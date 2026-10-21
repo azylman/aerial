@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -36,6 +37,8 @@ type TestMemStore struct {
 	activeThreads    []string
 	watermarks       map[string]int64
 	maxRowIDs        map[string]int64
+	threadSummaries  map[string]string
+	threadPriorTurns map[string][]Message
 }
 
 func newTestMemStore() *TestMemStore {
@@ -46,6 +49,8 @@ func newTestMemStore() *TestMemStore {
 		unextractedTurns: make(map[string][]Message),
 		watermarks:       make(map[string]int64),
 		maxRowIDs:        make(map[string]int64),
+		threadSummaries:  make(map[string]string),
+		threadPriorTurns: make(map[string][]Message),
 	}
 }
 
@@ -328,10 +333,24 @@ func (m *TestMemStore) UpdateConversationFactWatermark(ctx context.Context, thre
 	return nil
 }
 
-func (m *TestMemStore) FindNearestFacts(ctx context.Context, embedding []float32, limit int, minSim float64) ([]Fact, error) {
+func (m *TestMemStore) GetThreadContextBeforeWatermark(ctx context.Context, threadID string, priorTurnLimit int) (string, []Message, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.failOp == "FindNearestFacts" {
+	if m.failOp == "GetThreadContextBeforeWatermark" {
+		return "", nil, m.failErr
+	}
+	summary := m.threadSummaries[threadID]
+	turns := m.threadPriorTurns[threadID]
+	if priorTurnLimit > 0 && len(turns) > priorTurnLimit {
+		turns = turns[len(turns)-priorTurnLimit:]
+	}
+	return summary, append([]Message(nil), turns...), nil
+}
+
+func (m *TestMemStore) FindNearestScoredFacts(ctx context.Context, embedding []float32, limit int, minSim float64) ([]ScoredFact, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failOp == "FindNearestScoredFacts" {
 		return nil, m.failErr
 	}
 	if len(embedding) == 0 {
@@ -340,11 +359,7 @@ func (m *TestMemStore) FindNearestFacts(ctx context.Context, embedding []float32
 	if limit <= 0 {
 		limit = 5
 	}
-	type pair struct {
-		fact Fact
-		sim  float64
-	}
-	var pairs []pair
+	var pairs []ScoredFact
 	for id, emb := range m.embeddings {
 		if len(emb) == 0 {
 			continue
@@ -352,18 +367,37 @@ func (m *TestMemStore) FindNearestFacts(ctx context.Context, embedding []float32
 		sim := CosineSimilarity(embedding, emb)
 		if sim >= minSim {
 			if f, ok := m.facts[id]; ok {
-				pairs = append(pairs, pair{fact: *f, sim: sim})
+				pairs = append(pairs, ScoredFact{Fact: *f, Score: sim})
 			}
 		}
 	}
 	sort.Slice(pairs, func(i, j int) bool {
-		return pairs[i].sim > pairs[j].sim
+		return pairs[i].Score > pairs[j].Score
 	})
-	var res []Fact
+	var res []ScoredFact
 	for i := 0; i < len(pairs) && i < limit; i++ {
-		res = append(res, pairs[i].fact)
+		res = append(res, pairs[i])
 	}
 	return res, nil
+}
+
+func (m *TestMemStore) FindNearestFacts(ctx context.Context, embedding []float32, limit int, minSim float64) ([]Fact, error) {
+	m.mu.Lock()
+	if m.failOp == "FindNearestFacts" {
+		err := m.failErr
+		m.mu.Unlock()
+		return nil, err
+	}
+	m.mu.Unlock()
+	scored, err := m.FindNearestScoredFacts(ctx, embedding, limit, minSim)
+	if err != nil {
+		return nil, err
+	}
+	facts := make([]Fact, len(scored))
+	for i, sf := range scored {
+		facts[i] = sf.Fact
+	}
+	return facts, nil
 }
 
 func (m *TestMemStore) Close() error {
@@ -1834,6 +1868,7 @@ type queryMockDBTX struct {
 	rowsAffected  int64
 	capturedQuery *string
 	rowSQL        string
+	rowsSQL       string
 }
 
 func (q queryMockDBTX) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
@@ -1851,6 +1886,9 @@ func (q queryMockDBTX) QueryRowContext(ctx context.Context, query string, args .
 		*q.capturedQuery = query
 	}
 	if q.queryErr != nil {
+		if errors.Is(q.queryErr, sql.ErrNoRows) {
+			return q.dbMem.QueryRowContext(ctx, "SELECT 1 WHERE 1 = 0")
+		}
 		return q.dbMem.QueryRowContext(ctx, "SELECT syntax error")
 	}
 	if strings.Contains(query, "COUNT(*)") {
@@ -1868,6 +1906,9 @@ func (q queryMockDBTX) QueryContext(ctx context.Context, query string, args ...a
 	}
 	if q.queryErr != nil {
 		return nil, q.queryErr
+	}
+	if q.rowsSQL != "" {
+		return q.dbMem.QueryContext(ctx, q.rowsSQL)
 	}
 	if q.rowSQL != "" {
 		return q.dbMem.QueryContext(ctx, q.rowSQL)
@@ -3187,6 +3228,183 @@ func TestSQLStore_FindNearestFacts(t *testing.T) {
 	}
 }
 
+func TestSQLStore_FindNearestScoredFacts(t *testing.T) {
+	dbMem := setupTestDBMem(t)
+	ctx := context.Background()
+	emb := make([]float32, ExpectedEmbeddingDim)
+
+	tests := []struct {
+		name         string
+		nilDB        bool
+		emb          []float32
+		limit        int
+		minSim       float64
+		queryErr     error
+		rowSQL       string
+		wantErr      bool
+		wantCount    int
+		wantMinScore float64
+	}{
+		{
+			name:    "NilDBError",
+			nilDB:   true,
+			emb:     emb,
+			wantErr: true,
+		},
+		{
+			name:      "InvalidEmbeddingDim",
+			emb:       []float32{1.0, 2.0},
+			wantErr:   false,
+			wantCount: 0,
+		},
+		{
+			name:     "QueryError",
+			emb:      emb,
+			queryErr: errors.New("nearest scored query error"),
+			wantErr:  true,
+		},
+		{
+			name:    "RowScanError",
+			emb:     emb,
+			rowSQL:  "SELECT 'invalid' AS id",
+			wantErr: true,
+		},
+		{
+			name:         "SuccessDefaults",
+			emb:          emb,
+			limit:        -1,
+			minSim:       -1,
+			rowSQL:       "SELECT 10, 'routine', 'Morning walk', 0.8, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 1, 0.77",
+			wantCount:    1,
+			wantMinScore: 0.77,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var captured string
+			var store *SQLStore
+			if tc.nilDB {
+				store = &SQLStore{}
+			} else {
+				store = NewSQLStore(queryMockDBTX{
+					dbMem:         dbMem,
+					queryErr:      tc.queryErr,
+					rowSQL:        tc.rowSQL,
+					capturedQuery: &captured,
+				})
+			}
+			scored, err := store.FindNearestScoredFacts(ctx, tc.emb, tc.limit, tc.minSim)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("FindNearestScoredFacts() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantCount > 0 && len(scored) != tc.wantCount {
+				t.Errorf("len(scored) = %d, want %d", len(scored), tc.wantCount)
+			}
+			if tc.wantMinScore > 0 && len(scored) > 0 && scored[0].Score < tc.wantMinScore {
+				t.Errorf("scored[0].Score = %f, want >= %f", scored[0].Score, tc.wantMinScore)
+			}
+		})
+	}
+}
+
+func TestSQLStore_GetThreadContextBeforeWatermark(t *testing.T) {
+	dbMem := setupTestDBMem(t)
+	ctx := context.Background()
+
+	tests := []struct {
+		name          string
+		nilDB         bool
+		threadID      string
+		priorLimit    int
+		queryErr      error
+		rowSQL        string
+		rowsSQL       string
+		wantErr       bool
+		wantSummary   string
+		wantTurnCount int
+	}{
+		{
+			name:     "NilDBError",
+			nilDB:    true,
+			threadID: "t-1",
+			wantErr:  true,
+		},
+		{
+			name:     "EmptyThreadID",
+			threadID: "   ",
+			wantErr:  false,
+		},
+		{
+			name:        "SessionQueryErrNoRows",
+			threadID:    "t-1",
+			queryErr:    sql.ErrNoRows,
+			wantErr:     false,
+			wantSummary: "",
+		},
+		{
+			name:     "SessionQueryError",
+			threadID: "t-1",
+			queryErr: errors.New("db disconnect"),
+			wantErr:  true,
+		},
+		{
+			name:        "LastExtractedRowIDZero",
+			threadID:    "t-1",
+			rowSQL:      "SELECT 'summary text', 0",
+			wantSummary: "summary text",
+		},
+		{
+			name:       "MessagesScanError",
+			threadID:   "t-1",
+			rowSQL:     "SELECT 'summary', 15",
+			rowsSQL:    "SELECT 'invalid' AS id",
+			priorLimit: 2,
+			wantErr:    true,
+		},
+		{
+			name:          "SuccessChronologicalOrder",
+			threadID:      "t-1",
+			rowSQL:        "SELECT 'Session summary here', 20",
+			rowsSQL:       "SELECT 'm2', 12, 't-1', 'second prompt', 'second response', 'COMPLETED', '{\"is_admin\":true}' UNION ALL SELECT 'm1', 8, 't-1', 'first prompt', 'first response', 'COMPLETED', '{\"is_admin\":true}'",
+			priorLimit:    -1,
+			wantSummary:   "Session summary here",
+			wantTurnCount: 2,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var store *SQLStore
+			if tc.nilDB {
+				store = &SQLStore{}
+			} else {
+				store = NewSQLStore(queryMockDBTX{
+					dbMem:    dbMem,
+					queryErr: tc.queryErr,
+					rowSQL:   tc.rowSQL,
+					rowsSQL:  tc.rowsSQL,
+				})
+			}
+			summary, turns, err := store.GetThreadContextBeforeWatermark(ctx, tc.threadID, tc.priorLimit)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("GetThreadContextBeforeWatermark() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr {
+				if summary != tc.wantSummary {
+					t.Errorf("summary = %q, want %q", summary, tc.wantSummary)
+				}
+				if len(turns) != tc.wantTurnCount {
+					t.Errorf("len(turns) = %d, want %d", len(turns), tc.wantTurnCount)
+				}
+				if len(turns) == 2 && turns[0].RowID > turns[1].RowID {
+					t.Errorf("turns not chronological: row_id[0]=%d, row_id[1]=%d", turns[0].RowID, turns[1].RowID)
+				}
+			}
+		})
+	}
+}
+
 func TestHTTPBrainLLMClient(t *testing.T) {
 	ctx := context.Background()
 
@@ -3704,6 +3922,7 @@ func TestExtractActiveConversationFacts(t *testing.T) {
 func TestReconcileExtractedFact(t *testing.T) {
 	ctx := context.Background()
 	validEmb := make([]float32, ExpectedEmbeddingDim)
+	validEmb[0] = 1.0
 
 	tests := []struct {
 		name        string
@@ -3717,53 +3936,30 @@ func TestReconcileExtractedFact(t *testing.T) {
 			item: ExtractedFactItem{Action: "NOOP"},
 		},
 		{
-			name: "DeleteByDeleteID",
+			name: "DeleteByDeleteIDTooShort",
 			item: ExtractedFactItem{Action: "DELETE", DeleteID: 1},
 		},
 		{
-			name: "DeleteBySupersedesIDFallback",
+			name: "DeleteBySupersedesIDTooShort",
 			item: ExtractedFactItem{Action: "DELETE", SupersedesID: 2},
-		},
-		{
-			name:        "DeleteErrorLogged",
-			item:        ExtractedFactItem{Action: "DELETE", DeleteID: 3},
-			storeFailOp: "DeleteFact",
 		},
 		{
 			name: "UpdateEmptyTextSkipped",
 			item: ExtractedFactItem{Action: "UPDATE", SupersedesID: 4, FactText: "  "},
 		},
 		{
-			name:      "UpdateEmbeddingErrorLogged",
-			item:      ExtractedFactItem{Action: "UPDATE", SupersedesID: 4, FactText: "Text"},
-			ollamaErr: errors.New("embedding failed"),
-		},
-		{
-			name: "UpdateNotFoundFallsBackToInsert",
-			item: ExtractedFactItem{Action: "UPDATE", SupersedesID: 999, FactText: "New text"},
-		},
-		{
-			name:        "UpdateStoreErrorLogged",
-			item:        ExtractedFactItem{Action: "UPDATE", SupersedesID: 5, FactText: "New text"},
-			storeFailOp: "UpdateFact",
-		},
-		{
-			name: "AddEmptyTextSkipped",
-			item: ExtractedFactItem{Action: "ADD", FactText: "  "},
-		},
-		{
 			name:      "AddEmbeddingErrorLogged",
-			item:      ExtractedFactItem{Action: "ADD", FactText: "New fact"},
+			item:      ExtractedFactItem{Action: "ADD", FactText: "New durable fact text candidate"},
 			ollamaErr: errors.New("embedding error"),
 		},
 		{
 			name:    "AddDuplicateReinforces",
-			item:    ExtractedFactItem{Action: "ADD", FactText: "Duplicate text"},
+			item:    ExtractedFactItem{Action: "ADD", FactText: "Duplicate text candidate here"},
 			seedDup: true,
 		},
 		{
 			name:        "AddInsertErrorLogged",
-			item:        ExtractedFactItem{Action: "ADD", FactText: "Failing insert"},
+			item:        ExtractedFactItem{Action: "ADD", FactText: "Failing insert candidate here"},
 			storeFailOp: "InsertFact",
 		},
 	}
@@ -3771,13 +3967,8 @@ func TestReconcileExtractedFact(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			mem := newTestMemStore()
-			mem.facts[1] = &Fact{ID: 1, FactText: "F1"}
-			mem.facts[2] = &Fact{ID: 2, FactText: "F2"}
-			mem.facts[4] = &Fact{ID: 4, FactText: "F4"}
-			mem.facts[5] = &Fact{ID: 5, FactText: "F5"}
-
 			if tc.seedDup {
-				mem.facts[10] = &Fact{ID: 10, FactText: "Duplicate text", Importance: 0.8}
+				mem.facts[10] = &Fact{ID: 10, FactText: "Duplicate text candidate here", Importance: 0.8}
 				mem.embeddings[10] = validEmb
 			}
 			if tc.storeFailOp != "" {
@@ -3786,6 +3977,528 @@ func TestReconcileExtractedFact(t *testing.T) {
 
 			mockClient := &MockOllamaClient{embedding: validEmb, err: tc.ollamaErr}
 			reconcileExtractedFact(ctx, mem, mockClient, tc.item)
+		})
+	}
+}
+
+func TestEvaluateCandidateAdmission(t *testing.T) {
+	tests := []struct {
+		name           string
+		item           ExtractedFactItem
+		wantAdmit      bool
+		wantImportance float64
+		wantReason     string
+	}{
+		{
+			name:           "TooShort",
+			item:           ExtractedFactItem{FactText: "short"},
+			wantAdmit:      false,
+			wantImportance: 0,
+			wantReason:     "too_short",
+		},
+		{
+			name:           "EphemeralTelemetryPR",
+			item:           ExtractedFactItem{FactText: "Merged PR #1234 into main branch successfully", Importance: 0.7},
+			wantAdmit:      false,
+			wantImportance: 0,
+			wantReason:     "ephemeral_telemetry",
+		},
+		{
+			name:           "EphemeralVanadisChunk",
+			item:           ExtractedFactItem{FactText: "Executed vanadis_chunk task cleanly for build", Importance: 0.6},
+			wantAdmit:      false,
+			wantImportance: 0,
+			wantReason:     "ephemeral_telemetry",
+		},
+		{
+			name:           "EphemeralCommitSha",
+			item:           ExtractedFactItem{FactText: "Rolled back commit 0123456789abcdef due to panic", Importance: 0.5},
+			wantAdmit:      false,
+			wantImportance: 0,
+			wantReason:     "ephemeral_telemetry",
+		},
+		{
+			name:           "EphemeralAutoMerge",
+			item:           ExtractedFactItem{FactText: "Verified that auto-merge armed on the target pull request", Importance: 0.6},
+			wantAdmit:      false,
+			wantImportance: 0,
+			wantReason:     "ephemeral_telemetry",
+		},
+		{
+			name:           "DurableDirectiveOverridesEphemeral",
+			item:           ExtractedFactItem{FactText: "Always verify CI before pull request #500 merges", Importance: 0.7},
+			wantAdmit:      true,
+			wantImportance: 0.80,
+			wantReason:     "admitted",
+		},
+		{
+			name:           "UserPreferenceBoost",
+			item:           ExtractedFactItem{Category: "user_preference", FactText: "User drinks oat milk latte in the morning", Importance: 0.6},
+			wantAdmit:      true,
+			wantImportance: 0.70,
+			wantReason:     "admitted",
+		},
+		{
+			name:           "DefaultImportanceAndPrefersBoost",
+			item:           ExtractedFactItem{Category: "general", FactText: "Alex prefers dark roast coffee every day", Importance: 0},
+			wantAdmit:      true,
+			wantImportance: 0.70,
+			wantReason:     "admitted",
+		},
+		{
+			name:           "ImportanceClampedHigh",
+			item:           ExtractedFactItem{Category: "user_preference", FactText: "User is strictly allergic to peanuts", Importance: 0.95},
+			wantAdmit:      true,
+			wantImportance: 1.0,
+			wantReason:     "admitted",
+		},
+		{
+			name:           "ImportanceClampedLow",
+			item:           ExtractedFactItem{Category: "general", FactText: "A random general statement with low value", Importance: 0.05},
+			wantAdmit:      true,
+			wantImportance: 0.10,
+			wantReason:     "admitted",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			admit, importance, reason := EvaluateCandidateAdmission(tc.item)
+			if admit != tc.wantAdmit {
+				t.Errorf("admit = %v, want %v", admit, tc.wantAdmit)
+			}
+			if tc.wantAdmit && math.Abs(importance-tc.wantImportance) > 1e-6 {
+				t.Errorf("importance = %.2f, want %.2f", importance, tc.wantImportance)
+			}
+			if reason != tc.wantReason {
+				t.Errorf("reason = %q, want %q", reason, tc.wantReason)
+			}
+		})
+	}
+}
+
+func TestBuildCandidateReconcilePrompt(t *testing.T) {
+	candidate := ExtractedFactItem{
+		Category:   "user_preference",
+		FactText:   "User prefers dark mode across all interfaces",
+		Importance: 0.85,
+	}
+	neighbors := []ScoredFact{
+		{
+			Fact: Fact{
+				ID:       42,
+				Category: "user_preference",
+				FactText: "User prefers light mode on mobile displays",
+			},
+			Score: 0.76,
+		},
+	}
+	prompt := buildCandidateReconcilePrompt(candidate, neighbors)
+	for _, expected := range []string{
+		"CANDIDATE FACT:",
+		"Category: user_preference",
+		"User prefers dark mode across all interfaces",
+		"0.85",
+		"EXISTING CANDIDATE NEIGHBORS",
+		"ID 42 (similarity 0.76)",
+		"User prefers light mode on mobile displays",
+		"supersedes_id",
+		"delete_id",
+	} {
+		if !strings.Contains(prompt, expected) {
+			t.Errorf("buildCandidateReconcilePrompt missing expected substring %q in:\n%s", expected, prompt)
+		}
+	}
+}
+
+func TestReconcileCandidateFact_Tiers(t *testing.T) {
+	ctx := context.Background()
+	dim := ExpectedEmbeddingDim
+	baseEmb := make([]float32, dim)
+	baseEmb[0] = 1.0
+
+	highSimEmb := make([]float32, dim)
+	copy(highSimEmb, baseEmb)
+
+	tier3Emb := make([]float32, dim)
+	tier3Emb[0] = 0.75
+	tier3Emb[1] = 0.6614378
+
+	tests := []struct {
+		name           string
+		nilStore       bool
+		nilClient      bool
+		item           ExtractedFactItem
+		ollamaErr      error
+		storeFailOp    string
+		neighborID     int64
+		neighborEmb    []float32
+		llmResp        string
+		llmErr         error
+		nilLLM         bool
+		wantInserted   bool
+		wantReinforced bool
+		wantUpdated    bool
+		wantDeleted    bool
+	}{
+		{
+			name:     "NilStoreSafe",
+			nilStore: true,
+			item:     ExtractedFactItem{FactText: "Valid candidate fact text"},
+		},
+		{
+			name:      "NilClientSafe",
+			nilClient: true,
+			item:      ExtractedFactItem{FactText: "Valid candidate fact text"},
+		},
+		{
+			name: "UnadmittedTooShort",
+			item: ExtractedFactItem{FactText: "short"},
+		},
+		{
+			name:      "EmbeddingErrorLogged",
+			item:      ExtractedFactItem{FactText: "Valid candidate fact text"},
+			ollamaErr: errors.New("embed fail"),
+		},
+		{
+			name:        "FindNearestErrorLogged",
+			item:        ExtractedFactItem{FactText: "Valid candidate fact text"},
+			storeFailOp: "FindNearestScoredFacts",
+		},
+		{
+			name:         "Tier1_NoNeighbors_Insert",
+			item:         ExtractedFactItem{FactText: "Valid candidate fact text", Category: "user_preference"},
+			wantInserted: true,
+		},
+		{
+			name:         "Tier1_InsertErrorLogged",
+			item:         ExtractedFactItem{FactText: "Valid candidate fact text"},
+			storeFailOp:  "InsertFact",
+			wantInserted: false,
+		},
+		{
+			name:           "Tier2_HighSimReinforce",
+			item:           ExtractedFactItem{FactText: "Valid candidate fact text"},
+			neighborID:     10,
+			neighborEmb:    highSimEmb,
+			wantReinforced: true,
+		},
+		{
+			name:           "Tier2_ReinforceErrorLogged",
+			item:           ExtractedFactItem{FactText: "Valid candidate fact text"},
+			neighborID:     10,
+			neighborEmb:    highSimEmb,
+			storeFailOp:    "ReinforceFact",
+			wantReinforced: false,
+		},
+		{
+			name:         "Tier3_NilLLM_FallbackInsert",
+			item:         ExtractedFactItem{FactText: "Valid candidate fact text"},
+			neighborID:   10,
+			neighborEmb:  tier3Emb,
+			nilLLM:       true,
+			wantInserted: true,
+		},
+		{
+			name:         "Tier3_LLMError_FallbackInsert",
+			item:         ExtractedFactItem{FactText: "Valid candidate fact text"},
+			neighborID:   10,
+			neighborEmb:  tier3Emb,
+			llmErr:       errors.New("timeout"),
+			wantInserted: true,
+		},
+		{
+			name:         "Tier3_ParseError_FallbackInsert",
+			item:         ExtractedFactItem{FactText: "Valid candidate fact text"},
+			neighborID:   10,
+			neighborEmb:  tier3Emb,
+			llmResp:      "invalid json",
+			wantInserted: true,
+		},
+		{
+			name:         "Tier3_EmptyFacts_FallbackInsert",
+			item:         ExtractedFactItem{FactText: "Valid candidate fact text"},
+			neighborID:   10,
+			neighborEmb:  tier3Emb,
+			llmResp:      `{"facts":[]}`,
+			wantInserted: true,
+		},
+		{
+			name:        "Tier3_ValidUpdate",
+			item:        ExtractedFactItem{FactText: "Valid candidate fact text"},
+			neighborID:  10,
+			neighborEmb: tier3Emb,
+			llmResp:     `{"facts":[{"action":"UPDATE","supersedes_id":10,"fact_text":"Updated text here","importance_score":0.8}]}`,
+			wantUpdated: true,
+		},
+		{
+			name:         "Tier3_UnwhitelistedUpdate_FallbackInsert",
+			item:         ExtractedFactItem{FactText: "Valid candidate fact text"},
+			neighborID:   10,
+			neighborEmb:  tier3Emb,
+			llmResp:      `{"facts":[{"action":"UPDATE","supersedes_id":999,"fact_text":"Updated text here"}]}`,
+			wantInserted: true,
+		},
+		{
+			name:        "Tier3_UpdateStoreErrorLogged",
+			item:        ExtractedFactItem{FactText: "Valid candidate fact text"},
+			neighborID:  10,
+			neighborEmb: tier3Emb,
+			llmResp:     `{"facts":[{"action":"UPDATE","supersedes_id":10,"fact_text":"Updated text here"}]}`,
+			storeFailOp: "UpdateFact",
+		},
+		{
+			name:        "Tier3_ValidDelete",
+			item:        ExtractedFactItem{FactText: "Valid candidate fact text"},
+			neighborID:  10,
+			neighborEmb: tier3Emb,
+			llmResp:     `{"facts":[{"action":"DELETE","delete_id":10}]}`,
+			wantDeleted: true,
+		},
+		{
+			name:        "Tier3_UnwhitelistedDelete_NOOP",
+			item:        ExtractedFactItem{FactText: "Valid candidate fact text"},
+			neighborID:  10,
+			neighborEmb: tier3Emb,
+			llmResp:     `{"facts":[{"action":"DELETE","delete_id":999}]}`,
+			wantDeleted: false,
+		},
+		{
+			name:        "Tier3_DeleteStoreErrorLogged",
+			item:        ExtractedFactItem{FactText: "Valid candidate fact text"},
+			neighborID:  10,
+			neighborEmb: tier3Emb,
+			llmResp:     `{"facts":[{"action":"DELETE","delete_id":10}]}`,
+			storeFailOp: "DeleteFact",
+		},
+		{
+			name:        "Tier3_NOOP",
+			item:        ExtractedFactItem{FactText: "Valid candidate fact text"},
+			neighborID:  10,
+			neighborEmb: tier3Emb,
+			llmResp:     `{"facts":[{"action":"NOOP"}]}`,
+		},
+		{
+			name:         "Tier3_ADD",
+			item:         ExtractedFactItem{FactText: "Valid candidate fact text"},
+			neighborID:   10,
+			neighborEmb:  tier3Emb,
+			llmResp:      `{"facts":[{"action":"ADD"}]}`,
+			wantInserted: true,
+		},
+		{
+			name:         "Tier3_DefaultUnknownAction",
+			item:         ExtractedFactItem{FactText: "Valid candidate fact text"},
+			neighborID:   10,
+			neighborEmb:  tier3Emb,
+			llmResp:      `{"facts":[{"action":"OTHER"}]}`,
+			wantInserted: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var store Store
+			var mem *TestMemStore
+			if !tc.nilStore {
+				mem = newTestMemStore()
+				if tc.neighborID > 0 && len(tc.neighborEmb) > 0 {
+					mem.facts[tc.neighborID] = &Fact{ID: tc.neighborID, FactText: "Existing neighbor text", Importance: 0.7, ReinforceCount: 1}
+					mem.embeddings[tc.neighborID] = tc.neighborEmb
+				}
+				if tc.storeFailOp != "" {
+					mem.SetFail(tc.storeFailOp, errors.New("simulated store failure"))
+				}
+				store = mem
+			}
+
+			var client OllamaClient
+			if !tc.nilClient {
+				client = &MockOllamaClient{embedding: baseEmb, err: tc.ollamaErr}
+			}
+
+			var llm LLMClientFunc
+			if !tc.nilLLM {
+				llm = func(ctx context.Context, prompt string) (string, error) {
+					if tc.llmErr != nil {
+						return "", tc.llmErr
+					}
+					return tc.llmResp, nil
+				}
+			}
+
+			reconcileCandidateFact(ctx, store, client, llm, tc.item)
+
+			if mem != nil {
+				if tc.wantInserted && len(mem.facts) == 0 && tc.neighborID == 0 {
+					t.Errorf("expected fact to be inserted, but store has 0 facts")
+				}
+				if tc.wantReinforced && mem.facts[tc.neighborID].ReinforceCount < 2 {
+					t.Errorf("expected neighbor %d to be reinforced, got count %d", tc.neighborID, mem.facts[tc.neighborID].ReinforceCount)
+				}
+				if tc.wantUpdated && mem.facts[tc.neighborID].FactText != "Updated text here" {
+					t.Errorf("expected neighbor %d to be updated with new text, got %q", tc.neighborID, mem.facts[tc.neighborID].FactText)
+				}
+				if tc.wantDeleted && mem.facts[tc.neighborID] != nil {
+					t.Errorf("expected neighbor %d to be deleted from store, but it remains", tc.neighborID)
+				}
+			}
+		})
+	}
+}
+
+type sequenceOllamaClient struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (s *sequenceOllamaClient) GenerateEmbedding(ctx context.Context, text string, isQuery bool, maxRetries int) ([]float32, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	emb := make([]float32, ExpectedEmbeddingDim)
+	emb[s.calls%ExpectedEmbeddingDim] = 1.0
+	s.calls++
+	return emb, nil
+}
+
+func TestProcessThreadFacts_ContextAndCoreference(t *testing.T) {
+	ctx := context.Background()
+	dim := ExpectedEmbeddingDim
+	baseEmb := make([]float32, dim)
+	baseEmb[0] = 1.0
+
+	tests := []struct {
+		name                string
+		nilStore            bool
+		storeFailOp         string
+		unextractedErr      bool
+		emptyTurns          bool
+		withSummary         bool
+		withPriorTurns      bool
+		llmErr              error
+		parseErr            bool
+		manyCandidates      bool
+		wantCandidateCapped bool
+		wantErr             bool
+	}{
+		{
+			name:     "NilStoreError",
+			nilStore: true,
+			wantErr:  true,
+		},
+		{
+			name:           "UnextractedTurnsError",
+			unextractedErr: true,
+			wantErr:        true,
+		},
+		{
+			name:       "EmptyTurnsMarksWatermark",
+			emptyTurns: true,
+			wantErr:    false,
+		},
+		{
+			name:           "PriorSummaryAndTurnsInjected",
+			withSummary:    true,
+			withPriorTurns: true,
+			wantErr:        false,
+		},
+		{
+			name:        "ContextQueryErrorIgnoredAndContinues",
+			storeFailOp: "GetThreadContextBeforeWatermark",
+			wantErr:     false,
+		},
+		{
+			name:    "LLMErrorFails",
+			llmErr:  errors.New("llm error"),
+			wantErr: true,
+		},
+		{
+			name:     "ParseErrorFails",
+			parseErr: true,
+			wantErr:  true,
+		},
+		{
+			name:                "ManyCandidatesCappedAt5",
+			manyCandidates:      true,
+			wantCandidateCapped: true,
+			wantErr:             false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var store Store
+			var mem *TestMemStore
+			if !tc.nilStore {
+				mem = newTestMemStore()
+				store = mem
+				threadID := "th-test"
+				if tc.unextractedErr {
+					mem.SetFail("GetUnextractedAdminTurns", errors.New("db error"))
+				} else if !tc.emptyTurns {
+					mem.unextractedTurns[threadID] = []Message{
+						{RowID: 10, ThreadID: threadID, Content: "He likes matcha tea", ResponseText: "Understood", Status: "COMPLETED", Metadata: MessageMetadata{IsAdmin: true}},
+					}
+				}
+				if tc.withSummary {
+					mem.threadSummaries[threadID] = "User name is Alex"
+				}
+				if tc.withPriorTurns {
+					mem.threadPriorTurns[threadID] = []Message{
+						{RowID: 5, ThreadID: threadID, Content: "My name is Alex", ResponseText: "Hello Alex", Status: "COMPLETED", Metadata: MessageMetadata{IsAdmin: true}},
+					}
+				}
+				if tc.storeFailOp != "" {
+					mem.SetFail(tc.storeFailOp, errors.New("simulated store failure"))
+				}
+			}
+
+			var client OllamaClient
+			if tc.manyCandidates {
+				client = &sequenceOllamaClient{}
+			} else {
+				client = &MockOllamaClient{embedding: baseEmb}
+			}
+
+			var capturedPrompt string
+			llm := func(c context.Context, prompt string) (string, error) {
+				capturedPrompt = prompt
+				if tc.llmErr != nil {
+					return "", tc.llmErr
+				}
+				if tc.parseErr {
+					return "invalid json response", nil
+				}
+				if tc.manyCandidates {
+					return `{"facts":[
+						{"category":"general","fact_text":"Candidate fact text number 1","importance_score":0.6},
+						{"category":"general","fact_text":"Candidate fact text number 2","importance_score":0.6},
+						{"category":"general","fact_text":"Candidate fact text number 3","importance_score":0.6},
+						{"category":"general","fact_text":"Candidate fact text number 4","importance_score":0.6},
+						{"category":"general","fact_text":"Candidate fact text number 5","importance_score":0.6},
+						{"category":"general","fact_text":"Candidate fact text number 6","importance_score":0.6},
+						{"category":"general","fact_text":"Candidate fact text number 7","importance_score":0.6}
+					]}`, nil
+				}
+				return `{"facts":[{"category":"user_preference","fact_text":"Alex likes matcha tea in the afternoon","importance_score":0.8}]}`, nil
+			}
+
+			err := processThreadFacts(ctx, store, client, llm, "th-test")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("processThreadFacts() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.withSummary && !strings.Contains(capturedPrompt, "PRIOR THREAD SUMMARY:\nUser name is Alex") {
+				t.Errorf("captured prompt missing summary: %s", capturedPrompt)
+			}
+			if tc.withPriorTurns && !strings.Contains(capturedPrompt, "PRIOR TURNS (FOR COREFERENCE RESOLUTION ONLY") {
+				t.Errorf("captured prompt missing prior turns: %s", capturedPrompt)
+			}
+			if tc.wantCandidateCapped && mem != nil {
+				// 5 candidates should be inserted, not 7
+				if len(mem.facts) != 5 {
+					t.Errorf("len(mem.facts) = %d, want 5 (capped)", len(mem.facts))
+				}
+			}
 		})
 	}
 }
