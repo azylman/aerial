@@ -3,6 +3,7 @@ package transcript
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -510,5 +511,185 @@ func TestDefaultSyncOptions(t *testing.T) {
 	}
 	if opts.TailLimit != 35000 {
 		t.Errorf("expected TailLimit = 35000, got %d", opts.TailLimit)
+	}
+}
+
+func TestGetTranscriptStepWindow(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		nilStore    bool
+		closedStore bool
+		cancelCtx   bool
+		nilCtx      bool
+		sessionID   string
+		stepIndex   int
+		context     int
+		wantErr     bool
+		wantSubstr  string
+		wantCount   int
+		wantContext int
+		wantCenter  int
+	}{
+		{
+			name:       "nil store returns error",
+			nilStore:   true,
+			sessionID:  "sess-win-1",
+			stepIndex:  5,
+			context:    2,
+			wantErr:    true,
+			wantSubstr: "transcript store cannot be nil",
+		},
+		{
+			name:        "closed store returns error",
+			closedStore: true,
+			sessionID:   "sess-win-1",
+			stepIndex:   5,
+			context:     2,
+			wantErr:     true,
+			wantSubstr:  "get transcript step range",
+		},
+		{
+			name:       "cancelled context returns error",
+			cancelCtx:  true,
+			sessionID:  "sess-win-1",
+			stepIndex:  5,
+			context:    2,
+			wantErr:    true,
+			wantSubstr: "context canceled",
+		},
+		{
+			name:        "nil context succeeds with background",
+			nilCtx:      true,
+			sessionID:   "sess-win-1",
+			stepIndex:   5,
+			context:     2,
+			wantCount:   5,
+			wantContext: 2,
+			wantCenter:  5,
+		},
+		{
+			name:        "normal center step window",
+			sessionID:   "sess-win-1",
+			stepIndex:   5,
+			context:     2,
+			wantCount:   5,
+			wantContext: 2,
+			wantCenter:  5,
+		},
+		{
+			name:        "start clamped to zero at low step",
+			sessionID:   "sess-win-1",
+			stepIndex:   1,
+			context:     3,
+			wantCount:   5, // steps 0, 1, 2, 3, 4
+			wantContext: 3,
+			wantCenter:  1,
+		},
+		{
+			name:        "negative context defaults to 2",
+			sessionID:   "sess-win-1",
+			stepIndex:   5,
+			context:     -1,
+			wantCount:   5,
+			wantContext: 2,
+			wantCenter:  5,
+		},
+		{
+			name:        "excessive context clamped to 20",
+			sessionID:   "sess-win-1",
+			stepIndex:   5,
+			context:     50,
+			wantCount:   10, // all 10 steps 0..9
+			wantContext: 20,
+			wantCenter:  5,
+		},
+		{
+			name:        "empty session returns zero steps",
+			sessionID:   "",
+			stepIndex:   5,
+			context:     2,
+			wantCount:   0,
+			wantContext: 2,
+			wantCenter:  5,
+		},
+		{
+			name:        "unknown session returns zero steps",
+			sessionID:   "sess-nonexistent",
+			stepIndex:   5,
+			context:     2,
+			wantCount:   0,
+			wantContext: 2,
+			wantCenter:  5,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var store db.TranscriptStore
+			if !tc.nilStore {
+				fake := db.NewFakeStore()
+				ctx := context.Background()
+				_ = fake.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-win-1"})
+				steps := make([]db.TranscriptStep, 10)
+				for i := 0; i < 10; i++ {
+					steps[i] = db.TranscriptStep{
+						SessionID: "sess-win-1",
+						StepIndex: i,
+						StepType:  "tool_call",
+						ToolName:  "run_command",
+						Content:   fmt.Sprintf("echo step %d", i),
+						CreatedAt: time.Now().UTC(),
+					}
+				}
+				_ = fake.BatchInsertTranscriptSteps(ctx, steps)
+				if tc.closedStore {
+					_ = fake.Close()
+				}
+				store = fake
+			}
+
+			var ctx context.Context
+			if tc.nilCtx {
+				ctx = nil
+			} else {
+				ctx = context.Background()
+				if tc.cancelCtx {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithCancel(ctx)
+					cancel()
+				}
+			}
+
+			res, err := GetTranscriptStepWindow(ctx, store, tc.sessionID, tc.stepIndex, tc.context)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(res.Steps) != tc.wantCount {
+				t.Errorf("got %d steps, want %d", len(res.Steps), tc.wantCount)
+			}
+			if res.Context != tc.wantContext {
+				t.Errorf("got context=%d, want %d", res.Context, tc.wantContext)
+			}
+			if res.CenterStep != tc.wantCenter {
+				t.Errorf("got center step=%d, want %d", res.CenterStep, tc.wantCenter)
+			}
+			if res.Steps == nil {
+				t.Errorf("res.Steps should not be nil")
+			}
+		})
 	}
 }

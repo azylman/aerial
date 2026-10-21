@@ -72,3 +72,46 @@ func SearchTranscripts(
 	result.Total = len(result.Sessions) + len(result.Steps)
 	return result, nil
 }
+
+// GetTranscriptStepWindow fetches a step and its surrounding context window from the transcript store.
+func GetTranscriptStepWindow(
+	ctx context.Context,
+	store db.TranscriptStore,
+	sessionID string,
+	stepIndex, contextWindow int,
+) (StepWindowResult, error) {
+	if store == nil {
+		return StepWindowResult{}, fmt.Errorf("transcript store cannot be nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return StepWindowResult{}, ctx.Err()
+	}
+
+	if contextWindow < 0 {
+		contextWindow = 2
+	}
+	if contextWindow > 20 {
+		contextWindow = 20
+	}
+
+	startStep := max(0, stepIndex-contextWindow)
+	endStep := stepIndex + contextWindow
+
+	steps, err := store.GetTranscriptStepRange(ctx, strings.TrimSpace(sessionID), startStep, endStep)
+	if err != nil {
+		return StepWindowResult{}, fmt.Errorf("get transcript step range: %w", err)
+	}
+	if steps == nil {
+		steps = []db.TranscriptStep{}
+	}
+
+	return StepWindowResult{
+		SessionID:  strings.TrimSpace(sessionID),
+		CenterStep: stepIndex,
+		Context:    contextWindow,
+		Steps:      steps,
+	}, nil
+}

@@ -483,3 +483,119 @@ func TestTranscriptStore_SearchTranscriptStepsWithContext_MockDB(t *testing.T) {
 		})
 	}
 }
+
+func TestTranscriptStore_GetTranscriptStepRange(t *testing.T) {
+	ctx := context.Background()
+	for _, store := range []Store{NewTestStore(t), NewFakeStore()} {
+		_ = store.UpsertSessionSummary(ctx, SessionSummary{SessionID: "sess-range-a"})
+		_ = store.UpsertSessionSummary(ctx, SessionSummary{SessionID: "sess-range-b"})
+
+		now := time.Now().UTC()
+		steps := []TranscriptStep{
+			{SessionID: "sess-range-a", StepIndex: 0, StepType: "user_message", Content: "initial prompt", CreatedAt: now.Add(-4 * time.Minute)},
+			{SessionID: "sess-range-a", StepIndex: 1, StepType: "tool_call", ToolName: "run_command", Content: "git status", CreatedAt: now.Add(-3 * time.Minute)},
+			{SessionID: "sess-range-a", StepIndex: 2, StepType: "tool_result", ToolName: "run_command", Content: "on branch main", CreatedAt: now.Add(-2 * time.Minute)},
+			{SessionID: "sess-range-a", StepIndex: 3, StepType: "tool_call", ToolName: "view_file", Content: "reading config", CreatedAt: now.Add(-1 * time.Minute)},
+			{SessionID: "sess-range-a", StepIndex: 4, StepType: "assistant_turn", Content: "done", CreatedAt: now},
+			{SessionID: "sess-range-b", StepIndex: 0, StepType: "user_message", Content: "hello", CreatedAt: now},
+		}
+		if err := store.BatchInsertTranscriptSteps(ctx, steps); err != nil {
+			t.Fatalf("BatchInsertTranscriptSteps failed: %v", err)
+		}
+
+		tests := []struct {
+			name      string
+			session   string
+			startStep int
+			endStep   int
+			wantLen   int
+			wantFirst int
+			wantLast  int
+		}{
+			{name: "normal range", session: "sess-range-a", startStep: 1, endStep: 3, wantLen: 3, wantFirst: 1, wantLast: 3},
+			{name: "single step", session: "sess-range-a", startStep: 2, endStep: 2, wantLen: 1, wantFirst: 2, wantLast: 2},
+			{name: "negative start clamped", session: "sess-range-a", startStep: -5, endStep: 1, wantLen: 2, wantFirst: 0, wantLast: 1},
+			{name: "end before start clamped", session: "sess-range-a", startStep: 3, endStep: 1, wantLen: 1, wantFirst: 3, wantLast: 3},
+			{name: "empty session returns nil", session: "", startStep: 0, endStep: 5, wantLen: 0},
+			{name: "whitespace session returns nil", session: "   ", startStep: 0, endStep: 5, wantLen: 0},
+			{name: "unknown session", session: "sess-unknown", startStep: 0, endStep: 5, wantLen: 0},
+			{name: "out of bounds high range", session: "sess-range-a", startStep: 10, endStep: 20, wantLen: 0},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				got, err := store.GetTranscriptStepRange(ctx, tc.session, tc.startStep, tc.endStep)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if len(got) != tc.wantLen {
+					t.Fatalf("got len=%d, want %d", len(got), tc.wantLen)
+				}
+				if tc.wantLen > 0 {
+					if got[0].StepIndex != tc.wantFirst {
+						t.Errorf("got first step index=%d, want %d", got[0].StepIndex, tc.wantFirst)
+					}
+					if got[len(got)-1].StepIndex != tc.wantLast {
+						t.Errorf("got last step index=%d, want %d", got[len(got)-1].StepIndex, tc.wantLast)
+					}
+					if got[0].RankScore != 1.0 {
+						t.Errorf("got rank score %f, want 1.0", got[0].RankScore)
+					}
+				}
+			})
+		}
+	}
+
+	var nilSQLStore *SQLStore
+	if _, err := nilSQLStore.GetTranscriptStepRange(ctx, "sess", 0, 2); err == nil {
+		t.Error("expected error for nil SQLStore")
+	}
+}
+
+func TestTranscriptStore_GetTranscriptStepRange_MockDB(t *testing.T) {
+	dbMem := initTestSQLiteDB(t)
+	tests := []struct {
+		name       string
+		session    string
+		startStep  int
+		endStep    int
+		queryErr   error
+		scanSQL    string
+		wantErrMsg string
+		wantLen    int
+	}{
+		{
+			name:       "query execution failure",
+			session:    "sess-err",
+			startStep:  0,
+			endStep:    5,
+			queryErr:   errors.New("db connection lost"),
+			wantErrMsg: "get transcript step range query failed",
+		},
+		{
+			name:       "scan failure invalid columns",
+			session:    "sess-bad-scan",
+			startStep:  0,
+			endStep:    5,
+			scanSQL:    "SELECT 'col1' AS wrong_col",
+			wantErrMsg: "scan transcript step result",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mockDB := testMockDBTX{queryFn: func(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+				if tc.queryErr != nil {
+					return nil, tc.queryErr
+				}
+				return dbMem.QueryContext(ctx, tc.scanSQL)
+			}}
+			steps, err := (&SQLStore{db: mockDB, isPostgres: true}).GetTranscriptStepRange(context.Background(), tc.session, tc.startStep, tc.endStep)
+			if tc.wantErrMsg != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrMsg)) {
+				t.Fatalf("expected error containing %q, got %v", tc.wantErrMsg, err)
+			} else if tc.wantErrMsg == "" && (err != nil || len(steps) != tc.wantLen) {
+				t.Fatalf("unexpected steps len=%d err=%v", len(steps), err)
+			}
+		})
+	}
+}

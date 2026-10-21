@@ -304,3 +304,32 @@ func (s *SQLStore) SearchTranscriptSteps(ctx context.Context, queryText, session
 	}
 	return scanTranscriptSteps(rows)
 }
+
+func (s *SQLStore) GetTranscriptStepRange(ctx context.Context, sessionID string, startStep, endStep int) (results []TranscriptStep, err error) {
+	defer recordTranscriptQuery("get_transcript_step_range", time.Now(), &err)
+	if err = s.checkDB(); err != nil {
+		return nil, err
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, nil
+	}
+	if startStep < 0 {
+		startStep = 0
+	}
+	if endStep < startStep {
+		endStep = startStep
+	}
+	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	query := `SELECT session_id, step_index, step_type, tool_name, content, created_at, 1.0 AS rank_score
+FROM transcript_steps
+WHERE session_id = $1 AND step_index BETWEEN $2 AND $3
+ORDER BY step_index ASC;`
+	rows, err := s.db.QueryContext(queryCtx, query, sessionID, startStep, endStep)
+	if err != nil {
+		return nil, fmt.Errorf("get transcript step range query failed: %w", err)
+	}
+	return scanTranscriptSteps(rows)
+}

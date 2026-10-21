@@ -647,6 +647,50 @@ func handleTranscriptStats(store db.TranscriptStore) http.HandlerFunc {
 	}
 }
 
+func handleTranscriptSteps(store db.TranscriptStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireGetWithStore(w, r, store == nil) {
+			return
+		}
+
+		session := strings.TrimSpace(r.URL.Query().Get("session"))
+		if session == "" {
+			writeErr(w, http.StatusBadRequest, "session parameter is required")
+			return
+		}
+
+		stepStr := strings.TrimSpace(r.URL.Query().Get("step"))
+		if stepStr == "" {
+			writeErr(w, http.StatusBadRequest, "step parameter is required")
+			return
+		}
+		step, err := strconv.Atoi(stepStr)
+		if err != nil || step < 0 {
+			writeErr(w, http.StatusBadRequest, "step parameter must be a non-negative integer")
+			return
+		}
+
+		contextWindow := 2
+		contextStr := strings.TrimSpace(r.URL.Query().Get("context"))
+		if contextStr != "" {
+			c, err := strconv.Atoi(contextStr)
+			if err != nil {
+				writeErr(w, http.StatusBadRequest, "context parameter must be an integer")
+				return
+			}
+			contextWindow = c
+		}
+
+		res, err := transcript.GetTranscriptStepWindow(r.Context(), store, session, step, contextWindow)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		writeJSON(w, http.StatusOK, res)
+	}
+}
+
 func parseLimitOffset(q url.Values, defaultLimit, maxLimit int) (limit, offset int) {
 	limit = defaultLimit
 	if lStr := q.Get("limit"); lStr != "" {
@@ -1173,7 +1217,7 @@ func normalizeRoute(path string) string {
 		return path
 	case path == "/voice/ask" || path == "/api/voice/ask":
 		return "/voice/ask"
-	case path == "/transcripts" || strings.HasPrefix(path, "/transcripts/"):
+	case path == "/transcripts" || strings.HasPrefix(path, "/transcripts/") || strings.HasPrefix(path, "/api/transcripts"):
 		return "/transcripts"
 	case path == "/tasks" || strings.HasPrefix(path, "/tasks/"):
 		return "/tasks"
@@ -1222,6 +1266,8 @@ func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, embedder 
 	mux.HandleFunc("/api/transcripts/search", handleTranscriptSearch(store, embedder))
 	mux.HandleFunc("/transcripts/stats", handleTranscriptStats(store))
 	mux.HandleFunc("/api/transcripts/stats", handleTranscriptStats(store))
+	mux.HandleFunc("/transcripts/steps", handleTranscriptSteps(store))
+	mux.HandleFunc("/api/transcripts/steps", handleTranscriptSteps(store))
 	mux.HandleFunc("/tasks", handleTasks(store))
 	mux.HandleFunc("/facts", handleFacts(store))
 	mux.HandleFunc("/schedules", handleSchedules(store))

@@ -1150,6 +1150,35 @@ func (f *FakeStore) SearchTranscriptSteps(ctx context.Context, queryText, sessio
 	})
 }
 
+func (f *FakeStore) GetTranscriptStepRange(ctx context.Context, sessionID string, startStep, endStep int) ([]TranscriptStep, error) {
+	return withFakeLock(f, "GetTranscriptStepRange", func() ([]TranscriptStep, error) {
+		sessionID = strings.TrimSpace(sessionID)
+		if sessionID == "" {
+			return nil, nil
+		}
+		if startStep < 0 {
+			startStep = 0
+		}
+		if endStep < startStep {
+			endStep = startStep
+		}
+		steps, exists := f.transcriptSteps[sessionID]
+		if !exists {
+			return nil, nil
+		}
+		var matched []TranscriptStep
+		for _, s := range steps {
+			if s.StepIndex >= startStep && s.StepIndex <= endStep {
+				cp := s
+				cp.RankScore = 1.0
+				matched = append(matched, cp)
+			}
+		}
+		sort.Slice(matched, func(i, j int) bool { return matched[i].StepIndex < matched[j].StepIndex })
+		return matched, nil
+	})
+}
+
 func prKey(repo string, prNumber int) string {
 	return fmt.Sprintf("%s/%d", normalizeRepo(repo), prNumber)
 }
