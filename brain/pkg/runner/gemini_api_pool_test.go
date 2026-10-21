@@ -35,7 +35,8 @@ func TestGeminiAPIPool_ContextCancellation(t *testing.T) {
 			f.Flush()
 			select {
 			case <-flushedCh:
-			default: close(flushedCh)
+			default:
+				close(flushedCh)
 			}
 		}
 		select {
@@ -48,7 +49,9 @@ func TestGeminiAPIPool_ContextCancellation(t *testing.T) {
 	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{APIKey: "cancel-key", Model: "gemini-2.5-flash", BaseURL: ts.URL, HTTPClient: ts.Client()})
 	defer pool.Close()
 	sess, err := pool.GetOrCreateSession(context.Background(), "cancel-device", "")
-	if err != nil { t.Fatalf("unexpected error getting session: %v", err) }
+	if err != nil {
+		t.Fatalf("unexpected error getting session: %v", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	sink, doneCh := newMockTurnSink(), make(chan error, 1)
@@ -65,10 +68,14 @@ func TestGeminiAPIPool_ContextCancellation(t *testing.T) {
 
 	select {
 	case sendErr := <-doneCh:
-		if sendErr == nil { t.Fatalf("expected error from cancelled Send, got nil") }
+		if sendErr == nil {
+			t.Fatalf("expected error from cancelled Send, got nil")
+		}
 		sink.mu.Lock()
 		defer sink.mu.Unlock()
-		if sink.err == nil { t.Errorf("expected error delivered to sink.OnError") }
+		if sink.err == nil {
+			t.Errorf("expected error delivered to sink.OnError")
+		}
 	case <-time.After(3 * time.Second):
 		t.Fatalf("timeout waiting for Send to terminate after context cancellation")
 	}
@@ -83,20 +90,31 @@ type sendTestCase struct {
 }
 
 func makeSendSuiteHandler(tc sendTestCase, lastReqBody *[]byte) http.HandlerFunc {
-	if tc.serverMode == "" { return nil }
+	if tc.serverMode == "" {
+		return nil
+	}
 	var turnCounter int32
 	return func(w http.ResponseWriter, r *http.Request) {
-		if tc.checkThinkingBody && lastReqBody != nil { *lastReqBody, _ = io.ReadAll(r.Body) }
+		if tc.checkThinkingBody && lastReqBody != nil {
+			*lastReqBody, _ = io.ReadAll(r.Body)
+		}
 		switch tc.serverMode {
 		case "streaming_success":
-			if r.Method != http.MethodPost { http.Error(w, "method not allowed", http.StatusMethodNotAllowed); return }
+			if r.Method != http.MethodPost {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
 			flusher, _ := w.(http.Flusher)
 			_, _ = w.Write([]byte(`data: {"candidates":[{"content":{"parts":[{"text":"Hello "}],"role":"model"}}],"index":0}` + "\n\n"))
-			if flusher != nil { flusher.Flush() }
+			if flusher != nil {
+				flusher.Flush()
+			}
 			_, _ = w.Write([]byte(`data: {"candidates":[{"content":{"parts":[{"text":"world!"}],"role":"model"}}],"finishReason":"STOP","index":0,"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":6,"totalTokenCount":18}}` + "\n\n"))
-			if flusher != nil { flusher.Flush() }
+			if flusher != nil {
+				flusher.Flush()
+			}
 		case "zero_thinking":
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
@@ -119,7 +137,9 @@ func makeSendSuiteHandler(tc sendTestCase, lastReqBody *[]byte) http.HandlerFunc
 			_, _ = w.Write([]byte("data: {malformed_json\n\n"))
 		case "cancel_on_flush":
 			w.Header().Set("Content-Type", "text/event-stream")
-			if f, ok := w.(http.Flusher); ok { f.Flush() }
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
 			<-r.Context().Done()
 		case "empty_response":
 			w.Header().Set("Content-Type", "text/event-stream")
@@ -167,7 +187,9 @@ func TestGeminiAPIPool_Send_Suite(t *testing.T) {
 			defer pool.Close()
 			ctx := context.Background()
 			sess, err := pool.GetOrCreateSession(ctx, tc.device, "")
-			if err != nil { t.Fatalf("unexpected GetOrCreateSession error: %v", err) }
+			if err != nil {
+				t.Fatalf("unexpected GetOrCreateSession error: %v", err)
+			}
 
 			if tc.runSequential > 0 {
 				for i := 1; i <= tc.runSequential; i++ {
@@ -228,9 +250,13 @@ func TestGeminiAPIPool_Send_Suite(t *testing.T) {
 				return
 			}
 
-			if sendErr != nil { t.Fatalf("unexpected Send error: %v", sendErr) }
+			if sendErr != nil {
+				t.Fatalf("unexpected Send error: %v", sendErr)
+			}
 			if tc.expectEmptyHist {
-				if hist := sess.(*GeminiAPISession).History(); len(hist) != 0 { t.Errorf("expected empty history, got %d", len(hist)) }
+				if hist := sess.(*GeminiAPISession).History(); len(hist) != 0 {
+					t.Errorf("expected empty history, got %d", len(hist))
+				}
 				return
 			}
 			if sink != nil {
@@ -290,7 +316,9 @@ func TestGeminiAPIPool_AccessorsAndNilPool(t *testing.T) {
 	if targets := pool.PrewarmedTargets(); len(targets) != 2 || targets[0] != "alpha" {
 		t.Errorf("failed to update prewarmed targets: %v", targets)
 	}
-	if should, _ := pool.ShouldRotateSession(sess); should { t.Errorf("expected ShouldRotateSession false") }
+	if should, _ := pool.ShouldRotateSession(sess); should {
+		t.Errorf("expected ShouldRotateSession false")
+	}
 	if rotSess, err := pool.RotateSession(context.Background(), "target-123"); err != nil || rotSess == nil {
 		t.Fatalf("RotateSession failed: %v", err)
 	}
@@ -353,8 +381,14 @@ func TestGeminiAPISession_EdgeCases(t *testing.T) {
 }
 
 type errMockDispatcher struct{}
-func (d *errMockDispatcher) ListDeclarations(ctx context.Context) ([]geminiFunctionDeclaration, error) { return nil, errors.New("declarations query failed") }
-func (d *errMockDispatcher) Execute(ctx context.Context, name string, args map[string]interface{}) (string, error) { return "", errors.New("execute failed") }
+
+func (d *errMockDispatcher) ListDeclarations(ctx context.Context) ([]geminiFunctionDeclaration, error) {
+	return nil, errors.New("declarations query failed")
+}
+
+func (d *errMockDispatcher) Execute(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+	return "", errors.New("execute failed")
+}
 
 type toolCallingTestCase struct {
 	name, mcpMode, geminiMode, expectToolCall, expectResponseSub string
@@ -404,15 +438,21 @@ func makeToolCallingGeminiHandler(mode string) http.HandlerFunc {
 		switch mode {
 		case "tool_then_text":
 			chunk := `data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"ha_call_write_tool","args":{"entity_id":"light.living_room"}}}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n"
-			if step != 1 { chunk = `data: {"candidates":[{"content":{"parts":[{"text":"I've turned off the light."}],"role":"model"}}],"finishReason":"STOP","index":0,"usageMetadata":{"promptTokenCount":25,"candidatesTokenCount":10,"totalTokenCount":35}}` + "\n\n" }
+			if step != 1 {
+				chunk = `data: {"candidates":[{"content":{"parts":[{"text":"I've turned off the light."}],"role":"model"}}],"finishReason":"STOP","index":0,"usageMetadata":{"promptTokenCount":25,"candidatesTokenCount":10,"totalTokenCount":35}}` + "\n\n"
+			}
 			_, _ = w.Write([]byte(chunk))
 		case "tool_error_then_text":
 			chunk := `data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"failing_tool","args":{}}}],"role":"model"}}],"index":0}` + "\n\n"
-			if step != 1 { chunk = `data: {"candidates":[{"content":{"parts":[{"text":"Sorry, that device is currently unreachable."}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n" }
+			if step != 1 {
+				chunk = `data: {"candidates":[{"content":{"parts":[{"text":"Sorry, that device is currently unreachable."}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n"
+			}
 			_, _ = w.Write([]byte(chunk))
 		case "mystery_tool":
 			chunk := `data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"mystery_tool","args":{"x":1}}}]}}]}` + "\n\n"
-			if step != 1 { chunk = `data: {"candidates":[{"content":{"parts":[{"text":"Tool failed as expected"}]}}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}` + "\n\n" }
+			if step != 1 {
+				chunk = `data: {"candidates":[{"content":{"parts":[{"text":"Tool failed as expected"}]}}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}` + "\n\n"
+			}
 			_, _ = w.Write([]byte(chunk))
 		case "fallback_only":
 			_, _ = w.Write([]byte(`data: {"candidates":[{"content":{"parts":[{"text":"Fallback response"}],"role":"model"}}]}` + "\n\n"))
@@ -484,7 +524,9 @@ func TestGeminiAPISession_PersistenceAndHydrationCycle(t *testing.T) {
 	defer pool.Close()
 
 	sess, err := pool.GetOrCreateSession(context.Background(), "persisted-session", "")
-	if err != nil { t.Fatalf("unexpected error: %v", err) }
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if err := sess.Send("First prompt", &TurnContext{TurnID: "turn-persist-1", Prompt: "First prompt", Sink: newMockTurnSink()}); err != nil {
 		t.Fatalf("unexpected send error: %v", err)
 	}
@@ -503,9 +545,10 @@ func TestGeminiAPISession_PersistenceAndHydrationCycle(t *testing.T) {
 	(&GeminiAPISession{dataDir: ""}).appendTranscript("p", "r")
 	(&GeminiAPISession{sessionID: "test-err-dir", dataDir: "/dev/null/forbidden"}).appendTranscript("p", "r")
 	forbiddenFileSess := &GeminiAPISession{sessionID: "test-err-file", dataDir: tmpDir}
-	_ = os.MkdirAll(forbiddenFileSess.transcriptPath(), 0755)
+	_ = os.MkdirAll(forbiddenFileSess.transcriptPath(), 0o755)
 	forbiddenFileSess.appendTranscript("p", "r")
 }
+
 func TestGeminiAPISession_TranscriptPersistence_Suite(t *testing.T) {
 	t.Parallel()
 	fileContent30 := func() string {
@@ -529,8 +572,8 @@ func TestGeminiAPISession_TranscriptPersistence_Suite(t *testing.T) {
 			t.Parallel()
 			tmpDir := t.TempDir()
 			p := filepath.Join(tmpDir, "brain", "sess-"+tc.name, ".system_generated", "logs", "transcript.jsonl")
-			_ = os.MkdirAll(filepath.Dir(p), 0755)
-			_ = os.WriteFile(p, []byte(tc.fileContent), 0644)
+			_ = os.MkdirAll(filepath.Dir(p), 0o755)
+			_ = os.WriteFile(p, []byte(tc.fileContent), 0o644)
 			sess := &GeminiAPISession{targetKey: "sess-" + tc.name, sessionID: "sess-" + tc.name, pool: NewGeminiAPIPool(GeminiAPIPoolConfig{DataDir: tmpDir}), dataDir: tmpDir}
 			sess.hydrateHistory()
 			hist := sess.History()
@@ -544,9 +587,9 @@ func TestGeminiAPISession_TranscriptPersistence_Suite(t *testing.T) {
 func TestCleanParameters(t *testing.T) {
 	t.Parallel()
 	testCases := []struct {
-		name             string
-		input            map[string]interface{}
-		expectedType     string
+		name                                       string
+		input                                      map[string]interface{}
+		expectedType                               string
 		nullable, checkNonNilProps, checkAnyOfPres bool
 	}{
 		{name: "NilSchema", input: nil, expectedType: "OBJECT", checkNonNilProps: true},
@@ -571,10 +614,18 @@ func TestCleanParameters(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			cleaned := cleanParameters(tc.input)
-			if cleaned["type"] != tc.expectedType { t.Errorf("%s: expected type %q, got %q", tc.name, tc.expectedType, cleaned["type"]) }
-			if tc.nullable && cleaned["nullable"] != true { t.Errorf("%s: expected nullable true", tc.name) }
-			if tc.checkNonNilProps && cleaned["properties"] == nil { t.Errorf("%s: expected non-nil properties map", tc.name) }
-			if tc.checkAnyOfPres && cleaned["anyOf"] == nil { t.Errorf("%s: expected anyOf preserved", tc.name) }
+			if cleaned["type"] != tc.expectedType {
+				t.Errorf("%s: expected type %q, got %q", tc.name, tc.expectedType, cleaned["type"])
+			}
+			if tc.nullable && cleaned["nullable"] != true {
+				t.Errorf("%s: expected nullable true", tc.name)
+			}
+			if tc.checkNonNilProps && cleaned["properties"] == nil {
+				t.Errorf("%s: expected non-nil properties map", tc.name)
+			}
+			if tc.checkAnyOfPres && cleaned["anyOf"] == nil {
+				t.Errorf("%s: expected anyOf preserved", tc.name)
+			}
 		})
 	}
 }
@@ -602,7 +653,9 @@ func TestCleanParameters_StripsDisallowedKeys(t *testing.T) {
 	checkKeys = func(m map[string]interface{}, path string) {
 		for k, v := range m {
 			for _, dis := range disallowed {
-				if strings.EqualFold(k, dis) { t.Errorf("found disallowed key %q at path %s", k, path) }
+				if strings.EqualFold(k, dis) {
+					t.Errorf("found disallowed key %q at path %s", k, path)
+				}
 			}
 			if childMap, ok := v.(map[string]interface{}); ok {
 				checkKeys(childMap, path+"."+k)
@@ -637,7 +690,9 @@ func TestCleanParameters_StripsDisallowedKeys(t *testing.T) {
 	curr["properties"] = map[string]interface{}{"leaf": map[string]interface{}{"type": "string", "additionalProperties": false}}
 	probe := cleanParameters(root)
 	for level := 0; level < 20; level++ {
-		if _, hasAddl := probe["additionalProperties"]; hasAddl { t.Fatalf("level %d had additionalProperties", level) }
+		if _, hasAddl := probe["additionalProperties"]; hasAddl {
+			t.Fatalf("level %d had additionalProperties", level)
+		}
 		probe = probe["properties"].(map[string]interface{})["nested"].(map[string]interface{})
 	}
 	if leaf := probe["properties"].(map[string]interface{})["leaf"].(map[string]interface{}); leaf["type"] != "STRING" {
@@ -650,7 +705,9 @@ func TestGeminiAPIPool_MultipleToolCallsGrouping(t *testing.T) {
 	tsMCP := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Method string `json:"method"`
-			Params struct{ Name string `json:"name"` } `json:"params"`
+			Params struct {
+				Name string `json:"name"`
+			} `json:"params"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		w.Header().Set("Content-Type", "application/json")
@@ -688,7 +745,9 @@ func TestGeminiAPIPool_MultipleToolCallsGrouping(t *testing.T) {
 	defer pool.Close()
 
 	sess, err := pool.GetOrCreateSession(context.Background(), "voice-kiosk-multi", "")
-	if err != nil { t.Fatalf("unexpected error: %v", err) }
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	sink := newMockTurnSink()
 	if err := sess.Send("run tools", &TurnContext{TurnID: "turn-multi-tool", Prompt: "run tools", Sink: sink}); err != nil {
 		t.Fatalf("Send failed: %v", err)
@@ -711,17 +770,29 @@ func TestGeminiAPIPool_LoadVoiceRulesFromDataDir(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 	rulesDir := filepath.Join(tmpDir, "runtimes", "voice", ".gemini", "config", "rules")
-	if err := os.MkdirAll(rulesDir, 0755); err != nil { t.Fatalf("failed to create rules dir: %v", err) }
+	if err := os.MkdirAll(rulesDir, 0o755); err != nil {
+		t.Fatalf("failed to create rules dir: %v", err)
+	}
 	ruleContent := "# Test Voice Rules\nBe succinct and direct."
-	if err := os.WriteFile(filepath.Join(rulesDir, "00_test.md"), []byte(ruleContent), 0644); err != nil { t.Fatalf("failed to write test rule file: %v", err) }
+	if err := os.WriteFile(filepath.Join(rulesDir, "00_test.md"), []byte(ruleContent), 0o644); err != nil {
+		t.Fatalf("failed to write test rule file: %v", err)
+	}
 	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{DataDir: tmpDir})
 	defer pool.Close()
-	if !strings.Contains(pool.cfg.SystemPrompt, ruleContent) { t.Errorf("expected rule content, got: %q", pool.cfg.SystemPrompt) }
+	if !strings.Contains(pool.cfg.SystemPrompt, ruleContent) {
+		t.Errorf("expected rule content, got: %q", pool.cfg.SystemPrompt)
+	}
 }
 
 type fallbackMockDispatcher struct{}
-func (d *fallbackMockDispatcher) ListDeclarations(ctx context.Context) ([]geminiFunctionDeclaration, error) { return []geminiFunctionDeclaration{{Name: "test_tool", Description: "a test tool"}}, nil }
-func (d *fallbackMockDispatcher) Execute(ctx context.Context, name string, args map[string]interface{}) (string, error) { return `{"status":"ok"}`, nil }
+
+func (d *fallbackMockDispatcher) ListDeclarations(ctx context.Context) ([]geminiFunctionDeclaration, error) {
+	return []geminiFunctionDeclaration{{Name: "test_tool", Description: "a test tool"}}, nil
+}
+
+func (d *fallbackMockDispatcher) Execute(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+	return `{"status":"ok"}`, nil
+}
 
 func TestGeminiAPIPool_FallbackTextWhenToolIterationsExhausted(t *testing.T) {
 	t.Parallel()
@@ -765,7 +836,9 @@ func newAllowedToolsMockServer() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Method string `json:"method"`
-			Params struct{ Name string `json:"name"` } `json:"params"`
+			Params struct {
+				Name string `json:"name"`
+			} `json:"params"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		w.Header().Set("Content-Type", "application/json")
@@ -802,7 +875,9 @@ func TestDefaultMCPDispatcher_AllowedToolsFilteringAndExecution(t *testing.T) {
 		AllowedTools: []string{"ha_call_read_tool"},
 	})
 	t.Cleanup(func() { _ = pool.Close() })
-	if pool.cfg.MCPDispatcher == nil { t.Fatalf("expected DefaultMCPDispatcher auto-wired") }
+	if pool.cfg.MCPDispatcher == nil {
+		t.Fatalf("expected DefaultMCPDispatcher auto-wired")
+	}
 	if decls, err := pool.cfg.MCPDispatcher.ListDeclarations(context.Background()); err != nil || len(decls) != 1 || decls[0].Name != "ha_call_read_tool" {
 		t.Fatalf("unexpected decls: %v, %v", decls, err)
 	}
@@ -825,7 +900,9 @@ func TestDefaultMCPDispatcher_AllowedToolsFilteringAndExecution(t *testing.T) {
 			ts := newAllowedToolsMockServer()
 			t.Cleanup(ts.Close)
 			slice := tc.allowedTools
-			if tc.passNilSlice { slice = nil }
+			if tc.passNilSlice {
+				slice = nil
+			}
 			disp := NewDefaultMCPDispatcher([]MCPServerConfig{{Name: "test-mcp", ServerURL: ts.URL}}, ts.Client(), slice)
 			ctx := context.Background()
 			decls, err := disp.ListDeclarations(ctx)
@@ -870,16 +947,26 @@ func TestGeminiAPISession_Send_Retrievers(t *testing.T) {
 
 			poolCfg := GeminiAPIPoolConfig{APIKey: "test-key", Model: "gemini-2.5-flash", BaseURL: ts.URL, HTTPClient: ts.Client()}
 			if tc.isAmbient {
-				poolCfg.AmbientContextRetriever = func(ctx context.Context) (string, error) { retrieverCalled = true; return tc.retrieverSnippet, nil }
+				poolCfg.AmbientContextRetriever = func(ctx context.Context) (string, error) {
+					retrieverCalled = true
+					return tc.retrieverSnippet, nil
+				}
 			} else {
-				poolCfg.MemoryRetriever = func(ctx context.Context, query string) (string, error) { retrieverCalled = true; return tc.retrieverSnippet, nil }
+				poolCfg.MemoryRetriever = func(ctx context.Context, query string) (string, error) {
+					retrieverCalled = true
+					return tc.retrieverSnippet, nil
+				}
 			}
 			pool := NewGeminiAPIPool(poolCfg)
 			defer pool.Close()
 			sess, err := pool.GetOrCreateSession(context.Background(), "test-sess", "")
-			if err != nil { t.Fatalf("unexpected GetOrCreateSession error: %v", err) }
+			if err != nil {
+				t.Fatalf("unexpected GetOrCreateSession error: %v", err)
+			}
 			prompt := tc.normalPrompt
-			if tc.preSeededPrompt != "" { prompt = tc.preSeededPrompt }
+			if tc.preSeededPrompt != "" {
+				prompt = tc.preSeededPrompt
+			}
 			sink := newMockTurnSink()
 			if err := sess.Send(prompt, &TurnContext{TurnID: "turn-retriever", Prompt: prompt, Sink: sink}); err != nil {
 				t.Fatalf("Send failed: %v", err)
@@ -951,13 +1038,13 @@ func TestGeminiAPIPool_AcquireLease_TableDriven(t *testing.T) {
 	)
 
 	cases := []struct {
-		name                string
+		name                                                                                                                           string
 		nilPool, emptyTarget, useChannelFallback, expectInitCold, expectExecErr, expectRotation, expectEvictedOnFail, expectNilTurnErr bool
-		maxTurns            int
-		turnPrompts         []string
-		responseStatusCodes []int
-		responseChunks      []string
-		onRotateErr, expectReleaseErr error
+		maxTurns                                                                                                                       int
+		turnPrompts                                                                                                                    []string
+		responseStatusCodes                                                                                                            []int
+		responseChunks                                                                                                                 []string
+		onRotateErr, expectReleaseErr                                                                                                  error
 	}{
 		{name: "Validation_NilPool", nilPool: true},
 		{name: "Validation_EmptyTarget", emptyTarget: true},
@@ -977,13 +1064,17 @@ func TestGeminiAPIPool_AcquireLease_TableDriven(t *testing.T) {
 			ctx := context.Background()
 			if tc.nilPool {
 				var nilPool *GeminiAPIPool
-				if _, err := nilPool.AcquireLease(ctx, "target"); err == nil { t.Error("expected error from nil pool AcquireLease") }
+				if _, err := nilPool.AcquireLease(ctx, "target"); err == nil {
+					t.Error("expected error from nil pool AcquireLease")
+				}
 				return
 			}
 			if tc.emptyTarget {
 				pool := NewGeminiAPIPool(GeminiAPIPoolConfig{APIKey: "test"})
 				defer pool.Close()
-				if _, err := pool.AcquireLease(ctx, "   "); err == nil { t.Error("expected error from empty targetKey AcquireLease") }
+				if _, err := pool.AcquireLease(ctx, "   "); err == nil {
+					t.Error("expected error from empty targetKey AcquireLease")
+				}
 				return
 			}
 
@@ -991,13 +1082,21 @@ func TestGeminiAPIPool_AcquireLease_TableDriven(t *testing.T) {
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				idx := int(atomic.AddInt32(&callIdx, 1) - 1)
 				status, chunk := http.StatusOK, okChunk
-				if idx < len(tc.responseStatusCodes) && tc.responseStatusCodes[idx] != 0 { status = tc.responseStatusCodes[idx] }
-				if idx < len(tc.responseChunks) && tc.responseChunks[idx] != "" { chunk = tc.responseChunks[idx] }
-				if status == http.StatusOK { w.Header().Set("Content-Type", "text/event-stream") }
+				if idx < len(tc.responseStatusCodes) && tc.responseStatusCodes[idx] != 0 {
+					status = tc.responseStatusCodes[idx]
+				}
+				if idx < len(tc.responseChunks) && tc.responseChunks[idx] != "" {
+					chunk = tc.responseChunks[idx]
+				}
+				if status == http.StatusOK {
+					w.Header().Set("Content-Type", "text/event-stream")
+				}
 				w.WriteHeader(status)
 				flusher, _ := w.(http.Flusher)
 				_, _ = w.Write([]byte(chunk))
-				if flusher != nil { flusher.Flush() }
+				if flusher != nil {
+					flusher.Flush()
+				}
 			}))
 			defer ts.Close()
 
@@ -1019,7 +1118,9 @@ func TestGeminiAPIPool_AcquireLease_TableDriven(t *testing.T) {
 			defer pool.Close()
 			targetKey := "target-" + tc.name
 			lease, err := pool.AcquireLease(ctx, targetKey)
-			if err != nil { t.Fatalf("AcquireLease failed: %v", err) }
+			if err != nil {
+				t.Fatalf("AcquireLease failed: %v", err)
+			}
 			if tc.expectInitCold && (!lease.IsCold() || lease.TurnCount() != 0 || lease.PreviousSessionID() != "550e8400-e29b-41d4-a716-446655440000" || lease.SessionID() != "550e8400-e29b-41d4-a716-446655440001") {
 				t.Errorf("initial lease state mismatch: cold=%v, count=%d, prev=%s, sess=%s", lease.IsCold(), lease.TurnCount(), lease.PreviousSessionID(), lease.SessionID())
 			}
@@ -1034,7 +1135,9 @@ func TestGeminiAPIPool_AcquireLease_TableDriven(t *testing.T) {
 				}
 				res, execErr := lease.Execute(ctx, turnCtx)
 				if execErr != nil {
-					if !tc.expectExecErr && i != 0 { t.Fatalf("turn %d Execute failed: %v", i+1, execErr) }
+					if !tc.expectExecErr && i != 0 {
+						t.Fatalf("turn %d Execute failed: %v", i+1, execErr)
+					}
 					if tc.expectExecErr && !IsQuotaPause(execErr.Error(), "") && !IsCapacityBlip(execErr.Error(), "") {
 						t.Errorf("expected quota/capacity error, got: %v", execErr)
 					}
@@ -1044,12 +1147,16 @@ func TestGeminiAPIPool_AcquireLease_TableDriven(t *testing.T) {
 			}
 
 			if tc.expectNilTurnErr {
-				if _, err := lease.Execute(ctx, nil); err == nil { t.Errorf("expected error on nil turn context") }
+				if _, err := lease.Execute(ctx, nil); err == nil {
+					t.Errorf("expected error on nil turn context")
+				}
 			}
 
 			relErr := lease.Release()
 			if tc.expectReleaseErr != nil {
-				if !errors.Is(relErr, tc.expectReleaseErr) { t.Errorf("expected release error %v, got %v", tc.expectReleaseErr, relErr) }
+				if !errors.Is(relErr, tc.expectReleaseErr) {
+					t.Errorf("expected release error %v, got %v", tc.expectReleaseErr, relErr)
+				}
 			} else if relErr != nil && !tc.expectExecErr {
 				t.Errorf("unexpected release error: %v", relErr)
 			}
@@ -1066,7 +1173,9 @@ func TestGeminiAPIPool_AcquireLease_TableDriven(t *testing.T) {
 				pool.mu.RLock()
 				_, exists := pool.sessions[targetKey]
 				pool.mu.RUnlock()
-				if exists { t.Errorf("expected session evicted after latch rollback") }
+				if exists {
+					t.Errorf("expected session evicted after latch rollback")
+				}
 			}
 		})
 	}
@@ -1076,20 +1185,28 @@ func TestGeminiSessionLease_IsEphemeralAndMarkDirty(t *testing.T) {
 	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{})
 	defer pool.Close()
 	lease, err := pool.AcquireLease(context.Background(), "target-1")
-	if err != nil { t.Fatalf("AcquireLease failed: %v", err) }
+	if err != nil {
+		t.Fatalf("AcquireLease failed: %v", err)
+	}
 	defer lease.Release()
-	if lease.IsEphemeral() { t.Errorf("expected IsEphemeral to be false for gemini lease") }
+	if lease.IsEphemeral() {
+		t.Errorf("expected IsEphemeral to be false for gemini lease")
+	}
 
 	pool.mu.RLock()
 	_, exists := pool.sessions["target-1"]
 	pool.mu.RUnlock()
-	if !exists { t.Fatalf("expected session to exist before MarkDirty") }
+	if !exists {
+		t.Fatalf("expected session to exist before MarkDirty")
+	}
 
 	lease.MarkDirty()
 	pool.mu.RLock()
 	_, existsAfter := pool.sessions["target-1"]
 	pool.mu.RUnlock()
-	if existsAfter { t.Errorf("expected session removed from pool after lease.MarkDirty()") }
+	if existsAfter {
+		t.Errorf("expected session removed from pool after lease.MarkDirty()")
+	}
 
 	var nilLease *geminiSessionLease
 	nilLease.MarkDirty()

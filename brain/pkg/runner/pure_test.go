@@ -122,10 +122,17 @@ func TestExtractMCPToolInfo(t *testing.T) {
 		toolName, wantTool, wantServer string
 		params                         map[string]any
 	}{
-		{"", "unknown", "native", nil}, {"run_command", "run_command", "native", map[string]any{"CommandLine": "ls"}},
-		{"call_mcp_tool", "list_pull_requests", "github", map[string]any{"ServerName": "github", "ToolName": "list_pull_requests"}}, {"call_mcp_tool", "unifi_execute", "unifi", map[string]any{"ServerName": `"\"unifi\""`, "ToolName": `"\"unifi_execute\""`}},
-		{"call_mcp_tool", "call_mcp_tool", "unknown", nil}, {"call_mcp_tool", "call_mcp_tool", "docker", map[string]any{"ServerName": "docker"}}, {"call_mcp_tool", "list_containers", "unknown", map[string]any{"ToolName": "list_containers"}},
-		{"call_mcp_tool", "call_mcp_tool", "unknown", map[string]any{"ServerName": 12345, "ToolName": []any{"bad"}}}, {"mcp_github_create_pull_request", "create_pull_request", "github", nil}, {"mcp_docker", "docker", "unknown", nil}, {"mcp_singlepart", "singlepart", "unknown", nil},
+		{"", "unknown", "native", nil},
+		{"run_command", "run_command", "native", map[string]any{"CommandLine": "ls"}},
+		{"call_mcp_tool", "list_pull_requests", "github", map[string]any{"ServerName": "github", "ToolName": "list_pull_requests"}},
+		{"call_mcp_tool", "unifi_execute", "unifi", map[string]any{"ServerName": `"\"unifi\""`, "ToolName": `"\"unifi_execute\""`}},
+		{"call_mcp_tool", "call_mcp_tool", "unknown", nil},
+		{"call_mcp_tool", "call_mcp_tool", "docker", map[string]any{"ServerName": "docker"}},
+		{"call_mcp_tool", "list_containers", "unknown", map[string]any{"ToolName": "list_containers"}},
+		{"call_mcp_tool", "call_mcp_tool", "unknown", map[string]any{"ServerName": 12345, "ToolName": []any{"bad"}}},
+		{"mcp_github_create_pull_request", "create_pull_request", "github", nil},
+		{"mcp_docker", "docker", "unknown", nil},
+		{"mcp_singlepart", "singlepart", "unknown", nil},
 	} {
 		gotTool, gotServer := ExtractMCPToolInfo(tc.toolName, tc.params)
 		if gotTool != tc.wantTool || gotServer != tc.wantServer {
@@ -139,9 +146,16 @@ func TestExtractSkillFromTarget(t *testing.T) {
 		target, want string
 		wantOk       bool
 	}{
-		{"", "", false}, {"/share/aerial/pkg/runner/pure.go", "", false}, {"SKILL.md", "", false}, {"/foo/skills/SKILL.md", "", false}, {"no-skill-here", "", false}, {"view_file /skills/foo/SKILL.md", "foo", true},
-		{"/share/aerial/.agents/skills/discord/self-improvement/SKILL.md", "self-improvement", true}, {"/share/aerial-config/custom-skills/ha-operations/SKILL.md", "ha-operations", true},
-		{"file:///data/runtimes/discord/.gemini/config/skills/culinary-recipes/SKILL.md", "culinary-recipes", true}, {"cat /root/.gemini/config/skills/antigravity-guide/SKILL.md | grep title", "antigravity-guide", true},
+		{"", "", false},
+		{"/share/aerial/pkg/runner/pure.go", "", false},
+		{"SKILL.md", "", false},
+		{"/foo/skills/SKILL.md", "", false},
+		{"no-skill-here", "", false},
+		{"view_file /skills/foo/SKILL.md", "foo", true},
+		{"/share/aerial/.agents/skills/discord/self-improvement/SKILL.md", "self-improvement", true},
+		{"/share/aerial-config/custom-skills/ha-operations/SKILL.md", "ha-operations", true},
+		{"file:///data/runtimes/discord/.gemini/config/skills/culinary-recipes/SKILL.md", "culinary-recipes", true},
+		{"cat /root/.gemini/config/skills/antigravity-guide/SKILL.md | grep title", "antigravity-guide", true},
 	} {
 		if got, ok := ExtractSkillFromTarget(tc.target); got != tc.want || ok != tc.wantOk {
 			t.Errorf("ExtractSkillFromTarget(%q) = (%q, %v), want (%q, %v)", tc.target, got, ok, tc.want, tc.wantOk)

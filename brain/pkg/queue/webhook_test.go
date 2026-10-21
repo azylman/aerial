@@ -26,10 +26,10 @@ func TestWebhookDispatcher_LifecycleHooks(t *testing.T) {
 
 	// 1. OnWake
 	wakeTests := []struct {
-		name       string
-		override   string
-		reason     string
-		wantEvent  string
+		name      string
+		override  string
+		reason    string
+		wantEvent string
 	}{
 		{"wake override", "wake", "priority", "on_wake"},
 		{"drop override", "drop", "noise", "on_wake"},

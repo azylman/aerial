@@ -19,16 +19,16 @@ import (
 
 // PoolConfig specifies parameters for initializing and configuring UnifiedProcessPool.
 type PoolConfig struct {
-	AgyBin, Model, DefaultModel, Cwd, GeminiHomeDir, Timezone string
-	TargetModels                                              map[string]string // Deprecated: pools are now model-bound. Ignored.
-	Env, PrewarmedTargets                                     []string
-	MaxIdle, TargetLockTimeout, HandshakeTimeout              time.Duration
-	TranscriptRescuer                                         func(convID string, since time.Time) string
-	MemoryRetriever                                           MemoryRetriever
-	AmbientContextRetriever                                   AmbientContextRetriever
-	SessionManager                                            *session.Manager
-	OnSessionRotated                                          func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error
-	GetSessionRecord                                          func(ctx context.Context, targetKey string) (SessionRecord, error)
+	AgyBin, Model, DefaultModel, Cwd, GeminiHomeDir, Timezone     string
+	TargetModels                                                  map[string]string // Deprecated: pools are now model-bound. Ignored.
+	Env, PrewarmedTargets                                         []string
+	MaxIdle, TargetLockTimeout, HandshakeTimeout                  time.Duration
+	TranscriptRescuer                                             func(convID string, since time.Time) string
+	MemoryRetriever                                               MemoryRetriever
+	AmbientContextRetriever                                       AmbientContextRetriever
+	SessionManager                                                *session.Manager
+	OnSessionRotated                                              func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error
+	GetSessionRecord                                              func(ctx context.Context, targetKey string) (SessionRecord, error)
 	MaxSessionTurns, MinSessionTurns, EmergencyRotationMultiplier int
 }
 
@@ -59,11 +59,17 @@ var (
 
 // NewUnifiedProcessPool creates a new process pool with the given configuration and spawner.
 func NewUnifiedProcessPool(cfg PoolConfig, spawner DaemonSpawner) *UnifiedProcessPool {
-	if spawner == nil { spawner = &DefaultDaemonSpawner{} }
-	if cfg.MaxIdle <= 0 { cfg.MaxIdle = 24 * time.Hour }
+	if spawner == nil {
+		spawner = &DefaultDaemonSpawner{}
+	}
+	if cfg.MaxIdle <= 0 {
+		cfg.MaxIdle = 24 * time.Hour
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	resolvedModel := cfg.Model
-	if resolvedModel == "" { resolvedModel = cfg.DefaultModel }
+	if resolvedModel == "" {
+		resolvedModel = cfg.DefaultModel
+	}
 	cfg.Model, cfg.DefaultModel = resolvedModel, resolvedModel
 	return &UnifiedProcessPool{
 		cfg:         cfg,
@@ -77,7 +83,9 @@ func NewUnifiedProcessPool(cfg PoolConfig, spawner DaemonSpawner) *UnifiedProces
 }
 
 func (p *UnifiedProcessPool) Model() string {
-	if p == nil { return "" }
+	if p == nil {
+		return ""
+	}
 	return p.cfg.Model
 }
 
@@ -88,16 +96,22 @@ func (p *UnifiedProcessPool) isClosed() bool {
 }
 
 func (p *UnifiedProcessPool) SetTranscriptRescuer(rescuer func(convID string, since time.Time) string) {
-	if p == nil { return }
+	if p == nil {
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.cfg.TranscriptRescuer = rescuer
-	for _, d := range p.daemons { d.SetTranscriptRescuer(rescuer) }
+	for _, d := range p.daemons {
+		d.SetTranscriptRescuer(rescuer)
+	}
 }
 
 // SetSessionManager updates the session manager for rotation guardrail checks.
 func (p *UnifiedProcessPool) SetSessionManager(sm *session.Manager) {
-	if p == nil { return }
+	if p == nil {
+		return
+	}
 	p.mu.Lock()
 	p.cfg.SessionManager = sm
 	p.mu.Unlock()
@@ -105,7 +119,9 @@ func (p *UnifiedProcessPool) SetSessionManager(sm *session.Manager) {
 
 // SetSessionCallbacks updates the session record lookup and rotation callbacks.
 func (p *UnifiedProcessPool) SetSessionCallbacks(getRec func(ctx context.Context, targetKey string) (SessionRecord, error), onRot func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error) {
-	if p == nil { return }
+	if p == nil {
+		return
+	}
 	p.mu.Lock()
 	p.cfg.GetSessionRecord, p.cfg.OnSessionRotated = getRec, onRot
 	p.mu.Unlock()
@@ -113,11 +129,19 @@ func (p *UnifiedProcessPool) SetSessionCallbacks(getRec func(ctx context.Context
 
 // Initialize pre-warms configured target daemons sequentially in the caller's context.
 func (p *UnifiedProcessPool) Initialize(ctx context.Context) error {
-	if p.isClosed() { return fmt.Errorf("process pool is closed") }
-	if ctx == nil { ctx = context.Background() }
+	if p.isClosed() {
+		return fmt.Errorf("process pool is closed")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	for _, target := range p.cfg.PrewarmedTargets {
-		if p.isClosed() { return fmt.Errorf("process pool is closed") }
-		if err := ctx.Err(); err != nil { return err }
+		if p.isClosed() {
+			return fmt.Errorf("process pool is closed")
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		initCtx, cancel := context.WithTimeout(ctx, 35*time.Second)
 		if err := p.prewarmTarget(initCtx, target); err != nil {
 			log.Printf("[UnifiedProcessPool] Warning: pre-warming target %q failed: %v", target, err)
@@ -131,18 +155,28 @@ func (p *UnifiedProcessPool) Initialize(ctx context.Context) error {
 
 func (p *UnifiedProcessPool) prewarmTarget(ctx context.Context, targetKey string) error {
 	trimmed := strings.TrimSpace(targetKey)
-	if trimmed == "" { return nil }
-	if d, ok := p.Get(trimmed); ok && !d.IsDirty() { return nil }
+	if trimmed == "" {
+		return nil
+	}
+	if d, ok := p.Get(trimmed); ok && !d.IsDirty() {
+		return nil
+	}
 	tl, acquired := p.tryAcquireTargetLock(trimmed)
-	if !acquired { return nil }
+	if !acquired {
+		return nil
+	}
 	defer p.releaseTargetLock(trimmed, tl, true)
-	if d, ok := p.Get(trimmed); ok && !d.IsDirty() { return nil }
+	if d, ok := p.Get(trimmed); ok && !d.IsDirty() {
+		return nil
+	}
 	_, err := p.GetOrCreate(ctx, trimmed, "")
 	return err
 }
 
 func (p *UnifiedProcessPool) closeEvictedDaemon(oldD *StreamingDaemon, targetKey string) {
-	if oldD == nil { return }
+	if oldD == nil {
+		return
+	}
 	oldD.MarkDirty()
 	if oldD.InflightCount() > 0 {
 		oldD.SetOnTurnFinished(func(d *StreamingDaemon) {
@@ -150,7 +184,9 @@ func (p *UnifiedProcessPool) closeEvictedDaemon(oldD *StreamingDaemon, targetKey
 				log.Printf("[UnifiedProcessPool] Warning: error closing drained daemon %q: %v", targetKey, closeErr)
 			}
 		})
-		if oldD.InflightCount() > 0 { return }
+		if oldD.InflightCount() > 0 {
+			return
+		}
 	}
 	p.bgWg.Add(1)
 	go func(d *StreamingDaemon, tKey string) {
@@ -203,7 +239,7 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 		daemonEnv := filterVanadisChunkEnv(p.cfg.Env)
 		if home := strings.TrimSpace(p.cfg.GeminiHomeDir); home != "" {
 			geminiDir := filepath.Join(home, ".gemini")
-			if err := os.MkdirAll(geminiDir, 0755); err != nil {
+			if err := os.MkdirAll(geminiDir, 0o755); err != nil {
 				return nil, fmt.Errorf("failed to create runtime home directory %q: %w", geminiDir, err)
 			}
 			daemonEnv = BuildAgyEnv(AgyEnvInput{
@@ -233,7 +269,9 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 			daemon, spawnErr = StartStreamingDaemon(p.ctx, daemonCfg, p.spawner)
 		}
 		if spawnErr != nil {
-			if p.isClosed() { return nil, fmt.Errorf("process pool is closed") }
+			if p.isClosed() {
+				return nil, fmt.Errorf("process pool is closed")
+			}
 			return nil, fmt.Errorf("failed to start daemon for target %q: %w", targetKey, spawnErr)
 		}
 
@@ -253,46 +291,64 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 		return daemon, nil
 	})
 
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	daemon, ok := res.(*StreamingDaemon)
-	if !ok || daemon == nil { return nil, fmt.Errorf("unexpected nil daemon from singleflight") }
+	if !ok || daemon == nil {
+		return nil, fmt.Errorf("unexpected nil daemon from singleflight")
+	}
 	return daemon, nil
 }
 
 // GetOrCreateSession retrieves an active AgentSession for targetKey, satisfying runner.AgentPool.
 func (p *UnifiedProcessPool) GetOrCreateSession(ctx context.Context, targetKey, sessionID string) (AgentSession, error) {
 	d, err := p.GetOrCreate(ctx, targetKey, sessionID)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	return d, nil
 }
 
 // EvictSession closes and removes the active daemon for targetKey.
 func (p *UnifiedProcessPool) EvictSession(targetKey string) error {
-	if p == nil { return nil }
+	if p == nil {
+		return nil
+	}
 	p.mu.Lock()
 	d, exists := p.daemons[targetKey]
 	delete(p.daemons, targetKey)
 	p.mu.Unlock()
-	if exists && d != nil { return d.Close() }
+	if exists && d != nil {
+		return d.Close()
+	}
 	return nil
 }
 
 func isDaemonMatch(d *StreamingDaemon, trimmedSess string) bool {
-	if d == nil || d.State() == StateClosed || d.IsDirty() { return false }
-	if trimmedSess == "" { return true }
+	if d == nil || d.State() == StateClosed || d.IsDirty() {
+		return false
+	}
+	if trimmedSess == "" {
+		return true
+	}
 	return d.SessionID() == "" || d.SessionID() == trimmedSess
 }
 
 // Close gracefully terminates all daemons tracked by the pool.
 func (p *UnifiedProcessPool) Close() error {
-	if p == nil { return nil }
+	if p == nil {
+		return nil
+	}
 	p.closeOnce.Do(func() {
 		p.mu.Lock()
 		p.closed = true
 		toClose := p.daemons
 		p.daemons = make(map[string]*StreamingDaemon)
 		p.mu.Unlock()
-		if p.cancel != nil { p.cancel() }
+		if p.cancel != nil {
+			p.cancel()
+		}
 		p.bgWg.Wait()
 
 		var wg sync.WaitGroup
@@ -312,17 +368,23 @@ func (p *UnifiedProcessPool) Close() error {
 			}
 		}
 		wg.Wait()
-		if len(errs) > 0 { p.closeErr = fmt.Errorf("errors closing pool daemons: %v", errs) }
+		if len(errs) > 0 {
+			p.closeErr = fmt.Errorf("errors closing pool daemons: %v", errs)
+		}
 	})
 	return p.closeErr
 }
 
 func (p *UnifiedProcessPool) WaitBackground() {
-	if p != nil { p.bgWg.Wait() }
+	if p != nil {
+		p.bgWg.Wait()
+	}
 }
 
 func (p *UnifiedProcessPool) Get(targetKey string) (*StreamingDaemon, bool) {
-	if p == nil { return nil, false }
+	if p == nil {
+		return nil, false
+	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	d, ok := p.daemons[targetKey]
@@ -335,17 +397,23 @@ func (p *UnifiedProcessPool) HasDaemon(targetKey string) bool {
 }
 
 func (p *UnifiedProcessPool) PrewarmedTargets() []string {
-	if p == nil { return nil }
+	if p == nil {
+		return nil
+	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	if p.cfg.PrewarmedTargets == nil { return nil }
+	if p.cfg.PrewarmedTargets == nil {
+		return nil
+	}
 	targets := make([]string, len(p.cfg.PrewarmedTargets))
 	copy(targets, p.cfg.PrewarmedTargets)
 	return targets
 }
 
 func (p *UnifiedProcessPool) UpdatePrewarmedTargets(targets []string) {
-	if p == nil { return }
+	if p == nil {
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if targets == nil {
@@ -382,10 +450,14 @@ func (p *UnifiedProcessPool) MarkDirty() {
 	var toPrewarm []string
 
 	prewarmedSet := make(map[string]bool, len(p.cfg.PrewarmedTargets))
-	for _, target := range p.cfg.PrewarmedTargets { prewarmedSet[target] = true }
+	for _, target := range p.cfg.PrewarmedTargets {
+		prewarmedSet[target] = true
+	}
 
 	for target, d := range p.daemons {
-		if d == nil { continue }
+		if d == nil {
+			continue
+		}
 		if d.InflightCount() == 0 && !p.isTargetLocked(target) {
 			delete(p.daemons, target)
 			toClose = append(toClose, evictedEntry{targetKey: target, daemon: d})
@@ -401,7 +473,9 @@ func (p *UnifiedProcessPool) MarkDirty() {
 
 	for _, target := range p.cfg.PrewarmedTargets {
 		target = strings.TrimSpace(target)
-		if target == "" { continue }
+		if target == "" {
+			continue
+		}
 		d, exists := p.daemons[target]
 		if (!exists || d == nil || d.State() == StateClosed) && !p.prewarming[target] && !p.isTargetLocked(target) {
 			p.prewarming[target] = true
@@ -460,9 +534,15 @@ func (p *UnifiedProcessPool) ShouldRotate(d *StreamingDaemon) (bool, string) {
 
 	minTurns, maxTurns, mult := DefaultMinSessionTurns, DefaultMaxSessionTurns, DefaultEmergencyRotationMultiplier
 	if p != nil {
-		if p.cfg.MinSessionTurns > 0 { minTurns = p.cfg.MinSessionTurns }
-		if p.cfg.MaxSessionTurns > 0 { maxTurns = p.cfg.MaxSessionTurns }
-		if p.cfg.EmergencyRotationMultiplier > 0 { mult = p.cfg.EmergencyRotationMultiplier }
+		if p.cfg.MinSessionTurns > 0 {
+			minTurns = p.cfg.MinSessionTurns
+		}
+		if p.cfg.MaxSessionTurns > 0 {
+			maxTurns = p.cfg.MaxSessionTurns
+		}
+		if p.cfg.EmergencyRotationMultiplier > 0 {
+			mult = p.cfg.EmergencyRotationMultiplier
+		}
 	}
 
 	currentTurns := d.TurnCount()
@@ -531,7 +611,9 @@ func (p *UnifiedProcessPool) RotateDaemon(ctx context.Context, targetKey string,
 }
 
 func (p *UnifiedProcessPool) ShouldRotateSession(sess AgentSession) (bool, string) {
-	if d, ok := sess.(*StreamingDaemon); ok && p != nil { return p.ShouldRotate(d) }
+	if d, ok := sess.(*StreamingDaemon); ok && p != nil {
+		return p.ShouldRotate(d)
+	}
 	return false, ""
 }
 
@@ -545,18 +627,28 @@ func (p *UnifiedProcessPool) RotateSession(ctx context.Context, targetKey string
 
 // ExecuteEphemeral dispatches a prompt to targetKey's daemon and synchronously awaits the response.
 func (p *UnifiedProcessPool) ExecuteEphemeral(ctx context.Context, targetKey, prompt string) (string, error) {
-	if p == nil { return "", fmt.Errorf("process pool is nil") }
-	if strings.TrimSpace(targetKey) == "" { return "", fmt.Errorf("target key cannot be empty") }
-	if err := ctx.Err(); err != nil { return "", err }
+	if p == nil {
+		return "", fmt.Errorf("process pool is nil")
+	}
+	if strings.TrimSpace(targetKey) == "" {
+		return "", fmt.Errorf("target key cannot be empty")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	daemon, err := p.GetOrCreate(ctx, targetKey, "")
-	if err != nil { return "", fmt.Errorf("failed to acquire ephemeral daemon for %q: %w", targetKey, err) }
+	if err != nil {
+		return "", fmt.Errorf("failed to acquire ephemeral daemon for %q: %w", targetKey, err)
+	}
 	sink := NewThrowawayTurnSink()
 	turnCtx := &TurnContext{TurnID: uuid.New().String(), Prompt: prompt, Sink: sink, CreatedAt: time.Now()}
 	if err := daemon.Send(prompt, turnCtx); err != nil {
 		return "", fmt.Errorf("failed sending turn to ephemeral daemon %q: %w", targetKey, err)
 	}
 	res, err := sink.ResultContext(ctx)
-	if err != nil { return "", err }
+	if err != nil {
+		return "", err
+	}
 	if should, _ := p.ShouldRotate(daemon); should {
 		go func() {
 			rotCtx, cancel := context.WithTimeout(p.ctx, 35*time.Second)
@@ -572,7 +664,9 @@ func (p *UnifiedProcessPool) ExecuteEphemeral(ctx context.Context, targetKey, pr
 // EphemeralLLMFunc returns a runner.LLMFunc that executes prompts against targetKey.
 func (p *UnifiedProcessPool) EphemeralLLMFunc(targetKey string) LLMFunc {
 	return func(ctx context.Context, model, prompt string) (string, error) {
-		if p == nil { return "", fmt.Errorf("process pool is nil") }
+		if p == nil {
+			return "", fmt.Errorf("process pool is nil")
+		}
 		return p.ExecuteEphemeral(ctx, targetKey, prompt)
 	}
 }
@@ -592,7 +686,9 @@ func (p *UnifiedProcessPool) isTargetLocked(targetKey string) bool {
 func (p *UnifiedProcessPool) tryAcquireTargetLock(targetKey string) (*targetLock, bool) {
 	p.targetMu.Lock()
 	defer p.targetMu.Unlock()
-	if p.targetLocks == nil { p.targetLocks = make(map[string]*targetLock) }
+	if p.targetLocks == nil {
+		p.targetLocks = make(map[string]*targetLock)
+	}
 	tl, ok := p.targetLocks[targetKey]
 	if !ok {
 		tl = &targetLock{sem: make(chan struct{}, 1)}
@@ -603,15 +699,21 @@ func (p *UnifiedProcessPool) tryAcquireTargetLock(targetKey string) (*targetLock
 		tl.refs++
 		return tl, true
 	default:
-		if tl.refs <= 0 { delete(p.targetLocks, targetKey) }
+		if tl.refs <= 0 {
+			delete(p.targetLocks, targetKey)
+		}
 		return nil, false
 	}
 }
 
 func acquirePoolTargetLock(ctx context.Context, mu *sync.Mutex, locks *map[string]*targetLock, targetKey string, timeout time.Duration) (*targetLock, error) {
-	if mu == nil || locks == nil { return nil, errors.New("target lock state is uninitialized") }
+	if mu == nil || locks == nil {
+		return nil, errors.New("target lock state is uninitialized")
+	}
 	mu.Lock()
-	if *locks == nil { *locks = make(map[string]*targetLock) }
+	if *locks == nil {
+		*locks = make(map[string]*targetLock)
+	}
 	tl, ok := (*locks)[targetKey]
 	if !ok {
 		tl = &targetLock{sem: make(chan struct{}, 1)}
@@ -620,7 +722,9 @@ func acquirePoolTargetLock(ctx context.Context, mu *sync.Mutex, locks *map[strin
 	tl.refs++
 	mu.Unlock()
 
-	if timeout <= 0 { timeout = 30 * time.Second }
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
 	lockCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -634,17 +738,23 @@ func acquirePoolTargetLock(ctx context.Context, mu *sync.Mutex, locks *map[strin
 }
 
 func releasePoolTargetLock(mu *sync.Mutex, locks map[string]*targetLock, targetKey string, tl *targetLock, held bool) {
-	if tl == nil { return }
+	if tl == nil {
+		return
+	}
 	if held {
 		select {
 		case <-tl.sem:
 		default:
 		}
 	}
-	if mu == nil { return }
+	if mu == nil {
+		return
+	}
 	mu.Lock()
 	tl.refs--
-	if tl.refs <= 0 && locks != nil { delete(locks, targetKey) }
+	if tl.refs <= 0 && locks != nil {
+		delete(locks, targetKey)
+	}
 	mu.Unlock()
 }
 
@@ -658,16 +768,24 @@ func (p *UnifiedProcessPool) releaseTargetLock(targetKey string, tl *targetLock,
 
 // AcquireLease blocks until the target lock is acquired and returns an exclusive SessionLease.
 func (p *UnifiedProcessPool) AcquireLease(ctx context.Context, targetKey string) (SessionLease, error) {
-	if p == nil { return nil, errors.New("unified process pool is uninitialized") }
+	if p == nil {
+		return nil, errors.New("unified process pool is uninitialized")
+	}
 	trimmedKey := strings.TrimSpace(targetKey)
-	if trimmedKey == "" { return nil, errors.New("targetKey cannot be empty") }
+	if trimmedKey == "" {
+		return nil, errors.New("targetKey cannot be empty")
+	}
 
 	tl, err := p.acquireTargetLock(ctx, trimmedKey)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 
 	var rec SessionRecord
 	if p.cfg.GetSessionRecord != nil {
-		if r, rErr := p.cfg.GetSessionRecord(ctx, trimmedKey); rErr == nil { rec = r }
+		if r, rErr := p.cfg.GetSessionRecord(ctx, trimmedKey); rErr == nil {
+			rec = r
+		}
 	}
 	d, dErr := p.GetOrCreate(ctx, trimmedKey, rec.ActiveSessionID, rec.TurnCount)
 	if dErr != nil {
@@ -676,9 +794,13 @@ func (p *UnifiedProcessPool) AcquireLease(ctx context.Context, targetKey string)
 	}
 
 	isCold, turnCount := rec.TurnCount <= 1 || rec.ActiveSessionID == "", rec.TurnCount
-	if isCold { turnCount = 0 }
+	if isCold {
+		turnCount = 0
+	}
 	sessID := d.SessionID()
-	if sessID == "" { sessID = rec.ActiveSessionID }
+	if sessID == "" {
+		sessID = rec.ActiveSessionID
+	}
 
 	return &unifiedSessionLease{
 		pool:       p,
@@ -693,13 +815,13 @@ func (p *UnifiedProcessPool) AcquireLease(ctx context.Context, targetKey string)
 }
 
 type unifiedSessionLease struct {
-	pool           *UnifiedProcessPool
-	daemon         *StreamingDaemon
-	lock           *targetLock
+	pool                             *UnifiedProcessPool
+	daemon                           *StreamingDaemon
+	lock                             *targetLock
 	targetKey, sessionID, prevSessID string
-	turnCount      int
-	isCold, cancelRotation bool
-	releaseOnce    sync.Once
+	turnCount                        int
+	isCold, cancelRotation           bool
+	releaseOnce                      sync.Once
 }
 
 var _ SessionLease = (*unifiedSessionLease)(nil)
@@ -712,9 +834,9 @@ func (l *unifiedSessionLease) SessionID() string {
 }
 
 func (l *unifiedSessionLease) PreviousSessionID() string { return l.prevSessID }
-func (l *unifiedSessionLease) IsCold() bool             { return l.isCold }
-func (l *unifiedSessionLease) IsEphemeral() bool        { return false }
-func (l *unifiedSessionLease) TurnCount() int           { return l.turnCount }
+func (l *unifiedSessionLease) IsCold() bool              { return l.isCold }
+func (l *unifiedSessionLease) IsEphemeral() bool         { return false }
+func (l *unifiedSessionLease) TurnCount() int            { return l.turnCount }
 func (l *unifiedSessionLease) MarkDirty() {
 	if l != nil && l.daemon != nil {
 		l.daemon.MarkDirty()
@@ -726,23 +848,81 @@ type leaseTurnSinkWrapper struct {
 	buf   *BufferingTurnSink
 }
 
-func (s *leaseTurnSinkWrapper) OnTurnStarted() { if s.inner != nil { s.inner.OnTurnStarted() }; s.buf.OnTurnStarted() }
-func (s *leaseTurnSinkWrapper) OnThinking() { if s.inner != nil { s.inner.OnThinking() }; s.buf.OnThinking() }
-func (s *leaseTurnSinkWrapper) OnStepStarted(idx int) {
-	if s.inner != nil { if sa, ok := s.inner.(StepAwareSink); ok { sa.OnStepStarted(idx) } }
-	if s.buf != nil { s.buf.OnStepStarted(idx) }
+func (s *leaseTurnSinkWrapper) OnTurnStarted() {
+	if s.inner != nil {
+		s.inner.OnTurnStarted()
+	}
+	s.buf.OnTurnStarted()
 }
-func (s *leaseTurnSinkWrapper) OnToolCall(tool, cmd string) { if s.inner != nil { s.inner.OnToolCall(tool, cmd) }; s.buf.OnToolCall(tool, cmd) }
-func (s *leaseTurnSinkWrapper) OnToolCompleted(tool, mcp string, d time.Duration, status string) { if s.inner != nil { s.inner.OnToolCompleted(tool, mcp, d, status) }; s.buf.OnToolCompleted(tool, mcp, d, status) }
-func (s *leaseTurnSinkWrapper) OnSkillActivated(skill, src string) { if s.inner != nil { s.inner.OnSkillActivated(skill, src) }; s.buf.OnSkillActivated(skill, src) }
-func (s *leaseTurnSinkWrapper) OnTextDelta(delta string) { if s.inner != nil { s.inner.OnTextDelta(delta) }; s.buf.OnTextDelta(delta) }
-func (s *leaseTurnSinkWrapper) OnResult(res *TurnResult) { if s.inner != nil { s.inner.OnResult(res) }; s.buf.OnResult(res) }
-func (s *leaseTurnSinkWrapper) OnError(err error) { if s.inner != nil { s.inner.OnError(err) }; s.buf.OnError(err) }
+
+func (s *leaseTurnSinkWrapper) OnThinking() {
+	if s.inner != nil {
+		s.inner.OnThinking()
+	}
+	s.buf.OnThinking()
+}
+
+func (s *leaseTurnSinkWrapper) OnStepStarted(idx int) {
+	if s.inner != nil {
+		if sa, ok := s.inner.(StepAwareSink); ok {
+			sa.OnStepStarted(idx)
+		}
+	}
+	if s.buf != nil {
+		s.buf.OnStepStarted(idx)
+	}
+}
+
+func (s *leaseTurnSinkWrapper) OnToolCall(tool, cmd string) {
+	if s.inner != nil {
+		s.inner.OnToolCall(tool, cmd)
+	}
+	s.buf.OnToolCall(tool, cmd)
+}
+
+func (s *leaseTurnSinkWrapper) OnToolCompleted(tool, mcp string, d time.Duration, status string) {
+	if s.inner != nil {
+		s.inner.OnToolCompleted(tool, mcp, d, status)
+	}
+	s.buf.OnToolCompleted(tool, mcp, d, status)
+}
+
+func (s *leaseTurnSinkWrapper) OnSkillActivated(skill, src string) {
+	if s.inner != nil {
+		s.inner.OnSkillActivated(skill, src)
+	}
+	s.buf.OnSkillActivated(skill, src)
+}
+
+func (s *leaseTurnSinkWrapper) OnTextDelta(delta string) {
+	if s.inner != nil {
+		s.inner.OnTextDelta(delta)
+	}
+	s.buf.OnTextDelta(delta)
+}
+
+func (s *leaseTurnSinkWrapper) OnResult(res *TurnResult) {
+	if s.inner != nil {
+		s.inner.OnResult(res)
+	}
+	s.buf.OnResult(res)
+}
+
+func (s *leaseTurnSinkWrapper) OnError(err error) {
+	if s.inner != nil {
+		s.inner.OnError(err)
+	}
+	s.buf.OnError(err)
+}
 
 func (l *unifiedSessionLease) Execute(ctx context.Context, turn *TurnContext) (*TurnResult, error) {
-	if turn == nil { return nil, errors.New("turn context cannot be nil") }
+	if turn == nil {
+		return nil, errors.New("turn context cannot be nil")
+	}
 	l.cancelRotation = false
-	if turn.Ctx == nil { turn.Ctx = ctx }
+	if turn.Ctx == nil {
+		turn.Ctx = ctx
+	}
 
 	bufSink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
 	origSink := turn.Sink
@@ -751,9 +931,13 @@ func (l *unifiedSessionLease) Execute(ctx context.Context, turn *TurnContext) (*
 
 	if l.pool != nil && (l.daemon == nil || l.daemon.State() == StateClosed || l.daemon.IsDirty()) {
 		refreshed, err := l.pool.GetOrCreate(ctx, l.targetKey, l.sessionID, l.turnCount)
-		if err != nil { return nil, err }
+		if err != nil {
+			return nil, err
+		}
 		l.daemon = refreshed
-		if refreshed.SessionID() != "" { l.sessionID = refreshed.SessionID() }
+		if refreshed.SessionID() != "" {
+			l.sessionID = refreshed.SessionID()
+		}
 	}
 
 	handleErr := func(err error) {
@@ -770,8 +954,12 @@ func (l *unifiedSessionLease) Execute(ctx context.Context, turn *TurnContext) (*
 	}
 
 	res, waitErr := bufSink.Wait(ctx)
-	if l.daemon != nil && l.daemon.SessionID() != "" { l.sessionID = l.daemon.SessionID() }
-	if res != nil && res.ConversationID != "" { l.sessionID = res.ConversationID }
+	if l.daemon != nil && l.daemon.SessionID() != "" {
+		l.sessionID = l.daemon.SessionID()
+	}
+	if res != nil && res.ConversationID != "" {
+		l.sessionID = res.ConversationID
+	}
 	if waitErr != nil {
 		handleErr(waitErr)
 		return nil, waitErr
@@ -804,11 +992,15 @@ func (l *unifiedSessionLease) Release() error {
 		}
 		shouldRotate, reason := l.pool.ShouldRotate(l.daemon)
 		maxTurns := DefaultMaxSessionTurns
-		if l.pool != nil && l.pool.cfg.MaxSessionTurns > 0 { maxTurns = l.pool.cfg.MaxSessionTurns }
+		if l.pool != nil && l.pool.cfg.MaxSessionTurns > 0 {
+			maxTurns = l.pool.cfg.MaxSessionTurns
+		}
 		if !shouldRotate && l.turnCount >= maxTurns {
 			shouldRotate, reason = true, fmt.Sprintf("reached maximum turn threshold (%d)", maxTurns)
 		}
-		if !shouldRotate { return }
+		if !shouldRotate {
+			return
+		}
 
 		log.Printf("[UnifiedProcessPool] Session rotation triggered for %s (reason: %s)", l.targetKey, reason)
 		metrics.RecordSessionRotation("turn_end", "pool", reason)

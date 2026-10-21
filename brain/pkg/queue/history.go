@@ -51,17 +51,25 @@ func SanitizeHistoryContent(s string) string {
 // FormatChannelHistory filters out messages older than 4 hours, truncates oversized content to 1,000 runes,
 // sorts messages chronologically, and formats them inside a secure <CHANNEL_HISTORY> block.
 func FormatChannelHistory(messages []HistoryMessage, tzOpt ...string) string {
-	if len(messages) == 0 { return "" }
+	if len(messages) == 0 {
+		return ""
+	}
 	loc := time.UTC
 	if len(tzOpt) > 0 && strings.TrimSpace(tzOpt[0]) != "" {
-		if l, err := time.LoadLocation(strings.TrimSpace(tzOpt[0])); err == nil { loc = l }
+		if l, err := time.LoadLocation(strings.TrimSpace(tzOpt[0])); err == nil {
+			loc = l
+		}
 	}
 	cutoff := time.Now().UTC().Add(-maxHistoryAge)
 	filtered := make([]HistoryMessage, 0, len(messages))
 	for _, m := range messages {
-		if !m.CreatedAt.IsZero() && !m.CreatedAt.Before(cutoff) { filtered = append(filtered, m) }
+		if !m.CreatedAt.IsZero() && !m.CreatedAt.Before(cutoff) {
+			filtered = append(filtered, m)
+		}
 	}
-	if len(filtered) == 0 { return "" }
+	if len(filtered) == 0 {
+		return ""
+	}
 	sort.SliceStable(filtered, func(i, j int) bool { return filtered[i].CreatedAt.Before(filtered[j].CreatedAt) })
 
 	var sb strings.Builder
@@ -72,15 +80,25 @@ func FormatChannelHistory(messages []HistoryMessage, tzOpt ...string) string {
 			content = string(runes[:maxHistoryContentRunes]) + truncationMarker
 		}
 		author := strings.Map(func(r rune) rune {
-			if r == '\n' || r == '\r' || r == '[' || r == ']' { return -1 }
+			if r == '\n' || r == '\r' || r == '[' || r == ']' {
+				return -1
+			}
 			return r
 		}, strings.TrimSpace(m.AuthorName))
 		role := strings.TrimSpace(m.Role)
-		if role == "" { role = "User" }
-		if author == "" {
-			if role == "Assistant" { author = "Aerial" } else { author = "User" }
+		if role == "" {
+			role = "User"
 		}
-		if role == "User" && !strings.HasPrefix(author, "@") { author = "@" + author }
+		if author == "" {
+			if role == "Assistant" {
+				author = "Aerial"
+			} else {
+				author = "User"
+			}
+		}
+		if role == "User" && !strings.HasPrefix(author, "@") {
+			author = "@" + author
+		}
 		fmt.Fprintf(&sb, "- [%s] [%s (%s)]: %s\n", m.CreatedAt.In(loc).Format("2006-01-02 15:04:05 MST"), author, role, content)
 	}
 	sb.WriteString("</CHANNEL_HISTORY>")
@@ -99,8 +117,14 @@ func DefaultHistoryFetcher(dg *discordgo.Session, dbOrStore any) HistoryFetcherF
 		defer cancel()
 
 		before := beforeID
-		if !IsNumericSnowflake(before) { before = "" }
-		if limit <= 0 { limit = 10 } else if limit > 100 { limit = 100 }
+		if !IsNumericSnowflake(before) {
+			before = ""
+		}
+		if limit <= 0 {
+			limit = 10
+		} else if limit > 100 {
+			limit = 100
+		}
 
 		discordMsgs, err := dg.ChannelMessages(channelID, limit, before, "", "", discordgo.WithContext(fetchCtx))
 		if err != nil {
@@ -121,7 +145,9 @@ func convertDiscordMessagesToHistory(dg *discordgo.Session, discordMsgs []*disco
 	}
 	results := make([]HistoryMessage, 0, len(discordMsgs))
 	for _, dm := range discordMsgs {
-		if dm == nil { continue }
+		if dm == nil {
+			continue
+		}
 		role, authorName := "User", "User"
 		if dm.Author != nil {
 			authorName = dm.Author.Username
@@ -148,10 +174,14 @@ func convertDiscordMessagesToHistory(dg *discordgo.Session, discordMsgs []*disco
 
 // FilterAssistantMessages removes messages authored by Aerial or marked with Role "Assistant".
 func FilterAssistantMessages(msgs []HistoryMessage) []HistoryMessage {
-	if len(msgs) == 0 { return nil }
+	if len(msgs) == 0 {
+		return nil
+	}
 	filtered := make([]HistoryMessage, 0, len(msgs))
 	for _, m := range msgs {
-		if m.Role == "Assistant" || strings.EqualFold(m.AuthorName, "aerial") || strings.EqualFold(m.AuthorName, "assistant") { continue }
+		if m.Role == "Assistant" || strings.EqualFold(m.AuthorName, "aerial") || strings.EqualFold(m.AuthorName, "assistant") {
+			continue
+		}
 		filtered = append(filtered, m)
 	}
 	return filtered
@@ -160,23 +190,31 @@ func FilterAssistantMessages(msgs []HistoryMessage) []HistoryMessage {
 func fetchHistoryFromDB(dbOrStore any, channelID, beforeID string, limit int, ctxOpt ...context.Context) ([]HistoryMessage, error) {
 	start := time.Now()
 	store := resolveStore(dbOrStore)
-	if store == nil { return nil, nil }
+	if store == nil {
+		return nil, nil
+	}
 	ctx := context.Background()
-	if len(ctxOpt) > 0 && ctxOpt[0] != nil { ctx = ctxOpt[0] }
+	if len(ctxOpt) > 0 && ctxOpt[0] != nil {
+		ctx = ctxOpt[0]
+	}
 
 	var beforeTime time.Time
 	if beforeID != "" {
 		if beforeMsg, err := store.GetMessage(ctx, beforeID); err == nil && beforeMsg != nil && !beforeMsg.CreatedAt.IsZero() {
 			beforeTime = beforeMsg.CreatedAt
 		} else if IsNumericSnowflake(beforeID) {
-			if ts, err := discordgo.SnowflakeTimestamp(beforeID); err == nil { beforeTime = ts }
+			if ts, err := discordgo.SnowflakeTimestamp(beforeID); err == nil {
+				beforeTime = ts
+			}
 		}
 	}
 
 	fetchLimit := limit
 	if beforeID != "" {
 		fetchLimit = limit * 2
-		if fetchLimit < 50 { fetchLimit = 50 }
+		if fetchLimit < 50 {
+			fetchLimit = 50
+		}
 	}
 	msgs, err := store.GetRecentThreadMessages(ctx, channelID, fetchLimit)
 	if err != nil {
@@ -186,8 +224,12 @@ func fetchHistoryFromDB(dbOrStore any, channelID, beforeID string, limit int, ct
 
 	results := make([]HistoryMessage, 0, len(msgs))
 	for _, m := range msgs {
-		if beforeID != "" && (m.ID == beforeID || (!beforeTime.IsZero() && !m.CreatedAt.Before(beforeTime))) { continue }
-		if len(results) >= limit { break }
+		if beforeID != "" && (m.ID == beforeID || (!beforeTime.IsZero() && !m.CreatedAt.Before(beforeTime))) {
+			continue
+		}
+		if len(results) >= limit {
+			break
+		}
 		role := "User"
 		if m.AuthorID == "assistant" || strings.EqualFold(m.AuthorName, "aerial") || strings.EqualFold(m.AuthorName, "assistant") {
 			role = "Assistant"
@@ -204,7 +246,9 @@ func fetchHistoryFromDB(dbOrStore any, channelID, beforeID string, limit int, ct
 func FetchRecentThreadHistory(ctx context.Context, dg *discordgo.Session, dbOrStore any, threadID string, limit int) ([]HistoryMessage, error) {
 	start := time.Now()
 	store := resolveStore(dbOrStore)
-	if limit <= 0 || limit > 100 { limit = 100 }
+	if limit <= 0 || limit > 100 {
+		limit = 100
+	}
 
 	if msgs, err := fetchHistoryFromDB(store, threadID, "", limit, ctx); err == nil && len(msgs) > 0 {
 		return msgs, nil
@@ -231,20 +275,28 @@ type LLMFunc = runner.LLMFunc
 
 // SummarizeThreadHistoryWithGroup coordinates concurrent summarization requests for the same thread via singleflight.
 func SummarizeThreadHistoryWithGroup(ctx context.Context, sfg *singleflight.Group, llm LLMFunc, model, threadID string, msgs []HistoryMessage) (string, error) {
-	if len(msgs) == 0 { return "", fmt.Errorf("empty history") }
-	if sfg == nil { sfg = &threadSummaryGroup }
+	if len(msgs) == 0 {
+		return "", fmt.Errorf("empty history")
+	}
+	if sfg == nil {
+		sfg = &threadSummaryGroup
+	}
 
 	v, err, _ := sfg.Do(threadID, func() (interface{}, error) {
 		timeoutCtx, cancel := context.WithTimeout(ctx, DefaultThreadSummaryTimeout)
 		defer cancel()
 
 		transcript := FormatChannelHistory(msgs)
-		if transcript == "" { return "", fmt.Errorf("no valid history to summarize") }
+		if transcript == "" {
+			return "", fmt.Errorf("no valid history to summarize")
+		}
 
 		prompt := fmt.Sprintf("Synthesize the following Discord thread transcript into a concise memory block. Focus specifically on:\n1. Milestones & Deliverables: Key progress, completed tasks, and verified outcomes.\n2. User Directives & Constraints: Explicit instructions, preferences, and technical boundaries set by the user.\n3. Engineering Deltas & State Changes: Code modifications, refactors, architecture decisions, and config updates.\n4. Future Context & Action Items: Unresolved tasks, open questions, and context likely to be discussed in future turns.\n\nYou must output exactly a <THREAD_SUMMARY> block containing your summary. Do not include extra text outside the tags.\n\n<raw_thread_transcript>\n%s\n</raw_thread_transcript>", transcript)
 
 		result, err := llm(timeoutCtx, model, prompt)
-		if err != nil { return "", err }
+		if err != nil {
+			return "", err
+		}
 
 		startIdx, endIdx := strings.Index(result, "<THREAD_SUMMARY>"), strings.Index(result, "</THREAD_SUMMARY>")
 		if startIdx == -1 || endIdx == -1 || startIdx > endIdx {
@@ -252,15 +304,21 @@ func SummarizeThreadHistoryWithGroup(ctx context.Context, sfg *singleflight.Grou
 		}
 		return result[startIdx : endIdx+len("</THREAD_SUMMARY>")], nil
 	})
-	if err != nil { return "", err }
+	if err != nil {
+		return "", err
+	}
 	s, ok := v.(string)
-	if !ok { return "", fmt.Errorf("unexpected thread summary type: %T", v) }
+	if !ok {
+		return "", fmt.Errorf("unexpected thread summary type: %T", v)
+	}
 	return s, nil
 }
 
 // FormatPreviousSession formats an advisory <PREVIOUS_SESSION> block indicating that session rotation occurred.
 func FormatPreviousSession(sessionID string) string {
 	cleanID := strings.TrimSpace(sessionID)
-	if cleanID == "" || !reValidSessionID.MatchString(cleanID) { return "" }
+	if cleanID == "" || !reValidSessionID.MatchString(cleanID) {
+		return ""
+	}
 	return "<PREVIOUS_SESSION>\nNote: This thread was recently rotated to preserve token budget and optimize context window performance.\nPrior conversation context, active decisions, and recent channel history are summarized in thread summary and channel message history. Semantic facts and user preferences are preserved in long-term memory. Do not attempt to re-hydrate or inspect raw prior transcripts unless explicitly instructed by the user.\n</PREVIOUS_SESSION>"
 }

@@ -177,9 +177,11 @@ func (p *testRunnerAgentPool) Close() error {
 	return nil
 }
 
-var _ runner.AgentPool = (*testRunnerAgentPool)(nil)
-var _ runner.LeasedAgentPool = (*testRunnerAgentPool)(nil)
-var _ runner.SessionRotator = (*testRunnerAgentPool)(nil)
+var (
+	_ runner.AgentPool       = (*testRunnerAgentPool)(nil)
+	_ runner.LeasedAgentPool = (*testRunnerAgentPool)(nil)
+	_ runner.SessionRotator  = (*testRunnerAgentPool)(nil)
+)
 
 type testSessionLease struct {
 	pool        *testRunnerAgentPool
@@ -281,12 +283,14 @@ func (s *testTurnSinkWrapper) OnTurnStarted() {
 	}
 	s.buf.OnTurnStarted()
 }
+
 func (s *testTurnSinkWrapper) OnThinking() {
 	if s.inner != nil {
 		s.inner.OnThinking()
 	}
 	s.buf.OnThinking()
 }
+
 func (s *testTurnSinkWrapper) OnStepStarted(idx int) {
 	if s.inner != nil {
 		if sa, ok := s.inner.(runner.StepAwareSink); ok {
@@ -295,36 +299,42 @@ func (s *testTurnSinkWrapper) OnStepStarted(idx int) {
 	}
 	s.buf.OnStepStarted(idx)
 }
+
 func (s *testTurnSinkWrapper) OnToolCall(t, c string) {
 	if s.inner != nil {
 		s.inner.OnToolCall(t, c)
 	}
 	s.buf.OnToolCall(t, c)
 }
+
 func (s *testTurnSinkWrapper) OnToolCompleted(t, m string, d time.Duration, st string) {
 	if s.inner != nil {
 		s.inner.OnToolCompleted(t, m, d, st)
 	}
 	s.buf.OnToolCompleted(t, m, d, st)
 }
+
 func (s *testTurnSinkWrapper) OnSkillActivated(sk, src string) {
 	if s.inner != nil {
 		s.inner.OnSkillActivated(sk, src)
 	}
 	s.buf.OnSkillActivated(sk, src)
 }
+
 func (s *testTurnSinkWrapper) OnTextDelta(d string) {
 	if s.inner != nil {
 		s.inner.OnTextDelta(d)
 	}
 	s.buf.OnTextDelta(d)
 }
+
 func (s *testTurnSinkWrapper) OnResult(res *runner.TurnResult) {
 	if s.inner != nil {
 		s.inner.OnResult(res)
 	}
 	s.buf.OnResult(res)
 }
+
 func (s *testTurnSinkWrapper) OnError(err error) {
 	if s.inner != nil {
 		s.inner.OnError(err)

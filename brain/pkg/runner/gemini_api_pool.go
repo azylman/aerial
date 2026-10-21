@@ -36,18 +36,28 @@ type (
 
 func cleanParameters(schema map[string]interface{}) map[string]interface{} {
 	res := cleanSchemaNode(schema)
-	if res == nil { res = map[string]interface{}{} }
-	if t, ok := res["type"].(string); !ok || t == "" { res["type"] = "OBJECT" }
-	if res["type"] == "OBJECT" && res["properties"] == nil { res["properties"] = map[string]interface{}{} }
+	if res == nil {
+		res = map[string]interface{}{}
+	}
+	if t, ok := res["type"].(string); !ok || t == "" {
+		res["type"] = "OBJECT"
+	}
+	if res["type"] == "OBJECT" && res["properties"] == nil {
+		res["properties"] = map[string]interface{}{}
+	}
 	return res
 }
 
 func normalizeSchemaType(t string) string {
 	switch upper := strings.ToUpper(t); upper {
-	case "INT": return "INTEGER"
-	case "BOOL": return "BOOLEAN"
-	case "FLOAT", "DOUBLE": return "NUMBER"
-	default: return upper
+	case "INT":
+		return "INTEGER"
+	case "BOOL":
+		return "BOOLEAN"
+	case "FLOAT", "DOUBLE":
+		return "NUMBER"
+	default:
+		return upper
 	}
 }
 
@@ -167,7 +177,11 @@ func cleanSchemaNode(schema map[string]interface{}) map[string]interface{} {
 	if propsMap, ok := cp["properties"].(map[string]interface{}); ok {
 		cleanedProps := make(map[string]interface{}, len(propsMap))
 		for k, v := range propsMap {
-			if m, ok := v.(map[string]interface{}); ok { cleanedProps[k] = cleanSchemaNode(m) } else { cleanedProps[k] = v }
+			if m, ok := v.(map[string]interface{}); ok {
+				cleanedProps[k] = cleanSchemaNode(m)
+			} else {
+				cleanedProps[k] = v
+			}
 		}
 		cp["properties"] = cleanedProps
 	}
@@ -186,7 +200,9 @@ func cleanSchemaNode(schema map[string]interface{}) map[string]interface{} {
 	if t, ok := cp["type"].(string); (!ok || t == "") && cp["anyOf"] == nil && cp["oneOf"] == nil && cp["allOf"] == nil {
 		cp["type"] = "OBJECT"
 	}
-	if cp["type"] == "OBJECT" && cp["properties"] == nil { cp["properties"] = map[string]interface{}{} }
+	if cp["type"] == "OBJECT" && cp["properties"] == nil {
+		cp["properties"] = map[string]interface{}{}
+	}
 	return cp
 }
 
@@ -201,9 +217,13 @@ func NewDefaultMCPDispatcher(servers []MCPServerConfig, client *http.Client, all
 }
 
 func (d *DefaultMCPDispatcher) ListDeclarations(ctx context.Context) ([]geminiFunctionDeclaration, error) {
-	if d == nil || d.d == nil { return nil, nil }
+	if d == nil || d.d == nil {
+		return nil, nil
+	}
 	tools, err := d.d.ListTools(ctx)
-	if err != nil || len(tools) == 0 { return nil, err }
+	if err != nil || len(tools) == 0 {
+		return nil, err
+	}
 	decls := make([]geminiFunctionDeclaration, len(tools))
 	for i, t := range tools {
 		decls[i] = geminiFunctionDeclaration{Name: t.Name, Description: t.Description, Parameters: cleanParameters(t.InputSchema)}
@@ -212,7 +232,9 @@ func (d *DefaultMCPDispatcher) ListDeclarations(ctx context.Context) ([]geminiFu
 }
 
 func (d *DefaultMCPDispatcher) Execute(ctx context.Context, name string, args map[string]interface{}) (string, error) {
-	if d == nil || d.d == nil { return "", errors.New("mcp dispatcher is nil") }
+	if d == nil || d.d == nil {
+		return "", errors.New("mcp dispatcher is nil")
+	}
 	res, err := d.d.Execute(ctx, name, args)
 	if err != nil && strings.Contains(err.Error(), "is not in the allowed tools list") {
 		return "", fmt.Errorf("tool %q is not in the allowed voice tools list", name)
@@ -221,7 +243,9 @@ func (d *DefaultMCPDispatcher) Execute(ctx context.Context, name string, args ma
 }
 
 func (d *DefaultMCPDispatcher) Prime(ctx context.Context) error {
-	if d == nil || d.d == nil { return nil }
+	if d == nil || d.d == nil {
+		return nil
+	}
 	return d.d.Prime(ctx)
 }
 
@@ -267,8 +291,12 @@ type (
 	geminiTool struct {
 		FunctionDeclarations []geminiFunctionDeclaration `json:"functionDeclarations,omitempty"`
 	}
-	geminiThinkingConfig struct { ThinkingBudget int `json:"thinkingBudget"` }
-	geminiGenerationConfig struct { ThinkingConfig *geminiThinkingConfig `json:"thinkingConfig,omitempty"` }
+	geminiThinkingConfig struct {
+		ThinkingBudget int `json:"thinkingBudget"`
+	}
+	geminiGenerationConfig struct {
+		ThinkingConfig *geminiThinkingConfig `json:"thinkingConfig,omitempty"`
+	}
 	geminiStreamRequest struct {
 		Contents          []geminiContent         `json:"contents"`
 		Tools             []geminiTool            `json:"tools,omitempty"`
@@ -334,7 +362,9 @@ func NewGeminiAPIPool(cfg GeminiAPIPoolConfig) *GeminiAPIPool {
 			var parts []string
 			for _, e := range entries {
 				if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
-					if c, rErr := os.ReadFile(filepath.Join(rulesDir, e.Name())); rErr == nil && len(c) > 0 { parts = append(parts, string(c)) }
+					if c, rErr := os.ReadFile(filepath.Join(rulesDir, e.Name())); rErr == nil && len(c) > 0 {
+						parts = append(parts, string(c))
+					}
 				}
 			}
 			cfg.SystemPrompt = strings.Join(parts, "\n\n")
@@ -348,11 +378,16 @@ func NewGeminiAPIPool(cfg GeminiAPIPoolConfig) *GeminiAPIPool {
 }
 
 func (p *GeminiAPIPool) Model() string {
-	if p == nil { return "" }
+	if p == nil {
+		return ""
+	}
 	return p.cfg.Model
 }
+
 func (p *GeminiAPIPool) APIKey() string {
-	if p == nil { return "" }
+	if p == nil {
+		return ""
+	}
 	return p.cfg.APIKey
 }
 
@@ -401,28 +436,36 @@ func (p *GeminiAPIPool) Initialize(ctx context.Context) error {
 }
 
 func (p *GeminiAPIPool) PrewarmedTargets() []string {
-	if p == nil { return nil }
+	if p == nil {
+		return nil
+	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return append([]string(nil), p.cfg.PrewarmedTargets...)
 }
 
 func (p *GeminiAPIPool) UpdatePrewarmedTargets(targets []string) {
-	if p == nil { return }
+	if p == nil {
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.cfg.PrewarmedTargets = append([]string(nil), targets...)
 }
 
 func (p *GeminiAPIPool) MarkDirty() {
-	if p == nil { return }
+	if p == nil {
+		return
+	}
 	p.mu.Lock()
 	p.sessions = make(map[string]*GeminiAPISession)
 	p.mu.Unlock()
 }
 
 func (p *GeminiAPIPool) Close() error {
-	if p == nil { return nil }
+	if p == nil {
+		return nil
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.closed, p.sessions = true, make(map[string]*GeminiAPISession)
@@ -441,7 +484,9 @@ type GeminiAPISession struct {
 var _ AgentSession = (*GeminiAPISession)(nil)
 
 func (s *GeminiAPISession) SessionID() string {
-	if s.sessionID != "" { return s.sessionID }
+	if s.sessionID != "" {
+		return s.sessionID
+	}
 	return s.targetKey
 }
 
@@ -462,41 +507,59 @@ func (s *GeminiAPISession) transcriptPath() string {
 
 func (s *GeminiAPISession) hydrateHistory() {
 	p := s.transcriptPath()
-	if p == "" { return }
+	if p == "" {
+		return
+	}
 	data, err := os.ReadFile(p)
-	if err != nil || len(data) == 0 { return }
+	if err != nil || len(data) == 0 {
+		return
+	}
 	var loaded []geminiContent
 	for _, l := range strings.Split(strings.TrimSpace(string(data)), "\n") {
 		if trimmed := strings.TrimSpace(l); trimmed != "" {
 			var entry struct{ Type, Content string }
 			if json.Unmarshal([]byte(trimmed), &entry) == nil && entry.Content != "" {
 				role := ""
-				if entry.Type == "USER_INPUT" { role = "user" } else if entry.Type == "PLANNER_RESPONSE" { role = "model" }
-				if role != "" { loaded = append(loaded, geminiContent{Role: role, Parts: []geminiPart{{Text: entry.Content}}}) }
+				if entry.Type == "USER_INPUT" {
+					role = "user"
+				} else if entry.Type == "PLANNER_RESPONSE" {
+					role = "model"
+				}
+				if role != "" {
+					loaded = append(loaded, geminiContent{Role: role, Parts: []geminiPart{{Text: entry.Content}}})
+				}
 			}
 		}
 	}
 	if len(loaded) > 0 {
 		maxMessages := 20
-		if s.pool != nil && s.pool.cfg.MaxHistoryTurns > 0 { maxMessages = s.pool.cfg.MaxHistoryTurns * 2 }
-		if len(loaded) > maxMessages { loaded = loaded[len(loaded)-maxMessages:] }
+		if s.pool != nil && s.pool.cfg.MaxHistoryTurns > 0 {
+			maxMessages = s.pool.cfg.MaxHistoryTurns * 2
+		}
+		if len(loaded) > maxMessages {
+			loaded = loaded[len(loaded)-maxMessages:]
+		}
 		s.history = loaded
 	}
 }
 
 func (s *GeminiAPISession) appendTranscript(userPrompt, modelResponse string) {
 	p := s.transcriptPath()
-	if p == "" { return }
+	if p == "" {
+		return
+	}
 	dir := filepath.Dir(p)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		log.Printf("[GeminiAPISession] Warning creating transcript directory %s: %v", dir, err)
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	u, err1 := json.Marshal(map[string]interface{}{"source": "USER_EXPLICIT", "type": "USER_INPUT", "content": userPrompt, "created_at": now})
 	m, err2 := json.Marshal(map[string]interface{}{"source": "MODEL", "type": "PLANNER_RESPONSE", "content": modelResponse, "created_at": now})
-	if err1 != nil || err2 != nil { return }
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err1 != nil || err2 != nil {
+		return
+	}
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		log.Printf("[GeminiAPISession] Warning opening transcript file %s: %v", p, err)
 		return
@@ -513,8 +576,12 @@ func (s *GeminiAPISession) appendTranscript(userPrompt, modelResponse string) {
 
 func (s *GeminiAPISession) failTurn(turn *TurnContext, err error) error {
 	sanitized := err
-	if s.pool != nil { sanitized = s.pool.sanitizeError(err) }
-	if turn != nil && turn.Sink != nil { turn.Sink.OnError(sanitized) }
+	if s.pool != nil {
+		sanitized = s.pool.sanitizeError(err)
+	}
+	if turn != nil && turn.Sink != nil {
+		turn.Sink.OnError(sanitized)
+	}
 	return sanitized
 }
 
@@ -582,15 +649,25 @@ func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 		s.pool.mu.RLock()
 		closed := s.pool.closed
 		s.pool.mu.RUnlock()
-		if closed { return s.failTurn(turn, errors.New("gemini api pool is closed")) }
+		if closed {
+			return s.failTurn(turn, errors.New("gemini api pool is closed"))
+		}
 	}
-	if strings.TrimSpace(prompt) == "" { return s.failTurn(turn, errors.New("empty prompt")) }
+	if strings.TrimSpace(prompt) == "" {
+		return s.failTurn(turn, errors.New("empty prompt"))
+	}
 	ctx := context.Background()
-	if turn != nil && turn.Ctx != nil { ctx = turn.Ctx }
-	if err := ctx.Err(); err != nil { return s.failTurn(turn, err) }
+	if turn != nil && turn.Ctx != nil {
+		ctx = turn.Ctx
+	}
+	if err := ctx.Err(); err != nil {
+		return s.failTurn(turn, err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.history) == 0 { s.hydrateHistory() }
+	if len(s.history) == 0 {
+		s.hydrateHistory()
+	}
 	var tools []geminiTool
 	var dispatcher MCPDispatcher
 	if s.pool != nil && s.pool.cfg.MCPDispatcher != nil {
@@ -603,7 +680,9 @@ func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 	}
 	var ambRetriever AmbientContextRetriever
 	var memRetriever MemoryRetriever
-	if s.pool != nil { ambRetriever, memRetriever = s.pool.cfg.AmbientContextRetriever, s.pool.cfg.MemoryRetriever }
+	if s.pool != nil {
+		ambRetriever, memRetriever = s.pool.cfg.AmbientContextRetriever, s.pool.cfg.MemoryRetriever
+	}
 	payloadPrompt := injectRetrievedContext(ctx, prompt, ambRetriever, 300*time.Millisecond, memRetriever, 1500*time.Millisecond, "[GeminiAPISession]")
 
 	workingContents := append(append([]geminiContent(nil), s.history...), geminiContent{
@@ -617,12 +696,16 @@ func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 	}
 	baseURL, apiKey, model := "https://generativelanguage.googleapis.com", "", ""
 	if s.pool != nil {
-		if s.pool.cfg.BaseURL != "" { baseURL = strings.TrimRight(s.pool.cfg.BaseURL, "/") }
+		if s.pool.cfg.BaseURL != "" {
+			baseURL = strings.TrimRight(s.pool.cfg.BaseURL, "/")
+		}
 		apiKey, model = s.pool.cfg.APIKey, s.pool.cfg.Model
 	}
 	reqURL := fmt.Sprintf("%s/v1beta/models/%s:streamGenerateContent?key=%s&alt=sse", baseURL, model, url.QueryEscape(apiKey))
 	client := http.DefaultClient
-	if s.pool != nil && s.pool.cfg.HTTPClient != nil { client = s.pool.cfg.HTTPClient }
+	if s.pool != nil && s.pool.cfg.HTTPClient != nil {
+		client = s.pool.cfg.HTTPClient
+	}
 
 	const maxToolIterations = 5
 	var fullText strings.Builder
@@ -656,9 +739,13 @@ func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 			body, rErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			_ = resp.Body.Close()
 			targetModel := "default"
-			if s.pool != nil && s.pool.cfg.Model != "" { targetModel = s.pool.cfg.Model }
+			if s.pool != nil && s.pool.cfg.Model != "" {
+				targetModel = s.pool.cfg.Model
+			}
 			errType := "capacity_throttle"
-			if rErr == nil && IsQuotaPause(string(body), "") { errType = "quota_paused" }
+			if rErr == nil && IsQuotaPause(string(body), "") {
+				errType = "quota_paused"
+			}
 			metrics.RecordRunnerError(errType, targetModel)
 			return s.failTurn(turn, errors.New("rate limit exceeded: please try again shortly"))
 		}
@@ -724,13 +811,17 @@ func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 				execErr = errors.New("no mcp dispatcher configured")
 			}
 			status := "ok"
-			if execErr != nil { status = "error" }
+			if execErr != nil {
+				status = "error"
+			}
 			canonicalTool, mcpServer := ExtractMCPToolInfo(fc.Name, fc.Args)
 			if turn != nil && turn.Sink != nil {
 				turn.Sink.OnToolCompleted(canonicalTool, mcpServer, time.Since(start), status)
 			}
 			respMap := map[string]interface{}{"output": toolOutput}
-			if execErr != nil { respMap = map[string]interface{}{"error": execErr.Error()} }
+			if execErr != nil {
+				respMap = map[string]interface{}{"error": execErr.Error()}
+			}
 			funcParts = append(funcParts, geminiPart{FunctionResponse: &geminiFunctionResp{Name: fc.Name, Response: respMap}})
 		}
 		workingContents = append(workingContents,
@@ -769,30 +860,45 @@ func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 		)
 	}
 	maxTurns := 10
-	if s.pool != nil && s.pool.cfg.MaxHistoryTurns > 0 { maxTurns = s.pool.cfg.MaxHistoryTurns }
+	if s.pool != nil && s.pool.cfg.MaxHistoryTurns > 0 {
+		maxTurns = s.pool.cfg.MaxHistoryTurns
+	}
 	maxMessages := maxTurns * 2
-	if len(s.history) > maxMessages { s.history = s.history[len(s.history)-maxMessages:] }
+	if len(s.history) > maxMessages {
+		s.history = s.history[len(s.history)-maxMessages:]
+	}
 	s.appendTranscript(prompt, resText)
-	if turn != nil && turn.Sink != nil { turn.Sink.OnResult(&TurnResult{Response: resText, Usage: totalUsage}) }
+	if turn != nil && turn.Sink != nil {
+		turn.Sink.OnResult(&TurnResult{Response: resText, Usage: totalUsage})
+	}
 	return nil
 }
 
 func (p *GeminiAPIPool) acquireTargetLock(ctx context.Context, targetKey string) (*targetLock, error) {
 	return acquirePoolTargetLock(ctx, &p.targetMu, &p.targetLocks, targetKey, p.cfg.TargetLockTimeout)
 }
+
 func (p *GeminiAPIPool) releaseTargetLock(targetKey string, tl *targetLock, held bool) {
 	releasePoolTargetLock(&p.targetMu, p.targetLocks, targetKey, tl, held)
 }
 
 func (p *GeminiAPIPool) AcquireLease(ctx context.Context, targetKey string) (SessionLease, error) {
-	if p == nil { return nil, errors.New("gemini api pool is uninitialized") }
+	if p == nil {
+		return nil, errors.New("gemini api pool is uninitialized")
+	}
 	trimmedKey := strings.TrimSpace(targetKey)
-	if trimmedKey == "" { return nil, errors.New("targetKey cannot be empty") }
+	if trimmedKey == "" {
+		return nil, errors.New("targetKey cannot be empty")
+	}
 	tl, err := p.acquireTargetLock(ctx, trimmedKey)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	var rec SessionRecord
 	if p.cfg.GetSessionRecord != nil {
-		if r, rErr := p.cfg.GetSessionRecord(ctx, trimmedKey); rErr == nil { rec = r }
+		if r, rErr := p.cfg.GetSessionRecord(ctx, trimmedKey); rErr == nil {
+			rec = r
+		}
 	}
 	sess, sErr := p.GetOrCreateSession(ctx, trimmedKey, rec.ActiveSessionID)
 	if sErr != nil {
@@ -805,9 +911,13 @@ func (p *GeminiAPIPool) AcquireLease(ctx context.Context, targetKey string) (Ses
 		return nil, fmt.Errorf("unexpected session type for %s", trimmedKey)
 	}
 	isCold, turnCount := false, rec.TurnCount
-	if rec.TurnCount <= 1 || rec.ActiveSessionID == "" { isCold, turnCount = true, 0 }
+	if rec.TurnCount <= 1 || rec.ActiveSessionID == "" {
+		isCold, turnCount = true, 0
+	}
 	sessID := gSess.SessionID()
-	if sessID == "" { sessID = rec.ActiveSessionID }
+	if sessID == "" {
+		sessID = rec.ActiveSessionID
+	}
 	return &geminiSessionLease{
 		pool: p, session: gSess, targetKey: trimmedKey, sessionID: sessID,
 		prevSessID: rec.PreviousSessionID, isCold: isCold, turnCount: turnCount, lock: tl,
@@ -818,10 +928,10 @@ type geminiSessionLease struct {
 	pool                             *GeminiAPIPool
 	session                          *GeminiAPISession
 	targetKey, sessionID, prevSessID string
-	isCold, cancelRotation          bool
-	turnCount                       int
-	lock                            *targetLock
-	releaseOnce                     sync.Once
+	isCold, cancelRotation           bool
+	turnCount                        int
+	lock                             *targetLock
+	releaseOnce                      sync.Once
 }
 
 var _ SessionLease = (*geminiSessionLease)(nil)
@@ -838,13 +948,19 @@ func (l *geminiSessionLease) MarkDirty() {
 		delete(l.pool.sessions, l.targetKey)
 		l.pool.mu.Unlock()
 	}
-	if l != nil { l.session = nil }
+	if l != nil {
+		l.session = nil
+	}
 }
 
 func (l *geminiSessionLease) Execute(ctx context.Context, turn *TurnContext) (*TurnResult, error) {
-	if turn == nil { return nil, errors.New("turn context cannot be nil") }
+	if turn == nil {
+		return nil, errors.New("turn context cannot be nil")
+	}
 	l.cancelRotation = false
-	if turn.Ctx == nil { turn.Ctx = ctx }
+	if turn.Ctx == nil {
+		turn.Ctx = ctx
+	}
 	compiledPrompt := compileLeasePrompt(turn, l.isCold, l.prevSessID)
 	bufSink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
 	origSink := turn.Sink
@@ -852,12 +968,16 @@ func (l *geminiSessionLease) Execute(ctx context.Context, turn *TurnContext) (*T
 	defer func() { turn.Sink = origSink }()
 
 	if err := l.session.Send(compiledPrompt, turn); err != nil {
-		if IsQuotaPause(err.Error(), "") || IsCapacityBlip(err.Error(), "") { l.cancelRotation = true }
+		if IsQuotaPause(err.Error(), "") || IsCapacityBlip(err.Error(), "") {
+			l.cancelRotation = true
+		}
 		return nil, err
 	}
 	res, waitErr := bufSink.Wait(ctx)
 	if waitErr != nil {
-		if IsQuotaPause(waitErr.Error(), "") || IsCapacityBlip(waitErr.Error(), "") { l.cancelRotation = true }
+		if IsQuotaPause(waitErr.Error(), "") || IsCapacityBlip(waitErr.Error(), "") {
+			l.cancelRotation = true
+		}
 		return nil, waitErr
 	}
 	if res != nil && !IsSubstantiveResponse(res.Response) && (IsQuotaPause(res.Stderr, "") || IsCapacityBlip(res.Stderr, "")) {

@@ -72,7 +72,6 @@ func GetSessionLastActivity(dbOrStore any, threadID string, mgr ...*session.Mana
 		return time.Time{}, true, nil
 	}
 	stats, err := store.GetSessionActivityStats(ctx, threadID)
-
 	if err != nil {
 		return time.Time{}, false, fmt.Errorf("querying session activity for thread %s: %w", threadID, err)
 	}

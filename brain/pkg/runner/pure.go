@@ -35,9 +35,17 @@ func filterEnvKeys(env []string, excluded ...string) []string {
 	return filtered
 }
 
-func FilterAgyBaseEnv(env []string) []string         { return filterEnvKeys(env, "GEMINI_API_KEY", "ANTIGRAVITY_API_KEY", "GOOGLE_GENAI_API_KEY") }
-func filterHomeEnv(env []string) []string         { return filterEnvKeys(env, "HOME", "USERPROFILE", "GEMINI_CLI_HOME") }
-func filterVanadisChunkEnv(env []string) []string { return filterEnvKeys(env, "AERIAL_VANADIS_CHUNK_ID", "VANADIS_CHUNK_ID") }
+func FilterAgyBaseEnv(env []string) []string {
+	return filterEnvKeys(env, "GEMINI_API_KEY", "ANTIGRAVITY_API_KEY", "GOOGLE_GENAI_API_KEY")
+}
+
+func filterHomeEnv(env []string) []string {
+	return filterEnvKeys(env, "HOME", "USERPROFILE", "GEMINI_CLI_HOME")
+}
+
+func filterVanadisChunkEnv(env []string) []string {
+	return filterEnvKeys(env, "AERIAL_VANADIS_CHUNK_ID", "VANADIS_CHUNK_ID")
+}
 
 // BuildAgyEnv constructs the process environment slice for agy execution.
 func BuildAgyEnv(input AgyEnvInput) []string {

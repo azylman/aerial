@@ -53,7 +53,9 @@ func TestFormatChannelHistory(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
 	locLA, err := time.LoadLocation("America/Los_Angeles")
-	if err != nil { t.Fatalf("failed to load America/Los_Angeles: %v", err) }
+	if err != nil {
+		t.Fatalf("failed to load America/Los_Angeles: %v", err)
+	}
 
 	tests := []struct {
 		name         string
@@ -78,23 +80,23 @@ func TestFormatChannelHistory(t *testing.T) {
 			wantExcludes: []string{"Ancient message from 5 hours ago"},
 		},
 		{
-			name: "truncation cap at 1000 characters",
-			msgs: []HistoryMessage{{ID: "msg-long", AuthorName: "Spammer", Role: "User", Content: strings.Repeat("A", 2000), CreatedAt: now.Add(-10 * time.Minute)}},
+			name:         "truncation cap at 1000 characters",
+			msgs:         []HistoryMessage{{ID: "msg-long", AuthorName: "Spammer", Role: "User", Content: strings.Repeat("A", 2000), CreatedAt: now.Add(-10 * time.Minute)}},
 			wantContains: []string{strings.Repeat("A", 1000) + "... [truncated]"}, wantExcludes: []string{strings.Repeat("A", 1001)},
 		},
 		{
-			name: "author role formatting and ordering",
-			msgs: []HistoryMessage{{ID: "msg-1", AuthorName: "Alice", Role: "User", Content: "First msg", CreatedAt: now.Add(-3 * time.Hour)}, {ID: "msg-2", AuthorName: "Aerial", Role: "Assistant", Content: "Second msg", CreatedAt: now.Add(-2 * time.Hour)}},
+			name:       "author role formatting and ordering",
+			msgs:       []HistoryMessage{{ID: "msg-1", AuthorName: "Alice", Role: "User", Content: "First msg", CreatedAt: now.Add(-3 * time.Hour)}, {ID: "msg-2", AuthorName: "Aerial", Role: "Assistant", Content: "Second msg", CreatedAt: now.Add(-2 * time.Hour)}},
 			wantPrefix: "<CHANNEL_HISTORY>\n", wantSuffix: "</CHANNEL_HISTORY>", wantContains: []string{"[@Alice (User)]", "[Aerial (Assistant)]", "First msg", "Second msg"},
 		},
 		{
-			name: "explicit timezone formatting",
-			msgs: []HistoryMessage{{ID: "msg-tz", AuthorName: "Alice", Role: "User", Content: "Hello tz", CreatedAt: now.Add(-10 * time.Minute)}},
+			name:  "explicit timezone formatting",
+			msgs:  []HistoryMessage{{ID: "msg-tz", AuthorName: "Alice", Role: "User", Content: "Hello tz", CreatedAt: now.Add(-10 * time.Minute)}},
 			tzOpt: []string{"America/Los_Angeles"}, wantContains: []string{now.Add(-10 * time.Minute).In(locLA).Format("2006-01-02 15:04:05 MST")},
 		},
 		{
-			name: "invalid timezone fallback to UTC",
-			msgs: []HistoryMessage{{ID: "msg-inv", AuthorName: "Bob", Role: "User", Content: "Hello inv", CreatedAt: now.Add(-5 * time.Minute)}},
+			name:  "invalid timezone fallback to UTC",
+			msgs:  []HistoryMessage{{ID: "msg-inv", AuthorName: "Bob", Role: "User", Content: "Hello inv", CreatedAt: now.Add(-5 * time.Minute)}},
 			tzOpt: []string{"Invalid/Zone"}, wantContains: []string{now.Add(-5 * time.Minute).UTC().Format("2006-01-02 15:04:05 UTC")},
 		},
 	}
@@ -103,14 +105,24 @@ func TestFormatChannelHistory(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got := FormatChannelHistory(tc.msgs, tc.tzOpt...)
-			if len(tc.wantContains) == 0 && got != "" { t.Errorf("FormatChannelHistory() = %q, want empty", got) }
-			if tc.wantPrefix != "" && !strings.HasPrefix(got, tc.wantPrefix) { t.Errorf("expected prefix %q, got:\n%s", tc.wantPrefix, got) }
-			if tc.wantSuffix != "" && !strings.HasSuffix(got, tc.wantSuffix) { t.Errorf("expected suffix %q, got:\n%s", tc.wantSuffix, got) }
+			if len(tc.wantContains) == 0 && got != "" {
+				t.Errorf("FormatChannelHistory() = %q, want empty", got)
+			}
+			if tc.wantPrefix != "" && !strings.HasPrefix(got, tc.wantPrefix) {
+				t.Errorf("expected prefix %q, got:\n%s", tc.wantPrefix, got)
+			}
+			if tc.wantSuffix != "" && !strings.HasSuffix(got, tc.wantSuffix) {
+				t.Errorf("expected suffix %q, got:\n%s", tc.wantSuffix, got)
+			}
 			for _, sub := range tc.wantContains {
-				if !strings.Contains(got, sub) { t.Errorf("expected history to contain %q, got:\n%s", sub, got) }
+				if !strings.Contains(got, sub) {
+					t.Errorf("expected history to contain %q, got:\n%s", sub, got)
+				}
 			}
 			for _, sub := range tc.wantExcludes {
-				if strings.Contains(got, sub) { t.Errorf("expected history to exclude %q, got:\n%s", sub, got) }
+				if strings.Contains(got, sub) {
+					t.Errorf("expected history to exclude %q, got:\n%s", sub, got)
+				}
 			}
 		})
 	}
@@ -139,11 +151,11 @@ func TestFetchDiscordChannelHistory_Table(t *testing.T) {
 	})
 
 	tests := []struct {
-		name      string
-		sess      *discordgo.Session
-		store     any
-		channelID string
-		limit, wantCount int
+		name                string
+		sess                *discordgo.Session
+		store               any
+		channelID           string
+		limit, wantCount    int
 		wantFirst, wantRole string
 	}{
 		{"non-snowflake fallback to db", nil, store, "chan-test", 10, 2, "Alice", "User"},
@@ -155,8 +167,12 @@ func TestFetchDiscordChannelHistory_Table(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			history, err := DefaultHistoryFetcher(tc.sess, tc.store)(context.Background(), tc.channelID, "", tc.limit)
-			if err != nil { t.Fatalf("unexpected fetcher error: %v", err) }
-			if len(history) != tc.wantCount { t.Fatalf("got %d messages, want %d", len(history), tc.wantCount) }
+			if err != nil {
+				t.Fatalf("unexpected fetcher error: %v", err)
+			}
+			if len(history) != tc.wantCount {
+				t.Fatalf("got %d messages, want %d", len(history), tc.wantCount)
+			}
 			if history[0].AuthorName != tc.wantFirst || history[0].Role != tc.wantRole {
 				t.Errorf("got first message %+v, want Author=%s Role=%s", history[0], tc.wantFirst, tc.wantRole)
 			}
@@ -186,11 +202,11 @@ func TestFetchRecentThreadHistory_Table(t *testing.T) {
 	})
 
 	tests := []struct {
-		name      string
-		sess      *discordgo.Session
-		threadID  string
+		name             string
+		sess             *discordgo.Session
+		threadID         string
 		limit, wantCount int
-		wantErr   bool
+		wantErr          bool
 	}{
 		{"DB first success", nil, "111111111111111111", 10, 1, false},
 		{"Fallback unavailable empty thread", dg, "", 10, 0, true},
@@ -204,11 +220,17 @@ func TestFetchRecentThreadHistory_Table(t *testing.T) {
 			t.Parallel()
 			history, err := FetchRecentThreadHistory(context.Background(), tc.sess, store, tc.threadID, tc.limit)
 			if tc.wantErr {
-				if err == nil { t.Fatalf("expected error, got nil") }
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
 				return
 			}
-			if err != nil { t.Fatalf("unexpected error: %v", err) }
-			if len(history) != tc.wantCount { t.Errorf("got %d messages, want %d", len(history), tc.wantCount) }
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(history) != tc.wantCount {
+				t.Errorf("got %d messages, want %d", len(history), tc.wantCount)
+			}
 		})
 	}
 }
@@ -245,8 +267,12 @@ func TestSummarizeThreadHistory_Table(t *testing.T) {
 				}
 				return
 			}
-			if err != nil { t.Fatalf("unexpected error: %v", err) }
-			if !strings.Contains(summary, tc.wantSub) { t.Errorf("expected summary containing %q, got: %s", tc.wantSub, summary) }
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !strings.Contains(summary, tc.wantSub) {
+				t.Errorf("expected summary containing %q, got: %s", tc.wantSub, summary)
+			}
 		})
 	}
 }
@@ -264,7 +290,9 @@ func waitForSingleflightFollowers(t *testing.T, callerSubstr string, followers i
 				waiting++
 			}
 		}
-		if waiting >= followers { return }
+		if waiting >= followers {
+			return
+		}
 		runtime.Gosched()
 	}
 	t.Fatalf("timed out waiting for %d singleflight followers in %s", followers, callerSubstr)
@@ -303,12 +331,16 @@ func TestSummarizeThreadHistory_SingleflightBarrier(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		select {
 		case res := <-done:
-			if res != "<THREAD_SUMMARY>deduplicated summary</THREAD_SUMMARY>" { t.Errorf("unexpected summary: %q", res) }
+			if res != "<THREAD_SUMMARY>deduplicated summary</THREAD_SUMMARY>" {
+				t.Errorf("unexpected summary: %q", res)
+			}
 		case <-time.After(time.Second):
 			t.Fatal("timed out waiting for singleflight summary")
 		}
 	}
-	if calls.Load() != 1 { t.Errorf("expected 1 call to LLM, got %d", calls.Load()) }
+	if calls.Load() != 1 {
+		t.Errorf("expected 1 call to LLM, got %d", calls.Load())
+	}
 }
 
 func TestFormatPreviousSession(t *testing.T) {
@@ -328,12 +360,18 @@ func TestFormatPreviousSession(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got := FormatPreviousSession(tc.sessionID)
-			if len(tc.wantContains) == 0 && got != "" { t.Errorf("FormatPreviousSession(%q) = %q, want empty", tc.sessionID, got) }
+			if len(tc.wantContains) == 0 && got != "" {
+				t.Errorf("FormatPreviousSession(%q) = %q, want empty", tc.sessionID, got)
+			}
 			for _, sub := range tc.wantContains {
-				if !strings.Contains(got, sub) { t.Errorf("expected %q in formatted session, got:\n%s", sub, got) }
+				if !strings.Contains(got, sub) {
+					t.Errorf("expected %q in formatted session, got:\n%s", sub, got)
+				}
 			}
 			for _, sub := range tc.wantExcludes {
-				if strings.Contains(got, sub) { t.Errorf("expected %q excluded from formatted session, got:\n%s", sub, got) }
+				if strings.Contains(got, sub) {
+					t.Errorf("expected %q excluded from formatted session, got:\n%s", sub, got)
+				}
 			}
 		})
 	}

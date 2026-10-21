@@ -49,10 +49,10 @@ func TestWorker_WatchTaskCompletion(t *testing.T) {
 			t.Parallel()
 			tempDir := t.TempDir()
 			taskDir := filepath.Join(tempDir, ".system_generated", "tasks")
-			_ = os.MkdirAll(taskDir, 0755)
+			_ = os.MkdirAll(taskDir, 0o755)
 			logFile := filepath.Join(taskDir, tc.taskID+".log")
 			if tc.preWrite {
-				_ = os.WriteFile(logFile, []byte("Task output\n"), 0644)
+				_ = os.WriteFile(logFile, []byte("Task output\n"), 0o644)
 			}
 			var done chan struct{}
 			if tc.delayWrite {
@@ -60,7 +60,7 @@ func TestWorker_WatchTaskCompletion(t *testing.T) {
 				go func() {
 					defer close(done)
 					<-time.After(15 * time.Millisecond)
-					_ = os.WriteFile(logFile, []byte("finished"), 0644)
+					_ = os.WriteFile(logFile, []byte("finished"), 0o644)
 				}()
 			}
 			ctx := context.Background()
@@ -210,8 +210,8 @@ func TestWorker_ActiveTasksPreventReap(t *testing.T) {
 			cfg := config.NewTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
 			_ = store.SaveSessionID(context.Background(), tc.threadID, sessID)
 			sessDir := filepath.Join(tempData, "brain", sessID, ".system_generated", "logs")
-			_ = os.MkdirAll(sessDir, 0755)
-			_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0644)
+			_ = os.MkdirAll(sessDir, 0o755)
+			_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0o644)
 
 			doneCh := make(chan struct{})
 			pool := New(cfg, WorkerPoolConfig{
@@ -292,7 +292,7 @@ func TestWorker_PersistentDaemonExecutionErrors(t *testing.T) {
 			binPath := tc.agyBin
 			if tc.script != "" {
 				binPath = filepath.Join(t.TempDir(), "mock_err.sh")
-				_ = os.WriteFile(binPath, []byte(tc.script), 0755)
+				_ = os.WriteFile(binPath, []byte(tc.script), 0o755)
 			}
 			cfg := config.NewTestConfig(func(d *config.ConfigData) { d.AgyBin, d.DataDir = binPath, tempData })
 			failedCh := make(chan struct{})
@@ -387,12 +387,12 @@ func TestWorkerPool_PersistentDaemonTurns(t *testing.T) {
 			}
 			if tc.transcriptContent != "" {
 				sessDir := filepath.Join(tempData, "brain", tc.daemonUUID, ".system_generated", "logs")
-				_ = os.MkdirAll(sessDir, 0755)
-				_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(tc.transcriptContent), 0644)
+				_ = os.MkdirAll(sessDir, 0o755)
+				_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(tc.transcriptContent), 0o644)
 			}
 			if tc.foreignDiskUUID != "" {
 				brainDir := filepath.Join(tempData, "brain", tc.foreignDiskUUID)
-				_ = os.MkdirAll(brainDir, 0755)
+				_ = os.MkdirAll(brainDir, 0o755)
 				ft := time.Now().Add(5 * time.Second)
 				_ = os.Chtimes(brainDir, ft, ft)
 			}
@@ -402,7 +402,10 @@ func TestWorkerPool_PersistentDaemonTurns(t *testing.T) {
 			pool := New(cfg, WorkerPoolConfig{
 				ProcessPool: procPool, SessionManager: session.New(tmpHome, tempData),
 				Store: store, TimeoutMinutes: 1,
-				DeliveryFunc: func(sess *discordgo.Session, channelID, content string) error { deliveredText = content; return nil },
+				DeliveryFunc: func(sess *discordgo.Session, channelID, content string) error {
+					deliveredText = content
+					return nil
+				},
 				OnMessageCompleted: func(msg db.Message, status string) {
 					if status == tc.expectedFinalStatus {
 						select {
@@ -479,11 +482,11 @@ func TestWorkerPool_TransientRetry_RotatesBloatedSession(t *testing.T) {
 	tmpHome, tempData, store := t.TempDir(), t.TempDir(), setupTestStore(t)
 	validUUID := "c4444444-5555-6666-7777-888888888888"
 	sessDir := filepath.Join(tempData, "brain", validUUID, ".system_generated", "logs")
-	_ = os.MkdirAll(sessDir, 0755)
+	_ = os.MkdirAll(sessDir, 0o755)
 	transcriptFile := filepath.Join(sessDir, "transcript.jsonl")
 	_ = os.WriteFile(transcriptFile, []byte(fmt.Sprintf(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"hello"}
 {"step_index":100,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"working...","created_at":%q}
-`, time.Now().UTC().Format(time.RFC3339))), 0644)
+`, time.Now().UTC().Format(time.RFC3339))), 0o644)
 
 	cfg := config.NewTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
 	threadID := "thread-transient-bloat-rotation"
@@ -502,7 +505,7 @@ func TestWorkerPool_TransientRetry_RotatesBloatedSession(t *testing.T) {
 			mu.Unlock()
 			if att == 1 {
 				bloatedContent := fmt.Sprintf(`{"step_index":%d,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"tool runaway","created_at":%q}`+"\n", session.DefaultMaxSessionSteps+5, time.Now().UTC().Format(time.RFC3339))
-				if f, _ := os.OpenFile(transcriptFile, os.O_APPEND|os.O_WRONLY, 0644); f != nil {
+				if f, _ := os.OpenFile(transcriptFile, os.O_APPEND|os.O_WRONLY, 0o644); f != nil {
 					_, _ = f.WriteString(bloatedContent)
 					_ = f.Close()
 				}
@@ -659,12 +662,12 @@ func TestWorker_SessionDBRotation(t *testing.T) {
 			store, tmpDir := setupTestStore(t), t.TempDir()
 			sessMgr := session.New(tmpDir, tmpDir)
 			oldSess, convDir := "sess-"+tc.name, filepath.Join(tmpDir, "conversations")
-			_ = os.MkdirAll(convDir, 0755)
+			_ = os.MkdirAll(convDir, 0o755)
 			if tc.preWriteDBBytes > 0 {
-				_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, tc.preWriteDBBytes), 0644)
+				_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, tc.preWriteDBBytes), 0o644)
 			}
 			if tc.preWriteWALBytes > 0 {
-				_ = os.WriteFile(filepath.Join(convDir, oldSess+".db-wal"), make([]byte, tc.preWriteWALBytes), 0644)
+				_ = os.WriteFile(filepath.Join(convDir, oldSess+".db-wal"), make([]byte, tc.preWriteWALBytes), 0o644)
 			}
 
 			threadID := "thread-" + tc.name
@@ -694,17 +697,17 @@ func TestWorker_SessionDBRotation(t *testing.T) {
 					case "quota_429":
 						return "", "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Resets in 30s.", 1, errors.New("exit code 1")
 					case "post_heavy":
-						_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+500), 0644)
+						_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+500), 0o644)
 						return mockJSONResponse(oldSess, "heavy output"), "", 0, nil
 					case "retry_watchdog":
 						if cur == 1 {
-							_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+1024), 0644)
+							_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+1024), 0o644)
 							return "", "inactivity timeout exceeded [watchdog]", 124, errors.New("watchdog timeout")
 						}
 						return mockJSONResponse(sessionID, "Recovered"), "", 0, nil
 					case "retry_transient":
 						if cur == 1 {
-							_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+1024), 0644)
+							_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+1024), 0o644)
 							return `{"status": "ERROR", "error": "temporary network timeout"}`, "", 0, nil
 						}
 						return mockJSONResponse(sessionID, "Recovered"), "", 0, nil
@@ -939,7 +942,11 @@ func TestWorkerPool_CapacityBlip_ContextCancellation(t *testing.T) {
 					typingMu.Lock()
 					typingActive = true
 					typingMu.Unlock()
-					return func() { typingMu.Lock(); typingStopped = true; typingMu.Unlock() }
+					return func() {
+						typingMu.Lock()
+						typingStopped = true
+						typingMu.Unlock()
+					}
 				},
 			})
 			pool.Start()
@@ -1361,8 +1368,8 @@ func TestWorker_DualPool_YieldTrapFallback(t *testing.T) {
 	store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
 	sessID := "f1111111-2222-3333-4444-555555555555"
 	sessDir := filepath.Join(tempData, "brain", sessID, ".system_generated", "logs")
-	_ = os.MkdirAll(sessDir, 0755)
-	_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0644)
+	_ = os.MkdirAll(sessDir, 0o755)
+	_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0o644)
 
 	var turnCount atomic.Int32
 	primarySpawner := newScriptedDaemonSpawner(sessID,
@@ -1385,8 +1392,8 @@ func TestWorker_DualPool_YieldTrapFallback(t *testing.T) {
 	_ = store.SaveSessionID(context.Background(), threadID, sessID)
 
 	taskDir := filepath.Join(tempData, "brain", "d1111111-2222-3333-4444-555555555555", ".system_generated", "tasks")
-	_ = os.MkdirAll(taskDir, 0755)
-	_ = os.WriteFile(filepath.Join(taskDir, "bg-task-in-low-pool.log"), []byte("done"), 0644)
+	_ = os.MkdirAll(taskDir, 0o755)
+	_ = os.WriteFile(filepath.Join(taskDir, "bg-task-in-low-pool.log"), []byte("done"), 0o644)
 
 	doneCh := make(chan struct{})
 	pool := New(cfg, WorkerPoolConfig{
@@ -1502,8 +1509,8 @@ func TestWorkerPool_SessionRotationInjectsToolActions(t *testing.T) {
 			tmpHome, tempData, store := t.TempDir(), t.TempDir(), setupTestStore(t)
 			validUUID := uuid.New().String()
 			sessDir := filepath.Join(tempData, "brain", validUUID, ".system_generated", "logs")
-			_ = os.MkdirAll(sessDir, 0755)
-			_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"investigate"}`+"\n"), 0644)
+			_ = os.MkdirAll(sessDir, 0o755)
+			_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"investigate"}`+"\n"), 0o644)
 
 			cfg := config.NewTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
 			threadID := "thread-rot-" + strings.ToLower(tt.name)
@@ -1528,7 +1535,7 @@ func TestWorkerPool_SessionRotationInjectsToolActions(t *testing.T) {
 {"step_index":2,"source":"TOOL","type":"GENERIC","status":"DONE","content":"CONTAINER ID aerial-brain MEM USAGE 120MiB"}
 {"step_index":%d,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":%q,"created_at":%q}
 `, session.DefaultMaxSessionSteps, tt.triggerErr, time.Now().UTC().Format(time.RFC3339))
-						_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(transcriptContent), 0644)
+						_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(transcriptContent), 0o644)
 						return "", tt.triggerErr, 1, errors.New("simulated error")
 					}
 					return mockJSONResponse(uuid.New().String(), "Completed"), "", 0, nil
@@ -1821,8 +1828,8 @@ func TestYieldTrap_Scenarios(t *testing.T) {
 
 			sessMgr := session.New(tmpHome, "")
 			sessDir, _ := sessMgr.EnsureSessionDir(tc.sessionID)
-			_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0755)
-			_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0644)
+			_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0o755)
+			_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0o644)
 			now := time.Now()
 			_ = os.Chtimes(sessDir, now, now)
 
@@ -1830,8 +1837,8 @@ func TestYieldTrap_Scenarios(t *testing.T) {
 			var daemon *runner.StreamingDaemon
 			if tc.yieldType == "daemon_tracker" {
 				tasksDir := filepath.Join(sessDir, ".system_generated", "tasks")
-				_ = os.MkdirAll(tasksDir, 0755)
-				_ = os.WriteFile(filepath.Join(tasksDir, "task-999.log"), []byte("Task output\n"), 0644)
+				_ = os.MkdirAll(tasksDir, 0o755)
+				_ = os.WriteFile(filepath.Join(tasksDir, "task-999.log"), []byte("Task output\n"), 0o644)
 				pPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, runner.NewMockDaemonSpawner())
 				defer pPool.Close()
 				procPool = pPool
