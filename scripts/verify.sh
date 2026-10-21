@@ -58,6 +58,28 @@ check_utf8_bom() {
     fi
 }
 
+check_gofmt() {
+    if has_cmd gofmt; then
+        local unformatted=""
+        if [ "$MODE" = "staged" ]; then
+            local go_staged
+            go_staged=$(echo "$STAGED_FILES" | grep -E '\.go$' || true)
+            if [ -n "$go_staged" ]; then
+                unformatted=$(echo "$go_staged" | while read -r gf; do
+                    [ -f "$gf" ] && gofmt -l "$gf"
+                done)
+            fi
+        else
+            unformatted=$(gofmt -l . 2>/dev/null | grep -v -E '(^|/)vendor/' || true)
+        fi
+        if [ -n "$unformatted" ]; then
+            echo "🚨 [Aerial Verify] Error: Unformatted Go files detected (run gofmt -w or golangci-lint fmt):" >&2
+            echo "$unformatted" | sed 's/^/   • /' >&2
+            exit 1
+        fi
+    fi
+}
+
 # Check that tests never execute main() directly
 check_no_main_in_tests() {
     if has_cmd git; then
@@ -116,14 +138,7 @@ run_golangci_lint() {
         echo "   [golangci-lint] Linting $svc ($targetPkg)..."
         if has_cmd golangci-lint; then
             export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.27.1}"
-            if ! (cd "$svc" && golangci-lint run --allow-parallel-runners --path-prefix="$svc/" --config "$REPO_ROOT/.golangci.yml" "$targetPkg"); then
-                if has_cmd go; then
-                    echo "   (golangci-lint failed due to Go toolchain mismatch, falling back to go vet for $svc)"
-                    (cd "$svc" && go vet "$targetPkg")
-                else
-                    exit 1
-                fi
-            fi
+            (cd "$svc" && golangci-lint run --allow-parallel-runners --path-prefix="$svc/" --config "$REPO_ROOT/.golangci.yml" "$targetPkg")
         elif has_docker; then
             docker run --rm \
                 -v "$REPO_ROOT:/workspace" -w "/workspace/$svc" \
@@ -367,6 +382,7 @@ if [ "$MODE" = "staged" ]; then
     fi
 
     check_utf8_bom
+    check_gofmt
     check_no_main_in_tests
     check_rule_file_sizes
     check_no_imperative_ddl
@@ -436,6 +452,7 @@ fi
 # Full verification: Run entire CI-equivalent verification suite
 echo "=== 0. Encoding & BOM Hygiene ==="
 check_utf8_bom
+check_gofmt
 check_no_main_in_tests
 check_rule_file_sizes
 

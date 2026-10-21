@@ -9,8 +9,8 @@ import (
 func TestResolveConfigPath(t *testing.T) {
 	tmpDir := t.TempDir()
 	validLocal, emptyLocal, nonExistent := filepath.Join(tmpDir, "valid.yaml"), filepath.Join(tmpDir, "empty.yaml"), filepath.Join(tmpDir, "missing.yaml")
-	_ = os.WriteFile(validLocal, []byte("port: '4004'\n"), 0644)
-	_ = os.WriteFile(emptyLocal, []byte{}, 0644)
+	_ = os.WriteFile(validLocal, []byte("port: '4004'\n"), 0o644)
+	_ = os.WriteFile(emptyLocal, []byte{}, 0o644)
 
 	fallback := "/config/config.yaml"
 	tests := []struct {
@@ -41,10 +41,10 @@ func TestResolveConfigPath(t *testing.T) {
 func TestLoadConfigFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	validPath, noPortPath, noTZPath, malformedPath := filepath.Join(tmpDir, "valid.yaml"), filepath.Join(tmpDir, "no_port.yaml"), filepath.Join(tmpDir, "no_tz.yaml"), filepath.Join(tmpDir, "malformed.yaml")
-	_ = os.WriteFile(validPath, []byte("port: '4005'\ntimezone: 'America/Chicago'\n"), 0644)
-	_ = os.WriteFile(noPortPath, []byte("timezone: 'America/Chicago'\n"), 0644)
-	_ = os.WriteFile(noTZPath, []byte("port: '4005'\n"), 0644)
-	_ = os.WriteFile(malformedPath, []byte("port: [unclosed"), 0644)
+	_ = os.WriteFile(validPath, []byte("port: '4005'\ntimezone: 'America/Chicago'\n"), 0o644)
+	_ = os.WriteFile(noPortPath, []byte("timezone: 'America/Chicago'\n"), 0o644)
+	_ = os.WriteFile(noTZPath, []byte("port: '4005'\n"), 0o644)
+	_ = os.WriteFile(malformedPath, []byte("port: [unclosed"), 0o644)
 
 	tests := []struct {
 		name     string

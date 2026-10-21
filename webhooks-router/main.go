@@ -955,7 +955,8 @@ func (r *PostgresPRRegistry) GetRecentChannelContext(ctx context.Context, target
 
 func queryVanadisChunks(ctx context.Context, q interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-}, buildID string, forUpdate bool) ([]VanadisChunkSummary, error) {
+}, buildID string, forUpdate bool,
+) ([]VanadisChunkSummary, error) {
 	query := `SELECT id, chunk_index, repo, title, status, COALESCE(pr_number, 0), started_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC`
 	if forUpdate {
 		query += " FOR UPDATE"
@@ -1461,10 +1462,10 @@ func NewRouterServer(cfg Config, client *http.Client, riverClient ...RiverInsert
 }
 
 // SetConflictCheckDelay configures the delay before checking merge conflicts on push to main.
-func (s *RouterServer) SetConflictCheckDelay(d time.Duration)     { s.conflictCheckDelay = d }
-func (s *RouterServer) SetRiverClient(rc RiverInserter)            { s.riverClient = rc }
-func (s *RouterServer) SetRegistry(reg PRRegistryUpdater)          { s.registry = reg }
-func (s *RouterServer) SetDispatcher(d OutboundDispatcher)         { s.dispatcher = d }
+func (s *RouterServer) SetConflictCheckDelay(d time.Duration) { s.conflictCheckDelay = d }
+func (s *RouterServer) SetRiverClient(rc RiverInserter)       { s.riverClient = rc }
+func (s *RouterServer) SetRegistry(reg PRRegistryUpdater)     { s.registry = reg }
+func (s *RouterServer) SetDispatcher(d OutboundDispatcher)    { s.dispatcher = d }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
@@ -1744,7 +1745,6 @@ func formatErrorDetailsBlock(header, details, extraLine, footer string) string {
 	}
 	return strings.Join(lines, "\n")
 }
-
 
 func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber int, statusOverride string, banner string, deployingJobs []string) error {
 	if s == nil || s.dispatcher == nil || repo == "" || prNumber <= 0 {
@@ -2131,9 +2131,11 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 	return &evt, nil
 }
 
-const maxPromptRunes = 1500
-const maxCIRemediationAttempts = 3
-const maxRoboRevCommentRunes = 4000
+const (
+	maxPromptRunes           = 1500
+	maxCIRemediationAttempts = 3
+	maxRoboRevCommentRunes   = 4000
+)
 
 func truncatePromptDetails(s string) string {
 	return truncatePromptRunes(strings.ReplaceAll(s, "```", "'''"), maxPromptRunes)
@@ -2574,14 +2576,14 @@ type GitHubCheckRunPR struct {
 type GitHubCheckRunPayload struct {
 	Action   string `json:"action"`
 	CheckRun struct {
-		ID           int64              `json:"id"`
-		Name         string             `json:"name"`
-		HeadSHA      string             `json:"head_sha"`
-		Status       string             `json:"status"`
-		Conclusion   string             `json:"conclusion"`
-		DetailsURL   string             `json:"details_url"`
-		HTMLURL      string             `json:"html_url"`
-		Output       struct {
+		ID         int64  `json:"id"`
+		Name       string `json:"name"`
+		HeadSHA    string `json:"head_sha"`
+		Status     string `json:"status"`
+		Conclusion string `json:"conclusion"`
+		DetailsURL string `json:"details_url"`
+		HTMLURL    string `json:"html_url"`
+		Output     struct {
 			Title   string `json:"title"`
 			Summary string `json:"summary"`
 			Text    string `json:"text"`

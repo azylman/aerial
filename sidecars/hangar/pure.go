@@ -40,7 +40,6 @@ func FilterNomadConfigFiles(changedFiles []string) []string {
 	return result
 }
 
-
 // CalculateSyncStatus evaluates repository statuses and determines the overall daemon status.
 // Precedence: "error" > "lagging" > "synced".
 func CalculateSyncStatus(repos map[string]RepoStatus) string {
@@ -447,8 +446,6 @@ func ParseWwwAuthenticate(header string) (realm, service, scope string, err erro
 	return realm, service, scope, nil
 }
 
-
-
 // ParseGitHubSlug extracts and lowercases the "owner/repo" slug from a GitHub remote URL.
 // It strips embedded credentials/tokens and returns "" if the URL is invalid or not strictly github.com.
 func ParseGitHubSlug(rawRemoteURL string) string {
@@ -514,7 +511,6 @@ func IsNomadJobFile(p string) bool {
 	lower := strings.ToLower(base)
 	return strings.HasSuffix(lower, ".nomad") || strings.HasSuffix(lower, ".nomad.hcl")
 }
-
 
 // ExtractJobName extracts the Nomad job name from job specification content (e.g. job "name" { ... }).
 // If parsing fails, it falls back to the file basename stripped of .nomad extensions.
@@ -1056,7 +1052,9 @@ type HangarDeployEvent struct {
 func IsHangarJob(name string) bool { return strings.EqualFold(strings.TrimSpace(name), "hangar") }
 
 // IsHangarImage checks whether an image reference is for the hangar service.
-func IsHangarImage(img string) bool { return strings.Contains(strings.ToLower(strings.TrimSpace(img)), "hangar") }
+func IsHangarImage(img string) bool {
+	return strings.Contains(strings.ToLower(strings.TrimSpace(img)), "hangar")
+}
 
 // SortNomadChangesHangarLast sorts NomadFileChange slices so hangar changes execute last.
 func SortNomadChangesHangarLast(changes []NomadFileChange) {
@@ -1194,4 +1192,3 @@ func ExtractManifestAnnotations(manifestJSON []byte) map[string]string {
 	}
 	return doc.Annotations
 }
-

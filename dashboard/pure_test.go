@@ -141,7 +141,6 @@ func mkNomadAlloc(id, jobID, clientStatus string, createOff time.Duration, healt
 	return a
 }
 
-
 func TestBuildFactsUpstreamURL_TableDriven(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -1286,7 +1285,6 @@ func TestIsDeployOngoing_TableDriven(t *testing.T) {
 		})
 	}
 }
-
 
 func TestExtractAerialServiceName(t *testing.T) {
 	tests := []struct {

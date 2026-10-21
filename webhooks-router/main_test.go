@@ -719,7 +719,7 @@ brain_url: "http://brain.custom:8088"
 			var targetPath string
 			if !tc.useEmptyPath {
 				targetPath = filepath.Join(tmpDir, "local.yaml")
-				if err := os.WriteFile(targetPath, []byte(tc.localYAML), 0644); err != nil {
+				if err := os.WriteFile(targetPath, []byte(tc.localYAML), 0o644); err != nil {
 					t.Fatalf("failed to write local config: %v", err)
 				}
 			}
@@ -730,7 +730,7 @@ brain_url: "http://brain.custom:8088"
 					webhooksRouterFallbackConfigPath = filepath.Join(tmpDir, "nonexistent.yaml")
 				} else {
 					fbPath := filepath.Join(tmpDir, "fallback.yaml")
-					if err := os.WriteFile(fbPath, []byte(tc.fallbackYAML), 0644); err != nil {
+					if err := os.WriteFile(fbPath, []byte(tc.fallbackYAML), 0o644); err != nil {
 						t.Fatalf("failed to write fallback config: %v", err)
 					}
 					webhooksRouterFallbackConfigPath = fbPath
@@ -2732,14 +2732,14 @@ func TestDispatchWorkflowRunImages(t *testing.T) {
 			wantErr:        true,
 		},
 		{
-			name:            "deployingErr registry error returns error",
-			headBranch:      "main",
-			conclusion:      "success",
-			jobsStatus:      http.StatusOK,
-			jobsBody:        `{"jobs":[{"name":"Build & Push Images to GHCR (brain)","status":"completed","conclusion":"success"}]}`,
-			deployingErr:    errors.New("db fail"),
-			wantImageCalls:  1,
-			wantErr:         true,
+			name:           "deployingErr registry error returns error",
+			headBranch:     "main",
+			conclusion:     "success",
+			jobsStatus:     http.StatusOK,
+			jobsBody:       `{"jobs":[{"name":"Build & Push Images to GHCR (brain)","status":"completed","conclusion":"success"}]}`,
+			deployingErr:   errors.New("db fail"),
+			wantImageCalls: 1,
+			wantErr:        true,
 		},
 		{
 			name:       "non-main branch is no-op",
@@ -4169,21 +4169,21 @@ func (r *mockVanadisPgxRows) Scan(dest ...any) error {
 		return r.scanRowFn(r.idx-1, dest...)
 	}
 	it := r.items[r.idx-1]
-	*(dest[0].(*string)) = it.ID
-	*(dest[1].(*int)) = it.ChunkIndex
-	*(dest[2].(*string)) = it.Repo
-	*(dest[3].(*string)) = it.Title
-	*(dest[4].(*string)) = it.Status
-	*(dest[5].(*int)) = it.PRNumber
+	*dest[0].(*string) = it.ID
+	*dest[1].(*int) = it.ChunkIndex
+	*dest[2].(*string) = it.Repo
+	*dest[3].(*string) = it.Title
+	*dest[4].(*string) = it.Status
+	*dest[5].(*int) = it.PRNumber
 	if len(dest) > 6 {
 		if !it.StartedAt.IsZero() {
-			*(dest[6].(*sql.NullTime)) = sql.NullTime{Time: it.StartedAt, Valid: true}
+			*dest[6].(*sql.NullTime) = sql.NullTime{Time: it.StartedAt, Valid: true}
 		} else {
-			*(dest[6].(*sql.NullTime)) = sql.NullTime{}
+			*dest[6].(*sql.NullTime) = sql.NullTime{}
 		}
 	}
 	if len(dest) > 7 {
-		*(dest[7].(*time.Time)) = it.UpdatedAt
+		*dest[7].(*time.Time) = it.UpdatedAt
 	}
 	return nil
 }
@@ -4204,18 +4204,21 @@ func (t *mockVanadisPgxTx) Rollback(ctx context.Context) error {
 	}
 	return pgx.ErrTxClosed
 }
+
 func (t *mockVanadisPgxTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
 	if t.queryRowFn != nil {
 		return t.queryRowFn(ctx, sql, args...)
 	}
 	return mockVanadisPgxRow{}
 }
+
 func (t *mockVanadisPgxTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	if t.execFn != nil {
 		return t.execFn(ctx, sql, args...)
 	}
 	return pgconn.NewCommandTag("UPDATE 1"), nil
 }
+
 func (t *mockVanadisPgxTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
 	if t.queryFn != nil {
 		return t.queryFn(ctx, sql, args...)
@@ -4236,18 +4239,21 @@ func (p *mockVanadisPgxPool) Begin(ctx context.Context) (pgx.Tx, error) {
 	}
 	return &mockVanadisPgxTx{}, nil
 }
+
 func (p *mockVanadisPgxPool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
 	if p.queryRowFn != nil {
 		return p.queryRowFn(ctx, sql, args...)
 	}
 	return mockVanadisPgxRow{}
 }
+
 func (p *mockVanadisPgxPool) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	if p.execFn != nil {
 		return p.execFn(ctx, sql, args...)
 	}
 	return pgconn.NewCommandTag("UPDATE 1"), nil
 }
+
 func (p *mockVanadisPgxPool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
 	if p.queryFn != nil {
 		return p.queryFn(ctx, sql, args...)
@@ -4464,11 +4470,11 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 								}
 							}
 							if len(dest) == 5 {
-								*(dest[0].(*int64)) = 100
-								*(dest[1].(*string)) = tc.targetIDReturn
-								*(dest[2].(*int)) = tc.wantPRNum
-								*(dest[3].(*string)) = tc.mergeSHAReturn
-								*(dest[4].(*string)) = tc.repo
+								*dest[0].(*int64) = 100
+								*dest[1].(*string) = tc.targetIDReturn
+								*dest[2].(*int) = tc.wantPRNum
+								*dest[3].(*string) = tc.mergeSHAReturn
+								*dest[4].(*string) = tc.repo
 							}
 							return nil
 						}}
@@ -4505,15 +4511,15 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 										return tc.mockSelectErr
 									}
 									if len(dest) == 6 {
-										*(dest[0].(*int64)) = 101
-										*(dest[1].(*string)) = tc.targetIDReturn
-										*(dest[2].(*int)) = tc.wantPRNum
-										*(dest[3].(*string)) = tc.mergeSHAReturn
-										*(dest[4].(*string)) = tc.repo
+										*dest[0].(*int64) = 101
+										*dest[1].(*string) = tc.targetIDReturn
+										*dest[2].(*int) = tc.wantPRNum
+										*dest[3].(*string) = tc.mergeSHAReturn
+										*dest[4].(*string) = tc.repo
 										if tc.metaJSON != "" {
-											*(dest[5].(*[]byte)) = []byte(tc.metaJSON)
+											*dest[5].(*[]byte) = []byte(tc.metaJSON)
 										} else {
-											*(dest[5].(*[]byte)) = []byte("{}")
+											*dest[5].(*[]byte) = []byte("{}")
 										}
 										return nil
 									}
@@ -4537,29 +4543,29 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 								return tc.mockScanErr
 							}
 							if len(dest) == 4 {
-								*(dest[0].(*int)) = 100 + idx
-								*(dest[1].(*string)) = "feat/open"
-								*(dest[2].(*string)) = "1555405874565091380"
-								*(dest[3].(*string)) = "headsha"
+								*dest[0].(*int) = 100 + idx
+								*dest[1].(*string) = "feat/open"
+								*dest[2].(*string) = "1555405874565091380"
+								*dest[3].(*string) = "headsha"
 								return nil
 							}
 							if len(dest) == 8 {
-								*(dest[0].(*int64)) = int64(200 + idx)
-								*(dest[1].(*string)) = "azylman/aerial"
-								*(dest[2].(*int)) = 200 + idx
-								*(dest[3].(*string)) = "main"
-								*(dest[4].(*string)) = "headsha"
-								*(dest[5].(*string)) = "mergesha"
-								*(dest[6].(*string)) = "1555405874565091380"
+								*dest[0].(*int64) = int64(200 + idx)
+								*dest[1].(*string) = "azylman/aerial"
+								*dest[2].(*int) = 200 + idx
+								*dest[3].(*string) = "main"
+								*dest[4].(*string) = "headsha"
+								*dest[5].(*string) = "mergesha"
+								*dest[6].(*string) = "1555405874565091380"
 								if tc.metaJSON != "" {
-									*(dest[7].(*[]byte)) = []byte(tc.metaJSON)
+									*dest[7].(*[]byte) = []byte(tc.metaJSON)
 								}
 								return nil
 							}
 							if len(dest) == 3 {
-								*(dest[0].(*string)) = "arcane103"
-								*(dest[1].(*string)) = "wrap it up"
-								*(dest[2].(*string)) = "done"
+								*dest[0].(*string) = "arcane103"
+								*dest[1].(*string) = "wrap it up"
+								*dest[2].(*string) = "done"
 								return nil
 							}
 							return nil
@@ -5005,11 +5011,11 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 							return tc.selectErr
 						}
 						if tc.method == "ShouldSuppressVanadisDeployWake" {
-							*(dest[0].(*bool)) = tc.wantBool
+							*dest[0].(*bool) = tc.wantBool
 							return nil
 						}
 						if tc.method == "FailVanadisChunkByPR" {
-							*(dest[0].(*string)) = "build-fail-1"
+							*dest[0].(*string) = "build-fail-1"
 							return nil
 						}
 						return nil
@@ -5033,17 +5039,17 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 									return tc.selectErr
 								}
 								if len(dest) >= 11 {
-									*(dest[0].(*string)) = fmt.Sprintf("chunk-%d", tc.chunkIdx)
-									*(dest[1].(*string)) = "build-100"
-									*(dest[2].(*int)) = tc.chunkIdx
-									*(dest[3].(*string)) = fmt.Sprintf("Title %d", tc.chunkIdx)
-									*(dest[4].(*string)) = tc.chunkStatus
-									*(dest[5].(*string)) = "123456789012345678"
-									*(dest[6].(*int)) = 2
-									*(dest[7].(*string)) = "Test Build Title"
-									*(dest[8].(*string)) = "Test Objective"
-									*(dest[9].(*string)) = tc.buildStatus
-									*(dest[10].(*string)) = "msg-12345"
+									*dest[0].(*string) = fmt.Sprintf("chunk-%d", tc.chunkIdx)
+									*dest[1].(*string) = "build-100"
+									*dest[2].(*int) = tc.chunkIdx
+									*dest[3].(*string) = fmt.Sprintf("Title %d", tc.chunkIdx)
+									*dest[4].(*string) = tc.chunkStatus
+									*dest[5].(*string) = "123456789012345678"
+									*dest[6].(*int) = 2
+									*dest[7].(*string) = "Test Build Title"
+									*dest[8].(*string) = "Test Objective"
+									*dest[9].(*string) = tc.buildStatus
+									*dest[10].(*string) = "msg-12345"
 								}
 								return nil
 							}}
@@ -5440,7 +5446,6 @@ func TestDefaultOutboundDispatcher_DispatchWidget(t *testing.T) {
 		})
 	}
 }
-
 
 func TestFetchLatestRoboRevComment(t *testing.T) {
 	t.Parallel()

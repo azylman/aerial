@@ -22,19 +22,29 @@ var (
 )
 
 func resolveTimezone(tz, fallback string) string {
-	if s := strings.TrimSpace(tz); s != "" { return s }
-	if s := strings.TrimSpace(fallback); s != "" { return s }
+	if s := strings.TrimSpace(tz); s != "" {
+		return s
+	}
+	if s := strings.TrimSpace(fallback); s != "" {
+		return s
+	}
 	return DefaultTimezone
 }
 
 // ParseRunAtWithTimezone parses relative durations (e.g. "30m", "2h", "1d", "45s", "2 hours", "1 day", "30 mins") or timestamps in specified timezone.
 func ParseRunAtWithTimezone(input string, timezone string, now time.Time) (time.Time, error) {
 	raw := strings.TrimSpace(input)
-	if raw == "" { return time.Time{}, fmt.Errorf("run_at cannot be empty") }
+	if raw == "" {
+		return time.Time{}, fmt.Errorf("run_at cannot be empty")
+	}
 	tzTrimmed := strings.TrimSpace(timezone)
-	if tzTrimmed == "" { return time.Time{}, fmt.Errorf("timezone cannot be empty") }
+	if tzTrimmed == "" {
+		return time.Time{}, fmt.Errorf("timezone cannot be empty")
+	}
 	loc, err := time.LoadLocation(tzTrimmed)
-	if err != nil { return time.Time{}, fmt.Errorf("invalid timezone %q: %w", tzTrimmed, err) }
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid timezone %q: %w", tzTrimmed, err)
+	}
 
 	lower := strings.ToLower(raw)
 	if matches := reRelative.FindStringSubmatch(lower); len(matches) == 3 {
@@ -76,11 +86,17 @@ func ParseRunAtWithTimezone(input string, timezone string, now time.Time) (time.
 
 func CalculateNextCronRun(cronExpr, timezone string, from time.Time) (time.Time, error) {
 	sched, err := cronParser.Parse(cronExpr)
-	if err != nil { return time.Time{}, fmt.Errorf("invalid cron expression %q: %w", cronExpr, err) }
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid cron expression %q: %w", cronExpr, err)
+	}
 	tzTrimmed := strings.TrimSpace(timezone)
-	if tzTrimmed == "" { return time.Time{}, fmt.Errorf("timezone cannot be empty") }
+	if tzTrimmed == "" {
+		return time.Time{}, fmt.Errorf("timezone cannot be empty")
+	}
 	loc, err := time.LoadLocation(tzTrimmed)
-	if err != nil { return time.Time{}, fmt.Errorf("invalid timezone %q: %w", tzTrimmed, err) }
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid timezone %q: %w", tzTrimmed, err)
+	}
 	return sched.Next(from.In(loc)).UTC(), nil
 }
 
@@ -91,7 +107,9 @@ type ToolHandler struct {
 }
 
 func NewToolHandler(cfg *Config, database *sql.DB) *ToolHandler {
-	if cfg == nil { panic("tool handler: config cannot be nil") }
+	if cfg == nil {
+		panic("tool handler: config cannot be nil")
+	}
 	return &ToolHandler{cfg: cfg, db: database, timezone: cfg.Timezone}
 }
 
@@ -119,9 +137,15 @@ func handleScheduleRecurring(ctx context.Context, database *sql.DB, defaultTZ st
 	args.Timezone = resolveTimezone(args.Timezone, defaultTZ)
 	args.Effort = normalizeScheduleEffort(args.Effort)
 
-	if args.ChannelID == "" { return ScheduleRecurringOutput{}, fmt.Errorf("'channel_id' is required") }
-	if args.CronExpression == "" { return ScheduleRecurringOutput{}, fmt.Errorf("'cron_expression' is required") }
-	if args.Prompt == "" { return ScheduleRecurringOutput{}, fmt.Errorf("'prompt' is required") }
+	if args.ChannelID == "" {
+		return ScheduleRecurringOutput{}, fmt.Errorf("'channel_id' is required")
+	}
+	if args.CronExpression == "" {
+		return ScheduleRecurringOutput{}, fmt.Errorf("'cron_expression' is required")
+	}
+	if args.Prompt == "" {
+		return ScheduleRecurringOutput{}, fmt.Errorf("'prompt' is required")
+	}
 
 	now := time.Now().UTC()
 	nextRun, err := CalculateNextCronRun(args.CronExpression, args.Timezone, now)
@@ -148,7 +172,9 @@ func handleScheduleRecurring(ctx context.Context, database *sql.DB, defaultTZ st
 func (h *ToolHandler) ScheduleRecurring(ctx context.Context, args ScheduleRecurringArgs) (ScheduleRecurringOutput, error) {
 	var tz string
 	var db *sql.DB
-	if h != nil { tz, db = h.timezone, h.db }
+	if h != nil {
+		tz, db = h.timezone, h.db
+	}
 	return handleScheduleRecurring(ctx, db, tz, args)
 }
 
@@ -171,13 +197,21 @@ type ScheduleOnceOutput struct {
 
 func handleScheduleOnce(ctx context.Context, database *sql.DB, args ScheduleOnceArgs) (ScheduleOnceOutput, error) {
 	targetID := strings.TrimSpace(args.TargetID)
-	if targetID == "" { targetID = strings.TrimSpace(args.ThreadID) }
+	if targetID == "" {
+		targetID = strings.TrimSpace(args.ThreadID)
+	}
 	args.RunAt, args.Prompt = strings.TrimSpace(args.RunAt), strings.TrimSpace(args.Prompt)
 	args.Timezone = resolveTimezone(args.Timezone, "")
 
-	if targetID == "" { return ScheduleOnceOutput{}, fmt.Errorf("'target_id' is required") }
-	if args.RunAt == "" { return ScheduleOnceOutput{}, fmt.Errorf("'run_at' is required") }
-	if args.Prompt == "" { return ScheduleOnceOutput{}, fmt.Errorf("'prompt' is required") }
+	if targetID == "" {
+		return ScheduleOnceOutput{}, fmt.Errorf("'target_id' is required")
+	}
+	if args.RunAt == "" {
+		return ScheduleOnceOutput{}, fmt.Errorf("'run_at' is required")
+	}
+	if args.Prompt == "" {
+		return ScheduleOnceOutput{}, fmt.Errorf("'prompt' is required")
+	}
 
 	now := time.Now().UTC()
 	targetTime, err := ParseRunAtWithTimezone(args.RunAt, args.Timezone, now)
@@ -200,7 +234,9 @@ func handleScheduleOnce(ctx context.Context, database *sql.DB, args ScheduleOnce
 
 func (h *ToolHandler) ScheduleOnce(ctx context.Context, args ScheduleOnceArgs) (ScheduleOnceOutput, error) {
 	var db *sql.DB
-	if h != nil { args.Timezone, db = resolveTimezone(args.Timezone, h.timezone), h.db }
+	if h != nil {
+		args.Timezone, db = resolveTimezone(args.Timezone, h.timezone), h.db
+	}
 	return handleScheduleOnce(ctx, db, args)
 }
 
@@ -216,11 +252,19 @@ type ListSchedulesOutput struct {
 func (h *ToolHandler) ListSchedules(ctx context.Context, args ListSchedulesArgs) (ListSchedulesOutput, error) {
 	targetID := strings.TrimSpace(args.TargetID)
 	crons, err := ListCronSchedules(ctx, h.db, targetID)
-	if err != nil { return ListSchedulesOutput{}, fmt.Errorf("failed to query recurring schedules: %w", err) }
+	if err != nil {
+		return ListSchedulesOutput{}, fmt.Errorf("failed to query recurring schedules: %w", err)
+	}
 	oneShots, err := ListOneShotSchedules(ctx, h.db, targetID)
-	if err != nil { return ListSchedulesOutput{}, fmt.Errorf("failed to query one-shot schedules: %w", err) }
-	if crons == nil { crons = []CronSchedule{} }
-	if oneShots == nil { oneShots = []OneShotSchedule{} }
+	if err != nil {
+		return ListSchedulesOutput{}, fmt.Errorf("failed to query one-shot schedules: %w", err)
+	}
+	if crons == nil {
+		crons = []CronSchedule{}
+	}
+	if oneShots == nil {
+		oneShots = []OneShotSchedule{}
+	}
 	return ListSchedulesOutput{Recurring: crons, OneShot: oneShots}, nil
 }
 
@@ -236,10 +280,16 @@ type CancelScheduleOutput struct {
 
 func (h *ToolHandler) CancelSchedule(ctx context.Context, args CancelScheduleArgs) (CancelScheduleOutput, error) {
 	id := strings.TrimSpace(args.ScheduleID)
-	if id == "" { return CancelScheduleOutput{}, fmt.Errorf("'schedule_id' is required") }
+	if id == "" {
+		return CancelScheduleOutput{}, fmt.Errorf("'schedule_id' is required")
+	}
 	deleted, err := DeleteSchedule(ctx, h.db, id)
-	if err != nil { return CancelScheduleOutput{}, fmt.Errorf("failed to delete schedule %s: %w", id, err) }
-	if !deleted { return CancelScheduleOutput{}, fmt.Errorf("schedule with ID %q not found", id) }
+	if err != nil {
+		return CancelScheduleOutput{}, fmt.Errorf("failed to delete schedule %s: %w", id, err)
+	}
+	if !deleted {
+		return CancelScheduleOutput{}, fmt.Errorf("schedule with ID %q not found", id)
+	}
 	return CancelScheduleOutput{Status: "success", ScheduleID: id, Message: "Schedule cancelled successfully."}, nil
 }
 
@@ -262,16 +312,24 @@ type UpdateCronScheduleOutput struct {
 
 func (h *ToolHandler) UpdateCronSchedule(ctx context.Context, args UpdateCronScheduleArgs) (UpdateCronScheduleOutput, error) {
 	id := strings.TrimSpace(args.ScheduleID)
-	if id == "" { return UpdateCronScheduleOutput{}, fmt.Errorf("'schedule_id' is required") }
+	if id == "" {
+		return UpdateCronScheduleOutput{}, fmt.Errorf("'schedule_id' is required")
+	}
 
 	var nextRun *time.Time
 	if args.CronExpression != nil && strings.TrimSpace(*args.CronExpression) != "" {
 		var tzArg, hTZ string
-		if args.Timezone != nil { tzArg = *args.Timezone }
-		if h != nil { hTZ = h.timezone }
+		if args.Timezone != nil {
+			tzArg = *args.Timezone
+		}
+		if h != nil {
+			hTZ = h.timezone
+		}
 		tz := resolveTimezone(tzArg, hTZ)
 		computed, err := CalculateNextCronRun(*args.CronExpression, tz, time.Now().UTC())
-		if err != nil { return UpdateCronScheduleOutput{}, err }
+		if err != nil {
+			return UpdateCronScheduleOutput{}, err
+		}
 		nextRun = &computed
 	}
 
@@ -280,7 +338,11 @@ func (h *ToolHandler) UpdateCronSchedule(ctx context.Context, args UpdateCronSch
 	}
 
 	resp := UpdateCronScheduleOutput{Status: "success", ScheduleID: id, Message: "Recurring schedule updated successfully."}
-	if args.Effort != nil { resp.Effort = normalizeScheduleEffort(*args.Effort) }
-	if nextRun != nil { resp.NextRunAt = nextRun.Format(time.RFC3339) }
+	if args.Effort != nil {
+		resp.Effort = normalizeScheduleEffort(*args.Effort)
+	}
+	if nextRun != nil {
+		resp.NextRunAt = nextRun.Format(time.RFC3339)
+	}
 	return resp, nil
 }

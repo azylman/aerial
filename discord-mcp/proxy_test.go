@@ -208,13 +208,13 @@ func TestNewProxyHandler_InvalidURL(t *testing.T) {
 func TestLoadConfigFile_TableDriven(t *testing.T) {
 	tmpDir := t.TempDir()
 	fullYaml := filepath.Join(tmpDir, "full.yaml")
-	_ = os.WriteFile(fullYaml, []byte("port: \"4001\"\nupstream_port: \"4025\"\nnode_bin: \"/custom/node\"\napp_path: \"/custom/app.js\"\n"), 0644)
+	_ = os.WriteFile(fullYaml, []byte("port: \"4001\"\nupstream_port: \"4025\"\nnode_bin: \"/custom/node\"\napp_path: \"/custom/app.js\"\n"), 0o644)
 	minYaml := filepath.Join(tmpDir, "min.yaml")
-	_ = os.WriteFile(minYaml, []byte("port: \"4001\"\nupstream_port: \"4025\"\n"), 0644)
+	_ = os.WriteFile(minYaml, []byte("port: \"4001\"\nupstream_port: \"4025\"\n"), 0o644)
 	badPortYaml := filepath.Join(tmpDir, "badport.yaml")
-	_ = os.WriteFile(badPortYaml, []byte("upstream_port: \"4025\"\n"), 0644)
+	_ = os.WriteFile(badPortYaml, []byte("upstream_port: \"4025\"\n"), 0o644)
 	badUpYaml := filepath.Join(tmpDir, "badup.yaml")
-	_ = os.WriteFile(badUpYaml, []byte("port: \"4001\"\n"), 0644)
+	_ = os.WriteFile(badUpYaml, []byte("port: \"4001\"\n"), 0o644)
 
 	tests := []struct {
 		name         string
@@ -532,7 +532,7 @@ func TestCoverageFlushEndpoint_TableDriven(t *testing.T) {
 func TestMain_Execution_TableDriven(t *testing.T) {
 	tmpDir := t.TempDir()
 	testCfg := filepath.Join(tmpDir, "config.yaml")
-	_ = os.WriteFile(testCfg, []byte("port: \"4001\"\nupstream_port: \"4025\"\n"), 0644)
+	_ = os.WriteFile(testCfg, []byte("port: \"4001\"\nupstream_port: \"4025\"\n"), 0o644)
 
 	tests := []struct {
 		name     string

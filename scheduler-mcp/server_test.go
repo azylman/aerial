@@ -29,20 +29,25 @@ type JSONRPCResponse struct {
 }
 
 type mockErrReader struct{}
+
 func (m *mockErrReader) Read([]byte) (int, error) { return 0, errors.New("simulated read error") }
 
 type mockErrWriter struct {
 	header http.Header
 	err    error
 }
+
 func (m *mockErrWriter) Header() http.Header {
-	if m.header == nil { m.header = make(http.Header) }
+	if m.header == nil {
+		m.header = make(http.Header)
+	}
 	return m.header
 }
 func (m *mockErrWriter) Write([]byte) (int, error) { return 0, m.err }
 func (m *mockErrWriter) WriteHeader(int)           {}
 
 type errReadCloser struct{}
+
 func (e *errReadCloser) Read([]byte) (int, error) { return 0, io.EOF }
 func (e *errReadCloser) Close() error             { return errors.New("simulated close error") }
 
@@ -230,7 +235,7 @@ func TestDB_OperationsAndErrors(t *testing.T) {
 	}
 
 	blockerFile := filepath.Join(tmpDir, "blocker.txt")
-	_ = os.WriteFile(blockerFile, []byte("data"), 0644)
+	_ = os.WriteFile(blockerFile, []byte("data"), 0o644)
 	if _, err := initDB(filepath.Join(blockerFile, "sub", "db.sqlite")); err == nil {
 		t.Error("expected directory blocker error")
 	}
@@ -271,8 +276,12 @@ func TestDB_OperationsAndErrors(t *testing.T) {
 	now := time.Now().UTC()
 	c := CronSchedule{ID: "c1", TargetID: "t1", CronExpr: "0 0 * * *", Prompt: "p", NextRunAt: now, Enabled: true}
 	s := OneShotSchedule{ID: "s1", ThreadID: "t1", Prompt: "p", RunAt: now}
-	if err := InsertCronSchedule(ctx, db, c); err != nil { t.Fatalf("InsertCronSchedule failed: %v", err) }
-	if err := InsertOneShotSchedule(ctx, db, s); err != nil { t.Fatalf("InsertOneShotSchedule failed: %v", err) }
+	if err := InsertCronSchedule(ctx, db, c); err != nil {
+		t.Fatalf("InsertCronSchedule failed: %v", err)
+	}
+	if err := InsertOneShotSchedule(ctx, db, s); err != nil {
+		t.Fatalf("InsertOneShotSchedule failed: %v", err)
+	}
 
 	crons, _ := ListCronSchedules(ctx, db, "t1")
 	ones, _ := ListOneShotSchedules(ctx, db, "t1")
@@ -281,13 +290,25 @@ func TestDB_OperationsAndErrors(t *testing.T) {
 	}
 
 	eff := "high"
-	if err := UpdateCronSchedule(ctx, db, "c1", &eff, nil, nil, nil, nil, nil); err != nil { t.Fatal(err) }
-	if err := UpdateCronSchedule(ctx, db, "missing-id", &eff, nil, nil, nil, nil, nil); err == nil { t.Error("expected error") }
-	if err := UpdateCronSchedule(ctx, db, "", nil, nil, nil, nil, nil, nil); err == nil { t.Error("expected error") }
-	if err := UpdateCronSchedule(ctx, db, "c1", nil, nil, nil, nil, nil, nil); err != nil { t.Fatal(err) }
+	if err := UpdateCronSchedule(ctx, db, "c1", &eff, nil, nil, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateCronSchedule(ctx, db, "missing-id", &eff, nil, nil, nil, nil, nil); err == nil {
+		t.Error("expected error")
+	}
+	if err := UpdateCronSchedule(ctx, db, "", nil, nil, nil, nil, nil, nil); err == nil {
+		t.Error("expected error")
+	}
+	if err := UpdateCronSchedule(ctx, db, "c1", nil, nil, nil, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
 
-	if delFalse, err := DeleteSchedule(ctx, db, "missing"); err != nil || delFalse { t.Fatal(err) }
-	if delTrue, err := DeleteSchedule(ctx, db, "c1"); err != nil || !delTrue { t.Fatal(err) }
+	if delFalse, err := DeleteSchedule(ctx, db, "missing"); err != nil || delFalse {
+		t.Fatal(err)
+	}
+	if delTrue, err := DeleteSchedule(ctx, db, "c1"); err != nil || !delTrue {
+		t.Fatal(err)
+	}
 
 	_, _ = db.Exec("INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort) VALUES ('c-bad', 't1', '', '0 0 * * *', 'p', 'UTC', 'not-a-date', TRUE, CURRENT_TIMESTAMP, 'medium')")
 	if _, err := ListCronSchedules(ctx, db, ""); err == nil {
@@ -369,8 +390,14 @@ func TestCoverageFlushEndpoint(t *testing.T) {
 	defer func() { writeCountersDirFn, writeMetaDirFn = oldFn, oldMetaFn }()
 
 	called, metaCalled := false, false
-	writeCountersDirFn = func(dir string) error { called = true; return nil }
-	writeMetaDirFn = func(dir string) error { metaCalled = true; return nil }
+	writeCountersDirFn = func(dir string) error {
+		called = true
+		return nil
+	}
+	writeMetaDirFn = func(dir string) error {
+		metaCalled = true
+		return nil
+	}
 	_ = os.Setenv("GOCOVERDIR", t.TempDir())
 
 	doFlush(http.StatusOK)
