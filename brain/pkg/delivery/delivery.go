@@ -63,14 +63,18 @@ func SplitMessage(text string, limit int) []string {
 	lines := strings.Split(text, "\n")
 	for i, line := range lines {
 		trimmedLine := strings.TrimSpace(line)
-		isFence := strings.HasPrefix(trimmedLine, "```")
+		isFence := limit > 8 && strings.HasPrefix(trimmedLine, "```") && !(strings.HasSuffix(trimmedLine, "```") && len(trimmedLine) >= 6)
 
 		// If this line toggles a code fence
-		var willCloseFence bool
+		var willOpenFence, willCloseFence bool
+		var fenceLang string
 		if isFence {
 			if !inCodeBlock {
-				inCodeBlock = true
-				currentLang = strings.TrimSpace(strings.TrimPrefix(trimmedLine, "```"))
+				willOpenFence = true
+				fenceLang = strings.TrimSpace(strings.TrimPrefix(trimmedLine, "```"))
+				if strings.ContainsAny(fenceLang, " \t`") || len([]rune("```"+fenceLang+"\n"))+4 >= limit {
+					fenceLang = ""
+				}
 			} else {
 				willCloseFence = true
 			}
@@ -89,22 +93,36 @@ func SplitMessage(text string, limit int) []string {
 
 		// Extra safety margin for closing fence if inside code block (and not currently closing it)
 		closingMargin := 0
-		if inCodeBlock && !willCloseFence {
+		if (inCodeBlock && !willCloseFence) || willOpenFence {
 			closingMargin = len([]rune("\n```"))
+		}
+		fitMargin := closingMargin
+		if willOpenFence && current.Len() > 0 && i+1 < len(lines) {
+			fitMargin += 1 + len([]rune(lines[i+1]))
 		}
 
 		// If adding this line fits within limit
-		if currentRunes+sepLen+lineLen+closingMargin <= limit {
+		if currentRunes+sepLen+lineLen+fitMargin <= limit {
 			if sepLen > 0 {
 				current.WriteString(sep)
 				currentRunes += sepLen
 			}
 			current.WriteString(line)
 			currentRunes += lineLen
-			if willCloseFence {
+			if willOpenFence {
+				inCodeBlock = true
+				currentLang = fenceLang
+			} else if willCloseFence {
 				inCodeBlock = false
 				currentLang = ""
 			}
+			continue
+		}
+
+		if willCloseFence {
+			flushCurrent()
+			inCodeBlock = false
+			currentLang = ""
 			continue
 		}
 
@@ -112,6 +130,10 @@ func SplitMessage(text string, limit int) []string {
 		if current.Len() > 0 {
 			flushCurrent()
 			startNextChunk()
+		}
+		if willOpenFence {
+			inCodeBlock = true
+			currentLang = fenceLang
 		}
 
 		// Recompute margin in fresh chunk
@@ -124,10 +146,6 @@ func SplitMessage(text string, limit int) []string {
 		if currentRunes+lineLen+closingMargin <= limit {
 			current.WriteString(line)
 			currentRunes += lineLen
-			if willCloseFence {
-				inCodeBlock = false
-				currentLang = ""
-			}
 			continue
 		}
 
@@ -163,12 +181,6 @@ func SplitMessage(text string, limit int) []string {
 				}
 			}
 		}
-
-		if willCloseFence {
-			inCodeBlock = false
-			currentLang = ""
-		}
-		_ = i
 	}
 
 	if current.Len() > 0 {
