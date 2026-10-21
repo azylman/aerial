@@ -30,7 +30,7 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	}
 	defer closeWarn(database, "database on shutdown")
 
-	store := NewSQLStore(database, isPostgres(database))
+	store := NewSQLStore(database)
 	ollama := NewOllamaClient(&cfg.Ollama)
 	toolHandler := NewToolHandler(cfg, store, ollama)
 	server := NewServer(toolHandler)
@@ -42,7 +42,7 @@ func RunApp(ctx context.Context, cfg *Config) error {
 
 	errChan := make(chan error, 1)
 	go func() {
-		log.Printf("Memory MCP Server listening on port %s (db: %s)", port, cfg.DatabaseURL)
+		log.Printf("Memory MCP Server listening on port %s", port)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errChan <- err
 		}

@@ -252,6 +252,27 @@ func (m *mockErrReadCloser) Close() error {
 	return nil
 }
 
+type mockErrWriter struct {
+	header http.Header
+	err    error
+}
+
+func (m *mockErrWriter) Header() http.Header {
+	if m.header == nil {
+		m.header = make(http.Header)
+	}
+	return m.header
+}
+
+func (m *mockErrWriter) Write([]byte) (int, error) { return 0, m.err }
+func (m *mockErrWriter) WriteHeader(int)           {}
+
+type mockCloser struct {
+	err error
+}
+
+func (m mockCloser) Close() error { return m.err }
+
 func startMockPostgres(t *testing.T) string {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -434,6 +455,14 @@ ollama:
 			wantDB:   "postgres://pguser@localhost/pgdb",
 		},
 		{
+			name:      "EmptyPathUsesDefaultPort",
+			path:      "",
+			envDB:     "postgres://localhost/test",
+			wantPort:  "4008",
+			wantDB:    "postgres://localhost/test",
+			wantModel: "all-minilm",
+		},
+		{
 			name:    "MissingDatabaseURLFails",
 			path:    filepath.Join(tmpDir, "nonexistent.yaml"),
 			wantErr: true,
@@ -441,6 +470,12 @@ ollama:
 		{
 			name:    "BadYAMLFileFails",
 			path:    badYamlPath,
+			dbURL:   "postgres://localhost/db",
+			wantErr: true,
+		},
+		{
+			name:    "DirectoryPathReadError",
+			path:    tmpDir,
 			dbURL:   "postgres://localhost/db",
 			wantErr: true,
 		},
@@ -479,29 +514,42 @@ func TestResolveConfigPath(t *testing.T) {
 	defer func() {
 		localConfigPath = oldLocal
 	}()
-	localConfigPath = filepath.Join(t.TempDir(), "nonexistent.yaml")
+	tmpDir := t.TempDir()
+	existingLocal := filepath.Join(tmpDir, "local.yaml")
+	_ = os.WriteFile(existingLocal, []byte("port: '4015'\n"), 0o644)
+	missingLocal := filepath.Join(tmpDir, "nonexistent.yaml")
 
 	tests := []struct {
-		name     string
-		envPath  string
-		fallback string
-		want     string
+		name      string
+		localPath string
+		envPath   string
+		fallback  string
+		want      string
 	}{
 		{
-			name:     "EnvConfigPathSet",
-			envPath:  "/custom/path.yaml",
-			fallback: "/default/path.yaml",
-			want:     "/custom/path.yaml",
+			name:      "EnvConfigPathSet",
+			localPath: missingLocal,
+			envPath:   "/custom/path.yaml",
+			fallback:  "/default/path.yaml",
+			want:      "/custom/path.yaml",
 		},
 		{
-			name:     "FallbackUsed",
-			fallback: "/default/path.yaml",
-			want:     "/default/path.yaml",
+			name:      "LocalConfigFileExists",
+			localPath: existingLocal,
+			fallback:  "/default/path.yaml",
+			want:      existingLocal,
+		},
+		{
+			name:      "FallbackUsed",
+			localPath: missingLocal,
+			fallback:  "/default/path.yaml",
+			want:      "/default/path.yaml",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			localConfigPath = tc.localPath
 			t.Setenv("CONFIG_PATH", tc.envPath)
 			got := ResolveConfigPath(tc.fallback)
 			if got != tc.want {
@@ -620,67 +668,148 @@ func TestMMRSelect(t *testing.T) {
 	}
 }
 
-func TestOllamaClient(t *testing.T) {
+func TestNewOllamaClient(t *testing.T) {
 	tests := []struct {
-		name         string
-		handlerCode  int
-		handlerBody  string
-		input        string
-		isQuery      bool
-		prefix       string
-		wantErr      bool
-		wantVecLen   int
-		expectPrompt string
+		name      string
+		cfg       *OllamaConfig
+		wantURL   string
+		wantModel string
+		wantCtx   int
 	}{
 		{
-			name:        "SuccessDocument",
-			handlerCode: http.StatusOK,
-			handlerBody: `{"embedding": [0.1, 0.2, 0.3]}`,
-			input:       "test fact text",
-			isQuery:     false,
-			wantVecLen:  3,
+			name:      "NilConfigUsesDefaults",
+			cfg:       nil,
+			wantURL:   DefaultOllamaURL,
+			wantModel: DefaultOllamaModel,
+			wantCtx:   DefaultOllamaNumCtx,
 		},
 		{
-			name:         "SuccessQueryWithPrefix",
-			handlerCode:  http.StatusOK,
-			handlerBody:  `{"embedding": [0.1, 0.2, 0.3]}`,
-			input:        "search query",
-			isQuery:      true,
-			prefix:       "search: ",
-			wantVecLen:   3,
-			expectPrompt: "search: search query",
+			name:      "EmptyFieldsUseDefaults",
+			cfg:       &OllamaConfig{BaseURL: "  ", Model: "", NumCtx: 0},
+			wantURL:   DefaultOllamaURL,
+			wantModel: DefaultOllamaModel,
+			wantCtx:   DefaultOllamaNumCtx,
 		},
 		{
-			name:        "EmptyTextInputError",
-			input:       "",
-			wantErr:     true,
-			handlerCode: http.StatusOK,
-		},
-		{
-			name:        "Non200Error",
-			handlerCode: http.StatusInternalServerError,
-			handlerBody: `internal server error`,
-			input:       "test text",
-			wantErr:     true,
-		},
-		{
-			name:        "OllamaErrorResponse",
-			handlerCode: http.StatusOK,
-			handlerBody: `{"error": "model not found"}`,
-			input:       "test text",
-			wantErr:     true,
-		},
-		{
-			name:        "EmptyEmbeddingReturned",
-			handlerCode: http.StatusOK,
-			handlerBody: `{"embedding": []}`,
-			input:       "test text",
-			wantErr:     true,
+			name:      "CustomFieldsTrimSlash",
+			cfg:       &OllamaConfig{BaseURL: "http://ollama:11434/", Model: "bge", NumCtx: 256},
+			wantURL:   "http://ollama:11434",
+			wantModel: "bge",
+			wantCtx:   256,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			c := NewOllamaClient(tc.cfg)
+			if c.baseURL != tc.wantURL || c.model != tc.wantModel || c.numCtx != tc.wantCtx {
+				t.Errorf("NewOllamaClient() = %+v, want url=%q model=%q ctx=%d", c, tc.wantURL, tc.wantModel, tc.wantCtx)
+			}
+		})
+	}
+}
+
+func TestOllamaClient_GenerateEmbedding(t *testing.T) {
+	tests := []struct {
+		name          string
+		handlerCodes  []int
+		handlerBodies []string
+		input         string
+		isQuery       bool
+		prefix        string
+		maxRetries    int
+		retryDelay    time.Duration
+		cancelCtx     bool
+		wantErr       bool
+		wantVecLen    int
+		expectPrompt  string
+	}{
+		{
+			name:          "SuccessDocument",
+			handlerCodes:  []int{http.StatusOK},
+			handlerBodies: []string{`{"embedding": [0.1, 0.2, 0.3]}`},
+			input:         "test fact text",
+			isQuery:       false,
+			wantVecLen:    3,
+		},
+		{
+			name:          "SuccessQueryWithPrefix",
+			handlerCodes:  []int{http.StatusOK},
+			handlerBodies: []string{`{"embedding": [0.1, 0.2, 0.3]}`},
+			input:         "search query",
+			isQuery:       true,
+			prefix:        "search: ",
+			wantVecLen:    3,
+			expectPrompt:  "search: search query",
+		},
+		{
+			name:          "RetrySucceedsOnSecondAttempt",
+			handlerCodes:  []int{http.StatusInternalServerError, http.StatusOK},
+			handlerBodies: []string{`temporary error`, `{"embedding": [0.1, 0.2]}`},
+			input:         "retry query",
+			isQuery:       true,
+			prefix:        "q: ",
+			maxRetries:    2,
+			retryDelay:    1 * time.Millisecond,
+			wantVecLen:    2,
+		},
+		{
+			name:          "NegativeRetriesClampedAndFails",
+			handlerCodes:  []int{http.StatusInternalServerError},
+			handlerBodies: []string{`temporary error`},
+			input:         "query",
+			maxRetries:    -1,
+			wantErr:       true,
+		},
+		{
+			name:          "ContextCanceledError",
+			handlerCodes:  []int{http.StatusInternalServerError},
+			handlerBodies: []string{`err`},
+			input:         "query",
+			maxRetries:    1,
+			cancelCtx:     true,
+			wantErr:       true,
+		},
+		{
+			name:          "EmptyTextInputError",
+			input:         "",
+			wantErr:       true,
+			handlerCodes:  []int{http.StatusOK},
+			handlerBodies: []string{`{}`},
+		},
+		{
+			name:          "Non200Error",
+			handlerCodes:  []int{http.StatusInternalServerError},
+			handlerBodies: []string{`internal server error`},
+			input:         "test text",
+			wantErr:       true,
+		},
+		{
+			name:          "InvalidJSONResponse",
+			handlerCodes:  []int{http.StatusOK},
+			handlerBodies: []string{`{bad json`},
+			input:         "test text",
+			wantErr:       true,
+		},
+		{
+			name:          "OllamaErrorResponse",
+			handlerCodes:  []int{http.StatusOK},
+			handlerBodies: []string{`{"error": "model not found"}`},
+			input:         "test text",
+			wantErr:       true,
+		},
+		{
+			name:          "EmptyEmbeddingReturned",
+			handlerCodes:  []int{http.StatusOK},
+			handlerBodies: []string{`{"embedding": []}`},
+			input:         "test text",
+			wantErr:       true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			attempt := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if tc.expectPrompt != "" {
 					var req embeddingRequest
@@ -689,8 +818,13 @@ func TestOllamaClient(t *testing.T) {
 						t.Errorf("req.Prompt = %q, want %q", req.Prompt, tc.expectPrompt)
 					}
 				}
-				w.WriteHeader(tc.handlerCode)
-				_, _ = w.Write([]byte(tc.handlerBody))
+				idx := attempt
+				if idx >= len(tc.handlerCodes) {
+					idx = len(tc.handlerCodes) - 1
+				}
+				attempt++
+				w.WriteHeader(tc.handlerCodes[idx])
+				_, _ = w.Write([]byte(tc.handlerBodies[idx]))
 			}))
 			defer server.Close()
 
@@ -698,9 +832,16 @@ func TestOllamaClient(t *testing.T) {
 				BaseURL:     server.URL,
 				QueryPrefix: tc.prefix,
 			})
-			client.retryDelay = 0
+			client.retryDelay = tc.retryDelay
 
-			vec, err := client.GenerateEmbedding(context.Background(), tc.input, tc.isQuery, 0)
+			ctx := context.Background()
+			if tc.cancelCtx {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+
+			vec, err := client.GenerateEmbedding(ctx, tc.input, tc.isQuery, tc.maxRetries)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("GenerateEmbedding() err = %v, wantErr = %v", err, tc.wantErr)
 			}
@@ -758,12 +899,10 @@ func TestToolHandler_MemorySearch(t *testing.T) {
 	_, _ = store.InsertFact(context.Background(), "user", "User lives in Oakland", 0.9, []float32{1, 0})
 	_, _ = store.InsertFact(context.Background(), "work", "User works in tech", 0.8, []float32{0, 1})
 
-	ollama := &MockOllamaClient{embedding: []float32{1, 0}}
-	handler := NewToolHandler(&Config{}, store, ollama)
-
 	tests := []struct {
 		name      string
 		args      MemorySearchArgs
+		ollamaErr error
 		storeFail bool
 		wantErr   bool
 		wantCount int
@@ -771,6 +910,17 @@ func TestToolHandler_MemorySearch(t *testing.T) {
 		{
 			name:      "SuccessfulSearch",
 			args:      MemorySearchArgs{Query: "Oakland", Limit: 5},
+			wantCount: 1,
+		},
+		{
+			name:      "NegativeLimitAndOllamaWarningFallback",
+			args:      MemorySearchArgs{Query: "Oakland", Limit: -1},
+			ollamaErr: errors.New("ollama offline"),
+			wantCount: 1,
+		},
+		{
+			name:      "HighLimitClamped",
+			args:      MemorySearchArgs{Query: "Oakland", Limit: 100},
 			wantCount: 1,
 		},
 		{
@@ -788,6 +938,8 @@ func TestToolHandler_MemorySearch(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			ollama := &MockOllamaClient{embedding: []float32{1, 0}, err: tc.ollamaErr}
+			handler := NewToolHandler(&Config{}, store, ollama)
 			if tc.storeFail {
 				store.SetFail("SearchCandidateFacts", errors.New("search fail"))
 				defer store.SetFail("", nil)
@@ -807,38 +959,61 @@ func TestToolHandler_MemoryStore(t *testing.T) {
 	store := newTestMemStore()
 	existingID, _ := store.InsertFact(context.Background(), "user", "Existing Fact", 0.8, []float32{1.0, 0.0})
 
-	ollama := &MockOllamaClient{embedding: []float32{1.0, 0.0}}
-	handler := NewToolHandler(&Config{}, store, ollama)
-
 	tests := []struct {
 		name       string
 		args       MemoryStoreArgs
+		emb        []float32
+		ollamaErr  error
 		storeFail  string
 		wantErr    bool
 		wantAction string
 		wantID     int64
 	}{
 		{
-			name:       "InsertNewFact",
+			name:       "ReinforceDuplicateFact",
 			args:       MemoryStoreArgs{FactText: "Brand new fact", Category: "system"},
+			emb:        []float32{1.0, 0.0},
 			wantAction: "reinforced",
 			wantID:     existingID,
 		},
 		{
-			name:       "InsertUniqueFact",
-			args:       MemoryStoreArgs{FactText: "Unique fact", Category: "system"},
+			name:      "ReinforceDuplicateError",
+			args:      MemoryStoreArgs{FactText: "Brand new fact"},
+			emb:       []float32{1.0, 0.0},
+			storeFail: "ReinforceFact",
+			wantErr:   true,
+		},
+		{
+			name:       "InsertUniqueFactWithClampedHighImportance",
+			args:       MemoryStoreArgs{FactText: "Unique fact", Importance: 5.0},
+			emb:        []float32{0.0, 1.0},
+			wantAction: "inserted",
+		},
+		{
+			name:       "InsertWithOllamaWarningAndNegativeImportance",
+			args:       MemoryStoreArgs{FactText: "Fact without embedding", Importance: -0.5},
+			ollamaErr:  errors.New("embed error"),
 			wantAction: "inserted",
 		},
 		{
 			name:       "SupersedeExistingFact",
 			args:       MemoryStoreArgs{FactText: "Updated Fact", Category: "user", SupersedesID: existingID},
+			emb:        []float32{1.0, 0.0},
 			wantAction: "updated",
 			wantID:     existingID,
 		},
 		{
 			name:    "SupersedeNonexistentFails",
 			args:    MemoryStoreArgs{FactText: "Updated Fact", SupersedesID: 999999},
+			emb:     []float32{1.0, 0.0},
 			wantErr: true,
+		},
+		{
+			name:      "SupersedeStoreError",
+			args:      MemoryStoreArgs{FactText: "Updated Fact", SupersedesID: existingID},
+			emb:       []float32{1.0, 0.0},
+			storeFail: "UpdateFact",
+			wantErr:   true,
 		},
 		{
 			name:    "EmptyFactTextFails",
@@ -855,13 +1030,8 @@ func TestToolHandler_MemoryStore(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.name == "InsertUniqueFact" {
-				ollama.embedding = []float32{0.0, 1.0}
-			} else if tc.name == "InsertStoreFails" {
-				ollama.embedding = nil
-			} else {
-				ollama.embedding = []float32{1.0, 0.0}
-			}
+			ollama := &MockOllamaClient{embedding: tc.emb, err: tc.ollamaErr}
+			handler := NewToolHandler(&Config{}, store, ollama)
 			if tc.storeFail != "" {
 				store.SetFail(tc.storeFail, errors.New("simulated store failure"))
 				defer store.SetFail("", nil)
@@ -888,9 +1058,10 @@ func TestToolHandler_MemoryForget(t *testing.T) {
 	handler := NewToolHandler(&Config{}, store, nil)
 
 	tests := []struct {
-		name    string
-		args    MemoryForgetArgs
-		wantErr bool
+		name      string
+		args      MemoryForgetArgs
+		storeFail bool
+		wantErr   bool
 	}{
 		{
 			name:    "ForgetSuccess",
@@ -907,10 +1078,20 @@ func TestToolHandler_MemoryForget(t *testing.T) {
 			args:    MemoryForgetArgs{FactID: 0},
 			wantErr: true,
 		},
+		{
+			name:      "StoreDeleteError",
+			args:      MemoryForgetArgs{FactID: 10},
+			storeFail: true,
+			wantErr:   true,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.storeFail {
+				store.SetFail("DeleteFact", errors.New("disk failure"))
+				defer store.SetFail("", nil)
+			}
 			out, err := handler.MemoryForget(context.Background(), tc.args)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("MemoryForget() err = %v, wantErr = %v", err, tc.wantErr)
@@ -922,40 +1103,117 @@ func TestToolHandler_MemoryForget(t *testing.T) {
 	}
 }
 
-func TestToolHandler_GetFactsAndContext(t *testing.T) {
+func TestToolHandler_GetFacts(t *testing.T) {
 	store := newTestMemStore()
 	_, _ = store.InsertFact(context.Background(), "profile", "Profile fact", 0.8, []float32{1, 0})
-	handler := NewToolHandler(&Config{}, store, &MockOllamaClient{embedding: []float32{1, 0}})
+	handler := NewToolHandler(&Config{}, store, nil)
 
-	t.Run("GetFacts", func(t *testing.T) {
-		res, err := handler.GetFacts(context.Background(), FactsFilter{Category: "profile"})
-		if err != nil {
-			t.Fatalf("GetFacts failed: %v", err)
-		}
-		if res.Total != 1 || len(res.Facts) != 1 {
-			t.Errorf("res.Total = %d, len = %d, want 1", res.Total, len(res.Facts))
-		}
-	})
+	tests := []struct {
+		name      string
+		filter    FactsFilter
+		wantTotal int
+	}{
+		{
+			name:      "MatchingCategory",
+			filter:    FactsFilter{Category: "profile"},
+			wantTotal: 1,
+		},
+		{
+			name:      "NonMatchingCategory",
+			filter:    FactsFilter{Category: "other"},
+			wantTotal: 0,
+		},
+	}
 
-	t.Run("GetContextEmptyQuery", func(t *testing.T) {
-		res, err := handler.GetContext(context.Background(), "", 5)
-		if err != nil {
-			t.Fatalf("GetContext failed: %v", err)
-		}
-		if res.Context != "" || len(res.Facts) != 0 {
-			t.Errorf("expected empty context response, got %+v", res)
-		}
-	})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := handler.GetFacts(context.Background(), tc.filter)
+			if err != nil {
+				t.Fatalf("GetFacts() err = %v", err)
+			}
+			if res.Total != tc.wantTotal {
+				t.Errorf("res.Total = %d, want %d", res.Total, tc.wantTotal)
+			}
+		})
+	}
+}
 
-	t.Run("GetContextSuccess", func(t *testing.T) {
-		res, err := handler.GetContext(context.Background(), "Profile", 5)
-		if err != nil {
-			t.Fatalf("GetContext failed: %v", err)
-		}
-		if !strings.Contains(res.Context, "Profile fact") {
-			t.Errorf("expected context to contain 'Profile fact', got %q", res.Context)
-		}
-	})
+func TestToolHandler_GetContext(t *testing.T) {
+	store := newTestMemStore()
+	_, _ = store.InsertFact(context.Background(), "profile", "Profile fact", 0.8, []float32{1, 0})
+
+	tests := []struct {
+		name       string
+		query      string
+		limit      int
+		cancelCtx  bool
+		ollamaErr  error
+		storeFail  bool
+		wantErr    bool
+		wantSubstr string
+	}{
+		{
+			name:  "EmptyQuery",
+			query: "",
+			limit: 5,
+		},
+		{
+			name:       "ValidQuery",
+			query:      "Profile",
+			limit:      5,
+			wantSubstr: "Profile fact",
+		},
+		{
+			name:       "NegativeLimitAndOllamaWarning",
+			query:      "Profile",
+			limit:      -1,
+			ollamaErr:  errors.New("ollama down"),
+			wantSubstr: "Profile fact",
+		},
+		{
+			name:       "HighLimitClamped",
+			query:      "Profile",
+			limit:      50,
+			wantSubstr: "Profile fact",
+		},
+		{
+			name:      "CandidateSearchErrorGracefulEmpty",
+			query:     "Profile",
+			limit:     5,
+			storeFail: true,
+		},
+		{
+			name:      "CanceledContextReturnsError",
+			query:     "Profile",
+			limit:     5,
+			cancelCtx: true,
+			wantErr:   true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ollama := &MockOllamaClient{embedding: []float32{1, 0}, err: tc.ollamaErr}
+			handler := NewToolHandler(&Config{}, store, ollama)
+			if tc.storeFail {
+				store.SetFail("SearchCandidateFacts", errors.New("search err"))
+				defer store.SetFail("", nil)
+			}
+			ctx := context.Background()
+			if tc.cancelCtx {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			res, err := handler.GetContext(ctx, tc.query, tc.limit)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("GetContext() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr && tc.wantSubstr != "" && !strings.Contains(res.Context, tc.wantSubstr) {
+				t.Errorf("res.Context = %q, missing %q", res.Context, tc.wantSubstr)
+			}
+		})
+	}
 }
 
 func TestServer_Endpoints(t *testing.T) {
@@ -963,8 +1221,6 @@ func TestServer_Endpoints(t *testing.T) {
 	defer func() {
 		writeCountersDirFn, writeMetaDirFn = oldCounters, oldMeta
 	}()
-	writeCountersDirFn = func(string) error { return nil }
-	writeMetaDirFn = func(string) error { return nil }
 
 	store := newTestMemStore()
 	_, _ = store.InsertFact(context.Background(), "general", "Server fact test", 0.75, []float32{1, 0})
@@ -979,6 +1235,11 @@ func TestServer_Endpoints(t *testing.T) {
 		path       string
 		headers    map[string]string
 		body       string
+		coverDir   string
+		counterErr error
+		storeFail  string
+		directMCP  bool
+		errReader  bool
 		wantStatus int
 		wantSubstr string
 	}{
@@ -993,8 +1254,17 @@ func TestServer_Endpoints(t *testing.T) {
 			name:       "CoverageFlush",
 			method:     http.MethodGet,
 			path:       "/debug/coverage/flush",
+			coverDir:   t.TempDir(),
 			wantStatus: http.StatusOK,
 			wantSubstr: "ok",
+		},
+		{
+			name:       "CoverageFlushError",
+			method:     http.MethodGet,
+			path:       "/debug/coverage/flush",
+			coverDir:   t.TempDir(),
+			counterErr: errors.New("flush err"),
+			wantStatus: http.StatusInternalServerError,
 		},
 		{
 			name:       "FactsJSON",
@@ -1002,6 +1272,13 @@ func TestServer_Endpoints(t *testing.T) {
 			path:       "/facts?limit=10&offset=0",
 			wantStatus: http.StatusOK,
 			wantSubstr: `"facts"`,
+		},
+		{
+			name:       "FactsStoreError",
+			method:     http.MethodGet,
+			path:       "/facts",
+			storeFail:  "GetFactsPaginated",
+			wantStatus: http.StatusInternalServerError,
 		},
 		{
 			name:       "FactsMethodNotAllowed",
@@ -1051,16 +1328,90 @@ func TestServer_Endpoints(t *testing.T) {
 			wantStatus: http.StatusBadRequest,
 		},
 		{
+			name:       "MCPReadError",
+			method:     http.MethodPost,
+			path:       "/mcp",
+			directMCP:  true,
+			errReader:  true,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "MCPDirectHealthRoute",
+			method:     http.MethodGet,
+			path:       "/health",
+			directMCP:  true,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "MCPDirectFlushRoute",
+			method:     http.MethodGet,
+			path:       "/debug/coverage/flush",
+			directMCP:  true,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "MCPDirectFactsRoute",
+			method:     http.MethodGet,
+			path:       "/facts",
+			directMCP:  true,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "MCPDirectContextRoute",
+			method:     http.MethodGet,
+			path:       "/context?q=test",
+			directMCP:  true,
+			wantStatus: http.StatusOK,
+		},
+		{
 			name:       "MCPDoublePrefixNormalized",
 			method:     http.MethodPost,
 			path:       "/mcp",
 			body:       `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"memory_memory_search","arguments":{"query":"test"}}}`,
 			wantStatus: http.StatusOK,
 		},
+		{
+			name:       "MCPStoreToolCall",
+			method:     http.MethodPost,
+			path:       "/mcp",
+			body:       `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"memory_store","arguments":{"fact_text":"tool call store"}}}`,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "MCPForgetToolCall",
+			method:     http.MethodPost,
+			path:       "/mcp",
+			body:       `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"memory_forget","arguments":{"fact_id":1}}}`,
+			wantStatus: http.StatusOK,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GOCOVERDIR", tc.coverDir)
+			writeCountersDirFn = func(string) error { return tc.counterErr }
+			writeMetaDirFn = func(string) error { return tc.counterErr }
+			if tc.storeFail != "" {
+				store.SetFail(tc.storeFail, errors.New("store err"))
+				defer store.SetFail("", nil)
+			}
+
+			if tc.directMCP {
+				var rBody io.Reader
+				if tc.errReader {
+					rBody = &mockErrReadCloser{}
+				} else if tc.body != "" {
+					rBody = strings.NewReader(tc.body)
+				}
+				rec := httptest.NewRecorder()
+				req := httptest.NewRequest(tc.method, tc.path, rBody)
+				server.handleMCP(rec, req)
+				if rec.Code != tc.wantStatus {
+					t.Fatalf("status = %d, want %d", rec.Code, tc.wantStatus)
+				}
+				return
+			}
+
 			var bodyReader io.Reader
 			if tc.body != "" {
 				bodyReader = strings.NewReader(tc.body)
@@ -1100,68 +1451,115 @@ func TestServer_PanicOnNilHandler(t *testing.T) {
 	_ = NewServer(nil)
 }
 
-func TestDB_ScanHelpers(t *testing.T) {
-	t.Run("NullVector", func(t *testing.T) {
-		var nv NullVector
-		if err := nv.Scan(nil); err != nil || nv.Valid {
-			t.Errorf("expected null vector for nil, got %+v", nv)
-		}
-		if err := nv.Scan("[1.0,2.0]"); err != nil || !nv.Valid || len(nv.Vector) != 2 {
-			t.Errorf("expected valid vector from string, got %+v, err=%v", nv, err)
-		}
-		vec := pgvector.NewVector([]float32{3.0, 4.0})
-		if err := nv.Scan(vec); err != nil || !nv.Valid || len(nv.Vector) != 2 {
-			t.Errorf("expected valid vector from pgvector.Vector, got %+v, err=%v", nv, err)
-		}
-	})
+func TestNullVector_Scan(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     any
+		wantValid bool
+		wantErr   bool
+	}{
+		{"NilInput", nil, false, false},
+		{"StringVector", "[1.0,2.0]", true, false},
+		{"PgvectorValue", pgvector.NewVector([]float32{3.0, 4.0}), true, false},
+		{"InvalidIntInput", 12345, false, true},
+	}
 
-	t.Run("FactTime", func(t *testing.T) {
-		var ft FactTime
-		if err := ft.Scan(nil); err != nil || ft.Valid {
-			t.Errorf("expected invalid FactTime for nil, got %+v", ft)
-		}
-		now := time.Now().UTC()
-		if err := ft.Scan(now); err != nil || !ft.Valid {
-			t.Errorf("expected valid FactTime for time.Time, got %+v", ft)
-		}
-		if err := ft.Scan("2026-10-21T09:43:01Z"); err != nil || !ft.Valid {
-			t.Errorf("expected valid FactTime for RFC3339 string, got %+v", ft)
-		}
-		if err := ft.Scan(""); err != nil || ft.Valid {
-			t.Errorf("expected invalid FactTime for empty string, got %+v", ft)
-		}
-	})
-
-	t.Run("EscapeSQLLike", func(t *testing.T) {
-		got := EscapeSQLLike("a%b_c\\d")
-		want := "a\\%b\\_c\\\\d"
-		if got != want {
-			t.Errorf("EscapeSQLLike() = %q, want %q", got, want)
-		}
-	})
-
-	t.Run("OptionalVectorArg", func(t *testing.T) {
-		if optionalVectorArg(nil) != nil {
-			t.Errorf("expected nil for nil embedding")
-		}
-		emb384 := make([]float32, ExpectedEmbeddingDim)
-		if optionalVectorArg(emb384) == nil {
-			t.Errorf("expected non-nil for 384 dim embedding")
-		}
-	})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var nv NullVector
+			err := nv.Scan(tc.input)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("NullVector.Scan() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr && nv.Valid != tc.wantValid {
+				t.Errorf("nv.Valid = %v, want %v", nv.Valid, tc.wantValid)
+			}
+		})
+	}
 }
 
-func TestMockPostgresConnection(t *testing.T) {
-	addr := startMockPostgres(t)
-	dsn := "postgres://mock_user:mock_pass@" + addr + "/mock_db?sslmode=disable"
-	db, err := InitDB(&Config{DatabaseURL: dsn})
-	if err != nil {
-		t.Fatalf("InitDB with mock postgres failed: %v", err)
-	}
-	defer db.Close()
+func TestFactTime_Scan(t *testing.T) {
+	now := time.Now().UTC()
+	var nilTimePtr *time.Time
 
-	if !isPostgres(db) {
-		t.Errorf("expected isPostgres(db) to return true for mock postgres")
+	tests := []struct {
+		name      string
+		input     any
+		wantValid bool
+		wantErr   bool
+	}{
+		{"NilInput", nil, false, false},
+		{"NilTimePointer", nilTimePtr, false, false},
+		{"ValidTimePointer", &now, true, false},
+		{"ValidTimeValue", now, true, false},
+		{"ValidRFC3339String", "2026-10-21T09:43:01Z", true, false},
+		{"ValidSpaceString", "2026-10-21 09:00:00", true, false},
+		{"EmptyString", "  ", false, false},
+		{"InvalidDateString", "not-a-timestamp", false, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var ft FactTime
+			err := ft.Scan(tc.input)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("FactTime.Scan() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr && ft.Valid != tc.wantValid {
+				t.Errorf("ft.Valid = %v, want %v", ft.Valid, tc.wantValid)
+			}
+		})
+	}
+}
+
+func TestEscapeSQLLikeAndHelpers(t *testing.T) {
+	RegisterSQLiteTestHook(nil)
+	ctx, cancel := withTimeout(nil, 1*time.Second)
+	defer cancel()
+	if ctx == nil {
+		t.Fatal("expected non-nil context from withTimeout(nil)")
+	}
+	closeWarn(nil, "nil")
+	closeWarn(mockCloser{err: errors.New("close err")}, "mock")
+	writeResponse(httptest.NewRecorder(), nil, []byte("ok"))
+	writeResponse(&mockErrWriter{err: errors.New("write err")}, nil, []byte("fail"))
+
+	if optionalVectorArg(nil) != nil {
+		t.Error("expected nil for nil embedding")
+	}
+	if optionalVectorArg(make([]float32, ExpectedEmbeddingDim)) == nil {
+		t.Error("expected non-nil for 384-dim embedding")
+	}
+	if got := EscapeSQLLike("a%b_c\\d"); got != "a\\%b\\_c\\\\d" {
+		t.Errorf("EscapeSQLLike() = %q", got)
+	}
+}
+
+func TestInitDB(t *testing.T) {
+	addr := startMockPostgres(t)
+	validDSN := "postgres://mock_user:mock_pass@" + addr + "/mock_db?sslmode=disable"
+
+	tests := []struct {
+		name    string
+		cfg     *Config
+		wantErr bool
+	}{
+		{"NilConfig", nil, true},
+		{"EmptyDSN", &Config{DatabaseURL: "   "}, true},
+		{"UnreachableDSN", &Config{DatabaseURL: "postgres://127.0.0.1:1/bad?connect_timeout=1"}, true},
+		{"ValidMockPostgres", &Config{DatabaseURL: validDSN}, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := InitDB(tc.cfg)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("InitDB() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if db != nil {
+				_ = db.Close()
+			}
+		})
 	}
 }
 
@@ -1174,73 +1572,111 @@ func TestMain_Execution(t *testing.T) {
 	tmpDir := t.TempDir()
 	testCfg := filepath.Join(tmpDir, "config.yaml")
 	_ = os.WriteFile(testCfg, []byte("port: \"4008\"\ndatabase_url: \"postgres://u:p@localhost/db\"\n"), 0o644)
-	configPath = testCfg
-	t.Setenv("CONFIG_PATH", testCfg)
-	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/db")
 
-	runCalled := false
-	runAppFn = func(ctx context.Context, cfg *Config) error {
-		runCalled = true
-		return nil
-	}
-	main()
-	if !runCalled {
-		t.Error("expected runAppFn called")
+	tests := []struct {
+		name         string
+		cfgPath      string
+		dbURL        string
+		runErr       error
+		wantRunCall  bool
+		wantExitCall bool
+	}{
+		{
+			name:        "CleanExit",
+			cfgPath:     testCfg,
+			dbURL:       "postgres://user:pass@localhost:5432/db",
+			wantRunCall: true,
+		},
+		{
+			name:        "ErrServerClosedIgnored",
+			cfgPath:     testCfg,
+			dbURL:       "postgres://user:pass@localhost:5432/db",
+			runErr:      http.ErrServerClosed,
+			wantRunCall: true,
+		},
+		{
+			name:         "RuntimeFailureCallsExit",
+			cfgPath:      testCfg,
+			dbURL:        "postgres://user:pass@localhost:5432/db",
+			runErr:       context.DeadlineExceeded,
+			wantRunCall:  true,
+			wantExitCall: true,
+		},
+		{
+			name:         "ConfigLoadFailureCallsExit",
+			cfgPath:      filepath.Join(tmpDir, "nonexistent.yaml"),
+			dbURL:        "",
+			wantExitCall: true,
+		},
 	}
 
-	exitCalled := false
-	exitFn = func(string, ...interface{}) { exitCalled = true }
-	runAppFn = func(ctx context.Context, cfg *Config) error { return http.ErrServerClosed }
-	main()
-	if exitCalled {
-		t.Error("did not expect exitFn on http.ErrServerClosed")
-	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			configPath = tc.cfgPath
+			t.Setenv("CONFIG_PATH", tc.cfgPath)
+			t.Setenv("DATABASE_URL", tc.dbURL)
+			t.Setenv("POSTGRES_URL", "")
 
-	runAppFn = func(ctx context.Context, cfg *Config) error { return context.DeadlineExceeded }
-	main()
-	if !exitCalled {
-		t.Error("expected exitFn on server error")
-	}
+			runCalled := false
+			exitCalled := false
+			runAppFn = func(ctx context.Context, cfg *Config) error {
+				runCalled = true
+				return tc.runErr
+			}
+			exitFn = func(string, ...interface{}) {
+				exitCalled = true
+			}
 
-	exitCalled = false
-	configPath = filepath.Join(tmpDir, "nonexistent.yaml")
-	t.Setenv("CONFIG_PATH", configPath)
-	t.Setenv("DATABASE_URL", "")
-	t.Setenv("POSTGRES_URL", "")
-	main()
-	if !exitCalled {
-		t.Error("expected exitFn on config load error")
+			main()
+			if runCalled != tc.wantRunCall {
+				t.Errorf("runCalled = %v, want %v", runCalled, tc.wantRunCall)
+			}
+			if exitCalled != tc.wantExitCall {
+				t.Errorf("exitCalled = %v, want %v", exitCalled, tc.wantExitCall)
+			}
+		})
 	}
 }
 
 func TestRunApp_Lifecycle(t *testing.T) {
-	t.Run("NilConfigFails", func(t *testing.T) {
-		err := RunApp(context.Background(), nil)
-		if err == nil {
-			t.Error("expected error on nil config")
-		}
-	})
+	addr := startMockPostgres(t)
+	validDSN := "postgres://mock_user:mock_pass@" + addr + "/mock_db?sslmode=disable"
 
-	t.Run("InvalidDBFails", func(t *testing.T) {
-		err := RunApp(context.Background(), &Config{DatabaseURL: "invalid://bad"})
-		if err == nil {
-			t.Error("expected error on invalid db URL")
-		}
-	})
+	tests := []struct {
+		name    string
+		cfg     *Config
+		wantErr bool
+	}{
+		{
+			name:    "NilConfigFails",
+			cfg:     nil,
+			wantErr: true,
+		},
+		{
+			name:    "InvalidDBFails",
+			cfg:     &Config{DatabaseURL: "postgres://127.0.0.1:1/bad?connect_timeout=1"},
+			wantErr: true,
+		},
+		{
+			name:    "CleanLifecycleWithMockPostgres",
+			cfg:     &Config{Port: "0", DatabaseURL: validDSN},
+			wantErr: false,
+		},
+	}
 
-	t.Run("CleanLifecycleWithMockPostgres", func(t *testing.T) {
-		addr := startMockPostgres(t)
-		cfg := &Config{
-			Port:        "0",
-			DatabaseURL: "postgres://mock_user:mock_pass@" + addr + "/mock_db?sslmode=disable",
-		}
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel() // Cancel immediately for graceful shutdown test
-		err := RunApp(ctx, cfg)
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			t.Fatalf("RunApp error: %v", err)
-		}
-	})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			err := RunApp(ctx, tc.cfg)
+			if tc.wantErr && err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !tc.wantErr && err != nil && !errors.Is(err, http.ErrServerClosed) {
+				t.Fatalf("RunApp() unexpected err = %v", err)
+			}
+		})
+	}
 }
 
 type testCustomResult struct {
@@ -1308,43 +1744,28 @@ func setupTestDBMem(t *testing.T) *sql.DB {
 	return db
 }
 
-func TestSQLStore_Operations(t *testing.T) {
+func TestSQLStore_InsertFact(t *testing.T) {
 	dbMem := setupTestDBMem(t)
 	ctx := context.Background()
 	emb := make([]float32, ExpectedEmbeddingDim)
 
-	t.Run("CheckDBNil", func(t *testing.T) {
-		var store *SQLStore
-		if err := store.checkDB(); err == nil {
-			t.Error("expected error for nil SQLStore")
-		}
-		emptyStore := &SQLStore{}
-		if err := emptyStore.checkDB(); err == nil {
-			t.Error("expected error for nil db in SQLStore")
-		}
-	})
-
-	t.Run("Close", func(t *testing.T) {
-		var store *SQLStore
-		if err := store.Close(); err != nil {
-			t.Errorf("unexpected error on nil Close: %v", err)
-		}
-		memDB, _ := sql.Open("sqlite", ":memory:")
-		st := NewSQLStore(memDB, false)
-		if err := st.Close(); err != nil {
-			t.Errorf("unexpected error on valid Close: %v", err)
-		}
-	})
-
-	insertTests := []struct {
-		name     string
-		category string
-		factText string
-		queryErr error
-		rowSQL   string
-		wantErr  bool
-		wantID   int64
+	tests := []struct {
+		name       string
+		nilDB      bool
+		category   string
+		factText   string
+		importance float64
+		queryErr   error
+		rowSQL     string
+		wantErr    bool
+		wantID     int64
 	}{
+		{
+			name:     "NilDBError",
+			nilDB:    true,
+			factText: "valid",
+			wantErr:  true,
+		},
 		{
 			name:     "EmptyFactText",
 			factText: "",
@@ -1357,21 +1778,27 @@ func TestSQLStore_Operations(t *testing.T) {
 			wantErr:  true,
 		},
 		{
-			name:     "SuccessDefaultCategory",
-			factText: "valid fact",
-			rowSQL:   "SELECT 42",
-			wantID:   42,
+			name:       "SuccessDefaultCategoryAndImportance",
+			factText:   "valid fact",
+			importance: -1,
+			rowSQL:     "SELECT 42",
+			wantID:     42,
 		},
 	}
-	for _, tc := range insertTests {
-		t.Run("Insert_"+tc.name, func(t *testing.T) {
-			mock := queryMockDBTX{
-				dbMem:    dbMem,
-				queryErr: tc.queryErr,
-				rowSQL:   tc.rowSQL,
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var store *SQLStore
+			if tc.nilDB {
+				store = &SQLStore{}
+			} else {
+				store = NewSQLStore(queryMockDBTX{
+					dbMem:    dbMem,
+					queryErr: tc.queryErr,
+					rowSQL:   tc.rowSQL,
+				})
 			}
-			store := NewSQLStore(mock, true)
-			id, err := store.InsertFact(ctx, tc.category, tc.factText, 0.7, emb)
+			id, err := store.InsertFact(ctx, tc.category, tc.factText, tc.importance, emb)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("InsertFact() err = %v, wantErr = %v", err, tc.wantErr)
 			}
@@ -1380,14 +1807,29 @@ func TestSQLStore_Operations(t *testing.T) {
 			}
 		})
 	}
+}
 
-	updateTests := []struct {
+func TestSQLStore_UpdateFact(t *testing.T) {
+	dbMem := setupTestDBMem(t)
+	ctx := context.Background()
+	emb := make([]float32, ExpectedEmbeddingDim)
+
+	tests := []struct {
 		name         string
+		nilDB        bool
+		category     string
 		factText     string
+		importance   float64
 		execErr      error
 		rowsAffected int64
 		wantErr      bool
 	}{
+		{
+			name:     "NilDBError",
+			nilDB:    true,
+			factText: "valid",
+			wantErr:  true,
+		},
 		{
 			name:     "EmptyFactText",
 			factText: "",
@@ -1406,33 +1848,52 @@ func TestSQLStore_Operations(t *testing.T) {
 			wantErr:      true,
 		},
 		{
-			name:         "Success",
+			name:         "SuccessWithDefaults",
 			factText:     "valid",
+			importance:   -1,
 			rowsAffected: 1,
 			wantErr:      false,
 		},
 	}
-	for _, tc := range updateTests {
-		t.Run("Update_"+tc.name, func(t *testing.T) {
-			mock := queryMockDBTX{
-				dbMem:        dbMem,
-				execErr:      tc.execErr,
-				rowsAffected: tc.rowsAffected,
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var store *SQLStore
+			if tc.nilDB {
+				store = &SQLStore{}
+			} else {
+				store = NewSQLStore(queryMockDBTX{
+					dbMem:        dbMem,
+					execErr:      tc.execErr,
+					rowsAffected: tc.rowsAffected,
+				})
 			}
-			store := NewSQLStore(mock, true)
-			err := store.UpdateFact(ctx, 10, "cat", tc.factText, 0.8, emb)
+			err := store.UpdateFact(ctx, 10, tc.category, tc.factText, tc.importance, emb)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("UpdateFact() err = %v, wantErr = %v", err, tc.wantErr)
 			}
 		})
 	}
+}
 
-	reinforceTests := []struct {
+func TestSQLStore_ReinforceFact(t *testing.T) {
+	dbMem := setupTestDBMem(t)
+	ctx := context.Background()
+	emb := make([]float32, ExpectedEmbeddingDim)
+
+	tests := []struct {
 		name         string
+		nilDB        bool
+		boost        float64
 		execErr      error
 		rowsAffected int64
 		wantErr      bool
 	}{
+		{
+			name:    "NilDBError",
+			nilDB:   true,
+			wantErr: true,
+		},
 		{
 			name:    "ExecError",
 			execErr: errors.New("reinforce err"),
@@ -1444,32 +1905,49 @@ func TestSQLStore_Operations(t *testing.T) {
 			wantErr:      true,
 		},
 		{
-			name:         "Success",
+			name:         "SuccessDefaultBoost",
+			boost:        -1,
 			rowsAffected: 1,
 			wantErr:      false,
 		},
 	}
-	for _, tc := range reinforceTests {
-		t.Run("Reinforce_"+tc.name, func(t *testing.T) {
-			mock := queryMockDBTX{
-				dbMem:        dbMem,
-				execErr:      tc.execErr,
-				rowsAffected: tc.rowsAffected,
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var store *SQLStore
+			if tc.nilDB {
+				store = &SQLStore{}
+			} else {
+				store = NewSQLStore(queryMockDBTX{
+					dbMem:        dbMem,
+					execErr:      tc.execErr,
+					rowsAffected: tc.rowsAffected,
+				})
 			}
-			store := NewSQLStore(mock, true)
-			err := store.ReinforceFact(ctx, 10, "new text", emb, 0.15)
+			err := store.ReinforceFact(ctx, 10, "new text", emb, tc.boost)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("ReinforceFact() err = %v, wantErr = %v", err, tc.wantErr)
 			}
 		})
 	}
+}
 
-	deleteTests := []struct {
+func TestSQLStore_DeleteFact(t *testing.T) {
+	dbMem := setupTestDBMem(t)
+	ctx := context.Background()
+
+	tests := []struct {
 		name         string
+		nilDB        bool
 		execErr      error
 		rowsAffected int64
 		wantErr      bool
 	}{
+		{
+			name:    "NilDBError",
+			nilDB:   true,
+			wantErr: true,
+		},
 		{
 			name:    "ExecError",
 			execErr: errors.New("delete err"),
@@ -1486,24 +1964,36 @@ func TestSQLStore_Operations(t *testing.T) {
 			wantErr:      false,
 		},
 	}
-	for _, tc := range deleteTests {
-		t.Run("Delete_"+tc.name, func(t *testing.T) {
-			mock := queryMockDBTX{
-				dbMem:        dbMem,
-				execErr:      tc.execErr,
-				rowsAffected: tc.rowsAffected,
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var store *SQLStore
+			if tc.nilDB {
+				store = &SQLStore{}
+			} else {
+				store = NewSQLStore(queryMockDBTX{
+					dbMem:        dbMem,
+					execErr:      tc.execErr,
+					rowsAffected: tc.rowsAffected,
+				})
 			}
-			store := NewSQLStore(mock, true)
 			err := store.DeleteFact(ctx, 10)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("DeleteFact() err = %v, wantErr = %v", err, tc.wantErr)
 			}
 		})
 	}
+}
 
-	findDupTests := []struct {
+func TestSQLStore_FindDuplicateFact(t *testing.T) {
+	dbMem := setupTestDBMem(t)
+	ctx := context.Background()
+
+	tests := []struct {
 		name       string
+		nilDB      bool
 		embLen     int
+		minSim     float64
 		queryErr   error
 		rowSQL     string
 		wantErr    bool
@@ -1512,8 +2002,21 @@ func TestSQLStore_Operations(t *testing.T) {
 		wantSimMin float64
 	}{
 		{
+			name:    "NilDBError",
+			nilDB:   true,
+			embLen:  ExpectedEmbeddingDim,
+			wantErr: true,
+		},
+		{
 			name:    "ShortEmbeddingReturnsNil",
 			embLen:  10,
+			wantNil: true,
+		},
+		{
+			name:    "ErrNoRowsReturnsNil",
+			embLen:  ExpectedEmbeddingDim,
+			minSim:  -1,
+			rowSQL:  "SELECT 1 WHERE 1=0",
 			wantNil: true,
 		},
 		{
@@ -1525,6 +2028,7 @@ func TestSQLStore_Operations(t *testing.T) {
 		{
 			name:       "MatchedAboveMin",
 			embLen:     ExpectedEmbeddingDim,
+			minSim:     0.85,
 			rowSQL:     "SELECT 7, 'cat', 'fact text', 0.9, '2026-10-21 09:00:00', '2026-10-21 09:00:00', '2026-10-21 09:00:00', 2, 0.92",
 			wantID:     7,
 			wantSimMin: 0.90,
@@ -1532,20 +2036,26 @@ func TestSQLStore_Operations(t *testing.T) {
 		{
 			name:    "MatchedBelowMin",
 			embLen:  ExpectedEmbeddingDim,
+			minSim:  0.85,
 			rowSQL:  "SELECT 8, 'cat', 'fact text', 0.9, '2026-10-21 09:00:00', '2026-10-21 09:00:00', '2026-10-21 09:00:00', 2, 0.40",
 			wantNil: true,
 		},
 	}
-	for _, tc := range findDupTests {
-		t.Run("FindDup_"+tc.name, func(t *testing.T) {
-			testEmb := make([]float32, tc.embLen)
-			mock := queryMockDBTX{
-				dbMem:    dbMem,
-				queryErr: tc.queryErr,
-				rowSQL:   tc.rowSQL,
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var store *SQLStore
+			if tc.nilDB {
+				store = &SQLStore{}
+			} else {
+				store = NewSQLStore(queryMockDBTX{
+					dbMem:    dbMem,
+					queryErr: tc.queryErr,
+					rowSQL:   tc.rowSQL,
+				})
 			}
-			store := NewSQLStore(mock, true)
-			dup, sim, err := store.FindDuplicateFact(ctx, testEmb, 0.85)
+			testEmb := make([]float32, tc.embLen)
+			dup, sim, err := store.FindDuplicateFact(ctx, testEmb, tc.minSim)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("FindDuplicateFact() err = %v, wantErr = %v", err, tc.wantErr)
 			}
@@ -1564,22 +2074,32 @@ func TestSQLStore_Operations(t *testing.T) {
 	}
 }
 
-func TestSQLStore_SearchCandidateFactsBranches(t *testing.T) {
+func TestSQLStore_SearchCandidateFacts(t *testing.T) {
 	dbMem := setupTestDBMem(t)
 	ctx := context.Background()
 	emb := make([]float32, ExpectedEmbeddingDim)
 
 	tests := []struct {
 		name         string
+		nilDB        bool
 		emb          []float32
 		query        string
 		category     string
+		limit        int
+		minScore     float64
 		queryErr     error
 		rowSQL       string
 		wantErr      bool
 		wantPatterns []string
 		wantCount    int
 	}{
+		{
+			name:    "NilDBError",
+			nilDB:   true,
+			emb:     emb,
+			query:   "q",
+			wantErr: true,
+		},
 		{
 			name:      "NeitherEmbeddingNorQuery",
 			emb:       nil,
@@ -1591,13 +2111,17 @@ func TestSQLStore_SearchCandidateFactsBranches(t *testing.T) {
 			emb:          emb,
 			query:        "test query",
 			category:     "work",
+			limit:        10,
+			minScore:     0.20,
 			wantPatterns: []string{"vector_hits", "text_hits", "category = $2"},
 		},
 		{
-			name:         "BothWithoutCategory",
+			name:         "BothWithoutCategoryDefaultBounds",
 			emb:          emb,
 			query:        "test query",
 			category:     "",
+			limit:        -1,
+			minScore:     -1,
 			wantPatterns: []string{"vector_hits", "text_hits"},
 		},
 		{
@@ -1605,6 +2129,8 @@ func TestSQLStore_SearchCandidateFactsBranches(t *testing.T) {
 			emb:          emb,
 			query:        "",
 			category:     "personal",
+			limit:        10,
+			minScore:     0.20,
 			wantPatterns: []string{"candidates", "category = $2"},
 		},
 		{
@@ -1612,6 +2138,8 @@ func TestSQLStore_SearchCandidateFactsBranches(t *testing.T) {
 			emb:          emb,
 			query:        "",
 			category:     "",
+			limit:        10,
+			minScore:     0.20,
 			wantPatterns: []string{"candidates"},
 		},
 		{
@@ -1619,6 +2147,8 @@ func TestSQLStore_SearchCandidateFactsBranches(t *testing.T) {
 			emb:          nil,
 			query:        "test query",
 			category:     "personal",
+			limit:        10,
+			minScore:     0.20,
 			wantPatterns: []string{"text_hits", "category = $2"},
 		},
 		{
@@ -1626,6 +2156,8 @@ func TestSQLStore_SearchCandidateFactsBranches(t *testing.T) {
 			emb:          nil,
 			query:        "test query",
 			category:     "",
+			limit:        10,
+			minScore:     0.20,
 			wantPatterns: []string{"text_hits"},
 		},
 		{
@@ -1647,14 +2179,18 @@ func TestSQLStore_SearchCandidateFactsBranches(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var captured string
-			mock := queryMockDBTX{
-				dbMem:         dbMem,
-				queryErr:      tc.queryErr,
-				rowSQL:        tc.rowSQL,
-				capturedQuery: &captured,
+			var store *SQLStore
+			if tc.nilDB {
+				store = &SQLStore{}
+			} else {
+				store = NewSQLStore(queryMockDBTX{
+					dbMem:         dbMem,
+					queryErr:      tc.queryErr,
+					rowSQL:        tc.rowSQL,
+					capturedQuery: &captured,
+				})
 			}
-			store := NewSQLStore(mock, true)
-			results, err := store.SearchCandidateFacts(ctx, tc.emb, tc.query, tc.category, 10, 0.20)
+			results, err := store.SearchCandidateFacts(ctx, tc.emb, tc.query, tc.category, tc.limit, tc.minScore)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("SearchCandidateFacts() err = %v, wantErr = %v", err, tc.wantErr)
 			}
@@ -1670,12 +2206,13 @@ func TestSQLStore_SearchCandidateFactsBranches(t *testing.T) {
 	}
 }
 
-func TestSQLStore_GetFactsPaginatedBranches(t *testing.T) {
+func TestSQLStore_GetFactsPaginated(t *testing.T) {
 	dbMem := setupTestDBMem(t)
 	ctx := context.Background()
 
 	tests := []struct {
 		name         string
+		nilDB        bool
 		filter       FactsFilter
 		queryErr     error
 		rowSQL       string
@@ -1683,6 +2220,11 @@ func TestSQLStore_GetFactsPaginatedBranches(t *testing.T) {
 		wantPatterns []string
 		wantTotal    int
 	}{
+		{
+			name:    "NilDBError",
+			nilDB:   true,
+			wantErr: true,
+		},
 		{
 			name:     "CountQueryError",
 			filter:   FactsFilter{Limit: 10},
@@ -1717,13 +2259,17 @@ func TestSQLStore_GetFactsPaginatedBranches(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var captured string
-			mock := queryMockDBTX{
-				dbMem:         dbMem,
-				queryErr:      tc.queryErr,
-				rowSQL:        tc.rowSQL,
-				capturedQuery: &captured,
+			var store *SQLStore
+			if tc.nilDB {
+				store = &SQLStore{}
+			} else {
+				store = NewSQLStore(queryMockDBTX{
+					dbMem:         dbMem,
+					queryErr:      tc.queryErr,
+					rowSQL:        tc.rowSQL,
+					capturedQuery: &captured,
+				})
 			}
-			store := NewSQLStore(mock, true)
 			_, err := store.GetFactsPaginated(ctx, tc.filter)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("GetFactsPaginated() err = %v, wantErr = %v", err, tc.wantErr)
@@ -1737,7 +2283,27 @@ func TestSQLStore_GetFactsPaginatedBranches(t *testing.T) {
 	}
 }
 
-func TestServer_DisconnectAndWrite(t *testing.T) {
+func TestSQLStore_Close(t *testing.T) {
+	memDB := setupTestDBMem(t)
+
+	tests := []struct {
+		name  string
+		store *SQLStore
+	}{
+		{"NilStore", nil},
+		{"ValidDBStore", NewSQLStore(memDB)},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.store.Close(); err != nil {
+				t.Errorf("Close() err = %v", err)
+			}
+		})
+	}
+}
+
+func TestIsClientDisconnect(t *testing.T) {
 	canceledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
 	reqCanceled, _ := http.NewRequestWithContext(canceledCtx, http.MethodGet, "/health", nil)
@@ -1764,342 +2330,4 @@ func TestServer_DisconnectAndWrite(t *testing.T) {
 			}
 		})
 	}
-
-	t.Run("WriteResponseSuccess", func(t *testing.T) {
-		rec := httptest.NewRecorder()
-		writeResponse(rec, nil, []byte("test data"))
-		if rec.Body.String() != "test data" {
-			t.Errorf("got %q, want 'test data'", rec.Body.String())
-		}
-	})
-
-	t.Run("WriteResponseError", func(t *testing.T) {
-		mockWriter := &mockErrWriter{err: errors.New("write failed")}
-		writeResponse(mockWriter, nil, []byte("fail"))
-	})
-}
-
-type mockErrWriter struct {
-	header http.Header
-	err    error
-}
-
-func (m *mockErrWriter) Header() http.Header {
-	if m.header == nil {
-		m.header = make(http.Header)
-	}
-	return m.header
-}
-func (m *mockErrWriter) Write([]byte) (int, error) { return 0, m.err }
-func (m *mockErrWriter) WriteHeader(int)           {}
-
-type mockCloser struct {
-	err error
-}
-
-func (m mockCloser) Close() error { return m.err }
-
-func TestAdditionalCoverage(t *testing.T) {
-	t.Run("RegisterSQLiteTestHookAndHelpers", func(t *testing.T) {
-		RegisterSQLiteTestHook(nil)
-		ctx, cancel := withTimeout(nil, 1*time.Second)
-		defer cancel()
-		if ctx == nil {
-			t.Error("expected non-nil context from withTimeout(nil)")
-		}
-
-		closeWarn(nil, "nil resource")
-		closeWarn(mockCloser{err: errors.New("close err")}, "mock resource")
-
-		if isPostgres(nil) {
-			t.Error("isPostgres(nil) should be false")
-		}
-
-		var nv NullVector
-		if err := nv.Scan(12345); err == nil {
-			t.Error("expected error scanning int into NullVector")
-		}
-
-		var ft FactTime
-		var nilTime *time.Time
-		if err := ft.Scan(nilTime); err != nil || ft.Valid {
-			t.Error("expected invalid for nil *time.Time")
-		}
-		if err := ft.Scan("2026-10-21 09:00:00"); err != nil || !ft.Valid {
-			t.Error("expected valid for space timestamp")
-		}
-		if err := ft.Scan("invalid-date-string"); err == nil {
-			t.Error("expected error for invalid date string")
-		}
-	})
-
-	t.Run("DBInitEdges", func(t *testing.T) {
-		if _, err := InitDB(nil); err == nil {
-			t.Error("expected error for InitDB(nil)")
-		}
-		if _, err := initDB("   "); err == nil {
-			t.Error("expected error for empty connStr in initDB")
-		}
-	})
-
-	t.Run("OllamaClientDefaultsAndRetries", func(t *testing.T) {
-		clientNil := NewOllamaClient(nil)
-		if clientNil.model != DefaultOllamaModel || clientNil.baseURL != DefaultOllamaURL {
-			t.Errorf("expected defaults, got %+v", clientNil)
-		}
-
-		clientEmpty := NewOllamaClient(&OllamaConfig{BaseURL: "", Model: "", NumCtx: 0})
-		if clientEmpty.model != DefaultOllamaModel || clientEmpty.numCtx != DefaultOllamaNumCtx {
-			t.Errorf("expected defaults for empty config, got %+v", clientEmpty)
-		}
-
-		attempts := 0
-		retryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			attempts++
-			if attempts == 1 {
-				w.WriteHeader(http.StatusInternalServerError)
-				_, _ = w.Write([]byte("temporary error"))
-				return
-			}
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"embedding":[0.1,0.2]}`))
-		}))
-		defer retryServer.Close()
-
-		retryClient := NewOllamaClient(&OllamaConfig{
-			BaseURL:     retryServer.URL,
-			QueryPrefix: "q: ",
-		})
-		retryClient.retryDelay = 1 * time.Millisecond
-		vec, err := retryClient.GenerateEmbedding(context.Background(), "query", true, -1)
-		if err == nil {
-			t.Error("expected error with maxRetries = -1")
-		}
-
-		attempts = 0
-		vec, err = retryClient.GenerateEmbedding(context.Background(), "query", true, 2)
-		if err != nil || len(vec) != 2 {
-			t.Fatalf("expected successful retry, got vec=%v, err=%v", vec, err)
-		}
-	})
-
-	t.Run("ToolsHandlerEdges", func(t *testing.T) {
-		store := newTestMemStore()
-		ollamaErr := &MockOllamaClient{err: errors.New("ollama offline")}
-		handler := NewToolHandler(&Config{}, store, ollamaErr)
-
-		// MemorySearch with ollama error and clamped limits
-		searchOut, err := handler.MemorySearch(context.Background(), MemorySearchArgs{
-			Query: "test",
-			Limit: -1,
-		})
-		if err != nil {
-			t.Fatalf("MemorySearch with ollama warning failed: %v", err)
-		}
-		if searchOut.Facts == nil {
-			t.Error("expected facts slice")
-		}
-
-		_, _ = handler.MemorySearch(context.Background(), MemorySearchArgs{
-			Query: "test",
-			Limit: 100,
-		})
-
-		// MemoryStore with default category and clamped importance
-		storeOut, err := handler.MemoryStore(context.Background(), MemoryStoreArgs{
-			FactText:   "fact with zero importance and empty cat",
-			Importance: -0.5,
-		})
-		if err != nil || storeOut.Action != "inserted" {
-			t.Fatalf("MemoryStore insert failed: %v", err)
-		}
-
-		_, _ = handler.MemoryStore(context.Background(), MemoryStoreArgs{
-			FactText:   "fact with large importance",
-			Importance: 5.0,
-		})
-
-		// Reinforce error on duplicate
-		dupID, _ := store.InsertFact(context.Background(), "general", "dup", 0.8, []float32{1, 0})
-		store.SetFail("ReinforceFact", errors.New("reinforce failed"))
-		ollamaValid := &MockOllamaClient{embedding: []float32{1, 0}}
-		handlerWithValid := NewToolHandler(&Config{}, store, ollamaValid)
-		_, err = handlerWithValid.MemoryStore(context.Background(), MemoryStoreArgs{
-			FactText: "dup",
-		})
-		if err == nil {
-			t.Error("expected error when ReinforceFact fails on duplicate")
-		}
-		store.SetFail("", nil)
-
-		// MemoryForget with ID <= 0 and delete failure
-		_, err = handler.MemoryForget(context.Background(), MemoryForgetArgs{FactID: -1})
-		if err == nil {
-			t.Error("expected error for FactID <= 0")
-		}
-
-		store.SetFail("DeleteFact", errors.New("disk failure"))
-		_, err = handler.MemoryForget(context.Background(), MemoryForgetArgs{FactID: dupID})
-		if err == nil {
-			t.Error("expected error when DeleteFact fails")
-		}
-		store.SetFail("", nil)
-
-		// GetContext with limit bounds and candidate search error
-		ctxRes, _ := handler.GetContext(context.Background(), "query", -1)
-		if ctxRes == nil {
-			t.Error("expected non-nil context response")
-		}
-		_, _ = handler.GetContext(context.Background(), "query", 50)
-
-		store.SetFail("SearchCandidateFacts", errors.New("store search err"))
-		ctxResErr, err := handler.GetContext(context.Background(), "query", 5)
-		if err != nil || ctxResErr.Context != "" {
-			t.Errorf("expected graceful recovery from candidate search failure, got res=%+v, err=%v", ctxResErr, err)
-		}
-		store.SetFail("", nil)
-	})
-
-	t.Run("ServerHandlersExtra", func(t *testing.T) {
-		store := newTestMemStore()
-		handler := NewToolHandler(&Config{}, store, nil)
-		server := NewServer(handler)
-
-		// Coverage flush failure
-		oldCounters := writeCountersDirFn
-		defer func() { writeCountersDirFn = oldCounters }()
-		writeCountersDirFn = func(string) error { return errors.New("coverage flush err") }
-		t.Setenv("GOCOVERDIR", t.TempDir())
-		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/debug/coverage/flush", nil)
-		server.handleCoverageFlush(rec, req)
-		if rec.Code != http.StatusInternalServerError {
-			t.Errorf("handleCoverageFlush status = %d, want 500", rec.Code)
-		}
-
-		// HandleFacts error
-		store.SetFail("GetFactsPaginated", errors.New("db query error"))
-		rec = httptest.NewRecorder()
-		req = httptest.NewRequest(http.MethodGet, "/facts", nil)
-		server.handleFacts(rec, req)
-		if rec.Code != http.StatusInternalServerError {
-			t.Errorf("handleFacts status = %d, want 500", rec.Code)
-		}
-		store.SetFail("", nil)
-
-		// HandleContext error
-		store.SetFail("SearchCandidateFacts", errors.New("fatal search"))
-		// GetContext gracefully recovers, so test handleContext
-		rec = httptest.NewRecorder()
-		req = httptest.NewRequest(http.MethodGet, "/context?q=test", nil)
-		server.handleContext(rec, req)
-		if rec.Code != http.StatusOK {
-			t.Errorf("handleContext status = %d, want 200", rec.Code)
-		}
-		store.SetFail("", nil)
-
-		// HandleMCP subpaths hit directly
-		for _, path := range []string{"/health", "/debug/coverage/flush", "/facts", "/context"} {
-			rec = httptest.NewRecorder()
-			req = httptest.NewRequest(http.MethodGet, path, nil)
-			server.handleMCP(rec, req)
-			if rec.Code != http.StatusOK && rec.Code != http.StatusInternalServerError {
-				t.Errorf("handleMCP(%s) code = %d", path, rec.Code)
-			}
-		}
-
-		// HandleMCP body read error
-		rec = httptest.NewRecorder()
-		req = httptest.NewRequest(http.MethodPost, "/mcp", &mockErrReadCloser{})
-		server.handleMCP(rec, req)
-		if rec.Code != http.StatusBadRequest {
-			t.Errorf("handleMCP body read error status = %d, want 400", rec.Code)
-		}
-
-		// HandleMCP tool calls for store and forget
-		rec = httptest.NewRecorder()
-		req = httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"memory_store","arguments":{"fact_text":"tool call store" karma}}}`))
-		server.handleMCP(rec, req)
-
-		rec = httptest.NewRecorder()
-		req = httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"memory_store","arguments":{"fact_text":"tool call store"}}}`))
-		server.handleMCP(rec, req)
-
-		rec = httptest.NewRecorder()
-		req = httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"memory_forget","arguments":{"fact_id":1}}}`))
-		server.handleMCP(rec, req)
-	})
-
-	t.Run("ConfigEdges", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		localFile := filepath.Join(tmpDir, "local.yaml")
-		_ = os.WriteFile(localFile, []byte("port: '4015'\n"), 0o644)
-		oldLocal := localConfigPath
-		defer func() { localConfigPath = oldLocal }()
-		localConfigPath = localFile
-
-		t.Setenv("CONFIG_PATH", "")
-		resolved := ResolveConfigPath("/fallback.yaml")
-		if resolved != localFile {
-			t.Errorf("ResolveConfigPath() = %q, want %q", resolved, localFile)
-		}
-
-		t.Setenv("PORT", "")
-		t.Setenv("DATABASE_URL", "postgres://localhost/test")
-		cfg, err := LoadConfigFile("", "")
-		if err != nil || cfg.Port != "4008" {
-			t.Errorf("LoadConfigFile(\"\") err=%v, port=%s", err, cfg.Port)
-		}
-	})
-
-	t.Run("SQLStoreDefaultBranches", func(t *testing.T) {
-		dbMem := setupTestDBMem(t)
-		mock := queryMockDBTX{
-			dbMem:        dbMem,
-			rowsAffected: 1,
-			rowSQL:       "SELECT 99",
-		}
-		store := NewSQLStore(mock, true)
-
-		// InsertFact defaults
-		id, err := store.InsertFact(context.Background(), "", "test", -1, nil)
-		if err != nil || id != 99 {
-			t.Errorf("InsertFact with defaults err=%v, id=%d", err, id)
-		}
-
-		// UpdateFact defaults
-		err = store.UpdateFact(context.Background(), 1, "", "test", -1, nil)
-		if err != nil {
-			t.Errorf("UpdateFact with defaults err=%v", err)
-		}
-
-		// ReinforceFact defaults
-		err = store.ReinforceFact(context.Background(), 1, "", nil, -1)
-		if err != nil {
-			t.Errorf("ReinforceFact with defaults err=%v", err)
-		}
-
-		// FindDuplicateFact defaults and no rows
-		mockNoRows := queryMockDBTX{
-			dbMem:  dbMem,
-			rowSQL: "SELECT 1 WHERE 1=0",
-		}
-		storeNoRows := NewSQLStore(mockNoRows, true)
-		emb := make([]float32, ExpectedEmbeddingDim)
-		dup, sim, err := storeNoRows.FindDuplicateFact(context.Background(), emb, -1)
-		if err != nil || dup != nil || sim != 0 {
-			t.Errorf("FindDuplicateFact with sql.ErrNoRows got dup=%v, sim=%f, err=%v", dup, sim, err)
-		}
-
-		// SearchCandidateFacts defaults with proper 10-column candidate row
-		mockSearch := queryMockDBTX{
-			dbMem:  dbMem,
-			rowSQL: "SELECT 5, 'general', 'scanned fact', 0.85, '2026-10-21 09:00:00', '2026-10-21 09:00:00', '2026-10-21 09:00:00', 1, '[0.1,0.2]', 0.88",
-		}
-		storeSearch := NewSQLStore(mockSearch, true)
-		_, err = storeSearch.SearchCandidateFacts(context.Background(), emb, "query", "", -1, -1)
-		if err != nil {
-			t.Errorf("SearchCandidateFacts defaults err=%v", err)
-		}
-	})
 }

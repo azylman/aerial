@@ -99,13 +99,12 @@ type Store interface {
 
 // SQLStore implements Store backed by PostgreSQL.
 type SQLStore struct {
-	db         DBTX
-	isPostgres bool
+	db DBTX
 }
 
 // NewSQLStore creates a new SQLStore instance.
-func NewSQLStore(db DBTX, isPostgres bool) *SQLStore {
-	return &SQLStore{db: db, isPostgres: isPostgres}
+func NewSQLStore(db DBTX) *SQLStore {
+	return &SQLStore{db: db}
 }
 
 // Close closes the underlying database handle if it implements io.Closer.
@@ -145,17 +144,6 @@ func optionalVectorArg(emb []float32) any {
 		return pgvector.NewVector(emb)
 	}
 	return nil
-}
-
-func isPostgres(database *sql.DB) bool {
-	if database == nil {
-		return false
-	}
-	if database.Driver() != nil {
-		dt := fmt.Sprintf("%T", database.Driver())
-		return strings.Contains(dt, "stdlib") || strings.Contains(dt, "pgx")
-	}
-	return false
 }
 
 // EscapeSQLLike escapes characters with special meaning in SQL LIKE clauses.

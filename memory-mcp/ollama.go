@@ -114,7 +114,13 @@ func (c *Client) GenerateEmbedding(ctx context.Context, text string, isQuery boo
 			return nil, ctx.Err()
 		}
 		if attempt < totalAttempts-1 && c.retryDelay > 0 {
-			time.Sleep(c.retryDelay)
+			timer := time.NewTimer(c.retryDelay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, ctx.Err()
+			case <-timer.C:
+			}
 		}
 	}
 	return nil, fmt.Errorf("failed after %d attempts: %w", totalAttempts, lastErr)
