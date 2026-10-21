@@ -18,7 +18,6 @@ import (
 const (
 	DefaultEmbeddingModel = "all-minilm"
 	DefaultOllamaURL      = "http://ollama:11434"
-	BGEQueryPrefix        = "Represent this sentence for searching relevant passages: "
 )
 
 type Client struct {
@@ -46,30 +45,6 @@ func New(cfg *config.Config, roots ...string) *Client {
 		},
 		roots:      cleanRoots,
 		retryDelay: 50 * time.Millisecond,
-	}
-}
-
-// SetHTTPClientForTest sets a custom *http.Client for testing and returns a restore function.
-func (c *Client) SetHTTPClientForTest(client *http.Client) func() {
-	if c == nil {
-		return func() {}
-	}
-	old := c.httpClient
-	c.httpClient = client
-	return func() {
-		c.httpClient = old
-	}
-}
-
-// SetRetryDelayForTest sets a custom retry delay for testing (e.g. -1 to disable sleep) and returns a restore function.
-func (c *Client) SetRetryDelayForTest(d time.Duration) func() {
-	if c == nil {
-		return func() {}
-	}
-	old := c.retryDelay
-	c.retryDelay = d
-	return func() {
-		c.retryDelay = old
 	}
 }
 
