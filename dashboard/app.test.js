@@ -67,6 +67,7 @@ const {
     formatGitSyncDelta,
     renderGitSyncBadge,
     renderQuickLaunchDock,
+    parseFactReinforceCount,
     parseFactImportance,
     compareFactsImportanceDesc,
     renderDeployments,
@@ -260,6 +261,28 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
             assert.equal(formatCommitTimestamp(undefined), '');
             assert.equal(formatCommitTimestamp(''), '');
             assert.equal(formatCommitTimestamp('invalid'), '');
+        });
+    });
+
+    describe('formatTimeAgo(dateStr)', () => {
+        it('formats valid relative time for recent timestamps', () => {
+            const now = Date.now();
+            assert.equal(formatTimeAgo(new Date(now - 10 * 1000).toISOString()), '10s AGO');
+            assert.equal(formatTimeAgo(new Date(now - 120 * 1000).toISOString()), '2m AGO');
+            assert.equal(formatTimeAgo(new Date(now - 7200 * 1000).toISOString()), '2h AGO');
+            assert.equal(formatTimeAgo(new Date(now - 172800 * 1000).toISOString()), '2d AGO');
+        });
+
+        it('returns RECENT for Go zero-time and pre-2020 dates', () => {
+            assert.equal(formatTimeAgo('0001-01-01T00:00:00Z'), 'RECENT');
+            assert.equal(formatTimeAgo('1970-01-01T00:00:00Z'), 'RECENT');
+        });
+
+        it('returns RECENT for null, undefined, empty, or invalid date', () => {
+            assert.equal(formatTimeAgo(null), 'RECENT');
+            assert.equal(formatTimeAgo(undefined), 'RECENT');
+            assert.equal(formatTimeAgo(''), 'RECENT');
+            assert.equal(formatTimeAgo('invalid-date'), 'RECENT');
         });
     });
 
@@ -526,7 +549,7 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
 
             vm.runInContext(`
                 memoryState.totalCount = 42;
-                memoryState.facts = [{ id: 'f1', category: 'core', importance: 1.0 }];
+                memoryState.facts = [{ id: 'f1', reinforce_count: 2 }];
                 updateMemoryMetrics();
             `, sandbox);
 
@@ -546,8 +569,8 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
             vm.runInContext(`
                 memoryState.totalCount = null;
                 memoryState.facts = [
-                    { id: 'f1', category: 'core', importance: 1.0 },
-                    { id: 'f2', category: 'infra', importance: 0.8 }
+                    { id: 'f1', reinforce_count: 2 },
+                    { id: 'f2', reinforce_count: 1 }
                 ];
                 updateMemoryMetrics();
             `, sandbox);
@@ -631,97 +654,97 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
         });
     });
 
-    describe('Permet Memory Importance Sorting & Pipeline Invariants', () => {
-        describe('parseFactImportance(val)', () => {
-            it('parses valid numeric and floating point values', () => {
-                assert.equal(parseFactImportance(1.0), 1.0);
-                assert.equal(parseFactImportance(0.85), 0.85);
-                assert.equal(parseFactImportance('0.95'), 0.95);
-                assert.equal(parseFactImportance('1'), 1.0);
+    describe('Permet Memory Activity Metrics, Sorting & Pipeline Invariants', () => {
+        describe('parseFactReinforceCount(val)', () => {
+            it('parses valid positive integer and float counts', () => {
+                assert.equal(parseFactReinforceCount(1), 1);
+                assert.equal(parseFactReinforceCount(5), 5);
+                assert.equal(parseFactReinforceCount('3'), 3);
+                assert.equal(parseFactReinforceCount(2.9), 2);
+                assert.equal(parseFactImportance(4), 4);
             });
 
-            it('preserves valid 0.0 importance and does NOT coerce to 1.0', () => {
-                assert.equal(parseFactImportance(0), 0.0);
-                assert.equal(parseFactImportance(0.0), 0.0);
-                assert.equal(parseFactImportance('0'), 0.0);
-                assert.equal(parseFactImportance('0.0'), 0.0);
+            it('returns 1 for values <= 1, zero, or negative numbers', () => {
+                assert.equal(parseFactReinforceCount(1), 1);
+                assert.equal(parseFactReinforceCount(0), 1);
+                assert.equal(parseFactReinforceCount(-5), 1);
+                assert.equal(parseFactReinforceCount('0'), 1);
             });
 
-            it('clamps importance values to [0.0, 1.0]', () => {
-                assert.equal(parseFactImportance(1.5), 1.0);
-                assert.equal(parseFactImportance(-0.5), 0.0);
-            });
-
-            it('handles null, undefined, empty string, and NaN safely with 0.0 fallback', () => {
-                assert.equal(parseFactImportance(null), 0.0);
-                assert.equal(parseFactImportance(undefined), 0.0);
-                assert.equal(parseFactImportance(''), 0.0);
-                assert.equal(parseFactImportance('invalid-number'), 0.0);
-                assert.equal(parseFactImportance(NaN), 0.0);
+            it('handles null, undefined, empty string, and NaN safely with 1 fallback', () => {
+                assert.equal(parseFactReinforceCount(null), 1);
+                assert.equal(parseFactReinforceCount(undefined), 1);
+                assert.equal(parseFactReinforceCount(''), 1);
+                assert.equal(parseFactReinforceCount('invalid-number'), 1);
+                assert.equal(parseFactReinforceCount(NaN), 1);
             });
         });
 
         describe('compareFactsImportanceDesc(a, b)', () => {
-            it('sorts facts in strictly descending order of importance', () => {
+            it('sorts facts in strictly descending order of reinforce_count', () => {
                 const facts = [
-                    { id: 1, fact_text: 'low', importance: 0.2 },
-                    { id: 2, fact_text: 'max', importance: 1.0 },
-                    { id: 3, fact_text: 'mid', importance: 0.5 },
-                    { id: 4, fact_text: 'high', importance: 0.8 },
-                    { id: 5, fact_text: 'very high', importance: 0.95 }
+                    { id: 1, fact_text: 'base', reinforce_count: 1 },
+                    { id: 2, fact_text: 'max', reinforce_count: 10 },
+                    { id: 3, fact_text: 'mid', reinforce_count: 3 },
+                    { id: 4, fact_text: 'high', reinforce_count: 7 },
+                    { id: 5, fact_text: 'reinforced', reinforce_count: 2 }
                 ];
 
                 const sorted = facts.slice().sort(compareFactsImportanceDesc);
-                const order = sorted.map(f => f.importance);
-                assert.deepEqual(order, [1.0, 0.95, 0.8, 0.5, 0.2]);
+                const order = sorted.map(f => f.reinforce_count);
+                assert.deepEqual(order, [10, 7, 3, 2, 1]);
             });
 
-            it('applies secondary tie-breaking by recency (created_at DESC)', () => {
+            it('applies secondary tie-breaking by recency (last_reinforced_at fallback created_at DESC)', () => {
                 const facts = [
-                    { id: 1, fact_text: 'older', importance: 0.8, created_at: '2026-09-04T12:00:00Z' },
-                    { id: 2, fact_text: 'newer', importance: 0.8, created_at: '2026-09-05T12:00:00Z' }
+                    { id: 1, fact_text: 'older', reinforce_count: 3, created_at: '2026-09-04T12:00:00Z' },
+                    { id: 2, fact_text: 'newer reinforced', reinforce_count: 3, last_reinforced_at: '2026-09-06T12:00:00Z', created_at: '2026-09-01T12:00:00Z' },
+                    { id: 3, fact_text: 'newer created', reinforce_count: 3, created_at: '2026-09-05T12:00:00Z' },
+                    { id: 4, fact_text: 'zero reinforced time falls back to created_at', reinforce_count: 3, last_reinforced_at: '0001-01-01T00:00:00Z', created_at: '2026-09-07T12:00:00Z' }
                 ];
 
                 const sorted = facts.slice().sort(compareFactsImportanceDesc);
-                assert.equal(sorted[0].id, 2);
-                assert.equal(sorted[1].id, 1);
+                assert.equal(sorted[0].id, 4);
+                assert.equal(sorted[1].id, 2);
+                assert.equal(sorted[2].id, 3);
+                assert.equal(sorted[3].id, 1);
             });
 
             it('applies tertiary tie-breaking by numeric and alphanumeric ID (id DESC)', () => {
                 const numericFacts = [
-                    { id: 42, fact_text: 'lower id', importance: 0.8, created_at: '2026-09-05T12:00:00Z' },
-                    { id: 105, fact_text: 'higher id', importance: 0.8, created_at: '2026-09-05T12:00:00Z' }
+                    { id: 42, fact_text: 'lower id', reinforce_count: 2, created_at: '2026-09-05T12:00:00Z' },
+                    { id: 105, fact_text: 'higher id', reinforce_count: 2, created_at: '2026-09-05T12:00:00Z' }
                 ];
                 const sortedNumeric = numericFacts.slice().sort(compareFactsImportanceDesc);
                 assert.equal(sortedNumeric[0].id, 105);
                 assert.equal(sortedNumeric[1].id, 42);
 
                 const stringFacts = [
-                    { id: 'fact-01', fact_text: 'lower id', importance: 0.8, created_at: '2026-09-05T12:00:00Z' },
-                    { id: 'fact-99', fact_text: 'higher id', importance: 0.8, created_at: '2026-09-05T12:00:00Z' }
+                    { id: 'fact-01', fact_text: 'lower id', reinforce_count: 2, created_at: '2026-09-05T12:00:00Z' },
+                    { id: 'fact-99', reinforce_count: 2, created_at: '2026-09-05T12:00:00Z' }
                 ];
                 const sortedString = stringFacts.slice().sort(compareFactsImportanceDesc);
                 assert.equal(sortedString[0].id, 'fact-99');
                 assert.equal(sortedString[1].id, 'fact-01');
             });
 
-            it('handles missing, null, or string importance scores in sorting', () => {
+            it('handles missing, null, or string reinforce counts in sorting', () => {
                 const facts = [
                     { id: 1, fact_text: 'missing', created_at: '2026-09-05T10:00:00Z' },
-                    { id: 2, fact_text: 'string high', importance: '0.9', created_at: '2026-09-05T10:00:00Z' },
-                    { id: 3, fact_text: 'zero', importance: 0, created_at: '2026-09-05T10:00:00Z' }
+                    { id: 2, fact_text: 'string high', reinforce_count: '5', created_at: '2026-09-05T10:00:00Z' },
+                    { id: 3, fact_text: 'zero', reinforce_count: 0, created_at: '2026-09-05T10:00:00Z' }
                 ];
 
                 const sorted = facts.slice().sort(compareFactsImportanceDesc);
-                assert.equal(sorted[0].id, 2); // 0.9
-                // Both id 1 (null -> 0.0) and id 3 (0 -> 0.0) tie on importance, sort by ID DESC
+                assert.equal(sorted[0].id, 2); // 5
+                // Both id 1 (null -> 1) and id 3 (0 -> 1) tie on count, sort by ID DESC
                 assert.equal(sorted[1].id, 3);
                 assert.equal(sorted[2].id, 1);
             });
         });
 
         describe('Filter Pipeline & Metrics Integration', () => {
-            it('preserves descending importance sorting across category and query filtering', () => {
+            it('preserves descending reinforce sorting and filters by activity tier and text or node id', () => {
                 const elements = {};
                 sandbox.document.getElementById = (id) => {
                     if (!elements[id]) {
@@ -732,25 +755,45 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
 
                 const filtered = vm.runInContext(`
                     memoryState.facts = [
-                        { id: 1, category: 'USER_PREFERENCE', fact_text: 'Alex prefers dark mode', importance: 0.5 },
-                        { id: 2, category: 'USER_PREFERENCE', fact_text: 'Alex loves matcha latte', importance: 0.95 },
-                        { id: 3, category: 'SYSTEM_CONFIG', fact_text: 'Ollama model setting', importance: 0.8 },
-                        { id: 4, category: 'USER_PREFERENCE', fact_text: 'Alex drinks espresso', importance: 0.7 }
+                        { id: 10, fact_text: 'User prefers dark mode', reinforce_count: 2 },
+                        { id: 20, fact_text: 'User loves matcha latte', reinforce_count: 5 },
+                        { id: 30, fact_text: 'Ollama model setting', reinforce_count: 1 },
+                        { id: 40, fact_text: 'User drinks espresso', reinforce_count: 3 }
                     ].sort(compareFactsImportanceDesc);
 
-                    memoryState.selectedCategory = 'USER_PREFERENCE';
-                    memoryState.searchQuery = 'alex';
+                    memoryState.selectedCategory = 'REINFORCED';
+                    memoryState.searchQuery = 'user';
                     applyFilters();
                     memoryState.filteredFacts;
                 `, sandbox);
 
                 assert.equal(filtered.length, 3);
-                assert.equal(filtered[0].id, 2); // 0.95
-                assert.equal(filtered[1].id, 4); // 0.7
-                assert.equal(filtered[2].id, 1); // 0.5
+                assert.equal(filtered[0].id, 20); // 5
+                assert.equal(filtered[1].id, 40); // 3
+                assert.equal(filtered[2].id, 10); // 2
+
+                // Test searching by node ID
+                const idSearch = vm.runInContext(`
+                    memoryState.selectedCategory = 'ALL';
+                    memoryState.searchQuery = '30';
+                    applyFilters();
+                    memoryState.filteredFacts;
+                `, sandbox);
+                assert.equal(idSearch.length, 1);
+                assert.equal(idSearch[0].id, 30);
+
+                // Test BASE tier filter
+                const baseFiltered = vm.runInContext(`
+                    memoryState.selectedCategory = 'BASE';
+                    memoryState.searchQuery = '';
+                    applyFilters();
+                    memoryState.filteredFacts;
+                `, sandbox);
+                assert.equal(baseFiltered.length, 1);
+                assert.equal(baseFiltered[0].id, 30);
             });
 
-            it('computes average importance correctly without corrupting 0.0 importance facts', () => {
+            it('computes average reinforcements and reinforced count accurately', () => {
                 const elements = {};
                 sandbox.document.getElementById = (id) => {
                     if (!elements[id]) {
@@ -762,16 +805,57 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
                 vm.runInContext(`
                     memoryState.totalCount = 4;
                     memoryState.facts = [
-                        { id: 1, importance: 1.0 },
-                        { id: 2, importance: 0.5 },
-                        { id: 3, importance: 0.0 },
-                        { id: 4, importance: 0.5 }
+                        { id: 1, reinforce_count: 4 },
+                        { id: 2, reinforce_count: 2 },
+                        { id: 3, reinforce_count: 1 },
+                        { id: 4, reinforce_count: 1 }
                     ];
                     updateMemoryMetrics();
                 `, sandbox);
 
-                // Total sum = 1.0 + 0.5 + 0.0 + 0.5 = 2.0. Avg = 2.0 / 4 = 0.50
-                assert.equal(elements['memory-avg-importance'].textContent, '0.50');
+                // Total sum = 4 + 2 + 1 + 1 = 8. Avg = 8 / 4 = 2.00 -> 2.00x
+                assert.equal(elements['memory-avg-importance'].textContent, '2.00x');
+                // Facts with reinforce_count >= 2: id 1 and id 2 -> 2
+                assert.equal(elements['memory-category-count'].textContent, '2 REINFORCED');
+            });
+
+            it('renders activity tier category pills and fact cards with node badges', () => {
+                const elements = {};
+                sandbox.document.getElementById = (id) => {
+                    if (!elements[id]) {
+                        elements[id] = {
+                            textContent: '',
+                            className: '',
+                            style: {},
+                            innerHTML: '',
+                            querySelectorAll: () => []
+                        };
+                    }
+                    return elements[id];
+                };
+
+                vm.runInContext(`
+                    memoryState.facts = [
+                        { id: 101, fact_text: 'Reinforced fact', reinforce_count: 3, last_reinforced_at: '2026-09-01T00:00:00Z' },
+                        { id: 102, fact_text: 'Base fact', reinforce_count: 1, created_at: '2026-09-01T00:00:00Z' }
+                    ];
+                    memoryState.selectedCategory = 'ALL';
+                    memoryState.searchQuery = '';
+                    renderCategoryPills();
+                    applyFilters();
+                `, sandbox);
+
+                const pillsBarHtml = elements['category-pills-bar'].innerHTML;
+                assert.ok(pillsBarHtml.includes('ALL'));
+                assert.ok(pillsBarHtml.includes('REINFORCED'));
+                assert.ok(pillsBarHtml.includes('BASE'));
+
+                const gridHtml = elements['memory-cards-grid'].innerHTML;
+                assert.ok(gridHtml.includes('high-importance'));
+                assert.ok(gridHtml.includes('NODE #101'));
+                assert.ok(gridHtml.includes('⚡ 3x'));
+                assert.ok(gridHtml.includes('NODE #102'));
+                assert.ok(gridHtml.includes('⚡ 1x'));
             });
         });
     });

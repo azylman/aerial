@@ -160,7 +160,7 @@ func TestBuildFactsUpstreamURL_TableDriven(t *testing.T) {
 		{name: "positive limit and offset forwarded", baseURL: "http://brain:8080", query: url.Values{"limit": {"25"}, "offset": {"10"}}, wantLimit: 25, wantOffset: 10, wantQuery: map[string]string{"limit": "25", "offset": "10"}},
 		{name: "zero or negative limit and offset omitted", baseURL: "http://brain:8080", query: url.Values{"limit": {"0"}, "offset": {"0"}}, omitQuery: []string{"limit", "offset"}},
 		{name: "negative or invalid limit and offset omitted", baseURL: "http://brain:8080", query: url.Values{"limit": {"-5"}, "offset": {"invalid"}}, omitQuery: []string{"limit", "offset"}},
-		{name: "category and q trimmed and forwarded", baseURL: "http://brain:8080", query: url.Values{"category": {"  system  "}, "q": {"  docker deploy  "}}, wantQuery: map[string]string{"category": "system", "q": "docker deploy"}},
+		{name: "q trimmed and forwarded while category is ignored", baseURL: "http://brain:8080", query: url.Values{"category": {"  system  "}, "q": {"  docker deploy  "}}, wantQuery: map[string]string{"q": "docker deploy"}, omitQuery: []string{"category"}},
 		{name: "empty category and q omitted", baseURL: "http://brain:8080", query: url.Values{"category": {"   "}, "q": {"   "}}, omitQuery: []string{"category", "q"}},
 		{name: "long ASCII q clamped to 64 runes", baseURL: "http://brain:8080", query: url.Values{"q": {strings.Repeat("a", 100)}}, wantQuery: map[string]string{"q": strings.Repeat("a", 64)}},
 		{name: "multibyte unicode kanji clamped to 64 runes without UTF-8 corruption", baseURL: "http://brain:8080", query: url.Values{"q": {strings.Repeat("電", 70)}}, wantQuery: map[string]string{"q": strings.Repeat("電", 64)}},

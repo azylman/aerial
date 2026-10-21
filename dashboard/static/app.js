@@ -778,20 +778,26 @@ if (drawerOverlay) drawerOverlay.addEventListener('click', closeDiagnosticDrawer
 // ==========================================
 // PERMET MEMORY ARCHIVE STATE & LOGIC
 // ==========================================
-function parseFactImportance(val) {
-    if (val === null || val === undefined || val === '') return 0.0;
+function parseFactReinforceCount(val) {
+    if (val === null || val === undefined || val === '') return 1;
     const num = Number(val);
-    if (isNaN(num)) return 0.0;
-    return Math.max(0.0, Math.min(1.0, num));
+    if (isNaN(num) || !isFinite(num) || num < 1) return 1;
+    return Math.max(1, Math.floor(num));
+}
+
+function parseFactImportance(val) {
+    return parseFactReinforceCount(val);
 }
 
 function compareFactsImportanceDesc(a, b) {
-    const impA = parseFactImportance(a ? a.importance : null);
-    const impB = parseFactImportance(b ? b.importance : null);
-    if (impB !== impA) return impB - impA;
+    const countA = parseFactReinforceCount(a ? (a.reinforce_count !== undefined ? a.reinforce_count : a.importance) : null);
+    const countB = parseFactReinforceCount(b ? (b.reinforce_count !== undefined ? b.reinforce_count : b.importance) : null);
+    if (countB !== countA) return countB - countA;
 
-    const dateA = a && a.created_at ? (parseValidTimestampMs(a.created_at) || 0) : 0;
-    const dateB = b && b.created_at ? (parseValidTimestampMs(b.created_at) || 0) : 0;
+    const timeA = (a && parseValidTimestampMs(a.last_reinforced_at)) ? a.last_reinforced_at : (a ? a.created_at : null);
+    const timeB = (b && parseValidTimestampMs(b.last_reinforced_at)) ? b.last_reinforced_at : (b ? b.created_at : null);
+    const dateA = timeA ? (parseValidTimestampMs(timeA) || 0) : 0;
+    const dateB = timeB ? (parseValidTimestampMs(timeB) || 0) : 0;
     if (dateB !== dateA) return dateB - dateA;
 
     const idA = a && a.id != null ? a.id : 0;
@@ -893,15 +899,15 @@ function updateMemoryMetrics() {
     const totalCountEl = document.getElementById('memory-total-count');
     if (totalCountEl) totalCountEl.textContent = total;
 
-    const categories = new Set(factsList.map(f => (f.category || 'general').toLowerCase()));
+    const reinforcedCount = factsList.filter(f => parseFactReinforceCount(f ? (f.reinforce_count !== undefined ? f.reinforce_count : f.importance) : null) >= 2).length;
     const catCountEl = document.getElementById('memory-category-count');
-    if (catCountEl) catCountEl.textContent = `${categories.size} CATEGORIES`;
+    if (catCountEl) catCountEl.textContent = `${reinforcedCount} REINFORCED`;
 
-    const avgImp = factsList.length > 0
-        ? (factsList.reduce((acc, f) => acc + parseFactImportance(f.importance), 0) / factsList.length).toFixed(2)
-        : '0.00';
+    const avgReinforce = factsList.length > 0
+        ? (factsList.reduce((acc, f) => acc + parseFactReinforceCount(f ? (f.reinforce_count !== undefined ? f.reinforce_count : f.importance) : null), 0) / factsList.length).toFixed(2) + 'x'
+        : '0.00x';
     const avgImpEl = document.getElementById('memory-avg-importance');
-    if (avgImpEl) avgImpEl.textContent = avgImp;
+    if (avgImpEl) avgImpEl.textContent = avgReinforce;
 
     const statusBadge = document.getElementById('memory-status-badge');
     if (statusBadge) {
@@ -913,19 +919,31 @@ function updateMemoryMetrics() {
 }
 
 function renderCategoryPills() {
-    const counts = { ALL: memoryState.facts.length };
-    memoryState.facts.forEach(f => {
-        const cat = (f.category || 'general').toUpperCase().replace(' ', '_');
-        counts[cat] = (counts[cat] || 0) + 1;
+    const factsList = Array.isArray(memoryState.facts) ? memoryState.facts : [];
+    let reinforced = 0;
+    let base = 0;
+    factsList.forEach(f => {
+        const count = parseFactReinforceCount(f ? (f.reinforce_count !== undefined ? f.reinforce_count : f.importance) : null);
+        if (count >= 2) {
+            reinforced++;
+        } else {
+            base++;
+        }
     });
+
+    const counts = {
+        ALL: factsList.length,
+        REINFORCED: reinforced,
+        BASE: base
+    };
 
     const pillsBar = document.getElementById('category-pills-bar');
     if (!pillsBar) return;
-    const categories = Object.keys(counts);
+    const categories = ['ALL', 'REINFORCED', 'BASE'];
 
     pillsBar.innerHTML = categories.map(cat => `
         <button class="cat-pill ${memoryState.selectedCategory === cat ? 'active' : ''}" data-category="${escapeHtml(cat)}">
-            ${escapeHtml(cat.replace('_', ' '))} <span class="pill-count">${counts[cat]}</span>
+            ${escapeHtml(cat)} <span class="pill-count">${counts[cat]}</span>
         </button>
     `).join('');
 
@@ -940,17 +958,17 @@ function renderCategoryPills() {
 
 function applyFilters() {
     const query = memoryState.searchQuery.toLowerCase().trim();
-    const cat = memoryState.selectedCategory;
+    const cat = memoryState.selectedCategory || 'ALL';
 
     memoryState.filteredFacts = memoryState.facts.filter(f => {
-        const fCat = (f.category || 'general').toUpperCase().replace(' ', '_');
-        const matchesCat = (cat === 'ALL') || (fCat === cat);
-        if (!matchesCat) return false;
+        const count = parseFactReinforceCount(f ? (f.reinforce_count !== undefined ? f.reinforce_count : f.importance) : null);
+        if (cat === 'REINFORCED' && count < 2) return false;
+        if (cat === 'BASE' && count !== 1) return false;
 
         if (!query) return true;
         const text = (f.fact_text || '').toLowerCase();
-        const category = (f.category || '').toLowerCase();
-        return text.includes(query) || category.includes(query);
+        const idStr = String(f.id || '').toLowerCase();
+        return text.includes(query) || idStr.includes(query);
     }).sort(compareFactsImportanceDesc);
 
     const counterEl = document.getElementById('results-count-text');
@@ -979,24 +997,19 @@ function renderFactCards() {
     const query = memoryState.searchQuery.trim();
 
     grid.innerHTML = memoryState.filteredFacts.map((f, idx) => {
-        const importance = parseFactImportance(f.importance);
-        const isHigh = importance >= 0.8;
-        const cat = (f.category || 'GENERAL').toUpperCase();
-        const catSlug = (f.category || 'general').toLowerCase().replace(/[^a-z0-9_-]/g, '_');
-        const timeAgo = formatTimeAgo(f.created_at);
+        const reinforceCount = parseFactReinforceCount(f ? (f.reinforce_count !== undefined ? f.reinforce_count : f.importance) : null);
+        const isHigh = reinforceCount >= 2;
+        const effectiveTime = (f && parseValidTimestampMs(f.last_reinforced_at)) ? f.last_reinforced_at : (f ? f.created_at : null);
+        const timeAgo = formatTimeAgo(effectiveTime);
         const rawText = f.fact_text || '';
         const highlightedText = query ? highlightSearch(rawText, query) : escapeHtml(rawText);
-        const importancePct = Math.min(100, Math.max(0, Math.round(importance * 100)));
 
         return `
             <div class="fact-card ${isHigh ? 'high-importance' : ''}">
                 <div class="fact-card-header">
-                    <span class="fact-category-tag cat-${escapeHtml(catSlug)}">${escapeHtml(cat)}</span>
+                    <span class="fact-category-tag cat-system_config">NODE #${escapeHtml(String(f.id || 0))}</span>
                     <div class="fact-importance-gauge">
-                        <span>IMP ${importance.toFixed(2)}</span>
-                        <div class="fact-importance-bar-mini">
-                            <div class="fact-importance-fill-mini" style="width: ${importancePct}%;"></div>
-                        </div>
+                        <span>⚡ ${reinforceCount}x</span>
                     </div>
                 </div>
                 <div class="fact-body">${highlightedText}</div>
@@ -1021,9 +1034,9 @@ function highlightSearch(text, query) {
 
 function formatTimeAgo(dateStr) {
     if (!dateStr) return 'RECENT';
-    const date = new Date(dateStr);
-    if (isNaN(date.getTime())) return 'RECENT';
-    const sec = Math.floor((Date.now() - date.getTime()) / 1000);
+    const validMs = parseValidTimestampMs(typeof dateStr === 'string' ? dateStr : (dateStr.toISOString ? dateStr.toISOString() : String(dateStr)));
+    if (!validMs) return 'RECENT';
+    const sec = Math.max(0, Math.floor((Date.now() - validMs) / 1000));
     if (sec < 60) return `${sec}s AGO`;
     const min = Math.floor(sec / 60);
     if (min < 60) return `${min}m AGO`;
