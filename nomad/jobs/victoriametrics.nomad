@@ -88,7 +88,7 @@ scrape_configs:
 
   - job_name: "aerial-brain"
     static_configs:
-{{- range nomadService "brain" }}
+{{- range nomadService "eri" }}
       - targets: ["{{ .Address }}:{{ .Port }}"]
 {{- else }}
       - targets: ["127.0.0.1:8088"]

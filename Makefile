@@ -1,7 +1,7 @@
 .PHONY: all test lint tidy build help
 .DEFAULT_GOAL := help
 
-SERVICES := brain mcp/scheduler-mcp mcp/discord-mcp dashboard services/coven sidecars/hangar
+SERVICES := services/eri mcp/scheduler-mcp mcp/discord-mcp services/dashboard services/coven services/hangar services/vanadis services/webhooks-router
 
 help: ## Display available targets
 	@echo "Aerial Monorepo Development Commands:"
@@ -12,9 +12,9 @@ test: ## Run unit tests across all Go microservices and Frontend
 		echo "=== Testing $$svc ==="; \
 		(cd $$svc && go test -v ./...) || exit 1; \
 	done
-	@if command -v node >/dev/null 2>&1 && [ -f "dashboard/app.test.js" ]; then \
+	@if command -v node >/dev/null 2>&1 && [ -f "services/dashboard/app.test.js" ]; then \
 		echo "=== Testing Permet HUD Frontend ==="; \
-		node --test dashboard/*.test.js || exit 1; \
+		node --test services/dashboard/*.test.js || exit 1; \
 	fi
 
 lint: ## Run golangci-lint across all Go microservices and Frontend
@@ -22,13 +22,13 @@ lint: ## Run golangci-lint across all Go microservices and Frontend
 		echo "=== Linting $$svc ==="; \
 		(cd $$svc && golangci-lint run ./...) || exit 1; \
 	done
-	@if command -v node >/dev/null 2>&1 && [ -f "dashboard/static/app.js" ]; then \
+	@if command -v node >/dev/null 2>&1 && [ -f "services/dashboard/static/app.js" ]; then \
 		echo "=== Linting Permet HUD Frontend Syntax ==="; \
-		node --check dashboard/static/app.js || exit 1; \
+		node --check services/dashboard/static/app.js || exit 1; \
 	fi
-	@if command -v node >/dev/null 2>&1 && [ -f "docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js" ]; then \
+	@if command -v node >/dev/null 2>&1 && [ -f "services/docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js" ]; then \
 		echo "=== Linting Docsify Custom Plugin Syntax ==="; \
-		node --check docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js || exit 1; \
+		node --check services/docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js || exit 1; \
 	fi
 
 tidy: ## Run go mod tidy across all Go microservices

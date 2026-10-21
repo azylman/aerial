@@ -40,7 +40,7 @@ job "docs" {
         }
         volumes = [
           "/mnt/data/supervisor/share/aerial-config:/share/aerial-config:ro",
-          "/mnt/data/supervisor/share/aerial/docs-service/app:/usr/share/nginx/html:ro"
+          "/mnt/data/supervisor/share/aerial/services/docs-service/app:/usr/share/nginx/html:ro"
         ]
       }
 

@@ -308,7 +308,7 @@ REGISTER_PR_CHECK=$(bash -c "
 
     curl() { echo '{\"status\":\"registered\"}'; }
     export -f curl
-    AERIAL_PR_REGISTER_RETRIES=3 AERIAL_PR_REGISTER_RETRY_DELAY=0 register_pr_in_brain 'http://brain.aerial/internal/pr/register' '{}' 101 '1560698400780062884' 2>/dev/null && echo 'reg1:ok'
+    AERIAL_PR_REGISTER_RETRIES=3 AERIAL_PR_REGISTER_RETRY_DELAY=0 register_pr_in_brain 'http://eri.aerial/internal/pr/register' '{}' 101 '1560698400780062884' 2>/dev/null && echo 'reg1:ok'
 
     echo 0 > \"\$ATTEMPT_FILE\"
     curl() {
@@ -316,7 +316,7 @@ REGISTER_PR_CHECK=$(bash -c "
         [ \"\$c\" -lt 2 ] && echo '{\"error\":\"transient\"}' || echo '{\"status\":\"registered\"}'
     }
     export -f curl
-    AERIAL_PR_REGISTER_RETRIES=3 AERIAL_PR_REGISTER_RETRY_DELAY=0 register_pr_in_brain 'http://brain.aerial/internal/pr/register' '{}' 102 '1560698400780062884' 2>/dev/null && echo \"reg2:ok:\$(cat \"\$ATTEMPT_FILE\")\"
+    AERIAL_PR_REGISTER_RETRIES=3 AERIAL_PR_REGISTER_RETRY_DELAY=0 register_pr_in_brain 'http://eri.aerial/internal/pr/register' '{}' 102 '1560698400780062884' 2>/dev/null && echo \"reg2:ok:\$(cat \"\$ATTEMPT_FILE\")\"
 
     echo 0 > \"\$ATTEMPT_FILE\"
     curl() {
@@ -324,7 +324,7 @@ REGISTER_PR_CHECK=$(bash -c "
         echo '{\"error\":\"Failed to attach PR to Vanadis chunk\"}'
     }
     export -f curl
-    AERIAL_PR_REGISTER_RETRIES=3 AERIAL_PR_REGISTER_RETRY_DELAY=0 register_pr_in_brain 'http://brain.aerial/internal/pr/register' '{}' 103 '1560698400780062884' 2>/dev/null || echo \"reg3:failed_as_expected:\$(cat \"\$ATTEMPT_FILE\")\"
+    AERIAL_PR_REGISTER_RETRIES=3 AERIAL_PR_REGISTER_RETRY_DELAY=0 register_pr_in_brain 'http://eri.aerial/internal/pr/register' '{}' 103 '1560698400780062884' 2>/dev/null || echo \"reg3:failed_as_expected:\$(cat \"\$ATTEMPT_FILE\")\"
 ")
 assert_eq "true" "$(echo "$REGISTER_PR_CHECK" | grep -q 'reg1:ok' && echo true || echo false)" "register_pr_in_brain succeeds on first attempt"
 assert_eq "true" "$(echo "$REGISTER_PR_CHECK" | grep -q 'reg2:ok:2' && echo true || echo false)" "register_pr_in_brain retries transient error and succeeds on attempt 2"

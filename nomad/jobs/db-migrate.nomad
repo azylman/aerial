@@ -40,7 +40,7 @@ job "db-migrate" {
         mount {
           type     = "bind"
           target   = "/migrations"
-          source   = "/mnt/data/supervisor/share/aerial/brain/pkg/db/migrations"
+          source   = "/mnt/data/supervisor/share/aerial/services/eri/pkg/db/migrations"
           readonly = true
         }
       }
