@@ -4,13 +4,14 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 var (
 	reCodeSpans   = regexp.MustCompile("(?s)```.*?```|~~~.*?~~~|`[^`\n]+`")
 	reDisplayMath = regexp.MustCompile(`(\n?)[ \t]*(?:\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\])[ \t]*(\n?)`)
 	reInlineParen = regexp.MustCompile(`\\\(([^\n]+?)\\\)`)
-	reLatexText   = regexp.MustCompile(`\\(?:text|mathrm|mathbf|mathit|operatorname)\{([^{}]*)\}`)
+	reLatexText   = regexp.MustCompile(`\\(?:text(?:bf|it|rm|sf|tt)?|math(?:rm|bf|it|cal|bb|sf|tt|scr|frak)|operatorname|boldsymbol|bm)\{([^{}]*)\}`)
 	reLatexFrac   = regexp.MustCompile(`\\frac\{([^{}]*)\}\{([^{}]*)\}`)
 	reLatexSqrt   = regexp.MustCompile(`\\sqrt\{([^{}]*)\}`)
 	reLatexCmd    = regexp.MustCompile(`\\[a-zA-Z]+`)
@@ -91,7 +92,7 @@ func FormatDiscordLatex(text string) string {
 func replaceInlineDollarMath(line string) string {
 	var sb strings.Builder
 	for i := 0; i < len(line); {
-		if line[i] != '$' || (i > 0 && line[i-1] == '\\') || i+1 >= len(line) || line[i+1] == ' ' || line[i+1] == '\t' || (line[i+1] >= '0' && line[i+1] <= '9') {
+		if line[i] != '$' || (i > 0 && line[i-1] == '\\') || i+1 >= len(line) || line[i+1] == ' ' || line[i+1] == '\t' {
 			sb.WriteByte(line[i])
 			i++
 			continue
@@ -103,7 +104,7 @@ func replaceInlineDollarMath(line string) string {
 				break
 			}
 		}
-		if closeIdx > i+1 && line[closeIdx-1] != ' ' && line[closeIdx-1] != '\t' && (closeIdx+1 == len(line) || !isWordOrDigit(line[closeIdx+1])) && isLikelyLatexMath(line[i+1:closeIdx]) {
+		if closeIdx > i+1 && line[closeIdx-1] != ' ' && line[closeIdx-1] != '\t' && line[closeIdx-1] != '(' && line[closeIdx-1] != '[' && (closeIdx+1 == len(line) || (!isWordOrDigit(line[closeIdx+1]) && line[closeIdx+1] != '\\')) && isLikelyLatexMath(line[i+1:closeIdx]) {
 			sb.WriteString(translateLatexMath(line[i+1 : closeIdx]))
 			i = closeIdx + 1
 			continue
@@ -119,10 +120,21 @@ func isWordOrDigit(b byte) bool {
 }
 
 func isLikelyLatexMath(s string) bool {
+	if s[0] >= '0' && s[0] <= '9' {
+		k := 0
+		for k < len(s) && ((s[k] >= '0' && s[k] <= '9') || s[k] == '.' || s[k] == ',') {
+			k++
+		}
+		for k < len(s) && (s[k] == ' ' || s[k] == '\t') {
+			k++
+		}
+		r, _ := utf8.DecodeRuneInString(s[k:])
+		return k < len(s) && strings.ContainsRune(`\=^_<>±×·+-*/`, r)
+	}
 	if len(s) == 1 && ((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= 'A' && s[0] <= 'Z')) {
 		return true
 	}
-	return strings.ContainsAny(s, `\=^_<>±×·`)
+	return strings.ContainsAny(s, `\=^_<>±×·+-*/()[]{}|`)
 }
 
 func translateLatexMath(s string) string {
