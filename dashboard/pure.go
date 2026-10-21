@@ -120,10 +120,6 @@ func BuildFactsUpstreamURL(brainBaseURL string, inQuery url.Values) (targetURL s
 			}
 		}
 
-		if cat := strings.TrimSpace(inQuery.Get("category")); cat != "" {
-			outQuery.Set("category", cat)
-		}
-
 		if search := strings.TrimSpace(inQuery.Get("q")); search != "" {
 			runes := []rune(search)
 			if len(runes) > 64 {

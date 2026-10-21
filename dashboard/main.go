@@ -231,12 +231,11 @@ var globalGHPoller *GitHubPoller
 
 // FactItem represents a semantic memory item received from brain
 type FactItem struct {
-	ID         int64     `json:"id"`
-	Category   string    `json:"category"`
-	FactText   string    `json:"fact_text"`
-	Importance float64   `json:"importance"`
-	ThreadID   string    `json:"thread_id"`
-	CreatedAt  time.Time `json:"created_at"`
+	ID               int64     `json:"id"`
+	FactText         string    `json:"fact_text"`
+	ReinforceCount   int       `json:"reinforce_count"`
+	LastReinforcedAt time.Time `json:"last_reinforced_at,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
 }
 
 type FactsAPIResponse struct {

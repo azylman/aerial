@@ -388,17 +388,17 @@ func TestFactsHandler_TableDriven(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		if capturedQuery.Get("category") == "error500" {
+		if capturedQuery.Get("q") == "error500" {
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(`{"error":"db failure"}`))
 			return
 		}
-		if capturedQuery.Get("category") == "badjson" {
+		if capturedQuery.Get("q") == "badjson" {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`not-valid-json`))
 			return
 		}
-		if capturedQuery.Get("category") == "user" {
+		if capturedQuery.Get("limit") == "10" && capturedQuery.Get("offset") == "5" {
 			_ = json.NewEncoder(w).Encode(FactsAPIResponse{
 				Facts:  nil,
 				Total:  0,
@@ -408,16 +408,15 @@ func TestFactsHandler_TableDriven(t *testing.T) {
 			})
 			return
 		}
-		if capturedQuery.Get("limit") == "25" && capturedQuery.Get("category") == "user_preference" {
+		if capturedQuery.Get("limit") == "25" && capturedQuery.Get("q") == "dark mode" {
 			_ = json.NewEncoder(w).Encode(FactsAPIResponse{
 				Facts: []FactItem{
 					{
-						ID:         1,
-						Category:   "user_preference",
-						FactText:   "User prefers dark mode",
-						Importance: 0.9,
-						ThreadID:   "thread-123",
-						CreatedAt:  time.Now().UTC(),
+						ID:               1,
+						FactText:         "User prefers dark mode",
+						ReinforceCount:   2,
+						LastReinforcedAt: time.Now().UTC(),
+						CreatedAt:        time.Now().UTC(),
 					},
 				},
 				Total:  1,
@@ -429,11 +428,10 @@ func TestFactsHandler_TableDriven(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(FactsAPIResponse{
 			Facts: []FactItem{
 				{
-					ID:         1,
-					Category:   "user_preference",
-					FactText:   "Fact 1",
-					Importance: 1.0,
-					CreatedAt:  time.Now().UTC(),
+					ID:             1,
+					FactText:       "Fact 1",
+					ReinforceCount: 1,
+					CreatedAt:      time.Now().UTC(),
 				},
 			},
 			Total:  1,
@@ -459,7 +457,7 @@ func TestFactsHandler_TableDriven(t *testing.T) {
 			name:           "Success_QueryFilter",
 			brainURL:       mockBrain.URL,
 			method:         http.MethodGet,
-			target:         "/api/facts?limit=25&category=user_preference",
+			target:         "/api/facts?limit=25&q=dark%20mode",
 			wantStatus:     http.StatusOK,
 			wantBodySubstr: []string{"User prefers dark mode"},
 		},
@@ -483,7 +481,7 @@ func TestFactsHandler_TableDriven(t *testing.T) {
 			name:           "Success_AllParamsAndNilFacts",
 			brainURL:       mockBrain.URL,
 			method:         http.MethodGet,
-			target:         "/api/facts?limit=10&offset=5&category=user&q=" + strings.Repeat("searchterm", 10),
+			target:         "/api/facts?limit=10&offset=5&category=ignored&q=" + strings.Repeat("searchterm", 10),
 			wantStatus:     http.StatusOK,
 			wantBodySubstr: []string{`"facts":[]`},
 			wantMaxQRunes:  64,
@@ -500,14 +498,14 @@ func TestFactsHandler_TableDriven(t *testing.T) {
 			name:       "Upstream500",
 			brainURL:   mockBrain.URL,
 			method:     http.MethodGet,
-			target:     "/api/facts?category=error500",
+			target:     "/api/facts?q=error500",
 			wantStatus: http.StatusInternalServerError,
 		},
 		{
 			name:       "BadGateway_InvalidJSON",
 			brainURL:   mockBrain.URL,
 			method:     http.MethodGet,
-			target:     "/api/facts?category=badjson",
+			target:     "/api/facts?q=badjson",
 			wantStatus: http.StatusBadGateway,
 		},
 		{
