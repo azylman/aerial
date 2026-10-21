@@ -1855,6 +1855,7 @@ vanadis_url: "http://vanadis:8089"
 		userYAML             string
 		wantPort             string
 		wantBrainURL         string
+		wantMemoryURL        string
 		wantGHRepo           string
 		wantGHToken          string
 		wantGitSyncURL       string
@@ -1895,6 +1896,7 @@ vanadis_url: "http://vanadis:8089"
 			nilLookup:      true,
 			wantPort:       "8080",
 			wantBrainURL:   "http://brain:8080",
+			wantMemoryURL:  "http://memory-mcp.aerial",
 			wantGHRepo:     "azylman/aerial",
 			wantGHRepos:    []string{"azylman/aerial"},
 			wantGHToken:    "",
@@ -1937,6 +1939,16 @@ vanadis_url: "http://vanadis:8089"
 			env:         map[string]string{"GITHUB_REPO": "custom/single-repo"},
 			wantGHRepos: []string{"custom/single-repo"},
 			wantGHRepo:  "custom/single-repo",
+		},
+		{
+			name:          "MemoryURL_FromLookup",
+			env:           map[string]string{"MEMORY_MCP_URL": "http://memory-custom:4008"},
+			wantMemoryURL: "http://memory-custom:4008",
+		},
+		{
+			name:          "MemoryURL_FromYAML",
+			customYAML:    "memory_url: http://memory-yaml:4008\n",
+			wantMemoryURL: "http://memory-yaml:4008",
 		},
 		{
 			name:          "NomadAddr_FromLookup",
@@ -2018,6 +2030,9 @@ vanadis_url: "http://vanadis:8089"
 			}
 			if tc.wantBrainURL != "" && cfg.BrainURL != tc.wantBrainURL {
 				t.Errorf("BrainURL = %q, want %q", cfg.BrainURL, tc.wantBrainURL)
+			}
+			if tc.wantMemoryURL != "" && cfg.MemoryURL != tc.wantMemoryURL {
+				t.Errorf("MemoryURL = %q, want %q", cfg.MemoryURL, tc.wantMemoryURL)
 			}
 			if tc.wantGHRepo != "" && cfg.GHRepo != tc.wantGHRepo {
 				t.Errorf("GHRepo = %q, want %q", cfg.GHRepo, tc.wantGHRepo)

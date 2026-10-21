@@ -223,19 +223,9 @@ func BuildOneShotMessage(
 	return newScheduledMessage(msgID, runID, oneShot.ThreadID, oneShot.Prompt, summary, oneShot.Effort, now)
 }
 
-// ShouldRunFactExtraction returns true when tickCount represents an hourly interval (every 120 ticks at 30s).
-func ShouldRunFactExtraction(tickCount int) bool {
-	return tickCount > 0 && tickCount%120 == 0
-}
-
 // ShouldRunPruneRetention returns true when tickCount represents a daily interval (every 2880 ticks at 30s).
 func ShouldRunPruneRetention(tickCount int) bool {
 	return tickCount > 0 && tickCount%2880 == 0
-}
-
-// ShouldRunMemoryDecay returns true when tickCount represents a daily interval staggered by 60 ticks (30 minutes).
-func ShouldRunMemoryDecay(tickCount int) bool {
-	return tickCount > 0 && tickCount%2880 == 60
 }
 
 // ShouldRunTranscriptSync returns true when tickCount represents a 5-minute interval (every 10 ticks at 30s).

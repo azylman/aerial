@@ -852,6 +852,7 @@ type PendingImageRollout struct {
 var CoreBuildPaths = []string{
 	"brain/",
 	"scheduler-mcp/",
+	"memory-mcp/",
 	"discord-mcp/",
 	"docker-mcp/",
 	"github-mcp/",

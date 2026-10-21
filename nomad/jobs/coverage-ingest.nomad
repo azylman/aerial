@@ -85,6 +85,7 @@ for flush_url in \
   "http://vanadis.aerial/debug/coverage/flush" \
   "http://hangar.aerial/debug/coverage/flush" \
   "http://scheduler-mcp.aerial/debug/coverage/flush" \
+  "http://memory-mcp.aerial/debug/coverage/flush" \
   "http://discord-mcp.aerial/debug/coverage/flush" \
   "http://dashboard.aerial/debug/coverage/flush" \
   "http://brain.aerial/debug/coverage/flush" \

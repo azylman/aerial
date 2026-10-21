@@ -411,90 +411,6 @@ func TestScheduleLifecycle(t *testing.T) {
 	}
 }
 
-func TestFactLifecycle(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
-
-	store := NewSQLStore(database)
-	ctx := context.Background()
-
-	emb1, emb2 := make([]float32, ExpectedEmbeddingDim), make([]float32, ExpectedEmbeddingDim)
-	emb1[0], emb2[0], emb2[1] = 1.0, 0.9, 0.1
-
-	// 1. InsertFact & defaults
-	fID1, err := store.InsertFact(ctx, "personal", "Likes matcha latte", 0.9, emb1)
-	mustOK(t, err, "InsertFact 1")
-	fID2, err := store.InsertFact(ctx, "", "Default cat and imp", -1.0, emb2)
-	mustOK(t, err, "InsertFact 2 with defaults")
-	_, errEmptyFact := store.InsertFact(ctx, "cat", "", 1.0, nil)
-	assertErr(t, errEmptyFact, "empty fact text")
-
-	// 2. SearchSimilarFacts & FindDuplicateFact (tested on in-memory FakeStore, and query paths on SQLStore)
-	fakeStore := NewFakeStore()
-	_, _ = fakeStore.InsertFact(ctx, "personal", "Likes matcha latte", 0.9, emb1)
-	if similar, err := fakeStore.SearchSimilarFacts(ctx, emb1, "matcha", 5, 0.5); err != nil || len(similar) == 0 || similar[0].FactText != "Likes matcha latte" {
-		t.Fatalf("SearchSimilarFacts failed: %v, similar=%+v", err, similar)
-	}
-	if dup, sim, err := fakeStore.FindDuplicateFact(ctx, emb1, 0.85); err != nil || dup == nil || sim < 0.85 {
-		t.Fatalf("FindDuplicateFact failed: dup=%+v, sim=%f, %v", dup, sim, err)
-	}
-	if resEmpty, err := store.SearchSimilarFacts(ctx, nil, "", 10, 0.2); err != nil || resEmpty != nil {
-		t.Errorf("expected nil, nil for empty query and embedding, got %v, %v", resEmpty, err)
-	}
-	_, errPGVec := store.SearchSimilarFacts(ctx, emb1, "", 10, 0.2)
-	assertErr(t, errPGVec, "running pgvector query on sqlite")
-
-	// 4. GetFactsPaginated
-	if res, err := store.GetFactsPaginated(ctx, FactsFilter{Category: "personal", Limit: 10}); err != nil || res.Total != 1 || len(res.Facts) != 1 {
-		t.Fatalf("GetFactsPaginated category failed: %+v, %v", res, err)
-	}
-	if resQ, _ := store.GetFactsPaginated(ctx, FactsFilter{Query: "Default"}); len(resQ.Facts) != 1 {
-		t.Errorf("GetFactsPaginated query failed: %+v", resQ)
-	}
-	for _, f := range []FactsFilter{{Offset: 1}, {Limit: -1, Offset: -5}, {Query: "test\\_%", Category: "cat"}} {
-		if res, _ := store.GetFactsPaginated(ctx, f); res == nil {
-			t.Errorf("GetFactsPaginated(%+v) returned nil", f)
-		}
-	}
-
-	// 5. Watermarks & Active conversations
-	adminMeta := MessageMetadata{IsAdmin: true}
-	_ = store.InsertMessage(ctx, Message{ID: "m-ext-1", ThreadID: "th-1", Status: StatusCompleted, Content: "user prompt", ResponseText: "aerial answer", Metadata: adminMeta})
-	_ = store.InsertMessage(ctx, Message{ID: "m-ext-2", ThreadID: "th-1", Status: StatusCompleted, Content: "ambient prompt", ResponseText: "[AMBIENT_SILENT]", Metadata: adminMeta})
-	if activeConvs, err := store.GetActiveConversationsForExtraction(ctx, 24); err != nil || len(activeConvs) != 1 || activeConvs[0] != "th-1" {
-		t.Fatalf("GetActiveConversationsForExtraction failed: %v, active=%v", err, activeConvs)
-	}
-	if turns, err := store.GetUnextractedAdminTurns(ctx, "th-1"); err != nil || len(turns) != 1 || turns[0].ID != "m-ext-1" {
-		t.Fatalf("GetUnextractedAdminTurns failed: %v, turns=%+v", err, turns)
-	}
-	mustOK(t, store.UpdateConversationFactWatermark(ctx, "th-1", 5), "UpdateConversationFactWatermark")
-	mustOK(t, store.UpdateConversationFactExtractedAt(ctx, "th-1"), "UpdateConversationFactExtractedAt")
-	if convsAfter, _ := store.GetActiveConversationsForExtraction(ctx, 24); len(convsAfter) != 0 {
-		t.Errorf("expected 0 active conversations after watermark catch-up, got %d", len(convsAfter))
-	}
-
-	// 6. UpdateFactEmbedding
-	embUpdated := make([]float32, ExpectedEmbeddingDim)
-	embUpdated[1] = 1.0
-	mustOK(t, store.UpdateFactEmbedding(ctx, fID2, embUpdated), "UpdateFactEmbedding")
-	assertErr(t, store.UpdateFactEmbedding(ctx, fID2, []float32{1.0, 2.0}), "fact embedding with invalid dim")
-
-	// 7. ReinforceFact & DecayAndPruneFacts
-	_ = fakeStore.ReinforceFact(ctx, 1, "Likes iced matcha latte", emb1, 0.1)
-	assertErr(t, store.ReinforceFact(ctx, fID1, "Likes iced matcha latte", emb1, 0.1), "SQLite ::numeric syntax in ReinforceFact")
-	_, _, errDecay := store.DecayAndPruneFacts(ctx, 0.1, 0.2, 30)
-	assertErr(t, errDecay, "SQLite ::numeric syntax in DecayAndPruneFacts")
-
-	// 8. Missing embeddings & nil context
-	_, _ = store.GetFactsMissingEmbeddings(ctx, 10)
-	if idNilCtx, err := store.InsertFact(nil, "cat", "fact text nil ctx", 1.0, emb1); err != nil || idNilCtx <= 0 {
-		t.Fatalf("InsertFact with nil ctx failed: %v", err)
-	}
-	if resNilCtx, err := store.GetFactsPaginated(nil, FactsFilter{Limit: 5}); err != nil || resNilCtx.Total == 0 {
-		t.Fatalf("GetFactsPaginated with nil ctx failed: %v", err)
-	}
-}
-
 func TestVectorAndArrayHelpers(t *testing.T) {
 	// 1. Table-driven cosineSimilarity
 	simTests := []struct {
@@ -517,62 +433,7 @@ func TestVectorAndArrayHelpers(t *testing.T) {
 		})
 	}
 
-	// 2. Table-driven NullVector Scan
-	nvTests := []struct {
-		name           string
-		input          any
-		wantErr, valid bool
-		len            int
-	}{
-		{name: "nil", input: nil, wantErr: false, valid: false, len: 0},
-		{name: "invalid_type", input: 12345, wantErr: true},
-		{name: "invalid_json", input: "[bad", wantErr: true},
-		{name: "valid_string", input: "[0.1,0.2,0.3]", wantErr: false, valid: true, len: 3},
-		{name: "valid_bytes", input: []byte("[0.1,0.2]"), wantErr: false, valid: true, len: 2},
-	}
-	for _, tc := range nvTests {
-		t.Run(tc.name, func(t *testing.T) {
-			var nv NullVector
-			err := nv.Scan(tc.input)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("NullVector.Scan() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if !tc.wantErr && (nv.Valid != tc.valid || len(nv.Vector) != tc.len) {
-				t.Errorf("NullVector state mismatch: valid=%v, len=%d", nv.Valid, len(nv.Vector))
-			}
-		})
-	}
-
-	// 3. Table-driven FactTime Scan
-	now := time.Now()
-	ftTests := []struct {
-		name           string
-		input          any
-		wantErr, valid bool
-	}{
-		{name: "nil", input: nil, wantErr: false, valid: false},
-		{name: "time_val", input: now, wantErr: false, valid: true},
-		{name: "time_ptr", input: &now, wantErr: false, valid: true},
-		{name: "nil_time_ptr", input: (*time.Time)(nil), wantErr: false, valid: false},
-		{name: "empty_str", input: "", wantErr: false, valid: false},
-		{name: "empty_bytes", input: []byte(""), wantErr: false, valid: false},
-		{name: "valid_bytes", input: []byte(now.Format(time.RFC3339)), wantErr: false, valid: true},
-		{name: "invalid_str", input: "not-a-time", wantErr: true},
-	}
-	for _, tc := range ftTests {
-		t.Run(tc.name, func(t *testing.T) {
-			var ft FactTime
-			err := ft.Scan(tc.input)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("FactTime.Scan() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if !tc.wantErr && ft.Valid != tc.valid {
-				t.Errorf("FactTime.Valid = %v, want %v", ft.Valid, tc.valid)
-			}
-		})
-	}
-
-	// 4. Table-driven parsePostgresTextArray
+	// 2. Table-driven parsePostgresTextArray
 	arrTests := []struct {
 		name     string
 		input    string
@@ -658,25 +519,4 @@ func TestTaskHelpers(t *testing.T) {
 	tx, _ := database.Begin()
 	_ = tx.Rollback()
 	rollbackWarn(tx, "done tx")
-}
-
-func TestIsExtractableAdminTurn(t *testing.T) {
-	tests := []struct {
-		name string
-		msg  Message
-		want bool
-	}{
-		{name: "not_completed", msg: Message{Status: StatusPending, Metadata: MessageMetadata{IsAdmin: true}, ResponseText: "hello"}, want: false},
-		{name: "not_admin", msg: Message{Status: StatusCompleted, Metadata: MessageMetadata{IsAdmin: false}, ResponseText: "hello"}, want: false},
-		{name: "empty_response", msg: Message{Status: StatusCompleted, Metadata: MessageMetadata{IsAdmin: true}, ResponseText: "   "}, want: false},
-		{name: "starts_with_bracket", msg: Message{Status: StatusCompleted, Metadata: MessageMetadata{IsAdmin: true}, ResponseText: "[thinking] done"}, want: false},
-		{name: "valid_admin_turn", msg: Message{Status: StatusCompleted, Metadata: MessageMetadata{IsAdmin: true}, ResponseText: "All done!"}, want: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := IsExtractableAdminTurn(tc.msg); got != tc.want {
-				t.Fatalf("IsExtractableAdminTurn() = %v, want %v", got, tc.want)
-			}
-		})
-	}
 }

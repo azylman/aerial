@@ -33,11 +33,6 @@ func c2[A, B any](_ A, _ B, err error) error { return err }
 func assertStoreUnavailable(t *testing.T, s Store) {
 	t.Helper()
 	ctx := context.Background()
-	requireErr(t, c1(s.GetUnextractedAdminTurns(ctx, "t")), "GetUnextractedAdminTurns")
-	requireErr(t, s.UpdateConversationFactWatermark(ctx, "t", 1), "UpdateConversationFactWatermark")
-	requireErr(t, s.UpdateConversationFactExtractedAt(ctx, "t"), "UpdateConversationFactExtractedAt")
-	requireErr(t, c1(s.GetFactsMissingEmbeddings(ctx, 10)), "GetFactsMissingEmbeddings")
-	requireErr(t, s.UpdateFactEmbedding(ctx, 1, nil), "UpdateFactEmbedding")
 	requireErr(t, s.CreateOneShotSchedule(ctx, OneShotSchedule{}), "CreateOneShotSchedule")
 	requireErr(t, c1(s.GetDueOneShotSchedules(ctx)), "GetDueOneShotSchedules")
 	requireErr(t, s.InsertMessageAndConsumeOneShot(ctx, "id", Message{}), "InsertMessageAndConsumeOneShot")

@@ -1349,6 +1349,7 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalN
 			services = []ServiceStatus{
 				{Name: "brain", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "scheduler-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: "memory-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "discord-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "docker-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "github-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
@@ -1925,6 +1926,7 @@ func (ar *AssetRegistry) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 type DashboardConfig struct {
 	Port       string
 	BrainURL   string
+	MemoryURL  string
 	GHRepo     string
 	GHRepos    []string
 	GHToken    string
@@ -1941,6 +1943,7 @@ type DashboardConfig struct {
 type DashboardYAMLConfig struct {
 	Port       string   `yaml:"port"`
 	BrainURL   string   `yaml:"brain_url"`
+	MemoryURL  string   `yaml:"memory_url"`
 	HangarURL  string   `yaml:"hangar_url"`
 	GitSyncURL string   `yaml:"gitsync_url"`
 	GHRepo     string   `yaml:"github_repo"`
@@ -1980,6 +1983,14 @@ func NewDashboardConfigFromLookup(lookup func(string) string) DashboardConfig {
 	}
 	if brainURL == "" {
 		brainURL = "http://brain:8080"
+	}
+
+	memoryURL := strings.TrimSpace(lookup("MEMORY_MCP_URL"))
+	if memoryURL == "" && ycfg.MemoryURL != "" {
+		memoryURL = strings.TrimSpace(ycfg.MemoryURL)
+	}
+	if memoryURL == "" {
+		memoryURL = "http://memory-mcp.aerial"
 	}
 
 	var ghRepos []string
@@ -2071,6 +2082,7 @@ func NewDashboardConfigFromLookup(lookup func(string) string) DashboardConfig {
 	return DashboardConfig{
 		Port:       port,
 		BrainURL:   brainURL,
+		MemoryURL:  memoryURL,
 		GHRepo:     ghRepo,
 		GHRepos:    ghRepos,
 		GHToken:    ghToken,
@@ -2100,12 +2112,16 @@ var (
 // SetupDashboardMux configures the HTTP router and route handlers.
 func SetupDashboardMux(cfg DashboardConfig, assetReg *AssetRegistry) http.Handler {
 	mux := http.NewServeMux()
+	memoryURL := strings.TrimSpace(cfg.MemoryURL)
+	if memoryURL == "" {
+		memoryURL = cfg.BrainURL
+	}
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/dashboard/health", healthHandler)
 	mux.HandleFunc("/api/status", statusHandler(cfg.BrainURL, cfg.GitSyncURL, cfg.ConfigPath, cfg.GitCommit, cfg.NomadAddr))
 	mux.HandleFunc("/dashboard/api/status", statusHandler(cfg.BrainURL, cfg.GitSyncURL, cfg.ConfigPath, cfg.GitCommit, cfg.NomadAddr))
-	mux.HandleFunc("/api/facts", factsHandler(cfg.BrainURL))
-	mux.HandleFunc("/dashboard/api/facts", factsHandler(cfg.BrainURL))
+	mux.HandleFunc("/api/facts", factsHandler(memoryURL))
+	mux.HandleFunc("/dashboard/api/facts", factsHandler(memoryURL))
 	mux.HandleFunc("/api/schedules", schedulesHandler(cfg.BrainURL))
 	mux.HandleFunc("/dashboard/api/schedules", schedulesHandler(cfg.BrainURL))
 	mux.HandleFunc("/api/schedules/runs", scheduleRunsHandler(cfg.BrainURL))

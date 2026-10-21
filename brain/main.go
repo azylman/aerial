@@ -34,7 +34,6 @@ import (
 	"github.com/azylman/aerial/brain/pkg/discord"
 	"github.com/azylman/aerial/brain/pkg/env"
 	"github.com/azylman/aerial/brain/pkg/mcp"
-	"github.com/azylman/aerial/brain/pkg/memory"
 	"github.com/azylman/aerial/brain/pkg/metrics"
 	"github.com/azylman/aerial/brain/pkg/queue"
 	"github.com/azylman/aerial/brain/pkg/runner"
@@ -713,36 +712,70 @@ func setNoCacheJSONHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 }
 
-func handleFacts(store db.Store) http.HandlerFunc {
+func handleInternalLLM(llmFn func(context.Context, string, string) (string, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !requireGetWithStore(w, r, store == nil) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", "POST")
+			writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
 			return
 		}
-
-		q := r.URL.Query()
-		limit, offset := parseLimitOffset(q, 0, 0)
-
-		category := strings.TrimSpace(q.Get("category"))
-		search := strings.TrimSpace(q.Get("q"))
-		if runes := []rune(search); len(runes) > 64 {
-			search = string(runes[:64])
+		if llmFn == nil {
+			writeErr(w, http.StatusServiceUnavailable, "LLM runner not available")
+			return
 		}
-
-		filter := db.FactsFilter{
-			Category: category,
-			Query:    search,
-			Limit:    limit,
-			Offset:   offset,
+		var req struct {
+			Prompt string `json:"prompt"`
 		}
-
-		result, err := store.GetFactsPaginated(r.Context(), filter)
+		if !readPostJSON(w, r, &req) {
+			return
+		}
+		prompt := strings.TrimSpace(req.Prompt)
+		if prompt == "" {
+			writeErr(w, http.StatusBadRequest, "Invalid payload: 'prompt' field is required and cannot be empty")
+			return
+		}
+		resp, err := llmFn(r.Context(), "", prompt)
 		if err != nil {
-			writeStoreErr(w, "facts", err)
+			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		writeJSON(w, http.StatusOK, map[string]string{"response": resp})
+	}
+}
 
-		setNoCacheJSONHeaders(w)
-		writeJSON(w, http.StatusOK, result)
+func newHTTPMemoryRetriever(baseURL string) runner.MemoryRetriever {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		baseURL = strings.TrimRight(strings.TrimSpace(os.Getenv("MEMORY_MCP_URL")), "/")
+	}
+	if baseURL == "" {
+		baseURL = "http://memory-mcp.aerial"
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	return func(ctx context.Context, query string) (string, error) {
+		q := strings.TrimSpace(query)
+		if q == "" {
+			return "", nil
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/context?q="+url.QueryEscape(q)+"&limit=5", nil)
+		if err != nil {
+			return "", err
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return "", err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("memory-mcp returned status %d", resp.StatusCode)
+		}
+		var out struct {
+			Context string `json:"context"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+			return "", err
+		}
+		return out.Context, nil
 	}
 }
 
@@ -1213,7 +1246,7 @@ func (rec *statusRecorder) Flush() {
 
 func normalizeRoute(path string) string {
 	switch {
-	case path == "/prompt", path == "/schedules", path == "/schedules/runs", path == "/health", path == "/metrics":
+	case path == "/prompt", path == "/schedules", path == "/schedules/runs", path == "/health", path == "/metrics", path == "/internal/llm":
 		return path
 	case path == "/voice/ask" || path == "/api/voice/ask":
 		return "/voice/ask"
@@ -1221,8 +1254,6 @@ func normalizeRoute(path string) string {
 		return "/transcripts"
 	case path == "/tasks" || strings.HasPrefix(path, "/tasks/"):
 		return "/tasks"
-	case path == "/facts" || strings.HasPrefix(path, "/facts/"):
-		return "/facts"
 	default:
 		return "unmatched"
 	}
@@ -1269,10 +1300,14 @@ func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, embedder 
 	mux.HandleFunc("/transcripts/steps", handleTranscriptSteps(store))
 	mux.HandleFunc("/api/transcripts/steps", handleTranscriptSteps(store))
 	mux.HandleFunc("/tasks", handleTasks(store))
-	mux.HandleFunc("/facts", handleFacts(store))
 	mux.HandleFunc("/schedules", handleSchedules(store))
 	mux.HandleFunc("/schedules/runs", handleScheduleRuns(store))
 	mux.HandleFunc("/internal/pr/register", handlePRRegister(store, pool))
+	var llmFn func(context.Context, string, string) (string, error)
+	if pool != nil {
+		llmFn = pool.LLMFunc()
+	}
+	mux.HandleFunc("/internal/llm", handleInternalLLM(llmFn))
 	mux.HandleFunc("/debug/coverage/flush", func(w http.ResponseWriter, r *http.Request) {
 		if dir := os.Getenv("GOCOVERDIR"); dir != "" {
 			if err := writeMetaDirFn(dir); err != nil {
@@ -1802,17 +1837,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 
 	poolEnv := buildPoolEnv(os.Environ(), runtimeBase, cur.Timezone)
 
-	memClient := memory.New(cfg, sessionMgr.Roots()...)
-	var memoryRetriever runner.MemoryRetriever
-	if store != nil && memClient != nil {
-		memoryRetriever = func(ctx context.Context, query string) (string, error) {
-			queryText := memory.ExtractQueryText(query)
-			if queryText == "" {
-				queryText = query
-			}
-			return memory.RetrieveFormattedContext(ctx, store, memClient, queryText, 5)
-		}
-	}
+	memoryRetriever := newHTTPMemoryRetriever("")
 
 	basePoolCfg := func(home, model string, prewarmed []string) runner.PoolConfig {
 		return runner.PoolConfig{
@@ -1984,10 +2009,11 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	}
 	stopScheduler := sched.Start(ctx)
 	defer stopScheduler()
+	txEmbedder := transcript.NewEmbedder(cfg, sessionMgr.Roots()...)
 	var embedder transcript.EmbedderFunc
-	if memClient != nil {
+	if txEmbedder != nil {
 		embedder = func(eCtx context.Context, text string) ([]float32, error) {
-			return memClient.GenerateEmbedding(eCtx, text, false, 1)
+			return txEmbedder.GenerateEmbedding(eCtx, text, false, 1)
 		}
 	}
 	mux := SetupBrainMuxWithEmbedder(store, pool, embedder, sessionMgr.Roots()...)

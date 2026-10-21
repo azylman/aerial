@@ -112,6 +112,14 @@ func (p *WorkerPool) SummaryGroup() *singleflight.Group {
 	return &p.summaryGroup
 }
 
+// LLMFunc returns the configured ephemeral LLM function on the pool, or nil.
+func (p *WorkerPool) LLMFunc() LLMFunc {
+	if p == nil {
+		return nil
+	}
+	return p.cfg.LLMFunc
+}
+
 // Store returns the configured db.Store, resolving cfg.Store or wrapping cfg.DB if necessary.
 func (p *WorkerPool) Store() db.Store {
 	if p == nil {

@@ -1,4 +1,4 @@
-package memory
+package transcript
 
 import (
 	"bytes"
@@ -20,6 +20,7 @@ const (
 	DefaultOllamaURL      = "http://ollama:11434"
 )
 
+// Client manages HTTP embedding requests to Ollama for transcript indexing and search.
 type Client struct {
 	cfg        *config.Config
 	httpClient *http.Client
@@ -27,8 +28,8 @@ type Client struct {
 	retryDelay time.Duration
 }
 
-// New creates a new memory Client with pure *config.Config and optional transcript search roots.
-func New(cfg *config.Config, roots ...string) *Client {
+// NewEmbedder creates a new Ollama embedding client with *config.Config and optional transcript search roots.
+func NewEmbedder(cfg *config.Config, roots ...string) *Client {
 	if cfg == nil {
 		cfg = config.NewFromData(&config.ConfigData{})
 	}
@@ -45,22 +46,6 @@ func New(cfg *config.Config, roots ...string) *Client {
 		},
 		roots:      cleanRoots,
 		retryDelay: 50 * time.Millisecond,
-	}
-}
-
-// NewClient is a compatibility constructor.
-func NewClient(baseURLOrCfg any, roots ...string) *Client {
-	switch v := baseURLOrCfg.(type) {
-	case *config.Config:
-		return New(v, roots...)
-	case string:
-		return New(config.NewFromData(&config.ConfigData{
-			Ollama: config.OllamaConfig{
-				BaseURL: v,
-			},
-		}), roots...)
-	default:
-		return New(nil, roots...)
 	}
 }
 
@@ -101,24 +86,23 @@ func (c *Client) getOllamaConfig() config.OllamaConfig {
 	return cfg
 }
 
+// BaseURL returns the normalized Ollama server URL without trailing slash.
 func (c *Client) BaseURL() string {
 	return strings.TrimSuffix(c.getOllamaConfig().BaseURL, "/")
 }
 
-type EmbeddingRequest struct {
+type embeddingRequest struct {
 	Model   string         `json:"model"`
 	Prompt  string         `json:"prompt"`
 	Options map[string]any `json:"options,omitempty"`
 }
 
-type EmbeddingResponse struct {
+type embeddingResponse struct {
 	Embedding []float32 `json:"embedding"`
 	Error     string    `json:"error,omitempty"`
 }
 
 // GenerateEmbedding generates an embedding for a text string.
-// If isQuery is true and Ollama.QueryPrefix is configured, prepends the query instruction prefix.
-// Enforces a 1.0s timeout per attempt with up to maxRetries attempts (default 1 retry = 2 total attempts).
 func (c *Client) GenerateEmbedding(ctx context.Context, text string, isQuery bool, maxRetries int) (result []float32, retErr error) {
 	if text == "" {
 		return nil, fmt.Errorf("text cannot be empty")
@@ -152,7 +136,7 @@ func (c *Client) GenerateEmbedding(ctx context.Context, text string, isQuery boo
 		metrics.RecordEmbedding(model, embedType, status, time.Since(start))
 	}()
 
-	reqBody, err := json.Marshal(EmbeddingRequest{
+	reqBody, err := json.Marshal(embeddingRequest{
 		Model:  model,
 		Prompt: prompt,
 		Options: map[string]any{
@@ -191,7 +175,14 @@ func (c *Client) GenerateEmbedding(ctx context.Context, text string, isQuery boo
 				delay = 50 * time.Millisecond
 			}
 			if delay > 0 {
-				time.Sleep(delay)
+				timer := time.NewTimer(delay)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					retErr = ctx.Err()
+					return nil, retErr
+				case <-timer.C:
+				}
 			}
 		}
 	}
@@ -218,7 +209,7 @@ func (c *Client) doRequest(ctx context.Context, body []byte) ([]float32, error) 
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
-			log.Printf("[Memory] Warning closing ollama response body: %v", closeErr)
+			log.Printf("[Transcript] Warning closing ollama response body: %v", closeErr)
 		}
 	}()
 
@@ -231,7 +222,7 @@ func (c *Client) doRequest(ctx context.Context, body []byte) ([]float32, error) 
 		return nil, fmt.Errorf("ollama HTTP %d: %s", resp.StatusCode, string(respBytes))
 	}
 
-	var res EmbeddingResponse
+	var res embeddingResponse
 	if err := json.Unmarshal(respBytes, &res); err != nil {
 		return nil, err
 	}

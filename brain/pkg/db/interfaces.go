@@ -17,7 +17,6 @@ type DBTX interface {
 var (
 	ErrScheduleAlreadyConsumed = errors.New("schedule already consumed")
 	ErrMessageAlreadyClaimed   = errors.New("message already claimed")
-	ErrFactNotFound            = errors.New("fact not found")
 )
 
 // SessionActivityStats summarizes database-level activity timestamps for session lifecycle decisions.
@@ -28,22 +27,6 @@ type SessionActivityStats struct {
 	CompletedTurns                int64     `json:"completed_turns"`
 	LastMessageAt                 time.Time `json:"last_message_at"`
 	LastCompletedMessageCreatedAt time.Time `json:"last_completed_message_created_at"`
-}
-
-// FactStore handles persistence and semantic search for conversation facts.
-type FactStore interface {
-	InsertFact(ctx context.Context, category, factText string, importance float64, embedding []float32) (int64, error)
-	SearchSimilarFacts(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]Fact, error)
-	GetFactsPaginated(ctx context.Context, filter FactsFilter) (*FactsResult, error)
-	GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error)
-	GetUnextractedAdminTurns(ctx context.Context, threadID string) ([]Message, error)
-	UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64) error
-	UpdateConversationFactExtractedAt(ctx context.Context, threadID string) error
-	FindDuplicateFact(ctx context.Context, embedding []float32, minSim float64) (*Fact, float64, error)
-	ReinforceFact(ctx context.Context, id int64, newText string, newEmbedding []float32, boost float64) error
-	DecayAndPruneFacts(ctx context.Context, decayStep float64, pruneFloor float64, pruneAgeDays int) (decayed int64, pruned int64, err error)
-	GetFactsMissingEmbeddings(ctx context.Context, limit int) ([]Fact, error)
-	UpdateFactEmbedding(ctx context.Context, id int64, embedding []float32) error
 }
 
 // ScheduleStore handles cron and one-shot schedule execution and telemetry.
@@ -173,7 +156,6 @@ type VanadisStore interface {
 
 // Store unifies all repository capabilities under a single interface.
 type Store interface {
-	FactStore
 	ScheduleStore
 	MessageStore
 	SessionStore

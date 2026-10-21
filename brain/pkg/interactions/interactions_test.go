@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
@@ -89,7 +90,7 @@ func setupTestRouter(adminID string, httpStatus int) (*Router, *config.Config, *
 		AdminUsers: []string{adminID},
 		Channels:   map[string]config.ChannelPolicy{"chan-1": {Mode: "thread"}, "chan-2": {Mode: "mention"}},
 	})
-	return NewRouter(InteractionDeps{Config: cfg}), cfg, transport, newMockDiscordSession(transport)
+	return NewRouter(InteractionDeps{Config: cfg, MemoryURL: "http://127.0.0.1:1"}), cfg, transport, newMockDiscordSession(transport)
 }
 
 func mkOpt(name string, optType discordgo.ApplicationCommandOptionType, val any) *discordgo.ApplicationCommandInteractionDataOption {
@@ -147,9 +148,6 @@ func mockGitOpsUpdater(cfg *config.Config, shouldErr bool) GitOpsChannelUpdater 
 
 func seedStatusFixtures(store *db.FakeStore, facts, crons, oneShots, active bool) {
 	ctx, now := context.Background(), time.Now().UTC()
-	if facts {
-		_, _ = store.InsertFact(ctx, "architecture", "Aerial runs on PostgreSQL 16 with pgvector", 0.9, nil)
-	}
 	if crons {
 		if facts {
 			_ = store.CreateCronSchedule(ctx, db.CronSchedule{ID: "cron-1", CronExpr: "0 9 * * *", Prompt: "Morning system briefing", TitlePrefix: "Morning briefing", NextRunAt: now.Add(2 * time.Hour)})
@@ -340,6 +338,15 @@ func TestRouter_AuthAndDispatch(t *testing.T) {
 }
 
 func TestRouter_HandleStatus(t *testing.T) {
+	memSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"total": 1,
+			"facts": []map[string]any{{"fact_text": "Aerial runs on PostgreSQL 16 with pgvector", "created_at": time.Now().UTC().Format(time.RFC3339)}},
+		})
+	}))
+	defer memSrv.Close()
+
 	tests := []struct {
 		name         string
 		gitCommitEnv string
@@ -368,11 +375,15 @@ func TestRouter_HandleStatus(t *testing.T) {
 			}
 
 			router, _, transport, session := setupTestRouter("admin-123", tc.httpStatus)
+			if tc.seedFacts {
+				router.deps.MemoryURL = memSrv.URL
+			} else if tc.failStore {
+				router.deps.MemoryURL = ""
+			}
 			store := db.NewFakeStore()
 			seedStatusFixtures(store, tc.seedFacts, tc.seedCrons, tc.seedOneShots, tc.seedActive)
 
 			if tc.failStore {
-				store.FailNext("GetFactsPaginated", errors.New("db error"))
 				store.FailNext("GetAllCronSchedules", errors.New("db error"))
 				store.FailNext("GetAllOneShotSchedules", errors.New("db error"))
 				store.FailNext("GetActiveTasks", errors.New("db error"))

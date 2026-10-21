@@ -272,91 +272,6 @@ func TestFakeStoreScheduleOperations(t *testing.T) {
 	_, _ = s.PruneScheduleRuns(ctx, 2, time.Hour)
 }
 
-func TestFakeStoreFactOperations(t *testing.T) {
-	s := NewFakeStore()
-	ctx := context.Background()
-
-	emb1, emb2, emb3 := []float32{1.0, 0.0, 0.0}, []float32{0.9, 0.1, 0.0}, []float32{0.0, 1.0, 0.0}
-	id1, _ := s.InsertFact(ctx, "personal", "Likes matcha latte", 0.9, emb1)
-	_, _ = s.InsertFact(ctx, "tech", "Gundam pilot", 0.8, emb2)
-	id3, _ := s.InsertFact(ctx, "tech", "Missing embedding fact", 0.5, nil)
-
-	if matches, _ := s.SearchSimilarFacts(ctx, emb1, "", 5, 0.75); len(matches) != 2 || matches[0].ID != id1 {
-		t.Errorf("SearchSimilarFacts = %+v, want top id1", matches)
-	}
-	if dup, sim, _ := s.FindDuplicateFact(ctx, emb1, 0.85); dup == nil || dup.ID != id1 || sim <= 0.85 {
-		t.Errorf("FindDuplicateFact = %+v, %f", dup, sim)
-	}
-	if dupNone, _, _ := s.FindDuplicateFact(ctx, emb3, 0.99); dupNone != nil {
-		t.Errorf("expected no dup, got %+v", dupNone)
-	}
-
-	if res, _ := s.GetFactsPaginated(ctx, FactsFilter{Category: "tech", Limit: 10}); res.Total != 2 || len(res.Facts) != 2 {
-		t.Errorf("GetFactsPaginated tech = total %d, len %d, want 2, 2", res.Total, len(res.Facts))
-	}
-	if resQ, _ := s.GetFactsPaginated(ctx, FactsFilter{Query: "matcha"}); len(resQ.Facts) != 1 || resQ.Facts[0].ID != id1 {
-		t.Errorf("GetFactsPaginated query matcha = %+v", resQ)
-	}
-	if resOff, _ := s.GetFactsPaginated(ctx, FactsFilter{Offset: 50}); resOff.Facts != nil {
-		t.Errorf("expected nil facts for offset beyond total, got %+v", resOff)
-	}
-
-	if threadFacts, _ := s.GetFactsByThreadWithEmbeddings(ctx, "th-facts"); len(threadFacts) != 3 {
-		t.Errorf("GetFactsByThreadWithEmbeddings = %d, want 3", len(threadFacts))
-	}
-	if missing, _ := s.GetFactsMissingEmbeddings(ctx, 10); len(missing) != 1 || missing[0].ID != id3 {
-		t.Errorf("GetFactsMissingEmbeddings = %+v, want id3", missing)
-	}
-
-	_ = s.UpdateFactEmbedding(ctx, id3, emb3)
-	if err := s.UpdateFactEmbedding(ctx, 9999, emb3); !errors.Is(err, ErrFactNotFound) {
-		t.Errorf("expected ErrFactNotFound, got %v", err)
-	}
-	if missAfter, _ := s.GetFactsMissingEmbeddings(ctx, 10); len(missAfter) != 0 {
-		t.Errorf("GetFactsMissingEmbeddings after update = %d, want 0", len(missAfter))
-	}
-
-	_ = s.ReinforceFact(ctx, id1, "Likes iced matcha latte", emb1, 0.1)
-	if err := s.ReinforceFact(ctx, 9999, "", nil, 0.1); !errors.Is(err, ErrFactNotFound) {
-		t.Errorf("expected ErrFactNotFound on reinforce, got %v", err)
-	}
-
-	if decayed, pruned, err := s.DecayAndPruneFacts(ctx, 0.2, 0.6, 0); err != nil || decayed != 3 || pruned == 0 {
-		t.Errorf("DecayAndPruneFacts = decayed %d, pruned %d, err %v", decayed, pruned, err)
-	}
-
-	_ = s.UpdateConversationFactWatermark(ctx, "th-done", 42)
-	_ = s.UpdateConversationFactExtractedAt(ctx, "th-done")
-	adminMeta := MessageMetadata{IsAdmin: true}
-	_ = s.InsertMessage(ctx, Message{ID: "m-ext-0", ThreadID: "th-done", Status: StatusCompleted, Content: "q0", ResponseText: "a0", Metadata: adminMeta})
-	_ = s.InsertMessage(ctx, Message{ID: "m-ext-1", ThreadID: "th-facts", Status: StatusCompleted, Content: "q1", ResponseText: "a1", Metadata: adminMeta})
-	_ = s.InsertMessage(ctx, Message{ID: "m-ext-2", ThreadID: "th-facts", Status: StatusCompleted, Content: "q2", ResponseText: "[AMBIENT_SILENT]", Metadata: adminMeta})
-	_ = s.InsertMessage(ctx, Message{ID: "m-ext-3", ThreadID: "th-other", Status: StatusCompleted, Content: "q3", ResponseText: "a3", Metadata: adminMeta})
-	if activeThreads, _ := s.GetActiveConversationsForExtraction(ctx, 24); len(activeThreads) != 2 {
-		t.Errorf("GetActiveConversationsForExtraction = %d (%v), want 2", len(activeThreads), activeThreads)
-	}
-	if turns, _ := s.GetUnextractedAdminTurns(ctx, "th-facts"); len(turns) != 1 || turns[0].ID != "m-ext-1" {
-		t.Errorf("GetUnextractedAdminTurns = %+v, want m-ext-1", turns)
-	}
-	if emptyTurns, _ := s.GetUnextractedAdminTurns(ctx, "   "); len(emptyTurns) != 0 {
-		t.Errorf("expected empty turns, got %+v", emptyTurns)
-	}
-
-	_, _ = s.InsertFact(ctx, "cat", "Fact A", 0.5, []float32{1.0, 0.0})
-	_, _ = s.InsertFact(ctx, "cat", "Fact B", 0.5, []float32{0.0, 1.0})
-	if fbth, err := s.GetFactsByThreadWithEmbeddings(ctx, "any"); err != nil || len(fbth) < 2 {
-		t.Errorf("GetFactsByThreadWithEmbeddings failed: %v, len=%d", err, len(fbth))
-	}
-	_, _, _ = s.DecayAndPruneFacts(ctx, 0, 0, 0)
-	if none, _ := s.SearchSimilarFacts(ctx, nil, "", 0, 0); none != nil {
-		t.Errorf("expected nil for empty vec and query")
-	}
-	_, _ = s.SearchSimilarFacts(ctx, []float32{1.0, 0.0}, "", 0, 0)
-	_, _ = s.SearchSimilarFacts(ctx, nil, "Fact", 0, 0)
-	_, _ = s.SearchSimilarFacts(ctx, []float32{1.0, 0.0}, "Fact", 0, 0)
-	_, _, _ = s.FindDuplicateFact(ctx, []float32{1.0, 0.0}, 0)
-}
-
 func TestFakeStoreTranscriptsPRAndVanadis(t *testing.T) {
 	s := NewFakeStore()
 	ctx := context.Background()
@@ -407,7 +322,7 @@ func TestFakeStoreTranscriptsPRAndVanadis(t *testing.T) {
 
 func TestFakeStoreCloneNil(t *testing.T) {
 	if cloneMessage(nil) != nil || clonePtr[SessionInfo](nil) != nil || cloneRun(nil) != nil ||
-		cloneFactWithEmbedding(nil) != nil || cloneSessionSummary(nil) != nil || cloneTranscriptSteps(nil) != nil {
+		cloneSessionSummary(nil) != nil || cloneTranscriptSteps(nil) != nil {
 		t.Errorf("expected nil clones for nil inputs")
 	}
 	if got := cloneSliceNonNil[string](nil); got == nil || len(got) != 0 {

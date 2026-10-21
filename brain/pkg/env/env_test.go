@@ -944,6 +944,9 @@ func TestMCPProvisioning(t *testing.T) {
 			if (servers["scheduler"] != nil) != tc.wantScheduler {
 				t.Errorf("scheduler presence = %v, want %v", servers["scheduler"] != nil, tc.wantScheduler)
 			}
+			if (servers["memory"] != nil) != tc.wantScheduler {
+				t.Errorf("memory presence = %v, want %v", servers["memory"] != nil, tc.wantScheduler)
+			}
 			if (servers["discord"] != nil) != tc.wantDiscord {
 				t.Errorf("discord presence = %v, want %v", servers["discord"] != nil, tc.wantDiscord)
 			}

@@ -1538,9 +1538,16 @@ func (te *turnExecution) executeWithRetries() {
 				sessIDToSend = te.lease.SessionID()
 			}
 			scopeInst := config.LoadScopeInstructions(te.effectiveName)
+			var memParts []string
+			for _, m := range te.burst {
+				if bt := strings.TrimSpace(m.BodyText()); bt != "" {
+					memParts = append(memParts, bt)
+				}
+			}
 			turnCtx := &runner.TurnContext{
 				TurnID: uuid.New().String(), SessionID: sessIDToSend, Model: currentModel,
-				Prompt: promptToSend, ScopeInstructions: scopeInst, ChannelInstructions: scopeInst,
+				Prompt: promptToSend, MemoryQuery: strings.Join(memParts, "\n"),
+				ScopeInstructions: scopeInst, ChannelInstructions: scopeInst,
 				CoordinationContext: te.injectedHookContext, Sink: sink, CreatedAt: time.Now(), Ctx: runCtx,
 			}
 			var execErr error

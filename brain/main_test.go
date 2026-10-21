@@ -723,8 +723,7 @@ func TestNormalizeRoute(t *testing.T) {
 		{"/api/transcripts/search", "/transcripts"},
 		{"/tasks", "/tasks"},
 		{"/tasks/456", "/tasks"},
-		{"/facts", "/facts"},
-		{"/facts/789", "/facts"},
+		{"/internal/llm", "/internal/llm"},
 		{"/schedules", "/schedules"},
 		{"/schedules/runs", "/schedules/runs"},
 		{"/health", "/health"},
@@ -810,33 +809,62 @@ func TestStatusRecorder_Flush(t *testing.T) {
 	srPlain.Flush() // should not panic
 }
 
-func TestHandleFacts_Comprehensive(t *testing.T) {
-	store := db.NewFakeStore()
-	_, _ = store.InsertFact(context.Background(), "system", "Fact 1", 1.0, nil)
-	_, _ = store.InsertFact(context.Background(), "user_preference", "Fact 2", 1.0, nil)
-	handler := handleFacts(store)
-
-	closedStore := db.NewFakeStore()
-	_ = closedStore.Close()
+func TestHandleInternalLLM_And_MemoryRetriever(t *testing.T) {
+	okLLM := handleInternalLLM(func(ctx context.Context, model, p string) (string, error) {
+		return `[{"category":"system","fact":"ok"}]`, nil
+	})
+	errLLM := handleInternalLLM(func(ctx context.Context, model, p string) (string, error) {
+		return "", errors.New("llm failed")
+	})
+	nilLLM := handleInternalLLM(nil)
 
 	for _, tc := range []struct {
 		name       string
 		method     string
 		handler    http.HandlerFunc
-		target     string
+		body       string
 		wantStatus int
 	}{
-		{"method not allowed", http.MethodPost, handler, "/facts", http.StatusMethodNotAllowed},
-		{"valid GET no filter", http.MethodGet, handler, "/facts", http.StatusOK},
-		{"valid GET with filter", http.MethodGet, handler, "/facts?category=system&limit=10&offset=0&q=" + strings.Repeat("a", 100), http.StatusOK},
-		{"closed DB error", http.MethodGet, handleFacts(closedStore), "/facts", http.StatusInternalServerError},
-		{"nil store", http.MethodGet, handleFacts(nil), "/facts", http.StatusInternalServerError},
+		{"method not allowed", http.MethodGet, okLLM, "", http.StatusMethodNotAllowed},
+		{"nil llm runner", http.MethodPost, nilLLM, `{"prompt":"hi"}`, http.StatusServiceUnavailable},
+		{"invalid json", http.MethodPost, okLLM, `{bad`, http.StatusBadRequest},
+		{"empty prompt", http.MethodPost, okLLM, `{"prompt":"   "}`, http.StatusBadRequest},
+		{"llm error", http.MethodPost, errLLM, `{"prompt":"extract"}`, http.StatusInternalServerError},
+		{"valid request", http.MethodPost, okLLM, `{"prompt":"extract"}`, http.StatusOK},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if code := runHTTP(tc.handler, tc.method, tc.target, nil).Code; code != tc.wantStatus {
+			if code := runHTTP(tc.handler, tc.method, "/internal/llm", strings.NewReader(tc.body)).Code; code != tc.wantStatus {
 				t.Fatalf("got status=%d, want %d", code, tc.wantStatus)
 			}
 		})
+	}
+
+	memSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("q") == "fail" {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if r.URL.Query().Get("q") == "badjson" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("{bad"))
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"context": "<retrieved_memory>ok</retrieved_memory>"})
+	}))
+	defer memSrv.Close()
+
+	ret := newHTTPMemoryRetriever(memSrv.URL)
+	if out, err := ret(context.Background(), ""); err != nil || out != "" {
+		t.Errorf("expected empty on blank query, got %q, %v", out, err)
+	}
+	if out, err := ret(context.Background(), "hello world"); err != nil || !strings.Contains(out, "<retrieved_memory>") {
+		t.Errorf("expected retrieved memory, got %q, %v", out, err)
+	}
+	if _, err := ret(context.Background(), "fail"); err == nil {
+		t.Errorf("expected error on 500 status")
+	}
+	if _, err := ret(context.Background(), "badjson"); err == nil {
+		t.Errorf("expected error on bad json")
 	}
 }
 
