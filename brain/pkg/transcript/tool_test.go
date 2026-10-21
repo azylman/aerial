@@ -51,6 +51,7 @@ func TestClipContent(t *testing.T) {
 			content:   strings.Repeat("a", 60000),
 			headLimit: 0,
 			tailLimit: 0,
+			wantLen:   DefaultHeadLimit + len(TruncationMarker) + DefaultTailLimit,
 			hasMarker: true,
 		},
 		{
@@ -69,6 +70,46 @@ func TestClipContent(t *testing.T) {
 			hasMarker: true,
 			want:      "🚀🌟🎉" + TruncationMarker + "🔥⚡🌈",
 		},
+		{
+			name:      "default limits when both zero on short text",
+			content:   "short content",
+			headLimit: 0,
+			tailLimit: 0,
+			hasMarker: false,
+			want:      "short content",
+		},
+		{
+			name:      "default limits when both negative on short text",
+			content:   "short content",
+			headLimit: -10,
+			tailLimit: -20,
+			hasMarker: false,
+			want:      "short content",
+		},
+		{
+			name:      "oversized text with default limits 0 and -1",
+			content:   strings.Repeat("x", DefaultHeadLimit+DefaultTailLimit+100),
+			headLimit: 0,
+			tailLimit: -1,
+			wantLen:   DefaultHeadLimit + len(TruncationMarker) + DefaultTailLimit,
+			hasMarker: true,
+		},
+		{
+			name:      "negative head limit positive tail limit",
+			content:   "0123456789abcdefghij",
+			headLimit: -5,
+			tailLimit: 5,
+			hasMarker: true,
+			want:      TruncationMarker + "fghij",
+		},
+		{
+			name:      "positive head limit negative tail limit",
+			content:   "0123456789abcdefghij",
+			headLimit: 5,
+			tailLimit: -5,
+			hasMarker: true,
+			want:      "01234" + TruncationMarker,
+		},
 	}
 
 	for _, tc := range tests {
@@ -77,6 +118,9 @@ func TestClipContent(t *testing.T) {
 			got := ClipContent(tc.content, tc.headLimit, tc.tailLimit)
 			if tc.want != "" && got != tc.want {
 				t.Fatalf("ClipContent() = %q, want %q", got, tc.want)
+			}
+			if tc.wantLen > 0 && len(got) != tc.wantLen {
+				t.Fatalf("ClipContent() len = %d, wantLen %d", len(got), tc.wantLen)
 			}
 			if tc.hasMarker && !strings.Contains(got, TruncationMarker) {
 				t.Fatalf("expected truncation marker in %q", got)
@@ -196,42 +240,20 @@ func TestIsSubstantiveStep(t *testing.T) {
 	}
 }
 
-func TestSearchTranscripts(t *testing.T) {
-	t.Parallel()
+func newSearchTestStore(t *testing.T, seedCase int) *db.FakeStore {
+	t.Helper()
+	store := db.NewFakeStore()
 	ctx := context.Background()
 
-	t.Run("nil store returns error", func(t *testing.T) {
-		t.Parallel()
-		_, err := SearchTranscripts(ctx, nil, nil, "query", "auto", "", "", 10)
-		if err == nil || !strings.Contains(err.Error(), "transcript store cannot be nil") {
-			t.Fatalf("expected nil store error, got %v", err)
-		}
-	})
-
-	t.Run("context cancelled returns error", func(t *testing.T) {
-		t.Parallel()
-		cancelledCtx, cancel := context.WithCancel(ctx)
-		cancel()
-		store := db.NewFakeStore()
-		_, err := SearchTranscripts(cancelledCtx, store, nil, "query", "auto", "", "", 10)
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("expected context.Canceled, got %v", err)
-		}
-	})
-
-	t.Run("mode sessions searches only session summaries", func(t *testing.T) {
-		t.Parallel()
-		store := db.NewFakeStore()
-		err := store.UpsertSessionSummary(ctx, db.SessionSummary{
+	switch seedCase {
+	case 1:
+		_ = store.UpsertSessionSummary(ctx, db.SessionSummary{
 			SessionID: "sess-1",
 			Summary:   "Fixed Docker compose networking issue in staging environment",
 			IsSettled: true,
 			CreatedAt: time.Now().UTC(),
 		})
-		if err != nil {
-			t.Fatalf("upsert summary: %v", err)
-		}
-		err = store.BatchInsertTranscriptSteps(ctx, []db.TranscriptStep{
+		_ = store.BatchInsertTranscriptSteps(ctx, []db.TranscriptStep{
 			{
 				SessionID: "sess-1",
 				StepIndex: 1,
@@ -240,38 +262,14 @@ func TestSearchTranscripts(t *testing.T) {
 				Content:   "docker compose up -d",
 			},
 		})
-		if err != nil {
-			t.Fatalf("batch insert: %v", err)
-		}
-
-		res, err := SearchTranscripts(ctx, store, nil, "Docker compose networking", "sessions", "", "", 5)
-		if err != nil {
-			t.Fatalf("SearchTranscripts failed: %v", err)
-		}
-		if len(res.Sessions) != 1 {
-			t.Fatalf("expected 1 session hit, got %d", len(res.Sessions))
-		}
-		if len(res.Steps) != 0 {
-			t.Fatalf("expected 0 step hits in sessions mode, got %d", len(res.Steps))
-		}
-		if res.Total != 1 {
-			t.Fatalf("expected Total = 1, got %d", res.Total)
-		}
-	})
-
-	t.Run("mode steps searches only transcript steps", func(t *testing.T) {
-		t.Parallel()
-		store := db.NewFakeStore()
-		err := store.UpsertSessionSummary(ctx, db.SessionSummary{
+	case 2:
+		_ = store.UpsertSessionSummary(ctx, db.SessionSummary{
 			SessionID: "sess-2",
 			Summary:   "Database migration runbook",
 			IsSettled: true,
 			CreatedAt: time.Now().UTC(),
 		})
-		if err != nil {
-			t.Fatalf("upsert summary: %v", err)
-		}
-		err = store.BatchInsertTranscriptSteps(ctx, []db.TranscriptStep{
+		_ = store.BatchInsertTranscriptSteps(ctx, []db.TranscriptStep{
 			{
 				SessionID: "sess-2",
 				StepIndex: 1,
@@ -280,42 +278,17 @@ func TestSearchTranscripts(t *testing.T) {
 				Content:   "go run ./scripts/migrate.go --up",
 			},
 		})
-		if err != nil {
-			t.Fatalf("batch insert: %v", err)
-		}
-
-		res, err := SearchTranscripts(ctx, store, nil, "migrate.go", "steps", "sess-2", "run_command", 5)
-		if err != nil {
-			t.Fatalf("SearchTranscripts failed: %v", err)
-		}
-		if len(res.Sessions) != 0 {
-			t.Fatalf("expected 0 session hits in steps mode, got %d", len(res.Sessions))
-		}
-		if len(res.Steps) != 1 {
-			t.Fatalf("expected 1 step hit, got %d", len(res.Steps))
-		}
-		if res.Steps[0].SessionID != "sess-2" {
-			t.Fatalf("unexpected session ID in step: %s", res.Steps[0].SessionID)
-		}
-	})
-
-	t.Run("mode auto searches both sessions and steps with embedder", func(t *testing.T) {
-		t.Parallel()
-		store := db.NewFakeStore()
+	case 3:
 		dummyEmb := make([]float32, db.ExpectedEmbeddingDim)
 		dummyEmb[0] = 1.0
-
-		err := store.UpsertSessionSummary(ctx, db.SessionSummary{
+		_ = store.UpsertSessionSummary(ctx, db.SessionSummary{
 			SessionID: "sess-3",
 			Summary:   "Deploying Postgres pgvector instance",
 			Embedding: dummyEmb,
 			IsSettled: true,
 			CreatedAt: time.Now().UTC(),
 		})
-		if err != nil {
-			t.Fatalf("upsert summary: %v", err)
-		}
-		err = store.BatchInsertTranscriptSteps(ctx, []db.TranscriptStep{
+		_ = store.BatchInsertTranscriptSteps(ctx, []db.TranscriptStep{
 			{
 				SessionID: "sess-3",
 				StepIndex: 1,
@@ -324,82 +297,203 @@ func TestSearchTranscripts(t *testing.T) {
 				Content:   "docker run --name pgvector -d pgvector/pgvector:pg16",
 			},
 		})
-		if err != nil {
-			t.Fatalf("batch insert: %v", err)
-		}
-
-		mockEmbedder := func(ctx context.Context, text string) ([]float32, error) {
-			v := make([]float32, db.ExpectedEmbeddingDim)
-			v[0] = 1.0
-			return v, nil
-		}
-
-		res, err := SearchTranscripts(ctx, store, mockEmbedder, "pgvector", "auto", "", "", 10)
-		if err != nil {
-			t.Fatalf("SearchTranscripts auto failed: %v", err)
-		}
-		if len(res.Sessions) != 1 {
-			t.Fatalf("expected 1 session hit, got %d", len(res.Sessions))
-		}
-		if len(res.Steps) != 1 {
-			t.Fatalf("expected 1 step hit, got %d", len(res.Steps))
-		}
-		if res.Total != 2 {
-			t.Fatalf("expected Total = 2, got %d", res.Total)
-		}
-	})
-
-	t.Run("embedder error falls back gracefully to text search", func(t *testing.T) {
-		t.Parallel()
-		store := db.NewFakeStore()
-		err := store.UpsertSessionSummary(ctx, db.SessionSummary{
+	case 4:
+		_ = store.UpsertSessionSummary(ctx, db.SessionSummary{
 			SessionID: "sess-4",
 			Summary:   "Configured Grafana monitoring dashboards",
 			IsSettled: true,
 			CreatedAt: time.Now().UTC(),
 		})
-		if err != nil {
-			t.Fatalf("upsert summary: %v", err)
-		}
+	}
 
-		errEmbedder := func(ctx context.Context, text string) ([]float32, error) {
-			return nil, errors.New("ollama service unavailable")
-		}
+	return store
+}
 
-		res, err := SearchTranscripts(ctx, store, errEmbedder, "Grafana", "sessions", "", "", 10)
-		if err != nil {
-			t.Fatalf("expected graceful fallback on embedder error, got %v", err)
-		}
-		if len(res.Sessions) != 1 {
-			t.Fatalf("expected text search match despite embedder error, got %d hits", len(res.Sessions))
-		}
-	})
+func TestSearchTranscripts(t *testing.T) {
+	t.Parallel()
 
-	t.Run("nil ctx and default limit", func(t *testing.T) {
-		t.Parallel()
-		store := db.NewFakeStore()
-		res, err := SearchTranscripts(nil, store, nil, "any", "unknown_mode", "", "", 0)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if res.Mode != "auto" {
-			t.Errorf("expected mode normalized to auto, got %s", res.Mode)
-		}
-	})
+	tests := []struct {
+		name         string
+		seedCase     int
+		nilStore     bool
+		closedStore  bool
+		cancelCtx    bool
+		nilCtx       bool
+		embedderType string
+		query        string
+		mode         string
+		sessionID    string
+		toolName     string
+		limit        int
+		wantErr      bool
+		wantSubstr   string
+		wantSessions int
+		wantSteps    int
+		wantTotal    int
+		wantMode     string
+	}{
+		{
+			name:       "nil store returns error",
+			nilStore:   true,
+			query:      "query",
+			mode:       "auto",
+			limit:      10,
+			wantErr:    true,
+			wantSubstr: "transcript store cannot be nil",
+		},
+		{
+			name:       "context cancelled returns error",
+			cancelCtx:  true,
+			query:      "query",
+			mode:       "auto",
+			limit:      10,
+			wantErr:    true,
+			wantSubstr: "context canceled",
+		},
+		{
+			name:         "mode sessions searches only session summaries",
+			seedCase:     1,
+			query:        "Docker compose networking",
+			mode:         "sessions",
+			limit:        5,
+			wantSessions: 1,
+			wantSteps:    0,
+			wantTotal:    1,
+		},
+		{
+			name:         "mode steps searches only transcript steps",
+			seedCase:     2,
+			query:        "migrate.go",
+			mode:         "steps",
+			sessionID:    "sess-2",
+			toolName:     "run_command",
+			limit:        5,
+			wantSessions: 0,
+			wantSteps:    1,
+			wantTotal:    1,
+		},
+		{
+			name:         "mode auto searches both sessions and steps with embedder",
+			seedCase:     3,
+			embedderType: "dummy",
+			query:        "pgvector",
+			mode:         "auto",
+			limit:        10,
+			wantSessions: 1,
+			wantSteps:    1,
+			wantTotal:    2,
+		},
+		{
+			name:         "embedder error falls back gracefully to text search",
+			seedCase:     4,
+			embedderType: "fail",
+			query:        "Grafana",
+			mode:         "sessions",
+			limit:        10,
+			wantSessions: 1,
+			wantSteps:    0,
+			wantTotal:    1,
+		},
+		{
+			name:     "nil ctx and default limit",
+			nilCtx:   true,
+			query:    "any",
+			mode:     "unknown_mode",
+			limit:    0,
+			wantMode: "auto",
+		},
+		{
+			name:        "store search error propagation sessions",
+			closedStore: true,
+			query:       "query",
+			mode:        "sessions",
+			limit:       5,
+			wantErr:     true,
+		},
+		{
+			name:        "store search error propagation steps",
+			closedStore: true,
+			query:       "query",
+			mode:        "steps",
+			limit:       5,
+			wantErr:     true,
+		},
+	}
 
-	t.Run("store search error propagation", func(t *testing.T) {
-		t.Parallel()
-		store := db.NewFakeStore()
-		_ = store.Close()
-		_, err := SearchTranscripts(ctx, store, nil, "query", "sessions", "", "", 5)
-		if err == nil {
-			t.Fatalf("expected error from closed store on sessions search")
-		}
-		_, err = SearchTranscripts(ctx, store, nil, "query", "steps", "", "", 5)
-		if err == nil {
-			t.Fatalf("expected error from closed store on steps search")
-		}
-	})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var store db.TranscriptStore
+			if !tc.nilStore {
+				fakeStore := newSearchTestStore(t, tc.seedCase)
+				if tc.closedStore {
+					_ = fakeStore.Close()
+				}
+				store = fakeStore
+			}
+
+			var ctx context.Context
+			if tc.nilCtx {
+				ctx = nil
+			} else {
+				ctx = context.Background()
+				if tc.cancelCtx {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithCancel(ctx)
+					cancel()
+				}
+			}
+
+			var embedder func(ctx context.Context, text string) ([]float32, error)
+			switch tc.embedderType {
+			case "dummy":
+				embedder = func(ctx context.Context, text string) ([]float32, error) {
+					v := make([]float32, db.ExpectedEmbeddingDim)
+					v[0] = 1.0
+					return v, nil
+				}
+			case "fail":
+				embedder = func(ctx context.Context, text string) ([]float32, error) {
+					return nil, errors.New("ollama service unavailable")
+				}
+			}
+
+			res, err := SearchTranscripts(ctx, store, embedder, tc.query, tc.mode, tc.sessionID, tc.toolName, tc.limit)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("SearchTranscripts() unexpected error: %v", err)
+			}
+
+			if tc.wantMode != "" && res.Mode != tc.wantMode {
+				t.Errorf("expected Mode %q, got %q", tc.wantMode, res.Mode)
+			}
+			if tc.wantSessions != 0 || tc.wantSteps != 0 || tc.wantTotal != 0 {
+				if len(res.Sessions) != tc.wantSessions {
+					t.Errorf("expected %d sessions, got %d", tc.wantSessions, len(res.Sessions))
+				}
+				if len(res.Steps) != tc.wantSteps {
+					t.Errorf("expected %d steps, got %d", tc.wantSteps, len(res.Steps))
+				}
+				if res.Total != tc.wantTotal {
+					t.Errorf("expected Total %d, got %d", tc.wantTotal, res.Total)
+				}
+			}
+			if tc.mode == "steps" && tc.sessionID != "" && len(res.Steps) > 0 {
+				if res.Steps[0].SessionID != tc.sessionID {
+					t.Errorf("expected step SessionID %q, got %q", tc.sessionID, res.Steps[0].SessionID)
+				}
+			}
+		})
+	}
 }
 
 func TestDefaultSyncOptions(t *testing.T) {
