@@ -4731,8 +4731,8 @@ func makeScoredFactFixture(id int64, text string, emb []float32) ScoredFactWithE
 }
 
 func TestFindConsolidationCliques(t *testing.T) {
-	vecs := makePairwiseSimilarVectors(8, 0.78) // Pairwise similarity = 0.78 (in [0.75, 0.88])
-	looseVecs := makePairwiseSimilarVectors(3, 0.72)
+	vecs := makePairwiseSimilarVectors(8, 0.78) // Pairwise similarity = 0.78 (in [0.70, 1.0])
+	looseVecs := makePairwiseSimilarVectors(3, 0.65)
 	orthogonalVec := make([]float32, ExpectedEmbeddingDim)
 	orthogonalVec[ExpectedEmbeddingDim-1] = 1.0 // Orthogonal to vecs[0..7]
 
@@ -4753,6 +4753,13 @@ func TestFindConsolidationCliques(t *testing.T) {
 	tightVec[0] = 0.95
 	tightVec[1] = float32(math.Sqrt(1.0 - 0.95*0.95))
 
+	hijackVec := make([]float32, ExpectedEmbeddingDim)
+	hijackVec[0], hijackVec[1] = 0.72, float32(math.Sqrt(1.0-0.72*0.72))
+	emailVec1 := make([]float32, ExpectedEmbeddingDim)
+	emailVec1[0] = 1.0
+	emailVec2 := make([]float32, ExpectedEmbeddingDim)
+	emailVec2[0], emailVec2[1] = 0.92, -float32(math.Sqrt(1.0-0.92*0.92))
+
 	tests := []struct {
 		name      string
 		facts     []ScoredFactWithEmbedding
@@ -4762,6 +4769,7 @@ func TestFindConsolidationCliques(t *testing.T) {
 		maxSize   int
 		wantCount int
 		wantSizes []int
+		wantIDs   []int64
 	}{
 		{
 			name:      "EmptyFacts",
@@ -4854,7 +4862,7 @@ func TestFindConsolidationCliques(t *testing.T) {
 			wantSizes: []int{3},
 		},
 		{
-			name: "BelowDefaultMinSim075Excluded",
+			name: "BelowDefaultMinSim070Excluded",
 			facts: []ScoredFactWithEmbedding{
 				makeScoredFactFixture(1, "L1", looseVecs[0]),
 				makeScoredFactFixture(2, "L2", looseVecs[1]),
@@ -4883,6 +4891,17 @@ func TestFindConsolidationCliques(t *testing.T) {
 			wantCount: 1,
 			wantSizes: []int{3},
 		},
+		{
+			name: "GlobalDescendingEdgePreventsLowIDWeakHijack",
+			facts: []ScoredFactWithEmbedding{
+				makeScoredFactFixture(1, "WeakLowID", hijackVec),
+				makeScoredFactFixture(2, "Email1", emailVec1),
+				makeScoredFactFixture(3, "Email2", emailVec2),
+			},
+			wantCount: 1,
+			wantSizes: []int{2},
+			wantIDs:   []int64{2, 3},
+		},
 	}
 
 	for _, tc := range tests {
@@ -4894,6 +4913,13 @@ func TestFindConsolidationCliques(t *testing.T) {
 			for i, size := range tc.wantSizes {
 				if len(cliques[i]) != size {
 					t.Errorf("clique %d size = %d, want %d", i, len(cliques[i]), size)
+				}
+			}
+			if len(tc.wantIDs) > 0 && len(cliques) > 0 {
+				for i, wantID := range tc.wantIDs {
+					if cliques[0][i].Fact.ID != wantID {
+						t.Errorf("clique[0][%d].Fact.ID = %d, want %d", i, cliques[0][i].Fact.ID, wantID)
+					}
 				}
 			}
 		})

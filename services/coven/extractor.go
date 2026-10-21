@@ -495,11 +495,17 @@ func parseFactsJSON(raw string) (*ExtractedFactsPayload, error) {
 	return &payload, nil
 }
 
+// DefaultConsolidationMinSim is the minimum pairwise cosine similarity for fact consolidation cliques.
+const (
+	DefaultConsolidationMinSim = 0.70
+	MaxConsolidationPasses     = 3
+)
+
 // FindConsolidationCliques finds complete-linkage cliques of size [minSize, maxSize]
 // where every pair of facts (u, v) in the clique satisfies minSim <= CosineSimilarity(u.Embedding, v.Embedding) <= maxSim.
 func FindConsolidationCliques(facts []ScoredFactWithEmbedding, minSim, maxSim float64, minSize, maxSize int) [][]ScoredFactWithEmbedding {
 	if minSim <= 0 {
-		minSim = 0.75
+		minSim = DefaultConsolidationMinSim
 	}
 	if maxSim <= 0 {
 		maxSim = 1.0
@@ -508,10 +514,7 @@ func FindConsolidationCliques(facts []ScoredFactWithEmbedding, minSim, maxSim fl
 		minSize = 2
 	}
 	if maxSize < minSize {
-		maxSize = 6
-		if maxSize < minSize {
-			maxSize = minSize
-		}
+		maxSize = max(6, minSize)
 	}
 
 	var group []ScoredFactWithEmbedding
@@ -526,6 +529,28 @@ func FindConsolidationCliques(facts []ScoredFactWithEmbedding, minSim, maxSim fl
 		return group[i].Fact.ID < group[j].Fact.ID
 	})
 
+	type edge struct {
+		i, j int
+		sim  float64
+	}
+	var edges []edge
+	for i := 0; i < len(group); i++ {
+		for j := i + 1; j < len(group); j++ {
+			if sim := CosineSimilarity(group[i].Embedding, group[j].Embedding); sim >= minSim && (maxSim >= 1.0 || sim <= maxSim) {
+				edges = append(edges, edge{i: i, j: j, sim: sim})
+			}
+		}
+	}
+	sort.SliceStable(edges, func(a, b int) bool {
+		if edges[a].sim != edges[b].sim {
+			return edges[a].sim > edges[b].sim
+		}
+		if group[edges[a].i].Fact.ID != group[edges[b].i].Fact.ID {
+			return group[edges[a].i].Fact.ID < group[edges[b].i].Fact.ID
+		}
+		return group[edges[a].j].Fact.ID < group[edges[b].j].Fact.ID
+	})
+
 	type candidateMatch struct {
 		fact ScoredFactWithEmbedding
 		sim  float64
@@ -533,42 +558,49 @@ func FindConsolidationCliques(facts []ScoredFactWithEmbedding, minSim, maxSim fl
 
 	var cliques [][]ScoredFactWithEmbedding
 	used := make(map[int64]bool, len(group))
-	for i := 0; i < len(group); i++ {
-		if used[group[i].Fact.ID] {
+	for _, e := range edges {
+		u, v := group[e.i], group[e.j]
+		if used[u.Fact.ID] || used[v.Fact.ID] {
 			continue
 		}
-		var cands []candidateMatch
-		for j := i + 1; j < len(group); j++ {
-			if used[group[j].Fact.ID] {
-				continue
-			}
-			sim := CosineSimilarity(group[i].Embedding, group[j].Embedding)
-			if sim >= minSim && (maxSim >= 1.0 || sim <= maxSim) {
-				cands = append(cands, candidateMatch{fact: group[j], sim: sim})
-			}
-		}
-		sort.SliceStable(cands, func(a, b int) bool {
-			return cands[a].sim > cands[b].sim
-		})
-
-		clique := []ScoredFactWithEmbedding{group[i]}
-		for _, c := range cands {
-			if len(clique) >= maxSize {
-				break
-			}
-			matchesAll := true
-			for _, member := range clique[1:] {
-				sim := CosineSimilarity(member.Embedding, c.fact.Embedding)
-				if sim < minSim || (maxSim < 1.0 && sim > maxSim) {
-					matchesAll = false
-					break
+		clique := []ScoredFactWithEmbedding{u, v}
+		if maxSize > 2 {
+			var cands []candidateMatch
+			for k := 0; k < len(group); k++ {
+				if k == e.i || k == e.j || used[group[k].Fact.ID] {
+					continue
+				}
+				simU := CosineSimilarity(u.Embedding, group[k].Embedding)
+				simV := CosineSimilarity(v.Embedding, group[k].Embedding)
+				if simU >= minSim && (maxSim >= 1.0 || simU <= maxSim) && simV >= minSim && (maxSim >= 1.0 || simV <= maxSim) {
+					cands = append(cands, candidateMatch{fact: group[k], sim: min(simU, simV)})
 				}
 			}
-			if matchesAll {
-				clique = append(clique, c.fact)
+			sort.SliceStable(cands, func(a, b int) bool {
+				if cands[a].sim != cands[b].sim {
+					return cands[a].sim > cands[b].sim
+				}
+				return cands[a].fact.Fact.ID < cands[b].fact.Fact.ID
+			})
+			for _, c := range cands {
+				if len(clique) >= maxSize {
+					break
+				}
+				matchesAll := true
+				for _, member := range clique[2:] {
+					sim := CosineSimilarity(member.Embedding, c.fact.Embedding)
+					if sim < minSim || (maxSim < 1.0 && sim > maxSim) {
+						matchesAll = false
+						break
+					}
+				}
+				if matchesAll {
+					clique = append(clique, c.fact)
+				}
 			}
 		}
 		if len(clique) >= minSize {
+			sort.Slice(clique, func(a, b int) bool { return clique[a].Fact.ID < clique[b].Fact.ID })
 			for _, member := range clique {
 				used[member.Fact.ID] = true
 			}
@@ -577,6 +609,22 @@ func FindConsolidationCliques(facts []ScoredFactWithEmbedding, minSim, maxSim fl
 	}
 
 	return cliques
+}
+
+func cliqueSignature(clique []ScoredFactWithEmbedding) string {
+	ids := make([]int64, len(clique))
+	for i, item := range clique {
+		ids[i] = item.Fact.ID
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	var b strings.Builder
+	for i, id := range ids {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(fmt.Sprintf("%d", id))
+	}
+	return b.String()
 }
 
 // FactConsolidationPrompt defines the system prompt instructing the LLM to consolidate related facts.
@@ -594,7 +642,8 @@ Output strictly a JSON object matching this schema:
 Rules:
 1. Produce 1 consolidated fact (or 2 facts ONLY when a cluster of 3+ facts spans two genuinely distinct sub-topics). If a 2-fact cluster already consists of two distinct, non-redundant facts that should not be merged into 1, return {"facts": []}.
 2. Keep each consolidated fact strictly atomic (one single topic/predicate and one sentence per fact). If the cluster spans two distinct sub-topics (e.g. household composition vs. dietary restrictions), emit 2 separate facts rather than merging them into a multi-sentence compound fact.
-3. Output nothing else outside the JSON object.`
+3. Facts are ordered by ascending ID (higher ID = newer state). When facts in a cluster contain conflicting numbers, thresholds, versions, ports, or status values, preserve the newer (higher-ID) state and discard the outdated value.
+4. Output nothing else outside the JSON object.`
 
 func buildConsolidationPrompt(clique []ScoredFactWithEmbedding) string {
 	var b strings.Builder
@@ -607,7 +656,7 @@ func buildConsolidationPrompt(clique []ScoredFactWithEmbedding) string {
 }
 
 // ConsolidateFactClusters discovers semantically tight complete-linkage cliques of facts and synthesizes them into canonical facts.
-// Single-flight protected via extractionMutex.
+// Single-flight protected via extractionMutex. Runs up to MaxConsolidationPasses passes until convergence.
 func ConsolidateFactClusters(ctx context.Context, store Store, client OllamaClient, llmFunc LLMClientFunc) (int, error) {
 	if store == nil || client == nil || llmFunc == nil {
 		return 0, fmt.Errorf("nil store, ollama client, or llmFunc")
@@ -619,27 +668,51 @@ func ConsolidateFactClusters(ctx context.Context, store Store, client OllamaClie
 	}
 	defer extractionMutex.Unlock()
 
-	allFacts, err := store.GetAllFactsWithEmbeddings(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get facts with embeddings: %w", err)
+	var totalConsolidated int
+	triedCliques := make(map[string]bool)
+
+	for pass := 0; pass < MaxConsolidationPasses; pass++ {
+		allFacts, err := store.GetAllFactsWithEmbeddings(ctx)
+		if err != nil {
+			return totalConsolidated, fmt.Errorf("failed to get facts with embeddings: %w", err)
+		}
+		if len(allFacts) == 0 {
+			break
+		}
+
+		var cliques [][]ScoredFactWithEmbedding
+		for _, c := range FindConsolidationCliques(allFacts, DefaultConsolidationMinSim, 1.0, 2, 6) {
+			if sig := cliqueSignature(c); !triedCliques[sig] {
+				triedCliques[sig] = true
+				cliques = append(cliques, c)
+			}
+		}
+		if len(cliques) == 0 {
+			break
+		}
+
+		passCount, deleteFailed, err := consolidateCliqueBatch(ctx, store, client, llmFunc, cliques, triedCliques)
+		totalConsolidated += passCount
+		if err != nil {
+			return totalConsolidated, err
+		}
+		if passCount == 0 || deleteFailed {
+			break
+		}
 	}
 
-	if len(allFacts) == 0 {
-		return 0, nil
-	}
+	return totalConsolidated, nil
+}
 
-	cliques := FindConsolidationCliques(allFacts, 0.75, 1.0, 2, 6)
-	if len(cliques) == 0 {
-		return 0, nil
-	}
-
+func consolidateCliqueBatch(ctx context.Context, store Store, client OllamaClient, llmFunc LLMClientFunc, cliques [][]ScoredFactWithEmbedding, triedCliques map[string]bool) (int, bool, error) {
 	log.Printf("[Memory] Consolidating %d candidate fact cluster(s)...", len(cliques))
 	var consolidatedCount int
+	var deleteFailed bool
 
 	for _, clique := range cliques {
 		select {
 		case <-ctx.Done():
-			return consolidatedCount, ctx.Err()
+			return consolidatedCount, deleteFailed, ctx.Err()
 		default:
 		}
 
@@ -676,7 +749,7 @@ func ConsolidateFactClusters(ctx context.Context, store Store, client OllamaClie
 			}
 		}
 
-		var inserted int
+		var insertedIDs []int64
 		for _, text := range candidates {
 			emb, err := client.GenerateEmbedding(ctx, text, false, 1)
 			if err != nil {
@@ -692,7 +765,7 @@ func ConsolidateFactClusters(ctx context.Context, store Store, client OllamaClie
 				log.Printf("[Memory] Warning: Failed to insert consolidated fact: %v", err)
 				continue
 			}
-			inserted++
+			insertedIDs = append(insertedIDs, newID)
 
 			reinforceTimes := min(maxReinforce, 10) - 1
 			for r := 0; r < reinforceTimes; r++ {
@@ -702,15 +775,20 @@ func ConsolidateFactClusters(ctx context.Context, store Store, client OllamaClie
 			}
 		}
 
-		if inserted > 0 {
+		if len(insertedIDs) > 0 {
+			if len(insertedIDs) == 2 {
+				sibs := []ScoredFactWithEmbedding{{Fact: Fact{ID: insertedIDs[0]}}, {Fact: Fact{ID: insertedIDs[1]}}}
+				triedCliques[cliqueSignature(sibs)] = true
+			}
 			for _, src := range clique {
 				if err := store.DeleteFact(ctx, src.Fact.ID); err != nil {
 					log.Printf("[Memory] Warning: Failed to delete consolidated source fact ID %d: %v", src.Fact.ID, err)
+					deleteFailed = true
 				}
 			}
 			consolidatedCount++
 		}
 	}
 
-	return consolidatedCount, nil
+	return consolidatedCount, deleteFailed, nil
 }
