@@ -27,30 +27,34 @@ import (
 // --- Test Fixtures & Mocks ---
 
 type TestMemStore struct {
-	mu               sync.Mutex
-	facts            map[int64]*Fact
-	embeddings       map[int64][]float32
-	nextID           int64
-	failOp           string
-	failErr          error
-	unextractedTurns map[string][]Message
-	activeThreads    []string
-	watermarks       map[string]int64
-	maxRowIDs        map[string]int64
-	threadSummaries  map[string]string
-	threadPriorTurns map[string][]Message
+	mu                   sync.Mutex
+	facts                map[int64]*Fact
+	embeddings           map[int64][]float32
+	nextID               int64
+	failOp               string
+	failErr              error
+	unextractedTurns     map[string][]Message
+	activeThreads        []string
+	watermarks           map[string]int64
+	maxRowIDs            map[string]int64
+	threadSummaries      map[string]string
+	threadPriorTurns     map[string][]Message
+	threadRetrievedFacts map[string][]string
+	threadToolCalls      map[string][]string
 }
 
 func newTestMemStore() *TestMemStore {
 	return &TestMemStore{
-		facts:            make(map[int64]*Fact),
-		embeddings:       make(map[int64][]float32),
-		nextID:           1,
-		unextractedTurns: make(map[string][]Message),
-		watermarks:       make(map[string]int64),
-		maxRowIDs:        make(map[string]int64),
-		threadSummaries:  make(map[string]string),
-		threadPriorTurns: make(map[string][]Message),
+		facts:                make(map[int64]*Fact),
+		embeddings:           make(map[int64][]float32),
+		nextID:               1,
+		unextractedTurns:     make(map[string][]Message),
+		watermarks:           make(map[string]int64),
+		maxRowIDs:            make(map[string]int64),
+		threadSummaries:      make(map[string]string),
+		threadPriorTurns:     make(map[string][]Message),
+		threadRetrievedFacts: make(map[string][]string),
+		threadToolCalls:      make(map[string][]string),
 	}
 }
 
@@ -346,6 +350,15 @@ func (m *TestMemStore) GetThreadContextBeforeWatermark(ctx context.Context, thre
 		turns = turns[len(turns)-priorTurnLimit:]
 	}
 	return summary, append([]Message(nil), turns...), nil
+}
+
+func (m *TestMemStore) GetThreadTrajectoryContext(ctx context.Context, threadID string) (retrievedFacts []string, toolCalls []string, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failOp == "GetThreadTrajectoryContext" {
+		return nil, nil, m.failErr
+	}
+	return append([]string(nil), m.threadRetrievedFacts[threadID]...), append([]string(nil), m.threadToolCalls[threadID]...), nil
 }
 
 func (m *TestMemStore) FindNearestScoredFacts(ctx context.Context, embedding []float32, limit int, minSim float64) ([]ScoredFact, error) {
@@ -3139,6 +3152,213 @@ func TestSQLStore_GetThreadContextBeforeWatermark(t *testing.T) {
 	}
 }
 
+func TestSQLStore_GetThreadTrajectoryContext(t *testing.T) {
+	dbMem := setupTestDBMem(t)
+	ctx := context.Background()
+
+	tests := []struct {
+		name          string
+		nilDB         bool
+		threadID      string
+		queryErr      error
+		rowsSQL       string
+		wantErr       bool
+		wantFacts     []string
+		wantToolCalls []string
+	}{
+		{
+			name:     "NilDBError",
+			nilDB:    true,
+			threadID: "t-1",
+			wantErr:  true,
+		},
+		{
+			name:     "EmptyThreadID",
+			threadID: "   ",
+			wantErr:  false,
+		},
+		{
+			name:     "QueryError",
+			threadID: "t-1",
+			queryErr: errors.New("db disconnect"),
+			wantErr:  true,
+		},
+		{
+			name:     "ScanError",
+			threadID: "t-1",
+			rowsSQL:  "SELECT 'only_one_col'",
+			wantErr:  true,
+		},
+		{
+			name:     "SuccessParsingAndDeduplication",
+			threadID: "t-1",
+			rowsSQL: "SELECT 'USER_INPUT', '', '<retrieved_memory>\n- [id:42] User likes matcha\n- [id:42] User likes matcha\n- [id:43] Prefers dark mode\n</retrieved_memory>' " +
+				"UNION ALL SELECT 'PLANNER_RESPONSE', 'memory_search', '{\"query\": \"matcha\"}' " +
+				"UNION ALL SELECT 'USER_INPUT', '', '<\x5cRETRIEVED_MEMORY>\n- [id:42] User likes matcha\n- [id:44] Morning coffee at 8am\n<\x5c/RETRIEVED_MEMORY>' " +
+				"UNION ALL SELECT 'OTHER', '', 'ignored'",
+			wantErr: false,
+			wantFacts: []string{
+				"- [id:42] User likes matcha",
+				"- [id:43] Prefers dark mode",
+				"- [id:44] Morning coffee at 8am",
+			},
+			wantToolCalls: []string{
+				`memory_search({"query": "matcha"})`,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var store *SQLStore
+			if tc.nilDB {
+				store = &SQLStore{}
+			} else {
+				store = NewSQLStore(queryMockDBTX{
+					dbMem:    dbMem,
+					queryErr: tc.queryErr,
+					rowsSQL:  tc.rowsSQL,
+				})
+			}
+			facts, tools, err := store.GetThreadTrajectoryContext(ctx, tc.threadID)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("GetThreadTrajectoryContext() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr {
+				if len(facts) != len(tc.wantFacts) {
+					t.Fatalf("len(facts) = %d, want %d (%v)", len(facts), len(tc.wantFacts), facts)
+				}
+				for i := range facts {
+					if facts[i] != tc.wantFacts[i] {
+						t.Errorf("facts[%d] = %q, want %q", i, facts[i], tc.wantFacts[i])
+					}
+				}
+				if len(tools) != len(tc.wantToolCalls) {
+					t.Fatalf("len(tools) = %d, want %d (%v)", len(tools), len(tc.wantToolCalls), tools)
+				}
+				for i := range tools {
+					if tools[i] != tc.wantToolCalls[i] {
+						t.Errorf("tools[%d] = %q, want %q", i, tools[i], tc.wantToolCalls[i])
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestTruncateSingleLine(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		maxLen   int
+		expected string
+	}{
+		{
+			name:     "Empty",
+			input:    "",
+			maxLen:   10,
+			expected: "",
+		},
+		{
+			name:     "WhitespaceCollapse",
+			input:    "   hello \n\t  world  \r\n test   ",
+			maxLen:   50,
+			expected: "hello world test",
+		},
+		{
+			name:     "Truncated",
+			input:    "this is a long sentence that exceeds the limit",
+			maxLen:   10,
+			expected: "this is a ",
+		},
+		{
+			name:     "NoLimit",
+			input:    "sentence with spaces",
+			maxLen:   0,
+			expected: "sentence with spaces",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			res := truncateSingleLine(tc.input, tc.maxLen)
+			if res != tc.expected {
+				t.Errorf("truncateSingleLine(%q, %d) = %q, want %q", tc.input, tc.maxLen, res, tc.expected)
+			}
+		})
+	}
+}
+
+func TestExtractTrajectorySignals(t *testing.T) {
+	tests := []struct {
+		name          string
+		stepType      string
+		toolName      string
+		content       string
+		wantFacts     []string
+		wantToolCalls string
+	}{
+		{
+			name:     "UserInputStandardRetrievedMemory",
+			stepType: "USER_INPUT",
+			content:  "<retrieved_memory>\n- [id:1] User likes matcha\n- [id:2] Prefers dark mode\n</retrieved_memory>",
+			wantFacts: []string{
+				"- [id:1] User likes matcha",
+				"- [id:2] Prefers dark mode",
+			},
+		},
+		{
+			name:     "UserInputSanitizedEscapedRetrievedMemory",
+			stepType: "USER_INPUT",
+			content:  "<\x5cRETRIEVED_MEMORY>\n- [id:10] Fact A\n- [id:10] Fact A\n<\x5c/RETRIEVED_MEMORY>",
+			wantFacts: []string{
+				"- [id:10] Fact A",
+			},
+		},
+		{
+			name:      "UserInputNoRetrievedMemory",
+			stepType:  "USER_INPUT",
+			content:   "Just regular user content",
+			wantFacts: nil,
+		},
+		{
+			name:          "PlannerResponseWithTool",
+			stepType:      "PLANNER_RESPONSE",
+			toolName:      "memory_search",
+			content:       "{\"query\": \n \"something\"}",
+			wantToolCalls: "memory_search({\"query\": \"something\"})",
+		},
+		{
+			name:     "PlannerResponseEmptyTool",
+			stepType: "PLANNER_RESPONSE",
+			toolName: "",
+			content:  "some thought",
+		},
+		{
+			name:     "OtherStepType",
+			stepType: "SYSTEM",
+			content:  "<retrieved_memory>- [id:1] test</retrieved_memory>",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			facts, tool := extractTrajectorySignals(tc.stepType, tc.toolName, tc.content)
+			if len(facts) != len(tc.wantFacts) {
+				t.Fatalf("len(facts) = %d, want %d (%v)", len(facts), len(tc.wantFacts), facts)
+			}
+			for i := range facts {
+				if facts[i] != tc.wantFacts[i] {
+					t.Errorf("facts[%d] = %q, want %q", i, facts[i], tc.wantFacts[i])
+				}
+			}
+			if tool != tc.wantToolCalls {
+				t.Errorf("tool = %q, want %q", tool, tc.wantToolCalls)
+			}
+		})
+	}
+}
+
 func TestHTTPBrainLLMClient(t *testing.T) {
 	ctx := context.Background()
 
@@ -3607,120 +3827,84 @@ func TestReconcileExtractedFact(t *testing.T) {
 
 func TestEvaluateCandidateAdmission(t *testing.T) {
 	tests := []struct {
-		name           string
-		item           ExtractedFactItem
-		wantAdmit      bool
-		wantImportance float64
-		wantReason     string
+		name       string
+		item       ExtractedFactItem
+		wantAdmit  bool
+		wantReason string
 	}{
 		{
-			name:           "TooShort",
-			item:           ExtractedFactItem{FactText: "short"},
-			wantAdmit:      false,
-			wantImportance: 0,
-			wantReason:     "too_short",
+			name:       "TooShort",
+			item:       ExtractedFactItem{FactText: "short"},
+			wantAdmit:  false,
+			wantReason: "too_short",
 		},
 		{
-			name:           "EphemeralTelemetryPR",
-			item:           ExtractedFactItem{FactText: "Merged PR #1234 into main branch successfully", Importance: 0.7},
-			wantAdmit:      false,
-			wantImportance: 0,
-			wantReason:     "ephemeral_telemetry",
+			name:       "EphemeralTelemetryPR",
+			item:       ExtractedFactItem{FactText: "Merged PR #1234 into main branch successfully"},
+			wantAdmit:  false,
+			wantReason: "ephemeral_telemetry",
 		},
 		{
-			name:           "EphemeralVanadisChunk",
-			item:           ExtractedFactItem{FactText: "Executed vanadis_chunk task cleanly for build", Importance: 0.6},
-			wantAdmit:      false,
-			wantImportance: 0,
-			wantReason:     "ephemeral_telemetry",
+			name:       "EphemeralVanadisChunk",
+			item:       ExtractedFactItem{FactText: "Executed vanadis_chunk task cleanly for build"},
+			wantAdmit:  false,
+			wantReason: "ephemeral_telemetry",
 		},
 		{
-			name:           "EphemeralCommitSha",
-			item:           ExtractedFactItem{FactText: "Rolled back commit 0123456789abcdef due to panic", Importance: 0.5},
-			wantAdmit:      false,
-			wantImportance: 0,
-			wantReason:     "ephemeral_telemetry",
+			name:       "EphemeralCommitSha",
+			item:       ExtractedFactItem{FactText: "Rolled back commit 0123456789abcdef due to panic"},
+			wantAdmit:  false,
+			wantReason: "ephemeral_telemetry",
 		},
 		{
-			name:           "EphemeralAutoMerge",
-			item:           ExtractedFactItem{FactText: "Verified that auto-merge armed on the target pull request", Importance: 0.6},
-			wantAdmit:      false,
-			wantImportance: 0,
-			wantReason:     "ephemeral_telemetry",
+			name:       "EphemeralAutoMerge",
+			item:       ExtractedFactItem{FactText: "Verified that auto-merge armed on the target pull request"},
+			wantAdmit:  false,
+			wantReason: "ephemeral_telemetry",
 		},
 		{
-			name:           "DurableDirectiveOverridesEphemeral",
-			item:           ExtractedFactItem{FactText: "Always verify CI before pull request #500 merges", Importance: 0.7},
-			wantAdmit:      true,
-			wantImportance: 0.80,
-			wantReason:     "admitted",
+			name:       "DurableDirectiveOverridesEphemeral",
+			item:       ExtractedFactItem{FactText: "Always verify CI before pull request #500 merges"},
+			wantAdmit:  true,
+			wantReason: "admitted",
 		},
 		{
-			name:           "UserPreferenceBoost",
-			item:           ExtractedFactItem{Category: "user_preference", FactText: "User drinks oat milk latte in the morning", Importance: 0.6},
-			wantAdmit:      true,
-			wantImportance: 0.70,
-			wantReason:     "admitted",
+			name:       "ValidDurableFact",
+			item:       ExtractedFactItem{FactText: "User drinks oat milk latte in the morning"},
+			wantAdmit:  true,
+			wantReason: "admitted",
 		},
 		{
-			name:           "DefaultImportanceAndPrefersBoost",
-			item:           ExtractedFactItem{Category: "general", FactText: "User prefers dark roast coffee every day", Importance: 0},
-			wantAdmit:      true,
-			wantImportance: 0.70,
-			wantReason:     "admitted",
+			name:       "NoopActionRejected",
+			item:       ExtractedFactItem{Action: "NOOP", FactText: "User discussed the weather today in detail"},
+			wantAdmit:  false,
+			wantReason: "noop_action",
 		},
 		{
-			name:           "ImportanceClampedHigh",
-			item:           ExtractedFactItem{Category: "user_preference", FactText: "User is strictly allergic to peanuts", Importance: 0.95},
-			wantAdmit:      true,
-			wantImportance: 1.0,
-			wantReason:     "admitted",
+			name:       "NoopActionCaseInsensitiveWithWhitespace",
+			item:       ExtractedFactItem{Action: "  noop  ", FactText: "User mentioned something ephemeral yesterday"},
+			wantAdmit:  false,
+			wantReason: "noop_action",
 		},
 		{
-			name:           "ImportanceClampedLow",
-			item:           ExtractedFactItem{Category: "general", FactText: "A random general statement with low value", Importance: 0.05},
-			wantAdmit:      true,
-			wantImportance: 0.10,
-			wantReason:     "admitted",
+			name:       "DeleteActionRejected",
+			item:       ExtractedFactItem{Action: "DELETE", FactText: "Obsolete fact about favorite drinks"},
+			wantAdmit:  false,
+			wantReason: "delete_action",
 		},
 		{
-			name:           "NoopActionRejected",
-			item:           ExtractedFactItem{Action: "NOOP", FactText: "User discussed the weather today in detail", Importance: 0.6},
-			wantAdmit:      false,
-			wantImportance: 0,
-			wantReason:     "noop_action",
-		},
-		{
-			name:           "NoopActionCaseInsensitiveWithWhitespace",
-			item:           ExtractedFactItem{Action: "  noop  ", FactText: "User mentioned something ephemeral yesterday", Importance: 0.8},
-			wantAdmit:      false,
-			wantImportance: 0,
-			wantReason:     "noop_action",
-		},
-		{
-			name:           "DeleteActionRejected",
-			item:           ExtractedFactItem{Action: "DELETE", FactText: "Obsolete fact about favorite drinks", Importance: 0.6},
-			wantAdmit:      false,
-			wantImportance: 0,
-			wantReason:     "delete_action",
-		},
-		{
-			name:           "DeleteActionCaseInsensitiveWithWhitespace",
-			item:           ExtractedFactItem{Action: "  delete  ", FactText: "Old preference that is no longer active", Importance: 0.8},
-			wantAdmit:      false,
-			wantImportance: 0,
-			wantReason:     "delete_action",
+			name:       "DeleteActionCaseInsensitiveWithWhitespace",
+			item:       ExtractedFactItem{Action: "  delete  ", FactText: "Old preference that is no longer active"},
+			wantAdmit:  false,
+			wantReason: "delete_action",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			admit, importance, reason := EvaluateCandidateAdmission(tc.item)
+			admit, reason := EvaluateCandidateAdmission(tc.item)
 			if admit != tc.wantAdmit {
 				t.Errorf("admit = %v, want %v", admit, tc.wantAdmit)
-			}
-			if tc.wantAdmit && math.Abs(importance-tc.wantImportance) > 1e-6 {
-				t.Errorf("importance = %.2f, want %.2f", importance, tc.wantImportance)
 			}
 			if reason != tc.wantReason {
 				t.Errorf("reason = %q, want %q", reason, tc.wantReason)
@@ -3731,9 +3915,7 @@ func TestEvaluateCandidateAdmission(t *testing.T) {
 
 func TestBuildCandidateReconcilePrompt(t *testing.T) {
 	candidate := ExtractedFactItem{
-		Category:   "user_preference",
-		FactText:   "User prefers dark mode across all interfaces",
-		Importance: 0.85,
+		FactText: "User prefers dark mode across all interfaces",
 	}
 	neighbors := []ScoredFact{
 		{
@@ -3747,9 +3929,7 @@ func TestBuildCandidateReconcilePrompt(t *testing.T) {
 	prompt := buildCandidateReconcilePrompt(candidate, neighbors)
 	for _, expected := range []string{
 		"CANDIDATE FACT:",
-		"Category: user_preference",
-		"User prefers dark mode across all interfaces",
-		"0.85",
+		"Fact: User prefers dark mode across all interfaces",
 		"EXISTING CANDIDATE NEIGHBORS",
 		"ID 42 (similarity 0.76)",
 		"User prefers light mode on mobile displays",
@@ -3826,7 +4006,7 @@ func TestReconcileCandidateFact_Tiers(t *testing.T) {
 		},
 		{
 			name:         "Tier1_NoNeighbors_Insert",
-			item:         ExtractedFactItem{FactText: "Valid candidate fact text", Category: "user_preference"},
+			item:         ExtractedFactItem{FactText: "Valid candidate fact text"},
 			wantInserted: true,
 		},
 		{
@@ -3887,7 +4067,7 @@ func TestReconcileCandidateFact_Tiers(t *testing.T) {
 			item:        ExtractedFactItem{FactText: "Valid candidate fact text"},
 			neighborID:  10,
 			neighborEmb: tier3Emb,
-			llmResp:     `{"facts":[{"action":"UPDATE","supersedes_id":10,"fact_text":"Updated text here","importance_score":0.8}]}`,
+			llmResp:     `{"facts":[{"action":"UPDATE","supersedes_id":10,"fact_text":"Updated text here"}]}`,
 			wantUpdated: true,
 		},
 		{
@@ -3931,11 +4111,29 @@ func TestReconcileCandidateFact_Tiers(t *testing.T) {
 			storeFailOp: "DeleteFact",
 		},
 		{
-			name:        "Tier3_NOOP",
-			item:        ExtractedFactItem{FactText: "Valid candidate fact text"},
-			neighborID:  10,
-			neighborEmb: tier3Emb,
-			llmResp:     `{"facts":[{"action":"NOOP"}]}`,
+			name:           "Tier3_NOOP",
+			item:           ExtractedFactItem{FactText: "Valid candidate fact text"},
+			neighborID:     10,
+			neighborEmb:    tier3Emb,
+			llmResp:        `{"facts":[{"action":"NOOP"}]}`,
+			wantReinforced: true,
+		},
+		{
+			name:           "Tier3_NOOP_ExplicitSupersedesID",
+			item:           ExtractedFactItem{FactText: "Valid candidate fact text"},
+			neighborID:     10,
+			neighborEmb:    tier3Emb,
+			llmResp:        `{"facts":[{"action":"NOOP","supersedes_id":10}]}`,
+			wantReinforced: true,
+		},
+		{
+			name:           "Tier3_NOOP_ReinforceErrorLogged",
+			item:           ExtractedFactItem{FactText: "Valid candidate fact text"},
+			neighborID:     10,
+			neighborEmb:    tier3Emb,
+			llmResp:        `{"facts":[{"action":"NOOP"}]}`,
+			storeFailOp:    "ReinforceFact",
+			wantReinforced: false,
 		},
 		{
 			name:         "Tier3_ADD",
@@ -4038,6 +4236,9 @@ func TestProcessThreadFacts_ContextAndCoreference(t *testing.T) {
 		parseErr            bool
 		manyCandidates      bool
 		wantCandidateCapped bool
+		withTrajectory      bool
+		withReinforceIDs    bool
+		wantReinforcedID    int64
 		wantErr             bool
 	}{
 		{
@@ -4082,6 +4283,28 @@ func TestProcessThreadFacts_ContextAndCoreference(t *testing.T) {
 			wantCandidateCapped: true,
 			wantErr:             false,
 		},
+		{
+			name:           "TrajectoryRetrievedFactsAndToolCallsInjected",
+			withTrajectory: true,
+			wantErr:        false,
+		},
+		{
+			name:             "TrajectoryReinforcesFactIDs",
+			withReinforceIDs: true,
+			wantReinforcedID: 42,
+			wantErr:          false,
+		},
+		{
+			name:             "TrajectoryReinforceStoreErrorLoggedGracefully",
+			withReinforceIDs: true,
+			storeFailOp:      "ReinforceFact",
+			wantErr:          false,
+		},
+		{
+			name:        "TrajectoryQueryErrorIgnoredAndContinues",
+			storeFailOp: "GetThreadTrajectoryContext",
+			wantErr:     false,
+		},
 	}
 
 	for _, tc := range tests {
@@ -4107,6 +4330,14 @@ func TestProcessThreadFacts_ContextAndCoreference(t *testing.T) {
 						{RowID: 5, ThreadID: threadID, Content: "My name is Bob", ResponseText: "Hello Bob", Status: "COMPLETED", Metadata: MessageMetadata{IsAdmin: true}},
 					}
 				}
+				if tc.withTrajectory {
+					mem.threadRetrievedFacts[threadID] = []string{"- [id:42] User likes matcha"}
+					mem.threadToolCalls[threadID] = []string{`memory_search("matcha")`}
+				}
+				if tc.withReinforceIDs {
+					mem.facts[42] = &Fact{ID: 42, FactText: "User likes matcha", ReinforceCount: 1}
+					mem.embeddings[42] = baseEmb
+				}
 				if tc.storeFailOp != "" {
 					mem.SetFail(tc.storeFailOp, errors.New("simulated store failure"))
 				}
@@ -4130,16 +4361,19 @@ func TestProcessThreadFacts_ContextAndCoreference(t *testing.T) {
 				}
 				if tc.manyCandidates {
 					return `{"facts":[
-						{"category":"general","fact_text":"Candidate fact text number 1","importance_score":0.6},
-						{"category":"general","fact_text":"Candidate fact text number 2","importance_score":0.6},
-						{"category":"general","fact_text":"Candidate fact text number 3","importance_score":0.6},
-						{"category":"general","fact_text":"Candidate fact text number 4","importance_score":0.6},
-						{"category":"general","fact_text":"Candidate fact text number 5","importance_score":0.6},
-						{"category":"general","fact_text":"Candidate fact text number 6","importance_score":0.6},
-						{"category":"general","fact_text":"Candidate fact text number 7","importance_score":0.6}
+						{"fact_text":"Candidate fact text number 1"},
+						{"fact_text":"Candidate fact text number 2"},
+						{"fact_text":"Candidate fact text number 3"},
+						{"fact_text":"Candidate fact text number 4"},
+						{"fact_text":"Candidate fact text number 5"},
+						{"fact_text":"Candidate fact text number 6"},
+						{"fact_text":"Candidate fact text number 7"}
 					]}`, nil
 				}
-				return `{"facts":[{"category":"user_preference","fact_text":"Bob likes matcha tea in the afternoon","importance_score":0.8}]}`, nil
+				if tc.withReinforceIDs {
+					return `{"facts":[],"reinforced_ids":[42,42,-1,0]}`, nil
+				}
+				return `{"facts":[{"fact_text":"Bob likes matcha tea in the afternoon"}]}`, nil
 			}
 
 			err := processThreadFacts(ctx, store, client, llm, "th-test")
@@ -4151,6 +4385,19 @@ func TestProcessThreadFacts_ContextAndCoreference(t *testing.T) {
 			}
 			if tc.withPriorTurns && !strings.Contains(capturedPrompt, "PRIOR TURNS (FOR COREFERENCE RESOLUTION ONLY") {
 				t.Errorf("captured prompt missing prior turns: %s", capturedPrompt)
+			}
+			if tc.withTrajectory {
+				if !strings.Contains(capturedPrompt, "RETRIEVED MEMORY IN TURN:\n- [id:42] User likes matcha") {
+					t.Errorf("captured prompt missing retrieved memory: %s", capturedPrompt)
+				}
+				if !strings.Contains(capturedPrompt, "TOOL CALLS IN TURN:\nmemory_search(\"matcha\")") {
+					t.Errorf("captured prompt missing tool calls: %s", capturedPrompt)
+				}
+			}
+			if tc.wantReinforcedID > 0 && mem != nil {
+				if f, ok := mem.facts[tc.wantReinforcedID]; !ok || f.ReinforceCount != 2 {
+					t.Errorf("fact %d reinforce count = %v, want 2", tc.wantReinforcedID, f)
+				}
 			}
 			if tc.wantCandidateCapped && mem != nil {
 				// 5 candidates should be inserted, not 7
@@ -4593,20 +4840,22 @@ func TestConsolidateFactClusters(t *testing.T) {
 	cancel()
 
 	tests := []struct {
-		name          string
-		ctx           context.Context
-		nilStore      bool
-		nilOllama     bool
-		nilLLM        bool
-		storeFail     string
-		lockMutex     bool
-		addFacts      bool
-		llmResp       string
-		llmErr        error
-		ollamaErr     error
-		wantErr       bool
-		wantCount     int
-		wantRemaining int
+		name                string
+		ctx                 context.Context
+		nilStore            bool
+		nilOllama           bool
+		nilLLM              bool
+		storeFail           string
+		lockMutex           bool
+		addFacts            bool
+		seedReinforceCounts []int
+		llmResp             string
+		llmErr              error
+		ollamaErr           error
+		wantErr             bool
+		wantCount           int
+		wantRemaining       int
+		wantReinforcedCount int
 	}{
 		{
 			name:     "NilStoreError",
@@ -4719,6 +4968,39 @@ func TestConsolidateFactClusters(t *testing.T) {
 			llmResp:  validJSON,
 			wantErr:  true,
 		},
+		{
+			name:                "ConsolidationInheritsMaxReinforcement",
+			ctx:                 ctx,
+			addFacts:            true,
+			seedReinforceCounts: []int{1, 4, 2},
+			llmResp:             validJSON,
+			wantErr:             false,
+			wantCount:           1,
+			wantRemaining:       1,
+			wantReinforcedCount: 4,
+		},
+		{
+			name:                "ConsolidationClampsReinforceAt10",
+			ctx:                 ctx,
+			addFacts:            true,
+			seedReinforceCounts: []int{15, 12, 11},
+			llmResp:             validJSON,
+			wantErr:             false,
+			wantCount:           1,
+			wantRemaining:       1,
+			wantReinforcedCount: 10,
+		},
+		{
+			name:                "ConsolidationReinforceStoreErrorLoggedGracefully",
+			ctx:                 ctx,
+			addFacts:            true,
+			seedReinforceCounts: []int{1, 4, 2},
+			storeFail:           "ReinforceFact",
+			llmResp:             validJSON,
+			wantErr:             false,
+			wantCount:           1,
+			wantRemaining:       1,
+		},
 	}
 
 	for _, tc := range tests {
@@ -4728,6 +5010,11 @@ func TestConsolidateFactClusters(t *testing.T) {
 				_, _ = mem.InsertFact(ctx, "Fact A", vecs[0])
 				_, _ = mem.InsertFact(ctx, "Fact B", vecs[1])
 				_, _ = mem.InsertFact(ctx, "Fact C", vecs[2])
+			}
+			if len(tc.seedReinforceCounts) == 3 && len(mem.facts) >= 3 {
+				mem.facts[1].ReinforceCount = tc.seedReinforceCounts[0]
+				mem.facts[2].ReinforceCount = tc.seedReinforceCounts[1]
+				mem.facts[3].ReinforceCount = tc.seedReinforceCounts[2]
 			}
 			if tc.storeFail != "" {
 				mem.SetFail(tc.storeFail, errors.New("store failed"))
@@ -4765,6 +5052,13 @@ func TestConsolidateFactClusters(t *testing.T) {
 			}
 			if tc.wantRemaining > 0 && len(mem.facts) != tc.wantRemaining {
 				t.Errorf("len(mem.facts) = %d, want %d", len(mem.facts), tc.wantRemaining)
+			}
+			if tc.wantReinforcedCount > 0 {
+				for _, f := range mem.facts {
+					if f.ReinforceCount != tc.wantReinforcedCount {
+						t.Errorf("consolidated fact reinforce_count = %d, want %d", f.ReinforceCount, tc.wantReinforcedCount)
+					}
+				}
 			}
 		})
 	}

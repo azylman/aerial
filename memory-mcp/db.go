@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"regexp"
 	"strings"
 	"time"
 
@@ -182,6 +183,7 @@ type Store interface {
 	GetMaxMessageRowID(ctx context.Context, threadID string) (int64, error)
 	UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64) error
 	GetThreadContextBeforeWatermark(ctx context.Context, threadID string, priorTurnLimit int) (string, []Message, error)
+	GetThreadTrajectoryContext(ctx context.Context, threadID string) (retrievedFacts []string, toolCalls []string, err error)
 	FindNearestScoredFacts(ctx context.Context, embedding []float32, limit int, minSim float64) ([]ScoredFact, error)
 	FindNearestFacts(ctx context.Context, embedding []float32, limit int, minSim float64) ([]Fact, error)
 	Close() error
@@ -723,6 +725,98 @@ func (s *SQLStore) GetThreadContextBeforeWatermark(ctx context.Context, threadID
 	}
 
 	return summary, priorTurns, nil
+}
+
+var (
+	reRetrievedMemoryBlock = regexp.MustCompile(`(?is)<\s*\\?retrieved_memory\s*>(.*?)<\s*[\\/]+retrieved_memory\s*>`)
+	reFactLine             = regexp.MustCompile(`(?m)^\s*(-\s*\[id:\d+\].*)$`)
+)
+
+func truncateSingleLine(s string, maxLen int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if maxLen > 0 && len(s) > maxLen {
+		return s[:maxLen]
+	}
+	return s
+}
+
+func extractTrajectorySignals(stepType, toolName, content string) ([]string, string) {
+	switch stepType {
+	case "USER_INPUT":
+		var facts []string
+		seen := make(map[string]struct{})
+		for _, block := range reRetrievedMemoryBlock.FindAllStringSubmatch(content, -1) {
+			if len(block) > 1 {
+				for _, lineMatch := range reFactLine.FindAllStringSubmatch(block[1], -1) {
+					if len(lineMatch) > 1 {
+						line := strings.TrimSpace(lineMatch[1])
+						if line != "" {
+							if _, exists := seen[line]; !exists {
+								seen[line] = struct{}{}
+								facts = append(facts, line)
+							}
+						}
+					}
+				}
+			}
+		}
+		return facts, ""
+	case "PLANNER_RESPONSE":
+		trimmedTool := strings.TrimSpace(toolName)
+		if trimmedTool != "" {
+			return nil, fmt.Sprintf("%s(%s)", trimmedTool, truncateSingleLine(content, 200))
+		}
+	}
+	return nil, ""
+}
+
+// GetThreadTrajectoryContext queries the trajectory context (retrieved facts and tool calls) for an active thread.
+func (s *SQLStore) GetThreadTrajectoryContext(ctx context.Context, threadID string) (retrievedFacts []string, toolCalls []string, err error) {
+	if err := s.checkDB(); err != nil {
+		return nil, nil, err
+	}
+	if strings.TrimSpace(threadID) == "" {
+		return nil, nil, nil
+	}
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `SELECT ts.step_type, ts.tool_name, LEFT(ts.content, 500)
+	FROM transcript_steps ts
+	JOIN sessions s ON s.thread_id = $1
+	WHERE (ts.session_id = s.internal_session_id OR ts.session_id = s.previous_session_id)
+	  AND (s.fact_extracted_at IS NULL OR ts.created_at >= s.fact_extracted_at)
+	  AND (ts.step_type = 'USER_INPUT' OR (ts.step_type = 'PLANNER_RESPONSE' AND ts.tool_name != ''))
+	ORDER BY ts.created_at ASC, ts.step_index ASC
+	LIMIT 50`
+
+	rows, err := s.db.QueryContext(queryCtx, query, threadID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to query thread trajectory context: %w", err)
+	}
+	defer rows.Close()
+
+	seenFacts := make(map[string]struct{})
+	for rows.Next() {
+		var stepType, toolName, content string
+		if err := rows.Scan(&stepType, &toolName, &content); err != nil {
+			return nil, nil, fmt.Errorf("failed to scan trajectory step: %w", err)
+		}
+		rf, tc := extractTrajectorySignals(stepType, toolName, content)
+		for _, f := range rf {
+			if _, exists := seenFacts[f]; !exists {
+				seenFacts[f] = struct{}{}
+				retrievedFacts = append(retrievedFacts, f)
+			}
+		}
+		if tc != "" {
+			toolCalls = append(toolCalls, tc)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("failed to read trajectory rows: %w", err)
+	}
+	return retrievedFacts, toolCalls, nil
 }
 
 // FindNearestScoredFacts returns top-K facts with cosine similarity >= minSim along with their scores.
