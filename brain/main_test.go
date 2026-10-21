@@ -313,7 +313,7 @@ func TestHandleTranscripts(t *testing.T) {
 	_ = store.SaveSessionID(context.Background(), "thread-discord-100", "conv-alpha-100")
 	brainDir := filepath.Join(tmpHome, "brain")
 	convDir := filepath.Join(brainDir, "conv-alpha-100", ".system_generated", "logs")
-	if err := os.MkdirAll(convDir, 0755); err != nil {
+	if err := os.MkdirAll(convDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll failed: %v", err)
 	}
 	transcriptContent := "{\"step_index\": 1, \"status\": \"DONE\", \"content\": \"hello\"}\n" +
@@ -321,13 +321,13 @@ func TestHandleTranscripts(t *testing.T) {
 		"{\"step_index\": 3, \"status\": \"RUNNING\", \"error\": {\"code\": 500, \"message\": \"object error\"}}\n" +
 		"{\"step_index\": 4, \"status\": \"RUNNING\", \"error\": 99999}\n" +
 		"not a valid json line\n"
-	if err := os.WriteFile(filepath.Join(convDir, "transcript.jsonl"), []byte(transcriptContent), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(convDir, "transcript.jsonl"), []byte(transcriptContent), 0o644); err != nil {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
 
 	// Include unreadable folder (missing transcript.jsonl) and non-directory file
-	_ = os.MkdirAll(filepath.Join(brainDir, "conv-no-transcript", ".system_generated", "logs"), 0755)
-	_ = os.WriteFile(filepath.Join(brainDir, "regular_file.txt"), []byte("not a dir"), 0644)
+	_ = os.MkdirAll(filepath.Join(brainDir, "conv-no-transcript", ".system_generated", "logs"), 0o755)
+	_ = os.WriteFile(filepath.Join(brainDir, "regular_file.txt"), []byte("not a dir"), 0o644)
 
 	handler2 := handleTranscripts(store, brainDir, "", "   ", "/nonexistent/dir")
 	wGet := runHTTP(handler2, http.MethodGet, "/transcripts?include_raw=true", nil)
@@ -351,10 +351,10 @@ func TestHandleTranscripts(t *testing.T) {
 	root2 := filepath.Join(tmpHome, "root2")
 	dir1 := filepath.Join(root1, "shared-conv-1", ".system_generated", "logs")
 	dir2 := filepath.Join(root2, "shared-conv-1", ".system_generated", "logs")
-	_ = os.MkdirAll(dir1, 0755)
-	_ = os.MkdirAll(dir2, 0755)
-	_ = os.WriteFile(filepath.Join(dir1, "transcript.jsonl"), []byte(`{"step_index":1,"status":"DONE"}`+"\n"), 0644)
-	_ = os.WriteFile(filepath.Join(dir2, "transcript.jsonl"), []byte(`{"step_index":1,"status":"DONE"}`+"\n"), 0644)
+	_ = os.MkdirAll(dir1, 0o755)
+	_ = os.MkdirAll(dir2, 0o755)
+	_ = os.WriteFile(filepath.Join(dir1, "transcript.jsonl"), []byte(`{"step_index":1,"status":"DONE"}`+"\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir2, "transcript.jsonl"), []byte(`{"step_index":1,"status":"DONE"}`+"\n"), 0o644)
 
 	if w := runHTTP(handleTranscripts(store, root1, root2), http.MethodGet, "/transcripts", nil); w.Code != http.StatusOK {
 		t.Errorf("Expected 200 OK from dedup, got %d", w.Code)
@@ -580,8 +580,8 @@ func TestHandleTasks(t *testing.T) {
 	_ = store.InsertMessage(context.Background(), db.Message{
 		ID: "msg-test-task", ThreadID: "thread-1", AuthorID: "user-1",
 		AuthorName: "Tester with token ghp_999999999999999999999999999999999999",
-		Content: "Secret token ghp_123456789012345678901234567890123456 in prompt " + longPrompt,
-		Status: db.StatusProcessing, CreatedAt: now, UpdatedAt: now,
+		Content:    "Secret token ghp_123456789012345678901234567890123456 in prompt " + longPrompt,
+		Status:     db.StatusProcessing, CreatedAt: now, UpdatedAt: now,
 	})
 
 	handler := handleTasks(store)
@@ -852,8 +852,14 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 
 	t.Setenv("GOCOVERDIR", t.TempDir())
 	called, metaCalled := false, false
-	writeCountersDirFn = func(dir string) error { called = true; return nil }
-	writeMetaDirFn = func(dir string) error { metaCalled = true; return nil }
+	writeCountersDirFn = func(dir string) error {
+		called = true
+		return nil
+	}
+	writeMetaDirFn = func(dir string) error {
+		metaCalled = true
+		return nil
+	}
 
 	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/debug/coverage/flush", nil); w.Code != http.StatusOK || !called || !metaCalled {
 		t.Errorf("expected 200 OK with GOCOVERDIR and mocks called, got %d", w.Code)
@@ -899,8 +905,8 @@ func TestInitializeBrainEnvironment(t *testing.T) {
 			setup: func(t *testing.T) *config.Config {
 				tmpDir := t.TempDir()
 				conflict := filepath.Join(tmpDir, ".gemini", "antigravity-cli")
-				_ = os.MkdirAll(filepath.Dir(conflict), 0755)
-				_ = os.WriteFile(conflict, []byte("file-not-dir"), 0644)
+				_ = os.MkdirAll(filepath.Dir(conflict), 0o755)
+				_ = os.WriteFile(conflict, []byte("file-not-dir"), 0o644)
 				return config.NewTestConfig(func(d *config.ConfigData) {
 					d.DataDir = tmpDir
 					d.GeminiHomeDir = tmpDir
@@ -967,7 +973,7 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 		reloadFn("TestSource")
 
 		blockerHome := filepath.Join(tmpDir, "blocked_home")
-		if err := os.WriteFile(blockerHome, []byte("file"), 0644); err != nil {
+		if err := os.WriteFile(blockerHome, []byte("file"), 0o644); err != nil {
 			t.Fatalf("failed to write blocker file: %v", err)
 		}
 		cfg.Update(&config.ConfigData{GeminiHomeDir: filepath.Join(blockerHome, "sub"), DataDir: tmpData})
@@ -977,7 +983,7 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 	t.Run("provisioner error", func(t *testing.T) {
 		cfg := config.NewTestConfig()
 		tmpFile := filepath.Join(t.TempDir(), "blocking_file")
-		_ = os.WriteFile(tmpFile, []byte("file"), 0644)
+		_ = os.WriteFile(tmpFile, []byte("file"), 0o644)
 		cfg.Update(&config.ConfigData{GeminiHomeDir: tmpFile})
 		CreateReloadConfigFunc(cfg, WithProvisioner(env.NewFromConfig(cfg)))("test-provisioner-error")
 	})
@@ -1147,7 +1153,7 @@ func TestRunBrainApp_ValidationAndErrors(t *testing.T) {
 				cancel()
 			case "canceled_init_err":
 				blockDir := filepath.Join(t.TempDir(), "block")
-				_ = os.WriteFile(blockDir, []byte("file"), 0644)
+				_ = os.WriteFile(blockDir, []byte("file"), 0o644)
 				cfg = mkCfg(blockDir, filepath.Join(tmpDir, "data"), "0", ":memory:")
 				cancel()
 			case "missing_db":
@@ -1214,8 +1220,8 @@ func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
 	newLifecycleCfg := func(t *testing.T, mutators ...func(*config.ConfigData)) (string, *config.Config) {
 		t.Helper()
 		tmpDir := t.TempDir()
-		_ = os.MkdirAll(filepath.Join(tmpDir, "data", ".gemini", "config", "skills"), 0755)
-		_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "config", "skills"), 0755)
+		_ = os.MkdirAll(filepath.Join(tmpDir, "data", ".gemini", "config", "skills"), 0o755)
+		_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "config", "skills"), 0o755)
 		cfg := config.NewTestConfig(func(d *config.ConfigData) {
 			d.Port = "0"
 			d.AgyBin = "/bin/true"

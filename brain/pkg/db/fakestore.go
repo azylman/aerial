@@ -293,7 +293,10 @@ func (f *FakeStore) UpdateMessageCompleted(ctx context.Context, id, responseText
 }
 
 func (f *FakeStore) IncrementMessageRetry(ctx context.Context, id, errorMsg string) error {
-	return f.mutateMessage("IncrementMessageRetry", id, func(m *Message) { m.RetryCount++; m.ErrorMessage = errorMsg })
+	return f.mutateMessage("IncrementMessageRetry", id, func(m *Message) {
+		m.RetryCount++
+		m.ErrorMessage = errorMsg
+	})
 }
 
 func (f *FakeStore) ResetMessageToPendingWithRestart(ctx context.Context, id, reason string) error {

@@ -579,4 +579,3 @@ func TestIsSnowflake_EdgeCases(t *testing.T) {
 		t.Error("expected true for valid numeric snowflake")
 	}
 }
-

@@ -17,11 +17,11 @@ import (
 func writeTranscriptFile(t *testing.T, baseDir, sessionID, content string, mtime time.Time) string {
 	t.Helper()
 	logDir := filepath.Join(baseDir, sessionID, ".system_generated", "logs")
-	if err := os.MkdirAll(logDir, 0755); err != nil {
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		t.Fatalf("mkdir failed: %v", err)
 	}
 	tPath := filepath.Join(logDir, "transcript.jsonl")
-	if err := os.WriteFile(tPath, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(tPath, []byte(content), 0o644); err != nil {
 		t.Fatalf("write file failed: %v", err)
 	}
 	if !mtime.IsZero() {
@@ -588,7 +588,7 @@ func TestSyncTranscripts_ErrorsAndEdgeCases(t *testing.T) {
 				defer os.Remove(sockPath)
 
 				sockDir := filepath.Join(tempDir, "sess-sock-err", ".system_generated", "logs")
-				if err := os.MkdirAll(sockDir, 0755); err != nil {
+				if err := os.MkdirAll(sockDir, 0o755); err != nil {
 					t.Fatalf("mkdir failed: %v", err)
 				}
 				if err := os.Symlink(sockPath, filepath.Join(sockDir, "transcript.jsonl")); err != nil {
@@ -683,21 +683,21 @@ func TestFindTranscriptFile_AlternativeLocations(t *testing.T) {
 	// 1. system_generated/logs/transcript.jsonl (without leading dot)
 	sess1 := "sess-nodot"
 	dir1 := filepath.Join(tempDir, sess1, "system_generated", "logs")
-	_ = os.MkdirAll(dir1, 0755)
-	_ = os.WriteFile(filepath.Join(dir1, "transcript.jsonl"), []byte(`{"step_index":0,"content":"no dot"}`+"\n"), 0644)
+	_ = os.MkdirAll(dir1, 0o755)
+	_ = os.WriteFile(filepath.Join(dir1, "transcript.jsonl"), []byte(`{"step_index":0,"content":"no dot"}`+"\n"), 0o644)
 
 	// 2. transcript.jsonl directly under session dir
 	sess2 := "sess-root"
 	dir2 := filepath.Join(tempDir, sess2)
-	_ = os.MkdirAll(dir2, 0755)
-	_ = os.WriteFile(filepath.Join(dir2, "transcript.jsonl"), []byte(`{"step_index":0,"content":"root"}`+"\n"), 0644)
+	_ = os.MkdirAll(dir2, 0o755)
+	_ = os.WriteFile(filepath.Join(dir2, "transcript.jsonl"), []byte(`{"step_index":0,"content":"root"}`+"\n"), 0o644)
 
 	// 3. Hidden directory and regular file (should be ignored)
-	_ = os.MkdirAll(filepath.Join(tempDir, ".hidden-dir"), 0755)
-	_ = os.WriteFile(filepath.Join(tempDir, "regular-file.txt"), []byte("not a dir"), 0644)
+	_ = os.MkdirAll(filepath.Join(tempDir, ".hidden-dir"), 0o755)
+	_ = os.WriteFile(filepath.Join(tempDir, "regular-file.txt"), []byte("not a dir"), 0o644)
 
 	// 4. Session directory without any transcript file (should be ignored)
-	_ = os.MkdirAll(filepath.Join(tempDir, "sess-empty-dir"), 0755)
+	_ = os.MkdirAll(filepath.Join(tempDir, "sess-empty-dir"), 0o755)
 
 	stats, err := SyncTranscripts(ctx, store, tempDir, nil, nil, DefaultSyncOptions())
 	if err != nil {

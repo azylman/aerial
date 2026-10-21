@@ -27,7 +27,7 @@ func (p *Provisioner) SyncSkills() error {
 	legacySkillsDir := filepath.Join(p.homeDir, ".gemini", "skills")
 	if fi, err := os.Lstat(legacySkillsDir); err == nil {
 		if fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
-ignore(removeAllSkills(legacySkillsDir))
+			ignore(removeAllSkills(legacySkillsDir))
 		}
 	}
 
@@ -35,7 +35,7 @@ ignore(removeAllSkills(legacySkillsDir))
 	legacyPluginDir := filepath.Join(p.homeDir, ".gemini", "config", "plugins", "superpowers")
 	if fi, err := os.Lstat(legacyPluginDir); err == nil {
 		if fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
-ignore(removeAllSkills(legacyPluginDir))
+			ignore(removeAllSkills(legacyPluginDir))
 		}
 	}
 
@@ -138,10 +138,10 @@ func (p *Provisioner) LinkTargetSkills(targetDir string, target RuleTarget) int 
 
 func reconcileTargetSkills(targetDir string, allowedSkills map[string]string) int {
 	if fi, err := os.Lstat(targetDir); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-ignore(removeSkill(targetDir))
+		ignore(removeSkill(targetDir))
 	}
 
-	if err := os.MkdirAll(targetDir, 0755); err != nil {
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
 		log.Printf("[Skills] Warning: failed to create target skills directory %s: %v", targetDir, err)
 		return 0
 	}
@@ -151,12 +151,12 @@ ignore(removeSkill(targetDir))
 		for _, entry := range entries {
 			name := entry.Name()
 			if strings.HasSuffix(name, ".tmp") {
-ignore(removeSkill(filepath.Join(targetDir, name)))
+				ignore(removeSkill(filepath.Join(targetDir, name)))
 				continue
 			}
 			if _, ok := allowedSkills[name]; !ok {
 				entryPath := filepath.Join(targetDir, name)
-ignore(removeSkill(entryPath))
+				ignore(removeSkill(entryPath))
 				log.Printf("[Skills] Pruned unauthorized skill %s from %s", name, targetDir)
 			}
 		}
@@ -166,11 +166,11 @@ ignore(removeSkill(entryPath))
 	for skillName, srcPath := range allowedSkills {
 		destPath := filepath.Join(targetDir, skillName)
 		tmpDest := destPath + ".tmp"
-ignore(removeSkill(tmpDest))
+		ignore(removeSkill(tmpDest))
 
 		if err := symlinkSkill(srcPath, tmpDest); err != nil {
 			// Fallback: remove dest and symlink directly
-ignore(removeSkill(destPath))
+			ignore(removeSkill(destPath))
 			if err := symlinkSkill(srcPath, destPath); err != nil {
 				log.Printf("[Skills] Warning: failed to symlink skill %s -> %s: %v", srcPath, destPath, err)
 			} else {
@@ -178,7 +178,7 @@ ignore(removeSkill(destPath))
 			}
 		} else {
 			if err := renameSkill(tmpDest, destPath); err != nil {
-	ignore(removeSkill(destPath))
+				ignore(removeSkill(destPath))
 				if err := renameSkill(tmpDest, destPath); err != nil {
 					log.Printf("[Skills] Warning renaming %s -> %s: %v", tmpDest, destPath, err)
 				} else {
@@ -208,7 +208,7 @@ func sweepOrphanedSymlinks(targetSkillDirs []string) {
 			}
 			if fi.Mode()&os.ModeSymlink != 0 {
 				if _, err := os.Stat(linkPath); os.IsNotExist(err) {
-ignore(removeSkill(linkPath))
+					ignore(removeSkill(linkPath))
 				}
 			}
 		}

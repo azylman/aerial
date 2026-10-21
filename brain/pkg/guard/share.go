@@ -233,4 +233,3 @@ func isGitMutating(args []string) bool {
 	}
 	return false
 }
-

@@ -14,9 +14,7 @@ import (
 	"github.com/azylman/aerial/brain/pkg/sanitizer"
 )
 
-var (
-	rePreviousSessionEnvelope = regexp.MustCompile(`(?s)<PREVIOUS_SESSION>.*?</PREVIOUS_SESSION>`)
-)
+var rePreviousSessionEnvelope = regexp.MustCompile(`(?s)<PREVIOUS_SESSION>.*?</PREVIOUS_SESSION>`)
 
 func sanitizeQueryText(text string) string {
 	cleaned := sanitizer.SanitizeMentions(text)
@@ -176,4 +174,3 @@ func RetrieveFormattedContext(ctx context.Context, factStore db.FactStore, clien
 	}
 	return FormatMemoryContext(facts), nil
 }
-

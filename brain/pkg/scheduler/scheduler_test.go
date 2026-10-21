@@ -90,12 +90,12 @@ func setupTestStore(t *testing.T) *db.FakeStore {
 
 type mockStoreWrapper struct {
 	db.Store
-	getDueCronSchedulesFn                func(ctx context.Context) ([]db.CronSchedule, error)
-	updateCronNextRunFn                  func(ctx context.Context, id string, nextRunAt time.Time) error
-	createScheduleRunFn                  func(ctx context.Context, run db.ScheduleRun) error
-	insertMessageFn                      func(ctx context.Context, msg db.Message) error
-	getDueOneShotSchedulesFn             func(ctx context.Context) ([]db.OneShotSchedule, error)
-	insertMessageAndConsumeOneShotFn     func(ctx context.Context, scheduleID string, msg db.Message) error
+	getDueCronSchedulesFn                 func(ctx context.Context) ([]db.CronSchedule, error)
+	updateCronNextRunFn                   func(ctx context.Context, id string, nextRunAt time.Time) error
+	createScheduleRunFn                   func(ctx context.Context, run db.ScheduleRun) error
+	insertMessageFn                       func(ctx context.Context, msg db.Message) error
+	getDueOneShotSchedulesFn              func(ctx context.Context) ([]db.OneShotSchedule, error)
+	insertMessageAndConsumeOneShotFn      func(ctx context.Context, scheduleID string, msg db.Message) error
 	getActiveConversationsForExtractionFn func(ctx context.Context, activeHours int) ([]string, error)
 }
 
@@ -749,8 +749,8 @@ func TestMaintenanceJobs_RetentionDecayFactsTranscript(t *testing.T) {
 
 	tempBrain := t.TempDir()
 	logDir := filepath.Join(tempBrain, "sess-1", ".system_generated", "logs")
-	_ = os.MkdirAll(logDir, 0755)
-	_ = os.WriteFile(filepath.Join(logDir, "transcript.jsonl"), []byte(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"sync test"}`+"\n"), 0644)
+	_ = os.MkdirAll(logDir, 0o755)
+	_ = os.WriteFile(filepath.Join(logDir, "transcript.jsonl"), []byte(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"sync test"}`+"\n"), 0o644)
 	oldMtime := time.Now().Add(-time.Hour)
 	_ = os.Chtimes(filepath.Join(logDir, "transcript.jsonl"), oldMtime, oldMtime)
 
@@ -826,8 +826,8 @@ func TestScheduler_RunAndStartLifecycle(t *testing.T) {
 	nilSched.handleTick(context.Background(), 120, nil, nil)
 
 	mockStoreFast := &mockStoreWrapper{
-		Store: store,
-		getDueCronSchedulesFn: func(ctx context.Context) ([]db.CronSchedule, error) { return nil, nil },
+		Store:                    store,
+		getDueCronSchedulesFn:    func(ctx context.Context) ([]db.CronSchedule, error) { return nil, nil },
 		getDueOneShotSchedulesFn: func(ctx context.Context) ([]db.OneShotSchedule, error) { return nil, nil },
 	}
 	schedFast, _ := New(cfg, mockStoreFast, nil, nil)

@@ -1454,7 +1454,7 @@ func buildPoolEnv(baseEnv []string, runtimeBase string, timezone ...string) []st
 		filepath.Join(cacheBase, "go", "pkg", "mod"),
 		filepath.Join(cacheBase, "golangci-lint"),
 	} {
-		if err := os.MkdirAll(dir, 0755); err != nil {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
 			log.Printf("[WARN] Failed to create cache directory %q: %v", dir, err)
 		}
 	}

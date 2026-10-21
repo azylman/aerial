@@ -361,4 +361,3 @@ func TestSanitizeAuthor(t *testing.T) {
 		})
 	}
 }
-

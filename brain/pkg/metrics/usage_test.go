@@ -42,7 +42,7 @@ func TestStartUsagePollerAndRunner(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "mock-agy.sh")
 	payload := `{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[{"name":"G","buckets":[{"id":"b1","window":"5h","remaining_fraction":0.75}]}]}}}`
-	if err := os.WriteFile(script, []byte("#!/bin/sh\necho '"+payload+"'\n"), 0755); err != nil {
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho '"+payload+"'\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if out, err := NewAgyUsageRunner(script, dir, []string{"HOME=/old", "FOO=bar"})(context.Background()); err != nil || !strings.Contains(string(out), `"b1"`) {

@@ -23,9 +23,11 @@ var (
 		Help: "Unix timestamp in seconds when the agy /usage quota window resets.",
 	}, []string{"bucket_id", "group", "window"})
 )
+
 func init() {
 	Registry.MustRegister(UsageQuotaRemainingFraction, UsageQuotaResetTimestampSeconds)
 }
+
 type usageCLIResponse struct {
 	Command struct {
 		Data struct {

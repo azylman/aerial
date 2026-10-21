@@ -1057,9 +1057,6 @@ func TestConfig_AccessorsAndConcurrency(t *testing.T) {
 	_ = LoadScopeInstructions("general")
 }
 
-
-
-
 func slicesEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -1359,11 +1356,23 @@ func TestTargetMcpConfig(t *testing.T) {
 
 func TestVoiceConfigAndEngine(t *testing.T) {
 	engineTests := []struct{ in, want string }{
-		{"", "agy"}, {"   ", "agy"}, {"agy", "agy"}, {"AGY", "agy"}, {"  agy  ", "agy"},
-		{"gemini_api", "gemini_api"}, {"GEMINI_API", "gemini_api"}, {" gemini_api ", "gemini_api"},
-		{"gemini", "gemini_api"}, {"GEMINI", "gemini_api"}, {"  gemini  ", "gemini_api"},
-		{"direct_api", "gemini_api"}, {"DIRECT_API", "gemini_api"}, {" direct_api ", "gemini_api"},
-		{"custom", "agy"}, {"openai", "agy"}, {"12345", "agy"},
+		{"", "agy"},
+		{"   ", "agy"},
+		{"agy", "agy"},
+		{"AGY", "agy"},
+		{"  agy  ", "agy"},
+		{"gemini_api", "gemini_api"},
+		{"GEMINI_API", "gemini_api"},
+		{" gemini_api ", "gemini_api"},
+		{"gemini", "gemini_api"},
+		{"GEMINI", "gemini_api"},
+		{"  gemini  ", "gemini_api"},
+		{"direct_api", "gemini_api"},
+		{"DIRECT_API", "gemini_api"},
+		{" direct_api ", "gemini_api"},
+		{"custom", "agy"},
+		{"openai", "agy"},
+		{"12345", "agy"},
 	}
 	for _, tc := range engineTests {
 		t.Run("engine_"+tc.in, func(t *testing.T) {

@@ -25,15 +25,23 @@ func seedVanadisBuildSQLite(t *testing.T, store Store, build VanadisBuild, chunk
 	t.Helper()
 	sqlStore, ctx := store.(*SQLStore), context.Background()
 	title, status, tier := build.Title, build.Status, build.Tier
-	if strings.TrimSpace(title) == "" { title = build.Objective }
-	if strings.TrimSpace(status) == "" { status = "running" }
-	if tier <= 0 { tier = 2 }
+	if strings.TrimSpace(title) == "" {
+		title = build.Objective
+	}
+	if strings.TrimSpace(status) == "" {
+		status = "running"
+	}
+	if tier <= 0 {
+		tier = 2
+	}
 	if _, err := sqlStore.db.ExecContext(ctx, `INSERT INTO vanadis_builds (id, thread_id, tier, title, objective, shared_context, status, status_message_id, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);`, build.ID, build.ThreadID, tier, title, build.Objective, build.SharedContext, status, build.StatusMessageID); err != nil {
 		t.Fatalf("seed build: %v", err)
 	}
 	for _, c := range chunks {
 		var prNum sql.NullInt64
-		if c.PRNumber > 0 { prNum = sql.NullInt64{Int64: int64(c.PRNumber), Valid: true} }
+		if c.PRNumber > 0 {
+			prNum = sql.NullInt64{Int64: int64(c.PRNumber), Valid: true}
+		}
 		var startedAt sql.NullTime
 		if !c.StartedAt.IsZero() {
 			startedAt = sql.NullTime{Time: c.StartedAt.UTC(), Valid: true}
@@ -41,9 +49,15 @@ func seedVanadisBuildSQLite(t *testing.T, store Store, build VanadisBuild, chunk
 			startedAt = sql.NullTime{Time: time.Now().UTC(), Valid: true}
 		}
 		repo, cStatus, effort := c.Repo, c.Status, strings.ToLower(strings.TrimSpace(c.Effort))
-		if strings.TrimSpace(repo) == "" { repo = "azylman/aerial" }
-		if strings.TrimSpace(cStatus) == "" { cStatus = "pending" }
-		if effort == "" { effort = "medium" }
+		if strings.TrimSpace(repo) == "" {
+			repo = "azylman/aerial"
+		}
+		if strings.TrimSpace(cStatus) == "" {
+			cStatus = "pending"
+		}
+		if effort == "" {
+			effort = "medium"
+		}
 		if _, err := sqlStore.db.ExecContext(ctx, `INSERT INTO vanadis_chunks (id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, pr_number, started_at, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);`, c.ID, c.BuildID, c.ChunkIndex, repo, c.Title, c.Instructions, formatTestPostgresTextArray(c.TargetFiles), formatTestPostgresTextArray(c.TargetSymbols), effort, formatTestPostgresTextArray(c.AcceptanceCriteria), cStatus, prNum, startedAt); err != nil {
 			t.Fatalf("seed chunk %s: %v", c.ID, err)
 		}

@@ -84,12 +84,15 @@ type errInsertFactStore struct {
 func (e *errInsertFactStore) GetMaxMessageRowID(ctx context.Context, threadID string) (int64, error) {
 	return 1, nil
 }
+
 func (e *errInsertFactStore) GetUnextractedAdminTurns(ctx context.Context, threadID string) ([]db.Message, error) {
 	return []db.Message{{ID: "m1", RowID: 5, Content: "user msg", ResponseText: "assistant reply", Status: db.StatusCompleted, Metadata: db.MessageMetadata{IsAdmin: true}}}, nil
 }
+
 func (e *errInsertFactStore) UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64) error {
 	return nil
 }
+
 func (e *errInsertFactStore) InsertFact(ctx context.Context, category, factText string, importance float64, embedding []float32) (int64, error) {
 	return 0, fmt.Errorf("simulated insert error")
 }
@@ -291,10 +294,10 @@ func TestGenerateEmbedding(t *testing.T) {
 			wantSubstr: "connection refused",
 		},
 		{
-			name:       "ContextCancelled",
-			text:       "cancelled",
-			cancelCtx:  true,
-			wantErr:    true,
+			name:      "ContextCancelled",
+			text:      "cancelled",
+			cancelCtx: true,
+			wantErr:   true,
 		},
 		{
 			name:       "BodyCloseErrorIgnored",

@@ -207,23 +207,23 @@ func (p *Provisioner) compileTargetRules(target RuleTarget, customPrompt string)
 
 func (p *Provisioner) atomicSwapRulesDir(rules []ruleSourceFile, targetDir string) error {
 	parentDir := filepath.Dir(targetDir)
-	if err := os.MkdirAll(parentDir, 0755); err != nil {
+	if err := os.MkdirAll(parentDir, 0o755); err != nil {
 		return err
 	}
 
 	randSuffix := uuid.New().String()[:8]
 	stagingDir := filepath.Join(parentDir, fmt.Sprintf(".rules.tmp.%s", randSuffix))
-	if err := os.MkdirAll(stagingDir, 0755); err != nil {
+	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
 		return err
 	}
 	defer func() {
-ignore(os.RemoveAll(stagingDir))
+		ignore(os.RemoveAll(stagingDir))
 	}()
 
 	for _, r := range rules {
 		destName := r.prefix + r.filename
 		destPath := filepath.Join(stagingDir, destName)
-		if err := os.WriteFile(destPath, []byte(r.content), 0644); err != nil {
+		if err := os.WriteFile(destPath, []byte(r.content), 0o644); err != nil {
 			return fmt.Errorf("failed to write rule file %s in staging: %w", destName, err)
 		}
 	}
@@ -257,13 +257,13 @@ ignore(os.RemoveAll(stagingDir))
 	}
 
 	if hasActive {
-ignore(os.RemoveAll(backupDir))
+		ignore(os.RemoveAll(backupDir))
 	}
 	return nil
 }
 
 func (p *Provisioner) syncRulesToDir(rules []ruleSourceFile, geminiDir string) error {
-	if err := os.MkdirAll(geminiDir, 0755); err != nil {
+	if err := os.MkdirAll(geminiDir, 0o755); err != nil {
 		return err
 	}
 
@@ -303,8 +303,8 @@ func (p *Provisioner) provisionRuntimeSharedAssets(runtimeHome string) {
 	runtimeGemini := filepath.Join(runtimeHome, ".gemini")
 	primaryGemini := filepath.Join(p.homeDir, ".gemini")
 
-	ignore(os.MkdirAll(filepath.Join(runtimeGemini, "antigravity-cli"), 0755))
-	ignore(os.MkdirAll(filepath.Join(runtimeGemini, "config"), 0755))
+	ignore(os.MkdirAll(filepath.Join(runtimeGemini, "antigravity-cli"), 0o755))
+	ignore(os.MkdirAll(filepath.Join(runtimeGemini, "config"), 0o755))
 
 	primarySettings := filepath.Join(primaryGemini, "antigravity-cli", "settings.json")
 	targetSettings := filepath.Join(runtimeGemini, "antigravity-cli", "settings.json")
@@ -341,8 +341,8 @@ func (p *Provisioner) provisionRuntimeSharedAssets(runtimeHome string) {
 		canonicalBrain = filepath.Join(primaryGemini, "antigravity-cli", "brain")
 		canonicalConversations = filepath.Join(primaryGemini, "antigravity-cli", "conversations")
 	}
-	ignore(os.MkdirAll(canonicalBrain, 0755))
-	ignore(os.MkdirAll(canonicalConversations, 0755))
+	ignore(os.MkdirAll(canonicalBrain, 0o755))
+	ignore(os.MkdirAll(canonicalConversations, 0o755))
 	p.linkSharedSessionStorage(runtimeGemini, canonicalBrain, canonicalConversations)
 }
 
@@ -370,7 +370,7 @@ func (p *Provisioner) linkSharedSessionStorage(targetGemini, canonicalBrain, can
 				if linkTarget, rErr := os.Readlink(targetDir); rErr == nil && filepath.Clean(linkTarget) == cleanCanonical {
 					continue
 				}
-ignore(os.Remove(targetDir))
+				ignore(os.Remove(targetDir))
 			} else if fi.IsDir() {
 				// Migrate any existing files or sessions to canonical directory
 				if entries, rErr := os.ReadDir(targetDir); rErr == nil {
@@ -378,18 +378,18 @@ ignore(os.Remove(targetDir))
 						src := filepath.Join(targetDir, entry.Name())
 						dst := filepath.Join(item.canonical, entry.Name())
 						if _, dErr := os.Stat(dst); os.IsNotExist(dErr) {
-ignore(os.Rename(src, dst))
+							ignore(os.Rename(src, dst))
 						}
 					}
 				}
-ignore(os.RemoveAll(targetDir))
+				ignore(os.RemoveAll(targetDir))
 			} else {
-ignore(os.Remove(targetDir))
+				ignore(os.Remove(targetDir))
 			}
 		}
 
 		// Ensure parent directory exists (e.g. targetGemini/antigravity-cli)
-ignore(os.MkdirAll(filepath.Dir(targetDir), 0755))
+		ignore(os.MkdirAll(filepath.Dir(targetDir), 0o755))
 
 		if sErr := symlinkRuntimeAsset(item.canonical, targetDir); sErr != nil {
 			log.Printf("[Env] Warning: failed to link shared storage %s -> %s: %v", targetDir, item.canonical, sErr)
@@ -435,8 +435,8 @@ func (p *Provisioner) SyncRules(customPrompt string) error {
 	if p.dataDir != "" {
 		canonicalBrain := filepath.Join(p.dataDir, "brain")
 		canonicalConversations := filepath.Join(p.dataDir, "conversations")
-		ignore(os.MkdirAll(canonicalBrain, 0755))
-		ignore(os.MkdirAll(canonicalConversations, 0755))
+		ignore(os.MkdirAll(canonicalBrain, 0o755))
+		ignore(os.MkdirAll(canonicalConversations, 0o755))
 		p.linkSharedSessionStorage(primaryGemini, canonicalBrain, canonicalConversations)
 	}
 

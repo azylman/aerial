@@ -170,9 +170,15 @@ func scanVanadisChunk(scanner interface{ Scan(dest ...any) error }, isPostgres b
 		c.TargetSymbols = parsePostgresTextArray(rawTargetSymbols)
 		c.AcceptanceCriteria = parsePostgresTextArray(rawAcceptanceCriteria)
 	} else {
-		if c.TargetFiles == nil { c.TargetFiles = []string{} }
-		if c.TargetSymbols == nil { c.TargetSymbols = []string{} }
-		if c.AcceptanceCriteria == nil { c.AcceptanceCriteria = []string{} }
+		if c.TargetFiles == nil {
+			c.TargetFiles = []string{}
+		}
+		if c.TargetSymbols == nil {
+			c.TargetSymbols = []string{}
+		}
+		if c.AcceptanceCriteria == nil {
+			c.AcceptanceCriteria = []string{}
+		}
 	}
 	if strings.TrimSpace(c.Effort) == "" {
 		c.Effort = "medium"

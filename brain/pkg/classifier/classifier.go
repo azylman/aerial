@@ -61,7 +61,7 @@ type systemOneResponse struct {
 }
 
 var (
-	reBanter = regexp.MustCompile(`(?i)^(lol|haha|hahaha|lmao|rofl|ok|okay|k|thanks|thx|ty|\+1|nice|cool|yep|nope|gm|gn|bye)$`)
+	reBanter        = regexp.MustCompile(`(?i)^(lol|haha|hahaha|lmao|rofl|ok|okay|k|thanks|thx|ty|\+1|nice|cool|yep|nope|gm|gn|bye)$`)
 	reAlertKeywords = regexp.MustCompile(`(?i)\b(down|fail|failed|died|dead|broke|broken|crash|crashed|error|bug|500|403|404|panic|outage)\b`)
 )
 
@@ -116,7 +116,9 @@ func WithProcessPool(pool EphemeralProcessPool) Option {
 }
 
 // WithLLMFunc sets the LLM invocation function.
-func WithLLMFunc(fn func(ctx context.Context, model, prompt string) (string, error)) Option { return func(c *Classifier) { c.LLMFunc = fn } }
+func WithLLMFunc(fn func(ctx context.Context, model, prompt string) (string, error)) Option {
+	return func(c *Classifier) { c.LLMFunc = fn }
+}
 
 // WithModel sets the LLM model identifier.
 func WithModel(model string) Option { return func(c *Classifier) { c.Model = model } }
@@ -290,7 +292,9 @@ func FormatMessage(m db.Message) string {
 const DefaultAmbientWakePrompt = "determine whether the target message is intended for aerial, based on the recent channel context."
 
 // BuildPrompt constructs the classification prompt for a single target message.
-func BuildPrompt(target db.Message, recentContext []db.Message) string { return BuildBurstPrompt([]db.Message{target}, recentContext) }
+func BuildPrompt(target db.Message, recentContext []db.Message) string {
+	return BuildBurstPrompt([]db.Message{target}, recentContext)
+}
 
 // BuildBurstPrompt constructs the classification prompt with trailing context and target burst.
 // It implements sandwich defense by placing security directives and evaluation rubric after the untrusted content.

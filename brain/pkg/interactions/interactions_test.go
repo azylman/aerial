@@ -309,8 +309,14 @@ func TestRouter_AuthAndDispatch(t *testing.T) {
 
 			if tc.withProviders {
 				var cfgCalled, poolCalled bool
-				router.deps.ConfigProvider = func() *config.Config { cfgCalled = true; return cfg }
-				router.deps.PoolProvider = func() *queue.WorkerPool { poolCalled = true; return mockPool }
+				router.deps.ConfigProvider = func() *config.Config {
+					cfgCalled = true
+					return cfg
+				}
+				router.deps.PoolProvider = func() *queue.WorkerPool {
+					poolCalled = true
+					return mockPool
+				}
 				if got := router.getConfig(); got != cfg || !cfgCalled {
 					t.Fatalf("expected getConfig to invoke ConfigProvider")
 				}

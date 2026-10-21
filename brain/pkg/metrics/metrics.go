@@ -184,7 +184,6 @@ var (
 		},
 	)
 
-
 	// Thread Title Summarization Telemetry
 	ThreadTitleDurationSeconds = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
