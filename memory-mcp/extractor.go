@@ -22,17 +22,16 @@ var extractionMutex sync.Mutex
 
 // ExtractedFactItem represents a structured fact extracted by the LLM.
 type ExtractedFactItem struct {
-	Action       string  `json:"action,omitempty"`
-	SupersedesID int64   `json:"supersedes_id,omitempty"`
-	DeleteID     int64   `json:"delete_id,omitempty"`
-	Category     string  `json:"category"`
-	FactText     string  `json:"fact_text"`
-	Importance   float64 `json:"importance_score"`
+	Action       string `json:"action,omitempty"`
+	SupersedesID int64  `json:"supersedes_id,omitempty"`
+	DeleteID     int64  `json:"delete_id,omitempty"`
+	FactText     string `json:"fact_text"`
 }
 
 // ExtractedFactsPayload encapsulates the array of extracted facts.
 type ExtractedFactsPayload struct {
-	Facts []ExtractedFactItem `json:"facts"`
+	Facts         []ExtractedFactItem `json:"facts"`
+	ReinforcedIDs []int64             `json:"reinforced_ids,omitempty"`
 }
 
 type brainLLMRequest struct {
@@ -92,14 +91,13 @@ Requirements:
 {
   "facts": [
     {
-      "category": "user_preference|system_config|routine|general",
-      "fact_text": "1-2 concise sentences stating the fact clearly",
-      "importance_score": 0.6
+      "fact_text": "1-2 concise sentences stating the fact clearly"
     }
-  ]
+  ],
+  "reinforced_ids": [42]
 }
-2. Extract only durable, atomic facts not ephemeral details.
-3. Score importance_score on a 0.1 to 1.0 scale (0.8-1.0 for permanent user preferences/identity, 0.5-0.7 for durable system architecture/routines). Never extract ephemeral PR numbers, commit SHAs, branch names, coverage/LoC metrics, CI/CD deploy statuses, or Vanadis chunk IDs.
+2. Extract only durable, atomic facts not ephemeral details. Never extract ephemeral PR numbers, commit SHAs, branch names, coverage/LoC metrics, CI/CD deploy statuses, or Vanadis chunk IDs.
+3. If retrieved memory facts with [id:N] directly informed the assistant's response or tool calls in this turn, include their integer IDs in "reinforced_ids". If none were used, set "reinforced_ids": [].
 4. If no durable facts are present in the conversation, return {"facts": []}.
 5. Do NOT include markdown text formatting outside the JSON block.
 `
@@ -151,42 +149,26 @@ var (
 )
 
 // EvaluateCandidateAdmission deterministically evaluates an extracted fact candidate.
-func EvaluateCandidateAdmission(item ExtractedFactItem) (admit bool, adjustedImportance float64, reason string) {
+func EvaluateCandidateAdmission(item ExtractedFactItem) (admit bool, reason string) {
 	action := strings.ToUpper(strings.TrimSpace(item.Action))
 	if action == "NOOP" {
-		return false, 0, "noop_action"
+		return false, "noop_action"
 	}
 	if action == "DELETE" {
-		return false, 0, "delete_action"
+		return false, "delete_action"
 	}
 
 	trimmedText := strings.TrimSpace(item.FactText)
 	if len(trimmedText) < 10 {
-		return false, 0, "too_short"
+		return false, "too_short"
 	}
 
 	isDurable := durableDirectiveRegex.MatchString(trimmedText)
 	if ephemeralTelemetryRegex.MatchString(trimmedText) && !isDurable {
-		return false, 0, "ephemeral_telemetry"
+		return false, "ephemeral_telemetry"
 	}
 
-	importance := item.Importance
-	if importance <= 0 {
-		importance = 0.60
-	}
-
-	cleanCategory := strings.ToLower(strings.TrimSpace(item.Category))
-	if cleanCategory == "user_preference" || isDurable {
-		importance += 0.10
-	}
-
-	if importance < 0.10 {
-		importance = 0.10
-	} else if importance > 1.0 {
-		importance = 1.0
-	}
-
-	return true, importance, "admitted"
+	return true, "admitted"
 }
 
 func buildCandidateReconcilePrompt(item ExtractedFactItem, neighbors []ScoredFact) string {
@@ -195,14 +177,8 @@ func buildCandidateReconcilePrompt(item ExtractedFactItem, neighbors []ScoredFac
 Decide how to reconcile a new candidate fact against existing related facts in memory.
 
 CANDIDATE FACT:
-Category: `)
-	b.WriteString(item.Category)
-	b.WriteString(`
 Fact: `)
 	b.WriteString(item.FactText)
-	b.WriteString(`
-Importance: `)
-	b.WriteString(fmt.Sprintf("%.2f", item.Importance))
 	b.WriteString(`
 
 EXISTING CANDIDATE NEIGHBORS (id, similarity, text):
@@ -219,9 +195,7 @@ Requirements:
       "action": "ADD|UPDATE|DELETE|NOOP",
       "supersedes_id": 123,
       "delete_id": 456,
-      "category": "user_preference|system_config|routine|general",
-      "fact_text": "Fact text",
-      "importance_score": 0.6
+      "fact_text": "Fact text"
     }
   ]
 }
@@ -229,7 +203,7 @@ Requirements:
 - "ADD": Candidate is a distinct fact. Does not replace any neighbor.
 - "UPDATE": Candidate modifies or updates a neighbor. Set "supersedes_id" to that neighbor's ID.
 - "DELETE": Candidate invalidates a neighbor that is no longer true. Set "delete_id" to that neighbor's ID.
-- "NOOP": Candidate is already accurately captured or obsolete.
+- "NOOP": Candidate is already accurately captured or corroborated by an existing neighbor. Set "supersedes_id" to that neighbor's ID.
 3. Only reference neighbor IDs explicitly listed above.
 4. Output nothing else outside the JSON object.`)
 	return b.String()
@@ -274,6 +248,13 @@ func processThreadFacts(ctx context.Context, store Store, client OllamaClient, l
 		priorTurns = nil
 	}
 
+	retrievedFacts, toolCalls, trajErr := store.GetThreadTrajectoryContext(ctx, threadID)
+	if trajErr != nil {
+		log.Printf("[Memory] Warning: failed to get thread trajectory context (thread=%s): %v", threadID, trajErr)
+		retrievedFacts = nil
+		toolCalls = nil
+	}
+
 	var b strings.Builder
 	b.WriteString(FactExtractionPrompt)
 	b.WriteString("\nInstructions for Coreference Resolution:\nResolve any pronouns (he, she, they, it) or relative references in new turns into standalone atomic facts using prior context.\n")
@@ -289,6 +270,20 @@ func processThreadFacts(ctx context.Context, store Store, client OllamaClient, l
 			b.WriteString(formattedPrior)
 		}
 	}
+	if len(retrievedFacts) > 0 {
+		b.WriteString("\nRETRIEVED MEMORY IN TURN:\n")
+		for _, rf := range retrievedFacts {
+			b.WriteString(rf)
+			b.WriteString("\n")
+		}
+	}
+	if len(toolCalls) > 0 {
+		b.WriteString("\nTOOL CALLS IN TURN:\n")
+		for _, tc := range toolCalls {
+			b.WriteString(tc)
+			b.WriteString("\n")
+		}
+	}
 	b.WriteString("\nNEW UNEXTRACTED TURNS:\n")
 	b.WriteString(transcript)
 	prompt := b.String()
@@ -301,6 +296,16 @@ func processThreadFacts(ctx context.Context, store Store, client OllamaClient, l
 	factsPayload, err := parseFactsJSON(respText)
 	if err != nil {
 		return fmt.Errorf("failed to parse extracted facts JSON: %w", err)
+	}
+
+	seenReinforced := make(map[int64]bool)
+	for _, rid := range factsPayload.ReinforcedIDs {
+		if rid > 0 && !seenReinforced[rid] {
+			seenReinforced[rid] = true
+			if err := store.ReinforceFact(ctx, rid); err != nil {
+				log.Printf("[Memory] Warning: Failed to reinforce trajectory fact ID %d: %v", rid, err)
+			}
+		}
 	}
 
 	candidates := factsPayload.Facts
@@ -325,7 +330,7 @@ func reconcileCandidateFact(ctx context.Context, store Store, client OllamaClien
 	if strings.EqualFold(strings.TrimSpace(item.Action), "DELETE") {
 		return
 	}
-	admit, _, _ := EvaluateCandidateAdmission(item)
+	admit, _ := EvaluateCandidateAdmission(item)
 	if !admit {
 		return
 	}
@@ -429,7 +434,13 @@ func reconcileCandidateFact(ctx context.Context, store Store, client OllamaClien
 			}
 		}
 	case "NOOP":
-		// Do nothing
+		targetID := dec.SupersedesID
+		if !validIDs[targetID] {
+			targetID = neighbors[0].Fact.ID
+		}
+		if err := store.ReinforceFact(ctx, targetID); err != nil {
+			log.Printf("[Memory] Error reinforcing NOOP fact %d: %v", targetID, err)
+		}
 	default: // "ADD" or fallback
 		if _, err := store.InsertFact(ctx, item.FactText, emb); err != nil {
 			log.Printf("[Memory] Error inserting fact: %v", err)
@@ -634,6 +645,13 @@ func ConsolidateFactClusters(ctx context.Context, store Store, client OllamaClie
 			candidates = candidates[:2]
 		}
 
+		maxReinforce := 1
+		for _, src := range clique {
+			if src.Fact.ReinforceCount > maxReinforce {
+				maxReinforce = src.Fact.ReinforceCount
+			}
+		}
+
 		var inserted int
 		for _, c := range candidates {
 			text := strings.TrimSpace(c.FactText)
@@ -650,12 +668,19 @@ func ConsolidateFactClusters(ctx context.Context, store Store, client OllamaClie
 				continue
 			}
 
-			_, err = store.InsertFact(ctx, text, emb)
+			newID, err := store.InsertFact(ctx, text, emb)
 			if err != nil {
 				log.Printf("[Memory] Warning: Failed to insert consolidated fact: %v", err)
 				continue
 			}
 			inserted++
+
+			reinforceTimes := min(maxReinforce, 10) - 1
+			for r := 0; r < reinforceTimes; r++ {
+				if err := store.ReinforceFact(ctx, newID); err != nil {
+					log.Printf("[Memory] Warning: Failed to reinforce consolidated fact %d: %v", newID, err)
+				}
+			}
 		}
 
 		if inserted > 0 {

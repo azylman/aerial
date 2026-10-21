@@ -139,7 +139,7 @@ func (h *ToolHandler) MemoryStore(ctx context.Context, args MemoryStoreArgs) (Me
 	}
 
 	if args.SupersedesID == 0 {
-		admit, _, reason := EvaluateCandidateAdmission(ExtractedFactItem{
+		admit, reason := EvaluateCandidateAdmission(ExtractedFactItem{
 			FactText: factText,
 		})
 		if !admit {
