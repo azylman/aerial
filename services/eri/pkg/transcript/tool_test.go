@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 )
 
 func TestClipContent(t *testing.T) {
@@ -241,9 +242,9 @@ func TestIsSubstantiveStep(t *testing.T) {
 	}
 }
 
-func newSearchTestStore(t *testing.T, seedCase int) *db.FakeStore {
+func newSearchTestStore(t *testing.T, seedCase int) *dbtest.FakeStore {
 	t.Helper()
-	store := db.NewFakeStore()
+	store := dbtest.NewFakeStore()
 	ctx := context.Background()
 
 	switch seedCase {
@@ -631,7 +632,7 @@ func TestGetTranscriptStepWindow(t *testing.T) {
 
 			var store db.TranscriptStore
 			if !tc.nilStore {
-				fake := db.NewFakeStore()
+				fake := dbtest.NewFakeStore()
 				ctx := context.Background()
 				_ = fake.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-win-1"})
 				steps := make([]db.TranscriptStep, 10)

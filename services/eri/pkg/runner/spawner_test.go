@@ -3,11 +3,127 @@ package runner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
+	"sync"
 	"testing"
 )
+
+// MockProcessHandle simulates a running process in tests.
+type MockProcessHandle struct {
+	pid     int
+	killErr error
+	waitErr error
+	mu      sync.Mutex
+	killed  bool
+	waited  bool
+}
+
+func (m *MockProcessHandle) Pid() int { return m.pid }
+
+func (m *MockProcessHandle) Kill() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.killed = true
+	return m.killErr
+}
+
+func (m *MockProcessHandle) Wait() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.waited = true
+	return m.waitErr
+}
+
+func (m *MockProcessHandle) SetKillErr(err error) {
+	m.mu.Lock()
+	m.killErr = err
+	m.mu.Unlock()
+}
+
+func NewMockProcessHandle(pid int) *MockProcessHandle { return &MockProcessHandle{pid: pid} }
+
+// MockDaemonSpawner enables hermetic testing of streaming daemons.
+type MockDaemonSpawner struct {
+	SpawnFn func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error)
+}
+
+func spawnDefaultMockPipes(cfg DaemonConfig, closeOutW bool, logPrefix string) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	errR, errW := io.Pipe()
+
+	discardIn := func() {
+		if _, err := io.Copy(io.Discard, inR); err != nil && !errors.Is(err, io.ErrClosedPipe) && !errors.Is(err, io.EOF) {
+			log.Printf("%s Warning: failed to discard stdin: %v", logPrefix, err)
+		}
+	}
+	go func() {
+		sessID := cfg.SessionID
+		if sessID == "" || !IsValidUUID(sessID) {
+			sessID = "550e8400-e29b-41d4-a716-446655440000"
+		}
+		if _, err := fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", sessID); err != nil {
+			log.Printf("%s Warning: failed to write init event: %v", logPrefix, err)
+		}
+		closeQuietly(errW)
+		if closeOutW {
+			var buf [4096]byte
+			if _, err := inR.Read(buf[:]); err == nil {
+				go discardIn()
+			}
+			closeQuietly(outW)
+			return
+		}
+		discardIn()
+	}()
+	return inW, outR, errR, &MockProcessHandle{pid: 12345}, nil
+}
+
+func NewMockDaemonSpawner() *MockDaemonSpawner { return &MockDaemonSpawner{} }
+
+func (m *MockDaemonSpawner) Spawn(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+	if m != nil && m.SpawnFn != nil {
+		return m.SpawnFn(ctx, cfg)
+	}
+	return spawnDefaultMockPipes(cfg, false, "[DaemonSpawner]")
+}
+
+// MockSpawner records spawned configs and simulates running daemons for testing.
+type MockSpawner struct {
+	mu           sync.Mutex
+	lastSpawnCfg DaemonConfig
+	spawnCount   int
+	SpawnFn      func(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error)
+}
+
+func NewMockSpawner() *MockSpawner { return &MockSpawner{} }
+
+func (m *MockSpawner) Spawn(ctx context.Context, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+	if m == nil {
+		return spawnDefaultMockPipes(cfg, true, "[MockSpawner]")
+	}
+	m.mu.Lock()
+	m.lastSpawnCfg, m.spawnCount = cfg, m.spawnCount+1
+	fn := m.SpawnFn
+	m.mu.Unlock()
+	if fn != nil {
+		return fn(ctx, cfg)
+	}
+	return spawnDefaultMockPipes(cfg, true, "[MockSpawner]")
+}
+
+func (m *MockSpawner) LastSpawnCfg() DaemonConfig {
+	if m == nil {
+		return DaemonConfig{}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastSpawnCfg
+}
 
 type errCloser struct{ err error }
 

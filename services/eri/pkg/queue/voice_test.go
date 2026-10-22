@@ -18,6 +18,7 @@ import (
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/discord"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
@@ -68,7 +69,7 @@ func TestWorkerPool_EffortModelResolution(t *testing.T) {
 			var appCfg *config.Config
 			if tt.appCfgVal != nil {
 				val := *tt.appCfgVal
-				appCfg = config.NewTestConfig(func(d *config.ConfigData) {
+				appCfg = newTestConfig(func(d *config.ConfigData) {
 					if tt.effort == "medium" {
 						d.MediumEffortModel = val
 					} else {
@@ -153,7 +154,7 @@ func setupVoiceTestPool(t *testing.T, tt *voiceTurnTestCase, cancelCaller contex
 	}
 	if tt.runnerOut != "" || tt.runnerErr != nil || tt.runnerCode != 0 {
 		p := New(nil, WorkerPoolConfig{
-			LowEffortModel: "low-effort-fast-model", Store: db.NewFakeStore(),
+			LowEffortModel: "low-effort-fast-model", Store: dbtest.NewFakeStore(),
 			RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 				return tt.runnerOut, tt.runnerErrOut, tt.runnerCode, tt.runnerErr
 			},
@@ -283,8 +284,8 @@ type voiceProcessPoolSpawnerConfig struct {
 	blockUntilDone          chan struct{}
 }
 
-func newEventDrivenVoiceDaemonSpawner(cfg voiceProcessPoolSpawnerConfig) *runner.MockDaemonSpawner {
-	return &runner.MockDaemonSpawner{
+func newEventDrivenVoiceDaemonSpawner(cfg voiceProcessPoolSpawnerConfig) *mockDaemonSpawner {
+	return &mockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, daemonCfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 			if cfg.spawnerErr != nil {
 				return nil, nil, nil, nil, cfg.spawnerErr
@@ -332,7 +333,7 @@ func newEventDrivenVoiceDaemonSpawner(cfg voiceProcessPoolSpawnerConfig) *runner
 				}
 				_, _ = outW.Write([]byte(fmt.Sprintf("{\"event\":\"result\",\"result\":{\"status\":%q,\"response\":%q,\"error\":%q,\"conversation_id\":%q%s%s}}\n", status, cfg.resultResponse, cfg.resultError, sessID, exitPart, usagePart)))
 			}()
-			return inW, outR, errR, runner.NewMockProcessHandle(12345), nil
+			return inW, outR, errR, newMockProcessHandle(12345), nil
 		},
 	}
 }
@@ -382,7 +383,7 @@ func TestWorkerPool_ExecuteVoiceTurn_ProcessPoolSuccessAndMetrics(t *testing.T) 
 func TestWorkerPool_ExecuteVoiceTurn_ProcessPoolDeviceRouting(t *testing.T) {
 	t.Parallel()
 	var spawnedTarget string
-	spawner := &runner.MockDaemonSpawner{
+	spawner := &mockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 			spawnedTarget = cfg.ThreadID
 			inR, inW := io.Pipe()
@@ -397,7 +398,7 @@ func TestWorkerPool_ExecuteVoiceTurn_ProcessPoolDeviceRouting(t *testing.T) {
 					_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"kiosk device reply\",\"conversation_id\":\"550e8400-e29b-41d4-a716-446655440000\"}}\n"))
 				}
 			}()
-			return inW, outR, errR, runner.NewMockProcessHandle(8888), nil
+			return inW, outR, errR, newMockProcessHandle(8888), nil
 		},
 	}
 	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, spawner)
@@ -439,9 +440,9 @@ func TestWorkerPool_ExecuteVoiceTurn_ProcessPoolTranscriptRecovery(t *testing.T)
 
 func TestWorkerPool_Stop_ProcessPoolCloseError(t *testing.T) {
 	t.Parallel()
-	mockHandle := runner.NewMockProcessHandle(99999)
+	mockHandle := newMockProcessHandle(99999)
 	mockHandle.SetKillErr(errors.New("simulated kill process failure"))
-	spawner := &runner.MockDaemonSpawner{
+	spawner := &mockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 			inR, inW := io.Pipe()
 			outR, outW := io.Pipe()

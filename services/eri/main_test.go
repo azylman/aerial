@@ -21,6 +21,7 @@ import (
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/discord"
 	"github.com/azylman/aerial/services/eri/pkg/env"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
@@ -44,12 +45,12 @@ func runHTTP(h http.HandlerFunc, method, target string, body io.Reader, headers 
 }
 
 func TestHandlePromptValidation(t *testing.T) {
-	store := db.NewFakeStore()
+	store := dbtest.NewFakeStore()
 	pool := newTestWorkerPool(store)
 	pool.Start()
 	defer pool.Stop()
 
-	closedStore := db.NewFakeStore()
+	closedStore := dbtest.NewFakeStore()
 	_ = closedStore.Close()
 
 	for _, tc := range []struct {
@@ -128,12 +129,12 @@ func TestHandlePromptValidation(t *testing.T) {
 }
 
 func TestHandleDirectMessage(t *testing.T) {
-	restErrPool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+	restErrPool := queue.New(nil, queue.WorkerPoolConfig{
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			return &discordgo.RESTError{Response: &http.Response{StatusCode: 403}}
 		},
 	})
-	sendErrPool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+	sendErrPool := queue.New(nil, queue.WorkerPoolConfig{
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			return errors.New("cannot send messages to this thread")
 		},
@@ -168,7 +169,7 @@ func TestHandleDirectMessage(t *testing.T) {
 
 	t.Run("delivery success and fallback", func(t *testing.T) {
 		var capturedChannelID, capturedText string
-		handler := handleDirectMessage(queue.NewWorkerPool(queue.WorkerPoolConfig{
+		handler := handleDirectMessage(queue.New(nil, queue.WorkerPoolConfig{
 			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 				capturedChannelID, capturedText = channelID, text
 				return nil
@@ -192,10 +193,10 @@ func TestHandleDirectMessage(t *testing.T) {
 	})
 
 	t.Run("mux route mounting for /discord/message", func(t *testing.T) {
-		pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+		pool := queue.New(nil, queue.WorkerPoolConfig{
 			DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
 		})
-		mux := SetupBrainMuxWithEmbedder(db.NewFakeStore(), pool, nil)
+		mux := SetupBrainMuxWithEmbedder(dbtest.NewFakeStore(), pool, nil)
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/discord/message", strings.NewReader(`{"channel_id":"1542423172400291873","content":"test"}`)))
 		if w.Code != http.StatusOK {
@@ -210,17 +211,17 @@ func TestHandleDirectMessage(t *testing.T) {
 }
 
 func TestHandleStatusWidget(t *testing.T) {
-	restErrPool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+	restErrPool := queue.New(nil, queue.WorkerPoolConfig{
 		WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) {
 			return "", &discordgo.RESTError{Response: &http.Response{StatusCode: 403}}
 		},
 	})
-	sendErrPool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+	sendErrPool := queue.New(nil, queue.WorkerPoolConfig{
 		WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) {
 			return "", errors.New("cannot send messages to this thread")
 		},
 	})
-	failErrPool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+	failErrPool := queue.New(nil, queue.WorkerPoolConfig{
 		WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) {
 			return "", errors.New("database connection reset")
 		},
@@ -259,7 +260,7 @@ func TestHandleStatusWidget(t *testing.T) {
 
 	t.Run("success returns 200 with message_id and delivers widget", func(t *testing.T) {
 		var capturedReq discord.StatusWidgetRequest
-		handler := handleStatusWidget(queue.NewWorkerPool(queue.WorkerPoolConfig{
+		handler := handleStatusWidget(queue.New(nil, queue.WorkerPoolConfig{
 			WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) {
 				capturedReq = req
 				return "created-widget-msg-789", nil
@@ -282,10 +283,10 @@ func TestHandleStatusWidget(t *testing.T) {
 	})
 
 	t.Run("mux route mounting for /discord/widget", func(t *testing.T) {
-		pool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+		pool := queue.New(nil, queue.WorkerPoolConfig{
 			WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) { return "widget-99", nil },
 		})
-		mux := SetupBrainMuxWithEmbedder(db.NewFakeStore(), pool, nil)
+		mux := SetupBrainMuxWithEmbedder(dbtest.NewFakeStore(), pool, nil)
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/discord/widget", strings.NewReader(`{"channel_id":"1542423172400291873","chunks":[{"title":"t"}]}`)))
 		if w.Code != http.StatusOK {
@@ -300,7 +301,7 @@ func TestHandleStatusWidget(t *testing.T) {
 }
 
 func TestHandleTranscripts(t *testing.T) {
-	store := db.NewFakeStore()
+	store := dbtest.NewFakeStore()
 	tmpHome := t.TempDir()
 
 	// 1. Empty dir returns []
@@ -340,7 +341,7 @@ func TestHandleTranscripts(t *testing.T) {
 	}
 
 	// 3. Closed DB error branch (GetExternalConversationID warning branch)
-	closedStore := db.NewFakeStore()
+	closedStore := dbtest.NewFakeStore()
 	_ = closedStore.Close()
 	if w := runHTTP(handleTranscripts(closedStore, brainDir), http.MethodGet, "/transcripts", nil); w.Code != http.StatusOK {
 		t.Errorf("Expected 200 OK on closed DB warning branch, got %d", w.Code)
@@ -362,12 +363,12 @@ func TestHandleTranscripts(t *testing.T) {
 }
 
 func TestHandleTranscriptSearchAndStats(t *testing.T) {
-	fake := db.NewFakeStore()
+	fake := dbtest.NewFakeStore()
 	_ = fake.UpsertSessionSummary(context.Background(), db.SessionSummary{
 		SessionID: "sess-mux-1",
 		Summary:   "Triaged container restart in aerial",
 	})
-	errStore := &errTranscriptStore{FakeStore: db.NewFakeStore()}
+	errStore := &errTranscriptStore{FakeStore: dbtest.NewFakeStore()}
 	embedderCalled := false
 	embedder := func(ctx context.Context, text string) ([]float32, error) {
 		embedderCalled = true
@@ -443,7 +444,7 @@ func TestHandleTranscriptSearchAndStats(t *testing.T) {
 }
 
 type errTranscriptStore struct {
-	*db.FakeStore
+	*dbtest.FakeStore
 }
 
 func (e *errTranscriptStore) GetSessionSyncStates(ctx context.Context) (map[string]db.SessionSyncState, error) {
@@ -463,7 +464,7 @@ func (e *errTranscriptStore) GetTranscriptStepRange(ctx context.Context, session
 }
 
 func TestSchedulesEndpoints(t *testing.T) {
-	store := db.NewFakeStore()
+	store := dbtest.NewFakeStore()
 	now := time.Now().UTC()
 
 	_ = store.CreateCronSchedule(context.Background(), db.CronSchedule{
@@ -549,11 +550,11 @@ func TestSchedulesEndpoints(t *testing.T) {
 		t.Errorf("Expected 405 for POST /schedules/runs, got %d", code)
 	}
 
-	closedStore := db.NewFakeStore()
+	closedStore := dbtest.NewFakeStore()
 	_ = closedStore.Close()
-	storeCronErr := db.NewFakeStore()
+	storeCronErr := dbtest.NewFakeStore()
 	storeCronErr.FailNext("GetAllCronSchedules", errors.New("cron query forced error"))
-	storeOneShotErr := db.NewFakeStore()
+	storeOneShotErr := dbtest.NewFakeStore()
 	storeOneShotErr.FailNext("GetAllOneShotSchedules", errors.New("oneshot query forced error"))
 
 	for _, tc := range []struct {
@@ -589,7 +590,7 @@ func TestSchedulesEndpoints(t *testing.T) {
 }
 
 func TestHandleTasks(t *testing.T) {
-	store := db.NewFakeStore()
+	store := dbtest.NewFakeStore()
 	now := time.Now().UTC()
 	longPrompt := strings.Repeat("A", 600) + " ghp_123456789012345678901234567890123456"
 	_ = store.InsertMessage(context.Background(), db.Message{
@@ -642,7 +643,7 @@ func TestHandleTasks(t *testing.T) {
 		t.Fatalf("expected 405 Method Not Allowed, got %d", code)
 	}
 
-	closedStore := db.NewFakeStore()
+	closedStore := dbtest.NewFakeStore()
 	_ = closedStore.Close()
 	for _, tc := range []struct {
 		name    string
@@ -869,7 +870,7 @@ func TestHandleInternalLLM_And_MemoryRetriever(t *testing.T) {
 }
 
 func TestSetupBrainMux_And_Endpoints(t *testing.T) {
-	store := db.NewFakeStore()
+	store := dbtest.NewFakeStore()
 	pool := newTestWorkerPool(store)
 	tmpHome := t.TempDir()
 	mux := SetupBrainMuxWithEmbedder(store, pool, nil, tmpHome)
@@ -935,7 +936,7 @@ func TestInitializeBrainEnvironment(t *testing.T) {
 		{
 			name: "success fresh and idempotent",
 			setup: func(t *testing.T) *config.Config {
-				return config.NewTestConfig(func(d *config.ConfigData) {
+				return newTestConfig(func(d *config.ConfigData) {
 					d.Model = "gemini-2.5-flash"
 					d.GeminiHomeDir = t.TempDir()
 					d.DataDir = t.TempDir()
@@ -952,7 +953,7 @@ func TestInitializeBrainEnvironment(t *testing.T) {
 				conflict := filepath.Join(tmpDir, ".gemini", "antigravity-cli")
 				_ = os.MkdirAll(filepath.Dir(conflict), 0o755)
 				_ = os.WriteFile(conflict, []byte("file-not-dir"), 0o644)
-				return config.NewTestConfig(func(d *config.ConfigData) {
+				return newTestConfig(func(d *config.ConfigData) {
 					d.DataDir = tmpDir
 					d.GeminiHomeDir = tmpDir
 				})
@@ -989,17 +990,82 @@ func WithSkipEnvironmentSync() ReloadOption {
 	}
 }
 
+func WithStore(store db.Store) BrainAppOption {
+	return func(o *brainAppOptions) {
+		o.store = store
+	}
+}
+
+func WithProcessSpawner(spawner runner.DaemonSpawner) BrainAppOption {
+	return func(o *brainAppOptions) {
+		o.processSpawner = spawner
+	}
+}
+
+func WithHupChannel(hupChan <-chan os.Signal) BrainAppOption {
+	return func(o *brainAppOptions) {
+		o.hupChan = hupChan
+	}
+}
+
+func WithOnReload(fn func(source string)) BrainAppOption {
+	return func(o *brainAppOptions) {
+		o.onReload = fn
+	}
+}
+
+func newTestConfig(mutators ...func(*config.ConfigData)) *config.Config {
+	data := config.DefaultConfigData()
+	for _, m := range mutators {
+		if m != nil {
+			m(data)
+		}
+	}
+	return config.NewFromData(data)
+}
+
+type mockMainProcessHandle struct{ pid int }
+
+func (m *mockMainProcessHandle) Pid() int    { return m.pid }
+func (m *mockMainProcessHandle) Kill() error { return nil }
+func (m *mockMainProcessHandle) Wait() error { return nil }
+
+type mockMainDaemonSpawner struct {
+	SpawnFn func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error)
+}
+
+func newMockMainDaemonSpawner() *mockMainDaemonSpawner { return &mockMainDaemonSpawner{} }
+
+func (m *mockMainDaemonSpawner) Spawn(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+	if m != nil && m.SpawnFn != nil {
+		return m.SpawnFn(ctx, cfg)
+	}
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	errR, errW := io.Pipe()
+	go func() {
+		sessID := cfg.SessionID
+		if sessID == "" || !runner.IsValidUUID(sessID) {
+			sessID = "550e8400-e29b-41d4-a716-446655440000"
+		}
+		_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", sessID)
+		_ = errW.Close()
+		_, _ = io.Copy(io.Discard, inR)
+	}()
+	return inW, outR, errR, &mockMainProcessHandle{pid: 12345}, nil
+}
+
 func TestCreateReloadConfigFunc(t *testing.T) {
 	t.Run("invalid YAML with alert", func(t *testing.T) {
 		s, _ := discordgo.New("Bot mock-token")
-		CreateReloadConfigFunc(config.NewTestConfig(), WithDiscordSession(s), WithReloadSupplier(func(active *config.Config) error {
+		CreateReloadConfigFunc(newTestConfig(), WithDiscordSession(s), WithReloadSupplier(func(active *config.Config) error {
 			return errors.New("simulated invalid YAML error")
 		}), WithSkipEnvironmentSync())("TestReload")
 	})
 
 	t.Run("supplier success updating model", func(t *testing.T) {
 		s, _ := discordgo.New("Bot mock-token")
-		CreateReloadConfigFunc(config.NewTestConfig(), WithDiscordSession(s), WithReloadSupplier(func(active *config.Config) error {
+		CreateReloadConfigFunc(newTestConfig(), WithDiscordSession(s), WithReloadSupplier(func(active *config.Config) error {
 			active.Update(&config.ConfigData{Model: "gemini-2.5-flash"})
 			return nil
 		}), WithSkipEnvironmentSync())("TestReloadSuccess")
@@ -1007,7 +1073,7 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 
 	t.Run("complete success with sync and blocker home error", func(t *testing.T) {
 		tmpDir, tmpData := t.TempDir(), t.TempDir()
-		cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		cfg := newTestConfig(func(d *config.ConfigData) {
 			d.GeminiHomeDir = tmpDir
 			d.DataDir = tmpData
 			d.Model = "gemini-2.5-flash"
@@ -1026,7 +1092,7 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 	})
 
 	t.Run("provisioner error", func(t *testing.T) {
-		cfg := config.NewTestConfig()
+		cfg := newTestConfig()
 		tmpFile := filepath.Join(t.TempDir(), "blocking_file")
 		_ = os.WriteFile(tmpFile, []byte("file"), 0o644)
 		cfg.Update(&config.ConfigData{GeminiHomeDir: tmpFile})
@@ -1034,7 +1100,7 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 	})
 
 	t.Run("with worker pool", func(t *testing.T) {
-		cfg := config.NewTestConfig()
+		cfg := newTestConfig()
 		CreateReloadConfigFunc(cfg, WithSkipEnvironmentSync(), WithReloadSupplier(func(active *config.Config) error { return nil }), WithWorkerPool(queue.New(cfg, queue.WorkerPoolConfig{})))("TestWithWorkerPool")
 	})
 }
@@ -1108,10 +1174,10 @@ func runBrainAppUntilReady(t *testing.T, cfg *config.Config, opts ...BrainAppOpt
 	}
 	var effectiveOpts []BrainAppOption
 	if checkOpts.processSpawner == nil {
-		effectiveOpts = append(effectiveOpts, WithProcessSpawner(runner.NewMockDaemonSpawner()))
+		effectiveOpts = append(effectiveOpts, WithProcessSpawner(newMockMainDaemonSpawner()))
 	}
 	if checkOpts.store == nil {
-		effectiveOpts = append(effectiveOpts, WithStore(db.NewFakeStore()))
+		effectiveOpts = append(effectiveOpts, WithStore(dbtest.NewFakeStore()))
 	}
 	effectiveOpts = append(effectiveOpts, opts...)
 
@@ -1176,7 +1242,7 @@ func TestRunBrainApp_ValidationAndErrors(t *testing.T) {
 	}
 
 	mkCfg := func(home, data, port, dbURL string) *config.Config {
-		return config.NewTestConfig(func(d *config.ConfigData) {
+		return newTestConfig(func(d *config.ConfigData) {
 			d.GeminiHomeDir, d.DataDir, d.Port, d.DatabaseURL = home, data, port, dbURL
 			d.AgyBin, d.Model, d.SystemPrompt = "/bin/true", "gemini-2.5-flash", "test"
 		})
@@ -1213,7 +1279,7 @@ func TestRunBrainApp_ValidationAndErrors(t *testing.T) {
 				cfg = mkCfg(tmpDir, filepath.Join(tmpDir, "data"), "0", "mysql://user:pass@localhost/db")
 			case "invalid_port":
 				cfg = mkCfg(tmpDir, filepath.Join(tmpDir, "data"), "-1", ":memory:")
-				opts = []BrainAppOption{WithStore(db.NewFakeStore())}
+				opts = []BrainAppOption{WithStore(dbtest.NewFakeStore())}
 			}
 
 			err := RunBrainApp(ctx, cfg, opts...)
@@ -1248,7 +1314,7 @@ func TestRunBrainApp_ValidationAndErrors(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		defer cancel()
 
-		err = RunBrainApp(ctx, conflictCfg, WithStore(db.NewFakeStore()))
+		err = RunBrainApp(ctx, conflictCfg, WithStore(dbtest.NewFakeStore()))
 		if err == nil {
 			t.Fatalf("expected error from port conflict, got nil")
 		}
@@ -1267,7 +1333,7 @@ func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
 		tmpDir := t.TempDir()
 		_ = os.MkdirAll(filepath.Join(tmpDir, "data", ".gemini", "config", "skills"), 0o755)
 		_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "config", "skills"), 0o755)
-		cfg := config.NewTestConfig(func(d *config.ConfigData) {
+		cfg := newTestConfig(func(d *config.ConfigData) {
 			d.Port = "0"
 			d.AgyBin = "/bin/true"
 			d.Model = "gemini-2.5-flash"
@@ -1308,9 +1374,9 @@ func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
 		seen := make(map[string]runner.DaemonConfig)
 		allSpawned := make(chan struct{})
 		var once sync.Once
-		baseMock := runner.NewMockDaemonSpawner()
+		baseMock := newMockMainDaemonSpawner()
 
-		trackingSpawner := &runner.MockDaemonSpawner{
+		trackingSpawner := &mockMainDaemonSpawner{
 			SpawnFn: func(ctx context.Context, dCfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 				mu.Lock()
 				seen[dCfg.ThreadID] = dCfg
@@ -1395,10 +1461,11 @@ func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
 	})
 
 	t.Run("DefaultStoreSuccess", func(t *testing.T) {
-		db.RegisterSQLiteTestHook(func(dsn string) (*sql.DB, error) {
+		oldOpen := openDefaultDB
+		openDefaultDB = func(*config.Config) (*sql.DB, error) {
 			return sql.Open("sqlite", ":memory:")
-		})
-		defer db.RegisterSQLiteTestHook(nil)
+		}
+		defer func() { openDefaultDB = oldOpen }()
 
 		_, cfg := newLifecycleCfg(t)
 		_, cancel, wait := runBrainAppUntilReady(t, cfg, WithStore(nil))
@@ -1410,7 +1477,7 @@ func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
 
 	t.Run("ProcessPoolInitErrors", func(t *testing.T) {
 		_, cfg := newLifecycleCfg(t)
-		failingSpawner := &runner.MockDaemonSpawner{
+		failingSpawner := &mockMainDaemonSpawner{
 			SpawnFn: func(ctx context.Context, dCfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 				return nil, nil, nil, nil, errors.New("simulated spawn failure")
 			},
@@ -1425,7 +1492,7 @@ func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
 
 	t.Run("DaemonCloseErrors", func(t *testing.T) {
 		_, cfg := newLifecycleCfg(t)
-		spawner := &runner.MockDaemonSpawner{
+		spawner := &mockMainDaemonSpawner{
 			SpawnFn: func(ctx context.Context, dCfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 				inR, inW := io.Pipe()
 				outR, outW := io.Pipe()
@@ -1458,13 +1525,13 @@ func hasEnv(envs []string, target string) bool {
 
 func TestBrainAppOptions_Coverage(t *testing.T) {
 	var opts brainAppOptions
-	store := db.NewFakeStore()
+	store := dbtest.NewFakeStore()
 	WithStore(store)(&opts)
 	if opts.store != store {
 		t.Errorf("expected store to be set")
 	}
 
-	spawner := runner.NewMockDaemonSpawner()
+	spawner := newMockMainDaemonSpawner()
 	WithProcessSpawner(spawner)(&opts)
 	if opts.processSpawner != spawner {
 		t.Errorf("expected processSpawner to be set")
@@ -1556,7 +1623,7 @@ func (e *flusherErrWriter) WriteHeader(statusCode int) {
 func (e *flusherErrWriter) Flush() {}
 
 func TestHandleVoiceAsk_Validation(t *testing.T) {
-	store := db.NewFakeStore()
+	store := dbtest.NewFakeStore()
 	pool := newTestWorkerPool(store)
 	pool.Start()
 	defer pool.Stop()
@@ -1612,9 +1679,9 @@ func TestHandleVoiceAsk_Validation(t *testing.T) {
 
 func newVoiceHandler(cfg queue.WorkerPoolConfig) (http.HandlerFunc, func()) {
 	if cfg.Store == nil {
-		cfg.Store = db.NewFakeStore()
+		cfg.Store = dbtest.NewFakeStore()
 	}
-	pool := queue.NewWorkerPool(cfg)
+	pool := queue.New(nil, cfg)
 	pool.Start()
 	return handleVoiceAsk(pool), pool.Stop
 }
@@ -1788,7 +1855,7 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	voiceHome := filepath.Join(tmpDir, "voice")
-	spawner := runner.NewMockSpawner()
+	spawner := newMockMainDaemonSpawner()
 
 	mkCfg := func(engine, model, harnessKey, apiKey, tmpl string) *config.Config {
 		cd := &config.ConfigData{
@@ -2087,7 +2154,7 @@ func TestPrewarmProcessPoolsSequentially(t *testing.T) {
 }
 
 func TestHandlePRRegister(t *testing.T) {
-	store := db.NewFakeStore()
+	store := dbtest.NewFakeStore()
 	handler := handlePRRegister(store)
 
 	postPR := func(h http.HandlerFunc, body string) *httptest.ResponseRecorder {
@@ -2190,7 +2257,7 @@ func TestHandlePRRegister(t *testing.T) {
 	// Registration with pool delivers standalone PR widget and updates status_message_id
 	{
 		var deliveredReq discord.StatusWidgetRequest
-		testPool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+		testPool := queue.New(nil, queue.WorkerPoolConfig{
 			WidgetDeliveryFunc: func(r discord.StatusWidgetRequest) (string, error) {
 				deliveredReq = r
 				return "msg-widget-standalone-1", nil
@@ -2234,7 +2301,7 @@ func TestHandlePRRegister(t *testing.T) {
 		}
 
 		var deliveredVanadisReq discord.StatusWidgetRequest
-		testPool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+		testPool := queue.New(nil, queue.WorkerPoolConfig{
 			WidgetDeliveryFunc: func(r discord.StatusWidgetRequest) (string, error) {
 				deliveredVanadisReq = r
 				return "msg-build-widget-1", nil
@@ -2258,13 +2325,13 @@ func TestHandlePRRegister(t *testing.T) {
 
 	// Registration with pool covering warning/fallback branches (empty title, store/delivery errors)
 	{
-		errPool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+		errPool := queue.New(nil, queue.WorkerPoolConfig{
 			WidgetDeliveryFunc: func(r discord.StatusWidgetRequest) (string, error) {
 				return "", errors.New("widget delivery failed")
 			},
 		})
 		errPoolHandler := handlePRRegister(store, errPool)
-		okPool := queue.NewWorkerPool(queue.WorkerPoolConfig{
+		okPool := queue.New(nil, queue.WorkerPoolConfig{
 			WidgetDeliveryFunc: func(r discord.StatusWidgetRequest) (string, error) {
 				return "msg-new-id", nil
 			},

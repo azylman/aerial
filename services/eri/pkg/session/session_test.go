@@ -3,12 +3,63 @@ package session
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+// EnsureSessionDir bootstraps the session directory and transcript files if they do not exist.
+func (m *Manager) EnsureSessionDir(sessionID string) (string, error) {
+	cleanID, ok := m.validSessionID(sessionID)
+	if !ok {
+		return "", fmt.Errorf("sessionID %q is invalid", sessionID)
+	}
+
+	baseDir := m.resolveBaseDir(cleanID)
+	if baseDir == "" {
+		return "", fmt.Errorf("no session roots configured")
+	}
+	sessionDir := filepath.Join(baseDir, cleanID)
+	logsDir := filepath.Join(sessionDir, ".system_generated", "logs")
+
+	if err := os.MkdirAll(logsDir, 0o755); err != nil {
+		return "", fmt.Errorf("failed to create session logs directory: %w", err)
+	}
+
+	for _, name := range []string{"transcript.jsonl", "transcript_full.jsonl"} {
+		filePath := filepath.Join(logsDir, name)
+		f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			return "", fmt.Errorf("failed to ensure %s: %w", name, err)
+		}
+		if closeErr := f.Close(); closeErr != nil {
+			log.Printf("[Session] Warning closing newly created transcript %s: %v", filePath, closeErr)
+		}
+	}
+
+	return sessionDir, nil
+}
+
+// resolveBaseDir locates the appropriate brain base directory for sessions.
+func (m *Manager) resolveBaseDir(sessionID string) string {
+	if m == nil || len(m.roots) == 0 {
+		return ""
+	}
+	for _, targetDir := range m.getTargetDirs(sessionID) {
+		if fi, err := os.Stat(targetDir); err == nil && fi.IsDir() {
+			return filepath.Dir(targetDir)
+		}
+	}
+	for _, root := range m.roots {
+		if fi, err := os.Stat(root); err == nil && fi.IsDir() {
+			return root
+		}
+	}
+	return m.roots[0]
+}
 
 // 1-line positional fixture helpers.
 func writeTranscript(t *testing.T, mgr *Manager, sessionID, filename, content string) string {

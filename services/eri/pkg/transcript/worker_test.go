@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 )
 
 func writeTranscriptFile(t *testing.T, baseDir, sessionID, content string, mtime time.Time) string {
@@ -274,7 +275,7 @@ func TestSyncTranscripts_Scenarios(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
 			tempDir := t.TempDir()
-			store := db.NewFakeStore()
+			store := dbtest.NewFakeStore()
 
 			if tc.priorSummary != nil {
 				if err := store.UpsertSessionSummary(ctx, *tc.priorSummary); err != nil {
@@ -552,7 +553,7 @@ func TestSyncTranscripts_ErrorsAndEdgeCases(t *testing.T) {
 
 			var store db.TranscriptStore
 			if !tc.nilStore {
-				fakeStore := db.NewFakeStore()
+				fakeStore := dbtest.NewFakeStore()
 				if tc.prePopActive {
 					_ = fakeStore.UpsertSessionSummary(context.Background(), db.SessionSummary{
 						SessionID:       "sess-active-err",
@@ -678,7 +679,7 @@ func TestFindTranscriptFile_AlternativeLocations(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	tempDir := t.TempDir()
-	store := db.NewFakeStore()
+	store := dbtest.NewFakeStore()
 
 	// 1. system_generated/logs/transcript.jsonl (without leading dot)
 	sess1 := "sess-nodot"

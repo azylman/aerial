@@ -21,6 +21,20 @@ func (errReader) Read(p []byte) (n int, err error) {
 	return 0, errors.New("simulated read error")
 }
 
+// SetWebhookDispatcher updates the webhook dispatcher on the pool.
+func (p *WorkerPool) SetWebhookDispatcher(d WebhookDispatcher) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if d == nil {
+		d = NewDefaultWebhookDispatcher()
+	}
+	p.webhookDispatcher = d
+	p.cfg.WebhookDispatcher = d
+}
+
 func TestWebhookDispatcher_LifecycleHooks(t *testing.T) {
 	t.Parallel()
 

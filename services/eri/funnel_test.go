@@ -19,6 +19,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/bwmarrin/discordgo"
 )
@@ -54,7 +55,7 @@ func newTestWorkerPool(dbOrStore any) *queue.WorkerPool {
 			s = db.NewSQLStore(v)
 		}
 	}
-	return queue.NewWorkerPool(queue.WorkerPoolConfig{
+	return queue.New(nil, queue.WorkerPoolConfig{
 		Store: s,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			return `{"event":"result","result":{"status":"SUCCESS","response":"mock test response"}}`, "", 0, nil
@@ -453,10 +454,11 @@ channels:
 		t.Errorf("expected chan-threads-555 with allowSummarize=false")
 	}
 
-	clsErr := classifier.New(currentFunnelConfig(), classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+	clsErr := classifier.New(currentFunnelConfig())
+	clsErr.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
 		return "", errors.New("summarizer forced failure")
-	}))
-	pool := queue.New(currentFunnelConfig(), queue.WorkerPoolConfig{Classifier: clsErr, Store: db.NewFakeStore()})
+	}
+	pool := queue.New(currentFunnelConfig(), queue.WorkerPoolConfig{Classifier: clsErr, Store: dbtest.NewFakeStore()})
 	SetFunnelPool(pool)
 	defer SetFunnelPool(nil)
 
@@ -639,7 +641,7 @@ channels:
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	store := db.NewFakeStore()
+	store := dbtest.NewFakeStore()
 	pool := newTestWorkerPool(store)
 	pool.Start()
 	defer pool.Stop()
@@ -806,7 +808,7 @@ channels:
 	}
 
 	// 9. DB insert error during MessageCreate handled cleanly
-	closedStore := db.NewFakeStore()
+	closedStore := dbtest.NewFakeStore()
 	_ = closedStore.Close()
 	poolClosed := newTestWorkerPool(closedStore)
 	sClosed := connectDiscordFunnel(ctx, closedStore, poolClosed, "mock-token-closed-db")
@@ -832,7 +834,7 @@ func TestRunStartupCatchUpSweep_SafeguardsAndCooldown(t *testing.T) {
 	resetFunnelGlobals(t)
 	defer resetFunnelGlobals(t)
 
-	store := db.NewFakeStore()
+	store := dbtest.NewFakeStore()
 	pool := newTestWorkerPool(store)
 
 	// 1. Nil safety
@@ -893,7 +895,7 @@ channels:
     mode: "channel"
     ignore_bots: true
 `)
-	store := db.NewFakeStore()
+	store := dbtest.NewFakeStore()
 	pool := newTestWorkerPool(store)
 	pool.Start()
 	defer pool.Stop()
@@ -957,7 +959,7 @@ channels:
   ignored-ch:
     mode: "ignore"
 `)
-	store := db.NewFakeStore()
+	store := dbtest.NewFakeStore()
 	pool := newTestWorkerPool(store)
 	pool.Start()
 	defer pool.Stop()
@@ -1032,7 +1034,7 @@ channels:
 func TestRunStartupCatchUpSweep_GuildDiscoveryFallbackAndPermissions(t *testing.T) {
 	resetFunnelGlobals(t)
 	defer resetFunnelGlobals(t)
-	store := db.NewFakeStore()
+	store := dbtest.NewFakeStore()
 	pool := newTestWorkerPool(store)
 	pool.Start()
 	defer pool.Stop()
@@ -1072,7 +1074,7 @@ func TestRunStartupCatchUpSweep_GuildDiscoveryFallbackAndPermissions(t *testing.
 func TestRunStartupCatchUpSweep_CircuitBreakerAndStoreErrors(t *testing.T) {
 	resetFunnelGlobals(t)
 	defer resetFunnelGlobals(t)
-	store := db.NewFakeStore()
+	store := dbtest.NewFakeStore()
 	pool := newTestWorkerPool(store)
 	pool.Start()
 	defer pool.Stop()
@@ -1113,7 +1115,7 @@ func TestRunStartupCatchUpSweep_CircuitBreakerAndStoreErrors(t *testing.T) {
 	RunStartupCatchUpSweep(context.Background(), errStore, pool, sErr)
 
 	resetFunnelGlobals(t)
-	closedStore := db.NewFakeStore()
+	closedStore := dbtest.NewFakeStore()
 	_ = closedStore.Close()
 	RunStartupCatchUpSweep(context.Background(), closedStore, pool, sErr)
 }
@@ -1207,7 +1209,7 @@ func TestHandleDiscordReady(t *testing.T) {
 			Discriminator: "0001",
 		},
 	}
-	mockStore := db.NewFakeStore()
+	mockStore := dbtest.NewFakeStore()
 	pool := newTestWorkerPool(mockStore)
 	handleDiscordReady(context.Background(), s, ready, mockStore, pool)
 }

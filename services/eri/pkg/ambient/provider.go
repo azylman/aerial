@@ -154,15 +154,6 @@ func NewProvider(cfg config.AmbientContextConfig, invoker MCPInvoker) (*Provider
 	}, nil
 }
 
-// SetNowFunc overrides the clock function (used primarily in tests).
-func (p *Provider) SetNowFunc(fn func() time.Time) {
-	if fn == nil {
-		p.nowFunc = time.Now
-	} else {
-		p.nowFunc = fn
-	}
-}
-
 func (p *Provider) now() time.Time {
 	return p.nowFunc()
 }

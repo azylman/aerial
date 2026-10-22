@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"path"
 	"regexp"
 	"strconv"
@@ -181,61 +180,6 @@ type AgyUsage struct {
 }
 
 type TokenUsage = AgyUsage
-
-func ParseAgyOutput(stdout string) (*AgyResponse, error) {
-	trimmed := strings.TrimSpace(stdout)
-	if trimmed == "" {
-		return nil, fmt.Errorf("empty output")
-	}
-
-	var legacyResp AgyResponse
-	if err := json.Unmarshal([]byte(trimmed), &legacyResp); err == nil && (legacyResp.Status != "" || legacyResp.Response != "" || legacyResp.ConversationID != "") {
-		return &legacyResp, nil
-	}
-
-	var initConvID string
-	var resultResp *AgyResponse
-	for _, rawLine := range strings.Split(trimmed, "\n") {
-		line := strings.TrimSpace(rawLine)
-		if line == "" {
-			continue
-		}
-		var probe sessionProbe
-		if err := json.Unmarshal([]byte(line), &probe); err != nil {
-			continue
-		}
-		if probe.Event == "init" {
-			if id := probe.extractUUID(); id != "" {
-				initConvID = id
-			}
-		} else if probe.Event == "result" {
-			var res AgyResponse
-			raw := []byte(line)
-			if len(probe.Result) > 0 {
-				raw = probe.Result
-			}
-			if json.Unmarshal(raw, &res) == nil {
-				resultResp = &res
-			}
-			if resultResp != nil && resultResp.ConversationID == "" {
-				resultResp.ConversationID = probe.extractUUID()
-			}
-		} else if id := probe.extractUUID(); id != "" && initConvID == "" {
-			initConvID = id
-		}
-	}
-
-	if resultResp == nil {
-		if err := json.Unmarshal([]byte(trimmed), &legacyResp); err == nil {
-			return &legacyResp, nil
-		}
-		return nil, fmt.Errorf("failed to parse agy output: stream-json missing result event")
-	}
-	if resultResp.ConversationID == "" && initConvID != "" {
-		resultResp.ConversationID = initConvID
-	}
-	return resultResp, nil
-}
 
 type StepToolInfo struct {
 	Name       string             `json:"name,omitempty"`
@@ -417,14 +361,6 @@ type WatchdogOptions struct {
 	StepUpdateHandler StepUpdateHandler
 	TargetID          string
 	ExtraEnv          []string
-}
-
-func DefaultWatchdogOptions(timeoutMinutes int) WatchdogOptions {
-	return WatchdogOptions{
-		InactivityTimeout: 5 * time.Minute,
-		MaxDuration:       time.Duration(timeoutMinutes) * time.Minute,
-		OutputFormat:      "stream-json",
-	}
 }
 
 type RunnerFunc func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)

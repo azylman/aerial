@@ -85,15 +85,6 @@ func scanNonEmptyStrings(rows *sql.Rows) ([]string, error) {
 	return res, rows.Err()
 }
 
-func cloneSlice[T any](src []T) []T {
-	if src == nil {
-		return nil
-	}
-	out := make([]T, len(src))
-	copy(out, src)
-	return out
-}
-
 func NewSQLStore(database *sql.DB) Store {
 	if database == nil {
 		return nil

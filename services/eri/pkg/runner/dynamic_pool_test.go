@@ -11,6 +11,16 @@ import (
 	"time"
 )
 
+// Fingerprint returns the current configuration fingerprint under RLock.
+func (p *DynamicVoicePool) Fingerprint() string {
+	if p == nil {
+		return ""
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.currentKey
+}
+
 type mockVoiceSession struct {
 	sessID, targetKey string
 	sendFn            func(string, *TurnContext) error

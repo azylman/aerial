@@ -129,14 +129,6 @@ func RegisterConfigTokens(cfg *config.Config) {
 	RegisterSensitiveTokens(tokens...)
 }
 
-// ResetSensitiveTokens clears all registered sensitive tokens (primarily for test isolation).
-func ResetSensitiveTokens() {
-	sensitiveTokensMu.Lock()
-	defer sensitiveTokensMu.Unlock()
-	empty := make([]string, 0)
-	sensitiveTokensPtr.Store(&empty)
-}
-
 // sanitizeInternal executes the unified sanitization pipeline with a designated replacement placeholder.
 func sanitizeInternal(input string, placeholder string) string {
 	if input == "" {

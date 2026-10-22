@@ -14,19 +14,6 @@ var (
 	ErrVanadisChunkNotFound = errors.New("vanadis chunk not found")
 )
 
-func normalizeVanadisEffort(effort string) (string, error) {
-	trimmed := strings.ToLower(strings.TrimSpace(effort))
-	if trimmed == "" {
-		return "medium", nil
-	}
-	switch trimmed {
-	case "low", "medium", "high":
-		return trimmed, nil
-	default:
-		return "", fmt.Errorf("invalid vanadis effort %q: must be 'low', 'medium', or 'high'", effort)
-	}
-}
-
 func parsePostgresTextArray(raw string) []string {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" || trimmed == "{}" {
@@ -65,83 +52,6 @@ func parsePostgresTextArray(raw string) []string {
 	}
 	result = append(result, cur.String())
 	return result
-}
-
-func validateAndNormalizeVanadisBuild(build VanadisBuild, chunks []VanadisChunk) (VanadisBuild, []VanadisChunk, error) {
-	buildID := strings.TrimSpace(build.ID)
-	if buildID == "" {
-		return VanadisBuild{}, nil, fmt.Errorf("build id cannot be empty")
-	}
-	threadID := strings.TrimSpace(build.ThreadID)
-	if threadID == "" {
-		return VanadisBuild{}, nil, fmt.Errorf("thread_id cannot be empty")
-	}
-	objective := strings.TrimSpace(build.Objective)
-	if objective == "" {
-		return VanadisBuild{}, nil, fmt.Errorf("objective cannot be empty")
-	}
-	buildTitle := strings.TrimSpace(build.Title)
-	if buildTitle == "" {
-		buildTitle = objective
-	}
-	tier := build.Tier
-	if tier <= 0 {
-		tier = 2
-	}
-	status := strings.TrimSpace(build.Status)
-	if status == "" {
-		status = "running"
-	}
-
-	normBuild := build
-	normBuild.ID, normBuild.ThreadID, normBuild.Objective = buildID, threadID, objective
-	normBuild.Title, normBuild.Tier, normBuild.Status = buildTitle, tier, status
-	normBuild.SharedContext, normBuild.StatusMessageID = strings.TrimSpace(build.SharedContext), strings.TrimSpace(build.StatusMessageID)
-
-	normChunks := make([]VanadisChunk, len(chunks))
-	for i, c := range chunks {
-		cid := strings.TrimSpace(c.ID)
-		if cid == "" {
-			return VanadisBuild{}, nil, fmt.Errorf("chunk[%d] id cannot be empty", i)
-		}
-		if cb := strings.TrimSpace(c.BuildID); cb != "" && cb != buildID {
-			return VanadisBuild{}, nil, fmt.Errorf("chunk[%d] build_id %q does not match build id %q", i, cb, buildID)
-		}
-		title, instructions := strings.TrimSpace(c.Title), strings.TrimSpace(c.Instructions)
-		if title == "" {
-			return VanadisBuild{}, nil, fmt.Errorf("chunk[%d] title cannot be empty", i)
-		}
-		if instructions == "" {
-			return VanadisBuild{}, nil, fmt.Errorf("chunk[%d] instructions cannot be empty", i)
-		}
-		effort, err := normalizeVanadisEffort(c.Effort)
-		if err != nil {
-			return VanadisBuild{}, nil, fmt.Errorf("chunk[%d] %w", i, err)
-		}
-		chunkRepo, cStatus := normalizeRepo(c.Repo), strings.TrimSpace(c.Status)
-		if chunkRepo == "" {
-			chunkRepo = "azylman/aerial"
-		}
-		if cStatus == "" {
-			cStatus = "pending"
-		}
-		files, symbols, criteria := c.TargetFiles, c.TargetSymbols, c.AcceptanceCriteria
-		if files == nil {
-			files = []string{}
-		}
-		if symbols == nil {
-			symbols = []string{}
-		}
-		if criteria == nil {
-			criteria = []string{}
-		}
-
-		normChunks[i] = VanadisChunk{
-			ID: cid, BuildID: buildID, ChunkIndex: c.ChunkIndex, Repo: chunkRepo, Title: title, Instructions: instructions,
-			TargetFiles: files, TargetSymbols: symbols, Effort: effort, AcceptanceCriteria: criteria, Status: cStatus, PRNumber: c.PRNumber, StartedAt: c.StartedAt,
-		}
-	}
-	return normBuild, normChunks, nil
 }
 
 func scanVanadisBuild(scanner interface{ Scan(dest ...any) error }) (VanadisBuild, error) {

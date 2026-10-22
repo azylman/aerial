@@ -15,6 +15,7 @@ import (
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/bwmarrin/discordgo"
 )
@@ -79,9 +80,9 @@ func newTestConfig() *config.Config {
 	return config.NewFromData(config.DefaultConfigData())
 }
 
-func setupTestStore(t *testing.T) *db.FakeStore {
+func setupTestStore(t *testing.T) *dbtest.FakeStore {
 	t.Helper()
-	return db.NewFakeStore()
+	return dbtest.NewFakeStore()
 }
 
 type mockStoreWrapper struct {

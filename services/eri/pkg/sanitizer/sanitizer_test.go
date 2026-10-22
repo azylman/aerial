@@ -7,6 +7,14 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/config"
 )
 
+// ResetSensitiveTokens clears all registered sensitive tokens (primarily for test isolation).
+func ResetSensitiveTokens() {
+	sensitiveTokensMu.Lock()
+	defer sensitiveTokensMu.Unlock()
+	empty := make([]string, 0)
+	sensitiveTokensPtr.Store(&empty)
+}
+
 func TestSanitizer_RegisterConfigTokens(t *testing.T) {
 	ResetSensitiveTokens()
 	cfg := config.NewFromData(&config.ConfigData{

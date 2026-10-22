@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -406,28 +405,7 @@ func TestScheduleLifecycle(t *testing.T) {
 }
 
 func TestVectorAndArrayHelpers(t *testing.T) {
-	// 1. Table-driven cosineSimilarity
-	simTests := []struct {
-		name     string
-		a, b     []float32
-		expected float64
-	}{
-		{name: "both_nil", a: nil, b: nil, expected: 0.0},
-		{name: "one_empty", a: []float32{}, b: []float32{1.0}, expected: 0.0},
-		{name: "mismatched_len", a: []float32{1.0}, b: []float32{1.0, 2.0}, expected: 0.0},
-		{name: "zero_vector", a: []float32{0.0, 0.0}, b: []float32{1.0, 1.0}, expected: 0.0},
-		{name: "identical", a: []float32{1.0, 0.0}, b: []float32{1.0, 0.0}, expected: 1.0},
-	}
-	for _, tc := range simTests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := cosineSimilarity(tc.a, tc.b)
-			if math.Abs(got-tc.expected) > 0.001 {
-				t.Errorf("cosineSimilarity() = %f, want %f", got, tc.expected)
-			}
-		})
-	}
-
-	// 2. Table-driven parsePostgresTextArray
+	// Table-driven parsePostgresTextArray
 	arrTests := []struct {
 		name     string
 		input    string

@@ -23,8 +23,6 @@ var (
 	postgresRetryBase   = 500 * time.Millisecond
 )
 
-func RegisterSQLiteTestHook(fn func(string) (*sql.DB, error)) { sqliteTestInitHook = fn }
-
 func isPostgres(database DBTX) (isPg bool) {
 	if database == nil {
 		return false

@@ -15,6 +15,41 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/config"
 )
 
+func (p *Provisioner) SetCustomSkillsDir(dir string) { p.customSkillsDir = dir }
+func (p *Provisioner) SetSuperpowersDir(dir string)  { p.superpowersDir = dir }
+func (p *Provisioner) SetAgentsSkillsDir(dir string) { p.agentsSkillsDir = dir }
+func (p *Provisioner) SetAerialRulesDir(dir string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.aerialRulesDir = dir
+}
+
+func (p *Provisioner) SetConfigRulesDir(dir string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.configRulesDir = dir
+}
+
+func (p *Provisioner) SetHooksDir(dir string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.hooksDir = dir
+}
+
+func newTestConfig(mutators ...func(*config.ConfigData)) *config.Config {
+	data := config.DefaultConfigData()
+	data.DatabaseURL, data.Port = ":memory:", "0"
+	data.DiscordToken, data.APIKey, data.HarnessAPIKey, data.GitHubPAT = "", "", "", ""
+	data.GeminiHomeDir = filepath.Join(os.TempDir(), "aerial-test-gemini")
+	data.DataDir = filepath.Join(os.TempDir(), "aerial-test-data")
+	for _, fn := range mutators {
+		if fn != nil {
+			fn(data)
+		}
+	}
+	return config.NewFromData(data)
+}
+
 func writeTestFile(t *testing.T, path, content string) string {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -151,7 +186,7 @@ func TestProvisioner_InitAndGetters(t *testing.T) {
 			}
 
 			if tc.expectedHome == "/custom/gemini" {
-				cfg := config.NewTestConfig(func(c *config.ConfigData) {
+				cfg := newTestConfig(func(c *config.ConfigData) {
 					c.GeminiHomeDir = "/custom/gemini"
 					c.DataDir = "/custom/data"
 				})
@@ -219,7 +254,7 @@ func TestSync_EndToEndAndIsolation(t *testing.T) {
 
 			var cfg *config.Config
 			if tc.withActiveCfg {
-				cfg = config.NewTestConfig(func(c *config.ConfigData) {
+				cfg = newTestConfig(func(c *config.ConfigData) {
 					c.APIKey = "test-key"
 					c.Model = "gemini-2.5-pro"
 					c.SystemPrompt = "Custom instructions"
@@ -857,7 +892,7 @@ func TestMCPProvisioning(t *testing.T) {
 			tmpData := t.TempDir()
 			p := New(tmpHome, tmpData)
 
-			cfg := config.NewTestConfig(func(c *config.ConfigData) {
+			cfg := newTestConfig(func(c *config.ConfigData) {
 				if tc.withPAT {
 					c.GitHubPAT = "ghp_12345678901234567890"
 				}

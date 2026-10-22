@@ -1375,12 +1375,6 @@ func WithWorkerPool(pool *queue.WorkerPool) ReloadOption {
 	}
 }
 
-func WithOnReloadCallback(fn func(source string)) ReloadOption {
-	return func(o *reloadConfigOptions) {
-		o.onReload = fn
-	}
-}
-
 func CreateReloadConfigFunc(cfg *config.Config, opts ...ReloadOption) func(source string) {
 	options := &reloadConfigOptions{
 		reloadSupplier: config.Reload,
@@ -1454,34 +1448,6 @@ type brainAppOptions struct {
 	processSpawner runner.DaemonSpawner
 	hupChan        <-chan os.Signal
 	onReload       func(source string)
-}
-
-// WithStore allows injecting a custom Store implementation (e.g. db.FakeStore for tests).
-func WithStore(store db.Store) BrainAppOption {
-	return func(o *brainAppOptions) {
-		o.store = store
-	}
-}
-
-// WithProcessSpawner allows injecting a custom DaemonSpawner (e.g. runner.NewMockDaemonSpawner for tests).
-func WithProcessSpawner(spawner runner.DaemonSpawner) BrainAppOption {
-	return func(o *brainAppOptions) {
-		o.processSpawner = spawner
-	}
-}
-
-// WithHupChannel allows injecting a signal channel for testing SIGHUP reload behavior without POSIX signal broadcasts.
-func WithHupChannel(hupChan <-chan os.Signal) BrainAppOption {
-	return func(o *brainAppOptions) {
-		o.hupChan = hupChan
-	}
-}
-
-// WithOnReload allows injecting a callback invoked when configuration reload completes (useful for event-driven tests).
-func WithOnReload(fn func(source string)) BrainAppOption {
-	return func(o *brainAppOptions) {
-		o.onReload = fn
-	}
 }
 
 func extractMCPServers(cur *config.ConfigData, includeDiscord bool) []runner.MCPServerConfig {
@@ -1764,7 +1730,10 @@ func PrewarmProcessPoolsSequentially(ctx context.Context, pools ...runner.AgentP
 	}()
 }
 
-var onServerReady func(addr string)
+var (
+	onServerReady func(addr string)
+	openDefaultDB = db.New
+)
 
 func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption) error {
 	if cfg == nil {
@@ -1804,7 +1773,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	if appOpts.store != nil {
 		store = appOpts.store
 	} else {
-		database, err := db.New(cfg)
+		database, err := openDefaultDB(cfg)
 		if err != nil {
 			return fmt.Errorf("failed to initialize database: %w", err)
 		}
@@ -1966,7 +1935,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	var reloadOpts []ReloadOption
 	reloadOpts = append(reloadOpts, WithDiscordSession(dgSession), WithProvisioner(provisioner), WithWorkerPool(pool))
 	if appOpts.onReload != nil {
-		reloadOpts = append(reloadOpts, WithOnReloadCallback(appOpts.onReload))
+		reloadOpts = append(reloadOpts, func(o *reloadConfigOptions) { o.onReload = appOpts.onReload })
 	}
 	reloadConfig := CreateReloadConfigFunc(cfg, reloadOpts...)
 

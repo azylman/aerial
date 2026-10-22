@@ -26,6 +26,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
 	"github.com/azylman/aerial/services/eri/pkg/discord"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
@@ -371,9 +372,10 @@ func TestQueueChannelPolicyIgnoredAndDefaultDenyMatrix(t *testing.T) {
 
 			var cls *classifier.Classifier
 			if tc.classifierConfidence > 0 {
-				cls = classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+				cls = classifier.New(nil)
+				cls.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
 					return fmt.Sprintf(`{"confidence": %.2f, "reason": "test classification"}`, tc.classifierConfidence), nil
-				}))
+				}
 			}
 
 			cfg := WorkerPoolConfig{
@@ -733,11 +735,12 @@ func TestWorkerPoolShutdown_PreservationMatrix(t *testing.T) {
 
 			var cls *classifier.Classifier
 			if tc.blockClassifierCtx {
-				cls = classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+				cls = classifier.New(nil)
+				cls.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
 					once.Do(func() { close(stageStarted) })
 					<-ctx.Done()
 					return "", ctx.Err()
-				}))
+				}
 			}
 
 			cfg := WorkerPoolConfig{
@@ -1864,10 +1867,12 @@ func runWakeHookEval(t *testing.T, hookResp *WakeResponse, hookErr error, timeou
 	var classifierCalled, hookCalled bool
 	var cls *classifier.Classifier
 	if classifierResp != "" {
-		cls = classifier.NewClassifier(classifier.WithModel("test-flash"), classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+		cls = classifier.New(nil)
+		cls.Model = "test-flash"
+		cls.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
 			classifierCalled = true
 			return classifierResp, nil
-		}))
+		}
 	}
 	var capturedReq *WakeRequest
 	pool := NewWorkerPool(WorkerPoolConfig{Store: store, Classifier: cls, WebhookDispatcher: &mockWebhookDispatcher{callWakeHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *WakeRequest) (*WakeResponse, error) {
@@ -2435,7 +2440,7 @@ func runSessionRotationCase(t *testing.T, tc sessionRotationCase) {
 	sessMgr := session.New(tmpDir, "")
 
 	sessionID := "sess-" + strings.ToLower(tc.name)
-	sessDir, _ := sessMgr.EnsureSessionDir(sessionID)
+	sessDir, _ := ensureTestSessionDir(sessMgr, sessionID)
 	tPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
 
 	if tc.saveInitialSession {
@@ -2667,7 +2672,7 @@ func TestWorkerPool_ProcessPoolWiringAndTurnRouting(t *testing.T) {
 				return
 			}
 			if tc.interchangeable {
-				spawner := runner.NewMockDaemonSpawner()
+				spawner := newMockDaemonSpawner()
 				u1 := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, spawner)
 				defer func() { _ = u1.Close() }()
 				i1 := runner.NewInterchangeablePool(u1, runner.InterchangeablePoolConfig{WorkerCount: 2})
@@ -2684,12 +2689,12 @@ func TestWorkerPool_ProcessPoolWiringAndTurnRouting(t *testing.T) {
 				return
 			}
 			if tc.cleanAllThree {
-				pPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, runner.NewMockSpawner())
+				pPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, newMockSpawner())
 				defer func() { _ = pPool.Close() }()
-				lSpawner := runner.NewMockSpawner()
+				lSpawner := newMockSpawner()
 				lPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lSpawner)
 				defer func() { _ = lPool.Close() }()
-				vPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-2.5-flash"}, runner.NewMockSpawner())
+				vPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-2.5-flash"}, newMockSpawner())
 				defer func() { _ = vPool.Close() }()
 				pool := NewWorkerPool(WorkerPoolConfig{ProcessPool: pPool, LowEffortProcessPool: lPool, VoiceProcessPool: vPool})
 				_, _ = pool.cfg.LLMFunc(context.Background(), "", "summarize")
@@ -2701,20 +2706,21 @@ func TestWorkerPool_ProcessPoolWiringAndTurnRouting(t *testing.T) {
 				return
 			}
 			if tc.reconcilePrewarmed {
-				vPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-2.5-flash", PrewarmedTargets: tc.prewarmedTargets}, runner.NewMockDaemonSpawner())
+				vPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-2.5-flash", PrewarmedTargets: tc.prewarmedTargets}, newMockDaemonSpawner())
 				defer func() { _ = vPool.Close() }()
-				appCfg := config.NewTestConfig(func(d *config.ConfigData) { d.Voice.PrewarmedTargets = tc.expectedVoiceTargets })
+				appCfg := newTestConfig(func(d *config.ConfigData) { d.Voice.PrewarmedTargets = tc.expectedVoiceTargets })
 				pool := New(appCfg, WorkerPoolConfig{VoiceProcessPool: vPool})
 				defer pool.Stop()
 				pool.MarkDirty()
 				vPool.WaitBackground()
 				targets := vPool.PrewarmedTargets()
-				if len(targets) != len(tc.expectedVoiceTargets) || targets[0] != tc.expectedVoiceTargets[0] || !vPool.HasDaemon(tc.expectedVoiceTargets[0]) {
+				_, hasDaemon := vPool.Get(tc.expectedVoiceTargets[0])
+				if len(targets) != len(tc.expectedVoiceTargets) || targets[0] != tc.expectedVoiceTargets[0] || !hasDaemon {
 					t.Fatalf("prewarmed targets mismatch: %v", targets)
 				}
 				return
 			}
-			mockSpawner := runner.NewMockDaemonSpawner()
+			mockSpawner := newMockDaemonSpawner()
 			var unifiedPool, voicePool runner.AgentPool
 			if tc.withProcessPool {
 				up := runner.NewUnifiedProcessPool(runner.PoolConfig{PrewarmedTargets: tc.prewarmedTargets, DefaultModel: "gemini-2.5-flash"}, mockSpawner)
@@ -2811,7 +2817,7 @@ func TestWorkerPool_CheckUnrotatedSessions_Scenarios(t *testing.T) {
 			if tc.storeErr != nil {
 				store = &mockErrSessionStore{findErr: tc.storeErr}
 			} else {
-				fake := db.NewFakeStore()
+				fake := dbtest.NewFakeStore()
 				defer func() { _ = fake.Close() }()
 				store = fake
 				for i, turns := range tc.sessionTurns {
@@ -2848,7 +2854,7 @@ func TestWorkerPool_CheckUnrotatedSessions_Scenarios(t *testing.T) {
 
 func TestWorkerPool_CheckUnrotatedSessions_DeduplicationAndPruning(t *testing.T) {
 	t.Parallel()
-	fake := db.NewFakeStore()
+	fake := dbtest.NewFakeStore()
 	defer func() { _ = fake.Close() }()
 	ctx := context.Background()
 	var mu sync.Mutex
@@ -2922,7 +2928,7 @@ func TestWorkerPool_CheckUnrotatedSessions_DeduplicationAndPruning(t *testing.T)
 
 func TestWorkerPool_MaintenanceTicker_FiresCheck(t *testing.T) {
 	t.Parallel()
-	fake := db.NewFakeStore()
+	fake := dbtest.NewFakeStore()
 	defer func() { _ = fake.Close() }()
 	ctx := context.Background()
 	_ = fake.SaveSessionID(ctx, "th-ticker-test", "sess-ticker")
@@ -2990,7 +2996,7 @@ func TestResolveStore(t *testing.T) {
 	}{
 		{"nil", nil, true},
 		{"str", "unsupported", true},
-		{"typed_nil_fake", (*db.FakeStore)(nil), true},
+		{"typed_nil_fake", (*dbtest.FakeStore)(nil), true},
 		{"typed_nil_sql", (*db.SQLStore)(nil), true},
 		{"typed_nil_db", (*sql.DB)(nil), true},
 		{"valid_fake", fake, false},

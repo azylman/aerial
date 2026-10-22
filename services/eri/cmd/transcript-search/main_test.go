@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/transcript"
 )
 
@@ -385,7 +386,7 @@ func TestRunCLI_HTTPGet(t *testing.T) {
 	})
 
 	t.Run("DirectDBSuccessWithMock", func(t *testing.T) {
-		fake := db.NewFakeStore()
+		fake := dbtest.NewFakeStore()
 		_ = fake.UpsertSessionSummary(context.Background(), db.SessionSummary{SessionID: "sess-direct"})
 		_ = fake.BatchInsertTranscriptSteps(context.Background(), []db.TranscriptStep{
 			{SessionID: "sess-direct", StepIndex: 1, Content: "direct step content", CreatedAt: now},
@@ -552,7 +553,7 @@ func TestRunCLI_HTTPSearch(t *testing.T) {
 		oldFn := newDirectStoreFn
 		defer func() { newDirectStoreFn = oldFn }()
 
-		fake := db.NewFakeStore()
+		fake := dbtest.NewFakeStore()
 		_ = fake.UpsertSessionSummary(context.Background(), db.SessionSummary{
 			SessionID: "sess-direct-1",
 			Summary:   "Direct DB matched session",
@@ -812,7 +813,7 @@ func TestDirectStoreAndRunCLIEdges(t *testing.T) {
 		closedCalled := false
 		newDirectStoreFn = func(pgURL string) (db.Store, func(), error) {
 			calledWithURL = pgURL
-			fake := db.NewFakeStore()
+			fake := dbtest.NewFakeStore()
 			return fake, func() { closedCalled = true }, nil
 		}
 
@@ -846,7 +847,7 @@ func TestDirectStoreAndRunCLIEdges(t *testing.T) {
 		closedCalled := false
 		newDirectStoreFn = func(pgURL string) (db.Store, func(), error) {
 			calledWithURL = pgURL
-			fake := db.NewFakeStore()
+			fake := dbtest.NewFakeStore()
 			return fake, func() { closedCalled = true }, nil
 		}
 

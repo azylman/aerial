@@ -10,6 +10,20 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
 
+// WithStatusInterval sets a custom ticker flush interval.
+func WithStatusInterval(interval time.Duration) StatusUpdaterOption {
+	return func(u *StatusUpdater) {
+		if interval > 0 {
+			u.tickerInterval = interval
+		}
+	}
+}
+
+// WithStatusDebounce sets a custom initial debounce holdoff duration.
+func WithStatusDebounce(debounce time.Duration) StatusUpdaterOption {
+	return func(u *StatusUpdater) { u.debounceDelay = debounce }
+}
+
 func TestFormatToolStatus(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

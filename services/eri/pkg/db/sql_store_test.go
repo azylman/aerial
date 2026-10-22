@@ -35,9 +35,6 @@ func TestSQLStoreUnavailable(t *testing.T) {
 	assertStoreUnavailable(t, nilStore)
 	assertStoreUnavailable(t, &SQLStore{db: nil})
 
-	if cloneSlice[int](nil) != nil || len(cloneSlice([]int{1, 2, 3})) != 3 {
-		t.Errorf("unexpected cloneSlice results")
-	}
 	if strs, err := scanNonEmptyStrings(nil); err != nil || strs != nil {
 		t.Errorf("expected (nil, nil) for scanNonEmptyStrings(nil)")
 	}

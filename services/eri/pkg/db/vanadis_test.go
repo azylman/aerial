@@ -176,100 +176,6 @@ func TestVanadis_StoreParity(t *testing.T) {
 		seedVanadisBuildSQLite(t, store, titledBuild, []VanadisChunk{runningChunk})
 		testVanadisReadAndLifecycle(t, store, explicitStart)
 	})
-
-	t.Run("FakeStore", func(t *testing.T) {
-		store := NewFakeStore()
-		ctx := context.Background()
-		if err := store.CreateVanadisBuild(ctx, validBuild, chunks); err != nil {
-			t.Fatalf("CreateVanadisBuild failed: %v", err)
-		}
-		if err := store.CreateVanadisBuild(ctx, validBuild, nil); err == nil {
-			t.Error("expected error on duplicate build ID")
-		}
-		if err := store.CreateVanadisBuild(ctx, VanadisBuild{ID: "build-dup", ThreadID: "1555405874565091380", Objective: "obj", Tier: 3, Status: "queued"}, []VanadisChunk{validChunk}); err == nil {
-			t.Error("expected error on duplicate chunk ID")
-		}
-		if err := store.CreateVanadisBuild(ctx, titledBuild, []VanadisChunk{runningChunk}); err != nil {
-			t.Fatalf("CreateVanadisBuild with explicit Title failed: %v", err)
-		}
-		testVanadisReadAndLifecycle(t, store, explicitStart)
-		if err := store.CreateVanadisBuild(ctx, VanadisBuild{ID: "b-dup-idx", ThreadID: "123", Objective: "obj"}, []VanadisChunk{
-			{ID: "c-1", ChunkIndex: 0, Title: "t1", Instructions: "i1"},
-			{ID: "c-2", ChunkIndex: 0, Title: "t2", Instructions: "i2"},
-		}); err == nil {
-			t.Error("expected error on duplicate chunk_index")
-		}
-	})
-}
-
-func TestVanadis_Validation(t *testing.T) {
-	store := NewFakeStore()
-	ctx := context.Background()
-	validBuild := VanadisBuild{ID: "b1", ThreadID: "t1", Objective: "obj"}
-
-	for _, tc := range []struct {
-		name   string
-		build  VanadisBuild
-		chunks []VanadisChunk
-	}{
-		{"empty_build_id", VanadisBuild{ID: "", ThreadID: "123", Objective: "obj"}, nil},
-		{"empty_thread_id", VanadisBuild{ID: "b1", ThreadID: "", Objective: "obj"}, nil},
-		{"empty_objective", VanadisBuild{ID: "b1", ThreadID: "123", Objective: ""}, nil},
-		{"empty_chunk_id", validBuild, []VanadisChunk{{ID: "", Title: "t", Instructions: "i"}}},
-		{"mismatched_chunk_build_id", validBuild, []VanadisChunk{{ID: "c1", BuildID: "other-build", Title: "t", Instructions: "i"}}},
-		{"empty_chunk_title", validBuild, []VanadisChunk{{ID: "c1", Title: "", Instructions: "i"}}},
-		{"empty_chunk_instructions", validBuild, []VanadisChunk{{ID: "c1", Title: "t", Instructions: ""}}},
-		{"invalid_chunk_effort", validBuild, []VanadisChunk{{ID: "c1", Title: "t", Instructions: "i", Effort: "ultra"}}},
-		{"numeric_chunk_effort", validBuild, []VanadisChunk{{ID: "c1", Title: "t", Instructions: "i", Effort: "10"}}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if err := store.CreateVanadisBuild(ctx, tc.build, tc.chunks); err == nil {
-				t.Errorf("[%s] expected validation error", tc.name)
-			}
-		})
-	}
-}
-
-func TestVanadis_FakeStore_FailuresAndClosed(t *testing.T) {
-	simErr := errors.New("simulated error")
-	for _, op := range []string{"CreateVanadisBuild", "GetVanadisBuild", "GetVanadisChunk", "AttachVanadisChunkPR", "UpdateVanadisBuildStatusMessageID"} {
-		t.Run(op, func(t *testing.T) {
-			store := NewFakeStore()
-			ctx := context.Background()
-			store.FailNext(op, simErr)
-			var err error
-			switch op {
-			case "CreateVanadisBuild":
-				err = store.CreateVanadisBuild(ctx, VanadisBuild{}, nil)
-			case "GetVanadisBuild":
-				_, _, err = store.GetVanadisBuild(ctx, "b1")
-			case "GetVanadisChunk":
-				_, err = store.GetVanadisChunk(ctx, "c1")
-			case "AttachVanadisChunkPR":
-				err = store.AttachVanadisChunkPR(ctx, "c1", 1)
-			case "UpdateVanadisBuildStatusMessageID":
-				err = store.UpdateVanadisBuildStatusMessageID(ctx, "b1", "m")
-			}
-			if !errors.Is(err, simErr) {
-				t.Fatalf("expected %v, got %v", simErr, err)
-			}
-		})
-	}
-
-	closed := NewFakeStore()
-	_ = closed.Close()
-	ctx := context.Background()
-	for _, err := range []error{
-		closed.CreateVanadisBuild(ctx, VanadisBuild{}, nil),
-		c2(closed.GetVanadisBuild(ctx, "b1")),
-		c1(closed.GetVanadisChunk(ctx, "c1")),
-		closed.AttachVanadisChunkPR(ctx, "c1", 1),
-		closed.UpdateVanadisBuildStatusMessageID(ctx, "b1", "m"),
-	} {
-		if !errors.Is(err, sql.ErrConnDone) {
-			t.Errorf("expected ErrConnDone, got %v", err)
-		}
-	}
 }
 
 func TestVanadis_SQLStore_NilAndClosedBranches(t *testing.T) {
@@ -318,32 +224,6 @@ func TestParsePostgresTextArrayEdgeCases(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := parsePostgresTextArray(tc.in); !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("parsePostgresTextArray(%q) = %#v, want %#v", tc.in, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestNormalizeVanadisEffort(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		in   string
-		want string
-		err  bool
-	}{
-		{"empty", "", "medium", false},
-		{"whitespace", "   ", "medium", false},
-		{"low", "low", "low", false},
-		{"LOW", "LOW", "low", false},
-		{"medium_padded", "  Medium  ", "medium", false},
-		{"high", "high", "high", false},
-		{"HIGH", "HIGH", "high", false},
-		{"invalid", "invalid", "", true},
-		{"unknown", "unknown", "", true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := normalizeVanadisEffort(tc.in)
-			if (err != nil) != tc.err || got != tc.want {
-				t.Errorf("normalizeVanadisEffort(%q) = (%q, %v), want (%q, err=%v)", tc.in, got, err, tc.want, tc.err)
 			}
 		})
 	}

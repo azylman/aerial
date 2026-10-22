@@ -25,11 +25,9 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 	RecordThreadCreated("created")
 	RecordThreadTitleDuration("success", "gemini-2.5-flash", 150*time.Millisecond)
 	RecordEmbedding("nomic-embed-text", "query", "success", 30*time.Millisecond)
-	RecordFactExtraction("extracted", 800*time.Millisecond)
 	RecordDBQuery("insert_message", "success", 5*time.Millisecond)
 	RecordHTTPRequest("/prompt", "POST", "200", 15*time.Millisecond)
 	RecordChannelHistoryFetch("discord_api", "success", 150*time.Millisecond, 15)
-	RecordFallbackNotification("session_reset", "dynamic", 600*time.Millisecond)
 	RecordWebhookDispatch("on_wake", "success", 25*time.Millisecond)
 	RecordSessionRotation("pre_flight", "channel", "turns")
 	RecordYieldTrap("resumed", "stderr_signature", "gemini-2.5-pro")
@@ -93,8 +91,6 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 		"aerial_brain_memory_search_duration_seconds",
 		"aerial_brain_embeddings_generated_total",
 		"aerial_brain_embedding_duration_seconds",
-		"aerial_brain_facts_extracted_total",
-		"aerial_brain_fact_extraction_duration_seconds",
 		"aerial_brain_db_query_duration_seconds",
 		"aerial_brain_http_requests_total",
 		"aerial_brain_http_request_duration_seconds",
@@ -102,8 +98,6 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 		"aerial_brain_channel_history_fetches_total",
 		"aerial_brain_channel_history_fetch_duration_seconds",
 		"aerial_brain_channel_history_messages_count",
-		"aerial_brain_fallback_notifications_total",
-		"aerial_brain_fallback_notification_duration_seconds",
 		"aerial_brain_config_reloads_total",
 		"aerial_brain_webhooks_dispatched_total",
 		"aerial_brain_webhook_duration_seconds",
@@ -133,11 +127,9 @@ func TestMetricsDefaultFallbackBranches(t *testing.T) {
 	RecordThreadCreated("")
 	RecordThreadTitleDuration("", "", 10*time.Millisecond)
 	RecordEmbedding("", "", "", 10*time.Millisecond)
-	RecordFactExtraction("", 10*time.Millisecond)
 	RecordDBQuery("", "", 10*time.Millisecond)
 	RecordHTTPRequest("", "", "", 10*time.Millisecond)
 	RecordChannelHistoryFetch("", "", 10*time.Millisecond, 0)
-	RecordFallbackNotification("", "", 10*time.Millisecond)
 	RecordWebhookDispatch("", "", 10*time.Millisecond)
 	RecordSessionRotation("", "", "")
 	RecordYieldTrap("", "", "")

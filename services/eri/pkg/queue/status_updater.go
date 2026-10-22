@@ -88,20 +88,6 @@ type StatusUpdater struct {
 // StatusUpdaterOption configures a StatusUpdater instance.
 type StatusUpdaterOption func(*StatusUpdater)
 
-// WithStatusInterval sets a custom ticker flush interval.
-func WithStatusInterval(interval time.Duration) StatusUpdaterOption {
-	return func(u *StatusUpdater) {
-		if interval > 0 {
-			u.tickerInterval = interval
-		}
-	}
-}
-
-// WithStatusDebounce sets a custom initial debounce holdoff duration.
-func WithStatusDebounce(debounce time.Duration) StatusUpdaterOption {
-	return func(u *StatusUpdater) { u.debounceDelay = debounce }
-}
-
 // NewStatusUpdater constructs a thread status updater.
 func NewStatusUpdater(s *discordgo.Session, threadID string, enabled bool, opts ...StatusUpdaterOption) *StatusUpdater {
 	u := &StatusUpdater{

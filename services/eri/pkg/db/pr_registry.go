@@ -11,7 +11,7 @@ import (
 
 var ErrPRNotFound = errors.New("pr record not found")
 
-func normalizeRepo(repo string) string {
+func NormalizeRepo(repo string) string {
 	repo = strings.TrimSpace(repo)
 	if repo == "" {
 		return ""
@@ -22,8 +22,8 @@ func normalizeRepo(repo string) string {
 	return repo
 }
 
-func validateAndNormalizeUpsertPR(record PRRecord) (PRRecord, error) {
-	repo := normalizeRepo(record.Repo)
+func ValidateAndNormalizeUpsertPR(record PRRecord) (PRRecord, error) {
+	repo := NormalizeRepo(record.Repo)
 	if repo == "" {
 		return PRRecord{}, fmt.Errorf("repo cannot be empty")
 	}
@@ -58,7 +58,7 @@ func validateAndNormalizeUpsertPR(record PRRecord) (PRRecord, error) {
 
 // UpsertPR inserts or updates a Pull Request tracking record.
 func (s *SQLStore) UpsertPR(ctx context.Context, record PRRecord) error {
-	norm, err := validateAndNormalizeUpsertPR(record)
+	norm, err := ValidateAndNormalizeUpsertPR(record)
 	if err != nil {
 		return err
 	}
@@ -74,7 +74,7 @@ func (s *SQLStore) GetPRByNumber(ctx context.Context, repo string, prNumber int)
 	if err := s.checkDB(); err != nil {
 		return nil, err
 	}
-	repo = normalizeRepo(repo)
+	repo = NormalizeRepo(repo)
 	if repo == "" {
 		return nil, fmt.Errorf("repo cannot be empty")
 	}
@@ -95,7 +95,7 @@ func (s *SQLStore) GetPRByNumber(ctx context.Context, repo string, prNumber int)
 
 // UpdatePRStatusMessageID updates the status_message_id of a PR in pr_registry.
 func (s *SQLStore) UpdatePRStatusMessageID(ctx context.Context, repo string, prNumber int, messageID string) error {
-	repo = normalizeRepo(repo)
+	repo = NormalizeRepo(repo)
 	if repo == "" {
 		return fmt.Errorf("repo cannot be empty")
 	}

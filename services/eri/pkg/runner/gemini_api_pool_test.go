@@ -16,6 +16,8 @@ import (
 	"time"
 )
 
+func (s *GeminiAPISession) TargetKey() string { return s.targetKey }
+
 func TestGeminiAPIInterfaces_Satisfaction(t *testing.T) {
 	t.Parallel()
 

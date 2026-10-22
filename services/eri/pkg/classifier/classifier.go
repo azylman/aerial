@@ -113,14 +113,6 @@ func WithProcessPool(pool EphemeralProcessPool) Option {
 	}
 }
 
-// WithLLMFunc sets the LLM invocation function.
-func WithLLMFunc(fn func(ctx context.Context, model, prompt string) (string, error)) Option {
-	return func(c *Classifier) { c.LLMFunc = fn }
-}
-
-// WithModel sets the LLM model identifier.
-func WithModel(model string) Option { return func(c *Classifier) { c.Model = model } }
-
 // New constructs a Classifier with pure *config.Config dependency injection.
 func New(cfg *config.Config, opts ...Option) *Classifier {
 	if cfg == nil {
@@ -154,11 +146,6 @@ func New(cfg *config.Config, opts ...Option) *Classifier {
 		opt(c)
 	}
 	return c
-}
-
-// NewClassifier constructs a Classifier with defaults (compatibility wrapper for New).
-func NewClassifier(opts ...Option) *Classifier {
-	return New(nil, opts...)
 }
 
 func (c *Classifier) recordFailure() {

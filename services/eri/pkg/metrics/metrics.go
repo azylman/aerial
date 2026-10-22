@@ -317,22 +317,6 @@ var (
 		[]string{"model", "type", "status"},
 	)
 
-	FactsExtractedTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "aerial_brain_facts_extracted_total",
-			Help: "Total fact extraction operations evaluated from conversations.",
-		},
-		[]string{"status"},
-	)
-
-	FactExtractionDurationSeconds = prometheus.NewHistogram(
-		prometheus.HistogramOpts{
-			Name:    "aerial_brain_fact_extraction_duration_seconds",
-			Help:    "Latency of fact extraction execution in seconds.",
-			Buckets: []float64{0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 20.0},
-		},
-	)
-
 	// Database Query Telemetry
 	DBQueryDurationSeconds = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -391,23 +375,6 @@ var (
 			Name:    "aerial_brain_channel_history_messages_count",
 			Help:    "Number of historical messages fetched and formatted for turn context.",
 			Buckets: []float64{1, 2, 5, 10, 20, 50, 100},
-		},
-	)
-
-	// Fallback Notifier Telemetry
-	FallbackNotificationsTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "aerial_brain_fallback_notifications_total",
-			Help: "Total dynamic fallback notifications generated for session recovery/errors.",
-		},
-		[]string{"trigger", "outcome"},
-	)
-
-	FallbackNotificationDurationSeconds = prometheus.NewHistogram(
-		prometheus.HistogramOpts{
-			Name:    "aerial_brain_fallback_notification_duration_seconds",
-			Help:    "Latency of dynamic fallback notification synthesis in seconds.",
-			Buckets: []float64{0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 20.0},
 		},
 	)
 
@@ -520,8 +487,6 @@ func init() {
 		MemorySearchDurationSeconds,
 		EmbeddingsGeneratedTotal,
 		EmbeddingDurationSeconds,
-		FactsExtractedTotal,
-		FactExtractionDurationSeconds,
 		DBQueryDurationSeconds,
 		HTTPRequestsTotal,
 		HTTPRequestDurationSeconds,
@@ -529,8 +494,6 @@ func init() {
 		ChannelHistoryFetchesTotal,
 		ChannelHistoryFetchDurationSeconds,
 		ChannelHistoryMessagesCount,
-		FallbackNotificationsTotal,
-		FallbackNotificationDurationSeconds,
 		ConfigReloadsTotal,
 		WebhooksDispatchedTotal,
 		WebhookDurationSeconds,
@@ -746,15 +709,6 @@ func RecordEmbedding(model, embedType, status string, duration time.Duration) {
 	EmbeddingDurationSeconds.WithLabelValues(model, embedType, status).Observe(duration.Seconds())
 }
 
-// RecordFactExtraction records fact extraction latency and status.
-func RecordFactExtraction(status string, duration time.Duration) {
-	if status == "" {
-		status = "unknown"
-	}
-	FactsExtractedTotal.WithLabelValues(status).Inc()
-	FactExtractionDurationSeconds.Observe(duration.Seconds())
-}
-
 // RecordDBQuery records database query duration with bounded symbolic operation name.
 func RecordDBQuery(op, status string, duration time.Duration) {
 	if op == "" {
@@ -794,18 +748,6 @@ func RecordChannelHistoryFetch(source, status string, duration time.Duration, co
 	if count > 0 {
 		ChannelHistoryMessagesCount.Observe(float64(count))
 	}
-}
-
-// RecordFallbackNotification records dynamic fallback notification execution.
-func RecordFallbackNotification(trigger, outcome string, duration time.Duration) {
-	if trigger == "" {
-		trigger = "unknown"
-	}
-	if outcome == "" {
-		outcome = "unknown"
-	}
-	FallbackNotificationsTotal.WithLabelValues(trigger, outcome).Inc()
-	FallbackNotificationDurationSeconds.Observe(duration.Seconds())
 }
 
 // RecordWebhookDispatch records a lifecycle webhook dispatch outcome and duration.

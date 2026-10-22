@@ -137,11 +137,3 @@ func RegisterGuildCommandsOnce(s *discordgo.Session, appID, guildID string) ([]*
 	}
 	return cmds, nil
 }
-
-// ResetRegisteredGuilds clears cached guild registrations.
-func ResetRegisteredGuilds() {
-	registeredGuilds.Range(func(key, value any) bool {
-		registeredGuilds.Delete(key)
-		return true
-	})
-}
