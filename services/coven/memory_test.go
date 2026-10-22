@@ -4795,7 +4795,7 @@ func TestFindConsolidationCliques(t *testing.T) {
 				makeScoredFactFixture(6, "B3", vecsB[2]),
 			},
 			wantCount: 2,
-			wantSizes: []int{3, 3},
+			wantSizes: []int{2, 2},
 		},
 		{
 			name: "MinSizeThresholdEnforced",
@@ -4847,7 +4847,7 @@ func TestFindConsolidationCliques(t *testing.T) {
 			minSize:   -1,
 			maxSize:   -1,
 			wantCount: 1,
-			wantSizes: []int{3},
+			wantSizes: []int{2},
 		},
 		{
 			name: "MaxSizeLessThanMinSizeDefaults",
@@ -5033,17 +5033,26 @@ func TestConsolidateFactClusters(t *testing.T) {
 			addFacts:      true,
 			llmResp:       validJSON,
 			wantErr:       false,
-			wantCount:     1,
-			wantRemaining: 1, // 3 deleted, 1 inserted
+			wantCount:     2,
+			wantRemaining: 1, // 3 merged via 2 pairwise passes into 1
 		},
 		{
-			name:          "CandidateFactsWithEmptyTextAndClampedImportanceAndFallbackCategory",
+			name:          "CandidateFactsWithEmptyTextSkippedAndValidMerged",
 			ctx:           ctx,
 			addFacts:      true,
-			llmResp:       `{"facts":[{"fact_text":"","category":"","importance_score":0},{"fact_text":"Valid synthesized fact 1"},{"fact_text":"Valid synthesized fact 2"},{"fact_text":"Extra third fact capped"}]}`,
+			llmResp:       `{"facts":[{"fact_text":"","category":"","importance_score":0},{"fact_text":"Valid synthesized fact 1"}]}`,
 			wantErr:       false,
-			wantCount:     1,
-			wantRemaining: 2,
+			wantCount:     2,
+			wantRemaining: 1,
+		},
+		{
+			name:          "TwoCandidateFactsForPairAbortsMergeWithoutDeletion",
+			ctx:           ctx,
+			addFacts:      true,
+			llmResp:       `{"facts":[{"fact_text":"Valid synthesized fact 1"},{"fact_text":"Valid synthesized fact 2"},{"fact_text":"Extra third fact capped"}]}`,
+			wantErr:       false,
+			wantCount:     0,
+			wantRemaining: 3,
 		},
 		{
 			name:          "AllEmptyCandidateFactsSkippedWithoutDeletion",
@@ -5062,7 +5071,7 @@ func TestConsolidateFactClusters(t *testing.T) {
 			storeFail:     "DeleteFact",
 			wantErr:       false,
 			wantCount:     1,
-			wantRemaining: 4, // 3 not deleted + 1 inserted
+			wantRemaining: 4, // 3 not deleted + 1 inserted in pass 0 before break
 		},
 		{
 			name:     "ContextCanceled",
@@ -5078,7 +5087,7 @@ func TestConsolidateFactClusters(t *testing.T) {
 			seedReinforceCounts: []int{1, 4, 2},
 			llmResp:             validJSON,
 			wantErr:             false,
-			wantCount:           1,
+			wantCount:           2,
 			wantRemaining:       1,
 			wantReinforcedCount: 4,
 		},
@@ -5089,7 +5098,7 @@ func TestConsolidateFactClusters(t *testing.T) {
 			seedReinforceCounts: []int{15, 12, 11},
 			llmResp:             validJSON,
 			wantErr:             false,
-			wantCount:           1,
+			wantCount:           2,
 			wantRemaining:       1,
 			wantReinforcedCount: 10,
 		},
@@ -5101,7 +5110,7 @@ func TestConsolidateFactClusters(t *testing.T) {
 			storeFail:           "ReinforceFact",
 			llmResp:             validJSON,
 			wantErr:             false,
-			wantCount:           1,
+			wantCount:           2,
 			wantRemaining:       1,
 		},
 	}
