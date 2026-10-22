@@ -8,9 +8,18 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 )
+
+// Roots returns a defensive copy of configured transcript search roots.
+func (c *Client) Roots() []string {
+	if c == nil || len(c.roots) == 0 {
+		return nil
+	}
+	return append([]string(nil), c.roots...)
+}
 
 type roundTripperFunc func(req *http.Request) (*http.Response, error)
 
@@ -58,6 +67,7 @@ func TestClient_NewEmbedderAndConfig(t *testing.T) {
 		{"EmptyDataConfig", NewEmbedder(cfgEmpty), DefaultOllamaURL, nil, 512},
 		{"UninitializedConfig", NewEmbedder(&config.Config{}), DefaultOllamaURL, nil, 512},
 		{"ClientWithNilConfig", &Client{cfg: nil}, DefaultOllamaURL, nil, 512},
+		{"EmptyOllamaFields", NewEmbedder(config.NewFromData(&config.ConfigData{Ollama: config.OllamaConfig{}})), DefaultOllamaURL, nil, 512},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -93,6 +103,7 @@ func TestGenerateEmbedding(t *testing.T) {
 		text         string
 		isQuery      bool
 		maxRetries   int
+		retryDelay   time.Duration
 		queryPrefix  string
 		model        string
 		numCtx       int
@@ -210,6 +221,15 @@ func TestGenerateEmbedding(t *testing.T) {
 			badURL:  true,
 			wantErr: true,
 		},
+		{
+			name:       "RetryDelayTimerExpires",
+			text:       "retry timer",
+			maxRetries: 1,
+			retryDelay: time.Millisecond,
+			netErr:     true,
+			wantErr:    true,
+			wantSubstr: "failed after 2 attempts",
+		},
 	}
 
 	for _, tc := range tests {
@@ -245,6 +265,9 @@ func TestGenerateEmbedding(t *testing.T) {
 			client := NewEmbedder(cfg)
 			client.httpClient = &http.Client{Transport: rt}
 			client.retryDelay = -1
+			if tc.retryDelay != 0 {
+				client.retryDelay = tc.retryDelay
+			}
 
 			if tc.nilHTTP {
 				client.httpClient = nil

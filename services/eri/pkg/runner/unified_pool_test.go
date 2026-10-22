@@ -17,6 +17,11 @@ import (
 	"github.com/google/uuid"
 )
 
+func (p *UnifiedProcessPool) HasDaemon(targetKey string) bool {
+	_, ok := p.Get(targetKey)
+	return ok
+}
+
 type pipeMockSpawnerOpts struct {
 	pid               int
 	killErr           error

@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -373,7 +374,11 @@ func (s *testRunnerAgentSession) Send(prompt string, turn *runner.TurnContext) e
 	if timeout <= 0 {
 		timeout = DefaultTimeoutMinutes
 	}
-	watchdogOpts := runner.DefaultWatchdogOptions(timeout)
+	watchdogOpts := runner.WatchdogOptions{
+		InactivityTimeout: 5 * time.Minute,
+		MaxDuration:       time.Duration(timeout) * time.Minute,
+		OutputFormat:      "stream-json",
+	}
 	if s.pool.cfg.SessionManager != nil {
 		watchdogOpts.TranscriptDirs, watchdogOpts.HomeDir = s.pool.cfg.SessionManager.Roots(), s.pool.cfg.SessionManager.HomeDir()
 	}
@@ -453,7 +458,7 @@ func (s *testRunnerAgentSession) routeSendResponse(turn *runner.TurnContext, std
 	}
 	respText := stdout
 	var parsedUsage runner.AgyUsage
-	if parsed, pErr := runner.ParseAgyOutput(stdout); pErr == nil {
+	if parsed, pErr := parseTestAgyOutput(stdout); pErr == nil {
 		respText, parsedUsage = parsed.Response, parsed.Usage
 		if parsed.ConversationID != "" {
 			s.setSessionID(parsed.ConversationID)
@@ -489,6 +494,89 @@ func (s *testRunnerAgentSession) routeSendResponse(turn *runner.TurnContext, std
 		turn.Sink.OnResult(&runner.TurnResult{ConversationID: resSess, Response: strings.TrimSpace(respText), Stderr: stderr, Usage: parsedUsage})
 	}
 	return nil
+}
+
+type testSessionProbe struct {
+	Event          string `json:"event"`
+	Type           string `json:"type"`
+	ConversationID string `json:"conversation_id"`
+	SessionID      string `json:"session_id"`
+	Result         *struct {
+		ConversationID string           `json:"conversation_id"`
+		SessionID      string           `json:"session_id"`
+		Status         string           `json:"status"`
+		Response       string           `json:"response"`
+		Error          string           `json:"error"`
+		Usage          *runner.AgyUsage `json:"usage"`
+	} `json:"result"`
+}
+
+func parseTestAgyOutput(raw string) (*runner.AgyResponse, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, fmt.Errorf("empty agy output")
+	}
+	lines := strings.Split(trimmed, "\n")
+	var lastJSONLine string
+	var streamConvID string
+	for _, line := range lines {
+		l := strings.TrimSpace(line)
+		if strings.HasPrefix(l, "{") && strings.HasSuffix(l, "}") {
+			lastJSONLine = l
+			var probe testSessionProbe
+			if err := json.Unmarshal([]byte(l), &probe); err == nil {
+				if probe.ConversationID != "" {
+					streamConvID = probe.ConversationID
+				} else if probe.SessionID != "" {
+					streamConvID = probe.SessionID
+				}
+				if (probe.Event == "result" || probe.Type == "result") && probe.Result != nil {
+					resp := &runner.AgyResponse{
+						ConversationID: probe.Result.ConversationID,
+						Status:         probe.Result.Status,
+						Response:       probe.Result.Response,
+						Error:          probe.Result.Error,
+					}
+					if resp.ConversationID == "" {
+						resp.ConversationID = probe.Result.SessionID
+					}
+					if resp.ConversationID == "" {
+						resp.ConversationID = streamConvID
+					}
+					if probe.Result.Usage != nil {
+						resp.Usage = *probe.Result.Usage
+					}
+					return resp, nil
+				}
+			}
+		}
+	}
+	if lastJSONLine != "" {
+		var resp runner.AgyResponse
+		if err := json.Unmarshal([]byte(lastJSONLine), &resp); err == nil {
+			if resp.ConversationID == "" && streamConvID != "" {
+				resp.ConversationID = streamConvID
+			}
+			return &resp, nil
+		}
+	}
+	startIdx := strings.LastIndex(trimmed, "\n{")
+	if startIdx == -1 && strings.HasPrefix(trimmed, "{") {
+		startIdx = 0
+	} else if startIdx != -1 {
+		startIdx++
+	}
+	if startIdx != -1 {
+		var resp runner.AgyResponse
+		if err := json.Unmarshal([]byte(trimmed[startIdx:]), &resp); err != nil {
+			return nil, fmt.Errorf("failed to parse agy JSON: %w", err)
+		}
+		if resp.ConversationID == "" && streamConvID != "" {
+			resp.ConversationID = streamConvID
+		}
+		return &resp, nil
+	}
+	return nil, fmt.Errorf("no JSON payload found in agy output")
 }
 
 var _ runner.AgentSession = (*testRunnerAgentSession)(nil)

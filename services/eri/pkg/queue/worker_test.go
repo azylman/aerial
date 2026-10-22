@@ -24,13 +24,14 @@ import (
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
 func TestWorker_PoolDaemonAccessors(t *testing.T) {
-	mockSpawner := runner.NewMockDaemonSpawner()
+	mockSpawner := newMockDaemonSpawner()
 	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
 	defer procPool.Close()
 
@@ -52,7 +53,7 @@ func TestWorker_PassesSessionIDToAgentPool(t *testing.T) {
 	var mu sync.Mutex
 	capturedConfigs := make([]runner.DaemonConfig, 0)
 
-	mockSpawner := &runner.MockDaemonSpawner{
+	mockSpawner := &mockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 			mu.Lock()
 			capturedConfigs = append(capturedConfigs, cfg)
@@ -72,13 +73,13 @@ func TestWorker_PassesSessionIDToAgentPool(t *testing.T) {
 					_, _ = outW.Write([]byte(`{"event":"result","result":{"status":"SUCCESS","response":"ok","usage":{"total_tokens":5}}}` + "\n"))
 				}
 			}()
-			return inW, outR, errR, runner.NewMockProcessHandle(12346), nil
+			return inW, outR, errR, newMockProcessHandle(12346), nil
 		},
 	}
 	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, mockSpawner)
 	defer procPool.Close()
 
-	cfg := config.NewTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
+	cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
 	completedCh := make(chan string, 10)
 	pool := New(cfg, WorkerPoolConfig{
 		ProcessPool:    procPool,
@@ -144,7 +145,7 @@ func TestWorker_PersistentDaemonExecutionErrors(t *testing.T) {
 				binPath = filepath.Join(t.TempDir(), "mock_err.sh")
 				_ = os.WriteFile(binPath, []byte(tc.script), 0o755)
 			}
-			cfg := config.NewTestConfig(func(d *config.ConfigData) { d.AgyBin, d.DataDir = binPath, tempData })
+			cfg := newTestConfig(func(d *config.ConfigData) { d.AgyBin, d.DataDir = binPath, tempData })
 			failedCh := make(chan struct{})
 			pool := New(cfg, WorkerPoolConfig{
 				SessionManager: session.New(tmpHome, tempData), Store: store,
@@ -231,7 +232,7 @@ func TestWorkerPool_PersistentDaemonTurns(t *testing.T) {
 			procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, newScriptedDaemonSpawner(tc.daemonUUID, tc.turnResponses...))
 			defer procPool.Close()
 
-			cfg := config.NewTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
+			cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
 			if tc.presetSessionInDB != "" {
 				_ = store.SaveSessionID(context.Background(), tc.threadID, tc.presetSessionInDB)
 			}
@@ -280,7 +281,9 @@ func TestWorkerPool_PersistentDaemonTurns(t *testing.T) {
 			}
 
 			if tc.checkMetrics {
-				if pool.ProcessPool() == nil || !pool.ProcessPool().HasDaemon(tc.threadID) {
+				if pool.ProcessPool() == nil {
+					t.Errorf("expected daemon for %s", tc.threadID)
+				} else if _, ok := pool.ProcessPool().Get(tc.threadID); !ok {
 					t.Errorf("expected daemon for %s", tc.threadID)
 				}
 				rec := httptest.NewRecorder()
@@ -338,7 +341,7 @@ func TestWorkerPool_TransientRetry_RotatesBloatedSession(t *testing.T) {
 {"step_index":100,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"working...","created_at":%q}
 `, time.Now().UTC().Format(time.RFC3339))), 0o644)
 
-	cfg := config.NewTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
+	cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
 	threadID := "thread-transient-bloat-rotation"
 	_ = store.SaveSessionID(context.Background(), threadID, validUUID)
 
@@ -414,7 +417,7 @@ func TestTurnExecution_GetRecentThreadMessages(t *testing.T) {
 	dgFail, _ := discordgo.New("Bot test")
 	dgFail.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) { return nil, errors.New("simulated error") })
 
-	fakeStore := db.NewFakeStore()
+	fakeStore := dbtest.NewFakeStore()
 	ctx := context.Background()
 	_ = fakeStore.InsertMessage(ctx, db.Message{ID: "msg-1", ThreadID: "1552732003076669460", AuthorName: "test-user", Content: "Normal chat", CreatedAt: now.Add(-2 * time.Minute)})
 	_ = fakeStore.InsertMessage(ctx, db.Message{ID: "msg-sched", ThreadID: "1552732003076669460", AuthorName: "Scheduler", Content: "Check PR", ScheduleRunID: "run-123", CreatedAt: now.Add(-1 * time.Minute)})
@@ -467,7 +470,7 @@ func (m *mockErrRecentStore) GetRecentThreadMessages(ctx context.Context, thread
 func TestWorker_RotateSessionID_EvictsDaemons(t *testing.T) {
 	t.Parallel()
 	fakeStore := setupTestStore(t)
-	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, runner.NewMockDaemonSpawner())
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, newMockDaemonSpawner())
 	defer procPool.Close()
 
 	ctx := context.Background()
@@ -475,7 +478,7 @@ func TestWorker_RotateSessionID_EvictsDaemons(t *testing.T) {
 	te := &turnExecution{pool: &WorkerPool{cfg: WorkerPoolConfig{Store: fakeStore}, processPool: procPool}, threadID: "thread-evict-1"}
 
 	te.rotateSessionID("thread-evict-1", "new-sess-1")
-	if !procPool.HasDaemon("thread-evict-1") {
+	if _, ok := procPool.Get("thread-evict-1"); !ok {
 		t.Errorf("expected daemon to remain when newSessionID is non-empty")
 	}
 
@@ -978,7 +981,7 @@ func TestWorker_DualPoolRouting(t *testing.T) {
 				medPool = mp
 			}
 
-			cfg := config.NewTestConfig(func(d *config.ConfigData) {
+			cfg := newTestConfig(func(d *config.ConfigData) {
 				d.DataDir, d.LowEffortModel, d.MediumEffortModel = tempData, "gemini-3.8-flash-low", "gemini-3.8-flash-medium"
 			})
 			doneCh := make(chan struct{}, 1)
@@ -1027,7 +1030,7 @@ func TestWorkerPool_LowEffortAndPrimary_ConcurrentExecutionSameThread(t *testing
 
 	primarySpawner := newScriptedDaemonSpawner("c1111111-2222-3333-4444-555555555555",
 		"{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"primary reply\",\"usage\":{\"total_tokens\":10}}}\n")
-	lowSpawner := &runner.MockDaemonSpawner{
+	lowSpawner := &mockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 			inR, inW := io.Pipe()
 			outR, outW := io.Pipe()
@@ -1045,7 +1048,7 @@ func TestWorkerPool_LowEffortAndPrimary_ConcurrentExecutionSameThread(t *testing
 					_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"low reply\",\"usage\":{\"total_tokens\":5}}}\n"))
 				}
 			}()
-			return inW, outR, errR, runner.NewMockProcessHandle(12346), nil
+			return inW, outR, errR, newMockProcessHandle(12346), nil
 		},
 	}
 
@@ -1054,7 +1057,7 @@ func TestWorkerPool_LowEffortAndPrimary_ConcurrentExecutionSameThread(t *testing
 	lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lowSpawner)
 	defer lowPool.Close()
 
-	cfg := config.NewTestConfig(func(d *config.ConfigData) { d.DataDir, d.LowEffortModel = tempData, "gemini-3.8-flash-low" })
+	cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir, d.LowEffortModel = tempData, "gemini-3.8-flash-low" })
 	pool := New(cfg, WorkerPoolConfig{
 		ProcessPool: primaryPool, LowEffortProcessPool: lowPool,
 		SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1,
@@ -1106,7 +1109,7 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 	var mu sync.Mutex
 	var capturedPrompts []string
 
-	lowSpawner := &runner.MockDaemonSpawner{
+	lowSpawner := &mockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 			mu.Lock()
 			spawnSeq++
@@ -1134,10 +1137,10 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 					}
 				}
 			}()
-			return inW, outR, errR, runner.NewMockProcessHandle(12345 + seq), nil
+			return inW, outR, errR, newMockProcessHandle(12345 + seq), nil
 		},
 	}
-	primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, runner.NewMockSpawner())
+	primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, newMockSpawner())
 	defer primaryPool.Close()
 
 	lowUnderlying := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lowSpawner)
@@ -1146,7 +1149,7 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 	lowPool := runner.NewInterchangeablePool(lowUnderlying, runner.InterchangeablePoolConfig{WorkerCount: 1, KeyPrefix: "discord:worker"})
 	defer lowPool.Close()
 
-	cfg := config.NewTestConfig(func(d *config.ConfigData) { d.DataDir, d.LowEffortModel = tempData, "gemini-3.8-flash-low" })
+	cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir, d.LowEffortModel = tempData, "gemini-3.8-flash-low" })
 	doneCh := make(chan struct{}, 2)
 	pool := New(cfg, WorkerPoolConfig{
 		ProcessPool: primaryPool, LowEffortProcessPool: lowPool,
@@ -1244,7 +1247,7 @@ func TestWorker_DualPool_YieldTrapFallback(t *testing.T) {
 	lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, newScriptedDaemonSpawner("d1111111-2222-3333-4444-555555555555"))
 	defer lowPool.Close()
 
-	cfg := config.NewTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
+	cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
 	threadID := "thread-yield-fallback"
 	_ = store.SaveSessionID(context.Background(), threadID, sessID)
 
@@ -1310,7 +1313,7 @@ func TestWorker_QuotaPause_PreservesEffort(t *testing.T) {
 			lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, quotaErrSpawner)
 			defer lowPool.Close()
 
-			cfg := config.NewTestConfig(func(d *config.ConfigData) { d.DataDir, d.LowEffortModel = tempData, "gemini-3.8-flash-low" })
+			cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir, d.LowEffortModel = tempData, "gemini-3.8-flash-low" })
 			doneCh := make(chan struct{})
 			pool := New(cfg, WorkerPoolConfig{
 				ProcessPool: primaryPool, LowEffortProcessPool: lowPool,
@@ -1367,7 +1370,7 @@ func TestWorkerPool_SessionRotationInjectsToolActions(t *testing.T) {
 			_ = os.MkdirAll(sessDir, 0o755)
 			_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"investigate"}`+"\n"), 0o644)
 
-			cfg := config.NewTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
+			cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
 			threadID := "thread-rot-" + strings.ToLower(tt.name)
 			_ = store.SaveSessionID(context.Background(), threadID, validUUID)
 
@@ -1597,7 +1600,7 @@ func TestWorker_BurstHelpers_SilentAndLowEffort(t *testing.T) {
 
 func TestWorker_SilentBurst_Execution(t *testing.T) {
 	t.Parallel()
-	store := db.NewFakeStore()
+	store := dbtest.NewFakeStore()
 	ctx := context.Background()
 	threadID, sessionID := "1542423172400291873", "a1111111-2222-3333-4444-555555555555"
 
@@ -1678,7 +1681,7 @@ func TestYieldTrap_Scenarios(t *testing.T) {
 			doneCh := make(chan struct{})
 
 			sessMgr := session.New(tmpHome, "")
-			sessDir, _ := sessMgr.EnsureSessionDir(tc.sessionID)
+			sessDir, _ := ensureTestSessionDir(sessMgr, tc.sessionID)
 			_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0o755)
 			_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0o644)
 			now := time.Now()

@@ -1610,13 +1610,6 @@ func (te *turnExecution) executeWithRetries() {
 		}
 
 		if !isFailure {
-			if resp == nil {
-				var parseErr error
-				if resp, parseErr = runner.ParseAgyOutput(stdout); parseErr != nil {
-					log.Printf("[Queue] Failed to parse runner output despite exit 0: %v", parseErr)
-					lastErrDetail = parseErr.Error()
-				}
-			}
 			if resp != nil {
 				extSess := resp.ConversationID
 				if extSess == "" {

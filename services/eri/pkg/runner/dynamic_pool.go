@@ -243,16 +243,6 @@ func (p *DynamicVoicePool) CurrentPool() AgentPool {
 	return p.currentPool
 }
 
-// Fingerprint returns the current configuration fingerprint under RLock.
-func (p *DynamicVoicePool) Fingerprint() string {
-	if p == nil {
-		return ""
-	}
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.currentKey
-}
-
 // AcquireLease delegates lease acquisition to the underlying pool if supported.
 func (p *DynamicVoicePool) AcquireLease(ctx context.Context, targetKey string) (SessionLease, error) {
 	pool, err := p.activePool()

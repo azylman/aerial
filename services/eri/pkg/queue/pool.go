@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -135,16 +136,14 @@ func (p *WorkerPool) Store() db.Store {
 
 func resolveStore(dbOrStore any) db.Store {
 	switch s := dbOrStore.(type) {
-	case *db.FakeStore:
-		if s != nil {
-			return s
-		}
 	case *db.SQLStore:
 		if s != nil {
 			return s
 		}
 	case db.Store:
-		return s
+		if s != nil && !(reflect.ValueOf(s).Kind() == reflect.Pointer && reflect.ValueOf(s).IsNil()) {
+			return s
+		}
 	case *sql.DB:
 		if s != nil {
 			return db.NewSQLStore(s)
@@ -226,7 +225,11 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		}
 	} else if cfg.RunnerFunc == nil && cfg.RunnerWithOptionsFunc != nil {
 		cfg.RunnerFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			return cfg.RunnerWithOptionsFunc(ctx, agyBin, prompt, sessionID, apiKey, model, runner.DefaultWatchdogOptions(timeoutMinutes))
+			return cfg.RunnerWithOptionsFunc(ctx, agyBin, prompt, sessionID, apiKey, model, runner.WatchdogOptions{
+				InactivityTimeout: 5 * time.Minute,
+				MaxDuration:       time.Duration(timeoutMinutes) * time.Minute,
+				OutputFormat:      "stream-json",
+			})
 		}
 	} else if cfg.RunnerWithOptionsFunc == nil && cfg.RunnerFunc == nil {
 		cfg.RunnerFunc = func(context.Context, string, string, string, string, string, int) (string, string, int, error) {
@@ -270,7 +273,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	cfg.SessionManager = sessMgr
 
 	if cfg.Classifier == nil {
-		cfg.Classifier = classifier.NewClassifier()
+		cfg.Classifier = classifier.New(nil)
 	}
 	if cfg.LLMFunc == nil {
 		for _, candidate := range []runner.AgentPool{cfg.LowEffortProcessPool, cfg.ProcessPool} {
@@ -425,11 +428,6 @@ func (p *WorkerPool) systemChannel() string {
 	return config.DefaultConfigData().SystemChannel
 }
 
-// NewWorkerPool is a compatibility wrapper for New.
-func NewWorkerPool(cfg WorkerPoolConfig) *WorkerPool {
-	return New(nil, cfg)
-}
-
 func (p *WorkerPool) SetDiscordSession(s *discordgo.Session) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -492,20 +490,6 @@ func (p *WorkerPool) WebhookDispatcher() WebhookDispatcher {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.webhookDispatcher
-}
-
-// SetWebhookDispatcher updates the webhook dispatcher on the pool.
-func (p *WorkerPool) SetWebhookDispatcher(d WebhookDispatcher) {
-	if p == nil {
-		return
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if d == nil {
-		d = NewDefaultWebhookDispatcher()
-	}
-	p.webhookDispatcher = d
-	p.cfg.WebhookDispatcher = d
 }
 
 func (p *WorkerPool) GetRuntimeConfig() string {

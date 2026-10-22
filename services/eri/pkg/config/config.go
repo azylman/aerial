@@ -694,28 +694,6 @@ func (c *Config) update(fresh *ConfigData) {
 	c.current.Store(cloneConfigData(fresh))
 }
 
-// NewTestConfig returns a hermetic in-memory *Config initialized with DefaultConfigData(),
-// with DatabaseURL set to ":memory:", Port set to "0", sensitive tokens cleared,
-// hermetic temporary directories set for GeminiHomeDir and DataDir,
-// and any caller-provided mutators applied.
-func NewTestConfig(mutators ...func(*ConfigData)) *Config {
-	data := DefaultConfigData()
-	data.DatabaseURL = ":memory:"
-	data.Port = "0"
-	data.DiscordToken = ""
-	data.APIKey = ""
-	data.HarnessAPIKey = ""
-	data.GitHubPAT = ""
-	data.GeminiHomeDir = filepath.Join(os.TempDir(), "aerial-test-gemini")
-	data.DataDir = filepath.Join(os.TempDir(), "aerial-test-data")
-	for _, fn := range mutators {
-		if fn != nil {
-			fn(data)
-		}
-	}
-	return NewFromData(data)
-}
-
 func NewFromData(data *ConfigData) *Config {
 	if data == nil {
 		data = DefaultConfigData()
@@ -1212,10 +1190,6 @@ func (c *Config) ResolveChannelPolicy(channelID, channelName string) ChannelPoli
 
 func (c *Config) IsAdmin(identifiers ...string) bool {
 	return IsAdmin(c.Current().AdminUsers, identifiers...)
-}
-
-func (c *Config) getChannelPolicyRaw(key string) (ChannelPolicy, bool) {
-	return getChannelPolicyRaw(c.Current().Channels, key)
 }
 
 func getEnvFromLookup(lookup func(string) string, key, defaultVal string) string {

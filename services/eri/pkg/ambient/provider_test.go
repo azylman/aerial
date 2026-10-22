@@ -16,6 +16,15 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/config"
 )
 
+// SetNowFunc overrides the clock function in tests.
+func (p *Provider) SetNowFunc(fn func() time.Time) {
+	if fn == nil {
+		p.nowFunc = time.Now
+	} else {
+		p.nowFunc = fn
+	}
+}
+
 type mockInvoker struct {
 	mu       sync.Mutex
 	calls    int

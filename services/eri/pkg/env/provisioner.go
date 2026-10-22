@@ -64,42 +64,6 @@ func NewFromConfig(cfg *config.Config) *Provisioner {
 	return New(cfg.GeminiHomeDir(), cfg.DataDir())
 }
 
-// SetCustomSkillsDir sets the search path for custom user skills.
-func (p *Provisioner) SetCustomSkillsDir(dir string) {
-	p.customSkillsDir = dir
-}
-
-// SetSuperpowersDir sets the search path for methodology skills.
-func (p *Provisioner) SetSuperpowersDir(dir string) {
-	p.superpowersDir = dir
-}
-
-// SetAgentsSkillsDir sets the search path for application built-in skills.
-func (p *Provisioner) SetAgentsSkillsDir(dir string) {
-	p.agentsSkillsDir = dir
-}
-
-// SetAerialRulesDir sets the search path for aerial system rules.
-func (p *Provisioner) SetAerialRulesDir(dir string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.aerialRulesDir = dir
-}
-
-// SetConfigRulesDir sets the search path for aerial-config user rules.
-func (p *Provisioner) SetConfigRulesDir(dir string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.configRulesDir = dir
-}
-
-// SetHooksDir sets the search path for lifecycle hooks.
-func (p *Provisioner) SetHooksDir(dir string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.hooksDir = dir
-}
-
 func (p *Provisioner) runtimeHomeDir(t RuleTarget) string {
 	return filepath.Join(p.dataDir, "runtimes", string(t))
 }

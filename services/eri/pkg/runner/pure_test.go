@@ -101,6 +101,14 @@ func TestActivityWriter_SessionProbe(t *testing.T) {
 	}
 }
 
+func DefaultWatchdogOptions(timeoutMinutes int) WatchdogOptions {
+	return WatchdogOptions{
+		InactivityTimeout: 5 * time.Minute,
+		MaxDuration:       time.Duration(timeoutMinutes) * time.Minute,
+		OutputFormat:      "stream-json",
+	}
+}
+
 func TestDefaultWatchdogOptions(t *testing.T) {
 	if opts := DefaultWatchdogOptions(5); opts.InactivityTimeout == 0 || opts.MaxDuration == 0 {
 		t.Errorf("expected non-zero watchdog options")

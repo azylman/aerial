@@ -26,13 +26,14 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
 // setupTestStore returns a clean FakeStore for testing.
-func setupTestStore(t testing.TB) *db.FakeStore { return db.NewFakeStore() }
+func setupTestStore(t testing.TB) *dbtest.FakeStore { return dbtest.NewFakeStore() }
 
 func insertMessage(store db.Store, msg db.Message) error {
 	if store == nil {
@@ -80,7 +81,7 @@ func getScheduleRun(store db.Store, id string) (*db.ScheduleRun, error) {
 	if store == nil {
 		return nil, nil
 	}
-	if fake, ok := store.(*db.FakeStore); ok {
+	if fake, ok := store.(*dbtest.FakeStore); ok {
 		return fake.GetScheduleRun(id)
 	}
 	runs, _, err := store.GetScheduleRunsPaginated(context.Background(), 100, 0, "", "")
@@ -294,7 +295,7 @@ func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 	if tc.initialSessionID != "" {
 		_ = saveSessionID(store, threadID, tc.initialSessionID)
 		if sessMgr != nil && len(tc.seedTranscriptFiles) == 0 {
-			sessDir, _ := sessMgr.EnsureSessionDir(tc.initialSessionID)
+			sessDir, _ := ensureTestSessionDir(sessMgr, tc.initialSessionID)
 			cliPbDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "conversations")
 			_ = os.MkdirAll(cliPbDir, 0o755)
 			pbFile := filepath.Join(cliPbDir, tc.initialSessionID+".pb")
@@ -587,7 +588,7 @@ func runBurstTestCase(t *testing.T, tc burstTestCase) {
 	if tc.seedSession {
 		initialSessionID = uuid.New().String()
 		_ = saveSessionID(store, tc.channelID, initialSessionID)
-		_, _ = sessMgr.EnsureSessionDir(initialSessionID)
+		_, _ = ensureTestSessionDir(sessMgr, initialSessionID)
 		cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
 		_ = os.MkdirAll(cliPbDir, 0o755)
 		_ = os.WriteFile(filepath.Join(cliPbDir, initialSessionID+".pb"), []byte("mock-pb"), 0o644)
@@ -616,13 +617,14 @@ func runBurstTestCase(t *testing.T, tc burstTestCase) {
 
 	var cls *classifier.Classifier
 	if tc.classifierJSON != "" {
-		cls = classifier.NewClassifier(classifier.WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+		cls = classifier.New(nil)
+		cls.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
 			mu.Lock()
 			classifierCalls++
 			capturedClassifierPrompt = prompt
 			mu.Unlock()
 			return tc.classifierJSON, nil
-		}))
+		}
 	}
 
 	var dg *discordgo.Session
@@ -764,7 +766,7 @@ func runBurstTestCase(t *testing.T, tc burstTestCase) {
 		t.Errorf("passedSessID = %q, want %q", passedSessID, initialSessionID)
 	}
 	if tc.wantOldTranscriptExcludes != "" {
-		oldSessDir, _ := sessMgr.EnsureSessionDir(initialSessionID)
+		oldSessDir, _ := ensureTestSessionDir(sessMgr, initialSessionID)
 		dataOld, _ := os.ReadFile(filepath.Join(oldSessDir, ".system_generated", "logs", "transcript.jsonl"))
 		if strings.Contains(string(dataOld), tc.wantOldTranscriptExcludes) {
 			t.Errorf("old transcript should NOT contain %q", tc.wantOldTranscriptExcludes)
@@ -849,9 +851,9 @@ func TestWorkerPool_ScopeKeyAndPreviousSessionFallback(t *testing.T) {
 	}
 }
 
-// newScriptedDaemonSpawner returns a MockDaemonSpawner that responds with pre-scripted events.
-func newScriptedDaemonSpawner(conversationID string, turnResponses ...string) *runner.MockDaemonSpawner {
-	return &runner.MockDaemonSpawner{
+// newScriptedDaemonSpawner returns a mockDaemonSpawner that responds with pre-scripted events.
+func newScriptedDaemonSpawner(conversationID string, turnResponses ...string) *mockDaemonSpawner {
+	return &mockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 			inR, inW := io.Pipe()
 			outR, outW := io.Pipe()
@@ -876,7 +878,7 @@ func newScriptedDaemonSpawner(conversationID string, turnResponses ...string) *r
 					}
 				}
 			}()
-			return inW, outR, io.NopCloser(bytes.NewReader(nil)), runner.NewMockProcessHandle(12345), nil
+			return inW, outR, io.NopCloser(bytes.NewReader(nil)), newMockProcessHandle(12345), nil
 		},
 	}
 }
@@ -931,4 +933,120 @@ type mockClaimStore struct {
 
 func (m *mockClaimStore) ClaimPendingMessage(context.Context, string) (bool, error) {
 	return m.claimed, m.claimErr
+}
+
+func NewWorkerPool(cfg WorkerPoolConfig) *WorkerPool {
+	return New(nil, cfg)
+}
+
+func newTestConfig(mutators ...func(*config.ConfigData)) *config.Config {
+	data := config.DefaultConfigData()
+	for _, m := range mutators {
+		if m != nil {
+			m(data)
+		}
+	}
+	return config.NewFromData(data)
+}
+
+func ensureTestSessionDir(mgr *session.Manager, sessionID string) (string, error) {
+	roots := mgr.Roots()
+	if len(roots) == 0 {
+		return "", errors.New("no session roots")
+	}
+	dir := filepath.Join(roots[0], sessionID)
+	logsDir := filepath.Join(dir, ".system_generated", "logs")
+	if err := os.MkdirAll(logsDir, 0o755); err != nil {
+		return "", err
+	}
+	for _, name := range []string{"transcript.jsonl", "transcript_full.jsonl"} {
+		p := filepath.Join(logsDir, name)
+		if _, err := os.Stat(p); os.IsNotExist(err) {
+			_ = os.WriteFile(p, nil, 0o600)
+		}
+	}
+	return dir, nil
+}
+
+type mockProcessHandle struct {
+	pid     int
+	mu      sync.Mutex
+	killErr error
+}
+
+func newMockProcessHandle(pid int) *mockProcessHandle {
+	return &mockProcessHandle{pid: pid}
+}
+
+func (m *mockProcessHandle) SetKillErr(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.killErr = err
+}
+
+func (m *mockProcessHandle) Pid() int { return m.pid }
+
+func (m *mockProcessHandle) Kill() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.killErr
+}
+
+func (m *mockProcessHandle) Wait() error { return nil }
+
+func spawnDefaultQueueMockPipes(cfg runner.DaemonConfig, closeOutW bool) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	errR, errW := io.Pipe()
+	go func() {
+		sessID := cfg.SessionID
+		if sessID == "" || !runner.IsValidUUID(sessID) {
+			sessID = "550e8400-e29b-41d4-a716-446655440000"
+		}
+		_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", sessID)
+		_ = errW.Close()
+		if closeOutW {
+			var buf [4096]byte
+			if _, err := inR.Read(buf[:]); err == nil {
+				go func() { _, _ = io.Copy(io.Discard, inR) }()
+			}
+			_ = outW.Close()
+			return
+		}
+		_, _ = io.Copy(io.Discard, inR)
+	}()
+	return inW, outR, errR, newMockProcessHandle(12345), nil
+}
+
+type mockDaemonSpawner struct {
+	SpawnFn func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error)
+}
+
+func newMockDaemonSpawner() *mockDaemonSpawner { return &mockDaemonSpawner{} }
+
+func (m *mockDaemonSpawner) Spawn(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+	if m != nil && m.SpawnFn != nil {
+		return m.SpawnFn(ctx, cfg)
+	}
+	return spawnDefaultQueueMockPipes(cfg, false)
+}
+
+type mockSpawner struct {
+	mu           sync.Mutex
+	lastSpawnCfg runner.DaemonConfig
+}
+
+func newMockSpawner() *mockSpawner { return &mockSpawner{} }
+
+func (m *mockSpawner) Spawn(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+	m.mu.Lock()
+	m.lastSpawnCfg = cfg
+	m.mu.Unlock()
+	return spawnDefaultQueueMockPipes(cfg, true)
+}
+
+func (m *mockSpawner) LastSpawnCfg() runner.DaemonConfig {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastSpawnCfg
 }

@@ -13,6 +13,29 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// NewTestConfig returns a hermetic in-memory *Config initialized with DefaultConfigData().
+func NewTestConfig(mutators ...func(*ConfigData)) *Config {
+	data := DefaultConfigData()
+	data.DatabaseURL = ":memory:"
+	data.Port = "0"
+	data.DiscordToken = ""
+	data.APIKey = ""
+	data.HarnessAPIKey = ""
+	data.GitHubPAT = ""
+	data.GeminiHomeDir = filepath.Join(os.TempDir(), "aerial-test-gemini")
+	data.DataDir = filepath.Join(os.TempDir(), "aerial-test-data")
+	for _, fn := range mutators {
+		if fn != nil {
+			fn(data)
+		}
+	}
+	return NewFromData(data)
+}
+
+func (c *Config) getChannelPolicyRaw(key string) (ChannelPolicy, bool) {
+	return getChannelPolicyRaw(c.Current().Channels, key)
+}
+
 func writeTempYAML(t *testing.T, content string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "config.yaml")

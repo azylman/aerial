@@ -76,32 +76,8 @@ func TestPRRegistry_StoreParity(t *testing.T) {
 		store Store
 	}{
 		{"SQLStore", NewTestStore(t)},
-		{"FakeStore", NewFakeStore()},
 	} {
 		t.Run(tc.name, func(t *testing.T) { runPRRegistryLifecycle(t, tc.store) })
-	}
-}
-
-func TestPRRegistry_FakeStore_Failures(t *testing.T) {
-	simErr := errors.New("simulated error")
-	for _, op := range []string{"UpsertPR", "GetPRByNumber", "UpdatePRStatusMessageID"} {
-		t.Run(op, func(t *testing.T) {
-			store := NewFakeStore()
-			ctx := context.Background()
-			store.FailNext(op, simErr)
-			var err error
-			switch op {
-			case "UpsertPR":
-				err = store.UpsertPR(ctx, PRRecord{Repo: "a", PRNumber: 1, Branch: "b", HeadSHA: "c", TargetID: "d"})
-			case "GetPRByNumber":
-				_, err = store.GetPRByNumber(ctx, "a", 1)
-			case "UpdatePRStatusMessageID":
-				err = store.UpdatePRStatusMessageID(ctx, "a", 1, "msg-1")
-			}
-			if !errors.Is(err, simErr) {
-				t.Fatalf("expected %v, got %v", simErr, err)
-			}
-		})
 	}
 }
 

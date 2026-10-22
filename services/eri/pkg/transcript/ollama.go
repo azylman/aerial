@@ -49,14 +49,6 @@ func NewEmbedder(cfg *config.Config, roots ...string) *Client {
 	}
 }
 
-// Roots returns a defensive copy of configured transcript search roots.
-func (c *Client) Roots() []string {
-	if c == nil || len(c.roots) == 0 {
-		return nil
-	}
-	return append([]string(nil), c.roots...)
-}
-
 func (c *Client) getOllamaConfig() config.OllamaConfig {
 	if c == nil || c.cfg == nil {
 		return config.OllamaConfig{

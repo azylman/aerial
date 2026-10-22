@@ -20,6 +20,33 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
 
+// WithModel sets the LLM model identifier.
+func WithModel(model string) Option { return func(c *Classifier) { c.Model = model } }
+
+// WithLLMFunc sets the LLM invocation function.
+func WithLLMFunc(fn func(ctx context.Context, model, prompt string) (string, error)) Option {
+	return func(c *Classifier) { c.LLMFunc = fn }
+}
+
+// NewClassifier constructs a Classifier with defaults (compatibility wrapper for New).
+func NewClassifier(opts ...Option) *Classifier {
+	return New(nil, opts...)
+}
+
+type classifierMockProcessHandle struct{ pid int }
+
+func (m *classifierMockProcessHandle) Pid() int    { return m.pid }
+func (m *classifierMockProcessHandle) Kill() error { return nil }
+func (m *classifierMockProcessHandle) Wait() error { return nil }
+
+type classifierMockSpawner struct {
+	spawnFn func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error)
+}
+
+func (m *classifierMockSpawner) Spawn(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+	return m.spawnFn(ctx, cfg)
+}
+
 func mkMsg(author, content string, ts time.Time) db.Message {
 	return db.Message{AuthorName: author, Content: content, CreatedAt: ts}
 }
@@ -549,8 +576,8 @@ func TestClassifier_ProcessPools(t *testing.T) {
 		t.Fatalf("primaryLLMFunc failed: called=%v, conf=%f", calledPrimary, resPrimary.Confidence)
 	}
 
-	mockSpawner := &runner.MockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+	mockSpawner := &classifierMockSpawner{
+		spawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 			outR, outW := io.Pipe()
 			inR, inW := io.Pipe()
 			errR, _ := io.Pipe()
@@ -566,7 +593,7 @@ func TestClassifier_ProcessPools(t *testing.T) {
 					}
 				}
 			}()
-			return inW, outR, errR, runner.NewMockProcessHandle(999), nil
+			return inW, outR, errR, &classifierMockProcessHandle{pid: 999}, nil
 		},
 	}
 

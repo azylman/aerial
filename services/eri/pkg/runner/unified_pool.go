@@ -391,11 +391,6 @@ func (p *UnifiedProcessPool) Get(targetKey string) (*StreamingDaemon, bool) {
 	return d, ok && d != nil && d.State() != StateClosed
 }
 
-func (p *UnifiedProcessPool) HasDaemon(targetKey string) bool {
-	_, ok := p.Get(targetKey)
-	return ok
-}
-
 func (p *UnifiedProcessPool) PrewarmedTargets() []string {
 	if p == nil {
 		return nil

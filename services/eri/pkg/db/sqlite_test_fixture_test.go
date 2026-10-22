@@ -71,7 +71,7 @@ func initTestSQLiteDB(t testing.TB) *sql.DB {
 }
 
 func init() {
-	RegisterSQLiteTestHook(initTestSQLite)
+	sqliteTestInitHook = initTestSQLite
 }
 
 func TestSQLiteTestFixtureHook(t *testing.T) {

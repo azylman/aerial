@@ -16,6 +16,7 @@ import (
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/bwmarrin/discordgo"
@@ -120,14 +121,42 @@ func mkDMCmd(id, userID, name string, opts ...*discordgo.ApplicationCommandInter
 	}
 }
 
+// ResetRegisteredGuilds clears cached guild registrations.
+func ResetRegisteredGuilds() {
+	registeredGuilds.Range(func(key, value any) bool {
+		registeredGuilds.Delete(key)
+		return true
+	})
+}
+
+type mockInteractionsProcessHandle struct{}
+
+func (mockInteractionsProcessHandle) Pid() int    { return 12345 }
+func (mockInteractionsProcessHandle) Kill() error { return nil }
+func (mockInteractionsProcessHandle) Wait() error { return nil }
+
+type mockInteractionsDaemonSpawner struct{}
+
+func (mockInteractionsDaemonSpawner) Spawn(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	errR, errW := io.Pipe()
+	go func() {
+		_, _ = outW.Write([]byte("{\"event\":\"init\",\"conversation_id\":\"550e8400-e29b-41d4-a716-446655440000\"}\n"))
+		_ = errW.Close()
+		_, _ = io.Copy(io.Discard, inR)
+	}()
+	return inW, outR, errR, mockInteractionsProcessHandle{}, nil
+}
+
 func newMockProcessPools(threadID string) *queue.WorkerPool {
-	spawner := runner.NewMockDaemonSpawner()
+	spawner := mockInteractionsDaemonSpawner{}
 	mk := func(m string) *runner.UnifiedProcessPool {
 		p := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: m}, spawner)
 		_, _ = p.GetOrCreate(context.Background(), threadID, "")
 		return p
 	}
-	return queue.NewWorkerPool(queue.WorkerPoolConfig{
+	return queue.New(nil, queue.WorkerPoolConfig{
 		ProcessPool:             mk("gemini-2.5-flash"),
 		LowEffortProcessPool:    mk("gemini-2.5-flash"),
 		MediumEffortProcessPool: mk("gemini-3.8-flash-medium"),
@@ -146,7 +175,7 @@ func mockGitOpsUpdater(cfg *config.Config, shouldErr bool) GitOpsChannelUpdater 
 	}
 }
 
-func seedStatusFixtures(store *db.FakeStore, facts, crons, oneShots, active bool) {
+func seedStatusFixtures(store *dbtest.FakeStore, facts, crons, oneShots, active bool) {
 	ctx, now := context.Background(), time.Now().UTC()
 	if crons {
 		if facts {
@@ -270,7 +299,7 @@ func TestApplicationCommandsAndHelpers(t *testing.T) {
 }
 
 func TestRouter_AuthAndDispatch(t *testing.T) {
-	mockPool := queue.NewWorkerPool(queue.WorkerPoolConfig{})
+	mockPool := queue.New(nil, queue.WorkerPoolConfig{})
 
 	tests := []struct {
 		name          string
@@ -380,14 +409,14 @@ func TestRouter_HandleStatus(t *testing.T) {
 			} else if tc.failStore {
 				router.deps.MemoryURL = "http://127.0.0.1:1"
 			}
-			store := db.NewFakeStore()
+			store := dbtest.NewFakeStore()
 			seedStatusFixtures(store, tc.seedFacts, tc.seedCrons, tc.seedOneShots, tc.seedActive)
 
 			if tc.failStore {
 				store.FailNext("GetAllCronSchedules", errors.New("db error"))
 				store.FailNext("GetAllOneShotSchedules", errors.New("db error"))
 				store.FailNext("GetActiveTasks", errors.New("db error"))
-				router.deps.Pool = queue.NewWorkerPool(queue.WorkerPoolConfig{})
+				router.deps.Pool = queue.New(nil, queue.WorkerPoolConfig{})
 			}
 
 			router.deps.Store = store
@@ -437,7 +466,7 @@ func TestRouter_SessionAndQueueCommands(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			router, _, transport, session := setupTestRouter("admin-123", tc.httpStatus)
-			store := db.NewFakeStore()
+			store := dbtest.NewFakeStore()
 			targetChan := "chan-" + tc.name
 
 			if tc.seedPending {

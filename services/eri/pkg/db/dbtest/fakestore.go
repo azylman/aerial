@@ -1,4 +1,4 @@
-package db
+package dbtest
 
 import (
 	"context"
@@ -12,21 +12,137 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
 var (
-	_ Store           = (*FakeStore)(nil)
-	_ MessageStore    = (*FakeStore)(nil)
-	_ ScheduleStore   = (*FakeStore)(nil)
-	_ SessionStore    = (*FakeStore)(nil)
-	_ TranscriptStore = (*FakeStore)(nil)
-	_ PRRegistryStore = (*FakeStore)(nil)
-	_ VanadisStore    = (*FakeStore)(nil)
+	_ db.Store           = (*FakeStore)(nil)
+	_ db.MessageStore    = (*FakeStore)(nil)
+	_ db.ScheduleStore   = (*FakeStore)(nil)
+	_ db.SessionStore    = (*FakeStore)(nil)
+	_ db.TranscriptStore = (*FakeStore)(nil)
+	_ db.PRRegistryStore = (*FakeStore)(nil)
+	_ db.VanadisStore    = (*FakeStore)(nil)
 )
 
 type threadSummaryRecord struct {
 	summary, watermark string
+}
+
+func cloneSlice[T any](src []T) []T {
+	if src == nil {
+		return nil
+	}
+	out := make([]T, len(src))
+	copy(out, src)
+	return out
+}
+
+func cosineSimilarity(a, b []float32) float64 {
+	if len(a) != len(b) || len(a) == 0 {
+		return 0
+	}
+	var dot, normA, normB float64
+	for i := range a {
+		dot += float64(a[i]) * float64(b[i])
+		normA += float64(a[i]) * float64(a[i])
+		normB += float64(b[i]) * float64(b[i])
+	}
+	if normA == 0 || normB == 0 {
+		return 0
+	}
+	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
+}
+
+func normalizeVanadisEffort(effort string) (string, error) {
+	trimmed := strings.ToLower(strings.TrimSpace(effort))
+	if trimmed == "" {
+		return "medium", nil
+	}
+	switch trimmed {
+	case "low", "medium", "high":
+		return trimmed, nil
+	default:
+		return "", fmt.Errorf("invalid vanadis effort %q: must be 'low', 'medium', or 'high'", effort)
+	}
+}
+
+func validateAndNormalizeVanadisBuild(build db.VanadisBuild, chunks []db.VanadisChunk) (db.VanadisBuild, []db.VanadisChunk, error) {
+	buildID := strings.TrimSpace(build.ID)
+	if buildID == "" {
+		return db.VanadisBuild{}, nil, fmt.Errorf("build id cannot be empty")
+	}
+	threadID := strings.TrimSpace(build.ThreadID)
+	if threadID == "" {
+		return db.VanadisBuild{}, nil, fmt.Errorf("thread_id cannot be empty")
+	}
+	objective := strings.TrimSpace(build.Objective)
+	if objective == "" {
+		return db.VanadisBuild{}, nil, fmt.Errorf("objective cannot be empty")
+	}
+	buildTitle := strings.TrimSpace(build.Title)
+	if buildTitle == "" {
+		buildTitle = objective
+	}
+	tier := build.Tier
+	if tier <= 0 {
+		tier = 2
+	}
+	status := strings.TrimSpace(build.Status)
+	if status == "" {
+		status = "running"
+	}
+
+	normBuild := build
+	normBuild.ID, normBuild.ThreadID, normBuild.Objective = buildID, threadID, objective
+	normBuild.Title, normBuild.Tier, normBuild.Status = buildTitle, tier, status
+	normBuild.SharedContext, normBuild.StatusMessageID = strings.TrimSpace(build.SharedContext), strings.TrimSpace(build.StatusMessageID)
+
+	normChunks := make([]db.VanadisChunk, len(chunks))
+	for i, c := range chunks {
+		cid := strings.TrimSpace(c.ID)
+		if cid == "" {
+			return db.VanadisBuild{}, nil, fmt.Errorf("chunk[%d] id cannot be empty", i)
+		}
+		if cb := strings.TrimSpace(c.BuildID); cb != "" && cb != buildID {
+			return db.VanadisBuild{}, nil, fmt.Errorf("chunk[%d] build_id %q does not match build id %q", i, cb, buildID)
+		}
+		title, instructions := strings.TrimSpace(c.Title), strings.TrimSpace(c.Instructions)
+		if title == "" {
+			return db.VanadisBuild{}, nil, fmt.Errorf("chunk[%d] title cannot be empty", i)
+		}
+		if instructions == "" {
+			return db.VanadisBuild{}, nil, fmt.Errorf("chunk[%d] instructions cannot be empty", i)
+		}
+		effort, err := normalizeVanadisEffort(c.Effort)
+		if err != nil {
+			return db.VanadisBuild{}, nil, fmt.Errorf("chunk[%d] %w", i, err)
+		}
+		chunkRepo, cStatus := db.NormalizeRepo(c.Repo), strings.TrimSpace(c.Status)
+		if chunkRepo == "" {
+			chunkRepo = "azylman/aerial"
+		}
+		if cStatus == "" {
+			cStatus = "pending"
+		}
+		files, symbols, criteria := c.TargetFiles, c.TargetSymbols, c.AcceptanceCriteria
+		if files == nil {
+			files = []string{}
+		}
+		if symbols == nil {
+			symbols = []string{}
+		}
+		if criteria == nil {
+			criteria = []string{}
+		}
+
+		normChunks[i] = db.VanadisChunk{
+			ID: cid, BuildID: buildID, ChunkIndex: c.ChunkIndex, Repo: chunkRepo, Title: title, Instructions: instructions,
+			TargetFiles: files, TargetSymbols: symbols, Effort: effort, AcceptanceCriteria: criteria, Status: cStatus, PRNumber: c.PRNumber, StartedAt: c.StartedAt,
+		}
+	}
+	return normBuild, normChunks, nil
 }
 
 func setIf[T comparable](dst *T, src T) {
@@ -60,32 +176,32 @@ type FakeStore struct {
 	closed   bool
 	failNext map[string]error
 
-	messages            map[string]*Message
+	messages            map[string]*db.Message
 	messageOrder        []string
 	nextRowID, nextPRID int64
 
-	sessions        map[string]*SessionInfo
+	sessions        map[string]*db.SessionInfo
 	threadSummaries map[string]threadSummaryRecord
 
-	oneShots map[string]*OneShotSchedule
-	crons    map[string]*CronSchedule
-	runs     map[string]*ScheduleRun
+	oneShots map[string]*db.OneShotSchedule
+	crons    map[string]*db.CronSchedule
+	runs     map[string]*db.ScheduleRun
 
-	sessionSummaries map[string]*SessionSummary
-	transcriptSteps  map[string][]TranscriptStep
+	sessionSummaries map[string]*db.SessionSummary
+	transcriptSteps  map[string][]db.TranscriptStep
 
-	prRecords     map[string]*PRRecord
-	vanadisBuilds map[string]*VanadisBuild
-	vanadisChunks map[string]*VanadisChunk
+	prRecords     map[string]*db.PRRecord
+	vanadisBuilds map[string]*db.VanadisBuild
+	vanadisChunks map[string]*db.VanadisChunk
 }
 
 // NewFakeStore constructs an initialized, empty in-memory FakeStore.
 func NewFakeStore() *FakeStore {
-	f := &FakeStore{failNext: make(map[string]error), messages: make(map[string]*Message), messageOrder: make([]string, 0)}
-	f.sessions, f.threadSummaries = make(map[string]*SessionInfo), make(map[string]threadSummaryRecord)
-	f.oneShots, f.crons, f.runs = make(map[string]*OneShotSchedule), make(map[string]*CronSchedule), make(map[string]*ScheduleRun)
-	f.sessionSummaries, f.transcriptSteps = make(map[string]*SessionSummary), make(map[string][]TranscriptStep)
-	f.prRecords, f.vanadisBuilds, f.vanadisChunks = make(map[string]*PRRecord), make(map[string]*VanadisBuild), make(map[string]*VanadisChunk)
+	f := &FakeStore{failNext: make(map[string]error), messages: make(map[string]*db.Message), messageOrder: make([]string, 0)}
+	f.sessions, f.threadSummaries = make(map[string]*db.SessionInfo), make(map[string]threadSummaryRecord)
+	f.oneShots, f.crons, f.runs = make(map[string]*db.OneShotSchedule), make(map[string]*db.CronSchedule), make(map[string]*db.ScheduleRun)
+	f.sessionSummaries, f.transcriptSteps = make(map[string]*db.SessionSummary), make(map[string][]db.TranscriptStep)
+	f.prRecords, f.vanadisBuilds, f.vanadisChunks = make(map[string]*db.PRRecord), make(map[string]*db.VanadisBuild), make(map[string]*db.VanadisChunk)
 	return f
 }
 
@@ -159,7 +275,7 @@ func clonePtr[T any](v *T) *T {
 	return &cp
 }
 
-func cloneMessage(m *Message) *Message {
+func cloneMessage(m *db.Message) *db.Message {
 	if m == nil {
 		return nil
 	}
@@ -169,7 +285,7 @@ func cloneMessage(m *Message) *Message {
 	return &cp
 }
 
-func cloneRun(r *ScheduleRun) *ScheduleRun {
+func cloneRun(r *db.ScheduleRun) *db.ScheduleRun {
 	if r == nil {
 		return nil
 	}
@@ -178,7 +294,7 @@ func cloneRun(r *ScheduleRun) *ScheduleRun {
 	return &cp
 }
 
-func cloneSessionSummary(s *SessionSummary) *SessionSummary {
+func cloneSessionSummary(s *db.SessionSummary) *db.SessionSummary {
 	if s == nil {
 		return nil
 	}
@@ -194,7 +310,7 @@ func cloneSliceNonNil[T any](s []T) []T {
 	return cloneSlice(s)
 }
 
-func cloneVanadisChunk(c *VanadisChunk) VanadisChunk {
+func cloneVanadisChunk(c *db.VanadisChunk) db.VanadisChunk {
 	cp := *c
 	cp.TargetFiles, cp.TargetSymbols = cloneSliceNonNil(c.TargetFiles), cloneSliceNonNil(c.TargetSymbols)
 	cp.AcceptanceCriteria = cloneSliceNonNil(c.AcceptanceCriteria)
@@ -229,7 +345,7 @@ func textContainsAll(text, qLower string, words []string) bool {
 	return len(words) > 0 && !slices.ContainsFunc(words, func(w string) bool { return !strings.Contains(lower, w) })
 }
 
-func (f *FakeStore) insertMessageLocked(msg Message) {
+func (f *FakeStore) insertMessageLocked(msg db.Message) {
 	if _, exists := f.messages[msg.ID]; exists {
 		return
 	}
@@ -242,20 +358,20 @@ func (f *FakeStore) insertMessageLocked(msg Message) {
 		msg.UpdatedAt = now
 	}
 	if msg.Status == "" {
-		msg.Status = StatusPending
+		msg.Status = db.StatusPending
 	}
 	f.messages[msg.ID] = cloneMessage(&msg)
 	f.messageOrder = append(f.messageOrder, msg.ID)
 }
 
-func (f *FakeStore) InsertMessage(ctx context.Context, msg Message) error {
+func (f *FakeStore) InsertMessage(ctx context.Context, msg db.Message) error {
 	return f.withLockErr("InsertMessage", func() error {
 		f.insertMessageLocked(msg)
 		return nil
 	})
 }
 
-func (f *FakeStore) mutateMessage(method, id string, fn func(*Message)) error {
+func (f *FakeStore) mutateMessage(method, id string, fn func(*db.Message)) error {
 	return f.withLockErr(method, func() error {
 		if m, ok := f.messages[id]; ok {
 			fn(m)
@@ -266,29 +382,31 @@ func (f *FakeStore) mutateMessage(method, id string, fn func(*Message)) error {
 }
 
 func (f *FakeStore) UpdateMessageStatus(ctx context.Context, id, status, errorMsg string) error {
-	return f.mutateMessage("UpdateMessageStatus", id, func(m *Message) { m.Status, m.ErrorMessage = status, errorMsg })
+	return f.mutateMessage("UpdateMessageStatus", id, func(m *db.Message) { m.Status, m.ErrorMessage = status, errorMsg })
 }
 
 func (f *FakeStore) UpdateMessageCompleted(ctx context.Context, id, responseText string) error {
-	return f.mutateMessage("UpdateMessageCompleted", id, func(m *Message) { m.Status, m.ResponseText = StatusCompleted, responseText })
+	return f.mutateMessage("UpdateMessageCompleted", id, func(m *db.Message) { m.Status, m.ResponseText = db.StatusCompleted, responseText })
 }
 
 func (f *FakeStore) IncrementMessageRetry(ctx context.Context, id, errorMsg string) error {
-	return f.mutateMessage("IncrementMessageRetry", id, func(m *Message) {
+	return f.mutateMessage("IncrementMessageRetry", id, func(m *db.Message) {
 		m.RetryCount++
 		m.ErrorMessage = errorMsg
 	})
 }
 
 func (f *FakeStore) ResetMessageToPendingWithRestart(ctx context.Context, id, reason string) error {
-	return f.mutateMessage("ResetMessageToPendingWithRestart", id, func(m *Message) { m.Status, m.RestartCount, m.ErrorMessage = StatusPending, m.RestartCount+1, reason })
+	return f.mutateMessage("ResetMessageToPendingWithRestart", id, func(m *db.Message) {
+		m.Status, m.RestartCount, m.ErrorMessage = db.StatusPending, m.RestartCount+1, reason
+	})
 }
 
-func (f *FakeStore) GetPendingOrProcessingMessages(ctx context.Context, limit int) ([]Message, error) {
-	return withFakeLock(f, "GetPendingOrProcessingMessages", func() ([]Message, error) {
-		var results []Message
+func (f *FakeStore) GetPendingOrProcessingMessages(ctx context.Context, limit int) ([]db.Message, error) {
+	return withFakeLock(f, "GetPendingOrProcessingMessages", func() ([]db.Message, error) {
+		var results []db.Message
 		for _, id := range f.messageOrder {
-			if m := f.messages[id]; m != nil && (m.Status == StatusPending || m.Status == StatusProcessing) {
+			if m := f.messages[id]; m != nil && (m.Status == db.StatusPending || m.Status == db.StatusProcessing) {
 				results = append(results, *cloneMessage(m))
 				if limit > 0 && len(results) >= limit {
 					break
@@ -299,8 +417,8 @@ func (f *FakeStore) GetPendingOrProcessingMessages(ctx context.Context, limit in
 	})
 }
 
-func (f *FakeStore) GetMessage(ctx context.Context, id string) (*Message, error) {
-	return withFakeLock(f, "GetMessage", func() (*Message, error) {
+func (f *FakeStore) GetMessage(ctx context.Context, id string) (*db.Message, error) {
+	return withFakeLock(f, "GetMessage", func() (*db.Message, error) {
 		if m, ok := f.messages[id]; ok {
 			return cloneMessage(m), nil
 		}
@@ -318,10 +436,10 @@ func (f *FakeStore) MessageExists(ctx context.Context, id string) (bool, error) 
 func (f *FakeStore) ClaimPendingMessage(ctx context.Context, id string) (bool, error) {
 	return withFakeLock(f, "ClaimPendingMessage", func() (bool, error) {
 		m, ok := f.messages[id]
-		if !ok || m.Status != StatusPending {
+		if !ok || m.Status != db.StatusPending {
 			return false, nil
 		}
-		m.Status, m.UpdatedAt = StatusProcessing, time.Now().UTC()
+		m.Status, m.UpdatedAt = db.StatusProcessing, time.Now().UTC()
 		return true, nil
 	})
 }
@@ -340,10 +458,10 @@ func (f *FakeStore) GetActiveRecentThreadIDs(ctx context.Context, since time.Dur
 	})
 }
 
-func (f *FakeStore) GetRecentThreadMessages(ctx context.Context, threadID string, limit int) ([]Message, error) {
-	return withFakeLock(f, "GetRecentThreadMessages", func() ([]Message, error) {
+func (f *FakeStore) GetRecentThreadMessages(ctx context.Context, threadID string, limit int) ([]db.Message, error) {
+	return withFakeLock(f, "GetRecentThreadMessages", func() ([]db.Message, error) {
 		limit = defaultVal(limit, 10)
-		var matches []Message
+		var matches []db.Message
 		for i := len(f.messageOrder) - 1; i >= 0; i-- {
 			if m := f.messages[f.messageOrder[i]]; m != nil && m.ThreadID == threadID {
 				matches = append(matches, *cloneMessage(m))
@@ -365,11 +483,11 @@ func (f *FakeStore) SetSessionUpdatedAt(threadID string, t time.Time) {
 	})
 }
 
-func (f *FakeStore) GetActiveTasks(ctx context.Context) ([]ActiveTask, error) {
-	return withFakeLock(f, "GetActiveTasks", func() ([]ActiveTask, error) {
-		var activeMsgs []*Message
+func (f *FakeStore) GetActiveTasks(ctx context.Context) ([]db.ActiveTask, error) {
+	return withFakeLock(f, "GetActiveTasks", func() ([]db.ActiveTask, error) {
+		var activeMsgs []*db.Message
 		for _, id := range f.messageOrder {
-			if m := f.messages[id]; m != nil && (m.Status == StatusPending || m.Status == StatusProcessing) {
+			if m := f.messages[id]; m != nil && (m.Status == db.StatusPending || m.Status == db.StatusProcessing) {
 				activeMsgs = append(activeMsgs, m)
 			}
 		}
@@ -379,54 +497,54 @@ func (f *FakeStore) GetActiveTasks(ctx context.Context) ([]ActiveTask, error) {
 		if len(activeMsgs) > 50 {
 			activeMsgs = activeMsgs[:50]
 		}
-		tasks := make([]ActiveTask, len(activeMsgs))
+		tasks := make([]db.ActiveTask, len(activeMsgs))
 		for i, m := range activeMsgs {
 			summary := m.Summary
 			if summary == "" {
-				summary = CleanTaskSummary(m.Content)
+				summary = db.CleanTaskSummary(m.Content)
 			}
-			tasks[i] = ActiveTask{ID: m.ID, RowID: m.RowID, ThreadID: m.ThreadID, SessionID: f.sessions[m.ThreadID].internalID(), AuthorName: m.AuthorName, AuthorID: m.AuthorID, Prompt: m.Content, Summary: summary, Status: m.Status, RetryCount: m.RetryCount, ScheduleRunID: m.ScheduleRunID, CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt}
+			tasks[i] = db.ActiveTask{ID: m.ID, RowID: m.RowID, ThreadID: m.ThreadID, SessionID: sessionInternalID(f.sessions[m.ThreadID]), AuthorName: m.AuthorName, AuthorID: m.AuthorID, Prompt: m.Content, Summary: summary, Status: m.Status, RetryCount: m.RetryCount, ScheduleRunID: m.ScheduleRunID, CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt}
 		}
 		return tasks, nil
 	})
 }
 
-func (s *SessionInfo) internalID() string {
+func sessionInternalID(s *db.SessionInfo) string {
 	if s == nil {
 		return ""
 	}
 	return s.InternalSessionID
 }
 
-func (s *SessionInfo) prevID() string {
+func sessionPrevID(s *db.SessionInfo) string {
 	if s == nil {
 		return ""
 	}
 	return s.PreviousSessionID
 }
 
-func (s *SessionInfo) turnCount() int {
+func sessionTurnCount(s *db.SessionInfo) int {
 	if s == nil {
 		return 0
 	}
 	return s.TurnCount
 }
 
-func (f *FakeStore) getOrCreateSession(key string) *SessionInfo {
+func (f *FakeStore) getOrCreateSession(key string) *db.SessionInfo {
 	s := f.sessions[key]
 	if s == nil {
-		s = &SessionInfo{ThreadID: key, CreatedAt: time.Now().UTC()}
+		s = &db.SessionInfo{ThreadID: key, CreatedAt: time.Now().UTC()}
 		f.sessions[key] = s
 	}
 	return s
 }
 
 func (f *FakeStore) GetSessionID(ctx context.Context, threadID string) (string, error) {
-	return withFakeLock(f, "GetSessionID", func() (string, error) { return f.sessions[threadID].internalID(), nil })
+	return withFakeLock(f, "GetSessionID", func() (string, error) { return sessionInternalID(f.sessions[threadID]), nil })
 }
 
 func (f *FakeStore) GetPreviousSessionID(ctx context.Context, threadID string) (string, error) {
-	return withFakeLock(f, "GetPreviousSessionID", func() (string, error) { return f.sessions[threadID].prevID(), nil })
+	return withFakeLock(f, "GetPreviousSessionID", func() (string, error) { return sessionPrevID(f.sessions[threadID]), nil })
 }
 
 func (f *FakeStore) SaveSessionID(ctx context.Context, threadID, sessionID string) error {
@@ -447,7 +565,7 @@ func (f *FakeStore) IncrementSessionTurnCount(ctx context.Context, sessionKey st
 }
 
 func (f *FakeStore) GetSessionTurnCount(ctx context.Context, sessionKey string) (int, error) {
-	return withFakeLock(f, "GetSessionTurnCount", func() (int, error) { return f.sessions[sessionKey].turnCount(), nil })
+	return withFakeLock(f, "GetSessionTurnCount", func() (int, error) { return sessionTurnCount(f.sessions[sessionKey]), nil })
 }
 
 func (f *FakeStore) RotateSessionID(ctx context.Context, sessionKey, newSessionID string) error {
@@ -455,7 +573,7 @@ func (f *FakeStore) RotateSessionID(ctx context.Context, sessionKey, newSessionI
 		now := time.Now().UTC()
 		s := f.sessions[sessionKey]
 		if s == nil {
-			f.sessions[sessionKey] = &SessionInfo{ThreadID: sessionKey, InternalSessionID: newSessionID, CreatedAt: now, UpdatedAt: now}
+			f.sessions[sessionKey] = &db.SessionInfo{ThreadID: sessionKey, InternalSessionID: newSessionID, CreatedAt: now, UpdatedAt: now}
 			return nil
 		}
 		s.PreviousSessionID, s.InternalSessionID, s.TurnCount, s.UpdatedAt = s.InternalSessionID, newSessionID, 0, now
@@ -463,15 +581,15 @@ func (f *FakeStore) RotateSessionID(ctx context.Context, sessionKey, newSessionI
 	})
 }
 
-func (f *FakeStore) FindUnrotatedSessions(ctx context.Context, minTurns int, maxAge ...time.Duration) ([]SessionInfo, error) {
-	return withFakeLock(f, "FindUnrotatedSessions", func() ([]SessionInfo, error) {
+func (f *FakeStore) FindUnrotatedSessions(ctx context.Context, minTurns int, maxAge ...time.Duration) ([]db.SessionInfo, error) {
+	return withFakeLock(f, "FindUnrotatedSessions", func() ([]db.SessionInfo, error) {
 		minTurns = defaultVal(minTurns, session.DefaultMaxSessionTurns)
-		limitAge := DefaultUnrotatedSessionMaxAge
+		limitAge := db.DefaultUnrotatedSessionMaxAge
 		if len(maxAge) > 0 {
 			limitAge = maxAge[0]
 		}
 		cutoff := time.Now().UTC().Add(-limitAge)
-		var res []SessionInfo
+		var res []db.SessionInfo
 		for _, s := range f.sessions {
 			if s != nil && s.TurnCount > minTurns && (limitAge <= 0 || !s.UpdatedAt.Before(cutoff)) {
 				res = append(res, *s)
@@ -502,15 +620,15 @@ func maxTime(dst *time.Time, t time.Time) {
 	}
 }
 
-func (f *FakeStore) GetSessionActivityStats(ctx context.Context, threadID string) (*SessionActivityStats, error) {
-	return withFakeLock(f, "GetSessionActivityStats", func() (*SessionActivityStats, error) {
-		stats := &SessionActivityStats{}
+func (f *FakeStore) GetSessionActivityStats(ctx context.Context, threadID string) (*db.SessionActivityStats, error) {
+	return withFakeLock(f, "GetSessionActivityStats", func() (*db.SessionActivityStats, error) {
+		stats := &db.SessionActivityStats{}
 		if s := f.sessions[threadID]; s != nil {
 			stats.InternalSessionID, stats.TurnCount, stats.SessionUpdatedAt = s.InternalSessionID, s.TurnCount, s.UpdatedAt
 		}
 		for _, id := range f.messageOrder {
 			m := f.messages[id]
-			if m != nil && m.ThreadID == threadID && m.Status == StatusCompleted && !strings.HasPrefix(m.ResponseText, "[EXPIRED_STALE]") && !strings.HasPrefix(m.ResponseText, "[AMBIENT") && !strings.HasPrefix(m.ResponseText, "[IGNORED") {
+			if m != nil && m.ThreadID == threadID && m.Status == db.StatusCompleted && !strings.HasPrefix(m.ResponseText, "[EXPIRED_STALE]") && !strings.HasPrefix(m.ResponseText, "[AMBIENT") && !strings.HasPrefix(m.ResponseText, "[IGNORED") {
 				stats.CompletedTurns++
 				maxTime(&stats.LastMessageAt, m.UpdatedAt)
 				maxTime(&stats.LastCompletedMessageCreatedAt, m.CreatedAt)
@@ -520,7 +638,7 @@ func (f *FakeStore) GetSessionActivityStats(ctx context.Context, threadID string
 	})
 }
 
-func (f *FakeStore) SetSessionInfo(s SessionInfo) {
+func (f *FakeStore) SetSessionInfo(s db.SessionInfo) {
 	f.withLock(func() { f.sessions[s.ThreadID] = clonePtr(&s) })
 }
 
@@ -537,7 +655,7 @@ func (f *FakeStore) GetExternalConversationID(ctx context.Context, internalID st
 	})
 }
 
-func (f *FakeStore) CreateOneShotSchedule(ctx context.Context, s OneShotSchedule) error {
+func (f *FakeStore) CreateOneShotSchedule(ctx context.Context, s db.OneShotSchedule) error {
 	return f.withLockErr("CreateOneShotSchedule", func() error {
 		if s.CreatedAt.IsZero() {
 			s.CreatedAt = time.Now().UTC()
@@ -547,19 +665,19 @@ func (f *FakeStore) CreateOneShotSchedule(ctx context.Context, s OneShotSchedule
 	})
 }
 
-func (f *FakeStore) GetDueOneShotSchedules(ctx context.Context) ([]OneShotSchedule, error) {
-	return withFakeLock(f, "GetDueOneShotSchedules", func() ([]OneShotSchedule, error) {
+func (f *FakeStore) GetDueOneShotSchedules(ctx context.Context) ([]db.OneShotSchedule, error) {
+	return withFakeLock(f, "GetDueOneShotSchedules", func() ([]db.OneShotSchedule, error) {
 		now := time.Now().UTC()
-		due := mapValuesFiltered(f.oneShots, func(s *OneShotSchedule) bool { return !s.RunAt.After(now) })
+		due := mapValuesFiltered(f.oneShots, func(s *db.OneShotSchedule) bool { return !s.RunAt.After(now) })
 		sort.Slice(due, func(i, j int) bool { return due[i].RunAt.Before(due[j].RunAt) })
 		return due, nil
 	})
 }
 
-func (f *FakeStore) InsertMessageAndConsumeOneShot(ctx context.Context, scheduleID string, msg Message) error {
+func (f *FakeStore) InsertMessageAndConsumeOneShot(ctx context.Context, scheduleID string, msg db.Message) error {
 	return f.withLockErr("InsertMessageAndConsumeOneShot", func() error {
 		if _, exists := f.oneShots[scheduleID]; !exists {
-			return ErrScheduleAlreadyConsumed
+			return db.ErrScheduleAlreadyConsumed
 		}
 		delete(f.oneShots, scheduleID)
 		f.insertMessageLocked(msg)
@@ -567,15 +685,15 @@ func (f *FakeStore) InsertMessageAndConsumeOneShot(ctx context.Context, schedule
 	})
 }
 
-func (f *FakeStore) GetAllOneShotSchedules(ctx context.Context, threadID string) ([]OneShotSchedule, error) {
-	return withFakeLock(f, "GetAllOneShotSchedules", func() ([]OneShotSchedule, error) {
-		results := mapValuesFiltered(f.oneShots, func(s *OneShotSchedule) bool { return threadID == "" || s.ThreadID == threadID })
+func (f *FakeStore) GetAllOneShotSchedules(ctx context.Context, threadID string) ([]db.OneShotSchedule, error) {
+	return withFakeLock(f, "GetAllOneShotSchedules", func() ([]db.OneShotSchedule, error) {
+		results := mapValuesFiltered(f.oneShots, func(s *db.OneShotSchedule) bool { return threadID == "" || s.ThreadID == threadID })
 		sort.Slice(results, func(i, j int) bool { return results[i].RunAt.Before(results[j].RunAt) })
 		return results, nil
 	})
 }
 
-func (f *FakeStore) CreateCronSchedule(ctx context.Context, c CronSchedule) error {
+func (f *FakeStore) CreateCronSchedule(ctx context.Context, c db.CronSchedule) error {
 	return f.withLockErr("CreateCronSchedule", func() error {
 		if c.CreatedAt.IsZero() {
 			c.CreatedAt = time.Now().UTC()
@@ -585,18 +703,18 @@ func (f *FakeStore) CreateCronSchedule(ctx context.Context, c CronSchedule) erro
 	})
 }
 
-func (f *FakeStore) GetDueCronSchedules(ctx context.Context) ([]CronSchedule, error) {
-	return withFakeLock(f, "GetDueCronSchedules", func() ([]CronSchedule, error) {
+func (f *FakeStore) GetDueCronSchedules(ctx context.Context) ([]db.CronSchedule, error) {
+	return withFakeLock(f, "GetDueCronSchedules", func() ([]db.CronSchedule, error) {
 		now := time.Now().UTC()
-		due := mapValuesFiltered(f.crons, func(c *CronSchedule) bool { return c.Enabled && !c.NextRunAt.After(now) })
+		due := mapValuesFiltered(f.crons, func(c *db.CronSchedule) bool { return c.Enabled && !c.NextRunAt.After(now) })
 		sort.Slice(due, func(i, j int) bool { return due[i].NextRunAt.Before(due[j].NextRunAt) })
 		return due, nil
 	})
 }
 
-func (f *FakeStore) GetAllCronSchedules(ctx context.Context, targetID string) ([]CronSchedule, error) {
-	return withFakeLock(f, "GetAllCronSchedules", func() ([]CronSchedule, error) {
-		results := mapValuesFiltered(f.crons, func(c *CronSchedule) bool { return targetID == "" || c.TargetID == targetID })
+func (f *FakeStore) GetAllCronSchedules(ctx context.Context, targetID string) ([]db.CronSchedule, error) {
+	return withFakeLock(f, "GetAllCronSchedules", func() ([]db.CronSchedule, error) {
+		results := mapValuesFiltered(f.crons, func(c *db.CronSchedule) bool { return targetID == "" || c.TargetID == targetID })
 		sort.Slice(results, func(i, j int) bool { return results[i].NextRunAt.Before(results[j].NextRunAt) })
 		return results, nil
 	})
@@ -611,7 +729,7 @@ func (f *FakeStore) UpdateCronNextRun(ctx context.Context, id string, nextRunAt 
 	})
 }
 
-func (f *FakeStore) CreateScheduleRun(ctx context.Context, run ScheduleRun) error {
+func (f *FakeStore) CreateScheduleRun(ctx context.Context, run db.ScheduleRun) error {
 	return f.withLockErr("CreateScheduleRun", func() error {
 		if run.StartedAt.IsZero() {
 			run.StartedAt = time.Now().UTC()
@@ -621,7 +739,7 @@ func (f *FakeStore) CreateScheduleRun(ctx context.Context, run ScheduleRun) erro
 	})
 }
 
-func (f *FakeStore) UpdateScheduleRunStatus(ctx context.Context, params UpdateRunParams) error {
+func (f *FakeStore) UpdateScheduleRunStatus(ctx context.Context, params db.UpdateRunParams) error {
 	return f.withLockErr("UpdateScheduleRunStatus", func() error {
 		r := f.runs[params.RunID]
 		if r == nil {
@@ -639,9 +757,9 @@ func (f *FakeStore) UpdateScheduleRunStatus(ctx context.Context, params UpdateRu
 	})
 }
 
-func (f *FakeStore) GetScheduleRunsPaginated(ctx context.Context, limit, offset int, scheduleID, status string) ([]ScheduleRun, int, error) {
-	return withFakeLock2(f, "GetScheduleRunsPaginated", func() ([]ScheduleRun, int, error) {
-		filtered := mapValuesFiltered(f.runs, func(r *ScheduleRun) bool {
+func (f *FakeStore) GetScheduleRunsPaginated(ctx context.Context, limit, offset int, scheduleID, status string) ([]db.ScheduleRun, int, error) {
+	return withFakeLock2(f, "GetScheduleRunsPaginated", func() ([]db.ScheduleRun, int, error) {
+		filtered := mapValuesFiltered(f.runs, func(r *db.ScheduleRun) bool {
 			return (scheduleID == "" || r.ScheduleID == scheduleID) && (status == "" || r.Status == status)
 		})
 		sort.Slice(filtered, func(i, j int) bool {
@@ -658,8 +776,8 @@ func (f *FakeStore) GetScheduleRunsPaginated(ctx context.Context, limit, offset 
 	})
 }
 
-func (f *FakeStore) GetScheduleRun(id string) (*ScheduleRun, error) {
-	return withFakeLock(f, "GetScheduleRun", func() (*ScheduleRun, error) {
+func (f *FakeStore) GetScheduleRun(id string) (*db.ScheduleRun, error) {
+	return withFakeLock(f, "GetScheduleRun", func() (*db.ScheduleRun, error) {
 		if r, ok := f.runs[id]; ok && r != nil {
 			return cloneRun(r), nil
 		}
@@ -674,9 +792,9 @@ func updateNextRun(next **time.Time, t time.Time) {
 	}
 }
 
-func (f *FakeStore) GetScheduleSummaryMetrics(ctx context.Context) (ScheduleSummaryMetrics, error) {
-	return withFakeLock(f, "GetScheduleSummaryMetrics", func() (ScheduleSummaryMetrics, error) {
-		var m ScheduleSummaryMetrics
+func (f *FakeStore) GetScheduleSummaryMetrics(ctx context.Context) (db.ScheduleSummaryMetrics, error) {
+	return withFakeLock(f, "GetScheduleSummaryMetrics", func() (db.ScheduleSummaryMetrics, error) {
+		var m db.ScheduleSummaryMetrics
 		for _, c := range f.crons {
 			if c != nil && c.Enabled {
 				m.CronCount++
@@ -734,7 +852,7 @@ func (f *FakeStore) PruneScheduleRuns(ctx context.Context, maxCount int, maxAge 
 			}
 		}
 		if len(f.runs) > maxCount {
-			var list []*ScheduleRun
+			var list []*db.ScheduleRun
 			for _, r := range f.runs {
 				list = append(list, r)
 			}
@@ -750,19 +868,19 @@ func (f *FakeStore) PruneScheduleRuns(ctx context.Context, maxCount int, maxAge 
 	})
 }
 
-func (f *FakeStore) GetSessionSyncStates(ctx context.Context) (map[string]SessionSyncState, error) {
-	return withFakeLock(f, "GetSessionSyncStates", func() (map[string]SessionSyncState, error) {
-		res := make(map[string]SessionSyncState, len(f.sessionSummaries))
+func (f *FakeStore) GetSessionSyncStates(ctx context.Context) (map[string]db.SessionSyncState, error) {
+	return withFakeLock(f, "GetSessionSyncStates", func() (map[string]db.SessionSyncState, error) {
+		res := make(map[string]db.SessionSyncState, len(f.sessionSummaries))
 		for id, s := range f.sessionSummaries {
 			if s != nil {
-				res[id] = SessionSyncState{SessionID: id, LastMtime: s.LastMtime, LastIndexedStep: s.LastIndexedStep, IsSettled: s.IsSettled}
+				res[id] = db.SessionSyncState{SessionID: id, LastMtime: s.LastMtime, LastIndexedStep: s.LastIndexedStep, IsSettled: s.IsSettled}
 			}
 		}
 		return res, nil
 	})
 }
 
-func (f *FakeStore) UpsertSessionSummary(ctx context.Context, summary SessionSummary) error {
+func (f *FakeStore) UpsertSessionSummary(ctx context.Context, summary db.SessionSummary) error {
 	return f.withLockErr("UpsertSessionSummary", func() error {
 		if strings.TrimSpace(summary.SessionID) == "" {
 			return fmt.Errorf("session ID cannot be empty")
@@ -804,7 +922,7 @@ func (f *FakeStore) UpsertSessionSummary(ctx context.Context, summary SessionSum
 	})
 }
 
-func (f *FakeStore) BatchInsertTranscriptSteps(ctx context.Context, steps []TranscriptStep) error {
+func (f *FakeStore) BatchInsertTranscriptSteps(ctx context.Context, steps []db.TranscriptStep) error {
 	return f.withLockErr("BatchInsertTranscriptSteps", func() error {
 		now := time.Now().UTC()
 		for _, s := range steps {
@@ -815,7 +933,7 @@ func (f *FakeStore) BatchInsertTranscriptSteps(ctx context.Context, steps []Tran
 			if cp.CreatedAt.IsZero() {
 				cp.CreatedAt = now
 			}
-			if !slices.ContainsFunc(f.transcriptSteps[s.SessionID], func(e TranscriptStep) bool { return e.StepIndex == s.StepIndex }) {
+			if !slices.ContainsFunc(f.transcriptSteps[s.SessionID], func(e db.TranscriptStep) bool { return e.StepIndex == s.StepIndex }) {
 				f.transcriptSteps[s.SessionID] = append(f.transcriptSteps[s.SessionID], cp)
 			}
 		}
@@ -823,9 +941,9 @@ func (f *FakeStore) BatchInsertTranscriptSteps(ctx context.Context, steps []Tran
 	})
 }
 
-func (f *FakeStore) SearchSessionSummaries(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]SessionSummary, error) {
-	return withFakeLock(f, "SearchSessionSummaries", func() ([]SessionSummary, error) {
-		hasEmbedding, queryText := len(embedding) == ExpectedEmbeddingDim, strings.TrimSpace(queryText)
+func (f *FakeStore) SearchSessionSummaries(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]db.SessionSummary, error) {
+	return withFakeLock(f, "SearchSessionSummaries", func() ([]db.SessionSummary, error) {
+		hasEmbedding, queryText := len(embedding) == db.ExpectedEmbeddingDim, strings.TrimSpace(queryText)
 		hasText := queryText != ""
 		if !hasEmbedding && !hasText {
 			return nil, nil
@@ -835,13 +953,13 @@ func (f *FakeStore) SearchSessionSummaries(ctx context.Context, embedding []floa
 			minScore = 0.0
 		}
 		qLower, words := strings.ToLower(queryText), strings.Fields(strings.ToLower(queryText))
-		var scored []SessionSummary
+		var scored []db.SessionSummary
 		for _, s := range f.sessionSummaries {
 			if s == nil {
 				continue
 			}
 			var sim, textScore float64
-			if hasEmbedding && len(s.Embedding) == ExpectedEmbeddingDim {
+			if hasEmbedding && len(s.Embedding) == db.ExpectedEmbeddingDim {
 				sim = cosineSimilarity(embedding, s.Embedding)
 			}
 			if hasText {
@@ -864,15 +982,15 @@ func (f *FakeStore) SearchSessionSummaries(ctx context.Context, embedding []floa
 	})
 }
 
-func (f *FakeStore) SearchTranscriptSteps(ctx context.Context, queryText, sessionFilter, toolFilter string, limit int) ([]TranscriptStep, error) {
-	return withFakeLock(f, "SearchTranscriptSteps", func() ([]TranscriptStep, error) {
+func (f *FakeStore) SearchTranscriptSteps(ctx context.Context, queryText, sessionFilter, toolFilter string, limit int) ([]db.TranscriptStep, error) {
+	return withFakeLock(f, "SearchTranscriptSteps", func() ([]db.TranscriptStep, error) {
 		queryText, sessionFilter, toolFilter = strings.TrimSpace(queryText), strings.TrimSpace(sessionFilter), strings.TrimSpace(toolFilter)
 		if queryText == "" && sessionFilter == "" && toolFilter == "" {
 			return nil, nil
 		}
 		limit = defaultVal(limit, 20)
 		qLower, words := strings.ToLower(queryText), strings.Fields(strings.ToLower(queryText))
-		var matched []TranscriptStep
+		var matched []db.TranscriptStep
 		for sid, steps := range f.transcriptSteps {
 			if sessionFilter != "" && sid != sessionFilter {
 				continue
@@ -891,8 +1009,8 @@ func (f *FakeStore) SearchTranscriptSteps(ctx context.Context, queryText, sessio
 	})
 }
 
-func (f *FakeStore) GetTranscriptStepRange(ctx context.Context, sessionID string, startStep, endStep int) ([]TranscriptStep, error) {
-	return withFakeLock(f, "GetTranscriptStepRange", func() ([]TranscriptStep, error) {
+func (f *FakeStore) GetTranscriptStepRange(ctx context.Context, sessionID string, startStep, endStep int) ([]db.TranscriptStep, error) {
+	return withFakeLock(f, "GetTranscriptStepRange", func() ([]db.TranscriptStep, error) {
 		sessionID = strings.TrimSpace(sessionID)
 		if sessionID == "" {
 			return nil, nil
@@ -907,7 +1025,7 @@ func (f *FakeStore) GetTranscriptStepRange(ctx context.Context, sessionID string
 		if !exists {
 			return nil, nil
 		}
-		var matched []TranscriptStep
+		var matched []db.TranscriptStep
 		for _, s := range steps {
 			if s.StepIndex >= startStep && s.StepIndex <= endStep {
 				cp := s
@@ -921,12 +1039,12 @@ func (f *FakeStore) GetTranscriptStepRange(ctx context.Context, sessionID string
 }
 
 func prKey(repo string, prNumber int) string {
-	return fmt.Sprintf("%s/%d", normalizeRepo(repo), prNumber)
+	return fmt.Sprintf("%s/%d", db.NormalizeRepo(repo), prNumber)
 }
 
-func (f *FakeStore) UpsertPR(ctx context.Context, record PRRecord) error {
+func (f *FakeStore) UpsertPR(ctx context.Context, record db.PRRecord) error {
 	return f.withLockErr("UpsertPR", func() error {
-		norm, err := validateAndNormalizeUpsertPR(record)
+		norm, err := db.ValidateAndNormalizeUpsertPR(record)
 		if err != nil {
 			return err
 		}
@@ -952,19 +1070,19 @@ func (f *FakeStore) UpsertPR(ctx context.Context, record PRRecord) error {
 	})
 }
 
-func (f *FakeStore) getPRRecord(repo string, prNumber int) (*PRRecord, error) {
-	if repo = normalizeRepo(repo); repo == "" {
+func (f *FakeStore) getPRRecord(repo string, prNumber int) (*db.PRRecord, error) {
+	if repo = db.NormalizeRepo(repo); repo == "" {
 		return nil, fmt.Errorf("repo cannot be empty")
 	}
 	rec, exists := f.prRecords[prKey(repo, prNumber)]
 	if !exists {
-		return nil, ErrPRNotFound
+		return nil, db.ErrPRNotFound
 	}
 	return rec, nil
 }
 
-func (f *FakeStore) GetPRByNumber(ctx context.Context, repo string, prNumber int) (*PRRecord, error) {
-	return withFakeLock(f, "GetPRByNumber", func() (*PRRecord, error) {
+func (f *FakeStore) GetPRByNumber(ctx context.Context, repo string, prNumber int) (*db.PRRecord, error) {
+	return withFakeLock(f, "GetPRByNumber", func() (*db.PRRecord, error) {
 		rec, err := f.getPRRecord(repo, prNumber)
 		return clonePtr(rec), err
 	})
@@ -981,7 +1099,7 @@ func (f *FakeStore) UpdatePRStatusMessageID(ctx context.Context, repo string, pr
 	})
 }
 
-func (f *FakeStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, chunks []VanadisChunk) error {
+func (f *FakeStore) CreateVanadisBuild(ctx context.Context, build db.VanadisBuild, chunks []db.VanadisChunk) error {
 	return f.withLockErr("CreateVanadisBuild", func() error {
 		normBuild, normChunks, err := validateAndNormalizeVanadisBuild(build, chunks)
 		if err != nil {
@@ -1017,16 +1135,16 @@ func (f *FakeStore) CreateVanadisBuild(ctx context.Context, build VanadisBuild, 
 	})
 }
 
-func (f *FakeStore) GetVanadisBuild(ctx context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error) {
-	return withFakeLock2(f, "GetVanadisBuild", func() (*VanadisBuild, []VanadisChunk, error) {
+func (f *FakeStore) GetVanadisBuild(ctx context.Context, buildID string) (*db.VanadisBuild, []db.VanadisChunk, error) {
+	return withFakeLock2(f, "GetVanadisBuild", func() (*db.VanadisBuild, []db.VanadisChunk, error) {
 		if buildID = strings.TrimSpace(buildID); buildID == "" {
 			return nil, nil, fmt.Errorf("build id cannot be empty")
 		}
 		b := f.vanadisBuilds[buildID]
 		if b == nil {
-			return nil, nil, ErrVanadisBuildNotFound
+			return nil, nil, db.ErrVanadisBuildNotFound
 		}
-		chunks := mapValuesFiltered(f.vanadisChunks, func(c *VanadisChunk) bool { return c.BuildID == buildID })
+		chunks := mapValuesFiltered(f.vanadisChunks, func(c *db.VanadisChunk) bool { return c.BuildID == buildID })
 		for i := range chunks {
 			chunks[i] = cloneVanadisChunk(&chunks[i])
 		}
@@ -1036,19 +1154,19 @@ func (f *FakeStore) GetVanadisBuild(ctx context.Context, buildID string) (*Vanad
 	})
 }
 
-func (f *FakeStore) getVanadisChunkLocked(chunkID string) (*VanadisChunk, error) {
+func (f *FakeStore) getVanadisChunkLocked(chunkID string) (*db.VanadisChunk, error) {
 	if chunkID = strings.TrimSpace(chunkID); chunkID == "" {
 		return nil, fmt.Errorf("chunk id cannot be empty")
 	}
 	c, exists := f.vanadisChunks[chunkID]
 	if !exists {
-		return nil, ErrVanadisChunkNotFound
+		return nil, db.ErrVanadisChunkNotFound
 	}
 	return c, nil
 }
 
-func (f *FakeStore) GetVanadisChunk(ctx context.Context, chunkID string) (*VanadisChunk, error) {
-	return withFakeLock(f, "GetVanadisChunk", func() (*VanadisChunk, error) {
+func (f *FakeStore) GetVanadisChunk(ctx context.Context, chunkID string) (*db.VanadisChunk, error) {
+	return withFakeLock(f, "GetVanadisChunk", func() (*db.VanadisChunk, error) {
 		c, err := f.getVanadisChunkLocked(chunkID)
 		if err != nil {
 			return nil, err
@@ -1086,7 +1204,7 @@ func (f *FakeStore) UpdateVanadisBuildStatusMessageID(ctx context.Context, build
 		}
 		b, exists := f.vanadisBuilds[buildID]
 		if !exists {
-			return ErrVanadisBuildNotFound
+			return db.ErrVanadisBuildNotFound
 		}
 		b.StatusMessageID, b.UpdatedAt = strings.TrimSpace(messageID), time.Now()
 		return nil

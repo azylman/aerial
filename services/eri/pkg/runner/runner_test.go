@@ -3,61 +3,9 @@ package runner
 import (
 	"fmt"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 )
-
-func TestParseAgyOutput(t *testing.T) {
-	tests := []struct {
-		name       string
-		stdout     string
-		wantErr    bool
-		wantConvID string
-		wantStatus string
-		wantResp   string
-		wantTokens int
-	}{
-		{name: "Valid Success Response", stdout: `{"conversation_id":"11111111-2222-3333-4444-555555555555","status":"SUCCESS","response":"Hello world!","duration_seconds":1.25,"num_turns":1,"usage":{"total_tokens":42}}`, wantConvID: "11111111-2222-3333-4444-555555555555", wantStatus: "SUCCESS", wantResp: "Hello world!", wantTokens: 42},
-		{name: "Valid Error Response", stdout: `{"conversation_id":"11111111-2222-3333-4444-555555555555","status":"ERROR","error":"context window exceeded","duration_seconds":0.5}`, wantConvID: "11111111-2222-3333-4444-555555555555", wantStatus: "ERROR"},
-		{name: "Empty Stdout", stdout: "", wantErr: true},
-		{name: "Invalid JSON", stdout: "plain text without json formatting", wantErr: true},
-		{name: "Valid stream-json Success Stream", stdout: "{\"event\":\"init\",\"conversation_id\":\"22222222-3333-4444-5555-666666666666\"}\n{\"event\":\"step_update\",\"type\":\"tool_call\",\"name\":\"view_file\"}\n{\"event\":\"result\",\"result\":{\"conversation_id\":\"22222222-3333-4444-5555-666666666666\",\"status\":\"SUCCESS\",\"response\":\"Stream finished!\",\"duration_seconds\":3.14,\"num_turns\":2,\"usage\":{\"total_tokens\":88}}}", wantConvID: "22222222-3333-4444-5555-666666666666", wantStatus: "SUCCESS", wantResp: "Stream finished!", wantTokens: 88},
-		{name: "Stream-json with Init Propagation to Result", stdout: "{\"event\":\"init\",\"conversation_id\":\"33333333-4444-5555-6666-777777777777\"}\n{\"event\":\"step_update\",\"type\":\"thinking\"}\n{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"Propagated UUID!\",\"duration_seconds\":1.0,\"num_turns\":1}}", wantConvID: "33333333-4444-5555-6666-777777777777", wantStatus: "SUCCESS", wantResp: "Propagated UUID!"},
-		{name: "Stream-json Error Stream", stdout: "{\"event\":\"init\",\"conversation_id\":\"44444444-5555-6666-7777-888888888888\"}\n{\"event\":\"result\",\"result\":{\"status\":\"ERROR\",\"error\":\"model timeout\"}}", wantConvID: "44444444-5555-6666-7777-888888888888", wantStatus: "ERROR"},
-		{name: "Truncated Stream-json Missing Result Event", stdout: "{\"event\":\"init\",\"conversation_id\":\"55555555-6666-7777-8888-999999999999\"}\n{\"event\":\"step_update\",\"type\":\"run_command\"}", wantErr: true},
-		{name: "Large Line (>100KB) Stream-json Without Scanner Panic", stdout: "{\"event\":\"init\",\"conversation_id\":\"66666666-7777-8888-9999-000000000000\"}\n{\"event\":\"step_update\",\"huge_payload\":\"" + strings.Repeat("a", 120*1024) + "\"}\n{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"Handled large line\",\"duration_seconds\":2.0,\"num_turns\":1}}", wantConvID: "66666666-7777-8888-9999-000000000000", wantStatus: "SUCCESS", wantResp: "Handled large line"},
-		{name: "Stream-json Result Flat", stdout: "{\"event\":\"init\",\"conversation_id\":\"77777777-7777-7777-7777-777777777777\"}\n{\"event\":\"result\",\"status\":\"SUCCESS\",\"response\":\"flat response\"}", wantConvID: "77777777-7777-7777-7777-777777777777", wantStatus: "SUCCESS", wantResp: "flat response"},
-		{name: "Multiline Legacy JSON fallback", stdout: "{\n\"conversation_id\":\"88888888-8888-8888-8888-888888888888\",\n\"status\":\"SUCCESS\",\n\"response\":\"multiline legacy\"\n}", wantConvID: "88888888-8888-8888-8888-888888888888", wantStatus: "SUCCESS", wantResp: "multiline legacy"},
-		{name: "Root Result Flat Format", stdout: `{"event":"result","status":"SUCCESS","response":"all good"}`, wantStatus: "SUCCESS", wantResp: "all good"},
-		{name: "Fallback Unmarshal Non-Result JSON", stdout: `{"custom":"field"}`},
-		{name: "Stream-json Init With session_id", stdout: "{\"event\":\"init\",\"session_id\":\"87654321-4321-4321-4321-210987654321\"}\n{\"event\":\"result\",\"status\":\"SUCCESS\",\"response\":\"done\"}\n", wantConvID: "87654321-4321-4321-4321-210987654321", wantStatus: "SUCCESS", wantResp: "done"},
-		{name: "Stream-json Init With conversationId CamelCase", stdout: "{\"conversationId\":\"87654321-4321-4321-4321-210987654321\",\"event\":\"init\"}\n{\"event\":\"result\",\"status\":\"SUCCESS\",\"response\":\"done\"}\n", wantConvID: "87654321-4321-4321-4321-210987654321", wantStatus: "SUCCESS", wantResp: "done"},
-		{name: "Empty Lines With Probe Session", stdout: "\n\n{\"event\":\"result\",\"session_id\":\"22222222-3333-4444-5555-666666666666\",\"content\":\"ok\"}\n\n", wantConvID: "22222222-3333-4444-5555-666666666666"},
-		{name: "Init Event ConvID Fallback When Result Omits ID", stdout: "{\"event\":\"init\",\"session_id\":\"11111111-2222-3333-4444-555555555555\"}\n{\"event\":\"result\",\"response\":\"finished\"}\n", wantConvID: "11111111-2222-3333-4444-555555555555", wantResp: "finished"},
-		{name: "Empty Lines Interspersed", stdout: "{\"event\":\"init\",\"conversation_id\":\"test-conv-id\"}\n\n   \n\n{\"event\":\"result\",\"response\":\"success\"}", wantResp: "success"},
-	}
-
-	for _, tc := range tests {
-		resp, err := ParseAgyOutput(tc.stdout)
-		if (err != nil) != tc.wantErr {
-			t.Errorf("%s: ParseAgyOutput() error = %v, wantErr %v", tc.name, err, tc.wantErr)
-			continue
-		}
-		if !tc.wantErr && resp != nil {
-			for _, check := range []struct{ got, want, field string }{
-				{resp.ConversationID, tc.wantConvID, "ConvID"}, {resp.Status, tc.wantStatus, "Status"}, {resp.Response, tc.wantResp, "Resp"},
-			} {
-				if check.want != "" && check.got != check.want {
-					t.Errorf("%s: %s = %q, want %q", tc.name, check.field, check.got, check.want)
-				}
-			}
-			if tc.wantTokens > 0 && resp.Usage.TotalTokens != tc.wantTokens {
-				t.Errorf("%s: TotalTokens = %d, want %d", tc.name, resp.Usage.TotalTokens, tc.wantTokens)
-			}
-		}
-	}
-}
 
 func TestExtractSessionID(t *testing.T) {
 	for _, tc := range []struct{ name, input, wantUUID string }{
