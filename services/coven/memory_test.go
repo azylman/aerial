@@ -3895,6 +3895,18 @@ func TestEvaluateCandidateAdmission(t *testing.T) {
 			wantReason: "ephemeral_telemetry",
 		},
 		{
+			name:       "EphemeralAwaitingDelivery",
+			item:       ExtractedFactItem{FactText: "Hardware sensor is awaiting delivery before installation"},
+			wantAdmit:  false,
+			wantReason: "ephemeral_telemetry",
+		},
+		{
+			name:       "EphemeralCurrentlyInProgress",
+			item:       ExtractedFactItem{FactText: "Database migration task is currently in progress on the cluster"},
+			wantAdmit:  false,
+			wantReason: "ephemeral_telemetry",
+		},
+		{
 			name:       "DurableDirectiveOverridesEphemeral",
 			item:       ExtractedFactItem{FactText: "Always verify CI before pull request #500 merges"},
 			wantAdmit:  true,
