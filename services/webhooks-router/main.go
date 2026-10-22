@@ -1269,12 +1269,6 @@ func NewDefaultOutboundDispatcher(hangarURL, brainURL string, client *http.Clien
 	}
 }
 
-// SetRetryConfig overrides retry delay and attempt bounds for fast hermetic unit tests.
-func (d *DefaultOutboundDispatcher) SetRetryConfig(delay time.Duration, maxAttempts int) {
-	d.retryDelay = delay
-	d.maxAttempts = maxAttempts
-}
-
 func (d *DefaultOutboundDispatcher) postHangar(ctx context.Context, endpointPath, opName, targetDesc string, payload any) ([]byte, bool, error) {
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -1469,11 +1463,9 @@ func NewRouterServer(cfg Config, client *http.Client, riverClient ...RiverInsert
 	return s
 }
 
-// SetConflictCheckDelay configures the delay before checking merge conflicts on push to main.
-func (s *RouterServer) SetConflictCheckDelay(d time.Duration) { s.conflictCheckDelay = d }
-func (s *RouterServer) SetRiverClient(rc RiverInserter)       { s.riverClient = rc }
-func (s *RouterServer) SetRegistry(reg PRRegistryUpdater)     { s.registry = reg }
-func (s *RouterServer) SetDispatcher(d OutboundDispatcher)    { s.dispatcher = d }
+func (s *RouterServer) SetRiverClient(rc RiverInserter)    { s.riverClient = rc }
+func (s *RouterServer) SetRegistry(reg PRRegistryUpdater)  { s.registry = reg }
+func (s *RouterServer) SetDispatcher(d OutboundDispatcher) { s.dispatcher = d }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")

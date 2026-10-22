@@ -34,11 +34,6 @@ const (
 	ExpectedEmbeddingDim  = 384
 )
 
-// RegisterSQLiteTestHook allows unit tests to inject in-memory databases.
-func RegisterSQLiteTestHook(fn func(string) (*sql.DB, error)) {
-	sqliteTestInitHook = fn
-}
-
 // Fact represents a stored piece of semantic knowledge.
 type Fact struct {
 	ID               int64     `json:"id"`

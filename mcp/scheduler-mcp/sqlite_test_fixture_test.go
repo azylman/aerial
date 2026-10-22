@@ -97,6 +97,9 @@ func initTestSQLite(trimmed string) (*sql.DB, error) {
 	return database, nil
 }
 
+// RegisterSQLiteTestHook allows unit tests to inject in-memory databases.
+func RegisterSQLiteTestHook(fn func(string) (*sql.DB, error)) { sqliteTestInitHook = fn }
+
 func init() {
 	RegisterSQLiteTestHook(initTestSQLite)
 }

@@ -27,6 +27,15 @@ import (
 
 // --- Shared Test Mocks & Helpers ---
 
+// SetRetryConfig overrides retry delay and attempt bounds for fast hermetic unit tests.
+func (d *DefaultOutboundDispatcher) SetRetryConfig(delay time.Duration, maxAttempts int) {
+	d.retryDelay = delay
+	d.maxAttempts = maxAttempts
+}
+
+// SetConflictCheckDelay configures the delay before checking merge conflicts on push to main.
+func (s *RouterServer) SetConflictCheckDelay(d time.Duration) { s.conflictCheckDelay = d }
+
 type mockRiverInserter struct {
 	mu                     sync.Mutex
 	insertedJobs           []GitHubWebhookArgs
