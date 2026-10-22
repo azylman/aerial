@@ -1,15 +1,12 @@
 package runner
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"path"
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -89,76 +86,6 @@ func (p *sessionProbe) extractUUID() string {
 		}
 	}
 	return ""
-}
-
-type ActivityWriter struct {
-	mu        sync.Mutex
-	buf       bytes.Buffer
-	sessionID atomic.Pointer[string]
-}
-
-func NewActivityWriter(initialSessionID string) *ActivityWriter {
-	w := &ActivityWriter{}
-	if initialSessionID != "" {
-		w.sessionID.Store(&initialSessionID)
-	}
-	return w
-}
-
-func (w *ActivityWriter) Write(p []byte) (int, error) {
-	if len(p) == 0 {
-		return 0, nil
-	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	n, err := w.buf.Write(p)
-	if w.sessionID.Load() == nil {
-		window := w.buf.Bytes()
-		if len(window) > 512 {
-			window = window[len(window)-512:]
-		}
-		if first := bytes.IndexByte(window, '{'); first >= 0 {
-			if last := bytes.LastIndexByte(window, '}'); last > first {
-				var probe sessionProbe
-				if err := json.NewDecoder(bytes.NewReader(window[first : last+1])).Decode(&probe); err == nil {
-					if id := probe.extractUUID(); id != "" {
-						w.sessionID.Store(&id)
-					}
-				}
-			}
-		}
-		if w.sessionID.Load() == nil {
-			if sess := extractUUIDByRegex(string(window)); sess != "" {
-				w.sessionID.Store(&sess)
-			}
-		}
-	}
-	return n, err
-}
-
-func (w *ActivityWriter) String() string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.buf.String()
-}
-
-func (w *ActivityWriter) SessionID() string {
-	if ptr := w.sessionID.Load(); ptr != nil {
-		return *ptr
-	}
-	return ""
-}
-
-func (w *ActivityWriter) SetSessionID(id string) {
-	if !IsValidUUID(id) {
-		return
-	}
-	for {
-		current := w.sessionID.Load()
-		if (current != nil && *current != "") || w.sessionID.CompareAndSwap(current, &id) {
-			return
-		}
-	}
 }
 
 type AgyResponse struct {

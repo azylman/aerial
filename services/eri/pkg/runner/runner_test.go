@@ -1,7 +1,6 @@
 package runner
 
 import (
-	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -240,85 +239,6 @@ func TestStepUpdateEvent_Resolvers(t *testing.T) {
 				t.Errorf("%s: %s = %q, want %q", tc.name, check.field, check.got, check.want)
 			}
 		}
-	}
-}
-
-func TestActivityWriter_SessionDiscoveryAndConcurrency(t *testing.T) {
-	w := NewActivityWriter("")
-	if w.SessionID() != "" {
-		t.Errorf("expected empty initial session ID, got %q", w.SessionID())
-	}
-
-	chunk := []byte("INFO: Starting conversation update stream for 12345678-abcd-ef01-2345-6789abcdef01\n")
-	n, err := w.Write(chunk)
-	if err != nil || n != len(chunk) || w.SessionID() != "12345678-abcd-ef01-2345-6789abcdef01" || w.String() != string(chunk) {
-		t.Fatalf("Write checks failed: n=%d, err=%v", n, err)
-	}
-
-	if nZero, errZero := w.Write([]byte{}); nZero != 0 || errZero != nil {
-		t.Errorf("expected 0, nil from empty write")
-	}
-
-	wPre := NewActivityWriter("11111111-2222-3333-4444-555555555555")
-	_, _ = wPre.Write([]byte("INFO: Starting conversation update stream for 99999999-8888-7777-6666-555555555555\n"))
-	if wPre.SessionID() != "11111111-2222-3333-4444-555555555555" {
-		t.Errorf("expected pre-existing session ID preserved")
-	}
-
-	wGen := NewActivityWriter("")
-	_, _ = wGen.Write([]byte("Initialized conversation_id: 99999999-8888-7777-6666-555555555555\n"))
-	if wGen.SessionID() != "99999999-8888-7777-6666-555555555555" {
-		t.Errorf("expected conversation_id extracted")
-	}
-
-	wChunk := NewActivityWriter("")
-	_, _ = wChunk.Write([]byte("Some logs... Starting conversation update stream for 12345678-abcd-"))
-	if wChunk.SessionID() != "" {
-		t.Errorf("expected empty session after chunk1")
-	}
-	_, _ = wChunk.Write([]byte("ef01-2345-6789abcdef01 and more logs..."))
-	if wChunk.SessionID() != "12345678-abcd-ef01-2345-6789abcdef01" {
-		t.Errorf("expected extracted session after chunk2")
-	}
-
-	wRaw := NewActivityWriter("")
-	_, _ = wRaw.Write([]byte("some random text with 12345678-abcd-ef01-2345-6789abcdef0z invalid uuid"))
-	if wRaw.SessionID() != "" {
-		t.Errorf("expected empty session for invalid uuid")
-	}
-	_, _ = wRaw.Write([]byte("some random text with 11111111-2222-3333-4444-555555555555 embedded inside"))
-	if wRaw.SessionID() != "11111111-2222-3333-4444-555555555555" {
-		t.Errorf("expected extracted raw UUID")
-	}
-
-	wSet := NewActivityWriter("")
-	wSet.SetSessionID("not-a-uuid")
-	if wSet.SessionID() != "" {
-		t.Errorf("expected empty session after invalid UUID")
-	}
-	wSet.SetSessionID("11111111-2222-3333-4444-555555555555")
-	wSet.SetSessionID("99999999-8888-7777-6666-555555555555")
-	if wSet.SessionID() != "11111111-2222-3333-4444-555555555555" {
-		t.Errorf("expected original session preserved")
-	}
-
-	wConc := NewActivityWriter("")
-	done := make(chan struct{})
-	for i := 0; i < 10; i++ {
-		go func(id int) {
-			for j := 0; j < 50; j++ {
-				_, _ = wConc.Write([]byte(fmt.Sprintf("log line from worker %d turn %d\n", id, j)))
-				_ = wConc.SessionID()
-				_ = wConc.String()
-			}
-			done <- struct{}{}
-		}(i)
-	}
-	for i := 0; i < 10; i++ {
-		<-done
-	}
-	if len(wConc.String()) == 0 {
-		t.Errorf("expected non-empty buffer")
 	}
 }
 

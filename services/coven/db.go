@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -126,24 +125,6 @@ type MessageMetadata struct {
 	VanadisChunkID    string   `json:"vanadis_chunk_id,omitempty"`
 }
 
-// IsEmpty returns true if all metadata fields are zero/empty.
-func (m MessageMetadata) IsEmpty() bool {
-	return m.ChannelID == "" && m.ChannelName == "" && m.TargetThreadID == "" && m.ThreadName == "" &&
-		m.GuildID == "" && m.AuthorUsername == "" && m.AuthorGlobalName == "" && !m.AuthorBot && !m.IsAdmin &&
-		len(m.Mentions) == 0 && len(m.MentionUserIDs) == 0 && len(m.MentionRoleIDs) == 0 &&
-		m.ReplyingToAuthor == "" && m.ReplyingToContent == "" && len(m.Attachments) == 0 &&
-		m.Model == "" && !m.Silent && m.VanadisChunkID == ""
-}
-
-// Value implements driver.Valuer for PostgreSQL JSONB.
-func (m MessageMetadata) Value() (driver.Value, error) {
-	if m.IsEmpty() {
-		return "{}", nil
-	}
-	bytes, err := json.Marshal(m)
-	return string(bytes), err
-}
-
 // Scan implements sql.Scanner for PostgreSQL JSONB.
 func (m *MessageMetadata) Scan(src any) error {
 	if src == nil {
@@ -216,7 +197,6 @@ type Store interface {
 	GetPendingProceduralCandidates(ctx context.Context) ([]ProceduralCandidate, error)
 	MarkProceduralCandidatesConsolidated(ctx context.Context, ids []int64, prNumber int) error
 	MarkProceduralCandidatesSkipped(ctx context.Context, ids []int64) error
-	Close() error
 }
 
 // SQLStore implements Store backed by PostgreSQL.
@@ -227,16 +207,6 @@ type SQLStore struct {
 // NewSQLStore creates a new SQLStore instance.
 func NewSQLStore(db DBTX) *SQLStore {
 	return &SQLStore{db: db}
-}
-
-// Close closes the underlying database handle if it implements io.Closer.
-func (s *SQLStore) Close() error {
-	if s != nil && s.db != nil {
-		if closer, ok := s.db.(io.Closer); ok {
-			return closer.Close()
-		}
-	}
-	return nil
 }
 
 func (s *SQLStore) checkDB() error {

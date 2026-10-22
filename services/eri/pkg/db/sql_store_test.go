@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func TestSQLStoreIsDBTXNilAndClose(t *testing.T) {
+func TestSQLStoreIsDBTXNil(t *testing.T) {
 	var nilDB *sql.DB
 	var nilTx *sql.Tx
 	if !isDBTXNil(nil) || !isDBTXNil(nilDB) || !isDBTXNil(nilTx) {
@@ -19,11 +19,6 @@ func TestSQLStoreIsDBTXNilAndClose(t *testing.T) {
 	defer database.Close()
 	if isDBTXNil(database) || isDBTXNil(dummyDBTX{}) {
 		t.Errorf("expected isDBTXNil to be false for valid dbtx")
-	}
-
-	var nilStore *SQLStore
-	if err := nilStore.Close(); err != nil || (&SQLStore{db: nil}).Close() != nil || (&SQLStore{db: dummyDBTX{}}).Close() != nil {
-		t.Errorf("expected nil error on Close variations")
 	}
 }
 
