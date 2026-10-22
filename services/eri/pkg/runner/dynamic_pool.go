@@ -24,7 +24,6 @@ type DynamicVoicePool struct {
 
 var (
 	_ AgentPool       = (*DynamicVoicePool)(nil)
-	_ SessionRotator  = (*DynamicVoicePool)(nil)
 	_ LeasedAgentPool = (*DynamicVoicePool)(nil)
 )
 
@@ -71,30 +70,6 @@ func (p *DynamicVoicePool) GetOrCreateSession(ctx context.Context, targetKey str
 	return pool.GetOrCreateSession(ctx, targetKey, sessionID)
 }
 
-// ShouldRotateSession delegates rotation check to the current pool if it implements SessionRotator.
-func (p *DynamicVoicePool) ShouldRotateSession(sess AgentSession) (bool, string) {
-	pool, err := p.activePool()
-	if err != nil {
-		return false, ""
-	}
-	if rotator, ok := pool.(SessionRotator); ok {
-		return rotator.ShouldRotateSession(sess)
-	}
-	return false, ""
-}
-
-// RotateSession delegates session rotation to the current pool if it implements SessionRotator.
-func (p *DynamicVoicePool) RotateSession(ctx context.Context, targetKey string) (AgentSession, error) {
-	pool, err := p.activePool()
-	if err != nil {
-		return nil, err
-	}
-	if rotator, ok := pool.(SessionRotator); ok {
-		return rotator.RotateSession(ctx, targetKey)
-	}
-	return nil, nil
-}
-
 // Initialize pre-warms the currently active pool.
 func (p *DynamicVoicePool) Initialize(ctx context.Context) error {
 	pool, err := p.activePool()
@@ -126,18 +101,6 @@ func (p *DynamicVoicePool) Close() error {
 	}
 	p.retiringWg.Wait()
 	return err
-}
-
-// Model returns the active pool's model identifier if available.
-func (p *DynamicVoicePool) Model() string {
-	pool, err := p.activePool()
-	if err != nil {
-		return ""
-	}
-	if m, ok := pool.(interface{ Model() string }); ok {
-		return m.Model()
-	}
-	return ""
 }
 
 // UpdatePrewarmedTargets forwards the prewarmed targets list to the active pool if supported.

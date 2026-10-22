@@ -295,7 +295,7 @@ func TestGeminiAPIPool_Send_Suite(t *testing.T) {
 func TestGeminiAPIPool_AccessorsAndNilPool(t *testing.T) {
 	t.Parallel()
 	var nilPool *GeminiAPIPool
-	if nilPool.Model() != "" || nilPool.APIKey() != "" || nilPool.PrewarmedTargets() != nil || nilPool.sanitizeError(nil) != nil {
+	if nilPool.PrewarmedTargets() != nil || nilPool.sanitizeError(nil) != nil {
 		t.Errorf("expected empty/nil from nilPool accessors")
 	}
 	nilPool.MarkDirty()
@@ -305,8 +305,8 @@ func TestGeminiAPIPool_AccessorsAndNilPool(t *testing.T) {
 		APIKey: "my-api-key", Model: "gemini-2.5-pro", PrewarmedTargets: []string{"initial-1", "initial-2"},
 	})
 	defer pool.Close()
-	if pool.Model() != "gemini-2.5-pro" || pool.APIKey() != "my-api-key" || pool.cfg.HTTPClient == nil {
-		t.Errorf("unexpected pool accessors: %q %q", pool.Model(), pool.APIKey())
+	if pool.cfg.HTTPClient == nil {
+		t.Errorf("expected non-nil HTTPClient")
 	}
 	sess, err := pool.GetOrCreateSession(context.Background(), "target-123", "custom-uuid")
 	if err != nil || sess.(*GeminiAPISession).TargetKey() != "target-123" || sess.SessionID() != "custom-uuid" {
@@ -323,12 +323,6 @@ func TestGeminiAPIPool_AccessorsAndNilPool(t *testing.T) {
 	pool.UpdatePrewarmedTargets([]string{"alpha", "beta"})
 	if targets := pool.PrewarmedTargets(); len(targets) != 2 || targets[0] != "alpha" {
 		t.Errorf("failed to update prewarmed targets: %v", targets)
-	}
-	if should, _ := pool.ShouldRotateSession(sess); should {
-		t.Errorf("expected ShouldRotateSession false")
-	}
-	if rotSess, err := pool.RotateSession(context.Background(), "target-123"); err != nil || rotSess == nil {
-		t.Fatalf("RotateSession failed: %v", err)
 	}
 }
 

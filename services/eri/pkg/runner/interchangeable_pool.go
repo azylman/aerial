@@ -37,7 +37,6 @@ type InterchangeablePool struct {
 
 var (
 	_ AgentPool       = (*InterchangeablePool)(nil)
-	_ SessionRotator  = (*InterchangeablePool)(nil)
 	_ LeasedAgentPool = (*InterchangeablePool)(nil)
 )
 
@@ -142,12 +141,6 @@ func (p *InterchangeablePool) GetOrCreateSession(ctx context.Context, targetKey 
 		}
 	}()
 	return sess, nil
-}
-
-func (p *InterchangeablePool) ShouldRotateSession(sess AgentSession) (bool, string) { return false, "" }
-
-func (p *InterchangeablePool) RotateSession(ctx context.Context, targetKey string) (AgentSession, error) {
-	return nil, nil
 }
 
 func (p *InterchangeablePool) releaseWorkerKey(workerKey string, isOverflow bool) {
@@ -260,13 +253,6 @@ func (p *InterchangeablePool) Underlying() *UnifiedProcessPool {
 	return p.underlying
 }
 
-func (p *InterchangeablePool) Model() string {
-	if p == nil || p.underlying == nil {
-		return ""
-	}
-	return p.underlying.Model()
-}
-
 func (p *InterchangeablePool) SetTranscriptRescuer(r func(string, time.Time) string) {
 	if p != nil && p.underlying != nil {
 		p.underlying.SetTranscriptRescuer(r)
@@ -288,16 +274,6 @@ func (p *InterchangeablePool) SetSessionCallbacks(getRec func(ctx context.Contex
 func (p *InterchangeablePool) MarkDirty() {
 	if p != nil && p.underlying != nil {
 		p.underlying.MarkDirty()
-	}
-}
-
-func (p *InterchangeablePool) WaitBackground() {
-	if p == nil {
-		return
-	}
-	p.bgWg.Wait()
-	if p.underlying != nil {
-		p.underlying.WaitBackground()
 	}
 }
 

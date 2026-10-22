@@ -580,16 +580,6 @@ func (c *Config) VoicePrewarmedTargets() []string {
 	return targets
 }
 
-// VoiceAllowedTools returns a defensive copy of configured voice allowed tools.
-// A nil return indicates unconstrained (all tools allowed); an empty non-nil slice indicates zero tools allowed.
-func (c *Config) VoiceAllowedTools() []string {
-	if c == nil {
-		return nil
-	}
-	cur := c.Current()
-	return cur.VoiceAllowedTools()
-}
-
 // VoiceAllowedTools returns a defensive copy of configured voice allowed tools on ConfigData.
 // A nil return indicates unconstrained (all tools allowed); an empty non-nil slice indicates zero tools allowed.
 func (cd *ConfigData) VoiceAllowedTools() []string {
@@ -623,40 +613,12 @@ func (c *ConfigData) VoiceEngine() string {
 	}
 }
 
-// VoiceModel returns the configured voice model override, or empty string if not set.
-func (c *Config) VoiceModel() string {
-	if c == nil {
-		return ""
-	}
-	return c.Current().VoiceModel()
-}
-
-// VoiceModel returns the configured voice model override, or empty string if not set.
-func (c *ConfigData) VoiceModel() string {
-	if c == nil {
-		return ""
-	}
-	return strings.TrimSpace(c.Voice.Model)
-}
-
 // VoiceAmbientContext returns a deep copy of the configured voice ambient context, or nil if unset.
 func (c *ConfigData) VoiceAmbientContext() *AmbientContextConfig {
 	if c == nil || c.Voice.AmbientContext == nil {
 		return nil
 	}
 	return cloneAmbientContextConfig(c.Voice.AmbientContext)
-}
-
-// VoiceAmbientContext returns a deep copy of the configured voice ambient context, or nil if unset.
-func (c *Config) VoiceAmbientContext() *AmbientContextConfig {
-	if c == nil {
-		return nil
-	}
-	cur := c.Current()
-	if cur == nil {
-		return nil
-	}
-	return cur.VoiceAmbientContext()
 }
 
 // GeminiHomeDir returns the configured base directory for .gemini files.

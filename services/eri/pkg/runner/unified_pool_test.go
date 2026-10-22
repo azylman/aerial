@@ -22,6 +22,12 @@ func (p *UnifiedProcessPool) HasDaemon(targetKey string) bool {
 	return ok
 }
 
+func (p *UnifiedProcessPool) WaitBackground() {
+	if p != nil {
+		p.bgWg.Wait()
+	}
+}
+
 type pipeMockSpawnerOpts struct {
 	pid               int
 	killErr           error
@@ -131,23 +137,18 @@ func TestUnifiedProcessPool_ModelResolution(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name, model, defaultModel, wantModel string
-		nilPool, checkDaemon                 bool
+		checkDaemon                          bool
 	}{
 		{name: "ModelBound", model: "gemini-3.8-flash-low", wantModel: "gemini-3.8-flash-low", checkDaemon: true},
 		{name: "ModelFallback", defaultModel: "gemini-2.5-pro", wantModel: "gemini-2.5-pro"},
-		{name: "NilPoolModel", nilPool: true, wantModel: ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var pool *UnifiedProcessPool
-			var mock *MockSpawner
-			if !tc.nilPool {
-				mock = NewMockSpawner()
-				pool = NewUnifiedProcessPool(PoolConfig{Model: tc.model, DefaultModel: tc.defaultModel}, mock)
-				defer pool.Close()
-			}
-			if got := pool.Model(); got != tc.wantModel {
+			mock := NewMockSpawner()
+			pool := NewUnifiedProcessPool(PoolConfig{Model: tc.model, DefaultModel: tc.defaultModel}, mock)
+			defer pool.Close()
+			if got := pool.cfg.Model; got != tc.wantModel {
 				t.Fatalf("expected pool model %q, got %q", tc.wantModel, got)
 			}
 			if tc.checkDaemon {
@@ -736,59 +737,6 @@ func TestUnifiedProcessPool_CloseConcurrentMultipleDaemons(t *testing.T) {
 	}
 }
 
-func TestUnifiedProcessPool_SessionRotator(t *testing.T) {
-	var spawnCounter atomic.Int32
-	mock := newPipeMockSpawner(pipeMockSpawnerOpts{
-		onSpawn: func(cfg DaemonConfig) { spawnCounter.Add(1) },
-	})
-	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
-	defer pool.Close()
-
-	ctx := context.Background()
-	var nilPool *UnifiedProcessPool
-	if should, _ := pool.ShouldRotateSession(nil); should {
-		t.Error("expected false")
-	}
-	if should, _ := nilPool.ShouldRotateSession(nil); should {
-		t.Error("expected false")
-	}
-
-	d1, err := pool.GetOrCreate(ctx, "target-turn-hook", "")
-	if err != nil {
-		t.Fatalf("failed creating initial daemon: %v", err)
-	}
-	if should, _ := pool.ShouldRotateSession(d1); should {
-		t.Error("expected false")
-	}
-
-	d1.MarkDirty()
-	if should, reason := pool.ShouldRotateSession(d1); !should || !strings.Contains(reason, "dirty") {
-		t.Errorf("expected dirty ShouldRotateSession, got %v (%s)", should, reason)
-	}
-
-	rotatedSess, err := pool.RotateSession(ctx, "target-turn-hook")
-	if err != nil || rotatedSess == nil || rotatedSess == d1 || d1.State() != StateClosed {
-		t.Fatalf("unexpected RotateSession result: (%v, %v)", rotatedSess, err)
-	}
-	curDaemon, ok := pool.Get("target-turn-hook")
-	if !ok || curDaemon != rotatedSess || spawnCounter.Load() != 2 {
-		t.Errorf("expected rotated session in pool, count=%d", spawnCounter.Load())
-	}
-	if should, _ := pool.ShouldRotateSession(rotatedSess); should {
-		t.Error("expected false")
-	}
-
-	if err := pool.Close(); err != nil {
-		t.Fatalf("unexpected pool.Close() error: %v", err)
-	}
-	if sess, err := pool.RotateSession(ctx, "target-turn-hook"); err == nil || sess != nil {
-		t.Errorf("expected nil session and error on closed pool, got (%v, %v)", sess, err)
-	}
-	if should, _ := pool.ShouldRotateSession(rotatedSess); should {
-		t.Error("expected false")
-	}
-}
-
 func TestUnifiedProcessPool_DirtyEvictionAndReconciliation_Suite(t *testing.T) {
 	t.Parallel()
 	type testCase struct {
@@ -897,12 +845,19 @@ func TestUnifiedProcessPool_InflightRotatedOnCompletion(t *testing.T) {
 		t.Fatalf("expected in-flight daemon marked dirty and not closed")
 	}
 	d1.dispatchNDJSONLine(`{"event":"result","result":{"status":"SUCCESS","response":"finished"}}`)
-	if should, _ := pool.ShouldRotateSession(d1); !should {
+	if should, _ := pool.ShouldRotate(d1); !should {
 		t.Fatalf("expected dirty daemon to indicate rotation needed after turn completion")
 	}
-	rotatedSess, err := pool.RotateSession(context.Background(), "thread-inflight-rot")
+	rotatedSess, err := pool.RotateDaemon(context.Background(), "thread-inflight-rot", "")
 	if err != nil || rotatedSess == nil || rotatedSess == d1 || d1.State() != StateClosed || spawnCounter.Load() != 2 {
 		t.Fatalf("rotation failed: sess=%v err=%v d1State=%v count=%d", rotatedSess, err, d1.State(), spawnCounter.Load())
+	}
+	if got := (&unifiedSessionLease{sessionID: "fallback-id"}).SessionID(); got != "fallback-id" {
+		t.Fatalf("expected fallback session ID, got %q", got)
+	}
+	_ = pool.Close()
+	if _, err := pool.RotateDaemon(context.Background(), "thread-inflight-rot", ""); err == nil {
+		t.Fatalf("expected RotateDaemon error on closed pool")
 	}
 }
 

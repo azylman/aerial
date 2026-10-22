@@ -949,17 +949,8 @@ func TestConfig_AccessorsAndConcurrency(t *testing.T) {
 	if nilCfg.VoiceEngine() != "agy" {
 		t.Errorf("expected agy voice engine on nil Config, got %q", nilCfg.VoiceEngine())
 	}
-	if nilCfg.VoiceModel() != "" {
-		t.Errorf("expected empty voice model on nil Config, got %q", nilCfg.VoiceModel())
-	}
-	if nilCfg.VoiceAllowedTools() != nil {
-		t.Errorf("expected nil tools on nil Config")
-	}
 	if nilCfg.VoicePrewarmedTargets() == nil {
 		t.Errorf("expected non-nil prewarmed targets on nil Config")
-	}
-	if nilCfg.VoiceAmbientContext() != nil {
-		t.Errorf("expected nil ambient context on nil Config")
 	}
 	origGlobal := ActiveConfig().Current()
 	ActiveConfig().Update(&ConfigData{Timezone: "", SystemChannel: ""})
@@ -975,7 +966,7 @@ func TestConfig_AccessorsAndConcurrency(t *testing.T) {
 		t.Errorf("expected empty dirs on nil Config")
 	}
 	var nilData *ConfigData
-	if nilData.VoiceEngine() != "agy" || nilData.VoiceModel() != "" || nilData.VoiceAmbientContext() != nil {
+	if nilData.VoiceEngine() != "agy" || nilData.VoiceAmbientContext() != nil {
 		t.Errorf("unexpected nil ConfigData responses")
 	}
 	if nilData.VoiceAllowedTools() != nil {
@@ -1065,7 +1056,7 @@ func TestConfig_AccessorsAndConcurrency(t *testing.T) {
 			AmbientContext: &AmbientContextConfig{CacheTTL: "5m"},
 		},
 	})
-	if cfgWithAmbient.VoiceAmbientContext() == nil {
+	if cfgWithAmbient.Current().VoiceAmbientContext() == nil {
 		t.Errorf("expected non-nil voice ambient context")
 	}
 
@@ -1420,19 +1411,19 @@ func TestVoiceConfigAndEngine(t *testing.T) {
 			if err != nil {
 				t.Fatalf("LoadConfigFromLookup failed: %v", err)
 			}
-			if tc.wantModel != "" && (cfg.VoiceModel() != tc.wantModel || cfg.Current().VoiceModel() != tc.wantModel) {
-				t.Fatalf("VoiceModel mismatch: got %q want %q", cfg.VoiceModel(), tc.wantModel)
+			if tc.wantModel != "" && strings.TrimSpace(cfg.Current().Voice.Model) != tc.wantModel {
+				t.Fatalf("Voice.Model mismatch: got %q want %q", cfg.Current().Voice.Model, tc.wantModel)
 			}
 			if tc.wantTargets != nil && !slicesEqual(cfg.VoicePrewarmedTargets(), tc.wantTargets) {
 				t.Fatalf("VoicePrewarmedTargets mismatch: got %v want %v", cfg.VoicePrewarmedTargets(), tc.wantTargets)
 			}
-			if tc.wantTools != nil && (!slicesEqual(cfg.VoiceAllowedTools(), tc.wantTools) || !slicesEqual(cfg.Current().VoiceAllowedTools(), tc.wantTools)) {
-				t.Fatalf("VoiceAllowedTools mismatch: got %v want %v", cfg.VoiceAllowedTools(), tc.wantTools)
+			if tc.wantTools != nil && !slicesEqual(cfg.Current().VoiceAllowedTools(), tc.wantTools) {
+				t.Fatalf("VoiceAllowedTools mismatch: got %v want %v", cfg.Current().VoiceAllowedTools(), tc.wantTools)
 			}
 		})
 	}
 
-	if (*Config)(nil).VoiceEngine() != "agy" || (*Config)(nil).VoiceModel() != "" || len((*Config)(nil).VoicePrewarmedTargets()) != 0 || len((*Config)(nil).VoiceAllowedTools()) != 0 || (*ConfigData)(nil).VoiceEngine() != "agy" || (*ConfigData)(nil).VoiceModel() != "" || len((*ConfigData)(nil).VoiceAllowedTools()) != 0 {
+	if (*Config)(nil).VoiceEngine() != "agy" || len((*Config)(nil).VoicePrewarmedTargets()) != 0 || (*ConfigData)(nil).VoiceEngine() != "agy" || len((*ConfigData)(nil).VoiceAllowedTools()) != 0 {
 		t.Fatal("nil voice accessors failed")
 	}
 
@@ -1448,9 +1439,9 @@ func TestVoiceConfigAndEngine(t *testing.T) {
 	}
 
 	cfg := NewFromData(orig)
-	targets, tools := cfg.VoicePrewarmedTargets(), cfg.VoiceAllowedTools()
+	targets, tools := cfg.VoicePrewarmedTargets(), cfg.Current().VoiceAllowedTools()
 	targets[0], tools[0] = "mutated", "mutated"
-	if cfg.VoicePrewarmedTargets()[0] != "kiosk" || cfg.VoiceAllowedTools()[0] != "tool1" {
+	if cfg.VoicePrewarmedTargets()[0] != "kiosk" || cfg.Current().VoiceAllowedTools()[0] != "tool1" {
 		t.Fatal("Voice defensive copies failed")
 	}
 }
@@ -1503,7 +1494,7 @@ func TestAmbientContextConfig(t *testing.T) {
 			}
 			var ac *AmbientContextConfig
 			if cfg.Current().Voice.AmbientContext != nil {
-				ac = cfg.VoiceAmbientContext()
+				ac = cfg.Current().VoiceAmbientContext()
 			} else if home, ok := cfg.Current().Channels["home"]; ok {
 				ac = home.AmbientContext
 			}
@@ -1539,7 +1530,7 @@ func TestAmbientContextConfig(t *testing.T) {
 		t.Fatal("ResolveChannelPolicy ambient inheritance failed")
 	}
 
-	if (*Config)(nil).VoiceAmbientContext() != nil || (*ConfigData)(nil).VoiceAmbientContext() != nil || (&ConfigData{}).VoiceAmbientContext() != nil {
+	if (*ConfigData)(nil).VoiceAmbientContext() != nil || (&ConfigData{}).VoiceAmbientContext() != nil {
 		t.Fatal("nil accessors failed")
 	}
 
@@ -1548,9 +1539,9 @@ func TestAmbientContextConfig(t *testing.T) {
 	if cfg.DataDir() != "/data/test" || cfg.GeminiHomeDir() != "/home/gemini" || cfg.Get().Model != "gemini-test" {
 		t.Fatal("accessors mismatch")
 	}
-	vac := cfg.VoiceAmbientContext()
+	vac := cfg.Current().VoiceAmbientContext()
 	vac.CacheTTL = "mutated_defensive"
-	if cfg.VoiceAmbientContext().CacheTTL == "mutated_defensive" {
+	if cfg.Current().VoiceAmbientContext().CacheTTL == "mutated_defensive" {
 		t.Fatal("VoiceAmbientContext defensive copy failed")
 	}
 	if defData := DefaultConfigData(); defData == nil || defData.Model == "" {

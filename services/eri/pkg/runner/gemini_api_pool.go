@@ -329,7 +329,6 @@ type GeminiAPIPool struct {
 
 var (
 	_ AgentPool       = (*GeminiAPIPool)(nil)
-	_ SessionRotator  = (*GeminiAPIPool)(nil)
 	_ LeasedAgentPool = (*GeminiAPIPool)(nil)
 )
 
@@ -377,20 +376,6 @@ func NewGeminiAPIPool(cfg GeminiAPIPoolConfig) *GeminiAPIPool {
 	}
 }
 
-func (p *GeminiAPIPool) Model() string {
-	if p == nil {
-		return ""
-	}
-	return p.cfg.Model
-}
-
-func (p *GeminiAPIPool) APIKey() string {
-	if p == nil {
-		return ""
-	}
-	return p.cfg.APIKey
-}
-
 func (p *GeminiAPIPool) sanitizeError(err error) error {
 	if err == nil {
 		return nil
@@ -419,11 +404,6 @@ func (p *GeminiAPIPool) GetOrCreateSession(ctx context.Context, targetKey string
 	sess.hydrateHistory()
 	p.sessions[targetKey] = sess
 	return sess, nil
-}
-
-func (p *GeminiAPIPool) ShouldRotateSession(sess AgentSession) (bool, string) { return false, "" }
-func (p *GeminiAPIPool) RotateSession(ctx context.Context, targetKey string) (AgentSession, error) {
-	return p.GetOrCreateSession(ctx, targetKey, uuid.New().String())
 }
 
 func (p *GeminiAPIPool) Initialize(ctx context.Context) error {
@@ -991,15 +971,12 @@ func (l *geminiSessionLease) Release() error {
 		if l.cancelRotation {
 			return
 		}
-		shouldRotate, reason := l.pool.ShouldRotateSession(l.session)
 		maxTurns := DefaultMaxSessionTurns
 		if l.pool != nil && l.pool.cfg.MaxSessionTurns > 0 {
 			maxTurns = l.pool.cfg.MaxSessionTurns
 		}
-		if !shouldRotate && l.turnCount >= maxTurns {
-			shouldRotate, reason = true, fmt.Sprintf("reached maximum turn threshold (%d)", maxTurns)
-		}
-		if shouldRotate {
+		if l.turnCount >= maxTurns {
+			reason := fmt.Sprintf("reached maximum turn threshold (%d)", maxTurns)
 			log.Printf("[GeminiAPIPool] Session rotation triggered for %s (reason: %s)", l.targetKey, reason)
 			newSessionID, oldSessionID := uuid.New().String(), l.sessionID
 			if l.pool.cfg.OnSessionRotated != nil {

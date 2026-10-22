@@ -52,7 +52,6 @@ type UnifiedProcessPool struct {
 
 var (
 	_ AgentPool       = (*UnifiedProcessPool)(nil)
-	_ SessionRotator  = (*UnifiedProcessPool)(nil)
 	_ LeasedAgentPool = (*UnifiedProcessPool)(nil)
 	_ AgentSession    = (*StreamingDaemon)(nil)
 )
@@ -80,13 +79,6 @@ func NewUnifiedProcessPool(cfg PoolConfig, spawner DaemonSpawner) *UnifiedProces
 		ctx:         ctx,
 		cancel:      cancel,
 	}
-}
-
-func (p *UnifiedProcessPool) Model() string {
-	if p == nil {
-		return ""
-	}
-	return p.cfg.Model
 }
 
 func (p *UnifiedProcessPool) isClosed() bool {
@@ -375,12 +367,6 @@ func (p *UnifiedProcessPool) Close() error {
 	return p.closeErr
 }
 
-func (p *UnifiedProcessPool) WaitBackground() {
-	if p != nil {
-		p.bgWg.Wait()
-	}
-}
-
 func (p *UnifiedProcessPool) Get(targetKey string) (*StreamingDaemon, bool) {
 	if p == nil {
 		return nil, false
@@ -603,21 +589,6 @@ func (p *UnifiedProcessPool) RotateDaemon(ctx context.Context, targetKey string,
 		return nil, fmt.Errorf("failed creating rotated daemon for %q: %w", targetKey, err)
 	}
 	return newDaemon, nil
-}
-
-func (p *UnifiedProcessPool) ShouldRotateSession(sess AgentSession) (bool, string) {
-	if d, ok := sess.(*StreamingDaemon); ok && p != nil {
-		return p.ShouldRotate(d)
-	}
-	return false, ""
-}
-
-func (p *UnifiedProcessPool) RotateSession(ctx context.Context, targetKey string) (AgentSession, error) {
-	d, err := p.RotateDaemon(ctx, targetKey, "")
-	if err != nil {
-		return nil, err
-	}
-	return d, nil
 }
 
 // ExecuteEphemeral dispatches a prompt to targetKey's daemon and synchronously awaits the response.
