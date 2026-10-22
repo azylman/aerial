@@ -1,7 +1,6 @@
 package runner
 
 import (
-	"context"
 	"encoding/json"
 	"path"
 	"regexp"
@@ -289,8 +288,6 @@ type WatchdogOptions struct {
 	TargetID          string
 	ExtraEnv          []string
 }
-
-type RunnerFunc func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
 
 // ExtractSessionID extracts a session UUID from agy output.
 // Strict NDJSON lines are unmarshaled directly via json.Unmarshal; log-prefixed lines fall through to extractUUIDByRegex.

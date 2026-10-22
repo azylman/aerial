@@ -4,12 +4,10 @@ package queue
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"log"
 	"os"
-	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -50,7 +48,6 @@ func sanitizeErrorText(errStr string) string {
 var testPoolHook func(cfg WorkerPoolConfig) runner.AgentPool
 
 type WorkerPoolConfig struct {
-	DB                                                                                            *sql.DB
 	Store                                                                                         db.Store
 	DiscordSession                                                                                *discordgo.Session
 	AgyBin, APIKey, Model, LowEffortModel, MediumEffortModel, SystemPrompt                        string
@@ -119,37 +116,12 @@ func (p *WorkerPool) LLMFunc() LLMFunc {
 	return p.cfg.LLMFunc
 }
 
-// Store returns the configured db.Store, resolving cfg.Store or wrapping cfg.DB if necessary.
+// Store returns the configured db.Store.
 func (p *WorkerPool) Store() db.Store {
 	if p == nil {
 		return nil
 	}
-	if p.cfg.Store != nil {
-		return p.cfg.Store
-	}
-	if p.cfg.DB != nil {
-		p.cfg.Store = db.NewSQLStore(p.cfg.DB)
-		return p.cfg.Store
-	}
-	return nil
-}
-
-func resolveStore(dbOrStore any) db.Store {
-	switch s := dbOrStore.(type) {
-	case *db.SQLStore:
-		if s != nil {
-			return s
-		}
-	case db.Store:
-		if s != nil && !(reflect.ValueOf(s).Kind() == reflect.Pointer && reflect.ValueOf(s).IsNil()) {
-			return s
-		}
-	case *sql.DB:
-		if s != nil {
-			return db.NewSQLStore(s)
-		}
-	}
-	return nil
+	return p.cfg.Store
 }
 
 func makeSessionCallbacks(store db.Store) (func(context.Context, string) (runner.SessionRecord, error), func(context.Context, string, string, string) error) {
@@ -176,9 +148,6 @@ func makeSessionCallbacks(store db.Store) (func(context.Context, string) (runner
 
 // New creates a new WorkerPool with pure *config.Config dependency injection.
 func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
-	if cfg.Store == nil && cfg.DB != nil {
-		cfg.Store = db.NewSQLStore(cfg.DB)
-	}
 	isExplicitAppCfg := (appCfg != nil)
 	if appCfg == nil {
 		def := config.DefaultConfigData()
@@ -212,33 +181,6 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		cfg.DrainTimeout = 10 * time.Second
 	}
 	hasCustomRunner := cfg.RunnerFunc != nil || cfg.RunnerWithOptionsFunc != nil
-	if cfg.RunnerWithOptionsFunc == nil && cfg.RunnerFunc != nil {
-		cfg.RunnerWithOptionsFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-			timeoutMins := int(opts.MaxDuration / time.Minute)
-			if timeoutMins <= 0 {
-				timeoutMins = int(opts.InactivityTimeout / time.Minute)
-			}
-			if timeoutMins <= 0 {
-				timeoutMins = cfg.TimeoutMinutes
-			}
-			return cfg.RunnerFunc(ctx, agyBin, prompt, sessionID, apiKey, model, timeoutMins)
-		}
-	} else if cfg.RunnerFunc == nil && cfg.RunnerWithOptionsFunc != nil {
-		cfg.RunnerFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			return cfg.RunnerWithOptionsFunc(ctx, agyBin, prompt, sessionID, apiKey, model, runner.WatchdogOptions{
-				InactivityTimeout: 5 * time.Minute,
-				MaxDuration:       time.Duration(timeoutMinutes) * time.Minute,
-				OutputFormat:      "stream-json",
-			})
-		}
-	} else if cfg.RunnerWithOptionsFunc == nil && cfg.RunnerFunc == nil {
-		cfg.RunnerFunc = func(context.Context, string, string, string, string, string, int) (string, string, int, error) {
-			return "", "", 1, fmt.Errorf("queue: RunnerFunc not configured on WorkerPool")
-		}
-		cfg.RunnerWithOptionsFunc = func(context.Context, string, string, string, string, string, runner.WatchdogOptions) (string, string, int, error) {
-			return "", "", 1, fmt.Errorf("queue: RunnerWithOptionsFunc not configured on WorkerPool")
-		}
-	}
 	if hasCustomRunner && testPoolHook != nil {
 		if wrapped := testPoolHook(cfg); wrapped != nil {
 			cfg.ProcessPool = wrapped
@@ -264,11 +206,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	}
 	sessMgr := cfg.SessionManager
 	if sessMgr == nil {
-		if appCfg != nil {
-			sessMgr = session.New(appCfg.GeminiHomeDir(), appCfg.DataDir())
-		} else {
-			sessMgr = session.New("", "")
-		}
+		sessMgr = session.New(appCfg.GeminiHomeDir(), appCfg.DataDir())
 	}
 	cfg.SessionManager = sessMgr
 
@@ -288,10 +226,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	}
 	if cfg.ResolveChannelPolicy == nil {
 		cfg.ResolveChannelPolicy = func(cID, cName string) config.ChannelPolicy {
-			if appCfg != nil {
-				return appCfg.ResolveChannelPolicy(cID, cName)
-			}
-			return config.ActiveConfig().ResolveChannelPolicy(cID, cName)
+			return appCfg.ResolveChannelPolicy(cID, cName)
 		}
 	}
 	if cfg.SystemAlertFunc == nil {
@@ -667,10 +602,6 @@ func (p *WorkerPool) StopWithTimeout(drainTimeout time.Duration) {
 				}
 			}
 		}
-	} else if p.cfg.DB != nil {
-		if _, err := p.cfg.DB.ExecContext(sweepCtx, "UPDATE messages SET status = 'PENDING', error_message = 'deployment_drain' WHERE status = 'PROCESSING'"); err != nil {
-			log.Printf("[WorkerPool] Warning sweeping processing messages: %v", err)
-		}
 	}
 }
 
@@ -875,12 +806,7 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 		Prompt: turnPrompt, ScopeInstructions: nodeInstructions, Sink: sink, CreatedAt: time.Now(), Ctx: ctx,
 	}
 
-	leasedPool, ok := procPool.(runner.LeasedAgentPool)
-	if !ok {
-		metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
-		return "", deviceKey, fmt.Errorf("queue: active pool does not implement runner.LeasedAgentPool for voice %s", deviceKey)
-	}
-	lease, lErr := leasedPool.AcquireLease(ctx, deviceKey)
+	lease, lErr := procPool.AcquireLease(ctx, deviceKey)
 	if lErr != nil {
 		metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
 		return "", deviceKey, fmt.Errorf("failed to acquire voice daemon: %w", lErr)

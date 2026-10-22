@@ -1006,12 +1006,11 @@ func TestUnifiedProcessPool_SessionPropagation_Suite(t *testing.T) {
 	tests := []struct {
 		name, inputSessID, secondSessID, expectCapturedSess, expectSessID string
 		initialTurns, expectSpawns                                        int
-		callSession, expectSecondDiff                                     bool
+		expectSecondDiff                                                  bool
 	}{
 		{name: "PropagatesCustomSessionID", inputSessID: "11111111-2222-3333-4444-555555555555", secondSessID: "11111111-2222-3333-4444-555555555555", expectCapturedSess: "11111111-2222-3333-4444-555555555555", expectSessID: "11111111-2222-3333-4444-555555555555", expectSpawns: 1},
 		{name: "FreshSessionOnEmptyID", inputSessID: "", expectCapturedSess: "", expectSessID: "00000000-0000-0000-0000-000000000001", expectSpawns: 1},
 		{name: "MismatchedSessionIDRotates", inputSessID: "11111111-1111-1111-1111-111111111111", secondSessID: "22222222-2222-2222-2222-222222222222", expectCapturedSess: "11111111-1111-1111-1111-111111111111", expectSessID: "11111111-1111-1111-1111-111111111111", expectSecondDiff: true, expectSpawns: 2},
-		{name: "GetOrCreateSession_PropagatesSessionID", callSession: true, inputSessID: "33333333-3333-3333-3333-333333333333", expectCapturedSess: "33333333-3333-3333-3333-333333333333", expectSessID: "33333333-3333-3333-3333-333333333333", expectSpawns: 1},
 		{name: "PropagatesInitialTurnCount", inputSessID: "44444444-4444-4444-4444-444444444444", initialTurns: 5, expectCapturedSess: "44444444-4444-4444-4444-444444444444", expectSessID: "44444444-4444-4444-4444-444444444444", expectSpawns: 1},
 	}
 
@@ -1030,22 +1029,14 @@ func TestUnifiedProcessPool_SessionPropagation_Suite(t *testing.T) {
 
 			ctx := context.Background()
 			var daemon *StreamingDaemon
-			if tc.callSession {
-				sess, err := pool.GetOrCreateSession(ctx, "target-prop", tc.inputSessID)
-				if err != nil {
-					t.Fatalf("GetOrCreateSession failed: %v", err)
-				}
-				daemon = sess.(*StreamingDaemon)
+			var err error
+			if tc.initialTurns > 0 {
+				daemon, err = pool.GetOrCreate(ctx, "target-prop", tc.inputSessID, tc.initialTurns)
 			} else {
-				var err error
-				if tc.initialTurns > 0 {
-					daemon, err = pool.GetOrCreate(ctx, "target-prop", tc.inputSessID, tc.initialTurns)
-				} else {
-					daemon, err = pool.GetOrCreate(ctx, "target-prop", tc.inputSessID)
-				}
-				if err != nil {
-					t.Fatalf("GetOrCreate failed: %v", err)
-				}
+				daemon, err = pool.GetOrCreate(ctx, "target-prop", tc.inputSessID)
+			}
+			if err != nil {
+				t.Fatalf("GetOrCreate failed: %v", err)
 			}
 
 			if capturedCfg.SessionID != tc.expectCapturedSess || daemon.SessionID() != tc.expectSessID {
@@ -1602,27 +1593,5 @@ func TestAgentPool_InterfacesAndMockBehavior(t *testing.T) {
 	}
 	if _, err := pool.GetOrCreateSession(ctx, "device-b", ""); err == nil {
 		t.Fatal("expected error on closed mock pool")
-	}
-}
-
-func TestUnifiedProcessPool_GetOrCreateSession(t *testing.T) {
-	t.Parallel()
-	pool := NewUnifiedProcessPool(PoolConfig{DefaultModel: "gemini-2.5-pro", MaxIdle: 24 * time.Hour}, createTestSpawner())
-	defer pool.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	sess, err := pool.GetOrCreateSession(ctx, "kiosk-voice", "")
-	if err != nil || sess == nil || sess.SessionID() == "" {
-		t.Fatalf("unexpected session: (%v, %v)", sess, err)
-	}
-	if err := sess.Send("hello", &TurnContext{TurnID: "turn-1", Prompt: "hello", CreatedAt: time.Now()}); err != nil {
-		t.Fatalf("failed sending prompt: %v", err)
-	}
-	if err := pool.Close(); err != nil {
-		t.Fatalf("failed to close pool: %v", err)
-	}
-	if _, err := pool.GetOrCreateSession(ctx, "kiosk-voice", ""); err == nil {
-		t.Fatal("expected error from GetOrCreateSession on closed pool")
 	}
 }

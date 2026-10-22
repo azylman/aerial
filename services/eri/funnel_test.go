@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -45,18 +44,9 @@ func setDiscordSessionOpenerForTest(t *testing.T, fn func(*discordgo.Session) er
 }
 
 // newTestWorkerPool instantiates a fully isolated WorkerPool with mocked runner, notifier, and delivery hooks.
-func newTestWorkerPool(dbOrStore any) *queue.WorkerPool {
-	var s db.Store
-	if dbOrStore != nil {
-		switch v := dbOrStore.(type) {
-		case db.Store:
-			s = v
-		case *sql.DB:
-			s = db.NewSQLStore(v)
-		}
-	}
+func newTestWorkerPool(store db.Store) *queue.WorkerPool {
 	return queue.New(nil, queue.WorkerPoolConfig{
-		Store: s,
+		Store: store,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			return `{"event":"result","result":{"status":"SUCCESS","response":"mock test response"}}`, "", 0, nil
 		},

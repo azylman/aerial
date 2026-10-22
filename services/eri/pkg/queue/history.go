@@ -10,6 +10,7 @@ import (
 	"time"
 	_ "time/tzdata"
 
+	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/sanitizer"
@@ -106,8 +107,7 @@ func FormatChannelHistory(messages []HistoryMessage, tzOpt ...string) string {
 }
 
 // DefaultHistoryFetcher returns a HistoryFetcherFunc that fetches recent messages from Discord REST API with DB fallback.
-func DefaultHistoryFetcher(dg *discordgo.Session, dbOrStore any) HistoryFetcherFunc {
-	store := resolveStore(dbOrStore)
+func DefaultHistoryFetcher(dg *discordgo.Session, store db.Store) HistoryFetcherFunc {
 	return func(ctx context.Context, channelID, beforeID string, limit int) ([]HistoryMessage, error) {
 		start := time.Now()
 		if channelID == "" || !IsNumericSnowflake(channelID) || dg == nil {
@@ -187,9 +187,8 @@ func FilterAssistantMessages(msgs []HistoryMessage) []HistoryMessage {
 	return filtered
 }
 
-func fetchHistoryFromDB(dbOrStore any, channelID, beforeID string, limit int, ctxOpt ...context.Context) ([]HistoryMessage, error) {
+func fetchHistoryFromDB(store db.Store, channelID, beforeID string, limit int, ctxOpt ...context.Context) ([]HistoryMessage, error) {
 	start := time.Now()
-	store := resolveStore(dbOrStore)
 	if store == nil {
 		return nil, nil
 	}
@@ -243,9 +242,8 @@ func fetchHistoryFromDB(dbOrStore any, channelID, beforeID string, limit int, ct
 }
 
 // FetchRecentThreadHistory retrieves up to 100 recent messages for a thread from PostgreSQL, falling back to Discord API.
-func FetchRecentThreadHistory(ctx context.Context, dg *discordgo.Session, dbOrStore any, threadID string, limit int) ([]HistoryMessage, error) {
+func FetchRecentThreadHistory(ctx context.Context, dg *discordgo.Session, store db.Store, threadID string, limit int) ([]HistoryMessage, error) {
 	start := time.Now()
-	store := resolveStore(dbOrStore)
 	if limit <= 0 || limit > 100 {
 		limit = 100
 	}

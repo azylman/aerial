@@ -22,10 +22,7 @@ type DynamicVoicePool struct {
 	closed      bool
 }
 
-var (
-	_ AgentPool       = (*DynamicVoicePool)(nil)
-	_ LeasedAgentPool = (*DynamicVoicePool)(nil)
-)
+var _ AgentPool = (*DynamicVoicePool)(nil)
 
 // NewDynamicVoicePool constructs a DynamicVoicePool using the provided factory.
 func NewDynamicVoicePool(factory DynamicVoicePoolFactory) *DynamicVoicePool {
@@ -59,15 +56,6 @@ func (p *DynamicVoicePool) activePool() (AgentPool, error) {
 		return nil, errors.New("no active voice pool")
 	}
 	return p.currentPool, nil
-}
-
-// GetOrCreateSession captures currentPool and delegates unlocked.
-func (p *DynamicVoicePool) GetOrCreateSession(ctx context.Context, targetKey string, sessionID string) (AgentSession, error) {
-	pool, err := p.activePool()
-	if err != nil {
-		return nil, err
-	}
-	return pool.GetOrCreateSession(ctx, targetKey, sessionID)
 }
 
 // Initialize pre-warms the currently active pool.
@@ -196,14 +184,11 @@ func (p *DynamicVoicePool) MarkDirty() {
 	}
 }
 
-// AcquireLease delegates lease acquisition to the underlying pool if supported.
+// AcquireLease delegates lease acquisition to the underlying pool.
 func (p *DynamicVoicePool) AcquireLease(ctx context.Context, targetKey string) (SessionLease, error) {
 	pool, err := p.activePool()
 	if err != nil {
 		return nil, err
 	}
-	if lp, ok := pool.(LeasedAgentPool); ok {
-		return lp.AcquireLease(ctx, targetKey)
-	}
-	return nil, errors.New("underlying pool does not support leasing")
+	return pool.AcquireLease(ctx, targetKey)
 }

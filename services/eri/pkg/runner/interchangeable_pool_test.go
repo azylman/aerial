@@ -96,20 +96,6 @@ func newTestInterchangeablePool(t *testing.T, workers int, prefix, model string,
 	return pool, underlying
 }
 
-func sendInterchangeableTurn(t *testing.T, ctx context.Context, sess AgentSession, turnID, prompt string) string {
-	t.Helper()
-	sink := NewThrowawayTurnSink()
-	turn := &TurnContext{TurnID: turnID, SessionID: sess.SessionID(), Sink: sink, CreatedAt: time.Now(), Ctx: ctx}
-	if err := sess.Send(prompt, turn); err != nil {
-		t.Fatalf("sendInterchangeableTurn (%s) Send failed: %v", turnID, err)
-	}
-	res, err := sink.ResultContext(ctx)
-	if err != nil {
-		t.Fatalf("sendInterchangeableTurn (%s) ResultContext failed: %v", turnID, err)
-	}
-	return res
-}
-
 func TestInterchangeablePool_InitializationAndConfig(t *testing.T) {
 	var spawns atomic.Int32
 	mock := createTestSpawner()
@@ -138,15 +124,17 @@ func TestInterchangeablePool_LeaseAutoRotateAndRelease(t *testing.T) {
 	pool, _ := newTestInterchangeablePool(t, 1, "", "", nil)
 	ctx := context.Background()
 
-	s1, err1 := pool.GetOrCreateSession(ctx, "target-1", "")
-	res1 := sendInterchangeableTurn(t, ctx, s1, "turn-1", "hello 1")
+	l1, err1 := pool.AcquireLease(ctx, "target-1")
+	res1, _ := l1.Execute(ctx, &TurnContext{TurnID: "turn-1", Prompt: "hello 1", Ctx: ctx})
+	_ = l1.Release()
 	pool.WaitBackground()
-	s2, err2 := pool.GetOrCreateSession(ctx, "target-1", "")
-	res2 := sendInterchangeableTurn(t, ctx, s2, "turn-2", "hello 2")
+	l2, err2 := pool.AcquireLease(ctx, "target-1")
+	res2, _ := l2.Execute(ctx, &TurnContext{TurnID: "turn-2", Prompt: "hello 2", Ctx: ctx})
+	_ = l2.Release()
 	pool.WaitBackground()
 
-	if err1 != nil || err2 != nil || s1.SessionID() == "" || s2.SessionID() == "" || s1.SessionID() == s2.SessionID() || res1 != "response-to-1" || res2 != "response-to-2" || pool.AvailableCount() != 1 {
-		t.Fatalf("unexpected turn responses or availability: (%v, %v), id=(%q, %q), res=(%q, %q)", err1, err2, s1.SessionID(), s2.SessionID(), res1, res2)
+	if err1 != nil || err2 != nil || l1.SessionID() == "" || l2.SessionID() == "" || l1.SessionID() == l2.SessionID() || res1.Response != "response-to-1" || res2.Response != "response-to-2" || pool.AvailableCount() != 1 {
+		t.Fatalf("unexpected turn responses or availability: (%v, %v), id=(%q, %q), res=(%v, %v)", err1, err2, l1.SessionID(), l2.SessionID(), res1, res2)
 	}
 
 	errMock := &MockDaemonSpawner{
@@ -162,12 +150,12 @@ func TestInterchangeablePool_LeaseAutoRotateAndRelease(t *testing.T) {
 		},
 	}
 	errPool, _ := newTestInterchangeablePool(t, 1, "", "", errMock)
-	errSess, _ := errPool.GetOrCreateSession(ctx, "target", "")
-	_ = errSess.Send("trigger write error", &TurnContext{TurnID: "t-err", Sink: NewThrowawayTurnSink()})
+	_, _ = errPool.ExecuteEphemeral(ctx, "target", "trigger write error")
 	errPool.WaitBackground()
 
-	sessNilCtx, _ := pool.GetOrCreateSession(ctx, "target-nil", "")
-	_ = sessNilCtx.Send("nil turn context", nil)
+	lNilCtx, _ := pool.AcquireLease(ctx, "target-nil")
+	_, _ = lNilCtx.Execute(ctx, nil)
+	_ = lNilCtx.Release()
 	pool.WaitBackground()
 
 	if errPool.AvailableCount() != 1 || pool.AvailableCount() != 1 {
@@ -202,30 +190,24 @@ func TestInterchangeablePool_ConcurrencyAndSaturation(t *testing.T) {
 	turnBlockers["prompt-1"], turnBlockers["prompt-2"] = b1, b2
 	mu.Unlock()
 
-	s1, _ := pool.GetOrCreateSession(ctx, "c1", "")
-	sink1 := NewThrowawayTurnSink()
-	_ = s1.Send("prompt-1", &TurnContext{TurnID: "t1", Sink: sink1, Ctx: ctx})
-
-	s2, _ := pool.GetOrCreateSession(ctx, "c2", "")
-	sink2 := NewThrowawayTurnSink()
-	_ = s2.Send("prompt-2", &TurnContext{TurnID: "t2", Sink: sink2, Ctx: ctx})
+	l1, _ := pool.AcquireLease(ctx, "c1")
+	l2, _ := pool.AcquireLease(ctx, "c2")
 
 	if pool.AvailableCount() != 0 {
 		t.Fatalf("expected 0 available, got %d", pool.AvailableCount())
 	}
 
-	s3, err3 := pool.GetOrCreateSession(ctx, "c3", "")
+	lease3, err3 := pool.AcquireLease(ctx, "c3")
 	if err3 != nil {
 		t.Fatalf("caller 3 expected overflow: %v", err3)
 	}
 	if d3, ok := pool.Get("ephemeral:worker-ondemand-1"); !ok || d3 == nil {
 		t.Fatalf("expected on-demand worker active")
 	}
-	sink3 := NewThrowawayTurnSink()
-	_ = s3.Send("prompt-3", &TurnContext{TurnID: "t3", Sink: sink3, Ctx: ctx})
-	if _, err := sink3.ResultContext(ctx); err != nil {
+	if _, err := lease3.Execute(ctx, &TurnContext{TurnID: "t3", Prompt: "prompt-3", Ctx: ctx}); err != nil {
 		t.Fatalf("caller 3 result error: %v", err)
 	}
+	_ = lease3.Release()
 	pool.WaitBackground()
 	if d3After, ok := pool.Get("ephemeral:worker-ondemand-1"); ok || d3After != nil {
 		t.Fatalf("expected on-demand worker evicted")
@@ -248,9 +230,11 @@ func TestInterchangeablePool_ConcurrencyAndSaturation(t *testing.T) {
 	}
 
 	close(b1)
-	_, _ = sink1.ResultContext(ctx)
+	_, _ = l1.Execute(ctx, &TurnContext{TurnID: "t1", Prompt: "prompt-1", Ctx: ctx})
+	_ = l1.Release()
 	close(b2)
-	_, _ = sink2.ResultContext(ctx)
+	_, _ = l2.Execute(ctx, &TurnContext{TurnID: "t2", Prompt: "prompt-2", Ctx: ctx})
+	_ = l2.Release()
 	pool.WaitBackground()
 	if pool.AvailableCount() != 2 {
 		t.Errorf("expected 2 available workers, got %d", pool.AvailableCount())
@@ -261,18 +245,19 @@ func TestInterchangeablePool_ContextCancellation(t *testing.T) {
 	pool, _ := newTestInterchangeablePool(t, 1, "", "", nil)
 	ctxCancelled, cancelTimeout := context.WithCancel(context.Background())
 	cancelTimeout()
-	if _, err2 := pool.GetOrCreateSession(ctxCancelled, "c2", ""); !errors.Is(err2, context.Canceled) {
+	if _, err2 := pool.AcquireLease(ctxCancelled, "c2"); !errors.Is(err2, context.Canceled) {
 		t.Errorf("expected canceled error, got: %v", err2)
 	}
 
-	mockSlow := createTestSpawner(func(string) { select {} })
-	poolSlow, _ := newTestInterchangeablePool(t, 1, "", "", mockSlow)
 	ctx, cancel := context.WithCancel(context.Background())
-	sSlow, _ := poolSlow.GetOrCreateSession(ctx, "c-cancel", "")
-	sink := NewThrowawayTurnSink()
-	_ = sSlow.Send("long running", &TurnContext{TurnID: "t-cancel", Sink: sink, Ctx: ctx})
-	cancel()
-	_, _ = sink.ResultContext(context.Background())
+	mockSlow := createTestSpawner(func(string) {
+		cancel()
+		select {}
+	})
+	poolSlow, _ := newTestInterchangeablePool(t, 1, "", "", mockSlow)
+	lSlow, _ := poolSlow.AcquireLease(ctx, "c-cancel")
+	_, _ = lSlow.Execute(ctx, &TurnContext{TurnID: "t-cancel", Prompt: "long running", Ctx: ctx})
+	_ = lSlow.Release()
 	poolSlow.WaitBackground()
 	if poolSlow.AvailableCount() != 1 {
 		t.Errorf("expected worker returned after cancelled turn, got %d", poolSlow.AvailableCount())
@@ -302,15 +287,17 @@ func TestInterchangeablePool_DelegationAndErrorGuards(t *testing.T) {
 		t.Errorf("expected worker-0 lookup success, got (%v, %v)", d0, ok0)
 	}
 
-	_, sErr := pool.GetOrCreateSession(ctx, "any", "")
+	lease, sErr := pool.AcquireLease(ctx, "any")
 	pool.SetSessionManager(nil)
 	pool.SetSessionCallbacks(nil, nil)
 	if sErr != nil {
-		t.Fatalf("unexpected GetOrCreateSession error: %v", sErr)
+		t.Fatalf("unexpected AcquireLease error: %v", sErr)
 	}
+	_ = lease.Release()
+	pool.WaitBackground()
 
 	var nilPool *InterchangeablePool
-	_, ngErr := nilPool.GetOrCreateSession(ctx, "t", "")
+	_, ngErr := nilPool.AcquireLease(ctx, "t")
 	_, neErr := nilPool.ExecuteEphemeral(ctx, "t", "p")
 	_, nlErr := nilPool.EphemeralLLMFunc("t")(ctx, "m", "p")
 	nd, ndOk := nilPool.Get("t")
@@ -325,19 +312,15 @@ func TestInterchangeablePool_DelegationAndErrorGuards(t *testing.T) {
 	}
 
 	poolWaiting, _ := newTestInterchangeablePool(t, 1, "", "", nil)
-	wSess, _ := poolWaiting.GetOrCreateSession(ctx, "t1", "")
-	wOverflowSess, _ := poolWaiting.GetOrCreateSession(ctx, "t2", "")
+	wLease, _ := poolWaiting.AcquireLease(ctx, "t1")
+	wOverflowLease, _ := poolWaiting.AcquireLease(ctx, "t2")
 	_ = poolWaiting.Close()
-	if closer, ok := wSess.(io.Closer); ok {
-		_ = closer.Close()
-	}
-	if closer, ok := wOverflowSess.(io.Closer); ok {
-		_ = closer.Close()
-	}
+	_ = wLease.Release()
+	_ = wOverflowLease.Release()
 	poolWaiting.evictOverflow("ephemeral:worker-ondemand-closed")
 	runtime.Gosched()
 
-	_, wgErr := poolWaiting.GetOrCreateSession(ctx, "target", "")
+	_, wgErr := poolWaiting.AcquireLease(ctx, "target")
 	_, weErr := poolWaiting.ExecuteEphemeral(ctx, "target", "prompt")
 	if wgErr == nil || !strings.Contains(wgErr.Error(), "closed") || poolWaiting.Close() != nil || poolWaiting.Initialize(ctx) == nil || weErr == nil {
 		t.Errorf("expected closed error on closed poolWaiting: wgErr=%v, weErr=%v", wgErr, weErr)
@@ -345,53 +328,20 @@ func TestInterchangeablePool_DelegationAndErrorGuards(t *testing.T) {
 
 	poolNoUnderlying := NewInterchangeablePool(nil, InterchangeablePoolConfig{WorkerCount: 1})
 	defer poolNoUnderlying.Close()
-	_, nuErr := poolNoUnderlying.GetOrCreateSession(ctx, "t", "")
+	_, nuErr := poolNoUnderlying.AcquireLease(ctx, "t")
 	failSpawner := &MockDaemonSpawner{SpawnFn: func(context.Context, DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
 		return nil, nil, nil, nil, errors.New("spawn error")
 	}}
 	failPool, _ := newTestInterchangeablePool(t, 1, "", "", failSpawner)
-	_, fErr := failPool.GetOrCreateSession(ctx, "t", "")
+	_, fErr := failPool.AcquireLease(ctx, "t")
 	if poolNoUnderlying.Initialize(ctx) != nil || nuErr == nil || fErr == nil || failPool.AvailableCount() != 1 {
 		t.Errorf("expected underlying/spawner errors: nuErr=%v, fErr=%v, avail=%d", nuErr, fErr, failPool.AvailableCount())
 	}
 
-	nilSess := &leasedSession{}
 	var nilDaemon *StreamingDaemon
-	closedPool := NewUnifiedProcessPool(PoolConfig{}, createTestSpawner())
-	_ = closedPool.Close()
-	untypedSess, cpErr := closedPool.GetOrCreateSession(ctx, "target", "")
-	if nilSess.SessionID() != "" || nilSess.Send("p", nil) == nil || nilSess.Send("p", &TurnContext{}) == nil || nilDaemon.SessionID() != "" || cpErr == nil || untypedSess != nil {
-		t.Error("unexpected nil session/daemon guards")
+	if nilDaemon.SessionID() != "" {
+		t.Error("unexpected nil daemon SessionID")
 	}
-}
-
-func TestReleaseTurnSink_ForwardingAndIdempotency(t *testing.T) {
-	mockSink := newMockTurnSink()
-	var released atomic.Int32
-	wrapped := &releaseTurnSink{inner: mockSink, release: func() { released.Add(1) }}
-	dispatch := func(s *releaseTurnSink) {
-		s.OnTurnStarted()
-		s.OnStepStarted(1)
-		s.OnThinking()
-		s.OnToolCall("my-tool", "my-cmd")
-		s.OnToolCompleted("bash", "native", 10*time.Millisecond, "ok")
-		s.OnSkillActivated("self-improvement", "discord")
-		s.OnTextDelta("delta-chunk")
-		s.OnResult(&TurnResult{Response: "SUCCESS"})
-		s.OnError(errors.New("err"))
-	}
-	dispatch(wrapped)
-
-	mockSink.mu.Lock()
-	allEventsOk := mockSink.started && mockSink.thinking == 1 && len(mockSink.toolCalls) == 1 &&
-		len(mockSink.completedTools) == 1 && len(mockSink.activatedSkills) == 1 && len(mockSink.deltas) == 1 &&
-		mockSink.result != nil && mockSink.result.Response == "SUCCESS" && mockSink.err != nil
-	mockSink.mu.Unlock()
-
-	if !allEventsOk || released.Load() != 1 {
-		t.Errorf("expected all events forwarded and release once, ok=%v, rel=%d", allEventsOk, released.Load())
-	}
-	dispatch(&releaseTurnSink{inner: nil, release: func() {}})
 }
 
 func TestInterchangeablePool_AcquireLeaseAndMetadata(t *testing.T) {

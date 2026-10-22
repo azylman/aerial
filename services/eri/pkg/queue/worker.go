@@ -57,18 +57,14 @@ type turnExecution struct {
 // and diskActivity.IsZero(). Rotated sessions with turn_count == 0 or empty internal_session_id
 // but with prior completed messages are recognized as existing sessions.
 // If database queries fail, the error is returned to allow fail-open semantics.
-func GetSessionLastActivity(dbOrStore any, threadID string, mgr ...*session.Manager) (time.Time, bool, error) {
-	if dbOrStore == nil || strings.TrimSpace(threadID) == "" {
+func GetSessionLastActivity(store db.Store, threadID string, mgr ...*session.Manager) (time.Time, bool, error) {
+	if store == nil || strings.TrimSpace(threadID) == "" {
 		return time.Time{}, true, nil
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	store := resolveStore(dbOrStore)
-	if store == nil {
-		return time.Time{}, true, nil
-	}
 	stats, err := store.GetSessionActivityStats(ctx, threadID)
 	if err != nil {
 		return time.Time{}, false, fmt.Errorf("querying session activity for thread %s: %w", threadID, err)
@@ -506,15 +502,10 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 		te.failBurst(fmt.Errorf("queue: no agent execution pool available for thread %s", te.threadID))
 		return
 	}
-	leasedPool, ok := activePool.(runner.LeasedAgentPool)
-	if !ok {
-		te.failBurst(fmt.Errorf("queue: active pool does not implement runner.LeasedAgentPool for thread %s", te.threadID))
-		return
-	}
 
 	// 2. Acquire exclusive session lease before prompt construction
 	leaseCtx, leaseCancel := context.WithTimeout(te.pool.ctx, 65*time.Second)
-	lease, leaseErr := leasedPool.AcquireLease(leaseCtx, te.threadID)
+	lease, leaseErr := activePool.AcquireLease(leaseCtx, te.threadID)
 	leaseCancel()
 	if leaseErr != nil {
 		te.failBurst(fmt.Errorf("queue: failed to acquire session lease for thread %s: %w", te.threadID, leaseErr))
@@ -1658,10 +1649,8 @@ func (te *turnExecution) executeWithRetries() {
 				}
 				te.lease = nil
 			}
-			if leasedPool, ok := activePool.(runner.LeasedAgentPool); ok {
-				if newLease, lErr := leasedPool.AcquireLease(te.pool.ctx, te.threadID); lErr == nil {
-					te.lease, te.isEphemeral, te.currentSessionID = newLease, newLease.IsEphemeral() || te.isNonPrimaryPool(activePool), newLease.SessionID()
-				}
+			if newLease, lErr := activePool.AcquireLease(te.pool.ctx, te.threadID); lErr == nil {
+				te.lease, te.isEphemeral, te.currentSessionID = newLease, newLease.IsEphemeral() || te.isNonPrimaryPool(activePool), newLease.SessionID()
 			}
 			if shutdown := te.handleRetryBackoff(attempt, maxAttempts, errDetail, currentModel); shutdown {
 				return
