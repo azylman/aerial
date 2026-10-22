@@ -6278,38 +6278,35 @@ description: This is a sample description for testing scanner.
 	corruptSkillMD := `---
 invalid yaml without name or closing
 `
+	commonMD := strings.Replace(validSkillMD, "sample-skill", "sample-common", 1)
+	discordMD := strings.Replace(validSkillMD, "sample-skill", "sample-discord", 1)
+	nilEmbMD := strings.Replace(validSkillMD, "sample-skill", "nil-emb", 1)
+	errEmbMD := strings.Replace(validSkillMD, "sample-skill", "err-emb", 1)
+
+	type diskEntry struct {
+		relPath string
+		content string
+		isDir   bool
+	}
 
 	tests := []struct {
-		name         string
-		setupFn      func(t *testing.T) (dir string, client OllamaClient)
-		wantSkillLen int
-		wantRelPaths []string
-		wantEmbsNil  bool
-		wantErr      bool
-		errContains  string
+		name            string
+		nonExistentRoot bool
+		entries         []diskEntry
+		mockClient      *MockOllamaClient
+		wantSkillLen    int
+		wantRelPaths    []string
+		wantEmbsNil     bool
+		wantErr         bool
+		errContains     string
 	}{
 		{
 			name: "ValidSkillsScannedBothDomains",
-			setupFn: func(t *testing.T) (string, OllamaClient) {
-				tmp := t.TempDir()
-				commonSkillDir := filepath.Join(tmp, "common", "sample-common")
-				discordSkillDir := filepath.Join(tmp, "discord", "sample-discord")
-				if err := os.MkdirAll(commonSkillDir, 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.MkdirAll(discordSkillDir, 0o755); err != nil {
-					t.Fatal(err)
-				}
-				cMD := strings.Replace(validSkillMD, "sample-skill", "sample-common", 1)
-				dMD := strings.Replace(validSkillMD, "sample-skill", "sample-discord", 1)
-				if err := os.WriteFile(filepath.Join(commonSkillDir, "SKILL.md"), []byte(cMD), 0o644); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(discordSkillDir, "SKILL.md"), []byte(dMD), 0o644); err != nil {
-					t.Fatal(err)
-				}
-				return tmp, &MockOllamaClient{embedding: testEmbedding(1.0)}
+			entries: []diskEntry{
+				{relPath: "common/sample-common/SKILL.md", content: commonMD},
+				{relPath: "discord/sample-discord/SKILL.md", content: discordMD},
 			},
+			mockClient:   &MockOllamaClient{embedding: testEmbedding(1.0)},
 			wantSkillLen: 2,
 			wantRelPaths: []string{
 				"custom-skills/common/sample-common/SKILL.md",
@@ -6317,106 +6314,55 @@ invalid yaml without name or closing
 			},
 		},
 		{
-			name: "NonExistentDirTreatedAsEmptyWithoutError",
-			setupFn: func(t *testing.T) (string, OllamaClient) {
-				return filepath.Join(t.TempDir(), "nonexistent"), nil
-			},
-			wantSkillLen: 0,
+			name:            "NonExistentDirTreatedAsEmptyWithoutError",
+			nonExistentRoot: true,
+			wantSkillLen:    0,
 		},
 		{
 			name: "IgnoredNonDirectoryEntriesAndMissingSkillMD",
-			setupFn: func(t *testing.T) (string, OllamaClient) {
-				tmp := t.TempDir()
-				commonDir := filepath.Join(tmp, "common")
-				if err := os.MkdirAll(commonDir, 0o755); err != nil {
-					t.Fatal(err)
-				}
-				// Write regular file in domainDir (should be skipped)
-				if err := os.WriteFile(filepath.Join(commonDir, "README.md"), []byte("not a dir"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-				// Write directory without SKILL.md (should be skipped)
-				emptySubdir := filepath.Join(commonDir, "empty-dir")
-				if err := os.MkdirAll(emptySubdir, 0o755); err != nil {
-					t.Fatal(err)
-				}
-				return tmp, nil
+			entries: []diskEntry{
+				{relPath: "common/README.md", content: "not a dir"},
+				{relPath: "common/empty-dir", isDir: true},
 			},
 			wantSkillLen: 0,
 		},
 		{
 			name: "NilOllamaClientLeavesEmbeddingNil",
-			setupFn: func(t *testing.T) (string, OllamaClient) {
-				tmp := t.TempDir()
-				dir := filepath.Join(tmp, "discord", "nil-emb")
-				if err := os.MkdirAll(dir, 0o755); err != nil {
-					t.Fatal(err)
-				}
-				md := strings.Replace(validSkillMD, "sample-skill", "nil-emb", 1)
-				if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(md), 0o644); err != nil {
-					t.Fatal(err)
-				}
-				return tmp, nil
+			entries: []diskEntry{
+				{relPath: "discord/nil-emb/SKILL.md", content: nilEmbMD},
 			},
 			wantSkillLen: 1,
 			wantEmbsNil:  true,
 		},
 		{
 			name: "CorruptSkillFileReturnsError",
-			setupFn: func(t *testing.T) (string, OllamaClient) {
-				tmp := t.TempDir()
-				dir := filepath.Join(tmp, "discord", "bad-skill")
-				if err := os.MkdirAll(dir, 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(corruptSkillMD), 0o644); err != nil {
-					t.Fatal(err)
-				}
-				return tmp, nil
+			entries: []diskEntry{
+				{relPath: "discord/bad-skill/SKILL.md", content: corruptSkillMD},
 			},
 			wantErr:     true,
 			errContains: "failed to parse frontmatter",
 		},
 		{
 			name: "OllamaEmbeddingErrorReturnsError",
-			setupFn: func(t *testing.T) (string, OllamaClient) {
-				tmp := t.TempDir()
-				dir := filepath.Join(tmp, "discord", "err-emb")
-				if err := os.MkdirAll(dir, 0o755); err != nil {
-					t.Fatal(err)
-				}
-				md := strings.Replace(validSkillMD, "sample-skill", "err-emb", 1)
-				if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(md), 0o644); err != nil {
-					t.Fatal(err)
-				}
-				return tmp, &MockOllamaClient{err: errors.New("ollama failure")}
+			entries: []diskEntry{
+				{relPath: "discord/err-emb/SKILL.md", content: errEmbMD},
 			},
+			mockClient:  &MockOllamaClient{err: errors.New("ollama failure")},
 			wantErr:     true,
 			errContains: "failed to generate embedding",
 		},
 		{
 			name: "ReadDirDomainError",
-			setupFn: func(t *testing.T) (string, OllamaClient) {
-				tmp := t.TempDir()
-				// Create a regular file at tmp/common instead of a directory
-				if err := os.WriteFile(filepath.Join(tmp, "common"), []byte("not a dir"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-				return tmp, nil
+			entries: []diskEntry{
+				{relPath: "common", content: "not a dir"},
 			},
 			wantErr:     true,
 			errContains: "failed to read custom skills domain",
 		},
 		{
 			name: "ReadFileSkillError",
-			setupFn: func(t *testing.T) (string, OllamaClient) {
-				tmp := t.TempDir()
-				// Create SKILL.md as a directory to trigger ReadFile error
-				dir := filepath.Join(tmp, "discord", "dir-skill", "SKILL.md")
-				if err := os.MkdirAll(dir, 0o755); err != nil {
-					t.Fatal(err)
-				}
-				return tmp, nil
+			entries: []diskEntry{
+				{relPath: "discord/dir-skill/SKILL.md", isDir: true},
 			},
 			wantErr:     true,
 			errContains: "failed to read skill file",
@@ -6425,8 +6371,32 @@ invalid yaml without name or closing
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			dir, client := tc.setupFn(t)
-			skills, err := ScanCustomSkills(context.Background(), dir, client)
+			rootDir := filepath.Join(t.TempDir(), "nonexistent")
+			if !tc.nonExistentRoot {
+				rootDir = t.TempDir()
+				for _, entry := range tc.entries {
+					fullPath := filepath.Join(rootDir, entry.relPath)
+					if entry.isDir {
+						if err := os.MkdirAll(fullPath, 0o755); err != nil {
+							t.Fatalf("failed to create dir %s: %v", fullPath, err)
+						}
+					} else {
+						if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+							t.Fatalf("failed to create parent dir for %s: %v", fullPath, err)
+						}
+						if err := os.WriteFile(fullPath, []byte(entry.content), 0o644); err != nil {
+							t.Fatalf("failed to write test file %s: %v", fullPath, err)
+						}
+					}
+				}
+			}
+
+			var client OllamaClient
+			if tc.mockClient != nil {
+				client = tc.mockClient
+			}
+
+			skills, err := ScanCustomSkills(context.Background(), rootDir, client)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("ScanCustomSkills() err = %v, wantErr = %v", err, tc.wantErr)
 			}
