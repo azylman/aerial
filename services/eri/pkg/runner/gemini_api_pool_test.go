@@ -18,6 +18,12 @@ import (
 
 func (s *GeminiAPISession) TargetKey() string { return s.targetKey }
 
+func (s *GeminiAPISession) History() []geminiContent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]geminiContent(nil), s.history...)
+}
+
 func TestGeminiAPIInterfaces_Satisfaction(t *testing.T) {
 	t.Parallel()
 
