@@ -14,8 +14,6 @@ import (
 
 var sqliteTestInitHook func(string) (*sql.DB, error)
 
-func RegisterSQLiteTestHook(fn func(string) (*sql.DB, error)) { sqliteTestInitHook = fn }
-
 type CronSchedule struct {
 	ID          string    `json:"id"`
 	TargetID    string    `json:"channel_id"`

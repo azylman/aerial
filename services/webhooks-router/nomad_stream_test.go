@@ -14,6 +14,14 @@ import (
 	"time"
 )
 
+// SetReconnectDelay overrides reconnection backoff parameters for fast hermetic unit tests.
+func (sub *NomadStreamSubscriber) SetReconnectDelay(initial, maxDelay time.Duration) {
+	sub.mu.Lock()
+	defer sub.mu.Unlock()
+	sub.reconnectDelay = initial
+	sub.maxBackoff = maxDelay
+}
+
 func TestExtractJobsFromMetadata_TableDriven(t *testing.T) {
 	tests := []struct {
 		name     string

@@ -164,14 +164,6 @@ func NewNomadStreamSubscriber(server *RouterServer) *NomadStreamSubscriber {
 	}
 }
 
-// SetReconnectDelay overrides reconnection backoff parameters for fast hermetic unit tests.
-func (sub *NomadStreamSubscriber) SetReconnectDelay(initial, maxDelay time.Duration) {
-	sub.mu.Lock()
-	defer sub.mu.Unlock()
-	sub.reconnectDelay = initial
-	sub.maxBackoff = maxDelay
-}
-
 // Start launches the background streaming worker with automatic reconnection and exponential backoff.
 func (sub *NomadStreamSubscriber) Start(ctx context.Context) {
 	go func() {
