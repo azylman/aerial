@@ -490,12 +490,6 @@ func (s *GeminiAPISession) SessionID() string {
 	return s.targetKey
 }
 
-func (s *GeminiAPISession) History() []geminiContent {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]geminiContent(nil), s.history...)
-}
-
 func (s *GeminiAPISession) transcriptPath() string {
 	if s.dataDir == "" {
 		return ""
