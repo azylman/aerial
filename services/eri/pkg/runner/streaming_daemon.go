@@ -69,7 +69,6 @@ type StreamingDaemon struct {
 	stdin          io.WriteCloser
 	stdout         io.ReadCloser
 	stderrCloser   io.Closer
-	stderr         *ActivityWriter
 	mu             sync.RWMutex
 	stdinMu        sync.Mutex
 	state          DaemonState
@@ -115,11 +114,10 @@ func StartStreamingDaemon(ctx context.Context, cfg DaemonConfig, spawner DaemonS
 		return nil, fmt.Errorf("failed spawning daemon: %w", err)
 	}
 
-	actWriter := NewActivityWriter(cfg.SessionID)
 	if stderr != nil {
 		go func() {
 			defer closeStreamQuietly(stderr, "stderr")
-			if _, copyErr := io.Copy(actWriter, stderr); copyErr != nil && !errors.Is(copyErr, io.EOF) && !errors.Is(copyErr, io.ErrClosedPipe) && !errors.Is(copyErr, os.ErrClosed) {
+			if _, copyErr := io.Copy(io.Discard, stderr); copyErr != nil && !errors.Is(copyErr, io.EOF) && !errors.Is(copyErr, io.ErrClosedPipe) && !errors.Is(copyErr, os.ErrClosed) {
 				log.Printf("[StreamingDaemon] Warning: error copying stderr: %v", copyErr)
 			}
 		}()
@@ -127,7 +125,7 @@ func StartStreamingDaemon(ctx context.Context, cfg DaemonConfig, spawner DaemonS
 
 	d := &StreamingDaemon{
 		cfg: cfg, spawner: spawner, handle: handle, stdin: stdin,
-		stdout: stdout, stderrCloser: stderr, stderr: actWriter,
+		stdout: stdout, stderrCloser: stderr,
 		state: StateStarting, lastUsed: time.Now(),
 		turnCount: cfg.InitialTurnCount, inFlightTools: make(map[int]inFlightToolCall),
 	}
@@ -169,7 +167,6 @@ func StartStreamingDaemon(ctx context.Context, cfg DaemonConfig, spawner DaemonS
 		d.mu.Lock()
 		d.sessionID, d.state = initSessID, StateReady
 		d.mu.Unlock()
-		d.stderr.SetSessionID(initSessID)
 	}
 
 	d.readerWg.Add(1)
@@ -229,9 +226,6 @@ func (d *StreamingDaemon) SetSessionID(id string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.sessionID = id
-	if d.stderr != nil {
-		d.stderr.SetSessionID(id)
-	}
 }
 
 func (d *StreamingDaemon) MarkDirty() {

@@ -161,5 +161,4 @@ type Store interface {
 	TranscriptStore
 	PRRegistryStore
 	VanadisStore
-	Close() error
 }

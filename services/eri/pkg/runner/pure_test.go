@@ -86,22 +86,6 @@ func TestParseInitEvent(t *testing.T) {
 	}
 }
 
-func TestActivityWriter_SessionProbe(t *testing.T) {
-	w := NewActivityWriter("")
-	if n, err := w.Write(nil); n != 0 || err != nil {
-		t.Fatalf("expected 0, nil from empty write")
-	}
-	jsonPayload := []byte(`some log prefix {"session_id": "123e4567-e89b-12d3-a456-426614174000"} some suffix`)
-	if n, err := w.Write(jsonPayload); err != nil || n != len(jsonPayload) || w.SessionID() != "123e4567-e89b-12d3-a456-426614174000" {
-		t.Fatalf("write or SessionID failed: %v", err)
-	}
-	w2 := NewActivityWriter("")
-	_, _ = w2.Write([]byte("Starting conversation update stream for 223e4567-e89b-12d3-a456-426614174000\n"))
-	if w2.SessionID() != "223e4567-e89b-12d3-a456-426614174000" {
-		t.Errorf("expected update stream session ID, got %q", w2.SessionID())
-	}
-}
-
 func DefaultWatchdogOptions(timeoutMinutes int) WatchdogOptions {
 	return WatchdogOptions{
 		InactivityTimeout: 5 * time.Minute,

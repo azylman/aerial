@@ -16,7 +16,7 @@ func NewTestStore(t testing.TB) Store {
 		t.Fatalf("NewTestStore failed to initialize SQLite test database: %v", err)
 	}
 	store := NewSQLStore(db)
-	t.Cleanup(func() { _ = store.Close() })
+	t.Cleanup(func() { _ = db.Close() })
 	return store
 }
 

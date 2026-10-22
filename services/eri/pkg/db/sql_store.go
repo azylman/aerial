@@ -91,12 +91,3 @@ func NewSQLStore(database *sql.DB) Store {
 	}
 	return &SQLStore{db: database, isPostgres: isPostgres(database)}
 }
-
-func (s *SQLStore) Close() error {
-	if s != nil && s.db != nil {
-		if closer, ok := s.db.(interface{ Close() error }); ok {
-			return closer.Close()
-		}
-	}
-	return nil
-}

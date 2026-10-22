@@ -488,10 +488,6 @@ func (m *TestMemStore) MarkProceduralCandidatesSkipped(ctx context.Context, ids 
 	return nil
 }
 
-func (m *TestMemStore) Close() error {
-	return nil
-}
-
 type MockOllamaClient struct {
 	embedding []float32
 	err       error
@@ -2520,26 +2516,6 @@ func TestSQLStore_GetFactsPaginated(t *testing.T) {
 	}
 }
 
-func TestSQLStore_Close(t *testing.T) {
-	memDB := setupTestDBMem(t)
-
-	tests := []struct {
-		name  string
-		store *SQLStore
-	}{
-		{"NilStore", nil},
-		{"ValidDBStore", NewSQLStore(memDB)},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if err := tc.store.Close(); err != nil {
-				t.Errorf("Close() err = %v", err)
-			}
-		})
-	}
-}
-
 func TestIsClientDisconnect(t *testing.T) {
 	canceledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -2569,25 +2545,14 @@ func TestIsClientDisconnect(t *testing.T) {
 	}
 }
 
-func TestMessageMetadata_ValueScan(t *testing.T) {
+func TestMessageMetadata_Scan(t *testing.T) {
 	tests := []struct {
 		name      string
-		meta      MessageMetadata
 		src       any
 		wantErr   bool
 		wantEmpty bool
 		wantAdmin bool
 	}{
-		{
-			name:      "EmptyValue",
-			meta:      MessageMetadata{},
-			wantEmpty: true,
-		},
-		{
-			name:      "NonEmptyValue",
-			meta:      MessageMetadata{IsAdmin: true, ChannelID: "c1", AuthorUsername: "user1"},
-			wantAdmin: true,
-		},
 		{
 			name:      "ScanNil",
 			src:       nil,
@@ -2627,29 +2592,17 @@ func TestMessageMetadata_ValueScan(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.src != nil || tc.wantErr {
-				var target MessageMetadata
-				err := target.Scan(tc.src)
-				if (err != nil) != tc.wantErr {
-					t.Fatalf("Scan() err = %v, wantErr = %v", err, tc.wantErr)
-				}
-				if !tc.wantErr && target.IsEmpty() != tc.wantEmpty {
-					t.Fatalf("Scan() IsEmpty = %v, wantEmpty = %v", target.IsEmpty(), tc.wantEmpty)
-				}
-				if !tc.wantErr && target.IsAdmin != tc.wantAdmin {
-					t.Fatalf("Scan() IsAdmin = %v, wantAdmin = %v", target.IsAdmin, tc.wantAdmin)
-				}
-				return
+			var target MessageMetadata
+			err := target.Scan(tc.src)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Scan() err = %v, wantErr = %v", err, tc.wantErr)
 			}
-			val, err := tc.meta.Value()
-			if err != nil {
-				t.Fatalf("Value() unexpected err: %v", err)
+			isEmpty := target.ChannelID == "" && !target.IsAdmin
+			if !tc.wantErr && isEmpty != tc.wantEmpty {
+				t.Fatalf("Scan() isEmpty = %v, wantEmpty = %v", isEmpty, tc.wantEmpty)
 			}
-			if tc.wantEmpty && val != "{}" {
-				t.Fatalf("Value() = %v, want {}", val)
-			}
-			if tc.wantAdmin && !strings.Contains(val.(string), `"is_admin":true`) {
-				t.Fatalf("Value() = %v, want is_admin:true", val)
+			if !tc.wantErr && target.IsAdmin != tc.wantAdmin {
+				t.Fatalf("Scan() IsAdmin = %v, wantAdmin = %v", target.IsAdmin, tc.wantAdmin)
 			}
 		})
 	}
