@@ -15,21 +15,25 @@ const DefaultWorkerTickInterval = 30 * time.Second
 
 // WorkerConfig defines the parameters for the background memory maintenance worker.
 type WorkerConfig struct {
-	Store        Store
-	Ollama       OllamaClient
-	LLMClient    LLMClientFunc
-	InitialDelay time.Duration
-	TickInterval time.Duration
+	Store           Store
+	Ollama          OllamaClient
+	LLMClient       LLMClientFunc
+	Publisher       SkillPublisher
+	CustomSkillsDir string
+	InitialDelay    time.Duration
+	TickInterval    time.Duration
 }
 
 // Worker coordinates periodic embedding backfills, fact extraction, and importance decay/pruning.
 type Worker struct {
-	store        Store
-	ollama       OllamaClient
-	llmClient    LLMClientFunc
-	initialDelay time.Duration
-	tickInterval time.Duration
-	tickCount    int64
+	store           Store
+	ollama          OllamaClient
+	llmClient       LLMClientFunc
+	publisher       SkillPublisher
+	customSkillsDir string
+	initialDelay    time.Duration
+	tickInterval    time.Duration
+	tickCount       int64
 }
 
 // NewWorker initializes a new background Worker instance.
@@ -39,12 +43,18 @@ func NewWorker(cfg WorkerConfig) *Worker {
 	if tickInt <= 0 {
 		tickInt = DefaultWorkerTickInterval
 	}
+	customDir := cfg.CustomSkillsDir
+	if customDir == "" {
+		customDir = DefaultCustomSkillsDir
+	}
 	return &Worker{
-		store:        cfg.Store,
-		ollama:       cfg.Ollama,
-		llmClient:    cfg.LLMClient,
-		initialDelay: initDelay,
-		tickInterval: tickInt,
+		store:           cfg.Store,
+		ollama:          cfg.Ollama,
+		llmClient:       cfg.LLMClient,
+		publisher:       cfg.Publisher,
+		customSkillsDir: customDir,
+		initialDelay:    initDelay,
+		tickInterval:    tickInt,
 	}
 }
 
@@ -108,6 +118,14 @@ func (w *Worker) runDaily(ctx context.Context) {
 			log.Printf("[Memory Worker] Fact consolidation dreaming failed: %v", err)
 		} else {
 			log.Printf("[Memory Worker] Fact consolidation dreaming completed: %d clusters consolidated", consolidated)
+		}
+	}
+	if w.publisher != nil && w.llmClient != nil {
+		prNum, err := ConsolidateProceduralSkills(ctx, w.store, w.ollama, w.llmClient, w.publisher, w.customSkillsDir)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("[Memory Worker] Procedural skill consolidation failed: %v", err)
+		} else if prNum > 0 {
+			log.Printf("[Memory Worker] Procedural skill consolidation opened PR #%d", prNum)
 		}
 	}
 }
