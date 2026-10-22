@@ -5051,6 +5051,15 @@ func TestConsolidateFactClusters(t *testing.T) {
 			wantRemaining: 3,
 		},
 		{
+			name:          "EmptyFactsArraySkippedWithoutDeletion",
+			ctx:           ctx,
+			addFacts:      true,
+			llmResp:       `{"facts":[]}`,
+			wantErr:       false,
+			wantCount:     0,
+			wantRemaining: 3,
+		},
+		{
 			name:          "StoreDeleteFactErrorLoggedGracefully",
 			ctx:           ctx,
 			addFacts:      true,

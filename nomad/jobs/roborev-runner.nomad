@@ -66,7 +66,7 @@ EOH
       }
 
       resources {
-        cpu        = 300
+        cpu        = 100
         memory     = 768
         memory_max = 2048
       }
@@ -111,7 +111,7 @@ EOH
       }
 
       resources {
-        cpu        = 300
+        cpu        = 100
         memory     = 768
         memory_max = 2048
       }
@@ -156,7 +156,7 @@ EOH
       }
 
       resources {
-        cpu        = 300
+        cpu        = 100
         memory     = 768
         memory_max = 2048
       }
@@ -201,7 +201,7 @@ EOH
       }
 
       resources {
-        cpu        = 300
+        cpu        = 100
         memory     = 768
         memory_max = 2048
       }
