@@ -338,3 +338,23 @@ CREATE TABLE IF NOT EXISTS vanadis_chunks (
 
 CREATE INDEX IF NOT EXISTS idx_vanadis_chunks_build_status ON vanadis_chunks (build_id, status);
 CREATE INDEX IF NOT EXISTS idx_vanadis_chunks_pr_number ON vanadis_chunks (repo, pr_number) WHERE pr_number IS NOT NULL;
+
+-- Procedural Skill Candidates Staging Table
+CREATE TABLE IF NOT EXISTS procedural_candidates (
+    id BIGSERIAL PRIMARY KEY,
+    thread_id TEXT NOT NULL DEFAULT '',
+    domain TEXT NOT NULL DEFAULT 'discord',
+    loaded_skill TEXT NOT NULL DEFAULT '',
+    trigger_pattern TEXT NOT NULL CHECK (btrim(trigger_pattern) <> ''),
+    steps_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    avoid_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    embedding vector(384) NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    pr_number INTEGER,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_procedural_candidates_status ON procedural_candidates (status, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_procedural_candidates_loaded_skill ON procedural_candidates (status, loaded_skill);
+
