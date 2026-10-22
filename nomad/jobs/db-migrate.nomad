@@ -1,6 +1,7 @@
 job "db-migrate" {
   datacenters = ["dc1"]
   type        = "batch"
+  priority    = 90
 
   node_pool   = "default"
 
