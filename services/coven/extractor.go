@@ -96,10 +96,14 @@ Requirements:
   ],
   "reinforced_ids": [42]
 }
-2. Extract only durable, single-proposition atomic facts (one sentence and one topic/predicate per fact; never combine distinct topics such as family composition and dietary restrictions into a single compound fact). Never extract ephemeral PR numbers, commit SHAs, branch names, coverage/LoC metrics, CI/CD deploy statuses, or Vanadis chunk IDs.
-3. If retrieved memory facts with [id:N] directly informed the assistant's response or tool calls in this turn, include their integer IDs in "reinforced_ids". If none were used, set "reinforced_ids": [].
-4. If no durable facts are present in the conversation, return {"facts": []}.
-5. Do NOT include markdown text formatting outside the JSON block.
+2. Atomicity: Extract only single-proposition atomic facts (one concise sentence and one topic/predicate per fact; never combine distinct topics such as family composition and dietary restrictions into a single compound fact).
+3. 30-Day Durability & Settled-State Test: Extract ONLY facts that will remain true and actionable 30+ days from now without requiring a follow-up event. Extract settled end-states (permanent hardware owned, standing preferences, architectural invariants, recurring schedules), NEVER transient in-flight states:
+   - Never extract pending deliveries, shipping/order statuses, or items "awaiting delivery" / "on the way".
+   - Never extract temporary troubleshooting, active debugging sessions, or tasks "currently in progress" / "about to run".
+   - Never extract ephemeral PR numbers, commit SHAs, branch names, coverage/LoC metrics, CI/CD deploy statuses, or Vanadis chunk IDs.
+4. If retrieved memory facts with [id:N] directly informed the assistant's response or tool calls in this turn, include their integer IDs in "reinforced_ids". If none were used, set "reinforced_ids": [].
+5. If no durable facts are present in the conversation, return {"facts": []}.
+6. Do NOT include markdown text formatting outside the JSON block.
 `
 
 // ExtractActiveConversationFacts queries conversations modified in the last activeHours,
@@ -145,7 +149,7 @@ func ExtractActiveConversationFacts(ctx context.Context, store Store, client Oll
 
 var (
 	durableDirectiveRegex   = regexp.MustCompile(`(?i)\b(always|never|strictly|must|invariant|prefers|allergic)\b`)
-	ephemeralTelemetryRegex = regexp.MustCompile(`(?i)\b(PR\s*#\d+|pull request #\d+|chunk-\d+|build-\d+-[0-9a-f]+|vanadis_chunk|commit\s+[0-9a-f]{7,40}|auto-merge armed)\b`)
+	ephemeralTelemetryRegex = regexp.MustCompile(`(?i)\b(PR\s*#\d+|pull request #\d+|chunk-\d+|build-\d+-[0-9a-f]+|vanadis_chunk|commit\s+[0-9a-f]{7,40}|auto-merge armed|awaiting delivery|currently in progress)\b`)
 )
 
 // EvaluateCandidateAdmission deterministically evaluates an extracted fact candidate.
