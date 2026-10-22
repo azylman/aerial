@@ -6124,3 +6124,854 @@ func TestProcessThreadFacts_ProceduralCandidates(t *testing.T) {
 		})
 	}
 }
+
+func testProcCand(id int64, skill, trigger string, avoid []string, emb []float32) ProceduralCandidate {
+	return ProceduralCandidate{
+		ID:          id,
+		Domain:      "discord",
+		LoadedSkill: skill,
+		Trigger:     trigger,
+		Avoid:       avoid,
+		Embedding:   emb,
+		Status:      "pending",
+	}
+}
+
+func testDiskSkill(name, domain, relPath, content string, emb []float32) DiskSkill {
+	return DiskSkill{
+		Name:        name,
+		Domain:      domain,
+		RelPath:     relPath,
+		Description: "A test description for " + name,
+		RawContent:  content,
+		Embedding:   emb,
+	}
+}
+
+func testEmbedding2D(x, y float32) []float32 {
+	emb := make([]float32, ExpectedEmbeddingDim)
+	emb[0] = x
+	emb[1] = y
+	return emb
+}
+
+func TestParseSkillFrontmatter(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		wantName    string
+		wantDesc    string
+		wantBody    string
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name: "ValidStandard",
+			input: `---
+name: my-skill
+description: This is a standard valid description.
+---
+# Content Header
+Body content text here.`,
+			wantName: "my-skill",
+			wantDesc: "This is a standard valid description.",
+			wantBody: "# Content Header\nBody content text here.",
+		},
+		{
+			name:     "ValidOuterCodeFencesMarkdown",
+			input:    "```markdown\n---\nname: fenced-skill\ndescription: Fenced markdown description here.\n---\n# Fenced Content\n```",
+			wantName: "fenced-skill",
+			wantDesc: "Fenced markdown description here.",
+			wantBody: "# Fenced Content",
+		},
+		{
+			name:     "ValidOuterCodeFencesPlain",
+			input:    "```\n---\nname: plain-fence\ndescription: Plain fenced description here.\n---\nBody text\n```",
+			wantName: "plain-fence",
+			wantDesc: "Plain fenced description here.",
+			wantBody: "Body text",
+		},
+		{
+			name:     "ValidCRLF",
+			input:    "---\r\nname: crlf-skill\r\ndescription: CRLF description text here.\r\n---\r\nCRLF body text",
+			wantName: "crlf-skill",
+			wantDesc: "CRLF description text here.",
+			wantBody: "CRLF body text",
+		},
+		{
+			name:     "ValidEmptyBody",
+			input:    "---\nname: no-body\ndescription: Description without any markdown body.\n---",
+			wantName: "no-body",
+			wantDesc: "Description without any markdown body.",
+			wantBody: "",
+		},
+		{
+			name:        "ErrMissingOpeningDelimiter",
+			input:       "name: no-delims\ndescription: something",
+			wantErr:     true,
+			errContains: "missing frontmatter opening delimiter",
+		},
+		{
+			name:        "ErrInvalidOpeningDelimiter",
+			input:       "---invalid opening\nname: bad\n---\n",
+			wantErr:     true,
+			errContains: "invalid frontmatter opening delimiter",
+		},
+		{
+			name:        "ErrMissingClosingDelimiter",
+			input:       "---\nname: unclosed\ndescription: missing closing delimiter\n",
+			wantErr:     true,
+			errContains: "missing frontmatter closing delimiter",
+		},
+		{
+			name:        "ErrInvalidYAML",
+			input:       "---\n: bad : yaml :\n---\nbody",
+			wantErr:     true,
+			errContains: "invalid frontmatter yaml",
+		},
+		{
+			name:        "ErrEmptyName",
+			input:       "---\nname: \"   \"\ndescription: valid description text\n---\nbody",
+			wantErr:     true,
+			errContains: "frontmatter name and description must be non-empty",
+		},
+		{
+			name:        "ErrEmptyDescription",
+			input:       "---\nname: valid-name\ndescription: \"\"\n---\nbody",
+			wantErr:     true,
+			errContains: "frontmatter name and description must be non-empty",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotName, gotDesc, gotBody, err := ParseSkillFrontmatter(tc.input)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ParseSkillFrontmatter() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				if tc.errContains != "" && !strings.Contains(err.Error(), tc.errContains) {
+					t.Errorf("error %q does not contain %q", err.Error(), tc.errContains)
+				}
+				return
+			}
+			if gotName != tc.wantName {
+				t.Errorf("name = %q, want %q", gotName, tc.wantName)
+			}
+			if gotDesc != tc.wantDesc {
+				t.Errorf("desc = %q, want %q", gotDesc, tc.wantDesc)
+			}
+			if gotBody != tc.wantBody {
+				t.Errorf("body = %q, want %q", gotBody, tc.wantBody)
+			}
+		})
+	}
+}
+
+func TestScanCustomSkills(t *testing.T) {
+	validSkillMD := `---
+name: sample-skill
+description: This is a sample description for testing scanner.
+---
+# Sample Skill Instructions
+`
+	corruptSkillMD := `---
+invalid yaml without name or closing
+`
+
+	tests := []struct {
+		name         string
+		setupFn      func(t *testing.T) (dir string, client OllamaClient)
+		wantSkillLen int
+		wantRelPaths []string
+		wantEmbsNil  bool
+		wantErr      bool
+		errContains  string
+	}{
+		{
+			name: "ValidSkillsScannedBothDomains",
+			setupFn: func(t *testing.T) (string, OllamaClient) {
+				tmp := t.TempDir()
+				commonSkillDir := filepath.Join(tmp, "common", "sample-common")
+				discordSkillDir := filepath.Join(tmp, "discord", "sample-discord")
+				if err := os.MkdirAll(commonSkillDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(discordSkillDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				cMD := strings.Replace(validSkillMD, "sample-skill", "sample-common", 1)
+				dMD := strings.Replace(validSkillMD, "sample-skill", "sample-discord", 1)
+				if err := os.WriteFile(filepath.Join(commonSkillDir, "SKILL.md"), []byte(cMD), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(discordSkillDir, "SKILL.md"), []byte(dMD), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return tmp, &MockOllamaClient{embedding: testEmbedding(1.0)}
+			},
+			wantSkillLen: 2,
+			wantRelPaths: []string{
+				"custom-skills/common/sample-common/SKILL.md",
+				"custom-skills/discord/sample-discord/SKILL.md",
+			},
+		},
+		{
+			name: "NonExistentDirTreatedAsEmptyWithoutError",
+			setupFn: func(t *testing.T) (string, OllamaClient) {
+				return filepath.Join(t.TempDir(), "nonexistent"), nil
+			},
+			wantSkillLen: 0,
+		},
+		{
+			name: "IgnoredNonDirectoryEntriesAndMissingSkillMD",
+			setupFn: func(t *testing.T) (string, OllamaClient) {
+				tmp := t.TempDir()
+				commonDir := filepath.Join(tmp, "common")
+				if err := os.MkdirAll(commonDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				// Write regular file in domainDir (should be skipped)
+				if err := os.WriteFile(filepath.Join(commonDir, "README.md"), []byte("not a dir"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				// Write directory without SKILL.md (should be skipped)
+				emptySubdir := filepath.Join(commonDir, "empty-dir")
+				if err := os.MkdirAll(emptySubdir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				return tmp, nil
+			},
+			wantSkillLen: 0,
+		},
+		{
+			name: "NilOllamaClientLeavesEmbeddingNil",
+			setupFn: func(t *testing.T) (string, OllamaClient) {
+				tmp := t.TempDir()
+				dir := filepath.Join(tmp, "discord", "nil-emb")
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				md := strings.Replace(validSkillMD, "sample-skill", "nil-emb", 1)
+				if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(md), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return tmp, nil
+			},
+			wantSkillLen: 1,
+			wantEmbsNil:  true,
+		},
+		{
+			name: "CorruptSkillFileReturnsError",
+			setupFn: func(t *testing.T) (string, OllamaClient) {
+				tmp := t.TempDir()
+				dir := filepath.Join(tmp, "discord", "bad-skill")
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(corruptSkillMD), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return tmp, nil
+			},
+			wantErr:     true,
+			errContains: "failed to parse frontmatter",
+		},
+		{
+			name: "OllamaEmbeddingErrorReturnsError",
+			setupFn: func(t *testing.T) (string, OllamaClient) {
+				tmp := t.TempDir()
+				dir := filepath.Join(tmp, "discord", "err-emb")
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				md := strings.Replace(validSkillMD, "sample-skill", "err-emb", 1)
+				if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(md), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return tmp, &MockOllamaClient{err: errors.New("ollama failure")}
+			},
+			wantErr:     true,
+			errContains: "failed to generate embedding",
+		},
+		{
+			name: "ReadDirDomainError",
+			setupFn: func(t *testing.T) (string, OllamaClient) {
+				tmp := t.TempDir()
+				// Create a regular file at tmp/common instead of a directory
+				if err := os.WriteFile(filepath.Join(tmp, "common"), []byte("not a dir"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return tmp, nil
+			},
+			wantErr:     true,
+			errContains: "failed to read custom skills domain",
+		},
+		{
+			name: "ReadFileSkillError",
+			setupFn: func(t *testing.T) (string, OllamaClient) {
+				tmp := t.TempDir()
+				// Create SKILL.md as a directory to trigger ReadFile error
+				dir := filepath.Join(tmp, "discord", "dir-skill", "SKILL.md")
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				return tmp, nil
+			},
+			wantErr:     true,
+			errContains: "failed to read skill file",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, client := tc.setupFn(t)
+			skills, err := ScanCustomSkills(context.Background(), dir, client)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ScanCustomSkills() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				if tc.errContains != "" && !strings.Contains(err.Error(), tc.errContains) {
+					t.Errorf("error %q does not contain %q", err.Error(), tc.errContains)
+				}
+				return
+			}
+			if len(skills) != tc.wantSkillLen {
+				t.Fatalf("skills len = %d, want %d", len(skills), tc.wantSkillLen)
+			}
+			for i, wantRel := range tc.wantRelPaths {
+				if skills[i].RelPath != wantRel {
+					t.Errorf("skill[%d].RelPath = %q, want %q", i, skills[i].RelPath, wantRel)
+				}
+			}
+			if tc.wantEmbsNil {
+				for i, s := range skills {
+					if len(s.Embedding) != 0 {
+						t.Errorf("skill[%d] embedding is not nil", i)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestPlanSkillConsolidation(t *testing.T) {
+	skillA := testDiskSkill("ha-ops", "discord", "custom-skills/discord/ha-ops/SKILL.md", "content", testEmbedding2D(1.0, 0.0))
+	skillB := testDiskSkill("deploy-flow", "common", "custom-skills/common/deploy-flow/SKILL.md", "content", testEmbedding2D(0.0, 1.0))
+	diskSkills := []DiskSkill{skillA, skillB}
+
+	tests := []struct {
+		name          string
+		pending       []ProceduralCandidate
+		diskSkills    []DiskSkill
+		wantBatches   int
+		wantActions   []string
+		wantDomains   []string
+		wantCandCount []int
+		wantSkipped   []int64
+	}{
+		{
+			name: "BlockedCoreSkillsSkipped",
+			pending: []ProceduralCandidate{
+				testProcCand(1, "self-improvement", "trigger 1", nil, nil),
+				testProcCand(2, "writing-plans", "trigger 2", nil, nil),
+			},
+			diskSkills:  diskSkills,
+			wantBatches: 0,
+			wantSkipped: []int64{1, 2},
+		},
+		{
+			name: "CaseA_LoadedSkillMatchTwoCandidates",
+			pending: []ProceduralCandidate{
+				testProcCand(10, "ha-ops", "trigger 1", nil, nil),
+				testProcCand(11, "ha-ops", "trigger 2", nil, nil),
+			},
+			diskSkills:    diskSkills,
+			wantBatches:   1,
+			wantActions:   []string{"EDIT"},
+			wantDomains:   []string{"discord"},
+			wantCandCount: []int{2},
+		},
+		{
+			name: "CaseA_LoadedSkillMatchSingleCandidateWithAvoid",
+			pending: []ProceduralCandidate{
+				testProcCand(20, "ha-ops", "trigger with avoid", []string{"do not do this"}, nil),
+			},
+			diskSkills:    diskSkills,
+			wantBatches:   1,
+			wantActions:   []string{"EDIT"},
+			wantDomains:   []string{"discord"},
+			wantCandCount: []int{1},
+		},
+		{
+			name: "CaseA_LoadedSkillMatchSingleCandidateNoAvoidNotBatched",
+			pending: []ProceduralCandidate{
+				testProcCand(30, "ha-ops", "single candidate no avoid", nil, nil),
+			},
+			diskSkills:  diskSkills,
+			wantBatches: 0,
+		},
+		{
+			name: "CaseB_UnloadedRoutingMissHighSimilarityToExistingSkill",
+			pending: []ProceduralCandidate{
+				// Cosine similarity to skillA (1, 0) is 0.80 >= 0.72
+				testProcCand(40, "", "routing miss trigger", nil, testEmbedding2D(0.80, 0.60)),
+			},
+			diskSkills:    diskSkills,
+			wantBatches:   1,
+			wantActions:   []string{"EDIT"},
+			wantDomains:   []string{"discord"},
+			wantCandCount: []int{1},
+		},
+		{
+			name: "CaseB_UnmatchedLoadedSkillRoutingMiss",
+			pending: []ProceduralCandidate{
+				// LoadedSkill "unknown" not in diskSkills, similarity to skillB (0, 1) is 0.80 >= 0.72
+				testProcCand(45, "unknown-skill", "routing miss trigger 2", nil, testEmbedding2D(0.60, 0.80)),
+			},
+			diskSkills:    diskSkills,
+			wantBatches:   1,
+			wantActions:   []string{"EDIT"},
+			wantDomains:   []string{"common"},
+			wantCandCount: []int{1},
+		},
+		{
+			name: "CaseC_NovelWorkflowCliqueFormsCreateBatch",
+			pending: []ProceduralCandidate{
+				// Both candidates have similarity 1.0 to each other, but orthogonal to skillA and skillB
+				testProcCand(50, "", "novel workflow step 1", nil, testEmbeddingAt(2, 1.0)),
+				testProcCand(51, "", "novel workflow step 2", nil, testEmbeddingAt(2, 1.0)),
+			},
+			diskSkills:    diskSkills,
+			wantBatches:   1,
+			wantActions:   []string{"CREATE"},
+			wantDomains:   []string{"discord"},
+			wantCandCount: []int{2},
+		},
+		{
+			name: "CaseC_DissimilarCandidatesDoNotFormClique",
+			pending: []ProceduralCandidate{
+				// Orthogonal to each other (sim = 0) and orthogonal to disk skills
+				testProcCand(60, "", "cand a", nil, testEmbeddingAt(2, 1.0)),
+				testProcCand(61, "", "cand b", nil, testEmbeddingAt(3, 1.0)),
+			},
+			diskSkills:  diskSkills,
+			wantBatches: 0,
+		},
+		{
+			name: "MixedCasesComprehensive",
+			pending: []ProceduralCandidate{
+				testProcCand(1, "incident-triage", "blocked", nil, nil),
+				testProcCand(2, "ha-ops", "case a 1", nil, nil),
+				testProcCand(3, "ha-ops", "case a 2", nil, nil),
+				testProcCand(4, "", "case b miss", nil, testEmbedding2D(0.0, 1.0)), // sim 1.0 to skillB
+				testProcCand(5, "", "case c 1", nil, testEmbeddingAt(4, 1.0)),
+				testProcCand(6, "", "case c 2", nil, testEmbeddingAt(4, 1.0)),
+			},
+			diskSkills:    diskSkills,
+			wantBatches:   3,
+			wantActions:   []string{"EDIT", "EDIT", "CREATE"},
+			wantDomains:   []string{"discord", "common", "discord"},
+			wantCandCount: []int{2, 1, 2},
+			wantSkipped:   []int64{1},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			batches, skipped := PlanSkillConsolidation(tc.pending, tc.diskSkills)
+			if len(batches) != tc.wantBatches {
+				t.Fatalf("batches len = %d, want %d", len(batches), tc.wantBatches)
+			}
+			for i, wantAct := range tc.wantActions {
+				if batches[i].Action != wantAct {
+					t.Errorf("batch[%d].Action = %q, want %q", i, batches[i].Action, wantAct)
+				}
+				if batches[i].Domain != tc.wantDomains[i] {
+					t.Errorf("batch[%d].Domain = %q, want %q", i, batches[i].Domain, tc.wantDomains[i])
+				}
+				if len(batches[i].Candidates) != tc.wantCandCount[i] {
+					t.Errorf("batch[%d].Candidates len = %d, want %d", i, len(batches[i].Candidates), tc.wantCandCount[i])
+				}
+			}
+			if len(skipped) != len(tc.wantSkipped) {
+				t.Fatalf("skipped len = %d, want %d", len(skipped), len(tc.wantSkipped))
+			}
+			for i, wantID := range tc.wantSkipped {
+				if skipped[i] != wantID {
+					t.Errorf("skipped[%d] = %d, want %d", i, skipped[i], wantID)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateCompiledSkillMarkdown(t *testing.T) {
+	validMarkdown := `---
+name: custom-workflow
+description: This is a robust description with at least twenty characters.
+---
+# Custom Workflow Title
+Detailed procedure description goes here with step-by-step instructions.
+`
+	targetSkill := &DiskSkill{
+		Name:        "custom-workflow",
+		Domain:      "discord",
+		RelPath:     "custom-skills/discord/custom-workflow/SKILL.md",
+		RawContent:  validMarkdown,
+		Description: "This is a robust description with at least twenty characters.",
+	}
+	existingSkills := []DiskSkill{*targetSkill}
+
+	tests := []struct {
+		name           string
+		action         string
+		domain         string
+		rawMarkdown    string
+		target         *DiskSkill
+		existingSkills []DiskSkill
+		wantName       string
+		wantRelPath    string
+		wantErr        bool
+		errContains    string
+	}{
+		{
+			name:           "ValidCreateDiscordDomain",
+			action:         "CREATE",
+			domain:         "discord",
+			rawMarkdown:    strings.Replace(validMarkdown, "custom-workflow", "new-workflow", 1),
+			existingSkills: existingSkills,
+			wantName:       "new-workflow",
+			wantRelPath:    "custom-skills/discord/new-workflow/SKILL.md",
+		},
+		{
+			name:           "ValidCreateCommonDomainNormalized",
+			action:         "CREATE",
+			domain:         "COMMON",
+			rawMarkdown:    strings.Replace(validMarkdown, "custom-workflow", "new-common", 1),
+			existingSkills: existingSkills,
+			wantName:       "new-common",
+			wantRelPath:    "custom-skills/common/new-common/SKILL.md",
+		},
+		{
+			name:           "ValidCreateFallbackDomainNormalized",
+			action:         "create",
+			domain:         "unknown-domain",
+			rawMarkdown:    strings.Replace(validMarkdown, "custom-workflow", "fallback-flow", 1),
+			existingSkills: existingSkills,
+			wantName:       "fallback-flow",
+			wantRelPath:    "custom-skills/discord/fallback-flow/SKILL.md",
+		},
+		{
+			name:           "ValidEditRetainsTargetRelPath",
+			action:         "EDIT",
+			domain:         "discord",
+			rawMarkdown:    validMarkdown + "\nAdditional instructions.",
+			target:         targetSkill,
+			existingSkills: existingSkills,
+			wantName:       "custom-workflow",
+			wantRelPath:    "custom-skills/discord/custom-workflow/SKILL.md",
+		},
+		{
+			name:        "ErrInvalidFrontmatter",
+			action:      "CREATE",
+			rawMarkdown: "not valid frontmatter",
+			wantErr:     true,
+			errContains: "invalid skill markdown frontmatter",
+		},
+		{
+			name:   "ErrInvalidSkillName",
+			action: "CREATE",
+			rawMarkdown: `---
+name: Invalid_Name!
+description: Description that is at least twenty characters long.
+---
+# Title
+Body text with enough length to pass the minimum character count of one hundred characters.
+`,
+			wantErr:     true,
+			errContains: "invalid skill name",
+		},
+		{
+			name:   "ErrDescriptionTooShort",
+			action: "CREATE",
+			rawMarkdown: `---
+name: valid-name
+description: short
+---
+# Title
+Body text with enough length to pass the minimum character count of one hundred characters.
+`,
+			wantErr:     true,
+			errContains: "out of bounds [20, 500]",
+		},
+		{
+			name:   "ErrMarkdownTooShort",
+			action: "CREATE",
+			rawMarkdown: `---
+name: valid-name
+description: This description is long enough to pass validation.
+---
+short`,
+			wantErr:     true,
+			errContains: "out of bounds [100, 16384]",
+		},
+		{
+			name:   "ErrBlockedCoreSkillName",
+			action: "CREATE",
+			rawMarkdown: `---
+name: self-improvement
+description: This description is long enough to pass validation.
+---
+# Blocked Skill Body
+Body text with enough length to pass the minimum character count of one hundred characters.
+`,
+			wantErr:     true,
+			errContains: "is a blocked core skill",
+		},
+		{
+			name:        "ErrEditNilTarget",
+			action:      "EDIT",
+			rawMarkdown: validMarkdown,
+			target:      nil,
+			wantErr:     true,
+			errContains: "target skill required for EDIT",
+		},
+		{
+			name:   "ErrEditNameMismatch",
+			action: "EDIT",
+			target: targetSkill,
+			rawMarkdown: `---
+name: different-name
+description: This description is long enough to pass validation.
+---
+# Different Name
+Body text with enough length to pass the minimum character count of one hundred characters.
+`,
+			wantErr:     true,
+			errContains: "does not match target",
+		},
+		{
+			name:   "ErrEditShrunkMoreThan30Percent",
+			action: "EDIT",
+			target: &DiskSkill{
+				Name:        "custom-workflow",
+				RelPath:     "custom-skills/discord/custom-workflow/SKILL.md",
+				RawContent:  strings.Repeat("a", 500),
+				Description: "long content target",
+			},
+			rawMarkdown: `---
+name: custom-workflow
+description: This description is long enough to pass validation.
+---
+# Small Body
+Body text that is at least 100 bytes long so length check passes.
+`,
+			wantErr:     true,
+			errContains: "shrunk by >30%",
+		},
+		{
+			name:           "ErrCreateNameCollision",
+			action:         "CREATE",
+			rawMarkdown:    validMarkdown,
+			existingSkills: existingSkills, // contains custom-workflow
+			wantErr:        true,
+			errContains:    "collides with existing skill",
+		},
+		{
+			name:        "ErrUnsupportedAction",
+			action:      "DELETE",
+			rawMarkdown: validMarkdown,
+			wantErr:     true,
+			errContains: "unsupported action",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			name, relPath, _, err := ValidateCompiledSkillMarkdown(tc.action, tc.domain, tc.rawMarkdown, tc.target, tc.existingSkills)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ValidateCompiledSkillMarkdown() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				if tc.errContains != "" && !strings.Contains(err.Error(), tc.errContains) {
+					t.Errorf("error %q does not contain %q", err.Error(), tc.errContains)
+				}
+				return
+			}
+			if name != tc.wantName {
+				t.Errorf("name = %q, want %q", name, tc.wantName)
+			}
+			if relPath != tc.wantRelPath {
+				t.Errorf("relPath = %q, want %q", relPath, tc.wantRelPath)
+			}
+		})
+	}
+}
+
+func TestBuildSkillDesignerPrompt(t *testing.T) {
+	target := &DiskSkill{
+		Name:        "target-skill",
+		Domain:      "discord",
+		RelPath:     "custom-skills/discord/target-skill/SKILL.md",
+		Description: "Target description",
+		RawContent:  "# Target Content",
+	}
+
+	tests := []struct {
+		name         string
+		batch        SkillConsolidationBatch
+		wantContains []string
+	}{
+		{
+			name: "EditPromptWithTargetAndCandidates",
+			batch: SkillConsolidationBatch{
+				Action:      "EDIT",
+				Domain:      "discord",
+				TargetSkill: target,
+				Candidates: []ProceduralCandidate{
+					{
+						ID:      101,
+						Trigger: "run diagnostic command",
+						Steps:   []string{"check logs", "verify service"},
+						Avoid:   []string{"do not restart without checking logs"},
+					},
+				},
+			},
+			wantContains: []string{
+				"Action: EDIT",
+				"Target Skill Name: target-skill",
+				"Existing SKILL.md Content:",
+				"# Target Content",
+				"Candidate #1 (ID: 101):",
+				"Trigger: run diagnostic command",
+				"- check logs",
+				"- do not restart without checking logs",
+			},
+		},
+		{
+			name: "CreatePromptWithDomainAndCandidates",
+			batch: SkillConsolidationBatch{
+				Action: "CREATE",
+				Domain: "common",
+				Candidates: []ProceduralCandidate{
+					{
+						ID:      202,
+						Trigger: "backup sqlite database",
+						Steps:   []string{"run sqlite3 .backup"},
+					},
+				},
+			},
+			wantContains: []string{
+				"Action: CREATE",
+				"Target Domain: common",
+				"Candidate #1 (ID: 202):",
+				"Trigger: backup sqlite database",
+				"- run sqlite3 .backup",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			prompt := buildSkillDesignerPrompt(tc.batch)
+			for _, want := range tc.wantContains {
+				if !strings.Contains(prompt, want) {
+					t.Errorf("prompt missing %q:\n%s", want, prompt)
+				}
+			}
+		})
+	}
+}
+
+func TestFindCandidateCliques(t *testing.T) {
+	tests := []struct {
+		name        string
+		cands       []ProceduralCandidate
+		minSim      float64
+		minSize     int
+		maxSize     int
+		wantCliques int
+		wantSizes   []int
+	}{
+		{
+			name:        "EmptyCandidates",
+			cands:       nil,
+			wantCliques: 0,
+		},
+		{
+			name: "FallbackDefaults",
+			cands: []ProceduralCandidate{
+				testProcCand(1, "", "t1", nil, testEmbeddingAt(0, 1.0)),
+				testProcCand(2, "", "t2", nil, testEmbeddingAt(0, 1.0)),
+			},
+			minSim:      -1.0,
+			minSize:     -1,
+			maxSize:     -1,
+			wantCliques: 1,
+			wantSizes:   []int{2},
+		},
+		{
+			name: "CandidateWithoutEmbeddingSkipped",
+			cands: []ProceduralCandidate{
+				testProcCand(1, "", "t1", nil, nil),
+				testProcCand(2, "", "t2", nil, []float32{}),
+			},
+			wantCliques: 0,
+		},
+		{
+			name: "CliqueOfSizeThree",
+			cands: []ProceduralCandidate{
+				testProcCand(1, "", "t1", nil, testEmbeddingAt(0, 1.0)),
+				testProcCand(2, "", "t2", nil, testEmbeddingAt(0, 1.0)),
+				testProcCand(3, "", "t3", nil, testEmbeddingAt(0, 1.0)),
+			},
+			minSim:      0.75,
+			minSize:     2,
+			maxSize:     5,
+			wantCliques: 1,
+			wantSizes:   []int{3},
+		},
+		{
+			name: "CandidateMatchesOnlyFirstTwoNotThird",
+			cands: []ProceduralCandidate{
+				testProcCand(1, "", "t1", nil, testEmbedding2D(0.8, 0.6)),
+				testProcCand(2, "", "t2", nil, testEmbedding2D(0.8, 0.6)),
+				testProcCand(3, "", "t3", nil, testEmbedding2D(1.0, 0.0)),
+				testProcCand(4, "", "t4", nil, testEmbedding2D(0.6, 0.8)),
+			},
+			minSim:      0.75,
+			minSize:     2,
+			maxSize:     5,
+			wantCliques: 1,
+			wantSizes:   []int{3},
+		},
+		{
+			name: "MaxSizeBreaksEarly",
+			cands: []ProceduralCandidate{
+				testProcCand(1, "", "t1", nil, testEmbeddingAt(0, 1.0)),
+				testProcCand(2, "", "t2", nil, testEmbeddingAt(0, 1.0)),
+				testProcCand(3, "", "t3", nil, testEmbeddingAt(0, 1.0)),
+			},
+			minSim:      0.75,
+			minSize:     2,
+			maxSize:     2,
+			wantCliques: 1,
+			wantSizes:   []int{2},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cliques := findCandidateCliques(tc.cands, tc.minSim, tc.minSize, tc.maxSize)
+			if len(cliques) != tc.wantCliques {
+				t.Fatalf("cliques len = %d, want %d", len(cliques), tc.wantCliques)
+			}
+			for i, wantSize := range tc.wantSizes {
+				if len(cliques[i]) != wantSize {
+					t.Errorf("cliques[%d] len = %d, want %d", i, len(cliques[i]), wantSize)
+				}
+			}
+		})
+	}
+}
