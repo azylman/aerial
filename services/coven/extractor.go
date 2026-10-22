@@ -494,7 +494,7 @@ func parseFactsJSON(raw string) (*ExtractedFactsPayload, error) {
 // DefaultConsolidationMinSim is the minimum pairwise cosine similarity for fact consolidation cliques.
 const (
 	DefaultConsolidationMinSim  = 0.75
-	DefaultConsolidationMaxSize = 4
+	DefaultConsolidationMaxSize = 2
 	MaxConsolidationPasses      = 3
 )
 
@@ -626,7 +626,7 @@ func cliqueSignature(clique []ScoredFactWithEmbedding) string {
 
 // FactConsolidationPrompt defines the system prompt instructing the LLM to consolidate related facts.
 const FactConsolidationPrompt = `You are a memory consolidation engine.
-Synthesize the provided cluster of semantically related facts into 1 or at most 2 concise, canonical, single-topic facts that preserve all specific information, preferences, constraints, and context without redundancy.
+Synthesize the provided pair of semantically related facts into 1 concise, canonical, single-topic fact that preserves all specific information, preferences, constraints, and context without redundancy.
 
 Output strictly a JSON object matching this schema:
 {
@@ -637,9 +637,9 @@ Output strictly a JSON object matching this schema:
   ]
 }
 Rules:
-1. Produce 1 consolidated fact (or 2 facts ONLY when a cluster of 3+ facts spans two genuinely distinct sub-topics). If a cluster already consists of distinct, non-redundant facts that should not be merged, return {"facts": []}.
-2. Keep each consolidated fact strictly atomic and concise (one single topic/predicate, one sentence under 280 characters). Never cram multiple loosely related details into a long semicolon or participial run-on sentence; if a cluster of 3+ facts spans two distinct sub-topics (e.g. household composition vs. dietary restrictions), emit 2 separate concise facts.
-3. Facts are ordered by ascending ID (higher ID = newer state). When facts in a cluster contain conflicting numbers, thresholds, versions, ports, or status values, preserve the newer (higher-ID) state and discard the outdated value.
+1. If the facts express the same topic/predicate or one updates/refines the other, produce 1 consolidated fact. If the facts already cover distinct, non-redundant sub-topics that should remain separate, return {"facts": []}.
+2. Keep the consolidated fact strictly atomic and concise (one single topic/predicate, one sentence under 280 characters). Never cram multiple distinct topics into a long semicolon or participial run-on sentence; if the facts span distinct sub-topics (e.g. household composition vs. dietary restrictions), return {"facts": []}.
+3. Facts are ordered by ascending ID (higher ID = newer state). When facts contain conflicting numbers, thresholds, versions, ports, or status values, preserve the newer (higher-ID) state and discard the outdated value.
 4. Output nothing else outside the JSON object.`
 
 func buildConsolidationPrompt(clique []ScoredFactWithEmbedding) string {
@@ -688,7 +688,7 @@ func ConsolidateFactClusters(ctx context.Context, store Store, client OllamaClie
 			break
 		}
 
-		passCount, deleteFailed, err := consolidateCliqueBatch(ctx, store, client, llmFunc, cliques, triedCliques)
+		passCount, deleteFailed, err := consolidateCliqueBatch(ctx, store, client, llmFunc, cliques)
 		totalConsolidated += passCount
 		if err != nil {
 			return totalConsolidated, err
@@ -701,7 +701,7 @@ func ConsolidateFactClusters(ctx context.Context, store Store, client OllamaClie
 	return totalConsolidated, nil
 }
 
-func consolidateCliqueBatch(ctx context.Context, store Store, client OllamaClient, llmFunc LLMClientFunc, cliques [][]ScoredFactWithEmbedding, triedCliques map[string]bool) (int, bool, error) {
+func consolidateCliqueBatch(ctx context.Context, store Store, client OllamaClient, llmFunc LLMClientFunc, cliques [][]ScoredFactWithEmbedding) (int, bool, error) {
 	log.Printf("[Memory] Consolidating %d candidate fact cluster(s)...", len(cliques))
 	var consolidatedCount int
 	var deleteFailed bool
@@ -773,10 +773,6 @@ func consolidateCliqueBatch(ctx context.Context, store Store, client OllamaClien
 		}
 
 		if len(insertedIDs) > 0 {
-			if len(insertedIDs) == 2 {
-				sibs := []ScoredFactWithEmbedding{{Fact: Fact{ID: insertedIDs[0]}}, {Fact: Fact{ID: insertedIDs[1]}}}
-				triedCliques[cliqueSignature(sibs)] = true
-			}
 			for _, src := range clique {
 				if err := store.DeleteFact(ctx, src.Fact.ID); err != nil {
 					log.Printf("[Memory] Warning: Failed to delete consolidated source fact ID %d: %v", src.Fact.ID, err)
