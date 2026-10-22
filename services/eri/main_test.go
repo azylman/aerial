@@ -1902,13 +1902,14 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 			if !ok {
 				t.Fatalf("expected *runner.DynamicVoicePool, got %T", pool)
 			}
-			sess, sErr := dynPool.GetOrCreateSession(context.Background(), "k", "")
-			if sErr != nil {
-				t.Fatalf("GetOrCreateSession failed: %v", sErr)
+			lease, lErr := dynPool.AcquireLease(context.Background(), "k")
+			if lErr != nil {
+				t.Fatalf("AcquireLease failed: %v", lErr)
 			}
-			_, isGemini := sess.(*runner.GeminiAPISession)
+			isGemini := lease.SessionID() == "k"
+			_ = lease.Release()
 			if isGemini != tc.wantGeminiAPI {
-				t.Fatalf("expected GeminiAPISession=%v, got %T", tc.wantGeminiAPI, sess)
+				t.Fatalf("expected GeminiAPISession=%v, got sessionID=%q", tc.wantGeminiAPI, lease.SessionID())
 			}
 		})
 	}
@@ -1931,10 +1932,14 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 		if !ok {
 			t.Fatalf("expected *runner.DynamicVoicePool, got %T", pool)
 		}
-		if sess, err := dynPool.GetOrCreateSession(context.Background(), "k", ""); err != nil {
-			t.Fatalf("GetOrCreateSession failed: %v", err)
-		} else if _, isGemini := sess.(*runner.GeminiAPISession); isGemini {
-			t.Fatalf("expected initial pool to be UnifiedProcessPool, got %T", sess)
+		if lease, err := dynPool.AcquireLease(context.Background(), "k"); err != nil {
+			t.Fatalf("AcquireLease failed: %v", err)
+		} else {
+			sid := lease.SessionID()
+			_ = lease.Release()
+			if sid == "k" {
+				t.Fatalf("expected initial pool to be UnifiedProcessPool, got sessionID=%q", sid)
+			}
 		}
 
 		// Update config to gemini_api
@@ -1950,10 +1955,14 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 		dynPool.MarkDirty()
 
 		// Verify pool swapped to GeminiAPIPool
-		if sess, err := dynPool.GetOrCreateSession(context.Background(), "k", ""); err != nil {
-			t.Fatalf("GetOrCreateSession failed: %v", err)
-		} else if _, isGemini := sess.(*runner.GeminiAPISession); !isGemini {
-			t.Fatalf("expected swapped pool to be GeminiAPIPool, got %T", sess)
+		if lease, err := dynPool.AcquireLease(context.Background(), "k"); err != nil {
+			t.Fatalf("AcquireLease failed: %v", err)
+		} else {
+			sid := lease.SessionID()
+			_ = lease.Release()
+			if sid != "k" {
+				t.Fatalf("expected swapped pool to be GeminiAPIPool, got sessionID=%q", sid)
+			}
 		}
 	})
 }
@@ -2072,7 +2081,7 @@ type mockSequentialPool struct {
 	onInit     func(name string)
 }
 
-func (m *mockSequentialPool) GetOrCreateSession(ctx context.Context, targetKey string, sessionID string) (runner.AgentSession, error) {
+func (m *mockSequentialPool) AcquireLease(ctx context.Context, targetKey string) (runner.SessionLease, error) {
 	return nil, nil
 }
 

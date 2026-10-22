@@ -153,7 +153,7 @@ func TestFetchDiscordChannelHistory_Table(t *testing.T) {
 	tests := []struct {
 		name                string
 		sess                *discordgo.Session
-		store               any
+		store               db.Store
 		channelID           string
 		limit, wantCount    int
 		wantFirst, wantRole string

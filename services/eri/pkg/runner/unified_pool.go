@@ -51,9 +51,8 @@ type UnifiedProcessPool struct {
 }
 
 var (
-	_ AgentPool       = (*UnifiedProcessPool)(nil)
-	_ LeasedAgentPool = (*UnifiedProcessPool)(nil)
-	_ AgentSession    = (*StreamingDaemon)(nil)
+	_ AgentPool    = (*UnifiedProcessPool)(nil)
+	_ AgentSession = (*StreamingDaemon)(nil)
 )
 
 // NewUnifiedProcessPool creates a new process pool with the given configuration and spawner.
@@ -291,15 +290,6 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 		return nil, fmt.Errorf("unexpected nil daemon from singleflight")
 	}
 	return daemon, nil
-}
-
-// GetOrCreateSession retrieves an active AgentSession for targetKey, satisfying runner.AgentPool.
-func (p *UnifiedProcessPool) GetOrCreateSession(ctx context.Context, targetKey, sessionID string) (AgentSession, error) {
-	d, err := p.GetOrCreate(ctx, targetKey, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	return d, nil
 }
 
 // EvictSession closes and removes the active daemon for targetKey.

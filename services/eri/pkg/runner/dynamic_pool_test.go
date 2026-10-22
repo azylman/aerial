@@ -53,6 +53,7 @@ type mockVoicePool struct {
 	onInit                                   func()
 	closeGate                                chan struct{}
 	sessions                                 map[string]*mockVoiceSession
+	lease                                    SessionLease
 }
 
 func newMockVoicePool(m string) *mockVoicePool {
@@ -76,6 +77,21 @@ func (m *mockVoicePool) GetOrCreateSession(ctx context.Context, targetKey, sessi
 	return s, nil
 }
 
+func (m *mockVoicePool) AcquireLease(ctx context.Context, targetKey string) (SessionLease, error) {
+	m.mu.Lock()
+	if m.lease != nil || m.getErr != nil {
+		l, err := m.lease, m.getErr
+		m.mu.Unlock()
+		return l, err
+	}
+	m.mu.Unlock()
+	sess, err := m.GetOrCreateSession(ctx, targetKey, "")
+	if err != nil {
+		return nil, err
+	}
+	return &fakeSessionLease{sessID: sess.SessionID()}, nil
+}
+
 func (m *mockVoicePool) Initialize(ctx context.Context) error {
 	atomic.AddInt32(&m.initCalled, 1)
 	if m.onInit != nil {
@@ -97,16 +113,6 @@ func (m *mockVoicePool) UpdatePrewarmedTargets(t []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.prewarmedTargets = append([]string(nil), t...)
-}
-
-type mockLeasedVoicePool struct {
-	*mockVoicePool
-	lease    SessionLease
-	leaseErr error
-}
-
-func (m *mockLeasedVoicePool) AcquireLease(context.Context, string) (SessionLease, error) {
-	return m.lease, m.leaseErr
 }
 
 type fakeSessionLease struct{ sessID string }
@@ -149,9 +155,8 @@ func TestDynamicVoicePool_DelegationAndSafety(t *testing.T) {
 	var nilPool *DynamicVoicePool
 	nilPool.UpdatePrewarmedTargets([]string{"t"})
 	nilPool.MarkDirty()
-	_, sErr := nilPool.GetOrCreateSession(ctx, "k", "")
 	_, lErr := nilPool.AcquireLease(ctx, "k")
-	if sErr == nil || nilPool.Initialize(ctx) == nil || lErr == nil ||
+	if nilPool.Initialize(ctx) == nil || lErr == nil ||
 		nilPool.Close() != nil || nilPool.Fingerprint() != "" || nilPool.CurrentPool() != nil {
 		t.Error("unexpected nilPool safety behavior")
 	}
@@ -159,8 +164,7 @@ func TestDynamicVoicePool_DelegationAndSafety(t *testing.T) {
 	mock1 := newMockVoicePool("gemini-2.5-flash")
 	dyn := NewDynamicVoicePool(func() (AgentPool, string, error) { return mock1, "fp-1", nil })
 	dyn.UpdatePrewarmedTargets([]string{"kiosk-kitchen", "kiosk-living-room"})
-	sess, err := dyn.GetOrCreateSession(ctx, "kiosk-kitchen", "sess-k1")
-	_, leaseErr := dyn.AcquireLease(ctx, "k")
+	lease, err := dyn.AcquireLease(ctx, "kiosk-kitchen")
 
 	mock1.mu.Lock()
 	targets := append([]string(nil), mock1.prewarmedTargets...)
@@ -168,27 +172,28 @@ func TestDynamicVoicePool_DelegationAndSafety(t *testing.T) {
 
 	if dyn.Fingerprint() != "fp-1" || dyn.Initialize(ctx) != nil || atomic.LoadInt32(&mock1.initCalled) != 1 ||
 		len(targets) != 2 || targets[0] != "kiosk-kitchen" || targets[1] != "kiosk-living-room" ||
-		err != nil || sess.SessionID() != "sess-k1" || leaseErr == nil {
+		err != nil || lease.SessionID() != "kiosk-kitchen" {
 		t.Fatalf("unexpected delegation/passthrough behavior")
 	}
 
 	dyn.Close()
 	dyn.MarkDirty()
-	_, csErr := dyn.GetOrCreateSession(ctx, "k", "")
 	_, clErr := dyn.AcquireLease(ctx, "k")
-	if atomic.LoadInt32(&mock1.closeCalled) != 1 || dyn.Close() != nil || csErr == nil || dyn.Initialize(ctx) == nil || clErr == nil {
+	if atomic.LoadInt32(&mock1.closeCalled) != 1 || dyn.Close() != nil || dyn.Initialize(ctx) == nil || clErr == nil {
 		t.Error("expected error on closed dynamic pool methods")
 	}
 
 	fakeL := &fakeSessionLease{sessID: "lease-123"}
-	dynLeased := NewDynamicVoicePoolWithInitial(&mockLeasedVoicePool{mockVoicePool: newMockVoicePool("m3"), lease: fakeL}, "fp-3", nil)
+	mockLeased := newMockVoicePool("m3")
+	mockLeased.lease = fakeL
+	dynLeased := NewDynamicVoicePoolWithInitial(mockLeased, "fp-3", nil)
 	defer func() {
 		_ = dynLeased.Close()
 	}()
 
-	lease, leaseErr2 := dynLeased.AcquireLease(ctx, "k")
-	if leaseErr2 != nil || lease != fakeL {
-		t.Errorf("unexpected leased: (%v, %v)", leaseErr2, lease)
+	lease2, leaseErr2 := dynLeased.AcquireLease(ctx, "k")
+	if leaseErr2 != nil || lease2 != fakeL {
+		t.Errorf("unexpected leased: (%v, %v)", leaseErr2, lease2)
 	}
 }
 
@@ -219,7 +224,7 @@ func TestDynamicVoicePool_MarkDirtyAndReloadEdgeCases(t *testing.T) {
 
 	dynErr := NewDynamicVoicePool(func() (AgentPool, string, error) { return nil, "", errors.New("factory init fail") })
 	ctx := context.Background()
-	_, geErr := dynErr.GetOrCreateSession(ctx, "k", "")
+	_, geErr := dynErr.AcquireLease(ctx, "k")
 	dynErr.UpdatePrewarmedTargets([]string{"k"})
 
 	mockNoFac := newMockVoicePool("m")
@@ -263,8 +268,8 @@ func TestDynamicVoicePool_ConcurrentAccessDuringReload(t *testing.T) {
 		go func(wID int) {
 			defer wg.Done()
 			for j := 0; j < numIterations; j++ {
-				if s, err := dyn.GetOrCreateSession(ctx, fmt.Sprintf("t-%d", (wID+j)%5), ""); err != nil || s == nil {
-					t.Errorf("worker %d GetOrCreateSession error: %v", wID, err)
+				if l, err := dyn.AcquireLease(ctx, fmt.Sprintf("t-%d", (wID+j)%5)); err != nil || l == nil {
+					t.Errorf("worker %d AcquireLease error: %v", wID, err)
 					return
 				}
 			}

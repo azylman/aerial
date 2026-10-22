@@ -3,7 +3,6 @@ package queue
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2983,35 +2982,9 @@ func TestFormatUnrotatedSessionLine(t *testing.T) {
 	}
 }
 
-func TestResolveStore(t *testing.T) {
-	t.Parallel()
-	fake, realDB := setupTestStore(t), &sql.DB{}
-	tests := []struct {
-		name    string
-		input   any
-		wantNil bool
-	}{
-		{"nil", nil, true},
-		{"str", "unsupported", true},
-		{"typed_nil_fake", (*dbtest.FakeStore)(nil), true},
-		{"typed_nil_sql", (*db.SQLStore)(nil), true},
-		{"typed_nil_db", (*sql.DB)(nil), true},
-		{"valid_fake", fake, false},
-		{"valid_db", realDB, false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if (resolveStore(tc.input) == nil) != tc.wantNil {
-				t.Errorf("resolveStore(%v) wantNil=%v", tc.input, tc.wantNil)
-			}
-		})
-	}
-}
-
 func TestWorkerPool_Accessors(t *testing.T) {
 	t.Parallel()
-	fake, realDB := setupTestStore(t), &sql.DB{}
+	fake := setupTestStore(t)
 	noopLLM := func(context.Context, string, string) (string, error) { return "", nil }
 	tests := []struct {
 		name                                                           string
@@ -3021,7 +2994,6 @@ func TestWorkerPool_Accessors(t *testing.T) {
 		{"nil", nil, true, true, true, true},
 		{"empty", &WorkerPool{}, true, false, true, true},
 		{"with_fake_and_agentpool", &WorkerPool{cfg: WorkerPoolConfig{Store: fake, LLMFunc: noopLLM}, processPool: &testRunnerAgentPool{}}, false, false, false, false},
-		{"with_sqldb", &WorkerPool{cfg: WorkerPoolConfig{DB: realDB}}, false, false, true, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

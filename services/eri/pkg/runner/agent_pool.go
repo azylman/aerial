@@ -30,12 +30,7 @@ type SessionLease interface {
 }
 
 type AgentPool interface {
-	GetOrCreateSession(ctx context.Context, targetKey string, sessionID string) (AgentSession, error)
+	AcquireLease(ctx context.Context, targetKey string) (SessionLease, error)
 	Initialize(ctx context.Context) error
 	Close() error
-}
-
-type LeasedAgentPool interface {
-	AgentPool
-	AcquireLease(ctx context.Context, targetKey string) (SessionLease, error)
 }

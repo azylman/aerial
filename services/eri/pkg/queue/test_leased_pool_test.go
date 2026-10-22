@@ -30,6 +30,23 @@ type testRunnerAgentPool struct {
 }
 
 func newTestRunnerAgentPool(cfg WorkerPoolConfig, trackerPool runner.AgentPool) *testRunnerAgentPool {
+	if cfg.TimeoutMinutes <= 0 {
+		cfg.TimeoutMinutes = DefaultTimeoutMinutes
+	}
+	if cfg.RunnerWithOptionsFunc == nil && cfg.RunnerFunc != nil {
+		rf := cfg.RunnerFunc
+		tm := cfg.TimeoutMinutes
+		cfg.RunnerWithOptionsFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			timeoutMins := int(opts.MaxDuration / time.Minute)
+			if timeoutMins <= 0 {
+				timeoutMins = int(opts.InactivityTimeout / time.Minute)
+			}
+			if timeoutMins <= 0 {
+				timeoutMins = tm
+			}
+			return rf(ctx, agyBin, prompt, sessionID, apiKey, model, timeoutMins)
+		}
+	}
 	return &testRunnerAgentPool{
 		cfg:         cfg,
 		trackerPool: trackerPool,
@@ -143,10 +160,7 @@ func (p *testRunnerAgentPool) Close() error {
 	return nil
 }
 
-var (
-	_ runner.AgentPool       = (*testRunnerAgentPool)(nil)
-	_ runner.LeasedAgentPool = (*testRunnerAgentPool)(nil)
-)
+var _ runner.AgentPool = (*testRunnerAgentPool)(nil)
 
 type testSessionLease struct {
 	pool        *testRunnerAgentPool

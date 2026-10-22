@@ -35,10 +35,7 @@ type InterchangeablePool struct {
 	cancel      context.CancelFunc
 }
 
-var (
-	_ AgentPool       = (*InterchangeablePool)(nil)
-	_ LeasedAgentPool = (*InterchangeablePool)(nil)
-)
+var _ AgentPool = (*InterchangeablePool)(nil)
 
 // NewInterchangeablePool constructs an InterchangeablePool wrapping an underlying UnifiedProcessPool.
 func NewInterchangeablePool(underlying *UnifiedProcessPool, cfg InterchangeablePoolConfig) *InterchangeablePool {
@@ -98,49 +95,6 @@ func (p *InterchangeablePool) acquireWorkerSlot(ctx context.Context) (string, bo
 		}
 		return fmt.Sprintf("%s-ondemand-%d", prefix, p.overflowSeq.Add(1)), true, nil
 	}
-}
-
-// GetOrCreateSession leases an available worker from the pool and returns a leasedSession.
-func (p *InterchangeablePool) GetOrCreateSession(ctx context.Context, targetKey string, sessionID string) (AgentSession, error) {
-	if p == nil {
-		return nil, errors.New("interchangeable pool is closed")
-	}
-	workerKey, isOverflow, err := p.acquireWorkerSlot(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if p.underlying == nil {
-		p.returnWorker(workerKey)
-		return nil, errors.New("underlying pool is nil")
-	}
-	daemon, err := p.underlying.GetOrCreate(ctx, workerKey, "")
-	if err != nil {
-		p.returnWorker(workerKey)
-		return nil, err
-	}
-	if daemon == nil {
-		p.returnWorker(workerKey)
-		return nil, errors.New("underlying pool returned nil daemon")
-	}
-
-	sess := &leasedSession{
-		pool: p, workerKey: workerKey, isOverflow: isOverflow,
-		daemon: daemon, completed: make(chan struct{}),
-	}
-	var pDone <-chan struct{}
-	if p.ctx != nil {
-		pDone = p.ctx.Done()
-	}
-	go func() {
-		select {
-		case <-ctx.Done():
-			sess.release()
-		case <-sess.completed:
-		case <-pDone:
-			sess.release()
-		}
-	}()
-	return sess, nil
 }
 
 func (p *InterchangeablePool) releaseWorkerKey(workerKey string, isOverflow bool) {
@@ -222,19 +176,18 @@ func (p *InterchangeablePool) ExecuteEphemeral(ctx context.Context, targetKey, p
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	sess, err := p.GetOrCreateSession(ctx, targetKey, "")
+	lease, err := p.AcquireLease(ctx, targetKey)
 	if err != nil {
 		return "", fmt.Errorf("failed to acquire leased session: %w", err)
 	}
-	sink := NewThrowawayTurnSink()
-	turnCtx := &TurnContext{
-		TurnID: uuid.New().String(), SessionID: sess.SessionID(),
-		Prompt: prompt, Sink: sink, CreatedAt: time.Now(), Ctx: ctx,
+	res, err := lease.Execute(ctx, &TurnContext{
+		TurnID: uuid.New().String(), SessionID: lease.SessionID(),
+		Prompt: prompt, CreatedAt: time.Now(), Ctx: ctx,
+	})
+	if err = errors.Join(err, lease.Release()); err != nil || res == nil {
+		return "", err
 	}
-	if err := sess.Send(prompt, turnCtx); err != nil {
-		return "", fmt.Errorf("failed sending turn to leased session: %w", err)
-	}
-	return sink.ResultContext(ctx)
+	return res.Response, nil
 }
 
 func (p *InterchangeablePool) EphemeralLLMFunc(targetKey string) LLMFunc {
@@ -291,132 +244,6 @@ func (p *InterchangeablePool) returnWorker(workerKey string) {
 	select {
 	case p.available <- workerKey:
 	default:
-	}
-}
-
-type leasedSession struct {
-	pool        *InterchangeablePool
-	workerKey   string
-	isOverflow  bool
-	daemon      *StreamingDaemon
-	releaseOnce sync.Once
-	completed   chan struct{}
-}
-
-var _ AgentSession = (*leasedSession)(nil)
-
-func (s *leasedSession) release() {
-	s.releaseOnce.Do(func() {
-		if s.completed != nil {
-			close(s.completed)
-		}
-		if s.pool != nil {
-			s.pool.releaseWorkerKey(s.workerKey, s.isOverflow)
-		}
-	})
-}
-
-func (s *leasedSession) SessionID() string {
-	if s.daemon == nil {
-		return ""
-	}
-	return s.daemon.SessionID()
-}
-
-func (s *leasedSession) Send(prompt string, turnCtx *TurnContext) error {
-	if turnCtx == nil {
-		defer s.release()
-		if s.daemon == nil {
-			return errors.New("daemon is nil")
-		}
-		return s.daemon.Send(prompt, nil)
-	}
-	wrappedSink := &releaseTurnSink{inner: turnCtx.Sink, release: s.release}
-	turnCopy := *turnCtx
-	turnCopy.Sink = wrappedSink
-	if s.daemon == nil {
-		s.release()
-		return errors.New("daemon is nil")
-	}
-	if err := s.daemon.Send(prompt, &turnCopy); err != nil {
-		s.release()
-		return err
-	}
-	return nil
-}
-
-func (s *leasedSession) Close() error {
-	s.release()
-	return nil
-}
-
-type releaseTurnSink struct {
-	inner       TurnSink
-	releaseOnce sync.Once
-	release     func()
-}
-
-func (s *releaseTurnSink) doRelease() {
-	s.releaseOnce.Do(func() {
-		if s.release != nil {
-			s.release()
-		}
-	})
-}
-
-func (s *releaseTurnSink) OnTurnStarted() {
-	if s.inner != nil {
-		s.inner.OnTurnStarted()
-	}
-}
-
-func (s *releaseTurnSink) OnThinking() {
-	if s.inner != nil {
-		s.inner.OnThinking()
-	}
-}
-
-func (s *releaseTurnSink) OnStepStarted(stepIndex int) {
-	if sa, ok := s.inner.(StepAwareSink); ok {
-		sa.OnStepStarted(stepIndex)
-	}
-}
-
-func (s *releaseTurnSink) OnToolCall(toolName, commandName string) {
-	if s.inner != nil {
-		s.inner.OnToolCall(toolName, commandName)
-	}
-}
-
-func (s *releaseTurnSink) OnToolCompleted(toolName, mcpServer string, duration time.Duration, status string) {
-	if s.inner != nil {
-		s.inner.OnToolCompleted(toolName, mcpServer, duration, status)
-	}
-}
-
-func (s *releaseTurnSink) OnSkillActivated(skillName, source string) {
-	if s.inner != nil {
-		s.inner.OnSkillActivated(skillName, source)
-	}
-}
-
-func (s *releaseTurnSink) OnTextDelta(delta string) {
-	if s.inner != nil {
-		s.inner.OnTextDelta(delta)
-	}
-}
-
-func (s *releaseTurnSink) OnResult(res *TurnResult) {
-	s.doRelease()
-	if s.inner != nil {
-		s.inner.OnResult(res)
-	}
-}
-
-func (s *releaseTurnSink) OnError(err error) {
-	s.doRelease()
-	if s.inner != nil {
-		s.inner.OnError(err)
 	}
 }
 

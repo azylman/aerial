@@ -525,9 +525,8 @@ func (l *mockVoiceSessionLease) Execute(ctx context.Context, turn *runner.TurnCo
 }
 
 var (
-	_ runner.AgentPool       = (*queueMockVoiceProcessPool)(nil)
-	_ runner.LeasedAgentPool = (*queueMockVoiceProcessPool)(nil)
-	_ runner.AgentSession    = (*queueMockVoiceSession)(nil)
+	_ runner.AgentPool    = (*queueMockVoiceProcessPool)(nil)
+	_ runner.AgentSession = (*queueMockVoiceSession)(nil)
 )
 
 func TestWorkerPool_ExecuteVoiceTurn_MockVoiceProcessPool(t *testing.T) {
@@ -558,13 +557,12 @@ func TestGetSessionLastActivity(t *testing.T) {
 
 	tests := []struct {
 		name           string
-		store          any
+		store          db.Store
 		threadID       string
 		wantNonZeroTS  bool
 		wantIncomplete bool
 		wantErr        bool
 	}{
-		{name: "invalid_store_type", store: "invalid-type", threadID: "t1", wantIncomplete: true},
 		{name: "nil_store_non_empty_thread", store: nil, threadID: "thread-1", wantIncomplete: true},
 		{name: "nil_store_empty_thread", store: nil, threadID: "", wantIncomplete: true},
 		{name: "closed_store_error", store: closedStore, threadID: "thread-1", wantErr: true},
@@ -738,10 +736,16 @@ func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			p := New(nil, tc.cfg)
-			out1, _, _, err1 := p.cfg.RunnerFunc(ctx, "bin", "prompt", "sess", "key", "model", 10)
-			out2, _, _, err2 := p.cfg.RunnerWithOptionsFunc(ctx, "bin", "prompt", "sess", "key", "model", runner.WatchdogOptions{})
-			if tc.wantOut != "" && (err1 != nil || err2 != nil || out1 != tc.wantOut || out2 != tc.wantOut) {
-				t.Errorf("adapter outputs = (%q, %q), errs = (%v, %v), want %q", out1, out2, err1, err2, tc.wantOut)
+			if tc.wantOut != "" {
+				lease, err := p.AgentPool().AcquireLease(ctx, "t-adapter")
+				if err != nil {
+					t.Fatalf("AcquireLease failed: %v", err)
+				}
+				res, execErr := lease.Execute(ctx, &runner.TurnContext{Prompt: "prompt", Ctx: ctx})
+				_ = lease.Release()
+				if execErr != nil || res == nil || res.Response != tc.wantOut {
+					t.Errorf("adapter output = %v, err = %v, want %q", res, execErr, tc.wantOut)
+				}
 			}
 			if p.Classifier() == nil {
 				t.Errorf("expected non-nil Classifier")

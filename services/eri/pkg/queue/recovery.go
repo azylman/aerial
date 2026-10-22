@@ -19,8 +19,7 @@ const (
 // RecoverInterrupted resumes all PENDING and PROCESSING messages from the database on startup in chronological order.
 // If a message in PROCESSING has restart_count >= DefaultMaxRestarts or retry_count >= maxAttempts (poison pill),
 // it is not re-enqueued; instead, a poison pill notification is sent and the message is marked FAILED.
-func RecoverInterrupted(dbOrStore any, pool *WorkerPool) {
-	store := resolveStore(dbOrStore)
+func RecoverInterrupted(store db.Store, pool *WorkerPool) {
 	if store == nil || pool == nil {
 		return
 	}

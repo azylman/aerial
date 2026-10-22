@@ -324,10 +324,7 @@ type GeminiAPIPool struct {
 	closed      bool
 }
 
-var (
-	_ AgentPool       = (*GeminiAPIPool)(nil)
-	_ LeasedAgentPool = (*GeminiAPIPool)(nil)
-)
+var _ AgentPool = (*GeminiAPIPool)(nil)
 
 func NewGeminiAPIPool(cfg GeminiAPIPoolConfig) *GeminiAPIPool {
 	if cfg.BaseURL == "" {
