@@ -46,6 +46,8 @@ type TestMemStore struct {
 	threadPriorTurns     map[string][]Message
 	threadRetrievedFacts map[string][]string
 	threadToolCalls      map[string][]string
+	proceduralCandidates map[int64]*ProceduralCandidate
+	nextCandID           int64
 }
 
 func newTestMemStore() *TestMemStore {
@@ -60,6 +62,8 @@ func newTestMemStore() *TestMemStore {
 		threadPriorTurns:     make(map[string][]Message),
 		threadRetrievedFacts: make(map[string][]string),
 		threadToolCalls:      make(map[string][]string),
+		proceduralCandidates: make(map[int64]*ProceduralCandidate),
+		nextCandID:           1,
 	}
 }
 
@@ -398,6 +402,90 @@ func (m *TestMemStore) FindNearestScoredFacts(ctx context.Context, embedding []f
 		res = append(res, pairs[i])
 	}
 	return res, nil
+}
+
+func (m *TestMemStore) InsertProceduralCandidate(ctx context.Context, cand ProceduralCandidate) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failOp == "InsertProceduralCandidate" {
+		return 0, m.failErr
+	}
+	if strings.TrimSpace(cand.Trigger) == "" {
+		return 0, fmt.Errorf("trigger pattern cannot be empty")
+	}
+	id := m.nextCandID
+	m.nextCandID++
+	now := time.Now().UTC()
+	cand.ID = id
+	if cand.Domain == "" {
+		cand.Domain = "discord"
+	}
+	if cand.Status == "" {
+		cand.Status = "pending"
+	}
+	if cand.Steps == nil {
+		cand.Steps = []string{}
+	}
+	if cand.Avoid == nil {
+		cand.Avoid = []string{}
+	}
+	cand.CreatedAt = now
+	cpy := cand
+	m.proceduralCandidates[id] = &cpy
+	return id, nil
+}
+
+func (m *TestMemStore) GetPendingProceduralCandidates(ctx context.Context) ([]ProceduralCandidate, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failOp == "GetPendingProceduralCandidates" {
+		return nil, m.failErr
+	}
+	var res []ProceduralCandidate
+	for _, c := range m.proceduralCandidates {
+		if c.Status == "pending" {
+			res = append(res, *c)
+		}
+	}
+	sort.Slice(res, func(i, j int) bool {
+		if !res[i].CreatedAt.Equal(res[j].CreatedAt) {
+			return res[i].CreatedAt.Before(res[j].CreatedAt)
+		}
+		return res[i].ID < res[j].ID
+	})
+	if len(res) > 100 {
+		res = res[:100]
+	}
+	return res, nil
+}
+
+func (m *TestMemStore) MarkProceduralCandidatesConsolidated(ctx context.Context, ids []int64, prNumber int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failOp == "MarkProceduralCandidatesConsolidated" {
+		return m.failErr
+	}
+	for _, id := range ids {
+		if c, ok := m.proceduralCandidates[id]; ok {
+			c.Status = "consolidated"
+			c.PRNumber = prNumber
+		}
+	}
+	return nil
+}
+
+func (m *TestMemStore) MarkProceduralCandidatesSkipped(ctx context.Context, ids []int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failOp == "MarkProceduralCandidatesSkipped" {
+		return m.failErr
+	}
+	for _, id := range ids {
+		if c, ok := m.proceduralCandidates[id]; ok {
+			c.Status = "skipped"
+		}
+	}
+	return nil
 }
 
 func (m *TestMemStore) Close() error {
@@ -3272,6 +3360,34 @@ func TestExtractTrajectorySignals(t *testing.T) {
 			stepType: "SYSTEM",
 			content:  "<retrieved_memory>- [id:1] test</retrieved_memory>",
 		},
+		{
+			name:          "PlannerResponseWithSkill",
+			stepType:      "PLANNER_RESPONSE",
+			toolName:      "read_file",
+			content:       `{"Path": "/skills/ha-operations/SKILL.md"}`,
+			wantToolCalls: `read_file({"Path": "/skills/ha-operations/SKILL.md"}) [SKILL_LOADED: ha-operations]`,
+		},
+		{
+			name:          "GenericStepWithSkill",
+			stepType:      "GENERIC",
+			toolName:      "",
+			content:       "---\nname: ha-operations\ndescription: test",
+			wantToolCalls: `[SKILL_LOADED: ha-operations]`,
+		},
+		{
+			name:          "ToolStepOutputNoSkill",
+			stepType:      "TOOL",
+			toolName:      "read_file",
+			content:       "file content without skill",
+			wantToolCalls: `-> OUTPUT(read_file): file content without skill`,
+		},
+		{
+			name:          "RunCommandStepEmptyTool",
+			stepType:      "RUN_COMMAND",
+			toolName:      "",
+			content:       "command line output",
+			wantToolCalls: `-> OUTPUT(run_command): command line output`,
+		},
 	}
 
 	for _, tc := range tests {
@@ -5204,6 +5320,806 @@ func TestWorker_RunDaily_Dreaming(t *testing.T) {
 				if len(mem.facts) != 1 {
 					t.Errorf("len(mem.facts) = %d, want 1 consolidated fact", len(mem.facts))
 				}
+			}
+		})
+	}
+}
+
+func TestExtractLoadedSkillName(t *testing.T) {
+	tests := []struct {
+		name     string
+		stepType string
+		toolName string
+		content  string
+		want     string
+	}{
+		{
+			name:     "EmptyContent",
+			stepType: "PLANNER_RESPONSE",
+			toolName: "read_file",
+			content:  "",
+			want:     "",
+		},
+		{
+			name:     "PlannerResponseDirectPath",
+			stepType: "PLANNER_RESPONSE",
+			toolName: "read_file",
+			content:  `{"Path": "/skills/ha-operations/SKILL.md"}`,
+			want:     "ha-operations",
+		},
+		{
+			name:     "PlannerResponseDiscordSubdir",
+			stepType: "PLANNER_RESPONSE",
+			toolName: "read_file",
+			content:  `/skills/discord/ha-operations/SKILL.md`,
+			want:     "ha-operations",
+		},
+		{
+			name:     "PlannerResponseCommonSubdir",
+			stepType: "PLANNER_RESPONSE",
+			toolName: "read_file",
+			content:  `/skills/common/culinary-recipes/SKILL.md`,
+			want:     "culinary-recipes",
+		},
+		{
+			name:     "PlannerResponseVoiceSubdir",
+			stepType: "PLANNER_RESPONSE",
+			toolName: "read_file",
+			content:  `/skills/voice/voice-assistant/SKILL.md`,
+			want:     "voice-assistant",
+		},
+		{
+			name:     "PlannerResponseEphemeralSubdir",
+			stepType: "PLANNER_RESPONSE",
+			toolName: "read_file",
+			content:  `/skills/ephemeral/test-skill/SKILL.md`,
+			want:     "test-skill",
+		},
+		{
+			name:     "PlannerResponseWindowsBackslashes",
+			stepType: "PLANNER_RESPONSE",
+			toolName: "read_file",
+			content:  `C:\data\skills\discord\ha-operations\SKILL.md`,
+			want:     "ha-operations",
+		},
+		{
+			name:     "GenericStepYAML",
+			stepType: "GENERIC",
+			toolName: "",
+			content:  "---\nname: ha-operations\ndescription: Manage HA",
+			want:     "ha-operations",
+		},
+		{
+			name:     "ToolStepYAMLNumbered",
+			stepType: "TOOL",
+			toolName: "read_file",
+			content:  "1: ---\n2: name: culinary-recipes\n3: description: Cook",
+			want:     "culinary-recipes",
+		},
+		{
+			name:     "RunCommandStepYAML",
+			stepType: "RUN_COMMAND",
+			toolName: "bash",
+			content:  "---\nname: my-script-skill\n",
+			want:     "my-script-skill",
+		},
+		{
+			name:     "NoSkillFound",
+			stepType: "PLANNER_RESPONSE",
+			toolName: "run_command",
+			content:  "echo hello",
+			want:     "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ExtractLoadedSkillName(tc.stepType, tc.toolName, tc.content)
+			if got != tc.want {
+				t.Errorf("ExtractLoadedSkillName() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestExtractLoadedSkillsFromCalls(t *testing.T) {
+	tests := []struct {
+		name      string
+		toolCalls []string
+		want      []string
+	}{
+		{
+			name:      "Empty",
+			toolCalls: nil,
+			want:      nil,
+		},
+		{
+			name: "SingleSkill",
+			toolCalls: []string{
+				"read_file(...) [SKILL_LOADED: ha-operations]",
+			},
+			want: []string{"ha-operations"},
+		},
+		{
+			name: "DeduplicatedMultipleCalls",
+			toolCalls: []string{
+				"read_file(...) [SKILL_LOADED: ha-operations]",
+				"[SKILL_LOADED: ha-operations]",
+				"-> OUTPUT(read_file): done",
+			},
+			want: []string{"ha-operations"},
+		},
+		{
+			name: "MultipleDifferentSkills",
+			toolCalls: []string{
+				"read_file(...) [SKILL_LOADED: ha-operations]",
+				"[SKILL_LOADED: culinary-recipes]",
+			},
+			want: []string{"ha-operations", "culinary-recipes"},
+		},
+		{
+			name: "NoLoadedSkills",
+			toolCalls: []string{
+				"run_command(echo hi)",
+				"-> OUTPUT(run_command): hi",
+			},
+			want: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ExtractLoadedSkillsFromCalls(tc.toolCalls)
+			if len(got) != len(tc.want) {
+				t.Fatalf("ExtractLoadedSkillsFromCalls() len = %d, want %d (%v)", len(got), len(tc.want), got)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("ExtractLoadedSkillsFromCalls()[%d] = %q, want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestEvaluateProceduralCandidateAdmission(t *testing.T) {
+	tests := []struct {
+		name       string
+		item       ExtractedProceduralItem
+		wantAdmit  bool
+		wantReason string
+	}{
+		{
+			name: "AdmittedWithStepsAndAvoid",
+			item: ExtractedProceduralItem{
+				Trigger: "restart nomad service when stuck",
+				Steps:   []string{"check status", "restart allocation"},
+				Avoid:   []string{"do not kill without checking status"},
+			},
+			wantAdmit:  true,
+			wantReason: "admitted",
+		},
+		{
+			name: "AdmittedWithStepsOnly",
+			item: ExtractedProceduralItem{
+				Trigger: "configure home assistant entity",
+				Steps:   []string{"call ha_search", "apply entity change"},
+			},
+			wantAdmit:  true,
+			wantReason: "admitted",
+		},
+		{
+			name: "AdmittedWithAvoidOnly",
+			item: ExtractedProceduralItem{
+				Trigger: "deploy docker container on host",
+				Avoid:   []string{"do not use host networking mode"},
+			},
+			wantAdmit:  true,
+			wantReason: "admitted",
+		},
+		{
+			name: "EmptyTrigger",
+			item: ExtractedProceduralItem{
+				Trigger: "   ",
+				Steps:   []string{"step 1"},
+			},
+			wantAdmit:  false,
+			wantReason: "empty_trigger",
+		},
+		{
+			name: "TriggerTooShort",
+			item: ExtractedProceduralItem{
+				Trigger: "run",
+				Steps:   []string{"step 1"},
+			},
+			wantAdmit:  false,
+			wantReason: "trigger_too_short",
+		},
+		{
+			name: "EphemeralTelemetryPR",
+			item: ExtractedProceduralItem{
+				Trigger: "verify changes for PR #1234 before deploying",
+				Steps:   []string{"run tests"},
+			},
+			wantAdmit:  false,
+			wantReason: "ephemeral_telemetry",
+		},
+		{
+			name: "EphemeralTelemetryBuildID",
+			item: ExtractedProceduralItem{
+				Trigger: "execute build-1792688043-932febae in pipeline",
+				Steps:   []string{"run tests"},
+			},
+			wantAdmit:  false,
+			wantReason: "ephemeral_telemetry",
+		},
+		{
+			name: "EphemeralTelemetryDurableOverride",
+			item: ExtractedProceduralItem{
+				Trigger: "always verify pull request #1234 invariant strictly before commit",
+				Steps:   []string{"run verify.sh"},
+			},
+			wantAdmit:  true,
+			wantReason: "admitted",
+		},
+		{
+			name: "MissingStepsAndAvoid",
+			item: ExtractedProceduralItem{
+				Trigger: "some valid trigger description",
+				Steps:   nil,
+				Avoid:   nil,
+			},
+			wantAdmit:  false,
+			wantReason: "missing_steps_and_avoid",
+		},
+		{
+			name: "WhitespaceOnlyStepsAndAvoid",
+			item: ExtractedProceduralItem{
+				Trigger: "some valid trigger description",
+				Steps:   []string{"   ", ""},
+				Avoid:   []string{"   "},
+			},
+			wantAdmit:  false,
+			wantReason: "missing_steps_and_avoid",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			admit, reason := EvaluateProceduralCandidateAdmission(tc.item)
+			if admit != tc.wantAdmit {
+				t.Errorf("admit = %v, want %v (reason: %q)", admit, tc.wantAdmit, reason)
+			}
+			if reason != tc.wantReason {
+				t.Errorf("reason = %q, want %q", reason, tc.wantReason)
+			}
+		})
+	}
+}
+
+func TestSQLStore_ProceduralCandidates(t *testing.T) {
+	dbMem := setupTestDBMem(t)
+	ctx := context.Background()
+
+	tests := []struct {
+		name        string
+		action      string
+		nilDB       bool
+		cand        ProceduralCandidate
+		ids         []int64
+		prNum       int
+		queryErr    error
+		execErr     error
+		rowSQL      string
+		rowsSQL     string
+		wantErr     bool
+		wantCount   int
+		wantID      int64
+		wantNoQuery bool
+	}{
+		{
+			name:    "InsertNilDB",
+			action:  "insert",
+			nilDB:   true,
+			cand:    ProceduralCandidate{Trigger: "valid trigger"},
+			wantErr: true,
+		},
+		{
+			name:    "InsertEmptyTrigger",
+			action:  "insert",
+			cand:    ProceduralCandidate{Trigger: "   "},
+			wantErr: true,
+		},
+		{
+			name:     "InsertQueryError",
+			action:   "insert",
+			cand:     ProceduralCandidate{Trigger: "valid trigger"},
+			queryErr: errors.New("insert failed"),
+			wantErr:  true,
+		},
+		{
+			name:   "InsertSuccessWithPR",
+			action: "insert",
+			cand: ProceduralCandidate{
+				ThreadID:    "t-100",
+				Domain:      "discord",
+				LoadedSkill: "ha-operations",
+				Trigger:     "turn on porch light when motion detected",
+				Steps:       []string{"call ha_search", "call ha_call_write_tool"},
+				Avoid:       []string{"avoid loop"},
+				Embedding:   testEmbedding(0.5),
+				Status:      "pending",
+				PRNumber:    42,
+			},
+			rowSQL:  "SELECT 101",
+			wantID:  101,
+			wantErr: false,
+		},
+		{
+			name:   "InsertSuccessDefaults",
+			action: "insert",
+			cand: ProceduralCandidate{
+				Trigger:   "valid trigger pattern",
+				Embedding: testEmbedding(0.1),
+			},
+			rowSQL:  "SELECT 102",
+			wantID:  102,
+			wantErr: false,
+		},
+		{
+			name:    "GetPendingNilDB",
+			action:  "get_pending",
+			nilDB:   true,
+			wantErr: true,
+		},
+		{
+			name:     "GetPendingQueryError",
+			action:   "get_pending",
+			queryErr: errors.New("select failed"),
+			wantErr:  true,
+		},
+		{
+			name:    "GetPendingScanError",
+			action:  "get_pending",
+			rowsSQL: "SELECT 'bad_row'",
+			wantErr: true,
+		},
+		{
+			name:   "GetPendingSuccessParsing",
+			action: "get_pending",
+			rowsSQL: "SELECT 1, 't-1', 'discord', 'ha-operations', 'motion detected', '[\"step 1\"]', '[\"avoid 1\"]', '[0.1,0.2]', 'pending', 0, '2026-10-01 12:00:00' " +
+				"UNION ALL SELECT 2, 't-2', 'discord', '', 'unloaded skill trigger', '', '', '[0.3,0.4]', 'pending', 5, '2026-10-01 13:00:00'",
+			wantErr:   false,
+			wantCount: 2,
+		},
+		{
+			name:    "MarkConsolidatedNilDB",
+			action:  "mark_consolidated",
+			nilDB:   true,
+			ids:     []int64{1},
+			prNum:   10,
+			wantErr: true,
+		},
+		{
+			name:        "MarkConsolidatedEmptyIDs",
+			action:      "mark_consolidated",
+			ids:         nil,
+			prNum:       10,
+			wantErr:     false,
+			wantNoQuery: true,
+		},
+		{
+			name:    "MarkConsolidatedExecError",
+			action:  "mark_consolidated",
+			ids:     []int64{1, 2},
+			prNum:   10,
+			execErr: errors.New("update failed"),
+			wantErr: true,
+		},
+		{
+			name:    "MarkConsolidatedSuccess",
+			action:  "mark_consolidated",
+			ids:     []int64{1, 2},
+			prNum:   10,
+			wantErr: false,
+		},
+		{
+			name:    "MarkSkippedNilDB",
+			action:  "mark_skipped",
+			nilDB:   true,
+			ids:     []int64{1},
+			wantErr: true,
+		},
+		{
+			name:        "MarkSkippedEmptyIDs",
+			action:      "mark_skipped",
+			ids:         nil,
+			wantErr:     false,
+			wantNoQuery: true,
+		},
+		{
+			name:    "MarkSkippedExecError",
+			action:  "mark_skipped",
+			ids:     []int64{3},
+			execErr: errors.New("update failed"),
+			wantErr: true,
+		},
+		{
+			name:    "MarkSkippedSuccess",
+			action:  "mark_skipped",
+			ids:     []int64{3, 4},
+			wantErr: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var capturedQuery string
+			var store *SQLStore
+			if tc.nilDB {
+				store = &SQLStore{}
+			} else {
+				store = NewSQLStore(queryMockDBTX{
+					dbMem:         dbMem,
+					queryErr:      tc.queryErr,
+					execErr:       tc.execErr,
+					rowSQL:        tc.rowSQL,
+					rowsSQL:       tc.rowsSQL,
+					capturedQuery: &capturedQuery,
+				})
+			}
+
+			switch tc.action {
+			case "insert":
+				id, err := store.InsertProceduralCandidate(ctx, tc.cand)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("InsertProceduralCandidate() err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if tc.wantID > 0 && id != tc.wantID {
+					t.Errorf("InsertProceduralCandidate() id = %d, want %d", id, tc.wantID)
+				}
+			case "get_pending":
+				cands, err := store.GetPendingProceduralCandidates(ctx)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("GetPendingProceduralCandidates() err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if len(cands) != tc.wantCount {
+					t.Errorf("GetPendingProceduralCandidates() count = %d, want %d", len(cands), tc.wantCount)
+				}
+			case "mark_consolidated":
+				err := store.MarkProceduralCandidatesConsolidated(ctx, tc.ids, tc.prNum)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("MarkProceduralCandidatesConsolidated() err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if tc.wantNoQuery && capturedQuery != "" {
+					t.Errorf("expected no query for empty IDs, got: %s", capturedQuery)
+				}
+			case "mark_skipped":
+				err := store.MarkProceduralCandidatesSkipped(ctx, tc.ids)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("MarkProceduralCandidatesSkipped() err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if tc.wantNoQuery && capturedQuery != "" {
+					t.Errorf("expected no query for empty IDs, got: %s", capturedQuery)
+				}
+			}
+		})
+	}
+}
+
+func TestTestMemStore_ProceduralCandidates(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name       string
+		failOp     string
+		failErr    error
+		cand       ProceduralCandidate
+		markPR     int
+		wantErr    bool
+		wantCount  int
+		wantStatus string
+	}{
+		{
+			name:    "InsertFail",
+			failOp:  "InsertProceduralCandidate",
+			failErr: errors.New("insert fail"),
+			cand:    ProceduralCandidate{Trigger: "valid"},
+			wantErr: true,
+		},
+		{
+			name:    "InsertEmptyTrigger",
+			cand:    ProceduralCandidate{Trigger: ""},
+			wantErr: true,
+		},
+		{
+			name:       "InsertSuccessAndMarkConsolidated",
+			cand:       ProceduralCandidate{Trigger: "valid trigger", Steps: []string{"step 1"}},
+			markPR:     42,
+			wantErr:    false,
+			wantStatus: "consolidated",
+		},
+		{
+			name:       "MarkSkipped",
+			cand:       ProceduralCandidate{Trigger: "valid trigger 2"},
+			wantErr:    false,
+			wantStatus: "skipped",
+		},
+		{
+			name:    "GetPendingFail",
+			failOp:  "GetPendingProceduralCandidates",
+			failErr: errors.New("get pending fail"),
+			wantErr: true,
+		},
+		{
+			name:    "MarkConsolidatedFail",
+			failOp:  "MarkProceduralCandidatesConsolidated",
+			failErr: errors.New("consolidate fail"),
+			wantErr: true,
+		},
+		{
+			name:    "MarkSkippedFail",
+			failOp:  "MarkProceduralCandidatesSkipped",
+			failErr: errors.New("skip fail"),
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := newTestMemStore()
+			if tc.failOp != "" {
+				mem.SetFail(tc.failOp, tc.failErr)
+			}
+			if tc.name == "GetPendingFail" {
+				_, err := mem.GetPendingProceduralCandidates(ctx)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("GetPendingProceduralCandidates() err = %v", err)
+				}
+				return
+			}
+			if tc.name == "MarkConsolidatedFail" {
+				err := mem.MarkProceduralCandidatesConsolidated(ctx, []int64{1}, 10)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("MarkProceduralCandidatesConsolidated() err = %v", err)
+				}
+				return
+			}
+			if tc.name == "MarkSkippedFail" {
+				err := mem.MarkProceduralCandidatesSkipped(ctx, []int64{1})
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("MarkProceduralCandidatesSkipped() err = %v", err)
+				}
+				return
+			}
+
+			id, err := mem.InsertProceduralCandidate(ctx, tc.cand)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("InsertProceduralCandidate() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				return
+			}
+
+			if tc.wantStatus == "consolidated" {
+				if err := mem.MarkProceduralCandidatesConsolidated(ctx, []int64{id}, tc.markPR); err != nil {
+					t.Fatalf("MarkProceduralCandidatesConsolidated() err = %v", err)
+				}
+				if mem.proceduralCandidates[id].Status != "consolidated" || mem.proceduralCandidates[id].PRNumber != tc.markPR {
+					t.Errorf("candidate state = %v", mem.proceduralCandidates[id])
+				}
+			} else if tc.wantStatus == "skipped" {
+				if err := mem.MarkProceduralCandidatesSkipped(ctx, []int64{id}); err != nil {
+					t.Fatalf("MarkProceduralCandidatesSkipped() err = %v", err)
+				}
+				if mem.proceduralCandidates[id].Status != "skipped" {
+					t.Errorf("candidate status = %q, want skipped", mem.proceduralCandidates[id].Status)
+				}
+			}
+
+			pending, err := mem.GetPendingProceduralCandidates(ctx)
+			if err != nil {
+				t.Fatalf("GetPendingProceduralCandidates() err = %v", err)
+			}
+			if tc.wantStatus != "" && len(pending) != 0 {
+				t.Errorf("len(pending) = %d, want 0 after mark", len(pending))
+			}
+		})
+	}
+}
+
+func TestProcessThreadFacts_ProceduralCandidates(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name                 string
+		llmResp              string
+		storeFailOp          string
+		storeFailErr         error
+		ollamaErr            error
+		preexistingCandidate *ProceduralCandidate
+		trajectoryCalls      []string
+		wantCandidateCount   int
+		wantPromptContains   string
+		wantErr              bool
+	}{
+		{
+			name: "SuccessAdmitCandidate",
+			llmResp: `{
+				"facts": [],
+				"procedural_candidates": [
+					{
+						"domain": "discord",
+						"loaded_skill": "ha-operations",
+						"trigger": "turning on bedroom light when dark",
+						"steps": ["check sensor", "call ha_write_tool"],
+						"avoid": ["avoid loop"]
+					}
+				]
+			}`,
+			wantCandidateCount: 1,
+		},
+		{
+			name: "RejectCandidateAdmissionEmptyTrigger",
+			llmResp: `{
+				"facts": [],
+				"procedural_candidates": [
+					{
+						"trigger": "   ",
+						"steps": ["step 1"]
+					}
+				]
+			}`,
+			wantCandidateCount: 0,
+		},
+		{
+			name: "RejectCandidateAdmissionEphemeralTelemetry",
+			llmResp: `{
+				"facts": [],
+				"procedural_candidates": [
+					{
+						"trigger": "deploying PR #999 to production",
+						"steps": ["step 1"]
+					}
+				]
+			}`,
+			wantCandidateCount: 0,
+		},
+		{
+			name: "SkipNearDuplicateSameLoadedSkill",
+			preexistingCandidate: &ProceduralCandidate{
+				LoadedSkill: "ha-operations",
+				Trigger:     "turning on bedroom light when dark",
+				Embedding:   testEmbedding(1.0),
+				Status:      "pending",
+			},
+			llmResp: `{
+				"facts": [],
+				"procedural_candidates": [
+					{
+						"loaded_skill": "ha-operations",
+						"trigger": "turning on bedroom light when dark",
+						"steps": ["step 1"]
+					}
+				]
+			}`,
+			wantCandidateCount: 1,
+		},
+		{
+			name: "DifferentLoadedSkillAdmitted",
+			preexistingCandidate: &ProceduralCandidate{
+				LoadedSkill: "other-skill",
+				Trigger:     "turning on bedroom light when dark",
+				Embedding:   testEmbedding(1.0),
+				Status:      "pending",
+			},
+			llmResp: `{
+				"facts": [],
+				"procedural_candidates": [
+					{
+						"loaded_skill": "ha-operations",
+						"trigger": "turning on bedroom light when dark",
+						"steps": ["step 1"]
+					}
+				]
+			}`,
+			wantCandidateCount: 2,
+		},
+		{
+			name: "CapAtThreeCandidates",
+			llmResp: `{
+				"facts": [],
+				"procedural_candidates": [
+					{"loaded_skill": "skill-1", "trigger": "procedural task step number 1", "steps": ["s1"]},
+					{"loaded_skill": "skill-2", "trigger": "procedural task step number 2", "steps": ["s2"]},
+					{"loaded_skill": "skill-3", "trigger": "procedural task step number 3", "steps": ["s3"]},
+					{"loaded_skill": "skill-4", "trigger": "procedural task step number 4", "steps": ["s4"]},
+					{"loaded_skill": "skill-5", "trigger": "procedural task step number 5", "steps": ["s5"]}
+				]
+			}`,
+			wantCandidateCount: 3,
+		},
+		{
+			name:      "EmbeddingFailureContinues",
+			ollamaErr: errors.New("ollama down"),
+			llmResp: `{
+				"facts": [],
+				"procedural_candidates": [
+					{"trigger": "valid procedural task step", "steps": ["s1"]}
+				]
+			}`,
+			wantCandidateCount: 0,
+		},
+		{
+			name:         "StoreGetPendingErrorContinues",
+			storeFailOp:  "GetPendingProceduralCandidates",
+			storeFailErr: errors.New("db read failure"),
+			llmResp: `{
+				"facts": [],
+				"procedural_candidates": [
+					{"trigger": "valid procedural task step", "steps": ["s1"]}
+				]
+			}`,
+			wantCandidateCount: 1,
+		},
+		{
+			name:         "StoreInsertErrorContinues",
+			storeFailOp:  "InsertProceduralCandidate",
+			storeFailErr: errors.New("db insert failure"),
+			llmResp: `{
+				"facts": [],
+				"procedural_candidates": [
+					{"trigger": "valid procedural task step", "steps": ["s1"]}
+				]
+			}`,
+			wantCandidateCount: 0,
+		},
+		{
+			name: "LoadedSkillsInPrompt",
+			trajectoryCalls: []string{
+				"read_file(...) [SKILL_LOADED: ha-operations]",
+			},
+			llmResp:            `{"facts": []}`,
+			wantPromptContains: "LOADED SKILLS IN TURN:\n- ha-operations",
+			wantCandidateCount: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := newTestMemStore()
+			mem.unextractedTurns["th-proc"] = []Message{
+				{ID: "m1", RowID: 1, Content: "user prompt", Status: "PENDING"},
+			}
+			if len(tc.trajectoryCalls) > 0 {
+				mem.threadToolCalls["th-proc"] = tc.trajectoryCalls
+			}
+			if tc.preexistingCandidate != nil {
+				_, _ = mem.InsertProceduralCandidate(ctx, *tc.preexistingCandidate)
+			}
+			if tc.storeFailOp != "" {
+				mem.SetFail(tc.storeFailOp, tc.storeFailErr)
+			}
+
+			client := &MockOllamaClient{
+				embedding: testEmbedding(1.0),
+				err:       tc.ollamaErr,
+			}
+
+			var capturedPrompt string
+			llm := func(_ context.Context, prompt string) (string, error) {
+				capturedPrompt = prompt
+				return tc.llmResp, nil
+			}
+
+			err := processThreadFacts(ctx, mem, client, llm, "th-proc")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("processThreadFacts() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantPromptContains != "" && !strings.Contains(capturedPrompt, tc.wantPromptContains) {
+				t.Errorf("prompt missing %q:\n%s", tc.wantPromptContains, capturedPrompt)
+			}
+			if len(mem.proceduralCandidates) != tc.wantCandidateCount {
+				t.Errorf("candidate count = %d, want %d", len(mem.proceduralCandidates), tc.wantCandidateCount)
 			}
 		})
 	}
