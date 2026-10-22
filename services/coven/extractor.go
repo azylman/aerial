@@ -28,10 +28,20 @@ type ExtractedFactItem struct {
 	FactText     string `json:"fact_text"`
 }
 
-// ExtractedFactsPayload encapsulates the array of extracted facts.
+// ExtractedProceduralItem represents an extracted procedural candidate workflow or guardrail.
+type ExtractedProceduralItem struct {
+	Domain      string   `json:"domain,omitempty"`
+	LoadedSkill string   `json:"loaded_skill,omitempty"`
+	Trigger     string   `json:"trigger"`
+	Steps       []string `json:"steps,omitempty"`
+	Avoid       []string `json:"avoid,omitempty"`
+}
+
+// ExtractedFactsPayload encapsulates the array of extracted facts and procedural candidates.
 type ExtractedFactsPayload struct {
-	Facts         []ExtractedFactItem `json:"facts"`
-	ReinforcedIDs []int64             `json:"reinforced_ids,omitempty"`
+	Facts                []ExtractedFactItem       `json:"facts"`
+	ReinforcedIDs        []int64                   `json:"reinforced_ids,omitempty"`
+	ProceduralCandidates []ExtractedProceduralItem `json:"procedural_candidates,omitempty"`
 }
 
 type brainLLMRequest struct {
@@ -94,16 +104,32 @@ Requirements:
       "fact_text": "A single concise sentence stating one atomic proposition clearly"
     }
   ],
-  "reinforced_ids": [42]
+  "reinforced_ids": [42],
+  "procedural_candidates": [
+    {
+      "domain": "discord",
+      "loaded_skill": "name-of-loaded-skill-or-empty",
+      "trigger": "A clear description of when this procedural skill should activate",
+      "steps": ["Step 1 description", "Step 2 description"],
+      "avoid": ["Pitfall or failure mode to avoid"]
+    }
+  ]
 }
 2. Atomicity: Extract only single-proposition atomic facts (one concise sentence and one topic/predicate per fact; never combine distinct topics such as family composition and dietary restrictions into a single compound fact).
 3. 30-Day Durability & Settled-State Test: Extract ONLY facts that will remain true and actionable 30+ days from now without requiring a follow-up event. Extract settled end-states (permanent hardware owned, standing preferences, architectural invariants, recurring schedules), NEVER transient in-flight states:
    - Never extract pending deliveries, shipping/order statuses, or items "awaiting delivery" / "on the way".
    - Never extract temporary troubleshooting, active debugging sessions, or tasks "currently in progress" / "about to run".
    - Never extract ephemeral PR numbers, commit SHAs, branch names, coverage/LoC metrics, CI/CD deploy statuses, or Vanadis chunk IDs.
-4. If retrieved memory facts with [id:N] directly informed the assistant's response or tool calls in this turn, include their integer IDs in "reinforced_ids". If none were used, set "reinforced_ids": [].
-5. If no durable facts are present in the conversation, return {"facts": []}.
-6. Do NOT include markdown text formatting outside the JSON block.
+4. Procedural Skills & Friction Guardrails:
+   Extract reusable procedural workflows ("steps") and tool/retry failure guardrails ("avoid") into "procedural_candidates" when:
+   - Tool friction occurs (retries, failed commands, permission errors, bad parameters, recovery workarounds).
+   - User gives procedural corrections or instructions on how to do a task correctly.
+   - An unloaded-skill routing miss occurs (assistant performed a workflow without loading the appropriate skill, or no existing skill was loaded).
+   If a skill was loaded for this turn, set "loaded_skill" to that skill name; otherwise set it to "".
+   If no procedural friction or reusable workflows are present, set "procedural_candidates": [].
+5. If retrieved memory facts with [id:N] directly informed the assistant's response or tool calls in this turn, include their integer IDs in "reinforced_ids". If none were used, set "reinforced_ids": [].
+6. If no durable facts are present in the conversation, return {"facts": []}.
+7. Do NOT include markdown text formatting outside the JSON block.
 `
 
 // ExtractActiveConversationFacts queries conversations modified in the last activeHours,
@@ -170,6 +196,40 @@ func EvaluateCandidateAdmission(item ExtractedFactItem) (admit bool, reason stri
 	isDurable := durableDirectiveRegex.MatchString(trimmedText)
 	if ephemeralTelemetryRegex.MatchString(trimmedText) && !isDurable {
 		return false, "ephemeral_telemetry"
+	}
+
+	return true, "admitted"
+}
+
+// EvaluateProceduralCandidateAdmission determines whether an extracted procedural candidate should be admitted.
+func EvaluateProceduralCandidateAdmission(item ExtractedProceduralItem) (admit bool, reason string) {
+	trimmedTrigger := strings.TrimSpace(item.Trigger)
+	if trimmedTrigger == "" {
+		return false, "empty_trigger"
+	}
+	if len(trimmedTrigger) < 5 {
+		return false, "trigger_too_short"
+	}
+	if ephemeralTelemetryRegex.MatchString(trimmedTrigger) && !durableDirectiveRegex.MatchString(trimmedTrigger) {
+		return false, "ephemeral_telemetry"
+	}
+
+	validSteps := false
+	for _, s := range item.Steps {
+		if strings.TrimSpace(s) != "" {
+			validSteps = true
+			break
+		}
+	}
+	validAvoid := false
+	for _, a := range item.Avoid {
+		if strings.TrimSpace(a) != "" {
+			validAvoid = true
+			break
+		}
+	}
+	if !validSteps && !validAvoid {
+		return false, "missing_steps_and_avoid"
 	}
 
 	return true, "admitted"
@@ -258,6 +318,7 @@ func processThreadFacts(ctx context.Context, store Store, client OllamaClient, l
 		retrievedFacts = nil
 		toolCalls = nil
 	}
+	loadedSkills := ExtractLoadedSkillsFromCalls(toolCalls)
 
 	var b strings.Builder
 	b.WriteString(FactExtractionPrompt)
@@ -278,6 +339,14 @@ func processThreadFacts(ctx context.Context, store Store, client OllamaClient, l
 		b.WriteString("\nRETRIEVED MEMORY IN TURN:\n")
 		for _, rf := range retrievedFacts {
 			b.WriteString(rf)
+			b.WriteString("\n")
+		}
+	}
+	if len(loadedSkills) > 0 {
+		b.WriteString("\nLOADED SKILLS IN TURN:\n")
+		for _, ls := range loadedSkills {
+			b.WriteString("- ")
+			b.WriteString(ls)
 			b.WriteString("\n")
 		}
 	}
@@ -319,6 +388,86 @@ func processThreadFacts(ctx context.Context, store Store, client OllamaClient, l
 
 	for _, item := range candidates {
 		reconcileCandidateFact(ctx, store, client, llmFunc, item)
+	}
+
+	procCandidates := factsPayload.ProceduralCandidates
+	if len(procCandidates) > 3 {
+		procCandidates = procCandidates[:3]
+	}
+
+	if len(procCandidates) > 0 {
+		pendingExisting, err := store.GetPendingProceduralCandidates(ctx)
+		if err != nil {
+			log.Printf("[Memory] Warning: failed to get pending procedural candidates: %v", err)
+			pendingExisting = nil
+		}
+
+		for _, item := range procCandidates {
+			admit, reason := EvaluateProceduralCandidateAdmission(item)
+			if !admit {
+				log.Printf("[Memory] Procedural candidate rejected (%s): trigger=%q", reason, item.Trigger)
+				continue
+			}
+
+			emb, err := client.GenerateEmbedding(ctx, item.Trigger, false, 1)
+			if err != nil {
+				log.Printf("[Memory] Warning: failed to generate embedding for procedural candidate trigger %q: %v", item.Trigger, err)
+				continue
+			}
+			if len(emb) != ExpectedEmbeddingDim {
+				log.Printf("[Memory] Warning: procedural candidate embedding dimension %d != %d", len(emb), ExpectedEmbeddingDim)
+				continue
+			}
+
+			isDuplicate := false
+			trimmedLoadedSkill := strings.TrimSpace(item.LoadedSkill)
+			for _, existing := range pendingExisting {
+				if strings.EqualFold(strings.TrimSpace(existing.LoadedSkill), trimmedLoadedSkill) {
+					if len(existing.Embedding) == ExpectedEmbeddingDim {
+						if CosineSimilarity(emb, existing.Embedding) >= 0.90 {
+							isDuplicate = true
+							break
+						}
+					}
+				}
+			}
+			if isDuplicate {
+				log.Printf("[Memory] Skipping near-duplicate procedural candidate: trigger=%q skill=%q", item.Trigger, item.LoadedSkill)
+				continue
+			}
+
+			domain := strings.TrimSpace(item.Domain)
+			if domain == "" {
+				domain = "discord"
+			}
+			steps := item.Steps
+			if steps == nil {
+				steps = []string{}
+			}
+			avoid := item.Avoid
+			if avoid == nil {
+				avoid = []string{}
+			}
+
+			cand := ProceduralCandidate{
+				ThreadID:    threadID,
+				Domain:      domain,
+				LoadedSkill: trimmedLoadedSkill,
+				Trigger:     strings.TrimSpace(item.Trigger),
+				Steps:       steps,
+				Avoid:       avoid,
+				Embedding:   emb,
+				Status:      "pending",
+			}
+
+			newID, err := store.InsertProceduralCandidate(ctx, cand)
+			if err != nil {
+				log.Printf("[Memory] Warning: failed to insert procedural candidate %q: %v", cand.Trigger, err)
+				continue
+			}
+			cand.ID = newID
+			pendingExisting = append(pendingExisting, cand)
+		}
 	}
 
 	if err := store.UpdateConversationFactWatermark(ctx, threadID, maxRowID); err != nil {

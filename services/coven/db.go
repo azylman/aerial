@@ -56,6 +56,38 @@ type ScoredFactWithEmbedding struct {
 	Score     float64
 }
 
+// ProceduralCandidate represents a staged procedural skill pattern extracted from trajectory friction.
+type ProceduralCandidate struct {
+	ID          int64     `json:"id"`
+	ThreadID    string    `json:"thread_id"`
+	Domain      string    `json:"domain"`
+	LoadedSkill string    `json:"loaded_skill"`
+	Trigger     string    `json:"trigger"`
+	Steps       []string  `json:"steps"`
+	Avoid       []string  `json:"avoid"`
+	Embedding   []float32 `json:"-"`
+	Status      string    `json:"status"`
+	PRNumber    int       `json:"pr_number,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// BlockedCoreSkills defines immutable core aerial and superpower skill names blocked from dynamic mutation.
+var BlockedCoreSkills = map[string]struct{}{
+	"self-improvement":               {},
+	"incident-triage":                {},
+	"transcript-search":              {},
+	"brainstorming":                  {},
+	"writing-plans":                  {},
+	"test-driven-development":        {},
+	"systematic-debugging":           {},
+	"verification-before-completion": {},
+	"receiving-code-review":          {},
+	"dispatching-parallel-agents":    {},
+	"writing-skills":                 {},
+	"agy-customizations":             {},
+	"antigravity-guide":              {},
+}
+
 // FactsFilter defines filtering options for paginated fact queries.
 type FactsFilter struct {
 	Query  string `json:"query"`
@@ -163,7 +195,7 @@ type DBTX interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-// Store defines persistent storage operations for facts.
+// Store defines persistent storage operations for facts and procedural candidates.
 type Store interface {
 	InsertFact(ctx context.Context, factText string, embedding []float32) (int64, error)
 	UpdateFact(ctx context.Context, id int64, factText string, embedding []float32) error
@@ -180,6 +212,10 @@ type Store interface {
 	GetThreadContextBeforeWatermark(ctx context.Context, threadID string, priorTurnLimit int) (string, []Message, error)
 	GetThreadTrajectoryContext(ctx context.Context, threadID string) (retrievedFacts []string, toolCalls []string, err error)
 	FindNearestScoredFacts(ctx context.Context, embedding []float32, limit int, minSim float64) ([]ScoredFact, error)
+	InsertProceduralCandidate(ctx context.Context, cand ProceduralCandidate) (int64, error)
+	GetPendingProceduralCandidates(ctx context.Context) ([]ProceduralCandidate, error)
+	MarkProceduralCandidatesConsolidated(ctx context.Context, ids []int64, prNumber int) error
+	MarkProceduralCandidatesSkipped(ctx context.Context, ids []int64) error
 	Close() error
 }
 
@@ -724,7 +760,52 @@ func (s *SQLStore) GetThreadContextBeforeWatermark(ctx context.Context, threadID
 var (
 	reRetrievedMemoryBlock = regexp.MustCompile(`(?is)<\s*\\?retrieved_memory\s*>(.*?)<\s*[\\/]+retrieved_memory\s*>`)
 	reFactLine             = regexp.MustCompile(`(?m)^\s*(-\s*\[id:\d+\].*)$`)
+	reSkillPath            = regexp.MustCompile(`/skills/(?:(?:common|discord|voice|ephemeral)/)?([a-z0-9-]+)/SKILL\.md`)
+	reSkillYAML            = regexp.MustCompile(`(?m)(?:1:\s*)?---\s*(?:\n|\s+)(?:2:\s*)?name:\s*([a-z0-9-]+)`)
+	reSkillLoaded          = regexp.MustCompile(`\[SKILL_LOADED:\s*([a-z0-9-]+)\]`)
 )
+
+// ExtractLoadedSkillName extracts a skill name from trajectory step content or tool parameters.
+func ExtractLoadedSkillName(stepType, toolName, content string) string {
+	cleanType := strings.ToUpper(strings.TrimSpace(stepType))
+	cleanTool := strings.ToLower(strings.TrimSpace(toolName))
+
+	normalized := strings.ReplaceAll(content, "\\", "/")
+	if cleanType == "PLANNER_RESPONSE" || cleanTool == "read_file" || strings.Contains(normalized, "/skills/") {
+		if m := reSkillPath.FindStringSubmatch(normalized); len(m) > 1 {
+			return strings.TrimSpace(m[1])
+		}
+	}
+	if cleanType == "GENERIC" || cleanType == "TOOL" || cleanType == "RUN_COMMAND" || strings.Contains(content, "---") {
+		if m := reSkillYAML.FindStringSubmatch(content); len(m) > 1 {
+			return strings.TrimSpace(m[1])
+		}
+		if m := reSkillPath.FindStringSubmatch(normalized); len(m) > 1 {
+			return strings.TrimSpace(m[1])
+		}
+	}
+	return ""
+}
+
+// ExtractLoadedSkillsFromCalls extracts deduplicated loaded skill names from tool calls.
+func ExtractLoadedSkillsFromCalls(toolCalls []string) []string {
+	var skills []string
+	seen := make(map[string]struct{})
+	for _, call := range toolCalls {
+		for _, m := range reSkillLoaded.FindAllStringSubmatch(call, -1) {
+			if len(m) > 1 {
+				name := strings.TrimSpace(m[1])
+				if name != "" {
+					if _, exists := seen[name]; !exists {
+						seen[name] = struct{}{}
+						skills = append(skills, name)
+					}
+				}
+			}
+		}
+	}
+	return skills
+}
 
 func truncateSingleLine(s string, maxLen int) string {
 	s = strings.Join(strings.Fields(s), " ")
@@ -758,8 +839,23 @@ func extractTrajectorySignals(stepType, toolName, content string) ([]string, str
 	case "PLANNER_RESPONSE":
 		trimmedTool := strings.TrimSpace(toolName)
 		if trimmedTool != "" {
-			return nil, fmt.Sprintf("%s(%s)", trimmedTool, truncateSingleLine(content, 200))
+			skillName := ExtractLoadedSkillName(stepType, toolName, content)
+			callStr := fmt.Sprintf("%s(%s)", trimmedTool, truncateSingleLine(content, 200))
+			if skillName != "" {
+				return nil, fmt.Sprintf("%s [SKILL_LOADED: %s]", callStr, skillName)
+			}
+			return nil, callStr
 		}
+	case "GENERIC", "TOOL", "RUN_COMMAND":
+		skillName := ExtractLoadedSkillName(stepType, toolName, content)
+		if skillName != "" {
+			return nil, fmt.Sprintf("[SKILL_LOADED: %s]", skillName)
+		}
+		trimmedTool := strings.TrimSpace(toolName)
+		if trimmedTool == "" {
+			trimmedTool = strings.ToLower(stepType)
+		}
+		return nil, fmt.Sprintf("-> OUTPUT(%s): %s", trimmedTool, truncateSingleLine(content, 200))
 	}
 	return nil, ""
 }
@@ -780,7 +876,7 @@ func (s *SQLStore) GetThreadTrajectoryContext(ctx context.Context, threadID stri
 	JOIN sessions s ON s.thread_id = $1
 	WHERE (ts.session_id = s.internal_session_id OR ts.session_id = s.previous_session_id)
 	  AND (s.fact_extracted_at IS NULL OR ts.created_at >= s.fact_extracted_at)
-	  AND (ts.step_type = 'USER_INPUT' OR (ts.step_type = 'PLANNER_RESPONSE' AND ts.tool_name != ''))
+	  AND (ts.step_type IN ('USER_INPUT', 'GENERIC', 'TOOL', 'RUN_COMMAND') OR (ts.step_type = 'PLANNER_RESPONSE' AND ts.tool_name != ''))
 	ORDER BY ts.created_at ASC, ts.step_index ASC
 	LIMIT 50`
 
@@ -926,6 +1022,192 @@ func (s *SQLStore) GetAllFactsWithEmbeddings(ctx context.Context) ([]ScoredFactW
 		return nil, fmt.Errorf("failed to read facts with embeddings rows: %w", err)
 	}
 	return results, nil
+}
+
+// InsertProceduralCandidate persists a staged procedural candidate into the procedural_candidates table.
+func (s *SQLStore) InsertProceduralCandidate(ctx context.Context, cand ProceduralCandidate) (int64, error) {
+	if err := s.checkDB(); err != nil {
+		return 0, err
+	}
+	trigger := strings.TrimSpace(cand.Trigger)
+	if trigger == "" {
+		return 0, fmt.Errorf("trigger pattern cannot be empty")
+	}
+	stepsBytes, err := json.Marshal(cand.Steps)
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal steps: %w", err)
+	}
+	if cand.Steps == nil {
+		stepsBytes = []byte("[]")
+	}
+	avoidBytes, err := json.Marshal(cand.Avoid)
+	if err != nil {
+		return 0, fmt.Errorf("failed to marshal avoid: %w", err)
+	}
+	if cand.Avoid == nil {
+		avoidBytes = []byte("[]")
+	}
+	domain := strings.TrimSpace(cand.Domain)
+	if domain == "" {
+		domain = "discord"
+	}
+	status := strings.TrimSpace(cand.Status)
+	if status == "" {
+		status = "pending"
+	}
+
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	var prNum any
+	if cand.PRNumber > 0 {
+		prNum = cand.PRNumber
+	}
+
+	query := `INSERT INTO procedural_candidates (thread_id, domain, loaded_skill, trigger_pattern, steps_json, avoid_json, embedding, status, pr_number)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+	RETURNING id`
+
+	var id int64
+	if err := s.db.QueryRowContext(queryCtx, query,
+		cand.ThreadID,
+		domain,
+		cand.LoadedSkill,
+		trigger,
+		string(stepsBytes),
+		string(avoidBytes),
+		pgvector.NewVector(cand.Embedding),
+		status,
+		prNum,
+	).Scan(&id); err != nil {
+		return 0, fmt.Errorf("failed to insert procedural candidate: %w", err)
+	}
+	return id, nil
+}
+
+// GetPendingProceduralCandidates returns up to 100 pending candidates ordered by created_at ASC, id ASC.
+func (s *SQLStore) GetPendingProceduralCandidates(ctx context.Context) ([]ProceduralCandidate, error) {
+	if err := s.checkDB(); err != nil {
+		return nil, err
+	}
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `SELECT id, thread_id, domain, loaded_skill, trigger_pattern, steps_json, avoid_json, embedding, status, COALESCE(pr_number, 0), created_at
+	FROM procedural_candidates
+	WHERE status = 'pending'
+	ORDER BY created_at ASC, id ASC
+	LIMIT 100`
+
+	rows, err := s.db.QueryContext(queryCtx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query pending procedural candidates: %w", err)
+	}
+	defer rows.Close()
+
+	var candidates []ProceduralCandidate
+	for rows.Next() {
+		var (
+			cand      ProceduralCandidate
+			stepsRaw  []byte
+			avoidRaw  []byte
+			vec       pgvector.Vector
+			createdAt FactTime
+		)
+		if err := rows.Scan(
+			&cand.ID,
+			&cand.ThreadID,
+			&cand.Domain,
+			&cand.LoadedSkill,
+			&cand.Trigger,
+			&stepsRaw,
+			&avoidRaw,
+			&vec,
+			&cand.Status,
+			&cand.PRNumber,
+			&createdAt,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan procedural candidate: %w", err)
+		}
+		cand.CreatedAt = createdAt.Time
+		cand.Embedding = vec.Slice()
+		if len(stepsRaw) > 0 {
+			if err := json.Unmarshal(stepsRaw, &cand.Steps); err != nil {
+				cand.Steps = []string{}
+			}
+		} else {
+			cand.Steps = []string{}
+		}
+		if len(avoidRaw) > 0 {
+			if err := json.Unmarshal(avoidRaw, &cand.Avoid); err != nil {
+				cand.Avoid = []string{}
+			}
+		} else {
+			cand.Avoid = []string{}
+		}
+		candidates = append(candidates, cand)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read procedural candidate rows: %w", err)
+	}
+	return candidates, nil
+}
+
+// MarkProceduralCandidatesConsolidated transitions candidate status to 'consolidated' and records the created PR number.
+func (s *SQLStore) MarkProceduralCandidatesConsolidated(ctx context.Context, ids []int64, prNumber int) error {
+	if err := s.checkDB(); err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	placeholders := make([]string, len(ids))
+	args := make([]any, 0, len(ids)+1)
+	args = append(args, prNumber)
+	for i, id := range ids {
+		placeholders[i] = fmt.Sprintf("$%d", i+2)
+		args = append(args, id)
+	}
+
+	query := fmt.Sprintf(`UPDATE procedural_candidates
+	SET status = 'consolidated', pr_number = $1, updated_at = CURRENT_TIMESTAMP
+	WHERE id IN (%s)`, strings.Join(placeholders, ", "))
+
+	if _, err := s.db.ExecContext(queryCtx, query, args...); err != nil {
+		return fmt.Errorf("failed to mark procedural candidates consolidated: %w", err)
+	}
+	return nil
+}
+
+// MarkProceduralCandidatesSkipped transitions candidate status to 'skipped'.
+func (s *SQLStore) MarkProceduralCandidatesSkipped(ctx context.Context, ids []int64) error {
+	if err := s.checkDB(); err != nil {
+		return err
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	placeholders := make([]string, len(ids))
+	args := make([]any, 0, len(ids))
+	for i, id := range ids {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		args = append(args, id)
+	}
+
+	query := fmt.Sprintf(`UPDATE procedural_candidates
+	SET status = 'skipped', updated_at = CURRENT_TIMESTAMP
+	WHERE id IN (%s)`, strings.Join(placeholders, ", "))
+
+	if _, err := s.db.ExecContext(queryCtx, query, args...); err != nil {
+		return fmt.Errorf("failed to mark procedural candidates skipped: %w", err)
+	}
+	return nil
 }
 
 // InitDB initializes database connection based on config.
