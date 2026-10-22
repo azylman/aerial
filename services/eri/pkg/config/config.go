@@ -659,19 +659,6 @@ func (c *Config) VoiceAmbientContext() *AmbientContextConfig {
 	return cur.VoiceAmbientContext()
 }
 
-// Clone returns a deep copy of ConfigData.
-func (c *ConfigData) Clone() *ConfigData {
-	return cloneConfigData(c)
-}
-
-// Clone returns a new Config with a deep copy of the current configuration.
-func (c *Config) Clone() *Config {
-	if c == nil {
-		return nil
-	}
-	return NewFromData(c.Current())
-}
-
 // GeminiHomeDir returns the configured base directory for .gemini files.
 func (c *Config) GeminiHomeDir() string {
 	return c.Current().GeminiHomeDir

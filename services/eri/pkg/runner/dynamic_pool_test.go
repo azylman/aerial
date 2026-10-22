@@ -21,6 +21,16 @@ func (p *DynamicVoicePool) Fingerprint() string {
 	return p.currentKey
 }
 
+// CurrentPool returns the active AgentPool under RLock for test assertions.
+func (p *DynamicVoicePool) CurrentPool() AgentPool {
+	if p == nil {
+		return nil
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.currentPool
+}
+
 type mockVoiceSession struct {
 	sessID, targetKey string
 	sendFn            func(string, *TurnContext) error

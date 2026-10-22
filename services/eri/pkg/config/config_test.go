@@ -1001,14 +1001,6 @@ func TestConfig_AccessorsAndConcurrency(t *testing.T) {
 	if testCfg.Current().Model != "updated-model" {
 		t.Errorf("Update failed: got %q", testCfg.Current().Model)
 	}
-	clonedCfg := testCfg.Clone()
-	if clonedCfg == nil || clonedCfg.Current().Model != "updated-model" {
-		t.Errorf("Clone failed on Config")
-	}
-	clonedData := testCfg.Current().Clone()
-	if clonedData == nil || clonedData.Model != "updated-model" {
-		t.Errorf("Clone failed on ConfigData")
-	}
 
 	origCD := &ConfigData{
 		AdminUsers: []string{"u1"},
@@ -1547,17 +1539,13 @@ func TestAmbientContextConfig(t *testing.T) {
 		t.Fatal("ResolveChannelPolicy ambient inheritance failed")
 	}
 
-	if (*Config)(nil).Clone() != nil || (*Config)(nil).VoiceAmbientContext() != nil || (*ConfigData)(nil).VoiceAmbientContext() != nil || (&ConfigData{}).VoiceAmbientContext() != nil {
+	if (*Config)(nil).VoiceAmbientContext() != nil || (*ConfigData)(nil).VoiceAmbientContext() != nil || (&ConfigData{}).VoiceAmbientContext() != nil {
 		t.Fatal("nil accessors failed")
 	}
 
 	cfgData := &ConfigData{Model: "gemini-test", DataDir: "/data/test", GeminiHomeDir: "/home/gemini", Voice: VoiceConfig{Engine: "agy", AmbientContext: src}}
-	clonedData := cfgData.Clone()
-	if clonedData == nil || clonedData.Model != "gemini-test" {
-		t.Fatal("ConfigData.Clone failed")
-	}
 	cfg := NewFromData(cfgData)
-	if cfg.DataDir() != "/data/test" || cfg.GeminiHomeDir() != "/home/gemini" || cfg.Get().Model != "gemini-test" || cfg.Clone() == nil {
+	if cfg.DataDir() != "/data/test" || cfg.GeminiHomeDir() != "/home/gemini" || cfg.Get().Model != "gemini-test" {
 		t.Fatal("accessors mismatch")
 	}
 	vac := cfg.VoiceAmbientContext()

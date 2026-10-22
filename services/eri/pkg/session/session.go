@@ -83,22 +83,6 @@ func (m *Manager) Roots() []string {
 	return append([]string(nil), m.roots...)
 }
 
-// HomeDir returns the explicitly configured home directory for this Manager.
-func (m *Manager) HomeDir() string {
-	if m == nil {
-		return ""
-	}
-	return m.homeDir
-}
-
-// DataDir returns the explicitly configured data directory for this Manager.
-func (m *Manager) DataDir() string {
-	if m == nil {
-		return ""
-	}
-	return m.dataDir
-}
-
 func cleanSessionID(sessionID string) (string, bool) {
 	cleanID := strings.TrimSpace(sessionID)
 	if cleanID == "" || strings.ContainsAny(cleanID, `/\:`) || strings.Contains(cleanID, "..") {
