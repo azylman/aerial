@@ -180,7 +180,6 @@ type Store interface {
 	GetThreadContextBeforeWatermark(ctx context.Context, threadID string, priorTurnLimit int) (string, []Message, error)
 	GetThreadTrajectoryContext(ctx context.Context, threadID string) (retrievedFacts []string, toolCalls []string, err error)
 	FindNearestScoredFacts(ctx context.Context, embedding []float32, limit int, minSim float64) ([]ScoredFact, error)
-	FindNearestFacts(ctx context.Context, embedding []float32, limit int, minSim float64) ([]Fact, error)
 	Close() error
 }
 
@@ -880,19 +879,6 @@ func (s *SQLStore) FindNearestScoredFacts(ctx context.Context, embedding []float
 		return nil, fmt.Errorf("failed to read nearest scored facts rows: %w", err)
 	}
 	return results, nil
-}
-
-// FindNearestFacts returns top-K facts with cosine similarity >= minSim.
-func (s *SQLStore) FindNearestFacts(ctx context.Context, embedding []float32, limit int, minSim float64) ([]Fact, error) {
-	scored, err := s.FindNearestScoredFacts(ctx, embedding, limit, minSim)
-	if err != nil {
-		return nil, err
-	}
-	facts := make([]Fact, len(scored))
-	for i, sf := range scored {
-		facts[i] = sf.Fact
-	}
-	return facts, nil
 }
 
 // GetAllFactsWithEmbeddings retrieves all facts that possess a vector embedding for clustering and consolidation.

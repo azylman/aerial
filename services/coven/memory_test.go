@@ -400,25 +400,6 @@ func (m *TestMemStore) FindNearestScoredFacts(ctx context.Context, embedding []f
 	return res, nil
 }
 
-func (m *TestMemStore) FindNearestFacts(ctx context.Context, embedding []float32, limit int, minSim float64) ([]Fact, error) {
-	m.mu.Lock()
-	if m.failOp == "FindNearestFacts" {
-		err := m.failErr
-		m.mu.Unlock()
-		return nil, err
-	}
-	m.mu.Unlock()
-	scored, err := m.FindNearestScoredFacts(ctx, embedding, limit, minSim)
-	if err != nil {
-		return nil, err
-	}
-	facts := make([]Fact, len(scored))
-	for i, sf := range scored {
-		facts[i] = sf.Fact
-	}
-	return facts, nil
-}
-
 func (m *TestMemStore) Close() error {
 	return nil
 }
@@ -2922,86 +2903,6 @@ func TestSQLStore_UpdateConversationFactWatermark(t *testing.T) {
 				if !strings.Contains(captured, pat) {
 					t.Errorf("captured query missing %q: %s", pat, captured)
 				}
-			}
-		})
-	}
-}
-
-func TestSQLStore_FindNearestFacts(t *testing.T) {
-	dbMem := setupTestDBMem(t)
-	ctx := context.Background()
-	emb := make([]float32, ExpectedEmbeddingDim)
-
-	tests := []struct {
-		name         string
-		nilDB        bool
-		emb          []float32
-		limit        int
-		minSim       float64
-		queryErr     error
-		rowSQL       string
-		wantErr      bool
-		wantPatterns []string
-		wantCount    int
-	}{
-		{
-			name:    "NilDBError",
-			nilDB:   true,
-			emb:     emb,
-			wantErr: true,
-		},
-		{
-			name:      "InvalidEmbeddingDim",
-			emb:       []float32{1.0, 2.0},
-			wantErr:   false,
-			wantCount: 0,
-		},
-		{
-			name:     "QueryError",
-			emb:      emb,
-			queryErr: errors.New("nearest query error"),
-			wantErr:  true,
-		},
-		{
-			name:    "RowScanError",
-			emb:     emb,
-			rowSQL:  "SELECT 'invalid' AS id",
-			wantErr: true,
-		},
-		{
-			name:         "SuccessDefaults",
-			emb:          emb,
-			limit:        -1,
-			minSim:       -1,
-			wantPatterns: []string{"WITH candidates AS", "ORDER BY embedding <=> $1", "similarity >="},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var captured string
-			var store *SQLStore
-			if tc.nilDB {
-				store = &SQLStore{}
-			} else {
-				store = NewSQLStore(queryMockDBTX{
-					dbMem:         dbMem,
-					queryErr:      tc.queryErr,
-					rowSQL:        tc.rowSQL,
-					capturedQuery: &captured,
-				})
-			}
-			facts, err := store.FindNearestFacts(ctx, tc.emb, tc.limit, tc.minSim)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("FindNearestFacts() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			for _, pat := range tc.wantPatterns {
-				if !strings.Contains(captured, pat) {
-					t.Errorf("captured query missing %q: %s", pat, captured)
-				}
-			}
-			if tc.wantCount > 0 && len(facts) != tc.wantCount {
-				t.Errorf("len(facts) = %d, want %d", len(facts), tc.wantCount)
 			}
 		})
 	}

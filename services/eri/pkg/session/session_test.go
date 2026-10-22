@@ -94,12 +94,12 @@ func writeConversationFile(t *testing.T, dir, sessionID, ext string, size int) s
 func TestManager_InitAndActivity(t *testing.T) {
 	tmp := t.TempDir()
 	m := New(filepath.Join(tmp, "home"), filepath.Join(tmp, "data"))
-	if m == nil || m.HomeDir() == "" || m.DataDir() == "" || len(m.Roots()) == 0 {
+	if m == nil || m.homeDir == "" || m.dataDir == "" || len(m.Roots()) == 0 {
 		t.Fatalf("unexpected Manager initialization: %+v", m)
 	}
 	var nilMgr *Manager
-	if nilMgr.HomeDir() != "" || nilMgr.DataDir() != "" || len(nilMgr.Roots()) != 0 {
-		t.Fatalf("nil Manager should return empty strings and nil roots")
+	if len(nilMgr.Roots()) != 0 {
+		t.Fatalf("nil Manager should return nil roots")
 	}
 
 	tests := []struct {

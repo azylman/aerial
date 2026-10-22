@@ -1883,15 +1883,14 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 		cfg           *config.Config
 		wantGeminiAPI bool
 		wantModel     string
-		wantAPIKey    string
 	}{
-		{"GeminiAPI_WithHarnessAPIKey", mkCfg("gemini_api", "gemini-2.5-flash", "test-harness-key", "", ""), true, "gemini-2.5-flash", "test-harness-key"},
-		{"GeminiAPI_WithAmbientContext", mkCfg("gemini_api", "", "", "test-ambient-key", "Status: {{.ha.state}}"), true, "fallback-model", "test-ambient-key"},
-		{"GeminiAPI_WithAmbientContext_InvalidTemplate", mkCfg("gemini_api", "", "", "test-ambient-key", "{{.invalid"), true, "fallback-model", "test-ambient-key"},
-		{"GeminiAPI_WithAPIKeyFallback", mkCfg("gemini_api", "", "", "test-standard-key", ""), true, "fallback-model", "test-standard-key"},
-		{"GeminiAPI_EmptyKeyFallbackToAgy", mkCfg("gemini_api", "", "", "", ""), false, "fallback-model", ""},
-		{"AgyEngine", mkCfg("agy", "", "some-key", "", ""), false, "fallback-model", ""},
-		{"NilConfig", nil, false, "fallback-model", ""},
+		{"GeminiAPI_WithHarnessAPIKey", mkCfg("gemini_api", "gemini-2.5-flash", "test-harness-key", "", ""), true, "gemini-2.5-flash"},
+		{"GeminiAPI_WithAmbientContext", mkCfg("gemini_api", "", "", "test-ambient-key", "Status: {{.ha.state}}"), true, "fallback-model"},
+		{"GeminiAPI_WithAmbientContext_InvalidTemplate", mkCfg("gemini_api", "", "", "test-ambient-key", "{{.invalid"), true, "fallback-model"},
+		{"GeminiAPI_WithAPIKeyFallback", mkCfg("gemini_api", "", "", "test-standard-key", ""), true, "fallback-model"},
+		{"GeminiAPI_EmptyKeyFallbackToAgy", mkCfg("gemini_api", "", "", "", ""), false, "fallback-model"},
+		{"AgyEngine", mkCfg("agy", "", "some-key", "", ""), false, "fallback-model"},
+		{"NilConfig", nil, false, "fallback-model"},
 	}
 
 	for _, tc := range tests {
@@ -1907,22 +1906,13 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 			if dynPool.Model() != tc.wantModel {
 				t.Errorf("expected model %q, got %q", tc.wantModel, dynPool.Model())
 			}
-			if tc.wantGeminiAPI {
-				geminiPool, ok := dynPool.CurrentPool().(*runner.GeminiAPIPool)
-				if !ok {
-					t.Fatalf("expected *runner.GeminiAPIPool, got %T", dynPool.CurrentPool())
-				}
-				if tc.wantAPIKey != "" && geminiPool.APIKey() != tc.wantAPIKey {
-					t.Errorf("expected APIKey %q, got %q", tc.wantAPIKey, geminiPool.APIKey())
-				}
-			} else {
-				unifiedPool, ok := dynPool.CurrentPool().(*runner.UnifiedProcessPool)
-				if !ok {
-					t.Fatalf("expected *runner.UnifiedProcessPool, got %T", dynPool.CurrentPool())
-				}
-				if unifiedPool.Model() != tc.wantModel {
-					t.Errorf("expected model %q, got %q", tc.wantModel, unifiedPool.Model())
-				}
+			sess, sErr := dynPool.GetOrCreateSession(context.Background(), "k", "")
+			if sErr != nil {
+				t.Fatalf("GetOrCreateSession failed: %v", sErr)
+			}
+			_, isGemini := sess.(*runner.GeminiAPISession)
+			if isGemini != tc.wantGeminiAPI {
+				t.Fatalf("expected GeminiAPISession=%v, got %T", tc.wantGeminiAPI, sess)
 			}
 		})
 	}
@@ -1945,26 +1935,32 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 		if !ok {
 			t.Fatalf("expected *runner.DynamicVoicePool, got %T", pool)
 		}
-		if _, ok := dynPool.CurrentPool().(*runner.UnifiedProcessPool); !ok {
-			t.Fatalf("expected initial pool to be UnifiedProcessPool, got %T", dynPool.CurrentPool())
+		if sess, err := dynPool.GetOrCreateSession(context.Background(), "k", ""); err != nil {
+			t.Fatalf("GetOrCreateSession failed: %v", err)
+		} else if _, isGemini := sess.(*runner.GeminiAPISession); isGemini {
+			t.Fatalf("expected initial pool to be UnifiedProcessPool, got %T", sess)
 		}
 
 		// Update config to gemini_api
-		fresh := cfg.Current().Clone()
-		fresh.Voice.Engine = "gemini_api"
-		fresh.Voice.Model = "gemini-2.5-pro"
-		cfg.Update(fresh)
+		cfg.Update(&config.ConfigData{
+			HarnessAPIKey: "harness-key",
+			Voice: config.VoiceConfig{
+				Engine: "gemini_api",
+				Model:  "gemini-2.5-pro",
+			},
+		})
 
 		// Trigger MarkDirty on pool
 		dynPool.MarkDirty()
 
 		// Verify pool swapped to GeminiAPIPool with updated model
-		geminiPool, ok := dynPool.CurrentPool().(*runner.GeminiAPIPool)
-		if !ok {
-			t.Fatalf("expected swapped pool to be GeminiAPIPool, got %T", dynPool.CurrentPool())
+		if sess, err := dynPool.GetOrCreateSession(context.Background(), "k", ""); err != nil {
+			t.Fatalf("GetOrCreateSession failed: %v", err)
+		} else if _, isGemini := sess.(*runner.GeminiAPISession); !isGemini {
+			t.Fatalf("expected swapped pool to be GeminiAPIPool, got %T", sess)
 		}
-		if geminiPool.Model() != "gemini-2.5-pro" {
-			t.Errorf("expected model 'gemini-2.5-pro', got %q", geminiPool.Model())
+		if dynPool.Model() != "gemini-2.5-pro" {
+			t.Errorf("expected model 'gemini-2.5-pro', got %q", dynPool.Model())
 		}
 	})
 }

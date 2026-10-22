@@ -380,7 +380,7 @@ func (s *testRunnerAgentSession) Send(prompt string, turn *runner.TurnContext) e
 		OutputFormat:      "stream-json",
 	}
 	if s.pool.cfg.SessionManager != nil {
-		watchdogOpts.TranscriptDirs, watchdogOpts.HomeDir = s.pool.cfg.SessionManager.Roots(), s.pool.cfg.SessionManager.HomeDir()
+		watchdogOpts.TranscriptDirs = s.pool.cfg.SessionManager.Roots()
 	}
 	if trimmed := strings.TrimSpace(s.targetKey); trimmed != "" {
 		watchdogOpts.TargetID = trimmed

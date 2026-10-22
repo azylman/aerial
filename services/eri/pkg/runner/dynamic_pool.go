@@ -233,16 +233,6 @@ func (p *DynamicVoicePool) MarkDirty() {
 	}
 }
 
-// CurrentPool returns the active AgentPool under RLock.
-func (p *DynamicVoicePool) CurrentPool() AgentPool {
-	if p == nil {
-		return nil
-	}
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.currentPool
-}
-
 // AcquireLease delegates lease acquisition to the underlying pool if supported.
 func (p *DynamicVoicePool) AcquireLease(ctx context.Context, targetKey string) (SessionLease, error) {
 	pool, err := p.activePool()
