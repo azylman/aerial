@@ -660,14 +660,14 @@ func (s *RouterServer) isNomadBatchTemplateHealthy(ctx context.Context, job stri
 	return strings.EqualFold(jobSpec.Type, "batch") && isBatchTemplate && strings.EqualFold(jobSpec.Status, "running") && !jobSpec.Stop
 }
 
-// extractJobsFromMetadata extracts candidate Nomad job names stored in the PR registry metadata JSONB.
-func extractJobsFromMetadata(meta map[string]interface{}) []string {
+// extractStringSliceFromMetadata extracts a slice of strings stored under key in metadata JSONB.
+func extractStringSliceFromMetadata(meta map[string]interface{}, key string) []string {
 	if meta == nil {
 		return nil
 	}
 	var raw []string
-	if rawJobs, ok := meta["jobs"]; ok {
-		switch v := rawJobs.(type) {
+	if rawVal, ok := meta[key]; ok {
+		switch v := rawVal.(type) {
 		case []interface{}:
 			for _, item := range v {
 				if s, ok := item.(string); ok {
@@ -678,6 +678,15 @@ func extractJobsFromMetadata(meta map[string]interface{}) []string {
 			raw = append(raw, v...)
 		}
 	}
+	return dedupeTrimmedStrings(raw)
+}
+
+// extractJobsFromMetadata extracts candidate Nomad job names stored in the PR registry metadata JSONB.
+func extractJobsFromMetadata(meta map[string]interface{}) []string {
+	if meta == nil {
+		return nil
+	}
+	raw := extractStringSliceFromMetadata(meta, "jobs")
 	if s, ok := meta["job"].(string); ok {
 		raw = append(raw, s)
 	}

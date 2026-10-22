@@ -134,9 +134,10 @@ type mockPRRegistry struct {
 	conflictUpdated  bool
 	conflictErr      error
 
-	deployingCalls    []prCall
-	deployingTargetID string
-	deployingErr      error
+	deployingCalls          []prCall
+	deployingTargetID       string
+	deployingErr            error
+	skipDeployingTransition bool
 
 	deployedJobCalls []string
 	deployedTargetID string
@@ -199,7 +200,10 @@ func (m *mockPRRegistry) TransitionDeploying(ctx context.Context, repo string, p
 		return "", err
 	}
 	m.deployingCalls = append(m.deployingCalls, prCall{repo: repo, prNumber: prNumber, jobs: jobs})
-	return m.deployingTargetID, nil
+	if m.skipDeployingTransition {
+		return "", nil
+	}
+	return firstNonEmpty(m.deployingTargetID, m.resolveTargetID, "1555405874565091380"), nil
 }
 
 func (m *mockPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, jobName string) (string, int, string, string, bool, error) {
@@ -2235,6 +2239,15 @@ func TestProcessHangarEvent(t *testing.T) {
 			reg:                &mockPRRegistry{deployedErr: errors.New("db transition err")},
 			disp:               &mockOutboundDispatcher{},
 			wantPR:             851,
+			wantTargetID:       "1555405874565091380",
+			wantDeployingCalls: 1,
+		},
+		{
+			name:               "deploy_started skipped when job already deployed",
+			evt:                mkHangarEvt("deploy_started", "coven", "azylman/aerial", "bc1d3ef", 971, "1555405874565091380", "started", ""),
+			reg:                &mockPRRegistry{skipDeployingTransition: true},
+			disp:               &mockOutboundDispatcher{},
+			wantPR:             971,
 			wantTargetID:       "1555405874565091380",
 			wantDeployingCalls: 1,
 		},
@@ -4899,6 +4912,12 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 			wantBool:   false,
 		},
 		{
+			name:       "ResolveVanadisChunkForPR typed nil pool returns false",
+			method:     "ResolveVanadisChunkForPR",
+			useNilPool: true,
+			wantBool:   false,
+		},
+		{
 			name:       "FailVanadisChunkByPR typed nil pool returns false",
 			method:     "FailVanadisChunkByPR",
 			useNilPool: true,
@@ -4907,6 +4926,11 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 		{
 			name:       "ShouldSuppressVanadisDeployWake empty guard",
 			method:     "ShouldSuppressVanadisDeployWake",
+			emptyGuard: true,
+		},
+		{
+			name:       "ResolveVanadisChunkForPR empty guard",
+			method:     "ResolveVanadisChunkForPR",
 			emptyGuard: true,
 		},
 		{
@@ -4927,6 +4951,18 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 		{
 			name:      "ShouldSuppressVanadisDeployWake returns error on query failure",
 			method:    "ShouldSuppressVanadisDeployWake",
+			selectErr: errors.New("query err"),
+			wantErr:   true,
+		},
+		{
+			name:        "ResolveVanadisChunkForPR returns true and low effort on match",
+			method:      "ResolveVanadisChunkForPR",
+			chunkStatus: "low",
+			wantBool:    true,
+		},
+		{
+			name:      "ResolveVanadisChunkForPR returns error on query failure",
+			method:    "ResolveVanadisChunkForPR",
 			selectErr: errors.New("query err"),
 			wantErr:   true,
 		},
@@ -5050,6 +5086,11 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 					if err != nil || sup != tc.wantBool {
 						t.Fatalf("got %v, err=%v", sup, err)
 					}
+				case "ResolveVanadisChunkForPR":
+					matched, _, _, err := regNil.ResolveVanadisChunkForPR(ctx, "aerial", 1)
+					if err != nil || matched != tc.wantBool {
+						t.Fatalf("got %v, err=%v", matched, err)
+					}
 				case "FailVanadisChunkByPR":
 					failed, err := regNil.FailVanadisChunkByPR(ctx, "aerial", 1)
 					if err != nil || failed != tc.wantBool {
@@ -5067,6 +5108,16 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 						}
 						if tc.method == "ShouldSuppressVanadisDeployWake" {
 							*dest[0].(*bool) = tc.wantBool
+							return nil
+						}
+						if tc.method == "ResolveVanadisChunkForPR" {
+							*dest[0].(*bool) = tc.wantBool
+							if len(dest) > 1 {
+								*dest[1].(*string) = "chunk-resolved-1"
+							}
+							if len(dest) > 2 {
+								*dest[2].(*string) = tc.chunkStatus
+							}
 							return nil
 						}
 						if tc.method == "FailVanadisChunkByPR" {
@@ -5138,6 +5189,14 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 				}
 				if !tc.wantErr && sup != tc.wantBool {
 					t.Errorf("got %v, want %v", sup, tc.wantBool)
+				}
+			case "ResolveVanadisChunkForPR":
+				matched, _, _, err := reg.ResolveVanadisChunkForPR(ctx, repo, prNum)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("ResolveVanadisChunkForPR() err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if !tc.wantErr && matched != tc.wantBool {
+					t.Errorf("got %v, want %v", matched, tc.wantBool)
 				}
 			case "FailVanadisChunkByPR":
 				failed, err := reg.FailVanadisChunkByPR(ctx, repo, prNum)

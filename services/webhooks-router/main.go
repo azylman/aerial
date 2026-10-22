@@ -765,18 +765,15 @@ func (r *PostgresPRRegistry) TransitionDeploying(ctx context.Context, repo strin
 	if len(cleanJobs) == 0 {
 		return "", nil
 	}
-	jobsJSON, err := json.Marshal(cleanJobs)
-	if err != nil {
-		jobsJSON = []byte("[]")
-	}
 	query := `
 		UPDATE pr_registry
 		SET status = 'deploying',
-			metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{jobs}', (SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb) FROM jsonb_array_elements(COALESCE(metadata->'jobs', '[]'::jsonb) || $3::jsonb) AS elem)),
+			metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{jobs}', (SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb) FROM jsonb_array_elements(COALESCE(metadata->'jobs', '[]'::jsonb) || to_jsonb($3::text[])) AS elem WHERE NOT (COALESCE(metadata->'deployed_jobs', '[]'::jsonb) @> jsonb_build_array(elem)))),
 			updated_at = CURRENT_TIMESTAMP
-		WHERE repo = $1 AND pr_number = $2 AND status NOT IN ('closed', 'conflict', 'deployed')
+		WHERE repo = $1 AND pr_number = $2 AND status NOT IN ('closed', 'conflict')
+		  AND EXISTS (SELECT 1 FROM jsonb_array_elements(to_jsonb($3::text[])) AS req_elem WHERE NOT (COALESCE(metadata->'deployed_jobs', '[]'::jsonb) @> jsonb_build_array(req_elem)))
 		RETURNING target_id;`
-	return r.execReturningTargetID(ctx, repo, prNumber, "transition deploying", query, jobsJSON)
+	return r.execReturningTargetID(ctx, repo, prNumber, "transition deploying", query, cleanJobs)
 }
 
 func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, jobName string) (string, int, string, string, bool, error) {
@@ -828,14 +825,11 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, 
 			remaining = append(remaining, j)
 		}
 	}
+	deployedJobs := dedupeTrimmedStrings(append(extractStringSliceFromMetadata(meta, "deployed_jobs"), jobName))
 
 	if len(remaining) > 0 {
-		remainingJSON, err := json.Marshal(remaining)
-		if err != nil {
-			remainingJSON = []byte("[]")
-		}
-		updateQuery := `UPDATE pr_registry SET status = 'deploying', metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{jobs}', $1::jsonb), updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND status IN ('deploying', 'merged')`
-		if _, err := tx.Exec(qCtx, updateQuery, remainingJSON, id); err != nil {
+		updateQuery := `UPDATE pr_registry SET status = 'deploying', metadata = jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{jobs}', to_jsonb($1::text[])), '{deployed_jobs}', to_jsonb($2::text[])), updated_at = CURRENT_TIMESTAMP WHERE id = $3 AND status IN ('deploying', 'merged')`
+		if _, err := tx.Exec(qCtx, updateQuery, remaining, deployedJobs, id); err != nil {
 			return "", 0, "", "", false, fmt.Errorf("update remaining jobs: %w", err)
 		}
 		if err := tx.Commit(qCtx); err != nil {
@@ -844,8 +838,8 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, 
 		return "", 0, "", "", false, nil
 	}
 
-	updateQuery := `UPDATE pr_registry SET status = 'deployed', metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{jobs}', '[]'::jsonb), updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND status IN ('deploying', 'merged')`
-	tag, err := tx.Exec(qCtx, updateQuery, id)
+	updateQuery := `UPDATE pr_registry SET status = 'deployed', metadata = jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{jobs}', '[]'::jsonb), '{deployed_jobs}', to_jsonb($1::text[])), updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND status IN ('deploying', 'merged')`
+	tag, err := tx.Exec(qCtx, updateQuery, deployedJobs, id)
 	if err != nil {
 		return "", 0, "", "", false, fmt.Errorf("update pr deployed: %w", err)
 	}
@@ -1126,17 +1120,11 @@ func (r *PostgresPRRegistry) ResolveVanadisChunkForPR(ctx context.Context, repo 
 		FROM vanadis_chunks c
 		JOIN vanadis_builds b ON c.build_id = b.id
 		WHERE c.repo = $1 AND c.pr_number = $2
-		  AND (
-			  b.status = 'running'
-			  OR EXISTS (
-				  SELECT 1 FROM vanadis_chunks c2
-				  WHERE c2.build_id = c.build_id AND c2.chunk_index > c.chunk_index
-			  )
-		  )
+		  AND b.status != 'cancelled'
 		ORDER BY c.updated_at DESC LIMIT 1;`
 	var matched bool
 	var chunkID, effort string
-	found, err := r.queryRowScan(ctx, "check vanadis deploy wake suppression", query, []any{&matched, &chunkID, &effort}, repo, prNumber)
+	found, err := r.queryRowScan(ctx, "resolve vanadis chunk for pr", query, []any{&matched, &chunkID, &effort}, repo, prNumber)
 	if err != nil || !found || !matched {
 		return false, "", "", err
 	}
@@ -1148,8 +1136,27 @@ func (r *PostgresPRRegistry) ResolveVanadisChunkForPR(ctx context.Context, repo 
 }
 
 func (r *PostgresPRRegistry) ShouldSuppressVanadisDeployWake(ctx context.Context, repo string, prNumber int) (bool, error) {
-	matched, _, _, err := r.ResolveVanadisChunkForPR(ctx, repo, prNumber)
-	return matched, err
+	repo = normalizeRepo(repo)
+	if repo == "" || prNumber <= 0 {
+		return false, nil
+	}
+	query := `
+		SELECT TRUE
+		FROM vanadis_chunks c
+		JOIN vanadis_builds b ON c.build_id = b.id
+		WHERE c.repo = $1 AND c.pr_number = $2
+		  AND b.status != 'cancelled'
+		  AND EXISTS (
+			  SELECT 1 FROM vanadis_chunks c2
+			  WHERE c2.build_id = c.build_id AND c2.chunk_index > c.chunk_index
+		  )
+		ORDER BY c.updated_at DESC LIMIT 1;`
+	var matched bool
+	found, err := r.queryRowScan(ctx, "check vanadis deploy wake suppression", query, []any{&matched}, repo, prNumber)
+	if err != nil || !found {
+		return false, err
+	}
+	return matched, nil
 }
 
 func (r *PostgresPRRegistry) FailVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (bool, error) {
@@ -1979,7 +1986,15 @@ func (s *RouterServer) vanadisPromptOpts(ctx context.Context, repo string, prNum
 }
 
 func (s *RouterServer) isVanadisPR(ctx context.Context, repo string, prNum int) bool {
-	return s.vanadisPromptOpts(ctx, repo, prNum).silent
+	if s.registry == nil || prNum <= 0 {
+		return false
+	}
+	suppressed, err := s.registry.ShouldSuppressVanadisDeployWake(ctx, repo, prNum)
+	if err != nil {
+		log.Printf("[webhooks-router] [vanadis] warning checking Vanadis deploy suppression for %s#%d: %v", repo, prNum, err)
+		return false
+	}
+	return suppressed
 }
 
 func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, label, dmMsg, prompt string, vOpts ...vanadisPromptOpts) error {
@@ -2093,8 +2108,11 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 		evt.Event, evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA, evt.Status, evt.TargetID, evt.DeploymentID, evt.Details)
 
 	if s.registry != nil && evt.PRNumber > 0 && evt.Event == "deploy_started" && evt.JobName != "" {
-		if _, err := s.registry.TransitionDeploying(ctx, evt.Repo, evt.PRNumber, []string{evt.JobName}); err != nil {
+		if tID, err := s.registry.TransitionDeploying(ctx, evt.Repo, evt.PRNumber, []string{evt.JobName}); err != nil {
 			log.Printf("[webhooks-router] [registry] warning transitioning pr %s#%d to deploying for job %s: %v", evt.Repo, evt.PRNumber, evt.JobName, err)
+		} else if tID == "" {
+			log.Printf("[webhooks-router] [hangar] skipping deploy_started for %s on %s#%d (job already deployed or PR inactive)", evt.JobName, evt.Repo, evt.PRNumber)
+			return &evt, nil
 		} else if s.isNomadBatchTemplateHealthy(ctx, evt.JobName) {
 			if err := s.HandleNomadJobSuccess(ctx, evt.JobName, firstNonEmpty(evt.DeploymentID, "batch-registered")); err != nil {
 				log.Printf("[webhooks-router] [hangar] warning handling batch job success for %s: %v", evt.JobName, err)
