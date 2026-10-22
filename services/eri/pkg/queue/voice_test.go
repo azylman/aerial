@@ -28,41 +28,29 @@ import (
 
 func TestWorkerPool_EffortModelResolution(t *testing.T) {
 	t.Parallel()
-	defaultLow, defaultMed := config.DefaultConfigData().LowEffortModel, config.DefaultConfigData().MediumEffortModel
-	appLow, appMed, appEmpty := "app-cfg-low-model", "app-cfg-med-model", ""
+	defaultLow := config.DefaultConfigData().LowEffortModel
+	appLow, appEmpty := "app-cfg-low-model", ""
 
 	tests := []struct {
-		name, effort, cfgModel string
-		poolNil                bool
-		appCfgVal              *string
-		wantResult             string
+		name, cfgModel string
+		poolNil        bool
+		appCfgVal      *string
+		wantResult     string
 	}{
-		{"Low_NilPoolFallback", "low", "", true, nil, defaultLow},
-		{"Low_CustomModelInCfg", "low", "gemini-flash-low-test", false, nil, "gemini-flash-low-test"},
-		{"Low_AppCfgOverride", "low", "", false, &appLow, "app-cfg-low-model"},
-		{"Low_AppCfgEmptyWithCfgFallback", "low", "cfg-fallback-model", false, &appEmpty, "cfg-fallback-model"},
-		{"Low_AppCfgEmptyAndCfgEmptyDefaults", "low", "", false, &appEmpty, defaultLow},
-		{"Low_AppCfgNilAndCfgEmptyDefaults", "low", "", false, nil, defaultLow},
-		{"Med_NilPoolFallback", "medium", "", true, nil, defaultMed},
-		{"Med_CustomModelInCfg", "medium", "gemini-flash-med-test", false, nil, "gemini-flash-med-test"},
-		{"Med_AppCfgOverride", "medium", "", false, &appMed, "app-cfg-med-model"},
-		{"Med_AppCfgEmptyWithCfgFallback", "medium", "cfg-med-fallback", false, &appEmpty, "cfg-med-fallback"},
-		{"Med_AppCfgEmptyAndCfgEmptyDefaults", "medium", "", false, &appEmpty, defaultMed},
-		{"Med_AppCfgNilAndCfgEmptyDefaults", "medium", "", false, nil, defaultMed},
+		{"Low_NilPoolFallback", "", true, nil, defaultLow},
+		{"Low_CustomModelInCfg", "gemini-flash-low-test", false, nil, "gemini-flash-low-test"},
+		{"Low_AppCfgOverride", "", false, &appLow, "app-cfg-low-model"},
+		{"Low_AppCfgEmptyWithCfgFallback", "cfg-fallback-model", false, &appEmpty, "cfg-fallback-model"},
+		{"Low_AppCfgEmptyAndCfgEmptyDefaults", "", false, &appEmpty, defaultLow},
+		{"Low_AppCfgNilAndCfgEmptyDefaults", "", false, nil, defaultLow},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			resolve := func(p *WorkerPool) string {
-				if tt.effort == "medium" {
-					return p.MediumEffortModel()
-				}
-				return p.LowEffortModel()
-			}
 			if tt.poolNil {
 				var nilPool *WorkerPool
-				if got := resolve(nilPool); got != tt.wantResult {
-					t.Errorf("%s EffortModel() = %q, want %q", tt.effort, got, tt.wantResult)
+				if got := nilPool.LowEffortModel(); got != tt.wantResult {
+					t.Errorf("LowEffortModel() = %q, want %q", got, tt.wantResult)
 				}
 				return
 			}
@@ -70,22 +58,12 @@ func TestWorkerPool_EffortModelResolution(t *testing.T) {
 			if tt.appCfgVal != nil {
 				val := *tt.appCfgVal
 				appCfg = newTestConfig(func(d *config.ConfigData) {
-					if tt.effort == "medium" {
-						d.MediumEffortModel = val
-					} else {
-						d.LowEffortModel = val
-					}
+					d.LowEffortModel = val
 				})
 			}
-			cfg := WorkerPoolConfig{}
-			if tt.effort == "medium" {
-				cfg.MediumEffortModel = tt.cfgModel
-			} else {
-				cfg.LowEffortModel = tt.cfgModel
-			}
-			p := New(appCfg, cfg)
-			if got := resolve(p); got != tt.wantResult {
-				t.Errorf("%s EffortModel() = %q, want %q", tt.effort, got, tt.wantResult)
+			p := New(appCfg, WorkerPoolConfig{LowEffortModel: tt.cfgModel})
+			if got := p.LowEffortModel(); got != tt.wantResult {
+				t.Errorf("LowEffortModel() = %q, want %q", got, tt.wantResult)
 			}
 		})
 	}
@@ -559,9 +537,6 @@ func TestWorkerPool_ExecuteVoiceTurn_MockVoiceProcessPool(t *testing.T) {
 	pool.Start()
 	defer pool.Stop()
 
-	if pool.VoiceProcessPool() != mockPool {
-		t.Fatalf("expected VoiceProcessPool to return mockPool")
-	}
 	var sentenceReceived string
 	reply, sessID, err := pool.ExecuteVoiceTurn(context.Background(), "ping", "mock-dev-1", nil, func(sentence string) { sentenceReceived = sentence })
 	if err != nil || reply != "Hello from mock voice." || sessID != "sess-mock-dev-1" || sentenceReceived != "Hello from mock voice." {
@@ -768,8 +743,8 @@ func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
 			if tc.wantOut != "" && (err1 != nil || err2 != nil || out1 != tc.wantOut || out2 != tc.wantOut) {
 				t.Errorf("adapter outputs = (%q, %q), errs = (%v, %v), want %q", out1, out2, err1, err2, tc.wantOut)
 			}
-			if p.Classifier() == nil || p.SessionManager() == nil {
-				t.Errorf("expected non-nil Classifier and SessionManager")
+			if p.Classifier() == nil {
+				t.Errorf("expected non-nil Classifier")
 			}
 		})
 	}

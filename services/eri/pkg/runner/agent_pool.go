@@ -39,8 +39,3 @@ type LeasedAgentPool interface {
 	AgentPool
 	AcquireLease(ctx context.Context, targetKey string) (SessionLease, error)
 }
-
-type SessionRotator interface {
-	ShouldRotateSession(sess AgentSession) (bool, string)
-	RotateSession(ctx context.Context, targetKey string) (AgentSession, error)
-}

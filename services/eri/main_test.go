@@ -1882,15 +1882,14 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 		name          string
 		cfg           *config.Config
 		wantGeminiAPI bool
-		wantModel     string
 	}{
-		{"GeminiAPI_WithHarnessAPIKey", mkCfg("gemini_api", "gemini-2.5-flash", "test-harness-key", "", ""), true, "gemini-2.5-flash"},
-		{"GeminiAPI_WithAmbientContext", mkCfg("gemini_api", "", "", "test-ambient-key", "Status: {{.ha.state}}"), true, "fallback-model"},
-		{"GeminiAPI_WithAmbientContext_InvalidTemplate", mkCfg("gemini_api", "", "", "test-ambient-key", "{{.invalid"), true, "fallback-model"},
-		{"GeminiAPI_WithAPIKeyFallback", mkCfg("gemini_api", "", "", "test-standard-key", ""), true, "fallback-model"},
-		{"GeminiAPI_EmptyKeyFallbackToAgy", mkCfg("gemini_api", "", "", "", ""), false, "fallback-model"},
-		{"AgyEngine", mkCfg("agy", "", "some-key", "", ""), false, "fallback-model"},
-		{"NilConfig", nil, false, "fallback-model"},
+		{"GeminiAPI_WithHarnessAPIKey", mkCfg("gemini_api", "gemini-2.5-flash", "test-harness-key", "", ""), true},
+		{"GeminiAPI_WithAmbientContext", mkCfg("gemini_api", "", "", "test-ambient-key", "Status: {{.ha.state}}"), true},
+		{"GeminiAPI_WithAmbientContext_InvalidTemplate", mkCfg("gemini_api", "", "", "test-ambient-key", "{{.invalid"), true},
+		{"GeminiAPI_WithAPIKeyFallback", mkCfg("gemini_api", "", "", "test-standard-key", ""), true},
+		{"GeminiAPI_EmptyKeyFallbackToAgy", mkCfg("gemini_api", "", "", "", ""), false},
+		{"AgyEngine", mkCfg("agy", "", "some-key", "", ""), false},
+		{"NilConfig", nil, false},
 	}
 
 	for _, tc := range tests {
@@ -1902,9 +1901,6 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 			dynPool, ok := pool.(*runner.DynamicVoicePool)
 			if !ok {
 				t.Fatalf("expected *runner.DynamicVoicePool, got %T", pool)
-			}
-			if dynPool.Model() != tc.wantModel {
-				t.Errorf("expected model %q, got %q", tc.wantModel, dynPool.Model())
 			}
 			sess, sErr := dynPool.GetOrCreateSession(context.Background(), "k", "")
 			if sErr != nil {
@@ -1953,14 +1949,11 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 		// Trigger MarkDirty on pool
 		dynPool.MarkDirty()
 
-		// Verify pool swapped to GeminiAPIPool with updated model
+		// Verify pool swapped to GeminiAPIPool
 		if sess, err := dynPool.GetOrCreateSession(context.Background(), "k", ""); err != nil {
 			t.Fatalf("GetOrCreateSession failed: %v", err)
 		} else if _, isGemini := sess.(*runner.GeminiAPISession); !isGemini {
 			t.Fatalf("expected swapped pool to be GeminiAPIPool, got %T", sess)
-		}
-		if dynPool.Model() != "gemini-2.5-pro" {
-			t.Errorf("expected model 'gemini-2.5-pro', got %q", dynPool.Model())
 		}
 	})
 }

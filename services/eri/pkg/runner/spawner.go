@@ -10,7 +10,6 @@ import (
 
 // ProcessHandle abstracts an operating system process.
 type ProcessHandle interface {
-	Pid() int
 	Kill() error
 	Wait() error
 }
@@ -54,13 +53,6 @@ func KillProcessGroup(cmd *exec.Cmd) error {
 // OSProcessHandle wraps an *exec.Cmd process.
 type OSProcessHandle struct {
 	cmd *exec.Cmd
-}
-
-func (h *OSProcessHandle) Pid() int {
-	if h != nil && h.cmd != nil && h.cmd.Process != nil {
-		return h.cmd.Process.Pid
-	}
-	return 0
 }
 
 func (h *OSProcessHandle) Kill() error {

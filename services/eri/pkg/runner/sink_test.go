@@ -25,7 +25,7 @@ func TestThrowawayTurnSink(t *testing.T) {
 	s.OnResult(&TurnResult{Response: "res"})
 	s.OnResult(&TurnResult{Response: "dup"})
 	s.OnError(errors.New("ign"))
-	if res, err := s.Result(); err != nil || res != "res" {
+	if res, err := s.ResultContext(context.Background()); err != nil || res != "res" {
 		t.Fatalf("Result = (%q, %v)", res, err)
 	}
 
@@ -102,8 +102,6 @@ func TestBufferingTurnSink_LifecycleAndHooks(t *testing.T) {
 	if sink.AccumulatedText() != "Hello world!" {
 		t.Errorf("accumulated = %q", sink.AccumulatedText())
 	}
-	sink.SetEmitted(true)
-	sink.SetEmitted(false)
 	sink.MarkEmitted()
 	if !sink.EmittedAny() {
 		t.Errorf("MarkEmitted failed")

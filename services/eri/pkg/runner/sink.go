@@ -93,10 +93,6 @@ func (s *ThrowawayTurnSink) ResultContext(ctx context.Context) (string, error) {
 	return selectContext(ctx, s.resCh, s.errCh, "")
 }
 
-func (s *ThrowawayTurnSink) Result() (string, error) {
-	return s.ResultContext(context.Background())
-}
-
 // BufferingTurnSinkConfig configures the hooks and behavior of a BufferingTurnSink.
 type BufferingTurnSinkConfig struct {
 	OnTurnStarted      func()
@@ -219,10 +215,8 @@ func (s *BufferingTurnSink) EmittedAny() bool {
 	return s.emittedAny
 }
 
-func (s *BufferingTurnSink) MarkEmitted() { s.SetEmitted(true) }
-
-func (s *BufferingTurnSink) SetEmitted(emitted bool) {
+func (s *BufferingTurnSink) MarkEmitted() {
 	s.mu.Lock()
-	s.emittedAny = emitted
+	s.emittedAny = true
 	s.mu.Unlock()
 }

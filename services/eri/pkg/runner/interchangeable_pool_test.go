@@ -31,6 +31,16 @@ func (p *InterchangeablePool) AvailableCount() int {
 	return len(p.available)
 }
 
+func (p *InterchangeablePool) WaitBackground() {
+	if p == nil {
+		return
+	}
+	p.bgWg.Wait()
+	if p.underlying != nil {
+		p.underlying.WaitBackground()
+	}
+}
+
 // Helper mock spawner that generates deterministic sequential session UUIDs
 // and responds to user prompts with structured result events.
 func createTestSpawner(onPrompt ...func(prompt string)) *MockDaemonSpawner {
@@ -282,8 +292,8 @@ func TestInterchangeablePool_DelegationAndErrorGuards(t *testing.T) {
 	pool.SetTranscriptRescuer(func(string, time.Time) string { return "rescued" })
 	pool.MarkDirty()
 	pool.WaitBackground()
-	if pool.Underlying() != underlying || pool.Model() != "gemini-2.5-flash" {
-		t.Fatalf("unexpected Underlying/Model: %v, %q", pool.Underlying(), pool.Model())
+	if pool.Underlying() != underlying {
+		t.Fatalf("unexpected Underlying: %v", pool.Underlying())
 	}
 	if d, ok := pool.Get("non-existent"); ok || d != nil {
 		t.Errorf("expected missing worker false/nil, got (%v, %v)", d, ok)
@@ -292,13 +302,11 @@ func TestInterchangeablePool_DelegationAndErrorGuards(t *testing.T) {
 		t.Errorf("expected worker-0 lookup success, got (%v, %v)", d0, ok0)
 	}
 
-	sess, sErr := pool.GetOrCreateSession(ctx, "any", "")
-	should, _ := pool.ShouldRotateSession(sess)
-	rotSess, rErr := pool.RotateSession(ctx, "any")
+	_, sErr := pool.GetOrCreateSession(ctx, "any", "")
 	pool.SetSessionManager(nil)
 	pool.SetSessionCallbacks(nil, nil)
-	if sErr != nil || should || rErr != nil || rotSess != nil {
-		t.Fatalf("unexpected rotation: sErr=%v, should=%v, rErr=%v, rotSess=%v", sErr, should, rErr, rotSess)
+	if sErr != nil {
+		t.Fatalf("unexpected GetOrCreateSession error: %v", sErr)
 	}
 
 	var nilPool *InterchangeablePool
@@ -312,7 +320,7 @@ func TestInterchangeablePool_DelegationAndErrorGuards(t *testing.T) {
 	nilPool.SetSessionManager(nil)
 	nilPool.SetSessionCallbacks(nil, nil)
 	nilPool.returnWorker("ephemeral:worker-0")
-	if nilPool.Close() != nil || nilPool.Workers() != nil || nilPool.AvailableCount() != 0 || nilPool.Underlying() != nil || nilPool.Model() != "" || nilPool.Initialize(ctx) == nil || ngErr == nil || ndOk || nd != nil || neErr == nil || nlErr == nil {
+	if nilPool.Close() != nil || nilPool.Workers() != nil || nilPool.AvailableCount() != 0 || nilPool.Underlying() != nil || nilPool.Initialize(ctx) == nil || ngErr == nil || ndOk || nd != nil || neErr == nil || nlErr == nil {
 		t.Error("unexpected nilPool accessor returns or missing errors")
 	}
 

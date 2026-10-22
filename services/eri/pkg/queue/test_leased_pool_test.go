@@ -135,41 +135,6 @@ func (p *testRunnerAgentPool) AcquireLease(ctx context.Context, targetKey string
 	}, nil
 }
 
-func (p *testRunnerAgentPool) RotateSession(ctx context.Context, targetKey string) (runner.AgentSession, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	trimmedKey := strings.TrimSpace(targetKey)
-	if trimmedKey == "" {
-		return nil, fmt.Errorf("targetKey cannot be empty")
-	}
-	oldSessID := ""
-	if existing, ok := p.sessions[trimmedKey]; ok {
-		existing.mu.Lock()
-		oldSessID = existing.sessionID
-		existing.mu.Unlock()
-	}
-	newSessID := ""
-	if p.cfg.Store != nil {
-		if storedID, err := p.cfg.Store.GetSessionID(ctx, trimmedKey); err == nil && storedID != "" && storedID != oldSessID {
-			newSessID = storedID
-		}
-	}
-	s := &testRunnerAgentSession{pool: p, targetKey: trimmedKey, sessionID: newSessID, prevSessionID: oldSessID, isCold: true}
-	p.sessions[trimmedKey] = s
-	return s, nil
-}
-
-func (p *testRunnerAgentPool) ShouldRotateSession(sess runner.AgentSession) (bool, string) {
-	if s, ok := sess.(*testRunnerAgentSession); ok && s != nil {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		if s.turnCount > runner.DefaultMaxSessionTurns {
-			return true, "turn_count_exceeded"
-		}
-	}
-	return false, ""
-}
-
 func (p *testRunnerAgentPool) Initialize(ctx context.Context) error { return nil }
 func (p *testRunnerAgentPool) Close() error {
 	p.mu.Lock()
@@ -181,7 +146,6 @@ func (p *testRunnerAgentPool) Close() error {
 var (
 	_ runner.AgentPool       = (*testRunnerAgentPool)(nil)
 	_ runner.LeasedAgentPool = (*testRunnerAgentPool)(nil)
-	_ runner.SessionRotator  = (*testRunnerAgentPool)(nil)
 )
 
 type testSessionLease struct {

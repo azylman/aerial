@@ -1179,7 +1179,6 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 	case <-time.After(5 * time.Second):
 		t.Fatalf("timeout waiting for ephemeral turn 1")
 	}
-	lowPool.WaitBackground()
 
 	msg2 := db.Message{ID: "msg-ephem-2", ThreadID: threadID, Content: "execute vanadis chunk 2", Effort: "low", Status: db.StatusPending, CreatedAt: time.Now()}
 	_ = store.InsertMessage(ctx, msg2)
@@ -1189,7 +1188,6 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 	case <-time.After(5 * time.Second):
 		t.Fatalf("timeout waiting for ephemeral turn 2")
 	}
-	lowPool.WaitBackground()
 
 	mu.Lock()
 	prompts := append([]string(nil), capturedPrompts...)

@@ -506,10 +506,6 @@ func (p *WorkerPool) GetRuntimeConfig() string {
 	return p.cfg.Model
 }
 
-func (p *WorkerPool) SessionManager() *session.Manager {
-	return p.sessionMgr
-}
-
 func (p *WorkerPool) Start() {
 	// WorkerPool starts workers lazily per active thread
 	log.Printf("[WorkerPool] Started queue worker pool with max %d attempts per turn", p.cfg.MaxAttempts)
@@ -732,11 +728,6 @@ func (p *WorkerPool) MediumEffortProcessPool() *runner.UnifiedProcessPool {
 	return unwrapUnifiedPool(p.getPool(func() runner.AgentPool { return p.mediumEffortProcessPool }))
 }
 
-// VoiceProcessPool returns the configured runner.AgentPool for voice turns.
-func (p *WorkerPool) VoiceProcessPool() runner.AgentPool {
-	return p.getPool(func() runner.AgentPool { return p.voiceProcessPool })
-}
-
 // AgentPool returns the configured primary runner.AgentPool.
 func (p *WorkerPool) AgentPool() runner.AgentPool {
 	return p.getPool(func() runner.AgentPool { return p.processPool })
@@ -767,37 +758,21 @@ func (p *WorkerPool) MarkDirty() {
 	}
 }
 
-func (p *WorkerPool) resolveEffortModel(getApp func(*config.ConfigData) string, cfgModel, def string) string {
+// LowEffortModel returns the configured low effort reasoning model name.
+func (p *WorkerPool) LowEffortModel() string {
+	def := config.DefaultConfigData().LowEffortModel
 	if p == nil {
 		return def
 	}
 	if p.appCfg != nil {
-		if cur := p.appCfg.Current(); cur != nil && strings.TrimSpace(getApp(cur)) != "" {
-			return strings.TrimSpace(getApp(cur))
+		if cur := p.appCfg.Current(); cur != nil && strings.TrimSpace(cur.LowEffortModel) != "" {
+			return strings.TrimSpace(cur.LowEffortModel)
 		}
 	}
-	if strings.TrimSpace(cfgModel) != "" {
-		return strings.TrimSpace(cfgModel)
+	if strings.TrimSpace(p.cfg.LowEffortModel) != "" {
+		return strings.TrimSpace(p.cfg.LowEffortModel)
 	}
 	return def
-}
-
-// LowEffortModel returns the configured low effort reasoning model name.
-func (p *WorkerPool) LowEffortModel() string {
-	cfgModel := ""
-	if p != nil {
-		cfgModel = p.cfg.LowEffortModel
-	}
-	return p.resolveEffortModel(func(c *config.ConfigData) string { return c.LowEffortModel }, cfgModel, config.DefaultConfigData().LowEffortModel)
-}
-
-// MediumEffortModel returns the configured medium effort reasoning model name.
-func (p *WorkerPool) MediumEffortModel() string {
-	cfgModel := ""
-	if p != nil {
-		cfgModel = p.cfg.MediumEffortModel
-	}
-	return p.resolveEffortModel(func(c *config.ConfigData) string { return c.MediumEffortModel }, cfgModel, config.DefaultConfigData().MediumEffortModel)
 }
 
 func (p *WorkerPool) runnerCredentials() (string, string) {

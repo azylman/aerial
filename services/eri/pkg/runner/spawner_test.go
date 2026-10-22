@@ -142,7 +142,7 @@ func TestMockSpawnersAndProcessHandle(t *testing.T) {
 
 	for _, s := range []*MockDaemonSpawner{NewMockDaemonSpawner(), {}} {
 		stdin, stdout, stderr, handle, err := s.Spawn(context.Background(), DaemonConfig{SessionID: "test-sess"})
-		if err != nil || handle.Pid() <= 0 || handle.Kill() != nil || handle.Wait() != nil {
+		if err != nil || handle.Kill() != nil || handle.Wait() != nil {
 			t.Errorf("spawn checks failed: %v", err)
 		}
 		closeQuietlyAll(stdin, stdout, stderr)
@@ -198,7 +198,7 @@ func TestOSProcessHandle_And_DefaultDaemonSpawner(t *testing.T) {
 	closeQuietly(errCloser{err: errors.New("simulated close error")})
 
 	for _, h := range []*OSProcessHandle{nil, {}} {
-		if h.Pid() != 0 || h.Kill() != nil || h.Wait() != nil {
+		if h.Kill() != nil || h.Wait() != nil {
 			t.Errorf("handle check failed for %v", h)
 		}
 	}
@@ -216,7 +216,7 @@ func TestOSProcessHandle_And_DefaultDaemonSpawner(t *testing.T) {
 
 	cmdWithProc := &exec.Cmd{Process: &os.Process{Pid: 9876}}
 	handleWithProc := &OSProcessHandle{cmd: cmdWithProc}
-	if handleWithProc.Pid() != 9876 || handleWithProc.Kill() != nil || killedCmd != cmdWithProc {
+	if handleWithProc.Kill() != nil || killedCmd != cmdWithProc {
 		t.Errorf("handleWithProc failed")
 	}
 

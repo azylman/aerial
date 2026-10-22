@@ -2658,7 +2658,7 @@ func TestWorkerPool_ProcessPoolWiringAndTurnRouting(t *testing.T) {
 			t.Parallel()
 			if tc.nilPool {
 				var p *WorkerPool
-				if p.ProcessPool() != nil || p.VoiceProcessPool() != nil || p.LowEffortProcessPool() != nil || p.MediumEffortProcessPool() != nil {
+				if p.ProcessPool() != nil || p.LowEffortProcessPool() != nil || p.MediumEffortProcessPool() != nil {
 					t.Fatalf("expected nil pools from nil WorkerPool")
 				}
 				p.MarkDirty()
@@ -2666,7 +2666,7 @@ func TestWorkerPool_ProcessPoolWiringAndTurnRouting(t *testing.T) {
 			}
 			if tc.defaultConfig {
 				p := New(nil, WorkerPoolConfig{})
-				if p.ProcessPool() != nil || p.VoiceProcessPool() != nil || p.LowEffortProcessPool() != nil || p.MediumEffortProcessPool() != nil {
+				if p.ProcessPool() != nil || p.LowEffortProcessPool() != nil || p.MediumEffortProcessPool() != nil {
 					t.Fatalf("expected nil pools by default")
 				}
 				return
@@ -2712,7 +2712,7 @@ func TestWorkerPool_ProcessPoolWiringAndTurnRouting(t *testing.T) {
 				pool := New(appCfg, WorkerPoolConfig{VoiceProcessPool: vPool})
 				defer pool.Stop()
 				pool.MarkDirty()
-				vPool.WaitBackground()
+				_, _ = vPool.GetOrCreate(context.Background(), tc.expectedVoiceTargets[0], "")
 				targets := vPool.PrewarmedTargets()
 				_, hasDaemon := vPool.Get(tc.expectedVoiceTargets[0])
 				if len(targets) != len(tc.expectedVoiceTargets) || targets[0] != tc.expectedVoiceTargets[0] || !hasDaemon {
@@ -2742,9 +2742,6 @@ func TestWorkerPool_ProcessPoolWiringAndTurnRouting(t *testing.T) {
 				t.Fatalf("expected cfg.LLMFunc to be auto-populated")
 			}
 			if tc.withVoicePool {
-				if p.VoiceProcessPool() != voicePool {
-					t.Fatalf("expected VoiceProcessPool %p, got %p", voicePool, p.VoiceProcessPool())
-				}
 				p.MarkDirty()
 			}
 		})
