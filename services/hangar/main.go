@@ -1634,7 +1634,7 @@ func readAndValidateYAML(filePath, label string, out any) ([]byte, error) {
 	return raw, nil
 }
 
-// SyncBrainConfigToNomad validates config.yaml and writes it to Nomad variable nomad/jobs/brain (CONFIG_YAML) and nomad/jobs/eri (CONFIG_YAML).
+// SyncBrainConfigToNomad validates config.yaml and writes it to Nomad variable nomad/jobs/eri (CONFIG_YAML).
 func (d *SyncDaemon) SyncBrainConfigToNomad(ctx context.Context, configDir string, syncCtx ...ConfigSyncContext) error {
 	configPath := filepath.Join(configDir, "config.yaml")
 	var parsed struct {
@@ -1667,15 +1667,12 @@ func (d *SyncDaemon) SyncBrainConfigToNomad(ctx context.Context, configDir strin
 	diffGated := len(syncCtx) > 0 && syncCtx[0].DiffGated
 	isChangedInGit := !diffGated || fileInChangedList("config.yaml", syncCtx[0].ChangedFiles)
 
-	for _, job := range []string{"brain", "eri"} {
-		nomadVar := "nomad/jobs/" + job
-		pushed, err := d.pushNomadConfigVar(ctx, nomadVar+":CONFIG_YAML", nomadVar, job, configHash, isChangedInGit, []string{"CONFIG_YAML=@" + configPath}, syncCtx)
-		if err != nil {
-			return err
-		}
-		if pushed {
-			log.Printf("[Hangar:Nomad] Successfully pushed CONFIG_YAML to %s", nomadVar)
-		}
+	pushed, err := d.pushNomadConfigVar(ctx, "nomad/jobs/eri:CONFIG_YAML", "nomad/jobs/eri", "eri", configHash, isChangedInGit, []string{"CONFIG_YAML=@" + configPath}, syncCtx)
+	if err != nil {
+		return err
+	}
+	if pushed {
+		log.Printf("[Hangar:Nomad] Successfully pushed CONFIG_YAML to nomad/jobs/eri")
 	}
 	return nil
 }

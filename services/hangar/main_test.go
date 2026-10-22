@@ -1269,13 +1269,13 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 				syncFn: func(d *SyncDaemon, dir string, sCtx ...ConfigSyncContext) error {
 					return d.SyncBrainConfigToNomad(ctx, dir, sCtx...)
 				},
-				cacheKey:          "nomad/jobs/brain:CONFIG_YAML",
-				wantInitialCalls:  2,
-				wantModifiedCalls: 2,
+				cacheKey:          "nomad/jobs/eri:CONFIG_YAML",
+				wantInitialCalls:  1,
+				wantModifiedCalls: 1,
 				untouchedCtx:      ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_untouched", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/voice/voice.yaml"}},
 				sameContentCtx:    ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_same", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"config.yaml"}},
 				modifiedCtx:       ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_modified", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"config.yaml"}},
-				wantJobName:       "brain",
+				wantJobName:       "eri",
 			},
 			{
 				name: "homepage",
