@@ -96,11 +96,7 @@ func ParseInitEvent(line string) (string, bool) {
 func CleanUnescapedString(s string) string {
 	s = strings.TrimSpace(s)
 	for len(s) >= 2 && (s[0] == '"' || s[0] == '\\') {
-		trimmed := strings.Trim(s, "\\\" \t\r\n")
-		if trimmed == s {
-			break
-		}
-		s = trimmed
+		s = strings.Trim(s, "\\\" \t\r\n")
 	}
 	return s
 }

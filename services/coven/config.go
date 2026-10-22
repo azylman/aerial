@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -25,6 +26,20 @@ const DefaultOllamaModel = "all-minilm"
 
 // DefaultOllamaNumCtx is the default context length for embedding generation.
 const DefaultOllamaNumCtx = 512
+
+// DefaultCustomSkillsDir is the default path to scanned custom skills.
+const DefaultCustomSkillsDir = "/config/custom-skills"
+
+// DefaultConfigRepoOwner is the default owner of the configuration repository.
+const DefaultConfigRepoOwner = "azylman"
+
+// DefaultConfigRepoName is the default repository name of the configuration repository.
+const DefaultConfigRepoName = "aerial-config"
+
+// DefaultBrainPRRegisterURL is the default internal brain PR registration endpoint.
+const DefaultBrainPRRegisterURL = "http://eri.aerial/internal/pr/register"
+
+var systemChannelIDRegex = regexp.MustCompile(`^[0-9]{17,20}$`)
 
 var localConfigPath = "/local/config.yaml"
 
@@ -50,18 +65,30 @@ type OllamaConfig struct {
 
 // Config represents runtime configuration for the memory MCP server.
 type Config struct {
-	Port        string       `yaml:"port"`
-	DatabaseURL string       `yaml:"database_url"`
-	BrainLLMURL string       `yaml:"brain_llm_url"`
-	Ollama      OllamaConfig `yaml:"ollama"`
+	Port               string       `yaml:"port"`
+	DatabaseURL        string       `yaml:"database_url"`
+	BrainLLMURL        string       `yaml:"brain_llm_url"`
+	Ollama             OllamaConfig `yaml:"ollama"`
+	CustomSkillsDir    string       `yaml:"custom_skills_dir"`
+	GitHubPAT          string       `yaml:"github_pat"`
+	ConfigRepoOwner    string       `yaml:"config_repo_owner"`
+	ConfigRepoName     string       `yaml:"config_repo_name"`
+	BrainPRRegisterURL string       `yaml:"brain_pr_register_url"`
+	SystemChannelID    string       `yaml:"system_channel_id"`
 }
 
 // MemoryYAMLConfig defines the declarative file schema for /config/config.yaml.
 type MemoryYAMLConfig struct {
-	Port        string       `yaml:"port"`
-	DatabaseURL string       `yaml:"database_url"`
-	BrainLLMURL string       `yaml:"brain_llm_url"`
-	Ollama      OllamaConfig `yaml:"ollama"`
+	Port               string       `yaml:"port"`
+	DatabaseURL        string       `yaml:"database_url"`
+	BrainLLMURL        string       `yaml:"brain_llm_url"`
+	Ollama             OllamaConfig `yaml:"ollama"`
+	CustomSkillsDir    string       `yaml:"custom_skills_dir"`
+	GitHubPAT          string       `yaml:"github_pat"`
+	ConfigRepoOwner    string       `yaml:"config_repo_owner"`
+	ConfigRepoName     string       `yaml:"config_repo_name"`
+	BrainPRRegisterURL string       `yaml:"brain_pr_register_url"`
+	SystemChannelID    string       `yaml:"system_channel_id"`
 }
 
 // LoadConfigFile loads and validates the config from path and environment variables.
@@ -137,10 +164,61 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		numCtx = DefaultOllamaNumCtx
 	}
 
+	customSkillsDir := strings.TrimSpace(os.Getenv("CUSTOM_SKILLS_DIR"))
+	if customSkillsDir == "" {
+		customSkillsDir = strings.TrimSpace(ycfg.CustomSkillsDir)
+	}
+	if customSkillsDir == "" {
+		customSkillsDir = DefaultCustomSkillsDir
+	}
+
+	gitHubPAT := strings.TrimSpace(os.Getenv("GITHUB_PAT"))
+	if gitHubPAT == "" {
+		gitHubPAT = strings.TrimSpace(ycfg.GitHubPAT)
+	}
+
+	configRepoOwner := strings.TrimSpace(os.Getenv("CONFIG_REPO_OWNER"))
+	if configRepoOwner == "" {
+		configRepoOwner = strings.TrimSpace(ycfg.ConfigRepoOwner)
+	}
+	if configRepoOwner == "" {
+		configRepoOwner = DefaultConfigRepoOwner
+	}
+
+	configRepoName := strings.TrimSpace(os.Getenv("CONFIG_REPO_NAME"))
+	if configRepoName == "" {
+		configRepoName = strings.TrimSpace(ycfg.ConfigRepoName)
+	}
+	if configRepoName == "" {
+		configRepoName = DefaultConfigRepoName
+	}
+
+	brainPRRegisterURL := strings.TrimSpace(os.Getenv("BRAIN_PR_REGISTER_URL"))
+	if brainPRRegisterURL == "" {
+		brainPRRegisterURL = strings.TrimSpace(ycfg.BrainPRRegisterURL)
+	}
+	if brainPRRegisterURL == "" {
+		brainPRRegisterURL = DefaultBrainPRRegisterURL
+	}
+
+	systemChannelID := strings.TrimSpace(os.Getenv("SYSTEM_CHANNEL_ID"))
+	if systemChannelID == "" {
+		systemChannelID = strings.TrimSpace(ycfg.SystemChannelID)
+	}
+	if !systemChannelIDRegex.MatchString(systemChannelID) {
+		systemChannelID = ""
+	}
+
 	return &Config{
-		Port:        port,
-		DatabaseURL: databaseURL,
-		BrainLLMURL: brainLLMURL,
+		Port:               port,
+		DatabaseURL:        databaseURL,
+		BrainLLMURL:        brainLLMURL,
+		CustomSkillsDir:    customSkillsDir,
+		GitHubPAT:          gitHubPAT,
+		ConfigRepoOwner:    configRepoOwner,
+		ConfigRepoName:     configRepoName,
+		BrainPRRegisterURL: brainPRRegisterURL,
+		SystemChannelID:    systemChannelID,
 		Ollama: OllamaConfig{
 			BaseURL:     ollamaBaseURL,
 			Model:       ollamaModel,

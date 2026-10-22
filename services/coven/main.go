@@ -32,15 +32,24 @@ func RunApp(ctx context.Context, cfg *Config) error {
 
 	store := NewSQLStore(database)
 	ollama := NewOllamaClient(&cfg.Ollama)
-	toolHandler := NewToolHandler(cfg, store, ollama)
+	publisher := NewGitHubSkillPublisher(GitHubSkillPublisherConfig{
+		Token:              cfg.GitHubPAT,
+		Owner:              cfg.ConfigRepoOwner,
+		Repo:               cfg.ConfigRepoName,
+		BrainPRRegisterURL: cfg.BrainPRRegisterURL,
+		SystemChannelID:    cfg.SystemChannelID,
+	})
+	toolHandler := NewToolHandler(cfg, store, ollama, publisher)
 	server := NewServer(toolHandler)
 
 	worker := NewWorker(WorkerConfig{
-		Store:        store,
-		Ollama:       ollama,
-		LLMClient:    HTTPBrainLLMClient(cfg.BrainLLMURL, nil),
-		InitialDelay: DefaultWorkerInitialDelay,
-		TickInterval: DefaultWorkerTickInterval,
+		Store:           store,
+		Ollama:          ollama,
+		LLMClient:       HTTPBrainLLMClient(cfg.BrainLLMURL, nil),
+		Publisher:       publisher,
+		CustomSkillsDir: cfg.CustomSkillsDir,
+		InitialDelay:    DefaultWorkerInitialDelay,
+		TickInterval:    DefaultWorkerTickInterval,
 	})
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	defer workerCancel()

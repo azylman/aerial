@@ -68,12 +68,12 @@ func NewThrowawayTurnSink() *ThrowawayTurnSink {
 	return &ThrowawayTurnSink{resCh: make(chan string, 1), errCh: make(chan error, 1)}
 }
 
-func (s *ThrowawayTurnSink) OnTurnStarted()                                         {}
-func (s *ThrowawayTurnSink) OnThinking()                                            {}
-func (s *ThrowawayTurnSink) OnToolCall(_, _ string)                                 {}
-func (s *ThrowawayTurnSink) OnToolCompleted(_, _ string, _ time.Duration, _ string) {}
-func (s *ThrowawayTurnSink) OnSkillActivated(_, _ string)                           {}
-func (s *ThrowawayTurnSink) OnTextDelta(_ string)                                   {}
+func (s *ThrowawayTurnSink) OnTurnStarted()                                         { _ = s }
+func (s *ThrowawayTurnSink) OnThinking()                                            { _ = s }
+func (s *ThrowawayTurnSink) OnToolCall(_, _ string)                                 { _ = s }
+func (s *ThrowawayTurnSink) OnToolCompleted(_, _ string, _ time.Duration, _ string) { _ = s }
+func (s *ThrowawayTurnSink) OnSkillActivated(_, _ string)                           { _ = s }
+func (s *ThrowawayTurnSink) OnTextDelta(_ string)                                   { _ = s }
 
 func (s *ThrowawayTurnSink) OnResult(res *TurnResult) {
 	s.once.Do(func() {

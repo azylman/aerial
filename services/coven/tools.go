@@ -59,29 +59,49 @@ type ToolHandler struct {
 	store     Store
 	ollama    OllamaClient
 	llmClient LLMClientFunc
+	publisher SkillPublisher
 }
 
 // NewToolHandler creates a new ToolHandler instance.
-func NewToolHandler(cfg *Config, store Store, ollama OllamaClient) *ToolHandler {
+func NewToolHandler(cfg *Config, store Store, ollama OllamaClient, publisher ...SkillPublisher) *ToolHandler {
 	var brainURL string
 	if cfg != nil {
 		brainURL = cfg.BrainLLMURL
+	}
+	var pub SkillPublisher
+	if len(publisher) > 0 {
+		pub = publisher[0]
 	}
 	return &ToolHandler{
 		cfg:       cfg,
 		store:     store,
 		ollama:    ollama,
 		llmClient: HTTPBrainLLMClient(brainURL, nil),
+		publisher: pub,
 	}
 }
 
-// Consolidate runs a complete-linkage clique dreaming pass over all stored facts.
+// Consolidate runs a complete-linkage clique dreaming pass over all stored facts,
+// and if a publisher is configured, triggers procedural skill consolidation.
 func (h *ToolHandler) Consolidate(ctx context.Context) (int, error) {
 	consolidated, err := ConsolidateFactClusters(ctx, h.store, h.ollama, h.llmClient)
 	if err != nil {
 		return consolidated, err
 	}
 	log.Printf("[Memory] Fact consolidation dreaming completed: %d clusters consolidated", consolidated)
+
+	if h.publisher != nil && h.store != nil {
+		customDir := DefaultCustomSkillsDir
+		if h.cfg != nil && h.cfg.CustomSkillsDir != "" {
+			customDir = h.cfg.CustomSkillsDir
+		}
+		if prNum, err := ConsolidateProceduralSkills(ctx, h.store, h.ollama, h.llmClient, h.publisher, customDir); err != nil {
+			log.Printf("[Memory] Procedural skill consolidation failed: %v", err)
+		} else if prNum > 0 {
+			log.Printf("[Memory] Procedural skill consolidation opened PR #%d", prNum)
+		}
+	}
+
 	return consolidated, nil
 }
 

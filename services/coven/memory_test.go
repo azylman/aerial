@@ -6945,3 +6945,992 @@ func TestFindCandidateCliques(t *testing.T) {
 		})
 	}
 }
+
+type mockGitHubServerConfig struct {
+	openPRRefs       []string
+	failListPRs      bool
+	failGetMainRef   bool
+	emptyMainRefSHA  bool
+	failGetCommit    bool
+	emptyBaseTreeSHA bool
+	failCreateTree   bool
+	emptyTreeSHA     bool
+	failCreateCommit bool
+	emptyCommitSHA   bool
+	failCreateRef    bool
+	failCreatePR     bool
+	failDeleteRef    bool
+	failAutoMerge    bool
+	failBrainReg     bool
+}
+
+func newMockGitHubServer(t *testing.T, cfg mockGitHubServerConfig) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(path, "/pulls"):
+			if cfg.failListPRs {
+				http.Error(w, `{"message":"failed to list PRs"}`, http.StatusInternalServerError)
+				return
+			}
+			var prs []map[string]any
+			for i, ref := range cfg.openPRRefs {
+				prs = append(prs, map[string]any{
+					"number": i + 1,
+					"head": map[string]string{
+						"ref": ref,
+						"sha": "head-sha-123",
+					},
+				})
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(prs)
+
+		case r.Method == http.MethodGet && strings.HasSuffix(path, "/git/ref/heads/main"):
+			if cfg.failGetMainRef {
+				http.Error(w, `{"message":"not found"}`, http.StatusInternalServerError)
+				return
+			}
+			sha := "main-sha-123"
+			if cfg.emptyMainRefSHA {
+				sha = ""
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"object": map[string]string{"sha": sha, "type": "commit"},
+			})
+
+		case r.Method == http.MethodGet && strings.Contains(path, "/git/commits/"):
+			if cfg.failGetCommit {
+				http.Error(w, `{"message":"commit error"}`, http.StatusInternalServerError)
+				return
+			}
+			treeSHA := "base-tree-456"
+			if cfg.emptyBaseTreeSHA {
+				treeSHA = ""
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"sha":  "main-sha-123",
+				"tree": map[string]string{"sha": treeSHA},
+			})
+
+		case r.Method == http.MethodPost && strings.HasSuffix(path, "/git/trees"):
+			if cfg.failCreateTree {
+				http.Error(w, `{"message":"tree error"}`, http.StatusInternalServerError)
+				return
+			}
+			treeSHA := "new-tree-789"
+			if cfg.emptyTreeSHA {
+				treeSHA = ""
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{"sha": treeSHA})
+
+		case r.Method == http.MethodPost && strings.HasSuffix(path, "/git/commits"):
+			if cfg.failCreateCommit {
+				http.Error(w, `{"message":"commit error"}`, http.StatusInternalServerError)
+				return
+			}
+			commitSHA := "new-commit-abc"
+			if cfg.emptyCommitSHA {
+				commitSHA = ""
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{"sha": commitSHA})
+
+		case r.Method == http.MethodPost && strings.HasSuffix(path, "/git/refs"):
+			if cfg.failCreateRef {
+				http.Error(w, `{"message":"ref error"}`, http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{"ref": "refs/heads/branch"})
+
+		case r.Method == http.MethodDelete && strings.Contains(path, "/git/refs/heads/"):
+			if cfg.failDeleteRef {
+				http.Error(w, `{"message":"del error"}`, http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+
+		case r.Method == http.MethodPost && strings.HasSuffix(path, "/pulls"):
+			if cfg.failCreatePR {
+				http.Error(w, `{"message":"pr error"}`, http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"number":  42,
+				"node_id": "PR_kwDO123",
+			})
+
+		case r.Method == http.MethodPost && path == "/graphql":
+			if cfg.failAutoMerge {
+				http.Error(w, `{"errors":[{"message":"automerge error"}]}`, http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"enablePullRequestAutoMerge": map[string]any{},
+				},
+			})
+
+		case r.Method == http.MethodPost && path == "/internal/pr/register":
+			if cfg.failBrainReg {
+				http.Error(w, `{"error":"registration failed"}`, http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "registered"})
+
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+func TestGitHubSkillPublisher_PublishSkillChanges(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name      string
+		token     string
+		repo      string
+		channelID string
+		changes   []SkillFileChange
+		serverCfg mockGitHubServerConfig
+		wantPR    int
+		wantErr   bool
+		errSubstr string
+	}{
+		{
+			name:      "MissingToken",
+			token:     "",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			wantErr:   true,
+			errSubstr: "missing GITHUB_PAT",
+		},
+		{
+			name:      "ForbiddenAerialRepo",
+			token:     "pat-123",
+			repo:      "aerial",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			wantErr:   true,
+			errSubstr: "publishing directly to aerial repository is forbidden",
+		},
+		{
+			name:    "EmptyChangesReturnsZero",
+			token:   "pat-123",
+			repo:    "aerial-config",
+			changes: nil,
+			wantPR:  0,
+			wantErr: false,
+		},
+		{
+			name:      "InvalidRelPathRoot",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "SKILL.md", Content: "foo"}},
+			wantErr:   true,
+			errSubstr: "invalid skill relative path",
+		},
+		{
+			name:      "InvalidRelPathBadDomain",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/voice/ha/SKILL.md", Content: "foo"}},
+			wantErr:   true,
+			errSubstr: "invalid skill relative path",
+		},
+		{
+			name:      "OpenCovenPRAlreadyExists",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			serverCfg: mockGitHubServerConfig{openPRRefs: []string{"update/coven-skills-999"}},
+			wantPR:    0,
+			wantErr:   false,
+		},
+		{
+			name:      "ListPullsError",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			serverCfg: mockGitHubServerConfig{failListPRs: true},
+			wantErr:   true,
+			errSubstr: "failed to list open pull requests",
+		},
+		{
+			name:      "GetMainRefError",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			serverCfg: mockGitHubServerConfig{failGetMainRef: true},
+			wantErr:   true,
+			errSubstr: "failed to get heads/main",
+		},
+		{
+			name:      "EmptyMainRefSHAError",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			serverCfg: mockGitHubServerConfig{emptyMainRefSHA: true},
+			wantErr:   true,
+			errSubstr: "empty SHA for heads/main",
+		},
+		{
+			name:      "GetCommitError",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			serverCfg: mockGitHubServerConfig{failGetCommit: true},
+			wantErr:   true,
+			errSubstr: "failed to get commit",
+		},
+		{
+			name:      "EmptyBaseTreeSHAError",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			serverCfg: mockGitHubServerConfig{emptyBaseTreeSHA: true},
+			wantErr:   true,
+			errSubstr: "empty tree SHA",
+		},
+		{
+			name:      "CreateTreeError",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			serverCfg: mockGitHubServerConfig{failCreateTree: true},
+			wantErr:   true,
+			errSubstr: "failed to create tree",
+		},
+		{
+			name:      "EmptyCreatedTreeSHAError",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			serverCfg: mockGitHubServerConfig{emptyTreeSHA: true},
+			wantErr:   true,
+			errSubstr: "empty SHA for created tree",
+		},
+		{
+			name:      "CreateCommitError",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			serverCfg: mockGitHubServerConfig{failCreateCommit: true},
+			wantErr:   true,
+			errSubstr: "failed to create commit",
+		},
+		{
+			name:      "EmptyCreatedCommitSHAError",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			serverCfg: mockGitHubServerConfig{emptyCommitSHA: true},
+			wantErr:   true,
+			errSubstr: "empty SHA for created commit",
+		},
+		{
+			name:      "CreateRefError",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			serverCfg: mockGitHubServerConfig{failCreateRef: true},
+			wantErr:   true,
+			errSubstr: "failed to create ref",
+		},
+		{
+			name:      "CreatePRErrorCleansBranch",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			serverCfg: mockGitHubServerConfig{failCreatePR: true},
+			wantErr:   true,
+			errSubstr: "failed to create pull request",
+		},
+		{
+			name:      "CreatePRErrorCleansBranchDeleteErrorHandled",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo"}},
+			serverCfg: mockGitHubServerConfig{failCreatePR: true, failDeleteRef: true},
+			wantErr:   true,
+			errSubstr: "failed to create pull request",
+		},
+		{
+			name:      "SuccessSingleChangeWithAutoMergeAndBrainRegister",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			channelID: "1562837549255495693",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo", CommitSummary: "update ha", Action: "EDIT"}},
+			wantPR:    42,
+			wantErr:   false,
+		},
+		{
+			name:      "SuccessMultipleChangesWithoutChannelID",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			channelID: "",
+			changes: []SkillFileChange{
+				{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo", CommitSummary: "update ha", Action: "EDIT"},
+				{RelPath: "custom-skills/common/deploy/SKILL.md", Content: "bar", CommitSummary: "add deploy", Action: "CREATE"},
+			},
+			wantPR:  42,
+			wantErr: false,
+		},
+		{
+			name:      "SuccessAutoMergeAndBrainRegisterFailuresHandledBestEffort",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			channelID: "1562837549255495693",
+			changes:   []SkillFileChange{{RelPath: "custom-skills/discord/ha/SKILL.md", Content: "foo", CommitSummary: "update ha", Action: "EDIT"}},
+			serverCfg: mockGitHubServerConfig{failAutoMerge: true, failBrainReg: true},
+			wantPR:    42,
+			wantErr:   false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newMockGitHubServer(t, tc.serverCfg)
+			defer server.Close()
+
+			fixedTime := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
+			publisher := NewGitHubSkillPublisher(GitHubSkillPublisherConfig{
+				Token:              tc.token,
+				Owner:              "azylman",
+				Repo:               tc.repo,
+				BrainPRRegisterURL: server.URL + "/internal/pr/register",
+				SystemChannelID:    tc.channelID,
+				BaseURL:            server.URL,
+				HTTPClient:         server.Client(),
+				Now:                func() time.Time { return fixedTime },
+			})
+
+			prNum, err := publisher.PublishSkillChanges(ctx, tc.changes)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("PublishSkillChanges() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				if tc.errSubstr != "" && !strings.Contains(err.Error(), tc.errSubstr) {
+					t.Errorf("err = %q, want substring %q", err.Error(), tc.errSubstr)
+				}
+				return
+			}
+			if prNum != tc.wantPR {
+				t.Errorf("prNum = %d, want %d", prNum, tc.wantPR)
+			}
+		})
+	}
+}
+
+type mockSkillPublisher struct {
+	prNum   int
+	err     error
+	changes []SkillFileChange
+}
+
+func (m *mockSkillPublisher) PublishSkillChanges(ctx context.Context, changes []SkillFileChange) (int, error) {
+	m.changes = changes
+	if m.err != nil {
+		return 0, m.err
+	}
+	return m.prNum, nil
+}
+
+func TestConsolidateProceduralSkills(t *testing.T) {
+	ctx := context.Background()
+
+	validSkillMD := `---
+name: ha-ops
+description: Home assistant operations workflow and automation routines.
+---
+# Home Assistant Operations
+Procedure steps for configuring automations and entities properly.
+`
+	validNewSkillMD := `---
+name: new-flow
+description: Novel procedure for orchestrating automated deployments.
+---
+# New Flow Procedure
+1. First step in the procedural execution pipeline.
+2. Second step in the procedural execution pipeline.
+3. Third step in the procedural execution pipeline.
+`
+
+	tests := []struct {
+		name                    string
+		lockExtraction          bool
+		nilStore                bool
+		nilPublisher            bool
+		nilLLM                  bool
+		storeFailOp             string
+		cands                   []ProceduralCandidate
+		customSkillsDir         string
+		llmResp                 string
+		llmErr                  error
+		pubPR                   int
+		pubErr                  error
+		wantPR                  int
+		wantErr                 bool
+		wantMarkConsolidate     bool
+		wantMarkSkipped         bool
+		wantChangesLen          int
+		wantConsolidatedIndices []int
+		wantPendingIndices      []int
+	}{
+		{
+			name:           "ExtractionMutexLockedReturnsZero",
+			lockExtraction: true,
+			wantPR:         0,
+			wantErr:        false,
+		},
+		{
+			name:     "NilStoreFails",
+			nilStore: true,
+			wantErr:  true,
+		},
+		{
+			name:         "NilPublisherFails",
+			nilPublisher: true,
+			wantErr:      true,
+		},
+		{
+			name:    "NilLLMFails",
+			nilLLM:  true,
+			wantErr: true,
+		},
+		{
+			name:        "GetPendingCandidatesStoreError",
+			storeFailOp: "GetPendingProceduralCandidates",
+			wantErr:     true,
+		},
+		{
+			name:    "NoPendingCandidatesReturnsZero",
+			cands:   nil,
+			wantPR:  0,
+			wantErr: false,
+		},
+		{
+			name:            "ScanCustomSkillsDirError",
+			cands:           []ProceduralCandidate{testProcCand(1, "ha-ops", "trigger", []string{"avoid"}, nil)},
+			customSkillsDir: "FILE_AS_DIR",
+			wantErr:         true,
+		},
+		{
+			name: "PlanYieldsNoBatchesAllBlockedCoreSkillsSkipped",
+			cands: []ProceduralCandidate{
+				testProcCand(10, "self-improvement", "trigger 1", nil, nil),
+				testProcCand(11, "writing-plans", "trigger 2", nil, nil),
+			},
+			wantPR:          0,
+			wantErr:         false,
+			wantMarkSkipped: true,
+		},
+		{
+			name: "LLMInvocationErrorBatchSkipped",
+			cands: []ProceduralCandidate{
+				testProcCand(20, "ha-ops", "trigger 1", []string{"avoid this"}, nil),
+			},
+			llmErr:  errors.New("llm execution error"),
+			wantPR:  0,
+			wantErr: false,
+		},
+		{
+			name: "LLMMalformedJSONBatchSkipped",
+			cands: []ProceduralCandidate{
+				testProcCand(21, "ha-ops", "trigger 1", []string{"avoid this"}, nil),
+			},
+			llmResp: "not a json object",
+			wantPR:  0,
+			wantErr: false,
+		},
+		{
+			name: "DesignerReturnsNOOPCandidateMarkedSkipped",
+			cands: []ProceduralCandidate{
+				testProcCand(22, "ha-ops", "trigger 1", []string{"avoid this"}, nil),
+			},
+			llmResp:         `{"action":"NOOP"}`,
+			wantPR:          0,
+			wantErr:         false,
+			wantMarkSkipped: true,
+		},
+		{
+			name: "DesignerReturnsUnknownActionBatchSkipped",
+			cands: []ProceduralCandidate{
+				testProcCand(23, "ha-ops", "trigger 1", []string{"avoid this"}, nil),
+			},
+			llmResp: `{"action":"DELETE"}`,
+			wantPR:  0,
+			wantErr: false,
+		},
+		{
+			name: "DesignerValidationFailsBatchSkipped",
+			cands: []ProceduralCandidate{
+				testProcCand(24, "ha-ops", "trigger 1", []string{"avoid this"}, nil),
+			},
+			llmResp: `{"action":"EDIT","name":"ha-ops","markdown":"short"}`,
+			wantPR:  0,
+			wantErr: false,
+		},
+		{
+			name: "PublisherFailsReturnsError",
+			cands: []ProceduralCandidate{
+				testProcCand(25, "", "trigger 1", nil, testEmbeddingAt(2, 1.0)),
+				testProcCand(26, "", "trigger 2", nil, testEmbeddingAt(2, 1.0)),
+			},
+			llmResp: fmt.Sprintf(`{"action":"CREATE","name":"new-flow","domain":"discord","commit_summary":"add new flow","markdown":%q}`, validNewSkillMD),
+			pubErr:  errors.New("github publish error"),
+			wantErr: true,
+		},
+		{
+			name: "SuccessCREATEBatch",
+			cands: []ProceduralCandidate{
+				testProcCand(30, "", "trigger 1", nil, testEmbeddingAt(2, 1.0)),
+				testProcCand(31, "", "trigger 2", nil, testEmbeddingAt(2, 1.0)),
+			},
+			llmResp:             fmt.Sprintf(`{"action":"CREATE","name":"new-flow","domain":"discord","commit_summary":"add new flow","markdown":%q}`, validNewSkillMD),
+			pubPR:               88,
+			wantPR:              88,
+			wantErr:             false,
+			wantMarkConsolidate: true,
+		},
+		{
+			name: "SuccessEDITBatch",
+			cands: []ProceduralCandidate{
+				testProcCand(40, "ha-ops", "trigger 1", []string{"avoid this"}, nil),
+			},
+			llmResp:             fmt.Sprintf(`{"action":"EDIT","name":"ha-ops","domain":"discord","commit_summary":"update ha-ops","markdown":%q}`, validSkillMD),
+			pubPR:               89,
+			wantPR:              89,
+			wantErr:             false,
+			wantMarkConsolidate: true,
+		},
+		{
+			name: "PublisherReturnsZeroPRAlreadyOpenCandidatesNotConsolidated",
+			cands: []ProceduralCandidate{
+				testProcCand(50, "ha-ops", "trigger 1", []string{"avoid this"}, nil),
+			},
+			llmResp:             fmt.Sprintf(`{"action":"EDIT","name":"ha-ops","domain":"discord","commit_summary":"update ha-ops","markdown":%q}`, validSkillMD),
+			pubPR:               0,
+			wantPR:              0,
+			wantErr:             false,
+			wantMarkConsolidate: false,
+		},
+		{
+			name: "CollidingBatchesInSamePassDeferred",
+			cands: []ProceduralCandidate{
+				testProcCand(60, "ha-ops", "trigger 1", []string{"instruction 1"}, nil),
+				testProcCand(61, "", "trigger 2", nil, testEmbeddingAt(0, 1.0)),
+			},
+			llmResp:                 fmt.Sprintf(`{"action":"EDIT","name":"ha-ops","domain":"discord","commit_summary":"update ha-ops","markdown":%q}`, validSkillMD),
+			pubPR:                   95,
+			wantPR:                  95,
+			wantErr:                 false,
+			wantChangesLen:          1,
+			wantConsolidatedIndices: []int{0},
+			wantPendingIndices:      []int{1},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.lockExtraction {
+				extractionMutex.Lock()
+				defer extractionMutex.Unlock()
+			}
+
+			tmpDir := t.TempDir()
+			skillsDir := filepath.Join(tmpDir, "custom-skills")
+			discordDir := filepath.Join(skillsDir, "discord", "ha-ops")
+			if err := os.MkdirAll(discordDir, 0o755); err != nil {
+				t.Fatalf("failed to create test custom skills dir: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(discordDir, "SKILL.md"), []byte(validSkillMD), 0o644); err != nil {
+				t.Fatalf("failed to write test SKILL.md: %v", err)
+			}
+
+			targetSkillsDir := skillsDir
+			if tc.customSkillsDir == "FILE_AS_DIR" {
+				dummyFile := filepath.Join(tmpDir, "dummy-file")
+				_ = os.WriteFile(dummyFile, []byte("not-a-dir"), 0o644)
+				targetSkillsDir = dummyFile
+			} else if tc.customSkillsDir != "" {
+				targetSkillsDir = tc.customSkillsDir
+			}
+
+			mem := newTestMemStore()
+			if tc.storeFailOp != "" {
+				mem.failOp = tc.storeFailOp
+				mem.failErr = errors.New("simulated store failure")
+			}
+			var insertedIDs []int64
+			for _, cand := range tc.cands {
+				id, _ := mem.InsertProceduralCandidate(ctx, cand)
+				insertedIDs = append(insertedIDs, id)
+			}
+
+			var store Store = mem
+			if tc.nilStore {
+				store = nil
+			}
+
+			pub := &mockSkillPublisher{
+				prNum: tc.pubPR,
+				err:   tc.pubErr,
+			}
+			var publisher SkillPublisher = pub
+			if tc.nilPublisher {
+				publisher = nil
+			}
+
+			var llm LLMClientFunc = func(c context.Context, prompt string) (string, error) {
+				if tc.llmErr != nil {
+					return "", tc.llmErr
+				}
+				return tc.llmResp, nil
+			}
+			if tc.nilLLM {
+				llm = nil
+			}
+
+			ollama := &MockOllamaClient{embedding: testEmbeddingAt(0, 1.0)}
+
+			prNum, err := ConsolidateProceduralSkills(ctx, store, ollama, llm, publisher, targetSkillsDir)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ConsolidateProceduralSkills() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				return
+			}
+			if prNum != tc.wantPR {
+				t.Errorf("prNum = %d, want %d", prNum, tc.wantPR)
+			}
+
+			if tc.wantMarkConsolidate {
+				for _, id := range insertedIDs {
+					if mem.proceduralCandidates[id].Status != "consolidated" {
+						t.Errorf("candidate %d status = %q, want consolidated", id, mem.proceduralCandidates[id].Status)
+					}
+					if mem.proceduralCandidates[id].PRNumber != tc.wantPR {
+						t.Errorf("candidate %d pr_number = %d, want %d", id, mem.proceduralCandidates[id].PRNumber, tc.wantPR)
+					}
+				}
+			}
+			if tc.wantMarkSkipped {
+				for _, id := range insertedIDs {
+					if mem.proceduralCandidates[id].Status != "skipped" {
+						t.Errorf("candidate %d status = %q, want skipped", id, mem.proceduralCandidates[id].Status)
+					}
+				}
+			}
+			if tc.wantChangesLen > 0 {
+				if len(pub.changes) != tc.wantChangesLen {
+					t.Errorf("published changes len = %d, want %d", len(pub.changes), tc.wantChangesLen)
+				}
+			}
+			for _, idx := range tc.wantConsolidatedIndices {
+				if idx < len(insertedIDs) {
+					id := insertedIDs[idx]
+					if mem.proceduralCandidates[id].Status != "consolidated" {
+						t.Errorf("candidate %d status = %q, want consolidated", id, mem.proceduralCandidates[id].Status)
+					}
+				}
+			}
+			for _, idx := range tc.wantPendingIndices {
+				if idx < len(insertedIDs) {
+					id := insertedIDs[idx]
+					if mem.proceduralCandidates[id].Status != "pending" {
+						t.Errorf("candidate %d status = %q, want pending", id, mem.proceduralCandidates[id].Status)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestWorker_RunDaily_ProceduralSkills(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	skillsDir := filepath.Join(tmpDir, "custom-skills", "discord", "ha-ops")
+	_ = os.MkdirAll(skillsDir, 0o755)
+	validMD := `---
+name: ha-ops
+description: Home assistant operations workflow and automation routines.
+---
+# Home Assistant Operations
+Procedure steps.
+`
+	_ = os.WriteFile(filepath.Join(skillsDir, "SKILL.md"), []byte(validMD), 0o644)
+
+	mem := newTestMemStore()
+	_, _ = mem.InsertProceduralCandidate(ctx, testProcCand(1, "ha-ops", "trigger 1", []string{"avoid"}, nil))
+
+	pub := &mockSkillPublisher{prNum: 55}
+	llm := func(c context.Context, prompt string) (string, error) {
+		return fmt.Sprintf(`{"action":"EDIT","name":"ha-ops","markdown":%q}`, validMD), nil
+	}
+
+	w := NewWorker(WorkerConfig{
+		Store:           mem,
+		Ollama:          &MockOllamaClient{embedding: testEmbeddingAt(0, 1.0)},
+		LLMClient:       llm,
+		Publisher:       pub,
+		CustomSkillsDir: filepath.Join(tmpDir, "custom-skills"),
+	})
+
+	// Tick 60 is daily decay + dreaming + procedural consolidation
+	w.Tick(ctx, 60)
+
+	if len(pub.changes) != 1 {
+		t.Errorf("publisher changes len = %d, want 1", len(pub.changes))
+	}
+}
+
+func TestToolHandler_Consolidate_ProceduralSkills(t *testing.T) {
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	skillsDir := filepath.Join(tmpDir, "custom-skills", "discord", "ha-ops")
+	_ = os.MkdirAll(skillsDir, 0o755)
+	validMD := `---
+name: ha-ops
+description: Home assistant operations workflow and automation routines.
+---
+# Home Assistant Operations
+Procedure steps.
+`
+	_ = os.WriteFile(filepath.Join(skillsDir, "SKILL.md"), []byte(validMD), 0o644)
+
+	mem := newTestMemStore()
+	_, _ = mem.InsertProceduralCandidate(ctx, testProcCand(1, "ha-ops", "trigger 1", []string{"avoid"}, nil))
+
+	pub := &mockSkillPublisher{prNum: 77}
+	cfg := &Config{
+		CustomSkillsDir: filepath.Join(tmpDir, "custom-skills"),
+	}
+
+	h := NewToolHandler(cfg, mem, &MockOllamaClient{embedding: testEmbeddingAt(0, 1.0)}, pub)
+	h.llmClient = func(c context.Context, prompt string) (string, error) {
+		return fmt.Sprintf(`{"action":"EDIT","name":"ha-ops","markdown":%q}`, validMD), nil
+	}
+
+	count, err := h.Consolidate(ctx)
+	if err != nil {
+		t.Fatalf("Consolidate() err = %v", err)
+	}
+	if count != 0 {
+		t.Errorf("fact consolidate count = %d, want 0", count)
+	}
+	if len(pub.changes) != 1 {
+		t.Errorf("pub.changes len = %d, want 1", len(pub.changes))
+	}
+}
+
+func TestConfig_LoadAndResolve_Chunk4Fields(t *testing.T) {
+	tmpDir := t.TempDir()
+	yamlPath := filepath.Join(tmpDir, "chunk4.yaml")
+	content := `port: "4008"
+database_url: "postgres://localhost/test"
+custom_skills_dir: "/yaml/custom-skills"
+github_pat: "pat-from-yaml"
+config_repo_owner: "yaml-owner"
+config_repo_name: "yaml-repo"
+brain_pr_register_url: "http://yaml-brain/internal/pr/register"
+system_channel_id: "1562837549255495693"
+`
+	if err := os.WriteFile(yamlPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("failed to write yaml: %v", err)
+	}
+
+	tests := []struct {
+		name          string
+		path          string
+		envSkillsDir  string
+		envPAT        string
+		envOwner      string
+		envRepo       string
+		envBrainReg   string
+		envChannelID  string
+		wantSkillsDir string
+		wantPAT       string
+		wantOwner     string
+		wantRepo      string
+		wantBrainReg  string
+		wantChannelID string
+	}{
+		{
+			name:          "LoadedFromYAML",
+			path:          yamlPath,
+			wantSkillsDir: "/yaml/custom-skills",
+			wantPAT:       "pat-from-yaml",
+			wantOwner:     "yaml-owner",
+			wantRepo:      "yaml-repo",
+			wantBrainReg:  "http://yaml-brain/internal/pr/register",
+			wantChannelID: "1562837549255495693",
+		},
+		{
+			name:          "EnvOverridesYAML",
+			path:          yamlPath,
+			envSkillsDir:  "/env/custom-skills",
+			envPAT:        "pat-from-env",
+			envOwner:      "env-owner",
+			envRepo:       "env-repo",
+			envBrainReg:   "http://env-brain/pr/reg",
+			envChannelID:  "1562837549255495694",
+			wantSkillsDir: "/env/custom-skills",
+			wantPAT:       "pat-from-env",
+			wantOwner:     "env-owner",
+			wantRepo:      "env-repo",
+			wantBrainReg:  "http://env-brain/pr/reg",
+			wantChannelID: "1562837549255495694",
+		},
+		{
+			name:          "NonNumericChannelIDCleared",
+			path:          yamlPath,
+			envChannelID:  "general-channel-name",
+			wantSkillsDir: "/yaml/custom-skills",
+			wantPAT:       "pat-from-yaml",
+			wantOwner:     "yaml-owner",
+			wantRepo:      "yaml-repo",
+			wantBrainReg:  "http://yaml-brain/internal/pr/register",
+			wantChannelID: "",
+		},
+		{
+			name:          "DefaultsWhenEmpty",
+			path:          "",
+			wantSkillsDir: "/config/custom-skills",
+			wantOwner:     "azylman",
+			wantRepo:      "aerial-config",
+			wantBrainReg:  "http://eri.aerial/internal/pr/register",
+			wantChannelID: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DATABASE_URL", "postgres://localhost/test")
+			t.Setenv("CUSTOM_SKILLS_DIR", tc.envSkillsDir)
+			t.Setenv("GITHUB_PAT", tc.envPAT)
+			t.Setenv("CONFIG_REPO_OWNER", tc.envOwner)
+			t.Setenv("CONFIG_REPO_NAME", tc.envRepo)
+			t.Setenv("BRAIN_PR_REGISTER_URL", tc.envBrainReg)
+			t.Setenv("SYSTEM_CHANNEL_ID", tc.envChannelID)
+
+			cfg, err := LoadConfigFile(tc.path, "")
+			if err != nil {
+				t.Fatalf("LoadConfigFile() err = %v", err)
+			}
+			if cfg.CustomSkillsDir != tc.wantSkillsDir {
+				t.Errorf("CustomSkillsDir = %q, want %q", cfg.CustomSkillsDir, tc.wantSkillsDir)
+			}
+			if cfg.GitHubPAT != tc.wantPAT {
+				t.Errorf("GitHubPAT = %q, want %q", cfg.GitHubPAT, tc.wantPAT)
+			}
+			if cfg.ConfigRepoOwner != tc.wantOwner {
+				t.Errorf("ConfigRepoOwner = %q, want %q", cfg.ConfigRepoOwner, tc.wantOwner)
+			}
+			if cfg.ConfigRepoName != tc.wantRepo {
+				t.Errorf("ConfigRepoName = %q, want %q", cfg.ConfigRepoName, tc.wantRepo)
+			}
+			if cfg.BrainPRRegisterURL != tc.wantBrainReg {
+				t.Errorf("BrainPRRegisterURL = %q, want %q", cfg.BrainPRRegisterURL, tc.wantBrainReg)
+			}
+			if cfg.SystemChannelID != tc.wantChannelID {
+				t.Errorf("SystemChannelID = %q, want %q", cfg.SystemChannelID, tc.wantChannelID)
+			}
+		})
+	}
+}
+
+func TestFormatSkillCommitAndPRHelpers(t *testing.T) {
+	c1 := SkillFileChange{
+		RelPath:       "custom-skills/discord/ha/SKILL.md",
+		CommitSummary: "update ha",
+		Action:        "EDIT",
+	}
+	c2 := SkillFileChange{
+		RelPath:       "custom-skills/common/deploy/SKILL.md",
+		CommitSummary: "add deploy",
+		Action:        "CREATE",
+	}
+
+	tests := []struct {
+		name          string
+		changes       []SkillFileChange
+		targetID      string
+		wantCommitSub string
+		wantTitle     string
+		wantBodySub   string
+	}{
+		{
+			name:          "SingleChange",
+			changes:       []SkillFileChange{c1},
+			targetID:      "1562837549255495693",
+			wantCommitSub: "feat(skills): update ha",
+			wantTitle:     "feat(skills): update ha",
+			wantBodySub:   `<!-- aerial-pr: {"target_id":"1562837549255495693","vanadis_chunk_id":""} -->`,
+		},
+		{
+			name:          "MultipleChanges",
+			changes:       []SkillFileChange{c1, c2},
+			targetID:      "",
+			wantCommitSub: "feat(skills): update 2 procedural skills",
+			wantTitle:     "feat(skills): evolve 2 procedural skills",
+			wantBodySub:   `<!-- aerial-pr: {"target_id":"","vanadis_chunk_id":""} -->`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			commitMsg := formatSkillCommitMessage(tc.changes)
+			if !strings.Contains(commitMsg, tc.wantCommitSub) {
+				t.Errorf("commitMsg = %q, want containing %q", commitMsg, tc.wantCommitSub)
+			}
+			title := formatSkillPRTitle(tc.changes)
+			if title != tc.wantTitle {
+				t.Errorf("title = %q, want %q", title, tc.wantTitle)
+			}
+			body := formatSkillPRBody(tc.changes, tc.targetID)
+			if !strings.Contains(body, tc.wantBodySub) {
+				t.Errorf("body = %q, want containing %q", body, tc.wantBodySub)
+			}
+		})
+	}
+
+	// Test parseDesignerResponse
+	parseTests := []struct {
+		name       string
+		raw        string
+		wantErr    bool
+		wantAction string
+	}{
+		{name: "EmptyRaw", raw: "", wantErr: true},
+		{name: "NoJSON", raw: "hello world", wantErr: true},
+		{name: "MalformedJSON", raw: "{broken json", wantErr: true},
+		{name: "ValidJSON", raw: `{"action":"EDIT","name":"foo"}`, wantErr: false, wantAction: "EDIT"},
+		{name: "ValidJSONWithMarkdownPrefix", raw: "```json\n{\"action\":\"CREATE\",\"name\":\"bar\"}\n```", wantErr: false, wantAction: "CREATE"},
+	}
+
+	for _, tc := range parseTests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp, err := parseDesignerResponse(tc.raw)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("parseDesignerResponse(%q) err = %v, wantErr = %v", tc.raw, err, tc.wantErr)
+			}
+			if tc.wantErr {
+				return
+			}
+			if resp.Action != tc.wantAction {
+				t.Errorf("Action = %q, want %q", resp.Action, tc.wantAction)
+			}
+		})
+	}
+}
