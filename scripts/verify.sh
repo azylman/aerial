@@ -198,10 +198,27 @@ run_deadcode() {
         return 0
     fi
     if [ -d "$svc" ]; then
-        echo "   [deadcode] Checking $svc for unreachable code..."
+        echo "   [deadcode] Checking $svc for unreachable code (production & test graphs)..."
         ensure_deadcode
+        main_pkgs=$(cd "$svc" && go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./...) || {
+            echo "🚨 [Aerial Verify] Error: failed to list main packages in $svc" >&2
+            exit 1
+        }
+        if [ -n "$main_pkgs" ]; then
+            # shellcheck disable=SC2086
+            dead_prod=$(cd "$svc" && "$DEADCODE_BIN" $main_pkgs 2>&1) || {
+                echo "🚨 [Aerial Verify] Error: deadcode (production) execution failed on $svc:" >&2
+                echo "$dead_prod" >&2
+                exit 1
+            }
+            if [ -n "$dead_prod" ]; then
+                echo "🚨 [Aerial Verify] Unreachable production code or compiled-in test hooks detected in $svc:" >&2
+                echo "$dead_prod" | sed 's/^/   • /' >&2
+                exit 1
+            fi
+        fi
         dead_output=$(cd "$svc" && "$DEADCODE_BIN" -test ./... 2>&1) || {
-            echo "🚨 [Aerial Verify] Error: deadcode execution failed on $svc:" >&2
+            echo "🚨 [Aerial Verify] Error: deadcode (-test) execution failed on $svc:" >&2
             echo "$dead_output" >&2
             exit 1
         }

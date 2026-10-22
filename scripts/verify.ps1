@@ -136,14 +136,30 @@ function Ensure-Deadcode {
 }
 
 function Run-Deadcode($svc) {
-    Write-Host "   [deadcode] Checking $svc for unreachable code..." -ForegroundColor DarkCyan
+    Write-Host "   [deadcode] Checking $svc for unreachable code (production & test graphs)..." -ForegroundColor DarkCyan
     Ensure-Deadcode
     $svcPath = Join-Path $repoRoot $svc
     Push-Location $svcPath
     try {
+        $mainPkgs = @(& go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./... | Where-Object { $_ -and $_.Trim() -ne "" })
+        if ($LASTEXITCODE -ne 0) {
+            throw "go list main packages failed on ${svc}"
+        }
+        if ($mainPkgs.Count -gt 0) {
+            $prodOutput = & deadcode @mainPkgs 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                throw "deadcode (production) analysis failed on ${svc}: $prodOutput"
+            }
+            if ($prodOutput) {
+                $errLines = ($prodOutput | Out-String).Trim()
+                if ($errLines) {
+                    throw "Unreachable production code or compiled-in test hooks detected in ${svc}:`n$errLines"
+                }
+            }
+        }
         $output = & deadcode -test ./... 2>&1
         if ($LASTEXITCODE -ne 0) {
-            throw "deadcode analysis failed on ${svc}: $output"
+            throw "deadcode (-test) analysis failed on ${svc}: $output"
         }
         if ($output) {
             $errLines = ($output | Out-String).Trim()

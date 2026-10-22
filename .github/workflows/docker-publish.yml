@@ -223,7 +223,7 @@ jobs:
 
       - name: Install deadcode
         run: |
-          go install golang.org/x/tools/cmd/deadcode@v0.50.0
+          go install golang.org/x/tools/cmd/deadcode@v0.51.0
 
       - name: Lint Eri
         if: needs.changes.outputs.eri == 'true'
@@ -235,6 +235,13 @@ jobs:
         if: needs.changes.outputs.eri == 'true'
         run: |
           cd services/eri
+          MAIN_PKGS=$(go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./...)
+          DEAD_PROD=$(deadcode $MAIN_PKGS)
+          if [ -n "$DEAD_PROD" ]; then
+            echo "::error::Unreachable production code or compiled-in test hooks detected in eri:"
+            echo "$DEAD_PROD"
+            exit 1
+          fi
           DEAD=$(deadcode -test ./...)
           if [ -n "$DEAD" ]; then
             echo "::error::Unreachable dead code detected in eri:"
@@ -252,6 +259,12 @@ jobs:
         if: needs.changes.outputs.scheduler-mcp == 'true'
         run: |
           cd mcp/scheduler-mcp
+          DEAD_PROD=$(deadcode .)
+          if [ -n "$DEAD_PROD" ]; then
+            echo "::error::Unreachable production code or compiled-in test hooks detected in scheduler-mcp:"
+            echo "$DEAD_PROD"
+            exit 1
+          fi
           DEAD=$(deadcode -test ./...)
           if [ -n "$DEAD" ]; then
             echo "::error::Unreachable dead code detected in scheduler-mcp:"
@@ -269,6 +282,12 @@ jobs:
         if: needs.changes.outputs.coven == 'true'
         run: |
           cd services/coven
+          DEAD_PROD=$(deadcode .)
+          if [ -n "$DEAD_PROD" ]; then
+            echo "::error::Unreachable production code or compiled-in test hooks detected in coven:"
+            echo "$DEAD_PROD"
+            exit 1
+          fi
           DEAD=$(deadcode -test ./...)
           if [ -n "$DEAD" ]; then
             echo "::error::Unreachable dead code detected in coven:"
@@ -286,6 +305,12 @@ jobs:
         if: needs.changes.outputs.discord-mcp == 'true'
         run: |
           cd mcp/discord-mcp
+          DEAD_PROD=$(deadcode .)
+          if [ -n "$DEAD_PROD" ]; then
+            echo "::error::Unreachable production code or compiled-in test hooks detected in discord-mcp:"
+            echo "$DEAD_PROD"
+            exit 1
+          fi
           DEAD=$(deadcode -test ./...)
           if [ -n "$DEAD" ]; then
             echo "::error::Unreachable dead code detected in discord-mcp:"
@@ -303,6 +328,12 @@ jobs:
         if: needs.changes.outputs.dashboard == 'true'
         run: |
           cd services/dashboard
+          DEAD_PROD=$(deadcode .)
+          if [ -n "$DEAD_PROD" ]; then
+            echo "::error::Unreachable production code or compiled-in test hooks detected in dashboard:"
+            echo "$DEAD_PROD"
+            exit 1
+          fi
           DEAD=$(deadcode -test ./...)
           if [ -n "$DEAD" ]; then
             echo "::error::Unreachable dead code detected in dashboard:"
@@ -320,6 +351,12 @@ jobs:
         if: needs.changes.outputs.hangar == 'true'
         run: |
           cd services/hangar
+          DEAD_PROD=$(deadcode .)
+          if [ -n "$DEAD_PROD" ]; then
+            echo "::error::Unreachable production code or compiled-in test hooks detected in hangar:"
+            echo "$DEAD_PROD"
+            exit 1
+          fi
           DEAD=$(deadcode -test ./...)
           if [ -n "$DEAD" ]; then
             echo "::error::Unreachable dead code detected in hangar:"
@@ -337,6 +374,12 @@ jobs:
         if: needs.changes.outputs.webhooks-router == 'true'
         run: |
           cd services/webhooks-router
+          DEAD_PROD=$(deadcode .)
+          if [ -n "$DEAD_PROD" ]; then
+            echo "::error::Unreachable production code or compiled-in test hooks detected in webhooks-router:"
+            echo "$DEAD_PROD"
+            exit 1
+          fi
           DEAD=$(deadcode -test ./...)
           if [ -n "$DEAD" ]; then
             echo "::error::Unreachable dead code detected in webhooks-router:"
@@ -354,6 +397,12 @@ jobs:
         if: needs.changes.outputs.vanadis == 'true'
         run: |
           cd services/vanadis
+          DEAD_PROD=$(deadcode .)
+          if [ -n "$DEAD_PROD" ]; then
+            echo "::error::Unreachable production code or compiled-in test hooks detected in vanadis:"
+            echo "$DEAD_PROD"
+            exit 1
+          fi
           DEAD=$(deadcode -test ./...)
           if [ -n "$DEAD" ]; then
             echo "::error::Unreachable dead code detected in vanadis:"
