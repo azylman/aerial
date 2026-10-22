@@ -874,7 +874,7 @@ func consolidateCliqueBatch(ctx context.Context, store Store, client OllamaClien
 		}
 
 		payload, err := parseFactsJSON(resp)
-		if err != nil || len(payload.Facts) == 0 {
+		if err != nil {
 			log.Printf("[Memory] Warning: Fact consolidation payload parse failed: %v", err)
 			continue
 		}
