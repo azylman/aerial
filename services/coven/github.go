@@ -542,6 +542,8 @@ func ConsolidateProceduralSkills(ctx context.Context, store Store, ollama Ollama
 
 	var changes []SkillFileChange
 	var allPublishedIDs []int64
+	seenPaths := make(map[string]bool)
+	seenNames := make(map[string]bool)
 
 	for _, batch := range batches {
 		batchIDs := make([]int64, len(batch.Candidates))
@@ -587,6 +589,37 @@ func ConsolidateProceduralSkills(ctx context.Context, store Store, ollama Ollama
 		if err != nil {
 			log.Printf("[coven-skills] validation failed for %s %s: %v", action, designerResp.Name, err)
 			continue
+		}
+
+		if seenPaths[relPath] || seenNames[name] {
+			log.Printf("[coven-skills] colliding skill name %q or path %q already staged in current pass, deferring batch", name, relPath)
+			continue
+		}
+
+		seenPaths[relPath] = true
+		seenNames[name] = true
+
+		// Update in-memory diskSkills slice so subsequent batches validate and compile against the latest staged state.
+		found := false
+		for i := range diskSkills {
+			if diskSkills[i].RelPath == relPath || diskSkills[i].Name == name {
+				diskSkills[i].RawContent = cleanedMD
+				diskSkills[i].Name = name
+				found = true
+				break
+			}
+		}
+		if !found {
+			normDomain := strings.ToLower(strings.TrimSpace(domain))
+			if normDomain != "common" {
+				normDomain = "discord"
+			}
+			diskSkills = append(diskSkills, DiskSkill{
+				Name:       name,
+				RelPath:    relPath,
+				Domain:     normDomain,
+				RawContent: cleanedMD,
+			})
 		}
 
 		commitSummary := strings.TrimSpace(designerResp.CommitSummary)

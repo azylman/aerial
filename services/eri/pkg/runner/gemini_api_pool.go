@@ -36,9 +36,6 @@ type (
 
 func cleanParameters(schema map[string]interface{}) map[string]interface{} {
 	res := cleanSchemaNode(schema)
-	if res == nil {
-		res = map[string]interface{}{}
-	}
 	if t, ok := res["type"].(string); !ok || t == "" {
 		res["type"] = "OBJECT"
 	}

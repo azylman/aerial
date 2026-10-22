@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -186,5 +187,83 @@ func TestExtractSkillFromTarget(t *testing.T) {
 	}, time.Second, "[Test]")
 	if gotMemQuery != "fallback prompt" {
 		t.Errorf("expected fallback prompt, got %q", gotMemQuery)
+	}
+
+	// Test error and pre-existing tag branches
+	_ = injectRetrievedContext(context.Background(), "error prompt", "q", func(context.Context) (string, error) {
+		return "", errors.New("amb error")
+	}, time.Second, func(_ context.Context, _ string) (string, error) {
+		return "", errors.New("mem error")
+	}, time.Second, "[Test]")
+
+	tagPrompt := "<ambient_context>skip</ambient_context> <retrieved_memory>skip</retrieved_memory>"
+	if res := injectRetrievedContext(context.Background(), tagPrompt, "q", func(context.Context) (string, error) {
+		return "should not be called", nil
+	}, time.Second, func(_ context.Context, _ string) (string, error) {
+		return "should not be called", nil
+	}, time.Second, "[Test]"); res != tagPrompt {
+		t.Errorf("injectRetrievedContext did not skip existing tags: %q", res)
+	}
+}
+
+func TestCompileLeasePrompt(t *testing.T) {
+	tests := []struct {
+		name        string
+		turn        *TurnContext
+		isCold      bool
+		prevSessID  string
+		wantContain []string
+	}{
+		{
+			name:        "NilTurn",
+			turn:        nil,
+			wantContain: nil,
+		},
+		{
+			name:        "WarmTurn",
+			turn:        &TurnContext{Prompt: "hello", CoordinationContext: "coord-info"},
+			isCold:      false,
+			wantContain: []string{"hello", "coord-info"},
+		},
+		{
+			name: "ColdTurnWithScopeAndPrevSess",
+			turn: &TurnContext{
+				Prompt:            "hello",
+				ScopeInstructions: "scope-rules",
+				ThreadSummary:     "thread-sum",
+			},
+			isCold:      true,
+			prevSessID:  "sess-prev-99",
+			wantContain: []string{"hello", "<SCOPE_INSTRUCTIONS>", "scope-rules", "sess-prev-99", "thread-sum"},
+		},
+		{
+			name: "ColdTurnWithChannelInstructions",
+			turn: &TurnContext{
+				Prompt:              "hello",
+				ChannelInstructions: "chan-rules",
+			},
+			isCold:      true,
+			wantContain: []string{"hello", "<SCOPE_INSTRUCTIONS>", "chan-rules"},
+		},
+		{
+			name: "ColdTurnAlreadyHasScopeInstructions",
+			turn: &TurnContext{
+				Prompt:            "<SCOPE_INSTRUCTIONS>already present</SCOPE_INSTRUCTIONS>\nhello",
+				ScopeInstructions: "ignored-rules",
+			},
+			isCold:      true,
+			wantContain: []string{"already present", "hello"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := compileLeasePrompt(tc.turn, tc.isCold, tc.prevSessID)
+			for _, w := range tc.wantContain {
+				if !strings.Contains(got, w) {
+					t.Errorf("compileLeasePrompt() = %q, missing %q", got, w)
+				}
+			}
+		})
 	}
 }

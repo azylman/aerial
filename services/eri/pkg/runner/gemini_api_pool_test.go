@@ -611,6 +611,8 @@ func TestCleanParameters(t *testing.T) {
 		{name: "OneOfFlatteningMapSliceNullSecond", input: map[string]interface{}{"oneOf": []map[string]interface{}{{"type": "bool"}, {"type": "null"}}}, expectedType: "BOOLEAN", nullable: true},
 		{name: "UnflattenableTwoNonNulls", input: map[string]interface{}{"anyOf": []interface{}{map[string]interface{}{"type": "string"}, map[string]interface{}{"type": "int"}}}, expectedType: "OBJECT", checkAnyOfPres: true},
 		{name: "UnflattenableThreeAnyOf", input: map[string]interface{}{"anyOf": []interface{}{map[string]interface{}{"type": "string"}, map[string]interface{}{"type": "int"}, map[string]interface{}{"type": "null"}}}, expectedType: "OBJECT", checkAnyOfPres: true},
+		{name: "NilInput", input: nil, expectedType: "OBJECT", checkNonNilProps: true},
+		{name: "InvalidRequiredTypeInSchema", input: map[string]interface{}{"required": []interface{}{123}}, expectedType: "OBJECT"},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {

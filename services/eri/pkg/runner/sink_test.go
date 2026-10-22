@@ -53,6 +53,17 @@ func TestThrowawayTurnSink(t *testing.T) {
 	if _, err := NewThrowawayTurnSink().ResultContext(ctxTimeout); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expected DeadlineExceeded, got %v", err)
 	}
+
+	// Exercise ctxErr checks when both ctx.Done() and resCh/errCh are concurrently available
+	for i := 0; i < 50; i++ {
+		resCh := make(chan string, 1)
+		resCh <- "ready"
+		_, _ = selectContext(ctxCancel, resCh, nil, "")
+
+		errCh := make(chan error, 1)
+		errCh <- errors.New("ready")
+		_, _ = selectContext(ctxCancel, nil, errCh, "")
+	}
 }
 
 func TestIsSubstantiveResponse(t *testing.T) {

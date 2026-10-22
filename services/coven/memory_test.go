@@ -7365,22 +7365,25 @@ description: Novel procedure for orchestrating automated deployments.
 `
 
 	tests := []struct {
-		name                string
-		lockExtraction      bool
-		nilStore            bool
-		nilPublisher        bool
-		nilLLM              bool
-		storeFailOp         string
-		cands               []ProceduralCandidate
-		customSkillsDir     string
-		llmResp             string
-		llmErr              error
-		pubPR               int
-		pubErr              error
-		wantPR              int
-		wantErr             bool
-		wantMarkConsolidate bool
-		wantMarkSkipped     bool
+		name                    string
+		lockExtraction          bool
+		nilStore                bool
+		nilPublisher            bool
+		nilLLM                  bool
+		storeFailOp             string
+		cands                   []ProceduralCandidate
+		customSkillsDir         string
+		llmResp                 string
+		llmErr                  error
+		pubPR                   int
+		pubErr                  error
+		wantPR                  int
+		wantErr                 bool
+		wantMarkConsolidate     bool
+		wantMarkSkipped         bool
+		wantChangesLen          int
+		wantConsolidatedIndices []int
+		wantPendingIndices      []int
 	}{
 		{
 			name:           "ExtractionMutexLockedReturnsZero",
@@ -7520,6 +7523,20 @@ description: Novel procedure for orchestrating automated deployments.
 			wantErr:             false,
 			wantMarkConsolidate: false,
 		},
+		{
+			name: "CollidingBatchesInSamePassDeferred",
+			cands: []ProceduralCandidate{
+				testProcCand(60, "ha-ops", "trigger 1", []string{"instruction 1"}, nil),
+				testProcCand(61, "", "trigger 2", nil, testEmbeddingAt(0, 1.0)),
+			},
+			llmResp:                 fmt.Sprintf(`{"action":"EDIT","name":"ha-ops","domain":"discord","commit_summary":"update ha-ops","markdown":%q}`, validSkillMD),
+			pubPR:                   95,
+			wantPR:                  95,
+			wantErr:                 false,
+			wantChangesLen:          1,
+			wantConsolidatedIndices: []int{0},
+			wantPendingIndices:      []int{1},
+		},
 	}
 
 	for _, tc := range tests {
@@ -7610,6 +7627,27 @@ description: Novel procedure for orchestrating automated deployments.
 				for _, id := range insertedIDs {
 					if mem.proceduralCandidates[id].Status != "skipped" {
 						t.Errorf("candidate %d status = %q, want skipped", id, mem.proceduralCandidates[id].Status)
+					}
+				}
+			}
+			if tc.wantChangesLen > 0 {
+				if len(pub.changes) != tc.wantChangesLen {
+					t.Errorf("published changes len = %d, want %d", len(pub.changes), tc.wantChangesLen)
+				}
+			}
+			for _, idx := range tc.wantConsolidatedIndices {
+				if idx < len(insertedIDs) {
+					id := insertedIDs[idx]
+					if mem.proceduralCandidates[id].Status != "consolidated" {
+						t.Errorf("candidate %d status = %q, want consolidated", id, mem.proceduralCandidates[id].Status)
+					}
+				}
+			}
+			for _, idx := range tc.wantPendingIndices {
+				if idx < len(insertedIDs) {
+					id := insertedIDs[idx]
+					if mem.proceduralCandidates[id].Status != "pending" {
+						t.Errorf("candidate %d status = %q, want pending", id, mem.proceduralCandidates[id].Status)
 					}
 				}
 			}
