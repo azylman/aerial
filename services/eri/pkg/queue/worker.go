@@ -120,14 +120,6 @@ func (te *turnExecution) updateMessageStatus(id, status string, errorMsg ...stri
 	}
 }
 
-func (te *turnExecution) updateScheduleRunStatus(params db.UpdateRunParams) {
-	if s := te.store(); s != nil {
-		if err := s.UpdateScheduleRunStatus(context.Background(), params); err != nil {
-			log.Printf("[Worker] Warning updating schedule run %s status: %v", params.RunID, err)
-		}
-	}
-}
-
 func (te *turnExecution) updateMessageCompleted(id, responseText string) {
 	if s := te.store(); s != nil {
 		if err := s.UpdateMessageCompleted(context.Background(), id, responseText); err != nil {
@@ -166,18 +158,13 @@ func (te *turnExecution) rotateSessionID(threadID, newSessionID string) {
 	}
 }
 
+//nolint:unparam
 func (te *turnExecution) finalizeBurstMessages(msgs []db.Message, msgStatus, msgOutput, runStatus, runErr, model string, notify, isResponse bool) {
-	durationMs, now := time.Since(te.execStart).Milliseconds(), time.Now().UTC()
 	for _, m := range msgs {
 		if isResponse {
 			te.updateMessageCompleted(m.ID, msgOutput)
 		} else {
 			te.updateMessageStatus(m.ID, msgStatus, msgOutput)
-		}
-		if m.ScheduleRunID != "" && runStatus != "" {
-			te.updateScheduleRunStatus(db.UpdateRunParams{
-				RunID: m.ScheduleRunID, MessageID: m.ID, Status: runStatus, CompletedAt: now, DurationMs: durationMs, Error: runErr, Model: model,
-			})
 		}
 		if notify && te.pool != nil && te.pool.cfg.OnMessageCompleted != nil {
 			te.pool.cfg.OnMessageCompleted(m, msgStatus)
@@ -628,11 +615,6 @@ func (te *turnExecution) claimAndFilterStale() bool {
 	}
 
 	te.execStart = time.Now().UTC()
-	for _, m := range te.burst {
-		if m.ScheduleRunID != "" {
-			te.updateScheduleRunStatus(db.UpdateRunParams{RunID: m.ScheduleRunID, MessageID: m.ID, Status: "running"})
-		}
-	}
 	return true
 }
 
@@ -899,15 +881,6 @@ func (te *turnExecution) handleTrailing() {
 			}
 			telemetry := "[QUOTA_PAUSED] Trailing message suppressed due to active quota lockout"
 			te.updateMessageStatus(m.ID, db.StatusFailed, telemetry)
-			if m.ScheduleRunID != "" {
-				te.updateScheduleRunStatus(db.UpdateRunParams{
-					RunID:       m.ScheduleRunID,
-					MessageID:   m.ID,
-					Status:      "failed",
-					CompletedAt: time.Now().UTC(),
-					Error:       telemetry,
-				})
-			}
 			if te.pool != nil && te.pool.cfg.OnMessageCompleted != nil {
 				te.pool.cfg.OnMessageCompleted(m, db.StatusFailed)
 			}

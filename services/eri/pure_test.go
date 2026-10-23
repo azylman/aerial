@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -207,6 +209,55 @@ func TestResolveGuildID_TableDriven(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := ResolveGuildID(tt.msgID, tt.cachedID, tt.channelID); got != tt.want {
 				t.Errorf("ResolveGuildID() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildSyncLLM_TableDriven(t *testing.T) {
+	tests := []struct {
+		name           string
+		rawNil         bool
+		lowEffortModel string
+		defaultModel   string
+		wantModel      string
+		prompt         string
+	}{
+		{"nil raw returns nil", true, "low-model", "def-model", "", "hello"},
+		{"uses low effort model", false, "gemini-3.8-flash-low", "gemini-2.5-pro", "gemini-3.8-flash-low", "test prompt"},
+		{"falls back to default model when low effort empty", false, "", "gemini-2.5-pro", "gemini-2.5-pro", "test prompt 2"},
+		{"whitespace trimmed", false, "  low-model  ", "def-model", "low-model", "test prompt 3"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var raw runner.LLMFunc
+			var capturedModel, capturedPrompt string
+			if !tt.rawNil {
+				raw = func(ctx context.Context, model, prompt string) (string, error) {
+					capturedModel = model
+					capturedPrompt = prompt
+					return "response: " + prompt, nil
+				}
+			}
+			fn := buildSyncLLM(raw, tt.lowEffortModel, tt.defaultModel)
+			if (fn == nil) != tt.rawNil {
+				t.Fatalf("expected fn nil=%v, got nil=%v", tt.rawNil, fn == nil)
+			}
+			if fn != nil {
+				res, err := fn(context.Background(), tt.prompt)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if capturedModel != tt.wantModel {
+					t.Errorf("model = %q, want %q", capturedModel, tt.wantModel)
+				}
+				if capturedPrompt != tt.prompt {
+					t.Errorf("prompt = %q, want %q", capturedPrompt, tt.prompt)
+				}
+				if res != "response: "+tt.prompt {
+					t.Errorf("res = %q, want %q", res, "response: "+tt.prompt)
+				}
 			}
 		})
 	}

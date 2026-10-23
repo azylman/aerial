@@ -26,12 +26,6 @@ func RecoverInterrupted(store db.Store, pool *WorkerPool) {
 
 	ctx := context.Background()
 
-	if reconciled, err := store.ReconcileOrphanedScheduleRuns(ctx); err != nil {
-		log.Printf("[Startup Recovery] Error reconciling orphaned schedule runs: %v", err)
-	} else if reconciled > 0 {
-		log.Printf("[Startup Recovery] Reconciled %d orphaned schedule run(s) from previous run", reconciled)
-	}
-
 	messages, err := store.GetPendingOrProcessingMessages(ctx, 0)
 	if err != nil {
 		log.Printf("[Startup Recovery] Error querying pending/processing messages: %v", err)
@@ -102,18 +96,6 @@ func RecoverInterrupted(store db.Store, pool *WorkerPool) {
 				m.ID, m.ThreadID, staleReason)
 			if err := store.UpdateMessageCompleted(ctx, m.ID, "[EXPIRED_STALE]"); err != nil {
 				log.Printf("[Startup Recovery] Failed to update message %s status to [EXPIRED_STALE]: %v", m.ID, err)
-			}
-			if m.ScheduleRunID != "" {
-				if err := store.UpdateScheduleRunStatus(ctx, db.UpdateRunParams{
-					RunID:       m.ScheduleRunID,
-					MessageID:   m.ID,
-					Status:      "completed",
-					CompletedAt: time.Now().UTC(),
-					DurationMs:  0,
-					Error:       "[EXPIRED_STALE]",
-				}); err != nil {
-					log.Printf("[Startup Recovery] Failed to update schedule run status: %v", err)
-				}
 			}
 			continue
 		}

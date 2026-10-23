@@ -125,7 +125,4 @@ func TestPRRegistry_SQLStore_NilAndValidationBranches(t *testing.T) {
 	if err := live.SaveThreadSummary(ctx, "", "sum", "m1"); err != nil {
 		t.Error("expected nil on empty threadID SaveThreadSummary")
 	}
-	if _, err := live.PruneScheduleRuns(ctx, 0, 0); err != nil {
-		t.Errorf("PruneScheduleRuns(0, 0) failed: %v", err)
-	}
 }

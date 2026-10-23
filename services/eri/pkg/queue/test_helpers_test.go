@@ -74,26 +74,11 @@ func createScheduleRun(store db.Store, run db.ScheduleRun) error {
 	if store == nil {
 		return nil
 	}
-	return store.CreateScheduleRun(context.Background(), run)
-}
-
-func getScheduleRun(store db.Store, id string) (*db.ScheduleRun, error) {
-	if store == nil {
-		return nil, nil
-	}
 	if fake, ok := store.(*dbtest.FakeStore); ok {
-		return fake.GetScheduleRun(id)
+		fake.SeedScheduleRun(run)
+		return nil
 	}
-	runs, _, err := store.GetScheduleRunsPaginated(context.Background(), 100, 0, "", "")
-	if err != nil {
-		return nil, err
-	}
-	for _, r := range runs {
-		if r.ID == id {
-			return &r, nil
-		}
-	}
-	return nil, nil
+	return nil
 }
 
 func getSessionTurnCount(store db.Store, sessionKey string) (int, error) {
@@ -108,13 +93,6 @@ func incrementSessionTurnCount(store db.Store, sessionKey string) (int, error) {
 		return 0, nil
 	}
 	return store.IncrementSessionTurnCount(context.Background(), sessionKey)
-}
-
-func getScheduleRunsPaginated(store db.Store, limit, offset int, scheduleID, status string) ([]db.ScheduleRun, int, error) {
-	if store == nil {
-		return nil, 0, nil
-	}
-	return store.GetScheduleRunsPaginated(context.Background(), limit, offset, scheduleID, status)
 }
 
 func getThreadSummary(store db.Store, threadID string) (string, string, error) {
@@ -887,10 +865,6 @@ type errQueueStore struct{ db.Store }
 
 func (e *errQueueStore) UpdateMessageStatus(context.Context, string, string, string) error {
 	return errors.New("errQueueStore: update message status error")
-}
-
-func (e *errQueueStore) UpdateScheduleRunStatus(context.Context, db.UpdateRunParams) error {
-	return errors.New("errQueueStore: update schedule run status error")
 }
 
 func (e *errQueueStore) UpdateMessageCompleted(context.Context, string, string) error {

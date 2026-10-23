@@ -302,9 +302,6 @@
     "services/eri/pkg/runner/unified_pool.go::*unifiedSessionLease.Execute": {
       "cc": 30
     },
-    "services/eri/pkg/scheduler/scheduler.go::*Scheduler.ProcessDueSchedules": {
-      "cc": 27
-    },
     "services/eri/pkg/session/session.go::*Manager.ExtractLastTurnError": {
       "cc": 38,
       "depth": 7

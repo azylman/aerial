@@ -605,7 +605,6 @@ func TestTurnExecution_StoreDelegates(t *testing.T) {
 			t.Parallel()
 			threadID := "t-" + tc.name
 			tc.te.updateMessageStatus("m1", "failed", "err")
-			tc.te.updateScheduleRunStatus(db.UpdateRunParams{RunID: "r1"})
 			tc.te.updateMessageCompleted("m1", "resp")
 			tc.te.incrementMessageRetry("m1", "retry-err")
 			tc.te.saveSessionID(threadID, "s1")
@@ -781,7 +780,7 @@ func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
 
 	recStore := setupTestStore(t)
 	_ = recStore.InsertMessage(ctx, db.Message{ID: "m-rec-stale", ThreadID: "t-rec-stale", AuthorID: "u1", ScheduleRunID: "run-stale-rec", Status: db.StatusPending, CreatedAt: time.Now().UTC().Add(-2 * time.Hour)})
-	_ = recStore.CreateScheduleRun(ctx, db.ScheduleRun{ID: "run-stale-rec", ScheduleID: "s1", ScheduleType: "cron", StartedAt: time.Now().UTC().Add(-2 * time.Hour), Status: "running"})
+	recStore.SeedScheduleRun(db.ScheduleRun{ID: "run-stale-rec", ScheduleID: "s1", ScheduleType: "cron", StartedAt: time.Now().UTC().Add(-2 * time.Hour), Status: "running"})
 	_ = recStore.InsertMessage(ctx, db.Message{ID: "m-rec-poison", ThreadID: "t-rec-poison", AuthorID: "u1", Content: "poison content with a rather long snippet that exceeds sixty characters easily", Status: db.StatusProcessing, RetryCount: 5})
 	pRec := New(nil, WorkerPoolConfig{Store: recStore, NotifierFunc: func(b, k, d string) string { return "poison alert" }, DeliveryFunc: func(s *discordgo.Session, c, txt string) error { return nil }})
 	RecoverInterrupted(recStore, pRec)
@@ -1001,11 +1000,6 @@ func TestWorkerPool_ProcessBurstEdgeCases(t *testing.T) {
 			if tc.wantMsgStatus != "" {
 				if gotMsg, err := getMessage(fake, tc.msg.ID); err != nil || gotMsg == nil || gotMsg.Status != tc.wantMsgStatus {
 					t.Errorf("msg %s status = %v (err=%v), want %s", tc.msg.ID, gotMsg, err, tc.wantMsgStatus)
-				}
-			}
-			if tc.wantRunStatus != "" && tc.run != nil {
-				if gotRun, err := getScheduleRun(fake, tc.run.ID); err != nil || gotRun == nil || gotRun.Status != tc.wantRunStatus {
-					t.Errorf("run %s status = %v (err=%v), want %s", tc.run.ID, gotRun, err, tc.wantRunStatus)
 				}
 			}
 		})

@@ -665,26 +665,6 @@ func (f *FakeStore) CreateOneShotSchedule(ctx context.Context, s db.OneShotSched
 	})
 }
 
-func (f *FakeStore) GetDueOneShotSchedules(ctx context.Context) ([]db.OneShotSchedule, error) {
-	return withFakeLock(f, "GetDueOneShotSchedules", func() ([]db.OneShotSchedule, error) {
-		now := time.Now().UTC()
-		due := mapValuesFiltered(f.oneShots, func(s *db.OneShotSchedule) bool { return !s.RunAt.After(now) })
-		sort.Slice(due, func(i, j int) bool { return due[i].RunAt.Before(due[j].RunAt) })
-		return due, nil
-	})
-}
-
-func (f *FakeStore) InsertMessageAndConsumeOneShot(ctx context.Context, scheduleID string, msg db.Message) error {
-	return f.withLockErr("InsertMessageAndConsumeOneShot", func() error {
-		if _, exists := f.oneShots[scheduleID]; !exists {
-			return db.ErrScheduleAlreadyConsumed
-		}
-		delete(f.oneShots, scheduleID)
-		f.insertMessageLocked(msg)
-		return nil
-	})
-}
-
 func (f *FakeStore) GetAllOneShotSchedules(ctx context.Context, threadID string) ([]db.OneShotSchedule, error) {
 	return withFakeLock(f, "GetAllOneShotSchedules", func() ([]db.OneShotSchedule, error) {
 		results := mapValuesFiltered(f.oneShots, func(s *db.OneShotSchedule) bool { return threadID == "" || s.ThreadID == threadID })
@@ -703,15 +683,6 @@ func (f *FakeStore) CreateCronSchedule(ctx context.Context, c db.CronSchedule) e
 	})
 }
 
-func (f *FakeStore) GetDueCronSchedules(ctx context.Context) ([]db.CronSchedule, error) {
-	return withFakeLock(f, "GetDueCronSchedules", func() ([]db.CronSchedule, error) {
-		now := time.Now().UTC()
-		due := mapValuesFiltered(f.crons, func(c *db.CronSchedule) bool { return c.Enabled && !c.NextRunAt.After(now) })
-		sort.Slice(due, func(i, j int) bool { return due[i].NextRunAt.Before(due[j].NextRunAt) })
-		return due, nil
-	})
-}
-
 func (f *FakeStore) GetAllCronSchedules(ctx context.Context, targetID string) ([]db.CronSchedule, error) {
 	return withFakeLock(f, "GetAllCronSchedules", func() ([]db.CronSchedule, error) {
 		results := mapValuesFiltered(f.crons, func(c *db.CronSchedule) bool { return targetID == "" || c.TargetID == targetID })
@@ -720,40 +691,13 @@ func (f *FakeStore) GetAllCronSchedules(ctx context.Context, targetID string) ([
 	})
 }
 
-func (f *FakeStore) UpdateCronNextRun(ctx context.Context, id string, nextRunAt time.Time) error {
-	return f.withLockErr("UpdateCronNextRun", func() error {
-		if c, ok := f.crons[id]; ok {
-			c.NextRunAt = nextRunAt
-		}
-		return nil
-	})
-}
-
-func (f *FakeStore) CreateScheduleRun(ctx context.Context, run db.ScheduleRun) error {
-	return f.withLockErr("CreateScheduleRun", func() error {
+// SeedScheduleRun seeds a schedule run into the in-memory fake store for testing.
+func (f *FakeStore) SeedScheduleRun(run db.ScheduleRun) {
+	f.withLock(func() {
 		if run.StartedAt.IsZero() {
 			run.StartedAt = time.Now().UTC()
 		}
 		f.runs[run.ID] = cloneRun(&run)
-		return nil
-	})
-}
-
-func (f *FakeStore) UpdateScheduleRunStatus(ctx context.Context, params db.UpdateRunParams) error {
-	return f.withLockErr("UpdateScheduleRunStatus", func() error {
-		r := f.runs[params.RunID]
-		if r == nil {
-			return nil
-		}
-		setIf(&r.Status, params.Status)
-		setIf(&r.MessageID, params.MessageID)
-		setIf(&r.Error, params.Error)
-		setIf(&r.DurationMs, params.DurationMs)
-		setIf(&r.Model, params.Model)
-		if !params.CompletedAt.IsZero() {
-			r.CompletedAt = clonePtr(&params.CompletedAt)
-		}
-		return nil
 	})
 }
 
@@ -773,15 +717,6 @@ func (f *FakeStore) GetScheduleRunsPaginated(ctx context.Context, limit, offset 
 			limit = total
 		}
 		return filtered[offset:min(offset+limit, total)], total, nil
-	})
-}
-
-func (f *FakeStore) GetScheduleRun(id string) (*db.ScheduleRun, error) {
-	return withFakeLock(f, "GetScheduleRun", func() (*db.ScheduleRun, error) {
-		if r, ok := f.runs[id]; ok && r != nil {
-			return cloneRun(r), nil
-		}
-		return nil, sql.ErrNoRows
 	})
 }
 
@@ -823,48 +758,6 @@ func (f *FakeStore) GetScheduleSummaryMetrics(ctx context.Context) (db.ScheduleS
 			m.SuccessRate24h = math.Round((float64(completedRuns)/float64(m.TotalRuns24h))*1000.0) / 10.0
 		}
 		return m, nil
-	})
-}
-
-func (f *FakeStore) ReconcileOrphanedScheduleRuns(ctx context.Context) (int64, error) {
-	return withFakeLock(f, "ReconcileOrphanedScheduleRuns", func() (int64, error) {
-		now := time.Now().UTC()
-		var reconciled int64
-		for _, r := range f.runs {
-			if r != nil && (r.Status == "enqueued" || r.Status == "running") {
-				r.Status, r.Error, r.CompletedAt = "failed", "Interrupted by server restart", &now
-				reconciled++
-			}
-		}
-		return reconciled, nil
-	})
-}
-
-func (f *FakeStore) PruneScheduleRuns(ctx context.Context, maxCount int, maxAge time.Duration) (int64, error) {
-	return withFakeLock(f, "PruneScheduleRuns", func() (int64, error) {
-		maxCount, maxAge = defaultVal(maxCount, 1000), defaultVal(maxAge, 30*24*time.Hour)
-		var pruned int64
-		cutoff := time.Now().UTC().Add(-maxAge)
-		for id, r := range f.runs {
-			if r != nil && r.StartedAt.Before(cutoff) {
-				delete(f.runs, id)
-				pruned++
-			}
-		}
-		if len(f.runs) > maxCount {
-			var list []*db.ScheduleRun
-			for _, r := range f.runs {
-				list = append(list, r)
-			}
-			sort.Slice(list, func(i, j int) bool {
-				return list[i].StartedAt.After(list[j].StartedAt) || (list[i].StartedAt.Equal(list[j].StartedAt) && list[i].ID > list[j].ID)
-			})
-			for _, r := range list[maxCount:] {
-				delete(f.runs, r.ID)
-				pruned++
-			}
-		}
-		return pruned, nil
 	})
 }
 
