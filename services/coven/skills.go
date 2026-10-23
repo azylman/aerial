@@ -552,7 +552,7 @@ func buildSkillDesignerPrompt(batch SkillConsolidationBatch) string {
 	sb.WriteString("\nInstructions:\n")
 	sb.WriteString("1. If Action is EDIT, update the existing SKILL.md content by integrating the new triggers, steps, and avoid guidance without deleting unrelated workflows. Keep frontmatter name matching the target.\n")
 	sb.WriteString("2. If Action is CREATE, design a new SKILL.md with valid YAML frontmatter (name in ^[a-z0-9-]+$, description between 20 and 500 chars), clear usage guidelines, step-by-step procedures, and avoid sections.\n")
-	sb.WriteString("3. If the candidates are noisy, invalid, or do not warrant a skill change, return action \"NOOP\".\n")
+	sb.WriteString("3. Enforce a 30+ days durability bar: write generalizable procedures and imperative avoid rules (+ one clause of why), stripping PR/issue numbers, commit SHAs, dates, negative tool claims (\"tool X is broken\"), transient environment errors, or unresolved dead-ends. If the candidates are noisy, transient, invalid, or do not warrant a durable skill change, return action \"NOOP\".\n")
 	sb.WriteString("4. Respond STRICTLY with a valid JSON object matching this schema:\n")
 	sb.WriteString("{\n")
 	sb.WriteString("  \"action\": \"EDIT\" | \"CREATE\" | \"NOOP\",\n")

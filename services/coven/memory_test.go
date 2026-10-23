@@ -5525,6 +5525,25 @@ func TestEvaluateProceduralCandidateAdmission(t *testing.T) {
 			wantReason: "admitted",
 		},
 		{
+			name: "EphemeralTelemetryInSteps",
+			item: ExtractedProceduralItem{
+				Trigger: "reconcile repository branch state",
+				Steps:   []string{"check status of PR #1234 before merging"},
+			},
+			wantAdmit:  false,
+			wantReason: "ephemeral_telemetry",
+		},
+		{
+			name: "EphemeralTelemetryInAvoid",
+			item: ExtractedProceduralItem{
+				Trigger: "deploy service allocation on cluster",
+				Steps:   []string{"run nomad job"},
+				Avoid:   []string{"wait for build-1792688043-932febae to finish"},
+			},
+			wantAdmit:  false,
+			wantReason: "ephemeral_telemetry",
+		},
+		{
 			name: "MissingStepsAndAvoid",
 			item: ExtractedProceduralItem{
 				Trigger: "some valid trigger description",
@@ -6800,6 +6819,7 @@ func TestBuildSkillDesignerPrompt(t *testing.T) {
 				"Candidate #1 (ID: 202):",
 				"Trigger: backup sqlite database",
 				"- run sqlite3 .backup",
+				"30+ days",
 			},
 		},
 	}
