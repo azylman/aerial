@@ -33,12 +33,15 @@ func BuildHeartbeatPrompt(hb HeartbeatSchedule) string {
 Your direct text response in this turn is suppressed (silent: true) and will NOT be delivered to Discord.
 Target Discord Channel ID for Escalations: %s
 
-1. Evaluate the monitoring check below using your read/query tools. Track state across turns in this persistent heartbeat session.
+1. Evaluate the monitoring check below using your read/query tools. Track state across turns in this persistent heartbeat session (prior turns are already present in your conversation context; if none appear, this is Turn 1—do NOT scan /data or filesystem transcripts on disk).
 2. High-SNR Silence Bias & Edge-Triggered Gating (Default to Quiet):
    - Keep the signal-to-noise ratio high: if findings are nominal, borderline, transient, or ambiguous, err strictly on the side of silence—state a brief internal log note and end your turn without calling /prompt.
    - Compare against your prior turns in this heartbeat session and NEVER re-escalate an unchanged ongoing condition. Only escalate on a meaningful state transition (a net-new actionable issue, a significant severity spike, or an explicit recovery when prior alerts warrant closure).
-3. Escalation State (User Notification Required): If and only if a clear, high-signal state transition requires user attention, send an HTTP POST request to http://eri.aerial/prompt using channel_id %q. You MUST replace <INSERT_ACTUAL_FINDINGS_AND_METRICS_HERE> with your concrete diagnostic findings, numbers, and context (NEVER send the literal placeholder):
-   jq -n --arg channel_id %q --arg title %q --arg findings "<INSERT_ACTUAL_FINDINGS_AND_METRICS_HERE>" '{channel_id: $channel_id, title: $title, prompt: ($findings + "\n\nSummarize the situation for the user and propose concrete follow-up actions that you (Aerial) can execute upon their approval. Do NOT re-invoke /prompt.")}' | curl -sS -X POST http://eri.aerial/prompt -H "Content-Type: application/json" -d @-
+3. Escalation State (User Notification Required): If and only if a clear, high-signal state transition requires user attention, send an HTTP POST request to http://eri.aerial/prompt using channel_id %q. You MUST replace <INSERT_ACTUAL_FINDINGS_AND_METRICS_HERE> with your concrete diagnostic findings, numbers, and context (NEVER send the literal placeholder). Keep the heredoc delimiter single-quoted (<<'EOF') so bash never expands markdown backticks, quotes, or $variables as shell commands:
+   jq -Rs --arg channel_id %q --arg title %q '{channel_id: $channel_id, title: $title, prompt: (rtrimstr("\n") + "\n\nSummarize the situation for the user and propose concrete follow-up actions that you (Aerial) can execute upon their approval. Do NOT re-invoke /prompt.")}' <<'EOF' | curl -sS -f -X POST http://eri.aerial/prompt -H "Content-Type: application/json" -d @-
+<INSERT_ACTUAL_FINDINGS_AND_METRICS_HERE>
+EOF
+   - Delivery & Retry Policy: Retry the POST if curl fails (non-zero exit code, network error, or non-2xx HTTP status), but NEVER send a second POST once Eri returns a successful HTTP 2xx response (e.g. "status":"accepted").
 <\/HEARTBEAT_INSTRUCTIONS>
 
 %s`, targetID, targetID, targetID, title, strings.TrimSpace(hb.Prompt))
