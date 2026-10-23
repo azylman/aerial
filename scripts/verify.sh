@@ -113,7 +113,7 @@ check_rule_file_sizes() {
 }
 
 # Go services in the monorepo
-GO_SERVICES="services/eri mcp/scheduler-mcp mcp/discord-mcp services/dashboard services/hangar services/webhooks-router services/vanadis services/coven"
+GO_SERVICES="services/eri mcp/scheduler-mcp mcp/discord-mcp services/dashboard services/hangar services/webhooks-router services/vanadis services/coven scripts/code-health"
 
 run_go_vet() {
     svc="$1"
@@ -372,6 +372,22 @@ check_no_imperative_ddl() {
     return 0
 }
 
+check_code_health() {
+    if has_cmd go && [ -d "$REPO_ROOT/scripts/code-health" ]; then
+        if [ "$MODE" = "staged" ]; then
+            local go_staged
+            go_staged=$(echo "$STAGED_FILES" | grep -E '\.go$|\.code-health-baseline\.json$' || true)
+            if [ -n "$go_staged" ]; then
+                echo "   [code-health] Checking ratcheted complexity and length limits..."
+                (cd "$REPO_ROOT/scripts/code-health" && go run . -root "$REPO_ROOT" -baseline "$REPO_ROOT/.code-health-baseline.json")
+            fi
+        else
+            echo "   [code-health] Checking ratcheted complexity and length limits..."
+            (cd "$REPO_ROOT/scripts/code-health" && go run . -root "$REPO_ROOT" -baseline "$REPO_ROOT/.code-health-baseline.json")
+        fi
+    fi
+}
+
 run_atlas_validate() {
     has_cmd atlas || return 0
     find . -maxdepth 3 -name "atlas.hcl" 2>/dev/null | sort | while IFS= read -r hcl; do
@@ -403,6 +419,7 @@ if [ "$MODE" = "staged" ]; then
     check_no_main_in_tests
     check_rule_file_sizes
     check_no_imperative_ddl
+    check_code_health
 
     # Check Go microservices
     for svc in $GO_SERVICES; do
@@ -479,6 +496,7 @@ for svc in $GO_SERVICES; do
     run_deadcode "$svc"
 done
 check_no_imperative_ddl
+check_code_health
 run_atlas_validate
 
 echo "=== 2. Frontend & Script Syntax Checks ==="

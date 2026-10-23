@@ -216,6 +216,9 @@ jobs:
           # 4. Docker Compose Validation
           docker compose -f docker-compose.yml config --quiet
 
+          # 5. Ratcheted Code Health Gate & Scanner Unit Tests
+          (cd scripts/code-health && go test -v ./... && go run . -root ../.. -baseline ../../.code-health-baseline.json)
+
       - name: Install golangci-lint
         run: |
           mkdir -p $(go env GOPATH)/bin

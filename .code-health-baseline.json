@@ -1,0 +1,391 @@
+{
+  "files": {
+    "services/dashboard/main.go": {
+      "lines": 2229
+    },
+    "services/eri/main.go": {
+      "lines": 2104
+    },
+    "services/eri/pkg/queue/worker.go": {
+      "lines": 1865
+    },
+    "services/hangar/main.go": {
+      "lines": 3203
+    },
+    "services/webhooks-router/main.go": {
+      "lines": 3608
+    }
+  },
+  "functions": {
+    "services/coven/config.go::LoadConfigFile": {
+      "cc": 30
+    },
+    "services/coven/db.go::extractTrajectorySignals": {
+      "depth": 7
+    },
+    "services/coven/extractor.go::FindConsolidationCliques": {
+      "cc": 38
+    },
+    "services/coven/extractor.go::consolidateCliqueBatch": {
+      "cc": 21
+    },
+    "services/coven/extractor.go::processThreadFacts": {
+      "lines": 202,
+      "cc": 45,
+      "depth": 6
+    },
+    "services/coven/extractor.go::reconcileCandidateFact": {
+      "cc": 34
+    },
+    "services/coven/github.go::*GitHubSkillPublisher.PublishSkillChanges": {
+      "lines": 168,
+      "cc": 32
+    },
+    "services/coven/github.go::ConsolidateProceduralSkills": {
+      "lines": 160,
+      "cc": 36
+    },
+    "services/coven/skills.go::PlanSkillConsolidation": {
+      "cc": 26
+    },
+    "services/coven/skills.go::findCandidateCliques": {
+      "cc": 29
+    },
+    "services/dashboard/main.go::*GitHubPoller.pollOnce": {
+      "cc": 21
+    },
+    "services/dashboard/main.go::*GitHubPoller.pollRepo": {
+      "cc": 28
+    },
+    "services/dashboard/main.go::NewDashboardConfigFromLookup": {
+      "cc": 46
+    },
+    "services/dashboard/pure.go::MergeClusterDeploymentsWithHangar": {
+      "lines": 540,
+      "cc": 189,
+      "depth": 6
+    },
+    "services/dashboard/pure.go::ParseNomadClusterState": {
+      "cc": 31,
+      "depth": 6
+    },
+    "services/eri/cmd/transcript-search/main.go::parseCLIArgs": {
+      "cc": 21
+    },
+    "services/eri/cmd/transcript-search/main.go::runCLI": {
+      "cc": 26
+    },
+    "services/eri/funnel.go::RunStartupCatchUpSweep": {
+      "lines": 188,
+      "cc": 58
+    },
+    "services/eri/funnel.go::connectDiscordFunnel": {
+      "lines": 189,
+      "cc": 42
+    },
+    "services/eri/funnel.go::extractDiscordMetadata": {
+      "cc": 23
+    },
+    "services/eri/funnel.go::getOrCreateThreadID": {
+      "cc": 30
+    },
+    "services/eri/funnel.go::isFunnelBotTargeted": {
+      "cc": 21
+    },
+    "services/eri/main.go::RunBrainApp": {
+      "lines": 297,
+      "cc": 50
+    },
+    "services/eri/main.go::deliverPRRegistrationWidget": {
+      "cc": 21
+    },
+    "services/eri/main.go::handlePRRegister": {
+      "cc": 24
+    },
+    "services/eri/main.go::handleTranscripts": {
+      "cc": 25,
+      "depth": 8
+    },
+    "services/eri/main.go::handleVoiceAsk": {
+      "cc": 24
+    },
+    "services/eri/pkg/ambient/provider.go::*Provider.fetchAndRender": {
+      "depth": 6
+    },
+    "services/eri/pkg/ambient/provider.go::NewProvider": {
+      "cc": 26
+    },
+    "services/eri/pkg/classifier/classifier.go::*Classifier.classifySystemOne": {
+      "lines": 176,
+      "cc": 30
+    },
+    "services/eri/pkg/config/config.go::*ConfigData.UnmarshalYAML": {
+      "lines": 154,
+      "cc": 21
+    },
+    "services/eri/pkg/config/config.go::validateChannelPolicy": {
+      "cc": 22
+    },
+    "services/eri/pkg/delivery/delivery.go::SendMessageWithAttachments": {
+      "cc": 22
+    },
+    "services/eri/pkg/delivery/delivery.go::SplitMessage": {
+      "lines": 172,
+      "cc": 42
+    },
+    "services/eri/pkg/delivery/media.go::AutoAttachNewMedia": {
+      "cc": 23
+    },
+    "services/eri/pkg/delivery/media.go::ResolveAndValidateLocalImage": {
+      "cc": 27
+    },
+    "services/eri/pkg/delivery/media.go::SanitizeIntermediateStatus": {
+      "cc": 26
+    },
+    "services/eri/pkg/discord/widget.go::BuildStatusWidgetComponents": {
+      "cc": 22
+    },
+    "services/eri/pkg/env/hooks.go::*Provisioner.SyncHooks": {
+      "cc": 21
+    },
+    "services/eri/pkg/env/mcp.go::*Provisioner.LoadTargetMCPConfig": {
+      "cc": 35
+    },
+    "services/eri/pkg/env/rules.go::*Provisioner.linkSharedSessionStorage": {
+      "depth": 6
+    },
+    "services/eri/pkg/env/skills.go::*Provisioner.LinkTargetSkills": {
+      "cc": 21
+    },
+    "services/eri/pkg/guard/batch.go::CheckBatchWithDir": {
+      "cc": 28
+    },
+    "services/eri/pkg/guard/batch.go::isUnscopedTest": {
+      "cc": 22
+    },
+    "services/eri/pkg/guard/commit.go::CheckCommit": {
+      "cc": 27,
+      "depth": 6
+    },
+    "services/eri/pkg/guard/commit.go::IsCommitCommand": {
+      "cc": 24,
+      "depth": 7
+    },
+    "services/eri/pkg/guard/commit.go::ScanDiffWithPatterns": {
+      "cc": 26
+    },
+    "services/eri/pkg/guard/commit.go::isAllCommit": {
+      "cc": 21
+    },
+    "services/eri/pkg/guard/commit.go::parsePatternPayload": {
+      "cc": 23
+    },
+    "services/eri/pkg/guard/search.go::inspectFindCommand": {
+      "cc": 37
+    },
+    "services/eri/pkg/guard/search.go::inspectGrepCommand": {
+      "cc": 49
+    },
+    "services/eri/pkg/guard/search.go::splitPipeline": {
+      "cc": 24
+    },
+    "services/eri/pkg/guard/share.go::inspectRunCommand": {
+      "cc": 38
+    },
+    "services/eri/pkg/interactions/handlers.go::*Router.handleInterrupt": {
+      "depth": 6
+    },
+    "services/eri/pkg/interactions/handlers.go::*Router.handleStatus": {
+      "cc": 35
+    },
+    "services/eri/pkg/mcp/dispatcher.go::*DefaultDispatcher.EnsureSession": {
+      "cc": 27
+    },
+    "services/eri/pkg/mcp/dispatcher.go::*DefaultDispatcher.Execute": {
+      "cc": 25
+    },
+    "services/eri/pkg/notifier/notifier.go::StaticFallback": {
+      "cc": 26
+    },
+    "services/eri/pkg/queue/burst.go::PlanBurstExecution": {
+      "cc": 25
+    },
+    "services/eri/pkg/queue/channel_resolution.go::ResolveBotRoleIDs": {
+      "cc": 34
+    },
+    "services/eri/pkg/queue/channel_resolution.go::matchesWakeIdentity": {
+      "cc": 22
+    },
+    "services/eri/pkg/queue/history.go::fetchHistoryFromDB": {
+      "cc": 26
+    },
+    "services/eri/pkg/queue/pool.go::*WorkerPool.ExecuteVoiceTurn": {
+      "cc": 33
+    },
+    "services/eri/pkg/queue/pool.go::New": {
+      "lines": 178,
+      "cc": 49
+    },
+    "services/eri/pkg/queue/recovery.go::RecoverInterrupted": {
+      "cc": 38
+    },
+    "services/eri/pkg/queue/sentence_detector.go::findSentenceBoundary": {
+      "cc": 35
+    },
+    "services/eri/pkg/queue/status_updater.go::*StatusUpdater.flush": {
+      "cc": 26
+    },
+    "services/eri/pkg/queue/webhook.go::*DefaultWebhookDispatcher.dispatch": {
+      "cc": 24
+    },
+    "services/eri/pkg/queue/worker.go::*WorkerPool.processBurst": {
+      "lines": 156,
+      "cc": 31
+    },
+    "services/eri/pkg/queue/worker.go::*turnExecution.buildColdStartLookback": {
+      "cc": 31
+    },
+    "services/eri/pkg/queue/worker.go::*turnExecution.buildTurnPrompt": {
+      "cc": 26
+    },
+    "services/eri/pkg/queue/worker.go::*turnExecution.evaluateAmbientWake": {
+      "cc": 29
+    },
+    "services/eri/pkg/queue/worker.go::*turnExecution.executeWithRetries": {
+      "lines": 315,
+      "cc": 80,
+      "depth": 6
+    },
+    "services/eri/pkg/queue/worker.go::*turnExecution.getRecentThreadMessages": {
+      "cc": 26,
+      "depth": 6
+    },
+    "services/eri/pkg/queue/worker.go::*turnExecution.handleQuotaPause": {
+      "cc": 21
+    },
+    "services/eri/pkg/queue/worker.go::*turnExecution.resolveAndPersistSessionID": {
+      "cc": 33
+    },
+    "services/eri/pkg/runner/gemini_api_pool.go::*GeminiAPISession.Send": {
+      "lines": 233,
+      "cc": 67,
+      "depth": 6
+    },
+    "services/eri/pkg/runner/gemini_api_pool.go::*GeminiAPISession.consumeSSEStream": {
+      "cc": 26,
+      "depth": 10
+    },
+    "services/eri/pkg/runner/gemini_api_pool.go::cleanSchemaNode": {
+      "cc": 41,
+      "depth": 6
+    },
+    "services/eri/pkg/runner/runner.go::ExtractCommandName": {
+      "cc": 26
+    },
+    "services/eri/pkg/runner/runner.go::tokenizeCommandLine": {
+      "cc": 27
+    },
+    "services/eri/pkg/runner/streaming_daemon.go::*StreamingDaemon.dispatchNDJSONLine": {
+      "lines": 322,
+      "cc": 120,
+      "depth": 6
+    },
+    "services/eri/pkg/runner/streaming_daemon.go::*StreamingDaemon.readStdoutLoop": {
+      "depth": 7
+    },
+    "services/eri/pkg/runner/unified_pool.go::*UnifiedProcessPool.GetOrCreate": {
+      "cc": 36
+    },
+    "services/eri/pkg/runner/unified_pool.go::*UnifiedProcessPool.MarkDirty": {
+      "cc": 22
+    },
+    "services/eri/pkg/runner/unified_pool.go::*unifiedSessionLease.Execute": {
+      "cc": 30
+    },
+    "services/eri/pkg/scheduler/scheduler.go::*Scheduler.ProcessDueSchedules": {
+      "cc": 27
+    },
+    "services/eri/pkg/session/session.go::*Manager.ExtractLastTurnError": {
+      "cc": 38,
+      "depth": 7
+    },
+    "services/eri/pkg/session/session.go::LastActivityFromRoots": {
+      "cc": 23
+    },
+    "services/eri/pkg/transcript/worker.go::SyncTranscripts": {
+      "cc": 21
+    },
+    "services/eri/pkg/transcript/worker.go::syncSingleSession": {
+      "lines": 257,
+      "cc": 73
+    },
+    "services/eri/pure.go::FormatCronDescription": {
+      "cc": 54
+    },
+    "services/hangar/main.go::*SyncDaemon.CheckAndReconcileNomadImages": {
+      "depth": 6
+    },
+    "services/hangar/main.go::*SyncDaemon.ExecuteGitPushEvent": {
+      "lines": 182,
+      "cc": 31
+    },
+    "services/hangar/main.go::*SyncDaemon.ExecuteImageReadyEvent": {
+      "cc": 21
+    },
+    "services/hangar/main.go::*SyncDaemon.GetStatus": {
+      "cc": 27
+    },
+    "services/hangar/main.go::*SyncDaemon.StartImageRolloutLoop": {
+      "depth": 6
+    },
+    "services/hangar/main.go::*SyncDaemon.StartReconcilerLoop": {
+      "depth": 7
+    },
+    "services/hangar/main.go::*SyncDaemon.SyncRepo": {
+      "lines": 169,
+      "cc": 30
+    },
+    "services/hangar/main.go::*SyncDaemon.doRegistryRequestWithAuth": {
+      "cc": 24
+    },
+    "services/hangar/main.go::SetupMux": {
+      "cc": 23
+    },
+    "services/hangar/pure.go::ExtractNomadJobImages": {
+      "depth": 7
+    },
+    "services/hangar/pure.go::ParseImageReference": {
+      "cc": 21
+    },
+    "services/vanadis/main.go::*PostgresVanadisStore.CreateBuild": {
+      "cc": 25
+    },
+    "services/webhooks-router/main.go::*PostgresPRRegistry.AdvanceVanadisChunkByPR": {
+      "cc": 28
+    },
+    "services/webhooks-router/main.go::*RouterServer.ProcessGitHubEvent": {
+      "lines": 255,
+      "cc": 77,
+      "depth": 7
+    },
+    "services/webhooks-router/main.go::*RouterServer.ProcessHangarEvent": {
+      "cc": 51
+    },
+    "services/webhooks-router/main.go::*RouterServer.checkOpenPRConflicts": {
+      "cc": 24
+    },
+    "services/webhooks-router/main.go::*RouterServer.syncSinglePRWidget": {
+      "cc": 30,
+      "depth": 6
+    },
+    "services/webhooks-router/nomad_stream.go::*NomadStreamSubscriber.handleNomadEvent": {
+      "cc": 45
+    },
+    "services/webhooks-router/nomad_stream.go::*RouterServer.ProcessNomadEvent": {
+      "cc": 38
+    },
+    "services/webhooks-router/nomad_stream.go::*RouterServer.isNomadJobHealthy": {
+      "cc": 32
+    }
+  }
+}
