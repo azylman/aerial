@@ -904,6 +904,11 @@ func TestPureHelpers_BuildHeartbeatPrompt(t *testing.T) {
 				`title "Heartbeat Alert"`,
 				"Check node exporter disk",
 				`<\HEARTBEAT_INSTRUCTIONS>`,
+				"do NOT scan /data or filesystem transcripts on disk",
+				"jq -Rs --arg channel_id",
+				"<<'EOF' | curl -sS -f -X POST http://eri.aerial/prompt",
+				"Retry the POST if curl fails",
+				"NEVER send a second POST once Eri returns a successful HTTP 2xx response",
 			},
 		},
 		{
