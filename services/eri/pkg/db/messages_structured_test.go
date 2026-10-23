@@ -33,7 +33,6 @@ func TestMessageMetadata_IsEmpty(t *testing.T) {
 		{"silent", MessageMetadata{Silent: true}},
 		{"ephemeral_true", func() MessageMetadata { tVal := true; return MessageMetadata{Ephemeral: &tVal} }()},
 		{"ephemeral_false", func() MessageMetadata { fVal := false; return MessageMetadata{Ephemeral: &fVal} }()},
-		{"vanadis_chunk_id", MessageMetadata{VanadisChunkID: "chk-1"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -122,7 +122,6 @@ type MessageMetadata struct {
 	Attachments       []string `json:"attachments,omitempty"`
 	Model             string   `json:"model,omitempty"`
 	Silent            bool     `json:"silent,omitempty"`
-	VanadisChunkID    string   `json:"vanadis_chunk_id,omitempty"`
 }
 
 // Scan implements sql.Scanner for PostgreSQL JSONB.

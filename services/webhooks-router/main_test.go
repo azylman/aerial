@@ -3608,7 +3608,7 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 		t.Errorf("dispatchCIFailurePrompt(vanadis pg): %v", err)
 	}
 	vpgPrompts := dispVanadisPG.PromptCalls()
-	if len(vpgPrompts) != 1 || !vpgPrompts[0].Silent || vpgPrompts[0].Effort != "low" || vpgPrompts[0].VanadisChunkID != "chunk-885" {
+	if len(vpgPrompts) != 1 || !vpgPrompts[0].Silent || vpgPrompts[0].Effort != "low" || !strings.Contains(vpgPrompts[0].Prompt, "Chunk ID: chunk-885") {
 		t.Errorf("expected silent low-effort prompt with chunk-885, got %+v", vpgPrompts)
 	}
 }

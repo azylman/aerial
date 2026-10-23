@@ -1266,11 +1266,10 @@ type ImageReadyEventRequest struct {
 }
 
 type PromptRequest struct {
-	ChannelID      string `json:"channel_id"`
-	Prompt         string `json:"prompt"`
-	Effort         string `json:"effort,omitempty"`
-	Silent         bool   `json:"silent,omitempty"`
-	VanadisChunkID string `json:"vanadis_chunk_id,omitempty"`
+	ChannelID string `json:"channel_id"`
+	Prompt    string `json:"prompt"`
+	Effort    string `json:"effort,omitempty"`
+	Silent    bool   `json:"silent,omitempty"`
 }
 
 type DirectMessageRequest struct {
@@ -2053,7 +2052,10 @@ func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, la
 			log.Printf("[webhooks-router] [dispatcher] warning dispatching %s direct message: %v", label, err)
 		}
 	}
-	req := PromptRequest{ChannelID: targetID, Prompt: prompt, Effort: opt.effort, Silent: opt.silent, VanadisChunkID: opt.chunkID}
+	if opt.chunkID != "" && !strings.Contains(prompt, "Chunk ID: "+opt.chunkID) {
+		prompt += "\nChunk ID: " + opt.chunkID
+	}
+	req := PromptRequest{ChannelID: targetID, Prompt: prompt, Effort: opt.effort, Silent: opt.silent}
 	if err := s.dispatcher.DispatchPrompt(ctx, req); err != nil {
 		log.Printf("[webhooks-router] [dispatcher] error dispatching %s prompt: %v", label, err)
 		return fmt.Errorf("dispatch %s prompt: %w", label, err)
