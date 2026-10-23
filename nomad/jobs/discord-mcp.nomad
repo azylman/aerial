@@ -97,8 +97,8 @@ EOH
 
       resources {
         cpu        = 50
-        memory     = 256
-        memory_max = 512
+        memory     = 128
+        memory_max = 256
       }
     }
   }
