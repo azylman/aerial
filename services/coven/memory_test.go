@@ -6535,9 +6535,26 @@ func TestPlanSkillConsolidation(t *testing.T) {
 			pending: []ProceduralCandidate{
 				{ID: 55, Domain: "discord", Trigger: "find depth", Steps: []string{"use -maxdepth"}, Embedding: testEmbeddingAt(2, 1.0)},
 				{ID: 56, Domain: "discord", Trigger: "find cmd", Steps: []string{"pass -maxdepth 2"}, Embedding: testEmbeddingAt(2, 1.0)},
+				{ID: 57, Domain: "discord", Trigger: "find flag", Steps: []string{"pass -maxdepth 3"}, Embedding: testEmbeddingAt(2, 1.0)},
+				{ID: 58, Domain: "discord", Trigger: "find limit", Steps: []string{"pass -maxdepth 4"}, Embedding: testEmbeddingAt(2, 1.0)},
 			},
 			diskSkills:  diskSkills,
 			wantBatches: 0,
+		},
+		{
+			name: "CaseD_ShortCandidatesFiveRepeatsEmitAlertBatch",
+			pending: []ProceduralCandidate{
+				{ID: 71, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
+				{ID: 72, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
+				{ID: 73, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
+				{ID: 74, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
+				{ID: 75, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
+			},
+			diskSkills:    diskSkills,
+			wantBatches:   1,
+			wantActions:   []string{"ALERT"},
+			wantDomains:   []string{"discord"},
+			wantCandCount: []int{5},
 		},
 		{
 			name: "CaseC_DissimilarCandidatesDoNotFormClique",
@@ -7108,6 +7125,14 @@ func newMockGitHubServer(t *testing.T, cfg mockGitHubServerConfig) *httptest.Ser
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "registered"})
 
+		case r.Method == http.MethodPost && path == "/discord/message":
+			if cfg.failBrainReg {
+				http.Error(w, `{"error":"discord message failed"}`, http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "sent"})
+
 		default:
 			http.NotFound(w, r)
 		}
@@ -7348,14 +7373,18 @@ func TestGitHubSkillPublisher_PublishSkillChanges(t *testing.T) {
 			if prNum != tc.wantPR {
 				t.Errorf("prNum = %d, want %d", prNum, tc.wantPR)
 			}
+			_ = publisher.NotifyShortFriction(ctx, "test alert")
+			_ = publisher.NotifyShortFriction(ctx, "")
 		})
 	}
 }
 
 type mockSkillPublisher struct {
-	prNum   int
-	err     error
-	changes []SkillFileChange
+	prNum    int
+	err      error
+	alertErr error
+	changes  []SkillFileChange
+	alerts   []string
 }
 
 func (m *mockSkillPublisher) PublishSkillChanges(ctx context.Context, changes []SkillFileChange) (int, error) {
@@ -7364,6 +7393,11 @@ func (m *mockSkillPublisher) PublishSkillChanges(ctx context.Context, changes []
 		return 0, m.err
 	}
 	return m.prNum, nil
+}
+
+func (m *mockSkillPublisher) NotifyShortFriction(ctx context.Context, content string) error {
+	m.alerts = append(m.alerts, content)
+	return m.alertErr
 }
 
 func TestConsolidateProceduralSkills(t *testing.T) {
@@ -7399,11 +7433,13 @@ description: Novel procedure for orchestrating automated deployments.
 		llmErr                  error
 		pubPR                   int
 		pubErr                  error
+		alertErr                error
 		wantPR                  int
 		wantErr                 bool
 		wantMarkConsolidate     bool
 		wantMarkSkipped         bool
 		wantChangesLen          int
+		wantAlertsLen           int
 		wantConsolidatedIndices []int
 		wantPendingIndices      []int
 	}{
@@ -7559,6 +7595,35 @@ description: Novel procedure for orchestrating automated deployments.
 			wantConsolidatedIndices: []int{0},
 			wantPendingIndices:      []int{1},
 		},
+		{
+			name: "ShortFrictionAlertBatchNotifiedAndMarkedSkipped",
+			cands: []ProceduralCandidate{
+				{ID: 81, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
+				{ID: 82, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
+				{ID: 83, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
+				{ID: 84, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
+				{ID: 85, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
+			},
+			wantPR:          0,
+			wantErr:         false,
+			wantMarkSkipped: true,
+			wantAlertsLen:   1,
+		},
+		{
+			name: "ShortFrictionAlertErrorRetainsPending",
+			cands: []ProceduralCandidate{
+				{ID: 91, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
+				{ID: 92, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
+				{ID: 93, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
+				{ID: 94, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
+				{ID: 95, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
+			},
+			alertErr:           errors.New("alert post failed"),
+			wantPR:             0,
+			wantErr:            false,
+			wantAlertsLen:      1,
+			wantPendingIndices: []int{0, 1, 2, 3, 4},
+		},
 	}
 
 	for _, tc := range tests {
@@ -7604,8 +7669,9 @@ description: Novel procedure for orchestrating automated deployments.
 			}
 
 			pub := &mockSkillPublisher{
-				prNum: tc.pubPR,
-				err:   tc.pubErr,
+				prNum:    tc.pubPR,
+				err:      tc.pubErr,
+				alertErr: tc.alertErr,
 			}
 			var publisher SkillPublisher = pub
 			if tc.nilPublisher {
@@ -7656,6 +7722,9 @@ description: Novel procedure for orchestrating automated deployments.
 				if len(pub.changes) != tc.wantChangesLen {
 					t.Errorf("published changes len = %d, want %d", len(pub.changes), tc.wantChangesLen)
 				}
+			}
+			if tc.wantAlertsLen > 0 && len(pub.alerts) != tc.wantAlertsLen {
+				t.Errorf("alerts len = %d, want %d", len(pub.alerts), tc.wantAlertsLen)
 			}
 			for _, idx := range tc.wantConsolidatedIndices {
 				if idx < len(insertedIDs) {

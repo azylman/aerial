@@ -23,6 +23,8 @@ const (
 	DefaultSkillCliqueMaxSize = 5
 	// DefaultSkillCreateMinSteps is the minimum number of procedural steps required for a candidate to join a Case C (CREATE) skill clique.
 	DefaultSkillCreateMinSteps = 3
+	// DefaultShortFrictionMinRepeats is the minimum repeat clique size required to emit an ALERT batch for short (< 3 steps) friction candidates.
+	DefaultShortFrictionMinRepeats = 5
 )
 
 var (
@@ -324,21 +326,10 @@ func PlanSkillConsolidation(pending []ProceduralCandidate, diskSkills []DiskSkil
 		})
 	}
 
-	// Case C: Novel Workflow Clique
-	// Remaining unmatched candidates with >= DefaultSkillCreateMinSteps steps are clustered
-	// via complete-linkage cosine similarity (minSim = 0.70, minSize = 2, maxSize = 5).
-	cliques := findCandidateCliques(caseBUnmatched, DefaultSkillCliqueMinSim, DefaultSkillCliqueMinSize, DefaultSkillCliqueMaxSize)
-	for _, clique := range cliques {
-		domain := "discord"
-		if len(clique) > 0 && clique[0].Domain != "" {
-			domain = clique[0].Domain
-		}
-		batches = append(batches, SkillConsolidationBatch{
-			Action:     "CREATE",
-			Domain:     domain,
-			Candidates: clique,
-		})
-	}
+	// Case C: Novel Workflow Clique (>= 3 steps, minSize = 2)
+	// Case D: Short / 1-Liner Friction Alert Clique (< 3 steps, minSize = 5)
+	batches = appendCliqueBatches(batches, findCandidateCliques(caseBUnmatched, DefaultSkillCliqueMinSim, DefaultSkillCliqueMinSize, DefaultSkillCliqueMaxSize), "CREATE")
+	batches = appendCliqueBatches(batches, findCandidateCliques(filterShortFrictionCandidates(caseBUnmatched), DefaultSkillCliqueMinSim, DefaultShortFrictionMinRepeats, DefaultShortFrictionMinRepeats), "ALERT")
 
 	sort.Slice(skippedIDs, func(i, j int) bool {
 		return skippedIDs[i] < skippedIDs[j]
@@ -347,11 +338,37 @@ func PlanSkillConsolidation(pending []ProceduralCandidate, diskSkills []DiskSkil
 	return batches, skippedIDs
 }
 
+func appendCliqueBatches(batches []SkillConsolidationBatch, cliques [][]ProceduralCandidate, action string) []SkillConsolidationBatch {
+	for _, clique := range cliques {
+		domain := "discord"
+		if len(clique) > 0 && clique[0].Domain != "" {
+			domain = clique[0].Domain
+		}
+		batches = append(batches, SkillConsolidationBatch{
+			Action:     action,
+			Domain:     domain,
+			Candidates: clique,
+		})
+	}
+	return batches
+}
+
 // filterCreateCliqueCandidates retains candidates with non-empty embeddings and at least DefaultSkillCreateMinSteps steps.
 func filterCreateCliqueCandidates(cands []ProceduralCandidate) []ProceduralCandidate {
 	var group []ProceduralCandidate
 	for _, c := range cands {
 		if len(c.Embedding) > 0 && len(c.Steps) >= DefaultSkillCreateMinSteps {
+			group = append(group, c)
+		}
+	}
+	return group
+}
+
+// filterShortFrictionCandidates retains candidates with non-empty embeddings and fewer than DefaultSkillCreateMinSteps steps.
+func filterShortFrictionCandidates(cands []ProceduralCandidate) []ProceduralCandidate {
+	var group []ProceduralCandidate
+	for _, c := range cands {
+		if len(c.Embedding) > 0 && len(c.Steps) < DefaultSkillCreateMinSteps {
 			group = append(group, c)
 		}
 	}
@@ -370,7 +387,10 @@ func findCandidateCliques(cands []ProceduralCandidate, minSim float64, minSize, 
 		maxSize = DefaultSkillCliqueMaxSize
 	}
 
-	group := filterCreateCliqueCandidates(cands)
+	group := cands
+	if minSize < DefaultShortFrictionMinRepeats {
+		group = filterCreateCliqueCandidates(cands)
+	}
 
 	sort.Slice(group, func(i, j int) bool {
 		return group[i].ID < group[j].ID
