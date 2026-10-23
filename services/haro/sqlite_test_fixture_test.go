@@ -72,6 +72,27 @@ func initTestSQLite(trimmed string) (*sql.DB, error) {
 	);
 	CREATE INDEX IF NOT EXISTS idx_one_shot_schedules_run_at ON one_shot_schedules(run_at);
 
+	CREATE TABLE IF NOT EXISTS heartbeat_schedules (
+		id TEXT PRIMARY KEY,
+		target_id TEXT NOT NULL,
+		title_prefix TEXT NOT NULL DEFAULT '',
+		cron_expr TEXT NOT NULL,
+		prompt TEXT NOT NULL,
+		timezone TEXT NOT NULL DEFAULT 'UTC',
+		effort TEXT NOT NULL DEFAULT 'low',
+		next_run_at TIMESTAMP NOT NULL,
+		enabled BOOLEAN NOT NULL DEFAULT TRUE,
+		created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_heartbeat_schedules_next_run ON heartbeat_schedules(enabled, next_run_at);
+
+	CREATE TABLE IF NOT EXISTS messages (
+		id TEXT PRIMARY KEY,
+		thread_id TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'PENDING'
+	);
+	CREATE INDEX IF NOT EXISTS idx_messages_thread_status ON messages(thread_id, status);
+
 	CREATE TABLE IF NOT EXISTS schedule_runs (
 		id TEXT PRIMARY KEY,
 		schedule_id TEXT NOT NULL,

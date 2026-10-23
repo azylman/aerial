@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/google/uuid"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/robfig/cron/v3"
 )
 
@@ -245,8 +247,27 @@ type ListSchedulesArgs struct {
 }
 
 type ListSchedulesOutput struct {
-	Recurring []CronSchedule    `json:"recurring"`
-	OneShot   []OneShotSchedule `json:"one_shot"`
+	Recurring  []CronSchedule      `json:"recurring"`
+	OneShot    []OneShotSchedule   `json:"one_shot"`
+	Heartbeats []HeartbeatSchedule `json:"heartbeats"`
+	Summary    string              `json:"summary,omitempty"`
+}
+
+func FormatSchedulesSummary(out ListSchedulesOutput) string {
+	var lines []string
+	for _, r := range out.Recurring {
+		lines = append(lines, fmt.Sprintf("[RECURRING] ID: %s | Cron: %s | Channel: %s | Effort: %s | Next: %s | Prompt: %s", r.ID, r.CronExpr, r.TargetID, r.Effort, r.NextRunAt.Format(time.RFC3339), r.Prompt))
+	}
+	for _, o := range out.OneShot {
+		lines = append(lines, fmt.Sprintf("[ONE_SHOT] ID: %s | Target: %s | Effort: %s | RunAt: %s | Prompt: %s", o.ID, o.ThreadID, o.Effort, o.RunAt.Format(time.RFC3339), o.Prompt))
+	}
+	for _, h := range out.Heartbeats {
+		lines = append(lines, fmt.Sprintf("[HEARTBEAT] ID: %s | Cron: %s | Channel: %s | Effort: %s | Next: %s | Prompt: %s", h.ID, h.CronExpr, h.TargetID, h.Effort, h.NextRunAt.Format(time.RFC3339), h.Prompt))
+	}
+	if len(lines) == 0 {
+		return "No active schedules found."
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (h *ToolHandler) ListSchedules(ctx context.Context, args ListSchedulesArgs) (ListSchedulesOutput, error) {
@@ -259,13 +280,22 @@ func (h *ToolHandler) ListSchedules(ctx context.Context, args ListSchedulesArgs)
 	if err != nil {
 		return ListSchedulesOutput{}, fmt.Errorf("failed to query one-shot schedules: %w", err)
 	}
+	heartbeats, err := ListHeartbeatSchedules(ctx, h.db, targetID)
+	if err != nil {
+		return ListSchedulesOutput{}, fmt.Errorf("failed to query heartbeat schedules: %w", err)
+	}
 	if crons == nil {
 		crons = []CronSchedule{}
 	}
 	if oneShots == nil {
 		oneShots = []OneShotSchedule{}
 	}
-	return ListSchedulesOutput{Recurring: crons, OneShot: oneShots}, nil
+	if heartbeats == nil {
+		heartbeats = []HeartbeatSchedule{}
+	}
+	out := ListSchedulesOutput{Recurring: crons, OneShot: oneShots, Heartbeats: heartbeats}
+	out.Summary = FormatSchedulesSummary(out)
+	return out, nil
 }
 
 type CancelScheduleArgs struct {
@@ -345,4 +375,224 @@ func (h *ToolHandler) UpdateCronSchedule(ctx context.Context, args UpdateCronSch
 		resp.NextRunAt = nextRun.Format(time.RFC3339)
 	}
 	return resp, nil
+}
+
+func getMapString(args map[string]any, keys ...string) string {
+	if args == nil {
+		return ""
+	}
+	for _, k := range keys {
+		if v, ok := args[k]; ok && v != nil {
+			if s, ok := v.(string); ok {
+				if trimmed := strings.TrimSpace(s); trimmed != "" {
+					return trimmed
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func getMapBool(args map[string]any, keys ...string) (*bool, bool) {
+	if args == nil {
+		return nil, false
+	}
+	for _, k := range keys {
+		if v, ok := args[k]; ok && v != nil {
+			switch b := v.(type) {
+			case bool:
+				return &b, true
+			case string:
+				lower := strings.ToLower(strings.TrimSpace(b))
+				if lower == "true" || lower == "1" {
+					val := true
+					return &val, true
+				}
+				if lower == "false" || lower == "0" {
+					val := false
+					return &val, true
+				}
+			}
+		}
+	}
+	return nil, false
+}
+
+// HandleScheduleHeartbeat handles the schedule_heartbeat MCP tool call.
+func HandleScheduleHeartbeat(ctx context.Context, db *sql.DB, defaultTZ string, args map[string]any) (*mcp.CallToolResult, error) {
+	channelID := getMapString(args, "channel_id", "target_id")
+	if !IsNumericSnowflake(channelID) {
+		return nil, fmt.Errorf("'channel_id' is required and must be a valid numeric snowflake")
+	}
+
+	cronExpr := getMapString(args, "cron_expr", "cron_expression")
+	if cronExpr == "" {
+		return nil, fmt.Errorf("'cron_expr' is required")
+	}
+
+	prompt := getMapString(args, "prompt")
+	if prompt == "" {
+		return nil, fmt.Errorf("'prompt' is required")
+	}
+
+	titlePrefix := getMapString(args, "title_prefix")
+	if titlePrefix == "" {
+		titlePrefix = "Heartbeat Alert"
+	}
+
+	tz := getMapString(args, "timezone")
+	tz = resolveTimezone(tz, defaultTZ)
+
+	effortTier := getMapString(args, "effort")
+	effort, err := NormalizeEffort(effortTier)
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now().UTC()
+	nextRun, err := CalculateNextCronRun(cronExpr, tz, now)
+	if err != nil {
+		return nil, err
+	}
+
+	id := uuid.New().String()
+	hb := HeartbeatSchedule{
+		ID:          id,
+		TargetID:    channelID,
+		TitlePrefix: titlePrefix,
+		CronExpr:    cronExpr,
+		Prompt:      prompt,
+		Timezone:    tz,
+		Effort:      effort,
+		NextRunAt:   nextRun,
+		Enabled:     true,
+		CreatedAt:   now,
+	}
+
+	if err := InsertHeartbeatSchedule(ctx, db, hb); err != nil {
+		return nil, fmt.Errorf("failed to persist heartbeat schedule: %w", err)
+	}
+
+	out := map[string]any{
+		"status":          "success",
+		"schedule_id":     id,
+		"cron_expression": cronExpr,
+		"next_run_at":     nextRun.Format(time.RFC3339),
+		"channel_id":      channelID,
+		"effort":          effort,
+		"message":         "Heartbeat schedule created successfully.",
+	}
+	jsonBytes, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal heartbeat output: %w", err)
+	}
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.TextContent{Text: string(jsonBytes)},
+		},
+	}, nil
+}
+
+func applyHeartbeatTimingUpdates(args map[string]any, sched *HeartbeatSchedule) (bool, error) {
+	recompute := false
+	if cronExpr := getMapString(args, "cron_expr", "cron_expression"); cronExpr != "" {
+		if _, err := CalculateNextCronRun(cronExpr, sched.Timezone, time.Now().UTC()); err != nil {
+			return false, err
+		}
+		sched.CronExpr = cronExpr
+		recompute = true
+	}
+	if tz := getMapString(args, "timezone"); tz != "" {
+		if _, err := time.LoadLocation(tz); err != nil {
+			return false, fmt.Errorf("invalid timezone %q: %w", tz, err)
+		}
+		sched.Timezone = tz
+		recompute = true
+	}
+	if enabledVal, ok := getMapBool(args, "enabled"); ok && enabledVal != nil {
+		if sched.Enabled != *enabledVal {
+			sched.Enabled = *enabledVal
+			recompute = true
+		}
+	}
+	return recompute, nil
+}
+
+func applyHeartbeatContentUpdates(args map[string]any, sched *HeartbeatSchedule) error {
+	if channelID := getMapString(args, "channel_id", "target_id"); channelID != "" {
+		if !IsNumericSnowflake(channelID) {
+			return fmt.Errorf("'channel_id' must be a valid numeric snowflake")
+		}
+		sched.TargetID = channelID
+	}
+	if prompt := getMapString(args, "prompt"); prompt != "" {
+		sched.Prompt = prompt
+	}
+	if titlePrefix, ok := args["title_prefix"]; ok && titlePrefix != nil {
+		if s, ok := titlePrefix.(string); ok {
+			sched.TitlePrefix = strings.TrimSpace(s)
+		}
+	}
+	if effortTier := getMapString(args, "effort"); effortTier != "" {
+		effort, err := NormalizeEffort(effortTier)
+		if err != nil {
+			return err
+		}
+		sched.Effort = effort
+	}
+	return nil
+}
+
+// HandleUpdateHeartbeat handles the update_heartbeat MCP tool call.
+func HandleUpdateHeartbeat(ctx context.Context, db *sql.DB, args map[string]any) (*mcp.CallToolResult, error) {
+	id := getMapString(args, "id", "schedule_id")
+	if id == "" {
+		return nil, fmt.Errorf("'id' is required")
+	}
+
+	sched, err := GetHeartbeatSchedule(ctx, db, id)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := applyHeartbeatContentUpdates(args, sched); err != nil {
+		return nil, err
+	}
+
+	recomputeNextRun, err := applyHeartbeatTimingUpdates(args, sched)
+	if err != nil {
+		return nil, err
+	}
+
+	if recomputeNextRun && sched.Enabled {
+		nextRun, err := CalculateNextCronRun(sched.CronExpr, sched.Timezone, time.Now().UTC())
+		if err != nil {
+			return nil, err
+		}
+		sched.NextRunAt = nextRun
+	}
+
+	if err := UpdateHeartbeatSchedule(ctx, db, *sched); err != nil {
+		return nil, fmt.Errorf("failed to update heartbeat schedule: %w", err)
+	}
+
+	out := map[string]any{
+		"status":      "success",
+		"schedule_id": id,
+		"message":     "Heartbeat schedule updated successfully.",
+		"next_run_at": sched.NextRunAt.Format(time.RFC3339),
+		"effort":      sched.Effort,
+		"enabled":     sched.Enabled,
+	}
+	jsonBytes, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal heartbeat output: %w", err)
+	}
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.TextContent{Text: string(jsonBytes)},
+		},
+	}, nil
 }

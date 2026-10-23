@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -34,6 +35,19 @@ type OneShotSchedule struct {
 	RunAt     time.Time `json:"run_at"`
 	CreatedAt time.Time `json:"created_at"`
 	Effort    string    `json:"effort,omitempty"`
+}
+
+type HeartbeatSchedule struct {
+	ID          string    `json:"id"`
+	TargetID    string    `json:"channel_id"`
+	TitlePrefix string    `json:"title_prefix"`
+	CronExpr    string    `json:"cron_expression"`
+	Prompt      string    `json:"prompt"`
+	Timezone    string    `json:"timezone"`
+	Effort      string    `json:"effort,omitempty"`
+	NextRunAt   time.Time `json:"next_run_at"`
+	Enabled     bool      `json:"enabled"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 type ScheduleRun struct {
@@ -198,6 +212,26 @@ func InsertOneShotSchedule(ctx context.Context, database *sql.DB, s OneShotSched
 	return err
 }
 
+func InsertHeartbeatSchedule(ctx context.Context, database *sql.DB, h HeartbeatSchedule) error {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return err
+	}
+	if h.CreatedAt.IsZero() {
+		h.CreatedAt = time.Now().UTC()
+	}
+	if h.Timezone == "" {
+		h.Timezone = "UTC"
+	}
+	effort, err := NormalizeEffort(h.Effort)
+	if err != nil {
+		effort = "low"
+	}
+	query := rebindQuery(`INSERT INTO heartbeat_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, effort, next_run_at, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, isPostgres(database))
+	_, err = database.ExecContext(ctx, query, h.ID, h.TargetID, h.TitlePrefix, h.CronExpr, h.Prompt, h.Timezone, effort, h.NextRunAt, h.Enabled, h.CreatedAt)
+	return err
+}
+
 func querySchedules[T any](ctx context.Context, database *sql.DB, baseQuery, filterCol, targetID, orderCol string, scanFn func(*sql.Rows) (T, error)) ([]T, error) {
 	ctx, err := normCtxAndDB(ctx, database)
 	if err != nil {
@@ -248,6 +282,64 @@ func ListOneShotSchedules(ctx context.Context, database *sql.DB, targetID string
 		err := rows.Scan(&s.ID, &s.ThreadID, &s.Prompt, &s.RunAt, &s.CreatedAt, &s.Effort)
 		return s, err
 	})
+}
+
+func ListHeartbeatSchedules(ctx context.Context, database *sql.DB, targetID string) ([]HeartbeatSchedule, error) {
+	baseQuery := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'low') FROM heartbeat_schedules WHERE enabled = TRUE`
+	return querySchedules(ctx, database, baseQuery, "target_id", targetID, "created_at", func(rows *sql.Rows) (HeartbeatSchedule, error) {
+		var h HeartbeatSchedule
+		err := rows.Scan(&h.ID, &h.TargetID, &h.TitlePrefix, &h.CronExpr, &h.Prompt, &h.Timezone, &h.NextRunAt, &h.Enabled, &h.CreatedAt, &h.Effort)
+		return h, err
+	})
+}
+
+func GetHeartbeatSchedule(ctx context.Context, database *sql.DB, id string) (*HeartbeatSchedule, error) {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return nil, err
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, fmt.Errorf("schedule_id cannot be empty")
+	}
+	query := rebindQuery(`SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'low') FROM heartbeat_schedules WHERE id = ?`, isPostgres(database))
+	var h HeartbeatSchedule
+	row := database.QueryRowContext(ctx, query, id)
+	if err := row.Scan(&h.ID, &h.TargetID, &h.TitlePrefix, &h.CronExpr, &h.Prompt, &h.Timezone, &h.NextRunAt, &h.Enabled, &h.CreatedAt, &h.Effort); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("heartbeat schedule %q not found", id)
+		}
+		return nil, err
+	}
+	return &h, nil
+}
+
+func UpdateHeartbeatSchedule(ctx context.Context, database *sql.DB, h HeartbeatSchedule) error {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return err
+	}
+	h.ID = strings.TrimSpace(h.ID)
+	if h.ID == "" {
+		return fmt.Errorf("schedule_id cannot be empty")
+	}
+	effort, err := NormalizeEffort(h.Effort)
+	if err != nil {
+		return err
+	}
+	query := rebindQuery(`UPDATE heartbeat_schedules SET target_id = ?, title_prefix = ?, cron_expr = ?, prompt = ?, timezone = ?, effort = ?, next_run_at = ?, enabled = ? WHERE id = ?`, isPostgres(database))
+	res, err := database.ExecContext(ctx, query, h.TargetID, h.TitlePrefix, h.CronExpr, h.Prompt, h.Timezone, effort, h.NextRunAt, h.Enabled, h.ID)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to determine rows affected: %w", err)
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("heartbeat schedule %q not found", h.ID)
+	}
+	return nil
 }
 
 func UpdateCronSchedule(ctx context.Context, database *sql.DB, id string, effort, cronExpr, prompt, titlePrefix, timezone *string, nextRunAt *time.Time) error {
@@ -309,7 +401,7 @@ func DeleteSchedule(ctx context.Context, database *sql.DB, scheduleID string) (b
 		return false, err
 	}
 	var total int64
-	for _, tbl := range []string{"cron_schedules", "one_shot_schedules"} {
+	for _, tbl := range []string{"cron_schedules", "one_shot_schedules", "heartbeat_schedules"} {
 		res, err := database.ExecContext(ctx, rebindQuery("DELETE FROM "+tbl+" WHERE id = ?", isPostgres(database)), scheduleID)
 		if err != nil {
 			return false, err
@@ -370,6 +462,53 @@ func AdvanceCronNextRun(ctx context.Context, database *sql.DB, id string, nextRu
 	return nil
 }
 
+func GetDueHeartbeatSchedules(ctx context.Context, database *sql.DB, now time.Time) ([]HeartbeatSchedule, error) {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return nil, err
+	}
+	baseQuery := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'low') FROM heartbeat_schedules WHERE enabled = TRUE AND next_run_at <= ? ORDER BY next_run_at ASC`
+	rows, err := database.QueryContext(ctx, rebindQuery(baseQuery, isPostgres(database)), now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []HeartbeatSchedule
+	for rows.Next() {
+		var h HeartbeatSchedule
+		if err := rows.Scan(&h.ID, &h.TargetID, &h.TitlePrefix, &h.CronExpr, &h.Prompt, &h.Timezone, &h.NextRunAt, &h.Enabled, &h.CreatedAt, &h.Effort); err != nil {
+			return nil, err
+		}
+		results = append(results, h)
+	}
+	return results, rows.Err()
+}
+
+func AdvanceHeartbeatNextRun(ctx context.Context, database *sql.DB, id string, nextRun time.Time) error {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return err
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("schedule_id cannot be empty")
+	}
+	query := rebindQuery(`UPDATE heartbeat_schedules SET next_run_at = ? WHERE id = ?`, isPostgres(database))
+	res, err := database.ExecContext(ctx, query, nextRun, id)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to determine rows affected: %w", err)
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("heartbeat schedule %q not found", id)
+	}
+	return nil
+}
+
 func GetDueOneShotSchedules(ctx context.Context, database *sql.DB, now time.Time) ([]OneShotSchedule, error) {
 	ctx, err := normCtxAndDB(ctx, database)
 	if err != nil {
@@ -412,6 +551,23 @@ func DeleteOneShotSchedule(ctx context.Context, database *sql.DB, id string) (bo
 		return false, fmt.Errorf("failed to determine rows affected: %w", err)
 	}
 	return rowsAffected > 0, nil
+}
+
+func HasActiveThreadTurn(ctx context.Context, database *sql.DB, threadID string) (bool, error) {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return false, err
+	}
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" {
+		return false, nil
+	}
+	query := rebindQuery(`SELECT EXISTS(SELECT 1 FROM messages WHERE thread_id = ? AND (status IN ('pending', 'processing') OR status IN ('PENDING', 'PROCESSING')))`, isPostgres(database))
+	var exists bool
+	if err := database.QueryRowContext(ctx, query, threadID).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists, nil
 }
 
 func CreateScheduleRun(ctx context.Context, database *sql.DB, r ScheduleRun) error {
