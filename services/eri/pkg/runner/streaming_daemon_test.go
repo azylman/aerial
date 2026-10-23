@@ -743,20 +743,27 @@ func TestStreamingDaemon_ToolAndSkillLifecycleEvents(t *testing.T) {
 		`{"event":"step_update","step_update":{"state":"DONE","type":"tool_call","step_index":2,"tool_name":"call_mcp_tool"}}` + "\n" +
 		`{"event":"step_update","step_update":{"state":"RUNNING","type":"tool_call","step_index":3,"tool_name":"view_file","tool_info":{"parameters":{"AbsolutePath":"/share/aerial-config/custom-skills/home-assistant/SKILL.md"}}}}` + "\n" +
 		`{"event":"step_update","step_update":{"state":"DONE","type":"tool_call","step_index":3,"tool_name":"view_file"}}` + "\n" +
-		`{"event":"step_update","step_update":{"state":"RUNNING","type":"tool_call","step_index":4,"tool_name":"manage_task","tool_info":{"parameters":{}}}}` + "\n" +
+		`{"event":"step_update","step_update":{"state":"ACTIVE","step_type":"tool","step_index":4,"tool_name":"invoke_subagent","tool_info":{"parameters":{"Role":"Researcher"}}}}` + "\n" +
+		`{"event":"step_update","step_update":{"state":"DONE","step_type":"subagent","step_index":4,"tool_name":"invoke_subagent"}}` + "\n" +
+		`{"event":"step_update","step_update":{"state":"ACTIVE","step_type":"tool","step_index":5,"tool_name":"custom_step_tool","tool_info":{"parameters":{}}}}` + "\n" +
+		`{"event":"step_update","step_update":{"state":"ERROR","step_type":"generic","step_index":5,"tool_name":"custom_step_tool"}}` + "\n" +
+		`{"event":"step_update","step_update":{"state":"RUNNING","type":"tool_call","step_index":6,"tool_name":"manage_task","tool_info":{"parameters":{}}}}` + "\n" +
+		`{"event":"step_update","step_update":{"state":"DONE","step_type":"agent_response","step_index":7}}` + "\n" +
 		`{"event":"result","result":{"status":"SUCCESS","response":"done"}}` + "\n"
 	_, _ = h.outW.Write([]byte(events))
 
 	waitAndAssertSinkResult(t, "ToolEvents", sink, "done", "", "")
 	sink.mu.Lock()
 	defer sink.mu.Unlock()
-	if len(sink.completedToolDetails) != 4 {
-		t.Fatalf("expected 4 completed tool records, got %d", len(sink.completedToolDetails))
+	if len(sink.completedToolDetails) != 6 {
+		t.Fatalf("expected 6 completed tool records, got %d: %+v", len(sink.completedToolDetails), sink.completedToolDetails)
 	}
 	expectedDetails := []mockCompletedTool{
 		{ToolName: "run_command", MCPServer: "native", Status: "ok"},
 		{ToolName: "get_me", MCPServer: "github", Status: "ok"},
 		{ToolName: "view_file", MCPServer: "native", Status: "ok"},
+		{ToolName: "invoke_subagent", MCPServer: "native", Status: "ok"},
+		{ToolName: "custom_step_tool", MCPServer: "native", Status: "error"},
 		{ToolName: "manage_task", MCPServer: "native", Status: "aborted"},
 	}
 	for i, exp := range expectedDetails {
@@ -768,7 +775,7 @@ func TestStreamingDaemon_ToolAndSkillLifecycleEvents(t *testing.T) {
 	if len(sink.activatedSkills) != 1 || sink.activatedSkills[0] != "home-assistant:discord" {
 		t.Errorf("unexpected skill activation: %+v", sink.activatedSkills)
 	}
-	for i, tc := range []string{"run_command:echo hello", "get_me:", "view_file:", "manage_task:"} {
+	for i, tc := range []string{"run_command:echo hello", "get_me:", "view_file:", "invoke_subagent:", "custom_step_tool:", "manage_task:"} {
 		if len(sink.toolCalls) <= i || sink.toolCalls[i] != tc {
 			t.Errorf("expected tool call %d to be %q, got %v", i, tc, sink.toolCalls)
 		}
@@ -796,10 +803,12 @@ func TestStreamingDaemon_StepAwareDeltaPurging(t *testing.T) {
 	h := startTestStreamingDaemon(t, cfgForSession(testSessionUUID), "", true)
 	mockSink := newMockTurnSink()
 	bufSink := NewBufferingTurnSink(BufferingTurnSinkConfig{
-		OnStepStarted: mockSink.OnStepStarted,
-		OnTextDelta:   mockSink.OnTextDelta,
-		OnComplete:    mockSink.OnResult,
-		OnError:       mockSink.OnError,
+		OnStepStarted:   mockSink.OnStepStarted,
+		OnToolCall:      mockSink.OnToolCall,
+		OnToolCompleted: mockSink.OnToolCompleted,
+		OnTextDelta:     mockSink.OnTextDelta,
+		OnComplete:      mockSink.OnResult,
+		OnError:         mockSink.OnError,
 	})
 	enqueueInflightTurn(h.daemon, "turn-step-aware", bufSink, func(tc *TurnContext) {
 		tc.SessionID = testSessionUUID
@@ -808,7 +817,7 @@ func TestStreamingDaemon_StepAwareDeltaPurging(t *testing.T) {
 	})
 	steps := []struct{ line, want string }{
 		{`{"event":"step_update","step_update":{"step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"Let me wait for task..."}}`, "Let me wait for task..."},
-		{`{"event":"step_update","step_update":{"step_index":2,"state":"ACTIVE","step_type":"agent_response","text_delta":"Reviewing logs..."}}`, "Reviewing logs..."},
+		{`{"event":"step_update","step_update":{"step_index":2,"state":"ACTIVE","step_type":"tool","tool_name":"bg_daemon"}}`, ""},
 		{`{"event":"step_update","step_index":3,"step_update":{"state":"ACTIVE","step_type":"agent_response","text_delta":"All work completed! Ready to roll."}}`, "All work completed! Ready to roll."},
 	}
 	for i, s := range steps {
@@ -817,7 +826,7 @@ func TestStreamingDaemon_StepAwareDeltaPurging(t *testing.T) {
 			t.Fatalf("step %d: got %q, want %q", i+1, bufSink.AccumulatedText(), s.want)
 		}
 	}
-	h.daemon.dispatchNDJSONLine(`{"event":"result","result":{"status":"SUCCESS","response":"Let me wait for task... Reviewing logs... All work completed! Ready to roll."}}`)
+	h.daemon.dispatchNDJSONLine(`{"event":"result","result":{"status":"SUCCESS","response":"Let me wait for task... All work completed! Ready to roll."}}`)
 	res, err := bufSink.Wait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected wait error: %v", err)
@@ -827,9 +836,12 @@ func TestStreamingDaemon_StepAwareDeltaPurging(t *testing.T) {
 		t.Errorf("expected clean terminal deliverable %q, got %q", expected, res.Response)
 	}
 	mockSink.mu.Lock()
-	stepStarts := mockSink.stepStarts
+	stepStarts, completed := mockSink.stepStarts, mockSink.completedToolDetails
 	mockSink.mu.Unlock()
 	if len(stepStarts) != 3 || stepStarts[0] != 1 || stepStarts[1] != 2 || stepStarts[2] != 3 {
 		t.Errorf("unexpected step starts recorded: %v", stepStarts)
+	}
+	if len(completed) != 1 || completed[0].ToolName != "bg_daemon" || completed[0].Status != "aborted" {
+		t.Errorf("expected bg_daemon aborted completion without purging final response, got %+v", completed)
 	}
 }

@@ -157,13 +157,16 @@ func TestBufferingTurnSink_ToolResetPurgesBuffer(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		pre, mid, post []string
-		call, done     bool
+		call           bool
+		doneStatus     string
 		res, want      string
 	}{
 		{pre: []string{"Pre-tool commentary."}, call: true, res: "Pre-tool commentary.", want: ""},
-		{pre: []string{"Stray delta."}, done: true, res: "", want: ""},
-		{pre: []string{"Let me run tests..."}, mid: []string{"chunk..."}, post: []string{"All tests passed! ", "Ready."}, call: true, done: true, res: "Noise. All tests passed! Ready.", want: "All tests passed! Ready."},
-		{call: true, done: true, res: "Completed task output.", want: "Completed task output."},
+		{pre: []string{"Stray delta."}, doneStatus: "DONE", res: "", want: ""},
+		{pre: []string{"Let me run tests..."}, mid: []string{"chunk..."}, post: []string{"All tests passed! ", "Ready."}, call: true, doneStatus: "DONE", res: "Noise. All tests passed! Ready.", want: "All tests passed! Ready."},
+		{call: true, doneStatus: "DONE", res: "Completed task output.", want: "Completed task output."},
+		{pre: []string{"Spawning subagent..."}, post: []string{"Final deliverable preserved."}, call: true, doneStatus: "aborted", res: "Spawning subagent... Final deliverable preserved.", want: "Final deliverable preserved."},
+		{post: []string{"Streamed final response."}, doneStatus: "aborted", res: "Streamed final response.", want: "Streamed final response."},
 	} {
 		sink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
 		feed := func(deltas []string) {
@@ -176,10 +179,13 @@ func TestBufferingTurnSink_ToolResetPurgesBuffer(t *testing.T) {
 			sink.OnToolCall("run_command", "bash")
 		}
 		feed(tc.mid)
-		if tc.done {
-			sink.OnToolCompleted("run_command", "native", 100*time.Millisecond, "DONE")
+		if tc.doneStatus != "" && tc.doneStatus != "aborted" {
+			sink.OnToolCompleted("run_command", "native", 100*time.Millisecond, tc.doneStatus)
 		}
 		feed(tc.post)
+		if tc.doneStatus == "aborted" {
+			sink.OnToolCompleted("invoke_subagent", "native", 100*time.Millisecond, tc.doneStatus)
+		}
 		if tc.res != "" {
 			sink.OnResult(&TurnResult{Response: tc.res})
 			if res, err := sink.Wait(context.Background()); err != nil || res.Response != tc.want {
