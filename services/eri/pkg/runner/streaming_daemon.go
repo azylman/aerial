@@ -433,66 +433,46 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 		var su map[string]any
 		if m, ok := raw["step_update"].(map[string]any); ok && m != nil {
 			su = m
-			var state, typ string
-			if s, ok := su["state"].(string); ok {
-				state = strings.ToUpper(s)
-			} else if s, ok := su["status"].(string); ok {
-				state = strings.ToUpper(s)
-			}
-			if t, ok := su["type"].(string); ok {
-				typ = strings.ToLower(t)
-			} else if t, ok := su["step_type"].(string); ok {
-				typ = strings.ToLower(t)
-			}
-			if idx, ok := su["step_index"].(float64); ok {
-				stepIdx, hasStepIdx = int(idx), true
-			} else if idx, ok := su["step_index"].(int); ok {
-				stepIdx, hasStepIdx = idx, true
-			}
-			if tn, ok := su["tool_name"].(string); ok && tn != "" {
+			state := strings.ToUpper(extractFirstString(su, "state", "status"))
+			typ := strings.ToLower(extractFirstString(su, "type", "step_type"))
+			stepIdx, hasStepIdx = extractStepIndex(su)
+			if tn := extractFirstString(su, "tool_name"); tn != "" {
 				toolName = tn
 			}
 			if info, ok := su["tool_info"].(map[string]any); ok {
 				if params, ok := info["parameters"].(map[string]any); ok {
 					toolParams = params
-					if cl, ok := params["CommandLine"].(string); ok && cl != "" {
+					if cl := extractFirstString(params, "CommandLine"); cl != "" {
 						cmdName = cl
 					}
 				}
 			}
 			if tcs, ok := su["tool_calls"].([]any); ok && len(tcs) > 0 {
 				if firstTc, ok := tcs[0].(map[string]any); ok {
-					if n, ok := firstTc["name"].(string); ok && toolName == "" {
+					if n := extractFirstString(firstTc, "name"); n != "" && toolName == "" {
 						toolName = n
 					}
 					if args, ok := firstTc["args"].(map[string]any); ok && toolParams == nil {
 						toolParams = args
-						if cl, ok := args["CommandLine"].(string); ok && cl != "" {
+						if cl := extractFirstString(args, "CommandLine"); cl != "" {
 							cmdName = cl
 						}
 					}
 				}
 			}
-			if typ == "tool_call" || typ == "tool" {
-				if state != "DONE" && state != "ERROR" {
-					isToolStart = true
-				} else {
-					isToolStart, isToolEnd = false, true
-					if state == "DONE" {
-						toolEndStatus = "ok"
-					} else {
-						toolEndStatus = "error"
-					}
-				}
+			switch state {
+			case "DONE":
+				toolEndStatus = "ok"
+			case "ERROR":
+				toolEndStatus = "error"
+			}
+			if typ == "tool_call" || typ == "tool" || typ == "subagent" {
+				isToolStart, isToolEnd = toolEndStatus == "", toolEndStatus != ""
 			}
 		}
 
 		if !hasStepIdx {
-			if idx, ok := raw["step_index"].(float64); ok {
-				stepIdx, hasStepIdx = int(idx), true
-			} else if idx, ok := raw["step_index"].(int); ok {
-				stepIdx, hasStepIdx = idx, true
-			}
+			stepIdx, hasStepIdx = extractStepIndex(raw)
 		}
 
 		if hasStepIdx {
@@ -548,16 +528,16 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 				}
 			}
 			d.inflightMu.Unlock()
-		} else if isToolEnd {
+		} else if isToolEnd || (hasStepIdx && toolEndStatus != "") {
 			d.inflightMu.Lock()
 			if d.inFlightTools != nil {
 				if hasStepIdx {
 					if rec, exists := d.inFlightTools[stepIdx]; exists {
-						completedRecord, hasCompletedRecord = rec, true
+						completedRecord, hasCompletedRecord, isToolEnd = rec, true, true
 						delete(d.inFlightTools, stepIdx)
 					}
 				}
-				if !hasCompletedRecord && len(d.inFlightTools) > 0 {
+				if isToolEnd && !hasCompletedRecord && len(d.inFlightTools) > 0 {
 					cTool, _ := ExtractMCPToolInfo(toolName, toolParams)
 					for idx, rec := range d.inFlightTools {
 						if rec.toolName == toolName || rec.toolName == cTool || toolName == "call_mcp_tool" || len(d.inFlightTools) == 1 {
@@ -698,6 +678,25 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 		populateUsage(res, raw)
 		activeTurn.Sink.OnResult(res)
 	}
+}
+
+func extractFirstString(m map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if s, ok := m[k].(string); ok && s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+func extractStepIndex(m map[string]any) (int, bool) {
+	if idx, ok := m["step_index"].(float64); ok {
+		return int(idx), true
+	}
+	if idx, ok := m["step_index"].(int); ok {
+		return idx, true
+	}
+	return 0, false
 }
 
 func extractResponseString(raw map[string]any) string {

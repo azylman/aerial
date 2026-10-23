@@ -152,7 +152,9 @@ func (s *BufferingTurnSink) OnToolCall(toolName, commandName string) {
 }
 
 func (s *BufferingTurnSink) OnToolCompleted(toolName, mcpServer string, duration time.Duration, status string) {
-	s.resetIntermediateBuffer()
+	if status != "aborted" {
+		s.resetIntermediateBuffer()
+	}
 	if s.cfg.OnToolCompleted != nil {
 		s.cfg.OnToolCompleted(toolName, mcpServer, duration, status)
 	}
