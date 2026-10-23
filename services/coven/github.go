@@ -20,6 +20,11 @@ type SkillPublisher interface {
 	PublishSkillChanges(ctx context.Context, changes []SkillFileChange) (prNumber int, err error)
 }
 
+// FrictionAlertNotifier is an optional capability on SkillPublisher for delivering 5x-repeat short friction alerts to Discord.
+type FrictionAlertNotifier interface {
+	NotifyShortFriction(ctx context.Context, content string) error
+}
+
 // GitHubSkillPublisherConfig configures GitHubSkillPublisher.
 type GitHubSkillPublisherConfig struct {
 	Token              string
@@ -437,6 +442,66 @@ func (p *GitHubSkillPublisher) registerPRWithBrain(ctx context.Context, prNum in
 	return nil
 }
 
+// NotifyShortFriction posts a recurring short-friction alert to the configured Discord system channel via Brain's /discord/message endpoint.
+func (p *GitHubSkillPublisher) NotifyShortFriction(ctx context.Context, content string) error {
+	if p.systemChannelID == "" || p.brainPRRegisterURL == "" || strings.TrimSpace(content) == "" {
+		return nil
+	}
+	msgURL := strings.Replace(p.brainPRRegisterURL, "/internal/pr/register", "/discord/message", 1)
+	body := fmt.Sprintf(`{"channel_id":%q,"content":%q}`, p.systemChannelID, content)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, msgURL, strings.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("failed to create friction alert request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("friction alert request failed: %w", err)
+	}
+	defer closeWarn(resp.Body, "friction alert response")
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("friction alert returned status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func formatShortFrictionAlert(batch SkillConsolidationBatch) string {
+	var ids []string
+	var steps, avoid []string
+	seenSteps := make(map[string]bool)
+	seenAvoid := make(map[string]bool)
+	trigger := ""
+	for _, c := range batch.Candidates {
+		ids = append(ids, fmt.Sprintf("#%d", c.ID))
+		if trigger == "" && strings.TrimSpace(c.Trigger) != "" {
+			trigger = strings.TrimSpace(c.Trigger)
+		}
+		for _, s := range c.Steps {
+			if t := strings.TrimSpace(s); t != "" && !seenSteps[t] {
+				seenSteps[t] = true
+				steps = append(steps, t)
+			}
+		}
+		for _, a := range c.Avoid {
+			if t := strings.TrimSpace(a); t != "" && !seenAvoid[t] {
+				seenAvoid[t] = true
+				avoid = append(avoid, t)
+			}
+		}
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("⚡ **Recurring 1-Liner Friction Alert (%dx Repeats: %s)**\n", len(batch.Candidates), strings.Join(ids, ", ")))
+	sb.WriteString(fmt.Sprintf("- **Pattern**: %s\n", trigger))
+	if len(steps) > 0 {
+		sb.WriteString(fmt.Sprintf("- **Observed Workaround**: %s\n", strings.Join(steps, "; ")))
+	}
+	if len(avoid) > 0 {
+		sb.WriteString(fmt.Sprintf("- **Friction / Avoid**: %s\n", strings.Join(avoid, "; ")))
+	}
+	sb.WriteString("Should we fix the underlying container/tooling or codify a rule?")
+	return sb.String()
+}
+
 func formatSkillCommitMessage(changes []SkillFileChange) string {
 	if len(changes) == 1 {
 		return fmt.Sprintf("feat(skills): %s\n\n%s", changes[0].CommitSummary, changes[0].RelPath)
@@ -493,6 +558,42 @@ func parseDesignerResponse(raw string) (*DesignerSkillResponse, error) {
 	return &resp, nil
 }
 
+func stageCompiledSkillInMemory(diskSkills []DiskSkill, name, relPath, domain, cleanedMD string) []DiskSkill {
+	for i := range diskSkills {
+		if diskSkills[i].RelPath == relPath || diskSkills[i].Name == name {
+			diskSkills[i].RawContent = cleanedMD
+			diskSkills[i].Name = name
+			return diskSkills
+		}
+	}
+	normDomain := strings.ToLower(strings.TrimSpace(domain))
+	if normDomain != "common" {
+		normDomain = "discord"
+	}
+	return append(diskSkills, DiskSkill{
+		Name:       name,
+		RelPath:    relPath,
+		Domain:     normDomain,
+		RawContent: cleanedMD,
+	})
+}
+
+func handleAlertBatch(ctx context.Context, store Store, publisher SkillPublisher, batch SkillConsolidationBatch, batchIDs []int64) bool {
+	if batch.Action != "ALERT" {
+		return false
+	}
+	if notifier, ok := publisher.(FrictionAlertNotifier); ok {
+		if err := notifier.NotifyShortFriction(ctx, formatShortFrictionAlert(batch)); err != nil {
+			log.Printf("[coven-skills] warning sending short friction alert: %v", err)
+			return true
+		}
+	}
+	if err := store.MarkProceduralCandidatesSkipped(ctx, batchIDs); err != nil {
+		log.Printf("[coven-skills] warning marking alerted candidates skipped: %v", err)
+	}
+	return true
+}
+
 // ConsolidateProceduralSkills scans pending procedural friction candidates, clusters and compiles
 // them into validated SKILL.md changes, and publishes an auto-merging PR to aerial-config.
 func ConsolidateProceduralSkills(ctx context.Context, store Store, ollama OllamaClient, llmFunc LLMClientFunc, publisher SkillPublisher, customSkillsDir string) (int, error) {
@@ -501,14 +602,8 @@ func ConsolidateProceduralSkills(ctx context.Context, store Store, ollama Ollama
 	}
 	defer extractionMutex.Unlock()
 
-	if store == nil {
-		return 0, fmt.Errorf("store cannot be nil")
-	}
-	if publisher == nil {
-		return 0, fmt.Errorf("publisher cannot be nil")
-	}
-	if llmFunc == nil {
-		return 0, fmt.Errorf("llmFunc cannot be nil")
+	if store == nil || publisher == nil || llmFunc == nil {
+		return 0, fmt.Errorf("store, publisher, and llmFunc cannot be nil")
 	}
 
 	pending, err := store.GetPendingProceduralCandidates(ctx)
@@ -549,6 +644,10 @@ func ConsolidateProceduralSkills(ctx context.Context, store Store, ollama Ollama
 		batchIDs := make([]int64, len(batch.Candidates))
 		for i, c := range batch.Candidates {
 			batchIDs[i] = c.ID
+		}
+
+		if handleAlertBatch(ctx, store, publisher, batch, batchIDs) {
+			continue
 		}
 
 		prompt := buildSkillDesignerPrompt(batch)
@@ -598,29 +697,7 @@ func ConsolidateProceduralSkills(ctx context.Context, store Store, ollama Ollama
 
 		seenPaths[relPath] = true
 		seenNames[name] = true
-
-		// Update in-memory diskSkills slice so subsequent batches validate and compile against the latest staged state.
-		found := false
-		for i := range diskSkills {
-			if diskSkills[i].RelPath == relPath || diskSkills[i].Name == name {
-				diskSkills[i].RawContent = cleanedMD
-				diskSkills[i].Name = name
-				found = true
-				break
-			}
-		}
-		if !found {
-			normDomain := strings.ToLower(strings.TrimSpace(domain))
-			if normDomain != "common" {
-				normDomain = "discord"
-			}
-			diskSkills = append(diskSkills, DiskSkill{
-				Name:       name,
-				RelPath:    relPath,
-				Domain:     normDomain,
-				RawContent: cleanedMD,
-			})
-		}
+		diskSkills = stageCompiledSkillInMemory(diskSkills, name, relPath, domain, cleanedMD)
 
 		commitSummary := strings.TrimSpace(designerResp.CommitSummary)
 		if commitSummary == "" {

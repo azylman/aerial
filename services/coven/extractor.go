@@ -120,12 +120,11 @@ Requirements:
    - Never extract pending deliveries, shipping/order statuses, or items "awaiting delivery" / "on the way".
    - Never extract temporary troubleshooting, active debugging sessions, or tasks "currently in progress" / "about to run".
    - Never extract ephemeral PR numbers, commit SHAs, branch names, coverage/LoC metrics, CI/CD deploy statuses, or Vanadis chunk IDs.
-4. Procedural Skills & Friction Guardrails (30-Day Durability & Multi-Step Workflow Test):
-   Extract reusable procedural workflows ("steps") and tool/retry failure guardrails ("avoid") into "procedural_candidates" ONLY when they pass the same 30-day durability test (Rule 3), a working resolution was verified, AND they either (a) refine an existing skill ("loaded_skill" != "" or an unloaded routing miss for an existing domain skill) or (b) define a cohesive multi-step user-facing domain workflow (>= 3 sequential steps):
-   - Single-step CLI flags (e.g., passing "-maxdepth" to "find"), metric/table names, and standalone environment conventions belong in atomic "facts" (where semantic retrieval injects them mid-turn without loading a skill), NEVER as standalone "procedural_candidates".
-   - Tool friction occurs inside a domain skill or multi-step workflow AND the turn resolved it with a generalizable procedure that will remain valid 30+ days from now.
-   - User gives durable procedural corrections or instructions on how to execute a multi-step domain workflow or existing skill.
-   - Never extract transient environment outages ("command not found", missing credentials), unresolved dead-ends, ephemeral PR/commit/chunk IDs, or negative tool claims ("tool X is broken"); format "avoid" items as an imperative rule plus one clause of why.
+4. Procedural Skills & Friction Guardrails (30-Day Durability Test):
+   Extract reusable procedural workflows ("steps") and tool/retry failure guardrails ("avoid") into "procedural_candidates" ONLY when they pass the same 30-day durability test (Rule 3) AND a working resolution was verified:
+   - Tool or CLI friction (including 1-liner flag/environment workarounds or multi-step domain workflows) occurs AND the turn resolved it with a generalizable procedure or workaround that will remain valid 30+ days from now (never emit tool/CLI friction workarounds into "facts"; short 1-liners accumulate in "procedural_candidates" until 5 repeats trigger a fix alert).
+   - User gives durable procedural corrections or instructions on how to execute a domain workflow or existing skill.
+   - Never extract unresolved dead-ends, ephemeral PR/commit/chunk IDs, or negative tool claims ("tool X is broken") without a verified working alternative; format "avoid" items as an imperative rule plus one clause of why.
    If a skill was loaded for this turn, set "loaded_skill" to that skill name; otherwise set it to "".
    If no procedural friction or reusable workflows are present, set "procedural_candidates": [].
 5. If retrieved memory facts with [id:N] directly informed the assistant's response or tool calls in this turn, include their integer IDs in "reinforced_ids". If none were used, set "reinforced_ids": [].
@@ -447,19 +446,8 @@ func processThreadFacts(ctx context.Context, store Store, client OllamaClient, l
 				continue
 			}
 
-			isDuplicate := false
 			trimmedLoadedSkill := strings.TrimSpace(item.LoadedSkill)
-			for _, existing := range pendingExisting {
-				if strings.EqualFold(strings.TrimSpace(existing.LoadedSkill), trimmedLoadedSkill) {
-					if len(existing.Embedding) == ExpectedEmbeddingDim {
-						if CosineSimilarity(emb, existing.Embedding) >= 0.90 {
-							isDuplicate = true
-							break
-						}
-					}
-				}
-			}
-			if isDuplicate {
+			if isDuplicateProceduralCandidate(trimmedLoadedSkill, threadID, emb, pendingExisting) {
 				log.Printf("[Memory] Skipping near-duplicate procedural candidate: trigger=%q skill=%q", item.Trigger, item.LoadedSkill)
 				continue
 			}
@@ -502,6 +490,17 @@ func processThreadFacts(ctx context.Context, store Store, client OllamaClient, l
 		log.Printf("[Memory] Warning updating conversation fact watermark (thread=%s): %v", threadID, err)
 	}
 	return nil
+}
+
+func isDuplicateProceduralCandidate(trimmedLoadedSkill, threadID string, emb []float32, pendingExisting []ProceduralCandidate) bool {
+	for _, existing := range pendingExisting {
+		if strings.EqualFold(strings.TrimSpace(existing.LoadedSkill), trimmedLoadedSkill) && (trimmedLoadedSkill != "" || existing.ThreadID == threadID) {
+			if len(existing.Embedding) == ExpectedEmbeddingDim && CosineSimilarity(emb, existing.Embedding) >= 0.90 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func reconcileCandidateFact(ctx context.Context, store Store, client OllamaClient, llmFunc LLMClientFunc, item ExtractedFactItem) {
