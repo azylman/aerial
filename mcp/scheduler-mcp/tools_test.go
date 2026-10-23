@@ -197,9 +197,9 @@ func TestToolHandler_ScheduleAndList(t *testing.T) {
 	}
 
 	cfg := &Config{DatabaseURL: ":memory:", Timezone: "America/Los_Angeles"}
-	db, err := InitDB(cfg)
+	db, err := OpenDB(cfg)
 	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
+		t.Fatalf("OpenDB failed: %v", err)
 	}
 	defer db.Close()
 	h := NewToolHandler(cfg, db)
@@ -332,9 +332,9 @@ func TestToolHandler_ScheduleAndList(t *testing.T) {
 
 func TestToolHandler_UpdateAndCancel(t *testing.T) {
 	cfg := &Config{DatabaseURL: ":memory:", Timezone: "America/Los_Angeles"}
-	db, err := InitDB(cfg)
+	db, err := OpenDB(cfg)
 	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
+		t.Fatalf("OpenDB failed: %v", err)
 	}
 	defer db.Close()
 	h := NewToolHandler(cfg, db)

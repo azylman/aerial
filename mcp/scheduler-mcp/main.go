@@ -15,6 +15,8 @@ import (
 )
 
 // RunApp bootstraps the scheduler MCP HTTP server with graceful shutdown.
+var openDBFn = NewDB
+
 func RunApp(ctx context.Context, cfg *Config) error {
 	if cfg == nil {
 		return fmt.Errorf("app: config cannot be nil")
@@ -24,7 +26,7 @@ func RunApp(ctx context.Context, cfg *Config) error {
 		return fmt.Errorf("app: port cannot be empty")
 	}
 
-	database, err := InitDB(cfg)
+	database, err := openDBFn(cfg)
 	if err != nil {
 		return err
 	}

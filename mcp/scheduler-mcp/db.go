@@ -36,16 +36,16 @@ type OneShotSchedule struct {
 	Effort    string    `json:"effort,omitempty"`
 }
 
-const migrationLockID = 849201948201
-
-func NewDB(cfg *Config) (*sql.DB, error) {
+func OpenDB(cfg *Config) (*sql.DB, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
 	}
-	return initDB(cfg.DatabaseURL)
+	return openDB(cfg.DatabaseURL)
 }
 
-func InitDB(cfg *Config) (*sql.DB, error) { return NewDB(cfg) }
+func NewDB(cfg *Config) (*sql.DB, error) {
+	return OpenDB(cfg)
+}
 
 func closeWarn(c io.Closer, resource string) {
 	if c != nil {
@@ -85,7 +85,7 @@ var (
 	postgresRetryBase   = 500 * time.Millisecond
 )
 
-func initDB(dsn string) (*sql.DB, error) {
+func openDB(dsn string) (*sql.DB, error) {
 	trimmed := strings.TrimSpace(dsn)
 	if trimmed == "" {
 		return nil, fmt.Errorf("db: connection string cannot be empty")
@@ -128,49 +128,7 @@ func initDB(dsn string) (*sql.DB, error) {
 	database.SetConnMaxLifetime(30 * time.Minute)
 	database.SetConnMaxIdleTime(5 * time.Minute)
 
-	var success bool
-	defer func() {
-		if !success {
-			closeWarn(database, "database on initialization failure")
-		}
-	}()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	conn, err := database.Conn(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to acquire connection for migrations: %w", err)
-	}
-	defer closeWarn(conn, "migration conn")
-
-	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1);", migrationLockID); err != nil {
-		return nil, fmt.Errorf("failed to acquire migration advisory lock: %w", err)
-	}
-	defer func() {
-		if _, unlockErr := conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1);", migrationLockID); unlockErr != nil {
-			log.Printf("[Scheduler DB] Warning releasing migration advisory lock: %v", unlockErr)
-		}
-	}()
-
-	schema := `CREATE TABLE IF NOT EXISTS cron_schedules (
-		id TEXT PRIMARY KEY, target_id TEXT NOT NULL, title_prefix TEXT NOT NULL DEFAULT '',
-		cron_expr TEXT NOT NULL, prompt TEXT NOT NULL, timezone TEXT NOT NULL DEFAULT 'America/Los_Angeles',
-		next_run_at TIMESTAMPTZ NOT NULL, enabled BOOLEAN NOT NULL DEFAULT TRUE, effort TEXT NOT NULL DEFAULT 'low',
-		created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
-	);
-	CREATE INDEX IF NOT EXISTS idx_cron_schedules_next_run_at ON cron_schedules(enabled, next_run_at);
-	CREATE TABLE IF NOT EXISTS one_shot_schedules (
-		id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, prompt TEXT NOT NULL,
-		run_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, effort TEXT NOT NULL DEFAULT 'low'
-	);
-	CREATE INDEX IF NOT EXISTS idx_one_shot_schedules_run_at ON one_shot_schedules(run_at);`
-	if _, err := conn.ExecContext(ctx, schema); err != nil {
-		return nil, fmt.Errorf("failed to execute postgres schema: %w", err)
-	}
-
 	log.Printf("[Scheduler DB] PostgreSQL initialized successfully at %s", trimmed)
-	success = true
 	return database, nil
 }
 

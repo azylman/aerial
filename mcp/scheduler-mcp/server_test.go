@@ -51,12 +51,45 @@ type errReadCloser struct{}
 func (e *errReadCloser) Read([]byte) (int, error) { return 0, io.EOF }
 func (e *errReadCloser) Close() error             { return errors.New("simulated close error") }
 
+func setupTestPostgresTables(t *testing.T, db *sql.DB) {
+	t.Helper()
+	schema := `
+	CREATE TABLE IF NOT EXISTS cron_schedules (
+		id TEXT PRIMARY KEY,
+		target_id TEXT NOT NULL,
+		title_prefix TEXT NOT NULL DEFAULT '',
+		cron_expr TEXT NOT NULL,
+		prompt TEXT NOT NULL,
+		timezone TEXT NOT NULL DEFAULT 'America/Los_Angeles',
+		next_run_at TIMESTAMPTZ NOT NULL,
+		enabled BOOLEAN NOT NULL DEFAULT TRUE,
+		effort TEXT NOT NULL DEFAULT 'low',
+		created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_cron_schedules_next_run_at ON cron_schedules(enabled, next_run_at);
+
+	CREATE TABLE IF NOT EXISTS one_shot_schedules (
+		id TEXT PRIMARY KEY,
+		thread_id TEXT NOT NULL,
+		prompt TEXT NOT NULL,
+		run_at TIMESTAMPTZ NOT NULL,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		effort TEXT NOT NULL DEFAULT 'low'
+	);
+	CREATE INDEX IF NOT EXISTS idx_one_shot_schedules_run_at ON one_shot_schedules(run_at);
+	`
+	if _, err := db.Exec(schema); err != nil {
+		t.Fatalf("failed to setup test postgres tables: %v", err)
+	}
+}
+
 func setupTestServer(t *testing.T) (*Server, *httptest.Server) {
 	cfg := &Config{DatabaseURL: ":memory:", Timezone: DefaultTimezone, Port: "8080"}
-	db, err := InitDB(cfg)
+	db, err := OpenDB(cfg)
 	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
+		t.Fatalf("OpenDB failed: %v", err)
 	}
+	setupTestPostgresTables(t, db)
 	server := NewServer(NewToolHandler(cfg, db))
 	return server, httptest.NewServer(server.Routes())
 }
@@ -219,24 +252,24 @@ func TestDB_OperationsAndErrors(t *testing.T) {
 			if _, err := NewDB(tc.cfg); (err != nil) != tc.wantErr {
 				t.Fatalf("NewDB() err=%v", err)
 			}
-			if _, err := InitDB(tc.cfg); (err != nil) != tc.wantErr {
-				t.Fatalf("InitDB() err=%v", err)
+			if _, err := OpenDB(tc.cfg); (err != nil) != tc.wantErr {
+				t.Fatalf("OpenDB() err=%v", err)
 			}
 		})
 	}
 
 	tmpDir := t.TempDir()
 	for _, p := range []string{filepath.Join(tmpDir, "fresh1.db"), filepath.Join(tmpDir, "fresh2.db") + "?cache=shared"} {
-		fdb, err := initDB(p)
+		fdb, err := openDB(p)
 		if err != nil {
-			t.Fatalf("initDB %s failed: %v", p, err)
+			t.Fatalf("openDB %s failed: %v", p, err)
 		}
 		_ = fdb.Close()
 	}
 
 	blockerFile := filepath.Join(tmpDir, "blocker.txt")
 	_ = os.WriteFile(blockerFile, []byte("data"), 0o644)
-	if _, err := initDB(filepath.Join(blockerFile, "sub", "db.sqlite")); err == nil {
+	if _, err := openDB(filepath.Join(blockerFile, "sub", "db.sqlite")); err == nil {
 		t.Error("expected directory blocker error")
 	}
 
@@ -247,28 +280,28 @@ func TestDB_OperationsAndErrors(t *testing.T) {
 	}
 	_, _ = vdb.Exec("CREATE VIEW cron_schedules AS SELECT 1 AS id;")
 	_ = vdb.Close()
-	if _, err := initDB(viewDBPath); err == nil {
+	if _, err := openDB(viewDBPath); err == nil {
 		t.Error("expected error creating schema on conflicting view database")
 	}
 
 	oldHook := sqliteTestInitHook
 	sqliteTestInitHook = nil
-	if _, err := initDB(":memory:"); err == nil {
+	if _, err := openDB(":memory:"); err == nil {
 		t.Error("expected error for unhooked :memory:")
 	}
 	sqliteTestInitHook = oldHook
 
 	origMax, origBase := postgresMaxAttempts, postgresRetryBase
 	postgresMaxAttempts, postgresRetryBase = 1, time.Millisecond
-	_, errPg := initDB("postgres://invalid:invalid@127.0.0.1:59997/db?sslmode=disable")
+	_, errPg := openDB("postgres://invalid:invalid@127.0.0.1:59997/db?sslmode=disable")
 	postgresMaxAttempts, postgresRetryBase = origMax, origBase
 	if errPg == nil {
 		t.Error("expected postgres connection failure")
 	}
 
-	db, err := InitDB(&Config{DatabaseURL: ":memory:"})
+	db, err := OpenDB(&Config{DatabaseURL: ":memory:"})
 	if err != nil {
-		t.Fatalf("InitDB failed: %v", err)
+		t.Fatalf("OpenDB failed: %v", err)
 	}
 	defer db.Close()
 	ctx := context.Background()
@@ -321,9 +354,9 @@ func TestDB_OperationsAndErrors(t *testing.T) {
 
 	canceledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
-	closedDB, err := InitDB(&Config{DatabaseURL: ":memory:"})
+	closedDB, err := OpenDB(&Config{DatabaseURL: ":memory:"})
 	if err != nil {
-		t.Fatalf("InitDB closed failed: %v", err)
+		t.Fatalf("OpenDB closed failed: %v", err)
 	}
 	_ = closedDB.Close()
 

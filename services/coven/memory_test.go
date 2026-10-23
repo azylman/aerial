@@ -1790,7 +1790,7 @@ func TestEscapeSQLLikeAndHelpers(t *testing.T) {
 	}
 }
 
-func TestInitDB(t *testing.T) {
+func TestOpenDB(t *testing.T) {
 	addr := startMockPostgres(t)
 	validDSN := "postgres://mock_user:mock_pass@" + addr + "/mock_db?sslmode=disable"
 
@@ -1807,9 +1807,9 @@ func TestInitDB(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			db, err := InitDB(tc.cfg)
+			db, err := OpenDB(tc.cfg)
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("InitDB() err = %v, wantErr = %v", err, tc.wantErr)
+				t.Fatalf("OpenDB() err = %v, wantErr = %v", err, tc.wantErr)
 			}
 			if db != nil {
 				_ = db.Close()

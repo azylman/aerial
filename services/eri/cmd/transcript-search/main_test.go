@@ -989,15 +989,15 @@ func TestJSONMarshalIndentErrors(t *testing.T) {
 }
 
 func TestNewDirectStoreFnSuccess(t *testing.T) {
-	oldInit := initDBFn
-	defer func() { initDBFn = oldInit }()
+	oldInit := openDBFn
+	defer func() { openDBFn = oldInit }()
 
 	sqlDB, err := sql.Open("pgx", "postgres://user:pass@127.0.0.1:5432/aerial?sslmode=disable")
 	if err != nil {
 		t.Fatalf("failed creating test sql.DB: %v", err)
 	}
 
-	initDBFn = func(dsnOrCfg any) (*sql.DB, error) {
+	openDBFn = func(dsn string) (*sql.DB, error) {
 		return sqlDB, nil
 	}
 
