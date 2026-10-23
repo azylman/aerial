@@ -357,23 +357,27 @@ func (p *GitHubSkillPublisher) PublishSkillChanges(ctx context.Context, changes 
 		return 0, fmt.Errorf("github: failed to parse created pull request: %w", err)
 	}
 	prNumber := prResp.Number
-	nodeID := strings.TrimSpace(prResp.NodeID)
+	p.finalizePublishedSkillPR(ctx, prNumber, strings.TrimSpace(prResp.NodeID), branchName, newCommitSHA, prTitle, changes)
+	return prNumber, nil
+}
 
-	// 7. Best-effort GraphQL enablePullRequestAutoMerge (SQUASH)
+func (p *GitHubSkillPublisher) finalizePublishedSkillPR(ctx context.Context, prNumber int, nodeID, branchName, commitSHA, prTitle string, changes []SkillFileChange) {
+	if changesRequireReview(changes) {
+		if err := p.NotifyShortFriction(ctx, formatManualReviewPRAlert(prNumber, p.owner, p.repo, changes)); err != nil {
+			log.Printf("[coven-github] warning sending manual review PR alert for PR #%d: %v", prNumber, err)
+		}
+		return
+	}
 	if nodeID != "" {
 		if err := p.enableAutoMerge(ctx, nodeID); err != nil {
 			log.Printf("[coven-github] warning enabling auto-merge for PR #%d: %v", prNumber, err)
 		}
 	}
-
-	// 8. Best-effort register PR with Brain if SystemChannelID is configured
 	if p.systemChannelID != "" && p.brainPRRegisterURL != "" {
-		if err := p.registerPRWithBrain(ctx, prNumber, branchName, newCommitSHA, prTitle); err != nil {
+		if err := p.registerPRWithBrain(ctx, prNumber, branchName, commitSHA, prTitle); err != nil {
 			log.Printf("[coven-github] warning registering PR #%d in brain: %v", prNumber, err)
 		}
 	}
-
-	return prNumber, nil
 }
 
 func (p *GitHubSkillPublisher) enableAutoMerge(ctx context.Context, nodeID string) error {
@@ -502,6 +506,75 @@ func formatShortFrictionAlert(batch SkillConsolidationBatch) string {
 	return sb.String()
 }
 
+func changesRequireReview(changes []SkillFileChange) bool {
+	for _, c := range changes {
+		if c.RequireReview {
+			return true
+		}
+	}
+	return false
+}
+
+func appendUniqueTrimmed(dst []string, seen map[string]bool, vals ...string) []string {
+	for _, v := range vals {
+		if t := strings.TrimSpace(v); t != "" && !seen[t] {
+			seen[t] = true
+			dst = append(dst, t)
+		}
+	}
+	return dst
+}
+
+func writeBulletIfPresent(sb *strings.Builder, label string, items []string) {
+	if len(items) > 0 {
+		sb.WriteString(fmt.Sprintf("- **%s**: %s\n", label, strings.Join(items, "; ")))
+	}
+}
+
+func formatManualReviewPRAlert(prNumber int, owner, repo string, changes []SkillFileChange) string {
+	prURL := fmt.Sprintf("https://github.com/%s/%s/pull/%d", owner, repo, prNumber)
+	var ids, skills, triggers, steps, avoid, proposals []string
+	seenIDs := make(map[string]bool)
+	seenSkills := make(map[string]bool)
+	seenTriggers := make(map[string]bool)
+	seenSteps := make(map[string]bool)
+	seenAvoid := make(map[string]bool)
+
+	for _, ch := range changes {
+		proposals = append(proposals, fmt.Sprintf("**%s** `%s` (%s)", ch.Action, ch.RelPath, ch.CommitSummary))
+		for _, id := range ch.CandidateIDs {
+			ids = appendUniqueTrimmed(ids, seenIDs, fmt.Sprintf("#%d", id))
+		}
+		for _, c := range ch.Candidates {
+			if c.ID > 0 {
+				ids = appendUniqueTrimmed(ids, seenIDs, fmt.Sprintf("#%d", c.ID))
+			}
+			if sk := strings.TrimSpace(c.LoadedSkill); sk != "" {
+				skills = appendUniqueTrimmed(skills, seenSkills, fmt.Sprintf("`%s`", sk))
+			}
+			triggers = appendUniqueTrimmed(triggers, seenTriggers, c.Trigger)
+			steps = appendUniqueTrimmed(steps, seenSteps, c.Steps...)
+			avoid = appendUniqueTrimmed(avoid, seenAvoid, c.Avoid...)
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("🛡️ **Manual Review Required: Procedural Skill PR [#%d](%s)** (auto-merge disabled)\n", prNumber, prURL))
+	if len(ids) > 0 || len(skills) > 0 {
+		sb.WriteString(fmt.Sprintf("- **Source Candidates**: %s (Protected Skill Context: %s)\n", strings.Join(ids, ", "), strings.Join(skills, ", ")))
+	}
+	writeBulletIfPresent(&sb, "Issue / Friction Pattern", triggers)
+	writeBulletIfPresent(&sb, "Observed Steps", steps)
+	writeBulletIfPresent(&sb, "Avoid Guardrails", avoid)
+	writeBulletIfPresent(&sb, "Proposed PR Changes", proposals)
+	sb.WriteString("Review and merge manually on GitHub if approved.")
+	out := sb.String()
+	if len(out) > 1800 {
+		out = out[:1797] + "..."
+	}
+	return out
+}
+
 func formatSkillCommitMessage(changes []SkillFileChange) string {
 	if len(changes) == 1 {
 		return fmt.Sprintf("feat(skills): %s\n\n%s", changes[0].CommitSummary, changes[0].RelPath)
@@ -525,6 +598,11 @@ func formatSkillPRBody(changes []SkillFileChange, targetID string) string {
 	var sb strings.Builder
 	sb.WriteString("## Summary\n")
 	sb.WriteString("Autonomous procedural skill updates compiled by Coven from runtime trajectory friction and execution signals.\n\n")
+	effectiveTargetID := targetID
+	if changesRequireReview(changes) {
+		sb.WriteString("> [!IMPORTANT]\n> Manual review required: includes procedural candidates extracted while a protected core skill was active. Auto-merge is disabled.\n\n")
+		effectiveTargetID = ""
+	}
 
 	sb.WriteString("## Changes\n")
 	for _, c := range changes {
@@ -534,7 +612,7 @@ func formatSkillPRBody(changes []SkillFileChange, targetID string) string {
 	sb.WriteString("- Frontmatter schema and length boundaries verified by Coven validator.\n")
 	sb.WriteString("- Relative paths verified against allowed custom skill domain directories.\n\n")
 
-	trailer := fmt.Sprintf(`<!-- aerial-pr: {"target_id":%q,"vanadis_chunk_id":""} -->`, targetID)
+	trailer := fmt.Sprintf(`<!-- aerial-pr: {"target_id":%q,"vanadis_chunk_id":""} -->`, effectiveTargetID)
 	sb.WriteString(trailer)
 	return sb.String()
 }
@@ -624,13 +702,7 @@ func ConsolidateProceduralSkills(ctx context.Context, store Store, ollama Ollama
 		return 0, fmt.Errorf("failed to scan custom skills from %s: %w", cleanDir, err)
 	}
 
-	batches, skippedIDs := PlanSkillConsolidation(pending, diskSkills)
-	if len(skippedIDs) > 0 {
-		if err := store.MarkProceduralCandidatesSkipped(ctx, skippedIDs); err != nil {
-			log.Printf("[coven-skills] warning marking blocked candidates skipped: %v", err)
-		}
-	}
-
+	batches, _ := PlanSkillConsolidation(pending, diskSkills)
 	if len(batches) == 0 {
 		return 0, nil
 	}
@@ -711,6 +783,8 @@ func ConsolidateProceduralSkills(ctx context.Context, store Store, ollama Ollama
 			SkillName:     name,
 			CommitSummary: commitSummary,
 			CandidateIDs:  batchIDs,
+			Candidates:    batch.Candidates,
+			RequireReview: batch.RequireReview,
 		})
 		allPublishedIDs = append(allPublishedIDs, batchIDs...)
 	}

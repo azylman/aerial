@@ -52,20 +52,32 @@ type DiskSkill struct {
 
 // SkillConsolidationBatch groups procedural candidates scheduled for compilation into an EDIT or CREATE action.
 type SkillConsolidationBatch struct {
-	Action      string                `json:"action"` // "EDIT" or "CREATE"
-	TargetSkill *DiskSkill            `json:"target_skill,omitempty"`
-	Domain      string                `json:"domain"`
-	Candidates  []ProceduralCandidate `json:"candidates"`
+	Action        string                `json:"action"` // "EDIT" or "CREATE"
+	TargetSkill   *DiskSkill            `json:"target_skill,omitempty"`
+	Domain        string                `json:"domain"`
+	Candidates    []ProceduralCandidate `json:"candidates"`
+	RequireReview bool                  `json:"require_review,omitempty"`
 }
 
 // SkillFileChange represents a compiled skill file modification ready for Gitless commit/PR publishing.
 type SkillFileChange struct {
-	RelPath       string  `json:"rel_path"`
-	Content       string  `json:"content"`
-	Action        string  `json:"action"`
-	SkillName     string  `json:"skill_name"`
-	CommitSummary string  `json:"commit_summary"`
-	CandidateIDs  []int64 `json:"candidate_ids"`
+	RelPath       string                `json:"rel_path"`
+	Content       string                `json:"content"`
+	Action        string                `json:"action"`
+	SkillName     string                `json:"skill_name"`
+	CommitSummary string                `json:"commit_summary"`
+	CandidateIDs  []int64               `json:"candidate_ids"`
+	Candidates    []ProceduralCandidate `json:"candidates,omitempty"`
+	RequireReview bool                  `json:"require_review,omitempty"`
+}
+
+func batchRequiresReview(cands []ProceduralCandidate) bool {
+	for _, c := range cands {
+		if _, blocked := BlockedCoreSkills[strings.TrimSpace(c.LoadedSkill)]; blocked {
+			return true
+		}
+	}
+	return false
 }
 
 // DesignerSkillResponse represents the structured LLM output from the Skill Designer.
@@ -219,19 +231,9 @@ func ScanCustomSkills(ctx context.Context, customSkillsDir string, ollama Ollama
 }
 
 // PlanSkillConsolidation groups pending procedural candidates into consolidation batches across Case A (loaded custom skill match),
-// Case B (unloaded routing miss matching existing skill), and Case C (novel workflow clique). Blocked core skill candidate IDs are skipped.
+// Case B (unloaded routing miss matching existing skill), and Case C (novel workflow clique).
+// Batches containing candidates extracted while a BlockedCoreSkills skill was loaded are flagged with RequireReview: true.
 func PlanSkillConsolidation(pending []ProceduralCandidate, diskSkills []DiskSkill) ([]SkillConsolidationBatch, []int64) {
-	var skippedIDs []int64
-	var active []ProceduralCandidate
-
-	for _, c := range pending {
-		if _, blocked := BlockedCoreSkills[c.LoadedSkill]; blocked {
-			skippedIDs = append(skippedIDs, c.ID)
-			continue
-		}
-		active = append(active, c)
-	}
-
 	diskSkillsByName := make(map[string]*DiskSkill, len(diskSkills))
 	for i := range diskSkills {
 		diskSkillsByName[diskSkills[i].Name] = &diskSkills[i]
@@ -241,7 +243,7 @@ func PlanSkillConsolidation(pending []ProceduralCandidate, diskSkills []DiskSkil
 	caseAGroups := make(map[string][]ProceduralCandidate)
 	var remaining []ProceduralCandidate
 
-	for _, c := range active {
+	for _, c := range pending {
 		if c.LoadedSkill != "" && diskSkillsByName[c.LoadedSkill] != nil {
 			caseAGroups[c.LoadedSkill] = append(caseAGroups[c.LoadedSkill], c)
 		} else {
@@ -269,10 +271,11 @@ func PlanSkillConsolidation(pending []ProceduralCandidate, diskSkills []DiskSkil
 		if len(group) >= 2 || hasAvoid {
 			target := diskSkillsByName[name]
 			batches = append(batches, SkillConsolidationBatch{
-				Action:      "EDIT",
-				TargetSkill: target,
-				Domain:      target.Domain,
-				Candidates:  group,
+				Action:        "EDIT",
+				TargetSkill:   target,
+				Domain:        target.Domain,
+				Candidates:    group,
+				RequireReview: batchRequiresReview(group),
 			})
 		}
 	}
@@ -319,10 +322,11 @@ func PlanSkillConsolidation(pending []ProceduralCandidate, diskSkills []DiskSkil
 		group := caseBGroups[name]
 		target := diskSkillsByName[name]
 		batches = append(batches, SkillConsolidationBatch{
-			Action:      "EDIT",
-			TargetSkill: target,
-			Domain:      target.Domain,
-			Candidates:  group,
+			Action:        "EDIT",
+			TargetSkill:   target,
+			Domain:        target.Domain,
+			Candidates:    group,
+			RequireReview: batchRequiresReview(group),
 		})
 	}
 
@@ -331,11 +335,7 @@ func PlanSkillConsolidation(pending []ProceduralCandidate, diskSkills []DiskSkil
 	batches = appendCliqueBatches(batches, findCandidateCliques(caseBUnmatched, DefaultSkillCliqueMinSim, DefaultSkillCliqueMinSize, DefaultSkillCliqueMaxSize), "CREATE")
 	batches = appendCliqueBatches(batches, findCandidateCliques(filterShortFrictionCandidates(caseBUnmatched), DefaultSkillCliqueMinSim, DefaultShortFrictionMinRepeats, DefaultShortFrictionMinRepeats), "ALERT")
 
-	sort.Slice(skippedIDs, func(i, j int) bool {
-		return skippedIDs[i] < skippedIDs[j]
-	})
-
-	return batches, skippedIDs
+	return batches, nil
 }
 
 func appendCliqueBatches(batches []SkillConsolidationBatch, cliques [][]ProceduralCandidate, action string) []SkillConsolidationBatch {
@@ -345,9 +345,10 @@ func appendCliqueBatches(batches []SkillConsolidationBatch, cliques [][]Procedur
 			domain = clique[0].Domain
 		}
 		batches = append(batches, SkillConsolidationBatch{
-			Action:     action,
-			Domain:     domain,
-			Candidates: clique,
+			Action:        action,
+			Domain:        domain,
+			Candidates:    clique,
+			RequireReview: action != "ALERT" && batchRequiresReview(clique),
 		})
 	}
 	return batches
@@ -562,6 +563,9 @@ func buildSkillDesignerPrompt(batch SkillConsolidationBatch) string {
 	sb.WriteString("Procedural Friction Candidates to Consolidate:\n")
 	for i, c := range batch.Candidates {
 		sb.WriteString(fmt.Sprintf("Candidate #%d (ID: %d):\n", i+1, c.ID))
+		if c.LoadedSkill != "" {
+			sb.WriteString(fmt.Sprintf("  Loaded Skill: %s\n", c.LoadedSkill))
+		}
 		sb.WriteString(fmt.Sprintf("  Trigger: %s\n", c.Trigger))
 		if len(c.Steps) > 0 {
 			sb.WriteString("  Observed Steps:\n")
@@ -579,7 +583,7 @@ func buildSkillDesignerPrompt(batch SkillConsolidationBatch) string {
 
 	sb.WriteString("\nInstructions:\n")
 	sb.WriteString("1. If Action is EDIT, update the existing SKILL.md content by integrating the new triggers, steps, and avoid guidance without deleting unrelated workflows. Keep frontmatter name matching the target.\n")
-	sb.WriteString("2. If Action is CREATE, design a new SKILL.md with valid YAML frontmatter (name in ^[a-z0-9-]+$, description between 20 and 500 chars), clear usage guidelines, step-by-step procedures, and avoid sections ONLY when the candidates represent a cohesive multi-step user-facing domain workflow (>= 3 sequential steps); return action \"NOOP\" for single-tool CLI flags, metric lookups, or standalone shell guardrails that belong in semantic facts or rules.\n")
+	sb.WriteString("2. If Action is CREATE, design a new SKILL.md with valid YAML frontmatter (name in ^[a-z0-9-]+$, description between 20 and 500 chars; never reuse a reserved core skill name such as self-improvement or incident-triage), clear usage guidelines, step-by-step procedures, and avoid sections ONLY when the candidates represent a cohesive multi-step user-facing domain workflow (>= 3 sequential steps); return action \"NOOP\" for single-tool CLI flags, metric lookups, or standalone shell guardrails that belong in semantic facts or rules.\n")
 	sb.WriteString("3. Enforce a 30+ days durability bar: write generalizable procedures and imperative avoid rules (+ one clause of why), stripping PR/issue numbers, commit SHAs, dates, negative tool claims (\"tool X is broken\"), transient environment errors, or unresolved dead-ends. If the candidates are noisy, transient, invalid, or do not warrant a durable skill change, return action \"NOOP\".\n")
 	sb.WriteString("4. Respond STRICTLY with a valid JSON object matching this schema:\n")
 	sb.WriteString("{\n")

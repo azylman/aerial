@@ -6443,24 +6443,30 @@ func TestPlanSkillConsolidation(t *testing.T) {
 	diskSkills := []DiskSkill{skillA, skillB}
 
 	tests := []struct {
-		name          string
-		pending       []ProceduralCandidate
-		diskSkills    []DiskSkill
-		wantBatches   int
-		wantActions   []string
-		wantDomains   []string
-		wantCandCount []int
-		wantSkipped   []int64
+		name              string
+		pending           []ProceduralCandidate
+		diskSkills        []DiskSkill
+		wantBatches       int
+		wantActions       []string
+		wantDomains       []string
+		wantCandCount     []int
+		wantRequireReview []bool
+		wantSkipped       []int64
 	}{
 		{
-			name: "BlockedCoreSkillsSkipped",
+			name: "BlockedCoreSkillsRoutedWithRequireReview",
 			pending: []ProceduralCandidate{
-				testProcCand(1, "self-improvement", "trigger 1", nil, nil),
-				testProcCand(2, "writing-plans", "trigger 2", nil, nil),
+				testProcCand(1, "self-improvement", "trigger 1", nil, testEmbedding2D(0.80, 0.60)),
+				testProcCand(2, "writing-plans", "trigger 2", nil, testEmbeddingAt(2, 1.0)),
+				testProcCand(3, "incident-triage", "trigger 3", nil, testEmbeddingAt(2, 1.0)),
 			},
-			diskSkills:  diskSkills,
-			wantBatches: 0,
-			wantSkipped: []int64{1, 2},
+			diskSkills:        diskSkills,
+			wantBatches:       2,
+			wantActions:       []string{"EDIT", "CREATE"},
+			wantDomains:       []string{"discord", "discord"},
+			wantCandCount:     []int{1, 2},
+			wantRequireReview: []bool{true, true},
+			wantSkipped:       nil,
 		},
 		{
 			name: "CaseA_LoadedSkillMatchTwoCandidates",
@@ -6468,22 +6474,24 @@ func TestPlanSkillConsolidation(t *testing.T) {
 				testProcCand(10, "ha-ops", "trigger 1", nil, nil),
 				testProcCand(11, "ha-ops", "trigger 2", nil, nil),
 			},
-			diskSkills:    diskSkills,
-			wantBatches:   1,
-			wantActions:   []string{"EDIT"},
-			wantDomains:   []string{"discord"},
-			wantCandCount: []int{2},
+			diskSkills:        diskSkills,
+			wantBatches:       1,
+			wantActions:       []string{"EDIT"},
+			wantDomains:       []string{"discord"},
+			wantCandCount:     []int{2},
+			wantRequireReview: []bool{false},
 		},
 		{
 			name: "CaseA_LoadedSkillMatchSingleCandidateWithAvoid",
 			pending: []ProceduralCandidate{
 				testProcCand(20, "ha-ops", "trigger with avoid", []string{"do not do this"}, nil),
 			},
-			diskSkills:    diskSkills,
-			wantBatches:   1,
-			wantActions:   []string{"EDIT"},
-			wantDomains:   []string{"discord"},
-			wantCandCount: []int{1},
+			diskSkills:        diskSkills,
+			wantBatches:       1,
+			wantActions:       []string{"EDIT"},
+			wantDomains:       []string{"discord"},
+			wantCandCount:     []int{1},
+			wantRequireReview: []bool{false},
 		},
 		{
 			name: "CaseA_LoadedSkillMatchSingleCandidateNoAvoidNotBatched",
@@ -6499,11 +6507,12 @@ func TestPlanSkillConsolidation(t *testing.T) {
 				// Cosine similarity to skillA (1, 0) is 0.80 >= 0.72
 				testProcCand(40, "", "routing miss trigger", nil, testEmbedding2D(0.80, 0.60)),
 			},
-			diskSkills:    diskSkills,
-			wantBatches:   1,
-			wantActions:   []string{"EDIT"},
-			wantDomains:   []string{"discord"},
-			wantCandCount: []int{1},
+			diskSkills:        diskSkills,
+			wantBatches:       1,
+			wantActions:       []string{"EDIT"},
+			wantDomains:       []string{"discord"},
+			wantCandCount:     []int{1},
+			wantRequireReview: []bool{false},
 		},
 		{
 			name: "CaseB_UnmatchedLoadedSkillRoutingMiss",
@@ -6511,11 +6520,12 @@ func TestPlanSkillConsolidation(t *testing.T) {
 				// LoadedSkill "unknown" not in diskSkills, similarity to skillB (0, 1) is 0.80 >= 0.72
 				testProcCand(45, "unknown-skill", "routing miss trigger 2", nil, testEmbedding2D(0.60, 0.80)),
 			},
-			diskSkills:    diskSkills,
-			wantBatches:   1,
-			wantActions:   []string{"EDIT"},
-			wantDomains:   []string{"common"},
-			wantCandCount: []int{1},
+			diskSkills:        diskSkills,
+			wantBatches:       1,
+			wantActions:       []string{"EDIT"},
+			wantDomains:       []string{"common"},
+			wantCandCount:     []int{1},
+			wantRequireReview: []bool{false},
 		},
 		{
 			name: "CaseC_NovelWorkflowCliqueFormsCreateBatch",
@@ -6524,11 +6534,12 @@ func TestPlanSkillConsolidation(t *testing.T) {
 				testProcCand(50, "", "novel workflow step 1", nil, testEmbeddingAt(2, 1.0)),
 				testProcCand(51, "", "novel workflow step 2", nil, testEmbeddingAt(2, 1.0)),
 			},
-			diskSkills:    diskSkills,
-			wantBatches:   1,
-			wantActions:   []string{"CREATE"},
-			wantDomains:   []string{"discord"},
-			wantCandCount: []int{2},
+			diskSkills:        diskSkills,
+			wantBatches:       1,
+			wantActions:       []string{"CREATE"},
+			wantDomains:       []string{"discord"},
+			wantCandCount:     []int{2},
+			wantRequireReview: []bool{false},
 		},
 		{
 			name: "CaseC_ShortCandidatesUnderMinStepsDoNotFormClique",
@@ -6550,11 +6561,12 @@ func TestPlanSkillConsolidation(t *testing.T) {
 				{ID: 74, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
 				{ID: 75, Domain: "discord", Trigger: "psql missing", Steps: []string{"use python"}, Avoid: []string{"avoid psql"}, Embedding: testEmbeddingAt(2, 1.0)},
 			},
-			diskSkills:    diskSkills,
-			wantBatches:   1,
-			wantActions:   []string{"ALERT"},
-			wantDomains:   []string{"discord"},
-			wantCandCount: []int{5},
+			diskSkills:        diskSkills,
+			wantBatches:       1,
+			wantActions:       []string{"ALERT"},
+			wantDomains:       []string{"discord"},
+			wantCandCount:     []int{5},
+			wantRequireReview: []bool{false},
 		},
 		{
 			name: "CaseC_DissimilarCandidatesDoNotFormClique",
@@ -6569,19 +6581,20 @@ func TestPlanSkillConsolidation(t *testing.T) {
 		{
 			name: "MixedCasesComprehensive",
 			pending: []ProceduralCandidate{
-				testProcCand(1, "incident-triage", "blocked", nil, nil),
+				testProcCand(1, "incident-triage", "blocked unmatched", nil, nil),
 				testProcCand(2, "ha-ops", "case a 1", nil, nil),
 				testProcCand(3, "ha-ops", "case a 2", nil, nil),
 				testProcCand(4, "", "case b miss", nil, testEmbedding2D(0.0, 1.0)), // sim 1.0 to skillB
-				testProcCand(5, "", "case c 1", nil, testEmbeddingAt(4, 1.0)),
+				testProcCand(5, "self-improvement", "case c 1", nil, testEmbeddingAt(4, 1.0)),
 				testProcCand(6, "", "case c 2", nil, testEmbeddingAt(4, 1.0)),
 			},
-			diskSkills:    diskSkills,
-			wantBatches:   3,
-			wantActions:   []string{"EDIT", "EDIT", "CREATE"},
-			wantDomains:   []string{"discord", "common", "discord"},
-			wantCandCount: []int{2, 1, 2},
-			wantSkipped:   []int64{1},
+			diskSkills:        diskSkills,
+			wantBatches:       3,
+			wantActions:       []string{"EDIT", "EDIT", "CREATE"},
+			wantDomains:       []string{"discord", "common", "discord"},
+			wantCandCount:     []int{2, 1, 2},
+			wantRequireReview: []bool{false, false, true},
+			wantSkipped:       nil,
 		},
 	}
 
@@ -6600,6 +6613,9 @@ func TestPlanSkillConsolidation(t *testing.T) {
 				}
 				if len(batches[i].Candidates) != tc.wantCandCount[i] {
 					t.Errorf("batch[%d].Candidates len = %d, want %d", i, len(batches[i].Candidates), tc.wantCandCount[i])
+				}
+				if i < len(tc.wantRequireReview) && batches[i].RequireReview != tc.wantRequireReview[i] {
+					t.Errorf("batch[%d].RequireReview = %v, want %v", i, batches[i].RequireReview, tc.wantRequireReview[i])
 				}
 			}
 			if len(skipped) != len(tc.wantSkipped) {
@@ -7001,6 +7017,9 @@ type mockGitHubServerConfig struct {
 	failDeleteRef    bool
 	failAutoMerge    bool
 	failBrainReg     bool
+	autoMergeCalls   *int
+	brainRegCalls    *int
+	discordMsgCalls  *int
 }
 
 func newMockGitHubServer(t *testing.T, cfg mockGitHubServerConfig) *httptest.Server {
@@ -7106,6 +7125,9 @@ func newMockGitHubServer(t *testing.T, cfg mockGitHubServerConfig) *httptest.Ser
 			})
 
 		case r.Method == http.MethodPost && path == "/graphql":
+			if cfg.autoMergeCalls != nil {
+				*cfg.autoMergeCalls++
+			}
 			if cfg.failAutoMerge {
 				http.Error(w, `{"errors":[{"message":"automerge error"}]}`, http.StatusInternalServerError)
 				return
@@ -7118,6 +7140,9 @@ func newMockGitHubServer(t *testing.T, cfg mockGitHubServerConfig) *httptest.Ser
 			})
 
 		case r.Method == http.MethodPost && path == "/internal/pr/register":
+			if cfg.brainRegCalls != nil {
+				*cfg.brainRegCalls++
+			}
 			if cfg.failBrainReg {
 				http.Error(w, `{"error":"registration failed"}`, http.StatusInternalServerError)
 				return
@@ -7126,6 +7151,9 @@ func newMockGitHubServer(t *testing.T, cfg mockGitHubServerConfig) *httptest.Ser
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "registered"})
 
 		case r.Method == http.MethodPost && path == "/discord/message":
+			if cfg.discordMsgCalls != nil {
+				*cfg.discordMsgCalls++
+			}
 			if cfg.failBrainReg {
 				http.Error(w, `{"error":"discord message failed"}`, http.StatusInternalServerError)
 				return
@@ -7143,15 +7171,19 @@ func TestGitHubSkillPublisher_PublishSkillChanges(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name      string
-		token     string
-		repo      string
-		channelID string
-		changes   []SkillFileChange
-		serverCfg mockGitHubServerConfig
-		wantPR    int
-		wantErr   bool
-		errSubstr string
+		name               string
+		token              string
+		repo               string
+		channelID          string
+		changes            []SkillFileChange
+		serverCfg          mockGitHubServerConfig
+		wantPR             int
+		wantErr            bool
+		errSubstr          string
+		checkCalls         bool
+		wantAutoMergeCalls int
+		wantBrainRegCalls  int
+		wantDiscordCalls   int
 	}{
 		{
 			name:      "MissingToken",
@@ -7341,11 +7373,64 @@ func TestGitHubSkillPublisher_PublishSkillChanges(t *testing.T) {
 			wantPR:    42,
 			wantErr:   false,
 		},
+		{
+			name:      "SuccessRequireReviewSkipsAutoMergeAndNotifiesSystemChannel",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			channelID: "1562837549255495693",
+			changes: []SkillFileChange{{
+				RelPath:       "custom-skills/discord/ha/SKILL.md",
+				Content:       "foo",
+				CommitSummary: "update ha",
+				Action:        "EDIT",
+				RequireReview: true,
+				CandidateIDs:  []int64{101},
+				Candidates: []ProceduralCandidate{{
+					ID:          101,
+					LoadedSkill: "self-improvement",
+					Trigger:     "when running recursive grep",
+					Steps:       []string{"pass --exclude-dir=.git"},
+					Avoid:       []string{"do not run bare grep -r"},
+				}},
+			}},
+			wantPR:             42,
+			wantErr:            false,
+			checkCalls:         true,
+			wantAutoMergeCalls: 0,
+			wantBrainRegCalls:  0,
+			wantDiscordCalls:   1,
+		},
+		{
+			name:      "SuccessRequireReviewNotifyFailureHandledBestEffort",
+			token:     "pat-123",
+			repo:      "aerial-config",
+			channelID: "1562837549255495693",
+			changes: []SkillFileChange{{
+				RelPath:       "custom-skills/discord/ha/SKILL.md",
+				Content:       "foo",
+				CommitSummary: "update ha",
+				Action:        "EDIT",
+				RequireReview: true,
+			}},
+			serverCfg:          mockGitHubServerConfig{failBrainReg: true},
+			wantPR:             42,
+			wantErr:            false,
+			checkCalls:         true,
+			wantAutoMergeCalls: 0,
+			wantBrainRegCalls:  0,
+			wantDiscordCalls:   1,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			server := newMockGitHubServer(t, tc.serverCfg)
+			var autoMergeCalls, brainRegCalls, discordMsgCalls int
+			cfg := tc.serverCfg
+			cfg.autoMergeCalls = &autoMergeCalls
+			cfg.brainRegCalls = &brainRegCalls
+			cfg.discordMsgCalls = &discordMsgCalls
+
+			server := newMockGitHubServer(t, cfg)
 			defer server.Close()
 
 			fixedTime := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
@@ -7372,6 +7457,17 @@ func TestGitHubSkillPublisher_PublishSkillChanges(t *testing.T) {
 			}
 			if prNum != tc.wantPR {
 				t.Errorf("prNum = %d, want %d", prNum, tc.wantPR)
+			}
+			if tc.checkCalls {
+				if autoMergeCalls != tc.wantAutoMergeCalls {
+					t.Errorf("autoMergeCalls = %d, want %d", autoMergeCalls, tc.wantAutoMergeCalls)
+				}
+				if brainRegCalls != tc.wantBrainRegCalls {
+					t.Errorf("brainRegCalls = %d, want %d", brainRegCalls, tc.wantBrainRegCalls)
+				}
+				if discordMsgCalls != tc.wantDiscordCalls {
+					t.Errorf("discordMsgCalls = %d, want %d", discordMsgCalls, tc.wantDiscordCalls)
+				}
 			}
 			_ = publisher.NotifyShortFriction(ctx, "test alert")
 			_ = publisher.NotifyShortFriction(ctx, "")
@@ -7482,14 +7578,15 @@ description: Novel procedure for orchestrating automated deployments.
 			wantErr:         true,
 		},
 		{
-			name: "PlanYieldsNoBatchesAllBlockedCoreSkillsSkipped",
+			name: "PlanYieldsNoBatchesUnmatchedBlockedCoreSkillsRemainPending",
 			cands: []ProceduralCandidate{
 				testProcCand(10, "self-improvement", "trigger 1", nil, nil),
 				testProcCand(11, "writing-plans", "trigger 2", nil, nil),
 			},
-			wantPR:          0,
-			wantErr:         false,
-			wantMarkSkipped: true,
+			wantPR:             0,
+			wantErr:            false,
+			wantMarkSkipped:    false,
+			wantPendingIndices: []int{0, 1},
 		},
 		{
 			name: "LLMInvocationErrorBatchSkipped",
@@ -7977,6 +8074,27 @@ func TestFormatSkillCommitAndPRHelpers(t *testing.T) {
 			wantTitle:     "feat(skills): evolve 2 procedural skills",
 			wantBodySub:   `<!-- aerial-pr: {"target_id":"","vanadis_chunk_id":""} -->`,
 		},
+		{
+			name: "RequireReviewChangeClearsTargetIDAndRendersManualReviewBanner",
+			changes: []SkillFileChange{{
+				RelPath:       "custom-skills/discord/ha/SKILL.md",
+				CommitSummary: "update ha",
+				Action:        "EDIT",
+				RequireReview: true,
+				CandidateIDs:  []int64{101},
+				Candidates: []ProceduralCandidate{{
+					ID:          101,
+					LoadedSkill: "self-improvement",
+					Trigger:     "when running recursive grep",
+					Steps:       []string{"pass --exclude-dir=.git"},
+					Avoid:       []string{"do not run bare grep -r"},
+				}},
+			}},
+			targetID:      "1562837549255495693",
+			wantCommitSub: "feat(skills): update ha",
+			wantTitle:     "feat(skills): update ha",
+			wantBodySub:   `<!-- aerial-pr: {"target_id":"","vanadis_chunk_id":""} -->`,
+		},
 	}
 
 	for _, tc := range tests {
@@ -7994,6 +8112,29 @@ func TestFormatSkillCommitAndPRHelpers(t *testing.T) {
 				t.Errorf("body = %q, want containing %q", body, tc.wantBodySub)
 			}
 		})
+	}
+
+	longTrigger := strings.Repeat("x", 1800)
+	alertChanges := []SkillFileChange{{
+		RelPath:       "custom-skills/discord/ha/SKILL.md",
+		CommitSummary: "update ha",
+		Action:        "EDIT",
+		RequireReview: true,
+		CandidateIDs:  []int64{101},
+		Candidates: []ProceduralCandidate{{
+			ID:          101,
+			LoadedSkill: "self-improvement",
+			Trigger:     longTrigger,
+			Steps:       []string{"step 1", "step 2"},
+			Avoid:       []string{"avoid 1"},
+		}},
+	}}
+	alertMsg := formatManualReviewPRAlert(42, "azylman", "aerial-config", alertChanges)
+	if len(alertMsg) > 1800 {
+		t.Errorf("formatManualReviewPRAlert len = %d, want <= 1800", len(alertMsg))
+	}
+	if !strings.Contains(alertMsg, "PR [#42](https://github.com/azylman/aerial-config/pull/42)") {
+		t.Errorf("formatManualReviewPRAlert missing PR link: %q", alertMsg)
 	}
 
 	// Test parseDesignerResponse
