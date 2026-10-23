@@ -1017,19 +1017,31 @@ func TestResolveGitHubTriggerEventType(t *testing.T) {
 			wantEvent: "",
 		},
 		{
-			name: "pull_request closed with merge_sha returns pr_merged",
+			name: "pull_request closed with merged true returns pr_merged",
 			res: &ResolvedGitHubEvent{
 				Event:    "pull_request",
 				Action:   "closed",
+				Merged:   true,
 				MergeSHA: "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092",
 			},
 			wantEvent: "pr_merged",
+		},
+		{
+			name: "pull_request closed unmerged with merge_sha returns empty",
+			res: &ResolvedGitHubEvent{
+				Event:    "pull_request",
+				Action:   "closed",
+				Merged:   false,
+				MergeSHA: "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092",
+			},
+			wantEvent: "",
 		},
 		{
 			name: "pull_request closed without merge_sha returns empty",
 			res: &ResolvedGitHubEvent{
 				Event:    "pull_request",
 				Action:   "closed",
+				Merged:   false,
 				MergeSHA: "",
 			},
 			wantEvent: "",
@@ -1155,6 +1167,7 @@ func TestEvaluateGitHubEventTriggers(t *testing.T) {
 			res: &ResolvedGitHubEvent{
 				Event:    "pull_request",
 				Action:   "closed",
+				Merged:   true,
 				MergeSHA: "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092",
 				Repo:     "azylman/aerial",
 				Branch:   "refs/heads/feat/trigger-eval",
@@ -1163,6 +1176,18 @@ func TestEvaluateGitHubEventTriggers(t *testing.T) {
 			wantSource:    "github",
 			wantEventType: "pr_merged",
 			wantTargets:   []string{"azylman/aerial", "azylman/aerial:feat/trigger-eval"},
+		},
+		{
+			name: "pull_request closed unmerged with test merge_sha does not fire",
+			res: &ResolvedGitHubEvent{
+				Event:    "pull_request",
+				Action:   "closed",
+				Merged:   false,
+				MergeSHA: "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092",
+				Repo:     "azylman/aerial",
+				Branch:   "refs/heads/feat/trigger-eval",
+			},
+			wantFired: false,
 		},
 		{
 			name: "check_run extracts branch from body when res.Branch is empty",
@@ -1259,6 +1284,12 @@ func TestIntegrations_EventTriggers(t *testing.T) {
 			wantEventType: "failed",
 		},
 		{
+			name:          "ProcessGitHubEvent closed unmerged with test merge sha fires vanadis failure triggers but not github merged",
+			testScenario:  "github_pr_closed_unmerged_with_test_merge_sha",
+			wantSource:    "vanadis_chunk",
+			wantEventType: "failed",
+		},
+		{
 			name:          "notifyRemediationCap fires vanadis failure triggers",
 			testScenario:  "notify_remediation_cap",
 			wantSource:    "vanadis_chunk",
@@ -1319,6 +1350,9 @@ func TestIntegrations_EventTriggers(t *testing.T) {
 			case "github_pr_closed_unmerged":
 				body := []byte(`{"action":"closed","number":1,"repository":{"full_name":"azylman/aerial"},"pull_request":{"number":1,"merged":false,"head":{"ref":"feat/test","sha":"sha-head-123"}}}`)
 				_, _ = srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-closed", body)
+			case "github_pr_closed_unmerged_with_test_merge_sha":
+				body := []byte(`{"action":"closed","number":1,"repository":{"full_name":"azylman/aerial"},"pull_request":{"number":1,"merged":false,"merge_commit_sha":"test-merge-sha-123","head":{"ref":"feat/test","sha":"sha-head-123"}}}`)
+				_, _ = srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-closed-test-merge", body)
 			case "notify_remediation_cap":
 				srv.notifyRemediationCap(ctx, &ResolvedGitHubEvent{
 					Repo:     "azylman/aerial",
@@ -1343,6 +1377,37 @@ func TestIntegrations_EventTriggers(t *testing.T) {
 			if !found {
 				t.Fatalf("expected claim call for source=%s eventType=%s, calls = %+v", tc.wantSource, tc.wantEventType, mockReg.claimTriggersCalls)
 			}
+			if tc.testScenario == "github_pr_closed_unmerged_with_test_merge_sha" {
+				for _, call := range mockReg.claimTriggersCalls {
+					if call.source == "github" && call.eventType == "pr_merged" {
+						t.Fatalf("unexpected claim call for github pr_merged on unmerged PR: %+v", call)
+					}
+				}
+			}
 		})
+	}
+}
+
+func TestProcessGitHubEvent_TriggersEvaluatedOnlyOnSuccess(t *testing.T) {
+	t.Parallel()
+
+	mockReg := &mockPRRegistry{
+		err: errors.New("database connection lost"),
+	}
+	mockDisp := &mockOutboundDispatcher{}
+	srv := NewRouterServer(Config{}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	ctx := context.Background()
+	body := []byte(`{"action":"closed","number":1,"repository":{"full_name":"azylman/aerial"},"pull_request":{"number":1,"merged":true,"merge_commit_sha":"sha-merge-123","head":{"ref":"feat/test","sha":"sha-head-123"}}}`)
+
+	res, err := srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-merged-err", body)
+	if err == nil {
+		t.Fatalf("expected error from ProcessGitHubEvent, got res=%v", res)
+	}
+
+	if len(mockReg.claimTriggersCalls) != 0 {
+		t.Fatalf("expected no claimTriggersCalls on ProcessGitHubEvent error, got %d calls: %+v", len(mockReg.claimTriggersCalls), mockReg.claimTriggersCalls)
 	}
 }

@@ -2749,6 +2749,7 @@ type ResolvedGitHubEvent struct {
 	Branch           string `json:"branch,omitempty"`
 	HeadSHA          string `json:"head_sha,omitempty"`
 	MergeSHA         string `json:"merge_sha,omitempty"`
+	Merged           bool   `json:"merged,omitempty"`
 	TargetID         string `json:"target_id,omitempty"`
 	CheckName        string `json:"check_name,omitempty"`
 	Status           string `json:"status,omitempty"`
@@ -2918,12 +2919,17 @@ func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *Resol
 	return nil
 }
 
-func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery string, body []byte) (*ResolvedGitHubEvent, error) {
+func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery string, body []byte) (res *ResolvedGitHubEvent, err error) {
 	if s.onProcessed != nil {
 		defer s.onProcessed(event, delivery)
 	}
-	res := &ResolvedGitHubEvent{Event: event, Delivery: delivery}
-	defer s.evaluateGitHubEventTriggers(ctx, res, body)
+	res = &ResolvedGitHubEvent{Event: event, Delivery: delivery}
+	// Triggers are only evaluated after successful processing to prevent destructive trigger claiming during transient errors/River retries.
+	defer func() {
+		if err == nil {
+			s.evaluateGitHubEventTriggers(ctx, res, body)
+		}
+	}()
 
 	switch event {
 	case "ping":
@@ -2950,7 +2956,11 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 		}
 		res.Branch = p.PullRequest.Head.Ref
 		res.HeadSHA = p.PullRequest.Head.SHA
-		res.MergeSHA = p.PullRequest.MergeCommitSHA
+		res.Merged = p.PullRequest.Merged
+		// GitHub pull_request webhooks set merge_commit_sha for test merges even on unmerged PRs; only set MergeSHA when merged.
+		if p.PullRequest.Merged {
+			res.MergeSHA = p.PullRequest.MergeCommitSHA
+		}
 		res.Sender = p.Sender.Login
 		res.ResolutionSource = "pull_request_payload"
 		log.Printf("[webhooks-router] [github] [pull_request] repo=%s pr=%d action=%s head_sha=%s merge_sha=%s branch=%s merged=%v sender=%s delivery=%s",

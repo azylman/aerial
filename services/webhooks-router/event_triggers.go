@@ -225,7 +225,8 @@ func resolveGitHubTriggerEventType(res *ResolvedGitHubEvent) string {
 	}
 	switch res.Event {
 	case "pull_request":
-		if res.Action == "closed" && res.MergeSHA != "" {
+		// GitHub generates test merge commit SHAs for unmerged PRs; require res.Merged to prevent false pr_merged triggers.
+		if res.Action == "closed" && res.Merged {
 			return "pr_merged"
 		}
 	case "check_run", "workflow_run":
