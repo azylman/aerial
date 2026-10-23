@@ -50,6 +50,17 @@ type HeartbeatSchedule struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+type EventTrigger struct {
+	ID        string    `json:"id"`
+	ChannelID string    `json:"channel_id"`
+	Source    string    `json:"source"`
+	Target    string    `json:"target"`
+	EventType string    `json:"event_type"`
+	Prompt    string    `json:"prompt"`
+	Effort    string    `json:"effort"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 type ScheduleRun struct {
 	ID           string     `json:"id"`
 	ScheduleID   string     `json:"schedule_id"`
@@ -401,7 +412,7 @@ func DeleteSchedule(ctx context.Context, database *sql.DB, scheduleID string) (b
 		return false, err
 	}
 	var total int64
-	for _, tbl := range []string{"cron_schedules", "one_shot_schedules", "heartbeat_schedules"} {
+	for _, tbl := range []string{"cron_schedules", "one_shot_schedules", "heartbeat_schedules", "event_triggers"} {
 		res, err := database.ExecContext(ctx, rebindQuery("DELETE FROM "+tbl+" WHERE id = ?", isPostgres(database)), scheduleID)
 		if err != nil {
 			return false, err
@@ -614,4 +625,118 @@ func PruneScheduleRuns(ctx context.Context, database *sql.DB, maxCount int, maxA
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// ValidateLiveEventTarget checks that the referenced target is known and not in a terminal state.
+func ValidateLiveEventTarget(ctx context.Context, database *sql.DB, source, target string) error {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return err
+	}
+	switch source {
+	case "vanadis_build":
+		query := rebindQuery(`SELECT status FROM vanadis_builds WHERE id = ?`, isPostgres(database))
+		var status string
+		err := database.QueryRowContext(ctx, query, target).Scan(&status)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("vanadis build %q not found", target)
+			}
+			return fmt.Errorf("failed to query vanadis build %q: %w", target, err)
+		}
+		switch strings.ToLower(strings.TrimSpace(status)) {
+		case "completed", "merged", "failed", "cancelled", "canceled":
+			return fmt.Errorf("vanadis build %q is already in terminal state %q", target, status)
+		}
+	case "vanadis_chunk":
+		query := rebindQuery(`SELECT status FROM vanadis_chunks WHERE id = ?`, isPostgres(database))
+		var status string
+		err := database.QueryRowContext(ctx, query, target).Scan(&status)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("vanadis chunk %q not found", target)
+			}
+			return fmt.Errorf("failed to query vanadis chunk %q: %w", target, err)
+		}
+		switch strings.ToLower(strings.TrimSpace(status)) {
+		case "merged", "completed", "failed":
+			return fmt.Errorf("vanadis chunk %q is already in terminal state %q", target, status)
+		}
+	}
+	return nil
+}
+
+// InsertEventTrigger persists a new event trigger in the database.
+func InsertEventTrigger(ctx context.Context, database *sql.DB, t EventTrigger) error {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return err
+	}
+	if t.CreatedAt.IsZero() {
+		t.CreatedAt = time.Now().UTC()
+	}
+	effort, err := NormalizeEffort(t.Effort)
+	if err != nil {
+		effort = "medium"
+	}
+	query := rebindQuery(`INSERT INTO event_triggers (id, channel_id, source, target, event_type, prompt, effort, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, isPostgres(database))
+	_, err = database.ExecContext(ctx, query, t.ID, t.ChannelID, t.Source, t.Target, t.EventType, t.Prompt, effort, t.CreatedAt)
+	return err
+}
+
+// ListEventTriggers retrieves event triggers, optionally filtered by channel_id.
+func ListEventTriggers(ctx context.Context, database *sql.DB, channelID string) ([]EventTrigger, error) {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return nil, err
+	}
+	channelID = strings.TrimSpace(channelID)
+	var query string
+	var rows *sql.Rows
+	if channelID != "" {
+		query = rebindQuery(`SELECT id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at FROM event_triggers WHERE channel_id = ? ORDER BY created_at ASC`, isPostgres(database))
+		rows, err = database.QueryContext(ctx, query, channelID)
+	} else {
+		query = rebindQuery(`SELECT id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at FROM event_triggers ORDER BY created_at ASC`, isPostgres(database))
+		rows, err = database.QueryContext(ctx, query)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	results := []EventTrigger{}
+	for rows.Next() {
+		var t EventTrigger
+		if err := rows.Scan(&t.ID, &t.ChannelID, &t.Source, &t.Target, &t.EventType, &t.Prompt, &t.Effort, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		results = append(results, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+// DeleteEventTrigger removes an event trigger by id.
+func DeleteEventTrigger(ctx context.Context, database *sql.DB, id string) (bool, error) {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return false, err
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false, fmt.Errorf("id cannot be empty")
+	}
+	query := rebindQuery(`DELETE FROM event_triggers WHERE id = ?`, isPostgres(database))
+	res, err := database.ExecContext(ctx, query, id)
+	if err != nil {
+		return false, err
+	}
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rowsAffected > 0, nil
 }

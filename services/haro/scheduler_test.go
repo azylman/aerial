@@ -1664,3 +1664,451 @@ func TestPureHelpers_MapArgExtractors(t *testing.T) {
 		})
 	}
 }
+
+func TestPureHelpers_ValidateEventWatchSpec(t *testing.T) {
+	tests := []struct {
+		name          string
+		source        string
+		target        string
+		eventType     string
+		wantSource    string
+		wantTarget    string
+		wantEventType string
+		wantErr       bool
+	}{
+		// empty target
+		{"empty target", "vanadis_build", "", "completed", "", "", "", true},
+		// vanadis_build
+		{"vanadis_build completed", "vanadis_build", "build-123-abc", "completed", "vanadis_build", "build-123-abc", "completed", false},
+		{"vanadis_build failed", "VANADIS_BUILD", "build-456", "FAILED", "vanadis_build", "build-456", "failed", false},
+		{"vanadis_build invalid event_type", "vanadis_build", "build-123", "running", "", "", "", true},
+		{"vanadis_build target with chunk rejected", "vanadis_build", "build-123-chunk-1", "completed", "", "", "", true},
+		{"vanadis_build invalid target regex", "vanadis_build", "invalid_build", "completed", "", "", "", true},
+		// vanadis_chunk
+		{"vanadis_chunk merged", "vanadis_chunk", "build-123-chunk-1", "merged", "vanadis_chunk", "build-123-chunk-1", "merged", false},
+		{"vanadis_chunk failed", "vanadis_chunk", "anyprefix-chunk-99", "failed", "vanadis_chunk", "anyprefix-chunk-99", "failed", false},
+		{"vanadis_chunk invalid event_type", "vanadis_chunk", "build-123-chunk-1", "completed", "", "", "", true},
+		{"vanadis_chunk invalid target", "vanadis_chunk", "build-123", "merged", "", "", "", true},
+		// hangar
+		{"hangar bare repo sync_success", "hangar", "aerial", "sync_success", "hangar", "azylman/aerial", "sync_success", false},
+		{"hangar full repo sync_failed", "hangar", "azylman/aerial-config", "sync_failed", "hangar", "azylman/aerial-config", "sync_failed", false},
+		{"hangar invalid event_type", "hangar", "aerial", "deployed", "", "", "", true},
+		{"hangar unmanaged repo", "hangar", "other/repo", "sync_success", "", "", "", true},
+		// github
+		{"github repo only pr_merged", "github", "aerial", "pr_merged", "github", "azylman/aerial", "pr_merged", false},
+		{"github repo with branch ci_passed", "github", "azylman/aerial:main", "ci_passed", "github", "azylman/aerial:main", "ci_passed", false},
+		{"github refs heads stripped ci_failed", "github", "aerial:refs/heads/feature/test", "ci_failed", "github", "azylman/aerial:feature/test", "ci_failed", false},
+		{"github PR number with hash rejected", "github", "aerial:#123", "ci_passed", "", "", "", true},
+		{"github PR number numeric rejected", "github", "aerial:123", "ci_passed", "", "", "", true},
+		{"github 40-char SHA rejected", "github", "aerial:0123456789abcdef0123456789abcdef01234567", "ci_passed", "", "", "", true},
+		{"github empty branch rejected", "github", "aerial:", "ci_passed", "", "", "", true},
+		{"github unmanaged repo rejected", "github", "unmanaged/repo:main", "ci_passed", "", "", "", true},
+		{"github invalid event_type", "github", "aerial", "completed", "", "", "", true},
+		// nomad
+		{"nomad deploy_success", "nomad", "aerial-brain", "deploy_success", "nomad", "aerial-brain", "deploy_success", false},
+		{"nomad uppercase normalized deploy_failed", "nomad", "AERIAL-POSTGRES", "deploy_failed", "nomad", "aerial-postgres", "deploy_failed", false},
+		{"nomad invalid event_type", "nomad", "aerial-brain", "started", "", "", "", true},
+		{"nomad invalid target characters", "nomad", "aerial_brain", "deploy_success", "", "", "", true},
+		// unknown source
+		{"unknown source", "unknown_source", "target", "completed", "", "", "", true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s, target, ev, err := ValidateEventWatchSpec(tc.source, tc.target, tc.eventType)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ValidateEventWatchSpec() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr {
+				if s != tc.wantSource || target != tc.wantTarget || ev != tc.wantEventType {
+					t.Errorf("got (%q, %q, %q), want (%q, %q, %q)", s, target, ev, tc.wantSource, tc.wantTarget, tc.wantEventType)
+				}
+			}
+		})
+	}
+}
+
+func TestDB_EventTriggers(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+
+	// Seed vanadis_builds and vanadis_chunks
+	_, err := db.ExecContext(ctx, `
+		INSERT INTO vanadis_builds (id, status) VALUES 
+			('b-running', 'running'),
+			('b-completed', 'completed'),
+			('b-failed', 'failed'),
+			('b-cancelled', 'cancelled'),
+			('b-canceled', 'canceled');
+		INSERT INTO vanadis_chunks (id, build_id, status) VALUES 
+			('c-pending', 'b-running', 'pending'),
+			('c-merged', 'b-running', 'merged'),
+			('c-completed', 'b-running', 'completed'),
+			('c-failed', 'b-running', 'failed');
+	`)
+	if err != nil {
+		t.Fatalf("failed to seed vanadis tables: %v", err)
+	}
+
+	validateTests := []struct {
+		name    string
+		source  string
+		target  string
+		wantErr bool
+	}{
+		{"vanadis_build running", "vanadis_build", "b-running", false},
+		{"vanadis_build completed", "vanadis_build", "b-completed", true},
+		{"vanadis_build failed", "vanadis_build", "b-failed", true},
+		{"vanadis_build cancelled", "vanadis_build", "b-cancelled", true},
+		{"vanadis_build canceled", "vanadis_build", "b-canceled", true},
+		{"vanadis_build not found", "vanadis_build", "b-missing", true},
+		{"vanadis_chunk pending", "vanadis_chunk", "c-pending", false},
+		{"vanadis_chunk merged", "vanadis_chunk", "c-merged", true},
+		{"vanadis_chunk completed", "vanadis_chunk", "c-completed", true},
+		{"vanadis_chunk failed", "vanadis_chunk", "c-failed", true},
+		{"vanadis_chunk not found", "vanadis_chunk", "c-missing", true},
+		{"other source hangar", "hangar", "azylman/aerial", false},
+		{"other source github", "github", "azylman/aerial:main", false},
+		{"other source nomad", "nomad", "aerial-brain", false},
+	}
+	for _, tc := range validateTests {
+		t.Run("validate_"+tc.name, func(t *testing.T) {
+			err := ValidateLiveEventTarget(ctx, db, tc.source, tc.target)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ValidateLiveEventTarget(%q, %q) err = %v, wantErr = %v", tc.source, tc.target, err, tc.wantErr)
+			}
+		})
+	}
+
+	// Insert, List, Delete tests
+	trig1 := EventTrigger{
+		ID:        "et-1",
+		ChannelID: "111111111111111111",
+		Source:    "hangar",
+		Target:    "azylman/aerial",
+		EventType: "sync_success",
+		Prompt:    "Hangar sync finished",
+		Effort:    "low",
+		CreatedAt: time.Now().UTC(),
+	}
+	trig2 := EventTrigger{
+		ID:        "et-2",
+		ChannelID: "222222222222222222",
+		Source:    "vanadis_build",
+		Target:    "b-running",
+		EventType: "completed",
+		Prompt:    "Build completed",
+		CreatedAt: time.Now().UTC(),
+	}
+	trig3 := EventTrigger{
+		ID:        "et-3",
+		ChannelID: "111111111111111111",
+		Source:    "nomad",
+		Target:    "aerial-brain",
+		EventType: "deploy_success",
+		Prompt:    "Brain deployed",
+		CreatedAt: time.Now().UTC(),
+	}
+	trig4 := EventTrigger{
+		ID:        "et-4",
+		ChannelID: "111111111111111111",
+		Source:    "nomad",
+		Target:    "aerial-brain",
+		EventType: "deploy_success",
+		Prompt:    "Brain deployed with defaults",
+		Effort:    "invalid-effort",
+	}
+
+	if err := InsertEventTrigger(ctx, db, trig1); err != nil {
+		t.Fatalf("InsertEventTrigger 1 failed: %v", err)
+	}
+	if err := InsertEventTrigger(ctx, db, trig2); err != nil {
+		t.Fatalf("InsertEventTrigger 2 failed: %v", err)
+	}
+	if err := InsertEventTrigger(ctx, db, trig3); err != nil {
+		t.Fatalf("InsertEventTrigger 3 failed: %v", err)
+	}
+	if err := InsertEventTrigger(ctx, db, trig4); err != nil {
+		t.Fatalf("InsertEventTrigger 4 failed: %v", err)
+	}
+
+	listTests := []struct {
+		name      string
+		channelID string
+		wantCount int
+	}{
+		{"list all", "", 4},
+		{"list channel 1", "111111111111111111", 3},
+		{"list channel 2", "222222222222222222", 1},
+		{"list non-existent channel", "999999999999999999", 0},
+	}
+	for _, tc := range listTests {
+		t.Run("list_"+tc.name, func(t *testing.T) {
+			res, err := ListEventTriggers(ctx, db, tc.channelID)
+			if err != nil {
+				t.Fatalf("ListEventTriggers failed: %v", err)
+			}
+			if len(res) != tc.wantCount {
+				t.Errorf("ListEventTriggers count = %d, want %d", len(res), tc.wantCount)
+			}
+		})
+	}
+
+	// Delete via DeleteEventTrigger
+	delTests := []struct {
+		name       string
+		id         string
+		wantDelete bool
+		wantErr    bool
+	}{
+		{"delete existing", "et-1", true, false},
+		{"delete already deleted", "et-1", false, false},
+		{"delete non-existent", "et-missing", false, false},
+		{"delete empty id", "", false, true},
+	}
+	for _, tc := range delTests {
+		t.Run("delete_"+tc.name, func(t *testing.T) {
+			deleted, err := DeleteEventTrigger(ctx, db, tc.id)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("DeleteEventTrigger(%q) err = %v, wantErr = %v", tc.id, err, tc.wantErr)
+			}
+			if deleted != tc.wantDelete {
+				t.Errorf("DeleteEventTrigger(%q) deleted = %v, want %v", tc.id, deleted, tc.wantDelete)
+			}
+		})
+	}
+
+	// Verify DeleteSchedule deletes from event_triggers
+	delSchedTests := []struct {
+		name       string
+		id         string
+		wantDelete bool
+	}{
+		{"delete trigger via DeleteSchedule", "et-2", true},
+		{"delete non-existent via DeleteSchedule", "et-missing-2", false},
+	}
+	for _, tc := range delSchedTests {
+		t.Run("delete_sched_"+tc.name, func(t *testing.T) {
+			deleted, err := DeleteSchedule(ctx, db, tc.id)
+			if err != nil {
+				t.Fatalf("DeleteSchedule failed: %v", err)
+			}
+			if deleted != tc.wantDelete {
+				t.Errorf("DeleteSchedule deleted = %v, want %v", deleted, tc.wantDelete)
+			}
+		})
+	}
+}
+
+func TestEventWatchTools(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+
+	// Seed builds & chunks
+	_, err := db.ExecContext(ctx, `
+		INSERT INTO vanadis_builds (id, status) VALUES ('build-running-1', 'running'), ('build-term-1', 'completed');
+		INSERT INTO vanadis_chunks (id, build_id, status) VALUES ('chunk-pending-1', 'build-running-1', 'pending'), ('chunk-term-1', 'build-running-1', 'merged');
+	`)
+	if err != nil {
+		t.Fatalf("failed to seed vanadis tables: %v", err)
+	}
+
+	watchTests := []struct {
+		name    string
+		args    map[string]any
+		wantErr bool
+	}{
+		{
+			name:    "missing channel_id",
+			args:    map[string]any{"source": "hangar", "target": "aerial", "event_type": "sync_success", "prompt": "ok"},
+			wantErr: true,
+		},
+		{
+			name:    "non-numeric snowflake channel_id",
+			args:    map[string]any{"channel_id": "bad-id", "source": "hangar", "target": "aerial", "event_type": "sync_success", "prompt": "ok"},
+			wantErr: true,
+		},
+		{
+			name:    "missing prompt",
+			args:    map[string]any{"channel_id": "1562847268833337377", "source": "hangar", "target": "aerial", "event_type": "sync_success"},
+			wantErr: true,
+		},
+		{
+			name:    "invalid effort",
+			args:    map[string]any{"channel_id": "1562847268833337377", "source": "hangar", "target": "aerial", "event_type": "sync_success", "prompt": "ok", "effort": "extreme"},
+			wantErr: true,
+		},
+		{
+			name:    "invalid spec",
+			args:    map[string]any{"channel_id": "1562847268833337377", "source": "unknown", "target": "aerial", "event_type": "sync_success", "prompt": "ok"},
+			wantErr: true,
+		},
+		{
+			name:    "live validation failure build not found",
+			args:    map[string]any{"channel_id": "1562847268833337377", "source": "vanadis_build", "target": "build-not-found", "event_type": "completed", "prompt": "ok"},
+			wantErr: true,
+		},
+		{
+			name:    "live validation failure build in terminal state",
+			args:    map[string]any{"channel_id": "1562847268833337377", "source": "vanadis_build", "target": "build-term-1", "event_type": "completed", "prompt": "ok"},
+			wantErr: true,
+		},
+		{
+			name:    "success with defaults",
+			args:    map[string]any{"channel_id": "1562847268833337377", "source": "hangar", "target": "aerial", "event_type": "sync_success", "prompt": "deploy ready"},
+			wantErr: false,
+		},
+		{
+			name: "success with explicit fields and vanadis chunk",
+			args: map[string]any{
+				"channel_id": "1562847268833337378",
+				"source":     "vanadis_chunk",
+				"target":     "build-running-1-chunk-1",
+				"event_type": "merged",
+				"prompt":     "chunk 1 merged",
+				"effort":     "high",
+			},
+			wantErr: false,
+		},
+	}
+
+	// Seed chunk matching target
+	_, err = db.ExecContext(ctx, "INSERT INTO vanadis_chunks (id, build_id, status) VALUES ('build-running-1-chunk-1', 'build-running-1', 'pending')")
+	if err != nil {
+		t.Fatalf("failed to insert chunk: %v", err)
+	}
+
+	for _, tc := range watchTests {
+		t.Run("watch_"+tc.name, func(t *testing.T) {
+			res, err := HandleWatchEvent(ctx, db, tc.args)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("HandleWatchEvent() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr {
+				if res == nil || len(res.Content) == 0 {
+					t.Fatalf("expected non-empty CallToolResult")
+				}
+			}
+		})
+	}
+
+	// Test TOCTOU guard
+	toctouTests := []struct {
+		name       string
+		setupBuild string
+		args       map[string]any
+		wantErr    bool
+	}{
+		{
+			name:       "trigger deletes inserted row on terminal race",
+			setupBuild: "build-toctou-1",
+			args: map[string]any{
+				"channel_id": "1562847268833337377",
+				"source":     "vanadis_build",
+				"target":     "build-toctou-1",
+				"event_type": "completed",
+				"prompt":     "racing build",
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range toctouTests {
+		t.Run("toctou_"+tc.name, func(t *testing.T) {
+			_, err := db.ExecContext(ctx, "INSERT INTO vanadis_builds (id, status) VALUES (?, 'running')", tc.setupBuild)
+			if err != nil {
+				t.Fatalf("failed to insert build: %v", err)
+			}
+			// Attach SQLite trigger that transitions build to completed upon insert into event_triggers
+			triggerSQL := fmt.Sprintf(`CREATE TRIGGER simulate_toctou_%s AFTER INSERT ON event_triggers
+				WHEN NEW.target = '%s'
+				BEGIN
+					UPDATE vanadis_builds SET status = 'completed' WHERE id = '%s';
+				END;`, strings.ReplaceAll(tc.setupBuild, "-", "_"), tc.setupBuild, tc.setupBuild)
+			if _, err := db.ExecContext(ctx, triggerSQL); err != nil {
+				t.Fatalf("failed to create trigger: %v", err)
+			}
+
+			_, err = HandleWatchEvent(ctx, db, tc.args)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("HandleWatchEvent TOCTOU err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			// Verify that event_triggers contains no row for this target (it was rolled back / deleted)
+			var count int
+			if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM event_triggers WHERE target = ?", tc.setupBuild).Scan(&count); err != nil {
+				t.Fatalf("failed to count event triggers: %v", err)
+			}
+			if count != 0 {
+				t.Errorf("expected 0 triggers remaining after TOCTOU cleanup, got %d", count)
+			}
+		})
+	}
+
+	// Test HandleListEventWatches
+	listTests := []struct {
+		name        string
+		args        map[string]any
+		wantAtLeast int
+	}{
+		{"list all watches", map[string]any{}, 2},
+		{"list filtered channel", map[string]any{"channel_id": "1562847268833337377"}, 1},
+		{"list filtered target_id alias", map[string]any{"target_id": "1562847268833337378"}, 1},
+		{"list empty channel", map[string]any{"channel_id": "999999999999999999"}, 0},
+	}
+	for _, tc := range listTests {
+		t.Run("list_"+tc.name, func(t *testing.T) {
+			res, err := HandleListEventWatches(ctx, db, tc.args)
+			if err != nil {
+				t.Fatalf("HandleListEventWatches failed: %v", err)
+			}
+			if res == nil || len(res.Content) == 0 {
+				t.Fatalf("expected non-empty CallToolResult")
+			}
+			text, ok := res.Content[0].(*mcp.TextContent)
+			if !ok {
+				t.Fatalf("expected *mcp.TextContent")
+			}
+			var out struct {
+				EventWatches []EventTrigger `json:"event_watches"`
+				Count        int            `json:"count"`
+			}
+			if err := json.Unmarshal([]byte(text.Text), &out); err != nil {
+				t.Fatalf("failed to unmarshal output: %v", err)
+			}
+			if len(out.EventWatches) < tc.wantAtLeast {
+				t.Errorf("got %d event watches, want at least %d", len(out.EventWatches), tc.wantAtLeast)
+			}
+		})
+	}
+
+	// Test HandleCancelEventWatch
+	// Seed 3 event triggers to test different cancel keys
+	_ = InsertEventTrigger(ctx, db, EventTrigger{ID: "watch-key-1", ChannelID: "1562847268833337377", Source: "hangar", Target: "azylman/aerial", EventType: "sync_success", Prompt: "p1"})
+	_ = InsertEventTrigger(ctx, db, EventTrigger{ID: "watch-key-2", ChannelID: "1562847268833337377", Source: "hangar", Target: "azylman/aerial", EventType: "sync_success", Prompt: "p2"})
+	_ = InsertEventTrigger(ctx, db, EventTrigger{ID: "watch-key-3", ChannelID: "1562847268833337377", Source: "hangar", Target: "azylman/aerial", EventType: "sync_success", Prompt: "p3"})
+
+	cancelTests := []struct {
+		name    string
+		args    map[string]any
+		wantErr bool
+	}{
+		{"missing watch_id", map[string]any{}, true},
+		{"non-existent watch_id", map[string]any{"watch_id": "not-found-id"}, true},
+		{"cancel via watch_id", map[string]any{"watch_id": "watch-key-1"}, false},
+		{"cancel via id alias", map[string]any{"id": "watch-key-2"}, false},
+		{"cancel via schedule_id alias", map[string]any{"schedule_id": "watch-key-3"}, false},
+	}
+	for _, tc := range cancelTests {
+		t.Run("cancel_"+tc.name, func(t *testing.T) {
+			res, err := HandleCancelEventWatch(ctx, db, tc.args)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("HandleCancelEventWatch err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr {
+				if res == nil || len(res.Content) == 0 {
+					t.Fatalf("expected non-empty CallToolResult")
+				}
+			}
+		})
+	}
+}

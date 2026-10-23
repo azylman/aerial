@@ -77,6 +77,30 @@ func setupTestPostgresTables(t *testing.T, db *sql.DB) {
 		effort TEXT NOT NULL DEFAULT 'low'
 	);
 	CREATE INDEX IF NOT EXISTS idx_one_shot_schedules_run_at ON one_shot_schedules(run_at);
+
+	CREATE TABLE IF NOT EXISTS event_triggers (
+		id TEXT PRIMARY KEY,
+		channel_id TEXT NOT NULL,
+		source TEXT NOT NULL,
+		target TEXT NOT NULL,
+		event_type TEXT NOT NULL,
+		prompt TEXT NOT NULL,
+		effort TEXT NOT NULL DEFAULT 'medium',
+		created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_event_triggers_lookup ON event_triggers (source, target, event_type);
+	CREATE INDEX IF NOT EXISTS idx_event_triggers_channel ON event_triggers (channel_id, created_at ASC);
+
+	CREATE TABLE IF NOT EXISTS vanadis_builds (
+		id TEXT PRIMARY KEY,
+		status TEXT NOT NULL DEFAULT 'running'
+	);
+
+	CREATE TABLE IF NOT EXISTS vanadis_chunks (
+		id TEXT PRIMARY KEY,
+		build_id TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'pending'
+	);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		t.Fatalf("failed to setup test postgres tables: %v", err)
@@ -169,6 +193,10 @@ func TestServer_HTTPEndpointsAndMCPProtocol(t *testing.T) {
 		{"schedule_heartbeat invalid", `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"schedule_heartbeat","arguments":{"channel_id":"invalid-snow","cron_expr":"0 0 * * *","prompt":"monitor disk"}}}`, true, false},
 		{"update_heartbeat missing", `{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"update_heartbeat","arguments":{"id":"missing-hb","effort":"low"}}}`, true, false},
 		{"cancel_schedule missing", `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"cancel_schedule","arguments":{"schedule_id":"none"}}}`, true, false},
+		{"watch_event success", `{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"watch_event","arguments":{"channel_id":"123456789012345678","source":"hangar","target":"aerial","event_type":"sync_success","prompt":"deploy notification"}}}`, false, false},
+		{"watch_event invalid", `{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"watch_event","arguments":{"channel_id":"bad-snowflake","source":"hangar","target":"aerial","event_type":"sync_success","prompt":"deploy notification"}}}`, true, false},
+		{"list_event_watches", `{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"list_event_watches","arguments":{}}}`, false, false},
+		{"cancel_event_watch missing", `{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"cancel_event_watch","arguments":{"watch_id":"missing-watch"}}}`, true, false},
 		{"unknown tool", `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"non_existent","arguments":{}}}`, false, true},
 	}
 	for _, tc := range rpcTests {
@@ -391,6 +419,18 @@ func TestDB_OperationsAndErrors(t *testing.T) {
 			}
 			if _, err := DeleteSchedule(tc.ctx, tc.db, "c1"); err == nil {
 				t.Errorf("%s: expected err Delete", tc.name)
+			}
+			if err := InsertEventTrigger(tc.ctx, tc.db, EventTrigger{}); err == nil {
+				t.Errorf("%s: expected err InsertEventTrigger", tc.name)
+			}
+			if _, err := ListEventTriggers(tc.ctx, tc.db, ""); err == nil {
+				t.Errorf("%s: expected err ListEventTriggers", tc.name)
+			}
+			if _, err := DeleteEventTrigger(tc.ctx, tc.db, "e1"); err == nil {
+				t.Errorf("%s: expected err DeleteEventTrigger", tc.name)
+			}
+			if err := ValidateLiveEventTarget(tc.ctx, tc.db, "vanadis_build", "b1"); err == nil {
+				t.Errorf("%s: expected err ValidateLiveEventTarget", tc.name)
 			}
 		})
 	}

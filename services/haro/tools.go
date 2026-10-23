@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"regexp"
 	"strconv"
 	"strings"
@@ -588,6 +589,144 @@ func HandleUpdateHeartbeat(ctx context.Context, db *sql.DB, args map[string]any)
 	jsonBytes, err := json.Marshal(out)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal heartbeat output: %w", err)
+	}
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.TextContent{Text: string(jsonBytes)},
+		},
+	}, nil
+}
+
+// HandleWatchEvent registers a deterministic one-shot event watch trigger.
+func HandleWatchEvent(ctx context.Context, db *sql.DB, args map[string]any) (*mcp.CallToolResult, error) {
+	channelID := getMapString(args, "channel_id", "target_id")
+	if !IsNumericSnowflake(channelID) {
+		return nil, fmt.Errorf("'channel_id' is required and must be a valid numeric snowflake")
+	}
+
+	prompt := getMapString(args, "prompt")
+	if prompt == "" {
+		return nil, fmt.Errorf("'prompt' is required")
+	}
+
+	effortStr := getMapString(args, "effort")
+	if effortStr == "" {
+		effortStr = "medium"
+	}
+	effort, err := NormalizeEffort(effortStr)
+	if err != nil {
+		return nil, err
+	}
+
+	source := getMapString(args, "source")
+	target := getMapString(args, "target")
+	eventType := getMapString(args, "event_type")
+
+	normSource, normTarget, normEventType, err := ValidateEventWatchSpec(source, target, eventType)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := ValidateLiveEventTarget(ctx, db, normSource, normTarget); err != nil {
+		return nil, err
+	}
+
+	id := uuid.New().String()
+	trigger := EventTrigger{
+		ID:        id,
+		ChannelID: channelID,
+		Source:    normSource,
+		Target:    normTarget,
+		EventType: normEventType,
+		Prompt:    prompt,
+		Effort:    effort,
+		CreatedAt: time.Now().UTC(),
+	}
+
+	if err := InsertEventTrigger(ctx, db, trigger); err != nil {
+		return nil, fmt.Errorf("failed to persist event trigger: %w", err)
+	}
+
+	// TOCTOU guard: re-verify target state after insertion.
+	if normSource == "vanadis_build" || normSource == "vanadis_chunk" {
+		if liveErr := ValidateLiveEventTarget(ctx, db, normSource, normTarget); liveErr != nil {
+			if _, delErr := DeleteEventTrigger(ctx, db, id); delErr != nil {
+				log.Printf("[Haro] failed to rollback event trigger %s: %v", id, delErr)
+			}
+			return nil, fmt.Errorf("target entered terminal state during registration: %w", liveErr)
+		}
+	}
+
+	out := map[string]any{
+		"status":     "success",
+		"watch_id":   id,
+		"channel_id": channelID,
+		"source":     normSource,
+		"target":     normTarget,
+		"event_type": normEventType,
+		"effort":     effort,
+		"message":    "Event watch registered successfully.",
+	}
+	jsonBytes, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal watch event output: %w", err)
+	}
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.TextContent{Text: string(jsonBytes)},
+		},
+	}, nil
+}
+
+// HandleListEventWatches returns active deterministic event watches.
+func HandleListEventWatches(ctx context.Context, db *sql.DB, args map[string]any) (*mcp.CallToolResult, error) {
+	channelID := getMapString(args, "channel_id", "target_id")
+	triggers, err := ListEventTriggers(ctx, db, channelID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list event watches: %w", err)
+	}
+
+	out := map[string]any{
+		"event_watches": triggers,
+		"count":         len(triggers),
+	}
+	jsonBytes, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal list event watches output: %w", err)
+	}
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.TextContent{Text: string(jsonBytes)},
+		},
+	}, nil
+}
+
+// HandleCancelEventWatch cancels a deterministic event watch trigger.
+func HandleCancelEventWatch(ctx context.Context, db *sql.DB, args map[string]any) (*mcp.CallToolResult, error) {
+	id := getMapString(args, "watch_id", "id", "schedule_id")
+	if id == "" {
+		return nil, fmt.Errorf("'watch_id' is required")
+	}
+
+	deleted, err := DeleteEventTrigger(ctx, db, id)
+	if err != nil {
+		return nil, fmt.Errorf("failed to cancel event watch: %w", err)
+	}
+	if !deleted {
+		return nil, fmt.Errorf("event watch %q not found", id)
+	}
+
+	out := map[string]any{
+		"status":   "success",
+		"watch_id": id,
+		"message":  "Event watch cancelled successfully.",
+	}
+	jsonBytes, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal cancel event watch output: %w", err)
 	}
 
 	return &mcp.CallToolResult{

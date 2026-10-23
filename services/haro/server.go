@@ -116,6 +116,30 @@ func (s *Server) registerTools() {
 		res, err := HandleUpdateHeartbeat(ctx, s.handler.db, args)
 		return res, nil, err
 	})
+
+	mcp.AddTool(s.mcpServer, &mcp.Tool{
+		Name:        "watch_event",
+		Description: "Register a deterministic one-shot event watch trigger fired when an external event occurs.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
+		res, err := HandleWatchEvent(ctx, s.handler.db, args)
+		return res, nil, err
+	})
+
+	mcp.AddTool(s.mcpServer, &mcp.Tool{
+		Name:        "list_event_watches",
+		Description: "List active deterministic event watch triggers.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
+		res, err := HandleListEventWatches(ctx, s.handler.db, args)
+		return res, nil, err
+	})
+
+	mcp.AddTool(s.mcpServer, &mcp.Tool{
+		Name:        "cancel_event_watch",
+		Description: "Cancel an active deterministic event watch trigger by watch ID.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
+		res, err := HandleCancelEventWatch(ctx, s.handler.db, args)
+		return res, nil, err
+	})
 }
 
 func (s *Server) Routes() http.Handler {
