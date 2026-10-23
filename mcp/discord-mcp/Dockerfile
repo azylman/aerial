@@ -5,8 +5,9 @@
 FROM node:22-alpine AS node-build
 WORKDIR /app
 
-# Download pinned release tarball directly (avoids git package and commit history overhead)
-RUN wget -qO- https://github.com/vianaz/mcp-discord/archive/f350aac986338cf14d9b210104cb594385347508.tar.gz | tar -xz --strip-components=1
+# Download pinned release tarball directly and isolate McpServer protocol instance per HTTP session
+RUN wget -qO- https://github.com/vianaz/mcp-discord/archive/f350aac986338cf14d9b210104cb594385347508.tar.gz | tar -xz --strip-components=1 && \
+    sed -i '0,/await server\.connect(transport);/s//await createMcpServer(discord).connect(transport);/' src/app.ts
 
 # Install dependencies with cache mount and build TypeScript
 RUN --mount=type=cache,target=/root/.npm npm install --ignore-scripts

@@ -75,7 +75,11 @@ transforms:
 
         if raw_level != null {
           lvl = downcase(to_string(raw_level) ?? "")
-          if contains(lvl, "err") || contains(lvl, "fatal") || contains(lvl, "panic") || contains(lvl, "crit") {
+          msg_str = to_string!(.message)
+          msg_lower = downcase(msg_str)
+          if .service == "github-mcp" && (msg_lower == "server run cancelled" || (exists(parsed.error) && (to_string(parsed.error) ?? "") == "context canceled")) {
+            .level = "info"
+          } else if contains(lvl, "err") || contains(lvl, "fatal") || contains(lvl, "panic") || contains(lvl, "crit") {
             .level = "error"
           } else if contains(lvl, "warn") {
             .level = "warn"
@@ -83,7 +87,6 @@ transforms:
             .level = "debug"
           } else {
             # Inspect message only for explicit error/fatal prefixes to support bridged Go stdlib logs
-            msg_str = to_string!(.message)
             if match(msg_str, r'^(?i)(\[[^\]]+\]\s*)?(error|fatal|panic):') {
               .level = "error"
             } else {
@@ -291,6 +294,8 @@ transforms:
               .attributes.logger = parsed.logger
             }
             .attributes.severity = parsed.severity
+          } else if starts_with(to_string(.service), "hassio_") {
+            .level = "warn"
           }
         }
 
@@ -400,6 +405,8 @@ transforms:
             msg_lower = downcase(string!(.message))
             if msg_lower == "server error: context canceled" || msg_lower == "context canceled" {
               .level = "info"
+            } else if match(msg_lower, r'^(?:\[[^\]]+\]\s*)*warn(?:ing)?\b') {
+              .level = "warn"
             } else if contains(msg_lower, "error") || contains(msg_lower, "fatal") || contains(msg_lower, "fail") {
               .level = "error"
             } else if contains(msg_lower, "warn") {
@@ -417,6 +424,14 @@ transforms:
             }
           } else if match(string!(.message), r'^\s*Container\s+[a-zA-Z0-9_-]+\s+(Healthy|Running|Started|Created|Waiting|Recreated|Recreate|Stopping|Stopped)') {
             .level = "info"
+          } else if .service == "hangar" && match(string!(.message), r'^(Job registration successful|Evaluation ID:|\d+ warnings?:|\*\s+task\s+)') {
+            if contains(downcase(string!(.message)), "warning") || contains(string!(.message), "shutdown_delay") {
+              .level = "warn"
+            } else {
+              .level = "info"
+            }
+          } else if match(string!(.message), r'^\s*</?(html|head|body|center|hr)\b') {
+            .level = "warn"
           } else if .service == "photos-sync" && starts_with(string!(.message), "Finished run:") {
             .level = "info"
           } else if .service == "google-mcp" && match(string!(.message), r'^\[(OAUTH|TOOL|GMAIL|CALENDAR|TASKS)\]') {
