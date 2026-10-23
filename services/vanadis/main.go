@@ -482,6 +482,10 @@ func (s *PostgresVanadisStore) UpdateBuildStatusMessageID(ctx context.Context, b
 
 // FormatChunkPrompt renders a structured, context-rich prompt for executing a specific Vanadis chunk.
 func FormatChunkPrompt(build VanadisBuild, chunks []VanadisChunk, activeIdx int) (string, error) {
+	return formatChunkPromptWithShareRoot(build, chunks, activeIdx, defaultShareRoot)
+}
+
+func formatChunkPromptWithShareRoot(build VanadisBuild, chunks []VanadisChunk, activeIdx int, shareRoot string) (string, error) {
 	if len(chunks) == 0 {
 		return "", errors.New("chunks slice cannot be empty")
 	}
@@ -514,6 +518,10 @@ func FormatChunkPrompt(build VanadisBuild, chunks []VanadisChunk, activeIdx int)
 	if len(active.TargetSymbols) > 0 {
 		fmt.Fprintf(&sb, "Target Symbols: %s\n", strings.Join(active.TargetSymbols, ", "))
 	}
+	spanLines, allResolved := ResolveSymbolSpans(shareRoot, activeRepo, active.TargetFiles, active.TargetSymbols)
+	if len(spanLines) > 0 {
+		fmt.Fprintf(&sb, "Target Symbol Spans:\n%s\n", strings.Join(spanLines, "\n"))
+	}
 	fmt.Fprintf(&sb, "Instructions:\n%s\n\n=== Remaining Chunks ===\n", active.Instructions)
 	if activeIdx+1 >= total {
 		sb.WriteString("(none — this is the final chunk)\n\n")
@@ -525,8 +533,10 @@ func FormatChunkPrompt(build VanadisBuild, chunks []VanadisChunk, activeIdx int)
 		sb.WriteString("\n")
 	}
 	fmt.Fprintf(&sb, "=== Mandatory Execution Contract ===\n1. Initialize a fresh scratch workspace off `origin/main`: `/share/aerial/scripts/aerial-pr.sh init %s`\n2. Implement ONLY this chunk following TDD, optimizing all design and implementation choices for the `Build Objective`, run package tests and `./scripts/verify.sh --staged`, and write `PR_DESCRIPTION.md`.\n   If any detail in chunk `Instructions` is ambiguous, underspecified, or conflicts with the `Build Objective`, the `Build Objective` takes precedence—adapt the implementation to satisfy the `Build Objective`.\n3. Inspect `Target Files` and `Target Symbols` directly rather than running broad repo-wide searches: resolve live symbol line offsets first and `view_file` ONLY those targeted `StartLine`–`EndLine` slices instead of reading entire files from line 1.\n", activeRepo)
-	if grepCmd := formatSymbolGrepCommand(active.TargetFiles, active.TargetSymbols); grepCmd != "" {
-		fmt.Fprintf(&sb, "   Run after init: `%s`\n", grepCmd)
+	if !allResolved {
+		if grepCmd := formatSymbolGrepCommand(active.TargetFiles, active.TargetSymbols); grepCmd != "" {
+			fmt.Fprintf(&sb, "   Run after init: `%s`\n", grepCmd)
+		}
 	}
 	fmt.Fprintf(&sb, "4. Before submitting, review the full `git diff` against the `Build Objective` and `Shared Build Context`: verify that the change achieves the objective in substance and integrates cleanly and idiomatically into the existing architecture without superficial workarounds, dead scaffolding, or bolted-on catch-all blocks.\n5. Submit via `/share/aerial/scripts/aerial-pr.sh submit \"$SCRATCH_DIR\" \"<commit_msg>\" --vanadis-chunk %s`\n6. Terminate turn immediately after submission.\n", active.ID)
 	return sb.String(), nil
