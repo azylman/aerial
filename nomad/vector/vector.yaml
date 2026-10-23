@@ -263,6 +263,8 @@ transforms:
               .attributes = {}
             }
             .attributes.target = parsed.target
+          } else {
+            .level = "info"
           }
         } else if .service == "homeassistant" || .service == "home-assistant" || starts_with(to_string(.service), "hassio_") {
           parsed, err = parse_regex(.message, r'^(?P<ha_timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:[.,]\d+)?)\s+(?P<severity>[A-Z]+)(?:\s+\((?P<thread>[^)]+)\))?\s+\[(?P<logger>[^\]]+)\]:?\s+(?P<msg>.*)$')
@@ -300,9 +302,11 @@ transforms:
         }
 
         # Key-value / logfmt parser (e.g. victoriametrics-mcp, Go stdlib)
-        if !exists(.level) {
+        # Guard against VRL parse_logfmt treating bare words in plain-text/JSON lines as boolean keys (word=true),
+        # which pollutes OpenObserve schemas and causes string/boolean vs Int64 Parquet compaction cast conflicts.
+        if !exists(.level) && match(string!(.message), r'^[a-zA-Z_][a-zA-Z0-9_.-]*=') && match(string!(.message), r'(?:^|\s)(?:level|lvl|severity)=[a-zA-Z]+') {
           kv, err = parse_logfmt(.message)
-          if err == null && is_object(kv) && (exists(kv.level) || exists(kv.lvl) || exists(kv.severity)) {
+          if err == null && is_object(kv) && (is_string(kv.level) || is_string(kv.lvl) || is_string(kv.severity)) {
             if is_string(kv.msg) {
               .message = string!(kv.msg)
               del(kv.msg)
