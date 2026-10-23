@@ -255,7 +255,7 @@ resolve_vanadis_chunk_id() {
     local tfile="${ANTIGRAVITY_APP_DATA_DIR:-}/brain/${ANTIGRAVITY_CONVERSATION_ID:-}/.system_generated/logs/transcript.jsonl"
     if [ -f "$tfile" ]; then
         local cid
-        cid=$(grep -E '"type":[[:space:]]*"USER_INPUT"' "$tfile" 2>/dev/null | tail -n 1 | grep -oE -- '- vanadis_chunk_id: [^\\"[:space:]]+' | tail -n 1 | awk '{print $3}' || true)
+        cid=$(grep -E '"type":[[:space:]]*"USER_INPUT"' "$tfile" 2>/dev/null | tail -n 1 | sed 's/.*<\/retrieved_memory>//' | grep -oE -- '(Chunk ID:|--vanadis-chunk(=|[[:space:]]+)|- vanadis_chunk_id:)[[:space:]]*[^\\"[:space:]]+' | tail -n 1 | sed -E 's/^(Chunk ID:|--vanadis-chunk=|--vanadis-chunk|- vanadis_chunk_id:)[[:space:]]*//' || true)
         if [ -n "$cid" ]; then echo "$cid"; return; fi
     fi
     echo ""

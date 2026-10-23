@@ -45,16 +45,15 @@ import (
 )
 
 type PromptRequest struct {
-	Prompt         string `json:"prompt"`
-	ChannelID      string `json:"channel_id"`
-	SessionID      string `json:"session_id,omitempty"`
-	Title          string `json:"title,omitempty"`
-	MessageID      string `json:"message_id,omitempty"`
-	Model          string `json:"model,omitempty"`
-	Effort         string `json:"effort,omitempty"`
-	Silent         bool   `json:"silent,omitempty"`
-	Ephemeral      *bool  `json:"ephemeral,omitempty"`
-	VanadisChunkID string `json:"vanadis_chunk_id,omitempty"`
+	Prompt    string `json:"prompt"`
+	ChannelID string `json:"channel_id"`
+	SessionID string `json:"session_id,omitempty"`
+	Title     string `json:"title,omitempty"`
+	MessageID string `json:"message_id,omitempty"`
+	Model     string `json:"model,omitempty"`
+	Effort    string `json:"effort,omitempty"`
+	Silent    bool   `json:"silent,omitempty"`
+	Ephemeral *bool  `json:"ephemeral,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {
@@ -153,11 +152,10 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			Status:     db.StatusPending,
 			Effort:     effort,
 			Metadata: db.MessageMetadata{
-				ChannelID:      channelID,
-				Ephemeral:      req.Ephemeral,
-				Model:          model,
-				Silent:         req.Silent,
-				VanadisChunkID: strings.TrimSpace(req.VanadisChunkID),
+				ChannelID: channelID,
+				Ephemeral: req.Ephemeral,
+				Model:     model,
+				Silent:    req.Silent,
 			},
 			CreatedAt: time.Now().UTC(),
 			UpdatedAt: time.Now().UTC(),

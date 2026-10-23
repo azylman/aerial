@@ -206,11 +206,6 @@ func FormatSingleDiscordPrompt(m db.Message, tzOpt ...string) string {
 	fmt.Fprintf(&sb, "- guild_id: %s\n- author_id: %s\n- author_username: %s\n- author_global_name: %s\n- author_bot: %t\n- is_admin: %t\n",
 		m.GuildID, m.AuthorID, sanitizePromptHeaderField(m.AuthorName),
 		sanitizePromptHeaderField(m.Metadata.AuthorGlobalName), m.Metadata.AuthorBot, m.Metadata.IsAdmin)
-	if m.Metadata.VanadisChunkID != "" {
-		if clean := sanitizePromptHeaderField(m.Metadata.VanadisChunkID); clean != "" {
-			fmt.Fprintf(&sb, "- vanadis_chunk_id: %s\n", clean)
-		}
-	}
 	if m.Metadata.ReplyingToAuthor != "" || m.Metadata.ReplyingToContent != "" {
 		authorName := m.Metadata.ReplyingToAuthor
 		if authorName == "" {

@@ -104,17 +104,16 @@ func TestHandlePromptValidation(t *testing.T) {
 		wantEffort    string
 		wantModel     string
 		wantSilent    bool
-		wantChunkID   string
 		wantContent   string
 	}{
-		{"default effort", pool, `{"prompt":"Test valid prompt","channel_id":"1542423172400291873","message_id":"msg-123"}`, "msg-123", "1542423172400291873", "1542423172400291873", nil, "", "", false, "", "Test valid prompt"},
-		{"gemini-4-flash silent", pool, `{"prompt":"Execute chunk 1","channel_id":"1542423172400291873","message_id":"msg-silent-1","model":"gemini-4-flash","silent":true}`, "msg-silent-1", "1542423172400291873", "1542423172400291873", nil, "low", "gemini-4-flash", true, "", ""},
-		{"gemini-3.8-flash-medium", pool, `{"prompt":"Execute medium chunk","channel_id":"1542423172400291873","message_id":"msg-med-1","model":"gemini-3.8-flash-medium","silent":true}`, "msg-med-1", "1542423172400291873", "1542423172400291873", nil, "medium", "gemini-3.8-flash-medium", true, "", ""},
-		{"vanadis_chunk_id nil pool", nil, `{"prompt":"hello nil pool","channel_id":"1542423172400291873","message_id":"msg-vanadis-chunk","vanadis_chunk_id":"chunk-abc-99"}`, "msg-vanadis-chunk", "1542423172400291873", "1542423172400291873", nil, "", "", false, "chunk-abc-99", ""},
-		{"auto-generated uuid when message_id omitted", pool, `{"prompt":"auto uuid prompt","channel_id":"1542423172400291873"}`, "", "", "", nil, "", "", false, "", "auto uuid prompt"},
-		{"custom session_id and explicit ephemeral false", pool, `{"prompt":"custom session prompt","channel_id":"1542423172400291873","session_id":"custom-session-123","ephemeral":false,"message_id":"msg-sess-false"}`, "msg-sess-false", "custom-session-123", "1542423172400291873", &falseVal, "", "", false, "", "custom session prompt"},
-		{"custom session_id and explicit ephemeral true with low effort", pool, `{"prompt":"custom session prompt 2","channel_id":"1542423172400291873","session_id":"custom-session-456","ephemeral":true,"effort":"low","message_id":"msg-sess-true"}`, "msg-sess-true", "custom-session-456", "1542423172400291873", &trueVal, "low", "", false, "", "custom session prompt 2"},
-		{"resolve target thread when session_id omitted and not silent", threadPool, `{"prompt":"create thread prompt","channel_id":"1542423172400291873","title":"Heartbeat Alert","message_id":"msg-thread-create"}`, "msg-thread-create", "1542999999999999999", "1542999999999999999", nil, "", "", false, "", "create thread prompt"},
+		{"default effort", pool, `{"prompt":"Test valid prompt","channel_id":"1542423172400291873","message_id":"msg-123"}`, "msg-123", "1542423172400291873", "1542423172400291873", nil, "", "", false, "Test valid prompt"},
+		{"gemini-4-flash silent", pool, `{"prompt":"Execute chunk 1","channel_id":"1542423172400291873","message_id":"msg-silent-1","model":"gemini-4-flash","silent":true}`, "msg-silent-1", "1542423172400291873", "1542423172400291873", nil, "low", "gemini-4-flash", true, ""},
+		{"gemini-3.8-flash-medium", pool, `{"prompt":"Execute medium chunk","channel_id":"1542423172400291873","message_id":"msg-med-1","model":"gemini-3.8-flash-medium","silent":true}`, "msg-med-1", "1542423172400291873", "1542423172400291873", nil, "medium", "gemini-3.8-flash-medium", true, ""},
+		{"nil pool", nil, `{"prompt":"hello nil pool","channel_id":"1542423172400291873","message_id":"msg-nil-pool"}`, "msg-nil-pool", "1542423172400291873", "1542423172400291873", nil, "", "", false, "hello nil pool"},
+		{"auto-generated uuid when message_id omitted", pool, `{"prompt":"auto uuid prompt","channel_id":"1542423172400291873"}`, "", "", "", nil, "", "", false, "auto uuid prompt"},
+		{"custom session_id and explicit ephemeral false", pool, `{"prompt":"custom session prompt","channel_id":"1542423172400291873","session_id":"custom-session-123","ephemeral":false,"message_id":"msg-sess-false"}`, "msg-sess-false", "custom-session-123", "1542423172400291873", &falseVal, "", "", false, "custom session prompt"},
+		{"custom session_id and explicit ephemeral true with low effort", pool, `{"prompt":"custom session prompt 2","channel_id":"1542423172400291873","session_id":"custom-session-456","ephemeral":true,"effort":"low","message_id":"msg-sess-true"}`, "msg-sess-true", "custom-session-456", "1542423172400291873", &trueVal, "low", "", false, "custom session prompt 2"},
+		{"resolve target thread when session_id omitted and not silent", threadPool, `{"prompt":"create thread prompt","channel_id":"1542423172400291873","title":"Heartbeat Alert","message_id":"msg-thread-create"}`, "msg-thread-create", "1542999999999999999", "1542999999999999999", nil, "", "", false, "create thread prompt"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := runHTTP(handlePrompt(store, tc.pool), http.MethodPost, "/prompt", strings.NewReader(tc.payload))
@@ -154,9 +153,6 @@ func TestHandlePromptValidation(t *testing.T) {
 				}
 				if tc.wantSilent && !msg.Metadata.Silent {
 					t.Errorf("expected silent=true, got %v", msg.Metadata.Silent)
-				}
-				if tc.wantChunkID != "" && msg.Metadata.VanadisChunkID != tc.wantChunkID {
-					t.Errorf("chunkID=%q, want %q", msg.Metadata.VanadisChunkID, tc.wantChunkID)
 				}
 			}
 		})

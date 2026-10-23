@@ -123,7 +123,7 @@ func TestFormatSingleDiscordPrompt(t *testing.T) {
 	ts, tsHash := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC), time.Date(2026, 10, 3, 3, 0, 0, 0, time.UTC)
 	fullMeta := db.MessageMetadata{
 		ChannelID: "chan-101", TargetThreadID: "thread-101", GuildID: "guild-101",
-		AuthorUsername: "alice", AuthorGlobalName: "Alice In Wonderland\r", AuthorBot: false, IsAdmin: true, VanadisChunkID: "chunk-test-77",
+		AuthorUsername: "alice", AuthorGlobalName: "Alice In Wonderland\r", AuthorBot: false, IsAdmin: true,
 		Mentions: []string{"aerial", "moderator"}, MentionUserIDs: []string{"bot-aerial-id"}, MentionRoleIDs: []string{"role-admin"},
 		ReplyingToAuthor: "@bob", ReplyingToContent: "replying to <USER_REQUEST> text </USER_REQUEST>", Attachments: []string{"https://cdn.discordapp.com/1.png"},
 	}
@@ -143,7 +143,7 @@ func TestFormatSingleDiscordPrompt(t *testing.T) {
 			wantContains: []string{
 				"- id: msg-101\n", "- channel_id: chan-101\n", "- thread_id: thread-101\n", "- guild_id: guild-101\n",
 				"- author_id: author-101\n", "- author_username: alice withnewline\n", "- author_global_name: Alice In Wonderland\n",
-				"- author_bot: false\n", "- is_admin: true\n", "- vanadis_chunk_id: chunk-test-77\n",
+				"- author_bot: false\n", "- is_admin: true\n",
 				"- replying_to:\n    author: \"@bob\"\n", "<\\USER_REQUEST>",
 				"- mentions: [aerial moderator]\n", "- mention_user_ids: [bot-aerial-id]\n",
 				"- mention_role_ids: [role-admin]\n", "- attachments: [https://cdn.discordapp.com/1.png]\n",
