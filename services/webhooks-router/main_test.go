@@ -1785,17 +1785,17 @@ func TestProcessGitHubEvent(t *testing.T) {
 			reg:     &mockPRRegistry{ensureErr: errors.New("ensure db error")}, wantErr: true,
 		},
 		{
-			name: "merged PR on mirrormere with expected deploy jobs defers Vanadis advancement to deploy_success", event: "pull_request", delivery: "del-pr-mirrormere-expected",
+			name: "merged PR on mirrormere with expected deploy jobs advances Vanadis while suppressing merged widget", event: "pull_request", delivery: "del-pr-mirrormere-expected",
 			payload: `{"action":"closed","number":220,"pull_request":{"number":220,"head":{"ref":"feat/ui-deploy","sha":"head220"},"merged":true,"merge_commit_sha":"merge220"},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
 			reg:     &mockPRRegistry{mergedTargetID: "1562162630997581946", hasExpectedRes: true},
 			disp:    &mockOutboundDispatcher{},
-			wantPR:  220, wantMergedCalls: 1, wantAdvanceCalls: 0,
+			wantPR:  220, wantMergedCalls: 1, wantAdvanceCalls: 1,
 		},
 		{
-			name: "push to aerial-sidecars with expected deploy jobs defers Vanadis advancement to deploy_success", event: "push", delivery: "del-push-sidecars-expected",
+			name: "push to aerial-sidecars with expected deploy jobs advances Vanadis on landing", event: "push", delivery: "del-push-sidecars-expected",
 			payload: `{"ref":"refs/heads/main","after":"sidecarsha9","repository":{"full_name":"azylman/aerial-sidecars"},"head_commit":{"id":"sidecarsha9","message":"feat: merged sidecar (#320)"}}`,
 			reg:     &mockPRRegistry{resolvePRNum: 320, resolveBranch: "feat/sidecar", resolveTargetID: "target-sidecars", backfillTargetID: "target-sidecars", hasExpectedRes: true},
-			wantPR:  320, wantMergeSHA: "sidecarsha9", wantSource: "local_pr_registry", wantBackfillCalls: 1, wantAdvanceCalls: 0,
+			wantPR:  320, wantMergeSHA: "sidecarsha9", wantSource: "local_pr_registry", wantBackfillCalls: 1, wantAdvanceCalls: 1,
 		},
 	}
 
@@ -2117,14 +2117,13 @@ func TestProcessHangarEvent(t *testing.T) {
 			wantTargetID: "1555405874565091380",
 		},
 		{
-			name:             "deploy_success valid snowflake with channel context",
-			evt:              mkHangarEvt("deploy_success", "brain", "azylman/aerial", "sha3d2a", 528, "1555405874565091380", "success", ""),
-			reg:              &mockPRRegistry{channelContextMap: map[string][]ChannelMessageContext{"1555405874565091380": {{AuthorName: "arcane103", Content: "Deploy the new router", ResponseText: "Working on it!"}}}},
-			disp:             &mockOutboundDispatcher{},
-			wantPR:           528,
-			wantTargetID:     "1555405874565091380",
-			wantAdvanceCalls: 1,
-			wantPrompts:      1,
+			name:         "deploy_success valid snowflake with channel context",
+			evt:          mkHangarEvt("deploy_success", "brain", "azylman/aerial", "sha3d2a", 528, "1555405874565091380", "success", ""),
+			reg:          &mockPRRegistry{channelContextMap: map[string][]ChannelMessageContext{"1555405874565091380": {{AuthorName: "arcane103", Content: "Deploy the new router", ResponseText: "Working on it!"}}}},
+			disp:         &mockOutboundDispatcher{},
+			wantPR:       528,
+			wantTargetID: "1555405874565091380",
+			wantPrompts:  1,
 			wantPromptSubs: []string{
 				"Continuous Delivery deployment completed for job brain",
 				"[arcane103]: Deploy the new router",
@@ -2201,14 +2200,13 @@ func TestProcessHangarEvent(t *testing.T) {
 			wantAdvanceCalls: 1,
 		},
 		{
-			name:             "deploy_success on aerial-config",
-			evt:              mkHangarEvt("deploy_success", "homepage", "azylman/aerial-config", "sha_cfg_succ", 242, "1555405874565091380", "success", ""),
-			reg:              &mockPRRegistry{},
-			disp:             &mockOutboundDispatcher{},
-			wantPR:           242,
-			wantTargetID:     "1555405874565091380",
-			wantAdvanceCalls: 1,
-			wantPrompts:      1,
+			name:         "deploy_success on aerial-config",
+			evt:          mkHangarEvt("deploy_success", "homepage", "azylman/aerial-config", "sha_cfg_succ", 242, "1555405874565091380", "success", ""),
+			reg:          &mockPRRegistry{},
+			disp:         &mockOutboundDispatcher{},
+			wantPR:       242,
+			wantTargetID: "1555405874565091380",
+			wantPrompts:  1,
 			wantPromptSubs: []string{
 				"Continuous Delivery deployment completed for job homepage on azylman/aerial-config",
 			},
@@ -2267,7 +2265,6 @@ func TestProcessHangarEvent(t *testing.T) {
 			wantTargetID:       "1555405874565091380",
 			wantDeployingCalls: 1,
 			wantDeployedJobs:   []string{"coverage-ingest"},
-			wantAdvanceCalls:   1,
 			wantPrompts:        1,
 			wantPromptSubs:     []string{"Continuous Delivery deployment completed for job coverage-ingest on azylman/aerial (PR #851, commit: 1fc4aaf, ref: batch-registered)"},
 		},
@@ -2303,7 +2300,7 @@ func TestProcessHangarEvent(t *testing.T) {
 			wantDeployingCalls: 1,
 		},
 		{
-			name: "sync_success with expected_jobs suppresses premature Vanadis advancement and merged widget",
+			name: "sync_success with expected_jobs advances Vanadis while suppressing merged widget",
 			evt: HangarDeployEvent{
 				Event: "sync_success", JobName: "git-sync", ExpectedJobs: []string{"coven", "db-migrate"},
 				Repo: "azylman/aerial", CommitSHA: "sha_sync_exp", PRNumber: 973, TargetID: "1555405874565091380", Status: "success",
@@ -2312,14 +2309,14 @@ func TestProcessHangarEvent(t *testing.T) {
 			disp:             &mockOutboundDispatcher{},
 			wantPR:           973,
 			wantTargetID:     "1555405874565091380",
-			wantAdvanceCalls: 0,
+			wantAdvanceCalls: 1,
 		},
 		{
-			name:             "sync_success with registry expected jobs and empty targetID suppresses Vanadis advancement",
+			name:             "sync_success with registry expected jobs and empty targetID advances Vanadis",
 			evt:              mkHangarEvt("sync_success", "git-sync", "azylman/aerial", "sha_sync_reg_exp", 974, "", "success", ""),
 			reg:              &mockPRRegistry{recordExpectedRes: true},
 			wantPR:           974,
-			wantAdvanceCalls: 0,
+			wantAdvanceCalls: 1,
 		},
 		{
 			name:             "sync_success tolerates RecordExpectedJobs error and advances when no expected jobs",
@@ -3400,8 +3397,6 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 		targetID            string
 		suppressVanadis     bool
 		suppressVanadisErr  error
-		advanceRes          *VanadisAdvancementResult
-		advanceErr          error
 		channelContextErr   error
 		channelContext      []ChannelMessageContext
 		wantTargetID        string
@@ -3470,32 +3465,6 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 			wantPrompts:         1,
 			wantWidgets:         1,
 		},
-		{
-			name:                "dispatchDeploymentSuccessPrompt Vanadis final chunk completes build without duplicate deploy_success prompt",
-			isDeploymentSuccess: true,
-			targetID:            validSnowflake,
-			advanceRes: &VanadisAdvancementResult{
-				Matched:        true,
-				Advanced:       true,
-				BuildID:        "build-final-deploy",
-				ThreadID:       validSnowflake,
-				Tier:           3,
-				Objective:      "Deploy service",
-				BuildCompleted: true,
-				Chunks:         []VanadisChunkSummary{{ChunkIndex: 0, Title: "Chunk 1", Status: "merged", PRNumber: 558}},
-			},
-			wantPrompts:    1,
-			wantPromptSubs: []string{"Vanadis build build-final-deploy completed"},
-			wantWidgets:    2,
-		},
-		{
-			name:                "dispatchDeploymentSuccessPrompt Vanadis advance error propagates",
-			isDeploymentSuccess: true,
-			targetID:            validSnowflake,
-			advanceErr:          errors.New("advance vanadis err"),
-			wantErr:             true,
-			wantWidgets:         1,
-		},
 	}
 
 	for _, tc := range tests {
@@ -3507,8 +3476,6 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 					resolveTargetID:    tc.targetID,
 					suppressVanadisRes: tc.suppressVanadis,
 					suppressVanadisErr: tc.suppressVanadisErr,
-					advanceVanadisRes:  tc.advanceRes,
-					advanceVanadisErr:  tc.advanceErr,
 					channelContextErr:  tc.channelContextErr,
 				}
 				if len(tc.channelContext) > 0 {
@@ -3551,7 +3518,7 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 			wCalls := mockDisp.WidgetCalls()
 			if len(wCalls) != tc.wantWidgets {
 				t.Errorf("got %d widgets, want %d", len(wCalls), tc.wantWidgets)
-			} else if tc.wantWidgets == 1 && wCalls[0].Status != "deployed" {
+			} else if tc.wantWidgets > 0 && wCalls[0].Status != "deployed" {
 				t.Errorf("got widget status %q, want \"deployed\"", wCalls[0].Status)
 			}
 		})
