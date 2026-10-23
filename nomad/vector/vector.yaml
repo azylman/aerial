@@ -320,7 +320,10 @@ transforms:
             }
             if raw_level != null {
               lvl = downcase(to_string(raw_level) ?? "")
-              if contains(lvl, "err") || contains(lvl, "fatal") || contains(lvl, "panic") || contains(lvl, "crit") {
+              msg_lower = downcase(to_string!(.message))
+              if msg_lower == "server run cancelled" || (exists(kv.error) && (to_string(kv.error) ?? "") == "context canceled" && ends_with(to_string(.service), "-mcp")) {
+                .level = "info"
+              } else if contains(lvl, "err") || contains(lvl, "fatal") || contains(lvl, "panic") || contains(lvl, "crit") {
                 .level = "error"
               } else if contains(lvl, "warn") {
                 .level = "warn"
@@ -445,7 +448,9 @@ transforms:
               }
             } else {
               msg_lower = downcase(string!(.message))
-              if match(msg_lower, r'\b(error|fatal|panic|exception)\b') {
+              if contains(msg_lower, "no connection established for request id") {
+                .level = "warn"
+              } else if match(msg_lower, r'\b(error|fatal|panic|exception)\b') {
                 .level = "error"
               } else if match(msg_lower, r'\b(warn|warning)\b') {
                 .level = "warn"
@@ -466,6 +471,8 @@ transforms:
             trimmed = strip_whitespace(string!(.message))
             if trimmed == "" || match(trimmed, r'^(GitHub MCP Server running on stdio|server run cancelled|.*Server started on stdio|.*Starting .* MCP server)') {
               .level = "info"
+            } else if match(trimmed, r'^at\s+') {
+              .level = "warn"
             }
           } else if .service == "ollama" {
             msg_lower = downcase(string!(.message))
