@@ -2097,23 +2097,15 @@ func formatVanadisBuildCompletedPrompt(res *VanadisAdvancementResult) string {
 }
 
 func (s *RouterServer) advanceVanadisChunk(ctx context.Context, repo string, prNumber int) error {
-	_, err := s.advanceVanadisChunkWithStatus(ctx, repo, prNumber, "merged")
-	return err
-}
-
-func (s *RouterServer) advanceVanadisChunkWithStatus(ctx context.Context, repo string, prNumber int, widgetStatus string) (bool, error) {
 	if s.registry == nil || prNumber <= 0 {
-		return false, nil
+		return nil
 	}
 	res, err := s.registry.AdvanceVanadisChunkByPR(ctx, repo, prNumber)
 	if err != nil {
-		return false, err
+		return err
 	}
-	if res == nil || !res.Matched {
-		return false, nil
-	}
-	if !res.Advanced {
-		return true, nil
+	if res == nil || !res.Matched || !res.Advanced {
+		return nil
 	}
 	if !res.BuildCompleted && res.NextChunkIndex >= 0 {
 		if s.riverClient != nil {
@@ -2121,25 +2113,22 @@ func (s *RouterServer) advanceVanadisChunkWithStatus(ctx context.Context, repo s
 				BuildID:    res.BuildID,
 				ChunkIndex: res.NextChunkIndex,
 			}); err != nil {
-				return true, fmt.Errorf("enqueue next vanadis chunk %d for build %s: %w", res.NextChunkIndex, res.BuildID, err)
+				return fmt.Errorf("enqueue next vanadis chunk %d for build %s: %w", res.NextChunkIndex, res.BuildID, err)
 			}
 		}
-		if widgetStatus == "" {
-			widgetStatus = "merged"
-		}
-		if err := s.SyncPRWidget(ctx, repo, prNumber, widgetStatus, "", nil); err != nil {
+		if err := s.SyncPRWidget(ctx, repo, prNumber, "merged", "", nil); err != nil {
 			log.Printf("[webhooks-router] [vanadis] warning syncing chunk advancement widget for build %s: %v", res.BuildID, err)
 		}
-		return true, nil
+		return nil
 	}
 	if res.BuildCompleted {
 		if err := s.SyncPRWidget(ctx, repo, prNumber, "completed", "", nil); err != nil {
 			log.Printf("[webhooks-router] [vanadis] warning syncing build completed widget for build %s: %v", res.BuildID, err)
 		}
 		prompt := formatVanadisBuildCompletedPrompt(res)
-		return true, s.dispatchAlertWithPrompt(ctx, res.ThreadID, "vanadis_build_completed", "", prompt)
+		return s.dispatchAlertWithPrompt(ctx, res.ThreadID, "vanadis_build_completed", "", prompt)
 	}
-	return true, nil
+	return nil
 }
 
 func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployEvent) (*HangarDeployEvent, error) {
@@ -2193,7 +2182,7 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 	}
 
 	if !IsValidDiscordSnowflake(evt.TargetID) || s.dispatcher == nil {
-		if evt.Event == "sync_success" && evt.PRNumber > 0 && !syncHasExpected {
+		if evt.Event == "sync_success" && evt.PRNumber > 0 {
 			return &evt, s.advanceVanadisChunk(ctx, evt.Repo, evt.PRNumber)
 		}
 		return &evt, nil
@@ -2240,9 +2229,11 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 		)
 		return &evt, s.dispatchAlertWithPrompt(ctx, targetID, evt.Event, dmMsg, prompt, s.vanadisPromptOpts(ctx, evt.Repo, evt.PRNumber))
 	case "sync_success":
-		if evt.PRNumber > 0 && !syncHasExpected {
-			if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber, "merged", "", nil); err != nil {
-				log.Printf("[webhooks-router] [widget] warning syncing sync_success widget: %v", err)
+		if evt.PRNumber > 0 {
+			if !syncHasExpected {
+				if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber, "merged", "", nil); err != nil {
+					log.Printf("[webhooks-router] [widget] warning syncing sync_success widget: %v", err)
+				}
 			}
 			if err := s.advanceVanadisChunk(ctx, evt.Repo, evt.PRNumber); err != nil {
 				return &evt, err
@@ -2337,19 +2328,13 @@ func (s *RouterServer) dispatchDeploymentSuccessPrompt(ctx context.Context, targ
 		return nil
 	}
 
-	var vanadisMatched bool
 	if prNum > 0 {
 		if err := s.SyncPRWidget(ctx, repo, prNum, "deployed", "", nil); err != nil {
 			log.Printf("[webhooks-router] [widget] warning syncing deploy_success widget: %v", err)
 		}
-		var err error
-		vanadisMatched, err = s.advanceVanadisChunkWithStatus(ctx, repo, prNum, "deployed")
-		if err != nil {
-			return err
-		}
 	}
 
-	if vanadisMatched || s.isVanadisPR(ctx, repo, prNum) {
+	if s.isVanadisPR(ctx, repo, prNum) {
 		log.Printf("[webhooks-router] [vanadis] suppressing mid-run deploy_success /prompt wake for %s#%d (job=%s)", repo, prNum, jobName)
 		return nil
 	}
@@ -3097,10 +3082,10 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 						if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber, "merged", "", nil); err != nil {
 							log.Printf("[webhooks-router] [widget] warning syncing pr_merged widget for %s#%d: %v", res.Repo, res.PRNumber, err)
 						}
-						if !isHangarSyncedRepo(res.Repo) {
-							if err := s.advanceVanadisChunk(ctx, res.Repo, res.PRNumber); err != nil {
-								return nil, err
-							}
+					}
+					if !isHangarSyncedRepo(res.Repo) {
+						if err := s.advanceVanadisChunk(ctx, res.Repo, res.PRNumber); err != nil {
+							return nil, err
 						}
 					}
 				} else {
@@ -3258,18 +3243,8 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 			return nil, err
 		}
 		if res.PRNumber > 0 && !isHangarSyncedRepo(res.Repo) {
-			var hasExpected bool
-			if s.registry != nil {
-				var err error
-				hasExpected, err = s.registry.HasExpectedDeployJobs(ctx, res.Repo, res.PRNumber)
-				if err != nil {
-					log.Printf("[webhooks-router] [registry] warning checking expected deploy jobs on push for %s#%d: %v", res.Repo, res.PRNumber, err)
-				}
-			}
-			if !hasExpected {
-				if err := s.advanceVanadisChunk(ctx, res.Repo, res.PRNumber); err != nil {
-					return nil, err
-				}
+			if err := s.advanceVanadisChunk(ctx, res.Repo, res.PRNumber); err != nil {
+				return nil, err
 			}
 		}
 		if s.conflictCheckDelay > 0 {
