@@ -71,6 +71,25 @@ func initTestSQLite(trimmed string) (*sql.DB, error) {
 		effort TEXT NOT NULL DEFAULT 'low'
 	);
 	CREATE INDEX IF NOT EXISTS idx_one_shot_schedules_run_at ON one_shot_schedules(run_at);
+
+	CREATE TABLE IF NOT EXISTS schedule_runs (
+		id TEXT PRIMARY KEY,
+		schedule_id TEXT NOT NULL,
+		schedule_type TEXT NOT NULL,
+		message_id TEXT NOT NULL DEFAULT '',
+		target_id TEXT NOT NULL,
+		thread_id TEXT NOT NULL,
+		title TEXT NOT NULL DEFAULT '',
+		prompt TEXT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'enqueued',
+		started_at TIMESTAMP NOT NULL,
+		completed_at TIMESTAMP,
+		duration_ms INTEGER DEFAULT 0,
+		effort TEXT NOT NULL DEFAULT 'low',
+		model TEXT NOT NULL DEFAULT '',
+		error TEXT NOT NULL DEFAULT ''
+	);
+	CREATE INDEX IF NOT EXISTS idx_schedule_runs_started_at ON schedule_runs(started_at DESC);
 	`
 	if _, err := database.Exec(schema); err != nil {
 		closeWarn(database, "database on schema error")

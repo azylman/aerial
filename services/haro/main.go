@@ -32,6 +32,9 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	}
 	defer closeWarn(database, "database on shutdown")
 
+	ticker := NewTicker(database, NewHTTPPromptDispatcher(cfg.BrainURL), 30*time.Second)
+	go ticker.Start(ctx)
+
 	toolHandler := NewToolHandler(cfg, database)
 	server := NewServer(toolHandler)
 
@@ -79,7 +82,7 @@ func main() {
 	})))
 
 	resolvedPath := ResolveConfigPath(configPath)
-	cfg, err := LoadConfigFile(resolvedPath, os.Getenv("DATABASE_URL"))
+	cfg, err := LoadConfig(resolvedPath)
 	if err != nil {
 		exitFn("Fatal configuration error: %v", err)
 		return

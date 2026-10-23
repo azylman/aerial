@@ -83,3 +83,78 @@ func TestLoadConfigFile(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadConfig_BrainURLResolution(t *testing.T) {
+	tmpDir := t.TempDir()
+	pathWithBrain := filepath.Join(tmpDir, "with_brain.yaml")
+	pathWithoutBrain := filepath.Join(tmpDir, "without_brain.yaml")
+	_ = os.WriteFile(pathWithBrain, []byte("port: '4005'\ntimezone: 'UTC'\nbrain_url: 'http://yaml.brain:8080/'\n"), 0o644)
+	_ = os.WriteFile(pathWithoutBrain, []byte("port: '4005'\ntimezone: 'UTC'\n"), 0o644)
+
+	tests := []struct {
+		name             string
+		path             string
+		envBrainInternal string
+		envBrain         string
+		envDB            string
+		wantErr          bool
+		wantBrainURL     string
+	}{
+		{
+			name:             "BRAIN_INTERNAL_URL takes precedence",
+			path:             pathWithBrain,
+			envBrainInternal: "http://internal.aerial:9000/",
+			envBrain:         "http://brain.aerial:8000/",
+			envDB:            "postgres://localhost/db",
+			wantBrainURL:     "http://internal.aerial:9000",
+		},
+		{
+			name:             "BRAIN_URL takes precedence over yaml",
+			path:             pathWithBrain,
+			envBrainInternal: "",
+			envBrain:         "http://brain.aerial:8000/",
+			envDB:            "postgres://localhost/db",
+			wantBrainURL:     "http://brain.aerial:8000",
+		},
+		{
+			name:             "yaml brain_url used when env empty",
+			path:             pathWithBrain,
+			envBrainInternal: "",
+			envBrain:         "",
+			envDB:            "postgres://localhost/db",
+			wantBrainURL:     "http://yaml.brain:8080",
+		},
+		{
+			name:             "default fallback when nothing configured",
+			path:             pathWithoutBrain,
+			envBrainInternal: "",
+			envBrain:         "",
+			envDB:            "postgres://localhost/db",
+			wantBrainURL:     "http://eri.aerial",
+		},
+		{
+			name:             "missing DB returns error via LoadConfig",
+			path:             pathWithoutBrain,
+			envBrainInternal: "",
+			envBrain:         "",
+			envDB:            "",
+			wantErr:          true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BRAIN_INTERNAL_URL", tc.envBrainInternal)
+			t.Setenv("BRAIN_URL", tc.envBrain)
+			t.Setenv("DATABASE_URL", tc.envDB)
+
+			cfg, err := LoadConfig(tc.path)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("LoadConfig() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr && cfg.BrainURL != tc.wantBrainURL {
+				t.Errorf("cfg.BrainURL = %q, want %q", cfg.BrainURL, tc.wantBrainURL)
+			}
+		})
+	}
+}
