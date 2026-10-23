@@ -120,11 +120,11 @@ Requirements:
    - Never extract pending deliveries, shipping/order statuses, or items "awaiting delivery" / "on the way".
    - Never extract temporary troubleshooting, active debugging sessions, or tasks "currently in progress" / "about to run".
    - Never extract ephemeral PR numbers, commit SHAs, branch names, coverage/LoC metrics, CI/CD deploy statuses, or Vanadis chunk IDs.
-4. Procedural Skills & Friction Guardrails (30-Day Durability & Resolved-Fix Test):
-   Extract reusable procedural workflows ("steps") and tool/retry failure guardrails ("avoid") into "procedural_candidates" ONLY when they pass the same 30-day durability test (Rule 3) and a working resolution was verified:
-   - Tool friction occurs (retries, failed commands, bad parameters) AND the turn resolved it with a generalizable workaround or procedure that will remain valid 30+ days from now.
-   - User gives durable procedural corrections or instructions on how to do a class of task correctly.
-   - An unloaded-skill routing miss occurs (assistant performed a multi-step workflow without loading the appropriate skill).
+4. Procedural Skills & Friction Guardrails (30-Day Durability & Multi-Step Workflow Test):
+   Extract reusable procedural workflows ("steps") and tool/retry failure guardrails ("avoid") into "procedural_candidates" ONLY when they pass the same 30-day durability test (Rule 3), a working resolution was verified, AND they either (a) refine an existing skill ("loaded_skill" != "" or an unloaded routing miss for an existing domain skill) or (b) define a cohesive multi-step user-facing domain workflow (>= 3 sequential steps):
+   - Single-step CLI flags (e.g., passing "-maxdepth" to "find"), metric/table names, and standalone environment conventions belong in atomic "facts" (where semantic retrieval injects them mid-turn without loading a skill), NEVER as standalone "procedural_candidates".
+   - Tool friction occurs inside a domain skill or multi-step workflow AND the turn resolved it with a generalizable procedure that will remain valid 30+ days from now.
+   - User gives durable procedural corrections or instructions on how to execute a multi-step domain workflow or existing skill.
    - Never extract transient environment outages ("command not found", missing credentials), unresolved dead-ends, ephemeral PR/commit/chunk IDs, or negative tool claims ("tool X is broken"); format "avoid" items as an imperative rule plus one clause of why.
    If a skill was loaded for this turn, set "loaded_skill" to that skill name; otherwise set it to "".
    If no procedural friction or reusable workflows are present, set "procedural_candidates": [].
