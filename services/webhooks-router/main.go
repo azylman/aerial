@@ -353,6 +353,38 @@ func (w *NomadCrashAlertWorker) Work(ctx context.Context, job *river.Job[NomadCr
 	return nil
 }
 
+// WidgetSyncArgs contains payload data for durable background processing of Discord PR widget updates.
+type WidgetSyncArgs struct {
+	Repo           string   `json:"repo"`
+	PRNumber       int      `json:"pr_number"`
+	StatusOverride string   `json:"status_override,omitempty"`
+	Banner         string   `json:"banner,omitempty"`
+	DeployingJobs  []string `json:"deploying_jobs,omitempty"`
+}
+
+func (WidgetSyncArgs) Kind() string { return "widget_sync" }
+func (WidgetSyncArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{MaxAttempts: 5}
+}
+
+// WidgetSyncWorker processes Discord PR status widget updates from River.
+type WidgetSyncWorker struct {
+	river.WorkerDefaults[WidgetSyncArgs]
+	server *RouterServer
+}
+
+func (w *WidgetSyncWorker) Work(ctx context.Context, job *river.Job[WidgetSyncArgs]) error {
+	if w.server == nil {
+		return errors.New("router server not configured on worker")
+	}
+	log.Printf("[webhooks-router] [river] processing widget sync job id=%d repo=%s pr=%d status=%s", job.ID, job.Args.Repo, job.Args.PRNumber, job.Args.StatusOverride)
+	if err := w.server.ProcessWidgetSync(ctx, job.Args); err != nil {
+		log.Printf("[webhooks-router] [river] error processing widget sync job id=%d: %v", job.ID, err)
+		return err
+	}
+	return nil
+}
+
 // VanadisExecuteChunkArgs defines the River job payload for executing a single Vanadis build chunk.
 type VanadisExecuteChunkArgs struct {
 	BuildID    string `json:"build_id" river:"unique"`
@@ -1777,13 +1809,44 @@ func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber i
 	if s == nil || s.dispatcher == nil || s.registry == nil || repo == "" || prNumber <= 0 {
 		return nil
 	}
-	repo = normalizeRepo(repo)
+	args := WidgetSyncArgs{
+		Repo:           normalizeRepo(repo),
+		PRNumber:       prNumber,
+		StatusOverride: statusOverride,
+		Banner:         banner,
+		DeployingJobs:  deployingJobs,
+	}
+	if s.riverClient != nil {
+		if err := s.insertRiverJob(ctx, args); err != nil {
+			log.Printf("[webhooks-router] [widget] error enqueuing widget sync into river: %v", err)
+			return fmt.Errorf("enqueue widget sync: %w", err)
+		}
+		return nil
+	}
+	return s.ProcessWidgetSync(ctx, args)
+}
+
+func isStaleWidgetStatusOverride(dbStatus, statusOverride string) bool {
+	return statusOverride == "" ||
+		(dbStatus == "deployed" && (statusOverride == "open" || statusOverride == "merged" || statusOverride == "deploying")) ||
+		(dbStatus == "deploying" && (statusOverride == "open" || statusOverride == "merged"))
+}
+
+func (s *RouterServer) ProcessWidgetSync(ctx context.Context, args WidgetSyncArgs) error {
+	repo := normalizeRepo(args.Repo)
+	prNumber := args.PRNumber
+	if s == nil || s.dispatcher == nil || s.registry == nil || repo == "" || prNumber <= 0 {
+		return nil
+	}
+	statusOverride := args.StatusOverride
+	banner := args.Banner
+	deployingJobs := args.DeployingJobs
 	qCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	pgReg, ok := s.registry.(*PostgresPRRegistry)
 	if !ok || pgReg == nil || pgReg.pool == nil {
-		targetID, branch, _, _, err := s.registry.ResolvePRByNumber(ctx, repo, prNumber)
+		targetID, branch, _, _, err := s.registry.ResolvePRByNumber(qCtx, repo, prNumber)
 		if err != nil {
 			log.Printf("[webhooks-router] [widget] resolve pr error: %v", err)
 		}
@@ -1807,7 +1870,7 @@ func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber i
 				},
 			},
 		}
-		_, err = s.dispatcher.DispatchWidget(ctx, widgetReq)
+		_, err = s.dispatcher.DispatchWidget(qCtx, widgetReq)
 		return err
 	}
 
@@ -1855,16 +1918,13 @@ func (s *RouterServer) syncSinglePRWidget(qCtx context.Context, pgReg *PostgresP
 		}
 		var wChunks []StatusWidgetChunk
 		for _, cs := range allChunks {
-			chunkRepo := cs.Repo
-			if chunkRepo == "" {
-				chunkRepo = "azylman/aerial"
-			}
+			chunkRepo := firstNonEmpty(cs.Repo, "azylman/aerial")
 			chunkStatus := cs.Status
 			csStartedAt := cs.StartedAt
 			csUpdatedAt := cs.UpdatedAt
 			var cJobs []string
 			if cs.PRNumber == prNumber {
-				if statusOverride != "" {
+				if !isStaleWidgetStatusOverride(cs.Status, statusOverride) {
 					if cs.Status != statusOverride {
 						csUpdatedAt = time.Now().UTC()
 						if csStartedAt.IsZero() {
@@ -1873,7 +1933,7 @@ func (s *RouterServer) syncSinglePRWidget(qCtx context.Context, pgReg *PostgresP
 					}
 					chunkStatus = statusOverride
 				}
-				if len(deployingJobs) > 0 {
+				if len(deployingJobs) > 0 && chunkStatus != "deployed" {
 					cJobs = deployingJobs
 				}
 			}
@@ -1933,16 +1993,17 @@ func (s *RouterServer) syncSinglePRWidget(qCtx context.Context, pgReg *PostgresP
 	}
 
 	finalStatus := prStatus
-	if statusOverride != "" && !(statusOverride == "merged" && (prStatus == "deploying" || prStatus == "deployed")) {
+	if !isStaleWidgetStatusOverride(prStatus, statusOverride) {
 		if prStatus != statusOverride {
 			prUpdatedAt = time.Now().UTC()
 		}
 		finalStatus = statusOverride
 	}
-	widgetTitle := title
-	if widgetTitle == "" {
-		widgetTitle = fmt.Sprintf("PR #%d", prNumber)
+	var prJobs []string
+	if finalStatus != "deployed" {
+		prJobs = deployingJobs
 	}
+	widgetTitle := firstNonEmpty(title, fmt.Sprintf("PR #%d", prNumber))
 
 	widgetReq := StatusWidgetRequest{
 		ChannelID: targetID,
@@ -1958,7 +2019,7 @@ func (s *RouterServer) syncSinglePRWidget(qCtx context.Context, pgReg *PostgresP
 				Title:         widgetTitle,
 				Status:        finalStatus,
 				PRNumber:      prNumber,
-				DeployingJobs: deployingJobs,
+				DeployingJobs: prJobs,
 				StartedAt:     prCreatedAt,
 				UpdatedAt:     prUpdatedAt,
 			},
@@ -3390,6 +3451,7 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 		river.AddWorker(workers, &HangarWebhookWorker{server: server})
 		river.AddWorker(workers, &NomadEventWorker{server: server})
 		river.AddWorker(workers, &NomadCrashAlertWorker{server: server})
+		river.AddWorker(workers, &WidgetSyncWorker{server: server})
 
 		rc, err := river.NewClient(riverpgxv5.New(dbPool), &river.Config{
 			Queues: map[string]river.QueueConfig{

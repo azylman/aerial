@@ -43,6 +43,7 @@ type mockRiverInserter struct {
 	insertedNomadJobs      []NomadEventArgs
 	insertedCrashAlertJobs []NomadCrashAlertArgs
 	insertedVanadisJobs    []VanadisExecuteChunkArgs
+	insertedWidgetSyncJobs []WidgetSyncArgs
 	insertedOpts           []*river.InsertOpts
 	skipDuplicate          bool
 	err                    error
@@ -66,6 +67,8 @@ func (m *mockRiverInserter) Insert(ctx context.Context, args river.JobArgs, opts
 		m.insertedCrashAlertJobs = append(m.insertedCrashAlertJobs, a)
 	case VanadisExecuteChunkArgs:
 		m.insertedVanadisJobs = append(m.insertedVanadisJobs, a)
+	case WidgetSyncArgs:
+		m.insertedWidgetSyncJobs = append(m.insertedWidgetSyncJobs, a)
 	}
 	return &rivertype.JobInsertResult{
 		Job:                      &rivertype.JobRow{ID: 1},
@@ -3680,6 +3683,9 @@ func TestRiverWorkers(t *testing.T) {
 		{name: "NomadCrashAlertWorker valid job", workerType: "crash"},
 		{name: "NomadCrashAlertWorker nil server error", workerType: "crash", nilServer: true, wantErr: true},
 		{name: "NomadCrashAlertWorker downstream prompt error", workerType: "crash", downstreamErr: true, wantErr: true},
+		{name: "WidgetSyncWorker valid job", workerType: "widget"},
+		{name: "WidgetSyncWorker nil server error", workerType: "widget", nilServer: true, wantErr: true},
+		{name: "WidgetSyncWorker downstream dispatch error", workerType: "widget", downstreamErr: true, wantErr: true},
 	}
 
 	for _, tc := range tests {
@@ -3691,10 +3697,13 @@ func TestRiverWorkers(t *testing.T) {
 				deployedMergeSHA: "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092",
 				deployedRepo:     "azylman/aerial",
 				deployedUpdated:  true,
+				resolveTargetID:  "1555405874565091380",
+				resolveBranch:    "feat/widget",
 			}
 			mockDisp := &mockOutboundDispatcher{}
 			if tc.downstreamErr {
 				mockDisp.promptErr = errors.New("503 downstream failure")
+				mockDisp.widgetErr = errors.New("503 downstream failure")
 			}
 			srv := newTestRouter(Config{
 				NomadAddr:       nomadServer.URL,
@@ -3765,6 +3774,20 @@ func TestRiverWorkers(t *testing.T) {
 					},
 				}
 				err = w.Work(ctx, job)
+			case "widget":
+				w := &WidgetSyncWorker{server: srv}
+				if tc.nilServer {
+					w.server = nil
+				}
+				job := &river.Job[WidgetSyncArgs]{
+					JobRow: &rivertype.JobRow{ID: 501},
+					Args: WidgetSyncArgs{
+						Repo:           "azylman/aerial",
+						PRNumber:       552,
+						StatusOverride: "open",
+					},
+				}
+				err = w.Work(ctx, job)
 			}
 
 			if (err != nil) != tc.wantErr {
@@ -3811,6 +3834,12 @@ func TestRiverJobArgsAndUniqueOpts(t *testing.T) {
 			wantKind:     "nomad_crash_alert",
 			wantByArgs:   true,
 			wantByPeriod: 15 * time.Minute,
+		},
+		{
+			name:         "WidgetSyncArgs",
+			args:         WidgetSyncArgs{Repo: "azylman/aerial", PRNumber: 101},
+			wantKind:     "widget_sync",
+			wantAttempts: 5,
 		},
 		{
 			name:         "VanadisExecuteChunkArgs",
@@ -5393,8 +5422,11 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 		name           string
 		useNilServer   bool
 		useMockReg     bool
+		useInserter    bool
+		inserterErr    error
 		mockTargetID   string
 		mockBranch     string
+		prDBStatus     string
 		repo           string
 		prNumber       int
 		statusOverride string
@@ -5407,6 +5439,7 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 		prQueryErr     error
 		wantErr        bool
 		wantDispatched bool
+		wantQueued     int
 		wantWidgetID   string
 		wantStatus     string
 		wantBanner     string
@@ -5428,6 +5461,14 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 			name:     "prNumber <= 0 returns clean nil",
 			repo:     "azylman/aerial",
 			prNumber: 0,
+		},
+		{
+			name: "riverClient configured queues WidgetSyncArgs without inline HTTP dispatch", useMockReg: true, useInserter: true,
+			mockTargetID: "1555405874565091380", mockBranch: "feat/queued", repo: "aerial", prNumber: 101, statusOverride: "open", wantQueued: 1,
+		},
+		{
+			name: "riverClient insert error returns error", useMockReg: true, useInserter: true,
+			inserterErr: errors.New("db insert failure"), repo: "azylman/aerial", prNumber: 101, statusOverride: "open", wantErr: true,
 		},
 		{
 			name:           "non-Postgres registry fallback path",
@@ -5461,6 +5502,16 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 			wantStatus:     "merged",
 			wantChannel:    "1555405874565091380",
 			wantChunks:     1,
+		},
+		{
+			name: "Postgres standalone PR ignores stale deploying override when already deployed", prDBStatus: "deployed",
+			repo: "azylman/aerial", prNumber: 101, statusOverride: "deploying", deployingJobs: []string{"job-a"},
+			wantDispatched: true, wantWidgetID: "pr-azylman/aerial-101", wantStatus: "deployed", wantChannel: "1555405874565091380", wantChunks: 1,
+		},
+		{
+			name: "Postgres standalone PR ignores stale merged override when already deploying", prDBStatus: "deploying",
+			repo: "azylman/aerial", prNumber: 101, statusOverride: "merged",
+			wantDispatched: true, wantWidgetID: "pr-azylman/aerial-101", wantStatus: "deploying", wantChannel: "1555405874565091380", wantChunks: 1,
 		},
 		{
 			name:           "Postgres Vanadis chunk match with mock pool and older PR sweep",
@@ -5545,6 +5596,9 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 				if err := nilSrv.SyncPRWidget(ctx, tc.repo, tc.prNumber, tc.statusOverride, tc.banner, tc.deployingJobs); err != nil {
 					t.Fatalf("SyncPRWidget nil server err = %v", err)
 				}
+				if err := nilSrv.ProcessWidgetSync(ctx, WidgetSyncArgs{Repo: tc.repo, PRNumber: tc.prNumber}); err != nil {
+					t.Fatalf("ProcessWidgetSync nil server err = %v", err)
+				}
 				return
 			}
 
@@ -5554,9 +5608,17 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 					resolveBranch:   tc.mockBranch,
 				}
 				srv := newTestRouter(Config{}, nil, reg, mockDisp)
+				var inserter *mockRiverInserter
+				if tc.useInserter {
+					inserter = &mockRiverInserter{err: tc.inserterErr}
+					srv.SetRiverClient(inserter)
+				}
 				err := srv.SyncPRWidget(ctx, tc.repo, tc.prNumber, tc.statusOverride, tc.banner, tc.deployingJobs)
 				if (err != nil) != tc.wantErr {
 					t.Fatalf("SyncPRWidget fallback err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if tc.wantQueued > 0 && (inserter == nil || len(inserter.insertedWidgetSyncJobs) != tc.wantQueued) {
+					t.Fatalf("expected %d queued widget sync jobs, got %+v", tc.wantQueued, inserter)
 				}
 				if tc.wantDispatched {
 					calls := mockDisp.WidgetCalls()
@@ -5567,6 +5629,8 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 					if last.ID != tc.wantWidgetID || last.Status != tc.wantStatus || last.ChannelID != tc.wantChannel {
 						t.Errorf("unexpected widget request: %+v", last)
 					}
+				} else if len(mockDisp.WidgetCalls()) != 0 {
+					t.Errorf("expected 0 dispatched widget calls, got %d", len(mockDisp.WidgetCalls()))
 				}
 				return
 			}
@@ -5599,7 +5663,11 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 						return &mockVanadisPgxRow{scanFn: func(dest ...any) error {
 							*dest[0].(*string) = "1555405874565091380"
 							*dest[1].(*string) = "feat: awesome feature"
-							*dest[2].(*string) = "open"
+							dbStat := tc.prDBStatus
+							if dbStat == "" {
+								dbStat = "open"
+							}
+							*dest[2].(*string) = dbStat
 							*dest[3].(*string) = "old-msg-id"
 							if len(dest) > 4 {
 								*dest[4].(*time.Time) = prStart
