@@ -509,6 +509,11 @@ func TestSchedulesEndpoints(t *testing.T) {
 	_ = store.CreateOneShotSchedule(context.Background(), db.OneShotSchedule{
 		ID: "once-1", ThreadID: "thread-456", Prompt: "Reminder with secret key github_pat_1234567890abcdef", RunAt: now.Add(30 * time.Minute), CreatedAt: now,
 	})
+	_ = store.CreateHeartbeatSchedule(context.Background(), db.HeartbeatSchedule{
+		ID: "hb-1", TargetID: "chan-789", TitlePrefix: "DB Watch", CronExpr: "*/5 * * * *",
+		Prompt: "Heartbeat check secret ghp_secretToken1234567890", Timezone: "UTC", Effort: "low",
+		NextRunAt: now.Add(15 * time.Minute), Enabled: true, CreatedAt: now,
+	})
 	store.SeedScheduleRun(db.ScheduleRun{
 		ID: "run-1", ScheduleID: "cron-1", ScheduleType: "cron", MessageID: "msg-1", TargetID: "chan-123", ThreadID: "th-1",
 		Title: "Morning Brief", Prompt: "Check status with secret token ghp_secretToken1234567890", Status: "completed", StartedAt: now.Add(-2 * time.Hour), DurationMs: 4500,
@@ -528,12 +533,16 @@ func TestSchedulesEndpoints(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &schedResp); err != nil {
 		t.Fatalf("Failed to parse /schedules JSON: %v", err)
 	}
-	if schedResp.Status != "ok" || schedResp.Summary.TotalActive != 2 || len(schedResp.Crons) != 1 || len(schedResp.OneShots) != 1 {
+	if schedResp.Status != "ok" || schedResp.Summary.TotalActive != 3 || len(schedResp.Crons) != 1 || len(schedResp.Heartbeats) != 1 || len(schedResp.OneShots) != 1 {
 		t.Fatalf("Unexpected /schedules response: %+v", schedResp)
 	}
 	cronItem := schedResp.Crons[0]
 	if cronItem.ID != "cron-1" || cronItem.CronDescription != "Weekdays (Mon–Fri) at 09:00" || strings.Contains(cronItem.Prompt, "ghp_secretToken1234567890") || !strings.Contains(cronItem.Prompt, "[REDACTED]") {
 		t.Errorf("Unexpected cron item: %+v", cronItem)
+	}
+	hbItem := schedResp.Heartbeats[0]
+	if hbItem.ID != "hb-1" || hbItem.Effort != "low" || hbItem.CronDescription != "Every 5 minutes" || strings.Contains(hbItem.Prompt, "ghp_secretToken1234567890") || !strings.Contains(hbItem.Prompt, "[REDACTED]") {
+		t.Errorf("Unexpected heartbeat item: %+v", hbItem)
 	}
 	oneShotItem := schedResp.OneShots[0]
 	if oneShotItem.ID != "once-1" || strings.Contains(oneShotItem.Prompt, "github_pat_1234567890abcdef") {
@@ -545,8 +554,8 @@ func TestSchedulesEndpoints(t *testing.T) {
 	wCached := runHTTP(schedulesHandler, http.MethodGet, "/schedules", nil)
 	var cachedResp SchedulesResponse
 	_ = json.Unmarshal(wCached.Body.Bytes(), &cachedResp)
-	if len(cachedResp.Crons) != 1 {
-		t.Errorf("Expected cached 1 cron schedule within 5s TTL, got %d", len(cachedResp.Crons))
+	if len(cachedResp.Crons) != 1 || len(cachedResp.Heartbeats) != 1 {
+		t.Errorf("Expected cached 1 cron and 1 heartbeat schedule within 5s TTL, got %d crons, %d heartbeats", len(cachedResp.Crons), len(cachedResp.Heartbeats))
 	}
 
 	// GET /schedules/runs
@@ -589,6 +598,8 @@ func TestSchedulesEndpoints(t *testing.T) {
 	_ = closedStore.Close()
 	storeCronErr := dbtest.NewFakeStore()
 	storeCronErr.FailNext("GetAllCronSchedules", errors.New("cron query forced error"))
+	storeHeartbeatErr := dbtest.NewFakeStore()
+	storeHeartbeatErr.FailNext("GetAllHeartbeatSchedules", errors.New("heartbeat query forced error"))
 	storeOneShotErr := dbtest.NewFakeStore()
 	storeOneShotErr.FailNext("GetAllOneShotSchedules", errors.New("oneshot query forced error"))
 
@@ -601,6 +612,7 @@ func TestSchedulesEndpoints(t *testing.T) {
 		{"schedules closed DB", handleSchedules(closedStore), "/schedules", http.StatusInternalServerError},
 		{"schedules nil store", handleSchedules(nil), "/schedules", http.StatusInternalServerError},
 		{"schedules cron err", handleSchedules(storeCronErr), "/schedules", http.StatusInternalServerError},
+		{"schedules heartbeat err", handleSchedules(storeHeartbeatErr), "/schedules", http.StatusInternalServerError},
 		{"schedules oneshot err", handleSchedules(storeOneShotErr), "/schedules", http.StatusInternalServerError},
 		{"runs closed DB", handleScheduleRuns(closedStore), "/schedules/runs", http.StatusInternalServerError},
 		{"runs nil store", handleScheduleRuns(nil), "/schedules/runs", http.StatusInternalServerError},

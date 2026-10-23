@@ -35,6 +35,7 @@ func assertStoreUnavailable(t *testing.T, s db.Store) {
 	requireErr(t, s.CreateOneShotSchedule(ctx, db.OneShotSchedule{}), "CreateOneShotSchedule")
 	requireErr(t, c1(s.GetAllOneShotSchedules(ctx, "t")), "GetAllOneShotSchedules")
 	requireErr(t, c1(s.GetAllCronSchedules(ctx, "t")), "GetAllCronSchedules")
+	requireErr(t, c1(s.GetAllHeartbeatSchedules(ctx, "t")), "GetAllHeartbeatSchedules")
 	requireErr(t, c2(s.GetScheduleRunsPaginated(ctx, 10, 0, "", "")), "GetScheduleRunsPaginated")
 	requireErr(t, c1(s.GetScheduleSummaryMetrics(ctx)), "GetScheduleSummaryMetrics")
 	requireErr(t, s.InsertMessage(ctx, db.Message{}), "InsertMessage")
@@ -259,6 +260,13 @@ func TestFakeStoreScheduleOperations(t *testing.T) {
 	}
 	_, _ = s.GetAllCronSchedules(ctx, "")
 
+	_ = s.CreateHeartbeatSchedule(ctx, db.HeartbeatSchedule{ID: "hb-1", TargetID: "t-1", CronExpr: "*/10 * * * *", Enabled: true, NextRunAt: now.Add(-30 * time.Second)})
+	_ = s.CreateHeartbeatSchedule(ctx, db.HeartbeatSchedule{ID: "hb-2", TargetID: "t-2", CronExpr: "0 * * * *", Enabled: false, NextRunAt: now.Add(time.Hour)})
+	if allHBs, _ := s.GetAllHeartbeatSchedules(ctx, "t-1"); len(allHBs) != 1 {
+		t.Errorf("GetAllHeartbeatSchedules = %d, want 1", len(allHBs))
+	}
+	_, _ = s.GetAllHeartbeatSchedules(ctx, "")
+
 	s.SeedScheduleRun(db.ScheduleRun{ID: "run-1", ScheduleID: "cron-1", ScheduleType: "cron", Status: "enqueued", StartedAt: now.Add(-2 * time.Hour)})
 	s.SeedScheduleRun(db.ScheduleRun{ID: "run-2", ScheduleID: "cron-1", ScheduleType: "cron", Status: "completed", StartedAt: now.Add(-1 * time.Hour), DurationMs: 500})
 	s.SeedScheduleRun(db.ScheduleRun{ID: "run-3", ScheduleID: "cron-3", ScheduleType: "cron", Status: "running", StartedAt: now.Add(-30 * time.Minute)})
@@ -273,7 +281,7 @@ func TestFakeStoreScheduleOperations(t *testing.T) {
 		t.Errorf("expected nil runs for large offset, got %+v", runsLarge)
 	}
 
-	if metrics, err := s.GetScheduleSummaryMetrics(ctx); err != nil || metrics.CronCount != 2 || metrics.OneShotCount != 2 || metrics.TotalRuns24h != 3 {
+	if metrics, err := s.GetScheduleSummaryMetrics(ctx); err != nil || metrics.CronCount != 2 || metrics.HeartbeatCount != 1 || metrics.OneShotCount != 2 || metrics.TotalActive != 5 || metrics.TotalRuns24h != 3 {
 		t.Errorf("GetScheduleSummaryMetrics = %+v, %v", metrics, err)
 	}
 }

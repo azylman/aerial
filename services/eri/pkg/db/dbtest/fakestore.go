@@ -183,9 +183,10 @@ type FakeStore struct {
 	sessions        map[string]*db.SessionInfo
 	threadSummaries map[string]threadSummaryRecord
 
-	oneShots map[string]*db.OneShotSchedule
-	crons    map[string]*db.CronSchedule
-	runs     map[string]*db.ScheduleRun
+	oneShots   map[string]*db.OneShotSchedule
+	crons      map[string]*db.CronSchedule
+	heartbeats map[string]*db.HeartbeatSchedule
+	runs       map[string]*db.ScheduleRun
 
 	sessionSummaries map[string]*db.SessionSummary
 	transcriptSteps  map[string][]db.TranscriptStep
@@ -199,7 +200,7 @@ type FakeStore struct {
 func NewFakeStore() *FakeStore {
 	f := &FakeStore{failNext: make(map[string]error), messages: make(map[string]*db.Message), messageOrder: make([]string, 0)}
 	f.sessions, f.threadSummaries = make(map[string]*db.SessionInfo), make(map[string]threadSummaryRecord)
-	f.oneShots, f.crons, f.runs = make(map[string]*db.OneShotSchedule), make(map[string]*db.CronSchedule), make(map[string]*db.ScheduleRun)
+	f.oneShots, f.crons, f.heartbeats, f.runs = make(map[string]*db.OneShotSchedule), make(map[string]*db.CronSchedule), make(map[string]*db.HeartbeatSchedule), make(map[string]*db.ScheduleRun)
 	f.sessionSummaries, f.transcriptSteps = make(map[string]*db.SessionSummary), make(map[string][]db.TranscriptStep)
 	f.prRecords, f.vanadisBuilds, f.vanadisChunks = make(map[string]*db.PRRecord), make(map[string]*db.VanadisBuild), make(map[string]*db.VanadisChunk)
 	return f
@@ -691,6 +692,31 @@ func (f *FakeStore) GetAllCronSchedules(ctx context.Context, targetID string) ([
 	})
 }
 
+// CreateHeartbeatSchedule creates or updates a heartbeat schedule in the fake store.
+func (f *FakeStore) CreateHeartbeatSchedule(ctx context.Context, h db.HeartbeatSchedule) error {
+	return f.withLockErr("CreateHeartbeatSchedule", func() error {
+		if h.CreatedAt.IsZero() {
+			h.CreatedAt = time.Now().UTC()
+		}
+		if h.Effort == "" {
+			h.Effort = "low"
+		}
+		if h.Timezone == "" {
+			h.Timezone = "UTC"
+		}
+		f.heartbeats[h.ID] = clonePtr(&h)
+		return nil
+	})
+}
+
+func (f *FakeStore) GetAllHeartbeatSchedules(ctx context.Context, targetID string) ([]db.HeartbeatSchedule, error) {
+	return withFakeLock(f, "GetAllHeartbeatSchedules", func() ([]db.HeartbeatSchedule, error) {
+		results := mapValuesFiltered(f.heartbeats, func(h *db.HeartbeatSchedule) bool { return targetID == "" || h.TargetID == targetID })
+		sort.Slice(results, func(i, j int) bool { return results[i].CreatedAt.Before(results[j].CreatedAt) })
+		return results, nil
+	})
+}
+
 // SeedScheduleRun seeds a schedule run into the in-memory fake store for testing.
 func (f *FakeStore) SeedScheduleRun(run db.ScheduleRun) {
 	f.withLock(func() {
@@ -736,12 +762,19 @@ func (f *FakeStore) GetScheduleSummaryMetrics(ctx context.Context) (db.ScheduleS
 				updateNextRun(&m.NextRunAt, c.NextRunAt)
 			}
 		}
+		for _, h := range f.heartbeats {
+			if h != nil && h.Enabled {
+				m.HeartbeatCount++
+				updateNextRun(&m.NextRunAt, h.NextRunAt)
+			}
+		}
 		for _, s := range f.oneShots {
 			if s != nil {
 				updateNextRun(&m.NextRunAt, s.RunAt)
 			}
 		}
-		m.OneShotCount, m.TotalActive = len(f.oneShots), m.CronCount+len(f.oneShots)
+		m.OneShotCount = len(f.oneShots)
+		m.TotalActive = m.CronCount + m.HeartbeatCount + m.OneShotCount
 
 		cutoff24h := time.Now().UTC().Add(-24 * time.Hour)
 		var completedRuns int

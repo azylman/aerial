@@ -817,6 +817,21 @@ type CronScheduleWithDesc struct {
 	CreatedAt       time.Time `json:"created_at"`
 }
 
+type HeartbeatScheduleWithDesc struct {
+	ID              string    `json:"id"`
+	TargetID        string    `json:"target_id,omitempty"`
+	ChannelID       string    `json:"channel_id"`
+	TitlePrefix     string    `json:"title_prefix"`
+	CronExpr        string    `json:"cron_expr"`
+	CronDescription string    `json:"cron_description"`
+	Prompt          string    `json:"prompt"`
+	Timezone        string    `json:"timezone"`
+	Effort          string    `json:"effort,omitempty"`
+	NextRunAt       time.Time `json:"next_run_at"`
+	Enabled         bool      `json:"enabled"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
 type OneShotScheduleJSON struct {
 	ID        string    `json:"id"`
 	ThreadID  string    `json:"thread_id"`
@@ -826,11 +841,12 @@ type OneShotScheduleJSON struct {
 }
 
 type SchedulesResponse struct {
-	Status     string                    `json:"status"`
-	SystemTime time.Time                 `json:"system_time"`
-	Summary    db.ScheduleSummaryMetrics `json:"summary"`
-	Crons      []CronScheduleWithDesc    `json:"crons"`
-	OneShots   []OneShotScheduleJSON     `json:"one_shots"`
+	Status     string                      `json:"status"`
+	SystemTime time.Time                   `json:"system_time"`
+	Summary    db.ScheduleSummaryMetrics   `json:"summary"`
+	Crons      []CronScheduleWithDesc      `json:"crons"`
+	Heartbeats []HeartbeatScheduleWithDesc `json:"heartbeats"`
+	OneShots   []OneShotScheduleJSON       `json:"one_shots"`
 }
 
 type ScheduleRunsResponse struct {
@@ -842,11 +858,12 @@ type ScheduleRunsResponse struct {
 }
 
 type schedulesCache struct {
-	mu        sync.Mutex
-	expiresAt time.Time
-	summary   db.ScheduleSummaryMetrics
-	crons     []CronScheduleWithDesc
-	oneShots  []OneShotScheduleJSON
+	mu         sync.Mutex
+	expiresAt  time.Time
+	summary    db.ScheduleSummaryMetrics
+	crons      []CronScheduleWithDesc
+	heartbeats []HeartbeatScheduleWithDesc
+	oneShots   []OneShotScheduleJSON
 }
 
 func handleSchedules(store db.Store) http.HandlerFunc {
@@ -868,6 +885,7 @@ func handleSchedules(store db.Store) http.HandlerFunc {
 				SystemTime: now,
 				Summary:    cache.summary,
 				Crons:      cache.crons,
+				Heartbeats: cache.heartbeats,
 				OneShots:   cache.oneShots,
 			}
 			setNoCacheJSONHeaders(w)
@@ -887,42 +905,25 @@ func handleSchedules(store db.Store) http.HandlerFunc {
 			return
 		}
 
+		rawHeartbeats, err := store.GetAllHeartbeatSchedules(r.Context(), "")
+		if err != nil {
+			writeStoreErr(w, "heartbeat schedules", err)
+			return
+		}
+
 		rawOneShots, err := store.GetAllOneShotSchedules(r.Context(), "")
 		if err != nil {
 			writeStoreErr(w, "one-shot schedules", err)
 			return
 		}
 
-		crons := make([]CronScheduleWithDesc, 0, len(rawCrons))
-		for _, c := range rawCrons {
-			crons = append(crons, CronScheduleWithDesc{
-				ID:              c.ID,
-				TargetID:        c.TargetID,
-				ChannelID:       c.TargetID,
-				TitlePrefix:     sanitizer.SanitizeString(c.TitlePrefix),
-				CronExpr:        c.CronExpr,
-				CronDescription: FormatCronDescription(c.CronExpr),
-				Prompt:          sanitizer.SanitizeString(c.Prompt),
-				Timezone:        c.Timezone,
-				NextRunAt:       c.NextRunAt,
-				Enabled:         c.Enabled,
-				CreatedAt:       c.CreatedAt,
-			})
-		}
-
-		oneShots := make([]OneShotScheduleJSON, 0, len(rawOneShots))
-		for _, s := range rawOneShots {
-			oneShots = append(oneShots, OneShotScheduleJSON{
-				ID:        s.ID,
-				ThreadID:  s.ThreadID,
-				Prompt:    sanitizer.SanitizeString(s.Prompt),
-				RunAt:     s.RunAt,
-				CreatedAt: s.CreatedAt,
-			})
-		}
+		crons := FormatCronSchedulesWithDesc(rawCrons)
+		heartbeats := FormatHeartbeatSchedulesWithDesc(rawHeartbeats)
+		oneShots := FormatOneShotSchedulesJSON(rawOneShots)
 
 		cache.summary = summary
 		cache.crons = crons
+		cache.heartbeats = heartbeats
 		cache.oneShots = oneShots
 		cache.expiresAt = now.Add(5 * time.Second)
 
@@ -931,6 +932,7 @@ func handleSchedules(store db.Store) http.HandlerFunc {
 			SystemTime: now,
 			Summary:    summary,
 			Crons:      crons,
+			Heartbeats: heartbeats,
 			OneShots:   oneShots,
 		}
 

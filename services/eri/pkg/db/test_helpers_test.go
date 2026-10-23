@@ -36,6 +36,7 @@ func assertStoreUnavailable(t *testing.T, s Store) {
 	requireErr(t, s.CreateOneShotSchedule(ctx, OneShotSchedule{}), "CreateOneShotSchedule")
 	requireErr(t, c1(s.GetAllOneShotSchedules(ctx, "t")), "GetAllOneShotSchedules")
 	requireErr(t, c1(s.GetAllCronSchedules(ctx, "t")), "GetAllCronSchedules")
+	requireErr(t, c1(s.GetAllHeartbeatSchedules(ctx, "t")), "GetAllHeartbeatSchedules")
 	requireErr(t, c2(s.GetScheduleRunsPaginated(ctx, 10, 0, "", "")), "GetScheduleRunsPaginated")
 	requireErr(t, c1(s.GetScheduleSummaryMetrics(ctx)), "GetScheduleSummaryMetrics")
 	requireErr(t, s.InsertMessage(ctx, Message{}), "InsertMessage")

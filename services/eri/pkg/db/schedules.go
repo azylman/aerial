@@ -31,6 +31,19 @@ type CronSchedule struct {
 	Effort      string    `json:"effort,omitempty"`
 }
 
+type HeartbeatSchedule struct {
+	ID          string    `json:"id"`
+	TargetID    string    `json:"target_id"`
+	TitlePrefix string    `json:"title_prefix"`
+	CronExpr    string    `json:"cron_expr"`
+	Prompt      string    `json:"prompt"`
+	Timezone    string    `json:"timezone"`
+	Effort      string    `json:"effort"`
+	NextRunAt   time.Time `json:"next_run_at"`
+	Enabled     bool      `json:"enabled"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
 type ScheduleRun struct {
 	ID           string     `json:"id"`
 	ScheduleID   string     `json:"schedule_id"`
@@ -52,6 +65,7 @@ type ScheduleRun struct {
 type ScheduleSummaryMetrics struct {
 	TotalActive    int        `json:"total_active"`
 	CronCount      int        `json:"cron_count"`
+	HeartbeatCount int        `json:"heartbeat_count"`
 	OneShotCount   int        `json:"one_shot_count"`
 	TotalRuns24h   int        `json:"total_runs_24h"`
 	NextRunAt      *time.Time `json:"next_run_at"`
@@ -152,6 +166,44 @@ func (s *SQLStore) GetAllCronSchedules(ctx context.Context, targetID string) ([]
 	return s.queryCronSchedules(ctx, "ORDER BY created_at ASC")
 }
 
+func scanHeartbeatRows(rows *sql.Rows) ([]HeartbeatSchedule, error) {
+	var results []HeartbeatSchedule
+	for rows.Next() {
+		var h HeartbeatSchedule
+		if err := rows.Scan(&h.ID, &h.TargetID, &h.TitlePrefix, &h.CronExpr, &h.Prompt, &h.Timezone, &h.Effort, &h.NextRunAt, &h.Enabled, &h.CreatedAt); err != nil {
+			return nil, err
+		}
+		results = append(results, h)
+	}
+	return results, rows.Err()
+}
+
+func (s *SQLStore) queryHeartbeatSchedules(ctx context.Context, suffixSQL string, args ...any) ([]HeartbeatSchedule, error) {
+	if err := s.checkDB(); err != nil {
+		return nil, err
+	}
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := "SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, COALESCE(NULLIF(effort, ''), 'low'), next_run_at, enabled, created_at FROM heartbeat_schedules WHERE enabled = TRUE"
+	if suffixSQL != "" {
+		query += " " + suffixSQL
+	}
+	rows, err := s.db.QueryContext(queryCtx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanHeartbeatRows(rows)
+}
+
+func (s *SQLStore) GetAllHeartbeatSchedules(ctx context.Context, targetID string) ([]HeartbeatSchedule, error) {
+	if targetID != "" {
+		return s.queryHeartbeatSchedules(ctx, "AND target_id = $1 ORDER BY created_at ASC", targetID)
+	}
+	return s.queryHeartbeatSchedules(ctx, "ORDER BY created_at ASC")
+}
+
 func (s *SQLStore) GetScheduleRunsPaginated(ctx context.Context, limit, offset int, scheduleID, status string) ([]ScheduleRun, int, error) {
 	if err := s.checkDB(); err != nil {
 		return nil, 0, err
@@ -213,20 +265,29 @@ func (s *SQLStore) GetScheduleSummaryMetrics(ctx context.Context) (ScheduleSumma
 	if err := s.db.QueryRowContext(queryCtx, "SELECT COUNT(*) FROM cron_schedules WHERE enabled = TRUE").Scan(&metrics.CronCount); err != nil {
 		return metrics, fmt.Errorf("failed to count cron schedules: %w", err)
 	}
+	if err := s.db.QueryRowContext(queryCtx, "SELECT COUNT(*) FROM heartbeat_schedules WHERE enabled = TRUE").Scan(&metrics.HeartbeatCount); err != nil {
+		return metrics, fmt.Errorf("failed to count heartbeat schedules: %w", err)
+	}
 	if err := s.db.QueryRowContext(queryCtx, "SELECT COUNT(*) FROM one_shot_schedules").Scan(&metrics.OneShotCount); err != nil {
 		return metrics, fmt.Errorf("failed to count one-shot schedules: %w", err)
 	}
-	metrics.TotalActive = metrics.CronCount + metrics.OneShotCount
+	metrics.TotalActive = metrics.CronCount + metrics.HeartbeatCount + metrics.OneShotCount
 
-	var cronNext, oneShotNext sql.NullTime
+	var cronNext, heartbeatNext, oneShotNext sql.NullTime
 	if err := s.db.QueryRowContext(queryCtx, "SELECT next_run_at FROM cron_schedules WHERE enabled = TRUE ORDER BY next_run_at ASC LIMIT 1").Scan(&cronNext); err != nil && err != sql.ErrNoRows {
 		return metrics, fmt.Errorf("failed to query next cron run: %w", err)
+	}
+	if err := s.db.QueryRowContext(queryCtx, "SELECT next_run_at FROM heartbeat_schedules WHERE enabled = TRUE ORDER BY next_run_at ASC LIMIT 1").Scan(&heartbeatNext); err != nil && err != sql.ErrNoRows {
+		return metrics, fmt.Errorf("failed to query next heartbeat run: %w", err)
 	}
 	if err := s.db.QueryRowContext(queryCtx, "SELECT run_at FROM one_shot_schedules ORDER BY run_at ASC LIMIT 1").Scan(&oneShotNext); err != nil && err != sql.ErrNoRows {
 		return metrics, fmt.Errorf("failed to query next one-shot run: %w", err)
 	}
 	if cronNext.Valid {
 		metrics.NextRunAt = &cronNext.Time
+	}
+	if heartbeatNext.Valid && (metrics.NextRunAt == nil || heartbeatNext.Time.Before(*metrics.NextRunAt)) {
+		metrics.NextRunAt = &heartbeatNext.Time
 	}
 	if oneShotNext.Valid && (metrics.NextRunAt == nil || oneShotNext.Time.Before(*metrics.NextRunAt)) {
 		metrics.NextRunAt = &oneShotNext.Time

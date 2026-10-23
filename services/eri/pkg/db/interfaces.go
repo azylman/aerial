@@ -31,6 +31,7 @@ type ScheduleStore interface {
 	CreateOneShotSchedule(ctx context.Context, s OneShotSchedule) error
 	GetAllOneShotSchedules(ctx context.Context, threadID string) ([]OneShotSchedule, error)
 	GetAllCronSchedules(ctx context.Context, targetID string) ([]CronSchedule, error)
+	GetAllHeartbeatSchedules(ctx context.Context, targetID string) ([]HeartbeatSchedule, error)
 	GetScheduleRunsPaginated(ctx context.Context, limit, offset int, scheduleID, status string) ([]ScheduleRun, int, error)
 	GetScheduleSummaryMetrics(ctx context.Context) (ScheduleSummaryMetrics, error)
 }
