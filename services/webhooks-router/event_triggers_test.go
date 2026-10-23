@@ -1,0 +1,1413 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+)
+
+type mockTriggerRows struct {
+	pgx.Rows
+	items   []ClaimedEventTrigger
+	idx     int
+	scanErr error
+	rowsErr error
+}
+
+func (m *mockTriggerRows) Next() bool {
+	if m.scanErr != nil {
+		return true
+	}
+	return m.idx < len(m.items)
+}
+
+func (m *mockTriggerRows) Scan(dest ...any) error {
+	if m.scanErr != nil {
+		return m.scanErr
+	}
+	item := m.items[m.idx]
+	m.idx++
+	if len(dest) >= 7 {
+		*dest[0].(*string) = item.ID
+		*dest[1].(*string) = item.ChannelID
+		*dest[2].(*string) = item.Source
+		*dest[3].(*string) = item.Target
+		*dest[4].(*string) = item.EventType
+		*dest[5].(*string) = item.Prompt
+		*dest[6].(*string) = item.Effort
+	}
+	return nil
+}
+
+func (m *mockTriggerRows) Err() error {
+	return m.rowsErr
+}
+
+func (m *mockTriggerRows) Close() {}
+
+type mockTriggerPool struct {
+	queryErr   error
+	rows       *mockTriggerRows
+	execErr    error
+	rowScanErr error
+	foundRow   bool
+	buildID    string
+	chunkID    string
+}
+
+func (p *mockTriggerPool) Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
+	if p.execErr != nil {
+		return pgconn.CommandTag{}, p.execErr
+	}
+	return pgconn.NewCommandTag("UPDATE 1"), nil
+}
+
+func (p *mockTriggerPool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	if p.queryErr != nil {
+		return nil, p.queryErr
+	}
+	if p.rows != nil {
+		return p.rows, nil
+	}
+	return &mockTriggerRows{}, nil
+}
+
+func (p *mockTriggerPool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	return mockVanadisPgxRow{
+		scanFn: func(dest ...any) error {
+			if p.rowScanErr != nil {
+				return p.rowScanErr
+			}
+			if !p.foundRow {
+				return pgx.ErrNoRows
+			}
+			if len(dest) >= 2 {
+				*dest[0].(*string) = p.buildID
+				*dest[1].(*string) = p.chunkID
+			}
+			return nil
+		},
+	}
+}
+
+func (p *mockTriggerPool) Begin(ctx context.Context) (pgx.Tx, error) {
+	return nil, nil
+}
+
+func TestClaimEventTriggers(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		nilRegistry bool
+		nilPool     bool
+		source      string
+		targets     []string
+		eventType   string
+		queryErr    bool
+		scanErr     bool
+		rowsErr     bool
+		items       []ClaimedEventTrigger
+		wantCount   int
+		wantErr     bool
+	}{
+		{
+			name:        "nil registry returns nil",
+			nilRegistry: true,
+			source:      "github",
+			targets:     []string{"azylman/aerial"},
+			eventType:   "ci_passed",
+		},
+		{
+			name:      "nil pool returns nil",
+			nilPool:   true,
+			source:    "github",
+			targets:   []string{"azylman/aerial"},
+			eventType: "ci_passed",
+		},
+		{
+			name:      "empty targets returns nil",
+			source:    "github",
+			targets:   nil,
+			eventType: "ci_passed",
+		},
+		{
+			name:      "targets with only whitespace returns nil",
+			source:    "github",
+			targets:   []string{"   ", ""},
+			eventType: "ci_passed",
+		},
+		{
+			name:      "empty source returns nil",
+			source:    "",
+			targets:   []string{"azylman/aerial"},
+			eventType: "ci_passed",
+		},
+		{
+			name:      "empty eventType returns nil",
+			source:    "github",
+			targets:   []string{"azylman/aerial"},
+			eventType: "",
+		},
+		{
+			name:      "query error returns wrapped error",
+			source:    "github",
+			targets:   []string{"azylman/aerial"},
+			eventType: "ci_passed",
+			queryErr:  true,
+			wantErr:   true,
+		},
+		{
+			name:      "scan error returns wrapped error",
+			source:    "github",
+			targets:   []string{"azylman/aerial"},
+			eventType: "ci_passed",
+			scanErr:   true,
+			wantErr:   true,
+		},
+		{
+			name:      "rows.Err() returns wrapped error",
+			source:    "github",
+			targets:   []string{"azylman/aerial"},
+			eventType: "ci_passed",
+			rowsErr:   true,
+			wantErr:   true,
+		},
+		{
+			name:      "successful claim with multiple rows",
+			source:    "github",
+			targets:   []string{"azylman/aerial", "azylman/aerial:main"},
+			eventType: "pr_merged",
+			items: []ClaimedEventTrigger{
+				{
+					ID:        "trig-1",
+					ChannelID: "1555405874565091380",
+					Source:    "github",
+					Target:    "azylman/aerial",
+					EventType: "pr_merged",
+					Prompt:    "Continue with chunk 2",
+					Effort:    "high",
+				},
+				{
+					ID:        "trig-2",
+					ChannelID: "1555405874565091380",
+					Source:    "github",
+					Target:    "azylman/aerial:main",
+					EventType: "pr_merged",
+					Prompt:    "Report completion",
+					Effort:    "medium",
+				},
+			},
+			wantCount: 2,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var pool pgxQueryExecer
+			if !tc.nilPool {
+				var qErr, sErr, rErr error
+				if tc.queryErr {
+					qErr = errors.New("simulated query error")
+				}
+				if tc.scanErr {
+					sErr = errors.New("simulated scan error")
+				}
+				if tc.rowsErr {
+					rErr = errors.New("simulated rows error")
+				}
+				pool = &mockTriggerPool{
+					queryErr: qErr,
+					rows: &mockTriggerRows{
+						items:   tc.items,
+						scanErr: sErr,
+						rowsErr: rErr,
+					},
+				}
+			}
+			var reg *PostgresPRRegistry
+			if !tc.nilRegistry {
+				reg = NewPostgresPRRegistry(pool)
+			}
+			got, err := reg.ClaimEventTriggers(context.Background(), tc.source, tc.targets, tc.eventType)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ClaimEventTriggers() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if len(got) != tc.wantCount {
+				t.Fatalf("ClaimEventTriggers() returned %d items, want %d", len(got), tc.wantCount)
+			}
+		})
+	}
+}
+
+func TestFailVanadisChunkDetailsByPR(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		nilRegistry bool
+		nilPool     bool
+		repo        string
+		prNumber    int
+		foundRow    bool
+		rowScanErr  bool
+		execErr     bool
+		buildID     string
+		chunkID     string
+		wantFailed  bool
+		wantErr     bool
+	}{
+		{
+			name:        "nil registry returns false",
+			nilRegistry: true,
+			repo:        "azylman/aerial",
+			prNumber:    10,
+		},
+		{
+			name:     "nil pool returns false",
+			nilPool:  true,
+			repo:     "azylman/aerial",
+			prNumber: 10,
+		},
+		{
+			name:     "empty repo returns false",
+			repo:     "",
+			prNumber: 10,
+		},
+		{
+			name:     "invalid prNumber returns false",
+			repo:     "azylman/aerial",
+			prNumber: 0,
+		},
+		{
+			name:       "query scan error returns error",
+			repo:       "azylman/aerial",
+			prNumber:   10,
+			rowScanErr: true,
+			wantErr:    true,
+		},
+		{
+			name:       "not found (ErrNoRows) returns false",
+			repo:       "azylman/aerial",
+			prNumber:   10,
+			foundRow:   false,
+			wantFailed: false,
+		},
+		{
+			name:     "exec build fail error returns error",
+			repo:     "azylman/aerial",
+			prNumber: 10,
+			foundRow: true,
+			buildID:  "build-123",
+			chunkID:  "chunk-1",
+			execErr:  true,
+			wantErr:  true,
+		},
+		{
+			name:       "successful chunk fail updates and returns true",
+			repo:       "azylman/aerial",
+			prNumber:   10,
+			foundRow:   true,
+			buildID:    "build-123",
+			chunkID:    "chunk-1",
+			wantFailed: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var pool pgxQueryExecer
+			if !tc.nilPool {
+				var rsErr, exErr error
+				if tc.rowScanErr {
+					rsErr = errors.New("simulated scan error")
+				}
+				if tc.execErr {
+					exErr = errors.New("simulated exec error")
+				}
+				pool = &mockTriggerPool{
+					foundRow:   tc.foundRow,
+					rowScanErr: rsErr,
+					execErr:    exErr,
+					buildID:    tc.buildID,
+					chunkID:    tc.chunkID,
+				}
+			}
+			var reg *PostgresPRRegistry
+			if !tc.nilRegistry {
+				reg = NewPostgresPRRegistry(pool)
+			}
+			bID, cID, failed, err := reg.FailVanadisChunkDetailsByPR(context.Background(), tc.repo, tc.prNumber)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("FailVanadisChunkDetailsByPR() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if failed != tc.wantFailed {
+				t.Fatalf("FailVanadisChunkDetailsByPR() failed = %v, want %v", failed, tc.wantFailed)
+			}
+			if tc.wantFailed {
+				if bID != tc.buildID || cID != tc.chunkID {
+					t.Fatalf("FailVanadisChunkDetailsByPR() got bID=%q, cID=%q; want %q, %q", bID, cID, tc.buildID, tc.chunkID)
+				}
+			}
+		})
+	}
+}
+
+func TestFormatEventTriggerPrompt(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		header  string
+		prompt  string
+		wantStr string
+	}{
+		{
+			name:    "both header and prompt present",
+			header:  "Event trigger: test",
+			prompt:  "Proceed with task",
+			wantStr: "Event trigger: test\n\nProceed with task",
+		},
+		{
+			name:    "empty header returns prompt",
+			header:  "   ",
+			prompt:  "Proceed with task",
+			wantStr: "Proceed with task",
+		},
+		{
+			name:    "empty prompt returns header",
+			header:  "Event trigger: test",
+			prompt:  "   ",
+			wantStr: "Event trigger: test",
+		},
+		{
+			name:    "both empty returns empty",
+			header:  "",
+			prompt:  "",
+			wantStr: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := formatEventTriggerPrompt(tc.header, tc.prompt)
+			if got != tc.wantStr {
+				t.Fatalf("formatEventTriggerPrompt() = %q, want %q", got, tc.wantStr)
+			}
+		})
+	}
+}
+
+func TestFireEventTriggers(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		nilRegistry      bool
+		nilDispatcher    bool
+		targets          []string
+		claimErr         bool
+		claimedTriggers  []ClaimedEventTrigger
+		contextHeader    string
+		dispatchErr      bool
+		wantDispatched   int
+		wantPromptSubstr string
+	}{
+		{
+			name:          "nil registry is no-op",
+			nilRegistry:   true,
+			targets:       []string{"azylman/aerial"},
+			nilDispatcher: false,
+		},
+		{
+			name:          "nil dispatcher is no-op",
+			nilRegistry:   false,
+			targets:       []string{"azylman/aerial"},
+			nilDispatcher: true,
+		},
+		{
+			name:    "empty targets is no-op",
+			targets: nil,
+		},
+		{
+			name:    "whitespace targets is no-op",
+			targets: []string{"   ", ""},
+		},
+		{
+			name:     "claim error is handled gracefully",
+			targets:  []string{"azylman/aerial"},
+			claimErr: true,
+		},
+		{
+			name:            "zero claimed triggers dispatches nothing",
+			targets:         []string{"azylman/aerial"},
+			claimedTriggers: nil,
+			wantDispatched:  0,
+		},
+		{
+			name:    "claimed triggers dispatched with context header",
+			targets: []string{"azylman/aerial"},
+			claimedTriggers: []ClaimedEventTrigger{
+				{
+					ID:        "trig-101",
+					ChannelID: "1555405874565091380",
+					Source:    "github",
+					Target:    "azylman/aerial",
+					EventType: "ci_passed",
+					Prompt:    "Verify passing checks",
+					Effort:    "low",
+				},
+			},
+			contextHeader:    "GitHub ci_passed on azylman/aerial",
+			wantDispatched:   1,
+			wantPromptSubstr: "GitHub ci_passed on azylman/aerial\n\nVerify passing checks",
+		},
+		{
+			name:    "dispatcher error handled gracefully",
+			targets: []string{"azylman/aerial"},
+			claimedTriggers: []ClaimedEventTrigger{
+				{
+					ID:        "trig-102",
+					ChannelID: "1555405874565091380",
+					Source:    "github",
+					Target:    "azylman/aerial",
+					EventType: "ci_failed",
+					Prompt:    "Triage failure",
+				},
+			},
+			dispatchErr:    true,
+			wantDispatched: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mockReg := &mockPRRegistry{
+				claimTriggersRes: tc.claimedTriggers,
+			}
+			if tc.claimErr {
+				mockReg.claimTriggersErr = errors.New("simulated claim error")
+			}
+			mockDisp := &mockOutboundDispatcher{}
+			if tc.dispatchErr {
+				mockDisp.promptErr = errors.New("simulated dispatch error")
+			}
+
+			srv := NewRouterServer(Config{}, nil)
+			if !tc.nilRegistry {
+				srv.SetRegistry(mockReg)
+			}
+			if !tc.nilDispatcher {
+				srv.SetDispatcher(mockDisp)
+			}
+
+			srv.fireEventTriggers(context.Background(), "github", tc.targets, "ci_passed", tc.contextHeader)
+
+			prompts := mockDisp.PromptCalls()
+			if tc.dispatchErr {
+				// Dispatcher error occurred; prompt calls may be attempted but error logged
+				return
+			}
+			if len(prompts) != tc.wantDispatched {
+				t.Fatalf("fireEventTriggers() dispatched %d prompts, want %d", len(prompts), tc.wantDispatched)
+			}
+			if tc.wantPromptSubstr != "" && len(prompts) > 0 {
+				if !strings.Contains(prompts[0].Prompt, tc.wantPromptSubstr) {
+					t.Fatalf("prompt = %q, want substr %q", prompts[0].Prompt, tc.wantPromptSubstr)
+				}
+			}
+		})
+	}
+}
+
+func TestEvaluateHangarEventTriggers(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		event          string
+		repo           string
+		details        string
+		wantFired      bool
+		wantTarget     string
+		wantEventType  string
+		wantPromptPart string
+	}{
+		{
+			name:      "unsupported event ignored",
+			event:     "deploy_started",
+			repo:      "azylman/aerial",
+			wantFired: false,
+		},
+		{
+			name:      "empty repo ignored",
+			event:     "sync_success",
+			repo:      "",
+			wantFired: false,
+		},
+		{
+			name:           "sync_success with details fires hangar trigger",
+			event:          "sync_success",
+			repo:           "aerial",
+			details:        "synced 5 files",
+			wantFired:      true,
+			wantTarget:     "azylman/aerial",
+			wantEventType:  "sync_success",
+			wantPromptPart: "Hangar git sync sync_success for azylman/aerial: synced 5 files",
+		},
+		{
+			name:           "sync_failed without details fires hangar trigger",
+			event:          "sync_failed",
+			repo:           "azylman/aerial-config",
+			details:        "",
+			wantFired:      true,
+			wantTarget:     "azylman/aerial-config",
+			wantEventType:  "sync_failed",
+			wantPromptPart: "Hangar git sync sync_failed for azylman/aerial-config",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mockReg := &mockPRRegistry{
+				claimTriggersRes: []ClaimedEventTrigger{
+					{
+						ID:        "hangar-trig",
+						ChannelID: "1555405874565091380",
+						Source:    "hangar",
+						Target:    tc.wantTarget,
+						EventType: tc.wantEventType,
+						Prompt:    "Hangar updated",
+					},
+				},
+			}
+			mockDisp := &mockOutboundDispatcher{}
+			srv := NewRouterServer(Config{}, nil)
+			srv.SetRegistry(mockReg)
+			srv.SetDispatcher(mockDisp)
+
+			srv.evaluateHangarEventTriggers(context.Background(), HangarDeployEvent{
+				Event:   tc.event,
+				Repo:    tc.repo,
+				Details: tc.details,
+			})
+
+			if !tc.wantFired {
+				if len(mockReg.claimTriggersCalls) != 0 {
+					t.Fatalf("expected 0 claim calls, got %d", len(mockReg.claimTriggersCalls))
+				}
+				return
+			}
+			if len(mockReg.claimTriggersCalls) != 1 {
+				t.Fatalf("expected 1 claim call, got %d", len(mockReg.claimTriggersCalls))
+			}
+			call := mockReg.claimTriggersCalls[0]
+			if call.source != "hangar" || call.eventType != tc.wantEventType || len(call.targets) != 1 || call.targets[0] != tc.wantTarget {
+				t.Fatalf("unexpected claim call: %+v, want source=hangar target=%s event=%s", call, tc.wantTarget, tc.wantEventType)
+			}
+			prompts := mockDisp.PromptCalls()
+			if len(prompts) != 1 {
+				t.Fatalf("expected 1 prompt dispatched, got %d", len(prompts))
+			}
+			if !strings.Contains(prompts[0].Prompt, tc.wantPromptPart) {
+				t.Fatalf("prompt %q does not contain %q", prompts[0].Prompt, tc.wantPromptPart)
+			}
+		})
+	}
+}
+
+func TestEvaluateNomadEventTriggers(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		jobID         string
+		eventType     string
+		refID         string
+		details       string
+		wantFired     bool
+		wantTarget    string
+		wantEventType string
+	}{
+		{
+			name:      "empty jobID ignored",
+			jobID:     "   ",
+			eventType: "deploy_success",
+			wantFired: false,
+		},
+		{
+			name:          "deploy_success normalizes and fires nomad trigger",
+			jobID:         " Brain ",
+			eventType:     "deploy_success",
+			refID:         "dep-123",
+			details:       "",
+			wantFired:     true,
+			wantTarget:    "brain",
+			wantEventType: "deploy_success",
+		},
+		{
+			name:          "deploy_failed with details fires nomad trigger",
+			jobID:         "Webhooks-Router",
+			eventType:     "deploy_failed",
+			refID:         "alloc-456",
+			details:       "crashed with oom",
+			wantFired:     true,
+			wantTarget:    "webhooks-router",
+			wantEventType: "deploy_failed",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mockReg := &mockPRRegistry{
+				claimTriggersRes: []ClaimedEventTrigger{
+					{
+						ID:        "nomad-trig",
+						ChannelID: "1555405874565091380",
+						Source:    "nomad",
+						Target:    tc.wantTarget,
+						EventType: tc.wantEventType,
+						Prompt:    "Nomad event",
+					},
+				},
+			}
+			mockDisp := &mockOutboundDispatcher{}
+			srv := NewRouterServer(Config{}, nil)
+			srv.SetRegistry(mockReg)
+			srv.SetDispatcher(mockDisp)
+
+			srv.evaluateNomadEventTriggers(context.Background(), tc.jobID, tc.eventType, tc.refID, tc.details)
+
+			if !tc.wantFired {
+				if len(mockReg.claimTriggersCalls) != 0 {
+					t.Fatalf("expected 0 claim calls, got %d", len(mockReg.claimTriggersCalls))
+				}
+				return
+			}
+			if len(mockReg.claimTriggersCalls) != 1 {
+				t.Fatalf("expected 1 claim call, got %d", len(mockReg.claimTriggersCalls))
+			}
+			call := mockReg.claimTriggersCalls[0]
+			if call.source != "nomad" || call.eventType != tc.wantEventType || len(call.targets) != 1 || call.targets[0] != tc.wantTarget {
+				t.Fatalf("unexpected claim call: %+v", call)
+			}
+		})
+	}
+}
+
+func TestEvaluateVanadisAdvancementTriggers(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		res             *VanadisAdvancementResult
+		wantChunkTarget string
+		wantBuildTarget string
+		wantChunkFired  bool
+		wantBuildFired  bool
+	}{
+		{
+			name: "nil result is no-op",
+			res:  nil,
+		},
+		{
+			name: "unmatched result is no-op",
+			res: &VanadisAdvancementResult{
+				Matched:  false,
+				Advanced: false,
+			},
+		},
+		{
+			name: "not advanced is no-op",
+			res: &VanadisAdvancementResult{
+				Matched:  true,
+				Advanced: false,
+			},
+		},
+		{
+			name: "advanced with chunk resolved from Chunks slice",
+			res: &VanadisAdvancementResult{
+				Matched:          true,
+				Advanced:         true,
+				BuildID:          "build-abc",
+				MergedChunkIndex: 1,
+				Chunks: []VanadisChunkSummary{
+					{ChunkIndex: 0, ID: "build-abc-chunk-1"},
+					{ChunkIndex: 1, ID: "build-abc-chunk-custom-2"},
+				},
+			},
+			wantChunkFired:  true,
+			wantChunkTarget: "build-abc-chunk-custom-2",
+		},
+		{
+			name: "advanced with chunk fallback from index",
+			res: &VanadisAdvancementResult{
+				Matched:          true,
+				Advanced:         true,
+				BuildID:          "build-xyz",
+				MergedChunkIndex: 2,
+				Chunks:           nil,
+			},
+			wantChunkFired:  true,
+			wantChunkTarget: "build-xyz-chunk-3",
+		},
+		{
+			name: "build completed fires both chunk and build triggers",
+			res: &VanadisAdvancementResult{
+				Matched:          true,
+				Advanced:         true,
+				BuildCompleted:   true,
+				BuildID:          "build-full",
+				MergedChunkIndex: 0,
+				Chunks: []VanadisChunkSummary{
+					{ChunkIndex: 0, ID: "build-full-chunk-1"},
+				},
+			},
+			wantChunkFired:  true,
+			wantChunkTarget: "build-full-chunk-1",
+			wantBuildFired:  true,
+			wantBuildTarget: "build-full",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mockReg := &mockPRRegistry{}
+			mockDisp := &mockOutboundDispatcher{}
+			srv := NewRouterServer(Config{}, nil)
+			srv.SetRegistry(mockReg)
+			srv.SetDispatcher(mockDisp)
+
+			srv.evaluateVanadisAdvancementTriggers(context.Background(), "azylman/aerial", 42, tc.res)
+
+			var chunkFired, buildFired bool
+			for _, call := range mockReg.claimTriggersCalls {
+				if call.source == "vanadis_chunk" && call.eventType == "merged" && len(call.targets) == 1 && call.targets[0] == tc.wantChunkTarget {
+					chunkFired = true
+				}
+				if call.source == "vanadis_build" && call.eventType == "completed" && len(call.targets) == 1 && call.targets[0] == tc.wantBuildTarget {
+					buildFired = true
+				}
+			}
+			if chunkFired != tc.wantChunkFired {
+				t.Fatalf("chunkFired = %v, want %v", chunkFired, tc.wantChunkFired)
+			}
+			if buildFired != tc.wantBuildFired {
+				t.Fatalf("buildFired = %v, want %v", buildFired, tc.wantBuildFired)
+			}
+		})
+	}
+}
+
+func TestEvaluateVanadisFailureTriggers(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		buildID        string
+		chunkID        string
+		reason         string
+		wantChunkFired bool
+		wantBuildFired bool
+	}{
+		{
+			name:           "both empty is no-op",
+			buildID:        "",
+			chunkID:        "",
+			wantChunkFired: false,
+			wantBuildFired: false,
+		},
+		{
+			name:           "chunkID only fires chunk failure",
+			chunkID:        "build-1-chunk-2",
+			reason:         "ci failed",
+			wantChunkFired: true,
+			wantBuildFired: false,
+		},
+		{
+			name:           "buildID only fires build failure",
+			buildID:        "build-1",
+			reason:         "build cancelled",
+			wantChunkFired: false,
+			wantBuildFired: true,
+		},
+		{
+			name:           "both IDs fire both failure triggers",
+			buildID:        "build-1",
+			chunkID:        "build-1-chunk-1",
+			reason:         "remediation cap reached",
+			wantChunkFired: true,
+			wantBuildFired: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mockReg := &mockPRRegistry{}
+			mockDisp := &mockOutboundDispatcher{}
+			srv := NewRouterServer(Config{}, nil)
+			srv.SetRegistry(mockReg)
+			srv.SetDispatcher(mockDisp)
+
+			srv.evaluateVanadisFailureTriggers(context.Background(), tc.buildID, tc.chunkID, tc.reason)
+
+			var chunkFired, buildFired bool
+			for _, call := range mockReg.claimTriggersCalls {
+				if call.source == "vanadis_chunk" && call.eventType == "failed" {
+					chunkFired = true
+				}
+				if call.source == "vanadis_build" && call.eventType == "failed" {
+					buildFired = true
+				}
+			}
+			if chunkFired != tc.wantChunkFired {
+				t.Fatalf("chunkFired = %v, want %v", chunkFired, tc.wantChunkFired)
+			}
+			if buildFired != tc.wantBuildFired {
+				t.Fatalf("buildFired = %v, want %v", buildFired, tc.wantBuildFired)
+			}
+		})
+	}
+}
+
+func TestFailVanadisChunk(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		nilRegistry  bool
+		prNumber     int
+		failErr      bool
+		failed       bool
+		buildID      string
+		chunkID      string
+		wantTriggers bool
+		wantErr      bool
+	}{
+		{
+			name:        "nil registry is no-op",
+			nilRegistry: true,
+			prNumber:    10,
+		},
+		{
+			name:     "invalid prNumber is no-op",
+			prNumber: 0,
+		},
+		{
+			name:     "registry error returns error",
+			prNumber: 10,
+			failErr:  true,
+			wantErr:  true,
+		},
+		{
+			name:         "failed is false does not fire triggers",
+			prNumber:     10,
+			failed:       false,
+			wantTriggers: false,
+		},
+		{
+			name:         "failed is true fires triggers",
+			prNumber:     10,
+			failed:       true,
+			buildID:      "build-101",
+			chunkID:      "chunk-101",
+			wantTriggers: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mockReg := &mockPRRegistry{
+				failVanadisRes:     tc.failed,
+				failVanadisBuildID: tc.buildID,
+				failVanadisChunkID: tc.chunkID,
+			}
+			if tc.failErr {
+				mockReg.failVanadisErr = errors.New("simulated fail err")
+			}
+			mockDisp := &mockOutboundDispatcher{}
+			srv := NewRouterServer(Config{}, nil)
+			if !tc.nilRegistry {
+				srv.SetRegistry(mockReg)
+			}
+			srv.SetDispatcher(mockDisp)
+
+			err := srv.failVanadisChunk(context.Background(), "azylman/aerial", tc.prNumber, "test_reason")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("failVanadisChunk() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantTriggers {
+				if len(mockReg.claimTriggersCalls) != 2 {
+					t.Fatalf("expected 2 failure claim calls (chunk + build), got %d", len(mockReg.claimTriggersCalls))
+				}
+			} else if !tc.wantErr && !tc.nilRegistry && tc.prNumber > 0 {
+				if len(mockReg.claimTriggersCalls) != 0 {
+					t.Fatalf("expected 0 failure claim calls, got %d", len(mockReg.claimTriggersCalls))
+				}
+			}
+		})
+	}
+}
+
+func TestExtractCheckRunHeadBranch(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		body       string
+		wantBranch string
+	}{
+		{
+			name:       "empty body returns empty",
+			body:       "",
+			wantBranch: "",
+		},
+		{
+			name:       "invalid json returns empty",
+			body:       "{invalid",
+			wantBranch: "",
+		},
+		{
+			name:       "valid check_run body extracts branch with refs/heads/ stripped",
+			body:       `{"check_run":{"check_suite":{"head_branch":"refs/heads/feat/awesome-feature"}}}`,
+			wantBranch: "feat/awesome-feature",
+		},
+		{
+			name:       "valid check_run body extracts bare branch",
+			body:       `{"check_run":{"check_suite":{"head_branch":"main"}}}`,
+			wantBranch: "main",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := extractCheckRunHeadBranch([]byte(tc.body))
+			if got != tc.wantBranch {
+				t.Fatalf("extractCheckRunHeadBranch() = %q, want %q", got, tc.wantBranch)
+			}
+		})
+	}
+}
+
+func TestResolveGitHubTriggerEventType(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		res       *ResolvedGitHubEvent
+		wantEvent string
+	}{
+		{
+			name:      "nil res returns empty",
+			res:       nil,
+			wantEvent: "",
+		},
+		{
+			name: "pull_request closed with merged true returns pr_merged",
+			res: &ResolvedGitHubEvent{
+				Event:    "pull_request",
+				Action:   "closed",
+				Merged:   true,
+				MergeSHA: "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092",
+			},
+			wantEvent: "pr_merged",
+		},
+		{
+			name: "pull_request closed unmerged with merge_sha returns empty",
+			res: &ResolvedGitHubEvent{
+				Event:    "pull_request",
+				Action:   "closed",
+				Merged:   false,
+				MergeSHA: "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092",
+			},
+			wantEvent: "",
+		},
+		{
+			name: "pull_request closed without merge_sha returns empty",
+			res: &ResolvedGitHubEvent{
+				Event:    "pull_request",
+				Action:   "closed",
+				Merged:   false,
+				MergeSHA: "",
+			},
+			wantEvent: "",
+		},
+		{
+			name: "pull_request opened returns empty",
+			res: &ResolvedGitHubEvent{
+				Event:  "pull_request",
+				Action: "opened",
+			},
+			wantEvent: "",
+		},
+		{
+			name: "check_run completed success returns ci_passed",
+			res: &ResolvedGitHubEvent{
+				Event:      "check_run",
+				Action:     "completed",
+				Conclusion: "success",
+			},
+			wantEvent: "ci_passed",
+		},
+		{
+			name: "check_run completed failure returns ci_failed",
+			res: &ResolvedGitHubEvent{
+				Event:      "check_run",
+				Action:     "completed",
+				Conclusion: "failure",
+			},
+			wantEvent: "ci_failed",
+		},
+		{
+			name: "check_run completed timed_out returns ci_failed",
+			res: &ResolvedGitHubEvent{
+				Event:      "check_run",
+				Action:     "completed",
+				Conclusion: "timed_out",
+			},
+			wantEvent: "ci_failed",
+		},
+		{
+			name: "check_run in_progress returns empty",
+			res: &ResolvedGitHubEvent{
+				Event:  "check_run",
+				Action: "in_progress",
+			},
+			wantEvent: "",
+		},
+		{
+			name: "workflow_run completed success returns ci_passed",
+			res: &ResolvedGitHubEvent{
+				Event:      "workflow_run",
+				Action:     "completed",
+				Conclusion: "success",
+			},
+			wantEvent: "ci_passed",
+		},
+		{
+			name: "workflow_run completed cancelled returns empty",
+			res: &ResolvedGitHubEvent{
+				Event:      "workflow_run",
+				Action:     "completed",
+				Conclusion: "cancelled",
+			},
+			wantEvent: "",
+		},
+		{
+			name: "ping event returns empty",
+			res: &ResolvedGitHubEvent{
+				Event: "ping",
+			},
+			wantEvent: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := resolveGitHubTriggerEventType(tc.res)
+			if got != tc.wantEvent {
+				t.Fatalf("resolveGitHubTriggerEventType() = %q, want %q", got, tc.wantEvent)
+			}
+		})
+	}
+}
+
+func TestEvaluateGitHubEventTriggers(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		res           *ResolvedGitHubEvent
+		body          string
+		wantFired     bool
+		wantSource    string
+		wantEventType string
+		wantTargets   []string
+	}{
+		{
+			name:      "nil res is no-op",
+			res:       nil,
+			wantFired: false,
+		},
+		{
+			name: "empty repo is no-op",
+			res: &ResolvedGitHubEvent{
+				Event:    "pull_request",
+				Action:   "closed",
+				MergeSHA: "123",
+				Repo:     "",
+			},
+			wantFired: false,
+		},
+		{
+			name: "unsupported event type is no-op",
+			res: &ResolvedGitHubEvent{
+				Event: "ping",
+				Repo:  "azylman/aerial",
+			},
+			wantFired: false,
+		},
+		{
+			name: "pull_request closed with branch builds repo and branch targets",
+			res: &ResolvedGitHubEvent{
+				Event:    "pull_request",
+				Action:   "closed",
+				Merged:   true,
+				MergeSHA: "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092",
+				Repo:     "azylman/aerial",
+				Branch:   "refs/heads/feat/trigger-eval",
+			},
+			wantFired:     true,
+			wantSource:    "github",
+			wantEventType: "pr_merged",
+			wantTargets:   []string{"azylman/aerial", "azylman/aerial:feat/trigger-eval"},
+		},
+		{
+			name: "pull_request closed unmerged with test merge_sha does not fire",
+			res: &ResolvedGitHubEvent{
+				Event:    "pull_request",
+				Action:   "closed",
+				Merged:   false,
+				MergeSHA: "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092",
+				Repo:     "azylman/aerial",
+				Branch:   "refs/heads/feat/trigger-eval",
+			},
+			wantFired: false,
+		},
+		{
+			name: "check_run extracts branch from body when res.Branch is empty",
+			res: &ResolvedGitHubEvent{
+				Event:      "check_run",
+				Action:     "completed",
+				Conclusion: "success",
+				Repo:       "aerial",
+				Branch:     "",
+			},
+			body:          `{"check_run":{"check_suite":{"head_branch":"refs/heads/feat/auto-extract"}}}`,
+			wantFired:     true,
+			wantSource:    "github",
+			wantEventType: "ci_passed",
+			wantTargets:   []string{"azylman/aerial", "azylman/aerial:feat/auto-extract"},
+		},
+		{
+			name: "workflow_run completed failure with bare repo",
+			res: &ResolvedGitHubEvent{
+				Event:      "workflow_run",
+				Action:     "completed",
+				Conclusion: "failure",
+				Repo:       "azylman/aerial",
+				Branch:     "",
+			},
+			wantFired:     true,
+			wantSource:    "github",
+			wantEventType: "ci_failed",
+			wantTargets:   []string{"azylman/aerial"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mockReg := &mockPRRegistry{}
+			mockDisp := &mockOutboundDispatcher{}
+			srv := NewRouterServer(Config{}, nil)
+			srv.SetRegistry(mockReg)
+			srv.SetDispatcher(mockDisp)
+
+			srv.evaluateGitHubEventTriggers(context.Background(), tc.res, []byte(tc.body))
+
+			if !tc.wantFired {
+				if len(mockReg.claimTriggersCalls) != 0 {
+					t.Fatalf("expected 0 claim calls, got %d", len(mockReg.claimTriggersCalls))
+				}
+				return
+			}
+			if len(mockReg.claimTriggersCalls) != 1 {
+				t.Fatalf("expected 1 claim call, got %d", len(mockReg.claimTriggersCalls))
+			}
+			call := mockReg.claimTriggersCalls[0]
+			if call.source != tc.wantSource || call.eventType != tc.wantEventType {
+				t.Fatalf("call = %+v, want source=%s eventType=%s", call, tc.wantSource, tc.wantEventType)
+			}
+			if len(call.targets) != len(tc.wantTargets) {
+				t.Fatalf("call.targets = %v, want %v", call.targets, tc.wantTargets)
+			}
+			for i, tgt := range tc.wantTargets {
+				if call.targets[i] != tgt {
+					t.Fatalf("call.targets[%d] = %q, want %q", i, call.targets[i], tgt)
+				}
+			}
+		})
+	}
+}
+
+func TestIntegrations_EventTriggers(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		testScenario  string
+		wantSource    string
+		wantEventType string
+	}{
+		{
+			name:          "ProcessHangarEvent sync_success fires hangar triggers",
+			testScenario:  "hangar_sync_success",
+			wantSource:    "hangar",
+			wantEventType: "sync_success",
+		},
+		{
+			name:          "ProcessGitHubEvent pr closed merged fires github triggers",
+			testScenario:  "github_pr_merged",
+			wantSource:    "github",
+			wantEventType: "pr_merged",
+		},
+		{
+			name:          "ProcessGitHubEvent closed unmerged fires vanadis failure triggers",
+			testScenario:  "github_pr_closed_unmerged",
+			wantSource:    "vanadis_chunk",
+			wantEventType: "failed",
+		},
+		{
+			name:          "ProcessGitHubEvent closed unmerged with test merge sha fires vanadis failure triggers but not github merged",
+			testScenario:  "github_pr_closed_unmerged_with_test_merge_sha",
+			wantSource:    "vanadis_chunk",
+			wantEventType: "failed",
+		},
+		{
+			name:          "notifyRemediationCap fires vanadis failure triggers",
+			testScenario:  "notify_remediation_cap",
+			wantSource:    "vanadis_chunk",
+			wantEventType: "failed",
+		},
+		{
+			name:          "HandleNomadJobSuccess fires nomad deploy_success triggers",
+			testScenario:  "nomad_success",
+			wantSource:    "nomad",
+			wantEventType: "deploy_success",
+		},
+		{
+			name:          "HandleNomadJobFailure fires nomad deploy_failed triggers",
+			testScenario:  "nomad_failure",
+			wantSource:    "nomad",
+			wantEventType: "deploy_failed",
+		},
+		{
+			name:          "advanceVanadisChunk fires vanadis_chunk merged triggers",
+			testScenario:  "vanadis_advance",
+			wantSource:    "vanadis_chunk",
+			wantEventType: "merged",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mockReg := &mockPRRegistry{
+				failVanadisRes:     true,
+				failVanadisBuildID: "build-integ-1",
+				failVanadisChunkID: "chunk-integ-1",
+				advanceVanadisRes: &VanadisAdvancementResult{
+					Matched:          true,
+					Advanced:         true,
+					BuildID:          "build-integ-1",
+					MergedChunkIndex: 0,
+					Chunks: []VanadisChunkSummary{
+						{ChunkIndex: 0, ID: "chunk-integ-1"},
+					},
+				},
+			}
+			mockDisp := &mockOutboundDispatcher{}
+			srv := NewRouterServer(Config{}, nil)
+			srv.SetRegistry(mockReg)
+			srv.SetDispatcher(mockDisp)
+
+			ctx := context.Background()
+			switch tc.testScenario {
+			case "hangar_sync_success":
+				_, _ = srv.ProcessHangarEvent(ctx, HangarDeployEvent{
+					Event: "sync_success",
+					Repo:  "azylman/aerial",
+				})
+			case "github_pr_merged":
+				body := []byte(`{"action":"closed","number":1,"repository":{"full_name":"azylman/aerial"},"pull_request":{"number":1,"merged":true,"merge_commit_sha":"sha-merge-123","head":{"ref":"feat/test","sha":"sha-head-123"}}}`)
+				_, _ = srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-merged", body)
+			case "github_pr_closed_unmerged":
+				body := []byte(`{"action":"closed","number":1,"repository":{"full_name":"azylman/aerial"},"pull_request":{"number":1,"merged":false,"head":{"ref":"feat/test","sha":"sha-head-123"}}}`)
+				_, _ = srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-closed", body)
+			case "github_pr_closed_unmerged_with_test_merge_sha":
+				body := []byte(`{"action":"closed","number":1,"repository":{"full_name":"azylman/aerial"},"pull_request":{"number":1,"merged":false,"merge_commit_sha":"test-merge-sha-123","head":{"ref":"feat/test","sha":"sha-head-123"}}}`)
+				_, _ = srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-closed-test-merge", body)
+			case "notify_remediation_cap":
+				srv.notifyRemediationCap(ctx, &ResolvedGitHubEvent{
+					Repo:     "azylman/aerial",
+					PRNumber: 1,
+					TargetID: "1555405874565091380",
+				}, 4)
+			case "nomad_success":
+				_ = srv.HandleNomadJobSuccess(ctx, "brain", "dep-succ")
+			case "nomad_failure":
+				_ = srv.HandleNomadJobFailure(ctx, "brain", "dep-fail", "failed", "oom")
+			case "vanadis_advance":
+				_ = srv.advanceVanadisChunk(ctx, "azylman/aerial", 1)
+			}
+
+			var found bool
+			for _, call := range mockReg.claimTriggersCalls {
+				if call.source == tc.wantSource && call.eventType == tc.wantEventType {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("expected claim call for source=%s eventType=%s, calls = %+v", tc.wantSource, tc.wantEventType, mockReg.claimTriggersCalls)
+			}
+			if tc.testScenario == "github_pr_closed_unmerged_with_test_merge_sha" {
+				for _, call := range mockReg.claimTriggersCalls {
+					if call.source == "github" && call.eventType == "pr_merged" {
+						t.Fatalf("unexpected claim call for github pr_merged on unmerged PR: %+v", call)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestProcessGitHubEvent_TriggersEvaluatedOnlyOnSuccess(t *testing.T) {
+	t.Parallel()
+
+	mockReg := &mockPRRegistry{
+		err: errors.New("database connection lost"),
+	}
+	mockDisp := &mockOutboundDispatcher{}
+	srv := NewRouterServer(Config{}, nil)
+	srv.SetRegistry(mockReg)
+	srv.SetDispatcher(mockDisp)
+
+	ctx := context.Background()
+	body := []byte(`{"action":"closed","number":1,"repository":{"full_name":"azylman/aerial"},"pull_request":{"number":1,"merged":true,"merge_commit_sha":"sha-merge-123","head":{"ref":"feat/test","sha":"sha-head-123"}}}`)
+
+	res, err := srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-merged-err", body)
+	if err == nil {
+		t.Fatalf("expected error from ProcessGitHubEvent, got res=%v", res)
+	}
+
+	if len(mockReg.claimTriggersCalls) != 0 {
+		t.Fatalf("expected no claimTriggersCalls on ProcessGitHubEvent error, got %d calls: %+v", len(mockReg.claimTriggersCalls), mockReg.claimTriggersCalls)
+	}
+}

@@ -174,9 +174,15 @@ type mockPRRegistry struct {
 	suppressVanadisRes   bool
 	suppressVanadisErr   error
 
-	failVanadisCalls []prCall
-	failVanadisRes   bool
-	failVanadisErr   error
+	failVanadisCalls   []prCall
+	failVanadisRes     bool
+	failVanadisErr     error
+	failVanadisBuildID string
+	failVanadisChunkID string
+
+	claimTriggersCalls []claimTriggersCall
+	claimTriggersRes   []ClaimedEventTrigger
+	claimTriggersErr   error
 
 	ciFailCount    int
 	ciFailCountErr error
@@ -362,6 +368,29 @@ func (m *mockPRRegistry) FailVanadisChunkByPR(ctx context.Context, repo string, 
 		return false, err
 	}
 	return m.failVanadisRes, nil
+}
+
+func (m *mockPRRegistry) FailVanadisChunkDetailsByPR(ctx context.Context, repo string, prNumber int) (string, string, bool, error) {
+	failed, err := m.FailVanadisChunkByPR(ctx, repo, prNumber)
+	return m.failVanadisBuildID, m.failVanadisChunkID, failed, err
+}
+
+type claimTriggersCall struct {
+	source    string
+	targets   []string
+	eventType string
+}
+
+func (m *mockPRRegistry) ClaimEventTriggers(ctx context.Context, source string, targets []string, eventType string) ([]ClaimedEventTrigger, error) {
+	m.claimTriggersCalls = append(m.claimTriggersCalls, claimTriggersCall{
+		source:    source,
+		targets:   targets,
+		eventType: eventType,
+	})
+	if err := m.checkErr(m.claimTriggersErr); err != nil {
+		return nil, err
+	}
+	return m.claimTriggersRes, nil
 }
 
 func (m *mockPRRegistry) IncrementCIFailCount(ctx context.Context, repo string, prNumber int) (int, error) {
@@ -1594,7 +1623,7 @@ func TestProcessGitHubEvent(t *testing.T) {
 			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Lint","head_sha":"headsha789","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/123","output":{"title":"Failed"},"pull_requests":[{"number":530,"head":{"ref":"feat/test"}}]}}`,
 			reg:               &mockPRRegistry{ciFailedTargetID: "1555405874565091380", ciFailedUpdated: true, ciFailCount: 4},
 			disp:              &mockOutboundDispatcher{},
-			wantCIFailedCalls: 1, wantDMs: 1, wantDMSubstr: "remediation cap 3/3 reached", wantPrompts: 0,
+			wantCIFailedCalls: 1, wantDMs: 1, wantDMSubstr: "remediation cap 3/3 reached", wantPrompts: 0, wantFailVanadis: 1,
 		},
 		{
 			name: "check_run failure with ciFailCount error still dispatches prompt", event: "check_run", delivery: "del-cr-failcount-err",
@@ -5238,6 +5267,9 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 						}
 						if tc.method == "FailVanadisChunkByPR" {
 							*dest[0].(*string) = "build-fail-1"
+							if len(dest) > 1 {
+								*dest[1].(*string) = "chunk-fail-1"
+							}
 							return nil
 						}
 						return nil

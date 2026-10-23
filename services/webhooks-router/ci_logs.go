@@ -283,6 +283,11 @@ func (s *RouterServer) checkRemediationCapReached(ctx context.Context, res *Reso
 }
 
 func (s *RouterServer) notifyRemediationCap(ctx context.Context, res *ResolvedGitHubEvent, failCount int) {
+	if s.registry != nil && res != nil && res.PRNumber > 0 {
+		if err := s.failVanadisChunk(ctx, res.Repo, res.PRNumber, "ci_remediation_cap_reached"); err != nil {
+			log.Printf("[webhooks-router] [vanadis] warning failing vanadis chunk on remediation cap for %s#%d: %v", res.Repo, res.PRNumber, err)
+		}
+	}
 	banner := fmt.Sprintf("CI remediation cap (%d/%d) reached — awaiting human review", maxCIRemediationAttempts, maxCIRemediationAttempts)
 	if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber, "failed", banner, nil); err != nil {
 		log.Printf("[webhooks-router] [widget] sync pr widget error: %v", err)
