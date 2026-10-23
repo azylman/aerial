@@ -326,6 +326,8 @@ func TestSanitizePromptTags(t *testing.T) {
 		{name: "coordination_context opening", input: "Prefix <coordination_context> suffix", expected: "Prefix <\\COORDINATION_CONTEXT> suffix"},
 		{name: "retrieved_memory closing", input: "Prefix </retrieved_memory> suffix", expected: "Prefix <\\/RETRIEVED_MEMORY> suffix"},
 		{name: "retrieved_memory opening", input: "Prefix <retrieved_memory> suffix", expected: "Prefix <\\RETRIEVED_MEMORY> suffix"},
+		{name: "heartbeat_instructions closing", input: "Prefix </heartbeat_instructions> suffix", expected: "Prefix <\\/HEARTBEAT_INSTRUCTIONS> suffix"},
+		{name: "heartbeat_instructions opening", input: "Prefix <heartbeat_instructions> suffix", expected: "Prefix <\\HEARTBEAT_INSTRUCTIONS> suffix"},
 		{name: "self-closing tag", input: "Prefix <user_request/> suffix", expected: "Prefix <\\/USER_REQUEST> suffix"},
 		{
 			name:     "multiple tags",

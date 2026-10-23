@@ -11,8 +11,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
+	"github.com/azylman/aerial/services/eri/pkg/sanitizer"
 	"github.com/azylman/aerial/services/eri/pkg/transcript"
 	"github.com/bwmarrin/discordgo"
 )
@@ -284,4 +286,62 @@ func buildDiscordPools(basePoolCfg func(home, model string, prewarmed []string) 
 		ordered = append(ordered, p)
 	}
 	return pools, ordered
+}
+
+// FormatCronSchedulesWithDesc converts raw db.CronSchedule records into serialized CronScheduleWithDesc items.
+func FormatCronSchedulesWithDesc(raw []db.CronSchedule) []CronScheduleWithDesc {
+	crons := make([]CronScheduleWithDesc, 0, len(raw))
+	for _, c := range raw {
+		crons = append(crons, CronScheduleWithDesc{
+			ID:              c.ID,
+			TargetID:        c.TargetID,
+			ChannelID:       c.TargetID,
+			TitlePrefix:     sanitizer.SanitizeString(c.TitlePrefix),
+			CronExpr:        c.CronExpr,
+			CronDescription: FormatCronDescription(c.CronExpr),
+			Prompt:          sanitizer.SanitizeString(c.Prompt),
+			Timezone:        c.Timezone,
+			NextRunAt:       c.NextRunAt,
+			Enabled:         c.Enabled,
+			CreatedAt:       c.CreatedAt,
+		})
+	}
+	return crons
+}
+
+// FormatHeartbeatSchedulesWithDesc converts raw db.HeartbeatSchedule records into serialized HeartbeatScheduleWithDesc items.
+func FormatHeartbeatSchedulesWithDesc(raw []db.HeartbeatSchedule) []HeartbeatScheduleWithDesc {
+	heartbeats := make([]HeartbeatScheduleWithDesc, 0, len(raw))
+	for _, h := range raw {
+		heartbeats = append(heartbeats, HeartbeatScheduleWithDesc{
+			ID:              h.ID,
+			TargetID:        h.TargetID,
+			ChannelID:       h.TargetID,
+			TitlePrefix:     sanitizer.SanitizeString(h.TitlePrefix),
+			CronExpr:        h.CronExpr,
+			CronDescription: FormatCronDescription(h.CronExpr),
+			Prompt:          sanitizer.SanitizeString(h.Prompt),
+			Timezone:        h.Timezone,
+			Effort:          h.Effort,
+			NextRunAt:       h.NextRunAt,
+			Enabled:         h.Enabled,
+			CreatedAt:       h.CreatedAt,
+		})
+	}
+	return heartbeats
+}
+
+// FormatOneShotSchedulesJSON converts raw db.OneShotSchedule records into serialized OneShotScheduleJSON items.
+func FormatOneShotSchedulesJSON(raw []db.OneShotSchedule) []OneShotScheduleJSON {
+	oneShots := make([]OneShotScheduleJSON, 0, len(raw))
+	for _, s := range raw {
+		oneShots = append(oneShots, OneShotScheduleJSON{
+			ID:        s.ID,
+			ThreadID:  s.ThreadID,
+			Prompt:    sanitizer.SanitizeString(s.Prompt),
+			RunAt:     s.RunAt,
+			CreatedAt: s.CreatedAt,
+		})
+	}
+	return oneShots
 }

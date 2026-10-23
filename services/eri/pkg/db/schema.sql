@@ -74,6 +74,22 @@ CREATE TABLE IF NOT EXISTS cron_schedules (
 
 CREATE INDEX IF NOT EXISTS idx_cron_schedules_next_run_at ON cron_schedules(enabled, next_run_at);
 
+-- Heartbeat Schedules Table
+CREATE TABLE heartbeat_schedules (
+    id TEXT PRIMARY KEY,
+    target_id TEXT NOT NULL,
+    title_prefix TEXT NOT NULL DEFAULT '',
+    cron_expr TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    timezone TEXT NOT NULL DEFAULT 'UTC',
+    effort TEXT NOT NULL DEFAULT 'low',
+    next_run_at TIMESTAMPTZ NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_heartbeat_schedules_next_run ON heartbeat_schedules(enabled, next_run_at);
+
 -- Schedule Runs Table
 CREATE TABLE IF NOT EXISTS schedule_runs (
     id TEXT PRIMARY KEY,
