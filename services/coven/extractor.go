@@ -120,11 +120,12 @@ Requirements:
    - Never extract pending deliveries, shipping/order statuses, or items "awaiting delivery" / "on the way".
    - Never extract temporary troubleshooting, active debugging sessions, or tasks "currently in progress" / "about to run".
    - Never extract ephemeral PR numbers, commit SHAs, branch names, coverage/LoC metrics, CI/CD deploy statuses, or Vanadis chunk IDs.
-4. Procedural Skills & Friction Guardrails:
-   Extract reusable procedural workflows ("steps") and tool/retry failure guardrails ("avoid") into "procedural_candidates" when:
-   - Tool friction occurs (retries, failed commands, permission errors, bad parameters, recovery workarounds).
-   - User gives procedural corrections or instructions on how to do a task correctly.
-   - An unloaded-skill routing miss occurs (assistant performed a workflow without loading the appropriate skill, or no existing skill was loaded).
+4. Procedural Skills & Friction Guardrails (30-Day Durability & Resolved-Fix Test):
+   Extract reusable procedural workflows ("steps") and tool/retry failure guardrails ("avoid") into "procedural_candidates" ONLY when they pass the same 30-day durability test (Rule 3) and a working resolution was verified:
+   - Tool friction occurs (retries, failed commands, bad parameters) AND the turn resolved it with a generalizable workaround or procedure that will remain valid 30+ days from now.
+   - User gives durable procedural corrections or instructions on how to do a class of task correctly.
+   - An unloaded-skill routing miss occurs (assistant performed a multi-step workflow without loading the appropriate skill).
+   - Never extract transient environment outages ("command not found", missing credentials), unresolved dead-ends, ephemeral PR/commit/chunk IDs, or negative tool claims ("tool X is broken"); format "avoid" items as an imperative rule plus one clause of why.
    If a skill was loaded for this turn, set "loaded_skill" to that skill name; otherwise set it to "".
    If no procedural friction or reusable workflows are present, set "procedural_candidates": [].
 5. If retrieved memory facts with [id:N] directly informed the assistant's response or tool calls in this turn, include their integer IDs in "reinforced_ids". If none were used, set "reinforced_ids": [].
@@ -216,16 +217,20 @@ func EvaluateProceduralCandidateAdmission(item ExtractedProceduralItem) (admit b
 
 	validSteps := false
 	for _, s := range item.Steps {
-		if strings.TrimSpace(s) != "" {
+		if trimmed := strings.TrimSpace(s); trimmed != "" {
+			if ephemeralTelemetryRegex.MatchString(trimmed) && !durableDirectiveRegex.MatchString(trimmed) {
+				return false, "ephemeral_telemetry"
+			}
 			validSteps = true
-			break
 		}
 	}
 	validAvoid := false
 	for _, a := range item.Avoid {
-		if strings.TrimSpace(a) != "" {
+		if trimmed := strings.TrimSpace(a); trimmed != "" {
+			if ephemeralTelemetryRegex.MatchString(trimmed) && !durableDirectiveRegex.MatchString(trimmed) {
+				return false, "ephemeral_telemetry"
+			}
 			validAvoid = true
-			break
 		}
 	}
 	if !validSteps && !validAvoid {
