@@ -374,3 +374,18 @@ CREATE TABLE IF NOT EXISTS procedural_candidates (
 CREATE INDEX IF NOT EXISTS idx_procedural_candidates_status ON procedural_candidates (status, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_procedural_candidates_loaded_skill ON procedural_candidates (status, loaded_skill);
 
+
+-- Event Triggers Table
+CREATE TABLE IF NOT EXISTS event_triggers (
+    id TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL,
+    source TEXT NOT NULL,
+    target TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    effort TEXT NOT NULL DEFAULT 'medium',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_event_triggers_lookup ON event_triggers (source, target, event_type);
+CREATE INDEX IF NOT EXISTS idx_event_triggers_channel ON event_triggers (channel_id, created_at ASC);

@@ -111,6 +111,30 @@ func initTestSQLite(trimmed string) (*sql.DB, error) {
 		error TEXT NOT NULL DEFAULT ''
 	);
 	CREATE INDEX IF NOT EXISTS idx_schedule_runs_started_at ON schedule_runs(started_at DESC);
+
+	CREATE TABLE IF NOT EXISTS event_triggers (
+		id TEXT PRIMARY KEY,
+		channel_id TEXT NOT NULL,
+		source TEXT NOT NULL,
+		target TEXT NOT NULL,
+		event_type TEXT NOT NULL,
+		prompt TEXT NOT NULL,
+		effort TEXT NOT NULL DEFAULT 'medium',
+		created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_event_triggers_lookup ON event_triggers (source, target, event_type);
+	CREATE INDEX IF NOT EXISTS idx_event_triggers_channel ON event_triggers (channel_id, created_at ASC);
+
+	CREATE TABLE IF NOT EXISTS vanadis_builds (
+		id TEXT PRIMARY KEY,
+		status TEXT NOT NULL DEFAULT 'running'
+	);
+
+	CREATE TABLE IF NOT EXISTS vanadis_chunks (
+		id TEXT PRIMARY KEY,
+		build_id TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'pending'
+	);
 	`
 	if _, err := database.Exec(schema); err != nil {
 		closeWarn(database, "database on schema error")
