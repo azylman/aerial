@@ -134,6 +134,7 @@ func (t *Ticker) EvaluateDueSchedules(ctx context.Context, now time.Time) {
 
 	t.evaluateDueCronSchedules(ctx, now)
 	t.evaluateDueOneShotSchedules(ctx, now)
+	t.evaluateDueHeartbeatSchedules(ctx, now)
 
 	// Daily Retention Pruning
 	t.mu.Lock()
@@ -347,6 +348,124 @@ func (t *Ticker) processDueOneShot(ctx context.Context, s OneShotSchedule, now t
 	}
 	if createErr := CreateScheduleRun(ctx, t.db, run); createErr != nil {
 		log.Printf("[Haro Ticker] Error creating schedule run for one-shot %s: %v", s.ID, createErr)
+	}
+}
+
+func (t *Ticker) evaluateDueHeartbeatSchedules(ctx context.Context, now time.Time) {
+	dueHeartbeats, err := GetDueHeartbeatSchedules(ctx, t.db, now)
+	if err != nil {
+		log.Printf("[Haro Ticker] Error querying due heartbeat schedules: %v", err)
+		return
+	}
+	for _, hb := range dueHeartbeats {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		t.processDueHeartbeat(ctx, hb, now)
+	}
+}
+
+func (t *Ticker) processDueHeartbeat(ctx context.Context, hb HeartbeatSchedule, now time.Time) {
+	nextRun, calcErr := CalculateNextRun(hb.CronExpr, hb.Timezone, now)
+	if calcErr != nil {
+		log.Printf("[Haro Ticker] Failed to calculate next run for heartbeat %s (%q): %v", hb.ID, hb.CronExpr, calcErr)
+		nextRun = now.Add(24 * time.Hour)
+	}
+
+	if IsScheduleStale(hb.NextRunAt, now, 24*time.Hour) {
+		log.Printf("[Haro Ticker] Heartbeat %s (%q) is stale (>24h overdue: due %s, now %s). Advancing next_run_at without firing.",
+			hb.ID, hb.CronExpr, hb.NextRunAt.Format(time.RFC3339), now.Format(time.RFC3339))
+		if advErr := AdvanceHeartbeatNextRun(ctx, t.db, hb.ID, nextRun); advErr != nil {
+			log.Printf("[Haro Ticker] Error advancing heartbeat %s next_run_at: %v", hb.ID, advErr)
+		}
+		runID := uuid.NewString()
+		completedAt := now
+		staleRun := ScheduleRun{
+			ID:           runID,
+			ScheduleID:   hb.ID,
+			ScheduleType: "heartbeat",
+			MessageID:    runID,
+			TargetID:     hb.TargetID,
+			ThreadID:     "heartbeat-" + hb.ID,
+			Title:        hb.TitlePrefix,
+			Prompt:       hb.Prompt,
+			Status:       "failed",
+			StartedAt:    now,
+			CompletedAt:  &completedAt,
+			DurationMs:   0,
+			Error:        "stale heartbeat (>24h overdue)",
+			Effort:       hb.Effort,
+		}
+		if createErr := CreateScheduleRun(ctx, t.db, staleRun); createErr != nil {
+			log.Printf("[Haro Ticker] Error creating stale schedule run for heartbeat %s: %v", hb.ID, createErr)
+		}
+		return
+	}
+
+	threadID := "heartbeat-" + hb.ID
+	active, err := HasActiveThreadTurn(ctx, t.db, threadID)
+	if err != nil {
+		log.Printf("[Haro Ticker] Error checking active thread turn for %s: %v", threadID, err)
+	}
+	if active {
+		log.Printf("[Haro Ticker] Heartbeat %s has active turn in thread %s; coalescing and advancing next_run_at", hb.ID, threadID)
+		if advErr := AdvanceHeartbeatNextRun(ctx, t.db, hb.ID, nextRun); advErr != nil {
+			log.Printf("[Haro Ticker] Error advancing heartbeat %s next_run_at: %v", hb.ID, advErr)
+		}
+		return
+	}
+
+	if advErr := AdvanceHeartbeatNextRun(ctx, t.db, hb.ID, nextRun); advErr != nil {
+		log.Printf("[Haro Ticker] Error advancing heartbeat %s next_run_at: %v", hb.ID, advErr)
+		return
+	}
+
+	runID := uuid.NewString()
+	wrappedPrompt := BuildHeartbeatPrompt(hb)
+	req := PromptDispatchRequest{
+		Prompt:    wrappedPrompt,
+		ChannelID: hb.TargetID,
+		SessionID: "heartbeat-" + hb.ID,
+		Title:     hb.TitlePrefix,
+		MessageID: runID,
+		Effort:    hb.Effort,
+		Silent:    true,
+		Ephemeral: boolPtr(false),
+	}
+	resp, dispatchErr := t.dispatcher.DispatchPrompt(ctx, req)
+	completedAt := time.Now().UTC()
+	durationMs := completedAt.Sub(now).Milliseconds()
+	status := "completed"
+	errMsg := ""
+	if dispatchErr != nil {
+		status = "failed"
+		errMsg = dispatchErr.Error()
+		log.Printf("[Haro Ticker] Dispatch error for heartbeat %s: %v", hb.ID, dispatchErr)
+	}
+	msgID := resp.MessageID
+	if msgID == "" {
+		msgID = runID
+	}
+	run := ScheduleRun{
+		ID:           runID,
+		ScheduleID:   hb.ID,
+		ScheduleType: "heartbeat",
+		MessageID:    msgID,
+		TargetID:     hb.TargetID,
+		ThreadID:     "heartbeat-" + hb.ID,
+		Title:        hb.TitlePrefix,
+		Prompt:       hb.Prompt,
+		Status:       status,
+		StartedAt:    now,
+		CompletedAt:  &completedAt,
+		DurationMs:   durationMs,
+		Error:        errMsg,
+		Effort:       hb.Effort,
+	}
+	if createErr := CreateScheduleRun(ctx, t.db, run); createErr != nil {
+		log.Printf("[Haro Ticker] Error creating schedule run for heartbeat %s: %v", hb.ID, createErr)
 	}
 }
 

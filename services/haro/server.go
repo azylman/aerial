@@ -82,7 +82,15 @@ func (s *Server) registerTools() {
 		Description: "List all active recurring schedules and pending reminders.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args ListSchedulesArgs) (*mcp.CallToolResult, ListSchedulesOutput, error) {
 		out, err := s.handler.ListSchedules(ctx, args)
-		return nil, out, err
+		if err != nil {
+			return nil, out, err
+		}
+		res := &mcp.CallToolResult{
+			Content: []mcp.Content{
+				&mcp.TextContent{Text: out.Summary},
+			},
+		}
+		return res, out, nil
 	})
 
 	mcp.AddTool(s.mcpServer, &mcp.Tool{
@@ -91,6 +99,22 @@ func (s *Server) registerTools() {
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args CancelScheduleArgs) (*mcp.CallToolResult, CancelScheduleOutput, error) {
 		out, err := s.handler.CancelSchedule(ctx, args)
 		return nil, out, err
+	})
+
+	mcp.AddTool(s.mcpServer, &mcp.Tool{
+		Name:        "schedule_heartbeat",
+		Description: "Register a persistent heartbeat monitoring schedule evaluated periodically by Haro.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
+		res, err := HandleScheduleHeartbeat(ctx, s.handler.db, s.handler.timezone, args)
+		return res, nil, err
+	})
+
+	mcp.AddTool(s.mcpServer, &mcp.Tool{
+		Name:        "update_heartbeat",
+		Description: "Update an existing heartbeat monitoring schedule.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
+		res, err := HandleUpdateHeartbeat(ctx, s.handler.db, args)
+		return res, nil, err
 	})
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func setupTestDB(t *testing.T) *sql.DB {
@@ -555,6 +558,13 @@ func TestDB_NilDBGuards(t *testing.T) {
 		{"DeleteOneShotSchedule", func() error { _, err := DeleteOneShotSchedule(ctx, nil, "id"); return err }()},
 		{"CreateScheduleRun", CreateScheduleRun(ctx, nil, ScheduleRun{ID: "run-id"})},
 		{"PruneScheduleRuns", func() error { _, err := PruneScheduleRuns(ctx, nil, 10, 24*time.Hour, now); return err }()},
+		{"InsertHeartbeatSchedule", InsertHeartbeatSchedule(ctx, nil, HeartbeatSchedule{})},
+		{"ListHeartbeatSchedules", func() error { _, err := ListHeartbeatSchedules(ctx, nil, ""); return err }()},
+		{"GetHeartbeatSchedule", func() error { _, err := GetHeartbeatSchedule(ctx, nil, "id"); return err }()},
+		{"UpdateHeartbeatSchedule", UpdateHeartbeatSchedule(ctx, nil, HeartbeatSchedule{ID: "id"})},
+		{"GetDueHeartbeatSchedules", func() error { _, err := GetDueHeartbeatSchedules(ctx, nil, now); return err }()},
+		{"AdvanceHeartbeatNextRun", AdvanceHeartbeatNextRun(ctx, nil, "id", now)},
+		{"HasActiveThreadTurn", func() error { _, err := HasActiveThreadTurn(ctx, nil, "th"); return err }()},
 	}
 
 	for _, tc := range tests {
@@ -872,4 +882,785 @@ func TestTicker_StartLifecycle(t *testing.T) {
 	zeroCtx, zeroCancel := context.WithCancel(context.Background())
 	zeroCancel()
 	zeroTicker.Start(zeroCtx)
+}
+
+func TestPureHelpers_BuildHeartbeatPrompt(t *testing.T) {
+	tests := []struct {
+		name         string
+		schedule     HeartbeatSchedule
+		wantContains []string
+	}{
+		{
+			name: "default title when empty",
+			schedule: HeartbeatSchedule{
+				ID:          "hb-1",
+				TargetID:    "1234567890",
+				TitlePrefix: "",
+				Prompt:      "Check node exporter disk",
+			},
+			wantContains: []string{
+				"Target Discord Channel ID for Escalations: 1234567890",
+				`channel_id "1234567890"`,
+				`title "Heartbeat Alert"`,
+				"Check node exporter disk",
+				`<\HEARTBEAT_INSTRUCTIONS>`,
+			},
+		},
+		{
+			name: "custom title prefix and trimmed fields",
+			schedule: HeartbeatSchedule{
+				ID:          "hb-2",
+				TargetID:    " 9876543210 ",
+				TitlePrefix: " Disk Space Alert ",
+				Prompt:      "  Check high disk usage  ",
+			},
+			wantContains: []string{
+				"Target Discord Channel ID for Escalations: 9876543210",
+				`channel_id "9876543210"`,
+				`title "Disk Space Alert"`,
+				"Check high disk usage",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := BuildHeartbeatPrompt(tc.schedule)
+			for _, substr := range tc.wantContains {
+				if !strings.Contains(got, substr) {
+					t.Errorf("BuildHeartbeatPrompt() missing %q, got:\n%s", substr, got)
+				}
+			}
+		})
+	}
+}
+
+func TestPureHelpers_NormalizeEffort(t *testing.T) {
+	tests := []struct {
+		name       string
+		input      string
+		wantResult string
+		wantErr    bool
+	}{
+		{name: "empty defaults to low", input: "", wantResult: "low", wantErr: false},
+		{name: "whitespace defaults to low", input: "   ", wantResult: "low", wantErr: false},
+		{name: "low lowercase", input: "low", wantResult: "low", wantErr: false},
+		{name: "low uppercase trimmed", input: " LOW ", wantResult: "low", wantErr: false},
+		{name: "medium lowercase", input: "medium", wantResult: "medium", wantErr: false},
+		{name: "medium uppercase", input: "MEDIUM", wantResult: "medium", wantErr: false},
+		{name: "high lowercase", input: "high", wantResult: "high", wantErr: false},
+		{name: "high uppercase", input: "HIGH", wantResult: "high", wantErr: false},
+		{name: "invalid tier ultra", input: "ultra", wantResult: "", wantErr: true},
+		{name: "invalid tier numeric", input: "10", wantResult: "", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := NormalizeEffort(tc.input)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("NormalizeEffort(%q) error = %v, wantErr = %v", tc.input, err, tc.wantErr)
+			}
+			if got != tc.wantResult {
+				t.Errorf("NormalizeEffort(%q) = %q, want %q", tc.input, got, tc.wantResult)
+			}
+		})
+	}
+}
+
+func TestPureHelpers_IsNumericSnowflake(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{name: "empty string", input: "", want: false},
+		{name: "whitespace only", input: "   ", want: false},
+		{name: "valid numeric snowflake", input: "1562847268833337377", want: true},
+		{name: "valid short numeric", input: "12345", want: true},
+		{name: "valid with whitespace padding", input: " 1562847268833337377 ", want: true},
+		{name: "alphanumeric string", input: "12345abc", want: false},
+		{name: "alpha string", input: "general", want: false},
+		{name: "negative number", input: "-12345", want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsNumericSnowflake(tc.input); got != tc.want {
+				t.Errorf("IsNumericSnowflake(%q) = %v, want %v", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestHeartbeatDB_Operations(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	now := time.Date(2026, 10, 23, 10, 0, 0, 0, time.UTC)
+
+	// 1. InsertHeartbeatSchedule
+	hb1 := HeartbeatSchedule{
+		ID:          "hb-op-1",
+		TargetID:    "chan-1",
+		TitlePrefix: "Alert 1",
+		CronExpr:    "0 * * * *",
+		Prompt:      "Check logs",
+		Timezone:    "UTC",
+		Effort:      "low",
+		NextRunAt:   now.Add(1 * time.Hour),
+		Enabled:     true,
+		CreatedAt:   now,
+	}
+	if err := InsertHeartbeatSchedule(ctx, db, hb1); err != nil {
+		t.Fatalf("InsertHeartbeatSchedule failed: %v", err)
+	}
+
+	// Insert with zero CreatedAt, empty Timezone, empty Effort
+	hb2 := HeartbeatSchedule{
+		ID:        "hb-op-2",
+		TargetID:  "chan-2",
+		CronExpr:  "*/15 * * * *",
+		Prompt:    "Check disk",
+		NextRunAt: now.Add(15 * time.Minute),
+		Enabled:   true,
+	}
+	if err := InsertHeartbeatSchedule(ctx, db, hb2); err != nil {
+		t.Fatalf("InsertHeartbeatSchedule defaults failed: %v", err)
+	}
+
+	// 2. GetHeartbeatSchedule
+	got, err := GetHeartbeatSchedule(ctx, db, "hb-op-1")
+	if err != nil {
+		t.Fatalf("GetHeartbeatSchedule(hb-op-1) failed: %v", err)
+	}
+	if got.ID != "hb-op-1" || got.TargetID != "chan-1" || got.Effort != "low" {
+		t.Errorf("GetHeartbeatSchedule got %+v", got)
+	}
+
+	// GetHeartbeatSchedule missing
+	if _, err := GetHeartbeatSchedule(ctx, db, "non-existent"); err == nil {
+		t.Error("expected error for non-existent heartbeat")
+	}
+	if _, err := GetHeartbeatSchedule(ctx, db, "  "); err == nil {
+		t.Error("expected error for empty id")
+	}
+
+	// 3. ListHeartbeatSchedules
+	allHBs, err := ListHeartbeatSchedules(ctx, db, "")
+	if err != nil {
+		t.Fatalf("ListHeartbeatSchedules failed: %v", err)
+	}
+	if len(allHBs) != 2 {
+		t.Errorf("ListHeartbeatSchedules all got %d items, want 2", len(allHBs))
+	}
+
+	filteredHBs, err := ListHeartbeatSchedules(ctx, db, "chan-1")
+	if err != nil {
+		t.Fatalf("ListHeartbeatSchedules(chan-1) failed: %v", err)
+	}
+	if len(filteredHBs) != 1 || filteredHBs[0].ID != "hb-op-1" {
+		t.Errorf("ListHeartbeatSchedules(chan-1) got %+v, want hb-op-1", filteredHBs)
+	}
+
+	// 4. UpdateHeartbeatSchedule
+	hb1.TitlePrefix = "Updated Title"
+	hb1.Effort = "high"
+	if err := UpdateHeartbeatSchedule(ctx, db, hb1); err != nil {
+		t.Fatalf("UpdateHeartbeatSchedule failed: %v", err)
+	}
+	updated, err := GetHeartbeatSchedule(ctx, db, "hb-op-1")
+	if err != nil {
+		t.Fatalf("GetHeartbeatSchedule after update failed: %v", err)
+	}
+	if updated.TitlePrefix != "Updated Title" || updated.Effort != "high" {
+		t.Errorf("updated heartbeat = %+v, want title 'Updated Title' and effort 'high'", updated)
+	}
+
+	// Update non-existent
+	hbMissing := hb1
+	hbMissing.ID = "missing"
+	if err := UpdateHeartbeatSchedule(ctx, db, hbMissing); err == nil {
+		t.Error("expected error updating missing heartbeat")
+	}
+	hbEmptyID := hb1
+	hbEmptyID.ID = ""
+	if err := UpdateHeartbeatSchedule(ctx, db, hbEmptyID); err == nil {
+		t.Error("expected error updating empty id")
+	}
+	hbBadEffort := hb1
+	hbBadEffort.Effort = "bad-tier"
+	if err := UpdateHeartbeatSchedule(ctx, db, hbBadEffort); err == nil {
+		t.Error("expected error updating with invalid effort")
+	}
+
+	// 5. GetDueHeartbeatSchedules
+	due, err := GetDueHeartbeatSchedules(ctx, db, now.Add(20*time.Minute))
+	if err != nil {
+		t.Fatalf("GetDueHeartbeatSchedules failed: %v", err)
+	}
+	if len(due) != 1 || due[0].ID != "hb-op-2" {
+		t.Errorf("GetDueHeartbeatSchedules got %+v, want only hb-op-2", due)
+	}
+
+	// 6. AdvanceHeartbeatNextRun
+	nextTime := now.Add(2 * time.Hour)
+	if err := AdvanceHeartbeatNextRun(ctx, db, "hb-op-1", nextTime); err != nil {
+		t.Fatalf("AdvanceHeartbeatNextRun failed: %v", err)
+	}
+	advanced, _ := GetHeartbeatSchedule(ctx, db, "hb-op-1")
+	if !advanced.NextRunAt.Equal(nextTime) {
+		t.Errorf("advanced NextRunAt = %v, want %v", advanced.NextRunAt, nextTime)
+	}
+	if err := AdvanceHeartbeatNextRun(ctx, db, "missing", nextTime); err == nil {
+		t.Error("expected error advancing missing heartbeat")
+	}
+	if err := AdvanceHeartbeatNextRun(ctx, db, "  ", nextTime); err == nil {
+		t.Error("expected error advancing empty id")
+	}
+
+	// 7. DeleteSchedule deleting heartbeat
+	deleted, err := DeleteSchedule(ctx, db, "hb-op-1")
+	if err != nil || !deleted {
+		t.Fatalf("DeleteSchedule(hb-op-1) failed: deleted=%v, err=%v", deleted, err)
+	}
+	if _, err := GetHeartbeatSchedule(ctx, db, "hb-op-1"); err == nil {
+		t.Error("expected hb-op-1 to be deleted")
+	}
+}
+
+func TestHeartbeatDB_HasActiveThreadTurn(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+
+	tests := []struct {
+		name       string
+		threadID   string
+		setupQuery string
+		setupArgs  []any
+		wantActive bool
+		wantErr    bool
+	}{
+		{
+			name:       "empty thread id returns false",
+			threadID:   "",
+			wantActive: false,
+		},
+		{
+			name:       "whitespace thread id returns false",
+			threadID:   "   ",
+			wantActive: false,
+		},
+		{
+			name:       "no rows for thread returns false",
+			threadID:   "heartbeat-none",
+			wantActive: false,
+		},
+		{
+			name:       "thread with pending turn returns true",
+			threadID:   "heartbeat-pending",
+			setupQuery: "INSERT INTO messages (id, thread_id, status) VALUES (?, ?, ?)",
+			setupArgs:  []any{"msg-1", "heartbeat-pending", "pending"},
+			wantActive: true,
+		},
+		{
+			name:       "thread with uppercase PENDING turn returns true",
+			setupQuery: "INSERT INTO messages (id, thread_id, status) VALUES (?, ?, ?)",
+			setupArgs:  []any{"msg-2", "heartbeat-PENDING", "PENDING"},
+			threadID:   "heartbeat-PENDING",
+			wantActive: true,
+		},
+		{
+			name:       "thread with processing turn returns true",
+			setupQuery: "INSERT INTO messages (id, thread_id, status) VALUES (?, ?, ?)",
+			setupArgs:  []any{"msg-3", "heartbeat-proc", "processing"},
+			threadID:   "heartbeat-proc",
+			wantActive: true,
+		},
+		{
+			name:       "thread with completed turn returns false",
+			setupQuery: "INSERT INTO messages (id, thread_id, status) VALUES (?, ?, ?)",
+			setupArgs:  []any{"msg-4", "heartbeat-done", "completed"},
+			threadID:   "heartbeat-done",
+			wantActive: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.setupQuery != "" {
+				if _, err := db.Exec(tc.setupQuery, tc.setupArgs...); err != nil {
+					t.Fatalf("setup query failed: %v", err)
+				}
+			}
+			active, err := HasActiveThreadTurn(ctx, db, tc.threadID)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("HasActiveThreadTurn(%q) error = %v, wantErr = %v", tc.threadID, err, tc.wantErr)
+			}
+			if active != tc.wantActive {
+				t.Errorf("HasActiveThreadTurn(%q) = %v, want %v", tc.threadID, active, tc.wantActive)
+			}
+		})
+	}
+
+	// nil db error
+	if _, err := HasActiveThreadTurn(ctx, nil, "thread-1"); err == nil {
+		t.Error("expected error for nil db")
+	}
+}
+
+func TestHeartbeatTools_HandleScheduleHeartbeat(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+
+	tests := []struct {
+		name      string
+		defaultTZ string
+		args      map[string]any
+		wantErr   bool
+	}{
+		{
+			name:      "missing channel_id",
+			defaultTZ: "UTC",
+			args:      map[string]any{"cron_expr": "0 * * * *", "prompt": "check"},
+			wantErr:   true,
+		},
+		{
+			name:      "non-numeric snowflake channel_id",
+			defaultTZ: "UTC",
+			args:      map[string]any{"channel_id": "invalid-snowflake", "cron_expr": "0 * * * *", "prompt": "check"},
+			wantErr:   true,
+		},
+		{
+			name:      "missing cron_expr",
+			defaultTZ: "UTC",
+			args:      map[string]any{"channel_id": "1562847268833337377", "prompt": "check"},
+			wantErr:   true,
+		},
+		{
+			name:      "invalid cron_expr",
+			defaultTZ: "UTC",
+			args:      map[string]any{"channel_id": "1562847268833337377", "cron_expr": "not-a-cron", "prompt": "check"},
+			wantErr:   true,
+		},
+		{
+			name:      "missing prompt",
+			defaultTZ: "UTC",
+			args:      map[string]any{"channel_id": "1562847268833337377", "cron_expr": "0 * * * *"},
+			wantErr:   true,
+		},
+		{
+			name:      "invalid effort",
+			defaultTZ: "UTC",
+			args:      map[string]any{"channel_id": "1562847268833337377", "cron_expr": "0 * * * *", "prompt": "check", "effort": "ultra"},
+			wantErr:   true,
+		},
+		{
+			name:      "success with defaults",
+			defaultTZ: "UTC",
+			args:      map[string]any{"channel_id": "1562847268833337377", "cron_expr": "0 0 * * *", "prompt": "Monitor system health"},
+			wantErr:   false,
+		},
+		{
+			name:      "success with explicit fields",
+			defaultTZ: "America/Los_Angeles",
+			args: map[string]any{
+				"channel_id":   "1562847268833337378",
+				"cron_expr":    "*/10 * * * *",
+				"prompt":       "Check memory leaks",
+				"title_prefix": "Memory Alert",
+				"timezone":     "UTC",
+				"effort":       "high",
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := HandleScheduleHeartbeat(ctx, db, tc.defaultTZ, tc.args)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("HandleScheduleHeartbeat() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr {
+				if res == nil || len(res.Content) == 0 {
+					t.Fatalf("expected non-empty CallToolResult content")
+				}
+				textContent, ok := res.Content[0].(*mcp.TextContent)
+				if !ok || textContent.Text == "" {
+					t.Fatalf("expected TextContent, got %+v", res.Content[0])
+				}
+			}
+		})
+	}
+}
+
+func TestHeartbeatTools_HandleUpdateHeartbeat(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+
+	// Seed an existing heartbeat
+	seedRes, err := HandleScheduleHeartbeat(ctx, db, "UTC", map[string]any{
+		"channel_id": "1562847268833337377",
+		"cron_expr":  "0 0 * * *",
+		"prompt":     "Original Prompt",
+		"effort":     "low",
+	})
+	if err != nil {
+		t.Fatalf("failed to seed heartbeat: %v", err)
+	}
+	var seedMap map[string]any
+	tc := seedRes.Content[0].(*mcp.TextContent)
+	if err := json.Unmarshal([]byte(tc.Text), &seedMap); err != nil {
+		t.Fatalf("unmarshal seed map failed: %v", err)
+	}
+	hbID := seedMap["schedule_id"].(string)
+
+	tests := []struct {
+		name    string
+		args    map[string]any
+		wantErr bool
+	}{
+		{
+			name:    "missing id",
+			args:    map[string]any{"prompt": "new prompt"},
+			wantErr: true,
+		},
+		{
+			name:    "not found id",
+			args:    map[string]any{"id": "missing-uuid", "prompt": "new"},
+			wantErr: true,
+		},
+		{
+			name:    "invalid channel snowflake",
+			args:    map[string]any{"id": hbID, "channel_id": "abc"},
+			wantErr: true,
+		},
+		{
+			name:    "invalid cron_expr",
+			args:    map[string]any{"id": hbID, "cron_expr": "bad cron"},
+			wantErr: true,
+		},
+		{
+			name:    "invalid timezone",
+			args:    map[string]any{"id": hbID, "timezone": "Invalid/Zone"},
+			wantErr: true,
+		},
+		{
+			name:    "invalid effort",
+			args:    map[string]any{"id": hbID, "effort": "extreme"},
+			wantErr: true,
+		},
+		{
+			name: "valid full update",
+			args: map[string]any{
+				"id":           hbID,
+				"channel_id":   "1562847268833337999",
+				"cron_expr":    "*/30 * * * *",
+				"prompt":       "Updated Prompt",
+				"title_prefix": "New Prefix",
+				"timezone":     "America/New_York",
+				"effort":       "medium",
+				"enabled":      true,
+			},
+			wantErr: false,
+		},
+		{
+			name: "disable heartbeat",
+			args: map[string]any{
+				"id":      hbID,
+				"enabled": false,
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := HandleUpdateHeartbeat(ctx, db, tc.args)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("HandleUpdateHeartbeat() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr {
+				if res == nil || len(res.Content) == 0 {
+					t.Fatalf("expected non-empty CallToolResult content")
+				}
+			}
+		})
+	}
+}
+
+func TestToolHandler_ListSchedules_WithHeartbeats(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+	handler := NewToolHandler(&Config{Timezone: "UTC"}, db)
+
+	// Initially empty
+	emptyOut, err := handler.ListSchedules(ctx, ListSchedulesArgs{})
+	if err != nil {
+		t.Fatalf("ListSchedules empty failed: %v", err)
+	}
+	if emptyOut.Summary != "No active schedules found." {
+		t.Errorf("empty summary = %q, want 'No active schedules found.'", emptyOut.Summary)
+	}
+
+	// Add 1 recurring, 1 one-shot, and 1 heartbeat
+	_, err = handler.ScheduleRecurring(ctx, ScheduleRecurringArgs{
+		ChannelID:      "1562847268833337377",
+		CronExpression: "0 12 * * *",
+		Prompt:         "Daily Summary",
+	})
+	if err != nil {
+		t.Fatalf("ScheduleRecurring failed: %v", err)
+	}
+
+	_, err = handler.ScheduleOnce(ctx, ScheduleOnceArgs{
+		TargetID: "1562847268833337377",
+		RunAt:    "1h",
+		Prompt:   "One shot reminder",
+	})
+	if err != nil {
+		t.Fatalf("ScheduleOnce failed: %v", err)
+	}
+
+	_, err = HandleScheduleHeartbeat(ctx, db, "UTC", map[string]any{
+		"channel_id": "1562847268833337377",
+		"cron_expr":  "*/5 * * * *",
+		"prompt":     "Monitor ingress",
+	})
+	if err != nil {
+		t.Fatalf("HandleScheduleHeartbeat failed: %v", err)
+	}
+
+	out, err := handler.ListSchedules(ctx, ListSchedulesArgs{})
+	if err != nil {
+		t.Fatalf("ListSchedules failed: %v", err)
+	}
+	if len(out.Recurring) != 1 || len(out.OneShot) != 1 || len(out.Heartbeats) != 1 {
+		t.Errorf("ListSchedules count mismatch: recurring=%d, oneshot=%d, heartbeats=%d",
+			len(out.Recurring), len(out.OneShot), len(out.Heartbeats))
+	}
+	if !strings.Contains(out.Summary, "[RECURRING]") {
+		t.Errorf("summary missing [RECURRING]:\n%s", out.Summary)
+	}
+	if !strings.Contains(out.Summary, "[ONE_SHOT]") {
+		t.Errorf("summary missing [ONE_SHOT]:\n%s", out.Summary)
+	}
+	if !strings.Contains(out.Summary, "[HEARTBEAT]") {
+		t.Errorf("summary missing [HEARTBEAT]:\n%s", out.Summary)
+	}
+}
+
+func TestTicker_EvaluateDueHeartbeats_Scenarios(t *testing.T) {
+	now := time.Date(2026, 10, 23, 14, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name              string
+		hbID              string
+		cronExpr          string
+		nextRunAt         time.Time
+		setupActiveTurn   bool
+		dispatcherErr     error
+		wantDispatched    bool
+		wantStaleRun      bool
+		wantFailedRun     bool
+		wantSessionPrefix string
+	}{
+		{
+			name:              "nominal due heartbeat dispatched",
+			hbID:              "hb-nominal",
+			cronExpr:          "*/5 * * * *",
+			nextRunAt:         now.Add(-1 * time.Minute),
+			wantDispatched:    true,
+			wantSessionPrefix: "heartbeat-hb-nominal",
+		},
+		{
+			name:            "active thread turn coalesced without dispatch",
+			hbID:            "hb-coalesced",
+			cronExpr:        "*/5 * * * *",
+			nextRunAt:       now.Add(-1 * time.Minute),
+			setupActiveTurn: true,
+			wantDispatched:  false,
+		},
+		{
+			name:           "stale heartbeat overdue by more than 24h",
+			hbID:           "hb-stale",
+			cronExpr:       "0 * * * *",
+			nextRunAt:      now.Add(-25 * time.Hour),
+			wantDispatched: false,
+			wantStaleRun:   true,
+		},
+		{
+			name:           "dispatch failure recorded in schedule_runs",
+			hbID:           "hb-fail",
+			cronExpr:       "*/10 * * * *",
+			nextRunAt:      now.Add(-2 * time.Minute),
+			dispatcherErr:  fmt.Errorf("brain down"),
+			wantDispatched: true,
+			wantFailedRun:  true,
+		},
+		{
+			name:           "invalid cron expression uses 24h fallback",
+			hbID:           "hb-bad-cron",
+			cronExpr:       "invalid cron string",
+			nextRunAt:      now.Add(-1 * time.Minute),
+			wantDispatched: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := setupTestDB(t)
+			ctx := context.Background()
+
+			hb := HeartbeatSchedule{
+				ID:          tc.hbID,
+				TargetID:    "1562847268833337377",
+				TitlePrefix: "Test HB",
+				CronExpr:    tc.cronExpr,
+				Prompt:      "Raw monitoring prompt for " + tc.hbID,
+				Timezone:    "UTC",
+				Effort:      "low",
+				NextRunAt:   tc.nextRunAt,
+				Enabled:     true,
+				CreatedAt:   now.Add(-48 * time.Hour),
+			}
+			if err := InsertHeartbeatSchedule(ctx, db, hb); err != nil {
+				t.Fatalf("InsertHeartbeatSchedule failed: %v", err)
+			}
+
+			if tc.setupActiveTurn {
+				threadID := "heartbeat-" + tc.hbID
+				if _, err := db.Exec("INSERT INTO messages (id, thread_id, status) VALUES (?, ?, ?)", "msg-active-"+tc.hbID, threadID, "PENDING"); err != nil {
+					t.Fatalf("failed to insert active turn: %v", err)
+				}
+			}
+
+			mock := &mockDispatcher{
+				response: PromptDispatchResponse{Status: "ok", MessageID: "msg-dispatched"},
+				err:      tc.dispatcherErr,
+			}
+			ticker := NewTicker(db, mock, 30*time.Second)
+
+			ticker.EvaluateDueSchedules(ctx, now)
+
+			if tc.wantDispatched {
+				if len(mock.dispatched) == 0 {
+					t.Errorf("expected dispatcher to be called for %s", tc.hbID)
+				}
+				req := mock.dispatched[len(mock.dispatched)-1]
+				if !strings.Contains(req.Prompt, "Raw monitoring prompt for "+tc.hbID) {
+					t.Errorf("dispatcher prompt missing raw prompt:\n%s", req.Prompt)
+				}
+				if !strings.Contains(req.Prompt, `<\HEARTBEAT_INSTRUCTIONS>`) {
+					t.Errorf("dispatcher prompt missing <\\HEARTBEAT_INSTRUCTIONS> wrapper:\n%s", req.Prompt)
+				}
+				if req.SessionID != "heartbeat-"+tc.hbID {
+					t.Errorf("req.SessionID = %q, want 'heartbeat-%s'", req.SessionID, tc.hbID)
+				}
+				if !req.Silent {
+					t.Errorf("expected req.Silent = true")
+				}
+				if req.Ephemeral == nil || *req.Ephemeral != false {
+					t.Errorf("expected req.Ephemeral = boolPtr(false)")
+				}
+			} else {
+				if len(mock.dispatched) > 0 {
+					t.Errorf("dispatcher should NOT be called for %s, called %d times", tc.hbID, len(mock.dispatched))
+				}
+			}
+
+			// Verify schedule_runs table
+			var runCount int
+			var runStatus, runPrompt, runType string
+			_ = db.QueryRow("SELECT COUNT(*), COALESCE(MAX(status), ''), COALESCE(MAX(prompt), ''), COALESCE(MAX(schedule_type), '') FROM schedule_runs WHERE schedule_id = ?", tc.hbID).Scan(&runCount, &runStatus, &runPrompt, &runType)
+
+			if tc.wantStaleRun {
+				if runCount == 0 || runStatus != "failed" {
+					t.Errorf("expected stale failed run for %s, got count=%d, status=%s", tc.hbID, runCount, runStatus)
+				}
+			}
+			if tc.wantFailedRun {
+				if runCount == 0 || runStatus != "failed" {
+					t.Errorf("expected failed run for %s, got count=%d, status=%s", tc.hbID, runCount, runStatus)
+				}
+			}
+			if tc.wantDispatched && tc.dispatcherErr == nil {
+				if runCount == 0 || runStatus != "completed" {
+					t.Errorf("expected completed run for %s, got count=%d, status=%s", tc.hbID, runCount, runStatus)
+				}
+			}
+			if runCount > 0 {
+				if runType != "heartbeat" {
+					t.Errorf("expected schedule_type='heartbeat', got %s", runType)
+				}
+				// Verify raw prompt invariant: NEVER the wrapped <\HEARTBEAT_INSTRUCTIONS> string!
+				if strings.Contains(runPrompt, `HEARTBEAT_INSTRUCTIONS`) {
+					t.Errorf("schedule_runs.prompt must NOT contain HEARTBEAT_INSTRUCTIONS, got:\n%s", runPrompt)
+				}
+			}
+
+			// Verify next_run_at advanced past tc.nextRunAt
+			after, err := GetHeartbeatSchedule(ctx, db, tc.hbID)
+			if err != nil {
+				t.Fatalf("failed to reload heartbeat %s: %v", tc.hbID, err)
+			}
+			if !after.NextRunAt.After(tc.nextRunAt) {
+				t.Errorf("next_run_at was not advanced: before=%v, after=%v", tc.nextRunAt, after.NextRunAt)
+			}
+		})
+	}
+}
+
+func TestPureHelpers_MapArgExtractors(t *testing.T) {
+	stringTests := []struct {
+		name string
+		args map[string]any
+		keys []string
+		want string
+	}{
+		{name: "nil map", args: nil, keys: []string{"a"}, want: ""},
+		{name: "missing key", args: map[string]any{"b": "val"}, keys: []string{"a"}, want: ""},
+		{name: "empty string", args: map[string]any{"a": "   "}, keys: []string{"a"}, want: ""},
+		{name: "non string", args: map[string]any{"a": 123}, keys: []string{"a"}, want: ""},
+		{name: "valid string trimmed", args: map[string]any{"a": "  hello  "}, keys: []string{"a"}, want: "hello"},
+		{name: "fallback key", args: map[string]any{"b": "fallback"}, keys: []string{"a", "b"}, want: "fallback"},
+	}
+	for _, tc := range stringTests {
+		t.Run("string_"+tc.name, func(t *testing.T) {
+			if got := getMapString(tc.args, tc.keys...); got != tc.want {
+				t.Errorf("getMapString() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	boolTests := []struct {
+		name      string
+		args      map[string]any
+		key       string
+		wantVal   bool
+		wantFound bool
+	}{
+		{name: "nil map", args: nil, key: "k", wantVal: false, wantFound: false},
+		{name: "missing key", args: map[string]any{"other": true}, key: "k", wantVal: false, wantFound: false},
+		{name: "bool true", args: map[string]any{"k": true}, key: "k", wantVal: true, wantFound: true},
+		{name: "bool false", args: map[string]any{"k": false}, key: "k", wantVal: false, wantFound: true},
+		{name: "string true", args: map[string]any{"k": "true"}, key: "k", wantVal: true, wantFound: true},
+		{name: "string 1", args: map[string]any{"k": "1"}, key: "k", wantVal: true, wantFound: true},
+		{name: "string false", args: map[string]any{"k": "false"}, key: "k", wantVal: false, wantFound: true},
+		{name: "string 0", args: map[string]any{"k": "0"}, key: "k", wantVal: false, wantFound: true},
+		{name: "string other", args: map[string]any{"k": "maybe"}, key: "k", wantVal: false, wantFound: false},
+		{name: "non-bool type", args: map[string]any{"k": 123}, key: "k", wantVal: false, wantFound: false},
+	}
+	for _, tc := range boolTests {
+		t.Run("bool_"+tc.name, func(t *testing.T) {
+			valPtr, found := getMapBool(tc.args, tc.key)
+			if found != tc.wantFound {
+				t.Fatalf("getMapBool() found = %v, want %v", found, tc.wantFound)
+			}
+			if found {
+				if valPtr == nil || *valPtr != tc.wantVal {
+					t.Errorf("getMapBool() val = %v, want %v", valPtr, tc.wantVal)
+				}
+			}
+		})
+	}
 }
