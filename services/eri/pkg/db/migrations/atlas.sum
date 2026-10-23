@@ -1,4 +1,4 @@
-h1:nVuAg5cySqk4hHGZ4XOZnuA//6ZOVrn0p3ONYSmif+Y=
+h1:gChjwMqH2LYDvMXWPA0PAHRVnXS4zG5zsXjymlygA68=
 20261001221347_baseline.sql h1:uwrTrII8CWvC/4E6FLZx5vGvYuO48AxqjCh+Wi/43kg=
 20261002155428_add_pr_registry.sql h1:tfYt/SDhTn/o/uTIcpHMD+XnpPELqiYySBkrwS+imJQ=
 20261002164500_add_river_queue.sql h1:TOtzV6uJrR9mibPzmVN8RRQ7fVAS95WmFLTvMQ9vETk=
@@ -13,3 +13,4 @@ h1:nVuAg5cySqk4hHGZ4XOZnuA//6ZOVrn0p3ONYSmif+Y=
 20261021212126_simplify_facts_schema.sql h1:o/fUKvmPt86EO1LRr4Rkjr+3vf5Dm7L3adxGbuBzuYw=
 20261022095803_add_procedural_candidates.sql h1:Z46KYuGpafFyEKMPwE4mRELc8n3GRNjRNSZTEfOdst4=
 20261023091347_add_heartbeat_schedules.sql h1:+HBdnNPSJO0L+yREcGI+h4RTQjP9PImC/rIz0ZdZ1qs=
+20261023152500_add_event_triggers.sql h1:zlcUoaOmzJ7MtsrcjjrqtulLV4cmtb+APu9Mzsrn+Ls=
