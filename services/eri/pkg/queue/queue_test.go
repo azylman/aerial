@@ -198,12 +198,11 @@ func TestRecoverInterrupted(t *testing.T) {
 		stalenessTTL      time.Duration
 		wantCompletedIDs  []string
 		wantMsgStatuses   map[string]string
-		wantRunStatuses   map[string]string
 		wantMinDeliveries int
 	}{
-		{name: "FIFORecoveryAndScheduleRuns", seedMessages: []db.Message{{ID: "m1", ThreadID: "th-same", Status: db.StatusPending, CreatedAt: now.Add(-10 * time.Minute)}, {ID: "m2", ThreadID: "th-same", Status: db.StatusProcessing, CreatedAt: now.Add(-5 * time.Minute), UpdatedAt: now.Add(-2 * time.Minute)}, {ID: "m3", ThreadID: "th-same", Status: db.StatusCompleted, CreatedAt: now.Add(-15 * time.Minute)}}, seedRuns: []db.ScheduleRun{{ID: "r-orph", ScheduleID: "c1", TargetID: "ch1", ThreadID: "th-same", Status: "running", StartedAt: now.Add(-1 * time.Hour)}, {ID: "r-done", ScheduleID: "c2", TargetID: "ch1", ThreadID: "th-same", Status: "completed", StartedAt: now.Add(-2 * time.Hour)}}, wantCompletedIDs: []string{"m1", "m2"}, wantRunStatuses: map[string]string{"r-orph": "failed", "r-done": "completed"}},
+		{name: "FIFORecoveryAndScheduleRuns", seedMessages: []db.Message{{ID: "m1", ThreadID: "th-same", Status: db.StatusPending, CreatedAt: now.Add(-10 * time.Minute)}, {ID: "m2", ThreadID: "th-same", Status: db.StatusProcessing, CreatedAt: now.Add(-5 * time.Minute), UpdatedAt: now.Add(-2 * time.Minute)}, {ID: "m3", ThreadID: "th-same", Status: db.StatusCompleted, CreatedAt: now.Add(-15 * time.Minute)}}, wantCompletedIDs: []string{"m1", "m2"}},
 		{name: "PoisonPill_RetryAndRestartLimits", seedMessages: []db.Message{{ID: "m-retry-poison", ThreadID: "th-p1", AuthorID: "user-1", Content: "retry crash", Status: db.StatusProcessing, RetryCount: 3, CreatedAt: now.Add(-10 * time.Minute)}, {ID: "m-hard-restart", ThreadID: "th-p2", AuthorID: "http-client", Content: strings.Repeat("x", 80), Status: db.StatusProcessing, RestartCount: 5, CreatedAt: now.Add(-10 * time.Minute)}, {ID: "m-instant-crash", ThreadID: "th-p3", AuthorID: "user-2", Content: "instant crash", Status: db.StatusProcessing, RestartCount: 3, CreatedAt: now.Add(-10 * time.Minute), UpdatedAt: now.Add(-5 * time.Second)}, {ID: "m-long-running", ThreadID: "th-ok", AuthorID: "user-3", Content: "long task", Status: db.StatusProcessing, RestartCount: 3, CreatedAt: now.Add(-20 * time.Minute), UpdatedAt: now.Add(-40 * time.Second)}}, withSess: true, appCfg: config.NewFromData(&config.ConfigData{AgyBin: "agy-custom", APIKey: "key-custom"}), wantCompletedIDs: []string{"m-long-running"}, wantMsgStatuses: map[string]string{"m-retry-poison": db.StatusFailed, "m-hard-restart": db.StatusFailed, "m-instant-crash": db.StatusFailed}, wantMinDeliveries: 2},
-		{name: "Staleness_TTLAndSuperseded", seedMessages: []db.Message{{ID: "m-stale-pending", ThreadID: "th-stale", Status: db.StatusPending, CreatedAt: now.Add(-40 * time.Minute), ScheduleRunID: "run-stale"}, {ID: "m-superseded", ThreadID: "th-super", Status: db.StatusPending, CreatedAt: now.Add(-20 * time.Minute)}}, seedRuns: []db.ScheduleRun{{ID: "run-stale", ScheduleID: "c3", TargetID: "ch1", ThreadID: "th-stale", Status: "running", StartedAt: now.Add(-40 * time.Minute)}}, seedCompletedMsg: &db.Message{ID: "m-newer-completed", ThreadID: "th-super", Status: db.StatusCompleted, CreatedAt: now.Add(-10 * time.Minute)}, wantMsgStatuses: map[string]string{"m-stale-pending": db.StatusCompleted, "m-superseded": db.StatusCompleted}, wantRunStatuses: map[string]string{"run-stale": "completed"}},
+		{name: "Staleness_TTLAndSuperseded", seedMessages: []db.Message{{ID: "m-stale-pending", ThreadID: "th-stale", Status: db.StatusPending, CreatedAt: now.Add(-40 * time.Minute), ScheduleRunID: "run-stale"}, {ID: "m-superseded", ThreadID: "th-super", Status: db.StatusPending, CreatedAt: now.Add(-20 * time.Minute)}}, seedCompletedMsg: &db.Message{ID: "m-newer-completed", ThreadID: "th-super", Status: db.StatusCompleted, CreatedAt: now.Add(-10 * time.Minute)}, wantMsgStatuses: map[string]string{"m-stale-pending": db.StatusCompleted, "m-superseded": db.StatusCompleted}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -211,9 +210,6 @@ func TestRecoverInterrupted(t *testing.T) {
 			store := setupTestStore(t)
 			for _, m := range tc.seedMessages {
 				_ = insertMessage(store, m)
-			}
-			for _, r := range tc.seedRuns {
-				_ = createScheduleRun(store, r)
 			}
 			if tc.seedCompletedMsg != nil {
 				_ = insertMessage(store, *tc.seedCompletedMsg)
@@ -270,70 +266,8 @@ func TestRecoverInterrupted(t *testing.T) {
 					t.Errorf("msg %s status=%v, want %s", msgID, m, wantStatus)
 				}
 			}
-			for runID, wantStatus := range tc.wantRunStatuses {
-				if r, err := getScheduleRun(store, runID); err != nil || r == nil || r.Status != wantStatus {
-					t.Errorf("run %s status=%v, want %q", runID, r, wantStatus)
-				}
-			}
 			if len(deliveredNotifs) < tc.wantMinDeliveries {
 				t.Errorf("delivered count=%d, want >= %d", len(deliveredNotifs), tc.wantMinDeliveries)
-			}
-		})
-	}
-}
-
-func TestQueueScheduleRunLifecycle(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name, runID, scheduleID, threadID, wantMsgStatus, wantRunStatus string
-		step                                                            mockRunnerStep
-		wantEmptyErr                                                    bool
-	}{
-		{name: "Success", runID: "run-lifecycle-success-1", scheduleID: "cron-s-1", threadID: "thread-sched-s", step: mockRunnerStep{convID: "e1111111-2222-3333-4444-555555555555", response: "Success output"}, wantMsgStatus: db.StatusCompleted, wantRunStatus: "completed", wantEmptyErr: true},
-		{name: "Failure", runID: "run-lifecycle-fail-1", scheduleID: "cron-f-1", threadID: "thread-sched-f", step: mockRunnerStep{stderr: "Fatal execution error: out of memory", exitCode: 1, errMsg: "out of memory"}, wantMsgStatus: db.StatusFailed, wantRunStatus: "failed"},
-		{name: "PanicRecovery", runID: "run-panic-1", scheduleID: "cron-panic-sched", threadID: "thread-panic", step: mockRunnerStep{panicMsg: "simulated critical worker panic"}, wantMsgStatus: db.StatusFailed, wantRunStatus: "failed"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			store, doneCh := setupTestStore(t), make(chan struct{})
-			pool := NewWorkerPool(WorkerPoolConfig{
-				Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 1,
-				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-					return execMockRunnerStep(tc.step, "", sessionID)
-				},
-				DeliveryFunc: noopDelivery, TypingFunc: noopTyping,
-				OnMessageCompleted: func(msg db.Message, finalStatus string) { close(doneCh) },
-			})
-			pool.Start()
-			defer pool.Stop()
-
-			run := db.ScheduleRun{
-				ID: tc.runID, ScheduleID: tc.scheduleID, ScheduleType: "cron", TargetID: "chan-1",
-				ThreadID: tc.threadID, Title: tc.name + " Routine", Prompt: "Sync prompt", Status: "enqueued", StartedAt: time.Now().UTC().Add(-1 * time.Second),
-			}
-			if err := createScheduleRun(store, run); err != nil {
-				t.Fatalf("createScheduleRun: %v", err)
-			}
-			msg := db.Message{ID: "msg-" + tc.runID, ThreadID: tc.threadID, GuildID: "scheduled", AuthorID: "scheduler", Content: "Sync prompt", Status: db.StatusPending, ScheduleRunID: tc.runID, CreatedAt: time.Now().UTC()}
-			if err := insertMessage(store, msg); err != nil {
-				t.Fatalf("insertMessage: %v", err)
-			}
-
-			pool.Enqueue(msg)
-			waitForCompletion(t, doneCh, 3*time.Second, "schedule message execution")
-
-			dbMsg, err := getMessage(store, msg.ID)
-			if err != nil || dbMsg == nil || dbMsg.Status != tc.wantMsgStatus {
-				t.Errorf("msg status=%v (err %v), want %s", dbMsg, err, tc.wantMsgStatus)
-			}
-			runs, total, err := getScheduleRunsPaginated(store, 10, 0, tc.scheduleID, "")
-			if err != nil || total != 1 || len(runs) != 1 {
-				t.Fatalf("getScheduleRunsPaginated: %v (total=%d)", err, total)
-			}
-			r := runs[0]
-			if r.Status != tc.wantRunStatus || r.MessageID != msg.ID || r.CompletedAt == nil || r.DurationMs < 0 || (tc.wantEmptyErr && r.Error != "") || (!tc.wantEmptyErr && r.Error == "") {
-				t.Errorf("unexpected run state: %+v", r)
 			}
 		})
 	}
@@ -1484,11 +1418,6 @@ func TestWorkerPool_EffortRouting(t *testing.T) {
 		{"run-low-1", "cron-low", "msg-low-1", "thread-low", "low", "claude-sonnet-4-6-thinking"},
 	}
 	for _, c := range cases {
-		_ = createScheduleRun(store, db.ScheduleRun{
-			ID: c.runID, ScheduleID: c.schedID, ScheduleType: "cron", MessageID: c.msgID,
-			TargetID: c.threadID, ThreadID: c.threadID, Title: c.effort, Prompt: "Run routine",
-			Status: "enqueued", StartedAt: time.Now().UTC(), Effort: c.effort,
-		})
 		msg := db.Message{ID: c.msgID, ThreadID: c.threadID, AuthorID: "scheduler", AuthorName: "Scheduler", Content: "Run routine", Status: db.StatusPending, ScheduleRunID: c.runID, Effort: c.effort, CreatedAt: time.Now().UTC()}
 		_ = insertMessage(store, msg)
 		pool.Enqueue(msg)
@@ -1500,12 +1429,6 @@ func TestWorkerPool_EffortRouting(t *testing.T) {
 	mu.Unlock()
 	if len(models) != 2 || models[0] != cases[0].wantModel || models[1] != cases[1].wantModel {
 		t.Fatalf("executedModels = %v, want [%s, %s]", models, cases[0].wantModel, cases[1].wantModel)
-	}
-	for _, c := range cases {
-		runs, _, _ := getScheduleRunsPaginated(store, 10, 0, c.schedID, "")
-		if len(runs) != 1 || runs[0].Model != c.wantModel {
-			t.Errorf("schedule %s model = %+v, want %q", c.schedID, runs, c.wantModel)
-		}
 	}
 }
 
@@ -1946,11 +1869,6 @@ func TestOnWakeHook_Lifecycle(t *testing.T) {
 				if saved, _ := getMessage(store, tc.msgs[0].ID); saved == nil || saved.Status != db.StatusCompleted {
 					t.Fatalf("saved msg = %+v", saved)
 				}
-				if tc.schedRunID != "" {
-					if r, _ := getScheduleRun(store, tc.schedRunID); r == nil || r.Status != "completed" {
-						t.Errorf("scheduleRun = %+v, want status completed", r)
-					}
-				}
 			}
 			if capturedReq == nil || capturedReq.ChannelID == "" || capturedReq.Timestamp.IsZero() {
 				t.Errorf("capturedReq invalid: %+v", capturedReq)
@@ -2116,7 +2034,7 @@ func TestPreTurnHook_Lifecycle(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			hc, rc, cp, cr, saved, store := runPreTurnHookBurst(t, tc.hookResps, tc.hookErr, tc.timeoutAction, tc.initialRetry, tc.schedRunID, tc.waitAsync)
+			hc, rc, cp, cr, saved, _ := runPreTurnHookBurst(t, tc.hookResps, tc.hookErr, tc.timeoutAction, tc.initialRetry, tc.schedRunID, tc.waitAsync)
 			if hc != tc.wantHookCalls || rc != tc.wantRunner {
 				t.Fatalf("%s: hookCalls=%d runnerCalls=%d", tc.name, hc, rc)
 			}
@@ -2128,11 +2046,6 @@ func TestPreTurnHook_Lifecycle(t *testing.T) {
 			}
 			if tc.wantPromptSub != "" && !strings.Contains(cp, tc.wantPromptSub) {
 				t.Errorf("%s: prompt missing %q", tc.name, tc.wantPromptSub)
-			}
-			if tc.schedRunID != "" {
-				if r, _ := getScheduleRun(store, tc.schedRunID); r == nil || r.Status != "failed" {
-					t.Errorf("%s: run=%+v, want failed", tc.name, r)
-				}
 			}
 			if cr == nil || cr.Timestamp.IsZero() {
 				t.Errorf("%s: invalid captured request: %+v", tc.name, cr)
@@ -2158,13 +2071,9 @@ func TestPreTurnHook_HelperEdgeCases(t *testing.T) {
 	pool := NewWorkerPool(WorkerPoolConfig{Store: store, OnMessageCompleted: func(msg db.Message, status string) { completedStatus = status }})
 	schedMsg := db.Message{ID: "msg-sched-abort", ThreadID: "chan-sched", ScheduleRunID: "run-sched-abort", Status: db.StatusPending}
 	_ = insertMessage(store, schedMsg)
-	_ = createScheduleRun(store, db.ScheduleRun{ID: "run-sched-abort", ScheduleID: "s1", ScheduleType: "cron", Status: "running", StartedAt: time.Now().UTC()})
 	(&turnExecution{pool: pool, burst: []db.Message{schedMsg}, threadID: "chan-sched"}).abortBurst("manual abort")
 	if completedStatus != db.StatusCompleted {
 		t.Errorf("completedStatus=%s, want COMPLETED", completedStatus)
-	}
-	if r, _ := getScheduleRun(store, "run-sched-abort"); r == nil || r.Status != "completed" {
-		t.Errorf("schedule run status: %+v", r)
 	}
 }
 

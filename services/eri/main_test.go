@@ -474,11 +474,11 @@ func TestSchedulesEndpoints(t *testing.T) {
 	_ = store.CreateOneShotSchedule(context.Background(), db.OneShotSchedule{
 		ID: "once-1", ThreadID: "thread-456", Prompt: "Reminder with secret key github_pat_1234567890abcdef", RunAt: now.Add(30 * time.Minute), CreatedAt: now,
 	})
-	_ = store.CreateScheduleRun(context.Background(), db.ScheduleRun{
+	store.SeedScheduleRun(db.ScheduleRun{
 		ID: "run-1", ScheduleID: "cron-1", ScheduleType: "cron", MessageID: "msg-1", TargetID: "chan-123", ThreadID: "th-1",
 		Title: "Morning Brief", Prompt: "Check status with secret token ghp_secretToken1234567890", Status: "completed", StartedAt: now.Add(-2 * time.Hour), DurationMs: 4500,
 	})
-	_ = store.CreateScheduleRun(context.Background(), db.ScheduleRun{
+	store.SeedScheduleRun(db.ScheduleRun{
 		ID: "run-2", ScheduleID: "cron-1", ScheduleType: "cron", MessageID: "msg-2", TargetID: "chan-123", ThreadID: "th-2",
 		Title: "Morning Brief", Prompt: "Run routine", Status: "failed", StartedAt: now.Add(-time.Hour), DurationMs: 1200, Error: "Failed auth with token ghp_errorToken99999999",
 	})

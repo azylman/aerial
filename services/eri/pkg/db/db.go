@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -89,14 +88,6 @@ func closeWarn(closer io.Closer, name string) {
 	if closer != nil {
 		if err := closer.Close(); err != nil {
 			log.Printf("[DB] Warning closing %s: %v", name, err)
-		}
-	}
-}
-
-func rollbackWarn(tx *sql.Tx, name string) {
-	if tx != nil {
-		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
-			log.Printf("[DB] Warning rolling back %s: %v", name, err)
 		}
 	}
 }

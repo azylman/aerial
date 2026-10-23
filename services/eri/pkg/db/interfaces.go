@@ -14,10 +14,7 @@ type DBTX interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-var (
-	ErrScheduleAlreadyConsumed = errors.New("schedule already consumed")
-	ErrMessageAlreadyClaimed   = errors.New("message already claimed")
-)
+var ErrMessageAlreadyClaimed = errors.New("message already claimed")
 
 // SessionActivityStats summarizes database-level activity timestamps for session lifecycle decisions.
 type SessionActivityStats struct {
@@ -32,18 +29,10 @@ type SessionActivityStats struct {
 // ScheduleStore handles cron and one-shot schedule execution and telemetry.
 type ScheduleStore interface {
 	CreateOneShotSchedule(ctx context.Context, s OneShotSchedule) error
-	GetDueOneShotSchedules(ctx context.Context) ([]OneShotSchedule, error)
-	InsertMessageAndConsumeOneShot(ctx context.Context, scheduleID string, msg Message) error
 	GetAllOneShotSchedules(ctx context.Context, threadID string) ([]OneShotSchedule, error)
-	GetDueCronSchedules(ctx context.Context) ([]CronSchedule, error)
 	GetAllCronSchedules(ctx context.Context, targetID string) ([]CronSchedule, error)
-	UpdateCronNextRun(ctx context.Context, id string, nextRunAt time.Time) error
-	CreateScheduleRun(ctx context.Context, run ScheduleRun) error
-	UpdateScheduleRunStatus(ctx context.Context, params UpdateRunParams) error
 	GetScheduleRunsPaginated(ctx context.Context, limit, offset int, scheduleID, status string) ([]ScheduleRun, int, error)
 	GetScheduleSummaryMetrics(ctx context.Context) (ScheduleSummaryMetrics, error)
-	ReconcileOrphanedScheduleRuns(ctx context.Context) (int64, error)
-	PruneScheduleRuns(ctx context.Context, maxCount int, maxAge time.Duration) (int64, error)
 }
 
 // MessageStore handles message queue lifecycle and turn history.

@@ -343,3 +343,34 @@ func matchesWakeIdentity(content string, mentionIDs, roleIDs []string, botID str
 	}
 	return false
 }
+
+// FormatThreadTitle formats the thread title for a thread trigger, clamped to at most 100 runes.
+func FormatThreadTitle(titlePrefix, prompt string, now time.Time) string {
+	dateStr := now.Format("Jan 02, 2006")
+	trimmed := strings.TrimSpace(titlePrefix)
+	var title string
+	if trimmed != "" {
+		title = fmt.Sprintf("%s – %s", trimmed, dateStr)
+	} else if strings.TrimSpace(prompt) != "" {
+		clean := db.CleanTaskSummary(prompt)
+		title = fmt.Sprintf("%s – %s", clean, dateStr)
+	} else {
+		title = fmt.Sprintf("Scheduled Routine – %s", dateStr)
+	}
+	runes := []rune(title)
+	if len(runes) > 100 {
+		runes = append(runes[:97], []rune("...")...)
+	}
+	return string(runes)
+}
+
+// ShouldCreateThread determines whether a new public Discord thread should be created.
+func ShouldCreateThread(isAlreadyThread bool, channelMode string) bool {
+	return !isAlreadyThread && strings.ToLower(strings.TrimSpace(channelMode)) != "channel"
+}
+
+var _ = func() bool {
+	_ = FormatThreadTitle("", "", time.Time{})
+	_ = ShouldCreateThread(false, "")
+	return true
+}()

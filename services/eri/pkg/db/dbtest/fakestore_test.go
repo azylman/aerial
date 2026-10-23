@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"fmt"
 	"math"
 	"reflect"
 	"testing"
@@ -34,18 +33,10 @@ func assertStoreUnavailable(t *testing.T, s db.Store) {
 	t.Helper()
 	ctx := context.Background()
 	requireErr(t, s.CreateOneShotSchedule(ctx, db.OneShotSchedule{}), "CreateOneShotSchedule")
-	requireErr(t, c1(s.GetDueOneShotSchedules(ctx)), "GetDueOneShotSchedules")
-	requireErr(t, s.InsertMessageAndConsumeOneShot(ctx, "id", db.Message{}), "InsertMessageAndConsumeOneShot")
 	requireErr(t, c1(s.GetAllOneShotSchedules(ctx, "t")), "GetAllOneShotSchedules")
-	requireErr(t, c1(s.GetDueCronSchedules(ctx)), "GetDueCronSchedules")
 	requireErr(t, c1(s.GetAllCronSchedules(ctx, "t")), "GetAllCronSchedules")
-	requireErr(t, s.UpdateCronNextRun(ctx, "id", time.Now()), "UpdateCronNextRun")
-	requireErr(t, s.CreateScheduleRun(ctx, db.ScheduleRun{}), "CreateScheduleRun")
-	requireErr(t, s.UpdateScheduleRunStatus(ctx, db.UpdateRunParams{}), "UpdateScheduleRunStatus")
 	requireErr(t, c2(s.GetScheduleRunsPaginated(ctx, 10, 0, "", "")), "GetScheduleRunsPaginated")
 	requireErr(t, c1(s.GetScheduleSummaryMetrics(ctx)), "GetScheduleSummaryMetrics")
-	requireErr(t, c1(s.ReconcileOrphanedScheduleRuns(ctx)), "ReconcileOrphanedScheduleRuns")
-	requireErr(t, c1(s.PruneScheduleRuns(ctx, 10, time.Hour)), "PruneScheduleRuns")
 	requireErr(t, s.InsertMessage(ctx, db.Message{}), "InsertMessage")
 	requireErr(t, s.UpdateMessageStatus(ctx, "id", "", ""), "UpdateMessageStatus")
 	requireErr(t, s.UpdateMessageCompleted(ctx, "id", ""), "UpdateMessageCompleted")
@@ -254,40 +245,23 @@ func TestFakeStoreScheduleOperations(t *testing.T) {
 	_ = s.CreateOneShotSchedule(ctx, db.OneShotSchedule{ID: "os-1", ThreadID: "th-1", Prompt: "P1", RunAt: now.Add(-time.Minute)})
 	_ = s.CreateOneShotSchedule(ctx, db.OneShotSchedule{ID: "os-2", ThreadID: "th-1", Prompt: "P2", RunAt: now.Add(time.Hour)})
 
-	if due, _ := s.GetDueOneShotSchedules(ctx); len(due) != 1 || due[0].ID != "os-1" {
-		t.Errorf("GetDueOneShotSchedules = %+v, want [os-1]", due)
-	}
 	if allOS, _ := s.GetAllOneShotSchedules(ctx, "th-1"); len(allOS) != 2 {
 		t.Errorf("GetAllOneShotSchedules = %d, want 2", len(allOS))
 	}
 	_, _ = s.GetAllOneShotSchedules(ctx, "")
 
-	msg := db.Message{ID: "msg-os-1", ThreadID: "th-1", Content: "Executed"}
-	mustOK(t, s.InsertMessageAndConsumeOneShot(ctx, "os-1", msg), "InsertMessageAndConsumeOneShot")
-	if err := s.InsertMessageAndConsumeOneShot(ctx, "os-1", msg); !errors.Is(err, db.ErrScheduleAlreadyConsumed) {
-		t.Errorf("expected ErrScheduleAlreadyConsumed, got %v", err)
-	}
-
 	_ = s.CreateCronSchedule(ctx, db.CronSchedule{ID: "cron-1", TargetID: "t-1", CronExpr: "*/5 * * * *", Enabled: true, NextRunAt: now.Add(-time.Minute)})
 	_ = s.CreateCronSchedule(ctx, db.CronSchedule{ID: "cron-2", TargetID: "t-1", CronExpr: "0 * * * *", Enabled: false, NextRunAt: now.Add(-time.Minute)})
 	_ = s.CreateCronSchedule(ctx, db.CronSchedule{ID: "cron-3", TargetID: "t-2", CronExpr: "0 0 * * *", Enabled: true, NextRunAt: now.Add(time.Hour)})
 
-	if dueCron, _ := s.GetDueCronSchedules(ctx); len(dueCron) != 1 || dueCron[0].ID != "cron-1" {
-		t.Errorf("GetDueCronSchedules = %+v, want [cron-1]", dueCron)
-	}
 	if allCrons, _ := s.GetAllCronSchedules(ctx, "t-1"); len(allCrons) != 2 {
 		t.Errorf("GetAllCronSchedules = %d, want 2", len(allCrons))
 	}
 	_, _ = s.GetAllCronSchedules(ctx, "")
-	_ = s.UpdateCronNextRun(ctx, "cron-1", now.Add(10*time.Minute))
-	_ = s.UpdateCronNextRun(ctx, "cron-none", now)
 
-	_ = s.CreateScheduleRun(ctx, db.ScheduleRun{ID: "run-1", ScheduleID: "cron-1", ScheduleType: "cron", Status: "enqueued", StartedAt: now.Add(-2 * time.Hour)})
-	_ = s.CreateScheduleRun(ctx, db.ScheduleRun{ID: "run-2", ScheduleID: "cron-1", ScheduleType: "cron", Status: "completed", StartedAt: now.Add(-1 * time.Hour), DurationMs: 500})
-	_ = s.CreateScheduleRun(ctx, db.ScheduleRun{ID: "run-3", ScheduleID: "cron-3", ScheduleType: "cron", Status: "running", StartedAt: now.Add(-30 * time.Minute)})
-
-	_ = s.UpdateScheduleRunStatus(ctx, db.UpdateRunParams{RunID: "run-1", Status: "completed", MessageID: "msg-run-1", DurationMs: 1200, CompletedAt: now, Model: "claude"})
-	_ = s.UpdateScheduleRunStatus(ctx, db.UpdateRunParams{RunID: "run-none"})
+	s.SeedScheduleRun(db.ScheduleRun{ID: "run-1", ScheduleID: "cron-1", ScheduleType: "cron", Status: "enqueued", StartedAt: now.Add(-2 * time.Hour)})
+	s.SeedScheduleRun(db.ScheduleRun{ID: "run-2", ScheduleID: "cron-1", ScheduleType: "cron", Status: "completed", StartedAt: now.Add(-1 * time.Hour), DurationMs: 500})
+	s.SeedScheduleRun(db.ScheduleRun{ID: "run-3", ScheduleID: "cron-3", ScheduleType: "cron", Status: "running", StartedAt: now.Add(-30 * time.Minute)})
 
 	if runs, total, _ := s.GetScheduleRunsPaginated(ctx, 10, 0, "cron-1", ""); total != 2 || len(runs) != 2 {
 		t.Errorf("GetScheduleRunsPaginated = len %d, total %d, want 2, 2", len(runs), total)
@@ -299,29 +273,9 @@ func TestFakeStoreScheduleOperations(t *testing.T) {
 		t.Errorf("expected nil runs for large offset, got %+v", runsLarge)
 	}
 
-	if metrics, err := s.GetScheduleSummaryMetrics(ctx); err != nil || metrics.CronCount != 2 || metrics.OneShotCount != 1 || metrics.TotalRuns24h != 3 {
+	if metrics, err := s.GetScheduleSummaryMetrics(ctx); err != nil || metrics.CronCount != 2 || metrics.OneShotCount != 2 || metrics.TotalRuns24h != 3 {
 		t.Errorf("GetScheduleSummaryMetrics = %+v, %v", metrics, err)
 	}
-
-	if rec, err := s.ReconcileOrphanedScheduleRuns(ctx); err != nil || rec != 1 {
-		t.Errorf("ReconcileOrphanedScheduleRuns = %d, %v, want 1, nil", rec, err)
-	}
-	if prun, err := s.PruneScheduleRuns(ctx, 1, 48*time.Hour); err != nil || prun != 2 {
-		t.Errorf("PruneScheduleRuns = %d, %v, want 2, nil", prun, err)
-	}
-
-	if _, err := s.GetScheduleRun("non-existent-run"); !errors.Is(err, sql.ErrNoRows) {
-		t.Errorf("expected sql.ErrNoRows for non-existent run, got: %v", err)
-	}
-	_ = s.CreateScheduleRun(ctx, db.ScheduleRun{ID: "run-helper", ScheduleID: "sched-helper", Status: "completed", StartedAt: now})
-	if run, err := s.GetScheduleRun("run-helper"); err != nil || run == nil || run.Status != "completed" {
-		t.Errorf("GetScheduleRun failed: run=%+v, err=%v", run, err)
-	}
-	_, _ = s.PruneScheduleRuns(ctx, 0, 0)
-	for i := 0; i < 5; i++ {
-		_ = s.CreateScheduleRun(ctx, db.ScheduleRun{ID: fmt.Sprintf("run-limit-%d", i), ScheduleID: "sched-helper", Status: "completed", StartedAt: now.Add(time.Duration(i) * time.Minute)})
-	}
-	_, _ = s.PruneScheduleRuns(ctx, 2, time.Hour)
 }
 
 func TestFakeStoreTranscriptsPRAndVanadis(t *testing.T) {

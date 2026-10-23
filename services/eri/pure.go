@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/azylman/aerial/services/eri/pkg/runner"
+	"github.com/azylman/aerial/services/eri/pkg/transcript"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -206,4 +209,18 @@ func ResolveGuildID(msgGuildID, cachedGuildID, channelGuildID string) string {
 		return cachedGuildID
 	}
 	return channelGuildID
+}
+
+// buildSyncLLM adapts a runner.LLMFunc into a transcript.LLMClientFunc using the preferred low-effort model.
+func buildSyncLLM(rawLLM runner.LLMFunc, lowEffortModel, defaultModel string) transcript.LLMClientFunc {
+	if rawLLM == nil {
+		return nil
+	}
+	model := strings.TrimSpace(lowEffortModel)
+	if model == "" {
+		model = strings.TrimSpace(defaultModel)
+	}
+	return func(ctx context.Context, prompt string) (string, error) {
+		return rawLLM(ctx, model, prompt)
+	}
 }

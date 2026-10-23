@@ -38,7 +38,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/sanitizer"
-	"github.com/azylman/aerial/services/eri/pkg/scheduler"
 	"github.com/azylman/aerial/services/eri/pkg/session"
 	"github.com/azylman/aerial/services/eri/pkg/transcript"
 	"github.com/bwmarrin/discordgo"
@@ -1922,8 +1921,8 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	// so poison pill and recovery notifications can reliably deliver to Discord.
 	queue.RecoverInterrupted(store, pool)
 	defer func() {
-		log.Printf("Draining worker pool (10s timeout)...")
-		pool.StopWithTimeout(10 * time.Second)
+		log.Printf("Stopping worker pool...")
+		pool.Stop()
 		if dgSession != nil {
 			log.Printf("Closing Discord gateway session...")
 			if err := dgSession.Close(); err != nil {
@@ -1974,13 +1973,9 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	// Start background scheduler monitor for due cron and one-shot routines
-	sched, err := scheduler.New(cfg, store, pool, scheduler.NewDiscordThreadCreator(dgSession), scheduler.WithLLMFunc(ephemeralPool.EphemeralLLMFunc("ephemeral:summarizer")), scheduler.WithSessionRoots(sessionMgr.Roots()...))
-	if err != nil {
-		return fmt.Errorf("failed to initialize scheduler: %w", err)
-	}
-	stopScheduler := sched.Start(ctx)
-	defer stopScheduler()
+	// Start background transcript sync loop
+	syncLLM := buildSyncLLM(ephemeralPool.EphemeralLLMFunc("ephemeral:summarizer"), cur.LowEffortModel, cur.Model)
+	transcript.StartTranscriptSync(ctx, store, cfg, "", syncLLM, 5*time.Minute)
 	txEmbedder := transcript.NewEmbedder(cfg, sessionMgr.Roots()...)
 	var embedder transcript.EmbedderFunc
 	if txEmbedder != nil {

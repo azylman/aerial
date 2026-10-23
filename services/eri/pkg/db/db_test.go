@@ -135,7 +135,6 @@ func TestStoreUnavailableContract(t *testing.T) {
 	assertStoreUnavailable(t, NewSQLStore(database))
 	assertStoreUnavailable(t, &SQLStore{})
 	closeWarn(nil, "test")
-	rollbackWarn(nil, "test")
 	if isPostgres(nil) || isPostgres(database) {
 		t.Errorf("expected isPostgres false for nil/sqlite")
 	}
@@ -345,37 +344,25 @@ func TestScheduleLifecycle(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().Truncate(time.Second).UTC()
 
-	// 1. OneShot Schedule CRUD & consumption
+	// 1. OneShot Schedule CRUD
 	mustOK(t, store.CreateOneShotSchedule(ctx, OneShotSchedule{ID: "os-1", ThreadID: "th-1", Prompt: "Run once prompt", RunAt: now.Add(-time.Minute), CreatedAt: now, Effort: "low"}), "CreateOneShotSchedule")
-	if dueOS, err := store.GetDueOneShotSchedules(ctx); err != nil || len(dueOS) != 1 || dueOS[0].ID != "os-1" {
-		t.Fatalf("GetDueOneShotSchedules = %+v, %v", dueOS, err)
-	}
 	if allOS, err := store.GetAllOneShotSchedules(ctx, "th-1"); err != nil || len(allOS) != 1 {
 		t.Fatalf("GetAllOneShotSchedules = %+v, %v", allOS, err)
 	}
 	_, _ = store.GetAllOneShotSchedules(ctx, "")
 
-	msg := Message{ID: "msg-os-1", ThreadID: "th-1", Content: "Executed", Status: StatusPending}
-	mustOK(t, store.InsertMessageAndConsumeOneShot(ctx, "os-1", msg), "InsertMessageAndConsumeOneShot")
-	assertErr(t, store.InsertMessageAndConsumeOneShot(ctx, "non-existent", msg), "consuming non-existent one-shot")
-
 	// 2. Cron Schedule CRUD
 	_, err := database.ExecContext(ctx, `INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort) VALUES ('cron-1', 'chan-1', 'Weather', '0 6 * * *', 'Morning forecast', 'America/Los_Angeles', $1, true, $2, 'high')`, now.Add(-time.Minute), now)
 	mustOK(t, err, "insert cron")
 
-	if dueCron, err := store.GetDueCronSchedules(ctx); err != nil || len(dueCron) != 1 || dueCron[0].Effort != "high" {
-		t.Fatalf("GetDueCronSchedules = %+v, %v", dueCron, err)
-	}
 	if allCron, err := store.GetAllCronSchedules(ctx, "chan-1"); err != nil || len(allCron) != 1 {
 		t.Fatalf("GetAllCronSchedules = %+v, %v", allCron, err)
 	}
 	_, _ = store.GetAllCronSchedules(ctx, "")
-	mustOK(t, store.UpdateCronNextRun(ctx, "cron-1", now.Add(time.Hour)), "UpdateCronNextRun")
 
-	// 3. Schedule Runs CRUD
-	mustOK(t, store.CreateScheduleRun(ctx, ScheduleRun{ID: "run-1", ScheduleID: "cron-1", ScheduleType: "cron", TargetID: "chan-1", ThreadID: "th-1", Status: "running", StartedAt: now.Add(-2 * time.Hour), Effort: "high", Model: "claude-3-5"}), "CreateScheduleRun")
-	mustOK(t, store.UpdateScheduleRunStatus(ctx, UpdateRunParams{RunID: "run-1", Status: "completed", DurationMs: 1200, CompletedAt: now, Model: "claude-3-5"}), "UpdateScheduleRunStatus")
-	_ = store.UpdateScheduleRunStatus(ctx, UpdateRunParams{RunID: "run-1"})
+	// 3. Schedule Runs Query
+	_, err = database.ExecContext(ctx, `INSERT INTO schedule_runs (id, schedule_id, schedule_type, prompt, target_id, thread_id, status, started_at, duration_ms, completed_at, effort, model) VALUES ('run-1', 'cron-1', 'cron', 'Weather prompt', 'chan-1', 'th-1', 'completed', $1, 1200, $2, 'high', 'claude-3-5')`, now.Add(-2*time.Hour), now)
+	mustOK(t, err, "insert schedule run")
 
 	if runs, total, err := store.GetScheduleRunsPaginated(ctx, 10, 0, "cron-1", "completed"); err != nil || total != 1 || len(runs) != 1 {
 		t.Fatalf("GetScheduleRunsPaginated = len %d, total %d, %v", len(runs), total, err)
@@ -387,21 +374,6 @@ func TestScheduleLifecycle(t *testing.T) {
 	// 4. Summary metrics
 	if metrics, err := store.GetScheduleSummaryMetrics(ctx); err != nil || metrics.CronCount != 1 || metrics.TotalRuns24h != 1 {
 		t.Errorf("GetScheduleSummaryMetrics = %+v, %v", metrics, err)
-	}
-
-	// 5. Orphan reconciliation & pruning
-	_ = store.CreateScheduleRun(ctx, ScheduleRun{ID: "run-orphan", ScheduleID: "cron-1", ScheduleType: "cron", Status: "running", StartedAt: now.Add(-3 * time.Hour)})
-	if reconciled, err := store.ReconcileOrphanedScheduleRuns(ctx); err != nil || reconciled == 0 {
-		t.Errorf("ReconcileOrphanedScheduleRuns = %d, %v", reconciled, err)
-	}
-	_, errPrune := store.PruneScheduleRuns(ctx, 100, time.Hour)
-	mustOK(t, errPrune, "PruneScheduleRuns")
-
-	// 6. Empty validations
-	assertErr(t, store.CreateScheduleRun(ctx, ScheduleRun{ID: ""}), "CreateScheduleRun empty ID")
-	assertErr(t, store.UpdateScheduleRunStatus(ctx, UpdateRunParams{RunID: ""}), "UpdateScheduleRunStatus empty RunID")
-	if err := store.UpdateCronNextRun(ctx, "", time.Now()); err != nil {
-		t.Errorf("UpdateCronNextRun empty id = %v", err)
 	}
 }
 
@@ -486,10 +458,7 @@ func TestTaskHelpers(t *testing.T) {
 		})
 	}
 
-	// CloseWarn and RollbackWarn
+	// CloseWarn
 	closer := &dummyTestCloser{err: errors.New("dummy close error")}
 	closeWarn(closer, "test closer")
-	tx, _ := database.Begin()
-	_ = tx.Rollback()
-	rollbackWarn(tx, "done tx")
 }
