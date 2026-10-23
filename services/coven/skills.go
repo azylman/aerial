@@ -21,6 +21,8 @@ const (
 	DefaultSkillCliqueMinSize = 2
 	// DefaultSkillCliqueMaxSize is the maximum clique size clustered together.
 	DefaultSkillCliqueMaxSize = 5
+	// DefaultSkillCreateMinSteps is the minimum number of procedural steps required for a candidate to join a Case C (CREATE) skill clique.
+	DefaultSkillCreateMinSteps = 3
 )
 
 var (
@@ -323,8 +325,8 @@ func PlanSkillConsolidation(pending []ProceduralCandidate, diskSkills []DiskSkil
 	}
 
 	// Case C: Novel Workflow Clique
-	// Remaining unmatched candidates clustered via complete-linkage cosine similarity
-	// (minSim = 0.75, minSize = 2, maxSize = 5); each clique of size >= 2 emits a CREATE batch.
+	// Remaining unmatched candidates with >= DefaultSkillCreateMinSteps steps are clustered
+	// via complete-linkage cosine similarity (minSim = 0.70, minSize = 2, maxSize = 5).
 	cliques := findCandidateCliques(caseBUnmatched, DefaultSkillCliqueMinSim, DefaultSkillCliqueMinSize, DefaultSkillCliqueMaxSize)
 	for _, clique := range cliques {
 		domain := "discord"
@@ -345,6 +347,17 @@ func PlanSkillConsolidation(pending []ProceduralCandidate, diskSkills []DiskSkil
 	return batches, skippedIDs
 }
 
+// filterCreateCliqueCandidates retains candidates with non-empty embeddings and at least DefaultSkillCreateMinSteps steps.
+func filterCreateCliqueCandidates(cands []ProceduralCandidate) []ProceduralCandidate {
+	var group []ProceduralCandidate
+	for _, c := range cands {
+		if len(c.Embedding) > 0 && len(c.Steps) >= DefaultSkillCreateMinSteps {
+			group = append(group, c)
+		}
+	}
+	return group
+}
+
 // findCandidateCliques clusters procedural candidates into complete-linkage cliques of size [minSize, maxSize].
 func findCandidateCliques(cands []ProceduralCandidate, minSim float64, minSize, maxSize int) [][]ProceduralCandidate {
 	if minSim <= 0 {
@@ -357,12 +370,7 @@ func findCandidateCliques(cands []ProceduralCandidate, minSim float64, minSize, 
 		maxSize = DefaultSkillCliqueMaxSize
 	}
 
-	var group []ProceduralCandidate
-	for _, c := range cands {
-		if len(c.Embedding) > 0 {
-			group = append(group, c)
-		}
-	}
+	group := filterCreateCliqueCandidates(cands)
 
 	sort.Slice(group, func(i, j int) bool {
 		return group[i].ID < group[j].ID
@@ -551,7 +559,7 @@ func buildSkillDesignerPrompt(batch SkillConsolidationBatch) string {
 
 	sb.WriteString("\nInstructions:\n")
 	sb.WriteString("1. If Action is EDIT, update the existing SKILL.md content by integrating the new triggers, steps, and avoid guidance without deleting unrelated workflows. Keep frontmatter name matching the target.\n")
-	sb.WriteString("2. If Action is CREATE, design a new SKILL.md with valid YAML frontmatter (name in ^[a-z0-9-]+$, description between 20 and 500 chars), clear usage guidelines, step-by-step procedures, and avoid sections.\n")
+	sb.WriteString("2. If Action is CREATE, design a new SKILL.md with valid YAML frontmatter (name in ^[a-z0-9-]+$, description between 20 and 500 chars), clear usage guidelines, step-by-step procedures, and avoid sections ONLY when the candidates represent a cohesive multi-step user-facing domain workflow (>= 3 sequential steps); return action \"NOOP\" for single-tool CLI flags, metric lookups, or standalone shell guardrails that belong in semantic facts or rules.\n")
 	sb.WriteString("3. Enforce a 30+ days durability bar: write generalizable procedures and imperative avoid rules (+ one clause of why), stripping PR/issue numbers, commit SHAs, dates, negative tool claims (\"tool X is broken\"), transient environment errors, or unresolved dead-ends. If the candidates are noisy, transient, invalid, or do not warrant a durable skill change, return action \"NOOP\".\n")
 	sb.WriteString("4. Respond STRICTLY with a valid JSON object matching this schema:\n")
 	sb.WriteString("{\n")

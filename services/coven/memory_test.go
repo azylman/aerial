@@ -6142,6 +6142,7 @@ func testProcCand(id int64, skill, trigger string, avoid []string, emb []float32
 		Domain:      "discord",
 		LoadedSkill: skill,
 		Trigger:     trigger,
+		Steps:       []string{"step 1", "step 2", "step 3"},
 		Avoid:       avoid,
 		Embedding:   emb,
 		Status:      "pending",
@@ -6528,6 +6529,15 @@ func TestPlanSkillConsolidation(t *testing.T) {
 			wantActions:   []string{"CREATE"},
 			wantDomains:   []string{"discord"},
 			wantCandCount: []int{2},
+		},
+		{
+			name: "CaseC_ShortCandidatesUnderMinStepsDoNotFormClique",
+			pending: []ProceduralCandidate{
+				{ID: 55, Domain: "discord", Trigger: "find depth", Steps: []string{"use -maxdepth"}, Embedding: testEmbeddingAt(2, 1.0)},
+				{ID: 56, Domain: "discord", Trigger: "find cmd", Steps: []string{"pass -maxdepth 2"}, Embedding: testEmbeddingAt(2, 1.0)},
+			},
+			diskSkills:  diskSkills,
+			wantBatches: 0,
 		},
 		{
 			name: "CaseC_DissimilarCandidatesDoNotFormClique",
