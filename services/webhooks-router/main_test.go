@@ -3550,8 +3550,8 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 			wCalls := mockDisp.WidgetCalls()
 			if len(wCalls) != tc.wantWidgets {
 				t.Errorf("got %d widgets, want %d", len(wCalls), tc.wantWidgets)
-			} else if tc.wantWidgets > 0 && wCalls[0].Status != "deployed" {
-				t.Errorf("got widget status %q, want \"deployed\"", wCalls[0].Status)
+			} else if tc.wantWidgets > 0 && wCalls[0].Status != "open" {
+				t.Errorf("got widget status %q, want \"open\"", wCalls[0].Status)
 			}
 		})
 	}
@@ -3782,9 +3782,8 @@ func TestRiverWorkers(t *testing.T) {
 				job := &river.Job[WidgetSyncArgs]{
 					JobRow: &rivertype.JobRow{ID: 501},
 					Args: WidgetSyncArgs{
-						Repo:           "azylman/aerial",
-						PRNumber:       552,
-						StatusOverride: "open",
+						Repo:     "azylman/aerial",
+						PRNumber: 552,
 					},
 				}
 				err = w.Work(ctx, job)
@@ -5427,16 +5426,17 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 		mockTargetID   string
 		mockBranch     string
 		prDBStatus     string
+		prDBBanner     string
+		buildDBStatus  string
+		chunk1DBStatus string
 		repo           string
 		prNumber       int
-		statusOverride string
-		banner         string
-		deployingJobs  []string
 		olderPRs       []int
 		vanadisMatch   bool
 		dispErr        error
 		queryErr       error
 		prQueryErr     error
+		execErr        error
 		wantErr        bool
 		wantDispatched bool
 		wantQueued     int
@@ -5464,11 +5464,11 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 		},
 		{
 			name: "riverClient configured queues WidgetSyncArgs without inline HTTP dispatch", useMockReg: true, useInserter: true,
-			mockTargetID: "1555405874565091380", mockBranch: "feat/queued", repo: "aerial", prNumber: 101, statusOverride: "open", wantQueued: 1,
+			mockTargetID: "1555405874565091380", mockBranch: "feat/queued", repo: "aerial", prNumber: 101, wantQueued: 1,
 		},
 		{
 			name: "riverClient insert error returns error", useMockReg: true, useInserter: true,
-			inserterErr: errors.New("db insert failure"), repo: "azylman/aerial", prNumber: 101, statusOverride: "open", wantErr: true,
+			inserterErr: errors.New("db insert failure"), repo: "azylman/aerial", prNumber: 101, wantErr: true,
 		},
 		{
 			name:           "non-Postgres registry fallback path",
@@ -5477,7 +5477,6 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 			mockBranch:     "feat/fallback",
 			repo:           "azylman/aerial",
 			prNumber:       101,
-			statusOverride: "open",
 			wantDispatched: true,
 			wantWidgetID:   "pr-azylman/aerial-101",
 			wantStatus:     "open",
@@ -5493,50 +5492,50 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 			wantDispatched: false,
 		},
 		{
-			name:           "Postgres standalone PR with mock pool",
+			name:           "Postgres standalone PR merged status from DB",
 			repo:           "azylman/aerial",
 			prNumber:       101,
-			statusOverride: "merged",
+			prDBStatus:     "merged",
+			prDBBanner:     "stale banner ignored on merged",
 			wantDispatched: true,
 			wantWidgetID:   "pr-azylman/aerial-101",
 			wantStatus:     "merged",
+			wantBanner:     "",
 			wantChannel:    "1555405874565091380",
 			wantChunks:     1,
 		},
 		{
-			name: "Postgres standalone PR ignores stale deploying override when already deployed", prDBStatus: "deployed",
-			repo: "azylman/aerial", prNumber: 101, statusOverride: "deploying", deployingJobs: []string{"job-a"},
-			wantDispatched: true, wantWidgetID: "pr-azylman/aerial-101", wantStatus: "deployed", wantChannel: "1555405874565091380", wantChunks: 1,
+			name: "Postgres standalone PR ci_failed normalizes to failed and includes banner", prDBStatus: "ci_failed", prDBBanner: "CI check failed",
+			repo: "azylman/aerial", prNumber: 101, execErr: errors.New("exec warning"),
+			wantDispatched: true, wantWidgetID: "pr-azylman/aerial-101", wantStatus: "failed", wantBanner: "CI check failed", wantChannel: "1555405874565091380", wantChunks: 1,
 		},
 		{
-			name: "Postgres standalone PR ignores stale merged override when already deploying", prDBStatus: "deploying",
-			repo: "azylman/aerial", prNumber: 101, statusOverride: "merged",
+			name: "Postgres standalone PR deploying status from DB", prDBStatus: "deploying",
+			repo: "azylman/aerial", prNumber: 101,
 			wantDispatched: true, wantWidgetID: "pr-azylman/aerial-101", wantStatus: "deploying", wantChannel: "1555405874565091380", wantChunks: 1,
 		},
 		{
-			name:           "Postgres Vanadis chunk match with mock pool and older PR sweep",
+			name:           "Postgres Vanadis chunk match with deployed status and older PR sweep",
 			repo:           "azylman/aerial",
 			prNumber:       102,
-			statusOverride: "deployed",
-			banner:         "Deploying now",
-			deployingJobs:  []string{"job-a"},
+			prDBStatus:     "deployed",
 			olderPRs:       []int{101},
 			vanadisMatch:   true,
 			wantDispatched: true,
 			wantWidgetID:   "build-abc",
 			wantStatus:     "running",
-			wantBanner:     "Deploying now",
 			wantChunks:     2,
 		},
 		{
 			name: "Postgres deployed sweep logs warning when older PR widget dispatch fails", repo: "azylman/aerial",
-			prNumber: 102, statusOverride: "deployed", olderPRs: []int{101}, vanadisMatch: true, dispErr: errors.New("dispatch error"), wantErr: true,
+			prNumber: 102, prDBStatus: "deployed", olderPRs: []int{101}, vanadisMatch: true, dispErr: errors.New("dispatch error"), wantErr: true,
 		},
 		{
-			name:           "Postgres Vanadis chunk completed status override",
+			name:           "Postgres Vanadis chunk completed build status from DB",
 			repo:           "azylman/aerial",
 			prNumber:       102,
-			statusOverride: "completed",
+			prDBStatus:     "merged",
+			buildDBStatus:  "completed",
 			vanadisMatch:   true,
 			wantDispatched: true,
 			wantWidgetID:   "build-abc",
@@ -5544,15 +5543,21 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 			wantChunks:     2,
 		},
 		{
-			name:           "Postgres Vanadis chunk failed status override",
+			name:           "Postgres Vanadis chunk deploy_failed sets build status failed and banner",
 			repo:           "azylman/aerial",
 			prNumber:       102,
-			statusOverride: "failed",
+			prDBStatus:     "deploy_failed",
+			prDBBanner:     "Deploy failed",
 			vanadisMatch:   true,
 			wantDispatched: true,
 			wantWidgetID:   "build-abc",
 			wantStatus:     "failed",
+			wantBanner:     "Deploy failed",
 			wantChunks:     2,
+		},
+		{
+			name: "Postgres Vanadis chunk conflict and closed resolution variants", repo: "azylman/aerial", prNumber: 102,
+			prDBStatus: "closed", chunk1DBStatus: "pr_opened", vanadisMatch: true, wantDispatched: true, wantWidgetID: "build-abc", wantStatus: "failed", wantChunks: 2,
 		},
 		{
 			name:         "Postgres Vanadis chunk dispatch error",
@@ -5593,11 +5598,17 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 
 			if tc.useNilServer {
 				var nilSrv *RouterServer
-				if err := nilSrv.SyncPRWidget(ctx, tc.repo, tc.prNumber, tc.statusOverride, tc.banner, tc.deployingJobs); err != nil {
+				nilSrv.setPRWidgetState(ctx, tc.repo, tc.prNumber, "conflict", "banner")
+				if err := nilSrv.SyncPRWidget(ctx, tc.repo, tc.prNumber); err != nil {
 					t.Fatalf("SyncPRWidget nil server err = %v", err)
 				}
 				if err := nilSrv.ProcessWidgetSync(ctx, WidgetSyncArgs{Repo: tc.repo, PRNumber: tc.prNumber}); err != nil {
 					t.Fatalf("ProcessWidgetSync nil server err = %v", err)
+				}
+				for _, pair := range [][2]string{
+					{"failed", "open"}, {"running", "deploying"}, {"pr_opened", "conflict"}, {"merged", "closed"}, {"pr_opened", ""},
+				} {
+					_ = resolveVanadisChunkWidgetStatus(pair[0], pair[1])
 				}
 				return
 			}
@@ -5608,12 +5619,13 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 					resolveBranch:   tc.mockBranch,
 				}
 				srv := newTestRouter(Config{}, nil, reg, mockDisp)
+				srv.setPRWidgetState(ctx, tc.repo, tc.prNumber, "conflict", "banner")
 				var inserter *mockRiverInserter
 				if tc.useInserter {
 					inserter = &mockRiverInserter{err: tc.inserterErr}
 					srv.SetRiverClient(inserter)
 				}
-				err := srv.SyncPRWidget(ctx, tc.repo, tc.prNumber, tc.statusOverride, tc.banner, tc.deployingJobs)
+				err := srv.SyncPRWidget(ctx, tc.repo, tc.prNumber)
 				if (err != nil) != tc.wantErr {
 					t.Fatalf("SyncPRWidget fallback err = %v, wantErr = %v", err, tc.wantErr)
 				}
@@ -5636,6 +5648,9 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 			}
 
 			pool := &mockVanadisPgxPool{
+				execFn: func(qCtx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+					return pgconn.NewCommandTag("UPDATE 1"), tc.execErr
+				},
 				queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
 					if strings.Contains(sql, "FROM vanadis_chunks") {
 						if !tc.vanadisMatch {
@@ -5648,7 +5663,11 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 							*dest[3].(*int) = 2
 							*dest[4].(*string) = "Vanadis Build Title"
 							*dest[5].(*string) = "Vanadis Objective"
-							*dest[6].(*string) = "running"
+							bStat := tc.buildDBStatus
+							if bStat == "" {
+								bStat = "running"
+							}
+							*dest[6].(*string) = bStat
 							*dest[7].(*string) = "old-build-msg"
 							return nil
 						}}
@@ -5675,6 +5694,9 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 							if len(dest) > 5 {
 								*dest[5].(*time.Time) = prUpdate
 							}
+							if len(dest) > 6 {
+								*dest[6].(*string) = tc.prDBBanner
+							}
 							return nil
 						}}
 					}
@@ -5687,16 +5709,23 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 					if tc.queryErr != nil {
 						return nil, tc.queryErr
 					}
+					c1Stat := tc.chunk1DBStatus
+					if c1Stat == "" {
+						c1Stat = "running"
+					}
 					chunks := []VanadisChunkSummary{
 						{ID: "chunk-0", ChunkIndex: 0, Repo: "aerial", Title: "Chunk 0", Status: "merged", PRNumber: 101, StartedAt: chunk0Start, UpdatedAt: chunk0Update},
-						{ID: "chunk-1", ChunkIndex: 1, Repo: "", Title: "Chunk 1", Status: "running", PRNumber: 102},
+						{ID: "chunk-1", ChunkIndex: 1, Repo: "", Title: "Chunk 1", Status: c1Stat, PRNumber: 102},
 					}
 					return &mockVanadisPgxRows{items: chunks}, nil
 				},
 			}
 
 			srv := newTestRouter(Config{}, nil, NewPostgresPRRegistry(pool), mockDisp)
-			err := srv.SyncPRWidget(ctx, tc.repo, tc.prNumber, tc.statusOverride, tc.banner, tc.deployingJobs)
+			if tc.prDBBanner != "" {
+				srv.setPRWidgetState(ctx, tc.repo, tc.prNumber, tc.prDBStatus, tc.prDBBanner)
+			}
+			err := srv.SyncPRWidget(ctx, tc.repo, tc.prNumber)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("SyncPRWidget err = %v, wantErr = %v", err, tc.wantErr)
 			}
@@ -5706,8 +5735,8 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 					t.Fatalf("expected widget call dispatched")
 				}
 				last := calls[len(calls)-1]
-				if last.ID != tc.wantWidgetID || last.Banner != tc.banner || len(last.Chunks) != tc.wantChunks {
-					t.Errorf("unexpected widget request: %+v", last)
+				if last.ID != tc.wantWidgetID || last.Status != tc.wantStatus || last.Banner != tc.wantBanner || len(last.Chunks) != tc.wantChunks {
+					t.Errorf("unexpected widget request: %+v, want ID=%q Status=%q Banner=%q Chunks=%d", last, tc.wantWidgetID, tc.wantStatus, tc.wantBanner, tc.wantChunks)
 				}
 			}
 		})

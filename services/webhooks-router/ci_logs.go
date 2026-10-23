@@ -203,7 +203,8 @@ func (s *RouterServer) dispatchCIFailurePrompt(ctx context.Context, targetID, ch
 	if prNum > 0 && s.registry != nil {
 		if _, isPg := s.registry.(*PostgresPRRegistry); isPg {
 			banner := fmt.Sprintf("CI check %q failed", checkName)
-			if err := s.SyncPRWidget(ctx, repo, prNum, "failed", banner, nil); err == nil {
+			s.setPRWidgetState(ctx, repo, prNum, "", banner)
+			if err := s.SyncPRWidget(ctx, repo, prNum); err == nil {
 				dmMsg = ""
 			}
 		}
@@ -289,8 +290,11 @@ func (s *RouterServer) notifyRemediationCap(ctx context.Context, res *ResolvedGi
 		}
 	}
 	banner := fmt.Sprintf("CI remediation cap (%d/%d) reached — awaiting human review", maxCIRemediationAttempts, maxCIRemediationAttempts)
-	if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber, "failed", banner, nil); err != nil {
-		log.Printf("[webhooks-router] [widget] sync pr widget error: %v", err)
+	if res != nil {
+		s.setPRWidgetState(ctx, res.Repo, res.PRNumber, "", banner)
+		if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
+			log.Printf("[webhooks-router] [widget] sync pr widget error: %v", err)
+		}
 	}
 	if s.dispatcher == nil || !IsValidDiscordSnowflake(res.TargetID) {
 		return
