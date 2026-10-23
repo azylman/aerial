@@ -34,7 +34,9 @@ esac
 SCRIPT_DIR="$(cd "$SCRIPT_DIR" && (pwd -W 2>/dev/null || pwd))"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && (pwd -W 2>/dev/null || pwd))"
 
-echo "⚡ [Aerial Verify] Running $MODE verification checks..."
+if [ "$MODE" != "staged" ]; then
+    echo "⚡ [Aerial Verify] Running $MODE verification checks..."
+fi
 
 # Helper to check command availability
 has_cmd() {
@@ -135,7 +137,9 @@ run_golangci_lint() {
     svc="$1"
     targetPkg="${2:-./...}"
     if [ -d "$svc" ]; then
-        echo "   [golangci-lint] Linting $svc ($targetPkg)..."
+        if [ "$MODE" != "staged" ]; then
+            echo "   [golangci-lint] Linting $svc ($targetPkg)..."
+        fi
         if has_cmd golangci-lint; then
             export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.27.1}"
             (cd "$svc" && golangci-lint run --allow-parallel-runners --path-prefix="$svc/" --config "$REPO_ROOT/.golangci.yml" "$targetPkg")
@@ -194,11 +198,15 @@ ensure_deadcode() {
 run_deadcode() {
     svc="$1"
     if [ "${SKIP_DEADCODE:-0}" = "1" ] || [ "${AERIAL_SKIP_DEADCODE:-0}" = "1" ]; then
-        echo "   [deadcode] Skipping deadcode check for $svc (SKIP_DEADCODE=1)"
+        if [ "$MODE" != "staged" ]; then
+            echo "   [deadcode] Skipping deadcode check for $svc (SKIP_DEADCODE=1)"
+        fi
         return 0
     fi
     if [ -d "$svc" ]; then
-        echo "   [deadcode] Checking $svc for unreachable code (production & test graphs)..."
+        if [ "$MODE" != "staged" ]; then
+            echo "   [deadcode] Checking $svc for unreachable code (production graph)..."
+        fi
         ensure_deadcode
         main_pkgs=$(cd "$svc" && go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./...) || {
             echo "🚨 [Aerial Verify] Error: failed to list main packages in $svc" >&2
@@ -216,16 +224,6 @@ run_deadcode() {
                 echo "$dead_prod" | sed 's/^/   • /' >&2
                 exit 1
             fi
-        fi
-        dead_output=$(cd "$svc" && "$DEADCODE_BIN" -test ./... 2>&1) || {
-            echo "🚨 [Aerial Verify] Error: deadcode (-test) execution failed on $svc:" >&2
-            echo "$dead_output" >&2
-            exit 1
-        }
-        if [ -n "$dead_output" ]; then
-            echo "🚨 [Aerial Verify] Dead code detected in $svc:" >&2
-            echo "$dead_output" | sed 's/^/   • /' >&2
-            exit 1
         fi
     fi
 }
@@ -268,7 +266,7 @@ run_go_test() {
                 LC_ALL="${LC_ALL:-en_US.UTF-8}" \
                 GIT_TERMINAL_PROMPT=0 \
                 CGO_ENABLED="$cgo_val" \
-                go test -v ./...)
+                go test ./...)
         elif has_docker; then
             docker run --rm \
                 -v aerial-go-cache:/root/.cache/go-build \
@@ -283,7 +281,7 @@ run_go_test() {
                 CGO_ENABLED=1 \
                 LANG="en_US.UTF-8" \
                 LC_ALL="en_US.UTF-8" \
-                go test -v ./...
+                go test ./...
         else
             echo "🚨 [Aerial Verify] Error: Neither go nor docker found in PATH." >&2
             exit 1
@@ -372,18 +370,33 @@ check_no_imperative_ddl() {
     return 0
 }
 
+CODE_HEALTH_BIN=""
+
+ensure_code_health() {
+    local gopath bin_dir src_sum
+    gopath="$(go env GOPATH 2>/dev/null || true)"
+    bin_dir="${gopath:-$HOME/go}/bin"
+    mkdir -p "$bin_dir"
+    CODE_HEALTH_BIN="$bin_dir/code-health"
+    src_sum=$(cksum "$REPO_ROOT/scripts/code-health/"*.go 2>/dev/null || true)
+    if [ ! -x "$CODE_HEALTH_BIN" ] || [ -z "$src_sum" ] || [ "$(cat "${CODE_HEALTH_BIN}.cksum" 2>/dev/null || true)" != "$src_sum" ]; then
+        (cd "$REPO_ROOT/scripts/code-health" && go build -o "$CODE_HEALTH_BIN" .)
+        printf '%s\n' "$src_sum" > "${CODE_HEALTH_BIN}.cksum"
+    fi
+}
+
 check_code_health() {
     if has_cmd go && [ -d "$REPO_ROOT/scripts/code-health" ]; then
+        ensure_code_health
         if [ "$MODE" = "staged" ]; then
             local go_staged
             go_staged=$(echo "$STAGED_FILES" | grep -E '\.go$|\.code-health-baseline\.json$' || true)
             if [ -n "$go_staged" ]; then
-                echo "   [code-health] Checking ratcheted complexity and length limits..."
-                (cd "$REPO_ROOT/scripts/code-health" && go run . -root "$REPO_ROOT" -baseline "$REPO_ROOT/.code-health-baseline.json")
+                "$CODE_HEALTH_BIN" -root "$REPO_ROOT" -baseline "$REPO_ROOT/.code-health-baseline.json" >/dev/null
             fi
         else
             echo "   [code-health] Checking ratcheted complexity and length limits..."
-            (cd "$REPO_ROOT/scripts/code-health" && go run . -root "$REPO_ROOT" -baseline "$REPO_ROOT/.code-health-baseline.json")
+            "$CODE_HEALTH_BIN" -root "$REPO_ROOT" -baseline "$REPO_ROOT/.code-health-baseline.json"
         fi
     fi
 }

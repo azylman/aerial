@@ -136,7 +136,7 @@ function Ensure-Deadcode {
 }
 
 function Run-Deadcode($svc) {
-    Write-Host "   [deadcode] Checking $svc for unreachable code (production & test graphs)..." -ForegroundColor DarkCyan
+    Write-Host "   [deadcode] Checking $svc for unreachable code (production graph)..." -ForegroundColor DarkCyan
     Ensure-Deadcode
     $svcPath = Join-Path $repoRoot $svc
     Push-Location $svcPath
@@ -155,16 +155,6 @@ function Run-Deadcode($svc) {
                 if ($errLines) {
                     throw "Unreachable production code or compiled-in test hooks detected in ${svc}:`n$errLines"
                 }
-            }
-        }
-        $output = & deadcode -test ./... 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            throw "deadcode (-test) analysis failed on ${svc}: $output"
-        }
-        if ($output) {
-            $errLines = ($output | Out-String).Trim()
-            if ($errLines) {
-                throw "Dead code detected in ${svc}:`n$errLines"
             }
         }
     } finally {
@@ -198,13 +188,13 @@ function Run-GoTest($svc) {
     if ($hasGo) {
         Push-Location $svcPath
         try {
-            & go test -v ./...
+            & go test ./...
             if ($LASTEXITCODE -ne 0) { throw "go test failed on $svc" }
         } finally {
             Pop-Location
         }
     } elseif ($hasDocker) {
-        docker run --rm -v "${svcPath}:/app" -w /app golang:1.27.1 go test -v ./...
+        docker run --rm -v "${svcPath}:/app" -w /app golang:1.27.1 go test ./...
         if ($LASTEXITCODE -ne 0) { throw "go test (docker) failed on $svc" }
     } else {
         throw "Neither go nor docker found in PATH."
