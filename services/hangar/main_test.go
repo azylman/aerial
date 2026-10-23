@@ -1273,8 +1273,8 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 				wantInitialCalls:  1,
 				wantModifiedCalls: 1,
 				untouchedCtx:      ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_untouched", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/voice/voice.yaml"}},
-				sameContentCtx:    ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_same", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"config.yaml"}},
-				modifiedCtx:       ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_modified", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"config.yaml"}},
+				sameContentCtx:    ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_same", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"config.yaml"}, ExpectedJobs: []string{"eri"}},
+				modifiedCtx:       ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_modified", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"config.yaml"}, ExpectedJobs: []string{"eri"}},
 				wantJobName:       "eri",
 			},
 			{
@@ -1301,8 +1301,8 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 				cacheKey:         "nomad/jobs/homepage",
 				wantInitialCalls: 1,
 				untouchedCtx:     ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_untouched", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/voice/voice.yaml"}},
-				sameContentCtx:   ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_same", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/homepage/homepage.yaml"}},
-				modifiedCtx:      ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_modified", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"homepage/widgets.yaml"}},
+				sameContentCtx:   ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_same", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/homepage/homepage.yaml"}, ExpectedJobs: []string{"homepage"}},
+				modifiedCtx:      ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_modified", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"homepage/widgets.yaml"}, ExpectedJobs: []string{"homepage"}},
 				wantJobName:      "homepage",
 			},
 			{
@@ -1327,8 +1327,8 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 				cacheKey:         "nomad/jobs/orin-voice:CONFIG_YAML",
 				wantInitialCalls: 2,
 				untouchedCtx:     ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_untouched", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/hangar/hangar.yaml"}},
-				sameContentCtx:   ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_same", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/voice/voice.yaml"}},
-				modifiedCtx:      ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_modified", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/voice/voice.yaml"}},
+				sameContentCtx:   ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_same", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/voice/voice.yaml"}, ExpectedJobs: []string{"orin-voice"}},
+				modifiedCtx:      ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_modified", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/voice/voice.yaml"}, ExpectedJobs: []string{"orin-voice"}},
 				wantJobName:      "orin-voice",
 			},
 		}
@@ -1364,10 +1364,25 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 					t.Fatalf("expected cache to be primed for %s", tc.cacheKey)
 				}
 
-				// (d) diff-gated same-content file
+				// (d) diff-gated same-content file with CommitSHA after periodic sync (not suppressed by un-SHA'd cache, then cached on repeat)
+				wantMod := tc.wantModifiedCalls
+				if wantMod == 0 {
+					wantMod = 1
+				}
 				callsBeforeSame := len(env.nomadCalls())
-				if err := tc.syncFn(env.daemon, env.configDir, tc.sameContentCtx); err != nil || len(env.nomadCalls()) != callsBeforeSame {
-					t.Fatalf("same content calls = %d, want %d", len(env.nomadCalls()), callsBeforeSame)
+				if err := tc.syncFn(env.daemon, env.configDir, tc.sameContentCtx); err != nil || len(env.nomadCalls()) != callsBeforeSame+wantMod {
+					t.Fatalf("same content with commitSHA calls = %d, want %d", len(env.nomadCalls()), callsBeforeSame+wantMod)
+				}
+				sameEvts := env.waitForEvents(t, wantMod)
+				if len(sameEvts) == 0 || sameEvts[0].CommitSHA != tc.sameContentCtx.CommitSHA || len(sameEvts[0].ExpectedJobs) != 1 || sameEvts[0].ExpectedJobs[0] != tc.wantJobName {
+					t.Fatalf("expected deploy_started with commitSHA %s and expected_jobs [%s], got %+v", tc.sameContentCtx.CommitSHA, tc.wantJobName, sameEvts)
+				}
+				callsAfterFirstSame := len(env.nomadCalls())
+				if err := tc.syncFn(env.daemon, env.configDir, tc.sameContentCtx); err != nil || len(env.nomadCalls()) != callsAfterFirstSame {
+					t.Fatalf("repeated same content with same commitSHA calls = %d, want %d", len(env.nomadCalls()), callsAfterFirstSame)
+				}
+				if err := tc.syncFn(env.daemon, env.configDir); err != nil || len(env.nomadCalls()) != callsAfterFirstSame {
+					t.Fatalf("periodic sync after commitSHA push calls = %d, want %d", len(env.nomadCalls()), callsAfterFirstSame)
 				}
 
 				// (e) diff-gated modified file
@@ -1377,10 +1392,6 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 					t.Fatalf("modified sync error: %v", err)
 				}
 				calls := env.nomadCalls()
-				wantMod := tc.wantModifiedCalls
-				if wantMod == 0 {
-					wantMod = 1
-				}
 				if len(calls) != callsBeforeMod+wantMod {
 					t.Fatalf("expected %d new call(s), got %d (total %d)", wantMod, len(calls)-callsBeforeMod, len(calls))
 				}
@@ -1391,7 +1402,7 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 				evts := env.waitForEvents(t, wantMod)
 				var foundJob bool
 				for _, evt := range evts {
-					if evt.Event == "deploy_started" && evt.JobName == tc.wantJobName && evt.Repo == tc.modifiedCtx.Repo && evt.CommitSHA == tc.modifiedCtx.CommitSHA && evt.PRNumber == tc.modifiedCtx.PRNumber && evt.TargetID == tc.modifiedCtx.TargetID {
+					if evt.Event == "deploy_started" && evt.JobName == tc.wantJobName && evt.Repo == tc.modifiedCtx.Repo && evt.CommitSHA == tc.modifiedCtx.CommitSHA && evt.PRNumber == tc.modifiedCtx.PRNumber && evt.TargetID == tc.modifiedCtx.TargetID && len(evt.ExpectedJobs) == 1 && evt.ExpectedJobs[0] == tc.wantJobName {
 						foundJob = true
 						break
 					}
@@ -2959,6 +2970,7 @@ type gitPushCase struct {
 	wantBuilding         bool
 	wantNomadChanged     bool
 	wantApplied          []string
+	wantExpectedJobs     []string
 	wantEvents           []string
 	wantCommit           string
 	wantDeployJob        string
@@ -3059,6 +3071,7 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) { // t.Run(
 			wantCode:         http.StatusOK,
 			wantNomadChanged: true,
 			wantApplied:      []string{"migrate"},
+			wantExpectedJobs: []string{"migrate"},
 			wantDeployJob:    "migrate",
 		},
 		{
@@ -3091,6 +3104,7 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) { // t.Run(
 			wantBuilding:     true,
 			wantNomadChanged: true,
 			wantApplied:      []string{"coverage-ingest"},
+			wantExpectedJobs: []string{"coverage-ingest", "vanadis"},
 			checkDeferralJob: "vanadis",
 		},
 		{
@@ -3106,6 +3120,7 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) { // t.Run(
 			wantBuilding:     true,
 			wantNomadChanged: true,
 			wantApplied:      []string{"eri"},
+			wantExpectedJobs: []string{"eri", "hangar"},
 		},
 		{
 			name: "job rename with containers building defers delete",
@@ -3124,6 +3139,7 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) { // t.Run(
 			wantBuilding:        true,
 			wantNomadChanged:    true,
 			wantApplied:         nil,
+			wantExpectedJobs:    []string{"coven"},
 			checkPendingDeletes: []string{"memory-mcp"},
 		},
 		{
@@ -3135,6 +3151,7 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) { // t.Run(
 			wantBuilding:     true,
 			wantNomadChanged: true,
 			wantApplied:      []string{"db-migrate"},
+			wantExpectedJobs: []string{"db-migrate"},
 		},
 		{
 			name:         "config sync notices nomad var put fails gracefully",
@@ -3153,6 +3170,16 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) { // t.Run(
 			checkZeroVarPutCalls: true,
 		},
 		{
+			name:             "aerial-config variable mapping resolves expected_jobs and dispatches on sync_success and deploy_started",
+			gitScript:        mockGitScript{beforeSHA: "sha_prev", afterSHA: "sha_curr", nameOnly: "services/voice/voice.yaml\n"},
+			nomadAddr:        "http://127.0.0.1:4646",
+			serviceFiles:     true,
+			req:              GitPushEventRequest{Repo: "azylman/aerial-config", Commit: "sha_curr", PRNumber: 301, TargetID: "1555422677936644147"},
+			wantCode:         http.StatusOK,
+			wantExpectedJobs: []string{"orin-voice"},
+			wantEvents:       []string{"sync_success", "deploy_started"},
+		},
+		{
 			name:             "deferred nomad job due to active build",
 			gitScript:        mockGitScript{beforeSHA: "sha_before", afterSHA: "sha_after", nameStatus: "M jobs/webhooks-router.nomad\n"},
 			jobFiles:         map[string]string{"jobs/webhooks-router.nomad": jobWithAerialImg},
@@ -3161,6 +3188,7 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) { // t.Run(
 			wantCode:         http.StatusOK,
 			wantBuilding:     true,
 			wantNomadChanged: true,
+			wantExpectedJobs: []string{"webhooks-router"},
 		},
 		{
 			name:             "image ready applies nomad job and dispatches deploy_started",
@@ -3171,6 +3199,7 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) { // t.Run(
 			wantCode:         http.StatusOK,
 			wantNomadChanged: true,
 			wantApplied:      []string{"webhooks-router"},
+			wantExpectedJobs: []string{"webhooks-router"},
 			wantEvents:       []string{"sync_success", "deploy_started"},
 		},
 		{
@@ -3235,6 +3264,17 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) { // t.Run(
 					}
 				}
 			}
+			if tc.wantExpectedJobs != nil {
+				if len(resp.ExpectedJobs) != len(tc.wantExpectedJobs) {
+					t.Errorf("ExpectedJobs = %v, want %v", resp.ExpectedJobs, tc.wantExpectedJobs)
+				} else {
+					for i, job := range tc.wantExpectedJobs {
+						if resp.ExpectedJobs[i] != job {
+							t.Errorf("ExpectedJobs[%d] = %q, want %q", i, resp.ExpectedJobs[i], job)
+						}
+					}
+				}
+			}
 			if tc.checkZeroVarPutCalls {
 				env.mu.Lock()
 				if len(env.varPutJobs) != 0 {
@@ -3253,6 +3293,9 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) { // t.Run(
 						}
 						if tc.req.TargetID != "" && evt.TargetID != tc.req.TargetID {
 							t.Errorf("TargetID = %q, want %q", evt.TargetID, tc.req.TargetID)
+						}
+						if tc.wantExpectedJobs != nil && len(evt.ExpectedJobs) != len(tc.wantExpectedJobs) {
+							t.Errorf("deploy event ExpectedJobs = %v, want %v", evt.ExpectedJobs, tc.wantExpectedJobs)
 						}
 					}
 				}
@@ -3275,6 +3318,11 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) { // t.Run(
 							}
 							if tc.req.TargetID != "" && evt.TargetID != tc.req.TargetID {
 								t.Errorf("TargetID = %q, want %q", evt.TargetID, tc.req.TargetID)
+							}
+							if tc.wantExpectedJobs != nil && (wantEvt == "sync_success" || wantEvt == "deploy_started") {
+								if len(evt.ExpectedJobs) != len(tc.wantExpectedJobs) {
+									t.Errorf("%s ExpectedJobs = %v, want %v", wantEvt, evt.ExpectedJobs, tc.wantExpectedJobs)
+								}
 							}
 							if wantEvt == "deploy_failed" {
 								if evt.Status != "failed" || !strings.Contains(evt.Details, "driver error") {

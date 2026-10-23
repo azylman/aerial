@@ -207,44 +207,6 @@ assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target4:ok' && ec
 assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target5:ok' && echo true || echo false)" "Target precedence: skips discord:worker-0 for DISCORD_THREAD_ID"
 assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target6:ok' && echo true || echo false)" "Target precedence: resolves thread_id from transcript.jsonl when worker key set"
 
-# Case 7: Candidate Nomad job name extraction from changed files
-NOMAD_JOB_EXTRACTION_CHECK=$(bash -c '
-    sample_files="nomad/jobs/cadvisor.nomad
-nomad/jobs/node-exporter.nomad
-docs/superpowers/plans/test.md
-jobs/kiosk-client.nomad"
-    job_names=$(echo "$sample_files" | grep -E "(^|/)jobs/.*\.nomad$" | sed -E "s|.*/([^/]+)\.nomad$|\1|" | sort -u || true)
-    jobs_json=$(echo "$job_names" | jq -R . | jq -s .)
-    meta_json=$(jq -n --argjson jobs "$jobs_json" "{jobs: \$jobs}")
-    echo "$meta_json" | jq -r ".jobs | join(\",\")"
-')
-assert_eq "cadvisor,kiosk-client,node-exporter" "$NOMAD_JOB_EXTRACTION_CHECK" "Candidate Nomad jobs extracted into JSON metadata"
-
-# Case 8: Nomad job extraction filters out deleted jobs via --diff-filter=d
-NOMAD_DELETED_JOB_CHECK=$(bash -c '
-    TEST_GIT_DIR=$(mktemp -d /tmp/aerial-pr-nomad-diff.XXXXXX)
-    trap "rm -rf \"$TEST_GIT_DIR\"" EXIT
-    git init -q "$TEST_GIT_DIR"
-    git -C "$TEST_GIT_DIR" config user.name "Tester"
-    git -C "$TEST_GIT_DIR" config user.email "tester@example.com"
-    mkdir -p "$TEST_GIT_DIR/jobs"
-    echo "job1" > "$TEST_GIT_DIR/jobs/kiosk-client.nomad"
-    echo "job2" > "$TEST_GIT_DIR/jobs/kiosk-ear.nomad"
-    git -C "$TEST_GIT_DIR" add .
-    git -C "$TEST_GIT_DIR" commit -q -m "initial"
-    git -C "$TEST_GIT_DIR" checkout -q -b feat
-    rm "$TEST_GIT_DIR/jobs/kiosk-client.nomad"
-    echo "job3" > "$TEST_GIT_DIR/jobs/kiosk-go2rtc.nomad"
-    git -C "$TEST_GIT_DIR" add -A
-    git -C "$TEST_GIT_DIR" commit -q -m "remove kiosk-client, add kiosk-go2rtc"
-
-    changed_nomad_files=$(git -C "$TEST_GIT_DIR" diff --name-only --diff-filter=d HEAD~1...HEAD 2>/dev/null || true)
-    job_names=$(echo "$changed_nomad_files" | grep -E "(^|/)jobs/.*\.nomad$" | sed -E "s|.*/([^/]+)\.nomad$|\1|" | sort -u || true)
-    jobs_json=$(echo "$job_names" | jq -R . | jq -s .)
-    echo "$jobs_json" | jq -r "join(\",\")"
-')
-assert_eq "kiosk-go2rtc" "$NOMAD_DELETED_JOB_CHECK" "Deleted Nomad jobs are filtered out from metadata"
-
 # Case 9: --vanadis-chunk global flag parsing and AERIAL_VANADIS_CHUNK_ID env injection
 VANADIS_FLAG_CHECK=$(bash -c "
     REPO_TEST_MODE=1
@@ -590,11 +552,9 @@ TRAILER_CHECK=$(bash -c "
     source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
     echo \"t1:\$(format_aerial_pr_trailer '1562162630997581946' 'build-123-chunk-2')\"
     echo \"t2:\$(format_aerial_pr_trailer '' '')\"
-    echo \"t3:\$(format_aerial_pr_trailer '1562162630997581946' 'build-123-chunk-2' '[\"kiosk-client\"]')\"
 ")
 assert_eq 't1:<!-- aerial-pr: {"target_id":"1562162630997581946","vanadis_chunk_id":"build-123-chunk-2"} -->' "$(echo "$TRAILER_CHECK" | grep '^t1:')" "format_aerial_pr_trailer formats compact JSON trailer comment"
 assert_eq "t2:" "$(echo "$TRAILER_CHECK" | grep '^t2:')" "format_aerial_pr_trailer returns empty string when all metadata fields are empty"
-assert_eq 't3:<!-- aerial-pr: {"target_id":"1562162630997581946","vanadis_chunk_id":"build-123-chunk-2","jobs":["kiosk-client"]} -->' "$(echo "$TRAILER_CHECK" | grep '^t3:')" "format_aerial_pr_trailer includes changed Nomad jobs when present"
 
 echo "--------------------------------------------------------"
 echo "Test results: $PASSED passed, $FAILED failed"

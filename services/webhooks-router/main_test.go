@@ -185,6 +185,13 @@ type mockPRRegistry struct {
 	ensureTargetID string
 	ensureErr      error
 
+	recordExpectedCalls []prCall
+	recordExpectedRes   bool
+	recordExpectedErr   error
+	hasExpectedCalls    []prCall
+	hasExpectedRes      bool
+	hasExpectedErr      error
+
 	err error
 }
 
@@ -367,6 +374,22 @@ func (m *mockPRRegistry) EnsurePRRegistered(ctx context.Context, repo string, pr
 		return "", err
 	}
 	return firstNonEmpty(m.ensureTargetID, targetID), nil
+}
+
+func (m *mockPRRegistry) RecordExpectedJobs(ctx context.Context, repo string, prNumber int, jobs []string) (bool, error) {
+	m.recordExpectedCalls = append(m.recordExpectedCalls, prCall{repo: repo, prNumber: prNumber, jobs: jobs})
+	if err := m.checkErr(m.recordExpectedErr); err != nil {
+		return false, err
+	}
+	return m.recordExpectedRes || len(dedupeTrimmedStrings(jobs)) > 0, nil
+}
+
+func (m *mockPRRegistry) HasExpectedDeployJobs(ctx context.Context, repo string, prNumber int) (bool, error) {
+	m.hasExpectedCalls = append(m.hasExpectedCalls, prCall{repo: repo, prNumber: prNumber})
+	if err := m.checkErr(m.hasExpectedErr); err != nil {
+		return false, err
+	}
+	return m.hasExpectedRes, nil
 }
 
 type mockOutboundDispatcher struct {
@@ -1761,6 +1784,19 @@ func TestProcessGitHubEvent(t *testing.T) {
 			payload: `{"action":"opened","number":693,"pull_request":{"number":693,"title":"fix: chunk 3","body":"PR description\n\n<!-- aerial-pr: {\"target_id\":\"1562162630997581946\",\"vanadis_chunk_id\":\"build-123-chunk-3\",\"jobs\":[]} -->","head":{"ref":"feat/chunk3","sha":"head693"}},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
 			reg:     &mockPRRegistry{ensureErr: errors.New("ensure db error")}, wantErr: true,
 		},
+		{
+			name: "merged PR on mirrormere with expected deploy jobs defers Vanadis advancement to deploy_success", event: "pull_request", delivery: "del-pr-mirrormere-expected",
+			payload: `{"action":"closed","number":220,"pull_request":{"number":220,"head":{"ref":"feat/ui-deploy","sha":"head220"},"merged":true,"merge_commit_sha":"merge220"},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
+			reg:     &mockPRRegistry{mergedTargetID: "1562162630997581946", hasExpectedRes: true},
+			disp:    &mockOutboundDispatcher{},
+			wantPR:  220, wantMergedCalls: 1, wantAdvanceCalls: 0,
+		},
+		{
+			name: "push to aerial-sidecars with expected deploy jobs defers Vanadis advancement to deploy_success", event: "push", delivery: "del-push-sidecars-expected",
+			payload: `{"ref":"refs/heads/main","after":"sidecarsha9","repository":{"full_name":"azylman/aerial-sidecars"},"head_commit":{"id":"sidecarsha9","message":"feat: merged sidecar (#320)"}}`,
+			reg:     &mockPRRegistry{resolvePRNum: 320, resolveBranch: "feat/sidecar", resolveTargetID: "target-sidecars", backfillTargetID: "target-sidecars", hasExpectedRes: true},
+			wantPR:  320, wantMergeSHA: "sidecarsha9", wantSource: "local_pr_registry", wantBackfillCalls: 1, wantAdvanceCalls: 0,
+		},
 	}
 
 	for _, tc := range cases {
@@ -2081,13 +2117,14 @@ func TestProcessHangarEvent(t *testing.T) {
 			wantTargetID: "1555405874565091380",
 		},
 		{
-			name:         "deploy_success valid snowflake with channel context",
-			evt:          mkHangarEvt("deploy_success", "brain", "azylman/aerial", "sha3d2a", 528, "1555405874565091380", "success", ""),
-			reg:          &mockPRRegistry{channelContextMap: map[string][]ChannelMessageContext{"1555405874565091380": {{AuthorName: "arcane103", Content: "Deploy the new router", ResponseText: "Working on it!"}}}},
-			disp:         &mockOutboundDispatcher{},
-			wantPR:       528,
-			wantTargetID: "1555405874565091380",
-			wantPrompts:  1,
+			name:             "deploy_success valid snowflake with channel context",
+			evt:              mkHangarEvt("deploy_success", "brain", "azylman/aerial", "sha3d2a", 528, "1555405874565091380", "success", ""),
+			reg:              &mockPRRegistry{channelContextMap: map[string][]ChannelMessageContext{"1555405874565091380": {{AuthorName: "arcane103", Content: "Deploy the new router", ResponseText: "Working on it!"}}}},
+			disp:             &mockOutboundDispatcher{},
+			wantPR:           528,
+			wantTargetID:     "1555405874565091380",
+			wantAdvanceCalls: 1,
+			wantPrompts:      1,
 			wantPromptSubs: []string{
 				"Continuous Delivery deployment completed for job brain",
 				"[arcane103]: Deploy the new router",
@@ -2164,13 +2201,14 @@ func TestProcessHangarEvent(t *testing.T) {
 			wantAdvanceCalls: 1,
 		},
 		{
-			name:         "deploy_success on aerial-config",
-			evt:          mkHangarEvt("deploy_success", "homepage", "azylman/aerial-config", "sha_cfg_succ", 242, "1555405874565091380", "success", ""),
-			reg:          &mockPRRegistry{},
-			disp:         &mockOutboundDispatcher{},
-			wantPR:       242,
-			wantTargetID: "1555405874565091380",
-			wantPrompts:  1,
+			name:             "deploy_success on aerial-config",
+			evt:              mkHangarEvt("deploy_success", "homepage", "azylman/aerial-config", "sha_cfg_succ", 242, "1555405874565091380", "success", ""),
+			reg:              &mockPRRegistry{},
+			disp:             &mockOutboundDispatcher{},
+			wantPR:           242,
+			wantTargetID:     "1555405874565091380",
+			wantAdvanceCalls: 1,
+			wantPrompts:      1,
 			wantPromptSubs: []string{
 				"Continuous Delivery deployment completed for job homepage on azylman/aerial-config",
 			},
@@ -2229,6 +2267,7 @@ func TestProcessHangarEvent(t *testing.T) {
 			wantTargetID:       "1555405874565091380",
 			wantDeployingCalls: 1,
 			wantDeployedJobs:   []string{"coverage-ingest"},
+			wantAdvanceCalls:   1,
 			wantPrompts:        1,
 			wantPromptSubs:     []string{"Continuous Delivery deployment completed for job coverage-ingest on azylman/aerial (PR #851, commit: 1fc4aaf, ref: batch-registered)"},
 		},
@@ -2250,6 +2289,46 @@ func TestProcessHangarEvent(t *testing.T) {
 			wantPR:             971,
 			wantTargetID:       "1555405874565091380",
 			wantDeployingCalls: 1,
+		},
+		{
+			name: "deploy_started with expected_jobs records expected sibling jobs before transition",
+			evt: HangarDeployEvent{
+				Event: "deploy_started", JobName: "db-migrate", ExpectedJobs: []string{"coven", "db-migrate"},
+				Repo: "azylman/aerial", CommitSHA: "bc1d3ef", PRNumber: 972, TargetID: "1555405874565091380", Status: "started",
+			},
+			reg:                &mockPRRegistry{recordExpectedErr: errors.New("record expected warn")},
+			disp:               &mockOutboundDispatcher{},
+			wantPR:             972,
+			wantTargetID:       "1555405874565091380",
+			wantDeployingCalls: 1,
+		},
+		{
+			name: "sync_success with expected_jobs suppresses premature Vanadis advancement and merged widget",
+			evt: HangarDeployEvent{
+				Event: "sync_success", JobName: "git-sync", ExpectedJobs: []string{"coven", "db-migrate"},
+				Repo: "azylman/aerial", CommitSHA: "sha_sync_exp", PRNumber: 973, TargetID: "1555405874565091380", Status: "success",
+			},
+			reg:              &mockPRRegistry{},
+			disp:             &mockOutboundDispatcher{},
+			wantPR:           973,
+			wantTargetID:     "1555405874565091380",
+			wantAdvanceCalls: 0,
+		},
+		{
+			name:             "sync_success with registry expected jobs and empty targetID suppresses Vanadis advancement",
+			evt:              mkHangarEvt("sync_success", "git-sync", "azylman/aerial", "sha_sync_reg_exp", 974, "", "success", ""),
+			reg:              &mockPRRegistry{recordExpectedRes: true},
+			wantPR:           974,
+			wantAdvanceCalls: 0,
+		},
+		{
+			name:             "sync_success tolerates RecordExpectedJobs error and advances when no expected jobs",
+			evt:              mkHangarEvt("sync_success", "git-sync", "azylman/aerial-config", "sha_sync_err", 975, "1555405874565091380", "success", ""),
+			reg:              &mockPRRegistry{recordExpectedErr: errors.New("record expected db error")},
+			disp:             &mockOutboundDispatcher{},
+			wantPR:           975,
+			wantTargetID:     "1555405874565091380",
+			wantAdvanceCalls: 1,
 		},
 	}
 
@@ -3321,6 +3400,8 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 		targetID            string
 		suppressVanadis     bool
 		suppressVanadisErr  error
+		advanceRes          *VanadisAdvancementResult
+		advanceErr          error
 		channelContextErr   error
 		channelContext      []ChannelMessageContext
 		wantTargetID        string
@@ -3389,6 +3470,32 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 			wantPrompts:         1,
 			wantWidgets:         1,
 		},
+		{
+			name:                "dispatchDeploymentSuccessPrompt Vanadis final chunk completes build without duplicate deploy_success prompt",
+			isDeploymentSuccess: true,
+			targetID:            validSnowflake,
+			advanceRes: &VanadisAdvancementResult{
+				Matched:        true,
+				Advanced:       true,
+				BuildID:        "build-final-deploy",
+				ThreadID:       validSnowflake,
+				Tier:           3,
+				Objective:      "Deploy service",
+				BuildCompleted: true,
+				Chunks:         []VanadisChunkSummary{{ChunkIndex: 0, Title: "Chunk 1", Status: "merged", PRNumber: 558}},
+			},
+			wantPrompts:    1,
+			wantPromptSubs: []string{"Vanadis build build-final-deploy completed"},
+			wantWidgets:    2,
+		},
+		{
+			name:                "dispatchDeploymentSuccessPrompt Vanadis advance error propagates",
+			isDeploymentSuccess: true,
+			targetID:            validSnowflake,
+			advanceErr:          errors.New("advance vanadis err"),
+			wantErr:             true,
+			wantWidgets:         1,
+		},
 	}
 
 	for _, tc := range tests {
@@ -3400,6 +3507,8 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 					resolveTargetID:    tc.targetID,
 					suppressVanadisRes: tc.suppressVanadis,
 					suppressVanadisErr: tc.suppressVanadisErr,
+					advanceVanadisRes:  tc.advanceRes,
+					advanceVanadisErr:  tc.advanceErr,
 					channelContextErr:  tc.channelContextErr,
 				}
 				if len(tc.channelContext) > 0 {
@@ -3442,7 +3551,7 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 			wCalls := mockDisp.WidgetCalls()
 			if len(wCalls) != tc.wantWidgets {
 				t.Errorf("got %d widgets, want %d", len(wCalls), tc.wantWidgets)
-			} else if tc.wantWidgets > 0 && wCalls[0].Status != "deployed" {
+			} else if tc.wantWidgets == 1 && wCalls[0].Status != "deployed" {
 				t.Errorf("got widget status %q, want \"deployed\"", wCalls[0].Status)
 			}
 		})
@@ -4078,6 +4187,12 @@ func TestAdvanceVanadisChunk(t *testing.T) {
 			wantErr:    false,
 		},
 		{
+			name:       "matched but already advanced result returns nil",
+			prNumber:   10,
+			advanceRes: &VanadisAdvancementResult{Matched: true, Advanced: false},
+			wantErr:    false,
+		},
+		{
 			name:       "registry error returns error",
 			prNumber:   10,
 			advanceErr: errors.New("db failure"),
@@ -4484,6 +4599,23 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 		{name: "EnsurePRRegistered chunk resolves thread_id and upserts pr_registry with jobs", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", jobs: []string{"kiosk-client"}, targetIDReturn: "1562162630997581946", wantTarget: "1562162630997581946", wantSQLSubstr: "AND c.repo = $3"},
 		{name: "EnsurePRRegistered invalid targetID after chunk miss skips upsert", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", mockSelectErr: pgx.ErrNoRows, wantTarget: ""},
 		{name: "EnsurePRRegistered upsert exec error", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, targetID: "1562162630997581946", mockExecErr: errors.New("upsert err"), wantErr: true},
+
+		// RecordExpectedJobs
+		{name: "RecordExpectedJobs empty repo guard", op: "RecordExpectedJobs", repo: "", prNumber: 42, jobs: []string{"coven"}, wantUpdated: false},
+		{name: "RecordExpectedJobs zero pr guard", op: "RecordExpectedJobs", repo: "azylman/aerial", prNumber: 0, jobs: []string{"coven"}, wantUpdated: false},
+		{name: "RecordExpectedJobs nil pool guard", op: "RecordExpectedJobs", nilPool: true, repo: "azylman/aerial", prNumber: 42, jobs: []string{"coven"}, wantUpdated: false},
+		{name: "RecordExpectedJobs empty jobs delegates to HasExpectedDeployJobs", op: "RecordExpectedJobs", repo: "azylman/aerial", prNumber: 42, jobs: nil, wantUpdated: true, wantSQLSubstr: "FROM pr_registry"},
+		{name: "RecordExpectedJobs non-empty jobs updates metadata", op: "RecordExpectedJobs", repo: "azylman/aerial", prNumber: 42, jobs: []string{"coven", "db-migrate"}, wantUpdated: true, wantSQLSubstr: "UPDATE pr_registry"},
+		{name: "RecordExpectedJobs not found returns false", op: "RecordExpectedJobs", repo: "azylman/aerial", prNumber: 42, jobs: []string{"coven"}, mockSelectErr: pgx.ErrNoRows, wantUpdated: false},
+		{name: "RecordExpectedJobs db error", op: "RecordExpectedJobs", repo: "azylman/aerial", prNumber: 42, jobs: []string{"coven"}, mockSelectErr: errors.New("db error"), wantErr: true},
+
+		// HasExpectedDeployJobs
+		{name: "HasExpectedDeployJobs empty repo guard", op: "HasExpectedDeployJobs", repo: "", prNumber: 42, wantUpdated: false},
+		{name: "HasExpectedDeployJobs zero pr guard", op: "HasExpectedDeployJobs", repo: "azylman/aerial", prNumber: 0, wantUpdated: false},
+		{name: "HasExpectedDeployJobs nil pool guard", op: "HasExpectedDeployJobs", nilPool: true, repo: "azylman/aerial", prNumber: 42, wantUpdated: false},
+		{name: "HasExpectedDeployJobs true when jobs exist", op: "HasExpectedDeployJobs", repo: "azylman/aerial", prNumber: 42, wantUpdated: true, wantSQLSubstr: "deployed_jobs"},
+		{name: "HasExpectedDeployJobs not found returns false", op: "HasExpectedDeployJobs", repo: "azylman/aerial", prNumber: 42, mockSelectErr: pgx.ErrNoRows, wantUpdated: false},
+		{name: "HasExpectedDeployJobs db error", op: "HasExpectedDeployJobs", repo: "azylman/aerial", prNumber: 42, mockSelectErr: errors.New("db error"), wantErr: true},
 	}
 
 	for _, tc := range tests {
@@ -4510,6 +4642,8 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 									*ptr = tc.wantPRNum
 								case *int64:
 									*ptr = 100
+								case *bool:
+									*ptr = tc.wantUpdated
 								case *[]byte:
 									if tc.metaJSON != "" {
 										*ptr = []byte(tc.metaJSON)
@@ -4828,6 +4962,22 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 				}
 				if gotTarget != tc.wantTarget {
 					t.Errorf("gotTarget = %q, want %q", gotTarget, tc.wantTarget)
+				}
+			case "RecordExpectedJobs":
+				gotHas, err := reg.RecordExpectedJobs(ctx, tc.repo, tc.prNumber, tc.jobs)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("RecordExpectedJobs err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if gotHas != tc.wantUpdated {
+					t.Errorf("gotHas = %v, want %v", gotHas, tc.wantUpdated)
+				}
+			case "HasExpectedDeployJobs":
+				gotHas, err := reg.HasExpectedDeployJobs(ctx, tc.repo, tc.prNumber)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("HasExpectedDeployJobs err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if gotHas != tc.wantUpdated {
+					t.Errorf("gotHas = %v, want %v", gotHas, tc.wantUpdated)
 				}
 			}
 			if tc.wantSQLSubstr != "" && !strings.Contains(gotSQL, tc.wantSQLSubstr) {
