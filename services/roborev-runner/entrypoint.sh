@@ -42,9 +42,10 @@ if [ -d "${AUTH_SRC}" ]; then
   done
 fi
 
-# Pre-populate /root/.gemini/antigravity-cli/settings.json with read-only review tool permissions
-# so 3 concurrent agy review goroutines never race on updating settings.json.
-cat > /root/.gemini/antigravity-cli/settings.json <<'EOF'
+# Pre-populate /root/.gemini/antigravity-cli/permissions.json with read-only review tool permissions
+# and merge with Brain's /mnt/gemini-auth/antigravity-cli/settings.json (inheriting useG1Credits, model, etc.)
+# so concurrent agy review goroutines inherit Brain settings without racing on settings.json updates.
+cat > /root/.gemini/antigravity-cli/permissions.json <<'EOF'
 {
   "permissions": {
     "allow": [
@@ -123,7 +124,42 @@ cat > /root/.gemini/antigravity-cli/settings.json <<'EOF'
   }
 }
 EOF
-chmod 0600 /root/.gemini/antigravity-cli/settings.json
+chmod 0600 /root/.gemini/antigravity-cli/permissions.json
+
+cat > /usr/local/bin/sync-gemini-settings <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+AUTH_SETTINGS="${AUTH_SRC:-/mnt/gemini-auth/antigravity-cli}/settings.json"
+PERMS_FILE="/root/.gemini/antigravity-cli/permissions.json"
+TARGET_SETTINGS="/root/.gemini/antigravity-cli/settings.json"
+TMP_SETTINGS="/root/.gemini/antigravity-cli/.settings.json.tmp.$$"
+
+trap 'rm -f "${TMP_SETTINGS}"' EXIT
+
+if [ -f "${AUTH_SETTINGS}" ] && jq -e 'type == "object"' "${AUTH_SETTINGS}" >/dev/null 2>&1; then
+  jq -s '.[0] * .[1]' "${AUTH_SETTINGS}" "${PERMS_FILE}" > "${TMP_SETTINGS}"
+else
+  cp "${PERMS_FILE}" "${TMP_SETTINGS}"
+fi
+
+chmod 0600 "${TMP_SETTINGS}"
+if [ ! -f "${TARGET_SETTINGS}" ] || ! cmp -s "${TMP_SETTINGS}" "${TARGET_SETTINGS}"; then
+  mv -f "${TMP_SETTINGS}" "${TARGET_SETTINGS}"
+fi
+EOF
+chmod 0755 /usr/local/bin/sync-gemini-settings
+/usr/local/bin/sync-gemini-settings
+
+if [ -x /usr/local/bin/roborev ] && [ ! -e /usr/local/bin/roborev.real ]; then
+  mv /usr/local/bin/roborev /usr/local/bin/roborev.real
+  cat > /usr/local/bin/roborev <<'EOF'
+#!/usr/bin/env bash
+/usr/local/bin/sync-gemini-settings || true
+exec /usr/local/bin/roborev.real "$@"
+EOF
+  chmod 0755 /usr/local/bin/roborev
+fi
 
 # Define a local helper mint_runner_token() that reads /secrets/github_pat
 # (falling back to ${GITHUB_PAT:-} only if /secrets/github_pat is absent) into a local pat variable
