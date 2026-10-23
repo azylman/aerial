@@ -126,34 +126,27 @@ func hasNonTransientPlacementFailure(failedTG map[string]interface{}, queued map
 		if !ok {
 			return true
 		}
-		if naMap, ok := m["NodesAvailable"].(map[string]interface{}); ok {
-			hasAvailable := false
-			for _, count := range naMap {
-				if metricInt(count) > 0 {
-					hasAvailable = true
-					break
-				}
-			}
-			if !hasAvailable {
-				return true
-			}
+		if m["NodesAvailable"] != nil && !hasPositiveMetricValue(m["NodesAvailable"]) {
+			return true
 		}
-		if metricInt(m["NodesExhausted"]) > 0 ||
-			hasPositiveMetricValue(m["ConstraintFiltered"]) ||
+		if hasPositiveMetricValue(m["ConstraintFiltered"]) ||
 			hasPositiveMetricValue(m["ClassFiltered"]) ||
 			hasPositiveMetricValue(m["QuotaExhausted"]) {
 			return true
 		}
-		dimMap, hasDim := m["DimensionExhausted"].(map[string]interface{})
-		for k, count := range dimMap {
-			if metricInt(count) > 0 {
-				lower := strings.ToLower(k)
-				if !strings.Contains(lower, "network") && !strings.Contains(lower, "port") {
-					return true
+		hasPositiveDim := false
+		if dimMap, ok := m["DimensionExhausted"].(map[string]interface{}); ok {
+			for k, count := range dimMap {
+				if metricInt(count) > 0 {
+					hasPositiveDim = true
+					lower := strings.ToLower(k)
+					if !strings.Contains(lower, "network") && !strings.Contains(lower, "port") {
+						return true
+					}
 				}
 			}
 		}
-		if !hasDim && (metricInt(m["AllocationResourceExhausted"]) > 0 || metricInt(m["ResourceExhausted"]) > 0) {
+		if !hasPositiveDim && (metricInt(m["NodesExhausted"]) > 0 || metricInt(m["AllocationResourceExhausted"]) > 0 || metricInt(m["ResourceExhausted"]) > 0) {
 			return true
 		}
 	}
