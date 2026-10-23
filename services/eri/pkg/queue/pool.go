@@ -47,6 +47,39 @@ func sanitizeErrorText(errStr string) string {
 // testPoolHook is an optional hook injected by tests to wrap custom test runners without compiling test adapters into production.
 var testPoolHook func(cfg WorkerPoolConfig) runner.AgentPool
 
+// PoolKey uniquely identifies one of the 5 Discord execution pools by ephemerality and effort tier.
+type PoolKey struct {
+	Ephemeral bool
+	Effort    string
+}
+
+// AllValidPoolKeys returns the 5 valid Discord PoolKey combinations in deterministic order.
+func AllValidPoolKeys() []PoolKey {
+	return []PoolKey{
+		{Ephemeral: false, Effort: "high"},
+		{Ephemeral: false, Effort: "medium"},
+		{Ephemeral: false, Effort: "low"},
+		{Ephemeral: true, Effort: "medium"},
+		{Ephemeral: true, Effort: "low"},
+	}
+}
+
+// ResolvePoolKey normalizes effort and resolves the target PoolKey, rejecting (ephemeral: true, effort: "high").
+func ResolvePoolKey(ephemeral *bool, effort string) (PoolKey, error) {
+	eff := strings.ToLower(strings.TrimSpace(effort))
+	if eff != "low" && eff != "medium" {
+		eff = "high"
+	}
+	isEphem := eff == "low" || eff == "medium"
+	if ephemeral != nil {
+		isEphem = *ephemeral
+	}
+	if isEphem && eff == "high" {
+		return PoolKey{Ephemeral: true, Effort: "high"}, errors.New("ephemeral: true cannot be combined with high effort")
+	}
+	return PoolKey{Ephemeral: isEphem, Effort: eff}, nil
+}
+
 type WorkerPoolConfig struct {
 	Store                                                                                         db.Store
 	DiscordSession                                                                                *discordgo.Session
@@ -54,6 +87,7 @@ type WorkerPoolConfig struct {
 	TimeoutMinutes, MaxAttempts                                                                   int
 	BackoffBase, StalenessTTL, IdleTimeout, DrainTimeout, RetryDelayOverride, MaintenanceInterval time.Duration
 	SessionManager                                                                                *session.Manager
+	Pools                                                                                         map[PoolKey]runner.AgentPool
 	ProcessPool, LowEffortProcessPool, MediumEffortProcessPool, VoiceProcessPool                  runner.AgentPool
 	Classifier                                                                                    *classifier.Classifier
 
@@ -74,6 +108,7 @@ type WorkerPoolConfig struct {
 	VoiceRunnerFunc             func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (reply string, convID string, err error)
 	VoiceStreamRunnerFunc       func(ctx context.Context, prompt, sessionID string, onStatus func(string), onSentence func(string)) (reply string, convID string, err error)
 	AmbientResolver             func(ctx context.Context, cfg *config.AmbientContextConfig) (string, error)
+	CreateThreadFunc            func(channelID, title string) (string, error)
 }
 
 type threadWorkerState struct {
@@ -83,21 +118,23 @@ type threadWorkerState struct {
 }
 
 type WorkerPool struct {
-	appCfg                                                                       *config.Config
-	overrideModel                                                                string
-	cfg                                                                          WorkerPoolConfig
-	sessionMgr                                                                   *session.Manager
-	mu                                                                           sync.Mutex
-	threadChs                                                                    map[string]*threadWorkerState
-	wg                                                                           sync.WaitGroup
-	ctx                                                                          context.Context
-	cancel                                                                       context.CancelFunc
-	stopped                                                                      bool
-	quotaLockedUntil                                                             atomic.Int64
-	scopeLocks                                                                   sync.Map
-	webhookDispatcher                                                            WebhookDispatcher
-	summaryGroup                                                                 singleflight.Group
-	processPool, lowEffortProcessPool, mediumEffortProcessPool, voiceProcessPool runner.AgentPool
+	appCfg            *config.Config
+	overrideModel     string
+	cfg               WorkerPoolConfig
+	sessionMgr        *session.Manager
+	mu                sync.Mutex
+	threadChs         map[string]*threadWorkerState
+	wg                sync.WaitGroup
+	ctx               context.Context
+	cancel            context.CancelFunc
+	stopped           bool
+	quotaLockedUntil  atomic.Int64
+	scopeLocks        sync.Map
+	webhookDispatcher WebhookDispatcher
+	summaryGroup      singleflight.Group
+	pools             map[PoolKey]runner.AgentPool
+	voiceProcessPool  runner.AgentPool
+	createThreadFn    func(channelID, title string) (string, error)
 }
 
 // SummaryGroup returns the singleflight.Group coordinating thread summarizations for this pool instance.
@@ -144,6 +181,82 @@ func makeSessionCallbacks(store db.Store) (func(context.Context, string) (runner
 		return store.RotateSessionID(ctx, targetKey, newSessionID)
 	}
 	return getRec, onRot
+}
+
+func wirePoolSessionDependencies(pools map[PoolKey]runner.AgentPool, sessionMgr *session.Manager, store db.Store) {
+	var getRec func(context.Context, string) (runner.SessionRecord, error)
+	var onRot func(context.Context, string, string, string) error
+	if store != nil {
+		getRec, onRot = makeSessionCallbacks(store)
+	}
+	for _, k := range AllValidPoolKeys() {
+		pool := pools[k]
+		if pool == nil {
+			continue
+		}
+		if sessionMgr != nil {
+			if tr, ok := pool.(interface {
+				SetTranscriptRescuer(func(string, time.Time) string)
+			}); ok {
+				tr.SetTranscriptRescuer(sessionMgr.ExtractResponseSince)
+			}
+			if sm, ok := pool.(interface{ SetSessionManager(*session.Manager) }); ok {
+				sm.SetSessionManager(sessionMgr)
+			}
+		}
+		if store != nil && !k.Ephemeral {
+			if sc, ok := pool.(interface {
+				SetSessionCallbacks(func(context.Context, string) (runner.SessionRecord, error), func(context.Context, string, string, string) error)
+			}); ok {
+				sc.SetSessionCallbacks(getRec, onRot)
+			}
+		}
+	}
+}
+
+func initWorkerPools(appCfg *config.Config, isExplicitAppCfg bool, cfg WorkerPoolConfig, sessMgr *session.Manager, store db.Store) map[PoolKey]runner.AgentPool {
+	pools := make(map[PoolKey]runner.AgentPool, 5)
+	for _, k := range AllValidPoolKeys() {
+		if cfg.Pools != nil && cfg.Pools[k] != nil {
+			pools[k] = cfg.Pools[k]
+		}
+	}
+	highKey := PoolKey{Ephemeral: false, Effort: "high"}
+	lowEphemKey := PoolKey{Ephemeral: true, Effort: "low"}
+	medEphemKey := PoolKey{Ephemeral: true, Effort: "medium"}
+	if pools[highKey] == nil && cfg.ProcessPool != nil {
+		pools[highKey] = cfg.ProcessPool
+	}
+	if pools[lowEphemKey] == nil && cfg.LowEffortProcessPool != nil {
+		pools[lowEphemKey] = cfg.LowEffortProcessPool
+	}
+	if pools[medEphemKey] == nil && cfg.MediumEffortProcessPool != nil {
+		pools[medEphemKey] = cfg.MediumEffortProcessPool
+	}
+	if pools[highKey] == nil && isExplicitAppCfg {
+		cur := appCfg.Current()
+		daemonBin, daemonDataDir, defaultModel := cfg.AgyBin, "", cfg.Model
+		if cur != nil {
+			if daemonBin == "" {
+				daemonBin = cur.AgyBin
+			}
+			daemonDataDir = cur.DataDir
+			if defaultModel == "" {
+				defaultModel = cur.Model
+			}
+		}
+		poolCfg := runner.PoolConfig{AgyBin: daemonBin, Cwd: daemonDataDir, Env: os.Environ(), DefaultModel: defaultModel}
+		if sessMgr != nil {
+			poolCfg.TranscriptRescuer = sessMgr.ExtractResponseSince
+			poolCfg.SessionManager = sessMgr
+		}
+		if store != nil {
+			poolCfg.GetSessionRecord, poolCfg.OnSessionRotated = makeSessionCallbacks(store)
+		}
+		pools[highKey] = runner.NewUnifiedProcessPool(poolCfg, nil)
+	}
+	wirePoolSessionDependencies(pools, sessMgr, store)
+	return pools
 }
 
 // New creates a new WorkerPool with pure *config.Config dependency injection.
@@ -213,8 +326,13 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	if cfg.Classifier == nil {
 		cfg.Classifier = classifier.New(nil)
 	}
+	pools := initWorkerPools(appCfg, isExplicitAppCfg, cfg, sessMgr, cfg.Store)
 	if cfg.LLMFunc == nil {
-		for _, candidate := range []runner.AgentPool{cfg.LowEffortProcessPool, cfg.ProcessPool} {
+		for _, candidate := range []runner.AgentPool{
+			pools[PoolKey{Ephemeral: true, Effort: "low"}],
+			pools[PoolKey{Ephemeral: false, Effort: "low"}],
+			pools[PoolKey{Ephemeral: false, Effort: "high"}],
+		} {
 			if candidate == nil {
 				continue
 			}
@@ -238,58 +356,9 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &WorkerPool{
-		appCfg: appCfg, cfg: cfg, processPool: cfg.ProcessPool, lowEffortProcessPool: cfg.LowEffortProcessPool,
-		mediumEffortProcessPool: cfg.MediumEffortProcessPool, voiceProcessPool: cfg.VoiceProcessPool,
+		appCfg: appCfg, cfg: cfg, pools: pools, voiceProcessPool: cfg.VoiceProcessPool,
 		sessionMgr: sessMgr, threadChs: make(map[string]*threadWorkerState), ctx: ctx, cancel: cancel,
-		webhookDispatcher: cfg.WebhookDispatcher,
-	}
-
-	if p.processPool == nil && isExplicitAppCfg {
-		cur := appCfg.Current()
-		daemonBin, daemonDataDir, defaultModel := cfg.AgyBin, "", cfg.Model
-		if cur != nil {
-			if daemonBin == "" {
-				daemonBin = cur.AgyBin
-			}
-			daemonDataDir = cur.DataDir
-			if defaultModel == "" {
-				defaultModel = cur.Model
-			}
-		}
-		poolCfg := runner.PoolConfig{AgyBin: daemonBin, Cwd: daemonDataDir, Env: os.Environ(), DefaultModel: defaultModel}
-		if p.sessionMgr != nil {
-			poolCfg.TranscriptRescuer = p.sessionMgr.ExtractResponseSince
-			poolCfg.SessionManager = p.sessionMgr
-		}
-		if store := p.Store(); store != nil {
-			poolCfg.GetSessionRecord, poolCfg.OnSessionRotated = makeSessionCallbacks(store)
-		}
-		p.processPool = runner.NewUnifiedProcessPool(poolCfg, nil)
-	}
-
-	if p.sessionMgr != nil {
-		for _, pool := range []runner.AgentPool{p.processPool, p.lowEffortProcessPool, p.mediumEffortProcessPool} {
-			if pool == nil {
-				continue
-			}
-			if tr, ok := pool.(interface {
-				SetTranscriptRescuer(func(string, time.Time) string)
-			}); ok {
-				tr.SetTranscriptRescuer(p.sessionMgr.ExtractResponseSince)
-			}
-			if sm, ok := pool.(interface{ SetSessionManager(*session.Manager) }); ok {
-				sm.SetSessionManager(p.sessionMgr)
-			}
-		}
-	}
-
-	if store := p.Store(); store != nil {
-		getRec, onRot := makeSessionCallbacks(store)
-		if sc, ok := p.processPool.(interface {
-			SetSessionCallbacks(func(context.Context, string) (runner.SessionRecord, error), func(context.Context, string, string, string) error)
-		}); ok {
-			sc.SetSessionCallbacks(getRec, onRot)
-		}
+		webhookDispatcher: cfg.WebhookDispatcher, createThreadFn: cfg.CreateThreadFunc,
 	}
 
 	if p.cfg.HistoryFetcher == nil {
@@ -444,7 +513,7 @@ func (p *WorkerPool) GetRuntimeConfig() string {
 func (p *WorkerPool) Start() {
 	// WorkerPool starts workers lazily per active thread
 	log.Printf("[WorkerPool] Started queue worker pool with max %d attempts per turn", p.cfg.MaxAttempts)
-	if p.processPool != nil || p.cfg.Store != nil {
+	if p.AgentPool() != nil || p.cfg.Store != nil {
 		p.wg.Add(1)
 		go func() {
 			defer p.wg.Done()
@@ -620,19 +689,65 @@ func unwrapUnifiedPool(pool runner.AgentPool) *runner.UnifiedProcessPool {
 	return nil
 }
 
+func (p *WorkerPool) collectUniquePoolsLocked() []runner.AgentPool {
+	var out []runner.AgentPool
+	add := func(ap runner.AgentPool) {
+		if ap == nil {
+			return
+		}
+		for _, existing := range out {
+			if existing == ap {
+				return
+			}
+		}
+		out = append(out, ap)
+	}
+	for _, k := range AllValidPoolKeys() {
+		if p.pools != nil {
+			add(p.pools[k])
+		}
+	}
+	add(p.voiceProcessPool)
+	return out
+}
+
 func (p *WorkerPool) Stop() {
 	p.StopWithTimeout(p.cfg.DrainTimeout)
 	p.mu.Lock()
-	pools := []runner.AgentPool{p.processPool, p.lowEffortProcessPool, p.mediumEffortProcessPool, p.voiceProcessPool}
+	pools := p.collectUniquePoolsLocked()
 	p.mu.Unlock()
 	for _, pool := range pools {
-		if pool != nil {
-			if closeErr := pool.Close(); closeErr != nil {
-				log.Printf("[WorkerPool] Warning: failed to close process pool: %v", closeErr)
-			}
+		if closeErr := pool.Close(); closeErr != nil {
+			log.Printf("[WorkerPool] Warning: failed to close process pool: %v", closeErr)
 		}
 	}
 	log.Printf("[WorkerPool] Queue worker pool stopped cleanly")
+}
+
+// Pool returns the configured runner.AgentPool for the given PoolKey, or nil.
+func (p *WorkerPool) Pool(k PoolKey) runner.AgentPool {
+	if p == nil || p.pools == nil {
+		return nil
+	}
+	return p.pools[k]
+}
+
+// StatefulProcessPools returns non-nil unwrapped *runner.UnifiedProcessPool instances for stateful pool keys.
+func (p *WorkerPool) StatefulProcessPools() []*runner.UnifiedProcessPool {
+	if p == nil {
+		return nil
+	}
+	var out []*runner.UnifiedProcessPool
+	for _, k := range []PoolKey{
+		{Ephemeral: false, Effort: "high"},
+		{Ephemeral: false, Effort: "medium"},
+		{Ephemeral: false, Effort: "low"},
+	} {
+		if up := unwrapUnifiedPool(p.Pool(k)); up != nil {
+			out = append(out, up)
+		}
+	}
+	return out
 }
 
 // ProcessPool returns the configured runner.UnifiedProcessPool, or nil if unconfigured or p is nil.
@@ -640,28 +755,25 @@ func (p *WorkerPool) ProcessPool() *runner.UnifiedProcessPool {
 	return unwrapUnifiedPool(p.AgentPool())
 }
 
-func (p *WorkerPool) getPool(getter func() runner.AgentPool) runner.AgentPool {
-	if p == nil {
-		return nil
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return getter()
-}
-
 // LowEffortProcessPool returns the configured runner.UnifiedProcessPool for low effort turns.
 func (p *WorkerPool) LowEffortProcessPool() *runner.UnifiedProcessPool {
-	return unwrapUnifiedPool(p.getPool(func() runner.AgentPool { return p.lowEffortProcessPool }))
+	if up := unwrapUnifiedPool(p.Pool(PoolKey{Ephemeral: false, Effort: "low"})); up != nil {
+		return up
+	}
+	return unwrapUnifiedPool(p.Pool(PoolKey{Ephemeral: true, Effort: "low"}))
 }
 
 // MediumEffortProcessPool returns the configured runner.UnifiedProcessPool for medium effort turns.
 func (p *WorkerPool) MediumEffortProcessPool() *runner.UnifiedProcessPool {
-	return unwrapUnifiedPool(p.getPool(func() runner.AgentPool { return p.mediumEffortProcessPool }))
+	if up := unwrapUnifiedPool(p.Pool(PoolKey{Ephemeral: false, Effort: "medium"})); up != nil {
+		return up
+	}
+	return unwrapUnifiedPool(p.Pool(PoolKey{Ephemeral: true, Effort: "medium"}))
 }
 
 // AgentPool returns the configured primary runner.AgentPool.
 func (p *WorkerPool) AgentPool() runner.AgentPool {
-	return p.getPool(func() runner.AgentPool { return p.processPool })
+	return p.Pool(PoolKey{Ephemeral: false, Effort: "high"})
 }
 
 // MarkDirty notifies the process pools to mark active daemons dirty and evict idle daemons.
@@ -670,16 +782,13 @@ func (p *WorkerPool) MarkDirty() {
 		return
 	}
 	p.mu.Lock()
-	pools := []runner.AgentPool{p.processPool, p.lowEffortProcessPool, p.mediumEffortProcessPool, p.voiceProcessPool}
+	pools := p.collectUniquePoolsLocked()
 	var voiceTargets []string
 	if p.appCfg != nil {
 		voiceTargets = p.appCfg.VoicePrewarmedTargets()
 	}
 	p.mu.Unlock()
 	for _, pool := range pools {
-		if pool == nil {
-			continue
-		}
 		if targetUpdater, ok := pool.(interface{ UpdatePrewarmedTargets([]string) }); ok && voiceTargets != nil {
 			targetUpdater.UpdatePrewarmedTargets(voiceTargets)
 		}
@@ -783,8 +892,8 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 	var procPool runner.AgentPool
 	if p.voiceProcessPool != nil {
 		procPool = p.voiceProcessPool
-	} else if p.processPool != nil {
-		procPool = p.processPool
+	} else if p.pools != nil {
+		procPool = p.pools[PoolKey{Ephemeral: false, Effort: "high"}]
 	}
 	p.mu.Unlock()
 	if procPool == nil {

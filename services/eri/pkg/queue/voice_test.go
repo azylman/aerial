@@ -92,7 +92,7 @@ func setupVoiceTestPool(t *testing.T, tt *voiceTurnTestCase, cancelCaller contex
 	}
 	if tt.nilProcessPool {
 		p := New(nil, WorkerPoolConfig{})
-		p.processPool = nil
+		p.pools = nil
 		return p, nil, false
 	}
 	if tt.useVoiceHook {
@@ -763,6 +763,12 @@ func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
 	_, _ = getRec(ctx, "t1")
 	if err := onRot(ctx, "t1", "old", "new"); err != nil {
 		t.Errorf("onRot error: %v", err)
+	}
+	if rec, err := getRec(ctx, "discord:worker-0"); err != nil || rec.ActiveSessionID != "" {
+		t.Errorf("expected empty record for worker key with colon, got rec=%+v, err=%v", rec, err)
+	}
+	if err := onRot(ctx, "discord:worker-0", "old", "new"); err != nil {
+		t.Errorf("expected nil error on onRot for worker key with colon, got %v", err)
 	}
 	getRecErr, _ := makeSessionCallbacks(&errQueueStore{Store: fake})
 	_, _ = getRecErr(ctx, "t1")

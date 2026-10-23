@@ -69,6 +69,9 @@ func TestHandlePromptValidation(t *testing.T) {
 		{"whitespace prompt", http.MethodPost, store, pool, strings.NewReader(`{"prompt":"   "}`), http.StatusBadRequest, "Invalid payload: 'prompt' field is required and cannot be empty"},
 		{"missing channel_id", http.MethodPost, store, pool, strings.NewReader(`{"prompt":"hello"}`), http.StatusBadRequest, "Invalid payload: 'channel_id' field is required and cannot be empty"},
 		{"non-snowflake channel_id", http.MethodPost, store, pool, strings.NewReader(`{"prompt":"hello","channel_id":"not-a-snowflake"}`), http.StatusBadRequest, "Invalid payload: 'channel_id' must be a valid numeric Discord snowflake"},
+		{"invalid session_id", http.MethodPost, store, pool, strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873","session_id":"invalid:colon"}`), http.StatusBadRequest, "session_id"},
+		{"ephemeral true with high effort rejected", http.MethodPost, store, pool, strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873","ephemeral":true,"effort":"high"}`), http.StatusBadRequest, "ephemeral: true cannot be combined with high effort"},
+		{"ephemeral true with default high effort rejected", http.MethodPost, store, pool, strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873","ephemeral":true}`), http.StatusBadRequest, "ephemeral: true cannot be combined with high effort"},
 		{"nil store", http.MethodPost, nil, pool, strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873"}`), http.StatusInternalServerError, "Database store not configured"},
 		{"closed store", http.MethodPost, closedStore, pool, strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873"}`), http.StatusInternalServerError, "Failed to persist prompt message"},
 		{"body close error", http.MethodPost, store, pool, &errReadCloser{reader: strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873"}`), closeErr: errors.New("close error")}, http.StatusAccepted, "channel_id"},
@@ -81,32 +84,64 @@ func TestHandlePromptValidation(t *testing.T) {
 		})
 	}
 
+	threadPool := queue.New(nil, queue.WorkerPoolConfig{
+		Store: store,
+		CreateThreadFunc: func(channelID, title string) (string, error) {
+			return "1542999999999999999", nil
+		},
+	})
+
+	falseVal := false
+	trueVal := true
 	for _, tc := range []struct {
-		name        string
-		pool        *queue.WorkerPool
-		payload     string
-		msgID       string
-		wantEffort  string
-		wantModel   string
-		wantSilent  bool
-		wantChunkID string
-		wantContent string
+		name          string
+		pool          *queue.WorkerPool
+		payload       string
+		msgID         string
+		wantThreadID  string
+		wantChannelID string
+		wantEphemeral *bool
+		wantEffort    string
+		wantModel     string
+		wantSilent    bool
+		wantChunkID   string
+		wantContent   string
 	}{
-		{"default effort", pool, `{"prompt":"Test valid prompt","channel_id":"1542423172400291873","message_id":"msg-123"}`, "msg-123", "", "", false, "", "Test valid prompt"},
-		{"gemini-4-flash silent", pool, `{"prompt":"Execute chunk 1","channel_id":"1542423172400291873","message_id":"msg-silent-1","model":"gemini-4-flash","silent":true}`, "msg-silent-1", "low", "gemini-4-flash", true, "", ""},
-		{"gemini-3.8-flash-medium", pool, `{"prompt":"Execute medium chunk","channel_id":"1542423172400291873","message_id":"msg-med-1","model":"gemini-3.8-flash-medium","silent":true}`, "msg-med-1", "medium", "gemini-3.8-flash-medium", true, "", ""},
-		{"vanadis_chunk_id nil pool", nil, `{"prompt":"hello nil pool","channel_id":"1542423172400291873","message_id":"msg-vanadis-chunk","vanadis_chunk_id":"chunk-abc-99"}`, "msg-vanadis-chunk", "", "", false, "chunk-abc-99", ""},
-		{"auto-generated uuid when message_id omitted", pool, `{"prompt":"auto uuid prompt","channel_id":"1542423172400291873"}`, "", "", "", false, "", "auto uuid prompt"},
+		{"default effort", pool, `{"prompt":"Test valid prompt","channel_id":"1542423172400291873","message_id":"msg-123"}`, "msg-123", "1542423172400291873", "1542423172400291873", nil, "", "", false, "", "Test valid prompt"},
+		{"gemini-4-flash silent", pool, `{"prompt":"Execute chunk 1","channel_id":"1542423172400291873","message_id":"msg-silent-1","model":"gemini-4-flash","silent":true}`, "msg-silent-1", "1542423172400291873", "1542423172400291873", nil, "low", "gemini-4-flash", true, "", ""},
+		{"gemini-3.8-flash-medium", pool, `{"prompt":"Execute medium chunk","channel_id":"1542423172400291873","message_id":"msg-med-1","model":"gemini-3.8-flash-medium","silent":true}`, "msg-med-1", "1542423172400291873", "1542423172400291873", nil, "medium", "gemini-3.8-flash-medium", true, "", ""},
+		{"vanadis_chunk_id nil pool", nil, `{"prompt":"hello nil pool","channel_id":"1542423172400291873","message_id":"msg-vanadis-chunk","vanadis_chunk_id":"chunk-abc-99"}`, "msg-vanadis-chunk", "1542423172400291873", "1542423172400291873", nil, "", "", false, "chunk-abc-99", ""},
+		{"auto-generated uuid when message_id omitted", pool, `{"prompt":"auto uuid prompt","channel_id":"1542423172400291873"}`, "", "", "", nil, "", "", false, "", "auto uuid prompt"},
+		{"custom session_id and explicit ephemeral false", pool, `{"prompt":"custom session prompt","channel_id":"1542423172400291873","session_id":"custom-session-123","ephemeral":false,"message_id":"msg-sess-false"}`, "msg-sess-false", "custom-session-123", "1542423172400291873", &falseVal, "", "", false, "", "custom session prompt"},
+		{"custom session_id and explicit ephemeral true with low effort", pool, `{"prompt":"custom session prompt 2","channel_id":"1542423172400291873","session_id":"custom-session-456","ephemeral":true,"effort":"low","message_id":"msg-sess-true"}`, "msg-sess-true", "custom-session-456", "1542423172400291873", &trueVal, "low", "", false, "", "custom session prompt 2"},
+		{"resolve target thread when session_id omitted and not silent", threadPool, `{"prompt":"create thread prompt","channel_id":"1542423172400291873","title":"Heartbeat Alert","message_id":"msg-thread-create"}`, "msg-thread-create", "1542999999999999999", "1542999999999999999", nil, "", "", false, "", "create thread prompt"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := runHTTP(handlePrompt(store, tc.pool), http.MethodPost, "/prompt", strings.NewReader(tc.payload))
 			if w.Code != http.StatusAccepted {
 				t.Fatalf("got status=%d body=%q, want 202", w.Code, w.Body.String())
 			}
+			if tc.wantThreadID != "" && !strings.Contains(w.Body.String(), fmt.Sprintf(`"session_id":"%s"`, tc.wantThreadID)) {
+				t.Errorf("response body missing session_id %q: %s", tc.wantThreadID, w.Body.String())
+			}
+			if tc.wantChannelID != "" && !strings.Contains(w.Body.String(), fmt.Sprintf(`"channel_id":"%s"`, tc.wantChannelID)) {
+				t.Errorf("response body missing channel_id %q: %s", tc.wantChannelID, w.Body.String())
+			}
 			if tc.msgID != "" {
 				msg, err := store.GetMessage(context.Background(), tc.msgID)
 				if err != nil || msg == nil {
 					t.Fatalf("failed to retrieve persisted message %s: %v", tc.msgID, err)
+				}
+				if tc.wantThreadID != "" && msg.ThreadID != tc.wantThreadID {
+					t.Errorf("thread_id=%q, want %q", msg.ThreadID, tc.wantThreadID)
+				}
+				if tc.wantChannelID != "" && msg.Metadata.ChannelID != tc.wantChannelID {
+					t.Errorf("metadata.channel_id=%q, want %q", msg.Metadata.ChannelID, tc.wantChannelID)
+				}
+				if tc.wantEphemeral != nil {
+					if msg.Metadata.Ephemeral == nil || *msg.Metadata.Ephemeral != *tc.wantEphemeral {
+						t.Errorf("metadata.ephemeral=%v, want %v", msg.Metadata.Ephemeral, *tc.wantEphemeral)
+					}
 				}
 				if tc.wantContent != "" && msg.Content != tc.wantContent {
 					t.Errorf("content=%q, want %q", msg.Content, tc.wantContent)

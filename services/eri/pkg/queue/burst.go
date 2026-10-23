@@ -10,6 +10,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
+	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/sanitizer"
 )
 
@@ -35,14 +36,17 @@ func resolveMessageEffort(m db.Message) string {
 }
 
 func (p *WorkerPool) resolveScopeKey(m db.Message) string {
-	switch resolveMessageEffort(m) {
-	case "medium":
-		if p != nil && p.mediumEffortProcessPool != nil {
-			return "medium_effort:" + m.ThreadID
-		}
-	case "low":
-		if p != nil && p.lowEffortProcessPool != nil {
+	k, err := ResolvePoolKey(m.Metadata.Ephemeral, resolveMessageEffort(m))
+	if err == nil && p != nil && p.Pool(k) != nil {
+		switch k {
+		case PoolKey{Ephemeral: true, Effort: "low"}:
 			return "low_effort:" + m.ThreadID
+		case PoolKey{Ephemeral: true, Effort: "medium"}:
+			return "medium_effort:" + m.ThreadID
+		case PoolKey{Ephemeral: false, Effort: "low"}:
+			return "stateful_low:" + m.ThreadID
+		case PoolKey{Ephemeral: false, Effort: "medium"}:
+			return "stateful_medium:" + m.ThreadID
 		}
 	}
 	return m.ThreadID
@@ -227,9 +231,59 @@ func FormatSingleDiscordPrompt(m db.Message, tzOpt ...string) string {
 			ts = ts.In(loc)
 		}
 	}
-	fmt.Fprintf(&sb, "- timestamp: %s\n- mentions: %v\n- mention_user_ids: %v\n- mention_role_ids: %v\n- attachments: %v\n\nOnly formulate and output your final response once all immediate work is complete. It will be delivered directly to Discord.\n</USER_REQUEST>",
-		ts.Format(time.RFC3339), nonNilSlice(m.Metadata.Mentions), nonNilSlice(m.Metadata.MentionUserIDs), nonNilSlice(m.Metadata.MentionRoleIDs), nonNilSlice(m.Metadata.Attachments))
+	closingInstruction := "It will be delivered directly to Discord."
+	if m.Metadata.Silent {
+		closingInstruction = "This is a silent background turn; your response will not be delivered to Discord."
+	}
+	fmt.Fprintf(&sb, "- timestamp: %s\n- mentions: %v\n- mention_user_ids: %v\n- mention_role_ids: %v\n- attachments: %v\n\nOnly formulate and output your final response once all immediate work is complete. %s\n</USER_REQUEST>",
+		ts.Format(time.RFC3339), nonNilSlice(m.Metadata.Mentions), nonNilSlice(m.Metadata.MentionUserIDs), nonNilSlice(m.Metadata.MentionRoleIDs), nonNilSlice(m.Metadata.Attachments), closingInstruction)
 	return sb.String()
+}
+
+func extractBurstEphemeral(burst []db.Message) (bool, bool) {
+	for _, m := range burst {
+		if m.Metadata.Ephemeral != nil {
+			return *m.Metadata.Ephemeral, true
+		}
+	}
+	return false, false
+}
+
+func extractBurstModel(burst []db.Message) string {
+	for _, m := range burst {
+		if model := strings.TrimSpace(m.Metadata.Model); model != "" {
+			return model
+		}
+	}
+	return ""
+}
+
+func extractBurstSilent(burst []db.Message) bool {
+	if len(burst) == 0 {
+		return false
+	}
+	for _, m := range burst {
+		if !m.Metadata.Silent {
+			return false
+		}
+	}
+	return true
+}
+
+func resolveBurstEffort(burst []db.Message) string {
+	hasLow := false
+	for _, m := range burst {
+		switch resolveMessageEffort(m) {
+		case "medium":
+			return "medium"
+		case "low":
+			hasLow = true
+		}
+	}
+	if hasLow {
+		return "low"
+	}
+	return "high"
 }
 
 func nonNilSlice(s []string) []string {
@@ -540,4 +594,50 @@ func wrapPromptTag(text, openTag, closeTag string) string {
 		return fmt.Sprintf("%s\n%s\n%s", openTag, trimmed, closeTag)
 	}
 	return trimmed
+}
+
+func resolveBurstPoolKey(burst []db.Message) (PoolKey, error) {
+	var ephemPtr *bool
+	if isEphem, explicit := extractBurstEphemeral(burst); explicit {
+		ephemPtr = &isEphem
+	}
+	return ResolvePoolKey(ephemPtr, resolveBurstEffort(burst))
+}
+
+func isBurstEphemeral(burst []db.Message) bool {
+	k, err := resolveBurstPoolKey(burst)
+	return err != nil || k.Ephemeral
+}
+
+func (te *turnExecution) resolveExecutionPool() (runner.AgentPool, PoolKey, error) {
+	var burst []db.Message
+	if te != nil {
+		burst = te.burst
+	}
+	k, err := resolveBurstPoolKey(burst)
+	if err != nil {
+		return nil, k, err
+	}
+	if te == nil || te.pool == nil {
+		return nil, k, nil
+	}
+	if pool := te.pool.Pool(k); pool != nil {
+		return pool, k, nil
+	}
+	log.Printf("[Worker] Notice: pool for %+v is nil, falling back to primary processPool for thread %s", k, te.threadID)
+	return te.pool.Pool(PoolKey{Ephemeral: false, Effort: "high"}), k, nil
+}
+
+func getStreamingDaemon(pool runner.AgentPool, threadID string) *runner.StreamingDaemon {
+	if pool == nil {
+		return nil
+	}
+	if dPool, ok := pool.(interface {
+		Get(string) (*runner.StreamingDaemon, bool)
+	}); ok {
+		if d, ok := dPool.Get(threadID); ok && d != nil {
+			return d
+		}
+	}
+	return nil
 }

@@ -31,6 +31,8 @@ func TestMessageMetadata_IsEmpty(t *testing.T) {
 		{"attachments", MessageMetadata{Attachments: []string{"http://example.com/img.png"}}},
 		{"model", MessageMetadata{Model: "gemini-4-flash"}},
 		{"silent", MessageMetadata{Silent: true}},
+		{"ephemeral_true", func() MessageMetadata { tVal := true; return MessageMetadata{Ephemeral: &tVal} }()},
+		{"ephemeral_false", func() MessageMetadata { fVal := false; return MessageMetadata{Ephemeral: &fVal} }()},
 		{"vanadis_chunk_id", MessageMetadata{VanadisChunkID: "chk-1"}},
 	}
 	for _, tc := range tests {

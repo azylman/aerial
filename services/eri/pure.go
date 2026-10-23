@@ -4,10 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"testing"
 
+	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/transcript"
 	"github.com/bwmarrin/discordgo"
@@ -223,4 +227,61 @@ func buildSyncLLM(rawLLM runner.LLMFunc, lowEffortModel, defaultModel string) tr
 	return func(ctx context.Context, prompt string) (string, error) {
 		return rawLLM(ctx, model, prompt)
 	}
+}
+
+// DefaultGeminiHomeDir returns the production default base directory for .gemini files.
+func DefaultGeminiHomeDir() string {
+	return defaultGeminiHomeDirWithLookup(os.Getenv("HOME"), testing.Testing(), os.UserHomeDir)
+}
+
+func defaultGeminiHomeDirWithLookup(home string, isTesting bool, userHomeDirFn func() (string, error)) string {
+	if strings.TrimSpace(home) != "" {
+		return strings.TrimSpace(home)
+	}
+	if isTesting {
+		return filepath.Join(os.TempDir(), "aerial-test-gemini")
+	}
+	if userHomeDirFn != nil {
+		if h, err := userHomeDirFn(); err == nil && strings.TrimSpace(h) != "" {
+			return strings.TrimSpace(h)
+		}
+	}
+	return "/root"
+}
+
+// DefaultDataDir returns the production default base directory for persistent data.
+func DefaultDataDir() string {
+	return defaultDataDir(testing.Testing())
+}
+
+func defaultDataDir(isTesting bool) string {
+	if isTesting {
+		return filepath.Join(os.TempDir(), "aerial-test-data")
+	}
+	return "/data"
+}
+
+func buildDiscordPools(basePoolCfg func(home, model string, prewarmed []string) runner.PoolConfig, discordHome, highModel, medModel, lowModel string, spawner runner.DaemonSpawner) (map[queue.PoolKey]runner.AgentPool, []runner.AgentPool) {
+	pools := make(map[queue.PoolKey]runner.AgentPool, 5)
+	var ordered []runner.AgentPool
+	for _, k := range queue.AllValidPoolKeys() {
+		model := highModel
+		switch k.Effort {
+		case "medium":
+			model = medModel
+		case "low":
+			model = lowModel
+		}
+		var p runner.AgentPool
+		if !k.Ephemeral {
+			p = runner.NewUnifiedProcessPool(basePoolCfg(discordHome, model, nil), spawner)
+		} else if k.Effort == "medium" {
+			p = newWorkerInterchangeablePool(basePoolCfg(discordHome, model, []string{"discord:medium-worker-0", "discord:medium-worker-1"}), spawner, "discord:medium-worker")
+		} else {
+			p = newWorkerInterchangeablePool(basePoolCfg(discordHome, model, []string{"discord:worker-0", "discord:worker-1"}), spawner, "discord:worker")
+		}
+		pools[k] = p
+		ordered = append(ordered, p)
+	}
+	return pools, ordered
 }

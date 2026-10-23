@@ -22,6 +22,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
@@ -475,7 +476,7 @@ func TestWorker_RotateSessionID_EvictsDaemons(t *testing.T) {
 
 	ctx := context.Background()
 	_, _ = procPool.GetOrCreate(ctx, "thread-evict-1", "")
-	te := &turnExecution{pool: &WorkerPool{cfg: WorkerPoolConfig{Store: fakeStore}, processPool: procPool}, threadID: "thread-evict-1"}
+	te := &turnExecution{pool: &WorkerPool{cfg: WorkerPoolConfig{Store: fakeStore}, pools: map[PoolKey]runner.AgentPool{{Ephemeral: false, Effort: "high"}: procPool}}, threadID: "thread-evict-1"}
 
 	te.rotateSessionID("thread-evict-1", "new-sess-1")
 	if _, ok := procPool.Get("thread-evict-1"); !ok {
@@ -1221,6 +1222,193 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 	}
 }
 
+func TestWorker_EphemeralHighEffort_FailsBurst(t *testing.T) {
+	t.Parallel()
+	store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
+	primarySessUUID := "11111111-1111-1111-1111-111111111111"
+
+	var spawned atomic.Int32
+	spawner := &mockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			spawned.Add(1)
+			return nil, nil, nil, nil, errors.New("should not spawn")
+		},
+	}
+	primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, spawner)
+	defer primaryPool.Close()
+
+	cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
+	doneCh := make(chan string, 1)
+	pool := New(cfg, WorkerPoolConfig{
+		ProcessPool:    primaryPool,
+		SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1,
+		OnMessageCompleted: func(msg db.Message, status string) {
+			doneCh <- status
+		},
+	})
+	defer pool.Stop()
+
+	threadID := "1560318118792790999"
+	ctx := context.Background()
+	_ = store.SaveSessionID(ctx, threadID, primarySessUUID)
+
+	trueVal := true
+	msg := db.Message{
+		ID: "msg-ephem-high-fail", ThreadID: threadID, Content: "execute invalid ephemeral high effort",
+		Effort: "high", Metadata: db.MessageMetadata{Ephemeral: &trueVal}, Status: db.StatusPending, CreatedAt: time.Now(),
+	}
+	_ = store.InsertMessage(ctx, msg)
+	pool.Enqueue(msg)
+	select {
+	case status := <-doneCh:
+		if status != db.StatusFailed {
+			t.Fatalf("expected status %q, got %q", db.StatusFailed, status)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for failed burst")
+	}
+
+	if got := spawned.Load(); got != 0 {
+		t.Errorf("expected 0 spawns on primaryPool, got %d", got)
+	}
+	currentSess, err := store.GetSessionID(ctx, threadID)
+	if err != nil || currentSess != primarySessUUID {
+		t.Errorf("expected primary session %s untouched, got %s", primarySessUUID, currentSess)
+	}
+}
+
+func TestWorker_StatefulLowAndMediumPools_ResumeAndPersistSessions(t *testing.T) {
+	t.Parallel()
+	falseVal := false
+	tests := []struct {
+		name   string
+		effort string
+	}{
+		{"stateful_low", "low"},
+		{"stateful_medium", "medium"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
+			existingSessUUID := "11111111-1111-1111-1111-111111111111"
+			rotatedSessUUID := "22222222-2222-2222-2222-222222222222"
+
+			var mu sync.Mutex
+			var spawnedSessionID string
+			var ephemSpawns atomic.Int32
+
+			statefulSpawner := &mockDaemonSpawner{
+				SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+					mu.Lock()
+					spawnedSessionID = cfg.SessionID
+					mu.Unlock()
+
+					inR, inW := io.Pipe()
+					outR, outW := io.Pipe()
+					errR, errW := io.Pipe()
+					defer errW.Close()
+					go func() {
+						defer outW.Close()
+						_, _ = outW.Write([]byte(fmt.Sprintf("{\"event\":\"init\",\"conversation_id\":%q}\n", rotatedSessUUID)))
+						buf := make([]byte, 16384)
+						for {
+							n, rErr := inR.Read(buf)
+							if rErr != nil {
+								return
+							}
+							if n > 0 {
+								_, _ = outW.Write([]byte(fmt.Sprintf("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok\",\"conversation_id\":%q,\"usage\":{\"total_tokens\":5}}}\n", rotatedSessUUID)))
+							}
+						}
+					}()
+					return inW, outR, errR, newMockProcessHandle(23456), nil
+				},
+			}
+			ephemSpawner := &mockDaemonSpawner{
+				SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+					ephemSpawns.Add(1)
+					return nil, nil, nil, nil, errors.New("ephemeral pool should not be used")
+				},
+			}
+
+			primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, newMockSpawner())
+			defer primaryPool.Close()
+			statefulLow := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, statefulSpawner)
+			defer statefulLow.Close()
+			statefulMed := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-medium"}, statefulSpawner)
+			defer statefulMed.Close()
+			ephemLowU := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, ephemSpawner)
+			defer ephemLowU.Close()
+			ephemLow := runner.NewInterchangeablePool(ephemLowU, runner.InterchangeablePoolConfig{WorkerCount: 1, KeyPrefix: "discord:worker"})
+			defer ephemLow.Close()
+			ephemMedU := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-medium"}, ephemSpawner)
+			defer ephemMedU.Close()
+			ephemMed := runner.NewInterchangeablePool(ephemMedU, runner.InterchangeablePoolConfig{WorkerCount: 1, KeyPrefix: "discord:medium-worker"})
+			defer ephemMed.Close()
+
+			cfg := newTestConfig(func(d *config.ConfigData) {
+				d.DataDir = tempData
+				d.LowEffortModel = "gemini-3.8-flash-low"
+				d.MediumEffortModel = "gemini-3.8-flash-medium"
+			})
+			doneCh := make(chan struct{}, 1)
+			pool := New(cfg, WorkerPoolConfig{
+				Pools: map[PoolKey]runner.AgentPool{
+					{Ephemeral: false, Effort: "high"}:   primaryPool,
+					{Ephemeral: false, Effort: "medium"}: statefulMed,
+					{Ephemeral: false, Effort: "low"}:    statefulLow,
+					{Ephemeral: true, Effort: "medium"}:  ephemMed,
+					{Ephemeral: true, Effort: "low"}:     ephemLow,
+				},
+				SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1,
+				OnMessageCompleted: func(msg db.Message, status string) {
+					if status == db.StatusCompleted {
+						doneCh <- struct{}{}
+					}
+				},
+			})
+			defer pool.Stop()
+
+			threadID := "1560318118792790888-" + tc.effort
+			ctx := context.Background()
+			_ = store.SaveSessionID(ctx, threadID, existingSessUUID)
+
+			msg := db.Message{
+				ID: "msg-stateful-" + tc.effort, ThreadID: threadID, Content: "execute persistent " + tc.effort,
+				Effort: tc.effort, Metadata: db.MessageMetadata{Ephemeral: &falseVal}, Status: db.StatusPending, CreatedAt: time.Now(),
+			}
+			_ = store.InsertMessage(ctx, msg)
+			pool.Enqueue(msg)
+			select {
+			case <-doneCh:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("timeout waiting for stateful %s turn", tc.effort)
+			}
+			pool.Stop()
+
+			if got := ephemSpawns.Load(); got != 0 {
+				t.Errorf("expected 0 spawns on ephemeral pools, got %d", got)
+			}
+			mu.Lock()
+			gotSpawned := spawnedSessionID
+			mu.Unlock()
+			if gotSpawned != existingSessUUID {
+				t.Errorf("expected spawner to receive existing session %s, got %s", existingSessUUID, gotSpawned)
+			}
+			currentSess, err := store.GetSessionID(ctx, threadID)
+			if err != nil || currentSess != rotatedSessUUID {
+				t.Errorf("expected rotated session %s persisted in DB, got %s (err=%v)", rotatedSessUUID, currentSess, err)
+			}
+			turnCount, err := store.GetSessionTurnCount(ctx, threadID)
+			if err != nil || turnCount != 1 {
+				t.Errorf("expected session turn count 1 in DB, got %d (err=%v)", turnCount, err)
+			}
+		})
+	}
+}
+
 func TestWorker_DualPool_YieldTrapFallback(t *testing.T) {
 	t.Parallel()
 	store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
@@ -1750,6 +1938,551 @@ func TestYieldTrap_Scenarios(t *testing.T) {
 			newMetric := testutil.ToFloat64(metrics.YieldTrapEventsTotal.WithLabelValues(tc.metricOutcome, tc.metricSignature, model))
 			if newMetric != initialMetric+1 {
 				t.Errorf("metric delta = %.0f, want 1", newMetric-initialMetric)
+			}
+		})
+	}
+}
+
+func TestWorker_ResolveExecutionPool_EphemeralRouting_TableDriven(t *testing.T) {
+	t.Parallel()
+	primaryPool := &runner.UnifiedProcessPool{}
+	lowStateful := &runner.UnifiedProcessPool{}
+	medStateful := &runner.UnifiedProcessPool{}
+	lowEphem := &runner.UnifiedProcessPool{}
+	medEphem := &runner.UnifiedProcessPool{}
+
+	trueVal := true
+	falseVal := false
+
+	tests := []struct {
+		name        string
+		effort      string
+		ephemeral   *bool
+		wantPool    runner.AgentPool
+		wantPoolKey PoolKey
+		wantErr     bool
+	}{
+		{
+			name:        "default low effort routes to ephemeral low pool",
+			effort:      "low",
+			ephemeral:   nil,
+			wantPool:    lowEphem,
+			wantPoolKey: PoolKey{Ephemeral: true, Effort: "low"},
+		},
+		{
+			name:        "explicit ephemeral true with low effort routes to ephemeral low pool",
+			effort:      "low",
+			ephemeral:   &trueVal,
+			wantPool:    lowEphem,
+			wantPoolKey: PoolKey{Ephemeral: true, Effort: "low"},
+		},
+		{
+			name:        "explicit ephemeral false with low effort routes to stateful low pool",
+			effort:      "low",
+			ephemeral:   &falseVal,
+			wantPool:    lowStateful,
+			wantPoolKey: PoolKey{Ephemeral: false, Effort: "low"},
+		},
+		{
+			name:        "default medium effort routes to ephemeral medium pool",
+			effort:      "medium",
+			ephemeral:   nil,
+			wantPool:    medEphem,
+			wantPoolKey: PoolKey{Ephemeral: true, Effort: "medium"},
+		},
+		{
+			name:        "explicit ephemeral true with medium effort routes to ephemeral medium pool",
+			effort:      "medium",
+			ephemeral:   &trueVal,
+			wantPool:    medEphem,
+			wantPoolKey: PoolKey{Ephemeral: true, Effort: "medium"},
+		},
+		{
+			name:        "explicit ephemeral false with medium effort routes to stateful medium pool",
+			effort:      "medium",
+			ephemeral:   &falseVal,
+			wantPool:    medStateful,
+			wantPoolKey: PoolKey{Ephemeral: false, Effort: "medium"},
+		},
+		{
+			name:        "default high effort routes to stateful high pool",
+			effort:      "high",
+			ephemeral:   nil,
+			wantPool:    primaryPool,
+			wantPoolKey: PoolKey{Ephemeral: false, Effort: "high"},
+		},
+		{
+			name:      "explicit ephemeral true with high effort returns error",
+			effort:    "high",
+			ephemeral: &trueVal,
+			wantErr:   true,
+		},
+		{
+			name:      "explicit ephemeral true with empty effort returns error",
+			effort:    "",
+			ephemeral: &trueVal,
+			wantErr:   true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			wp := &WorkerPool{
+				pools: map[PoolKey]runner.AgentPool{
+					{Ephemeral: false, Effort: "high"}:   primaryPool,
+					{Ephemeral: false, Effort: "medium"}: medStateful,
+					{Ephemeral: false, Effort: "low"}:    lowStateful,
+					{Ephemeral: true, Effort: "medium"}:  medEphem,
+					{Ephemeral: true, Effort: "low"}:     lowEphem,
+				},
+			}
+			te := &turnExecution{
+				pool:     wp,
+				threadID: "thread-ephem-test",
+				burst: []db.Message{
+					{
+						ID:     "msg-1",
+						Effort: tc.effort,
+						Metadata: db.MessageMetadata{
+							Ephemeral: tc.ephemeral,
+						},
+					},
+				},
+			}
+
+			activePool, poolKey, err := te.resolveExecutionPool()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("resolveExecutionPool() err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				return
+			}
+			if activePool != tc.wantPool {
+				t.Errorf("activePool = %v, want %v", activePool, tc.wantPool)
+			}
+			if poolKey != tc.wantPoolKey {
+				t.Errorf("poolKey = %+v, want %+v", poolKey, tc.wantPoolKey)
+			}
+		})
+	}
+}
+
+func TestWorker_DeliverFailureNotice_And_QuotaPause_Silent_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		silent       bool
+		wantDelivery bool
+	}{
+		{"standard burst triggers delivery", false, true},
+		{"silent burst suppresses delivery", true, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var deliveryCount int
+			pool := &WorkerPool{
+				cfg: WorkerPoolConfig{
+					DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+						deliveryCount++
+						return nil
+					},
+					NotifierFunc: func(agyBin, apiKey, desc string) string { return "notice: " + desc },
+				},
+			}
+			te := &turnExecution{
+				pool:     pool,
+				threadID: "1542423172400291873",
+				burst: []db.Message{
+					{
+						ID:       "msg-1",
+						Metadata: db.MessageMetadata{Silent: tc.silent},
+					},
+				},
+			}
+
+			te.deliverFailureNotice("agy", "key", "fatal error", "stderr", "prefix", "test")
+			if tc.wantDelivery && deliveryCount == 0 {
+				t.Errorf("expected delivery for non-silent turn, got none")
+			}
+			if !tc.wantDelivery && deliveryCount > 0 {
+				t.Errorf("expected zero delivery for silent turn, got %d", deliveryCount)
+			}
+		})
+	}
+}
+
+func TestWorker_ResolveTurnPolicy_ParentChannelFallback_TableDriven(t *testing.T) {
+	t.Parallel()
+	CacheDiscordChannel(&discordgo.Channel{
+		ID:   "5566778899",
+		Name: "aerial-dev",
+		Type: discordgo.ChannelTypeGuildText,
+	})
+
+	tests := []struct {
+		name              string
+		threadID          string
+		parentChannelID   string
+		wantEffectiveName string
+	}{
+		{
+			name:              "custom session key with parent channel metadata resolves parent name",
+			threadID:          "heartbeat-session-123",
+			parentChannelID:   "5566778899",
+			wantEffectiveName: "aerial-dev",
+		},
+		{
+			name:              "custom session key without parent channel metadata has empty effective name",
+			threadID:          "custom-key-no-parent",
+			parentChannelID:   "",
+			wantEffectiveName: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pool := &WorkerPool{
+				cfg: WorkerPoolConfig{
+					Store: dbtest.NewFakeStore(),
+					ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+						return config.ChannelPolicy{Mode: "channel"}
+					},
+				},
+			}
+			te := &turnExecution{
+				pool:     pool,
+				threadID: tc.threadID,
+				burst: []db.Message{
+					{
+						ID:       "msg-fallback",
+						ThreadID: tc.threadID,
+						Metadata: db.MessageMetadata{ChannelID: tc.parentChannelID},
+					},
+				},
+			}
+			_ = te.resolveTurnPolicy()
+			if te.effectiveName != tc.wantEffectiveName {
+				t.Errorf("te.effectiveName = %q, want %q", te.effectiveName, tc.wantEffectiveName)
+			}
+		})
+	}
+}
+
+func TestWorker_EvaluateAmbientWake_HTTPAndSilent_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		authorID      string
+		silent        bool
+		isThread      bool
+		mode          string
+		wantSkipClass bool
+	}{
+		{
+			name:          "standard user message in channel mode is evaluated for ambient",
+			authorID:      "user-1",
+			silent:        false,
+			isThread:      false,
+			mode:          "channel",
+			wantSkipClass: false,
+		},
+		{
+			name:          "http-client author message skips ambient classifier",
+			authorID:      "http-client",
+			silent:        false,
+			isThread:      false,
+			mode:          "channel",
+			wantSkipClass: true,
+		},
+		{
+			name:          "silent message skips ambient classifier",
+			authorID:      "user-1",
+			silent:        true,
+			isThread:      false,
+			mode:          "channel",
+			wantSkipClass: true,
+		},
+		{
+			name:          "thread message skips channel ambient classifier",
+			authorID:      "user-1",
+			silent:        false,
+			isThread:      true,
+			mode:          "channel",
+			wantSkipClass: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pool := &WorkerPool{
+				cfg: WorkerPoolConfig{
+					Classifier: classifier.New(nil),
+				},
+			}
+			te := &turnExecution{
+				pool:     pool,
+				threadID: "chan-ambient-test",
+				isThread: tc.isThread,
+				policy:   config.ChannelPolicy{Mode: tc.mode},
+				burst: []db.Message{
+					{
+						ID:       "msg-ambient",
+						AuthorID: tc.authorID,
+						Content:  "ambient message text",
+						Metadata: db.MessageMetadata{Silent: tc.silent},
+					},
+				},
+			}
+
+			_ = te.evaluateAmbientWake()
+			if tc.wantSkipClass {
+				if te.wakeInfos != nil {
+					t.Errorf("expected ambient wake to be skipped, but wakeInfos was populated: %v", te.wakeInfos)
+				}
+			}
+		})
+	}
+}
+
+func TestWorker_DeliveryTargetID_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		threadID       string
+		effectiveID    string
+		burstChannelID string
+		wantTargetID   string
+	}{
+		{
+			name:           "numeric snowflake threadID returned as-is",
+			threadID:       "1542423172400291873",
+			effectiveID:    "123456789",
+			burstChannelID: "987654321",
+			wantTargetID:   "1542423172400291873",
+		},
+		{
+			name:           "custom session key falls back to snowflake burst channelID",
+			threadID:       "custom-session-123",
+			effectiveID:    "",
+			burstChannelID: "1542423172400291873",
+			wantTargetID:   "1542423172400291873",
+		},
+		{
+			name:           "custom session key with empty burst channelID falls back to snowflake effectiveID",
+			threadID:       "custom-session-456",
+			effectiveID:    "1542423172400291873",
+			burstChannelID: "",
+			wantTargetID:   "1542423172400291873",
+		},
+		{
+			name:           "custom session key with non-snowflake burst channelID returns burst channelID",
+			threadID:       "custom-session-789",
+			effectiveID:    "non-snowflake-eff",
+			burstChannelID: "non-snowflake-burst",
+			wantTargetID:   "non-snowflake-burst",
+		},
+		{
+			name:           "custom session key with empty burst channelID and non-snowflake effectiveID falls back to threadID",
+			threadID:       "custom-session-abc",
+			effectiveID:    "eff-key",
+			burstChannelID: "",
+			wantTargetID:   "custom-session-abc",
+		},
+		{
+			name:           "custom session key with empty burst and empty effectiveID falls back to threadID",
+			threadID:       "custom-session-fallback",
+			effectiveID:    "",
+			burstChannelID: "",
+			wantTargetID:   "custom-session-fallback",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			te := &turnExecution{
+				threadID:    tc.threadID,
+				effectiveID: tc.effectiveID,
+				burst: []db.Message{
+					{
+						ID:       "msg-delivery-target",
+						ThreadID: tc.threadID,
+						Metadata: db.MessageMetadata{ChannelID: tc.burstChannelID},
+					},
+				},
+			}
+			got := te.deliveryTargetID()
+			if got != tc.wantTargetID {
+				t.Errorf("deliveryTargetID() = %q, want %q", got, tc.wantTargetID)
+			}
+		})
+	}
+}
+
+func TestWorker_GlobalQuotaLockout_SilentAndDeliveryTarget_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		threadID       string
+		channelID      string
+		silent         bool
+		wantDelivered  bool
+		wantTargetChan string
+	}{
+		{
+			name:           "silent turn hitting global quota lockout suppresses quota message",
+			threadID:       "custom-session-silent",
+			channelID:      "1542423172400291873",
+			silent:         true,
+			wantDelivered:  false,
+			wantTargetChan: "",
+		},
+		{
+			name:           "non-silent turn hitting global quota lockout delivers to deliveryTargetID snowflake",
+			threadID:       "custom-session-visible",
+			channelID:      "1542423172400291873",
+			silent:         false,
+			wantDelivered:  true,
+			wantTargetChan: "1542423172400291873",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var deliveredMu sync.Mutex
+			var deliveredTo string
+			var deliveredText string
+
+			store := dbtest.NewFakeStore()
+			pool := New(config.NewFromData(&config.ConfigData{}), WorkerPoolConfig{
+				Store: store,
+				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+					deliveredMu.Lock()
+					deliveredTo = channelID
+					deliveredText = text
+					deliveredMu.Unlock()
+					return nil
+				},
+			})
+			pool.quotaLockedUntil.Store(time.Now().Add(10 * time.Minute).Unix())
+
+			msg := db.Message{
+				ID:       "msg-quota-lockout",
+				ThreadID: tc.threadID,
+				Content:  "execute prompt",
+				Status:   db.StatusProcessing,
+				Metadata: db.MessageMetadata{
+					ChannelID: tc.channelID,
+					Silent:    tc.silent,
+				},
+			}
+			_ = store.InsertMessage(context.Background(), msg)
+
+			te := &turnExecution{
+				pool:        pool,
+				threadID:    tc.threadID,
+				triggerType: "http",
+				burst:       []db.Message{msg},
+				execStart:   time.Now().UTC(),
+				turnPrompt:  "execute prompt",
+				stopTyping:  func() {},
+			}
+
+			te.executeWithRetries()
+
+			deliveredMu.Lock()
+			wasDelivered := deliveredTo != ""
+			gotTarget := deliveredTo
+			deliveredMu.Unlock()
+
+			if wasDelivered != tc.wantDelivered {
+				t.Fatalf("wasDelivered = %v, want %v (text=%q)", wasDelivered, tc.wantDelivered, deliveredText)
+			}
+			if tc.wantDelivered && gotTarget != tc.wantTargetChan {
+				t.Fatalf("deliveredTo = %q, want %q", gotTarget, tc.wantTargetChan)
+			}
+		})
+	}
+}
+
+func TestWorker_DeliverSuccessAndFinalize_CustomSessionTarget_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		threadID       string
+		channelID      string
+		silent         bool
+		wantDelivered  bool
+		wantTargetChan string
+	}{
+		{
+			name:           "custom session non-silent delivers to snowflake channelID",
+			threadID:       "custom-session-success",
+			channelID:      "1542423172400291873",
+			silent:         false,
+			wantDelivered:  true,
+			wantTargetChan: "1542423172400291873",
+		},
+		{
+			name:           "custom session silent suppresses delivery",
+			threadID:       "custom-session-silent",
+			channelID:      "1542423172400291873",
+			silent:         true,
+			wantDelivered:  false,
+			wantTargetChan: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var deliveredTo string
+			store := dbtest.NewFakeStore()
+			pool := New(config.NewFromData(&config.ConfigData{}), WorkerPoolConfig{
+				Store: store,
+				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+					deliveredTo = channelID
+					return nil
+				},
+			})
+
+			msg := db.Message{
+				ID:       "msg-succ",
+				ThreadID: tc.threadID,
+				Status:   db.StatusProcessing,
+				Metadata: db.MessageMetadata{
+					ChannelID: tc.channelID,
+					Silent:    tc.silent,
+				},
+			}
+			_ = store.InsertMessage(context.Background(), msg)
+
+			te := &turnExecution{
+				pool:        pool,
+				threadID:    tc.threadID,
+				triggerType: "http",
+				burst:       []db.Message{msg},
+				execStart:   time.Now().UTC(),
+				stopTyping:  func() {},
+			}
+
+			resp := &runner.AgyResponse{
+				Response: "Task completed successfully",
+			}
+			ok, _ := te.deliverSuccessAndFinalize(resp, runner.TokenUsage{}, "test-model", 1, 1)
+			if !ok {
+				t.Fatalf("deliverSuccessAndFinalize returned false")
+			}
+			if tc.wantDelivered && deliveredTo != tc.wantTargetChan {
+				t.Fatalf("deliveredTo = %q, want %q", deliveredTo, tc.wantTargetChan)
+			}
+			if !tc.wantDelivered && deliveredTo != "" {
+				t.Fatalf("deliveredTo = %q, want empty", deliveredTo)
 			}
 		})
 	}

@@ -1,10 +1,23 @@
 package queue
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/azylman/aerial/services/eri/pkg/config"
+	"github.com/bwmarrin/discordgo"
 )
+
+func (p *WorkerPool) SetCreateThreadFunc(fn func(channelID, title string) (string, error)) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.createThreadFn = fn
+}
 
 func TestFormatThreadTitle_TableDriven(t *testing.T) {
 	t.Parallel()
@@ -64,6 +77,156 @@ func TestShouldCreateThread_TableDriven(t *testing.T) {
 			t.Parallel()
 			if got := ShouldCreateThread(tc.isAlreadyThread, tc.channelMode); got != tc.expected {
 				t.Errorf("expected %v, got %v", tc.expected, got)
+			}
+		})
+	}
+}
+
+func TestIsValidThreadKey_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		key      string
+		expected bool
+	}{
+		{"empty key", "", false},
+		{"single char", "a", true},
+		{"alphanumeric with hyphen and underscore", "valid-key_123", true},
+		{"all digits", "1234567890", true},
+		{"all uppercase", "SESSION-ABC", true},
+		{"128 chars valid", strings.Repeat("a", 128), true},
+		{"129 chars invalid", strings.Repeat("a", 129), false},
+		{"contains colon", "prefix:key", false},
+		{"contains space", "key with space", false},
+		{"contains slash", "key/slash", false},
+		{"contains dot", "key.dot", false},
+		{"contains exclamation", "key!alert", false},
+		{"contains emoji", "heartbeat🚀", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsValidThreadKey(tc.key); got != tc.expected {
+				t.Errorf("IsValidThreadKey(%q) = %v, want %v", tc.key, got, tc.expected)
+			}
+		})
+	}
+}
+
+func TestResolveTargetThread_TableDriven(t *testing.T) {
+	tests := []struct {
+		name          string
+		isNilPool     bool
+		channelID     string
+		title         string
+		prompt        string
+		cachedChannel *discordgo.Channel
+		policyMode    string
+		hasHook       bool
+		hookThreadID  string
+		hookErr       error
+		expected      string
+	}{
+		{
+			name:      "nil pool returns channelID",
+			isNilPool: true,
+			channelID: "11223344",
+			expected:  "11223344",
+		},
+		{
+			name:      "empty channelID returns empty",
+			channelID: "",
+			expected:  "",
+		},
+		{
+			name:      "channel is already a thread",
+			channelID: "99887766",
+			cachedChannel: &discordgo.Channel{
+				ID:   "99887766",
+				Type: discordgo.ChannelTypeGuildPublicThread,
+				Name: "existing-thread",
+			},
+			policyMode: "threads",
+			expected:   "99887766",
+		},
+		{
+			name:      "policy mode is channel",
+			channelID: "55667788",
+			cachedChannel: &discordgo.Channel{
+				ID:   "55667788",
+				Type: discordgo.ChannelTypeGuildText,
+				Name: "general",
+			},
+			policyMode: "channel",
+			expected:   "55667788",
+		},
+		{
+			name:      "createThreadFn hook creates thread successfully",
+			channelID: "44332211",
+			title:     "System Health",
+			prompt:    "Check disk and CPU",
+			cachedChannel: &discordgo.Channel{
+				ID:   "44332211",
+				Type: discordgo.ChannelTypeGuildText,
+				Name: "alerts",
+			},
+			policyMode:   "threads",
+			hasHook:      true,
+			hookThreadID: "77889900",
+			expected:     "77889900",
+		},
+		{
+			name:      "createThreadFn hook returns error fallback to channelID",
+			channelID: "44332211",
+			cachedChannel: &discordgo.Channel{
+				ID:   "44332211",
+				Type: discordgo.ChannelTypeGuildText,
+				Name: "alerts",
+			},
+			policyMode: "threads",
+			hasHook:    true,
+			hookErr:    errors.New("discord rate limited"),
+			expected:   "44332211",
+		},
+		{
+			name:      "createThreadFn hook returns empty thread ID fallback",
+			channelID: "44332211",
+			cachedChannel: &discordgo.Channel{
+				ID:   "44332211",
+				Type: discordgo.ChannelTypeGuildText,
+				Name: "alerts",
+			},
+			policyMode:   "threads",
+			hasHook:      true,
+			hookThreadID: "",
+			expected:     "44332211",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.cachedChannel != nil {
+				CacheDiscordChannel(tc.cachedChannel)
+			}
+			var pool *WorkerPool
+			if !tc.isNilPool {
+				pool = &WorkerPool{
+					cfg: WorkerPoolConfig{
+						ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+							return config.ChannelPolicy{Mode: tc.policyMode}
+						},
+					},
+				}
+				if tc.hasHook {
+					pool.SetCreateThreadFunc(func(cID, title string) (string, error) {
+						return tc.hookThreadID, tc.hookErr
+					})
+				}
+			}
+
+			got := pool.ResolveTargetThread(tc.channelID, tc.title, tc.prompt, time.Now())
+			if got != tc.expected {
+				t.Errorf("ResolveTargetThread() = %q, want %q", got, tc.expected)
 			}
 		})
 	}

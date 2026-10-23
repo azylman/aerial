@@ -173,7 +173,7 @@ func (te *turnExecution) finalizeBurstMessages(msgs []db.Message, msgStatus, msg
 }
 
 func (te *turnExecution) incrementSessionTurnCount(threadID string) (int, error) {
-	if te == nil || te.isEphemeral || (te.pool != nil && te.isNonPrimaryPool(te.resolveExecutionPool())) {
+	if te == nil || te.isEphemeral || isBurstEphemeral(te.burst) {
 		return 0, nil
 	}
 	if s := te.store(); s != nil {
@@ -339,43 +339,6 @@ func isRateLimitError(errDetail string, extraStrs ...string) bool {
 	return false
 }
 
-func extractBurstModel(burst []db.Message) string {
-	for _, m := range burst {
-		if model := strings.TrimSpace(m.Metadata.Model); model != "" {
-			return model
-		}
-	}
-	return ""
-}
-
-func extractBurstSilent(burst []db.Message) bool {
-	if len(burst) == 0 {
-		return false
-	}
-	for _, m := range burst {
-		if !m.Metadata.Silent {
-			return false
-		}
-	}
-	return true
-}
-
-func resolveBurstEffort(burst []db.Message) string {
-	hasLow := false
-	for _, m := range burst {
-		switch resolveMessageEffort(m) {
-		case "medium":
-			return "medium"
-		case "low":
-			hasLow = true
-		}
-	}
-	if hasLow {
-		return "low"
-	}
-	return "high"
-}
-
 func (te *turnExecution) poolCtx() context.Context {
 	if te != nil && te.pool != nil && te.pool.ctx != nil {
 		return te.pool.ctx
@@ -437,6 +400,7 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 		triggerType: triggerType,
 		execStart:   time.Now().UTC(),
 		wakeIdx:     -1,
+		isEphemeral: isBurstEphemeral(burst),
 		stopTyping:  func() {},
 	}
 
@@ -481,9 +445,13 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 	}
 
 	// 1. Resolve active execution pool (primary vs medium vs low effort)
-	activePool := te.resolveExecutionPool()
+	activePool, poolKey, poolErr := te.resolveExecutionPool()
+	if poolErr != nil {
+		te.failBurst(poolErr)
+		return
+	}
 	te.activePool = activePool
-	te.isEphemeral = te.isNonPrimaryPool(activePool)
+	te.isEphemeral = poolKey.Ephemeral
 
 	if activePool == nil {
 		te.failBurst(fmt.Errorf("queue: no agent execution pool available for thread %s", te.threadID))
@@ -500,50 +468,23 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 	}
 	te.lease = lease
 	defer func() {
-		if te.lease != nil {
-			if relErr := te.lease.Release(); relErr != nil {
-				log.Printf("[WorkerPool] Warning releasing lease for %s: %v", te.threadID, relErr)
-			}
+		if relErr := te.lease.Release(); relErr != nil {
+			log.Printf("[WorkerPool] Warning releasing lease for %s: %v", te.threadID, relErr)
 		}
 	}()
 
 	te.currentSessionID = lease.SessionID()
 	te.previousSessionID = lease.PreviousSessionID()
 	te.isCold = lease.IsCold()
-	te.isEphemeral = lease.IsEphemeral() || te.isNonPrimaryPool(activePool)
+	te.isEphemeral = poolKey.Ephemeral || lease.IsEphemeral()
 	te.turnCount = lease.TurnCount()
 
-	if te.currentSessionID != "" && te.isCold {
+	if te.currentSessionID != "" && te.isCold && !te.isEphemeral {
 		te.saveSessionID(te.threadID, te.currentSessionID)
 	}
 
-	if te.policy.Hooks.PreTurn != nil {
-		preReq := buildPreTurnRequest(te)
-		dispatcher, poolCtx := te.resolveWebhookDispatcher()
-		preResp, err := dispatcher.CallPreTurnHook(poolCtx, te.policy.Hooks.PreTurn, preReq)
-		if err != nil {
-			action := te.policy.Hooks.PreTurn.GetOnTimeout("drop")
-			if action == "drop" {
-				te.abortBurst("pre_turn_timeout_drop")
-				return
-			} else if action == "retry" {
-				te.rescheduleBurst(5)
-				return
-			}
-		} else if preResp != nil {
-			if !preResp.Allow {
-				if preResp.Action == "retry" {
-					te.rescheduleBurst(preResp.RetryAfterSeconds)
-					return
-				}
-				te.abortBurst("pre_turn_rejected: " + preResp.Reason)
-				return
-			}
-			if strings.TrimSpace(preResp.InjectedContext) != "" {
-				te.injectedHookContext = fmt.Sprintf("<COORDINATION_CONTEXT>\n%s\n</COORDINATION_CONTEXT>", strings.TrimSpace(preResp.InjectedContext))
-			}
-			te.hookMetadata = preResp.Metadata
-		}
+	if !te.runPreTurnHook() {
+		return
 	}
 
 	te.turnAttempted = true
@@ -629,6 +570,15 @@ func isHTTPClientBurst(burst []db.Message) bool {
 
 func (te *turnExecution) resolveTurnPolicy() bool {
 	te.effectiveID, te.effectiveName, te.isThread, te.threadName = ResolveChannelAndThread(te.pool.getDiscordSession(), te.threadID)
+	if te.effectiveName == "" && len(te.burst) > 0 && te.burst[0].Metadata.ChannelID != "" {
+		effID, effName, isTh, thName := ResolveChannelAndThread(te.pool.getDiscordSession(), te.burst[0].Metadata.ChannelID)
+		if effName != "" || effID != "" {
+			te.effectiveID = effID
+			te.effectiveName = effName
+			te.isThread = isTh
+			te.threadName = thName
+		}
+	}
 	if te.pool.cfg.ResolveChannelPolicy != nil {
 		te.policy = te.pool.cfg.ResolveChannelPolicy(te.effectiveID, te.effectiveName)
 	} else {
@@ -651,8 +601,54 @@ func (te *turnExecution) resolveTurnPolicy() bool {
 	return true
 }
 
+func shouldEvaluateAmbientWake(mode string, isThread, isSilent, isHTTP bool) bool {
+	return strings.ToLower(mode) == "channel" && !isThread && !isSilent && !isHTTP
+}
+
+func (te *turnExecution) resolveWakeHookOverride() string {
+	if te.policy.Hooks.OnWake == nil {
+		return ""
+	}
+	channelID := te.effectiveID
+	if channelID == "" {
+		channelID = te.threadID
+	}
+	var firstMsg db.Message
+	if len(te.burst) > 0 {
+		firstMsg = te.burst[0]
+	}
+	req := &WakeRequest{ChannelID: channelID, ThreadID: te.threadID, Message: firstMsg, Timestamp: time.Now().UTC()}
+
+	dispatcher, poolCtx := te.resolveWebhookDispatcher()
+	wakeResp, err := dispatcher.CallWakeHook(poolCtx, te.policy.Hooks.OnWake, req)
+	hookOverride := te.policy.Hooks.OnWake.GetOnTimeout("classify")
+	if err == nil && wakeResp != nil && strings.TrimSpace(wakeResp.Override) != "" {
+		hookOverride = strings.ToLower(strings.TrimSpace(wakeResp.Override))
+	}
+	return hookOverride
+}
+
+// deliveryTargetID returns the Discord channel or thread snowflake to target for status updates,
+// typing indicators, response delivery, and notices. When te.threadID is an internal non-snowflake
+// session key (e.g. from /prompt session_id), it falls back to the message's Discord ChannelID or effectiveID.
+func (te *turnExecution) deliveryTargetID() string {
+	if IsNumericSnowflake(te.threadID) {
+		return te.threadID
+	}
+	if len(te.burst) > 0 && IsNumericSnowflake(te.burst[0].Metadata.ChannelID) {
+		return te.burst[0].Metadata.ChannelID
+	}
+	if IsNumericSnowflake(te.effectiveID) {
+		return te.effectiveID
+	}
+	if len(te.burst) > 0 && te.burst[0].Metadata.ChannelID != "" {
+		return te.burst[0].Metadata.ChannelID
+	}
+	return te.threadID
+}
+
 func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
-	if strings.ToLower(te.policy.Mode) == "channel" {
+	if shouldEvaluateAmbientWake(te.policy.Mode, te.isThread, extractBurstSilent(te.burst), isHTTPClientBurst(te.burst)) {
 		botUserID := ""
 		var botRoleIDs []string
 		if sess := te.pool.getDiscordSession(); sess != nil && sess.State != nil {
@@ -663,25 +659,7 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 		}
 
 		wakeMode := te.policy.GetWakeMode()
-		var hookOverride string
-		if te.policy.Hooks.OnWake != nil {
-			channelID := te.effectiveID
-			if channelID == "" {
-				channelID = te.threadID
-			}
-			var firstMsg db.Message
-			if len(te.burst) > 0 {
-				firstMsg = te.burst[0]
-			}
-			req := &WakeRequest{ChannelID: channelID, ThreadID: te.threadID, Message: firstMsg, Timestamp: time.Now().UTC()}
-
-			dispatcher, poolCtx := te.resolveWebhookDispatcher()
-			wakeResp, err := dispatcher.CallWakeHook(poolCtx, te.policy.Hooks.OnWake, req)
-			hookOverride = te.policy.Hooks.OnWake.GetOnTimeout("classify")
-			if err == nil && wakeResp != nil && strings.TrimSpace(wakeResp.Override) != "" {
-				hookOverride = strings.ToLower(strings.TrimSpace(wakeResp.Override))
-			}
-		}
+		hookOverride := te.resolveWakeHookOverride()
 
 		classifierFn := func(msgs []db.Message) (float64, string) {
 			var recentContext []db.Message
@@ -737,9 +715,10 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 	}
 
 	if !extractBurstSilent(te.burst) {
-		te.statusUpdater = NewStatusUpdater(te.pool.getDiscordSession(), te.threadID, te.isThread)
+		deliveryTarget := te.deliveryTargetID()
+		te.statusUpdater = NewStatusUpdater(te.pool.getDiscordSession(), deliveryTarget, te.isThread)
 		if te.pool.cfg.TypingFunc != nil {
-			if stop := te.pool.cfg.TypingFunc(te.pool.getDiscordSession(), te.threadID); stop != nil {
+			if stop := te.pool.cfg.TypingFunc(te.pool.getDiscordSession(), deliveryTarget); stop != nil {
 				te.stopTyping = stop
 			}
 		}
@@ -765,60 +744,6 @@ func (te *turnExecution) markAmbientBurst() {
 			info = te.wakeInfos[i]
 		}
 		te.completeAmbientMessage(m, info)
-	}
-}
-
-func buildPreTurnRequest(te *turnExecution) *PreTurnRequest {
-	if te == nil {
-		return &PreTurnRequest{Timestamp: time.Now().UTC()}
-	}
-	channelID := te.effectiveID
-	if channelID == "" {
-		channelID = te.threadID
-	}
-	msgs, maxRetry := make([]*db.Message, len(te.burst)), 0
-	for i := range te.burst {
-		msgs[i] = &te.burst[i]
-		if te.burst[i].RetryCount > maxRetry {
-			maxRetry = te.burst[i].RetryCount
-		}
-	}
-	prompt := te.turnPrompt
-	if prompt == "" {
-		var tz string
-		if te.pool != nil && te.pool.appCfg != nil {
-			if cur := te.pool.appCfg.Current(); cur != nil {
-				tz = cur.Timezone
-			}
-		}
-		prompt = CoalesceBurstPrompt(te.burst, tz)
-	}
-	return &PreTurnRequest{
-		ChannelID: channelID, ThreadID: te.threadID, BurstCount: len(te.burst),
-		Messages: msgs, Prompt: prompt, RetryCount: maxRetry, Timestamp: time.Now().UTC(),
-	}
-}
-
-func buildPostTurnRequest(te *turnExecution) *PostTurnRequest {
-	if te == nil {
-		return &PostTurnRequest{Timestamp: time.Now().UTC()}
-	}
-	channelID := te.effectiveID
-	if channelID == "" {
-		channelID = te.threadID
-	}
-	durMs := te.turnDurationMs
-	if durMs <= 0 && !te.execStart.IsZero() {
-		durMs = time.Since(te.execStart).Milliseconds()
-	}
-	status := te.turnStatus
-	if status == "" {
-		status = "failed"
-	}
-	return &PostTurnRequest{
-		ChannelID: channelID, ThreadID: te.threadID, Status: status,
-		ResponseText: te.turnResponseText, Error: te.turnError,
-		DurationMs: durMs, TokenUsage: te.turnTokenUsage, Metadata: te.hookMetadata, Timestamp: time.Now().UTC(),
 	}
 }
 
@@ -974,7 +899,7 @@ func (te *turnExecution) resolveAndPersistSessionID(candidateID, stdout, stderr 
 	defer te.activeSessionMu.Unlock()
 
 	targetSess := candidateID
-	if targetSess == "" && te.isNonPrimaryPool(te.activePool) {
+	if targetSess == "" && te.isEphemeral {
 		if d := getStreamingDaemon(te.activePool, te.threadID); d != nil && d.SessionID() != "" {
 			targetSess = d.SessionID()
 		}
@@ -996,8 +921,8 @@ func (te *turnExecution) resolveAndPersistSessionID(candidateID, stdout, stderr 
 			targetSess = d.SessionID()
 		}
 	}
-	if targetSess == "" && te.pool != nil && te.pool.processPool != nil && te.pool.processPool != te.activePool {
-		if d := getStreamingDaemon(te.pool.processPool, te.threadID); d != nil && d.SessionID() != "" {
+	if primaryPool := te.pool.AgentPool(); targetSess == "" && primaryPool != nil && primaryPool != te.activePool {
+		if d := getStreamingDaemon(primaryPool, te.threadID); d != nil && d.SessionID() != "" {
 			targetSess = d.SessionID()
 		}
 	}
@@ -1017,28 +942,33 @@ func (te *turnExecution) resolveAndPersistSessionID(candidateID, stdout, stderr 
 	return targetSess
 }
 
+func (te *turnExecution) fetchTurnHistory(fetchCtx context.Context, limit int) []HistoryMessage {
+	if !IsNumericSnowflake(te.threadID) && (te.pool == nil || te.pool.cfg.HistoryFetcher == nil) {
+		return nil
+	}
+	var err error
+	var turnHistory []HistoryMessage
+	if te.pool.cfg.HistoryFetcher != nil {
+		turnHistory, err = te.pool.cfg.HistoryFetcher(fetchCtx, te.threadID, te.burst[0].ID, limit)
+	} else {
+		turnHistory, err = FetchRecentThreadHistory(fetchCtx, te.pool.getDiscordSession(), te.store(), te.threadID, limit)
+	}
+	if err != nil {
+		log.Printf("[WorkerPool] Warning: History fetch failed for thread %s: %v", te.threadID, err)
+	}
+	return turnHistory
+}
+
 func (te *turnExecution) buildTurnPrompt() {
 	var turnHistory []HistoryMessage
 	var turnHistoryFetched bool
 	getTurnHistory := func(limit int) []HistoryMessage {
-		if turnHistoryFetched {
-			if len(turnHistory) > limit {
-				return turnHistory[:limit]
-			}
-			return turnHistory
+		if !turnHistoryFetched {
+			fetchCtx, fetchCancel := context.WithTimeout(te.poolCtx(), 3*time.Second)
+			turnHistory = te.fetchTurnHistory(fetchCtx, limit)
+			fetchCancel()
+			turnHistoryFetched = true
 		}
-		fetchCtx, fetchCancel := context.WithTimeout(te.poolCtx(), 3*time.Second)
-		defer fetchCancel()
-		var err error
-		if te.pool.cfg.HistoryFetcher != nil {
-			turnHistory, err = te.pool.cfg.HistoryFetcher(fetchCtx, te.threadID, te.burst[0].ID, limit)
-		} else {
-			turnHistory, err = FetchRecentThreadHistory(fetchCtx, te.pool.getDiscordSession(), te.store(), te.threadID, limit)
-		}
-		if err != nil {
-			log.Printf("[WorkerPool] Warning: History fetch failed for thread %s: %v", te.threadID, err)
-		}
-		turnHistoryFetched = true
 		if len(turnHistory) > limit {
 			return turnHistory[:limit]
 		}
@@ -1225,11 +1155,12 @@ func (te *turnExecution) deliverSuccessAndFinalize(resp *runner.AgyResponse, acc
 	}
 
 	if !isSilent {
+		deliveryTarget := te.deliveryTargetID()
 		var deliveryErr error
 		if te.pool.cfg.DeliveryWithAttachmentsFunc != nil {
-			deliveryErr = te.pool.cfg.DeliveryWithAttachmentsFunc(te.pool.getDiscordSession(), te.threadID, cleanText, attachments)
+			deliveryErr = te.pool.cfg.DeliveryWithAttachmentsFunc(te.pool.getDiscordSession(), deliveryTarget, cleanText, attachments)
 		} else if te.pool.cfg.DeliveryFunc != nil {
-			deliveryErr = te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, cleanText)
+			deliveryErr = te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), deliveryTarget, cleanText)
 		}
 		if deliveryErr != nil {
 			log.Printf("[WorkerPool] Failed to deliver response for thread %s: %v", te.threadID, deliveryErr)
@@ -1256,6 +1187,15 @@ func (te *turnExecution) deliverSuccessAndFinalize(resp *runner.AgyResponse, acc
 	te.finalizeBurstMessages(te.burst, db.StatusCompleted, cleanText, "completed", "", currentModel, true, true)
 	log.Printf("[WorkerPool] %d message(s) in thread %s completed successfully on attempt %d/%d", len(te.burst), te.threadID, attempt, maxAttempts)
 	return true, ""
+}
+
+func (te *turnExecution) deliverQuotaNotice(pauseMsg string, logPrefix string) {
+	if te.pool != nil && te.pool.cfg.DeliveryFunc != nil && !extractBurstSilent(te.burst) {
+		deliveryTarget := te.deliveryTargetID()
+		if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), deliveryTarget, pauseMsg); err != nil {
+			log.Printf("[WorkerPool] Failed to deliver %s for thread %s: %v", logPrefix, te.threadID, err)
+		}
+	}
 }
 
 func (te *turnExecution) handleQuotaPause(errDetail, stderr, currentModel, burstEffort string, attempt, maxAttempts int) bool {
@@ -1289,12 +1229,8 @@ func (te *turnExecution) handleQuotaPause(errDetail, stderr, currentModel, burst
 		reason := fmt.Sprintf("[CAPACITY_EXHAUSTED reset_in=%v] %s", resetDur, sanitizeErrorText(errDetail))
 		metrics.RecordRunnerError("capacity_exhausted", currentModel)
 		metrics.RecordTurnCompleted("capacity_exhausted", te.triggerType, currentModel, time.Since(te.execStart))
-		if te.pool != nil && te.pool.cfg.DeliveryFunc != nil {
-			pauseMsg := notifier.FormatQuotaPauseMessage(resetDur, time.Now().UTC().Add(resetDur), false, false)
-			if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, pauseMsg); err != nil {
-				log.Printf("[WorkerPool] Failed to deliver capacity pause notice for thread %s: %v", te.threadID, err)
-			}
-		}
+		pauseMsg := notifier.FormatQuotaPauseMessage(resetDur, time.Now().UTC().Add(resetDur), false, false)
+		te.deliverQuotaNotice(pauseMsg, "capacity pause notice")
 		te.failBurstWithStatus("failed", reason, currentModel)
 		return false
 	}
@@ -1321,12 +1257,8 @@ func (te *turnExecution) handleQuotaPause(errDetail, stderr, currentModel, burst
 	}
 	metrics.RecordTurnCompleted("quota_paused", te.triggerType, currentModel, time.Since(te.execStart))
 	te.stopIndicators()
-	if te.pool.cfg.DeliveryFunc != nil {
-		pauseMsg := notifier.FormatQuotaPauseMessage(resetDur, runAt, scheduled, isAlreadyRetry)
-		if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, pauseMsg); err != nil {
-			log.Printf("[WorkerPool] Failed to deliver quota pause notice for thread %s: %v", te.threadID, err)
-		}
-	}
+	pauseMsg := notifier.FormatQuotaPauseMessage(resetDur, runAt, scheduled, isAlreadyRetry)
+	te.deliverQuotaNotice(pauseMsg, "quota pause notice")
 	reason := fmt.Sprintf("[QUOTA_PAUSED reset_in=%v scheduled=%t] %s", resetDur, scheduled, sanitizeErrorText(errDetail))
 	te.failBurstWithStatus("failed", reason, currentModel)
 	return false
@@ -1403,12 +1335,8 @@ func (te *turnExecution) executeWithRetries() {
 					reason := fmt.Sprintf("[QUOTA_PAUSED reset_in=%v scheduled=false] global quota pause active", remaining)
 					metrics.RecordRunnerError("quota_paused", currentModel)
 					metrics.RecordTurnCompleted("quota_paused", te.triggerType, currentModel, time.Since(te.execStart))
-					if te.pool.cfg.DeliveryFunc != nil {
-						pauseMsg := notifier.FormatQuotaPauseMessage(remaining, lockedUntil, false, false)
-						if dErr := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, pauseMsg); dErr != nil {
-							log.Printf("[WorkerPool] Failed to deliver quota pause message to thread %s: %v", te.threadID, dErr)
-						}
-					}
+					pauseMsg := notifier.FormatQuotaPauseMessage(remaining, lockedUntil, false, false)
+					te.deliverQuotaNotice(pauseMsg, "quota pause message")
 					te.failBurstWithStatus("failed", reason, currentModel)
 					return
 				}
@@ -1436,8 +1364,10 @@ func (te *turnExecution) executeWithRetries() {
 
 		activePool := te.activePool
 		if activePool == nil {
-			activePool = te.resolveExecutionPool()
-			te.activePool = activePool
+			if resolved, _, resolveErr := te.resolveExecutionPool(); resolveErr == nil {
+				activePool = resolved
+				te.activePool = activePool
+			}
 		}
 
 		var resp *runner.AgyResponse
@@ -1623,7 +1553,7 @@ func (te *turnExecution) executeWithRetries() {
 				te.lease = nil
 			}
 			if newLease, lErr := activePool.AcquireLease(te.pool.ctx, te.threadID); lErr == nil {
-				te.lease, te.isEphemeral, te.currentSessionID = newLease, newLease.IsEphemeral() || te.isNonPrimaryPool(activePool), newLease.SessionID()
+				te.lease, te.isEphemeral, te.currentSessionID = newLease, te.isEphemeral || newLease.IsEphemeral(), newLease.SessionID()
 			}
 			if shutdown := te.handleRetryBackoff(attempt, maxAttempts, errDetail, currentModel); shutdown {
 				return
@@ -1774,7 +1704,7 @@ func (te *turnExecution) cancelBurstOnShutdown(turnStatus, currentModel string, 
 }
 
 func (te *turnExecution) deliverFailureNotice(agyBin, apiKey, errDetail, stderr, descPrefix, logLabel string) {
-	if te.pool == nil || te.pool.cfg.DeliveryFunc == nil {
+	if te.pool == nil || te.pool.cfg.DeliveryFunc == nil || extractBurstSilent(te.burst) {
 		return
 	}
 	var notif string
@@ -1795,44 +1725,8 @@ func (te *turnExecution) deliverFailureNotice(agyBin, apiKey, errDetail, stderr,
 		}
 		notif = te.pool.cfg.NotifierFunc(agyBin, apiKey, desc)
 	}
-	if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, notif); err != nil {
+	deliveryTarget := te.deliveryTargetID()
+	if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), deliveryTarget, notif); err != nil {
 		log.Printf("[WorkerPool] Failed to deliver %s for thread %s: %v", logLabel, te.threadID, err)
 	}
-}
-
-func (te *turnExecution) resolveExecutionPool() runner.AgentPool {
-	if te.pool == nil {
-		return nil
-	}
-	switch resolveBurstEffort(te.burst) {
-	case "medium":
-		if te.pool.mediumEffortProcessPool != nil {
-			return te.pool.mediumEffortProcessPool
-		}
-		log.Printf("[Worker] Notice: mediumEffortProcessPool is nil, falling back to processPool for thread %s", te.threadID)
-	case "low":
-		if te.pool.lowEffortProcessPool != nil {
-			return te.pool.lowEffortProcessPool
-		}
-		log.Printf("[Worker] Notice: lowEffortProcessPool is nil, falling back to processPool for thread %s", te.threadID)
-	}
-	return te.pool.processPool
-}
-
-func (te *turnExecution) isNonPrimaryPool(activePool runner.AgentPool) bool {
-	return te != nil && te.pool != nil && activePool != nil && activePool != te.pool.processPool
-}
-
-func getStreamingDaemon(pool runner.AgentPool, threadID string) *runner.StreamingDaemon {
-	if pool == nil {
-		return nil
-	}
-	if dPool, ok := pool.(interface {
-		Get(string) (*runner.StreamingDaemon, bool)
-	}); ok {
-		if d, ok := dPool.Get(threadID); ok && d != nil {
-			return d
-		}
-	}
-	return nil
 }

@@ -226,3 +226,93 @@ func (d *DefaultWebhookDispatcher) dispatch(ctx context.Context, hook string, en
 
 	return nil
 }
+
+func buildPreTurnRequest(te *turnExecution) *PreTurnRequest {
+	if te == nil {
+		return &PreTurnRequest{Timestamp: time.Now().UTC()}
+	}
+	channelID := te.effectiveID
+	if channelID == "" {
+		channelID = te.threadID
+	}
+	msgs, maxRetry := make([]*db.Message, len(te.burst)), 0
+	for i := range te.burst {
+		msgs[i] = &te.burst[i]
+		if te.burst[i].RetryCount > maxRetry {
+			maxRetry = te.burst[i].RetryCount
+		}
+	}
+	prompt := te.turnPrompt
+	if prompt == "" {
+		var tz string
+		if te.pool != nil && te.pool.appCfg != nil {
+			if cur := te.pool.appCfg.Current(); cur != nil {
+				tz = cur.Timezone
+			}
+		}
+		prompt = CoalesceBurstPrompt(te.burst, tz)
+	}
+	return &PreTurnRequest{
+		ChannelID: channelID, ThreadID: te.threadID, BurstCount: len(te.burst),
+		Messages: msgs, Prompt: prompt, RetryCount: maxRetry, Timestamp: time.Now().UTC(),
+	}
+}
+
+func buildPostTurnRequest(te *turnExecution) *PostTurnRequest {
+	if te == nil {
+		return &PostTurnRequest{Timestamp: time.Now().UTC()}
+	}
+	channelID := te.effectiveID
+	if channelID == "" {
+		channelID = te.threadID
+	}
+	durMs := te.turnDurationMs
+	if durMs <= 0 && !te.execStart.IsZero() {
+		durMs = time.Since(te.execStart).Milliseconds()
+	}
+	status := te.turnStatus
+	if status == "" {
+		status = "failed"
+	}
+	return &PostTurnRequest{
+		ChannelID: channelID, ThreadID: te.threadID, Status: status,
+		ResponseText: te.turnResponseText, Error: te.turnError,
+		DurationMs: durMs, TokenUsage: te.turnTokenUsage, Metadata: te.hookMetadata, Timestamp: time.Now().UTC(),
+	}
+}
+
+func (te *turnExecution) runPreTurnHook() bool {
+	if te == nil || te.policy.Hooks.PreTurn == nil {
+		return true
+	}
+	preReq := buildPreTurnRequest(te)
+	dispatcher, poolCtx := te.resolveWebhookDispatcher()
+	preResp, err := dispatcher.CallPreTurnHook(poolCtx, te.policy.Hooks.PreTurn, preReq)
+	if err != nil {
+		action := te.policy.Hooks.PreTurn.GetOnTimeout("drop")
+		if action == "drop" {
+			te.abortBurst("pre_turn_timeout_drop")
+			return false
+		} else if action == "retry" {
+			te.rescheduleBurst(5)
+			return false
+		}
+		return true
+	}
+	if preResp == nil {
+		return true
+	}
+	if !preResp.Allow {
+		if preResp.Action == "retry" {
+			te.rescheduleBurst(preResp.RetryAfterSeconds)
+			return false
+		}
+		te.abortBurst("pre_turn_rejected: " + preResp.Reason)
+		return false
+	}
+	if strings.TrimSpace(preResp.InjectedContext) != "" {
+		te.injectedHookContext = fmt.Sprintf("<COORDINATION_CONTEXT>\n%s\n</COORDINATION_CONTEXT>", strings.TrimSpace(preResp.InjectedContext))
+	}
+	te.hookMetadata = preResp.Metadata
+	return true
+}

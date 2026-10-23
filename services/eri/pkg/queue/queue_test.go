@@ -2656,6 +2656,82 @@ func TestWorkerPool_ProcessPoolWiringAndTurnRouting(t *testing.T) {
 	}
 }
 
+type spyPoolSessionDeps struct {
+	runner.AgentPool
+	callbacksSet bool
+	managerSet   bool
+}
+
+func (s *spyPoolSessionDeps) SetSessionCallbacks(getRec func(context.Context, string) (runner.SessionRecord, error), onRot func(context.Context, string, string, string) error) {
+	s.callbacksSet = true
+}
+
+func (s *spyPoolSessionDeps) SetSessionManager(sm *session.Manager) {
+	s.managerSet = true
+}
+
+func (s *spyPoolSessionDeps) SetTranscriptRescuer(r func(string, time.Time) string) {}
+
+func TestWorkerPool_WirePoolSessionDependencies_TableDriven(t *testing.T) {
+	t.Parallel()
+	sessMgr := &session.Manager{}
+	fakeStore := dbtest.NewFakeStore()
+
+	tests := []struct {
+		name                   string
+		hasStore               bool
+		wantStatefulCallbacks  bool
+		wantEphemeralCallbacks bool
+		wantMgrWired           bool
+	}{
+		{
+			name:                   "stateful pools receive callbacks while ephemeral pools do not when store provided",
+			hasStore:               true,
+			wantStatefulCallbacks:  true,
+			wantEphemeralCallbacks: false,
+			wantMgrWired:           true,
+		},
+		{
+			name:                   "nil store wires manager to all pools but not callbacks",
+			hasStore:               false,
+			wantStatefulCallbacks:  false,
+			wantEphemeralCallbacks: false,
+			wantMgrWired:           true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			primary := &spyPoolSessionDeps{}
+			statefulLow := &spyPoolSessionDeps{}
+			ephemLow := &spyPoolSessionDeps{}
+
+			var store db.Store
+			if tc.hasStore {
+				store = fakeStore
+			}
+
+			pools := map[PoolKey]runner.AgentPool{
+				{Ephemeral: false, Effort: "high"}: primary,
+				{Ephemeral: false, Effort: "low"}:  statefulLow,
+				{Ephemeral: true, Effort: "low"}:   ephemLow,
+			}
+			wirePoolSessionDependencies(pools, sessMgr, store)
+
+			if primary.callbacksSet != tc.wantStatefulCallbacks || statefulLow.callbacksSet != tc.wantStatefulCallbacks {
+				t.Errorf("stateful callbacksSet = (primary:%v, statefulLow:%v), want %v", primary.callbacksSet, statefulLow.callbacksSet, tc.wantStatefulCallbacks)
+			}
+			if ephemLow.callbacksSet != tc.wantEphemeralCallbacks {
+				t.Errorf("ephemLow.callbacksSet = %v, want %v", ephemLow.callbacksSet, tc.wantEphemeralCallbacks)
+			}
+			if primary.managerSet != tc.wantMgrWired || statefulLow.managerSet != tc.wantMgrWired || ephemLow.managerSet != tc.wantMgrWired {
+				t.Errorf("managerSet = (primary:%v, statefulLow:%v, ephemLow:%v), want %v", primary.managerSet, statefulLow.managerSet, ephemLow.managerSet, tc.wantMgrWired)
+			}
+		})
+	}
+}
+
 type mockErrSessionStore struct {
 	db.Store
 	findErr error
@@ -2902,7 +2978,7 @@ func TestWorkerPool_Accessors(t *testing.T) {
 	}{
 		{"nil", nil, true, true, true, true},
 		{"empty", &WorkerPool{}, true, false, true, true},
-		{"with_fake_and_agentpool", &WorkerPool{cfg: WorkerPoolConfig{Store: fake, LLMFunc: noopLLM}, processPool: &testRunnerAgentPool{}}, false, false, false, false},
+		{"with_fake_and_agentpool", &WorkerPool{cfg: WorkerPoolConfig{Store: fake, LLMFunc: noopLLM}, pools: map[PoolKey]runner.AgentPool{{Ephemeral: false, Effort: "high"}: &testRunnerAgentPool{}}}, false, false, false, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
