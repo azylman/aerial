@@ -593,7 +593,13 @@ func isHTTPClientBurst(burst []db.Message) bool {
 func (te *turnExecution) resolveTurnPolicy() bool {
 	te.effectiveID, te.effectiveName, te.isThread, te.threadName = ResolveChannelAndThread(te.pool.getDiscordSession(), te.threadID)
 	if te.effectiveName == "" && len(te.burst) > 0 && te.burst[0].Metadata.ChannelID != "" {
-		te.effectiveID, te.effectiveName, _, _ = ResolveChannelAndThread(te.pool.getDiscordSession(), te.burst[0].Metadata.ChannelID)
+		effID, effName, isTh, thName := ResolveChannelAndThread(te.pool.getDiscordSession(), te.burst[0].Metadata.ChannelID)
+		if effName != "" || effID != "" {
+			te.effectiveID = effID
+			te.effectiveName = effName
+			te.isThread = isTh
+			te.threadName = thName
+		}
 	}
 	if te.pool.cfg.ResolveChannelPolicy != nil {
 		te.policy = te.pool.cfg.ResolveChannelPolicy(te.effectiveID, te.effectiveName)
@@ -642,6 +648,25 @@ func (te *turnExecution) resolveWakeHookOverride() string {
 		hookOverride = strings.ToLower(strings.TrimSpace(wakeResp.Override))
 	}
 	return hookOverride
+}
+
+// deliveryTargetID returns the Discord channel or thread snowflake to target for status updates,
+// typing indicators, response delivery, and notices. When te.threadID is an internal non-snowflake
+// session key (e.g. from /prompt session_id), it falls back to the message's Discord ChannelID or effectiveID.
+func (te *turnExecution) deliveryTargetID() string {
+	if IsNumericSnowflake(te.threadID) {
+		return te.threadID
+	}
+	if len(te.burst) > 0 && IsNumericSnowflake(te.burst[0].Metadata.ChannelID) {
+		return te.burst[0].Metadata.ChannelID
+	}
+	if IsNumericSnowflake(te.effectiveID) {
+		return te.effectiveID
+	}
+	if len(te.burst) > 0 && te.burst[0].Metadata.ChannelID != "" {
+		return te.burst[0].Metadata.ChannelID
+	}
+	return te.threadID
 }
 
 func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
@@ -712,9 +737,10 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 	}
 
 	if !extractBurstSilent(te.burst) {
-		te.statusUpdater = NewStatusUpdater(te.pool.getDiscordSession(), te.threadID, te.isThread)
+		deliveryTarget := te.deliveryTargetID()
+		te.statusUpdater = NewStatusUpdater(te.pool.getDiscordSession(), deliveryTarget, te.isThread)
 		if te.pool.cfg.TypingFunc != nil {
-			if stop := te.pool.cfg.TypingFunc(te.pool.getDiscordSession(), te.threadID); stop != nil {
+			if stop := te.pool.cfg.TypingFunc(te.pool.getDiscordSession(), deliveryTarget); stop != nil {
 				te.stopTyping = stop
 			}
 		}
@@ -1205,11 +1231,12 @@ func (te *turnExecution) deliverSuccessAndFinalize(resp *runner.AgyResponse, acc
 	}
 
 	if !isSilent {
+		deliveryTarget := te.deliveryTargetID()
 		var deliveryErr error
 		if te.pool.cfg.DeliveryWithAttachmentsFunc != nil {
-			deliveryErr = te.pool.cfg.DeliveryWithAttachmentsFunc(te.pool.getDiscordSession(), te.threadID, cleanText, attachments)
+			deliveryErr = te.pool.cfg.DeliveryWithAttachmentsFunc(te.pool.getDiscordSession(), deliveryTarget, cleanText, attachments)
 		} else if te.pool.cfg.DeliveryFunc != nil {
-			deliveryErr = te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, cleanText)
+			deliveryErr = te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), deliveryTarget, cleanText)
 		}
 		if deliveryErr != nil {
 			log.Printf("[WorkerPool] Failed to deliver response for thread %s: %v", te.threadID, deliveryErr)
@@ -1240,7 +1267,8 @@ func (te *turnExecution) deliverSuccessAndFinalize(resp *runner.AgyResponse, acc
 
 func (te *turnExecution) deliverQuotaNotice(pauseMsg string, logPrefix string) {
 	if te.pool != nil && te.pool.cfg.DeliveryFunc != nil && !extractBurstSilent(te.burst) {
-		if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, pauseMsg); err != nil {
+		deliveryTarget := te.deliveryTargetID()
+		if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), deliveryTarget, pauseMsg); err != nil {
 			log.Printf("[WorkerPool] Failed to deliver %s for thread %s: %v", logPrefix, te.threadID, err)
 		}
 	}
@@ -1383,12 +1411,8 @@ func (te *turnExecution) executeWithRetries() {
 					reason := fmt.Sprintf("[QUOTA_PAUSED reset_in=%v scheduled=false] global quota pause active", remaining)
 					metrics.RecordRunnerError("quota_paused", currentModel)
 					metrics.RecordTurnCompleted("quota_paused", te.triggerType, currentModel, time.Since(te.execStart))
-					if te.pool.cfg.DeliveryFunc != nil {
-						pauseMsg := notifier.FormatQuotaPauseMessage(remaining, lockedUntil, false, false)
-						if dErr := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, pauseMsg); dErr != nil {
-							log.Printf("[WorkerPool] Failed to deliver quota pause message to thread %s: %v", te.threadID, dErr)
-						}
-					}
+					pauseMsg := notifier.FormatQuotaPauseMessage(remaining, lockedUntil, false, false)
+					te.deliverQuotaNotice(pauseMsg, "quota pause message")
 					te.failBurstWithStatus("failed", reason, currentModel)
 					return
 				}
@@ -1775,7 +1799,8 @@ func (te *turnExecution) deliverFailureNotice(agyBin, apiKey, errDetail, stderr,
 		}
 		notif = te.pool.cfg.NotifierFunc(agyBin, apiKey, desc)
 	}
-	if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, notif); err != nil {
+	deliveryTarget := te.deliveryTargetID()
+	if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), deliveryTarget, notif); err != nil {
 		log.Printf("[WorkerPool] Failed to deliver %s for thread %s: %v", logLabel, te.threadID, err)
 	}
 }

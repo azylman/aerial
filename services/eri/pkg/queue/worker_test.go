@@ -2066,3 +2066,243 @@ func TestWorker_EvaluateAmbientWake_HTTPAndSilent_TableDriven(t *testing.T) {
 		})
 	}
 }
+
+func TestWorker_DeliveryTargetID_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		threadID       string
+		effectiveID    string
+		burstChannelID string
+		wantTargetID   string
+	}{
+		{
+			name:           "numeric snowflake threadID returned as-is",
+			threadID:       "1542423172400291873",
+			effectiveID:    "123456789",
+			burstChannelID: "987654321",
+			wantTargetID:   "1542423172400291873",
+		},
+		{
+			name:           "custom session key falls back to snowflake burst channelID",
+			threadID:       "custom-session-123",
+			effectiveID:    "",
+			burstChannelID: "1542423172400291873",
+			wantTargetID:   "1542423172400291873",
+		},
+		{
+			name:           "custom session key with empty burst channelID falls back to snowflake effectiveID",
+			threadID:       "custom-session-456",
+			effectiveID:    "1542423172400291873",
+			burstChannelID: "",
+			wantTargetID:   "1542423172400291873",
+		},
+		{
+			name:           "custom session key with non-snowflake burst channelID returns burst channelID",
+			threadID:       "custom-session-789",
+			effectiveID:    "non-snowflake-eff",
+			burstChannelID: "non-snowflake-burst",
+			wantTargetID:   "non-snowflake-burst",
+		},
+		{
+			name:           "custom session key with empty burst channelID and non-snowflake effectiveID falls back to threadID",
+			threadID:       "custom-session-abc",
+			effectiveID:    "eff-key",
+			burstChannelID: "",
+			wantTargetID:   "custom-session-abc",
+		},
+		{
+			name:           "custom session key with empty burst and empty effectiveID falls back to threadID",
+			threadID:       "custom-session-fallback",
+			effectiveID:    "",
+			burstChannelID: "",
+			wantTargetID:   "custom-session-fallback",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			te := &turnExecution{
+				threadID:    tc.threadID,
+				effectiveID: tc.effectiveID,
+				burst: []db.Message{
+					{
+						ID:       "msg-delivery-target",
+						ThreadID: tc.threadID,
+						Metadata: db.MessageMetadata{ChannelID: tc.burstChannelID},
+					},
+				},
+			}
+			got := te.deliveryTargetID()
+			if got != tc.wantTargetID {
+				t.Errorf("deliveryTargetID() = %q, want %q", got, tc.wantTargetID)
+			}
+		})
+	}
+}
+
+func TestWorker_GlobalQuotaLockout_SilentAndDeliveryTarget_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		threadID       string
+		channelID      string
+		silent         bool
+		wantDelivered  bool
+		wantTargetChan string
+	}{
+		{
+			name:           "silent turn hitting global quota lockout suppresses quota message",
+			threadID:       "custom-session-silent",
+			channelID:      "1542423172400291873",
+			silent:         true,
+			wantDelivered:  false,
+			wantTargetChan: "",
+		},
+		{
+			name:           "non-silent turn hitting global quota lockout delivers to deliveryTargetID snowflake",
+			threadID:       "custom-session-visible",
+			channelID:      "1542423172400291873",
+			silent:         false,
+			wantDelivered:  true,
+			wantTargetChan: "1542423172400291873",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var deliveredMu sync.Mutex
+			var deliveredTo string
+			var deliveredText string
+
+			store := dbtest.NewFakeStore()
+			pool := New(config.NewFromData(&config.ConfigData{}), WorkerPoolConfig{
+				Store: store,
+				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+					deliveredMu.Lock()
+					deliveredTo = channelID
+					deliveredText = text
+					deliveredMu.Unlock()
+					return nil
+				},
+			})
+			pool.quotaLockedUntil.Store(time.Now().Add(10 * time.Minute).Unix())
+
+			msg := db.Message{
+				ID:       "msg-quota-lockout",
+				ThreadID: tc.threadID,
+				Content:  "execute prompt",
+				Status:   db.StatusProcessing,
+				Metadata: db.MessageMetadata{
+					ChannelID: tc.channelID,
+					Silent:    tc.silent,
+				},
+			}
+			_ = store.InsertMessage(context.Background(), msg)
+
+			te := &turnExecution{
+				pool:        pool,
+				threadID:    tc.threadID,
+				triggerType: "http",
+				burst:       []db.Message{msg},
+				execStart:   time.Now().UTC(),
+				turnPrompt:  "execute prompt",
+				stopTyping:  func() {},
+			}
+
+			te.executeWithRetries()
+
+			deliveredMu.Lock()
+			wasDelivered := deliveredTo != ""
+			gotTarget := deliveredTo
+			deliveredMu.Unlock()
+
+			if wasDelivered != tc.wantDelivered {
+				t.Fatalf("wasDelivered = %v, want %v (text=%q)", wasDelivered, tc.wantDelivered, deliveredText)
+			}
+			if tc.wantDelivered && gotTarget != tc.wantTargetChan {
+				t.Fatalf("deliveredTo = %q, want %q", gotTarget, tc.wantTargetChan)
+			}
+		})
+	}
+}
+
+func TestWorker_DeliverSuccessAndFinalize_CustomSessionTarget_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		threadID       string
+		channelID      string
+		silent         bool
+		wantDelivered  bool
+		wantTargetChan string
+	}{
+		{
+			name:           "custom session non-silent delivers to snowflake channelID",
+			threadID:       "custom-session-success",
+			channelID:      "1542423172400291873",
+			silent:         false,
+			wantDelivered:  true,
+			wantTargetChan: "1542423172400291873",
+		},
+		{
+			name:           "custom session silent suppresses delivery",
+			threadID:       "custom-session-silent",
+			channelID:      "1542423172400291873",
+			silent:         true,
+			wantDelivered:  false,
+			wantTargetChan: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var deliveredTo string
+			store := dbtest.NewFakeStore()
+			pool := New(config.NewFromData(&config.ConfigData{}), WorkerPoolConfig{
+				Store: store,
+				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+					deliveredTo = channelID
+					return nil
+				},
+			})
+
+			msg := db.Message{
+				ID:       "msg-succ",
+				ThreadID: tc.threadID,
+				Status:   db.StatusProcessing,
+				Metadata: db.MessageMetadata{
+					ChannelID: tc.channelID,
+					Silent:    tc.silent,
+				},
+			}
+			_ = store.InsertMessage(context.Background(), msg)
+
+			te := &turnExecution{
+				pool:        pool,
+				threadID:    tc.threadID,
+				triggerType: "http",
+				burst:       []db.Message{msg},
+				execStart:   time.Now().UTC(),
+				stopTyping:  func() {},
+			}
+
+			resp := &runner.AgyResponse{
+				Response: "Task completed successfully",
+			}
+			ok, _ := te.deliverSuccessAndFinalize(resp, runner.TokenUsage{}, "test-model", 1, 1)
+			if !ok {
+				t.Fatalf("deliverSuccessAndFinalize returned false")
+			}
+			if tc.wantDelivered && deliveredTo != tc.wantTargetChan {
+				t.Fatalf("deliveredTo = %q, want %q", deliveredTo, tc.wantTargetChan)
+			}
+			if !tc.wantDelivered && deliveredTo != "" {
+				t.Fatalf("deliveredTo = %q, want empty", deliveredTo)
+			}
+		})
+	}
+}
