@@ -28,7 +28,7 @@ Options:
   --check               Exit with status 1 if any coverage threshold is violated
   --summary             Output Markdown summary table (also written to \$GITHUB_STEP_SUMMARY if set)
   --gaps                Print top uncovered functions and statement deficit for below-target packages
-  --service <name>      Target a specific microservice (services/eri, eri, brain, mcp/scheduler-mcp, mcp/discord-mcp, services/dashboard, dashboard, services/hangar, hangar, services/vanadis, vanadis, services/webhooks-router, webhooks-router, services/coven, coven)
+  --service <name>      Target a specific microservice (services/eri, eri, brain, mcp/scheduler-mcp, mcp/discord-mcp, services/dashboard, dashboard, services/hangar, hangar, services/vanadis, vanadis, services/webhooks-router, webhooks-router, services/coven, coven, scripts/code-health, code-health)
   --profile-dir <dir>   Store intermediate coverage profiles in the specified directory
   -h, --help            Show this help message
 EOF
@@ -123,10 +123,11 @@ if [ -n "$TARGET_SERVICE" ]; then
         hangar) TARGET_SERVICE="services/hangar" ;;
         vanadis) TARGET_SERVICE="services/vanadis" ;;
         webhooks-router) TARGET_SERVICE="services/webhooks-router" ;;
+        code-health) TARGET_SERVICE="scripts/code-health" ;;
     esac
     ALL_GO_SERVICES="$TARGET_SERVICE"
 else
-    ALL_GO_SERVICES="services/eri mcp/scheduler-mcp mcp/discord-mcp services/dashboard services/hangar services/vanadis services/webhooks-router services/coven"
+    ALL_GO_SERVICES="services/eri mcp/scheduler-mcp mcp/discord-mcp services/dashboard services/hangar services/vanadis services/webhooks-router services/coven scripts/code-health"
 fi
 
 # Target Minimum Monorepo Coverage Threshold (Uniform 95.0% floor)
