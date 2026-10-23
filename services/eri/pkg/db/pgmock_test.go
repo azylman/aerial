@@ -10,7 +10,6 @@ import (
 	"net"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 )
@@ -121,16 +120,12 @@ func (d dummyDBTX) ExecContext(context.Context, string, ...any) (sql.Result, err
 func (d dummyDBTX) QueryContext(context.Context, string, ...any) (*sql.Rows, error) { return nil, nil }
 func (d dummyDBTX) QueryRowContext(context.Context, string, ...any) *sql.Row        { return nil }
 
-func TestPostgresWireMockAndInitDB(t *testing.T) {
+func TestPostgresWireMockAndOpen(t *testing.T) {
 	addr := startMockPostgres(t)
-	origAttempts, origRetryBase := postgresMaxAttempts, postgresRetryBase
-	postgresMaxAttempts, postgresRetryBase = 2, 1*time.Millisecond
-	defer func() { postgresMaxAttempts, postgresRetryBase = origAttempts, origRetryBase }()
-
 	dsn := fmt.Sprintf("postgres://mock:mock@%s/testdb?sslmode=disable", addr)
-	db, err := InitDB(dsn)
+	db, err := Open(dsn)
 	if err != nil || !isPostgres(db) {
-		t.Fatalf("InitDB with mock postgres failed: (%v, %v)", db, err)
+		t.Fatalf("Open with mock postgres failed: (%v, %v)", db, err)
 	}
 	defer db.Close()
 
@@ -140,12 +135,6 @@ func TestPostgresWireMockAndInitDB(t *testing.T) {
 		t.Fatalf("New(cfg) with mock postgres failed: %v", err)
 	}
 	defer dbCfg.Close()
-
-	dbInitCfg, err := InitDB(cfg)
-	if err != nil {
-		t.Fatalf("InitDB(cfg) with mock postgres failed: %v", err)
-	}
-	defer dbInitCfg.Close()
 }
 
 func TestIsPostgresDriver(t *testing.T) {

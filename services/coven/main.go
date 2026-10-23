@@ -24,7 +24,7 @@ func RunApp(ctx context.Context, cfg *Config) error {
 		port = DefaultPort
 	}
 
-	database, err := InitDB(cfg)
+	database, err := OpenDB(cfg)
 	if err != nil {
 		return err
 	}

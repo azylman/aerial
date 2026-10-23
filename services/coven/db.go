@@ -1180,15 +1180,15 @@ func (s *SQLStore) MarkProceduralCandidatesSkipped(ctx context.Context, ids []in
 	return nil
 }
 
-// InitDB initializes database connection based on config.
-func InitDB(cfg *Config) (*sql.DB, error) {
+// OpenDB initializes database connection based on config.
+func OpenDB(cfg *Config) (*sql.DB, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
 	}
-	return initDB(cfg.DatabaseURL)
+	return openDB(cfg.DatabaseURL)
 }
 
-func initDB(connStr string) (*sql.DB, error) {
+func openDB(connStr string) (*sql.DB, error) {
 	if sqliteTestInitHook != nil {
 		return sqliteTestInitHook(connStr)
 	}

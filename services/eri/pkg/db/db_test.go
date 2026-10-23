@@ -58,18 +58,14 @@ func TestDBInitAndDSN(t *testing.T) {
 		{name: "mysql_scheme", url: "mysql://user:pass@localhost/db", wantErr: true, errSub: "only postgres://"},
 		{name: "sqlite_prod", url: "sqlite:///tmp/aerial.db", wantErr: true, errSub: "only postgres://"},
 		{name: "nil_snapshot", snapNil: true, wantErr: true},
-		{name: "bad_syntax", url: "postgres://invalid user@localhost:5432/aerial", wantErr: true, errSub: "invalid postgres"},
-		{name: "invalid_percent", url: "postgres://%zz", wantErr: true},
-		{name: "unreachable_host", url: "postgres://user:pass@127.0.0.1:54399/nonexistent?sslmode=disable&connect_timeout=1", wantErr: true, errSub: "could not connect to PostgreSQL"},
+		{name: "bad_syntax", url: "postgres://invalid user@localhost:5432/aerial", wantErr: true, errSub: "failed to ping postgres database"},
+		{name: "invalid_percent", url: "postgres://%zz", wantErr: true, errSub: "failed to ping postgres database"},
+		{name: "unreachable_host", url: "postgres://user:pass@127.0.0.1:54399/nonexistent?sslmode=disable&connect_timeout=1", wantErr: true, errSub: "failed to ping postgres database"},
 	}
 
 	oldHook := sqliteTestInitHook
 	sqliteTestInitHook = nil
 	defer func() { sqliteTestInitHook = oldHook }()
-
-	origAttempts, origBase := postgresMaxAttempts, postgresRetryBase
-	postgresMaxAttempts, postgresRetryBase = 1, 1*time.Millisecond
-	defer func() { postgresMaxAttempts, postgresRetryBase = origAttempts, origBase }()
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -78,8 +74,6 @@ func TestDBInitAndDSN(t *testing.T) {
 				_, err = New(nil)
 			} else if tc.snapNil {
 				_, err = New(&config.Config{})
-			} else if tc.name == "invalid_percent" {
-				_, err = initDB(tc.url)
 			} else {
 				cfg := config.NewFromData(&config.ConfigData{DatabaseURL: tc.url})
 				_, err = New(cfg)
@@ -108,12 +102,19 @@ func TestDBInitAndDSN(t *testing.T) {
 		}
 	}
 	for _, dsn := range []string{"file:mem_1?mode=memory&cache=shared", "file:mem_2?mode=memory&_pragma=busy_timeout(5000)", "sqlite://:memory:"} {
-		dbPragma, err := InitDB(dsn)
-		mustOK(t, err, "InitDB")
+		dbPragma, err := Open(dsn)
+		mustOK(t, err, "Open")
 		_ = dbPragma.Close()
 	}
-	_, errNonStr := InitDB(12345)
-	assertErr(t, errNonStr, "non-string InitDB")
+
+	oldSqlOpen := sqlOpen
+	defer func() { sqlOpen = oldSqlOpen }()
+	sqlOpen = func(driverName, dataSourceName string) (*sql.DB, error) {
+		return nil, errors.New("simulated open error")
+	}
+	_, errOpen := Open("postgres://localhost/test")
+	assertErr(t, errOpen, "sqlOpen failure")
+	sqlOpen = oldSqlOpen
 
 	database := setupTestDB(t)
 	defer database.Close()

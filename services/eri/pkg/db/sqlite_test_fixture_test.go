@@ -78,9 +78,9 @@ func TestSQLiteTestFixtureHook(t *testing.T) {
 	if sqliteTestInitHook == nil {
 		t.Fatalf("expected sqliteTestInitHook to be registered")
 	}
-	db, err := InitDB(":memory:")
+	db, err := Open(":memory:")
 	if err != nil {
-		t.Fatalf("InitDB with hooked sqlite failed: %v", err)
+		t.Fatalf("Open with hooked sqlite failed: %v", err)
 	}
 	defer db.Close()
 	if err := db.Ping(); err != nil {

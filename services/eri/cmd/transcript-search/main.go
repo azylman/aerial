@@ -323,12 +323,12 @@ func executeStatsHTTP(ctx context.Context, cfg CLIConfig) (map[string]any, error
 }
 
 var (
-	initDBFn          = db.InitDB
+	openDBFn          = db.Open
 	jsonMarshalIndent = json.MarshalIndent
 )
 
 var newDirectStoreFn = func(pgURL string) (db.Store, func(), error) {
-	sqlDB, err := initDBFn(pgURL)
+	sqlDB, err := openDBFn(pgURL)
 	if err != nil {
 		return nil, nil, fmt.Errorf("postgres connect failed: %w", err)
 	}
