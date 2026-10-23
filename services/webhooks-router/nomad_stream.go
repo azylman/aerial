@@ -621,7 +621,8 @@ func (s *RouterServer) HandleNomadJobFailure(ctx context.Context, jobID, refID, 
 
 	dmMsg := fmt.Sprintf("💥 %sNomad deployment failed for %s. Following up...", formatDirectMessagePrefix(prNumber, repo), cleanJob)
 	if prNumber > 0 {
-		if err := s.SyncPRWidget(ctx, repo, prNumber, "failed", fmt.Sprintf("Nomad deployment failed for %s", cleanJob), nil); err != nil {
+		s.setPRWidgetState(ctx, repo, prNumber, "deploy_failed", fmt.Sprintf("Nomad deployment failed for %s", cleanJob))
+		if err := s.SyncPRWidget(ctx, repo, prNumber); err != nil {
 			log.Printf("[webhooks-router] [widget] warning syncing nomad deploy_failed widget: %v", err)
 		}
 	}

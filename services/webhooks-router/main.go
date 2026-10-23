@@ -355,11 +355,8 @@ func (w *NomadCrashAlertWorker) Work(ctx context.Context, job *river.Job[NomadCr
 
 // WidgetSyncArgs contains payload data for durable background processing of Discord PR widget updates.
 type WidgetSyncArgs struct {
-	Repo           string   `json:"repo"`
-	PRNumber       int      `json:"pr_number"`
-	StatusOverride string   `json:"status_override,omitempty"`
-	Banner         string   `json:"banner,omitempty"`
-	DeployingJobs  []string `json:"deploying_jobs,omitempty"`
+	Repo     string `json:"repo"`
+	PRNumber int    `json:"pr_number"`
 }
 
 func (WidgetSyncArgs) Kind() string { return "widget_sync" }
@@ -377,7 +374,7 @@ func (w *WidgetSyncWorker) Work(ctx context.Context, job *river.Job[WidgetSyncAr
 	if w.server == nil {
 		return errors.New("router server not configured on worker")
 	}
-	log.Printf("[webhooks-router] [river] processing widget sync job id=%d repo=%s pr=%d status=%s", job.ID, job.Args.Repo, job.Args.PRNumber, job.Args.StatusOverride)
+	log.Printf("[webhooks-router] [river] processing widget sync job id=%d repo=%s pr=%d", job.ID, job.Args.Repo, job.Args.PRNumber)
 	if err := w.server.ProcessWidgetSync(ctx, job.Args); err != nil {
 		log.Printf("[webhooks-router] [river] error processing widget sync job id=%d: %v", job.ID, err)
 		return err
@@ -528,15 +525,17 @@ type PRRegistryUpdater interface {
 
 // ChannelMessageContext holds historical conversation snippets for prompt enrichment.
 // StatusWidgetChunk represents a chunk in a Vanadis build or a PR task.
+// Note: eri's BuildStatusWidgetComponents (services/eri/pkg/discord/widget.go) renders
+// chunk status badges, repo tags, titles, PR links, and runtime durations only; it does
+// not display per-job deploying_jobs lists.
 type StatusWidgetChunk struct {
-	Index         int       `json:"index"`
-	Repo          string    `json:"repo"`
-	Title         string    `json:"title"`
-	Status        string    `json:"status"`
-	PRNumber      int       `json:"pr_number,omitempty"`
-	DeployingJobs []string  `json:"deploying_jobs,omitempty"`
-	StartedAt     time.Time `json:"started_at,omitempty"`
-	UpdatedAt     time.Time `json:"updated_at,omitempty"`
+	Index     int       `json:"index"`
+	Repo      string    `json:"repo"`
+	Title     string    `json:"title"`
+	Status    string    `json:"status"`
+	PRNumber  int       `json:"pr_number,omitempty"`
+	StartedAt time.Time `json:"started_at,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
 }
 
 // StatusWidgetRequest represents a request to deliver or update a Discord status tracker widget.
@@ -624,22 +623,22 @@ func (r *PostgresPRRegistry) execAtomicTransition(ctx context.Context, repo stri
 }
 
 func (r *PostgresPRRegistry) UpdatePRMerged(ctx context.Context, repo string, prNumber int, mergeSHA string) (string, error) {
-	query := `UPDATE pr_registry SET status = CASE WHEN status IN ('deploying', 'deployed', 'deploy_failed') THEN status ELSE 'merged' END, merge_sha = CASE WHEN $3 != '' THEN $3 ELSE merge_sha END, updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 RETURNING target_id;`
+	query := `UPDATE pr_registry SET status = CASE WHEN status IN ('deploying', 'deployed', 'deploy_failed') THEN status ELSE 'merged' END, merge_sha = CASE WHEN $3 != '' THEN $3 ELSE merge_sha END, metadata = CASE WHEN status = 'deploy_failed' THEN COALESCE(metadata, '{}'::jsonb) ELSE COALESCE(metadata, '{}'::jsonb) - 'banner' END, updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 RETURNING target_id;`
 	return r.execReturningTargetID(ctx, repo, prNumber, "update pr merged", query, strings.TrimSpace(mergeSHA))
 }
 
 func (r *PostgresPRRegistry) UpdatePRClosedUnmerged(ctx context.Context, repo string, prNumber int) (string, error) {
-	query := `UPDATE pr_registry SET status = 'closed', updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 RETURNING target_id;`
+	query := `UPDATE pr_registry SET status = 'closed', metadata = COALESCE(metadata, '{}'::jsonb) - 'banner', updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 RETURNING target_id;`
 	return r.execReturningTargetID(ctx, repo, prNumber, "update pr closed unmerged", query)
 }
 
 func (r *PostgresPRRegistry) UpdatePRSync(ctx context.Context, repo string, prNumber int, headSHA string) (string, error) {
-	query := `UPDATE pr_registry SET head_sha = $3, status = 'open', updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 AND COALESCE(merge_sha, '') = '' AND status NOT IN ('merged', 'closed', 'deploying', 'deployed', 'deploy_failed') AND (head_sha IS DISTINCT FROM $3 OR status IN ('ci_failed', 'conflict')) RETURNING target_id;`
+	query := `UPDATE pr_registry SET head_sha = $3, status = 'open', metadata = COALESCE(metadata, '{}'::jsonb) - 'banner', updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 AND COALESCE(merge_sha, '') = '' AND status NOT IN ('merged', 'closed', 'deploying', 'deployed', 'deploy_failed') AND (head_sha IS DISTINCT FROM $3 OR status IN ('ci_failed', 'conflict')) RETURNING target_id;`
 	return r.execReturningTargetID(ctx, repo, prNumber, "update pr sync", query, strings.TrimSpace(headSHA))
 }
 
 func (r *PostgresPRRegistry) BackfillPushMergeSHA(ctx context.Context, repo string, prNumber int, mergeSHA string) (string, error) {
-	query := `UPDATE pr_registry SET merge_sha = $3, status = CASE WHEN status IN ('deploying', 'deployed', 'deploy_failed') THEN status ELSE 'merged' END, updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 RETURNING target_id;`
+	query := `UPDATE pr_registry SET merge_sha = $3, status = CASE WHEN status IN ('deploying', 'deployed', 'deploy_failed') THEN status ELSE 'merged' END, metadata = CASE WHEN status = 'deploy_failed' THEN COALESCE(metadata, '{}'::jsonb) ELSE COALESCE(metadata, '{}'::jsonb) - 'banner' END, updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 RETURNING target_id;`
 	return r.execReturningTargetID(ctx, repo, prNumber, "backfill push merge_sha", query, strings.TrimSpace(mergeSHA))
 }
 
@@ -799,7 +798,7 @@ func (r *PostgresPRRegistry) TransitionDeploying(ctx context.Context, repo strin
 		UPDATE pr_registry
 		SET status = 'deploying',
 			metadata = jsonb_set(
-				jsonb_set(COALESCE(metadata, '{}'::jsonb), '{jobs}', (SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb) FROM jsonb_array_elements(COALESCE(metadata->'jobs', '[]'::jsonb) || to_jsonb($3::text[])) AS elem WHERE NOT (COALESCE(metadata->'deployed_jobs', '[]'::jsonb) @> jsonb_build_array(elem)))),
+				jsonb_set(COALESCE(metadata, '{}'::jsonb) - 'banner', '{jobs}', (SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb) FROM jsonb_array_elements(COALESCE(metadata->'jobs', '[]'::jsonb) || to_jsonb($3::text[])) AS elem WHERE NOT (COALESCE(metadata->'deployed_jobs', '[]'::jsonb) @> jsonb_build_array(elem)))),
 				'{started_jobs}',
 				(SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb) FROM jsonb_array_elements(COALESCE(metadata->'started_jobs', '[]'::jsonb) || to_jsonb($3::text[])) AS elem)
 			),
@@ -907,7 +906,7 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, 
 	deployedJobs := dedupeTrimmedStrings(append(extractStringSliceFromMetadata(meta, "deployed_jobs"), jobName))
 
 	if len(remaining) > 0 {
-		updateQuery := `UPDATE pr_registry SET status = 'deploying', metadata = jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{jobs}', to_jsonb($1::text[])), '{deployed_jobs}', to_jsonb($2::text[])), updated_at = CURRENT_TIMESTAMP WHERE id = $3 AND status IN ('deploying', 'merged')`
+		updateQuery := `UPDATE pr_registry SET status = 'deploying', metadata = jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb) - 'banner', '{jobs}', to_jsonb($1::text[])), '{deployed_jobs}', to_jsonb($2::text[])), updated_at = CURRENT_TIMESTAMP WHERE id = $3 AND status IN ('deploying', 'merged')`
 		if _, err := tx.Exec(qCtx, updateQuery, remaining, deployedJobs, id); err != nil {
 			return "", 0, "", "", false, fmt.Errorf("update remaining jobs: %w", err)
 		}
@@ -917,7 +916,7 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, 
 		return "", 0, "", "", false, nil
 	}
 
-	updateQuery := `UPDATE pr_registry SET status = 'deployed', metadata = jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{jobs}', '[]'::jsonb), '{deployed_jobs}', to_jsonb($1::text[])), updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND status IN ('deploying', 'merged')`
+	updateQuery := `UPDATE pr_registry SET status = 'deployed', metadata = jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb) - 'banner', '{jobs}', '[]'::jsonb), '{deployed_jobs}', to_jsonb($1::text[])), updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND status IN ('deploying', 'merged')`
 	tag, err := tx.Exec(qCtx, updateQuery, deployedJobs, id)
 	if err != nil {
 		return "", 0, "", "", false, fmt.Errorf("update pr deployed: %w", err)
@@ -1805,16 +1804,72 @@ func formatErrorDetailsBlock(header, details, extraLine, footer string) string {
 	return strings.Join(lines, "\n")
 }
 
-func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber int, statusOverride string, banner string, deployingJobs []string) error {
+func normalizeWidgetStatus(dbStatus string) string {
+	switch strings.ToLower(strings.TrimSpace(dbStatus)) {
+	case "ci_failed", "deploy_failed":
+		return "failed"
+	default:
+		return strings.ToLower(strings.TrimSpace(dbStatus))
+	}
+}
+
+func resolveVanadisChunkWidgetStatus(chunkStatus, prDBStatus string) string {
+	cStat := normalizeWidgetStatus(chunkStatus)
+	if cStat == "failed" {
+		return "failed"
+	}
+	switch normalizeWidgetStatus(prDBStatus) {
+	case "deployed":
+		return "deployed"
+	case "deploying":
+		return "deploying"
+	case "failed":
+		return "failed"
+	case "conflict":
+		return "conflict"
+	case "merged":
+		return "merged"
+	case "closed":
+		if cStat == "merged" {
+			return "merged"
+		}
+		return "failed"
+	default:
+		return firstNonEmpty(cStat, "open")
+	}
+}
+
+func (s *RouterServer) setPRWidgetState(ctx context.Context, repo string, prNumber int, status, banner string) {
+	if s == nil || s.registry == nil || repo == "" || prNumber <= 0 {
+		return
+	}
+	pgReg, ok := s.registry.(*PostgresPRRegistry)
+	if !ok || pgReg == nil || pgReg.pool == nil {
+		return
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	query := `
+		UPDATE pr_registry
+		SET status = CASE WHEN $3 != '' AND status NOT IN ('deployed', 'closed') THEN $3 ELSE status END,
+		    metadata = CASE
+		        WHEN $4 != '' THEN jsonb_set(COALESCE(metadata, '{}'::jsonb), '{banner}', to_jsonb($4::text), true)
+		        ELSE COALESCE(metadata, '{}'::jsonb) - 'banner'
+		    END,
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $1 AND pr_number = $2`
+	if _, err := pgReg.pool.Exec(qCtx, query, normalizeRepo(repo), prNumber, strings.TrimSpace(status), strings.TrimSpace(banner)); err != nil {
+		log.Printf("[webhooks-router] [widget] warning updating pr widget state for %s#%d: %v", repo, prNumber, err)
+	}
+}
+
+func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber int) error {
 	if s == nil || s.dispatcher == nil || s.registry == nil || repo == "" || prNumber <= 0 {
 		return nil
 	}
 	args := WidgetSyncArgs{
-		Repo:           normalizeRepo(repo),
-		PRNumber:       prNumber,
-		StatusOverride: statusOverride,
-		Banner:         banner,
-		DeployingJobs:  deployingJobs,
+		Repo:     normalizeRepo(repo),
+		PRNumber: prNumber,
 	}
 	if s.riverClient != nil {
 		if err := s.insertRiverJob(ctx, args); err != nil {
@@ -1826,21 +1881,12 @@ func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber i
 	return s.ProcessWidgetSync(ctx, args)
 }
 
-func isStaleWidgetStatusOverride(dbStatus, statusOverride string) bool {
-	return statusOverride == "" ||
-		(dbStatus == "deployed" && (statusOverride == "open" || statusOverride == "merged" || statusOverride == "deploying")) ||
-		(dbStatus == "deploying" && (statusOverride == "open" || statusOverride == "merged"))
-}
-
 func (s *RouterServer) ProcessWidgetSync(ctx context.Context, args WidgetSyncArgs) error {
 	repo := normalizeRepo(args.Repo)
 	prNumber := args.PRNumber
 	if s == nil || s.dispatcher == nil || s.registry == nil || repo == "" || prNumber <= 0 {
 		return nil
 	}
-	statusOverride := args.StatusOverride
-	banner := args.Banner
-	deployingJobs := args.DeployingJobs
 	qCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -1857,16 +1903,14 @@ func (s *RouterServer) ProcessWidgetSync(ctx context.Context, args WidgetSyncArg
 			ChannelID: targetID,
 			ID:        fmt.Sprintf("pr-%s-%d", repo, prNumber),
 			Title:     branch,
-			Status:    statusOverride,
-			Banner:    banner,
+			Status:    "open",
 			Chunks: []StatusWidgetChunk{
 				{
-					Index:         0,
-					Repo:          repo,
-					Title:         branch,
-					Status:        statusOverride,
-					PRNumber:      prNumber,
-					DeployingJobs: deployingJobs,
+					Index:    0,
+					Repo:     repo,
+					Title:    branch,
+					Status:   "open",
+					PRNumber: prNumber,
 				},
 			},
 		}
@@ -1874,29 +1918,82 @@ func (s *RouterServer) ProcessWidgetSync(ctx context.Context, args WidgetSyncArg
 		return err
 	}
 
-	if statusOverride == "deployed" {
-		sweepQuery := `UPDATE pr_registry SET status = 'deployed', metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{jobs}', '[]'::jsonb), updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number < $2 AND status IN ('merged', 'deploying', 'deploy_failed') RETURNING pr_number`
-		if rows, sErr := pgReg.pool.Query(qCtx, sweepQuery, repo, prNumber); sErr == nil && rows != nil {
-			var olderPRs []int
-			for rows.Next() {
-				var oldPR int
-				if rows.Scan(&oldPR) == nil && oldPR > 0 {
-					olderPRs = append(olderPRs, oldPR)
-				}
-			}
-			rows.Close()
-			for _, oldPR := range olderPRs {
-				if wErr := s.syncSinglePRWidget(qCtx, pgReg, repo, oldPR, "deployed", "", nil); wErr != nil {
-					log.Printf("[webhooks-router] [widget] warning syncing older deployed PR %s#%d: %v", repo, oldPR, wErr)
-				}
-			}
-		}
-	}
-
-	return s.syncSinglePRWidget(qCtx, pgReg, repo, prNumber, statusOverride, banner, deployingJobs)
+	return s.syncSinglePRWidget(qCtx, pgReg, repo, prNumber, true)
 }
 
-func (s *RouterServer) syncSinglePRWidget(qCtx context.Context, pgReg *PostgresPRRegistry, repo string, prNumber int, statusOverride string, banner string, deployingJobs []string) error {
+func (s *RouterServer) sweepOlderDeployedPRWidgets(qCtx context.Context, pgReg *PostgresPRRegistry, repo string, prNumber int) {
+	sweepQuery := `UPDATE pr_registry SET status = 'deployed', metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb) - 'banner', '{jobs}', '[]'::jsonb), updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number < $2 AND status IN ('merged', 'deploying', 'deploy_failed') RETURNING pr_number`
+	rows, sErr := pgReg.pool.Query(qCtx, sweepQuery, repo, prNumber)
+	if sErr != nil || rows == nil {
+		return
+	}
+	var olderPRs []int
+	for rows.Next() {
+		var oldPR int
+		if rows.Scan(&oldPR) == nil && oldPR > 0 {
+			olderPRs = append(olderPRs, oldPR)
+		}
+	}
+	rows.Close()
+	for _, oldPR := range olderPRs {
+		if wErr := s.syncSinglePRWidget(qCtx, pgReg, repo, oldPR, false); wErr != nil {
+			log.Printf("[webhooks-router] [widget] warning syncing older deployed PR %s#%d: %v", repo, oldPR, wErr)
+		}
+	}
+}
+
+func buildVanadisWidgetRequest(allChunks []VanadisChunkSummary, buildID, threadID, bStatusMsgID, bTitle, objective, bStatus, prStatus, prBanner string, tier, prNumber int, prFound bool) StatusWidgetRequest {
+	widgetStatus := firstNonEmpty(normalizeWidgetStatus(bStatus), "running")
+	var wChunks []StatusWidgetChunk
+	for _, cs := range allChunks {
+		chunkRepo := firstNonEmpty(cs.Repo, "azylman/aerial")
+		chunkStatus := normalizeWidgetStatus(cs.Status)
+		if cs.PRNumber == prNumber && prFound {
+			chunkStatus = resolveVanadisChunkWidgetStatus(cs.Status, prStatus)
+			if (chunkStatus == "failed" || chunkStatus == "conflict") && widgetStatus != "completed" {
+				widgetStatus = "failed"
+			}
+		}
+		wChunks = append(wChunks, StatusWidgetChunk{
+			Index:     cs.ChunkIndex,
+			Repo:      chunkRepo,
+			Title:     cs.Title,
+			Status:    chunkStatus,
+			PRNumber:  cs.PRNumber,
+			StartedAt: cs.StartedAt,
+			UpdatedAt: cs.UpdatedAt,
+		})
+	}
+	widgetBanner := ""
+	if widgetStatus == "failed" || widgetStatus == "conflict" {
+		widgetBanner = prBanner
+	}
+	return StatusWidgetRequest{
+		ChannelID: threadID,
+		MessageID: bStatusMsgID,
+		ID:        buildID,
+		Tier:      tier,
+		Title:     firstNonEmpty(bTitle, objective),
+		Status:    widgetStatus,
+		Banner:    widgetBanner,
+		Chunks:    wChunks,
+	}
+}
+
+func (s *RouterServer) syncSinglePRWidget(qCtx context.Context, pgReg *PostgresPRRegistry, repo string, prNumber int, allowSweep bool) error {
+	prQuery := `SELECT target_id, title, status, status_message_id, created_at, updated_at, COALESCE(metadata->>'banner', '') FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1`
+	var targetID, title, prStatus, prMsgID, prBanner string
+	var prCreatedAt, prUpdatedAt time.Time
+	prErr := pgReg.pool.QueryRow(qCtx, prQuery, repo, prNumber).Scan(&targetID, &title, &prStatus, &prMsgID, &prCreatedAt, &prUpdatedAt, &prBanner)
+	if prErr != nil && !errors.Is(prErr, pgx.ErrNoRows) {
+		return fmt.Errorf("sync pr widget query pr: %w", prErr)
+	}
+	prFound := prErr == nil
+
+	if allowSweep && prFound && strings.EqualFold(strings.TrimSpace(prStatus), "deployed") {
+		s.sweepOlderDeployedPRWidgets(qCtx, pgReg, repo, prNumber)
+	}
+
 	// 1. Check if (repo, prNumber) belongs to a vanadis_chunks row
 	selectChunkQuery := `
 		SELECT c.id, c.build_id, b.thread_id, b.tier, COALESCE(NULLIF(b.title, ''), b.objective), b.objective, b.status, b.status_message_id
@@ -1911,62 +2008,11 @@ func (s *RouterServer) syncSinglePRWidget(qCtx context.Context, pgReg *PostgresP
 		&cID, &buildID, &threadID, &tier, &bTitle, &objective, &bStatus, &bStatusMsgID,
 	)
 	if err == nil && buildID != "" {
-		// Parent Vanadis build found
 		allChunks, qErr := queryVanadisChunks(qCtx, pgReg.pool, buildID, false)
 		if qErr != nil {
 			return fmt.Errorf("sync widget query chunks: %w", qErr)
 		}
-		var wChunks []StatusWidgetChunk
-		for _, cs := range allChunks {
-			chunkRepo := firstNonEmpty(cs.Repo, "azylman/aerial")
-			chunkStatus := cs.Status
-			csStartedAt := cs.StartedAt
-			csUpdatedAt := cs.UpdatedAt
-			var cJobs []string
-			if cs.PRNumber == prNumber {
-				if !isStaleWidgetStatusOverride(cs.Status, statusOverride) {
-					if cs.Status != statusOverride {
-						csUpdatedAt = time.Now().UTC()
-						if csStartedAt.IsZero() {
-							csStartedAt = csUpdatedAt
-						}
-					}
-					chunkStatus = statusOverride
-				}
-				if len(deployingJobs) > 0 && chunkStatus != "deployed" {
-					cJobs = deployingJobs
-				}
-			}
-			wChunks = append(wChunks, StatusWidgetChunk{
-				Index:         cs.ChunkIndex,
-				Repo:          chunkRepo,
-				Title:         cs.Title,
-				Status:        chunkStatus,
-				PRNumber:      cs.PRNumber,
-				DeployingJobs: cJobs,
-				StartedAt:     csStartedAt,
-				UpdatedAt:     csUpdatedAt,
-			})
-		}
-
-		widgetStatus := bStatus
-		if statusOverride == "completed" {
-			widgetStatus = "completed"
-		} else if statusOverride == "failed" {
-			widgetStatus = "failed"
-		}
-
-		widgetReq := StatusWidgetRequest{
-			ChannelID: threadID,
-			MessageID: bStatusMsgID,
-			ID:        buildID,
-			Tier:      tier,
-			Title:     firstNonEmpty(bTitle, objective),
-			Status:    widgetStatus,
-			Banner:    banner,
-			Chunks:    wChunks,
-		}
-
+		widgetReq := buildVanadisWidgetRequest(allChunks, buildID, threadID, bStatusMsgID, bTitle, objective, bStatus, prStatus, prBanner, tier, prNumber, prFound)
 		newMsgID, dispErr := s.dispatcher.DispatchWidget(qCtx, widgetReq)
 		if dispErr != nil {
 			return fmt.Errorf("dispatch vanadis widget: %w", dispErr)
@@ -1981,27 +2027,14 @@ func (s *RouterServer) syncSinglePRWidget(qCtx context.Context, pgReg *PostgresP
 	}
 
 	// 2. Standalone PR in pr_registry
-	prQuery := `SELECT target_id, title, status, status_message_id, created_at, updated_at FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1`
-	var targetID, title, prStatus, prMsgID string
-	var prCreatedAt, prUpdatedAt time.Time
-	err = pgReg.pool.QueryRow(qCtx, prQuery, repo, prNumber).Scan(&targetID, &title, &prStatus, &prMsgID, &prCreatedAt, &prUpdatedAt)
-	if errors.Is(err, pgx.ErrNoRows) || targetID == "" {
+	if !prFound || targetID == "" {
 		return nil
 	}
-	if err != nil {
-		return fmt.Errorf("sync pr widget query pr: %w", err)
-	}
 
-	finalStatus := prStatus
-	if !isStaleWidgetStatusOverride(prStatus, statusOverride) {
-		if prStatus != statusOverride {
-			prUpdatedAt = time.Now().UTC()
-		}
-		finalStatus = statusOverride
-	}
-	var prJobs []string
-	if finalStatus != "deployed" {
-		prJobs = deployingJobs
+	finalStatus := firstNonEmpty(normalizeWidgetStatus(prStatus), "open")
+	widgetBanner := ""
+	if finalStatus == "failed" || finalStatus == "conflict" {
+		widgetBanner = prBanner
 	}
 	widgetTitle := firstNonEmpty(title, fmt.Sprintf("PR #%d", prNumber))
 
@@ -2011,17 +2044,16 @@ func (s *RouterServer) syncSinglePRWidget(qCtx context.Context, pgReg *PostgresP
 		ID:        fmt.Sprintf("pr-%s-%d", repo, prNumber),
 		Title:     widgetTitle,
 		Status:    finalStatus,
-		Banner:    banner,
+		Banner:    widgetBanner,
 		Chunks: []StatusWidgetChunk{
 			{
-				Index:         0,
-				Repo:          repo,
-				Title:         widgetTitle,
-				Status:        finalStatus,
-				PRNumber:      prNumber,
-				DeployingJobs: prJobs,
-				StartedAt:     prCreatedAt,
-				UpdatedAt:     prUpdatedAt,
+				Index:     0,
+				Repo:      repo,
+				Title:     widgetTitle,
+				Status:    finalStatus,
+				PRNumber:  prNumber,
+				StartedAt: prCreatedAt,
+				UpdatedAt: prUpdatedAt,
 			},
 		},
 	}
@@ -2158,13 +2190,13 @@ func (s *RouterServer) advanceVanadisChunk(ctx context.Context, repo string, prN
 				return fmt.Errorf("enqueue next vanadis chunk %d for build %s: %w", res.NextChunkIndex, res.BuildID, err)
 			}
 		}
-		if err := s.SyncPRWidget(ctx, repo, prNumber, "merged", "", nil); err != nil {
+		if err := s.SyncPRWidget(ctx, repo, prNumber); err != nil {
 			log.Printf("[webhooks-router] [vanadis] warning syncing chunk advancement widget for build %s: %v", res.BuildID, err)
 		}
 		return nil
 	}
 	if res.BuildCompleted {
-		if err := s.SyncPRWidget(ctx, repo, prNumber, "completed", "", nil); err != nil {
+		if err := s.SyncPRWidget(ctx, repo, prNumber); err != nil {
 			log.Printf("[webhooks-router] [vanadis] warning syncing build completed widget for build %s: %v", res.BuildID, err)
 		}
 		prompt := formatVanadisBuildCompletedPrompt(res)
@@ -2236,13 +2268,16 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 	switch evt.Event {
 	case "deploy_started":
 		if evt.PRNumber > 0 {
-			if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber, "deploying", "", []string{evt.JobName}); err != nil {
+			if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber); err != nil {
 				log.Printf("[webhooks-router] [widget] warning syncing deploy_started widget: %v", err)
 				return &evt, err
 			}
 		}
 		return &evt, nil
 	case "deploy_success":
+		if evt.PRNumber > 0 {
+			s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "deployed", "")
+		}
 		return &evt, s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, evt.JobName, evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID)
 	case "deploy_rollback", "deploy_failed":
 		targetID := evt.TargetID
@@ -2263,7 +2298,8 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 			banner = fmt.Sprintf("Deployment failed and rolled back for %s", evt.JobName)
 		}
 		if evt.PRNumber > 0 {
-			if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber, "failed", banner, nil); err == nil {
+			s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "deploy_failed", banner)
+			if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber); err == nil {
 				dmMsg = ""
 			}
 		}
@@ -2275,7 +2311,7 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 	case "sync_success":
 		if evt.PRNumber > 0 {
 			if !syncHasExpected {
-				if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber, "merged", "", nil); err != nil {
+				if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber); err != nil {
 					log.Printf("[webhooks-router] [widget] warning syncing sync_success widget: %v", err)
 				}
 			}
@@ -2291,7 +2327,8 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 		}
 		dmMsg := fmt.Sprintf("⚠️ %sGit file sync failed. Following up...", prefix)
 		if evt.PRNumber > 0 {
-			if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber, "failed", "Git file sync failed", nil); err == nil {
+			s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "deploy_failed", "Git file sync failed")
+			if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber); err == nil {
 				dmMsg = ""
 			}
 		}
@@ -2373,7 +2410,7 @@ func (s *RouterServer) dispatchDeploymentSuccessPrompt(ctx context.Context, targ
 	}
 
 	if prNum > 0 {
-		if err := s.SyncPRWidget(ctx, repo, prNum, "deployed", "", nil); err != nil {
+		if err := s.SyncPRWidget(ctx, repo, prNum); err != nil {
 			log.Printf("[webhooks-router] [widget] warning syncing deploy_success widget: %v", err)
 		}
 	}
@@ -2414,7 +2451,8 @@ func (s *RouterServer) dispatchConflictPrompt(ctx context.Context, targetID, rep
 	if prNum > 0 {
 		if s.registry != nil {
 			if _, isPg := s.registry.(*PostgresPRRegistry); isPg {
-				if err := s.SyncPRWidget(ctx, repo, prNum, "conflict", "Merge conflict detected", nil); err == nil {
+				s.setPRWidgetState(ctx, repo, prNum, "conflict", "Merge conflict detected")
+				if err := s.SyncPRWidget(ctx, repo, prNum); err == nil {
 					dmMsg = ""
 				}
 			}
@@ -3049,7 +3087,7 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 						log.Printf("[webhooks-router] [registry] warning checking expected deploy jobs for %s#%d: %v", res.Repo, res.PRNumber, err)
 					}
 					if !hasExpected {
-						if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber, "merged", "", nil); err != nil {
+						if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
 							log.Printf("[webhooks-router] [widget] warning syncing pr_merged widget for %s#%d: %v", res.Repo, res.PRNumber, err)
 						}
 					}
@@ -3067,7 +3105,7 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 					if err := s.failVanadisChunk(ctx, res.Repo, res.PRNumber, "pr_closed_unmerged"); err != nil {
 						log.Printf("[webhooks-router] [vanadis] warning failing vanadis chunk for closed unmerged PR %s#%d: %v", res.Repo, res.PRNumber, err)
 					}
-					if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber, "closed", "", nil); err != nil {
+					if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
 						log.Printf("[webhooks-router] [widget] warning syncing pr_closed widget for %s#%d: %v", res.Repo, res.PRNumber, err)
 					}
 				}
@@ -3079,7 +3117,7 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 				}
 				res.TargetID = firstNonEmpty(res.TargetID, targetID)
 				if res.TargetID != "" {
-					if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber, "open", "", nil); err != nil {
+					if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
 						log.Printf("[webhooks-router] [widget] warning syncing pr_sync widget for %s#%d: %v", res.Repo, res.PRNumber, err)
 					}
 				}
@@ -3123,7 +3161,7 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 			}
 			res.TargetID = firstNonEmpty(res.TargetID, targetID)
 			if targetID != "" {
-				if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber, "open", "", nil); err != nil {
+				if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
 					log.Printf("[webhooks-router] [widget] warning syncing pr_open widget for %s#%d: %v", res.Repo, res.PRNumber, err)
 				}
 			}
