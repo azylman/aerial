@@ -16,7 +16,7 @@ const (
 	// DefaultSkillMatchMinSim is the minimum cosine similarity threshold for routing unloaded candidates to existing skills (Case B).
 	DefaultSkillMatchMinSim = 0.72
 	// DefaultSkillCliqueMinSim is the minimum pairwise similarity threshold for forming new skill candidate cliques (Case C).
-	DefaultSkillCliqueMinSim = 0.75
+	DefaultSkillCliqueMinSim = 0.70
 	// DefaultSkillCliqueMinSize is the minimum clique size required to emit a CREATE batch.
 	DefaultSkillCliqueMinSize = 2
 	// DefaultSkillCliqueMaxSize is the maximum clique size clustered together.

@@ -491,9 +491,11 @@ func (m *TestMemStore) MarkProceduralCandidatesSkipped(ctx context.Context, ids 
 type MockOllamaClient struct {
 	embedding []float32
 	err       error
+	lastText  string
 }
 
 func (m *MockOllamaClient) GenerateEmbedding(ctx context.Context, text string, isQuery bool, maxRetries int) ([]float32, error) {
+	m.lastText = text
 	if m.err != nil {
 		return nil, m.err
 	}
@@ -5908,6 +5910,29 @@ func TestTestMemStore_ProceduralCandidates(t *testing.T) {
 	}
 }
 
+func TestFormatProceduralCandidateEmbeddingText(t *testing.T) {
+	mk := func(trig string, steps, avoid []string) ExtractedProceduralItem {
+		return ExtractedProceduralItem{Trigger: trig, Steps: steps, Avoid: avoid}
+	}
+	tests := []struct {
+		name string
+		item ExtractedProceduralItem
+		want string
+	}{
+		{"StepsAndAvoid", mk("find", []string{" include -maxdepth ", "", "target subdir"}, []string{" unconstrained find ", " "}), "Steps: include -maxdepth; target subdir\nAvoid: unconstrained find"},
+		{"StepsOnly", mk("find", []string{"include -maxdepth"}, nil), "Steps: include -maxdepth"},
+		{"AvoidOnly", mk("find", nil, []string{"unconstrained find"}), "Avoid: unconstrained find"},
+		{"FallbackTrigger", mk("  when running find  ", nil, nil), "when running find"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := FormatProceduralCandidateEmbeddingText(tc.item); got != tc.want {
+				t.Errorf("FormatProceduralCandidateEmbeddingText() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestProcessThreadFacts_ProceduralCandidates(t *testing.T) {
 	ctx := context.Background()
 
@@ -5921,6 +5946,7 @@ func TestProcessThreadFacts_ProceduralCandidates(t *testing.T) {
 		trajectoryCalls      []string
 		wantCandidateCount   int
 		wantPromptContains   string
+		wantEmbeddedText     string
 		wantErr              bool
 	}{
 		{
@@ -5938,6 +5964,7 @@ func TestProcessThreadFacts_ProceduralCandidates(t *testing.T) {
 				]
 			}`,
 			wantCandidateCount: 1,
+			wantEmbeddedText:   "Steps: check sensor; call ha_write_tool\nAvoid: avoid loop",
 		},
 		{
 			name: "RejectCandidateAdmissionEmptyTrigger",
@@ -6101,6 +6128,9 @@ func TestProcessThreadFacts_ProceduralCandidates(t *testing.T) {
 			}
 			if len(mem.proceduralCandidates) != tc.wantCandidateCount {
 				t.Errorf("candidate count = %d, want %d", len(mem.proceduralCandidates), tc.wantCandidateCount)
+			}
+			if tc.wantEmbeddedText != "" && client.lastText != tc.wantEmbeddedText {
+				t.Errorf("embedded text = %q, want %q", client.lastText, tc.wantEmbeddedText)
 			}
 		})
 	}

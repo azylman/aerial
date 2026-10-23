@@ -240,6 +240,29 @@ func EvaluateProceduralCandidateAdmission(item ExtractedProceduralItem) (admit b
 	return true, "admitted"
 }
 
+// FormatProceduralCandidateEmbeddingText builds the canonical action-space text (Steps + Avoid, falling back to Trigger) for embedding procedural candidates.
+func FormatProceduralCandidateEmbeddingText(item ExtractedProceduralItem) string {
+	var parts []string
+	for _, grp := range []struct {
+		prefix string
+		items  []string
+	}{{"Steps: ", item.Steps}, {"Avoid: ", item.Avoid}} {
+		var clean []string
+		for _, s := range grp.items {
+			if t := strings.TrimSpace(s); t != "" {
+				clean = append(clean, t)
+			}
+		}
+		if len(clean) > 0 {
+			parts = append(parts, grp.prefix+strings.Join(clean, "; "))
+		}
+	}
+	if len(parts) == 0 {
+		return strings.TrimSpace(item.Trigger)
+	}
+	return strings.Join(parts, "\n")
+}
+
 func buildCandidateReconcilePrompt(item ExtractedFactItem, neighbors []ScoredFact) string {
 	var b strings.Builder
 	b.WriteString(`You are a memory reconciliation classifier.
@@ -414,7 +437,7 @@ func processThreadFacts(ctx context.Context, store Store, client OllamaClient, l
 				continue
 			}
 
-			emb, err := client.GenerateEmbedding(ctx, item.Trigger, false, 1)
+			emb, err := client.GenerateEmbedding(ctx, FormatProceduralCandidateEmbeddingText(item), false, 1)
 			if err != nil {
 				log.Printf("[Memory] Warning: failed to generate embedding for procedural candidate trigger %q: %v", item.Trigger, err)
 				continue
