@@ -152,13 +152,15 @@ assert_eq "true" "$(echo "$SUBMIT_TARGET_ERR" | grep -q "ERROR: Target ID cannot
 SUBMIT_TARGET_ID_ERR=$(bash "${AERIAL_PR}" submit --target-id=1234567890 2>&1 || true)
 assert_eq "true" "$(echo "$SUBMIT_TARGET_ID_ERR" | grep -q "ERROR: Target ID cannot be specified manually (--target-id=1234567890 is removed)" && echo true || echo false)" "submit --target-id= rejects with explicit error"
 
-# Case 6D: schedule_pr_followup is completely eliminated
+# Case 6D: schedule_pr_followup, merge_pr, get_deploy_status, and resolve_hangar_url are completely eliminated
 FOLLOWUP_FUNC_EXISTS=$(bash -c "
     REPO_TEST_MODE=1
     source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-    type schedule_pr_followup 2>&1 || true
+    for fn in schedule_pr_followup merge_pr get_deploy_status resolve_hangar_url; do
+        type \"\$fn\" 2>&1 || true
+    done
 ")
-assert_eq "true" "$(echo "$FOLLOWUP_FUNC_EXISTS" | grep -Fq 'not found' && echo true || echo false)" "schedule_pr_followup is eliminated"
+assert_eq "4" "$(echo "$FOLLOWUP_FUNC_EXISTS" | grep -Fc 'not found')" "legacyfollowup/merge/deploy-status functions are eliminated"
 
 SUBMIT_USAGE_CHECK=$(bash "${AERIAL_PR}" --help 2>&1 || true)
 assert_eq "true" "$(echo "$SUBMIT_USAGE_CHECK" | grep -Fq 'scheduler-mcp' && echo false || echo true)" "Usage text does not reference scheduler-mcp"

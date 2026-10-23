@@ -44,12 +44,8 @@ curl -s -f -X POST http://aerial-hangar:8080/reconcile
 ```
 
 ### Step 2: Track Deployment & Container Rollout
-Check active deployment and container swap progress:
-```bash
-/share/aerial/scripts/aerial-pr.sh deploy-status main
-```
-- **Response Format Invariant**: Report deployment status in plain prose strictly capped at 2 sentences max (zero markdown bullet lists, tables, or forward-looking checklists).
 - Deployment status and completion outcomes are delivered reactively to Discord via Hangar and webhooks-router without manual polling.
+- **Response Format Invariant**: Report deployment status in plain prose strictly capped at 2 sentences max (zero markdown bullet lists, tables, or forward-looking checklists).
 
 ---
 

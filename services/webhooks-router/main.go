@@ -487,7 +487,7 @@ type PRRegistryUpdater interface {
 	ShouldSuppressVanadisDeployWake(ctx context.Context, repo string, prNumber int) (bool, error)
 	FailVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (bool, error)
 	IncrementCIFailCount(ctx context.Context, repo string, prNumber int) (int, error)
-	EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID, vanadisChunkID string, jobs []string) (string, error)
+	EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID, vanadisChunkID string) (string, error)
 	RecordExpectedJobs(ctx context.Context, repo string, prNumber int, jobs []string) (bool, error)
 	HasExpectedDeployJobs(ctx context.Context, repo string, prNumber int) (bool, error)
 }
@@ -643,7 +643,7 @@ func (r *PostgresPRRegistry) IncrementCIFailCount(ctx context.Context, repo stri
 	return count, nil
 }
 
-func (r *PostgresPRRegistry) EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID, vanadisChunkID string, jobs []string) (string, error) {
+func (r *PostgresPRRegistry) EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID, vanadisChunkID string) (string, error) {
 	repo = normalizeRepo(repo)
 	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
 		return "", nil
@@ -663,16 +663,10 @@ func (r *PostgresPRRegistry) EnsurePRRegistered(ctx context.Context, repo string
 	if !IsValidDiscordSnowflake(targetID) {
 		return "", nil
 	}
-	metaJSON := "{}"
-	if cleanJobs := dedupeTrimmedStrings(jobs); len(cleanJobs) > 0 {
-		if b, err := json.Marshal(map[string][]string{"jobs": cleanJobs}); err == nil {
-			metaJSON = string(b)
-		}
-	}
 	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	upsertQuery := `INSERT INTO pr_registry (repo, pr_number, branch, head_sha, target_id, title, status, metadata, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, 'open', $7::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT (repo, pr_number) DO UPDATE SET branch = CASE WHEN EXCLUDED.branch != '' THEN EXCLUDED.branch ELSE pr_registry.branch END, head_sha = CASE WHEN pr_registry.head_sha = '' THEN EXCLUDED.head_sha ELSE pr_registry.head_sha END, target_id = CASE WHEN pr_registry.target_id = '' THEN EXCLUDED.target_id ELSE pr_registry.target_id END, title = CASE WHEN pr_registry.title = '' THEN EXCLUDED.title ELSE pr_registry.title END, metadata = CASE WHEN EXCLUDED.metadata != '{}'::jsonb AND NOT (COALESCE(pr_registry.metadata, '{}'::jsonb) ? 'jobs') AND pr_registry.status NOT IN ('deploying', 'deployed') THEN COALESCE(pr_registry.metadata, '{}'::jsonb) || EXCLUDED.metadata ELSE pr_registry.metadata END, updated_at = CURRENT_TIMESTAMP;`
-	if _, err := r.pool.Exec(qCtx, upsertQuery, repo, prNumber, strings.TrimSpace(branch), strings.TrimSpace(headSHA), targetID, strings.TrimSpace(title), metaJSON); err != nil {
+	upsertQuery := `INSERT INTO pr_registry (repo, pr_number, branch, head_sha, target_id, title, status, metadata, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, 'open', '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT (repo, pr_number) DO UPDATE SET branch = CASE WHEN EXCLUDED.branch != '' THEN EXCLUDED.branch ELSE pr_registry.branch END, head_sha = CASE WHEN pr_registry.head_sha = '' THEN EXCLUDED.head_sha ELSE pr_registry.head_sha END, target_id = CASE WHEN pr_registry.target_id = '' THEN EXCLUDED.target_id ELSE pr_registry.target_id END, title = CASE WHEN pr_registry.title = '' THEN EXCLUDED.title ELSE pr_registry.title END, updated_at = CURRENT_TIMESTAMP;`
+	if _, err := r.pool.Exec(qCtx, upsertQuery, repo, prNumber, strings.TrimSpace(branch), strings.TrimSpace(headSHA), targetID, strings.TrimSpace(title)); err != nil {
 		return "", fmt.Errorf("ensure pr registered: %w", err)
 	}
 	return targetID, nil
@@ -814,7 +808,6 @@ func (r *PostgresPRRegistry) HasExpectedDeployJobs(ctx context.Context, repo str
 		SELECT (
 			CASE WHEN jsonb_typeof(metadata->'jobs') = 'array' THEN jsonb_array_length(metadata->'jobs') ELSE 0 END > 0
 			OR CASE WHEN jsonb_typeof(metadata->'deployed_jobs') = 'array' THEN jsonb_array_length(metadata->'deployed_jobs') ELSE 0 END > 0
-			OR COALESCE(metadata->>'job', '') != ''
 			OR status IN ('deploying', 'deployed')
 		)
 		FROM pr_registry
@@ -849,7 +842,7 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, 
 	selectQuery := `
 		SELECT id, target_id, pr_number, COALESCE(NULLIF(merge_sha, ''), head_sha), repo, COALESCE(metadata, '{}'::jsonb)
 		FROM pr_registry
-		WHERE status IN ('deploying', 'merged') AND (metadata->'jobs' ? $1 OR metadata->>'job' = $1)
+		WHERE status IN ('deploying', 'merged') AND metadata->'jobs' ? $1
 		ORDER BY updated_at DESC LIMIT 1 FOR UPDATE`
 
 	var id int64
@@ -912,7 +905,7 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployFailedByJob(ctx context.Conte
 	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	selectQuery := `SELECT id, target_id, pr_number, COALESCE(merge_sha, ''), repo FROM pr_registry WHERE status IN ('deploying', 'merged') AND (metadata->'jobs' ? $1 OR metadata->>'job' = $1) ORDER BY updated_at DESC LIMIT 1;`
+	selectQuery := `SELECT id, target_id, pr_number, COALESCE(merge_sha, ''), repo FROM pr_registry WHERE status IN ('deploying', 'merged') AND metadata->'jobs' ? $1 ORDER BY updated_at DESC LIMIT 1;`
 	var id int64
 	var targetID, mergeSHA, repoOut string
 	var prNum int
@@ -942,10 +935,7 @@ func (r *PostgresPRRegistry) ListDeployingPRs(ctx context.Context) ([]DeployingP
 	query := `
 		SELECT id, repo, pr_number, branch, head_sha, COALESCE(merge_sha, ''), target_id, COALESCE(metadata, '{}'::jsonb)
 		FROM pr_registry
-		WHERE status = 'deploying' OR (status = 'merged' AND (
-			CASE WHEN jsonb_typeof(metadata->'jobs') = 'array' THEN jsonb_array_length(metadata->'jobs') ELSE 0 END > 0
-			OR COALESCE(metadata->>'job', '') != ''
-		))
+		WHERE status = 'deploying' OR (status = 'merged' AND CASE WHEN jsonb_typeof(metadata->'jobs') = 'array' THEN jsonb_array_length(metadata->'jobs') ELSE 0 END > 0)
 		ORDER BY id ASC;`
 	rows, err := r.pool.Query(qCtx, query)
 	if err != nil {
@@ -2684,29 +2674,28 @@ type GitHubPullRequest struct {
 
 const aerialPRMetadataPrefix = "<!-- aerial-pr:"
 
-func ParseAerialPRMetadata(body string) (string, string, []string, bool) {
+func ParseAerialPRMetadata(body string) (string, string, bool) {
 	idx := strings.LastIndex(body, aerialPRMetadataPrefix)
 	if idx < 0 {
-		return "", "", nil, false
+		return "", "", false
 	}
 	rest := body[idx+len(aerialPRMetadataPrefix):]
 	endIdx := strings.Index(rest, "-->")
 	if endIdx < 0 {
-		return "", "", nil, false
+		return "", "", false
 	}
 	var trailer struct {
-		TargetID       string   `json:"target_id"`
-		VanadisChunkID string   `json:"vanadis_chunk_id"`
-		Jobs           []string `json:"jobs"`
+		TargetID       string `json:"target_id"`
+		VanadisChunkID string `json:"vanadis_chunk_id"`
 	}
 	if err := json.Unmarshal([]byte(strings.TrimSpace(rest[:endIdx])), &trailer); err != nil {
-		return "", "", nil, false
+		return "", "", false
 	}
 	targetID, chunkID := strings.TrimSpace(trailer.TargetID), strings.TrimSpace(trailer.VanadisChunkID)
 	if !IsValidDiscordSnowflake(targetID) {
 		targetID = ""
 	}
-	return targetID, chunkID, dedupeTrimmedStrings(trailer.Jobs), targetID != "" || chunkID != ""
+	return targetID, chunkID, targetID != "" || chunkID != ""
 }
 
 type GitHubPullRequestPayload struct {
@@ -3084,9 +3073,9 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 			res.Repo, res.PRNumber, res.Action, res.HeadSHA, res.MergeSHA, res.Branch, p.PullRequest.Merged, res.Sender, delivery)
 
 		if s.registry != nil && res.PRNumber > 0 {
-			if trailerTargetID, trailerChunkID, trailerJobs, ok := ParseAerialPRMetadata(p.PullRequest.Body); ok {
+			if trailerTargetID, trailerChunkID, ok := ParseAerialPRMetadata(p.PullRequest.Body); ok {
 				// Self-heal DB registration only; initial Discord widget delivery on opened is owned by Brain's /internal/pr/register to avoid duplicate message creation races.
-				resolvedTargetID, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, p.PullRequest.Title, trailerTargetID, trailerChunkID, trailerJobs)
+				resolvedTargetID, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, p.PullRequest.Title, trailerTargetID, trailerChunkID)
 				if err != nil {
 					return nil, err
 				}

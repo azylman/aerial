@@ -831,14 +831,7 @@ func extractStringSliceFromMetadata(meta map[string]interface{}, key string) []s
 
 // extractJobsFromMetadata extracts candidate Nomad job names stored in the PR registry metadata JSONB.
 func extractJobsFromMetadata(meta map[string]interface{}) []string {
-	if meta == nil {
-		return nil
-	}
-	raw := extractStringSliceFromMetadata(meta, "jobs")
-	if s, ok := meta["job"].(string); ok {
-		raw = append(raw, s)
-	}
-	return dedupeTrimmedStrings(raw)
+	return extractStringSliceFromMetadata(meta, "jobs")
 }
 
 // extractStartedJobsFromMetadata returns candidate Nomad jobs eligible for startup sweep reconciliation.

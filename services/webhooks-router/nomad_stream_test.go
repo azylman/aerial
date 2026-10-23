@@ -30,10 +30,7 @@ func TestExtractJobsFromMetadata_TableDriven(t *testing.T) {
 	}{
 		{name: "nil metadata", metadata: nil, expected: nil},
 		{name: "jobs array string", metadata: map[string]interface{}{"jobs": []interface{}{"brain", "scheduler-mcp"}}, expected: []string{"brain", "scheduler-mcp"}},
-		{name: "single job string", metadata: map[string]interface{}{"job": "hangar"}, expected: []string{"hangar"}},
-		{name: "both jobs and job", metadata: map[string]interface{}{"jobs": []interface{}{"brain"}, "job": "hangar"}, expected: []string{"brain", "hangar"}},
 		{name: "deduplicates clean job names", metadata: map[string]interface{}{"jobs": []interface{}{"brain", "brain", "hangar"}}, expected: []string{"brain", "hangar"}},
-		{name: "deduplicates duplicate job names in jobs and job", metadata: map[string]interface{}{"jobs": []interface{}{"brain", "hangar"}, "job": "brain"}, expected: []string{"brain", "hangar"}},
 		{name: "empty jobs array", metadata: map[string]interface{}{"jobs": []interface{}{}}, expected: nil},
 		{name: "non-slice jobs", metadata: map[string]interface{}{"jobs": 123}, expected: nil},
 		{name: "typed string slice", metadata: map[string]interface{}{"jobs": []string{"job-a", "job-b"}}, expected: []string{"job-a", "job-b"}},
