@@ -67,8 +67,8 @@ EOH
 
       resources {
         cpu        = 100
-        memory     = 768
-        memory_max = 2048
+        memory     = 512
+        memory_max = 1536
       }
     }
 
@@ -112,8 +112,8 @@ EOH
 
       resources {
         cpu        = 100
-        memory     = 768
-        memory_max = 2048
+        memory     = 512
+        memory_max = 1536
       }
     }
 
@@ -157,8 +157,8 @@ EOH
 
       resources {
         cpu        = 100
-        memory     = 768
-        memory_max = 2048
+        memory     = 512
+        memory_max = 1536
       }
     }
 
@@ -202,8 +202,8 @@ EOH
 
       resources {
         cpu        = 100
-        memory     = 768
-        memory_max = 2048
+        memory     = 512
+        memory_max = 1536
       }
     }
   }
