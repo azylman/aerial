@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -32,8 +33,21 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	}
 	defer closeWarn(database, "database on shutdown")
 
-	ticker := NewTicker(database, NewHTTPPromptDispatcher(cfg.BrainURL), 30*time.Second)
-	go ticker.Start(ctx)
+	// Invariant: ticker goroutine must be bound to a child context and strictly
+	// awaited on all exit paths before closing the database to prevent goroutine leaks
+	// and use-after-close on database shutdown.
+	tickerCtx, tickerCancel := context.WithCancel(ctx)
+	var tickerWg sync.WaitGroup
+	tickerWg.Add(1)
+	go func() {
+		defer tickerWg.Done()
+		ticker := NewTicker(database, NewHTTPPromptDispatcher(cfg.BrainURL), 30*time.Second)
+		ticker.Start(tickerCtx)
+	}()
+	defer func() {
+		tickerCancel()
+		tickerWg.Wait()
+	}()
 
 	toolHandler := NewToolHandler(cfg, database)
 	server := NewServer(toolHandler)
