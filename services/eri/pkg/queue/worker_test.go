@@ -1222,6 +1222,78 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 	}
 }
 
+func TestWorker_EphemeralOnPrimaryPool_GuardsSessionAndEvicts(t *testing.T) {
+	t.Parallel()
+	store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
+	primarySessUUID := "11111111-1111-1111-1111-111111111111"
+	ephemSessUUID := "22222222-2222-2222-2222-222222222222"
+
+	spawner := &mockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
+			go func() {
+				defer outW.Close()
+				_, _ = outW.Write([]byte(fmt.Sprintf("{\"event\":\"init\",\"conversation_id\":%q}\n", ephemSessUUID)))
+				buf := make([]byte, 16384)
+				for {
+					n, rErr := inR.Read(buf)
+					if rErr != nil {
+						return
+					}
+					if n > 0 {
+						_, _ = outW.Write([]byte(fmt.Sprintf("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ephemeral ok\",\"conversation_id\":%q,\"usage\":{\"total_tokens\":5}}}\n", ephemSessUUID)))
+					}
+				}
+			}()
+			return inW, outR, errR, newMockProcessHandle(12345), nil
+		},
+	}
+	primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, spawner)
+	defer primaryPool.Close()
+
+	cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
+	doneCh := make(chan struct{}, 1)
+	pool := New(cfg, WorkerPoolConfig{
+		ProcessPool:    primaryPool,
+		SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1,
+		OnMessageCompleted: func(msg db.Message, status string) {
+			if status == db.StatusCompleted {
+				doneCh <- struct{}{}
+			}
+		},
+	})
+	defer pool.Stop()
+
+	threadID := "1560318118792790999"
+	ctx := context.Background()
+	_ = store.SaveSessionID(ctx, threadID, primarySessUUID)
+
+	trueVal := true
+	msg := db.Message{
+		ID: "msg-ephem-primary", ThreadID: threadID, Content: "execute ephemeral high effort",
+		Metadata: db.MessageMetadata{Ephemeral: &trueVal}, Status: db.StatusPending, CreatedAt: time.Now(),
+	}
+	_ = store.InsertMessage(ctx, msg)
+	pool.Enqueue(msg)
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for ephemeral turn")
+	}
+	pool.Stop()
+
+	currentSess, err := store.GetSessionID(ctx, threadID)
+	if err != nil || currentSess != primarySessUUID {
+		t.Errorf("expected primary session %s untouched, got %s", primarySessUUID, currentSess)
+	}
+	if _, exists := primaryPool.Get(threadID); exists {
+		t.Errorf("expected session for thread %s to be evicted from UnifiedProcessPool, but it still exists", threadID)
+	}
+}
+
 func TestWorker_DualPool_YieldTrapFallback(t *testing.T) {
 	t.Parallel()
 	store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
@@ -1835,6 +1907,20 @@ func TestWorker_ResolveExecutionPool_EphemeralRouting_TableDriven(t *testing.T) 
 			wantNonPrimary:    false,
 			isPrimaryFallback: true,
 		},
+		{
+			name:           "explicit ephemeral true with high effort routes to wrapped medium pool and is non-primary",
+			effort:         "high",
+			ephemeral:      &trueVal,
+			wantUnderlying: false,
+			wantNonPrimary: true,
+		},
+		{
+			name:           "explicit ephemeral true with default empty effort routes to wrapped medium pool and is non-primary",
+			effort:         "",
+			ephemeral:      &trueVal,
+			wantUnderlying: false,
+			wantNonPrimary: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -1875,7 +1961,7 @@ func TestWorker_ResolveExecutionPool_EphemeralRouting_TableDriven(t *testing.T) 
 				if tc.effort == "low" && activePool != lowWrapped {
 					t.Errorf("expected lowWrapped, got %v", activePool)
 				}
-				if tc.effort == "medium" && activePool != medWrapped {
+				if (tc.effort == "medium" || tc.effort == "high" || tc.effort == "") && activePool != medWrapped {
 					t.Errorf("expected medWrapped, got %v", activePool)
 				}
 			}

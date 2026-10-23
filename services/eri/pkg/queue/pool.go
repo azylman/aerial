@@ -128,6 +128,9 @@ func (p *WorkerPool) Store() db.Store {
 
 func makeSessionCallbacks(store db.Store) (func(context.Context, string) (runner.SessionRecord, error), func(context.Context, string, string, string) error) {
 	getRec := func(ctx context.Context, targetKey string) (runner.SessionRecord, error) {
+		if strings.Contains(targetKey, ":") {
+			return runner.SessionRecord{}, nil
+		}
 		sessID, err := store.GetSessionID(ctx, targetKey)
 		if err != nil {
 			return runner.SessionRecord{}, err
@@ -143,19 +146,16 @@ func makeSessionCallbacks(store db.Store) (func(context.Context, string) (runner
 		return runner.SessionRecord{ActiveSessionID: sessID, PreviousSessionID: prevID, TurnCount: turns}, nil
 	}
 	onRot := func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+		if strings.Contains(targetKey, ":") {
+			return nil
+		}
 		return store.RotateSessionID(ctx, targetKey, newSessionID)
 	}
 	return getRec, onRot
 }
 
-func wirePoolSessionDependencies(pools []runner.AgentPool, sessionMgr *session.Manager, store db.Store) {
-	var getRec func(context.Context, string) (runner.SessionRecord, error)
-	var onRot func(context.Context, string, string, string) error
-	if store != nil {
-		getRec, onRot = makeSessionCallbacks(store)
-	}
-
-	for _, pool := range pools {
+func wirePoolSessionDependencies(primaryPool runner.AgentPool, auxPools []runner.AgentPool, sessionMgr *session.Manager, store db.Store) {
+	for _, pool := range append([]runner.AgentPool{primaryPool}, auxPools...) {
 		if pool == nil {
 			continue
 		}
@@ -169,8 +169,15 @@ func wirePoolSessionDependencies(pools []runner.AgentPool, sessionMgr *session.M
 				sm.SetSessionManager(sessionMgr)
 			}
 		}
-		if getRec != nil && onRot != nil {
-			if sc, ok := pool.(interface {
+	}
+
+	// Session persistence callbacks are exclusively wired to the primary pool.
+	// Ephemeral / interchangeable pools operate on recycled internal worker slots (e.g., "discord:worker-0")
+	// and must never read or write persistent session state in the database.
+	if store != nil && primaryPool != nil {
+		if _, isInter := primaryPool.(*runner.InterchangeablePool); !isInter {
+			getRec, onRot := makeSessionCallbacks(store)
+			if sc, ok := primaryPool.(interface {
 				SetSessionCallbacks(func(context.Context, string) (runner.SessionRecord, error), func(context.Context, string, string, string) error)
 			}); ok {
 				sc.SetSessionCallbacks(getRec, onRot)
@@ -300,7 +307,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		p.processPool = runner.NewUnifiedProcessPool(poolCfg, nil)
 	}
 
-	wirePoolSessionDependencies([]runner.AgentPool{p.processPool, p.lowEffortProcessPool, p.mediumEffortProcessPool}, p.sessionMgr, p.Store())
+	wirePoolSessionDependencies(p.processPool, []runner.AgentPool{p.lowEffortProcessPool, p.mediumEffortProcessPool}, p.sessionMgr, p.Store())
 
 	if p.cfg.HistoryFetcher == nil {
 		p.cfg.HistoryFetcher = func(ctx context.Context, cID, beforeID string, limit int) ([]HistoryMessage, error) {

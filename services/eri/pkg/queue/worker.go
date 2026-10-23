@@ -136,6 +136,22 @@ func (te *turnExecution) incrementMessageRetry(id, errorMsg string) {
 	}
 }
 
+func (te *turnExecution) releaseLease(activePool runner.AgentPool) {
+	if te == nil || te.lease == nil {
+		return
+	}
+	if relErr := te.lease.Release(); relErr != nil {
+		log.Printf("[WorkerPool] Warning releasing lease for %s: %v", te.threadID, relErr)
+	}
+	if te.isEphemeral && te.pool != nil {
+		if ep, ok := activePool.(interface{ EvictSession(string) error }); ok {
+			if err := ep.EvictSession(te.threadID); err != nil {
+				log.Printf("[WorkerPool] Warning evicting ephemeral session for %s: %v", te.threadID, err)
+			}
+		}
+	}
+}
+
 func (te *turnExecution) saveSessionID(threadID, sessionID string) {
 	if te == nil || te.isEphemeral {
 		return
@@ -462,13 +478,7 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 		return
 	}
 	te.lease = lease
-	defer func() {
-		if te.lease != nil {
-			if relErr := te.lease.Release(); relErr != nil {
-				log.Printf("[WorkerPool] Warning releasing lease for %s: %v", te.threadID, relErr)
-			}
-		}
-	}()
+	defer te.releaseLease(activePool)
 
 	te.currentSessionID = lease.SessionID()
 	te.previousSessionID = lease.PreviousSessionID()
@@ -476,37 +486,12 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 	te.isEphemeral = lease.IsEphemeral() || te.isNonPrimaryPool(activePool)
 	te.turnCount = lease.TurnCount()
 
-	if te.currentSessionID != "" && te.isCold {
+	if te.currentSessionID != "" && te.isCold && !te.isEphemeral {
 		te.saveSessionID(te.threadID, te.currentSessionID)
 	}
 
-	if te.policy.Hooks.PreTurn != nil {
-		preReq := buildPreTurnRequest(te)
-		dispatcher, poolCtx := te.resolveWebhookDispatcher()
-		preResp, err := dispatcher.CallPreTurnHook(poolCtx, te.policy.Hooks.PreTurn, preReq)
-		if err != nil {
-			action := te.policy.Hooks.PreTurn.GetOnTimeout("drop")
-			if action == "drop" {
-				te.abortBurst("pre_turn_timeout_drop")
-				return
-			} else if action == "retry" {
-				te.rescheduleBurst(5)
-				return
-			}
-		} else if preResp != nil {
-			if !preResp.Allow {
-				if preResp.Action == "retry" {
-					te.rescheduleBurst(preResp.RetryAfterSeconds)
-					return
-				}
-				te.abortBurst("pre_turn_rejected: " + preResp.Reason)
-				return
-			}
-			if strings.TrimSpace(preResp.InjectedContext) != "" {
-				te.injectedHookContext = fmt.Sprintf("<COORDINATION_CONTEXT>\n%s\n</COORDINATION_CONTEXT>", strings.TrimSpace(preResp.InjectedContext))
-			}
-			te.hookMetadata = preResp.Metadata
-		}
+	if !te.runPreTurnHook() {
+		return
 	}
 
 	te.turnAttempted = true
@@ -766,60 +751,6 @@ func (te *turnExecution) markAmbientBurst() {
 			info = te.wakeInfos[i]
 		}
 		te.completeAmbientMessage(m, info)
-	}
-}
-
-func buildPreTurnRequest(te *turnExecution) *PreTurnRequest {
-	if te == nil {
-		return &PreTurnRequest{Timestamp: time.Now().UTC()}
-	}
-	channelID := te.effectiveID
-	if channelID == "" {
-		channelID = te.threadID
-	}
-	msgs, maxRetry := make([]*db.Message, len(te.burst)), 0
-	for i := range te.burst {
-		msgs[i] = &te.burst[i]
-		if te.burst[i].RetryCount > maxRetry {
-			maxRetry = te.burst[i].RetryCount
-		}
-	}
-	prompt := te.turnPrompt
-	if prompt == "" {
-		var tz string
-		if te.pool != nil && te.pool.appCfg != nil {
-			if cur := te.pool.appCfg.Current(); cur != nil {
-				tz = cur.Timezone
-			}
-		}
-		prompt = CoalesceBurstPrompt(te.burst, tz)
-	}
-	return &PreTurnRequest{
-		ChannelID: channelID, ThreadID: te.threadID, BurstCount: len(te.burst),
-		Messages: msgs, Prompt: prompt, RetryCount: maxRetry, Timestamp: time.Now().UTC(),
-	}
-}
-
-func buildPostTurnRequest(te *turnExecution) *PostTurnRequest {
-	if te == nil {
-		return &PostTurnRequest{Timestamp: time.Now().UTC()}
-	}
-	channelID := te.effectiveID
-	if channelID == "" {
-		channelID = te.threadID
-	}
-	durMs := te.turnDurationMs
-	if durMs <= 0 && !te.execStart.IsZero() {
-		durMs = time.Since(te.execStart).Milliseconds()
-	}
-	status := te.turnStatus
-	if status == "" {
-		status = "failed"
-	}
-	return &PostTurnRequest{
-		ChannelID: channelID, ThreadID: te.threadID, Status: status,
-		ResponseText: te.turnResponseText, Error: te.turnError,
-		DurationMs: durMs, TokenUsage: te.turnTokenUsage, Metadata: te.hookMetadata, Timestamp: time.Now().UTC(),
 	}
 }
 
@@ -1803,55 +1734,4 @@ func (te *turnExecution) deliverFailureNotice(agyBin, apiKey, errDetail, stderr,
 	if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), deliveryTarget, notif); err != nil {
 		log.Printf("[WorkerPool] Failed to deliver %s for thread %s: %v", logLabel, te.threadID, err)
 	}
-}
-
-func (te *turnExecution) resolveExecutionPool() runner.AgentPool {
-	if te.pool == nil {
-		return nil
-	}
-	isEphem, explicit := extractBurstEphemeral(te.burst)
-	switch resolveBurstEffort(te.burst) {
-	case "medium":
-		if explicit && !isEphem {
-			if up := te.pool.MediumEffortProcessPool(); up != nil {
-				return up
-			}
-		}
-		if te.pool.mediumEffortProcessPool != nil {
-			return te.pool.mediumEffortProcessPool
-		}
-		log.Printf("[Worker] Notice: mediumEffortProcessPool is nil, falling back to processPool for thread %s", te.threadID)
-	case "low":
-		if explicit && !isEphem {
-			if up := te.pool.LowEffortProcessPool(); up != nil {
-				return up
-			}
-		}
-		if te.pool.lowEffortProcessPool != nil {
-			return te.pool.lowEffortProcessPool
-		}
-		log.Printf("[Worker] Notice: lowEffortProcessPool is nil, falling back to processPool for thread %s", te.threadID)
-	}
-	return te.pool.processPool
-}
-
-func (te *turnExecution) isNonPrimaryPool(activePool runner.AgentPool) bool {
-	if isEphem, explicit := extractBurstEphemeral(te.burst); explicit {
-		return isEphem
-	}
-	return te != nil && te.pool != nil && activePool != nil && activePool != te.pool.processPool
-}
-
-func getStreamingDaemon(pool runner.AgentPool, threadID string) *runner.StreamingDaemon {
-	if pool == nil {
-		return nil
-	}
-	if dPool, ok := pool.(interface {
-		Get(string) (*runner.StreamingDaemon, bool)
-	}); ok {
-		if d, ok := dPool.Get(threadID); ok && d != nil {
-			return d
-		}
-	}
-	return nil
 }

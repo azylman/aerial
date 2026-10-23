@@ -10,6 +10,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
+	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/sanitizer"
 )
 
@@ -590,4 +591,64 @@ func wrapPromptTag(text, openTag, closeTag string) string {
 		return fmt.Sprintf("%s\n%s\n%s", openTag, trimmed, closeTag)
 	}
 	return trimmed
+}
+
+func (te *turnExecution) resolveExecutionPool() runner.AgentPool {
+	if te.pool == nil {
+		return nil
+	}
+	isEphem, explicit := extractBurstEphemeral(te.burst)
+	switch resolveBurstEffort(te.burst) {
+	case "medium":
+		if explicit && !isEphem {
+			if up := te.pool.MediumEffortProcessPool(); up != nil {
+				return up
+			}
+		}
+		if te.pool.mediumEffortProcessPool != nil {
+			return te.pool.mediumEffortProcessPool
+		}
+		log.Printf("[Worker] Notice: mediumEffortProcessPool is nil, falling back to processPool for thread %s", te.threadID)
+	case "low":
+		if explicit && !isEphem {
+			if up := te.pool.LowEffortProcessPool(); up != nil {
+				return up
+			}
+		}
+		if te.pool.lowEffortProcessPool != nil {
+			return te.pool.lowEffortProcessPool
+		}
+		log.Printf("[Worker] Notice: lowEffortProcessPool is nil, falling back to processPool for thread %s", te.threadID)
+	default:
+		if explicit && isEphem {
+			if te.pool.mediumEffortProcessPool != nil {
+				return te.pool.mediumEffortProcessPool
+			}
+			if te.pool.lowEffortProcessPool != nil {
+				return te.pool.lowEffortProcessPool
+			}
+		}
+	}
+	return te.pool.processPool
+}
+
+func (te *turnExecution) isNonPrimaryPool(activePool runner.AgentPool) bool {
+	if isEphem, explicit := extractBurstEphemeral(te.burst); explicit {
+		return isEphem
+	}
+	return te != nil && te.pool != nil && activePool != nil && activePool != te.pool.processPool
+}
+
+func getStreamingDaemon(pool runner.AgentPool, threadID string) *runner.StreamingDaemon {
+	if pool == nil {
+		return nil
+	}
+	if dPool, ok := pool.(interface {
+		Get(string) (*runner.StreamingDaemon, bool)
+	}); ok {
+		if d, ok := dPool.Get(threadID); ok && d != nil {
+			return d
+		}
+	}
+	return nil
 }

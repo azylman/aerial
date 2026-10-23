@@ -2656,6 +2656,76 @@ func TestWorkerPool_ProcessPoolWiringAndTurnRouting(t *testing.T) {
 	}
 }
 
+type spyPoolSessionDeps struct {
+	runner.AgentPool
+	callbacksSet bool
+	managerSet   bool
+}
+
+func (s *spyPoolSessionDeps) SetSessionCallbacks(getRec func(context.Context, string) (runner.SessionRecord, error), onRot func(context.Context, string, string, string) error) {
+	s.callbacksSet = true
+}
+
+func (s *spyPoolSessionDeps) SetSessionManager(sm *session.Manager) {
+	s.managerSet = true
+}
+
+func (s *spyPoolSessionDeps) SetTranscriptRescuer(r func(string, time.Time) string) {}
+
+func TestWorkerPool_WirePoolSessionDependencies_TableDriven(t *testing.T) {
+	t.Parallel()
+	sessMgr := &session.Manager{}
+	fakeStore := dbtest.NewFakeStore()
+
+	tests := []struct {
+		name                 string
+		hasStore             bool
+		wantPrimaryCallbacks bool
+		wantAuxCallbacks     bool
+		wantMgrWired         bool
+	}{
+		{
+			name:                 "primary receives callbacks and manager, aux receives only manager",
+			hasStore:             true,
+			wantPrimaryCallbacks: true,
+			wantAuxCallbacks:     false,
+			wantMgrWired:         true,
+		},
+		{
+			name:                 "nil store wires manager but not callbacks",
+			hasStore:             false,
+			wantPrimaryCallbacks: false,
+			wantAuxCallbacks:     false,
+			wantMgrWired:         true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			primary := &spyPoolSessionDeps{}
+			aux := &spyPoolSessionDeps{}
+
+			var store db.Store
+			if tc.hasStore {
+				store = fakeStore
+			}
+
+			wirePoolSessionDependencies(primary, []runner.AgentPool{aux}, sessMgr, store)
+
+			if primary.callbacksSet != tc.wantPrimaryCallbacks {
+				t.Errorf("primary.callbacksSet = %v, want %v", primary.callbacksSet, tc.wantPrimaryCallbacks)
+			}
+			if aux.callbacksSet != tc.wantAuxCallbacks {
+				t.Errorf("aux.callbacksSet = %v, want %v", aux.callbacksSet, tc.wantAuxCallbacks)
+			}
+			if primary.managerSet != tc.wantMgrWired || aux.managerSet != tc.wantMgrWired {
+				t.Errorf("managerSet = (primary:%v, aux:%v), want %v", primary.managerSet, aux.managerSet, tc.wantMgrWired)
+			}
+		})
+	}
+}
+
 type mockErrSessionStore struct {
 	db.Store
 	findErr error
