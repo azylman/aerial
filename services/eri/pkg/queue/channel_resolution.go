@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/bwmarrin/discordgo"
 	"golang.org/x/sync/singleflight"
@@ -367,6 +368,54 @@ func FormatThreadTitle(titlePrefix, prompt string, now time.Time) string {
 // ShouldCreateThread determines whether a new public Discord thread should be created.
 func ShouldCreateThread(isAlreadyThread bool, channelMode string) bool {
 	return !isAlreadyThread && strings.ToLower(strings.TrimSpace(channelMode)) != "channel"
+}
+
+// IsValidThreadKey returns true if 1 <= len(id) <= 128, !strings.Contains(id, ":"),
+// and all bytes are ASCII [a-zA-Z0-9_-].
+func IsValidThreadKey(id string) bool {
+	if len(id) < 1 || len(id) > 128 || strings.Contains(id, ":") {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+// ResolveTargetThread resolves a target Discord thread for a prompt, auto-creating a thread
+// if channel policy permits and the target is not already a thread.
+func (p *WorkerPool) ResolveTargetThread(channelID, title, prompt string, now time.Time) string {
+	if p == nil || channelID == "" {
+		return channelID
+	}
+	sess := p.getDiscordSession()
+	snap, ok := resolveChannelSnapshot(sess, channelID)
+	var policy config.ChannelPolicy
+	if p.cfg.ResolveChannelPolicy != nil {
+		policy = p.cfg.ResolveChannelPolicy(channelID, snap.Name)
+	} else {
+		policy = config.ActiveConfig().ResolveChannelPolicy(channelID, snap.Name)
+	}
+	if !ShouldCreateThread(ok && snap.IsThread, policy.Mode) {
+		return channelID
+	}
+	threadTitle := FormatThreadTitle(title, prompt, now)
+	if p.createThreadFn != nil {
+		if tid, err := p.createThreadFn(channelID, threadTitle); err == nil && tid != "" {
+			return tid
+		}
+		return channelID
+	}
+	if sess != nil && sess.Token != "" {
+		if ch, err := sess.ThreadStart(channelID, threadTitle, discordgo.ChannelTypeGuildPublicThread, 1440); err == nil && ch != nil && ch.ID != "" {
+			CacheDiscordChannel(ch)
+			return ch.ID
+		}
+	}
+	return channelID
 }
 
 var _ = func() bool {

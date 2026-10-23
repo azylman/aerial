@@ -339,43 +339,6 @@ func isRateLimitError(errDetail string, extraStrs ...string) bool {
 	return false
 }
 
-func extractBurstModel(burst []db.Message) string {
-	for _, m := range burst {
-		if model := strings.TrimSpace(m.Metadata.Model); model != "" {
-			return model
-		}
-	}
-	return ""
-}
-
-func extractBurstSilent(burst []db.Message) bool {
-	if len(burst) == 0 {
-		return false
-	}
-	for _, m := range burst {
-		if !m.Metadata.Silent {
-			return false
-		}
-	}
-	return true
-}
-
-func resolveBurstEffort(burst []db.Message) string {
-	hasLow := false
-	for _, m := range burst {
-		switch resolveMessageEffort(m) {
-		case "medium":
-			return "medium"
-		case "low":
-			hasLow = true
-		}
-	}
-	if hasLow {
-		return "low"
-	}
-	return "high"
-}
-
 func (te *turnExecution) poolCtx() context.Context {
 	if te != nil && te.pool != nil && te.pool.ctx != nil {
 		return te.pool.ctx
@@ -629,6 +592,9 @@ func isHTTPClientBurst(burst []db.Message) bool {
 
 func (te *turnExecution) resolveTurnPolicy() bool {
 	te.effectiveID, te.effectiveName, te.isThread, te.threadName = ResolveChannelAndThread(te.pool.getDiscordSession(), te.threadID)
+	if te.effectiveName == "" && len(te.burst) > 0 && te.burst[0].Metadata.ChannelID != "" {
+		te.effectiveID, te.effectiveName, _, _ = ResolveChannelAndThread(te.pool.getDiscordSession(), te.burst[0].Metadata.ChannelID)
+	}
 	if te.pool.cfg.ResolveChannelPolicy != nil {
 		te.policy = te.pool.cfg.ResolveChannelPolicy(te.effectiveID, te.effectiveName)
 	} else {
@@ -651,8 +617,35 @@ func (te *turnExecution) resolveTurnPolicy() bool {
 	return true
 }
 
+func shouldEvaluateAmbientWake(mode string, isThread, isSilent, isHTTP bool) bool {
+	return strings.ToLower(mode) == "channel" && !isThread && !isSilent && !isHTTP
+}
+
+func (te *turnExecution) resolveWakeHookOverride() string {
+	if te.policy.Hooks.OnWake == nil {
+		return ""
+	}
+	channelID := te.effectiveID
+	if channelID == "" {
+		channelID = te.threadID
+	}
+	var firstMsg db.Message
+	if len(te.burst) > 0 {
+		firstMsg = te.burst[0]
+	}
+	req := &WakeRequest{ChannelID: channelID, ThreadID: te.threadID, Message: firstMsg, Timestamp: time.Now().UTC()}
+
+	dispatcher, poolCtx := te.resolveWebhookDispatcher()
+	wakeResp, err := dispatcher.CallWakeHook(poolCtx, te.policy.Hooks.OnWake, req)
+	hookOverride := te.policy.Hooks.OnWake.GetOnTimeout("classify")
+	if err == nil && wakeResp != nil && strings.TrimSpace(wakeResp.Override) != "" {
+		hookOverride = strings.ToLower(strings.TrimSpace(wakeResp.Override))
+	}
+	return hookOverride
+}
+
 func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
-	if strings.ToLower(te.policy.Mode) == "channel" {
+	if shouldEvaluateAmbientWake(te.policy.Mode, te.isThread, extractBurstSilent(te.burst), isHTTPClientBurst(te.burst)) {
 		botUserID := ""
 		var botRoleIDs []string
 		if sess := te.pool.getDiscordSession(); sess != nil && sess.State != nil {
@@ -663,25 +656,7 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 		}
 
 		wakeMode := te.policy.GetWakeMode()
-		var hookOverride string
-		if te.policy.Hooks.OnWake != nil {
-			channelID := te.effectiveID
-			if channelID == "" {
-				channelID = te.threadID
-			}
-			var firstMsg db.Message
-			if len(te.burst) > 0 {
-				firstMsg = te.burst[0]
-			}
-			req := &WakeRequest{ChannelID: channelID, ThreadID: te.threadID, Message: firstMsg, Timestamp: time.Now().UTC()}
-
-			dispatcher, poolCtx := te.resolveWebhookDispatcher()
-			wakeResp, err := dispatcher.CallWakeHook(poolCtx, te.policy.Hooks.OnWake, req)
-			hookOverride = te.policy.Hooks.OnWake.GetOnTimeout("classify")
-			if err == nil && wakeResp != nil && strings.TrimSpace(wakeResp.Override) != "" {
-				hookOverride = strings.ToLower(strings.TrimSpace(wakeResp.Override))
-			}
-		}
+		hookOverride := te.resolveWakeHookOverride()
 
 		classifierFn := func(msgs []db.Message) (float64, string) {
 			var recentContext []db.Message
@@ -1017,28 +992,33 @@ func (te *turnExecution) resolveAndPersistSessionID(candidateID, stdout, stderr 
 	return targetSess
 }
 
+func (te *turnExecution) fetchTurnHistory(fetchCtx context.Context, limit int) []HistoryMessage {
+	if !IsNumericSnowflake(te.threadID) && (te.pool == nil || te.pool.cfg.HistoryFetcher == nil) {
+		return nil
+	}
+	var err error
+	var turnHistory []HistoryMessage
+	if te.pool.cfg.HistoryFetcher != nil {
+		turnHistory, err = te.pool.cfg.HistoryFetcher(fetchCtx, te.threadID, te.burst[0].ID, limit)
+	} else {
+		turnHistory, err = FetchRecentThreadHistory(fetchCtx, te.pool.getDiscordSession(), te.store(), te.threadID, limit)
+	}
+	if err != nil {
+		log.Printf("[WorkerPool] Warning: History fetch failed for thread %s: %v", te.threadID, err)
+	}
+	return turnHistory
+}
+
 func (te *turnExecution) buildTurnPrompt() {
 	var turnHistory []HistoryMessage
 	var turnHistoryFetched bool
 	getTurnHistory := func(limit int) []HistoryMessage {
-		if turnHistoryFetched {
-			if len(turnHistory) > limit {
-				return turnHistory[:limit]
-			}
-			return turnHistory
+		if !turnHistoryFetched {
+			fetchCtx, fetchCancel := context.WithTimeout(te.poolCtx(), 3*time.Second)
+			turnHistory = te.fetchTurnHistory(fetchCtx, limit)
+			fetchCancel()
+			turnHistoryFetched = true
 		}
-		fetchCtx, fetchCancel := context.WithTimeout(te.poolCtx(), 3*time.Second)
-		defer fetchCancel()
-		var err error
-		if te.pool.cfg.HistoryFetcher != nil {
-			turnHistory, err = te.pool.cfg.HistoryFetcher(fetchCtx, te.threadID, te.burst[0].ID, limit)
-		} else {
-			turnHistory, err = FetchRecentThreadHistory(fetchCtx, te.pool.getDiscordSession(), te.store(), te.threadID, limit)
-		}
-		if err != nil {
-			log.Printf("[WorkerPool] Warning: History fetch failed for thread %s: %v", te.threadID, err)
-		}
-		turnHistoryFetched = true
 		if len(turnHistory) > limit {
 			return turnHistory[:limit]
 		}
@@ -1258,6 +1238,14 @@ func (te *turnExecution) deliverSuccessAndFinalize(resp *runner.AgyResponse, acc
 	return true, ""
 }
 
+func (te *turnExecution) deliverQuotaNotice(pauseMsg string, logPrefix string) {
+	if te.pool != nil && te.pool.cfg.DeliveryFunc != nil && !extractBurstSilent(te.burst) {
+		if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, pauseMsg); err != nil {
+			log.Printf("[WorkerPool] Failed to deliver %s for thread %s: %v", logPrefix, te.threadID, err)
+		}
+	}
+}
+
 func (te *turnExecution) handleQuotaPause(errDetail, stderr, currentModel, burstEffort string, attempt, maxAttempts int) bool {
 	resetDur, _ := runner.ExtractQuotaResetDuration(errDetail, stderr)
 	if runner.IsCapacityBlip(errDetail, stderr) || resetDur <= 5*time.Second {
@@ -1289,12 +1277,8 @@ func (te *turnExecution) handleQuotaPause(errDetail, stderr, currentModel, burst
 		reason := fmt.Sprintf("[CAPACITY_EXHAUSTED reset_in=%v] %s", resetDur, sanitizeErrorText(errDetail))
 		metrics.RecordRunnerError("capacity_exhausted", currentModel)
 		metrics.RecordTurnCompleted("capacity_exhausted", te.triggerType, currentModel, time.Since(te.execStart))
-		if te.pool != nil && te.pool.cfg.DeliveryFunc != nil {
-			pauseMsg := notifier.FormatQuotaPauseMessage(resetDur, time.Now().UTC().Add(resetDur), false, false)
-			if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, pauseMsg); err != nil {
-				log.Printf("[WorkerPool] Failed to deliver capacity pause notice for thread %s: %v", te.threadID, err)
-			}
-		}
+		pauseMsg := notifier.FormatQuotaPauseMessage(resetDur, time.Now().UTC().Add(resetDur), false, false)
+		te.deliverQuotaNotice(pauseMsg, "capacity pause notice")
 		te.failBurstWithStatus("failed", reason, currentModel)
 		return false
 	}
@@ -1321,12 +1305,8 @@ func (te *turnExecution) handleQuotaPause(errDetail, stderr, currentModel, burst
 	}
 	metrics.RecordTurnCompleted("quota_paused", te.triggerType, currentModel, time.Since(te.execStart))
 	te.stopIndicators()
-	if te.pool.cfg.DeliveryFunc != nil {
-		pauseMsg := notifier.FormatQuotaPauseMessage(resetDur, runAt, scheduled, isAlreadyRetry)
-		if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), te.threadID, pauseMsg); err != nil {
-			log.Printf("[WorkerPool] Failed to deliver quota pause notice for thread %s: %v", te.threadID, err)
-		}
-	}
+	pauseMsg := notifier.FormatQuotaPauseMessage(resetDur, runAt, scheduled, isAlreadyRetry)
+	te.deliverQuotaNotice(pauseMsg, "quota pause notice")
 	reason := fmt.Sprintf("[QUOTA_PAUSED reset_in=%v scheduled=%t] %s", resetDur, scheduled, sanitizeErrorText(errDetail))
 	te.failBurstWithStatus("failed", reason, currentModel)
 	return false
@@ -1774,7 +1754,7 @@ func (te *turnExecution) cancelBurstOnShutdown(turnStatus, currentModel string, 
 }
 
 func (te *turnExecution) deliverFailureNotice(agyBin, apiKey, errDetail, stderr, descPrefix, logLabel string) {
-	if te.pool == nil || te.pool.cfg.DeliveryFunc == nil {
+	if te.pool == nil || te.pool.cfg.DeliveryFunc == nil || extractBurstSilent(te.burst) {
 		return
 	}
 	var notif string
@@ -1804,13 +1784,24 @@ func (te *turnExecution) resolveExecutionPool() runner.AgentPool {
 	if te.pool == nil {
 		return nil
 	}
+	isEphem, explicit := extractBurstEphemeral(te.burst)
 	switch resolveBurstEffort(te.burst) {
 	case "medium":
+		if explicit && !isEphem {
+			if up := te.pool.MediumEffortProcessPool(); up != nil {
+				return up
+			}
+		}
 		if te.pool.mediumEffortProcessPool != nil {
 			return te.pool.mediumEffortProcessPool
 		}
 		log.Printf("[Worker] Notice: mediumEffortProcessPool is nil, falling back to processPool for thread %s", te.threadID)
 	case "low":
+		if explicit && !isEphem {
+			if up := te.pool.LowEffortProcessPool(); up != nil {
+				return up
+			}
+		}
 		if te.pool.lowEffortProcessPool != nil {
 			return te.pool.lowEffortProcessPool
 		}
@@ -1820,6 +1811,9 @@ func (te *turnExecution) resolveExecutionPool() runner.AgentPool {
 }
 
 func (te *turnExecution) isNonPrimaryPool(activePool runner.AgentPool) bool {
+	if isEphem, explicit := extractBurstEphemeral(te.burst); explicit {
+		return isEphem
+	}
 	return te != nil && te.pool != nil && activePool != nil && activePool != te.pool.processPool
 }
 

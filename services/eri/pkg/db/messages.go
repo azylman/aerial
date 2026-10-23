@@ -37,6 +37,7 @@ type MessageMetadata struct {
 	Attachments       []string `json:"attachments,omitempty"`
 	Model             string   `json:"model,omitempty"`
 	Silent            bool     `json:"silent,omitempty"`
+	Ephemeral         *bool    `json:"ephemeral,omitempty"`
 	VanadisChunkID    string   `json:"vanadis_chunk_id,omitempty"`
 }
 
@@ -46,7 +47,7 @@ func (m MessageMetadata) IsEmpty() bool {
 		m.GuildID == "" && m.AuthorUsername == "" && m.AuthorGlobalName == "" && !m.AuthorBot && !m.IsAdmin &&
 		len(m.Mentions) == 0 && len(m.MentionUserIDs) == 0 && len(m.MentionRoleIDs) == 0 &&
 		m.ReplyingToAuthor == "" && m.ReplyingToContent == "" && len(m.Attachments) == 0 &&
-		m.Model == "" && !m.Silent && m.VanadisChunkID == ""
+		m.Model == "" && !m.Silent && m.Ephemeral == nil && m.VanadisChunkID == ""
 }
 
 // Value implements driver.Valuer for PostgreSQL JSONB and SQLite TEXT.

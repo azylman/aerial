@@ -22,6 +22,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
@@ -1750,6 +1751,317 @@ func TestYieldTrap_Scenarios(t *testing.T) {
 			newMetric := testutil.ToFloat64(metrics.YieldTrapEventsTotal.WithLabelValues(tc.metricOutcome, tc.metricSignature, model))
 			if newMetric != initialMetric+1 {
 				t.Errorf("metric delta = %.0f, want 1", newMetric-initialMetric)
+			}
+		})
+	}
+}
+
+type mockUnwrappablePool struct {
+	runner.AgentPool
+	underlying *runner.UnifiedProcessPool
+}
+
+func (m *mockUnwrappablePool) Underlying() *runner.UnifiedProcessPool {
+	return m.underlying
+}
+
+func TestWorker_ResolveExecutionPool_EphemeralRouting_TableDriven(t *testing.T) {
+	t.Parallel()
+	primaryPool := &runner.UnifiedProcessPool{}
+	lowUnified := &runner.UnifiedProcessPool{}
+	medUnified := &runner.UnifiedProcessPool{}
+
+	lowWrapped := &mockUnwrappablePool{underlying: lowUnified}
+	medWrapped := &mockUnwrappablePool{underlying: medUnified}
+
+	trueVal := true
+	falseVal := false
+
+	tests := []struct {
+		name              string
+		effort            string
+		ephemeral         *bool
+		wantUnderlying    bool
+		wantNonPrimary    bool
+		isPrimaryFallback bool
+	}{
+		{
+			name:           "default low effort uses wrapped pool and is non-primary",
+			effort:         "low",
+			ephemeral:      nil,
+			wantUnderlying: false,
+			wantNonPrimary: true,
+		},
+		{
+			name:           "explicit ephemeral true with low effort uses wrapped pool and is non-primary",
+			effort:         "low",
+			ephemeral:      &trueVal,
+			wantUnderlying: false,
+			wantNonPrimary: true,
+		},
+		{
+			name:           "explicit ephemeral false with low effort unwraps unified pool and is primary-like",
+			effort:         "low",
+			ephemeral:      &falseVal,
+			wantUnderlying: true,
+			wantNonPrimary: false,
+		},
+		{
+			name:           "default medium effort uses wrapped pool and is non-primary",
+			effort:         "medium",
+			ephemeral:      nil,
+			wantUnderlying: false,
+			wantNonPrimary: true,
+		},
+		{
+			name:           "explicit ephemeral true with medium effort uses wrapped pool and is non-primary",
+			effort:         "medium",
+			ephemeral:      &trueVal,
+			wantUnderlying: false,
+			wantNonPrimary: true,
+		},
+		{
+			name:           "explicit ephemeral false with medium effort unwraps unified pool and is primary-like",
+			effort:         "medium",
+			ephemeral:      &falseVal,
+			wantUnderlying: true,
+			wantNonPrimary: false,
+		},
+		{
+			name:              "high effort always uses primary pool and is not non-primary",
+			effort:            "high",
+			ephemeral:         nil,
+			wantUnderlying:    false,
+			wantNonPrimary:    false,
+			isPrimaryFallback: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			wp := &WorkerPool{
+				processPool:             primaryPool,
+				lowEffortProcessPool:    lowWrapped,
+				mediumEffortProcessPool: medWrapped,
+			}
+			te := &turnExecution{
+				pool:     wp,
+				threadID: "thread-ephem-test",
+				burst: []db.Message{
+					{
+						ID:     "msg-1",
+						Effort: tc.effort,
+						Metadata: db.MessageMetadata{
+							Ephemeral: tc.ephemeral,
+						},
+					},
+				},
+			}
+
+			activePool := te.resolveExecutionPool()
+			if tc.isPrimaryFallback {
+				if activePool != primaryPool {
+					t.Errorf("expected primaryPool, got %v", activePool)
+				}
+			} else if tc.wantUnderlying {
+				if tc.effort == "low" && activePool != lowUnified {
+					t.Errorf("expected lowUnified, got %v", activePool)
+				}
+				if tc.effort == "medium" && activePool != medUnified {
+					t.Errorf("expected medUnified, got %v", activePool)
+				}
+			} else {
+				if tc.effort == "low" && activePool != lowWrapped {
+					t.Errorf("expected lowWrapped, got %v", activePool)
+				}
+				if tc.effort == "medium" && activePool != medWrapped {
+					t.Errorf("expected medWrapped, got %v", activePool)
+				}
+			}
+
+			if got := te.isNonPrimaryPool(activePool); got != tc.wantNonPrimary {
+				t.Errorf("isNonPrimaryPool() = %v, want %v", got, tc.wantNonPrimary)
+			}
+		})
+	}
+}
+
+func TestWorker_DeliverFailureNotice_And_QuotaPause_Silent_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		silent       bool
+		wantDelivery bool
+	}{
+		{"standard burst triggers delivery", false, true},
+		{"silent burst suppresses delivery", true, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var deliveryCount int
+			pool := &WorkerPool{
+				cfg: WorkerPoolConfig{
+					DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+						deliveryCount++
+						return nil
+					},
+					NotifierFunc: func(agyBin, apiKey, desc string) string { return "notice: " + desc },
+				},
+			}
+			te := &turnExecution{
+				pool:     pool,
+				threadID: "1542423172400291873",
+				burst: []db.Message{
+					{
+						ID:       "msg-1",
+						Metadata: db.MessageMetadata{Silent: tc.silent},
+					},
+				},
+			}
+
+			te.deliverFailureNotice("agy", "key", "fatal error", "stderr", "prefix", "test")
+			if tc.wantDelivery && deliveryCount == 0 {
+				t.Errorf("expected delivery for non-silent turn, got none")
+			}
+			if !tc.wantDelivery && deliveryCount > 0 {
+				t.Errorf("expected zero delivery for silent turn, got %d", deliveryCount)
+			}
+		})
+	}
+}
+
+func TestWorker_ResolveTurnPolicy_ParentChannelFallback_TableDriven(t *testing.T) {
+	t.Parallel()
+	CacheDiscordChannel(&discordgo.Channel{
+		ID:   "5566778899",
+		Name: "aerial-dev",
+		Type: discordgo.ChannelTypeGuildText,
+	})
+
+	tests := []struct {
+		name              string
+		threadID          string
+		parentChannelID   string
+		wantEffectiveName string
+	}{
+		{
+			name:              "custom session key with parent channel metadata resolves parent name",
+			threadID:          "heartbeat-session-123",
+			parentChannelID:   "5566778899",
+			wantEffectiveName: "aerial-dev",
+		},
+		{
+			name:              "custom session key without parent channel metadata has empty effective name",
+			threadID:          "custom-key-no-parent",
+			parentChannelID:   "",
+			wantEffectiveName: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pool := &WorkerPool{
+				cfg: WorkerPoolConfig{
+					Store: dbtest.NewFakeStore(),
+					ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+						return config.ChannelPolicy{Mode: "channel"}
+					},
+				},
+			}
+			te := &turnExecution{
+				pool:     pool,
+				threadID: tc.threadID,
+				burst: []db.Message{
+					{
+						ID:       "msg-fallback",
+						ThreadID: tc.threadID,
+						Metadata: db.MessageMetadata{ChannelID: tc.parentChannelID},
+					},
+				},
+			}
+			_ = te.resolveTurnPolicy()
+			if te.effectiveName != tc.wantEffectiveName {
+				t.Errorf("te.effectiveName = %q, want %q", te.effectiveName, tc.wantEffectiveName)
+			}
+		})
+	}
+}
+
+func TestWorker_EvaluateAmbientWake_HTTPAndSilent_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		authorID      string
+		silent        bool
+		isThread      bool
+		mode          string
+		wantSkipClass bool
+	}{
+		{
+			name:          "standard user message in channel mode is evaluated for ambient",
+			authorID:      "user-1",
+			silent:        false,
+			isThread:      false,
+			mode:          "channel",
+			wantSkipClass: false,
+		},
+		{
+			name:          "http-client author message skips ambient classifier",
+			authorID:      "http-client",
+			silent:        false,
+			isThread:      false,
+			mode:          "channel",
+			wantSkipClass: true,
+		},
+		{
+			name:          "silent message skips ambient classifier",
+			authorID:      "user-1",
+			silent:        true,
+			isThread:      false,
+			mode:          "channel",
+			wantSkipClass: true,
+		},
+		{
+			name:          "thread message skips channel ambient classifier",
+			authorID:      "user-1",
+			silent:        false,
+			isThread:      true,
+			mode:          "channel",
+			wantSkipClass: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pool := &WorkerPool{
+				cfg: WorkerPoolConfig{
+					Classifier: classifier.New(nil),
+				},
+			}
+			te := &turnExecution{
+				pool:     pool,
+				threadID: "chan-ambient-test",
+				isThread: tc.isThread,
+				policy:   config.ChannelPolicy{Mode: tc.mode},
+				burst: []db.Message{
+					{
+						ID:       "msg-ambient",
+						AuthorID: tc.authorID,
+						Content:  "ambient message text",
+						Metadata: db.MessageMetadata{Silent: tc.silent},
+					},
+				},
+			}
+
+			_ = te.evaluateAmbientWake()
+			if tc.wantSkipClass {
+				if te.wakeInfos != nil {
+					t.Errorf("expected ambient wake to be skipped, but wakeInfos was populated: %v", te.wakeInfos)
+				}
 			}
 		})
 	}

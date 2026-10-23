@@ -47,10 +47,13 @@ import (
 type PromptRequest struct {
 	Prompt         string `json:"prompt"`
 	ChannelID      string `json:"channel_id"`
+	SessionID      string `json:"session_id,omitempty"`
+	Title          string `json:"title,omitempty"`
 	MessageID      string `json:"message_id,omitempty"`
 	Model          string `json:"model,omitempty"`
 	Effort         string `json:"effort,omitempty"`
 	Silent         bool   `json:"silent,omitempty"`
+	Ephemeral      *bool  `json:"ephemeral,omitempty"`
 	VanadisChunkID string `json:"vanadis_chunk_id,omitempty"`
 }
 
@@ -106,6 +109,19 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
+		sessionID := strings.TrimSpace(req.SessionID)
+		if sessionID != "" {
+			if !queue.IsValidThreadKey(sessionID) {
+				writeErr(w, http.StatusBadRequest, "Invalid payload: 'session_id' must be a valid alphanumeric/hyphen/underscore key")
+				return
+			}
+		} else {
+			if !req.Silent && pool != nil {
+				channelID = pool.ResolveTargetThread(channelID, strings.TrimSpace(req.Title), req.Prompt, time.Now().UTC())
+			}
+			sessionID = channelID
+		}
+
 		msgID := strings.TrimSpace(req.MessageID)
 		if msgID == "" {
 			msgID = uuid.New().String()
@@ -124,7 +140,7 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 
 		msg := db.Message{
 			ID:         msgID,
-			ThreadID:   channelID,
+			ThreadID:   sessionID,
 			GuildID:    "",
 			AuthorID:   "http-client",
 			AuthorName: "HTTP Client",
@@ -133,6 +149,8 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			Status:     db.StatusPending,
 			Effort:     effort,
 			Metadata: db.MessageMetadata{
+				ChannelID:      channelID,
+				Ephemeral:      req.Ephemeral,
 				Model:          model,
 				Silent:         req.Silent,
 				VanadisChunkID: strings.TrimSpace(req.VanadisChunkID),
@@ -162,6 +180,7 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 		writeJSON(w, http.StatusAccepted, map[string]string{
 			"status":     "accepted",
 			"channel_id": channelID,
+			"session_id": sessionID,
 			"message_id": msgID,
 			"message":    "Prompt execution enqueued in background",
 		})
@@ -2026,38 +2045,6 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	case err := <-errChan:
 		return err
 	}
-}
-
-// DefaultGeminiHomeDir returns the production default base directory for .gemini files.
-func DefaultGeminiHomeDir() string {
-	return defaultGeminiHomeDirWithLookup(os.Getenv("HOME"), testing.Testing(), os.UserHomeDir)
-}
-
-func defaultGeminiHomeDirWithLookup(home string, isTesting bool, userHomeDirFn func() (string, error)) string {
-	if strings.TrimSpace(home) != "" {
-		return strings.TrimSpace(home)
-	}
-	if isTesting {
-		return filepath.Join(os.TempDir(), "aerial-test-gemini")
-	}
-	if userHomeDirFn != nil {
-		if h, err := userHomeDirFn(); err == nil && strings.TrimSpace(h) != "" {
-			return strings.TrimSpace(h)
-		}
-	}
-	return "/root"
-}
-
-// DefaultDataDir returns the production default base directory for persistent data.
-func DefaultDataDir() string {
-	return defaultDataDir(testing.Testing())
-}
-
-func defaultDataDir(isTesting bool) string {
-	if isTesting {
-		return filepath.Join(os.TempDir(), "aerial-test-data")
-	}
-	return "/data"
 }
 
 func main() {

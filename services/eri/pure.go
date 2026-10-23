@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"testing"
 
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/transcript"
@@ -223,4 +226,36 @@ func buildSyncLLM(rawLLM runner.LLMFunc, lowEffortModel, defaultModel string) tr
 	return func(ctx context.Context, prompt string) (string, error) {
 		return rawLLM(ctx, model, prompt)
 	}
+}
+
+// DefaultGeminiHomeDir returns the production default base directory for .gemini files.
+func DefaultGeminiHomeDir() string {
+	return defaultGeminiHomeDirWithLookup(os.Getenv("HOME"), testing.Testing(), os.UserHomeDir)
+}
+
+func defaultGeminiHomeDirWithLookup(home string, isTesting bool, userHomeDirFn func() (string, error)) string {
+	if strings.TrimSpace(home) != "" {
+		return strings.TrimSpace(home)
+	}
+	if isTesting {
+		return filepath.Join(os.TempDir(), "aerial-test-gemini")
+	}
+	if userHomeDirFn != nil {
+		if h, err := userHomeDirFn(); err == nil && strings.TrimSpace(h) != "" {
+			return strings.TrimSpace(h)
+		}
+	}
+	return "/root"
+}
+
+// DefaultDataDir returns the production default base directory for persistent data.
+func DefaultDataDir() string {
+	return defaultDataDir(testing.Testing())
+}
+
+func defaultDataDir(isTesting bool) string {
+	if isTesting {
+		return filepath.Join(os.TempDir(), "aerial-test-data")
+	}
+	return "/data"
 }

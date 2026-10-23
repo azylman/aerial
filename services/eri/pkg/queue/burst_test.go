@@ -445,3 +445,79 @@ func TestEvaluateBurstStaleness(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractBurstEphemeral_TableDriven(t *testing.T) {
+	t.Parallel()
+	trueVal := true
+	falseVal := false
+	tests := []struct {
+		name          string
+		burst         []db.Message
+		wantEphemeral bool
+		wantExplicit  bool
+	}{
+		{"empty burst", nil, false, false},
+		{"no ephemeral metadata", []db.Message{{ID: "m1"}}, false, false},
+		{"explicit false at head", []db.Message{{ID: "m1", Metadata: db.MessageMetadata{Ephemeral: &falseVal}}}, false, true},
+		{"explicit true at head", []db.Message{{ID: "m1", Metadata: db.MessageMetadata{Ephemeral: &trueVal}}}, true, true},
+		{"explicit true in second message", []db.Message{
+			{ID: "m1"},
+			{ID: "m2", Metadata: db.MessageMetadata{Ephemeral: &trueVal}},
+		}, true, true},
+		{"explicit false precedes true", []db.Message{
+			{ID: "m1", Metadata: db.MessageMetadata{Ephemeral: &falseVal}},
+			{ID: "m2", Metadata: db.MessageMetadata{Ephemeral: &trueVal}},
+		}, false, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gotEphem, gotExplicit := extractBurstEphemeral(tc.burst)
+			if gotEphem != tc.wantEphemeral || gotExplicit != tc.wantExplicit {
+				t.Errorf("extractBurstEphemeral() = (%v, %v), want (%v, %v)", gotEphem, gotExplicit, tc.wantEphemeral, tc.wantExplicit)
+			}
+		})
+	}
+}
+
+func TestFormatSingleDiscordPrompt_Silent_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		silent       bool
+		wantContains string
+		wantExcludes string
+	}{
+		{
+			name:         "standard message delivers to discord",
+			silent:       false,
+			wantContains: "It will be delivered directly to Discord.",
+			wantExcludes: "This is a silent background turn",
+		},
+		{
+			name:         "silent message suppresses discord delivery",
+			silent:       true,
+			wantContains: "This is a silent background turn; your response will not be delivered to Discord.",
+			wantExcludes: "It will be delivered directly to Discord.",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := db.Message{
+				ID:        "msg-123",
+				ThreadID:  "thread-456",
+				Content:   "check cluster health",
+				Metadata:  db.MessageMetadata{Silent: tc.silent},
+				CreatedAt: time.Now(),
+			}
+			prompt := FormatSingleDiscordPrompt(m)
+			if !strings.Contains(prompt, tc.wantContains) {
+				t.Errorf("prompt missing %q:\n%s", tc.wantContains, prompt)
+			}
+			if strings.Contains(prompt, tc.wantExcludes) {
+				t.Errorf("prompt unexpectedly contained %q:\n%s", tc.wantExcludes, prompt)
+			}
+		})
+	}
+}

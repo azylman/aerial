@@ -74,6 +74,7 @@ type WorkerPoolConfig struct {
 	VoiceRunnerFunc             func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (reply string, convID string, err error)
 	VoiceStreamRunnerFunc       func(ctx context.Context, prompt, sessionID string, onStatus func(string), onSentence func(string)) (reply string, convID string, err error)
 	AmbientResolver             func(ctx context.Context, cfg *config.AmbientContextConfig) (string, error)
+	CreateThreadFunc            func(channelID, title string) (string, error)
 }
 
 type threadWorkerState struct {
@@ -98,6 +99,7 @@ type WorkerPool struct {
 	webhookDispatcher                                                            WebhookDispatcher
 	summaryGroup                                                                 singleflight.Group
 	processPool, lowEffortProcessPool, mediumEffortProcessPool, voiceProcessPool runner.AgentPool
+	createThreadFn                                                               func(channelID, title string) (string, error)
 }
 
 // SummaryGroup returns the singleflight.Group coordinating thread summarizations for this pool instance.
@@ -144,6 +146,37 @@ func makeSessionCallbacks(store db.Store) (func(context.Context, string) (runner
 		return store.RotateSessionID(ctx, targetKey, newSessionID)
 	}
 	return getRec, onRot
+}
+
+func wirePoolSessionDependencies(pools []runner.AgentPool, sessionMgr *session.Manager, store db.Store) {
+	var getRec func(context.Context, string) (runner.SessionRecord, error)
+	var onRot func(context.Context, string, string, string) error
+	if store != nil {
+		getRec, onRot = makeSessionCallbacks(store)
+	}
+
+	for _, pool := range pools {
+		if pool == nil {
+			continue
+		}
+		if sessionMgr != nil {
+			if tr, ok := pool.(interface {
+				SetTranscriptRescuer(func(string, time.Time) string)
+			}); ok {
+				tr.SetTranscriptRescuer(sessionMgr.ExtractResponseSince)
+			}
+			if sm, ok := pool.(interface{ SetSessionManager(*session.Manager) }); ok {
+				sm.SetSessionManager(sessionMgr)
+			}
+		}
+		if getRec != nil && onRot != nil {
+			if sc, ok := pool.(interface {
+				SetSessionCallbacks(func(context.Context, string) (runner.SessionRecord, error), func(context.Context, string, string, string) error)
+			}); ok {
+				sc.SetSessionCallbacks(getRec, onRot)
+			}
+		}
+	}
 }
 
 // New creates a new WorkerPool with pure *config.Config dependency injection.
@@ -241,7 +274,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		appCfg: appCfg, cfg: cfg, processPool: cfg.ProcessPool, lowEffortProcessPool: cfg.LowEffortProcessPool,
 		mediumEffortProcessPool: cfg.MediumEffortProcessPool, voiceProcessPool: cfg.VoiceProcessPool,
 		sessionMgr: sessMgr, threadChs: make(map[string]*threadWorkerState), ctx: ctx, cancel: cancel,
-		webhookDispatcher: cfg.WebhookDispatcher,
+		webhookDispatcher: cfg.WebhookDispatcher, createThreadFn: cfg.CreateThreadFunc,
 	}
 
 	if p.processPool == nil && isExplicitAppCfg {
@@ -267,30 +300,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		p.processPool = runner.NewUnifiedProcessPool(poolCfg, nil)
 	}
 
-	if p.sessionMgr != nil {
-		for _, pool := range []runner.AgentPool{p.processPool, p.lowEffortProcessPool, p.mediumEffortProcessPool} {
-			if pool == nil {
-				continue
-			}
-			if tr, ok := pool.(interface {
-				SetTranscriptRescuer(func(string, time.Time) string)
-			}); ok {
-				tr.SetTranscriptRescuer(p.sessionMgr.ExtractResponseSince)
-			}
-			if sm, ok := pool.(interface{ SetSessionManager(*session.Manager) }); ok {
-				sm.SetSessionManager(p.sessionMgr)
-			}
-		}
-	}
-
-	if store := p.Store(); store != nil {
-		getRec, onRot := makeSessionCallbacks(store)
-		if sc, ok := p.processPool.(interface {
-			SetSessionCallbacks(func(context.Context, string) (runner.SessionRecord, error), func(context.Context, string, string, string) error)
-		}); ok {
-			sc.SetSessionCallbacks(getRec, onRot)
-		}
-	}
+	wirePoolSessionDependencies([]runner.AgentPool{p.processPool, p.lowEffortProcessPool, p.mediumEffortProcessPool}, p.sessionMgr, p.Store())
 
 	if p.cfg.HistoryFetcher == nil {
 		p.cfg.HistoryFetcher = func(ctx context.Context, cID, beforeID string, limit int) ([]HistoryMessage, error) {

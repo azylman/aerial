@@ -227,9 +227,59 @@ func FormatSingleDiscordPrompt(m db.Message, tzOpt ...string) string {
 			ts = ts.In(loc)
 		}
 	}
-	fmt.Fprintf(&sb, "- timestamp: %s\n- mentions: %v\n- mention_user_ids: %v\n- mention_role_ids: %v\n- attachments: %v\n\nOnly formulate and output your final response once all immediate work is complete. It will be delivered directly to Discord.\n</USER_REQUEST>",
-		ts.Format(time.RFC3339), nonNilSlice(m.Metadata.Mentions), nonNilSlice(m.Metadata.MentionUserIDs), nonNilSlice(m.Metadata.MentionRoleIDs), nonNilSlice(m.Metadata.Attachments))
+	closingInstruction := "It will be delivered directly to Discord."
+	if m.Metadata.Silent {
+		closingInstruction = "This is a silent background turn; your response will not be delivered to Discord."
+	}
+	fmt.Fprintf(&sb, "- timestamp: %s\n- mentions: %v\n- mention_user_ids: %v\n- mention_role_ids: %v\n- attachments: %v\n\nOnly formulate and output your final response once all immediate work is complete. %s\n</USER_REQUEST>",
+		ts.Format(time.RFC3339), nonNilSlice(m.Metadata.Mentions), nonNilSlice(m.Metadata.MentionUserIDs), nonNilSlice(m.Metadata.MentionRoleIDs), nonNilSlice(m.Metadata.Attachments), closingInstruction)
 	return sb.String()
+}
+
+func extractBurstEphemeral(burst []db.Message) (bool, bool) {
+	for _, m := range burst {
+		if m.Metadata.Ephemeral != nil {
+			return *m.Metadata.Ephemeral, true
+		}
+	}
+	return false, false
+}
+
+func extractBurstModel(burst []db.Message) string {
+	for _, m := range burst {
+		if model := strings.TrimSpace(m.Metadata.Model); model != "" {
+			return model
+		}
+	}
+	return ""
+}
+
+func extractBurstSilent(burst []db.Message) bool {
+	if len(burst) == 0 {
+		return false
+	}
+	for _, m := range burst {
+		if !m.Metadata.Silent {
+			return false
+		}
+	}
+	return true
+}
+
+func resolveBurstEffort(burst []db.Message) string {
+	hasLow := false
+	for _, m := range burst {
+		switch resolveMessageEffort(m) {
+		case "medium":
+			return "medium"
+		case "low":
+			hasLow = true
+		}
+	}
+	if hasLow {
+		return "low"
+	}
+	return "high"
 }
 
 func nonNilSlice(s []string) []string {
