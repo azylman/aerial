@@ -44,8 +44,7 @@ job "haro" {
       }
 
       env {
-        CONFIG_PATH = "/secrets/haro.yaml"
-        GOCOVERDIR  = "/coverage"
+        GOCOVERDIR = "/coverage"
       }
 
       template {
@@ -60,7 +59,7 @@ job "haro" {
 {{- end -}}
 {{- end -}}
 EOH
-        destination = "secrets/haro.yaml"
+        destination = "local/config.yaml"
         change_mode = "restart"
       }
 
@@ -93,6 +92,12 @@ EOH
             ignore_warnings = false
           }
         }
+      }
+
+      service {
+        name     = "scheduler-mcp"
+        port     = "http"
+        provider = "nomad"
       }
 
       resources {
