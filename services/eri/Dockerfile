@@ -60,6 +60,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
     python3 \
     openssh-client \
+    postgresql-client \
     libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 
