@@ -68,7 +68,7 @@ func RunApp(ctx context.Context, cfg *Config) error {
 }
 
 var (
-	configPath = DefaultConfigPath
+	configPath = defaultConfigPath
 	runAppFn   = RunApp
 	exitFn     = log.Fatalf
 )

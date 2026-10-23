@@ -26,7 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       eri: ${{ steps.filter.outputs.eri }}
-      scheduler-mcp: ${{ steps.filter.outputs.scheduler-mcp }}
+      haro: ${{ steps.filter.outputs.haro }}
       coven: ${{ steps.filter.outputs.coven }}
       discord-mcp: ${{ steps.filter.outputs.discord-mcp }}
       docker-mcp: ${{ steps.filter.outputs.docker-mcp }}
@@ -50,8 +50,8 @@ jobs:
           filters: |
             eri:
               - 'services/eri/**'
-            scheduler-mcp:
-              - 'mcp/scheduler-mcp/**'
+            haro:
+              - 'services/haro/**'
             coven:
               - 'services/coven/**'
             discord-mcp:
@@ -85,7 +85,7 @@ jobs:
           node -e '
             const filter = {
               eri: "${{ steps.filter.outputs.eri }}",
-              "scheduler-mcp": "${{ steps.filter.outputs.scheduler-mcp }}",
+              haro: "${{ steps.filter.outputs.haro }}",
               coven: "${{ steps.filter.outputs.coven }}",
               "discord-mcp": "${{ steps.filter.outputs.discord-mcp }}",
               "docker-mcp": "${{ steps.filter.outputs.docker-mcp }}",
@@ -103,7 +103,7 @@ jobs:
 
             const catalog = [
               { service: "eri", context: ".", file: "./services/eri/Dockerfile", image_name: "aerial-eri" },
-              { service: "scheduler-mcp", context: "./mcp/scheduler-mcp", file: "./mcp/scheduler-mcp/Dockerfile", image_name: "aerial-scheduler-mcp" },
+              { service: "haro", context: "./services/haro", file: "./services/haro/Dockerfile", image_name: "aerial-haro" },
               { service: "coven", context: "./services/coven", file: "./services/coven/Dockerfile", image_name: "aerial-coven" },
               { service: "discord-mcp", context: "./mcp/discord-mcp", file: "./mcp/discord-mcp/Dockerfile", image_name: "aerial-discord-mcp" },
               { service: "docker-mcp", context: "./mcp/docker-mcp", file: "./mcp/docker-mcp/Dockerfile", image_name: "aerial-docker-mcp" },
@@ -252,25 +252,25 @@ jobs:
             exit 1
           fi
 
-      - name: Lint Scheduler MCP
-        if: needs.changes.outputs.scheduler-mcp == 'true'
+      - name: Lint Haro
+        if: needs.changes.outputs.haro == 'true'
         run: |
-          cd mcp/scheduler-mcp
-          golangci-lint run --path-prefix=mcp/scheduler-mcp/ ./...
+          cd services/haro
+          golangci-lint run --path-prefix=services/haro/ ./...
 
-      - name: Check Dead Code in Scheduler MCP
-        if: needs.changes.outputs.scheduler-mcp == 'true'
+      - name: Check Dead Code in Haro
+        if: needs.changes.outputs.haro == 'true'
         run: |
-          cd mcp/scheduler-mcp
+          cd services/haro
           DEAD_PROD=$(deadcode .)
           if [ -n "$DEAD_PROD" ]; then
-            echo "::error::Unreachable production code or compiled-in test hooks detected in scheduler-mcp:"
+            echo "::error::Unreachable production code or compiled-in test hooks detected in haro:"
             echo "$DEAD_PROD"
             exit 1
           fi
           DEAD=$(deadcode -test ./...)
           if [ -n "$DEAD" ]; then
-            echo "::error::Unreachable dead code detected in scheduler-mcp:"
+            echo "::error::Unreachable dead code detected in haro:"
             echo "$DEAD"
             exit 1
           fi

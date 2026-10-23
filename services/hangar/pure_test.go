@@ -1262,10 +1262,10 @@ func TestSortNomadChangesHangarLast_TableDriven(t *testing.T) {
 func TestSortMatchedJobsHangarLast_TableDriven(t *testing.T) {
 	matches := []MatchedNomadJob{
 		{JobName: "hangar", JobPath: "jobs/hangar.nomad"},
-		{JobName: "scheduler-mcp", JobPath: "jobs/scheduler-mcp.nomad"},
+		{JobName: "haro", JobPath: "jobs/haro.nomad"},
 	}
 	SortMatchedJobsHangarLast(matches)
-	if matches[0].JobName != "scheduler-mcp" || matches[1].JobName != "hangar" {
+	if matches[0].JobName != "haro" || matches[1].JobName != "hangar" {
 		t.Fatalf("unexpected order after SortMatchedJobsHangarLast: %+v", matches)
 	}
 }
@@ -1495,7 +1495,7 @@ func TestResolveExpectedDeployJobs_TableDriven(t *testing.T) {
 	writeJob(filepath.Join(configDir, "jobs", "eri.nomad"), `job "eri" { task "eri" { config { image = "ghcr.io/azylman/aerial-eri:${var.image_tag}" } } }`)
 
 	serviceMappings := []ServiceConfigMapping{
-		{RelPath: "services/mcp/scheduler-mcp.yaml", NomadVar: "nomad/jobs/scheduler-mcp", VarKey: "CONFIG_YAML"},
+		{RelPath: "services/haro/haro.yaml", NomadVar: "nomad/jobs/haro", VarKey: "CONFIG_YAML"},
 		{RelPath: "services/voice/voice.yaml", NomadVar: "nomad/jobs/orin-voice", VarKey: "CONFIG_YAML"},
 	}
 

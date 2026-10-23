@@ -3,7 +3,7 @@ variable "image_tag" {
   default = "latest"
 }
 
-job "scheduler-mcp" {
+job "haro" {
   datacenters = ["dc1"]
   type        = "service"
 
@@ -18,7 +18,7 @@ job "scheduler-mcp" {
     auto_revert       = true
   }
 
-  group "scheduler-mcp" {
+  group "haro" {
     count = 1
 
     network {
@@ -27,35 +27,40 @@ job "scheduler-mcp" {
       }
     }
 
-    task "scheduler-mcp" {
+    task "haro" {
       driver = "docker"
 
       config {
         dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
-        image        = "ghcr.io/azylman/aerial-scheduler-mcp:${var.image_tag}"
+        image        = "ghcr.io/azylman/aerial-haro:${var.image_tag}"
         ports        = ["http"]
         healthchecks {
           disable = true
         }
         volumes = [
-          "/mnt/data/supervisor/share/coverage/scheduler-mcp:/coverage:rw",
+          "/mnt/data/supervisor/share/coverage/haro:/coverage:rw",
         ]
       }
 
       env {
-        GOCOVERDIR = "/coverage"
+        CONFIG_PATH = "/secrets/haro.yaml"
+        GOCOVERDIR  = "/coverage"
       }
 
       template {
         data = <<EOH
-{{- if nomadVarExists "nomad/jobs/scheduler-mcp" -}}
+{{- if nomadVarExists "nomad/jobs/haro" -}}
+{{- with nomadVar "nomad/jobs/haro" -}}
+{{- if .CONFIG_YAML -}}{{- .CONFIG_YAML -}}{{- end -}}
+{{- end -}}
+{{- else if nomadVarExists "nomad/jobs/scheduler-mcp" -}}
 {{- with nomadVar "nomad/jobs/scheduler-mcp" -}}
 {{- if .CONFIG_YAML -}}{{- .CONFIG_YAML -}}{{- end -}}
 {{- end -}}
 {{- end -}}
 EOH
-        destination = "local/config.yaml"
+        destination = "secrets/haro.yaml"
         change_mode = "restart"
       }
 
@@ -72,12 +77,12 @@ EOH
       }
 
       service {
-        name     = "scheduler-mcp"
+        name     = "haro"
         port     = "http"
         provider = "nomad"
 
         check {
-          name     = "scheduler-mcp-health"
+          name     = "haro-health"
           type     = "http"
           path     = "/health"
           interval = "15s"

@@ -13,7 +13,7 @@ Write-Host "⚡ [Aerial Test Linux] Running Linux verification on Windows..." -F
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $normRepoRoot = $repoRoot.ToString().Replace('\', '/')
-$goServices = if ($Service) { @($Service) } else { @("services/eri", "mcp/scheduler-mcp", "mcp/discord-mcp", "services/dashboard", "services/hangar", "services/vanadis", "services/webhooks-router", "services/coven") }
+$goServices = if ($Service) { @($Service) } else { @("services/eri", "services/haro", "mcp/discord-mcp", "services/dashboard", "services/hangar", "services/vanadis", "services/webhooks-router", "services/coven") }
 
 # 1. Fast Docker Status Probe
 $hasDocker = if (Get-Command "docker" -ErrorAction SilentlyContinue) {

@@ -869,6 +869,7 @@ var CoreBuildPaths = []string{
 	"services/",
 	"mcp/",
 	"coven/",
+	"haro/",
 	"eri/",
 	"brain/",
 	"scheduler-mcp/",

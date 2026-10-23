@@ -1756,7 +1756,7 @@ type ServiceConfigMapping struct {
 // DefaultManagedServiceConfigs specifies the default built-in MCP and auxiliary service configs
 // synchronized into Nomad variables when not overridden by services/hangar/hangar.yaml.
 var DefaultManagedServiceConfigs = []ServiceConfigMapping{
-	{RelPath: "services/mcp/scheduler-mcp.yaml", NomadVar: "nomad/jobs/scheduler-mcp", VarKey: "CONFIG_YAML"},
+	{RelPath: "services/haro/haro.yaml", NomadVar: "nomad/jobs/haro", VarKey: "CONFIG_YAML"},
 	{RelPath: "services/mcp/docker-mcp.yaml", NomadVar: "nomad/jobs/docker-mcp", VarKey: "CONFIG_YAML"},
 	{RelPath: "services/mcp/github-mcp.yaml", NomadVar: "nomad/jobs/github-mcp", VarKey: "CONFIG_YAML"},
 	{RelPath: "services/mcp/nomad-mcp.yaml", NomadVar: "nomad/jobs/nomad-mcp", VarKey: "CONFIG_YAML"},

@@ -9,21 +9,31 @@ import (
 )
 
 // DefaultConfigPath is the canonical in-container configuration path.
-const DefaultConfigPath = "/config/config.yaml"
+const DefaultConfigPath = "/config/haro.yaml"
 
 // DefaultTimezone is the fallback timezone for tool invocations when unspecified in tool payload.
 const DefaultTimezone = "America/Los_Angeles"
 
-var localConfigPath = "/local/config.yaml"
+var (
+	defaultConfigPath = "/config/haro.yaml"
+	legacyConfigPath  = "/config/scheduler-mcp.yaml"
+	localConfigPath   = "/local/config.yaml"
+)
 
 // ResolveConfigPath returns the config file path, checking CONFIG_PATH env,
 // then /local/config.yaml (if size > 0), falling back to fallbackPath.
+// If fallbackPath does not exist and legacyConfigPath exists, it falls back to legacyConfigPath.
 func ResolveConfigPath(fallbackPath string) string {
 	if env := strings.TrimSpace(os.Getenv("CONFIG_PATH")); env != "" {
 		return env
 	}
 	if fi, err := os.Stat(localConfigPath); err == nil && fi.Size() > 0 {
 		return localConfigPath
+	}
+	if _, err := os.Stat(fallbackPath); os.IsNotExist(err) {
+		if _, err := os.Stat(legacyConfigPath); err == nil {
+			return legacyConfigPath
+		}
 	}
 	return fallbackPath
 }

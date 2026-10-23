@@ -371,6 +371,7 @@ func ExtractServiceNameFromJobName(jobName string) string {
 		"brain",
 		"dashboard",
 		"proxy",
+		"haro",
 		"scheduler-mcp",
 		"coven",
 		"memory-mcp",
