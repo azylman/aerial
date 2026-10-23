@@ -391,13 +391,16 @@ func calcDepth(root ast.Node, cur int) int {
 			return true
 		}
 		if ifStmt, ok := n.(*ast.IfStmt); ok {
-			maxD = max(maxD, calcDepth(ifStmt.Body, cur+1))
-			if ifStmt.Else != nil {
-				next := cur + 1
-				if _, isElseIf := ifStmt.Else.(*ast.IfStmt); isElseIf {
-					next = cur
+			for curIf := ifStmt; curIf != nil; {
+				maxD = max(maxD, calcDepth(curIf.Body, cur+1))
+				if nextIf, isElseIf := curIf.Else.(*ast.IfStmt); isElseIf {
+					curIf = nextIf
+					continue
 				}
-				maxD = max(maxD, calcDepth(ifStmt.Else, next))
+				if curIf.Else != nil {
+					maxD = max(maxD, calcDepth(curIf.Else, cur+1))
+				}
+				break
 			}
 			return false
 		}

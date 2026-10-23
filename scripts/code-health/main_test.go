@@ -34,16 +34,19 @@ func (b *Box[T]) MethodA(v int, ch chan int) int {
 			for range []int{1} {
 				switch v {
 				case 1:
-					select {
-					case <-ch:
-						if v > 0 && (v == 1 || v == 2) {
-							return 1
-						} else if v < 0 {
-							return -1
-						} else {
-							return 0
+					if v > 0 && (v == 1 || v == 2) {
+						return 1
+					} else if v < 0 {
+						if v == -2 {
+							return -2
 						}
-					default:
+						return -1
+					} else {
+						select {
+						case <-ch:
+							return 0
+						default:
+						}
 					}
 				default:
 				}

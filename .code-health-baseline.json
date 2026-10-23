@@ -10,10 +10,10 @@
       "lines": 1865
     },
     "services/hangar/main.go": {
-      "lines": 3232
+      "lines": 3203
     },
     "services/webhooks-router/main.go": {
-      "lines": 3619
+      "lines": 3608
     }
   },
   "functions": {
@@ -150,6 +150,9 @@
     },
     "services/eri/pkg/env/mcp.go::*Provisioner.LoadTargetMCPConfig": {
       "cc": 35
+    },
+    "services/eri/pkg/env/rules.go::*Provisioner.linkSharedSessionStorage": {
+      "depth": 6
     },
     "services/eri/pkg/env/skills.go::*Provisioner.LinkTargetSkills": {
       "cc": 21
@@ -323,8 +326,8 @@
       "depth": 6
     },
     "services/hangar/main.go::*SyncDaemon.ExecuteGitPushEvent": {
-      "lines": 231,
-      "cc": 44
+      "lines": 182,
+      "cc": 31
     },
     "services/hangar/main.go::*SyncDaemon.ExecuteImageReadyEvent": {
       "cc": 21
