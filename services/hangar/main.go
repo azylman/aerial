@@ -1079,7 +1079,7 @@ func (d *SyncDaemon) ReconcileNomadChanges(ctx context.Context, repoPath string,
 	recCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
-	_, _, err := d.applyNomadChangesDirectly(recCtx, repoPath, changes, false, true, nil, repo, commit, targetID, strconv.Itoa(prNumber))
+	_, _, err := d.applyNomadChangesDirectly(recCtx, repoPath, changes, false, true, false, nil, nil, repo, commit, targetID, strconv.Itoa(prNumber))
 	return err
 }
 
@@ -2266,63 +2266,83 @@ func (d *SyncDaemon) shouldDeferNomadJob(ctx context.Context, jobName, jobSpec s
 	return false
 }
 
-func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath string, changes []NomadFileChange, checkRepoBuilds, failOnJobErr bool, expectedJobs []string, meta ...string) (applied, deferred []string, err error) {
+func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath string, changes []NomadFileChange, checkRepoBuilds, failOnJobErr, containersBuilding bool, changedFiles, expectedJobs []string, meta ...string) (applied, deferred []string, err error) {
 	repo, commit, targetID, prNumber := parseNomadMeta(meta)
 
 	SortNomadChangesHangarLast(changes)
 
-	// Phase 1: Teardowns (stop deleted jobs)
+	type readyApply struct {
+		change   NomadFileChange
+		fullPath string
+	}
+	var readyApplies []readyApply
+	var deleteChanges []NomadFileChange
+
 	for _, ch := range changes {
 		if ch.Action == "delete" {
-			d.stopDeletedNomadJob(ctx, "[Hangar:Nomad]", repoPath, ch.JobName)
+			deleteChanges = append(deleteChanges, ch)
+			continue
+		}
+		fullPath := filepath.Join(repoPath, ch.Path)
+		if !IsSafeJobPath(repoPath, fullPath) {
+			continue
+		}
+		content, readErr := os.ReadFile(fullPath)
+		if readErr != nil {
+			log.Printf("[Hangar:Nomad] Notice: job file %s not found on disk, skipping", fullPath)
+			continue
+		}
+		jobSpec := string(content)
+		if (containersBuilding && JobHasContainerBuildChanges(jobSpec, changedFiles)) || d.shouldDeferNomadJob(ctx, ch.JobName, jobSpec, checkRepoBuilds) {
+			log.Printf("[Hangar:GitPush] Deferring Nomad job %s until container image is ready", ch.JobName)
+			deferred = append(deferred, ch.JobName)
+			continue
+		}
+		readyApplies = append(readyApplies, readyApply{change: ch, fullPath: fullPath})
+	}
+
+	// Phase 1: Teardowns (stop deleted jobs, or defer if core container build rollout is pending)
+	if len(deleteChanges) > 0 {
+		if !checkRepoBuilds && (containersBuilding || len(deferred) > 0) {
+			d.recordPendingNomadChanges(repoPath, deleteChanges, repo, commit, targetID, strconv.Itoa(prNumber))
+		} else {
+			for _, ch := range deleteChanges {
+				d.stopDeletedNomadJob(ctx, "[Hangar:Nomad]", repoPath, ch.JobName)
+			}
 		}
 	}
 
 	// Phase 2: Applications (validate, then run)
-	for _, ch := range changes {
-		if ch.Action != "delete" {
-			fullPath := filepath.Join(repoPath, ch.Path)
-			if !IsSafeJobPath(repoPath, fullPath) {
-				continue
+	for _, item := range readyApplies {
+		ch, fullPath := item.change, item.fullPath
+		if errVal := d.ValidateNomadJob(ctx, fullPath); errVal != nil {
+			log.Printf("[Hangar:Nomad] ERROR: Validation failed for %s: %v", ch.Path, errVal)
+			if failOnJobErr {
+				return applied, deferred, errVal
 			}
-			content, readErr := os.ReadFile(fullPath)
-			if readErr != nil {
-				log.Printf("[Hangar:Nomad] Notice: job file %s not found on disk, skipping", fullPath)
-				continue
-			}
-			if d.shouldDeferNomadJob(ctx, ch.JobName, string(content), checkRepoBuilds) {
-				deferred = append(deferred, ch.JobName)
-				continue
-			}
-			if errVal := d.ValidateNomadJob(ctx, fullPath); errVal != nil {
-				log.Printf("[Hangar:Nomad] ERROR: Validation failed for %s: %v", ch.Path, errVal)
-				if failOnJobErr {
-					return applied, deferred, errVal
-				}
-				continue
-			}
-
-			baseEvt := HangarDeployEvent{
-				JobName:      ch.JobName,
-				Repo:         repo,
-				CommitSHA:    commit,
-				PRNumber:     prNumber,
-				TargetID:     targetID,
-				ExpectedJobs: expectedJobs,
-			}
-
-			log.Printf("[Hangar:Nomad] Applying job %s (%s)...", ch.JobName, ch.Path)
-			out, sanitizedCombined, errRun := d.runNomadJobWithEvents(ctx, baseEvt, "job", "run", "-detach", fullPath)
-			if errRun != nil {
-				log.Printf("[Hangar:Nomad] nomad job run failed for %s: %s (%v)", ch.JobName, sanitizedCombined, errRun)
-				if failOnJobErr {
-					return applied, deferred, fmt.Errorf("nomad job run failed for %s: %s (%w)", ch.Path, sanitizedCombined, errRun)
-				}
-				continue
-			}
-			log.Printf("[Hangar:Nomad] Successfully applied job %s: %s", ch.JobName, SanitizeLog(strings.TrimSpace(string(out))))
-			applied = append(applied, ch.JobName)
+			continue
 		}
+
+		baseEvt := HangarDeployEvent{
+			JobName:      ch.JobName,
+			Repo:         repo,
+			CommitSHA:    commit,
+			PRNumber:     prNumber,
+			TargetID:     targetID,
+			ExpectedJobs: expectedJobs,
+		}
+
+		log.Printf("[Hangar:Nomad] Applying job %s (%s)...", ch.JobName, ch.Path)
+		out, sanitizedCombined, errRun := d.runNomadJobWithEvents(ctx, baseEvt, "job", "run", "-detach", fullPath)
+		if errRun != nil {
+			log.Printf("[Hangar:Nomad] nomad job run failed for %s: %s (%v)", ch.JobName, sanitizedCombined, errRun)
+			if failOnJobErr {
+				return applied, deferred, fmt.Errorf("nomad job run failed for %s: %s (%w)", ch.Path, sanitizedCombined, errRun)
+			}
+			continue
+		}
+		log.Printf("[Hangar:Nomad] Successfully applied job %s: %s", ch.JobName, SanitizeLog(strings.TrimSpace(string(out))))
+		applied = append(applied, ch.JobName)
 	}
 	return applied, deferred, nil
 }
@@ -2452,56 +2472,7 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 
 		if errNomad == nil && len(nomadChanges) > 0 {
 			resp.NomadChanged = true
-
-			type classifiedChange struct {
-				change   NomadFileChange
-				deferred bool
-			}
-			classified := make([]classifiedChange, 0, len(nomadChanges))
-			hasDeferredApply := false
-
-			for _, ch := range nomadChanges {
-				if ch.Action == "delete" {
-					classified = append(classified, classifiedChange{change: ch})
-					continue
-				}
-
-				fullPath := filepath.Join(repoPath, ch.Path)
-				deferred := false
-				if content, readErr := os.ReadFile(fullPath); readErr == nil {
-					jobSpec := string(content)
-					if (containersBuilding && JobHasContainerBuildChanges(jobSpec, changedFiles)) || d.shouldDeferNomadJob(ctx, ch.JobName, jobSpec, false) {
-						deferred = true
-					}
-				}
-				if deferred {
-					hasDeferredApply = true
-					resp.ContainersBuilding = true
-					log.Printf("[Hangar:GitPush] Deferring Nomad job %s until container image is ready", ch.JobName)
-				}
-				classified = append(classified, classifiedChange{change: ch, deferred: deferred})
-			}
-
-			var immediateChanges []NomadFileChange
-			var deferredDeletes []NomadFileChange
-			for _, item := range classified {
-				if item.change.Action == "delete" {
-					if hasDeferredApply || containersBuilding {
-						deferredDeletes = append(deferredDeletes, item.change)
-					} else {
-						immediateChanges = append(immediateChanges, item.change)
-					}
-				} else if !item.deferred {
-					immediateChanges = append(immediateChanges, item.change)
-				}
-			}
-
-			if len(deferredDeletes) > 0 {
-				resp.ContainersBuilding = true
-				d.recordPendingNomadChanges(repoPath, deferredDeletes, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
-			}
-
-			applied, deferred, errRec := d.applyNomadChangesDirectly(ctx, repoPath, immediateChanges, false, true, expectedJobs, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
+			applied, deferred, errRec := d.applyNomadChangesDirectly(ctx, repoPath, nomadChanges, false, true, containersBuilding, changedFiles, expectedJobs, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
 			resp.AppliedJobs = applied
 			if len(deferred) > 0 {
 				resp.ContainersBuilding = true
@@ -2535,7 +2506,7 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 
 		if len(nomadChanges) > 0 {
 			resp.NomadChanged = true
-			applied, deferred, errRec := d.applyNomadChangesDirectly(ctx, repoPath, nomadChanges, true, false, expectedJobs, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
+			applied, deferred, errRec := d.applyNomadChangesDirectly(ctx, repoPath, nomadChanges, true, false, false, nil, expectedJobs, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
 			if errRec != nil {
 				log.Printf("[Hangar:GitPush] Notice: applyNomadChangesDirectly notice: %v", errRec)
 			}
