@@ -145,6 +145,8 @@ DISCORD_TOKEN="{{ .DISCORD_BOT_TOKEN }}"{{ end }}
 {{ else if .GEMINI_HARNESS_API_KEY }}AGY_GEMINI_API_KEY="{{ .GEMINI_HARNESS_API_KEY }}"{{ end }}
 {{ if .POSTGRES_PASSWORD }}DATABASE_URL="postgres://aerial:{{ .POSTGRES_PASSWORD }}@postgres:5432/aerial?sslmode=disable"{{ end }}
 {{ if .OPENOBSERVE_ROOT_USER_PASSWORD }}OPENOBSERVE_ROOT_USER_PASSWORD="{{ .OPENOBSERVE_ROOT_USER_PASSWORD }}"{{ end }}
+{{ if .UNIFI_PASS }}UNIFI_PASS="{{ .UNIFI_PASS }}"
+UNIFI_PASSWORD="{{ .UNIFI_PASS }}"{{ end }}
 {{ end }}
 {{ end }}
 EOH
