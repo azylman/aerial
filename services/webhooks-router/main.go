@@ -488,6 +488,8 @@ type PRRegistryUpdater interface {
 	FailVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (bool, error)
 	IncrementCIFailCount(ctx context.Context, repo string, prNumber int) (int, error)
 	EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID, vanadisChunkID string, jobs []string) (string, error)
+	RecordExpectedJobs(ctx context.Context, repo string, prNumber int, jobs []string) (bool, error)
+	HasExpectedDeployJobs(ctx context.Context, repo string, prNumber int) (bool, error)
 }
 
 // ChannelMessageContext holds historical conversation snippets for prompt enrichment.
@@ -768,12 +770,62 @@ func (r *PostgresPRRegistry) TransitionDeploying(ctx context.Context, repo strin
 	query := `
 		UPDATE pr_registry
 		SET status = 'deploying',
-			metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{jobs}', (SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb) FROM jsonb_array_elements(COALESCE(metadata->'jobs', '[]'::jsonb) || to_jsonb($3::text[])) AS elem WHERE NOT (COALESCE(metadata->'deployed_jobs', '[]'::jsonb) @> jsonb_build_array(elem)))),
+			metadata = jsonb_set(
+				jsonb_set(COALESCE(metadata, '{}'::jsonb), '{jobs}', (SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb) FROM jsonb_array_elements(COALESCE(metadata->'jobs', '[]'::jsonb) || to_jsonb($3::text[])) AS elem WHERE NOT (COALESCE(metadata->'deployed_jobs', '[]'::jsonb) @> jsonb_build_array(elem)))),
+				'{started_jobs}',
+				(SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb) FROM jsonb_array_elements(COALESCE(metadata->'started_jobs', '[]'::jsonb) || to_jsonb($3::text[])) AS elem)
+			),
 			updated_at = CURRENT_TIMESTAMP
 		WHERE repo = $1 AND pr_number = $2 AND status NOT IN ('closed', 'conflict')
 		  AND EXISTS (SELECT 1 FROM jsonb_array_elements(to_jsonb($3::text[])) AS req_elem WHERE NOT (COALESCE(metadata->'deployed_jobs', '[]'::jsonb) @> jsonb_build_array(req_elem)))
 		RETURNING target_id;`
 	return r.execReturningTargetID(ctx, repo, prNumber, "transition deploying", query, cleanJobs)
+}
+
+func (r *PostgresPRRegistry) RecordExpectedJobs(ctx context.Context, repo string, prNumber int, jobs []string) (bool, error) {
+	repo = normalizeRepo(repo)
+	cleanJobs := dedupeTrimmedStrings(jobs)
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
+		return false, nil
+	}
+	if len(cleanJobs) == 0 {
+		return r.HasExpectedDeployJobs(ctx, repo, prNumber)
+	}
+	query := `
+		UPDATE pr_registry
+		SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{jobs}', (SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb) FROM jsonb_array_elements(COALESCE(metadata->'jobs', '[]'::jsonb) || to_jsonb($3::text[])) AS elem WHERE NOT (COALESCE(metadata->'deployed_jobs', '[]'::jsonb) @> jsonb_build_array(elem)))),
+			updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $1 AND pr_number = $2 AND status NOT IN ('closed', 'conflict')
+		RETURNING TRUE;`
+	var hasExpected bool
+	found, err := r.queryRowScan(ctx, "record expected jobs", query, []any{&hasExpected}, repo, prNumber, cleanJobs)
+	if err != nil || !found {
+		return false, err
+	}
+	return hasExpected, nil
+}
+
+func (r *PostgresPRRegistry) HasExpectedDeployJobs(ctx context.Context, repo string, prNumber int) (bool, error) {
+	repo = normalizeRepo(repo)
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
+		return false, nil
+	}
+	query := `
+		SELECT (
+			CASE WHEN jsonb_typeof(metadata->'jobs') = 'array' THEN jsonb_array_length(metadata->'jobs') ELSE 0 END > 0
+			OR CASE WHEN jsonb_typeof(metadata->'deployed_jobs') = 'array' THEN jsonb_array_length(metadata->'deployed_jobs') ELSE 0 END > 0
+			OR COALESCE(metadata->>'job', '') != ''
+			OR status IN ('deploying', 'deployed')
+		)
+		FROM pr_registry
+		WHERE repo = $1 AND pr_number = $2
+		LIMIT 1;`
+	var hasExpected bool
+	found, err := r.queryRowScan(ctx, "has expected deploy jobs", query, []any{&hasExpected}, repo, prNumber)
+	if err != nil || !found {
+		return false, err
+	}
+	return hasExpected, nil
 }
 
 func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, jobName string) (string, int, string, string, bool, error) {
@@ -1628,6 +1680,7 @@ func (s *RouterServer) handleGenericWebhook(w http.ResponseWriter, r *http.Reque
 type HangarDeployEvent struct {
 	Event        string    `json:"event"`                   // "deploy_started", "deploy_success", "deploy_failed", "deploy_rollback"
 	JobName      string    `json:"job_name"`                // Nomad job name (e.g. "webhooks-router", "brain")
+	ExpectedJobs []string  `json:"expected_jobs,omitempty"` // All Nomad jobs expected to deploy for this PR/sync
 	Repo         string    `json:"repo,omitempty"`          // repository name (e.g. "azylman/aerial", "azylman/aerial-config")
 	CommitSHA    string    `json:"commit_sha,omitempty"`    // git commit SHA (head or merge commit)
 	PRNumber     int       `json:"pr_number,omitempty"`     // PR number if known
@@ -1913,7 +1966,7 @@ func (s *RouterServer) syncSinglePRWidget(qCtx context.Context, pgReg *PostgresP
 	}
 
 	finalStatus := prStatus
-	if statusOverride != "" {
+	if statusOverride != "" && !(statusOverride == "merged" && (prStatus == "deploying" || prStatus == "deployed")) {
 		if prStatus != statusOverride {
 			prUpdatedAt = time.Now().UTC()
 		}
@@ -2054,15 +2107,23 @@ func formatVanadisBuildCompletedPrompt(res *VanadisAdvancementResult) string {
 }
 
 func (s *RouterServer) advanceVanadisChunk(ctx context.Context, repo string, prNumber int) error {
+	_, err := s.advanceVanadisChunkWithStatus(ctx, repo, prNumber, "merged")
+	return err
+}
+
+func (s *RouterServer) advanceVanadisChunkWithStatus(ctx context.Context, repo string, prNumber int, widgetStatus string) (bool, error) {
 	if s.registry == nil || prNumber <= 0 {
-		return nil
+		return false, nil
 	}
 	res, err := s.registry.AdvanceVanadisChunkByPR(ctx, repo, prNumber)
 	if err != nil {
-		return err
+		return false, err
 	}
-	if res == nil || !res.Matched || !res.Advanced {
-		return nil
+	if res == nil || !res.Matched {
+		return false, nil
+	}
+	if !res.Advanced {
+		return true, nil
 	}
 	if !res.BuildCompleted && res.NextChunkIndex >= 0 {
 		if s.riverClient != nil {
@@ -2070,22 +2131,25 @@ func (s *RouterServer) advanceVanadisChunk(ctx context.Context, repo string, prN
 				BuildID:    res.BuildID,
 				ChunkIndex: res.NextChunkIndex,
 			}); err != nil {
-				return fmt.Errorf("enqueue next vanadis chunk %d for build %s: %w", res.NextChunkIndex, res.BuildID, err)
+				return true, fmt.Errorf("enqueue next vanadis chunk %d for build %s: %w", res.NextChunkIndex, res.BuildID, err)
 			}
 		}
-		if err := s.SyncPRWidget(ctx, repo, prNumber, "merged", "", nil); err != nil {
+		if widgetStatus == "" {
+			widgetStatus = "merged"
+		}
+		if err := s.SyncPRWidget(ctx, repo, prNumber, widgetStatus, "", nil); err != nil {
 			log.Printf("[webhooks-router] [vanadis] warning syncing chunk advancement widget for build %s: %v", res.BuildID, err)
 		}
-		return nil
+		return true, nil
 	}
 	if res.BuildCompleted {
 		if err := s.SyncPRWidget(ctx, repo, prNumber, "completed", "", nil); err != nil {
 			log.Printf("[webhooks-router] [vanadis] warning syncing build completed widget for build %s: %v", res.BuildID, err)
 		}
 		prompt := formatVanadisBuildCompletedPrompt(res)
-		return s.dispatchAlertWithPrompt(ctx, res.ThreadID, "vanadis_build_completed", "", prompt)
+		return true, s.dispatchAlertWithPrompt(ctx, res.ThreadID, "vanadis_build_completed", "", prompt)
 	}
-	return nil
+	return true, nil
 }
 
 func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployEvent) (*HangarDeployEvent, error) {
@@ -2108,6 +2172,11 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 		evt.Event, evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA, evt.Status, evt.TargetID, evt.DeploymentID, evt.Details)
 
 	if s.registry != nil && evt.PRNumber > 0 && evt.Event == "deploy_started" && evt.JobName != "" {
+		if len(evt.ExpectedJobs) > 0 {
+			if _, err := s.registry.RecordExpectedJobs(ctx, evt.Repo, evt.PRNumber, evt.ExpectedJobs); err != nil {
+				log.Printf("[webhooks-router] [registry] warning recording expected jobs on deploy_started for %s#%d: %v", evt.Repo, evt.PRNumber, err)
+			}
+		}
 		if tID, err := s.registry.TransitionDeploying(ctx, evt.Repo, evt.PRNumber, []string{evt.JobName}); err != nil {
 			log.Printf("[webhooks-router] [registry] warning transitioning pr %s#%d to deploying for job %s: %v", evt.Repo, evt.PRNumber, evt.JobName, err)
 		} else if tID == "" {
@@ -2121,8 +2190,20 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 		}
 	}
 
+	var syncHasExpected bool
+	if evt.Event == "sync_success" && evt.PRNumber > 0 {
+		syncHasExpected = len(dedupeTrimmedStrings(evt.ExpectedJobs)) > 0
+		if s.registry != nil {
+			if regHasExpected, err := s.registry.RecordExpectedJobs(ctx, evt.Repo, evt.PRNumber, evt.ExpectedJobs); err != nil {
+				log.Printf("[webhooks-router] [registry] warning recording expected jobs on sync_success for %s#%d: %v", evt.Repo, evt.PRNumber, err)
+			} else {
+				syncHasExpected = syncHasExpected || regHasExpected
+			}
+		}
+	}
+
 	if !IsValidDiscordSnowflake(evt.TargetID) || s.dispatcher == nil {
-		if evt.Event == "sync_success" && evt.PRNumber > 0 {
+		if evt.Event == "sync_success" && evt.PRNumber > 0 && !syncHasExpected {
 			return &evt, s.advanceVanadisChunk(ctx, evt.Repo, evt.PRNumber)
 		}
 		return &evt, nil
@@ -2169,7 +2250,7 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 		)
 		return &evt, s.dispatchAlertWithPrompt(ctx, targetID, evt.Event, dmMsg, prompt, s.vanadisPromptOpts(ctx, evt.Repo, evt.PRNumber))
 	case "sync_success":
-		if evt.PRNumber > 0 {
+		if evt.PRNumber > 0 && !syncHasExpected {
 			if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber, "merged", "", nil); err != nil {
 				log.Printf("[webhooks-router] [widget] warning syncing sync_success widget: %v", err)
 			}
@@ -2266,13 +2347,19 @@ func (s *RouterServer) dispatchDeploymentSuccessPrompt(ctx context.Context, targ
 		return nil
 	}
 
+	var vanadisMatched bool
 	if prNum > 0 {
 		if err := s.SyncPRWidget(ctx, repo, prNum, "deployed", "", nil); err != nil {
 			log.Printf("[webhooks-router] [widget] warning syncing deploy_success widget: %v", err)
 		}
+		var err error
+		vanadisMatched, err = s.advanceVanadisChunkWithStatus(ctx, repo, prNum, "deployed")
+		if err != nil {
+			return err
+		}
 	}
 
-	if s.isVanadisPR(ctx, repo, prNum) {
+	if vanadisMatched || s.isVanadisPR(ctx, repo, prNum) {
 		log.Printf("[webhooks-router] [vanadis] suppressing mid-run deploy_success /prompt wake for %s#%d (job=%s)", repo, prNum, jobName)
 		return nil
 	}
@@ -3013,12 +3100,18 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 						return nil, err
 					}
 					res.TargetID = firstNonEmpty(res.TargetID, targetID)
-					if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber, "merged", "", nil); err != nil {
-						log.Printf("[webhooks-router] [widget] warning syncing pr_merged widget for %s#%d: %v", res.Repo, res.PRNumber, err)
+					hasExpected, err := s.registry.HasExpectedDeployJobs(ctx, res.Repo, res.PRNumber)
+					if err != nil {
+						log.Printf("[webhooks-router] [registry] warning checking expected deploy jobs for %s#%d: %v", res.Repo, res.PRNumber, err)
 					}
-					if !isHangarSyncedRepo(res.Repo) {
-						if err := s.advanceVanadisChunk(ctx, res.Repo, res.PRNumber); err != nil {
-							return nil, err
+					if !hasExpected {
+						if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber, "merged", "", nil); err != nil {
+							log.Printf("[webhooks-router] [widget] warning syncing pr_merged widget for %s#%d: %v", res.Repo, res.PRNumber, err)
+						}
+						if !isHangarSyncedRepo(res.Repo) {
+							if err := s.advanceVanadisChunk(ctx, res.Repo, res.PRNumber); err != nil {
+								return nil, err
+							}
 						}
 					}
 				} else {
@@ -3176,8 +3269,18 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 			return nil, err
 		}
 		if res.PRNumber > 0 && !isHangarSyncedRepo(res.Repo) {
-			if err := s.advanceVanadisChunk(ctx, res.Repo, res.PRNumber); err != nil {
-				return nil, err
+			var hasExpected bool
+			if s.registry != nil {
+				var err error
+				hasExpected, err = s.registry.HasExpectedDeployJobs(ctx, res.Repo, res.PRNumber)
+				if err != nil {
+					log.Printf("[webhooks-router] [registry] warning checking expected deploy jobs on push for %s#%d: %v", res.Repo, res.PRNumber, err)
+				}
+			}
+			if !hasExpected {
+				if err := s.advanceVanadisChunk(ctx, res.Repo, res.PRNumber); err != nil {
+					return nil, err
+				}
 			}
 		}
 		if s.conflictCheckDelay > 0 {

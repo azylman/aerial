@@ -50,6 +50,62 @@ func TestExtractJobsFromMetadata_TableDriven(t *testing.T) {
 	}
 }
 
+func TestExtractStartedJobsFromMetadata_TableDriven(t *testing.T) {
+	startedTests := []struct {
+		name     string
+		metadata map[string]interface{}
+		expected []string
+	}{
+		{name: "nil metadata", metadata: nil, expected: nil},
+		{name: "legacy metadata without started_jobs falls back to jobs", metadata: map[string]interface{}{"jobs": []interface{}{"coven", "db-migrate"}}, expected: []string{"coven", "db-migrate"}},
+		{name: "started_jobs filters out unstarted sibling job", metadata: map[string]interface{}{"jobs": []interface{}{"coven", "db-migrate"}, "started_jobs": []interface{}{"db-migrate"}}, expected: []string{"db-migrate"}},
+		{name: "empty started_jobs returns nil", metadata: map[string]interface{}{"jobs": []interface{}{"coven"}, "started_jobs": []interface{}{}}, expected: nil},
+	}
+	for _, tt := range startedTests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractStartedJobsFromMetadata(tt.metadata)
+			if !reflect.DeepEqual(got, tt.expected) {
+				t.Errorf("extractStartedJobsFromMetadata() = %v, want %v", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestHasNonTransientPlacementFailure_TableDriven(t *testing.T) {
+	placementTests := []struct {
+		name     string
+		failedTG map[string]interface{}
+		queued   map[string]int
+		desc     string
+		want     bool
+		wantDesc string
+	}{
+		{name: "empty failedTG", failedTG: nil, desc: "only desc", want: false, wantDesc: "only desc"},
+		{name: "queued task group skipped", failedTG: map[string]interface{}{"tg": map[string]interface{}{"NodesExhausted": 1}}, queued: map[string]int{"tg": 1}, want: false},
+		{name: "non-map rawMetrics returns true", failedTG: map[string]interface{}{"tg": 1}, desc: "", want: true, wantDesc: "failed task group allocations:"},
+		{name: "NodesAvailable zero returns true", failedTG: map[string]interface{}{"tg": map[string]interface{}{"NodesAvailable": map[string]interface{}{"dc1": float64(0)}}}, desc: "no nodes", want: true, wantDesc: "no nodes (failed task group allocations:"},
+		{name: "NodesAvailable positive and transient port collision returns false", failedTG: map[string]interface{}{"tg": map[string]interface{}{"NodesAvailable": map[string]interface{}{"dc1": float64(1)}, "DimensionExhausted": map[string]interface{}{"network: port collision": float64(1)}}}, want: false},
+		{name: "NodesExhausted positive returns true", failedTG: map[string]interface{}{"tg": map[string]interface{}{"NodesExhausted": float64(1)}}, want: true},
+		{name: "ConstraintFiltered map positive returns true", failedTG: map[string]interface{}{"tg": map[string]interface{}{"ConstraintFiltered": map[string]interface{}{"missing drivers": float64(1)}}}, want: true},
+		{name: "ConstraintFiltered int positive returns true", failedTG: map[string]interface{}{"tg": map[string]interface{}{"ConstraintFiltered": 1}}, want: true},
+		{name: "QuotaExhausted slice non-empty returns true", failedTG: map[string]interface{}{"tg": map[string]interface{}{"QuotaExhausted": []interface{}{"default"}}}, want: true},
+		{name: "DimensionExhausted memory returns true", failedTG: map[string]interface{}{"tg": map[string]interface{}{"DimensionExhausted": map[string]interface{}{"memory": float64(1)}}}, want: true},
+		{name: "AllocationResourceExhausted without DimensionExhausted returns true", failedTG: map[string]interface{}{"tg": map[string]interface{}{"AllocationResourceExhausted": float64(1)}}, want: true},
+	}
+	for _, tt := range placementTests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasNonTransientPlacementFailure(tt.failedTG, tt.queued); got != tt.want {
+				t.Errorf("hasNonTransientPlacementFailure() = %v, want %v", got, tt.want)
+			}
+			if tt.wantDesc != "" {
+				if gotDesc := formatFailedTGAllocs(tt.desc, tt.failedTG); !strings.Contains(gotDesc, tt.wantDesc) {
+					t.Errorf("formatFailedTGAllocs() = %q, want substring %q", gotDesc, tt.wantDesc)
+				}
+			}
+		})
+	}
+}
+
 func TestNomadStreamSubscriber_Events(t *testing.T) {
 	defaultHealthyDeploys := `[{"ID":"dep-1","Status":"successful"}]`
 	defaultHealthyAllocs := `[{"ID":"alloc-999","DesiredStatus":"run","ClientStatus":"running"}]`
@@ -263,6 +319,25 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 			wantPrompts:      1,
 			wantPromptSubstr: []string{"Continuous Delivery deployment completed for job coverage-ingest", "ref: job-registered-851"},
 		},
+		{
+			name:             "one-shot batch allocation complete dispatches success",
+			streamLines:      []string{`{"Index":2061,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":{"Allocation":{"ID":"alloc-migrate-1","JobID":"db-migrate","DesiredStatus":"run","ClientStatus":"complete","TaskStates":{"migrate":{"State":"dead","Failed":false}}}}}]}`},
+			allocationsJSON:  `[{"ID":"alloc-migrate-1","JobID":"db-migrate","DesiredStatus":"run","ClientStatus":"complete","JobVersion":2}]`,
+			jobSpecJSON:      `{"ID":"db-migrate","Type":"batch","Status":"dead","Version":2,"Stop":false}`,
+			reg:              mkDeployedReg(validThread, 971, validSHA, validRepo, true),
+			wantDeployedJobs: []string{"db-migrate"},
+			wantPrompts:      1,
+			wantPromptSubstr: []string{"Continuous Delivery deployment completed for job db-migrate", "ref: alloc-migrate-1"},
+		},
+		{
+			name:             "evaluation blocked with non-transient memory exhaustion dispatches failure immediately",
+			streamLines:      []string{`{"Index":2062,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"ID":"eval-blocked-mem","JobID":"coven","Status":"blocked","StatusDescription":"created to place remaining allocations","FailedTGAllocs":{"coven":{"NodesExhausted":1,"DimensionExhausted":{"memory":1}}},"QueuedAllocations":{"coven":0}}}}]}`},
+			reg:              mkDeployFailedReg(validThread, 971, validSHA, validRepo, true),
+			wantFailedJobs:   []string{"coven"},
+			wantPrompts:      1,
+			wantPromptSubstr: []string{`failed with status "blocked"`, "memory"},
+			wantDMs:          1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -357,6 +432,8 @@ func TestProcessNomadEvent_TableDriven(t *testing.T) {
 		{name: "PlanResult dropped", topic: "Allocation", eventType: "PlanResult", payload: `{"Allocation":{"ID":"alloc-1","JobID":"github-mcp","ClientStatus":"failed"}}`},
 		{name: "blocked evaluation returns nil", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"ID":"eval-blocked-direct","JobID":"hangar","Status":"blocked","StatusDescription":"created to place remaining allocations"}}`},
 		{name: "blocked evaluation with FailedTGAllocs returns nil", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"ID":"eval-blocked-direct","JobID":"webhooks-router","Status":"blocked","StatusDescription":"created to place remaining allocations","FailedTGAllocs":{"webhooks-router":{"DimensionExhausted":{"network: port collision":1}}},"QueuedAllocations":{"webhooks-router":0}}}`},
+		{name: "blocked evaluation with non-transient placement failure dispatches failure", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"ID":"eval-blocked-nontransient","JobID":"coven","Status":"blocked","StatusDescription":"created to place remaining allocations","FailedTGAllocs":{"coven":{"ConstraintFiltered":{"missing drivers":1}}},"QueuedAllocations":{"coven":0}}}`, reg: mkDeployFailedReg("target-1", 100, "sha1", "repo", true)},
+		{name: "allocation complete with failed task state ignored", topic: "Allocation", eventType: "AllocationUpdated", payload: `{"Allocation":{"ID":"alloc-comp-failed","JobID":"db-migrate","DesiredStatus":"run","ClientStatus":"complete","TaskStates":{"migrate":{"State":"dead","Failed":true}}}}`},
 		{name: "blocked evaluation with queued failed allocs returns nil", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"BlockedEval":"b-1","JobID":"webhooks-router","FailedTGAllocs":{"tg":1},"QueuedAllocations":{"tg":1}}}`},
 		{name: "evaluation with all failed groups queued returns nil", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"JobID":"webhooks-router","FailedTGAllocs":{"tg":1},"QueuedAllocations":{"tg":1}}}`},
 		{name: "evaluation with unqueued failed group and empty desc dispatches failure", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"ID":"eval-fail-unqueued","JobID":"brain","StatusDescription":"","FailedTGAllocs":{"tg":1},"QueuedAllocations":{"tg":0}}}`, reg: mkDeployFailedReg("target-1", 100, "sha1", "repo", true)},
@@ -419,6 +496,21 @@ func TestRouterServer_ReconcileActiveDeployments_StartupSweep(t *testing.T) {
 				return r
 			}(),
 			allocsJSON:       `[{"ID":"alloc-old","JobID":"webhooks-router","DesiredStatus":"stop","ClientStatus":"complete"},{"ID":"alloc-new","JobID":"webhooks-router","DesiredStatus":"run","ClientStatus":"running"}]`,
+			wantDeployedJobs: []string{"webhooks-router"},
+		},
+		{
+			name: "startup sweep with started_jobs skips unstarted sibling job",
+			reg: func() PRRegistryUpdater {
+				r := mkDeployedReg("1555405874565091380", 971, "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092", "azylman/aerial", true)
+				r.listDeployingPRs = []DeployingPR{
+					{
+						ID: 102, Repo: "azylman/aerial", PRNumber: 971, MergeSHA: "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092", TargetID: "1555405874565091380",
+						Metadata: map[string]interface{}{"jobs": []interface{}{"coven", "webhooks-router"}, "started_jobs": []interface{}{"webhooks-router"}},
+					},
+				}
+				return r
+			}(),
+			allocsJSON:       `[{"ID":"alloc-new","JobID":"webhooks-router","DesiredStatus":"run","ClientStatus":"running"}]`,
 			wantDeployedJobs: []string{"webhooks-router"},
 		},
 		{name: "nil registry returns nil", reg: nil},
@@ -537,6 +629,10 @@ func TestRouterServer_IsNomadJobHealthy_TableDriven(t *testing.T) {
 		{name: "periodic batch job with actively failing allocation is unhealthy", job: "coverage-ingest", deploysJSON: `[]`, allocs: `[{"ID":"a1","DesiredStatus":"run","ClientStatus":"failed"}]`, jobSpec: `{"ID":"coverage-ingest","Type":"batch","Status":"running","Stop":false,"Periodic":{"Enabled":true}}`, jobStatus: http.StatusOK, wantHealthy: false},
 		{name: "parameterized batch job with 0 allocations running is healthy", job: "batch-worker", deploysJSON: `[]`, allocs: `[]`, jobSpec: `{"ID":"batch-worker","Type":"batch","Status":"running","Stop":false,"Periodic":null,"ParameterizedJob":{"Payload":"optional"}}`, jobStatus: http.StatusOK, wantHealthy: true},
 		{name: "non-periodic batch job with 0 allocations is unhealthy", job: "migrate", deploysJSON: `[]`, allocs: `[]`, jobSpec: `{"ID":"migrate","Type":"batch","Status":"running","Stop":false,"Periodic":null,"ParameterizedJob":null}`, jobStatus: http.StatusOK, wantHealthy: false},
+		{name: "one-shot batch job with running allocation is unhealthy", job: "db-migrate", deploysJSON: `[]`, allocs: `[{"ID":"a1","DesiredStatus":"run","ClientStatus":"running","JobVersion":2}]`, jobSpec: `{"ID":"db-migrate","Type":"batch","Status":"running","Version":2,"Stop":false}`, jobStatus: http.StatusOK, wantHealthy: false},
+		{name: "one-shot batch job with complete allocation at current version and older failed version is healthy", job: "db-migrate", deploysJSON: `[]`, allocs: `[{"ID":"a0","DesiredStatus":"run","ClientStatus":"failed","JobVersion":1},{"ID":"a1","DesiredStatus":"run","ClientStatus":"complete","JobVersion":2}]`, jobSpec: `{"ID":"db-migrate","Type":"batch","Status":"dead","Version":2,"Stop":false}`, jobStatus: http.StatusOK, wantHealthy: true},
+		{name: "one-shot batch job with pending job status is unhealthy", job: "db-migrate", deploysJSON: `[]`, allocs: `[{"ID":"a1","DesiredStatus":"run","ClientStatus":"complete","JobVersion":1}]`, jobSpec: `{"ID":"db-migrate","Type":"batch","Status":"pending","Version":2,"Stop":false}`, jobStatus: http.StatusOK, wantHealthy: false},
+		{name: "one-shot batch job with Stop=true is unhealthy", job: "db-migrate", deploysJSON: `[]`, allocs: `[{"ID":"a1","DesiredStatus":"run","ClientStatus":"complete","JobVersion":2}]`, jobSpec: `{"ID":"db-migrate","Type":"batch","Status":"dead","Version":2,"Stop":true}`, jobStatus: http.StatusOK, wantHealthy: false},
 		{name: "stopped periodic batch job is unhealthy", job: "coverage-ingest", deploysJSON: `[]`, allocs: `[]`, jobSpec: `{"ID":"coverage-ingest","Type":"batch","Status":"dead","Stop":true,"Periodic":{"Enabled":true}}`, jobStatus: http.StatusOK, wantHealthy: false},
 		{name: "disabled periodic batch job is unhealthy", job: "coverage-ingest", deploysJSON: `[]`, allocs: `[]`, jobSpec: `{"ID":"coverage-ingest","Type":"batch","Status":"running","Stop":false,"Periodic":{"Enabled":false}}`, jobStatus: http.StatusOK, wantHealthy: false},
 		{name: "batch job spec API 500 error is unhealthy", job: "coverage-ingest", deploysJSON: `[]`, allocs: `[]`, jobStatus: http.StatusInternalServerError, wantHealthy: false},
@@ -588,11 +684,13 @@ func TestNomadStreamSubscriber_RiverQueue(t *testing.T) {
 				`{"Index":2005,"Events":[{"Topic":"Deployment","Type":"DeploymentStatusUpdate","Payload":{"Deployment":{"ID":"dep-fail","JobID":"discord-mcp","Status":"failed","StatusDescription":"oom"}}}]}`,
 				`{"Index":2010,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":{"Allocation":{"ID":"alloc-dead-1","JobID":"brain","DesiredStatus":"stop","ClientStatus":"failed"}}}]}`,
 				`{"Index":2011,"Events":[{"Topic":"Job","Type":"JobRegistered","Payload":{"Job":{"ID":"coverage-ingest","ModifyIndex":42}}}]}`,
+				`{"Index":2012,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":{"Allocation":{"ID":"alloc-run","JobID":"scheduler-mcp","DesiredStatus":"run","ClientStatus":"complete"}}}]}`,
+				`{"Index":2013,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"ID":"eval-blk-1","JobID":"coven","Status":"blocked","FailedTGAllocs":{"coven":{"DimensionExhausted":{"memory":1}}}}}}]}`,
 				"{}",
 			},
-			wantJobs:    5,
-			wantTopics:  []string{"Deployment", "Allocation", "Deployment", "Allocation", "Job"},
-			wantSubstrs: []string{"dep-succ", "alloc-run", "dep-fail", ":failed", "nomad:job:coverage-ingest:42:registered"},
+			wantJobs:    7,
+			wantTopics:  []string{"Deployment", "Allocation", "Deployment", "Allocation", "Job", "Allocation", "Evaluation"},
+			wantSubstrs: []string{"dep-succ", "nomad:allocation:scheduler-mcp:alloc-run:running", "dep-fail", ":failed", "nomad:job:coverage-ingest:42:registered", "nomad:allocation:scheduler-mcp:alloc-run:complete", "nomad:evaluation:coven:eval-blk-1:blocked"},
 		},
 		{
 			name: "duplicate nomad event increments skipped metric",

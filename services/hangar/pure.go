@@ -835,6 +835,7 @@ type GitPushEventResponse struct {
 	ContainersBuilding bool     `json:"containers_building,omitempty"`
 	NomadChanged       bool     `json:"nomad_changed,omitempty"`
 	AppliedJobs        []string `json:"applied_jobs,omitempty"`
+	ExpectedJobs       []string `json:"expected_jobs,omitempty"`
 	Message            string   `json:"message,omitempty"`
 }
 
@@ -1065,6 +1066,7 @@ type HangarDeployEvent struct {
 	Status       string    `json:"status"`                  // "started", "success", "failed", "rollback"
 	DeploymentID string    `json:"deployment_id,omitempty"` // Nomad deployment UUID
 	Details      string    `json:"details,omitempty"`       // status description or error message
+	ExpectedJobs []string  `json:"expected_jobs,omitempty"`
 	Timestamp    time.Time `json:"timestamp"`
 }
 
@@ -1088,6 +1090,88 @@ func SortMatchedJobsHangarLast(matches []MatchedNomadJob) {
 	sort.SliceStable(matches, func(i, j int) bool {
 		return !IsHangarJob(matches[i].JobName) && IsHangarJob(matches[j].JobName)
 	})
+}
+
+// ResolveExpectedDeployJobs computes the deduplicated, deterministically ordered list of Nomad jobs
+// expected to deploy for a git push across all 4 triggers (.nomad specs, DB migrations,
+// aerial-config Nomad variable mappings, and container build changes).
+func ResolveExpectedDeployJobs(
+	repoPath string,
+	changedFiles []string,
+	nomadChanges []NomadFileChange,
+	serviceConfigs []ServiceConfigMapping,
+	candidateRepos []string,
+) []string {
+	cleanRepo := filepath.ToSlash(strings.ToLower(filepath.Clean(repoPath)))
+	isAerialCore := strings.HasSuffix(cleanRepo, "/aerial") || cleanRepo == "aerial"
+	isAerialConfig := strings.Contains(cleanRepo, "aerial-config")
+
+	seen := make(map[string]struct{})
+	var jobs []string
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return
+		}
+		if _, ok := seen[name]; !ok {
+			seen[name] = struct{}{}
+			jobs = append(jobs, name)
+		}
+	}
+
+	// 1. Non-deleted .nomad specification changes
+	for _, ch := range nomadChanges {
+		if ch.Action != "delete" {
+			add(ch.JobName)
+		}
+	}
+
+	// 2. Database migration changes in aerial core
+	if isAerialCore && HasMigrationChanges(changedFiles) {
+		add("db-migrate")
+	}
+
+	// 3. aerial-config Nomad variable mappings
+	if isAerialConfig {
+		if fileInChangedList("config.yaml", changedFiles) {
+			add("eri")
+		}
+		if homepageInChangedList(changedFiles) {
+			add("homepage")
+		}
+		for _, m := range serviceConfigs {
+			if fileInChangedList(m.RelPath, changedFiles) {
+				add(strings.TrimPrefix(strings.TrimSpace(m.NomadVar), "nomad/jobs/"))
+			}
+		}
+	}
+
+	// 4. Container build changes in aerial core
+	if isAerialCore && HasContainerBuildChanges(repoPath, changedFiles) {
+		var dirs []string
+		for _, r := range append([]string{repoPath}, candidateRepos...) {
+			dirs = append(dirs, filepath.Join(r, "jobs"), filepath.Join(r, "nomad", "jobs"))
+		}
+		walkNomadJobFiles(dirs, func(dir, jobPath, jobName, content string) bool {
+			if JobHasContainerBuildChanges(content, changedFiles) {
+				add(jobName)
+			}
+			return true
+		})
+	}
+
+	if len(jobs) == 0 {
+		return nil
+	}
+
+	sort.Slice(jobs, func(i, j int) bool {
+		if IsHangarJob(jobs[i]) != IsHangarJob(jobs[j]) {
+			return !IsHangarJob(jobs[i])
+		}
+		return jobs[i] < jobs[j]
+	})
+
+	return jobs
 }
 
 // IsValidGitCommitSHA returns true if s is 7 to 40 characters and contains only hexadecimal characters.

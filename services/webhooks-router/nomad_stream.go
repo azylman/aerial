@@ -83,6 +83,106 @@ func allFailedTaskGroupsQueued(failedTG map[string]interface{}, queued map[strin
 	return true
 }
 
+func metricInt(v interface{}) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	default:
+		return 0
+	}
+}
+
+func hasPositiveMetricValue(v interface{}) bool {
+	if metricInt(v) > 0 {
+		return true
+	}
+	switch mp := v.(type) {
+	case map[string]interface{}:
+		for _, val := range mp {
+			if metricInt(val) > 0 {
+				return true
+			}
+		}
+	case []interface{}:
+		return len(mp) > 0
+	}
+	return false
+}
+
+// hasNonTransientPlacementFailure returns true if any unqueued task group in FailedTGAllocs
+// failed placement due to non-transient resource, node, constraint, class, or quota exhaustion
+// (ignoring transient network/port collisions).
+func hasNonTransientPlacementFailure(failedTG map[string]interface{}, queued map[string]int) bool {
+	if len(failedTG) == 0 {
+		return false
+	}
+	for tg, rawMetrics := range failedTG {
+		if queued[tg] > 0 {
+			continue
+		}
+		m, ok := rawMetrics.(map[string]interface{})
+		if !ok {
+			return true
+		}
+		if naMap, ok := m["NodesAvailable"].(map[string]interface{}); ok {
+			hasAvailable := false
+			for _, count := range naMap {
+				if metricInt(count) > 0 {
+					hasAvailable = true
+					break
+				}
+			}
+			if !hasAvailable {
+				return true
+			}
+		}
+		if metricInt(m["NodesExhausted"]) > 0 ||
+			hasPositiveMetricValue(m["ConstraintFiltered"]) ||
+			hasPositiveMetricValue(m["ClassFiltered"]) ||
+			hasPositiveMetricValue(m["QuotaExhausted"]) {
+			return true
+		}
+		dimMap, hasDim := m["DimensionExhausted"].(map[string]interface{})
+		for k, count := range dimMap {
+			if metricInt(count) > 0 {
+				lower := strings.ToLower(k)
+				if !strings.Contains(lower, "network") && !strings.Contains(lower, "port") {
+					return true
+				}
+			}
+		}
+		if !hasDim && (metricInt(m["AllocationResourceExhausted"]) > 0 || metricInt(m["ResourceExhausted"]) > 0) {
+			return true
+		}
+	}
+	return false
+}
+
+// formatFailedTGAllocs formats a human-readable evaluation failure description combining statusDesc and failedTG.
+func formatFailedTGAllocs(statusDesc string, failedTG map[string]interface{}) string {
+	desc := strings.TrimSpace(statusDesc)
+	if len(failedTG) == 0 {
+		return desc
+	}
+	allocSummary := fmt.Sprintf("failed task group allocations: %v", failedTG)
+	if desc == "" {
+		return allocSummary
+	}
+	return fmt.Sprintf("%s (%s)", desc, allocSummary)
+}
+
+// hasFailedTaskState returns true if any task state in the allocation has Failed == true.
+func hasFailedTaskState(taskStates map[string]NomadTaskState) bool {
+	for _, ts := range taskStates {
+		if ts.Failed {
+			return true
+		}
+	}
+	return false
+}
+
 // NomadJobEventPayload captures job registration updates from Nomad.
 type NomadJobEventPayload struct {
 	Job struct {
@@ -133,6 +233,7 @@ type NomadJobAllocSummary struct {
 	JobID         string `json:"JobID"`
 	DesiredStatus string `json:"DesiredStatus"`
 	ClientStatus  string `json:"ClientStatus"`
+	JobVersion    uint64 `json:"JobVersion"`
 	CreateIndex   uint64 `json:"CreateIndex"`
 }
 
@@ -337,16 +438,17 @@ func (sub *NomadStreamSubscriber) handleNomadEvent(ctx context.Context, event No
 		}
 		alloc := allocPayload.Allocation
 		isRunning := alloc.DesiredStatus == "run" && alloc.ClientStatus == "running"
+		isComplete := alloc.DesiredStatus == "run" && alloc.ClientStatus == "complete" && !hasFailedTaskState(alloc.TaskStates)
 		isFailed := strings.EqualFold(alloc.ClientStatus, "failed")
 		isExhausted := alloc.DesiredStatus == "run" && isAllocationRestartExhausted(alloc.TaskStates)
-		if !isRunning && !isFailed && !isExhausted {
+		if !isRunning && !isComplete && !isFailed && !isExhausted {
 			return
 		}
 		if alloc.ID != "" && alloc.JobID != "" {
 			if isFailed || isExhausted {
 				idempotencyKey = fmt.Sprintf("nomad:allocation:%s:%s:failed", alloc.JobID, alloc.ID)
 			} else {
-				idempotencyKey = fmt.Sprintf("nomad:allocation:%s:%s", alloc.JobID, alloc.ID)
+				idempotencyKey = fmt.Sprintf("nomad:allocation:%s:%s:%s", alloc.JobID, alloc.ID, strings.ToLower(alloc.ClientStatus))
 			}
 		}
 	case "Evaluation":
@@ -359,24 +461,26 @@ func (sub *NomadStreamSubscriber) handleNomadEvent(ctx context.Context, event No
 			return
 		}
 		if strings.EqualFold(eval.Status, "blocked") {
-			// A blocked evaluation represents Nomad waiting for cluster state changes to place remaining allocations;
-			// wait for follow-up allocation/deployment events.
-			return
-		}
-		hasUnqueuedFailures := hasUnqueuedFailedAllocs(eval.FailedTGAllocs, eval.QueuedAllocations)
-		isExplicitFailure := strings.EqualFold(eval.Status, "failed") || strings.EqualFold(eval.Status, "canceled") || strings.EqualFold(eval.Status, "cancelled")
-
-		if hasUnqueuedFailures || isExplicitFailure {
-			// Pass through to River/ProcessNomadEvent for failure handling
-			idempotencyKey = fmt.Sprintf("nomad:evaluation:%s:%s:%s", eval.JobID, eval.ID, eval.Status)
-		} else if eval.BlockedEval != "" || allFailedTaskGroupsQueued(eval.FailedTGAllocs, eval.QueuedAllocations) {
-			// Blocked evaluation or all unplaced allocations queued for rollout; wait for follow-up allocation/deployment events
-			return
-		} else if strings.EqualFold(eval.Status, "complete") {
-			// In-place or restart complete evaluation; pass through for success handling
-			idempotencyKey = fmt.Sprintf("nomad:evaluation:%s:%s:complete", eval.JobID, eval.ID)
+			if !hasNonTransientPlacementFailure(eval.FailedTGAllocs, eval.QueuedAllocations) {
+				return
+			}
+			idempotencyKey = fmt.Sprintf("nomad:evaluation:%s:%s:blocked", eval.JobID, eval.ID)
 		} else {
-			return
+			hasUnqueuedFailures := hasUnqueuedFailedAllocs(eval.FailedTGAllocs, eval.QueuedAllocations)
+			isExplicitFailure := strings.EqualFold(eval.Status, "failed") || strings.EqualFold(eval.Status, "canceled") || strings.EqualFold(eval.Status, "cancelled")
+
+			if hasUnqueuedFailures || isExplicitFailure {
+				// Pass through to River/ProcessNomadEvent for failure handling
+				idempotencyKey = fmt.Sprintf("nomad:evaluation:%s:%s:%s", eval.JobID, eval.ID, eval.Status)
+			} else if eval.BlockedEval != "" || allFailedTaskGroupsQueued(eval.FailedTGAllocs, eval.QueuedAllocations) {
+				// Blocked evaluation or all unplaced allocations queued for rollout; wait for follow-up allocation/deployment events
+				return
+			} else if strings.EqualFold(eval.Status, "complete") {
+				// In-place or restart complete evaluation; pass through for success handling
+				idempotencyKey = fmt.Sprintf("nomad:evaluation:%s:%s:complete", eval.JobID, eval.ID)
+			} else {
+				return
+			}
 		}
 	case "Job":
 		if !strings.EqualFold(event.Type, "JobRegistered") {
@@ -455,7 +559,7 @@ func (s *RouterServer) ProcessNomadEvent(ctx context.Context, topic, eventType s
 		if isAllocationRestarting(alloc.TaskStates) {
 			return nil
 		}
-		if alloc.DesiredStatus == "run" && alloc.ClientStatus == "running" && s.isNomadJobHealthy(ctx, alloc.JobID) {
+		if alloc.DesiredStatus == "run" && (alloc.ClientStatus == "running" || (alloc.ClientStatus == "complete" && !hasFailedTaskState(alloc.TaskStates))) && s.isNomadJobHealthy(ctx, alloc.JobID) {
 			return s.HandleNomadJobSuccess(ctx, alloc.JobID, alloc.ID)
 		}
 	case "Evaluation":
@@ -465,7 +569,10 @@ func (s *RouterServer) ProcessNomadEvent(ctx context.Context, topic, eventType s
 		}
 		eval := evalPayload.Evaluation
 		if strings.EqualFold(eval.Status, "blocked") {
-			return nil
+			if !hasNonTransientPlacementFailure(eval.FailedTGAllocs, eval.QueuedAllocations) || s.isNomadJobHealthy(ctx, eval.JobID) {
+				return nil
+			}
+			return s.HandleNomadJobFailure(ctx, eval.JobID, eval.ID, eval.Status, formatFailedTGAllocs(eval.StatusDescription, eval.FailedTGAllocs))
 		}
 		hasUnqueuedFailures := hasUnqueuedFailedAllocs(eval.FailedTGAllocs, eval.QueuedAllocations)
 		isExplicitFailure := strings.EqualFold(eval.Status, "failed") || strings.EqualFold(eval.Status, "canceled") || strings.EqualFold(eval.Status, "cancelled")
@@ -474,11 +581,7 @@ func (s *RouterServer) ProcessNomadEvent(ctx context.Context, topic, eventType s
 			if s.isNomadJobHealthy(ctx, eval.JobID) {
 				return nil
 			}
-			desc := eval.StatusDescription
-			if desc == "" && len(eval.FailedTGAllocs) > 0 {
-				desc = fmt.Sprintf("failed task group allocations: %v", eval.FailedTGAllocs)
-			}
-			return s.HandleNomadJobFailure(ctx, eval.JobID, eval.ID, eval.Status, desc)
+			return s.HandleNomadJobFailure(ctx, eval.JobID, eval.ID, eval.Status, formatFailedTGAllocs(eval.StatusDescription, eval.FailedTGAllocs))
 		} else if eval.BlockedEval != "" || allFailedTaskGroupsQueued(eval.FailedTGAllocs, eval.QueuedAllocations) {
 			return nil
 		} else if strings.EqualFold(eval.Status, "complete") && s.isNomadJobHealthy(ctx, eval.JobID) {
@@ -568,7 +671,7 @@ func (s *RouterServer) ReconcileActiveDeployments(ctx context.Context) error {
 	}
 	log.Printf("[webhooks-router] [sweep] found %d active deployment(s) in pr_registry, reconciling with Nomad...", len(pending))
 	for _, p := range pending {
-		for _, job := range extractJobsFromMetadata(p.Metadata) {
+		for _, job := range extractStartedJobsFromMetadata(p.Metadata) {
 			if s.isNomadJobHealthy(ctx, job) {
 				if err := s.HandleNomadJobSuccess(ctx, job, "startup-sweep"); err != nil {
 					log.Printf("[webhooks-router] [sweep] error handling nomad job success for %s: %v", job, err)
@@ -597,6 +700,35 @@ func (s *RouterServer) getNomadJSON(ctx context.Context, path string, out any) b
 		return false
 	}
 	return json.NewDecoder(resp.Body).Decode(out) == nil
+}
+
+// NomadJobKind classifies a Nomad job for completion and health tracking.
+type NomadJobKind int
+
+const (
+	NomadJobKindService NomadJobKind = iota
+	NomadJobKindOneShotBatch
+	NomadJobKindBatchTemplate
+)
+
+func (s *RouterServer) classifyNomadJob(ctx context.Context, job string) (NomadJobKind, string, uint64, bool) {
+	var jobSpec struct {
+		Type     string `json:"Type"`
+		Status   string `json:"Status"`
+		Version  uint64 `json:"Version"`
+		Stop     bool   `json:"Stop"`
+		Periodic *struct {
+			Enabled bool `json:"Enabled"`
+		} `json:"Periodic"`
+		ParameterizedJob interface{} `json:"ParameterizedJob"`
+	}
+	if !s.getNomadJSON(ctx, "/v1/job/"+job, &jobSpec) || !strings.EqualFold(jobSpec.Type, "batch") {
+		return NomadJobKindService, jobSpec.Status, jobSpec.Version, jobSpec.Stop
+	}
+	if (jobSpec.Periodic != nil && jobSpec.Periodic.Enabled) || jobSpec.ParameterizedJob != nil {
+		return NomadJobKindBatchTemplate, jobSpec.Status, jobSpec.Version, jobSpec.Stop
+	}
+	return NomadJobKindOneShotBatch, jobSpec.Status, jobSpec.Version, jobSpec.Stop
 }
 
 // isNomadJobHealthy queries the Nomad REST API to verify if the job has successfully deployed.
@@ -629,35 +761,51 @@ func (s *RouterServer) isNomadJobHealthy(ctx context.Context, job string) bool {
 	if !s.getNomadJSON(ctx, "/v1/job/"+job+"/allocations", &allocs) {
 		return false
 	}
-	hasRunning := false
-	for _, a := range allocs {
-		if a.DesiredStatus == "run" && (a.ClientStatus == "failed" || a.ClientStatus == "pending") {
+	kind, jobStatus, jobVersion, jobStop := s.classifyNomadJob(ctx, job)
+	switch kind {
+	case NomadJobKindBatchTemplate:
+		for _, a := range allocs {
+			if a.DesiredStatus == "run" && (a.ClientStatus == "failed" || a.ClientStatus == "pending") {
+				return false
+			}
+		}
+		return strings.EqualFold(jobStatus, "running") && !jobStop
+	case NomadJobKindOneShotBatch:
+		if jobStop || strings.EqualFold(jobStatus, "pending") {
 			return false
 		}
-		if a.DesiredStatus == "run" && a.ClientStatus == "running" {
-			hasRunning = true
+		hasComplete := false
+		for _, a := range allocs {
+			if a.JobVersion < jobVersion {
+				continue
+			}
+			if a.DesiredStatus == "run" && (a.ClientStatus == "failed" || a.ClientStatus == "pending" || a.ClientStatus == "running") {
+				return false
+			}
+			if a.DesiredStatus == "run" && a.ClientStatus == "complete" {
+				hasComplete = true
+			}
 		}
+		return hasComplete
+	default:
+		hasRunning := false
+		for _, a := range allocs {
+			if a.DesiredStatus == "run" && (a.ClientStatus == "failed" || a.ClientStatus == "pending") {
+				return false
+			}
+			if a.DesiredStatus == "run" && a.ClientStatus == "running" {
+				hasRunning = true
+			}
+		}
+		return hasRunning
 	}
-	return hasRunning || s.isNomadBatchTemplateHealthy(ctx, job)
 }
 
 // isNomadBatchTemplateHealthy queries Nomad for periodic or parameterized batch job templates
 // that do not maintain persistent allocations between runs.
 func (s *RouterServer) isNomadBatchTemplateHealthy(ctx context.Context, job string) bool {
-	var jobSpec struct {
-		Type     string `json:"Type"`
-		Status   string `json:"Status"`
-		Stop     bool   `json:"Stop"`
-		Periodic *struct {
-			Enabled bool `json:"Enabled"`
-		} `json:"Periodic"`
-		ParameterizedJob interface{} `json:"ParameterizedJob"`
-	}
-	if !s.getNomadJSON(ctx, "/v1/job/"+job, &jobSpec) {
-		return false
-	}
-	isBatchTemplate := (jobSpec.Periodic != nil && jobSpec.Periodic.Enabled) || jobSpec.ParameterizedJob != nil
-	return strings.EqualFold(jobSpec.Type, "batch") && isBatchTemplate && strings.EqualFold(jobSpec.Status, "running") && !jobSpec.Stop
+	kind, status, _, stop := s.classifyNomadJob(ctx, job)
+	return kind == NomadJobKindBatchTemplate && strings.EqualFold(status, "running") && !stop
 }
 
 // extractStringSliceFromMetadata extracts a slice of strings stored under key in metadata JSONB.
@@ -691,6 +839,34 @@ func extractJobsFromMetadata(meta map[string]interface{}) []string {
 		raw = append(raw, s)
 	}
 	return dedupeTrimmedStrings(raw)
+}
+
+// extractStartedJobsFromMetadata returns candidate Nomad jobs eligible for startup sweep reconciliation.
+// When "started_jobs" is present in metadata, only pending jobs in "started_jobs" are returned;
+// legacy rows without "started_jobs" fall back to extractJobsFromMetadata.
+func extractStartedJobsFromMetadata(meta map[string]interface{}) []string {
+	if meta == nil {
+		return nil
+	}
+	pending := extractJobsFromMetadata(meta)
+	if _, hasStarted := meta["started_jobs"]; !hasStarted {
+		return pending
+	}
+	started := extractStringSliceFromMetadata(meta, "started_jobs")
+	if len(started) == 0 || len(pending) == 0 {
+		return nil
+	}
+	startedSet := make(map[string]struct{}, len(started))
+	for _, s := range started {
+		startedSet[strings.ToLower(s)] = struct{}{}
+	}
+	var out []string
+	for _, job := range pending {
+		if _, ok := startedSet[strings.ToLower(job)]; ok {
+			out = append(out, job)
+		}
+	}
+	return out
 }
 
 // isTaskRestartExhausted returns true if a task has exhausted its restart policy attempts

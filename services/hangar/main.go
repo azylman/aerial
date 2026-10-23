@@ -133,6 +133,7 @@ type ConfigSyncContext struct {
 	PRNumber         int
 	TargetID         string
 	ChangedFiles     []string
+	ExpectedJobs     []string
 	DiffGated        bool
 	SkipPendingNomad bool
 }
@@ -1078,7 +1079,7 @@ func (d *SyncDaemon) ReconcileNomadChanges(ctx context.Context, repoPath string,
 	recCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
-	_, _, err := d.applyNomadChangesDirectly(recCtx, repoPath, changes, false, true, repo, commit, targetID, strconv.Itoa(prNumber))
+	_, _, err := d.applyNomadChangesDirectly(recCtx, repoPath, changes, false, true, nil, repo, commit, targetID, strconv.Itoa(prNumber))
 	return err
 }
 
@@ -1550,6 +1551,11 @@ func (d *SyncDaemon) pushNomadConfigVar(ctx context.Context, cacheKey, nomadVar,
 		return false, nil
 	}
 
+	cacheToken := configHash
+	if len(syncCtx) > 0 && strings.TrimSpace(syncCtx[0].CommitSHA) != "" {
+		cacheToken = configHash + ":" + strings.TrimSpace(syncCtx[0].CommitSHA)
+	}
+
 	d.lastPushedConfigMu.Lock()
 	cachedHash := ""
 	if d.lastPushedConfig != nil {
@@ -1563,7 +1569,7 @@ func (d *SyncDaemon) pushNomadConfigVar(ctx context.Context, cacheKey, nomadVar,
 		d.lastPushedConfigMu.Unlock()
 		return false, nil
 	}
-	if cachedHash == configHash {
+	if cachedHash == cacheToken || (cacheToken == configHash && strings.HasPrefix(cachedHash, configHash+":")) {
 		d.lastPushedConfigMu.Unlock()
 		return false, nil
 	}
@@ -1576,14 +1582,15 @@ func (d *SyncDaemon) pushNomadConfigVar(ctx context.Context, cacheKey, nomadVar,
 	if len(syncCtx) > 0 && syncCtx[0].CommitSHA != "" {
 		args = append(args, "COMMIT_SHA="+syncCtx[0].CommitSHA)
 		baseEvt := HangarDeployEvent{
-			Event:     "deploy_started",
-			JobName:   jobName,
-			Repo:      syncCtx[0].Repo,
-			CommitSHA: syncCtx[0].CommitSHA,
-			PRNumber:  syncCtx[0].PRNumber,
-			TargetID:  syncCtx[0].TargetID,
-			Status:    "started",
-			Timestamp: time.Now().UTC(),
+			Event:        "deploy_started",
+			JobName:      jobName,
+			Repo:         syncCtx[0].Repo,
+			CommitSHA:    syncCtx[0].CommitSHA,
+			PRNumber:     syncCtx[0].PRNumber,
+			TargetID:     syncCtx[0].TargetID,
+			Status:       "started",
+			ExpectedJobs: syncCtx[0].ExpectedJobs,
+			Timestamp:    time.Now().UTC(),
 		}
 		go d.DispatchDeployEvent(baseEvt)
 	}
@@ -1598,7 +1605,7 @@ func (d *SyncDaemon) pushNomadConfigVar(ctx context.Context, cacheKey, nomadVar,
 	if d.lastPushedConfig == nil {
 		d.lastPushedConfig = make(map[string]string)
 	}
-	d.lastPushedConfig[cacheKey] = configHash
+	d.lastPushedConfig[cacheKey] = cacheToken
 	d.lastPushedConfigMu.Unlock()
 
 	return true, nil
@@ -2259,7 +2266,7 @@ func (d *SyncDaemon) shouldDeferNomadJob(ctx context.Context, jobName, jobSpec s
 	return false
 }
 
-func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath string, changes []NomadFileChange, checkRepoBuilds, failOnJobErr bool, meta ...string) (applied, deferred []string, err error) {
+func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath string, changes []NomadFileChange, checkRepoBuilds, failOnJobErr bool, expectedJobs []string, meta ...string) (applied, deferred []string, err error) {
 	repo, commit, targetID, prNumber := parseNomadMeta(meta)
 
 	SortNomadChangesHangarLast(changes)
@@ -2296,11 +2303,12 @@ func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath str
 			}
 
 			baseEvt := HangarDeployEvent{
-				JobName:   ch.JobName,
-				Repo:      repo,
-				CommitSHA: commit,
-				PRNumber:  prNumber,
-				TargetID:  targetID,
+				JobName:      ch.JobName,
+				Repo:         repo,
+				CommitSHA:    commit,
+				PRNumber:     prNumber,
+				TargetID:     targetID,
+				ExpectedJobs: expectedJobs,
 			}
 
 			log.Printf("[Hangar:Nomad] Applying job %s (%s)...", ch.JobName, ch.Path)
@@ -2393,35 +2401,55 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 		commitSHA = res.CurrentHead
 	}
 	sc.CommitSHA = commitSHA
-	syncEvt := HangarDeployEvent{
-		Event:     "sync_success",
-		JobName:   "git-sync",
-		Repo:      req.Repo,
-		PRNumber:  req.PRNumber,
-		TargetID:  req.TargetID,
-		CommitSHA: commitSHA,
-		Status:    "success",
-		Details:   "git sync completed",
-		Timestamp: time.Now().UTC(),
-	}
-	d.DispatchDeployEvent(syncEvt)
 
 	cleanRepo := strings.ToLower(filepath.Clean(repoPath))
 	isAerialConfig := strings.Contains(cleanRepo, "aerial-config")
 	isAerialCore := strings.HasSuffix(cleanRepo, "/aerial") || cleanRepo == "aerial"
 
+	changedFiles, errDiff := d.getChangedFiles(ctx, repoPath, res.PreviousHead, res.CurrentHead)
+	if isAerialConfig && errDiff != nil {
+		log.Printf("[Hangar:GitPush] Error: getChangedFiles failed for %s: %v", repoPath, errDiff)
+		return GitPushEventResponse{
+			Status:  "error",
+			Repo:    req.Repo,
+			Commit:  res.CurrentHead,
+			Message: fmt.Sprintf("failed inspecting git diff: %v", errDiff),
+		}, http.StatusInternalServerError
+	}
+
+	nomadChanges, errNomad := d.HasNomadChanges(ctx, repoPath, res.PreviousHead, res.CurrentHead)
+	if isAerialConfig && errNomad != nil {
+		log.Printf("[Hangar:GitPush] Warning: HasNomadChanges failed for %s: %v", repoPath, errNomad)
+	}
+	if isAerialCore && errDiff == nil && HasMigrationChanges(changedFiles) {
+		nomadChanges = EnsureDBMigrateNomadChange(nomadChanges)
+		errNomad = nil
+	}
+
+	expectedJobs := ResolveExpectedDeployJobs(repoPath, changedFiles, nomadChanges, d.GetServiceConfigMappings(repoPath), d.candidateJobRepos())
+	resp.ExpectedJobs = expectedJobs
+	sc.ExpectedJobs = expectedJobs
+
+	syncEvt := HangarDeployEvent{
+		Event:        "sync_success",
+		JobName:      "git-sync",
+		Repo:         req.Repo,
+		PRNumber:     req.PRNumber,
+		TargetID:     req.TargetID,
+		CommitSHA:    commitSHA,
+		Status:       "success",
+		Details:      "git sync completed",
+		ExpectedJobs: expectedJobs,
+		Timestamp:    time.Now().UTC(),
+	}
+	d.DispatchDeployEvent(syncEvt)
+
 	if isAerialCore {
-		changedFiles, errDiff := d.getChangedFiles(ctx, repoPath, res.PreviousHead, res.CurrentHead)
 		containersBuilding := errDiff == nil && HasContainerBuildChanges(repoPath, changedFiles)
 		if containersBuilding {
 			resp.ContainersBuilding = true
 		}
 
-		nomadChanges, errNomad := d.HasNomadChanges(ctx, repoPath, res.PreviousHead, res.CurrentHead)
-		if errDiff == nil && HasMigrationChanges(changedFiles) {
-			nomadChanges = EnsureDBMigrateNomadChange(nomadChanges)
-			errNomad = nil
-		}
 		if errNomad == nil && len(nomadChanges) > 0 {
 			resp.NomadChanged = true
 
@@ -2473,7 +2501,7 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 				d.recordPendingNomadChanges(repoPath, deferredDeletes, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
 			}
 
-			applied, deferred, errRec := d.applyNomadChangesDirectly(ctx, repoPath, immediateChanges, false, true, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
+			applied, deferred, errRec := d.applyNomadChangesDirectly(ctx, repoPath, immediateChanges, false, true, expectedJobs, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
 			resp.AppliedJobs = applied
 			if len(deferred) > 0 {
 				resp.ContainersBuilding = true
@@ -2502,27 +2530,12 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 	}
 
 	if isAerialConfig {
-		changedFiles, errDiff := d.getChangedFiles(ctx, repoPath, res.PreviousHead, res.CurrentHead)
-		if errDiff != nil {
-			log.Printf("[Hangar:GitPush] Error: getChangedFiles failed for %s: %v", repoPath, errDiff)
-			return GitPushEventResponse{
-				Status:  "error",
-				Repo:    req.Repo,
-				Commit:  res.CurrentHead,
-				Message: fmt.Sprintf("failed inspecting git diff: %v", errDiff),
-			}, http.StatusInternalServerError
-		}
 		sc.DiffGated = true
 		sc.ChangedFiles = changedFiles
 
-		nomadChanges, errNomad := d.HasNomadChanges(ctx, repoPath, res.PreviousHead, res.CurrentHead)
-		if errNomad != nil {
-			log.Printf("[Hangar:GitPush] Warning: HasNomadChanges failed for %s: %v", repoPath, errNomad)
-		}
-
 		if len(nomadChanges) > 0 {
 			resp.NomadChanged = true
-			applied, deferred, errRec := d.applyNomadChangesDirectly(ctx, repoPath, nomadChanges, true, false, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
+			applied, deferred, errRec := d.applyNomadChangesDirectly(ctx, repoPath, nomadChanges, true, false, expectedJobs, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
 			if errRec != nil {
 				log.Printf("[Hangar:GitPush] Notice: applyNomadChangesDirectly notice: %v", errRec)
 			}

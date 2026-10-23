@@ -1471,3 +1471,99 @@ func TestHasNomadJobVariable_TableDriven(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveExpectedDeployJobs_TableDriven(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	aerialDir := filepath.Join(tmpDir, "aerial")
+	configDir := filepath.Join(tmpDir, "aerial-config")
+	if err := os.MkdirAll(filepath.Join(aerialDir, "nomad", "jobs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(configDir, "jobs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	writeJob := func(path, content string) {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeJob(filepath.Join(aerialDir, "nomad", "jobs", "vanadis.nomad"), `job "vanadis" { task "vanadis" { config { image = "ghcr.io/azylman/aerial-vanadis:${var.image_tag}" } } }`)
+	writeJob(filepath.Join(aerialDir, "nomad", "jobs", "hangar.nomad"), `job "hangar" { task "hangar" { config { image = "ghcr.io/azylman/aerial-hangar:${var.image_tag}" } } }`)
+	writeJob(filepath.Join(configDir, "jobs", "eri.nomad"), `job "eri" { task "eri" { config { image = "ghcr.io/azylman/aerial-eri:${var.image_tag}" } } }`)
+
+	serviceMappings := []ServiceConfigMapping{
+		{RelPath: "services/mcp/scheduler-mcp.yaml", NomadVar: "nomad/jobs/scheduler-mcp", VarKey: "CONFIG_YAML"},
+		{RelPath: "services/voice/voice.yaml", NomadVar: "nomad/jobs/orin-voice", VarKey: "CONFIG_YAML"},
+	}
+
+	cases := []struct {
+		name           string
+		repoPath       string
+		changedFiles   []string
+		nomadChanges   []NomadFileChange
+		serviceConfigs []ServiceConfigMapping
+		candidateRepos []string
+		want           []string
+	}{
+		{
+			name:     "empty changes returns nil",
+			repoPath: aerialDir,
+			want:     nil,
+		},
+		{
+			name:     "nomad changes filters out deletes and blank names and sorts hangar last",
+			repoPath: aerialDir,
+			nomadChanges: []NomadFileChange{
+				{Path: "nomad/jobs/hangar.nomad", Action: "apply", JobName: "hangar"},
+				{Path: "nomad/jobs/old.nomad", Action: "delete", JobName: "old-job"},
+				{Path: "nomad/jobs/blank.nomad", Action: "apply", JobName: "   "},
+				{Path: "nomad/jobs/coven.nomad", Action: "apply", JobName: "coven"},
+				{Path: "nomad/jobs/brain.nomad", Action: "apply", JobName: "brain"},
+			},
+			want: []string{"brain", "coven", "hangar"},
+		},
+		{
+			name:         "migration changes in aerial core adds db-migrate and deduplicates",
+			repoPath:     aerialDir,
+			changedFiles: []string{"services/eri/pkg/db/migrations/20261023_init.sql"},
+			nomadChanges: []NomadFileChange{
+				{Path: "nomad/jobs/db-migrate.nomad", Action: "apply", JobName: "db-migrate"},
+				{Path: "nomad/jobs/eri.nomad", Action: "apply", JobName: "eri"},
+			},
+			want: []string{"db-migrate", "eri"},
+		},
+		{
+			name:           "aerial-config variable mappings and nomad changes combined",
+			repoPath:       configDir,
+			changedFiles:   []string{"config.yaml", "homepage/widgets.yaml", "services/voice/voice.yaml"},
+			nomadChanges:   []NomadFileChange{{Path: "jobs/hangar.nomad", Action: "apply", JobName: "hangar"}},
+			serviceConfigs: serviceMappings,
+			want:           []string{"eri", "homepage", "orin-voice", "hangar"},
+		},
+		{
+			name:           "container build changes across repoPath and candidateRepos with hangar sorted last",
+			repoPath:       aerialDir,
+			changedFiles:   []string{"services/hangar/main.go", "services/vanadis/main.go", "services/eri/main.go"},
+			candidateRepos: []string{configDir},
+			want:           []string{"eri", "vanadis", "hangar"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ResolveExpectedDeployJobs(tc.repoPath, tc.changedFiles, tc.nomadChanges, tc.serviceConfigs, tc.candidateRepos)
+			if len(got) != len(tc.want) {
+				t.Fatalf("ResolveExpectedDeployJobs() = %v, want %v", got, tc.want)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Errorf("ResolveExpectedDeployJobs()[%d] = %q, want %q (full: %v)", i, got[i], tc.want[i], got)
+				}
+			}
+		})
+	}
+}
