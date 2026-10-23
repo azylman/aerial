@@ -36,14 +36,17 @@ func resolveMessageEffort(m db.Message) string {
 }
 
 func (p *WorkerPool) resolveScopeKey(m db.Message) string {
-	switch resolveMessageEffort(m) {
-	case "medium":
-		if p != nil && p.mediumEffortProcessPool != nil {
-			return "medium_effort:" + m.ThreadID
-		}
-	case "low":
-		if p != nil && p.lowEffortProcessPool != nil {
+	k, err := ResolvePoolKey(m.Metadata.Ephemeral, resolveMessageEffort(m))
+	if err == nil && p != nil && p.Pool(k) != nil {
+		switch k {
+		case PoolKey{Ephemeral: true, Effort: "low"}:
 			return "low_effort:" + m.ThreadID
+		case PoolKey{Ephemeral: true, Effort: "medium"}:
+			return "medium_effort:" + m.ThreadID
+		case PoolKey{Ephemeral: false, Effort: "low"}:
+			return "stateful_low:" + m.ThreadID
+		case PoolKey{Ephemeral: false, Effort: "medium"}:
+			return "stateful_medium:" + m.ThreadID
 		}
 	}
 	return m.ThreadID
@@ -593,50 +596,36 @@ func wrapPromptTag(text, openTag, closeTag string) string {
 	return trimmed
 }
 
-func (te *turnExecution) resolveExecutionPool() runner.AgentPool {
-	if te.pool == nil {
-		return nil
+func resolveBurstPoolKey(burst []db.Message) (PoolKey, error) {
+	var ephemPtr *bool
+	if isEphem, explicit := extractBurstEphemeral(burst); explicit {
+		ephemPtr = &isEphem
 	}
-	isEphem, explicit := extractBurstEphemeral(te.burst)
-	switch resolveBurstEffort(te.burst) {
-	case "medium":
-		if explicit && !isEphem {
-			if up := te.pool.MediumEffortProcessPool(); up != nil {
-				return up
-			}
-		}
-		if te.pool.mediumEffortProcessPool != nil {
-			return te.pool.mediumEffortProcessPool
-		}
-		log.Printf("[Worker] Notice: mediumEffortProcessPool is nil, falling back to processPool for thread %s", te.threadID)
-	case "low":
-		if explicit && !isEphem {
-			if up := te.pool.LowEffortProcessPool(); up != nil {
-				return up
-			}
-		}
-		if te.pool.lowEffortProcessPool != nil {
-			return te.pool.lowEffortProcessPool
-		}
-		log.Printf("[Worker] Notice: lowEffortProcessPool is nil, falling back to processPool for thread %s", te.threadID)
-	default:
-		if explicit && isEphem {
-			if te.pool.mediumEffortProcessPool != nil {
-				return te.pool.mediumEffortProcessPool
-			}
-			if te.pool.lowEffortProcessPool != nil {
-				return te.pool.lowEffortProcessPool
-			}
-		}
-	}
-	return te.pool.processPool
+	return ResolvePoolKey(ephemPtr, resolveBurstEffort(burst))
 }
 
-func (te *turnExecution) isNonPrimaryPool(activePool runner.AgentPool) bool {
-	if isEphem, explicit := extractBurstEphemeral(te.burst); explicit {
-		return isEphem
+func isBurstEphemeral(burst []db.Message) bool {
+	k, err := resolveBurstPoolKey(burst)
+	return err != nil || k.Ephemeral
+}
+
+func (te *turnExecution) resolveExecutionPool() (runner.AgentPool, PoolKey, error) {
+	var burst []db.Message
+	if te != nil {
+		burst = te.burst
 	}
-	return te != nil && te.pool != nil && activePool != nil && activePool != te.pool.processPool
+	k, err := resolveBurstPoolKey(burst)
+	if err != nil {
+		return nil, k, err
+	}
+	if te == nil || te.pool == nil {
+		return nil, k, nil
+	}
+	if pool := te.pool.Pool(k); pool != nil {
+		return pool, k, nil
+	}
+	log.Printf("[Worker] Notice: pool for %+v is nil, falling back to primary processPool for thread %s", k, te.threadID)
+	return te.pool.Pool(PoolKey{Ephemeral: false, Effort: "high"}), k, nil
 }
 
 func getStreamingDaemon(pool runner.AgentPool, threadID string) *runner.StreamingDaemon {

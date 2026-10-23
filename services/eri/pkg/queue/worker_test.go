@@ -476,7 +476,7 @@ func TestWorker_RotateSessionID_EvictsDaemons(t *testing.T) {
 
 	ctx := context.Background()
 	_, _ = procPool.GetOrCreate(ctx, "thread-evict-1", "")
-	te := &turnExecution{pool: &WorkerPool{cfg: WorkerPoolConfig{Store: fakeStore}, processPool: procPool}, threadID: "thread-evict-1"}
+	te := &turnExecution{pool: &WorkerPool{cfg: WorkerPoolConfig{Store: fakeStore}, pools: map[PoolKey]runner.AgentPool{{Ephemeral: false, Effort: "high"}: procPool}}, threadID: "thread-evict-1"}
 
 	te.rotateSessionID("thread-evict-1", "new-sess-1")
 	if _, ok := procPool.Get("thread-evict-1"); !ok {
@@ -1222,47 +1222,28 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 	}
 }
 
-func TestWorker_EphemeralOnPrimaryPool_GuardsSessionAndEvicts(t *testing.T) {
+func TestWorker_EphemeralHighEffort_FailsBurst(t *testing.T) {
 	t.Parallel()
 	store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
 	primarySessUUID := "11111111-1111-1111-1111-111111111111"
-	ephemSessUUID := "22222222-2222-2222-2222-222222222222"
 
+	var spawned atomic.Int32
 	spawner := &mockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
-			inR, inW := io.Pipe()
-			outR, outW := io.Pipe()
-			errR, errW := io.Pipe()
-			defer errW.Close()
-			go func() {
-				defer outW.Close()
-				_, _ = outW.Write([]byte(fmt.Sprintf("{\"event\":\"init\",\"conversation_id\":%q}\n", ephemSessUUID)))
-				buf := make([]byte, 16384)
-				for {
-					n, rErr := inR.Read(buf)
-					if rErr != nil {
-						return
-					}
-					if n > 0 {
-						_, _ = outW.Write([]byte(fmt.Sprintf("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ephemeral ok\",\"conversation_id\":%q,\"usage\":{\"total_tokens\":5}}}\n", ephemSessUUID)))
-					}
-				}
-			}()
-			return inW, outR, errR, newMockProcessHandle(12345), nil
+			spawned.Add(1)
+			return nil, nil, nil, nil, errors.New("should not spawn")
 		},
 	}
 	primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, spawner)
 	defer primaryPool.Close()
 
 	cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
-	doneCh := make(chan struct{}, 1)
+	doneCh := make(chan string, 1)
 	pool := New(cfg, WorkerPoolConfig{
 		ProcessPool:    primaryPool,
 		SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1,
 		OnMessageCompleted: func(msg db.Message, status string) {
-			if status == db.StatusCompleted {
-				doneCh <- struct{}{}
-			}
+			doneCh <- status
 		},
 	})
 	defer pool.Stop()
@@ -1273,118 +1254,158 @@ func TestWorker_EphemeralOnPrimaryPool_GuardsSessionAndEvicts(t *testing.T) {
 
 	trueVal := true
 	msg := db.Message{
-		ID: "msg-ephem-primary", ThreadID: threadID, Content: "execute ephemeral high effort",
-		Metadata: db.MessageMetadata{Ephemeral: &trueVal}, Status: db.StatusPending, CreatedAt: time.Now(),
+		ID: "msg-ephem-high-fail", ThreadID: threadID, Content: "execute invalid ephemeral high effort",
+		Effort: "high", Metadata: db.MessageMetadata{Ephemeral: &trueVal}, Status: db.StatusPending, CreatedAt: time.Now(),
 	}
 	_ = store.InsertMessage(ctx, msg)
 	pool.Enqueue(msg)
 	select {
-	case <-doneCh:
+	case status := <-doneCh:
+		if status != db.StatusFailed {
+			t.Fatalf("expected status %q, got %q", db.StatusFailed, status)
+		}
 	case <-time.After(5 * time.Second):
-		t.Fatalf("timeout waiting for ephemeral turn")
+		t.Fatalf("timeout waiting for failed burst")
 	}
-	pool.Stop()
 
+	if got := spawned.Load(); got != 0 {
+		t.Errorf("expected 0 spawns on primaryPool, got %d", got)
+	}
 	currentSess, err := store.GetSessionID(ctx, threadID)
 	if err != nil || currentSess != primarySessUUID {
 		t.Errorf("expected primary session %s untouched, got %s", primarySessUUID, currentSess)
 	}
-	if _, exists := primaryPool.Get(threadID); exists {
-		t.Errorf("expected session for thread %s to be evicted from UnifiedProcessPool, but it still exists", threadID)
-	}
 }
 
-func TestWorker_ExplicitNonEphemeralAuxPool_ResumesAndPersistsSession(t *testing.T) {
+func TestWorker_StatefulLowAndMediumPools_ResumeAndPersistSessions(t *testing.T) {
 	t.Parallel()
-	store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
-	existingSessUUID := "11111111-1111-1111-1111-111111111111"
-	rotatedSessUUID := "22222222-2222-2222-2222-222222222222"
-
-	var mu sync.Mutex
-	var spawnedSessionID string
-
-	spawner := &mockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
-			mu.Lock()
-			spawnedSessionID = cfg.SessionID
-			mu.Unlock()
-
-			inR, inW := io.Pipe()
-			outR, outW := io.Pipe()
-			errR, errW := io.Pipe()
-			defer errW.Close()
-			go func() {
-				defer outW.Close()
-				_, _ = outW.Write([]byte(fmt.Sprintf("{\"event\":\"init\",\"conversation_id\":%q}\n", rotatedSessUUID)))
-				buf := make([]byte, 16384)
-				for {
-					n, rErr := inR.Read(buf)
-					if rErr != nil {
-						return
-					}
-					if n > 0 {
-						_, _ = outW.Write([]byte(fmt.Sprintf("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok\",\"conversation_id\":%q,\"usage\":{\"total_tokens\":5}}}\n", rotatedSessUUID)))
-					}
-				}
-			}()
-			return inW, outR, errR, newMockProcessHandle(23456), nil
-		},
-	}
-
-	primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, newMockSpawner())
-	defer primaryPool.Close()
-
-	lowUnderlying := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, spawner)
-	defer lowUnderlying.Close()
-
-	lowPool := runner.NewInterchangeablePool(lowUnderlying, runner.InterchangeablePoolConfig{WorkerCount: 1, KeyPrefix: "discord:worker"})
-	defer lowPool.Close()
-
-	cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir, d.LowEffortModel = tempData, "gemini-3.8-flash-low" })
-	doneCh := make(chan struct{}, 1)
-	pool := New(cfg, WorkerPoolConfig{
-		ProcessPool: primaryPool, LowEffortProcessPool: lowPool,
-		SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1,
-		OnMessageCompleted: func(msg db.Message, status string) {
-			if status == db.StatusCompleted {
-				doneCh <- struct{}{}
-			}
-		},
-	})
-	defer pool.Stop()
-
-	threadID := "1560318118792790888"
-	ctx := context.Background()
-	_ = store.SaveSessionID(ctx, threadID, existingSessUUID)
-
 	falseVal := false
-	msg := db.Message{
-		ID: "msg-explicit-nonephem-low", ThreadID: threadID, Content: "execute persistent low effort",
-		Effort: "low", Metadata: db.MessageMetadata{Ephemeral: &falseVal}, Status: db.StatusPending, CreatedAt: time.Now(),
-	}
-	_ = store.InsertMessage(ctx, msg)
-	pool.Enqueue(msg)
-	select {
-	case <-doneCh:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("timeout waiting for non-ephemeral low turn")
-	}
-	pool.Stop()
-
-	mu.Lock()
-	gotSpawned := spawnedSessionID
-	mu.Unlock()
-
-	if gotSpawned != existingSessUUID {
-		t.Errorf("expected spawner to receive existing session %s, got %s", existingSessUUID, gotSpawned)
+	tests := []struct {
+		name   string
+		effort string
+	}{
+		{"stateful_low", "low"},
+		{"stateful_medium", "medium"},
 	}
 
-	currentSess, err := store.GetSessionID(ctx, threadID)
-	if err != nil {
-		t.Fatalf("GetSessionID error: %v", err)
-	}
-	if currentSess != rotatedSessUUID {
-		t.Errorf("expected rotated session %s to be persisted in DB, got %s", rotatedSessUUID, currentSess)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
+			existingSessUUID := "11111111-1111-1111-1111-111111111111"
+			rotatedSessUUID := "22222222-2222-2222-2222-222222222222"
+
+			var mu sync.Mutex
+			var spawnedSessionID string
+			var ephemSpawns atomic.Int32
+
+			statefulSpawner := &mockDaemonSpawner{
+				SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+					mu.Lock()
+					spawnedSessionID = cfg.SessionID
+					mu.Unlock()
+
+					inR, inW := io.Pipe()
+					outR, outW := io.Pipe()
+					errR, errW := io.Pipe()
+					defer errW.Close()
+					go func() {
+						defer outW.Close()
+						_, _ = outW.Write([]byte(fmt.Sprintf("{\"event\":\"init\",\"conversation_id\":%q}\n", rotatedSessUUID)))
+						buf := make([]byte, 16384)
+						for {
+							n, rErr := inR.Read(buf)
+							if rErr != nil {
+								return
+							}
+							if n > 0 {
+								_, _ = outW.Write([]byte(fmt.Sprintf("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok\",\"conversation_id\":%q,\"usage\":{\"total_tokens\":5}}}\n", rotatedSessUUID)))
+							}
+						}
+					}()
+					return inW, outR, errR, newMockProcessHandle(23456), nil
+				},
+			}
+			ephemSpawner := &mockDaemonSpawner{
+				SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+					ephemSpawns.Add(1)
+					return nil, nil, nil, nil, errors.New("ephemeral pool should not be used")
+				},
+			}
+
+			primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, newMockSpawner())
+			defer primaryPool.Close()
+			statefulLow := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, statefulSpawner)
+			defer statefulLow.Close()
+			statefulMed := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-medium"}, statefulSpawner)
+			defer statefulMed.Close()
+			ephemLowU := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, ephemSpawner)
+			defer ephemLowU.Close()
+			ephemLow := runner.NewInterchangeablePool(ephemLowU, runner.InterchangeablePoolConfig{WorkerCount: 1, KeyPrefix: "discord:worker"})
+			defer ephemLow.Close()
+			ephemMedU := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-medium"}, ephemSpawner)
+			defer ephemMedU.Close()
+			ephemMed := runner.NewInterchangeablePool(ephemMedU, runner.InterchangeablePoolConfig{WorkerCount: 1, KeyPrefix: "discord:medium-worker"})
+			defer ephemMed.Close()
+
+			cfg := newTestConfig(func(d *config.ConfigData) {
+				d.DataDir = tempData
+				d.LowEffortModel = "gemini-3.8-flash-low"
+				d.MediumEffortModel = "gemini-3.8-flash-medium"
+			})
+			doneCh := make(chan struct{}, 1)
+			pool := New(cfg, WorkerPoolConfig{
+				Pools: map[PoolKey]runner.AgentPool{
+					{Ephemeral: false, Effort: "high"}:   primaryPool,
+					{Ephemeral: false, Effort: "medium"}: statefulMed,
+					{Ephemeral: false, Effort: "low"}:    statefulLow,
+					{Ephemeral: true, Effort: "medium"}:  ephemMed,
+					{Ephemeral: true, Effort: "low"}:     ephemLow,
+				},
+				SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1,
+				OnMessageCompleted: func(msg db.Message, status string) {
+					if status == db.StatusCompleted {
+						doneCh <- struct{}{}
+					}
+				},
+			})
+			defer pool.Stop()
+
+			threadID := "1560318118792790888-" + tc.effort
+			ctx := context.Background()
+			_ = store.SaveSessionID(ctx, threadID, existingSessUUID)
+
+			msg := db.Message{
+				ID: "msg-stateful-" + tc.effort, ThreadID: threadID, Content: "execute persistent " + tc.effort,
+				Effort: tc.effort, Metadata: db.MessageMetadata{Ephemeral: &falseVal}, Status: db.StatusPending, CreatedAt: time.Now(),
+			}
+			_ = store.InsertMessage(ctx, msg)
+			pool.Enqueue(msg)
+			select {
+			case <-doneCh:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("timeout waiting for stateful %s turn", tc.effort)
+			}
+			pool.Stop()
+
+			if got := ephemSpawns.Load(); got != 0 {
+				t.Errorf("expected 0 spawns on ephemeral pools, got %d", got)
+			}
+			mu.Lock()
+			gotSpawned := spawnedSessionID
+			mu.Unlock()
+			if gotSpawned != existingSessUUID {
+				t.Errorf("expected spawner to receive existing session %s, got %s", existingSessUUID, gotSpawned)
+			}
+			currentSess, err := store.GetSessionID(ctx, threadID)
+			if err != nil || currentSess != rotatedSessUUID {
+				t.Errorf("expected rotated session %s persisted in DB, got %s (err=%v)", rotatedSessUUID, currentSess, err)
+			}
+			turnCount, err := store.GetSessionTurnCount(ctx, threadID)
+			if err != nil || turnCount != 1 {
+				t.Errorf("expected session turn count 1 in DB, got %d (err=%v)", turnCount, err)
+			}
+		})
 	}
 }
 
@@ -1922,98 +1943,85 @@ func TestYieldTrap_Scenarios(t *testing.T) {
 	}
 }
 
-type mockUnwrappablePool struct {
-	runner.AgentPool
-	underlying *runner.UnifiedProcessPool
-}
-
-func (m *mockUnwrappablePool) Underlying() *runner.UnifiedProcessPool {
-	return m.underlying
-}
-
 func TestWorker_ResolveExecutionPool_EphemeralRouting_TableDriven(t *testing.T) {
 	t.Parallel()
 	primaryPool := &runner.UnifiedProcessPool{}
-	lowUnified := &runner.UnifiedProcessPool{}
-	medUnified := &runner.UnifiedProcessPool{}
-
-	lowWrapped := &mockUnwrappablePool{underlying: lowUnified}
-	medWrapped := &mockUnwrappablePool{underlying: medUnified}
+	lowStateful := &runner.UnifiedProcessPool{}
+	medStateful := &runner.UnifiedProcessPool{}
+	lowEphem := &runner.UnifiedProcessPool{}
+	medEphem := &runner.UnifiedProcessPool{}
 
 	trueVal := true
 	falseVal := false
 
 	tests := []struct {
-		name              string
-		effort            string
-		ephemeral         *bool
-		wantUnderlying    bool
-		wantNonPrimary    bool
-		isPrimaryFallback bool
+		name        string
+		effort      string
+		ephemeral   *bool
+		wantPool    runner.AgentPool
+		wantPoolKey PoolKey
+		wantErr     bool
 	}{
 		{
-			name:           "default low effort uses wrapped pool and is non-primary",
-			effort:         "low",
-			ephemeral:      nil,
-			wantUnderlying: false,
-			wantNonPrimary: true,
+			name:        "default low effort routes to ephemeral low pool",
+			effort:      "low",
+			ephemeral:   nil,
+			wantPool:    lowEphem,
+			wantPoolKey: PoolKey{Ephemeral: true, Effort: "low"},
 		},
 		{
-			name:           "explicit ephemeral true with low effort uses wrapped pool and is non-primary",
-			effort:         "low",
-			ephemeral:      &trueVal,
-			wantUnderlying: false,
-			wantNonPrimary: true,
+			name:        "explicit ephemeral true with low effort routes to ephemeral low pool",
+			effort:      "low",
+			ephemeral:   &trueVal,
+			wantPool:    lowEphem,
+			wantPoolKey: PoolKey{Ephemeral: true, Effort: "low"},
 		},
 		{
-			name:           "explicit ephemeral false with low effort unwraps unified pool and is primary-like",
-			effort:         "low",
-			ephemeral:      &falseVal,
-			wantUnderlying: true,
-			wantNonPrimary: false,
+			name:        "explicit ephemeral false with low effort routes to stateful low pool",
+			effort:      "low",
+			ephemeral:   &falseVal,
+			wantPool:    lowStateful,
+			wantPoolKey: PoolKey{Ephemeral: false, Effort: "low"},
 		},
 		{
-			name:           "default medium effort uses wrapped pool and is non-primary",
-			effort:         "medium",
-			ephemeral:      nil,
-			wantUnderlying: false,
-			wantNonPrimary: true,
+			name:        "default medium effort routes to ephemeral medium pool",
+			effort:      "medium",
+			ephemeral:   nil,
+			wantPool:    medEphem,
+			wantPoolKey: PoolKey{Ephemeral: true, Effort: "medium"},
 		},
 		{
-			name:           "explicit ephemeral true with medium effort uses wrapped pool and is non-primary",
-			effort:         "medium",
-			ephemeral:      &trueVal,
-			wantUnderlying: false,
-			wantNonPrimary: true,
+			name:        "explicit ephemeral true with medium effort routes to ephemeral medium pool",
+			effort:      "medium",
+			ephemeral:   &trueVal,
+			wantPool:    medEphem,
+			wantPoolKey: PoolKey{Ephemeral: true, Effort: "medium"},
 		},
 		{
-			name:           "explicit ephemeral false with medium effort unwraps unified pool and is primary-like",
-			effort:         "medium",
-			ephemeral:      &falseVal,
-			wantUnderlying: true,
-			wantNonPrimary: false,
+			name:        "explicit ephemeral false with medium effort routes to stateful medium pool",
+			effort:      "medium",
+			ephemeral:   &falseVal,
+			wantPool:    medStateful,
+			wantPoolKey: PoolKey{Ephemeral: false, Effort: "medium"},
 		},
 		{
-			name:              "high effort always uses primary pool and is not non-primary",
-			effort:            "high",
-			ephemeral:         nil,
-			wantUnderlying:    false,
-			wantNonPrimary:    false,
-			isPrimaryFallback: true,
+			name:        "default high effort routes to stateful high pool",
+			effort:      "high",
+			ephemeral:   nil,
+			wantPool:    primaryPool,
+			wantPoolKey: PoolKey{Ephemeral: false, Effort: "high"},
 		},
 		{
-			name:           "explicit ephemeral true with high effort routes to wrapped medium pool and is non-primary",
-			effort:         "high",
-			ephemeral:      &trueVal,
-			wantUnderlying: false,
-			wantNonPrimary: true,
+			name:      "explicit ephemeral true with high effort returns error",
+			effort:    "high",
+			ephemeral: &trueVal,
+			wantErr:   true,
 		},
 		{
-			name:           "explicit ephemeral true with default empty effort routes to wrapped medium pool and is non-primary",
-			effort:         "",
-			ephemeral:      &trueVal,
-			wantUnderlying: false,
-			wantNonPrimary: true,
+			name:      "explicit ephemeral true with empty effort returns error",
+			effort:    "",
+			ephemeral: &trueVal,
+			wantErr:   true,
 		},
 	}
 
@@ -2021,9 +2029,13 @@ func TestWorker_ResolveExecutionPool_EphemeralRouting_TableDriven(t *testing.T) 
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			wp := &WorkerPool{
-				processPool:             primaryPool,
-				lowEffortProcessPool:    lowWrapped,
-				mediumEffortProcessPool: medWrapped,
+				pools: map[PoolKey]runner.AgentPool{
+					{Ephemeral: false, Effort: "high"}:   primaryPool,
+					{Ephemeral: false, Effort: "medium"}: medStateful,
+					{Ephemeral: false, Effort: "low"}:    lowStateful,
+					{Ephemeral: true, Effort: "medium"}:  medEphem,
+					{Ephemeral: true, Effort: "low"}:     lowEphem,
+				},
 			}
 			te := &turnExecution{
 				pool:     wp,
@@ -2039,29 +2051,18 @@ func TestWorker_ResolveExecutionPool_EphemeralRouting_TableDriven(t *testing.T) 
 				},
 			}
 
-			activePool := te.resolveExecutionPool()
-			if tc.isPrimaryFallback {
-				if activePool != primaryPool {
-					t.Errorf("expected primaryPool, got %v", activePool)
-				}
-			} else if tc.wantUnderlying {
-				if tc.effort == "low" && activePool != lowUnified {
-					t.Errorf("expected lowUnified, got %v", activePool)
-				}
-				if tc.effort == "medium" && activePool != medUnified {
-					t.Errorf("expected medUnified, got %v", activePool)
-				}
-			} else {
-				if tc.effort == "low" && activePool != lowWrapped {
-					t.Errorf("expected lowWrapped, got %v", activePool)
-				}
-				if (tc.effort == "medium" || tc.effort == "high" || tc.effort == "") && activePool != medWrapped {
-					t.Errorf("expected medWrapped, got %v", activePool)
-				}
+			activePool, poolKey, err := te.resolveExecutionPool()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("resolveExecutionPool() err = %v, wantErr %v", err, tc.wantErr)
 			}
-
-			if got := te.isNonPrimaryPool(activePool); got != tc.wantNonPrimary {
-				t.Errorf("isNonPrimaryPool() = %v, want %v", got, tc.wantNonPrimary)
+			if tc.wantErr {
+				return
+			}
+			if activePool != tc.wantPool {
+				t.Errorf("activePool = %v, want %v", activePool, tc.wantPool)
+			}
+			if poolKey != tc.wantPoolKey {
+				t.Errorf("poolKey = %+v, want %+v", poolKey, tc.wantPoolKey)
 			}
 		})
 	}

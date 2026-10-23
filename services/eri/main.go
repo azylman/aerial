@@ -109,6 +109,21 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
+		model := strings.TrimSpace(req.Model)
+		effort := strings.TrimSpace(req.Effort)
+		if effort == "" {
+			modelLower := strings.ToLower(model)
+			if strings.Contains(modelLower, "medium") {
+				effort = "medium"
+			} else if strings.Contains(modelLower, "flash") {
+				effort = "low"
+			}
+		}
+		if _, err := queue.ResolvePoolKey(req.Ephemeral, effort); err != nil {
+			writeErr(w, http.StatusBadRequest, "Invalid payload: "+err.Error())
+			return
+		}
+
 		sessionID := strings.TrimSpace(req.SessionID)
 		if sessionID != "" {
 			if !queue.IsValidThreadKey(sessionID) {
@@ -125,17 +140,6 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 		msgID := strings.TrimSpace(req.MessageID)
 		if msgID == "" {
 			msgID = uuid.New().String()
-		}
-
-		model := strings.TrimSpace(req.Model)
-		effort := strings.TrimSpace(req.Effort)
-		if effort == "" {
-			modelLower := strings.ToLower(model)
-			if strings.Contains(modelLower, "medium") {
-				effort = "medium"
-			} else if strings.Contains(modelLower, "flash") {
-				effort = "low"
-			}
 		}
 
 		msg := db.Message{
@@ -1844,31 +1848,20 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		return pcfg
 	}
 
-	primaryCfg := basePoolCfg(discordHome, cur.Model, nil)
-	discordPrimaryPool := runner.NewUnifiedProcessPool(primaryCfg, appOpts.processSpawner)
+	discordPools, discordPoolList := buildDiscordPools(basePoolCfg, discordHome, cur.Model, mediumEffortModel, lowEffortModel, appOpts.processSpawner)
 	ephemeralPool := newWorkerInterchangeablePool(basePoolCfg(ephemeralHome, lowEffortModel, []string{"ephemeral:worker-0", "ephemeral:worker-1"}), appOpts.processSpawner, "ephemeral:worker")
-	discordLowEffortPool := newWorkerInterchangeablePool(basePoolCfg(discordHome, lowEffortModel, []string{"discord:worker-0", "discord:worker-1"}), appOpts.processSpawner, "discord:worker")
-	discordMediumEffortPool := newWorkerInterchangeablePool(basePoolCfg(discordHome, mediumEffortModel, []string{"discord:medium-worker-0", "discord:medium-worker-1"}), appOpts.processSpawner, "discord:medium-worker")
 	var voicePool runner.AgentPool = createVoiceProcessPool(cfg, voiceHome, lowEffortModel, appOpts.processSpawner, memoryRetriever)
+	allPools := append(append([]runner.AgentPool{}, discordPoolList...), ephemeralPool, voicePool)
 
 	defer func() {
-		for _, p := range []struct {
-			name string
-			pool io.Closer
-		}{
-			{"discord primary", discordPrimaryPool},
-			{"ephemeral", ephemeralPool},
-			{"discord low effort", discordLowEffortPool},
-			{"discord medium effort", discordMediumEffortPool},
-			{"voice", voicePool},
-		} {
-			if err := p.pool.Close(); err != nil {
-				log.Printf("[WARN] Failed to close %s process pool: %v", p.name, err)
+		for _, p := range allPools {
+			if err := p.Close(); err != nil {
+				log.Printf("[WARN] Failed to close process pool: %v", err)
 			}
 		}
 	}()
 
-	PrewarmProcessPoolsSequentially(ctx, discordPrimaryPool, ephemeralPool, discordLowEffortPool, discordMediumEffortPool, voicePool)
+	PrewarmProcessPoolsSequentially(ctx, allPools...)
 	metrics.StartUsagePoller(ctx, 10*time.Minute, metrics.DefaultUsageRunner(cur.AgyBin, ephemeralHome, poolEnv, testing.Testing()))
 
 	cls := classifier.New(cfg, classifier.WithProcessPool(ephemeralPool))
@@ -1915,15 +1908,13 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	}
 
 	pool := queue.New(cfg, queue.WorkerPoolConfig{
-		Store:                   store,
-		Classifier:              cls,
-		SessionManager:          sessionMgr,
-		ProcessPool:             discordPrimaryPool,
-		LowEffortProcessPool:    discordLowEffortPool,
-		MediumEffortProcessPool: discordMediumEffortPool,
-		VoiceProcessPool:        voicePool,
-		LLMFunc:                 ephemeralPool.EphemeralLLMFunc("ephemeral:summarizer"),
-		AmbientResolver:         ambientResolver,
+		Store:            store,
+		Classifier:       cls,
+		SessionManager:   sessionMgr,
+		Pools:            discordPools,
+		VoiceProcessPool: voicePool,
+		LLMFunc:          ephemeralPool.EphemeralLLMFunc("ephemeral:summarizer"),
+		AmbientResolver:  ambientResolver,
 	})
 	pool.Start()
 

@@ -738,7 +738,7 @@ func (p *UnifiedProcessPool) AcquireLease(ctx context.Context, targetKey string)
 	}
 
 	var rec SessionRecord
-	if p.cfg.GetSessionRecord != nil && !strings.Contains(trimmedKey, ":") {
+	if p.cfg.GetSessionRecord != nil {
 		if r, rErr := p.cfg.GetSessionRecord(ctx, trimmedKey); rErr == nil {
 			rec = r
 		}
@@ -971,7 +971,7 @@ func (l *unifiedSessionLease) Release() error {
 			return
 		}
 
-		if newSessionID := newDaemon.SessionID(); l.pool.cfg.OnSessionRotated != nil && newSessionID != "" && !strings.Contains(l.targetKey, ":") {
+		if newSessionID := newDaemon.SessionID(); l.pool.cfg.OnSessionRotated != nil && newSessionID != "" {
 			if rotErr := l.pool.cfg.OnSessionRotated(context.Background(), l.targetKey, oldSessionID, newSessionID); rotErr != nil {
 				log.Printf("[UnifiedProcessPool] Persistence callback failed during rotation for %s: %v. Evicting daemon to maintain DB truth.", l.targetKey, rotErr)
 				if evictErr := l.pool.EvictSession(l.targetKey); evictErr != nil {

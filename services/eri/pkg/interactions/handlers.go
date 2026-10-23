@@ -98,9 +98,10 @@ func (r *Router) handleStatus(s *discordgo.Session, i *discordgo.InteractionCrea
 	}
 	if runtimeStr == "`Idle`" {
 		if pool := r.getPool(); pool != nil {
-			if procPool := pool.ProcessPool(); procPool != nil {
+			for _, procPool := range pool.StatefulProcessPools() {
 				if d, ok := procPool.Get(i.ChannelID); ok && d != nil && d.InflightCount() > 0 {
 					runtimeStr = fmt.Sprintf("`Active` (Turn in progress | %s elapsed)", formatRelativeDuration(time.Since(d.LastUsed())))
+					break
 				}
 			}
 		}
@@ -184,21 +185,15 @@ func (r *Router) closeThreadProcesses(threadID, reason string) {
 	if pool == nil {
 		return
 	}
-	pools := []struct {
-		desc string
-		p    *runner.UnifiedProcessPool
-	}{
-		{"process", pool.ProcessPool()},
-		{"low-effort process", pool.LowEffortProcessPool()},
-		{"medium-effort process", pool.MediumEffortProcessPool()},
-	}
-	for _, target := range pools {
-		if target.p == nil {
+	seen := make(map[*runner.UnifiedProcessPool]bool)
+	for _, target := range append(pool.StatefulProcessPools(), pool.ProcessPool(), pool.LowEffortProcessPool(), pool.MediumEffortProcessPool()) {
+		if target == nil || seen[target] {
 			continue
 		}
-		if d, ok := target.p.Get(threadID); ok && d != nil {
+		seen[target] = true
+		if d, ok := target.Get(threadID); ok && d != nil {
 			if err := d.Close(); err != nil {
-				log.Printf("[Interactions] Warning: failed to close %s on %s: %v", target.desc, reason, err)
+				log.Printf("[Interactions] Warning: failed to close process on %s: %v", reason, err)
 			}
 		}
 	}

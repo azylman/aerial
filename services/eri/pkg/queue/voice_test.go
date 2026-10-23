@@ -92,7 +92,7 @@ func setupVoiceTestPool(t *testing.T, tt *voiceTurnTestCase, cancelCaller contex
 	}
 	if tt.nilProcessPool {
 		p := New(nil, WorkerPoolConfig{})
-		p.processPool = nil
+		p.pools = nil
 		return p, nil, false
 	}
 	if tt.useVoiceHook {

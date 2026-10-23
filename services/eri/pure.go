@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/transcript"
 	"github.com/bwmarrin/discordgo"
@@ -258,4 +259,29 @@ func defaultDataDir(isTesting bool) string {
 		return filepath.Join(os.TempDir(), "aerial-test-data")
 	}
 	return "/data"
+}
+
+func buildDiscordPools(basePoolCfg func(home, model string, prewarmed []string) runner.PoolConfig, discordHome, highModel, medModel, lowModel string, spawner runner.DaemonSpawner) (map[queue.PoolKey]runner.AgentPool, []runner.AgentPool) {
+	pools := make(map[queue.PoolKey]runner.AgentPool, 5)
+	var ordered []runner.AgentPool
+	for _, k := range queue.AllValidPoolKeys() {
+		model := highModel
+		switch k.Effort {
+		case "medium":
+			model = medModel
+		case "low":
+			model = lowModel
+		}
+		var p runner.AgentPool
+		if !k.Ephemeral {
+			p = runner.NewUnifiedProcessPool(basePoolCfg(discordHome, model, nil), spawner)
+		} else if k.Effort == "medium" {
+			p = newWorkerInterchangeablePool(basePoolCfg(discordHome, model, []string{"discord:medium-worker-0", "discord:medium-worker-1"}), spawner, "discord:medium-worker")
+		} else {
+			p = newWorkerInterchangeablePool(basePoolCfg(discordHome, model, []string{"discord:worker-0", "discord:worker-1"}), spawner, "discord:worker")
+		}
+		pools[k] = p
+		ordered = append(ordered, p)
+	}
+	return pools, ordered
 }

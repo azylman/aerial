@@ -136,22 +136,6 @@ func (te *turnExecution) incrementMessageRetry(id, errorMsg string) {
 	}
 }
 
-func (te *turnExecution) releaseLease(activePool runner.AgentPool) {
-	if te == nil || te.lease == nil {
-		return
-	}
-	if relErr := te.lease.Release(); relErr != nil {
-		log.Printf("[WorkerPool] Warning releasing lease for %s: %v", te.threadID, relErr)
-	}
-	if te.isEphemeral && te.pool != nil {
-		if ep, ok := activePool.(interface{ EvictSession(string) error }); ok {
-			if err := ep.EvictSession(te.threadID); err != nil {
-				log.Printf("[WorkerPool] Warning evicting ephemeral session for %s: %v", te.threadID, err)
-			}
-		}
-	}
-}
-
 func (te *turnExecution) saveSessionID(threadID, sessionID string) {
 	if te == nil || te.isEphemeral {
 		return
@@ -189,7 +173,7 @@ func (te *turnExecution) finalizeBurstMessages(msgs []db.Message, msgStatus, msg
 }
 
 func (te *turnExecution) incrementSessionTurnCount(threadID string) (int, error) {
-	if te == nil || te.isEphemeral || (te.pool != nil && te.isNonPrimaryPool(te.resolveExecutionPool())) {
+	if te == nil || te.isEphemeral || isBurstEphemeral(te.burst) {
 		return 0, nil
 	}
 	if s := te.store(); s != nil {
@@ -416,6 +400,7 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 		triggerType: triggerType,
 		execStart:   time.Now().UTC(),
 		wakeIdx:     -1,
+		isEphemeral: isBurstEphemeral(burst),
 		stopTyping:  func() {},
 	}
 
@@ -460,9 +445,13 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 	}
 
 	// 1. Resolve active execution pool (primary vs medium vs low effort)
-	activePool := te.resolveExecutionPool()
+	activePool, poolKey, poolErr := te.resolveExecutionPool()
+	if poolErr != nil {
+		te.failBurst(poolErr)
+		return
+	}
 	te.activePool = activePool
-	te.isEphemeral = te.isNonPrimaryPool(activePool)
+	te.isEphemeral = poolKey.Ephemeral
 
 	if activePool == nil {
 		te.failBurst(fmt.Errorf("queue: no agent execution pool available for thread %s", te.threadID))
@@ -478,12 +467,16 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 		return
 	}
 	te.lease = lease
-	defer te.releaseLease(activePool)
+	defer func() {
+		if relErr := te.lease.Release(); relErr != nil {
+			log.Printf("[WorkerPool] Warning releasing lease for %s: %v", te.threadID, relErr)
+		}
+	}()
 
 	te.currentSessionID = lease.SessionID()
 	te.previousSessionID = lease.PreviousSessionID()
 	te.isCold = lease.IsCold()
-	te.isEphemeral = lease.IsEphemeral() || te.isNonPrimaryPool(activePool)
+	te.isEphemeral = poolKey.Ephemeral || lease.IsEphemeral()
 	te.turnCount = lease.TurnCount()
 
 	if te.currentSessionID != "" && te.isCold && !te.isEphemeral {
@@ -906,7 +899,7 @@ func (te *turnExecution) resolveAndPersistSessionID(candidateID, stdout, stderr 
 	defer te.activeSessionMu.Unlock()
 
 	targetSess := candidateID
-	if targetSess == "" && te.isNonPrimaryPool(te.activePool) {
+	if targetSess == "" && te.isEphemeral {
 		if d := getStreamingDaemon(te.activePool, te.threadID); d != nil && d.SessionID() != "" {
 			targetSess = d.SessionID()
 		}
@@ -928,8 +921,8 @@ func (te *turnExecution) resolveAndPersistSessionID(candidateID, stdout, stderr 
 			targetSess = d.SessionID()
 		}
 	}
-	if targetSess == "" && te.pool != nil && te.pool.processPool != nil && te.pool.processPool != te.activePool {
-		if d := getStreamingDaemon(te.pool.processPool, te.threadID); d != nil && d.SessionID() != "" {
+	if primaryPool := te.pool.AgentPool(); targetSess == "" && primaryPool != nil && primaryPool != te.activePool {
+		if d := getStreamingDaemon(primaryPool, te.threadID); d != nil && d.SessionID() != "" {
 			targetSess = d.SessionID()
 		}
 	}
@@ -1371,8 +1364,10 @@ func (te *turnExecution) executeWithRetries() {
 
 		activePool := te.activePool
 		if activePool == nil {
-			activePool = te.resolveExecutionPool()
-			te.activePool = activePool
+			if resolved, _, resolveErr := te.resolveExecutionPool(); resolveErr == nil {
+				activePool = resolved
+				te.activePool = activePool
+			}
 		}
 
 		var resp *runner.AgyResponse
@@ -1558,7 +1553,7 @@ func (te *turnExecution) executeWithRetries() {
 				te.lease = nil
 			}
 			if newLease, lErr := activePool.AcquireLease(te.pool.ctx, te.threadID); lErr == nil {
-				te.lease, te.isEphemeral, te.currentSessionID = newLease, newLease.IsEphemeral() || te.isNonPrimaryPool(activePool), newLease.SessionID()
+				te.lease, te.isEphemeral, te.currentSessionID = newLease, te.isEphemeral || newLease.IsEphemeral(), newLease.SessionID()
 			}
 			if shutdown := te.handleRetryBackoff(attempt, maxAttempts, errDetail, currentModel); shutdown {
 				return
