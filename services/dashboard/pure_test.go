@@ -494,6 +494,7 @@ func TestExtractServiceNameFromJobName_TableDriven(t *testing.T) {
 		{name: "brain service", jobName: "Build & Push brain (linux/amd64)", expected: "brain"},
 		{name: "dashboard service", jobName: "Build & Push dashboard", expected: "dashboard"},
 		{name: "proxy service", jobName: "test-proxy-service", expected: "proxy"},
+		{name: "haro service", jobName: "haro CI", expected: "haro"},
 		{name: "scheduler mcp", jobName: "scheduler-mcp CI", expected: "scheduler-mcp"},
 		{name: "coven service", jobName: "Build & Push coven", expected: "coven"},
 		{name: "discord mcp", jobName: "discord-mcp Tests", expected: "discord-mcp"},
@@ -535,7 +536,7 @@ func TestParseMatrixJobChips_TableDriven(t *testing.T) {
 		{name: "empty jobs returns empty slice", jobs: []GitHubJob{}, now: testRefTime, wantChips: []MatrixJobChip{}},
 		{name: "zero-time default fallback", jobs: []GitHubJob{mkJob(1, 10, "Build & Push Images (proxy)", "in_progress", "", -10*time.Second, 0)}, now: time.Time{}, wantChips: []MatrixJobChip{{Name: "proxy"}}},
 		{name: "in_progress job computes active status and duration from refTime", jobs: []GitHubJob{mkJob(1, 10, "brain-build", "in_progress", "", -45*time.Second, 0)}, now: testRefTime, wantChips: []MatrixJobChip{{Name: "brain", Status: "active", Duration: "45s"}}},
-		{name: "completed success and failure with deduplication", jobs: []GitHubJob{mkJob(1, 10, "dashboard-test", "completed", "success", -120*time.Second, -60*time.Second), mkJob(2, 10, "dashboard-duplicate", "completed", "failure", 0, 0), mkJob(3, 10, "scheduler-mcp", "completed", "failure", 0, 0), mkJob(4, 10, "discord-mcp", "completed", "cancelled", 0, 0)}, now: testRefTime, wantChips: []MatrixJobChip{{Name: "dashboard", Status: "completed", Duration: "60s"}, {Name: "scheduler-mcp", Status: "failed"}, {Name: "discord-mcp", Status: "pending"}}},
+		{name: "completed success and failure with deduplication", jobs: []GitHubJob{mkJob(1, 10, "dashboard-test", "completed", "success", -120*time.Second, -60*time.Second), mkJob(2, 10, "dashboard-duplicate", "completed", "failure", 0, 0), mkJob(3, 10, "haro", "completed", "failure", 0, 0), mkJob(4, 10, "discord-mcp", "completed", "cancelled", 0, 0)}, now: testRefTime, wantChips: []MatrixJobChip{{Name: "dashboard", Status: "completed", Duration: "60s"}, {Name: "haro", Status: "failed"}, {Name: "discord-mcp", Status: "pending"}}},
 		{name: "zero reference time defaults to now", jobs: []GitHubJob{mkJob(1, 10, "brain-build", "in_progress", "", -10*time.Second, 0)}, now: time.Time{}, wantChips: []MatrixJobChip{{Name: "brain", Status: "active"}}},
 	}
 
@@ -570,7 +571,7 @@ func TestBuildContainerChips_TableDriven(t *testing.T) {
 		{name: "empty containers returns empty slice", containers: []DockerContainerJSON{}, now: testRefTime, wantChips: []MatrixJobChip{}},
 		{name: "zero-time default fallback", containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", -60*time.Second)}, now: time.Time{}, wantChips: []MatrixJobChip{{Name: "brain"}}},
 		{name: "zero or future creation time defaults to 0s duration", containers: []DockerContainerJSON{mkLabeledCont("aerial-brain", "running", nil), mkCont("aerial-dashboard", "", "", "running", "", 10*time.Minute)}, now: testRefTime, wantChips: []MatrixJobChip{{Duration: "0s"}, {Duration: "0s"}}},
-		{name: "health status active for starting, failed for unhealthy or not running", containers: []DockerContainerJSON{mkCont("aerial-brain", "", "", "running", "starting", -120*time.Second), mkCont("aerial-proxy", "", "", "exited", "", -300*time.Second), mkCont("aerial-scheduler-mcp", "", "", "running", "unhealthy", -600*time.Second)}, now: testRefTime, wantChips: []MatrixJobChip{{Status: "active", Duration: "2m"}, {Status: "failed", Conclusion: "failure"}, {Status: "failed", Conclusion: "failure"}}},
+		{name: "health status active for starting, failed for unhealthy or not running", containers: []DockerContainerJSON{mkCont("aerial-brain", "", "", "running", "starting", -120*time.Second), mkCont("aerial-proxy", "", "", "exited", "", -300*time.Second), mkCont("aerial-haro", "", "", "running", "unhealthy", -600*time.Second)}, now: testRefTime, wantChips: []MatrixJobChip{{Status: "active", Duration: "2m"}, {Status: "failed", Conclusion: "failure"}, {Status: "failed", Conclusion: "failure"}}},
 		{name: "deduplicates running brain containers with future and current created", containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", 1*time.Hour), mkCont("aerial-brain", "brain", "", "running", "", 0)}, now: testRefTime, wantChips: []MatrixJobChip{{Name: "brain", Duration: "0s"}}},
 		{name: "nomad containers with alloc_id labels", containers: []DockerContainerJSON{
 			mkLabeledCont("brain-2a3a24e5-d6ce-2069-bad1-f328c7a24af0", "running", map[string]string{"aerial.service": "brain", "com.hashicorp.nomad.alloc_id": "2a3a24e5-d6ce-2069-bad1-f328c7a24af0"}),
@@ -844,7 +845,7 @@ func TestBuildTargetContainerChips_TableDriven(t *testing.T) {
 		{name: "empty targets falls back to all containers", targets: []string{}, startedAt: startedAt, wantChips: []MatrixJobChip{{Name: "dashboard"}, {Name: "brain"}, {Name: "proxy"}, {Name: "docs"}}},
 		{name: "scoped to single recently created target", targets: []string{"dashboard"}, startedAt: startedAt, wantChips: []MatrixJobChip{{Name: "dashboard", Status: "completed", Conclusion: "success", Duration: "30s"}}},
 		{name: "stale container reports active and pending duration", targets: []string{"brain"}, startedAt: startedAt, wantChips: []MatrixJobChip{{Name: "brain", Status: "active", Duration: "pending"}}},
-		{name: "missing container reports active and pending duration", targets: []string{"scheduler-mcp"}, startedAt: startedAt, wantChips: []MatrixJobChip{{Name: "scheduler-mcp", Status: "active", Duration: "pending"}}},
+		{name: "missing container reports active and pending duration", targets: []string{"haro"}, startedAt: startedAt, wantChips: []MatrixJobChip{{Name: "haro", Status: "active", Duration: "pending"}}},
 		{name: "starting health reports active and non-empty duration", targets: []string{"proxy"}, startedAt: startedAt, wantChips: []MatrixJobChip{{Name: "proxy", Status: "active"}}},
 		{name: "exited container reports failed and failure conclusion", targets: []string{"docs"}, startedAt: startedAt, wantChips: []MatrixJobChip{{Name: "docs", Status: "failed", Conclusion: "failure"}}},
 		{name: "multiple targets deduplicated and trimmed", targets: []string{"dashboard", " dashboard ", "docs", ""}, startedAt: startedAt, wantChips: []MatrixJobChip{{Name: "dashboard"}, {Name: "docs"}}},
@@ -1296,7 +1297,7 @@ func TestExtractAerialServiceName(t *testing.T) {
 	}{
 		{name: "Docker Compose container", container: mkLabeledCont("aerial-brain-1", "", map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}), expectedSvc: "brain", expectedOk: true},
 		{name: "Foreign Docker Compose project container", container: mkLabeledCont("homeassistant-web-1", "", map[string]string{"com.docker.compose.project": "homeassistant", "com.docker.compose.service": "web"}), expectedSvc: "", expectedOk: false},
-		{name: "Nomad container with aerial.service label", container: mkLabeledCont("scheduler-mcp-6f0e3a1d-8af5-f530-2ca8-eee83dfac17e", "", map[string]string{"aerial.service": "scheduler-mcp", "com.hashicorp.nomad.alloc_id": "6f0e3a1d-8af5-f530-2ca8-eee83dfac17e"}), expectedSvc: "scheduler-mcp", expectedOk: true},
+		{name: "Nomad container with aerial.service label", container: mkLabeledCont("haro-6f0e3a1d-8af5-f530-2ca8-eee83dfac17e", "", map[string]string{"aerial.service": "haro", "com.hashicorp.nomad.alloc_id": "6f0e3a1d-8af5-f530-2ca8-eee83dfac17e"}), expectedSvc: "haro", expectedOk: true},
 		{name: "Nomad container with alloc_id in name", container: mkLabeledCont("victoriametrics-mcp-6ca68da8-1599-0516-4c28-635658025294", "", map[string]string{"com.hashicorp.nomad.alloc_id": "6ca68da8-1599-0516-4c28-635658025294"}), expectedSvc: "victoriametrics-mcp", expectedOk: true},
 		{name: "Legacy container with aerial- prefix", container: mkCont("aerial-proxy", "", "", "", "", 0), expectedSvc: "proxy", expectedOk: true},
 		{name: "Host supervisor container (non-Aerial)", container: mkLabeledCont("hassio_supervisor", "", map[string]string{"io.hass.type": "supervisor"}), expectedSvc: "", expectedOk: false},

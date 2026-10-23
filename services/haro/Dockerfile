@@ -9,14 +9,16 @@ RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux go build -cover -covermode=atomic -trimpath -ldflags="-s -w" -o /app/scheduler-mcp .
+    CGO_ENABLED=0 GOOS=linux go build -cover -covermode=atomic -trimpath -ldflags="-s -w" -o /app/haro .
 
 FROM alpine:3.24
+
+LABEL org.opencontainers.image.title="aerial-haro"
 
 RUN apk add --no-cache tzdata
 
 WORKDIR /app
-COPY --from=builder --link /app/scheduler-mcp /app/scheduler-mcp
+COPY --from=builder --link /app/haro /app/haro
 
 ENV PORT=8080
 EXPOSE 8080
@@ -24,4 +26,4 @@ EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --start-interval=2s --retries=3 \
   CMD wget -q --spider http://127.0.0.1:8080/health || exit 1
 
-CMD ["/app/scheduler-mcp"]
+ENTRYPOINT ["/app/haro"]

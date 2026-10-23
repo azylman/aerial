@@ -979,6 +979,13 @@ func TestMCPProvisioning(t *testing.T) {
 			if (servers["scheduler"] != nil) != tc.wantScheduler {
 				t.Errorf("scheduler presence = %v, want %v", servers["scheduler"] != nil, tc.wantScheduler)
 			}
+			if tc.wantScheduler && servers["scheduler"] != nil {
+				if sMap, ok := servers["scheduler"].(map[string]interface{}); ok {
+					if sMap["serverUrl"] != "http://haro.aerial/mcp" {
+						t.Errorf("scheduler serverUrl = %v, want http://haro.aerial/mcp", sMap["serverUrl"])
+					}
+				}
+			}
 			if (servers["memory"] != nil) != tc.wantScheduler {
 				t.Errorf("memory presence = %v, want %v", servers["memory"] != nil, tc.wantScheduler)
 			}

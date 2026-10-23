@@ -22,7 +22,7 @@ func (p *Provisioner) LoadTargetMCPConfig(cfg *config.Config, target RuleTarget)
 	// Scheduler and memory are common across all runtimes except ephemeral
 	if target != TargetEphemeral {
 		mergedServers["scheduler"] = map[string]interface{}{
-			"serverUrl": "http://scheduler-mcp:8080/mcp",
+			"serverUrl": "http://haro.aerial/mcp",
 		}
 		mergedServers["memory"] = map[string]interface{}{
 			"serverUrl": "http://coven.aerial/mcp",

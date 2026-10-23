@@ -170,6 +170,7 @@ func TestStatusHandler(t *testing.T) {
 		{
 			name:            "NomadFallbackOnError",
 			nomadMode:       "error500",
+			dockerJSON:      "[]",
 			wantCode:        http.StatusOK,
 			wantMinServices: 1,
 			wantServiceName: "brain",
@@ -2184,12 +2185,12 @@ func TestFetchDockerClusterState_Extended(t *testing.T) {
 			Created: time.Now().UTC().Add(-time.Hour).Unix(),
 		},
 		{
-			Names:   []string{"/scheduler-mcp-6f0e3a1d-8af5-f530-2ca8-eee83dfac17e"},
+			Names:   []string{"/haro-6f0e3a1d-8af5-f530-2ca8-eee83dfac17e"},
 			State:   "running",
 			Status:  "Up 30 minutes (healthy)",
 			Created: time.Now().UTC().Add(-30 * time.Minute).Unix(),
 			Labels: map[string]string{
-				"aerial.service":               "scheduler-mcp",
+				"aerial.service":               "haro",
 				"com.hashicorp.nomad.alloc_id": "6f0e3a1d-8af5-f530-2ca8-eee83dfac17e",
 			},
 		},

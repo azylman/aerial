@@ -1347,7 +1347,7 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalN
 			uptimeSec := int64(time.Since(startTime).Seconds())
 			services = []ServiceStatus{
 				{Name: "brain", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-				{Name: "scheduler-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: "haro", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "coven", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "discord-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "docker-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},

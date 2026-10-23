@@ -1,4 +1,4 @@
-module github.com/azylman/aerial/mcp/scheduler-mcp
+module github.com/azylman/aerial/services/haro
 
 go 1.27.1
 

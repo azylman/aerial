@@ -34,7 +34,7 @@ func NewServer(handler *ToolHandler) *Server {
 	}
 
 	mcpServer := mcp.NewServer(&mcp.Implementation{
-		Name:    "scheduler-mcp",
+		Name:    "haro",
 		Version: "1.0.0",
 	}, nil)
 
@@ -121,10 +121,10 @@ var (
 func (s *Server) handleCoverageFlush(w http.ResponseWriter, r *http.Request) {
 	if dir := os.Getenv("GOCOVERDIR"); dir != "" {
 		if err := writeMetaDirFn(dir); err != nil {
-			log.Printf("[scheduler-mcp] coverage meta flush error: %v", err)
+			log.Printf("[haro] coverage meta flush error: %v", err)
 		}
 		if err := writeCountersDirFn(dir); err != nil {
-			log.Printf("[scheduler-mcp] coverage flush error: %v", err)
+			log.Printf("[haro] coverage flush error: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

@@ -9,27 +9,36 @@ import (
 func TestResolveConfigPath(t *testing.T) {
 	tmpDir := t.TempDir()
 	validLocal, emptyLocal, nonExistent := filepath.Join(tmpDir, "valid.yaml"), filepath.Join(tmpDir, "empty.yaml"), filepath.Join(tmpDir, "missing.yaml")
+	legacyFile := filepath.Join(tmpDir, "legacy.yaml")
 	_ = os.WriteFile(validLocal, []byte("port: '4004'\n"), 0o644)
 	_ = os.WriteFile(emptyLocal, []byte{}, 0o644)
+	_ = os.WriteFile(legacyFile, []byte("port: '4004'\n"), 0o644)
 
-	fallback := "/config/config.yaml"
+	fallback := "/config/haro.yaml"
 	tests := []struct {
-		name      string
-		envVal    string
-		localPath string
-		want      string
+		name       string
+		envVal     string
+		localPath  string
+		legacyPath string
+		want       string
 	}{
-		{"env override takes precedence", "/custom/override.yaml", validLocal, "/custom/override.yaml"},
-		{"local config non-empty exists", "", validLocal, validLocal},
-		{"local config empty falls back", "", emptyLocal, fallback},
-		{"local config missing falls back", "", nonExistent, fallback},
+		{"env override takes precedence", "/custom/override.yaml", validLocal, legacyFile, "/custom/override.yaml"},
+		{"local config non-empty exists", "", validLocal, legacyFile, validLocal},
+		{"local config empty falls back to legacy", "", emptyLocal, legacyFile, legacyFile},
+		{"local config missing falls back to legacy", "", nonExistent, legacyFile, legacyFile},
+		{"legacy missing falls back to default", "", nonExistent, nonExistent, fallback},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("CONFIG_PATH", tc.envVal)
 			oldLocal := localConfigPath
+			oldLegacy := legacyConfigPath
 			localConfigPath = tc.localPath
-			defer func() { localConfigPath = oldLocal }()
+			legacyConfigPath = tc.legacyPath
+			defer func() {
+				localConfigPath = oldLocal
+				legacyConfigPath = oldLegacy
+			}()
 
 			if got := ResolveConfigPath(fallback); got != tc.want {
 				t.Errorf("ResolveConfigPath(%q) = %q, want %q", fallback, got, tc.want)

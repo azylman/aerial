@@ -1454,7 +1454,7 @@ func extractMCPServers(cur *config.ConfigData, includeDiscord bool) []runner.MCP
 	serverMap := make(map[string]runner.MCPServerConfig)
 	serverMap["scheduler"] = runner.MCPServerConfig{
 		Name:      "scheduler",
-		ServerURL: "http://scheduler-mcp:8080/mcp",
+		ServerURL: "http://haro.aerial/mcp",
 	}
 	if cur != nil {
 		type srvJSON struct {

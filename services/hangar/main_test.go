@@ -642,9 +642,9 @@ func TestEnsureRepoAndSync_TableDriven(t *testing.T) {
 		localDir := filepath.Join(tempDir, "local")
 		_ = os.MkdirAll(filepath.Join(localDir, ".git"), 0o755)
 		configDir := filepath.Join(tempDir, "config")
-		_ = os.MkdirAll(filepath.Join(configDir, "services", "mcp"), 0o755)
+		_ = os.MkdirAll(filepath.Join(configDir, "services", "haro"), 0o755)
 		_ = os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("channels:\n  default:\n    mode: all\n"), 0o644)
-		_ = os.WriteFile(filepath.Join(configDir, "services", "mcp", "scheduler-mcp.yaml"), []byte("port: 4001\n"), 0o644)
+		_ = os.WriteFile(filepath.Join(configDir, "services", "haro", "haro.yaml"), []byte("port: 4001\n"), 0o644)
 
 		head1 := "1111111111111111111111111111111111111111"
 		head2 := "2222222222222222222222222222222222222222"
@@ -1234,10 +1234,10 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 			{name: "nomad_cli_failure_returns_error_homepage", target: "homepage", files: map[string]string{"services/homepage/homepage.yaml": "port: \"3001\"\n"}, nomadErr: true, wantErrSub: "failed updating Nomad variable"},
 
 			{name: "empty_dir_graceful_skip_service", target: "service"},
-			{name: "directory_instead_of_file_error", target: "service", dirAsFile: "services/mcp/scheduler-mcp.yaml", wantErrSub: "failed to read service config"},
-			{name: "invalid_yaml_syntax_in_service_config", target: "service", files: map[string]string{"services/mcp/scheduler-mcp.yaml": "invalid: yaml: [unclosed"}, wantErrSub: "invalid YAML syntax"},
-			{name: "disabled_nomad_addr_safe_noop_service", target: "service", files: map[string]string{"services/mcp/scheduler-mcp.yaml": "port: \"4005\"\n"}, disableNomad: true},
-			{name: "nomad_cli_failure_returns_error_service", target: "service", files: map[string]string{"services/mcp/scheduler-mcp.yaml": "port: \"4005\"\n"}, nomadErr: true, wantErrSub: "failed updating Nomad variable"},
+			{name: "directory_instead_of_file_error", target: "service", dirAsFile: "services/haro/haro.yaml", wantErrSub: "failed to read service config"},
+			{name: "invalid_yaml_syntax_in_service_config", target: "service", files: map[string]string{"services/haro/haro.yaml": "invalid: yaml: [unclosed"}, wantErrSub: "invalid YAML syntax"},
+			{name: "disabled_nomad_addr_safe_noop_service", target: "service", files: map[string]string{"services/haro/haro.yaml": "port: \"4005\"\n"}, disableNomad: true},
+			{name: "nomad_cli_failure_returns_error_service", target: "service", files: map[string]string{"services/haro/haro.yaml": "port: \"4005\"\n"}, nomadErr: true, wantErrSub: "failed updating Nomad variable"},
 		})
 	})
 
@@ -1309,9 +1309,9 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 				name: "service",
 				setup: func(dir string) {
 					for rel, content := range map[string]string{
-						"services/voice/voice.yaml":       "model: small.en\n",
-						"services/mcp/scheduler-mcp.yaml": "enabled: true\n",
-						"services/hangar/hangar.yaml":     "service_configs:\n  - rel_path: \"services/voice/voice.yaml\"\n    nomad_var: \"nomad/jobs/orin-voice\"\n    var_key: \"CONFIG_YAML\"\n  - rel_path: \"services/mcp/scheduler-mcp.yaml\"\n    nomad_var: \"nomad/jobs/scheduler-mcp\"\n    var_key: \"CONFIG_YAML\"\n",
+						"services/voice/voice.yaml":   "model: small.en\n",
+						"services/haro/haro.yaml":     "enabled: true\n",
+						"services/hangar/hangar.yaml": "service_configs:\n  - rel_path: \"services/voice/voice.yaml\"\n    nomad_var: \"nomad/jobs/orin-voice\"\n    var_key: \"CONFIG_YAML\"\n  - rel_path: \"services/haro/haro.yaml\"\n    nomad_var: \"nomad/jobs/haro\"\n    var_key: \"CONFIG_YAML\"\n",
 					} {
 						full := filepath.Join(dir, rel)
 						_ = os.MkdirAll(filepath.Dir(full), 0o755)

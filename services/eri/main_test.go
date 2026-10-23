@@ -1972,11 +1972,11 @@ func TestExtractMCPServers(t *testing.T) {
 
 	// 1. Nil config
 	nilVoice := extractMCPServers(nil, false)
-	if len(nilVoice) != 1 || nilVoice[0].Name != "scheduler" {
+	if len(nilVoice) != 1 || nilVoice[0].Name != "scheduler" || nilVoice[0].ServerURL != "http://haro.aerial/mcp" {
 		t.Fatalf("expected scheduler default for nil voice config, got: %+v", nilVoice)
 	}
 	nilAll := extractMCPServers(nil, true)
-	if len(nilAll) != 1 || nilAll[0].Name != "scheduler" {
+	if len(nilAll) != 1 || nilAll[0].Name != "scheduler" || nilAll[0].ServerURL != "http://haro.aerial/mcp" {
 		t.Fatalf("expected scheduler default for nil all config, got: %+v", nilAll)
 	}
 

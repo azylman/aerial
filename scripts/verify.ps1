@@ -12,7 +12,7 @@ $mode = if ($Staged) { "staged" } else { "full" }
 Write-Host "⚡ [Aerial Verify] Running $mode verification checks on Windows..." -ForegroundColor Cyan
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
-$goServices = @("services/eri", "mcp/scheduler-mcp", "mcp/discord-mcp", "services/dashboard", "services/hangar", "services/webhooks-router", "services/vanadis", "services/coven")
+$goServices = @("services/eri", "services/haro", "mcp/discord-mcp", "services/dashboard", "services/hangar", "services/webhooks-router", "services/vanadis", "services/coven")
 
 $gitCmd = if (Get-Command "git" -ErrorAction SilentlyContinue) { "git" }
           elseif (Test-Path "$env:LOCALAPPDATA\Programs\MinGit\cmd\git.exe") { 
