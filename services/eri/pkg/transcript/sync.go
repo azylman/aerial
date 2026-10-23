@@ -6,14 +6,11 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 )
-
-var transcriptSyncMutex sync.Mutex
 
 func isNilStore(s db.TranscriptStore) bool {
 	if s == nil {
@@ -44,11 +41,6 @@ func RunTranscriptSync(ctx context.Context, store db.TranscriptStore, cfg *confi
 	if isNilStore(store) {
 		return SyncStats{}, nil
 	}
-	if !transcriptSyncMutex.TryLock() {
-		log.Printf("[TranscriptSync] Sync already in progress, skipping overlapping sweep.")
-		return SyncStats{}, nil
-	}
-	defer transcriptSyncMutex.Unlock()
 
 	targetBrainDir := strings.TrimSpace(brainDir)
 	if targetBrainDir == "" && cfg != nil {
