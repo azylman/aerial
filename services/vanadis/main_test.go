@@ -550,11 +550,15 @@ func TestFormatChunkPrompt(t *testing.T) {
 		"Target Files: vanadis/main.go, vanadis/main_test.go", "Target Symbols: VanadisServer, FormatChunkPrompt",
 		"- [Chunk 3/3] Task 3: Webhook Advancement (azylman/aerial)", "optimizing all design and implementation choices for the `Build Objective`",
 		"Run after init: `grep -n -E \"VanadisServer|FormatChunkPrompt\" \"$SCRATCH_DIR/vanadis/main.go\" \"$SCRATCH_DIR/vanadis/main_test.go\"`",
-		"5. Submit via `/share/aerial/scripts/aerial-pr.sh submit \"$SCRATCH_DIR\" \"<commit_msg>\" --vanadis-chunk build-999-chunk-2`",
+		"4. Submit via `/share/aerial/scripts/aerial-pr.sh submit \"$SCRATCH_DIR\" \"<commit_msg>\" --vanadis-chunk build-999-chunk-2`",
+		"5. Terminate turn immediately after submission.",
 	} {
 		if !strings.Contains(p1, want) {
 			t.Fatalf("prompt for chunk 1 missing %q:\n%s", want, p1)
 		}
+	}
+	if strings.Contains(p1, "review the full `git diff`") {
+		t.Fatalf("prompt for chunk 1 should not contain review git diff step:\n%s", p1)
 	}
 	if strings.Contains(p1, "=== Acceptance Criteria ===") || strings.Contains(p0, "Run after init:") {
 		t.Fatalf("unexpected prompt headers: p1=%s p0=%s", p1, p0)
