@@ -2365,34 +2365,6 @@ func (s *RouterServer) dispatchDeploymentSuccessPrompt(ctx context.Context, targ
 	return s.dispatchAlertWithPrompt(ctx, targetID, "deploy_success", "", strings.Join(lines, "\n"))
 }
 
-func (s *RouterServer) dispatchCIFailurePrompt(ctx context.Context, targetID, checkName, repo, headSHA string, prNum int, details, checkURL string) error {
-	dmMsg := fmt.Sprintf("❌ %sCI check %q failed. Following up...", formatDirectMessagePrefix(prNum, repo), checkName)
-	if prNum > 0 {
-		banner := fmt.Sprintf("CI check %q failed", checkName)
-		if s.registry != nil {
-			if _, isPg := s.registry.(*PostgresPRRegistry); isPg {
-				if err := s.SyncPRWidget(ctx, repo, prNum, "failed", banner, nil); err == nil {
-					dmMsg = ""
-				}
-			}
-		}
-	}
-	var urlLine string
-	if cleanURL := strings.TrimSpace(checkURL); cleanURL != "" {
-		urlLine = "Check URL: " + cleanURL
-	}
-	directive := "Please investigate and fix the failure by inspecting the failing logs, diagnosing the issue, verifying with local checks, and pushing a fix."
-	if isRoboRevCheck(checkName) {
-		directive = fmt.Sprintf("Please critically evaluate each RoboRev finding against codebase reality and architectural intent (RoboRev has read-only repo tools but lacks thread/build/cross-repo context: treat purely mechanical and objective findings like duplicate code, dead code, invariant violations, or concrete bugs/security issues as high-trust, while verifying subjective design suggestions or unverified caller assumptions before acting). Fix verified issues, add concise inline comments for non-obvious invariants (and consider adding general architectural principles to .roborev.toml only when a gap reflects a broad repo-wide pattern rather than a one-off fix), or—if the remaining findings are false positives or conflict with architectural invariants—run '/share/aerial/scripts/aerial-pr.sh --repo %s override-roborev %d '<technical_rebuttal>' to record your rebuttal on the PR and pass the gate.", firstNonEmpty(cleanRepoName(repo), "aerial"), prNum)
-	}
-	prompt := formatErrorDetailsBlock(
-		fmt.Sprintf("CI check %q failed for PR #%d on %s (head commit: %s).", checkName, prNum, repo, headSHA),
-		details, urlLine,
-		directive,
-	)
-	return s.dispatchAlertWithPrompt(ctx, targetID, "ci_failed", dmMsg, prompt, s.vanadisPromptOpts(ctx, repo, prNum))
-}
-
 func (s *RouterServer) dispatchConflictPrompt(ctx context.Context, targetID, repo, branch, headSHA string, prNum int) error {
 	dmMsg := fmt.Sprintf("⛔ %sMerge conflict detected. Following up...", formatDirectMessagePrefix(prNum, repo))
 	if prNum > 0 {
@@ -2464,34 +2436,6 @@ func (s *RouterServer) fetchPRDetails(ctx context.Context, repo string, prNumber
 		return nil, err
 	}
 	return &details, nil
-}
-
-func (s *RouterServer) fetchLatestRoboRevComment(ctx context.Context, repo string, prNumber int, headSHA string) string {
-	repo = normalizeRepo(repo)
-	if s == nil || repo == "" || prNumber <= 0 {
-		return ""
-	}
-	var comments []GitHubIssueComment
-	path := fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=100", repo, prNumber)
-	if err := s.getGitHubJSON(ctx, path, 2<<20, &comments); err != nil {
-		log.Printf("[webhooks-router] [github] warning fetching roborev comments for %s#%d: %v", repo, prNumber, err)
-		return ""
-	}
-	shortSHA := strings.TrimSpace(headSHA)
-	if len(shortSHA) > 7 {
-		shortSHA = shortSHA[:7]
-	}
-	for i := len(comments) - 1; i >= 0; i-- {
-		body := strings.TrimSpace(comments[i].Body)
-		if !strings.Contains(body, "## roborev:") {
-			continue
-		}
-		if shortSHA != "" && !strings.Contains(body, "`"+shortSHA) && !strings.Contains(body, headSHA) {
-			continue
-		}
-		return truncatePromptRunes(body, maxRoboRevCommentRunes)
-	}
-	return ""
 }
 
 func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) error {
@@ -2952,35 +2896,6 @@ func (s *RouterServer) canRecoverRoboRevSuccess(ctx context.Context, repo string
 	}
 	comment := s.fetchLatestRoboRevComment(ctx, repo, prNumber, headSHA)
 	return comment != "" && !strings.Contains(comment, "## roborev: Review Passed")
-}
-
-func (s *RouterServer) completeCIFailureTransition(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) error {
-	if res.PRNumber > 0 && isRoboRevCheck(res.CheckName) {
-		if comment := s.fetchLatestRoboRevComment(ctx, res.Repo, res.PRNumber, res.HeadSHA); comment != "" {
-			details = comment
-		}
-	}
-	if res.PRNumber > 0 {
-		failCount, fcErr := s.registry.IncrementCIFailCount(ctx, res.Repo, res.PRNumber)
-		if fcErr != nil {
-			log.Printf("[webhooks-router] [registry] warning incrementing ci_fail_count for %s#%d: %v", res.Repo, res.PRNumber, fcErr)
-		}
-		if failCount > maxCIRemediationAttempts {
-			if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber, "failed", fmt.Sprintf("CI remediation cap (%d/%d) reached — awaiting human review", maxCIRemediationAttempts, maxCIRemediationAttempts), nil); err != nil {
-				log.Printf("[webhooks-router] [widget] sync pr widget error: %v", err)
-			}
-			if s.dispatcher != nil && IsValidDiscordSnowflake(res.TargetID) {
-				if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{
-					ChannelID: res.TargetID,
-					Content:   fmt.Sprintf("🛑 %sCI check %q failed %d times (remediation cap %d/%d reached). Automatic fix loop paused for human review.", formatDirectMessagePrefix(res.PRNumber, res.Repo), res.CheckName, failCount, maxCIRemediationAttempts, maxCIRemediationAttempts),
-				}); err != nil {
-					log.Printf("[webhooks-router] [dispatcher] error dispatching cap direct message: %v", err)
-				}
-			}
-			return nil
-		}
-	}
-	return s.dispatchCIFailurePrompt(ctx, res.TargetID, res.CheckName, res.Repo, res.HeadSHA, res.PRNumber, details, checkURL)
 }
 
 func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) error {
