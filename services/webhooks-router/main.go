@@ -486,10 +486,12 @@ type PRRegistryUpdater interface {
 	AdvanceVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisAdvancementResult, error)
 	ShouldSuppressVanadisDeployWake(ctx context.Context, repo string, prNumber int) (bool, error)
 	FailVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (bool, error)
+	FailVanadisChunkDetailsByPR(ctx context.Context, repo string, prNumber int) (buildID, chunkID string, failed bool, err error)
 	IncrementCIFailCount(ctx context.Context, repo string, prNumber int) (int, error)
 	EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID, vanadisChunkID string) (string, error)
 	RecordExpectedJobs(ctx context.Context, repo string, prNumber int, jobs []string) (bool, error)
 	HasExpectedDeployJobs(ctx context.Context, repo string, prNumber int) (bool, error)
+	ClaimEventTriggers(ctx context.Context, source string, targets []string, eventType string) ([]ClaimedEventTrigger, error)
 }
 
 // ChannelMessageContext holds historical conversation snippets for prompt enrichment.
@@ -1202,32 +1204,8 @@ func (r *PostgresPRRegistry) ShouldSuppressVanadisDeployWake(ctx context.Context
 }
 
 func (r *PostgresPRRegistry) FailVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (bool, error) {
-	repo = normalizeRepo(repo)
-	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
-		return false, nil
-	}
-	query := `
-		UPDATE vanadis_chunks c
-		SET status = 'failed', updated_at = CURRENT_TIMESTAMP
-		FROM vanadis_builds b
-		WHERE c.build_id = b.id AND c.repo = $1 AND c.pr_number = $2 AND c.status NOT IN ('merged', 'failed')
-		RETURNING c.build_id;`
-	var buildID string
-	found, err := r.queryRowScan(ctx, "fail vanadis chunk by pr", query, []any{&buildID}, repo, prNumber)
-	if err != nil {
-		return false, err
-	}
-	if !found {
-		return false, nil
-	}
-
-	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	updateBuild := `UPDATE vanadis_builds SET status = 'failed', updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND status = 'running';`
-	if _, err := r.pool.Exec(qCtx, updateBuild, buildID); err != nil {
-		return false, fmt.Errorf("fail vanadis build by pr: %w", err)
-	}
-	return true, nil
+	_, _, failed, err := r.FailVanadisChunkDetailsByPR(ctx, repo, prNumber)
+	return failed, err
 }
 
 // Discord Snowflake validation
@@ -2109,6 +2087,7 @@ func (s *RouterServer) advanceVanadisChunk(ctx context.Context, repo string, prN
 	if res == nil || !res.Matched || !res.Advanced {
 		return nil
 	}
+	s.evaluateVanadisAdvancementTriggers(ctx, repo, prNumber, res)
 	if !res.BuildCompleted && res.NextChunkIndex >= 0 {
 		if s.riverClient != nil {
 			if err := s.insertRiverJob(ctx, VanadisExecuteChunkArgs{
@@ -2151,6 +2130,8 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 
 	log.Printf("[webhooks-router] [hangar] [deploy] event=%s job=%s repo=%s pr=%d commit=%s status=%s target_id=%s deployment_id=%s details=%q",
 		evt.Event, evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA, evt.Status, evt.TargetID, evt.DeploymentID, evt.Details)
+
+	s.evaluateHangarEventTriggers(ctx, evt)
 
 	if s.registry != nil && evt.PRNumber > 0 && evt.Event == "deploy_started" && evt.JobName != "" {
 		if len(evt.ExpectedJobs) > 0 {
@@ -2942,6 +2923,7 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 		defer s.onProcessed(event, delivery)
 	}
 	res := &ResolvedGitHubEvent{Event: event, Delivery: delivery}
+	defer s.evaluateGitHubEventTriggers(ctx, res, body)
 
 	switch event {
 	case "ping":
@@ -3011,7 +2993,7 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 						return nil, err
 					}
 					res.TargetID = firstNonEmpty(res.TargetID, targetID)
-					if _, err := s.registry.FailVanadisChunkByPR(ctx, res.Repo, res.PRNumber); err != nil {
+					if err := s.failVanadisChunk(ctx, res.Repo, res.PRNumber, "pr_closed_unmerged"); err != nil {
 						log.Printf("[webhooks-router] [vanadis] warning failing vanadis chunk for closed unmerged PR %s#%d: %v", res.Repo, res.PRNumber, err)
 					}
 					if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber, "closed", "", nil); err != nil {

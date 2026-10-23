@@ -609,6 +609,7 @@ func (s *RouterServer) HandleNomadJobFailure(ctx context.Context, jobID, refID, 
 	if cleanJob == "" {
 		return nil
 	}
+	s.evaluateNomadEventTriggers(ctx, cleanJob, "deploy_failed", refID, statusDesc)
 	if s.registry == nil {
 		return s.HandleUnmanagedJobCrash(ctx, cleanJob, refID, status, statusDesc)
 	}
@@ -641,7 +642,11 @@ func (s *RouterServer) HandleNomadJobFailure(ctx context.Context, jobID, refID, 
 // HandleNomadJobSuccess processes a confirmed successful deployment or running allocation for a Nomad job.
 func (s *RouterServer) HandleNomadJobSuccess(ctx context.Context, jobID, refID string) error {
 	cleanJob := strings.TrimSpace(jobID)
-	if s.registry == nil || cleanJob == "" {
+	if cleanJob == "" {
+		return nil
+	}
+	s.evaluateNomadEventTriggers(ctx, cleanJob, "deploy_success", refID, "")
+	if s.registry == nil {
 		return nil
 	}
 	targetID, prNumber, mergeSHA, repo, updated, err := s.registry.AtomicTransitionDeployedByJob(ctx, cleanJob)
