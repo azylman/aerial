@@ -155,7 +155,8 @@ func makeSessionCallbacks(store db.Store) (func(context.Context, string) (runner
 }
 
 func wirePoolSessionDependencies(primaryPool runner.AgentPool, auxPools []runner.AgentPool, sessionMgr *session.Manager, store db.Store) {
-	for _, pool := range append([]runner.AgentPool{primaryPool}, auxPools...) {
+	allPools := append([]runner.AgentPool{primaryPool}, auxPools...)
+	for _, pool := range allPools {
 		if pool == nil {
 			continue
 		}
@@ -171,16 +172,24 @@ func wirePoolSessionDependencies(primaryPool runner.AgentPool, auxPools []runner
 		}
 	}
 
-	// Session persistence callbacks are exclusively wired to the primary pool.
-	// Ephemeral / interchangeable pools operate on recycled internal worker slots (e.g., "discord:worker-0")
-	// and must never read or write persistent session state in the database.
-	if store != nil && primaryPool != nil {
-		if _, isInter := primaryPool.(*runner.InterchangeablePool); !isInter {
-			getRec, onRot := makeSessionCallbacks(store)
-			if sc, ok := primaryPool.(interface {
+	// Wire session persistence callbacks to all pools and their underlying UnifiedProcessPools.
+	// When non-ephemeral turns run on auxiliary pools (e.g. low/medium effort explicit persistent turns),
+	// resolveExecutionPool unwraps them to run directly against the underlying pool using the thread ID.
+	// Internal interchangeable worker slots (e.g. "discord:worker-0" or "ephemeral:worker-0") are guarded
+	// inside makeSessionCallbacks and UnifiedProcessPool by strings.Contains(targetKey, ":").
+	if store != nil {
+		getRec, onRot := makeSessionCallbacks(store)
+		for _, pool := range allPools {
+			if pool == nil {
+				continue
+			}
+			if sc, ok := pool.(interface {
 				SetSessionCallbacks(func(context.Context, string) (runner.SessionRecord, error), func(context.Context, string, string, string) error)
 			}); ok {
 				sc.SetSessionCallbacks(getRec, onRot)
+			}
+			if up := unwrapUnifiedPool(pool); up != nil {
+				up.SetSessionCallbacks(getRec, onRot)
 			}
 		}
 	}

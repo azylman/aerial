@@ -1294,6 +1294,100 @@ func TestWorker_EphemeralOnPrimaryPool_GuardsSessionAndEvicts(t *testing.T) {
 	}
 }
 
+func TestWorker_ExplicitNonEphemeralAuxPool_ResumesAndPersistsSession(t *testing.T) {
+	t.Parallel()
+	store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
+	existingSessUUID := "11111111-1111-1111-1111-111111111111"
+	rotatedSessUUID := "22222222-2222-2222-2222-222222222222"
+
+	var mu sync.Mutex
+	var spawnedSessionID string
+
+	spawner := &mockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			mu.Lock()
+			spawnedSessionID = cfg.SessionID
+			mu.Unlock()
+
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
+			go func() {
+				defer outW.Close()
+				_, _ = outW.Write([]byte(fmt.Sprintf("{\"event\":\"init\",\"conversation_id\":%q}\n", rotatedSessUUID)))
+				buf := make([]byte, 16384)
+				for {
+					n, rErr := inR.Read(buf)
+					if rErr != nil {
+						return
+					}
+					if n > 0 {
+						_, _ = outW.Write([]byte(fmt.Sprintf("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok\",\"conversation_id\":%q,\"usage\":{\"total_tokens\":5}}}\n", rotatedSessUUID)))
+					}
+				}
+			}()
+			return inW, outR, errR, newMockProcessHandle(23456), nil
+		},
+	}
+
+	primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, newMockSpawner())
+	defer primaryPool.Close()
+
+	lowUnderlying := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, spawner)
+	defer lowUnderlying.Close()
+
+	lowPool := runner.NewInterchangeablePool(lowUnderlying, runner.InterchangeablePoolConfig{WorkerCount: 1, KeyPrefix: "discord:worker"})
+	defer lowPool.Close()
+
+	cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir, d.LowEffortModel = tempData, "gemini-3.8-flash-low" })
+	doneCh := make(chan struct{}, 1)
+	pool := New(cfg, WorkerPoolConfig{
+		ProcessPool: primaryPool, LowEffortProcessPool: lowPool,
+		SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1,
+		OnMessageCompleted: func(msg db.Message, status string) {
+			if status == db.StatusCompleted {
+				doneCh <- struct{}{}
+			}
+		},
+	})
+	defer pool.Stop()
+
+	threadID := "1560318118792790888"
+	ctx := context.Background()
+	_ = store.SaveSessionID(ctx, threadID, existingSessUUID)
+
+	falseVal := false
+	msg := db.Message{
+		ID: "msg-explicit-nonephem-low", ThreadID: threadID, Content: "execute persistent low effort",
+		Effort: "low", Metadata: db.MessageMetadata{Ephemeral: &falseVal}, Status: db.StatusPending, CreatedAt: time.Now(),
+	}
+	_ = store.InsertMessage(ctx, msg)
+	pool.Enqueue(msg)
+	select {
+	case <-doneCh:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for non-ephemeral low turn")
+	}
+	pool.Stop()
+
+	mu.Lock()
+	gotSpawned := spawnedSessionID
+	mu.Unlock()
+
+	if gotSpawned != existingSessUUID {
+		t.Errorf("expected spawner to receive existing session %s, got %s", existingSessUUID, gotSpawned)
+	}
+
+	currentSess, err := store.GetSessionID(ctx, threadID)
+	if err != nil {
+		t.Fatalf("GetSessionID error: %v", err)
+	}
+	if currentSess != rotatedSessUUID {
+		t.Errorf("expected rotated session %s to be persisted in DB, got %s", rotatedSessUUID, currentSess)
+	}
+}
+
 func TestWorker_DualPool_YieldTrapFallback(t *testing.T) {
 	t.Parallel()
 	store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()

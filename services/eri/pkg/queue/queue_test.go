@@ -2685,10 +2685,10 @@ func TestWorkerPool_WirePoolSessionDependencies_TableDriven(t *testing.T) {
 		wantMgrWired         bool
 	}{
 		{
-			name:                 "primary receives callbacks and manager, aux receives only manager",
+			name:                 "both primary and aux receive callbacks and manager when store provided",
 			hasStore:             true,
 			wantPrimaryCallbacks: true,
-			wantAuxCallbacks:     false,
+			wantAuxCallbacks:     true,
 			wantMgrWired:         true,
 		},
 		{
