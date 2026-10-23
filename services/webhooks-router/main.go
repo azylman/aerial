@@ -525,15 +525,17 @@ type PRRegistryUpdater interface {
 
 // ChannelMessageContext holds historical conversation snippets for prompt enrichment.
 // StatusWidgetChunk represents a chunk in a Vanadis build or a PR task.
+// Note: eri's BuildStatusWidgetComponents (services/eri/pkg/discord/widget.go) renders
+// chunk status badges, repo tags, titles, PR links, and runtime durations only; it does
+// not display per-job deploying_jobs lists.
 type StatusWidgetChunk struct {
-	Index         int       `json:"index"`
-	Repo          string    `json:"repo"`
-	Title         string    `json:"title"`
-	Status        string    `json:"status"`
-	PRNumber      int       `json:"pr_number,omitempty"`
-	DeployingJobs []string  `json:"deploying_jobs,omitempty"`
-	StartedAt     time.Time `json:"started_at,omitempty"`
-	UpdatedAt     time.Time `json:"updated_at,omitempty"`
+	Index     int       `json:"index"`
+	Repo      string    `json:"repo"`
+	Title     string    `json:"title"`
+	Status    string    `json:"status"`
+	PRNumber  int       `json:"pr_number,omitempty"`
+	StartedAt time.Time `json:"started_at,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
 }
 
 // StatusWidgetRequest represents a request to deliver or update a Discord status tracker widget.
@@ -2273,6 +2275,9 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 		}
 		return &evt, nil
 	case "deploy_success":
+		if evt.PRNumber > 0 {
+			s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "deployed", "")
+		}
 		return &evt, s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, evt.JobName, evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID)
 	case "deploy_rollback", "deploy_failed":
 		targetID := evt.TargetID
