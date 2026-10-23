@@ -36,6 +36,24 @@ type OneShotSchedule struct {
 	Effort    string    `json:"effort,omitempty"`
 }
 
+type ScheduleRun struct {
+	ID           string     `json:"id"`
+	ScheduleID   string     `json:"schedule_id"`
+	ScheduleType string     `json:"schedule_type"`
+	MessageID    string     `json:"message_id"`
+	TargetID     string     `json:"target_id"`
+	ThreadID     string     `json:"thread_id"`
+	Title        string     `json:"title"`
+	Prompt       string     `json:"prompt"`
+	Status       string     `json:"status"`
+	StartedAt    time.Time  `json:"started_at"`
+	CompletedAt  *time.Time `json:"completed_at,omitempty"`
+	DurationMs   int64      `json:"duration_ms"`
+	Error        string     `json:"error,omitempty"`
+	Effort       string     `json:"effort,omitempty"`
+	Model        string     `json:"model,omitempty"`
+}
+
 func OpenDB(cfg *Config) (*sql.DB, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
@@ -303,4 +321,141 @@ func DeleteSchedule(ctx context.Context, database *sql.DB, scheduleID string) (b
 		total += rows
 	}
 	return total > 0, nil
+}
+
+func GetDueCronSchedules(ctx context.Context, database *sql.DB, now time.Time) ([]CronSchedule, error) {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return nil, err
+	}
+	baseQuery := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM cron_schedules WHERE enabled = TRUE AND next_run_at <= ? ORDER BY next_run_at ASC`
+	rows, err := database.QueryContext(ctx, rebindQuery(baseQuery, isPostgres(database)), now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []CronSchedule
+	for rows.Next() {
+		var c CronSchedule
+		if err := rows.Scan(&c.ID, &c.TargetID, &c.TitlePrefix, &c.CronExpr, &c.Prompt, &c.Timezone, &c.NextRunAt, &c.Enabled, &c.CreatedAt, &c.Effort); err != nil {
+			return nil, err
+		}
+		results = append(results, c)
+	}
+	return results, rows.Err()
+}
+
+func AdvanceCronNextRun(ctx context.Context, database *sql.DB, id string, nextRun time.Time) error {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return err
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("schedule_id cannot be empty")
+	}
+	query := rebindQuery(`UPDATE cron_schedules SET next_run_at = ? WHERE id = ?`, isPostgres(database))
+	res, err := database.ExecContext(ctx, query, nextRun, id)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to determine rows affected: %w", err)
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("cron schedule %q not found", id)
+	}
+	return nil
+}
+
+func GetDueOneShotSchedules(ctx context.Context, database *sql.DB, now time.Time) ([]OneShotSchedule, error) {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return nil, err
+	}
+	baseQuery := `SELECT id, thread_id, prompt, run_at, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM one_shot_schedules WHERE run_at <= ? ORDER BY run_at ASC`
+	rows, err := database.QueryContext(ctx, rebindQuery(baseQuery, isPostgres(database)), now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []OneShotSchedule
+	for rows.Next() {
+		var s OneShotSchedule
+		if err := rows.Scan(&s.ID, &s.ThreadID, &s.Prompt, &s.RunAt, &s.CreatedAt, &s.Effort); err != nil {
+			return nil, err
+		}
+		results = append(results, s)
+	}
+	return results, rows.Err()
+}
+
+func DeleteOneShotSchedule(ctx context.Context, database *sql.DB, id string) (bool, error) {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return false, err
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false, fmt.Errorf("schedule_id cannot be empty")
+	}
+	query := rebindQuery(`DELETE FROM one_shot_schedules WHERE id = ?`, isPostgres(database))
+	res, err := database.ExecContext(ctx, query, id)
+	if err != nil {
+		return false, err
+	}
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("failed to determine rows affected: %w", err)
+	}
+	return rowsAffected > 0, nil
+}
+
+func CreateScheduleRun(ctx context.Context, database *sql.DB, r ScheduleRun) error {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(r.ID) == "" {
+		return fmt.Errorf("run id cannot be empty")
+	}
+	if r.StartedAt.IsZero() {
+		r.StartedAt = time.Now().UTC()
+	}
+	query := rebindQuery(`INSERT INTO schedule_runs (id, schedule_id, schedule_type, message_id, target_id, thread_id, title, prompt, status, started_at, completed_at, duration_ms, error, effort, model) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, isPostgres(database))
+	_, err = database.ExecContext(ctx, query,
+		r.ID,
+		r.ScheduleID,
+		r.ScheduleType,
+		r.MessageID,
+		r.TargetID,
+		r.ThreadID,
+		r.Title,
+		r.Prompt,
+		r.Status,
+		r.StartedAt,
+		r.CompletedAt,
+		r.DurationMs,
+		r.Error,
+		normalizeScheduleEffort(r.Effort),
+		r.Model,
+	)
+	return err
+}
+
+func PruneScheduleRuns(ctx context.Context, database *sql.DB, maxCount int, maxAge time.Duration, now time.Time) (int64, error) {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return 0, err
+	}
+	cutoff := now.Add(-maxAge)
+	query := rebindQuery(`DELETE FROM schedule_runs WHERE started_at < ? OR id NOT IN (SELECT id FROM schedule_runs ORDER BY started_at DESC, id DESC LIMIT ?)`, isPostgres(database))
+	res, err := database.ExecContext(ctx, query, cutoff, maxCount)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }

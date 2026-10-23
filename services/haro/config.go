@@ -43,12 +43,19 @@ type Config struct {
 	DatabaseURL string
 	Timezone    string `yaml:"timezone"`
 	Port        string `yaml:"port"`
+	BrainURL    string `yaml:"brain_url"`
 }
 
 // SchedulerYAMLConfig defines the declarative file schema for /config/config.yaml.
 type SchedulerYAMLConfig struct {
 	Port     string `yaml:"port"`
 	Timezone string `yaml:"timezone"`
+	BrainURL string `yaml:"brain_url"`
+}
+
+// LoadConfig loads configuration from path using DATABASE_URL from the environment.
+func LoadConfig(path string) (*Config, error) {
+	return LoadConfigFile(path, os.Getenv("DATABASE_URL"))
 }
 
 // LoadConfigFile loads and validates the YAML config from path.
@@ -82,9 +89,23 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		return nil, fmt.Errorf("config: database connection string is required")
 	}
 
+	brainURL := os.Getenv("BRAIN_INTERNAL_URL")
+	if brainURL == "" {
+		brainURL = os.Getenv("BRAIN_URL")
+	}
+	if brainURL == "" {
+		brainURL = ycfg.BrainURL
+	}
+	brainURL = strings.TrimSpace(brainURL)
+	if brainURL == "" {
+		brainURL = "http://eri.aerial"
+	}
+	brainURL = strings.TrimRight(brainURL, "/")
+
 	return &Config{
 		DatabaseURL: cleanDB,
 		Timezone:    tz,
 		Port:        port,
+		BrainURL:    brainURL,
 	}, nil
 }
