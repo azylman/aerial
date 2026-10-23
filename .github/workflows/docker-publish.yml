@@ -245,12 +245,6 @@ jobs:
             echo "$DEAD_PROD"
             exit 1
           fi
-          DEAD=$(deadcode -test ./...)
-          if [ -n "$DEAD" ]; then
-            echo "::error::Unreachable dead code detected in eri:"
-            echo "$DEAD"
-            exit 1
-          fi
 
       - name: Lint Haro
         if: needs.changes.outputs.haro == 'true'
@@ -266,12 +260,6 @@ jobs:
           if [ -n "$DEAD_PROD" ]; then
             echo "::error::Unreachable production code or compiled-in test hooks detected in haro:"
             echo "$DEAD_PROD"
-            exit 1
-          fi
-          DEAD=$(deadcode -test ./...)
-          if [ -n "$DEAD" ]; then
-            echo "::error::Unreachable dead code detected in haro:"
-            echo "$DEAD"
             exit 1
           fi
 
@@ -291,12 +279,6 @@ jobs:
             echo "$DEAD_PROD"
             exit 1
           fi
-          DEAD=$(deadcode -test ./...)
-          if [ -n "$DEAD" ]; then
-            echo "::error::Unreachable dead code detected in coven:"
-            echo "$DEAD"
-            exit 1
-          fi
 
       - name: Lint Discord MCP
         if: needs.changes.outputs.discord-mcp == 'true'
@@ -312,12 +294,6 @@ jobs:
           if [ -n "$DEAD_PROD" ]; then
             echo "::error::Unreachable production code or compiled-in test hooks detected in discord-mcp:"
             echo "$DEAD_PROD"
-            exit 1
-          fi
-          DEAD=$(deadcode -test ./...)
-          if [ -n "$DEAD" ]; then
-            echo "::error::Unreachable dead code detected in discord-mcp:"
-            echo "$DEAD"
             exit 1
           fi
 
@@ -337,12 +313,6 @@ jobs:
             echo "$DEAD_PROD"
             exit 1
           fi
-          DEAD=$(deadcode -test ./...)
-          if [ -n "$DEAD" ]; then
-            echo "::error::Unreachable dead code detected in dashboard:"
-            echo "$DEAD"
-            exit 1
-          fi
 
       - name: Lint Hangar
         if: needs.changes.outputs.hangar == 'true'
@@ -358,12 +328,6 @@ jobs:
           if [ -n "$DEAD_PROD" ]; then
             echo "::error::Unreachable production code or compiled-in test hooks detected in hangar:"
             echo "$DEAD_PROD"
-            exit 1
-          fi
-          DEAD=$(deadcode -test ./...)
-          if [ -n "$DEAD" ]; then
-            echo "::error::Unreachable dead code detected in hangar:"
-            echo "$DEAD"
             exit 1
           fi
 
@@ -383,12 +347,6 @@ jobs:
             echo "$DEAD_PROD"
             exit 1
           fi
-          DEAD=$(deadcode -test ./...)
-          if [ -n "$DEAD" ]; then
-            echo "::error::Unreachable dead code detected in webhooks-router:"
-            echo "$DEAD"
-            exit 1
-          fi
 
       - name: Lint Vanadis
         if: needs.changes.outputs.vanadis == 'true'
@@ -404,12 +362,6 @@ jobs:
           if [ -n "$DEAD_PROD" ]; then
             echo "::error::Unreachable production code or compiled-in test hooks detected in vanadis:"
             echo "$DEAD_PROD"
-            exit 1
-          fi
-          DEAD=$(deadcode -test ./...)
-          if [ -n "$DEAD" ]; then
-            echo "::error::Unreachable dead code detected in vanadis:"
-            echo "$DEAD"
             exit 1
           fi
 

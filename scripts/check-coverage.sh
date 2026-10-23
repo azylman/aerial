@@ -236,11 +236,10 @@ for svc in $ALL_GO_SERVICES; do
         log_file="${PROF_DIR}/${safe_pkg}.log"
         status_file="${PROF_DIR}/${safe_pkg}.status"
 
-        if [ -f "$log_file" ]; then
-            cat "$log_file"
-        fi
-
         if [ ! -f "$status_file" ] || [ "$(cat "$status_file" 2>/dev/null)" = "FAIL" ]; then
+            if [ -f "$log_file" ]; then
+                cat "$log_file"
+            fi
             record_violation "Package $pkg tests failed during coverage collection"
         fi
 
@@ -287,6 +286,64 @@ for svc in $ALL_GO_SERVICES; do
                     if [ -f "$prof_file" ] && command -v go >/dev/null 2>&1; then
                         echo "      Top uncovered functions in $pkg:"
                         (cd "$svc" && go tool cover -func="$prof_file" 2>/dev/null | awk '$1 !~ /^total:/ && $NF != "100.0%"' | sort -k3 -n | head -n 5 | sed 's/^/      • /') || true
+                    fi
+                    if [ -f "$prof_file" ]; then
+                        awk '
+                            !/^mode:/ && $(NF-1)+0 > 0 && $NF+0 == 0 {
+                                col_idx = match($1, /:[0-9]+\.[0-9]+,[0-9]+\.[0-9]+$/)
+                                if (col_idx > 0) {
+                                    path = substr($1, 1, col_idx - 1)
+                                    sub(/.*[\/\\]/, "", path)
+                                    range_str = substr($1, col_idx + 1)
+                                    split(range_str, b, ",")
+                                    split(b[1], s, ".")
+                                    split(b[2], e, ".")
+                                    print path ":" (s[1]+0) ":" (e[1]+0)
+                                }
+                            }
+                        ' "$prof_file" | sort -t: -k1,1 -k2,2n -k3,3n | awk -F: -v pkg="$pkg" '
+                            function flush_range() {
+                                if (cur_file != "") {
+                                    rng = sprintf("L%d-L%d", prev_start, prev_end)
+                                    if (file_ranges[cur_file] == "") {
+                                        file_ranges[cur_file] = rng
+                                    } else {
+                                        file_ranges[cur_file] = file_ranges[cur_file] ", " rng
+                                    }
+                                }
+                            }
+                            {
+                                f = $1; s = $2 + 0; e = $3 + 0
+                                if (f != cur_file) {
+                                    flush_range()
+                                    cur_file = f
+                                    prev_start = s
+                                    prev_end = e
+                                    if (!seen[f]++) {
+                                        files[++file_count] = f
+                                    }
+                                } else {
+                                    if (s <= prev_end + 1) {
+                                        if (e > prev_end) prev_end = e
+                                    } else {
+                                        flush_range()
+                                        prev_start = s
+                                        prev_end = e
+                                    }
+                                }
+                            }
+                            END {
+                                flush_range()
+                                if (file_count > 0) {
+                                    printf("      Uncovered line ranges in %s:\n", pkg)
+                                    limit = (file_count > 10) ? 10 : file_count
+                                    for (i = 1; i <= limit; i++) {
+                                        fn = files[i]
+                                        printf("      • %s: %s\n", fn, file_ranges[fn])
+                                    }
+                                }
+                            }
+                        '
                     fi
                 fi
             fi
@@ -355,45 +412,53 @@ if [ -f "services/dashboard/app.test.js" ] && { [ -z "$TARGET_SERVICE" ] || [ "$
 fi
 
 # Print Console Table
-printf "\n%bMonorepo Test Coverage Summary%b\n" "$BOLD" "$NC"
-printf "%-18s | %-54s | %-12s | %-9s | %-7s | %-6s\n" "Service" "Package" "Statements" "Coverage" "Floor" "Status"
-printf -- "------------------------------------------------------------------------------------------------------------------------------------\n"
+if [ -z "$TARGET_SERVICE" ] || [ "$SUMMARY_MODE" -eq 1 ]; then
+    printf "\n%bMonorepo Test Coverage Summary%b\n" "$BOLD" "$NC"
+    printf "%-18s | %-54s | %-12s | %-9s | %-7s | %-6s\n" "Service" "Package" "Statements" "Coverage" "Floor" "Status"
+    printf -- "------------------------------------------------------------------------------------------------------------------------------------\n"
 
-while IFS='|' read -r svc pkg tot cov pct thresh status; do
-    if [ "$tot" -eq 0 ]; then
-        cov_str="N/A"
-        floor_str="-"
+    while IFS='|' read -r svc pkg tot cov pct thresh status; do
+        if [ "$tot" -eq 0 ]; then
+            cov_str="N/A"
+            floor_str="-"
+        else
+            cov_str="${pct}%"
+            floor_str="${thresh}%"
+        fi
+        
+        if [ "$status" = "PASS" ]; then
+            status_colored="${GREEN}PASS${NC}"
+        elif [ "$status" = "FAIL" ]; then
+            status_colored="${RED}FAIL${NC}"
+        else
+            status_colored="${YELLOW}N/A${NC}"
+        fi
+
+        printf "%-18s | %-54s | %4d / %4d   | %-9s | %-7s | %b\n" "$svc" "$pkg" "$cov" "$tot" "$cov_str" "$floor_str" "$status_colored"
+    done < "$PKG_DATA_FILE"
+
+    printf -- "------------------------------------------------------------------------------------------------------------------------------------\n"
+    if [ "$GLOBAL_GO_STATUS" = "PASS" ]; then
+        printf "%bGlobal Go Statement Coverage: %s%% (%d/%d statements) [Floor: %s%%] - PASS%b\n" "$GREEN" "$GLOBAL_GO_PCT" "$COVERED_GO_STMTS" "$TOTAL_GO_STMTS" "$COVERAGE_THRESHOLD" "$NC"
     else
-        cov_str="${pct}%"
-        floor_str="${thresh}%"
-    fi
-    
-    if [ "$status" = "PASS" ]; then
-        status_colored="${GREEN}PASS${NC}"
-    elif [ "$status" = "FAIL" ]; then
-        status_colored="${RED}FAIL${NC}"
-    else
-        status_colored="${YELLOW}N/A${NC}"
+        printf "%bGlobal Go Statement Coverage: %s%% (%d/%d statements) [Floor: %s%%] - FAIL%b\n" "$RED" "$GLOBAL_GO_PCT" "$COVERED_GO_STMTS" "$TOTAL_GO_STMTS" "$COVERAGE_THRESHOLD" "$NC"
     fi
 
-    printf "%-18s | %-54s | %4d / %4d   | %-9s | %-7s | %b\n" "$svc" "$pkg" "$cov" "$tot" "$cov_str" "$floor_str" "$status_colored"
-done < "$PKG_DATA_FILE"
-
-printf -- "------------------------------------------------------------------------------------------------------------------------------------\n"
-if [ "$GLOBAL_GO_STATUS" = "PASS" ]; then
-    printf "%bGlobal Go Statement Coverage: %s%% (%d/%d statements) [Floor: %s%%] - PASS%b\n" "$GREEN" "$GLOBAL_GO_PCT" "$COVERED_GO_STMTS" "$TOTAL_GO_STMTS" "$COVERAGE_THRESHOLD" "$NC"
+    if [ "$FRONTEND_STATUS" != "SKIPPED" ]; then
+        if [ "$FRONTEND_STATUS" = "PASS" ]; then
+            printf "%bPermet HUD Frontend Coverage: %s%% lines, %s%% branches, %s%% funcs [Floor: %s%%] - PASS%b\n" "$GREEN" "$FRONTEND_LINE_PCT" "$FRONTEND_BRANCH_PCT" "$FRONTEND_FUNCS_PCT" "$COVERAGE_THRESHOLD" "$NC"
+        else
+            printf "%bPermet HUD Frontend Coverage: %s%% lines, %s%% branches, %s%% funcs [Floor: %s%%] - FAIL%b\n" "$RED" "$FRONTEND_LINE_PCT" "$FRONTEND_BRANCH_PCT" "$FRONTEND_FUNCS_PCT" "$COVERAGE_THRESHOLD" "$NC"
+        fi
+    fi
+    printf "\n"
 else
-    printf "%bGlobal Go Statement Coverage: %s%% (%d/%d statements) [Floor: %s%%] - FAIL%b\n" "$RED" "$GLOBAL_GO_PCT" "$COVERED_GO_STMTS" "$TOTAL_GO_STMTS" "$COVERAGE_THRESHOLD" "$NC"
-fi
-
-if [ "$FRONTEND_STATUS" != "SKIPPED" ]; then
-    if [ "$FRONTEND_STATUS" = "PASS" ]; then
-        printf "%bPermet HUD Frontend Coverage: %s%% lines, %s%% branches, %s%% funcs [Floor: %s%%] - PASS%b\n" "$GREEN" "$FRONTEND_LINE_PCT" "$FRONTEND_BRANCH_PCT" "$FRONTEND_FUNCS_PCT" "$COVERAGE_THRESHOLD" "$NC"
+    if [ -z "$VIOLATIONS" ] && [ "$GLOBAL_GO_STATUS" = "PASS" ] && [ "$FRONTEND_STATUS" != "FAIL" ]; then
+        printf "\n%bCoverage (%s): %s%% (%d/%d statements) [Floor: %s%%] - PASS%b\n\n" "$GREEN" "$TARGET_SERVICE" "$GLOBAL_GO_PCT" "$COVERED_GO_STMTS" "$TOTAL_GO_STMTS" "$COVERAGE_THRESHOLD" "$NC"
     else
-        printf "%bPermet HUD Frontend Coverage: %s%% lines, %s%% branches, %s%% funcs [Floor: %s%%] - FAIL%b\n" "$RED" "$FRONTEND_LINE_PCT" "$FRONTEND_BRANCH_PCT" "$FRONTEND_FUNCS_PCT" "$COVERAGE_THRESHOLD" "$NC"
+        printf "\n%bCoverage (%s): %s%% (%d/%d statements) [Floor: %s%%] - FAIL%b\n\n" "$RED" "$TARGET_SERVICE" "$GLOBAL_GO_PCT" "$COVERED_GO_STMTS" "$TOTAL_GO_STMTS" "$COVERAGE_THRESHOLD" "$NC"
     fi
 fi
-printf "\n"
 
 # Markdown Summary Generation (for GitHub Step Summary or --summary)
 generate_markdown_summary() {
