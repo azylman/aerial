@@ -55,6 +55,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     make \
     jq \
+    ripgrep \
     tar \
     gzip \
     tzdata \
