@@ -16,7 +16,7 @@ This skill defines the standardized operational protocol for diagnosing runtime 
 - **Two-Repository Boundary**: This skill is strictly generic and core-contained. It relies exclusively on generic core stack components (`aerial-brain`, `aerial-victoriametrics`, `aerial-openobserve`, `aerial-postgres`, `aerial-vector`, Docker daemon, Discord API). It MUST NEVER hardcode non-core service names, user-config overlays (`ha-mcp`, `google`, `ubereats`), custom sidecars, or private channel IDs. Services outside the core stack are discovered dynamically at runtime.
 - **Metric-First Hierarchy**: Always query metrics first via VictoriaMetrics to pinpoint exact microsecond timestamps and duration boundaries before querying logs. Never jump directly to dumping raw container logs via Docker MCP unless observability services are offline.
 - **Strictly Zero Host Memory Inspection**: Never inspect host memory (`/proc/meminfo`, system memory heuristics). Container memory is observed strictly through cAdvisor metrics (`container_memory_rss`) in VictoriaMetrics.
-- **Silent Multi-Step Execution**: Perform all diagnostic queries silently without intermediate play-by-play chatter to prevent `agy -p` print-mode drain.
+- **Silent Multi-Step Execution**: Perform all diagnostic queries silently without intermediate play-by-play status chatter.
 - **Handoff Contract**: `incident-triage` is Phase 0 (Forensics & Root Cause Identification). Once the root-cause failure mode and offending code path are isolated, if code changes are needed in `aerial`, hand off immediately to:
   - `systematic-debugging`: For reproducing the bug with a minimal failing test.
   - `self-improvement`: For executing the tiered PR workflow and deploying the fix.

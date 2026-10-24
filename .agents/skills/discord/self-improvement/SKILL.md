@@ -44,7 +44,7 @@ Scale review rigor and subagent orchestration dynamically by blast radius:
 
 ### Review Panel Composition & Subagent Execution Invariants
 - **The Girl Gang (4 Disciplines)**: 3 domain specialists dynamically tailored to the change (e.g., Systems/Concurrency, Architecture, Security, Data Integrity, or PWA/Frontend when user-facing UI is touched) + 1 mandatory Adversarial Devil's Advocate.
-- **Single Consolidated Review Subagent**: Always run The Girl Gang inside a **single `research` subagent** (`role: "TheGirlGangReviewer"`, `TypeName: "research"`). Never spawn multiple parallel review subagents or emit intermediate waiting prose while a subagent is running (prevents `agy -p` print-mode drain). Never Poll subagent `transcript.jsonl` files with `read_file`; wait for reactive subagent completion wakeup.
+- **Single Consolidated Review Subagent**: Always run The Girl Gang inside a **single `research` subagent** (`role: "TheGirlGangReviewer"`, `TypeName: "research"`). Never spawn multiple parallel review subagents or emit intermediate waiting prose while a subagent is running. Once parallel work is complete, stop calling tools with empty text so `agy` suspends until the reactive `<SYSTEM_MESSAGE>` wakeup arrives (never busy-poll `manage_subagents list` or read a running subagent's `transcript.jsonl` to check status).
 
 ---
 
