@@ -113,6 +113,9 @@ func NewToolHandler(cfg *Config, database *sql.DB) *ToolHandler {
 	if cfg == nil {
 		panic("tool handler: config cannot be nil")
 	}
+	if cfg.VanadisURL != "" {
+		SetVanadisURL(cfg.VanadisURL)
+	}
 	return &ToolHandler{cfg: cfg, db: database, timezone: cfg.Timezone}
 }
 

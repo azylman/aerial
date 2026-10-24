@@ -255,6 +255,11 @@ type VanadisStore interface {
 	UpdateChunkStatus(ctx context.Context, chunkID, status string) error
 	UpdateBuildStatus(ctx context.Context, buildID, status string) error
 	UpdateBuildStatusMessageID(ctx context.Context, buildID, messageID string) error
+	GetChunk(ctx context.Context, chunkID string) (*VanadisChunk, *VanadisBuild, error)
+	GetChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisChunkPRLookup, error)
+	AttachChunkPR(ctx context.Context, chunkID string, prNumber int, repo string) (string, error)
+	AdvanceChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisAdvancementResult, error)
+	FailChunkByPR(ctx context.Context, repo string, prNumber int) (buildID, chunkID string, failed bool, err error)
 }
 
 type pgxQueryExecer interface {
@@ -837,7 +842,7 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 
 func writeStoreErr(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
-	if errors.Is(err, ErrBuildNotFound) {
+	if errors.Is(err, ErrBuildNotFound) || errors.Is(err, ErrChunkNotFound) {
 		status = http.StatusNotFound
 	}
 	writeErr(w, status, err.Error())
@@ -852,6 +857,12 @@ func SetupMux(server *VanadisServer) *http.ServeMux {
 		"GET /builds": server.handleListBuilds, "GET /runs": server.handleListBuilds,
 		"POST /builds": server.handleCreateBuild, "POST /runs": server.handleCreateBuild,
 		"/builds/": server.handleBuildByID, "/runs/": server.handleBuildByID,
+		"/chunks/by-pr":              server.handleChunkByPR,
+		"/chunks/attach-pr":          server.handleAttachChunkPR,
+		"/chunks/advance-pr":         server.handleAdvanceChunkPR,
+		"/chunks/fail-pr":            server.handleFailChunkPR,
+		"/chunks/sync-pr-widget":     server.handleSyncPRWidget,
+		"/chunks/":                   server.handleChunkByID,
 		"POST /debug/coverage/flush": server.handleCoverageFlush, "GET /debug/coverage/flush": server.handleCoverageFlush,
 	} {
 		mux.HandleFunc(p, h)

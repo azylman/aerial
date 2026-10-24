@@ -124,17 +124,6 @@ func initTestSQLite(trimmed string) (*sql.DB, error) {
 	);
 	CREATE INDEX IF NOT EXISTS idx_event_triggers_lookup ON event_triggers (source, target, event_type);
 	CREATE INDEX IF NOT EXISTS idx_event_triggers_channel ON event_triggers (channel_id, created_at ASC);
-
-	CREATE TABLE IF NOT EXISTS vanadis_builds (
-		id TEXT PRIMARY KEY,
-		status TEXT NOT NULL DEFAULT 'running'
-	);
-
-	CREATE TABLE IF NOT EXISTS vanadis_chunks (
-		id TEXT PRIMARY KEY,
-		build_id TEXT NOT NULL DEFAULT '',
-		status TEXT NOT NULL DEFAULT 'pending'
-	);
 	`
 	if _, err := database.Exec(schema); err != nil {
 		closeWarn(database, "database on schema error")

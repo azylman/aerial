@@ -3,12 +3,17 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"math"
+	"net/http"
+	"net/url"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -654,37 +659,106 @@ func PruneScheduleRuns(ctx context.Context, database *sql.DB, maxCount int, maxA
 	return res.RowsAffected()
 }
 
+var (
+	vanadisMu     sync.RWMutex
+	vanadisURL    = "http://vanadis.aerial"
+	vanadisClient = &http.Client{Timeout: 5 * time.Second}
+)
+
+// SetVanadisURL sets the base URL for Vanadis HTTP API calls.
+func SetVanadisURL(u string) {
+	vanadisMu.Lock()
+	defer vanadisMu.Unlock()
+	vanadisURL = strings.TrimRight(u, "/")
+}
+
+// GetVanadisURL gets the base URL for Vanadis HTTP API calls.
+func GetVanadisURL() string {
+	vanadisMu.RLock()
+	defer vanadisMu.RUnlock()
+	if env := strings.TrimSpace(os.Getenv("VANADIS_URL")); env != "" {
+		return strings.TrimRight(env, "/")
+	}
+	return vanadisURL
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
 // ValidateLiveEventTarget checks that the referenced target is known and not in a terminal state.
 func ValidateLiveEventTarget(ctx context.Context, database *sql.DB, source, target string) error {
 	ctx, err := normCtxAndDB(ctx, database)
 	if err != nil {
 		return err
 	}
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return fmt.Errorf("target cannot be empty")
+	}
+	baseURL := GetVanadisURL()
 	switch source {
 	case "vanadis_build":
-		query := rebindQuery(`SELECT status FROM vanadis_builds WHERE id = ?`, isPostgres(database))
-		var status string
-		err := database.QueryRowContext(ctx, query, target).Scan(&status)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/builds/%s", baseURL, url.PathEscape(target)), nil)
 		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("vanadis build %q not found", target)
-			}
+			return fmt.Errorf("create vanadis build request: %w", err)
+		}
+		resp, err := vanadisClient.Do(req)
+		if err != nil {
 			return fmt.Errorf("failed to query vanadis build %q: %w", target, err)
 		}
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusNotFound {
+			return fmt.Errorf("vanadis build %q not found", target)
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return fmt.Errorf("failed to query vanadis build %q: HTTP %d", target, resp.StatusCode)
+		}
+		var bResp struct {
+			Build struct {
+				Status string `json:"status"`
+			} `json:"build"`
+			Status string `json:"status"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&bResp); err != nil {
+			return fmt.Errorf("failed to decode vanadis build %q response: %w", target, err)
+		}
+		status := firstNonEmpty(bResp.Build.Status, bResp.Status)
 		switch strings.ToLower(strings.TrimSpace(status)) {
 		case "completed", "merged", "failed", "cancelled", "canceled":
 			return fmt.Errorf("vanadis build %q is already in terminal state %q", target, status)
 		}
 	case "vanadis_chunk":
-		query := rebindQuery(`SELECT status FROM vanadis_chunks WHERE id = ?`, isPostgres(database))
-		var status string
-		err := database.QueryRowContext(ctx, query, target).Scan(&status)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/chunks/%s", baseURL, url.PathEscape(target)), nil)
 		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("vanadis chunk %q not found", target)
-			}
+			return fmt.Errorf("create vanadis chunk request: %w", err)
+		}
+		resp, err := vanadisClient.Do(req)
+		if err != nil {
 			return fmt.Errorf("failed to query vanadis chunk %q: %w", target, err)
 		}
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusNotFound {
+			return fmt.Errorf("vanadis chunk %q not found", target)
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return fmt.Errorf("failed to query vanadis chunk %q: HTTP %d", target, resp.StatusCode)
+		}
+		var cResp struct {
+			Chunk struct {
+				Status string `json:"status"`
+			} `json:"chunk"`
+			Status string `json:"status"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&cResp); err != nil {
+			return fmt.Errorf("failed to decode vanadis chunk %q response: %w", target, err)
+		}
+		status := firstNonEmpty(cResp.Chunk.Status, cResp.Status)
 		switch strings.ToLower(strings.TrimSpace(status)) {
 		case "merged", "completed", "failed":
 			return fmt.Errorf("vanadis chunk %q is already in terminal state %q", target, status)

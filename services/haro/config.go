@@ -44,13 +44,15 @@ type Config struct {
 	Timezone    string `yaml:"timezone"`
 	Port        string `yaml:"port"`
 	BrainURL    string `yaml:"brain_url"`
+	VanadisURL  string `yaml:"vanadis_url"`
 }
 
 // SchedulerYAMLConfig defines the declarative file schema for /config/config.yaml.
 type SchedulerYAMLConfig struct {
-	Port     string `yaml:"port"`
-	Timezone string `yaml:"timezone"`
-	BrainURL string `yaml:"brain_url"`
+	Port       string `yaml:"port"`
+	Timezone   string `yaml:"timezone"`
+	BrainURL   string `yaml:"brain_url"`
+	VanadisURL string `yaml:"vanadis_url"`
 }
 
 // LoadConfig loads configuration from path using DATABASE_URL from the environment.
@@ -102,10 +104,21 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 	}
 	brainURL = strings.TrimRight(brainURL, "/")
 
+	vanadisURL := os.Getenv("VANADIS_URL")
+	if vanadisURL == "" {
+		vanadisURL = ycfg.VanadisURL
+	}
+	vanadisURL = strings.TrimSpace(vanadisURL)
+	if vanadisURL == "" {
+		vanadisURL = "http://vanadis.aerial"
+	}
+	vanadisURL = strings.TrimRight(vanadisURL, "/")
+
 	return &Config{
 		DatabaseURL: cleanDB,
 		Timezone:    tz,
 		Port:        port,
 		BrainURL:    brainURL,
+		VanadisURL:  vanadisURL,
 	}, nil
 }
