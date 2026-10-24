@@ -230,6 +230,13 @@ func TestGenerateEmbedding_TableDriven(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			if tc.cancelCtx {
+				cancel()
+			}
+
 			var attemptCount int64
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				idx := atomic.AddInt64(&attemptCount, 1)
@@ -241,6 +248,10 @@ func TestGenerateEmbedding_TableDriven(t *testing.T) {
 						http.Error(w, fmt.Sprintf("expected prompt to have prefix %q", tc.queryPrefix), http.StatusBadRequest)
 						return
 					}
+				}
+
+				if tc.cancelInDelay && idx == 1 {
+					cancel()
 				}
 
 				if tc.failAttempts > 0 && int(idx) <= tc.failAttempts {
@@ -267,19 +278,6 @@ func TestGenerateEmbedding_TableDriven(t *testing.T) {
 				client.SetHTTPClient(nil)
 			}
 			client.SetRetryDelay(tc.retryDelay)
-
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-
-			if tc.cancelCtx {
-				cancel()
-			}
-			if tc.cancelInDelay {
-				go func() {
-					time.Sleep(10 * time.Millisecond)
-					cancel()
-				}()
-			}
 
 			emb, err := client.GenerateEmbedding(ctx, tc.text, tc.isQuery, tc.maxRetries)
 			if tc.wantErrSubstr != "" {
