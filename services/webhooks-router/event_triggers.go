@@ -23,45 +23,72 @@ type ClaimedEventTrigger struct {
 	Effort    string `json:"effort"`
 }
 
-// ClaimEventTriggers claims matching event triggers atomically from event_triggers.
+// WithHaroClient configures the Haro URL and HTTP client for PostgresPRRegistry.
+func WithHaroClient(haroURL string, client *http.Client) func(*PostgresPRRegistry) {
+	return func(r *PostgresPRRegistry) {
+		if r == nil {
+			return
+		}
+		if haroURL != "" {
+			r.haroURL = strings.TrimRight(haroURL, "/")
+		}
+		if client != nil {
+			r.httpClient = client
+		}
+	}
+}
+
+func (r *PostgresPRRegistry) getHaroClient() (*http.Client, string) {
+	if r == nil {
+		return &http.Client{Timeout: 10 * time.Second}, "http://haro.aerial"
+	}
+	client := r.httpClient
+	if client == nil {
+		client = &http.Client{Timeout: 10 * time.Second}
+	}
+	hURL := strings.TrimRight(r.haroURL, "/")
+	if hURL == "" {
+		hURL = "http://haro.aerial"
+	}
+	return client, hURL
+}
+
+// ClaimEventTriggers claims matching event triggers atomically via Haro HTTP API.
 func (r *PostgresPRRegistry) ClaimEventTriggers(ctx context.Context, source string, targets []string, eventType string) ([]ClaimedEventTrigger, error) {
-	if r == nil || r.pool == nil || len(targets) == 0 || source == "" || eventType == "" {
-		return nil, nil
-	}
+	source, eventType = strings.TrimSpace(source), strings.TrimSpace(eventType)
 	cleanTargets := dedupeTrimmedStrings(targets)
-	if len(cleanTargets) == 0 {
+	if r == nil || len(cleanTargets) == 0 || source == "" || eventType == "" {
 		return nil, nil
 	}
-
-	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	query := `
-DELETE FROM event_triggers
-USING UNNEST($2::text[]) AS t(target_val)
-WHERE event_triggers.source = $1
-  AND event_triggers.target = t.target_val
-  AND event_triggers.event_type = $3
-RETURNING event_triggers.id, event_triggers.channel_id, event_triggers.source, event_triggers.target, event_triggers.event_type, event_triggers.prompt, COALESCE(NULLIF(event_triggers.effort, ''), 'medium');`
-
-	rows, err := r.pool.Query(qCtx, query, source, cleanTargets, eventType)
+	client, hURL := r.getHaroClient()
+	bodyBytes, err := json.Marshal(map[string]any{
+		"source":     source,
+		"targets":    cleanTargets,
+		"event_type": eventType,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal claim event triggers request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, hURL+"/event-triggers/claim", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("create claim event triggers request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("claim event triggers: %w", err)
 	}
-	defer rows.Close()
-
-	var claimed []ClaimedEventTrigger
-	for rows.Next() {
-		var trig ClaimedEventTrigger
-		if err := rows.Scan(&trig.ID, &trig.ChannelID, &trig.Source, &trig.Target, &trig.EventType, &trig.Prompt, &trig.Effort); err != nil {
-			return nil, fmt.Errorf("scan claimed event trigger: %w", err)
-		}
-		claimed = append(claimed, trig)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("claim event triggers: unexpected status %d: %s", resp.StatusCode, readBodyString(io.LimitReader(resp.Body, 1024)))
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate claimed event triggers: %w", err)
+	var res struct {
+		Triggers []ClaimedEventTrigger `json:"triggers"`
 	}
-	return claimed, nil
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return nil, fmt.Errorf("decode claim event triggers response: %w", err)
+	}
+	return res.Triggers, nil
 }
 
 // FailVanadisChunkDetailsByPR marks a Vanadis chunk as failed by PR and returns the build ID and chunk ID.

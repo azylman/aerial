@@ -808,8 +808,11 @@ func ListEventTriggers(ctx context.Context, database *sql.DB, channelID string) 
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	return scanEventTriggerRows(rows)
+}
 
+func scanEventTriggerRows(rows *sql.Rows) ([]EventTrigger, error) {
+	defer rows.Close()
 	results := []EventTrigger{}
 	for rows.Next() {
 		var t EventTrigger
@@ -818,10 +821,42 @@ func ListEventTriggers(ctx context.Context, database *sql.DB, channelID string) 
 		}
 		results = append(results, t)
 	}
-	if err := rows.Err(); err != nil {
+	return results, rows.Err()
+}
+
+// ClaimEventTriggers atomically deletes and returns matching event triggers from event_triggers.
+func ClaimEventTriggers(ctx context.Context, database *sql.DB, source string, targets []string, eventType string) ([]EventTrigger, error) {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
 		return nil, err
 	}
-	return results, nil
+	source, eventType = strings.TrimSpace(source), strings.TrimSpace(eventType)
+	var cleanTargets []string
+	seen := make(map[string]struct{}, len(targets))
+	for _, t := range targets {
+		if clean := strings.TrimSpace(t); clean != "" {
+			if _, ok := seen[clean]; !ok {
+				seen[clean] = struct{}{}
+				cleanTargets = append(cleanTargets, clean)
+			}
+		}
+	}
+	if source == "" || eventType == "" || len(cleanTargets) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(cleanTargets))
+	args := make([]any, 0, 2+len(cleanTargets))
+	args = append(args, source, eventType)
+	for i, t := range cleanTargets {
+		placeholders[i] = "?"
+		args = append(args, t)
+	}
+	rawQuery := fmt.Sprintf(`DELETE FROM event_triggers WHERE source = ? AND event_type = ? AND target IN (%s) RETURNING id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at`, strings.Join(placeholders, ", "))
+	rows, err := database.QueryContext(ctx, rebindQuery(rawQuery, isPostgres(database)), args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanEventTriggerRows(rows)
 }
 
 // DeleteEventTrigger removes an event trigger by id.

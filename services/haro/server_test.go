@@ -1286,6 +1286,7 @@ func TestServer_ScheduleRoutesDispatchViaMCP(t *testing.T) {
 		{"mcp dispatch schedules", http.MethodGet, "/schedules", "", http.StatusOK},
 		{"mcp dispatch schedules runs", http.MethodGet, "/schedules/runs", "", http.StatusOK},
 		{"mcp dispatch schedules oneshot invalid", http.MethodPost, "/schedules/oneshot", `{}`, http.StatusBadRequest},
+		{"mcp dispatch event triggers claim invalid", http.MethodPost, "/event-triggers/claim", `{}`, http.StatusBadRequest},
 	}
 
 	for _, tc := range tests {
@@ -1295,6 +1296,67 @@ func TestServer_ScheduleRoutesDispatchViaMCP(t *testing.T) {
 			server.handleMCP(rec, req)
 			if rec.Code != tc.wantStatus {
 				t.Fatalf("handleMCP path %s got status %d, want %d", tc.path, rec.Code, tc.wantStatus)
+			}
+		})
+	}
+}
+
+func TestHandleClaimEventTriggers_Table(t *testing.T) {
+	server, ts := setupTestServer(t)
+	defer ts.Close()
+
+	_ = InsertEventTrigger(context.Background(), server.handler.db, EventTrigger{
+		ID:        "trig-claim-1",
+		ChannelID: "1555405874565091380",
+		Source:    "github",
+		Target:    "azylman/aerial",
+		EventType: "ci_passed",
+		Prompt:    "check passed",
+		Effort:    "medium",
+	})
+
+	closedDB, err := OpenDB(&Config{DatabaseURL: ":memory:"})
+	if err != nil {
+		t.Fatalf("OpenDB failed: %v", err)
+	}
+	_ = closedDB.Close()
+	serverClosed := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, closedDB))
+
+	tests := []struct {
+		name       string
+		method     string
+		body       string
+		useServer  *Server
+		wantStatus int
+		wantCount  int
+	}{
+		{"method not allowed", http.MethodGet, "", server, http.StatusMethodNotAllowed, 0},
+		{"nil server db", http.MethodPost, `{"source":"github","targets":["azylman/aerial"],"event_type":"ci_passed"}`, &Server{}, http.StatusInternalServerError, 0},
+		{"malformed json", http.MethodPost, `{bad`, server, http.StatusBadRequest, 0},
+		{"missing fields", http.MethodPost, `{"source":"github"}`, server, http.StatusBadRequest, 0},
+		{"closed db error", http.MethodPost, `{"source":"github","targets":["azylman/aerial"],"event_type":"ci_passed"}`, serverClosed, http.StatusInternalServerError, 0},
+		{"claim matching trigger", http.MethodPost, `{"source":"github","targets":["azylman/aerial","azylman/aerial:main"],"event_type":"ci_passed"}`, server, http.StatusOK, 1},
+		{"second claim returns empty", http.MethodPost, `{"source":"github","targets":["azylman/aerial"],"event_type":"ci_passed"}`, server, http.StatusOK, 0},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(tc.method, "/event-triggers/claim", strings.NewReader(tc.body))
+			tc.useServer.handleClaimEventTriggers(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("%s got status %d, want %d (%s)", tc.name, rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if tc.wantStatus == http.StatusOK {
+				var resp struct {
+					Triggers []EventTrigger `json:"triggers"`
+				}
+				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+					t.Fatalf("decode failed: %v", err)
+				}
+				if len(resp.Triggers) != tc.wantCount {
+					t.Fatalf("got %d triggers, want %d", len(resp.Triggers), tc.wantCount)
+				}
 			}
 		})
 	}
