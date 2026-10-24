@@ -7,15 +7,17 @@ In Discord, Aerial operates as an autonomous systems architect, principal softwa
 Aerial runs as a multi-node HashiCorp Nomad cluster supervised by Nomad and Hangar across the local network:
 
 - **Core Infrastructure & Execution**:
-  - **`aerial-brain`**: Multi-protocol Antigravity execution engine managing multi-turn memory, multiplexed ingress (Discord gateway funnel, real-time voice pipeline via `/voice/ask`, HTTP prompt injection via `/prompt`, and direct outbound delivery via `/discord/message`), Laya INT8 System-1 ambient triage (`/v1/systemone`), and background task scheduling.
-  - **`aerial-postgres`**: PostgreSQL 18 relational database with `pgvector` for production persistence (messages, sessions, atomic CAS task queues, recurring and one-shot schedules, vector embeddings, PR registry, and Grafana).
+  - **`aerial-brain` (`eri`)**: Multi-protocol Antigravity execution engine managing multi-turn memory, multiplexed ingress (Discord gateway funnel, real-time voice pipeline via `/voice/ask`, HTTP prompt injection via `/prompt`, and direct outbound delivery via `/discord/message`), and Laya INT8 System-1 ambient triage (`/v1/systemone`).
+  - **`haro`**: Persistent scheduling, heartbeat, and event-watch orchestration service evaluating cron, one-shot, and event triggers and dispatching due turns to `eri`.
+  - **`coven`**: Semantic fact extraction, ACT-R memory decay, and procedural skill synthesis service.
+  - **`vanadis`**: Autonomous multi-chunk build queue orchestrator with JIT symbol line-slice resolution.
+  - **`aerial-postgres`**: PostgreSQL 18 relational database with `pgvector` for production persistence (messages, sessions, atomic CAS task queues, schedules, event triggers, vector embeddings, PR registry, and Grafana).
   - **`aerial-hangar`**: Dedicated infrastructure sidecar holding read-write repository mounts, executing event-driven GitOps push reconciliation and automated git synchronization.
   - **`coredns`**: Dynamic Nomad service discovery daemon rendering internal DNS records (`*.aerial`, `*.lan`) directly from `nomadServices`.
   - **`infisical`**: Centralized secret management and automated rotation backed by Redis, dynamically syncing secrets into Nomad variables (`nomadVar`).
 
 - **Outbound Model Context Protocol (MCP) Microservices**:
   - **`nomad-mcp`**: Native Streamable HTTP MCP server for Nomad cluster orchestration, job lifecycles, and allocation diagnostics.
-  - **`scheduler-mcp`**: Persistent cron and one-shot reminder scheduling server.
   - **`discord-mcp`**: Outbound Discord API operations (channels, threads, history).
   - **`github-mcp`**: Native Streamable HTTP MCP server for GitHub repository, PR, and issue operations.
   - **`infisical-mcp`**: Native Streamable HTTP MCP server for Infisical secret management and rotation.
@@ -26,10 +28,10 @@ Aerial runs as a multi-node HashiCorp Nomad cluster supervised by Nomad and Hang
 - **Web, Gateway & Ingress Services**:
   - **`aerial-homepage`**: Root landing portal and service discovery HUD.
   - **`aerial-mesh-proxy`**: Internal service mesh reverse proxy routing dynamic Nomad services and dashboards.
-  - **`aerial-dashboard`**: Web status HUD rendering live queue state and turn health.
+  - **`aerial-dashboard`**: Web status HUD rendering live queue state, schedules, memory, and turn health.
   - **`aerial-docs`**: Living documentation portal serving architectural specifications and runbooks.
   - **`agentsview`**: Web observability dashboard rendering agent session transcripts and tool traces.
-  - **`webhooks-router`**: Secret sync router dispatching Infisical webhook events to Nomad variables, and event-driven GitHub push webhooks to Hangar.
+  - **`webhooks-router`**: Event-driven router dispatching Infisical secret webhooks to Nomad variables, GitHub push/CI webhooks to Hangar and `eri`, and Vanadis chunk lifecycle progression.
   - **`cloudflared-webhooks` / `edge-proxy`**: Ingress tunnel services exposing secure external webhooks and public domains into the local Nomad mesh.
 
 - **Observability & Supporting Services**:
@@ -52,14 +54,15 @@ To inspect active job allocations, service health, or cluster status, query Noma
 
 Aerial operates on a strict **Multi-Repository Architecture & Separation of Concerns**:
 
-### 1. Core Engine Monorepo (`azylman/aerial` at `/share/aerial`)
+### 1. Core Engine Monorepo (`azylman/aerial` at `/share/aerial` — `scripts/aerial-pr.sh init aerial`)
 - **Purpose**: Generic, domain-agnostic open-source foundation.
+- **Contents**: Core Go services (`services/eri`, `services/haro`, `services/coven`, `services/vanadis`, `services/hangar`, `services/webhooks-router`, `services/dashboard`, `services/discord-mcp`), base system rules (`rules/`), built-in skills (`.agents/skills/`), Nomad job definitions (`nomad/jobs/*.nomad`), Dockerfiles, and CI/verification scripts (`scripts/`).
 - **Strict Invariants**:
   - **100% Generic & Domain-Agnostic**: All prompts, code, error handlers, and schemas must remain completely generic and reusable for any user.
   - **Zero Personal Data Invariant**: NEVER commit real names, Discord handles, usernames, family members, home addresses, private device/entity IDs, or user-specific business logic into this repository.
   - **Zero Plaintext Token Invariant**: NEVER commit API keys, tokens, private webhook URLs, or GitHub PATs to disk.
 
-### 2. User Configuration Repository (e.g. `azylman/aerial-config` at `/share/aerial-config`)
+### 2. User Configuration Repository (`azylman/aerial-config` at `/share/aerial-config` — `scripts/aerial-pr.sh init aerial-config`)
 - **Purpose**: Private user customization, personal persona, user identity/aliases, domain skills, and environment-specific integrations. Starter template available at [azylman/aerial-config-example](https://github.com/azylman/aerial-config-example).
 - **Contents**:
   - **`config.yaml`**: Non-secret user options (`model`, `timezone`, `system_channel`, `mcp_servers`, `channels`).
@@ -71,10 +74,11 @@ Aerial operates on a strict **Multi-Repository Architecture & Separation of Conc
   - **`jobs/*.nomad`**: User-defined Nomad sidecar job specifications deployed across cluster nodes.
 
 ### 3. Peripheral Displays & Sidecars
-- **`azylman/mirrormere`**: Smart display kiosk UI, frontend dashboard widgets, and display hardware integration.
-- **`azylman/aerial-sidecars`**: Auxiliary standalone daemon microservices and hardware bridges.
+- **`azylman/mirrormere`** (`scripts/aerial-pr.sh init mirrormere`): Smart display kiosk UI, frontend dashboard widgets, and display hardware integration.
+- **`azylman/aerial-sidecars`** (`scripts/aerial-pr.sh init aerial-sidecars`): Auxiliary standalone daemon microservices and hardware bridges.
 
-### 4. Repository Target Selection & Precedence Rules
-- Before initializing a scratch workspace (`scripts/aerial-pr.sh init [repo]`), consult the **Repository Target Selection Decision Matrix** and **Two-Step Feature Rule** canonically defined in `.agents/skills/discord/self-improvement/SKILL.md` (Section 3).
-- Rules and persona overrides resolve strictly according to the **Instruction Precedence Hierarchy**.
-- **Skill Precedence**: Custom skills in `/share/aerial-config/custom-skills/` take highest priority, shadowing built-in skills of the same name, canonically consolidated into `~/.gemini/config/skills`.
+### 4. Two-Step Feature Rule & Precedence
+- **Two-Step Feature Rule (Engine Capability vs. Configuration)**: When introducing a feature that requires both engine support and user configuration:
+  1. **Step 1 (`azylman/aerial`)**: Implement the schema field, parsing, and runtime behavior in `aerial` first, and submit/merge.
+  2. **Step 2 (`azylman/aerial-config`)**: Enable or configure the desired value in `aerial-config` (`config.yaml` or rules) after engine support is deployed.
+- **Precedence**: Rules and persona overrides resolve strictly per the **Instruction Precedence Hierarchy**. Custom skills in `/share/aerial-config/custom-skills/` take highest priority, shadowing built-in skills of the same name in `~/.gemini/config/skills`.
