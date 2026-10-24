@@ -49,6 +49,7 @@ job "webhooks-router" {
         HANGAR_URL    = "http://hangar.aerial"
         BRAIN_URL     = "http://eri.aerial"
         INFISICAL_URL = "http://infisical.aerial"
+        VANADIS_URL   = "http://vanadis.aerial"
         PORT          = "4020"
         GOCOVERDIR  = "/coverage"
       }

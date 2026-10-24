@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -251,12 +253,10 @@ func TestFailVanadisChunkDetailsByPR(t *testing.T) {
 	tests := []struct {
 		name        string
 		nilRegistry bool
-		nilPool     bool
 		repo        string
 		prNumber    int
-		foundRow    bool
-		rowScanErr  bool
-		execErr     bool
+		httpStatus  int
+		httpBody    string
 		buildID     string
 		chunkID     string
 		wantFailed  bool
@@ -269,12 +269,6 @@ func TestFailVanadisChunkDetailsByPR(t *testing.T) {
 			prNumber:    10,
 		},
 		{
-			name:     "nil pool returns false",
-			nilPool:  true,
-			repo:     "azylman/aerial",
-			prNumber: 10,
-		},
-		{
 			name:     "empty repo returns false",
 			repo:     "",
 			prNumber: 10,
@@ -285,34 +279,35 @@ func TestFailVanadisChunkDetailsByPR(t *testing.T) {
 			prNumber: 0,
 		},
 		{
-			name:       "query scan error returns error",
+			name:       "server 500 error returns error",
 			repo:       "azylman/aerial",
 			prNumber:   10,
-			rowScanErr: true,
+			httpStatus: http.StatusInternalServerError,
+			httpBody:   `{"error":"internal err"}`,
 			wantErr:    true,
 		},
 		{
-			name:       "not found (ErrNoRows) returns false",
+			name:       "invalid json returns error",
 			repo:       "azylman/aerial",
 			prNumber:   10,
-			foundRow:   false,
-			wantFailed: false,
+			httpStatus: http.StatusOK,
+			httpBody:   `{invalid-json`,
+			wantErr:    true,
 		},
 		{
-			name:     "exec build fail error returns error",
-			repo:     "azylman/aerial",
-			prNumber: 10,
-			foundRow: true,
-			buildID:  "build-123",
-			chunkID:  "chunk-1",
-			execErr:  true,
-			wantErr:  true,
+			name:       "not found / not failed returns false",
+			repo:       "azylman/aerial",
+			prNumber:   10,
+			httpStatus: http.StatusOK,
+			httpBody:   `{"failed":false}`,
+			wantFailed: false,
 		},
 		{
 			name:       "successful chunk fail updates and returns true",
 			repo:       "azylman/aerial",
 			prNumber:   10,
-			foundRow:   true,
+			httpStatus: http.StatusOK,
+			httpBody:   `{"build_id":"build-123","chunk_id":"chunk-1","failed":true}`,
 			buildID:    "build-123",
 			chunkID:    "chunk-1",
 			wantFailed: true,
@@ -322,27 +317,24 @@ func TestFailVanadisChunkDetailsByPR(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var pool pgxQueryExecer
-			if !tc.nilPool {
-				var rsErr, exErr error
-				if tc.rowScanErr {
-					rsErr = errors.New("simulated scan error")
-				}
-				if tc.execErr {
-					exErr = errors.New("simulated exec error")
-				}
-				pool = &mockTriggerPool{
-					foundRow:   tc.foundRow,
-					rowScanErr: rsErr,
-					execErr:    exErr,
-					buildID:    tc.buildID,
-					chunkID:    tc.chunkID,
-				}
-			}
 			var reg *PostgresPRRegistry
 			if !tc.nilRegistry {
-				reg = NewPostgresPRRegistry(pool)
+				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path != "/chunks/fail-pr" {
+						http.NotFound(w, r)
+						return
+					}
+					status := tc.httpStatus
+					if status == 0 {
+						status = http.StatusOK
+					}
+					w.WriteHeader(status)
+					_, _ = w.Write([]byte(tc.httpBody))
+				}))
+				defer ts.Close()
+				reg = NewPostgresPRRegistry(nil, WithVanadisClient(ts.URL, ts.Client()))
 			}
+
 			bID, cID, failed, err := reg.FailVanadisChunkDetailsByPR(context.Background(), tc.repo, tc.prNumber)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("FailVanadisChunkDetailsByPR() err = %v, wantErr = %v", err, tc.wantErr)

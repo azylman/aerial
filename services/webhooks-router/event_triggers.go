@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"strings"
 	"time"
 )
@@ -64,31 +67,43 @@ RETURNING event_triggers.id, event_triggers.channel_id, event_triggers.source, e
 // FailVanadisChunkDetailsByPR marks a Vanadis chunk as failed by PR and returns the build ID and chunk ID.
 func (r *PostgresPRRegistry) FailVanadisChunkDetailsByPR(ctx context.Context, repo string, prNumber int) (string, string, bool, error) {
 	repo = normalizeRepo(repo)
-	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
+	if r == nil || repo == "" || prNumber <= 0 {
 		return "", "", false, nil
 	}
-	query := `
-		UPDATE vanadis_chunks c
-		SET status = 'failed', updated_at = CURRENT_TIMESTAMP
-		FROM vanadis_builds b
-		WHERE c.build_id = b.id AND c.repo = $1 AND c.pr_number = $2 AND c.status NOT IN ('merged', 'failed')
-		RETURNING c.build_id, c.id;`
-	var buildID, chunkID string
-	found, err := r.queryRowScan(ctx, "fail vanadis chunk by pr", query, []any{&buildID, &chunkID}, repo, prNumber)
+	client, vURL := r.getVanadisClient()
+	bodyBytes, err := json.Marshal(map[string]any{
+		"repo":      repo,
+		"pr_number": prNumber,
+	})
 	if err != nil {
-		return "", "", false, err
+		return "", "", false, fmt.Errorf("marshal fail chunk request: %w", err)
 	}
-	if !found {
-		return "", "", false, nil
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, vURL+"/chunks/fail-pr", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", "", false, fmt.Errorf("create fail chunk request: %w", err)
 	}
-
-	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	updateBuild := `UPDATE vanadis_builds SET status = 'failed', updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND status = 'running';`
-	if _, err := r.pool.Exec(qCtx, updateBuild, buildID); err != nil {
-		return "", "", false, fmt.Errorf("fail vanadis build by pr: %w", err)
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return "", "", false, fmt.Errorf("fail vanadis chunk by pr: %w", err)
 	}
-	return buildID, chunkID, true, nil
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		if readErr != nil {
+			return "", "", false, fmt.Errorf("fail vanadis chunk by pr: unexpected status %d (read error: %w)", resp.StatusCode, readErr)
+		}
+		return "", "", false, fmt.Errorf("fail vanadis chunk by pr: unexpected status %d: %s", resp.StatusCode, string(body))
+	}
+	var res struct {
+		BuildID string `json:"build_id"`
+		ChunkID string `json:"chunk_id"`
+		Failed  bool   `json:"failed"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return "", "", false, fmt.Errorf("decode fail chunk response: %w", err)
+	}
+	return res.BuildID, res.ChunkID, res.Failed, nil
 }
 
 func formatEventTriggerPrompt(contextHeader, prompt string) string {
