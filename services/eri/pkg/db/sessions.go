@@ -117,8 +117,7 @@ func (s *SQLStore) SaveSessionID(ctx context.Context, threadID, sessionID string
 		return nil
 	}
 	query := `INSERT INTO sessions (thread_id, internal_session_id, created_at, updated_at) VALUES ($1, $2, $3, $4) ON CONFLICT(thread_id) DO UPDATE SET created_at = CASE WHEN sessions.internal_session_id != EXCLUDED.internal_session_id THEN EXCLUDED.created_at ELSE sessions.created_at END, internal_session_id = EXCLUDED.internal_session_id, updated_at = EXCLUDED.updated_at`
-	_, err := s.execWithTimeout(ctx, 5*time.Second, query, threadID, sessionID, time.Now().UTC(), time.Now().UTC())
-	return err
+	return s.execWithTimeout(ctx, query, threadID, sessionID, time.Now().UTC(), time.Now().UTC())
 }
 
 // IncrementSessionTurnCount atomically increments and returns the turn count for a session key.
@@ -144,8 +143,7 @@ func (s *SQLStore) RotateSessionID(ctx context.Context, sessionKey, newSessionID
 		return fmt.Errorf("session key cannot be empty")
 	}
 	query := `INSERT INTO sessions (thread_id, internal_session_id, previous_session_id, turn_count, created_at, updated_at) VALUES ($1, $2, '', 0, $3, $4) ON CONFLICT(thread_id) DO UPDATE SET previous_session_id = CASE WHEN sessions.internal_session_id != '' AND sessions.internal_session_id != EXCLUDED.internal_session_id THEN sessions.internal_session_id ELSE sessions.previous_session_id END, internal_session_id = EXCLUDED.internal_session_id, turn_count = 0, created_at = EXCLUDED.created_at, updated_at = EXCLUDED.updated_at;`
-	_, err := s.execWithTimeout(ctx, 5*time.Second, query, sessionKey, newSessionID, time.Now().UTC(), time.Now().UTC())
-	return err
+	return s.execWithTimeout(ctx, query, sessionKey, newSessionID, time.Now().UTC(), time.Now().UTC())
 }
 
 // GetSessionTurnCount returns the current turn count for a session.
@@ -173,8 +171,7 @@ func (s *SQLStore) SaveThreadSummary(ctx context.Context, threadID, summary, las
 		return nil
 	}
 	query := `INSERT INTO sessions (thread_id, summary, last_summarized_message_id, created_at, updated_at) VALUES ($1, $2, $3, $4, $4) ON CONFLICT(thread_id) DO UPDATE SET summary = EXCLUDED.summary, last_summarized_message_id = EXCLUDED.last_summarized_message_id, updated_at = EXCLUDED.updated_at`
-	_, err := s.execWithTimeout(ctx, 5*time.Second, query, threadID, summary, lastSummarizedMsgID, time.Now().UTC())
-	return err
+	return s.execWithTimeout(ctx, query, threadID, summary, lastSummarizedMsgID, time.Now().UTC())
 }
 
 // GetThreadSummary retrieves the cached thread summary and last_summarized_message_id watermark for a thread.

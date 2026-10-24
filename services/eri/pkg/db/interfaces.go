@@ -101,43 +101,9 @@ type TranscriptStore interface {
 	GetTranscriptStepRange(ctx context.Context, sessionID string, startStep, endStep int) ([]TranscriptStep, error)
 }
 
-// PRRecord encapsulates a tracked Pull Request and deployment lifecycle state.
-type PRRecord struct {
-	ID              int64     `json:"id"`
-	Repo            string    `json:"repo"`
-	PRNumber        int       `json:"pr_number"`
-	Branch          string    `json:"branch"`
-	HeadSHA         string    `json:"head_sha"`
-	MergeSHA        string    `json:"merge_sha,omitempty"`
-	TargetID        string    `json:"target_id"`
-	Status          string    `json:"status"`
-	Title           string    `json:"title"`
-	StatusMessageID string    `json:"status_message_id,omitempty"`
-	Metadata        string    `json:"metadata"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
-}
-
-// PRRegistryStore handles persistent tracking and atomic state transitions for PRs and deployments.
-type PRRegistryStore interface {
-	UpsertPR(ctx context.Context, record PRRecord) error
-	GetPRByNumber(ctx context.Context, repo string, prNumber int) (*PRRecord, error)
-	UpdatePRStatusMessageID(ctx context.Context, repo string, prNumber int, messageID string) error
-}
-
-// VanadisStore handles persistent tracking for Vanadis multi-chunk builds and chunks.
-type VanadisStore interface {
-	GetVanadisBuild(ctx context.Context, buildID string) (*VanadisBuild, []VanadisChunk, error)
-	GetVanadisChunk(ctx context.Context, chunkID string) (*VanadisChunk, error)
-	AttachVanadisChunkPR(ctx context.Context, chunkID string, prNumber int) error
-	UpdateVanadisBuildStatusMessageID(ctx context.Context, buildID, messageID string) error
-}
-
 // Store unifies all repository capabilities under a single interface.
 type Store interface {
 	MessageStore
 	SessionStore
 	TranscriptStore
-	PRRegistryStore
-	VanadisStore
 }

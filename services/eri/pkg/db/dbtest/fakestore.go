@@ -21,8 +21,6 @@ var (
 	_ db.MessageStore    = (*FakeStore)(nil)
 	_ db.SessionStore    = (*FakeStore)(nil)
 	_ db.TranscriptStore = (*FakeStore)(nil)
-	_ db.PRRegistryStore = (*FakeStore)(nil)
-	_ db.VanadisStore    = (*FakeStore)(nil)
 )
 
 type threadSummaryRecord struct {
@@ -54,96 +52,6 @@ func cosineSimilarity(a, b []float32) float64 {
 	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
 }
 
-func normalizeVanadisEffort(effort string) (string, error) {
-	trimmed := strings.ToLower(strings.TrimSpace(effort))
-	if trimmed == "" {
-		return "medium", nil
-	}
-	switch trimmed {
-	case "low", "medium", "high":
-		return trimmed, nil
-	default:
-		return "", fmt.Errorf("invalid vanadis effort %q: must be 'low', 'medium', or 'high'", effort)
-	}
-}
-
-func validateAndNormalizeVanadisBuild(build db.VanadisBuild, chunks []db.VanadisChunk) (db.VanadisBuild, []db.VanadisChunk, error) {
-	buildID := strings.TrimSpace(build.ID)
-	if buildID == "" {
-		return db.VanadisBuild{}, nil, fmt.Errorf("build id cannot be empty")
-	}
-	threadID := strings.TrimSpace(build.ThreadID)
-	if threadID == "" {
-		return db.VanadisBuild{}, nil, fmt.Errorf("thread_id cannot be empty")
-	}
-	objective := strings.TrimSpace(build.Objective)
-	if objective == "" {
-		return db.VanadisBuild{}, nil, fmt.Errorf("objective cannot be empty")
-	}
-	buildTitle := strings.TrimSpace(build.Title)
-	if buildTitle == "" {
-		buildTitle = objective
-	}
-	tier := build.Tier
-	if tier <= 0 {
-		tier = 2
-	}
-	status := strings.TrimSpace(build.Status)
-	if status == "" {
-		status = "running"
-	}
-
-	normBuild := build
-	normBuild.ID, normBuild.ThreadID, normBuild.Objective = buildID, threadID, objective
-	normBuild.Title, normBuild.Tier, normBuild.Status = buildTitle, tier, status
-	normBuild.SharedContext, normBuild.StatusMessageID = strings.TrimSpace(build.SharedContext), strings.TrimSpace(build.StatusMessageID)
-
-	normChunks := make([]db.VanadisChunk, len(chunks))
-	for i, c := range chunks {
-		cid := strings.TrimSpace(c.ID)
-		if cid == "" {
-			return db.VanadisBuild{}, nil, fmt.Errorf("chunk[%d] id cannot be empty", i)
-		}
-		if cb := strings.TrimSpace(c.BuildID); cb != "" && cb != buildID {
-			return db.VanadisBuild{}, nil, fmt.Errorf("chunk[%d] build_id %q does not match build id %q", i, cb, buildID)
-		}
-		title, instructions := strings.TrimSpace(c.Title), strings.TrimSpace(c.Instructions)
-		if title == "" {
-			return db.VanadisBuild{}, nil, fmt.Errorf("chunk[%d] title cannot be empty", i)
-		}
-		if instructions == "" {
-			return db.VanadisBuild{}, nil, fmt.Errorf("chunk[%d] instructions cannot be empty", i)
-		}
-		effort, err := normalizeVanadisEffort(c.Effort)
-		if err != nil {
-			return db.VanadisBuild{}, nil, fmt.Errorf("chunk[%d] %w", i, err)
-		}
-		chunkRepo, cStatus := db.NormalizeRepo(c.Repo), strings.TrimSpace(c.Status)
-		if chunkRepo == "" {
-			chunkRepo = "azylman/aerial"
-		}
-		if cStatus == "" {
-			cStatus = "pending"
-		}
-		files, symbols, criteria := c.TargetFiles, c.TargetSymbols, c.AcceptanceCriteria
-		if files == nil {
-			files = []string{}
-		}
-		if symbols == nil {
-			symbols = []string{}
-		}
-		if criteria == nil {
-			criteria = []string{}
-		}
-
-		normChunks[i] = db.VanadisChunk{
-			ID: cid, BuildID: buildID, ChunkIndex: c.ChunkIndex, Repo: chunkRepo, Title: title, Instructions: instructions,
-			TargetFiles: files, TargetSymbols: symbols, Effort: effort, AcceptanceCriteria: criteria, Status: cStatus, PRNumber: c.PRNumber, StartedAt: c.StartedAt,
-		}
-	}
-	return normBuild, normChunks, nil
-}
-
 func setIf[T comparable](dst *T, src T) {
 	var zero T
 	if src != zero {
@@ -158,16 +66,6 @@ func defaultVal[T ~int | ~float64 | ~int64](v, def T) T {
 	return v
 }
 
-func mapValuesFiltered[K comparable, V any](m map[K]*V, filter func(*V) bool) []V {
-	var res []V
-	for _, v := range m {
-		if v != nil && (filter == nil || filter(v)) {
-			res = append(res, *v)
-		}
-	}
-	return res
-}
-
 // FakeStore is a thread-safe, pure Go in-memory implementation of db.Store.
 type FakeStore struct {
 	mu sync.RWMutex
@@ -175,19 +73,15 @@ type FakeStore struct {
 	closed   bool
 	failNext map[string]error
 
-	messages            map[string]*db.Message
-	messageOrder        []string
-	nextRowID, nextPRID int64
+	messages     map[string]*db.Message
+	messageOrder []string
+	nextRowID    int64
 
 	sessions        map[string]*db.SessionInfo
 	threadSummaries map[string]threadSummaryRecord
 
 	sessionSummaries map[string]*db.SessionSummary
 	transcriptSteps  map[string][]db.TranscriptStep
-
-	prRecords     map[string]*db.PRRecord
-	vanadisBuilds map[string]*db.VanadisBuild
-	vanadisChunks map[string]*db.VanadisChunk
 }
 
 // NewFakeStore constructs an initialized, empty in-memory FakeStore.
@@ -195,7 +89,6 @@ func NewFakeStore() *FakeStore {
 	f := &FakeStore{failNext: make(map[string]error), messages: make(map[string]*db.Message), messageOrder: make([]string, 0)}
 	f.sessions, f.threadSummaries = make(map[string]*db.SessionInfo), make(map[string]threadSummaryRecord)
 	f.sessionSummaries, f.transcriptSteps = make(map[string]*db.SessionSummary), make(map[string][]db.TranscriptStep)
-	f.prRecords, f.vanadisBuilds, f.vanadisChunks = make(map[string]*db.PRRecord), make(map[string]*db.VanadisBuild), make(map[string]*db.VanadisChunk)
 	return f
 }
 
@@ -293,16 +186,6 @@ func cloneSliceNonNil[T any](s []T) []T {
 		return []T{}
 	}
 	return cloneSlice(s)
-}
-
-func cloneVanadisChunk(c *db.VanadisChunk) db.VanadisChunk {
-	cp := *c
-	cp.TargetFiles, cp.TargetSymbols = cloneSliceNonNil(c.TargetFiles), cloneSliceNonNil(c.TargetSymbols)
-	cp.AcceptanceCriteria = cloneSliceNonNil(c.AcceptanceCriteria)
-	if strings.TrimSpace(cp.Effort) == "" {
-		cp.Effort = "medium"
-	}
-	return cp
 }
 
 func textMatchScore(text, qLower string, words []string) float64 {
@@ -807,178 +690,5 @@ func (f *FakeStore) GetTranscriptStepRange(ctx context.Context, sessionID string
 		}
 		sort.Slice(matched, func(i, j int) bool { return matched[i].StepIndex < matched[j].StepIndex })
 		return matched, nil
-	})
-}
-
-func prKey(repo string, prNumber int) string {
-	return fmt.Sprintf("%s/%d", db.NormalizeRepo(repo), prNumber)
-}
-
-func (f *FakeStore) UpsertPR(ctx context.Context, record db.PRRecord) error {
-	return f.withLockErr("UpsertPR", func() error {
-		norm, err := db.ValidateAndNormalizeUpsertPR(record)
-		if err != nil {
-			return err
-		}
-		key, now := prKey(norm.Repo, norm.PRNumber), time.Now()
-		existing, exists := f.prRecords[key]
-		if exists {
-			existing.Branch, existing.HeadSHA, existing.TargetID, existing.UpdatedAt = norm.Branch, norm.HeadSHA, norm.TargetID, now
-			setIf(&existing.Title, norm.Title)
-			setIf(&existing.StatusMessageID, norm.StatusMessageID)
-			if norm.Status != "" && existing.Status != "merged" && existing.Status != "deploying" && existing.Status != "deployed" {
-				existing.Status = norm.Status
-			}
-			if norm.Metadata != "" && norm.Metadata != "{}" {
-				existing.Metadata = norm.Metadata
-			}
-			return nil
-		}
-		f.nextPRID++
-		rec := norm
-		rec.ID, rec.CreatedAt, rec.UpdatedAt = f.nextPRID, now, now
-		f.prRecords[key] = &rec
-		return nil
-	})
-}
-
-func (f *FakeStore) getPRRecord(repo string, prNumber int) (*db.PRRecord, error) {
-	if repo = db.NormalizeRepo(repo); repo == "" {
-		return nil, fmt.Errorf("repo cannot be empty")
-	}
-	rec, exists := f.prRecords[prKey(repo, prNumber)]
-	if !exists {
-		return nil, db.ErrPRNotFound
-	}
-	return rec, nil
-}
-
-func (f *FakeStore) GetPRByNumber(ctx context.Context, repo string, prNumber int) (*db.PRRecord, error) {
-	return withFakeLock(f, "GetPRByNumber", func() (*db.PRRecord, error) {
-		rec, err := f.getPRRecord(repo, prNumber)
-		return clonePtr(rec), err
-	})
-}
-
-func (f *FakeStore) UpdatePRStatusMessageID(ctx context.Context, repo string, prNumber int, messageID string) error {
-	return f.withLockErr("UpdatePRStatusMessageID", func() error {
-		rec, err := f.getPRRecord(repo, prNumber)
-		if err != nil {
-			return err
-		}
-		rec.StatusMessageID, rec.UpdatedAt = strings.TrimSpace(messageID), time.Now()
-		return nil
-	})
-}
-
-func (f *FakeStore) CreateVanadisBuild(ctx context.Context, build db.VanadisBuild, chunks []db.VanadisChunk) error {
-	return f.withLockErr("CreateVanadisBuild", func() error {
-		normBuild, normChunks, err := validateAndNormalizeVanadisBuild(build, chunks)
-		if err != nil {
-			return err
-		}
-		if _, exists := f.vanadisBuilds[normBuild.ID]; exists {
-			return fmt.Errorf("vanadis build %s already exists", normBuild.ID)
-		}
-		seenChunkIDs, seenIndices := make(map[string]bool, len(normChunks)), make(map[int]bool, len(normChunks))
-		for _, c := range normChunks {
-			if _, exists := f.vanadisChunks[c.ID]; exists || seenChunkIDs[c.ID] {
-				return fmt.Errorf("vanadis chunk %s already exists", c.ID)
-			}
-			if seenIndices[c.ChunkIndex] {
-				return fmt.Errorf("duplicate chunk_index %d in build %s", c.ChunkIndex, normBuild.ID)
-			}
-			seenChunkIDs[c.ID], seenIndices[c.ChunkIndex] = true, true
-		}
-		now := time.Now()
-		b := normBuild
-		b.CreatedAt, b.UpdatedAt = now, now
-		f.vanadisBuilds[normBuild.ID] = &b
-		for _, c := range normChunks {
-			startedAt := c.StartedAt
-			if startedAt.IsZero() && (c.Status == "running" || c.Status == "coding") {
-				startedAt = now
-			}
-			cp := cloneVanadisChunk(&c)
-			cp.StartedAt, cp.CreatedAt, cp.UpdatedAt = startedAt, now, now
-			f.vanadisChunks[c.ID] = &cp
-		}
-		return nil
-	})
-}
-
-func (f *FakeStore) GetVanadisBuild(ctx context.Context, buildID string) (*db.VanadisBuild, []db.VanadisChunk, error) {
-	return withFakeLock2(f, "GetVanadisBuild", func() (*db.VanadisBuild, []db.VanadisChunk, error) {
-		if buildID = strings.TrimSpace(buildID); buildID == "" {
-			return nil, nil, fmt.Errorf("build id cannot be empty")
-		}
-		b := f.vanadisBuilds[buildID]
-		if b == nil {
-			return nil, nil, db.ErrVanadisBuildNotFound
-		}
-		chunks := mapValuesFiltered(f.vanadisChunks, func(c *db.VanadisChunk) bool { return c.BuildID == buildID })
-		for i := range chunks {
-			chunks[i] = cloneVanadisChunk(&chunks[i])
-		}
-		sort.Slice(chunks, func(i, j int) bool { return chunks[i].ChunkIndex < chunks[j].ChunkIndex })
-		cp := *b
-		return &cp, chunks, nil
-	})
-}
-
-func (f *FakeStore) getVanadisChunkLocked(chunkID string) (*db.VanadisChunk, error) {
-	if chunkID = strings.TrimSpace(chunkID); chunkID == "" {
-		return nil, fmt.Errorf("chunk id cannot be empty")
-	}
-	c, exists := f.vanadisChunks[chunkID]
-	if !exists {
-		return nil, db.ErrVanadisChunkNotFound
-	}
-	return c, nil
-}
-
-func (f *FakeStore) GetVanadisChunk(ctx context.Context, chunkID string) (*db.VanadisChunk, error) {
-	return withFakeLock(f, "GetVanadisChunk", func() (*db.VanadisChunk, error) {
-		c, err := f.getVanadisChunkLocked(chunkID)
-		if err != nil {
-			return nil, err
-		}
-		cp := cloneVanadisChunk(c)
-		return &cp, nil
-	})
-}
-
-func (f *FakeStore) AttachVanadisChunkPR(ctx context.Context, chunkID string, prNumber int) error {
-	return f.withLockErr("AttachVanadisChunkPR", func() error {
-		if prNumber <= 0 {
-			return fmt.Errorf("pr_number must be greater than 0")
-		}
-		c, err := f.getVanadisChunkLocked(chunkID)
-		if err != nil {
-			return err
-		}
-		now := time.Now()
-		c.PRNumber, c.Status, c.UpdatedAt = prNumber, "pr_opened", now
-		if c.StartedAt.IsZero() {
-			c.StartedAt = now
-			if !c.CreatedAt.IsZero() {
-				c.StartedAt = c.CreatedAt
-			}
-		}
-		return nil
-	})
-}
-
-func (f *FakeStore) UpdateVanadisBuildStatusMessageID(ctx context.Context, buildID, messageID string) error {
-	return f.withLockErr("UpdateVanadisBuildStatusMessageID", func() error {
-		if buildID = strings.TrimSpace(buildID); buildID == "" {
-			return fmt.Errorf("build id cannot be empty")
-		}
-		b, exists := f.vanadisBuilds[buildID]
-		if !exists {
-			return db.ErrVanadisBuildNotFound
-		}
-		b.StatusMessageID, b.UpdatedAt = strings.TrimSpace(messageID), time.Now()
-		return nil
 	})
 }

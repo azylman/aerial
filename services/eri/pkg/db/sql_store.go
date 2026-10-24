@@ -37,34 +37,16 @@ func withTimeout(ctx context.Context, d time.Duration) (context.Context, context
 	return context.WithTimeout(ctx, d)
 }
 
-func (s *SQLStore) execWithTimeout(ctx context.Context, d time.Duration, query string, args ...any) (sql.Result, error) {
-	if err := s.checkDB(); err != nil {
-		return nil, err
-	}
-	if d <= 0 {
-		d = 5 * time.Second
-	}
-	queryCtx, cancel := withTimeout(ctx, d)
-	defer cancel()
-	return s.db.ExecContext(queryCtx, query, args...)
-}
+const defaultExecTimeout = 5 * time.Second
 
-func (s *SQLStore) execRequireOneRow(ctx context.Context, d time.Duration, query string, notFoundErr error, args ...any) error {
-	res, err := s.execWithTimeout(ctx, d, query, args...)
-	if err != nil {
+func (s *SQLStore) execWithTimeout(ctx context.Context, query string, args ...any) error {
+	if err := s.checkDB(); err != nil {
 		return err
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		if notFoundErr != nil {
-			return notFoundErr
-		}
-		return sql.ErrNoRows
-	}
-	return nil
+	queryCtx, cancel := withTimeout(ctx, defaultExecTimeout)
+	defer cancel()
+	_, err := s.db.ExecContext(queryCtx, query, args...)
+	return err
 }
 
 func scanNonEmptyStrings(rows *sql.Rows) ([]string, error) {

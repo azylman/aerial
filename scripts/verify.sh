@@ -68,7 +68,7 @@ check_gofmt() {
             go_staged=$(echo "$STAGED_FILES" | grep -E '\.go$' || true)
             if [ -n "$go_staged" ]; then
                 unformatted=$(echo "$go_staged" | while read -r gf; do
-                    [ -f "$gf" ] && gofmt -l "$gf"
+                    if [ -f "$gf" ]; then gofmt -l "$gf"; fi
                 done)
             fi
         else

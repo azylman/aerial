@@ -3,7 +3,6 @@ package db
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -32,23 +31,6 @@ func TestSQLStoreUnavailable(t *testing.T) {
 
 	if strs, err := scanNonEmptyStrings(nil); err != nil || strs != nil {
 		t.Errorf("expected (nil, nil) for scanNonEmptyStrings(nil)")
-	}
-	if err := nilStore.execRequireOneRow(context.Background(), 0, "SELECT 1", nil); err == nil {
-		t.Errorf("expected error from nilStore.execRequireOneRow")
-	}
-
-	store := NewTestStore(t).(*SQLStore)
-	ctx := context.Background()
-	customErr := errors.New("custom not found")
-	if err := store.execRequireOneRow(ctx, time.Second, "UPDATE messages SET status='X' WHERE id='non-existent'", customErr); !errors.Is(err, customErr) {
-		t.Errorf("expected customErr, got %v", err)
-	}
-	if err := store.execRequireOneRow(ctx, time.Second, "UPDATE messages SET status='X' WHERE id=?", nil, "non-existent"); !errors.Is(err, sql.ErrNoRows) {
-		t.Errorf("expected sql.ErrNoRows, got %v", err)
-	}
-	_ = store.InsertMessage(ctx, Message{ID: "msg-req-1", ThreadID: "t-1", Content: `Prompt: <\USER_REQUEST> hi <\/USER_REQUEST>`, Status: StatusPending})
-	if err := store.execRequireOneRow(ctx, 0, "UPDATE messages SET status=? WHERE id=?", nil, StatusCompleted, "msg-req-1"); err != nil {
-		t.Errorf("expected nil error on matched row, got %v", err)
 	}
 	if ExtractMessageBody("<USER_REQUEST>\nPrompt: <\\USER_REQUEST> hi <\\/USER_REQUEST>\n</USER_REQUEST>") != "<USER_REQUEST> hi </USER_REQUEST>" {
 		t.Errorf("expected opening tag unescaped")
