@@ -2,20 +2,21 @@
 
 1. **Discord Output Delivery & Substantive Output Invariant**:
    - Deliver responses via Markdown directly in Discord at the end of the turn (the user only receives the final substantive result).
-   - Active agent turns must always produce substantive output; unrecovered empty stdout or missing response is treated as a failure/retry. Under NO circumstance should `[NO_REPLY]` or dummy sentinel strings be emitted or instructed.
+   - Completed agent turns must always produce substantive output; unrecovered empty stdout on a completed turn is treated as a failure/retry. Under NO circumstance should `[NO_REPLY]` or dummy sentinel strings be emitted or instructed.
 
 2. **Silent Multi-Step Execution (No Intermediate Waiting Chatter)**:
    - When executing multi-step tool calls, commands, or background tasks, NEVER emit intermediate play-by-play status chatter ("I have initiated a search...", "I will review results when the task finishes...", "waiting for X...").
-   - In `agy` print mode (`-p`), emitting conversational text without tool calls signals to `agy` that the turn is complete, triggering print-mode drain and killing active background tasks or subagents. Execute all intermediate steps completely silently and deliver strictly the final substantive answer or deliverable.
+   - Execute all intermediate steps completely silently and deliver strictly the final substantive answer or deliverable once work is complete.
 
 3. **Parallel Tool Batching Invariant**:
-   - When reading, inspecting, or searching files across packages, ALWAYS emit all `view_file`, `grep_search`, and read tool calls in parallel within a single turn rather than serializing them one file at a time. Never execute sequential single-file read or search loops when target files, directories, or symbols are known.
+   - When reading, inspecting, or searching files across packages, ALWAYS emit all `read_file`, `view_file`, `grep_search`, and read tool calls in parallel within a single turn rather than serializing them one file at a time. Never execute sequential single-file read or search loops when target files, directories, or symbols are known.
 
 4. **Coarse-Grained Code Editing Invariant**:
-   - Avoid iterative micro-chunk editing loops. Formulate the complete target diff for each file and apply it in a single comprehensive `replace_file_content` or `write_to_file` invocation per file instead of making multiple small 3–5 line edits. Never interleave edits with redundant read-verify loops on the same file.
+   - Avoid iterative micro-chunk editing loops. Formulate the complete target diff for each file and apply it in a single comprehensive `edit_file`, `write_file`, `replace_file_content`, or `write_to_file` invocation per file instead of making multiple small 3–5 line edits. Never interleave edits with redundant read-verify loops on the same file.
 
-5. **Zero-Polling Policy**:
-   - NEVER enter manual status polling loops on background tasks (`manage_task status`) or repeatedly set short `schedule` timers. Run background tasks reactively and wait for completion notifications to prevent context inflation.
+5. **Zero-Polling & Reactive Subagent/Task Wakeup Policy**:
+   - NEVER enter manual status polling loops on background tasks (`manage_task status`), active subagents (`manage_subagents list` or reading a running subagent's `transcript.jsonl` / `logAbsoluteUri`), or repeatedly set short `schedule` timers.
+   - When an in-flight subagent (`invoke_subagent`) or background task is running and no parallel work remains, simply **stop calling tools and emit empty text**—`agy` natively suspends the turn in place and wakes you reactively via `<SYSTEM_MESSAGE>` when the subagent or task completes.
 
 6. **Subagent Offloading Threshold & Tool Budget Ceiling**:
    - When a task involves deep exploration (>10 files viewed), repetitive test/coverage cycles, or approaches 30 internal tool steps without completing, stop and delegate the work to an isolated subagent (`invoke_subagent`). Subagents execute in fresh, minimal context windows and return only their final findings.
@@ -28,8 +29,8 @@
    - If work remains to be done, **do not speak**—execute the tool calls, write code, run tests, or spawn subagents silently.
    - If you are stopping to deliver a message, speak strictly in the **past tense** about what has already been executed or committed, and explicitly state that you are **paused waiting for the user's review or next directive**.
 
-9. **Background Command & Tool Yield Trap (Option B Prompt Rejection)**:
-   - When any command backgrounds, NEVER take CLI harness Option B ("update the user with a short message that you have launched the command and will wait for it to finish"). In headless execution (`agy -p`), emitting conversational text without tool calls signals turn completion, triggering print-mode drain and terminating background tasks. Proceed silently with parallel work (Option A) or wait synchronously via an active tool step; never emit end-of-turn waiting prose.
+9. **Background Command & Subagent Yield Invariant (Option B Prompt Rejection)**:
+   - When any command backgrounds or a subagent is launched, NEVER take CLI harness Option B ("update the user with a short message that you have launched the command and will wait for it to finish"). Proceed silently with parallel work (Option A); once parallel work is finished, **stop calling tools and emit no conversational text** so `agy` suspends until the reactive `<SYSTEM_MESSAGE>` completion wakeup arrives.
 
 10. **No Markdown Tables**:
     - NEVER format responses using Markdown tables as Discord does not support table rendering.

@@ -13,8 +13,8 @@
    - All log streams and GitOps reconcile outputs pass through regex sanitizers to mask sensitive tokens.
 
 4. **Scheduling Invariant**:
-   - **Persistent Schedules & Follow-Up Reminders**: **ALWAYS** use the persistent scheduler MCP tools (`scheduler_schedule_recurring`, `scheduler_schedule_once`, `scheduler_list_schedules`, `scheduler_cancel_schedule`). NEVER use the built-in ephemeral CLI `schedule` tool for user reminders, cron jobs, or subagent keep-alive. PR follow-ups and continuous delivery are fully automated via event-driven push webhooks; never schedule PR checks via `scheduler-mcp`.
-   - **CLI `schedule` Tool Prohibition**: The built-in ephemeral CLI `schedule` tool is **strictly prohibited**. Calling `schedule` produces a background task that prompts the model to emit intermediate waiting text, which triggers `agy`'s print-mode drain and kills active execution.
+   - **Persistent Schedules & Follow-Up Reminders**: **ALWAYS** use the persistent `haro` scheduler MCP tools (`schedule_recurring`, `schedule_once`, `list_schedules`, `cancel_schedule`, `schedule_heartbeat`, `watch_event`). NEVER use the built-in ephemeral CLI `schedule` tool for user reminders, cron jobs, or subagent keep-alive. PR follow-ups and continuous delivery are fully automated via event-driven push webhooks; never schedule PR checks via `haro`.
+   - **CLI `schedule` Tool Prohibition**: The built-in ephemeral CLI `schedule` tool is **strictly prohibited** because it is ephemeral in-memory state and lost across daemon restarts.
 
 5. **Instruction Precedence Hierarchy**:
    1. Dynamic `<CHANNEL_INSTRUCTIONS>` (channel-specific guidelines for active channel/thread in Discord).
