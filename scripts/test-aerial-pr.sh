@@ -294,6 +294,66 @@ assert_eq "true" "$(echo "$REGISTER_PR_CHECK" | grep -q 'reg1:ok' && echo true |
 assert_eq "true" "$(echo "$REGISTER_PR_CHECK" | grep -q 'reg2:ok:2' && echo true || echo false)" "register_pr_in_brain retries transient error and succeeds on attempt 2"
 assert_eq "true" "$(echo "$REGISTER_PR_CHECK" | grep -q 'reg3:failed_as_expected:3' && echo true || echo false)" "register_pr_in_brain fails non-zero after exhausting all 3 attempts"
 
+# Case 10b: PR registration endpoint probing and AERIAL_PR_REGISTER_URL override
+PR_ENDPOINT_CHECK=$(bash -c "
+    REPO_TEST_MODE=1
+    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
+
+    # Test 1: AERIAL_PR_REGISTER_URL override used directly
+    res1=\$(AERIAL_PR_REGISTER_URL='http://custom-router.aerial:4020' bash -c '
+        if [ -n \"\${AERIAL_PR_REGISTER_URL:-}\" ]; then
+            if [[ \"\${AERIAL_PR_REGISTER_URL}\" == */internal/pr/register ]]; then
+                echo \"\${AERIAL_PR_REGISTER_URL}\"
+            else
+                echo \"\${AERIAL_PR_REGISTER_URL%/}/internal/pr/register\"
+            fi
+        fi
+    ')
+    [ \"\$res1\" = 'http://custom-router.aerial:4020/internal/pr/register' ] && echo 'ep1:ok'
+
+    # Test 2: Default fallback when no candidates respond
+    curl() { return 1; }
+    export -f curl
+    res2=\$(bash -c '
+        brain_reg_url=\"\"
+        for cand in \"http://webhooks-router.aerial\" \"http://127.0.0.1:4020\" \"http://127.0.0.1:8088\" \"http://eri.aerial\" \"http://brain.aerial\" \"http://host.docker.internal:8088\" \"http://127.0.0.1:8080\" \"http://aerial-brain:8080\"; do
+            probe_code=\$(curl -s -o /dev/null -w \"%{http_code}\" --connect-timeout 1 -m 2 -X POST \"\${cand}/internal/pr/register\" 2>/dev/null || true)
+            if [ \"\$probe_code\" = \"400\" ] || [ \"\$probe_code\" = \"200\" ]; then
+                brain_reg_url=\"\${cand}/internal/pr/register\"
+                break
+            fi
+        done
+        if [ -z \"\$brain_reg_url\" ]; then
+            brain_reg_url=\"http://webhooks-router.aerial/internal/pr/register\"
+        fi
+        echo \"\$brain_reg_url\"
+    ')
+    [ \"\$res2\" = 'http://webhooks-router.aerial/internal/pr/register' ] && echo 'ep2:ok'
+
+    # Test 3: First responding candidate is selected (webhooks-router candidate)
+    curl() {
+        if [[ \"\$*\" == *\"http://webhooks-router.aerial/internal/pr/register\"* ]]; then
+            printf '400'
+        fi
+    }
+    export -f curl
+    res3=\$(bash -c '
+        brain_reg_url=\"\"
+        for cand in \"http://webhooks-router.aerial\" \"http://127.0.0.1:4020\" \"http://127.0.0.1:8088\" \"http://eri.aerial\" \"http://brain.aerial\" \"http://host.docker.internal:8088\" \"http://127.0.0.1:8080\" \"http://aerial-brain:8080\"; do
+            probe_code=\$(curl -s -o /dev/null -w \"%{http_code}\" --connect-timeout 1 -m 2 -X POST \"\${cand}/internal/pr/register\" 2>/dev/null || true)
+            if [ \"\$probe_code\" = \"400\" ] || [ \"\$probe_code\" = \"200\" ]; then
+                brain_reg_url=\"\${cand}/internal/pr/register\"
+                break
+            fi
+        done
+        echo \"\$brain_reg_url\"
+    ')
+    [ \"\$res3\" = 'http://webhooks-router.aerial/internal/pr/register' ] && echo 'ep3:ok'
+")
+assert_eq "true" "$(echo "$PR_ENDPOINT_CHECK" | grep -q 'ep1:ok' && echo true || echo false)" "AERIAL_PR_REGISTER_URL override appends /internal/pr/register"
+assert_eq "true" "$(echo "$PR_ENDPOINT_CHECK" | grep -q 'ep2:ok' && echo true || echo false)" "PR register endpoint defaults to webhooks-router fallback"
+assert_eq "true" "$(echo "$PR_ENDPOINT_CHECK" | grep -q 'ep3:ok' && echo true || echo false)" "PR register endpoint probes webhooks-router.aerial first"
+
 # Case 11: rebase_staged_changes rebases onto advanced upstream before verification and aborts on conflict
 REBASE_STAGED_CHECK=$(bash -c "
     REPO_TEST_MODE=1

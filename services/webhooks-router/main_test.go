@@ -190,6 +190,10 @@ type mockPRRegistry struct {
 	ciFailCount    int
 	ciFailCountErr error
 
+	registerCalls    []PRRegisterRequest
+	registerTargetID string
+	registerErr      error
+
 	ensureCalls    []prCall
 	ensureTargetID string
 	ensureErr      error
@@ -398,6 +402,17 @@ func (m *mockPRRegistry) ClaimEventTriggers(ctx context.Context, source string, 
 
 func (m *mockPRRegistry) IncrementCIFailCount(ctx context.Context, repo string, prNumber int) (int, error) {
 	return m.ciFailCount, m.checkErr(m.ciFailCountErr)
+}
+
+func (m *mockPRRegistry) RegisterPR(ctx context.Context, req PRRegisterRequest) (string, error) {
+	if m == nil {
+		return "", errors.New("nil mockPRRegistry")
+	}
+	m.registerCalls = append(m.registerCalls, req)
+	if err := m.checkErr(m.registerErr); err != nil {
+		return "", err
+	}
+	return firstNonEmpty(m.registerTargetID, req.TargetID), nil
 }
 
 func (m *mockPRRegistry) EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID, vanadisChunkID string) (string, error) {
@@ -4624,6 +4639,20 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 		{name: "EnsurePRRegistered invalid targetID after chunk miss skips upsert", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", mockSelectErr: pgx.ErrNoRows, wantTarget: ""},
 		{name: "EnsurePRRegistered upsert exec error", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, targetID: "1562162630997581946", mockExecErr: errors.New("upsert err"), wantErr: true},
 
+		// RegisterPR
+		{name: "RegisterPR nil pool guard", op: "RegisterPR", nilPool: true, repo: "azylman/aerial", prNumber: 42, targetID: "1555405874565091380", wantErr: true},
+		{name: "RegisterPR empty repo guard", op: "RegisterPR", repo: "", prNumber: 42, targetID: "1555405874565091380", wantErr: true},
+		{name: "RegisterPR zero pr guard", op: "RegisterPR", repo: "azylman/aerial", prNumber: 0, targetID: "1555405874565091380", wantErr: true},
+		{name: "RegisterPR empty branch guard", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, sha: "head123", targetID: "1555405874565091380", branchReturn: "", wantErr: true},
+		{name: "RegisterPR empty head_sha guard", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, sha: "", targetID: "1555405874565091380", branchReturn: "feat/foo", wantErr: true},
+		{name: "RegisterPR chunk query error", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", jobName: "chunk-1", mockSelectErr: errors.New("chunk db err"), wantErr: true},
+		{name: "RegisterPR chunk not found returns ErrVanadisChunkNotFound", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", jobName: "chunk-1", mockSelectErr: pgx.ErrNoRows, wantErr: true},
+		{name: "RegisterPR chunk resolves thread_id and upserts pr_registry", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", jobName: "chunk-1", targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantSQLSubstr: "ON CONFLICT (repo, pr_number)"},
+		{name: "RegisterPR invalid targetID without chunk returns error", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", targetID: "invalid-target", wantErr: true},
+		{name: "RegisterPR empty targetID without chunk returns error", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", targetID: "", wantErr: true},
+		{name: "RegisterPR upsert exec error", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", targetID: "1555405874565091380", mockExecErr: errors.New("upsert err"), wantErr: true},
+		{name: "RegisterPR success direct targetID", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", targetID: "1555405874565091380", wantTarget: "1555405874565091380", wantSQLSubstr: "INSERT INTO pr_registry"},
+
 		// RecordExpectedJobs
 		{name: "RecordExpectedJobs empty repo guard", op: "RecordExpectedJobs", repo: "", prNumber: 42, jobs: []string{"coven"}, wantUpdated: false},
 		{name: "RecordExpectedJobs zero pr guard", op: "RecordExpectedJobs", repo: "azylman/aerial", prNumber: 0, jobs: []string{"coven"}, wantUpdated: false},
@@ -4645,7 +4674,7 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var gotSQL string
+			var gotSQL, gotExecSQL string
 			var pool *mockVanadisPgxPool
 			if !tc.nilPool {
 				pool = &mockVanadisPgxPool{
@@ -4706,6 +4735,7 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 						}}
 					},
 					execFn: func(qCtx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+						gotExecSQL = sql
 						if tc.mockExecErr != nil {
 							return pgconn.CommandTag{}, tc.mockExecErr
 						}
@@ -4979,6 +5009,29 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 				if gotPR != tc.wantPRNum {
 					t.Errorf("gotPR = %d, want %d", gotPR, tc.wantPRNum)
 				}
+			case "RegisterPR":
+				req := PRRegisterRequest{
+					Repo:           tc.repo,
+					PRNumber:       tc.prNumber,
+					Branch:         tc.branchReturn,
+					HeadSHA:        tc.sha,
+					TargetID:       tc.targetID,
+					Title:          "feat: title",
+					VanadisChunkID: tc.jobName,
+					Metadata:       tc.metaJSON,
+				}
+				gotTarget, err := reg.RegisterPR(ctx, req)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("RegisterPR err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if tc.name == "RegisterPR chunk not found returns ErrVanadisChunkNotFound" {
+					if !errors.Is(err, ErrVanadisChunkNotFound) {
+						t.Errorf("err = %v, want ErrVanadisChunkNotFound", err)
+					}
+				}
+				if gotTarget != tc.wantTarget {
+					t.Errorf("gotTarget = %q, want %q", gotTarget, tc.wantTarget)
+				}
 			case "EnsurePRRegistered":
 				gotTarget, err := reg.EnsurePRRegistered(ctx, tc.repo, tc.prNumber, "feat/branch", "head123", "feat: title", tc.targetID, tc.jobName)
 				if (err != nil) != tc.wantErr {
@@ -5004,8 +5057,8 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 					t.Errorf("gotHas = %v, want %v", gotHas, tc.wantUpdated)
 				}
 			}
-			if tc.wantSQLSubstr != "" && !strings.Contains(gotSQL, tc.wantSQLSubstr) {
-				t.Errorf("gotSQL = %q, want substring %q", gotSQL, tc.wantSQLSubstr)
+			if tc.wantSQLSubstr != "" && !strings.Contains(gotSQL, tc.wantSQLSubstr) && !strings.Contains(gotExecSQL, tc.wantSQLSubstr) {
+				t.Errorf("gotSQL = %q, gotExecSQL = %q, want substring %q", gotSQL, gotExecSQL, tc.wantSQLSubstr)
 			}
 		})
 	}
@@ -5810,6 +5863,169 @@ func TestDefaultOutboundDispatcher_DispatchWidget(t *testing.T) {
 			}
 			if msgID != tc.wantMsgID {
 				t.Errorf("got msgID = %q, want %q", msgID, tc.wantMsgID)
+			}
+		})
+	}
+}
+
+func TestRouterServer_HandlePRRegister(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		nilRegistry    bool
+		regErr         error
+		regTargetID    string
+		body           string
+		dispWidgetErr  error
+		wantStatus     int
+		wantSubstr     string
+		wantRegistered bool
+		wantTargetID   string
+		wantWidgetCall bool
+	}{
+		{
+			name:        "NilRegistry",
+			nilRegistry: true,
+			body:        `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"sha123","target_id":"1555405874565091380"}`,
+			wantStatus:  http.StatusInternalServerError,
+			wantSubstr:  "registry not initialized",
+		},
+		{
+			name:       "InvalidJSON",
+			body:       `{not-valid-json`,
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "invalid json payload",
+		},
+		{
+			name:       "EmptyRepo",
+			body:       `{"repo":"","pr_number":101,"branch":"feat/test","head_sha":"sha123","target_id":"1555405874565091380"}`,
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "repo cannot be empty",
+		},
+		{
+			name:       "ZeroPRNumber",
+			body:       `{"repo":"azylman/aerial","pr_number":0,"branch":"feat/test","head_sha":"sha123","target_id":"1555405874565091380"}`,
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "pr_number must be greater than 0",
+		},
+		{
+			name:       "EmptyBranch",
+			body:       `{"repo":"azylman/aerial","pr_number":101,"branch":"","head_sha":"sha123","target_id":"1555405874565091380"}`,
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "branch cannot be empty",
+		},
+		{
+			name:       "EmptyHeadSHA",
+			body:       `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"","target_id":"1555405874565091380"}`,
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "head_sha cannot be empty",
+		},
+		{
+			name:       "EmptyTargetIDWithoutChunk",
+			body:       `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"sha123","target_id":""}`,
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "target_id cannot be empty",
+		},
+		{
+			name:       "InvalidTargetIDWithoutChunk",
+			body:       `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"sha123","target_id":"not-a-snowflake"}`,
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "target_id must be a valid Discord snowflake (17-20 digits)",
+		},
+		{
+			name:       "MissingVanadisChunkReturns404",
+			body:       `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"sha123","vanadis_chunk_id":"missing-chunk-id"}`,
+			regErr:     ErrVanadisChunkNotFound,
+			wantStatus: http.StatusNotFound,
+			wantSubstr: "vanadis chunk not found",
+		},
+		{
+			name:       "InvalidTargetIDFromChunkRegistrationReturns400",
+			body:       `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"sha123","vanadis_chunk_id":"chunk-no-thread"}`,
+			regErr:     ErrInvalidTargetID,
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "target_id must be a valid Discord snowflake (17-20 digits)",
+		},
+		{
+			name:       "InternalRegistrationErrorReturns500",
+			body:       `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"sha123","target_id":"1555405874565091380"}`,
+			regErr:     errors.New("db disk failure"),
+			wantStatus: http.StatusInternalServerError,
+			wantSubstr: "Failed to register PR",
+		},
+		{
+			name:           "SuccessDirectTargetID",
+			body:           `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"sha123","target_id":"1555405874565091380","title":"feat: test"}`,
+			wantStatus:     http.StatusOK,
+			wantSubstr:     `"status":"registered"`,
+			wantRegistered: true,
+			wantTargetID:   "1555405874565091380",
+			wantWidgetCall: true,
+		},
+		{
+			name:           "SuccessWithChunkIDResolvingThreadID",
+			body:           `{"repo":"azylman/aerial","pr_number":102,"branch":"feat/chunk","head_sha":"sha456","vanadis_chunk_id":"chunk-xyz"}`,
+			regTargetID:    "1555405874565091399",
+			wantStatus:     http.StatusOK,
+			wantSubstr:     `"status":"registered"`,
+			wantRegistered: true,
+			wantTargetID:   "1555405874565091399",
+			wantWidgetCall: true,
+		},
+		{
+			name:           "SuccessEvenIfWidgetSyncFails",
+			body:           `{"repo":"azylman/aerial","pr_number":103,"branch":"feat/widget-fail","head_sha":"sha789","target_id":"1555405874565091380"}`,
+			dispWidgetErr:  errors.New("discord rate limited"),
+			wantStatus:     http.StatusOK,
+			wantSubstr:     `"status":"registered"`,
+			wantRegistered: true,
+			wantTargetID:   "1555405874565091380",
+			wantWidgetCall: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var reg PRRegistryUpdater
+			var mockReg *mockPRRegistry
+			if !tc.nilRegistry {
+				mockReg = &mockPRRegistry{
+					registerErr:      tc.regErr,
+					registerTargetID: tc.regTargetID,
+					resolveTargetID:  firstNonEmpty(tc.regTargetID, "1555405874565091380"),
+					resolveBranch:    "feat/test",
+				}
+				reg = mockReg
+			}
+
+			disp := &mockOutboundDispatcher{
+				widgetErr: tc.dispWidgetErr,
+			}
+
+			srv := newTestRouter(Config{}, nil, reg, disp)
+			routes := srv.Routes()
+
+			rec := doHTTPRequest(routes, http.MethodPost, "/internal/pr/register", strings.NewReader(tc.body), nil)
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if tc.wantSubstr != "" && !strings.Contains(rec.Body.String(), tc.wantSubstr) {
+				t.Errorf("body = %q, want substr %q", rec.Body.String(), tc.wantSubstr)
+			}
+			if tc.wantRegistered && mockReg != nil {
+				if len(mockReg.registerCalls) != 1 {
+					t.Errorf("registerCalls = %d, want 1", len(mockReg.registerCalls))
+				}
+			}
+			if tc.wantWidgetCall && disp != nil {
+				calls := disp.WidgetCalls()
+				if len(calls) != 1 {
+					t.Errorf("WidgetCalls = %d, want 1", len(calls))
+				}
 			}
 		})
 	}

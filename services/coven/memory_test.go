@@ -8027,7 +8027,7 @@ system_channel_id: "1562837549255495693"
 			wantSkillsDir: "/config/custom-skills",
 			wantOwner:     "azylman",
 			wantRepo:      "aerial-config",
-			wantBrainReg:  "http://eri.aerial/internal/pr/register",
+			wantBrainReg:  "http://webhooks-router.aerial/internal/pr/register",
 			wantChannelID: "",
 		},
 	}
