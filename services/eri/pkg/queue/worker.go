@@ -1,10 +1,15 @@
 package queue
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
+	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -200,9 +205,58 @@ func (te *turnExecution) getPreviousSessionID(threadID string) string {
 	return ""
 }
 
-func (te *turnExecution) createOneShotSchedule(s db.OneShotSchedule) error {
-	if store := te.store(); store != nil {
-		return store.CreateOneShotSchedule(context.Background(), s)
+type oneShotScheduleRequest struct {
+	ID       string    `json:"id"`
+	ThreadID string    `json:"thread_id"`
+	Prompt   string    `json:"prompt"`
+	Effort   string    `json:"effort,omitempty"`
+	RunAt    time.Time `json:"run_at"`
+}
+
+func (te *turnExecution) createOneShotSchedule(s oneShotScheduleRequest) error {
+	if te == nil || te.pool == nil {
+		return errors.New("turnExecution or pool is nil")
+	}
+
+	haroURL := strings.TrimSpace(te.pool.cfg.HaroURL)
+	if haroURL == "" {
+		haroURL = strings.TrimSpace(os.Getenv("HARO_URL"))
+	}
+	if haroURL == "" {
+		if schedURL := strings.TrimSpace(os.Getenv("SCHEDULER_MCP_URL")); schedURL != "" {
+			schedURL = strings.TrimRight(schedURL, "/")
+			schedURL = strings.TrimSuffix(schedURL, "/mcp")
+			schedURL = strings.TrimSuffix(schedURL, "/sse")
+			haroURL = strings.TrimRight(schedURL, "/")
+		}
+	}
+	if haroURL == "" {
+		haroURL = "http://haro.aerial"
+	}
+	haroURL = strings.TrimRight(haroURL, "/")
+
+	bodyBytes, err := json.Marshal(s)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, haroURL+"/schedules/oneshot", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("haro returned status code %d", resp.StatusCode)
 	}
 	return nil
 }
@@ -1246,9 +1300,12 @@ func (te *turnExecution) handleQuotaPause(errDetail, stderr, currentModel, burst
 	var scheduled bool
 	if !isAlreadyRetry {
 		oneShotID := uuid.New().String()
-		oneShot := db.OneShotSchedule{
-			ID: oneShotID, ThreadID: te.threadID, Prompt: fmt.Sprintf("[QUOTA_RETRY] %s", te.turnPrompt),
-			Effort: burstEffort, RunAt: runAt, CreatedAt: time.Now().UTC(),
+		oneShot := oneShotScheduleRequest{
+			ID:       oneShotID,
+			ThreadID: te.threadID,
+			Prompt:   fmt.Sprintf("[QUOTA_RETRY] %s", te.turnPrompt),
+			Effort:   burstEffort,
+			RunAt:    runAt,
 		}
 		if err := te.createOneShotSchedule(oneShot); err == nil {
 			scheduled = true

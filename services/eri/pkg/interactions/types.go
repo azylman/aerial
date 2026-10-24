@@ -31,4 +31,5 @@ type InteractionDeps struct {
 	DeployStatusProvider DeployStatusProvider
 	GitOpsChannelUpdater GitOpsChannelUpdater
 	MemoryURL            string
+	HaroURL              string
 }

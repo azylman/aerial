@@ -710,23 +710,6 @@ func handleTranscriptSteps(store db.TranscriptStore) http.HandlerFunc {
 	}
 }
 
-func parseLimitOffset(q url.Values, defaultLimit, maxLimit int) (limit, offset int) {
-	limit = defaultLimit
-	if lStr := q.Get("limit"); lStr != "" {
-		if l, err := strconv.Atoi(lStr); err == nil && l > 0 {
-			if maxLimit <= 0 || l <= maxLimit {
-				limit = l
-			}
-		}
-	}
-	if oStr := q.Get("offset"); oStr != "" {
-		if o, err := strconv.Atoi(oStr); err == nil && o >= 0 {
-			offset = o
-		}
-	}
-	return limit, offset
-}
-
 func setNoCacheJSONHeaders(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
@@ -796,185 +779,6 @@ func newHTTPMemoryRetriever(baseURL string) runner.MemoryRetriever {
 			return "", err
 		}
 		return out.Context, nil
-	}
-}
-
-// Telemetry & Schedules Data Structures
-
-type CronScheduleWithDesc struct {
-	ID              string    `json:"id"`
-	TargetID        string    `json:"target_id,omitempty"`
-	ChannelID       string    `json:"channel_id"`
-	TitlePrefix     string    `json:"title_prefix"`
-	CronExpr        string    `json:"cron_expr"`
-	CronDescription string    `json:"cron_description"`
-	Prompt          string    `json:"prompt"`
-	Timezone        string    `json:"timezone"`
-	NextRunAt       time.Time `json:"next_run_at"`
-	Enabled         bool      `json:"enabled"`
-	CreatedAt       time.Time `json:"created_at"`
-}
-
-type HeartbeatScheduleWithDesc struct {
-	ID              string    `json:"id"`
-	TargetID        string    `json:"target_id,omitempty"`
-	ChannelID       string    `json:"channel_id"`
-	TitlePrefix     string    `json:"title_prefix"`
-	CronExpr        string    `json:"cron_expr"`
-	CronDescription string    `json:"cron_description"`
-	Prompt          string    `json:"prompt"`
-	Timezone        string    `json:"timezone"`
-	Effort          string    `json:"effort,omitempty"`
-	NextRunAt       time.Time `json:"next_run_at"`
-	Enabled         bool      `json:"enabled"`
-	CreatedAt       time.Time `json:"created_at"`
-}
-
-type OneShotScheduleJSON struct {
-	ID        string    `json:"id"`
-	ThreadID  string    `json:"thread_id"`
-	Prompt    string    `json:"prompt"`
-	RunAt     time.Time `json:"run_at"`
-	CreatedAt time.Time `json:"created_at"`
-}
-
-type SchedulesResponse struct {
-	Status     string                      `json:"status"`
-	SystemTime time.Time                   `json:"system_time"`
-	Summary    db.ScheduleSummaryMetrics   `json:"summary"`
-	Crons      []CronScheduleWithDesc      `json:"crons"`
-	Heartbeats []HeartbeatScheduleWithDesc `json:"heartbeats"`
-	OneShots   []OneShotScheduleJSON       `json:"one_shots"`
-}
-
-type ScheduleRunsResponse struct {
-	Status string           `json:"status"`
-	Total  int              `json:"total"`
-	Limit  int              `json:"limit"`
-	Offset int              `json:"offset"`
-	Runs   []db.ScheduleRun `json:"runs"`
-}
-
-type schedulesCache struct {
-	mu         sync.Mutex
-	expiresAt  time.Time
-	summary    db.ScheduleSummaryMetrics
-	crons      []CronScheduleWithDesc
-	heartbeats []HeartbeatScheduleWithDesc
-	oneShots   []OneShotScheduleJSON
-}
-
-func handleSchedules(store db.Store) http.HandlerFunc {
-	cache := &schedulesCache{}
-
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !requireGetWithStore(w, r, store == nil) {
-			return
-		}
-
-		now := time.Now().UTC()
-
-		cache.mu.Lock()
-		defer cache.mu.Unlock()
-
-		if now.Before(cache.expiresAt) && cache.crons != nil {
-			resp := SchedulesResponse{
-				Status:     "ok",
-				SystemTime: now,
-				Summary:    cache.summary,
-				Crons:      cache.crons,
-				Heartbeats: cache.heartbeats,
-				OneShots:   cache.oneShots,
-			}
-			setNoCacheJSONHeaders(w)
-			writeJSON(w, http.StatusOK, resp)
-			return
-		}
-
-		summary, err := store.GetScheduleSummaryMetrics(r.Context())
-		if err != nil {
-			writeStoreErr(w, "schedule summary", err)
-			return
-		}
-
-		rawCrons, err := store.GetAllCronSchedules(r.Context(), "")
-		if err != nil {
-			writeStoreErr(w, "cron schedules", err)
-			return
-		}
-
-		rawHeartbeats, err := store.GetAllHeartbeatSchedules(r.Context(), "")
-		if err != nil {
-			writeStoreErr(w, "heartbeat schedules", err)
-			return
-		}
-
-		rawOneShots, err := store.GetAllOneShotSchedules(r.Context(), "")
-		if err != nil {
-			writeStoreErr(w, "one-shot schedules", err)
-			return
-		}
-
-		crons := FormatCronSchedulesWithDesc(rawCrons)
-		heartbeats := FormatHeartbeatSchedulesWithDesc(rawHeartbeats)
-		oneShots := FormatOneShotSchedulesJSON(rawOneShots)
-
-		cache.summary = summary
-		cache.crons = crons
-		cache.heartbeats = heartbeats
-		cache.oneShots = oneShots
-		cache.expiresAt = now.Add(5 * time.Second)
-
-		resp := SchedulesResponse{
-			Status:     "ok",
-			SystemTime: now,
-			Summary:    summary,
-			Crons:      crons,
-			Heartbeats: heartbeats,
-			OneShots:   oneShots,
-		}
-
-		setNoCacheJSONHeaders(w)
-		writeJSON(w, http.StatusOK, resp)
-	}
-}
-
-func handleScheduleRuns(store db.Store) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !requireGetWithStore(w, r, store == nil) {
-			return
-		}
-
-		q := r.URL.Query()
-		limit, offset := parseLimitOffset(q, 50, 100)
-
-		scheduleID := strings.TrimSpace(q.Get("schedule_id"))
-		status := strings.TrimSpace(q.Get("status"))
-
-		rawRuns, total, err := store.GetScheduleRunsPaginated(r.Context(), limit, offset, scheduleID, status)
-		if err != nil {
-			writeStoreErr(w, "schedule runs", err)
-			return
-		}
-
-		runs := make([]db.ScheduleRun, 0, len(rawRuns))
-		for _, run := range rawRuns {
-			run.Prompt = sanitizer.SanitizeString(run.Prompt)
-			run.Error = sanitizer.SanitizeString(run.Error)
-			run.Title = sanitizer.SanitizeString(run.Title)
-			runs = append(runs, run)
-		}
-
-		resp := ScheduleRunsResponse{
-			Status: "ok",
-			Total:  total,
-			Limit:  limit,
-			Offset: offset,
-			Runs:   runs,
-		}
-
-		setNoCacheJSONHeaders(w)
-		writeJSON(w, http.StatusOK, resp)
 	}
 }
 
@@ -1322,8 +1126,6 @@ func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, embedder 
 	mux.HandleFunc("/transcripts/steps", handleTranscriptSteps(store))
 	mux.HandleFunc("/api/transcripts/steps", handleTranscriptSteps(store))
 	mux.HandleFunc("/tasks", handleTasks(store))
-	mux.HandleFunc("/schedules", handleSchedules(store))
-	mux.HandleFunc("/schedules/runs", handleScheduleRuns(store))
 	mux.HandleFunc("/internal/pr/register", handlePRRegister(store, pool))
 	var llmFn func(context.Context, string, string) (string, error)
 	if pool != nil {
@@ -1915,6 +1717,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		VoiceProcessPool: voicePool,
 		LLMFunc:          ephemeralPool.EphemeralLLMFunc("ephemeral:summarizer"),
 		AmbientResolver:  ambientResolver,
+		HaroURL:          os.Getenv("HARO_URL"),
 	})
 	pool.Start()
 

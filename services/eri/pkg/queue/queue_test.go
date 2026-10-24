@@ -190,7 +190,6 @@ func TestRecoverInterrupted(t *testing.T) {
 	tests := []struct {
 		name              string
 		seedMessages      []db.Message
-		seedRuns          []db.ScheduleRun
 		seedCompletedMsg  *db.Message
 		appCfg            *config.Config
 		withSess          bool
@@ -943,9 +942,11 @@ func TestProcessBurst_QuotaPause_Suite(t *testing.T) {
 			var deliveredTexts []string
 			var mu sync.Mutex
 			doneCh := make(chan struct{}, len(tc.messages))
+			haroSrv, getOneShots := newMockHaroOneShotServer(t)
 
 			cfg := WorkerPoolConfig{
 				Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 3,
+				HaroURL: haroSrv.URL,
 				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 					mu.Lock()
 					runnerCalls++
@@ -991,7 +992,7 @@ func TestProcessBurst_QuotaPause_Suite(t *testing.T) {
 					t.Errorf("deliveredTexts missing %q", sub)
 				}
 			}
-			oneShots, _ := store.GetAllOneShotSchedules(context.Background(), tc.threadID)
+			oneShots := getOneShots(tc.threadID)
 			if len(oneShots) != tc.wantOneShotCount {
 				t.Fatalf("oneShots len = %d, want %d", len(oneShots), tc.wantOneShotCount)
 			}
@@ -1732,9 +1733,6 @@ func TestWorkerPool_CancellationDuringBackoffSuite(t *testing.T) {
 			pool.Start()
 			defer pool.Stop()
 
-			if tt.scheduleRunID != "" {
-				_ = createScheduleRun(store, db.ScheduleRun{ID: tt.scheduleRunID, ScheduleID: "sched-" + tt.name, ScheduleType: "cron", Status: "running", StartedAt: time.Now().UTC()})
-			}
 			msgID := "msg-" + tt.name
 			msg := db.Message{ID: msgID, ThreadID: tt.threadID, Content: "cancel test", ScheduleRunID: tt.scheduleRunID}
 			_ = insertMessage(store, msg)
@@ -1802,9 +1800,6 @@ func runWakeHookEval(t *testing.T, hookResp *WakeResponse, hookErr error, timeou
 		capturedReq = req
 		return hookResp, hookErr
 	}}})
-	if schedRunID != "" {
-		_ = createScheduleRun(store, db.ScheduleRun{ID: schedRunID, ScheduleID: "sched-1", ScheduleType: "cron", TargetID: inputMsgs[0].ThreadID, ThreadID: inputMsgs[0].ThreadID, Title: "Scheduled Run", Prompt: "prompt", StartedAt: now, Status: "pending"})
-	}
 	msgs := make([]db.Message, len(inputMsgs))
 	for i, m := range inputMsgs {
 		m.CreatedAt = now.Add(time.Duration(i) * time.Second)
@@ -2000,7 +1995,6 @@ func runPreTurnHookBurst(t *testing.T, hookResps []*PreTurnResponse, hookErr err
 	msg := db.Message{ID: "msg-preturn-test", ThreadID: "chan-preturn", AuthorName: "user-alpha", Content: "test prompt for pre-turn", Status: db.StatusPending, RetryCount: initialRetry, CreatedAt: now}
 	if schedRunID != "" {
 		msg.ScheduleRunID = schedRunID
-		_ = createScheduleRun(store, db.ScheduleRun{ID: schedRunID, ScheduleID: "sched-1", ScheduleType: "cron", Status: "running", StartedAt: now})
 	}
 	_ = insertMessage(store, msg)
 	pool.processBurst([]db.Message{msg})

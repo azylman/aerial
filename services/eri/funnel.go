@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -474,9 +475,9 @@ func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.Worke
 	}
 
 	if ctx == nil {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithCancel(context.Background())
+		cCtx, cancel := context.WithCancel(context.Background())
 		cancel()
+		ctx = cCtx
 	}
 
 	dg, err := discordgo.New("Bot " + token)
@@ -490,11 +491,8 @@ func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.Worke
 	}
 
 	interactionRouter := interactions.NewRouter(interactions.InteractionDeps{
-		Store:          store,
-		Pool:           pool,
-		PoolProvider:   funnelPool.Load,
-		Config:         currentFunnelConfig(),
-		ConfigProvider: currentFunnelConfig,
+		Store: store, Pool: pool, PoolProvider: funnelPool.Load,
+		Config: currentFunnelConfig(), ConfigProvider: currentFunnelConfig, HaroURL: os.Getenv("HARO_URL"),
 	})
 	activeInteractionRouter.Store(interactionRouter)
 

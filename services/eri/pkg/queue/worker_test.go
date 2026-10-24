@@ -251,9 +251,10 @@ func TestWorkerPool_PersistentDaemonTurns(t *testing.T) {
 
 			var deliveredText string
 			doneCh := make(chan struct{})
+			haroSrv, getOneShots := newMockHaroOneShotServer(t)
 			pool := New(cfg, WorkerPoolConfig{
 				ProcessPool: procPool, SessionManager: session.New(tmpHome, tempData),
-				Store: store, TimeoutMinutes: 1,
+				Store: store, TimeoutMinutes: 1, HaroURL: haroSrv.URL,
 				DeliveryFunc: func(sess *discordgo.Session, channelID, content string) error {
 					deliveredText = content
 					return nil
@@ -316,7 +317,7 @@ func TestWorkerPool_PersistentDaemonTurns(t *testing.T) {
 				}
 			}
 			if tc.checkQuotaSchedule {
-				schedules, _ := store.GetAllOneShotSchedules(context.Background(), tc.threadID)
+				schedules := getOneShots(tc.threadID)
 				found := false
 				for _, s := range schedules {
 					if s.ThreadID == tc.threadID && strings.Contains(s.Prompt, "[QUOTA_RETRY]") {
@@ -618,9 +619,10 @@ func TestWorkerPool_CapacityBlipMatrix(t *testing.T) {
 			var deliveredText string
 			doneCh := make(chan struct{}, 1)
 			appCfg := config.NewFromData(&config.ConfigData{Channels: map[string]config.ChannelPolicy{"default": {Mode: "thread"}}})
+			haroSrv, getOneShots := newMockHaroOneShotServer(t)
 			pool := New(appCfg, WorkerPoolConfig{
 				SessionManager: session.New(tmpDir, tmpDir), Store: store, TimeoutMinutes: 1, BackoffBase: 5 * time.Millisecond,
-				RetryDelayOverride: 10 * time.Millisecond, MaxAttempts: tt.maxAttempts,
+				RetryDelayOverride: 10 * time.Millisecond, MaxAttempts: tt.maxAttempts, HaroURL: haroSrv.URL,
 				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 					mu.Lock()
 					attemptCount++
@@ -684,7 +686,7 @@ func TestWorkerPool_CapacityBlipMatrix(t *testing.T) {
 				t.Errorf("expected quotaLockedUntil == 0")
 			}
 			if tt.checkNoSchedules {
-				s, _ := store.GetAllOneShotSchedules(context.Background(), threadID)
+				s := getOneShots(threadID)
 				if len(s) > 0 {
 					t.Errorf("expected 0 schedules, got %d", len(s))
 				}
@@ -1501,9 +1503,11 @@ func TestWorker_QuotaPause_PreservesEffort(t *testing.T) {
 
 			cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir, d.LowEffortModel = tempData, "gemini-3.8-flash-low" })
 			doneCh := make(chan struct{})
+			haroSrv, getOneShots := newMockHaroOneShotServer(t)
 			pool := New(cfg, WorkerPoolConfig{
 				ProcessPool: primaryPool, LowEffortProcessPool: lowPool,
 				SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1, MaxAttempts: 1,
+				HaroURL: haroSrv.URL,
 				OnMessageCompleted: func(msg db.Message, status string) {
 					if status == db.StatusFailed {
 						select {
@@ -1526,9 +1530,9 @@ func TestWorker_QuotaPause_PreservesEffort(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatalf("timed out waiting for message completion")
 			}
-			schedules, err := store.GetAllOneShotSchedules(context.Background(), threadID)
-			if err != nil || len(schedules) != 1 || schedules[0].Effort != tt.expectedEffort {
-				t.Fatalf("expected 1 schedule with effort %q, got %v (err=%v)", tt.expectedEffort, schedules, err)
+			schedules := getOneShots(threadID)
+			if len(schedules) != 1 || schedules[0].Effort != tt.expectedEffort {
+				t.Fatalf("expected 1 schedule with effort %q, got %v", tt.expectedEffort, schedules)
 			}
 		})
 	}

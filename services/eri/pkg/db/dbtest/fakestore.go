@@ -19,7 +19,6 @@ import (
 var (
 	_ db.Store           = (*FakeStore)(nil)
 	_ db.MessageStore    = (*FakeStore)(nil)
-	_ db.ScheduleStore   = (*FakeStore)(nil)
 	_ db.SessionStore    = (*FakeStore)(nil)
 	_ db.TranscriptStore = (*FakeStore)(nil)
 	_ db.PRRegistryStore = (*FakeStore)(nil)
@@ -183,11 +182,6 @@ type FakeStore struct {
 	sessions        map[string]*db.SessionInfo
 	threadSummaries map[string]threadSummaryRecord
 
-	oneShots   map[string]*db.OneShotSchedule
-	crons      map[string]*db.CronSchedule
-	heartbeats map[string]*db.HeartbeatSchedule
-	runs       map[string]*db.ScheduleRun
-
 	sessionSummaries map[string]*db.SessionSummary
 	transcriptSteps  map[string][]db.TranscriptStep
 
@@ -200,7 +194,6 @@ type FakeStore struct {
 func NewFakeStore() *FakeStore {
 	f := &FakeStore{failNext: make(map[string]error), messages: make(map[string]*db.Message), messageOrder: make([]string, 0)}
 	f.sessions, f.threadSummaries = make(map[string]*db.SessionInfo), make(map[string]threadSummaryRecord)
-	f.oneShots, f.crons, f.heartbeats, f.runs = make(map[string]*db.OneShotSchedule), make(map[string]*db.CronSchedule), make(map[string]*db.HeartbeatSchedule), make(map[string]*db.ScheduleRun)
 	f.sessionSummaries, f.transcriptSteps = make(map[string]*db.SessionSummary), make(map[string][]db.TranscriptStep)
 	f.prRecords, f.vanadisBuilds, f.vanadisChunks = make(map[string]*db.PRRecord), make(map[string]*db.VanadisBuild), make(map[string]*db.VanadisChunk)
 	return f
@@ -283,15 +276,6 @@ func cloneMessage(m *db.Message) *db.Message {
 	cp := *m
 	cp.Metadata.Mentions, cp.Metadata.MentionUserIDs = cloneSlice(m.Metadata.Mentions), cloneSlice(m.Metadata.MentionUserIDs)
 	cp.Metadata.MentionRoleIDs, cp.Metadata.Attachments = cloneSlice(m.Metadata.MentionRoleIDs), cloneSlice(m.Metadata.Attachments)
-	return &cp
-}
-
-func cloneRun(r *db.ScheduleRun) *db.ScheduleRun {
-	if r == nil {
-		return nil
-	}
-	cp := *r
-	cp.CompletedAt = clonePtr(r.CompletedAt)
 	return &cp
 }
 
@@ -653,144 +637,6 @@ func (f *FakeStore) GetExternalConversationID(ctx context.Context, internalID st
 			}
 		}
 		return "", nil
-	})
-}
-
-func (f *FakeStore) CreateOneShotSchedule(ctx context.Context, s db.OneShotSchedule) error {
-	return f.withLockErr("CreateOneShotSchedule", func() error {
-		if s.CreatedAt.IsZero() {
-			s.CreatedAt = time.Now().UTC()
-		}
-		f.oneShots[s.ID] = clonePtr(&s)
-		return nil
-	})
-}
-
-func (f *FakeStore) GetAllOneShotSchedules(ctx context.Context, threadID string) ([]db.OneShotSchedule, error) {
-	return withFakeLock(f, "GetAllOneShotSchedules", func() ([]db.OneShotSchedule, error) {
-		results := mapValuesFiltered(f.oneShots, func(s *db.OneShotSchedule) bool { return threadID == "" || s.ThreadID == threadID })
-		sort.Slice(results, func(i, j int) bool { return results[i].RunAt.Before(results[j].RunAt) })
-		return results, nil
-	})
-}
-
-func (f *FakeStore) CreateCronSchedule(ctx context.Context, c db.CronSchedule) error {
-	return f.withLockErr("CreateCronSchedule", func() error {
-		if c.CreatedAt.IsZero() {
-			c.CreatedAt = time.Now().UTC()
-		}
-		f.crons[c.ID] = clonePtr(&c)
-		return nil
-	})
-}
-
-func (f *FakeStore) GetAllCronSchedules(ctx context.Context, targetID string) ([]db.CronSchedule, error) {
-	return withFakeLock(f, "GetAllCronSchedules", func() ([]db.CronSchedule, error) {
-		results := mapValuesFiltered(f.crons, func(c *db.CronSchedule) bool { return targetID == "" || c.TargetID == targetID })
-		sort.Slice(results, func(i, j int) bool { return results[i].NextRunAt.Before(results[j].NextRunAt) })
-		return results, nil
-	})
-}
-
-// CreateHeartbeatSchedule creates or updates a heartbeat schedule in the fake store.
-func (f *FakeStore) CreateHeartbeatSchedule(ctx context.Context, h db.HeartbeatSchedule) error {
-	return f.withLockErr("CreateHeartbeatSchedule", func() error {
-		if h.CreatedAt.IsZero() {
-			h.CreatedAt = time.Now().UTC()
-		}
-		if h.Effort == "" {
-			h.Effort = "low"
-		}
-		if h.Timezone == "" {
-			h.Timezone = "UTC"
-		}
-		f.heartbeats[h.ID] = clonePtr(&h)
-		return nil
-	})
-}
-
-func (f *FakeStore) GetAllHeartbeatSchedules(ctx context.Context, targetID string) ([]db.HeartbeatSchedule, error) {
-	return withFakeLock(f, "GetAllHeartbeatSchedules", func() ([]db.HeartbeatSchedule, error) {
-		results := mapValuesFiltered(f.heartbeats, func(h *db.HeartbeatSchedule) bool { return targetID == "" || h.TargetID == targetID })
-		sort.Slice(results, func(i, j int) bool { return results[i].CreatedAt.Before(results[j].CreatedAt) })
-		return results, nil
-	})
-}
-
-// SeedScheduleRun seeds a schedule run into the in-memory fake store for testing.
-func (f *FakeStore) SeedScheduleRun(run db.ScheduleRun) {
-	f.withLock(func() {
-		if run.StartedAt.IsZero() {
-			run.StartedAt = time.Now().UTC()
-		}
-		f.runs[run.ID] = cloneRun(&run)
-	})
-}
-
-func (f *FakeStore) GetScheduleRunsPaginated(ctx context.Context, limit, offset int, scheduleID, status string) ([]db.ScheduleRun, int, error) {
-	return withFakeLock2(f, "GetScheduleRunsPaginated", func() ([]db.ScheduleRun, int, error) {
-		filtered := mapValuesFiltered(f.runs, func(r *db.ScheduleRun) bool {
-			return (scheduleID == "" || r.ScheduleID == scheduleID) && (status == "" || r.Status == status)
-		})
-		sort.Slice(filtered, func(i, j int) bool {
-			return filtered[i].StartedAt.After(filtered[j].StartedAt) || (filtered[i].StartedAt.Equal(filtered[j].StartedAt) && filtered[i].ID > filtered[j].ID)
-		})
-		total := len(filtered)
-		if offset > total {
-			return nil, total, nil
-		}
-		if limit <= 0 {
-			limit = total
-		}
-		return filtered[offset:min(offset+limit, total)], total, nil
-	})
-}
-
-func updateNextRun(next **time.Time, t time.Time) {
-	if *next == nil || t.Before(**next) {
-		cp := t
-		*next = &cp
-	}
-}
-
-func (f *FakeStore) GetScheduleSummaryMetrics(ctx context.Context) (db.ScheduleSummaryMetrics, error) {
-	return withFakeLock(f, "GetScheduleSummaryMetrics", func() (db.ScheduleSummaryMetrics, error) {
-		var m db.ScheduleSummaryMetrics
-		for _, c := range f.crons {
-			if c != nil && c.Enabled {
-				m.CronCount++
-				updateNextRun(&m.NextRunAt, c.NextRunAt)
-			}
-		}
-		for _, h := range f.heartbeats {
-			if h != nil && h.Enabled {
-				m.HeartbeatCount++
-				updateNextRun(&m.NextRunAt, h.NextRunAt)
-			}
-		}
-		for _, s := range f.oneShots {
-			if s != nil {
-				updateNextRun(&m.NextRunAt, s.RunAt)
-			}
-		}
-		m.OneShotCount = len(f.oneShots)
-		m.TotalActive = m.CronCount + m.HeartbeatCount + m.OneShotCount
-
-		cutoff24h := time.Now().UTC().Add(-24 * time.Hour)
-		var completedRuns int
-		for _, r := range f.runs {
-			if r != nil && !r.StartedAt.Before(cutoff24h) {
-				m.TotalRuns24h++
-				if r.Status == "completed" {
-					completedRuns++
-				}
-			}
-		}
-		m.SuccessRate24h = 100.0
-		if m.TotalRuns24h > 0 {
-			m.SuccessRate24h = math.Round((float64(completedRuns)/float64(m.TotalRuns24h))*1000.0) / 10.0
-		}
-		return m, nil
 	})
 }
 
