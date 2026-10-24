@@ -116,10 +116,11 @@ Requirements:
   ]
 }
 2. Atomicity: Extract only single-proposition atomic facts (one concise sentence and one topic/predicate per fact; never combine distinct topics such as family composition and dietary restrictions into a single compound fact).
-3. 30-Day Durability & Settled-State Test: Extract ONLY facts that will remain true and actionable 30+ days from now without requiring a follow-up event. Extract settled end-states (permanent hardware owned, standing preferences, architectural invariants, recurring schedules), NEVER transient in-flight states:
+3. 30-Day Durability & Settled-State Test: Extract ONLY facts that will remain true and actionable 30+ days from now without requiring a follow-up event. Extract settled end-states (permanent hardware owned, standing preferences, architectural invariants, recurring schedules), NEVER transient in-flight states or plaintext credentials:
    - Never extract pending deliveries, shipping/order statuses, or items "awaiting delivery" / "on the way".
    - Never extract temporary troubleshooting, active debugging sessions, or tasks "currently in progress" / "about to run".
    - Never extract ephemeral PR numbers, commit SHAs, branch names, coverage/LoC metrics, CI/CD deploy statuses, or Vanadis chunk IDs.
+   - Never extract literal plaintext passwords, passphrases, API keys, secret tokens, private keys, or PIN codes (only record where credentials are stored, such as a secret manager or vault).
 4. Procedural Skills & Friction Guardrails (30-Day Durability Test):
    Extract reusable procedural workflows ("steps") and tool/retry failure guardrails ("avoid") into "procedural_candidates" ONLY when they pass the same 30-day durability test (Rule 3) AND a working resolution was verified:
    - Tool or CLI friction (including 1-liner flag/environment workarounds or multi-step domain workflows) occurs AND the turn resolved it with a generalizable procedure or workaround that will remain valid 30+ days from now (never emit tool/CLI friction workarounds into "facts"; short 1-liners accumulate in "procedural_candidates" until 5 repeats trigger a fix alert).
@@ -174,8 +175,10 @@ func ExtractActiveConversationFacts(ctx context.Context, store Store, client Oll
 }
 
 var (
-	durableDirectiveRegex   = regexp.MustCompile(`(?i)\b(always|never|strictly|must|invariant|prefers|allergic)\b`)
-	ephemeralTelemetryRegex = regexp.MustCompile(`(?i)\b(PR\s*#\d+|pull request #\d+|chunk-\d+|build-\d+-[0-9a-f]+|vanadis_chunk|commit\s+[0-9a-f]{7,40}|auto-merge armed|awaiting delivery|currently in progress)\b`)
+	durableDirectiveRegex    = regexp.MustCompile(`(?i)\b(always|never|strictly|must|invariant|prefers|allergic)\b`)
+	ephemeralTelemetryRegex  = regexp.MustCompile(`(?i)\b(PR\s*#\d+|pull request #\d+|chunk-\d+|build-\d+-[0-9a-f]+|vanadis_chunk|commit\s+[0-9a-f]{7,40}|auto-merge armed|awaiting delivery|currently in progress)\b`)
+	plaintextCredentialRegex = regexp.MustCompile(`(?i)\b(ghp_[a-z0-9]{20,}|github_pat_[a-z0-9_]{20,}|sk-[a-z0-9_-]{16,}|xox[baprs]-[a-z0-9-]{10,}|AIza[0-9a-z_-]{30,})\b|-----BEGIN [A-Z ]*PRIVATE KEY-----|(?:\bpin(?:\s+code)?\b[^.;,\n]{0,60}?\b(?:is|equals|=|:)\s*['"\x60]?\d{4,8}\b)|(?:\b(?:password|passphrase|api[_ -]?key|secret[_ -]?key|access[_ -]?token|auth[_ -]?token|client[_ -]?secret)\b[^.;,\n]{0,80}?\b(?:is|equals|=|:)\s*['"\x60]?([^\s'"\x60.;,]{4,}))`)
+	nonSecretVerbs           = regexp.MustCompile(`(?i)^(stored|injected|managed|configured|retrieved|loaded|passed|provided|kept|saved|located|fetched|synced|rotated|encrypted|hashed|masked|redacted|required|disabled|enabled|empty|missing|invalid|valid|null|none|never|shared|used|defined|generated|scoped)$`)
 )
 
 // EvaluateCandidateAdmission deterministically evaluates an extracted fact candidate.
@@ -191,6 +194,12 @@ func EvaluateCandidateAdmission(item ExtractedFactItem) (admit bool, reason stri
 	trimmedText := strings.TrimSpace(item.FactText)
 	if len(trimmedText) < 10 {
 		return false, "too_short"
+	}
+
+	for _, m := range plaintextCredentialRegex.FindAllStringSubmatch(trimmedText, -1) {
+		if m[2] == "" || !nonSecretVerbs.MatchString(m[2]) {
+			return false, "plaintext_credential"
+		}
 	}
 
 	isDurable := durableDirectiveRegex.MatchString(trimmedText)
