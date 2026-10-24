@@ -46,6 +46,7 @@ job "haro" {
       env {
         GOCOVERDIR = "/coverage"
         BRAIN_INTERNAL_URL = "http://eri.aerial"
+        VANADIS_URL = "http://vanadis.aerial"
       }
 
       template {

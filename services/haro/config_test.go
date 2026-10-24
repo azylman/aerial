@@ -158,3 +158,57 @@ func TestLoadConfig_BrainURLResolution(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadConfig_VanadisURLResolution(t *testing.T) {
+	tmpDir := t.TempDir()
+	pathWithVanadis := filepath.Join(tmpDir, "with_vanadis.yaml")
+	pathWithoutVanadis := filepath.Join(tmpDir, "without_vanadis.yaml")
+	_ = os.WriteFile(pathWithVanadis, []byte("port: '4005'\ntimezone: 'UTC'\nvanadis_url: 'http://yaml.vanadis:4025/'\n"), 0o644)
+	_ = os.WriteFile(pathWithoutVanadis, []byte("port: '4005'\ntimezone: 'UTC'\n"), 0o644)
+
+	tests := []struct {
+		name           string
+		path           string
+		envVanadis     string
+		envDB          string
+		wantErr        bool
+		wantVanadisURL string
+	}{
+		{
+			name:           "VANADIS_URL takes precedence over yaml",
+			path:           pathWithVanadis,
+			envVanadis:     "http://env.vanadis:4025/",
+			envDB:          "postgres://localhost/db",
+			wantVanadisURL: "http://env.vanadis:4025",
+		},
+		{
+			name:           "yaml vanadis_url used when env empty",
+			path:           pathWithVanadis,
+			envVanadis:     "",
+			envDB:          "postgres://localhost/db",
+			wantVanadisURL: "http://yaml.vanadis:4025",
+		},
+		{
+			name:           "default fallback when nothing configured",
+			path:           pathWithoutVanadis,
+			envVanadis:     "",
+			envDB:          "postgres://localhost/db",
+			wantVanadisURL: "http://vanadis.aerial",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("VANADIS_URL", tc.envVanadis)
+			t.Setenv("DATABASE_URL", tc.envDB)
+
+			cfg, err := LoadConfig(tc.path)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("LoadConfig() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr && cfg.VanadisURL != tc.wantVanadisURL {
+				t.Errorf("cfg.VanadisURL = %q, want %q", cfg.VanadisURL, tc.wantVanadisURL)
+			}
+		})
+	}
+}

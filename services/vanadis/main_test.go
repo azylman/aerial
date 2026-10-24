@@ -73,6 +73,11 @@ func (r *mockRows) Scan(dest ...any) error {
 		fillBuildDest(r.builds[r.idx-1], dest)
 		return nil
 	}
+	if len(dest) == 8 && len(r.items) > 0 {
+		c := r.items[r.idx-1]
+		*dest[0].(*string), *dest[1].(*int), *dest[2].(*string), *dest[3].(*string), *dest[4].(*string), *dest[5].(*int), *dest[6].(*sql.NullTime), *dest[7].(*time.Time) = c.ID, c.ChunkIndex, c.Repo, c.Title, c.Status, c.PRNumber, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, c.UpdatedAt
+		return nil
+	}
 	c := r.items[r.idx-1]
 	*dest[0].(*string), *dest[1].(*string), *dest[2].(*int), *dest[3].(*string), *dest[4].(*string), *dest[5].(*string), *dest[6].(*[]string), *dest[7].(*[]string), *dest[8].(*string), *dest[9].(*[]string), *dest[10].(*string), *dest[11].(*int), *dest[12].(*sql.NullTime), *dest[13].(*time.Time), *dest[14].(*time.Time) = c.ID, c.BuildID, c.ChunkIndex, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, c.CreatedAt, c.UpdatedAt
 	return nil
@@ -81,6 +86,8 @@ func (r *mockRows) Scan(dest ...any) error {
 type mockTx struct {
 	pgx.Tx
 	execFn                 func(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	queryFn                func(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	queryRowFn             func(ctx context.Context, sql string, args ...any) pgx.Row
 	commitErr, rollbackErr error
 }
 
@@ -89,6 +96,20 @@ func (t *mockTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.Comm
 		return t.execFn(ctx, sql, args...)
 	}
 	return pgconn.NewCommandTag("INSERT 0 1"), nil
+}
+
+func (t *mockTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	if t.queryFn != nil {
+		return t.queryFn(ctx, sql, args...)
+	}
+	return &mockRows{}, nil
+}
+
+func (t *mockTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	if t.queryRowFn != nil {
+		return t.queryRowFn(ctx, sql, args...)
+	}
+	return &mockRow{}
 }
 func (t *mockTx) Commit(_ context.Context) error   { return t.commitErr }
 func (t *mockTx) Rollback(_ context.Context) error { return t.rollbackErr }
@@ -223,6 +244,210 @@ func (m *memoryVanadisStore) UpdateBuildStatus(_ context.Context, id, status str
 
 func (m *memoryVanadisStore) UpdateBuildStatusMessageID(_ context.Context, id, msgID string) error {
 	return m.setBuild(id, func(b *VanadisBuild) { b.StatusMessageID = msgID })
+}
+
+func (m *memoryVanadisStore) GetChunk(_ context.Context, chunkID string) (*VanadisChunk, *VanadisBuild, error) {
+	for bID, list := range m.chunks {
+		for _, c := range list {
+			if c.ID == chunkID {
+				b, ok := m.builds[bID]
+				if !ok {
+					return nil, nil, ErrBuildNotFound
+				}
+				return &c, &b, nil
+			}
+		}
+	}
+	return nil, nil, ErrChunkNotFound
+}
+
+func (m *memoryVanadisStore) GetChunkByPR(_ context.Context, repo string, prNumber int) (*VanadisChunkPRLookup, error) {
+	repo = normalizeRepo(repo)
+	if repo == "" || prNumber <= 0 {
+		return &VanadisChunkPRLookup{Matched: false}, nil
+	}
+	for bID, list := range m.chunks {
+		b := m.builds[bID]
+		if b.Status == "cancelled" {
+			continue
+		}
+		for _, c := range list {
+			if c.Repo == repo && c.PRNumber == prNumber {
+				hasRemaining := false
+				for _, c2 := range list {
+					if c2.ChunkIndex > c.ChunkIndex {
+						hasRemaining = true
+						break
+					}
+				}
+				return &VanadisChunkPRLookup{
+					Matched:            true,
+					ChunkID:            c.ID,
+					BuildID:            bID,
+					Effort:             capChunkEffort(c.Effort),
+					HasRemainingChunks: hasRemaining,
+				}, nil
+			}
+		}
+	}
+	return &VanadisChunkPRLookup{Matched: false}, nil
+}
+
+func (m *memoryVanadisStore) AttachChunkPR(_ context.Context, chunkID string, prNumber int, repo string) (string, error) {
+	chunkID = strings.TrimSpace(chunkID)
+	repo = normalizeRepo(repo)
+	if chunkID == "" || prNumber <= 0 {
+		return "", errors.New("chunk id and valid pr number are required")
+	}
+	for bID, list := range m.chunks {
+		for i := range list {
+			if list[i].ID == chunkID {
+				if repo != "" && list[i].Repo != repo {
+					return "", fmt.Errorf("chunk %s repo %q does not match %q", chunkID, list[i].Repo, repo)
+				}
+				if list[i].PRNumber > 0 && list[i].PRNumber != prNumber {
+					return "", fmt.Errorf("chunk %s pr number already set to %d", chunkID, list[i].PRNumber)
+				}
+				list[i].PRNumber = prNumber
+				if list[i].Status != "merged" && list[i].Status != "failed" {
+					list[i].Status = "pr_opened"
+				}
+				if list[i].StartedAt.IsZero() {
+					list[i].StartedAt = time.Now().UTC()
+				}
+				list[i].UpdatedAt = time.Now().UTC()
+				m.chunks[bID] = list
+				return m.builds[bID].ThreadID, nil
+			}
+		}
+	}
+	return "", ErrChunkNotFound
+}
+
+func (m *memoryVanadisStore) AdvanceChunkByPR(_ context.Context, repo string, prNumber int) (*VanadisAdvancementResult, error) {
+	repo = normalizeRepo(repo)
+	if repo == "" || prNumber <= 0 {
+		return &VanadisAdvancementResult{Matched: false}, nil
+	}
+	for bID, list := range m.chunks {
+		for i := range list {
+			if list[i].Repo == repo && list[i].PRNumber == prNumber {
+				b := m.builds[bID]
+				if b.Status == "cancelled" || b.Status == "failed" || b.Status == "completed" {
+					return &VanadisAdvancementResult{
+						Matched:          true,
+						Advanced:         false,
+						BuildID:          bID,
+						ThreadID:         b.ThreadID,
+						Tier:             b.Tier,
+						Title:            firstNonEmpty(b.Title, b.Objective),
+						Objective:        b.Objective,
+						BuildStatus:      b.Status,
+						StatusMessageID:  b.StatusMessageID,
+						MergedChunkIndex: list[i].ChunkIndex,
+						MergedChunkTitle: list[i].Title,
+						NextChunkIndex:   -1,
+						BuildCompleted:   b.Status == "completed",
+					}, nil
+				}
+				wasMerged := list[i].Status == "merged"
+				list[i].Status = "merged"
+				list[i].UpdatedAt = time.Now().UTC()
+				m.chunks[bID] = list
+
+				var summaries []VanadisChunkSummary
+				for _, c := range list {
+					summaries = append(summaries, VanadisChunkSummary{
+						ID:         c.ID,
+						ChunkIndex: c.ChunkIndex,
+						Repo:       c.Repo,
+						Title:      c.Title,
+						Status:     c.Status,
+						PRNumber:   c.PRNumber,
+						StartedAt:  c.StartedAt,
+						UpdatedAt:  c.UpdatedAt,
+					})
+				}
+
+				nextChunkIdx := -1
+				fallbackIdx := -1
+				for _, cs := range list {
+					if cs.Status != "merged" {
+						if cs.ChunkIndex > list[i].ChunkIndex && (nextChunkIdx == -1 || cs.ChunkIndex < nextChunkIdx) {
+							nextChunkIdx = cs.ChunkIndex
+						} else if fallbackIdx == -1 {
+							fallbackIdx = cs.ChunkIndex
+						}
+					}
+				}
+				if nextChunkIdx == -1 {
+					nextChunkIdx = fallbackIdx
+				}
+
+				if nextChunkIdx >= 0 {
+					return &VanadisAdvancementResult{
+						Matched:          true,
+						Advanced:         !wasMerged,
+						BuildID:          bID,
+						ThreadID:         b.ThreadID,
+						Tier:             b.Tier,
+						Title:            firstNonEmpty(b.Title, b.Objective),
+						Objective:        b.Objective,
+						BuildStatus:      b.Status,
+						StatusMessageID:  b.StatusMessageID,
+						MergedChunkIndex: list[i].ChunkIndex,
+						MergedChunkTitle: list[i].Title,
+						NextChunkIndex:   nextChunkIdx,
+						BuildCompleted:   false,
+						Chunks:           summaries,
+					}, nil
+				}
+
+				b.Status = "completed"
+				m.builds[bID] = b
+				return &VanadisAdvancementResult{
+					Matched:          true,
+					Advanced:         !wasMerged,
+					BuildID:          bID,
+					ThreadID:         b.ThreadID,
+					Tier:             b.Tier,
+					Title:            firstNonEmpty(b.Title, b.Objective),
+					Objective:        b.Objective,
+					BuildStatus:      "completed",
+					StatusMessageID:  b.StatusMessageID,
+					MergedChunkIndex: list[i].ChunkIndex,
+					MergedChunkTitle: list[i].Title,
+					NextChunkIndex:   -1,
+					BuildCompleted:   true,
+					Chunks:           summaries,
+				}, nil
+			}
+		}
+	}
+	return &VanadisAdvancementResult{Matched: false}, nil
+}
+
+func (m *memoryVanadisStore) FailChunkByPR(_ context.Context, repo string, prNumber int) (string, string, bool, error) {
+	repo = normalizeRepo(repo)
+	if repo == "" || prNumber <= 0 {
+		return "", "", false, nil
+	}
+	for bID, list := range m.chunks {
+		for i := range list {
+			if list[i].Repo == repo && list[i].PRNumber == prNumber && list[i].Status != "merged" && list[i].Status != "failed" {
+				list[i].Status = "failed"
+				list[i].UpdatedAt = time.Now().UTC()
+				m.chunks[bID] = list
+				b := m.builds[bID]
+				if b.Status == "running" {
+					b.Status = "failed"
+					m.builds[bID] = b
+				}
+				return bID, list[i].ID, true, nil
+			}
+		}
+	}
+	return "", "", false, nil
 }
 
 type mockRiverInserter struct {

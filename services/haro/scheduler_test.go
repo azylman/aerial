@@ -1737,23 +1737,62 @@ func TestDB_EventTriggers(t *testing.T) {
 	db := setupTestDB(t)
 	ctx := context.Background()
 
-	// Seed vanadis_builds and vanadis_chunks
-	_, err := db.ExecContext(ctx, `
-		INSERT INTO vanadis_builds (id, status) VALUES 
-			('b-running', 'running'),
-			('b-completed', 'completed'),
-			('b-failed', 'failed'),
-			('b-cancelled', 'cancelled'),
-			('b-canceled', 'canceled');
-		INSERT INTO vanadis_chunks (id, build_id, status) VALUES 
-			('c-pending', 'b-running', 'pending'),
-			('c-merged', 'b-running', 'merged'),
-			('c-completed', 'b-running', 'completed'),
-			('c-failed', 'b-running', 'failed');
-	`)
-	if err != nil {
-		t.Fatalf("failed to seed vanadis tables: %v", err)
+	mockBuilds := map[string]string{
+		"b-running":   "running",
+		"b-completed": "completed",
+		"b-failed":    "failed",
+		"b-cancelled": "cancelled",
+		"b-canceled":  "canceled",
 	}
+	mockChunks := map[string]string{
+		"c-pending":   "pending",
+		"c-merged":    "merged",
+		"c-completed": "completed",
+		"c-failed":    "failed",
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/builds/") {
+			id := strings.TrimPrefix(r.URL.Path, "/builds/")
+			if id == "b-500" {
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			if id == "b-badjson" {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("{bad-json"))
+				return
+			}
+			if st, ok := mockBuilds[id]; ok {
+				writeJSON(w, http.StatusOK, map[string]any{"build": map[string]string{"status": st}})
+				return
+			}
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/chunks/") {
+			id := strings.TrimPrefix(r.URL.Path, "/chunks/")
+			if id == "c-500" {
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			if id == "c-badjson" {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("{bad-json"))
+				return
+			}
+			if st, ok := mockChunks[id]; ok {
+				writeJSON(w, http.StatusOK, map[string]any{"chunk": map[string]string{"status": st}})
+				return
+			}
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+	oldVanadis := GetVanadisURL()
+	SetVanadisURL(ts.URL)
+	defer SetVanadisURL(oldVanadis)
 
 	validateTests := []struct {
 		name    string
@@ -1767,11 +1806,16 @@ func TestDB_EventTriggers(t *testing.T) {
 		{"vanadis_build cancelled", "vanadis_build", "b-cancelled", true},
 		{"vanadis_build canceled", "vanadis_build", "b-canceled", true},
 		{"vanadis_build not found", "vanadis_build", "b-missing", true},
+		{"vanadis_build 500 error", "vanadis_build", "b-500", true},
+		{"vanadis_build bad json", "vanadis_build", "b-badjson", true},
 		{"vanadis_chunk pending", "vanadis_chunk", "c-pending", false},
 		{"vanadis_chunk merged", "vanadis_chunk", "c-merged", true},
 		{"vanadis_chunk completed", "vanadis_chunk", "c-completed", true},
 		{"vanadis_chunk failed", "vanadis_chunk", "c-failed", true},
 		{"vanadis_chunk not found", "vanadis_chunk", "c-missing", true},
+		{"vanadis_chunk 500 error", "vanadis_chunk", "c-500", true},
+		{"vanadis_chunk bad json", "vanadis_chunk", "c-badjson", true},
+		{"empty target", "vanadis_build", "   ", true},
 		{"other source hangar", "hangar", "azylman/aerial", false},
 		{"other source github", "github", "azylman/aerial:main", false},
 		{"other source nomad", "nomad", "aerial-brain", false},
@@ -1909,14 +1953,50 @@ func TestEventWatchTools(t *testing.T) {
 	db := setupTestDB(t)
 	ctx := context.Background()
 
-	// Seed builds & chunks
-	_, err := db.ExecContext(ctx, `
-		INSERT INTO vanadis_builds (id, status) VALUES ('build-running-1', 'running'), ('build-term-1', 'completed');
-		INSERT INTO vanadis_chunks (id, build_id, status) VALUES ('chunk-pending-1', 'build-running-1', 'pending'), ('chunk-term-1', 'build-running-1', 'merged');
-	`)
-	if err != nil {
-		t.Fatalf("failed to seed vanadis tables: %v", err)
+	mockBuilds := map[string]string{
+		"build-running-1": "running",
+		"build-term-1":    "completed",
 	}
+	mockChunks := map[string]string{
+		"chunk-pending-1":         "pending",
+		"chunk-term-1":            "merged",
+		"build-running-1-chunk-1": "pending",
+	}
+	var toctouCalls int
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/builds/") {
+			id := strings.TrimPrefix(r.URL.Path, "/builds/")
+			if id == "build-toctou-1" {
+				toctouCalls++
+				if toctouCalls == 1 {
+					writeJSON(w, http.StatusOK, map[string]any{"build": map[string]string{"status": "running"}})
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"build": map[string]string{"status": "completed"}})
+				return
+			}
+			if st, ok := mockBuilds[id]; ok {
+				writeJSON(w, http.StatusOK, map[string]any{"build": map[string]string{"status": st}})
+				return
+			}
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/chunks/") {
+			id := strings.TrimPrefix(r.URL.Path, "/chunks/")
+			if st, ok := mockChunks[id]; ok {
+				writeJSON(w, http.StatusOK, map[string]any{"chunk": map[string]string{"status": st}})
+				return
+			}
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer ts.Close()
+	oldVanadis := GetVanadisURL()
+	SetVanadisURL(ts.URL)
+	defer SetVanadisURL(oldVanadis)
 
 	watchTests := []struct {
 		name    string
@@ -1977,12 +2057,6 @@ func TestEventWatchTools(t *testing.T) {
 		},
 	}
 
-	// Seed chunk matching target
-	_, err = db.ExecContext(ctx, "INSERT INTO vanadis_chunks (id, build_id, status) VALUES ('build-running-1-chunk-1', 'build-running-1', 'pending')")
-	if err != nil {
-		t.Fatalf("failed to insert chunk: %v", err)
-	}
-
 	for _, tc := range watchTests {
 		t.Run("watch_"+tc.name, func(t *testing.T) {
 			res, err := HandleWatchEvent(ctx, db, tc.args)
@@ -2020,21 +2094,7 @@ func TestEventWatchTools(t *testing.T) {
 
 	for _, tc := range toctouTests {
 		t.Run("toctou_"+tc.name, func(t *testing.T) {
-			_, err := db.ExecContext(ctx, "INSERT INTO vanadis_builds (id, status) VALUES (?, 'running')", tc.setupBuild)
-			if err != nil {
-				t.Fatalf("failed to insert build: %v", err)
-			}
-			// Attach SQLite trigger that transitions build to completed upon insert into event_triggers
-			triggerSQL := fmt.Sprintf(`CREATE TRIGGER simulate_toctou_%s AFTER INSERT ON event_triggers
-				WHEN NEW.target = '%s'
-				BEGIN
-					UPDATE vanadis_builds SET status = 'completed' WHERE id = '%s';
-				END;`, strings.ReplaceAll(tc.setupBuild, "-", "_"), tc.setupBuild, tc.setupBuild)
-			if _, err := db.ExecContext(ctx, triggerSQL); err != nil {
-				t.Fatalf("failed to create trigger: %v", err)
-			}
-
-			_, err = HandleWatchEvent(ctx, db, tc.args)
+			_, err := HandleWatchEvent(ctx, db, tc.args)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("HandleWatchEvent TOCTOU err = %v, wantErr = %v", err, tc.wantErr)
 			}
@@ -2113,6 +2173,34 @@ func TestEventWatchTools(t *testing.T) {
 				if res == nil || len(res.Content) == 0 {
 					t.Fatalf("expected non-empty CallToolResult")
 				}
+			}
+		})
+	}
+}
+
+func TestVanadisURL_Precedence(t *testing.T) {
+	oldVanadis := GetVanadisURL()
+	defer SetVanadisURL(oldVanadis)
+
+	tests := []struct {
+		name    string
+		setURL  string
+		envURL  string
+		wantURL string
+	}{
+		{"explicit setURL takes precedence over env", "http://explicit.vanadis", "http://env.vanadis", "http://explicit.vanadis"},
+		{"fallback to env when setURL empty", "", "http://env.vanadis", "http://env.vanadis"},
+		{"trailing slash stripped from explicit", "http://explicit.vanadis/api/", "", "http://explicit.vanadis/api"},
+		{"trailing slash stripped from env", "", "http://env.vanadis/api/", "http://env.vanadis/api"},
+		{"default fallback when both empty", "", "", "http://vanadis.aerial"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("VANADIS_URL", tc.envURL)
+			SetVanadisURL(tc.setURL)
+			got := GetVanadisURL()
+			if got != tc.wantURL {
+				t.Errorf("GetVanadisURL() = %q, want %q", got, tc.wantURL)
 			}
 		})
 	}
