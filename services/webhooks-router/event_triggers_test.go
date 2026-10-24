@@ -7,98 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 )
-
-type mockTriggerRows struct {
-	pgx.Rows
-	items   []ClaimedEventTrigger
-	idx     int
-	scanErr error
-	rowsErr error
-}
-
-func (m *mockTriggerRows) Next() bool {
-	if m.scanErr != nil {
-		return true
-	}
-	return m.idx < len(m.items)
-}
-
-func (m *mockTriggerRows) Scan(dest ...any) error {
-	if m.scanErr != nil {
-		return m.scanErr
-	}
-	item := m.items[m.idx]
-	m.idx++
-	if len(dest) >= 7 {
-		*dest[0].(*string) = item.ID
-		*dest[1].(*string) = item.ChannelID
-		*dest[2].(*string) = item.Source
-		*dest[3].(*string) = item.Target
-		*dest[4].(*string) = item.EventType
-		*dest[5].(*string) = item.Prompt
-		*dest[6].(*string) = item.Effort
-	}
-	return nil
-}
-
-func (m *mockTriggerRows) Err() error {
-	return m.rowsErr
-}
-
-func (m *mockTriggerRows) Close() {}
-
-type mockTriggerPool struct {
-	queryErr   error
-	rows       *mockTriggerRows
-	execErr    error
-	rowScanErr error
-	foundRow   bool
-	buildID    string
-	chunkID    string
-}
-
-func (p *mockTriggerPool) Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
-	if p.execErr != nil {
-		return pgconn.CommandTag{}, p.execErr
-	}
-	return pgconn.NewCommandTag("UPDATE 1"), nil
-}
-
-func (p *mockTriggerPool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-	if p.queryErr != nil {
-		return nil, p.queryErr
-	}
-	if p.rows != nil {
-		return p.rows, nil
-	}
-	return &mockTriggerRows{}, nil
-}
-
-func (p *mockTriggerPool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
-	return mockVanadisPgxRow{
-		scanFn: func(dest ...any) error {
-			if p.rowScanErr != nil {
-				return p.rowScanErr
-			}
-			if !p.foundRow {
-				return pgx.ErrNoRows
-			}
-			if len(dest) >= 2 {
-				*dest[0].(*string) = p.buildID
-				*dest[1].(*string) = p.chunkID
-			}
-			return nil
-		},
-	}
-}
-
-func (p *mockTriggerPool) Begin(ctx context.Context) (pgx.Tx, error) {
-	return nil, nil
-}
 
 func TestClaimEventTriggers(t *testing.T) {
 	t.Parallel()
@@ -106,135 +15,43 @@ func TestClaimEventTriggers(t *testing.T) {
 	tests := []struct {
 		name        string
 		nilRegistry bool
-		nilPool     bool
 		source      string
 		targets     []string
 		eventType   string
-		queryErr    bool
-		scanErr     bool
-		rowsErr     bool
-		items       []ClaimedEventTrigger
+		httpStatus  int
+		httpBody    string
 		wantCount   int
 		wantErr     bool
 	}{
-		{
-			name:        "nil registry returns nil",
-			nilRegistry: true,
-			source:      "github",
-			targets:     []string{"azylman/aerial"},
-			eventType:   "ci_passed",
-		},
-		{
-			name:      "nil pool returns nil",
-			nilPool:   true,
-			source:    "github",
-			targets:   []string{"azylman/aerial"},
-			eventType: "ci_passed",
-		},
-		{
-			name:      "empty targets returns nil",
-			source:    "github",
-			targets:   nil,
-			eventType: "ci_passed",
-		},
-		{
-			name:      "targets with only whitespace returns nil",
-			source:    "github",
-			targets:   []string{"   ", ""},
-			eventType: "ci_passed",
-		},
-		{
-			name:      "empty source returns nil",
-			source:    "",
-			targets:   []string{"azylman/aerial"},
-			eventType: "ci_passed",
-		},
-		{
-			name:      "empty eventType returns nil",
-			source:    "github",
-			targets:   []string{"azylman/aerial"},
-			eventType: "",
-		},
-		{
-			name:      "query error returns wrapped error",
-			source:    "github",
-			targets:   []string{"azylman/aerial"},
-			eventType: "ci_passed",
-			queryErr:  true,
-			wantErr:   true,
-		},
-		{
-			name:      "scan error returns wrapped error",
-			source:    "github",
-			targets:   []string{"azylman/aerial"},
-			eventType: "ci_passed",
-			scanErr:   true,
-			wantErr:   true,
-		},
-		{
-			name:      "rows.Err() returns wrapped error",
-			source:    "github",
-			targets:   []string{"azylman/aerial"},
-			eventType: "ci_passed",
-			rowsErr:   true,
-			wantErr:   true,
-		},
-		{
-			name:      "successful claim with multiple rows",
-			source:    "github",
-			targets:   []string{"azylman/aerial", "azylman/aerial:main"},
-			eventType: "pr_merged",
-			items: []ClaimedEventTrigger{
-				{
-					ID:        "trig-1",
-					ChannelID: "1555405874565091380",
-					Source:    "github",
-					Target:    "azylman/aerial",
-					EventType: "pr_merged",
-					Prompt:    "Continue with chunk 2",
-					Effort:    "high",
-				},
-				{
-					ID:        "trig-2",
-					ChannelID: "1555405874565091380",
-					Source:    "github",
-					Target:    "azylman/aerial:main",
-					EventType: "pr_merged",
-					Prompt:    "Report completion",
-					Effort:    "medium",
-				},
-			},
-			wantCount: 2,
-		},
+		{name: "nil registry returns nil", nilRegistry: true, source: "github", targets: []string{"azylman/aerial"}, eventType: "ci_passed"},
+		{name: "empty targets returns nil", source: "github", targets: nil, eventType: "ci_passed"},
+		{name: "whitespace targets returns nil", source: "github", targets: []string{"   ", ""}, eventType: "ci_passed"},
+		{name: "empty source returns nil", source: "", targets: []string{"azylman/aerial"}, eventType: "ci_passed"},
+		{name: "empty eventType returns nil", source: "github", targets: []string{"azylman/aerial"}, eventType: ""},
+		{name: "server 500 error returns error", source: "github", targets: []string{"azylman/aerial"}, eventType: "ci_passed", httpStatus: http.StatusInternalServerError, httpBody: `{"error":"db error"}`, wantErr: true},
+		{name: "invalid json returns error", source: "github", targets: []string{"azylman/aerial"}, eventType: "ci_passed", httpStatus: http.StatusOK, httpBody: `{invalid`, wantErr: true},
+		{name: "successful claim with multiple rows", source: "github", targets: []string{"azylman/aerial", "azylman/aerial:main"}, eventType: "pr_merged", httpStatus: http.StatusOK, httpBody: `{"status":"ok","triggers":[{"id":"trig-1","channel_id":"1555405874565091380","source":"github","target":"azylman/aerial","event_type":"pr_merged","prompt":"Continue","effort":"high"},{"id":"trig-2","channel_id":"1555405874565091380","source":"github","target":"azylman/aerial:main","event_type":"pr_merged","prompt":"Report","effort":"medium"}]}`, wantCount: 2},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var pool pgxQueryExecer
-			if !tc.nilPool {
-				var qErr, sErr, rErr error
-				if tc.queryErr {
-					qErr = errors.New("simulated query error")
-				}
-				if tc.scanErr {
-					sErr = errors.New("simulated scan error")
-				}
-				if tc.rowsErr {
-					rErr = errors.New("simulated rows error")
-				}
-				pool = &mockTriggerPool{
-					queryErr: qErr,
-					rows: &mockTriggerRows{
-						items:   tc.items,
-						scanErr: sErr,
-						rowsErr: rErr,
-					},
-				}
-			}
 			var reg *PostgresPRRegistry
 			if !tc.nilRegistry {
-				reg = NewPostgresPRRegistry(pool)
+				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path != "/event-triggers/claim" {
+						http.NotFound(w, r)
+						return
+					}
+					status := tc.httpStatus
+					if status == 0 {
+						status = http.StatusOK
+					}
+					w.WriteHeader(status)
+					_, _ = w.Write([]byte(tc.httpBody))
+				}))
+				defer ts.Close()
+				reg = NewPostgresPRRegistry(nil, WithHaroClient(ts.URL, ts.Client()))
 			}
 			got, err := reg.ClaimEventTriggers(context.Background(), tc.source, tc.targets, tc.eventType)
 			if (err != nil) != tc.wantErr {
@@ -244,6 +61,19 @@ func TestClaimEventTriggers(t *testing.T) {
 				t.Fatalf("ClaimEventTriggers() returned %d items, want %d", len(got), tc.wantCount)
 			}
 		})
+	}
+}
+
+func TestPostgresPRRegistry_HaroClientOptions(t *testing.T) {
+	t.Parallel()
+	WithHaroClient("http://custom.haro", nil)(nil)
+	var nilReg *PostgresPRRegistry
+	if c, u := nilReg.getHaroClient(); c == nil || u != "http://haro.aerial" {
+		t.Fatalf("nilReg.getHaroClient() = %v, %q", c, u)
+	}
+	emptyReg := &PostgresPRRegistry{}
+	if c, u := emptyReg.getHaroClient(); c == nil || u != "http://haro.aerial" {
+		t.Fatalf("emptyReg.getHaroClient() = %v, %q", c, u)
 	}
 }
 

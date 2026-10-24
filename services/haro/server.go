@@ -185,6 +185,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/schedules", s.handleSchedules)
 	mux.HandleFunc("/schedules/runs", s.handleScheduleRuns)
 	mux.HandleFunc("/schedules/oneshot", s.handleScheduleOneShot)
+	mux.HandleFunc("/event-triggers/claim", s.handleClaimEventTriggers)
 
 	mcpBridge := http.HandlerFunc(s.handleMCP)
 	mux.Handle("/mcp", mcpBridge)
@@ -240,6 +241,10 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/schedules/oneshot" {
 		s.handleScheduleOneShot(w, r)
+		return
+	}
+	if r.URL.Path == "/event-triggers/claim" {
+		s.handleClaimEventTriggers(w, r)
 		return
 	}
 
@@ -503,5 +508,48 @@ func (s *Server) handleScheduleOneShot(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
 		"status": "ok",
 		"id":     schedID,
+	})
+}
+
+func (s *Server) handleClaimEventTriggers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		return
+	}
+	if s.handler == nil || s.handler.db == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "database not initialized"})
+		return
+	}
+	var req struct {
+		Source    string   `json:"source"`
+		Targets   []string `json:"targets"`
+		EventType string   `json:"event_type"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body: " + err.Error()})
+		return
+	}
+	var cleanTargets []string
+	for _, t := range req.Targets {
+		if clean := strings.TrimSpace(t); clean != "" {
+			cleanTargets = append(cleanTargets, clean)
+		}
+	}
+	if strings.TrimSpace(req.Source) == "" || strings.TrimSpace(req.EventType) == "" || len(cleanTargets) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "source, event_type, and targets are required"})
+		return
+	}
+	triggers, err := ClaimEventTriggers(r.Context(), s.handler.db, req.Source, cleanTargets, req.EventType)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	if triggers == nil {
+		triggers = []EventTrigger{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":   "ok",
+		"triggers": triggers,
 	})
 }

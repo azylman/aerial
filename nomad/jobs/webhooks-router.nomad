@@ -50,6 +50,7 @@ job "webhooks-router" {
         BRAIN_URL     = "http://eri.aerial"
         INFISICAL_URL = "http://infisical.aerial"
         VANADIS_URL   = "http://vanadis.aerial"
+        HARO_URL      = "http://haro.aerial"
         PORT          = "4020"
         GOCOVERDIR  = "/coverage"
       }

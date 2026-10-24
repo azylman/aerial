@@ -73,6 +73,7 @@ type Config struct {
 	HangarURL             string
 	BrainURL              string
 	VanadisURL            string
+	HaroURL               string
 	SystemChannelID       string
 }
 
@@ -85,6 +86,7 @@ type RouterYAMLConfig struct {
 	HangarURL            string `yaml:"hangar_url"`
 	BrainURL             string `yaml:"brain_url"`
 	VanadisURL           string `yaml:"vanadis_url"`
+	HaroURL              string `yaml:"haro_url"`
 	SystemChannelID      string `yaml:"system_channel_id"`
 }
 
@@ -138,6 +140,7 @@ func LoadConfig(configPath string) Config {
 		HangarURL:             strings.TrimRight(firstNonEmpty(os.Getenv("HANGAR_URL"), fileCfg.HangarURL, "http://127.0.0.1:8087"), "/"),
 		BrainURL:              strings.TrimRight(firstNonEmpty(os.Getenv("BRAIN_INTERNAL_URL"), os.Getenv("BRAIN_URL"), fileCfg.BrainURL, "http://127.0.0.1:8088"), "/"),
 		VanadisURL:            strings.TrimRight(firstNonEmpty(os.Getenv("VANADIS_URL"), fileCfg.VanadisURL, "http://vanadis.aerial"), "/"),
+		HaroURL:               strings.TrimRight(firstNonEmpty(os.Getenv("HARO_URL"), fileCfg.HaroURL, "http://haro.aerial"), "/"),
 		SystemChannelID:       strings.TrimSpace(firstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), os.Getenv("DISCORD_CHANNEL_ID"), fileCfg.SystemChannelID)),
 	}
 }
@@ -568,6 +571,7 @@ type pgxQueryExecer interface {
 type PostgresPRRegistry struct {
 	pool       pgxQueryExecer
 	vanadisURL string
+	haroURL    string
 	httpClient *http.Client
 }
 
@@ -579,6 +583,7 @@ func NewPostgresPRRegistry(pool pgxQueryExecer, opts ...func(*PostgresPRRegistry
 	r := &PostgresPRRegistry{
 		pool:       pool,
 		vanadisURL: "http://vanadis.aerial",
+		haroURL:    "http://haro.aerial",
 		httpClient: &http.Client{Timeout: 10 * time.Second},
 	}
 	for _, opt := range opts {
@@ -3517,7 +3522,7 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 		}
 		defer pool.Close()
 		dbPool = pool
-		server.SetRegistry(NewPostgresPRRegistry(dbPool, WithVanadisClient(cfg.VanadisURL, server.httpClient)))
+		server.SetRegistry(NewPostgresPRRegistry(dbPool, WithVanadisClient(cfg.VanadisURL, server.httpClient), WithHaroClient(cfg.HaroURL, server.httpClient)))
 
 		workers := river.NewWorkers()
 		river.AddWorker(workers, &GitHubWebhookWorker{server: server})
