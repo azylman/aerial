@@ -1,13 +1,16 @@
 # syntax=docker/dockerfile:1
 FROM golang:1.27.1-alpine AS builder
-WORKDIR /app
-COPY go.mod go.sum* ./
+WORKDIR /src
+COPY pkg/go.mod pkg/go.sum* ./pkg/
+COPY services/dashboard/go.mod services/dashboard/go.sum* ./services/dashboard/
+WORKDIR /src/services/dashboard
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
-COPY *.go ./
-COPY static/ ./static/
+
+COPY pkg/ /src/pkg/
+COPY services/dashboard/ ./
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS=linux go build -cover -covermode=atomic -trimpath -ldflags="-s -w" -o aerial-dashboard .
+    CGO_ENABLED=0 GOOS=linux go build -cover -covermode=atomic -trimpath -ldflags="-s -w" -o /app/aerial-dashboard .
 
 FROM alpine:3.24
 RUN apk add --no-cache ca-certificates

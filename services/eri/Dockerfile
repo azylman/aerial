@@ -2,11 +2,14 @@
 # --- Build stage --------------------------------------------------------
 FROM golang:1.27.1-bookworm AS builder
 
-WORKDIR /build
+WORKDIR /src
 
-COPY services/eri/go.mod services/eri/go.sum* ./
+COPY pkg/go.mod pkg/go.sum* ./pkg/
+COPY services/eri/go.mod services/eri/go.sum* ./services/eri/
+WORKDIR /src/services/eri
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
+COPY pkg/ /src/pkg/
 COPY services/eri/ ./
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \

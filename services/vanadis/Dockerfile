@@ -1,12 +1,14 @@
 # syntax=docker/dockerfile:1
 FROM golang:1.27.1-alpine AS builder
 
-WORKDIR /app
-
-COPY go.mod go.sum* ./
+WORKDIR /src
+COPY pkg/go.mod pkg/go.sum* ./pkg/
+COPY services/vanadis/go.mod services/vanadis/go.sum* ./services/vanadis/
+WORKDIR /src/services/vanadis
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
-COPY . ./
+COPY pkg/ /src/pkg/
+COPY services/vanadis/ ./
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=linux go build -cover -covermode=atomic -trimpath -ldflags="-s -w" -o /bin/vanadis .

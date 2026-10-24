@@ -2,11 +2,13 @@
 FROM golang:1.27.1-alpine AS builder
 
 WORKDIR /src
-
-COPY go.mod go.sum* ./
+COPY pkg/go.mod pkg/go.sum* ./pkg/
+COPY services/haro/go.mod services/haro/go.sum* ./services/haro/
+WORKDIR /src/services/haro
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
-COPY . .
+COPY pkg/ /src/pkg/
+COPY services/haro/ ./
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=linux go build -cover -covermode=atomic -trimpath -ldflags="-s -w" -o /app/haro .

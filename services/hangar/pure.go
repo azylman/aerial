@@ -584,7 +584,7 @@ func JobHasContainerBuildChanges(jobSpec string, changedFiles []string) bool {
 			continue
 		}
 		svc := strings.TrimPrefix(path.Base(stripImageTag(strings.ToLower(strings.TrimSpace(img)))), "aerial-")
-		prefixes := []string{"services/" + svc + "/", "mcp/" + svc + "/", svc + "/"}
+		prefixes := []string{"services/" + svc + "/", "mcp/" + svc + "/", svc + "/", "pkg/"}
 		if svc == "docs" {
 			prefixes = append(prefixes, "services/docs-service/", "docs-service/")
 		}
@@ -868,6 +868,7 @@ type PendingImageRollout struct {
 var CoreBuildPaths = []string{
 	"services/",
 	"mcp/",
+	"pkg/",
 	"coven/",
 	"haro/",
 	"eri/",

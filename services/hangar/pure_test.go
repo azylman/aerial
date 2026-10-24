@@ -884,6 +884,7 @@ func TestJobHasContainerBuildChanges_TableDriven(t *testing.T) {
 		{"matching mcp dir", specMCP, []string{"mcp/discord-mcp/main.go"}, true},
 		{"matching docs-service alias", specDocs, []string{"services/docs-service/Dockerfile"}, true},
 		{"matching root Dockerfile", specVanadis, []string{"Dockerfile"}, true},
+		{"matching pkg dir", specVanadis, []string{"pkg/httpkit/httpkit.go"}, true},
 		{"unmatched other service dir", specVanadis, []string{"services/hangar/main.go", "nomad/jobs/vanadis.nomad"}, false},
 		{"external image never matches", specExternal, []string{"services/vanadis/main.go", "Dockerfile"}, false},
 		{"empty changed files", specVanadis, nil, false},
@@ -993,6 +994,7 @@ func TestHasContainerBuildChanges_TableDriven(t *testing.T) {
 		{"aerial core roborev-runner touched", "/share/aerial", []string{"roborev-runner/Dockerfile"}, true},
 		{"aerial core Dockerfile touched", "/share/aerial", []string{"Dockerfile"}, true},
 		{"aerial core go.mod touched", "/share/aerial", []string{"go.mod"}, true},
+		{"aerial core pkg touched", "/share/aerial", []string{"pkg/httpkit/httpkit.go"}, true},
 		{"aerial core non-build files (docs, nomad, rules)", "/share/aerial", []string{"nomad/jobs/migrate.nomad", "README.md", "rules/discord/foo.md", "docs/spec.md"}, false},
 		{"aerial core empty files", "/share/aerial", nil, false},
 	}
