@@ -134,9 +134,6 @@ func TestStoreUnavailableContract(t *testing.T) {
 	assertStoreUnavailable(t, NewSQLStore(database))
 	assertStoreUnavailable(t, &SQLStore{})
 	closeWarn(nil, "test")
-	if isPostgres(nil) || isPostgres(database) {
-		t.Errorf("expected isPostgres false for nil/sqlite")
-	}
 }
 
 func TestMessageLifecycle(t *testing.T) {
@@ -148,7 +145,7 @@ func TestMessageLifecycle(t *testing.T) {
 
 	msg := Message{
 		ID: "msg-1", ThreadID: "th-1", GuildID: "guild-1", AuthorID: "author-1", AuthorName: "Alice", Content: "Hello Aerial", Status: StatusPending,
-		Metadata: MessageMetadata{Mentions: []string{"@aerial"}, MentionUserIDs: []string{"1001"}, MentionRoleIDs: []string{"2001"}, Attachments: []string{"https://example.com/file.png"}, IsAdmin: true},
+		Mentions: []string{"@aerial"}, MentionUserIDs: []string{"1001"}, MentionRoleIDs: []string{"2001"}, Attachments: []string{"https://example.com/file.png"}, IsAdmin: true,
 	}
 
 	mustOK(t, store.InsertMessage(ctx, msg), "InsertMessage")
@@ -156,7 +153,7 @@ func TestMessageLifecycle(t *testing.T) {
 
 	got, err := store.GetMessage(ctx, "msg-1")
 	mustOK(t, err, "GetMessage msg-1")
-	if got == nil || got.Content != "Hello Aerial" || !got.Metadata.IsAdmin || len(got.Metadata.Mentions) != 1 {
+	if got == nil || got.Content != "Hello Aerial" || !got.IsAdmin || len(got.Mentions) != 1 {
 		t.Fatalf("GetMessage unexpected: %+v", got)
 	}
 

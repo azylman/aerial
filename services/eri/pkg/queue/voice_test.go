@@ -907,7 +907,7 @@ func TestChannelCacheAndMessageEffort(t *testing.T) {
 		wantEffort string
 	}{
 		{"explicit_custom_effort", db.Message{Effort: "custom"}, "high"},
-		{"model_derived_medium_effort", db.Message{Metadata: db.MessageMetadata{Model: "claude-medium"}}, "medium"},
+		{"model_derived_medium_effort", db.Message{Model: "claude-medium"}, "medium"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

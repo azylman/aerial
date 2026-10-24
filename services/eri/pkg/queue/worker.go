@@ -344,7 +344,7 @@ func (te *turnExecution) getRecentThreadMessages(threadID string, limit int) ([]
 					msgs = append(msgs, db.Message{
 						ID: dm.ID, ThreadID: threadID, AuthorID: authorID, AuthorName: authorName,
 						Content: dm.Content, CreatedAt: createdAt,
-						Metadata: db.MessageMetadata{Mentions: mentions, MentionUserIDs: mentionUserIDs, ReplyingToAuthor: replyingToAuthor},
+						Mentions: mentions, MentionUserIDs: mentionUserIDs, ReplyingToAuthor: replyingToAuthor,
 					})
 				}
 				return msgs, nil
@@ -624,8 +624,8 @@ func isHTTPClientBurst(burst []db.Message) bool {
 
 func (te *turnExecution) resolveTurnPolicy() bool {
 	te.effectiveID, te.effectiveName, te.isThread, te.threadName = ResolveChannelAndThread(te.pool.getDiscordSession(), te.threadID)
-	if te.effectiveName == "" && len(te.burst) > 0 && te.burst[0].Metadata.ChannelID != "" {
-		effID, effName, isTh, thName := ResolveChannelAndThread(te.pool.getDiscordSession(), te.burst[0].Metadata.ChannelID)
+	if te.effectiveName == "" && len(te.burst) > 0 && te.burst[0].ChannelID != "" {
+		effID, effName, isTh, thName := ResolveChannelAndThread(te.pool.getDiscordSession(), te.burst[0].ChannelID)
 		if effName != "" || effID != "" {
 			te.effectiveID = effID
 			te.effectiveName = effName
@@ -689,14 +689,14 @@ func (te *turnExecution) deliveryTargetID() string {
 	if IsNumericSnowflake(te.threadID) {
 		return te.threadID
 	}
-	if len(te.burst) > 0 && IsNumericSnowflake(te.burst[0].Metadata.ChannelID) {
-		return te.burst[0].Metadata.ChannelID
+	if len(te.burst) > 0 && IsNumericSnowflake(te.burst[0].ChannelID) {
+		return te.burst[0].ChannelID
 	}
 	if IsNumericSnowflake(te.effectiveID) {
 		return te.effectiveID
 	}
-	if len(te.burst) > 0 && te.burst[0].Metadata.ChannelID != "" {
-		return te.burst[0].Metadata.ChannelID
+	if len(te.burst) > 0 && te.burst[0].ChannelID != "" {
+		return te.burst[0].ChannelID
 	}
 	return te.threadID
 }
@@ -1064,11 +1064,11 @@ func (te *turnExecution) buildTurnPrompt() {
 	}
 
 	for i := range te.burst {
-		if te.burst[i].Metadata.ChannelName == "" && te.effectiveName != "" {
-			te.burst[i].Metadata.ChannelName = te.effectiveName
+		if te.burst[i].ChannelName == "" && te.effectiveName != "" {
+			te.burst[i].ChannelName = te.effectiveName
 		}
-		if te.isThread && te.burst[i].Metadata.ThreadName == "" && te.threadName != "" {
-			te.burst[i].Metadata.ThreadName = te.threadName
+		if te.isThread && te.burst[i].ThreadName == "" && te.threadName != "" {
+			te.burst[i].ThreadName = te.threadName
 		}
 	}
 

@@ -3,7 +3,6 @@ package db
 import (
 	"context"
 	"database/sql"
-	"database/sql/driver"
 	"fmt"
 	"io"
 	"log"
@@ -22,23 +21,6 @@ var (
 		return db.PingContext(ctx)
 	}
 )
-
-func isPostgres(database DBTX) (isPg bool) {
-	if database == nil {
-		return false
-	}
-	defer func() {
-		if r := recover(); r != nil {
-			isPg = false
-		}
-	}()
-	type driverGetter interface{ Driver() driver.Driver }
-	if dg, ok := database.(driverGetter); ok && dg.Driver() != nil {
-		dt := fmt.Sprintf("%T", dg.Driver())
-		return strings.Contains(dt, "stdlib") || strings.Contains(dt, "pgx")
-	}
-	return false
-}
 
 // New establishes a database connection pool using the DatabaseURL from cfg.
 func New(cfg *config.Config) (*sql.DB, error) {

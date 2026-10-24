@@ -183,11 +183,11 @@ func SanitizeContent(s string) string { return sanitizer.SanitizePromptTags(s) }
 // SanitizeAuthor cleans untrusted author strings.
 func SanitizeAuthor(name string) string { return sanitizer.SanitizeAuthor(name) }
 
-// ExtractReplyingToAuthor retrieves the author being replied to, checking structured metadata first,
+// ExtractReplyingToAuthor retrieves the author being replied to, checking structured fields first,
 // then falling back to legacy prompt envelope formats.
 func ExtractReplyingToAuthor(m db.Message) string {
-	if m.Metadata.ReplyingToAuthor != "" {
-		return m.Metadata.ReplyingToAuthor
+	if m.ReplyingToAuthor != "" {
+		return m.ReplyingToAuthor
 	}
 	if strings.Contains(m.Content, "- replying_to:") {
 		idx := strings.Index(m.Content, "- replying_to:")
@@ -224,10 +224,10 @@ func resolveMessageParts(m db.Message) (author, replyTo, bodyText string) {
 	}
 
 	bodyText = SanitizeContent(m.BodyText())
-	if len(m.Metadata.MentionUserIDs) > 0 && len(m.Metadata.Mentions) > 0 {
-		for i, uID := range m.Metadata.MentionUserIDs {
-			if i < len(m.Metadata.Mentions) && uID != "" {
-				name := m.Metadata.Mentions[i]
+	if len(m.MentionUserIDs) > 0 && len(m.Mentions) > 0 {
+		for i, uID := range m.MentionUserIDs {
+			if i < len(m.Mentions) && uID != "" {
+				name := m.Mentions[i]
 				if name != "" {
 					bodyText = strings.ReplaceAll(bodyText, "<@"+uID+">", "@"+name)
 					bodyText = strings.ReplaceAll(bodyText, "<@!"+uID+">", "@"+name)
@@ -235,12 +235,12 @@ func resolveMessageParts(m db.Message) (author, replyTo, bodyText string) {
 			}
 		}
 	}
-	if len(m.Metadata.MentionRoleIDs) > 0 && len(m.Metadata.Mentions) > 0 {
-		userCount := len(m.Metadata.MentionUserIDs)
-		for i, rID := range m.Metadata.MentionRoleIDs {
+	if len(m.MentionRoleIDs) > 0 && len(m.Mentions) > 0 {
+		userCount := len(m.MentionUserIDs)
+		for i, rID := range m.MentionRoleIDs {
 			roleIdx := userCount + i
-			if roleIdx < len(m.Metadata.Mentions) && rID != "" {
-				name := m.Metadata.Mentions[roleIdx]
+			if roleIdx < len(m.Mentions) && rID != "" {
+				name := m.Mentions[roleIdx]
 				if name != "" {
 					bodyText = strings.ReplaceAll(bodyText, "<@&"+rID+">", "@"+name)
 				}

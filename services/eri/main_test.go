@@ -134,12 +134,12 @@ func TestHandlePromptValidation(t *testing.T) {
 				if tc.wantThreadID != "" && msg.ThreadID != tc.wantThreadID {
 					t.Errorf("thread_id=%q, want %q", msg.ThreadID, tc.wantThreadID)
 				}
-				if tc.wantChannelID != "" && msg.Metadata.ChannelID != tc.wantChannelID {
-					t.Errorf("metadata.channel_id=%q, want %q", msg.Metadata.ChannelID, tc.wantChannelID)
+				if tc.wantChannelID != "" && msg.ChannelID != tc.wantChannelID {
+					t.Errorf("channel_id=%q, want %q", msg.ChannelID, tc.wantChannelID)
 				}
 				if tc.wantEphemeral != nil {
-					if msg.Metadata.Ephemeral == nil || *msg.Metadata.Ephemeral != *tc.wantEphemeral {
-						t.Errorf("metadata.ephemeral=%v, want %v", msg.Metadata.Ephemeral, *tc.wantEphemeral)
+					if msg.Ephemeral == nil || *msg.Ephemeral != *tc.wantEphemeral {
+						t.Errorf("ephemeral=%v, want %v", msg.Ephemeral, *tc.wantEphemeral)
 					}
 				}
 				if tc.wantContent != "" && msg.Content != tc.wantContent {
@@ -148,11 +148,11 @@ func TestHandlePromptValidation(t *testing.T) {
 				if tc.wantEffort != "" && msg.Effort != tc.wantEffort {
 					t.Errorf("effort=%q, want %q", msg.Effort, tc.wantEffort)
 				}
-				if tc.wantModel != "" && msg.Metadata.Model != tc.wantModel {
-					t.Errorf("model=%q, want %q", msg.Metadata.Model, tc.wantModel)
+				if tc.wantModel != "" && msg.Model != tc.wantModel {
+					t.Errorf("model=%q, want %q", msg.Model, tc.wantModel)
 				}
-				if tc.wantSilent && !msg.Metadata.Silent {
-					t.Errorf("expected silent=true, got %v", msg.Metadata.Silent)
+				if tc.wantSilent && !msg.Silent {
+					t.Errorf("expected silent=true, got %v", msg.Silent)
 				}
 			}
 		})

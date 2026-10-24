@@ -3,8 +3,6 @@ package db
 import (
 	"context"
 	"database/sql"
-	"database/sql/driver"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -18,87 +16,157 @@ const (
 	StatusFailed     = "FAILED"
 )
 
-// MessageMetadata stores structured Discord and source metadata preserved throughout the queue lifecycle.
-type MessageMetadata struct {
-	ChannelID         string   `json:"channel_id,omitempty"`
-	ChannelName       string   `json:"channel_name,omitempty"`
-	TargetThreadID    string   `json:"target_thread_id,omitempty"`
-	ThreadName        string   `json:"thread_name,omitempty"`
-	GuildID           string   `json:"guild_id,omitempty"`
-	AuthorUsername    string   `json:"author_username,omitempty"`
-	AuthorGlobalName  string   `json:"author_global_name,omitempty"`
-	AuthorBot         bool     `json:"author_bot,omitempty"`
-	IsAdmin           bool     `json:"is_admin,omitempty"`
-	Mentions          []string `json:"mentions,omitempty"`
-	MentionUserIDs    []string `json:"mention_user_ids,omitempty"`
-	MentionRoleIDs    []string `json:"mention_role_ids,omitempty"`
-	ReplyingToAuthor  string   `json:"replying_to_author,omitempty"`
-	ReplyingToContent string   `json:"replying_to_content,omitempty"`
-	Attachments       []string `json:"attachments,omitempty"`
-	Model             string   `json:"model,omitempty"`
-	Silent            bool     `json:"silent,omitempty"`
-	Ephemeral         *bool    `json:"ephemeral,omitempty"`
-}
-
-// IsEmpty returns true if all metadata fields are zero/empty.
-func (m MessageMetadata) IsEmpty() bool {
-	return m.ChannelID == "" && m.ChannelName == "" && m.TargetThreadID == "" && m.ThreadName == "" &&
-		m.GuildID == "" && m.AuthorUsername == "" && m.AuthorGlobalName == "" && !m.AuthorBot && !m.IsAdmin &&
-		len(m.Mentions) == 0 && len(m.MentionUserIDs) == 0 && len(m.MentionRoleIDs) == 0 &&
-		m.ReplyingToAuthor == "" && m.ReplyingToContent == "" && len(m.Attachments) == 0 &&
-		m.Model == "" && !m.Silent && m.Ephemeral == nil
-}
-
-// Value implements driver.Valuer for PostgreSQL JSONB and SQLite TEXT.
-func (m MessageMetadata) Value() (driver.Value, error) {
-	if m.IsEmpty() {
-		return "{}", nil
-	}
-	bytes, err := json.Marshal(m)
-	return string(bytes), err
-}
-
-// Scan implements sql.Scanner for PostgreSQL JSONB and SQLite TEXT.
-func (m *MessageMetadata) Scan(src any) error {
-	if src == nil {
-		*m = MessageMetadata{}
-		return nil
-	}
-	var data []byte
-	switch v := src.(type) {
-	case []byte:
-		data = v
-	case string:
-		data = []byte(v)
-	default:
-		return fmt.Errorf("cannot scan type %T into MessageMetadata", src)
-	}
-	if len(data) == 0 || string(data) == "{}" || string(data) == "null" {
-		*m = MessageMetadata{}
-		return nil
-	}
-	return json.Unmarshal(data, m)
-}
-
 type Message struct {
-	ID            string          `json:"id"`
-	RowID         int64           `json:"row_id,omitempty"`
-	ThreadID      string          `json:"thread_id"`
-	GuildID       string          `json:"guild_id"`
-	AuthorID      string          `json:"author_id"`
-	AuthorName    string          `json:"author_name"`
-	Content       string          `json:"content"`
-	Summary       string          `json:"summary"`
-	Status        string          `json:"status"`
-	RetryCount    int             `json:"retry_count"`
-	RestartCount  int             `json:"restart_count"`
-	Effort        string          `json:"effort"`
-	ErrorMessage  string          `json:"error_message,omitempty"`
-	ResponseText  string          `json:"response_text,omitempty"`
-	ScheduleRunID string          `json:"schedule_run_id,omitempty"`
-	Metadata      MessageMetadata `json:"metadata"`
-	CreatedAt     time.Time       `json:"created_at"`
-	UpdatedAt     time.Time       `json:"updated_at"`
+	ID                string    `json:"id"`
+	RowID             int64     `json:"row_id,omitempty"`
+	ThreadID          string    `json:"thread_id"`
+	GuildID           string    `json:"guild_id"`
+	AuthorID          string    `json:"author_id"`
+	AuthorName        string    `json:"author_name"`
+	Content           string    `json:"content"`
+	Summary           string    `json:"summary"`
+	Status            string    `json:"status"`
+	RetryCount        int       `json:"retry_count"`
+	RestartCount      int       `json:"restart_count"`
+	Effort            string    `json:"effort"`
+	ErrorMessage      string    `json:"error_message,omitempty"`
+	ResponseText      string    `json:"response_text,omitempty"`
+	ScheduleRunID     string    `json:"schedule_run_id,omitempty"`
+	ChannelID         string    `json:"channel_id,omitempty"`
+	ChannelName       string    `json:"channel_name,omitempty"`
+	ThreadName        string    `json:"thread_name,omitempty"`
+	AuthorGlobalName  string    `json:"author_global_name,omitempty"`
+	AuthorBot         bool      `json:"author_bot,omitempty"`
+	IsAdmin           bool      `json:"is_admin,omitempty"`
+	Mentions          []string  `json:"mentions,omitempty"`
+	MentionUserIDs    []string  `json:"mention_user_ids,omitempty"`
+	MentionRoleIDs    []string  `json:"mention_role_ids,omitempty"`
+	ReplyingToAuthor  string    `json:"replying_to_author,omitempty"`
+	ReplyingToContent string    `json:"replying_to_content,omitempty"`
+	Attachments       []string  `json:"attachments,omitempty"`
+	Model             string    `json:"model,omitempty"`
+	Silent            bool      `json:"silent,omitempty"`
+	Ephemeral         *bool     `json:"ephemeral,omitempty"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+func (m Message) HasStructuredFields() bool {
+	return m.ChannelID != "" || m.ChannelName != "" || m.ThreadName != "" ||
+		m.AuthorGlobalName != "" || m.AuthorBot || m.IsAdmin ||
+		len(m.Mentions) > 0 || len(m.MentionUserIDs) > 0 || len(m.MentionRoleIDs) > 0 ||
+		m.ReplyingToAuthor != "" || m.ReplyingToContent != "" || len(m.Attachments) > 0 ||
+		m.Model != "" || m.Silent || m.Ephemeral != nil
+}
+
+type pgStringSlice struct{ dest *[]string }
+
+func (s *pgStringSlice) Scan(src any) error {
+	vals, err := parsePGTextArray(src)
+	if err != nil {
+		return err
+	}
+	*s.dest = vals
+	return nil
+}
+
+func formatPGTextArray(elems []string) string {
+	if len(elems) == 0 {
+		return "{}"
+	}
+	var sb strings.Builder
+	sb.WriteByte('{')
+	for i, s := range elems {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteByte('"')
+		for _, r := range s {
+			if r == '\\' || r == '"' {
+				sb.WriteByte('\\')
+			}
+			sb.WriteRune(r)
+		}
+		sb.WriteByte('"')
+	}
+	sb.WriteByte('}')
+	return sb.String()
+}
+
+func extractArrayString(src any) (content string, empty bool, err error) {
+	if src == nil {
+		return "", true, nil
+	}
+	var str string
+	switch v := src.(type) {
+	case string:
+		str = v
+	case []byte:
+		str = string(v)
+	default:
+		return "", false, fmt.Errorf("cannot scan type %T into pgStringSlice", src)
+	}
+	str = strings.TrimSpace(str)
+	if str == "" || str == "{}" || str == "NULL" {
+		return "", true, nil
+	}
+	if !strings.HasPrefix(str, "{") || !strings.HasSuffix(str, "}") {
+		return "", false, fmt.Errorf("malformed postgres array: %q", str)
+	}
+	return str[1 : len(str)-1], false, nil
+}
+
+func parsePGArrayContent(content string) ([]string, error) {
+	if len(content) == 0 {
+		return []string{}, nil
+	}
+	var res []string
+	var cur strings.Builder
+	inQuotes, escaped, hasItem := false, false, false
+
+	for i := 0; i < len(content); i++ {
+		ch := content[i]
+		if escaped {
+			cur.WriteByte(ch)
+			escaped = false
+			continue
+		}
+		if ch == '\\' {
+			escaped = true
+			continue
+		}
+		if ch == '"' {
+			inQuotes = !inQuotes
+			hasItem = true
+			continue
+		}
+		if ch == ',' && !inQuotes {
+			res = append(res, cur.String())
+			cur.Reset()
+			hasItem = false
+			continue
+		}
+		cur.WriteByte(ch)
+		hasItem = true
+	}
+	if inQuotes || escaped {
+		return nil, fmt.Errorf("unclosed quote or escape in postgres array")
+	}
+	if hasItem || len(res) > 0 {
+		res = append(res, cur.String())
+	}
+	return res, nil
+}
+
+func parsePGTextArray(src any) ([]string, error) {
+	if slice, ok := src.([]string); ok {
+		return slice, nil
+	}
+	content, empty, err := extractArrayString(src)
+	if err != nil || empty {
+		return []string{}, err
+	}
+	return parsePGArrayContent(content)
 }
 
 func unescapeUserRequest(s string) string {
@@ -134,15 +202,15 @@ func ExtractMessageBody(content string) string {
 	return strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, "<USER_REQUEST>"), "</USER_REQUEST>"))
 }
 
-// BodyText returns the clean user utterance. If Metadata is present, m.Content is already the raw user message.
+// BodyText returns the clean user utterance. If structured fields are present, m.Content is already the raw user message.
 func (m Message) BodyText() string {
-	if m.Metadata.IsEmpty() && strings.Contains(m.Content, "<USER_REQUEST>") {
+	if !m.HasStructuredFields() && strings.Contains(m.Content, "<USER_REQUEST>") {
 		return ExtractMessageBody(m.Content)
 	}
 	return m.Content
 }
 
-const messageSelectCols = "id, COALESCE(row_id, 0) AS row_id, thread_id, guild_id, author_id, author_name, content, COALESCE(summary, '') AS summary, status, retry_count, COALESCE(restart_count, 0) AS restart_count, COALESCE(effort, '') AS effort, COALESCE(error_message, '') AS error_message, COALESCE(response_text, '') AS response_text, COALESCE(schedule_run_id, '') AS schedule_run_id, metadata, created_at, updated_at"
+const messageSelectCols = "id, COALESCE(row_id, 0) AS row_id, thread_id, guild_id, author_id, author_name, content, COALESCE(summary, '') AS summary, status, retry_count, COALESCE(restart_count, 0) AS restart_count, COALESCE(effort, '') AS effort, COALESCE(error_message, '') AS error_message, COALESCE(response_text, '') AS response_text, COALESCE(schedule_run_id, '') AS schedule_run_id, COALESCE(channel_id, '') AS channel_id, COALESCE(channel_name, '') AS channel_name, COALESCE(thread_name, '') AS thread_name, COALESCE(author_global_name, '') AS author_global_name, COALESCE(author_bot, false) AS author_bot, COALESCE(is_admin, false) AS is_admin, mentions, mention_user_ids, mention_role_ids, COALESCE(replying_to_author, '') AS replying_to_author, COALESCE(replying_to_content, '') AS replying_to_content, attachments, COALESCE(model, '') AS model, COALESCE(silent, false) AS silent, ephemeral, created_at, updated_at"
 
 // InsertMessage stores a new message in the database.
 func (s *SQLStore) InsertMessage(ctx context.Context, msg Message) (err error) {
@@ -166,11 +234,30 @@ func (s *SQLStore) InsertMessage(ctx context.Context, msg Message) (err error) {
 	if msg.UpdatedAt.IsZero() {
 		msg.UpdatedAt = now
 	}
-	err = s.execWithTimeout(ctx, `INSERT INTO messages (id, thread_id, guild_id, author_id, author_name, content, summary, status, retry_count, restart_count, effort, error_message, response_text, schedule_run_id, metadata, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) ON CONFLICT (id) DO NOTHING;`,
+	err = s.execWithTimeout(ctx, `INSERT INTO messages (
+		id, thread_id, guild_id, author_id, author_name,
+		content, summary, status, retry_count, restart_count,
+		effort, error_message, response_text, schedule_run_id,
+		channel_id, channel_name, thread_name, author_global_name,
+		author_bot, is_admin, mentions, mention_user_ids,
+		mention_role_ids, replying_to_author, replying_to_content, attachments,
+		model, silent, ephemeral, created_at, updated_at
+	) VALUES (
+		$1, $2, $3, $4, $5,
+		$6, $7, $8, $9, $10,
+		$11, $12, $13, $14,
+		$15, $16, $17, $18,
+		$19, $20, $21, $22,
+		$23, $24, $25, $26,
+		$27, $28, $29, $30, $31
+	) ON CONFLICT (id) DO NOTHING;`,
 		msg.ID, msg.ThreadID, msg.GuildID, msg.AuthorID, msg.AuthorName,
 		msg.Content, msg.Summary, msg.Status, msg.RetryCount, msg.RestartCount,
 		msg.Effort, msg.ErrorMessage, msg.ResponseText, msg.ScheduleRunID,
-		msg.Metadata, msg.CreatedAt, msg.UpdatedAt,
+		msg.ChannelID, msg.ChannelName, msg.ThreadName, msg.AuthorGlobalName,
+		msg.AuthorBot, msg.IsAdmin, formatPGTextArray(msg.Mentions), formatPGTextArray(msg.MentionUserIDs),
+		formatPGTextArray(msg.MentionRoleIDs), msg.ReplyingToAuthor, msg.ReplyingToContent, formatPGTextArray(msg.Attachments),
+		msg.Model, msg.Silent, msg.Ephemeral, msg.CreatedAt, msg.UpdatedAt,
 	)
 	return err
 }
@@ -178,13 +265,26 @@ func (s *SQLStore) InsertMessage(ctx context.Context, msg Message) (err error) {
 func scanMessage(scanner interface{ Scan(dest ...any) error }, autoCleanSummary bool) (Message, error) {
 	var m Message
 	var errMsg, respText, schedID sql.NullString
+	var ephemeral sql.NullBool
 	if err := scanner.Scan(
 		&m.ID, &m.RowID, &m.ThreadID, &m.GuildID, &m.AuthorID, &m.AuthorName, &m.Content, &m.Summary,
-		&m.Status, &m.RetryCount, &m.RestartCount, &m.Effort, &errMsg, &respText, &schedID, &m.Metadata, &m.CreatedAt, &m.UpdatedAt,
+		&m.Status, &m.RetryCount, &m.RestartCount, &m.Effort, &errMsg, &respText, &schedID,
+		&m.ChannelID, &m.ChannelName, &m.ThreadName, &m.AuthorGlobalName,
+		&m.AuthorBot, &m.IsAdmin,
+		&pgStringSlice{dest: &m.Mentions},
+		&pgStringSlice{dest: &m.MentionUserIDs},
+		&pgStringSlice{dest: &m.MentionRoleIDs},
+		&m.ReplyingToAuthor, &m.ReplyingToContent,
+		&pgStringSlice{dest: &m.Attachments},
+		&m.Model, &m.Silent, &ephemeral,
+		&m.CreatedAt, &m.UpdatedAt,
 	); err != nil {
 		return Message{}, err
 	}
 	m.ErrorMessage, m.ResponseText, m.ScheduleRunID = errMsg.String, respText.String, schedID.String
+	if ephemeral.Valid {
+		m.Ephemeral = &ephemeral.Bool
+	}
 	if autoCleanSummary && m.Summary == "" {
 		m.Summary = CleanTaskSummary(m.Content)
 	}
