@@ -494,144 +494,6 @@ func (e *errTranscriptStore) GetTranscriptStepRange(ctx context.Context, session
 	return nil, errors.New("simulated get transcript step range error")
 }
 
-func TestSchedulesEndpoints(t *testing.T) {
-	store := dbtest.NewFakeStore()
-	now := time.Now().UTC()
-
-	_ = store.CreateCronSchedule(context.Background(), db.CronSchedule{
-		ID: "cron-1", TargetID: "chan-123", TitlePrefix: "Morning Brief", CronExpr: "0 9 * * 1-5",
-		Prompt: "Check status with secret token ghp_secretToken1234567890", Timezone: "America/Los_Angeles", NextRunAt: now.Add(time.Hour), Enabled: true, CreatedAt: now,
-	})
-	_ = store.CreateOneShotSchedule(context.Background(), db.OneShotSchedule{
-		ID: "once-1", ThreadID: "thread-456", Prompt: "Reminder with secret key github_pat_1234567890abcdef", RunAt: now.Add(30 * time.Minute), CreatedAt: now,
-	})
-	_ = store.CreateHeartbeatSchedule(context.Background(), db.HeartbeatSchedule{
-		ID: "hb-1", TargetID: "chan-789", TitlePrefix: "DB Watch", CronExpr: "*/5 * * * *",
-		Prompt: "Heartbeat check secret ghp_secretToken1234567890", Timezone: "UTC", Effort: "low",
-		NextRunAt: now.Add(15 * time.Minute), Enabled: true, CreatedAt: now,
-	})
-	store.SeedScheduleRun(db.ScheduleRun{
-		ID: "run-1", ScheduleID: "cron-1", ScheduleType: "cron", MessageID: "msg-1", TargetID: "chan-123", ThreadID: "th-1",
-		Title: "Morning Brief", Prompt: "Check status with secret token ghp_secretToken1234567890", Status: "completed", StartedAt: now.Add(-2 * time.Hour), DurationMs: 4500,
-	})
-	store.SeedScheduleRun(db.ScheduleRun{
-		ID: "run-2", ScheduleID: "cron-1", ScheduleType: "cron", MessageID: "msg-2", TargetID: "chan-123", ThreadID: "th-2",
-		Title: "Morning Brief", Prompt: "Run routine", Status: "failed", StartedAt: now.Add(-time.Hour), DurationMs: 1200, Error: "Failed auth with token ghp_errorToken99999999",
-	})
-
-	schedulesHandler := handleSchedules(store)
-	w := runHTTP(schedulesHandler, http.MethodGet, "/schedules", nil)
-	if w.Code != http.StatusOK {
-		t.Fatalf("Expected 200 OK from /schedules, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var schedResp SchedulesResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &schedResp); err != nil {
-		t.Fatalf("Failed to parse /schedules JSON: %v", err)
-	}
-	if schedResp.Status != "ok" || schedResp.Summary.TotalActive != 3 || len(schedResp.Crons) != 1 || len(schedResp.Heartbeats) != 1 || len(schedResp.OneShots) != 1 {
-		t.Fatalf("Unexpected /schedules response: %+v", schedResp)
-	}
-	cronItem := schedResp.Crons[0]
-	if cronItem.ID != "cron-1" || cronItem.CronDescription != "Weekdays (Mon–Fri) at 09:00" || strings.Contains(cronItem.Prompt, "ghp_secretToken1234567890") || !strings.Contains(cronItem.Prompt, "[REDACTED]") {
-		t.Errorf("Unexpected cron item: %+v", cronItem)
-	}
-	hbItem := schedResp.Heartbeats[0]
-	if hbItem.ID != "hb-1" || hbItem.Effort != "low" || hbItem.CronDescription != "Every 5 minutes" || strings.Contains(hbItem.Prompt, "ghp_secretToken1234567890") || !strings.Contains(hbItem.Prompt, "[REDACTED]") {
-		t.Errorf("Unexpected heartbeat item: %+v", hbItem)
-	}
-	oneShotItem := schedResp.OneShots[0]
-	if oneShotItem.ID != "once-1" || strings.Contains(oneShotItem.Prompt, "github_pat_1234567890abcdef") {
-		t.Errorf("Unexpected one-shot item: %+v", oneShotItem)
-	}
-
-	// Caching check
-	_ = store.CreateCronSchedule(context.Background(), db.CronSchedule{ID: "cron-2", TargetID: "chan-999", TitlePrefix: "Nightly", CronExpr: "0 0 * * *", Prompt: "Nightly check", NextRunAt: now.Add(12 * time.Hour), Enabled: true, CreatedAt: now})
-	wCached := runHTTP(schedulesHandler, http.MethodGet, "/schedules", nil)
-	var cachedResp SchedulesResponse
-	_ = json.Unmarshal(wCached.Body.Bytes(), &cachedResp)
-	if len(cachedResp.Crons) != 1 || len(cachedResp.Heartbeats) != 1 {
-		t.Errorf("Expected cached 1 cron and 1 heartbeat schedule within 5s TTL, got %d crons, %d heartbeats", len(cachedResp.Crons), len(cachedResp.Heartbeats))
-	}
-
-	// GET /schedules/runs
-	runsHandler := handleScheduleRuns(store)
-	wRuns := runHTTP(runsHandler, http.MethodGet, "/schedules/runs", nil)
-	if wRuns.Code != http.StatusOK {
-		t.Fatalf("Expected 200 OK from /schedules/runs, got %d: %s", wRuns.Code, wRuns.Body.String())
-	}
-	var runsResp ScheduleRunsResponse
-	_ = json.Unmarshal(wRuns.Body.Bytes(), &runsResp)
-	if runsResp.Status != "ok" || runsResp.Total != 2 || len(runsResp.Runs) != 2 {
-		t.Errorf("Unexpected runs response: total=%d, len=%d", runsResp.Total, len(runsResp.Runs))
-	}
-	for _, r := range runsResp.Runs {
-		if strings.Contains(r.Prompt, "ghp_secretToken1234567890") || strings.Contains(r.Error, "ghp_errorToken99999999") {
-			t.Errorf("Run secret leaked: %+v", r)
-		}
-	}
-
-	var filteredResp ScheduleRunsResponse
-	_ = json.Unmarshal(runHTTP(runsHandler, http.MethodGet, "/schedules/runs?status=failed", nil).Body.Bytes(), &filteredResp)
-	if filteredResp.Total != 1 || len(filteredResp.Runs) != 1 || filteredResp.Runs[0].Status != "failed" {
-		t.Errorf("Unexpected filtered runs: %+v", filteredResp)
-	}
-
-	var paginatedResp ScheduleRunsResponse
-	_ = json.Unmarshal(runHTTP(runsHandler, http.MethodGet, "/schedules/runs?limit=1&offset=0", nil).Body.Bytes(), &paginatedResp)
-	if paginatedResp.Total != 2 || len(paginatedResp.Runs) != 1 || paginatedResp.Limit != 1 {
-		t.Errorf("Unexpected paginated runs: %+v", paginatedResp)
-	}
-
-	if code := runHTTP(schedulesHandler, http.MethodPost, "/schedules", nil).Code; code != http.StatusMethodNotAllowed {
-		t.Errorf("Expected 405 for POST /schedules, got %d", code)
-	}
-	if code := runHTTP(runsHandler, http.MethodPost, "/schedules/runs", nil).Code; code != http.StatusMethodNotAllowed {
-		t.Errorf("Expected 405 for POST /schedules/runs, got %d", code)
-	}
-
-	closedStore := dbtest.NewFakeStore()
-	_ = closedStore.Close()
-	storeCronErr := dbtest.NewFakeStore()
-	storeCronErr.FailNext("GetAllCronSchedules", errors.New("cron query forced error"))
-	storeHeartbeatErr := dbtest.NewFakeStore()
-	storeHeartbeatErr.FailNext("GetAllHeartbeatSchedules", errors.New("heartbeat query forced error"))
-	storeOneShotErr := dbtest.NewFakeStore()
-	storeOneShotErr.FailNext("GetAllOneShotSchedules", errors.New("oneshot query forced error"))
-
-	for _, tc := range []struct {
-		name       string
-		handler    http.HandlerFunc
-		target     string
-		wantStatus int
-	}{
-		{"schedules closed DB", handleSchedules(closedStore), "/schedules", http.StatusInternalServerError},
-		{"schedules nil store", handleSchedules(nil), "/schedules", http.StatusInternalServerError},
-		{"schedules cron err", handleSchedules(storeCronErr), "/schedules", http.StatusInternalServerError},
-		{"schedules heartbeat err", handleSchedules(storeHeartbeatErr), "/schedules", http.StatusInternalServerError},
-		{"schedules oneshot err", handleSchedules(storeOneShotErr), "/schedules", http.StatusInternalServerError},
-		{"runs closed DB", handleScheduleRuns(closedStore), "/schedules/runs", http.StatusInternalServerError},
-		{"runs nil store", handleScheduleRuns(nil), "/schedules/runs", http.StatusInternalServerError},
-		{"runs query filter", handleScheduleRuns(store), "/schedules/runs?limit=100&offset=5&schedule_id=cron-1&status=completed", http.StatusOK},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if code := runHTTP(tc.handler, http.MethodGet, tc.target, nil).Code; code != tc.wantStatus {
-				t.Fatalf("got status=%d, want %d", code, tc.wantStatus)
-			}
-		})
-	}
-
-	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			schedulesHandler(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/schedules", nil))
-		}()
-	}
-	wg.Wait()
-}
-
 func TestHandleTasks(t *testing.T) {
 	store := dbtest.NewFakeStore()
 	now := time.Now().UTC()
@@ -909,6 +771,17 @@ func TestHandleInternalLLM_And_MemoryRetriever(t *testing.T) {
 	}
 	if _, err := ret(context.Background(), "badjson"); err == nil {
 		t.Errorf("expected error on bad json")
+	}
+
+	os.Setenv("MEMORY_MCP_URL", memSrv.URL)
+	retEnv := newHTTPMemoryRetriever("")
+	os.Unsetenv("MEMORY_MCP_URL")
+	if out, err := retEnv(context.Background(), "hello"); err != nil || !strings.Contains(out, "<retrieved_memory>") {
+		t.Errorf("expected retrieved memory with env var fallback, got %q, %v", out, err)
+	}
+	retDef := newHTTPMemoryRetriever("")
+	if retDef == nil {
+		t.Errorf("expected non-nil retriever with default URL")
 	}
 }
 
@@ -2256,6 +2129,16 @@ func TestHandlePRRegister(t *testing.T) {
 		}
 		if recInDB.Branch != "feat/push-pipeline" || recInDB.HeadSHA != "head1234" || recInDB.Title != "feat: push pipeline" {
 			t.Errorf("Stored PR mismatch: %+v", recInDB)
+		}
+	}
+
+	// Success with Vanadis chunk ID resolving target_id
+	{
+		_ = store.CreateVanadisBuild(context.Background(), db.VanadisBuild{ID: "build-1", ThreadID: "1555405874565091380", Title: "Build 1", Objective: "Obj"}, []db.VanadisChunk{{ID: "chunk-1", BuildID: "build-1", Title: "Chunk 1", Instructions: "Inst"}})
+		payload := `{"repo":"aerial","pr_number":510,"branch":"feat/chunk-1","head_sha":"head5678","target_id":"","vanadis_chunk_id":"chunk-1","title":"feat: chunk 1"}`
+		rec := postPR(handler, payload)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("Expected 200 OK for Vanadis PR registration, got %d (%s)", rec.Code, rec.Body.String())
 		}
 	}
 

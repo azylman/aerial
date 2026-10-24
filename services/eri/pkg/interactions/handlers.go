@@ -58,36 +58,7 @@ func (r *Router) handleStatus(s *discordgo.Session, i *discordgo.InteractionCrea
 		}
 	}
 
-	nextActionStr := "none scheduled"
-	if r.deps.Store != nil {
-		now := time.Now().UTC()
-		var earliestTime time.Time
-		var earliestDesc string
-
-		if crons, err := r.deps.Store.GetAllCronSchedules(ctx, ""); err == nil {
-			for _, c := range crons {
-				if c.NextRunAt.After(now) && (earliestTime.IsZero() || c.NextRunAt.Before(earliestTime)) {
-					earliestTime = c.NextRunAt
-					promptDesc := c.TitlePrefix
-					if promptDesc == "" {
-						promptDesc = c.Prompt
-					}
-					earliestDesc = fmt.Sprintf("`%s` in %s (%s)", truncateRunes(promptDesc, 40), formatRelativeDuration(time.Until(c.NextRunAt)), c.NextRunAt.Format("15:04 MST"))
-				}
-			}
-		}
-		if oneshots, err := r.deps.Store.GetAllOneShotSchedules(ctx, ""); err == nil {
-			for _, o := range oneshots {
-				if o.RunAt.After(now) && (earliestTime.IsZero() || o.RunAt.Before(earliestTime)) {
-					earliestTime = o.RunAt
-					earliestDesc = fmt.Sprintf("`%s` in %s (%s)", truncateRunes(o.Prompt, 40), formatRelativeDuration(time.Until(o.RunAt)), o.RunAt.Format("15:04 MST"))
-				}
-			}
-		}
-		if earliestDesc != "" {
-			nextActionStr = earliestDesc
-		}
-	}
+	nextActionStr := resolveNextScheduleAction(ctx, r.deps.HaroURL)
 
 	runtimeStr := "`Idle`"
 	if r.deps.Store != nil {
@@ -136,6 +107,83 @@ func (r *Router) handleStatus(s *discordgo.Session, i *discordgo.InteractionCrea
 	}); err != nil {
 		log.Printf("[Interactions] Failed to respond to /status: %v", err)
 	}
+}
+
+func resolveNextScheduleAction(ctx context.Context, explicitHaroURL string) string {
+	haroURL := strings.TrimSpace(explicitHaroURL)
+	if haroURL == "" {
+		haroURL = strings.TrimSpace(os.Getenv("HARO_URL"))
+	}
+	if haroURL == "" {
+		if schedURL := strings.TrimSpace(os.Getenv("SCHEDULER_MCP_URL")); schedURL != "" {
+			schedURL = strings.TrimRight(schedURL, "/")
+			schedURL = strings.TrimSuffix(schedURL, "/mcp")
+			schedURL = strings.TrimSuffix(schedURL, "/sse")
+			haroURL = strings.TrimRight(schedURL, "/")
+		}
+	}
+	if haroURL == "" {
+		haroURL = "http://haro.aerial"
+	}
+	haroURL = strings.TrimRight(haroURL, "/")
+
+	reqCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, haroURL+"/schedules", nil)
+	if err != nil {
+		return "none scheduled"
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "none scheduled"
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "none scheduled"
+	}
+
+	var schedData struct {
+		Crons []struct {
+			TitlePrefix string    `json:"title_prefix"`
+			Prompt      string    `json:"prompt"`
+			NextRunAt   time.Time `json:"next_run_at"`
+		} `json:"crons"`
+		OneShots []struct {
+			Prompt string    `json:"prompt"`
+			RunAt  time.Time `json:"run_at"`
+		} `json:"one_shots"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&schedData); err != nil {
+		return "none scheduled"
+	}
+
+	now := time.Now().UTC()
+	var earliestTime time.Time
+	var earliestDesc string
+
+	for _, c := range schedData.Crons {
+		if c.NextRunAt.After(now) && (earliestTime.IsZero() || c.NextRunAt.Before(earliestTime)) {
+			earliestTime = c.NextRunAt
+			promptDesc := c.TitlePrefix
+			if promptDesc == "" {
+				promptDesc = c.Prompt
+			}
+			earliestDesc = fmt.Sprintf("`%s` in %s (%s)", truncateRunes(promptDesc, 40), formatRelativeDuration(time.Until(c.NextRunAt)), c.NextRunAt.Format("15:04 MST"))
+		}
+	}
+	for _, o := range schedData.OneShots {
+		if o.RunAt.After(now) && (earliestTime.IsZero() || o.RunAt.Before(earliestTime)) {
+			earliestTime = o.RunAt
+			earliestDesc = fmt.Sprintf("`%s` in %s (%s)", truncateRunes(o.Prompt, 40), formatRelativeDuration(time.Until(o.RunAt)), o.RunAt.Format("15:04 MST"))
+		}
+	}
+	if earliestDesc != "" {
+		return earliestDesc
+	}
+	return "none scheduled"
 }
 
 func (r *Router) handleRotate(s *discordgo.Session, i *discordgo.InteractionCreate, data discordgo.ApplicationCommandInteractionData) {

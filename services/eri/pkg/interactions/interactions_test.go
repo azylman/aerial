@@ -175,20 +175,8 @@ func mockGitOpsUpdater(cfg *config.Config, shouldErr bool) GitOpsChannelUpdater 
 	}
 }
 
-func seedStatusFixtures(store *dbtest.FakeStore, facts, crons, oneShots, active bool) {
+func seedStatusFixtures(store *dbtest.FakeStore, active bool) {
 	ctx, now := context.Background(), time.Now().UTC()
-	if crons {
-		if facts {
-			_ = store.CreateCronSchedule(ctx, db.CronSchedule{ID: "cron-1", CronExpr: "0 9 * * *", Prompt: "Morning system briefing", TitlePrefix: "Morning briefing", NextRunAt: now.Add(2 * time.Hour)})
-		} else {
-			_ = store.CreateCronSchedule(ctx, db.CronSchedule{ID: "cron-noprefix", CronExpr: "0 * * * *", Prompt: "Hourly health check", NextRunAt: now.Add(30 * time.Minute)})
-			_ = store.CreateCronSchedule(ctx, db.CronSchedule{ID: "cron-past", CronExpr: "0 * * * *", Prompt: "Past cron", NextRunAt: now.Add(-10 * time.Minute)})
-		}
-	}
-	if oneShots {
-		_ = store.CreateOneShotSchedule(ctx, db.OneShotSchedule{ID: "oneshot-1", Prompt: "Follow up on PR deployment", RunAt: now.Add(15 * time.Minute)})
-		_ = store.CreateOneShotSchedule(ctx, db.OneShotSchedule{ID: "oneshot-past", Prompt: "Past oneshot", RunAt: now.Add(-15 * time.Minute)})
-	}
 	if active {
 		_ = store.InsertMessage(ctx, db.Message{ID: "task-12345", Status: db.StatusProcessing, CreatedAt: now.Add(-45 * time.Second)})
 	}
@@ -388,12 +376,15 @@ func TestRouter_HandleStatus(t *testing.T) {
 		failStore    bool
 		httpStatus   int
 		wantSubstrs  []string
+		envMode      string
 	}{
-		{"StandardWithFactsAndCron", "", "`aerial@bfed897` (Live, healthy)", true, true, true, false, false, false, 0, []string{"**Runtime**:", "`aerial@bfed897`", "1 facts recorded", "Morning briefing"}},
-		{"FallbackEnvAndIdle", "abcdef123456", "", false, false, false, false, false, false, 0, []string{"`aerial@abcdef1`", "`Idle`"}},
-		{"AdvancedBranchesAndSchedules", "", "", true, false, true, true, true, false, 0, []string{"Follow up on PR deployment"}},
-		{"StoreFailuresHandledGracefully", "", "", false, false, false, false, false, true, 0, []string{"0 facts recorded"}},
-		{"ErrorLoggingHttp500", "", "", false, false, false, false, false, false, http.StatusInternalServerError, nil},
+		{"StandardWithFactsAndCron", "", "`aerial@bfed897` (Live, healthy)", true, true, true, false, false, false, 0, []string{"**Runtime**:", "`aerial@bfed897`", "1 facts recorded", "Morning briefing"}, ""},
+		{"FallbackEnvAndIdle", "abcdef123456", "", false, false, false, false, false, false, 0, []string{"`aerial@abcdef1`", "`Idle`"}, ""},
+		{"AdvancedBranchesAndSchedules", "", "", true, false, true, true, true, false, 0, []string{"Follow up on PR deployment"}, ""},
+		{"HaroEnvFallback", "", "", false, true, true, false, false, false, 0, []string{"Morning briefing"}, "haro_env"},
+		{"SchedulerMcpEnvFallback", "", "", false, true, true, false, false, false, 0, []string{"Morning briefing"}, "sched_env"},
+		{"StoreFailuresHandledGracefully", "", "", false, false, false, false, false, true, 0, []string{"0 facts recorded"}, ""},
+		{"ErrorLoggingHttp500", "", "", false, false, false, false, false, false, http.StatusInternalServerError, nil, ""},
 	}
 
 	for _, tc := range tests {
@@ -410,13 +401,55 @@ func TestRouter_HandleStatus(t *testing.T) {
 				router.deps.MemoryURL = "http://127.0.0.1:1"
 			}
 			store := dbtest.NewFakeStore()
-			seedStatusFixtures(store, tc.seedFacts, tc.seedCrons, tc.seedOneShots, tc.seedActive)
+			seedStatusFixtures(store, tc.seedActive)
 
 			if tc.failStore {
-				store.FailNext("GetAllCronSchedules", errors.New("db error"))
-				store.FailNext("GetAllOneShotSchedules", errors.New("db error"))
+				router.deps.HaroURL = "http://127.0.0.1:1"
 				store.FailNext("GetActiveTasks", errors.New("db error"))
 				router.deps.Pool = queue.New(nil, queue.WorkerPoolConfig{})
+			} else {
+				haroSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					now := time.Now().UTC()
+					var crons []map[string]any
+					var oneShots []map[string]any
+					if tc.seedCrons {
+						if tc.seedFacts {
+							crons = append(crons, map[string]any{
+								"title_prefix": "Morning briefing",
+								"prompt":       "Morning system briefing",
+								"next_run_at":  now.Add(2 * time.Hour),
+							})
+						} else {
+							crons = append(crons,
+								map[string]any{"title_prefix": "", "prompt": "Hourly health check", "next_run_at": now.Add(30 * time.Minute)},
+								map[string]any{"title_prefix": "", "prompt": "Past cron", "next_run_at": now.Add(-10 * time.Minute)},
+							)
+						}
+					}
+					if tc.seedOneShots {
+						oneShots = append(oneShots,
+							map[string]any{"prompt": "Follow up on PR deployment", "run_at": now.Add(15 * time.Minute)},
+							map[string]any{"prompt": "Past oneshot", "run_at": now.Add(-15 * time.Minute)},
+						)
+					}
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"status":    "ok",
+						"crons":     crons,
+						"one_shots": oneShots,
+					})
+				}))
+				defer haroSrv.Close()
+				switch tc.envMode {
+				case "haro_env":
+					os.Setenv("HARO_URL", haroSrv.URL)
+					defer os.Unsetenv("HARO_URL")
+				case "sched_env":
+					os.Setenv("SCHEDULER_MCP_URL", haroSrv.URL+"/mcp/")
+					defer os.Unsetenv("SCHEDULER_MCP_URL")
+				default:
+					router.deps.HaroURL = haroSrv.URL
+				}
 			}
 
 			router.deps.Store = store

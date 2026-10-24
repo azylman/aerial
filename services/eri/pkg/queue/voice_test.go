@@ -615,7 +615,7 @@ func TestTurnExecution_StoreDelegates(t *testing.T) {
 			}
 			_, _ = tc.te.getSessionID(threadID)
 			_ = tc.te.getPreviousSessionID(threadID)
-			_ = tc.te.createOneShotSchedule(db.OneShotSchedule{ID: "os-" + tc.name})
+			_ = tc.te.createOneShotSchedule(oneShotScheduleRequest{ID: "os-" + tc.name, ThreadID: threadID, Prompt: "p", RunAt: time.Now().UTC()})
 			tc.te.saveThreadSummary(threadID, "sum", "m1")
 			_, _ = tc.te.getThreadSummary(threadID)
 			_, _ = tc.te.getRecentThreadMessages(threadID, 10)
@@ -786,7 +786,6 @@ func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
 
 	recStore := setupTestStore(t)
 	_ = recStore.InsertMessage(ctx, db.Message{ID: "m-rec-stale", ThreadID: "t-rec-stale", AuthorID: "u1", ScheduleRunID: "run-stale-rec", Status: db.StatusPending, CreatedAt: time.Now().UTC().Add(-2 * time.Hour)})
-	recStore.SeedScheduleRun(db.ScheduleRun{ID: "run-stale-rec", ScheduleID: "s1", ScheduleType: "cron", StartedAt: time.Now().UTC().Add(-2 * time.Hour), Status: "running"})
 	_ = recStore.InsertMessage(ctx, db.Message{ID: "m-rec-poison", ThreadID: "t-rec-poison", AuthorID: "u1", Content: "poison content with a rather long snippet that exceeds sixty characters easily", Status: db.StatusProcessing, RetryCount: 5})
 	pRec := New(nil, WorkerPoolConfig{Store: recStore, NotifierFunc: func(b, k, d string) string { return "poison alert" }, DeliveryFunc: func(s *discordgo.Session, c, txt string) error { return nil }})
 	RecoverInterrupted(recStore, pRec)
@@ -954,30 +953,26 @@ func TestWorkerPool_ProcessBurstEdgeCases(t *testing.T) {
 	f05 := 0.5
 
 	tests := []struct {
-		name, runnerOut, runnerErrOut, wantMsgStatus, wantRunStatus string
-		msg                                                         db.Message
-		trailing                                                    *db.Message
-		run                                                         *db.ScheduleRun
-		runnerCode                                                  int
-		runnerErr, claimErr                                         error
-		policy                                                      *config.ChannelPolicy
-		nilClassifier, unclaimed                                    bool
+		name, runnerOut, runnerErrOut, wantMsgStatus string
+		msg                                          db.Message
+		trailing                                     *db.Message
+		runnerCode                                   int
+		runnerErr, claimErr                          error
+		policy                                       *config.ChannelPolicy
+		nilClassifier, unclaimed                     bool
 	}{
 		{name: "claim_error_aborts_burst", msg: db.Message{ID: "m-err-claim", ThreadID: "t-claim", Status: db.StatusPending, CreatedAt: now}, claimErr: errors.New("db lock error")},
 		{name: "unclaimed_message_skipped", msg: db.Message{ID: "m-unclaimed", ThreadID: "t-unclaimed", Status: db.StatusPending, CreatedAt: now}, unclaimed: true},
-		{name: "stale_schedule_run_expired", msg: db.Message{ID: "msg-stale-burst-1", ThreadID: "thread-stale-burst", AuthorID: "user-1", ScheduleRunID: "run-stale-burst-1", Content: "old prompt", Status: db.StatusPending, CreatedAt: now.Add(-2 * time.Hour)}, run: &db.ScheduleRun{ID: "run-stale-burst-1", ScheduleID: "sched-stale", ScheduleType: "cron", StartedAt: now.Add(-2 * time.Hour), Status: "running"}, wantMsgStatus: db.StatusCompleted, wantRunStatus: "completed"},
-		{name: "ignored_channel_completes_schedule_run", msg: db.Message{ID: "m-ign-extra", ThreadID: "t-ign-extra", AuthorID: "u1", ScheduleRunID: "run-ignored-extra", Content: "ignored prompt", Status: db.StatusPending, CreatedAt: now}, run: &db.ScheduleRun{ID: "run-ignored-extra", ScheduleID: "s-ign", ScheduleType: "cron", StartedAt: now, Status: "running"}, policy: &config.ChannelPolicy{Mode: "ignore"}, wantMsgStatus: db.StatusCompleted, wantRunStatus: "completed"},
+		{name: "stale_schedule_run_expired", msg: db.Message{ID: "msg-stale-burst-1", ThreadID: "thread-stale-burst", AuthorID: "user-1", ScheduleRunID: "run-stale-burst-1", Content: "old prompt", Status: db.StatusPending, CreatedAt: now.Add(-2 * time.Hour)}, wantMsgStatus: db.StatusCompleted},
+		{name: "ignored_channel_completes_schedule_run", msg: db.Message{ID: "m-ign-extra", ThreadID: "t-ign-extra", AuthorID: "u1", ScheduleRunID: "run-ignored-extra", Content: "ignored prompt", Status: db.StatusPending, CreatedAt: now}, policy: &config.ChannelPolicy{Mode: "ignore"}, wantMsgStatus: db.StatusCompleted},
 		{name: "bad_json_output_fails_after_attempt", msg: db.Message{ID: "m-badparse", ThreadID: "t-badparse", AuthorID: "u1", Content: "hello", Status: db.StatusPending, CreatedAt: now}, runnerOut: "definitely not json", wantMsgStatus: db.StatusFailed},
-		{name: "rate_limit_fails_schedule_run", msg: db.Message{ID: "m-rate-1", ThreadID: "t-rate", AuthorID: "u1", ScheduleRunID: "run-ratelimit-1", Content: "query", Status: db.StatusPending, CreatedAt: now}, run: &db.ScheduleRun{ID: "run-ratelimit-1", ScheduleID: "s-rate", ScheduleType: "cron", StartedAt: now, Status: "running"}, runnerErrOut: "Resource has been exhausted: rate limit exceeded 429", runnerCode: 1, runnerErr: errors.New("exit 1"), wantMsgStatus: db.StatusFailed, wantRunStatus: "failed"},
+		{name: "rate_limit_fails_schedule_run", msg: db.Message{ID: "m-rate-1", ThreadID: "t-rate", AuthorID: "u1", ScheduleRunID: "run-ratelimit-1", Content: "query", Status: db.StatusPending, CreatedAt: now}, runnerErrOut: "Resource has been exhausted: rate limit exceeded 429", runnerCode: 1, runnerErr: errors.New("exit 1"), wantMsgStatus: db.StatusFailed},
 		{name: "trailing_query_with_nil_classifier_and_default_policy", msg: db.Message{ID: "m-w-lead", ThreadID: "t-trail-noclass", AuthorID: "u1", Content: "<@aerial> start", Status: db.StatusPending, CreatedAt: now}, trailing: &db.Message{ID: "m-trail-query", ThreadID: "t-trail-noclass", AuthorID: "u1", Content: "why is the ocean blue", Status: db.StatusPending, CreatedAt: now}, runnerOut: mockJSONResponse("", "OK"), policy: &config.ChannelPolicy{Mode: "channel", WakeMode: "classifier", AmbientWakeThreshold: &f05}, nilClassifier: true, wantMsgStatus: db.StatusCompleted},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			fake := setupTestStore(t)
-			if tc.run != nil {
-				_ = createScheduleRun(fake, *tc.run)
-			}
 			_ = insertMessage(fake, tc.msg)
 			burst := []db.Message{tc.msg}
 			if tc.trailing != nil {

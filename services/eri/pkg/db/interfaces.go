@@ -26,16 +26,6 @@ type SessionActivityStats struct {
 	LastCompletedMessageCreatedAt time.Time `json:"last_completed_message_created_at"`
 }
 
-// ScheduleStore handles cron and one-shot schedule execution and telemetry.
-type ScheduleStore interface {
-	CreateOneShotSchedule(ctx context.Context, s OneShotSchedule) error
-	GetAllOneShotSchedules(ctx context.Context, threadID string) ([]OneShotSchedule, error)
-	GetAllCronSchedules(ctx context.Context, targetID string) ([]CronSchedule, error)
-	GetAllHeartbeatSchedules(ctx context.Context, targetID string) ([]HeartbeatSchedule, error)
-	GetScheduleRunsPaginated(ctx context.Context, limit, offset int, scheduleID, status string) ([]ScheduleRun, int, error)
-	GetScheduleSummaryMetrics(ctx context.Context) (ScheduleSummaryMetrics, error)
-}
-
 // MessageStore handles message queue lifecycle and turn history.
 type MessageStore interface {
 	InsertMessage(ctx context.Context, msg Message) error
@@ -145,7 +135,6 @@ type VanadisStore interface {
 
 // Store unifies all repository capabilities under a single interface.
 type Store interface {
-	ScheduleStore
 	MessageStore
 	SessionStore
 	TranscriptStore

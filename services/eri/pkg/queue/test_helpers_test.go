@@ -10,6 +10,8 @@ import (
 	"image"
 	"image/png"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -70,15 +72,41 @@ func getPreviousSessionID(store db.Store, threadID string) (string, error) {
 	return store.GetPreviousSessionID(context.Background(), threadID)
 }
 
-func createScheduleRun(store db.Store, run db.ScheduleRun) error {
-	if store == nil {
-		return nil
+func newMockHaroOneShotServer(t testing.TB) (*httptest.Server, func(threadID string) []oneShotScheduleRequest) {
+	var mu sync.Mutex
+	var requests []oneShotScheduleRequest
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && (r.URL.Path == "/schedules/oneshot" || strings.HasSuffix(r.URL.Path, "/schedules/oneshot")) {
+			var req oneShotScheduleRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			requests = append(requests, req)
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"ok","id":"` + req.ID + `"}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(func() { srv.Close() })
+
+	getter := func(threadID string) []oneShotScheduleRequest {
+		mu.Lock()
+		defer mu.Unlock()
+		var res []oneShotScheduleRequest
+		for _, req := range requests {
+			if threadID == "" || req.ThreadID == threadID {
+				res = append(res, req)
+			}
+		}
+		return res
 	}
-	if fake, ok := store.(*dbtest.FakeStore); ok {
-		fake.SeedScheduleRun(run)
-		return nil
-	}
-	return nil
+	return srv, getter
 }
 
 func getSessionTurnCount(store db.Store, sessionKey string) (int, error) {
