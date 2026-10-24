@@ -885,6 +885,8 @@ func TestJobHasContainerBuildChanges_TableDriven(t *testing.T) {
 		{"matching docs-service alias", specDocs, []string{"services/docs-service/Dockerfile"}, true},
 		{"matching root Dockerfile", specVanadis, []string{"Dockerfile"}, true},
 		{"matching pkg dir", specVanadis, []string{"pkg/httpkit/httpkit.go"}, true},
+		{"matching pkg dir on mcp go service", specMCP, []string{"pkg/ollama/client.go"}, true},
+		{"pkg dir does not match non-pkg service", specDocs, []string{"pkg/httpkit/httpkit.go"}, false},
 		{"unmatched other service dir", specVanadis, []string{"services/hangar/main.go", "nomad/jobs/vanadis.nomad"}, false},
 		{"external image never matches", specExternal, []string{"services/vanadis/main.go", "Dockerfile"}, false},
 		{"empty changed files", specVanadis, nil, false},
@@ -1494,6 +1496,7 @@ func TestResolveExpectedDeployJobs_TableDriven(t *testing.T) {
 	}
 	writeJob(filepath.Join(aerialDir, "nomad", "jobs", "vanadis.nomad"), `job "vanadis" { task "vanadis" { config { image = "ghcr.io/azylman/aerial-vanadis:${var.image_tag}" } } }`)
 	writeJob(filepath.Join(aerialDir, "nomad", "jobs", "hangar.nomad"), `job "hangar" { task "hangar" { config { image = "ghcr.io/azylman/aerial-hangar:${var.image_tag}" } } }`)
+	writeJob(filepath.Join(aerialDir, "nomad", "jobs", "docs.nomad"), `job "docs" { task "docs" { config { image = "ghcr.io/azylman/aerial-docs:${var.image_tag}" } } }`)
 	writeJob(filepath.Join(configDir, "jobs", "eri.nomad"), `job "eri" { task "eri" { config { image = "ghcr.io/azylman/aerial-eri:${var.image_tag}" } } }`)
 
 	serviceMappings := []ServiceConfigMapping{
@@ -1549,6 +1552,13 @@ func TestResolveExpectedDeployJobs_TableDriven(t *testing.T) {
 			name:           "container build changes across repoPath and candidateRepos with hangar sorted last",
 			repoPath:       aerialDir,
 			changedFiles:   []string{"services/hangar/main.go", "services/vanadis/main.go", "services/eri/main.go"},
+			candidateRepos: []string{configDir},
+			want:           []string{"eri", "vanadis", "hangar"},
+		},
+		{
+			name:           "shared pkg changes deploy only pkg dependent services and exclude non pkg services",
+			repoPath:       aerialDir,
+			changedFiles:   []string{"pkg/httpkit/httpkit.go"},
 			candidateRepos: []string{configDir},
 			want:           []string{"eri", "vanadis", "hangar"},
 		},

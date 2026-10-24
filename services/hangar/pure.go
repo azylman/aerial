@@ -576,6 +576,24 @@ func ExtractNomadJobImages(content string) []string {
 	return images
 }
 
+// serviceBuildDependsOnPkg reports whether the given service image depends on pkg/ and is
+// rebuilt by CI (.github/workflows/docker-publish.yml) when pkg/** changes.
+func serviceBuildDependsOnPkg(svc string) bool {
+	switch svc {
+	case "eri", "brain",
+		"haro", "scheduler-mcp",
+		"coven", "memory-mcp",
+		"discord-mcp",
+		"dashboard",
+		"hangar",
+		"webhooks-router",
+		"vanadis":
+		return true
+	default:
+		return false
+	}
+}
+
 // JobHasContainerBuildChanges returns true if any azylman/aerial container image referenced
 // in jobSpec has matching source file modifications in changedFiles.
 func JobHasContainerBuildChanges(jobSpec string, changedFiles []string) bool {
@@ -584,9 +602,12 @@ func JobHasContainerBuildChanges(jobSpec string, changedFiles []string) bool {
 			continue
 		}
 		svc := strings.TrimPrefix(path.Base(stripImageTag(strings.ToLower(strings.TrimSpace(img)))), "aerial-")
-		prefixes := []string{"services/" + svc + "/", "mcp/" + svc + "/", svc + "/", "pkg/"}
+		prefixes := []string{"services/" + svc + "/", "mcp/" + svc + "/", svc + "/"}
 		if svc == "docs" {
 			prefixes = append(prefixes, "services/docs-service/", "docs-service/")
+		}
+		if serviceBuildDependsOnPkg(svc) {
+			prefixes = append(prefixes, "pkg/")
 		}
 		for _, f := range changedFiles {
 			clean := strings.TrimPrefix(path.Clean(strings.ReplaceAll(strings.TrimSpace(f), "\\", "/")), "/")
