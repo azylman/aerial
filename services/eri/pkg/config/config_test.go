@@ -520,6 +520,11 @@ channels:
 `,
 			expectedErr: "webhook timeout_ms cannot be negative",
 		},
+		{
+			name:        "invalid channel effort",
+			yaml:        "channels:\n  default:\n    mode: threads\n    effort: ultra\n",
+			expectedErr: "effort must be 'low', 'medium', or 'high'",
+		},
 	}
 
 	for _, tc := range validationTests {
@@ -539,6 +544,7 @@ channels:
 	channels := map[string]ChannelPolicy{
 		"default": {
 			Mode:                 "threads",
+			Effort:               "medium",
 			IgnoreBots:           boolPtr(true),
 			WakeMode:             "mention",
 			AmbientWakeThreshold: &thresh,
@@ -550,6 +556,7 @@ channels:
 		},
 		"general": {
 			Mode:                 "channel",
+			Effort:               "low",
 			WakeMode:             "classifier",
 			AmbientWakeThreshold: f64Ptr(0.85),
 		},
@@ -574,6 +581,7 @@ channels:
 		channelID     string
 		channelName   string
 		wantMode      string
+		wantEffort    string
 		wantWake      string
 		wantIgnore    bool
 		wantBotIgn    bool
@@ -586,6 +594,7 @@ channels:
 			channelID:     "1543668253363150928",
 			channelName:   "dev",
 			wantMode:      "channel",
+			wantEffort:    "medium",
 			wantWake:      "mention",
 			wantBotIgn:    false,
 			wantThreshold: 0.75,
@@ -597,6 +606,7 @@ channels:
 			channelID:     "99999",
 			channelName:   "#General",
 			wantMode:      "channel",
+			wantEffort:    "low",
 			wantWake:      "classifier",
 			wantBotIgn:    true,
 			wantThreshold: 0.85,
@@ -608,6 +618,7 @@ channels:
 			channelID:     "88888",
 			channelName:   "random-topic",
 			wantMode:      "threads",
+			wantEffort:    "medium",
 			wantWake:      "mention",
 			wantBotIgn:    true,
 			wantThreshold: 0.75,
@@ -635,6 +646,7 @@ channels:
 			channelID:     "",
 			channelName:   "any-chan",
 			wantMode:      "threads",
+			wantEffort:    "high",
 			wantBotIgn:    true,
 			wantThreshold: 0.0,
 		},
@@ -645,6 +657,9 @@ channels:
 			res := ResolveChannelPolicy(tc.channels, tc.channelID, tc.channelName)
 			if tc.wantMode != "" && res.Mode != tc.wantMode {
 				t.Errorf("Mode = %q, want %q", res.Mode, tc.wantMode)
+			}
+			if tc.wantEffort != "" && res.GetEffort() != tc.wantEffort {
+				t.Errorf("Effort = %q, want %q", res.GetEffort(), tc.wantEffort)
 			}
 			if tc.wantWake != "" && res.GetWakeMode() != tc.wantWake {
 				t.Errorf("WakeMode = %q, want %q", res.GetWakeMode(), tc.wantWake)
@@ -1452,18 +1467,19 @@ func TestChannelPolicy_Modes(t *testing.T) {
 		input         ChannelPolicy
 		wantMode      string
 		wantWake      string
+		wantEffort    string
 		wantThreshold float64
 	}{
-		{"canonical thread", ChannelPolicy{Mode: "thread"}, "thread", "all", 0.0},
-		{"canonical classifier", ChannelPolicy{Mode: "classifier"}, "classifier", "classifier", 0.80},
-		{"canonical mention", ChannelPolicy{Mode: "mention"}, "mention", "mention", 0.0},
-		{"canonical ignore", ChannelPolicy{Mode: "ignore"}, "ignore", "ignore", 0.0},
+		{"canonical thread", ChannelPolicy{Mode: "thread", Effort: "low"}, "thread", "all", "low", 0.0},
+		{"canonical classifier", ChannelPolicy{Mode: "classifier", Effort: "medium"}, "classifier", "classifier", "medium", 0.80},
+		{"canonical mention", ChannelPolicy{Mode: "mention", Effort: "high"}, "mention", "mention", "high", 0.0},
+		{"canonical ignore", ChannelPolicy{Mode: "ignore"}, "ignore", "ignore", "high", 0.0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			p := tc.input
-			if p.Mode != tc.wantMode || p.GetWakeMode() != tc.wantWake || p.GetAmbientWakeThreshold() != tc.wantThreshold || (tc.wantMode == "thread") != p.IsThread() || (tc.wantMode == "ignore") != p.IsIgnored() {
-				t.Fatalf("mode/wake/thresh mismatch: %+v", p)
+			if p.Mode != tc.wantMode || p.GetWakeMode() != tc.wantWake || p.GetEffort() != tc.wantEffort || p.GetAmbientWakeThreshold() != tc.wantThreshold || (tc.wantMode == "thread") != p.IsThread() || (tc.wantMode == "ignore") != p.IsIgnored() {
+				t.Fatalf("mode/wake/effort/thresh mismatch: %+v", p)
 			}
 		})
 	}

@@ -433,7 +433,7 @@ func buildAndInsertFunnelMessage(ctx context.Context, s *discordgo.Session, stor
 		m.GuildID = resolvedGuildID
 	}
 	metadata := extractDiscordMetadata(s, m, targetThreadID)
-	authorID, authorName, rawContent, msgID := "", "Discord User", "", ""
+	authorID, authorName, rawContent, msgID, effort := "", "Discord User", "", "", ""
 	if m != nil {
 		msgID = m.ID
 		if m.Author != nil {
@@ -441,6 +441,12 @@ func buildAndInsertFunnelMessage(ctx context.Context, s *discordgo.Session, stor
 			authorName = m.Author.Username
 		}
 		rawContent = resolveMessageContent(s, m)
+		policy, _ := resolveEffectiveChannelPolicy(s, m.ChannelID)
+		effort = policy.GetEffort()
+		if effort == "low" || effort == "medium" {
+			ephem := false
+			metadata.Ephemeral = &ephem
+		}
 	}
 	msg := db.Message{
 		ID:         msgID,
@@ -449,6 +455,7 @@ func buildAndInsertFunnelMessage(ctx context.Context, s *discordgo.Session, stor
 		AuthorID:   authorID,
 		AuthorName: authorName,
 		Content:    rawContent,
+		Effort:     effort,
 		Metadata:   metadata,
 		Status:     db.StatusPending,
 		CreatedAt:  createdAt,
