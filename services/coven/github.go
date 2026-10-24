@@ -451,7 +451,7 @@ func (p *GitHubSkillPublisher) NotifyShortFriction(ctx context.Context, content 
 	if p.systemChannelID == "" || p.brainPRRegisterURL == "" || strings.TrimSpace(content) == "" {
 		return nil
 	}
-	msgURL := strings.Replace(p.brainPRRegisterURL, "/internal/pr/register", "/discord/message", 1)
+	msgURL := strings.Replace(strings.Replace(p.brainPRRegisterURL, "webhooks-router.aerial", "eri.aerial", 1), "/internal/pr/register", "/discord/message", 1)
 	body := fmt.Sprintf(`{"channel_id":%q,"content":%q}`, p.systemChannelID, content)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, msgURL, strings.NewReader(body))
 	if err != nil {

@@ -494,8 +494,26 @@ type VanadisAdvancementResult struct {
 	Chunks           []VanadisChunkSummary `json:"chunks,omitempty"`
 }
 
+var (
+	ErrVanadisChunkNotFound = errors.New("vanadis chunk not found")
+	ErrInvalidTargetID      = errors.New("target_id must be a valid Discord snowflake (17-20 digits)")
+)
+
+// PRRegisterRequest defines the request payload for POST /internal/pr/register.
+type PRRegisterRequest struct {
+	Repo           string `json:"repo"`
+	PRNumber       int    `json:"pr_number"`
+	Branch         string `json:"branch"`
+	HeadSHA        string `json:"head_sha"`
+	TargetID       string `json:"target_id"`
+	Title          string `json:"title,omitempty"`
+	Metadata       string `json:"metadata,omitempty"`
+	VanadisChunkID string `json:"vanadis_chunk_id,omitempty"`
+}
+
 // PRRegistryUpdater defines the interface for updating PR lifecycle state in PostgreSQL pr_registry.
 type PRRegistryUpdater interface {
+	RegisterPR(ctx context.Context, req PRRegisterRequest) (string, error)
 	UpdatePRMerged(ctx context.Context, repo string, prNumber int, mergeSHA string) (targetID string, err error)
 	UpdatePRSync(ctx context.Context, repo string, prNumber int, headSHA string) (targetID string, err error)
 	UpdatePRClosedUnmerged(ctx context.Context, repo string, prNumber int) (targetID string, err error)
@@ -674,6 +692,66 @@ func (r *PostgresPRRegistry) IncrementCIFailCount(ctx context.Context, repo stri
 		return 0, err
 	}
 	return count, nil
+}
+
+func (r *PostgresPRRegistry) RegisterPR(ctx context.Context, req PRRegisterRequest) (string, error) {
+	if r == nil || r.pool == nil {
+		return "", errors.New("pr registry uninitialized")
+	}
+	repo := normalizeRepo(req.Repo)
+	if repo == "" {
+		return "", errors.New("repo cannot be empty")
+	}
+	if req.PRNumber <= 0 {
+		return "", errors.New("pr_number must be greater than 0")
+	}
+	branch := strings.TrimSpace(req.Branch)
+	if branch == "" {
+		return "", errors.New("branch cannot be empty")
+	}
+	headSHA := strings.TrimSpace(req.HeadSHA)
+	if headSHA == "" {
+		return "", errors.New("head_sha cannot be empty")
+	}
+	targetID := strings.TrimSpace(req.TargetID)
+	title := strings.TrimSpace(req.Title)
+	chunkID := strings.TrimSpace(req.VanadisChunkID)
+	meta := strings.TrimSpace(req.Metadata)
+	if meta == "" {
+		meta = "{}"
+	}
+
+	if chunkID != "" {
+		chunkQuery := `UPDATE vanadis_chunks c SET pr_number = $1, status = CASE WHEN c.status IN ('merged', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $2 RETURNING b.thread_id;`
+		var chunkThreadID string
+		found, err := r.queryRowScan(ctx, "attach vanadis chunk pr", chunkQuery, []any{&chunkThreadID}, req.PRNumber, chunkID)
+		if err != nil {
+			return "", err
+		}
+		if !found {
+			return "", ErrVanadisChunkNotFound
+		}
+		if !IsValidDiscordSnowflake(targetID) && IsValidDiscordSnowflake(chunkThreadID) {
+			targetID = strings.TrimSpace(chunkThreadID)
+		}
+	}
+
+	if targetID == "" {
+		return "", errors.New("target_id cannot be empty")
+	}
+	if !IsValidDiscordSnowflake(targetID) {
+		return "", ErrInvalidTargetID
+	}
+
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	upsertQuery := `INSERT INTO pr_registry (repo, pr_number, branch, head_sha, target_id, title, status, metadata, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, 'open', $7::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT (repo, pr_number) DO UPDATE SET branch = EXCLUDED.branch, head_sha = EXCLUDED.head_sha, target_id = EXCLUDED.target_id, title = CASE WHEN EXCLUDED.title != '' THEN EXCLUDED.title ELSE pr_registry.title END, status = CASE WHEN pr_registry.status IN ('merged', 'deploying', 'deployed') THEN pr_registry.status ELSE 'open' END, metadata = CASE WHEN EXCLUDED.metadata != '{}'::jsonb THEN EXCLUDED.metadata ELSE pr_registry.metadata END, updated_at = CURRENT_TIMESTAMP;`
+	if _, err := r.pool.Exec(qCtx, upsertQuery, repo, req.PRNumber, branch, headSHA, targetID, title, meta); err != nil {
+		return "", fmt.Errorf("register pr: %w", err)
+	}
+
+	return targetID, nil
 }
 
 func (r *PostgresPRRegistry) EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID, vanadisChunkID string) (string, error) {
@@ -1541,6 +1619,7 @@ func readWebhookBody(w http.ResponseWriter, r *http.Request, maxBytes int64) ([]
 	return body, true
 }
 
+//nolint:unparam
 func readWebhookJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, allowEmpty bool, dst any) bool {
 	body, ok := readWebhookBody(w, r, maxBytes)
 	if !ok {
@@ -1577,6 +1656,7 @@ func (s *RouterServer) Routes() http.Handler {
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /health", s.handleHealthz)
 	mux.Handle("GET /metrics", promhttp.Handler())
+	mux.HandleFunc("POST /internal/pr/register", s.handlePRRegister)
 	mux.HandleFunc("POST /webhooks/infisical", s.handleInfisicalWebhook)
 	mux.HandleFunc("POST /webhooks/generic", s.handleGenericWebhook)
 	mux.HandleFunc("POST /api/webhooks/github", s.handleGitHubWebhook)
@@ -1592,6 +1672,78 @@ var (
 	writeCountersDirFn = coverage.WriteCountersDir
 	writeMetaDirFn     = coverage.WriteMetaDir
 )
+
+func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) {
+	if s == nil || s.registry == nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "registry not initialized"})
+		return
+	}
+
+	var req PRRegisterRequest
+	if !readWebhookJSON(w, r, 1<<20, false, &req) {
+		return
+	}
+
+	req.Repo = strings.TrimSpace(req.Repo)
+	req.Branch = strings.TrimSpace(req.Branch)
+	req.HeadSHA = strings.TrimSpace(req.HeadSHA)
+	req.TargetID = strings.TrimSpace(req.TargetID)
+	req.Title = strings.TrimSpace(req.Title)
+	chunkID := strings.TrimSpace(req.VanadisChunkID)
+
+	if req.Repo == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "repo cannot be empty"})
+		return
+	}
+	if req.PRNumber <= 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "pr_number must be greater than 0"})
+		return
+	}
+	if req.Branch == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "branch cannot be empty"})
+		return
+	}
+	if req.HeadSHA == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "head_sha cannot be empty"})
+		return
+	}
+	if chunkID == "" {
+		if req.TargetID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id cannot be empty"})
+			return
+		}
+		if !IsValidDiscordSnowflake(req.TargetID) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id must be a valid Discord snowflake (17-20 digits)"})
+			return
+		}
+	}
+
+	targetID, err := s.registry.RegisterPR(r.Context(), req)
+	if err != nil {
+		if errors.Is(err, ErrVanadisChunkNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "vanadis chunk not found"})
+			return
+		}
+		if errors.Is(err, ErrInvalidTargetID) || strings.Contains(err.Error(), "target_id") {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id must be a valid Discord snowflake (17-20 digits)"})
+			return
+		}
+		log.Printf("[webhooks-router] Failed to register PR #%d (%s): %v", req.PRNumber, req.Repo, err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to register PR"})
+		return
+	}
+
+	if err := s.ProcessWidgetSync(r.Context(), WidgetSyncArgs{Repo: req.Repo, PRNumber: req.PRNumber}); err != nil {
+		log.Printf("[webhooks-router] failed to sync initial PR widget for %s#%d: %v", req.Repo, req.PRNumber, err)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":    "registered",
+		"repo":      req.Repo,
+		"pr_number": req.PRNumber,
+		"target_id": targetID,
+	})
+}
 
 func (s *RouterServer) handleCoverageFlush(w http.ResponseWriter, r *http.Request) {
 	if dir := os.Getenv("GOCOVERDIR"); dir != "" {
