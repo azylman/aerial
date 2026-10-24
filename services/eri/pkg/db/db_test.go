@@ -291,6 +291,8 @@ func TestSessionLifecycle(t *testing.T) {
 		t.Errorf("FindUnrotatedSessions = %+v, %v", unrotated, err)
 	}
 	_, _ = store.FindUnrotatedSessions(ctx, 0)
+	_, _ = store.FindUnrotatedSessions(ctx, 5, time.Hour)
+	_, _ = store.FindUnrotatedSessions(ctx, 5, -1)
 
 	// 6. Table-driven ParseDBTime
 	now := time.Now().Truncate(time.Second).UTC()
@@ -307,6 +309,7 @@ func TestSessionLifecycle(t *testing.T) {
 		{name: "whitespace_str", input: "   ", wantOK: false},
 		{name: "rfc3339_str", input: now.Format(time.RFC3339), wantOK: true},
 		{name: "sqlite_str", input: "2026-10-19 12:00:00", wantOK: true},
+		{name: "monotonic_clock_str", input: "2026-10-19 12:00:00 m=+0.000000001", wantOK: true},
 		{name: "bytes", input: []byte(now.Format(time.RFC3339)), wantOK: true},
 		{name: "invalid_str", input: "not-a-time", wantOK: false},
 		{name: "unsupported_type", input: 12345, wantOK: false},
@@ -330,9 +333,16 @@ func TestSessionLifecycle(t *testing.T) {
 	if cnt, err := store.GetSessionTurnCount(ctx, ""); err != nil || cnt != 0 {
 		t.Errorf("GetSessionTurnCount empty key = %d, %v", cnt, err)
 	}
+	if cnt, err := store.GetSessionTurnCount(ctx, "nonexistent-thread"); err != nil || cnt != 0 {
+		t.Errorf("GetSessionTurnCount nonexistent = %d, %v", cnt, err)
+	}
 	assertErr(t, store.RotateSessionID(ctx, "", "s2"), "RotateSessionID empty key")
 	if prev, err := store.GetPreviousSessionID(ctx, ""); err != nil || prev != "" {
 		t.Errorf("GetPreviousSessionID empty key = %q, %v", prev, err)
+	}
+	_ = store.SaveThreadSummary(ctx, "", "sum", "mid")
+	if sum, last, err := store.GetThreadSummary(ctx, ""); err != nil || sum != "" || last != "" {
+		t.Errorf("GetThreadSummary empty thread = %q, %q, %v", sum, last, err)
 	}
 }
 
@@ -481,6 +491,18 @@ func TestGetActiveTasks_FiltersAndOrdering(t *testing.T) {
 			name:        "is_admin true filter with status",
 			filter:      TasksFilter{IsAdmin: &adminTrue, Statuses: []string{"PROCESSING"}},
 			wantCount:   1,
+			wantFirstID: "msg-f3",
+		},
+		{
+			name:        "multiple statuses filter",
+			filter:      TasksFilter{Statuses: []string{"PENDING", "PROCESSING"}},
+			wantCount:   2,
+			wantFirstID: "msg-f3",
+		},
+		{
+			name:        "clamped limit above 200",
+			filter:      TasksFilter{Limit: 250},
+			wantCount:   3,
 			wantFirstID: "msg-f3",
 		},
 		{

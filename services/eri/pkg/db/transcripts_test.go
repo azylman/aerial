@@ -177,6 +177,7 @@ func TestTranscriptStore_SearchTranscriptSteps_SessionFilterAndSince(t *testing.
 		sessFilter    string
 		toolFilter    string
 		since         time.Time
+		limit         int
 		wantCount     int
 		wantFirstSess string
 		wantFirstStep int
@@ -184,6 +185,7 @@ func TestTranscriptStore_SearchTranscriptSteps_SessionFilterAndSince(t *testing.
 		{
 			name:          "comma separated session filter",
 			sessFilter:    "sess-multi-1, sess-multi-2",
+			limit:         10,
 			wantCount:     4,
 			wantFirstSess: "sess-multi-2", // default order created_at DESC
 			wantFirstStep: 1,
@@ -192,6 +194,7 @@ func TestTranscriptStore_SearchTranscriptSteps_SessionFilterAndSince(t *testing.
 			name:          "since filter with empty query orders asc",
 			sessFilter:    "sess-multi-1,sess-multi-2",
 			since:         now.Add(-150 * time.Second),
+			limit:         10,
 			wantCount:     3,
 			wantFirstSess: "sess-multi-1", // order created_at ASC
 			wantFirstStep: 1,
@@ -200,15 +203,30 @@ func TestTranscriptStore_SearchTranscriptSteps_SessionFilterAndSince(t *testing.
 			name:          "single session with since",
 			sessFilter:    "sess-multi-2",
 			since:         now.Add(-30 * time.Second),
+			limit:         10,
 			wantCount:     1,
 			wantFirstSess: "sess-multi-2",
 			wantFirstStep: 1,
+		},
+		{
+			name:          "zero limit defaults to 20",
+			sessFilter:    "sess-multi-2",
+			since:         now.Add(-30 * time.Second),
+			limit:         0,
+			wantCount:     1,
+			wantFirstSess: "sess-multi-2",
+			wantFirstStep: 1,
+		},
+		{
+			name:      "empty query and filters returns nil",
+			limit:     10,
+			wantCount: 0,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			res, err := store.SearchTranscriptSteps(ctx, tc.query, tc.sessFilter, tc.toolFilter, 10, tc.since)
+			res, err := store.SearchTranscriptSteps(ctx, tc.query, tc.sessFilter, tc.toolFilter, tc.limit, tc.since)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
