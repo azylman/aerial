@@ -475,6 +475,9 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 		if advRec2.Code != http.StatusOK {
 			t.Fatalf("expected 200 OK on repeat chunk 2 advance, got %d", advRec2.Code)
 		}
+		if len(inserterAdv.inserted) != 2 || inserterAdv.inserted[1].ChunkIndex != 2 {
+			t.Errorf("expected river job inserted for chunk 2 on repeat, got %+v", inserterAdv.inserted)
+		}
 
 		// Final advance completing build
 		advCompRec := doAdvReq(http.MethodPost, "/chunks/advance-pr", `{"repo":"aerial","pr_number":103}`)
@@ -933,7 +936,7 @@ func TestPostgresVanadisStore_ChunkMethods(t *testing.T) {
 			t.Error("expected error on select chunk error")
 		}
 
-		// Already terminal / merged
+		// Already terminal
 		sTerminal := newMockStore(mockDB{
 			beginFn: func(context.Context) (pgx.Tx, error) {
 				return &mockTx{
@@ -948,7 +951,7 @@ func TestPostgresVanadisStore_ChunkMethods(t *testing.T) {
 							*dest[6].(*int) = 2
 							*dest[7].(*string) = "Build 1"
 							*dest[8].(*string) = "Objective 1"
-							*dest[9].(*string) = "running"
+							*dest[9].(*string) = "cancelled"
 							*dest[10].(*string) = "msg-1"
 							return nil
 						}}
@@ -957,8 +960,42 @@ func TestPostgresVanadisStore_ChunkMethods(t *testing.T) {
 			},
 		})
 		resTerm, err := sTerminal.AdvanceChunkByPR(ctx, "aerial", 101)
-		if err != nil || !resTerm.Matched || resTerm.Advanced {
-			t.Errorf("expected matched but not advanced for already merged chunk, got %+v", resTerm)
+		if err != nil || !resTerm.Matched || resTerm.Advanced || resTerm.NextChunkIndex != -1 {
+			t.Errorf("expected matched but not advanced for already terminal build, got %+v", resTerm)
+		}
+
+		// Already merged chunk on running build computes next chunk
+		sMergedRunning := newMockStore(mockDB{
+			beginFn: func(context.Context) (pgx.Tx, error) {
+				return &mockTx{
+					queryRowFn: func(context.Context, string, ...any) pgx.Row {
+						return &genericMockRow{scanFn: func(dest ...any) error {
+							*dest[0].(*string) = "c1"
+							*dest[1].(*string) = "b1"
+							*dest[2].(*int) = 0
+							*dest[3].(*string) = "Chunk 1"
+							*dest[4].(*string) = "merged"
+							*dest[5].(*string) = "thread-1"
+							*dest[6].(*int) = 2
+							*dest[7].(*string) = "Build 1"
+							*dest[8].(*string) = "Objective 1"
+							*dest[9].(*string) = "running"
+							*dest[10].(*string) = "msg-1"
+							return nil
+						}}
+					},
+					queryFn: func(context.Context, string, ...any) (pgx.Rows, error) {
+						return &mockRows{items: []VanadisChunk{
+							{ID: "c1", ChunkIndex: 0, Status: "merged"},
+							{ID: "c2", ChunkIndex: 1, Status: "pending"},
+						}}, nil
+					},
+				}, nil
+			},
+		})
+		resMergedRunning, err := sMergedRunning.AdvanceChunkByPR(ctx, "aerial", 101)
+		if err != nil || !resMergedRunning.Matched || resMergedRunning.Advanced || resMergedRunning.NextChunkIndex != 1 {
+			t.Errorf("expected matched, unadvanced, nextChunkIdx 1 for already merged chunk on running build, got %+v", resMergedRunning)
 		}
 
 		// Update chunk error

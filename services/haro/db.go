@@ -661,7 +661,7 @@ func PruneScheduleRuns(ctx context.Context, database *sql.DB, maxCount int, maxA
 
 var (
 	vanadisMu     sync.RWMutex
-	vanadisURL    = "http://vanadis.aerial"
+	vanadisURL    string
 	vanadisClient = &http.Client{Timeout: 5 * time.Second}
 )
 
@@ -673,13 +673,17 @@ func SetVanadisURL(u string) {
 }
 
 // GetVanadisURL gets the base URL for Vanadis HTTP API calls.
+// Explicitly configured URLs via SetVanadisURL take precedence over environment defaults.
 func GetVanadisURL() string {
 	vanadisMu.RLock()
 	defer vanadisMu.RUnlock()
+	if vanadisURL != "" {
+		return vanadisURL
+	}
 	if env := strings.TrimSpace(os.Getenv("VANADIS_URL")); env != "" {
 		return strings.TrimRight(env, "/")
 	}
-	return vanadisURL
+	return "http://vanadis.aerial"
 }
 
 func firstNonEmpty(vals ...string) string {

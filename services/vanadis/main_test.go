@@ -333,7 +333,7 @@ func (m *memoryVanadisStore) AdvanceChunkByPR(_ context.Context, repo string, pr
 		for i := range list {
 			if list[i].Repo == repo && list[i].PRNumber == prNumber {
 				b := m.builds[bID]
-				if b.Status == "cancelled" || b.Status == "failed" || list[i].Status == "merged" {
+				if b.Status == "cancelled" || b.Status == "failed" || b.Status == "completed" {
 					return &VanadisAdvancementResult{
 						Matched:          true,
 						Advanced:         false,
@@ -347,8 +347,10 @@ func (m *memoryVanadisStore) AdvanceChunkByPR(_ context.Context, repo string, pr
 						MergedChunkIndex: list[i].ChunkIndex,
 						MergedChunkTitle: list[i].Title,
 						NextChunkIndex:   -1,
+						BuildCompleted:   b.Status == "completed",
 					}, nil
 				}
+				wasMerged := list[i].Status == "merged"
 				list[i].Status = "merged"
 				list[i].UpdatedAt = time.Now().UTC()
 				m.chunks[bID] = list
@@ -385,7 +387,7 @@ func (m *memoryVanadisStore) AdvanceChunkByPR(_ context.Context, repo string, pr
 				if nextChunkIdx >= 0 {
 					return &VanadisAdvancementResult{
 						Matched:          true,
-						Advanced:         true,
+						Advanced:         !wasMerged,
 						BuildID:          bID,
 						ThreadID:         b.ThreadID,
 						Tier:             b.Tier,
@@ -405,7 +407,7 @@ func (m *memoryVanadisStore) AdvanceChunkByPR(_ context.Context, repo string, pr
 				m.builds[bID] = b
 				return &VanadisAdvancementResult{
 					Matched:          true,
-					Advanced:         true,
+					Advanced:         !wasMerged,
 					BuildID:          bID,
 					ThreadID:         b.ThreadID,
 					Tier:             b.Tier,

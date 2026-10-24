@@ -2177,3 +2177,31 @@ func TestEventWatchTools(t *testing.T) {
 		})
 	}
 }
+
+func TestVanadisURL_Precedence(t *testing.T) {
+	oldVanadis := GetVanadisURL()
+	defer SetVanadisURL(oldVanadis)
+
+	tests := []struct {
+		name    string
+		setURL  string
+		envURL  string
+		wantURL string
+	}{
+		{"explicit setURL takes precedence over env", "http://explicit.vanadis", "http://env.vanadis", "http://explicit.vanadis"},
+		{"fallback to env when setURL empty", "", "http://env.vanadis", "http://env.vanadis"},
+		{"trailing slash stripped from explicit", "http://explicit.vanadis/api/", "", "http://explicit.vanadis/api"},
+		{"trailing slash stripped from env", "", "http://env.vanadis/api/", "http://env.vanadis/api"},
+		{"default fallback when both empty", "", "", "http://vanadis.aerial"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("VANADIS_URL", tc.envURL)
+			SetVanadisURL(tc.setURL)
+			got := GetVanadisURL()
+			if got != tc.wantURL {
+				t.Errorf("GetVanadisURL() = %q, want %q", got, tc.wantURL)
+			}
+		})
+	}
+}
