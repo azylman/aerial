@@ -187,14 +187,12 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			Summary:    db.CleanTaskSummary(req.Prompt),
 			Status:     db.StatusPending,
 			Effort:     effort,
-			Metadata: db.MessageMetadata{
-				ChannelID: channelID,
-				Ephemeral: req.Ephemeral,
-				Model:     model,
-				Silent:    req.Silent,
-			},
-			CreatedAt: time.Now().UTC(),
-			UpdatedAt: time.Now().UTC(),
+			ChannelID:  channelID,
+			Ephemeral:  req.Ephemeral,
+			Model:      model,
+			Silent:     req.Silent,
+			CreatedAt:  time.Now().UTC(),
+			UpdatedAt:  time.Now().UTC(),
 		}
 
 		if store == nil {

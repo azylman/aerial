@@ -19,7 +19,21 @@ CREATE TABLE IF NOT EXISTS messages (
     error_message TEXT,
     response_text TEXT,
     schedule_run_id TEXT NOT NULL DEFAULT '',
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    channel_id TEXT NOT NULL DEFAULT '',
+    channel_name TEXT NOT NULL DEFAULT '',
+    thread_name TEXT NOT NULL DEFAULT '',
+    author_global_name TEXT NOT NULL DEFAULT '',
+    author_bot BOOLEAN NOT NULL DEFAULT FALSE,
+    is_admin BOOLEAN NOT NULL DEFAULT FALSE,
+    mentions TEXT[] NOT NULL DEFAULT '{}',
+    mention_user_ids TEXT[] NOT NULL DEFAULT '{}',
+    mention_role_ids TEXT[] NOT NULL DEFAULT '{}',
+    replying_to_author TEXT NOT NULL DEFAULT '',
+    replying_to_content TEXT NOT NULL DEFAULT '',
+    attachments TEXT[] NOT NULL DEFAULT '{}',
+    model TEXT NOT NULL DEFAULT '',
+    silent BOOLEAN NOT NULL DEFAULT FALSE,
+    ephemeral BOOLEAN,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -28,6 +42,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_thread_status ON messages(thread_id, sta
 CREATE INDEX IF NOT EXISTS idx_messages_thread_row_id ON messages(thread_id, row_id);
 CREATE INDEX IF NOT EXISTS idx_messages_status_created_at ON messages(status, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_messages_row_id ON messages(row_id);
+CREATE INDEX IF NOT EXISTS idx_messages_admin_completed ON messages(status, is_admin, updated_at);
 
 -- Sessions Table
 CREATE TABLE IF NOT EXISTS sessions (
@@ -35,16 +50,19 @@ CREATE TABLE IF NOT EXISTS sessions (
     internal_session_id TEXT NOT NULL DEFAULT '',
     previous_session_id TEXT NOT NULL DEFAULT '',
     turn_count INTEGER NOT NULL DEFAULT 0,
-    last_extracted_rowid BIGINT NOT NULL DEFAULT 0,
-    fact_extracted_at TIMESTAMPTZ,
     summary TEXT NOT NULL DEFAULT '',
     last_summarized_message_id TEXT NOT NULL DEFAULT '',
-    active_tasks TEXT NOT NULL DEFAULT '[]',
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_sessions_fact_extracted ON sessions(last_extracted_rowid, fact_extracted_at);
+-- Extraction Watermarks Table
+CREATE TABLE IF NOT EXISTS extraction_watermarks (
+    thread_id TEXT PRIMARY KEY,
+    last_extracted_rowid BIGINT NOT NULL DEFAULT 0,
+    fact_extracted_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 
 -- One-Shot Schedules Table
 CREATE TABLE IF NOT EXISTS one_shot_schedules (
@@ -269,6 +287,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS river_job_unique_idx ON river_job (unique_key)
     WHERE unique_key IS NOT NULL
       AND unique_states IS NOT NULL
       AND river_job_state_in_bitmask(unique_states, state);
+
 
 CREATE UNLOGGED TABLE IF NOT EXISTS river_leader (
     elected_at TIMESTAMPTZ NOT NULL,

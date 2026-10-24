@@ -1257,7 +1257,7 @@ func TestWorker_EphemeralHighEffort_FailsBurst(t *testing.T) {
 	trueVal := true
 	msg := db.Message{
 		ID: "msg-ephem-high-fail", ThreadID: threadID, Content: "execute invalid ephemeral high effort",
-		Effort: "high", Metadata: db.MessageMetadata{Ephemeral: &trueVal}, Status: db.StatusPending, CreatedAt: time.Now(),
+		Effort: "high", Ephemeral: &trueVal, Status: db.StatusPending, CreatedAt: time.Now(),
 	}
 	_ = store.InsertMessage(ctx, msg)
 	pool.Enqueue(msg)
@@ -1379,7 +1379,7 @@ func TestWorker_StatefulLowAndMediumPools_ResumeAndPersistSessions(t *testing.T)
 
 			msg := db.Message{
 				ID: "msg-stateful-" + tc.effort, ThreadID: threadID, Content: "execute persistent " + tc.effort,
-				Effort: tc.effort, Metadata: db.MessageMetadata{Ephemeral: &falseVal}, Status: db.StatusPending, CreatedAt: time.Now(),
+				Effort: tc.effort, Ephemeral: &falseVal, Status: db.StatusPending, CreatedAt: time.Now(),
 			}
 			_ = store.InsertMessage(ctx, msg)
 			pool.Enqueue(msg)
@@ -1765,12 +1765,12 @@ func TestWorker_BurstHelpers_SilentAndLowEffort(t *testing.T) {
 		wantEffort string
 	}{
 		{name: "NilBurst", burst: nil, wantModel: "", wantSilent: false, wantEffort: "high"},
-		{name: "NormalBurst", burst: []db.Message{{ID: "m1", Effort: "high", Metadata: db.MessageMetadata{Model: "gemini-3.1-pro"}}, {ID: "m2", Metadata: db.MessageMetadata{Silent: false}}}, wantModel: "gemini-3.1-pro", wantSilent: false, wantEffort: "high"},
-		{name: "SilentFlashBurst", burst: []db.Message{{ID: "m1", Metadata: db.MessageMetadata{Silent: true}}, {ID: "m2", Metadata: db.MessageMetadata{Silent: true, Model: "  gemini-4-flash  "}}}, wantModel: "gemini-4-flash", wantSilent: true, wantEffort: "low"},
-		{name: "MixedSilentAndNormalBurst", burst: []db.Message{{ID: "m1", Metadata: db.MessageMetadata{Silent: true}}, {ID: "m2", Metadata: db.MessageMetadata{Silent: false, Model: "  gemini-4-flash  "}}}, wantModel: "gemini-4-flash", wantSilent: false, wantEffort: "low"},
+		{name: "NormalBurst", burst: []db.Message{{ID: "m1", Effort: "high", Model: "gemini-3.1-pro"}, {ID: "m2", Silent: false}}, wantModel: "gemini-3.1-pro", wantSilent: false, wantEffort: "high"},
+		{name: "SilentFlashBurst", burst: []db.Message{{ID: "m1", Silent: true}, {ID: "m2", Silent: true, Model: "  gemini-4-flash  "}}, wantModel: "gemini-4-flash", wantSilent: true, wantEffort: "low"},
+		{name: "MixedSilentAndNormalBurst", burst: []db.Message{{ID: "m1", Silent: true}, {ID: "m2", Silent: false, Model: "  gemini-4-flash  "}}, wantModel: "gemini-4-flash", wantSilent: false, wantEffort: "low"},
 		{name: "LowEffortFieldBurst", burst: []db.Message{{ID: "m1", Effort: " LOW "}}, wantModel: "", wantSilent: false, wantEffort: "low"},
 		{name: "MediumEffortFieldBurst", burst: []db.Message{{ID: "m1", Effort: " MEDIUM "}}, wantModel: "", wantSilent: false, wantEffort: "medium"},
-		{name: "FlashMediumModelBurstNotLow", burst: []db.Message{{ID: "m1", Metadata: db.MessageMetadata{Model: "gemini-3.8-flash-medium"}}}, wantModel: "gemini-3.8-flash-medium", wantSilent: false, wantEffort: "medium"},
+		{name: "FlashMediumModelBurstNotLow", burst: []db.Message{{ID: "m1", Model: "gemini-3.8-flash-medium"}}, wantModel: "gemini-3.8-flash-medium", wantSilent: false, wantEffort: "medium"},
 	}
 	for _, tt := range burstTests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1821,7 +1821,7 @@ func TestWorker_SilentBurst_Execution(t *testing.T) {
 	pool.Start()
 	defer pool.Stop()
 
-	msg := db.Message{ID: "msg-silent-exec-1", ThreadID: threadID, Content: "Execute silent task", Status: db.StatusPending, Metadata: db.MessageMetadata{Model: "gemini-4-flash", Silent: true}}
+	msg := db.Message{ID: "msg-silent-exec-1", ThreadID: threadID, Content: "Execute silent task", Status: db.StatusPending, Model: "gemini-4-flash", Silent: true}
 	_ = store.InsertMessage(ctx, msg)
 	pool.Enqueue(msg)
 
@@ -2046,11 +2046,9 @@ func TestWorker_ResolveExecutionPool_EphemeralRouting_TableDriven(t *testing.T) 
 				threadID: "thread-ephem-test",
 				burst: []db.Message{
 					{
-						ID:     "msg-1",
-						Effort: tc.effort,
-						Metadata: db.MessageMetadata{
-							Ephemeral: tc.ephemeral,
-						},
+						ID:        "msg-1",
+						Effort:    tc.effort,
+						Ephemeral: tc.ephemeral,
 					},
 				},
 			}
@@ -2100,8 +2098,8 @@ func TestWorker_DeliverFailureNotice_And_QuotaPause_Silent_TableDriven(t *testin
 				threadID: "1542423172400291873",
 				burst: []db.Message{
 					{
-						ID:       "msg-1",
-						Metadata: db.MessageMetadata{Silent: tc.silent},
+						ID:     "msg-1",
+						Silent: tc.silent,
 					},
 				},
 			}
@@ -2161,9 +2159,9 @@ func TestWorker_ResolveTurnPolicy_ParentChannelFallback_TableDriven(t *testing.T
 				threadID: tc.threadID,
 				burst: []db.Message{
 					{
-						ID:       "msg-fallback",
-						ThreadID: tc.threadID,
-						Metadata: db.MessageMetadata{ChannelID: tc.parentChannelID},
+						ID:        "msg-fallback",
+						ThreadID:  tc.threadID,
+						ChannelID: tc.parentChannelID,
 					},
 				},
 			}
@@ -2237,7 +2235,7 @@ func TestWorker_EvaluateAmbientWake_HTTPAndSilent_TableDriven(t *testing.T) {
 						ID:       "msg-ambient",
 						AuthorID: tc.authorID,
 						Content:  "ambient message text",
-						Metadata: db.MessageMetadata{Silent: tc.silent},
+						Silent:   tc.silent,
 					},
 				},
 			}
@@ -2313,9 +2311,9 @@ func TestWorker_DeliveryTargetID_TableDriven(t *testing.T) {
 				effectiveID: tc.effectiveID,
 				burst: []db.Message{
 					{
-						ID:       "msg-delivery-target",
-						ThreadID: tc.threadID,
-						Metadata: db.MessageMetadata{ChannelID: tc.burstChannelID},
+						ID:        "msg-delivery-target",
+						ThreadID:  tc.threadID,
+						ChannelID: tc.burstChannelID,
 					},
 				},
 			}
@@ -2376,14 +2374,12 @@ func TestWorker_GlobalQuotaLockout_SilentAndDeliveryTarget_TableDriven(t *testin
 			pool.quotaLockedUntil.Store(time.Now().Add(10 * time.Minute).Unix())
 
 			msg := db.Message{
-				ID:       "msg-quota-lockout",
-				ThreadID: tc.threadID,
-				Content:  "execute prompt",
-				Status:   db.StatusProcessing,
-				Metadata: db.MessageMetadata{
-					ChannelID: tc.channelID,
-					Silent:    tc.silent,
-				},
+				ID:        "msg-quota-lockout",
+				ThreadID:  tc.threadID,
+				Content:   "execute prompt",
+				Status:    db.StatusProcessing,
+				ChannelID: tc.channelID,
+				Silent:    tc.silent,
 			}
 			_ = store.InsertMessage(context.Background(), msg)
 
@@ -2456,13 +2452,11 @@ func TestWorker_DeliverSuccessAndFinalize_CustomSessionTarget_TableDriven(t *tes
 			})
 
 			msg := db.Message{
-				ID:       "msg-succ",
-				ThreadID: tc.threadID,
-				Status:   db.StatusProcessing,
-				Metadata: db.MessageMetadata{
-					ChannelID: tc.channelID,
-					Silent:    tc.silent,
-				},
+				ID:        "msg-succ",
+				ThreadID:  tc.threadID,
+				Status:    db.StatusProcessing,
+				ChannelID: tc.channelID,
+				Silent:    tc.silent,
 			}
 			_ = store.InsertMessage(context.Background(), msg)
 

@@ -12,7 +12,79 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const sqliteSchema = `CREATE TABLE IF NOT EXISTS messages ( id TEXT PRIMARY KEY, row_id INTEGER, thread_id TEXT NOT NULL DEFAULT '', guild_id TEXT NOT NULL DEFAULT '', author_id TEXT NOT NULL DEFAULT '', author_name TEXT NOT NULL DEFAULT '', content TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'PENDING', retry_count INTEGER NOT NULL DEFAULT 0, restart_count INTEGER NOT NULL DEFAULT 0, effort TEXT NOT NULL DEFAULT '', error_message TEXT, response_text TEXT, schedule_run_id TEXT NOT NULL DEFAULT '', metadata TEXT NOT NULL DEFAULT '{}', created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ); CREATE TRIGGER IF NOT EXISTS trg_messages_row_id AFTER INSERT ON messages WHEN new.row_id IS NULL OR new.row_id = 0 BEGIN UPDATE messages SET row_id = (SELECT COALESCE(MAX(row_id), 0) + 1 FROM messages) WHERE id = new.id; END; CREATE TABLE IF NOT EXISTS sessions ( thread_id TEXT PRIMARY KEY, internal_session_id TEXT NOT NULL DEFAULT '', previous_session_id TEXT NOT NULL DEFAULT '', turn_count INTEGER NOT NULL DEFAULT 0, last_extracted_rowid INTEGER NOT NULL DEFAULT 0, fact_extracted_at DATETIME, summary TEXT NOT NULL DEFAULT '', last_summarized_message_id TEXT NOT NULL DEFAULT '', active_tasks TEXT NOT NULL DEFAULT '[]', created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ); CREATE TABLE IF NOT EXISTS one_shot_schedules ( id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, prompt TEXT NOT NULL, run_at DATETIME NOT NULL, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, effort TEXT NOT NULL DEFAULT 'low' ); CREATE TABLE IF NOT EXISTS cron_schedules ( id TEXT PRIMARY KEY, target_id TEXT NOT NULL, title_prefix TEXT NOT NULL DEFAULT '', cron_expr TEXT NOT NULL, prompt TEXT NOT NULL, timezone TEXT NOT NULL DEFAULT 'America/Los_Angeles', next_run_at DATETIME NOT NULL, enabled BOOLEAN NOT NULL DEFAULT 1, effort TEXT NOT NULL DEFAULT 'low', created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ); CREATE TABLE IF NOT EXISTS heartbeat_schedules ( id TEXT PRIMARY KEY, target_id TEXT NOT NULL, title_prefix TEXT NOT NULL DEFAULT '', cron_expr TEXT NOT NULL, prompt TEXT NOT NULL, timezone TEXT NOT NULL DEFAULT 'UTC', effort TEXT NOT NULL DEFAULT 'low', next_run_at DATETIME NOT NULL, enabled BOOLEAN NOT NULL DEFAULT 1, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ); CREATE TABLE IF NOT EXISTS schedule_runs ( id TEXT PRIMARY KEY, schedule_id TEXT NOT NULL, schedule_type TEXT NOT NULL, message_id TEXT NOT NULL DEFAULT '', target_id TEXT NOT NULL, thread_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '', prompt TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'enqueued', started_at DATETIME NOT NULL, completed_at DATETIME, duration_ms INTEGER DEFAULT 0, effort TEXT NOT NULL DEFAULT 'low', model TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '' ); CREATE TABLE IF NOT EXISTS facts ( id INTEGER PRIMARY KEY AUTOINCREMENT, fact_text TEXT NOT NULL, embedding BLOB NOT NULL, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, last_reinforced_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, reinforce_count INTEGER NOT NULL DEFAULT 1 ); CREATE INDEX IF NOT EXISTS idx_messages_thread_status ON messages(thread_id, status); CREATE INDEX IF NOT EXISTS idx_messages_status_created_at ON messages(status, created_at ASC); CREATE INDEX IF NOT EXISTS idx_sessions_fact_extracted ON sessions(last_extracted_rowid, fact_extracted_at); CREATE INDEX IF NOT EXISTS idx_one_shot_schedules_run_at ON one_shot_schedules(run_at); CREATE INDEX IF NOT EXISTS idx_cron_schedules_next_run_at ON cron_schedules(enabled, next_run_at); CREATE INDEX IF NOT EXISTS idx_heartbeat_schedules_next_run ON heartbeat_schedules(enabled, next_run_at); CREATE INDEX IF NOT EXISTS idx_schedule_runs_started_at ON schedule_runs(started_at DESC); CREATE INDEX IF NOT EXISTS idx_schedule_runs_schedule_started ON schedule_runs(schedule_id, started_at DESC); CREATE INDEX IF NOT EXISTS idx_schedule_runs_status_started ON schedule_runs(status, started_at DESC); CREATE INDEX IF NOT EXISTS idx_schedule_runs_message_id ON schedule_runs(message_id); CREATE INDEX IF NOT EXISTS idx_facts_activity ON facts(reinforce_count DESC, last_reinforced_at DESC); CREATE TABLE IF NOT EXISTS session_summaries ( session_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '', embedding BLOB, last_indexed_step INTEGER NOT NULL DEFAULT -1, last_mtime DATETIME, summary_step_watermark INTEGER NOT NULL DEFAULT -1, is_settled BOOLEAN NOT NULL DEFAULT 0, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ); CREATE TABLE IF NOT EXISTS transcript_steps ( session_id TEXT NOT NULL, step_index INTEGER NOT NULL, step_type TEXT NOT NULL DEFAULT '', tool_name TEXT NOT NULL DEFAULT '', content TEXT NOT NULL DEFAULT '', created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (session_id, step_index), FOREIGN KEY (session_id) REFERENCES session_summaries(session_id) ON DELETE CASCADE ); CREATE INDEX IF NOT EXISTS idx_session_summaries_mtime ON session_summaries(last_mtime); CREATE INDEX IF NOT EXISTS idx_session_summaries_thread ON session_summaries(thread_id); CREATE INDEX IF NOT EXISTS idx_transcript_steps_tool ON transcript_steps(tool_name); CREATE TABLE IF NOT EXISTS procedural_candidates ( id INTEGER PRIMARY KEY AUTOINCREMENT, thread_id TEXT NOT NULL DEFAULT '', domain TEXT NOT NULL DEFAULT 'discord', loaded_skill TEXT NOT NULL DEFAULT '', trigger_pattern TEXT NOT NULL CHECK (trim(trigger_pattern) <> ''), steps_json TEXT NOT NULL DEFAULT '[]', avoid_json TEXT NOT NULL DEFAULT '[]', embedding BLOB NOT NULL, status TEXT NOT NULL DEFAULT 'pending', pr_number INTEGER, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ); CREATE INDEX IF NOT EXISTS idx_procedural_candidates_status ON procedural_candidates (status, created_at ASC); CREATE INDEX IF NOT EXISTS idx_procedural_candidates_loaded_skill ON procedural_candidates (status, loaded_skill); CREATE TABLE IF NOT EXISTS event_triggers ( id TEXT PRIMARY KEY, channel_id TEXT NOT NULL, source TEXT NOT NULL, target TEXT NOT NULL, event_type TEXT NOT NULL, prompt TEXT NOT NULL, effort TEXT NOT NULL DEFAULT 'medium', created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ); CREATE INDEX IF NOT EXISTS idx_event_triggers_lookup ON event_triggers (source, target, event_type); CREATE INDEX IF NOT EXISTS idx_event_triggers_channel ON event_triggers (channel_id, created_at ASC);`
+const sqliteSchema = `CREATE TABLE IF NOT EXISTS messages (
+    id TEXT PRIMARY KEY,
+    row_id INTEGER,
+    thread_id TEXT NOT NULL DEFAULT '',
+    guild_id TEXT NOT NULL DEFAULT '',
+    author_id TEXT NOT NULL DEFAULT '',
+    author_name TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'PENDING',
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    restart_count INTEGER NOT NULL DEFAULT 0,
+    effort TEXT NOT NULL DEFAULT '',
+    error_message TEXT,
+    response_text TEXT,
+    schedule_run_id TEXT NOT NULL DEFAULT '',
+    channel_id TEXT NOT NULL DEFAULT '',
+    channel_name TEXT NOT NULL DEFAULT '',
+    thread_name TEXT NOT NULL DEFAULT '',
+    author_global_name TEXT NOT NULL DEFAULT '',
+    author_bot BOOLEAN NOT NULL DEFAULT 0,
+    is_admin BOOLEAN NOT NULL DEFAULT 0,
+    mentions TEXT NOT NULL DEFAULT '{}',
+    mention_user_ids TEXT NOT NULL DEFAULT '{}',
+    mention_role_ids TEXT NOT NULL DEFAULT '{}',
+    replying_to_author TEXT NOT NULL DEFAULT '',
+    replying_to_content TEXT NOT NULL DEFAULT '',
+    attachments TEXT NOT NULL DEFAULT '{}',
+    model TEXT NOT NULL DEFAULT '',
+    silent BOOLEAN NOT NULL DEFAULT 0,
+    ephemeral BOOLEAN,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TRIGGER IF NOT EXISTS trg_messages_row_id AFTER INSERT ON messages WHEN new.row_id IS NULL OR new.row_id = 0 BEGIN UPDATE messages SET row_id = (SELECT COALESCE(MAX(row_id), 0) + 1 FROM messages) WHERE id = new.id; END;
+CREATE INDEX IF NOT EXISTS idx_messages_thread_status ON messages(thread_id, status);
+CREATE INDEX IF NOT EXISTS idx_messages_status_created_at ON messages(status, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_messages_admin_completed ON messages(status, is_admin, updated_at);
+CREATE TABLE IF NOT EXISTS sessions (
+    thread_id TEXT PRIMARY KEY,
+    internal_session_id TEXT NOT NULL DEFAULT '',
+    previous_session_id TEXT NOT NULL DEFAULT '',
+    turn_count INTEGER NOT NULL DEFAULT 0,
+    summary TEXT NOT NULL DEFAULT '',
+    last_summarized_message_id TEXT NOT NULL DEFAULT '',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS session_summaries (
+    session_id TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    embedding BLOB,
+    last_indexed_step INTEGER NOT NULL DEFAULT -1,
+    last_mtime DATETIME,
+    summary_step_watermark INTEGER NOT NULL DEFAULT -1,
+    is_settled BOOLEAN NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_session_summaries_mtime ON session_summaries(last_mtime);
+CREATE INDEX IF NOT EXISTS idx_session_summaries_thread ON session_summaries(thread_id);
+CREATE TABLE IF NOT EXISTS transcript_steps (
+    session_id TEXT NOT NULL,
+    step_index INTEGER NOT NULL,
+    step_type TEXT NOT NULL DEFAULT '',
+    tool_name TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL DEFAULT '',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (session_id, step_index),
+    FOREIGN KEY (session_id) REFERENCES session_summaries(session_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_transcript_steps_tool ON transcript_steps(tool_name);`
 
 func initSchemaSQLite(database *sql.DB) error {
 	pragmas := "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA synchronous = NORMAL;"

@@ -773,7 +773,7 @@ channels:
 	if dbMsg == nil {
 		t.Fatalf("Expected msg-incoming-100 to be inserted into DB by MessageCreate handler")
 	}
-	if dbMsg.AuthorName != "test-user" || !strings.Contains(dbMsg.Content, "deploy the stack") || dbMsg.Effort != "low" || dbMsg.Metadata.Ephemeral == nil || *dbMsg.Metadata.Ephemeral {
+	if dbMsg.AuthorName != "test-user" || !strings.Contains(dbMsg.Content, "deploy the stack") || dbMsg.Effort != "low" || dbMsg.Ephemeral == nil || *dbMsg.Ephemeral {
 		t.Errorf("Unexpected persisted message: %+v", dbMsg)
 	}
 
@@ -1243,10 +1243,11 @@ func TestHandleGuildMemberUpdate(t *testing.T) {
 	handleGuildMemberUpdate(s, mBot2)
 }
 
-func TestExtractDiscordMetadata(t *testing.T) {
-	empty := extractDiscordMetadata(nil, nil, "")
-	if !empty.IsEmpty() {
-		t.Errorf("expected empty metadata for nil message")
+func TestPopulateDiscordMessageFields(t *testing.T) {
+	var empty db.Message
+	populateDiscordMessageFields(nil, nil, &empty)
+	if empty.HasStructuredFields() {
+		t.Errorf("expected empty fields for nil message")
 	}
 
 	s := newMockDiscordSession(t, nil)
@@ -1264,37 +1265,35 @@ func TestExtractDiscordMetadata(t *testing.T) {
 		Attachments:       []*discordgo.MessageAttachment{nil, {URL: "https://example.com/att.png"}, {URL: ""}},
 	}
 
-	meta := extractDiscordMetadata(s, m, "thread-1")
-	if meta.ChannelID != "chan-1" || meta.TargetThreadID != "thread-1" || meta.GuildID != "guild-1" {
-		t.Errorf("metadata IDs mismatch: %+v", meta)
+	var msg db.Message
+	populateDiscordMessageFields(s, m, &msg)
+	if msg.ChannelID != "chan-1" {
+		t.Errorf("channel ID mismatch: %+v", msg)
 	}
-	if meta.AuthorUsername != "testuser\n" || meta.AuthorGlobalName != "Test User\r" {
-		t.Errorf("author name mismatch: %+v", meta)
+	if msg.AuthorGlobalName != "Test User\r" {
+		t.Errorf("author name mismatch: %+v", msg)
 	}
-	if meta.ReplyingToAuthor != "@bob" || meta.ReplyingToContent != "hello ref" {
-		t.Errorf("replyingTo mismatch: %s / %s", meta.ReplyingToAuthor, meta.ReplyingToContent)
+	if msg.ReplyingToAuthor != "@bob" || msg.ReplyingToContent != "hello ref" {
+		t.Errorf("replyingTo mismatch: %s / %s", msg.ReplyingToAuthor, msg.ReplyingToContent)
 	}
-	if len(meta.MentionUserIDs) != 1 || meta.MentionUserIDs[0] != "u-mention-1" {
-		t.Errorf("mentionUserIDs mismatch: %v", meta.MentionUserIDs)
+	if len(msg.MentionUserIDs) != 1 || msg.MentionUserIDs[0] != "u-mention-1" {
+		t.Errorf("mentionUserIDs mismatch: %v", msg.MentionUserIDs)
 	}
-	if len(meta.MentionRoleIDs) != 2 || meta.MentionRoleIDs[0] != "role-mod" {
-		t.Errorf("mentionRoleIDs mismatch: %v", meta.MentionRoleIDs)
+	if len(msg.MentionRoleIDs) != 2 || msg.MentionRoleIDs[0] != "role-mod" {
+		t.Errorf("mentionRoleIDs mismatch: %v", msg.MentionRoleIDs)
 	}
-	if len(meta.Attachments) != 1 || meta.Attachments[0] != "https://example.com/att.png" {
-		t.Errorf("attachments mismatch: %v", meta.Attachments)
+	if len(msg.Attachments) != 1 || msg.Attachments[0] != "https://example.com/att.png" {
+		t.Errorf("attachments mismatch: %v", msg.Attachments)
 	}
 
 	mNilAuth := &discordgo.Message{
 		ChannelID:         "chan-2",
 		ReferencedMessage: &discordgo.Message{Content: "no author ref"},
 	}
-	metaNilAuth := extractDiscordMetadata(nil, mNilAuth, "thread-2")
-	if metaNilAuth.ReplyingToAuthor != "Unknown" {
-		t.Errorf("expected Unknown for referenced message with nil author, got %q", metaNilAuth.ReplyingToAuthor)
-	}
-
-	if meta := extractDiscordMetadata(nil, nil, "th-1"); meta.TargetThreadID != "" {
-		t.Errorf("expected empty metadata for nil message")
+	var msgNilAuth db.Message
+	populateDiscordMessageFields(nil, mNilAuth, &msgNilAuth)
+	if msgNilAuth.ReplyingToAuthor != "Unknown" {
+		t.Errorf("expected Unknown for referenced message with nil author, got %q", msgNilAuth.ReplyingToAuthor)
 	}
 }
 

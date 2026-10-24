@@ -263,11 +263,7 @@ func resolveMessageContent(s *discordgo.Session, m *discordgo.Message) string {
 	return m.Content
 }
 
-// extractDiscordMetadata extracts structured metadata from a discordgo.Message.
-func extractDiscordMetadata(s *discordgo.Session, m *discordgo.Message, targetThreadID string) db.MessageMetadata {
-	if m == nil {
-		return db.MessageMetadata{}
-	}
+func resolveMentionRoleNames(s *discordgo.Session, m *discordgo.Message) map[string]string {
 	roleNames := make(map[string]string)
 	if s != nil && s.State != nil && m.GuildID != "" {
 		for _, roleID := range m.MentionRoles {
@@ -276,36 +272,31 @@ func extractDiscordMetadata(s *discordgo.Session, m *discordgo.Message, targetTh
 			}
 		}
 	}
-	var adminUsers []string
-	if cfg := currentFunnelConfig(); cfg != nil {
-		adminUsers = cfg.Current().AdminUsers
-	}
-	isAdmin, username, globalName, authorBot := false, "", "", false
-	if m.Author != nil {
-		isAdmin = config.IsAdmin(adminUsers, m.Author.ID, m.Author.Username, m.Author.GlobalName)
-		username, globalName, authorBot = m.Author.Username, m.Author.GlobalName, m.Author.Bot
-	}
+	return roleNames
+}
 
-	var replyingToAuthor, replyingToContent string
-	if m.ReferencedMessage != nil {
-		replyingToAuthor = "Unknown"
-		if m.ReferencedMessage.Author != nil {
-			replyingToAuthor = "@" + strings.ReplaceAll(strings.ReplaceAll(m.ReferencedMessage.Author.Username, "\n", " "), "\r", "")
-		}
-		replyingToContent = resolveMessageContent(s, m.ReferencedMessage)
+func resolveReplyContext(s *discordgo.Session, m *discordgo.Message) (replyingToAuthor, replyingToContent string) {
+	if m == nil || m.ReferencedMessage == nil {
+		return "", ""
 	}
+	replyingToAuthor = "Unknown"
+	if m.ReferencedMessage.Author != nil {
+		replyingToAuthor = "@" + strings.ReplaceAll(strings.ReplaceAll(m.ReferencedMessage.Author.Username, "\n", " "), "\r", "")
+	}
+	replyingToContent = resolveMessageContent(s, m.ReferencedMessage)
+	return replyingToAuthor, replyingToContent
+}
 
+func resolveMentionsAndRoles(m *discordgo.Message, roleNames map[string]string) (mentions, userIDs, roleIDs []string) {
 	cleanStr := func(str string) string { return strings.ReplaceAll(strings.ReplaceAll(str, "\n", " "), "\r", "") }
-	var mentions, mentionUserIDs []string
 	for _, u := range m.Mentions {
 		if u != nil {
 			mentions = append(mentions, cleanStr(u.Username))
 			if u.ID != "" {
-				mentionUserIDs = append(mentionUserIDs, u.ID)
+				userIDs = append(userIDs, u.ID)
 			}
 		}
 	}
-	var mentionRoleIDs []string
 	for _, roleID := range m.MentionRoles {
 		name := roleID
 		if rName, ok := roleNames[roleID]; ok && rName != "" {
@@ -313,33 +304,45 @@ func extractDiscordMetadata(s *discordgo.Session, m *discordgo.Message, targetTh
 		}
 		mentions = append(mentions, cleanStr(name))
 		if roleID != "" {
-			mentionRoleIDs = append(mentionRoleIDs, roleID)
+			roleIDs = append(roleIDs, roleID)
 		}
 	}
+	return mentions, userIDs, roleIDs
+}
+
+func resolveAttachments(m *discordgo.Message) []string {
 	var attachments []string
 	for _, a := range m.Attachments {
 		if a != nil && a.URL != "" {
 			attachments = append(attachments, a.URL)
 		}
 	}
-	_, effName, _, threadName := queue.ResolveChannelAndThread(s, m.ChannelID)
-	return db.MessageMetadata{
-		ChannelID:         m.ChannelID,
-		ChannelName:       effName,
-		TargetThreadID:    targetThreadID,
-		ThreadName:        threadName,
-		GuildID:           m.GuildID,
-		AuthorUsername:    username,
-		AuthorGlobalName:  globalName,
-		AuthorBot:         authorBot,
-		IsAdmin:           isAdmin,
-		Mentions:          mentions,
-		MentionUserIDs:    mentionUserIDs,
-		MentionRoleIDs:    mentionRoleIDs,
-		ReplyingToAuthor:  replyingToAuthor,
-		ReplyingToContent: replyingToContent,
-		Attachments:       attachments,
+	return attachments
+}
+
+// populateDiscordMessageFields populates structured Discord fields onto a db.Message.
+func populateDiscordMessageFields(s *discordgo.Session, m *discordgo.Message, msg *db.Message) {
+	if m == nil || msg == nil {
+		return
 	}
+	roleNames := resolveMentionRoleNames(s, m)
+	var adminUsers []string
+	if cfg := currentFunnelConfig(); cfg != nil {
+		adminUsers = cfg.Current().AdminUsers
+	}
+	if m.Author != nil {
+		msg.IsAdmin = config.IsAdmin(adminUsers, m.Author.ID, m.Author.Username, m.Author.GlobalName)
+		msg.AuthorGlobalName, msg.AuthorBot = m.Author.GlobalName, m.Author.Bot
+	}
+
+	msg.ReplyingToAuthor, msg.ReplyingToContent = resolveReplyContext(s, m)
+	msg.Mentions, msg.MentionUserIDs, msg.MentionRoleIDs = resolveMentionsAndRoles(m, roleNames)
+	msg.Attachments = resolveAttachments(m)
+
+	_, effName, _, threadName := queue.ResolveChannelAndThread(s, m.ChannelID)
+	msg.ChannelID = m.ChannelID
+	msg.ChannelName = effName
+	msg.ThreadName = threadName
 }
 
 // resolveEffectiveChannelPolicy resolves the ChannelPolicy for a channel or thread.
@@ -433,8 +436,8 @@ func buildAndInsertFunnelMessage(ctx context.Context, s *discordgo.Session, stor
 	if m != nil {
 		m.GuildID = resolvedGuildID
 	}
-	metadata := extractDiscordMetadata(s, m, targetThreadID)
 	authorID, authorName, rawContent, msgID, effort := "", "Discord User", "", "", ""
+	var ephemeral *bool
 	if m != nil {
 		msgID = m.ID
 		if m.Author != nil {
@@ -446,7 +449,7 @@ func buildAndInsertFunnelMessage(ctx context.Context, s *discordgo.Session, stor
 		effort = policy.GetEffort()
 		if effort == "low" || effort == "medium" {
 			ephem := false
-			metadata.Ephemeral = &ephem
+			ephemeral = &ephem
 		}
 	}
 	msg := db.Message{
@@ -457,11 +460,12 @@ func buildAndInsertFunnelMessage(ctx context.Context, s *discordgo.Session, stor
 		AuthorName: authorName,
 		Content:    rawContent,
 		Effort:     effort,
-		Metadata:   metadata,
+		Ephemeral:  ephemeral,
 		Status:     db.StatusPending,
 		CreatedAt:  createdAt,
 		UpdatedAt:  time.Now().UTC(),
 	}
+	populateDiscordMessageFields(s, m, &msg)
 	if err := store.InsertMessage(ctx, msg); err != nil {
 		return msg, err
 	}

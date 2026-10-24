@@ -9,8 +9,7 @@ import (
 )
 
 type SQLStore struct {
-	db         DBTX
-	isPostgres bool
+	db DBTX
 }
 
 var ErrNilDatabase = errors.New("database is nil")
@@ -71,5 +70,5 @@ func NewSQLStore(database *sql.DB) Store {
 	if database == nil {
 		return nil
 	}
-	return &SQLStore{db: database, isPostgres: isPostgres(database)}
+	return &SQLStore{db: database}
 }

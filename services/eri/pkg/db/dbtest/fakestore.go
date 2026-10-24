@@ -167,8 +167,9 @@ func cloneMessage(m *db.Message) *db.Message {
 		return nil
 	}
 	cp := *m
-	cp.Metadata.Mentions, cp.Metadata.MentionUserIDs = cloneSlice(m.Metadata.Mentions), cloneSlice(m.Metadata.MentionUserIDs)
-	cp.Metadata.MentionRoleIDs, cp.Metadata.Attachments = cloneSlice(m.Metadata.MentionRoleIDs), cloneSlice(m.Metadata.Attachments)
+	cp.Mentions, cp.MentionUserIDs = cloneSlice(m.Mentions), cloneSlice(m.MentionUserIDs)
+	cp.MentionRoleIDs, cp.Attachments = cloneSlice(m.MentionRoleIDs), cloneSlice(m.Attachments)
+	cp.Ephemeral = clonePtr(m.Ephemeral)
 	return &cp
 }
 

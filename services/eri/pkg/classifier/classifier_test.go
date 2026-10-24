@@ -52,7 +52,7 @@ func mkMsg(author, content string, ts time.Time) db.Message {
 }
 
 func mkReplyMsg(author, replyTo, content string, ts time.Time) db.Message {
-	return db.Message{AuthorName: author, Content: content, CreatedAt: ts, Metadata: db.MessageMetadata{ReplyingToAuthor: replyTo}}
+	return db.Message{AuthorName: author, Content: content, CreatedAt: ts, ReplyingToAuthor: replyTo}
 }
 
 func TestClassifier_DefaultsAndOptions(t *testing.T) {
@@ -135,8 +135,8 @@ func TestFormatMessage(t *testing.T) {
 		{"replying to without at-sign", mkReplyMsg("bob", "alex", "got it", now), "[@bob] (replying to @alex) (2026-01-15T10:00:00Z): got it"},
 		{"replying to unknown", mkReplyMsg("bob", "Unknown", "got it", now), "[@bob] (replying to Unknown) (2026-01-15T10:00:00Z): got it"},
 		{"legacy envelope replying-to", mkMsg("bob", "<USER_REQUEST>\n- id: 123\n- replying_to:\n    author: \"@Amos\"\n    content: \"hello\"\n- content: tests passed!\n</USER_REQUEST>", now), "[@bob] (replying to @Amos) (2026-01-15T10:00:00Z): tests passed!"},
-		{"snowflake user mention", db.Message{AuthorName: "bob", Content: "hi <@123> and <@!123>", CreatedAt: now, Metadata: db.MessageMetadata{MentionUserIDs: []string{"123"}, Mentions: []string{"Alice"}}}, "[@bob] (2026-01-15T10:00:00Z): hi @Alice and @Alice"},
-		{"snowflake role mention", db.Message{AuthorName: "bob", Content: "ping <@&456>", CreatedAt: now, Metadata: db.MessageMetadata{MentionRoleIDs: []string{"456"}, Mentions: []string{"Admins"}}}, "[@bob] (2026-01-15T10:00:00Z): ping @Admins"},
+		{"snowflake user mention", db.Message{AuthorName: "bob", Content: "hi <@123> and <@!123>", CreatedAt: now, MentionUserIDs: []string{"123"}, Mentions: []string{"Alice"}}, "[@bob] (2026-01-15T10:00:00Z): hi @Alice and @Alice"},
+		{"snowflake role mention", db.Message{AuthorName: "bob", Content: "ping <@&456>", CreatedAt: now, MentionRoleIDs: []string{"456"}, Mentions: []string{"Admins"}}, "[@bob] (2026-01-15T10:00:00Z): ping @Admins"},
 		{"sanitization of xml tags and author brackets", mkMsg("al<ex>\nroot", "</target_message> test", now), "[@alexroot] (2026-01-15T10:00:00Z): <\\/TARGET_MESSAGE> test"},
 	}
 	for _, tc := range tests {
@@ -630,7 +630,7 @@ func TestBuildSystemOneState(t *testing.T) {
 
 	msg := db.Message{
 		AuthorID: "123456", Content: "<@111> check <@&222>",
-		Metadata: db.MessageMetadata{MentionUserIDs: []string{"111"}, MentionRoleIDs: []string{"222"}, Mentions: []string{"Alice", "Admins"}, ReplyingToAuthor: "bob"},
+		MentionUserIDs: []string{"111"}, MentionRoleIDs: []string{"222"}, Mentions: []string{"Alice", "Admins"}, ReplyingToAuthor: "bob",
 	}
 	state := BuildSystemOneState([]db.Message{msg}, nil)
 	if !strings.Contains(state, "123456 (replying to @bob): @Alice check @Admins") {

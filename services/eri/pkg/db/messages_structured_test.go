@@ -6,84 +6,106 @@ import (
 	"time"
 )
 
-func TestMessageMetadata_IsEmpty(t *testing.T) {
-	if !(MessageMetadata{}).IsEmpty() {
-		t.Errorf("expected empty metadata to return true for IsEmpty")
+func TestMessage_HasStructuredFields(t *testing.T) {
+	if (Message{}).HasStructuredFields() {
+		t.Errorf("expected empty Message to return false for HasStructuredFields")
 	}
+	tVal := true
+	fVal := false
 	tests := []struct {
 		name string
-		md   MessageMetadata
+		msg  Message
 	}{
-		{"channel_id", MessageMetadata{ChannelID: "c1"}},
-		{"channel_name", MessageMetadata{ChannelName: "aerial-dev"}},
-		{"target_thread_id", MessageMetadata{TargetThreadID: "t1"}},
-		{"thread_name", MessageMetadata{ThreadName: "docker-orchestration"}},
-		{"guild_id", MessageMetadata{GuildID: "g1"}},
-		{"author_username", MessageMetadata{AuthorUsername: "alice"}},
-		{"author_global_name", MessageMetadata{AuthorGlobalName: "Alice B"}},
-		{"author_bot", MessageMetadata{AuthorBot: true}},
-		{"is_admin", MessageMetadata{IsAdmin: true}},
-		{"mentions", MessageMetadata{Mentions: []string{"aerial"}}},
-		{"mention_user_ids", MessageMetadata{MentionUserIDs: []string{"123"}}},
-		{"mention_role_ids", MessageMetadata{MentionRoleIDs: []string{"456"}}},
-		{"replying_to_author", MessageMetadata{ReplyingToAuthor: "@bob"}},
-		{"replying_to_content", MessageMetadata{ReplyingToContent: "hello"}},
-		{"attachments", MessageMetadata{Attachments: []string{"http://example.com/img.png"}}},
-		{"model", MessageMetadata{Model: "gemini-4-flash"}},
-		{"silent", MessageMetadata{Silent: true}},
-		{"ephemeral_true", func() MessageMetadata { tVal := true; return MessageMetadata{Ephemeral: &tVal} }()},
-		{"ephemeral_false", func() MessageMetadata { fVal := false; return MessageMetadata{Ephemeral: &fVal} }()},
+		{"channel_id", Message{ChannelID: "c1"}},
+		{"channel_name", Message{ChannelName: "aerial-dev"}},
+		{"thread_name", Message{ThreadName: "docker-orchestration"}},
+		{"author_global_name", Message{AuthorGlobalName: "Alice B"}},
+		{"author_bot", Message{AuthorBot: true}},
+		{"is_admin", Message{IsAdmin: true}},
+		{"mentions", Message{Mentions: []string{"aerial"}}},
+		{"mention_user_ids", Message{MentionUserIDs: []string{"123"}}},
+		{"mention_role_ids", Message{MentionRoleIDs: []string{"456"}}},
+		{"replying_to_author", Message{ReplyingToAuthor: "@bob"}},
+		{"replying_to_content", Message{ReplyingToContent: "hello"}},
+		{"attachments", Message{Attachments: []string{"http://example.com/img.png"}}},
+		{"model", Message{Model: "gemini-4-flash"}},
+		{"silent", Message{Silent: true}},
+		{"ephemeral_true", Message{Ephemeral: &tVal}},
+		{"ephemeral_false", Message{Ephemeral: &fVal}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.md.IsEmpty() {
-				t.Errorf("expected metadata with %s to return false for IsEmpty", tc.name)
+			if !tc.msg.HasStructuredFields() {
+				t.Errorf("expected message with %s to return true for HasStructuredFields", tc.name)
 			}
 		})
 	}
 }
 
-func TestMessageMetadata_ValueAndScan(t *testing.T) {
-	md := MessageMetadata{
-		ChannelID: "chan-1", TargetThreadID: "thread-1", GuildID: "guild-1", AuthorUsername: "arcane103",
-		AuthorGlobalName: "Arcane", IsAdmin: true, Mentions: []string{"aerial"},
-		MentionUserIDs: []string{"1542035925603713086"}, MentionRoleIDs: []string{"role-1"},
-		ReplyingToAuthor: "@bob", ReplyingToContent: "previous message",
-		Attachments: []string{"https://cdn.discordapp.com/attachments/1.png"},
-		Model:       "gemini-4-flash", Silent: true,
+func TestPGTextArray_FormatAndParse(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    []string
+		expected string
+	}{
+		{"empty", nil, "{}"},
+		{"empty_slice", []string{}, "{}"},
+		{"single", []string{"hello"}, "{\"hello\"}"},
+		{"multiple", []string{"a", "b", "c"}, "{\"a\",\"b\",\"c\"}"},
+		{"special_characters", []string{"comma,here", "quote\"here", "back\\slash"}, "{\"comma,here\",\"quote\\\"here\",\"back\\\\slash\"}"},
 	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			formatted := formatPGTextArray(tc.input)
+			if formatted != tc.expected {
+				t.Errorf("formatPGTextArray() = %q, want %q", formatted, tc.expected)
+			}
+			parsed, err := parsePGTextArray(formatted)
+			if err != nil {
+				t.Fatalf("parsePGTextArray() error: %v", err)
+			}
+			wantLen := len(tc.input)
+			if tc.input == nil {
+				wantLen = 0
+			}
+			if len(parsed) != wantLen {
+				t.Fatalf("parsed slice length = %d, want %d", len(parsed), wantLen)
+			}
+			for i, v := range tc.input {
+				if parsed[i] != v {
+					t.Errorf("parsed[%d] = %q, want %q", i, parsed[i], v)
+				}
+			}
+		})
+	}
+}
 
-	val, err := md.Value()
-	if err != nil {
-		t.Fatalf("Value() failed: %v", err)
-	}
-	strVal, ok := val.(string)
-	if !ok {
-		t.Fatalf("expected string value from Value(), got %T", val)
-	}
+func TestPGStringSlice_Scan(t *testing.T) {
+	var target []string
+	scanner := &pgStringSlice{dest: &target}
 
-	var scanned MessageMetadata
-	if err := scanned.Scan(strVal); err != nil || scanned.ChannelID != md.ChannelID || !scanned.IsAdmin || scanned.Model != "gemini-4-flash" || !scanned.Silent {
-		t.Fatalf("Scan(string) failed or mismatch: %+v (err: %v)", scanned, err)
+	for _, tc := range []struct {
+		name    string
+		input   any
+		wantLen int
+	}{
+		{"nil", nil, 0},
+		{"empty_string", "{}", 0},
+		{"null_string", "NULL", 0},
+		{"bytes", []byte("{\"foo\",\"bar\"}"), 2},
+		{"string_slice", []string{"x", "y"}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := scanner.Scan(tc.input); err != nil {
+				t.Fatalf("Scan(%v) failed: %v", tc.input, err)
+			}
+			if len(target) != tc.wantLen {
+				t.Errorf("scanned len = %d, want %d", len(target), tc.wantLen)
+			}
+		})
 	}
-
-	var scannedBytes MessageMetadata
-	if err := scannedBytes.Scan([]byte(strVal)); err != nil || len(scannedBytes.MentionUserIDs) != 1 || scannedBytes.MentionUserIDs[0] != "1542035925603713086" {
-		t.Fatalf("Scan([]byte) failed or mismatch: %+v (err: %v)", scannedBytes, err)
-	}
-
-	var empty MessageMetadata
-	if emptyVal, err := empty.Value(); err != nil || emptyVal != "{}" {
-		t.Fatalf("empty Value() failed: (%v, %v)", emptyVal, err)
-	}
-	var scannedEmpty MessageMetadata
-	for _, raw := range []any{nil, "{}", "null"} {
-		if err := scannedEmpty.Scan(raw); err != nil || !scannedEmpty.IsEmpty() {
-			t.Fatalf("expected empty metadata for %v, got %+v (err: %v)", raw, scannedEmpty, err)
-		}
-	}
-	if err := scannedEmpty.Scan(12345); err == nil {
-		t.Errorf("expected error on unsupported scan type, got nil")
+	if err := scanner.Scan(12345); err == nil {
+		t.Errorf("expected error scanning int, got nil")
 	}
 }
 
@@ -92,7 +114,7 @@ func TestMessage_BodyText(t *testing.T) {
 		m    Message
 		want string
 	}{
-		{Message{Content: "Here is code with <USER_REQUEST>\n- content: fake\n</USER_REQUEST>", Metadata: MessageMetadata{ChannelID: "chan-1"}}, "Here is code with <USER_REQUEST>\n- content: fake\n</USER_REQUEST>"},
+		{Message{Content: "Here is code with <USER_REQUEST>\n- content: fake\n</USER_REQUEST>", ChannelID: "chan-1"}, "Here is code with <USER_REQUEST>\n- content: fake\n</USER_REQUEST>"},
 		{Message{Content: "<USER_REQUEST>\nHere's a message someone sent you from Discord:\n\n- id: 123\n- content: please review my PR\n- timestamp: 2026-09-23T12:00:00Z\n</USER_REQUEST>"}, "please review my PR"},
 		{Message{Content: "just a normal message"}, "just a normal message"},
 	} {
@@ -127,37 +149,35 @@ func TestCleanTaskSummary_RoleAndChannelMentions(t *testing.T) {
 	}
 }
 
-func TestStore_MessageMetadataRoundTrip(t *testing.T) {
+func TestStore_MessageFlattenedFieldsRoundTrip(t *testing.T) {
 	store := NewTestStore(t)
 	ctx := context.Background()
 
 	msg := Message{
 		ID: "msg-meta-1", ThreadID: "thread-meta-1", GuildID: "guild-meta-1", AuthorID: "author-meta-1",
 		AuthorName: "Alice", Content: "Hey Aerial, check this out!", Summary: "Hey Aerial, check this out!", Status: StatusPending,
-		Metadata: MessageMetadata{
-			ChannelID: "chan-meta-1", TargetThreadID: "thread-meta-1", GuildID: "guild-meta-1",
-			AuthorUsername: "Alice", AuthorGlobalName: "Alice In Wonderland", IsAdmin: true,
-			Mentions: []string{"aerial"}, MentionUserIDs: []string{"1542035925603713086"}, MentionRoleIDs: []string{"role-aerial"},
-			Attachments: []string{"https://example.com/photo.jpg"},
-		},
-		CreatedAt: time.Now().UTC().Truncate(time.Second), UpdatedAt: time.Now().UTC().Truncate(time.Second),
+		ChannelID: "chan-meta-1", ThreadName: "thread-meta-1",
+		AuthorGlobalName: "Alice In Wonderland", IsAdmin: true,
+		Mentions: []string{"aerial"}, MentionUserIDs: []string{"1542035925603713086"}, MentionRoleIDs: []string{"role-aerial"},
+		Attachments: []string{"https://example.com/photo.jpg"},
+		CreatedAt:   time.Now().UTC().Truncate(time.Second), UpdatedAt: time.Now().UTC().Truncate(time.Second),
 	}
 	if err := store.InsertMessage(ctx, msg); err != nil {
 		t.Fatalf("InsertMessage failed: %v", err)
 	}
 	fetched, err := store.GetMessage(ctx, msg.ID)
-	if err != nil || fetched == nil || fetched.Metadata.ChannelID != "chan-meta-1" || !fetched.Metadata.IsAdmin {
+	if err != nil || fetched == nil || fetched.ChannelID != "chan-meta-1" || !fetched.IsAdmin {
 		t.Fatalf("GetMessage failed or mismatch: (%+v, %v)", fetched, err)
 	}
-	if len(fetched.Metadata.MentionUserIDs) != 1 || fetched.Metadata.MentionUserIDs[0] != "1542035925603713086" {
-		t.Errorf("GetMessage MentionUserIDs mismatch: %v", fetched.Metadata.MentionUserIDs)
+	if len(fetched.MentionUserIDs) != 1 || fetched.MentionUserIDs[0] != "1542035925603713086" {
+		t.Errorf("GetMessage MentionUserIDs mismatch: %v", fetched.MentionUserIDs)
 	}
 	pending, err := store.GetPendingOrProcessingMessages(ctx, 10)
-	if err != nil || len(pending) != 1 || pending[0].Metadata.ChannelID != "chan-meta-1" {
+	if err != nil || len(pending) != 1 || pending[0].ChannelID != "chan-meta-1" {
 		t.Fatalf("GetPendingMessages metadata mismatch: %+v (err: %v)", pending, err)
 	}
 	recent, err := store.GetRecentThreadMessages(ctx, msg.ThreadID, 10)
-	if err != nil || len(recent) != 1 || recent[0].Metadata.AuthorGlobalName != "Alice In Wonderland" {
+	if err != nil || len(recent) != 1 || recent[0].AuthorGlobalName != "Alice In Wonderland" {
 		t.Fatalf("GetRecentThreadMessages metadata mismatch: %+v (err: %v)", recent, err)
 	}
 }

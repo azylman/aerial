@@ -243,9 +243,9 @@ func isTier1Wake(m db.Message, botUserID string, botRoleIDs []string) bool {
 	var mentionIDs, candidates []string
 	var rawContent string
 
-	if !m.Metadata.IsEmpty() {
-		mentionIDs = append(slices.Clone(m.Metadata.MentionUserIDs), m.Metadata.MentionRoleIDs...)
-		candidates = append(slices.Clone(m.Metadata.Mentions), m.Metadata.ReplyingToAuthor)
+	if m.HasStructuredFields() {
+		mentionIDs = append(slices.Clone(m.MentionUserIDs), m.MentionRoleIDs...)
+		candidates = append(slices.Clone(m.Mentions), m.ReplyingToAuthor)
 	} else {
 		rawContent = m.Content
 		mentionIDs = append(extractHeaderTokens(m.Content, "- mention_user_ids: ["), extractHeaderTokens(m.Content, "- mention_role_ids: [")...)

@@ -208,7 +208,7 @@ func TestTranscriptStore_GetSessionSyncStatesWithContext_MockDB(t *testing.T) {
 				}
 				return dbMem.QueryContext(ctx, tc.querySQL)
 			}}
-			states, err := (&SQLStore{db: mock, isPostgres: true}).GetSessionSyncStates(context.Background())
+			states, err := (&SQLStore{db: mock}).GetSessionSyncStates(context.Background())
 			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
 				t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
 			} else if tc.wantErr == "" && (err != nil || len(states) != tc.wantLen || states["sess-1"].LastIndexedStep != 10 || !states["sess-1"].IsSettled) {
@@ -245,7 +245,7 @@ func TestTranscriptStore_UpsertSessionSummaryWithContext_MockDB(t *testing.T) {
 				}
 				return testCustomResult{rows: 1}, nil
 			}}
-			err := (&SQLStore{db: mock, isPostgres: true}).UpsertSessionSummary(context.Background(), summary)
+			err := (&SQLStore{db: mock}).UpsertSessionSummary(context.Background(), summary)
 			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
 				t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
 			} else if tc.wantErr == "" && (err != nil || !strings.Contains(capturedQuery, "INSERT INTO session_summaries") || len(capturedArgs) != 10) {
@@ -282,7 +282,7 @@ func TestTranscriptStore_BatchInsertTranscriptStepsWithContext_MockDB(t *testing
 				}
 				return testCustomResult{rows: int64(len(args) / 6)}, nil
 			}}
-			err := (&SQLStore{db: mock, isPostgres: true}).BatchInsertTranscriptSteps(context.Background(), steps[:tc.stepsCount])
+			err := (&SQLStore{db: mock}).BatchInsertTranscriptSteps(context.Background(), steps[:tc.stepsCount])
 			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
 				t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
 			} else if tc.wantErr == "" && (err != nil || chunkCount != tc.wantChunks || !strings.Contains(lastQuery, "INSERT INTO transcript_steps")) {
@@ -321,7 +321,7 @@ func TestTranscriptStore_SearchSessionSummariesWithContext_MockDB(t *testing.T) 
 				}
 				return dbMem.QueryContext(ctx, tc.scanSQL)
 			}}
-			res, err := (&SQLStore{db: mockDB, isPostgres: true}).SearchSessionSummaries(context.Background(), tc.emb, tc.query, 10, 0.5)
+			res, err := (&SQLStore{db: mockDB}).SearchSessionSummaries(context.Background(), tc.emb, tc.query, 10, 0.5)
 			if tc.wantErrMsg != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrMsg)) {
 				t.Fatalf("expected error containing %q, got %v", tc.wantErrMsg, err)
 			} else if tc.wantErrMsg == "" && (err != nil || len(res) != tc.wantLen) {
@@ -361,7 +361,7 @@ func TestTranscriptStore_SearchTranscriptStepsWithContext_MockDB(t *testing.T) {
 				}
 				return dbMem.QueryContext(ctx, tc.scanSQL)
 			}}
-			steps, err := (&SQLStore{db: mockDB, isPostgres: true}).SearchTranscriptSteps(context.Background(), tc.query, tc.sess, tc.tool, tc.limit)
+			steps, err := (&SQLStore{db: mockDB}).SearchTranscriptSteps(context.Background(), tc.query, tc.sess, tc.tool, tc.limit)
 			if tc.wantErrMsg != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrMsg)) {
 				t.Fatalf("expected error containing %q, got %v", tc.wantErrMsg, err)
 			} else if tc.wantErrMsg == "" && (err != nil || len(steps) != tc.wantLen) {
@@ -482,7 +482,7 @@ func TestTranscriptStore_GetTranscriptStepRange_MockDB(t *testing.T) {
 				}
 				return dbMem.QueryContext(ctx, tc.scanSQL)
 			}}
-			steps, err := (&SQLStore{db: mockDB, isPostgres: true}).GetTranscriptStepRange(context.Background(), tc.session, tc.startStep, tc.endStep)
+			steps, err := (&SQLStore{db: mockDB}).GetTranscriptStepRange(context.Background(), tc.session, tc.startStep, tc.endStep)
 			if tc.wantErrMsg != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrMsg)) {
 				t.Fatalf("expected error containing %q, got %v", tc.wantErrMsg, err)
 			} else if tc.wantErrMsg == "" && (err != nil || len(steps) != tc.wantLen) {

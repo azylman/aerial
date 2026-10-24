@@ -124,7 +124,7 @@ func TestPostgresWireMockAndOpen(t *testing.T) {
 	addr := startMockPostgres(t)
 	dsn := fmt.Sprintf("postgres://mock:mock@%s/testdb?sslmode=disable", addr)
 	db, err := Open(dsn)
-	if err != nil || !isPostgres(db) {
+	if err != nil {
 		t.Fatalf("Open with mock postgres failed: (%v, %v)", db, err)
 	}
 	defer db.Close()
@@ -135,15 +135,4 @@ func TestPostgresWireMockAndOpen(t *testing.T) {
 		t.Fatalf("New(cfg) with mock postgres failed: %v", err)
 	}
 	defer dbCfg.Close()
-}
-
-func TestIsPostgresDriver(t *testing.T) {
-	if isPostgres(nil) || isPostgres(dummyDBTX{}) || isPostgres(dummyDBTX{d: nil}) {
-		t.Errorf("expected isPostgres to be false for nil or non-pg drivers")
-	}
-	sqliteDB := setupTestDB(t)
-	defer sqliteDB.Close()
-	if isPostgres(sqliteDB) {
-		t.Errorf("expected isPostgres(sqliteDB) to be false")
-	}
 }

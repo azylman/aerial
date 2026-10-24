@@ -25,7 +25,7 @@ func resolveMessageEffort(m db.Message) string {
 	if effort != "" {
 		return "high"
 	}
-	model := strings.ToLower(strings.TrimSpace(m.Metadata.Model))
+	model := strings.ToLower(strings.TrimSpace(m.Model))
 	if strings.Contains(model, "medium") {
 		return "medium"
 	}
@@ -36,7 +36,7 @@ func resolveMessageEffort(m db.Message) string {
 }
 
 func (p *WorkerPool) resolveScopeKey(m db.Message) string {
-	k, err := ResolvePoolKey(m.Metadata.Ephemeral, resolveMessageEffort(m))
+	k, err := ResolvePoolKey(m.Ephemeral, resolveMessageEffort(m))
 	if err == nil && p != nil && p.Pool(k) != nil {
 		switch k {
 		case PoolKey{Ephemeral: true, Effort: "low"}:
@@ -184,13 +184,13 @@ func (p *WorkerPool) runThreadWorker(scopeKey string, state *threadWorkerState) 
 func FormatSingleDiscordPrompt(m db.Message, tzOpt ...string) string {
 	var sb strings.Builder
 	sb.WriteString("<USER_REQUEST>\nHere's a message someone sent you from Discord:\n\n")
-	channelID := m.Metadata.ChannelID
+	channelID := m.ChannelID
 	if channelID == "" {
 		channelID = m.ThreadID
 	}
 	fmt.Fprintf(&sb, "- id: %s\n- channel_id: %s\n", m.ID, channelID)
-	if m.Metadata.ChannelName != "" {
-		if clean := sanitizePromptHeaderField(m.Metadata.ChannelName); clean != "" {
+	if m.ChannelName != "" {
+		if clean := sanitizePromptHeaderField(m.ChannelName); clean != "" {
 			if !strings.HasPrefix(clean, "#") {
 				clean = "#" + clean
 			}
@@ -198,23 +198,23 @@ func FormatSingleDiscordPrompt(m db.Message, tzOpt ...string) string {
 		}
 	}
 	fmt.Fprintf(&sb, "- thread_id: %s\n", m.ThreadID)
-	if m.Metadata.ThreadName != "" {
-		if clean := sanitizePromptHeaderField(m.Metadata.ThreadName); clean != "" {
+	if m.ThreadName != "" {
+		if clean := sanitizePromptHeaderField(m.ThreadName); clean != "" {
 			fmt.Fprintf(&sb, "- thread_name: %q\n", clean)
 		}
 	}
 	fmt.Fprintf(&sb, "- guild_id: %s\n- author_id: %s\n- author_username: %s\n- author_global_name: %s\n- author_bot: %t\n- is_admin: %t\n",
 		m.GuildID, m.AuthorID, sanitizePromptHeaderField(m.AuthorName),
-		sanitizePromptHeaderField(m.Metadata.AuthorGlobalName), m.Metadata.AuthorBot, m.Metadata.IsAdmin)
-	if m.Metadata.ReplyingToAuthor != "" || m.Metadata.ReplyingToContent != "" {
-		authorName := m.Metadata.ReplyingToAuthor
+		sanitizePromptHeaderField(m.AuthorGlobalName), m.AuthorBot, m.IsAdmin)
+	if m.ReplyingToAuthor != "" || m.ReplyingToContent != "" {
+		authorName := m.ReplyingToAuthor
 		if authorName == "" {
 			authorName = "Unknown"
 		}
 		if !strings.HasPrefix(authorName, "@") && authorName != "Unknown" {
 			authorName = "@" + authorName
 		}
-		fmt.Fprintf(&sb, "- replying_to:\n    author: %q\n    content: %q\n", authorName, sanitizer.SanitizePromptTags(m.Metadata.ReplyingToContent))
+		fmt.Fprintf(&sb, "- replying_to:\n    author: %q\n    content: %q\n", authorName, sanitizer.SanitizePromptTags(m.ReplyingToContent))
 	}
 	fmt.Fprintf(&sb, "- content: %s\n", sanitizer.SanitizePromptTags(m.Content))
 	ts := m.CreatedAt
@@ -227,18 +227,18 @@ func FormatSingleDiscordPrompt(m db.Message, tzOpt ...string) string {
 		}
 	}
 	closingInstruction := "It will be delivered directly to Discord."
-	if m.Metadata.Silent {
+	if m.Silent {
 		closingInstruction = "This is a silent background turn; your response will not be delivered to Discord."
 	}
 	fmt.Fprintf(&sb, "- timestamp: %s\n- mentions: %v\n- mention_user_ids: %v\n- mention_role_ids: %v\n- attachments: %v\n\nOnly formulate and output your final response once all immediate work is complete. %s\n</USER_REQUEST>",
-		ts.Format(time.RFC3339), nonNilSlice(m.Metadata.Mentions), nonNilSlice(m.Metadata.MentionUserIDs), nonNilSlice(m.Metadata.MentionRoleIDs), nonNilSlice(m.Metadata.Attachments), closingInstruction)
+		ts.Format(time.RFC3339), nonNilSlice(m.Mentions), nonNilSlice(m.MentionUserIDs), nonNilSlice(m.MentionRoleIDs), nonNilSlice(m.Attachments), closingInstruction)
 	return sb.String()
 }
 
 func extractBurstEphemeral(burst []db.Message) (bool, bool) {
 	for _, m := range burst {
-		if m.Metadata.Ephemeral != nil {
-			return *m.Metadata.Ephemeral, true
+		if m.Ephemeral != nil {
+			return *m.Ephemeral, true
 		}
 	}
 	return false, false
@@ -246,7 +246,7 @@ func extractBurstEphemeral(burst []db.Message) (bool, bool) {
 
 func extractBurstModel(burst []db.Message) string {
 	for _, m := range burst {
-		if model := strings.TrimSpace(m.Metadata.Model); model != "" {
+		if model := strings.TrimSpace(m.Model); model != "" {
 			return model
 		}
 	}
@@ -258,7 +258,7 @@ func extractBurstSilent(burst []db.Message) bool {
 		return false
 	}
 	for _, m := range burst {
-		if !m.Metadata.Silent {
+		if !m.Silent {
 			return false
 		}
 	}
@@ -294,7 +294,7 @@ func CoalesceBurstPrompt(burst []db.Message, tzOpt ...string) string {
 		return ""
 	}
 	if len(burst) == 1 {
-		if !burst[0].Metadata.IsEmpty() {
+		if burst[0].HasStructuredFields() {
 			return FormatSingleDiscordPrompt(burst[0], tzOpt...)
 		}
 		return burst[0].Content
