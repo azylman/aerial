@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -384,68 +385,6 @@ func TestHandleStatusWidget(t *testing.T) {
 	})
 }
 
-func TestHandleTranscripts(t *testing.T) {
-	store := dbtest.NewFakeStore()
-	tmpHome := t.TempDir()
-
-	// 1. Empty dir returns []
-	handler := handleTranscripts(store, tmpHome)
-	if w := runHTTP(handler, http.MethodGet, "/transcripts", nil); w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != "[]" {
-		t.Fatalf("Expected 200 with empty array, got %d: %q", w.Code, w.Body.String())
-	}
-
-	// 2. Transcript file with various errors and include_raw=true
-	_ = store.SaveSessionID(context.Background(), "thread-discord-100", "conv-alpha-100")
-	brainDir := filepath.Join(tmpHome, "brain")
-	convDir := filepath.Join(brainDir, "conv-alpha-100", ".system_generated", "logs")
-	if err := os.MkdirAll(convDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll failed: %v", err)
-	}
-	transcriptContent := "{\"step_index\": 1, \"status\": \"DONE\", \"content\": \"hello\"}\n" +
-		"{\"step_index\": 2, \"status\": \"ERROR\", \"error\": \"something failed\"}\n" +
-		"{\"step_index\": 3, \"status\": \"RUNNING\", \"error\": {\"code\": 500, \"message\": \"object error\"}}\n" +
-		"{\"step_index\": 4, \"status\": \"RUNNING\", \"error\": 99999}\n" +
-		"not a valid json line\n"
-	if err := os.WriteFile(filepath.Join(convDir, "transcript.jsonl"), []byte(transcriptContent), 0o644); err != nil {
-		t.Fatalf("WriteFile failed: %v", err)
-	}
-
-	// Include unreadable folder (missing transcript.jsonl) and non-directory file
-	_ = os.MkdirAll(filepath.Join(brainDir, "conv-no-transcript", ".system_generated", "logs"), 0o755)
-	_ = os.WriteFile(filepath.Join(brainDir, "regular_file.txt"), []byte("not a dir"), 0o644)
-
-	handler2 := handleTranscripts(store, brainDir, "", "   ", "/nonexistent/dir")
-	wGet := runHTTP(handler2, http.MethodGet, "/transcripts?include_raw=true", nil)
-	if wGet.Code != http.StatusOK {
-		t.Fatalf("Expected 200 OK, got %d", wGet.Code)
-	}
-	bodyStr := wGet.Body.String()
-	if !strings.Contains(bodyStr, "conv-alpha-100") || !strings.Contains(bodyStr, "99999") {
-		t.Errorf("Expected conv-alpha-100 and 99999 in response: %s", bodyStr)
-	}
-
-	// 3. Closed DB error branch (GetExternalConversationID warning branch)
-	closedStore := dbtest.NewFakeStore()
-	_ = closedStore.Close()
-	if w := runHTTP(handleTranscripts(closedStore, brainDir), http.MethodGet, "/transcripts", nil); w.Code != http.StatusOK {
-		t.Errorf("Expected 200 OK on closed DB warning branch, got %d", w.Code)
-	}
-
-	// 4. Multi-root deduplication
-	root1 := filepath.Join(tmpHome, "root1")
-	root2 := filepath.Join(tmpHome, "root2")
-	dir1 := filepath.Join(root1, "shared-conv-1", ".system_generated", "logs")
-	dir2 := filepath.Join(root2, "shared-conv-1", ".system_generated", "logs")
-	_ = os.MkdirAll(dir1, 0o755)
-	_ = os.MkdirAll(dir2, 0o755)
-	_ = os.WriteFile(filepath.Join(dir1, "transcript.jsonl"), []byte(`{"step_index":1,"status":"DONE"}`+"\n"), 0o644)
-	_ = os.WriteFile(filepath.Join(dir2, "transcript.jsonl"), []byte(`{"step_index":1,"status":"DONE"}`+"\n"), 0o644)
-
-	if w := runHTTP(handleTranscripts(store, root1, root2), http.MethodGet, "/transcripts", nil); w.Code != http.StatusOK {
-		t.Errorf("Expected 200 OK from dedup, got %d", w.Code)
-	}
-}
-
 func TestHandleTranscriptSearchAndStats(t *testing.T) {
 	fake := dbtest.NewFakeStore()
 	_ = fake.UpsertSessionSummary(context.Background(), db.SessionSummary{
@@ -506,6 +445,14 @@ func TestHandleTranscriptSearchAndStats(t *testing.T) {
 		}
 	})
 
+	t.Run("search with since and empty query steps mode", func(t *testing.T) {
+		sinceTime := time.Now().Add(-10 * time.Minute).Format(time.RFC3339)
+		w := runHTTP(handleTranscriptSearch(fake, nil), http.MethodGet, "/api/transcripts/search?mode=steps&session=sess-mux-1&since="+url.QueryEscape(sinceTime), nil)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+		}
+	})
+
 	t.Run("stats success", func(t *testing.T) {
 		w := runHTTP(handleTranscriptStats(fake), http.MethodGet, "/api/transcripts/stats", nil)
 		if w.Code != http.StatusOK {
@@ -535,7 +482,7 @@ func (e *errTranscriptStore) GetSessionSyncStates(ctx context.Context) (map[stri
 	return nil, errors.New("simulated sync states db error")
 }
 
-func (e *errTranscriptStore) SearchTranscriptSteps(ctx context.Context, query, sessionFilter, toolFilter string, limit int) ([]db.TranscriptStep, error) {
+func (e *errTranscriptStore) SearchTranscriptSteps(ctx context.Context, query, sessionFilter, toolFilter string, limit int, since ...time.Time) ([]db.TranscriptStep, error) {
 	return nil, errors.New("simulated search transcript steps error")
 }
 
@@ -578,8 +525,8 @@ func TestHandleTasks(t *testing.T) {
 	if strings.Contains(task.Prompt, "ghp_123456") || strings.Contains(task.Summary, "ghp_123456") || task.Summary == "" || strings.Contains(task.AuthorName, "ghp_999999") {
 		t.Errorf("token leaked or summary empty: %+v", task)
 	}
-	if runes := []rune(task.Prompt); len(runes) > 503 || !strings.HasSuffix(task.Prompt, "...") {
-		t.Errorf("prompt not truncated properly: len=%d, text=%s", len(runes), task.Prompt)
+	if len(task.Prompt) < 600 {
+		t.Errorf("prompt unexpectedly truncated: len=%d, text=%s", len(task.Prompt), task.Prompt)
 	}
 
 	_ = store.InsertMessage(context.Background(), db.Message{
@@ -595,6 +542,26 @@ func TestHandleTasks(t *testing.T) {
 	_ = json.NewDecoder(rrCached.Body).Decode(&cachedResp)
 	if cachedResp.Total != 1 || len(cachedResp.Tasks) != 1 {
 		t.Errorf("expected 1 cached task within 1s TTL, got %d", cachedResp.Total)
+	}
+
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{name: "status filter", path: "/tasks?status=PENDING,PROCESSING"},
+		{name: "thread_id filter", path: "/tasks?thread_id=thread-1"},
+		{name: "is_admin filter", path: "/tasks?is_admin=true"},
+		{name: "since filter", path: "/tasks?since=" + url.QueryEscape(now.Add(-time.Hour).Format(time.RFC3339))},
+		{name: "after_row_id filter", path: "/tasks?after_row_id=0"},
+		{name: "before_row_id filter", path: "/tasks?before_row_id=100"},
+		{name: "limit filter", path: "/tasks?limit=10"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := runHTTP(handler, http.MethodGet, tc.path, nil)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("expected 200 OK, got %d: %s", rr.Code, rr.Body.String())
+			}
+		})
 	}
 
 	if code := runHTTP(handler, http.MethodPost, "/tasks", nil).Code; code != http.StatusMethodNotAllowed {
@@ -676,15 +643,15 @@ func TestNormalizeRoute(t *testing.T) {
 		input, expected string
 	}{
 		{"/prompt", "/prompt"},
-		{"/transcripts", "/transcripts"},
 		{"/transcripts/abc-123", "/transcripts"},
 		{"/api/transcripts/steps", "/transcripts"},
 		{"/api/transcripts/search", "/transcripts"},
 		{"/tasks", "/tasks"},
 		{"/tasks/456", "/tasks"},
 		{"/internal/llm", "/internal/llm"},
-		{"/schedules", "/schedules"},
-		{"/schedules/runs", "/schedules/runs"},
+		{"/schedules", "unmatched"},
+		{"/schedules/runs", "unmatched"},
+		{"/transcripts", "unmatched"},
 		{"/health", "/health"},
 		{"/metrics", "/metrics"},
 		{"/voice/ask", "/voice/ask"},
@@ -849,8 +816,11 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 	}
 	mux.ServeHTTP(&flusherErrWriter{}, httptest.NewRequest(http.MethodGet, "/health", nil))
 
-	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/transcripts", nil); w.Code != http.StatusOK {
-		t.Errorf("Expected 200 from /transcripts, got %d", w.Code)
+	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/tasks", nil); w.Code != http.StatusOK {
+		t.Errorf("Expected 200 from /tasks, got %d", w.Code)
+	}
+	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/transcripts", nil); w.Code != http.StatusNotFound {
+		t.Errorf("Expected 404 from deleted /transcripts, got %d", w.Code)
 	}
 
 	writeJSON(httptest.NewRecorder(), http.StatusOK, make(chan int))

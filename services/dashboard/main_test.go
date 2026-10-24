@@ -2455,6 +2455,7 @@ func TestFetchActiveTasksFromBrain_Extended(t *testing.T) {
 		body        string
 		wantTasks   int
 		wantSummary string
+		wantPrompt  string
 		wantErr     bool
 	}{
 		{
@@ -2482,6 +2483,16 @@ func TestFetchActiveTasksFromBrain_Extended(t *testing.T) {
 			body:        `{"status":"ok","total":1,"tasks":[{"id":"t1","status":"PENDING","prompt":"do something","summary":"","created_at":"2026-08-30T12:00:00Z"}]}`,
 			wantTasks:   1,
 			wantSummary: "do something",
+			wantPrompt:  "do something",
+		},
+		{
+			name:        "PromptTruncationExceeds500Runes",
+			brainURL:    "http://brain",
+			statusCode:  http.StatusOK,
+			body:        fmt.Sprintf(`{"status":"ok","total":1,"tasks":[{"id":"t2","status":"PENDING","prompt":%q,"summary":"explicit summary","created_at":"2026-08-30T12:00:00Z"}]}`, strings.Repeat("A", 600)),
+			wantTasks:   1,
+			wantSummary: "explicit summary",
+			wantPrompt:  strings.Repeat("A", 500) + "...",
 		},
 	}
 
@@ -2515,6 +2526,9 @@ func TestFetchActiveTasksFromBrain_Extended(t *testing.T) {
 			}
 			if tc.wantSummary != "" && (len(tasks) == 0 || tasks[0].Summary != tc.wantSummary) {
 				t.Errorf("expected task summary to fallback to prompt, got %+v", tasks)
+			}
+			if tc.wantPrompt != "" && (len(tasks) == 0 || tasks[0].Prompt != tc.wantPrompt) {
+				t.Errorf("expected task prompt %q, got %+v", tc.wantPrompt, tasks)
 			}
 		})
 	}

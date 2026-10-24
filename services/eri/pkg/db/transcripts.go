@@ -283,13 +283,80 @@ func (s *SQLStore) SearchSessionSummaries(ctx context.Context, embedding []float
 	return scanSessionSummaries(rows)
 }
 
-func (s *SQLStore) SearchTranscriptSteps(ctx context.Context, queryText, sessionFilter, toolFilter string, limit int) (results []TranscriptStep, err error) {
+func buildSearchTranscriptStepsQuery(queryText, sessionFilter, toolFilter string, limit int, sinceTime time.Time) (string, []any) {
+	var whereClauses []string
+	var args []any
+
+	if queryText != "" {
+		args = append(args, queryText)
+		whereClauses = append(whereClauses, fmt.Sprintf("fts_tokens @@ websearch_to_tsquery('simple', $%d)", len(args)))
+	}
+
+	if sessionFilter != "" {
+		var sessions []string
+		for _, raw := range strings.Split(sessionFilter, ",") {
+			if trimmed := strings.TrimSpace(raw); trimmed != "" {
+				sessions = append(sessions, trimmed)
+			}
+		}
+		if len(sessions) == 1 {
+			args = append(args, sessions[0])
+			whereClauses = append(whereClauses, fmt.Sprintf("session_id = $%d", len(args)))
+		} else if len(sessions) > 1 {
+			placeholders := make([]string, len(sessions))
+			for i, sid := range sessions {
+				args = append(args, sid)
+				placeholders[i] = fmt.Sprintf("$%d", len(args))
+			}
+			whereClauses = append(whereClauses, fmt.Sprintf("session_id IN (%s)", strings.Join(placeholders, ", ")))
+		}
+	}
+
+	if toolFilter != "" {
+		args = append(args, toolFilter)
+		whereClauses = append(whereClauses, fmt.Sprintf("tool_name = $%d", len(args)))
+	}
+
+	if !sinceTime.IsZero() {
+		args = append(args, sinceTime)
+		whereClauses = append(whereClauses, fmt.Sprintf("created_at > $%d", len(args)))
+	}
+
+	var selectClause string
+	var orderClause string
+
+	if queryText != "" {
+		selectClause = "SELECT session_id, step_index, step_type, tool_name, content, created_at, ts_rank_cd(fts_tokens, websearch_to_tsquery('simple', $1)) AS rank_score FROM transcript_steps"
+		orderClause = "ORDER BY rank_score DESC, created_at DESC"
+	} else {
+		selectClause = "SELECT session_id, step_index, step_type, tool_name, content, created_at, 1.0 AS rank_score FROM transcript_steps"
+		if !sinceTime.IsZero() {
+			orderClause = "ORDER BY created_at ASC, step_index ASC"
+		} else {
+			orderClause = "ORDER BY created_at DESC"
+		}
+	}
+
+	query := selectClause
+	if len(whereClauses) > 0 {
+		query += " WHERE " + strings.Join(whereClauses, " AND ")
+	}
+	args = append(args, limit)
+	query += fmt.Sprintf(" %s LIMIT $%d;", orderClause, len(args))
+	return query, args
+}
+
+func (s *SQLStore) SearchTranscriptSteps(ctx context.Context, queryText, sessionFilter, toolFilter string, limit int, since ...time.Time) (results []TranscriptStep, err error) {
 	defer recordTranscriptQuery("search_transcript_steps", time.Now(), &err)
 	if err = s.checkDB(); err != nil {
 		return nil, err
 	}
 	queryText, sessionFilter, toolFilter = strings.TrimSpace(queryText), strings.TrimSpace(sessionFilter), strings.TrimSpace(toolFilter)
-	if queryText == "" && sessionFilter == "" && toolFilter == "" {
+	var sinceTime time.Time
+	if len(since) > 0 {
+		sinceTime = since[0]
+	}
+	if queryText == "" && sessionFilter == "" && toolFilter == "" && sinceTime.IsZero() {
 		return nil, nil
 	}
 	if limit <= 0 {
@@ -298,21 +365,9 @@ func (s *SQLStore) SearchTranscriptSteps(ctx context.Context, queryText, session
 	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	var rows *sql.Rows
-	if queryText != "" {
-		query := `SELECT session_id, step_index, step_type, tool_name, content, created_at,
-		       ts_rank_cd(fts_tokens, websearch_to_tsquery('simple', $1)) AS rank_score
-		FROM transcript_steps
-		WHERE fts_tokens @@ websearch_to_tsquery('simple', $1) AND ($2 = '' OR session_id = $2) AND ($3 = '' OR tool_name = $3)
-		ORDER BY rank_score DESC, created_at DESC LIMIT $4;`
-		rows, err = s.db.QueryContext(queryCtx, query, queryText, sessionFilter, toolFilter, limit)
-	} else {
-		query := `SELECT session_id, step_index, step_type, tool_name, content, created_at, 1.0 AS rank_score
-		FROM transcript_steps WHERE ($1 = '' OR session_id = $1) AND ($2 = '' OR tool_name = $2)
-		ORDER BY created_at DESC LIMIT $3;`
-		rows, err = s.db.QueryContext(queryCtx, query, sessionFilter, toolFilter, limit)
-	}
+	query, args := buildSearchTranscriptStepsQuery(queryText, sessionFilter, toolFilter, limit, sinceTime)
 
+	rows, err := s.db.QueryContext(queryCtx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("search transcript steps query failed: %w", err)
 	}

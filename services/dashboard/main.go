@@ -1115,16 +1115,20 @@ func fetchActiveTasksFromBrain(ctx context.Context, brainURL string) ([]ActiveTa
 		if t.Status == "PENDING" || startedAt.IsZero() {
 			startedAt = t.CreatedAt
 		}
+		prompt := t.Prompt
+		if runes := []rune(prompt); len(runes) > 500 {
+			prompt = string(runes[:500]) + "..."
+		}
 		summary := strings.TrimSpace(t.Summary)
 		if summary == "" {
-			summary = t.Prompt
+			summary = prompt
 		}
 		tasks = append(tasks, ActiveTaskStatus{
 			ID:          t.ID,
 			ThreadID:    t.ThreadID,
 			SessionID:   t.SessionID,
 			AuthorName:  t.AuthorName,
-			Prompt:      t.Prompt,
+			Prompt:      prompt,
 			Summary:     summary,
 			Status:      t.Status,
 			RetryCount:  t.RetryCount,

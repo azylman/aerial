@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/azylman/aerial/services/eri/pkg/db"
 )
@@ -19,6 +20,53 @@ func SearchTranscripts(
 	embedder EmbedderFunc,
 	query, mode, sessionFilter, toolFilter string,
 	limit int,
+	since ...time.Time,
+) (SearchResult, error) {
+	var sinceTime time.Time
+	if len(since) > 0 {
+		sinceTime = since[0]
+	}
+	return ExecuteTranscriptSearch(ctx, store, embedder, SearchOptions{
+		Query:         query,
+		Mode:          mode,
+		SessionFilter: sessionFilter,
+		SessionID:     sessionFilter,
+		ToolFilter:    toolFilter,
+		Limit:         limit,
+		Since:         sinceTime,
+	})
+}
+
+func normalizeSearchMode(mode string) string {
+	normalized := strings.ToLower(strings.TrimSpace(mode))
+	if normalized != "sessions" && normalized != "steps" {
+		return "auto"
+	}
+	return normalized
+}
+
+func searchSessionSummariesHelper(
+	ctx context.Context,
+	store db.TranscriptStore,
+	embedder EmbedderFunc,
+	query string,
+	limit int,
+) ([]db.SessionSummary, error) {
+	var embedding []float32
+	if embedder != nil {
+		if emb, err := embedder(ctx, query); err == nil && len(emb) == db.ExpectedEmbeddingDim {
+			embedding = emb
+		}
+	}
+	return store.SearchSessionSummaries(ctx, embedding, query, limit, 0.0)
+}
+
+// ExecuteTranscriptSearch executes a transcript search with full SearchOptions.
+func ExecuteTranscriptSearch(
+	ctx context.Context,
+	store db.TranscriptStore,
+	embedder EmbedderFunc,
+	opts SearchOptions,
 ) (SearchResult, error) {
 	if store == nil {
 		return SearchResult{}, fmt.Errorf("transcript store cannot be nil")
@@ -30,14 +78,23 @@ func SearchTranscripts(
 		return SearchResult{}, ctx.Err()
 	}
 
-	trimmedQuery := strings.TrimSpace(query)
-	if limit <= 0 {
+	trimmedQuery := strings.TrimSpace(opts.Query)
+	sessID := strings.TrimSpace(opts.SessionFilter)
+	if sessID == "" {
+		sessID = strings.TrimSpace(opts.SessionID)
+	}
+	limit := max(1, opts.Limit)
+	if opts.Limit <= 0 {
 		limit = 10
 	}
 
-	normalizedMode := strings.ToLower(strings.TrimSpace(mode))
-	if normalizedMode == "" || (normalizedMode != "sessions" && normalizedMode != "steps" && normalizedMode != "auto") {
-		normalizedMode = "auto"
+	normalizedMode := normalizeSearchMode(opts.Mode)
+
+	if trimmedQuery == "" && !(normalizedMode == "steps" && sessID != "") {
+		return SearchResult{
+			Query: trimmedQuery,
+			Mode:  normalizedMode,
+		}, nil
 	}
 
 	result := SearchResult{
@@ -46,14 +103,8 @@ func SearchTranscripts(
 	}
 
 	// 1. Session Summaries Search
-	if normalizedMode == "sessions" || normalizedMode == "auto" {
-		var embedding []float32
-		if embedder != nil && trimmedQuery != "" {
-			if emb, err := embedder(ctx, trimmedQuery); err == nil && len(emb) == db.ExpectedEmbeddingDim {
-				embedding = emb
-			}
-		}
-		sessions, err := store.SearchSessionSummaries(ctx, embedding, trimmedQuery, limit, 0.0)
+	if (normalizedMode == "sessions" || normalizedMode == "auto") && trimmedQuery != "" {
+		sessions, err := searchSessionSummariesHelper(ctx, store, embedder, trimmedQuery, limit)
 		if err != nil {
 			return SearchResult{}, fmt.Errorf("search session summaries: %w", err)
 		}
@@ -62,7 +113,7 @@ func SearchTranscripts(
 
 	// 2. Transcript Steps Search
 	if normalizedMode == "steps" || normalizedMode == "auto" {
-		steps, err := store.SearchTranscriptSteps(ctx, trimmedQuery, sessionFilter, toolFilter, limit)
+		steps, err := store.SearchTranscriptSteps(ctx, trimmedQuery, sessID, opts.ToolFilter, limit, opts.Since)
 		if err != nil {
 			return SearchResult{}, fmt.Errorf("search transcript steps: %w", err)
 		}

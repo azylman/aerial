@@ -53,7 +53,6 @@ func assertStoreUnavailable(t *testing.T, s db.Store) {
 	requireErr(t, c2(s.GetThreadSummary(ctx, "t")), "GetThreadSummary")
 	requireErr(t, s.SaveThreadSummary(ctx, "t", "s", "w"), "SaveThreadSummary")
 	requireErr(t, c1(s.GetSessionActivityStats(ctx, "t")), "GetSessionActivityStats")
-	requireErr(t, c1(s.GetExternalConversationID(ctx, "test")), "GetExternalConversationID")
 	requireErr(t, c1(s.FindUnrotatedSessions(ctx, 8)), "FindUnrotatedSessions")
 }
 
@@ -165,11 +164,17 @@ func TestFakeStoreMessageOperations(t *testing.T) {
 	if pending, err := s.GetPendingOrProcessingMessages(ctx, 10); err != nil || len(pending) != 1 || pending[0].ID != "msg-2" {
 		t.Errorf("GetPendingOrProcessingMessages = %+v, %v", pending, err)
 	}
+	if p1, err := s.GetPendingOrProcessingMessages(ctx, 1); err != nil || len(p1) != 1 {
+		t.Errorf("GetPendingOrProcessingMessages(limit=1) = %+v, %v", p1, err)
+	}
 	if threadIDs, err := s.GetActiveRecentThreadIDs(ctx, time.Hour); err != nil || len(threadIDs) != 1 {
 		t.Errorf("GetActiveRecentThreadIDs = %v, %v", threadIDs, err)
 	}
 	if recent, err := s.GetRecentThreadMessages(ctx, "th-1", 10); err != nil || len(recent) != 2 {
 		t.Errorf("GetRecentThreadMessages = %+v, %v", recent, err)
+	}
+	if r1, err := s.GetRecentThreadMessages(ctx, "th-1", 1); err != nil || len(r1) != 1 {
+		t.Errorf("GetRecentThreadMessages(limit=1) = %+v, %v", r1, err)
 	}
 	_, _ = s.GetRecentThreadMessages(ctx, "th-1", 0)
 
@@ -181,6 +186,156 @@ func TestFakeStoreMessageOperations(t *testing.T) {
 	}
 	if clamped, err := s.GetActiveTasks(ctx); err != nil || len(clamped) != 50 {
 		t.Errorf("clamped active tasks len = %d, want 50", len(clamped))
+	}
+}
+
+func TestFakeStore_GetActiveTasks_FiltersAndOrdering(t *testing.T) {
+	s := NewFakeStore()
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	_ = s.SaveSessionID(ctx, "th-filter", "prev-sess-0")
+	_ = s.RotateSessionID(ctx, "th-filter", "int-sess-1")
+	_ = s.SaveThreadSummary(ctx, "th-filter", "Summary of thread filter", "w")
+
+	adminTrue := true
+	adminFalse := false
+
+	_ = s.InsertMessage(ctx, db.Message{
+		ID:           "msg-f1",
+		ThreadID:     "th-filter",
+		Content:      "Prompt 1",
+		Summary:      "Summary 1",
+		ResponseText: "Response 1",
+		Status:       db.StatusCompleted,
+		IsAdmin:      true,
+		CreatedAt:    now.Add(-3 * time.Minute),
+		UpdatedAt:    now.Add(-3 * time.Minute),
+	})
+	_ = s.InsertMessage(ctx, db.Message{
+		ID:           "msg-f2",
+		ThreadID:     "th-filter",
+		Content:      "Prompt 2",
+		Summary:      "Summary 2",
+		ResponseText: "Response 2",
+		Status:       db.StatusPending,
+		IsAdmin:      false,
+		CreatedAt:    now.Add(-2 * time.Minute),
+		UpdatedAt:    now.Add(-2 * time.Minute),
+	})
+	_ = s.InsertMessage(ctx, db.Message{
+		ID:           "msg-f3",
+		ThreadID:     "th-other",
+		Content:      "Prompt 3",
+		Summary:      "Summary 3",
+		ResponseText: "Response 3",
+		Status:       db.StatusProcessing,
+		IsAdmin:      true,
+		CreatedAt:    now.Add(-1 * time.Minute),
+		UpdatedAt:    now.Add(-1 * time.Minute),
+	})
+
+	tests := []struct {
+		name          string
+		filter        db.TasksFilter
+		wantCount     int
+		wantFirstID   string
+		wantPrevSess  string
+		wantThreadSum string
+		wantRespText  string
+	}{
+		{
+			name:          "thread_id filter and session join",
+			filter:        db.TasksFilter{ThreadID: "th-filter", Statuses: []string{"COMPLETED"}},
+			wantCount:     1,
+			wantFirstID:   "msg-f1",
+			wantPrevSess:  "prev-sess-0",
+			wantThreadSum: "Summary of thread filter",
+			wantRespText:  "Response 1",
+		},
+		{
+			name:        "is_admin false filter",
+			filter:      db.TasksFilter{IsAdmin: &adminFalse},
+			wantCount:   1,
+			wantFirstID: "msg-f2",
+		},
+		{
+			name:        "is_admin true filter with status",
+			filter:      db.TasksFilter{IsAdmin: &adminTrue, Statuses: []string{"PROCESSING"}},
+			wantCount:   1,
+			wantFirstID: "msg-f3",
+		},
+		{
+			name:        "multiple statuses filter",
+			filter:      db.TasksFilter{Statuses: []string{"PENDING", "PROCESSING"}},
+			wantCount:   2,
+			wantFirstID: "msg-f3",
+		},
+		{
+			name:        "after_row_id orders asc",
+			filter:      db.TasksFilter{AfterRowID: 1},
+			wantCount:   2,
+			wantFirstID: "msg-f2",
+		},
+		{
+			name:        "since filter matches recent",
+			filter:      db.TasksFilter{Since: now.Add(-90 * time.Second)},
+			wantCount:   1,
+			wantFirstID: "msg-f3",
+		},
+		{
+			name:        "before_row_id filter",
+			filter:      db.TasksFilter{BeforeRowID: 1},
+			wantCount:   1,
+			wantFirstID: "msg-f1",
+		},
+		{
+			name:        "clamped limit above 200",
+			filter:      db.TasksFilter{Limit: 250},
+			wantCount:   3,
+			wantFirstID: "msg-f3",
+		},
+		{
+			name:      "unmatched status",
+			filter:    db.TasksFilter{Statuses: []string{"FAILED"}},
+			wantCount: 0,
+		},
+		{
+			name:      "unmatched thread",
+			filter:    db.TasksFilter{ThreadID: "nonexistent"},
+			wantCount: 0,
+		},
+		{
+			name:      "unmatched since",
+			filter:    db.TasksFilter{Since: now.Add(time.Hour)},
+			wantCount: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tasks, err := s.GetActiveTasks(ctx, tc.filter)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(tasks) != tc.wantCount {
+				t.Fatalf("got count %d, want %d", len(tasks), tc.wantCount)
+			}
+			if tc.wantCount > 0 {
+				if tasks[0].ID != tc.wantFirstID {
+					t.Errorf("got first ID %q, want %q", tasks[0].ID, tc.wantFirstID)
+				}
+				if tc.wantPrevSess != "" && tasks[0].PreviousSessionID != tc.wantPrevSess {
+					t.Errorf("got PreviousSessionID %q, want %q", tasks[0].PreviousSessionID, tc.wantPrevSess)
+				}
+				if tc.wantThreadSum != "" && tasks[0].ThreadSummary != tc.wantThreadSum {
+					t.Errorf("got ThreadSummary %q, want %q", tasks[0].ThreadSummary, tc.wantThreadSum)
+				}
+				if tc.wantRespText != "" && tasks[0].ResponseText != tc.wantRespText {
+					t.Errorf("got ResponseText %q, want %q", tasks[0].ResponseText, tc.wantRespText)
+				}
+			}
+		})
 	}
 }
 
@@ -236,22 +391,20 @@ func TestFakeStoreSessionOperations(t *testing.T) {
 	}
 
 	_ = s.SaveSessionID(ctx, "ext-1", "int-1")
-	if ext, _ := s.GetExternalConversationID(ctx, "int-1"); ext != "ext-1" {
-		t.Errorf("GetExternalConversationID = %q, want ext-1", ext)
-	}
-	if ext, _ := s.GetExternalConversationID(ctx, ""); ext != "" {
-		t.Errorf("GetExternalConversationID empty = %q, want empty", ext)
-	}
 
 	for i := 0; i < 8; i++ {
 		_, _ = s.IncrementSessionTurnCount(ctx, "th-unrotated")
 	}
+	for i := 0; i < 12; i++ {
+		_, _ = s.IncrementSessionTurnCount(ctx, "th-unrotated-2")
+	}
 	s.SetSessionUpdatedAt("th-unrotated", time.Now().UTC().Add(-2*time.Hour))
+	s.SetSessionUpdatedAt("th-unrotated-2", time.Now().UTC().Add(-2*time.Hour))
 	if unrot, _ := s.FindUnrotatedSessions(ctx, 5); len(unrot) != 0 {
 		t.Errorf("expected 0 unrotated sessions within 1h, got %d", len(unrot))
 	}
-	if unrotLong, _ := s.FindUnrotatedSessions(ctx, 5, 4*time.Hour); len(unrotLong) != 1 {
-		t.Errorf("expected 1 unrotated session within 4h, got %d", len(unrotLong))
+	if unrotLong, _ := s.FindUnrotatedSessions(ctx, 5, 4*time.Hour); len(unrotLong) != 2 {
+		t.Errorf("expected 2 unrotated sessions within 4h, got %d", len(unrotLong))
 	}
 	_, _ = s.FindUnrotatedSessions(ctx, 0)
 
@@ -270,6 +423,7 @@ func TestFakeStoreTranscriptsPRAndVanadis(t *testing.T) {
 	ctx := context.Background()
 
 	mustOK(t, s.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-1", ThreadID: "th-1", Summary: "Cockpit debug session"}), "UpsertSessionSummary")
+	mustOK(t, s.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-1", LastMtime: time.Now().UTC()}), "UpsertSessionSummary with LastMtime")
 	if syncStates, err := s.GetSessionSyncStates(ctx); err != nil || len(syncStates) != 1 || syncStates["sess-1"].SessionID != "sess-1" {
 		t.Fatalf("GetSessionSyncStates failed: %v", err)
 	}
@@ -508,6 +662,7 @@ func TestTranscriptStore_SearchTranscriptSteps(t *testing.T) {
 		{SessionID: "sess-steps-a", StepIndex: 1, StepType: "tool_call", ToolName: "run_command", Content: "kubectl apply -f ingress.yaml", CreatedAt: now.Add(-2 * time.Minute)},
 		{SessionID: "sess-steps-a", StepIndex: 2, StepType: "tool_result", ToolName: "run_command", Content: "error: 502 bad gateway connecting to webhook", CreatedAt: now.Add(-1 * time.Minute)},
 		{SessionID: "sess-steps-b", StepIndex: 0, StepType: "tool_call", ToolName: "read_file", Content: "reading ingress.yaml configuration", CreatedAt: now},
+		{SessionID: "sess-steps-b", StepIndex: 1, StepType: "tool_result", ToolName: "read_file", Content: "done reading configuration", CreatedAt: now},
 	}
 	if err := store.BatchInsertTranscriptSteps(ctx, steps); err != nil {
 		t.Fatalf("BatchInsertTranscriptSteps failed: %v", err)
@@ -515,18 +670,20 @@ func TestTranscriptStore_SearchTranscriptSteps(t *testing.T) {
 
 	tests := []struct {
 		name, query, session, tool string
+		since                      time.Time
 		limit, wantLen, wantStep   int
 	}{
 		{name: "text search", query: "bad gateway", limit: 10, wantLen: 1, wantStep: 2},
 		{name: "multi word non-contiguous search", query: "error webhook", limit: 10, wantLen: 1, wantStep: 2},
 		{name: "session filter", query: "ingress", session: "sess-steps-b", limit: 10, wantLen: 1},
 		{name: "tool filter", query: "ingress", tool: "read_file", limit: 10, wantLen: 1},
-		{name: "empty query tool filter", tool: "read_file", limit: 10, wantLen: 1},
+		{name: "empty query tool filter", tool: "read_file", limit: 10, wantLen: 2},
 		{name: "empty query and filters", limit: 10},
+		{name: "since filter without query orders asc", since: now.Add(-5 * time.Minute), limit: 10, wantLen: 5},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			res, err := store.SearchTranscriptSteps(ctx, tc.query, tc.session, tc.tool, tc.limit)
+			res, err := store.SearchTranscriptSteps(ctx, tc.query, tc.session, tc.tool, tc.limit, tc.since)
 			if err != nil {
 				t.Fatalf("SearchTranscriptSteps failed: %v", err)
 			}

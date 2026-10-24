@@ -420,6 +420,17 @@ func TestSearchTranscripts(t *testing.T) {
 			limit:       5,
 			wantErr:     true,
 		},
+		{
+			name:         "empty query with mode steps and session returns steps",
+			seedCase:     2,
+			query:        "",
+			mode:         "steps",
+			sessionID:    "sess-2",
+			limit:        5,
+			wantSessions: 0,
+			wantSteps:    1,
+			wantTotal:    1,
+		},
 	}
 
 	for _, tc := range tests {
@@ -690,6 +701,83 @@ func TestGetTranscriptStepWindow(t *testing.T) {
 			}
 			if res.Steps == nil {
 				t.Errorf("res.Steps should not be nil")
+			}
+		})
+	}
+}
+
+func TestExecuteTranscriptSearch_Options(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		opts         SearchOptions
+		nilStore     bool
+		wantSessions int
+		wantSteps    int
+		wantTotal    int
+		wantErr      bool
+	}{
+		{
+			name:     "nil store returns error",
+			nilStore: true,
+			opts:     SearchOptions{Mode: "auto", Query: "test"},
+			wantErr:  true,
+		},
+		{
+			name: "empty query with mode steps and session id",
+			opts: SearchOptions{
+				Mode:      "steps",
+				SessionID: "sess-2",
+			},
+			wantSteps: 1,
+			wantTotal: 1,
+		},
+		{
+			name: "empty query with mode steps and session filter",
+			opts: SearchOptions{
+				Mode:          "steps",
+				SessionFilter: "sess-2",
+			},
+			wantSteps: 1,
+			wantTotal: 1,
+		},
+		{
+			name: "empty query with mode auto returns zero results",
+			opts: SearchOptions{
+				Mode: "auto",
+			},
+			wantTotal: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var store db.TranscriptStore
+			if !tc.nilStore {
+				store = newSearchTestStore(t, 2)
+			}
+
+			res, err := ExecuteTranscriptSearch(context.Background(), store, nil, tc.opts)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(res.Sessions) != tc.wantSessions {
+				t.Errorf("got %d sessions, want %d", len(res.Sessions), tc.wantSessions)
+			}
+			if len(res.Steps) != tc.wantSteps {
+				t.Errorf("got %d steps, want %d", len(res.Steps), tc.wantSteps)
+			}
+			if res.Total != tc.wantTotal {
+				t.Errorf("got total %d, want %d", res.Total, tc.wantTotal)
 			}
 		})
 	}

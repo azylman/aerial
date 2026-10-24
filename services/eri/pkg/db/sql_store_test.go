@@ -78,9 +78,6 @@ func TestSQLStoreDelegationAndQueries(t *testing.T) {
 	if err := store.SaveSessionID(ctx, "ext-thread-99", "internal-sess-99"); err != nil {
 		t.Fatalf("SaveSessionID failed: %v", err)
 	}
-	if extID, err := store.GetExternalConversationID(ctx, "internal-sess-99"); err != nil || extID != "ext-thread-99" {
-		t.Fatalf("GetExternalConversationID returned (%q, %v), want ext-thread-99", extID, err)
-	}
 
 	err := store.InsertMessage(ctx, Message{
 		ID: "m-sqlstore-task", ThreadID: "ext-thread-99", Content: "SQLStore task content",
