@@ -134,8 +134,8 @@ func BuildFactsUpstreamURL(brainBaseURL string, inQuery url.Values) (targetURL s
 }
 
 // BuildSchedulesUpstreamURL validates the base URL and constructs the upstream /schedules URL.
-func BuildSchedulesUpstreamURL(brainBaseURL string) (string, error) {
-	target, err := parseUpstreamURL(brainBaseURL, fmt.Sprintf("invalid upstream URL configuration: %q", brainBaseURL), "/schedules")
+func BuildSchedulesUpstreamURL(haroBaseURL string) (string, error) {
+	target, err := parseUpstreamURL(haroBaseURL, fmt.Sprintf("invalid upstream URL configuration: %q", haroBaseURL), "/schedules")
 	if err != nil {
 		return "", err
 	}
@@ -144,8 +144,8 @@ func BuildSchedulesUpstreamURL(brainBaseURL string) (string, error) {
 
 // BuildScheduleRunsUpstreamURL validates the base URL and constructs the upstream
 // /schedules/runs URL with sanitized limit, offset, schedule_id, and status parameters.
-func BuildScheduleRunsUpstreamURL(brainBaseURL string, inQuery url.Values) (targetURL string, limit, offset int, err error) {
-	target, err := parseUpstreamURL(brainBaseURL, fmt.Sprintf("invalid upstream URL configuration: %q", brainBaseURL), "/schedules/runs")
+func BuildScheduleRunsUpstreamURL(haroBaseURL string, inQuery url.Values) (targetURL string, limit, offset int, err error) {
+	target, err := parseUpstreamURL(haroBaseURL, fmt.Sprintf("invalid upstream URL configuration: %q", haroBaseURL), "/schedules/runs")
 	if err != nil {
 		return "", 0, 0, err
 	}
@@ -1395,4 +1395,83 @@ func ParseNomadClusterState(jobsData, allocsData []byte, now time.Time) ([]Servi
 	})
 
 	return services, nil
+}
+
+// normalizeGitCommit sanitizes and truncates a git commit string to short 7-character form.
+func normalizeGitCommit(commit string) string {
+	commit = strings.TrimSpace(commit)
+	if len(commit) > 7 {
+		return commit[:7]
+	}
+	return commit
+}
+
+// resolveDashboardGitHubRepos resolves the primary and list of GitHub repositories from lookup and YAML config.
+func resolveDashboardGitHubRepos(lookup func(string) string, yamlRepos []string, yamlRepo string) (string, []string) {
+	var ghRepos []string
+	rawGHRepos := strings.TrimSpace(lookup("GITHUB_REPOS"))
+	if rawGHRepos != "" {
+		seen := make(map[string]bool)
+		for _, part := range strings.Split(rawGHRepos, ",") {
+			trimmed := strings.TrimSpace(part)
+			if trimmed != "" && !seen[trimmed] {
+				seen[trimmed] = true
+				ghRepos = append(ghRepos, trimmed)
+			}
+		}
+	} else if len(yamlRepos) > 0 {
+		ghRepos = append(ghRepos, yamlRepos...)
+	}
+
+	ghRepo := strings.TrimSpace(lookup("GITHUB_REPO"))
+	if ghRepo == "" && yamlRepo != "" {
+		ghRepo = strings.TrimSpace(yamlRepo)
+	}
+	if len(ghRepos) > 0 {
+		if ghRepo == "" {
+			ghRepo = ghRepos[0]
+		}
+	} else if ghRepo != "" {
+		ghRepos = []string{ghRepo}
+	} else {
+		ghRepo = "azylman/aerial"
+		ghRepos = []string{"azylman/aerial"}
+	}
+	return ghRepo, ghRepos
+}
+
+// resolveDashboardVanadisURL resolves the Vanadis service base URL from user config, YAML, or defaults.
+func resolveDashboardVanadisURL(configPath, yamlVanadisURL string) string {
+	vanadisURL := loadDashboardVanadisURL(configPath)
+	if vanadisURL == "" && yamlVanadisURL != "" {
+		vanadisURL = strings.TrimSpace(yamlVanadisURL)
+	}
+	if vanadisURL == "" {
+		vanadisURL = "http://vanadis.aerial"
+	}
+	return vanadisURL
+}
+
+// resolveDashboardHaroURL resolves the Haro service base URL from env lookup, YAML config, or defaults.
+func resolveDashboardHaroURL(lookup func(string) string, configPath, yamlHaroURL string) string {
+	haroURL := strings.TrimSpace(lookup("HARO_URL"))
+	if haroURL == "" {
+		if schedURL := strings.TrimSpace(lookup("SCHEDULER_MCP_URL")); schedURL != "" {
+			schedURL = strings.TrimRight(schedURL, "/")
+			schedURL = strings.TrimSuffix(schedURL, "/mcp")
+			schedURL = strings.TrimSuffix(schedURL, "/sse")
+			schedURL = strings.TrimRight(schedURL, "/")
+			haroURL = schedURL
+		}
+	}
+	if haroURL == "" {
+		haroURL = loadDashboardHaroURL(configPath)
+	}
+	if haroURL == "" && yamlHaroURL != "" {
+		haroURL = strings.TrimSpace(yamlHaroURL)
+	}
+	if haroURL == "" {
+		haroURL = "http://haro.aerial"
+	}
+	return haroURL
 }

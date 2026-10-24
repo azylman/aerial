@@ -447,15 +447,6 @@ var defaultGitCommitPaths = []string{
 	"/share/aerial/.git/HEAD",
 }
 
-// normalizeGitCommit sanitizes and truncates a git commit string to short 7-character form.
-func normalizeGitCommit(commit string) string {
-	commit = strings.TrimSpace(commit)
-	if len(commit) > 7 {
-		return commit[:7]
-	}
-	return commit
-}
-
 func getGitCommit(customPaths ...string) string {
 	paths := defaultGitCommitPaths
 	if len(customPaths) > 0 {
@@ -1157,10 +1148,12 @@ type rawUserConfig struct {
 		GitHubRepos      []string          `yaml:"github_repos"`
 		Repos            []string          `yaml:"repos"`
 		VanadisURL       string            `yaml:"vanadis_url"`
+		HaroURL          string            `yaml:"haro_url"`
 	} `yaml:"dashboard"`
 	QuickLinks  []QuickLaunchLink `yaml:"quick_links"`
 	GitHubRepos []string          `yaml:"github_repos"`
 	VanadisURL  string            `yaml:"vanadis_url"`
+	HaroURL     string            `yaml:"haro_url"`
 }
 
 // loadRawUserConfig parses and unmarshals rawUserConfig from the given path.
@@ -1194,6 +1187,20 @@ func loadDashboardVanadisURL(configPath string) string {
 	val := strings.TrimSpace(cfg.Dashboard.VanadisURL)
 	if val == "" {
 		val = strings.TrimSpace(cfg.VanadisURL)
+	}
+	return val
+}
+
+// loadDashboardHaroURL parses the Haro upstream URL configured in config.yaml.
+func loadDashboardHaroURL(configPath string) string {
+	cfg, ok := loadRawUserConfig(configPath)
+	if !ok {
+		return ""
+	}
+
+	val := strings.TrimSpace(cfg.Dashboard.HaroURL)
+	if val == "" {
+		val = strings.TrimSpace(cfg.HaroURL)
 	}
 	return val
 }
@@ -1491,7 +1498,7 @@ func factsHandler(brainBaseURL string) http.HandlerFunc {
 	}
 }
 
-func schedulesHandler(brainBaseURL string) http.HandlerFunc {
+func schedulesHandler(haroBaseURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -1499,7 +1506,7 @@ func schedulesHandler(brainBaseURL string) http.HandlerFunc {
 			return
 		}
 
-		targetURL, err := BuildSchedulesUpstreamURL(brainBaseURL)
+		targetURL, err := BuildSchedulesUpstreamURL(haroBaseURL)
 		if err != nil {
 			http.Error(w, `{"error":"Invalid upstream URL configuration"}`, http.StatusInternalServerError)
 			return
@@ -1572,7 +1579,7 @@ func schedulesHandler(brainBaseURL string) http.HandlerFunc {
 	}
 }
 
-func scheduleRunsHandler(brainBaseURL string) http.HandlerFunc {
+func scheduleRunsHandler(haroBaseURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -1580,7 +1587,7 @@ func scheduleRunsHandler(brainBaseURL string) http.HandlerFunc {
 			return
 		}
 
-		targetURL, limit, offset, err := BuildScheduleRunsUpstreamURL(brainBaseURL, r.URL.Query())
+		targetURL, limit, offset, err := BuildScheduleRunsUpstreamURL(haroBaseURL, r.URL.Query())
 		if err != nil {
 			http.Error(w, `{"error":"Invalid upstream URL configuration"}`, http.StatusInternalServerError)
 			return
@@ -1936,6 +1943,7 @@ type DashboardConfig struct {
 	APIBaseURL string
 	NomadAddr  string
 	VanadisURL string
+	HaroURL    string
 }
 
 // DashboardYAMLConfig defines the declarative file schema for dashboard.yaml.
@@ -1950,6 +1958,7 @@ type DashboardYAMLConfig struct {
 	ConfigPath string   `yaml:"config_path"`
 	NomadAddr  string   `yaml:"nomad_addr"`
 	VanadisURL string   `yaml:"vanadis_url"`
+	HaroURL    string   `yaml:"haro_url"`
 }
 
 // NewDashboardConfigFromLookup parses DashboardConfig using a key lookup function with YAML config file support.
@@ -1992,35 +2001,7 @@ func NewDashboardConfigFromLookup(lookup func(string) string) DashboardConfig {
 		memoryURL = "http://coven.aerial"
 	}
 
-	var ghRepos []string
-	rawGHRepos := strings.TrimSpace(lookup("GITHUB_REPOS"))
-	if rawGHRepos != "" {
-		seen := make(map[string]bool)
-		for _, part := range strings.Split(rawGHRepos, ",") {
-			trimmed := strings.TrimSpace(part)
-			if trimmed != "" && !seen[trimmed] {
-				seen[trimmed] = true
-				ghRepos = append(ghRepos, trimmed)
-			}
-		}
-	} else if len(ycfg.GHRepos) > 0 {
-		ghRepos = append(ghRepos, ycfg.GHRepos...)
-	}
-
-	ghRepo := strings.TrimSpace(lookup("GITHUB_REPO"))
-	if ghRepo == "" && ycfg.GHRepo != "" {
-		ghRepo = strings.TrimSpace(ycfg.GHRepo)
-	}
-	if len(ghRepos) > 0 {
-		if ghRepo == "" {
-			ghRepo = ghRepos[0]
-		}
-	} else if ghRepo != "" {
-		ghRepos = []string{ghRepo}
-	} else {
-		ghRepo = "azylman/aerial"
-		ghRepos = []string{"azylman/aerial"}
-	}
+	ghRepo, ghRepos := resolveDashboardGitHubRepos(lookup, ycfg.GHRepos, ycfg.GHRepo)
 
 	ghToken := strings.TrimSpace(lookup("GITHUB_PAT"))
 	if ghToken == "" {
@@ -2070,13 +2051,8 @@ func NewDashboardConfigFromLookup(lookup func(string) string) DashboardConfig {
 		nomadAddr = "http://127.0.0.1:4646"
 	}
 
-	vanadisURL := loadDashboardVanadisURL(configPath)
-	if vanadisURL == "" && ycfg.VanadisURL != "" {
-		vanadisURL = strings.TrimSpace(ycfg.VanadisURL)
-	}
-	if vanadisURL == "" {
-		vanadisURL = "http://vanadis.aerial"
-	}
+	vanadisURL := resolveDashboardVanadisURL(configPath, ycfg.VanadisURL)
+	haroURL := resolveDashboardHaroURL(lookup, configPath, ycfg.HaroURL)
 
 	return DashboardConfig{
 		Port:       port,
@@ -2091,6 +2067,7 @@ func NewDashboardConfigFromLookup(lookup func(string) string) DashboardConfig {
 		GitCommit:  gitCommit,
 		NomadAddr:  nomadAddr,
 		VanadisURL: vanadisURL,
+		HaroURL:    haroURL,
 	}
 }
 
@@ -2115,16 +2092,20 @@ func SetupDashboardMux(cfg DashboardConfig, assetReg *AssetRegistry) http.Handle
 	if memoryURL == "" {
 		memoryURL = cfg.BrainURL
 	}
+	haroURL := strings.TrimSpace(cfg.HaroURL)
+	if haroURL == "" {
+		haroURL = cfg.BrainURL
+	}
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/dashboard/health", healthHandler)
 	mux.HandleFunc("/api/status", statusHandler(cfg.BrainURL, cfg.GitSyncURL, cfg.ConfigPath, cfg.GitCommit, cfg.NomadAddr))
 	mux.HandleFunc("/dashboard/api/status", statusHandler(cfg.BrainURL, cfg.GitSyncURL, cfg.ConfigPath, cfg.GitCommit, cfg.NomadAddr))
 	mux.HandleFunc("/api/facts", factsHandler(memoryURL))
 	mux.HandleFunc("/dashboard/api/facts", factsHandler(memoryURL))
-	mux.HandleFunc("/api/schedules", schedulesHandler(cfg.BrainURL))
-	mux.HandleFunc("/dashboard/api/schedules", schedulesHandler(cfg.BrainURL))
-	mux.HandleFunc("/api/schedules/runs", scheduleRunsHandler(cfg.BrainURL))
-	mux.HandleFunc("/dashboard/api/schedules/runs", scheduleRunsHandler(cfg.BrainURL))
+	mux.HandleFunc("/api/schedules", schedulesHandler(haroURL))
+	mux.HandleFunc("/dashboard/api/schedules", schedulesHandler(haroURL))
+	mux.HandleFunc("/api/schedules/runs", scheduleRunsHandler(haroURL))
+	mux.HandleFunc("/dashboard/api/schedules/runs", scheduleRunsHandler(haroURL))
 	mux.HandleFunc("/api/builds", buildsHandler(cfg.VanadisURL))
 	mux.HandleFunc("/dashboard/api/builds", buildsHandler(cfg.VanadisURL))
 	mux.HandleFunc("/api/builds/", buildDetailHandler(cfg.VanadisURL))

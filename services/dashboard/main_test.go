@@ -697,10 +697,33 @@ func TestSchedulesAndRunsHandlers_TableDriven(t *testing.T) {
 	}))
 	defer mockBrain.Close()
 
+	mockHaro := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/schedules/runs"):
+			_ = json.NewEncoder(w).Encode(ScheduleRunsAPIResponse{
+				Status: "ok", Total: 42, Limit: 10, Offset: 5,
+				Runs: []ScheduleRun{{ID: "haro-run-101", ScheduleID: "cron-1", ScheduleType: "cron", Prompt: "Haro summary", Title: "Haro Brief #101", Status: "success", StartedAt: time.Now().UTC().Add(-1 * time.Hour), DurationMs: 1250}},
+			})
+		case strings.HasSuffix(r.URL.Path, "/schedules"):
+			_ = json.NewEncoder(w).Encode(SchedulesAPIResponse{
+				Status:   "ok",
+				Summary:  ScheduleSummaryMetrics{TotalActive: 1, CronCount: 1, OneShotCount: 0, TotalRuns24h: 1, SuccessRate24h: 100.0},
+				Crons:    []CronSchedule{{ID: "haro-cron-1", ChannelID: "chan-1", TitlePrefix: "Haro Schedule", CronExpr: "0 * * * *", CronDescription: "Every hour", Prompt: "Haro run", Timezone: "America/Los_Angeles", Enabled: true}},
+				OneShots: []OneShotSchedule{},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockHaro.Close()
+
 	offlineURL := "http://127.0.0.1:54321"
 	tests := []struct {
 		name           string
 		isRuns         bool
+		useMux         bool
+		haroURL        string
 		brainURL       string
 		method         string
 		target         string
@@ -825,17 +848,78 @@ func TestSchedulesAndRunsHandlers_TableDriven(t *testing.T) {
 			target:     "/api/schedules/runs",
 			wantStatus: http.StatusInternalServerError,
 		},
+		{
+			name:           "SetupDashboardMux_Schedules_RoutesToHaro",
+			useMux:         true,
+			brainURL:       offlineURL,
+			haroURL:        mockHaro.URL,
+			method:         "GET",
+			target:         "/api/schedules",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{"Haro Schedule", `"total_active":1`},
+		},
+		{
+			name:           "SetupDashboardMux_DashboardSchedules_RoutesToHaro",
+			useMux:         true,
+			brainURL:       offlineURL,
+			haroURL:        mockHaro.URL,
+			method:         "GET",
+			target:         "/dashboard/api/schedules",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{"Haro Schedule", `"total_active":1`},
+		},
+		{
+			name:           "SetupDashboardMux_ScheduleRuns_RoutesToHaro",
+			useMux:         true,
+			isRuns:         true,
+			brainURL:       offlineURL,
+			haroURL:        mockHaro.URL,
+			method:         "GET",
+			target:         "/api/schedules/runs?limit=10&offset=5&schedule_id=cron-1&status=success",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{"Haro Brief #101", `"total":42`},
+		},
+		{
+			name:           "SetupDashboardMux_DashboardScheduleRuns_RoutesToHaro",
+			useMux:         true,
+			isRuns:         true,
+			brainURL:       offlineURL,
+			haroURL:        mockHaro.URL,
+			method:         "GET",
+			target:         "/dashboard/api/schedules/runs?limit=10&offset=5&schedule_id=cron-1&status=success",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{"Haro Brief #101", `"total":42`},
+		},
+		{
+			name:           "SetupDashboardMux_Schedules_FallbackToBrainWhenHaroEmpty",
+			useMux:         true,
+			brainURL:       mockBrain.URL,
+			haroURL:        "",
+			method:         "GET",
+			target:         "/api/schedules",
+			wantStatus:     http.StatusOK,
+			wantBodySubstr: []string{"Morning Brief", `"total_active":3`},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := schedulesHandler(tt.brainURL)
-			if tt.isRuns {
-				h = scheduleRunsHandler(tt.brainURL)
+			var h http.Handler
+			if tt.useMux {
+				h = SetupDashboardMux(DashboardConfig{
+					BrainURL: tt.brainURL,
+					HaroURL:  tt.haroURL,
+				}, nil)
+			} else {
+				if tt.isRuns {
+					h = scheduleRunsHandler(tt.brainURL)
+				} else {
+					h = schedulesHandler(tt.brainURL)
+				}
 			}
 			req := httptest.NewRequest(tt.method, tt.target, nil)
 			rr := httptest.NewRecorder()
-			h(rr, req)
+			h.ServeHTTP(rr, req)
 			if rr.Code != tt.wantStatus {
 				t.Fatalf("expected status %d, got %d", tt.wantStatus, rr.Code)
 			}
@@ -1506,6 +1590,7 @@ func TestLoadDashboardYAMLConfigs_TableDriven(t *testing.T) {
 		wantLinks      []QuickLaunchLink
 		wantRepos      []string
 		wantVanadisURL string
+		wantHaroURL    string
 	}{
 		{
 			name:           "EmptyPath",
@@ -1513,6 +1598,7 @@ func TestLoadDashboardYAMLConfigs_TableDriven(t *testing.T) {
 			wantLinks:      []QuickLaunchLink{},
 			wantRepos:      nil,
 			wantVanadisURL: "",
+			wantHaroURL:    "",
 		},
 		{
 			name:           "NonExistentFile",
@@ -1520,6 +1606,7 @@ func TestLoadDashboardYAMLConfigs_TableDriven(t *testing.T) {
 			wantLinks:      []QuickLaunchLink{},
 			wantRepos:      nil,
 			wantVanadisURL: "",
+			wantHaroURL:    "",
 		},
 		{
 			name: "InvalidYAML",
@@ -1529,6 +1616,7 @@ invalid: [yaml: broken
 			wantLinks:      []QuickLaunchLink{},
 			wantRepos:      nil,
 			wantVanadisURL: "",
+			wantHaroURL:    "",
 		},
 		{
 			name: "QuickLaunchLinks_DashboardConfig",
@@ -1645,6 +1733,39 @@ vanadis_url: ""
 `,
 			wantVanadisURL: "",
 		},
+		{
+			name: "HaroURL_DashboardResolutionWithTrimming",
+			yamlData: `
+dashboard:
+  haro_url: "  http://haro.internal:8088  "
+`,
+			wantHaroURL: "http://haro.internal:8088",
+		},
+		{
+			name: "HaroURL_RootFallback",
+			yamlData: `
+haro_url: "http://haro-root.internal:8088"
+`,
+			wantHaroURL: "http://haro-root.internal:8088",
+		},
+		{
+			name: "HaroURL_DashboardPrecedenceOverRoot",
+			yamlData: `
+dashboard:
+  haro_url: "http://haro-dash.internal:8088"
+haro_url: "http://haro-root.internal:8088"
+`,
+			wantHaroURL: "http://haro-dash.internal:8088",
+		},
+		{
+			name: "HaroURL_EmptyValuesReturnEmpty",
+			yamlData: `
+dashboard:
+  haro_url: ""
+haro_url: ""
+`,
+			wantHaroURL: "",
+		},
 	}
 
 	for _, tc := range tests {
@@ -1687,6 +1808,13 @@ vanadis_url: ""
 				gotVanadis := loadDashboardVanadisURL(path)
 				if gotVanadis != tc.wantVanadisURL {
 					t.Errorf("loadDashboardVanadisURL() = %q, want %q", gotVanadis, tc.wantVanadisURL)
+				}
+			}
+
+			if tc.wantHaroURL != "" || tc.noFile || tc.nonExistent || strings.Contains(tc.yamlData, "invalid") || strings.Contains(tc.name, "EmptyValues") {
+				gotHaro := loadDashboardHaroURL(path)
+				if gotHaro != tc.wantHaroURL {
+					t.Errorf("loadDashboardHaroURL() = %q, want %q", gotHaro, tc.wantHaroURL)
 				}
 			}
 		})
@@ -1869,6 +1997,7 @@ vanadis_url: "http://vanadis:8089"
 		wantConfigPath       string
 		wantGitCommit        string
 		wantVanadisURL       string
+		wantHaroURL          string
 		wantNomadAddr        string
 		assertEmptyNomadAddr bool
 		wantGHRepos          []string
@@ -1911,6 +2040,7 @@ vanadis_url: "http://vanadis:8089"
 			wantConfigPath: "/share/aerial-config/config.yaml",
 			wantGitCommit:  "latest",
 			wantVanadisURL: "http://vanadis.aerial",
+			wantHaroURL:    "http://haro.aerial",
 		},
 		{
 			name:        "Defaults_FallbackToken",
@@ -1957,6 +2087,39 @@ vanadis_url: "http://vanadis:8089"
 			wantMemoryURL: "http://memory-yaml:4008",
 		},
 		{
+			name:        "HaroURL_FromLookup",
+			env:         map[string]string{"HARO_URL": "http://haro-custom:8080"},
+			wantHaroURL: "http://haro-custom:8080",
+		},
+		{
+			name:        "HaroURL_FromSCHEDULER_MCP_URL_TrimMCP",
+			env:         map[string]string{"SCHEDULER_MCP_URL": "http://scheduler.aerial/mcp"},
+			wantHaroURL: "http://scheduler.aerial",
+		},
+		{
+			name:        "HaroURL_FromSCHEDULER_MCP_URL_TrimSSE",
+			env:         map[string]string{"SCHEDULER_MCP_URL": "http://scheduler.aerial:8080/sse/"},
+			wantHaroURL: "http://scheduler.aerial:8080",
+		},
+		{
+			name: "HaroURL_HARO_URL_PrecedenceOverSCHEDULER_MCP_URL",
+			env: map[string]string{
+				"HARO_URL":          "http://haro-direct:8080",
+				"SCHEDULER_MCP_URL": "http://scheduler.aerial/mcp",
+			},
+			wantHaroURL: "http://haro-direct:8080",
+		},
+		{
+			name:        "HaroURL_FromYAML",
+			customYAML:  "haro_url: http://haro-yaml:8080\n",
+			wantHaroURL: "http://haro-yaml:8080",
+		},
+		{
+			name:        "HaroURL_FromUserConfigYAML",
+			userYAML:    "dashboard:\n  haro_url: http://haro-user:8080\n",
+			wantHaroURL: "http://haro-user:8080",
+		},
+		{
 			name:          "NomadAddr_FromLookup",
 			env:           map[string]string{"NOMAD_ADDR": "http://10.1.2.3:4646"},
 			wantNomadAddr: "http://10.1.2.3:4646",
@@ -1988,7 +2151,7 @@ vanadis_url: "http://vanadis:8089"
 			t.Parallel()
 			if tc.useEnvSmoke {
 				cfg := NewDashboardConfigFromEnv()
-				if cfg.Port == "" || cfg.BrainURL == "" || cfg.GHRepo == "" || cfg.GitSyncURL == "" || cfg.ConfigPath == "" || cfg.GitCommit == "" || cfg.VanadisURL == "" {
+				if cfg.Port == "" || cfg.BrainURL == "" || cfg.GHRepo == "" || cfg.GitSyncURL == "" || cfg.ConfigPath == "" || cfg.GitCommit == "" || cfg.VanadisURL == "" || cfg.HaroURL == "" {
 					t.Errorf("expected non-empty fields in NewDashboardConfigFromEnv, got %+v", cfg)
 				}
 				return
@@ -2060,6 +2223,9 @@ vanadis_url: "http://vanadis:8089"
 			}
 			if tc.wantVanadisURL != "" && cfg.VanadisURL != tc.wantVanadisURL {
 				t.Errorf("VanadisURL = %q, want %q", cfg.VanadisURL, tc.wantVanadisURL)
+			}
+			if tc.wantHaroURL != "" && cfg.HaroURL != tc.wantHaroURL {
+				t.Errorf("HaroURL = %q, want %q", cfg.HaroURL, tc.wantHaroURL)
 			}
 			if tc.wantNomadAddr != "" && cfg.NomadAddr != tc.wantNomadAddr {
 				t.Errorf("NomadAddr = %q, want %q", cfg.NomadAddr, tc.wantNomadAddr)
