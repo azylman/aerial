@@ -42,7 +42,6 @@ type mockRiverInserter struct {
 	insertedHangarJobs     []HangarWebhookArgs
 	insertedNomadJobs      []NomadEventArgs
 	insertedCrashAlertJobs []NomadCrashAlertArgs
-	insertedVanadisJobs    []VanadisExecuteChunkArgs
 	insertedWidgetSyncJobs []WidgetSyncArgs
 	insertedOpts           []*river.InsertOpts
 	skipDuplicate          bool
@@ -65,8 +64,6 @@ func (m *mockRiverInserter) Insert(ctx context.Context, args river.JobArgs, opts
 		m.insertedNomadJobs = append(m.insertedNomadJobs, a)
 	case NomadCrashAlertArgs:
 		m.insertedCrashAlertJobs = append(m.insertedCrashAlertJobs, a)
-	case VanadisExecuteChunkArgs:
-		m.insertedVanadisJobs = append(m.insertedVanadisJobs, a)
 	case WidgetSyncArgs:
 		m.insertedWidgetSyncJobs = append(m.insertedWidgetSyncJobs, a)
 	}
@@ -3635,22 +3632,21 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 		t.Errorf("expected 2 silent medium-effort prompts for Vanadis auto-fix, got %+v", vPrompts)
 	}
 
-	poolVanadisPG := &mockVanadisPgxPool{
-		queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
-			return mockVanadisPgxRow{scanFn: func(dest ...any) error {
-				if len(dest) == 3 {
-					if b, ok := dest[0].(*bool); ok {
-						*b = true
-						*dest[1].(*string) = "chunk-885"
-						*dest[2].(*string) = "low"
-					}
-				}
-				return nil
-			}}
-		},
-	}
+	tsVanadis := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/chunks/by-pr") {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"matched":  true,
+				"chunk_id": "chunk-885",
+				"effort":   "low",
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(tsVanadis.Close)
+
 	dispVanadisPG := &mockOutboundDispatcher{}
-	srvVanadisPG := newTestRouter(Config{}, nil, NewPostgresPRRegistry(poolVanadisPG), dispVanadisPG)
+	srvVanadisPG := newTestRouter(Config{}, nil, NewPostgresPRRegistry(nil, WithVanadisClient(tsVanadis.URL, tsVanadis.Client())), dispVanadisPG)
 	if err := srvVanadisPG.dispatchCIFailurePrompt(ctx, validSnowflake, "unit", "azylman/aerial", "sha1", 885, "err", "http://ci.test"); err != nil {
 		t.Errorf("dispatchCIFailurePrompt(vanadis pg): %v", err)
 	}
@@ -3854,14 +3850,6 @@ func TestRiverJobArgsAndUniqueOpts(t *testing.T) {
 			args:         WidgetSyncArgs{Repo: "azylman/aerial", PRNumber: 101},
 			wantKind:     "widget_sync",
 			wantAttempts: 5,
-		},
-		{
-			name:         "VanadisExecuteChunkArgs",
-			args:         VanadisExecuteChunkArgs{BuildID: "build-01", ChunkIndex: 2},
-			wantKind:     "vanadis_execute_chunk",
-			wantQueue:    VanadisQueueName,
-			wantByArgs:   true,
-			wantAttempts: 3,
 		},
 	}
 
@@ -4194,19 +4182,17 @@ func TestAdvanceVanadisChunk(t *testing.T) {
 	validThread := "123456789012345678"
 
 	tests := []struct {
-		name             string
-		useNilRegistry   bool
-		prNumber         int
-		advanceRes       *VanadisAdvancementResult
-		advanceErr       error
-		inserterErr      error
-		dispDirectErr    error
-		dispWidgetErr    error
-		wantErr          bool
-		wantInsertedJobs int
-		wantPrompts      int
-		wantPromptSubs   []string
-		wantDMs          int
+		name           string
+		useNilRegistry bool
+		prNumber       int
+		advanceRes     *VanadisAdvancementResult
+		advanceErr     error
+		dispDirectErr  error
+		dispWidgetErr  error
+		wantErr        bool
+		wantPrompts    int
+		wantPromptSubs []string
+		wantDMs        int
 	}{
 		{
 			name:           "nil registry is clean no-op",
@@ -4238,7 +4224,7 @@ func TestAdvanceVanadisChunk(t *testing.T) {
 			wantErr:    true,
 		},
 		{
-			name:     "mid-run chunk advancement enqueues next chunk in River",
+			name:     "mid-run chunk advancement syncs widget and succeeds",
 			prNumber: 42,
 			advanceRes: &VanadisAdvancementResult{
 				Matched:          true,
@@ -4254,23 +4240,24 @@ func TestAdvanceVanadisChunk(t *testing.T) {
 					{ChunkIndex: 1, Title: "Chunk Two", Status: "pending"},
 				},
 			},
-			dispDirectErr:    errors.New("transient dm error warning"),
-			wantInsertedJobs: 1,
-			wantErr:          false,
+			dispDirectErr: errors.New("transient dm error warning"),
+			wantErr:       false,
 		},
 		{
-			name:     "River insert error during mid-run advancement returns error",
+			name:     "mid-run chunk advancement with widget error logs warning",
 			prNumber: 42,
 			advanceRes: &VanadisAdvancementResult{
-				Matched:        true,
-				Advanced:       true,
-				BuildID:        "build-mid",
-				ThreadID:       validThread,
-				NextChunkIndex: 1,
-				BuildCompleted: false,
+				Matched:          true,
+				Advanced:         true,
+				BuildID:          "build-mid",
+				ThreadID:         validThread,
+				MergedChunkIndex: 0,
+				MergedChunkTitle: "Chunk One",
+				NextChunkIndex:   1,
+				BuildCompleted:   false,
 			},
-			inserterErr: errors.New("river insert failed"),
-			wantErr:     true,
+			dispWidgetErr: errors.New("transient widget error"),
+			wantErr:       false,
 		},
 		{
 			name:     "final build completion dispatches widget sync and completion prompt",
@@ -4313,17 +4300,11 @@ func TestAdvanceVanadisChunk(t *testing.T) {
 				directMessageErr: tc.dispDirectErr,
 				widgetErr:        tc.dispWidgetErr,
 			}
-			inserter := &mockRiverInserter{
-				err: tc.inserterErr,
-			}
-			srv := newTestRouter(Config{}, nil, reg, disp, inserter)
+			srv := newTestRouter(Config{}, nil, reg, disp)
 
 			err := srv.advanceVanadisChunk(ctx, "azylman/aerial", tc.prNumber)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("advanceVanadisChunk() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if len(inserter.insertedVanadisJobs) != tc.wantInsertedJobs {
-				t.Errorf("got %d inserted jobs, want %d", len(inserter.insertedVanadisJobs), tc.wantInsertedJobs)
 			}
 			if len(disp.PromptCalls()) != tc.wantPrompts {
 				t.Errorf("got %d prompts, want %d", len(disp.PromptCalls()), tc.wantPrompts)
@@ -4510,6 +4491,8 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 		mergeSHAReturn string
 		metaJSON       string
 		totalRows      int
+		vanadisStatus  int
+		vanadisBody    string
 		wantErr        bool
 		wantUpdated    bool
 		wantTarget     string
@@ -4634,9 +4617,9 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 
 		// EnsurePRRegistered
 		{name: "EnsurePRRegistered empty repo guard", op: "EnsurePRRegistered", repo: "", prNumber: 692, wantTarget: ""},
-		{name: "EnsurePRRegistered chunk query error", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", mockSelectErr: errors.New("chunk db err"), wantErr: true},
-		{name: "EnsurePRRegistered chunk resolves thread_id and upserts pr_registry", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", targetIDReturn: "1562162630997581946", wantTarget: "1562162630997581946", wantSQLSubstr: "AND c.repo = $3"},
-		{name: "EnsurePRRegistered invalid targetID after chunk miss skips upsert", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", mockSelectErr: pgx.ErrNoRows, wantTarget: ""},
+		{name: "EnsurePRRegistered chunk query error", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", vanadisStatus: http.StatusInternalServerError, vanadisBody: `{"error":"internal"}`, wantErr: true},
+		{name: "EnsurePRRegistered chunk resolves thread_id and upserts pr_registry", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", vanadisStatus: http.StatusOK, vanadisBody: `{"status":"attached","thread_id":"1562162630997581946"}`, targetIDReturn: "1562162630997581946", wantTarget: "1562162630997581946"},
+		{name: "EnsurePRRegistered invalid targetID after chunk miss skips upsert", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", vanadisStatus: http.StatusNotFound, vanadisBody: `{"error":"not found"}`, wantTarget: ""},
 		{name: "EnsurePRRegistered upsert exec error", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, targetID: "1562162630997581946", mockExecErr: errors.New("upsert err"), wantErr: true},
 
 		// RegisterPR
@@ -4645,9 +4628,9 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 		{name: "RegisterPR zero pr guard", op: "RegisterPR", repo: "azylman/aerial", prNumber: 0, targetID: "1555405874565091380", wantErr: true},
 		{name: "RegisterPR empty branch guard", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, sha: "head123", targetID: "1555405874565091380", branchReturn: "", wantErr: true},
 		{name: "RegisterPR empty head_sha guard", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, sha: "", targetID: "1555405874565091380", branchReturn: "feat/foo", wantErr: true},
-		{name: "RegisterPR chunk query error", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", jobName: "chunk-1", mockSelectErr: errors.New("chunk db err"), wantErr: true},
-		{name: "RegisterPR chunk not found returns ErrVanadisChunkNotFound", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", jobName: "chunk-1", mockSelectErr: pgx.ErrNoRows, wantErr: true},
-		{name: "RegisterPR chunk resolves thread_id and upserts pr_registry", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", jobName: "chunk-1", targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantSQLSubstr: "ON CONFLICT (repo, pr_number)"},
+		{name: "RegisterPR chunk query error", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", jobName: "chunk-1", vanadisStatus: http.StatusInternalServerError, vanadisBody: `{"error":"internal"}`, wantErr: true},
+		{name: "RegisterPR chunk not found returns ErrVanadisChunkNotFound", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", jobName: "chunk-1", vanadisStatus: http.StatusNotFound, vanadisBody: `{"error":"not found"}`, wantErr: true},
+		{name: "RegisterPR chunk resolves thread_id and upserts pr_registry", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", jobName: "chunk-1", vanadisStatus: http.StatusOK, vanadisBody: `{"status":"attached","thread_id":"1555405874565091380"}`, targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantSQLSubstr: "ON CONFLICT (repo, pr_number)"},
 		{name: "RegisterPR invalid targetID without chunk returns error", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", targetID: "invalid-target", wantErr: true},
 		{name: "RegisterPR empty targetID without chunk returns error", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", targetID: "", wantErr: true},
 		{name: "RegisterPR upsert exec error", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", targetID: "1555405874565091380", mockExecErr: errors.New("upsert err"), wantErr: true},
@@ -4831,9 +4814,25 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 				}
 			}
 
-			reg := NewPostgresPRRegistry(pool)
+			var vURL string
+			var vClient *http.Client
+			if tc.vanadisStatus != 0 || tc.vanadisBody != "" {
+				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					status := tc.vanadisStatus
+					if status == 0 {
+						status = http.StatusOK
+					}
+					w.WriteHeader(status)
+					_, _ = w.Write([]byte(tc.vanadisBody))
+				}))
+				defer ts.Close()
+				vURL = ts.URL
+				vClient = ts.Client()
+			}
+
+			reg := NewPostgresPRRegistry(pool, WithVanadisClient(vURL, vClient))
 			if tc.nilPool {
-				reg = NewPostgresPRRegistry((*pgxpool.Pool)(nil))
+				reg = NewPostgresPRRegistry((*pgxpool.Pool)(nil), WithVanadisClient(vURL, vClient))
 			}
 
 			switch tc.op {
@@ -5064,6 +5063,61 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 	}
 }
 
+func TestPostgresPRRegistry_VanadisClientOptions(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		reg        *PostgresPRRegistry
+		url        string
+		client     *http.Client
+		wantURL    string
+		wantClient bool
+	}{
+		{
+			name:       "nil registry returns defaults",
+			reg:        nil,
+			wantURL:    "http://vanadis.aerial",
+			wantClient: true,
+		},
+		{
+			name:       "uninitialized fields return defaults",
+			reg:        &PostgresPRRegistry{},
+			wantURL:    "http://vanadis.aerial",
+			wantClient: true,
+		},
+		{
+			name:       "custom URL and client",
+			reg:        NewPostgresPRRegistry(nil, WithVanadisClient("http://custom.vanadis:8080/", &http.Client{Timeout: 5 * time.Second})),
+			wantURL:    "http://custom.vanadis:8080",
+			wantClient: true,
+		},
+		{
+			name:       "WithVanadisClient nil registry guard",
+			reg:        nil,
+			url:        "http://custom.vanadis",
+			wantURL:    "http://vanadis.aerial",
+			wantClient: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.url != "" {
+				WithVanadisClient(tc.url, tc.client)(tc.reg)
+			}
+			c, u := tc.reg.getVanadisClient()
+			if u != tc.wantURL {
+				t.Errorf("got URL %q, want %q", u, tc.wantURL)
+			}
+			if (c != nil) != tc.wantClient {
+				t.Errorf("got client %v, wantClient %v", c, tc.wantClient)
+			}
+		})
+	}
+}
+
 func TestParseAerialPRMetadata(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -5092,40 +5146,22 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	chunkStart := time.Date(2026, 10, 16, 16, 0, 0, 0, time.UTC)
-	chunkEnd := chunkStart.Add(10 * time.Minute)
-	twoChunks := []VanadisChunkSummary{
-		{ID: "chunk-0", ChunkIndex: 0, Title: "C0", Status: "merged", PRNumber: 10, StartedAt: chunkStart, UpdatedAt: chunkEnd},
-		{ID: "chunk-1", ChunkIndex: 1, Repo: "", Title: "C1", Status: "pending", PRNumber: 0},
-	}
-	allMergedChunks := []VanadisChunkSummary{
-		{ID: "chunk-0", ChunkIndex: 0, Title: "C0", Status: "merged", PRNumber: 10, StartedAt: chunkStart, UpdatedAt: chunkEnd},
-		{ID: "chunk-1", ChunkIndex: 1, Title: "C1", Status: "merged", PRNumber: 11, StartedAt: chunkStart, UpdatedAt: chunkEnd},
-	}
-
 	tests := []struct {
 		name               string
 		method             string
 		useNilPool         bool
 		emptyGuard         bool
-		beginErr           error
-		selectErr          error
-		execErr            error
-		commitErr          error
-		queryErr           error
-		chunkStatus        string
-		buildStatus        string
-		chunkIdx           int
-		chunksResult       []VanadisChunkSummary
-		queryScanErr       error
-		queryRowsErr       error
+		httpStatus         int
+		httpBody           string
 		wantErr            bool
 		wantBool           bool
+		wantEffort         string
 		wantMatched        bool
 		wantAdvanced       bool
 		wantBuildCompleted bool
 		wantNextChunkIdx   int
 	}{
+		// Typed nil pool / uninitialized
 		{
 			name:       "AdvanceVanadisChunkByPR typed nil pool returns empty",
 			method:     "AdvanceVanadisChunkByPR",
@@ -5149,6 +5185,8 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 			useNilPool: true,
 			wantBool:   false,
 		},
+
+		// Empty repo / prNumber <= 0 guard
 		{
 			name:       "ShouldSuppressVanadisDeployWake empty guard",
 			method:     "ShouldSuppressVanadisDeployWake",
@@ -5169,105 +5207,127 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 			method:     "AdvanceVanadisChunkByPR",
 			emptyGuard: true,
 		},
+
+		// ShouldSuppressVanadisDeployWake
 		{
-			name:     "ShouldSuppressVanadisDeployWake returns true on match",
-			method:   "ShouldSuppressVanadisDeployWake",
-			wantBool: true,
+			name:       "ShouldSuppressVanadisDeployWake returns true on match with remaining chunks",
+			method:     "ShouldSuppressVanadisDeployWake",
+			httpStatus: http.StatusOK,
+			httpBody:   `{"matched":true,"chunk_id":"c1","build_id":"b1","has_remaining_chunks":true}`,
+			wantBool:   true,
 		},
 		{
-			name:      "ShouldSuppressVanadisDeployWake returns error on query failure",
-			method:    "ShouldSuppressVanadisDeployWake",
-			selectErr: errors.New("query err"),
-			wantErr:   true,
+			name:       "ShouldSuppressVanadisDeployWake returns false when no remaining chunks",
+			method:     "ShouldSuppressVanadisDeployWake",
+			httpStatus: http.StatusOK,
+			httpBody:   `{"matched":true,"chunk_id":"c1","build_id":"b1","has_remaining_chunks":false}`,
+			wantBool:   false,
 		},
 		{
-			name:        "ResolveVanadisChunkForPR returns true and low effort on match",
-			method:      "ResolveVanadisChunkForPR",
-			chunkStatus: "low",
-			wantBool:    true,
+			name:       "ShouldSuppressVanadisDeployWake returns false when not matched",
+			method:     "ShouldSuppressVanadisDeployWake",
+			httpStatus: http.StatusOK,
+			httpBody:   `{"matched":false}`,
+			wantBool:   false,
 		},
 		{
-			name:      "ResolveVanadisChunkForPR returns error on query failure",
-			method:    "ResolveVanadisChunkForPR",
-			selectErr: errors.New("query err"),
-			wantErr:   true,
+			name:       "ShouldSuppressVanadisDeployWake returns error on 500",
+			method:     "ShouldSuppressVanadisDeployWake",
+			httpStatus: http.StatusInternalServerError,
+			httpBody:   `{"error":"fail"}`,
+			wantErr:    true,
 		},
 		{
-			name:      "FailVanadisChunkByPR returns false on ErrNoRows",
-			method:    "FailVanadisChunkByPR",
-			selectErr: pgx.ErrNoRows,
-			wantBool:  false,
+			name:       "ShouldSuppressVanadisDeployWake returns error on invalid json",
+			method:     "ShouldSuppressVanadisDeployWake",
+			httpStatus: http.StatusOK,
+			httpBody:   `{invalid-json`,
+			wantErr:    true,
+		},
+
+		// ResolveVanadisChunkForPR
+		{
+			name:       "ResolveVanadisChunkForPR returns true and low effort on match",
+			method:     "ResolveVanadisChunkForPR",
+			httpStatus: http.StatusOK,
+			httpBody:   `{"matched":true,"chunk_id":"c1","build_id":"b1","effort":"low"}`,
+			wantBool:   true,
+			wantEffort: "low",
 		},
 		{
-			name:      "FailVanadisChunkByPR returns error on scan error",
-			method:    "FailVanadisChunkByPR",
-			selectErr: errors.New("scan err"),
-			wantErr:   true,
+			name:       "ResolveVanadisChunkForPR defaults to medium effort when empty",
+			method:     "ResolveVanadisChunkForPR",
+			httpStatus: http.StatusOK,
+			httpBody:   `{"matched":true,"chunk_id":"c1","build_id":"b1","effort":""}`,
+			wantBool:   true,
+			wantEffort: "medium",
 		},
 		{
-			name:    "FailVanadisChunkByPR returns error on exec error",
-			method:  "FailVanadisChunkByPR",
-			execErr: errors.New("exec build fail err"),
-			wantErr: true,
+			name:       "ResolveVanadisChunkForPR returns false when not matched",
+			method:     "ResolveVanadisChunkForPR",
+			httpStatus: http.StatusOK,
+			httpBody:   `{"matched":false}`,
+			wantBool:   false,
 		},
 		{
-			name:     "FailVanadisChunkByPR returns true on success",
-			method:   "FailVanadisChunkByPR",
-			wantBool: true,
+			name:       "ResolveVanadisChunkForPR returns error on 500",
+			method:     "ResolveVanadisChunkForPR",
+			httpStatus: http.StatusInternalServerError,
+			httpBody:   `{"error":"fail"}`,
+			wantErr:    true,
 		},
 		{
-			name:     "AdvanceVanadisChunkByPR begin tx error",
-			method:   "AdvanceVanadisChunkByPR",
-			beginErr: errors.New("begin tx err"),
-			wantErr:  true,
+			name:       "ResolveVanadisChunkForPR returns error on invalid json",
+			method:     "ResolveVanadisChunkForPR",
+			httpStatus: http.StatusOK,
+			httpBody:   `{invalid-json`,
+			wantErr:    true,
+		},
+
+		// FailVanadisChunkByPR
+		{
+			name:       "FailVanadisChunkByPR returns false on failed: false",
+			method:     "FailVanadisChunkByPR",
+			httpStatus: http.StatusOK,
+			httpBody:   `{"failed":false}`,
+			wantBool:   false,
 		},
 		{
-			name:        "AdvanceVanadisChunkByPR ErrNoRows returns Matched=false",
+			name:       "FailVanadisChunkByPR returns true on success",
+			method:     "FailVanadisChunkByPR",
+			httpStatus: http.StatusOK,
+			httpBody:   `{"build_id":"b1","chunk_id":"c1","failed":true}`,
+			wantBool:   true,
+		},
+		{
+			name:       "FailVanadisChunkByPR returns error on 500",
+			method:     "FailVanadisChunkByPR",
+			httpStatus: http.StatusInternalServerError,
+			httpBody:   `{"error":"fail"}`,
+			wantErr:    true,
+		},
+
+		// AdvanceVanadisChunkByPR
+		{
+			name:        "AdvanceVanadisChunkByPR returns Matched=false when not found",
 			method:      "AdvanceVanadisChunkByPR",
-			selectErr:   pgx.ErrNoRows,
+			httpStatus:  http.StatusOK,
+			httpBody:    `{"matched":false}`,
 			wantMatched: false,
 		},
 		{
-			name:      "AdvanceVanadisChunkByPR select error returns error",
-			method:    "AdvanceVanadisChunkByPR",
-			selectErr: errors.New("select chunk for update err"),
-			wantErr:   true,
-		},
-		{
-			name:         "AdvanceVanadisChunkByPR non-matching status commits and returns unadvanced",
+			name:         "AdvanceVanadisChunkByPR returns unadvanced on terminal/already merged chunk",
 			method:       "AdvanceVanadisChunkByPR",
-			chunkStatus:  "merged",
-			buildStatus:  "running",
+			httpStatus:   http.StatusOK,
+			httpBody:     `{"matched":true,"advanced":false,"build_id":"b1","thread_id":"t1","build_status":"running"}`,
 			wantMatched:  true,
 			wantAdvanced: false,
 		},
 		{
-			name:         "AdvanceVanadisChunkByPR mid-run query chunks scan error",
-			method:       "AdvanceVanadisChunkByPR",
-			chunkStatus:  "pr_open",
-			buildStatus:  "running",
-			chunkIdx:     0,
-			chunksResult: []VanadisChunkSummary{{ID: "chunk-0"}},
-			queryScanErr: errors.New("scan chunk err"),
-			wantErr:      true,
-		},
-		{
-			name:         "AdvanceVanadisChunkByPR mid-run query chunks rows error",
-			method:       "AdvanceVanadisChunkByPR",
-			chunkStatus:  "pr_open",
-			buildStatus:  "running",
-			chunkIdx:     0,
-			chunksResult: []VanadisChunkSummary{{ID: "chunk-0"}},
-			queryRowsErr: errors.New("rows iter err"),
-			wantErr:      true,
-		},
-		{
 			name:             "AdvanceVanadisChunkByPR mid-run advancement success",
 			method:           "AdvanceVanadisChunkByPR",
-			chunkStatus:      "pr_open",
-			buildStatus:      "running",
-			chunkIdx:         0,
-			chunksResult:     twoChunks,
+			httpStatus:       http.StatusOK,
+			httpBody:         `{"matched":true,"advanced":true,"build_id":"b1","thread_id":"t1","next_chunk_index":1,"build_completed":false}`,
 			wantMatched:      true,
 			wantAdvanced:     true,
 			wantNextChunkIdx: 1,
@@ -5275,135 +5335,52 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 		{
 			name:               "AdvanceVanadisChunkByPR build completed advancement success",
 			method:             "AdvanceVanadisChunkByPR",
-			chunkStatus:        "pr_open",
-			buildStatus:        "running",
-			chunkIdx:           1,
-			chunksResult:       allMergedChunks,
+			httpStatus:         http.StatusOK,
+			httpBody:           `{"matched":true,"advanced":true,"build_id":"b1","thread_id":"t1","next_chunk_index":-1,"build_completed":true}`,
 			wantMatched:        true,
 			wantAdvanced:       true,
 			wantBuildCompleted: true,
 			wantNextChunkIdx:   -1,
 		},
 		{
-			name:         "AdvanceVanadisChunkByPR build completed commit error",
-			method:       "AdvanceVanadisChunkByPR",
-			chunkStatus:  "pr_open",
-			buildStatus:  "running",
-			chunkIdx:     1,
-			chunksResult: allMergedChunks,
-			commitErr:    errors.New("commit completed err"),
-			wantErr:      true,
+			name:       "AdvanceVanadisChunkByPR server 500 returns error",
+			method:     "AdvanceVanadisChunkByPR",
+			httpStatus: http.StatusInternalServerError,
+			httpBody:   `{"error":"fail"}`,
+			wantErr:    true,
+		},
+		{
+			name:       "AdvanceVanadisChunkByPR invalid json returns error",
+			method:     "AdvanceVanadisChunkByPR",
+			httpStatus: http.StatusOK,
+			httpBody:   `{invalid-json`,
+			wantErr:    true,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			var vURL string
+			var vClient *http.Client
+			if tc.httpStatus != 0 || tc.httpBody != "" {
+				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					status := tc.httpStatus
+					if status == 0 {
+						status = http.StatusOK
+					}
+					w.WriteHeader(status)
+					_, _ = w.Write([]byte(tc.httpBody))
+				}))
+				defer ts.Close()
+				vURL = ts.URL
+				vClient = ts.Client()
+			}
+
+			reg := NewPostgresPRRegistry(nil, WithVanadisClient(vURL, vClient))
 			if tc.useNilPool {
-				regNil := NewPostgresPRRegistry((*pgxpool.Pool)(nil))
-				switch tc.method {
-				case "AdvanceVanadisChunkByPR":
-					res, err := regNil.AdvanceVanadisChunkByPR(ctx, "aerial", 1)
-					if err != nil || res.Matched {
-						t.Fatalf("expected Matched=false, err=nil on nil pool, got res=%+v err=%v", res, err)
-					}
-				case "ShouldSuppressVanadisDeployWake":
-					sup, err := regNil.ShouldSuppressVanadisDeployWake(ctx, "aerial", 1)
-					if err != nil || sup != tc.wantBool {
-						t.Fatalf("got %v, err=%v", sup, err)
-					}
-				case "ResolveVanadisChunkForPR":
-					matched, _, _, err := regNil.ResolveVanadisChunkForPR(ctx, "aerial", 1)
-					if err != nil || matched != tc.wantBool {
-						t.Fatalf("got %v, err=%v", matched, err)
-					}
-				case "FailVanadisChunkByPR":
-					failed, err := regNil.FailVanadisChunkByPR(ctx, "aerial", 1)
-					if err != nil || failed != tc.wantBool {
-						t.Fatalf("got %v, err=%v", failed, err)
-					}
-				}
-				return
+				reg = NewPostgresPRRegistry((*pgxpool.Pool)(nil), WithVanadisClient(vURL, vClient))
 			}
-
-			pool := &mockVanadisPgxPool{
-				queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
-					return mockVanadisPgxRow{scanFn: func(dest ...any) error {
-						if tc.selectErr != nil {
-							return tc.selectErr
-						}
-						if tc.method == "ShouldSuppressVanadisDeployWake" {
-							*dest[0].(*bool) = tc.wantBool
-							return nil
-						}
-						if tc.method == "ResolveVanadisChunkForPR" {
-							*dest[0].(*bool) = tc.wantBool
-							if len(dest) > 1 {
-								*dest[1].(*string) = "chunk-resolved-1"
-							}
-							if len(dest) > 2 {
-								*dest[2].(*string) = tc.chunkStatus
-							}
-							return nil
-						}
-						if tc.method == "FailVanadisChunkByPR" {
-							*dest[0].(*string) = "build-fail-1"
-							if len(dest) > 1 {
-								*dest[1].(*string) = "chunk-fail-1"
-							}
-							return nil
-						}
-						return nil
-					}}
-				},
-				execFn: func(qCtx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
-					if tc.execErr != nil {
-						return pgconn.CommandTag{}, tc.execErr
-					}
-					return pgconn.NewCommandTag("UPDATE 1"), nil
-				},
-				beginFn: func(qCtx context.Context) (pgx.Tx, error) {
-					if tc.beginErr != nil {
-						return nil, tc.beginErr
-					}
-					return &mockVanadisPgxTx{
-						commitErr: tc.commitErr,
-						queryRowFn: func(txCtx context.Context, sql string, args ...any) pgx.Row {
-							return mockVanadisPgxRow{scanFn: func(dest ...any) error {
-								if tc.selectErr != nil {
-									return tc.selectErr
-								}
-								if len(dest) >= 11 {
-									*dest[0].(*string) = fmt.Sprintf("chunk-%d", tc.chunkIdx)
-									*dest[1].(*string) = "build-100"
-									*dest[2].(*int) = tc.chunkIdx
-									*dest[3].(*string) = fmt.Sprintf("Title %d", tc.chunkIdx)
-									*dest[4].(*string) = tc.chunkStatus
-									*dest[5].(*string) = "123456789012345678"
-									*dest[6].(*int) = 2
-									*dest[7].(*string) = "Test Build Title"
-									*dest[8].(*string) = "Test Objective"
-									*dest[9].(*string) = tc.buildStatus
-									*dest[10].(*string) = "msg-12345"
-								}
-								return nil
-							}}
-						},
-						queryFn: func(txCtx context.Context, sql string, args ...any) (pgx.Rows, error) {
-							if tc.queryErr != nil {
-								return nil, tc.queryErr
-							}
-							return &mockVanadisPgxRows{
-								items:   tc.chunksResult,
-								scanErr: tc.queryScanErr,
-								rowsErr: tc.queryRowsErr,
-							}, nil
-						},
-					}, nil
-				},
-			}
-
-			reg := NewPostgresPRRegistry(pool)
 			repo := "aerial"
 			prNum := 10
 			if tc.emptyGuard {
@@ -5420,12 +5397,17 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 					t.Errorf("got %v, want %v", sup, tc.wantBool)
 				}
 			case "ResolveVanadisChunkForPR":
-				matched, _, _, err := reg.ResolveVanadisChunkForPR(ctx, repo, prNum)
+				matched, _, effort, err := reg.ResolveVanadisChunkForPR(ctx, repo, prNum)
 				if (err != nil) != tc.wantErr {
 					t.Fatalf("ResolveVanadisChunkForPR() err = %v, wantErr = %v", err, tc.wantErr)
 				}
-				if !tc.wantErr && matched != tc.wantBool {
-					t.Errorf("got %v, want %v", matched, tc.wantBool)
+				if !tc.wantErr {
+					if matched != tc.wantBool {
+						t.Errorf("got matched %v, want %v", matched, tc.wantBool)
+					}
+					if tc.wantEffort != "" && effort != tc.wantEffort {
+						t.Errorf("got effort %q, want %q", effort, tc.wantEffort)
+					}
 				}
 			case "FailVanadisChunkByPR":
 				failed, err := reg.FailVanadisChunkByPR(ctx, repo, prNum)
@@ -5575,9 +5557,9 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 			olderPRs:       []int{101},
 			vanadisMatch:   true,
 			wantDispatched: true,
-			wantWidgetID:   "build-abc",
-			wantStatus:     "running",
-			wantChunks:     2,
+			wantWidgetID:   "pr-azylman/aerial-101",
+			wantStatus:     "deployed",
+			wantChunks:     1,
 		},
 		{
 			name: "Postgres deployed sweep logs warning when older PR widget dispatch fails", repo: "azylman/aerial",
@@ -5590,10 +5572,7 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 			prDBStatus:     "merged",
 			buildDBStatus:  "completed",
 			vanadisMatch:   true,
-			wantDispatched: true,
-			wantWidgetID:   "build-abc",
-			wantStatus:     "completed",
-			wantChunks:     2,
+			wantDispatched: false,
 		},
 		{
 			name:           "Postgres Vanadis chunk deploy_failed sets build status failed and banner",
@@ -5602,15 +5581,16 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 			prDBStatus:     "deploy_failed",
 			prDBBanner:     "Deploy failed",
 			vanadisMatch:   true,
-			wantDispatched: true,
-			wantWidgetID:   "build-abc",
-			wantStatus:     "failed",
-			wantBanner:     "Deploy failed",
-			wantChunks:     2,
+			wantDispatched: false,
 		},
 		{
-			name: "Postgres Vanadis chunk conflict and closed resolution variants", repo: "azylman/aerial", prNumber: 102,
-			prDBStatus: "closed", chunk1DBStatus: "pr_opened", vanadisMatch: true, wantDispatched: true, wantWidgetID: "build-abc", wantStatus: "failed", wantChunks: 2,
+			name:           "Postgres Vanadis chunk conflict and closed resolution variants",
+			repo:           "azylman/aerial",
+			prNumber:       102,
+			prDBStatus:     "closed",
+			chunk1DBStatus: "pr_opened",
+			vanadisMatch:   true,
+			wantDispatched: false,
 		},
 		{
 			name:         "Postgres Vanadis chunk dispatch error",
@@ -5657,11 +5637,6 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 				}
 				if err := nilSrv.ProcessWidgetSync(ctx, WidgetSyncArgs{Repo: tc.repo, PRNumber: tc.prNumber}); err != nil {
 					t.Fatalf("ProcessWidgetSync nil server err = %v", err)
-				}
-				for _, pair := range [][2]string{
-					{"failed", "open"}, {"running", "deploying"}, {"pr_opened", "conflict"}, {"merged", "closed"}, {"pr_opened", ""},
-				} {
-					_ = resolveVanadisChunkWidgetStatus(pair[0], pair[1])
 				}
 				return
 			}
@@ -5774,7 +5749,30 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 				},
 			}
 
-			srv := newTestRouter(Config{}, nil, NewPostgresPRRegistry(pool), mockDisp)
+			tsVanadis := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/chunks/sync-pr-widget" {
+					http.NotFound(w, r)
+					return
+				}
+				if tc.queryErr != nil || (tc.vanadisMatch && tc.dispErr != nil) {
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte(`{"error":"vanadis failure"}`))
+					return
+				}
+				var req struct {
+					Repo     string `json:"repo"`
+					PRNumber int    `json:"pr_number"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				if tc.vanadisMatch && req.PRNumber == tc.prNumber {
+					_ = json.NewEncoder(w).Encode(map[string]any{"matched": true, "build_id": "build-abc"})
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"matched": false})
+			}))
+			t.Cleanup(tsVanadis.Close)
+
+			srv := newTestRouter(Config{VanadisURL: tsVanadis.URL}, tsVanadis.Client(), NewPostgresPRRegistry(pool, WithVanadisClient(tsVanadis.URL, tsVanadis.Client())), mockDisp)
 			if tc.prDBBanner != "" {
 				srv.setPRWidgetState(ctx, tc.repo, tc.prNumber, tc.prDBStatus, tc.prDBBanner)
 			}

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -36,9 +35,6 @@ import (
 
 // TargetNomadVariable is the hardcoded destination Nomad variable for all synced secrets.
 const TargetNomadVariable = "nomad/jobs/shared"
-
-// VanadisQueueName is the River queue name for Vanadis build chunk execution jobs.
-const VanadisQueueName = "vanadis"
 
 // UniqueSkippedTotal records the total number of River jobs dropped due to unique constraint debouncing.
 var UniqueSkippedTotal = prometheus.NewCounterVec(
@@ -76,6 +72,7 @@ type Config struct {
 	PostgresURL           string
 	HangarURL             string
 	BrainURL              string
+	VanadisURL            string
 	SystemChannelID       string
 }
 
@@ -87,6 +84,7 @@ type RouterYAMLConfig struct {
 	NomadAddr            string `yaml:"nomad_addr"`
 	HangarURL            string `yaml:"hangar_url"`
 	BrainURL             string `yaml:"brain_url"`
+	VanadisURL           string `yaml:"vanadis_url"`
 	SystemChannelID      string `yaml:"system_channel_id"`
 }
 
@@ -139,6 +137,7 @@ func LoadConfig(configPath string) Config {
 		PostgresURL:           pgURL,
 		HangarURL:             strings.TrimRight(firstNonEmpty(os.Getenv("HANGAR_URL"), fileCfg.HangarURL, "http://127.0.0.1:8087"), "/"),
 		BrainURL:              strings.TrimRight(firstNonEmpty(os.Getenv("BRAIN_INTERNAL_URL"), os.Getenv("BRAIN_URL"), fileCfg.BrainURL, "http://127.0.0.1:8088"), "/"),
+		VanadisURL:            strings.TrimRight(firstNonEmpty(os.Getenv("VANADIS_URL"), fileCfg.VanadisURL, "http://vanadis.aerial"), "/"),
 		SystemChannelID:       strings.TrimSpace(firstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), os.Getenv("DISCORD_CHANNEL_ID"), fileCfg.SystemChannelID)),
 	}
 }
@@ -382,22 +381,6 @@ func (w *WidgetSyncWorker) Work(ctx context.Context, job *river.Job[WidgetSyncAr
 	return nil
 }
 
-// VanadisExecuteChunkArgs defines the River job payload for executing a single Vanadis build chunk.
-type VanadisExecuteChunkArgs struct {
-	BuildID    string `json:"build_id" river:"unique"`
-	ChunkIndex int    `json:"chunk_index" river:"unique"`
-}
-
-func (VanadisExecuteChunkArgs) Kind() string { return "vanadis_execute_chunk" }
-
-func (VanadisExecuteChunkArgs) InsertOpts() river.InsertOpts {
-	return river.InsertOpts{
-		Queue:       VanadisQueueName,
-		MaxAttempts: 3,
-		UniqueOpts:  river.UniqueOpts{ByArgs: true, ByPeriod: 15 * time.Minute},
-	}
-}
-
 // normalizeRepo ensures repository names are normalized with the owner prefix.
 func normalizeRepo(repo string) string {
 	repo = strings.TrimSpace(repo)
@@ -583,15 +566,57 @@ type pgxQueryExecer interface {
 
 // PostgresPRRegistry implements PRRegistryUpdater backed by a pgxpool.Pool.
 type PostgresPRRegistry struct {
-	pool pgxQueryExecer
+	pool       pgxQueryExecer
+	vanadisURL string
+	httpClient *http.Client
 }
 
 // NewPostgresPRRegistry constructs a new PostgresPRRegistry.
-func NewPostgresPRRegistry(pool pgxQueryExecer) *PostgresPRRegistry {
+func NewPostgresPRRegistry(pool pgxQueryExecer, opts ...func(*PostgresPRRegistry)) *PostgresPRRegistry {
 	if typedPool, ok := pool.(*pgxpool.Pool); ok && typedPool == nil {
 		pool = nil
 	}
-	return &PostgresPRRegistry{pool: pool}
+	r := &PostgresPRRegistry{
+		pool:       pool,
+		vanadisURL: "http://vanadis.aerial",
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(r)
+		}
+	}
+	return r
+}
+
+// WithVanadisClient configures the Vanadis URL and HTTP client for PostgresPRRegistry.
+func WithVanadisClient(vanadisURL string, client *http.Client) func(*PostgresPRRegistry) {
+	return func(r *PostgresPRRegistry) {
+		if r == nil {
+			return
+		}
+		if vanadisURL != "" {
+			r.vanadisURL = strings.TrimRight(vanadisURL, "/")
+		}
+		if client != nil {
+			r.httpClient = client
+		}
+	}
+}
+
+func (r *PostgresPRRegistry) getVanadisClient() (*http.Client, string) {
+	if r == nil {
+		return &http.Client{Timeout: 10 * time.Second}, "http://vanadis.aerial"
+	}
+	client := r.httpClient
+	if client == nil {
+		client = &http.Client{Timeout: 10 * time.Second}
+	}
+	vURL := strings.TrimRight(r.vanadisURL, "/")
+	if vURL == "" {
+		vURL = "http://vanadis.aerial"
+	}
+	return client, vURL
 }
 
 func (r *PostgresPRRegistry) queryRowScan(ctx context.Context, opName, query string, dest []any, args ...any) (bool, error) {
@@ -722,17 +747,12 @@ func (r *PostgresPRRegistry) RegisterPR(ctx context.Context, req PRRegisterReque
 	}
 
 	if chunkID != "" {
-		chunkQuery := `UPDATE vanadis_chunks c SET pr_number = $1, status = CASE WHEN c.status IN ('merged', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $2 RETURNING b.thread_id;`
-		var chunkThreadID string
-		found, err := r.queryRowScan(ctx, "attach vanadis chunk pr", chunkQuery, []any{&chunkThreadID}, req.PRNumber, chunkID)
+		threadID, err := r.attachVanadisChunkPR(ctx, repo, chunkID, req.PRNumber)
 		if err != nil {
 			return "", err
 		}
-		if !found {
-			return "", ErrVanadisChunkNotFound
-		}
-		if !IsValidDiscordSnowflake(targetID) && IsValidDiscordSnowflake(chunkThreadID) {
-			targetID = strings.TrimSpace(chunkThreadID)
+		if !IsValidDiscordSnowflake(targetID) && IsValidDiscordSnowflake(threadID) {
+			targetID = threadID
 		}
 	}
 
@@ -754,6 +774,45 @@ func (r *PostgresPRRegistry) RegisterPR(ctx context.Context, req PRRegisterReque
 	return targetID, nil
 }
 
+func (r *PostgresPRRegistry) attachVanadisChunkPR(ctx context.Context, repo, chunkID string, prNumber int) (string, error) {
+	client, vURL := r.getVanadisClient()
+	bodyBytes, err := json.Marshal(map[string]any{
+		"chunk_id":  chunkID,
+		"pr_number": prNumber,
+		"repo":      repo,
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal attach chunk request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, vURL+"/chunks/attach-pr", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return "", fmt.Errorf("create attach chunk request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return "", fmt.Errorf("attach vanadis chunk pr: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return "", ErrVanadisChunkNotFound
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		if readErr != nil {
+			return "", fmt.Errorf("attach vanadis chunk pr: unexpected status %d (read error: %w)", resp.StatusCode, readErr)
+		}
+		return "", fmt.Errorf("attach vanadis chunk pr: unexpected status %d: %s", resp.StatusCode, string(body))
+	}
+	var attachRes struct {
+		ThreadID string `json:"thread_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&attachRes); err != nil {
+		return "", fmt.Errorf("decode attach chunk response: %w", err)
+	}
+	return strings.TrimSpace(attachRes.ThreadID), nil
+}
+
 func (r *PostgresPRRegistry) EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID, vanadisChunkID string) (string, error) {
 	repo = normalizeRepo(repo)
 	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
@@ -761,14 +820,13 @@ func (r *PostgresPRRegistry) EnsurePRRegistered(ctx context.Context, repo string
 	}
 	targetID, vanadisChunkID = strings.TrimSpace(targetID), strings.TrimSpace(vanadisChunkID)
 	if vanadisChunkID != "" {
-		chunkQuery := `UPDATE vanadis_chunks c SET pr_number = $1, status = CASE WHEN c.status IN ('merged', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $2 AND c.repo = $3 AND (c.pr_number IS NULL OR c.pr_number = 0 OR c.pr_number = $1) RETURNING b.thread_id;`
-		var chunkThreadID string
-		found, err := r.queryRowScan(ctx, "ensure vanadis chunk pr registered", chunkQuery, []any{&chunkThreadID}, prNumber, vanadisChunkID, repo)
-		if err != nil {
+		threadID, err := r.attachVanadisChunkPR(ctx, repo, vanadisChunkID, prNumber)
+		if err == nil {
+			if !IsValidDiscordSnowflake(targetID) && IsValidDiscordSnowflake(threadID) {
+				targetID = threadID
+			}
+		} else if !errors.Is(err, ErrVanadisChunkNotFound) {
 			return "", err
-		}
-		if found && !IsValidDiscordSnowflake(targetID) && IsValidDiscordSnowflake(chunkThreadID) {
-			targetID = strings.TrimSpace(chunkThreadID)
 		}
 	}
 	if !IsValidDiscordSnowflake(targetID) {
@@ -1100,216 +1158,105 @@ func (r *PostgresPRRegistry) GetRecentChannelContext(ctx context.Context, target
 	return results, rows.Err()
 }
 
-func queryVanadisChunks(ctx context.Context, q interface {
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-}, buildID string, forUpdate bool,
-) ([]VanadisChunkSummary, error) {
-	query := `SELECT id, chunk_index, repo, title, status, COALESCE(pr_number, 0), started_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC`
-	if forUpdate {
-		query += " FOR UPDATE"
-	}
-	rows, err := q.Query(ctx, query, buildID)
-	if err != nil {
-		return nil, fmt.Errorf("query vanadis build chunks: %w", err)
-	}
-	defer rows.Close()
-
-	var chunks []VanadisChunkSummary
-	for rows.Next() {
-		var cs VanadisChunkSummary
-		var startedAt sql.NullTime
-		if scanErr := rows.Scan(&cs.ID, &cs.ChunkIndex, &cs.Repo, &cs.Title, &cs.Status, &cs.PRNumber, &startedAt, &cs.UpdatedAt); scanErr != nil {
-			return nil, fmt.Errorf("scan vanadis build chunk: %w", scanErr)
-		}
-		if startedAt.Valid {
-			cs.StartedAt = startedAt.Time
-		}
-		chunks = append(chunks, cs)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate vanadis build chunks: %w", err)
-	}
-	return chunks, nil
-}
-
 func (r *PostgresPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisAdvancementResult, error) {
 	repo = normalizeRepo(repo)
-	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
-		return &VanadisAdvancementResult{}, nil
-	}
-	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	tx, err := r.pool.Begin(qCtx)
-	if err != nil {
-		return nil, fmt.Errorf("begin vanadis advance tx: %w", err)
-	}
-	defer func() {
-		if rbErr := tx.Rollback(qCtx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
-			log.Printf("[webhooks-router] [registry] vanadis tx rollback error: %v", rbErr)
-		}
-	}()
-
-	selectChunkQuery := `
-		SELECT c.id, c.build_id, c.chunk_index, c.title, c.status, b.thread_id, b.tier, COALESCE(NULLIF(b.title, ''), b.objective), b.objective, b.status, b.status_message_id
-		FROM vanadis_chunks c
-		JOIN vanadis_builds b ON c.build_id = b.id
-		WHERE c.repo = $1 AND c.pr_number = $2
-		ORDER BY c.updated_at DESC LIMIT 1 FOR UPDATE`
-
-	var chunkID, buildID, cTitle, cStatus, threadID, bTitle, objective, bStatus, bStatusMsgID string
-	var chunkIdx, tier int
-	err = tx.QueryRow(qCtx, selectChunkQuery, repo, prNumber).Scan(
-		&chunkID, &buildID, &chunkIdx, &cTitle, &cStatus, &threadID, &tier, &bTitle, &objective, &bStatus, &bStatusMsgID,
-	)
-	if errors.Is(err, pgx.ErrNoRows) {
+	if r == nil || repo == "" || prNumber <= 0 {
 		return &VanadisAdvancementResult{Matched: false}, nil
 	}
+	client, vURL := r.getVanadisClient()
+	bodyBytes, err := json.Marshal(map[string]any{
+		"repo":      repo,
+		"pr_number": prNumber,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("select vanadis chunk by pr: %w", err)
+		return nil, fmt.Errorf("marshal advance chunk request: %w", err)
 	}
-
-	if bStatus == "cancelled" || bStatus == "failed" || cStatus == "merged" {
-		return &VanadisAdvancementResult{
-			Matched:          true,
-			Advanced:         false,
-			BuildID:          buildID,
-			ThreadID:         threadID,
-			Tier:             tier,
-			Title:            bTitle,
-			Objective:        objective,
-			BuildStatus:      bStatus,
-			StatusMessageID:  bStatusMsgID,
-			MergedChunkIndex: chunkIdx,
-			MergedChunkTitle: cTitle,
-			NextChunkIndex:   -1,
-		}, nil
-	}
-
-	updateChunkQuery := `UPDATE vanadis_chunks SET status = 'merged', updated_at = CURRENT_TIMESTAMP WHERE id = $1`
-	if _, err := tx.Exec(qCtx, updateChunkQuery, chunkID); err != nil {
-		return nil, fmt.Errorf("update vanadis chunk merged: %w", err)
-	}
-
-	allChunks, err := queryVanadisChunks(qCtx, tx, buildID, true)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, vURL+"/chunks/advance-pr", bytes.NewReader(bodyBytes))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create advance chunk request: %w", err)
 	}
-	for i := range allChunks {
-		if allChunks[i].ID == chunkID {
-			allChunks[i].Status = "merged"
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("advance vanadis chunk by pr: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		if readErr != nil {
+			return nil, fmt.Errorf("advance vanadis chunk by pr: unexpected status %d (read error: %w)", resp.StatusCode, readErr)
 		}
+		return nil, fmt.Errorf("advance vanadis chunk by pr: unexpected status %d: %s", resp.StatusCode, string(body))
 	}
+	var res VanadisAdvancementResult
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return nil, fmt.Errorf("decode advance chunk response: %w", err)
+	}
+	return &res, nil
+}
 
-	nextChunkIdx := -1
-	fallbackIdx := -1
-	for _, cs := range allChunks {
-		if cs.Status != "merged" {
-			if cs.ChunkIndex > chunkIdx && (nextChunkIdx == -1 || cs.ChunkIndex < nextChunkIdx) {
-				nextChunkIdx = cs.ChunkIndex
-			} else if fallbackIdx == -1 {
-				fallbackIdx = cs.ChunkIndex
-			}
+type vanadisChunkPRLookup struct {
+	Matched            bool   `json:"matched"`
+	ChunkID            string `json:"chunk_id,omitempty"`
+	BuildID            string `json:"build_id,omitempty"`
+	Effort             string `json:"effort,omitempty"`
+	HasRemainingChunks bool   `json:"has_remaining_chunks"`
+}
+
+func (r *PostgresPRRegistry) getChunkByPR(ctx context.Context, repo string, prNumber int) (*vanadisChunkPRLookup, error) {
+	repo = normalizeRepo(repo)
+	if r == nil || repo == "" || prNumber <= 0 {
+		return &vanadisChunkPRLookup{Matched: false}, nil
+	}
+	client, vURL := r.getVanadisClient()
+	endpoint := fmt.Sprintf("%s/chunks/by-pr?repo=%s&pr_number=%d", vURL, url.QueryEscape(repo), prNumber)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create get chunk by pr request: %w", err)
+	}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("get chunk by pr: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		if readErr != nil {
+			return nil, fmt.Errorf("get chunk by pr: unexpected status %d (read error: %w)", resp.StatusCode, readErr)
 		}
+		return nil, fmt.Errorf("get chunk by pr: unexpected status %d: %s", resp.StatusCode, string(body))
 	}
-	if nextChunkIdx == -1 {
-		nextChunkIdx = fallbackIdx
+	var lookup vanadisChunkPRLookup
+	if err := json.NewDecoder(resp.Body).Decode(&lookup); err != nil {
+		return nil, fmt.Errorf("decode get chunk by pr response: %w", err)
 	}
-
-	if nextChunkIdx >= 0 {
-		if err := tx.Commit(qCtx); err != nil {
-			return nil, fmt.Errorf("commit vanadis chunk advance tx: %w", err)
-		}
-		return &VanadisAdvancementResult{
-			Matched:          true,
-			Advanced:         true,
-			BuildID:          buildID,
-			ThreadID:         threadID,
-			Tier:             tier,
-			Title:            bTitle,
-			Objective:        objective,
-			BuildStatus:      bStatus,
-			StatusMessageID:  bStatusMsgID,
-			MergedChunkIndex: chunkIdx,
-			MergedChunkTitle: cTitle,
-			NextChunkIndex:   nextChunkIdx,
-			BuildCompleted:   false,
-			Chunks:           allChunks,
-		}, nil
-	}
-
-	updateBuildQuery := `UPDATE vanadis_builds SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = $1`
-	if _, err := tx.Exec(qCtx, updateBuildQuery, buildID); err != nil {
-		return nil, fmt.Errorf("update vanadis build completed: %w", err)
-	}
-	if err := tx.Commit(qCtx); err != nil {
-		return nil, fmt.Errorf("commit vanadis build completed tx: %w", err)
-	}
-	return &VanadisAdvancementResult{
-		Matched:          true,
-		Advanced:         true,
-		BuildID:          buildID,
-		ThreadID:         threadID,
-		Tier:             tier,
-		Title:            bTitle,
-		Objective:        objective,
-		BuildStatus:      "completed",
-		StatusMessageID:  bStatusMsgID,
-		MergedChunkIndex: chunkIdx,
-		MergedChunkTitle: cTitle,
-		NextChunkIndex:   -1,
-		BuildCompleted:   true,
-		Chunks:           allChunks,
-	}, nil
+	return &lookup, nil
 }
 
 func (r *PostgresPRRegistry) ResolveVanadisChunkForPR(ctx context.Context, repo string, prNumber int) (bool, string, string, error) {
-	repo = normalizeRepo(repo)
-	if repo == "" || prNumber <= 0 {
-		return false, "", "", nil
-	}
-	query := `
-		SELECT TRUE, c.id, COALESCE(NULLIF(c.effort, ''), 'medium')
-		FROM vanadis_chunks c
-		JOIN vanadis_builds b ON c.build_id = b.id
-		WHERE c.repo = $1 AND c.pr_number = $2
-		  AND b.status != 'cancelled'
-		ORDER BY c.updated_at DESC LIMIT 1;`
-	var matched bool
-	var chunkID, effort string
-	found, err := r.queryRowScan(ctx, "resolve vanadis chunk for pr", query, []any{&matched, &chunkID, &effort}, repo, prNumber)
-	if err != nil || !found || !matched {
+	lookup, err := r.getChunkByPR(ctx, repo, prNumber)
+	if err != nil {
 		return false, "", "", err
 	}
+	if lookup == nil || !lookup.Matched {
+		return false, "", "", nil
+	}
 	cleanEffort := "medium"
-	if strings.EqualFold(strings.TrimSpace(effort), "low") {
+	if strings.EqualFold(strings.TrimSpace(lookup.Effort), "low") {
 		cleanEffort = "low"
 	}
-	return true, strings.TrimSpace(chunkID), cleanEffort, nil
+	return true, strings.TrimSpace(lookup.ChunkID), cleanEffort, nil
 }
 
 func (r *PostgresPRRegistry) ShouldSuppressVanadisDeployWake(ctx context.Context, repo string, prNumber int) (bool, error) {
-	repo = normalizeRepo(repo)
-	if repo == "" || prNumber <= 0 {
-		return false, nil
-	}
-	query := `
-		SELECT TRUE
-		FROM vanadis_chunks c
-		JOIN vanadis_builds b ON c.build_id = b.id
-		WHERE c.repo = $1 AND c.pr_number = $2
-		  AND b.status != 'cancelled'
-		  AND EXISTS (
-			  SELECT 1 FROM vanadis_chunks c2
-			  WHERE c2.build_id = c.build_id AND c2.chunk_index > c.chunk_index
-		  )
-		ORDER BY c.updated_at DESC LIMIT 1;`
-	var matched bool
-	found, err := r.queryRowScan(ctx, "check vanadis deploy wake suppression", query, []any{&matched}, repo, prNumber)
-	if err != nil || !found {
+	lookup, err := r.getChunkByPR(ctx, repo, prNumber)
+	if err != nil {
 		return false, err
 	}
-	return matched, nil
+	if lookup == nil || !lookup.Matched {
+		return false, nil
+	}
+	return lookup.HasRemainingChunks, nil
 }
 
 func (r *PostgresPRRegistry) FailVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (bool, error) {
@@ -1965,32 +1912,6 @@ func normalizeWidgetStatus(dbStatus string) string {
 	}
 }
 
-func resolveVanadisChunkWidgetStatus(chunkStatus, prDBStatus string) string {
-	cStat := normalizeWidgetStatus(chunkStatus)
-	if cStat == "failed" {
-		return "failed"
-	}
-	switch normalizeWidgetStatus(prDBStatus) {
-	case "deployed":
-		return "deployed"
-	case "deploying":
-		return "deploying"
-	case "failed":
-		return "failed"
-	case "conflict":
-		return "conflict"
-	case "merged":
-		return "merged"
-	case "closed":
-		if cStat == "merged" {
-			return "merged"
-		}
-		return "failed"
-	default:
-		return firstNonEmpty(cStat, "open")
-	}
-}
-
 func (s *RouterServer) setPRWidgetState(ctx context.Context, repo string, prNumber int, status, banner string) {
 	if s == nil || s.registry == nil || repo == "" || prNumber <= 0 {
 		return
@@ -2094,44 +2015,6 @@ func (s *RouterServer) sweepOlderDeployedPRWidgets(qCtx context.Context, pgReg *
 	}
 }
 
-func buildVanadisWidgetRequest(allChunks []VanadisChunkSummary, buildID, threadID, bStatusMsgID, bTitle, objective, bStatus, prStatus, prBanner string, tier, prNumber int, prFound bool) StatusWidgetRequest {
-	widgetStatus := firstNonEmpty(normalizeWidgetStatus(bStatus), "running")
-	var wChunks []StatusWidgetChunk
-	for _, cs := range allChunks {
-		chunkRepo := firstNonEmpty(cs.Repo, "azylman/aerial")
-		chunkStatus := normalizeWidgetStatus(cs.Status)
-		if cs.PRNumber == prNumber && prFound {
-			chunkStatus = resolveVanadisChunkWidgetStatus(cs.Status, prStatus)
-			if (chunkStatus == "failed" || chunkStatus == "conflict") && widgetStatus != "completed" {
-				widgetStatus = "failed"
-			}
-		}
-		wChunks = append(wChunks, StatusWidgetChunk{
-			Index:     cs.ChunkIndex,
-			Repo:      chunkRepo,
-			Title:     cs.Title,
-			Status:    chunkStatus,
-			PRNumber:  cs.PRNumber,
-			StartedAt: cs.StartedAt,
-			UpdatedAt: cs.UpdatedAt,
-		})
-	}
-	widgetBanner := ""
-	if widgetStatus == "failed" || widgetStatus == "conflict" {
-		widgetBanner = prBanner
-	}
-	return StatusWidgetRequest{
-		ChannelID: threadID,
-		MessageID: bStatusMsgID,
-		ID:        buildID,
-		Tier:      tier,
-		Title:     firstNonEmpty(bTitle, objective),
-		Status:    widgetStatus,
-		Banner:    widgetBanner,
-		Chunks:    wChunks,
-	}
-}
-
 func (s *RouterServer) syncSinglePRWidget(qCtx context.Context, pgReg *PostgresPRRegistry, repo string, prNumber int, allowSweep bool) error {
 	prQuery := `SELECT target_id, title, status, status_message_id, created_at, updated_at, COALESCE(metadata->>'banner', '') FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1`
 	var targetID, title, prStatus, prMsgID, prBanner string
@@ -2146,35 +2029,43 @@ func (s *RouterServer) syncSinglePRWidget(qCtx context.Context, pgReg *PostgresP
 		s.sweepOlderDeployedPRWidgets(qCtx, pgReg, repo, prNumber)
 	}
 
-	// 1. Check if (repo, prNumber) belongs to a vanadis_chunks row
-	selectChunkQuery := `
-		SELECT c.id, c.build_id, b.thread_id, b.tier, COALESCE(NULLIF(b.title, ''), b.objective), b.objective, b.status, b.status_message_id
-		FROM vanadis_chunks c
-		JOIN vanadis_builds b ON c.build_id = b.id
-		WHERE c.repo = $1 AND c.pr_number = $2
-		ORDER BY c.updated_at DESC LIMIT 1`
-
-	var cID, buildID, threadID, bTitle, objective, bStatus, bStatusMsgID string
-	var tier int
-	err := pgReg.pool.QueryRow(qCtx, selectChunkQuery, repo, prNumber).Scan(
-		&cID, &buildID, &threadID, &tier, &bTitle, &objective, &bStatus, &bStatusMsgID,
-	)
-	if err == nil && buildID != "" {
-		allChunks, qErr := queryVanadisChunks(qCtx, pgReg.pool, buildID, false)
-		if qErr != nil {
-			return fmt.Errorf("sync widget query chunks: %w", qErr)
+	// 1. Ask vanadis to sync widget if this PR belongs to a vanadis chunk
+	client, vURL := pgReg.getVanadisClient()
+	bodyBytes, err := json.Marshal(map[string]any{
+		"repo":      repo,
+		"pr_number": prNumber,
+		"pr_status": prStatus,
+		"pr_banner": prBanner,
+		"pr_found":  prFound,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal sync chunk widget request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(qCtx, http.MethodPost, vURL+"/chunks/sync-pr-widget", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return fmt.Errorf("create sync chunk widget request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("sync vanadis pr widget: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		if readErr != nil {
+			return fmt.Errorf("sync vanadis pr widget: unexpected status %d (read error: %w)", resp.StatusCode, readErr)
 		}
-		widgetReq := buildVanadisWidgetRequest(allChunks, buildID, threadID, bStatusMsgID, bTitle, objective, bStatus, prStatus, prBanner, tier, prNumber, prFound)
-		newMsgID, dispErr := s.dispatcher.DispatchWidget(qCtx, widgetReq)
-		if dispErr != nil {
-			return fmt.Errorf("dispatch vanadis widget: %w", dispErr)
-		}
-		if newMsgID != "" && newMsgID != bStatusMsgID {
-			updateMsgQuery := `UPDATE vanadis_builds SET status_message_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`
-			if _, execErr := pgReg.pool.Exec(qCtx, updateMsgQuery, newMsgID, buildID); execErr != nil {
-				log.Printf("[webhooks-router] [widget] warning updating vanadis status_message_id: %v", execErr)
-			}
-		}
+		return fmt.Errorf("sync vanadis pr widget: unexpected status %d: %s", resp.StatusCode, string(body))
+	}
+	var syncRes struct {
+		Matched bool   `json:"matched"`
+		BuildID string `json:"build_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&syncRes); err != nil {
+		return fmt.Errorf("decode sync chunk widget response: %w", err)
+	}
+	if syncRes.Matched {
 		return nil
 	}
 
@@ -2334,14 +2225,6 @@ func (s *RouterServer) advanceVanadisChunk(ctx context.Context, repo string, prN
 	}
 	s.evaluateVanadisAdvancementTriggers(ctx, repo, prNumber, res)
 	if !res.BuildCompleted && res.NextChunkIndex >= 0 {
-		if s.riverClient != nil {
-			if err := s.insertRiverJob(ctx, VanadisExecuteChunkArgs{
-				BuildID:    res.BuildID,
-				ChunkIndex: res.NextChunkIndex,
-			}); err != nil {
-				return fmt.Errorf("enqueue next vanadis chunk %d for build %s: %w", res.NextChunkIndex, res.BuildID, err)
-			}
-		}
 		if err := s.SyncPRWidget(ctx, repo, prNumber); err != nil {
 			log.Printf("[webhooks-router] [vanadis] warning syncing chunk advancement widget for build %s: %v", res.BuildID, err)
 		}
@@ -3634,7 +3517,7 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 		}
 		defer pool.Close()
 		dbPool = pool
-		server.SetRegistry(NewPostgresPRRegistry(dbPool))
+		server.SetRegistry(NewPostgresPRRegistry(dbPool, WithVanadisClient(cfg.VanadisURL, server.httpClient)))
 
 		workers := river.NewWorkers()
 		river.AddWorker(workers, &GitHubWebhookWorker{server: server})
