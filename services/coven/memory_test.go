@@ -3879,6 +3879,30 @@ func TestEvaluateCandidateAdmission(t *testing.T) {
 			wantReason: "ephemeral_telemetry",
 		},
 		{
+			name:       "PlaintextPasswordRejected",
+			item:       ExtractedFactItem{FactText: "The password for the staging service account is SuperSecret2026!."},
+			wantAdmit:  false,
+			wantReason: "plaintext_credential",
+		},
+		{
+			name:       "PlaintextTokenPrefixRejected",
+			item:       ExtractedFactItem{FactText: "Service authentication uses token ghp_0123456789abcdefghij0123456789ab"},
+			wantAdmit:  false,
+			wantReason: "plaintext_credential",
+		},
+		{
+			name:       "PlaintextPINCodeRejected",
+			item:       ExtractedFactItem{FactText: "Guest smart lock PIN code is 4829 for weekend access"},
+			wantAdmit:  false,
+			wantReason: "plaintext_credential",
+		},
+		{
+			name:       "CredentialStorageLocationAdmitted",
+			item:       ExtractedFactItem{FactText: "The database password is stored in the cluster secret manager"},
+			wantAdmit:  true,
+			wantReason: "admitted",
+		},
+		{
 			name:       "DurableDirectiveOverridesEphemeral",
 			item:       ExtractedFactItem{FactText: "Always verify CI before pull request #500 merges"},
 			wantAdmit:  true,
