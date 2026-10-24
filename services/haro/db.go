@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"strings"
 	"time"
 
@@ -14,6 +15,32 @@ import (
 )
 
 var sqliteTestInitHook func(string) (*sql.DB, error)
+
+type ScheduleSummaryMetrics struct {
+	TotalActive    int        `json:"total_active"`
+	CronCount      int        `json:"cron_count"`
+	HeartbeatCount int        `json:"heartbeat_count"`
+	OneShotCount   int        `json:"one_shot_count"`
+	TotalRuns24h   int        `json:"total_runs_24h"`
+	NextRunAt      *time.Time `json:"next_run_at"`
+	SuccessRate24h float64    `json:"success_rate_24h"`
+}
+
+type ScheduleRunJSON struct {
+	ID           string     `json:"id"`
+	ScheduleID   string     `json:"schedule_id"`
+	ScheduleType string     `json:"schedule_type"`
+	MessageID    string     `json:"message_id,omitempty"`
+	TargetID     string     `json:"target_id"`
+	ThreadID     string     `json:"thread_id,omitempty"`
+	Title        string     `json:"title"`
+	Prompt       string     `json:"prompt"`
+	StartedAt    time.Time  `json:"started_at"`
+	CompletedAt  *time.Time `json:"completed_at,omitempty"`
+	DurationMs   int64      `json:"duration_ms"`
+	Status       string     `json:"status"`
+	Error        string     `json:"error,omitempty"`
+}
 
 type CronSchedule struct {
 	ID          string    `json:"id"`
@@ -739,4 +766,176 @@ func DeleteEventTrigger(ctx context.Context, database *sql.DB, id string) (bool,
 		return false, err
 	}
 	return rowsAffected > 0, nil
+}
+
+func findEarliestNextRun(crons []CronSchedule, heartbeats []HeartbeatSchedule, oneshots []OneShotSchedule) *time.Time {
+	var earliest *time.Time
+	for _, c := range crons {
+		if !c.NextRunAt.IsZero() && (earliest == nil || c.NextRunAt.Before(*earliest)) {
+			t := c.NextRunAt
+			earliest = &t
+		}
+	}
+	for _, h := range heartbeats {
+		if !h.NextRunAt.IsZero() && (earliest == nil || h.NextRunAt.Before(*earliest)) {
+			t := h.NextRunAt
+			earliest = &t
+		}
+	}
+	for _, o := range oneshots {
+		if !o.RunAt.IsZero() && (earliest == nil || o.RunAt.Before(*earliest)) {
+			t := o.RunAt
+			earliest = &t
+		}
+	}
+	return earliest
+}
+
+func compute24hRunMetrics(ctx context.Context, database *sql.DB) (int, float64, error) {
+	cutoff := time.Now().UTC().Add(-24 * time.Hour)
+	query := rebindQuery(`SELECT status FROM schedule_runs WHERE started_at >= ?`, isPostgres(database))
+	rows, err := database.QueryContext(ctx, query, cutoff)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to query schedule runs for 24h metrics: %w", err)
+	}
+	defer rows.Close()
+
+	totalRuns := 0
+	successCount := 0
+	for rows.Next() {
+		var status string
+		if err := rows.Scan(&status); err != nil {
+			return 0, 0, fmt.Errorf("failed to scan schedule run status: %w", err)
+		}
+		totalRuns++
+		normStatus := strings.ToLower(strings.TrimSpace(status))
+		if normStatus == "completed" || normStatus == "enqueued" || normStatus == "success" {
+			successCount++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, fmt.Errorf("error iterating schedule runs: %w", err)
+	}
+
+	rate := 0.0
+	if totalRuns > 0 {
+		rate = math.Round((float64(successCount)/float64(totalRuns))*1000) / 10
+	}
+	return totalRuns, rate, nil
+}
+
+// GetScheduleSummaryMetrics computes summary metrics across all schedules and runs in the last 24 hours.
+func GetScheduleSummaryMetrics(ctx context.Context, database *sql.DB) (ScheduleSummaryMetrics, error) {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return ScheduleSummaryMetrics{}, err
+	}
+
+	crons, err := ListCronSchedules(ctx, database, "")
+	if err != nil {
+		return ScheduleSummaryMetrics{}, fmt.Errorf("failed to list cron schedules: %w", err)
+	}
+	heartbeats, err := ListHeartbeatSchedules(ctx, database, "")
+	if err != nil {
+		return ScheduleSummaryMetrics{}, fmt.Errorf("failed to list heartbeat schedules: %w", err)
+	}
+	oneshots, err := ListOneShotSchedules(ctx, database, "")
+	if err != nil {
+		return ScheduleSummaryMetrics{}, fmt.Errorf("failed to list one-shot schedules: %w", err)
+	}
+
+	totalRuns, successRate, err := compute24hRunMetrics(ctx, database)
+	if err != nil {
+		return ScheduleSummaryMetrics{}, err
+	}
+
+	return ScheduleSummaryMetrics{
+		TotalActive:    len(crons) + len(heartbeats) + len(oneshots),
+		CronCount:      len(crons),
+		HeartbeatCount: len(heartbeats),
+		OneShotCount:   len(oneshots),
+		TotalRuns24h:   totalRuns,
+		NextRunAt:      findEarliestNextRun(crons, heartbeats, oneshots),
+		SuccessRate24h: successRate,
+	}, nil
+}
+
+// GetScheduleRunsPaginated fetches a paginated, filtered slice of schedule runs and the total count.
+func GetScheduleRunsPaginated(ctx context.Context, database *sql.DB, limit, offset int, scheduleID, status string) ([]ScheduleRunJSON, int, error) {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	if limit <= 0 {
+		limit = 50
+	} else if limit > 100 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	whereClause := " WHERE 1=1"
+	var filterArgs []any
+	if trimmedID := strings.TrimSpace(scheduleID); trimmedID != "" {
+		whereClause += " AND schedule_id = ?"
+		filterArgs = append(filterArgs, trimmedID)
+	}
+	if trimmedStatus := strings.TrimSpace(status); trimmedStatus != "" {
+		whereClause += " AND LOWER(status) = LOWER(?)"
+		filterArgs = append(filterArgs, trimmedStatus)
+	}
+
+	countQuery := rebindQuery("SELECT COUNT(*) FROM schedule_runs"+whereClause, isPostgres(database))
+	var total int
+	if err := database.QueryRowContext(ctx, countQuery, filterArgs...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("failed to count schedule runs: %w", err)
+	}
+
+	selectQuery := "SELECT id, schedule_id, schedule_type, COALESCE(message_id, ''), COALESCE(target_id, ''), COALESCE(thread_id, ''), COALESCE(title, ''), COALESCE(prompt, ''), started_at, completed_at, COALESCE(duration_ms, 0), status, COALESCE(error, '') FROM schedule_runs" + whereClause + " ORDER BY started_at DESC LIMIT ? OFFSET ?"
+	selectQuery = rebindQuery(selectQuery, isPostgres(database))
+
+	selectArgs := make([]any, len(filterArgs), len(filterArgs)+2)
+	copy(selectArgs, filterArgs)
+	selectArgs = append(selectArgs, limit, offset)
+
+	rows, err := database.QueryContext(ctx, selectQuery, selectArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to query schedule runs: %w", err)
+	}
+	defer rows.Close()
+
+	runs := make([]ScheduleRunJSON, 0)
+	for rows.Next() {
+		var r ScheduleRunJSON
+		var completedAt sql.NullTime
+		if err := rows.Scan(
+			&r.ID,
+			&r.ScheduleID,
+			&r.ScheduleType,
+			&r.MessageID,
+			&r.TargetID,
+			&r.ThreadID,
+			&r.Title,
+			&r.Prompt,
+			&r.StartedAt,
+			&completedAt,
+			&r.DurationMs,
+			&r.Status,
+			&r.Error,
+		); err != nil {
+			return nil, 0, fmt.Errorf("failed to scan schedule run: %w", err)
+		}
+		if completedAt.Valid {
+			t := completedAt.Time
+			r.CompletedAt = &t
+		}
+		runs = append(runs, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("error iterating schedule runs: %w", err)
+	}
+
+	return runs, total, nil
 }

@@ -182,6 +182,30 @@ func TestParseRunAtWithTimezone(t *testing.T) {
 	}
 }
 
+func TestResolveTimezone_Table(t *testing.T) {
+	tests := []struct {
+		name     string
+		tz       string
+		fallback string
+		want     string
+	}{
+		{"explicit timezone", "America/New_York", "UTC", "America/New_York"},
+		{"fallback timezone", "", "America/Chicago", "America/Chicago"},
+		{"whitespace explicit timezone", "  America/Denver  ", "UTC", "America/Denver"},
+		{"whitespace fallback timezone", "", "  UTC  ", "UTC"},
+		{"default timezone", "", "", DefaultTimezone},
+		{"whitespace both default", "   ", "   ", DefaultTimezone},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveTimezone(tc.tz, tc.fallback)
+			if got != tc.want {
+				t.Errorf("resolveTimezone(%q, %q) = %q, want %q", tc.tz, tc.fallback, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestToolHandler_ScheduleAndList(t *testing.T) {
 	func() {
 		defer func() {

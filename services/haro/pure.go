@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -194,4 +195,294 @@ func ValidateEventWatchSpec(source, target, eventType string) (normSource, normT
 		return "", "", "", err
 	}
 	return normSource, normTarget, normEventType, nil
+}
+
+var cronMonthNames = map[int]string{
+	1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
+	7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec",
+}
+
+var cronDayNames = map[int]string{
+	0: "Sunday", 1: "Monday", 2: "Tuesday", 3: "Wednesday", 4: "Thursday", 5: "Friday", 6: "Saturday", 7: "Sunday",
+}
+
+var cronDayShortNames = map[int]string{
+	0: "Sun", 1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu", 5: "Fri", 6: "Sat", 7: "Sun",
+}
+
+// Ordinal formats an integer into its English ordinal string (e.g., 1st, 2nd, 3rd, 4th, 11th, 111th).
+func Ordinal(n int) string {
+	abs := n
+	if abs < 0 {
+		abs = -abs
+	}
+	rem100 := abs % 100
+	if rem100 >= 11 && rem100 <= 13 {
+		return fmt.Sprintf("%dth", n)
+	}
+	switch abs % 10 {
+	case 1:
+		return fmt.Sprintf("%dst", n)
+	case 2:
+		return fmt.Sprintf("%dnd", n)
+	case 3:
+		return fmt.Sprintf("%drd", n)
+	default:
+		return fmt.Sprintf("%dth", n)
+	}
+}
+
+func parseCronMacro(expr string) (string, bool) {
+	switch strings.ToLower(expr) {
+	case "@yearly", "@annually":
+		return "Every year on Jan 1st at 00:00", true
+	case "@monthly":
+		return "1st of every month at 00:00", true
+	case "@weekly":
+		return "Every week on Sunday at 00:00", true
+	case "@daily", "@midnight":
+		return "Every day at 00:00", true
+	case "@hourly":
+		return "Every hour", true
+	default:
+		return "", false
+	}
+}
+
+func parseCronStepMinutesOrHours(minStr, hourStr, domStr, monStr, dowStr string) (string, bool) {
+	if minStr == "*" && hourStr == "*" && domStr == "*" && monStr == "*" && dowStr == "*" {
+		return "Every minute", true
+	}
+	if strings.HasPrefix(minStr, "*/") && hourStr == "*" && domStr == "*" && monStr == "*" && dowStr == "*" {
+		return fmt.Sprintf("Every %s minutes", strings.TrimPrefix(minStr, "*/")), true
+	}
+	if minStr == "0" && strings.HasPrefix(hourStr, "*/") && domStr == "*" && monStr == "*" && dowStr == "*" {
+		return fmt.Sprintf("Every %s hours", strings.TrimPrefix(hourStr, "*/")), true
+	}
+	return "", false
+}
+
+func formatCronDayOfWeek(dowStr, timeStr string) string {
+	switch strings.ToUpper(dowStr) {
+	case "1-5", "MON-FRI":
+		return fmt.Sprintf("Weekdays (Mon–Fri) at %s", timeStr)
+	case "0,6", "6,0", "SAT,SUN", "SUN,SAT":
+		return fmt.Sprintf("Weekends (Sat–Sun) at %s", timeStr)
+	}
+	if dowNum, err := strconv.Atoi(dowStr); err == nil && dowNum >= 0 && dowNum <= 7 {
+		return fmt.Sprintf("Every %s at %s", cronDayNames[dowNum], timeStr)
+	}
+	var names []string
+	for _, p := range strings.Split(dowStr, ",") {
+		pTrim := strings.TrimSpace(p)
+		if dNum, err := strconv.Atoi(pTrim); err == nil && dNum >= 0 && dNum <= 7 {
+			names = append(names, cronDayShortNames[dNum])
+		} else {
+			names = append(names, pTrim)
+		}
+	}
+	if len(names) > 0 {
+		return fmt.Sprintf("%s at %s", strings.Join(names, ", "), timeStr)
+	}
+	return ""
+}
+
+func formatCronDayAndMonth(domStr, monStr, timeStr string) string {
+	if monStr == "*" {
+		if domNum, err := strconv.Atoi(domStr); err == nil && domNum >= 1 && domNum <= 31 {
+			return fmt.Sprintf("%s of every month at %s", Ordinal(domNum), timeStr)
+		}
+	} else {
+		domNum, errDom := strconv.Atoi(domStr)
+		monNum, errMon := strconv.Atoi(monStr)
+		if errDom == nil && errMon == nil && monNum >= 1 && monNum <= 12 {
+			return fmt.Sprintf("Every year on %s %s at %s", cronMonthNames[monNum], Ordinal(domNum), timeStr)
+		}
+	}
+	return ""
+}
+
+// FormatCronDescription converts a standard 5-field cron expression or descriptor into human-readable English.
+func FormatCronDescription(cronExpr string) string {
+	expr := strings.TrimSpace(cronExpr)
+	if expr == "" {
+		return ""
+	}
+	if desc, ok := parseCronMacro(expr); ok {
+		return desc
+	}
+
+	fields := strings.Fields(expr)
+	if len(fields) != 5 {
+		return expr
+	}
+
+	minStr, hourStr, domStr, monStr, dowStr := fields[0], fields[1], fields[2], fields[3], fields[4]
+	if desc, ok := parseCronStepMinutesOrHours(minStr, hourStr, domStr, monStr, dowStr); ok {
+		return desc
+	}
+
+	m, minErr := strconv.Atoi(minStr)
+	h, hourErr := strconv.Atoi(hourStr)
+	if minErr != nil || hourErr != nil {
+		return expr
+	}
+
+	timeStr := fmt.Sprintf("%02d:%02d", h, m)
+	if domStr == "*" && monStr == "*" && dowStr == "*" {
+		return fmt.Sprintf("Every day at %s", timeStr)
+	}
+	if domStr == "*" && monStr == "*" && dowStr != "*" {
+		if desc := formatCronDayOfWeek(dowStr, timeStr); desc != "" {
+			return desc
+		}
+	}
+	if domStr != "*" && dowStr == "*" {
+		if desc := formatCronDayAndMonth(domStr, monStr, timeStr); desc != "" {
+			return desc
+		}
+	}
+	return fmt.Sprintf("At %s (cron: %s)", timeStr, expr)
+}
+
+var (
+	reGitHubToken    = regexp.MustCompile(`(?i)\b(?:gh[pousr]_[a-zA-Z0-9_]+|github_pat_[a-zA-Z0-9_]+)`)
+	reBearerAuth     = regexp.MustCompile(`(?i)\b(?:bearer\s+[a-zA-Z0-9_\-\.]{12,})`)
+	reSecretKeyValue = regexp.MustCompile(`(?i)\b([A-Za-z0-9_-]*(?:KEY|SECRET|TOKEN|PAT|PASSWORD))\s*([:=]\s*)([^\s,;]+)`)
+)
+
+// SanitizeScheduleText redacts GitHub PATs, Bearer tokens, and secret key assignments.
+func SanitizeScheduleText(s string) string {
+	if s == "" {
+		return ""
+	}
+	out := s
+	out = reSecretKeyValue.ReplaceAllString(out, "${1}${2}[REDACTED]")
+	out = reGitHubToken.ReplaceAllString(out, "[REDACTED]")
+	out = reBearerAuth.ReplaceAllString(out, "[REDACTED]")
+	return out
+}
+
+type CronScheduleWithDesc struct {
+	ID              string    `json:"id"`
+	TargetID        string    `json:"target_id,omitempty"`
+	ChannelID       string    `json:"channel_id"`
+	TitlePrefix     string    `json:"title_prefix"`
+	CronExpr        string    `json:"cron_expr"`
+	CronDescription string    `json:"cron_description"`
+	Prompt          string    `json:"prompt"`
+	Timezone        string    `json:"timezone"`
+	NextRunAt       time.Time `json:"next_run_at"`
+	Enabled         bool      `json:"enabled"`
+	CreatedAt       time.Time `json:"created_at"`
+	Effort          string    `json:"effort,omitempty"`
+}
+
+type HeartbeatScheduleWithDesc struct {
+	ID              string    `json:"id"`
+	TargetID        string    `json:"target_id,omitempty"`
+	ChannelID       string    `json:"channel_id"`
+	TitlePrefix     string    `json:"title_prefix"`
+	CronExpr        string    `json:"cron_expr"`
+	CronDescription string    `json:"cron_description"`
+	Prompt          string    `json:"prompt"`
+	Timezone        string    `json:"timezone"`
+	Effort          string    `json:"effort,omitempty"`
+	NextRunAt       time.Time `json:"next_run_at"`
+	Enabled         bool      `json:"enabled"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+type OneShotScheduleJSON struct {
+	ID        string    `json:"id"`
+	ThreadID  string    `json:"thread_id"`
+	Prompt    string    `json:"prompt"`
+	RunAt     time.Time `json:"run_at"`
+	CreatedAt time.Time `json:"created_at"`
+	Effort    string    `json:"effort,omitempty"`
+}
+
+type SchedulesResponse struct {
+	Status     string                      `json:"status"`
+	SystemTime time.Time                   `json:"system_time"`
+	Summary    ScheduleSummaryMetrics      `json:"summary"`
+	Crons      []CronScheduleWithDesc      `json:"crons"`
+	Heartbeats []HeartbeatScheduleWithDesc `json:"heartbeats"`
+	OneShots   []OneShotScheduleJSON       `json:"one_shots"`
+}
+
+type ScheduleRunsResponse struct {
+	Status string            `json:"status"`
+	Total  int               `json:"total"`
+	Limit  int               `json:"limit"`
+	Offset int               `json:"offset"`
+	Runs   []ScheduleRunJSON `json:"runs"`
+}
+
+type CreateOneShotRequest struct {
+	ID       string    `json:"id"`
+	ThreadID string    `json:"thread_id"`
+	Prompt   string    `json:"prompt"`
+	RunAt    time.Time `json:"run_at"`
+	Effort   string    `json:"effort,omitempty"`
+}
+
+// FormatCronSchedulesWithDesc converts raw CronSchedule records into serialized CronScheduleWithDesc items.
+func FormatCronSchedulesWithDesc(raw []CronSchedule) []CronScheduleWithDesc {
+	crons := make([]CronScheduleWithDesc, 0, len(raw))
+	for _, c := range raw {
+		crons = append(crons, CronScheduleWithDesc{
+			ID:              c.ID,
+			TargetID:        c.TargetID,
+			ChannelID:       c.TargetID,
+			TitlePrefix:     SanitizeScheduleText(c.TitlePrefix),
+			CronExpr:        c.CronExpr,
+			CronDescription: FormatCronDescription(c.CronExpr),
+			Prompt:          SanitizeScheduleText(c.Prompt),
+			Timezone:        c.Timezone,
+			NextRunAt:       c.NextRunAt,
+			Enabled:         c.Enabled,
+			CreatedAt:       c.CreatedAt,
+			Effort:          c.Effort,
+		})
+	}
+	return crons
+}
+
+// FormatHeartbeatSchedulesWithDesc converts raw HeartbeatSchedule records into serialized HeartbeatScheduleWithDesc items.
+func FormatHeartbeatSchedulesWithDesc(raw []HeartbeatSchedule) []HeartbeatScheduleWithDesc {
+	heartbeats := make([]HeartbeatScheduleWithDesc, 0, len(raw))
+	for _, h := range raw {
+		heartbeats = append(heartbeats, HeartbeatScheduleWithDesc{
+			ID:              h.ID,
+			TargetID:        h.TargetID,
+			ChannelID:       h.TargetID,
+			TitlePrefix:     SanitizeScheduleText(h.TitlePrefix),
+			CronExpr:        h.CronExpr,
+			CronDescription: FormatCronDescription(h.CronExpr),
+			Prompt:          SanitizeScheduleText(h.Prompt),
+			Timezone:        h.Timezone,
+			Effort:          h.Effort,
+			NextRunAt:       h.NextRunAt,
+			Enabled:         h.Enabled,
+			CreatedAt:       h.CreatedAt,
+		})
+	}
+	return heartbeats
+}
+
+// FormatOneShotSchedulesJSON converts raw OneShotSchedule records into serialized OneShotScheduleJSON items.
+func FormatOneShotSchedulesJSON(raw []OneShotSchedule) []OneShotScheduleJSON {
+	oneShots := make([]OneShotScheduleJSON, 0, len(raw))
+	for _, s := range raw {
+		oneShots = append(oneShots, OneShotScheduleJSON{
+			ID:        s.ID,
+			ThreadID:  s.ThreadID,
+			Prompt:    SanitizeScheduleText(s.Prompt),
+			RunAt:     s.RunAt,
+			CreatedAt: s.CreatedAt,
+			Effort:    s.Effort,
+		})
+	}
+	return oneShots
 }
