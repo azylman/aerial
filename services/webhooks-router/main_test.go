@@ -5149,7 +5149,7 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 	tests := []struct {
 		name               string
 		method             string
-		useNilPool         bool
+		useNilRegistry     bool
 		emptyGuard         bool
 		httpStatus         int
 		httpBody           string
@@ -5161,29 +5161,29 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 		wantBuildCompleted bool
 		wantNextChunkIdx   int
 	}{
-		// Typed nil pool / uninitialized
+		// Typed nil registry / uninitialized
 		{
-			name:       "AdvanceVanadisChunkByPR typed nil pool returns empty",
-			method:     "AdvanceVanadisChunkByPR",
-			useNilPool: true,
+			name:           "AdvanceVanadisChunkByPR typed nil registry returns empty",
+			method:         "AdvanceVanadisChunkByPR",
+			useNilRegistry: true,
 		},
 		{
-			name:       "ShouldSuppressVanadisDeployWake typed nil pool returns false",
-			method:     "ShouldSuppressVanadisDeployWake",
-			useNilPool: true,
-			wantBool:   false,
+			name:           "ShouldSuppressVanadisDeployWake typed nil registry returns false",
+			method:         "ShouldSuppressVanadisDeployWake",
+			useNilRegistry: true,
+			wantBool:       false,
 		},
 		{
-			name:       "ResolveVanadisChunkForPR typed nil pool returns false",
-			method:     "ResolveVanadisChunkForPR",
-			useNilPool: true,
-			wantBool:   false,
+			name:           "ResolveVanadisChunkForPR typed nil registry returns false",
+			method:         "ResolveVanadisChunkForPR",
+			useNilRegistry: true,
+			wantBool:       false,
 		},
 		{
-			name:       "FailVanadisChunkByPR typed nil pool returns false",
-			method:     "FailVanadisChunkByPR",
-			useNilPool: true,
-			wantBool:   false,
+			name:           "FailVanadisChunkByPR typed nil registry returns false",
+			method:         "FailVanadisChunkByPR",
+			useNilRegistry: true,
+			wantBool:       false,
 		},
 
 		// Empty repo / prNumber <= 0 guard
@@ -5378,8 +5378,8 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 			}
 
 			reg := NewPostgresPRRegistry(nil, WithVanadisClient(vURL, vClient))
-			if tc.useNilPool {
-				reg = NewPostgresPRRegistry((*pgxpool.Pool)(nil), WithVanadisClient(vURL, vClient))
+			if tc.useNilRegistry {
+				reg = nil
 			}
 			repo := "aerial"
 			prNum := 10
