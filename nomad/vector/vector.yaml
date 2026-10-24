@@ -278,7 +278,11 @@ transforms:
                 .level = "error"
               }
             } else if sev == "ERROR" || sev == "FATAL" {
-              .level = "error"
+              if starts_with(string!(parsed.logger), "pyalarmdotcomajax.websockets") && contains(string!(parsed.msg), "Unexpected WebSocket error") {
+                .level = "warn"
+              } else {
+                .level = "error"
+              }
             } else if sev == "WARNING" || sev == "WARN" {
               .level = "warn"
             } else if starts_with(sev, "DEBUG") || sev == "TRACE" {
@@ -296,7 +300,7 @@ transforms:
               .attributes.logger = parsed.logger
             }
             .attributes.severity = parsed.severity
-          } else if starts_with(to_string(.service), "hassio_") {
+          } else {
             .level = "warn"
           }
         }
