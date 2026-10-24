@@ -190,6 +190,7 @@ func TestServer_HTTPEndpointsAndMCPProtocol(t *testing.T) {
 		{"ping request", http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":100,"method":"ping"}`), http.StatusOK},
 		{"initialize request", http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":101,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}`), http.StatusOK},
 		{"tools list request", http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":102,"method":"tools/list","params":{}}`), http.StatusOK},
+		{"mcp post without content-type", http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":104,"method":"ping"}`), http.StatusOK},
 		{"unknown method", http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":103,"method":"unknown/method"}`), http.StatusBadRequest},
 	}
 	for _, tc := range httpTests {
@@ -198,7 +199,7 @@ func TestServer_HTTPEndpointsAndMCPProtocol(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewRequest error: %v", err)
 			}
-			if tc.method == http.MethodPost {
+			if tc.method == http.MethodPost && tc.name != "mcp post without content-type" {
 				req.Header.Set("Content-Type", "application/json")
 			}
 			resp, err := http.DefaultClient.Do(req)
@@ -212,6 +213,30 @@ func TestServer_HTTPEndpointsAndMCPProtocol(t *testing.T) {
 		})
 	}
 
+	rpcCtx := context.Background()
+	_ = InsertCronSchedule(rpcCtx, server.handler.db, CronSchedule{
+		ID:        "test-cron-id",
+		TargetID:  "123",
+		CronExpr:  "0 0 * * *",
+		Prompt:    "test",
+		NextRunAt: time.Now().UTC(),
+		Enabled:   true,
+	})
+	_ = InsertHeartbeatSchedule(rpcCtx, server.handler.db, HeartbeatSchedule{
+		ID:        "test-hb-id",
+		TargetID:  "123",
+		CronExpr:  "0 0 * * *",
+		Prompt:    "test",
+		NextRunAt: time.Now().UTC(),
+		Enabled:   true,
+	})
+	_ = InsertOneShotSchedule(rpcCtx, server.handler.db, OneShotSchedule{
+		ID:       "test-once-id",
+		ThreadID: "123",
+		Prompt:   "test",
+		RunAt:    time.Now().UTC(),
+	})
+
 	rpcTests := []struct {
 		name        string
 		reqPayload  string
@@ -220,13 +245,16 @@ func TestServer_HTTPEndpointsAndMCPProtocol(t *testing.T) {
 	}{
 		{"schedule_recurring alias", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"scheduler_schedule_recurring","arguments":{"channel_id":"123","cron_expression":"0 20 * * 5","prompt":"plan","effort":"high"}}}`, false, false},
 		{"update_cron_schedule", `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"update_cron_schedule","arguments":{"schedule_id":"missing-id","effort":"low"}}}`, true, false},
+		{"update_cron_schedule success", `{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"update_cron_schedule","arguments":{"schedule_id":"test-cron-id","effort":"medium"}}}`, false, false},
 		{"schedule_once direct", `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"schedule_once","arguments":{"target_id":"456","run_at":"15m","prompt":"trash"}}}`, false, false},
 		{"schedule_once alias validation", `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"scheduler_schedule_once","arguments":{"target_id":"","run_at":"15m","prompt":"trash"}}}`, true, false},
 		{"list_schedules", `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"list_schedules","arguments":{}}}`, false, false},
 		{"schedule_heartbeat success", `{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"schedule_heartbeat","arguments":{"channel_id":"123456789012345678","cron_expr":"0 0 * * *","prompt":"monitor disk"}}}`, false, false},
 		{"schedule_heartbeat invalid", `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"schedule_heartbeat","arguments":{"channel_id":"invalid-snow","cron_expr":"0 0 * * *","prompt":"monitor disk"}}}`, true, false},
 		{"update_heartbeat missing", `{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"update_heartbeat","arguments":{"id":"missing-hb","effort":"low"}}}`, true, false},
+		{"update_heartbeat success", `{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"update_heartbeat","arguments":{"id":"test-hb-id","effort":"medium"}}}`, false, false},
 		{"cancel_schedule missing", `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"cancel_schedule","arguments":{"schedule_id":"none"}}}`, true, false},
+		{"cancel_schedule success", `{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"cancel_schedule","arguments":{"schedule_id":"test-once-id"}}}`, false, false},
 		{"watch_event success", `{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"watch_event","arguments":{"channel_id":"123456789012345678","source":"hangar","target":"aerial","event_type":"sync_success","prompt":"deploy notification"}}}`, false, false},
 		{"watch_event invalid", `{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"watch_event","arguments":{"channel_id":"bad-snowflake","source":"hangar","target":"aerial","event_type":"sync_success","prompt":"deploy notification"}}}`, true, false},
 		{"list_event_watches", `{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"list_event_watches","arguments":{}}}`, false, false},
@@ -295,6 +323,57 @@ func TestServer_WriteResponseAndDisconnect(t *testing.T) {
 	writeResponse(&mockErrWriter{err: errors.New("err")}, req, []byte("data"))
 	for _, c := range []io.Closer{nil, io.NopCloser(strings.NewReader("")), &errReadCloser{}} {
 		closeWarn(c, "test")
+	}
+}
+
+func TestWriteJSON_Table(t *testing.T) {
+	tests := []struct {
+		name            string
+		initialHeader   string
+		status          int
+		data            any
+		wantStatus      int
+		wantContentType string
+	}{
+		{
+			name:            "default content type",
+			initialHeader:   "",
+			status:          http.StatusOK,
+			data:            map[string]string{"status": "ok"},
+			wantStatus:      http.StatusOK,
+			wantContentType: "application/json",
+		},
+		{
+			name:            "preserved custom content type",
+			initialHeader:   "application/problem+json",
+			status:          http.StatusBadRequest,
+			data:            map[string]string{"error": "bad request"},
+			wantStatus:      http.StatusBadRequest,
+			wantContentType: "application/problem+json",
+		},
+		{
+			name:            "unsupported type encode error",
+			initialHeader:   "",
+			status:          http.StatusInternalServerError,
+			data:            make(chan int),
+			wantStatus:      http.StatusInternalServerError,
+			wantContentType: "application/json",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			if tc.initialHeader != "" {
+				rec.Header().Set("Content-Type", tc.initialHeader)
+			}
+			writeJSON(rec, tc.status, tc.data)
+			if rec.Code != tc.wantStatus {
+				t.Errorf("got status %d, want %d", rec.Code, tc.wantStatus)
+			}
+			if got := rec.Header().Get("Content-Type"); got != tc.wantContentType {
+				t.Errorf("got Content-Type %q, want %q", got, tc.wantContentType)
+			}
+		})
 	}
 }
 
@@ -580,6 +659,9 @@ func TestFormatCronDescription(t *testing.T) {
 		{"multiple days list", "0 12 * * 1,3,5", "Mon, Wed, Fri at 12:00"},
 		{"specific day of month", "15 14 1 * *", "1st of every month at 14:15"},
 		{"day of month and month", "0 8 25 12 *", "Every year on Dec 25th at 08:00"},
+		{"multiple days text", "0 12 * * MON,WED", "MON, WED at 12:00"},
+		{"day of month non-numeric month", "0 8 25 FOO *", "At 08:00 (cron: 0 8 25 FOO *)"},
+		{"non-numeric day of month with month", "0 8 1-5 12 *", "At 08:00 (cron: 0 8 1-5 12 *)"},
 		{"other cron pattern", "0 9 * 5 1-3", "At 09:00 (cron: 0 9 * 5 1-3)"},
 	}
 	for _, tc := range tests {
@@ -950,6 +1032,33 @@ func TestHandleScheduleRuns_Table(t *testing.T) {
 			wantStatus: http.StatusOK,
 			wantCount:  2,
 			wantTotal:  2,
+		},
+		{
+			name:       "large limit clamped to 100",
+			method:     http.MethodGet,
+			url:        "/schedules/runs?limit=200",
+			useServer:  server,
+			wantStatus: http.StatusOK,
+			wantCount:  5,
+			wantTotal:  5,
+		},
+		{
+			name:       "negative offset clamped to 0",
+			method:     http.MethodGet,
+			url:        "/schedules/runs?offset=-5",
+			useServer:  server,
+			wantStatus: http.StatusOK,
+			wantCount:  5,
+			wantTotal:  5,
+		},
+		{
+			name:       "negative limit clamped to 50",
+			method:     http.MethodGet,
+			url:        "/schedules/runs?limit=-10",
+			useServer:  server,
+			wantStatus: http.StatusOK,
+			wantCount:  5,
+			wantTotal:  5,
 		},
 		{
 			name:       "method not allowed",
