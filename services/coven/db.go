@@ -8,7 +8,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
+	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -103,65 +106,22 @@ type FactsResult struct {
 	Status string `json:"status,omitempty"`
 }
 
-// MessageMetadata stores structured Discord and source metadata preserved throughout the lifecycle.
-type MessageMetadata struct {
-	ChannelID         string   `json:"channel_id,omitempty"`
-	ChannelName       string   `json:"channel_name,omitempty"`
-	TargetThreadID    string   `json:"target_thread_id,omitempty"`
-	ThreadName        string   `json:"thread_name,omitempty"`
-	GuildID           string   `json:"guild_id,omitempty"`
-	AuthorUsername    string   `json:"author_username,omitempty"`
-	AuthorGlobalName  string   `json:"author_global_name,omitempty"`
-	AuthorBot         bool     `json:"author_bot,omitempty"`
-	IsAdmin           bool     `json:"is_admin,omitempty"`
-	Mentions          []string `json:"mentions,omitempty"`
-	MentionUserIDs    []string `json:"mention_user_ids,omitempty"`
-	MentionRoleIDs    []string `json:"mention_role_ids,omitempty"`
-	ReplyingToAuthor  string   `json:"replying_to_author,omitempty"`
-	ReplyingToContent string   `json:"replying_to_content,omitempty"`
-	Attachments       []string `json:"attachments,omitempty"`
-	Model             string   `json:"model,omitempty"`
-	Silent            bool     `json:"silent,omitempty"`
-}
-
-// Scan implements sql.Scanner for PostgreSQL JSONB.
-func (m *MessageMetadata) Scan(src any) error {
-	if src == nil {
-		*m = MessageMetadata{}
-		return nil
-	}
-	var data []byte
-	switch v := src.(type) {
-	case []byte:
-		data = v
-	case string:
-		data = []byte(v)
-	default:
-		return fmt.Errorf("cannot scan type %T into MessageMetadata", src)
-	}
-	if len(data) == 0 || string(data) == "{}" || string(data) == "null" {
-		*m = MessageMetadata{}
-		return nil
-	}
-	return json.Unmarshal(data, m)
-}
-
 // Message represents a stored turn message.
 type Message struct {
-	ID           string          `json:"id"`
-	RowID        int64           `json:"row_id,omitempty"`
-	ThreadID     string          `json:"thread_id"`
-	Content      string          `json:"content"`
-	ResponseText string          `json:"response_text,omitempty"`
-	Status       string          `json:"status"`
-	Metadata     MessageMetadata `json:"metadata"`
-	CreatedAt    time.Time       `json:"created_at"`
-	UpdatedAt    time.Time       `json:"updated_at"`
+	ID           string    `json:"id"`
+	RowID        int64     `json:"row_id,omitempty"`
+	ThreadID     string    `json:"thread_id"`
+	Content      string    `json:"content"`
+	ResponseText string    `json:"response_text,omitempty"`
+	Status       string    `json:"status"`
+	IsAdmin      bool      `json:"is_admin,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // IsExtractableAdminTurn returns true if the message is completed, from an admin, and has non-empty, non-bracket response text.
 func IsExtractableAdminTurn(m Message) bool {
-	if m.Status != "COMPLETED" || !m.Metadata.IsAdmin {
+	if m.Status != "COMPLETED" || !m.IsAdmin {
 		return false
 	}
 	resp := strings.TrimSpace(m.ResponseText)
@@ -198,14 +158,63 @@ type Store interface {
 	MarkProceduralCandidatesSkipped(ctx context.Context, ids []int64) error
 }
 
-// SQLStore implements Store backed by PostgreSQL.
+// SQLStore implements Store backed by PostgreSQL and Eri HTTP APIs.
 type SQLStore struct {
-	db DBTX
+	db         DBTX
+	brainURL   string
+	httpClient *http.Client
 }
 
-// NewSQLStore creates a new SQLStore instance.
+// NewSQLStore creates a new SQLStore instance using default Brain URL.
 func NewSQLStore(db DBTX) *SQLStore {
-	return &SQLStore{db: db}
+	return NewSQLStoreWithBrainURL(db, DefaultBrainURL, nil)
+}
+
+// NewSQLStoreWithBrainURL creates a new SQLStore instance with custom Brain URL and HTTP client.
+func NewSQLStoreWithBrainURL(db DBTX, brainURL string, client *http.Client) *SQLStore {
+	cleanURL := strings.TrimRight(strings.TrimSpace(brainURL), "/")
+	if cleanURL == "" {
+		cleanURL = DefaultBrainURL
+	}
+	if client == nil {
+		client = &http.Client{Timeout: 15 * time.Second}
+	}
+	return &SQLStore{
+		db:         db,
+		brainURL:   cleanURL,
+		httpClient: client,
+	}
+}
+
+// SetBrainURL sets the Brain URL on an existing SQLStore.
+func (s *SQLStore) SetBrainURL(brainURL string) {
+	cleanURL := strings.TrimRight(strings.TrimSpace(brainURL), "/")
+	if cleanURL == "" {
+		cleanURL = DefaultBrainURL
+	}
+	s.brainURL = cleanURL
+}
+
+// SetHTTPClient sets the HTTP client on an existing SQLStore.
+func (s *SQLStore) SetHTTPClient(client *http.Client) {
+	if client == nil {
+		client = &http.Client{Timeout: 15 * time.Second}
+	}
+	s.httpClient = client
+}
+
+func (s *SQLStore) getBrainURL() string {
+	if s != nil && s.brainURL != "" {
+		return s.brainURL
+	}
+	return DefaultBrainURL
+}
+
+func (s *SQLStore) getHTTPClient() *http.Client {
+	if s != nil && s.httpClient != nil {
+		return s.httpClient
+	}
+	return &http.Client{Timeout: 15 * time.Second}
 }
 
 func (s *SQLStore) checkDB() error {
@@ -561,6 +570,125 @@ func scanFacts(rows *sql.Rows) ([]Fact, error) {
 	return facts, nil
 }
 
+type eriTasksResponse struct {
+	Status string        `json:"status"`
+	Total  int           `json:"total"`
+	Tasks  []eriTaskItem `json:"tasks"`
+}
+
+type eriTaskItem struct {
+	ID                string    `json:"id"`
+	RowID             int64     `json:"row_id"`
+	ThreadID          string    `json:"thread_id"`
+	SessionID         string    `json:"session_id"`
+	PreviousSessionID string    `json:"previous_session_id"`
+	ThreadSummary     string    `json:"thread_summary"`
+	Prompt            string    `json:"prompt"`
+	ResponseText      string    `json:"response_text"`
+	Status            string    `json:"status"`
+	IsAdmin           bool      `json:"is_admin"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+func (t eriTaskItem) toMessage() Message {
+	return Message{
+		ID:           t.ID,
+		RowID:        t.RowID,
+		ThreadID:     t.ThreadID,
+		Content:      t.Prompt,
+		ResponseText: t.ResponseText,
+		Status:       t.Status,
+		IsAdmin:      t.IsAdmin,
+		CreatedAt:    t.CreatedAt,
+		UpdatedAt:    t.UpdatedAt,
+	}
+}
+
+type eriTranscriptSearchResult struct {
+	Steps []eriTranscriptStepItem `json:"steps"`
+}
+
+type eriTranscriptStepItem struct {
+	StepType string `json:"step_type"`
+	ToolName string `json:"tool_name"`
+	Content  string `json:"content"`
+}
+
+func (s *SQLStore) fetchTasks(ctx context.Context, endpoint string) ([]eriTaskItem, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create eri tasks request: %w", err)
+	}
+	resp, err := s.getHTTPClient().Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("eri tasks request failed: %w", err)
+	}
+	defer closeWarn(resp.Body, "eri tasks response body")
+
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("eri tasks request returned status %d", resp.StatusCode)
+	}
+
+	var data eriTasksResponse
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil, fmt.Errorf("failed to decode eri tasks response: %w", err)
+	}
+	return data.Tasks, nil
+}
+
+func (s *SQLStore) getWatermark(ctx context.Context, threadID string) (int64, *time.Time, error) {
+	if err := s.checkDB(); err != nil {
+		return 0, nil, err
+	}
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	var lastRowID int64
+	var factExtractedAt FactTime
+	query := `SELECT COALESCE(last_extracted_rowid, 0), fact_extracted_at FROM extraction_watermarks WHERE thread_id = $1`
+	err := s.db.QueryRowContext(queryCtx, query, threadID).Scan(&lastRowID, &factExtractedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, nil, nil
+		}
+		return 0, nil, err
+	}
+	var t *time.Time
+	if factExtractedAt.Valid {
+		t = &factExtractedAt.Time
+	}
+	return lastRowID, t, nil
+}
+
+func (s *SQLStore) getWatermarkMap(ctx context.Context) (map[string]int64, error) {
+	if err := s.checkDB(); err != nil {
+		return nil, err
+	}
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `SELECT thread_id, COALESCE(last_extracted_rowid, 0) FROM extraction_watermarks`
+	rows, err := s.db.QueryContext(queryCtx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	watermarks := make(map[string]int64)
+	for rows.Next() {
+		var tid string
+		var rowID int64
+		if err := rows.Scan(&tid, &rowID); err != nil {
+			return nil, err
+		}
+		if tid = strings.TrimSpace(tid); tid != "" {
+			watermarks[tid] = rowID
+		}
+	}
+	return watermarks, rows.Err()
+}
+
 // GetActiveConversationsForExtraction finds threads with unextracted admin turns in the past activeHours.
 func (s *SQLStore) GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error) {
 	if err := s.checkDB(); err != nil {
@@ -569,29 +697,40 @@ func (s *SQLStore) GetActiveConversationsForExtraction(ctx context.Context, acti
 	if activeHours <= 0 {
 		activeHours = 24
 	}
-	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	query := `SELECT DISTINCT m.thread_id FROM messages m LEFT JOIN sessions s ON m.thread_id = s.thread_id
-	WHERE m.thread_id != '' AND m.created_at >= $1 AND m.status = 'COMPLETED' AND COALESCE(TRIM(m.response_text), '') != '' AND TRIM(m.response_text) NOT LIKE '[%%'
-	  AND (s.last_extracted_rowid IS NULL OR m.row_id > s.last_extracted_rowid) AND (m.metadata->>'is_admin')::boolean IS TRUE ORDER BY m.thread_id LIMIT 20`
-	rows, err := s.db.QueryContext(queryCtx, query, time.Now().UTC().Add(-time.Duration(activeHours)*time.Hour))
+	watermarks, err := s.getWatermarkMap(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
+	cutoff := time.Now().UTC().Add(-time.Duration(activeHours) * time.Hour).Format(time.RFC3339)
+	endpoint := fmt.Sprintf("%s/tasks?status=COMPLETED&is_admin=true&since=%s&limit=200",
+		s.getBrainURL(), url.QueryEscape(cutoff))
+
+	tasks, err := s.fetchTasks(ctx, endpoint)
+	if err != nil {
+		return nil, err
+	}
+
+	seen := make(map[string]struct{})
 	var threadIDs []string
-	for rows.Next() {
-		var tid string
-		if err := rows.Scan(&tid); err != nil {
-			return nil, err
+	for _, t := range tasks {
+		tid := strings.TrimSpace(t.ThreadID)
+		if tid == "" {
+			continue
 		}
-		if tid = strings.TrimSpace(tid); tid != "" {
-			threadIDs = append(threadIDs, tid)
+		lastRowID := watermarks[tid]
+		if t.RowID > lastRowID {
+			if _, exists := seen[tid]; !exists {
+				seen[tid] = struct{}{}
+				threadIDs = append(threadIDs, tid)
+			}
 		}
 	}
-	return threadIDs, rows.Err()
+	sort.Strings(threadIDs)
+	if len(threadIDs) > 20 {
+		threadIDs = threadIDs[:20]
+	}
+	return threadIDs, nil
 }
 
 // GetUnextractedAdminTurns retrieves completed admin turns for threadID that haven't been extracted.
@@ -602,30 +741,27 @@ func (s *SQLStore) GetUnextractedAdminTurns(ctx context.Context, threadID string
 	if threadID = strings.TrimSpace(threadID); threadID == "" {
 		return nil, nil
 	}
-	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	query := `SELECT m.id, m.row_id, m.thread_id, m.content, COALESCE(m.response_text, ''), m.status, m.metadata FROM messages m LEFT JOIN sessions s ON m.thread_id = s.thread_id
-	WHERE m.thread_id = $1 AND m.status = 'COMPLETED' AND COALESCE(TRIM(m.response_text), '') != '' AND TRIM(m.response_text) NOT LIKE '[%%'
-	  AND (s.last_extracted_rowid IS NULL OR m.row_id > s.last_extracted_rowid) AND (m.metadata->>'is_admin')::boolean IS TRUE ORDER BY m.row_id ASC LIMIT 50`
-
-	rows, err := s.db.QueryContext(queryCtx, query, threadID)
+	lastRowID, _, err := s.getWatermark(ctx, threadID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+
+	endpoint := fmt.Sprintf("%s/tasks?thread_id=%s&status=COMPLETED&is_admin=true&after_row_id=%d&limit=50",
+		s.getBrainURL(), url.QueryEscape(threadID), lastRowID)
+
+	tasks, err := s.fetchTasks(ctx, endpoint)
+	if err != nil {
+		return nil, err
+	}
 
 	var turns []Message
-	for rows.Next() {
-		var m Message
-		if err := rows.Scan(&m.ID, &m.RowID, &m.ThreadID, &m.Content, &m.ResponseText, &m.Status, &m.Metadata); err != nil {
-			return nil, err
-		}
+	for _, t := range tasks {
+		m := t.toMessage()
 		if IsExtractableAdminTurn(m) {
 			turns = append(turns, m)
 		}
 	}
-	return turns, rows.Err()
+	return turns, nil
 }
 
 // GetMaxMessageRowID returns the maximum row ID of completed messages for a thread.
@@ -633,18 +769,21 @@ func (s *SQLStore) GetMaxMessageRowID(ctx context.Context, threadID string) (int
 	if err := s.checkDB(); err != nil {
 		return 0, err
 	}
-	if threadID == "" {
+	if threadID = strings.TrimSpace(threadID); threadID == "" {
 		return 0, nil
 	}
-	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
-	defer cancel()
 
-	var maxRowID sql.NullInt64
-	err := s.db.QueryRowContext(queryCtx, `SELECT MAX(row_id) FROM messages WHERE thread_id = $1 AND status = 'COMPLETED'`, threadID).Scan(&maxRowID)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	endpoint := fmt.Sprintf("%s/tasks?thread_id=%s&status=COMPLETED&limit=1",
+		s.getBrainURL(), url.QueryEscape(threadID))
+
+	tasks, err := s.fetchTasks(ctx, endpoint)
+	if err != nil {
 		return 0, err
 	}
-	return maxRowID.Int64, nil
+	if len(tasks) == 0 {
+		return 0, nil
+	}
+	return tasks[0].RowID, nil
 }
 
 // UpdateConversationFactWatermark updates or inserts watermark for thread fact extraction.
@@ -652,16 +791,20 @@ func (s *SQLStore) UpdateConversationFactWatermark(ctx context.Context, threadID
 	if err := s.checkDB(); err != nil {
 		return err
 	}
-	if threadID == "" {
+	if threadID = strings.TrimSpace(threadID); threadID == "" {
 		return nil
 	}
 	now := time.Now().UTC()
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := `INSERT INTO sessions (thread_id, internal_session_id, last_extracted_rowid, fact_extracted_at, created_at, updated_at) VALUES ($1, '', $2, $3, $4, $5)
-	ON CONFLICT(thread_id) DO UPDATE SET last_extracted_rowid = CASE WHEN EXCLUDED.last_extracted_rowid > sessions.last_extracted_rowid THEN EXCLUDED.last_extracted_rowid ELSE sessions.last_extracted_rowid END, fact_extracted_at = EXCLUDED.fact_extracted_at, updated_at = EXCLUDED.updated_at`
-	_, err := s.db.ExecContext(queryCtx, query, threadID, maxRowID, now, now, now)
+	query := `INSERT INTO extraction_watermarks (thread_id, last_extracted_rowid, fact_extracted_at, updated_at)
+	VALUES ($1, $2, $3, $4)
+	ON CONFLICT(thread_id) DO UPDATE SET
+	  last_extracted_rowid = CASE WHEN EXCLUDED.last_extracted_rowid > extraction_watermarks.last_extracted_rowid THEN EXCLUDED.last_extracted_rowid ELSE extraction_watermarks.last_extracted_rowid END,
+	  fact_extracted_at = EXCLUDED.fact_extracted_at,
+	  updated_at = EXCLUDED.updated_at`
+	_, err := s.db.ExecContext(queryCtx, query, threadID, maxRowID, now, now)
 	return err
 }
 
@@ -676,47 +819,55 @@ func (s *SQLStore) GetThreadContextBeforeWatermark(ctx context.Context, threadID
 	if priorTurnLimit <= 0 {
 		priorTurnLimit = 2
 	}
-	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
-	defer cancel()
 
-	var summary string
-	var lastExtractedRowID int64
-	sessQuery := `SELECT COALESCE(summary, ''), COALESCE(last_extracted_rowid, 0) FROM sessions WHERE thread_id = $1`
-	err := s.db.QueryRowContext(queryCtx, sessQuery, threadID).Scan(&summary, &lastExtractedRowID)
+	lastRowID, _, err := s.getWatermark(ctx, threadID)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return "", nil, nil
-		}
-		return "", nil, fmt.Errorf("failed to query session context: %w", err)
+		return "", nil, err
 	}
 
-	if lastExtractedRowID <= 0 {
+	if lastRowID <= 0 {
+		endpoint := fmt.Sprintf("%s/tasks?thread_id=%s&status=COMPLETED&limit=1",
+			s.getBrainURL(), url.QueryEscape(threadID))
+		tasks, err := s.fetchTasks(ctx, endpoint)
+		if err != nil {
+			return "", nil, err
+		}
+		var summary string
+		if len(tasks) > 0 {
+			summary = tasks[0].ThreadSummary
+		}
 		return summary, nil, nil
 	}
 
-	msgQuery := `SELECT id, row_id, thread_id, content, COALESCE(response_text, ''), status, metadata
-	FROM messages
-	WHERE thread_id = $1 AND row_id <= $2 AND status = 'COMPLETED'
-	  AND COALESCE(TRIM(response_text), '') != '' AND TRIM(response_text) NOT LIKE '[%'
-	  AND (metadata->>'is_admin')::boolean IS TRUE
-	ORDER BY row_id DESC LIMIT $3`
-
-	rows, err := s.db.QueryContext(queryCtx, msgQuery, threadID, lastExtractedRowID, priorTurnLimit)
+	fetchLimit := priorTurnLimit * 3
+	endpoint := fmt.Sprintf("%s/tasks?thread_id=%s&status=COMPLETED&is_admin=true&before_row_id=%d&limit=%d",
+		s.getBrainURL(), url.QueryEscape(threadID), lastRowID, fetchLimit)
+	tasks, err := s.fetchTasks(ctx, endpoint)
 	if err != nil {
-		return summary, nil, fmt.Errorf("failed to query prior turns: %w", err)
+		return "", nil, err
 	}
-	defer rows.Close()
+
+	var summary string
+	if len(tasks) > 0 {
+		summary = tasks[0].ThreadSummary
+	} else {
+		fbEndpoint := fmt.Sprintf("%s/tasks?thread_id=%s&status=COMPLETED&limit=1",
+			s.getBrainURL(), url.QueryEscape(threadID))
+		fbTasks, err := s.fetchTasks(ctx, fbEndpoint)
+		if err == nil && len(fbTasks) > 0 {
+			summary = fbTasks[0].ThreadSummary
+		}
+	}
 
 	var priorTurns []Message
-	for rows.Next() {
-		var m Message
-		if err := rows.Scan(&m.ID, &m.RowID, &m.ThreadID, &m.Content, &m.ResponseText, &m.Status, &m.Metadata); err != nil {
-			return summary, nil, fmt.Errorf("failed to scan prior turn: %w", err)
+	for _, t := range tasks {
+		m := t.toMessage()
+		if IsExtractableAdminTurn(m) {
+			priorTurns = append(priorTurns, m)
+			if len(priorTurns) >= priorTurnLimit {
+				break
+			}
 		}
-		priorTurns = append(priorTurns, m)
-	}
-	if err := rows.Err(); err != nil {
-		return summary, nil, fmt.Errorf("failed to read prior turns rows: %w", err)
 	}
 
 	for i, j := 0, len(priorTurns)-1; i < j; i, j = i+1, j-1 {
@@ -829,39 +980,28 @@ func extractTrajectorySignals(stepType, toolName, content string) ([]string, str
 	return nil, ""
 }
 
-// GetThreadTrajectoryContext queries the trajectory context (retrieved facts and tool calls) for an active thread.
-func (s *SQLStore) GetThreadTrajectoryContext(ctx context.Context, threadID string) (retrievedFacts []string, toolCalls []string, err error) {
-	if err := s.checkDB(); err != nil {
-		return nil, nil, err
+func extractSessionIDs(task eriTaskItem) []string {
+	var parts []string
+	if sessID := strings.TrimSpace(task.SessionID); sessID != "" {
+		parts = append(parts, sessID)
 	}
-	if strings.TrimSpace(threadID) == "" {
-		return nil, nil, nil
+	if prevSessID := strings.TrimSpace(task.PreviousSessionID); prevSessID != "" && prevSessID != task.SessionID {
+		parts = append(parts, prevSessID)
 	}
-	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
-	defer cancel()
+	return parts
+}
 
-	query := `SELECT ts.step_type, ts.tool_name, LEFT(ts.content, 500)
-	FROM transcript_steps ts
-	JOIN sessions s ON s.thread_id = $1
-	WHERE (ts.session_id = s.internal_session_id OR ts.session_id = s.previous_session_id)
-	  AND (s.fact_extracted_at IS NULL OR ts.created_at >= s.fact_extracted_at)
-	  AND (ts.step_type IN ('USER_INPUT', 'GENERIC', 'TOOL', 'RUN_COMMAND') OR (ts.step_type = 'PLANNER_RESPONSE' AND ts.tool_name != ''))
-	ORDER BY ts.created_at ASC, ts.step_index ASC
-	LIMIT 50`
-
-	rows, err := s.db.QueryContext(queryCtx, query, threadID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to query thread trajectory context: %w", err)
-	}
-	defer rows.Close()
-
+func parseTrajectorySteps(steps []eriTranscriptStepItem) ([]string, []string) {
+	var retrievedFacts []string
+	var toolCalls []string
 	seenFacts := make(map[string]struct{})
-	for rows.Next() {
-		var stepType, toolName, content string
-		if err := rows.Scan(&stepType, &toolName, &content); err != nil {
-			return nil, nil, fmt.Errorf("failed to scan trajectory step: %w", err)
+	for _, step := range steps {
+		content := step.Content
+		r := []rune(content)
+		if len(r) > 500 {
+			content = string(r[:500])
 		}
-		rf, tc := extractTrajectorySignals(stepType, toolName, content)
+		rf, tc := extractTrajectorySignals(step.StepType, step.ToolName, content)
 		for _, f := range rf {
 			if _, exists := seenFacts[f]; !exists {
 				seenFacts[f] = struct{}{}
@@ -872,10 +1012,74 @@ func (s *SQLStore) GetThreadTrajectoryContext(ctx context.Context, threadID stri
 			toolCalls = append(toolCalls, tc)
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return nil, nil, fmt.Errorf("failed to read trajectory rows: %w", err)
+	return retrievedFacts, toolCalls
+}
+
+func (s *SQLStore) fetchTranscriptSteps(ctx context.Context, sessionCSV, sinceRFC string) ([]eriTranscriptStepItem, error) {
+	searchEndpoint := fmt.Sprintf("%s/transcripts/search?mode=steps&session=%s&since=%s&limit=50",
+		s.getBrainURL(), url.QueryEscape(sessionCSV), url.QueryEscape(sinceRFC))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, searchEndpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create transcript search request: %w", err)
 	}
-	return retrievedFacts, toolCalls, nil
+	resp, err := s.getHTTPClient().Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("transcript search request failed: %w", err)
+	}
+	defer closeWarn(resp.Body, "transcript search response body")
+
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("transcript search request returned status %d", resp.StatusCode)
+	}
+
+	var searchRes eriTranscriptSearchResult
+	if err := json.NewDecoder(resp.Body).Decode(&searchRes); err != nil {
+		return nil, fmt.Errorf("failed to decode transcript search response: %w", err)
+	}
+	return searchRes.Steps, nil
+}
+
+// GetThreadTrajectoryContext queries the trajectory context (retrieved facts and tool calls) for an active thread.
+func (s *SQLStore) GetThreadTrajectoryContext(ctx context.Context, threadID string) (retrievedFacts []string, toolCalls []string, err error) {
+	if err := s.checkDB(); err != nil {
+		return nil, nil, err
+	}
+	if threadID = strings.TrimSpace(threadID); threadID == "" {
+		return nil, nil, nil
+	}
+
+	_, factExtractedAt, err := s.getWatermark(ctx, threadID)
+	if err != nil {
+		return nil, nil, err
+	}
+	sinceTime := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+	if factExtractedAt != nil && !factExtractedAt.IsZero() {
+		sinceTime = factExtractedAt.UTC()
+	}
+
+	endpoint := fmt.Sprintf("%s/tasks?thread_id=%s&status=COMPLETED&limit=1",
+		s.getBrainURL(), url.QueryEscape(threadID))
+	tasks, err := s.fetchTasks(ctx, endpoint)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(tasks) == 0 {
+		return nil, nil, nil
+	}
+
+	sessionParts := extractSessionIDs(tasks[0])
+	if len(sessionParts) == 0 {
+		return nil, nil, nil
+	}
+
+	steps, err := s.fetchTranscriptSteps(ctx, strings.Join(sessionParts, ","), sinceTime.Format(time.RFC3339))
+	if err != nil {
+		return nil, nil, err
+	}
+
+	facts, tools := parseTrajectorySteps(steps)
+	return facts, tools, nil
 }
 
 // FindNearestScoredFacts returns top-K facts with cosine similarity >= minSim along with their scores.

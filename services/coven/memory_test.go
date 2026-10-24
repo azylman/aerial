@@ -2006,6 +2006,57 @@ func setupTestDBMem(t *testing.T) *sql.DB {
 	return db
 }
 
+func TestSQLStore_ConstructorsAndSetters(t *testing.T) {
+	dbMem := setupTestDBMem(t)
+
+	tests := []struct {
+		name         string
+		initialURL   string
+		setURL       string
+		client       *http.Client
+		wantBrainURL string
+	}{
+		{
+			name:         "DefaultURL",
+			initialURL:   "",
+			wantBrainURL: DefaultBrainURL,
+		},
+		{
+			name:         "CustomURL",
+			initialURL:   "http://my-eri:5000/",
+			wantBrainURL: "http://my-eri:5000",
+		},
+		{
+			name:         "SetterWithWhitespace",
+			initialURL:   DefaultBrainURL,
+			setURL:       " http://new-eri:6000/ ",
+			wantBrainURL: "http://new-eri:6000",
+		},
+		{
+			name:         "SetterEmptyResetsToDefault",
+			initialURL:   "http://custom:1234",
+			setURL:       "   ",
+			wantBrainURL: DefaultBrainURL,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewSQLStoreWithBrainURL(dbMem, tc.initialURL, tc.client)
+			if tc.setURL != "" {
+				store.SetBrainURL(tc.setURL)
+			}
+			store.SetHTTPClient(tc.client)
+			if got := store.getBrainURL(); got != tc.wantBrainURL {
+				t.Errorf("getBrainURL() = %q, want %q", got, tc.wantBrainURL)
+			}
+			if cl := store.getHTTPClient(); cl == nil {
+				t.Error("getHTTPClient() returned nil")
+			}
+		})
+	}
+}
+
 func TestSQLStore_InsertFact(t *testing.T) {
 	dbMem := setupTestDBMem(t)
 	ctx := context.Background()
@@ -2547,69 +2598,6 @@ func TestIsClientDisconnect(t *testing.T) {
 	}
 }
 
-func TestMessageMetadata_Scan(t *testing.T) {
-	tests := []struct {
-		name      string
-		src       any
-		wantErr   bool
-		wantEmpty bool
-		wantAdmin bool
-	}{
-		{
-			name:      "ScanNil",
-			src:       nil,
-			wantEmpty: true,
-		},
-		{
-			name:      "ScanBytes",
-			src:       []byte(`{"is_admin":true,"channel_id":"c2"}`),
-			wantAdmin: true,
-		},
-		{
-			name:      "ScanString",
-			src:       `{"is_admin":true,"channel_id":"c3"}`,
-			wantAdmin: true,
-		},
-		{
-			name:      "ScanEmptyString",
-			src:       `{}`,
-			wantEmpty: true,
-		},
-		{
-			name:      "ScanNullString",
-			src:       `null`,
-			wantEmpty: true,
-		},
-		{
-			name:    "ScanInvalidJSON",
-			src:     `{not-valid-json`,
-			wantErr: true,
-		},
-		{
-			name:    "ScanUnsupportedType",
-			src:     12345,
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var target MessageMetadata
-			err := target.Scan(tc.src)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("Scan() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			isEmpty := target.ChannelID == "" && !target.IsAdmin
-			if !tc.wantErr && isEmpty != tc.wantEmpty {
-				t.Fatalf("Scan() isEmpty = %v, wantEmpty = %v", isEmpty, tc.wantEmpty)
-			}
-			if !tc.wantErr && target.IsAdmin != tc.wantAdmin {
-				t.Fatalf("Scan() IsAdmin = %v, wantAdmin = %v", target.IsAdmin, tc.wantAdmin)
-			}
-		})
-	}
-}
-
 func TestIsExtractableAdminTurn(t *testing.T) {
 	tests := []struct {
 		name string
@@ -2621,7 +2609,7 @@ func TestIsExtractableAdminTurn(t *testing.T) {
 			msg: Message{
 				Status:       "COMPLETED",
 				ResponseText: "Here is your answer.",
-				Metadata:     MessageMetadata{IsAdmin: true},
+				IsAdmin:      true,
 			},
 			want: true,
 		},
@@ -2630,7 +2618,7 @@ func TestIsExtractableAdminTurn(t *testing.T) {
 			msg: Message{
 				Status:       "PENDING",
 				ResponseText: "Here is your answer.",
-				Metadata:     MessageMetadata{IsAdmin: true},
+				IsAdmin:      true,
 			},
 			want: false,
 		},
@@ -2639,7 +2627,7 @@ func TestIsExtractableAdminTurn(t *testing.T) {
 			msg: Message{
 				Status:       "COMPLETED",
 				ResponseText: "Here is your answer.",
-				Metadata:     MessageMetadata{IsAdmin: false},
+				IsAdmin:      false,
 			},
 			want: false,
 		},
@@ -2648,7 +2636,7 @@ func TestIsExtractableAdminTurn(t *testing.T) {
 			msg: Message{
 				Status:       "COMPLETED",
 				ResponseText: "[SILENT_TURN]",
-				Metadata:     MessageMetadata{IsAdmin: true},
+				IsAdmin:      true,
 			},
 			want: false,
 		},
@@ -2657,7 +2645,7 @@ func TestIsExtractableAdminTurn(t *testing.T) {
 			msg: Message{
 				Status:       "COMPLETED",
 				ResponseText: "   ",
-				Metadata:     MessageMetadata{IsAdmin: true},
+				IsAdmin:      true,
 			},
 			want: false,
 		},
@@ -2682,9 +2670,13 @@ func TestSQLStore_GetActiveConversationsForExtraction(t *testing.T) {
 		nilDB        bool
 		activeHours  int
 		queryErr     error
-		rowSQL       string
+		watermarkSQL string
+		eriStatus    int
+		eriBody      string
 		wantErr      bool
+		wantThreads  []string
 		wantPatterns []string
+		wantURLSub   string
 	}{
 		{
 			name:    "NilDBError",
@@ -2692,51 +2684,97 @@ func TestSQLStore_GetActiveConversationsForExtraction(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:     "QueryError",
+			name:     "DBQueryError",
 			queryErr: errors.New("query failed"),
 			wantErr:  true,
 		},
 		{
-			name:    "RowScanError",
-			rowSQL:  "SELECT 12345 AS not_a_string",
-			wantErr: false,
+			name:      "EriHTTPError",
+			eriStatus: http.StatusInternalServerError,
+			eriBody:   `{"error":"failed"}`,
+			wantErr:   true,
+		},
+		{
+			name:    "EriJSONError",
+			eriBody: `not-valid-json`,
+			wantErr: true,
 		},
 		{
 			name:         "SuccessDefaultHours",
 			activeHours:  -1,
-			wantPatterns: []string{"SELECT DISTINCT m.thread_id FROM messages m", "is_admin"},
+			watermarkSQL: "SELECT 'th-1', 5 UNION ALL SELECT 'th-2', 10",
+			eriBody: `{"status":"ok","tasks":[
+				{"thread_id":"th-1","row_id":10},
+				{"thread_id":"th-2","row_id":5},
+				{"thread_id":"th-3","row_id":20},
+				{"thread_id":"th-1","row_id":12}
+			]}`,
+			wantThreads:  []string{"th-1", "th-3"},
+			wantPatterns: []string{"SELECT thread_id, COALESCE(last_extracted_rowid, 0) FROM extraction_watermarks"},
 		},
 		{
 			name:         "SuccessCustomHours",
 			activeHours:  48,
-			wantPatterns: []string{"SELECT DISTINCT m.thread_id FROM messages m"},
+			watermarkSQL: "SELECT 'th-9', 0",
+			eriBody: `{"status":"ok","tasks":[
+				{"thread_id":"th-9","row_id":100}
+			]}`,
+			wantThreads:  []string{"th-9"},
+			wantPatterns: []string{"SELECT thread_id, COALESCE(last_extracted_rowid, 0) FROM extraction_watermarks"},
+			wantURLSub:   "limit=200",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var captured string
+			var capturedURL string
 			var store *SQLStore
+
 			if tc.nilDB {
 				store = &SQLStore{}
 			} else {
-				store = NewSQLStore(queryMockDBTX{
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					capturedURL = r.URL.String()
+					if tc.eriStatus != 0 {
+						w.WriteHeader(tc.eriStatus)
+					}
+					if tc.eriBody != "" {
+						_, _ = w.Write([]byte(tc.eriBody))
+					}
+				}))
+				defer server.Close()
+
+				store = NewSQLStoreWithBrainURL(queryMockDBTX{
 					dbMem:         dbMem,
 					queryErr:      tc.queryErr,
-					rowSQL:        tc.rowSQL,
+					rowsSQL:       tc.watermarkSQL,
 					capturedQuery: &captured,
-				})
+				}, server.URL, server.Client())
 			}
+
 			threads, err := store.GetActiveConversationsForExtraction(ctx, tc.activeHours)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("GetActiveConversationsForExtraction() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr {
+				if len(threads) != len(tc.wantThreads) {
+					t.Fatalf("len(threads) = %d, want %d (%v)", len(threads), len(tc.wantThreads), threads)
+				}
+				for i := range threads {
+					if threads[i] != tc.wantThreads[i] {
+						t.Errorf("threads[%d] = %q, want %q", i, threads[i], tc.wantThreads[i])
+					}
+				}
 			}
 			for _, pat := range tc.wantPatterns {
 				if !strings.Contains(captured, pat) {
 					t.Errorf("captured query missing %q: %s", pat, captured)
 				}
 			}
-			_ = threads
+			if tc.wantURLSub != "" && !strings.Contains(capturedURL, tc.wantURLSub) {
+				t.Errorf("captured URL missing %q: %s", tc.wantURLSub, capturedURL)
+			}
 		})
 	}
 }
@@ -2750,10 +2788,14 @@ func TestSQLStore_GetUnextractedAdminTurns(t *testing.T) {
 		nilDB        bool
 		threadID     string
 		queryErr     error
-		rowSQL       string
+		watermarkSQL string
+		eriStatus    int
+		eriBody      string
 		wantErr      bool
 		wantEmpty    bool
+		wantCount    int
 		wantPatterns []string
+		wantURLSub   string
 	}{
 		{
 			name:     "NilDBError",
@@ -2768,38 +2810,68 @@ func TestSQLStore_GetUnextractedAdminTurns(t *testing.T) {
 			wantEmpty: true,
 		},
 		{
-			name:     "QueryError",
+			name:     "DBQueryError",
 			threadID: "th-1",
 			queryErr: errors.New("query error"),
 			wantErr:  true,
 		},
 		{
-			name:     "RowScanError",
-			threadID: "th-1",
-			rowSQL:   "SELECT 'id-only' AS id",
-			wantErr:  true,
+			name:         "EriHTTPError",
+			threadID:     "th-1",
+			watermarkSQL: "SELECT 5, NULL",
+			eriStatus:    http.StatusInternalServerError,
+			wantErr:      true,
+		},
+		{
+			name:         "EriJSONError",
+			threadID:     "th-1",
+			watermarkSQL: "SELECT 5, NULL",
+			eriBody:      "invalid-json",
+			wantErr:      true,
 		},
 		{
 			name:         "Success",
 			threadID:     "th-1",
-			wantPatterns: []string{"m.thread_id = $1", "m.status = 'COMPLETED'", "is_admin"},
+			watermarkSQL: "SELECT 10, NULL",
+			eriBody: `{"status":"ok","tasks":[
+				{"id":"m1","row_id":12,"thread_id":"th-1","prompt":"hello","response_text":"world","status":"COMPLETED","is_admin":true},
+				{"id":"m2","row_id":14,"thread_id":"th-1","prompt":"skip","response_text":"[SILENT]","status":"COMPLETED","is_admin":true},
+				{"id":"m3","row_id":15,"thread_id":"th-1","prompt":"non-admin","response_text":"ok","status":"COMPLETED","is_admin":false}
+			]}`,
+			wantCount:    1,
+			wantPatterns: []string{"FROM extraction_watermarks WHERE thread_id = $1"},
+			wantURLSub:   "after_row_id=10",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var captured string
+			var capturedURL string
 			var store *SQLStore
+
 			if tc.nilDB {
 				store = &SQLStore{}
 			} else {
-				store = NewSQLStore(queryMockDBTX{
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					capturedURL = r.URL.String()
+					if tc.eriStatus != 0 {
+						w.WriteHeader(tc.eriStatus)
+					}
+					if tc.eriBody != "" {
+						_, _ = w.Write([]byte(tc.eriBody))
+					}
+				}))
+				defer server.Close()
+
+				store = NewSQLStoreWithBrainURL(queryMockDBTX{
 					dbMem:         dbMem,
 					queryErr:      tc.queryErr,
-					rowSQL:        tc.rowSQL,
+					rowSQL:        tc.watermarkSQL,
 					capturedQuery: &captured,
-				})
+				}, server.URL, server.Client())
 			}
+
 			turns, err := store.GetUnextractedAdminTurns(ctx, tc.threadID)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("GetUnextractedAdminTurns() err = %v, wantErr = %v", err, tc.wantErr)
@@ -2807,10 +2879,16 @@ func TestSQLStore_GetUnextractedAdminTurns(t *testing.T) {
 			if tc.wantEmpty && len(turns) != 0 {
 				t.Errorf("expected empty turns, got %d", len(turns))
 			}
+			if tc.wantCount > 0 && len(turns) != tc.wantCount {
+				t.Errorf("len(turns) = %d, want %d", len(turns), tc.wantCount)
+			}
 			for _, pat := range tc.wantPatterns {
 				if !strings.Contains(captured, pat) {
 					t.Errorf("captured query missing %q: %s", pat, captured)
 				}
+			}
+			if tc.wantURLSub != "" && !strings.Contains(capturedURL, tc.wantURLSub) {
+				t.Errorf("captured URL missing %q: %s", tc.wantURLSub, capturedURL)
 			}
 		})
 	}
@@ -2821,14 +2899,14 @@ func TestSQLStore_GetMaxMessageRowID(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name         string
-		nilDB        bool
-		threadID     string
-		queryErr     error
-		rowSQL       string
-		wantErr      bool
-		wantPatterns []string
-		wantID       int64
+		name       string
+		nilDB      bool
+		threadID   string
+		eriStatus  int
+		eriBody    string
+		wantErr    bool
+		wantID     int64
+		wantURLSub string
 	}{
 		{
 			name:     "NilDBError",
@@ -2843,34 +2921,50 @@ func TestSQLStore_GetMaxMessageRowID(t *testing.T) {
 			wantID:   0,
 		},
 		{
-			name:     "QueryError",
-			threadID: "th-1",
-			queryErr: errors.New("scan error"),
-			wantErr:  true,
+			name:      "EriHTTPError",
+			threadID:  "th-1",
+			eriStatus: http.StatusInternalServerError,
+			wantErr:   true,
 		},
 		{
-			name:         "SuccessWithRow",
-			threadID:     "th-1",
-			rowSQL:       "SELECT 42 AS max_row_id",
-			wantPatterns: []string{"SELECT MAX(row_id) FROM messages WHERE thread_id = $1"},
-			wantID:       42,
+			name:     "EmptyTasks",
+			threadID: "th-1",
+			eriBody:  `{"status":"ok","tasks":[]}`,
+			wantID:   0,
+		},
+		{
+			name:       "SuccessWithRow",
+			threadID:   "th-1",
+			eriBody:    `{"status":"ok","tasks":[{"row_id":42}]}`,
+			wantID:     42,
+			wantURLSub: "status=COMPLETED&limit=1",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var captured string
+			var capturedURL string
 			var store *SQLStore
+
 			if tc.nilDB {
 				store = &SQLStore{}
 			} else {
-				store = NewSQLStore(queryMockDBTX{
-					dbMem:         dbMem,
-					queryErr:      tc.queryErr,
-					rowSQL:        tc.rowSQL,
-					capturedQuery: &captured,
-				})
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					capturedURL = r.URL.String()
+					if tc.eriStatus != 0 {
+						w.WriteHeader(tc.eriStatus)
+					}
+					if tc.eriBody != "" {
+						_, _ = w.Write([]byte(tc.eriBody))
+					}
+				}))
+				defer server.Close()
+
+				store = NewSQLStoreWithBrainURL(queryMockDBTX{
+					dbMem: dbMem,
+				}, server.URL, server.Client())
 			}
+
 			id, err := store.GetMaxMessageRowID(ctx, tc.threadID)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("GetMaxMessageRowID() err = %v, wantErr = %v", err, tc.wantErr)
@@ -2878,10 +2972,8 @@ func TestSQLStore_GetMaxMessageRowID(t *testing.T) {
 			if !tc.wantErr && id != tc.wantID {
 				t.Errorf("GetMaxMessageRowID() = %d, want %d", id, tc.wantID)
 			}
-			for _, pat := range tc.wantPatterns {
-				if !strings.Contains(captured, pat) {
-					t.Errorf("captured query missing %q: %s", pat, captured)
-				}
+			if tc.wantURLSub != "" && !strings.Contains(capturedURL, tc.wantURLSub) {
+				t.Errorf("captured URL missing %q: %s", tc.wantURLSub, capturedURL)
 			}
 		})
 	}
@@ -2921,7 +3013,7 @@ func TestSQLStore_UpdateConversationFactWatermark(t *testing.T) {
 			name:         "Success",
 			threadID:     "th-1",
 			maxRowID:     99,
-			wantPatterns: []string{"INSERT INTO sessions (thread_id", "ON CONFLICT(thread_id) DO UPDATE"},
+			wantPatterns: []string{"INSERT INTO extraction_watermarks (thread_id", "ON CONFLICT(thread_id) DO UPDATE"},
 		},
 	}
 
@@ -3041,8 +3133,9 @@ func TestSQLStore_GetThreadContextBeforeWatermark(t *testing.T) {
 		threadID      string
 		priorLimit    int
 		queryErr      error
-		rowSQL        string
-		rowsSQL       string
+		watermarkSQL  string
+		eriStatus     int
+		eriBody       string
 		wantErr       bool
 		wantSummary   string
 		wantTurnCount int
@@ -3059,37 +3152,33 @@ func TestSQLStore_GetThreadContextBeforeWatermark(t *testing.T) {
 			wantErr:  false,
 		},
 		{
-			name:        "SessionQueryErrNoRows",
-			threadID:    "t-1",
-			queryErr:    sql.ErrNoRows,
-			wantErr:     false,
-			wantSummary: "",
-		},
-		{
-			name:     "SessionQueryError",
+			name:     "DBWatermarkError",
 			threadID: "t-1",
 			queryErr: errors.New("db disconnect"),
 			wantErr:  true,
 		},
 		{
-			name:        "LastExtractedRowIDZero",
-			threadID:    "t-1",
-			rowSQL:      "SELECT 'summary text', 0",
-			wantSummary: "summary text",
+			name:         "LastExtractedRowIDZero",
+			threadID:     "t-1",
+			watermarkSQL: "SELECT 0, NULL",
+			eriBody:      `{"status":"ok","tasks":[{"thread_summary":"summary text"}]}`,
+			wantSummary:  "summary text",
 		},
 		{
-			name:       "MessagesScanError",
-			threadID:   "t-1",
-			rowSQL:     "SELECT 'summary', 15",
-			rowsSQL:    "SELECT 'invalid' AS id",
-			priorLimit: 2,
-			wantErr:    true,
+			name:         "EriTasksError",
+			threadID:     "t-1",
+			watermarkSQL: "SELECT 15, NULL",
+			eriStatus:    http.StatusInternalServerError,
+			wantErr:      true,
 		},
 		{
-			name:          "SuccessChronologicalOrder",
-			threadID:      "t-1",
-			rowSQL:        "SELECT 'Session summary here', 20",
-			rowsSQL:       "SELECT 'm2', 12, 't-1', 'second prompt', 'second response', 'COMPLETED', '{\"is_admin\":true}' UNION ALL SELECT 'm1', 8, 't-1', 'first prompt', 'first response', 'COMPLETED', '{\"is_admin\":true}'",
+			name:         "SuccessChronologicalOrder",
+			threadID:     "t-1",
+			watermarkSQL: "SELECT 20, NULL",
+			eriBody: `{"status":"ok","tasks":[
+				{"id":"m2","row_id":12,"thread_id":"t-1","prompt":"second prompt","response_text":"second response","status":"COMPLETED","is_admin":true,"thread_summary":"Session summary here"},
+				{"id":"m1","row_id":8,"thread_id":"t-1","prompt":"first prompt","response_text":"first response","status":"COMPLETED","is_admin":true,"thread_summary":"Session summary here"}
+			]}`,
 			priorLimit:    -1,
 			wantSummary:   "Session summary here",
 			wantTurnCount: 2,
@@ -3099,16 +3188,27 @@ func TestSQLStore_GetThreadContextBeforeWatermark(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var store *SQLStore
+
 			if tc.nilDB {
 				store = &SQLStore{}
 			} else {
-				store = NewSQLStore(queryMockDBTX{
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if tc.eriStatus != 0 {
+						w.WriteHeader(tc.eriStatus)
+					}
+					if tc.eriBody != "" {
+						_, _ = w.Write([]byte(tc.eriBody))
+					}
+				}))
+				defer server.Close()
+
+				store = NewSQLStoreWithBrainURL(queryMockDBTX{
 					dbMem:    dbMem,
 					queryErr: tc.queryErr,
-					rowSQL:   tc.rowSQL,
-					rowsSQL:  tc.rowsSQL,
-				})
+					rowSQL:   tc.watermarkSQL,
+				}, server.URL, server.Client())
 			}
+
 			summary, turns, err := store.GetThreadContextBeforeWatermark(ctx, tc.threadID, tc.priorLimit)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("GetThreadContextBeforeWatermark() err = %v, wantErr = %v", err, tc.wantErr)
@@ -3137,7 +3237,11 @@ func TestSQLStore_GetThreadTrajectoryContext(t *testing.T) {
 		nilDB         bool
 		threadID      string
 		queryErr      error
-		rowsSQL       string
+		watermarkSQL  string
+		tasksStatus   int
+		tasksBody     string
+		searchStatus  int
+		searchBody    string
 		wantErr       bool
 		wantFacts     []string
 		wantToolCalls []string
@@ -3154,24 +3258,44 @@ func TestSQLStore_GetThreadTrajectoryContext(t *testing.T) {
 			wantErr:  false,
 		},
 		{
-			name:     "QueryError",
+			name:     "DBQueryError",
 			threadID: "t-1",
 			queryErr: errors.New("db disconnect"),
 			wantErr:  true,
 		},
 		{
-			name:     "ScanError",
-			threadID: "t-1",
-			rowsSQL:  "SELECT 'only_one_col'",
-			wantErr:  true,
+			name:         "EriTasksError",
+			threadID:     "t-1",
+			watermarkSQL: "SELECT 0, NULL",
+			tasksStatus:  http.StatusInternalServerError,
+			wantErr:      true,
 		},
 		{
-			name:     "SuccessParsingAndDeduplication",
-			threadID: "t-1",
-			rowsSQL: "SELECT 'USER_INPUT', '', '<retrieved_memory>\n- [id:42] User likes matcha\n- [id:42] User likes matcha\n- [id:43] Prefers dark mode\n</retrieved_memory>' " +
-				"UNION ALL SELECT 'PLANNER_RESPONSE', 'memory_search', '{\"query\": \"matcha\"}' " +
-				"UNION ALL SELECT 'USER_INPUT', '', '<\x5cRETRIEVED_MEMORY>\n- [id:42] User likes matcha\n- [id:44] Morning coffee at 8am\n<\x5c/RETRIEVED_MEMORY>' " +
-				"UNION ALL SELECT 'OTHER', '', 'ignored'",
+			name:         "EmptySessions",
+			threadID:     "t-1",
+			watermarkSQL: "SELECT 0, NULL",
+			tasksBody:    `{"status":"ok","tasks":[{"session_id":"","previous_session_id":""}]}`,
+			wantErr:      false,
+		},
+		{
+			name:         "TranscriptSearchError",
+			threadID:     "t-1",
+			watermarkSQL: "SELECT 0, NULL",
+			tasksBody:    `{"status":"ok","tasks":[{"session_id":"s1","previous_session_id":"s0"}]}`,
+			searchStatus: http.StatusInternalServerError,
+			wantErr:      true,
+		},
+		{
+			name:         "SuccessParsingAndDeduplication",
+			threadID:     "t-1",
+			watermarkSQL: "SELECT 0, '2026-01-01T00:00:00Z'",
+			tasksBody:    `{"status":"ok","tasks":[{"session_id":"s1","previous_session_id":"s0"}]}`,
+			searchBody: `{"steps":[
+				{"step_type":"USER_INPUT","tool_name":"","content":"<retrieved_memory>\n- [id:42] User likes matcha\n- [id:42] User likes matcha\n- [id:43] Prefers dark mode\n</retrieved_memory>"},
+				{"step_type":"PLANNER_RESPONSE","tool_name":"memory_search","content":"{\"query\": \"matcha\"}"},
+				{"step_type":"USER_INPUT","tool_name":"","content":"<\\RETRIEVED_MEMORY>\n- [id:42] User likes matcha\n- [id:44] Morning coffee at 8am\n<\\/RETRIEVED_MEMORY>"},
+				{"step_type":"OTHER","tool_name":"","content":"ignored"}
+			]}`,
 			wantErr: false,
 			wantFacts: []string{
 				"- [id:42] User likes matcha",
@@ -3187,15 +3311,44 @@ func TestSQLStore_GetThreadTrajectoryContext(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var store *SQLStore
+
 			if tc.nilDB {
 				store = &SQLStore{}
 			} else {
-				store = NewSQLStore(queryMockDBTX{
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if strings.HasPrefix(r.URL.Path, "/tasks") {
+						if tc.tasksStatus != 0 {
+							w.WriteHeader(tc.tasksStatus)
+						}
+						if tc.tasksBody != "" {
+							_, _ = w.Write([]byte(tc.tasksBody))
+						} else {
+							_, _ = w.Write([]byte(`{"status":"ok","tasks":[]}`))
+						}
+						return
+					}
+					if strings.HasPrefix(r.URL.Path, "/transcripts/search") {
+						if tc.searchStatus != 0 {
+							w.WriteHeader(tc.searchStatus)
+						}
+						if tc.searchBody != "" {
+							_, _ = w.Write([]byte(tc.searchBody))
+						} else {
+							_, _ = w.Write([]byte(`{"steps":[]}`))
+						}
+						return
+					}
+					http.NotFound(w, r)
+				}))
+				defer server.Close()
+
+				store = NewSQLStoreWithBrainURL(queryMockDBTX{
 					dbMem:    dbMem,
 					queryErr: tc.queryErr,
-					rowsSQL:  tc.rowsSQL,
-				})
+					rowSQL:   tc.watermarkSQL,
+				}, server.URL, server.Client())
 			}
+
 			facts, tools, err := store.GetThreadTrajectoryContext(ctx, tc.threadID)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("GetThreadTrajectoryContext() err = %v, wantErr = %v", err, tc.wantErr)
@@ -4366,7 +4519,7 @@ func TestProcessThreadFacts_ContextAndCoreference(t *testing.T) {
 					mem.SetFail("GetUnextractedAdminTurns", errors.New("db error"))
 				} else if !tc.emptyTurns {
 					mem.unextractedTurns[threadID] = []Message{
-						{RowID: 10, ThreadID: threadID, Content: "He likes matcha tea", ResponseText: "Understood", Status: "COMPLETED", Metadata: MessageMetadata{IsAdmin: true}},
+						{RowID: 10, ThreadID: threadID, Content: "He likes matcha tea", ResponseText: "Understood", Status: "COMPLETED", IsAdmin: true},
 					}
 				}
 				if tc.withSummary {
@@ -4374,7 +4527,7 @@ func TestProcessThreadFacts_ContextAndCoreference(t *testing.T) {
 				}
 				if tc.withPriorTurns {
 					mem.threadPriorTurns[threadID] = []Message{
-						{RowID: 5, ThreadID: threadID, Content: "My name is Bob", ResponseText: "Hello Bob", Status: "COMPLETED", Metadata: MessageMetadata{IsAdmin: true}},
+						{RowID: 5, ThreadID: threadID, Content: "My name is Bob", ResponseText: "Hello Bob", Status: "COMPLETED", IsAdmin: true},
 					}
 				}
 				if tc.withTrajectory {
@@ -7468,6 +7621,7 @@ func TestGitHubSkillPublisher_PublishSkillChanges(t *testing.T) {
 				Token:              tc.token,
 				Owner:              "azylman",
 				Repo:               tc.repo,
+				BrainURL:           server.URL,
 				BrainPRRegisterURL: server.URL + "/internal/pr/register",
 				SystemChannelID:    tc.channelID,
 				BaseURL:            server.URL,
@@ -8063,6 +8217,60 @@ system_channel_id: "1562837549255495693"
 			}
 			if cfg.SystemChannelID != tc.wantChannelID {
 				t.Errorf("SystemChannelID = %q, want %q", cfg.SystemChannelID, tc.wantChannelID)
+			}
+		})
+	}
+}
+
+func TestConfig_BrainURLResolution(t *testing.T) {
+	tests := []struct {
+		name           string
+		envBrainURL    string
+		envBrainLLMURL string
+		wantBrainURL   string
+		wantBrainLLM   string
+	}{
+		{
+			name:         "DefaultWhenUnset",
+			wantBrainURL: DefaultBrainURL,
+			wantBrainLLM: DefaultBrainLLMURL,
+		},
+		{
+			name:           "DeriveBrainURLFromLLMURL",
+			envBrainLLMURL: "http://my-eri:5000/internal/llm",
+			wantBrainURL:   "http://my-eri:5000",
+			wantBrainLLM:   "http://my-eri:5000/internal/llm",
+		},
+		{
+			name:         "DeriveLLMURLFromBrainURL",
+			envBrainURL:  "http://my-eri:5000",
+			wantBrainURL: "http://my-eri:5000",
+			wantBrainLLM: "http://my-eri:5000/internal/llm",
+		},
+		{
+			name:           "BothCustomized",
+			envBrainURL:    "http://custom-eri:8000",
+			envBrainLLMURL: "http://custom-proxy:9000/v1/llm",
+			wantBrainURL:   "http://custom-eri:8000",
+			wantBrainLLM:   "http://custom-proxy:9000/v1/llm",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DATABASE_URL", "postgres://localhost/test")
+			t.Setenv("BRAIN_URL", tc.envBrainURL)
+			t.Setenv("BRAIN_LLM_URL", tc.envBrainLLMURL)
+
+			cfg, err := LoadConfigFile("", "")
+			if err != nil {
+				t.Fatalf("LoadConfigFile() err = %v", err)
+			}
+			if cfg.BrainURL != tc.wantBrainURL {
+				t.Errorf("BrainURL = %q, want %q", cfg.BrainURL, tc.wantBrainURL)
+			}
+			if cfg.BrainLLMURL != tc.wantBrainLLM {
+				t.Errorf("BrainLLMURL = %q, want %q", cfg.BrainLLMURL, tc.wantBrainLLM)
 			}
 		})
 	}

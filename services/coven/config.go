@@ -15,6 +15,9 @@ const DefaultConfigPath = "/config/config.yaml"
 // DefaultPort is the fallback port when unspecified.
 const DefaultPort = "4008"
 
+// DefaultBrainURL is the fallback internal brain HTTP base URL.
+const DefaultBrainURL = "http://eri.aerial"
+
 // DefaultBrainLLMURL is the fallback brain LLM proxy URL.
 const DefaultBrainLLMURL = "http://eri.aerial/internal/llm"
 
@@ -67,6 +70,7 @@ type OllamaConfig struct {
 type Config struct {
 	Port               string       `yaml:"port"`
 	DatabaseURL        string       `yaml:"database_url"`
+	BrainURL           string       `yaml:"brain_url"`
 	BrainLLMURL        string       `yaml:"brain_llm_url"`
 	Ollama             OllamaConfig `yaml:"ollama"`
 	CustomSkillsDir    string       `yaml:"custom_skills_dir"`
@@ -81,6 +85,7 @@ type Config struct {
 type MemoryYAMLConfig struct {
 	Port               string       `yaml:"port"`
 	DatabaseURL        string       `yaml:"database_url"`
+	BrainURL           string       `yaml:"brain_url"`
 	BrainLLMURL        string       `yaml:"brain_llm_url"`
 	Ollama             OllamaConfig `yaml:"ollama"`
 	CustomSkillsDir    string       `yaml:"custom_skills_dir"`
@@ -89,6 +94,51 @@ type MemoryYAMLConfig struct {
 	ConfigRepoName     string       `yaml:"config_repo_name"`
 	BrainPRRegisterURL string       `yaml:"brain_pr_register_url"`
 	SystemChannelID    string       `yaml:"system_channel_id"`
+}
+
+func resolveFirstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func resolveBrainURLs(envURL, yamlURL, envLLM, yamlLLM string) (string, string) {
+	brainURL := resolveFirstNonEmpty(envURL, yamlURL)
+	brainLLMURL := resolveFirstNonEmpty(envLLM, yamlLLM)
+
+	if brainURL == "" {
+		if brainLLMURL != "" {
+			brainURL = strings.TrimSuffix(brainLLMURL, "/internal/llm")
+		} else {
+			brainURL = DefaultBrainURL
+		}
+	}
+	if brainLLMURL == "" {
+		brainLLMURL = strings.TrimRight(brainURL, "/") + "/internal/llm"
+	}
+	return brainURL, brainLLMURL
+}
+
+func resolveOllamaConfig(ycfg OllamaConfig) OllamaConfig {
+	baseURL := resolveFirstNonEmpty(os.Getenv("OLLAMA_BASE_URL"), ycfg.BaseURL, DefaultOllamaURL)
+	model := resolveFirstNonEmpty(os.Getenv("OLLAMA_MODEL"), ycfg.Model, DefaultOllamaModel)
+	queryPrefix := os.Getenv("OLLAMA_QUERY_PREFIX")
+	if queryPrefix == "" {
+		queryPrefix = ycfg.QueryPrefix
+	}
+	numCtx := ycfg.NumCtx
+	if numCtx <= 0 {
+		numCtx = DefaultOllamaNumCtx
+	}
+	return OllamaConfig{
+		BaseURL:     baseURL,
+		Model:       model,
+		QueryPrefix: queryPrefix,
+		NumCtx:      numCtx,
+	}
 }
 
 // LoadConfigFile loads and validates the config from path and environment variables.
@@ -108,103 +158,24 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		}
 	}
 
-	port := strings.TrimSpace(os.Getenv("PORT"))
-	if port == "" {
-		port = strings.TrimSpace(ycfg.Port)
-	}
-	if port == "" {
-		port = DefaultPort
-	}
-
-	databaseURL := strings.TrimSpace(dbURL)
-	if databaseURL == "" {
-		databaseURL = strings.TrimSpace(os.Getenv("DATABASE_URL"))
-	}
-	if databaseURL == "" {
-		databaseURL = strings.TrimSpace(os.Getenv("POSTGRES_URL"))
-	}
-	if databaseURL == "" {
-		databaseURL = strings.TrimSpace(ycfg.DatabaseURL)
-	}
+	port := resolveFirstNonEmpty(os.Getenv("PORT"), ycfg.Port, DefaultPort)
+	databaseURL := resolveFirstNonEmpty(dbURL, os.Getenv("DATABASE_URL"), os.Getenv("POSTGRES_URL"), ycfg.DatabaseURL)
 	if databaseURL == "" {
 		return nil, fmt.Errorf("config: database connection string is required")
 	}
 
-	brainLLMURL := strings.TrimSpace(os.Getenv("BRAIN_LLM_URL"))
-	if brainLLMURL == "" {
-		brainLLMURL = strings.TrimSpace(ycfg.BrainLLMURL)
-	}
-	if brainLLMURL == "" {
-		brainLLMURL = DefaultBrainLLMURL
-	}
+	brainURL, brainLLMURL := resolveBrainURLs(
+		os.Getenv("BRAIN_URL"), ycfg.BrainURL,
+		os.Getenv("BRAIN_LLM_URL"), ycfg.BrainLLMURL,
+	)
 
-	ollamaBaseURL := strings.TrimSpace(os.Getenv("OLLAMA_BASE_URL"))
-	if ollamaBaseURL == "" {
-		ollamaBaseURL = strings.TrimSpace(ycfg.Ollama.BaseURL)
-	}
-	if ollamaBaseURL == "" {
-		ollamaBaseURL = DefaultOllamaURL
-	}
+	customSkillsDir := resolveFirstNonEmpty(os.Getenv("CUSTOM_SKILLS_DIR"), ycfg.CustomSkillsDir, DefaultCustomSkillsDir)
+	gitHubPAT := resolveFirstNonEmpty(os.Getenv("GITHUB_PAT"), ycfg.GitHubPAT)
+	configRepoOwner := resolveFirstNonEmpty(os.Getenv("CONFIG_REPO_OWNER"), ycfg.ConfigRepoOwner, DefaultConfigRepoOwner)
+	configRepoName := resolveFirstNonEmpty(os.Getenv("CONFIG_REPO_NAME"), ycfg.ConfigRepoName, DefaultConfigRepoName)
+	brainPRRegisterURL := resolveFirstNonEmpty(os.Getenv("BRAIN_PR_REGISTER_URL"), ycfg.BrainPRRegisterURL, DefaultBrainPRRegisterURL)
 
-	ollamaModel := strings.TrimSpace(os.Getenv("OLLAMA_MODEL"))
-	if ollamaModel == "" {
-		ollamaModel = strings.TrimSpace(ycfg.Ollama.Model)
-	}
-	if ollamaModel == "" {
-		ollamaModel = DefaultOllamaModel
-	}
-
-	queryPrefix := os.Getenv("OLLAMA_QUERY_PREFIX")
-	if queryPrefix == "" {
-		queryPrefix = ycfg.Ollama.QueryPrefix
-	}
-
-	numCtx := ycfg.Ollama.NumCtx
-	if numCtx <= 0 {
-		numCtx = DefaultOllamaNumCtx
-	}
-
-	customSkillsDir := strings.TrimSpace(os.Getenv("CUSTOM_SKILLS_DIR"))
-	if customSkillsDir == "" {
-		customSkillsDir = strings.TrimSpace(ycfg.CustomSkillsDir)
-	}
-	if customSkillsDir == "" {
-		customSkillsDir = DefaultCustomSkillsDir
-	}
-
-	gitHubPAT := strings.TrimSpace(os.Getenv("GITHUB_PAT"))
-	if gitHubPAT == "" {
-		gitHubPAT = strings.TrimSpace(ycfg.GitHubPAT)
-	}
-
-	configRepoOwner := strings.TrimSpace(os.Getenv("CONFIG_REPO_OWNER"))
-	if configRepoOwner == "" {
-		configRepoOwner = strings.TrimSpace(ycfg.ConfigRepoOwner)
-	}
-	if configRepoOwner == "" {
-		configRepoOwner = DefaultConfigRepoOwner
-	}
-
-	configRepoName := strings.TrimSpace(os.Getenv("CONFIG_REPO_NAME"))
-	if configRepoName == "" {
-		configRepoName = strings.TrimSpace(ycfg.ConfigRepoName)
-	}
-	if configRepoName == "" {
-		configRepoName = DefaultConfigRepoName
-	}
-
-	brainPRRegisterURL := strings.TrimSpace(os.Getenv("BRAIN_PR_REGISTER_URL"))
-	if brainPRRegisterURL == "" {
-		brainPRRegisterURL = strings.TrimSpace(ycfg.BrainPRRegisterURL)
-	}
-	if brainPRRegisterURL == "" {
-		brainPRRegisterURL = DefaultBrainPRRegisterURL
-	}
-
-	systemChannelID := strings.TrimSpace(os.Getenv("SYSTEM_CHANNEL_ID"))
-	if systemChannelID == "" {
-		systemChannelID = strings.TrimSpace(ycfg.SystemChannelID)
-	}
+	systemChannelID := resolveFirstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), ycfg.SystemChannelID)
 	if !systemChannelIDRegex.MatchString(systemChannelID) {
 		systemChannelID = ""
 	}
@@ -212,6 +183,7 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 	return &Config{
 		Port:               port,
 		DatabaseURL:        databaseURL,
+		BrainURL:           brainURL,
 		BrainLLMURL:        brainLLMURL,
 		CustomSkillsDir:    customSkillsDir,
 		GitHubPAT:          gitHubPAT,
@@ -219,11 +191,6 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		ConfigRepoName:     configRepoName,
 		BrainPRRegisterURL: brainPRRegisterURL,
 		SystemChannelID:    systemChannelID,
-		Ollama: OllamaConfig{
-			BaseURL:     ollamaBaseURL,
-			Model:       ollamaModel,
-			QueryPrefix: queryPrefix,
-			NumCtx:      numCtx,
-		},
+		Ollama:             resolveOllamaConfig(ycfg.Ollama),
 	}, nil
 }

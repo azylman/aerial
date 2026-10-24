@@ -31,11 +31,13 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	defer closeWarn(database, "database on shutdown")
 
 	store := NewSQLStore(database)
+	store.SetBrainURL(cfg.BrainURL)
 	ollama := NewOllamaClient(&cfg.Ollama)
 	publisher := NewGitHubSkillPublisher(GitHubSkillPublisherConfig{
 		Token:              cfg.GitHubPAT,
 		Owner:              cfg.ConfigRepoOwner,
 		Repo:               cfg.ConfigRepoName,
+		BrainURL:           cfg.BrainURL,
 		BrainPRRegisterURL: cfg.BrainPRRegisterURL,
 		SystemChannelID:    cfg.SystemChannelID,
 	})
