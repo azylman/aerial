@@ -515,7 +515,6 @@ type PRRegistryUpdater interface {
 	AtomicTransitionDeployFailed(ctx context.Context, repo string, prNumber int) (targetID string, updated bool, err error)
 	AtomicTransitionDeployFailedByJob(ctx context.Context, jobName string) (targetID string, prNumber int, mergeSHA, repo string, updated bool, err error)
 	ListDeployingPRs(ctx context.Context) ([]DeployingPR, error)
-	GetRecentChannelContext(ctx context.Context, targetID string, limit int) ([]ChannelMessageContext, error)
 	AdvanceVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisAdvancementResult, error)
 	ShouldSuppressVanadisDeployWake(ctx context.Context, repo string, prNumber int) (bool, error)
 	FailVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (bool, error)
@@ -527,7 +526,6 @@ type PRRegistryUpdater interface {
 	ClaimEventTriggers(ctx context.Context, source string, targets []string, eventType string) ([]ClaimedEventTrigger, error)
 }
 
-// ChannelMessageContext holds historical conversation snippets for prompt enrichment.
 // StatusWidgetChunk represents a chunk in a Vanadis build or a PR task.
 // Note: eri's BuildStatusWidgetComponents (services/eri/pkg/discord/widget.go) renders
 // chunk status badges, repo tags, titles, PR links, and runtime durations only; it does
@@ -552,12 +550,6 @@ type StatusWidgetRequest struct {
 	Status    string              `json:"status"`
 	Banner    string              `json:"banner,omitempty"`
 	Chunks    []StatusWidgetChunk `json:"chunks"`
-}
-
-type ChannelMessageContext struct {
-	AuthorName   string
-	Content      string
-	ResponseText string
 }
 
 type pgxQueryExecer interface {
@@ -1132,35 +1124,6 @@ func (r *PostgresPRRegistry) ListDeployingPRs(ctx context.Context) ([]DeployingP
 		prs = append(prs, p)
 	}
 	return prs, rows.Err()
-}
-
-func (r *PostgresPRRegistry) GetRecentChannelContext(ctx context.Context, targetID string, limit int) ([]ChannelMessageContext, error) {
-	targetID = strings.TrimSpace(targetID)
-	if targetID == "" {
-		return nil, nil
-	}
-	if limit <= 0 {
-		limit = 20
-	}
-	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	query := `SELECT author_name, content, COALESCE(response_text, '') FROM (SELECT author_name, content, response_text, created_at FROM messages WHERE thread_id = $1 ORDER BY created_at DESC LIMIT $2) sub ORDER BY created_at ASC;`
-	rows, err := r.pool.Query(qCtx, query, targetID, limit)
-	if err != nil {
-		return nil, fmt.Errorf("get recent channel context: %w", err)
-	}
-	defer rows.Close()
-
-	var results []ChannelMessageContext
-	for rows.Next() {
-		var m ChannelMessageContext
-		if err := rows.Scan(&m.AuthorName, &m.Content, &m.ResponseText); err != nil {
-			return nil, fmt.Errorf("scan recent channel context: %w", err)
-		}
-		results = append(results, m)
-	}
-	return results, rows.Err()
 }
 
 func (r *PostgresPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisAdvancementResult, error) {
@@ -2396,54 +2359,6 @@ func truncatePromptRunes(s string, maxRunes int) string {
 	return string(runes[:maxRunes]) + "... (truncated)"
 }
 
-func sanitizeChannelContextText(s string) string {
-	r := strings.NewReplacer("\r", "", "\n", " ", "</CHANNEL_CONTEXT>", "[CHANNEL_CONTEXT]", "<CHANNEL_CONTEXT>", "[CHANNEL_CONTEXT]")
-	return strings.TrimSpace(r.Replace(s))
-}
-
-func formatChannelContext(msgs []ChannelMessageContext) string {
-	if len(msgs) == 0 {
-		return "No recent channel messages found."
-	}
-
-	var bullets []string
-	for _, m := range msgs {
-		author := firstNonEmpty(strings.TrimSpace(m.AuthorName), "User")
-		if cleanContent := sanitizeChannelContextText(m.Content); cleanContent != "" {
-			bullets = append(bullets, fmt.Sprintf("- [%s]: %s", author, truncatePromptRunes(cleanContent, 300)))
-		}
-		if cleanResp := sanitizeChannelContextText(m.ResponseText); cleanResp != "" {
-			bullets = append(bullets, fmt.Sprintf("- [Aerial]: %s", truncatePromptRunes(cleanResp, 300)))
-		}
-	}
-
-	totalRunes := 0
-	truncated := false
-	var selectedBullets []string
-	for i := len(bullets) - 1; i >= 0; i-- {
-		b := bullets[i]
-		bRunes := len([]rune(b))
-		if totalRunes+bRunes > 4000 {
-			truncated = true
-			break
-		}
-		totalRunes += bRunes
-		selectedBullets = append(selectedBullets, b)
-	}
-
-	for i, j := 0, len(selectedBullets)-1; i < j; i, j = i+1, j-1 {
-		selectedBullets[i], selectedBullets[j] = selectedBullets[j], selectedBullets[i]
-	}
-
-	lines := []string{"Recent Discord channel context:", "<CHANNEL_CONTEXT>"}
-	if truncated {
-		lines = append(lines, "... (older context truncated)")
-	}
-	lines = append(lines, selectedBullets...)
-	lines = append(lines, "</CHANNEL_CONTEXT>")
-	return strings.Join(lines, "\n")
-}
-
 func (s *RouterServer) dispatchDeploymentSuccessPrompt(ctx context.Context, targetID, jobName, repo, commitSHA string, prNum int, refID string) error {
 	if s.dispatcher == nil || !IsValidDiscordSnowflake(targetID) {
 		return nil
@@ -2460,15 +2375,6 @@ func (s *RouterServer) dispatchDeploymentSuccessPrompt(ctx context.Context, targ
 		return nil
 	}
 
-	var contextMsgs []ChannelMessageContext
-	if s.registry != nil {
-		if msgs, err := s.registry.GetRecentChannelContext(ctx, targetID, 20); err != nil {
-			log.Printf("[webhooks-router] [registry] warning fetching channel context for %s: %v", targetID, err)
-		} else {
-			contextMsgs = msgs
-		}
-	}
-
 	repoPart := ""
 	if repo != "" {
 		repoPart = " on " + repo
@@ -2478,11 +2384,11 @@ func (s *RouterServer) dispatchDeploymentSuccessPrompt(ctx context.Context, targ
 		refPart = ", ref: " + refID
 	}
 	header := fmt.Sprintf("Continuous Delivery deployment completed for job %s%s (PR #%d, commit: %s%s).", jobName, repoPart, prNum, commitSHA, refPart)
-	lines := []string{header}
-	if ctxStr := formatChannelContext(contextMsgs); ctxStr != "" {
-		lines = append(lines, "", ctxStr)
+	lines := []string{
+		header,
+		"",
+		"Directive: Confirm the deployment and suggest logical next steps, follow-up verification, or related tasks concisely.",
 	}
-	lines = append(lines, "", "Directive: Based on the recent conversation context above, suggest logical next steps if any work or follow-ups remain; otherwise, celebrate completion.")
 	return s.dispatchAlertWithPrompt(ctx, targetID, "deploy_success", "", strings.Join(lines, "\n"))
 }
 

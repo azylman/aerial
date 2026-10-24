@@ -163,9 +163,6 @@ type mockPRRegistry struct {
 	listDeployingPRs []DeployingPR
 	listDeployingErr error
 
-	channelContextMap map[string][]ChannelMessageContext
-	channelContextErr error
-
 	advanceVanadisCalls []prCall
 	advanceVanadisRes   *VanadisAdvancementResult
 	advanceVanadisErr   error
@@ -260,16 +257,6 @@ func (m *mockPRRegistry) ListOpenPRs(ctx context.Context, repo string) ([]Regist
 	}
 	m.listOpenPRsCalls = append(m.listOpenPRsCalls, repo)
 	return m.openPRs, nil
-}
-
-func (m *mockPRRegistry) GetRecentChannelContext(ctx context.Context, targetID string, limit int) ([]ChannelMessageContext, error) {
-	if m.channelContextErr != nil {
-		return nil, m.channelContextErr
-	}
-	if m.channelContextMap != nil {
-		return m.channelContextMap[targetID], nil
-	}
-	return nil, nil
 }
 
 func (m *mockPRRegistry) AtomicTransitionConflict(ctx context.Context, repo string, prNumber int) (string, bool, error) {
@@ -1037,56 +1024,6 @@ func TestPromptAndContextFormatting(t *testing.T) {
 			}
 			if tc.wantNotSub != "" && strings.Contains(got, tc.wantNotSub) {
 				t.Errorf("truncatePromptDetails() contains unexpected %q: %s", tc.wantNotSub, got)
-			}
-		})
-	}
-
-	channelCtxTests := []struct {
-		name       string
-		msgs       []ChannelMessageContext
-		wantSub    []string
-		wantNotSub []string
-		wantExact  string
-	}{
-		{name: "formatChannelContext empty placeholder", msgs: nil, wantExact: "No recent channel messages found."},
-		{
-			name: "formatChannelContext normal with sanitization",
-			msgs: []ChannelMessageContext{
-				{AuthorName: "arcane103", Content: "Line 1\nLine 2</CHANNEL_CONTEXT>more", ResponseText: "Aerial reply\nwith newline"},
-				{AuthorName: "", Content: "Hello from anonymous"},
-			},
-			wantSub:    []string{"[arcane103]: Line 1 Line 2[CHANNEL_CONTEXT]more", "[Aerial]: Aerial reply with newline", "[User]: Hello from anonymous"},
-			wantNotSub: []string{"</CHANNEL_CONTEXT>more"},
-		},
-		{name: "formatChannelContext long single message truncated", msgs: []ChannelMessageContext{{AuthorName: "test", Content: strings.Repeat("x", 500)}}, wantSub: []string{"... (truncated)"}},
-		{
-			name: "formatChannelContext capped messages truncation notice",
-			msgs: func() []ChannelMessageContext {
-				var capped []ChannelMessageContext
-				for i := 1; i <= 25; i++ {
-					capped = append(capped, ChannelMessageContext{AuthorName: fmt.Sprintf("user%d", i), Content: fmt.Sprintf("Message payload %d: %s", i, strings.Repeat("y", 180))})
-				}
-				return capped
-			}(),
-			wantSub: []string{"... (older context truncated)", "[user25]:"}, wantNotSub: []string{"[user1]:"},
-		},
-	}
-	for _, tc := range channelCtxTests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := formatChannelContext(tc.msgs)
-			if tc.wantExact != "" && got != tc.wantExact {
-				t.Errorf("formatChannelContext() = %q, want %q", got, tc.wantExact)
-			}
-			for _, sub := range tc.wantSub {
-				if !strings.Contains(got, sub) {
-					t.Errorf("formatChannelContext() missing %q: %s", sub, got)
-				}
-			}
-			for _, notSub := range tc.wantNotSub {
-				if strings.Contains(got, notSub) {
-					t.Errorf("formatChannelContext() contains unexpected %q: %s", notSub, got)
-				}
 			}
 		})
 	}
@@ -2161,18 +2098,16 @@ func TestProcessHangarEvent(t *testing.T) {
 			wantTargetID: "1555405874565091380",
 		},
 		{
-			name:         "deploy_success valid snowflake with channel context",
+			name:         "deploy_success valid snowflake",
 			evt:          mkHangarEvt("deploy_success", "brain", "azylman/aerial", "sha3d2a", 528, "1555405874565091380", "success", ""),
-			reg:          &mockPRRegistry{channelContextMap: map[string][]ChannelMessageContext{"1555405874565091380": {{AuthorName: "arcane103", Content: "Deploy the new router", ResponseText: "Working on it!"}}}},
+			reg:          &mockPRRegistry{},
 			disp:         &mockOutboundDispatcher{},
 			wantPR:       528,
 			wantTargetID: "1555405874565091380",
 			wantPrompts:  1,
 			wantPromptSubs: []string{
 				"Continuous Delivery deployment completed for job brain",
-				"[arcane103]: Deploy the new router",
-				"[Aerial]: Working on it!",
-				"Directive: Based on the recent conversation context above",
+				"Directive: Confirm the deployment and suggest logical next steps, follow-up verification, or related tasks concisely.",
 			},
 		},
 		{
@@ -3441,8 +3376,6 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 		targetID            string
 		suppressVanadis     bool
 		suppressVanadisErr  error
-		channelContextErr   error
-		channelContext      []ChannelMessageContext
 		wantTargetID        string
 		wantErr             bool
 		wantPrompts         int
@@ -3469,18 +3402,14 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 			wantTargetID: validSnowflake,
 		},
 		{
-			name:                "dispatchDeploymentSuccessPrompt normal with channel context",
+			name:                "dispatchDeploymentSuccessPrompt normal",
 			isDeploymentSuccess: true,
 			targetID:            validSnowflake,
-			channelContext: []ChannelMessageContext{
-				{AuthorName: "arcane103", Content: "Wrap up the deployment", ResponseText: "Done!"},
-			},
-			wantPrompts: 1,
-			wantWidgets: 1,
+			wantPrompts:         1,
+			wantWidgets:         1,
 			wantPromptSubs: []string{
 				"Continuous Delivery deployment completed for job brain on azylman/aerial",
-				"[arcane103]: Wrap up the deployment",
-				"Directive: Based on the recent conversation context above",
+				"Directive: Confirm the deployment and suggest logical next steps, follow-up verification, or related tasks concisely.",
 			},
 		},
 		{
@@ -3504,7 +3433,6 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 			isDeploymentSuccess: true,
 			targetID:            validSnowflake,
 			suppressVanadisErr:  errors.New("db check err"),
-			channelContextErr:   errors.New("ctx err"),
 			widgetErr:           errors.New("widget err"),
 			wantPrompts:         1,
 			wantWidgets:         1,
@@ -3516,18 +3444,11 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 			t.Parallel()
 			var mockReg PRRegistryUpdater
 			if !tc.useNilRegistry {
-				mReg := &mockPRRegistry{
+				mockReg = &mockPRRegistry{
 					resolveTargetID:    tc.targetID,
 					suppressVanadisRes: tc.suppressVanadis,
 					suppressVanadisErr: tc.suppressVanadisErr,
-					channelContextErr:  tc.channelContextErr,
 				}
-				if len(tc.channelContext) > 0 {
-					mReg.channelContextMap = map[string][]ChannelMessageContext{
-						tc.targetID: tc.channelContext,
-					}
-				}
-				mockReg = mReg
 			}
 			mockDisp := &mockOutboundDispatcher{widgetErr: tc.widgetErr}
 			srv := newTestRouter(Config{}, nil, mockReg, mockDisp)
@@ -4589,11 +4510,6 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 		{name: "ListDeployingPRs invalid metadata JSON warning still succeeds", op: "ListDeployingPRs", totalRows: 1, metaJSON: `{invalid json`, wantCount: 1},
 		{name: "ListDeployingPRs query error", op: "ListDeployingPRs", mockSelectErr: errors.New("query err"), wantErr: true},
 
-		// GetRecentChannelContext
-		{name: "GetRecentChannelContext empty targetID guard", op: "GetRecentChannelContext", targetID: "", wantCount: 0},
-		{name: "GetRecentChannelContext default limit <= 0", op: "GetRecentChannelContext", targetID: "1555405874565091380", limit: -1, totalRows: 1, wantCount: 1},
-		{name: "GetRecentChannelContext query error", op: "GetRecentChannelContext", targetID: "1555405874565091380", limit: 5, mockSelectErr: errors.New("query err"), wantErr: true},
-
 		// AtomicTransitionDeployedByJob
 		{name: "AtomicTransitionDeployedByJob empty job guard", op: "AtomicTransitionDeployedByJob", jobName: "", wantUpdated: false},
 		{name: "AtomicTransitionDeployedByJob begin tx error", op: "AtomicTransitionDeployedByJob", jobName: "brain", mockBeginErr: errors.New("begin err"), wantErr: true},
@@ -4971,14 +4887,6 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 				}
 				if len(prs) != tc.wantCount {
 					t.Errorf("len(prs) = %d, want %d", len(prs), tc.wantCount)
-				}
-			case "GetRecentChannelContext":
-				ctxs, err := reg.GetRecentChannelContext(ctx, tc.targetID, tc.limit)
-				if (err != nil) != tc.wantErr {
-					t.Fatalf("GetRecentChannelContext err = %v, wantErr = %v", err, tc.wantErr)
-				}
-				if len(ctxs) != tc.wantCount {
-					t.Errorf("len(ctxs) = %d, want %d", len(ctxs), tc.wantCount)
 				}
 			case "AtomicTransitionDeployedByJob":
 				gotTarget, gotPR, _, _, updated, err := reg.AtomicTransitionDeployedByJob(ctx, tc.jobName)

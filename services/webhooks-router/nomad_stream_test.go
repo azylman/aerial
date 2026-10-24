@@ -111,20 +111,19 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 	validRepo := "azylman/aerial"
 
 	tests := []struct {
-		name              string
-		streamLines       []string
-		deploymentsJSON   string
-		allocationsJSON   string
-		jobSpecJSON       string
-		reg               *mockPRRegistry
-		channelContextMap map[string][]ChannelMessageContext
-		systemChannelID   string
-		wantDeployedJobs  []string
-		wantFailedJobs    []string
-		wantPrompts       int
-		wantPromptSubstr  []string
-		wantDMs           int
-		wantDMSubstr      string
+		name             string
+		streamLines      []string
+		deploymentsJSON  string
+		allocationsJSON  string
+		jobSpecJSON      string
+		reg              *mockPRRegistry
+		systemChannelID  string
+		wantDeployedJobs []string
+		wantFailedJobs   []string
+		wantPrompts      int
+		wantPromptSubstr []string
+		wantDMs          int
+		wantDMSubstr     string
 	}{
 		{
 			name:             "heartbeat and deployment success",
@@ -134,20 +133,17 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 			reg:              mkDeployedReg(validThread, 552, validSHA, validRepo, true),
 			wantDeployedJobs: []string{"brain"},
 			wantPrompts:      1,
-			wantPromptSubstr: []string{"Continuous Delivery deployment completed for job brain", "Directive: Based on the recent conversation context above"},
+			wantPromptSubstr: []string{"Continuous Delivery deployment completed for job brain", "Directive: Confirm the deployment and suggest logical next steps, follow-up verification, or related tasks concisely."},
 		},
 		{
-			name:            "allocation running with channel context",
-			streamLines:     []string{`{"Index":1002,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":{"Allocation":{"ID":"alloc-999","JobID":"webhooks-router","DesiredStatus":"run","ClientStatus":"running"}}}]}`},
-			deploymentsJSON: defaultHealthyDeploys,
-			allocationsJSON: defaultHealthyAllocs,
-			reg:             mkDeployedReg(validThread, 552, validSHA, validRepo, true),
-			channelContextMap: map[string][]ChannelMessageContext{
-				validThread: {{AuthorName: "arcane103", Content: "Ship it", ResponseText: "Shipping!"}},
-			},
+			name:             "allocation running",
+			streamLines:      []string{`{"Index":1002,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":{"Allocation":{"ID":"alloc-999","JobID":"webhooks-router","DesiredStatus":"run","ClientStatus":"running"}}}]}`},
+			deploymentsJSON:  defaultHealthyDeploys,
+			allocationsJSON:  defaultHealthyAllocs,
+			reg:              mkDeployedReg(validThread, 552, validSHA, validRepo, true),
 			wantDeployedJobs: []string{"webhooks-router"},
 			wantPrompts:      1,
-			wantPromptSubstr: []string{"Continuous Delivery deployment completed for job webhooks-router", "[arcane103]: Ship it", "[Aerial]: Shipping!", "Directive: Based on the recent conversation context above"},
+			wantPromptSubstr: []string{"Continuous Delivery deployment completed for job webhooks-router", "Directive: Confirm the deployment and suggest logical next steps, follow-up verification, or related tasks concisely."},
 		},
 		{
 			name:             "deployment failure dispatches DM and remediation prompt",
@@ -341,10 +337,6 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-
-			if tt.channelContextMap != nil && tt.reg != nil {
-				tt.reg.channelContextMap = tt.channelContextMap
-			}
 
 			streamData := strings.Join(tt.streamLines, "\n") + "\n"
 			nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
