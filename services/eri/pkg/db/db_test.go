@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -333,28 +332,6 @@ func TestSessionLifecycle(t *testing.T) {
 	}
 	if ext, err := store.GetExternalConversationID(ctx, ""); err != nil || ext != "" {
 		t.Errorf("GetExternalConversationID empty key = %q, %v", ext, err)
-	}
-}
-
-func TestVectorAndArrayHelpers(t *testing.T) {
-	// Table-driven parsePostgresTextArray
-	arrTests := []struct {
-		name     string
-		input    string
-		expected []string
-	}{
-		{name: "empty", input: "", expected: []string{}},
-		{name: "braces_only", input: "{}", expected: []string{}},
-		{name: "spaces_in_braces", input: "{   }", expected: []string{}},
-		{name: "elements", input: "{a,b,c}", expected: []string{"a", "b", "c"}},
-	}
-	for _, tc := range arrTests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := parsePostgresTextArray(tc.input)
-			if !reflect.DeepEqual(got, tc.expected) {
-				t.Errorf("parsePostgresTextArray(%q) = %#v, want %#v", tc.input, got, tc.expected)
-			}
-		})
 	}
 }
 

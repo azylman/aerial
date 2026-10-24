@@ -166,7 +166,7 @@ func (s *SQLStore) InsertMessage(ctx context.Context, msg Message) (err error) {
 	if msg.UpdatedAt.IsZero() {
 		msg.UpdatedAt = now
 	}
-	_, err = s.execWithTimeout(ctx, 5*time.Second, `INSERT INTO messages (id, thread_id, guild_id, author_id, author_name, content, summary, status, retry_count, restart_count, effort, error_message, response_text, schedule_run_id, metadata, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) ON CONFLICT (id) DO NOTHING;`,
+	err = s.execWithTimeout(ctx, `INSERT INTO messages (id, thread_id, guild_id, author_id, author_name, content, summary, status, retry_count, restart_count, effort, error_message, response_text, schedule_run_id, metadata, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) ON CONFLICT (id) DO NOTHING;`,
 		msg.ID, msg.ThreadID, msg.GuildID, msg.AuthorID, msg.AuthorName,
 		msg.Content, msg.Summary, msg.Status, msg.RetryCount, msg.RestartCount,
 		msg.Effort, msg.ErrorMessage, msg.ResponseText, msg.ScheduleRunID,
@@ -214,8 +214,7 @@ func (s *SQLStore) execMessageUpdate(ctx context.Context, id, query string, args
 	if strings.TrimSpace(id) == "" {
 		return fmt.Errorf("message id cannot be empty")
 	}
-	_, err := s.execWithTimeout(ctx, 5*time.Second, query, args...)
-	return err
+	return s.execWithTimeout(ctx, query, args...)
 }
 
 func (s *SQLStore) UpdateMessageStatus(ctx context.Context, id, status, errorMsg string) error {
