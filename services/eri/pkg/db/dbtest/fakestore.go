@@ -343,6 +343,21 @@ func (f *FakeStore) GetRecentThreadMessages(ctx context.Context, threadID string
 	})
 }
 
+func (f *FakeStore) HasActiveThreadTurn(ctx context.Context, threadID string) (bool, error) {
+	return withFakeLock(f, "HasActiveThreadTurn", func() (bool, error) {
+		trimmed := strings.TrimSpace(threadID)
+		if trimmed == "" {
+			return false, nil
+		}
+		for _, m := range f.messages {
+			if m != nil && m.ThreadID == trimmed && (m.Status == db.StatusPending || m.Status == db.StatusProcessing) {
+				return true, nil
+			}
+		}
+		return false, nil
+	})
+}
+
 func (f *FakeStore) SetSessionUpdatedAt(threadID string, t time.Time) {
 	f.withLock(func() {
 		if s := f.sessions[threadID]; s != nil {

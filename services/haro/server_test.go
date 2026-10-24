@@ -1361,3 +1361,71 @@ func TestHandleClaimEventTriggers_Table(t *testing.T) {
 		})
 	}
 }
+
+func TestServer_HeartbeatSkipping_MockHTTPBrainServer(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+
+	var receivedReq PromptDispatchRequest
+	mockBrainServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/prompt" || r.Method != http.MethodPost {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&receivedReq); err != nil {
+			http.Error(w, "bad json", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"skipped_active","channel_id":"123456789012345678","session_id":"heartbeat-hb-skip-1"}`))
+	}))
+	defer mockBrainServer.Close()
+
+	now := time.Now().UTC()
+	hb := HeartbeatSchedule{
+		ID:          "hb-skip-1",
+		TargetID:    "123456789012345678",
+		TitlePrefix: "Heartbeat Test",
+		CronExpr:    "*/5 * * * *",
+		Prompt:      "Check system status",
+		Timezone:    "UTC",
+		Effort:      "low",
+		NextRunAt:   now.Add(-1 * time.Minute),
+		Enabled:     true,
+		CreatedAt:   now.Add(-1 * time.Hour),
+	}
+	if err := InsertHeartbeatSchedule(ctx, db, hb); err != nil {
+		t.Fatalf("InsertHeartbeatSchedule failed: %v", err)
+	}
+
+	dispatcher := NewHTTPPromptDispatcher(mockBrainServer.URL)
+	ticker := NewTicker(db, dispatcher, 30*time.Second)
+
+	ticker.EvaluateDueSchedules(ctx, now)
+
+	if !receivedReq.SkipIfActive {
+		t.Errorf("expected receivedReq.SkipIfActive to be true")
+	}
+	if receivedReq.SessionID != "heartbeat-hb-skip-1" {
+		t.Errorf("expected receivedReq.SessionID to be 'heartbeat-hb-skip-1', got %q", receivedReq.SessionID)
+	}
+
+	// Verify next_run_at was advanced into the future
+	updatedHB, err := GetHeartbeatSchedule(ctx, db, "hb-skip-1")
+	if err != nil {
+		t.Fatalf("GetHeartbeatSchedule failed: %v", err)
+	}
+	if !updatedHB.NextRunAt.After(now) {
+		t.Errorf("expected next_run_at %v to be after %v", updatedHB.NextRunAt, now)
+	}
+
+	// Verify zero schedule_runs rows created
+	var runCount int
+	if err := db.QueryRow("SELECT COUNT(*) FROM schedule_runs WHERE schedule_id = 'hb-skip-1'").Scan(&runCount); err != nil {
+		t.Fatalf("query schedule_runs failed: %v", err)
+	}
+	if runCount != 0 {
+		t.Errorf("expected 0 schedule_runs, got %d", runCount)
+	}
+}

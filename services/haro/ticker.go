@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -17,14 +18,15 @@ import (
 )
 
 type PromptDispatchRequest struct {
-	Prompt    string `json:"prompt"`
-	ChannelID string `json:"channel_id,omitempty"`
-	SessionID string `json:"session_id,omitempty"`
-	Title     string `json:"title,omitempty"`
-	MessageID string `json:"message_id,omitempty"`
-	Effort    string `json:"effort,omitempty"`
-	Silent    bool   `json:"silent,omitempty"`
-	Ephemeral *bool  `json:"ephemeral,omitempty"`
+	Prompt       string `json:"prompt"`
+	ChannelID    string `json:"channel_id,omitempty"`
+	SessionID    string `json:"session_id,omitempty"`
+	Title        string `json:"title,omitempty"`
+	MessageID    string `json:"message_id,omitempty"`
+	Effort       string `json:"effort,omitempty"`
+	Silent       bool   `json:"silent,omitempty"`
+	Ephemeral    *bool  `json:"ephemeral,omitempty"`
+	SkipIfActive bool   `json:"skip_if_active,omitempty"`
 }
 
 type PromptDispatchResponse struct {
@@ -404,37 +406,30 @@ func (t *Ticker) processDueHeartbeat(ctx context.Context, hb HeartbeatSchedule, 
 		return
 	}
 
-	threadID := "heartbeat-" + hb.ID
-	active, err := HasActiveThreadTurn(ctx, t.db, threadID)
-	if err != nil {
-		log.Printf("[Haro Ticker] Error checking active thread turn for %s: %v", threadID, err)
-	}
-	if active {
-		log.Printf("[Haro Ticker] Heartbeat %s has active turn in thread %s; coalescing and advancing next_run_at", hb.ID, threadID)
-		if advErr := AdvanceHeartbeatNextRun(ctx, t.db, hb.ID, nextRun); advErr != nil {
-			log.Printf("[Haro Ticker] Error advancing heartbeat %s next_run_at: %v", hb.ID, advErr)
-		}
-		return
-	}
-
 	if advErr := AdvanceHeartbeatNextRun(ctx, t.db, hb.ID, nextRun); advErr != nil {
 		log.Printf("[Haro Ticker] Error advancing heartbeat %s next_run_at: %v", hb.ID, advErr)
 		return
 	}
 
+	sessionKey := "heartbeat-" + hb.ID
 	runID := uuid.NewString()
 	wrappedPrompt := BuildHeartbeatPrompt(hb)
-	req := PromptDispatchRequest{
-		Prompt:    wrappedPrompt,
-		ChannelID: hb.TargetID,
-		SessionID: "heartbeat-" + hb.ID,
-		Title:     hb.TitlePrefix,
-		MessageID: runID,
-		Effort:    hb.Effort,
-		Silent:    true,
-		Ephemeral: boolPtr(false),
+	req := BrainPromptRequest{
+		Prompt:       wrappedPrompt,
+		ChannelID:    hb.TargetID,
+		SessionID:    sessionKey,
+		Title:        hb.TitlePrefix,
+		MessageID:    runID,
+		Effort:       hb.Effort,
+		Silent:       true,
+		Ephemeral:    boolPtr(false),
+		SkipIfActive: true,
 	}
 	resp, dispatchErr := t.dispatcher.DispatchPrompt(ctx, req)
+	if dispatchErr == nil && resp.Status == "skipped_active" {
+		slog.Info("Skipping heartbeat run: thread has an active turn in progress", "id", hb.ID, "target_id", hb.TargetID, "thread_id", sessionKey)
+		return
+	}
 	completedAt := time.Now().UTC()
 	durationMs := completedAt.Sub(now).Milliseconds()
 	status := "completed"

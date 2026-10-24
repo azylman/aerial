@@ -45,15 +45,16 @@ import (
 )
 
 type PromptRequest struct {
-	Prompt    string `json:"prompt"`
-	ChannelID string `json:"channel_id"`
-	SessionID string `json:"session_id,omitempty"`
-	Title     string `json:"title,omitempty"`
-	MessageID string `json:"message_id,omitempty"`
-	Model     string `json:"model,omitempty"`
-	Effort    string `json:"effort,omitempty"`
-	Silent    bool   `json:"silent,omitempty"`
-	Ephemeral *bool  `json:"ephemeral,omitempty"`
+	Prompt       string `json:"prompt"`
+	ChannelID    string `json:"channel_id"`
+	SessionID    string `json:"session_id,omitempty"`
+	Title        string `json:"title,omitempty"`
+	MessageID    string `json:"message_id,omitempty"`
+	Model        string `json:"model,omitempty"`
+	Effort       string `json:"effort,omitempty"`
+	Silent       bool   `json:"silent,omitempty"`
+	Ephemeral    *bool  `json:"ephemeral,omitempty"`
+	SkipIfActive bool   `json:"skip_if_active,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, data any) {
@@ -87,6 +88,32 @@ func validateSnowflakeID(w http.ResponseWriter, id, field string) bool {
 	return true
 }
 
+func resolvePromptEffort(model, effort string) string {
+	if effort != "" {
+		return effort
+	}
+	modelLower := strings.ToLower(model)
+	if strings.Contains(modelLower, "medium") {
+		return "medium"
+	}
+	if strings.Contains(modelLower, "flash") {
+		return "low"
+	}
+	return ""
+}
+
+func checkPromptActiveTurn(ctx context.Context, store db.Store, skipIfActive bool, sessionID, channelID string) (bool, string, error) {
+	if !skipIfActive || store == nil {
+		return false, "", nil
+	}
+	checkID := sessionID
+	if checkID == "" {
+		checkID = channelID
+	}
+	active, err := store.HasActiveThreadTurn(ctx, checkID)
+	return active, checkID, err
+}
+
 func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -109,15 +136,7 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 		}
 
 		model := strings.TrimSpace(req.Model)
-		effort := strings.TrimSpace(req.Effort)
-		if effort == "" {
-			modelLower := strings.ToLower(model)
-			if strings.Contains(modelLower, "medium") {
-				effort = "medium"
-			} else if strings.Contains(modelLower, "flash") {
-				effort = "low"
-			}
-		}
+		effort := resolvePromptEffort(model, strings.TrimSpace(req.Effort))
 		if _, err := queue.ResolvePoolKey(req.Ephemeral, effort); err != nil {
 			writeErr(w, http.StatusBadRequest, "Invalid payload: "+err.Error())
 			return
@@ -129,7 +148,24 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 				writeErr(w, http.StatusBadRequest, "Invalid payload: 'session_id' must be a valid alphanumeric/hyphen/underscore key")
 				return
 			}
-		} else {
+		}
+
+		active, checkID, err := checkPromptActiveTurn(r.Context(), store, req.SkipIfActive, sessionID, channelID)
+		if err != nil {
+			log.Printf("[HTTP] Failed to check active turn for %s: %v", checkID, err)
+			writeErr(w, http.StatusInternalServerError, "Failed to check active turn")
+			return
+		}
+		if active {
+			writeJSON(w, http.StatusOK, map[string]string{
+				"status":     "skipped_active",
+				"channel_id": channelID,
+				"session_id": checkID,
+			})
+			return
+		}
+
+		if sessionID == "" {
 			if !req.Silent && pool != nil {
 				channelID = pool.ResolveTargetThread(channelID, strings.TrimSpace(req.Title), req.Prompt, time.Now().UTC())
 			}

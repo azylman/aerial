@@ -159,6 +159,59 @@ func TestHandlePromptValidation(t *testing.T) {
 	}
 }
 
+func TestHandlePrompt_SkipIfActive(t *testing.T) {
+	activeStore := dbtest.NewFakeStore()
+	_ = activeStore.InsertMessage(context.Background(), db.Message{
+		ID:       "msg-active",
+		ThreadID: "1542423172400291873",
+		Status:   db.StatusProcessing,
+	})
+
+	inactiveStore := dbtest.NewFakeStore()
+
+	errStore := dbtest.NewFakeStore()
+	errStore.FailNext("HasActiveThreadTurn", errors.New("simulated db failure"))
+
+	tests := []struct {
+		name       string
+		store      db.Store
+		body       string
+		wantStatus int
+		wantSubstr string
+	}{
+		{
+			name:       "active turn exists returns 200 skipped_active",
+			store:      activeStore,
+			body:       `{"prompt":"check","channel_id":"1542423172400291873","skip_if_active":true}`,
+			wantStatus: http.StatusOK,
+			wantSubstr: `"status":"skipped_active"`,
+		},
+		{
+			name:       "no active turn exists returns 202 accepted",
+			store:      inactiveStore,
+			body:       `{"prompt":"check","channel_id":"1542423172400291873","skip_if_active":true}`,
+			wantStatus: http.StatusAccepted,
+			wantSubstr: `"status":"accepted"`,
+		},
+		{
+			name:       "store error returns 500",
+			store:      errStore,
+			body:       `{"prompt":"check","channel_id":"1542423172400291873","skip_if_active":true}`,
+			wantStatus: http.StatusInternalServerError,
+			wantSubstr: "Failed to check active turn",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			w := runHTTP(handlePrompt(tc.store, nil), http.MethodPost, "/prompt", strings.NewReader(tc.body))
+			if w.Code != tc.wantStatus || !strings.Contains(w.Body.String(), tc.wantSubstr) {
+				t.Fatalf("got status=%d body=%q, want status=%d substr=%q", w.Code, w.Body.String(), tc.wantStatus, tc.wantSubstr)
+			}
+		})
+	}
+}
+
 func TestHandleDirectMessage(t *testing.T) {
 	restErrPool := queue.New(nil, queue.WorkerPoolConfig{
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {

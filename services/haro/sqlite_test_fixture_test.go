@@ -86,13 +86,6 @@ func initTestSQLite(trimmed string) (*sql.DB, error) {
 	);
 	CREATE INDEX IF NOT EXISTS idx_heartbeat_schedules_next_run ON heartbeat_schedules(enabled, next_run_at);
 
-	CREATE TABLE IF NOT EXISTS messages (
-		id TEXT PRIMARY KEY,
-		thread_id TEXT NOT NULL DEFAULT '',
-		status TEXT NOT NULL DEFAULT 'PENDING'
-	);
-	CREATE INDEX IF NOT EXISTS idx_messages_thread_status ON messages(thread_id, status);
-
 	CREATE TABLE IF NOT EXISTS schedule_runs (
 		id TEXT PRIMARY KEY,
 		schedule_id TEXT NOT NULL,

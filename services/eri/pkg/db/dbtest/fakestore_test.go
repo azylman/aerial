@@ -42,6 +42,7 @@ func assertStoreUnavailable(t *testing.T, s db.Store) {
 	requireErr(t, c1(s.ClaimPendingMessage(ctx, "id")), "ClaimPendingMessage")
 	requireErr(t, c1(s.GetActiveRecentThreadIDs(ctx, time.Hour)), "GetActiveRecentThreadIDs")
 	requireErr(t, c1(s.GetRecentThreadMessages(ctx, "t", 10)), "GetRecentThreadMessages")
+	requireErr(t, c1(s.HasActiveThreadTurn(ctx, "t")), "HasActiveThreadTurn")
 	requireErr(t, c1(s.GetActiveTasks(ctx)), "GetActiveTasks")
 	requireErr(t, c1(s.GetSessionID(ctx, "t")), "GetSessionID")
 	requireErr(t, s.SaveSessionID(ctx, "t", "s"), "SaveSessionID")
@@ -54,6 +55,39 @@ func assertStoreUnavailable(t *testing.T, s db.Store) {
 	requireErr(t, c1(s.GetSessionActivityStats(ctx, "t")), "GetSessionActivityStats")
 	requireErr(t, c1(s.GetExternalConversationID(ctx, "test")), "GetExternalConversationID")
 	requireErr(t, c1(s.FindUnrotatedSessions(ctx, 8)), "FindUnrotatedSessions")
+}
+
+func TestFakeStore_HasActiveThreadTurn(t *testing.T) {
+	s := NewFakeStore()
+	ctx := context.Background()
+
+	active, err := s.HasActiveThreadTurn(ctx, "")
+	if err != nil || active {
+		t.Fatalf("expected false, nil for empty threadID, got %v, %v", active, err)
+	}
+
+	active, err = s.HasActiveThreadTurn(ctx, "th-1")
+	if err != nil || active {
+		t.Fatalf("expected false, nil for empty store, got %v, %v", active, err)
+	}
+
+	mustOK(t, s.InsertMessage(ctx, db.Message{ID: "m1", ThreadID: "th-1", Status: db.StatusPending}), "InsertMessage")
+	active, err = s.HasActiveThreadTurn(ctx, "th-1")
+	if err != nil || !active {
+		t.Fatalf("expected true, nil for pending message, got %v, %v", active, err)
+	}
+
+	mustOK(t, s.UpdateMessageStatus(ctx, "m1", db.StatusProcessing, ""), "UpdateMessageStatus")
+	active, err = s.HasActiveThreadTurn(ctx, "th-1")
+	if err != nil || !active {
+		t.Fatalf("expected true, nil for processing message, got %v, %v", active, err)
+	}
+
+	mustOK(t, s.UpdateMessageStatus(ctx, "m1", db.StatusCompleted, ""), "UpdateMessageStatus")
+	active, err = s.HasActiveThreadTurn(ctx, "th-1")
+	if err != nil || active {
+		t.Fatalf("expected false, nil for completed message, got %v, %v", active, err)
+	}
 }
 
 func TestFakeStoreLifecycleAndFailNext(t *testing.T) {
