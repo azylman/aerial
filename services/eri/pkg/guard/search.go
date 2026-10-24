@@ -137,9 +137,14 @@ func tokenizeQuoteAware(sub string) []string {
 	return tokens
 }
 
-// CheckSearch evaluates search commands in run_command against unconstrained root, missing maxdepth,
-// and binary scanning invariants.
+// CheckSearch evaluates search and psql commands in run_command against unconstrained root, missing maxdepth,
+// binary scanning, and SQL context-bloat invariants.
 func CheckSearch(toolName string, args ToolArgs) *Decision {
+	return CheckSearchWithSQL(toolName, args, DefaultSQLDescriber())
+}
+
+// CheckSearchWithSQL evaluates search and psql commands using the provided SQLDescriber.
+func CheckSearchWithSQL(toolName string, args ToolArgs, describer SQLDescriber) *Decision {
 	normalizedName := normalizeToolName(toolName)
 	if normalizedName != "run_command" && normalizedName != "grep_search" && normalizedName != "find_by_name" {
 		return &Decision{Decision: DecisionAllow}
@@ -176,7 +181,8 @@ func CheckSearch(toolName string, args ToolArgs) *Decision {
 		}
 	}
 
-	return &Decision{Decision: DecisionAllow}
+	// 3. Evaluate psql invocations (schema validation, SELECT * ban, LIMIT gate, and -A shaping)
+	return inspectPsqlPipeline(args.CommandLine, describer)
 }
 
 func isGrepOrSearchBinary(bin string) bool {

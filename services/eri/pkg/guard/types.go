@@ -24,8 +24,9 @@ const (
 
 // Decision is the JSON payload returned to Antigravity.
 type Decision struct {
-	Decision DecisionType `json:"decision"`
-	Reason   string       `json:"reason,omitempty"`
+	Decision  DecisionType   `json:"decision"`
+	Reason    string         `json:"reason,omitempty"`
+	Overwrite map[string]any `json:"overwrite,omitempty"`
 }
 
 // Payload is the root JSON structure received from Antigravity via stdin.

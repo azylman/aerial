@@ -1,8 +1,62 @@
 package guard
 
 import (
+	"context"
+	"errors"
+	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
+
+type fakeSQLCatalogConn struct {
+	cols        []SQLColumn
+	explainJSON string
+	prepareErr  error
+	tableMeta   map[uint32][2]string
+	relCounts   map[string]string
+	publicCols  [][3]string
+	catalogErr  error
+}
+
+func (f *fakeSQLCatalogConn) PrepareAndExplain(_ context.Context, _ string) ([]SQLColumn, []byte, error) {
+	if f.prepareErr != nil {
+		return nil, nil, f.prepareErr
+	}
+	return f.cols, []byte(f.explainJSON), nil
+}
+
+func (f *fakeSQLCatalogConn) QueryCatalog(_ context.Context, sqlStr string, args ...any) ([][]string, error) {
+	if f.catalogErr != nil {
+		return nil, f.catalogErr
+	}
+	if strings.Contains(sqlStr, "WHERE c.oid = $1") && len(args) == 1 {
+		if oid, ok := args[0].(uint32); ok {
+			if m, found := f.tableMeta[oid]; found {
+				return [][]string{{m[0], m[1]}}, nil
+			}
+		}
+		return nil, nil
+	}
+	if strings.Contains(sqlStr, "WHERE n.nspname = 'public' AND c.relname = $1") && len(args) == 1 {
+		if rel, ok := args[0].(string); ok {
+			if cnt, found := f.relCounts[rel]; found {
+				return [][]string{{cnt}}, nil
+			}
+		}
+		return nil, nil
+	}
+	if strings.Contains(sqlStr, "information_schema.columns") {
+		var out [][]string
+		for _, r := range f.publicCols {
+			out = append(out, []string{r[0], r[1], r[2]})
+		}
+		return out, nil
+	}
+	return nil, nil
+}
+
+func (f *fakeSQLCatalogConn) Close(_ context.Context) {}
 
 func TestCheckSearch(t *testing.T) {
 	t.Parallel()
@@ -78,12 +132,179 @@ func TestCheckSearch(t *testing.T) {
 			if tool == "" {
 				tool = "run_command"
 			}
-			d := CheckSearch(tool, ToolArgs{CommandLine: tc.cmd, Cwd: tc.cwd})
+			d := CheckSearchWithSQL(tool, ToolArgs{CommandLine: tc.cmd, Cwd: tc.cwd}, nil)
 			if tc.wantDeny && d.Decision != DecisionDeny {
 				t.Fatalf("cmd %q: expected deny, got %v", tc.cmd, d)
 			}
 			if !tc.wantDeny && d.Decision != DecisionAllow {
 				t.Fatalf("cmd %q: expected allow, got deny: %v", tc.cmd, d)
+			}
+		})
+	}
+}
+
+func TestPsqlGuard(t *testing.T) {
+	twoCols := []SQLColumn{{Name: "id", TableOID: 100, AttrNum: 1}, {Name: "author_name", TableOID: 100, AttrNum: 2}}
+	threeCols := []SQLColumn{{Name: "id", TableOID: 100, AttrNum: 1}, {Name: "author_name", TableOID: 100, AttrNum: 2}, {Name: "content", TableOID: 100, AttrNum: 3}}
+	cteCols := []SQLColumn{{Name: "id", TableOID: 0, AttrNum: 0}, {Name: "author_name", TableOID: 0, AttrNum: 0}, {Name: "content", TableOID: 0, AttrNum: 0}}
+	embedCols := []SQLColumn{{Name: "id", TableOID: 200, AttrNum: 1}, {Name: "embedding", TableOID: 200, AttrNum: 2}}
+
+	meta3 := map[uint32][2]string{100: {"messages", "3"}, 200: {"facts", "7"}}
+	rel3 := map[string]string{"messages": "3"}
+	schemaRows := [][3]string{{"messages", "id", "text"}, {"messages", "author_name", "text"}, {"messages", "content", "text"}}
+
+	limitPlan := `[{"Plan": {"Node Type": "Limit", "Plan Rows": 10, "Plans": [{"Node Type": "Seq Scan", "Relation Name": "messages", "Plan Rows": 100}]}}]`
+	overLimitPlan := `[{"Plan": {"Node Type": "Limit", "Plan Rows": 100, "Plans": [{"Node Type": "Seq Scan", "Relation Name": "messages", "Plan Rows": 200}]}}]`
+	unboundedPlan := `[{"Plan": {"Node Type": "Sort", "Plan Rows": 103, "Plans": [{"Node Type": "Seq Scan", "Relation Name": "messages", "Plan Rows": 103}]}}]`
+	pkPlan := `[{"Plan": {"Node Type": "Index Scan", "Relation Name": "messages", "Plan Rows": 1}}]`
+	dmlPlan := `[{"Plan": {"Node Type": "ModifyTable", "Relation Name": "messages", "Plan Rows": 1}}]`
+
+	tests := []struct {
+		name          string
+		cmd           string
+		conn          *fakeSQLCatalogConn
+		connErr       error
+		wantDeny      bool
+		wantReasonSub string
+		wantOverwrite string
+	}{
+		{
+			name:          "scoped select injects -A",
+			cmd:           `psql "$DATABASE_URL" -c "SELECT id, author_name FROM messages LIMIT 10;"`,
+			conn:          &fakeSQLCatalogConn{cols: twoCols, explainJSON: limitPlan, tableMeta: meta3, relCounts: rel3},
+			wantOverwrite: `psql -A "$DATABASE_URL" -c "SELECT id, author_name FROM messages LIMIT 10;"`,
+		},
+		{
+			name:     "existing -Atc preserves command without overwrite",
+			cmd:      `psql "$DATABASE_URL" -Atc "SELECT id, author_name FROM messages LIMIT 10;"`,
+			conn:     &fakeSQLCatalogConn{cols: twoCols, explainJSON: limitPlan, tableMeta: meta3},
+			wantDeny: false,
+		},
+		{
+			name:     "existing --csv preserves command without overwrite",
+			cmd:      `psql "$DATABASE_URL" --csv --command="SELECT id, author_name FROM messages WHERE id = '1'"`,
+			conn:     &fakeSQLCatalogConn{cols: twoCols, explainJSON: pkPlan, tableMeta: meta3},
+			wantDeny: false,
+		},
+		{
+			name:     "existing -P format=unaligned and -Pformat=csv",
+			cmd:      `psql -P format=unaligned -c "\d messages" && psql -Pformat=csv -U aerial -d aerial -c "SELECT '--not-comment'; SELECT id, author_name FROM messages WHERE id = '1'"`,
+			conn:     &fakeSQLCatalogConn{cols: twoCols, explainJSON: pkPlan, tableMeta: meta3},
+			wantDeny: false,
+		},
+		{
+			name:          "leading env var and attached -c injects -A",
+			cmd:           `PGPASSWORD=secret /usr/bin/psql -U Admin -d Aerial -c"SELECT id, embedding FROM facts WHERE id = 1"`,
+			conn:          &fakeSQLCatalogConn{cols: embedCols, explainJSON: pkPlan, tableMeta: meta3},
+			wantOverwrite: `PGPASSWORD=secret /usr/bin/psql -A -U Admin -d Aerial -c"SELECT id, embedding FROM facts WHERE id = 1"`,
+		},
+		{
+			name:          "select star detected via TableOID column count",
+			cmd:           `psql "$DATABASE_URL" -c "SELECT * FROM messages LIMIT 5"`,
+			conn:          &fakeSQLCatalogConn{cols: threeCols, explainJSON: limitPlan, tableMeta: meta3, relCounts: rel3},
+			wantDeny:      true,
+			wantReasonSub: "Available columns: id, author_name, content",
+		},
+		{
+			name:          "select star detected via CTE relation column count",
+			cmd:           `psql "$DATABASE_URL" -c "WITH c AS (SELECT * FROM messages LIMIT 5) SELECT * FROM c"`,
+			conn:          &fakeSQLCatalogConn{cols: cteCols, explainJSON: limitPlan, tableMeta: meta3, relCounts: rel3},
+			wantDeny:      true,
+			wantReasonSub: "Wildcard SELECT * is prohibited",
+		},
+		{
+			name:          "unbounded multi-row select without LIMIT denied",
+			cmd:           `psql "$DATABASE_URL" -c "SELECT id, author_name FROM messages ORDER BY id"`,
+			conn:          &fakeSQLCatalogConn{cols: twoCols, explainJSON: unboundedPlan, tableMeta: meta3},
+			wantDeny:      true,
+			wantReasonSub: "Unbounded multi-row psql SELECT detected (estimated rows: 103)",
+		},
+		{
+			name:          "select with excessive LIMIT denied",
+			cmd:           `psql "$DATABASE_URL" -c "SELECT id, author_name FROM messages LIMIT 100"`,
+			conn:          &fakeSQLCatalogConn{cols: twoCols, explainJSON: overLimitPlan, tableMeta: meta3},
+			wantDeny:      true,
+			wantReasonSub: "psql LIMIT exceeds maximum allowed rows",
+		},
+		{
+			name:          "DML RETURNING all columns allowed and injects -A",
+			cmd:           `psql "$DATABASE_URL" -c "UPDATE messages SET content = 'a''b' WHERE id = '1' RETURNING *"`,
+			conn:          &fakeSQLCatalogConn{cols: threeCols, explainJSON: dmlPlan, tableMeta: meta3},
+			wantOverwrite: `psql -A "$DATABASE_URL" -c "UPDATE messages SET content = 'a''b' WHERE id = '1' RETURNING *"`,
+		},
+		{
+			name:          "undefined column 42703 returns schema hint for referenced table",
+			cmd:           `psql "$DATABASE_URL" -c "SELECT author_username FROM \"messages\" -- comment\n WHERE id = '1'"`,
+			conn:          &fakeSQLCatalogConn{prepareErr: &pgconn.PgError{Code: "42703", Message: `column "author_username" does not exist`}, publicCols: schemaRows},
+			wantDeny:      true,
+			wantReasonSub: "messages: [id (text), author_name (text), content (text)]",
+		},
+		{
+			name:          "undefined table 42P01 returns generic schema hint",
+			cmd:           `psql "$DATABASE_URL" -c "SELECT id FROM unknown_tbl"`,
+			conn:          &fakeSQLCatalogConn{prepareErr: &pgconn.PgError{Code: "42P01", Message: `relation "unknown_tbl" does not exist`}, publicCols: schemaRows},
+			wantDeny:      true,
+			wantReasonSub: "Verify table and column names against schema.sql",
+		},
+		{
+			name:          "undefined column with catalog query error still returns pgErr",
+			cmd:           `psql "$DATABASE_URL" -c "SELECT bad_col FROM messages"`,
+			conn:          &fakeSQLCatalogConn{prepareErr: &pgconn.PgError{Code: "42703", Message: `column "bad_col" does not exist`}, catalogErr: errors.New("catalog fail")},
+			wantDeny:      true,
+			wantReasonSub: `42703: column "bad_col" does not exist`,
+		},
+		{
+			name:          "syntax error 42601 on psql variable fails open and injects -A",
+			cmd:           `psql "$DATABASE_URL" -c "SELECT :var FROM messages"`,
+			conn:          &fakeSQLCatalogConn{prepareErr: &pgconn.PgError{Code: "42601", Message: "syntax error"}},
+			wantOverwrite: `psql -A "$DATABASE_URL" -c "SELECT :var FROM messages"`,
+		},
+		{
+			name:          "connection failure fails open and injects -A",
+			cmd:           `psql "$DATABASE_URL" -c "SELECT * FROM messages"`,
+			connErr:       errors.New("dial error"),
+			wantOverwrite: `psql -A "$DATABASE_URL" -c "SELECT * FROM messages"`,
+		},
+		{
+			name:          "backslash command in multi-statement skipped and injects -A",
+			cmd:           `psql "$DATABASE_URL" --command "\dt" -c "\d; SELECT id, author_name FROM messages LIMIT 5"`,
+			conn:          &fakeSQLCatalogConn{cols: twoCols, explainJSON: limitPlan, tableMeta: meta3},
+			wantOverwrite: `psql -A "$DATABASE_URL" --command "\dt" -c "\d; SELECT id, author_name FROM messages LIMIT 5"`,
+		},
+	}
+
+	t.Setenv("DATABASE_URL", "postgres://127.0.0.1:1/aerial?connect_timeout=1")
+	if d := CheckSearch("run_command", ToolArgs{CommandLine: `psql -c "SELECT id FROM messages LIMIT 1"`}); d.Decision != DecisionAllow {
+		t.Fatalf("expected allow on unreachable default describer, got %+v", d)
+	}
+	t.Setenv("DATABASE_URL", ":memory:")
+	if DefaultSQLDescriber() != nil {
+		t.Fatalf("expected nil describer for :memory:")
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			desc := &pgxDescriber{
+				connect: func(_ context.Context) (sqlCatalogConn, error) {
+					if tc.connErr != nil {
+						return nil, tc.connErr
+					}
+					return tc.conn, nil
+				},
+			}
+			d := CheckSearchWithSQL("run_command", ToolArgs{CommandLine: tc.cmd}, desc)
+			if tc.wantDeny && d.Decision != DecisionDeny {
+				t.Fatalf("expected deny, got %+v", d)
+			}
+			if !tc.wantDeny && d.Decision != DecisionAllow {
+				t.Fatalf("expected allow, got %+v", d)
+			}
+			if tc.wantReasonSub != "" && !strings.Contains(d.Reason, tc.wantReasonSub) {
+				t.Fatalf("reason %q missing %q", d.Reason, tc.wantReasonSub)
+			}
+			gotOverwrite, _ := d.Overwrite["CommandLine"].(string)
+			if gotOverwrite != tc.wantOverwrite {
+				t.Fatalf("Overwrite[CommandLine] = %q, want %q", gotOverwrite, tc.wantOverwrite)
 			}
 		})
 	}

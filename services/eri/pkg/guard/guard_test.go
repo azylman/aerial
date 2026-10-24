@@ -27,7 +27,8 @@ func runGuard(t *testing.T, mode string, input string) Decision {
 }
 
 func TestGuardProcess_EndToEnd(t *testing.T) {
-	t.Parallel()
+	t.Setenv("AERIAL_BATCH_GUARD_DIR", t.TempDir())
+	t.Setenv("DATABASE_URL", ":memory:")
 
 	tests := []struct {
 		name     string
@@ -36,6 +37,8 @@ func TestGuardProcess_EndToEnd(t *testing.T) {
 		wantDeny bool
 	}{
 		{"direct write to share aerial", "share", `{"toolCall": {"name": "write_to_file", "args": {"TargetFile": "/share/aerial/main.go"}}}`, true},
+		{"edit_file in share aerial", "share", `{"toolCall": {"name": "edit_file", "args": {"path": "/share/aerial/main.go"}}}`, true},
+		{"write_file in share aerial-config", "share", `{"toolCall": {"name": "write_file", "args": {"path": "/share/aerial-config/config.yaml"}}}`, true},
 		{"replace content in share aerial-config", "share", `{"toolCall": {"name": "default_api:replace_file_content", "args": {"TargetFile": "/share/aerial-config/config.yaml"}}}`, true},
 		{"relative traversal to share aerial", "share", `{"toolCall": {"name": "write_to_file", "args": {"TargetFile": "/data/../share/aerial/file.txt"}}}`, true},
 		{"write to safe workspace", "share", `{"toolCall": {"name": "write_to_file", "args": {"TargetFile": "/data/scratch/workspace/file.txt"}}}`, false},
@@ -71,6 +74,7 @@ func TestGuardProcess_EndToEnd(t *testing.T) {
 		{"all mode denies sleep violation", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "sleep 5"}}}`, true},
 		{"all mode denies unconstrained search", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "find / -name secret"}}}`, true},
 		{"all mode allows safe command", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git status", "Cwd": "/data"}}}`, false},
+		{"all mode preserves psql -A overwrite", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "psql -c \"\\dt\"", "Cwd": "/data"}}}`, false},
 		{"non-intercepted view_file", "all", `{"toolCall": {"name": "view_file", "args": {"AbsolutePath": "/share/aerial/README.md"}}}`, false},
 		{"empty tool call", "all", `{"toolCall": {"name": "", "args": {}}}`, false},
 		{"search mode denies unconstrained find", "search", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "find / -name foo"}}}`, true},
@@ -80,7 +84,6 @@ func TestGuardProcess_EndToEnd(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			d := runGuard(t, tc.mode, tc.input)
 			if tc.wantDeny && d.Decision != DecisionDeny {
 				t.Fatalf("mode=%q input=%s: expected deny, got %v", tc.mode, tc.input, d)

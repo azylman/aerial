@@ -69,12 +69,25 @@ func Process(r io.Reader, w io.Writer, mode string) (err error) {
 			func() *Decision { return CheckSearch(payload.ToolCall.Name, args) },
 			func() *Decision { return CheckCommit(payload.ToolCall.Name, args) },
 		}
+		var mergedOverwrite map[string]any
 		for _, check := range checks {
 			decision = check()
 			if decision.Decision == DecisionDeny {
-				break
+				return json.NewEncoder(w).Encode(decision)
+			}
+			for k, v := range decision.Overwrite {
+				if mergedOverwrite == nil {
+					mergedOverwrite = make(map[string]any)
+				}
+				mergedOverwrite[k] = v
+				if k == "CommandLine" {
+					if s, ok := v.(string); ok {
+						args.CommandLine = s
+					}
+				}
 			}
 		}
+		decision.Overwrite = mergedOverwrite
 	}
 
 	return json.NewEncoder(w).Encode(decision)

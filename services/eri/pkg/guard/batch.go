@@ -24,9 +24,12 @@ const (
 )
 
 var (
-	gcMu        sync.Mutex
-	lastGCTime  time.Time
-	pytestRegex = regexp.MustCompile(`^(python[0-9.]*\s+-m\s+)?pytest(\s+(-v|-q|-s|-x|--tb=\S+))*\s*$`)
+	gcMu            sync.Mutex
+	lastGCTime      time.Time
+	pytestRegex     = regexp.MustCompile(`^(python[0-9.]*\s+-m\s+)?pytest(\s+(-v|-q|-s|-x|--tb=\S+))*\s*$`)
+	goTestValFlags  = map[string]bool{"-timeout": true, "-tags": true, "-coverprofile": true, "-cpu": true, "-count": true, "-o": true}
+	goTestVerbose   = map[string]bool{"-v": true, "-test.v": true, "-v=true": true, "-test.v=true": true}
+	unscopedTargets = map[string]bool{"./...": true, "brain/...": true, "services/eri/...": true, "...": true}
 )
 
 // GetBatchDir returns the active directory for batch guard state persistence.
@@ -52,47 +55,91 @@ type BatchState struct {
 }
 
 func isUnscopedTest(cmd string) bool {
-	trimmed := strings.TrimSpace(cmd)
-	if trimmed == "" {
+	for _, sub := range splitPipeline(cmd) {
+		if isUnscopedTestSingle(sub) {
+			return true
+		}
+	}
+	return false
+}
+
+func isUnscopedTestSingle(cmd string) bool {
+	fields := stripLeadingEnv(tokenizeQuoteAware(strings.TrimSpace(cmd)))
+	if len(fields) == 0 {
 		return false
 	}
-
-	// Bare ./scripts/verify.sh without --staged
-	if strings.HasPrefix(trimmed, "./scripts/verify.sh") || strings.HasPrefix(trimmed, "scripts/verify.sh") {
-		if !strings.Contains(trimmed, "--staged") && !strings.Contains(trimmed, "-h") && !strings.Contains(trimmed, "--help") {
-			return true
-		}
+	if fields[0] == "./scripts/verify.sh" || fields[0] == "scripts/verify.sh" {
+		return isUnscopedVerify(fields[1:])
 	}
-
-	// Bare pytest or python -m pytest without specific test path
-	if pytestRegex.MatchString(trimmed) {
+	if pytestRegex.MatchString(strings.Join(fields, " ")) {
 		return true
 	}
+	if len(fields) >= 2 && fields[0] == "go" && fields[1] == "test" {
+		return isUnscopedGoTest(fields[2:])
+	}
+	return false
+}
 
-	// Unscoped go test
-	if strings.HasPrefix(trimmed, "go test") {
-		fields := strings.Fields(trimmed)
-		var pkgArgs []string
-		for i := 2; i < len(fields); i++ {
-			f := fields[i]
-			if strings.HasPrefix(f, "-") {
-				if f == "-run" || f == "-timeout" || f == "-tags" || f == "-coverprofile" || f == "-cpu" {
-					i++
-				}
-				continue
-			}
-			pkgArgs = append(pkgArgs, f)
-		}
-		if len(pkgArgs) == 0 {
-			return true
-		}
-		for _, arg := range pkgArgs {
-			if arg == "./..." || arg == "brain/..." || arg == "services/eri/..." || arg == "..." {
-				return true
-			}
+func stripLeadingEnv(fields []string) []string {
+	for len(fields) > 0 && strings.Contains(fields[0], "=") && !strings.HasPrefix(fields[0], "-") {
+		fields = fields[1:]
+	}
+	return fields
+}
+
+func isUnscopedVerify(args []string) bool {
+	for _, f := range args {
+		if f == "--staged" || f == "-h" || f == "--help" {
+			return false
 		}
 	}
+	return true
+}
 
+func isUnscopedGoTest(args []string) bool {
+	var pkgArgs []string
+	hasVerbose := false
+	hasRun := false
+	for i := 0; i < len(args); i++ {
+		f := args[i]
+		if goTestVerbose[f] {
+			hasVerbose = true
+			continue
+		}
+		if f == "-run" || f == "-test.run" {
+			hasRun = true
+			i++
+			continue
+		}
+		if isAttachedRunFlag(f) {
+			hasRun = true
+			continue
+		}
+		if strings.HasPrefix(f, "-") {
+			if goTestValFlags[f] {
+				i++
+			}
+			continue
+		}
+		pkgArgs = append(pkgArgs, f)
+	}
+	if len(pkgArgs) == 0 || (hasVerbose && !hasRun) {
+		return true
+	}
+	for _, arg := range pkgArgs {
+		if unscopedTargets[arg] {
+			return true
+		}
+	}
+	return false
+}
+
+func isAttachedRunFlag(f string) bool {
+	for _, p := range []string{"-run=", "--run=", "-test.run="} {
+		if strings.HasPrefix(f, p) {
+			return true
+		}
+	}
 	return false
 }
 
@@ -143,9 +190,9 @@ func isSingleInspection(cmd string) bool {
 
 func categorizeInvocation(toolName string, args ToolArgs) (category, target string) {
 	switch normalizeToolName(toolName) {
-	case "view_file":
+	case "view_file", "read_file":
 		return "read", args.FilePath()
-	case "replace_file_content", "write_to_file":
+	case "replace_file_content", "write_to_file", "edit_file", "write_file":
 		return "edit", args.FilePath()
 	case "run_command":
 		cmd := strings.TrimSpace(args.CommandLine)
@@ -183,8 +230,8 @@ func sanitizeID(id string) string {
 }
 
 func isSameStep(rec ToolInvocation, currentStep int, currentTS int64) bool {
-	if currentStep > 0 && rec.StepIdx > 0 {
-		return rec.StepIdx == currentStep
+	if currentStep > 0 && rec.StepIdx > 0 && rec.StepIdx == currentStep {
+		return true
 	}
 	diff := currentTS - rec.Timestamp
 	if diff < 0 {
@@ -337,16 +384,11 @@ func groupSteps(records []ToolInvocation) [][]ToolInvocation {
 			continue
 		}
 
-		var same bool
-		if currentStep > 0 && r.StepIdx > 0 {
-			same = (r.StepIdx == currentStep)
-		} else {
-			diff := r.Timestamp - currentTS
-			if diff < 0 {
-				diff = -diff
-			}
-			same = (diff <= 1)
+		diff := r.Timestamp - currentTS
+		if diff < 0 {
+			diff = -diff
 		}
+		same := (currentStep > 0 && r.StepIdx > 0 && r.StepIdx == currentStep) || (diff <= 1)
 
 		if same {
 			current = append(current, r)
@@ -371,16 +413,18 @@ func CheckBatch(payload Payload, args ToolArgs) *Decision {
 // CheckBatchWithDir evaluates tool batching invariants with configurable state directory and timestamp.
 // Guaranteed fail-open: returns allow on unexpected errors or corrupted states.
 func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time) *Decision {
+	normalizedTool := normalizeToolName(payload.ToolCall.Name)
+
 	// Rule 1: Unscoped test sweeps
-	if payload.ToolCall.Name == "run_command" && isUnscopedTest(args.CommandLine) {
+	if normalizedTool == "run_command" && isUnscopedTest(args.CommandLine) {
 		return &Decision{
 			Decision: DecisionDeny,
-			Reason:   "Unscoped test sweep detected. Run targeted package unit tests (e.g. 'go test -v ./pkg/<pkg>/...') during development; comprehensive monorepo sweeps are offloaded to GitHub Actions CI or './scripts/verify.sh --staged'.",
+			Reason:   "Unscoped test sweep detected. Run targeted package unit tests (e.g. 'go test ./pkg/<pkg>/...' or 'go test -v -run TestName ./pkg/<pkg>') during development; comprehensive monorepo sweeps are offloaded to GitHub Actions CI or './scripts/verify.sh --staged'.",
 		}
 	}
 
 	// Rule 2: Unbatched git mutations
-	if payload.ToolCall.Name == "run_command" && isUnbatchedGitMutation(args.CommandLine) {
+	if normalizedTool == "run_command" && isUnbatchedGitMutation(args.CommandLine) {
 		return &Decision{
 			Decision: DecisionDeny,
 			Reason:   "Unbatched git lifecycle command detected. Combine git operations into compound one-liners (e.g. 'git add -A && git commit -m ... && git push ...') or use 'scripts/aerial-pr.sh submit <scratch_dir> [commit_msg]' for automated pre-flight verification and submission.",
@@ -404,8 +448,8 @@ func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time
 			}
 		}
 
-		// Rule 4: Micro-reads to the same file (view_file)
-		if payload.ToolCall.Name == "view_file" && target != "" {
+		// Rule 4: Micro-reads to the same file (view_file / read_file)
+		if category == "read" && target != "" {
 			reads := countTargetInvocations(priorRecords, "read", target)
 			if reads >= 2 {
 				decision = &Decision{
@@ -418,7 +462,7 @@ func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time
 			}
 		}
 
-		// Rule 6: Micro-edits to the same file (replace_file_content / write_to_file)
+		// Rule 6: Micro-edits to the same file (replace_file_content / write_to_file / edit_file / write_file)
 		if category == "edit" && target != "" {
 			edits := countTargetInvocations(priorRecords, "edit", target)
 			if edits >= 2 {
@@ -455,13 +499,13 @@ func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time
 			}
 		}
 
-		// Rule 5: Sequential single-file reads across turns (view_file)
-		if payload.ToolCall.Name == "view_file" {
+		// Rule 5: Sequential single-file reads across turns (view_file / read_file)
+		if category == "read" {
 			steps := groupSteps(priorRecords)
 			if len(steps) >= 2 {
 				consecutive := true
 				for i := len(steps) - 2; i < len(steps); i++ {
-					if len(steps[i]) != 1 || steps[i][0].ToolName != "view_file" {
+					if len(steps[i]) != 1 || steps[i][0].Category != "read" {
 						consecutive = false
 						break
 					}

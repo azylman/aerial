@@ -2,7 +2,7 @@
   "share-guard": {
     "PreToolUse": [
       {
-        "matcher": "replace_file_content|write_to_file|run_command",
+        "matcher": "replace_file_content|write_to_file|edit_file|write_file|run_command",
         "hooks": [
           {
             "type": "command",
@@ -30,7 +30,7 @@
   "batch-guard": {
     "PreToolUse": [
       {
-        "matcher": "view_file|replace_file_content|write_to_file|run_command",
+        "matcher": "view_file|read_file|replace_file_content|write_to_file|edit_file|write_file|run_command",
         "hooks": [
           {
             "type": "command",

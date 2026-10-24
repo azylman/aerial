@@ -2560,7 +2560,7 @@ func TestWorkerPool_ProcessPoolWiringAndTurnRouting(t *testing.T) {
 			t.Parallel()
 			if tc.nilPool {
 				var p *WorkerPool
-				if p.ProcessPool() != nil || p.LowEffortProcessPool() != nil || p.MediumEffortProcessPool() != nil {
+				if p.ProcessPool() != nil || p.LowEffortProcessPool() != nil || p.MediumEffortProcessPool() != nil || p.StatefulProcessPools() != nil {
 					t.Fatalf("expected nil pools from nil WorkerPool")
 				}
 				p.MarkDirty()
@@ -2599,6 +2599,9 @@ func TestWorkerPool_ProcessPoolWiringAndTurnRouting(t *testing.T) {
 				vPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-2.5-flash"}, newMockSpawner())
 				defer func() { _ = vPool.Close() }()
 				pool := NewWorkerPool(WorkerPoolConfig{ProcessPool: pPool, LowEffortProcessPool: lPool, VoiceProcessPool: vPool})
+				if len(pool.StatefulProcessPools()) != 1 {
+					t.Fatalf("expected 1 stateful pool")
+				}
 				_, _ = pool.cfg.LLMFunc(context.Background(), "", "summarize")
 				if got := lSpawner.LastSpawnCfg().Model; got != "gemini-3.8-flash-low" {
 					t.Fatalf("expected LowEffortProcessPool model, got %q", got)
