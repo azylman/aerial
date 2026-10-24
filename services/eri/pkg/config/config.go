@@ -85,11 +85,24 @@ type AmbientContextConfig struct {
 
 type ChannelPolicy struct {
 	Mode                 string                `yaml:"mode" json:"mode"`
+	Effort               string                `yaml:"effort,omitempty" json:"effort,omitempty"`
 	WakeMode             string                `yaml:"wake_mode,omitempty" json:"wake_mode,omitempty"`
 	IgnoreBots           *bool                 `yaml:"ignore_bots,omitempty" json:"ignore_bots,omitempty"`
 	AmbientWakeThreshold *float64              `yaml:"ambient_wake_threshold,omitempty" json:"ambient_wake_threshold,omitempty"`
 	Hooks                ChannelHooksConfig    `yaml:"hooks,omitempty" json:"hooks,omitempty"`
 	AmbientContext       *AmbientContextConfig `yaml:"ambient_context,omitempty" json:"ambient_context,omitempty"`
+}
+
+// GetEffort returns the normalized effort tier for this channel policy ("low", "medium", or "high"), defaulting to "high".
+func (p ChannelPolicy) GetEffort() string {
+	switch strings.ToLower(strings.TrimSpace(p.Effort)) {
+	case "low":
+		return "low"
+	case "medium":
+		return "medium"
+	default:
+		return "high"
+	}
 }
 
 // IsThread reports whether the channel policy specifies thread-based interaction.
@@ -921,14 +934,22 @@ func validateChannelPolicy(name string, p *ChannelPolicy, isDefault bool, target
 		}
 	}
 	if p.WakeMode != "" {
-		wLower := strings.ToLower(strings.TrimSpace(p.WakeMode))
-		if wLower != "mention" && wLower != "mentions" && wLower != "direct" &&
-			wLower != "classifier" && wLower != "ambient" &&
-			wLower != "all" && wLower != "always" {
+		switch strings.ToLower(strings.TrimSpace(p.WakeMode)) {
+		case "mention", "mentions", "direct", "classifier", "ambient", "all", "always":
+			p.WakeMode = p.GetWakeMode()
+		default:
 			log.Printf("[Config] Validation error: %s wake_mode must be 'mention', 'classifier', or 'all', got %q in %s.", prefix, p.WakeMode, targetPath)
 			return fmt.Errorf("%s wake_mode must be 'mention', 'classifier', or 'all', got %q", prefix, p.WakeMode)
 		}
-		p.WakeMode = p.GetWakeMode()
+	}
+	if p.Effort != "" {
+		switch eLower := strings.ToLower(strings.TrimSpace(p.Effort)); eLower {
+		case "low", "medium", "high":
+			p.Effort = eLower
+		default:
+			log.Printf("[Config] Validation error: %s effort must be 'low', 'medium', or 'high', got %q in %s.", prefix, p.Effort, targetPath)
+			return fmt.Errorf("%s effort must be 'low', 'medium', or 'high', got %q", prefix, p.Effort)
+		}
 	}
 	return validateHooks(name, p.Hooks, targetPath)
 }
@@ -1086,6 +1107,9 @@ func ResolveChannelPolicy(channels map[string]ChannelPolicy, channelID, channelN
 	}
 	if res.WakeMode == "" && def.WakeMode != "" {
 		res.WakeMode = def.WakeMode
+	}
+	if res.Effort == "" && def.Effort != "" {
+		res.Effort = def.Effort
 	}
 	if res.IgnoreBots == nil {
 		res.IgnoreBots = clonePtr(def.IgnoreBots)

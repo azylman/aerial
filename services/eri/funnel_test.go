@@ -627,6 +627,9 @@ admin_users:
 channels:
   default:
     mode: "channel"
+  gc-chan:
+    mode: "channel"
+    effort: "low"
 `)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -770,7 +773,7 @@ channels:
 	if dbMsg == nil {
 		t.Fatalf("Expected msg-incoming-100 to be inserted into DB by MessageCreate handler")
 	}
-	if dbMsg.AuthorName != "test-user" || !strings.Contains(dbMsg.Content, "deploy the stack") {
+	if dbMsg.AuthorName != "test-user" || !strings.Contains(dbMsg.Content, "deploy the stack") || dbMsg.Effort != "low" || dbMsg.Metadata.Ephemeral == nil || *dbMsg.Metadata.Ephemeral {
 		t.Errorf("Unexpected persisted message: %+v", dbMsg)
 	}
 
