@@ -30,6 +30,7 @@ type GitHubSkillPublisherConfig struct {
 	Token              string
 	Owner              string
 	Repo               string
+	BrainURL           string
 	BrainPRRegisterURL string
 	SystemChannelID    string
 	BaseURL            string
@@ -42,6 +43,7 @@ type GitHubSkillPublisher struct {
 	token              string
 	owner              string
 	repo               string
+	brainURL           string
 	brainPRRegisterURL string
 	systemChannelID    string
 	baseURL            string
@@ -71,15 +73,20 @@ func NewGitHubSkillPublisher(cfg GitHubSkillPublisherConfig) *GitHubSkillPublish
 	if repo == "" {
 		repo = DefaultConfigRepoName
 	}
-	brainURL := strings.TrimSpace(cfg.BrainPRRegisterURL)
+	brainURL := strings.TrimRight(strings.TrimSpace(cfg.BrainURL), "/")
 	if brainURL == "" {
-		brainURL = DefaultBrainPRRegisterURL
+		brainURL = DefaultBrainURL
+	}
+	brainPRRegisterURL := strings.TrimSpace(cfg.BrainPRRegisterURL)
+	if brainPRRegisterURL == "" {
+		brainPRRegisterURL = DefaultBrainPRRegisterURL
 	}
 	return &GitHubSkillPublisher{
 		token:              strings.TrimSpace(cfg.Token),
 		owner:              owner,
 		repo:               repo,
-		brainPRRegisterURL: brainURL,
+		brainURL:           brainURL,
+		brainPRRegisterURL: brainPRRegisterURL,
 		systemChannelID:    strings.TrimSpace(cfg.SystemChannelID),
 		baseURL:            baseURL,
 		httpClient:         httpClient,
@@ -448,10 +455,14 @@ func (p *GitHubSkillPublisher) registerPRWithBrain(ctx context.Context, prNum in
 
 // NotifyShortFriction posts a recurring short-friction alert to the configured Discord system channel via Brain's /discord/message endpoint.
 func (p *GitHubSkillPublisher) NotifyShortFriction(ctx context.Context, content string) error {
-	if p.systemChannelID == "" || p.brainPRRegisterURL == "" || strings.TrimSpace(content) == "" {
+	if p.systemChannelID == "" || strings.TrimSpace(content) == "" {
 		return nil
 	}
-	msgURL := strings.Replace(strings.Replace(p.brainPRRegisterURL, "webhooks-router.aerial", "eri.aerial", 1), "/internal/pr/register", "/discord/message", 1)
+	brainURL := strings.TrimRight(strings.TrimSpace(p.brainURL), "/")
+	if brainURL == "" {
+		brainURL = DefaultBrainURL
+	}
+	msgURL := brainURL + "/discord/message"
 	body := fmt.Sprintf(`{"channel_id":%q,"content":%q}`, p.systemChannelID, content)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, msgURL, strings.NewReader(body))
 	if err != nil {

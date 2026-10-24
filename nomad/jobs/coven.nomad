@@ -46,6 +46,7 @@ job "coven" {
 
       env {
         GOCOVERDIR    = "/coverage"
+        BRAIN_URL     = "http://eri.aerial"
         BRAIN_LLM_URL = "http://eri.aerial/internal/llm"
       }
 
