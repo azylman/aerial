@@ -196,8 +196,10 @@ func EvaluateCandidateAdmission(item ExtractedFactItem) (admit bool, reason stri
 		return false, "too_short"
 	}
 
-	if m := plaintextCredentialRegex.FindStringSubmatch(trimmedText); m != nil && (m[2] == "" || !nonSecretVerbs.MatchString(m[2])) {
-		return false, "plaintext_credential"
+	for _, m := range plaintextCredentialRegex.FindAllStringSubmatch(trimmedText, -1) {
+		if m[2] == "" || !nonSecretVerbs.MatchString(m[2]) {
+			return false, "plaintext_credential"
+		}
 	}
 
 	isDurable := durableDirectiveRegex.MatchString(trimmedText)

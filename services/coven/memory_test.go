@@ -3903,6 +3903,12 @@ func TestEvaluateCandidateAdmission(t *testing.T) {
 			wantReason: "admitted",
 		},
 		{
+			name:       "PlaintextCredentialAfterWhitelistedClauseRejected",
+			item:       ExtractedFactItem{FactText: "The GitHub access token is configured as ghp_0123456789abcdefghij0123456789ab"},
+			wantAdmit:  false,
+			wantReason: "plaintext_credential",
+		},
+		{
 			name:       "DurableDirectiveOverridesEphemeral",
 			item:       ExtractedFactItem{FactText: "Always verify CI before pull request #500 merges"},
 			wantAdmit:  true,
