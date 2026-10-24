@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/azylman/aerial/pkg/httpkit"
 )
 
 // DefaultConfigPath is the canonical in-container configuration path.
@@ -24,18 +26,13 @@ var (
 // then /local/config.yaml (if size > 0), falling back to fallbackPath.
 // If fallbackPath does not exist and legacyConfigPath exists, it falls back to legacyConfigPath.
 func ResolveConfigPath(fallbackPath string) string {
-	if env := strings.TrimSpace(os.Getenv("CONFIG_PATH")); env != "" {
-		return env
-	}
-	if fi, err := os.Stat(localConfigPath); err == nil && fi.Size() > 0 {
-		return localConfigPath
-	}
-	if _, err := os.Stat(fallbackPath); os.IsNotExist(err) {
+	if fallbackPath != "" {
 		if _, err := os.Stat(legacyConfigPath); err == nil {
-			return legacyConfigPath
+			return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, legacyConfigPath, fallbackPath)
 		}
+		return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, fallbackPath)
 	}
-	return fallbackPath
+	return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, defaultConfigPath, legacyConfigPath, "config.yaml")
 }
 
 // Config represents the runtime configuration for the scheduler MCP server.

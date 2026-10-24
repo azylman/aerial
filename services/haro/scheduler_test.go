@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/httpkit"
+
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -1689,7 +1691,7 @@ func TestDB_EventTriggers(t *testing.T) {
 				return
 			}
 			if st, ok := mockBuilds[id]; ok {
-				writeJSON(w, http.StatusOK, map[string]any{"build": map[string]string{"status": st}})
+				httpkit.WriteJSON(w, http.StatusOK, map[string]any{"build": map[string]string{"status": st}})
 				return
 			}
 			http.Error(w, "not found", http.StatusNotFound)
@@ -1707,7 +1709,7 @@ func TestDB_EventTriggers(t *testing.T) {
 				return
 			}
 			if st, ok := mockChunks[id]; ok {
-				writeJSON(w, http.StatusOK, map[string]any{"chunk": map[string]string{"status": st}})
+				httpkit.WriteJSON(w, http.StatusOK, map[string]any{"chunk": map[string]string{"status": st}})
 				return
 			}
 			http.Error(w, "not found", http.StatusNotFound)
@@ -1895,14 +1897,14 @@ func TestEventWatchTools(t *testing.T) {
 			if id == "build-toctou-1" {
 				toctouCalls++
 				if toctouCalls == 1 {
-					writeJSON(w, http.StatusOK, map[string]any{"build": map[string]string{"status": "running"}})
+					httpkit.WriteJSON(w, http.StatusOK, map[string]any{"build": map[string]string{"status": "running"}})
 					return
 				}
-				writeJSON(w, http.StatusOK, map[string]any{"build": map[string]string{"status": "completed"}})
+				httpkit.WriteJSON(w, http.StatusOK, map[string]any{"build": map[string]string{"status": "completed"}})
 				return
 			}
 			if st, ok := mockBuilds[id]; ok {
-				writeJSON(w, http.StatusOK, map[string]any{"build": map[string]string{"status": st}})
+				httpkit.WriteJSON(w, http.StatusOK, map[string]any{"build": map[string]string{"status": st}})
 				return
 			}
 			http.Error(w, "not found", http.StatusNotFound)
@@ -1911,7 +1913,7 @@ func TestEventWatchTools(t *testing.T) {
 		if strings.HasPrefix(r.URL.Path, "/chunks/") {
 			id := strings.TrimPrefix(r.URL.Path, "/chunks/")
 			if st, ok := mockChunks[id]; ok {
-				writeJSON(w, http.StatusOK, map[string]any{"chunk": map[string]string{"status": st}})
+				httpkit.WriteJSON(w, http.StatusOK, map[string]any{"chunk": map[string]string{"status": st}})
 				return
 			}
 			http.Error(w, "not found", http.StatusNotFound)

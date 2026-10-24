@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/azylman/aerial/pkg/sanitizer"
 )
 
 // IsScheduleStale reports whether scheduledAt is more overdue than maxOverdue relative to now.
@@ -345,22 +347,9 @@ func FormatCronDescription(cronExpr string) string {
 	return fmt.Sprintf("At %s (cron: %s)", timeStr, expr)
 }
 
-var (
-	reGitHubToken    = regexp.MustCompile(`(?i)\b(?:gh[pousr]_[a-zA-Z0-9_]+|github_pat_[a-zA-Z0-9_]+)`)
-	reBearerAuth     = regexp.MustCompile(`(?i)\b(?:bearer\s+[a-zA-Z0-9_\-\.]{12,})`)
-	reSecretKeyValue = regexp.MustCompile(`(?i)\b([A-Za-z0-9_-]*(?:KEY|SECRET|TOKEN|PAT|PASSWORD))\s*([:=]\s*)([^\s,;]+)`)
-)
-
 // SanitizeScheduleText redacts GitHub PATs, Bearer tokens, and secret key assignments.
 func SanitizeScheduleText(s string) string {
-	if s == "" {
-		return ""
-	}
-	out := s
-	out = reSecretKeyValue.ReplaceAllString(out, "${1}${2}[REDACTED]")
-	out = reGitHubToken.ReplaceAllString(out, "[REDACTED]")
-	out = reBearerAuth.ReplaceAllString(out, "[REDACTED]")
-	return out
+	return sanitizer.SanitizeString(s)
 }
 
 type CronScheduleWithDesc struct {

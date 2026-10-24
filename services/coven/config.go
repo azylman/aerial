@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/azylman/aerial/pkg/httpkit"
 	"gopkg.in/yaml.v3"
 )
 
@@ -49,13 +50,10 @@ var localConfigPath = "/local/config.yaml"
 // ResolveConfigPath returns the config file path, checking CONFIG_PATH env,
 // then /local/config.yaml (if size > 0), falling back to fallbackPath.
 func ResolveConfigPath(fallbackPath string) string {
-	if env := strings.TrimSpace(os.Getenv("CONFIG_PATH")); env != "" {
-		return env
+	if fallbackPath != "" {
+		return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, fallbackPath)
 	}
-	if fi, err := os.Stat(localConfigPath); err == nil && fi.Size() > 0 {
-		return localConfigPath
-	}
-	return fallbackPath
+	return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, "config.yaml", "/share/aerial-config/config.yaml", "/data/config.yaml")
 }
 
 // OllamaConfig defines Ollama embedding client settings.

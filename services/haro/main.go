@@ -13,6 +13,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/azylman/aerial/pkg/httpkit"
 )
 
 // BrainPromptRequest is an alias for PromptDispatchRequest used when dispatching prompts to Brain / Eri.
@@ -34,7 +36,7 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	defer closeWarn(database, "database on shutdown")
+	defer httpkit.CloseWarn(database, "database on shutdown")
 
 	// Invariant: ticker goroutine must be bound to a child context and strictly
 	// awaited on all exit paths before closing the database to prevent goroutine leaks

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"math"
 	"net/http"
@@ -16,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/azylman/aerial/pkg/httpkit"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -122,39 +122,6 @@ func NewDB(cfg *Config) (*sql.DB, error) {
 	return OpenDB(cfg)
 }
 
-func closeWarn(c io.Closer, resource string) {
-	if c != nil {
-		if err := c.Close(); err != nil {
-			log.Printf("[Scheduler DB] Warning closing %s: %v", resource, err)
-		}
-	}
-}
-
-func isPostgres(database *sql.DB) bool {
-	if database == nil {
-		return false
-	}
-	drv := fmt.Sprintf("%T", database.Driver())
-	return strings.Contains(drv, "stdlib") || strings.Contains(drv, "pgx")
-}
-
-func rebindQuery(query string, isPg bool) string {
-	if !isPg {
-		return query
-	}
-	var b strings.Builder
-	paramIdx := 1
-	for i := 0; i < len(query); i++ {
-		if query[i] == '?' {
-			b.WriteString(fmt.Sprintf("$%d", paramIdx))
-			paramIdx++
-		} else {
-			b.WriteByte(query[i])
-		}
-	}
-	return b.String()
-}
-
 var (
 	postgresMaxAttempts = 10
 	postgresRetryBase   = 500 * time.Millisecond
@@ -185,7 +152,7 @@ func openDB(dsn string) (*sql.DB, error) {
 			if err == nil {
 				break
 			}
-			closeWarn(database, "database on ping failure")
+			httpkit.CloseWarn(database, "database on ping failure")
 		}
 		log.Printf("[Scheduler DB] Waiting for PostgreSQL (attempt %d/%d): %v", attempt, maxAttempts, err)
 		time.Sleep(backoff)
@@ -237,7 +204,7 @@ func InsertCronSchedule(ctx context.Context, database *sql.DB, c CronSchedule) e
 	if c.Timezone == "" {
 		c.Timezone = "America/Los_Angeles"
 	}
-	query := rebindQuery(`INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, isPostgres(database))
+	query := `INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
 	_, err = database.ExecContext(ctx, query, c.ID, c.TargetID, c.TitlePrefix, c.CronExpr, c.Prompt, c.Timezone, c.NextRunAt, c.Enabled, c.CreatedAt, normalizeScheduleEffort(c.Effort))
 	return err
 }
@@ -250,7 +217,7 @@ func InsertOneShotSchedule(ctx context.Context, database *sql.DB, s OneShotSched
 	if s.CreatedAt.IsZero() {
 		s.CreatedAt = time.Now().UTC()
 	}
-	query := rebindQuery(`INSERT INTO one_shot_schedules (id, thread_id, prompt, run_at, created_at, effort) VALUES (?, ?, ?, ?, ?, ?)`, isPostgres(database))
+	query := `INSERT INTO one_shot_schedules (id, thread_id, prompt, run_at, created_at, effort) VALUES ($1, $2, $3, $4, $5, $6)`
 	_, err = database.ExecContext(ctx, query, s.ID, s.ThreadID, s.Prompt, s.RunAt, s.CreatedAt, normalizeScheduleEffort(s.Effort))
 	return err
 }
@@ -270,7 +237,7 @@ func InsertHeartbeatSchedule(ctx context.Context, database *sql.DB, h HeartbeatS
 	if err != nil {
 		effort = "low"
 	}
-	query := rebindQuery(`INSERT INTO heartbeat_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, effort, next_run_at, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, isPostgres(database))
+	query := `INSERT INTO heartbeat_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, effort, next_run_at, enabled, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
 	_, err = database.ExecContext(ctx, query, h.ID, h.TargetID, h.TitlePrefix, h.CronExpr, h.Prompt, h.Timezone, effort, h.NextRunAt, h.Enabled, h.CreatedAt)
 	return err
 }
@@ -287,16 +254,16 @@ func querySchedules[T any](ctx context.Context, database *sql.DB, baseQuery, fil
 		if strings.Contains(query, "WHERE") {
 			sep = " AND "
 		}
-		query = fmt.Sprintf("%s%s%s = ? ORDER BY %s ASC", query, sep, filterCol, orderCol)
-		rows, err = database.QueryContext(ctx, rebindQuery(query, isPostgres(database)), targetID)
+		query = fmt.Sprintf("%s%s%s = $1 ORDER BY %s ASC", query, sep, filterCol, orderCol)
+		rows, err = database.QueryContext(ctx, query, targetID)
 	} else {
 		query = fmt.Sprintf("%s ORDER BY %s ASC", query, orderCol)
-		rows, err = database.QueryContext(ctx, rebindQuery(query, isPostgres(database)))
+		rows, err = database.QueryContext(ctx, query)
 	}
 	if err != nil {
 		return nil, err
 	}
-	defer closeWarn(rows, "rows")
+	defer httpkit.CloseWarn(rows, "rows")
 
 	var results []T
 	for rows.Next() {
@@ -345,7 +312,7 @@ func GetHeartbeatSchedule(ctx context.Context, database *sql.DB, id string) (*He
 	if id == "" {
 		return nil, fmt.Errorf("schedule_id cannot be empty")
 	}
-	query := rebindQuery(`SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'low') FROM heartbeat_schedules WHERE id = ?`, isPostgres(database))
+	query := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'low') FROM heartbeat_schedules WHERE id = $1`
 	var h HeartbeatSchedule
 	row := database.QueryRowContext(ctx, query, id)
 	if err := row.Scan(&h.ID, &h.TargetID, &h.TitlePrefix, &h.CronExpr, &h.Prompt, &h.Timezone, &h.NextRunAt, &h.Enabled, &h.CreatedAt, &h.Effort); err != nil {
@@ -370,7 +337,7 @@ func UpdateHeartbeatSchedule(ctx context.Context, database *sql.DB, h HeartbeatS
 	if err != nil {
 		return err
 	}
-	query := rebindQuery(`UPDATE heartbeat_schedules SET target_id = ?, title_prefix = ?, cron_expr = ?, prompt = ?, timezone = ?, effort = ?, next_run_at = ?, enabled = ? WHERE id = ?`, isPostgres(database))
+	query := `UPDATE heartbeat_schedules SET target_id = $1, title_prefix = $2, cron_expr = $3, prompt = $4, timezone = $5, effort = $6, next_run_at = $7, enabled = $8 WHERE id = $9`
 	res, err := database.ExecContext(ctx, query, h.TargetID, h.TitlePrefix, h.CronExpr, h.Prompt, h.Timezone, effort, h.NextRunAt, h.Enabled, h.ID)
 	if err != nil {
 		return err
@@ -395,36 +362,36 @@ func UpdateCronSchedule(ctx context.Context, database *sql.DB, id string, effort
 	}
 
 	var sets []string
-	var args []interface{}
+	var args []any
 	addSet := func(col string, val *string) {
 		if val != nil && strings.TrimSpace(*val) != "" {
-			sets = append(sets, col+" = ?")
 			args = append(args, strings.TrimSpace(*val))
+			sets = append(sets, fmt.Sprintf("%s = $%d", col, len(args)))
 		}
 	}
 	if effort != nil {
-		sets = append(sets, "effort = ?")
 		args = append(args, normalizeScheduleEffort(*effort))
+		sets = append(sets, fmt.Sprintf("effort = $%d", len(args)))
 	}
 	addSet("cron_expr", cronExpr)
 	addSet("prompt", prompt)
 	if titlePrefix != nil {
-		sets = append(sets, "title_prefix = ?")
 		args = append(args, strings.TrimSpace(*titlePrefix))
+		sets = append(sets, fmt.Sprintf("title_prefix = $%d", len(args)))
 	}
 	addSet("timezone", timezone)
 	if nextRunAt != nil && !nextRunAt.IsZero() {
-		sets = append(sets, "next_run_at = ?")
 		args = append(args, *nextRunAt)
+		sets = append(sets, fmt.Sprintf("next_run_at = $%d", len(args)))
 	}
 
 	if len(sets) == 0 {
 		return ctx.Err()
 	}
 
-	query := fmt.Sprintf("UPDATE cron_schedules SET %s WHERE id = ?", strings.Join(sets, ", "))
 	args = append(args, id)
-	res, err := database.ExecContext(ctx, rebindQuery(query, isPostgres(database)), args...)
+	query := fmt.Sprintf("UPDATE cron_schedules SET %s WHERE id = $%d", strings.Join(sets, ", "), len(args))
+	res, err := database.ExecContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}
@@ -445,7 +412,7 @@ func DeleteSchedule(ctx context.Context, database *sql.DB, scheduleID string) (b
 	}
 	var total int64
 	for _, tbl := range []string{"cron_schedules", "one_shot_schedules", "heartbeat_schedules", "event_triggers"} {
-		res, err := database.ExecContext(ctx, rebindQuery("DELETE FROM "+tbl+" WHERE id = ?", isPostgres(database)), scheduleID)
+		res, err := database.ExecContext(ctx, "DELETE FROM "+tbl+" WHERE id = $1", scheduleID)
 		if err != nil {
 			return false, err
 		}
@@ -463,8 +430,8 @@ func GetDueCronSchedules(ctx context.Context, database *sql.DB, now time.Time) (
 	if err != nil {
 		return nil, err
 	}
-	baseQuery := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM cron_schedules WHERE enabled = TRUE AND next_run_at <= ? ORDER BY next_run_at ASC`
-	rows, err := database.QueryContext(ctx, rebindQuery(baseQuery, isPostgres(database)), now)
+	baseQuery := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM cron_schedules WHERE enabled = TRUE AND next_run_at <= $1 ORDER BY next_run_at ASC`
+	rows, err := database.QueryContext(ctx, baseQuery, now)
 	if err != nil {
 		return nil, err
 	}
@@ -490,7 +457,7 @@ func AdvanceCronNextRun(ctx context.Context, database *sql.DB, id string, nextRu
 	if id == "" {
 		return fmt.Errorf("schedule_id cannot be empty")
 	}
-	query := rebindQuery(`UPDATE cron_schedules SET next_run_at = ? WHERE id = ?`, isPostgres(database))
+	query := `UPDATE cron_schedules SET next_run_at = $1 WHERE id = $2`
 	res, err := database.ExecContext(ctx, query, nextRun, id)
 	if err != nil {
 		return err
@@ -510,8 +477,8 @@ func GetDueHeartbeatSchedules(ctx context.Context, database *sql.DB, now time.Ti
 	if err != nil {
 		return nil, err
 	}
-	baseQuery := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'low') FROM heartbeat_schedules WHERE enabled = TRUE AND next_run_at <= ? ORDER BY next_run_at ASC`
-	rows, err := database.QueryContext(ctx, rebindQuery(baseQuery, isPostgres(database)), now)
+	baseQuery := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'low') FROM heartbeat_schedules WHERE enabled = TRUE AND next_run_at <= $1 ORDER BY next_run_at ASC`
+	rows, err := database.QueryContext(ctx, baseQuery, now)
 	if err != nil {
 		return nil, err
 	}
@@ -537,7 +504,7 @@ func AdvanceHeartbeatNextRun(ctx context.Context, database *sql.DB, id string, n
 	if id == "" {
 		return fmt.Errorf("schedule_id cannot be empty")
 	}
-	query := rebindQuery(`UPDATE heartbeat_schedules SET next_run_at = ? WHERE id = ?`, isPostgres(database))
+	query := `UPDATE heartbeat_schedules SET next_run_at = $1 WHERE id = $2`
 	res, err := database.ExecContext(ctx, query, nextRun, id)
 	if err != nil {
 		return err
@@ -557,8 +524,8 @@ func GetDueOneShotSchedules(ctx context.Context, database *sql.DB, now time.Time
 	if err != nil {
 		return nil, err
 	}
-	baseQuery := `SELECT id, thread_id, prompt, run_at, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM one_shot_schedules WHERE run_at <= ? ORDER BY run_at ASC`
-	rows, err := database.QueryContext(ctx, rebindQuery(baseQuery, isPostgres(database)), now)
+	baseQuery := `SELECT id, thread_id, prompt, run_at, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM one_shot_schedules WHERE run_at <= $1 ORDER BY run_at ASC`
+	rows, err := database.QueryContext(ctx, baseQuery, now)
 	if err != nil {
 		return nil, err
 	}
@@ -584,7 +551,7 @@ func DeleteOneShotSchedule(ctx context.Context, database *sql.DB, id string) (bo
 	if id == "" {
 		return false, fmt.Errorf("schedule_id cannot be empty")
 	}
-	query := rebindQuery(`DELETE FROM one_shot_schedules WHERE id = ?`, isPostgres(database))
+	query := `DELETE FROM one_shot_schedules WHERE id = $1`
 	res, err := database.ExecContext(ctx, query, id)
 	if err != nil {
 		return false, err
@@ -607,7 +574,7 @@ func CreateScheduleRun(ctx context.Context, database *sql.DB, r ScheduleRun) err
 	if r.StartedAt.IsZero() {
 		r.StartedAt = time.Now().UTC()
 	}
-	query := rebindQuery(`INSERT INTO schedule_runs (id, schedule_id, schedule_type, message_id, target_id, thread_id, title, prompt, status, started_at, completed_at, duration_ms, error, effort, model) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, isPostgres(database))
+	query := `INSERT INTO schedule_runs (id, schedule_id, schedule_type, message_id, target_id, thread_id, title, prompt, status, started_at, completed_at, duration_ms, error, effort, model) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`
 	_, err = database.ExecContext(ctx, query,
 		r.ID,
 		r.ScheduleID,
@@ -634,7 +601,7 @@ func PruneScheduleRuns(ctx context.Context, database *sql.DB, maxCount int, maxA
 		return 0, err
 	}
 	cutoff := now.Add(-maxAge)
-	query := rebindQuery(`DELETE FROM schedule_runs WHERE started_at < ? OR id NOT IN (SELECT id FROM schedule_runs ORDER BY started_at DESC, id DESC LIMIT ?)`, isPostgres(database))
+	query := `DELETE FROM schedule_runs WHERE started_at < $1 OR id NOT IN (SELECT id FROM schedule_runs ORDER BY started_at DESC, id DESC LIMIT $2)`
 	res, err := database.ExecContext(ctx, query, cutoff, maxCount)
 	if err != nil {
 		return 0, err
@@ -767,7 +734,7 @@ func InsertEventTrigger(ctx context.Context, database *sql.DB, t EventTrigger) e
 	if err != nil {
 		effort = "medium"
 	}
-	query := rebindQuery(`INSERT INTO event_triggers (id, channel_id, source, target, event_type, prompt, effort, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, isPostgres(database))
+	query := `INSERT INTO event_triggers (id, channel_id, source, target, event_type, prompt, effort, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
 	_, err = database.ExecContext(ctx, query, t.ID, t.ChannelID, t.Source, t.Target, t.EventType, t.Prompt, effort, t.CreatedAt)
 	return err
 }
@@ -782,10 +749,10 @@ func ListEventTriggers(ctx context.Context, database *sql.DB, channelID string) 
 	var query string
 	var rows *sql.Rows
 	if channelID != "" {
-		query = rebindQuery(`SELECT id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at FROM event_triggers WHERE channel_id = ? ORDER BY created_at ASC`, isPostgres(database))
+		query = `SELECT id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at FROM event_triggers WHERE channel_id = $1 ORDER BY created_at ASC`
 		rows, err = database.QueryContext(ctx, query, channelID)
 	} else {
-		query = rebindQuery(`SELECT id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at FROM event_triggers ORDER BY created_at ASC`, isPostgres(database))
+		query = `SELECT id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at FROM event_triggers ORDER BY created_at ASC`
 		rows, err = database.QueryContext(ctx, query)
 	}
 	if err != nil {
@@ -831,11 +798,11 @@ func ClaimEventTriggers(ctx context.Context, database *sql.DB, source string, ta
 	args := make([]any, 0, 2+len(cleanTargets))
 	args = append(args, source, eventType)
 	for i, t := range cleanTargets {
-		placeholders[i] = "?"
+		placeholders[i] = fmt.Sprintf("$%d", i+3)
 		args = append(args, t)
 	}
-	rawQuery := fmt.Sprintf(`DELETE FROM event_triggers WHERE source = ? AND event_type = ? AND target IN (%s) RETURNING id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at`, strings.Join(placeholders, ", "))
-	rows, err := database.QueryContext(ctx, rebindQuery(rawQuery, isPostgres(database)), args...)
+	rawQuery := fmt.Sprintf(`DELETE FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) RETURNING id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at`, strings.Join(placeholders, ", "))
+	rows, err := database.QueryContext(ctx, rawQuery, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -852,7 +819,7 @@ func DeleteEventTrigger(ctx context.Context, database *sql.DB, id string) (bool,
 	if id == "" {
 		return false, fmt.Errorf("id cannot be empty")
 	}
-	query := rebindQuery(`DELETE FROM event_triggers WHERE id = ?`, isPostgres(database))
+	query := `DELETE FROM event_triggers WHERE id = $1`
 	res, err := database.ExecContext(ctx, query, id)
 	if err != nil {
 		return false, err
@@ -889,7 +856,7 @@ func findEarliestNextRun(crons []CronSchedule, heartbeats []HeartbeatSchedule, o
 
 func compute24hRunMetrics(ctx context.Context, database *sql.DB) (int, float64, error) {
 	cutoff := time.Now().UTC().Add(-24 * time.Hour)
-	query := rebindQuery(`SELECT status FROM schedule_runs WHERE started_at >= ?`, isPostgres(database))
+	query := `SELECT status FROM schedule_runs WHERE started_at >= $1`
 	rows, err := database.QueryContext(ctx, query, cutoff)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to query schedule runs for 24h metrics: %w", err)
@@ -975,26 +942,27 @@ func GetScheduleRunsPaginated(ctx context.Context, database *sql.DB, limit, offs
 	whereClause := " WHERE 1=1"
 	var filterArgs []any
 	if trimmedID := strings.TrimSpace(scheduleID); trimmedID != "" {
-		whereClause += " AND schedule_id = ?"
 		filterArgs = append(filterArgs, trimmedID)
+		whereClause += fmt.Sprintf(" AND schedule_id = $%d", len(filterArgs))
 	}
 	if trimmedStatus := strings.TrimSpace(status); trimmedStatus != "" {
-		whereClause += " AND LOWER(status) = LOWER(?)"
 		filterArgs = append(filterArgs, trimmedStatus)
+		whereClause += fmt.Sprintf(" AND LOWER(status) = LOWER($%d)", len(filterArgs))
 	}
 
-	countQuery := rebindQuery("SELECT COUNT(*) FROM schedule_runs"+whereClause, isPostgres(database))
+	countQuery := "SELECT COUNT(*) FROM schedule_runs" + whereClause
 	var total int
 	if err := database.QueryRowContext(ctx, countQuery, filterArgs...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("failed to count schedule runs: %w", err)
 	}
 
-	selectQuery := "SELECT id, schedule_id, schedule_type, COALESCE(message_id, ''), COALESCE(target_id, ''), COALESCE(thread_id, ''), COALESCE(title, ''), COALESCE(prompt, ''), started_at, completed_at, COALESCE(duration_ms, 0), status, COALESCE(error, '') FROM schedule_runs" + whereClause + " ORDER BY started_at DESC LIMIT ? OFFSET ?"
-	selectQuery = rebindQuery(selectQuery, isPostgres(database))
-
 	selectArgs := make([]any, len(filterArgs), len(filterArgs)+2)
 	copy(selectArgs, filterArgs)
 	selectArgs = append(selectArgs, limit, offset)
+	limitParam := len(selectArgs) - 1
+	offsetParam := len(selectArgs)
+
+	selectQuery := fmt.Sprintf("SELECT id, schedule_id, schedule_type, COALESCE(message_id, ''), COALESCE(target_id, ''), COALESCE(thread_id, ''), COALESCE(title, ''), COALESCE(prompt, ''), started_at, completed_at, COALESCE(duration_ms, 0), status, COALESCE(error, '') FROM schedule_runs%s ORDER BY started_at DESC LIMIT $%d OFFSET $%d", whereClause, limitParam, offsetParam)
 
 	rows, err := database.QueryContext(ctx, selectQuery, selectArgs...)
 	if err != nil {
