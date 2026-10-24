@@ -367,27 +367,124 @@ func (f *FakeStore) SetSessionUpdatedAt(threadID string, t time.Time) {
 	})
 }
 
-func (f *FakeStore) GetActiveTasks(ctx context.Context) ([]db.ActiveTask, error) {
+func matchesTaskFilter(m *db.Message, flt db.TasksFilter) bool {
+	if len(flt.Statuses) > 0 {
+		statusMatch := false
+		for _, st := range flt.Statuses {
+			if strings.EqualFold(m.Status, strings.TrimSpace(st)) {
+				statusMatch = true
+				break
+			}
+		}
+		if !statusMatch {
+			return false
+		}
+	}
+	if flt.ThreadID != "" && m.ThreadID != flt.ThreadID {
+		return false
+	}
+	if flt.IsAdmin != nil && m.IsAdmin != *flt.IsAdmin {
+		return false
+	}
+	if !flt.Since.IsZero() && m.UpdatedAt.Before(flt.Since) {
+		return false
+	}
+	if flt.AfterRowID > 0 && m.RowID <= flt.AfterRowID {
+		return false
+	}
+	if flt.BeforeRowID > 0 && m.RowID > flt.BeforeRowID {
+		return false
+	}
+	return true
+}
+
+func buildActiveTaskRecord(m *db.Message, sess *db.SessionInfo, threadSummary string) db.ActiveTask {
+	summary := m.Summary
+	if summary == "" {
+		summary = db.CleanTaskSummary(m.Content)
+	}
+	var sessID, prevSessID string
+	if sess != nil {
+		sessID = sess.InternalSessionID
+		prevSessID = sess.PreviousSessionID
+	}
+	return db.ActiveTask{
+		ID:                m.ID,
+		RowID:             m.RowID,
+		ThreadID:          m.ThreadID,
+		SessionID:         sessID,
+		PreviousSessionID: prevSessID,
+		ThreadSummary:     threadSummary,
+		AuthorName:        m.AuthorName,
+		AuthorID:          m.AuthorID,
+		Prompt:            m.Content,
+		Summary:           summary,
+		ResponseText:      m.ResponseText,
+		IsAdmin:           m.IsAdmin,
+		Status:            m.Status,
+		RetryCount:        m.RetryCount,
+		ScheduleRunID:     m.ScheduleRunID,
+		TriggerType:       db.InferTriggerType(m.AuthorID, m.ScheduleRunID),
+		CreatedAt:         m.CreatedAt,
+		UpdatedAt:         m.UpdatedAt,
+	}
+}
+
+func (f *FakeStore) GetActiveTasks(ctx context.Context, filter ...db.TasksFilter) ([]db.ActiveTask, error) {
 	return withFakeLock(f, "GetActiveTasks", func() ([]db.ActiveTask, error) {
-		var activeMsgs []*db.Message
+		var hasFilter bool
+		var flt db.TasksFilter
+		if len(filter) > 0 && !filter[0].IsZero() {
+			hasFilter = true
+			flt = filter[0]
+		}
+
+		var matchedMsgs []*db.Message
 		for _, id := range f.messageOrder {
-			if m := f.messages[id]; m != nil && (m.Status == db.StatusPending || m.Status == db.StatusProcessing) {
-				activeMsgs = append(activeMsgs, m)
+			m := f.messages[id]
+			if m == nil {
+				continue
+			}
+			if !hasFilter {
+				if m.Status == db.StatusPending || m.Status == db.StatusProcessing {
+					matchedMsgs = append(matchedMsgs, m)
+				}
+				continue
+			}
+			if matchesTaskFilter(m, flt) {
+				matchedMsgs = append(matchedMsgs, m)
 			}
 		}
-		sort.Slice(activeMsgs, func(i, j int) bool {
-			return activeMsgs[i].CreatedAt.Before(activeMsgs[j].CreatedAt) || (activeMsgs[i].CreatedAt.Equal(activeMsgs[j].CreatedAt) && activeMsgs[i].ID < activeMsgs[j].ID)
-		})
-		if len(activeMsgs) > 50 {
-			activeMsgs = activeMsgs[:50]
-		}
-		tasks := make([]db.ActiveTask, len(activeMsgs))
-		for i, m := range activeMsgs {
-			summary := m.Summary
-			if summary == "" {
-				summary = db.CleanTaskSummary(m.Content)
+
+		limit := 50
+		if !hasFilter {
+			sort.Slice(matchedMsgs, func(i, j int) bool {
+				return matchedMsgs[i].CreatedAt.Before(matchedMsgs[j].CreatedAt) || (matchedMsgs[i].CreatedAt.Equal(matchedMsgs[j].CreatedAt) && matchedMsgs[i].ID < matchedMsgs[j].ID)
+			})
+		} else {
+			if flt.AfterRowID > 0 {
+				sort.Slice(matchedMsgs, func(i, j int) bool {
+					return matchedMsgs[i].RowID < matchedMsgs[j].RowID
+				})
+			} else {
+				sort.Slice(matchedMsgs, func(i, j int) bool {
+					return matchedMsgs[i].RowID > matchedMsgs[j].RowID
+				})
 			}
-			tasks[i] = db.ActiveTask{ID: m.ID, RowID: m.RowID, ThreadID: m.ThreadID, SessionID: sessionInternalID(f.sessions[m.ThreadID]), AuthorName: m.AuthorName, AuthorID: m.AuthorID, Prompt: m.Content, Summary: summary, Status: m.Status, RetryCount: m.RetryCount, ScheduleRunID: m.ScheduleRunID, CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt}
+			if flt.Limit > 0 {
+				limit = flt.Limit
+				if limit > 200 {
+					limit = 200
+				}
+			}
+		}
+
+		if len(matchedMsgs) > limit {
+			matchedMsgs = matchedMsgs[:limit]
+		}
+		tasks := make([]db.ActiveTask, len(matchedMsgs))
+		for i, m := range matchedMsgs {
+			tasks[i] = buildActiveTaskRecord(m, f.sessions[m.ThreadID], f.threadSummaries[m.ThreadID].summary)
 		}
 		return tasks, nil
 	})
@@ -526,19 +623,6 @@ func (f *FakeStore) SetSessionInfo(s db.SessionInfo) {
 	f.withLock(func() { f.sessions[s.ThreadID] = clonePtr(&s) })
 }
 
-func (f *FakeStore) GetExternalConversationID(ctx context.Context, internalID string) (string, error) {
-	return withFakeLock(f, "GetExternalConversationID", func() (string, error) {
-		if internalID != "" {
-			for threadID, sess := range f.sessions {
-				if sess != nil && sess.InternalSessionID == internalID {
-					return threadID, nil
-				}
-			}
-		}
-		return "", nil
-	})
-}
-
 func (f *FakeStore) GetSessionSyncStates(ctx context.Context) (map[string]db.SessionSyncState, error) {
 	return withFakeLock(f, "GetSessionSyncStates", func() (map[string]db.SessionSyncState, error) {
 		res := make(map[string]db.SessionSyncState, len(f.sessionSummaries))
@@ -653,21 +737,53 @@ func (f *FakeStore) SearchSessionSummaries(ctx context.Context, embedding []floa
 	})
 }
 
-func (f *FakeStore) SearchTranscriptSteps(ctx context.Context, queryText, sessionFilter, toolFilter string, limit int) ([]db.TranscriptStep, error) {
+func parseAllowedSessions(filter string) map[string]bool {
+	if filter == "" {
+		return nil
+	}
+	allowed := make(map[string]bool)
+	for _, sid := range strings.Split(filter, ",") {
+		if trimmed := strings.TrimSpace(sid); trimmed != "" {
+			allowed[trimmed] = true
+		}
+	}
+	return allowed
+}
+
+func matchesTranscriptStep(s db.TranscriptStep, toolFilter string, sinceTime time.Time, queryText, qLower string, words []string) bool {
+	if toolFilter != "" && s.ToolName != toolFilter {
+		return false
+	}
+	if !sinceTime.IsZero() && !s.CreatedAt.After(sinceTime) {
+		return false
+	}
+	if queryText != "" && !textContainsAll(s.Content, qLower, words) {
+		return false
+	}
+	return true
+}
+
+func (f *FakeStore) SearchTranscriptSteps(ctx context.Context, queryText, sessionFilter, toolFilter string, limit int, since ...time.Time) ([]db.TranscriptStep, error) {
 	return withFakeLock(f, "SearchTranscriptSteps", func() ([]db.TranscriptStep, error) {
 		queryText, sessionFilter, toolFilter = strings.TrimSpace(queryText), strings.TrimSpace(sessionFilter), strings.TrimSpace(toolFilter)
-		if queryText == "" && sessionFilter == "" && toolFilter == "" {
+		var sinceTime time.Time
+		if len(since) > 0 {
+			sinceTime = since[0]
+		}
+		if queryText == "" && sessionFilter == "" && toolFilter == "" && sinceTime.IsZero() {
 			return nil, nil
 		}
 		limit = defaultVal(limit, 20)
 		qLower, words := strings.ToLower(queryText), strings.Fields(strings.ToLower(queryText))
+		allowedSessions := parseAllowedSessions(sessionFilter)
+
 		var matched []db.TranscriptStep
 		for sid, steps := range f.transcriptSteps {
-			if sessionFilter != "" && sid != sessionFilter {
+			if allowedSessions != nil && !allowedSessions[sid] {
 				continue
 			}
 			for _, s := range steps {
-				if (toolFilter != "" && s.ToolName != toolFilter) || (queryText != "" && !textContainsAll(s.Content, qLower, words)) {
+				if !matchesTranscriptStep(s, toolFilter, sinceTime, queryText, qLower, words) {
 					continue
 				}
 				cp := s
@@ -675,7 +791,17 @@ func (f *FakeStore) SearchTranscriptSteps(ctx context.Context, queryText, sessio
 				matched = append(matched, cp)
 			}
 		}
-		sort.Slice(matched, func(i, j int) bool { return matched[i].CreatedAt.After(matched[j].CreatedAt) })
+
+		if !sinceTime.IsZero() && queryText == "" {
+			sort.Slice(matched, func(i, j int) bool {
+				if matched[i].CreatedAt.Equal(matched[j].CreatedAt) {
+					return matched[i].StepIndex < matched[j].StepIndex
+				}
+				return matched[i].CreatedAt.Before(matched[j].CreatedAt)
+			})
+		} else {
+			sort.Slice(matched, func(i, j int) bool { return matched[i].CreatedAt.After(matched[j].CreatedAt) })
+		}
 		return matched[:min(limit, len(matched))], nil
 	})
 }

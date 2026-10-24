@@ -40,7 +40,7 @@ type MessageStore interface {
 	GetActiveRecentThreadIDs(ctx context.Context, since time.Duration) ([]string, error)
 	GetRecentThreadMessages(ctx context.Context, threadID string, limit int) ([]Message, error)
 	HasActiveThreadTurn(ctx context.Context, threadID string) (bool, error)
-	GetActiveTasks(ctx context.Context) ([]ActiveTask, error)
+	GetActiveTasks(ctx context.Context, filter ...TasksFilter) ([]ActiveTask, error)
 }
 
 // SessionStore handles thread turn counts and session rotations.
@@ -54,7 +54,6 @@ type SessionStore interface {
 	GetThreadSummary(ctx context.Context, threadID string) (summary string, lastSummarizedMsgID string, err error)
 	SaveThreadSummary(ctx context.Context, threadID, summary, lastSummarizedMsgID string) error
 	GetSessionActivityStats(ctx context.Context, threadID string) (*SessionActivityStats, error)
-	GetExternalConversationID(ctx context.Context, internalID string) (string, error)
 	FindUnrotatedSessions(ctx context.Context, minTurns int, maxAge ...time.Duration) ([]SessionInfo, error)
 }
 
@@ -98,7 +97,7 @@ type TranscriptStore interface {
 	UpsertSessionSummary(ctx context.Context, summary SessionSummary) error
 	BatchInsertTranscriptSteps(ctx context.Context, steps []TranscriptStep) error
 	SearchSessionSummaries(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) ([]SessionSummary, error)
-	SearchTranscriptSteps(ctx context.Context, queryText, sessionFilter, toolFilter string, limit int) ([]TranscriptStep, error)
+	SearchTranscriptSteps(ctx context.Context, queryText, sessionFilter, toolFilter string, limit int, since ...time.Time) ([]TranscriptStep, error)
 	GetTranscriptStepRange(ctx context.Context, sessionID string, startStep, endStep int) ([]TranscriptStep, error)
 }
 

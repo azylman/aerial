@@ -153,6 +153,77 @@ func TestTranscriptStore_CascadeDelete(t *testing.T) {
 	}
 }
 
+func TestTranscriptStore_SearchTranscriptSteps_SessionFilterAndSince(t *testing.T) {
+	database := initTestSQLiteDB(t)
+	store, ctx := NewSQLStore(database), context.Background()
+
+	_ = store.UpsertSessionSummary(ctx, SessionSummary{SessionID: "sess-multi-1", ThreadID: "th-1", Summary: "Sess 1"})
+	_ = store.UpsertSessionSummary(ctx, SessionSummary{SessionID: "sess-multi-2", ThreadID: "th-2", Summary: "Sess 2"})
+
+	now := time.Now().UTC().Truncate(time.Second)
+	steps := []TranscriptStep{
+		{SessionID: "sess-multi-1", StepIndex: 0, StepType: "user_message", Content: "Msg 0", CreatedAt: now.Add(-3 * time.Minute)},
+		{SessionID: "sess-multi-1", StepIndex: 1, StepType: "tool_call", ToolName: "tool-a", Content: "Call 1", CreatedAt: now.Add(-2 * time.Minute)},
+		{SessionID: "sess-multi-2", StepIndex: 0, StepType: "tool_call", ToolName: "tool-b", Content: "Call 2", CreatedAt: now.Add(-1 * time.Minute)},
+		{SessionID: "sess-multi-2", StepIndex: 1, StepType: "model_response", Content: "Resp 2", CreatedAt: now},
+	}
+	if err := store.BatchInsertTranscriptSteps(ctx, steps); err != nil {
+		t.Fatalf("BatchInsertTranscriptSteps failed: %v", err)
+	}
+
+	tests := []struct {
+		name          string
+		query         string
+		sessFilter    string
+		toolFilter    string
+		since         time.Time
+		wantCount     int
+		wantFirstSess string
+		wantFirstStep int
+	}{
+		{
+			name:          "comma separated session filter",
+			sessFilter:    "sess-multi-1, sess-multi-2",
+			wantCount:     4,
+			wantFirstSess: "sess-multi-2", // default order created_at DESC
+			wantFirstStep: 1,
+		},
+		{
+			name:          "since filter with empty query orders asc",
+			sessFilter:    "sess-multi-1,sess-multi-2",
+			since:         now.Add(-150 * time.Second),
+			wantCount:     3,
+			wantFirstSess: "sess-multi-1", // order created_at ASC
+			wantFirstStep: 1,
+		},
+		{
+			name:          "single session with since",
+			sessFilter:    "sess-multi-2",
+			since:         now.Add(-30 * time.Second),
+			wantCount:     1,
+			wantFirstSess: "sess-multi-2",
+			wantFirstStep: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := store.SearchTranscriptSteps(ctx, tc.query, tc.sessFilter, tc.toolFilter, 10, tc.since)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(res) != tc.wantCount {
+				t.Fatalf("got count %d, want %d", len(res), tc.wantCount)
+			}
+			if tc.wantCount > 0 {
+				if res[0].SessionID != tc.wantFirstSess || res[0].StepIndex != tc.wantFirstStep {
+					t.Errorf("got first step (%s, %d), want (%s, %d)", res[0].SessionID, res[0].StepIndex, tc.wantFirstSess, tc.wantFirstStep)
+				}
+			}
+		})
+	}
+}
+
 type testCustomResult struct {
 	rows int64
 	err  error

@@ -53,7 +53,6 @@ func assertStoreUnavailable(t *testing.T, s db.Store) {
 	requireErr(t, c2(s.GetThreadSummary(ctx, "t")), "GetThreadSummary")
 	requireErr(t, s.SaveThreadSummary(ctx, "t", "s", "w"), "SaveThreadSummary")
 	requireErr(t, c1(s.GetSessionActivityStats(ctx, "t")), "GetSessionActivityStats")
-	requireErr(t, c1(s.GetExternalConversationID(ctx, "test")), "GetExternalConversationID")
 	requireErr(t, c1(s.FindUnrotatedSessions(ctx, 8)), "FindUnrotatedSessions")
 }
 
@@ -236,12 +235,6 @@ func TestFakeStoreSessionOperations(t *testing.T) {
 	}
 
 	_ = s.SaveSessionID(ctx, "ext-1", "int-1")
-	if ext, _ := s.GetExternalConversationID(ctx, "int-1"); ext != "ext-1" {
-		t.Errorf("GetExternalConversationID = %q, want ext-1", ext)
-	}
-	if ext, _ := s.GetExternalConversationID(ctx, ""); ext != "" {
-		t.Errorf("GetExternalConversationID empty = %q, want empty", ext)
-	}
 
 	for i := 0; i < 8; i++ {
 		_, _ = s.IncrementSessionTurnCount(ctx, "th-unrotated")

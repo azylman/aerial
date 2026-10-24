@@ -33,6 +33,17 @@ type SyncStats struct {
 	Duration           time.Duration `json:"duration"`
 }
 
+// SearchOptions configures parameters for transcript search.
+type SearchOptions struct {
+	Query         string    `json:"query"`
+	Mode          string    `json:"mode"`
+	SessionFilter string    `json:"session_filter,omitempty"`
+	SessionID     string    `json:"session_id,omitempty"`
+	ToolFilter    string    `json:"tool_filter,omitempty"`
+	Limit         int       `json:"limit,omitempty"`
+	Since         time.Time `json:"since,omitempty"`
+}
+
 // SearchResult aggregates hits from macro session summaries and micro transcript steps.
 type SearchResult struct {
 	Query    string              `json:"query"`

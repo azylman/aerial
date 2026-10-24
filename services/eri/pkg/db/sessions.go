@@ -39,11 +39,6 @@ func (s *SQLStore) GetPreviousSessionID(ctx context.Context, threadID string) (s
 	return s.querySessionString(ctx, threadID, "SELECT previous_session_id FROM sessions WHERE thread_id = $1")
 }
 
-// GetExternalConversationID retrieves the external thread ID given an internal session ID.
-func (s *SQLStore) GetExternalConversationID(ctx context.Context, internalID string) (string, error) {
-	return s.querySessionString(ctx, internalID, "SELECT thread_id FROM sessions WHERE internal_session_id = $1")
-}
-
 var dbTimeLayouts = []string{
 	"2006-01-02 15:04:05.999999999 -0700 MST", "2006-01-02 15:04:05.999999999 -0700 -0700",
 	"2006-01-02 15:04:05.999999999-07:00", "2006-01-02 15:04:05.999999999",

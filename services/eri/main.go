@@ -504,128 +504,6 @@ func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 	}
 }
 
-func handleTranscripts(store db.Store, searchPaths ...string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		type TranscriptEntry struct {
-			Path       string `json:"path"`
-			ModTime    string `json:"mod_time"`
-			TotalSteps int    `json:"total_steps"`
-			LastStatus string `json:"last_status"`
-			LastError  string `json:"last_error,omitempty"`
-			ExternalID string `json:"external_id,omitempty"`
-			RawJSONL   string `json:"raw_jsonl,omitempty"`
-		}
-
-		results := make([]TranscriptEntry, 0)
-		seen := make(map[string]bool)
-		includeRaw := r.URL.Query().Get("include_raw") == "true"
-
-		for _, root := range searchPaths {
-			root = strings.TrimSpace(root)
-			if root == "" {
-				continue
-			}
-			entries, err := os.ReadDir(root)
-			if err != nil {
-				continue
-			}
-
-			for _, entry := range entries {
-				if !entry.IsDir() {
-					continue
-				}
-
-				internalID := entry.Name()
-				if seen[internalID] {
-					continue
-				}
-				tPath := filepath.Join(root, internalID, ".system_generated", "logs", "transcript_full.jsonl")
-				tStat, err := os.Stat(tPath)
-				if err != nil {
-					tPath = filepath.Join(root, internalID, ".system_generated", "logs", "transcript.jsonl")
-					tStat, err = os.Stat(tPath)
-					if err != nil {
-						tStat = nil
-					}
-				}
-
-				data, err := os.ReadFile(tPath)
-				if err != nil {
-					continue
-				}
-
-				modTime := ""
-				if tStat != nil {
-					modTime = tStat.ModTime().Format(time.RFC3339)
-				}
-				lines := strings.Split(string(data), "\n")
-				totalSteps := 0
-				lastStatus := "UNKNOWN"
-				lastError := ""
-
-				for _, line := range lines {
-					line = strings.TrimSpace(line)
-					if line == "" {
-						continue
-					}
-					totalSteps++
-
-					var step struct {
-						Status string `json:"status"`
-						Error  any    `json:"error"`
-					}
-					if err := json.Unmarshal([]byte(line), &step); err == nil {
-						if step.Status != "" {
-							lastStatus = step.Status
-						}
-						if step.Error != nil {
-							switch v := step.Error.(type) {
-							case string:
-								if trimmed := strings.TrimSpace(v); trimmed != "" {
-									lastError = trimmed
-								}
-							case map[string]interface{}:
-								if b, err := json.Marshal(v); err == nil {
-									lastError = string(b)
-								}
-							default:
-								if s := strings.TrimSpace(fmt.Sprintf("%v", v)); s != "" && s != "<nil>" {
-									lastError = s
-								}
-							}
-						}
-					}
-				}
-
-				var extID string
-				if store != nil {
-					var err error
-					extID, err = store.GetExternalConversationID(r.Context(), internalID)
-					if err != nil {
-						log.Printf("Warning: GetExternalConversationID error for %s: %v", internalID, err)
-					}
-				}
-
-				item := TranscriptEntry{
-					Path:       tPath,
-					ModTime:    modTime,
-					TotalSteps: totalSteps,
-					LastStatus: lastStatus,
-					LastError:  lastError,
-					ExternalID: extID,
-				}
-				if includeRaw {
-					item.RawJSONL = string(data)
-				}
-				seen[internalID] = true
-				results = append(results, item)
-			}
-		}
-
-		writeJSON(w, http.StatusOK, results)
-	}
-}
-
 func requireGetWithStore(w http.ResponseWriter, r *http.Request, storeNil bool) bool {
 	if r.Method != http.MethodGet {
 		writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -659,7 +537,22 @@ func handleTranscriptSearch(store db.TranscriptStore, embedder transcript.Embedd
 			}
 		}
 
-		res, err := transcript.SearchTranscripts(r.Context(), store, embedder, q, mode, session, tool, limit)
+		var since time.Time
+		if sinceStr := strings.TrimSpace(r.URL.Query().Get("since")); sinceStr != "" {
+			if t, err := time.Parse(time.RFC3339, sinceStr); err == nil {
+				since = t
+			}
+		}
+
+		res, err := transcript.ExecuteTranscriptSearch(r.Context(), store, embedder, transcript.SearchOptions{
+			Query:         q,
+			Mode:          mode,
+			SessionFilter: session,
+			SessionID:     session,
+			ToolFilter:    tool,
+			Limit:         limit,
+			Since:         since,
+		})
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
@@ -816,6 +709,70 @@ type tasksCache struct {
 	expiresAt time.Time
 }
 
+func parseTasksFilter(q url.Values) (db.TasksFilter, bool) {
+	var filter db.TasksFilter
+	hasFilter := false
+
+	if statusParam := strings.TrimSpace(q.Get("status")); statusParam != "" {
+		for _, p := range strings.Split(statusParam, ",") {
+			if trimmed := strings.TrimSpace(p); trimmed != "" {
+				filter.Statuses = append(filter.Statuses, trimmed)
+			}
+		}
+		if len(filter.Statuses) > 0 {
+			hasFilter = true
+		}
+	}
+	if threadID := strings.TrimSpace(q.Get("thread_id")); threadID != "" {
+		filter.ThreadID = threadID
+		hasFilter = true
+	}
+	if adminParam := strings.TrimSpace(q.Get("is_admin")); adminParam != "" {
+		if val, err := strconv.ParseBool(adminParam); err == nil {
+			filter.IsAdmin = &val
+			hasFilter = true
+		}
+	}
+	if sinceParam := strings.TrimSpace(q.Get("since")); sinceParam != "" {
+		if t, err := time.Parse(time.RFC3339, sinceParam); err == nil {
+			filter.Since = t
+			hasFilter = true
+		}
+	}
+	if afterParam := strings.TrimSpace(q.Get("after_row_id")); afterParam != "" {
+		if id, err := strconv.ParseInt(afterParam, 10, 64); err == nil {
+			filter.AfterRowID = id
+			hasFilter = true
+		}
+	}
+	if beforeParam := strings.TrimSpace(q.Get("before_row_id")); beforeParam != "" {
+		if id, err := strconv.ParseInt(beforeParam, 10, 64); err == nil {
+			filter.BeforeRowID = id
+			hasFilter = true
+		}
+	}
+	if limitParam := strings.TrimSpace(q.Get("limit")); limitParam != "" {
+		if l, err := strconv.Atoi(limitParam); err == nil && l > 0 {
+			filter.Limit = l
+			hasFilter = true
+		}
+	}
+	return filter, hasFilter
+}
+
+func sanitizeActiveTasks(rawTasks []db.ActiveTask) []db.ActiveTask {
+	tasks := make([]db.ActiveTask, 0, len(rawTasks))
+	for _, task := range rawTasks {
+		task.Prompt = sanitizer.SanitizeString(task.Prompt)
+		task.Summary = sanitizer.SanitizeString(task.Summary)
+		task.ResponseText = sanitizer.SanitizeString(task.ResponseText)
+		task.ThreadSummary = sanitizer.SanitizeString(task.ThreadSummary)
+		task.AuthorName = sanitizer.SanitizeString(sanitizer.SanitizeAuthor(task.AuthorName))
+		tasks = append(tasks, task)
+	}
+	return tasks
+}
+
 func handleTasks(store db.Store) http.HandlerFunc {
 	cache := &tasksCache{}
 
@@ -824,42 +781,45 @@ func handleTasks(store db.Store) http.HandlerFunc {
 			return
 		}
 
+		filter, hasFilter := parseTasksFilter(r.URL.Query())
 		now := time.Now().UTC()
 
-		cache.mu.Lock()
-		defer cache.mu.Unlock()
-
-		if now.Before(cache.expiresAt) && cache.tasks != nil {
-			setNoCacheJSONHeaders(w)
-			writeJSON(w, http.StatusOK, TasksResponse{
-				Status: "ok",
-				Total:  len(cache.tasks),
-				Tasks:  cache.tasks,
-			})
-			return
+		if !hasFilter {
+			cache.mu.Lock()
+			if now.Before(cache.expiresAt) && cache.tasks != nil {
+				cached := cache.tasks
+				cache.mu.Unlock()
+				setNoCacheJSONHeaders(w)
+				writeJSON(w, http.StatusOK, TasksResponse{
+					Status: "ok",
+					Total:  len(cached),
+					Tasks:  cached,
+				})
+				return
+			}
+			cache.mu.Unlock()
 		}
 
-		rawTasks, err := store.GetActiveTasks(r.Context())
+		var rawTasks []db.ActiveTask
+		var err error
+		if hasFilter {
+			rawTasks, err = store.GetActiveTasks(r.Context(), filter)
+		} else {
+			rawTasks, err = store.GetActiveTasks(r.Context())
+		}
 		if err != nil {
 			writeStoreErr(w, "active tasks", err)
 			return
 		}
 
-		tasks := make([]db.ActiveTask, 0, len(rawTasks))
-		for _, task := range rawTasks {
-			sanitizedPrompt := sanitizer.SanitizeString(task.Prompt)
-			runes := []rune(sanitizedPrompt)
-			if len(runes) > 500 {
-				sanitizedPrompt = string(runes[:500]) + "..."
-			}
-			task.Prompt = sanitizedPrompt
-			task.Summary = sanitizer.SanitizeString(task.Summary)
-			task.AuthorName = sanitizer.SanitizeString(sanitizer.SanitizeAuthor(task.AuthorName))
-			tasks = append(tasks, task)
-		}
+		tasks := sanitizeActiveTasks(rawTasks)
 
-		cache.tasks = tasks
-		cache.expiresAt = now.Add(1 * time.Second)
+		if !hasFilter {
+			cache.mu.Lock()
+			cache.tasks = tasks
+			cache.expiresAt = now.Add(1 * time.Second)
+			cache.mu.Unlock()
+		}
 
 		setNoCacheJSONHeaders(w)
 		writeJSON(w, http.StatusOK, TasksResponse{
@@ -888,11 +848,11 @@ func (rec *statusRecorder) Flush() {
 
 func normalizeRoute(path string) string {
 	switch {
-	case path == "/prompt", path == "/schedules", path == "/schedules/runs", path == "/health", path == "/metrics", path == "/internal/llm":
+	case path == "/prompt", path == "/health", path == "/metrics", path == "/internal/llm":
 		return path
 	case path == "/voice/ask" || path == "/api/voice/ask":
 		return "/voice/ask"
-	case path == "/transcripts" || strings.HasPrefix(path, "/transcripts/") || strings.HasPrefix(path, "/api/transcripts"):
+	case strings.HasPrefix(path, "/transcripts/") || strings.HasPrefix(path, "/api/transcripts"):
 		return "/transcripts"
 	case path == "/tasks" || strings.HasPrefix(path, "/tasks/"):
 		return "/tasks"
@@ -927,6 +887,7 @@ var (
 )
 
 func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, embedder transcript.EmbedderFunc, searchPaths ...string) *http.ServeMux {
+	_ = searchPaths
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
 	mux.HandleFunc("/prompt", handlePrompt(store, pool))
@@ -934,7 +895,6 @@ func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, embedder 
 	mux.HandleFunc("/discord/widget", handleStatusWidget(pool))
 	mux.HandleFunc("/voice/ask", handleVoiceAsk(pool))
 	mux.HandleFunc("/api/voice/ask", handleVoiceAsk(pool))
-	mux.HandleFunc("/transcripts", handleTranscripts(store, searchPaths...))
 	mux.HandleFunc("/transcripts/search", handleTranscriptSearch(store, embedder))
 	mux.HandleFunc("/api/transcripts/search", handleTranscriptSearch(store, embedder))
 	mux.HandleFunc("/transcripts/stats", handleTranscriptStats(store))

@@ -282,9 +282,6 @@ func TestSessionLifecycle(t *testing.T) {
 
 	// 4. External conversation mapping
 	_ = store.SaveSessionID(ctx, "ext-1", "int-1")
-	if ext, _ := store.GetExternalConversationID(ctx, "int-1"); ext != "ext-1" {
-		t.Errorf("GetExternalConversationID = %q, want ext-1", ext)
-	}
 
 	// 5. Unrotated sessions
 	for i := 0; i < 10; i++ {
@@ -336,9 +333,6 @@ func TestSessionLifecycle(t *testing.T) {
 	assertErr(t, store.RotateSessionID(ctx, "", "s2"), "RotateSessionID empty key")
 	if prev, err := store.GetPreviousSessionID(ctx, ""); err != nil || prev != "" {
 		t.Errorf("GetPreviousSessionID empty key = %q, %v", prev, err)
-	}
-	if ext, err := store.GetExternalConversationID(ctx, ""); err != nil || ext != "" {
-		t.Errorf("GetExternalConversationID empty key = %q, %v", ext, err)
 	}
 }
 
@@ -404,4 +398,134 @@ func TestTaskHelpers(t *testing.T) {
 	// CloseWarn
 	closer := &dummyTestCloser{err: errors.New("dummy close error")}
 	closeWarn(closer, "test closer")
+}
+
+func TestGetActiveTasks_FiltersAndOrdering(t *testing.T) {
+	database, err := initTestSQLite(filepath.Join(t.TempDir(), "aerial_tasks_test.db"))
+	if err != nil {
+		t.Fatalf("initTestSQLite failed: %v", err)
+	}
+	defer database.Close()
+	store := NewSQLStore(database)
+	ctx := context.Background()
+
+	// Seed session metadata
+	_, err = database.Exec(`INSERT INTO sessions (thread_id, internal_session_id, previous_session_id, summary) VALUES ('th-filter', 'int-sess-1', 'prev-sess-0', 'Summary of thread filter');`)
+	if err != nil {
+		t.Fatalf("seed session failed: %v", err)
+	}
+
+	adminTrue := true
+	adminFalse := false
+	now := time.Now().UTC().Truncate(time.Second)
+
+	_ = store.InsertMessage(ctx, Message{
+		ID:           "msg-f1",
+		ThreadID:     "th-filter",
+		Content:      "Prompt 1",
+		Summary:      "Summary 1",
+		ResponseText: "Response 1",
+		Status:       StatusCompleted,
+		IsAdmin:      true,
+		CreatedAt:    now.Add(-3 * time.Minute),
+		UpdatedAt:    now.Add(-3 * time.Minute),
+	})
+	_ = store.InsertMessage(ctx, Message{
+		ID:           "msg-f2",
+		ThreadID:     "th-filter",
+		Content:      "Prompt 2",
+		Summary:      "Summary 2",
+		ResponseText: "Response 2",
+		Status:       StatusPending,
+		IsAdmin:      false,
+		CreatedAt:    now.Add(-2 * time.Minute),
+		UpdatedAt:    now.Add(-2 * time.Minute),
+	})
+	_ = store.InsertMessage(ctx, Message{
+		ID:           "msg-f3",
+		ThreadID:     "th-other",
+		Content:      "Prompt 3",
+		Summary:      "Summary 3",
+		ResponseText: "Response 3",
+		Status:       StatusProcessing,
+		IsAdmin:      true,
+		CreatedAt:    now.Add(-1 * time.Minute),
+		UpdatedAt:    now.Add(-1 * time.Minute),
+	})
+
+	tests := []struct {
+		name          string
+		filter        TasksFilter
+		wantCount     int
+		wantFirstID   string
+		wantPrevSess  string
+		wantThreadSum string
+		wantRespText  string
+	}{
+		{
+			name:          "thread_id filter and session join",
+			filter:        TasksFilter{ThreadID: "th-filter", Statuses: []string{"COMPLETED"}},
+			wantCount:     1,
+			wantFirstID:   "msg-f1",
+			wantPrevSess:  "prev-sess-0",
+			wantThreadSum: "Summary of thread filter",
+			wantRespText:  "Response 1",
+		},
+		{
+			name:        "is_admin false filter",
+			filter:      TasksFilter{IsAdmin: &adminFalse},
+			wantCount:   1,
+			wantFirstID: "msg-f2",
+		},
+		{
+			name:        "is_admin true filter with status",
+			filter:      TasksFilter{IsAdmin: &adminTrue, Statuses: []string{"PROCESSING"}},
+			wantCount:   1,
+			wantFirstID: "msg-f3",
+		},
+		{
+			name:        "after_row_id orders asc",
+			filter:      TasksFilter{AfterRowID: 1},
+			wantCount:   2,
+			wantFirstID: "msg-f2",
+		},
+		{
+			name:        "since filter matches recent",
+			filter:      TasksFilter{Since: now.Add(-90 * time.Second)},
+			wantCount:   1,
+			wantFirstID: "msg-f3",
+		},
+		{
+			name:        "before_row_id filter",
+			filter:      TasksFilter{BeforeRowID: 1},
+			wantCount:   1,
+			wantFirstID: "msg-f1",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tasks, err := store.GetActiveTasks(ctx, tc.filter)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(tasks) != tc.wantCount {
+				t.Fatalf("got count %d, want %d", len(tasks), tc.wantCount)
+			}
+			if tc.wantCount > 0 {
+				if tasks[0].ID != tc.wantFirstID {
+					t.Errorf("got first ID %q, want %q", tasks[0].ID, tc.wantFirstID)
+				}
+				if tc.wantPrevSess != "" && tasks[0].PreviousSessionID != tc.wantPrevSess {
+					t.Errorf("got PreviousSessionID %q, want %q", tasks[0].PreviousSessionID, tc.wantPrevSess)
+				}
+				if tc.wantThreadSum != "" && tasks[0].ThreadSummary != tc.wantThreadSum {
+					t.Errorf("got ThreadSummary %q, want %q", tasks[0].ThreadSummary, tc.wantThreadSum)
+				}
+				if tc.wantRespText != "" && tasks[0].ResponseText != tc.wantRespText {
+					t.Errorf("got ResponseText %q, want %q", tasks[0].ResponseText, tc.wantRespText)
+				}
+			}
+		})
+	}
 }
