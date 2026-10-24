@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -77,6 +78,39 @@ func setupTestPostgresTables(t *testing.T, db *sql.DB) {
 		effort TEXT NOT NULL DEFAULT 'low'
 	);
 	CREATE INDEX IF NOT EXISTS idx_one_shot_schedules_run_at ON one_shot_schedules(run_at);
+
+	CREATE TABLE IF NOT EXISTS heartbeat_schedules (
+		id TEXT PRIMARY KEY,
+		target_id TEXT NOT NULL,
+		title_prefix TEXT NOT NULL DEFAULT '',
+		cron_expr TEXT NOT NULL,
+		prompt TEXT NOT NULL,
+		timezone TEXT NOT NULL DEFAULT 'UTC',
+		effort TEXT NOT NULL DEFAULT 'low',
+		next_run_at TIMESTAMPTZ NOT NULL,
+		enabled BOOLEAN NOT NULL DEFAULT TRUE,
+		created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+	);
+	CREATE INDEX IF NOT EXISTS idx_heartbeat_schedules_next_run ON heartbeat_schedules(enabled, next_run_at);
+
+	CREATE TABLE IF NOT EXISTS schedule_runs (
+		id TEXT PRIMARY KEY,
+		schedule_id TEXT NOT NULL,
+		schedule_type TEXT NOT NULL,
+		message_id TEXT NOT NULL DEFAULT '',
+		target_id TEXT NOT NULL,
+		thread_id TEXT NOT NULL,
+		title TEXT NOT NULL DEFAULT '',
+		prompt TEXT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'enqueued',
+		started_at TIMESTAMPTZ NOT NULL,
+		completed_at TIMESTAMPTZ,
+		duration_ms INTEGER DEFAULT 0,
+		effort TEXT NOT NULL DEFAULT 'low',
+		model TEXT NOT NULL DEFAULT '',
+		error TEXT NOT NULL DEFAULT ''
+	);
+	CREATE INDEX IF NOT EXISTS idx_schedule_runs_started_at ON schedule_runs(started_at DESC);
 
 	CREATE TABLE IF NOT EXISTS event_triggers (
 		id TEXT PRIMARY KEY,
@@ -486,4 +520,673 @@ func TestCoverageFlushEndpoint(t *testing.T) {
 
 	writeCountersDirFn = func(dir string) error { return errors.New("flush error") }
 	doFlush(http.StatusInternalServerError)
+}
+
+func TestOrdinal(t *testing.T) {
+	tests := []struct {
+		name string
+		num  int
+		want string
+	}{
+		{"first", 1, "1st"},
+		{"second", 2, "2nd"},
+		{"third", 3, "3rd"},
+		{"fourth", 4, "4th"},
+		{"eleventh", 11, "11th"},
+		{"twelfth", 12, "12th"},
+		{"thirteenth", 13, "13th"},
+		{"twenty-first", 21, "21st"},
+		{"twenty-second", 22, "22nd"},
+		{"twenty-third", 23, "23rd"},
+		{"negative number", -1, "-1st"},
+		{"negative eleventh", -11, "-11th"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Ordinal(tc.num)
+			if got != tc.want {
+				t.Errorf("Ordinal(%d) = %q, want %q", tc.num, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFormatCronDescription(t *testing.T) {
+	tests := []struct {
+		name     string
+		cronExpr string
+		want     string
+	}{
+		{"empty", "", ""},
+		{"yearly", "@yearly", "Every year on Jan 1st at 00:00"},
+		{"annually", "@annually", "Every year on Jan 1st at 00:00"},
+		{"monthly", "@monthly", "1st of every month at 00:00"},
+		{"weekly", "@weekly", "Every week on Sunday at 00:00"},
+		{"daily", "@daily", "Every day at 00:00"},
+		{"midnight", "@midnight", "Every day at 00:00"},
+		{"hourly", "@hourly", "Every hour"},
+		{"invalid field count", "0 0 * *", "0 0 * *"},
+		{"every minute", "* * * * *", "Every minute"},
+		{"step minutes", "*/15 * * * *", "Every 15 minutes"},
+		{"step hours", "0 */2 * * *", "Every 2 hours"},
+		{"invalid min or hour", "xx yy * * *", "xx yy * * *"},
+		{"every day at 09:30", "30 9 * * *", "Every day at 09:30"},
+		{"weekdays numeric", "0 9 * * 1-5", "Weekdays (Mon–Fri) at 09:00"},
+		{"weekdays text", "0 9 * * MON-FRI", "Weekdays (Mon–Fri) at 09:00"},
+		{"weekends numeric 0-6", "0 10 * * 0,6", "Weekends (Sat–Sun) at 10:00"},
+		{"weekends numeric 6-0", "0 10 * * 6,0", "Weekends (Sat–Sun) at 10:00"},
+		{"weekends text", "0 10 * * SAT,SUN", "Weekends (Sat–Sun) at 10:00"},
+		{"single day numeric", "0 12 * * 2", "Every Tuesday at 12:00"},
+		{"multiple days list", "0 12 * * 1,3,5", "Mon, Wed, Fri at 12:00"},
+		{"specific day of month", "15 14 1 * *", "1st of every month at 14:15"},
+		{"day of month and month", "0 8 25 12 *", "Every year on Dec 25th at 08:00"},
+		{"other cron pattern", "0 9 * 5 1-3", "At 09:00 (cron: 0 9 * 5 1-3)"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := FormatCronDescription(tc.cronExpr)
+			if got != tc.want {
+				t.Errorf("FormatCronDescription(%q) = %q, want %q", tc.cronExpr, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSanitizeScheduleTextAndFormatters(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		wantText string
+	}{
+		{"empty string", "", ""},
+		{"clean string", "hello world", "hello world"},
+		{"github pat classic", "token ghp_1234567890abcdefghijklmnopqrstuvwxyz", "token [REDACTED]"},
+		{"github pat fine grained", "my github_pat_11AAAAAAA_bbbbbbbbbbbbbb token", "my [REDACTED] token"},
+		{"bearer token", "Authorization: Bearer mysecrettoken123456789", "Authorization: [REDACTED]"},
+		{"key value secret assignment", "API_KEY: supersecretpassword", "API_KEY: [REDACTED]"},
+		{"key value token assignment", "TOKEN=my_top_secret_token", "TOKEN=[REDACTED]"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := SanitizeScheduleText(tc.input)
+			if got != tc.wantText {
+				t.Errorf("SanitizeScheduleText(%q) = %q, want %q", tc.input, got, tc.wantText)
+			}
+		})
+	}
+}
+
+func TestFormatScheduleHelpers(t *testing.T) {
+	tests := []struct {
+		name          string
+		cronCount     int
+		hbCount       int
+		oneShotCount  int
+		wantChannelID string
+	}{
+		{"empty slices", 0, 0, 0, ""},
+		{"populated slices", 1, 1, 1, "chan-123"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var crons []CronSchedule
+			var hbs []HeartbeatSchedule
+			var oneshots []OneShotSchedule
+			if tc.cronCount > 0 {
+				crons = append(crons, CronSchedule{
+					ID:          "cron-1",
+					TargetID:    tc.wantChannelID,
+					TitlePrefix: "Report GITHUB_PAT=ghp_1234567890abcdef",
+					CronExpr:    "0 9 * * 1-5",
+					Prompt:      "Check ghp_secret",
+					Timezone:    "America/Los_Angeles",
+					NextRunAt:   time.Now().UTC(),
+					Enabled:     true,
+					Effort:      "low",
+				})
+			}
+			if tc.hbCount > 0 {
+				hbs = append(hbs, HeartbeatSchedule{
+					ID:          "hb-1",
+					TargetID:    tc.wantChannelID,
+					TitlePrefix: "HB Alert",
+					CronExpr:    "*/5 * * * *",
+					Prompt:      "Heartbeat Bearer secrettoken123456",
+					Timezone:    "UTC",
+					Effort:      "high",
+					NextRunAt:   time.Now().UTC(),
+					Enabled:     true,
+				})
+			}
+			if tc.oneShotCount > 0 {
+				oneshots = append(oneshots, OneShotSchedule{
+					ID:       "os-1",
+					ThreadID: tc.wantChannelID,
+					Prompt:   "Remind Bearer secrettoken123456",
+					RunAt:    time.Now().UTC(),
+					Effort:   "medium",
+				})
+			}
+
+			formattedCrons := FormatCronSchedulesWithDesc(crons)
+			formattedHBs := FormatHeartbeatSchedulesWithDesc(hbs)
+			formattedOS := FormatOneShotSchedulesJSON(oneshots)
+
+			if len(formattedCrons) != tc.cronCount {
+				t.Fatalf("FormatCronSchedulesWithDesc got len=%d, want %d", len(formattedCrons), tc.cronCount)
+			}
+			if len(formattedHBs) != tc.hbCount {
+				t.Fatalf("FormatHeartbeatSchedulesWithDesc got len=%d, want %d", len(formattedHBs), tc.hbCount)
+			}
+			if len(formattedOS) != tc.oneShotCount {
+				t.Fatalf("FormatOneShotSchedulesJSON got len=%d, want %d", len(formattedOS), tc.oneShotCount)
+			}
+
+			if tc.cronCount > 0 {
+				if formattedCrons[0].ChannelID != tc.wantChannelID || formattedCrons[0].TargetID != tc.wantChannelID {
+					t.Errorf("channel/target id mismatch: %v", formattedCrons[0])
+				}
+				if strings.Contains(formattedCrons[0].TitlePrefix, "ghp_") || strings.Contains(formattedCrons[0].Prompt, "ghp_") {
+					t.Errorf("cron text not sanitized: %v", formattedCrons[0])
+				}
+				if formattedCrons[0].CronDescription == "" {
+					t.Errorf("cron description missing")
+				}
+			}
+			if tc.hbCount > 0 {
+				if strings.Contains(formattedHBs[0].Prompt, "secrettoken") {
+					t.Errorf("heartbeat text not sanitized: %v", formattedHBs[0])
+				}
+			}
+			if tc.oneShotCount > 0 {
+				if strings.Contains(formattedOS[0].Prompt, "secrettoken") {
+					t.Errorf("oneshot text not sanitized: %v", formattedOS[0])
+				}
+			}
+		})
+	}
+}
+
+func TestHandleSchedules_Table(t *testing.T) {
+	server, ts := setupTestServer(t)
+	defer ts.Close()
+
+	ctx := context.Background()
+	db := server.handler.db
+
+	// Seed one cron schedule with sensitive text
+	err := InsertCronSchedule(ctx, db, CronSchedule{
+		ID:          "cron-1",
+		TargetID:    "123456789012345678",
+		TitlePrefix: "Cron Token: ghp_12345678901234567890",
+		CronExpr:    "0 9 * * 1-5",
+		Prompt:      "Prompt with Bearer secrettoken123456 and TOKEN=secret",
+		Timezone:    "America/Los_Angeles",
+		NextRunAt:   time.Now().UTC().Add(1 * time.Hour),
+		Enabled:     true,
+		Effort:      "low",
+		CreatedAt:   time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("failed to insert cron: %v", err)
+	}
+
+	// Seed one heartbeat schedule
+	err = InsertHeartbeatSchedule(ctx, db, HeartbeatSchedule{
+		ID:          "hb-1",
+		TargetID:    "123456789012345678",
+		TitlePrefix: "HB Alert",
+		CronExpr:    "*/5 * * * *",
+		Prompt:      "Monitor with github_pat_11AAA_bbb",
+		Timezone:    "UTC",
+		Effort:      "medium",
+		NextRunAt:   time.Now().UTC().Add(30 * time.Minute),
+		Enabled:     true,
+		CreatedAt:   time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("failed to insert heartbeat: %v", err)
+	}
+
+	// Seed one one-shot schedule
+	err = InsertOneShotSchedule(ctx, db, OneShotSchedule{
+		ID:        "os-1",
+		ThreadID:  "123456789012345678",
+		Prompt:    "One shot prompt with API_KEY: secretpass",
+		Effort:    "high",
+		RunAt:     time.Now().UTC().Add(15 * time.Minute),
+		CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("failed to insert oneshot: %v", err)
+	}
+
+	// Seed schedule runs (success and failure)
+	_ = CreateScheduleRun(ctx, db, ScheduleRun{
+		ID:           "run-1",
+		ScheduleID:   "cron-1",
+		ScheduleType: "cron",
+		TargetID:     "123456789012345678",
+		ThreadID:     "123456789012345678",
+		Title:        "Run 1",
+		Prompt:       "Run Prompt with ghp_12345678901234567890",
+		Status:       "completed",
+		StartedAt:    time.Now().UTC().Add(-1 * time.Hour),
+		DurationMs:   100,
+	})
+	_ = CreateScheduleRun(ctx, db, ScheduleRun{
+		ID:           "run-2",
+		ScheduleID:   "cron-1",
+		ScheduleType: "cron",
+		TargetID:     "123456789012345678",
+		ThreadID:     "123456789012345678",
+		Title:        "Run 2",
+		Prompt:       "Run Prompt 2",
+		Status:       "failed",
+		StartedAt:    time.Now().UTC().Add(-2 * time.Hour),
+		DurationMs:   50,
+		Error:        "Error with TOKEN=badtoken",
+	})
+
+	closedDB, err := OpenDB(&Config{DatabaseURL: ":memory:"})
+	if err != nil {
+		t.Fatalf("OpenDB failed: %v", err)
+	}
+	_ = closedDB.Close()
+	serverClosed := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, closedDB))
+
+	tests := []struct {
+		name       string
+		method     string
+		useServer  *Server
+		wantStatus int
+		wantTotal  int
+	}{
+		{
+			name:       "valid get schedules with seeded data",
+			method:     http.MethodGet,
+			useServer:  server,
+			wantStatus: http.StatusOK,
+			wantTotal:  3,
+		},
+		{
+			name:       "cached get schedules hit",
+			method:     http.MethodGet,
+			useServer:  server,
+			wantStatus: http.StatusOK,
+			wantTotal:  3,
+		},
+		{
+			name:       "method not allowed post",
+			method:     http.MethodPost,
+			useServer:  server,
+			wantStatus: http.StatusMethodNotAllowed,
+			wantTotal:  0,
+		},
+		{
+			name:       "database error on closed db",
+			method:     http.MethodGet,
+			useServer:  serverClosed,
+			wantStatus: http.StatusInternalServerError,
+			wantTotal:  0,
+		},
+		{
+			name:       "nil db server error",
+			method:     http.MethodGet,
+			useServer:  &Server{},
+			wantStatus: http.StatusInternalServerError,
+			wantTotal:  0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(tc.method, "/schedules", nil)
+			tc.useServer.handleSchedules(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("%s got status %d, want %d", tc.name, rec.Code, tc.wantStatus)
+			}
+			if tc.wantStatus == http.StatusOK {
+				var resp SchedulesResponse
+				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+					t.Fatalf("failed to decode response: %v", err)
+				}
+				if resp.Status != "ok" {
+					t.Errorf("expected status 'ok', got %q", resp.Status)
+				}
+				if resp.Summary.TotalActive != tc.wantTotal {
+					t.Errorf("got TotalActive=%d, want %d", resp.Summary.TotalActive, tc.wantTotal)
+				}
+				if len(resp.Crons) > 0 && strings.Contains(resp.Crons[0].Prompt, "secrettoken") {
+					t.Errorf("secret not redacted from cron prompt: %s", resp.Crons[0].Prompt)
+				}
+				if len(resp.Heartbeats) > 0 && strings.Contains(resp.Heartbeats[0].Prompt, "github_pat_") {
+					t.Errorf("secret not redacted from heartbeat prompt: %s", resp.Heartbeats[0].Prompt)
+				}
+				if len(resp.OneShots) > 0 && strings.Contains(resp.OneShots[0].Prompt, "secretpass") {
+					t.Errorf("secret not redacted from oneshot prompt: %s", resp.OneShots[0].Prompt)
+				}
+			}
+		})
+	}
+}
+
+func TestHandleScheduleRuns_Table(t *testing.T) {
+	server, ts := setupTestServer(t)
+	defer ts.Close()
+
+	ctx := context.Background()
+	db := server.handler.db
+
+	for i := 1; i <= 5; i++ {
+		status := "completed"
+		if i%2 == 0 {
+			status = "failed"
+		}
+		_ = CreateScheduleRun(ctx, db, ScheduleRun{
+			ID:           fmt.Sprintf("run-%d", i),
+			ScheduleID:   fmt.Sprintf("sched-%d", i%2+1),
+			ScheduleType: "cron",
+			TargetID:     "123456789012345678",
+			ThreadID:     "123456789012345678",
+			Title:        fmt.Sprintf("Run %d Title with ghp_12345678901234567890", i),
+			Prompt:       fmt.Sprintf("Prompt %d with Bearer mysecrettoken123", i),
+			Status:       status,
+			StartedAt:    time.Now().UTC().Add(time.Duration(-i) * time.Hour),
+			DurationMs:   int64(i * 10),
+			Error:        "Error with TOKEN=supersecret",
+		})
+	}
+
+	closedDB, err := OpenDB(&Config{DatabaseURL: ":memory:"})
+	if err != nil {
+		t.Fatalf("OpenDB failed: %v", err)
+	}
+	_ = closedDB.Close()
+	serverClosed := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, closedDB))
+
+	tests := []struct {
+		name       string
+		method     string
+		url        string
+		useServer  *Server
+		wantStatus int
+		wantCount  int
+		wantTotal  int
+	}{
+		{
+			name:       "default pagination",
+			method:     http.MethodGet,
+			url:        "/schedules/runs",
+			useServer:  server,
+			wantStatus: http.StatusOK,
+			wantCount:  5,
+			wantTotal:  5,
+		},
+		{
+			name:       "custom limit and offset",
+			method:     http.MethodGet,
+			url:        "/schedules/runs?limit=2&offset=1",
+			useServer:  server,
+			wantStatus: http.StatusOK,
+			wantCount:  2,
+			wantTotal:  5,
+		},
+		{
+			name:       "filter by schedule_id",
+			method:     http.MethodGet,
+			url:        "/schedules/runs?schedule_id=sched-2",
+			useServer:  server,
+			wantStatus: http.StatusOK,
+			wantCount:  3,
+			wantTotal:  3,
+		},
+		{
+			name:       "filter by status",
+			method:     http.MethodGet,
+			url:        "/schedules/runs?status=failed",
+			useServer:  server,
+			wantStatus: http.StatusOK,
+			wantCount:  2,
+			wantTotal:  2,
+		},
+		{
+			name:       "method not allowed",
+			method:     http.MethodPost,
+			url:        "/schedules/runs",
+			useServer:  server,
+			wantStatus: http.StatusMethodNotAllowed,
+			wantCount:  0,
+			wantTotal:  0,
+		},
+		{
+			name:       "closed database error",
+			method:     http.MethodGet,
+			url:        "/schedules/runs",
+			useServer:  serverClosed,
+			wantStatus: http.StatusInternalServerError,
+			wantCount:  0,
+			wantTotal:  0,
+		},
+		{
+			name:       "nil server db error",
+			method:     http.MethodGet,
+			url:        "/schedules/runs",
+			useServer:  &Server{},
+			wantStatus: http.StatusInternalServerError,
+			wantCount:  0,
+			wantTotal:  0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(tc.method, tc.url, nil)
+			tc.useServer.handleScheduleRuns(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("%s got status %d, want %d", tc.name, rec.Code, tc.wantStatus)
+			}
+			if tc.wantStatus == http.StatusOK {
+				var resp ScheduleRunsResponse
+				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+					t.Fatalf("failed to decode response: %v", err)
+				}
+				if resp.Status != "ok" {
+					t.Errorf("expected status 'ok', got %q", resp.Status)
+				}
+				if len(resp.Runs) != tc.wantCount {
+					t.Errorf("got %d runs, want %d", len(resp.Runs), tc.wantCount)
+				}
+				if resp.Total != tc.wantTotal {
+					t.Errorf("got Total=%d, want %d", resp.Total, tc.wantTotal)
+				}
+				for _, r := range resp.Runs {
+					if strings.Contains(r.Prompt, "mysecrettoken") {
+						t.Errorf("prompt not sanitized: %s", r.Prompt)
+					}
+					if strings.Contains(r.Title, "ghp_") {
+						t.Errorf("title not sanitized: %s", r.Title)
+					}
+					if strings.Contains(r.Error, "supersecret") {
+						t.Errorf("error not sanitized: %s", r.Error)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestHandleScheduleOneShot_Table(t *testing.T) {
+	server, ts := setupTestServer(t)
+	defer ts.Close()
+
+	closedDB, err := OpenDB(&Config{DatabaseURL: ":memory:"})
+	if err != nil {
+		t.Fatalf("OpenDB failed: %v", err)
+	}
+	_ = closedDB.Close()
+	serverClosed := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, closedDB))
+
+	tests := []struct {
+		name       string
+		method     string
+		body       string
+		useServer  *Server
+		wantStatus int
+		wantID     string
+	}{
+		{
+			name:       "valid with custom id",
+			method:     http.MethodPost,
+			body:       fmt.Sprintf(`{"id":"os-custom-1","thread_id":"123","prompt":"test prompt","run_at":%q,"effort":"high"}`, time.Now().UTC().Add(time.Hour).Format(time.RFC3339)),
+			useServer:  server,
+			wantStatus: http.StatusOK,
+			wantID:     "os-custom-1",
+		},
+		{
+			name:       "valid with auto-generated id",
+			method:     http.MethodPost,
+			body:       fmt.Sprintf(`{"thread_id":"123","prompt":"test prompt","run_at":%q}`, time.Now().UTC().Add(time.Hour).Format(time.RFC3339)),
+			useServer:  server,
+			wantStatus: http.StatusOK,
+			wantID:     "",
+		},
+		{
+			name:       "missing thread_id",
+			method:     http.MethodPost,
+			body:       fmt.Sprintf(`{"prompt":"test prompt","run_at":%q}`, time.Now().UTC().Add(time.Hour).Format(time.RFC3339)),
+			useServer:  server,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "missing prompt",
+			method:     http.MethodPost,
+			body:       fmt.Sprintf(`{"thread_id":"123","run_at":%q}`, time.Now().UTC().Add(time.Hour).Format(time.RFC3339)),
+			useServer:  server,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "zero run_at",
+			method:     http.MethodPost,
+			body:       `{"thread_id":"123","prompt":"test prompt"}`,
+			useServer:  server,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "malformed json body",
+			method:     http.MethodPost,
+			body:       `{not valid json`,
+			useServer:  server,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "method not allowed get",
+			method:     http.MethodGet,
+			body:       "",
+			useServer:  server,
+			wantStatus: http.StatusMethodNotAllowed,
+		},
+		{
+			name:       "closed database error",
+			method:     http.MethodPost,
+			body:       fmt.Sprintf(`{"thread_id":"123","prompt":"test prompt","run_at":%q}`, time.Now().UTC().Add(time.Hour).Format(time.RFC3339)),
+			useServer:  serverClosed,
+			wantStatus: http.StatusInternalServerError,
+		},
+		{
+			name:       "nil server db error",
+			method:     http.MethodPost,
+			body:       fmt.Sprintf(`{"thread_id":"123","prompt":"test prompt","run_at":%q}`, time.Now().UTC().Add(time.Hour).Format(time.RFC3339)),
+			useServer:  &Server{},
+			wantStatus: http.StatusInternalServerError,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(tc.method, "/schedules/oneshot", strings.NewReader(tc.body))
+			tc.useServer.handleScheduleOneShot(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("%s got status %d, want %d, body: %s", tc.name, rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if tc.wantStatus == http.StatusOK {
+				var resp map[string]string
+				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+					t.Fatalf("failed to decode response: %v", err)
+				}
+				if resp["status"] != "ok" {
+					t.Errorf("expected status 'ok', got %q", resp["status"])
+				}
+				if tc.wantID != "" && resp["id"] != tc.wantID {
+					t.Errorf("expected id %q, got %q", tc.wantID, resp["id"])
+				}
+				if resp["id"] == "" {
+					t.Errorf("expected non-empty id")
+				}
+			}
+		})
+	}
+}
+
+func TestDirectDB_SummaryAndRunsErrors(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	closedDB, err := OpenDB(&Config{DatabaseURL: ":memory:"})
+	if err != nil {
+		t.Fatalf("OpenDB failed: %v", err)
+	}
+	_ = closedDB.Close()
+
+	tests := []struct {
+		name    string
+		ctx     context.Context
+		db      *sql.DB
+		wantErr bool
+	}{
+		{"canceled ctx", ctx, closedDB, true},
+		{"nil db", context.Background(), nil, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := GetScheduleSummaryMetrics(tc.ctx, tc.db); (err != nil) != tc.wantErr {
+				t.Errorf("GetScheduleSummaryMetrics() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if _, _, err := GetScheduleRunsPaginated(tc.ctx, tc.db, 50, 0, "", ""); (err != nil) != tc.wantErr {
+				t.Errorf("GetScheduleRunsPaginated() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestServer_ScheduleRoutesDispatchViaMCP(t *testing.T) {
+	server, ts := setupTestServer(t)
+	defer ts.Close()
+
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		body       string
+		wantStatus int
+	}{
+		{"mcp dispatch schedules", http.MethodGet, "/schedules", "", http.StatusOK},
+		{"mcp dispatch schedules runs", http.MethodGet, "/schedules/runs", "", http.StatusOK},
+		{"mcp dispatch schedules oneshot invalid", http.MethodPost, "/schedules/oneshot", `{}`, http.StatusBadRequest},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+			server.handleMCP(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("handleMCP path %s got status %d, want %d", tc.path, rec.Code, tc.wantStatus)
+			}
+		})
+	}
 }
