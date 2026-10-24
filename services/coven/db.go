@@ -761,6 +761,11 @@ func (s *SQLStore) GetUnextractedAdminTurns(ctx context.Context, threadID string
 			turns = append(turns, m)
 		}
 	}
+	// Sort turns ascending by RowID to guarantee strictly chronological conversation order
+	// regardless of whether Eri returned results in DESC order (e.g. when after_row_id=0).
+	sort.Slice(turns, func(i, j int) bool {
+		return turns[i].RowID < turns[j].RowID
+	})
 	return turns, nil
 }
 

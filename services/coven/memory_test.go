@@ -2794,6 +2794,7 @@ func TestSQLStore_GetUnextractedAdminTurns(t *testing.T) {
 		wantErr      bool
 		wantEmpty    bool
 		wantCount    int
+		wantRowIDs   []int64
 		wantPatterns []string
 		wantURLSub   string
 	}{
@@ -2839,8 +2840,22 @@ func TestSQLStore_GetUnextractedAdminTurns(t *testing.T) {
 				{"id":"m3","row_id":15,"thread_id":"th-1","prompt":"non-admin","response_text":"ok","status":"COMPLETED","is_admin":false}
 			]}`,
 			wantCount:    1,
+			wantRowIDs:   []int64{12},
 			wantPatterns: []string{"FROM extraction_watermarks WHERE thread_id = $1"},
 			wantURLSub:   "after_row_id=10",
+		},
+		{
+			name:         "Success_ReverseOrderSortedAscending",
+			threadID:     "th-2",
+			watermarkSQL: "SELECT 0, NULL",
+			eriBody: `{"status":"ok","tasks":[
+				{"id":"m2","row_id":25,"thread_id":"th-2","prompt":"turn 2","response_text":"answer 2","status":"COMPLETED","is_admin":true},
+				{"id":"m1","row_id":10,"thread_id":"th-2","prompt":"turn 1","response_text":"answer 1","status":"COMPLETED","is_admin":true}
+			]}`,
+			wantCount:    2,
+			wantRowIDs:   []int64{10, 25},
+			wantPatterns: []string{"FROM extraction_watermarks WHERE thread_id = $1"},
+			wantURLSub:   "after_row_id=0",
 		},
 	}
 
@@ -2881,6 +2896,21 @@ func TestSQLStore_GetUnextractedAdminTurns(t *testing.T) {
 			}
 			if tc.wantCount > 0 && len(turns) != tc.wantCount {
 				t.Errorf("len(turns) = %d, want %d", len(turns), tc.wantCount)
+			}
+			if len(tc.wantRowIDs) > 0 {
+				var gotRowIDs []int64
+				for _, turn := range turns {
+					gotRowIDs = append(gotRowIDs, turn.RowID)
+				}
+				if len(gotRowIDs) != len(tc.wantRowIDs) {
+					t.Errorf("got rowIDs len = %d, want %d", len(gotRowIDs), len(tc.wantRowIDs))
+				} else {
+					for i, id := range gotRowIDs {
+						if id != tc.wantRowIDs[i] {
+							t.Errorf("rowID[%d] = %d, want %d", i, id, tc.wantRowIDs[i])
+						}
+					}
+				}
 			}
 			for _, pat := range tc.wantPatterns {
 				if !strings.Contains(captured, pat) {
