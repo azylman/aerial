@@ -15,6 +15,9 @@ import (
 	"time"
 )
 
+// BrainPromptRequest is an alias for PromptDispatchRequest used when dispatching prompts to Brain / Eri.
+type BrainPromptRequest = PromptDispatchRequest
+
 // RunApp bootstraps the scheduler MCP HTTP server with graceful shutdown.
 var openDBFn = NewDB
 

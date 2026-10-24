@@ -596,23 +596,6 @@ func DeleteOneShotSchedule(ctx context.Context, database *sql.DB, id string) (bo
 	return rowsAffected > 0, nil
 }
 
-func HasActiveThreadTurn(ctx context.Context, database *sql.DB, threadID string) (bool, error) {
-	ctx, err := normCtxAndDB(ctx, database)
-	if err != nil {
-		return false, err
-	}
-	threadID = strings.TrimSpace(threadID)
-	if threadID == "" {
-		return false, nil
-	}
-	query := rebindQuery(`SELECT EXISTS(SELECT 1 FROM messages WHERE thread_id = ? AND (status IN ('pending', 'processing') OR status IN ('PENDING', 'PROCESSING')))`, isPostgres(database))
-	var exists bool
-	if err := database.QueryRowContext(ctx, query, threadID).Scan(&exists); err != nil {
-		return false, err
-	}
-	return exists, nil
-}
-
 func CreateScheduleRun(ctx context.Context, database *sql.DB, r ScheduleRun) error {
 	ctx, err := normCtxAndDB(ctx, database)
 	if err != nil {

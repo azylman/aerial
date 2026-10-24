@@ -564,7 +564,6 @@ func TestDB_NilDBGuards(t *testing.T) {
 		{"UpdateHeartbeatSchedule", UpdateHeartbeatSchedule(ctx, nil, HeartbeatSchedule{ID: "id"})},
 		{"GetDueHeartbeatSchedules", func() error { _, err := GetDueHeartbeatSchedules(ctx, nil, now); return err }()},
 		{"AdvanceHeartbeatNextRun", AdvanceHeartbeatNextRun(ctx, nil, "id", now)},
-		{"HasActiveThreadTurn", func() error { _, err := HasActiveThreadTurn(ctx, nil, "th"); return err }()},
 	}
 
 	for _, tc := range tests {
@@ -1132,86 +1131,6 @@ func TestHeartbeatDB_Operations(t *testing.T) {
 	}
 }
 
-func TestHeartbeatDB_HasActiveThreadTurn(t *testing.T) {
-	db := setupTestDB(t)
-	ctx := context.Background()
-
-	tests := []struct {
-		name       string
-		threadID   string
-		setupQuery string
-		setupArgs  []any
-		wantActive bool
-		wantErr    bool
-	}{
-		{
-			name:       "empty thread id returns false",
-			threadID:   "",
-			wantActive: false,
-		},
-		{
-			name:       "whitespace thread id returns false",
-			threadID:   "   ",
-			wantActive: false,
-		},
-		{
-			name:       "no rows for thread returns false",
-			threadID:   "heartbeat-none",
-			wantActive: false,
-		},
-		{
-			name:       "thread with pending turn returns true",
-			threadID:   "heartbeat-pending",
-			setupQuery: "INSERT INTO messages (id, thread_id, status) VALUES (?, ?, ?)",
-			setupArgs:  []any{"msg-1", "heartbeat-pending", "pending"},
-			wantActive: true,
-		},
-		{
-			name:       "thread with uppercase PENDING turn returns true",
-			setupQuery: "INSERT INTO messages (id, thread_id, status) VALUES (?, ?, ?)",
-			setupArgs:  []any{"msg-2", "heartbeat-PENDING", "PENDING"},
-			threadID:   "heartbeat-PENDING",
-			wantActive: true,
-		},
-		{
-			name:       "thread with processing turn returns true",
-			setupQuery: "INSERT INTO messages (id, thread_id, status) VALUES (?, ?, ?)",
-			setupArgs:  []any{"msg-3", "heartbeat-proc", "processing"},
-			threadID:   "heartbeat-proc",
-			wantActive: true,
-		},
-		{
-			name:       "thread with completed turn returns false",
-			setupQuery: "INSERT INTO messages (id, thread_id, status) VALUES (?, ?, ?)",
-			setupArgs:  []any{"msg-4", "heartbeat-done", "completed"},
-			threadID:   "heartbeat-done",
-			wantActive: false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if tc.setupQuery != "" {
-				if _, err := db.Exec(tc.setupQuery, tc.setupArgs...); err != nil {
-					t.Fatalf("setup query failed: %v", err)
-				}
-			}
-			active, err := HasActiveThreadTurn(ctx, db, tc.threadID)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("HasActiveThreadTurn(%q) error = %v, wantErr = %v", tc.threadID, err, tc.wantErr)
-			}
-			if active != tc.wantActive {
-				t.Errorf("HasActiveThreadTurn(%q) = %v, want %v", tc.threadID, active, tc.wantActive)
-			}
-		})
-	}
-
-	// nil db error
-	if _, err := HasActiveThreadTurn(ctx, nil, "thread-1"); err == nil {
-		t.Error("expected error for nil db")
-	}
-}
-
 func TestHeartbeatTools_HandleScheduleHeartbeat(t *testing.T) {
 	db := setupTestDB(t)
 	ctx := context.Background()
@@ -1462,9 +1381,10 @@ func TestTicker_EvaluateDueHeartbeats_Scenarios(t *testing.T) {
 		hbID              string
 		cronExpr          string
 		nextRunAt         time.Time
-		setupActiveTurn   bool
+		dispatcherStatus  string
 		dispatcherErr     error
 		wantDispatched    bool
+		wantSkippedRun    bool
 		wantStaleRun      bool
 		wantFailedRun     bool
 		wantSessionPrefix string
@@ -1478,12 +1398,13 @@ func TestTicker_EvaluateDueHeartbeats_Scenarios(t *testing.T) {
 			wantSessionPrefix: "heartbeat-hb-nominal",
 		},
 		{
-			name:            "active thread turn coalesced without dispatch",
-			hbID:            "hb-coalesced",
-			cronExpr:        "*/5 * * * *",
-			nextRunAt:       now.Add(-1 * time.Minute),
-			setupActiveTurn: true,
-			wantDispatched:  false,
+			name:             "active thread turn skipped without schedule run",
+			hbID:             "hb-coalesced",
+			cronExpr:         "*/5 * * * *",
+			nextRunAt:        now.Add(-1 * time.Minute),
+			dispatcherStatus: "skipped_active",
+			wantDispatched:   true,
+			wantSkippedRun:   true,
 		},
 		{
 			name:           "stale heartbeat overdue by more than 24h",
@@ -1532,15 +1453,12 @@ func TestTicker_EvaluateDueHeartbeats_Scenarios(t *testing.T) {
 				t.Fatalf("InsertHeartbeatSchedule failed: %v", err)
 			}
 
-			if tc.setupActiveTurn {
-				threadID := "heartbeat-" + tc.hbID
-				if _, err := db.Exec("INSERT INTO messages (id, thread_id, status) VALUES (?, ?, ?)", "msg-active-"+tc.hbID, threadID, "PENDING"); err != nil {
-					t.Fatalf("failed to insert active turn: %v", err)
-				}
+			dispStatus := "ok"
+			if tc.dispatcherStatus != "" {
+				dispStatus = tc.dispatcherStatus
 			}
-
 			mock := &mockDispatcher{
-				response: PromptDispatchResponse{Status: "ok", MessageID: "msg-dispatched"},
+				response: PromptDispatchResponse{Status: dispStatus, MessageID: "msg-dispatched"},
 				err:      tc.dispatcherErr,
 			}
 			ticker := NewTicker(db, mock, 30*time.Second)
@@ -1564,6 +1482,9 @@ func TestTicker_EvaluateDueHeartbeats_Scenarios(t *testing.T) {
 				if !req.Silent {
 					t.Errorf("expected req.Silent = true")
 				}
+				if !req.SkipIfActive {
+					t.Errorf("expected req.SkipIfActive = true")
+				}
 				if req.Ephemeral == nil || *req.Ephemeral != false {
 					t.Errorf("expected req.Ephemeral = boolPtr(false)")
 				}
@@ -1578,6 +1499,11 @@ func TestTicker_EvaluateDueHeartbeats_Scenarios(t *testing.T) {
 			var runStatus, runPrompt, runType string
 			_ = db.QueryRow("SELECT COUNT(*), COALESCE(MAX(status), ''), COALESCE(MAX(prompt), ''), COALESCE(MAX(schedule_type), '') FROM schedule_runs WHERE schedule_id = ?", tc.hbID).Scan(&runCount, &runStatus, &runPrompt, &runType)
 
+			if tc.wantSkippedRun {
+				if runCount != 0 {
+					t.Errorf("expected 0 runs for skipped active heartbeat %s, got count=%d", tc.hbID, runCount)
+				}
+			}
 			if tc.wantStaleRun {
 				if runCount == 0 || runStatus != "failed" {
 					t.Errorf("expected stale failed run for %s, got count=%d, status=%s", tc.hbID, runCount, runStatus)
@@ -1588,7 +1514,7 @@ func TestTicker_EvaluateDueHeartbeats_Scenarios(t *testing.T) {
 					t.Errorf("expected failed run for %s, got count=%d, status=%s", tc.hbID, runCount, runStatus)
 				}
 			}
-			if tc.wantDispatched && tc.dispatcherErr == nil {
+			if tc.wantDispatched && tc.dispatcherErr == nil && !tc.wantSkippedRun {
 				if runCount == 0 || runStatus != "completed" {
 					t.Errorf("expected completed run for %s, got count=%d, status=%s", tc.hbID, runCount, runStatus)
 				}

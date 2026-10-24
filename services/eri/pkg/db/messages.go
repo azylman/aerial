@@ -336,3 +336,24 @@ func (s *SQLStore) GetRecentThreadMessages(ctx context.Context, threadID string,
 	}
 	return msgs, nil
 }
+
+func (s *SQLStore) HasActiveThreadTurn(ctx context.Context, threadID string) (bool, error) {
+	if err := s.checkDB(); err != nil {
+		return false, err
+	}
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" {
+		return false, nil
+	}
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var dummy int
+	err := s.db.QueryRowContext(queryCtx, `SELECT 1 FROM messages WHERE thread_id = $1 AND status IN ('PENDING', 'PROCESSING') LIMIT 1`, threadID).Scan(&dummy)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to check active thread turn for %s: %w", threadID, err)
+	}
+	return true, nil
+}

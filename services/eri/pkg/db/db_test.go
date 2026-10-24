@@ -207,6 +207,16 @@ func TestMessageLifecycle(t *testing.T) {
 		t.Errorf("GetActiveTasks = %+v, %v", tasks, err)
 	}
 
+	if active, err := store.HasActiveThreadTurn(ctx, ""); err != nil || active {
+		t.Errorf("HasActiveThreadTurn empty = %v, %v, want false, nil", active, err)
+	}
+	if active, err := store.HasActiveThreadTurn(ctx, "th-none"); err != nil || active {
+		t.Errorf("HasActiveThreadTurn th-none = %v, %v, want false, nil", active, err)
+	}
+	if active, err := store.HasActiveThreadTurn(ctx, "th-1"); err != nil || !active {
+		t.Errorf("HasActiveThreadTurn th-1 = %v, %v, want true, nil", active, err)
+	}
+
 	// Empty ID validation
 	assertErr(t, store.InsertMessage(ctx, Message{ID: ""}), "InsertMessage empty ID")
 	assertErr(t, store.UpdateMessageStatus(ctx, "", StatusCompleted, ""), "UpdateMessageStatus empty ID")
