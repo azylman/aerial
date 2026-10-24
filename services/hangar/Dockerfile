@@ -1,10 +1,13 @@
 # syntax=docker/dockerfile:1
 FROM golang:1.27.1-alpine AS builder
 
-WORKDIR /build
-COPY services/hangar/go.mod services/hangar/go.sum* ./
+WORKDIR /src
+COPY pkg/go.mod pkg/go.sum* ./pkg/
+COPY services/hangar/go.mod services/hangar/go.sum* ./services/hangar/
+WORKDIR /src/services/hangar
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
+COPY pkg/ /src/pkg/
 COPY services/hangar/ ./
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \

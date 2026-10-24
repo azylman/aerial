@@ -884,6 +884,9 @@ func TestJobHasContainerBuildChanges_TableDriven(t *testing.T) {
 		{"matching mcp dir", specMCP, []string{"mcp/discord-mcp/main.go"}, true},
 		{"matching docs-service alias", specDocs, []string{"services/docs-service/Dockerfile"}, true},
 		{"matching root Dockerfile", specVanadis, []string{"Dockerfile"}, true},
+		{"matching pkg dir", specVanadis, []string{"pkg/httpkit/httpkit.go"}, true},
+		{"matching pkg dir on mcp go service", specMCP, []string{"pkg/ollama/client.go"}, true},
+		{"pkg dir does not match non-pkg service", specDocs, []string{"pkg/httpkit/httpkit.go"}, false},
 		{"unmatched other service dir", specVanadis, []string{"services/hangar/main.go", "nomad/jobs/vanadis.nomad"}, false},
 		{"external image never matches", specExternal, []string{"services/vanadis/main.go", "Dockerfile"}, false},
 		{"empty changed files", specVanadis, nil, false},
@@ -993,6 +996,7 @@ func TestHasContainerBuildChanges_TableDriven(t *testing.T) {
 		{"aerial core roborev-runner touched", "/share/aerial", []string{"roborev-runner/Dockerfile"}, true},
 		{"aerial core Dockerfile touched", "/share/aerial", []string{"Dockerfile"}, true},
 		{"aerial core go.mod touched", "/share/aerial", []string{"go.mod"}, true},
+		{"aerial core pkg touched", "/share/aerial", []string{"pkg/httpkit/httpkit.go"}, true},
 		{"aerial core non-build files (docs, nomad, rules)", "/share/aerial", []string{"nomad/jobs/migrate.nomad", "README.md", "rules/discord/foo.md", "docs/spec.md"}, false},
 		{"aerial core empty files", "/share/aerial", nil, false},
 	}
@@ -1492,6 +1496,7 @@ func TestResolveExpectedDeployJobs_TableDriven(t *testing.T) {
 	}
 	writeJob(filepath.Join(aerialDir, "nomad", "jobs", "vanadis.nomad"), `job "vanadis" { task "vanadis" { config { image = "ghcr.io/azylman/aerial-vanadis:${var.image_tag}" } } }`)
 	writeJob(filepath.Join(aerialDir, "nomad", "jobs", "hangar.nomad"), `job "hangar" { task "hangar" { config { image = "ghcr.io/azylman/aerial-hangar:${var.image_tag}" } } }`)
+	writeJob(filepath.Join(aerialDir, "nomad", "jobs", "docs.nomad"), `job "docs" { task "docs" { config { image = "ghcr.io/azylman/aerial-docs:${var.image_tag}" } } }`)
 	writeJob(filepath.Join(configDir, "jobs", "eri.nomad"), `job "eri" { task "eri" { config { image = "ghcr.io/azylman/aerial-eri:${var.image_tag}" } } }`)
 
 	serviceMappings := []ServiceConfigMapping{
@@ -1547,6 +1552,13 @@ func TestResolveExpectedDeployJobs_TableDriven(t *testing.T) {
 			name:           "container build changes across repoPath and candidateRepos with hangar sorted last",
 			repoPath:       aerialDir,
 			changedFiles:   []string{"services/hangar/main.go", "services/vanadis/main.go", "services/eri/main.go"},
+			candidateRepos: []string{configDir},
+			want:           []string{"eri", "vanadis", "hangar"},
+		},
+		{
+			name:           "shared pkg changes deploy only pkg dependent services and exclude non pkg services",
+			repoPath:       aerialDir,
+			changedFiles:   []string{"pkg/httpkit/httpkit.go"},
 			candidateRepos: []string{configDir},
 			want:           []string{"eri", "vanadis", "hangar"},
 		},

@@ -19,12 +19,14 @@ RUN npm prune --omit=dev --ignore-scripts
 # Stage 2: Build Go proxy wrapper binary
 # -----------------------------------------------------------------------------
 FROM golang:1.27.1-alpine AS go-build
-WORKDIR /build
-
-COPY go.mod go.sum* ./
+WORKDIR /src
+COPY pkg/go.mod pkg/go.sum* ./pkg/
+COPY mcp/discord-mcp/go.mod mcp/discord-mcp/go.sum* ./mcp/discord-mcp/
+WORKDIR /src/mcp/discord-mcp
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
-COPY main.go proxy.go pure.go ./
+COPY pkg/ /src/pkg/
+COPY mcp/discord-mcp/ ./
 
 # Build statically linked Go proxy with compiler cache mounts
 RUN --mount=type=cache,target=/go/pkg/mod \

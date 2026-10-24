@@ -115,7 +115,7 @@ check_rule_file_sizes() {
 }
 
 # Go services in the monorepo
-GO_SERVICES="services/eri services/haro mcp/discord-mcp services/dashboard services/hangar services/webhooks-router services/vanadis services/coven scripts/code-health"
+GO_SERVICES="pkg services/eri services/haro mcp/discord-mcp services/dashboard services/hangar services/webhooks-router services/vanadis services/coven scripts/code-health"
 
 run_go_vet() {
     svc="$1"

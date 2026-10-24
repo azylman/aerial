@@ -25,6 +25,7 @@ jobs:
     name: Detect Changed Microservices
     runs-on: ubuntu-latest
     outputs:
+      pkg: ${{ steps.filter.outputs.pkg }}
       eri: ${{ steps.filter.outputs.eri }}
       haro: ${{ steps.filter.outputs.haro }}
       coven: ${{ steps.filter.outputs.coven }}
@@ -48,14 +49,20 @@ jobs:
         id: filter
         with:
           filters: |
+            pkg:
+              - 'pkg/**'
             eri:
               - 'services/eri/**'
+              - 'pkg/**'
             haro:
               - 'services/haro/**'
+              - 'pkg/**'
             coven:
               - 'services/coven/**'
+              - 'pkg/**'
             discord-mcp:
               - 'mcp/discord-mcp/**'
+              - 'pkg/**'
             docker-mcp:
               - 'mcp/docker-mcp/**'
             github-mcp:
@@ -66,16 +73,20 @@ jobs:
               - 'mcp/infisical-mcp/**'
             dashboard:
               - 'services/dashboard/**'
+              - 'pkg/**'
             docs:
               - 'services/docs-service/**'
             proxy:
               - 'services/proxy/**'
             hangar:
               - 'services/hangar/**'
+              - 'pkg/**'
             webhooks-router:
               - 'services/webhooks-router/**'
+              - 'pkg/**'
             vanadis:
               - 'services/vanadis/**'
+              - 'pkg/**'
             roborev-runner:
               - 'services/roborev-runner/**'
 
@@ -103,19 +114,19 @@ jobs:
 
             const catalog = [
               { service: "eri", context: ".", file: "./services/eri/Dockerfile", image_name: "aerial-eri" },
-              { service: "haro", context: "./services/haro", file: "./services/haro/Dockerfile", image_name: "aerial-haro" },
-              { service: "coven", context: "./services/coven", file: "./services/coven/Dockerfile", image_name: "aerial-coven" },
-              { service: "discord-mcp", context: "./mcp/discord-mcp", file: "./mcp/discord-mcp/Dockerfile", image_name: "aerial-discord-mcp" },
+              { service: "haro", context: ".", file: "./services/haro/Dockerfile", image_name: "aerial-haro" },
+              { service: "coven", context: ".", file: "./services/coven/Dockerfile", image_name: "aerial-coven" },
+              { service: "discord-mcp", context: ".", file: "./mcp/discord-mcp/Dockerfile", image_name: "aerial-discord-mcp" },
               { service: "docker-mcp", context: "./mcp/docker-mcp", file: "./mcp/docker-mcp/Dockerfile", image_name: "aerial-docker-mcp" },
               { service: "github-mcp", context: "./mcp/github-mcp", file: "./mcp/github-mcp/Dockerfile", image_name: "aerial-github-mcp" },
               { service: "nomad-mcp", context: "./mcp/nomad-mcp", file: "./mcp/nomad-mcp/Dockerfile", image_name: "aerial-nomad-mcp" },
               { service: "infisical-mcp", context: "./mcp/infisical-mcp", file: "./mcp/infisical-mcp/Dockerfile", image_name: "aerial-infisical-mcp" },
-              { service: "dashboard", context: "./services/dashboard", file: "./services/dashboard/Dockerfile", image_name: "aerial-dashboard" },
+              { service: "dashboard", context: ".", file: "./services/dashboard/Dockerfile", image_name: "aerial-dashboard" },
               { service: "docs", context: "./services/docs-service", file: "./services/docs-service/Dockerfile", image_name: "aerial-docs" },
               { service: "proxy", context: "./services/proxy", file: "./services/proxy/Dockerfile", image_name: "aerial-proxy" },
               { service: "hangar", context: ".", file: "./services/hangar/Dockerfile", image_name: "aerial-hangar" },
-              { service: "webhooks-router", context: "./services/webhooks-router", file: "./services/webhooks-router/Dockerfile", image_name: "aerial-webhooks-router" },
-              { service: "vanadis", context: "./services/vanadis", file: "./services/vanadis/Dockerfile", image_name: "aerial-vanadis" },
+              { service: "webhooks-router", context: ".", file: "./services/webhooks-router/Dockerfile", image_name: "aerial-webhooks-router" },
+              { service: "vanadis", context: ".", file: "./services/vanadis/Dockerfile", image_name: "aerial-vanadis" },
               { service: "roborev-runner", context: ".", file: "./services/roborev-runner/Dockerfile", image_name: "aerial-roborev-runner" }
             ];
 
@@ -227,6 +238,12 @@ jobs:
       - name: Install deadcode
         run: |
           go install golang.org/x/tools/cmd/deadcode@v0.51.0
+
+      - name: Lint Shared Pkg
+        if: needs.changes.outputs.pkg == 'true'
+        run: |
+          cd pkg
+          golangci-lint run --path-prefix=pkg/ ./...
 
       - name: Lint Eri
         if: needs.changes.outputs.eri == 'true'
