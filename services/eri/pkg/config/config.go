@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +18,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/azylman/aerial/pkg/sanitizer"
 )
 
 var (
@@ -195,6 +198,28 @@ type TargetMcpConfig struct {
 	Ephemeral map[string]json.RawMessage `yaml:"ephemeral,omitempty" json:"ephemeral,omitempty"`
 }
 
+// SecretsConfig encapsulates credential configurations for redaction registration.
+type SecretsConfig struct {
+	DiscordToken string `yaml:"discord_token,omitempty" json:"discord_token,omitempty"`
+}
+
+// MCPServerConfig defines an MCP server configuration.
+type MCPServerConfig struct {
+	Command   string            `json:"command,omitempty" yaml:"command,omitempty"`
+	Args      []string          `json:"args,omitempty" yaml:"args,omitempty"`
+	Env       map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
+	ServerURL string            `json:"serverUrl,omitempty" yaml:"server_url,omitempty"`
+	Headers   map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
+}
+
+// MCPServersConfig groups MCP server configurations by target category.
+type MCPServersConfig struct {
+	Common    map[string]MCPServerConfig `yaml:"common,omitempty" json:"common,omitempty"`
+	Eri       map[string]MCPServerConfig `yaml:"eri,omitempty" json:"eri,omitempty"`
+	Voice     map[string]MCPServerConfig `yaml:"voice,omitempty" json:"voice,omitempty"`
+	Ephemeral map[string]MCPServerConfig `yaml:"ephemeral,omitempty" json:"ephemeral,omitempty"`
+}
+
 type VoiceConfig struct {
 	Engine           string                `yaml:"engine,omitempty" json:"engine,omitempty"`
 	Model            string                `yaml:"model,omitempty" json:"model,omitempty"`
@@ -209,7 +234,9 @@ type ConfigData struct {
 	SystemChannel             string                   `yaml:"system_channel" json:"system_channel"`
 	AdminUsers                []string                 `yaml:"admin_users" json:"admin_users"`
 	Channels                  map[string]ChannelPolicy `yaml:"channels" json:"channels"`
+	Secrets                   SecretsConfig            `yaml:"secrets,omitempty" json:"secrets,omitempty"`
 	McpServers                TargetMcpConfig          `yaml:"mcp_servers,omitempty" json:"mcp_servers,omitempty"`
+	MCPServers                MCPServersConfig         `yaml:"-" json:"-"`
 	Voice                     VoiceConfig              `yaml:"voice,omitempty" json:"voice,omitempty"`
 	DatabaseURL               string                   `yaml:"database_url" json:"database_url"`
 	Port                      string                   `yaml:"port" json:"port"`
@@ -501,6 +528,7 @@ func cloneConfigData(src *ConfigData) *ConfigData {
 		Voice:     cloneRawMessageMap(src.McpServers.Voice),
 		Ephemeral: cloneRawMessageMap(src.McpServers.Ephemeral),
 	}
+	dst.MCPServers = cloneMCPServers(src.MCPServers)
 	dst.Voice = VoiceConfig{
 		Engine:           src.Voice.Engine,
 		Model:            src.Voice.Model,
@@ -534,6 +562,12 @@ func DefaultConfigData() *ConfigData {
 			Discord:   make(map[string]json.RawMessage),
 			Voice:     make(map[string]json.RawMessage),
 			Ephemeral: make(map[string]json.RawMessage),
+		},
+		MCPServers: MCPServersConfig{
+			Common:    make(map[string]MCPServerConfig),
+			Eri:       make(map[string]MCPServerConfig),
+			Voice:     make(map[string]MCPServerConfig),
+			Ephemeral: make(map[string]MCPServerConfig),
 		},
 		Voice: VoiceConfig{
 			Engine:           "agy",
@@ -1265,4 +1299,167 @@ func LoadScopeInstructions(scopeName string) string {
 		}
 	}
 	return ""
+}
+
+func cloneMCPServers(src MCPServersConfig) MCPServersConfig {
+	return MCPServersConfig{
+		Common:    cloneMCPServerConfigMap(src.Common),
+		Eri:       cloneMCPServerConfigMap(src.Eri),
+		Voice:     cloneMCPServerConfigMap(src.Voice),
+		Ephemeral: cloneMCPServerConfigMap(src.Ephemeral),
+	}
+}
+
+func cloneMCPServerConfigMap(src map[string]MCPServerConfig) map[string]MCPServerConfig {
+	if src == nil {
+		return nil
+	}
+	dst := make(map[string]MCPServerConfig, len(src))
+	for k, v := range src {
+		srv := MCPServerConfig{
+			Command:   v.Command,
+			ServerURL: v.ServerURL,
+		}
+		if v.Args != nil {
+			srv.Args = append([]string(nil), v.Args...)
+		}
+		if v.Env != nil {
+			srv.Env = make(map[string]string, len(v.Env))
+			for ek, ev := range v.Env {
+				srv.Env[ek] = ev
+			}
+		}
+		if v.Headers != nil {
+			srv.Headers = make(map[string]string, len(v.Headers))
+			for hk, hv := range v.Headers {
+				srv.Headers[hk] = hv
+			}
+		}
+		dst[k] = srv
+	}
+	return dst
+}
+
+func collectCoreTokens(cur *ConfigData) []string {
+	var tokens []string
+	if cur.DiscordToken != "" {
+		tokens = append(tokens, cur.DiscordToken)
+	}
+	if cur.Secrets.DiscordToken != "" && cur.Secrets.DiscordToken != cur.DiscordToken {
+		tokens = append(tokens, cur.Secrets.DiscordToken)
+	}
+	if cur.APIKey != "" {
+		tokens = append(tokens, cur.APIKey)
+	}
+	if cur.HarnessAPIKey != "" {
+		tokens = append(tokens, cur.HarnessAPIKey)
+	}
+	if cur.GitHubPAT != "" {
+		tokens = append(tokens, cur.GitHubPAT)
+	}
+	if cur.DatabaseURL != "" {
+		if u, err := url.Parse(cur.DatabaseURL); err == nil && u.User != nil {
+			if pass, ok := u.User.Password(); ok && pass != "" {
+				tokens = append(tokens, pass)
+			}
+		}
+	}
+	return tokens
+}
+
+func extractMapTokens(m map[string]string) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var tokens []string
+	for _, k := range keys {
+		if v := m[k]; v != "" {
+			tokens = append(tokens, v)
+		}
+	}
+	return tokens
+}
+
+func extractMCPServerTokens(srv MCPServerConfig) []string {
+	var tokens []string
+	tokens = append(tokens, extractMapTokens(srv.Env)...)
+	tokens = append(tokens, extractMapTokens(srv.Headers)...)
+	return tokens
+}
+
+func collectMCPServerTokens(serverMaps []map[string]MCPServerConfig) []string {
+	var tokens []string
+	for _, m := range serverMaps {
+		if len(m) == 0 {
+			continue
+		}
+		names := make([]string, 0, len(m))
+		for name := range m {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			tokens = append(tokens, extractMCPServerTokens(m[name])...)
+		}
+	}
+	return tokens
+}
+
+func collectRawMCPServerTokens(rawMaps []map[string]json.RawMessage) []string {
+	var tokens []string
+	for _, m := range rawMaps {
+		if len(m) == 0 {
+			continue
+		}
+		names := make([]string, 0, len(m))
+		for name := range m {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			raw := m[name]
+			if len(raw) == 0 {
+				continue
+			}
+			var srv MCPServerConfig
+			if err := json.Unmarshal(raw, &srv); err != nil {
+				continue
+			}
+			tokens = append(tokens, extractMCPServerTokens(srv)...)
+		}
+	}
+	return tokens
+}
+
+// RegisterConfigTokens extracts secrets from the injected *Config and registers them
+// into the global redaction pool.
+func RegisterConfigTokens(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	cur := cfg.Current()
+
+	var tokens []string
+	tokens = append(tokens, collectCoreTokens(cur)...)
+	tokens = append(tokens, collectMCPServerTokens([]map[string]MCPServerConfig{
+		cur.MCPServers.Common,
+		cur.MCPServers.Eri,
+		cur.MCPServers.Voice,
+		cur.MCPServers.Ephemeral,
+	})...)
+	tokens = append(tokens, collectRawMCPServerTokens([]map[string]json.RawMessage{
+		cur.McpServers.Common,
+		cur.McpServers.Discord,
+		cur.McpServers.Voice,
+		cur.McpServers.Ephemeral,
+	})...)
+
+	if len(tokens) > 0 {
+		sanitizer.RegisterSensitiveTokens(tokens...)
+	}
 }

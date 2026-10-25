@@ -26,6 +26,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/services/eri/pkg/ambient"
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
@@ -37,7 +38,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
-	"github.com/azylman/aerial/services/eri/pkg/sanitizer"
 	"github.com/azylman/aerial/services/eri/pkg/session"
 	"github.com/azylman/aerial/services/eri/pkg/transcript"
 	"github.com/bwmarrin/discordgo"
@@ -994,7 +994,7 @@ func CreateReloadConfigFunc(cfg *config.Config, opts ...ReloadOption) func(sourc
 					cfg.Update(cur)
 				}
 			}
-			sanitizer.RegisterConfigTokens(cfg)
+			config.RegisterConfigTokens(cfg)
 
 			if !options.skipEnvironmentSync && options.provisioner != nil {
 				if err := options.provisioner.Sync(context.Background(), cfg); err != nil {
@@ -1354,7 +1354,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		store = db.NewSQLStore(database)
 	}
 
-	sanitizer.RegisterConfigTokens(cfg)
+	config.RegisterConfigTokens(cfg)
 
 	sessionMgr := session.New(cfg.GeminiHomeDir(), cfg.DataDir())
 

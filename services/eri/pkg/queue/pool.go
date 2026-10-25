@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
@@ -24,7 +25,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/notifier"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
-	"github.com/azylman/aerial/services/eri/pkg/sanitizer"
 	"github.com/azylman/aerial/services/eri/pkg/session"
 	"github.com/bwmarrin/discordgo"
 )

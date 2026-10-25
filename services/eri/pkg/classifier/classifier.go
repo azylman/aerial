@@ -16,11 +16,11 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
-	"github.com/azylman/aerial/services/eri/pkg/sanitizer"
 )
 
 // DefaultAGYClassifierModel is the default canonical agy model used for classification.

@@ -10,10 +10,10 @@ import (
 	"time"
 	_ "time/tzdata"
 
+	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
-	"github.com/azylman/aerial/services/eri/pkg/sanitizer"
 	"github.com/bwmarrin/discordgo"
 	"golang.org/x/sync/singleflight"
 )

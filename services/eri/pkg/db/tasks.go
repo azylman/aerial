@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/azylman/aerial/services/eri/pkg/sanitizer"
+	"github.com/azylman/aerial/pkg/sanitizer"
 )
 
 var (
