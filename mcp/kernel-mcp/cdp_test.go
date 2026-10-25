@@ -31,10 +31,9 @@ type fakeCDPOptions struct {
 	returnCDPError   bool
 }
 
-func startFakeCDPServer(t *testing.T) (*httptest.Server, *Config, *fakeCDPOptions) {
+func startFakeCDPServer(t *testing.T, opts fakeCDPOptions) (*httptest.Server, *Config) {
 	t.Helper()
 
-	opts := &fakeCDPOptions{}
 	var wsMu sync.Mutex
 	var activeWS *websocket.Conn
 
@@ -240,49 +239,40 @@ func startFakeCDPServer(t *testing.T) (*httptest.Server, *Config, *fakeCDPOption
 		server.Close()
 	})
 
-	return server, cfg, opts
+	return server, cfg
 }
 
 func TestCDPClient_EnsureConnectionTable(t *testing.T) {
 	tests := []struct {
 		name      string
-		setup     func(*fakeCDPOptions)
+		opts      fakeCDPOptions
 		wantErr   bool
 		errSubstr string
 	}{
 		{
 			name:    "successful connection and stealth init",
-			setup:   func(o *fakeCDPOptions) {},
 			wantErr: false,
 		},
 		{
-			name: "target selection skips chrome:// url",
-			setup: func(o *fakeCDPOptions) {
-				o.includeChrome = true
-			},
+			name:    "target selection skips chrome:// url",
+			opts:    fakeCDPOptions{includeChrome: true},
 			wantErr: false,
 		},
 		{
-			name: "fail list query returns error",
-			setup: func(o *fakeCDPOptions) {
-				o.failList = true
-			},
+			name:      "fail list query returns error",
+			opts:      fakeCDPOptions{failList: true},
 			wantErr:   true,
 			errSubstr: "cdp target query returned status 500",
 		},
 		{
-			name: "empty targets returns error",
-			setup: func(o *fakeCDPOptions) {
-				o.emptyTargets = true
-			},
+			name:      "empty targets returns error",
+			opts:      fakeCDPOptions{emptyTargets: true},
 			wantErr:   true,
 			errSubstr: "no open page target found",
 		},
 		{
-			name: "stealth Page.enable failure",
-			setup: func(o *fakeCDPOptions) {
-				o.failPageEnable = true
-			},
+			name:      "stealth Page.enable failure",
+			opts:      fakeCDPOptions{failPageEnable: true},
 			wantErr:   true,
 			errSubstr: "Page.enable",
 		},
@@ -290,8 +280,7 @@ func TestCDPClient_EnsureConnectionTable(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, cfg, opts := startFakeCDPServer(t)
-			tc.setup(opts)
+			_, cfg := startFakeCDPServer(t, tc.opts)
 
 			client := NewCDPClient(cfg)
 			defer client.Close()
@@ -330,7 +319,7 @@ func TestCDPClient_EnsureConnectionTable(t *testing.T) {
 }
 
 func TestCDPClient_CommandsTable(t *testing.T) {
-	_, cfg, _ := startFakeCDPServer(t)
+	_, cfg := startFakeCDPServer(t, fakeCDPOptions{})
 	client := NewCDPClient(cfg)
 	defer client.Close()
 
@@ -403,82 +392,67 @@ func TestCDPClient_CommandsTable(t *testing.T) {
 func TestCDPClient_ErrorAndDisconnectTable(t *testing.T) {
 	tests := []struct {
 		name      string
-		setup     func(*fakeCDPOptions)
+		opts      fakeCDPOptions
 		action    string
 		wantErr   bool
 		errSubstr string
 	}{
 		{
-			name: "eval exception details returns error",
-			setup: func(o *fakeCDPOptions) {
-				o.evalException = "SyntaxError: Unexpected token"
-			},
+			name:      "eval exception details returns error",
+			opts:      fakeCDPOptions{evalException: "SyntaxError: Unexpected token"},
 			action:    "eval",
 			wantErr:   true,
 			errSubstr: "javascript evaluation error: SyntaxError: Unexpected token",
 		},
 		{
-			name: "detachment disconnects connection",
-			setup: func(o *fakeCDPOptions) {
-				o.detachOnMethod = "Input.insertText"
-			},
+			name:      "detachment disconnects connection",
+			opts:      fakeCDPOptions{detachOnMethod: "Input.insertText"},
 			action:    "detach",
 			wantErr:   true,
 			errSubstr: "connection closed",
 		},
 		{
 			name:      "cancelled context aborts wait settle",
-			setup:     func(o *fakeCDPOptions) {},
 			action:    "settle-cancel",
 			wantErr:   true,
 			errSubstr: "context canceled",
 		},
 		{
 			name:      "send cdp with dead server returns error",
-			setup:     func(o *fakeCDPOptions) {},
 			action:    "send-cdp-fail",
 			wantErr:   true,
 			errSubstr: "cdp target query failed",
 		},
 		{
-			name: "trusted click mouseMoved error",
-			setup: func(o *fakeCDPOptions) {
-				o.failMouseMoved = true
-			},
+			name:      "trusted click mouseMoved error",
+			opts:      fakeCDPOptions{failMouseMoved: true},
 			action:    "click-fail-moved",
 			wantErr:   true,
 			errSubstr: "mouseMoved",
 		},
 		{
-			name: "trusted click mousePressed error",
-			setup: func(o *fakeCDPOptions) {
-				o.failMousePress = true
-			},
+			name:      "trusted click mousePressed error",
+			opts:      fakeCDPOptions{failMousePress: true},
 			action:    "click-fail-press",
 			wantErr:   true,
 			errSubstr: "mousePressed",
 		},
 		{
-			name: "trusted click mouseReleased error",
-			setup: func(o *fakeCDPOptions) {
-				o.failMouseRelease = true
-			},
+			name:      "trusted click mouseReleased error",
+			opts:      fakeCDPOptions{failMouseRelease: true},
 			action:    "click-fail-release",
 			wantErr:   true,
 			errSubstr: "mouseReleased",
 		},
 		{
-			name: "send cdp command returns cdp error code",
-			setup: func(o *fakeCDPOptions) {
-				o.returnCDPError = true
-			},
+			name:      "send cdp command returns cdp error code",
+			opts:      fakeCDPOptions{returnCDPError: true},
 			action:    "cdp-error-resp",
 			wantErr:   true,
 			errSubstr: "cdp error -32603",
 		},
 		{
 			name:      "send cdp with pre-canceled context",
-			setup:     func(o *fakeCDPOptions) {},
 			action:    "send-cdp-canceled-ctx",
 			wantErr:   true,
 			errSubstr: "context canceled",
@@ -487,8 +461,7 @@ func TestCDPClient_ErrorAndDisconnectTable(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			server, cfg, opts := startFakeCDPServer(t)
-			tc.setup(opts)
+			server, cfg := startFakeCDPServer(t, tc.opts)
 
 			client := NewCDPClient(cfg)
 			defer client.Close()

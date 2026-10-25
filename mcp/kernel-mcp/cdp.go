@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -68,7 +69,7 @@ func NewCDPClient(cfg *Config) *CDPClient {
 // getActivePageTarget queries /json/list on the CDP host and returns target ID and WS URL.
 func (c *CDPClient) getActivePageTarget(ctx context.Context) (string, string, error) {
 	resolvedHost := ResolveCDPHost(ctx, c.cfg.CDPHost)
-	listURL := fmt.Sprintf("http://%s:%s/json/list", resolvedHost, c.cfg.CDPPort)
+	listURL := fmt.Sprintf("http://%s/json/list", net.JoinHostPort(resolvedHost, c.cfg.CDPPort))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, listURL, nil)
 	if err != nil {
