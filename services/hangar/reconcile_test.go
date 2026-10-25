@@ -696,51 +696,30 @@ func TestNomadValidationAndServerReconcile_TableDriven(t *testing.T) {
 		_ = os.WriteFile(jobFile, []byte(`job "test" {}`), 0o644)
 
 		tests := []struct {
-			name      string
-			target    string
-			path      string
-			nomadExec NomadExecutor
-			wantErr   bool
+			name     string
+			target   string
+			path     string
+			nilExec  bool
+			execOut  string
+			execErrB string
+			execErr  error
+			wantErr  bool
 		}{
-			{name: "config nil executor returns error", target: "config", path: "/tmp/nomad", nomadExec: nil, wantErr: true},
-			{
-				name:   "config validation success",
-				target: "config",
-				path:   "/tmp/nomad",
-				nomadExec: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-					return []byte("Configuration is valid!\n"), nil, nil
-				},
-			},
-			{
-				name:   "config validation failure",
-				target: "config",
-				path:   "/tmp/nomad",
-				nomadExec: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-					return nil, []byte("syntax error"), errors.New("exit 1")
-				},
-				wantErr: true,
-			},
-			{
-				name:   "job validation success",
-				target: "job",
-				path:   jobFile,
-				nomadExec: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-					return []byte("Job validation successful!\n"), nil, nil
-				},
-			},
-			{
-				name:   "job validation failure",
-				target: "job",
-				path:   filepath.Join(tmpDir, "invalid.nomad"),
-				nomadExec: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
-					return nil, []byte("syntax error"), errors.New("exit 1")
-				},
-				wantErr: true,
-			},
+			{name: "config nil executor returns error", target: "config", path: "/tmp/nomad", nilExec: true, wantErr: true},
+			{name: "config validation success", target: "config", path: "/tmp/nomad", execOut: "Configuration is valid!\n"},
+			{name: "config validation failure", target: "config", path: "/tmp/nomad", execErrB: "syntax error", execErr: errors.New("exit 1"), wantErr: true},
+			{name: "job validation success", target: "job", path: jobFile, execOut: "Job validation successful!\n"},
+			{name: "job validation failure", target: "job", path: filepath.Join(tmpDir, "invalid.nomad"), execErrB: "syntax error", execErr: errors.New("exit 1"), wantErr: true},
 		}
 		for _, tc := range tests {
 			t.Run(tc.name, func(t *testing.T) {
-				d := &SyncDaemon{nomadExecutor: tc.nomadExec}
+				var nomadExec NomadExecutor
+				if !tc.nilExec {
+					nomadExec = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+						return []byte(tc.execOut), []byte(tc.execErrB), tc.execErr
+					}
+				}
+				d := &SyncDaemon{nomadExecutor: nomadExec}
 				var err error
 				if tc.target == "job" {
 					err = d.ValidateNomadJob(context.Background(), tc.path)
@@ -1102,57 +1081,75 @@ func TestNomadJobReconciliation_TableDriven(t *testing.T) {
 			}
 		})
 
-		type crossRepoCase struct {
+		reconcileCases := []struct {
 			name        string
-			fn          func() error
+			changes     []NomadFileChange
 			wantStopped []string
-		}
-
-		cases := []crossRepoCase{
+		}{
 			{
 				name: "defined in other repo skips stop",
-				fn: func() error {
-					return dCross.ReconcileNomadChanges(ctx, repoA, []NomadFileChange{
-						{Path: "jobs/brain.nomad", Action: "delete", JobName: "brain"},
-					})
+				changes: []NomadFileChange{
+					{Path: "jobs/brain.nomad", Action: "delete", JobName: "brain"},
 				},
 				wantStopped: nil,
 			},
 			{
 				name: "truly deleted job stops",
-				fn: func() error {
-					return dCross.ReconcileNomadChanges(ctx, repoA, []NomadFileChange{
-						{Path: "jobs/truly_deleted.nomad", Action: "delete", JobName: "truly_deleted"},
-					})
+				changes: []NomadFileChange{
+					{Path: "jobs/truly_deleted.nomad", Action: "delete", JobName: "truly_deleted"},
 				},
 				wantStopped: []string{"truly_deleted"},
 			},
+		}
+
+		for _, tc := range reconcileCases {
+			t.Run(tc.name, func(t *testing.T) {
+				mu.Lock()
+				stoppedJobs = nil
+				mu.Unlock()
+				if err := dCross.ReconcileNomadChanges(ctx, repoA, tc.changes); err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				mu.Lock()
+				got := append([]string(nil), stoppedJobs...)
+				mu.Unlock()
+				if len(got) != len(tc.wantStopped) {
+					t.Fatalf("stopped = %v, want %v", got, tc.wantStopped)
+				}
+				for i := range got {
+					if got[i] != tc.wantStopped[i] {
+						t.Errorf("stopped[%d] = %q, want %q", i, got[i], tc.wantStopped[i])
+					}
+				}
+			})
+		}
+
+		teardownCases := []struct {
+			name        string
+			events      []NomadChangeEvent
+			wantStopped []string
+		}{
 			{
 				name: "teardowns filters out cross repo defined jobs",
-				fn: func() error {
-					dCross.ExecuteNomadTeardowns(ctx, []NomadChangeEvent{
-						{
-							RepoPath: repoA,
-							Changes: []NomadFileChange{
-								{Path: "jobs/brain.nomad", Action: "delete", JobName: "brain"},
-								{Path: "jobs/old_orphan.nomad", Action: "delete", JobName: "old_orphan"},
-							},
+				events: []NomadChangeEvent{
+					{
+						RepoPath: repoA,
+						Changes: []NomadFileChange{
+							{Path: "jobs/brain.nomad", Action: "delete", JobName: "brain"},
+							{Path: "jobs/old_orphan.nomad", Action: "delete", JobName: "old_orphan"},
 						},
-					})
-					return nil
+					},
 				},
 				wantStopped: []string{"old_orphan"},
 			},
 		}
 
-		for _, tc := range cases {
+		for _, tc := range teardownCases {
 			t.Run(tc.name, func(t *testing.T) {
 				mu.Lock()
 				stoppedJobs = nil
 				mu.Unlock()
-				if err := tc.fn(); err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
+				dCross.ExecuteNomadTeardowns(ctx, tc.events)
 				mu.Lock()
 				got := append([]string(nil), stoppedJobs...)
 				mu.Unlock()

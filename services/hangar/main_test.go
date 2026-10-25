@@ -327,6 +327,40 @@ func TestReconcilerAndPeriodicLoops_TableDriven(t *testing.T) {
 		d.StartReconcilerLoop(ctx)
 		cancel()
 	})
+
+	t.Run("StartReconcilerLoop_cancel_stops_debounce_timer", func(t *testing.T) {
+		oldDebounce, oldCooldown := reconcilerDebounceDuration, reconcilerMinCooldown
+		reconcilerDebounceDuration, reconcilerMinCooldown = 50*time.Millisecond, 50*time.Millisecond
+		defer func() {
+			reconcilerDebounceDuration, reconcilerMinCooldown = oldDebounce, oldCooldown
+		}()
+
+		tempDir := t.TempDir()
+		nomadExecuted := make(chan struct{}, 1)
+		d := NewDaemon(DaemonConfig{
+			ComposeDir: tempDir,
+			ConfigDir:  tempDir,
+			NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+				nomadExecuted <- struct{}{}
+				return nil, nil, nil
+			},
+		})
+		d.recordPendingNomadChanges(tempDir, []NomadFileChange{
+			{JobName: "deljob", Action: "delete"},
+		})
+
+		loopCtx, loopCancel := context.WithCancel(context.Background())
+		d.StartReconcilerLoop(loopCtx)
+
+		_ = d.TriggerReconcile(context.Background(), true)
+		loopCancel()
+
+		select {
+		case <-nomadExecuted:
+			t.Fatal("expected debounce timer to be stopped on ctx.Done, but executor ran")
+		case <-time.After(100 * time.Millisecond):
+		}
+	})
 }
 
 func TestEnsureRepoAndSync_TableDriven(t *testing.T) {

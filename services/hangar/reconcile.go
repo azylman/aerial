@@ -602,27 +602,37 @@ func (d *SyncDaemon) StartReconcilerLoop(ctx context.Context) {
 		for {
 			select {
 			case <-ctx.Done():
+				if debounceTimer != nil {
+					debounceTimer.Stop()
+				}
 				return
 			case <-d.reconcileCh:
 				if debounceTimer != nil {
 					debounceTimer.Stop()
 				}
 				debounceTimer = time.AfterFunc(reconcilerDebounceDuration, func() {
+					// Stop immediately if loop context is canceled before callback fires
+					if ctx.Err() != nil {
+						return
+					}
 					if elapsed := time.Since(d.GetLastReconcile()); elapsed < reconcilerMinCooldown {
 						if !sleepWithContext(ctx, reconcilerMinCooldown-elapsed) {
 							return
 						}
+					}
+					if ctx.Err() != nil {
+						return
 					}
 
 					// Phase 1: Teardowns for any deleted Nomad jobs (releases ports)
 					d.pendingNomadMu.Lock()
 					pendingNomad := append([]NomadChangeEvent(nil), d.pendingNomadChanges...)
 					d.pendingNomadMu.Unlock()
-					d.ExecuteNomadTeardowns(context.Background(), pendingNomad)
+					d.ExecuteNomadTeardowns(ctx, pendingNomad)
 
 					// Phase 2: Check for Nomad server daemon config changes
 					if d.consumePendingNomadServerRestart() {
-						if errNomad := d.reconcileNomadServer(context.Background(), d.composeDir); errNomad != nil {
+						if errNomad := d.reconcileNomadServer(ctx, d.composeDir); errNomad != nil {
 							log.Printf("[Hangar:GitOps] Warning: reconcileNomadServer encountered error: %v", errNomad)
 						} else {
 							// Wait briefly for Nomad API readiness after server container restart
@@ -633,7 +643,7 @@ func (d *SyncDaemon) StartReconcilerLoop(ctx context.Context) {
 					}
 
 					// Phase 3: Nomad reconciliation (job applications)
-					if nomadErr := d.ReconcilePendingNomad(context.Background()); nomadErr != nil {
+					if nomadErr := d.ReconcilePendingNomad(ctx); nomadErr != nil {
 						log.Printf("[Hangar:GitOps] Debounced Nomad reconcile failed: %v", nomadErr)
 					}
 					d.SetLastReconcile(time.Now())
