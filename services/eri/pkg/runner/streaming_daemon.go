@@ -339,42 +339,427 @@ func (d *StreamingDaemon) drainInFlightToolsLocked() []inFlightToolCall {
 	return dangling
 }
 
+func (d *StreamingDaemon) tryRescueTurnOnEOF(turn *TurnContext) bool {
+	if d.cfg.TranscriptRescuer == nil || d.SessionID() == "" {
+		return false
+	}
+	rescued := d.cfg.TranscriptRescuer(d.SessionID(), turn.CreatedAt)
+	if !IsSubstantiveResponse(rescued) || strings.HasPrefix(rescued, "[Tool Call Requested]:") {
+		return false
+	}
+	log.Printf("[StreamingDaemon] Recovered substantive response directly from session %s transcript after unexpected EOF", d.SessionID())
+	turn.Sink.OnResult(&TurnResult{ConversationID: d.SessionID(), Response: strings.TrimSpace(rescued), Duration: time.Since(turn.CreatedAt)})
+	return true
+}
+
+func (d *StreamingDaemon) handleStdoutEOF(err error) {
+	if d.closed.Load() {
+		return
+	}
+	d.mu.Lock()
+	d.state = StateClosed
+	d.mu.Unlock()
+	d.inflightMu.Lock()
+	remaining, dangling := d.inflight, d.drainInFlightToolsLocked()
+	d.inflight = nil
+	d.inflightMu.Unlock()
+
+	for _, rec := range dangling {
+		if len(remaining) > 0 && remaining[0] != nil && remaining[0].Sink != nil {
+			remaining[0].Sink.OnToolCompleted(rec.toolName, rec.mcpServer, time.Since(rec.startedAt), "aborted")
+		}
+	}
+	for _, turn := range remaining {
+		if turn != nil && turn.Sink != nil {
+			if !d.tryRescueTurnOnEOF(turn) {
+				turn.Sink.OnError(fmt.Errorf("daemon stdout unexpected EOF: %w", err))
+			}
+		}
+	}
+}
+
 func (d *StreamingDaemon) readStdoutLoop(r *bufio.Reader) {
 	defer d.readerWg.Done()
 	for {
 		line, err := r.ReadString('\n')
 		if err != nil {
-			if !d.closed.Load() {
-				d.mu.Lock()
-				d.state = StateClosed
-				d.mu.Unlock()
-				d.inflightMu.Lock()
-				remaining, dangling := d.inflight, d.drainInFlightToolsLocked()
-				d.inflight = nil
-				d.inflightMu.Unlock()
-
-				for _, rec := range dangling {
-					if len(remaining) > 0 && remaining[0] != nil && remaining[0].Sink != nil {
-						remaining[0].Sink.OnToolCompleted(rec.toolName, rec.mcpServer, time.Since(rec.startedAt), "aborted")
-					}
-				}
-				for _, turn := range remaining {
-					if turn != nil && turn.Sink != nil {
-						if d.cfg.TranscriptRescuer != nil && d.SessionID() != "" {
-							if rescued := d.cfg.TranscriptRescuer(d.SessionID(), turn.CreatedAt); IsSubstantiveResponse(rescued) && !strings.HasPrefix(rescued, "[Tool Call Requested]:") {
-								log.Printf("[StreamingDaemon] Recovered substantive response directly from session %s transcript after unexpected EOF", d.SessionID())
-								turn.Sink.OnResult(&TurnResult{ConversationID: d.SessionID(), Response: strings.TrimSpace(rescued), Duration: time.Since(turn.CreatedAt)})
-								continue
-							}
-						}
-						turn.Sink.OnError(fmt.Errorf("daemon stdout unexpected EOF: %w", err))
-					}
-				}
-			}
+			d.handleStdoutEOF(err)
 			return
 		}
 		d.dispatchNDJSONLine(line)
 	}
+}
+
+type stepUpdateFields struct {
+	su            map[string]any
+	toolName      string
+	cmdName       string
+	toolParams    map[string]any
+	stepIdx       int
+	hasStepIdx    bool
+	isToolStart   bool
+	isToolEnd     bool
+	toolEndStatus string
+}
+
+func extractToolInfoParams(su map[string]any) (map[string]any, string) {
+	if info, ok := su["tool_info"].(map[string]any); ok {
+		if params, ok := info["parameters"].(map[string]any); ok {
+			var cmdName string
+			if cl := extractFirstString(params, "CommandLine"); cl != "" {
+				cmdName = cl
+			}
+			return params, cmdName
+		}
+	}
+	return nil, ""
+}
+
+func extractFirstToolCallEntry(su map[string]any, currentToolName string, currentParams map[string]any) (string, map[string]any, string) {
+	toolName := currentToolName
+	toolParams := currentParams
+	var cmdName string
+	if tcs, ok := su["tool_calls"].([]any); ok && len(tcs) > 0 {
+		if firstTc, ok := tcs[0].(map[string]any); ok {
+			if n := extractFirstString(firstTc, "name"); n != "" && toolName == "" {
+				toolName = n
+			}
+			if args, ok := firstTc["args"].(map[string]any); ok && toolParams == nil {
+				toolParams = args
+				if cl := extractFirstString(args, "CommandLine"); cl != "" {
+					cmdName = cl
+				}
+			}
+		}
+	}
+	return toolName, toolParams, cmdName
+}
+
+func applyStepUpdateSubmap(f *stepUpdateFields, su map[string]any) {
+	f.su = su
+	state := strings.ToUpper(extractFirstString(su, "state", "status"))
+	typ := strings.ToLower(extractFirstString(su, "type", "step_type"))
+	f.stepIdx, f.hasStepIdx = extractStepIndex(su)
+	if tn := extractFirstString(su, "tool_name"); tn != "" {
+		f.toolName = tn
+	}
+	if params, cmd := extractToolInfoParams(su); params != nil {
+		f.toolParams = params
+		if cmd != "" {
+			f.cmdName = cmd
+		}
+	}
+	tn, params, cmd := extractFirstToolCallEntry(su, f.toolName, f.toolParams)
+	f.toolName = tn
+	f.toolParams = params
+	if cmd != "" {
+		f.cmdName = cmd
+	}
+	switch state {
+	case "DONE":
+		f.toolEndStatus = "ok"
+	case "ERROR":
+		f.toolEndStatus = "error"
+	}
+	if typ == "tool_call" || typ == "tool" || typ == "subagent" {
+		f.isToolStart = f.toolEndStatus == ""
+		f.isToolEnd = f.toolEndStatus != ""
+	}
+}
+
+func parseStepUpdateEvent(raw map[string]any) stepUpdateFields {
+	var f stepUpdateFields
+	if tc, ok := raw["tool_call"].(map[string]any); ok {
+		if n, ok := tc["name"].(string); ok {
+			f.toolName = n
+		}
+		if c, ok := tc["command"].(string); ok {
+			f.cmdName = c
+		}
+		f.isToolStart = true
+	}
+	if m, ok := raw["step_update"].(map[string]any); ok && m != nil {
+		applyStepUpdateSubmap(&f, m)
+	}
+	if !f.hasStepIdx {
+		f.stepIdx, f.hasStepIdx = extractStepIndex(raw)
+	}
+	return f
+}
+
+func (d *StreamingDaemon) notifyStepBoundary(activeTurn *TurnContext, stepIdx int) {
+	d.inflightMu.Lock()
+	isNewStep := !activeTurn.hasSeenStep || stepIdx != activeTurn.lastStepIndex
+	if isNewStep {
+		activeTurn.hasSeenStep, activeTurn.lastStepIndex = true, stepIdx
+	}
+	d.inflightMu.Unlock()
+	if isNewStep {
+		if sa, ok := activeTurn.Sink.(StepAwareSink); ok {
+			sa.OnStepStarted(stepIdx)
+		}
+	}
+}
+
+func extractActivatedSkill(toolParams map[string]any, cmdName string) (string, bool) {
+	if toolParams != nil {
+		if path, ok := toolParams["AbsolutePath"].(string); ok && path != "" {
+			if skill, ok := ExtractSkillFromTarget(path); ok {
+				return skill, true
+			}
+		}
+	}
+	if cmdName != "" {
+		if skill, ok := ExtractSkillFromTarget(cmdName); ok {
+			return skill, true
+		}
+	}
+	return "", false
+}
+
+func (d *StreamingDaemon) recordToolStart(stepIdx int, hasStepIdx bool, canonicalTool, mcpServer string) bool {
+	var isNewToolStart bool
+	d.inflightMu.Lock()
+	defer d.inflightMu.Unlock()
+	if d.inFlightTools == nil {
+		d.inFlightTools = make(map[int]inFlightToolCall)
+	}
+	if hasStepIdx {
+		if _, exists := d.inFlightTools[stepIdx]; !exists {
+			d.inFlightTools[stepIdx] = inFlightToolCall{stepIndex: stepIdx, toolName: canonicalTool, mcpServer: mcpServer, startedAt: time.Now()}
+			isNewToolStart = true
+		}
+	} else {
+		alreadyInFlight := false
+		for _, rec := range d.inFlightTools {
+			if rec.toolName == canonicalTool {
+				alreadyInFlight = true
+				break
+			}
+		}
+		if !alreadyInFlight {
+			d.inFlightTools[-1] = inFlightToolCall{stepIndex: -1, toolName: canonicalTool, mcpServer: mcpServer, startedAt: time.Now()}
+			isNewToolStart = true
+		}
+	}
+	return isNewToolStart
+}
+
+func (d *StreamingDaemon) recordToolEnd(f stepUpdateFields) (inFlightToolCall, bool, bool) {
+	var completedRecord inFlightToolCall
+	var hasCompletedRecord bool
+	isToolEnd := f.isToolEnd
+	d.inflightMu.Lock()
+	defer d.inflightMu.Unlock()
+	if d.inFlightTools != nil {
+		if f.hasStepIdx {
+			if rec, exists := d.inFlightTools[f.stepIdx]; exists {
+				completedRecord, hasCompletedRecord, isToolEnd = rec, true, true
+				delete(d.inFlightTools, f.stepIdx)
+			}
+		}
+		if isToolEnd && !hasCompletedRecord && len(d.inFlightTools) > 0 {
+			cTool, _ := ExtractMCPToolInfo(f.toolName, f.toolParams)
+			for idx, rec := range d.inFlightTools {
+				if rec.toolName == f.toolName || rec.toolName == cTool || f.toolName == "call_mcp_tool" || len(d.inFlightTools) == 1 {
+					completedRecord, hasCompletedRecord = rec, true
+					delete(d.inFlightTools, idx)
+					break
+				}
+			}
+		}
+	}
+	return completedRecord, hasCompletedRecord, isToolEnd
+}
+
+func extractStepTextDelta(raw, su map[string]any) string {
+	for _, m := range []map[string]any{raw, su} {
+		if m == nil {
+			continue
+		}
+		for _, k := range []string{"delta", "text_delta"} {
+			if d, ok := m[k].(string); ok && d != "" {
+				return d
+			}
+		}
+	}
+	return ""
+}
+
+func hasThinkingField(raw, su map[string]any) bool {
+	if _, ok := raw["thinking"]; ok {
+		return true
+	}
+	if su != nil {
+		if _, ok := su["thinking"]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func (d *StreamingDaemon) handleStepUpdateEvent(activeTurn *TurnContext, raw map[string]any) {
+	d.mu.Lock()
+	d.stepCount++
+	d.mu.Unlock()
+	if activeTurn.Sink == nil {
+		return
+	}
+
+	f := parseStepUpdateEvent(raw)
+	if f.hasStepIdx {
+		d.notifyStepBoundary(activeTurn, f.stepIdx)
+	}
+
+	var (
+		canonicalTool      string
+		activatedSkill     string
+		hasSkill           bool
+		completedRecord    inFlightToolCall
+		hasCompletedRecord bool
+		isToolEnd          = f.isToolEnd
+		isNewToolStart     bool
+	)
+
+	if f.isToolStart {
+		var mcpServer string
+		canonicalTool, mcpServer = ExtractMCPToolInfo(f.toolName, f.toolParams)
+		activatedSkill, hasSkill = extractActivatedSkill(f.toolParams, f.cmdName)
+		isNewToolStart = d.recordToolStart(f.stepIdx, f.hasStepIdx, canonicalTool, mcpServer)
+	} else if f.isToolEnd || (f.hasStepIdx && f.toolEndStatus != "") {
+		completedRecord, hasCompletedRecord, isToolEnd = d.recordToolEnd(f)
+	}
+
+	if isNewToolStart && (canonicalTool != "" || f.cmdName != "") {
+		activeTurn.Sink.OnToolCall(canonicalTool, f.cmdName)
+	}
+	if hasSkill {
+		activeTurn.Sink.OnSkillActivated(activatedSkill, "discord")
+	}
+	if isToolEnd && hasCompletedRecord {
+		activeTurn.Sink.OnToolCompleted(completedRecord.toolName, completedRecord.mcpServer, time.Since(completedRecord.startedAt), f.toolEndStatus)
+	}
+	if delta := extractStepTextDelta(raw, f.su); delta != "" {
+		activeTurn.Sink.OnTextDelta(delta)
+	}
+	if hasThinkingField(raw, f.su) {
+		activeTurn.Sink.OnThinking()
+	}
+}
+
+func extractResultStatusAndError(raw map[string]any) (status, errMsg string) {
+	var resObj map[string]any
+	if r, ok := raw["result"].(map[string]any); ok {
+		resObj = r
+	}
+	for _, m := range []map[string]any{resObj, raw} {
+		if m == nil {
+			continue
+		}
+		if status == "" {
+			if s, ok := m["status"].(string); ok {
+				status = s
+			}
+		}
+		if errMsg == "" {
+			if em, ok := m["error"].(string); ok {
+				errMsg = em
+			}
+		}
+	}
+	return status, errMsg
+}
+
+func (d *StreamingDaemon) tryRescueTurnOnResult(activeTurn *TurnContext, raw map[string]any, errMsg, currentModel string) bool {
+	if d.cfg.TranscriptRescuer == nil || d.SessionID() == "" {
+		return false
+	}
+	rescued := d.cfg.TranscriptRescuer(d.SessionID(), activeTurn.CreatedAt)
+	if rescued == "" || !IsSubstantiveResponse(rescued) || strings.HasPrefix(rescued, "[Tool Call Requested]:") {
+		return false
+	}
+	log.Printf("[StreamingDaemon] Recovered substantive response directly from session %s transcript after error/empty result: %s", d.SessionID(), rescued)
+	recordStreamErrorMetric(errMsg, currentModel, false)
+	res := &TurnResult{ConversationID: d.SessionID(), Response: strings.TrimSpace(rescued), Stderr: errMsg, Duration: time.Since(activeTurn.CreatedAt)}
+	populateUsage(res, raw)
+	activeTurn.Sink.OnResult(res)
+	return true
+}
+
+func (d *StreamingDaemon) deliverResultToSink(activeTurn *TurnContext, raw map[string]any) {
+	currentModel := d.cfg.Model
+	if activeTurn != nil && strings.TrimSpace(activeTurn.Model) != "" {
+		currentModel = strings.TrimSpace(activeTurn.Model)
+	}
+	if currentModel == "" {
+		currentModel = "default"
+	}
+
+	respStr := extractResponseString(raw)
+	status, errMsg := extractResultStatusAndError(raw)
+
+	if strings.TrimSpace(respStr) == "" || strings.HasPrefix(respStr, "[Tool Call Requested]:") || strings.EqualFold(status, "ERROR") {
+		if d.tryRescueTurnOnResult(activeTurn, raw, errMsg, currentModel) {
+			return
+		}
+		if strings.EqualFold(status, "ERROR") {
+			if strings.TrimSpace(respStr) == "" || strings.HasPrefix(respStr, "[Tool Call Requested]:") {
+				recordStreamErrorMetric(errMsg, currentModel, true)
+				if errMsg == "" {
+					errMsg = "daemon execution failed"
+				}
+				activeTurn.Sink.OnError(errors.New(errMsg))
+				return
+			}
+			if errMsg != "" {
+				log.Printf("[StreamingDaemon] Notice: daemon reported error with substantive response: %s", errMsg)
+				recordStreamErrorMetric(errMsg, currentModel, false)
+			}
+		}
+	}
+
+	res := &TurnResult{ConversationID: d.SessionID(), Response: respStr, Stderr: errMsg, Duration: time.Since(activeTurn.CreatedAt)}
+	populateUsage(res, raw)
+	activeTurn.Sink.OnResult(res)
+}
+
+func (d *StreamingDaemon) handleResultEvent(raw map[string]any) {
+	d.inflightMu.Lock()
+	var activeTurn *TurnContext
+	if len(d.inflight) > 0 {
+		activeTurn = d.inflight[0]
+		d.inflight = d.inflight[1:]
+	}
+	hasMoreInflight := len(d.inflight) > 0
+	dangling := d.drainInFlightToolsLocked()
+	d.inflightMu.Unlock()
+
+	for _, rec := range dangling {
+		if activeTurn != nil && activeTurn.Sink != nil {
+			activeTurn.Sink.OnToolCompleted(rec.toolName, rec.mcpServer, time.Since(rec.startedAt), "aborted")
+		}
+	}
+
+	d.mu.Lock()
+	d.turnCount++
+	d.lastUsed = time.Now()
+	if !hasMoreInflight && d.state != StateClosed {
+		d.state = StateReady
+	}
+	var turnFinishedCb func(d *StreamingDaemon)
+	if !hasMoreInflight {
+		turnFinishedCb = d.onTurnFinished
+	}
+	d.mu.Unlock()
+
+	if turnFinishedCb != nil {
+		go turnFinishedCb(d)
+	}
+	if activeTurn == nil || activeTurn.Sink == nil {
+		return
+	}
+
+	d.deliverResultToSink(activeTurn, raw)
 }
 
 func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
@@ -404,279 +789,9 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 
 	switch event {
 	case "step_update":
-		d.mu.Lock()
-		d.stepCount++
-		d.mu.Unlock()
-		if activeTurn.Sink == nil {
-			return
-		}
-
-		var (
-			toolName, canonicalTool, mcpServer, cmdName, activatedSkill string
-			stepIdx                                                     int
-			hasStepIdx, isToolStart, isToolEnd, hasSkill                bool
-			toolEndStatus                                               string
-			completedRecord                                             inFlightToolCall
-			hasCompletedRecord                                          bool
-			toolParams                                                  map[string]any
-		)
-
-		if tc, ok := raw["tool_call"].(map[string]any); ok {
-			if n, ok := tc["name"].(string); ok {
-				toolName = n
-			}
-			if c, ok := tc["command"].(string); ok {
-				cmdName = c
-			}
-			isToolStart = true
-		}
-		var su map[string]any
-		if m, ok := raw["step_update"].(map[string]any); ok && m != nil {
-			su = m
-			state := strings.ToUpper(extractFirstString(su, "state", "status"))
-			typ := strings.ToLower(extractFirstString(su, "type", "step_type"))
-			stepIdx, hasStepIdx = extractStepIndex(su)
-			if tn := extractFirstString(su, "tool_name"); tn != "" {
-				toolName = tn
-			}
-			if info, ok := su["tool_info"].(map[string]any); ok {
-				if params, ok := info["parameters"].(map[string]any); ok {
-					toolParams = params
-					if cl := extractFirstString(params, "CommandLine"); cl != "" {
-						cmdName = cl
-					}
-				}
-			}
-			if tcs, ok := su["tool_calls"].([]any); ok && len(tcs) > 0 {
-				if firstTc, ok := tcs[0].(map[string]any); ok {
-					if n := extractFirstString(firstTc, "name"); n != "" && toolName == "" {
-						toolName = n
-					}
-					if args, ok := firstTc["args"].(map[string]any); ok && toolParams == nil {
-						toolParams = args
-						if cl := extractFirstString(args, "CommandLine"); cl != "" {
-							cmdName = cl
-						}
-					}
-				}
-			}
-			switch state {
-			case "DONE":
-				toolEndStatus = "ok"
-			case "ERROR":
-				toolEndStatus = "error"
-			}
-			if typ == "tool_call" || typ == "tool" || typ == "subagent" {
-				isToolStart, isToolEnd = toolEndStatus == "", toolEndStatus != ""
-			}
-		}
-
-		if !hasStepIdx {
-			stepIdx, hasStepIdx = extractStepIndex(raw)
-		}
-
-		if hasStepIdx {
-			d.inflightMu.Lock()
-			isNewStep := !activeTurn.hasSeenStep || stepIdx != activeTurn.lastStepIndex
-			if isNewStep {
-				activeTurn.hasSeenStep, activeTurn.lastStepIndex = true, stepIdx
-			}
-			d.inflightMu.Unlock()
-			if isNewStep {
-				if sa, ok := activeTurn.Sink.(StepAwareSink); ok {
-					sa.OnStepStarted(stepIdx)
-				}
-			}
-		}
-
-		var isNewToolStart bool
-		if isToolStart {
-			canonicalTool, mcpServer = ExtractMCPToolInfo(toolName, toolParams)
-			if toolParams != nil {
-				if path, ok := toolParams["AbsolutePath"].(string); ok && path != "" {
-					if skill, ok := ExtractSkillFromTarget(path); ok {
-						activatedSkill, hasSkill = skill, true
-					}
-				}
-			}
-			if !hasSkill && cmdName != "" {
-				if skill, ok := ExtractSkillFromTarget(cmdName); ok {
-					activatedSkill, hasSkill = skill, true
-				}
-			}
-
-			d.inflightMu.Lock()
-			if d.inFlightTools == nil {
-				d.inFlightTools = make(map[int]inFlightToolCall)
-			}
-			if hasStepIdx {
-				if _, exists := d.inFlightTools[stepIdx]; !exists {
-					d.inFlightTools[stepIdx] = inFlightToolCall{stepIndex: stepIdx, toolName: canonicalTool, mcpServer: mcpServer, startedAt: time.Now()}
-					isNewToolStart = true
-				}
-			} else {
-				alreadyInFlight := false
-				for _, rec := range d.inFlightTools {
-					if rec.toolName == canonicalTool {
-						alreadyInFlight = true
-						break
-					}
-				}
-				if !alreadyInFlight {
-					d.inFlightTools[-1] = inFlightToolCall{stepIndex: -1, toolName: canonicalTool, mcpServer: mcpServer, startedAt: time.Now()}
-					isNewToolStart = true
-				}
-			}
-			d.inflightMu.Unlock()
-		} else if isToolEnd || (hasStepIdx && toolEndStatus != "") {
-			d.inflightMu.Lock()
-			if d.inFlightTools != nil {
-				if hasStepIdx {
-					if rec, exists := d.inFlightTools[stepIdx]; exists {
-						completedRecord, hasCompletedRecord, isToolEnd = rec, true, true
-						delete(d.inFlightTools, stepIdx)
-					}
-				}
-				if isToolEnd && !hasCompletedRecord && len(d.inFlightTools) > 0 {
-					cTool, _ := ExtractMCPToolInfo(toolName, toolParams)
-					for idx, rec := range d.inFlightTools {
-						if rec.toolName == toolName || rec.toolName == cTool || toolName == "call_mcp_tool" || len(d.inFlightTools) == 1 {
-							completedRecord, hasCompletedRecord = rec, true
-							delete(d.inFlightTools, idx)
-							break
-						}
-					}
-				}
-			}
-			d.inflightMu.Unlock()
-		}
-
-		if isNewToolStart && (canonicalTool != "" || cmdName != "") {
-			activeTurn.Sink.OnToolCall(canonicalTool, cmdName)
-		}
-		if hasSkill {
-			activeTurn.Sink.OnSkillActivated(activatedSkill, "discord")
-		}
-		if isToolEnd && hasCompletedRecord {
-			activeTurn.Sink.OnToolCompleted(completedRecord.toolName, completedRecord.mcpServer, time.Since(completedRecord.startedAt), toolEndStatus)
-		}
-		var delta string
-		for _, m := range []map[string]any{raw, su} {
-			if m == nil || delta != "" {
-				continue
-			}
-			for _, k := range []string{"delta", "text_delta"} {
-				if d, ok := m[k].(string); ok && d != "" {
-					delta = d
-					break
-				}
-			}
-		}
-		if delta != "" {
-			activeTurn.Sink.OnTextDelta(delta)
-		}
-		if _, ok := raw["thinking"]; ok {
-			activeTurn.Sink.OnThinking()
-		} else if su != nil {
-			if _, ok := su["thinking"]; ok {
-				activeTurn.Sink.OnThinking()
-			}
-		}
-
+		d.handleStepUpdateEvent(activeTurn, raw)
 	case "result":
-		d.inflightMu.Lock()
-		if len(d.inflight) > 0 {
-			activeTurn = d.inflight[0]
-			d.inflight = d.inflight[1:]
-		}
-		hasMoreInflight := len(d.inflight) > 0
-		dangling := d.drainInFlightToolsLocked()
-		d.inflightMu.Unlock()
-
-		for _, rec := range dangling {
-			activeTurn.Sink.OnToolCompleted(rec.toolName, rec.mcpServer, time.Since(rec.startedAt), "aborted")
-		}
-
-		d.mu.Lock()
-		d.turnCount++
-		d.lastUsed = time.Now()
-		if !hasMoreInflight && d.state != StateClosed {
-			d.state = StateReady
-		}
-		var turnFinishedCb func(d *StreamingDaemon)
-		if !hasMoreInflight {
-			turnFinishedCb = d.onTurnFinished
-		}
-		d.mu.Unlock()
-
-		if turnFinishedCb != nil {
-			go turnFinishedCb(d)
-		}
-		if activeTurn == nil || activeTurn.Sink == nil {
-			return
-		}
-
-		currentModel := d.cfg.Model
-		if activeTurn != nil && strings.TrimSpace(activeTurn.Model) != "" {
-			currentModel = strings.TrimSpace(activeTurn.Model)
-		}
-		if currentModel == "" {
-			currentModel = "default"
-		}
-
-		respStr := extractResponseString(raw)
-		var status, errMsg string
-		var resObj map[string]any
-		if r, ok := raw["result"].(map[string]any); ok {
-			resObj = r
-		}
-		for _, m := range []map[string]any{resObj, raw} {
-			if m == nil {
-				continue
-			}
-			if status == "" {
-				if s, ok := m["status"].(string); ok {
-					status = s
-				}
-			}
-			if errMsg == "" {
-				if em, ok := m["error"].(string); ok {
-					errMsg = em
-				}
-			}
-		}
-
-		if strings.TrimSpace(respStr) == "" || strings.HasPrefix(respStr, "[Tool Call Requested]:") || strings.EqualFold(status, "ERROR") {
-			if d.cfg.TranscriptRescuer != nil && d.SessionID() != "" {
-				rescued := d.cfg.TranscriptRescuer(d.SessionID(), activeTurn.CreatedAt)
-				if rescued != "" && IsSubstantiveResponse(rescued) && !strings.HasPrefix(rescued, "[Tool Call Requested]:") {
-					log.Printf("[StreamingDaemon] Recovered substantive response directly from session %s transcript after error/empty result: %s", d.SessionID(), rescued)
-					recordStreamErrorMetric(errMsg, currentModel, false)
-					res := &TurnResult{ConversationID: d.SessionID(), Response: strings.TrimSpace(rescued), Stderr: errMsg, Duration: time.Since(activeTurn.CreatedAt)}
-					populateUsage(res, raw)
-					activeTurn.Sink.OnResult(res)
-					return
-				}
-			}
-			if strings.EqualFold(status, "ERROR") {
-				if strings.TrimSpace(respStr) == "" || strings.HasPrefix(respStr, "[Tool Call Requested]:") {
-					recordStreamErrorMetric(errMsg, currentModel, true)
-					if errMsg == "" {
-						errMsg = "daemon execution failed"
-					}
-					activeTurn.Sink.OnError(errors.New(errMsg))
-					return
-				}
-				if errMsg != "" {
-					log.Printf("[StreamingDaemon] Notice: daemon reported error with substantive response: %s", errMsg)
-					recordStreamErrorMetric(errMsg, currentModel, false)
-				}
-			}
-		}
-
-		res := &TurnResult{ConversationID: d.SessionID(), Response: respStr, Stderr: errMsg, Duration: time.Since(activeTurn.CreatedAt)}
-		populateUsage(res, raw)
-		activeTurn.Sink.OnResult(res)
+		d.handleResultEvent(raw)
 	}
 }
 
