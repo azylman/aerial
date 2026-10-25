@@ -51,15 +51,7 @@ job "haro" {
 
       template {
         data = <<EOH
-{{- if nomadVarExists "nomad/jobs/haro" -}}
-{{- with nomadVar "nomad/jobs/haro" -}}
-{{- if .CONFIG_YAML -}}{{- .CONFIG_YAML -}}{{- end -}}
-{{- end -}}
-{{- else if nomadVarExists "nomad/jobs/scheduler-mcp" -}}
-{{- with nomadVar "nomad/jobs/scheduler-mcp" -}}
-{{- if .CONFIG_YAML -}}{{- .CONFIG_YAML -}}{{- end -}}
-{{- end -}}
-{{- end -}}
+{{- with nomadVar "nomad/jobs/haro" -}}{{ index . "config.yaml" }}{{- end -}}
 EOH
         destination = "local/config.yaml"
         change_mode = "restart"
@@ -94,12 +86,6 @@ EOH
             ignore_warnings = false
           }
         }
-      }
-
-      service {
-        name     = "scheduler-mcp"
-        port     = "http"
-        provider = "nomad"
       }
 
       resources {

@@ -880,7 +880,7 @@ func TestJobHasContainerBuildChanges_TableDriven(t *testing.T) {
 		want    bool
 	}{
 		{"matching services dir", specVanadis, []string{"services/vanadis/main.go"}, true},
-		{"matching legacy root dir", specVanadis, []string{"vanadis/Dockerfile"}, true},
+		{"matching legacy root dir", specVanadis, []string{"vanadis/Dockerfile"}, false},
 		{"matching mcp dir", specMCP, []string{"mcp/discord-mcp/main.go"}, true},
 		{"matching docs-service alias", specDocs, []string{"services/docs-service/Dockerfile"}, true},
 		{"matching root Dockerfile", specVanadis, []string{"Dockerfile"}, true},
@@ -986,18 +986,22 @@ func TestHasContainerBuildChanges_TableDriven(t *testing.T) {
 		expected bool
 	}{
 		{"aerial-config always false", "/share/aerial-config", []string{"jobs/brain.nomad", "rules/common.md", "Dockerfile"}, false},
-		{"aerial core brain touched", "/share/aerial", []string{"brain/main.go"}, true},
+		{"aerial core legacy brain touched returns false", "/share/aerial", []string{"brain/main.go"}, false},
 		{"aerial core services touched", "/share/aerial", []string{"services/coven/main.go"}, true},
 		{"aerial core mcp touched", "/share/aerial", []string{"mcp/github-mcp/main.go"}, true},
-		{"aerial core coven touched", "/share/aerial", []string{"coven/main.go"}, true},
-		{"aerial core eri touched", "/share/aerial", []string{"eri/main.go"}, true},
-		{"aerial core webhooks-router touched", "/share/aerial", []string{"webhooks-router/main.go"}, true},
-		{"aerial core vanadis touched", "/share/aerial", []string{"vanadis/main.go"}, true},
-		{"aerial core roborev-runner touched", "/share/aerial", []string{"roborev-runner/Dockerfile"}, true},
+		{"aerial core legacy coven touched returns false", "/share/aerial", []string{"coven/main.go"}, false},
+		{"aerial core eri touched", "/share/aerial", []string{"services/eri/main.go"}, true},
+		{"aerial core legacy webhooks-router touched returns false", "/share/aerial", []string{"webhooks-router/main.go"}, false},
+		{"aerial core legacy vanadis touched returns false", "/share/aerial", []string{"vanadis/main.go"}, false},
+		{"aerial core legacy roborev-runner touched returns false", "/share/aerial", []string{"roborev-runner/Dockerfile"}, false},
 		{"aerial core Dockerfile touched", "/share/aerial", []string{"Dockerfile"}, true},
 		{"aerial core go.mod touched", "/share/aerial", []string{"go.mod"}, true},
 		{"aerial core pkg touched", "/share/aerial", []string{"pkg/httpkit/httpkit.go"}, true},
-		{"aerial core non-build files (docs, nomad, rules)", "/share/aerial", []string{"nomad/jobs/migrate.nomad", "README.md", "rules/discord/foo.md", "docs/spec.md"}, false},
+		{"aerial core scripts touched", "/share/aerial", []string{"scripts/verify.sh"}, true},
+		{"aerial core rules touched", "/share/aerial", []string{"rules/discord/foo.md"}, true},
+		{"aerial core .agents touched", "/share/aerial", []string{".agents/skills/self-improvement/SKILL.md"}, true},
+		{"aerial core docker publish workflow touched", "/share/aerial", []string{".github/workflows/docker-publish.yml"}, true},
+		{"aerial core non-build files (docs, nomad, readme)", "/share/aerial", []string{"nomad/jobs/migrate.nomad", "README.md", "docs/spec.md"}, false},
 		{"aerial core empty files", "/share/aerial", nil, false},
 	}
 

@@ -495,8 +495,11 @@ func TestExtractServiceNameFromJobName_TableDriven(t *testing.T) {
 		{name: "dashboard service", jobName: "Build & Push dashboard", expected: "dashboard"},
 		{name: "proxy service", jobName: "test-proxy-service", expected: "proxy"},
 		{name: "haro service", jobName: "haro CI", expected: "haro"},
-		{name: "scheduler mcp", jobName: "scheduler-mcp CI", expected: "scheduler-mcp"},
 		{name: "coven service", jobName: "Build & Push coven", expected: "coven"},
+		{name: "vanadis service", jobName: "Build & Push vanadis", expected: "vanadis"},
+		{name: "roborev-runner service", jobName: "roborev-runner CI", expected: "roborev-runner"},
+		{name: "eri service build & push", jobName: "Build & Push eri", expected: "eri"},
+		{name: "eri service build parentheses", jobName: "build (eri)", expected: "eri"},
 		{name: "discord mcp", jobName: "discord-mcp Tests", expected: "discord-mcp"},
 		{name: "docker mcp", jobName: "docker-mcp Unit", expected: "docker-mcp"},
 		{name: "github mcp", jobName: "github-mcp Deploy", expected: "github-mcp"},
@@ -515,6 +518,7 @@ func TestExtractServiceNameFromJobName_TableDriven(t *testing.T) {
 		{name: "hangar service", jobName: "Build hangar", expected: "hangar"},
 		{name: "docs service", jobName: "Build docs", expected: "docs"},
 		{name: "unrelated job", jobName: "Cleanup Stale Artifacts", expected: ""},
+		{name: "verify does not match eri", jobName: "verify", expected: ""},
 	}
 
 	for _, tt := range tests {

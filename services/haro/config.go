@@ -18,18 +18,16 @@ const DefaultTimezone = "America/Los_Angeles"
 
 var (
 	defaultConfigPath = "/config/haro.yaml"
-	legacyConfigPath  = "/config/scheduler-mcp.yaml"
 	localConfigPath   = "/local/config.yaml"
 )
 
 // ResolveConfigPath returns the config file path, checking CONFIG_PATH env,
 // then /local/config.yaml (if size > 0), falling back to fallbackPath.
-// If fallbackPath does not exist and legacyConfigPath exists, it falls back to legacyConfigPath.
 func ResolveConfigPath(fallbackPath string) string {
 	if fallbackPath != "" {
-		return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, fallbackPath, legacyConfigPath)
+		return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, fallbackPath)
 	}
-	return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, defaultConfigPath, legacyConfigPath, "config.yaml")
+	return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, defaultConfigPath, "config.yaml")
 }
 
 // Config represents the runtime configuration for the scheduler MCP server.

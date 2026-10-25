@@ -8308,6 +8308,79 @@ func TestConfig_BrainURLResolution(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_TableDriven(t *testing.T) {
+	tmpDir := t.TempDir()
+	validFile := filepath.Join(tmpDir, "config.yaml")
+	_ = os.WriteFile(validFile, []byte("port: '4011'\nrules_dir: '/custom/rules'\n"), 0o644)
+
+	tests := []struct {
+		name         string
+		path         string
+		envPort      string
+		envDB        string
+		envRules     string
+		wantPort     string
+		wantRulesDir string
+		wantErr      bool
+	}{
+		{
+			name:         "valid file and env database url",
+			path:         validFile,
+			envPort:      "",
+			envDB:        "postgres://localhost/coven_test",
+			wantPort:     "4011",
+			wantRulesDir: "/custom/rules",
+			wantErr:      false,
+		},
+		{
+			name:         "default rules dir with env rules override",
+			path:         "",
+			envPort:      "4008",
+			envDB:        "postgres://localhost/coven_test",
+			envRules:     "/override/rules",
+			wantPort:     "4008",
+			wantRulesDir: "/override/rules",
+			wantErr:      false,
+		},
+		{
+			name:         "default rules dir without override",
+			path:         "",
+			envPort:      "",
+			envDB:        "postgres://localhost/coven_test",
+			wantPort:     "4008",
+			wantRulesDir: "/config/rules",
+			wantErr:      false,
+		},
+		{
+			name:    "missing database url returns error",
+			path:    "",
+			envDB:   "",
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("PORT", tc.envPort)
+			t.Setenv("DATABASE_URL", tc.envDB)
+			t.Setenv("RULES_DIR", tc.envRules)
+			cfg, err := LoadConfig(tc.path)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("LoadConfig() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				return
+			}
+			if cfg.Port != tc.wantPort {
+				t.Errorf("Port = %q, want %q", cfg.Port, tc.wantPort)
+			}
+			if cfg.RulesDir != tc.wantRulesDir {
+				t.Errorf("RulesDir = %q, want %q", cfg.RulesDir, tc.wantRulesDir)
+			}
+		})
+	}
+}
+
 func TestFormatSkillCommitAndPRHelpers(t *testing.T) {
 	c1 := SkillFileChange{
 		RelPath:       "custom-skills/discord/ha/SKILL.md",
