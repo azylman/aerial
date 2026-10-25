@@ -1,9 +1,5 @@
 {
-  "files": {
-    "services/eri/pkg/queue/worker.go": {
-      "lines": 1865
-    }
-  },
+  "files": {},
   "functions": {
     "services/coven/config.go::LoadConfigFile": {
       "cc": 30
@@ -213,18 +209,25 @@
     "services/eri/pkg/queue/status_updater.go::*StatusUpdater.flush": {
       "cc": 26
     },
+    "services/eri/pkg/queue/turn_prompt.go::*turnExecution.buildColdStartLookback": {
+      "cc": 31
+    },
+    "services/eri/pkg/queue/turn_prompt.go::*turnExecution.buildTurnPrompt": {
+      "cc": 26
+    },
+    "services/eri/pkg/queue/turn_prompt.go::*turnExecution.getRecentThreadMessages": {
+      "cc": 26,
+      "depth": 6
+    },
+    "services/eri/pkg/queue/turn_prompt.go::*turnExecution.resolveAndPersistSessionID": {
+      "cc": 33
+    },
     "services/eri/pkg/queue/webhook.go::*DefaultWebhookDispatcher.dispatch": {
       "cc": 24
     },
     "services/eri/pkg/queue/worker.go::*WorkerPool.processBurst": {
       "lines": 156,
       "cc": 31
-    },
-    "services/eri/pkg/queue/worker.go::*turnExecution.buildColdStartLookback": {
-      "cc": 31
-    },
-    "services/eri/pkg/queue/worker.go::*turnExecution.buildTurnPrompt": {
-      "cc": 26
     },
     "services/eri/pkg/queue/worker.go::*turnExecution.evaluateAmbientWake": {
       "cc": 29
@@ -234,15 +237,8 @@
       "cc": 80,
       "depth": 6
     },
-    "services/eri/pkg/queue/worker.go::*turnExecution.getRecentThreadMessages": {
-      "cc": 26,
-      "depth": 6
-    },
     "services/eri/pkg/queue/worker.go::*turnExecution.handleQuotaPause": {
       "cc": 21
-    },
-    "services/eri/pkg/queue/worker.go::*turnExecution.resolveAndPersistSessionID": {
-      "cc": 33
     },
     "services/eri/pkg/runner/gemini_api_pool.go::*GeminiAPISession.Send": {
       "lines": 233,
