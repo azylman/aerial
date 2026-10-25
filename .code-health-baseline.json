@@ -316,17 +316,17 @@
     "services/hangar/reconcile.go::*SyncDaemon.CheckAndReconcileNomadImages": {
       "depth": 6
     },
-    "services/hangar/main.go::*SyncDaemon.ExecuteGitPushEvent": {
+    "services/hangar/events.go::*SyncDaemon.ExecuteGitPushEvent": {
       "lines": 182,
       "cc": 31
     },
-    "services/hangar/main.go::*SyncDaemon.ExecuteImageReadyEvent": {
+    "services/hangar/events.go::*SyncDaemon.ExecuteImageReadyEvent": {
       "cc": 21
     },
     "services/hangar/gitsync.go::*SyncDaemon.GetStatus": {
       "cc": 27
     },
-    "services/hangar/main.go::*SyncDaemon.StartImageRolloutLoop": {
+    "services/hangar/events.go::*SyncDaemon.StartImageRolloutLoop": {
       "depth": 6
     },
     "services/hangar/reconcile.go::*SyncDaemon.StartReconcilerLoop": {
