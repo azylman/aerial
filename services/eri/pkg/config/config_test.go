@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/azylman/aerial/pkg/sanitizer"
 )
 
 // NewTestConfig returns a hermetic in-memory *Config initialized with DefaultConfigData().
@@ -1564,4 +1566,93 @@ func TestAmbientContextConfig(t *testing.T) {
 		t.Fatal("DefaultConfigData failed")
 	}
 	_ = GetRuntimeConfig()
+}
+
+func TestRegisterConfigTokens(t *testing.T) {
+	tests := []struct {
+		name       string
+		cfg        *Config
+		input      string
+		wantResult string
+	}{
+		{
+			name:       "nil config",
+			cfg:        nil,
+			input:      "text with unredacted token discord_secret_token_12345",
+			wantResult: "text with unredacted token discord_secret_token_12345",
+		},
+		{
+			name:       "empty config",
+			cfg:        &Config{},
+			input:      "text with unredacted token discord_secret_token_12345",
+			wantResult: "text with unredacted token discord_secret_token_12345",
+		},
+		{
+			name: "populated discord token and mcp servers",
+			cfg: NewFromData(&ConfigData{
+				DiscordToken: "secret_discord_token_12345",
+				MCPServers: MCPServersConfig{
+					Common: map[string]MCPServerConfig{
+						"common-srv": {
+							Env:     map[string]string{"COMMON_ENV": "secret_common_env_1111"},
+							Headers: map[string]string{"X-Common": "secret_common_hdr_2222"},
+						},
+					},
+					Eri: map[string]MCPServerConfig{
+						"eri-srv": {
+							Env:     map[string]string{"ERI_ENV": "secret_eri_env_3333"},
+							Headers: map[string]string{"X-Eri": "secret_eri_hdr_4444"},
+						},
+					},
+					Voice: map[string]MCPServerConfig{
+						"voice-srv": {
+							Env:     map[string]string{"VOICE_ENV": "secret_voice_env_5555"},
+							Headers: map[string]string{"X-Voice": "secret_voice_hdr_6666"},
+						},
+					},
+					Ephemeral: map[string]MCPServerConfig{
+						"eph-srv": {
+							Env:     map[string]string{"EPH_ENV": "secret_eph_env_7777"},
+							Headers: map[string]string{"X-Eph": "secret_eph_hdr_8888"},
+						},
+					},
+				},
+			}),
+			input:      "discord: secret_discord_token_12345, c-env: secret_common_env_1111, c-hdr: secret_common_hdr_2222, e-env: secret_eri_env_3333, e-hdr: secret_eri_hdr_4444, v-env: secret_voice_env_5555, v-hdr: secret_voice_hdr_6666, eph-env: secret_eph_env_7777, eph-hdr: secret_eph_hdr_8888",
+			wantResult: "discord: [REDACTED], c-env: [REDACTED], c-hdr: [REDACTED], e-env: [REDACTED], e-hdr: [REDACTED], v-env: [REDACTED], v-hdr: [REDACTED], eph-env: [REDACTED], eph-hdr: [REDACTED]",
+		},
+		{
+			name: "populated secrets discord token and core credentials",
+			cfg: NewFromData(&ConfigData{
+				Secrets: SecretsConfig{
+					DiscordToken: "secret_secrets_token_9999",
+				},
+				APIKey:        "secret_api_key_888888",
+				HarnessAPIKey: "secret_harness_key_77777",
+				GitHubPAT:     "ghp_testpersonalaccesstoken6666666",
+				DatabaseURL:   "postgres://user:secret_db_pass_55555@localhost:5432/aerial",
+				McpServers: TargetMcpConfig{
+					Common: map[string]json.RawMessage{
+						"srv-json": []byte(`{"env":{"RAW_SECRET":"secret_raw_env_44444"},"headers":{"Authorization":"secret_raw_hdr_33333"}}`),
+					},
+				},
+			}),
+			input:      "sec: secret_secrets_token_9999, api: secret_api_key_888888, harn: secret_harness_key_77777, pat: ghp_testpersonalaccesstoken6666666, db: secret_db_pass_55555, raw-env: secret_raw_env_44444, raw-hdr: secret_raw_hdr_33333",
+			wantResult: "sec: [REDACTED], api: [REDACTED], harn: [REDACTED], pat: [REDACTED], db: [REDACTED], raw-env: [REDACTED], raw-hdr: [REDACTED]",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sanitizer.ResetSensitiveTokens()
+			defer sanitizer.ResetSensitiveTokens()
+
+			RegisterConfigTokens(tc.cfg)
+
+			got := sanitizer.SanitizeString(tc.input)
+			if got != tc.wantResult {
+				t.Errorf("SanitizeString() = %q, want %q", got, tc.wantResult)
+			}
+		})
+	}
 }

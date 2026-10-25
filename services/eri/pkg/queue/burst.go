@@ -7,11 +7,11 @@ import (
 	"time"
 	_ "time/tzdata"
 
+	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
-	"github.com/azylman/aerial/services/eri/pkg/sanitizer"
 )
 
 func (p *WorkerPool) Enqueue(msg db.Message) { p.EnqueueBurst(msg) }
