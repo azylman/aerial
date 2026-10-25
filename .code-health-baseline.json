@@ -231,20 +231,6 @@
     "services/eri/pkg/runner/unified_pool.go::*unifiedSessionLease.Execute": {
       "cc": 30
     },
-    "services/eri/pkg/session/session.go::*Manager.ExtractLastTurnError": {
-      "cc": 38,
-      "depth": 7
-    },
-    "services/eri/pkg/session/session.go::LastActivityFromRoots": {
-      "cc": 23
-    },
-    "services/eri/pkg/transcript/worker.go::SyncTranscripts": {
-      "cc": 21
-    },
-    "services/eri/pkg/transcript/worker.go::syncSingleSession": {
-      "lines": 257,
-      "cc": 73
-    },
     "services/eri/pure.go::FormatCronDescription": {
       "cc": 54
     },

@@ -133,6 +133,82 @@ func isStepBefore(createdAt string, since time.Time) bool {
 	return false
 }
 
+// expandSessionRoot interpolates %s or {session} template placeholders with cleanID.
+func expandSessionRoot(root, cleanID string) string {
+	if strings.Contains(root, "%s") {
+		return fmt.Sprintf(root, cleanID)
+	}
+	if strings.Contains(root, "{session}") {
+		return strings.ReplaceAll(root, "{session}", cleanID)
+	}
+	return root
+}
+
+// resolveSessionDirInRoot returns the candidate session directory within root if it exists.
+func resolveSessionDirInRoot(root, cleanID string) (string, bool) {
+	if strings.TrimSpace(root) == "" {
+		return "", false
+	}
+	expandedRoot := expandSessionRoot(root, cleanID)
+
+	sessDir := filepath.Join(expandedRoot, cleanID)
+	if fi, err := os.Stat(sessDir); err == nil && fi.IsDir() {
+		return sessDir, true
+	}
+
+	// Also check if expandedRoot is directly the session directory or points to .system_generated/logs
+	fiRoot, errRoot := os.Stat(expandedRoot)
+	if errRoot != nil || !fiRoot.IsDir() {
+		return "", false
+	}
+
+	cleanExpanded := filepath.Clean(expandedRoot)
+	if filepath.Base(cleanExpanded) == cleanID {
+		return cleanExpanded, true
+	}
+	if strings.HasSuffix(cleanExpanded, filepath.Clean(filepath.Join(cleanID, ".system_generated", "logs"))) ||
+		strings.HasSuffix(cleanExpanded, filepath.Clean(filepath.Join(".system_generated", "logs"))) {
+		return filepath.Dir(filepath.Dir(cleanExpanded)), true
+	}
+
+	return "", false
+}
+
+// latestModTimeInSessionDir inspects transcript and task logs in sessDir and returns the latest mod time.
+func latestModTimeInSessionDir(sessDir string) time.Time {
+	var latest time.Time
+
+	// 1. Transcripts in .system_generated/logs/
+	logsDir := filepath.Join(sessDir, ".system_generated", "logs")
+	for _, name := range []string{"transcript.jsonl", "transcript_full.jsonl"} {
+		if fi, err := os.Stat(filepath.Join(logsDir, name)); err == nil && !fi.IsDir() {
+			if fi.ModTime().After(latest) {
+				latest = fi.ModTime()
+			}
+		}
+	}
+
+	// 2. Background task logs in .system_generated/tasks/*.log
+	tasksDir := filepath.Join(sessDir, ".system_generated", "tasks")
+	entries, err := os.ReadDir(tasksDir)
+	if err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".log") {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			if info.ModTime().After(latest) {
+				latest = info.ModTime()
+			}
+		}
+	}
+
+	return latest
+}
+
 // LastActivityFromRoots returns the latest modification timestamp across all log files
 // (transcripts and background task logs) for a session ID within the provided search roots.
 // Zero ambient environment defaults are used.
@@ -143,63 +219,13 @@ func LastActivityFromRoots(sessionID string, roots []string) (time.Time, error) 
 	}
 
 	var latestTime time.Time
-	updateLatest := func(t time.Time) {
-		if t.After(latestTime) {
-			latestTime = t
-		}
-	}
-
 	for _, root := range roots {
-		if strings.TrimSpace(root) == "" {
+		sessDir, ok := resolveSessionDirInRoot(root, cleanID)
+		if !ok {
 			continue
 		}
-		expandedRoot := root
-		if strings.Contains(expandedRoot, "%s") {
-			expandedRoot = fmt.Sprintf(expandedRoot, cleanID)
-		} else if strings.Contains(expandedRoot, "{session}") {
-			expandedRoot = strings.ReplaceAll(expandedRoot, "{session}", cleanID)
-		}
-
-		sessDir := filepath.Join(expandedRoot, cleanID)
-		if fi, err := os.Stat(sessDir); err != nil || !fi.IsDir() {
-			// Also check if expandedRoot is directly the session directory or points to .system_generated/logs
-			if fiRoot, errRoot := os.Stat(expandedRoot); errRoot == nil && fiRoot.IsDir() {
-				cleanExpanded := filepath.Clean(expandedRoot)
-				if filepath.Base(cleanExpanded) == cleanID {
-					sessDir = cleanExpanded
-				} else if strings.HasSuffix(cleanExpanded, filepath.Clean(filepath.Join(cleanID, ".system_generated", "logs"))) ||
-					strings.HasSuffix(cleanExpanded, filepath.Clean(filepath.Join(".system_generated", "logs"))) {
-					sessDir = filepath.Dir(filepath.Dir(cleanExpanded))
-				} else {
-					continue
-				}
-			} else {
-				continue
-			}
-		}
-
-		// 1. Transcripts in .system_generated/logs/
-		logsDir := filepath.Join(sessDir, ".system_generated", "logs")
-		for _, name := range []string{"transcript.jsonl", "transcript_full.jsonl"} {
-			if fi, err := os.Stat(filepath.Join(logsDir, name)); err == nil && !fi.IsDir() {
-				updateLatest(fi.ModTime())
-			}
-		}
-
-		// 2. Background task logs in .system_generated/tasks/*.log
-		tasksDir := filepath.Join(sessDir, ".system_generated", "tasks")
-		entries, err := os.ReadDir(tasksDir)
-		if err == nil {
-			for _, entry := range entries {
-				if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".log") {
-					continue
-				}
-				info, err := entry.Info()
-				if err != nil {
-					continue
-				}
-				updateLatest(info.ModTime())
-			}
+		if t := latestModTimeInSessionDir(sessDir); t.After(latestTime) {
+			latestTime = t
 		}
 	}
 
@@ -271,6 +297,119 @@ func (m *Manager) getTargetDirs(convID string) []string {
 	return targetDirs
 }
 
+// readTranscriptTailLines reads up to the last 1MB of a transcript file and returns its lines.
+func readTranscriptTailLines(tPath string) ([]string, bool) {
+	f, err := os.Open(tPath)
+	if err != nil {
+		return nil, false
+	}
+
+	fi, err := f.Stat()
+	if err != nil || fi.Size() == 0 {
+		if closeErr := f.Close(); closeErr != nil {
+			log.Printf("[Session] Warning: failed to close file %s: %v", tPath, closeErr)
+		}
+		return nil, false
+	}
+
+	fileSize := fi.Size()
+	readSize := fileSize
+	var offset int64
+	const maxChunk = int64(1024 * 1024)
+	if fileSize > maxChunk {
+		readSize = maxChunk
+		offset = fileSize - maxChunk
+	}
+
+	buf := make([]byte, readSize)
+	_, err = f.ReadAt(buf, offset)
+	if closeErr := f.Close(); closeErr != nil {
+		log.Printf("[Session] Warning: failed to close file %s: %v", tPath, closeErr)
+	}
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, false
+	}
+
+	lines := strings.Split(string(buf), "\n")
+	if offset > 0 && len(lines) > 1 {
+		lines = lines[1:]
+	}
+
+	if findLastUserInputIdx(lines) == -1 && offset > 0 {
+		fullData, readErr := os.ReadFile(tPath)
+		if readErr == nil {
+			lines = strings.Split(string(fullData), "\n")
+		}
+	}
+
+	return lines, true
+}
+
+// extractErrorFromStepLine parses a single transcript step line and extracts any turn error message.
+// It returns beforeCutoff = true if the step timestamp is strictly before cutoff.
+func extractErrorFromStepLine(line string, cutoff time.Time) (errMsg string, beforeCutoff bool) {
+	var step struct {
+		Type      string          `json:"type"`
+		Status    string          `json:"status"`
+		Error     json.RawMessage `json:"error"`
+		Content   string          `json:"content"`
+		CreatedAt string          `json:"created_at"`
+	}
+	if err := json.Unmarshal([]byte(line), &step); err != nil {
+		return "", false
+	}
+	if isStepBefore(step.CreatedAt, cutoff) {
+		return "", true
+	}
+	if step.Type == "GENERIC" || step.Type == "USER_INPUT" {
+		return "", false
+	}
+
+	if step.Status == "ERROR" || len(step.Error) > 0 || step.Type == "ERROR_MESSAGE" {
+		if errStr := strings.TrimSpace(string(step.Error)); errStr != "" && errStr != "null" {
+			var unquoted string
+			if json.Unmarshal(step.Error, &unquoted) == nil && unquoted != "" {
+				return unquoted, false
+			}
+			return strings.Trim(errStr, "\""), false
+		}
+		if trimmedContent := strings.TrimSpace(step.Content); trimmedContent != "" {
+			return trimmedContent, false
+		}
+	}
+
+	return "", false
+}
+
+// scanLinesForTurnError scans lines backwards from the last user input turn to find any turn error.
+func scanLinesForTurnError(ctx context.Context, lines []string, since time.Time) (string, error) {
+	lastUserInputIdx := findLastUserInputIdx(lines)
+	startIdx := 0
+	if lastUserInputIdx >= 0 {
+		startIdx = lastUserInputIdx + 1
+	}
+
+	cutoff := since.Add(-10 * time.Second)
+	for i := len(lines) - 1; i >= startIdx; i-- {
+		if ctx != nil && ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		errMsg, beforeCutoff := extractErrorFromStepLine(line, cutoff)
+		if beforeCutoff {
+			break
+		}
+		if errMsg != "" {
+			return errMsg, nil
+		}
+	}
+
+	return "", nil
+}
+
 // ExtractLastTurnError parses transcript files to extract any error step specifically occurring
 // during the active turn (strictly after 'since' or after the latest non-ambient USER_INPUT).
 func (m *Manager) ExtractLastTurnError(ctx context.Context, convID string, since time.Time) (string, error) {
@@ -290,93 +429,17 @@ func (m *Manager) ExtractLastTurnError(ctx context.Context, convID string, since
 				return "", ctx.Err()
 			}
 			tPath := filepath.Join(dir, ".system_generated", "logs", name)
-			f, err := os.Open(tPath)
+			lines, ok := readTranscriptTailLines(tPath)
+			if !ok {
+				continue
+			}
+
+			errMsg, err := scanLinesForTurnError(ctx, lines, since)
 			if err != nil {
-				continue
+				return "", err
 			}
-
-			fi, err := f.Stat()
-			if err != nil || fi.Size() == 0 {
-				if closeErr := f.Close(); closeErr != nil {
-					log.Printf("[Session] Warning: failed to close file %s: %v", tPath, closeErr)
-				}
-				continue
-			}
-
-			fileSize := fi.Size()
-			readSize := fileSize
-			var offset int64 = 0
-			const maxChunk = int64(1024 * 1024)
-			if fileSize > maxChunk {
-				readSize = maxChunk
-				offset = fileSize - maxChunk
-			}
-
-			buf := make([]byte, readSize)
-			_, err = f.ReadAt(buf, offset)
-			if closeErr := f.Close(); closeErr != nil {
-				log.Printf("[Session] Warning: failed to close file %s: %v", tPath, closeErr)
-			}
-			if err != nil && !errors.Is(err, io.EOF) {
-				continue
-			}
-
-			lines := strings.Split(string(buf), "\n")
-			if offset > 0 && len(lines) > 1 {
-				lines = lines[1:]
-			}
-
-			lastUserInputIdx := findLastUserInputIdx(lines)
-			if lastUserInputIdx == -1 && offset > 0 {
-				fullData, readErr := os.ReadFile(tPath)
-				if readErr == nil {
-					lines = strings.Split(string(fullData), "\n")
-					lastUserInputIdx = findLastUserInputIdx(lines)
-				}
-			}
-
-			startIdx := 0
-			if lastUserInputIdx >= 0 {
-				startIdx = lastUserInputIdx + 1
-			}
-
-			for i := len(lines) - 1; i >= startIdx; i-- {
-				if ctx != nil && ctx.Err() != nil {
-					return "", ctx.Err()
-				}
-				line := strings.TrimSpace(lines[i])
-				if line == "" {
-					continue
-				}
-				var step struct {
-					Type      string          `json:"type"`
-					Status    string          `json:"status"`
-					Error     json.RawMessage `json:"error"`
-					Content   string          `json:"content"`
-					CreatedAt string          `json:"created_at"`
-				}
-				if err := json.Unmarshal([]byte(line), &step); err == nil {
-					if isStepBefore(step.CreatedAt, since.Add(-10*time.Second)) {
-						break
-					}
-
-					if step.Type == "GENERIC" || step.Type == "USER_INPUT" {
-						continue
-					}
-
-					if step.Status == "ERROR" || len(step.Error) > 0 || step.Type == "ERROR_MESSAGE" {
-						if errStr := strings.TrimSpace(string(step.Error)); errStr != "" && errStr != "null" {
-							var unquoted string
-							if json.Unmarshal(step.Error, &unquoted) == nil && unquoted != "" {
-								return unquoted, nil
-							}
-							return strings.Trim(errStr, "\""), nil
-						}
-						if trimmedContent := strings.TrimSpace(step.Content); trimmedContent != "" {
-							return trimmedContent, nil
-						}
-					}
-				}
+			if errMsg != "" {
+				return errMsg, nil
 			}
 		}
 	}
