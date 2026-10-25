@@ -228,19 +228,6 @@
       "cc": 80,
       "depth": 6
     },
-    "services/eri/pkg/runner/gemini_api_pool.go::*GeminiAPISession.Send": {
-      "lines": 233,
-      "cc": 67,
-      "depth": 6
-    },
-    "services/eri/pkg/runner/gemini_api_pool.go::*GeminiAPISession.consumeSSEStream": {
-      "cc": 26,
-      "depth": 10
-    },
-    "services/eri/pkg/runner/gemini_api_pool.go::cleanSchemaNode": {
-      "cc": 41,
-      "depth": 6
-    },
     "services/eri/pkg/runner/runner.go::ExtractCommandName": {
       "cc": 26
     },
