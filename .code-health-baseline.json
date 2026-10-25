@@ -247,14 +247,6 @@
     "services/eri/pkg/runner/runner.go::tokenizeCommandLine": {
       "cc": 27
     },
-    "services/eri/pkg/runner/streaming_daemon.go::*StreamingDaemon.dispatchNDJSONLine": {
-      "lines": 322,
-      "cc": 120,
-      "depth": 6
-    },
-    "services/eri/pkg/runner/streaming_daemon.go::*StreamingDaemon.readStdoutLoop": {
-      "depth": 7
-    },
     "services/eri/pkg/runner/unified_pool.go::*UnifiedProcessPool.GetOrCreate": {
       "cc": 36
     },
