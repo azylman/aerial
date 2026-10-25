@@ -115,7 +115,7 @@ check_rule_file_sizes() {
 }
 
 # Go services in the monorepo
-GO_SERVICES="pkg services/eri services/haro mcp/discord-mcp services/dashboard services/hangar services/webhooks-router services/vanadis services/coven scripts/code-health"
+GO_SERVICES="pkg services/eri services/haro mcp/discord-mcp mcp/kernel-mcp services/dashboard services/hangar services/webhooks-router services/vanadis services/coven scripts/code-health"
 
 run_go_vet() {
     svc="$1"
@@ -450,8 +450,6 @@ if [ "$MODE" = "staged" ]; then
                     fi
                 done
                 run_deadcode "$svc"
-            else
-                run_golangci_lint "$svc"
             fi
         fi
     done

@@ -69,7 +69,7 @@ apk add --no-cache postgresql-client curl >/dev/null 2>&1
 
 COVERAGE_DIR="/share/coverage"
 
-mkdir -p "$COVERAGE_DIR/coven" "$COVERAGE_DIR/eri" "$COVERAGE_DIR/haro" "$COVERAGE_DIR/mirrormere" "$COVERAGE_DIR/hass-proxy" "$COVERAGE_DIR/aura-farming" "$COVERAGE_DIR/photos-api" "$COVERAGE_DIR/photos-sync" "$COVERAGE_DIR/scratch-service" && chmod -R 0777 "$COVERAGE_DIR" 2>/dev/null || true
+mkdir -p "$COVERAGE_DIR/kernel-mcp" "$COVERAGE_DIR/coven" "$COVERAGE_DIR/eri" "$COVERAGE_DIR/haro" "$COVERAGE_DIR/mirrormere" "$COVERAGE_DIR/hass-proxy" "$COVERAGE_DIR/aura-farming" "$COVERAGE_DIR/photos-api" "$COVERAGE_DIR/photos-sync" "$COVERAGE_DIR/scratch-service" && chmod -R 0777 "$COVERAGE_DIR" 2>/dev/null || true
 rm -rf "$COVERAGE_DIR/brain" "$COVERAGE_DIR/memory-mcp" "$COVERAGE_DIR/scheduler-mcp" 2>/dev/null || true
 psql "$POSTGRES_URL" -c "DELETE FROM production_code_coverage WHERE service IN ('brain', 'memory-mcp', 'scheduler-mcp');" >/dev/null 2>&1 || true
 find "$COVERAGE_DIR/eri" -maxdepth 1 -type f -name "covmeta.*" -size -100 -delete 2>/dev/null || true
@@ -90,6 +90,7 @@ for flush_url in \
   "http://haro.aerial/debug/coverage/flush" \
   "http://coven.aerial/debug/coverage/flush" \
   "http://discord-mcp.aerial/debug/coverage/flush" \
+  "http://kernel-mcp.aerial/debug/coverage/flush" \
   "http://dashboard.aerial/debug/coverage/flush" \
   "http://eri.aerial/debug/coverage/flush" \
   "http://mirrormere-core.aerial/debug/coverage/flush" \

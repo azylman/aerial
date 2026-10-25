@@ -481,6 +481,7 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalN
 				{Name: "haro", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "coven", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "discord-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: "kernel-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "docker-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "github-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "nomad-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
