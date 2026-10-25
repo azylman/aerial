@@ -32,6 +32,29 @@ type rawToolCall struct {
 	Args json.RawMessage `json:"args"`
 }
 
+// normalizeSyncOptions validates and populates default sync options and targets.
+func normalizeSyncOptions(brainDir string, opts SyncOptions) (string, SyncOptions, error) {
+	targetBrainDir := strings.TrimSpace(brainDir)
+	if targetBrainDir == "" {
+		targetBrainDir = strings.TrimSpace(opts.BrainDir)
+	}
+	if targetBrainDir == "" {
+		return "", opts, fmt.Errorf("brain directory cannot be empty")
+	}
+
+	if opts.BatchLimit <= 0 {
+		opts.BatchLimit = 100
+	}
+	if opts.IdleThreshold <= 0 {
+		opts.IdleThreshold = 10 * time.Minute
+	}
+	if opts.HeadLimit <= 0 && opts.TailLimit <= 0 {
+		opts.HeadLimit = DefaultHeadLimit
+		opts.TailLimit = DefaultTailLimit
+	}
+	return targetBrainDir, opts, nil
+}
+
 // SyncTranscripts scans the brain directory for session transcripts, reconciles modification
 // times against the database, ingests new steps, and updates debounced macro summaries.
 func SyncTranscripts(
@@ -52,23 +75,9 @@ func SyncTranscripts(
 		ctx = context.Background()
 	}
 
-	targetBrainDir := strings.TrimSpace(brainDir)
-	if targetBrainDir == "" {
-		targetBrainDir = strings.TrimSpace(opts.BrainDir)
-	}
-	if targetBrainDir == "" {
-		return stats, fmt.Errorf("brain directory cannot be empty")
-	}
-
-	if opts.BatchLimit <= 0 {
-		opts.BatchLimit = 100
-	}
-	if opts.IdleThreshold <= 0 {
-		opts.IdleThreshold = 10 * time.Minute
-	}
-	if opts.HeadLimit <= 0 && opts.TailLimit <= 0 {
-		opts.HeadLimit = DefaultHeadLimit
-		opts.TailLimit = DefaultTailLimit
+	targetBrainDir, opts, err := normalizeSyncOptions(brainDir, opts)
+	if err != nil {
+		return stats, err
 	}
 
 	entries, err := os.ReadDir(targetBrainDir)
@@ -150,21 +159,106 @@ func findTranscriptFile(brainDir, sessionID string) string {
 	return ""
 }
 
-func syncSingleSession(
-	ctx context.Context,
-	store db.TranscriptStore,
-	sessionID, transcriptPath string,
-	mtime time.Time,
-	state db.SessionSyncState,
-	exists bool,
-	embedder EmbedderFunc,
-	llmFunc LLMClientFunc,
-	opts SyncOptions,
-	stats *SyncStats,
-) error {
+type transcriptScanState struct {
+	parsedSteps     []rawTranscriptStep
+	firstParsedStep int
+	maxStepIndex    int
+	step0Prompt     string
+	firstStepTime   time.Time
+	dialogueLines   []string
+	pendingToolName string
+}
+
+func parseTranscriptTimestamp(rawTime string, fallback time.Time) time.Time {
+	if rawTime == "" {
+		return fallback
+	}
+	if t, err := time.Parse(time.RFC3339Nano, rawTime); err == nil {
+		return t.UTC()
+	}
+	if t, err := time.Parse(time.RFC3339, rawTime); err == nil {
+		return t.UTC()
+	}
+	return fallback
+}
+
+func resolveStepToolAssociation(raw rawTranscriptStep, pendingToolName string) (effectiveToolName, nextPending string) {
+	effectiveToolName = raw.ToolName
+	if effectiveToolName == "" && len(raw.ToolCalls) > 0 {
+		effectiveToolName = raw.ToolCalls[0].Name
+	}
+	if effectiveToolName == "" && (raw.Type == "GENERIC" || raw.Type == "TOOL" || raw.Type == "RUN_COMMAND") {
+		effectiveToolName = pendingToolName
+	}
+
+	nextPending = pendingToolName
+	if raw.Type == "PLANNER_RESPONSE" && len(raw.ToolCalls) > 0 {
+		nextPending = raw.ToolCalls[0].Name
+	} else if raw.Type != "PLANNER_RESPONSE" {
+		nextPending = ""
+	}
+
+	return effectiveToolName, nextPending
+}
+
+func (st *transcriptScanState) recordStep(raw rawTranscriptStep) {
+	if st.firstParsedStep == -1 {
+		st.firstParsedStep = raw.StepIndex
+	}
+	if raw.StepIndex > st.maxStepIndex {
+		st.maxStepIndex = raw.StepIndex
+	}
+
+	if st.firstStepTime.IsZero() && raw.CreatedAt != "" {
+		st.firstStepTime = parseTranscriptTimestamp(raw.CreatedAt, time.Time{})
+	}
+
+	// Extract Step 0 prompt shortcut
+	trimmedContent := strings.TrimSpace(raw.Content)
+	if raw.StepIndex == 0 && (raw.Type == "USER_INPUT" || raw.Source == "USER_EXPLICIT") && st.step0Prompt == "" {
+		st.step0Prompt = trimmedContent
+	} else if raw.Type == "USER_INPUT" && st.step0Prompt == "" {
+		st.step0Prompt = trimmedContent
+	}
+
+	// Collect dialogue lines for settled session summary
+	if (raw.Type == "USER_INPUT" || raw.Type == "PLANNER_RESPONSE") && trimmedContent != "" && len(st.dialogueLines) < 20 {
+		st.dialogueLines = append(st.dialogueLines, fmt.Sprintf("%s: %s", raw.Type, trimmedContent))
+	}
+
+	// Tool name association
+	raw.ToolName, st.pendingToolName = resolveStepToolAssociation(raw, st.pendingToolName)
+	st.parsedSteps = append(st.parsedSteps, raw)
+}
+
+func (st *transcriptScanState) parseLine(line string, isLast bool, stats *SyncStats) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return
+	}
+	var raw rawTranscriptStep
+	if err := json.Unmarshal([]byte(trimmed), &raw); err != nil {
+		if isLast {
+			// Gracefully ignore partial line error at EOF / last line
+			return
+		}
+		if stats != nil {
+			stats.Errors++
+		}
+		return
+	}
+	st.recordStep(raw)
+}
+
+func scanSessionTranscriptFile(transcriptPath string, stats *SyncStats) (transcriptScanState, error) {
+	st := transcriptScanState{
+		firstParsedStep: -1,
+		maxStepIndex:    -1,
+	}
+
 	f, err := os.Open(transcriptPath)
 	if err != nil {
-		return fmt.Errorf("open transcript: %w", err)
+		return st, fmt.Errorf("open transcript: %w", err)
 	}
 	defer func() {
 		if closeErr := f.Close(); closeErr != nil {
@@ -177,104 +271,41 @@ func syncSingleSession(
 	scanner.Buffer(buf, 10*1024*1024)
 
 	var (
-		parsedSteps     []rawTranscriptStep
-		firstParsedStep = -1
-		maxStepIndex    = -1
-		step0Prompt     = ""
-		firstStepTime   time.Time
-		dialogueLines   []string
-		pendingToolName = ""
-		hasPrev         = false
-		prevLine        string
+		hasPrev  bool
+		prevLine string
 	)
-
-	processStep := func(raw rawTranscriptStep) {
-		if firstParsedStep == -1 {
-			firstParsedStep = raw.StepIndex
-		}
-		if raw.StepIndex > maxStepIndex {
-			maxStepIndex = raw.StepIndex
-		}
-
-		if firstStepTime.IsZero() && raw.CreatedAt != "" {
-			if t, err := time.Parse(time.RFC3339Nano, raw.CreatedAt); err == nil {
-				firstStepTime = t.UTC()
-			} else if t, err := time.Parse(time.RFC3339, raw.CreatedAt); err == nil {
-				firstStepTime = t.UTC()
-			}
-		}
-
-		// Extract Step 0 prompt shortcut
-		trimmedContent := strings.TrimSpace(raw.Content)
-		if raw.StepIndex == 0 && (raw.Type == "USER_INPUT" || raw.Source == "USER_EXPLICIT") && step0Prompt == "" {
-			step0Prompt = trimmedContent
-		} else if raw.Type == "USER_INPUT" && step0Prompt == "" {
-			step0Prompt = trimmedContent
-		}
-
-		// Collect dialogue lines for settled session summary
-		if (raw.Type == "USER_INPUT" || raw.Type == "PLANNER_RESPONSE") && trimmedContent != "" && len(dialogueLines) < 20 {
-			dialogueLines = append(dialogueLines, fmt.Sprintf("%s: %s", raw.Type, trimmedContent))
-		}
-
-		// Tool name association
-		effectiveToolName := raw.ToolName
-		if effectiveToolName == "" && len(raw.ToolCalls) > 0 {
-			effectiveToolName = raw.ToolCalls[0].Name
-		}
-		if effectiveToolName == "" && (raw.Type == "GENERIC" || raw.Type == "TOOL" || raw.Type == "RUN_COMMAND") {
-			effectiveToolName = pendingToolName
-		}
-
-		if raw.Type == "PLANNER_RESPONSE" && len(raw.ToolCalls) > 0 {
-			pendingToolName = raw.ToolCalls[0].Name
-		} else if raw.Type != "PLANNER_RESPONSE" {
-			pendingToolName = ""
-		}
-
-		raw.ToolName = effectiveToolName
-		parsedSteps = append(parsedSteps, raw)
-	}
-
-	parseLine := func(line string, isLast bool) {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			return
-		}
-		var raw rawTranscriptStep
-		if err := json.Unmarshal([]byte(trimmed), &raw); err != nil {
-			if isLast {
-				// Gracefully ignore partial line error at EOF / last line
-				return
-			}
-			stats.Errors++
-			return
-		}
-		processStep(raw)
-	}
 
 	for scanner.Scan() {
 		if hasPrev {
-			parseLine(prevLine, false)
+			st.parseLine(prevLine, false, stats)
 		}
 		prevLine = scanner.Text()
 		hasPrev = true
 	}
 	if hasPrev {
-		parseLine(prevLine, true)
+		st.parseLine(prevLine, true, stats)
 	}
 
-	// Truncation detection: if first parsed step < state.LastIndexedStep, reset watermark
-	watermark := -1
-	if exists {
-		if firstParsedStep >= 0 && state.LastIndexedStep >= 0 && firstParsedStep < state.LastIndexedStep {
-			watermark = -1
-		} else {
-			watermark = state.LastIndexedStep
-		}
-	}
+	return st, nil
+}
 
-	// Filter and clip steps for insertion
+func computeSessionWatermark(exists bool, firstParsedStep int, state db.SessionSyncState) int {
+	if !exists {
+		return -1
+	}
+	if firstParsedStep >= 0 && state.LastIndexedStep >= 0 && firstParsedStep < state.LastIndexedStep {
+		return -1
+	}
+	return state.LastIndexedStep
+}
+
+func buildTranscriptStepsToInsert(
+	sessionID string,
+	parsedSteps []rawTranscriptStep,
+	watermark int,
+	mtime time.Time,
+	opts SyncOptions,
+) []db.TranscriptStep {
 	var stepsToInsert []db.TranscriptStep
 	for _, raw := range parsedSteps {
 		if raw.StepIndex <= watermark {
@@ -291,15 +322,7 @@ func syncSingleSession(
 		}
 
 		clipped := ClipContent(content, opts.HeadLimit, opts.TailLimit)
-
-		stepTime := mtime
-		if raw.CreatedAt != "" {
-			if t, err := time.Parse(time.RFC3339Nano, raw.CreatedAt); err == nil {
-				stepTime = t.UTC()
-			} else if t, err := time.Parse(time.RFC3339, raw.CreatedAt); err == nil {
-				stepTime = t.UTC()
-			}
-		}
+		stepTime := parseTranscriptTimestamp(raw.CreatedAt, mtime)
 
 		stepsToInsert = append(stepsToInsert, db.TranscriptStep{
 			SessionID: sessionID,
@@ -310,34 +333,57 @@ func syncSingleSession(
 			CreatedAt: stepTime,
 		})
 	}
+	return stepsToInsert
+}
 
-	// Debounced Macro Summary Generation
+func generateSettledSummaryText(
+	ctx context.Context,
+	sessionID string,
+	isSettled bool,
+	dialogueLines []string,
+	step0Prompt string,
+	llmFunc LLMClientFunc,
+) string {
+	summaryText := ""
+	if isSettled && llmFunc != nil && len(dialogueLines) > 0 {
+		prompt := fmt.Sprintf("Summarize the following agent conversation transcript in 2-3 concise sentences. Focus on technical entities, tools executed, and outcomes.\n\nTranscript:\n%s", strings.Join(dialogueLines, "\n"))
+		if res, err := llmFunc(ctx, prompt); err == nil && strings.TrimSpace(res) != "" {
+			summaryText = strings.TrimSpace(res)
+		}
+	}
+
+	if summaryText == "" {
+		summaryText = step0Prompt
+	}
+	if summaryText == "" {
+		summaryText = fmt.Sprintf("Session %s", sessionID)
+	}
+
+	return summaryText
+}
+
+func buildSessionSummaryRecord(
+	ctx context.Context,
+	sessionID string,
+	mtime time.Time,
+	state db.SessionSyncState,
+	exists bool,
+	st transcriptScanState,
+	watermark int,
+	embedder EmbedderFunc,
+	llmFunc LLMClientFunc,
+	opts SyncOptions,
+) (db.SessionSummary, bool, bool) {
 	isSettled := time.Since(mtime) > opts.IdleThreshold
 	shouldSummarize := false
 	if !exists {
 		shouldSummarize = true
-	} else if isSettled && (!state.IsSettled || (maxStepIndex >= 0 && maxStepIndex-state.LastIndexedStep > 10)) {
+	} else if isSettled && (!state.IsSettled || (st.maxStepIndex >= 0 && st.maxStepIndex-state.LastIndexedStep > 10)) {
 		shouldSummarize = true
 	}
 
-	var summaryRecord db.SessionSummary
-	hasSummaryRecord := false
-
 	if shouldSummarize {
-		summaryText := ""
-		if isSettled && llmFunc != nil && len(dialogueLines) > 0 {
-			prompt := fmt.Sprintf("Summarize the following agent conversation transcript in 2-3 concise sentences. Focus on technical entities, tools executed, and outcomes.\n\nTranscript:\n%s", strings.Join(dialogueLines, "\n"))
-			if res, err := llmFunc(ctx, prompt); err == nil && strings.TrimSpace(res) != "" {
-				summaryText = strings.TrimSpace(res)
-			}
-		}
-
-		if summaryText == "" {
-			summaryText = step0Prompt
-		}
-		if summaryText == "" {
-			summaryText = fmt.Sprintf("Session %s", sessionID)
-		}
+		summaryText := generateSettledSummaryText(ctx, sessionID, isSettled, st.dialogueLines, st.step0Prompt, llmFunc)
 
 		var emb []float32
 		if embedder != nil {
@@ -346,37 +392,66 @@ func syncSingleSession(
 			}
 		}
 
+		firstStepTime := st.firstStepTime
 		if firstStepTime.IsZero() {
 			firstStepTime = mtime
 		}
 
-		lastIndexedStepToSave := maxStepIndex
-		if watermark == -1 && maxStepIndex == -1 {
+		lastIndexedStepToSave := st.maxStepIndex
+		if watermark == -1 && st.maxStepIndex == -1 {
 			lastIndexedStepToSave = -2
 		}
 
-		summaryRecord = db.SessionSummary{
+		summaryRecord := db.SessionSummary{
 			SessionID:            sessionID,
 			Summary:              summaryText,
 			Embedding:            emb,
 			LastIndexedStep:      lastIndexedStepToSave,
 			LastMtime:            mtime,
-			SummaryStepWatermark: maxStepIndex,
+			SummaryStepWatermark: st.maxStepIndex,
 			IsSettled:            isSettled,
 			CreatedAt:            firstStepTime,
 			UpdatedAt:            time.Now().UTC(),
 		}
-		hasSummaryRecord = true
-	} else if exists {
-		summaryRecord = db.SessionSummary{
+		return summaryRecord, true, true
+	}
+
+	if exists {
+		summaryRecord := db.SessionSummary{
 			SessionID:       sessionID,
-			LastIndexedStep: maxStepIndex,
+			LastIndexedStep: st.maxStepIndex,
 			LastMtime:       mtime,
 			IsSettled:       false,
 			UpdatedAt:       time.Now().UTC(),
 		}
-		hasSummaryRecord = true
+		return summaryRecord, true, false
 	}
+
+	return db.SessionSummary{}, false, false
+}
+
+func syncSingleSession(
+	ctx context.Context,
+	store db.TranscriptStore,
+	sessionID, transcriptPath string,
+	mtime time.Time,
+	state db.SessionSyncState,
+	exists bool,
+	embedder EmbedderFunc,
+	llmFunc LLMClientFunc,
+	opts SyncOptions,
+	stats *SyncStats,
+) error {
+	st, err := scanSessionTranscriptFile(transcriptPath, stats)
+	if err != nil {
+		return err
+	}
+
+	watermark := computeSessionWatermark(exists, st.firstParsedStep, state)
+	stepsToInsert := buildTranscriptStepsToInsert(sessionID, st.parsedSteps, watermark, mtime, opts)
+	summaryRecord, hasSummaryRecord, shouldSummarize := buildSessionSummaryRecord(
+		ctx, sessionID, mtime, state, exists, st, watermark, embedder, llmFunc, opts,
+	)
 
 	// 1. Ensure parent session summary exists before inserting child transcript steps to satisfy foreign key.
 	if hasSummaryRecord {
