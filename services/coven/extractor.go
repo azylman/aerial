@@ -309,16 +309,7 @@ Requirements:
 	return b.String()
 }
 
-func processThreadFacts(ctx context.Context, store Store, client OllamaClient, llmFunc LLMClientFunc, threadID string) error {
-	if store == nil {
-		return fmt.Errorf("database is nil")
-	}
-
-	turns, err := store.GetUnextractedAdminTurns(ctx, threadID)
-	if err != nil {
-		return fmt.Errorf("failed to get unextracted turns for thread %s: %w", threadID, err)
-	}
-
+func resolveThreadTurnWatermark(ctx context.Context, store Store, threadID string, turns []Message) (int64, error) {
 	var maxRowID int64
 	for _, t := range turns {
 		if t.RowID > maxRowID {
@@ -326,21 +317,16 @@ func processThreadFacts(ctx context.Context, store Store, client OllamaClient, l
 		}
 	}
 	if maxRowID == 0 {
+		var err error
 		maxRowID, err = store.GetMaxMessageRowID(ctx, threadID)
 		if err != nil {
-			return fmt.Errorf("failed to get max message rowid for thread %s: %w", threadID, err)
+			return 0, fmt.Errorf("failed to get max message rowid for thread %s: %w", threadID, err)
 		}
 	}
+	return maxRowID, nil
+}
 
-	transcript := formatExtractableTurns(turns)
-	if strings.TrimSpace(transcript) == "" {
-		log.Printf("[Memory] Empty extractable turns for thread %s, marking watermark.", threadID)
-		if err := store.UpdateConversationFactWatermark(ctx, threadID, maxRowID); err != nil {
-			log.Printf("[Memory] Warning updating conversation fact watermark for empty transcript (thread=%s): %v", threadID, err)
-		}
-		return nil
-	}
-
+func buildFactExtractionPrompt(ctx context.Context, store Store, threadID, transcript string) string {
 	priorSummary, priorTurns, ctxErr := store.GetThreadContextBeforeWatermark(ctx, threadID, 2)
 	if ctxErr != nil {
 		log.Printf("[Memory] Warning: failed to get thread context before watermark (thread=%s): %v", threadID, ctxErr)
@@ -395,8 +381,121 @@ func processThreadFacts(ctx context.Context, store Store, client OllamaClient, l
 	}
 	b.WriteString("\nNEW UNEXTRACTED TURNS:\n")
 	b.WriteString(transcript)
-	prompt := b.String()
+	return b.String()
+}
 
+func reinforceExtractedFactIDs(ctx context.Context, store Store, ids []int64) {
+	seenReinforced := make(map[int64]bool)
+	for _, rid := range ids {
+		if rid > 0 && !seenReinforced[rid] {
+			seenReinforced[rid] = true
+			if err := store.ReinforceFact(ctx, rid); err != nil {
+				log.Printf("[Memory] Warning: Failed to reinforce trajectory fact ID %d: %v", rid, err)
+			}
+		}
+	}
+}
+
+func stageSingleProceduralCandidate(ctx context.Context, store Store, client OllamaClient, threadID string, item ExtractedProceduralItem, pendingExisting []ProceduralCandidate) ([]ProceduralCandidate, bool) {
+	admit, reason := EvaluateProceduralCandidateAdmission(item)
+	if !admit {
+		log.Printf("[Memory] Procedural candidate rejected (%s): trigger=%q", reason, item.Trigger)
+		return pendingExisting, false
+	}
+
+	emb, err := client.GenerateEmbedding(ctx, FormatProceduralCandidateEmbeddingText(item), false, 1)
+	if err != nil {
+		log.Printf("[Memory] Warning: failed to generate embedding for procedural candidate trigger %q: %v", item.Trigger, err)
+		return pendingExisting, false
+	}
+	if len(emb) != ExpectedEmbeddingDim {
+		log.Printf("[Memory] Warning: procedural candidate embedding dimension %d != %d", len(emb), ExpectedEmbeddingDim)
+		return pendingExisting, false
+	}
+
+	trimmedLoadedSkill := strings.TrimSpace(item.LoadedSkill)
+	if isDuplicateProceduralCandidate(trimmedLoadedSkill, threadID, emb, pendingExisting) {
+		log.Printf("[Memory] Skipping near-duplicate procedural candidate: trigger=%q skill=%q", item.Trigger, item.LoadedSkill)
+		return pendingExisting, false
+	}
+
+	domain := strings.TrimSpace(item.Domain)
+	if domain == "" {
+		domain = "discord"
+	}
+	steps := item.Steps
+	if steps == nil {
+		steps = []string{}
+	}
+	avoid := item.Avoid
+	if avoid == nil {
+		avoid = []string{}
+	}
+
+	cand := ProceduralCandidate{
+		ThreadID:    threadID,
+		Domain:      domain,
+		LoadedSkill: trimmedLoadedSkill,
+		Trigger:     strings.TrimSpace(item.Trigger),
+		Steps:       steps,
+		Avoid:       avoid,
+		Embedding:   emb,
+		Status:      "pending",
+	}
+
+	newID, err := store.InsertProceduralCandidate(ctx, cand)
+	if err != nil {
+		log.Printf("[Memory] Warning: failed to insert procedural candidate %q: %v", cand.Trigger, err)
+		return pendingExisting, false
+	}
+	cand.ID = newID
+	return append(pendingExisting, cand), true
+}
+
+func stageProceduralCandidates(ctx context.Context, store Store, client OllamaClient, threadID string, procCandidates []ExtractedProceduralItem) {
+	if len(procCandidates) > 3 {
+		procCandidates = procCandidates[:3]
+	}
+	if len(procCandidates) == 0 {
+		return
+	}
+
+	pendingExisting, err := store.GetPendingProceduralCandidates(ctx)
+	if err != nil {
+		log.Printf("[Memory] Warning: failed to get pending procedural candidates: %v", err)
+		pendingExisting = nil
+	}
+
+	for _, item := range procCandidates {
+		pendingExisting, _ = stageSingleProceduralCandidate(ctx, store, client, threadID, item, pendingExisting)
+	}
+}
+
+func processThreadFacts(ctx context.Context, store Store, client OllamaClient, llmFunc LLMClientFunc, threadID string) error {
+	if store == nil {
+		return fmt.Errorf("database is nil")
+	}
+
+	turns, err := store.GetUnextractedAdminTurns(ctx, threadID)
+	if err != nil {
+		return fmt.Errorf("failed to get unextracted turns for thread %s: %w", threadID, err)
+	}
+
+	maxRowID, err := resolveThreadTurnWatermark(ctx, store, threadID, turns)
+	if err != nil {
+		return err
+	}
+
+	transcript := formatExtractableTurns(turns)
+	if strings.TrimSpace(transcript) == "" {
+		log.Printf("[Memory] Empty extractable turns for thread %s, marking watermark.", threadID)
+		if err := store.UpdateConversationFactWatermark(ctx, threadID, maxRowID); err != nil {
+			log.Printf("[Memory] Warning updating conversation fact watermark for empty transcript (thread=%s): %v", threadID, err)
+		}
+		return nil
+	}
+
+	prompt := buildFactExtractionPrompt(ctx, store, threadID, transcript)
 	respText, err := llmFunc(ctx, prompt)
 	if err != nil {
 		return fmt.Errorf("LLM fact extraction call failed: %w", err)
@@ -407,15 +506,7 @@ func processThreadFacts(ctx context.Context, store Store, client OllamaClient, l
 		return fmt.Errorf("failed to parse extracted facts JSON: %w", err)
 	}
 
-	seenReinforced := make(map[int64]bool)
-	for _, rid := range factsPayload.ReinforcedIDs {
-		if rid > 0 && !seenReinforced[rid] {
-			seenReinforced[rid] = true
-			if err := store.ReinforceFact(ctx, rid); err != nil {
-				log.Printf("[Memory] Warning: Failed to reinforce trajectory fact ID %d: %v", rid, err)
-			}
-		}
-	}
+	reinforceExtractedFactIDs(ctx, store, factsPayload.ReinforcedIDs)
 
 	candidates := factsPayload.Facts
 	if len(candidates) > 5 {
@@ -426,74 +517,7 @@ func processThreadFacts(ctx context.Context, store Store, client OllamaClient, l
 		reconcileCandidateFact(ctx, store, client, llmFunc, item)
 	}
 
-	procCandidates := factsPayload.ProceduralCandidates
-	if len(procCandidates) > 3 {
-		procCandidates = procCandidates[:3]
-	}
-
-	if len(procCandidates) > 0 {
-		pendingExisting, err := store.GetPendingProceduralCandidates(ctx)
-		if err != nil {
-			log.Printf("[Memory] Warning: failed to get pending procedural candidates: %v", err)
-			pendingExisting = nil
-		}
-
-		for _, item := range procCandidates {
-			admit, reason := EvaluateProceduralCandidateAdmission(item)
-			if !admit {
-				log.Printf("[Memory] Procedural candidate rejected (%s): trigger=%q", reason, item.Trigger)
-				continue
-			}
-
-			emb, err := client.GenerateEmbedding(ctx, FormatProceduralCandidateEmbeddingText(item), false, 1)
-			if err != nil {
-				log.Printf("[Memory] Warning: failed to generate embedding for procedural candidate trigger %q: %v", item.Trigger, err)
-				continue
-			}
-			if len(emb) != ExpectedEmbeddingDim {
-				log.Printf("[Memory] Warning: procedural candidate embedding dimension %d != %d", len(emb), ExpectedEmbeddingDim)
-				continue
-			}
-
-			trimmedLoadedSkill := strings.TrimSpace(item.LoadedSkill)
-			if isDuplicateProceduralCandidate(trimmedLoadedSkill, threadID, emb, pendingExisting) {
-				log.Printf("[Memory] Skipping near-duplicate procedural candidate: trigger=%q skill=%q", item.Trigger, item.LoadedSkill)
-				continue
-			}
-
-			domain := strings.TrimSpace(item.Domain)
-			if domain == "" {
-				domain = "discord"
-			}
-			steps := item.Steps
-			if steps == nil {
-				steps = []string{}
-			}
-			avoid := item.Avoid
-			if avoid == nil {
-				avoid = []string{}
-			}
-
-			cand := ProceduralCandidate{
-				ThreadID:    threadID,
-				Domain:      domain,
-				LoadedSkill: trimmedLoadedSkill,
-				Trigger:     strings.TrimSpace(item.Trigger),
-				Steps:       steps,
-				Avoid:       avoid,
-				Embedding:   emb,
-				Status:      "pending",
-			}
-
-			newID, err := store.InsertProceduralCandidate(ctx, cand)
-			if err != nil {
-				log.Printf("[Memory] Warning: failed to insert procedural candidate %q: %v", cand.Trigger, err)
-				continue
-			}
-			cand.ID = newID
-			pendingExisting = append(pendingExisting, cand)
-		}
-	}
+	stageProceduralCandidates(ctx, store, client, threadID, factsPayload.ProceduralCandidates)
 
 	if err := store.UpdateConversationFactWatermark(ctx, threadID, maxRowID); err != nil {
 		log.Printf("[Memory] Warning updating conversation fact watermark (thread=%s): %v", threadID, err)
@@ -510,6 +534,60 @@ func isDuplicateProceduralCandidate(trimmedLoadedSkill, threadID string, emb []f
 		}
 	}
 	return false
+}
+
+func applyReconcileDecision(ctx context.Context, store Store, item ExtractedFactItem, emb []float32, neighbors []ScoredFact, dec ExtractedFactItem) {
+	validIDs := make(map[int64]bool, len(neighbors))
+	for _, n := range neighbors {
+		validIDs[n.Fact.ID] = true
+	}
+
+	action := strings.ToUpper(strings.TrimSpace(dec.Action))
+	switch action {
+	case "DELETE":
+		targetID := dec.DeleteID
+		if targetID <= 0 {
+			targetID = dec.SupersedesID
+		}
+		if validIDs[targetID] {
+			if err := store.DeleteFact(ctx, targetID); err != nil {
+				log.Printf("[Memory] Error deleting fact %d: %v", targetID, err)
+			}
+		} else {
+			log.Printf("[Memory] Tier 3 delete rejected: ID %d not in whitelisted neighbors (NOOP)", targetID)
+		}
+	case "UPDATE":
+		targetID := dec.SupersedesID
+		if targetID <= 0 {
+			targetID = dec.DeleteID
+		}
+		if validIDs[targetID] {
+			factText := dec.FactText
+			if strings.TrimSpace(factText) == "" {
+				factText = item.FactText
+			}
+			if err := store.UpdateFact(ctx, targetID, factText, emb); err != nil {
+				log.Printf("[Memory] Error updating fact %d: %v", targetID, err)
+			}
+		} else {
+			log.Printf("[Memory] Tier 3 update rejected: ID %d not in whitelisted neighbors; falling back to ADD", targetID)
+			if _, err := store.InsertFact(ctx, item.FactText, emb); err != nil {
+				log.Printf("[Memory] Error inserting fallback fact: %v", err)
+			}
+		}
+	case "NOOP":
+		targetID := dec.SupersedesID
+		if !validIDs[targetID] {
+			targetID = neighbors[0].Fact.ID
+		}
+		if err := store.ReinforceFact(ctx, targetID); err != nil {
+			log.Printf("[Memory] Error reinforcing NOOP fact %d: %v", targetID, err)
+		}
+	default: // "ADD" or fallback
+		if _, err := store.InsertFact(ctx, item.FactText, emb); err != nil {
+			log.Printf("[Memory] Error inserting fact: %v", err)
+		}
+	}
 }
 
 func reconcileCandidateFact(ctx context.Context, store Store, client OllamaClient, llmFunc LLMClientFunc, item ExtractedFactItem) {
@@ -583,58 +661,7 @@ func reconcileCandidateFact(ctx context.Context, store Store, client OllamaClien
 		return
 	}
 
-	dec := decisionPayload.Facts[0]
-	validIDs := make(map[int64]bool, len(neighbors))
-	for _, n := range neighbors {
-		validIDs[n.Fact.ID] = true
-	}
-
-	action := strings.ToUpper(strings.TrimSpace(dec.Action))
-	switch action {
-	case "DELETE":
-		targetID := dec.DeleteID
-		if targetID <= 0 {
-			targetID = dec.SupersedesID
-		}
-		if validIDs[targetID] {
-			if err := store.DeleteFact(ctx, targetID); err != nil {
-				log.Printf("[Memory] Error deleting fact %d: %v", targetID, err)
-			}
-		} else {
-			log.Printf("[Memory] Tier 3 delete rejected: ID %d not in whitelisted neighbors (NOOP)", targetID)
-		}
-	case "UPDATE":
-		targetID := dec.SupersedesID
-		if targetID <= 0 {
-			targetID = dec.DeleteID
-		}
-		if validIDs[targetID] {
-			factText := dec.FactText
-			if strings.TrimSpace(factText) == "" {
-				factText = item.FactText
-			}
-			if err := store.UpdateFact(ctx, targetID, factText, emb); err != nil {
-				log.Printf("[Memory] Error updating fact %d: %v", targetID, err)
-			}
-		} else {
-			log.Printf("[Memory] Tier 3 update rejected: ID %d not in whitelisted neighbors; falling back to ADD", targetID)
-			if _, err := store.InsertFact(ctx, item.FactText, emb); err != nil {
-				log.Printf("[Memory] Error inserting fallback fact: %v", err)
-			}
-		}
-	case "NOOP":
-		targetID := dec.SupersedesID
-		if !validIDs[targetID] {
-			targetID = neighbors[0].Fact.ID
-		}
-		if err := store.ReinforceFact(ctx, targetID); err != nil {
-			log.Printf("[Memory] Error reinforcing NOOP fact %d: %v", targetID, err)
-		}
-	default: // "ADD" or fallback
-		if _, err := store.InsertFact(ctx, item.FactText, emb); err != nil {
-			log.Printf("[Memory] Error inserting fact: %v", err)
-		}
-	}
+	applyReconcileDecision(ctx, store, item, emb, neighbors, decisionPayload.Facts[0])
 }
 
 func formatExtractableTurns(turns []Message) string {
@@ -687,6 +714,87 @@ const (
 	MaxConsolidationPasses      = 3
 )
 
+type factCliqueEdge struct {
+	i, j int
+	sim  float64
+}
+
+type factCandidateMatch struct {
+	fact ScoredFactWithEmbedding
+	sim  float64
+}
+
+func similarityInBounds(sim, minSim, maxSim float64) bool {
+	return sim >= minSim && (maxSim >= 1.0 || sim <= maxSim)
+}
+
+func buildFactCliqueEdges(group []ScoredFactWithEmbedding, minSim, maxSim float64) []factCliqueEdge {
+	var edges []factCliqueEdge
+	for i := 0; i < len(group); i++ {
+		for j := i + 1; j < len(group); j++ {
+			if sim := CosineSimilarity(group[i].Embedding, group[j].Embedding); similarityInBounds(sim, minSim, maxSim) {
+				edges = append(edges, factCliqueEdge{i: i, j: j, sim: sim})
+			}
+		}
+	}
+	sort.SliceStable(edges, func(a, b int) bool {
+		if edges[a].sim != edges[b].sim {
+			return edges[a].sim > edges[b].sim
+		}
+		if group[edges[a].i].Fact.ID != group[edges[b].i].Fact.ID {
+			return group[edges[a].i].Fact.ID < group[edges[b].i].Fact.ID
+		}
+		return group[edges[a].j].Fact.ID < group[edges[b].j].Fact.ID
+	})
+	return edges
+}
+
+func matchesAllFactCliqueMembers(members []ScoredFactWithEmbedding, cand ScoredFactWithEmbedding, minSim, maxSim float64) bool {
+	for _, member := range members {
+		sim := CosineSimilarity(member.Embedding, cand.Embedding)
+		if !similarityInBounds(sim, minSim, maxSim) {
+			return false
+		}
+	}
+	return true
+}
+
+func expandFactClique(group []ScoredFactWithEmbedding, e factCliqueEdge, used map[int64]bool, minSim, maxSim float64, maxSize int) []ScoredFactWithEmbedding {
+	u, v := group[e.i], group[e.j]
+	clique := []ScoredFactWithEmbedding{u, v}
+	if maxSize <= 2 {
+		return clique
+	}
+
+	var cands []factCandidateMatch
+	for k := 0; k < len(group); k++ {
+		if k == e.i || k == e.j || used[group[k].Fact.ID] {
+			continue
+		}
+		simU := CosineSimilarity(u.Embedding, group[k].Embedding)
+		simV := CosineSimilarity(v.Embedding, group[k].Embedding)
+		if similarityInBounds(simU, minSim, maxSim) && similarityInBounds(simV, minSim, maxSim) {
+			cands = append(cands, factCandidateMatch{fact: group[k], sim: min(simU, simV)})
+		}
+	}
+	sort.SliceStable(cands, func(a, b int) bool {
+		if cands[a].sim != cands[b].sim {
+			return cands[a].sim > cands[b].sim
+		}
+		return cands[a].fact.Fact.ID < cands[b].fact.Fact.ID
+	})
+
+	for _, c := range cands {
+		if len(clique) >= maxSize {
+			break
+		}
+		if matchesAllFactCliqueMembers(clique[2:], c.fact, minSim, maxSim) {
+			clique = append(clique, c.fact)
+		}
+	}
+	return clique
+}
+
 // FindConsolidationCliques finds complete-linkage cliques of size [minSize, maxSize]
 // where every pair of facts (u, v) in the clique satisfies minSim <= CosineSimilarity(u.Embedding, v.Embedding) <= maxSim.
 func FindConsolidationCliques(facts []ScoredFactWithEmbedding, minSim, maxSim float64, minSize, maxSize int) [][]ScoredFactWithEmbedding {
@@ -715,32 +823,7 @@ func FindConsolidationCliques(facts []ScoredFactWithEmbedding, minSim, maxSim fl
 		return group[i].Fact.ID < group[j].Fact.ID
 	})
 
-	type edge struct {
-		i, j int
-		sim  float64
-	}
-	var edges []edge
-	for i := 0; i < len(group); i++ {
-		for j := i + 1; j < len(group); j++ {
-			if sim := CosineSimilarity(group[i].Embedding, group[j].Embedding); sim >= minSim && (maxSim >= 1.0 || sim <= maxSim) {
-				edges = append(edges, edge{i: i, j: j, sim: sim})
-			}
-		}
-	}
-	sort.SliceStable(edges, func(a, b int) bool {
-		if edges[a].sim != edges[b].sim {
-			return edges[a].sim > edges[b].sim
-		}
-		if group[edges[a].i].Fact.ID != group[edges[b].i].Fact.ID {
-			return group[edges[a].i].Fact.ID < group[edges[b].i].Fact.ID
-		}
-		return group[edges[a].j].Fact.ID < group[edges[b].j].Fact.ID
-	})
-
-	type candidateMatch struct {
-		fact ScoredFactWithEmbedding
-		sim  float64
-	}
+	edges := buildFactCliqueEdges(group, minSim, maxSim)
 
 	var cliques [][]ScoredFactWithEmbedding
 	used := make(map[int64]bool, len(group))
@@ -749,42 +832,7 @@ func FindConsolidationCliques(facts []ScoredFactWithEmbedding, minSim, maxSim fl
 		if used[u.Fact.ID] || used[v.Fact.ID] {
 			continue
 		}
-		clique := []ScoredFactWithEmbedding{u, v}
-		if maxSize > 2 {
-			var cands []candidateMatch
-			for k := 0; k < len(group); k++ {
-				if k == e.i || k == e.j || used[group[k].Fact.ID] {
-					continue
-				}
-				simU := CosineSimilarity(u.Embedding, group[k].Embedding)
-				simV := CosineSimilarity(v.Embedding, group[k].Embedding)
-				if simU >= minSim && (maxSim >= 1.0 || simU <= maxSim) && simV >= minSim && (maxSim >= 1.0 || simV <= maxSim) {
-					cands = append(cands, candidateMatch{fact: group[k], sim: min(simU, simV)})
-				}
-			}
-			sort.SliceStable(cands, func(a, b int) bool {
-				if cands[a].sim != cands[b].sim {
-					return cands[a].sim > cands[b].sim
-				}
-				return cands[a].fact.Fact.ID < cands[b].fact.Fact.ID
-			})
-			for _, c := range cands {
-				if len(clique) >= maxSize {
-					break
-				}
-				matchesAll := true
-				for _, member := range clique[2:] {
-					sim := CosineSimilarity(member.Embedding, c.fact.Embedding)
-					if sim < minSim || (maxSim < 1.0 && sim > maxSim) {
-						matchesAll = false
-						break
-					}
-				}
-				if matchesAll {
-					clique = append(clique, c.fact)
-				}
-			}
-		}
+		clique := expandFactClique(group, e, used, minSim, maxSim, maxSize)
 		if len(clique) >= minSize {
 			sort.Slice(clique, func(a, b int) bool { return clique[a].Fact.ID < clique[b].Fact.ID })
 			for _, member := range clique {
@@ -890,6 +938,90 @@ func ConsolidateFactClusters(ctx context.Context, store Store, client OllamaClie
 	return totalConsolidated, nil
 }
 
+func extractConsolidatedTexts(items []ExtractedFactItem) []string {
+	var candidates []string
+	for _, c := range items {
+		if text := strings.TrimSpace(c.FactText); text != "" {
+			candidates = append(candidates, text)
+			if len(candidates) == 2 {
+				break
+			}
+		}
+	}
+	return candidates
+}
+
+func insertAndReinforceConsolidatedFact(ctx context.Context, store Store, client OllamaClient, text string, maxReinforce int) (int64, bool) {
+	emb, err := client.GenerateEmbedding(ctx, text, false, 1)
+	if err != nil {
+		log.Printf("[Memory] Warning: Failed to generate embedding for consolidated fact %q: %v", text, err)
+		return 0, false
+	}
+	if len(emb) != ExpectedEmbeddingDim {
+		return 0, false
+	}
+
+	newID, err := store.InsertFact(ctx, text, emb)
+	if err != nil {
+		log.Printf("[Memory] Warning: Failed to insert consolidated fact: %v", err)
+		return 0, false
+	}
+
+	reinforceTimes := min(maxReinforce, 10) - 1
+	for r := 0; r < reinforceTimes; r++ {
+		if err := store.ReinforceFact(ctx, newID); err != nil {
+			log.Printf("[Memory] Warning: Failed to reinforce consolidated fact %d: %v", newID, err)
+		}
+	}
+	return newID, true
+}
+
+func consolidateSingleFactClique(ctx context.Context, store Store, client OllamaClient, llmFunc LLMClientFunc, clique []ScoredFactWithEmbedding) (consolidated bool, deleteFailed bool) {
+	prompt := buildConsolidationPrompt(clique)
+	resp, err := llmFunc(ctx, prompt)
+	if err != nil {
+		log.Printf("[Memory] Warning: Fact consolidation LLM synthesis failed for cluster: %v", err)
+		return false, false
+	}
+
+	payload, err := parseFactsJSON(resp)
+	if err != nil {
+		log.Printf("[Memory] Warning: Fact consolidation payload parse failed: %v", err)
+		return false, false
+	}
+
+	candidates := extractConsolidatedTexts(payload.Facts)
+	if len(candidates) == 0 || len(candidates) >= len(clique) {
+		return false, false
+	}
+
+	maxReinforce := 1
+	for _, src := range clique {
+		if src.Fact.ReinforceCount > maxReinforce {
+			maxReinforce = src.Fact.ReinforceCount
+		}
+	}
+
+	var insertedIDs []int64
+	for _, text := range candidates {
+		if newID, ok := insertAndReinforceConsolidatedFact(ctx, store, client, text, maxReinforce); ok {
+			insertedIDs = append(insertedIDs, newID)
+		}
+	}
+
+	if len(insertedIDs) == 0 {
+		return false, false
+	}
+
+	for _, src := range clique {
+		if err := store.DeleteFact(ctx, src.Fact.ID); err != nil {
+			log.Printf("[Memory] Warning: Failed to delete consolidated source fact ID %d: %v", src.Fact.ID, err)
+			deleteFailed = true
+		}
+	}
+	return true, deleteFailed
+}
+
 func consolidateCliqueBatch(ctx context.Context, store Store, client OllamaClient, llmFunc LLMClientFunc, cliques [][]ScoredFactWithEmbedding) (int, bool, error) {
 	log.Printf("[Memory] Consolidating %d candidate fact cluster(s)...", len(cliques))
 	var consolidatedCount int
@@ -902,72 +1034,11 @@ func consolidateCliqueBatch(ctx context.Context, store Store, client OllamaClien
 		default:
 		}
 
-		prompt := buildConsolidationPrompt(clique)
-		resp, err := llmFunc(ctx, prompt)
-		if err != nil {
-			log.Printf("[Memory] Warning: Fact consolidation LLM synthesis failed for cluster: %v", err)
-			continue
+		consolidated, delFail := consolidateSingleFactClique(ctx, store, client, llmFunc, clique)
+		if delFail {
+			deleteFailed = true
 		}
-
-		payload, err := parseFactsJSON(resp)
-		if err != nil {
-			log.Printf("[Memory] Warning: Fact consolidation payload parse failed: %v", err)
-			continue
-		}
-
-		var candidates []string
-		for _, c := range payload.Facts {
-			if text := strings.TrimSpace(c.FactText); text != "" {
-				candidates = append(candidates, text)
-				if len(candidates) == 2 {
-					break
-				}
-			}
-		}
-		if len(candidates) == 0 || len(candidates) >= len(clique) {
-			continue
-		}
-
-		maxReinforce := 1
-		for _, src := range clique {
-			if src.Fact.ReinforceCount > maxReinforce {
-				maxReinforce = src.Fact.ReinforceCount
-			}
-		}
-
-		var insertedIDs []int64
-		for _, text := range candidates {
-			emb, err := client.GenerateEmbedding(ctx, text, false, 1)
-			if err != nil {
-				log.Printf("[Memory] Warning: Failed to generate embedding for consolidated fact %q: %v", text, err)
-				continue
-			}
-			if len(emb) != ExpectedEmbeddingDim {
-				continue
-			}
-
-			newID, err := store.InsertFact(ctx, text, emb)
-			if err != nil {
-				log.Printf("[Memory] Warning: Failed to insert consolidated fact: %v", err)
-				continue
-			}
-			insertedIDs = append(insertedIDs, newID)
-
-			reinforceTimes := min(maxReinforce, 10) - 1
-			for r := 0; r < reinforceTimes; r++ {
-				if err := store.ReinforceFact(ctx, newID); err != nil {
-					log.Printf("[Memory] Warning: Failed to reinforce consolidated fact %d: %v", newID, err)
-				}
-			}
-		}
-
-		if len(insertedIDs) > 0 {
-			for _, src := range clique {
-				if err := store.DeleteFact(ctx, src.Fact.ID); err != nil {
-					log.Printf("[Memory] Warning: Failed to delete consolidated source fact ID %d: %v", src.Fact.ID, err)
-					deleteFailed = true
-				}
-			}
+		if consolidated {
 			consolidatedCount++
 		}
 	}
