@@ -286,21 +286,6 @@
     "services/vanadis/main.go::*PostgresVanadisStore.CreateBuild": {
       "cc": 25
     },
-    "services/webhooks-router/github.go::*RouterServer.ProcessGitHubEvent": {
-      "lines": 255,
-      "cc": 77,
-      "depth": 7
-    },
-    "services/webhooks-router/github.go::*RouterServer.checkOpenPRConflicts": {
-      "cc": 24
-    },
-    "services/webhooks-router/main.go::*RouterServer.ProcessHangarEvent": {
-      "cc": 51
-    },
-    "services/webhooks-router/main.go::*RouterServer.syncSinglePRWidget": {
-      "cc": 30,
-      "depth": 6
-    },
     "services/webhooks-router/nomad_stream.go::*NomadStreamSubscriber.handleNomadEvent": {
       "cc": 45
     },
