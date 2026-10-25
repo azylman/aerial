@@ -230,16 +230,16 @@ func ScanCustomSkills(ctx context.Context, customSkillsDir string, ollama Ollama
 	return skills, nil
 }
 
-// PlanSkillConsolidation groups pending procedural candidates into consolidation batches across Case A (loaded custom skill match),
-// Case B (unloaded routing miss matching existing skill), and Case C (novel workflow clique).
-// Batches containing candidates extracted while a BlockedCoreSkills skill was loaded are flagged with RequireReview: true.
-func PlanSkillConsolidation(pending []ProceduralCandidate, diskSkills []DiskSkill) ([]SkillConsolidationBatch, []int64) {
-	diskSkillsByName := make(map[string]*DiskSkill, len(diskSkills))
-	for i := range diskSkills {
-		diskSkillsByName[diskSkills[i].Name] = &diskSkills[i]
+func hasCandidateWithAvoid(group []ProceduralCandidate) bool {
+	for _, c := range group {
+		if len(c.Avoid) > 0 {
+			return true
+		}
 	}
+	return false
+}
 
-	// Case A: Loaded Custom Skill Match
+func planLoadedSkillBatches(pending []ProceduralCandidate, diskSkillsByName map[string]*DiskSkill) ([]SkillConsolidationBatch, []ProceduralCandidate) {
 	caseAGroups := make(map[string][]ProceduralCandidate)
 	var remaining []ProceduralCandidate
 
@@ -252,7 +252,6 @@ func PlanSkillConsolidation(pending []ProceduralCandidate, diskSkills []DiskSkil
 	}
 
 	var batches []SkillConsolidationBatch
-
 	var caseASkillNames []string
 	for name := range caseAGroups {
 		caseASkillNames = append(caseASkillNames, name)
@@ -261,14 +260,7 @@ func PlanSkillConsolidation(pending []ProceduralCandidate, diskSkills []DiskSkil
 
 	for _, name := range caseASkillNames {
 		group := caseAGroups[name]
-		hasAvoid := false
-		for _, c := range group {
-			if len(c.Avoid) > 0 {
-				hasAvoid = true
-				break
-			}
-		}
-		if len(group) >= 2 || hasAvoid {
+		if len(group) >= 2 || hasCandidateWithAvoid(group) {
 			target := diskSkillsByName[name]
 			batches = append(batches, SkillConsolidationBatch{
 				Action:        "EDIT",
@@ -279,10 +271,26 @@ func PlanSkillConsolidation(pending []ProceduralCandidate, diskSkills []DiskSkil
 			})
 		}
 	}
+	return batches, remaining
+}
 
-	// Case B: Unloaded Routing Miss
-	// Candidates with LoadedSkill == "" (or not in diskSkills) whose embedding has
-	// CosineSimilarity >= 0.72 against a DiskSkill.Embedding are grouped by highest-similarity DiskSkill.
+func findBestMatchingDiskSkill(emb []float32, diskSkills []DiskSkill) (*DiskSkill, float64) {
+	var bestSkill *DiskSkill
+	bestSim := -1.0
+	for i := range diskSkills {
+		if len(diskSkills[i].Embedding) == 0 {
+			continue
+		}
+		sim := CosineSimilarity(emb, diskSkills[i].Embedding)
+		if sim > bestSim {
+			bestSim = sim
+			bestSkill = &diskSkills[i]
+		}
+	}
+	return bestSkill, bestSim
+}
+
+func planUnloadedSkillBatches(remaining []ProceduralCandidate, diskSkills []DiskSkill, diskSkillsByName map[string]*DiskSkill) ([]SkillConsolidationBatch, []ProceduralCandidate) {
 	caseBGroups := make(map[string][]ProceduralCandidate)
 	var caseBUnmatched []ProceduralCandidate
 
@@ -292,19 +300,7 @@ func PlanSkillConsolidation(pending []ProceduralCandidate, diskSkills []DiskSkil
 			continue
 		}
 
-		var bestSkill *DiskSkill
-		bestSim := -1.0
-		for i := range diskSkills {
-			if len(diskSkills[i].Embedding) == 0 {
-				continue
-			}
-			sim := CosineSimilarity(c.Embedding, diskSkills[i].Embedding)
-			if sim > bestSim {
-				bestSim = sim
-				bestSkill = &diskSkills[i]
-			}
-		}
-
+		bestSkill, bestSim := findBestMatchingDiskSkill(c.Embedding, diskSkills)
 		if bestSkill != nil && bestSim >= DefaultSkillMatchMinSim {
 			caseBGroups[bestSkill.Name] = append(caseBGroups[bestSkill.Name], c)
 		} else {
@@ -312,6 +308,7 @@ func PlanSkillConsolidation(pending []ProceduralCandidate, diskSkills []DiskSkil
 		}
 	}
 
+	var batches []SkillConsolidationBatch
 	var caseBSkillNames []string
 	for name := range caseBGroups {
 		caseBSkillNames = append(caseBSkillNames, name)
@@ -329,6 +326,22 @@ func PlanSkillConsolidation(pending []ProceduralCandidate, diskSkills []DiskSkil
 			RequireReview: batchRequiresReview(group),
 		})
 	}
+
+	return batches, caseBUnmatched
+}
+
+// PlanSkillConsolidation groups pending procedural candidates into consolidation batches across Case A (loaded custom skill match),
+// Case B (unloaded routing miss matching existing skill), and Case C (novel workflow clique).
+// Batches containing candidates extracted while a BlockedCoreSkills skill was loaded are flagged with RequireReview: true.
+func PlanSkillConsolidation(pending []ProceduralCandidate, diskSkills []DiskSkill) ([]SkillConsolidationBatch, []int64) {
+	diskSkillsByName := make(map[string]*DiskSkill, len(diskSkills))
+	for i := range diskSkills {
+		diskSkillsByName[diskSkills[i].Name] = &diskSkills[i]
+	}
+
+	batches, remaining := planLoadedSkillBatches(pending, diskSkillsByName)
+	caseBBatches, caseBUnmatched := planUnloadedSkillBatches(remaining, diskSkills, diskSkillsByName)
+	batches = append(batches, caseBBatches...)
 
 	// Case C: Novel Workflow Clique (>= 3 steps, minSize = 2)
 	// Case D: Short / 1-Liner Friction Alert Clique (< 3 steps, minSize = 5)
@@ -376,6 +389,85 @@ func filterShortFrictionCandidates(cands []ProceduralCandidate) []ProceduralCand
 	return group
 }
 
+type procCliqueEdge struct {
+	i, j int
+	sim  float64
+}
+
+type procCandidateMatch struct {
+	cand ProceduralCandidate
+	sim  float64
+}
+
+func buildProceduralCliqueEdges(group []ProceduralCandidate, minSim float64) []procCliqueEdge {
+	var edges []procCliqueEdge
+	for i := 0; i < len(group); i++ {
+		for j := i + 1; j < len(group); j++ {
+			sim := CosineSimilarity(group[i].Embedding, group[j].Embedding)
+			if sim >= minSim {
+				edges = append(edges, procCliqueEdge{i: i, j: j, sim: sim})
+			}
+		}
+	}
+
+	sort.SliceStable(edges, func(a, b int) bool {
+		if edges[a].sim != edges[b].sim {
+			return edges[a].sim > edges[b].sim
+		}
+		if group[edges[a].i].ID != group[edges[b].i].ID {
+			return group[edges[a].i].ID < group[edges[b].i].ID
+		}
+		return group[edges[a].j].ID < group[edges[b].j].ID
+	})
+	return edges
+}
+
+func matchesAllProceduralCliqueMembers(members []ProceduralCandidate, emb []float32, minSim float64) bool {
+	for _, member := range members {
+		sim := CosineSimilarity(member.Embedding, emb)
+		if sim < minSim {
+			return false
+		}
+	}
+	return true
+}
+
+func expandProceduralClique(group []ProceduralCandidate, e procCliqueEdge, used map[int64]bool, minSim float64, maxSize int) []ProceduralCandidate {
+	u, v := group[e.i], group[e.j]
+	clique := []ProceduralCandidate{u, v}
+	if maxSize <= 2 {
+		return clique
+	}
+
+	var matchCands []procCandidateMatch
+	for k := 0; k < len(group); k++ {
+		if k == e.i || k == e.j || used[group[k].ID] {
+			continue
+		}
+		simU := CosineSimilarity(u.Embedding, group[k].Embedding)
+		simV := CosineSimilarity(v.Embedding, group[k].Embedding)
+		if simU >= minSim && simV >= minSim {
+			matchCands = append(matchCands, procCandidateMatch{cand: group[k], sim: min(simU, simV)})
+		}
+	}
+	sort.SliceStable(matchCands, func(a, b int) bool {
+		if matchCands[a].sim != matchCands[b].sim {
+			return matchCands[a].sim > matchCands[b].sim
+		}
+		return matchCands[a].cand.ID < matchCands[b].cand.ID
+	})
+
+	for _, c := range matchCands {
+		if len(clique) >= maxSize {
+			break
+		}
+		if matchesAllProceduralCliqueMembers(clique[2:], c.cand.Embedding, minSim) {
+			clique = append(clique, c.cand)
+		}
+	}
+	return clique
+}
+
 // findCandidateCliques clusters procedural candidates into complete-linkage cliques of size [minSize, maxSize].
 func findCandidateCliques(cands []ProceduralCandidate, minSim float64, minSize, maxSize int) [][]ProceduralCandidate {
 	if minSim <= 0 {
@@ -397,34 +489,7 @@ func findCandidateCliques(cands []ProceduralCandidate, minSim float64, minSize, 
 		return group[i].ID < group[j].ID
 	})
 
-	type edge struct {
-		i, j int
-		sim  float64
-	}
-	var edges []edge
-	for i := 0; i < len(group); i++ {
-		for j := i + 1; j < len(group); j++ {
-			sim := CosineSimilarity(group[i].Embedding, group[j].Embedding)
-			if sim >= minSim {
-				edges = append(edges, edge{i: i, j: j, sim: sim})
-			}
-		}
-	}
-
-	sort.SliceStable(edges, func(a, b int) bool {
-		if edges[a].sim != edges[b].sim {
-			return edges[a].sim > edges[b].sim
-		}
-		if group[edges[a].i].ID != group[edges[b].i].ID {
-			return group[edges[a].i].ID < group[edges[b].i].ID
-		}
-		return group[edges[a].j].ID < group[edges[b].j].ID
-	})
-
-	type candidateMatch struct {
-		cand ProceduralCandidate
-		sim  float64
-	}
+	edges := buildProceduralCliqueEdges(group, minSim)
 
 	var cliques [][]ProceduralCandidate
 	used := make(map[int64]bool, len(group))
@@ -433,44 +498,7 @@ func findCandidateCliques(cands []ProceduralCandidate, minSim float64, minSize, 
 		if used[u.ID] || used[v.ID] {
 			continue
 		}
-		clique := []ProceduralCandidate{u, v}
-		if maxSize > 2 {
-			var matchCands []candidateMatch
-			for k := 0; k < len(group); k++ {
-				if k == e.i || k == e.j || used[group[k].ID] {
-					continue
-				}
-				simU := CosineSimilarity(u.Embedding, group[k].Embedding)
-				simV := CosineSimilarity(v.Embedding, group[k].Embedding)
-				if simU >= minSim && simV >= minSim {
-					matchCands = append(matchCands, candidateMatch{cand: group[k], sim: min(simU, simV)})
-				}
-			}
-			sort.SliceStable(matchCands, func(a, b int) bool {
-				if matchCands[a].sim != matchCands[b].sim {
-					return matchCands[a].sim > matchCands[b].sim
-				}
-				return matchCands[a].cand.ID < matchCands[b].cand.ID
-			})
-
-			for _, c := range matchCands {
-				if len(clique) >= maxSize {
-					break
-				}
-				matchesAll := true
-				for _, member := range clique[2:] {
-					sim := CosineSimilarity(member.Embedding, c.cand.Embedding)
-					if sim < minSim {
-						matchesAll = false
-						break
-					}
-				}
-				if matchesAll {
-					clique = append(clique, c.cand)
-				}
-			}
-		}
-
+		clique := expandProceduralClique(group, e, used, minSim, maxSize)
 		if len(clique) >= minSize {
 			sort.Slice(clique, func(a, b int) bool { return clique[a].ID < clique[b].ID })
 			for _, m := range clique {
