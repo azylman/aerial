@@ -357,9 +357,6 @@
     "services/vanadis/main.go::*PostgresVanadisStore.CreateBuild": {
       "cc": 25
     },
-    "services/webhooks-router/main.go::*PostgresPRRegistry.AdvanceVanadisChunkByPR": {
-      "cc": 28
-    },
     "services/webhooks-router/main.go::*RouterServer.ProcessGitHubEvent": {
       "lines": 255,
       "cc": 77,
