@@ -1,8 +1,5 @@
 {
   "files": {
-    "services/eri/main.go": {
-      "lines": 2104
-    },
     "services/eri/pkg/queue/worker.go": {
       "lines": 1865
     }
@@ -83,22 +80,12 @@
     "services/eri/funnel.go::isFunnelBotTargeted": {
       "cc": 21
     },
+    "services/eri/handlers.go::handleVoiceAsk": {
+      "cc": 24
+    },
     "services/eri/main.go::RunBrainApp": {
       "lines": 297,
       "cc": 50
-    },
-    "services/eri/main.go::deliverPRRegistrationWidget": {
-      "cc": 21
-    },
-    "services/eri/main.go::handlePRRegister": {
-      "cc": 24
-    },
-    "services/eri/main.go::handleTranscripts": {
-      "cc": 25,
-      "depth": 8
-    },
-    "services/eri/main.go::handleVoiceAsk": {
-      "cc": 24
     },
     "services/eri/pkg/ambient/provider.go::*Provider.fetchAndRender": {
       "depth": 6
