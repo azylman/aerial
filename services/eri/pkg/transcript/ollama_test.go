@@ -13,12 +13,26 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/config"
 )
 
+// BaseURL returns the normalized Ollama server URL without trailing slash.
+func (c *Client) BaseURL() string {
+	if c == nil {
+		return DefaultOllamaURL
+	}
+	return strings.TrimSuffix(c.getOllamaConfig().BaseURL, "/")
+}
+
 // Roots returns a defensive copy of configured transcript search roots.
 func (c *Client) Roots() []string {
 	if c == nil || len(c.roots) == 0 {
 		return nil
 	}
 	return append([]string(nil), c.roots...)
+}
+
+type embeddingRequest struct {
+	Model   string         `json:"model"`
+	Prompt  string         `json:"prompt"`
+	Options map[string]any `json:"options,omitempty"`
 }
 
 type roundTripperFunc func(req *http.Request) (*http.Response, error)
@@ -263,14 +277,14 @@ func TestGenerateEmbedding(t *testing.T) {
 				},
 			})
 			client := NewEmbedder(cfg)
-			client.httpClient = &http.Client{Transport: rt}
-			client.retryDelay = -1
+			client.SetHTTPClient(&http.Client{Transport: rt})
+			client.SetRetryDelay(-1)
 			if tc.retryDelay != 0 {
-				client.retryDelay = tc.retryDelay
+				client.SetRetryDelay(tc.retryDelay)
 			}
 
 			if tc.nilHTTP {
-				client.httpClient = nil
+				client.SetHTTPClient(nil)
 			}
 
 			ctx := context.Background()

@@ -5,10 +5,10 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
-	"log"
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -67,9 +67,5 @@ func Open(dsn string) (*sql.DB, error) {
 }
 
 func closeWarn(closer io.Closer, name string) {
-	if closer != nil {
-		if err := closer.Close(); err != nil {
-			log.Printf("[DB] Warning closing %s: %v", name, err)
-		}
-	}
+	httpkit.CloseWarn(closer, name)
 }
