@@ -20,6 +20,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/azylman/aerial/pkg/httpkit"
 )
 
 func TestStatusHandler(t *testing.T) {
@@ -2601,39 +2603,39 @@ func TestDashboard_CloseWarnAndDisconnect(t *testing.T) {
 	drainAndClose(&mockReadCloser{Reader: strings.NewReader("hello"), closeErr: errors.New("simulated close error")}, "mock body")
 
 	// 3. isClientDisconnect
-	if isClientDisconnect(nil, nil) {
+	if httpkit.IsClientDisconnect(nil, nil) {
 		t.Error("expected false for nil error")
 	}
 	ctxCanceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	reqCanceled := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctxCanceled)
-	if !isClientDisconnect(reqCanceled, errors.New("some network abort")) {
+	if !httpkit.IsClientDisconnect(reqCanceled, errors.New("some network abort")) {
 		t.Error("expected true when request context is canceled")
 	}
 	reqActive := httptest.NewRequest(http.MethodGet, "/", nil)
-	if isClientDisconnect(reqActive, errors.New("unrelated error")) {
+	if httpkit.IsClientDisconnect(reqActive, errors.New("unrelated error")) {
 		t.Error("expected false for unrelated error with active context")
 	}
-	if !isClientDisconnect(nil, syscall.EPIPE) {
+	if !httpkit.IsClientDisconnect(nil, syscall.EPIPE) {
 		t.Error("expected true for EPIPE")
 	}
-	if !isClientDisconnect(nil, syscall.ECONNRESET) {
+	if !httpkit.IsClientDisconnect(nil, syscall.ECONNRESET) {
 		t.Error("expected true for ECONNRESET")
 	}
-	if !isClientDisconnect(nil, net.ErrClosed) {
+	if !httpkit.IsClientDisconnect(nil, net.ErrClosed) {
 		t.Error("expected true for net.ErrClosed")
 	}
 
 	// 4. writeResponse
 	rr := httptest.NewRecorder()
-	writeResponse(rr, reqActive, []byte("success payload"))
+	httpkit.WriteResponse(rr, reqActive, "dashboard", []byte("success payload"))
 	if rr.Body.String() != "success payload" {
 		t.Errorf("expected 'success payload', got %q", rr.Body.String())
 	}
 	mockWDisconnect := newMockErrWriter(syscall.EPIPE)
-	writeResponse(mockWDisconnect, reqActive, []byte("data"))
+	httpkit.WriteResponse(mockWDisconnect, reqActive, "dashboard", []byte("data"))
 	mockWOtherErr := newMockErrWriter(errors.New("other write failure"))
-	writeResponse(mockWOtherErr, reqActive, []byte("data"))
+	httpkit.WriteResponse(mockWOtherErr, reqActive, "dashboard", []byte("data"))
 
 	// 5. writeJSON: success, marshal error, and write error
 	rrJSON := httptest.NewRecorder()
@@ -3508,15 +3510,15 @@ func TestCoverageFlushEndpoint(t *testing.T) {
 	}
 
 	// 2. With GOCOVERDIR + mock success -> 200 OK
-	oldFn, oldMetaFn := writeCountersDirFn, writeMetaDirFn
-	defer func() { writeCountersDirFn, writeMetaDirFn = oldFn, oldMetaFn }()
+	oldFn, oldMetaFn := httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn
+	defer func() { httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn = oldFn, oldMetaFn }()
 
 	called, metaCalled := false, false
-	writeCountersDirFn = func(dir string) error {
+	httpkit.WriteCountersDirFn = func(dir string) error {
 		called = true
 		return nil
 	}
-	writeMetaDirFn = func(dir string) error {
+	httpkit.WriteMetaDirFn = func(dir string) error {
 		metaCalled = true
 		return nil
 	}
@@ -3531,7 +3533,7 @@ func TestCoverageFlushEndpoint(t *testing.T) {
 		t.Errorf("expected 200 OK and both flush fns called, got status=%d called=%v metaCalled=%v", resp3.StatusCode, called, metaCalled)
 	}
 
-	writeMetaDirFn = func(dir string) error { return errors.New("simulated meta flush error") }
+	httpkit.WriteMetaDirFn = func(dir string) error { return errors.New("simulated meta flush error") }
 	if resp3b, err3b := http.Get(ts.URL + "/debug/coverage/flush"); err3b != nil || resp3b.StatusCode != http.StatusOK {
 		t.Errorf("expected 200 OK when meta flush errors, got resp=%v err=%v", resp3b, err3b)
 	} else {
@@ -3539,7 +3541,7 @@ func TestCoverageFlushEndpoint(t *testing.T) {
 	}
 
 	// 3. With GOCOVERDIR + mock error -> 500 Internal Server Error
-	writeCountersDirFn = func(dir string) error {
+	httpkit.WriteCountersDirFn = func(dir string) error {
 		return errors.New("simulated flush error")
 	}
 

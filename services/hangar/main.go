@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -18,7 +17,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
-	"runtime/coverage"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,48 +24,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/services/hangar/pkg/metrics"
 	"golang.org/x/sync/singleflight"
 	"gopkg.in/yaml.v3"
 )
-
-var sanitizePatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)\b(?:basic\s+[a-zA-Z0-9+/]{8,}={1,2}|basic\s+[a-zA-Z0-9+/]{10,}|basic\s+[a-zA-Z0-9+/=]+|bearer\s+[a-zA-Z0-9_\-\.]{12,})`),
-	regexp.MustCompile(`(?i)x-access-token:[^@\s]+`),
-	regexp.MustCompile(`(?i)https://(?:canary\.|ptb\.)?discord(?:app)?\.com/api/webhooks/\d+/[a-zA-Z0-9_-]+`),
-	regexp.MustCompile(`(?i)(?:gh[pousr]_[a-zA-Z0-9_]+|github_pat_[a-zA-Z0-9_]+)`),
-	regexp.MustCompile(`\bsk-(?:proj-|ant-|svcacct-)?[a-zA-Z0-9_-]{16,}`),
-	regexp.MustCompile(`(?i)(?:AIza[0-9A-Za-z-_]{35,}|(?:antigravity|gemini)_[a-zA-Z0-9_\-]{16,})`),
-	regexp.MustCompile(`\b(?:mfa\.[a-zA-Z0-9_-]{20,}|[a-zA-Z0-9_-]{24,28}\.[a-zA-Z0-9_-]{6}\.[a-zA-Z0-9_-]{27,38})`),
-	regexp.MustCompile(`\beyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}`),
-	regexp.MustCompile(`postgres://[^:]+:[^@]+@[^/]+/[^?]+`),
-}
-
-func closeWarn(closer io.Closer, name string) {
-	if closer != nil {
-		if err := closer.Close(); err != nil {
-			log.Printf("[Hangar] Warning closing %s: %v", name, err)
-		}
-	}
-}
-
-func isClientDisconnect(r *http.Request, err error) bool {
-	if err == nil {
-		return false
-	}
-	if r != nil && r.Context().Err() != nil {
-		return true
-	}
-	return errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, net.ErrClosed)
-}
-
-func writeResponse(w http.ResponseWriter, r *http.Request, data []byte) {
-	if _, err := w.Write(data); err != nil {
-		if !isClientDisconnect(r, err) {
-			log.Printf("[Hangar:HTTP] Failed to write response: %v", err)
-		}
-	}
-}
 
 func writeJSON(w http.ResponseWriter, r *http.Request, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
@@ -78,16 +40,12 @@ func writeJSON(w http.ResponseWriter, r *http.Request, status int, data interfac
 		return
 	}
 	w.WriteHeader(status)
-	writeResponse(w, r, b)
+	httpkit.WriteResponse(w, r, "hangar", b)
 }
 
 // SanitizeLog scrubs sensitive tokens from error and log messages.
 func SanitizeLog(input string) string {
-	out := input
-	for _, re := range sanitizePatterns {
-		out = re.ReplaceAllString(out, "[REDACTED_TOKEN]")
-	}
-	return out
+	return sanitizer.SanitizeLog(input)
 }
 
 // RepoSyncResult holds telemetry for a single repository sync operation.
@@ -356,11 +314,11 @@ func (d *SyncDaemon) defaultDeployDispatcher(ctx context.Context, evt HangarDepl
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) //nolint:bodyclose // closed by httpkit.CloseWarn
 	if err != nil {
 		return fmt.Errorf("deploy event post failed: %s (%w)", SanitizeLog(err.Error()), err)
 	}
-	defer closeWarn(resp.Body, "deploy event response body")
+	defer httpkit.CloseWarn(resp.Body, "deploy event response body")
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
@@ -660,11 +618,11 @@ func (d *SyncDaemon) GetRemoteImageDigest(ctx context.Context, imageRef string) 
 	}
 
 	manifestURL := fmt.Sprintf("https://%s/v2/%s/manifests/%s", registry, repository, tag)
-	resp, _, err := d.doRegistryRequestWithAuth(ctx, http.MethodHead, manifestURL, registry, repository, acceptManifestHeaders, "")
+	resp, _, err := d.doRegistryRequestWithAuth(ctx, http.MethodHead, manifestURL, registry, repository, acceptManifestHeaders, "") //nolint:bodyclose // closed by httpkit.CloseWarn
 	if err != nil {
 		return "", err
 	}
-	defer closeWarn(resp.Body, "manifest response body")
+	defer httpkit.CloseWarn(resp.Body, "manifest response body")
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("manifest query for %s returned HTTP %d", imageRef, resp.StatusCode)
@@ -710,9 +668,9 @@ func (d *SyncDaemon) doRegistryRequestWithAuth(ctx context.Context, method, targ
 	}
 
 	if existingBearer != "" {
-		closeWarn(resp.Body, "unauthorized response body with existing bearer")
+		httpkit.CloseWarn(resp.Body, "unauthorized response body with existing bearer")
 	} else {
-		closeWarn(resp.Body, "unauthorized probe response body")
+		httpkit.CloseWarn(resp.Body, "unauthorized probe response body")
 	}
 
 	authHeader := resp.Header.Get("Www-Authenticate")
@@ -751,7 +709,7 @@ func (d *SyncDaemon) doRegistryRequestWithAuth(ctx context.Context, method, targ
 	if dErr != nil {
 		return nil, "", fmt.Errorf("token request failed for %s: %w", targetURL, dErr)
 	}
-	defer closeWarn(tokResp.Body, "token response body")
+	defer httpkit.CloseWarn(tokResp.Body, "token response body")
 
 	if tokResp.StatusCode != http.StatusOK {
 		return nil, "", fmt.Errorf("token request for %s returned HTTP %d", targetURL, tokResp.StatusCode)
@@ -792,11 +750,11 @@ func (d *SyncDaemon) doRegistryRequestWithAuth(ctx context.Context, method, targ
 }
 
 func (d *SyncDaemon) fetchRegistryBytes(ctx context.Context, targetURL, registry, repository, acceptHeader, existingBearer, label string) ([]byte, string, error) {
-	resp, token, err := d.doRegistryRequestWithAuth(ctx, http.MethodGet, targetURL, registry, repository, acceptHeader, existingBearer)
+	resp, token, err := d.doRegistryRequestWithAuth(ctx, http.MethodGet, targetURL, registry, repository, acceptHeader, existingBearer) //nolint:bodyclose // closed by httpkit.CloseWarn
 	if err != nil {
 		return nil, "", err
 	}
-	defer closeWarn(resp.Body, label+" response body")
+	defer httpkit.CloseWarn(resp.Body, label+" response body")
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", fmt.Errorf("%s request returned HTTP %d", label, resp.StatusCode)
@@ -2158,12 +2116,12 @@ func (d *SyncDaemon) CheckGitHubRepoBuildInProgress(ctx context.Context, repoSlu
 			req.Header.Set("Authorization", "Bearer "+d.pat)
 		}
 
-		resp, err := client.Do(req)
+		resp, err := client.Do(req) //nolint:bodyclose // closed by httpkit.CloseWarn
 		if err != nil {
 			log.Printf("[Hangar:GitHub] Warning: actions API request failed for %s: %v", slug, err)
 			return false
 		}
-		defer closeWarn(resp.Body, "github actions response body")
+		defer httpkit.CloseWarn(resp.Body, "github actions response body")
 
 		if resp.StatusCode == http.StatusOK {
 			var data struct {
@@ -2847,11 +2805,6 @@ func (d *SyncDaemon) executePendingImageRollouts(ctx context.Context) {
 	}
 }
 
-var (
-	writeCountersDirFn = coverage.WriteCountersDir
-	writeMetaDirFn     = coverage.WriteMetaDir
-)
-
 func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
 	if r.Method != method {
 		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
@@ -2870,19 +2823,7 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 		writeJSON(w, r, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
-	mux.HandleFunc("/debug/coverage/flush", func(w http.ResponseWriter, r *http.Request) {
-		if dir := os.Getenv("GOCOVERDIR"); dir != "" {
-			if err := writeMetaDirFn(dir); err != nil {
-				log.Printf("[hangar] coverage meta flush error: %v", err)
-			}
-			if err := writeCountersDirFn(dir); err != nil {
-				log.Printf("[hangar] coverage flush error: %v", err)
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-		}
-		writeJSON(w, r, http.StatusOK, map[string]string{"status": "ok"})
-	})
+	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("hangar", false))
 
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		if !requireMethod(w, r, http.MethodGet) {
@@ -2921,7 +2862,7 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 		}
 
 		if r.Body != nil {
-			defer closeWarn(r.Body, "reconcile request body")
+			defer httpkit.CloseWarn(r.Body, "reconcile request body")
 		}
 
 		isSync := r.URL.Query().Get("sync") == "true"
@@ -2962,7 +2903,7 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 			return
 		}
 		if r.Body != nil {
-			defer closeWarn(r.Body, "git_push request body")
+			defer httpkit.CloseWarn(r.Body, "git_push request body")
 		}
 
 		var req GitPushEventRequest
@@ -2987,7 +2928,7 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 			return
 		}
 		if r.Body != nil {
-			defer closeWarn(r.Body, "image_ready request body")
+			defer httpkit.CloseWarn(r.Body, "image_ready request body")
 		}
 
 		var req ImageReadyEventRequest

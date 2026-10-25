@@ -11,10 +11,11 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"runtime/coverage"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/azylman/aerial/pkg/httpkit"
 
 	"gopkg.in/yaml.v3"
 )
@@ -27,13 +28,10 @@ var localConfigPath = "/local/config.yaml"
 // ResolveConfigPath returns the config file path, checking CONFIG_PATH env,
 // then /local/config.yaml (if size > 0), falling back to fallbackPath.
 func ResolveConfigPath(fallbackPath string) string {
-	if env := strings.TrimSpace(os.Getenv("CONFIG_PATH")); env != "" {
-		return env
+	if fallbackPath != "" {
+		return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, fallbackPath)
 	}
-	if fi, err := os.Stat(localConfigPath); err == nil && fi.Size() > 0 {
-		return localConfigPath
-	}
-	return fallbackPath
+	return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, "/share/aerial-config/config.yaml", "/data/config.yaml", "config.yaml")
 }
 
 // Config defines configuration settings for discord-mcp proxy and upstream server.
@@ -124,11 +122,6 @@ func PollUpstream(ctx context.Context, upstreamPort string, maxAttempts int, del
 	return false
 }
 
-var (
-	writeCountersDirFn = coverage.WriteCountersDir
-	writeMetaDirFn     = coverage.WriteMetaDir
-)
-
 // StartProxyServer sets up the HTTP proxy mux and starts the server.
 func StartProxyServer(port, upstreamBase string) (*http.Server, error) {
 	proxyHandler, err := NewProxyHandler(upstreamBase, BlockedToolNames)
@@ -140,22 +133,9 @@ func StartProxyServer(port, upstreamBase string) (*http.Server, error) {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		writeProxyResponse(w, r, BuildHealthResponse("aerial-discord-mcp", DefaultBlockedToolList))
+		httpkit.WriteResponse(w, r, "discord-mcp", BuildHealthResponse("aerial-discord-mcp", DefaultBlockedToolList))
 	})
-	mux.HandleFunc("/debug/coverage/flush", func(w http.ResponseWriter, r *http.Request) {
-		if dir := os.Getenv("GOCOVERDIR"); dir != "" {
-			if err := writeMetaDirFn(dir); err != nil {
-				log.Printf("[discord-mcp] coverage meta flush error: %v", err)
-			}
-			if err := writeCountersDirFn(dir); err != nil {
-				log.Printf("[discord-mcp] coverage flush error: %v", err)
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-		}
-		w.WriteHeader(http.StatusOK)
-		writeProxyResponse(w, r, []byte("ok\n"))
-	})
+	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("discord-mcp", false))
 	mux.Handle("/mcp", proxyHandler)
 	mux.Handle("/", proxyHandler)
 

@@ -3,6 +3,7 @@ module github.com/azylman/aerial/services/hangar
 go 1.27.1
 
 require (
+	github.com/azylman/aerial/pkg v0.0.0
 	github.com/prometheus/client_golang v1.21.0
 	golang.org/x/sync v0.11.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -20,3 +21,5 @@ require (
 	golang.org/x/sys v0.30.0 // indirect
 	google.golang.org/protobuf v1.36.5 // indirect
 )
+
+replace github.com/azylman/aerial/pkg => ../../pkg

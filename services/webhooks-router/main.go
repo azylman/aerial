@@ -16,11 +16,12 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
-	"runtime/coverage"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/azylman/aerial/pkg/httpkit"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -1517,18 +1518,10 @@ func (s *RouterServer) SetRiverClient(rc RiverInserter)    { s.riverClient = rc 
 func (s *RouterServer) SetRegistry(reg PRRegistryUpdater)  { s.registry = reg }
 func (s *RouterServer) SetDispatcher(d OutboundDispatcher) { s.dispatcher = d }
 
-func writeJSON(w http.ResponseWriter, status int, v interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(v); err != nil {
-		log.Printf("[webhooks-router] JSON encode error: %v", err)
-	}
-}
-
 func readWebhookBody(w http.ResponseWriter, r *http.Request, maxBytes int64) ([]byte, bool) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBytes))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to read body"})
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to read body"})
 		return nil, false
 	}
 	return body, true
@@ -1544,7 +1537,7 @@ func readWebhookJSON(w http.ResponseWriter, r *http.Request, maxBytes int64, all
 		return true
 	}
 	if err := json.Unmarshal(body, dst); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json payload"})
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json payload"})
 		return false
 	}
 	return true
@@ -1578,19 +1571,15 @@ func (s *RouterServer) Routes() http.Handler {
 	mux.HandleFunc("POST /webhooks/github", s.handleGitHubWebhook)
 	mux.HandleFunc("POST /api/webhooks/hangar", s.handleHangarWebhook)
 	mux.HandleFunc("POST /webhooks/hangar", s.handleHangarWebhook)
-	mux.HandleFunc("POST /debug/coverage/flush", s.handleCoverageFlush)
-	mux.HandleFunc("GET /debug/coverage/flush", s.handleCoverageFlush)
+	coverageFlush := httpkit.HandleCoverageFlush("webhooks-router", true)
+	mux.HandleFunc("POST /debug/coverage/flush", coverageFlush)
+	mux.HandleFunc("GET /debug/coverage/flush", coverageFlush)
 	return mux
 }
 
-var (
-	writeCountersDirFn = coverage.WriteCountersDir
-	writeMetaDirFn     = coverage.WriteMetaDir
-)
-
 func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) {
 	if s == nil || s.registry == nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "registry not initialized"})
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "registry not initialized"})
 		return
 	}
 
@@ -1607,28 +1596,28 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 	chunkID := strings.TrimSpace(req.VanadisChunkID)
 
 	if req.Repo == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "repo cannot be empty"})
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "repo cannot be empty"})
 		return
 	}
 	if req.PRNumber <= 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "pr_number must be greater than 0"})
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "pr_number must be greater than 0"})
 		return
 	}
 	if req.Branch == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "branch cannot be empty"})
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "branch cannot be empty"})
 		return
 	}
 	if req.HeadSHA == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "head_sha cannot be empty"})
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "head_sha cannot be empty"})
 		return
 	}
 	if chunkID == "" {
 		if req.TargetID == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id cannot be empty"})
+			httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id cannot be empty"})
 			return
 		}
 		if !IsValidDiscordSnowflake(req.TargetID) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id must be a valid Discord snowflake (17-20 digits)"})
+			httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id must be a valid Discord snowflake (17-20 digits)"})
 			return
 		}
 	}
@@ -1636,15 +1625,15 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 	targetID, err := s.registry.RegisterPR(r.Context(), req)
 	if err != nil {
 		if errors.Is(err, ErrVanadisChunkNotFound) {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "vanadis chunk not found"})
+			httpkit.WriteJSON(w, http.StatusNotFound, map[string]string{"error": "vanadis chunk not found"})
 			return
 		}
 		if errors.Is(err, ErrInvalidTargetID) || strings.Contains(err.Error(), "target_id") {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id must be a valid Discord snowflake (17-20 digits)"})
+			httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id must be a valid Discord snowflake (17-20 digits)"})
 			return
 		}
 		log.Printf("[webhooks-router] Failed to register PR #%d (%s): %v", req.PRNumber, req.Repo, err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to register PR"})
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to register PR"})
 		return
 	}
 
@@ -1652,7 +1641,7 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 		log.Printf("[webhooks-router] failed to sync initial PR widget for %s#%d: %v", req.Repo, req.PRNumber, err)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	httpkit.WriteJSON(w, http.StatusOK, map[string]interface{}{
 		"status":    "registered",
 		"repo":      req.Repo,
 		"pr_number": req.PRNumber,
@@ -1660,22 +1649,8 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-func (s *RouterServer) handleCoverageFlush(w http.ResponseWriter, r *http.Request) {
-	if dir := os.Getenv("GOCOVERDIR"); dir != "" {
-		if err := writeMetaDirFn(dir); err != nil {
-			log.Printf("[webhooks-router] coverage meta flush error: %v", err)
-		}
-		if err := writeCountersDirFn(dir); err != nil {
-			log.Printf("[webhooks-router] coverage flush error: %v", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "flushed"})
-}
-
 func (s *RouterServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	httpkit.WriteJSON(w, http.StatusOK, map[string]interface{}{
 		"status":  "ok",
 		"service": "webhooks-router",
 		"time":    time.Now().UTC().Format(time.RFC3339),
@@ -1690,7 +1665,7 @@ func (s *RouterServer) handleInfisicalWebhook(w http.ResponseWriter, r *http.Req
 	workspaceID := payload.GetWorkspaceID(s.cfg.InfisicalProjectID)
 	envName := payload.GetEnvironment(s.cfg.InfisicalEnvironment)
 
-	writeJSON(w, http.StatusAccepted, map[string]interface{}{
+	httpkit.WriteJSON(w, http.StatusAccepted, map[string]interface{}{
 		"status":         "accepted",
 		"message":        "Secret sync scheduled",
 		"targetVariable": TargetNomadVariable,
@@ -1714,7 +1689,7 @@ func (s *RouterServer) handleGenericWebhook(w http.ResponseWriter, r *http.Reque
 	}
 
 	if len(payload.Secrets) > 0 {
-		writeJSON(w, http.StatusAccepted, map[string]interface{}{
+		httpkit.WriteJSON(w, http.StatusAccepted, map[string]interface{}{
 			"status":         "accepted",
 			"message":        "Direct secret sync scheduled",
 			"targetVariable": TargetNomadVariable,
@@ -1729,7 +1704,7 @@ func (s *RouterServer) handleGenericWebhook(w http.ResponseWriter, r *http.Reque
 	workspaceID := firstNonEmpty(payload.WorkspaceID, s.cfg.InfisicalProjectID)
 	envName := firstNonEmpty(payload.Environment, s.cfg.InfisicalEnvironment)
 
-	writeJSON(w, http.StatusAccepted, map[string]interface{}{
+	httpkit.WriteJSON(w, http.StatusAccepted, map[string]interface{}{
 		"status":         "accepted",
 		"message":        "Generic secret sync scheduled",
 		"targetVariable": TargetNomadVariable,
@@ -1764,14 +1739,14 @@ func (s *RouterServer) handleHangarWebhook(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if strings.TrimSpace(evt.Event) == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing required fields"})
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "missing required fields"})
 		return
 	}
 	if strings.TrimSpace(evt.JobName) == "" {
 		if strings.HasPrefix(evt.Event, "sync_") {
 			evt.JobName = "git-sync"
 		} else {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing required fields"})
+			httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "missing required fields"})
 			return
 		}
 	}
@@ -1783,10 +1758,10 @@ func (s *RouterServer) handleHangarWebhook(w http.ResponseWriter, r *http.Reques
 		}
 		if err := s.insertRiverJob(r.Context(), HangarWebhookArgs{IdempotencyKey: idempotencyKey, Event: evt}); err != nil {
 			log.Printf("[webhooks-router] [hangar] ERROR: failed to insert job into river: %v", err)
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist webhook"})
+			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist webhook"})
 			return
 		}
-		writeJSON(w, http.StatusAccepted, map[string]interface{}{
+		httpkit.WriteJSON(w, http.StatusAccepted, map[string]interface{}{
 			"status":   "accepted",
 			"event":    evt.Event,
 			"job_name": evt.JobName,
@@ -1798,7 +1773,7 @@ func (s *RouterServer) handleHangarWebhook(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		log.Printf("[webhooks-router] [hangar] error processing hangar event: %v", err)
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	httpkit.WriteJSON(w, http.StatusOK, map[string]interface{}{
 		"status":    "accepted",
 		"event":     processed.Event,
 		"job_name":  processed.JobName,
@@ -2838,7 +2813,7 @@ func extractPRNumberFromCommitMessage(msg string) int {
 func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	event := r.Header.Get("X-GitHub-Event")
 	if strings.TrimSpace(event) == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing X-GitHub-Event header"})
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "missing X-GitHub-Event header"})
 		return
 	}
 	delivery := r.Header.Get("X-GitHub-Delivery")
@@ -2849,16 +2824,16 @@ func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Reques
 	}
 	if s.riverClient == nil {
 		log.Printf("[webhooks-router] [github] ERROR: river client not initialized")
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "river queue not initialized"})
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "river queue not initialized"})
 		return
 	}
 	if err := s.insertRiverJob(r.Context(), GitHubWebhookArgs{Event: event, Delivery: delivery, Body: body}); err != nil {
 		log.Printf("[webhooks-router] [github] ERROR: failed to insert job into river: %v", err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist webhook"})
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist webhook"})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	httpkit.WriteJSON(w, http.StatusOK, map[string]interface{}{
 		"status":   "accepted",
 		"event":    event,
 		"delivery": delivery,

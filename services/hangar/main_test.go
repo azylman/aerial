@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/azylman/aerial/pkg/httpkit"
 )
 
 func TestSanitizeAndEnv_TableDriven(t *testing.T) {
@@ -29,7 +31,7 @@ func TestSanitizeAndEnv_TableDriven(t *testing.T) {
 			{"github pat", "failed with token github_pat_11AAAA_secret_token_123", "failed with token [REDACTED_TOKEN]"},
 			{"classic ghp token", "cloning with ghp_1234567890abcdef1234567890abcdef12", "cloning with [REDACTED_TOKEN]"},
 			{"basic auth header", "AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46c2VjcmV0", "AUTHORIZATION: [REDACTED_TOKEN]"},
-			{"postgres connection string", "connecting to postgres://aerial:aerial_secure_pass@postgres:5432/aerial?sslmode=disable", "connecting to [REDACTED_TOKEN]?sslmode=disable"},
+			{"postgres connection string", "connecting to postgres://aerial:aerial_secure_pass@postgres:5432/aerial?sslmode=disable", "connecting to postgres://aerial:[REDACTED_TOKEN]@postgres:5432/aerial?sslmode=disable"},
 			{"anthropic api key", "using sk-ant-api03-1234567890abcdef-secret", "using [REDACTED_TOKEN]"},
 			{"google api key", "key AIzaSyD1234567890abcdefghijklmnopqrstuv", "key [REDACTED_TOKEN]"},
 		}
@@ -1024,15 +1026,15 @@ func TestSetupMuxAndDaemonLifecycle_TableDriven(t *testing.T) {
 			t.Errorf("expected 200 OK without GOCOVERDIR, got: %d", rec.Code)
 		}
 
-		oldFn, oldMetaFn := writeCountersDirFn, writeMetaDirFn
-		defer func() { writeCountersDirFn, writeMetaDirFn = oldFn, oldMetaFn }()
+		oldFn, oldMetaFn := httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn
+		defer func() { httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn = oldFn, oldMetaFn }()
 
 		called, metaCalled := false, false
-		writeCountersDirFn = func(dir string) error {
+		httpkit.WriteCountersDirFn = func(dir string) error {
 			called = true
 			return nil
 		}
-		writeMetaDirFn = func(dir string) error {
+		httpkit.WriteMetaDirFn = func(dir string) error {
 			metaCalled = true
 			return nil
 		}
@@ -1044,14 +1046,14 @@ func TestSetupMuxAndDaemonLifecycle_TableDriven(t *testing.T) {
 			t.Errorf("expected 200 OK and both flush fns called, got status=%d called=%v metaCalled=%v", rec2.Code, called, metaCalled)
 		}
 
-		writeMetaDirFn = func(dir string) error { return errors.New("simulated meta flush error") }
+		httpkit.WriteMetaDirFn = func(dir string) error { return errors.New("simulated meta flush error") }
 		rec2b := httptest.NewRecorder()
 		mux.ServeHTTP(rec2b, httptest.NewRequest(http.MethodGet, "/debug/coverage/flush", nil))
 		if rec2b.Code != http.StatusOK {
 			t.Errorf("expected 200 OK when meta flush errors, got %d", rec2b.Code)
 		}
 
-		writeCountersDirFn = func(dir string) error { return errors.New("simulated flush error") }
+		httpkit.WriteCountersDirFn = func(dir string) error { return errors.New("simulated flush error") }
 		rec3 := httptest.NewRecorder()
 		mux.ServeHTTP(rec3, httptest.NewRequest(http.MethodGet, "/debug/coverage/flush", nil))
 		if rec3.Code != http.StatusInternalServerError {
@@ -1827,7 +1829,7 @@ func TestHangarHelpers_TableDriven(t *testing.T) {
 			{"valid NopCloser", io.NopCloser(strings.NewReader(""))},
 			{"mock error closer", &mockErrReadCloser{}},
 		} {
-			t.Run(tc.name, func(t *testing.T) { closeWarn(tc.closer, tc.name) })
+			t.Run(tc.name, func(t *testing.T) { httpkit.CloseWarn(tc.closer, tc.name) })
 		}
 	})
 
@@ -1847,7 +1849,7 @@ func TestHangarHelpers_TableDriven(t *testing.T) {
 			{name: "net ErrClosed", req: httptest.NewRequest(http.MethodGet, "/health", nil), err: net.ErrClosed, want: true},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				if got := isClientDisconnect(tc.req, tc.err); got != tc.want {
+				if got := httpkit.IsClientDisconnect(tc.req, tc.err); got != tc.want {
 					t.Errorf("isClientDisconnect() = %v, want %v", got, tc.want)
 				}
 			})
@@ -1866,7 +1868,7 @@ func TestHangarHelpers_TableDriven(t *testing.T) {
 			{name: "mock error response writer", w: &mockErrResponseWriter{err: errors.New("fail")}, body: []byte("fail")},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
-				writeResponse(tc.w, req, tc.body)
+				httpkit.WriteResponse(tc.w, req, "hangar", tc.body)
 				if rec, ok := tc.w.(*httptest.ResponseRecorder); ok && tc.want != "" && rec.Body.String() != tc.want {
 					t.Errorf("expected body %q, got %q", tc.want, rec.Body.String())
 				}

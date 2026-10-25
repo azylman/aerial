@@ -3,6 +3,7 @@ module github.com/azylman/aerial/services/vanadis
 go 1.27.1
 
 require (
+	github.com/azylman/aerial/pkg v0.0.0
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/prometheus/client_golang v1.21.0
 	github.com/riverqueue/river v0.49.0
@@ -34,3 +35,5 @@ require (
 	golang.org/x/text v0.42.0 // indirect
 	google.golang.org/protobuf v1.36.1 // indirect
 )
+
+replace github.com/azylman/aerial/pkg => ../../pkg

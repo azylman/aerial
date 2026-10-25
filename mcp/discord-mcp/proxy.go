@@ -2,15 +2,14 @@ package main
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"syscall"
+
+	"github.com/azylman/aerial/pkg/httpkit"
 )
 
 // ProxyHandler proxies MCP HTTP requests to the upstream server while filtering blocked tools.
@@ -60,7 +59,7 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Del("Transfer-Encoding")
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(errBytes)))
 		w.WriteHeader(http.StatusOK)
-		writeProxyResponse(w, r, errBytes)
+		httpkit.WriteResponse(w, r, "discord-mcp", errBytes)
 		return
 	}
 
@@ -120,23 +119,5 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Del("Transfer-Encoding")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(respBytes)))
 	w.WriteHeader(resp.StatusCode)
-	writeProxyResponse(w, r, respBytes)
-}
-
-func isClientDisconnect(r *http.Request, err error) bool {
-	if err == nil {
-		return false
-	}
-	if r != nil && r.Context().Err() != nil {
-		return true
-	}
-	return errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, net.ErrClosed)
-}
-
-func writeProxyResponse(w http.ResponseWriter, r *http.Request, data []byte) {
-	if _, err := w.Write(data); err != nil {
-		if !isClientDisconnect(r, err) {
-			log.Printf("[Proxy] Failed to write response: %v", err)
-		}
-	}
+	httpkit.WriteResponse(w, r, "discord-mcp", respBytes)
 }

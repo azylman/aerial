@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -418,7 +419,7 @@ func (s *VanadisServer) handleChunkByID(w http.ResponseWriter, r *http.Request) 
 		writeStoreErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"chunk": chunk, "build": build})
+	httpkit.WriteJSON(w, http.StatusOK, map[string]any{"chunk": chunk, "build": build})
 }
 
 func (s *VanadisServer) handleChunkByPR(w http.ResponseWriter, r *http.Request) {
@@ -446,7 +447,7 @@ func (s *VanadisServer) handleChunkByPR(w http.ResponseWriter, r *http.Request) 
 		writeStoreErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, lookup)
+	httpkit.WriteJSON(w, http.StatusOK, lookup)
 }
 
 func (s *VanadisServer) handleAttachChunkPR(w http.ResponseWriter, r *http.Request) {
@@ -478,7 +479,7 @@ func (s *VanadisServer) handleAttachChunkPR(w http.ResponseWriter, r *http.Reque
 		writeStoreErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{
+	httpkit.WriteJSON(w, http.StatusOK, map[string]string{
 		"status":    "attached",
 		"chunk_id":  req.ChunkID,
 		"thread_id": threadID,
@@ -520,7 +521,7 @@ func (s *VanadisServer) handleAdvanceChunkPR(w http.ResponseWriter, r *http.Requ
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, res)
+	httpkit.WriteJSON(w, http.StatusOK, res)
 }
 
 func (s *VanadisServer) handleFailChunkPR(w http.ResponseWriter, r *http.Request) {
@@ -552,7 +553,7 @@ func (s *VanadisServer) handleFailChunkPR(w http.ResponseWriter, r *http.Request
 		writeStoreErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
 		"build_id": buildID,
 		"chunk_id": chunkID,
 		"failed":   failed,
@@ -643,7 +644,7 @@ func (s *VanadisServer) handleSyncPRWidget(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if !lookup.Matched {
-		writeJSON(w, http.StatusOK, map[string]any{"matched": false})
+		httpkit.WriteJSON(w, http.StatusOK, map[string]any{"matched": false})
 		return
 	}
 	build, chunks, err := s.store.GetBuild(r.Context(), lookup.BuildID)
@@ -656,5 +657,5 @@ func (s *VanadisServer) handleSyncPRWidget(w http.ResponseWriter, r *http.Reques
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"matched": true, "build_id": build.ID})
+	httpkit.WriteJSON(w, http.StatusOK, map[string]any{"matched": true, "build_id": build.ID})
 }

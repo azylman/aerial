@@ -15,11 +15,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"runtime/coverage"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/azylman/aerial/pkg/httpkit"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -818,14 +819,6 @@ func generateBuildID() string {
 	return fmt.Sprintf("build-%d-%s", time.Now().Unix(), hex.EncodeToString(b))
 }
 
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(v); err != nil {
-		log.Printf("[vanadis] JSON encode error: %v", err)
-	}
-}
-
 type rowScanner interface {
 	Scan(dest ...any) error
 }
@@ -837,7 +830,7 @@ func scanBuild(s rowScanner) (VanadisBuild, error) {
 }
 
 func writeErr(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
+	httpkit.WriteJSON(w, status, map[string]string{"error": msg})
 }
 
 func writeStoreErr(w http.ResponseWriter, err error) {
@@ -852,6 +845,7 @@ func writeStoreErr(w http.ResponseWriter, err error) {
 func SetupMux(server *VanadisServer) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", promhttp.Handler())
+	coverageFlush := httpkit.HandleCoverageFlush("vanadis", true)
 	for p, h := range map[string]http.HandlerFunc{
 		"GET /health": server.handleHealth, "GET /healthz": server.handleHealth,
 		"GET /builds": server.handleListBuilds, "GET /runs": server.handleListBuilds,
@@ -863,7 +857,7 @@ func SetupMux(server *VanadisServer) *http.ServeMux {
 		"/chunks/fail-pr":            server.handleFailChunkPR,
 		"/chunks/sync-pr-widget":     server.handleSyncPRWidget,
 		"/chunks/":                   server.handleChunkByID,
-		"POST /debug/coverage/flush": server.handleCoverageFlush, "GET /debug/coverage/flush": server.handleCoverageFlush,
+		"POST /debug/coverage/flush": coverageFlush, "GET /debug/coverage/flush": coverageFlush,
 	} {
 		mux.HandleFunc(p, h)
 	}
@@ -874,26 +868,7 @@ func SetupMux(server *VanadisServer) *http.ServeMux {
 func (s *VanadisServer) Routes() http.Handler { return SetupMux(s) }
 
 func (s *VanadisServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-var (
-	writeCountersDirFn = coverage.WriteCountersDir
-	writeMetaDirFn     = coverage.WriteMetaDir
-)
-
-func (s *VanadisServer) handleCoverageFlush(w http.ResponseWriter, _ *http.Request) {
-	if dir := os.Getenv("GOCOVERDIR"); dir != "" {
-		if err := writeMetaDirFn(dir); err != nil {
-			log.Printf("[vanadis] coverage flush meta error: %v", err)
-		}
-		if err := writeCountersDirFn(dir); err != nil {
-			log.Printf("[vanadis] coverage flush error: %v", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "flushed"})
+	httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request) {
@@ -974,7 +949,7 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusInternalServerError, fmt.Sprintf("failed to enqueue chunk 0: %v", err))
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{
+	httpkit.WriteJSON(w, http.StatusAccepted, map[string]any{
 		"status": "accepted", "build_id": build.ID, "thread_id": build.ThreadID, "tier": build.Tier,
 		"status_message_id": build.StatusMessageID, "chunk_count": len(chunks), "first_chunk_id": chunks[0].ID, "chunks": chunks,
 	})
@@ -1012,7 +987,7 @@ func (s *VanadisServer) handleBuildByID(w http.ResponseWriter, r *http.Request) 
 			existing.Status = "cancelled"
 			s.syncBuildWidget(r.Context(), *existing, existingChunks, "")
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled", "build_id": id})
+		httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "cancelled", "build_id": id})
 		return
 	}
 	if r.Method != http.MethodGet {
@@ -1024,7 +999,7 @@ func (s *VanadisServer) handleBuildByID(w http.ResponseWriter, r *http.Request) 
 		writeStoreErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"build": build, "chunks": chunks, "entry": SummarizeBuildEntry(*build, chunks)})
+	httpkit.WriteJSON(w, http.StatusOK, map[string]any{"build": build, "chunks": chunks, "entry": SummarizeBuildEntry(*build, chunks)})
 }
 
 func (s *VanadisServer) handleListBuilds(w http.ResponseWriter, r *http.Request) {
@@ -1061,7 +1036,7 @@ func (s *VanadisServer) handleListBuilds(w http.ResponseWriter, r *http.Request)
 			filtered = append(filtered, b)
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
 		"status": "ok", "total": len(filtered), "running_count": running,
 		"queued_count": queued, "completed_count": completed, "builds": filtered,
 	})
