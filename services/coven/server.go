@@ -1,21 +1,15 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"log"
-	"net"
 	"net/http"
-	"os"
-	"runtime/coverage"
 	"strconv"
 	"strings"
-	"syscall"
 
+	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -87,7 +81,7 @@ func (s *Server) registerTools() {
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
-	mux.HandleFunc("/debug/coverage/flush", s.handleCoverageFlush)
+	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("coven", false))
 	mux.HandleFunc("/facts", s.handleFacts)
 	mux.HandleFunc("/context", s.handleContext)
 	mux.HandleFunc("/consolidate", s.handleConsolidate)
@@ -103,27 +97,7 @@ func (s *Server) Routes() http.Handler {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	writeResponse(w, r, []byte(`{"status":"ok"}`))
-}
-
-var (
-	writeCountersDirFn = coverage.WriteCountersDir
-	writeMetaDirFn     = coverage.WriteMetaDir
-)
-
-func (s *Server) handleCoverageFlush(w http.ResponseWriter, r *http.Request) {
-	if dir := os.Getenv("GOCOVERDIR"); dir != "" {
-		if err := writeMetaDirFn(dir); err != nil {
-			log.Printf("[coven] coverage meta flush error: %v", err)
-		}
-		if err := writeCountersDirFn(dir); err != nil {
-			log.Printf("[coven] coverage flush error: %v", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-	}
-	w.WriteHeader(http.StatusOK)
-	writeResponse(w, r, []byte("ok\n"))
+	httpkit.WriteResponse(w, r, "coven", []byte(`{"status":"ok"}`))
 }
 
 func (s *Server) handleFacts(w http.ResponseWriter, r *http.Request) {
@@ -187,7 +161,7 @@ func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
 	if strings.Contains(accept, "text/plain") && !strings.Contains(accept, "application/json") {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		writeResponse(w, r, []byte(res.Context))
+		httpkit.WriteResponse(w, r, "coven", []byte(res.Context))
 		return
 	}
 
@@ -214,7 +188,7 @@ func (s *Server) handleConsolidate(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	writeResponse(w, r, []byte(fmt.Sprintf(`{"status":"ok","consolidated":%d}`, consolidated)))
+	httpkit.WriteResponse(w, r, "coven", []byte(fmt.Sprintf(`{"status":"ok","consolidated":%d}`, consolidated)))
 }
 
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
@@ -223,7 +197,7 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Path == "/debug/coverage/flush" {
-		s.handleCoverageFlush(w, r)
+		httpkit.HandleCoverageFlush("coven", false)(w, r)
 		return
 	}
 	if r.URL.Path == "/facts" {
@@ -239,65 +213,5 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Handle GET probe for streamable HTTP / SSE
-	if r.Method == http.MethodGet {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		writeResponse(w, r, []byte("MCP Memory Service Ready\n"))
-		return
-	}
-
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", "GET, POST")
-		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
-		return
-	}
-
-	defer closeWarn(r.Body, "request body")
-	bodyBytes, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, `{"error":"Failed to read request body"}`, http.StatusBadRequest)
-		return
-	}
-
-	trimmed := strings.TrimSpace(string(bodyBytes))
-	if trimmed == "" {
-		http.Error(w, `{"error":"Empty request body"}`, http.StatusBadRequest)
-		return
-	}
-
-	// Normalize doubly prefixed "name":"memory_memory_<tool>" to "name":"memory_<tool>"
-	if strings.Contains(string(bodyBytes), "memory_memory_") {
-		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`"name":"memory_memory_`), []byte(`"name":"memory_`))
-		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`"name": "memory_memory_`), []byte(`"name": "memory_`))
-		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`"name":  "memory_memory_`), []byte(`"name": "memory_`))
-	}
-
-	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-	r.ContentLength = int64(len(bodyBytes))
-
-	r.Header.Set("Accept", "application/json, text/event-stream")
-	if r.Header.Get("Content-Type") == "" {
-		r.Header.Set("Content-Type", "application/json")
-	}
-
-	s.streamHandler.ServeHTTP(w, r)
-}
-
-func isClientDisconnect(r *http.Request, err error) bool {
-	if err == nil {
-		return false
-	}
-	if r != nil && r.Context().Err() != nil {
-		return true
-	}
-	return errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, net.ErrClosed)
-}
-
-func writeResponse(w http.ResponseWriter, r *http.Request, data []byte) {
-	if _, err := w.Write(data); err != nil {
-		if !isClientDisconnect(r, err) {
-			log.Printf("[coven] response write error: %v", err)
-		}
-	}
+	httpkit.ServeMCPStream(w, r, s.streamHandler, "Aerial Memory MCP Server (Streamable HTTP) Ready\n", "memory_memory_", "memory_")
 }

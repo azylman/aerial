@@ -198,7 +198,7 @@ func (p *GitHubSkillPublisher) doRequest(ctx context.Context, method, endpoint s
 	if err != nil {
 		return nil, fmt.Errorf("http request %s %s failed: %w", method, url, err)
 	}
-	defer closeWarn(resp.Body, "github response body")
+	defer resp.Body.Close()
 
 	limited := io.LimitReader(resp.Body, 2<<20)
 	respBytes, err := io.ReadAll(limited)
@@ -439,7 +439,7 @@ func (p *GitHubSkillPublisher) registerPRWithBrain(ctx context.Context, prNum in
 	if err != nil {
 		return fmt.Errorf("brain registration request failed: %w", err)
 	}
-	defer closeWarn(resp.Body, "brain registration response")
+	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
 		limited := io.LimitReader(resp.Body, 2<<20)
@@ -473,7 +473,7 @@ func (p *GitHubSkillPublisher) NotifyShortFriction(ctx context.Context, content 
 	if err != nil {
 		return fmt.Errorf("friction alert request failed: %w", err)
 	}
-	defer closeWarn(resp.Body, "friction alert response")
+	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("friction alert returned status %d", resp.StatusCode)
 	}

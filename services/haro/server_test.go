@@ -16,6 +16,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/azylman/aerial/pkg/httpkit"
 )
 
 type JSONRPCResponse struct {
@@ -290,7 +292,7 @@ func TestServer_HTTPEndpointsAndMCPProtocol(t *testing.T) {
 func TestServer_WriteResponseAndDisconnect(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
-	writeResponse(rec, req, []byte("ok"))
+	httpkit.WriteResponse(rec, req, "haro", []byte("ok"))
 	if rec.Body.String() != "ok" {
 		t.Fatalf("expected ok, got %s", rec.Body.String())
 	}
@@ -314,15 +316,15 @@ func TestServer_WriteResponseAndDisconnect(t *testing.T) {
 	}
 	for _, tc := range errTests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isClientDisconnect(tc.req, tc.err); got != tc.want {
+			if got := httpkit.IsClientDisconnect(tc.req, tc.err); got != tc.want {
 				t.Errorf("isClientDisconnect() = %v, want %v", got, tc.want)
 			}
 		})
 	}
 
-	writeResponse(&mockErrWriter{err: errors.New("err")}, req, []byte("data"))
+	httpkit.WriteResponse(&mockErrWriter{err: errors.New("err")}, req, "haro", []byte("data"))
 	for _, c := range []io.Closer{nil, io.NopCloser(strings.NewReader("")), &errReadCloser{}} {
-		closeWarn(c, "test")
+		httpkit.CloseWarn(c, "test")
 	}
 }
 
@@ -357,7 +359,7 @@ func TestWriteJSON_Table(t *testing.T) {
 			status:          http.StatusInternalServerError,
 			data:            make(chan int),
 			wantStatus:      http.StatusInternalServerError,
-			wantContentType: "application/json",
+			wantContentType: "text/plain; charset=utf-8",
 		},
 	}
 	for _, tc := range tests {
@@ -366,7 +368,7 @@ func TestWriteJSON_Table(t *testing.T) {
 			if tc.initialHeader != "" {
 				rec.Header().Set("Content-Type", tc.initialHeader)
 			}
-			writeJSON(rec, tc.status, tc.data)
+			httpkit.WriteJSON(rec, tc.status, tc.data)
 			if rec.Code != tc.wantStatus {
 				t.Errorf("got status %d, want %d", rec.Code, tc.wantStatus)
 			}
@@ -378,10 +380,6 @@ func TestWriteJSON_Table(t *testing.T) {
 }
 
 func TestDB_OperationsAndErrors(t *testing.T) {
-	if isPostgres(nil) || rebindQuery("?", false) != "?" || rebindQuery("? ?", true) != "$1 $2" {
-		t.Error("unexpected isPostgres or rebindQuery")
-	}
-
 	cfgTests := []struct {
 		name    string
 		cfg     *Config
@@ -575,15 +573,15 @@ func TestCoverageFlushEndpoint(t *testing.T) {
 
 	doFlush(http.StatusOK)
 
-	oldFn, oldMetaFn := writeCountersDirFn, writeMetaDirFn
-	defer func() { writeCountersDirFn, writeMetaDirFn = oldFn, oldMetaFn }()
+	oldFn, oldMetaFn := httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn
+	defer func() { httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn = oldFn, oldMetaFn }()
 
 	called, metaCalled := false, false
-	writeCountersDirFn = func(dir string) error {
+	httpkit.WriteCountersDirFn = func(dir string) error {
 		called = true
 		return nil
 	}
-	writeMetaDirFn = func(dir string) error {
+	httpkit.WriteMetaDirFn = func(dir string) error {
 		metaCalled = true
 		return nil
 	}
@@ -594,10 +592,10 @@ func TestCoverageFlushEndpoint(t *testing.T) {
 		t.Fatalf("expected flush called, called=%v, meta=%v", called, metaCalled)
 	}
 
-	writeMetaDirFn = func(dir string) error { return errors.New("meta flush error") }
+	httpkit.WriteMetaDirFn = func(dir string) error { return errors.New("meta flush error") }
 	doFlush(http.StatusOK)
 
-	writeCountersDirFn = func(dir string) error { return errors.New("flush error") }
+	httpkit.WriteCountersDirFn = func(dir string) error { return errors.New("flush error") }
 	doFlush(http.StatusInternalServerError)
 }
 

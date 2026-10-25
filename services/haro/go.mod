@@ -3,6 +3,7 @@ module github.com/azylman/aerial/services/haro
 go 1.27.1
 
 require (
+	github.com/azylman/aerial/pkg v0.0.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.7.2
 	github.com/modelcontextprotocol/go-sdk v1.8.0
@@ -36,3 +37,5 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
+
+replace github.com/azylman/aerial/pkg => ../../pkg

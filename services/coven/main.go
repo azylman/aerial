@@ -12,6 +12,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/azylman/aerial/pkg/httpkit"
 )
 
 // RunApp bootstraps the coven MCP HTTP server with graceful shutdown.
@@ -28,7 +30,7 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	if err != nil {
 		return err
 	}
-	defer closeWarn(database, "database on shutdown")
+	defer httpkit.CloseWarn(database, "database on shutdown")
 
 	store := NewSQLStore(database)
 	store.SetBrainURL(cfg.BrainURL)

@@ -1,22 +1,15 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
-	"io"
-	"log"
-	"net"
 	"net/http"
-	"os"
-	"runtime/coverage"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
+	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -181,7 +174,7 @@ func (s *Server) registerTools() {
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
-	mux.HandleFunc("/debug/coverage/flush", s.handleCoverageFlush)
+	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("haro", false))
 	mux.HandleFunc("/schedules", s.handleSchedules)
 	mux.HandleFunc("/schedules/runs", s.handleScheduleRuns)
 	mux.HandleFunc("/schedules/oneshot", s.handleScheduleOneShot)
@@ -198,27 +191,7 @@ func (s *Server) Routes() http.Handler {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	writeResponse(w, r, []byte(`{"status":"ok"}`))
-}
-
-var (
-	writeCountersDirFn = coverage.WriteCountersDir
-	writeMetaDirFn     = coverage.WriteMetaDir
-)
-
-func (s *Server) handleCoverageFlush(w http.ResponseWriter, r *http.Request) {
-	if dir := os.Getenv("GOCOVERDIR"); dir != "" {
-		if err := writeMetaDirFn(dir); err != nil {
-			log.Printf("[haro] coverage meta flush error: %v", err)
-		}
-		if err := writeCountersDirFn(dir); err != nil {
-			log.Printf("[haro] coverage flush error: %v", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-	}
-	w.WriteHeader(http.StatusOK)
-	writeResponse(w, r, []byte("ok\n"))
+	httpkit.WriteResponse(w, r, "haro", []byte(`{"status":"ok"}`))
 }
 
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
@@ -228,7 +201,7 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Path == "/debug/coverage/flush" {
-		s.handleCoverageFlush(w, r)
+		httpkit.HandleCoverageFlush("haro", false)(w, r)
 		return
 	}
 	if r.URL.Path == "/schedules" {
@@ -248,95 +221,18 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Handle SSE / Streamable HTTP GET probe
-	if r.Method == http.MethodGet {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		writeResponse(w, r, []byte("MCP Scheduler Service Ready\n"))
-		return
-	}
-
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", "GET, POST")
-		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Read and normalize body
-	defer closeWarn(r.Body, "request body")
-	bodyBytes, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, `{"error":"Failed to read request body"}`, http.StatusBadRequest)
-		return
-	}
-
-	trimmed := strings.TrimSpace(string(bodyBytes))
-	if trimmed == "" {
-		http.Error(w, `{"error":"Empty request body"}`, http.StatusBadRequest)
-		return
-	}
-
-	// Intercept scheduler_ alias prefix in tool calls:
-	// Rewrite "name": "scheduler_<tool>" to "name": "<tool>"
-	// or "name":"scheduler_<tool>" to "name":"<tool>"
-	if strings.Contains(string(bodyBytes), "scheduler_") {
-		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`"name":"scheduler_`), []byte(`"name":"`))
-		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`"name": "scheduler_`), []byte(`"name": "`))
-		bodyBytes = bytes.ReplaceAll(bodyBytes, []byte(`"name":  "scheduler_`), []byte(`"name": "`))
-	}
-
-	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-	r.ContentLength = int64(len(bodyBytes))
-
-	// Normalize headers to ensure maximum compatibility with single-shot curl clients:
-	// 1. Accept must contain both application/json and text/event-stream for Streamable HTTP
-	r.Header.Set("Accept", "application/json, text/event-stream")
-
-	// 2. Ensure Content-Type is set to application/json
-	if r.Header.Get("Content-Type") == "" {
-		r.Header.Set("Content-Type", "application/json")
-	}
-
-	s.streamHandler.ServeHTTP(w, r)
-}
-
-func isClientDisconnect(r *http.Request, err error) bool {
-	if err == nil {
-		return false
-	}
-	if r != nil && r.Context().Err() != nil {
-		return true
-	}
-	return errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, net.ErrClosed)
-}
-
-func writeResponse(w http.ResponseWriter, r *http.Request, data []byte) {
-	if _, err := w.Write(data); err != nil {
-		if !isClientDisconnect(r, err) {
-			log.Printf("[Scheduler Server] Failed to write response: %v", err)
-		}
-	}
-}
-
-func writeJSON(w http.ResponseWriter, status int, data any) {
-	if w.Header().Get("Content-Type") == "" {
-		w.Header().Set("Content-Type", "application/json")
-	}
-	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(data); err != nil {
-		log.Printf("[Scheduler Server] Failed to encode JSON response: %v", err)
-	}
+	httpkit.ServeMCPStream(w, r, s.streamHandler, "Aerial Scheduler MCP Server (Streamable HTTP) Ready\n", "scheduler_", "")
 }
 
 func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		httpkit.WriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
 
 	if s.handler == nil || s.handler.db == nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "database not initialized"})
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "database not initialized"})
 		return
 	}
 
@@ -347,7 +243,7 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 		cached.SystemTime = now
 		s.schedulesCache.mu.Unlock()
 		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
-		writeJSON(w, http.StatusOK, cached)
+		httpkit.WriteJSON(w, http.StatusOK, cached)
 		return
 	}
 	s.schedulesCache.mu.Unlock()
@@ -357,25 +253,25 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 
 	metrics, err := GetScheduleSummaryMetrics(ctx, db)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
 	crons, err := ListCronSchedules(ctx, db, "")
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
 	heartbeats, err := ListHeartbeatSchedules(ctx, db, "")
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
 	oneshots, err := ListOneShotSchedules(ctx, db, "")
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
@@ -394,18 +290,18 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 	s.schedulesCache.mu.Unlock()
 
 	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
-	writeJSON(w, http.StatusOK, resp)
+	httpkit.WriteJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleScheduleRuns(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		httpkit.WriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
 
 	if s.handler == nil || s.handler.db == nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "database not initialized"})
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "database not initialized"})
 		return
 	}
 
@@ -427,7 +323,7 @@ func (s *Server) handleScheduleRuns(w http.ResponseWriter, r *http.Request) {
 
 	runs, total, err := GetScheduleRunsPaginated(r.Context(), s.handler.db, limit, offset, scheduleID, status)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
@@ -454,31 +350,31 @@ func (s *Server) handleScheduleRuns(w http.ResponseWriter, r *http.Request) {
 		Runs:   runs,
 	}
 
-	writeJSON(w, http.StatusOK, resp)
+	httpkit.WriteJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleScheduleOneShot(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		httpkit.WriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
 
 	if s.handler == nil || s.handler.db == nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "database not initialized"})
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "database not initialized"})
 		return
 	}
 
 	var req CreateOneShotRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body: " + err.Error()})
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body: " + err.Error()})
 		return
 	}
 
 	threadID := strings.TrimSpace(req.ThreadID)
 	prompt := strings.TrimSpace(req.Prompt)
 	if threadID == "" || prompt == "" || req.RunAt.IsZero() {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "thread_id, prompt, and run_at are required"})
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "thread_id, prompt, and run_at are required"})
 		return
 	}
 
@@ -499,13 +395,13 @@ func (s *Server) handleScheduleOneShot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := InsertOneShotSchedule(r.Context(), s.handler.db, sched); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
 	s.InvalidateSchedulesCache()
 
-	writeJSON(w, http.StatusOK, map[string]string{
+	httpkit.WriteJSON(w, http.StatusOK, map[string]string{
 		"status": "ok",
 		"id":     schedID,
 	})
@@ -514,11 +410,11 @@ func (s *Server) handleScheduleOneShot(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleClaimEventTriggers(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+		httpkit.WriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
 	if s.handler == nil || s.handler.db == nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "database not initialized"})
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "database not initialized"})
 		return
 	}
 	var req struct {
@@ -527,7 +423,7 @@ func (s *Server) handleClaimEventTriggers(w http.ResponseWriter, r *http.Request
 		EventType string   `json:"event_type"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body: " + err.Error()})
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body: " + err.Error()})
 		return
 	}
 	var cleanTargets []string
@@ -537,18 +433,18 @@ func (s *Server) handleClaimEventTriggers(w http.ResponseWriter, r *http.Request
 		}
 	}
 	if strings.TrimSpace(req.Source) == "" || strings.TrimSpace(req.EventType) == "" || len(cleanTargets) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "source, event_type, and targets are required"})
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "source, event_type, and targets are required"})
 		return
 	}
 	triggers, err := ClaimEventTriggers(r.Context(), s.handler.db, req.Source, cleanTargets, req.EventType)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 	if triggers == nil {
 		triggers = []EventTrigger{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
 		"status":   "ok",
 		"triggers": triggers,
 	})

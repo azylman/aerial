@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -15,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/httpkit"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pgvector/pgvector-go"
 )
@@ -229,14 +228,6 @@ func withTimeout(ctx context.Context, d time.Duration) (context.Context, context
 		ctx = context.Background()
 	}
 	return context.WithTimeout(ctx, d)
-}
-
-func closeWarn(c io.Closer, resource string) {
-	if c != nil {
-		if err := c.Close(); err != nil {
-			log.Printf("[Memory DB] Warning closing %s: %v", resource, err)
-		}
-	}
 }
 
 // EscapeSQLLike escapes characters with special meaning in SQL LIKE clauses.
@@ -624,7 +615,7 @@ func (s *SQLStore) fetchTasks(ctx context.Context, endpoint string) ([]eriTaskIt
 	if err != nil {
 		return nil, fmt.Errorf("eri tasks request failed: %w", err)
 	}
-	defer closeWarn(resp.Body, "eri tasks response body")
+	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("eri tasks request returned status %d", resp.StatusCode)
@@ -1032,7 +1023,7 @@ func (s *SQLStore) fetchTranscriptSteps(ctx context.Context, sessionCSV, sinceRF
 	if err != nil {
 		return nil, fmt.Errorf("transcript search request failed: %w", err)
 	}
-	defer closeWarn(resp.Body, "transcript search response body")
+	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("transcript search request returned status %d", resp.StatusCode)
@@ -1411,7 +1402,7 @@ func openDB(connStr string) (*sql.DB, error) {
 	pingCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := db.PingContext(pingCtx); err != nil {
-		closeWarn(db, "database on ping failure")
+		httpkit.CloseWarn(db, "database on ping failure")
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 	return db, nil

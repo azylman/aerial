@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/azylman/aerial/pkg/httpkit"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -43,7 +45,7 @@ func initTestSQLite(trimmed string) (*sql.DB, error) {
 	PRAGMA synchronous = NORMAL;
 	`
 	if _, err := database.Exec(pragmas); err != nil {
-		closeWarn(database, "database on pragma error")
+		httpkit.CloseWarn(database, "database on pragma error")
 		return nil, fmt.Errorf("failed to execute PRAGMAs: %w", err)
 	}
 
@@ -119,7 +121,7 @@ func initTestSQLite(trimmed string) (*sql.DB, error) {
 	CREATE INDEX IF NOT EXISTS idx_event_triggers_channel ON event_triggers (channel_id, created_at ASC);
 	`
 	if _, err := database.Exec(schema); err != nil {
-		closeWarn(database, "database on schema error")
+		httpkit.CloseWarn(database, "database on schema error")
 		return nil, err
 	}
 
@@ -132,7 +134,7 @@ func initTestSQLite(trimmed string) (*sql.DB, error) {
 	} {
 		if _, alterErr := database.Exec(alterStmt); alterErr != nil {
 			if !strings.Contains(strings.ToLower(alterErr.Error()), "duplicate column") {
-				closeWarn(database, "database on migration error")
+				httpkit.CloseWarn(database, "database on migration error")
 				return nil, fmt.Errorf("failed to execute migration %q: %w", alterStmt, alterErr)
 			}
 			log.Printf("[Scheduler DB] Column migration notice (safe to ignore if exists): %v", alterErr)

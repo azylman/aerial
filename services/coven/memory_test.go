@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/httpkit"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -1092,7 +1094,7 @@ func TestOllamaClient_GenerateEmbedding(t *testing.T) {
 				BaseURL:     server.URL,
 				QueryPrefix: tc.prefix,
 			})
-			client.retryDelay = tc.retryDelay
+			client.SetRetryDelay(tc.retryDelay)
 
 			ctx := context.Background()
 			if tc.cancelCtx {
@@ -1478,9 +1480,9 @@ func TestToolHandler_GetContext(t *testing.T) {
 }
 
 func TestServer_Endpoints(t *testing.T) {
-	oldCounters, oldMeta := writeCountersDirFn, writeMetaDirFn
+	oldCounters, oldMeta := httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn
 	defer func() {
-		writeCountersDirFn, writeMetaDirFn = oldCounters, oldMeta
+		httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn = oldCounters, oldMeta
 	}()
 
 	store := newTestMemStore()
@@ -1600,7 +1602,7 @@ func TestServer_Endpoints(t *testing.T) {
 			method:     http.MethodGet,
 			path:       "/mcp",
 			wantStatus: http.StatusOK,
-			wantSubstr: "MCP Memory Service Ready",
+			wantSubstr: "Aerial Memory MCP Server",
 		},
 		{
 			name:       "MCPMethodNotAllowed",
@@ -1677,8 +1679,8 @@ func TestServer_Endpoints(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("GOCOVERDIR", tc.coverDir)
-			writeCountersDirFn = func(string) error { return tc.counterErr }
-			writeMetaDirFn = func(string) error { return tc.counterErr }
+			httpkit.WriteCountersDirFn = func(string) error { return tc.counterErr }
+			httpkit.WriteMetaDirFn = func(string) error { return tc.counterErr }
 			if tc.storeFail != "" {
 				store.SetFail(tc.storeFail, errors.New("store err"))
 				defer store.SetFail("", nil)
@@ -1780,10 +1782,10 @@ func TestEscapeSQLLikeAndHelpers(t *testing.T) {
 	if ctx == nil {
 		t.Fatal("expected non-nil context from withTimeout(nil)")
 	}
-	closeWarn(nil, "nil")
-	closeWarn(mockCloser{err: errors.New("close err")}, "mock")
-	writeResponse(httptest.NewRecorder(), nil, []byte("ok"))
-	writeResponse(&mockErrWriter{err: errors.New("write err")}, nil, []byte("fail"))
+	httpkit.CloseWarn(nil, "nil")
+	httpkit.CloseWarn(mockCloser{err: errors.New("close err")}, "mock")
+	httpkit.WriteResponse(httptest.NewRecorder(), nil, "coven", []byte("ok"))
+	httpkit.WriteResponse(&mockErrWriter{err: errors.New("write err")}, nil, "coven", []byte("fail"))
 
 	if got := EscapeSQLLike("a%b_c\\d"); got != "a\\%b\\_c\\\\d" {
 		t.Errorf("EscapeSQLLike() = %q", got)
@@ -2590,7 +2592,7 @@ func TestIsClientDisconnect(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := isClientDisconnect(tc.req, tc.err)
+			got := httpkit.IsClientDisconnect(tc.req, tc.err)
 			if got != tc.want {
 				t.Errorf("isClientDisconnect() = %v, want %v", got, tc.want)
 			}
