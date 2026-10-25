@@ -3,8 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,11 +29,7 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 	"github.com/riverqueue/river/rivertype"
-	"gopkg.in/yaml.v3"
 )
-
-// TargetNomadVariable is the hardcoded destination Nomad variable for all synced secrets.
-const TargetNomadVariable = "nomad/jobs/shared"
 
 // UniqueSkippedTotal records the total number of River jobs dropped due to unique constraint debouncing.
 var UniqueSkippedTotal = prometheus.NewCounterVec(
@@ -56,149 +50,6 @@ func RecordUniqueSkipped(kind string) {
 		return
 	}
 	UniqueSkippedTotal.WithLabelValues(kind).Inc()
-}
-
-// Config holds runtime configuration for webhooks-router.
-type Config struct {
-	Port                  string
-	InfisicalURL          string
-	InfisicalClientID     string
-	InfisicalClientSecret string
-	InfisicalProjectID    string
-	InfisicalEnvironment  string
-	NomadAddr             string
-	NomadToken            string
-	GitHubToken           string
-	GitHubAPIURL          string
-	PostgresURL           string
-	HangarURL             string
-	BrainURL              string
-	VanadisURL            string
-	HaroURL               string
-	SystemChannelID       string
-}
-
-// RouterYAMLConfig defines the declarative file schema for services/webhooks-router/webhooks-router.yaml.
-type RouterYAMLConfig struct {
-	Port                 string `yaml:"port"`
-	InfisicalURL         string `yaml:"infisical_url"`
-	InfisicalEnvironment string `yaml:"infisical_environment"`
-	NomadAddr            string `yaml:"nomad_addr"`
-	HangarURL            string `yaml:"hangar_url"`
-	BrainURL             string `yaml:"brain_url"`
-	VanadisURL           string `yaml:"vanadis_url"`
-	HaroURL              string `yaml:"haro_url"`
-	SystemChannelID      string `yaml:"system_channel_id"`
-}
-
-var webhooksRouterFallbackConfigPath = "/config/webhooks-router.yaml"
-
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
-// LoadConfig loads configuration from an optional YAML file (CONFIG_PATH) with environment variable overrides.
-func LoadConfig(configPath string) Config {
-	var fileCfg RouterYAMLConfig
-	targetPath := strings.TrimSpace(configPath)
-	if targetPath != "" {
-		if fi, err := os.Stat(targetPath); err != nil || fi.Size() == 0 {
-			targetPath = ""
-		}
-	}
-	if targetPath == "" {
-		if fi, err := os.Stat(webhooksRouterFallbackConfigPath); err == nil && fi.Size() > 0 {
-			targetPath = webhooksRouterFallbackConfigPath
-		}
-	}
-	if targetPath != "" {
-		if data, err := os.ReadFile(targetPath); err == nil {
-			if err := yaml.Unmarshal(data, &fileCfg); err != nil {
-				log.Printf("[WebhooksRouter] Warning: failed to parse yaml config at %s: %v", targetPath, err)
-			}
-		}
-	}
-
-	pgURL := firstNonEmpty(os.Getenv("POSTGRES_URL"), os.Getenv("DATABASE_URL"), "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable")
-
-	return Config{
-		Port:                  firstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4020"),
-		InfisicalURL:          strings.TrimRight(firstNonEmpty(os.Getenv("INFISICAL_URL"), os.Getenv("INFISICAL_HOST_URL"), fileCfg.InfisicalURL, "http://infisical.aerial"), "/"),
-		InfisicalClientID:     firstNonEmpty(os.Getenv("INFISICAL_CLIENT_ID"), os.Getenv("INFISICAL_UNIVERSAL_AUTH_CLIENT_ID")),
-		InfisicalClientSecret: firstNonEmpty(os.Getenv("INFISICAL_CLIENT_SECRET"), os.Getenv("INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET")),
-		InfisicalProjectID:    firstNonEmpty(os.Getenv("INFISICAL_PROJECT_ID"), os.Getenv("INFISICAL_WORKSPACE_ID")),
-		InfisicalEnvironment:  firstNonEmpty(os.Getenv("INFISICAL_ENVIRONMENT"), fileCfg.InfisicalEnvironment, "prod"),
-		NomadAddr:             strings.TrimRight(firstNonEmpty(os.Getenv("NOMAD_ADDR"), fileCfg.NomadAddr, "http://127.0.0.1:4646"), "/"),
-		NomadToken:            os.Getenv("NOMAD_TOKEN"),
-		GitHubToken:           firstNonEmpty(os.Getenv("GITHUB_PAT"), os.Getenv("GITHUB_TOKEN")),
-		GitHubAPIURL:          strings.TrimRight(firstNonEmpty(os.Getenv("GITHUB_API_URL"), "https://api.github.com"), "/"),
-		PostgresURL:           pgURL,
-		HangarURL:             strings.TrimRight(firstNonEmpty(os.Getenv("HANGAR_URL"), fileCfg.HangarURL, "http://127.0.0.1:8087"), "/"),
-		BrainURL:              strings.TrimRight(firstNonEmpty(os.Getenv("BRAIN_INTERNAL_URL"), os.Getenv("BRAIN_URL"), fileCfg.BrainURL, "http://127.0.0.1:8088"), "/"),
-		VanadisURL:            strings.TrimRight(firstNonEmpty(os.Getenv("VANADIS_URL"), fileCfg.VanadisURL, "http://vanadis.aerial"), "/"),
-		HaroURL:               strings.TrimRight(firstNonEmpty(os.Getenv("HARO_URL"), fileCfg.HaroURL, "http://haro.aerial"), "/"),
-		SystemChannelID:       strings.TrimSpace(firstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), os.Getenv("DISCORD_CHANNEL_ID"), fileCfg.SystemChannelID)),
-	}
-}
-
-// LoadConfigFromEnv initializes configuration from environment variables with optional CONFIG_PATH fallback.
-func LoadConfigFromEnv() Config {
-	return LoadConfig(os.Getenv("CONFIG_PATH"))
-}
-
-// InfisicalWebhookPayload captures common payload variants from Infisical webhooks.
-type InfisicalWebhookPayload struct {
-	Event       string `json:"event"`
-	WorkspaceID string `json:"workspaceId"`
-	ProjectID   string `json:"projectId"`
-	Environment string `json:"environment"`
-	Data        *struct {
-		WorkspaceID string `json:"workspaceId"`
-		ProjectID   string `json:"projectId"`
-		Environment string `json:"environment"`
-	} `json:"data"`
-}
-
-func (p *InfisicalWebhookPayload) GetWorkspaceID(fallback string) string {
-	var dataWS, dataProj string
-	if p.Data != nil {
-		dataWS, dataProj = p.Data.WorkspaceID, p.Data.ProjectID
-	}
-	return firstNonEmpty(p.WorkspaceID, p.ProjectID, dataWS, dataProj, fallback)
-}
-
-func (p *InfisicalWebhookPayload) GetEnvironment(fallback string) string {
-	var dataEnv string
-	if p.Data != nil {
-		dataEnv = p.Data.Environment
-	}
-	return firstNonEmpty(p.Environment, dataEnv, fallback)
-}
-
-type UniversalAuthLoginResponse struct {
-	AccessToken string `json:"accessToken"`
-	Token       string `json:"token"`
-}
-
-type InfisicalSecretItem struct {
-	SecretKey   string `json:"secretKey"`
-	SecretValue string `json:"secretValue"`
-}
-
-type InfisicalSecretsResponse struct {
-	Secrets []InfisicalSecretItem `json:"secrets"`
-}
-
-type NomadVariable struct {
-	Path        string            `json:"Path"`
-	Items       map[string]string `json:"Items"`
-	CreateIndex uint64            `json:"CreateIndex,omitempty"`
-	ModifyIndex uint64            `json:"ModifyIndex,omitempty"`
 }
 
 // RiverInserter defines the interface for inserting jobs into River.
@@ -256,14 +107,6 @@ func (w *GitHubWebhookWorker) Work(ctx context.Context, job *river.Job[GitHubWeb
 		return err
 	}
 	return nil
-}
-
-func randomNonce() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return fmt.Sprintf("nonce-%d", time.Now().UnixNano())
-	}
-	return hex.EncodeToString(b)
 }
 
 // HangarWebhookArgs contains payload data for durable background processing of Hangar webhooks.
@@ -383,52 +226,6 @@ func (w *WidgetSyncWorker) Work(ctx context.Context, job *river.Job[WidgetSyncAr
 		return err
 	}
 	return nil
-}
-
-// normalizeRepo ensures repository names are normalized with the owner prefix.
-func normalizeRepo(repo string) string {
-	repo = strings.TrimSpace(repo)
-	if repo == "" {
-		return ""
-	}
-	if !strings.Contains(repo, "/") {
-		return "azylman/" + repo
-	}
-	return repo
-}
-
-// cleanRepoName strips the owner prefix (e.g. "azylman/") for concise Discord notifications.
-func cleanRepoName(repo string) string {
-	return strings.TrimPrefix(strings.TrimSpace(repo), "azylman/")
-}
-
-// formatDirectMessagePrefix formats the bold PR and repo prefix for direct Discord messages.
-func formatDirectMessagePrefix(prNumber int, repo string) string {
-	repoName := cleanRepoName(repo)
-	switch {
-	case prNumber > 0 && repoName != "":
-		return fmt.Sprintf("**(PR: #%d, repo: %s)** ", prNumber, repoName)
-	case repoName != "":
-		return fmt.Sprintf("**(repo: %s)** ", repoName)
-	case prNumber > 0:
-		return fmt.Sprintf("**(PR: #%d)** ", prNumber)
-	default:
-		return ""
-	}
-}
-
-func dedupeTrimmedStrings(items []string) []string {
-	seen := make(map[string]struct{}, len(items))
-	var out []string
-	for _, item := range items {
-		if clean := strings.TrimSpace(item); clean != "" {
-			if _, exists := seen[clean]; !exists {
-				seen[clean] = struct{}{}
-				out = append(out, clean)
-			}
-		}
-	}
-	return out
 }
 
 // RegisteredPR holds basic identification for an active pull request.
@@ -1233,24 +1030,6 @@ func (r *PostgresPRRegistry) FailVanadisChunkByPR(ctx context.Context, repo stri
 	return failed, err
 }
 
-// Discord Snowflake validation
-var snowflakeRegex = regexp.MustCompile(`^[0-9]{17,20}$`)
-
-func IsValidDiscordSnowflake(id string) bool {
-	return snowflakeRegex.MatchString(strings.TrimSpace(id))
-}
-
-var re4xx = regexp.MustCompile(`\bstatus 4\d{2}\b`)
-
-// is4xxClientError returns true if the error indicates a 4xx HTTP client error or invalid Discord snowflake.
-func is4xxClientError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return re4xx.MatchString(msg) || strings.Contains(msg, "invalid discord snowflake")
-}
-
 type GitPushEventRequest struct {
 	Repo     string `json:"repo"`
 	Ref      string `json:"ref"`
@@ -1657,64 +1436,6 @@ func (s *RouterServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *RouterServer) handleInfisicalWebhook(w http.ResponseWriter, r *http.Request) {
-	var payload InfisicalWebhookPayload
-	if !readWebhookJSON(w, r, 1<<20, true, &payload) {
-		return
-	}
-	workspaceID := payload.GetWorkspaceID(s.cfg.InfisicalProjectID)
-	envName := payload.GetEnvironment(s.cfg.InfisicalEnvironment)
-
-	httpkit.WriteJSON(w, http.StatusAccepted, map[string]interface{}{
-		"status":         "accepted",
-		"message":        "Secret sync scheduled",
-		"targetVariable": TargetNomadVariable,
-		"environment":    envName,
-	})
-	runBackgroundSync("infisical webhook sync", func(ctx context.Context) error {
-		return s.SyncSecrets(ctx, workspaceID, envName)
-	})
-}
-
-type GenericWebhookPayload struct {
-	WorkspaceID string            `json:"workspaceId"`
-	Environment string            `json:"environment"`
-	Secrets     map[string]string `json:"secrets"`
-}
-
-func (s *RouterServer) handleGenericWebhook(w http.ResponseWriter, r *http.Request) {
-	var payload GenericWebhookPayload
-	if !readWebhookJSON(w, r, 1<<20, true, &payload) {
-		return
-	}
-
-	if len(payload.Secrets) > 0 {
-		httpkit.WriteJSON(w, http.StatusAccepted, map[string]interface{}{
-			"status":         "accepted",
-			"message":        "Direct secret sync scheduled",
-			"targetVariable": TargetNomadVariable,
-			"keyCount":       len(payload.Secrets),
-		})
-		runBackgroundSync("direct generic sync", func(ctx context.Context) error {
-			return s.putNomadVariable(ctx, payload.Secrets)
-		})
-		return
-	}
-
-	workspaceID := firstNonEmpty(payload.WorkspaceID, s.cfg.InfisicalProjectID)
-	envName := firstNonEmpty(payload.Environment, s.cfg.InfisicalEnvironment)
-
-	httpkit.WriteJSON(w, http.StatusAccepted, map[string]interface{}{
-		"status":         "accepted",
-		"message":        "Generic secret sync scheduled",
-		"targetVariable": TargetNomadVariable,
-		"environment":    envName,
-	})
-	runBackgroundSync("generic webhook sync", func(ctx context.Context) error {
-		return s.SyncSecrets(ctx, workspaceID, envName)
-	})
-}
-
 // Hangar Webhook Payloads and Resolution Types
 
 type HangarDeployEvent struct {
@@ -1830,29 +1551,6 @@ func (s *RouterServer) ResolveThreadForPR(ctx context.Context, repo string, prNu
 	}
 	targetID, _, _, _, err := s.registry.ResolvePRByNumber(ctx, normalizeRepo(repo), prNum)
 	return targetID, err
-}
-
-func formatErrorDetailsBlock(header, details, extraLine, footer string) string {
-	lines := []string{header}
-	if clean := strings.TrimSpace(details); clean != "" {
-		lines = append(lines, fmt.Sprintf("Error details:\n```\n%s\n```", truncatePromptDetails(clean)))
-	}
-	if cleanExtra := strings.TrimSpace(extraLine); cleanExtra != "" {
-		lines = append(lines, cleanExtra)
-	}
-	if footer != "" {
-		lines = append(lines, footer)
-	}
-	return strings.Join(lines, "\n")
-}
-
-func normalizeWidgetStatus(dbStatus string) string {
-	switch strings.ToLower(strings.TrimSpace(dbStatus)) {
-	case "ci_failed", "deploy_failed":
-		return "failed"
-	default:
-		return strings.ToLower(strings.TrimSpace(dbStatus))
-	}
 }
 
 func (s *RouterServer) setPRWidgetState(ctx context.Context, repo string, prNumber int, status, banner string) {
@@ -2120,41 +1818,6 @@ func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, la
 	return nil
 }
 
-func isHangarSyncedRepo(repo string) bool {
-	norm := strings.ToLower(normalizeRepo(repo))
-	return norm == "azylman/aerial" || norm == "azylman/aerial-config"
-}
-
-func formatVanadisBuildCompletedPrompt(res *VanadisAdvancementResult) string {
-	if res == nil {
-		return ""
-	}
-	total := len(res.Chunks)
-	lines := []string{
-		fmt.Sprintf("Vanadis build %s completed (Tier %d, %d chunks merged).", res.BuildID, res.Tier, total),
-	}
-	if obj := strings.TrimSpace(res.Objective); obj != "" {
-		lines = append(lines, fmt.Sprintf("Objective: %s", obj))
-	}
-	if total > 0 {
-		lines = append(lines, "", "Merged Chunks Ledger:")
-		for _, c := range res.Chunks {
-			cRepo := strings.TrimSpace(c.Repo)
-			if cRepo == "" {
-				cRepo = "azylman/aerial"
-			}
-			prLabel := fmt.Sprintf(" (%s)", cRepo)
-			if c.PRNumber > 0 {
-				prLabel = fmt.Sprintf(" (%s, PR #%d)", cRepo, c.PRNumber)
-			}
-			line := fmt.Sprintf("- Chunk %d/%d: %s%s", c.ChunkIndex+1, total, c.Title, prLabel)
-			lines = append(lines, line)
-		}
-	}
-	lines = append(lines, "", "All Vanadis build chunks have merged into main. Summarize the completed build and verification outcomes for the user.")
-	return strings.Join(lines, "\n")
-}
-
 func (s *RouterServer) advanceVanadisChunk(ctx context.Context, repo string, prNumber int) error {
 	if s.registry == nil || prNumber <= 0 {
 		return nil
@@ -2314,24 +1977,6 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 		return &evt, s.dispatchAlertWithPrompt(ctx, evt.TargetID, "sync_failed", dmMsg, prompt, s.vanadisPromptOpts(ctx, evt.Repo, evt.PRNumber))
 	}
 	return &evt, nil
-}
-
-const (
-	maxPromptRunes           = 1500
-	maxCIRemediationAttempts = 3
-	maxRoboRevCommentRunes   = 4000
-)
-
-func truncatePromptDetails(s string) string {
-	return truncatePromptRunes(strings.ReplaceAll(s, "```", "'''"), maxPromptRunes)
-}
-
-func truncatePromptRunes(s string, maxRunes int) string {
-	runes := []rune(s)
-	if len(runes) <= maxRunes {
-		return s
-	}
-	return string(runes[:maxRunes]) + "... (truncated)"
 }
 
 func (s *RouterServer) dispatchDeploymentSuccessPrompt(ctx context.Context, targetID, jobName, repo, commitSHA string, prNum int, refID string) error {
@@ -3252,127 +2897,6 @@ func (s *RouterServer) resolveWorkflowRunImages(ctx context.Context, repo string
 		}
 	}
 	return dedupeTrimmedStrings(rawImages), nil
-}
-
-func (s *RouterServer) getInfisicalToken(ctx context.Context) (string, error) {
-	if s.cfg.InfisicalClientID == "" || s.cfg.InfisicalClientSecret == "" {
-		return "", fmt.Errorf("infisical client ID or client secret not configured")
-	}
-	payload, err := json.Marshal(map[string]string{
-		"clientId":     s.cfg.InfisicalClientID,
-		"clientSecret": s.cfg.InfisicalClientSecret,
-	})
-	if err != nil {
-		return "", err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.InfisicalURL+"/api/v1/auth/universal-auth/login", bytes.NewReader(payload))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("infisical login request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("infisical login returned status %d: %s", resp.StatusCode, readBodyString(resp.Body))
-	}
-	var loginResp UniversalAuthLoginResponse
-	if err := json.NewDecoder(resp.Body).Decode(&loginResp); err != nil {
-		return "", fmt.Errorf("decoding infisical login response: %w", err)
-	}
-	token := firstNonEmpty(loginResp.AccessToken, loginResp.Token)
-	if token == "" {
-		return "", fmt.Errorf("empty access token in infisical login response")
-	}
-	return token, nil
-}
-
-func readBodyString(r io.Reader) string {
-	body, err := io.ReadAll(r)
-	if err != nil {
-		return ""
-	}
-	return string(body)
-}
-
-func (s *RouterServer) fetchInfisicalSecrets(ctx context.Context, token, workspaceID, envName string) (map[string]string, error) {
-	params := url.Values{
-		"workspaceId": {firstNonEmpty(workspaceID, s.cfg.InfisicalProjectID)},
-		"environment": {firstNonEmpty(envName, s.cfg.InfisicalEnvironment)},
-		"secretPath":  {"/"},
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.InfisicalURL+"/api/v3/secrets/raw?"+params.Encode(), nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("infisical fetch request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("infisical fetch returned status %d: %s", resp.StatusCode, readBodyString(resp.Body))
-	}
-	var secretsResp InfisicalSecretsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&secretsResp); err != nil {
-		return nil, fmt.Errorf("decoding infisical secrets response: %w", err)
-	}
-	items := make(map[string]string, len(secretsResp.Secrets))
-	for _, item := range secretsResp.Secrets {
-		items[item.SecretKey] = item.SecretValue
-	}
-	return items, nil
-}
-
-func (s *RouterServer) putNomadVariable(ctx context.Context, items map[string]string) error {
-	data, err := json.Marshal(NomadVariable{Path: TargetNomadVariable, Items: items})
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, fmt.Sprintf("%s/v1/var/%s", s.cfg.NomadAddr, TargetNomadVariable), bytes.NewReader(data))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if s.cfg.NomadToken != "" {
-		req.Header.Set("X-Nomad-Token", s.cfg.NomadToken)
-	}
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("nomad put variable request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("nomad put variable returned status %d: %s", resp.StatusCode, readBodyString(resp.Body))
-	}
-	return nil
-}
-
-// SyncSecrets coordinates fetching secrets from Infisical and synchronizing directly to Nomad.
-func (s *RouterServer) SyncSecrets(ctx context.Context, workspaceID, envName string) error {
-	log.Printf("[webhooks-router] Initiating secret sync to %s (env: %s)", TargetNomadVariable, envName)
-	token, err := s.getInfisicalToken(ctx)
-	if err != nil {
-		return err
-	}
-	newItems, err := s.fetchInfisicalSecrets(ctx, token, workspaceID, envName)
-	if err != nil {
-		return err
-	}
-	if err := s.putNomadVariable(ctx, newItems); err != nil {
-		return err
-	}
-	log.Printf("[webhooks-router] Successfully synchronized %d secrets to %s", len(newItems), TargetNomadVariable)
-	return nil
 }
 
 // runServer runs the HTTP server with graceful shutdown and optional ready callback.
