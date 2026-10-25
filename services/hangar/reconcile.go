@@ -486,6 +486,81 @@ func (d *SyncDaemon) ReconcilePendingNomad(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
+func (d *SyncDaemon) resolvePolledImageCommitSHA(pollCtx context.Context, repo, imgRef string) string {
+	if rev, revErr := d.GetRemoteImageRevision(pollCtx, imgRef); revErr == nil && rev != "" {
+		log.Printf("[Hangar:NomadImagePoll] Resolved commit SHA %s from image labels for %s", rev, imgRef)
+		return rev
+	} else if revErr != nil {
+		log.Printf("[Hangar:NomadImagePoll] Notice: could not resolve revision from image %s: %v (falling back to git HEAD)", imgRef, revErr)
+	}
+
+	if headOut, _, headErr := d.getGitExecutor()(pollCtx, repo, "rev-parse", "HEAD"); headErr == nil {
+		return strings.TrimSpace(string(headOut))
+	}
+	return ""
+}
+
+func (d *SyncDaemon) checkSingleJobImageDigest(pollCtx context.Context, repo, jobName, imgRef string) {
+	remoteDigest, digestErr := d.GetRemoteImageDigest(pollCtx, imgRef)
+	if digestErr != nil || remoteDigest == "" {
+		return
+	}
+
+	key := jobName + ":" + imgRef
+	d.nomadDigestsMu.RLock()
+	lastDigest, seen := d.nomadKnownDigests[key]
+	d.nomadDigestsMu.RUnlock()
+
+	if !seen {
+		d.nomadDigestsMu.Lock()
+		if d.nomadKnownDigests == nil {
+			d.nomadKnownDigests = make(map[string]string)
+		}
+		d.nomadKnownDigests[key] = remoteDigest
+		d.nomadDigestsMu.Unlock()
+		return
+	}
+
+	if lastDigest == remoteDigest {
+		return
+	}
+
+	log.Printf("[Hangar:NomadImagePoll] New image digest %s detected for Nomad job %s (image %s, previous %s). Rescheduling allocation.", remoteDigest, jobName, imgRef, lastDigest)
+	d.nomadDigestsMu.Lock()
+	d.nomadKnownDigests[key] = remoteDigest
+	d.nomadDigestsMu.Unlock()
+
+	headSHA := d.resolvePolledImageCommitSHA(pollCtx, repo, imgRef)
+
+	repoName := ImageSourceRepo(imgRef)
+	if repoName == "" {
+		repoName = filepath.Base(repo)
+		if repoName == "aerial" || repoName == "aerial-config" || repoName == "aerial-sidecars" {
+			repoName = "azylman/" + repoName
+		}
+	}
+
+	deployEvt := HangarDeployEvent{
+		Event:     "deploy_started",
+		JobName:   jobName,
+		Repo:      repoName,
+		CommitSHA: headSHA,
+		Image:     imgRef,
+		Digest:    remoteDigest,
+		Status:    "started",
+		Details:   fmt.Sprintf("nomad image poll restart for %s (digest %s)", imgRef, remoteDigest),
+		Timestamp: time.Now().UTC(),
+	}
+	d.DispatchDeployEvent(deployEvt)
+
+	out, errBytes, runErr := d.getNomadExecutor()(pollCtx, "job", "restart", "-yes", "-reschedule", "-on-error=fail", jobName)
+	if runErr != nil {
+		log.Printf("[Hangar:NomadImagePoll] Warning: nomad job restart failed for %s: %s (%v)", jobName, SanitizeLog(strings.TrimSpace(string(append(out, errBytes...)))), runErr)
+	} else {
+		log.Printf("[Hangar:NomadImagePoll] Successfully triggered reschedule restart for Nomad job %s", jobName)
+	}
+}
+
 // CheckAndReconcileNomadImages scans jobs/*.nomad in configDir for updated image digests and triggers rolling restarts.
 func (d *SyncDaemon) CheckAndReconcileNomadImages(ctx context.Context) error {
 	d.nomadPollMu.Lock()
@@ -513,81 +588,52 @@ func (d *SyncDaemon) CheckAndReconcileNomadImages(ctx context.Context) error {
 
 			images := ExtractNomadJobImages(content)
 			for _, imgRef := range images {
-				remoteDigest, digestErr := d.GetRemoteImageDigest(pollCtx, imgRef)
-				if digestErr != nil || remoteDigest == "" {
-					continue
-				}
-
-				key := jobName + ":" + imgRef
-				d.nomadDigestsMu.RLock()
-				lastDigest, seen := d.nomadKnownDigests[key]
-				d.nomadDigestsMu.RUnlock()
-
-				if !seen {
-					d.nomadDigestsMu.Lock()
-					if d.nomadKnownDigests == nil {
-						d.nomadKnownDigests = make(map[string]string)
-					}
-					d.nomadKnownDigests[key] = remoteDigest
-					d.nomadDigestsMu.Unlock()
-					continue
-				}
-
-				if lastDigest != remoteDigest {
-					log.Printf("[Hangar:NomadImagePoll] New image digest %s detected for Nomad job %s (image %s, previous %s). Rescheduling allocation.", remoteDigest, jobName, imgRef, lastDigest)
-					d.nomadDigestsMu.Lock()
-					d.nomadKnownDigests[key] = remoteDigest
-					d.nomadDigestsMu.Unlock()
-
-					// Resolve commit SHA: first try reading remote container image OCI revision labels,
-					// falling back to local git repo HEAD if unavailable.
-					var headSHA string
-					if rev, revErr := d.GetRemoteImageRevision(pollCtx, imgRef); revErr == nil && rev != "" {
-						headSHA = rev
-						log.Printf("[Hangar:NomadImagePoll] Resolved commit SHA %s from image labels for %s", headSHA, imgRef)
-					} else {
-						if revErr != nil {
-							log.Printf("[Hangar:NomadImagePoll] Notice: could not resolve revision from image %s: %v (falling back to git HEAD)", imgRef, revErr)
-						}
-						if headOut, _, headErr := d.getGitExecutor()(pollCtx, repo, "rev-parse", "HEAD"); headErr == nil {
-							headSHA = strings.TrimSpace(string(headOut))
-						}
-					}
-
-					repoName := ImageSourceRepo(imgRef)
-					if repoName == "" {
-						repoName = filepath.Base(repo)
-						if repoName == "aerial" || repoName == "aerial-config" || repoName == "aerial-sidecars" {
-							repoName = "azylman/" + repoName
-						}
-					}
-
-					deployEvt := HangarDeployEvent{
-						Event:     "deploy_started",
-						JobName:   jobName,
-						Repo:      repoName,
-						CommitSHA: headSHA,
-						Image:     imgRef,
-						Digest:    remoteDigest,
-						Status:    "started",
-						Details:   fmt.Sprintf("nomad image poll restart for %s (digest %s)", imgRef, remoteDigest),
-						Timestamp: time.Now().UTC(),
-					}
-					d.DispatchDeployEvent(deployEvt)
-
-					out, errBytes, runErr := d.getNomadExecutor()(pollCtx, "job", "restart", "-yes", "-reschedule", "-on-error=fail", jobName)
-					if runErr != nil {
-						log.Printf("[Hangar:NomadImagePoll] Warning: nomad job restart failed for %s: %s (%v)", jobName, SanitizeLog(strings.TrimSpace(string(append(out, errBytes...)))), runErr)
-					} else {
-						log.Printf("[Hangar:NomadImagePoll] Successfully triggered reschedule restart for Nomad job %s", jobName)
-					}
-				}
+				d.checkSingleJobImageDigest(pollCtx, repo, jobName, imgRef)
 			}
 			return true
 		})
 	}
 
 	return nil
+}
+
+func (d *SyncDaemon) executeDebouncedReconcileCycle(ctx context.Context) {
+	// Stop immediately if loop context is canceled before callback fires
+	if ctx.Err() != nil {
+		return
+	}
+	if elapsed := time.Since(d.GetLastReconcile()); elapsed < reconcilerMinCooldown {
+		if !sleepWithContext(ctx, reconcilerMinCooldown-elapsed) {
+			return
+		}
+	}
+	if ctx.Err() != nil {
+		return
+	}
+
+	// Phase 1: Teardowns for any deleted Nomad jobs (releases ports)
+	d.pendingNomadMu.Lock()
+	pendingNomad := append([]NomadChangeEvent(nil), d.pendingNomadChanges...)
+	d.pendingNomadMu.Unlock()
+	d.ExecuteNomadTeardowns(ctx, pendingNomad)
+
+	// Phase 2: Check for Nomad server daemon config changes
+	if d.consumePendingNomadServerRestart() {
+		if errNomad := d.reconcileNomadServer(ctx, d.composeDir); errNomad != nil {
+			log.Printf("[Hangar:GitOps] Warning: reconcileNomadServer encountered error: %v", errNomad)
+		} else {
+			// Wait briefly for Nomad API readiness after server container restart
+			if !sleepWithContext(ctx, reconcilerServerReadyDelay) {
+				return
+			}
+		}
+	}
+
+	// Phase 3: Nomad reconciliation (job applications)
+	if nomadErr := d.ReconcilePendingNomad(ctx); nomadErr != nil {
+		log.Printf("[Hangar:GitOps] Debounced Nomad reconcile failed: %v", nomadErr)
+	}
+	d.SetLastReconcile(time.Now())
 }
 
 // StartReconcilerLoop runs the background debounced worker goroutine.
@@ -611,42 +657,7 @@ func (d *SyncDaemon) StartReconcilerLoop(ctx context.Context) {
 					debounceTimer.Stop()
 				}
 				debounceTimer = time.AfterFunc(reconcilerDebounceDuration, func() {
-					// Stop immediately if loop context is canceled before callback fires
-					if ctx.Err() != nil {
-						return
-					}
-					if elapsed := time.Since(d.GetLastReconcile()); elapsed < reconcilerMinCooldown {
-						if !sleepWithContext(ctx, reconcilerMinCooldown-elapsed) {
-							return
-						}
-					}
-					if ctx.Err() != nil {
-						return
-					}
-
-					// Phase 1: Teardowns for any deleted Nomad jobs (releases ports)
-					d.pendingNomadMu.Lock()
-					pendingNomad := append([]NomadChangeEvent(nil), d.pendingNomadChanges...)
-					d.pendingNomadMu.Unlock()
-					d.ExecuteNomadTeardowns(ctx, pendingNomad)
-
-					// Phase 2: Check for Nomad server daemon config changes
-					if d.consumePendingNomadServerRestart() {
-						if errNomad := d.reconcileNomadServer(ctx, d.composeDir); errNomad != nil {
-							log.Printf("[Hangar:GitOps] Warning: reconcileNomadServer encountered error: %v", errNomad)
-						} else {
-							// Wait briefly for Nomad API readiness after server container restart
-							if !sleepWithContext(ctx, reconcilerServerReadyDelay) {
-								return
-							}
-						}
-					}
-
-					// Phase 3: Nomad reconciliation (job applications)
-					if nomadErr := d.ReconcilePendingNomad(ctx); nomadErr != nil {
-						log.Printf("[Hangar:GitOps] Debounced Nomad reconcile failed: %v", nomadErr)
-					}
-					d.SetLastReconcile(time.Now())
+					d.executeDebouncedReconcileCycle(ctx)
 				})
 			}
 		}

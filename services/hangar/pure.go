@@ -303,6 +303,32 @@ func ResolveDockerConfigPath(lookup func(string) string) string {
 	return filepath.FromSlash("/root/.docker/config.json")
 }
 
+func splitRegistryAndRepo(namePart string) (registry, repository string) {
+	slashIdx := strings.Index(namePart, "/")
+	if slashIdx != -1 {
+		firstSegment := namePart[:slashIdx]
+		if strings.Contains(firstSegment, ".") || strings.Contains(firstSegment, ":") || firstSegment == "localhost" {
+			registry = firstSegment
+			repository = namePart[slashIdx+1:]
+		} else {
+			registry = "registry-1.docker.io"
+			repository = namePart
+		}
+	} else {
+		registry = "registry-1.docker.io"
+		repository = "library/" + namePart
+	}
+
+	// Normalize docker.io aliases
+	if registry == "docker.io" || registry == "index.docker.io" {
+		registry = "registry-1.docker.io"
+	}
+	if registry == "registry-1.docker.io" && !strings.Contains(repository, "/") {
+		repository = "library/" + repository
+	}
+	return registry, repository
+}
+
 // ParseImageReference decomposes a container image reference into its registry,
 // repository path, and tag. Normalizes Docker Hub references (docker.io -> registry-1.docker.io
 // and library/ prefixing for official images).
@@ -351,29 +377,7 @@ func ParseImageReference(ref string) (registry, repository, tag string, err erro
 		return "", "", "", fmt.Errorf("missing repository name in image reference: %q", ref)
 	}
 
-	// Determine registry vs repository
-	slashIdx := strings.Index(namePart, "/")
-	if slashIdx != -1 {
-		firstSegment := namePart[:slashIdx]
-		if strings.Contains(firstSegment, ".") || strings.Contains(firstSegment, ":") || firstSegment == "localhost" {
-			registry = firstSegment
-			repository = namePart[slashIdx+1:]
-		} else {
-			registry = "registry-1.docker.io"
-			repository = namePart
-		}
-	} else {
-		registry = "registry-1.docker.io"
-		repository = "library/" + namePart
-	}
-
-	// Normalize docker.io aliases
-	if registry == "docker.io" || registry == "index.docker.io" {
-		registry = "registry-1.docker.io"
-	}
-	if registry == "registry-1.docker.io" && !strings.Contains(repository, "/") {
-		repository = "library/" + repository
-	}
+	registry, repository = splitRegistryAndRepo(namePart)
 
 	if repository == "" {
 		return "", "", "", fmt.Errorf("empty repository path in image reference: %q", ref)
@@ -539,6 +543,30 @@ func ExtractJobName(content string, fallbackFileName string) string {
 	return base
 }
 
+func extractImageFromHCLAssignment(line string) string {
+	idx := strings.Index(line, "image")
+	if idx == -1 {
+		return ""
+	}
+	sub := strings.TrimSpace(line[idx+len("image"):])
+	if !strings.HasPrefix(sub, "=") {
+		return ""
+	}
+	val := strings.TrimSpace(sub[1:])
+	qStart := strings.IndexAny(val, `"'`)
+	if qStart == -1 {
+		return ""
+	}
+	quote := val[qStart]
+	rest := val[qStart+1:]
+	qEnd := strings.IndexByte(rest, quote)
+	if qEnd == -1 {
+		return ""
+	}
+	img := strings.TrimSpace(rest[:qEnd])
+	return strings.ReplaceAll(img, "${var.image_tag}", "latest")
+}
+
 // ExtractNomadJobImages extracts all Docker container image references from a Nomad job specification.
 // Normalizes Nomad ${var.image_tag} interpolations to "latest".
 func ExtractNomadJobImages(content string) []string {
@@ -552,24 +580,11 @@ func ExtractNomadJobImages(content string) []string {
 		if strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
 			continue
 		}
-		if idx := strings.Index(line, "image"); idx != -1 {
-			sub := strings.TrimSpace(line[idx+len("image"):])
-			if strings.HasPrefix(sub, "=") {
-				val := strings.TrimSpace(sub[1:])
-				if qStart := strings.IndexAny(val, `"'`); qStart != -1 {
-					quote := val[qStart]
-					rest := val[qStart+1:]
-					if qEnd := strings.IndexByte(rest, quote); qEnd != -1 {
-						img := strings.TrimSpace(rest[:qEnd])
-						img = strings.ReplaceAll(img, "${var.image_tag}", "latest")
-						if img != "" {
-							if _, exists := seen[img]; !exists {
-								seen[img] = struct{}{}
-								images = append(images, img)
-							}
-						}
-					}
-				}
+		img := extractImageFromHCLAssignment(line)
+		if img != "" {
+			if _, exists := seen[img]; !exists {
+				seen[img] = struct{}{}
+				images = append(images, img)
 			}
 		}
 	}

@@ -287,18 +287,9 @@ func normalizeRepo(repo string) string {
 	return "azylman/" + repo
 }
 
-// CreateBuild inserts a VanadisBuild and all of its ordered VanadisChunks in a single transaction.
-func (s *PostgresVanadisStore) CreateBuild(ctx context.Context, build VanadisBuild, chunks []VanadisChunk) error {
-	if s == nil || s.db == nil {
-		return errors.New("database connection is nil")
-	}
-	buildID, threadID, objective := strings.TrimSpace(build.ID), strings.TrimSpace(build.ThreadID), strings.TrimSpace(build.Objective)
+func validateCreateBuildInputs(buildID, threadID, objective string, chunks []VanadisChunk) error {
 	if buildID == "" || threadID == "" || objective == "" {
 		return errors.New("build id, thread_id, and objective cannot be empty")
-	}
-	tier := build.Tier
-	if tier <= 0 {
-		tier = 2
 	}
 	for i, c := range chunks {
 		if strings.TrimSpace(c.ID) == "" || strings.TrimSpace(c.Title) == "" || strings.TrimSpace(c.Instructions) == "" {
@@ -310,6 +301,44 @@ func (s *PostgresVanadisStore) CreateBuild(ctx context.Context, build VanadisBui
 		if _, err := normalizeChunkEffort(c.Effort); err != nil {
 			return fmt.Errorf("chunk[%d] %w", i, err)
 		}
+	}
+	return nil
+}
+
+func execInsertVanadisChunk(ctx context.Context, tx pgx.Tx, buildID string, c VanadisChunk) error {
+	const cQ = `INSERT INTO vanadis_chunks (id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, pr_number, started_at, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);`
+	cStatus := firstNonEmpty(strings.TrimSpace(c.Status), "pending")
+	cEffort, err := normalizeChunkEffort(c.Effort)
+	if err != nil {
+		return fmt.Errorf("chunk %s: %w", c.ID, err)
+	}
+	var prNum, startedAt any
+	if c.PRNumber > 0 {
+		prNum = c.PRNumber
+	}
+	if !c.StartedAt.IsZero() {
+		startedAt = c.StartedAt
+	} else if cStatus == "running" || cStatus == "coding" {
+		startedAt = time.Now().UTC()
+	}
+	if _, err := tx.Exec(ctx, cQ, strings.TrimSpace(c.ID), buildID, c.ChunkIndex, firstNonEmpty(normalizeRepo(c.Repo), "azylman/aerial"), strings.TrimSpace(c.Title), strings.TrimSpace(c.Instructions), nonNilSlice(c.TargetFiles), nonNilSlice(c.TargetSymbols), cEffort, nonNilSlice(c.AcceptanceCriteria), cStatus, prNum, startedAt); err != nil {
+		return fmt.Errorf("failed to insert vanadis chunk %s: %w", c.ID, err)
+	}
+	return nil
+}
+
+// CreateBuild inserts a VanadisBuild and all of its ordered VanadisChunks in a single transaction.
+func (s *PostgresVanadisStore) CreateBuild(ctx context.Context, build VanadisBuild, chunks []VanadisChunk) error {
+	if s == nil || s.db == nil {
+		return errors.New("database connection is nil")
+	}
+	buildID, threadID, objective := strings.TrimSpace(build.ID), strings.TrimSpace(build.ThreadID), strings.TrimSpace(build.Objective)
+	if err := validateCreateBuildInputs(buildID, threadID, objective, chunks); err != nil {
+		return err
+	}
+	tier := build.Tier
+	if tier <= 0 {
+		tier = 2
 	}
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
@@ -324,24 +353,9 @@ func (s *PostgresVanadisStore) CreateBuild(ctx context.Context, build VanadisBui
 	if _, err := tx.Exec(ctx, bQ, buildID, threadID, tier, firstNonEmpty(strings.TrimSpace(build.Title), objective), objective, strings.TrimSpace(build.SharedContext), firstNonEmpty(strings.TrimSpace(build.Status), "running"), strings.TrimSpace(build.StatusMessageID)); err != nil {
 		return fmt.Errorf("failed to insert vanadis build: %w", err)
 	}
-	const cQ = `INSERT INTO vanadis_chunks (id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, pr_number, started_at, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);`
 	for _, c := range chunks {
-		cStatus := firstNonEmpty(strings.TrimSpace(c.Status), "pending")
-		cEffort, err := normalizeChunkEffort(c.Effort)
-		if err != nil {
-			return fmt.Errorf("chunk %s: %w", c.ID, err)
-		}
-		var prNum, startedAt any
-		if c.PRNumber > 0 {
-			prNum = c.PRNumber
-		}
-		if !c.StartedAt.IsZero() {
-			startedAt = c.StartedAt
-		} else if cStatus == "running" || cStatus == "coding" {
-			startedAt = time.Now().UTC()
-		}
-		if _, err := tx.Exec(ctx, cQ, strings.TrimSpace(c.ID), buildID, c.ChunkIndex, firstNonEmpty(normalizeRepo(c.Repo), "azylman/aerial"), strings.TrimSpace(c.Title), strings.TrimSpace(c.Instructions), nonNilSlice(c.TargetFiles), nonNilSlice(c.TargetSymbols), cEffort, nonNilSlice(c.AcceptanceCriteria), cStatus, prNum, startedAt); err != nil {
-			return fmt.Errorf("failed to insert vanadis chunk %s: %w", c.ID, err)
+		if err := execInsertVanadisChunk(ctx, tx, buildID, c); err != nil {
+			return err
 		}
 	}
 	return tx.Commit(ctx)
