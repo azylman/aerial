@@ -335,6 +335,97 @@ type VoiceAskResponse struct {
 	NodeID         string `json:"node_id,omitempty"`
 }
 
+func resolveVoiceAskSessionID(req VoiceAskRequest) (string, string) {
+	sessionID := strings.TrimSpace(req.NodeID)
+	if sessionID == "" {
+		sessionID = strings.TrimSpace(req.SessionID)
+	}
+	if sessionID == "" {
+		sessionID = strings.TrimSpace(req.ConversationID)
+	}
+	if sessionID == "" {
+		return "", "Invalid payload: 'session_id' (or 'node_id' / 'conversation_id') is required to identify the device"
+	}
+	if len(sessionID) > 128 || strings.ContainsAny(sessionID, "\r\n\x00") {
+		return "", "Invalid payload: device identifier exceeds 128 characters or contains invalid characters"
+	}
+	return sessionID, ""
+}
+
+func handleVoiceAskSSE(w http.ResponseWriter, r *http.Request, pool *queue.WorkerPool, req VoiceAskRequest, sessionID string, reqStart time.Time) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "Streaming not supported by client connection"})
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate, no-transform")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	var writeMu sync.Mutex
+	var ttfrOnce sync.Once
+	recordTTFR := func(status string) {
+		ttfrOnce.Do(func() {
+			metrics.RecordVoiceTTFR("sse", status, time.Since(reqStart))
+		})
+	}
+
+	emitSSE := func(event string, data any) {
+		if r.Context().Err() != nil {
+			return
+		}
+		payload, mErr := json.Marshal(data)
+		if mErr != nil {
+			log.Printf("[VoiceAsk] Failed to marshal SSE payload: %v", mErr)
+			return
+		}
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		if _, wErr := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, string(payload)); wErr != nil {
+			log.Printf("[VoiceAsk] Failed to write SSE chunk: %v", wErr)
+			return
+		}
+		flusher.Flush()
+
+		if event == "reply" || event == "delta" || event == "sentence" {
+			recordTTFR("success")
+		} else if event == "error" {
+			recordTTFR("error")
+		}
+	}
+
+	onStatus := func(status string) {
+		emitSSE("status", map[string]string{"status": status})
+	}
+
+	onSentence := func(sentence string) {
+		emitSSE("sentence", map[string]string{"text": sentence})
+	}
+
+	if pool == nil {
+		emitSSE("error", map[string]string{"error": "worker pool is uninitialized"})
+		emitSSE("done", map[string]any{})
+		return
+	}
+
+	reply, convID, turnErr := pool.ExecuteVoiceTurn(r.Context(), req.Prompt, sessionID, onStatus, onSentence)
+	if turnErr != nil {
+		if r.Context().Err() == nil {
+			sanitizedErr := sanitizer.SanitizeString(turnErr.Error())
+			emitSSE("error", map[string]string{"error": sanitizedErr})
+			emitSSE("done", map[string]any{})
+		}
+		return
+	}
+
+	emitSSE("reply", map[string]string{"reply": reply, "conversation_id": convID})
+	emitSSE("done", map[string]any{"conversation_id": convID})
+}
+
 func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		reqStart := time.Now()
@@ -355,100 +446,17 @@ func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		sessionID := strings.TrimSpace(req.NodeID)
-		if sessionID == "" {
-			sessionID = strings.TrimSpace(req.SessionID)
-		}
-		if sessionID == "" {
-			sessionID = strings.TrimSpace(req.ConversationID)
-		}
-		if sessionID == "" {
+		sessionID, errMsg := resolveVoiceAskSessionID(req)
+		if errMsg != "" {
 			httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{
-				"error": "Invalid payload: 'session_id' (or 'node_id' / 'conversation_id') is required to identify the device",
-			})
-			return
-		}
-		if len(sessionID) > 128 || strings.ContainsAny(sessionID, "\r\n\x00") {
-			httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{
-				"error": "Invalid payload: device identifier exceeds 128 characters or contains invalid characters",
+				"error": errMsg,
 			})
 			return
 		}
 
 		isSSE := strings.Contains(r.Header.Get("Accept"), "text/event-stream") || r.URL.Query().Get("stream") == "true"
-
 		if isSSE {
-			flusher, ok := w.(http.Flusher)
-			if !ok {
-				httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "Streaming not supported by client connection"})
-				return
-			}
-
-			w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
-			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate, no-transform")
-			w.Header().Set("Connection", "keep-alive")
-			w.Header().Set("X-Accel-Buffering", "no")
-			w.WriteHeader(http.StatusOK)
-			flusher.Flush()
-
-			var writeMu sync.Mutex
-			var ttfrOnce sync.Once
-			recordTTFR := func(status string) {
-				ttfrOnce.Do(func() {
-					metrics.RecordVoiceTTFR("sse", status, time.Since(reqStart))
-				})
-			}
-
-			emitSSE := func(event string, data any) {
-				if r.Context().Err() != nil {
-					return
-				}
-				payload, mErr := json.Marshal(data)
-				if mErr != nil {
-					log.Printf("[VoiceAsk] Failed to marshal SSE payload: %v", mErr)
-					return
-				}
-				writeMu.Lock()
-				defer writeMu.Unlock()
-				if _, wErr := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, string(payload)); wErr != nil {
-					log.Printf("[VoiceAsk] Failed to write SSE chunk: %v", wErr)
-					return
-				}
-				flusher.Flush()
-
-				if event == "reply" || event == "delta" || event == "sentence" {
-					recordTTFR("success")
-				} else if event == "error" {
-					recordTTFR("error")
-				}
-			}
-
-			onStatus := func(status string) {
-				emitSSE("status", map[string]string{"status": status})
-			}
-
-			onSentence := func(sentence string) {
-				emitSSE("sentence", map[string]string{"text": sentence})
-			}
-
-			if pool == nil {
-				emitSSE("error", map[string]string{"error": "worker pool is uninitialized"})
-				emitSSE("done", map[string]any{})
-				return
-			}
-
-			reply, convID, turnErr := pool.ExecuteVoiceTurn(r.Context(), req.Prompt, sessionID, onStatus, onSentence)
-			if turnErr != nil {
-				if r.Context().Err() == nil {
-					sanitizedErr := sanitizer.SanitizeString(turnErr.Error())
-					emitSSE("error", map[string]string{"error": sanitizedErr})
-					emitSSE("done", map[string]any{})
-				}
-				return
-			}
-
-			emitSSE("reply", map[string]string{"reply": reply, "conversation_id": convID})
-			emitSSE("done", map[string]any{"conversation_id": convID})
+			handleVoiceAskSSE(w, r, pool, req, sessionID, reqStart)
 			return
 		}
 
