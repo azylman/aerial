@@ -213,6 +213,119 @@ func (p *GitHubSkillPublisher) doRequest(ctx context.Context, method, endpoint s
 	return respBytes, nil
 }
 
+func (p *GitHubSkillPublisher) hasOpenCovenSkillPR(ctx context.Context) (bool, error) {
+	listPullsEndpoint := fmt.Sprintf("/repos/%s/%s/pulls?state=open&per_page=30", p.owner, p.repo)
+	pullsData, err := p.doRequest(ctx, http.MethodGet, listPullsEndpoint, nil)
+	if err != nil {
+		return false, fmt.Errorf("github: failed to list open pull requests: %w", err)
+	}
+	var openPRs []ghPullRequest
+	if err := json.Unmarshal(pullsData, &openPRs); err != nil {
+		return false, fmt.Errorf("github: failed to parse open pull requests: %w", err)
+	}
+	for _, pr := range openPRs {
+		if strings.HasPrefix(pr.Head.Ref, "update/coven-skills-") {
+			log.Printf("[coven-github] open coven PR already exists (#%d, ref %s), skipping publication", pr.Number, pr.Head.Ref)
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (p *GitHubSkillPublisher) resolveMainCommitAndTree(ctx context.Context) (mainCommitSHA, baseTreeSHA string, err error) {
+	mainRefEndpoint := fmt.Sprintf("/repos/%s/%s/git/ref/heads/main", p.owner, p.repo)
+	mainRefData, err := p.doRequest(ctx, http.MethodGet, mainRefEndpoint, nil)
+	if err != nil {
+		return "", "", fmt.Errorf("github: failed to get heads/main: %w", err)
+	}
+	var mainRef ghRef
+	if err := json.Unmarshal(mainRefData, &mainRef); err != nil {
+		return "", "", fmt.Errorf("github: failed to parse heads/main: %w", err)
+	}
+	mainCommitSHA = strings.TrimSpace(mainRef.Object.SHA)
+	if mainCommitSHA == "" {
+		return "", "", fmt.Errorf("github: empty SHA for heads/main")
+	}
+
+	commitEndpoint := fmt.Sprintf("/repos/%s/%s/git/commits/%s", p.owner, p.repo, mainCommitSHA)
+	commitData, err := p.doRequest(ctx, http.MethodGet, commitEndpoint, nil)
+	if err != nil {
+		return "", "", fmt.Errorf("github: failed to get commit %s: %w", mainCommitSHA, err)
+	}
+	var commitInfo ghCommit
+	if err := json.Unmarshal(commitData, &commitInfo); err != nil {
+		return "", "", fmt.Errorf("github: failed to parse commit %s: %w", mainCommitSHA, err)
+	}
+	baseTreeSHA = strings.TrimSpace(commitInfo.Tree.SHA)
+	if baseTreeSHA == "" {
+		return "", "", fmt.Errorf("github: empty tree SHA for commit %s", mainCommitSHA)
+	}
+	return mainCommitSHA, baseTreeSHA, nil
+}
+
+func (p *GitHubSkillPublisher) createSkillCommitAndBranch(ctx context.Context, mainCommitSHA, baseTreeSHA string, changes []SkillFileChange) (branchName, newCommitSHA string, err error) {
+	treeEntries := make([]ghTreeEntry, len(changes))
+	for i, c := range changes {
+		treeEntries[i] = ghTreeEntry{
+			Path:    c.RelPath,
+			Mode:    "100644",
+			Type:    "blob",
+			Content: c.Content,
+		}
+	}
+	treeReq := ghCreateTreeRequest{
+		BaseTree: baseTreeSHA,
+		Tree:     treeEntries,
+	}
+	createTreeEndpoint := fmt.Sprintf("/repos/%s/%s/git/trees", p.owner, p.repo)
+	treeData, err := p.doRequest(ctx, http.MethodPost, createTreeEndpoint, treeReq)
+	if err != nil {
+		return "", "", fmt.Errorf("github: failed to create tree: %w", err)
+	}
+	var treeResp ghCreateTreeResponse
+	if err := json.Unmarshal(treeData, &treeResp); err != nil {
+		return "", "", fmt.Errorf("github: failed to parse created tree: %w", err)
+	}
+	newTreeSHA := strings.TrimSpace(treeResp.SHA)
+	if newTreeSHA == "" {
+		return "", "", fmt.Errorf("github: empty SHA for created tree")
+	}
+
+	commitMsg := formatSkillCommitMessage(changes)
+	commitReq := ghCreateCommitRequest{
+		Message: commitMsg,
+		Tree:    newTreeSHA,
+		Parents: []string{mainCommitSHA},
+	}
+	createCommitEndpoint := fmt.Sprintf("/repos/%s/%s/git/commits", p.owner, p.repo)
+	commitRespData, err := p.doRequest(ctx, http.MethodPost, createCommitEndpoint, commitReq)
+	if err != nil {
+		return "", "", fmt.Errorf("github: failed to create commit: %w", err)
+	}
+	var commitResp ghCreateCommitResponse
+	if err := json.Unmarshal(commitRespData, &commitResp); err != nil {
+		return "", "", fmt.Errorf("github: failed to parse created commit: %w", err)
+	}
+	newCommitSHA = strings.TrimSpace(commitResp.SHA)
+	if newCommitSHA == "" {
+		return "", "", fmt.Errorf("github: empty SHA for created commit")
+	}
+
+	ts := p.now().Unix()
+	branchRef := fmt.Sprintf("refs/heads/update/coven-skills-%d", ts)
+	branchName = fmt.Sprintf("update/coven-skills-%d", ts)
+
+	createRefEndpoint := fmt.Sprintf("/repos/%s/%s/git/refs", p.owner, p.repo)
+	refReq := ghCreateRefRequest{
+		Ref: branchRef,
+		SHA: newCommitSHA,
+	}
+	if _, err := p.doRequest(ctx, http.MethodPost, createRefEndpoint, refReq); err != nil {
+		return "", "", fmt.Errorf("github: failed to create ref %s: %w", branchRef, err)
+	}
+	return branchName, newCommitSHA, nil
+}
+
 // PublishSkillChanges publishes compiled skill changes to the configuration repository as an auto-merging PR.
 func (p *GitHubSkillPublisher) PublishSkillChanges(ctx context.Context, changes []SkillFileChange) (int, error) {
 	if p.token == "" {
@@ -231,113 +344,22 @@ func (p *GitHubSkillPublisher) PublishSkillChanges(ctx context.Context, changes 
 		}
 	}
 
-	// 1. Check open PRs for an existing update/coven-skills- branch
-	listPullsEndpoint := fmt.Sprintf("/repos/%s/%s/pulls?state=open&per_page=30", p.owner, p.repo)
-	pullsData, err := p.doRequest(ctx, http.MethodGet, listPullsEndpoint, nil)
+	hasOpen, err := p.hasOpenCovenSkillPR(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("github: failed to list open pull requests: %w", err)
+		return 0, err
 	}
-	var openPRs []ghPullRequest
-	if err := json.Unmarshal(pullsData, &openPRs); err != nil {
-		return 0, fmt.Errorf("github: failed to parse open pull requests: %w", err)
-	}
-	for _, pr := range openPRs {
-		if strings.HasPrefix(pr.Head.Ref, "update/coven-skills-") {
-			log.Printf("[coven-github] open coven PR already exists (#%d, ref %s), skipping publication", pr.Number, pr.Head.Ref)
-			return 0, nil
-		}
+	if hasOpen {
+		return 0, nil
 	}
 
-	// 2. Resolve main branch HEAD ref and base commit
-	mainRefEndpoint := fmt.Sprintf("/repos/%s/%s/git/ref/heads/main", p.owner, p.repo)
-	mainRefData, err := p.doRequest(ctx, http.MethodGet, mainRefEndpoint, nil)
+	mainCommitSHA, baseTreeSHA, err := p.resolveMainCommitAndTree(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("github: failed to get heads/main: %w", err)
-	}
-	var mainRef ghRef
-	if err := json.Unmarshal(mainRefData, &mainRef); err != nil {
-		return 0, fmt.Errorf("github: failed to parse heads/main: %w", err)
-	}
-	mainCommitSHA := strings.TrimSpace(mainRef.Object.SHA)
-	if mainCommitSHA == "" {
-		return 0, fmt.Errorf("github: empty SHA for heads/main")
+		return 0, err
 	}
 
-	commitEndpoint := fmt.Sprintf("/repos/%s/%s/git/commits/%s", p.owner, p.repo, mainCommitSHA)
-	commitData, err := p.doRequest(ctx, http.MethodGet, commitEndpoint, nil)
+	branchName, newCommitSHA, err := p.createSkillCommitAndBranch(ctx, mainCommitSHA, baseTreeSHA, changes)
 	if err != nil {
-		return 0, fmt.Errorf("github: failed to get commit %s: %w", mainCommitSHA, err)
-	}
-	var commitInfo ghCommit
-	if err := json.Unmarshal(commitData, &commitInfo); err != nil {
-		return 0, fmt.Errorf("github: failed to parse commit %s: %w", mainCommitSHA, err)
-	}
-	baseTreeSHA := strings.TrimSpace(commitInfo.Tree.SHA)
-	if baseTreeSHA == "" {
-		return 0, fmt.Errorf("github: empty tree SHA for commit %s", mainCommitSHA)
-	}
-
-	// 3. Create tree with changes
-	treeEntries := make([]ghTreeEntry, len(changes))
-	for i, c := range changes {
-		treeEntries[i] = ghTreeEntry{
-			Path:    c.RelPath,
-			Mode:    "100644",
-			Type:    "blob",
-			Content: c.Content,
-		}
-	}
-	treeReq := ghCreateTreeRequest{
-		BaseTree: baseTreeSHA,
-		Tree:     treeEntries,
-	}
-	createTreeEndpoint := fmt.Sprintf("/repos/%s/%s/git/trees", p.owner, p.repo)
-	treeData, err := p.doRequest(ctx, http.MethodPost, createTreeEndpoint, treeReq)
-	if err != nil {
-		return 0, fmt.Errorf("github: failed to create tree: %w", err)
-	}
-	var treeResp ghCreateTreeResponse
-	if err := json.Unmarshal(treeData, &treeResp); err != nil {
-		return 0, fmt.Errorf("github: failed to parse created tree: %w", err)
-	}
-	newTreeSHA := strings.TrimSpace(treeResp.SHA)
-	if newTreeSHA == "" {
-		return 0, fmt.Errorf("github: empty SHA for created tree")
-	}
-
-	// 4. Create commit
-	commitMsg := formatSkillCommitMessage(changes)
-	commitReq := ghCreateCommitRequest{
-		Message: commitMsg,
-		Tree:    newTreeSHA,
-		Parents: []string{mainCommitSHA},
-	}
-	createCommitEndpoint := fmt.Sprintf("/repos/%s/%s/git/commits", p.owner, p.repo)
-	commitRespData, err := p.doRequest(ctx, http.MethodPost, createCommitEndpoint, commitReq)
-	if err != nil {
-		return 0, fmt.Errorf("github: failed to create commit: %w", err)
-	}
-	var commitResp ghCreateCommitResponse
-	if err := json.Unmarshal(commitRespData, &commitResp); err != nil {
-		return 0, fmt.Errorf("github: failed to parse created commit: %w", err)
-	}
-	newCommitSHA := strings.TrimSpace(commitResp.SHA)
-	if newCommitSHA == "" {
-		return 0, fmt.Errorf("github: empty SHA for created commit")
-	}
-
-	// 5. Create branch ref: refs/heads/update/coven-skills-<unix_ts>
-	ts := p.now().Unix()
-	branchRef := fmt.Sprintf("refs/heads/update/coven-skills-%d", ts)
-	branchName := fmt.Sprintf("update/coven-skills-%d", ts)
-
-	createRefEndpoint := fmt.Sprintf("/repos/%s/%s/git/refs", p.owner, p.repo)
-	refReq := ghCreateRefRequest{
-		Ref: branchRef,
-		SHA: newCommitSHA,
-	}
-	if _, err := p.doRequest(ctx, http.MethodPost, createRefEndpoint, refReq); err != nil {
-		return 0, fmt.Errorf("github: failed to create ref %s: %w", branchRef, err)
+		return 0, err
 	}
 
 	// 6. Create PR
@@ -683,6 +705,91 @@ func handleAlertBatch(ctx context.Context, store Store, publisher SkillPublisher
 	return true
 }
 
+type skillCompilationState struct {
+	diskSkills      []DiskSkill
+	changes         []SkillFileChange
+	allPublishedIDs []int64
+	seenPaths       map[string]bool
+	seenNames       map[string]bool
+}
+
+func compileSkillBatch(ctx context.Context, store Store, llmFunc LLMClientFunc, publisher SkillPublisher, batch SkillConsolidationBatch, state *skillCompilationState) {
+	batchIDs := make([]int64, len(batch.Candidates))
+	for i, c := range batch.Candidates {
+		batchIDs[i] = c.ID
+	}
+
+	if handleAlertBatch(ctx, store, publisher, batch, batchIDs) {
+		return
+	}
+
+	prompt := buildSkillDesignerPrompt(batch)
+	rawResp, err := llmFunc(ctx, prompt)
+	if err != nil {
+		log.Printf("[coven-skills] error invoking skill designer LLM: %v", err)
+		return
+	}
+
+	designerResp, err := parseDesignerResponse(rawResp)
+	if err != nil {
+		log.Printf("[coven-skills] error parsing designer response: %v", err)
+		return
+	}
+
+	action := strings.ToUpper(strings.TrimSpace(designerResp.Action))
+	if action == "NOOP" {
+		if err := store.MarkProceduralCandidatesSkipped(ctx, batchIDs); err != nil {
+			log.Printf("[coven-skills] warning marking NOOP candidates skipped: %v", err)
+		}
+		return
+	}
+
+	if action != "EDIT" && action != "CREATE" {
+		log.Printf("[coven-skills] unknown designer action %q, skipping batch", designerResp.Action)
+		return
+	}
+
+	domain := batch.Domain
+	if domain == "" {
+		domain = designerResp.Domain
+	}
+	if domain == "" {
+		domain = "discord"
+	}
+
+	name, relPath, cleanedMD, err := ValidateCompiledSkillMarkdown(action, domain, designerResp.Markdown, batch.TargetSkill, state.diskSkills)
+	if err != nil {
+		log.Printf("[coven-skills] validation failed for %s %s: %v", action, designerResp.Name, err)
+		return
+	}
+
+	if state.seenPaths[relPath] || state.seenNames[name] {
+		log.Printf("[coven-skills] colliding skill name %q or path %q already staged in current pass, deferring batch", name, relPath)
+		return
+	}
+
+	state.seenPaths[relPath] = true
+	state.seenNames[name] = true
+	state.diskSkills = stageCompiledSkillInMemory(state.diskSkills, name, relPath, domain, cleanedMD)
+
+	commitSummary := strings.TrimSpace(designerResp.CommitSummary)
+	if commitSummary == "" {
+		commitSummary = fmt.Sprintf("%s skill %s", strings.ToLower(action), name)
+	}
+
+	state.changes = append(state.changes, SkillFileChange{
+		RelPath:       relPath,
+		Content:       cleanedMD,
+		Action:        action,
+		SkillName:     name,
+		CommitSummary: commitSummary,
+		CandidateIDs:  batchIDs,
+		Candidates:    batch.Candidates,
+		RequireReview: batch.RequireReview,
+	})
+	state.allPublishedIDs = append(state.allPublishedIDs, batchIDs...)
+}
+
 // ConsolidateProceduralSkills scans pending procedural friction candidates, clusters and compiles
 // them into validated SKILL.md changes, and publishes an auto-merging PR to aerial-config.
 func ConsolidateProceduralSkills(ctx context.Context, store Store, ollama OllamaClient, llmFunc LLMClientFunc, publisher SkillPublisher, customSkillsDir string) (int, error) {
@@ -718,99 +825,27 @@ func ConsolidateProceduralSkills(ctx context.Context, store Store, ollama Ollama
 		return 0, nil
 	}
 
-	var changes []SkillFileChange
-	var allPublishedIDs []int64
-	seenPaths := make(map[string]bool)
-	seenNames := make(map[string]bool)
-
-	for _, batch := range batches {
-		batchIDs := make([]int64, len(batch.Candidates))
-		for i, c := range batch.Candidates {
-			batchIDs[i] = c.ID
-		}
-
-		if handleAlertBatch(ctx, store, publisher, batch, batchIDs) {
-			continue
-		}
-
-		prompt := buildSkillDesignerPrompt(batch)
-		rawResp, err := llmFunc(ctx, prompt)
-		if err != nil {
-			log.Printf("[coven-skills] error invoking skill designer LLM: %v", err)
-			continue
-		}
-
-		designerResp, err := parseDesignerResponse(rawResp)
-		if err != nil {
-			log.Printf("[coven-skills] error parsing designer response: %v", err)
-			continue
-		}
-
-		action := strings.ToUpper(strings.TrimSpace(designerResp.Action))
-		if action == "NOOP" {
-			if err := store.MarkProceduralCandidatesSkipped(ctx, batchIDs); err != nil {
-				log.Printf("[coven-skills] warning marking NOOP candidates skipped: %v", err)
-			}
-			continue
-		}
-
-		if action != "EDIT" && action != "CREATE" {
-			log.Printf("[coven-skills] unknown designer action %q, skipping batch", designerResp.Action)
-			continue
-		}
-
-		domain := batch.Domain
-		if domain == "" {
-			domain = designerResp.Domain
-		}
-		if domain == "" {
-			domain = "discord"
-		}
-
-		name, relPath, cleanedMD, err := ValidateCompiledSkillMarkdown(action, domain, designerResp.Markdown, batch.TargetSkill, diskSkills)
-		if err != nil {
-			log.Printf("[coven-skills] validation failed for %s %s: %v", action, designerResp.Name, err)
-			continue
-		}
-
-		if seenPaths[relPath] || seenNames[name] {
-			log.Printf("[coven-skills] colliding skill name %q or path %q already staged in current pass, deferring batch", name, relPath)
-			continue
-		}
-
-		seenPaths[relPath] = true
-		seenNames[name] = true
-		diskSkills = stageCompiledSkillInMemory(diskSkills, name, relPath, domain, cleanedMD)
-
-		commitSummary := strings.TrimSpace(designerResp.CommitSummary)
-		if commitSummary == "" {
-			commitSummary = fmt.Sprintf("%s skill %s", strings.ToLower(action), name)
-		}
-
-		changes = append(changes, SkillFileChange{
-			RelPath:       relPath,
-			Content:       cleanedMD,
-			Action:        action,
-			SkillName:     name,
-			CommitSummary: commitSummary,
-			CandidateIDs:  batchIDs,
-			Candidates:    batch.Candidates,
-			RequireReview: batch.RequireReview,
-		})
-		allPublishedIDs = append(allPublishedIDs, batchIDs...)
+	state := &skillCompilationState{
+		diskSkills: diskSkills,
+		seenPaths:  make(map[string]bool),
+		seenNames:  make(map[string]bool),
 	}
 
-	if len(changes) == 0 {
+	for _, batch := range batches {
+		compileSkillBatch(ctx, store, llmFunc, publisher, batch, state)
+	}
+
+	if len(state.changes) == 0 {
 		return 0, nil
 	}
 
-	prNum, err := publisher.PublishSkillChanges(ctx, changes)
+	prNum, err := publisher.PublishSkillChanges(ctx, state.changes)
 	if err != nil {
 		return 0, fmt.Errorf("failed to publish skill changes: %w", err)
 	}
 
-	if prNum > 0 && len(allPublishedIDs) > 0 {
-		if err := store.MarkProceduralCandidatesConsolidated(ctx, allPublishedIDs, prNum); err != nil {
+	if prNum > 0 && len(state.allPublishedIDs) > 0 {
+		if err := store.MarkProceduralCandidatesConsolidated(ctx, state.allPublishedIDs, prNum); err != nil {
 			log.Printf("[coven-skills] warning marking candidates consolidated: %v", err)
 		}
 	}

@@ -1,20 +1,6 @@
 {
   "files": {},
   "functions": {
-    "services/coven/github.go::*GitHubSkillPublisher.PublishSkillChanges": {
-      "lines": 168,
-      "cc": 32
-    },
-    "services/coven/github.go::ConsolidateProceduralSkills": {
-      "lines": 160,
-      "cc": 36
-    },
-    "services/coven/skills.go::PlanSkillConsolidation": {
-      "cc": 26
-    },
-    "services/coven/skills.go::findCandidateCliques": {
-      "cc": 29
-    },
     "services/dashboard/config.go::NewDashboardConfigFromLookup": {
       "cc": 46
     },
