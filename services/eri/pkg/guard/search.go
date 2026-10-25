@@ -46,6 +46,8 @@ var grepMatchLimitLongFlags = map[string]bool{
 	"--count-matches":       true,
 	"--quiet":               true,
 	"--silent":              true,
+	"--help":                true,
+	"--version":             true,
 }
 
 // splitPipeline splits a shell command line on ;, &&, ||, and | respecting single and double quotes.
@@ -345,6 +347,12 @@ func hasBroadPathToken(pathTokens []string) bool {
 	return false
 }
 
+var grepNoPatternLongFlags = map[string]bool{
+	"--files":   true,
+	"--help":    true,
+	"--version": true,
+}
+
 func inspectGrepCommand(bin string, tokens []string, fromPipe bool) *Decision {
 	hasExcludeDir, hasMatchLimit, hasExplicitPattern := false, false, false
 	isRecursive := (bin == "rg" || bin == "ag" || bin == "ack")
@@ -352,9 +360,6 @@ func inspectGrepCommand(bin string, tokens []string, fromPipe bool) *Decision {
 
 	for i := 1; i < len(tokens); i++ {
 		t := tokens[i]
-		if t == "-h" || t == "--help" || t == "-V" || t == "--version" {
-			return nil
-		}
 		if strings.HasPrefix(t, "-") {
 			if strings.HasPrefix(t, "--exclude-dir") || strings.HasPrefix(t, "--exclude") {
 				hasExcludeDir = true
@@ -367,7 +372,7 @@ func inspectGrepCommand(bin string, tokens []string, fromPipe bool) *Decision {
 			}
 			if limit, takesArg := isGrepMatchLimitFlag(t); limit {
 				hasMatchLimit = true
-				if t == "--files" {
+				if grepNoPatternLongFlags[t] {
 					hasExplicitPattern = true
 				}
 				if takesArg && i+1 < len(tokens) {
