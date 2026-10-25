@@ -578,6 +578,19 @@ type nomadSyncValidationCase struct {
 	checkEmptyHomepageHash              bool
 }
 
+func syncNomadConfig(ctx context.Context, d *SyncDaemon, target, configDir string, syncCtx ...ConfigSyncContext) error {
+	switch target {
+	case "brain":
+		return d.SyncBrainConfigToNomad(ctx, configDir, syncCtx...)
+	case "homepage":
+		return d.SyncHomepageConfigToNomad(ctx, configDir, syncCtx...)
+	case "service":
+		return d.SyncServiceConfigsToNomad(ctx, configDir, syncCtx...)
+	default:
+		return errors.New("unknown target: " + target)
+	}
+}
+
 func runNomadValidationCases(t *testing.T, cases []nomadSyncValidationCase) {
 	t.Helper()
 	ctx := context.Background()
@@ -603,17 +616,7 @@ func runNomadValidationCases(t *testing.T, cases []nomadSyncValidationCase) {
 					return nil, []byte("nomad var put permission denied"), errors.New("exit 1")
 				}
 			}
-			var err error
-			switch tc.target {
-			case "brain":
-				err = env.daemon.SyncBrainConfigToNomad(ctx, env.configDir)
-			case "homepage":
-				err = env.daemon.SyncHomepageConfigToNomad(ctx, env.configDir)
-			case "service":
-				err = env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir)
-			default:
-				t.Fatalf("unknown target: %s", tc.target)
-			}
+			err := syncNomadConfig(ctx, env.daemon, tc.target, env.configDir)
 
 			if tc.wantErrSub != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
@@ -669,9 +672,10 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 		t.Parallel()
 		type syncLifecycleCase struct {
 			name              string
-			setup             func(configDir string)
-			modify            func(configDir string)
-			syncFn            func(d *SyncDaemon, configDir string, syncCtx ...ConfigSyncContext) error
+			target            string
+			initialFiles      map[string]string
+			mkdirs            []string
+			modifiedFiles     map[string]string
 			cacheKey          string
 			wantInitialCalls  int
 			wantModifiedCalls int
@@ -683,16 +687,10 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 
 		cases := []syncLifecycleCase{
 			{
-				name: "brain",
-				setup: func(dir string) {
-					_ = os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(validBrainYAML), 0o644)
-				},
-				modify: func(dir string) {
-					_ = os.WriteFile(filepath.Join(dir, "config.yaml"), []byte("channels:\n  default:\n    mode: always\n"), 0o644)
-				},
-				syncFn: func(d *SyncDaemon, dir string, sCtx ...ConfigSyncContext) error {
-					return d.SyncBrainConfigToNomad(ctx, dir, sCtx...)
-				},
+				name:              "brain",
+				target:            "brain",
+				initialFiles:      map[string]string{"config.yaml": validBrainYAML},
+				modifiedFiles:     map[string]string{"config.yaml": "channels:\n  default:\n    mode: always\n"},
 				cacheKey:          "nomad/jobs/eri:CONFIG_YAML",
 				wantInitialCalls:  1,
 				wantModifiedCalls: 1,
@@ -702,25 +700,18 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 				wantJobName:       "eri",
 			},
 			{
-				name: "homepage",
-				setup: func(dir string) {
-					_ = os.MkdirAll(filepath.Join(dir, "services", "homepage"), 0o755)
-					_ = os.WriteFile(filepath.Join(dir, "services", "homepage", "homepage.yaml"), []byte("port: \"3001\"\nallowed_hosts: \"*\"\n"), 0o644)
-					_ = os.MkdirAll(filepath.Join(dir, "homepage", "subdir"), 0o755)
-					for name, content := range map[string]string{
-						"services.yaml": "- My Group: []\n",
-						"widgets.yaml":  "- search: {}\n",
-						".hidden":       "ignore me",
-						"temp.tmp":      "ignore me too",
-					} {
-						_ = os.WriteFile(filepath.Join(dir, "homepage", name), []byte(content), 0o644)
-					}
+				name:   "homepage",
+				target: "homepage",
+				mkdirs: []string{"homepage/subdir"},
+				initialFiles: map[string]string{
+					"services/homepage/homepage.yaml": "port: \"3001\"\nallowed_hosts: \"*\"\n",
+					"homepage/services.yaml":          "- My Group: []\n",
+					"homepage/widgets.yaml":           "- search: {}\n",
+					"homepage/.hidden":                "ignore me",
+					"homepage/temp.tmp":               "ignore me too",
 				},
-				modify: func(dir string) {
-					_ = os.WriteFile(filepath.Join(dir, "homepage", "widgets.yaml"), []byte("- search: { updated: true }\n"), 0o644)
-				},
-				syncFn: func(d *SyncDaemon, dir string, sCtx ...ConfigSyncContext) error {
-					return d.SyncHomepageConfigToNomad(ctx, dir, sCtx...)
+				modifiedFiles: map[string]string{
+					"homepage/widgets.yaml": "- search: { updated: true }\n",
 				},
 				cacheKey:         "nomad/jobs/homepage",
 				wantInitialCalls: 1,
@@ -730,23 +721,15 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 				wantJobName:      "homepage",
 			},
 			{
-				name: "service",
-				setup: func(dir string) {
-					for rel, content := range map[string]string{
-						"services/voice/voice.yaml":   "model: small.en\n",
-						"services/haro/haro.yaml":     "enabled: true\n",
-						"services/hangar/hangar.yaml": "service_configs:\n  - rel_path: \"services/voice/voice.yaml\"\n    nomad_var: \"nomad/jobs/orin-voice\"\n    var_key: \"CONFIG_YAML\"\n  - rel_path: \"services/haro/haro.yaml\"\n    nomad_var: \"nomad/jobs/haro\"\n    var_key: \"CONFIG_YAML\"\n",
-					} {
-						full := filepath.Join(dir, rel)
-						_ = os.MkdirAll(filepath.Dir(full), 0o755)
-						_ = os.WriteFile(full, []byte(content), 0o644)
-					}
+				name:   "service",
+				target: "service",
+				initialFiles: map[string]string{
+					"services/voice/voice.yaml":   "model: small.en\n",
+					"services/haro/haro.yaml":     "enabled: true\n",
+					"services/hangar/hangar.yaml": "service_configs:\n  - rel_path: \"services/voice/voice.yaml\"\n    nomad_var: \"nomad/jobs/orin-voice\"\n    var_key: \"CONFIG_YAML\"\n  - rel_path: \"services/haro/haro.yaml\"\n    nomad_var: \"nomad/jobs/haro\"\n    var_key: \"CONFIG_YAML\"\n",
 				},
-				modify: func(dir string) {
-					_ = os.WriteFile(filepath.Join(dir, "services", "voice", "voice.yaml"), []byte("model: distil-small.en\n"), 0o644)
-				},
-				syncFn: func(d *SyncDaemon, dir string, sCtx ...ConfigSyncContext) error {
-					return d.SyncServiceConfigsToNomad(ctx, dir, sCtx...)
+				modifiedFiles: map[string]string{
+					"services/voice/voice.yaml": "model: distil-small.en\n",
 				},
 				cacheKey:         "nomad/jobs/orin-voice:CONFIG_YAML",
 				wantInitialCalls: 2,
@@ -761,10 +744,23 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				t.Parallel()
 				env := newNomadConfigSyncTestEnv(t)
-				tc.setup(env.configDir)
+				for _, dir := range tc.mkdirs {
+					if err := os.MkdirAll(filepath.Join(env.configDir, dir), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				for rel, content := range tc.initialFiles {
+					full := filepath.Join(env.configDir, rel)
+					if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
 
 				// (a) initial push
-				if err := tc.syncFn(env.daemon, env.configDir); err != nil {
+				if err := syncNomadConfig(ctx, env.daemon, tc.target, env.configDir); err != nil {
 					t.Fatalf("initial push failed: %v", err)
 				}
 				if len(env.nomadCalls()) != tc.wantInitialCalls {
@@ -772,13 +768,13 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 				}
 
 				// (b) cached second push
-				if err := tc.syncFn(env.daemon, env.configDir); err != nil || len(env.nomadCalls()) != tc.wantInitialCalls {
+				if err := syncNomadConfig(ctx, env.daemon, tc.target, env.configDir); err != nil || len(env.nomadCalls()) != tc.wantInitialCalls {
 					t.Fatalf("cached push calls = %d, want %d", len(env.nomadCalls()), tc.wantInitialCalls)
 				}
 
 				// (c) diff-gated untouched file
 				callsBeforeUntouched := len(env.nomadCalls())
-				if err := tc.syncFn(env.daemon, env.configDir, tc.untouchedCtx); err != nil || len(env.nomadCalls()) != callsBeforeUntouched {
+				if err := syncNomadConfig(ctx, env.daemon, tc.target, env.configDir, tc.untouchedCtx); err != nil || len(env.nomadCalls()) != callsBeforeUntouched {
 					t.Fatalf("untouched diff calls = %d, want %d", len(env.nomadCalls()), callsBeforeUntouched)
 				}
 				env.daemon.lastPushedConfigMu.Lock()
@@ -794,7 +790,7 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 					wantMod = 1
 				}
 				callsBeforeSame := len(env.nomadCalls())
-				if err := tc.syncFn(env.daemon, env.configDir, tc.sameContentCtx); err != nil || len(env.nomadCalls()) != callsBeforeSame+wantMod {
+				if err := syncNomadConfig(ctx, env.daemon, tc.target, env.configDir, tc.sameContentCtx); err != nil || len(env.nomadCalls()) != callsBeforeSame+wantMod {
 					t.Fatalf("same content with commitSHA calls = %d, want %d", len(env.nomadCalls()), callsBeforeSame+wantMod)
 				}
 				sameEvts := env.waitForEvents(t, wantMod)
@@ -802,17 +798,25 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 					t.Fatalf("expected deploy_started with commitSHA %s and expected_jobs [%s], got %+v", tc.sameContentCtx.CommitSHA, tc.wantJobName, sameEvts)
 				}
 				callsAfterFirstSame := len(env.nomadCalls())
-				if err := tc.syncFn(env.daemon, env.configDir, tc.sameContentCtx); err != nil || len(env.nomadCalls()) != callsAfterFirstSame {
+				if err := syncNomadConfig(ctx, env.daemon, tc.target, env.configDir, tc.sameContentCtx); err != nil || len(env.nomadCalls()) != callsAfterFirstSame {
 					t.Fatalf("repeated same content with same commitSHA calls = %d, want %d", len(env.nomadCalls()), callsAfterFirstSame)
 				}
-				if err := tc.syncFn(env.daemon, env.configDir); err != nil || len(env.nomadCalls()) != callsAfterFirstSame {
+				if err := syncNomadConfig(ctx, env.daemon, tc.target, env.configDir); err != nil || len(env.nomadCalls()) != callsAfterFirstSame {
 					t.Fatalf("periodic sync after commitSHA push calls = %d, want %d", len(env.nomadCalls()), callsAfterFirstSame)
 				}
 
 				// (e) diff-gated modified file
-				tc.modify(env.configDir)
+				for rel, content := range tc.modifiedFiles {
+					full := filepath.Join(env.configDir, rel)
+					if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
 				callsBeforeMod := len(env.nomadCalls())
-				if err := tc.syncFn(env.daemon, env.configDir, tc.modifiedCtx); err != nil {
+				if err := syncNomadConfig(ctx, env.daemon, tc.target, env.configDir, tc.modifiedCtx); err != nil {
 					t.Fatalf("modified sync error: %v", err)
 				}
 				calls := env.nomadCalls()
