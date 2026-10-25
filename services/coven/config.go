@@ -34,6 +34,9 @@ const DefaultOllamaNumCtx = 512
 // DefaultCustomSkillsDir is the default path to scanned custom skills.
 const DefaultCustomSkillsDir = "/config/custom-skills"
 
+// DefaultRulesDir is the default path to configuration rules.
+const DefaultRulesDir = "/config/rules"
+
 // DefaultConfigRepoOwner is the default owner of the configuration repository.
 const DefaultConfigRepoOwner = "azylman"
 
@@ -53,7 +56,7 @@ func ResolveConfigPath(fallbackPath string) string {
 	if fallbackPath != "" {
 		return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, fallbackPath)
 	}
-	return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, "config.yaml", "/share/aerial-config/config.yaml", "/data/config.yaml")
+	return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, "config.yaml", "/config/config.yaml", "/share/aerial-config/config.yaml", "/data/config.yaml")
 }
 
 // OllamaConfig defines Ollama embedding client settings.
@@ -72,6 +75,7 @@ type Config struct {
 	BrainLLMURL        string       `yaml:"brain_llm_url"`
 	Ollama             OllamaConfig `yaml:"ollama"`
 	CustomSkillsDir    string       `yaml:"custom_skills_dir"`
+	RulesDir           string       `yaml:"rules_dir"`
 	GitHubPAT          string       `yaml:"github_pat"`
 	ConfigRepoOwner    string       `yaml:"config_repo_owner"`
 	ConfigRepoName     string       `yaml:"config_repo_name"`
@@ -87,6 +91,7 @@ type MemoryYAMLConfig struct {
 	BrainLLMURL        string       `yaml:"brain_llm_url"`
 	Ollama             OllamaConfig `yaml:"ollama"`
 	CustomSkillsDir    string       `yaml:"custom_skills_dir"`
+	RulesDir           string       `yaml:"rules_dir"`
 	GitHubPAT          string       `yaml:"github_pat"`
 	ConfigRepoOwner    string       `yaml:"config_repo_owner"`
 	ConfigRepoName     string       `yaml:"config_repo_name"`
@@ -139,6 +144,11 @@ func resolveOllamaConfig(ycfg OllamaConfig) OllamaConfig {
 	}
 }
 
+// LoadConfig loads configuration from path using DATABASE_URL from the environment.
+func LoadConfig(path string) (*Config, error) {
+	return LoadConfigFile(path, os.Getenv("DATABASE_URL"))
+}
+
 // LoadConfigFile loads and validates the config from path and environment variables.
 // The config file is optional: if path does not exist, defaults and environment variables are used.
 func LoadConfigFile(path string, dbURL string) (*Config, error) {
@@ -168,6 +178,7 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 	)
 
 	customSkillsDir := resolveFirstNonEmpty(os.Getenv("CUSTOM_SKILLS_DIR"), ycfg.CustomSkillsDir, DefaultCustomSkillsDir)
+	rulesDir := resolveFirstNonEmpty(os.Getenv("RULES_DIR"), ycfg.RulesDir, DefaultRulesDir)
 	gitHubPAT := resolveFirstNonEmpty(os.Getenv("GITHUB_PAT"), ycfg.GitHubPAT)
 	configRepoOwner := resolveFirstNonEmpty(os.Getenv("CONFIG_REPO_OWNER"), ycfg.ConfigRepoOwner, DefaultConfigRepoOwner)
 	configRepoName := resolveFirstNonEmpty(os.Getenv("CONFIG_REPO_NAME"), ycfg.ConfigRepoName, DefaultConfigRepoName)
@@ -184,6 +195,7 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		BrainURL:           brainURL,
 		BrainLLMURL:        brainLLMURL,
 		CustomSkillsDir:    customSkillsDir,
+		RulesDir:           rulesDir,
 		GitHubPAT:          gitHubPAT,
 		ConfigRepoOwner:    configRepoOwner,
 		ConfigRepoName:     configRepoName,

@@ -364,6 +364,20 @@ func IsCoreAerialContainer(c DockerContainerJSON) bool {
 	return true
 }
 
+// containsWordToken returns true if token matches any discrete word token in s
+// when splitting on non-alphanumeric/non-hyphen characters.
+func containsWordToken(s, token string) bool {
+	tokens := strings.FieldsFunc(s, func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-')
+	})
+	for _, tok := range tokens {
+		if strings.EqualFold(tok, token) {
+			return true
+		}
+	}
+	return false
+}
+
 // ExtractServiceNameFromJobName resolves a microservice name from a GitHub Actions job name.
 func ExtractServiceNameFromJobName(jobName string) string {
 	lower := strings.ToLower(jobName)
@@ -372,9 +386,9 @@ func ExtractServiceNameFromJobName(jobName string) string {
 		"dashboard",
 		"proxy",
 		"haro",
-		"scheduler-mcp",
 		"coven",
-		"memory-mcp",
+		"vanadis",
+		"roborev-runner",
 		"discord-mcp",
 		"docker-mcp",
 		"github-mcp",
@@ -390,6 +404,9 @@ func ExtractServiceNameFromJobName(jobName string) string {
 		if strings.Contains(lower, s) {
 			return s
 		}
+	}
+	if containsWordToken(lower, "eri") {
+		return "eri"
 	}
 	if strings.Contains(lower, "unit test") || strings.Contains(lower, "test") {
 		return "unit-tests"

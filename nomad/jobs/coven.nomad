@@ -99,12 +99,6 @@ EOH
         }
       }
 
-      service {
-        name     = "memory-mcp"
-        port     = "http"
-        provider = "nomad"
-      }
-
       resources {
         cpu        = 100
         memory     = 64

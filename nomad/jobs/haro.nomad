@@ -55,10 +55,6 @@ job "haro" {
 {{- with nomadVar "nomad/jobs/haro" -}}
 {{- if .CONFIG_YAML -}}{{- .CONFIG_YAML -}}{{- end -}}
 {{- end -}}
-{{- else if nomadVarExists "nomad/jobs/scheduler-mcp" -}}
-{{- with nomadVar "nomad/jobs/scheduler-mcp" -}}
-{{- if .CONFIG_YAML -}}{{- .CONFIG_YAML -}}{{- end -}}
-{{- end -}}
 {{- end -}}
 EOH
         destination = "local/config.yaml"
@@ -94,12 +90,6 @@ EOH
             ignore_warnings = false
           }
         }
-      }
-
-      service {
-        name     = "scheduler-mcp"
-        port     = "http"
-        provider = "nomad"
       }
 
       resources {

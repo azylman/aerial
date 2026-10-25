@@ -3060,7 +3060,7 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) { // t.Run(
 		},
 		{
 			name:         "build changes",
-			gitScript:    mockGitScript{beforeSHA: "sha_before", afterSHA: "sha_after", nameOnly: "brain/main.go\nDockerfile\n"},
+			gitScript:    mockGitScript{beforeSHA: "sha_before", afterSHA: "sha_after", nameOnly: "services/eri/main.go\nDockerfile\n"},
 			req:          GitPushEventRequest{Repo: "aerial", Ref: "refs/heads/main"},
 			wantCode:     http.StatusOK,
 			wantBuilding: true,
@@ -3095,7 +3095,7 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) { // t.Run(
 		},
 		{
 			name:      "mixed build and nomad deferral",
-			gitScript: mockGitScript{beforeSHA: "sha_before", afterSHA: "sha_after", nameOnly: "vanadis/Dockerfile\nnomad/jobs/vanadis.nomad\nnomad/jobs/coverage-ingest.nomad\n", nameStatus: "A\tnomad/jobs/vanadis.nomad\nM\tnomad/jobs/coverage-ingest.nomad\n"},
+			gitScript: mockGitScript{beforeSHA: "sha_before", afterSHA: "sha_after", nameOnly: "services/vanadis/Dockerfile\nnomad/jobs/vanadis.nomad\nnomad/jobs/coverage-ingest.nomad\n", nameStatus: "A\tnomad/jobs/vanadis.nomad\nM\tnomad/jobs/coverage-ingest.nomad\n"},
 			jobFiles: map[string]string{
 				"nomad/jobs/vanadis.nomad":         `job "vanadis" { task "vanadis" { config { image = "ghcr.io/azylman/aerial-vanadis:${var.image_tag}" } } }`,
 				"nomad/jobs/coverage-ingest.nomad": `job "coverage-ingest" { task "flush" { config { image = "golang:1.27.1-alpine" } } }`,
@@ -3129,7 +3129,7 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) { // t.Run(
 			gitScript: mockGitScript{
 				beforeSHA:  "sha_rename_before",
 				afterSHA:   "sha_rename_after",
-				nameOnly:   "coven/Dockerfile\nnomad/jobs/memory-mcp.nomad\nnomad/jobs/coven.nomad\n",
+				nameOnly:   "services/coven/Dockerfile\nnomad/jobs/memory-mcp.nomad\nnomad/jobs/coven.nomad\n",
 				nameStatus: "D\tnomad/jobs/memory-mcp.nomad\nA\tnomad/jobs/coven.nomad\n",
 			},
 			jobFiles: map[string]string{
@@ -3146,7 +3146,7 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) { // t.Run(
 		},
 		{
 			name:             "migration change runs db-migrate immediately",
-			gitScript:        mockGitScript{beforeSHA: "sha_before_mig", afterSHA: "sha_after_mig", nameOnly: "brain/pkg/db/migrations/20261016182900_add_started_at.sql\nbrain/pkg/db/vanadis.go\n", nameStatus: "A\tbrain/pkg/db/migrations/20261016182900_add_started_at.sql\nM\tbrain/pkg/db/vanadis.go\n"},
+			gitScript:        mockGitScript{beforeSHA: "sha_before_mig", afterSHA: "sha_after_mig", nameOnly: "services/eri/pkg/db/migrations/20261016182900_add_started_at.sql\nservices/eri/pkg/db/vanadis.go\n", nameStatus: "A\tservices/eri/pkg/db/migrations/20261016182900_add_started_at.sql\nM\tservices/eri/pkg/db/vanadis.go\n"},
 			jobFiles:         map[string]string{"nomad/jobs/db-migrate.nomad": `job "db-migrate" { type = "batch" task "atlas" { config { image = "arigaio/atlas:1.3.3" } } }`},
 			req:              GitPushEventRequest{Repo: "azylman/aerial", Ref: "refs/heads/main", Commit: "sha_after_mig", PRNumber: 751, TargetID: "1560698400780062884"},
 			wantCode:         http.StatusOK,

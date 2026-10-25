@@ -108,7 +108,7 @@ func main() {
 	})))
 
 	resolvedPath := ResolveConfigPath(configPath)
-	cfg, err := LoadConfigFile(resolvedPath, os.Getenv("DATABASE_URL"))
+	cfg, err := LoadConfig(resolvedPath)
 	if err != nil {
 		exitFn("Fatal configuration error: %v", err)
 		return

@@ -602,9 +602,9 @@ func JobHasContainerBuildChanges(jobSpec string, changedFiles []string) bool {
 			continue
 		}
 		svc := strings.TrimPrefix(path.Base(stripImageTag(strings.ToLower(strings.TrimSpace(img)))), "aerial-")
-		prefixes := []string{"services/" + svc + "/", "mcp/" + svc + "/", svc + "/"}
+		prefixes := []string{"services/" + svc + "/", "mcp/" + svc + "/"}
 		if svc == "docs" {
-			prefixes = append(prefixes, "services/docs-service/", "docs-service/")
+			prefixes = append(prefixes, "services/docs-service/")
 		}
 		if serviceBuildDependsOnPkg(svc) {
 			prefixes = append(prefixes, "pkg/")
@@ -890,24 +890,6 @@ var CoreBuildPaths = []string{
 	"services/",
 	"mcp/",
 	"pkg/",
-	"coven/",
-	"haro/",
-	"eri/",
-	"brain/",
-	"scheduler-mcp/",
-	"memory-mcp/",
-	"discord-mcp/",
-	"docker-mcp/",
-	"github-mcp/",
-	"nomad-mcp/",
-	"infisical-mcp/",
-	"dashboard/",
-	"docs-service/",
-	"proxy/",
-	"sidecars/",
-	"webhooks-router/",
-	"vanadis/",
-	"roborev-runner/",
 	"Dockerfile",
 	"go.mod",
 	"go.sum",
