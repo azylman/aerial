@@ -27,10 +27,7 @@ var (
 // If fallbackPath does not exist and legacyConfigPath exists, it falls back to legacyConfigPath.
 func ResolveConfigPath(fallbackPath string) string {
 	if fallbackPath != "" {
-		if _, err := os.Stat(legacyConfigPath); err == nil {
-			return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, legacyConfigPath, fallbackPath)
-		}
-		return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, fallbackPath)
+		return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, fallbackPath, legacyConfigPath)
 	}
 	return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, defaultConfigPath, legacyConfigPath, "config.yaml")
 }

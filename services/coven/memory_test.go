@@ -1094,7 +1094,7 @@ func TestOllamaClient_GenerateEmbedding(t *testing.T) {
 				BaseURL:     server.URL,
 				QueryPrefix: tc.prefix,
 			})
-			client.retryDelay = tc.retryDelay
+			client.SetRetryDelay(tc.retryDelay)
 
 			ctx := context.Background()
 			if tc.cancelCtx {

@@ -10,23 +10,27 @@ func TestResolveConfigPath(t *testing.T) {
 	tmpDir := t.TempDir()
 	validLocal, emptyLocal, nonExistent := filepath.Join(tmpDir, "valid.yaml"), filepath.Join(tmpDir, "empty.yaml"), filepath.Join(tmpDir, "missing.yaml")
 	legacyFile := filepath.Join(tmpDir, "legacy.yaml")
+	fallbackFile := filepath.Join(tmpDir, "haro.yaml")
 	_ = os.WriteFile(validLocal, []byte("port: '4004'\n"), 0o644)
 	_ = os.WriteFile(emptyLocal, []byte{}, 0o644)
 	_ = os.WriteFile(legacyFile, []byte("port: '4004'\n"), 0o644)
+	_ = os.WriteFile(fallbackFile, []byte("port: '4004'\n"), 0o644)
 
 	fallback := "/config/haro.yaml"
 	tests := []struct {
-		name       string
-		envVal     string
-		localPath  string
-		legacyPath string
-		want       string
+		name         string
+		envVal       string
+		localPath    string
+		legacyPath   string
+		fallbackPath string
+		want         string
 	}{
-		{"env override takes precedence", "/custom/override.yaml", validLocal, legacyFile, "/custom/override.yaml"},
-		{"local config non-empty exists", "", validLocal, legacyFile, validLocal},
-		{"local config empty falls back to legacy", "", emptyLocal, legacyFile, legacyFile},
-		{"local config missing falls back to legacy", "", nonExistent, legacyFile, legacyFile},
-		{"legacy missing falls back to default", "", nonExistent, nonExistent, fallback},
+		{"env override takes precedence", "/custom/override.yaml", validLocal, legacyFile, fallback, "/custom/override.yaml"},
+		{"local config non-empty exists", "", validLocal, legacyFile, fallback, validLocal},
+		{"local config empty falls back to legacy", "", emptyLocal, legacyFile, fallback, legacyFile},
+		{"local config missing falls back to legacy", "", nonExistent, legacyFile, fallback, legacyFile},
+		{"legacy missing falls back to default", "", nonExistent, nonExistent, fallback, fallback},
+		{"fallback exists takes precedence over legacy", "", nonExistent, legacyFile, fallbackFile, fallbackFile},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -40,8 +44,12 @@ func TestResolveConfigPath(t *testing.T) {
 				legacyConfigPath = oldLegacy
 			}()
 
-			if got := ResolveConfigPath(fallback); got != tc.want {
-				t.Errorf("ResolveConfigPath(%q) = %q, want %q", fallback, got, tc.want)
+			targetFallback := tc.fallbackPath
+			if targetFallback == "" {
+				targetFallback = fallback
+			}
+			if got := ResolveConfigPath(targetFallback); got != tc.want {
+				t.Errorf("ResolveConfigPath(%q) = %q, want %q", targetFallback, got, tc.want)
 			}
 		})
 	}

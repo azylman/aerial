@@ -21,8 +21,6 @@ type Client struct {
 	model       string
 	queryPrefix string
 	numCtx      int
-	httpClient  *http.Client
-	retryDelay  time.Duration
 }
 
 // NewOllamaClient creates a new Client configured from OllamaConfig.
@@ -55,8 +53,6 @@ func NewOllamaClient(cfg *OllamaConfig) *Client {
 		model:       model,
 		queryPrefix: cfg.QueryPrefix,
 		numCtx:      numCtx,
-		httpClient:  httpClient,
-		retryDelay:  retryDelay,
 	}
 	c.Client = ollama.NewDynamicClient(func() ollama.Config {
 		return ollama.Config{
@@ -80,10 +76,6 @@ type embeddingRequest struct {
 // GenerateEmbedding generates an embedding vector for the provided text.
 // If isQuery is true and queryPrefix is configured, prepends the query prefix to the prompt.
 func (c *Client) GenerateEmbedding(ctx context.Context, text string, isQuery bool, maxRetries int) ([]float32, error) {
-	if c.httpClient != nil {
-		c.Client.SetHTTPClient(c.httpClient)
-	}
-	c.Client.SetRetryDelay(c.retryDelay)
 	return c.Client.GenerateEmbedding(ctx, text, isQuery, maxRetries)
 }
 
