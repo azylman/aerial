@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
@@ -775,7 +776,7 @@ func TestHandleInternalLLM_And_MemoryRetriever(t *testing.T) {
 			_, _ = w.Write([]byte("{bad"))
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"context": "<retrieved_memory>ok</retrieved_memory>"})
+		httpkit.WriteJSON(w, http.StatusOK, map[string]string{"context": "<retrieved_memory>ok</retrieved_memory>"})
 	}))
 	defer memSrv.Close()
 
@@ -823,25 +824,25 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 		t.Errorf("Expected 404 from deleted /transcripts, got %d", w.Code)
 	}
 
-	writeJSON(httptest.NewRecorder(), http.StatusOK, make(chan int))
+	httpkit.WriteJSON(httptest.NewRecorder(), http.StatusOK, make(chan int))
 
 	t.Setenv("GOCOVERDIR", "")
 	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/debug/coverage/flush", nil); w.Code != http.StatusOK {
 		t.Errorf("expected 200 OK without GOCOVERDIR, got %d", w.Code)
 	}
 
-	oldFn := writeCountersDirFn
-	defer func() { writeCountersDirFn = oldFn }()
-	oldMetaFn := writeMetaDirFn
-	defer func() { writeMetaDirFn = oldMetaFn }()
+	oldFn := httpkit.WriteCountersDirFn
+	defer func() { httpkit.WriteCountersDirFn = oldFn }()
+	oldMetaFn := httpkit.WriteMetaDirFn
+	defer func() { httpkit.WriteMetaDirFn = oldMetaFn }()
 
 	t.Setenv("GOCOVERDIR", t.TempDir())
 	called, metaCalled := false, false
-	writeCountersDirFn = func(dir string) error {
+	httpkit.WriteCountersDirFn = func(dir string) error {
 		called = true
 		return nil
 	}
-	writeMetaDirFn = func(dir string) error {
+	httpkit.WriteMetaDirFn = func(dir string) error {
 		metaCalled = true
 		return nil
 	}
@@ -850,12 +851,12 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 		t.Errorf("expected 200 OK with GOCOVERDIR and mocks called, got %d", w.Code)
 	}
 
-	writeMetaDirFn = func(dir string) error { return errors.New("simulated meta flush error") }
+	httpkit.WriteMetaDirFn = func(dir string) error { return errors.New("simulated meta flush error") }
 	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/debug/coverage/flush", nil); w.Code != http.StatusOK {
 		t.Errorf("expected 200 OK when meta flush errors, got %d", w.Code)
 	}
 
-	writeCountersDirFn = func(dir string) error { return errors.New("simulated flush error") }
+	httpkit.WriteCountersDirFn = func(dir string) error { return errors.New("simulated flush error") }
 	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/debug/coverage/flush", nil); w.Code != http.StatusInternalServerError {
 		t.Errorf("expected 500 on flush error, got %d", w.Code)
 	}

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/azylman/aerial/pkg/pgutil"
 )
 
 const (
@@ -57,116 +59,6 @@ func (m Message) HasStructuredFields() bool {
 		len(m.Mentions) > 0 || len(m.MentionUserIDs) > 0 || len(m.MentionRoleIDs) > 0 ||
 		m.ReplyingToAuthor != "" || m.ReplyingToContent != "" || len(m.Attachments) > 0 ||
 		m.Model != "" || m.Silent || m.Ephemeral != nil
-}
-
-type pgStringSlice struct{ dest *[]string }
-
-func (s *pgStringSlice) Scan(src any) error {
-	vals, err := parsePGTextArray(src)
-	if err != nil {
-		return err
-	}
-	*s.dest = vals
-	return nil
-}
-
-func formatPGTextArray(elems []string) string {
-	if len(elems) == 0 {
-		return "{}"
-	}
-	var sb strings.Builder
-	sb.WriteByte('{')
-	for i, s := range elems {
-		if i > 0 {
-			sb.WriteByte(',')
-		}
-		sb.WriteByte('"')
-		for _, r := range s {
-			if r == '\\' || r == '"' {
-				sb.WriteByte('\\')
-			}
-			sb.WriteRune(r)
-		}
-		sb.WriteByte('"')
-	}
-	sb.WriteByte('}')
-	return sb.String()
-}
-
-func extractArrayString(src any) (content string, empty bool, err error) {
-	if src == nil {
-		return "", true, nil
-	}
-	var str string
-	switch v := src.(type) {
-	case string:
-		str = v
-	case []byte:
-		str = string(v)
-	default:
-		return "", false, fmt.Errorf("cannot scan type %T into pgStringSlice", src)
-	}
-	str = strings.TrimSpace(str)
-	if str == "" || str == "{}" || str == "NULL" {
-		return "", true, nil
-	}
-	if !strings.HasPrefix(str, "{") || !strings.HasSuffix(str, "}") {
-		return "", false, fmt.Errorf("malformed postgres array: %q", str)
-	}
-	return str[1 : len(str)-1], false, nil
-}
-
-func parsePGArrayContent(content string) ([]string, error) {
-	if len(content) == 0 {
-		return []string{}, nil
-	}
-	var res []string
-	var cur strings.Builder
-	inQuotes, escaped, hasItem := false, false, false
-
-	for i := 0; i < len(content); i++ {
-		ch := content[i]
-		if escaped {
-			cur.WriteByte(ch)
-			escaped = false
-			continue
-		}
-		if ch == '\\' {
-			escaped = true
-			continue
-		}
-		if ch == '"' {
-			inQuotes = !inQuotes
-			hasItem = true
-			continue
-		}
-		if ch == ',' && !inQuotes {
-			res = append(res, cur.String())
-			cur.Reset()
-			hasItem = false
-			continue
-		}
-		cur.WriteByte(ch)
-		hasItem = true
-	}
-	if inQuotes || escaped {
-		return nil, fmt.Errorf("unclosed quote or escape in postgres array")
-	}
-	if hasItem || len(res) > 0 {
-		res = append(res, cur.String())
-	}
-	return res, nil
-}
-
-func parsePGTextArray(src any) ([]string, error) {
-	if slice, ok := src.([]string); ok {
-		return slice, nil
-	}
-	content, empty, err := extractArrayString(src)
-	if err != nil || empty {
-		return []string{}, err
-	}
-	return parsePGArrayContent(content)
 }
 
 func unescapeUserRequest(s string) string {
@@ -255,8 +147,8 @@ func (s *SQLStore) InsertMessage(ctx context.Context, msg Message) (err error) {
 		msg.Content, msg.Summary, msg.Status, msg.RetryCount, msg.RestartCount,
 		msg.Effort, msg.ErrorMessage, msg.ResponseText, msg.ScheduleRunID,
 		msg.ChannelID, msg.ChannelName, msg.ThreadName, msg.AuthorGlobalName,
-		msg.AuthorBot, msg.IsAdmin, formatPGTextArray(msg.Mentions), formatPGTextArray(msg.MentionUserIDs),
-		formatPGTextArray(msg.MentionRoleIDs), msg.ReplyingToAuthor, msg.ReplyingToContent, formatPGTextArray(msg.Attachments),
+		msg.AuthorBot, msg.IsAdmin, pgutil.FormatPGTextArray(msg.Mentions), pgutil.FormatPGTextArray(msg.MentionUserIDs),
+		pgutil.FormatPGTextArray(msg.MentionRoleIDs), msg.ReplyingToAuthor, msg.ReplyingToContent, pgutil.FormatPGTextArray(msg.Attachments),
 		msg.Model, msg.Silent, msg.Ephemeral, msg.CreatedAt, msg.UpdatedAt,
 	)
 	return err
@@ -271,11 +163,11 @@ func scanMessage(scanner interface{ Scan(dest ...any) error }, autoCleanSummary 
 		&m.Status, &m.RetryCount, &m.RestartCount, &m.Effort, &errMsg, &respText, &schedID,
 		&m.ChannelID, &m.ChannelName, &m.ThreadName, &m.AuthorGlobalName,
 		&m.AuthorBot, &m.IsAdmin,
-		&pgStringSlice{dest: &m.Mentions},
-		&pgStringSlice{dest: &m.MentionUserIDs},
-		&pgStringSlice{dest: &m.MentionRoleIDs},
+		&pgutil.PGStringSlice{Dest: &m.Mentions},
+		&pgutil.PGStringSlice{Dest: &m.MentionUserIDs},
+		&pgutil.PGStringSlice{Dest: &m.MentionRoleIDs},
 		&m.ReplyingToAuthor, &m.ReplyingToContent,
-		&pgStringSlice{dest: &m.Attachments},
+		&pgutil.PGStringSlice{Dest: &m.Attachments},
 		&m.Model, &m.Silent, &ephemeral,
 		&m.CreatedAt, &m.UpdatedAt,
 	); err != nil {

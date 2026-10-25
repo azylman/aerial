@@ -4,7 +4,16 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/azylman/aerial/pkg/pgutil"
 )
+
+var (
+	formatPGTextArray = pgutil.FormatPGTextArray
+	parsePGTextArray  = pgutil.ParsePGTextArray
+)
+
+type pgStringSlice = pgutil.PGStringSlice
 
 func TestMessage_HasStructuredFields(t *testing.T) {
 	if (Message{}).HasStructuredFields() {
@@ -82,7 +91,7 @@ func TestPGTextArray_FormatAndParse(t *testing.T) {
 
 func TestPGStringSlice_Scan(t *testing.T) {
 	var target []string
-	scanner := &pgStringSlice{dest: &target}
+	scanner := &pgStringSlice{Dest: &target}
 
 	for _, tc := range []struct {
 		name    string

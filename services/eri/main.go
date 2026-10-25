@@ -16,7 +16,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime/coverage"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,6 +25,7 @@ import (
 	"time"
 	_ "time/tzdata"
 
+	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/services/eri/pkg/ambient"
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
@@ -57,18 +57,8 @@ type PromptRequest struct {
 	SkipIfActive bool   `json:"skip_if_active,omitempty"`
 }
 
-func writeJSON(w http.ResponseWriter, status int, data any) {
-	if w.Header().Get("Content-Type") == "" {
-		w.Header().Set("Content-Type", "application/json")
-	}
-	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(data); err != nil {
-		log.Printf("[HTTP] Failed to encode JSON response: %v", err)
-	}
-}
-
 func writeErr(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
+	httpkit.WriteJSON(w, status, map[string]string{"error": msg})
 }
 
 func writeStoreErr(w http.ResponseWriter, entity string, err error) {
@@ -157,7 +147,7 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 		if active {
-			writeJSON(w, http.StatusOK, map[string]string{
+			httpkit.WriteJSON(w, http.StatusOK, map[string]string{
 				"status":     "skipped_active",
 				"channel_id": channelID,
 				"session_id": checkID,
@@ -213,7 +203,7 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			pool.Enqueue(msg)
 		}
 
-		writeJSON(w, http.StatusAccepted, map[string]string{
+		httpkit.WriteJSON(w, http.StatusAccepted, map[string]string{
 			"status":     "accepted",
 			"channel_id": channelID,
 			"session_id": sessionID,
@@ -237,11 +227,11 @@ func readPostJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 		log.Printf("[HTTP] Warning closing request body: %v", closeErr)
 	}
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Failed to read request body"})
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "Failed to read request body"})
 		return false
 	}
 	if err := json.Unmarshal(body, dst); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON payload"})
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON payload"})
 		return false
 	}
 	return true
@@ -312,7 +302,7 @@ func handleDirectMessage(pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "sent", "channel_id": targetID})
+		httpkit.WriteJSON(w, http.StatusOK, map[string]interface{}{"status": "sent", "channel_id": targetID})
 	}
 }
 
@@ -343,7 +333,7 @@ func handleStatusWidget(pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok", "message_id": msgID})
+		httpkit.WriteJSON(w, http.StatusOK, map[string]interface{}{"status": "ok", "message_id": msgID})
 	}
 }
 
@@ -367,7 +357,7 @@ func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 		reqStart := time.Now()
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", "POST")
-			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
+			httpkit.WriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "Method not allowed"})
 			return
 		}
 
@@ -376,7 +366,7 @@ func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 		if strings.TrimSpace(req.Prompt) == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{
+			httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{
 				"error": "Invalid payload: 'prompt' field is required and cannot be empty",
 			})
 			return
@@ -390,13 +380,13 @@ func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 			sessionID = strings.TrimSpace(req.ConversationID)
 		}
 		if sessionID == "" {
-			writeJSON(w, http.StatusBadRequest, map[string]string{
+			httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{
 				"error": "Invalid payload: 'session_id' (or 'node_id' / 'conversation_id') is required to identify the device",
 			})
 			return
 		}
 		if len(sessionID) > 128 || strings.ContainsAny(sessionID, "\r\n\x00") {
-			writeJSON(w, http.StatusBadRequest, map[string]string{
+			httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{
 				"error": "Invalid payload: device identifier exceeds 128 characters or contains invalid characters",
 			})
 			return
@@ -407,7 +397,7 @@ func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 		if isSSE {
 			flusher, ok := w.(http.Flusher)
 			if !ok {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Streaming not supported by client connection"})
+				httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "Streaming not supported by client connection"})
 				return
 			}
 
@@ -482,7 +472,7 @@ func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 		// Standard JSON response mode
 		if pool == nil {
 			metrics.RecordVoiceTTFR("json", "error", time.Since(reqStart))
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "worker pool is uninitialized"})
+			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "worker pool is uninitialized"})
 			return
 		}
 
@@ -490,12 +480,12 @@ func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 		if turnErr != nil {
 			metrics.RecordVoiceTTFR("json", "error", time.Since(reqStart))
 			sanitizedErr := sanitizer.SanitizeString(turnErr.Error())
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": sanitizedErr})
+			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": sanitizedErr})
 			return
 		}
 
 		metrics.RecordVoiceTTFR("json", "success", time.Since(reqStart))
-		writeJSON(w, http.StatusOK, VoiceAskResponse{
+		httpkit.WriteJSON(w, http.StatusOK, VoiceAskResponse{
 			Reply:          reply,
 			ConversationID: convID,
 			SessionID:      convID,
@@ -558,7 +548,7 @@ func handleTranscriptSearch(store db.TranscriptStore, embedder transcript.Embedd
 			return
 		}
 
-		writeJSON(w, http.StatusOK, res)
+		httpkit.WriteJSON(w, http.StatusOK, res)
 	}
 }
 
@@ -574,7 +564,7 @@ func handleTranscriptStats(store db.TranscriptStore) http.HandlerFunc {
 			return
 		}
 
-		writeJSON(w, http.StatusOK, map[string]any{
+		httpkit.WriteJSON(w, http.StatusOK, map[string]any{
 			"total_sessions": len(syncStates),
 			"status":         "ok",
 		})
@@ -621,7 +611,7 @@ func handleTranscriptSteps(store db.TranscriptStore) http.HandlerFunc {
 			return
 		}
 
-		writeJSON(w, http.StatusOK, res)
+		httpkit.WriteJSON(w, http.StatusOK, res)
 	}
 }
 
@@ -657,7 +647,7 @@ func handleInternalLLM(llmFn func(context.Context, string, string) (string, erro
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"response": resp})
+		httpkit.WriteJSON(w, http.StatusOK, map[string]string{"response": resp})
 	}
 }
 
@@ -790,7 +780,7 @@ func handleTasks(store db.Store) http.HandlerFunc {
 				cached := cache.tasks
 				cache.mu.Unlock()
 				setNoCacheJSONHeaders(w)
-				writeJSON(w, http.StatusOK, TasksResponse{
+				httpkit.WriteJSON(w, http.StatusOK, TasksResponse{
 					Status: "ok",
 					Total:  len(cached),
 					Tasks:  cached,
@@ -822,7 +812,7 @@ func handleTasks(store db.Store) http.HandlerFunc {
 		}
 
 		setNoCacheJSONHeaders(w)
-		writeJSON(w, http.StatusOK, TasksResponse{
+		httpkit.WriteJSON(w, http.StatusOK, TasksResponse{
 			Status: "ok",
 			Total:  len(tasks),
 			Tasks:  tasks,
@@ -881,11 +871,6 @@ func metricsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-var (
-	writeCountersDirFn = coverage.WriteCountersDir
-	writeMetaDirFn     = coverage.WriteMetaDir
-)
-
 func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, embedder transcript.EmbedderFunc, searchPaths ...string) *http.ServeMux {
 	_ = searchPaths
 	mux := http.NewServeMux()
@@ -907,22 +892,7 @@ func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, embedder 
 		llmFn = pool.LLMFunc()
 	}
 	mux.HandleFunc("/internal/llm", handleInternalLLM(llmFn))
-	mux.HandleFunc("/debug/coverage/flush", func(w http.ResponseWriter, r *http.Request) {
-		if dir := os.Getenv("GOCOVERDIR"); dir != "" {
-			if err := writeMetaDirFn(dir); err != nil {
-				log.Printf("[brain] coverage meta flush error: %v", err)
-			}
-			if err := writeCountersDirFn(dir); err != nil {
-				log.Printf("[brain] coverage flush error: %v", err)
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-		}
-		w.WriteHeader(http.StatusOK)
-		if _, err := w.Write([]byte("ok\n")); err != nil {
-			log.Printf("[brain] failed to write coverage flush response: %v", err)
-		}
-	})
+	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("eri", false))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)

@@ -26,7 +26,7 @@ var (
 	reJWT = regexp.MustCompile(`\beyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}`)
 
 	// HTTP Basic & Bearer Auth Headers and x-access-token
-	reHTTPAuth = regexp.MustCompile(`(?i)\b(?:basic\s+[a-zA-Z0-9+/]{8,}={1,2}|basic\s+[a-zA-Z0-9+/]{10,}|basic\s+[a-zA-Z0-9+/=]+|bearer\s+[a-zA-Z0-9_\-\.]{12,})`)
+	reHTTPAuth = regexp.MustCompile(`(?i)\b(?:basic\s+[a-zA-Z0-9+/]{8,}={1,2}|basic\s+[a-zA-Z0-9+/]{10,}|bearer\s+[a-zA-Z0-9_\-\.]{12,})`)
 	reXAccess  = regexp.MustCompile(`(?i)x-access-token:[^@\s]+`)
 
 	// Universal Database & Network URIs with embedded credentials (non-greedy password capture)

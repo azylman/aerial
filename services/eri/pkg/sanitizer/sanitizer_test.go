@@ -4,15 +4,13 @@ import (
 	"strings"
 	"testing"
 
+	pkgsanitizer "github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 )
 
 // ResetSensitiveTokens clears all registered sensitive tokens (primarily for test isolation).
 func ResetSensitiveTokens() {
-	sensitiveTokensMu.Lock()
-	defer sensitiveTokensMu.Unlock()
-	empty := make([]string, 0)
-	sensitiveTokensPtr.Store(&empty)
+	pkgsanitizer.ResetSensitiveTokens()
 }
 
 func TestSanitizer_RegisterConfigTokens(t *testing.T) {
