@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/httpkit"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -260,7 +262,7 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 			var wr StatusWidgetRequest
 			_ = json.NewDecoder(r.Body).Decode(&wr)
 			widgetDispatched = append(widgetDispatched, wr)
-			writeJSON(w, http.StatusOK, map[string]string{"message_id": "msg-new-widget-1"})
+			httpkit.WriteJSON(w, http.StatusOK, map[string]string{"message_id": "msg-new-widget-1"})
 			return
 		}
 		http.NotFound(w, r)

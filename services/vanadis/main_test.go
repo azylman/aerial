@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/httpkit"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -886,7 +888,7 @@ func TestExecuteChunkWorkerAndProcessExecuteChunk(t *testing.T) {
 	memStore.updateBuildErr = errors.New("build fail update err")
 	_ = NewVanadisServer(Config{BrainURL: closedURL}, memStore, nil, nil).ProcessExecuteChunk(ctx, "b-run", 1, true)
 	memStore.updateBuildErr = nil
-	writeJSON(httptest.NewRecorder(), http.StatusOK, make(chan int))
+	httpkit.WriteJSON(httptest.NewRecorder(), http.StatusOK, make(chan int))
 }
 
 func TestHTTPEndpoints(t *testing.T) {
@@ -908,11 +910,11 @@ func TestHTTPEndpoints(t *testing.T) {
 		checkCode(http.MethodGet, p, nil, http.StatusOK)
 	}
 	t.Setenv("GOCOVERDIR", t.TempDir())
-	origMeta, origCounters := writeMetaDirFn, writeCountersDirFn
-	defer func() { writeMetaDirFn, writeCountersDirFn = origMeta, origCounters }()
-	writeMetaDirFn, writeCountersDirFn = func(string) error { return errors.New("meta err") }, func(string) error { return nil }
+	origMeta, origCounters := httpkit.WriteMetaDirFn, httpkit.WriteCountersDirFn
+	defer func() { httpkit.WriteMetaDirFn, httpkit.WriteCountersDirFn = origMeta, origCounters }()
+	httpkit.WriteMetaDirFn, httpkit.WriteCountersDirFn = func(string) error { return errors.New("meta err") }, func(string) error { return nil }
 	checkCode(http.MethodPost, "/debug/coverage/flush", nil, http.StatusOK)
-	writeCountersDirFn = func(string) error { return errors.New("counters err") }
+	httpkit.WriteCountersDirFn = func(string) error { return errors.New("counters err") }
 	checkCode(http.MethodGet, "/debug/coverage/flush", nil, http.StatusInternalServerError)
 	srv.SetStore(nil)
 	checkCode(http.MethodPost, "/builds", strings.NewReader(`{}`), http.StatusInternalServerError)

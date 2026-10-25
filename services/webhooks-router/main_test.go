@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/httpkit"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -3886,11 +3888,11 @@ func TestCrashAlerts(t *testing.T) {
 }
 
 func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
-	oldCountersFn := writeCountersDirFn
-	oldMetaFn := writeMetaDirFn
+	oldCountersFn := httpkit.WriteCountersDirFn
+	oldMetaFn := httpkit.WriteMetaDirFn
 	t.Cleanup(func() {
-		writeCountersDirFn = oldCountersFn
-		writeMetaDirFn = oldMetaFn
+		httpkit.WriteCountersDirFn = oldCountersFn
+		httpkit.WriteMetaDirFn = oldMetaFn
 	})
 
 	RecordUniqueSkipped("")
@@ -3962,10 +3964,10 @@ func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
 			} else {
 				t.Setenv("GOCOVERDIR", tc.gocoverdir)
 			}
-			writeMetaDirFn = func(dir string) error {
+			httpkit.WriteMetaDirFn = func(dir string) error {
 				return tc.mockMetaErr
 			}
-			writeCountersDirFn = func(dir string) error {
+			httpkit.WriteCountersDirFn = func(dir string) error {
 				return tc.mockCountErr
 			}
 
@@ -3982,9 +3984,9 @@ func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	writeJSON(rec, http.StatusOK, make(chan int))
-	if rec.Code != http.StatusOK {
-		t.Errorf("writeJSON code = %d, want 200", rec.Code)
+	httpkit.WriteJSON(rec, http.StatusOK, make(chan int))
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("writeJSON code = %d, want 500", rec.Code)
 	}
 
 	done := make(chan struct{})

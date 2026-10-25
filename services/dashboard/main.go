@@ -21,13 +21,14 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
-	"runtime/coverage"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/azylman/aerial/pkg/httpkit"
 
 	"gopkg.in/yaml.v3"
 )
@@ -649,24 +650,6 @@ func drainAndClose(body io.ReadCloser, name string) {
 	}
 }
 
-func isClientDisconnect(r *http.Request, err error) bool {
-	if err == nil {
-		return false
-	}
-	if r != nil && r.Context().Err() != nil {
-		return true
-	}
-	return errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, net.ErrClosed)
-}
-
-func writeResponse(w http.ResponseWriter, r *http.Request, data []byte) {
-	if _, err := w.Write(data); err != nil {
-		if !isClientDisconnect(r, err) {
-			log.Printf("[Dashboard:HTTP] Failed to write response: %v", err)
-		}
-	}
-}
-
 func writeJSON(w http.ResponseWriter, r *http.Request, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	b, err := json.Marshal(data)
@@ -676,7 +659,7 @@ func writeJSON(w http.ResponseWriter, r *http.Request, status int, data interfac
 		return
 	}
 	w.WriteHeader(status)
-	writeResponse(w, r, b)
+	httpkit.WriteResponse(w, r, "dashboard", b)
 }
 
 func (p *GitHubPoller) pollOnce(ctx context.Context) bool {
@@ -1783,7 +1766,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-	writeResponse(w, r, []byte("OK"))
+	httpkit.WriteResponse(w, r, "dashboard", []byte("OK"))
 }
 
 func securityHeadersMiddleware(next http.Handler) http.Handler {
@@ -1929,7 +1912,7 @@ func (ar *AssetRegistry) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodHead {
 		return
 	}
-	writeResponse(w, r, asset.Data)
+	httpkit.WriteResponse(w, r, "dashboard", asset.Data)
 }
 
 // DashboardConfig holds configuration settings for the dashboard web server.
@@ -2084,11 +2067,6 @@ func NewDashboardConfigFromEnv() DashboardConfig {
 	return cfg
 }
 
-var (
-	writeCountersDirFn = coverage.WriteCountersDir
-	writeMetaDirFn     = coverage.WriteMetaDir
-)
-
 // SetupDashboardMux configures the HTTP router and route handlers.
 func SetupDashboardMux(cfg DashboardConfig, assetReg *AssetRegistry) http.Handler {
 	mux := http.NewServeMux()
@@ -2114,20 +2092,7 @@ func SetupDashboardMux(cfg DashboardConfig, assetReg *AssetRegistry) http.Handle
 	mux.HandleFunc("/dashboard/api/builds", buildsHandler(cfg.VanadisURL))
 	mux.HandleFunc("/api/builds/", buildDetailHandler(cfg.VanadisURL))
 	mux.HandleFunc("/dashboard/api/builds/", buildDetailHandler(cfg.VanadisURL))
-	coverageFlush := func(w http.ResponseWriter, r *http.Request) {
-		if dir := os.Getenv("GOCOVERDIR"); dir != "" {
-			if err := writeMetaDirFn(dir); err != nil {
-				log.Printf("[dashboard] coverage meta flush error: %v", err)
-			}
-			if err := writeCountersDirFn(dir); err != nil {
-				log.Printf("[dashboard] coverage flush error: %v", err)
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-		}
-		w.WriteHeader(http.StatusOK)
-		writeResponse(w, r, []byte("ok\n"))
-	}
+	coverageFlush := httpkit.HandleCoverageFlush("dashboard", false)
 	mux.HandleFunc("/debug/coverage/flush", coverageFlush)
 	mux.HandleFunc("/dashboard/debug/coverage/flush", coverageFlush)
 

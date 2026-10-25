@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/azylman/aerial/pkg/httpkit"
 )
 
 func init() {
@@ -420,13 +422,13 @@ func TestWriteProxyResponse_TableDriven(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/health", nil).WithContext(tc.ctx)
 			if tc.writerErr == nil {
 				rec := httptest.NewRecorder()
-				writeProxyResponse(rec, req, []byte("ok"))
+				httpkit.WriteResponse(rec, req, "discord-mcp", []byte("ok"))
 				if rec.Body.String() != tc.wantBody {
 					t.Errorf("got %s, want %s", rec.Body.String(), tc.wantBody)
 				}
 			} else {
 				w := &mockErrWriter{err: tc.writerErr}
-				writeProxyResponse(w, req, []byte("ignored"))
+				httpkit.WriteResponse(w, req, "discord-mcp", []byte("ignored"))
 			}
 		})
 	}
@@ -475,7 +477,7 @@ func TestIsClientDisconnect_TableDriven(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isClientDisconnect(nil, tc.err); got != tc.want {
+			if got := httpkit.IsClientDisconnect(nil, tc.err); got != tc.want {
 				t.Errorf("got %v, want %v", got, tc.want)
 			}
 		})
@@ -505,8 +507,8 @@ func TestCoverageFlushEndpoint_TableDriven(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			oldFn, oldMetaFn := writeCountersDirFn, writeMetaDirFn
-			t.Cleanup(func() { writeCountersDirFn, writeMetaDirFn = oldFn, oldMetaFn })
+			oldFn, oldMetaFn := httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn
+			t.Cleanup(func() { httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn = oldFn, oldMetaFn })
 
 			if tc.useDir {
 				t.Setenv("GOCOVERDIR", t.TempDir())
@@ -514,8 +516,8 @@ func TestCoverageFlushEndpoint_TableDriven(t *testing.T) {
 				_ = os.Unsetenv("GOCOVERDIR")
 			}
 
-			writeCountersDirFn = func(dir string) error { return tc.counterErr }
-			writeMetaDirFn = func(dir string) error { return tc.metaErr }
+			httpkit.WriteCountersDirFn = func(dir string) error { return tc.counterErr }
+			httpkit.WriteMetaDirFn = func(dir string) error { return tc.metaErr }
 
 			resp, err := http.Get(ts.URL + "/debug/coverage/flush")
 			if err != nil {
