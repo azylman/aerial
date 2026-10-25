@@ -45,14 +45,14 @@
     "services/coven/skills.go::findCandidateCliques": {
       "cc": 29
     },
+    "services/dashboard/config.go::NewDashboardConfigFromLookup": {
+      "cc": 46
+    },
     "services/dashboard/github.go::*GitHubPoller.pollOnce": {
       "cc": 21
     },
     "services/dashboard/github.go::*GitHubPoller.pollRepo": {
       "cc": 28
-    },
-    "services/dashboard/main.go::NewDashboardConfigFromLookup": {
-      "cc": 46
     },
     "services/dashboard/pure.go::MergeClusterDeploymentsWithHangar": {
       "lines": 540,
@@ -313,9 +313,6 @@
     "services/eri/pure.go::FormatCronDescription": {
       "cc": 54
     },
-    "services/hangar/reconcile.go::*SyncDaemon.CheckAndReconcileNomadImages": {
-      "depth": 6
-    },
     "services/hangar/events.go::*SyncDaemon.ExecuteGitPushEvent": {
       "lines": 182,
       "cc": 31
@@ -323,21 +320,15 @@
     "services/hangar/events.go::*SyncDaemon.ExecuteImageReadyEvent": {
       "cc": 21
     },
-    "services/hangar/gitsync.go::*SyncDaemon.GetStatus": {
-      "cc": 27
-    },
     "services/hangar/events.go::*SyncDaemon.StartImageRolloutLoop": {
       "depth": 6
     },
-    "services/hangar/reconcile.go::*SyncDaemon.StartReconcilerLoop": {
-      "depth": 7
+    "services/hangar/gitsync.go::*SyncDaemon.GetStatus": {
+      "cc": 27
     },
     "services/hangar/gitsync.go::*SyncDaemon.SyncRepo": {
       "lines": 169,
       "cc": 30
-    },
-    "services/hangar/registry.go::*SyncDaemon.doRegistryRequestWithAuth": {
-      "cc": 24
     },
     "services/hangar/main.go::SetupMux": {
       "cc": 23
@@ -348,8 +339,25 @@
     "services/hangar/pure.go::ParseImageReference": {
       "cc": 21
     },
+    "services/hangar/reconcile.go::*SyncDaemon.CheckAndReconcileNomadImages": {
+      "depth": 6
+    },
+    "services/hangar/reconcile.go::*SyncDaemon.StartReconcilerLoop": {
+      "depth": 7
+    },
+    "services/hangar/registry.go::*SyncDaemon.doRegistryRequestWithAuth": {
+      "cc": 24
+    },
     "services/vanadis/main.go::*PostgresVanadisStore.CreateBuild": {
       "cc": 25
+    },
+    "services/webhooks-router/github.go::*RouterServer.ProcessGitHubEvent": {
+      "lines": 255,
+      "cc": 77,
+      "depth": 7
+    },
+    "services/webhooks-router/github.go::*RouterServer.checkOpenPRConflicts": {
+      "cc": 24
     },
     "services/webhooks-router/main.go::*RouterServer.ProcessHangarEvent": {
       "cc": 51
@@ -366,14 +374,6 @@
     },
     "services/webhooks-router/nomad_stream.go::*RouterServer.isNomadJobHealthy": {
       "cc": 32
-    },
-    "services/webhooks-router/github.go::*RouterServer.ProcessGitHubEvent": {
-      "lines": 255,
-      "cc": 77,
-      "depth": 7
-    },
-    "services/webhooks-router/github.go::*RouterServer.checkOpenPRConflicts": {
-      "cc": 24
     }
   }
 }
