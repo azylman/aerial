@@ -1,23 +1,6 @@
 {
   "files": {},
   "functions": {
-    "services/coven/db.go::extractTrajectorySignals": {
-      "depth": 7
-    },
-    "services/coven/extractor.go::FindConsolidationCliques": {
-      "cc": 38
-    },
-    "services/coven/extractor.go::consolidateCliqueBatch": {
-      "cc": 21
-    },
-    "services/coven/extractor.go::processThreadFacts": {
-      "lines": 202,
-      "cc": 45,
-      "depth": 6
-    },
-    "services/coven/extractor.go::reconcileCandidateFact": {
-      "cc": 34
-    },
     "services/coven/github.go::*GitHubSkillPublisher.PublishSkillChanges": {
       "lines": 168,
       "cc": 32

@@ -931,27 +931,34 @@ func truncateSingleLine(s string, maxLen int) string {
 	return s
 }
 
+func extractRetrievedMemoryFacts(content string) []string {
+	var facts []string
+	seen := make(map[string]struct{})
+	for _, block := range reRetrievedMemoryBlock.FindAllStringSubmatch(content, -1) {
+		if len(block) <= 1 {
+			continue
+		}
+		for _, lineMatch := range reFactLine.FindAllStringSubmatch(block[1], -1) {
+			if len(lineMatch) <= 1 {
+				continue
+			}
+			line := strings.TrimSpace(lineMatch[1])
+			if line == "" {
+				continue
+			}
+			if _, exists := seen[line]; !exists {
+				seen[line] = struct{}{}
+				facts = append(facts, line)
+			}
+		}
+	}
+	return facts
+}
+
 func extractTrajectorySignals(stepType, toolName, content string) ([]string, string) {
 	switch stepType {
 	case "USER_INPUT":
-		var facts []string
-		seen := make(map[string]struct{})
-		for _, block := range reRetrievedMemoryBlock.FindAllStringSubmatch(content, -1) {
-			if len(block) > 1 {
-				for _, lineMatch := range reFactLine.FindAllStringSubmatch(block[1], -1) {
-					if len(lineMatch) > 1 {
-						line := strings.TrimSpace(lineMatch[1])
-						if line != "" {
-							if _, exists := seen[line]; !exists {
-								seen[line] = struct{}{}
-								facts = append(facts, line)
-							}
-						}
-					}
-				}
-			}
-		}
-		return facts, ""
+		return extractRetrievedMemoryFacts(content), ""
 	case "PLANNER_RESPONSE":
 		trimmedTool := strings.TrimSpace(toolName)
 		if trimmedTool != "" {
