@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -98,7 +99,7 @@ func (c *CDPClient) getActivePageTarget(ctx context.Context) (string, string, er
 
 	var selected *TargetInfo
 	for i := range targets {
-		if targets[i].Type == "page" && targets[i].URL != "" && targets[i].URL != "chrome://" {
+		if targets[i].Type == "page" && targets[i].URL != "" && !strings.HasPrefix(targets[i].URL, "chrome://") {
 			selected = &targets[i]
 			break
 		}
@@ -241,6 +242,10 @@ func (c *CDPClient) EnsureConnection(ctx context.Context) error {
 
 // sendCDPDirect issues a raw CDP command over a specific connection.
 func (c *CDPClient) sendCDPDirect(ctx context.Context, conn *websocket.Conn, method string, params any, sessionID string) (json.RawMessage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	id := atomic.AddInt64(&c.msgID, 1)
 	respCh := make(chan cdpResponse, 1)
 

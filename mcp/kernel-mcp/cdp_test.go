@@ -22,6 +22,7 @@ type fakeCDPOptions struct {
 	failList         bool
 	emptyTargets     bool
 	includeChrome    bool
+	onlyChrome       bool
 	evalException    string
 	detachOnMethod   string
 	failPageEnable   bool
@@ -29,13 +30,27 @@ type fakeCDPOptions struct {
 	failMousePress   bool
 	failMouseRelease bool
 	returnCDPError   bool
+	withholdMethod   string
 }
 
-func startFakeCDPServer(t *testing.T, opts fakeCDPOptions) (*httptest.Server, *Config) {
+type fakeCDPServer struct {
+	*httptest.Server
+	attachedMu     sync.Mutex
+	attachedTarget string
+}
+
+func (s *fakeCDPServer) getAttachedTarget() string {
+	s.attachedMu.Lock()
+	defer s.attachedMu.Unlock()
+	return s.attachedTarget
+}
+
+func startFakeCDPServer(t *testing.T, opts fakeCDPOptions) (*fakeCDPServer, *Config) {
 	t.Helper()
 
 	var wsMu sync.Mutex
 	var activeWS *websocket.Conn
+	fakeSrv := &fakeCDPServer{}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/json/list" {
@@ -50,7 +65,7 @@ func startFakeCDPServer(t *testing.T, opts fakeCDPOptions) (*httptest.Server, *C
 			}
 			host := r.Host
 			targets := []TargetInfo{}
-			if opts.includeChrome {
+			if opts.includeChrome || opts.onlyChrome {
 				targets = append(targets, TargetInfo{
 					ID:                   "chrome-target",
 					Type:                 "page",
@@ -58,12 +73,14 @@ func startFakeCDPServer(t *testing.T, opts fakeCDPOptions) (*httptest.Server, *C
 					WebSocketDebuggerURL: "ws://" + host + "/devtools/page/chrome-target",
 				})
 			}
-			targets = append(targets, TargetInfo{
-				ID:                   "page-target-1",
-				Type:                 "page",
-				URL:                  "https://www.example.com",
-				WebSocketDebuggerURL: "ws://" + host + "/devtools/page/page-target-1",
-			})
+			if !opts.onlyChrome {
+				targets = append(targets, TargetInfo{
+					ID:                   "page-target-1",
+					Type:                 "page",
+					URL:                  "https://www.example.com",
+					WebSocketDebuggerURL: "ws://" + host + "/devtools/page/page-target-1",
+				})
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(targets)
 			return
@@ -101,6 +118,10 @@ func startFakeCDPServer(t *testing.T, opts fakeCDPOptions) (*httptest.Server, *C
 							"params": map[string]any{"sessionId": "test-session-1"},
 						})
 						return
+					}
+
+					if opts.withholdMethod != "" && req.Method == opts.withholdMethod {
+						continue
 					}
 
 					if opts.returnCDPError && req.Method == "Input.insertText" {
@@ -176,6 +197,13 @@ func startFakeCDPServer(t *testing.T, opts fakeCDPOptions) (*httptest.Server, *C
 
 					switch req.Method {
 					case "Target.attachToTarget":
+						var p struct {
+							TargetID string `json:"targetId"`
+						}
+						_ = json.Unmarshal(req.Params, &p)
+						fakeSrv.attachedMu.Lock()
+						fakeSrv.attachedTarget = p.TargetID
+						fakeSrv.attachedMu.Unlock()
 						result = map[string]any{"sessionId": "test-session-1"}
 					case "Page.enable", "Emulation.setUserAgentOverride":
 						result = map[string]any{}
@@ -230,6 +258,8 @@ func startFakeCDPServer(t *testing.T, opts fakeCDPOptions) (*httptest.Server, *C
 		SettleDelay: 1 * time.Millisecond,
 	}
 
+	fakeSrv.Server = server
+
 	t.Cleanup(func() {
 		wsMu.Lock()
 		if activeWS != nil {
@@ -239,24 +269,33 @@ func startFakeCDPServer(t *testing.T, opts fakeCDPOptions) (*httptest.Server, *C
 		server.Close()
 	})
 
-	return server, cfg
+	return fakeSrv, cfg
 }
 
 func TestCDPClient_EnsureConnectionTable(t *testing.T) {
 	tests := []struct {
-		name      string
-		opts      fakeCDPOptions
-		wantErr   bool
-		errSubstr string
+		name               string
+		opts               fakeCDPOptions
+		wantErr            bool
+		errSubstr          string
+		wantAttachedTarget string
 	}{
 		{
-			name:    "successful connection and stealth init",
-			wantErr: false,
+			name:               "successful connection and stealth init",
+			wantAttachedTarget: "page-target-1",
+			wantErr:            false,
 		},
 		{
-			name:    "target selection skips chrome:// url",
-			opts:    fakeCDPOptions{includeChrome: true},
-			wantErr: false,
+			name:               "target selection skips chrome:// url",
+			opts:               fakeCDPOptions{includeChrome: true},
+			wantAttachedTarget: "page-target-1",
+			wantErr:            false,
+		},
+		{
+			name:               "target selection falls back to chrome:// when only chrome target exists",
+			opts:               fakeCDPOptions{onlyChrome: true},
+			wantAttachedTarget: "chrome-target",
+			wantErr:            false,
 		},
 		{
 			name:      "fail list query returns error",
@@ -280,7 +319,7 @@ func TestCDPClient_EnsureConnectionTable(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, cfg := startFakeCDPServer(t, tc.opts)
+			server, cfg := startFakeCDPServer(t, tc.opts)
 
 			client := NewCDPClient(cfg)
 			defer client.Close()
@@ -300,6 +339,12 @@ func TestCDPClient_EnsureConnectionTable(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatalf("EnsureConnection() unexpected error: %v", err)
+			}
+
+			if tc.wantAttachedTarget != "" {
+				if got := server.getAttachedTarget(); got != tc.wantAttachedTarget {
+					t.Fatalf("attached target = %q, want %q", got, tc.wantAttachedTarget)
+				}
 			}
 
 			// Calling EnsureStealthSession explicitly
@@ -453,6 +498,7 @@ func TestCDPClient_ErrorAndDisconnectTable(t *testing.T) {
 		},
 		{
 			name:      "send cdp with pre-canceled context",
+			opts:      fakeCDPOptions{withholdMethod: "Test.withheld"},
 			action:    "send-cdp-canceled-ctx",
 			wantErr:   true,
 			errSubstr: "context canceled",
@@ -511,7 +557,7 @@ func TestCDPClient_ErrorAndDisconnectTable(t *testing.T) {
 				_ = client.EnsureConnection(ctx)
 				cancelCtx, cancelFn := context.WithCancel(context.Background())
 				cancelFn()
-				_, err := client.sendCDPDirect(cancelCtx, client.activeConn, "Page.enable", nil, "")
+				_, err := client.sendCDPDirect(cancelCtx, client.activeConn, "Test.withheld", nil, "")
 				if tc.wantErr && (err == nil || !strings.Contains(err.Error(), tc.errSubstr)) {
 					t.Fatalf("sendCDPDirect error = %v, want substring %q", err, tc.errSubstr)
 				}
