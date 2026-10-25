@@ -114,18 +114,19 @@ VictoriaMetrics is the cluster-wide time-series database (TSDB) collecting metri
 
 Once the event timestamp `t_event` and `<target_services>` are pinpointed from metrics:
 
-- **Targeted Log Query**:
-  - Query OpenObserve stream `docker_logs` parameterized by service:
+- **Targeted Log Query (`openobserve:SearchSQL`)**:
+  - Query OpenObserve stream `docker_logs` parameterized by service using explicit canonical columns (`_timestamp, service, level, message, stream, container_name, host`) and `agent_options: {"output_format": "csv"}` (~40% fewer tokens than JSON hits):
     ```sql
     SELECT _timestamp, service, level, message 
     FROM docker_logs 
     WHERE service IN ('brain', '<target_services>')
       AND _timestamp >= <start_time_us> AND _timestamp <= <end_time_us>
     ORDER BY _timestamp ASC 
-    LIMIT 100;
+    LIMIT 50;
     ```
-- **Context Protection (LIMIT 100)**:
-  - Default strictly to `LIMIT 100` (~5,000 tokens) to capture complete lifecycles without token bloat.
+- **Context Protection (`LIMIT 50` & CSV Output)**:
+  - Default strictly to `LIMIT 50` with `agent_options: {"output_format": "csv"}` to capture complete lifecycles without token bloat.
+  - Never call `StreamSchema` or `SELECT *` on `docker_logs` (which contains 28,000+ historical dynamic fields).
   - If the log stream is noisy, narrow the query by filtering on severity or keywords:
     - `AND level IN ('warn', 'error', 'fatal', 'panic')`
     - `AND (message LIKE '%error%' OR message LIKE '%timeout%' OR message LIKE '%disconnect%')`
@@ -146,7 +147,7 @@ Map findings to the **8-Point Core Failure Taxonomy**:
 1. **Classifier Misfire / Ambient Silence**: Message received by gateway but scored below ambient wake threshold (`Tier.SILENT`).
 2. **Gateway / Thread Routing Mismatch**: Discord API error `160004` caused thread creation retry failures, or turn was erroneously delivered to the root channel due to missing thread context.
 3. **Session Rotation / Ceiling Overflow**: Thread reached maximum turn count (e.g. 20 turns) or quota pause steps, causing session rotation.
-4. **Harness Print-Mode Drain**: Active execution was terminated prematurely because conversational text was emitted during background task execution in `agy -p`.
+4. **Premature Turn Termination**: Active execution stopped early before background task or subagent completion wakeup arrived.
 5. **Container Crash / OOMKill**: Process died mid-turn due to container memory limits (exit code 137) or runtime panic, leaving the message in `PENDING` or `PROCESSING`.
 6. **Replay / Idempotency Storm**: Server restarted with pending unacknowledged tasks, triggering duplicate message processing.
 7. **Discord API Delivery Error**: Turn completed successfully in `agy` and `messages.response_text` was populated, but Discord API returned 403 Forbidden (50001/50013 Missing Permissions), 404 (10008 Unknown Message), or 50083/50084 (Thread Archived/Locked).
@@ -156,10 +157,10 @@ Map findings to the **8-Point Core Failure Taxonomy**:
 
 ## 4. Post-Mortem Delivery Format
 
-Deliver the post-mortem directly to the user in clean Markdown (strictly < 1,800 characters, bulleted lists only, no markdown tables):
+Deliver the post-mortem directly to the user in clean Markdown (strictly < 1,800 characters, bulleted lists only, no markdown tables, leading naturally with the key conclusion first):
 
 ```markdown
-**BLUF**: [One-sentence bottom-line conclusion stating exact failure mode or latency source].
+[One-sentence conclusion stating exact failure mode or latency source].
 
 ### 🔍 Forensic Findings
 - **Target Event**: [Message ID, service, or operation at <timestamp>].

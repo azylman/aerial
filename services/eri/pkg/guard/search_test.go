@@ -136,7 +136,7 @@ func TestCheckSearch(t *testing.T) {
 		{"semicolon inside quotes allowed", "run_command", `git commit -m "fix; update search guard"`, "", false},
 		{"or operator pipeline with bad find denied", "run_command", `test -d /foo || find / -maxdepth 1`, "", true},
 
-		// MCP tool_index shaping (cmd = ToolName, cwd = Arguments JSON)
+		// MCP tool_index & openobserve shaping (cmd = ToolName, cwd = Arguments JSON)
 		{"mcp non-index tool allowed", "call_mcp_tool", "list_devices", `{}`, false},
 		{"mcp tool_index empty args denied", "call_mcp_tool", "unifi_tool_index", ``, true},
 		{"mcp tool_index empty object denied", "call_mcp_tool", "protect_tool_index", `{}`, true},
@@ -144,6 +144,12 @@ func TestCheckSearch(t *testing.T) {
 		{"mcp tool_index string-encoded category filter allowed", "default_api:call_mcp_tool", `"protect_tool_index"`, `"{\"category\":\"cameras\"}"`, false},
 		{"mcp tool_index include_schemas without name denied", "call_mcp_tool", "unifi_tool_index", `{"search":"firewall","include_schemas":true}`, true},
 		{"mcp tool_index include_schemas with exact name allowed", "call_mcp_tool", "unifi_tool_index", `{"name":"unifi_list_firewall_policies","include_schemas":true}`, false},
+		{"mcp openobserve StreamSchema denied", "call_mcp_tool", "StreamSchema", `{"org_id":"default","stream_name":"docker_logs"}`, true},
+		{"mcp openobserve SearchSQL without request_body allowed", "call_mcp_tool", "SearchSQL", ``, false},
+		{"mcp openobserve SearchSQL select star denied", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"query":{"sql":"SELECT * FROM docker_logs LIMIT 10"}}}`, true},
+		{"mcp openobserve SearchSQL table star denied", "call_mcp_tool", "SearchSQL", `"{\"org_id\":\"default\",\"request_body\":{\"query\":{\"sql\":\"SELECT t.* FROM docker_logs t LIMIT 10\"}}}"`, true},
+		{"mcp openobserve SearchSQL explicit columns and count(*) allowed", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"query":{"sql":"SELECT _timestamp, service, COUNT(*) FROM docker_logs WHERE message LIKE '%SELECT *%''s%' -- * comment\n GROUP BY _timestamp, service LIMIT 50"}}}`, false},
+		{"mcp openobserve SearchSQL existing output_format allowed", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"agent_options":{"output_format":"json"},"query":{"sql":"SELECT _timestamp, message FROM docker_logs LIMIT 10"}}}`, false},
 	}
 
 	for _, tc := range tests {

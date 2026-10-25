@@ -30,8 +30,125 @@ func parseToolIndexArgs(raw json.RawMessage) toolIndexArgs {
 	return parsed
 }
 
+func parseRawJSONMap(raw json.RawMessage) map[string]any {
+	if len(raw) == 0 {
+		return nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err == nil && len(m) > 0 {
+		return m
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil && s != "" {
+		if err := json.Unmarshal([]byte(s), &m); err == nil {
+			return m
+		}
+	}
+	return nil
+}
+
+var sqlWildcardReplacer = strings.NewReplacer("*", " * ", ",", " , ", ".", " . ", "(", " ( ", ")", " ) ")
+
+func skipSQLSingleQuote(sqlStr string, i int) int {
+	for i++; i < len(sqlStr); i++ {
+		if sqlStr[i] == '\'' {
+			if i+1 < len(sqlStr) && sqlStr[i+1] == '\'' {
+				i++
+				continue
+			}
+			return i
+		}
+	}
+	return len(sqlStr)
+}
+
+func stripSQLQuotesAndComments(sqlStr string) string {
+	var b strings.Builder
+	for i := 0; i < len(sqlStr); i++ {
+		if sqlStr[i] == '\'' {
+			i = skipSQLSingleQuote(sqlStr, i)
+			b.WriteByte(' ')
+			continue
+		}
+		if sqlStr[i] == '-' && i+1 < len(sqlStr) && sqlStr[i+1] == '-' {
+			for i < len(sqlStr) && sqlStr[i] != '\n' {
+				i++
+			}
+			b.WriteByte(' ')
+			continue
+		}
+		b.WriteByte(sqlStr[i])
+	}
+	return b.String()
+}
+
+func hasSelectWildcard(sqlStr string) bool {
+	cleaned := strings.ToLower(stripSQLQuotesAndComments(sqlStr))
+	tokens := strings.Fields(sqlWildcardReplacer.Replace(cleaned))
+	for i, tok := range tokens {
+		if tok == "*" && i > 0 {
+			switch tokens[i-1] {
+			case "select", "distinct", ",", ".":
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func mapField(m map[string]any, key string) map[string]any {
+	if v, ok := m[key].(map[string]any); ok {
+		return v
+	}
+	return nil
+}
+
+func stringField(m map[string]any, key string) string {
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+func inspectOpenObserveSearchSQL(raw json.RawMessage) *Decision {
+	root := parseRawJSONMap(raw)
+	reqBody := mapField(root, "request_body")
+	if reqBody == nil {
+		return &Decision{Decision: DecisionAllow}
+	}
+	sqlStr := stringField(mapField(reqBody, "query"), "sql")
+	if hasSelectWildcard(sqlStr) {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Wildcard SELECT * is prohibited in openobserve SearchSQL (docker_logs has 28,000+ historical columns, causing context bloat and DataFusion 502 timeouts). Select explicit columns such as: SELECT _timestamp, service, level, message FROM docker_logs ...",
+		}
+	}
+	agentOpts := mapField(reqBody, "agent_options")
+	if strings.TrimSpace(stringField(agentOpts, "output_format")) == "" {
+		if agentOpts == nil {
+			agentOpts = make(map[string]any)
+		}
+		agentOpts["output_format"] = "csv"
+		reqBody["agent_options"] = agentOpts
+		return &Decision{
+			Decision:  DecisionAllow,
+			Overwrite: map[string]any{"Arguments": root},
+		}
+	}
+	return &Decision{Decision: DecisionAllow}
+}
+
 func inspectMCPToolCall(args ToolArgs) *Decision {
 	mcpTool := strings.ToLower(strings.Trim(strings.TrimSpace(args.ToolName), `"`))
+	if mcpTool == "streamschema" {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "openobserve StreamSchema is blocked because docker_logs contains 28,000+ historical dynamic attribute fields. Query openobserve SearchSQL directly using canonical columns: _timestamp, service, level, message, stream, container_name, host (never use SELECT *).",
+		}
+	}
+	if mcpTool == "searchsql" {
+		return inspectOpenObserveSearchSQL(args.Arguments)
+	}
 	if mcpTool != "tool_index" && !strings.HasSuffix(mcpTool, "_tool_index") {
 		return &Decision{Decision: DecisionAllow}
 	}
