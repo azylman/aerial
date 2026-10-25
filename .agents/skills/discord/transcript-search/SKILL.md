@@ -41,7 +41,7 @@ transcript-search stats [options]
 - `-s, --session <id>`: Restrict search results to a specific session / conversation ID.
 - `-n, --limit <int>`: Maximum number of records to return (default: `10`).
 - `--json`: Output structured JSON for piping into `jq`.
-- `--url <url>`: Override the Aerial brain daemon HTTP endpoint (default: `http://localhost:8080` or `$AERIAL_BRAIN_URL`).
+- `--url <url>`: Override the Aerial eri daemon HTTP endpoint (default: `http://localhost:8080` or `$AERIAL_BRAIN_URL`).
 - `--direct-db`: Bypass HTTP daemon and query PostgreSQL directly via `$POSTGRES_URL`.
 
 ### Get Subcommand Flags (Step-Window Zoom)
@@ -49,7 +49,7 @@ transcript-search stats [options]
 - `-i, --step <int>`: Target step index to zoom into (required, non-negative).
 - `-C, --context <int>`: Number of surrounding context steps before and after the target step (default: `2`, range: 0–20).
 - `--json`: Output raw JSON containing `{session_id, step, context, steps: [...]}`.
-- `--url <url>`: Override the Aerial brain daemon HTTP endpoint (default: `http://localhost:8080` or `$AERIAL_BRAIN_URL`).
+- `--url <url>`: Override the Aerial eri daemon HTTP endpoint (default: `http://localhost:8080` or `$AERIAL_BRAIN_URL`).
 - `--direct-db`: Bypass HTTP daemon and query PostgreSQL directly via `$POSTGRES_URL`.
 
 ---
@@ -105,4 +105,4 @@ transcript-search search "atlas migration validate" --json | jq '.steps[] | {ste
 
 - **Zero Arbitrary Transcript Scrapes**: Avoid running heavy `find` or `grep` loops against `/data/runtimes/discord/.gemini/antigravity-cli/brain/*/transcript.jsonl`. Always prefer `transcript-search` for fast, indexed queries and step-window zoom (`transcript-search get`).
 - **Link Navigation**: Results include `[conv_id](conversation://<conv_id>)` links. Use these IDs directly if you need to read the full transcript file on disk (`<appDataDir>/brain/<conv_id>/.system_generated/logs/transcript.jsonl`).
-- **Daemon-First Resilience**: `transcript-search` communicates with the local `aerial-brain` daemon over HTTP (`/api/transcripts/search`). If the daemon is temporarily unavailable or restarting, it automatically falls back to direct PostgreSQL queries.
+- **Daemon-First Resilience**: `transcript-search` communicates with the local `aerial-eri` daemon over HTTP (`/api/transcripts/search`). If the daemon is temporarily unavailable or restarting, it automatically falls back to direct PostgreSQL queries.
