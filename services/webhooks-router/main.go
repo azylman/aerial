@@ -417,6 +417,45 @@ func (s *RouterServer) sweepOlderDeployedPRWidgets(qCtx context.Context, pgReg *
 	}
 }
 
+func (s *RouterServer) syncVanadisChunkPRWidget(qCtx context.Context, pgReg *PostgresPRRegistry, repo string, prNumber int, prStatus, prBanner string, prFound bool) (bool, error) {
+	client, vURL := pgReg.getVanadisClient()
+	bodyBytes, err := json.Marshal(map[string]any{
+		"repo":      repo,
+		"pr_number": prNumber,
+		"pr_status": prStatus,
+		"pr_banner": prBanner,
+		"pr_found":  prFound,
+	})
+	if err != nil {
+		return false, fmt.Errorf("marshal sync chunk widget request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(qCtx, http.MethodPost, vURL+"/chunks/sync-pr-widget", bytes.NewReader(bodyBytes))
+	if err != nil {
+		return false, fmt.Errorf("create sync chunk widget request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return false, fmt.Errorf("sync vanadis pr widget: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		if readErr != nil {
+			return false, fmt.Errorf("sync vanadis pr widget: unexpected status %d (read error: %w)", resp.StatusCode, readErr)
+		}
+		return false, fmt.Errorf("sync vanadis pr widget: unexpected status %d: %s", resp.StatusCode, string(body))
+	}
+	var syncRes struct {
+		Matched bool   `json:"matched"`
+		BuildID string `json:"build_id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&syncRes); err != nil {
+		return false, fmt.Errorf("decode sync chunk widget response: %w", err)
+	}
+	return syncRes.Matched, nil
+}
+
 func (s *RouterServer) syncSinglePRWidget(qCtx context.Context, pgReg *PostgresPRRegistry, repo string, prNumber int, allowSweep bool) error {
 	prQuery := `SELECT target_id, title, status, status_message_id, created_at, updated_at, COALESCE(metadata->>'banner', '') FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1`
 	var targetID, title, prStatus, prMsgID, prBanner string
@@ -432,42 +471,11 @@ func (s *RouterServer) syncSinglePRWidget(qCtx context.Context, pgReg *PostgresP
 	}
 
 	// 1. Ask vanadis to sync widget if this PR belongs to a vanadis chunk
-	client, vURL := pgReg.getVanadisClient()
-	bodyBytes, err := json.Marshal(map[string]any{
-		"repo":      repo,
-		"pr_number": prNumber,
-		"pr_status": prStatus,
-		"pr_banner": prBanner,
-		"pr_found":  prFound,
-	})
+	matched, err := s.syncVanadisChunkPRWidget(qCtx, pgReg, repo, prNumber, prStatus, prBanner, prFound)
 	if err != nil {
-		return fmt.Errorf("marshal sync chunk widget request: %w", err)
+		return err
 	}
-	httpReq, err := http.NewRequestWithContext(qCtx, http.MethodPost, vURL+"/chunks/sync-pr-widget", bytes.NewReader(bodyBytes))
-	if err != nil {
-		return fmt.Errorf("create sync chunk widget request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return fmt.Errorf("sync vanadis pr widget: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		if readErr != nil {
-			return fmt.Errorf("sync vanadis pr widget: unexpected status %d (read error: %w)", resp.StatusCode, readErr)
-		}
-		return fmt.Errorf("sync vanadis pr widget: unexpected status %d: %s", resp.StatusCode, string(body))
-	}
-	var syncRes struct {
-		Matched bool   `json:"matched"`
-		BuildID string `json:"build_id"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&syncRes); err != nil {
-		return fmt.Errorf("decode sync chunk widget response: %w", err)
-	}
-	if syncRes.Matched {
+	if matched {
 		return nil
 	}
 
@@ -607,7 +615,7 @@ func (s *RouterServer) advanceVanadisChunk(ctx context.Context, repo string, prN
 	return nil
 }
 
-func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployEvent) (*HangarDeployEvent, error) {
+func (s *RouterServer) enrichHangarEventPRAndTarget(ctx context.Context, evt *HangarDeployEvent) {
 	if evt.CommitSHA != "" && evt.PRNumber == 0 {
 		if prNum, targetID, _, err := s.ResolveSHA(ctx, evt.Repo, evt.CommitSHA); err != nil {
 			log.Printf("[webhooks-router] [hangar] failed resolving SHA %s: %v", evt.CommitSHA, err)
@@ -622,42 +630,106 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 			evt.TargetID = targetID
 		}
 	}
+}
+
+func (s *RouterServer) handleHangarDeployStartedRegistry(ctx context.Context, evt HangarDeployEvent) bool {
+	if s.registry == nil || evt.PRNumber == 0 || evt.Event != "deploy_started" || evt.JobName == "" {
+		return false
+	}
+	if len(evt.ExpectedJobs) > 0 {
+		if _, err := s.registry.RecordExpectedJobs(ctx, evt.Repo, evt.PRNumber, evt.ExpectedJobs); err != nil {
+			log.Printf("[webhooks-router] [registry] warning recording expected jobs on deploy_started for %s#%d: %v", evt.Repo, evt.PRNumber, err)
+		}
+	}
+	if tID, err := s.registry.TransitionDeploying(ctx, evt.Repo, evt.PRNumber, []string{evt.JobName}); err != nil {
+		log.Printf("[webhooks-router] [registry] warning transitioning pr %s#%d to deploying for job %s: %v", evt.Repo, evt.PRNumber, evt.JobName, err)
+	} else if tID == "" {
+		log.Printf("[webhooks-router] [hangar] skipping deploy_started for %s on %s#%d (job already deployed or PR inactive)", evt.JobName, evt.Repo, evt.PRNumber)
+		return true
+	} else if s.isNomadBatchTemplateHealthy(ctx, evt.JobName) {
+		if err := s.HandleNomadJobSuccess(ctx, evt.JobName, firstNonEmpty(evt.DeploymentID, "batch-registered")); err != nil {
+			log.Printf("[webhooks-router] [hangar] warning handling batch job success for %s: %v", evt.JobName, err)
+		}
+		return true
+	}
+	return false
+}
+
+func (s *RouterServer) recordHangarSyncExpectedJobs(ctx context.Context, evt HangarDeployEvent) bool {
+	if evt.Event != "sync_success" || evt.PRNumber == 0 {
+		return false
+	}
+	syncHasExpected := len(dedupeTrimmedStrings(evt.ExpectedJobs)) > 0
+	if s.registry != nil {
+		if regHasExpected, err := s.registry.RecordExpectedJobs(ctx, evt.Repo, evt.PRNumber, evt.ExpectedJobs); err != nil {
+			log.Printf("[webhooks-router] [registry] warning recording expected jobs on sync_success for %s#%d: %v", evt.Repo, evt.PRNumber, err)
+		} else {
+			syncHasExpected = syncHasExpected || regHasExpected
+		}
+	}
+	return syncHasExpected
+}
+
+func (s *RouterServer) handleHangarDeployFailedOrRollback(ctx context.Context, evt HangarDeployEvent, prefix string) error {
+	targetID := evt.TargetID
+	if s.registry != nil && evt.PRNumber > 0 {
+		tID, updated, err := s.registry.AtomicTransitionDeployFailed(ctx, evt.Repo, evt.PRNumber)
+		if err != nil || !updated {
+			return err
+		}
+		targetID = firstNonEmpty(tID, targetID)
+	}
+	actionDesc, fixDesc := "Deployment failed", "deployment failure"
+	if evt.Event == "deploy_rollback" {
+		actionDesc, fixDesc = "Deployment failed and rolled back", "deployment rollback failure"
+	}
+	dmMsg := fmt.Sprintf("💥 %s%s for %s. Following up...", prefix, actionDesc, evt.JobName)
+	banner := fmt.Sprintf("Deployment failed for %s", evt.JobName)
+	if evt.Event == "deploy_rollback" {
+		banner = fmt.Sprintf("Deployment failed and rolled back for %s", evt.JobName)
+	}
+	if evt.PRNumber > 0 {
+		s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "deploy_failed", banner)
+		if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber); err == nil {
+			dmMsg = ""
+		}
+	}
+	prompt := formatErrorDetailsBlock(
+		fmt.Sprintf("%s for job %s on %s (PR #%d, commit: %s).", actionDesc, evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA),
+		evt.Details, "", fmt.Sprintf("Please investigate and fix the %s.", fixDesc),
+	)
+	return s.dispatchAlertWithPrompt(ctx, targetID, evt.Event, dmMsg, prompt, s.vanadisPromptOpts(ctx, evt.Repo, evt.PRNumber))
+}
+
+func (s *RouterServer) handleHangarSyncFailed(ctx context.Context, evt HangarDeployEvent, prefix string) error {
+	header := fmt.Sprintf("Git sync failed for repo %s (commit: %s, PR #%d).", evt.Repo, evt.CommitSHA, evt.PRNumber)
+	if evt.PRNumber == 0 {
+		header = fmt.Sprintf("Git sync failed for repo %s (commit: %s).", evt.Repo, evt.CommitSHA)
+	}
+	dmMsg := fmt.Sprintf("⚠️ %sGit file sync failed. Following up...", prefix)
+	if evt.PRNumber > 0 {
+		s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "deploy_failed", "Git file sync failed")
+		if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber); err == nil {
+			dmMsg = ""
+		}
+	}
+	prompt := formatErrorDetailsBlock(header, evt.Details, "", "Please investigate and fix the git sync failure.")
+	return s.dispatchAlertWithPrompt(ctx, evt.TargetID, "sync_failed", dmMsg, prompt, s.vanadisPromptOpts(ctx, evt.Repo, evt.PRNumber))
+}
+
+func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployEvent) (*HangarDeployEvent, error) {
+	s.enrichHangarEventPRAndTarget(ctx, &evt)
 
 	log.Printf("[webhooks-router] [hangar] [deploy] event=%s job=%s repo=%s pr=%d commit=%s status=%s target_id=%s deployment_id=%s details=%q",
 		evt.Event, evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA, evt.Status, evt.TargetID, evt.DeploymentID, evt.Details)
 
 	s.evaluateHangarEventTriggers(ctx, evt)
 
-	if s.registry != nil && evt.PRNumber > 0 && evt.Event == "deploy_started" && evt.JobName != "" {
-		if len(evt.ExpectedJobs) > 0 {
-			if _, err := s.registry.RecordExpectedJobs(ctx, evt.Repo, evt.PRNumber, evt.ExpectedJobs); err != nil {
-				log.Printf("[webhooks-router] [registry] warning recording expected jobs on deploy_started for %s#%d: %v", evt.Repo, evt.PRNumber, err)
-			}
-		}
-		if tID, err := s.registry.TransitionDeploying(ctx, evt.Repo, evt.PRNumber, []string{evt.JobName}); err != nil {
-			log.Printf("[webhooks-router] [registry] warning transitioning pr %s#%d to deploying for job %s: %v", evt.Repo, evt.PRNumber, evt.JobName, err)
-		} else if tID == "" {
-			log.Printf("[webhooks-router] [hangar] skipping deploy_started for %s on %s#%d (job already deployed or PR inactive)", evt.JobName, evt.Repo, evt.PRNumber)
-			return &evt, nil
-		} else if s.isNomadBatchTemplateHealthy(ctx, evt.JobName) {
-			if err := s.HandleNomadJobSuccess(ctx, evt.JobName, firstNonEmpty(evt.DeploymentID, "batch-registered")); err != nil {
-				log.Printf("[webhooks-router] [hangar] warning handling batch job success for %s: %v", evt.JobName, err)
-			}
-			return &evt, nil
-		}
+	if s.handleHangarDeployStartedRegistry(ctx, evt) {
+		return &evt, nil
 	}
 
-	var syncHasExpected bool
-	if evt.Event == "sync_success" && evt.PRNumber > 0 {
-		syncHasExpected = len(dedupeTrimmedStrings(evt.ExpectedJobs)) > 0
-		if s.registry != nil {
-			if regHasExpected, err := s.registry.RecordExpectedJobs(ctx, evt.Repo, evt.PRNumber, evt.ExpectedJobs); err != nil {
-				log.Printf("[webhooks-router] [registry] warning recording expected jobs on sync_success for %s#%d: %v", evt.Repo, evt.PRNumber, err)
-			} else {
-				syncHasExpected = syncHasExpected || regHasExpected
-			}
-		}
-	}
+	syncHasExpected := s.recordHangarSyncExpectedJobs(ctx, evt)
 
 	if !IsValidDiscordSnowflake(evt.TargetID) || s.dispatcher == nil {
 		if evt.Event == "sync_success" && evt.PRNumber > 0 {
@@ -682,34 +754,7 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 		}
 		return &evt, s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, evt.JobName, evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID)
 	case "deploy_rollback", "deploy_failed":
-		targetID := evt.TargetID
-		if s.registry != nil && evt.PRNumber > 0 {
-			tID, updated, err := s.registry.AtomicTransitionDeployFailed(ctx, evt.Repo, evt.PRNumber)
-			if err != nil || !updated {
-				return &evt, err
-			}
-			targetID = firstNonEmpty(tID, targetID)
-		}
-		actionDesc, fixDesc := "Deployment failed", "deployment failure"
-		if evt.Event == "deploy_rollback" {
-			actionDesc, fixDesc = "Deployment failed and rolled back", "deployment rollback failure"
-		}
-		dmMsg := fmt.Sprintf("💥 %s%s for %s. Following up...", prefix, actionDesc, evt.JobName)
-		banner := fmt.Sprintf("Deployment failed for %s", evt.JobName)
-		if evt.Event == "deploy_rollback" {
-			banner = fmt.Sprintf("Deployment failed and rolled back for %s", evt.JobName)
-		}
-		if evt.PRNumber > 0 {
-			s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "deploy_failed", banner)
-			if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber); err == nil {
-				dmMsg = ""
-			}
-		}
-		prompt := formatErrorDetailsBlock(
-			fmt.Sprintf("%s for job %s on %s (PR #%d, commit: %s).", actionDesc, evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA),
-			evt.Details, "", fmt.Sprintf("Please investigate and fix the %s.", fixDesc),
-		)
-		return &evt, s.dispatchAlertWithPrompt(ctx, targetID, evt.Event, dmMsg, prompt, s.vanadisPromptOpts(ctx, evt.Repo, evt.PRNumber))
+		return &evt, s.handleHangarDeployFailedOrRollback(ctx, evt, prefix)
 	case "sync_success":
 		if evt.PRNumber > 0 {
 			if !syncHasExpected {
@@ -723,19 +768,7 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 		}
 		return &evt, nil
 	case "sync_failed":
-		header := fmt.Sprintf("Git sync failed for repo %s (commit: %s, PR #%d).", evt.Repo, evt.CommitSHA, evt.PRNumber)
-		if evt.PRNumber == 0 {
-			header = fmt.Sprintf("Git sync failed for repo %s (commit: %s).", evt.Repo, evt.CommitSHA)
-		}
-		dmMsg := fmt.Sprintf("⚠️ %sGit file sync failed. Following up...", prefix)
-		if evt.PRNumber > 0 {
-			s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "deploy_failed", "Git file sync failed")
-			if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber); err == nil {
-				dmMsg = ""
-			}
-		}
-		prompt := formatErrorDetailsBlock(header, evt.Details, "", "Please investigate and fix the git sync failure.")
-		return &evt, s.dispatchAlertWithPrompt(ctx, evt.TargetID, "sync_failed", dmMsg, prompt, s.vanadisPromptOpts(ctx, evt.Repo, evt.PRNumber))
+		return &evt, s.handleHangarSyncFailed(ctx, evt, prefix)
 	}
 	return &evt, nil
 }

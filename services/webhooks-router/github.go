@@ -74,6 +74,53 @@ func (s *RouterServer) fetchPRDetails(ctx context.Context, repo string, prNumber
 	return &details, nil
 }
 
+func (s *RouterServer) pollPRMergeability(ctx context.Context, repo string, prNumber int) (*GitHubPRDetails, error) {
+	var details *GitHubPRDetails
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			delay := s.conflictCheckDelay
+			if delay <= 0 {
+				delay = 200 * time.Millisecond
+			}
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		det, fetchErr := s.fetchPRDetails(ctx, repo, prNumber)
+		if fetchErr != nil {
+			log.Printf("[webhooks-router] [github] error fetching PR #%d details for conflict check: %v", prNumber, fetchErr)
+			if strings.Contains(fetchErr.Error(), "403") || strings.Contains(strings.ToLower(fetchErr.Error()), "rate limit") {
+				return nil, fetchErr
+			}
+			break
+		}
+		details = det
+		if details.Mergeable != nil || (details.MergeableState != "" && details.MergeableState != "unknown") {
+			break
+		}
+	}
+	return details, nil
+}
+
+func (s *RouterServer) handleDirtyPRConflict(ctx context.Context, repo string, pr RegisteredPR) {
+	if pr.HeadSHA != "" {
+		s.nonRoboRevFailedSHAs.Store(prCheckKey(repo, pr.PRNumber), strings.TrimSpace(pr.HeadSHA))
+	}
+	targetID, updated, trErr := s.registry.AtomicTransitionConflict(ctx, repo, pr.PRNumber)
+	if trErr != nil {
+		log.Printf("[webhooks-router] [registry] error transitioning PR #%d to conflict: %v", pr.PRNumber, trErr)
+		return
+	}
+	if updated {
+		targetID = firstNonEmpty(targetID, pr.TargetID)
+		if err := s.dispatchConflictPrompt(ctx, targetID, repo, pr.Branch, pr.HeadSHA, pr.PRNumber); err != nil {
+			log.Printf("[webhooks-router] [registry] error dispatching conflict prompt for PR #%d: %v", pr.PRNumber, err)
+		}
+	}
+}
+
 func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) error {
 	if s.registry == nil {
 		return nil
@@ -86,51 +133,15 @@ func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) er
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		var details *GitHubPRDetails
-		for attempt := 0; attempt < 3; attempt++ {
-			if attempt > 0 {
-				delay := s.conflictCheckDelay
-				if delay <= 0 {
-					delay = 200 * time.Millisecond
-				}
-				select {
-				case <-time.After(delay):
-				case <-ctx.Done():
-					return ctx.Err()
-				}
-			}
-			det, fetchErr := s.fetchPRDetails(ctx, repo, pr.PRNumber)
-			if fetchErr != nil {
-				log.Printf("[webhooks-router] [github] error fetching PR #%d details for conflict check: %v", pr.PRNumber, fetchErr)
-				if strings.Contains(fetchErr.Error(), "403") || strings.Contains(strings.ToLower(fetchErr.Error()), "rate limit") {
-					return fetchErr
-				}
-				break
-			}
-			details = det
-			if details.Mergeable != nil || (details.MergeableState != "" && details.MergeableState != "unknown") {
-				break
-			}
+		details, err := s.pollPRMergeability(ctx, repo, pr.PRNumber)
+		if err != nil {
+			return err
 		}
-
 		if details == nil {
 			continue
 		}
 		if (details.Mergeable != nil && !*details.Mergeable) || details.MergeableState == "dirty" {
-			if pr.HeadSHA != "" {
-				s.nonRoboRevFailedSHAs.Store(prCheckKey(repo, pr.PRNumber), strings.TrimSpace(pr.HeadSHA))
-			}
-			targetID, updated, trErr := s.registry.AtomicTransitionConflict(ctx, repo, pr.PRNumber)
-			if trErr != nil {
-				log.Printf("[webhooks-router] [registry] error transitioning PR #%d to conflict: %v", pr.PRNumber, trErr)
-				continue
-			}
-			if updated {
-				targetID = firstNonEmpty(targetID, pr.TargetID)
-				if err := s.dispatchConflictPrompt(ctx, targetID, repo, pr.Branch, pr.HeadSHA, pr.PRNumber); err != nil {
-					log.Printf("[webhooks-router] [registry] error dispatching conflict prompt for PR #%d: %v", pr.PRNumber, err)
-				}
-			}
+			s.handleDirtyPRConflict(ctx, repo, pr)
 		}
 	}
 	return nil
@@ -555,6 +566,278 @@ func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *Resol
 	return nil
 }
 
+func (s *RouterServer) processGitHubPingEvent(delivery string, body []byte, res *ResolvedGitHubEvent) (*ResolvedGitHubEvent, error) {
+	var p GitHubPingPayload
+	if err := json.Unmarshal(body, &p); err != nil {
+		return nil, fmt.Errorf("unmarshal ping payload: %w", err)
+	}
+	if p.Repo != nil {
+		res.Repo = p.Repo.FullName
+	}
+	log.Printf("[webhooks-router] [github] [ping] hook_id=%d repo=%s zen=%q delivery=%s", p.HookID, res.Repo, p.Zen, delivery)
+	return res, nil
+}
+
+func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGitHubEvent, merged bool) error {
+	if merged {
+		targetID, err := s.registry.UpdatePRMerged(ctx, res.Repo, res.PRNumber, res.MergeSHA)
+		if err != nil {
+			return err
+		}
+		res.TargetID = firstNonEmpty(res.TargetID, targetID)
+		hasExpected, err := s.registry.HasExpectedDeployJobs(ctx, res.Repo, res.PRNumber)
+		if err != nil {
+			log.Printf("[webhooks-router] [registry] warning checking expected deploy jobs for %s#%d: %v", res.Repo, res.PRNumber, err)
+		}
+		if !hasExpected {
+			if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
+				log.Printf("[webhooks-router] [widget] warning syncing pr_merged widget for %s#%d: %v", res.Repo, res.PRNumber, err)
+			}
+		}
+		if !isHangarSyncedRepo(res.Repo) {
+			if err := s.advanceVanadisChunk(ctx, res.Repo, res.PRNumber); err != nil {
+				return err
+			}
+		}
+	} else {
+		targetID, err := s.registry.UpdatePRClosedUnmerged(ctx, res.Repo, res.PRNumber)
+		if err != nil {
+			return err
+		}
+		res.TargetID = firstNonEmpty(res.TargetID, targetID)
+		if err := s.failVanadisChunk(ctx, res.Repo, res.PRNumber, "pr_closed_unmerged"); err != nil {
+			log.Printf("[webhooks-router] [vanadis] warning failing vanadis chunk for closed unmerged PR %s#%d: %v", res.Repo, res.PRNumber, err)
+		}
+		if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
+			log.Printf("[webhooks-router] [widget] warning syncing pr_closed widget for %s#%d: %v", res.Repo, res.PRNumber, err)
+		}
+	}
+	return nil
+}
+
+func (s *RouterServer) handlePRAutoMergeDisabledAction(ctx context.Context, res *ResolvedGitHubEvent) error {
+	if res.HeadSHA != "" {
+		s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
+	}
+	targetID, updated, err := s.registry.AtomicTransitionConflict(ctx, res.Repo, res.PRNumber)
+	if err != nil {
+		return err
+	}
+	res.TargetID = firstNonEmpty(res.TargetID, targetID)
+	if updated {
+		if err := s.dispatchConflictPrompt(ctx, res.TargetID, res.Repo, res.Branch, res.HeadSHA, res.PRNumber); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res *ResolvedGitHubEvent, pr GitHubPullRequest) error {
+	if trailerTargetID, trailerChunkID, ok := ParseAerialPRMetadata(pr.Body); ok {
+		// Self-heal DB registration only; initial Discord widget delivery on opened is owned by Brain's /internal/pr/register to avoid duplicate message creation races.
+		resolvedTargetID, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, pr.Title, trailerTargetID, trailerChunkID)
+		if err != nil {
+			return err
+		}
+		res.TargetID = firstNonEmpty(res.TargetID, resolvedTargetID, trailerTargetID)
+	}
+	switch res.Action {
+	case "closed":
+		return s.handlePRClosedAction(ctx, res, pr.Merged)
+	case "synchronize":
+		s.nonRoboRevFailedSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
+		targetID, err := s.registry.UpdatePRSync(ctx, res.Repo, res.PRNumber, res.HeadSHA)
+		if err != nil {
+			return err
+		}
+		res.TargetID = firstNonEmpty(res.TargetID, targetID)
+		if res.TargetID != "" {
+			if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
+				log.Printf("[webhooks-router] [widget] warning syncing pr_sync widget for %s#%d: %v", res.Repo, res.PRNumber, err)
+			}
+		}
+	case "auto_merge_disabled":
+		return s.handlePRAutoMergeDisabledAction(ctx, res)
+	}
+	return nil
+}
+
+func (s *RouterServer) processGitHubPullRequestEvent(ctx context.Context, delivery string, body []byte, res *ResolvedGitHubEvent) (*ResolvedGitHubEvent, error) {
+	var p GitHubPullRequestPayload
+	if err := json.Unmarshal(body, &p); err != nil {
+		return nil, fmt.Errorf("unmarshal pull_request payload: %w", err)
+	}
+	res.Repo = p.Repository.FullName
+	res.Action = p.Action
+	res.PRNumber = p.Number
+	if res.PRNumber == 0 {
+		res.PRNumber = p.PullRequest.Number
+	}
+	res.Branch = p.PullRequest.Head.Ref
+	res.HeadSHA = p.PullRequest.Head.SHA
+	res.Merged = p.PullRequest.Merged
+	// GitHub pull_request webhooks set merge_commit_sha for test merges even on unmerged PRs; only set MergeSHA when merged.
+	if p.PullRequest.Merged {
+		res.MergeSHA = p.PullRequest.MergeCommitSHA
+	}
+	res.Sender = p.Sender.Login
+	res.ResolutionSource = "pull_request_payload"
+	log.Printf("[webhooks-router] [github] [pull_request] repo=%s pr=%d action=%s head_sha=%s merge_sha=%s branch=%s merged=%v sender=%s delivery=%s",
+		res.Repo, res.PRNumber, res.Action, res.HeadSHA, res.MergeSHA, res.Branch, p.PullRequest.Merged, res.Sender, delivery)
+
+	if s.registry != nil && res.PRNumber > 0 {
+		if err := s.handlePullRequestRegistryAction(ctx, res, p.PullRequest); err != nil {
+			return nil, err
+		}
+	}
+	return res, nil
+}
+
+func (s *RouterServer) processGitHubCheckRunEvent(ctx context.Context, delivery string, body []byte, res *ResolvedGitHubEvent) (*ResolvedGitHubEvent, error) {
+	var p GitHubCheckRunPayload
+	if err := json.Unmarshal(body, &p); err != nil {
+		return nil, fmt.Errorf("unmarshal check_run payload: %w", err)
+	}
+	res.Repo = p.Repository.FullName
+	res.Action = p.Action
+	res.CheckName = p.CheckRun.Name
+	res.HeadSHA = p.CheckRun.HeadSHA
+	res.Status = p.CheckRun.Status
+	res.Conclusion = p.CheckRun.Conclusion
+	s.resolveEventPR(ctx, res, p.CheckRun.PullRequests, "check_run_payload")
+	log.Printf("[webhooks-router] [github] [check_run] repo=%s check=%q head_sha=%s pr=%d branch=%s status=%s conclusion=%s source=%s target_id=%s delivery=%s",
+		res.Repo, res.CheckName, res.HeadSHA, res.PRNumber, res.Branch, res.Status, res.Conclusion, res.ResolutionSource, res.TargetID, delivery)
+
+	if p.Action == "completed" && res.Conclusion == "success" && res.PRNumber > 0 && strings.EqualFold(strings.TrimSpace(res.CheckName), "roborev") && s.registry != nil && s.canRecoverRoboRevSuccess(ctx, res.Repo, res.PRNumber, res.HeadSHA) {
+		targetID, err := s.registry.UpdatePRSync(ctx, res.Repo, res.PRNumber, res.HeadSHA)
+		if err != nil {
+			return nil, err
+		}
+		res.TargetID = firstNonEmpty(res.TargetID, targetID)
+		if targetID != "" {
+			if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
+				log.Printf("[webhooks-router] [widget] warning syncing pr_open widget for %s#%d: %v", res.Repo, res.PRNumber, err)
+			}
+		}
+	}
+
+	details := firstNonEmpty(strings.TrimSpace(p.CheckRun.Output.Text), strings.TrimSpace(p.CheckRun.Output.Summary), strings.TrimSpace(p.CheckRun.Output.Title))
+	checkURL := firstNonEmpty(strings.TrimSpace(p.CheckRun.HTMLURL), strings.TrimSpace(p.CheckRun.DetailsURL))
+	if err := s.handleCIFailureTransition(ctx, res, details, checkURL); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+func (s *RouterServer) processGitHubWorkflowRunEvent(ctx context.Context, delivery string, body []byte, res *ResolvedGitHubEvent) (*ResolvedGitHubEvent, error) {
+	var p GitHubWorkflowRunPayload
+	if err := json.Unmarshal(body, &p); err != nil {
+		return nil, fmt.Errorf("unmarshal workflow_run payload: %w", err)
+	}
+	res.Repo = p.Repository.FullName
+	res.Action = p.Action
+	res.CheckName = p.WorkflowRun.Name
+	res.HeadSHA = p.WorkflowRun.HeadSHA
+	res.Branch = p.WorkflowRun.HeadBranch
+	res.Status = p.WorkflowRun.Status
+	res.Conclusion = p.WorkflowRun.Conclusion
+	s.resolveEventPR(ctx, res, p.WorkflowRun.PullRequests, "workflow_run_payload")
+	log.Printf("[webhooks-router] [github] [workflow_run] repo=%s workflow=%q head_sha=%s pr=%d branch=%s status=%s conclusion=%s source=%s target_id=%s delivery=%s",
+		res.Repo, res.CheckName, res.HeadSHA, res.PRNumber, res.Branch, res.Status, res.Conclusion, res.ResolutionSource, res.TargetID, delivery)
+
+	details := fmt.Sprintf("Workflow %q concluded with %s", p.WorkflowRun.Name, p.WorkflowRun.Conclusion)
+	if err := s.handleCIFailureTransition(ctx, res, details, strings.TrimSpace(p.WorkflowRun.HTMLURL)); err != nil {
+		return nil, err
+	}
+	if p.Action == "completed" && p.WorkflowRun.Status == "completed" {
+		if err := s.dispatchWorkflowRunImages(ctx, res.Repo, p.WorkflowRun.ID, p.WorkflowRun.HeadBranch, p.WorkflowRun.Conclusion, res.HeadSHA, res.TargetID, res.PRNumber); err != nil {
+			return nil, err
+		}
+	}
+	return res, nil
+}
+
+func (s *RouterServer) resolveAndBackfillPushPR(ctx context.Context, res *ResolvedGitHubEvent, p GitHubPushPayload) error {
+	s.resolveEventPR(ctx, res, nil, "")
+	if res.PRNumber == 0 && p.HeadCommit != nil {
+		if prNum := extractPRNumberFromCommitMessage(p.HeadCommit.Message); prNum > 0 {
+			res.PRNumber = prNum
+			res.ResolutionSource = "commit_message"
+		}
+	}
+	if res.PRNumber > 0 {
+		res.MergeSHA = res.HeadSHA
+	}
+	log.Printf("[webhooks-router] [github] [push] repo=%s ref=%s head_sha=%s resolved_pr=%d branch=%s source=%s target_id=%s delivery=%s",
+		res.Repo, p.Ref, res.HeadSHA, res.PRNumber, res.Branch, res.ResolutionSource, res.TargetID, res.Delivery)
+
+	if s.registry != nil && res.PRNumber > 0 && res.MergeSHA != "" {
+		targetID, err := s.registry.BackfillPushMergeSHA(ctx, res.Repo, res.PRNumber, res.MergeSHA)
+		if err != nil {
+			return err
+		}
+		res.TargetID = firstNonEmpty(res.TargetID, targetID)
+	}
+	return nil
+}
+
+func (s *RouterServer) waitConflictCheckDelay(ctx context.Context) error {
+	if s.conflictCheckDelay > 0 {
+		select {
+		case <-time.After(s.conflictCheckDelay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+func (s *RouterServer) processGitHubPushEvent(ctx context.Context, body []byte, res *ResolvedGitHubEvent) (*ResolvedGitHubEvent, error) {
+	var p GitHubPushPayload
+	if err := json.Unmarshal(body, &p); err != nil {
+		return nil, fmt.Errorf("unmarshal push payload: %w", err)
+	}
+	res.Repo = p.Repository.FullName
+	res.Branch = p.Ref
+
+	if p.Deleted || isZeroSHA(p.After) {
+		res.ResolutionSource = "branch_deleted"
+		return res, nil
+	}
+	if !strings.HasPrefix(p.Ref, "refs/heads/") {
+		res.ResolutionSource = "non_branch_ref"
+		return res, nil
+	}
+	res.HeadSHA = p.After
+	if p.HeadCommit != nil && p.HeadCommit.ID != "" {
+		res.HeadSHA = p.HeadCommit.ID
+	}
+	if !strings.HasPrefix(p.Ref, "refs/heads/main") {
+		res.ResolutionSource = "non_main_branch"
+		return res, nil
+	}
+
+	if err := s.resolveAndBackfillPushPR(ctx, res, p); err != nil {
+		return nil, err
+	}
+
+	if err := s.dispatchGitPush(ctx, res.Repo, p.Ref, res.HeadSHA, res.TargetID, res.PRNumber); err != nil {
+		return nil, err
+	}
+	if res.PRNumber > 0 && !isHangarSyncedRepo(res.Repo) {
+		if err := s.advanceVanadisChunk(ctx, res.Repo, res.PRNumber); err != nil {
+			return nil, err
+		}
+	}
+	if err := s.waitConflictCheckDelay(ctx); err != nil {
+		return nil, err
+	}
+	if err := s.checkOpenPRConflicts(ctx, res.Repo); err != nil {
+		log.Printf("[webhooks-router] [github] error checking open pr conflicts for %s: %v", res.Repo, err)
+	}
+	return res, nil
+}
+
 func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery string, body []byte) (res *ResolvedGitHubEvent, err error) {
 	if s.onProcessed != nil {
 		defer s.onProcessed(event, delivery)
@@ -569,241 +852,15 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 
 	switch event {
 	case "ping":
-		var p GitHubPingPayload
-		if err := json.Unmarshal(body, &p); err != nil {
-			return nil, fmt.Errorf("unmarshal ping payload: %w", err)
-		}
-		if p.Repo != nil {
-			res.Repo = p.Repo.FullName
-		}
-		log.Printf("[webhooks-router] [github] [ping] hook_id=%d repo=%s zen=%q delivery=%s", p.HookID, res.Repo, p.Zen, delivery)
-		return res, nil
-
+		return s.processGitHubPingEvent(delivery, body, res)
 	case "pull_request":
-		var p GitHubPullRequestPayload
-		if err := json.Unmarshal(body, &p); err != nil {
-			return nil, fmt.Errorf("unmarshal pull_request payload: %w", err)
-		}
-		res.Repo = p.Repository.FullName
-		res.Action = p.Action
-		res.PRNumber = p.Number
-		if res.PRNumber == 0 {
-			res.PRNumber = p.PullRequest.Number
-		}
-		res.Branch = p.PullRequest.Head.Ref
-		res.HeadSHA = p.PullRequest.Head.SHA
-		res.Merged = p.PullRequest.Merged
-		// GitHub pull_request webhooks set merge_commit_sha for test merges even on unmerged PRs; only set MergeSHA when merged.
-		if p.PullRequest.Merged {
-			res.MergeSHA = p.PullRequest.MergeCommitSHA
-		}
-		res.Sender = p.Sender.Login
-		res.ResolutionSource = "pull_request_payload"
-		log.Printf("[webhooks-router] [github] [pull_request] repo=%s pr=%d action=%s head_sha=%s merge_sha=%s branch=%s merged=%v sender=%s delivery=%s",
-			res.Repo, res.PRNumber, res.Action, res.HeadSHA, res.MergeSHA, res.Branch, p.PullRequest.Merged, res.Sender, delivery)
-
-		if s.registry != nil && res.PRNumber > 0 {
-			if trailerTargetID, trailerChunkID, ok := ParseAerialPRMetadata(p.PullRequest.Body); ok {
-				// Self-heal DB registration only; initial Discord widget delivery on opened is owned by Brain's /internal/pr/register to avoid duplicate message creation races.
-				resolvedTargetID, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, p.PullRequest.Title, trailerTargetID, trailerChunkID)
-				if err != nil {
-					return nil, err
-				}
-				res.TargetID = firstNonEmpty(res.TargetID, resolvedTargetID, trailerTargetID)
-			}
-			switch res.Action {
-			case "closed":
-				if p.PullRequest.Merged {
-					targetID, err := s.registry.UpdatePRMerged(ctx, res.Repo, res.PRNumber, res.MergeSHA)
-					if err != nil {
-						return nil, err
-					}
-					res.TargetID = firstNonEmpty(res.TargetID, targetID)
-					hasExpected, err := s.registry.HasExpectedDeployJobs(ctx, res.Repo, res.PRNumber)
-					if err != nil {
-						log.Printf("[webhooks-router] [registry] warning checking expected deploy jobs for %s#%d: %v", res.Repo, res.PRNumber, err)
-					}
-					if !hasExpected {
-						if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
-							log.Printf("[webhooks-router] [widget] warning syncing pr_merged widget for %s#%d: %v", res.Repo, res.PRNumber, err)
-						}
-					}
-					if !isHangarSyncedRepo(res.Repo) {
-						if err := s.advanceVanadisChunk(ctx, res.Repo, res.PRNumber); err != nil {
-							return nil, err
-						}
-					}
-				} else {
-					targetID, err := s.registry.UpdatePRClosedUnmerged(ctx, res.Repo, res.PRNumber)
-					if err != nil {
-						return nil, err
-					}
-					res.TargetID = firstNonEmpty(res.TargetID, targetID)
-					if err := s.failVanadisChunk(ctx, res.Repo, res.PRNumber, "pr_closed_unmerged"); err != nil {
-						log.Printf("[webhooks-router] [vanadis] warning failing vanadis chunk for closed unmerged PR %s#%d: %v", res.Repo, res.PRNumber, err)
-					}
-					if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
-						log.Printf("[webhooks-router] [widget] warning syncing pr_closed widget for %s#%d: %v", res.Repo, res.PRNumber, err)
-					}
-				}
-			case "synchronize":
-				s.nonRoboRevFailedSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
-				targetID, err := s.registry.UpdatePRSync(ctx, res.Repo, res.PRNumber, res.HeadSHA)
-				if err != nil {
-					return nil, err
-				}
-				res.TargetID = firstNonEmpty(res.TargetID, targetID)
-				if res.TargetID != "" {
-					if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
-						log.Printf("[webhooks-router] [widget] warning syncing pr_sync widget for %s#%d: %v", res.Repo, res.PRNumber, err)
-					}
-				}
-			case "auto_merge_disabled":
-				if res.HeadSHA != "" {
-					s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
-				}
-				targetID, updated, err := s.registry.AtomicTransitionConflict(ctx, res.Repo, res.PRNumber)
-				if err != nil {
-					return nil, err
-				}
-				res.TargetID = firstNonEmpty(res.TargetID, targetID)
-				if updated {
-					if err := s.dispatchConflictPrompt(ctx, res.TargetID, res.Repo, res.Branch, res.HeadSHA, res.PRNumber); err != nil {
-						return nil, err
-					}
-				}
-			}
-		}
-		return res, nil
-
+		return s.processGitHubPullRequestEvent(ctx, delivery, body, res)
 	case "check_run":
-		var p GitHubCheckRunPayload
-		if err := json.Unmarshal(body, &p); err != nil {
-			return nil, fmt.Errorf("unmarshal check_run payload: %w", err)
-		}
-		res.Repo = p.Repository.FullName
-		res.Action = p.Action
-		res.CheckName = p.CheckRun.Name
-		res.HeadSHA = p.CheckRun.HeadSHA
-		res.Status = p.CheckRun.Status
-		res.Conclusion = p.CheckRun.Conclusion
-		s.resolveEventPR(ctx, res, p.CheckRun.PullRequests, "check_run_payload")
-		log.Printf("[webhooks-router] [github] [check_run] repo=%s check=%q head_sha=%s pr=%d branch=%s status=%s conclusion=%s source=%s target_id=%s delivery=%s",
-			res.Repo, res.CheckName, res.HeadSHA, res.PRNumber, res.Branch, res.Status, res.Conclusion, res.ResolutionSource, res.TargetID, delivery)
-
-		if p.Action == "completed" && res.Conclusion == "success" && res.PRNumber > 0 && strings.EqualFold(strings.TrimSpace(res.CheckName), "roborev") && s.registry != nil && s.canRecoverRoboRevSuccess(ctx, res.Repo, res.PRNumber, res.HeadSHA) {
-			targetID, err := s.registry.UpdatePRSync(ctx, res.Repo, res.PRNumber, res.HeadSHA)
-			if err != nil {
-				return nil, err
-			}
-			res.TargetID = firstNonEmpty(res.TargetID, targetID)
-			if targetID != "" {
-				if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
-					log.Printf("[webhooks-router] [widget] warning syncing pr_open widget for %s#%d: %v", res.Repo, res.PRNumber, err)
-				}
-			}
-		}
-
-		details := firstNonEmpty(strings.TrimSpace(p.CheckRun.Output.Text), strings.TrimSpace(p.CheckRun.Output.Summary), strings.TrimSpace(p.CheckRun.Output.Title))
-		checkURL := firstNonEmpty(strings.TrimSpace(p.CheckRun.HTMLURL), strings.TrimSpace(p.CheckRun.DetailsURL))
-		if err := s.handleCIFailureTransition(ctx, res, details, checkURL); err != nil {
-			return nil, err
-		}
-		return res, nil
-
+		return s.processGitHubCheckRunEvent(ctx, delivery, body, res)
 	case "workflow_run":
-		var p GitHubWorkflowRunPayload
-		if err := json.Unmarshal(body, &p); err != nil {
-			return nil, fmt.Errorf("unmarshal workflow_run payload: %w", err)
-		}
-		res.Repo = p.Repository.FullName
-		res.Action = p.Action
-		res.CheckName = p.WorkflowRun.Name
-		res.HeadSHA = p.WorkflowRun.HeadSHA
-		res.Branch = p.WorkflowRun.HeadBranch
-		res.Status = p.WorkflowRun.Status
-		res.Conclusion = p.WorkflowRun.Conclusion
-		s.resolveEventPR(ctx, res, p.WorkflowRun.PullRequests, "workflow_run_payload")
-		log.Printf("[webhooks-router] [github] [workflow_run] repo=%s workflow=%q head_sha=%s pr=%d branch=%s status=%s conclusion=%s source=%s target_id=%s delivery=%s",
-			res.Repo, res.CheckName, res.HeadSHA, res.PRNumber, res.Branch, res.Status, res.Conclusion, res.ResolutionSource, res.TargetID, delivery)
-
-		details := fmt.Sprintf("Workflow %q concluded with %s", p.WorkflowRun.Name, p.WorkflowRun.Conclusion)
-		if err := s.handleCIFailureTransition(ctx, res, details, strings.TrimSpace(p.WorkflowRun.HTMLURL)); err != nil {
-			return nil, err
-		}
-		if p.Action == "completed" && p.WorkflowRun.Status == "completed" {
-			if err := s.dispatchWorkflowRunImages(ctx, res.Repo, p.WorkflowRun.ID, p.WorkflowRun.HeadBranch, p.WorkflowRun.Conclusion, res.HeadSHA, res.TargetID, res.PRNumber); err != nil {
-				return nil, err
-			}
-		}
-		return res, nil
-
+		return s.processGitHubWorkflowRunEvent(ctx, delivery, body, res)
 	case "push":
-		var p GitHubPushPayload
-		if err := json.Unmarshal(body, &p); err != nil {
-			return nil, fmt.Errorf("unmarshal push payload: %w", err)
-		}
-		res.Repo = p.Repository.FullName
-		res.Branch = p.Ref
-
-		if p.Deleted || isZeroSHA(p.After) {
-			res.ResolutionSource = "branch_deleted"
-			return res, nil
-		}
-		if !strings.HasPrefix(p.Ref, "refs/heads/") {
-			res.ResolutionSource = "non_branch_ref"
-			return res, nil
-		}
-		res.HeadSHA = p.After
-		if p.HeadCommit != nil && p.HeadCommit.ID != "" {
-			res.HeadSHA = p.HeadCommit.ID
-		}
-		if !strings.HasPrefix(p.Ref, "refs/heads/main") {
-			res.ResolutionSource = "non_main_branch"
-			return res, nil
-		}
-
-		s.resolveEventPR(ctx, res, nil, "")
-		if res.PRNumber == 0 && p.HeadCommit != nil {
-			if prNum := extractPRNumberFromCommitMessage(p.HeadCommit.Message); prNum > 0 {
-				res.PRNumber = prNum
-				res.ResolutionSource = "commit_message"
-			}
-		}
-		if res.PRNumber > 0 {
-			res.MergeSHA = res.HeadSHA
-		}
-		log.Printf("[webhooks-router] [github] [push] repo=%s ref=%s head_sha=%s resolved_pr=%d branch=%s source=%s target_id=%s delivery=%s",
-			res.Repo, p.Ref, res.HeadSHA, res.PRNumber, res.Branch, res.ResolutionSource, res.TargetID, delivery)
-
-		if s.registry != nil && res.PRNumber > 0 && res.MergeSHA != "" {
-			targetID, err := s.registry.BackfillPushMergeSHA(ctx, res.Repo, res.PRNumber, res.MergeSHA)
-			if err != nil {
-				return nil, err
-			}
-			res.TargetID = firstNonEmpty(res.TargetID, targetID)
-		}
-
-		if err := s.dispatchGitPush(ctx, res.Repo, p.Ref, res.HeadSHA, res.TargetID, res.PRNumber); err != nil {
-			return nil, err
-		}
-		if res.PRNumber > 0 && !isHangarSyncedRepo(res.Repo) {
-			if err := s.advanceVanadisChunk(ctx, res.Repo, res.PRNumber); err != nil {
-				return nil, err
-			}
-		}
-		if s.conflictCheckDelay > 0 {
-			select {
-			case <-time.After(s.conflictCheckDelay):
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-		}
-		if err := s.checkOpenPRConflicts(ctx, res.Repo); err != nil {
-			log.Printf("[webhooks-router] [github] error checking open pr conflicts for %s: %v", res.Repo, err)
-		}
-		return res, nil
-
+		return s.processGitHubPushEvent(ctx, body, res)
 	default:
 		log.Printf("[webhooks-router] [github] [unhandled] event=%s delivery=%s payload_size=%d bytes", event, delivery, len(body))
 		res.ResolutionSource = "unhandled_event"
