@@ -11,9 +11,11 @@ import (
 )
 
 type batchHookInput struct {
-	tool string
-	path string
-	cmd  string
+	tool  string
+	path  string
+	cmd   string
+	start int
+	end   int
 }
 
 func TestCheckBatch(t *testing.T) {
@@ -51,6 +53,10 @@ func TestCheckBatch(t *testing.T) {
 		{"micro edit thrashing", turns(turn(batchHookInput{tool: "replace_file_content", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "replace_file_content", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "replace_file_content", path: "/tmp/mod.go"})), DecisionDeny, "Coarse-Grained Code Editing Invariant Violated"},
 		{"micro edit_file thrashing", turns(turn(batchHookInput{tool: "edit_file", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "write_file", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "edit_file", path: "/tmp/mod.go"})), DecisionDeny, "Coarse-Grained Code Editing Invariant Violated"},
 		{"read different file allowed", turns(turn(batchHookInput{tool: "view_file", path: "/tmp/foo.go"}, batchHookInput{tool: "view_file", path: "/tmp/extra1.go"}), turn(batchHookInput{tool: "view_file", path: "/tmp/foo.go"}, batchHookInput{tool: "view_file", path: "/tmp/extra2.go"}), turn(batchHookInput{tool: "view_file", path: "/tmp/other.go"}, batchHookInput{tool: "view_file", path: "/tmp/extra1.go"})), DecisionAllow, ""},
+		{"parallel same-file reads in turn 1 plus turn 2 read allowed", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/big.go", start: 10, end: 60}, batchHookInput{tool: "read_file", path: "/tmp/big.go", start: 800, end: 860}), turn(batchHookInput{tool: "read_file", path: "/tmp/big.go", start: 861, end: 950})), DecisionAllow, ""},
+		{"non-overlapping paginated read_file allowed", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 1, end: 500}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 501, end: 1000}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 1001, end: 1400})), DecisionAllow, ""},
+		{"overlapping paginated read_file denied", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 1, end: 500}, batchHookInput{tool: "read_file", path: "/tmp/o1.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 501, end: 1000}, batchHookInput{tool: "read_file", path: "/tmp/o2.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 400, end: 900})), DecisionDeny, "Iterative micro-read thrashing"},
+		{"small non-overlapping micro-reads denied", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 1, end: 50}, batchHookInput{tool: "read_file", path: "/tmp/o1.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 51, end: 100}, batchHookInput{tool: "read_file", path: "/tmp/o2.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 101, end: 150})), DecisionDeny, "Iterative micro-read thrashing"},
 	}
 
 	for _, tc := range stepTests {
@@ -62,8 +68,8 @@ func TestCheckBatch(t *testing.T) {
 			stepIdx := 0
 			for turnIdx, turn := range tc.steps {
 				stepTime := now.Add(time.Duration(turnIdx) * 2 * time.Second)
-				stepIdx++
 				for _, inv := range turn {
+					stepIdx++
 					payload := Payload{
 						ConversationID: convID,
 						StepIdx:        stepIdx,
@@ -71,6 +77,8 @@ func TestCheckBatch(t *testing.T) {
 					}
 					args := ToolArgs{
 						TargetFile:  inv.path,
+						StartLine:   inv.start,
+						EndLine:     inv.end,
 						CommandLine: inv.cmd,
 					}
 					lastDec = CheckBatchWithDir(payload, args, dir, stepTime)
