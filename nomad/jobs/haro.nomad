@@ -51,7 +51,11 @@ job "haro" {
 
       template {
         data = <<EOH
-{{- with nomadVar "nomad/jobs/haro" -}}{{ index . "config.yaml" }}{{- end -}}
+{{- if nomadVarExists "nomad/jobs/haro" -}}
+{{- with nomadVar "nomad/jobs/haro" -}}
+{{- if .CONFIG_YAML -}}{{- .CONFIG_YAML -}}{{- end -}}
+{{- end -}}
+{{- end -}}
 EOH
         destination = "local/config.yaml"
         change_mode = "restart"
