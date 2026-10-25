@@ -44,7 +44,7 @@
   "search-guard": {
     "PreToolUse": [
       {
-        "matcher": "run_command",
+        "matcher": "run_command|call_mcp_tool",
         "hooks": [
           {
             "type": "command",

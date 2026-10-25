@@ -2,6 +2,7 @@ package guard
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -134,6 +135,15 @@ func TestCheckSearch(t *testing.T) {
 		{"pipe inside quotes allowed", "run_command", `grep "a | b" file.txt`, "", false},
 		{"semicolon inside quotes allowed", "run_command", `git commit -m "fix; update search guard"`, "", false},
 		{"or operator pipeline with bad find denied", "run_command", `test -d /foo || find / -maxdepth 1`, "", true},
+
+		// MCP tool_index shaping (cmd = ToolName, cwd = Arguments JSON)
+		{"mcp non-index tool allowed", "call_mcp_tool", "list_devices", `{}`, false},
+		{"mcp tool_index empty args denied", "call_mcp_tool", "unifi_tool_index", ``, true},
+		{"mcp tool_index empty object denied", "call_mcp_tool", "protect_tool_index", `{}`, true},
+		{"mcp tool_index search filter allowed", "call_mcp_tool", "unifi_tool_index", `{"search":"firewall"}`, false},
+		{"mcp tool_index string-encoded category filter allowed", "default_api:call_mcp_tool", `"protect_tool_index"`, `"{\"category\":\"cameras\"}"`, false},
+		{"mcp tool_index include_schemas without name denied", "call_mcp_tool", "unifi_tool_index", `{"search":"firewall","include_schemas":true}`, true},
+		{"mcp tool_index include_schemas with exact name allowed", "call_mcp_tool", "unifi_tool_index", `{"name":"unifi_list_firewall_policies","include_schemas":true}`, false},
 	}
 
 	for _, tc := range tests {
@@ -143,7 +153,11 @@ func TestCheckSearch(t *testing.T) {
 			if tool == "" {
 				tool = "run_command"
 			}
-			d := CheckSearchWithSQL(tool, ToolArgs{CommandLine: tc.cmd, Cwd: tc.cwd}, nil)
+			args := ToolArgs{CommandLine: tc.cmd, Cwd: tc.cwd}
+			if normalizeToolName(tool) == "call_mcp_tool" {
+				args = ToolArgs{ToolName: tc.cmd, Arguments: json.RawMessage(tc.cwd)}
+			}
+			d := CheckSearchWithSQL(tool, args, nil)
 			if tc.wantDeny && d.Decision != DecisionDeny {
 				t.Fatalf("cmd %q: expected deny, got %v", tc.cmd, d)
 			}

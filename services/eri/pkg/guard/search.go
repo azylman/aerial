@@ -1,9 +1,59 @@
 package guard
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"strings"
 )
+
+type toolIndexArgs struct {
+	Search         string `json:"search"`
+	Category       string `json:"category"`
+	Name           string `json:"name"`
+	IncludeSchemas bool   `json:"include_schemas"`
+}
+
+func parseToolIndexArgs(raw json.RawMessage) toolIndexArgs {
+	var parsed toolIndexArgs
+	if len(raw) == 0 {
+		return parsed
+	}
+	if err := json.Unmarshal(raw, &parsed); err == nil && (parsed.Search != "" || parsed.Category != "" || parsed.Name != "" || parsed.IncludeSchemas) {
+		return parsed
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil && s != "" {
+		if err := json.Unmarshal([]byte(s), &parsed); err == nil {
+			return parsed
+		}
+	}
+	return parsed
+}
+
+func inspectMCPToolCall(args ToolArgs) *Decision {
+	mcpTool := strings.ToLower(strings.Trim(strings.TrimSpace(args.ToolName), `"`))
+	if mcpTool != "tool_index" && !strings.HasSuffix(mcpTool, "_tool_index") {
+		return &Decision{Decision: DecisionAllow}
+	}
+
+	idxArgs := parseToolIndexArgs(args.Arguments)
+	hasFilter := strings.TrimSpace(idxArgs.Search) != "" ||
+		strings.TrimSpace(idxArgs.Category) != "" ||
+		strings.TrimSpace(idxArgs.Name) != ""
+	if !hasFilter {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Unfiltered MCP tool index call detected. Calling a tool_index endpoint without 'search', 'category', or 'name' dumps the entire tool catalog into the context window. Pass a specific 'search' keyword, 'category', or exact 'name' (or read the local tool schema JSON under <appDataDir>/mcp/<server>/<tool>.json if already listed).",
+		}
+	}
+	if idxArgs.IncludeSchemas && strings.TrimSpace(idxArgs.Name) == "" {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Unscoped MCP tool index schema dump detected: 'include_schemas: true' requires an exact 'name' parameter. Discover tool names with 'search' or 'category' (include_schemas=false) first, then request the schema for a single tool via 'name'.",
+		}
+	}
+	return &Decision{Decision: DecisionAllow}
+}
 
 var binaryExtensions = map[string]bool{
 	".so":    true,
@@ -170,6 +220,9 @@ func CheckSearch(toolName string, args ToolArgs) *Decision {
 // CheckSearchWithSQL evaluates search and psql commands using the provided SQLDescriber.
 func CheckSearchWithSQL(toolName string, args ToolArgs, describer SQLDescriber) *Decision {
 	normalizedName := normalizeToolName(toolName)
+	if normalizedName == "call_mcp_tool" {
+		return inspectMCPToolCall(args)
+	}
 	if normalizedName != "run_command" && normalizedName != "grep_search" && normalizedName != "find_by_name" {
 		return &Decision{Decision: DecisionAllow}
 	}
