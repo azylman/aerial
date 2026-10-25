@@ -18,6 +18,10 @@ func CommandDefinitions() []*discordgo.ApplicationCommand {
 			Description: "Operator HUD snapshot of runtime state, deployment, facts, and upcoming schedules",
 		},
 		{
+			Name:        "quota",
+			Description: "Show remaining model quota and reset windows",
+		},
+		{
 			Name:        "rotate",
 			Description: "Rotate session lifecycle and start a fresh context window",
 			Options: []*discordgo.ApplicationCommandOption{

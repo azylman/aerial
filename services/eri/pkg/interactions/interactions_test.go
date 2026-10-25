@@ -17,6 +17,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
+	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/bwmarrin/discordgo"
@@ -203,8 +204,9 @@ func TestApplicationCommandsAndHelpers(t *testing.T) {
 		wantBool   bool
 		wantInt    int
 	}{
-		{"CmdDefCount", "cmd_len", "", 0, 0, "", false, 5},
+		{"CmdDefCount", "cmd_len", "", 0, 0, "", false, 6},
 		{"CmdDef_status", "cmd_opts", "status", 0, 0, "", false, 0},
+		{"CmdDef_quota", "cmd_opts", "quota", 0, 0, "", false, 0},
 		{"CmdDef_rotate", "cmd_opts", "rotate", 0, 0, "", false, 2},
 		{"CmdDef_interrupt", "cmd_opts", "interrupt", 0, 0, "", false, 2},
 		{"CmdDef_mode", "cmd_opts", "mode", 0, 0, "", false, 2},
@@ -460,6 +462,51 @@ func TestRouter_HandleStatus(t *testing.T) {
 
 			router.Handle(session, mkCmd("int-status", "chan-1", "admin-123", "status"))
 
+			reqs := transport.Requests()
+			if len(reqs) != 1 {
+				t.Fatalf("expected 1 request, got %d", len(reqs))
+			}
+			body := string(reqs[0].Body)
+			for _, want := range tc.wantSubstrs {
+				if !strings.Contains(body, want) {
+					t.Errorf("expected response to contain %q, got: %s", want, body)
+				}
+			}
+		})
+	}
+}
+
+func TestRouter_HandleQuota(t *testing.T) {
+	resetStr := time.Now().UTC().Add(2*time.Hour + 30*time.Minute).Format(time.RFC3339)
+	sampleGroups := []metrics.QuotaGroup{
+		{
+			Name: "Gemini Models",
+			Buckets: []metrics.QuotaBucket{
+				{ID: "gemini-weekly", Window: "weekly", RemainingFraction: 0.869, ResetTime: resetStr},
+				{ID: "gemini-5h", Window: "5h", RemainingFraction: 0.944, Disabled: true},
+				{ID: "", Window: "ignored", RemainingFraction: 0.5},
+			},
+		},
+	}
+	tests := []struct {
+		name        string
+		groups      []metrics.QuotaGroup
+		useProvider bool
+		httpStatus  int
+		wantSubstrs []string
+	}{
+		{"WithActiveQuotaBuckets", sampleGroups, true, 0, []string{"**Gemini Models**", "**weekly**: `87%` remaining", "resets in 2h"}},
+		{"EmptyQuotaFallback", nil, false, 0, []string{"No quota telemetry recorded yet"}},
+		{"ErrorLoggingHttp500", nil, true, http.StatusInternalServerError, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			router, _, transport, session := setupTestRouter("admin-123", tc.httpStatus)
+			if tc.useProvider {
+				g := tc.groups
+				router.deps.QuotaProvider = func() []metrics.QuotaGroup { return g }
+			}
+			router.Handle(session, mkCmd("int-quota", "chan-1", "admin-123", "quota"))
 			reqs := transport.Requests()
 			if len(reqs) != 1 {
 				t.Fatalf("expected 1 request, got %d", len(reqs))

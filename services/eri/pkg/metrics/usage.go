@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -22,29 +23,45 @@ var (
 		Name: "aerial_brain_usage_quota_reset_timestamp_seconds",
 		Help: "Unix timestamp in seconds when the agy /usage quota window resets.",
 	}, []string{"bucket_id", "group", "window"})
+	latestQuotaMu     sync.RWMutex
+	latestQuotaGroups []QuotaGroup
 )
 
 func init() {
 	Registry.MustRegister(UsageQuotaRemainingFraction, UsageQuotaResetTimestampSeconds)
 }
 
+type QuotaBucket struct {
+	ID                string  `json:"id"`
+	Window            string  `json:"window"`
+	ResetTime         string  `json:"reset_time"`
+	RemainingFraction float64 `json:"remaining_fraction"`
+	Disabled          bool    `json:"disabled"`
+}
+
+type QuotaGroup struct {
+	Name    string        `json:"name"`
+	Buckets []QuotaBucket `json:"buckets"`
+}
+
 type usageCLIResponse struct {
 	Command struct {
 		Data struct {
-			Groups []struct {
-				Name    string `json:"name"`
-				Buckets []struct {
-					ID                string  `json:"id"`
-					Window            string  `json:"window"`
-					ResetTime         string  `json:"reset_time"`
-					RemainingFraction float64 `json:"remaining_fraction"`
-					Disabled          bool    `json:"disabled"`
-				} `json:"buckets"`
-			} `json:"groups"`
+			Groups []QuotaGroup `json:"groups"`
 		} `json:"data"`
 	} `json:"command"`
 }
 type UsageRunnerFunc func(ctx context.Context) ([]byte, error)
+
+func LatestQuotaGroups() []QuotaGroup {
+	latestQuotaMu.RLock()
+	defer latestQuotaMu.RUnlock()
+	out := make([]QuotaGroup, len(latestQuotaGroups))
+	for i, g := range latestQuotaGroups {
+		out[i] = QuotaGroup{Name: g.Name, Buckets: append([]QuotaBucket(nil), g.Buckets...)}
+	}
+	return out
+}
 
 func RecordUsageJSON(raw []byte) error {
 	var resp usageCLIResponse
@@ -54,6 +71,9 @@ func RecordUsageJSON(raw []byte) error {
 	if len(resp.Command.Data.Groups) == 0 {
 		return errors.New("usage payload contains no quota groups")
 	}
+	latestQuotaMu.Lock()
+	latestQuotaGroups = resp.Command.Data.Groups
+	latestQuotaMu.Unlock()
 	UsageQuotaRemainingFraction.Reset()
 	UsageQuotaResetTimestampSeconds.Reset()
 	for _, g := range resp.Command.Data.Groups {

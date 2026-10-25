@@ -33,6 +33,9 @@ func TestRecordUsageJSON(t *testing.T) {
 			if !strings.Contains(rec.Body.String(), tc.wantCheck) {
 				t.Errorf("%s: missing %q in:\n%s", tc.name, tc.wantCheck, rec.Body.String())
 			}
+			if len(LatestQuotaGroups()) == 0 {
+				t.Errorf("%s: expected LatestQuotaGroups() to be populated", tc.name)
+			}
 		}
 	}
 }
