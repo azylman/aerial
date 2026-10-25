@@ -45,10 +45,10 @@
     "services/coven/skills.go::findCandidateCliques": {
       "cc": 29
     },
-    "services/dashboard/main.go::*GitHubPoller.pollOnce": {
+    "services/dashboard/github.go::*GitHubPoller.pollOnce": {
       "cc": 21
     },
-    "services/dashboard/main.go::*GitHubPoller.pollRepo": {
+    "services/dashboard/github.go::*GitHubPoller.pollRepo": {
       "cc": 28
     },
     "services/dashboard/main.go::NewDashboardConfigFromLookup": {
