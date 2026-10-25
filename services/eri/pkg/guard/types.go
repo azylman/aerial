@@ -44,14 +44,17 @@ type ToolCall struct {
 
 // ToolArgs represents commonly inspected tool parameters.
 type ToolArgs struct {
-	TargetFile   string `json:"TargetFile"`
-	AbsolutePath string `json:"AbsolutePath"`
-	Path         string `json:"path"`
-	File         string `json:"file"`
-	StartLine    int    `json:"StartLine"`
-	EndLine      int    `json:"EndLine"`
-	CommandLine  string `json:"CommandLine"`
-	Cwd          string `json:"Cwd"`
+	TargetFile   string          `json:"TargetFile"`
+	AbsolutePath string          `json:"AbsolutePath"`
+	Path         string          `json:"path"`
+	File         string          `json:"file"`
+	StartLine    int             `json:"StartLine"`
+	EndLine      int             `json:"EndLine"`
+	CommandLine  string          `json:"CommandLine"`
+	Cwd          string          `json:"Cwd"`
+	ServerName   string          `json:"ServerName"`
+	ToolName     string          `json:"ToolName"`
+	Arguments    json.RawMessage `json:"Arguments"`
 }
 
 // FilePath returns the resolved file path from TargetFile, AbsolutePath, Path, or File.
@@ -76,7 +79,7 @@ func ParseArgs(raw json.RawMessage) ToolArgs {
 	}
 
 	// 1. Try direct object unmarshal
-	if err := json.Unmarshal(raw, &args); err == nil && (args.FilePath() != "" || args.CommandLine != "" || args.Cwd != "") {
+	if err := json.Unmarshal(raw, &args); err == nil && (args.FilePath() != "" || args.CommandLine != "" || args.Cwd != "" || args.ToolName != "" || args.ServerName != "") {
 		return args
 	}
 
