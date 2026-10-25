@@ -134,42 +134,9 @@ func (d *SyncDaemon) SyncRepo(ctx context.Context, repoPath string, syncCtx ...C
 	res.PreviousHead = strings.TrimSpace(string(outBefore))
 	res.CurrentHead = res.PreviousHead
 
-	// 1. Fetch remote commit metadata without modifying working tree
-	outFetch, errFetchBytes, errFetch := d.getGitExecutor()(opCtx, repoPath, "fetch", "origin", "main")
-	if errFetch != nil {
-		combinedFetch := string(append(outFetch, errFetchBytes...))
-		sanitizedOut := SanitizeLog(strings.TrimSpace(combinedFetch))
-		sanitizedErr := SanitizeLog(errFetch.Error())
-		log.Printf("[Hangar] Notice: git fetch origin main failed for %s (%s, %s). Attempting git pull fallback...", repoPath, sanitizedErr, sanitizedOut)
-
-		outPull, errPullBytes, errPull := d.getGitExecutor()(opCtx, repoPath, "pull", "--ff-only")
-		if errPull != nil {
-			combinedPull := string(append(outPull, errPullBytes...))
-			res.Error = fmt.Sprintf("fetch failed: %s; pull failed: %s", sanitizedOut, SanitizeLog(strings.TrimSpace(combinedPull)))
-			return res
-		}
-	} else {
-		// 2. Fast-forward merge verified clean upstream commit
-		outMerge, errMergeBytes, errMerge := d.getGitExecutor()(opCtx, repoPath, "merge", "--ff-only", "FETCH_HEAD")
-		if errMerge != nil {
-			combinedMerge := string(append(outMerge, errMergeBytes...))
-			sanitizedOut := SanitizeLog(strings.TrimSpace(combinedMerge))
-			sanitizedErr := SanitizeLog(errMerge.Error())
-			log.Printf("[Hangar] Notice: git merge --ff-only failed for %s (%s, %s). Attempting safe reset recovery...", repoPath, sanitizedErr, sanitizedOut)
-
-			outReset, errResetBytes, errReset := d.getGitExecutor()(opCtx, repoPath, "reset", "--hard", "FETCH_HEAD")
-			if errReset != nil {
-				combinedReset := string(append(outReset, errResetBytes...))
-				res.Error = fmt.Sprintf("reset failed: %s", SanitizeLog(combinedReset))
-				return res
-			}
-
-			if _, cleanStderr, cleanErr := d.getGitExecutor()(opCtx, repoPath, "clean", "-fd"); cleanErr != nil {
-				log.Printf("[Hangar] Warning: git clean -fd failed for %s: %s (%v)", repoPath, SanitizeLog(strings.TrimSpace(string(cleanStderr))), cleanErr)
-			}
-
-			log.Printf("[Hangar] Successfully recovered %s via reset to FETCH_HEAD", repoPath)
-		}
+	if syncErr := d.fetchAndFastForwardRepo(opCtx, repoPath); syncErr != "" {
+		res.Error = syncErr
+		return res
 	}
 
 	outAfter, _, err := d.getGitExecutor()(opCtx, repoPath, "rev-parse", "HEAD")
@@ -183,59 +150,103 @@ func (d *SyncDaemon) SyncRepo(ctx context.Context, repoPath string, syncCtx ...C
 	if res.PreviousHead != res.CurrentHead {
 		res.Changed = true
 		log.Printf("[Hangar] Repository %s updated: %s -> %s", repoPath, res.PreviousHead, res.CurrentHead)
+		d.enqueuePostSyncReconciliation(opCtx, repoPath, res.PreviousHead, res.CurrentHead, syncCtx)
+	}
 
-		nomadCfgChanged, errNomadCfg := d.HasNomadConfigChanges(opCtx, repoPath, res.PreviousHead, res.CurrentHead)
-		if errNomadCfg != nil {
-			log.Printf("[Hangar] Warning: Failed to check nomad config changes in %s: %v", repoPath, errNomadCfg)
+	return res
+}
+
+func (d *SyncDaemon) fetchAndFastForwardRepo(opCtx context.Context, repoPath string) string {
+	// 1. Fetch remote commit metadata without modifying working tree
+	outFetch, errFetchBytes, errFetch := d.getGitExecutor()(opCtx, repoPath, "fetch", "origin", "main")
+	if errFetch != nil {
+		combinedFetch := string(append(outFetch, errFetchBytes...))
+		sanitizedOut := SanitizeLog(strings.TrimSpace(combinedFetch))
+		sanitizedErr := SanitizeLog(errFetch.Error())
+		log.Printf("[Hangar] Notice: git fetch origin main failed for %s (%s, %s). Attempting git pull fallback...", repoPath, sanitizedErr, sanitizedOut)
+
+		outPull, errPullBytes, errPull := d.getGitExecutor()(opCtx, repoPath, "pull", "--ff-only")
+		if errPull != nil {
+			combinedPull := string(append(outPull, errPullBytes...))
+			return fmt.Sprintf("fetch failed: %s; pull failed: %s", sanitizedOut, SanitizeLog(strings.TrimSpace(combinedPull)))
 		}
-		if nomadCfgChanged {
-			log.Printf("[Hangar:GitOps] Nomad daemon configuration changes detected in %s (%s -> %s). Triggering debounced reconciliation.", repoPath, res.PreviousHead, res.CurrentHead)
-			d.recordPendingNomadServerRestart()
-			if d.reconcileCh != nil {
-				select {
-				case d.reconcileCh <- struct{}{}:
-				default:
-				}
-			}
+		return ""
+	}
+
+	// 2. Fast-forward merge verified clean upstream commit
+	outMerge, errMergeBytes, errMerge := d.getGitExecutor()(opCtx, repoPath, "merge", "--ff-only", "FETCH_HEAD")
+	if errMerge != nil {
+		combinedMerge := string(append(outMerge, errMergeBytes...))
+		sanitizedOut := SanitizeLog(strings.TrimSpace(combinedMerge))
+		sanitizedErr := SanitizeLog(errMerge.Error())
+		log.Printf("[Hangar] Notice: git merge --ff-only failed for %s (%s, %s). Attempting safe reset recovery...", repoPath, sanitizedErr, sanitizedOut)
+
+		outReset, errResetBytes, errReset := d.getGitExecutor()(opCtx, repoPath, "reset", "--hard", "FETCH_HEAD")
+		if errReset != nil {
+			combinedReset := string(append(outReset, errResetBytes...))
+			return fmt.Sprintf("reset failed: %s", SanitizeLog(combinedReset))
 		}
 
-		if len(syncCtx) > 0 && syncCtx[0].SkipPendingNomad {
-			return res
+		if _, cleanStderr, cleanErr := d.getGitExecutor()(opCtx, repoPath, "clean", "-fd"); cleanErr != nil {
+			log.Printf("[Hangar] Warning: git clean -fd failed for %s: %s (%v)", repoPath, SanitizeLog(strings.TrimSpace(string(cleanStderr))), cleanErr)
 		}
 
-		nomadChanges, errNomad := d.HasNomadChanges(opCtx, repoPath, res.PreviousHead, res.CurrentHead)
-		if errNomad != nil {
-			log.Printf("[Hangar] Warning: Failed to check Nomad changes in %s: %v", repoPath, errNomad)
-		}
-		if len(nomadChanges) > 0 {
-			log.Printf("[Hangar:GitOps] Nomad job changes detected in %s (%d changes). Triggering debounced reconciliation.", repoPath, len(nomadChanges))
-			var meta []string
-			if len(syncCtx) > 0 {
-				meta = []string{
-					syncCtx[0].Repo,
-					syncCtx[0].CommitSHA,
-					syncCtx[0].TargetID,
-					strconv.Itoa(syncCtx[0].PRNumber),
-				}
-			} else {
-				meta = []string{
-					NormalizeGitHubSlug(repoPath),
-					res.CurrentHead,
-					"",
-					"0",
-				}
-			}
-			d.recordPendingNomadChanges(repoPath, nomadChanges, meta...)
-			if d.reconcileCh != nil {
-				select {
-				case d.reconcileCh <- struct{}{}:
-				default:
-				}
+		log.Printf("[Hangar] Successfully recovered %s via reset to FETCH_HEAD", repoPath)
+	}
+
+	return ""
+}
+
+func (d *SyncDaemon) enqueuePostSyncReconciliation(opCtx context.Context, repoPath, prevHead, currHead string, syncCtx []ConfigSyncContext) {
+	nomadCfgChanged, errNomadCfg := d.HasNomadConfigChanges(opCtx, repoPath, prevHead, currHead)
+	if errNomadCfg != nil {
+		log.Printf("[Hangar] Warning: Failed to check nomad config changes in %s: %v", repoPath, errNomadCfg)
+	}
+	if nomadCfgChanged {
+		log.Printf("[Hangar:GitOps] Nomad daemon configuration changes detected in %s (%s -> %s). Triggering debounced reconciliation.", repoPath, prevHead, currHead)
+		d.recordPendingNomadServerRestart()
+		if d.reconcileCh != nil {
+			select {
+			case d.reconcileCh <- struct{}{}:
+			default:
 			}
 		}
 	}
 
-	return res
+	if len(syncCtx) > 0 && syncCtx[0].SkipPendingNomad {
+		return
+	}
+
+	nomadChanges, errNomad := d.HasNomadChanges(opCtx, repoPath, prevHead, currHead)
+	if errNomad != nil {
+		log.Printf("[Hangar] Warning: Failed to check Nomad changes in %s: %v", repoPath, errNomad)
+	}
+	if len(nomadChanges) > 0 {
+		log.Printf("[Hangar:GitOps] Nomad job changes detected in %s (%d changes). Triggering debounced reconciliation.", repoPath, len(nomadChanges))
+		var meta []string
+		if len(syncCtx) > 0 {
+			meta = []string{
+				syncCtx[0].Repo,
+				syncCtx[0].CommitSHA,
+				syncCtx[0].TargetID,
+				strconv.Itoa(syncCtx[0].PRNumber),
+			}
+		} else {
+			meta = []string{
+				NormalizeGitHubSlug(repoPath),
+				currHead,
+				"",
+				"0",
+			}
+		}
+		d.recordPendingNomadChanges(repoPath, nomadChanges, meta...)
+		if d.reconcileCh != nil {
+			select {
+			case d.reconcileCh <- struct{}{}:
+			default:
+			}
+		}
+	}
 }
 
 // TriggerSync runs a synchronous singleflight sync across all managed repositories.
@@ -615,6 +626,92 @@ func (d *SyncDaemon) getRepoCommit(ctx context.Context, repoPath, ref string) (s
 	return sha, nil, nil
 }
 
+func (d *SyncDaemon) resolveRepoGitHubSlug(ctx context.Context, repo string) string {
+	d.statusMu.RLock()
+	var ghSlug string
+	if d.repoGitHubSlugs != nil {
+		ghSlug = d.repoGitHubSlugs[repo]
+	}
+	d.statusMu.RUnlock()
+	if ghSlug != "" {
+		return ghSlug
+	}
+
+	out, _, err := d.getGitExecutor()(ctx, repo, "remote", "get-url", "origin")
+	if err != nil || len(out) == 0 {
+		out, _, err = d.getGitExecutor()(ctx, repo, "config", "--get", "remote.origin.url")
+	}
+	if err != nil {
+		out = nil
+	}
+	rawURL := strings.TrimSpace(string(out))
+	if rawURL == "" && d.repoUrls != nil {
+		rawURL = d.repoUrls[repo]
+	}
+	if rawURL == "" {
+		return ""
+	}
+
+	ghSlug = ParseGitHubSlug(rawURL)
+	if ghSlug != "" {
+		d.statusMu.Lock()
+		if d.repoGitHubSlugs == nil {
+			d.repoGitHubSlugs = make(map[string]string)
+		}
+		d.repoGitHubSlugs[repo] = ghSlug
+		d.statusMu.Unlock()
+	}
+	return ghSlug
+}
+
+func (d *SyncDaemon) buildSingleRepoStatus(ctx context.Context, repo string, syncTimes map[string]time.Time) RepoStatus {
+	st := RepoStatus{
+		Repo:       repo,
+		SyncStatus: "synced",
+	}
+
+	st.GitHubRepo = d.resolveRepoGitHubSlug(ctx, repo)
+
+	if t, ok := syncTimes[repo]; ok {
+		st.LastSyncTime = t
+	}
+
+	// Check disk HEAD
+	diskSha, diskTime, err := d.getRepoCommit(ctx, repo, "HEAD")
+	if err != nil {
+		st.SyncStatus = "error"
+		st.Error = fmt.Sprintf("failed to get disk HEAD: %v", SanitizeLog(err.Error()))
+		return st
+	}
+	st.DiskCommit = diskSha
+	st.DiskCommitTime = diskTime
+
+	// Check remote commit: try origin/main, fallback to FETCH_HEAD
+	remoteSha, remoteTime, err := d.getRepoCommit(ctx, repo, "origin/main")
+	if err != nil || remoteSha == "" {
+		remoteSha, remoteTime, err = d.getRepoCommit(ctx, repo, "FETCH_HEAD")
+	}
+	if err != nil || remoteSha == "" {
+		remoteSha = diskSha
+		remoteTime = diskTime
+	}
+	st.RemoteCommit = remoteSha
+	st.RemoteCommitTime = remoteTime
+
+	if diskTime != nil && remoteTime != nil {
+		lag := int64(remoteTime.Sub(*diskTime).Seconds())
+		if lag < 0 {
+			lag = 0
+		}
+		st.TimeLagSeconds = lag
+		if diskSha != remoteSha && lag > 0 {
+			st.SyncStatus = "lagging"
+		}
+	}
+
+	return st
+}
+
 // GetStatus computes real-time synchronization telemetry across all configured repositories.
 func (d *SyncDaemon) GetStatus(ctx context.Context) HangarStatusResponse {
 	rec := d.GetReconciliationStatus()
@@ -635,87 +732,13 @@ func (d *SyncDaemon) GetStatus(ctx context.Context) HangarStatusResponse {
 	var latestSync time.Time
 
 	for _, repo := range d.repos {
-		st := RepoStatus{
-			Repo:       repo,
-			SyncStatus: "synced",
+		st := d.buildSingleRepoStatus(ctx, repo, syncTimes)
+		if st.LastSyncTime.After(latestSync) {
+			latestSync = st.LastSyncTime
 		}
-
-		var ghSlug string
-		d.statusMu.RLock()
-		if d.repoGitHubSlugs != nil {
-			ghSlug = d.repoGitHubSlugs[repo]
+		if st.TimeLagSeconds > maxLag {
+			maxLag = st.TimeLagSeconds
 		}
-		d.statusMu.RUnlock()
-		if ghSlug == "" {
-			out, _, err := d.getGitExecutor()(ctx, repo, "remote", "get-url", "origin")
-			if err != nil || len(out) == 0 {
-				out, _, err = d.getGitExecutor()(ctx, repo, "config", "--get", "remote.origin.url")
-			}
-			if err != nil {
-				out = nil
-			}
-			rawURL := strings.TrimSpace(string(out))
-			if rawURL == "" && d.repoUrls != nil {
-				rawURL = d.repoUrls[repo]
-			}
-			if rawURL != "" {
-				ghSlug = ParseGitHubSlug(rawURL)
-				if ghSlug != "" {
-					d.statusMu.Lock()
-					if d.repoGitHubSlugs == nil {
-						d.repoGitHubSlugs = make(map[string]string)
-					}
-					d.repoGitHubSlugs[repo] = ghSlug
-					d.statusMu.Unlock()
-				}
-			}
-		}
-		st.GitHubRepo = ghSlug
-
-		if t, ok := syncTimes[repo]; ok {
-			st.LastSyncTime = t
-			if t.After(latestSync) {
-				latestSync = t
-			}
-		}
-
-		// Check disk HEAD
-		diskSha, diskTime, err := d.getRepoCommit(ctx, repo, "HEAD")
-		if err != nil {
-			st.SyncStatus = "error"
-			st.Error = fmt.Sprintf("failed to get disk HEAD: %v", SanitizeLog(err.Error()))
-			resp.Repos[repo] = st
-			continue
-		}
-		st.DiskCommit = diskSha
-		st.DiskCommitTime = diskTime
-
-		// Check remote commit: try origin/main, fallback to FETCH_HEAD
-		remoteSha, remoteTime, err := d.getRepoCommit(ctx, repo, "origin/main")
-		if err != nil || remoteSha == "" {
-			remoteSha, remoteTime, err = d.getRepoCommit(ctx, repo, "FETCH_HEAD")
-		}
-		if err != nil || remoteSha == "" {
-			remoteSha = diskSha
-			remoteTime = diskTime
-		}
-		st.RemoteCommit = remoteSha
-		st.RemoteCommitTime = remoteTime
-
-		if diskTime != nil && remoteTime != nil {
-			lag := int64(remoteTime.Sub(*diskTime).Seconds())
-			if lag < 0 {
-				lag = 0
-			}
-			st.TimeLagSeconds = lag
-			if lag > maxLag {
-				maxLag = lag
-			}
-			if diskSha != remoteSha && lag > 0 {
-				st.SyncStatus = "lagging"
-			}
-		}
-
 		resp.Repos[repo] = st
 	}
 

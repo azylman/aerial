@@ -291,69 +291,76 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 	d.DispatchDeployEvent(syncEvt)
 
 	if isAerialCore {
-		containersBuilding := errDiff == nil && HasContainerBuildChanges(repoPath, changedFiles)
-		if containersBuilding {
-			resp.ContainersBuilding = true
-		}
-
-		if errNomad == nil && len(nomadChanges) > 0 {
-			resp.NomadChanged = true
-			applied, deferred, errRec := d.applyNomadChangesDirectly(ctx, repoPath, nomadChanges, false, true, containersBuilding, changedFiles, expectedJobs, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
-			resp.AppliedJobs = applied
-			if len(deferred) > 0 {
-				resp.ContainersBuilding = true
-			}
-			if errRec != nil {
-				resp.Status = "error"
-				resp.Message = fmt.Sprintf("failed applying nomad changes: %v", errRec)
-				return resp, http.StatusInternalServerError
-			}
-			if resp.ContainersBuilding {
-				resp.Message = fmt.Sprintf("repository synced; applied %d nomad job(s), deferred container build rollout until image_ready", len(applied))
-			} else {
-				resp.Message = fmt.Sprintf("repository synced; applied %d nomad job(s)", len(applied))
-			}
-			return resp, http.StatusOK
-		}
-
-		if containersBuilding {
-			resp.Message = "repository synced; container build changes detected, deferring rollout until image_ready"
-			log.Printf("[Hangar:GitPush] Container build changes detected in %s (%d files). Deferring Nomad rollout.", repoPath, len(changedFiles))
-			return resp, http.StatusOK
-		}
-
-		resp.Message = "repository synced; no container build or nomad changes"
-		return resp, http.StatusOK
+		return d.handleAerialCorePush(ctx, repoPath, req, resp, changedFiles, errDiff, nomadChanges, errNomad, expectedJobs)
 	}
 
 	if isAerialConfig {
-		sc.DiffGated = true
-		sc.ChangedFiles = changedFiles
-
-		if len(nomadChanges) > 0 {
-			resp.NomadChanged = true
-			applied, deferred, errRec := d.applyNomadChangesDirectly(ctx, repoPath, nomadChanges, true, false, false, nil, expectedJobs, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
-			if errRec != nil {
-				log.Printf("[Hangar:GitPush] Notice: applyNomadChangesDirectly notice: %v", errRec)
-			}
-			resp.AppliedJobs = applied
-			if len(deferred) > 0 {
-				resp.ContainersBuilding = true
-				resp.Message = fmt.Sprintf("applied %d job(s); deferred %d job(s) pending container builds", len(applied), len(deferred))
-			} else {
-				resp.Message = fmt.Sprintf("applied %d nomad job(s)", len(applied))
-			}
-		} else {
-			resp.Message = "configuration synced; no nomad job changes"
-		}
-
-		sc.CommitSHA = commitSHA
-		d.syncAllConfigsToNomad(ctx, "[Hangar:GitPush]", repoPath, sc)
-
-		return resp, http.StatusOK
+		return d.handleAerialConfigPush(ctx, repoPath, req, sc, resp, changedFiles, nomadChanges, expectedJobs)
 	}
 
 	resp.Message = "repository synced"
+	return resp, http.StatusOK
+}
+
+func (d *SyncDaemon) handleAerialCorePush(ctx context.Context, repoPath string, req GitPushEventRequest, resp GitPushEventResponse, changedFiles []string, errDiff error, nomadChanges []NomadFileChange, errNomad error, expectedJobs []string) (GitPushEventResponse, int) {
+	containersBuilding := errDiff == nil && HasContainerBuildChanges(repoPath, changedFiles)
+	if containersBuilding {
+		resp.ContainersBuilding = true
+	}
+
+	if errNomad == nil && len(nomadChanges) > 0 {
+		resp.NomadChanged = true
+		applied, deferred, errRec := d.applyNomadChangesDirectly(ctx, repoPath, nomadChanges, false, true, containersBuilding, changedFiles, expectedJobs, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
+		resp.AppliedJobs = applied
+		if len(deferred) > 0 {
+			resp.ContainersBuilding = true
+		}
+		if errRec != nil {
+			resp.Status = "error"
+			resp.Message = fmt.Sprintf("failed applying nomad changes: %v", errRec)
+			return resp, http.StatusInternalServerError
+		}
+		if resp.ContainersBuilding {
+			resp.Message = fmt.Sprintf("repository synced; applied %d nomad job(s), deferred container build rollout until image_ready", len(applied))
+		} else {
+			resp.Message = fmt.Sprintf("repository synced; applied %d nomad job(s)", len(applied))
+		}
+		return resp, http.StatusOK
+	}
+
+	if containersBuilding {
+		resp.Message = "repository synced; container build changes detected, deferring rollout until image_ready"
+		log.Printf("[Hangar:GitPush] Container build changes detected in %s (%d files). Deferring Nomad rollout.", repoPath, len(changedFiles))
+		return resp, http.StatusOK
+	}
+
+	resp.Message = "repository synced; no container build or nomad changes"
+	return resp, http.StatusOK
+}
+
+func (d *SyncDaemon) handleAerialConfigPush(ctx context.Context, repoPath string, req GitPushEventRequest, sc ConfigSyncContext, resp GitPushEventResponse, changedFiles []string, nomadChanges []NomadFileChange, expectedJobs []string) (GitPushEventResponse, int) {
+	sc.DiffGated = true
+	sc.ChangedFiles = changedFiles
+
+	if len(nomadChanges) > 0 {
+		resp.NomadChanged = true
+		applied, deferred, errRec := d.applyNomadChangesDirectly(ctx, repoPath, nomadChanges, true, false, false, nil, expectedJobs, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
+		if errRec != nil {
+			log.Printf("[Hangar:GitPush] Notice: applyNomadChangesDirectly notice: %v", errRec)
+		}
+		resp.AppliedJobs = applied
+		if len(deferred) > 0 {
+			resp.ContainersBuilding = true
+			resp.Message = fmt.Sprintf("applied %d job(s); deferred %d job(s) pending container builds", len(applied), len(deferred))
+		} else {
+			resp.Message = fmt.Sprintf("applied %d nomad job(s)", len(applied))
+		}
+	} else {
+		resp.Message = "configuration synced; no nomad job changes"
+	}
+
+	d.syncAllConfigsToNomad(ctx, "[Hangar:GitPush]", repoPath, sc)
+
 	return resp, http.StatusOK
 }
 
@@ -425,77 +432,11 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 	var appliedJobs []string
 	var runErrors []string
 	for _, job := range matches {
-		content, readErr := os.ReadFile(job.JobPath)
-		if readErr != nil {
-			log.Printf("[Hangar:ImageReady] Failed reading job file %s: %v", job.JobPath, readErr)
-			runErrors = append(runErrors, fmt.Sprintf("%s: read error: %v", job.JobName, readErr))
+		if err := d.applyImageReadyToJob(ctx, job, req, imgRef, digest); err != nil {
+			runErrors = append(runErrors, err.Error())
 			continue
 		}
-
-		jobSpec := string(content)
-
-		if errVal := d.ValidateNomadJob(ctx, job.JobPath); errVal != nil {
-			log.Printf("[Hangar:ImageReady] Validation failed for job %s (%s): %v", job.JobName, job.JobPath, errVal)
-			runErrors = append(runErrors, fmt.Sprintf("%s validation failed: %v", job.JobName, errVal))
-			continue
-		}
-
-		baseEvt := HangarDeployEvent{
-			JobName:   job.JobName,
-			Repo:      req.Repo,
-			CommitSHA: req.CommitSHA,
-			PRNumber:  req.PRNumber,
-			TargetID:  req.TargetID,
-			Image:     req.Image,
-			Digest:    digest,
-		}
-
-		runArgs := []string{"job", "run", "-detach"}
-		varInjected := false
-		if HasNomadJobVariable(jobSpec, "image_tag") {
-			tag := req.CommitSHA
-			if tag == "" {
-				if digest != "" {
-					cleanDigest := strings.TrimPrefix(digest, "@")
-					if !strings.HasPrefix(cleanDigest, "sha256:") {
-						cleanDigest = "sha256:" + cleanDigest
-					}
-					tag = "latest@" + cleanDigest
-				} else {
-					tag = "latest"
-				}
-			}
-			runArgs = append(runArgs, "-var=image_tag="+tag)
-			varInjected = true
-		}
-		runArgs = append(runArgs, job.JobPath)
-
-		log.Printf("[Hangar:ImageReady] Applying Nomad job %s from %s (args: %v)...", job.JobName, job.JobPath, runArgs)
-		if _, sanitizedCombined, errRun := d.runNomadJobWithEvents(ctx, baseEvt, runArgs...); errRun != nil {
-			log.Printf("[Hangar:ImageReady] Error: job run failed for %s: %s (%v)", job.JobName, sanitizedCombined, errRun)
-			runErrors = append(runErrors, fmt.Sprintf("%s: %v", job.JobName, errRun))
-			continue
-		}
-
-		if !varInjected {
-			log.Printf("[Hangar:ImageReady] Rescheduling allocation restart for unparameterized job %s...", job.JobName)
-			outRest, errRestBytes, errRest := d.getNomadExecutor()(ctx, "job", "restart", "-yes", "-reschedule", "-on-error=fail", job.JobName)
-			if errRest != nil {
-				log.Printf("[Hangar:ImageReady] Warning: job restart -reschedule failed for %s: %s (%v)", job.JobName, SanitizeLog(strings.TrimSpace(string(append(outRest, errRestBytes...)))), errRest)
-			}
-		}
-
 		appliedJobs = append(appliedJobs, job.JobName)
-
-		if digest != "" {
-			key := job.JobName + ":" + imgRef
-			d.nomadDigestsMu.Lock()
-			if d.nomadKnownDigests == nil {
-				d.nomadKnownDigests = make(map[string]string)
-			}
-			d.nomadKnownDigests[key] = digest
-			d.nomadDigestsMu.Unlock()
-		}
 	}
 
 	if len(runErrors) > 0 {
@@ -514,6 +455,82 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 		MatchedJobs: appliedJobs,
 		Message:     fmt.Sprintf("successfully applied %d matching nomad job(s)", len(appliedJobs)),
 	}, http.StatusOK
+}
+
+func buildImageReadyNomadRunArgs(jobSpec, jobPath, commitSHA, digest string) ([]string, bool) {
+	runArgs := []string{"job", "run", "-detach"}
+	varInjected := false
+	if HasNomadJobVariable(jobSpec, "image_tag") {
+		tag := commitSHA
+		if tag == "" {
+			if digest != "" {
+				cleanDigest := strings.TrimPrefix(digest, "@")
+				if !strings.HasPrefix(cleanDigest, "sha256:") {
+					cleanDigest = "sha256:" + cleanDigest
+				}
+				tag = "latest@" + cleanDigest
+			} else {
+				tag = "latest"
+			}
+		}
+		runArgs = append(runArgs, "-var=image_tag="+tag)
+		varInjected = true
+	}
+	runArgs = append(runArgs, jobPath)
+	return runArgs, varInjected
+}
+
+func (d *SyncDaemon) applyImageReadyToJob(ctx context.Context, job MatchedNomadJob, req ImageReadyEventRequest, imgRef, digest string) error {
+	content, readErr := os.ReadFile(job.JobPath)
+	if readErr != nil {
+		log.Printf("[Hangar:ImageReady] Failed reading job file %s: %v", job.JobPath, readErr)
+		return fmt.Errorf("%s: read error: %w", job.JobName, readErr)
+	}
+
+	jobSpec := string(content)
+
+	if errVal := d.ValidateNomadJob(ctx, job.JobPath); errVal != nil {
+		log.Printf("[Hangar:ImageReady] Validation failed for job %s (%s): %v", job.JobName, job.JobPath, errVal)
+		return fmt.Errorf("%s validation failed: %w", job.JobName, errVal)
+	}
+
+	baseEvt := HangarDeployEvent{
+		JobName:   job.JobName,
+		Repo:      req.Repo,
+		CommitSHA: req.CommitSHA,
+		PRNumber:  req.PRNumber,
+		TargetID:  req.TargetID,
+		Image:     req.Image,
+		Digest:    digest,
+	}
+
+	runArgs, varInjected := buildImageReadyNomadRunArgs(jobSpec, job.JobPath, req.CommitSHA, digest)
+
+	log.Printf("[Hangar:ImageReady] Applying Nomad job %s from %s (args: %v)...", job.JobName, job.JobPath, runArgs)
+	if _, sanitizedCombined, errRun := d.runNomadJobWithEvents(ctx, baseEvt, runArgs...); errRun != nil {
+		log.Printf("[Hangar:ImageReady] Error: job run failed for %s: %s (%v)", job.JobName, sanitizedCombined, errRun)
+		return fmt.Errorf("%s: %w", job.JobName, errRun)
+	}
+
+	if !varInjected {
+		log.Printf("[Hangar:ImageReady] Rescheduling allocation restart for unparameterized job %s...", job.JobName)
+		outRest, errRestBytes, errRest := d.getNomadExecutor()(ctx, "job", "restart", "-yes", "-reschedule", "-on-error=fail", job.JobName)
+		if errRest != nil {
+			log.Printf("[Hangar:ImageReady] Warning: job restart -reschedule failed for %s: %s (%v)", job.JobName, SanitizeLog(strings.TrimSpace(string(append(outRest, errRestBytes...)))), errRest)
+		}
+	}
+
+	if digest != "" {
+		key := job.JobName + ":" + imgRef
+		d.nomadDigestsMu.Lock()
+		if d.nomadKnownDigests == nil {
+			d.nomadKnownDigests = make(map[string]string)
+		}
+		d.nomadKnownDigests[key] = digest
+		d.nomadDigestsMu.Unlock()
+	}
+
+	return nil
 }
 
 // EnqueueImageReadyEvent validates an incoming image ready notification, records all matching
@@ -571,6 +588,28 @@ func (d *SyncDaemon) EnqueueImageReadyEvent(req ImageReadyEventRequest) (ImageRe
 	}, http.StatusAccepted
 }
 
+func resetDebounceTimer(timer *time.Timer, d time.Duration) (*time.Timer, <-chan time.Time) {
+	if timer != nil {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}
+	t := time.NewTimer(d)
+	return t, t.C
+}
+
+func (d *SyncDaemon) safeExecutePendingImageRollouts(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[Hangar:ImageRollout] PANIC recovered in executePendingImageRollouts: %v", r)
+		}
+	}()
+	d.executePendingImageRollouts(ctx)
+}
+
 // StartImageRolloutLoop runs the background debounced worker goroutine for image rollouts.
 func (d *SyncDaemon) StartImageRolloutLoop(ctx context.Context) {
 	if d.imageRolloutCh == nil {
@@ -602,26 +641,10 @@ func (d *SyncDaemon) StartImageRolloutLoop(ctx context.Context) {
 				}
 				return
 			case <-d.imageRolloutCh:
-				if debounceTimer != nil {
-					if !debounceTimer.Stop() {
-						select {
-						case <-debounceTimer.C:
-						default:
-						}
-					}
-				}
-				debounceTimer = time.NewTimer(debounceDuration)
-				timerCh = debounceTimer.C
+				debounceTimer, timerCh = resetDebounceTimer(debounceTimer, debounceDuration)
 			case <-timerCh:
 				timerCh = nil
-				func() {
-					defer func() {
-						if r := recover(); r != nil {
-							log.Printf("[Hangar:ImageRollout] PANIC recovered in executePendingImageRollouts: %v", r)
-						}
-					}()
-					d.executePendingImageRollouts(ctx)
-				}()
+				d.safeExecutePendingImageRollouts(ctx)
 			}
 		}
 	}()
