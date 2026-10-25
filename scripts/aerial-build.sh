@@ -151,7 +151,7 @@ cmd_enqueue() {
     resp="$(vanadis_request "POST" "/builds" "$payload")"
 
     if printf '%s' "$resp" | jq empty >/dev/null 2>&1; then
-        printf '%s\n' "$resp" | jq '. + {"turn_action": "end_turn"}'
+        printf '%s\n' "$resp" | jq 'if .chunks then .chunks |= map({id, chunk_index, title, effort, status}) else . end + {"turn_action": "end_turn"}'
     else
         printf '%s\n' "$resp"
     fi

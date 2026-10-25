@@ -96,7 +96,7 @@ fi
 
 case "${METHOD}:${URL}" in
     POST:*/builds)
-        printf '{"status":"accepted","build_id":"build-test-101","chunk_count":2}\n202\n'
+        printf '{"status":"accepted","build_id":"build-test-101","chunk_count":2,"chunks":[{"id":"c1","chunk_index":0,"title":"Chunk 1","instructions":"huge instructions blob","effort":"high","status":"pending"}]}\n202\n'
         ;;
     GET:*/builds/build-test-101)
         printf '{"build":{"id":"build-test-101","status":"running"},"chunks":[]}\n200\n'
@@ -147,6 +147,8 @@ EOF
 ENQUEUE_OUT="$(VANADIS_URL="http://127.0.0.1:4025" DISCORD_THREAD_ID="1555888999" "$AERIAL_BUILD" enqueue --file "$PLAN_JSON")"
 assert_eq "end_turn" "$(printf '%s' "$ENQUEUE_OUT" | jq -r '.turn_action')" "enqueue response includes turn_action: end_turn"
 assert_eq "build-test-101" "$(printf '%s' "$ENQUEUE_OUT" | jq -r '.build_id')" "enqueue response includes build_id"
+assert_eq "Chunk 1" "$(printf '%s' "$ENQUEUE_OUT" | jq -r '.chunks[0].title')" "enqueue response retains chunk metadata"
+assert_eq "null" "$(printf '%s' "$ENQUEUE_OUT" | jq -r '.chunks[0].instructions')" "enqueue response strips verbose chunk instructions"
 assert_eq "1555888999" "$(jq -r '.thread_id' "$CAPTURED_BODY")" "DISCORD_THREAD_ID injected into request payload when thread_id is missing"
 assert_eq "POST http://127.0.0.1:4025/builds" "$(cat "$CAPTURED_REQ")" "enqueue dispatches POST /builds"
 

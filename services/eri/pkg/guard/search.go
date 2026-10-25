@@ -30,70 +30,92 @@ var binaryDirs = []string{
 	"/usr/local/sbin",
 }
 
+var grepValueFlags = map[string]bool{
+	"-A": true, "-B": true, "-C": true,
+	"-g": true, "--glob": true, "--iglob": true,
+	"-t": true, "--type": true, "-T": true, "--type-not": true,
+	"--include": true,
+}
+
+var grepMatchLimitLongFlags = map[string]bool{
+	"--max-count":           true,
+	"--files-with-matches":  true,
+	"--files-without-match": true,
+	"--files":               true,
+	"--count":               true,
+	"--count-matches":       true,
+	"--quiet":               true,
+	"--silent":              true,
+}
+
 // splitPipeline splits a shell command line on ;, &&, ||, and | respecting single and double quotes.
 func splitPipeline(cmd string) []string {
+	cmds, _ := splitPipelineSegments(cmd)
+	return cmds
+}
+
+func detectDelimiter(chars []rune, i int) (op rune, advance int) {
+	r := chars[i]
+	if r == '&' && i+1 < len(chars) && chars[i+1] == '&' {
+		return '&', 1
+	}
+	if r == '|' && i+1 < len(chars) && chars[i+1] == '|' {
+		return ';', 1
+	}
+	if r == ';' || r == '|' || r == '\n' {
+		return r, 0
+	}
+	return 0, 0
+}
+
+func splitPipelineSegments(cmd string) ([]string, []rune) {
 	var cmds []string
+	var ops []rune
 	var current strings.Builder
-	inSingle := false
-	inDouble := false
-	escaped := false
+	var lastOp rune
+	inSingle, inDouble, escaped := false, false, false
+
+	flush := func(nextOp rune) {
+		if s := strings.TrimSpace(current.String()); s != "" {
+			cmds = append(cmds, s)
+			ops = append(ops, lastOp)
+			lastOp = nextOp
+		} else if nextOp == '|' {
+			lastOp = nextOp
+		}
+		current.Reset()
+	}
 
 	chars := []rune(cmd)
 	for i := 0; i < len(chars); i++ {
 		r := chars[i]
-		if escaped {
+		switch {
+		case escaped:
 			current.WriteRune(r)
 			escaped = false
-			continue
-		}
-		if r == '\\' && !inSingle {
+		case r == '\\' && !inSingle:
 			escaped = true
 			current.WriteRune(r)
-			continue
-		}
-		if r == '\'' && !inDouble {
+		case r == '\'' && !inDouble:
 			inSingle = !inSingle
 			current.WriteRune(r)
-			continue
-		}
-		if r == '"' && !inSingle {
+		case r == '"' && !inSingle:
 			inDouble = !inDouble
 			current.WriteRune(r)
-			continue
+		case !inSingle && !inDouble:
+			if op, adv := detectDelimiter(chars, i); op != 0 {
+				flush(op)
+				i += adv
+				continue
+			}
+			current.WriteRune(r)
+		default:
+			current.WriteRune(r)
 		}
-
-		if !inSingle && !inDouble {
-			if r == '&' && i+1 < len(chars) && chars[i+1] == '&' {
-				if s := strings.TrimSpace(current.String()); s != "" {
-					cmds = append(cmds, s)
-				}
-				current.Reset()
-				i++
-				continue
-			}
-			if r == '|' && i+1 < len(chars) && chars[i+1] == '|' {
-				if s := strings.TrimSpace(current.String()); s != "" {
-					cmds = append(cmds, s)
-				}
-				current.Reset()
-				i++
-				continue
-			}
-			if r == ';' || r == '|' || r == '\n' {
-				if s := strings.TrimSpace(current.String()); s != "" {
-					cmds = append(cmds, s)
-				}
-				current.Reset()
-				continue
-			}
-		}
-		current.WriteRune(r)
 	}
 
-	if s := strings.TrimSpace(current.String()); s != "" {
-		cmds = append(cmds, s)
-	}
-	return cmds
+	flush(0)
+	return cmds, ops
 }
 
 // tokenizeQuoteAware tokenizes a single command respecting single and double quotes.
@@ -155,8 +177,8 @@ func CheckSearchWithSQL(toolName string, args ToolArgs, describer SQLDescriber) 
 		return &Decision{Decision: DecisionAllow}
 	}
 
-	commands := splitPipeline(cmdLine)
-	for _, cmd := range commands {
+	commands, ops := splitPipelineSegments(cmdLine)
+	for idx, cmd := range commands {
 		tokens := tokenizeQuoteAware(cmd)
 		if len(tokens) == 0 {
 			continue
@@ -174,7 +196,7 @@ func CheckSearchWithSQL(toolName string, args ToolArgs, describer SQLDescriber) 
 
 		// 2. Evaluate grep / search / strings commands
 		if isGrepOrSearchBinary(bin) {
-			if dec := inspectGrepCommand(bin, tokens); dec != nil {
+			if dec := inspectGrepCommand(bin, tokens, ops[idx] == '|'); dec != nil {
 				return dec
 			}
 			continue
@@ -192,6 +214,33 @@ func isGrepOrSearchBinary(bin string) bool {
 	default:
 		return false
 	}
+}
+
+func hasShortFlag(token string, flag rune) bool {
+	if !strings.HasPrefix(token, "-") || strings.HasPrefix(token, "--") {
+		return false
+	}
+	for _, r := range token[1:] {
+		if r >= '0' && r <= '9' {
+			break
+		}
+		if r == flag {
+			return true
+		}
+	}
+	return false
+}
+
+func isGrepMatchLimitFlag(t string) (isLimit, takesArg bool) {
+	if grepMatchLimitLongFlags[t] || strings.HasPrefix(t, "--max-count=") {
+		return true, t == "--max-count"
+	}
+	for _, f := range []rune{'m', 'l', 'L', 'c', 'q'} {
+		if hasShortFlag(t, f) {
+			return true, f == 'm' && strings.HasSuffix(t, "m")
+		}
+	}
+	return false, false
 }
 
 func inspectFindCommand(tokens []string, cwd string) *Decision {
@@ -251,46 +300,95 @@ func inspectFindCommand(tokens []string, cwd string) *Decision {
 	return nil
 }
 
-func inspectGrepCommand(bin string, tokens []string) *Decision {
-	hasExcludeDir := false
-	isRecursive := (bin == "rg" || bin == "ag" || bin == "ack")
-	hasExplicitPattern := false
+func validateGrepPathToken(pt string) *Decision {
+	clean := filepath.Clean(pt)
+	if clean == "/" || clean == "/proc" || clean == "/sys" || clean == "/dev" {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Unconstrained root search detected. Avoid searching the root filesystem ('/') or system directories directly. Scope searches to specific package or workspace directories.",
+		}
+	}
+	if clean == ".git" || strings.HasPrefix(clean, ".git/") || clean == "node_modules" || strings.HasPrefix(clean, "node_modules/") {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Direct search into large internal repository directory (.git/node_modules) detected. Exclude internal version control and dependency trees from searches.",
+		}
+	}
+	if binaryExtensions[strings.ToLower(filepath.Ext(clean))] {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Binary search detected. Scanning compiled system binaries or archive files with grep/strings is prohibited. Inspect source code or documentation instead.",
+		}
+	}
+	for _, bDir := range binaryDirs {
+		if clean == bDir || strings.HasPrefix(clean, bDir+"/") {
+			return &Decision{
+				Decision: DecisionDeny,
+				Reason:   "Binary directory search detected. Scanning system binary directories is prohibited. Inspect source code or documentation instead.",
+			}
+		}
+	}
+	return nil
+}
 
+func isStandardGrep(bin string) bool {
+	return bin == "grep" || bin == "egrep" || bin == "fgrep"
+}
+
+func hasBroadPathToken(pathTokens []string) bool {
+	for _, pt := range pathTokens {
+		switch filepath.Clean(pt) {
+		case ".", "..", "/share", "/share/aerial", "/data":
+			return true
+		}
+	}
+	return false
+}
+
+func inspectGrepCommand(bin string, tokens []string, fromPipe bool) *Decision {
+	hasExcludeDir, hasMatchLimit, hasExplicitPattern := false, false, false
+	isRecursive := (bin == "rg" || bin == "ag" || bin == "ack")
 	var pathTokens []string
 
 	for i := 1; i < len(tokens); i++ {
 		t := tokens[i]
+		if t == "-h" || t == "--help" || t == "-V" || t == "--version" {
+			return nil
+		}
 		if strings.HasPrefix(t, "-") {
 			if strings.HasPrefix(t, "--exclude-dir") || strings.HasPrefix(t, "--exclude") {
 				hasExcludeDir = true
 				if (t == "--exclude-dir" || t == "--exclude") && i+1 < len(tokens) {
-					i++ // skip the exclude dir argument
+					i++
 				}
 			}
-			// Only short flags (-r, -rn, -inr) or explicit --recursive enable recursive mode for grep.
-			// Do NOT match long flags like --color or --ignore-case just because they contain the letter 'r'.
-			if t == "-r" || t == "-R" || t == "--recursive" || (!strings.HasPrefix(t, "--") && (strings.Contains(t, "r") || strings.Contains(t, "R"))) {
-				if bin == "grep" || bin == "egrep" || bin == "fgrep" {
-					isRecursive = true
+			if isStandardGrep(bin) && (t == "--recursive" || hasShortFlag(t, 'r') || hasShortFlag(t, 'R')) {
+				isRecursive = true
+			}
+			if limit, takesArg := isGrepMatchLimitFlag(t); limit {
+				hasMatchLimit = true
+				if t == "--files" {
+					hasExplicitPattern = true
+				}
+				if takesArg && i+1 < len(tokens) {
+					i++
 				}
 			}
-			if t == "-e" || t == "-f" {
+			if t == "-e" || t == "-f" || t == "--regexp" || t == "--file" {
 				hasExplicitPattern = true
-				i++ // skip pattern argument
+				i++
+			} else if grepValueFlags[t] && i+1 < len(tokens) {
+				i++
 			}
 			continue
 		}
-
-		// First non-flag token is pattern unless -e was passed
 		if !hasExplicitPattern {
 			hasExplicitPattern = true
 			continue
 		}
-
 		pathTokens = append(pathTokens, t)
 	}
 
-	// For commands like `strings`, all non-flag tokens are target file paths
 	if bin == "strings" {
 		pathTokens = nil
 		for _, t := range tokens[1:] {
@@ -301,53 +399,22 @@ func inspectGrepCommand(bin string, tokens []string) *Decision {
 	}
 
 	for _, pt := range pathTokens {
-		clean := filepath.Clean(pt)
-
-		// Rule 1: Root search
-		if clean == "/" || clean == "/proc" || clean == "/sys" || clean == "/dev" {
-			return &Decision{
-				Decision: DecisionDeny,
-				Reason:   "Unconstrained root search detected. Avoid searching the root filesystem ('/') or system directories directly. Scope searches to specific package or workspace directories.",
-			}
-		}
-
-		// Rule 3: Giant directory search
-		if clean == ".git" || strings.HasPrefix(clean, ".git/") || clean == "node_modules" || strings.HasPrefix(clean, "node_modules/") {
-			return &Decision{
-				Decision: DecisionDeny,
-				Reason:   "Direct search into large internal repository directory (.git/node_modules) detected. Exclude internal version control and dependency trees from searches.",
-			}
-		}
-
-		// Rule 4: Binary search (extension or system binary dir)
-		ext := strings.ToLower(filepath.Ext(clean))
-		if binaryExtensions[ext] {
-			return &Decision{
-				Decision: DecisionDeny,
-				Reason:   "Binary search detected. Scanning compiled system binaries or archive files with grep/strings is prohibited. Inspect source code or documentation instead.",
-			}
-		}
-
-		for _, bDir := range binaryDirs {
-			if clean == bDir || strings.HasPrefix(clean, bDir+"/") {
-				return &Decision{
-					Decision: DecisionDeny,
-					Reason:   "Binary directory search detected. Scanning system binary directories is prohibited. Inspect source code or documentation instead.",
-				}
-			}
+		if dec := validateGrepPathToken(pt); dec != nil {
+			return dec
 		}
 	}
 
-	// For recursive standard grep targeting broad paths, require --exclude-dir
-	if isRecursive && (bin == "grep" || bin == "egrep" || bin == "fgrep") && !hasExcludeDir {
-		for _, pt := range pathTokens {
-			clean := filepath.Clean(pt)
-			if clean == "." || clean == ".." || clean == "/share" || clean == "/share/aerial" || clean == "/data" {
-				return &Decision{
-					Decision: DecisionDeny,
-					Reason:   "Recursive grep without directory exclusions detected. Add '--exclude-dir=.git' (or use ripgrep/rg, which excludes .git by default) to prevent scanning raw git packfiles and binary objects.",
-				}
-			}
+	if isRecursive && isStandardGrep(bin) && !hasExcludeDir && hasBroadPathToken(pathTokens) {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Recursive grep without directory exclusions detected. Add '--exclude-dir=.git' (or use ripgrep/rg, which excludes .git by default) to prevent scanning raw git packfiles and binary objects.",
+		}
+	}
+
+	if isRecursive && !(fromPipe && len(pathTokens) == 0) && !hasMatchLimit {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Unbounded recursive text search detected. Bound output with '-m <N>' / '--max-count=<N>' (e.g. 'rg -n -m 20 <pattern> <path>'), '-l' ('--files-with-matches'), or '-c' ('--count') per the shell-filesystem-traversal skill to prevent context window bloat.",
 		}
 	}
 
