@@ -48,7 +48,7 @@ func parseRawJSONMap(raw json.RawMessage) map[string]any {
 	return nil
 }
 
-var sqlWildcardReplacer = strings.NewReplacer("*", " * ", ",", " , ", ".", " . ", "(", " ( ", ")", " ) ")
+var sqlWildcardReplacer = strings.NewReplacer("*", " * ", ",", " , ", ".", " . ", "(", " ( ", ")", " ) ", ";", " ; ")
 
 func skipSQLSingleQuote(sqlStr string, i int) int {
 	for i++; i < len(sqlStr); i++ {

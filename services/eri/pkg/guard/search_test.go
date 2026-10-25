@@ -63,96 +63,98 @@ func TestCheckSearch(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		tool     string
-		cmd      string
-		cwd      string
-		wantDeny bool
+		name             string
+		tool             string
+		cmd              string
+		cwd              string
+		wantDeny         bool
+		wantOverwriteSub string
 	}{
 		// Non-search tools / empty / prefix cases
-		{"write_to_file allowed", "write_to_file", "find /", "", false},
-		{"empty command line allowed", "run_command", "", "", false},
-		{"whitespace command line allowed", "run_command", "   ", "", false},
-		{"default_api prefix deny", "default_api:run_command", "find . -name '*.go'", "", true},
-		{"empty grep_search allowed", "grep_search", "", "", false},
-		{"empty find_by_name allowed", "find_by_name", "", "", false},
-		{"escaped quote allowed", "run_command", `echo \"escaped\ quote\" && find . -maxdepth 1`, "", false},
-		{"repeated delimiters allowed", "run_command", `echo 1 ; ; echo 2 | | echo 3`, "", false},
+		{"write_to_file allowed", "write_to_file", "find /", "", false, ""},
+		{"empty command line allowed", "run_command", "", "", false, ""},
+		{"whitespace command line allowed", "run_command", "   ", "", false, ""},
+		{"default_api prefix deny", "default_api:run_command", "find . -name '*.go'", "", true, ""},
+		{"empty grep_search allowed", "grep_search", "", "", false, ""},
+		{"empty find_by_name allowed", "find_by_name", "", "", false, ""},
+		{"escaped quote allowed", "run_command", `echo \"escaped\ quote\" && find . -maxdepth 1`, "", false, ""},
+		{"repeated delimiters allowed", "run_command", `echo 1 ; ; echo 2 | | echo 3`, "", false, ""},
 
 		// Find commands
-		{"find targeting root directory denied", "run_command", "find / -maxdepth 1 -name '*.go'", "", true},
-		{"find targeting /proc denied", "run_command", "find /proc -maxdepth 1", "", true},
-		{"find targeting /sys denied", "run_command", "find /sys -maxdepth 1", "", true},
-		{"find dot when cwd is root denied", "run_command", "find . -maxdepth 1", "/", true},
-		{"find without maxdepth denied", "run_command", "find . -name '*.go'", "", true},
-		{"find in share without maxdepth denied", "run_command", "find /share/aerial -type f", "", true},
-		{"find with -maxdepth allowed", "run_command", "find . -maxdepth 2 -name '*.go'", "", false},
-		{"find with --maxdepth allowed", "run_command", "find /share/aerial -maxdepth 3 -type f", "", false},
-		{"find with -mtime flag allowed", "run_command", "find . -maxdepth 1 -mtime 1 -type f", "", false},
-		{"find --help allowed", "run_command", "find --help", "", false},
-		{"find -help allowed", "run_command", "find -help", "", false},
-		{"find --version allowed", "run_command", "find --version", "", false},
-		{"find targeting .git denied", "run_command", "find .git -maxdepth 1", "", true},
-		{"find targeting node_modules denied", "run_command", "find node_modules -maxdepth 1", "", true},
+		{"find targeting root directory denied", "run_command", "find / -maxdepth 1 -name '*.go'", "", true, ""},
+		{"find targeting /proc denied", "run_command", "find /proc -maxdepth 1", "", true, ""},
+		{"find targeting /sys denied", "run_command", "find /sys -maxdepth 1", "", true, ""},
+		{"find dot when cwd is root denied", "run_command", "find . -maxdepth 1", "/", true, ""},
+		{"find without maxdepth denied", "run_command", "find . -name '*.go'", "", true, ""},
+		{"find in share without maxdepth denied", "run_command", "find /share/aerial -type f", "", true, ""},
+		{"find with -maxdepth allowed", "run_command", "find . -maxdepth 2 -name '*.go'", "", false, ""},
+		{"find with --maxdepth allowed", "run_command", "find /share/aerial -maxdepth 3 -type f", "", false, ""},
+		{"find with -mtime flag allowed", "run_command", "find . -maxdepth 1 -mtime 1 -type f", "", false, ""},
+		{"find --help allowed", "run_command", "find --help", "", false, ""},
+		{"find -help allowed", "run_command", "find -help", "", false, ""},
+		{"find --version allowed", "run_command", "find --version", "", false, ""},
+		{"find targeting .git denied", "run_command", "find .git -maxdepth 1", "", true, ""},
+		{"find targeting node_modules denied", "run_command", "find node_modules -maxdepth 1", "", true, ""},
 
 		// Grep commands
-		{"grep -r targeting root denied", "run_command", "grep -r 'pattern' /", "", true},
-		{"grep -r targeting /proc denied", "run_command", "grep -r 'pattern' /proc", "", true},
-		{"rg targeting root denied", "run_command", "rg 'pattern' /", "", true},
-		{"grep targeting .git denied", "run_command", "grep -r 'pattern' .git", "", true},
-		{"grep targeting node_modules denied", "run_command", "grep -r 'pattern' node_modules", "", true},
-		{"recursive grep without exclude-dir denied", "run_command", "grep -r 'pattern' .", "", true},
-		{"recursive grep targeting /share without exclude-dir denied", "run_command", "grep -rn 'pattern' /share", "", true},
-		{"recursive grep with --exclude-dir but no match limit denied", "run_command", "grep -rn --exclude-dir=.git 'pattern' .", "", true},
-		{"recursive grep with --exclude-dir and -m allowed", "run_command", "grep -rn -m 20 --exclude-dir=.git 'pattern' .", "", false},
-		{"recursive grep with space-delimited --exclude-dir and -l allowed", "run_command", "grep -rn -l --exclude-dir node_modules 'pattern' .", "", false},
-		{"non-recursive grep with --color allowed", "run_command", "grep --color 'pattern' .", "", false},
-		{"non-recursive grep with --ignore-case allowed", "run_command", "grep --ignore-case 'pattern' file.txt", "", false},
-		{"unbounded ripgrep targeting workspace denied", "run_command", "rg 'pattern' .", "", true},
-		{"ripgrep with -m targeting workspace allowed", "run_command", "rg -n -m 20 -g '*.go' 'pattern' .", "", false},
-		{"ripgrep with attached -nm20 allowed", "run_command", "rg -nm20 'pattern' .", "", false},
-		{"ripgrep with --max-count allowed", "run_command", "rg --max-count 10 'pattern' .", "", false},
-		{"ripgrep with -l allowed", "run_command", "rg -l 'pattern' /share/aerial", "", false},
-		{"ripgrep with --files allowed", "run_command", "rg --files /share/aerial", "", false},
-		{"ripgrep with --help allowed", "run_command", "rg --help", "", false},
-		{"ripgrep with --help and root path denied", "run_command", "rg --help /", "", true},
-		{"grep -r -h targeting root denied", "run_command", "grep -r -h 'pattern' /", "", true},
-		{"grep -r -h without match limit denied", "run_command", "grep -r -h --exclude-dir=.git 'pattern' .", "", true},
-		{"ripgrep reading from pipe without path args allowed", "run_command", "echo hello | rg hello", "", false},
-		{"grep targeting system binary directory denied", "run_command", "grep 'pattern' /usr/bin/bash", "", true},
-		{"strings targeting binary directory denied", "run_command", "strings /usr/local/bin/hook-guard", "", true},
-		{"grep targeting .so file denied", "run_command", "grep 'pattern' libfoo.so", "", true},
-		{"grep targeting .tar.gz denied", "run_command", "grep 'pattern' archive.tar.gz", "", true},
-		{"grep targeting .zip denied", "run_command", "grep 'pattern' file.zip", "", true},
-		{"grep for .zip string in source file allowed", "run_command", "grep '.zip' main.go", "", false},
-		{"grep in file named bin.go allowed", "run_command", "grep 'pattern' bin.go", "", false},
-		{"grep with explicit -e flag allowed", "run_command", "grep -e 'foo' main.go", "", false},
+		{"grep -r targeting root denied", "run_command", "grep -r 'pattern' /", "", true, ""},
+		{"grep -r targeting /proc denied", "run_command", "grep -r 'pattern' /proc", "", true, ""},
+		{"rg targeting root denied", "run_command", "rg 'pattern' /", "", true, ""},
+		{"grep targeting .git denied", "run_command", "grep -r 'pattern' .git", "", true, ""},
+		{"grep targeting node_modules denied", "run_command", "grep -r 'pattern' node_modules", "", true, ""},
+		{"recursive grep without exclude-dir denied", "run_command", "grep -r 'pattern' .", "", true, ""},
+		{"recursive grep targeting /share without exclude-dir denied", "run_command", "grep -rn 'pattern' /share", "", true, ""},
+		{"recursive grep with --exclude-dir but no match limit denied", "run_command", "grep -rn --exclude-dir=.git 'pattern' .", "", true, ""},
+		{"recursive grep with --exclude-dir and -m allowed", "run_command", "grep -rn -m 20 --exclude-dir=.git 'pattern' .", "", false, ""},
+		{"recursive grep with space-delimited --exclude-dir and -l allowed", "run_command", "grep -rn -l --exclude-dir node_modules 'pattern' .", "", false, ""},
+		{"non-recursive grep with --color allowed", "run_command", "grep --color 'pattern' .", "", false, ""},
+		{"non-recursive grep with --ignore-case allowed", "run_command", "grep --ignore-case 'pattern' file.txt", "", false, ""},
+		{"unbounded ripgrep targeting workspace denied", "run_command", "rg 'pattern' .", "", true, ""},
+		{"ripgrep with -m targeting workspace allowed", "run_command", "rg -n -m 20 -g '*.go' 'pattern' .", "", false, ""},
+		{"ripgrep with attached -nm20 allowed", "run_command", "rg -nm20 'pattern' .", "", false, ""},
+		{"ripgrep with --max-count allowed", "run_command", "rg --max-count 10 'pattern' .", "", false, ""},
+		{"ripgrep with -l allowed", "run_command", "rg -l 'pattern' /share/aerial", "", false, ""},
+		{"ripgrep with --files allowed", "run_command", "rg --files /share/aerial", "", false, ""},
+		{"ripgrep with --help allowed", "run_command", "rg --help", "", false, ""},
+		{"ripgrep with --help and root path denied", "run_command", "rg --help /", "", true, ""},
+		{"grep -r -h targeting root denied", "run_command", "grep -r -h 'pattern' /", "", true, ""},
+		{"grep -r -h without match limit denied", "run_command", "grep -r -h --exclude-dir=.git 'pattern' .", "", true, ""},
+		{"ripgrep reading from pipe without path args allowed", "run_command", "echo hello | rg hello", "", false, ""},
+		{"grep targeting system binary directory denied", "run_command", "grep 'pattern' /usr/bin/bash", "", true, ""},
+		{"strings targeting binary directory denied", "run_command", "strings /usr/local/bin/hook-guard", "", true, ""},
+		{"grep targeting .so file denied", "run_command", "grep 'pattern' libfoo.so", "", true, ""},
+		{"grep targeting .tar.gz denied", "run_command", "grep 'pattern' archive.tar.gz", "", true, ""},
+		{"grep targeting .zip denied", "run_command", "grep 'pattern' file.zip", "", true, ""},
+		{"grep for .zip string in source file allowed", "run_command", "grep '.zip' main.go", "", false, ""},
+		{"grep in file named bin.go allowed", "run_command", "grep 'pattern' bin.go", "", false, ""},
+		{"grep with explicit -e flag allowed", "run_command", "grep -e 'foo' main.go", "", false, ""},
 
 		// Pipelines & Quotes
-		{"echo containing find in quotes allowed", "run_command", `echo "find / -name foo"`, "", false},
-		{"chained safe commands allowed", "run_command", `ls -la && find . -maxdepth 1 -name '*.go'`, "", false},
-		{"pipeline with unconstrained find denied", "run_command", `echo starting && find . -name '*.go'`, "", true},
-		{"pipe inside quotes allowed", "run_command", `grep "a | b" file.txt`, "", false},
-		{"semicolon inside quotes allowed", "run_command", `git commit -m "fix; update search guard"`, "", false},
-		{"or operator pipeline with bad find denied", "run_command", `test -d /foo || find / -maxdepth 1`, "", true},
+		{"echo containing find in quotes allowed", "run_command", `echo "find / -name foo"`, "", false, ""},
+		{"chained safe commands allowed", "run_command", `ls -la && find . -maxdepth 1 -name '*.go'`, "", false, ""},
+		{"pipeline with unconstrained find denied", "run_command", `echo starting && find . -name '*.go'`, "", true, ""},
+		{"pipe inside quotes allowed", "run_command", `grep "a | b" file.txt`, "", false, ""},
+		{"semicolon inside quotes allowed", "run_command", `git commit -m "fix; update search guard"`, "", false, ""},
+		{"or operator pipeline with bad find denied", "run_command", `test -d /foo || find / -maxdepth 1`, "", true, ""},
 
 		// MCP tool_index & openobserve shaping (cmd = ToolName, cwd = Arguments JSON)
-		{"mcp non-index tool allowed", "call_mcp_tool", "list_devices", `{}`, false},
-		{"mcp tool_index empty args denied", "call_mcp_tool", "unifi_tool_index", ``, true},
-		{"mcp tool_index empty object denied", "call_mcp_tool", "protect_tool_index", `{}`, true},
-		{"mcp tool_index search filter allowed", "call_mcp_tool", "unifi_tool_index", `{"search":"firewall"}`, false},
-		{"mcp tool_index string-encoded category filter allowed", "default_api:call_mcp_tool", `"protect_tool_index"`, `"{\"category\":\"cameras\"}"`, false},
-		{"mcp tool_index include_schemas without name denied", "call_mcp_tool", "unifi_tool_index", `{"search":"firewall","include_schemas":true}`, true},
-		{"mcp tool_index include_schemas with exact name allowed", "call_mcp_tool", "unifi_tool_index", `{"name":"unifi_list_firewall_policies","include_schemas":true}`, false},
-		{"mcp openobserve StreamSchema denied", "call_mcp_tool", "StreamSchema", `{"org_id":"default","stream_name":"docker_logs"}`, true},
-		{"mcp openobserve SearchSQL without request_body allowed", "call_mcp_tool", "SearchSQL", ``, false},
-		{"mcp openobserve SearchSQL select star denied", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"query":{"sql":"SELECT * FROM docker_logs LIMIT 10"}}}`, true},
-		{"mcp openobserve SearchSQL table star denied", "call_mcp_tool", "SearchSQL", `"{\"org_id\":\"default\",\"request_body\":{\"query\":{\"sql\":\"SELECT t.* FROM docker_logs t LIMIT 10\"}}}"`, true},
-		{"mcp openobserve SearchSQL excessive SQL LIMIT denied", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"query":{"sql":"SELECT _timestamp, message FROM docker_logs LIMIT 100"}}}`, true},
-		{"mcp openobserve SearchSQL excessive query size denied", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"query":{"size":100,"sql":"SELECT _timestamp, message FROM docker_logs LIMIT 10"}}}`, true},
-		{"mcp openobserve SearchSQL explicit columns and count(*) allowed", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"query":{"sql":"SELECT _timestamp, service, COUNT(*) FROM docker_logs WHERE message LIKE '%SELECT *%''s%' -- * comment\n GROUP BY _timestamp, service LIMIT 50"}}}`, false},
-		{"mcp openobserve SearchSQL csv output_format rewritten to json", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"agent_options":{"output_format":"csv"},"query":{"size":20,"sql":"SELECT _timestamp, message FROM docker_logs LIMIT 10"}}}`, false},
-		{"mcp openobserve SearchSQL bounded size and json output_format allowed", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"agent_options":{"output_format":"json"},"query":{"size":20,"sql":"SELECT _timestamp, message FROM docker_logs LIMIT 10"}}}`, false},
+		{"mcp non-index tool allowed", "call_mcp_tool", "list_devices", `{}`, false, ""},
+		{"mcp tool_index empty args denied", "call_mcp_tool", "unifi_tool_index", ``, true, ""},
+		{"mcp tool_index empty object denied", "call_mcp_tool", "protect_tool_index", `{}`, true, ""},
+		{"mcp tool_index search filter allowed", "call_mcp_tool", "unifi_tool_index", `{"search":"firewall"}`, false, ""},
+		{"mcp tool_index string-encoded category filter allowed", "default_api:call_mcp_tool", `"protect_tool_index"`, `"{\"category\":\"cameras\"}"`, false, ""},
+		{"mcp tool_index include_schemas without name denied", "call_mcp_tool", "unifi_tool_index", `{"search":"firewall","include_schemas":true}`, true, ""},
+		{"mcp tool_index include_schemas with exact name allowed", "call_mcp_tool", "unifi_tool_index", `{"name":"unifi_list_firewall_policies","include_schemas":true}`, false, ""},
+		{"mcp openobserve StreamSchema denied", "call_mcp_tool", "StreamSchema", `{"org_id":"default","stream_name":"docker_logs"}`, true, ""},
+		{"mcp openobserve SearchSQL without request_body allowed", "call_mcp_tool", "SearchSQL", ``, false, ""},
+		{"mcp openobserve SearchSQL select star denied", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"query":{"sql":"SELECT * FROM docker_logs LIMIT 10"}}}`, true, ""},
+		{"mcp openobserve SearchSQL table star denied", "call_mcp_tool", "SearchSQL", `"{\"org_id\":\"default\",\"request_body\":{\"query\":{\"sql\":\"SELECT t.* FROM docker_logs t LIMIT 10\"}}}"`, true, ""},
+		{"mcp openobserve SearchSQL excessive SQL LIMIT denied", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"query":{"sql":"SELECT _timestamp, message FROM docker_logs LIMIT 100"}}}`, true, ""},
+		{"mcp openobserve SearchSQL semicolon-terminated excessive LIMIT denied", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"query":{"sql":"SELECT _timestamp, message FROM docker_logs LIMIT 100;"}}}`, true, ""},
+		{"mcp openobserve SearchSQL excessive query size denied", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"query":{"size":100,"sql":"SELECT _timestamp, message FROM docker_logs LIMIT 10"}}}`, true, ""},
+		{"mcp openobserve SearchSQL explicit columns defaults query size", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"query":{"sql":"SELECT _timestamp, service, COUNT(*) FROM docker_logs WHERE message LIKE '%SELECT *%''s%' -- * comment\n GROUP BY _timestamp, service LIMIT 50"}}}`, false, `"size":50`},
+		{"mcp openobserve SearchSQL csv output_format rewritten to json", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"agent_options":{"output_format":"csv"},"query":{"size":20,"sql":"SELECT _timestamp, message FROM docker_logs LIMIT 10"}}}`, false, `"output_format":"json"`},
+		{"mcp openobserve SearchSQL bounded size and json output_format allowed", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"agent_options":{"output_format":"json"},"query":{"size":20,"sql":"SELECT _timestamp, message FROM docker_logs LIMIT 10"}}}`, false, ""},
 	}
 
 	for _, tc := range tests {
@@ -172,6 +174,16 @@ func TestCheckSearch(t *testing.T) {
 			}
 			if !tc.wantDeny && d.Decision != DecisionAllow {
 				t.Fatalf("cmd %q: expected allow, got deny: %v", tc.cmd, d)
+			}
+			if tc.wantOverwriteSub == "" {
+				if d.Overwrite != nil {
+					t.Fatalf("cmd %q: unexpected Overwrite: %v", tc.cmd, d.Overwrite)
+				}
+				return
+			}
+			rawOverwrite, err := json.Marshal(d.Overwrite["Arguments"])
+			if err != nil || !strings.Contains(string(rawOverwrite), tc.wantOverwriteSub) {
+				t.Fatalf("cmd %q: Overwrite[Arguments] = %s (err=%v), want substring %q", tc.cmd, rawOverwrite, err, tc.wantOverwriteSub)
 			}
 		})
 	}
