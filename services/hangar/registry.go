@@ -95,62 +95,9 @@ func (d *SyncDaemon) doRegistryRequestWithAuth(ctx context.Context, method, targ
 	}
 
 	authHeader := resp.Header.Get("Www-Authenticate")
-	realm, service, scope, pErr := ParseWwwAuthenticate(authHeader)
-	if pErr != nil {
-		return nil, "", fmt.Errorf("failed parsing Www-Authenticate header for %s: %w", targetURL, pErr)
-	}
-	if scope == "" {
-		scope = fmt.Sprintf("repository:%s:pull", repository)
-	}
-
-	tokURL, uErr := url.Parse(realm)
-	if uErr != nil {
-		return nil, "", fmt.Errorf("failed parsing token realm %q: %w", realm, uErr)
-	}
-	q := tokURL.Query()
-	if service != "" {
-		q.Set("service", service)
-	}
-	if scope != "" {
-		q.Set("scope", scope)
-	}
-	tokURL.RawQuery = q.Encode()
-
-	tokReq, tErr := http.NewRequestWithContext(ctx, http.MethodGet, tokURL.String(), nil)
-	if tErr != nil {
-		return nil, "", fmt.Errorf("failed creating token request for %s: %w", targetURL, tErr)
-	}
-
-	if registry == "ghcr.io" && d != nil && strings.TrimSpace(d.pat) != "" {
-		username := ResolveRegistryUser("", os.Getenv)
-		tokReq.SetBasicAuth(username, d.pat)
-	}
-
-	tokResp, dErr := d.getRegistryClient().Do(tokReq)
-	if dErr != nil {
-		return nil, "", fmt.Errorf("token request failed for %s: %w", targetURL, dErr)
-	}
-	defer httpkit.CloseWarn(tokResp.Body, "token response body")
-
-	if tokResp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("token request for %s returned HTTP %d", targetURL, tokResp.StatusCode)
-	}
-
-	var tokPayload struct {
-		Token       string `json:"token"`
-		AccessToken string `json:"access_token"`
-	}
-	decErr := json.NewDecoder(tokResp.Body).Decode(&tokPayload)
-	if decErr != nil {
-		return nil, "", fmt.Errorf("failed decoding token for %s: %w", targetURL, decErr)
-	}
-
-	token := tokPayload.Token
-	if token == "" {
-		token = tokPayload.AccessToken
-	}
-	if token == "" {
-		return nil, "", fmt.Errorf("empty bearer token returned for %s", targetURL)
+	token, err := d.fetchRegistryBearerToken(ctx, targetURL, registry, repository, authHeader)
+	if err != nil {
+		return nil, "", err
 	}
 
 	authReq, aErr := http.NewRequestWithContext(ctx, method, targetURL, nil)
@@ -168,6 +115,68 @@ func (d *SyncDaemon) doRegistryRequestWithAuth(ctx context.Context, method, targ
 	}
 
 	return finalResp, token, nil
+}
+
+func (d *SyncDaemon) fetchRegistryBearerToken(ctx context.Context, targetURL, registry, repository, authHeader string) (string, error) {
+	realm, service, scope, pErr := ParseWwwAuthenticate(authHeader)
+	if pErr != nil {
+		return "", fmt.Errorf("failed parsing Www-Authenticate header for %s: %w", targetURL, pErr)
+	}
+	if scope == "" {
+		scope = fmt.Sprintf("repository:%s:pull", repository)
+	}
+
+	tokURL, uErr := url.Parse(realm)
+	if uErr != nil {
+		return "", fmt.Errorf("failed parsing token realm %q: %w", realm, uErr)
+	}
+	q := tokURL.Query()
+	if service != "" {
+		q.Set("service", service)
+	}
+	if scope != "" {
+		q.Set("scope", scope)
+	}
+	tokURL.RawQuery = q.Encode()
+
+	tokReq, tErr := http.NewRequestWithContext(ctx, http.MethodGet, tokURL.String(), nil)
+	if tErr != nil {
+		return "", fmt.Errorf("failed creating token request for %s: %w", targetURL, tErr)
+	}
+
+	if registry == "ghcr.io" && d != nil && strings.TrimSpace(d.pat) != "" {
+		username := ResolveRegistryUser("", os.Getenv)
+		tokReq.SetBasicAuth(username, d.pat)
+	}
+
+	tokResp, dErr := d.getRegistryClient().Do(tokReq) //nolint:bodyclose // closed by httpkit.CloseWarn
+	if dErr != nil {
+		return "", fmt.Errorf("token request failed for %s: %w", targetURL, dErr)
+	}
+	defer httpkit.CloseWarn(tokResp.Body, "token response body")
+
+	if tokResp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("token request for %s returned HTTP %d", targetURL, tokResp.StatusCode)
+	}
+
+	var tokPayload struct {
+		Token       string `json:"token"`
+		AccessToken string `json:"access_token"`
+	}
+	decErr := json.NewDecoder(tokResp.Body).Decode(&tokPayload)
+	if decErr != nil {
+		return "", fmt.Errorf("failed decoding token for %s: %w", targetURL, decErr)
+	}
+
+	token := tokPayload.Token
+	if token == "" {
+		token = tokPayload.AccessToken
+	}
+	if token == "" {
+		return "", fmt.Errorf("empty bearer token returned for %s", targetURL)
+	}
+
+	return token, nil
 }
 
 func (d *SyncDaemon) fetchRegistryBytes(ctx context.Context, targetURL, registry, repository, acceptHeader, existingBearer, label string) ([]byte, string, error) {

@@ -164,23 +164,6 @@
     "services/eri/pkg/runner/unified_pool.go::*unifiedSessionLease.Execute": {
       "cc": 30
     },
-    "services/hangar/events.go::*SyncDaemon.ExecuteGitPushEvent": {
-      "lines": 182,
-      "cc": 31
-    },
-    "services/hangar/events.go::*SyncDaemon.ExecuteImageReadyEvent": {
-      "cc": 21
-    },
-    "services/hangar/events.go::*SyncDaemon.StartImageRolloutLoop": {
-      "depth": 6
-    },
-    "services/hangar/gitsync.go::*SyncDaemon.GetStatus": {
-      "cc": 27
-    },
-    "services/hangar/gitsync.go::*SyncDaemon.SyncRepo": {
-      "lines": 169,
-      "cc": 30
-    },
     "services/hangar/pure.go::ExtractNomadJobImages": {
       "depth": 7
     },
@@ -192,9 +175,6 @@
     },
     "services/hangar/reconcile.go::*SyncDaemon.StartReconcilerLoop": {
       "depth": 7
-    },
-    "services/hangar/registry.go::*SyncDaemon.doRegistryRequestWithAuth": {
-      "cc": 24
     },
     "services/vanadis/main.go::*PostgresVanadisStore.CreateBuild": {
       "cc": 25
