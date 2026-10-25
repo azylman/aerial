@@ -8,9 +8,6 @@
     },
     "services/eri/pkg/queue/worker.go": {
       "lines": 1865
-    },
-    "services/hangar/main.go": {
-      "lines": 3203
     }
   },
   "functions": {
@@ -326,7 +323,7 @@
     "services/hangar/main.go::*SyncDaemon.ExecuteImageReadyEvent": {
       "cc": 21
     },
-    "services/hangar/main.go::*SyncDaemon.GetStatus": {
+    "services/hangar/gitsync.go::*SyncDaemon.GetStatus": {
       "cc": 27
     },
     "services/hangar/main.go::*SyncDaemon.StartImageRolloutLoop": {
@@ -335,7 +332,7 @@
     "services/hangar/reconcile.go::*SyncDaemon.StartReconcilerLoop": {
       "depth": 7
     },
-    "services/hangar/main.go::*SyncDaemon.SyncRepo": {
+    "services/hangar/gitsync.go::*SyncDaemon.SyncRepo": {
       "lines": 169,
       "cc": 30
     },
