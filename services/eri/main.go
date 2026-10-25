@@ -439,23 +439,8 @@ var (
 	openDefaultDB = db.New
 )
 
-func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption) error {
-	if cfg == nil {
-		return fmt.Errorf("brain: config cannot be nil")
-	}
-	if ctx.Err() != nil {
-		return nil
-	}
-
-	var appOpts brainAppOptions
-	for _, opt := range opts {
-		if opt != nil {
-			opt(&appOpts)
-		}
-	}
-
-	cur := cfg.Current()
-	if appOpts.store == nil && cur.DatabaseURL == "" {
+func validateBrainStartupConfig(cur *config.ConfigData, hasInjectedStore bool) error {
+	if !hasInjectedStore && cur.DatabaseURL == "" {
 		return fmt.Errorf("database URL or path is required")
 	}
 	if cur.GeminiHomeDir == "" {
@@ -467,41 +452,28 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	if cur.Port == "" {
 		return fmt.Errorf("port is required")
 	}
+	return nil
+}
 
-	provisioner := env.NewFromConfig(cfg)
-	if err := InitializeBrainEnvironment(ctx, cfg); err != nil {
-		log.Printf("Warning initializing brain environment: %v", err)
-	}
-
-	var store db.Store
-	if appOpts.store != nil {
-		store = appOpts.store
-	} else {
-		database, err := openDefaultDB(cfg)
-		if err != nil {
-			return fmt.Errorf("failed to initialize database: %w", err)
-		}
-		defer func() {
-			if err := database.Close(); err != nil {
-				log.Printf("Error closing database: %v", err)
-			}
-		}()
-		store = db.NewSQLStore(database)
-	}
-
-	config.RegisterConfigTokens(cfg)
-
-	sessionMgr := session.New(cfg.GeminiHomeDir(), cfg.DataDir())
-
-	lowEffortModel := cur.LowEffortModel
+func resolveBrainModelDefaults(cur *config.ConfigData) (lowEffortModel, mediumEffortModel string) {
+	lowEffortModel = cur.LowEffortModel
 	if lowEffortModel == "" {
 		lowEffortModel = "gemini-3.8-flash-low"
 	}
-	mediumEffortModel := cur.MediumEffortModel
+	mediumEffortModel = cur.MediumEffortModel
 	if mediumEffortModel == "" {
 		mediumEffortModel = "gemini-3.8-flash-medium"
 	}
+	return lowEffortModel, mediumEffortModel
+}
 
+func buildBrainProcessPools(
+	cfg *config.Config,
+	cur *config.ConfigData,
+	sessionMgr *session.Manager,
+	spawner runner.DaemonSpawner,
+) (map[queue.PoolKey]runner.AgentPool, *runner.InterchangeablePool, runner.AgentPool, []runner.AgentPool, []string, string) {
+	lowEffortModel, mediumEffortModel := resolveBrainModelDefaults(cur)
 	runtimeBase := cur.DataDir
 
 	discordHome := filepath.Join(runtimeBase, "runtimes", "discord")
@@ -509,7 +481,6 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	ephemeralHome := filepath.Join(runtimeBase, "runtimes", "ephemeral")
 
 	poolEnv := buildPoolEnv(os.Environ(), runtimeBase, cur.Timezone)
-
 	memoryRetriever := newHTTPMemoryRetriever("")
 
 	basePoolCfg := func(home, model string, prewarmed []string) runner.PoolConfig {
@@ -530,26 +501,25 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		return pcfg
 	}
 
-	discordPools, discordPoolList := buildDiscordPools(basePoolCfg, discordHome, cur.Model, mediumEffortModel, lowEffortModel, appOpts.processSpawner)
-	ephemeralPool := newWorkerInterchangeablePool(basePoolCfg(ephemeralHome, lowEffortModel, []string{"ephemeral:worker-0", "ephemeral:worker-1"}), appOpts.processSpawner, "ephemeral:worker")
-	var voicePool runner.AgentPool = createVoiceProcessPool(cfg, voiceHome, lowEffortModel, appOpts.processSpawner, memoryRetriever)
+	discordPools, discordPoolList := buildDiscordPools(basePoolCfg, discordHome, cur.Model, mediumEffortModel, lowEffortModel, spawner)
+	ephemeralPool := newWorkerInterchangeablePool(basePoolCfg(ephemeralHome, lowEffortModel, []string{"ephemeral:worker-0", "ephemeral:worker-1"}), spawner, "ephemeral:worker")
+	var voicePool runner.AgentPool = createVoiceProcessPool(cfg, voiceHome, lowEffortModel, spawner, memoryRetriever)
 	allPools := append(append([]runner.AgentPool{}, discordPoolList...), ephemeralPool, voicePool)
 
-	defer func() {
-		for _, p := range allPools {
-			if err := p.Close(); err != nil {
-				log.Printf("[WARN] Failed to close process pool: %v", err)
-			}
+	return discordPools, ephemeralPool, voicePool, allPools, poolEnv, ephemeralHome
+}
+
+func closeAllBrainPools(pools []runner.AgentPool) {
+	for _, p := range pools {
+		if err := p.Close(); err != nil {
+			log.Printf("[WARN] Failed to close process pool: %v", err)
 		}
-	}()
+	}
+}
 
-	PrewarmProcessPoolsSequentially(ctx, allPools...)
-	metrics.StartUsagePoller(ctx, 10*time.Minute, metrics.DefaultUsageRunner(cur.AgyBin, ephemeralHome, poolEnv, testing.Testing()))
-
-	cls := classifier.New(cfg, classifier.WithProcessPool(ephemeralPool))
-
+func newAmbientContextResolver(cfg *config.Config) func(ctx context.Context, ambCfg *config.AmbientContextConfig) (string, error) {
 	var ambientProviders sync.Map
-	ambientResolver := func(ctx context.Context, ambCfg *config.AmbientContextConfig) (string, error) {
+	return func(ctx context.Context, ambCfg *config.AmbientContextConfig) (string, error) {
 		if ambCfg == nil {
 			return "", nil
 		}
@@ -588,54 +558,44 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 		return prov.Retrieve(ctx)
 	}
+}
 
-	pool := queue.New(cfg, queue.WorkerPoolConfig{
-		Store:            store,
-		Classifier:       cls,
-		SessionManager:   sessionMgr,
-		Pools:            discordPools,
-		VoiceProcessPool: voicePool,
-		LLMFunc:          ephemeralPool.EphemeralLLMFunc("ephemeral:summarizer"),
-		AmbientResolver:  ambientResolver,
-		HaroURL:          os.Getenv("HARO_URL"),
-	})
-	pool.Start()
-
+func connectAndRecoverDiscordFunnel(
+	ctx context.Context,
+	cfg *config.Config,
+	store db.Store,
+	pool *queue.WorkerPool,
+	discordToken string,
+) (*discordgo.Session, func()) {
 	SetFunnelConfig(cfg)
-	dgSession := connectDiscordFunnel(ctx, store, pool, cur.DiscordToken)
+	dgSession := connectDiscordFunnel(ctx, store, pool, discordToken)
 	if pool != nil && dgSession != nil {
 		pool.SetDiscordSession(dgSession)
 		pool.SetWidgetDeliveryFunc(func(req discord.StatusWidgetRequest) (string, error) {
 			return discord.DeliverStatusWidget(dgSession, req, time.Now())
 		})
 	}
-
-	// Resume interrupted turns after Discord gateway session is registered
-	// so poison pill and recovery notifications can reliably deliver to Discord.
 	queue.RecoverInterrupted(store, pool)
-	defer func() {
+	cleanup := func() {
 		log.Printf("Stopping worker pool...")
-		pool.Stop()
+		if pool != nil {
+			pool.Stop()
+		}
 		if dgSession != nil {
 			log.Printf("Closing Discord gateway session...")
 			if err := dgSession.Close(); err != nil {
 				log.Printf("[WARN] Failed to close Discord gateway session: %v", err)
 			}
 		}
-	}()
-
-	var reloadOpts []ReloadOption
-	reloadOpts = append(reloadOpts, WithDiscordSession(dgSession), WithProvisioner(provisioner), WithWorkerPool(pool))
-	if appOpts.onReload != nil {
-		reloadOpts = append(reloadOpts, func(o *reloadConfigOptions) { o.onReload = appOpts.onReload })
 	}
-	reloadConfig := CreateReloadConfigFunc(cfg, reloadOpts...)
+	return dgSession, cleanup
+}
 
-	// Listen for SIGHUP to trigger atomic zero-downtime reloads and worker pool bouncing
+func startSIGHUPReloadLoop(ctx context.Context, appHupChan <-chan os.Signal, reloadConfig func(string)) func() {
 	var hupChan <-chan os.Signal
 	var stopHup func()
-	if appOpts.hupChan != nil {
-		hupChan = appOpts.hupChan
+	if appHupChan != nil {
+		hupChan = appHupChan
 	} else {
 		ch := make(chan os.Signal, 1)
 		signal.Notify(ch, syscall.SIGHUP)
@@ -644,12 +604,8 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 			signal.Stop(ch)
 		}
 	}
-	if stopHup != nil {
-		defer stopHup()
-	}
 
 	hupCtx, hupCancel := context.WithCancel(ctx)
-	defer hupCancel()
 	go func() {
 		for {
 			select {
@@ -666,30 +622,15 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	// Start background transcript sync loop
-	syncLLM := buildSyncLLM(ephemeralPool.EphemeralLLMFunc("ephemeral:summarizer"), cur.LowEffortModel, cur.Model)
-	transcript.StartTranscriptSync(ctx, store, cfg, "", syncLLM, 5*time.Minute)
-	txEmbedder := transcript.NewEmbedder(cfg, sessionMgr.Roots()...)
-	var embedder transcript.EmbedderFunc
-	if txEmbedder != nil {
-		embedder = func(eCtx context.Context, text string) ([]float32, error) {
-			return txEmbedder.GenerateEmbedding(eCtx, text, false, 1)
+	return func() {
+		if stopHup != nil {
+			stopHup()
 		}
+		hupCancel()
 	}
-	mux := SetupBrainMuxWithEmbedder(store, pool, embedder, sessionMgr.Roots()...)
+}
 
-	port := cur.Port
-	var lc net.ListenConfig
-	ln, err := lc.Listen(ctx, "tcp", ":"+port)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err := ln.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-			log.Printf("[WARN] Error closing listener: %v", err)
-		}
-	}()
-
+func serveBrainHTTP(ctx context.Context, ln net.Listener, mux http.Handler, model string) error {
 	srv := &http.Server{
 		Handler: metricsMiddleware(mux),
 	}
@@ -700,7 +641,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 
 	errChan := make(chan error, 1)
 	go func() {
-		log.Printf("Aerial Brain listening on %s (model=%s, timeout=%dm)", ln.Addr().String(), cur.Model, queue.DefaultTimeoutMinutes)
+		log.Printf("Aerial Brain listening on %s (model=%s, timeout=%dm)", ln.Addr().String(), model, queue.DefaultTimeoutMinutes)
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			errChan <- err
 		}
@@ -719,6 +660,110 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	case err := <-errChan:
 		return err
 	}
+}
+
+func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption) error {
+	if cfg == nil {
+		return fmt.Errorf("brain: config cannot be nil")
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
+
+	var appOpts brainAppOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&appOpts)
+		}
+	}
+
+	cur := cfg.Current()
+	if err := validateBrainStartupConfig(cur, appOpts.store != nil); err != nil {
+		return err
+	}
+
+	provisioner := env.NewFromConfig(cfg)
+	if err := InitializeBrainEnvironment(ctx, cfg); err != nil {
+		log.Printf("Warning initializing brain environment: %v", err)
+	}
+
+	var store db.Store
+	if appOpts.store != nil {
+		store = appOpts.store
+	} else {
+		database, err := openDefaultDB(cfg)
+		if err != nil {
+			return fmt.Errorf("failed to initialize database: %w", err)
+		}
+		defer func() {
+			if err := database.Close(); err != nil {
+				log.Printf("Error closing database: %v", err)
+			}
+		}()
+		store = db.NewSQLStore(database)
+	}
+
+	config.RegisterConfigTokens(cfg)
+
+	sessionMgr := session.New(cfg.GeminiHomeDir(), cfg.DataDir())
+
+	discordPools, ephemeralPool, voicePool, allPools, poolEnv, ephemeralHome := buildBrainProcessPools(cfg, cur, sessionMgr, appOpts.processSpawner)
+	defer closeAllBrainPools(allPools)
+
+	PrewarmProcessPoolsSequentially(ctx, allPools...)
+	metrics.StartUsagePoller(ctx, 10*time.Minute, metrics.DefaultUsageRunner(cur.AgyBin, ephemeralHome, poolEnv, testing.Testing()))
+
+	cls := classifier.New(cfg, classifier.WithProcessPool(ephemeralPool))
+	ambientResolver := newAmbientContextResolver(cfg)
+
+	pool := queue.New(cfg, queue.WorkerPoolConfig{
+		Store:            store,
+		Classifier:       cls,
+		SessionManager:   sessionMgr,
+		Pools:            discordPools,
+		VoiceProcessPool: voicePool,
+		LLMFunc:          ephemeralPool.EphemeralLLMFunc("ephemeral:summarizer"),
+		AmbientResolver:  ambientResolver,
+		HaroURL:          os.Getenv("HARO_URL"),
+	})
+	pool.Start()
+
+	dgSession, cleanupFunnel := connectAndRecoverDiscordFunnel(ctx, cfg, store, pool, cur.DiscordToken)
+	defer cleanupFunnel()
+
+	var reloadOpts []ReloadOption
+	reloadOpts = append(reloadOpts, WithDiscordSession(dgSession), WithProvisioner(provisioner), WithWorkerPool(pool))
+	if appOpts.onReload != nil {
+		reloadOpts = append(reloadOpts, func(o *reloadConfigOptions) { o.onReload = appOpts.onReload })
+	}
+	reloadConfig := CreateReloadConfigFunc(cfg, reloadOpts...)
+
+	stopHup := startSIGHUPReloadLoop(ctx, appOpts.hupChan, reloadConfig)
+	defer stopHup()
+
+	syncLLM := buildSyncLLM(ephemeralPool.EphemeralLLMFunc("ephemeral:summarizer"), cur.LowEffortModel, cur.Model)
+	transcript.StartTranscriptSync(ctx, store, cfg, "", syncLLM, 5*time.Minute)
+	txEmbedder := transcript.NewEmbedder(cfg, sessionMgr.Roots()...)
+	var embedder transcript.EmbedderFunc
+	if txEmbedder != nil {
+		embedder = func(eCtx context.Context, text string) ([]float32, error) {
+			return txEmbedder.GenerateEmbedding(eCtx, text, false, 1)
+		}
+	}
+	mux := SetupBrainMuxWithEmbedder(store, pool, embedder, sessionMgr.Roots()...)
+
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", ":"+cur.Port)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := ln.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			log.Printf("[WARN] Error closing listener: %v", err)
+		}
+	}()
+
+	return serveBrainHTTP(ctx, ln, mux, cur.Model)
 }
 
 func main() {

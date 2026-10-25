@@ -1,9 +1,6 @@
 {
   "files": {},
   "functions": {
-    "services/coven/config.go::LoadConfigFile": {
-      "cc": 30
-    },
     "services/coven/db.go::extractTrajectorySignals": {
       "depth": 7
     },
@@ -50,30 +47,6 @@
     "services/eri/cmd/transcript-search/main.go::runCLI": {
       "cc": 26
     },
-    "services/eri/funnel.go::RunStartupCatchUpSweep": {
-      "lines": 188,
-      "cc": 58
-    },
-    "services/eri/funnel.go::connectDiscordFunnel": {
-      "lines": 189,
-      "cc": 42
-    },
-    "services/eri/funnel.go::extractDiscordMetadata": {
-      "cc": 23
-    },
-    "services/eri/funnel.go::getOrCreateThreadID": {
-      "cc": 30
-    },
-    "services/eri/funnel.go::isFunnelBotTargeted": {
-      "cc": 21
-    },
-    "services/eri/handlers.go::handleVoiceAsk": {
-      "cc": 24
-    },
-    "services/eri/main.go::RunBrainApp": {
-      "lines": 297,
-      "cc": 50
-    },
     "services/eri/pkg/ambient/provider.go::*Provider.fetchAndRender": {
       "depth": 6
     },
@@ -87,9 +60,6 @@
     "services/eri/pkg/config/config.go::*ConfigData.UnmarshalYAML": {
       "lines": 154,
       "cc": 21
-    },
-    "services/eri/pkg/config/config.go::validateChannelPolicy": {
-      "cc": 22
     },
     "services/eri/pkg/delivery/delivery.go::SendMessageWithAttachments": {
       "cc": 22
@@ -125,9 +95,6 @@
     "services/eri/pkg/guard/batch.go::CheckBatchWithDir": {
       "cc": 28
     },
-    "services/eri/pkg/guard/batch.go::isUnscopedTest": {
-      "cc": 22
-    },
     "services/eri/pkg/guard/commit.go::CheckCommit": {
       "cc": 27,
       "depth": 6
@@ -150,9 +117,6 @@
     },
     "services/eri/pkg/guard/search.go::inspectGrepCommand": {
       "cc": 49
-    },
-    "services/eri/pkg/guard/search.go::splitPipeline": {
-      "cc": 24
     },
     "services/eri/pkg/guard/share.go::inspectRunCommand": {
       "cc": 38
@@ -231,9 +195,6 @@
     "services/eri/pkg/runner/unified_pool.go::*unifiedSessionLease.Execute": {
       "cc": 30
     },
-    "services/eri/pure.go::FormatCronDescription": {
-      "cc": 54
-    },
     "services/hangar/events.go::*SyncDaemon.ExecuteGitPushEvent": {
       "lines": 182,
       "cc": 31
@@ -250,9 +211,6 @@
     "services/hangar/gitsync.go::*SyncDaemon.SyncRepo": {
       "lines": 169,
       "cc": 30
-    },
-    "services/hangar/main.go::SetupMux": {
-      "cc": 23
     },
     "services/hangar/pure.go::ExtractNomadJobImages": {
       "depth": 7
@@ -271,9 +229,6 @@
     },
     "services/vanadis/main.go::*PostgresVanadisStore.CreateBuild": {
       "cc": 25
-    },
-    "services/eri/pkg/queue/turn_outcome.go::*turnExecution.handleQuotaPause": {
-      "cc": 21
     }
   }
 }
