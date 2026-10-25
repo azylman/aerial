@@ -316,7 +316,7 @@
     "services/eri/pure.go::FormatCronDescription": {
       "cc": 54
     },
-    "services/hangar/main.go::*SyncDaemon.CheckAndReconcileNomadImages": {
+    "services/hangar/reconcile.go::*SyncDaemon.CheckAndReconcileNomadImages": {
       "depth": 6
     },
     "services/hangar/main.go::*SyncDaemon.ExecuteGitPushEvent": {
@@ -332,7 +332,7 @@
     "services/hangar/main.go::*SyncDaemon.StartImageRolloutLoop": {
       "depth": 6
     },
-    "services/hangar/main.go::*SyncDaemon.StartReconcilerLoop": {
+    "services/hangar/reconcile.go::*SyncDaemon.StartReconcilerLoop": {
       "depth": 7
     },
     "services/hangar/main.go::*SyncDaemon.SyncRepo": {
