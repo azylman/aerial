@@ -84,6 +84,8 @@ func (r *Router) Handle(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	switch data.Name {
 	case "status":
 		r.handleStatus(s, i)
+	case "quota":
+		r.handleQuota(s, i)
 	case "rotate":
 		r.handleRotate(s, i, data)
 	case "interrupt":

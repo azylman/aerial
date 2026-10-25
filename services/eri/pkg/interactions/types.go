@@ -5,11 +5,15 @@ import (
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 )
 
 // DeployStatusProvider supplies current deployment information for /status.
 type DeployStatusProvider func() string
+
+// QuotaProvider supplies current model quota groups for /quota.
+type QuotaProvider func() []metrics.QuotaGroup
 
 // GitOpsChannelUpdater supplies the update function for modifying channel configurations.
 type GitOpsChannelUpdater func(ctx context.Context, channelKey string, mutateFn func(p *config.ChannelPolicy)) (commitSHA string, err error)
@@ -29,6 +33,7 @@ type InteractionDeps struct {
 	ConfigProvider       ConfigProvider
 	AppID                string
 	DeployStatusProvider DeployStatusProvider
+	QuotaProvider        QuotaProvider
 	GitOpsChannelUpdater GitOpsChannelUpdater
 	MemoryURL            string
 	HaroURL              string

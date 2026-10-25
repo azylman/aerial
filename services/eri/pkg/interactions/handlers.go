@@ -12,6 +12,7 @@ import (
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
@@ -21,6 +22,43 @@ var (
 	deployProgressDelay = 3 * time.Second
 	pollerTimeout       = 14*time.Minute + 30*time.Second
 )
+
+func (r *Router) handleQuota(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	var groups []metrics.QuotaGroup
+	if r.deps.QuotaProvider != nil {
+		groups = r.deps.QuotaProvider()
+	} else {
+		groups = metrics.LatestQuotaGroups()
+	}
+	var lines []string
+	now := time.Now().UTC()
+	for _, g := range groups {
+		var bLines []string
+		for _, b := range g.Buckets {
+			if strings.TrimSpace(b.ID) == "" || b.Disabled {
+				continue
+			}
+			line := fmt.Sprintf("• **%s**: `%d%%` remaining", b.Window, int(b.RemainingFraction*100+0.5))
+			if ts, err := time.Parse(time.RFC3339, strings.TrimSpace(b.ResetTime)); err == nil && ts.After(now) {
+				line += fmt.Sprintf(" (resets in %s)", formatRelativeDuration(ts.Sub(now)))
+			}
+			bLines = append(bLines, line)
+		}
+		if len(bLines) > 0 {
+			lines = append(lines, fmt.Sprintf("**%s**\n%s", g.Name, strings.Join(bLines, "\n")))
+		}
+	}
+	content := "⏳ No quota telemetry recorded yet."
+	if len(lines) > 0 {
+		content = strings.Join(lines, "\n\n")
+	}
+	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{Content: content, Flags: discordgo.MessageFlagsEphemeral},
+	}); err != nil {
+		log.Printf("[Interactions] Failed to respond to /quota: %v", err)
+	}
+}
 
 func (r *Router) handleStatus(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
