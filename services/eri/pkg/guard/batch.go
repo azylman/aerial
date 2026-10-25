@@ -21,6 +21,8 @@ const (
 	DefaultMaxRecords = 30
 	// DefaultPruneAge is the maximum age before state files are purged by opportunistic GC.
 	DefaultPruneAge = 1 * time.Hour
+	// minPaginatedReadLines is the minimum line span for a prior read to qualify as multi-page pagination.
+	minPaginatedReadLines = 400
 )
 
 var (
@@ -47,6 +49,8 @@ type ToolInvocation struct {
 	ToolName  string `json:"toolName"`
 	Target    string `json:"target"`
 	Category  string `json:"category"`
+	StartLine int    `json:"startLine,omitempty"`
+	EndLine   int    `json:"endLine,omitempty"`
 }
 
 // BatchState persists recent tool invocations for a conversation.
@@ -337,14 +341,36 @@ func opportunisticGC(dir string, now time.Time) {
 }
 
 func countTargetInvocations(records []ToolInvocation, category, target string) int {
-	distinctSteps := make(map[string]struct{})
-	for _, r := range records {
-		if r.Category == category && r.Target == target {
-			key := fmt.Sprintf("%d_%d", r.StepIdx, r.Timestamp)
-			distinctSteps[key] = struct{}{}
+	count := 0
+	for _, step := range groupSteps(records) {
+		for _, r := range step {
+			if r.Category == category && r.Target == target {
+				count++
+				break
+			}
 		}
 	}
-	return len(distinctSteps)
+	return count
+}
+
+func isPaginatedRead(priorRecords []ToolInvocation, target string, startLine, endLine int) bool {
+	if startLine <= 0 || endLine < startLine {
+		return false
+	}
+	hasPrior := false
+	for _, r := range priorRecords {
+		if r.Category != "read" || r.Target != target {
+			continue
+		}
+		hasPrior = true
+		if r.EndLine-r.StartLine+1 < minPaginatedReadLines {
+			return false
+		}
+		if startLine <= r.EndLine && endLine >= r.StartLine {
+			return false
+		}
+	}
+	return hasPrior
 }
 
 func removeTargetInvocations(records []ToolInvocation, target string) []ToolInvocation {
@@ -365,6 +391,19 @@ func filterOutCategory(records []ToolInvocation, category string) []ToolInvocati
 		}
 	}
 	return kept
+}
+
+func hasConsecutiveSingleSteps(records []ToolInvocation, category string, required int) bool {
+	steps := groupSteps(records)
+	if len(steps) < required {
+		return false
+	}
+	for i := len(steps) - required; i < len(steps); i++ {
+		if len(steps[i]) != 1 || steps[i][0].Category != category {
+			return false
+		}
+	}
+	return true
 }
 
 func groupSteps(records []ToolInvocation) [][]ToolInvocation {
@@ -448,8 +487,10 @@ func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time
 			}
 		}
 
+		paginatedRead := category == "read" && target != "" && isPaginatedRead(priorRecords, target, args.StartLine, args.EndLine)
+
 		// Rule 4: Micro-reads to the same file (view_file / read_file)
-		if category == "read" && target != "" {
+		if category == "read" && target != "" && !paginatedRead {
 			reads := countTargetInvocations(priorRecords, "read", target)
 			if reads >= 2 {
 				decision = &Decision{
@@ -477,49 +518,25 @@ func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time
 		}
 
 		// Rule 3: Micro-command inspection thrashing (run_command)
-		if category == "inspection" {
-			steps := groupSteps(priorRecords)
-			if len(steps) >= 3 {
-				consecutive := true
-				for i := len(steps) - 3; i < len(steps); i++ {
-					if len(steps[i]) != 1 || steps[i][0].Category != "inspection" {
-						consecutive = false
-						break
-					}
-				}
-				if consecutive {
-					decision = &Decision{
-						Decision: DecisionDeny,
-						Reason:   "Micro-command thrashing detected: 4 consecutive single inspection commands across turns. Combine commands into compound one-liners (e.g. with && or ;) or execute an ephemeral scratch script in brain/<id>/scratch/ to collect diagnostics.",
-					}
-					state.Records = filterOutCategory(state.Records, "inspection")
-					_ = saveState(dir, safeID, state) //nolint:errcheck
-					return nil
-				}
+		if category == "inspection" && hasConsecutiveSingleSteps(priorRecords, "inspection", 3) {
+			decision = &Decision{
+				Decision: DecisionDeny,
+				Reason:   "Micro-command thrashing detected: 4 consecutive single inspection commands across turns. Combine commands into compound one-liners (e.g. with && or ;) or execute an ephemeral scratch script in brain/<id>/scratch/ to collect diagnostics.",
 			}
+			state.Records = filterOutCategory(state.Records, "inspection")
+			_ = saveState(dir, safeID, state) //nolint:errcheck
+			return nil
 		}
 
 		// Rule 5: Sequential single-file reads across turns (view_file / read_file)
-		if category == "read" {
-			steps := groupSteps(priorRecords)
-			if len(steps) >= 2 {
-				consecutive := true
-				for i := len(steps) - 2; i < len(steps); i++ {
-					if len(steps[i]) != 1 || steps[i][0].Category != "read" {
-						consecutive = false
-						break
-					}
-				}
-				if consecutive {
-					decision = &Decision{
-						Decision: DecisionDeny,
-						Reason:   "Parallel Tool Batching Invariant Violated: 3 consecutive sequential single-file reads detected across turns. ALWAYS emit view_file, grep_search, and read tool calls in parallel within a single turn when inspecting multiple files.",
-					}
-					state.Records = filterOutCategory(state.Records, "read")
-					_ = saveState(dir, safeID, state) //nolint:errcheck
-					return nil
-				}
+		if category == "read" && !paginatedRead && hasConsecutiveSingleSteps(priorRecords, "read", 2) {
+			decision = &Decision{
+				Decision: DecisionDeny,
+				Reason:   "Parallel Tool Batching Invariant Violated: 3 consecutive sequential single-file reads detected across turns. ALWAYS emit view_file, grep_search, and read tool calls in parallel within a single turn when inspecting multiple files.",
 			}
+			state.Records = filterOutCategory(state.Records, "read")
+			_ = saveState(dir, safeID, state) //nolint:errcheck
+			return nil
 		}
 
 		// Allowed: record invocation
@@ -529,6 +546,8 @@ func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time
 			ToolName:  payload.ToolCall.Name,
 			Target:    target,
 			Category:  category,
+			StartLine: args.StartLine,
+			EndLine:   args.EndLine,
 		}
 		state.Records = append(state.Records, inv)
 		if len(state.Records) > DefaultMaxRecords {

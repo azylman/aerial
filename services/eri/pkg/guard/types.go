@@ -48,6 +48,8 @@ type ToolArgs struct {
 	AbsolutePath string `json:"AbsolutePath"`
 	Path         string `json:"path"`
 	File         string `json:"file"`
+	StartLine    int    `json:"StartLine"`
+	EndLine      int    `json:"EndLine"`
 	CommandLine  string `json:"CommandLine"`
 	Cwd          string `json:"Cwd"`
 }
