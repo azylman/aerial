@@ -11,9 +11,6 @@
     },
     "services/hangar/main.go": {
       "lines": 3203
-    },
-    "services/webhooks-router/main.go": {
-      "lines": 3744
     }
   },
   "functions": {
@@ -357,16 +354,8 @@
     "services/vanadis/main.go::*PostgresVanadisStore.CreateBuild": {
       "cc": 25
     },
-    "services/webhooks-router/main.go::*RouterServer.ProcessGitHubEvent": {
-      "lines": 255,
-      "cc": 77,
-      "depth": 7
-    },
     "services/webhooks-router/main.go::*RouterServer.ProcessHangarEvent": {
       "cc": 51
-    },
-    "services/webhooks-router/main.go::*RouterServer.checkOpenPRConflicts": {
-      "cc": 24
     },
     "services/webhooks-router/main.go::*RouterServer.syncSinglePRWidget": {
       "cc": 30,
@@ -380,6 +369,14 @@
     },
     "services/webhooks-router/nomad_stream.go::*RouterServer.isNomadJobHealthy": {
       "cc": 32
+    },
+    "services/webhooks-router/github.go::*RouterServer.ProcessGitHubEvent": {
+      "lines": 255,
+      "cc": 77,
+      "depth": 7
+    },
+    "services/webhooks-router/github.go::*RouterServer.checkOpenPRConflicts": {
+      "cc": 24
     }
   }
 }
