@@ -44,15 +44,6 @@
     "services/dashboard/github.go::*GitHubPoller.pollRepo": {
       "cc": 28
     },
-    "services/dashboard/pure.go::MergeClusterDeploymentsWithHangar": {
-      "lines": 540,
-      "cc": 189,
-      "depth": 6
-    },
-    "services/dashboard/pure.go::ParseNomadClusterState": {
-      "cc": 31,
-      "depth": 6
-    },
     "services/eri/cmd/transcript-search/main.go::parseCLIArgs": {
       "cc": 21
     },
