@@ -3,6 +3,7 @@ package guard
 import (
 	"encoding/json"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -110,26 +111,60 @@ func stringField(m map[string]any, key string) string {
 	return ""
 }
 
+func hasExcessiveSearchSQLLimit(sqlStr string, queryMap map[string]any) bool {
+	if sz, ok := queryMap["size"].(float64); ok && sz > MaxSelectLimitRows {
+		return true
+	}
+	cleaned := strings.ToLower(stripSQLQuotesAndComments(sqlStr))
+	tokens := strings.Fields(sqlWildcardReplacer.Replace(cleaned))
+	for i, tok := range tokens {
+		if tok == "limit" && i+1 < len(tokens) {
+			if n, err := strconv.Atoi(tokens[i+1]); err == nil && n > MaxSelectLimitRows {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func shapeSearchSQLOptions(reqBody, queryMap map[string]any) bool {
+	changed := false
+	if queryMap != nil {
+		if sz, ok := queryMap["size"].(float64); !ok || sz <= 0 {
+			queryMap["size"] = MaxSelectLimitRows
+			changed = true
+		}
+	}
+	agentOpts := mapField(reqBody, "agent_options")
+	fmtVal := strings.ToLower(strings.TrimSpace(stringField(agentOpts, "output_format")))
+	if fmtVal == "csv" || fmtVal == "md_table" {
+		agentOpts["output_format"] = "json"
+		changed = true
+	}
+	return changed
+}
+
 func inspectOpenObserveSearchSQL(raw json.RawMessage) *Decision {
 	root := parseRawJSONMap(raw)
 	reqBody := mapField(root, "request_body")
 	if reqBody == nil {
 		return &Decision{Decision: DecisionAllow}
 	}
-	sqlStr := stringField(mapField(reqBody, "query"), "sql")
+	queryMap := mapField(reqBody, "query")
+	sqlStr := stringField(queryMap, "sql")
 	if hasSelectWildcard(sqlStr) {
 		return &Decision{
 			Decision: DecisionDeny,
-			Reason:   "Wildcard SELECT * is prohibited in openobserve SearchSQL (docker_logs has 28,000+ historical columns, causing context bloat and DataFusion 502 timeouts). Select explicit columns such as: SELECT _timestamp, service, level, message FROM docker_logs ...",
+			Reason:   "Wildcard SELECT * is prohibited in openobserve SearchSQL. Select explicit columns such as: SELECT _timestamp, service, level, message FROM docker_logs ...",
 		}
 	}
-	agentOpts := mapField(reqBody, "agent_options")
-	if strings.TrimSpace(stringField(agentOpts, "output_format")) == "" {
-		if agentOpts == nil {
-			agentOpts = make(map[string]any)
+	if hasExcessiveSearchSQLLimit(sqlStr, queryMap) {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "openobserve SearchSQL limit exceeds maximum allowed rows (50). Use LIMIT <= 50 (and query.size <= 50) to prevent context bloat.",
 		}
-		agentOpts["output_format"] = "csv"
-		reqBody["agent_options"] = agentOpts
+	}
+	if shapeSearchSQLOptions(reqBody, queryMap) {
 		return &Decision{
 			Decision:  DecisionAllow,
 			Overwrite: map[string]any{"Arguments": root},

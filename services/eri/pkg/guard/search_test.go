@@ -148,8 +148,11 @@ func TestCheckSearch(t *testing.T) {
 		{"mcp openobserve SearchSQL without request_body allowed", "call_mcp_tool", "SearchSQL", ``, false},
 		{"mcp openobserve SearchSQL select star denied", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"query":{"sql":"SELECT * FROM docker_logs LIMIT 10"}}}`, true},
 		{"mcp openobserve SearchSQL table star denied", "call_mcp_tool", "SearchSQL", `"{\"org_id\":\"default\",\"request_body\":{\"query\":{\"sql\":\"SELECT t.* FROM docker_logs t LIMIT 10\"}}}"`, true},
+		{"mcp openobserve SearchSQL excessive SQL LIMIT denied", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"query":{"sql":"SELECT _timestamp, message FROM docker_logs LIMIT 100"}}}`, true},
+		{"mcp openobserve SearchSQL excessive query size denied", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"query":{"size":100,"sql":"SELECT _timestamp, message FROM docker_logs LIMIT 10"}}}`, true},
 		{"mcp openobserve SearchSQL explicit columns and count(*) allowed", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"query":{"sql":"SELECT _timestamp, service, COUNT(*) FROM docker_logs WHERE message LIKE '%SELECT *%''s%' -- * comment\n GROUP BY _timestamp, service LIMIT 50"}}}`, false},
-		{"mcp openobserve SearchSQL existing output_format allowed", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"agent_options":{"output_format":"json"},"query":{"sql":"SELECT _timestamp, message FROM docker_logs LIMIT 10"}}}`, false},
+		{"mcp openobserve SearchSQL csv output_format rewritten to json", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"agent_options":{"output_format":"csv"},"query":{"size":20,"sql":"SELECT _timestamp, message FROM docker_logs LIMIT 10"}}}`, false},
+		{"mcp openobserve SearchSQL bounded size and json output_format allowed", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"agent_options":{"output_format":"json"},"query":{"size":20,"sql":"SELECT _timestamp, message FROM docker_logs LIMIT 10"}}}`, false},
 	}
 
 	for _, tc := range tests {
