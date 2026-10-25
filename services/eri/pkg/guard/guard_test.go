@@ -78,7 +78,7 @@ func TestGuardProcess_EndToEnd(t *testing.T) {
 		{"non-intercepted view_file", "all", `{"toolCall": {"name": "view_file", "args": {"AbsolutePath": "/share/aerial/README.md"}}}`, false},
 		{"empty tool call", "all", `{"toolCall": {"name": "", "args": {}}}`, false},
 		{"search mode denies unconstrained find", "search", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "find / -name foo"}}}`, true},
-		{"search mode allows scoped grep", "search", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "grep -rn --exclude-dir=.git foo ."}}}`, false},
+		{"search mode allows scoped grep", "search", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "grep -rn -m 20 --exclude-dir=.git foo ."}}}`, false},
 		{"commit mode allows safe commit command", "commit", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git status"}}}`, false},
 	}
 
