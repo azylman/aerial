@@ -339,7 +339,7 @@
       "lines": 169,
       "cc": 30
     },
-    "services/hangar/main.go::*SyncDaemon.doRegistryRequestWithAuth": {
+    "services/hangar/registry.go::*SyncDaemon.doRegistryRequestWithAuth": {
       "cc": 24
     },
     "services/hangar/main.go::SetupMux": {
