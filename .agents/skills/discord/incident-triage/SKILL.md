@@ -115,7 +115,7 @@ VictoriaMetrics is the cluster-wide time-series database (TSDB) collecting metri
 Once the event timestamp `t_event` and `<target_services>` are pinpointed from metrics:
 
 - **Targeted Log Query (`openobserve:SearchSQL`)**:
-  - Query OpenObserve stream `docker_logs` parameterized by service using explicit canonical columns (`_timestamp, service, level, message, stream, container_name, host`) and `agent_options: {"output_format": "csv"}` (~40% fewer tokens than JSON hits):
+  - Query OpenObserve stream `docker_logs` parameterized by service using explicit canonical columns (`_timestamp, service, level, message, stream, container_name, host`):
     ```sql
     SELECT _timestamp, service, level, message 
     FROM docker_logs 
@@ -124,9 +124,9 @@ Once the event timestamp `t_event` and `<target_services>` are pinpointed from m
     ORDER BY _timestamp ASC 
     LIMIT 50;
     ```
-- **Context Protection (`LIMIT 50` & CSV Output)**:
-  - Default strictly to `LIMIT 50` with `agent_options: {"output_format": "csv"}` to capture complete lifecycles without token bloat.
-  - Never call `StreamSchema` or `SELECT *` on `docker_logs` (which contains 28,000+ historical dynamic fields).
+- **Context Protection (`LIMIT 50` & JSON Output)**:
+  - Default strictly to `LIMIT 50` (and `size: 50`) to capture complete lifecycles without token bloat.
+  - Never call `StreamSchema` or `SELECT *` on `docker_logs`, and do not set `agent_options.output_format` to `"csv"` or `"md_table"` (OpenObserve v1.0.4's MCP wrapper drops hits in non-JSON modes).
   - If the log stream is noisy, narrow the query by filtering on severity or keywords:
     - `AND level IN ('warn', 'error', 'fatal', 'panic')`
     - `AND (message LIKE '%error%' OR message LIKE '%timeout%' OR message LIKE '%disconnect%')`
