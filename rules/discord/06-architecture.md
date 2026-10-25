@@ -4,15 +4,15 @@
 In Discord, Aerial operates as an autonomous systems architect, principal software engineer, and DevOps orchestrator. She plans and executes multi-turn workflows, authors code modifications, triages issues, runs testing suites, submits scratch Pull Requests, and supervises infrastructure maintenance.
 
 ## System Architecture & Topology
-Aerial runs as a multi-node HashiCorp Nomad cluster supervised by Nomad and Hangar across the local network:
+Aerial runs as a multi-node HashiCorp Nomad cluster supervised by Nomad and `hangar` across the local network:
 
 - **Core Infrastructure & Execution**:
-  - **`aerial-brain` (`eri`)**: Multi-protocol Antigravity execution engine managing multi-turn memory, multiplexed ingress (Discord gateway funnel, real-time voice pipeline via `/voice/ask`, HTTP prompt injection via `/prompt`, and direct outbound delivery via `/discord/message`), and Laya INT8 System-1 ambient triage (`/v1/systemone`).
+  - **`eri`**: Multi-protocol Antigravity execution engine managing multi-turn memory, multiplexed ingress (Discord gateway funnel, real-time voice pipeline via `/voice/ask`, HTTP prompt injection via `/prompt`, and direct outbound delivery via `/discord/message`), and Laya INT8 System-1 ambient triage (`/v1/systemone`).
   - **`haro`**: Persistent scheduling, heartbeat, and event-watch orchestration service evaluating cron, one-shot, and event triggers and dispatching due turns to `eri`.
   - **`coven`**: Semantic fact extraction, ACT-R memory decay, and procedural skill synthesis service.
   - **`vanadis`**: Autonomous multi-chunk build queue orchestrator with JIT symbol line-slice resolution.
-  - **`aerial-postgres`**: PostgreSQL 18 relational database with `pgvector` for production persistence (messages, sessions, atomic CAS task queues, schedules, event triggers, vector embeddings, PR registry, and Grafana).
-  - **`aerial-hangar`**: Dedicated infrastructure sidecar holding read-write repository mounts, executing event-driven GitOps push reconciliation and automated git synchronization.
+  - **`postgres`**: PostgreSQL 18 relational database with `pgvector` for production persistence (messages, sessions, atomic CAS task queues, schedules, event triggers, vector embeddings, PR registry, and Grafana).
+  - **`hangar`**: Dedicated infrastructure sidecar holding read-write repository mounts, executing event-driven GitOps push reconciliation and automated git synchronization.
   - **`coredns`**: Dynamic Nomad service discovery daemon rendering internal DNS records (`*.aerial`, `*.lan`) directly from `nomadServices`.
   - **`infisical`**: Centralized secret management and automated rotation backed by Redis, dynamically syncing secrets into Nomad variables (`nomadVar`).
 
@@ -26,25 +26,25 @@ Aerial runs as a multi-node HashiCorp Nomad cluster supervised by Nomad and Hang
   - **`docker-mcp`**: Streamable HTTP MCP server for auxiliary host Docker inspection.
 
 - **Web, Gateway & Ingress Services**:
-  - **`aerial-homepage`**: Root landing portal and service discovery HUD.
-  - **`aerial-mesh-proxy`**: Internal service mesh reverse proxy routing dynamic Nomad services and dashboards.
-  - **`aerial-dashboard`**: Web status HUD rendering live queue state, schedules, memory, and turn health.
-  - **`aerial-docs`**: Living documentation portal serving architectural specifications and runbooks.
+  - **`homepage`**: Root landing portal and service discovery HUD.
+  - **`mesh-proxy`**: Internal service mesh reverse proxy routing dynamic Nomad services and dashboards.
+  - **`dashboard`**: Web status HUD rendering live queue state, schedules, memory, and turn health.
+  - **`docs`**: Living documentation portal serving architectural specifications and runbooks.
   - **`agentsview`**: Web observability dashboard rendering agent session transcripts and tool traces.
-  - **`webhooks-router`**: Event-driven router dispatching Infisical secret webhooks to Nomad variables, GitHub push/CI webhooks to Hangar and `eri`, and Vanadis chunk lifecycle progression.
-  - **`cloudflared-webhooks` / `edge-proxy`**: Ingress tunnel services exposing secure external webhooks and public domains into the local Nomad mesh.
+  - **`webhooks-router`**: Event-driven router dispatching Infisical secret webhooks to Nomad variables, GitHub push/CI webhooks to `hangar` and `eri`, and Vanadis chunk lifecycle progression.
+  - **`edge-proxy`**: Ingress reverse proxy and HMAC verification gateway exposing secure external webhooks into the local Nomad mesh.
 
 - **Observability & Supporting Services**:
-  - **`aerial-vector`**: High-performance log collector and transform pipeline shipping container stdout/stderr into OpenObserve.
-  - **`aerial-cadvisor`**: Container resource metrics collector (CPU, memory, network, disk).
-  - **`aerial-node-exporter`**: Host telemetry collector gathering CPU, memory, storage, thermals, and OS metrics.
-  - **`aerial-postgres-exporter`**: Database metrics exporter collecting connection pools, transactions, and cache stats.
-  - **`aerial-victoriametrics`**: Single-node Prometheus-compatible TSDB storing system metrics with modular scrape configs.
-  - **`aerial-grafana`**: Cyberpunk-themed visual telemetry dashboards.
+  - **`vector`**: High-performance log collector and transform pipeline shipping container stdout/stderr into OpenObserve.
+  - **`cadvisor`**: Container resource metrics collector (CPU, memory, network, disk).
+  - **`node-exporter`**: Host telemetry collector gathering CPU, memory, storage, thermals, and OS metrics.
+  - **`postgres-exporter`**: Database metrics exporter collecting connection pools, transactions, and cache stats.
+  - **`victoriametrics`**: Single-node Prometheus-compatible TSDB storing system metrics with modular scrape configs.
+  - **`grafana`**: Cyberpunk-themed visual telemetry dashboards.
   - **`ollama`**: Local LLM and vector embedding server for semantic memory.
 
 - **Heterogeneous 3-Node Cluster Topology**:
-  - **`quiet-zero`** (Core Server Node): Primary server hosting persistent storage, PostgreSQL + pgvector, Brain execution engine, Hangar GitOps, CoreDNS, Infisical, and full-stack telemetry.
+  - **`quiet-zero`** (Core Server Node): Primary server hosting persistent storage, PostgreSQL + pgvector, `eri` execution engine, `hangar` GitOps, CoreDNS, Infisical, and full-stack telemetry.
   - **`calibarn`** (AI / GPU Compute Node): Hardware-accelerated edge node with NVIDIA GPU acceleration hosting speech recognition (Faster-Whisper large-v3-turbo) and voice synthesis (Kokoro-82M TTS) over Wyoming protocol.
   - **`cockpit`** (Touch Kiosk Node): Interactive touch display HUD hosting microphone capture (`ear`), wake-word detection, and WebRTC media streaming.
 
@@ -56,7 +56,7 @@ Aerial operates on a strict **Multi-Repository Architecture & Separation of Conc
 
 ### 1. Core Engine Monorepo (`azylman/aerial` at `/share/aerial` — `scripts/aerial-pr.sh init aerial`)
 - **Purpose**: Generic, domain-agnostic open-source foundation.
-- **Contents**: Core Go services (`services/eri`, `services/haro`, `services/coven`, `services/vanadis`, `services/hangar`, `services/webhooks-router`, `services/dashboard`, `services/discord-mcp`), base system rules (`rules/`), built-in skills (`.agents/skills/`), Nomad job definitions (`nomad/jobs/*.nomad`), Dockerfiles, and CI/verification scripts (`scripts/`).
+- **Contents**: Core Go services (`services/eri`, `services/haro`, `services/coven`, `services/vanadis`, `services/hangar`, `services/webhooks-router`, `services/dashboard`), MCP servers (`mcp/discord-mcp`, `mcp/docker-mcp`, `mcp/github-mcp`, `mcp/infisical-mcp`, `mcp/nomad-mcp`), shared Go packages (`pkg/`), base system rules (`rules/`), built-in skills (`.agents/skills/`), Nomad job definitions (`nomad/jobs/*.nomad`), Dockerfiles, and CI/verification scripts (`scripts/`).
 - **Strict Invariants**:
   - **100% Generic & Domain-Agnostic**: All prompts, code, error handlers, and schemas must remain completely generic and reusable for any user.
   - **Zero Personal Data Invariant**: NEVER commit real names, Discord handles, usernames, family members, home addresses, private device/entity IDs, or user-specific business logic into this repository.
