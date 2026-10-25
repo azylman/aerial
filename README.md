@@ -14,12 +14,12 @@ Built in **Go (1.27)** and orchestrated as a resilient bare-metal homelab mesh:
 
 - **Cluster Orchestration**: **HashiCorp Nomad** — Heterogeneous bare-metal cluster managing distributed daemons, batch tasks, and GPU workloads.
 - **Service Discovery & Routing**: **CoreDNS** (internal mesh DNS) + **Nginx** (reverse proxy & edge ingress).
-- **Persistence & Vector Memory**: **PostgreSQL 18 + pgvector** — Multi-turn conversation state, relational persistence, and hybrid RRF search (dense HNSW embeddings + sparse FTS).
+- **Persistence & Vector Memory**: **PostgreSQL 18 + pgvector** — Multi-turn conversation state, strict 1-to-1 single-service table ownership, and hybrid RRF semantic memory (`coven`).
 - **Schema Migrations**: **Ariga Atlas** — Declarative schema migrations, automated diffing, and checksum validation via Nomad batch jobs.
-- **Queuing & Idempotent Ingestion**: **River** — Transactional, PostgreSQL-backed Go job queue powering strictly idempotent webhook processing and event dispatch.
+- **Queuing & Idempotent Ingestion**: **River** — Transactional, PostgreSQL-backed Go job queue powering strictly idempotent webhook processing, event dispatch, and multi-chunk build orchestration (`vanadis`).
 - **Secrets Management**: **Infisical + Redis** — Centralized secret governance with dynamic runtime injection and zero plaintext disk persistence.
 - **Observability & Telemetry**:
-  - **Metrics**: **VictoriaMetrics** (TSDB) + **Grafana** (telemetry HUDs) + Prometheus Exporters (**cAdvisor**, **Node Exporter**)
+  - **Metrics**: **VictoriaMetrics** (TSDB) + **Grafana** (telemetry HUDs) + Prometheus Exporters (**cAdvisor**, **Node Exporter**, **Postgres Exporter**)
   - **Logs**: **Vector** (collection & transforms) + **OpenObserve** (structured SQL log analytics)
 - **Agent Protocols & Extensibility**: **Model Context Protocol (MCP)** — Streamable HTTP microservices providing modular tool boundaries across the platform.
 - **Edge AI & Speech**: **Faster-Whisper (CUDA)** + **Kokoro-82M TTS** over Wyoming protocol, with quantized **ModernBERT** ambient triage.
@@ -29,8 +29,8 @@ Built in **Go (1.27)** and orchestrated as a resilient bare-metal homelab mesh:
 ## 1. System Architecture & Topology
 
 Aerial separates generic platform orchestration from private homelab state using a decoupled **Two-Repository Architecture**:
-- **Engine Repo (`azylman/aerial`)**: Autonomous agent execution core (`aerial-brain`), declarative Nomad cluster jobs (`nomad/jobs/*.nomad`), turnkey telemetry stack (VictoriaMetrics, Vector, Grafana), PostgreSQL 18 persistence, CoreDNS service discovery, and outbound MCP microservices.
-- **User Config Repo (e.g. `your-username/your-aerial-config`)**: Declarative user sidecar jobs (`jobs/*.nomad`), custom skills and automation runbooks (`custom-skills/`), modular telemetry scrapes (`victoriametrics/`), platform options (`config.yaml`), persona guidelines (`rules/`), and Discord channel policies (`channels/`). Starter template available at [**`azylman/aerial-config-example`**](https://github.com/azylman/aerial-config-example).
+- **Engine Repo (`azylman/aerial`)**: Autonomous agent execution core (`eri`), scheduling & event watch orchestrator (`haro`), semantic memory & skill synthesis (`coven`), multi-chunk build orchestrator (`vanadis`), GitOps reconciler (`hangar`), shared Go packages (`pkg/`), declarative Nomad cluster jobs (`nomad/jobs/*.nomad`), turnkey telemetry stack (VictoriaMetrics, Vector, Grafana), PostgreSQL 18 persistence, CoreDNS service discovery, and outbound MCP microservices.
+- **User Config Repo (e.g. `your-username/your-aerial-config`)**: Declarative user sidecar jobs (`jobs/*.nomad`), custom skills and automation runbooks (`custom-skills/`), modular telemetry scrapes (`victoriametrics/`), platform options (`config.yaml`), modular persona and runtime rules (`rules/`), and Discord channel policies (`channels/`). Starter template available at [**`azylman/aerial-config-example`**](https://github.com/azylman/aerial-config-example).
 
 ```text
 ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
@@ -44,14 +44,13 @@ Aerial separates generic platform orchestration from private homelab state using
                                                │
                                                ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                        Aerial Brain                                         │
+│                                  eri (Execution Core)                                       │
 │  • Autonomous Subagent Orchestrator & SDD Planning Engine                                   │
-│  • Self-Healing GitOps Worker (Proactive CI/CD Remediation)                                 │
+│  • Self-Healing GitOps Worker (Proactive CI/CD & RoboRev Remediation)                       │
 │  • Configurable Multi-Protocol Execution Core: agy-cli, Gemini CLI, etc.                    │
 │  • Laya INT8 ModernBERT-large Ambient Classifier (/v1/systemone)                            │
 │  • PostgreSQL 18 Multi-Turn Thread Memory & Atomic CAS Task State                           │
-│  • Semantic Memory Hybrid RRF (dense pgvector HNSW + sparse FTS lexical search)             │
-│  • Deep Prometheus Telemetry Instrumentation (:8080/metrics)                                │
+│  • Deep Prometheus Telemetry Instrumentation (:8088/metrics)                                │
 └─────────────────────────────────────────────────────────────────────────────────────────────┘
                                                │
                                                ▼
@@ -59,13 +58,13 @@ Aerial separates generic platform orchestration from private homelab state using
 │                       HASHICORP NOMAD 3-NODE HETEROGENEOUS CLUSTER                          │
 ├──────────────────────────────┬──────────────────────────────┬───────────────────────────────┤
 │ Core Server (quiet-zero)     │ GPU Worker (calibarn)        │ Touch Kiosk (cockpit)         │
-│ • aerial-brain (Agent Core)  │ • orin-voice (Whisper GPU)   │ • kiosk-client (ALSA / ear)   │
-│ • aerial-postgres (pgvector) │ • Kokoro-82M TTS synthesis   │ • WebRTC stream & Chromium UI │
-│ • coredns (*.aerial, *.lan)  │ • Wyoming protocol (:10300)  │ • Voice fingerprinter sidecar │
-│ • infisical & redis (Secrets)│ • Host volume whisper_cache  │ • wake-word detection         │
-│ • webhooks-router & hangar   │ • High-bandwidth speech pipe │ • Real-time user touch HUD    │
-│ • User Sidecars (*.nomad)    │ • CUDA / Tensor acceleration │ • Local audio capture         │
-│ • Persistent Cron Pipelines  │ • Edge AI speech engine      │ • Ambient room microphone     │
+│ • eri (Agent Execution Core) │ • orin-voice (Whisper GPU)   │ • kiosk-ear (ALSA / ear)      │
+│ • haro, coven & vanadis      │ • Kokoro-82M TTS synthesis   │ • WebRTC stream & Chromium UI │
+│ • postgres (PG 18 + pgvector)│ • Wyoming protocol (:10300)  │ • Voice fingerprinter sidecar │
+│ • coredns (*.aerial, *.lan)  │ • Host volume whisper_cache  │ • Wake-word detection         │
+│ • infisical & redis (Secrets)│ • High-bandwidth speech pipe │ • Real-time user touch HUD    │
+│ • webhooks-router & hangar   │ • CUDA / Tensor acceleration │ • Local audio capture         │
+│ • User Sidecars (*.nomad)    │ • Edge AI speech engine      │ • Ambient room microphone     │
 │ • Full Telemetry Matrix      │ • Host GPU worker offload    │ • Wayland display kiosk       │
 └──────────────────────────────┴──────────────────────────────┴───────────────────────────────┘
                                                │
@@ -73,9 +72,10 @@ Aerial separates generic platform orchestration from private homelab state using
 ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
 │                          AUTONOMOUS TOOL RUNTIME (MCP) & TELEMETRY                          │
 ├──────────────────────────────┬──────────────────────────────┬───────────────────────────────┤
-│ Nomad Cluster MCP (:4005)    │ Database Scheduler (:8080)   │ VictoriaMetrics TSDB (:8428)  │
-│ GitHub Operations MCP (:4003)│ Infisical Secrets (:4006)    │ OpenObserve Telemetry (:5080) │
-│ Discord REST MCP (:4001)     │ Host Docker MCP (:4002)      │ Grafana Cyberpunk HUD (:3000) │
+│ Haro Scheduler MCP (:4005)   │ Coven Memory MCP (:4008)     │ VictoriaMetrics TSDB (:8428)  │
+│ Nomad Cluster MCP (:4006)    │ Infisical Secrets (:4007)    │ OpenObserve Telemetry (:5080) │
+│ GitHub Operations MCP (:4003)│ Discord REST MCP (:4001)     │ Grafana Cyberpunk HUD (:3000) │
+│ Host Docker MCP (:4002)      │ VictoriaMetrics MCP (:4044)  │ Vanadis Build Queue (:4025)   │
 └──────────────────────────────┴──────────────────────────────┴───────────────────────────────┘
 ```
 
@@ -90,19 +90,20 @@ Aerial is designed to be easily extended across four distinct layers:
 │                                  4 WAYS TO EXTEND AERIAL                                    │
 ├─────────────────────────────┬──────────────────────────┬────────────────────┬───────────────┤
 │ 1. CONFIG & PERSONA         │ 2. CUSTOM SKILLS         │ 3. MCP SERVERS     │ 4. CONTAINERS │
-│ config.yaml & AGENTS.md     │ Runbooks in config repo  │ Connecting APIs    │ Extra sidecars│
+│ config.yaml & rules/        │ Runbooks in config repo  │ Connecting APIs    │ Extra sidecars│
 └─────────────────────────────┴──────────────────────────┴────────────────────┴───────────────┘
 ```
 
 ---
 
-### Layer 1: Configuration & Persona (`config.yaml` & `AGENTS.md`)
+### Layer 1: Configuration & Persona (`config.yaml` & `rules/`)
 
 User configuration and persona rules live in your private configuration repository (see [aerial-config-example](https://github.com/azylman/aerial-config-example)):
 
 1. **`config.yaml`** (Agent Options, Channel Policies, & MCP Tools):
    ```yaml
    model: "gemini-3.8-flash-high"
+   medium_effort_model: "gemini-3.8-flash-medium"
    low_effort_model: "gemini-3.8-flash-low"
    timezone: "America/Los_Angeles"
    system_channel: "aerial-dev"
@@ -112,17 +113,19 @@ User configuration and persona rules live in your private configuration reposito
    admin_users:
      - "123456789012345678"
 
-   # Channel Policies, Interaction Modes & Webhook Interceptors
+   # Channel Policies, Effort Tiers, Interaction Modes & Webhook Interceptors
    channels:
      # Default fallback (Required)
      default:
        mode: "threads"           # "threads" | "channel" | "ignore"
+       effort: "high"            # "high" | "medium" | "low"
        ignore_bots: true
        ambient_wake_threshold: 0.80
 
      # In-Channel Direct Interaction with Classifier and Lifecycle Webhooks
      general:
        mode: "channel"
+       effort: "medium"
        wake_mode: "classifier"   # "classifier" | "mention" | "all"
        ignore_bots: true
        ambient_wake_threshold: 0.80
@@ -144,6 +147,7 @@ User configuration and persona rules live in your private configuration reposito
      # Mention-Only Channel (listens ambiently, responds ONLY on explicit @mention or direct reply)
      lounge:
        mode: "channel"
+       effort: "low"
        wake_mode: "mention"
        ignore_bots: false
 
@@ -162,6 +166,10 @@ User configuration and persona rules live in your private configuration reposito
      - `threads`: Direct messages or mentions spawn and route to a Discord thread (default).
      - `channel`: Messages are evaluated directly in-channel without spawning threads.
      - `ignore` (or `disabled`): Channel is completely ignored (no messages evaluated, no startup sweeps).
+   - **Effort Tiers (`effort`)**:
+     - `high` (default): Uses primary `model`.
+     - `medium`: Routes turns in the channel to `medium_effort_model`.
+     - `low`: Routes turns in the channel to `low_effort_model`.
    - **Wake Sensitivity Modes (`wake_mode`)**:
      - `mention` (or `mentions`, `direct`): Aerial responds strictly to explicit user pings (`@Aerial`) and direct replies. Keyword triggers and LLM classification are bypassed with zero token cost. Ambient channel chatter is silently appended into `transcript.jsonl` so Aerial retains complete conversational lookback when subsequently pinged.
      - `classifier` (or `ambient`): Tier 1 wakes strictly on direct mentions and direct replies; Tier 2 ambient messages are scored (0.0 to 1.0) locally by the in-cluster Laya System-1 INT8 ModernBERT-large classifier (`/v1/systemone`) evaluating recent channel context and thread history with zero external API latency or token cost. Plaintext keywords do not trigger Tier 1 wakes.
@@ -175,12 +183,12 @@ User configuration and persona rules live in your private configuration reposito
    - **Server Whitelisting (Default-Deny)**: Set `channels.default.mode: "ignore"` to ignore the entire server by default, responding only in explicitly declared channels.
    - **Hot-Reloading & LKGC**: Changes to `config.yaml` trigger zero-downtime hot-reloads via Nomad template signaling (`SIGHUP`) and are reconfigured in-memory without restarting the daemon. If invalid YAML is saved, Aerial retains the **Last Known Good Configuration (LKGC)** in memory and posts a diagnostic alert to `#aerial-dev`.
 
-2. **`AGENTS.md`** (Persona & Tone Overrides):
-   Define custom persona rules, tone guidelines, or private operational context. Instructions in `AGENTS.md` take priority over base `GEMINI.md` rules.
+2. **Modular Rules (`rules/`)** (Persona, Identity & Runtime Overrides):
+   Define custom persona rules, tone guidelines, user identity, and runtime preferences under `rules/{common,persona,discord,voice}/` in your config repository. User rules in `aerial-config/rules/` take precedence over base engine rules in `aerial/rules/` and are automatically provisioned into target runtime directories (`discord`, `voice`, `ephemeral`).
 
 3. **Per-Channel Instructions (`channels/<channel-name>.md`)**:
    Define dedicated guidelines and operational personas tailored to specific Discord channels:
-   - **Convention Auto-Discovery**: Place Markdown files in `channels/<channel-name>.md` within your configuration repository (e.g., `/share/aerial-config/channels/general.md` or `/share/aerial-config/channels/lounge.md`). Aerial automatically discovers and injects them dynamically without requiring explicit path configuration in `config.yaml`.
+   - **Convention Auto-Discovery**: Place Markdown files in `channels/<channel-name>.md` within your configuration repository (e.g., `/share/aerial-config/channels/general.md` or `/share/aerial-config/channels/lounge.md`). `eri` automatically discovers and injects them dynamically without requiring explicit path configuration in `config.yaml`.
    - **Thread Inheritance**: Conversations in Discord threads automatically resolve and apply instructions from their parent channel (`channels/<parent-channel-name>.md`).
    - **Normalized Lookups**: Channel names are normalized case-insensitively, strip leading `#`, and interoperate between spaces and hyphens (e.g., `#Dev Chat` resolves `dev-chat.md` or `dev chat.md`).
    - **Prompt Injection & Safety**: Instructions are framed inside `<CHANNEL_INSTRUCTIONS>` prior to `<USER_REQUEST>`, escaped against XML delimiter breakouts, capped at 64KB, and defended against directory traversal.
@@ -192,16 +200,17 @@ User configuration and persona rules live in your private configuration reposito
 Skills use **Progressive Disclosure**—Aerial only loads skill titles and descriptions into context, reading full runbooks on-demand when relevant.
 
 #### A. User Custom Skills (`custom-skills/` in your config repo)
-Place custom skill directories inside `custom-skills/` in your private configuration repository:
+Place custom skill directories inside `custom-skills/{common,discord,voice}/` in your private configuration repository:
 ```text
 custom-skills/
-└── weather-alerts/
-    └── SKILL.md
+└── common/
+    └── weather-alerts/
+        └── SKILL.md
 ```
-`aerial-brain` automatically discovers custom skills in `/share/aerial-config/custom-skills` and symlinks them into `/root/.gemini/skills/` with highest priority. Orphaned or dead symlinks are automatically swept when skills are renamed or removed.
+`eri` automatically discovers custom skills in `/share/aerial-config/custom-skills` and symlinks them into each runtime's `.gemini/config/skills/` directory with highest priority. Orphaned or dead symlinks are automatically swept when skills are renamed or removed.
 
 #### B. Built-in Skills (`azylman/aerial/.agents/skills/`)
-Core system skills (such as `self-improvement`) are baked into the `brain` image during build.
+Core system skills (such as `self-improvement`) are baked into the `eri` image during build.
 
 #### Skill File Structure (`SKILL.md`)
 ```markdown
@@ -221,30 +230,32 @@ description: "Check regional weather forecasts and send alert summaries via Disc
 
 ### Layer 3: Adding Custom MCP Servers
 
-Aerial connects to external Model Context Protocol (MCP) servers over Streamable HTTP / SSE. Service hostnames resolve dynamically across cluster nodes via CoreDNS (`*.aerial`, `*.lan`):
+`eri` connects to external Model Context Protocol (MCP) servers over Streamable HTTP / SSE. Service hostnames resolve dynamically across cluster nodes via CoreDNS (`*.aerial`, `*.lan`):
 
 #### Built-in Tool Autodiscovery
-By default, Aerial automatically mounts:
-- **`nomad`** (`http://nomad-mcp:4005/mcp` - Nomad cluster orchestration, job lifecycles & allocation diagnostics)
+By default, `eri` automatically mounts built-in MCP servers across runtimes:
+- **`scheduler`** (`http://haro.aerial/mcp` - Persistent PostgreSQL cron, one-shot, heartbeat & event-watch orchestrator)
+- **`memory`** (`http://coven.aerial/mcp` - Semantic memory search, fact storage & ACT-R recall)
 - **`discord`** (`http://discord-mcp:4001/mcp` - Outbound Discord messaging & thread tools)
 - **`github`** (`http://github-mcp:4003/mcp` - GitHub repository, PR, and issue operations with PAT auth)
-- **`scheduler`** (`http://scheduler-mcp:8080/mcp` - PostgreSQL-backed cron & reminder manager)
-- **`infisical`** (`http://infisical-mcp:4006/mcp` - Secret inspection and rotation management)
-- **`victoriametrics`** (`http://victoriametrics-mcp:4004/mcp` - Streamable HTTP TSDB metric querying & alert rule inspection)
 - **`openobserve`** (`http://openobserve:5080/openobserve/api/default/mcp` - Native telemetry, log exploration, and SQL search)
-- **`docker`** (`http://docker-mcp:4002/mcp` - Host Docker daemon operations)
 
+Additional cluster MCP microservices (`nomad-mcp` on `:4006`, `infisical-mcp` on `:4007`, `victoriametrics-mcp` on `:4044`, and `docker-mcp` on `:4002`) can be enabled per target runtime in `config.yaml`.
 
 #### Custom MCP Servers (`config.yaml`)
-Define additional MCP tools directly in your `config.yaml`:
+Define additional MCP tools partitioned by target runtime (`common`, `discord`, `voice`, `ephemeral`) in your `config.yaml`:
 ```yaml
 mcp_servers:
-  brave-search:
-    serverUrl: "http://brave-mcp:4005/mcp"
-  custom-remote-api:
-    serverUrl: "https://mcp.example.com/mcp"
-    headers:
-      Authorization: "Bearer ${CUSTOM_API_KEY}"
+  common:
+    brave-search:
+      serverUrl: "http://brave-mcp:4005/mcp"
+  discord:
+    nomad:
+      serverUrl: "http://nomad-mcp:4006/mcp"
+    custom-remote-api:
+      serverUrl: "https://mcp.example.com/mcp"
+      headers:
+        Authorization: "Bearer ${CUSTOM_API_KEY}"
 ```
 Environment variables `${VAR}` are interpolated dynamically at runtime from Infisical secrets and Nomad variables.
 
@@ -259,12 +270,8 @@ job "custom-worker" {
   datacenters = ["dc1"]
   type        = "service"
 
-  # Target specific cluster node class (e.g. quiet-zero, calibarn, cockpit)
-  constraint {
-    attribute = "${node.class}"
-    operator  = "="
-    value     = "quiet-zero"
-  }
+  # Target specific cluster node pool or class (e.g. default, calibarn, cockpit)
+  node_pool = "default"
 
   group "worker" {
     count = 1
@@ -299,38 +306,38 @@ Aerial includes an enterprise-grade, out-of-the-box observability matrix with si
 │                                 TELEMETRY PIPELINE                                    │
 ├────────────────────────────┬─────────────────────────────┬────────────────────────────┤
 │ METRIC EXPORTERS           │ TIME-SERIES TSDB            │ VISUALIZATION & HUD        │
-│ • aerial-brain (:8080)     │                             │                            │
-│ • aerial-hangar (:8080)    │ aerial-victoriametrics      │ aerial-grafana (:3000)     │
-│ • postgres-exporter (:9187)│ (:8428)                     │ • Anonymous Admin HUD      │
-│ • cadvisor (:8080)         │ • 5-Year Retention          │ • Cyberpunk Permet Theme   │
-│ • node-exporter (:9100)    │ • Dynamic 15s Scrape Engine │ • Core Telemetry Dashboard │
-│ • Modular scrape.d/*.yml   │ • Token Interpolation       │ • Postgres & Docker Views  │
+│ • eri (:8088)              │                             │                            │
+│ • hangar (:8087)           │ victoriametrics (:8428)     │ grafana (:3000)            │
+│ • postgres-exporter (:9187)│ • 5-Year Retention          │ • Anonymous Admin HUD      │
+│ • cadvisor (:8080)         │ • Dynamic 15s Scrape Engine │ • Cyberpunk Permet Theme   │
+│ • node-exporter (:9100)    │ • Token Interpolation       │ • Core Telemetry Dashboard │
+│ • Modular scrape.d/*.yml   │                             │ • Postgres & Docker Views  │
 └────────────────────────────┴─────────────────────────────┴────────────────────────────┘
 ```
 
-### 1. VictoriaMetrics TSDB (`aerial-victoriametrics`)
-- **Engine**: Single-node VictoriaMetrics (`v1.153.0`) running with 5-year retention (`-retentionPeriod=5y`) and 15s scrape interval.
+### 1. VictoriaMetrics TSDB (`victoriametrics`)
+- **Engine**: Single-node VictoriaMetrics running with 5-year retention (`-retentionPeriod=5y`) and 15s scrape interval.
 - **Dynamic Modular Scrapes**: VictoriaMetrics automatically discovers and live-reloads scrape configurations mounted from `/share/aerial-config/victoriametrics/*.yml` every 15 seconds without container restarts (`-promscrape.configCheckInterval=15s`).
 - **Token Interpolation**: Automatically expands environment variables (e.g. `%{HA_METRICS_TOKEN}`) in custom scrape configs.
 
-### 2. Pre-Provisioned Grafana Dashboards (`http://localhost:8089/grafana/`)
+### 2. Pre-Provisioned Grafana Dashboards (`/grafana/`)
 - **Single-Click Anonymous Admin Access**: Instant dashboard access without login friction.
 - **Persistent Backend**: Dashboards and user settings persist directly in PostgreSQL 18 (`GF_DATABASE_TYPE=postgres`).
 - **Pre-Provisioned Dashboard Suite**:
-  - **`⚡ Aerial Brain & Hangar Operations` (`core-telemetry.json`)**: Live turn execution latency (p50/p90/p95/p99), token usage, active worker pool depth, CAS task states, runner error taxonomy, Discord gateway ping, classifier triage decisions, Ollama vector search durations, GitSync and Hangar reconcile runs.
+  - **`⚡ Aerial Core & Hangar Operations` (`core-telemetry.json`)**: Live turn execution latency (p50/p90/p95/p99), token usage, active worker pool depth, CAS task states, runner error taxonomy, Discord gateway ping, classifier triage decisions, Ollama vector search durations, GitSync and Hangar reconcile runs.
   - **`🐘 PostgreSQL Overview` (`postgres-overview.json`)**: Active backends, connection pool state, buffer cache hit ratio (>99%), commits/rollbacks, tuple read/write velocity, and lock contention.
   - **`🐳 Docker Containers Overview` (`docker-overview.json`)**: Per-container CPU %, working set memory curves, network RX/TX, and CFS CPU throttling periods.
   - **`🖥️ Host System & Hardware Overview` (`host-system-overview.json`)**: Host CPU load breakdown, thermal sensors per core, RAM utilization, root disk space, and load averages.
   - **`🪙 Token Telemetry & Channel Breakdown` (`token-usage.json`)**: Real-time and cumulative token consumption partitioned by Discord channel, 24-hour and 7-day velocity, burn rates, and channel share leaderboards.
 
 ### 3. Deep Go Prometheus Metrics Instrumentation
-- **`aerial-brain`** (Exposed on internal `:8080/metrics` / host `:8088/metrics`):
-  - Queue & Workers: `aerial_brain_active_workers`, `aerial_brain_queue_depth`, `aerial_brain_interrupted_turns_recovered_total`.
+- **`eri`** (Exposed on `:8088/metrics`):
+  - Queue & Workers: `aerial_brain_active_workers`, `aerial_brain_queue_depth`, `aerial_brain_interrupted_turns_recovered_total`, `aerial_brain_daemons_active`, `aerial_brain_daemon_spawns_total`, `aerial_brain_daemon_prunes_total`.
   - Turns & Runner: `aerial_brain_turns_total`, `aerial_brain_turn_duration_seconds`, `aerial_brain_runner_executions_total`, `aerial_brain_runner_duration_seconds`, `aerial_brain_runner_errors_total`, `aerial_brain_yield_trap_total`.
   - Classifier & Funnel: `aerial_brain_classifier_duration_seconds`, `aerial_brain_classifier_decisions_total`, `aerial_brain_classifier_confidence_score`, `aerial_brain_discord_events_total`, `aerial_brain_discord_gateway_latency_seconds`.
-  - Memory & Embeddings: `aerial_brain_memory_operations_total`, `aerial_brain_memory_search_duration_seconds`, `aerial_brain_embeddings_generated_total`, `aerial_brain_facts_extracted_total`.
+  - Memory & Embeddings: `aerial_brain_memory_operations_total`, `aerial_brain_memory_search_duration_seconds`, `aerial_brain_embeddings_generated_total`, `aerial_brain_embedding_duration_seconds`.
   - Database Connection Pool: `aerial_brain_db_query_duration_seconds`, `aerial_brain_db_open_connections`, `aerial_brain_db_in_use_connections`, `aerial_brain_db_idle_connections`, `aerial_brain_db_wait_count_total`.
-- **`aerial-hangar`** (Exposed on internal `:8080/metrics`):
+- **`hangar`** (Exposed on `:8087/metrics`):
   - Git-related: `aerial_gitsync_pulls_total`, `aerial_gitsync_pull_duration_seconds`, `aerial_gitsync_sync_requests_total`, `aerial_gitsync_last_sync_timestamp_seconds`.
   - Reconcile & OCI: `aerial_hangar_reconciliations_total`, `aerial_hangar_compose_duration_seconds`, `aerial_hangar_registry_manifest_requests_total`, `aerial_hangar_registry_manifest_duration_seconds`, `aerial_hangar_rollbacks_total`, `aerial_hangar_image_quarantines_total`, `aerial_hangar_active_quarantines`, `aerial_hangar_build_info`.
 
@@ -339,11 +346,11 @@ Aerial includes an enterprise-grade, out-of-the-box observability matrix with si
 ## 4. Continuous Deployment, GitOps & Self-Improvement
 
 Aerial uses an automated, event-driven GitOps push continuous deployment pipeline:
-1. **GitHub Actions Matrix Builds**: Triggers dynamic matrix builds for modified microservices and publishes them to GitHub Container Registry (`ghcr.io/azylman/aerial-*`).
-2. **Event-Driven Push GitOps Router (`webhooks-router`)**: Receives authenticated GitHub push webhooks through Cloudflare tunnels, immediately triggering Hangar GitOps sync and Nomad job reconciliation without 60s pull polling delay.
-3. **Dedicated Hangar Sidecar (`aerial-hangar`)**: A dedicated background daemon holding read-write mounts on `/share/aerial-config` and `/share/aerial`, dispatching declarative Nomad job updates, managing snapshot rollbacks, image quarantine, and exposing `/sync` and `/reconcile` triggers.
-4. **Physical Immutability & Asynchronous PR Workflow**: The `aerial-brain` execution container mounts repositories strictly **read-only (`:ro`)**. When making code, configuration, persona, or peripheral adjustments across any repository, Aerial uses `scripts/aerial-pr.sh init [repo]` to initialize an ephemeral scratch directory, runs pre-flight syntax and verification checks (`./scripts/verify.sh --staged`), and submits asynchronously via `scripts/aerial-pr.sh submit` with native GitHub auto-merge (`SQUASH`) enabled and registered in PostgreSQL `pr_registry`.
-5. **Event-Driven Continuous Delivery & Proactive CI Self-Healing**: Once submitted, turns terminate immediately with zero foreground CI polling. When CI turns green, GitHub automatically merges the PR and Hangar deploys the Nomad jobs, posting confirmation directly to the registered Discord thread. If CI checks fail, `webhooks-router` wakes Brain with a proactive remediation prompt to checkout the branch, resolve the failure locally, verify, and push directly to the PR branch.
+1. **GitHub Actions Matrix Builds**: Triggers dynamic matrix builds for modified microservices (including dependents when shared `pkg/` changes) and publishes them to GitHub Container Registry (`ghcr.io/azylman/aerial-*`).
+2. **Event-Driven Push GitOps Router (`webhooks-router`)**: Receives authenticated GitHub push and CI webhooks through Cloudflare tunnels and `edge-proxy`, immediately triggering `hangar` GitOps sync, Nomad job reconciliation, and `vanadis` build chunk progression.
+3. **Dedicated Hangar Sidecar (`hangar`)**: A dedicated background daemon holding read-write mounts on `/share/aerial-config` and `/share/aerial`, dispatching declarative Nomad job updates, managing snapshot rollbacks, image quarantine, and exposing `/sync` and `/reconcile` triggers.
+4. **Physical Immutability & Asynchronous PR Workflow**: The `eri` execution container mounts repositories strictly **read-only (`:ro`)**. When making code, configuration, persona, or peripheral adjustments across any repository, Aerial uses `scripts/aerial-pr.sh init [repo]` to initialize an ephemeral scratch directory, runs pre-flight syntax and verification checks (`./scripts/verify.sh --staged`), and submits asynchronously via `scripts/aerial-pr.sh submit` with native GitHub auto-merge (`SQUASH`) enabled and registered in PostgreSQL `pr_registry`.
+5. **Event-Driven Continuous Delivery & Proactive CI Self-Healing**: Once submitted, turns terminate immediately with zero foreground CI polling. When CI turns green, GitHub automatically merges the PR and `hangar` deploys the Nomad jobs, posting confirmation directly to the registered Discord thread. If CI checks or `roborev` fail, `webhooks-router` wakes `eri` with a proactive remediation prompt to checkout the branch, resolve the failure locally, verify, and push directly to the PR branch.
 
 ---
 
@@ -351,29 +358,35 @@ Aerial uses an automated, event-driven GitOps push continuous deployment pipelin
 
 | Service | Port | Description |
 | :--- | :--- | :--- |
-| **`aerial-postgres`** | `5432` (Host `127.0.0.1:5432`) | Dedicated PostgreSQL 18 relational database with `pgvector` extension for production state, CAS task queues, Hybrid RRF semantic memory (dense vector + sparse FTS), PR registry, schedules, and Grafana storage. Production runs exclusively on PostgreSQL. |
-| **`aerial-brain`** | `8080` (Host `8088`) | Multi-protocol Go execution daemon running `agy`, PostgreSQL memory, multiplexed Discord, Voice (`/voice/ask`), and HTTP (`/prompt`) ingress, Prometheus metrics (`:8080/metrics`), and SIGHUP configuration hot-reloading. Mounted `:ro`. |
-| **`aerial-hangar`** | `8087` (Host `8087`) | Dedicated Hangar sidecar daemon managing automated repository synchronization, push GitOps reconciliation for Nomad jobs, image update detection, snapshot rollbacks, and Prometheus metrics. Mounted `:rw`. |
-| **`coredns`** | `53` (Host `53/udp`) | Dynamic Nomad service discovery daemon rendering internal DNS records (`*.aerial`, `*.lan`) directly from `nomadServices`. |
-| **`infisical`** | Dynamic (via `infisical.aerial`) | Centralized secret management and automated rotation backed by Redis, dynamically syncing secrets into Nomad variables (`nomadVar`). |
-| **`webhooks-router`** | `4020` (Host `4020`) | Event-driven webhook dispatcher routing GitHub push webhooks to Hangar and Infisical secret changes to Nomad variables. |
-| **`nomad-mcp`** | `4005` (Host `4005`) | Native Streamable HTTP MCP server for Nomad cluster orchestration, job lifecycles, and allocation diagnostics. |
-| **`infisical-mcp`** | `4006` (Host `4006`) | Native Streamable HTTP MCP server for Infisical secret management and rotation. |
-| **`aerial-scheduler-mcp`**| `8080` (Internal) | PostgreSQL-backed cron and one-shot reminder management server over HTTP MCP. |
-| **`aerial-discord-mcp`** | `4001` (Host `4001`) | Outbound MCP server providing Discord messaging, thread creation, and channel tools. |
-| **`aerial-github-mcp`** | `4003` (Host `4003`) | Native in-image GitHub MCP server with PAT authentication for PR, issue, and code operations. |
-| **`aerial-victoriametrics-mcp`**| `4004` (Host `127.0.0.1:4044`) | VictoriaMetrics MCP server exposing metrics querying and alert inspection over Streamable HTTP. |
-| **`aerial-ollama`** | `11434` (Host `11434`) | Local LLM and embedding server for vector memory retrieval (`all-minilm:latest` / 384-dim). |
-| **`aerial-agentsview`** | `8080` (via proxy) | Web UI for visualizing agent transcripts, session history, and execution timelines. |
-| **`aerial-dashboard`** | `8080` (via proxy) | Status microservice serving Cyberpunk status HUD. |
-| **`aerial-docs`** | `80` (via proxy) | Documentation engine rendering Markdown and Mermaid diagrams from config repo via Docsify. |
-| **`aerial-proxy`** | `8089` (Host `8089`) | Edge reverse proxy routing traffic for `/` (302 to HUD), `/dashboard/`, `/docs/`, `/agentsview/`, and `/grafana/`. |
-| **`aerial-cadvisor`** | `8080` (Internal) | cAdvisor container metrics collector gathering per-container CPU, memory, network, and disk telemetry. |
-| **`aerial-node-exporter`**| `9100` (Internal) | Node Exporter host telemetry gathering host CPU loads, memory, storage, thermals, and network metrics. |
-| **`aerial-postgres-exporter`**| `9187` (Internal) | PostgreSQL database metrics exporter gathering connection pools, locks, query stats, and buffer metrics. |
-| **`aerial-victoriametrics`**| Dynamic (via `victoriametrics.aerial`) | VictoriaMetrics single-node TSDB scraping Prometheus metrics from all exporters with 5-year retention and dynamic `scrape.d/` config. |
-| **`aerial-grafana`** | `3000` (via proxy) | Grafana visual dashboards serving system HUD & container metrics with PostgreSQL persistent backend and pre-provisioned dashboards. |
-| **`docker-mcp`** | `4002` (Host `4002`) | Auxiliary host Docker MCP inspection service over `/var/run/docker.sock`. |
+| **`postgres`** | `5432` | Dedicated PostgreSQL 18 relational database with `pgvector` extension for production state, CAS task queues, semantic memory, PR registry, schedules, Vanadis build queues, and Grafana storage. |
+| **`eri`** | `8088` | Multi-protocol Go execution daemon running `agy`, PostgreSQL session memory, multiplexed Discord, Voice (`/voice/ask`), and HTTP (`/prompt`) ingress, Laya System-1 triage, Prometheus metrics (`:8088/metrics`), and SIGHUP configuration hot-reloading. Mounted `:ro`. |
+| **`haro`** | `4005` | Persistent scheduling, heartbeat, and event-watch orchestration service (`http://haro.aerial/mcp`) evaluating cron, one-shot, and event triggers and dispatching due turns to `eri`. |
+| **`coven`** | `4008` | Semantic fact extraction, hybrid RRF memory search, ACT-R memory decay, and procedural skill synthesis MCP service (`http://coven.aerial/mcp`). |
+| **`vanadis`** | `4025` | Autonomous multi-chunk build queue orchestrator backed by PostgreSQL and River with JIT symbol line-slice resolution. |
+| **`hangar`** | `8087` | Dedicated GitOps sidecar daemon managing automated repository synchronization, push reconciliation for Nomad jobs, image update detection, snapshot rollbacks, and Prometheus metrics. Mounted `:rw`. |
+| **`webhooks-router`** | `4020` | Event-driven webhook dispatcher routing GitHub push/CI webhooks to `hangar`, `eri`, and `vanadis`, and Infisical secret changes to Nomad variables. |
+| **`edge-proxy`** | `4021` | Ingress reverse proxy verifying webhook HMAC signatures and forwarding external traffic into the local Nomad mesh. |
+| **`coredns`** | `53` | Dynamic Nomad service discovery daemon rendering internal DNS records (`*.aerial`, `*.lan`) directly from `nomadServices`. |
+| **`infisical`** | Dynamic (`infisical.aerial`) | Centralized secret management and automated rotation backed by Redis, dynamically syncing secrets into Nomad variables (`nomadVar`). |
+| **`nomad-mcp`** | `4006` | Native Streamable HTTP MCP server for Nomad cluster orchestration, job lifecycles, and allocation diagnostics. |
+| **`infisical-mcp`** | `4007` | Native Streamable HTTP MCP server for Infisical secret management and rotation. |
+| **`discord-mcp`** | `4001` | Outbound Streamable HTTP MCP server providing Discord messaging, thread creation, and channel tools. |
+| **`docker-mcp`** | `4002` | Streamable HTTP MCP server for auxiliary host Docker inspection over `/var/run/docker.sock`. |
+| **`github-mcp`** | `4003` | Native Streamable HTTP GitHub MCP server with PAT authentication for PR, issue, and code operations. |
+| **`victoriametrics-mcp`**| `4044` | VictoriaMetrics MCP server exposing metrics querying and alert inspection over Streamable HTTP. |
+| **`openobserve`** | `5080` | Cloud-native log analytics and Streamable HTTP MCP server (`/openobserve/api/default/mcp`) for structured log exploration and SQL search. |
+| **`ollama`** | `11434` | Local LLM and embedding server for vector memory retrieval (`all-minilm:latest` / 384-dim). |
+| **`homepage`** | `3001` | Root landing portal and service discovery HUD. |
+| **`dashboard`** | `8084` | Web status HUD rendering live queue state, schedules, memory, and turn health. |
+| **`agentsview`** | `8082` | Web UI for visualizing agent transcripts, session history, and execution timelines. |
+| **`docs`** | `80` | Living documentation portal rendering Markdown and Mermaid diagrams via Docsify. |
+| **`mesh-proxy`** | `80` | Internal service mesh reverse proxy routing traffic for `/`, `/dashboard/`, `/docs/`, `/agentsview/`, `/grafana/`, and `/openobserve/`. |
+| **`vector`** | `8686` | High-performance log collector and VRL transform pipeline shipping container stdout/stderr into OpenObserve. |
+| **`cadvisor`** | `8080` (Internal) | cAdvisor container metrics collector gathering per-container CPU, memory, network, and disk telemetry. |
+| **`node-exporter`** | `9100` (Internal) | Node Exporter host telemetry gathering host CPU loads, memory, storage, thermals, and network metrics. |
+| **`postgres-exporter`** | `9187` | PostgreSQL database metrics exporter gathering connection pools, locks, query stats, and buffer metrics. |
+| **`victoriametrics`** | `8428` (`victoriametrics.aerial`) | VictoriaMetrics single-node TSDB scraping Prometheus metrics from all exporters with 5-year retention and dynamic `scrape.d/` config. |
+| **`grafana`** | `3000` | Grafana visual dashboards serving system HUD & container metrics with PostgreSQL persistent backend and pre-provisioned dashboards. |
 
 ---
 
@@ -388,7 +401,7 @@ Aerial uses an automated, event-driven GitOps push continuous deployment pipelin
 ### Step 1: Create Your Private Configuration Repository
 1. Create a private repository on GitHub (e.g. `your-username/my-aerial-config`).
 2. Copy or fork the template files from [**`azylman/aerial-config-example`**](https://github.com/azylman/aerial-config-example) into your private repository.
-3. Customize `config.yaml` and persona rules as desired.
+3. Customize `config.yaml` and persona rules in `rules/` as desired.
 
 ### Step 2: Clone Aerial Engine
 ```bash
@@ -397,7 +410,7 @@ cd aerial
 ```
 
 ### Step 3: Configure Infisical Secrets & Nomad Variables
-Secrets and credentials are managed through Infisical and synced automatically to Nomad variables (`nomad/jobs/shared` and `nomad/jobs/brain`):
+Secrets and credentials are managed through Infisical and synced automatically to Nomad variables (`nomad/jobs/shared` and `nomad/jobs/eri`):
 ```bash
 # Example secrets managed in Infisical:
 # DISCORD_BOT_TOKEN=...
@@ -414,26 +427,29 @@ nomad job run nomad/jobs/db-migrate.nomad
 # Run core services:
 nomad job run nomad/jobs/coredns.nomad
 nomad job run nomad/jobs/postgres.nomad
-nomad job run nomad/jobs/brain.nomad
+nomad job run nomad/jobs/eri.nomad
+nomad job run nomad/jobs/haro.nomad
+nomad job run nomad/jobs/coven.nomad
+nomad job run nomad/jobs/vanadis.nomad
 nomad job run nomad/jobs/hangar.nomad
 nomad job run nomad/jobs/mesh-proxy.nomad
 ```
-On boot, `aerial-brain` and `aerial-hangar` adopt or clone your private configuration repository into `/share/aerial-config` and synchronize settings.
+On boot, `eri` and `hangar` adopt or clone your private configuration repository into `/share/aerial-config` and synchronize settings.
 
 ### Step 5: Authenticate via Google OAuth (Recommended)
-By default, Aerial runs `agy` in Google OAuth / subscription mode:
-1. Run the interactive `agy` CLI inside the brain container or shell:
+By default, `eri` runs `agy` in Google OAuth / subscription mode:
+1. Run the interactive `agy` CLI inside the `eri` container or shell:
    ```bash
-   docker exec -it aerial-brain agy
+   nomad alloc exec -i -t $(nomad job allocs -t '{{range .}}{{if eq .ClientStatus "running"}}{{.ID}}{{end}}{{end}}' eri) agy
    ```
 2. Copy the displayed Google OAuth login URL into your web browser and sign in.
 3. Paste the authorization code back into the terminal prompt and hit Enter.
-4. Press `Ctrl+C` to exit once authenticated. Aerial stores the OAuth session token in `/data` and automatically refreshes access tokens in the background!
+4. Press `Ctrl+C` to exit once authenticated. `eri` stores the OAuth session token in `/data` and automatically refreshes access tokens in the background.
 
 ### Step 6: Verify Health
 ```bash
 nomad job status
-nomad alloc logs -f $(nomad job status brain | grep -m1 running | awk '{print $1}')
+nomad alloc logs -f $(nomad job status eri | grep -m1 running | awk '{print $1}')
 ```
 
 ---
@@ -442,18 +458,19 @@ nomad alloc logs -f $(nomad job status brain | grep -m1 running | awk '{print $1
 
 | Action / Service | URL / Command |
 | :--- | :--- |
-| Status Dashboard (HUD) | `http://localhost:8089/dashboard/` (or `http://localhost:8089/`) |
-| Documentation (Docsify) | `http://localhost:8089/docs/` |
-| Agent Transcripts (Agentsview) | `http://localhost:8089/agentsview/` |
-| System Telemetry (Grafana) | `http://localhost:8089/grafana/` |
-| Brain Prometheus Metrics | `http://localhost:8088/metrics` |
-| Brain Healthcheck | `http://localhost:8088/health` |
+| Root Landing Portal (`homepage`) | `http://localhost/` |
+| Status Dashboard (`dashboard`) | `http://localhost/dashboard/` |
+| Documentation (`docs`) | `http://localhost/docs/` |
+| Agent Transcripts (`agentsview`) | `http://localhost/agentsview/` |
+| System Telemetry (`grafana`) | `http://localhost/grafana/` |
+| `eri` Prometheus Metrics | `http://localhost:8088/metrics` |
+| `eri` Healthcheck | `http://localhost:8088/health` |
 | List all cluster jobs | `nomad job status` |
 | View job allocations | `nomad job status <job_name>` |
 | View live allocation logs | `nomad alloc logs -f <alloc_id>` |
 | Stop or restart a job | `nomad job stop <job_name>` / `nomad job restart <job_name>` |
-| Trigger Hangar Sync & Push CD | `curl -s -X POST http://hangar:8087/sync` |
-| Trigger Immediate GitOps Reconcile | `curl -s -X POST http://hangar:8087/reconcile` |
+| Trigger Hangar Sync & Push CD | `curl -s -X POST http://hangar.aerial/sync` |
+| Trigger Immediate GitOps Reconcile | `curl -s -X POST http://hangar.aerial/reconcile` |
 
 ---
 
@@ -463,6 +480,6 @@ nomad alloc logs -f $(nomad job status brain | grep -m1 running | awk '{print $1
 - **Fail-Closed Default-Deny Server Containment**: Set `channels.default.mode: "ignore"` to contain Aerial exclusively to allowlisted channels on shared Discord servers.
 - **Discord Funnel Hardening**: Thread ID deduplication recovery resolves Discord error 160004 race conditions seamlessly, and message staleness TTL is set to 30 minutes to prevent dropped messages during deployment bursts.
 - **Zero Plaintext Tokens**: GitHub PATs and database secrets are passed in-memory ephemerally and never written to `.git/config` on disk.
-- **Automated Token Redaction**: All subprocess logs, errors, and GitOps reconcile streams pass through multi-pattern token sanitizers to redact sensitive credentials.
+- **Automated Token Redaction**: All subprocess logs, errors, and GitOps reconcile streams pass through multi-pattern token sanitizers (`pkg/sanitizer`) to redact sensitive credentials.
 - **Infisical Secret Governance**: Secrets are centralized in Infisical and injected dynamically into Nomad variables (`nomadVar`), eliminating plaintext `.env` files on disk.
 - **CoreDNS Mesh Isolation**: Internal microservices communicate securely across cluster nodes via dynamic CoreDNS (`*.aerial`, `*.lan`), keeping traffic private to the cluster network.
