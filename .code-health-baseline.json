@@ -1,8 +1,5 @@
 {
   "files": {
-    "services/dashboard/main.go": {
-      "lines": 2229
-    },
     "services/eri/main.go": {
       "lines": 2104
     },
