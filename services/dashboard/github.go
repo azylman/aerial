@@ -243,44 +243,25 @@ func (p *GitHubPoller) Start(ctx context.Context) {
 	}()
 }
 
-func (p *GitHubPoller) pollOnce(ctx context.Context) bool {
-	if p == nil {
-		return false
-	}
+func (p *GitHubPoller) refreshHangarDynamicRepos(ctx context.Context) {
 	p.mu.RLock()
 	hURL := p.hangarURL
 	p.mu.RUnlock()
 
-	if hURL != "" {
-		hCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		dynRepos := fetchHangarRepos(hCtx, hURL, p.client)
-		cancel()
-		if len(dynRepos) > 0 {
-			p.mu.Lock()
-			p.dynamicRepos = dynRepos
-			p.mu.Unlock()
-		}
+	if hURL == "" {
+		return
 	}
-
-	repos := p.getActiveRepos()
-	if len(repos) == 0 {
-		return false
+	hCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	dynRepos := fetchHangarRepos(hCtx, hURL, p.client)
+	cancel()
+	if len(dynRepos) > 0 {
+		p.mu.Lock()
+		p.dynamicRepos = dynRepos
+		p.mu.Unlock()
 	}
+}
 
-	baseURL := p.apiBaseURL
-	if baseURL == "" {
-		baseURL = "https://api.github.com"
-	}
-	allActiveRunIDs := make(map[int64]bool)
-	hasActive := false
-
-	for _, repo := range repos {
-		if p.pollRepo(ctx, repo, baseURL, allActiveRunIDs) {
-			hasActive = true
-		}
-	}
-
-	// Rebuild and sort aggregated cachedRuns under lock
+func (p *GitHubPoller) commitPolledRunsAndPruneJobs(repos []string, allActiveRunIDs map[int64]bool) bool {
 	p.mu.Lock()
 	var allRuns []GitHubRun
 	activeRepoMap := make(map[string]bool)
@@ -306,6 +287,7 @@ func (p *GitHubPoller) pollOnce(ctx context.Context) bool {
 		return allRuns[i].CreatedAt.After(allRuns[j].CreatedAt)
 	})
 
+	hasActive := false
 	for _, r := range allRuns {
 		if r.Status == "in_progress" || r.Status == "queued" {
 			hasActive = true
@@ -329,6 +311,82 @@ func (p *GitHubPoller) pollOnce(ctx context.Context) bool {
 	}
 	p.mu.Unlock()
 
+	return hasActive
+}
+
+func (p *GitHubPoller) pollOnce(ctx context.Context) bool {
+	if p == nil {
+		return false
+	}
+	p.refreshHangarDynamicRepos(ctx)
+
+	repos := p.getActiveRepos()
+	if len(repos) == 0 {
+		return false
+	}
+
+	baseURL := p.apiBaseURL
+	if baseURL == "" {
+		baseURL = "https://api.github.com"
+	}
+	allActiveRunIDs := make(map[int64]bool)
+	hasActive := false
+
+	for _, repo := range repos {
+		if p.pollRepo(ctx, repo, baseURL, allActiveRunIDs) {
+			hasActive = true
+		}
+	}
+
+	if p.commitPolledRunsAndPruneJobs(repos, allActiveRunIDs) {
+		hasActive = true
+	}
+
+	return hasActive
+}
+
+func sanitizeWorkflowRunCommits(runs []GitHubRun, repo string) {
+	// Sanitize commit messages and tag repository
+	for i := range runs {
+		runs[i].Repository = repo
+		if runs[i].HeadCommit != nil {
+			rawMsg := runs[i].HeadCommit.Message
+			firstLine := strings.SplitN(rawMsg, "\n", 2)[0]
+			// Truncate to 72 runes
+			runes := []rune(firstLine)
+			if len(runes) > 72 {
+				firstLine = string(runes[:72]) + "…"
+			}
+			// Strip any token-like substrings
+			for _, sens := range sensitiveKeys {
+				firstLine = strings.ReplaceAll(firstLine, sens, "[REDACTED]")
+			}
+			runs[i].HeadCommit.Message = firstLine
+		}
+	}
+}
+
+func (p *GitHubPoller) processPolledWorkflowRuns(ctx context.Context, repo, newETag string, runs []GitHubRun, allActiveRunIDs map[int64]bool) bool {
+	p.mu.Lock()
+	if newETag != "" {
+		p.runsETagMap[repo] = newETag
+		if repo == p.repo {
+			p.runsETag = newETag
+		}
+	}
+	p.cachedRunsByRepo[repo] = runs
+	p.mu.Unlock()
+
+	hasActive := false
+	for _, r := range runs {
+		allActiveRunIDs[r.ID] = true
+		if r.Status == "in_progress" || r.Status == "queued" || time.Since(r.UpdatedAt) < 10*time.Minute {
+			p.fetchJobsForRun(ctx, r.ID, repo)
+		}
+		if r.Status == "in_progress" || r.Status == "queued" {
+			hasActive = true
+		}
+	}
 	return hasActive
 }
 
@@ -387,46 +445,8 @@ func (p *GitHubPoller) pollRepo(ctx context.Context, repo, baseURL string, allAc
 			log.Printf("[Dashboard:GitHub] Error decoding runs for %s: %v", repo, decodeErr)
 			return false
 		}
-		// Sanitize commit messages and tag repository
-		for i := range runData.WorkflowRuns {
-			runData.WorkflowRuns[i].Repository = repo
-			if runData.WorkflowRuns[i].HeadCommit != nil {
-				rawMsg := runData.WorkflowRuns[i].HeadCommit.Message
-				firstLine := strings.SplitN(rawMsg, "\n", 2)[0]
-				// Truncate to 72 runes
-				runes := []rune(firstLine)
-				if len(runes) > 72 {
-					firstLine = string(runes[:72]) + "…"
-				}
-				// Strip any token-like substrings
-				for _, sens := range sensitiveKeys {
-					firstLine = strings.ReplaceAll(firstLine, sens, "[REDACTED]")
-				}
-				runData.WorkflowRuns[i].HeadCommit.Message = firstLine
-			}
-		}
-
-		p.mu.Lock()
-		if newETag != "" {
-			p.runsETagMap[repo] = newETag
-			if repo == p.repo {
-				p.runsETag = newETag
-			}
-		}
-		p.cachedRunsByRepo[repo] = runData.WorkflowRuns
-		p.mu.Unlock()
-
-		hasActive := false
-		for _, r := range runData.WorkflowRuns {
-			allActiveRunIDs[r.ID] = true
-			if r.Status == "in_progress" || r.Status == "queued" || time.Since(r.UpdatedAt) < 10*time.Minute {
-				p.fetchJobsForRun(ctx, r.ID, repo)
-			}
-			if r.Status == "in_progress" || r.Status == "queued" {
-				hasActive = true
-			}
-		}
-		return hasActive
+		sanitizeWorkflowRunCommits(runData.WorkflowRuns, repo)
+		return p.processPolledWorkflowRuns(ctx, repo, newETag, runData.WorkflowRuns, allActiveRunIDs)
 	}
 
 	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == 429 {

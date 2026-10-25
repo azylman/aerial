@@ -1,15 +1,6 @@
 {
   "files": {},
   "functions": {
-    "services/dashboard/config.go::NewDashboardConfigFromLookup": {
-      "cc": 46
-    },
-    "services/dashboard/github.go::*GitHubPoller.pollOnce": {
-      "cc": 21
-    },
-    "services/dashboard/github.go::*GitHubPoller.pollRepo": {
-      "cc": 28
-    },
     "services/eri/cmd/transcript-search/main.go::parseCLIArgs": {
       "cc": 21
     },
@@ -163,21 +154,6 @@
     },
     "services/eri/pkg/runner/unified_pool.go::*unifiedSessionLease.Execute": {
       "cc": 30
-    },
-    "services/hangar/pure.go::ExtractNomadJobImages": {
-      "depth": 7
-    },
-    "services/hangar/pure.go::ParseImageReference": {
-      "cc": 21
-    },
-    "services/hangar/reconcile.go::*SyncDaemon.CheckAndReconcileNomadImages": {
-      "depth": 6
-    },
-    "services/hangar/reconcile.go::*SyncDaemon.StartReconcilerLoop": {
-      "depth": 7
-    },
-    "services/vanadis/main.go::*PostgresVanadisStore.CreateBuild": {
-      "cc": 25
     }
   }
 }
