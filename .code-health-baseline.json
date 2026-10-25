@@ -216,18 +216,6 @@
     "services/eri/pkg/queue/webhook.go::*DefaultWebhookDispatcher.dispatch": {
       "cc": 24
     },
-    "services/eri/pkg/queue/worker.go::*WorkerPool.processBurst": {
-      "lines": 156,
-      "cc": 31
-    },
-    "services/eri/pkg/queue/worker.go::*turnExecution.evaluateAmbientWake": {
-      "cc": 29
-    },
-    "services/eri/pkg/queue/worker.go::*turnExecution.executeWithRetries": {
-      "lines": 315,
-      "cc": 80,
-      "depth": 6
-    },
     "services/eri/pkg/runner/runner.go::ExtractCommandName": {
       "cc": 26
     },

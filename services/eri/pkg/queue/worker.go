@@ -156,17 +156,7 @@ func (te *turnExecution) resolveWebhookDispatcher() (WebhookDispatcher, context.
 	return dispatcher, te.poolCtx()
 }
 
-func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
-	if len(burst) == 0 {
-		return
-	}
-	if p.ctx.Err() != nil {
-		return
-	}
-
-	metrics.ActiveWorkers.Inc()
-	defer metrics.ActiveWorkers.Dec()
-
+func (p *WorkerPool) resolveBurstScopeLock(burst []db.Message, scopeKeyOpt []string) (string, string, *sync.Mutex) {
 	threadID := burst[0].ThreadID
 	scopeKey := threadID
 	if len(scopeKeyOpt) > 0 && scopeKeyOpt[0] != "" {
@@ -182,21 +172,94 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 		scopeLock = &sync.Mutex{}
 		p.scopeLocks.Store(scopeKey, scopeLock)
 	}
+	return threadID, scopeKey, scopeLock
+}
+
+func resolveBurstTriggerType(firstMsg db.Message) string {
+	if firstMsg.ScheduleRunID != "" {
+		return "schedule"
+	} else if firstMsg.AuthorID == "http-client" {
+		return "http"
+	}
+	return "discord"
+}
+
+func (te *turnExecution) runPostTurnHook() {
+	if te.turnAttempted && te.policy.Hooks.PostTurn != nil {
+		postReq := buildPostTurnRequest(te)
+		ctx, cancel := context.WithTimeout(context.Background(), te.policy.Hooks.PostTurn.GetTimeout())
+		defer cancel()
+		dispatcher, _ := te.resolveWebhookDispatcher()
+		if _, err := dispatcher.CallPostTurnHook(ctx, te.policy.Hooks.PostTurn, postReq); err != nil {
+			log.Printf("[WorkerPool] Warning: post_turn hook failed for thread %s: %v", te.threadID, err)
+		}
+	}
+}
+
+func (te *turnExecution) handleBurstPanic(r any) {
+	log.Printf("[WorkerPool] Panic in processBurst for thread %s: %v", te.threadID, r)
+	te.stopIndicators()
+	metrics.RecordTurnCompleted("panic", te.triggerType, te.pool.GetRuntimeConfig(), time.Since(te.execStart))
+	te.failBurstWithStatus("failed", fmt.Sprintf("panic: %v", r), "")
+}
+
+func (te *turnExecution) acquirePoolAndLease() bool {
+	// 1. Resolve active execution pool (primary vs medium vs low effort)
+	activePool, poolKey, poolErr := te.resolveExecutionPool()
+	if poolErr != nil {
+		te.failBurst(poolErr)
+		return false
+	}
+	te.activePool = activePool
+	te.isEphemeral = poolKey.Ephemeral
+
+	if activePool == nil {
+		te.failBurst(fmt.Errorf("queue: no agent execution pool available for thread %s", te.threadID))
+		return false
+	}
+
+	// 2. Acquire exclusive session lease before prompt construction
+	leaseCtx, leaseCancel := context.WithTimeout(te.pool.ctx, 65*time.Second)
+	lease, leaseErr := activePool.AcquireLease(leaseCtx, te.threadID)
+	leaseCancel()
+	if leaseErr != nil {
+		te.failBurst(fmt.Errorf("queue: failed to acquire session lease for thread %s: %w", te.threadID, leaseErr))
+		return false
+	}
+	te.lease = lease
+
+	te.currentSessionID = lease.SessionID()
+	te.previousSessionID = lease.PreviousSessionID()
+	te.isCold = lease.IsCold()
+	te.isEphemeral = poolKey.Ephemeral || lease.IsEphemeral()
+	te.turnCount = lease.TurnCount()
+
+	if te.currentSessionID != "" && te.isCold && !te.isEphemeral {
+		te.saveSessionID(te.threadID, te.currentSessionID)
+	}
+	return true
+}
+
+func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
+	if len(burst) == 0 {
+		return
+	}
+	if p.ctx.Err() != nil {
+		return
+	}
+
+	metrics.ActiveWorkers.Inc()
+	defer metrics.ActiveWorkers.Dec()
+
+	threadID, _, scopeLock := p.resolveBurstScopeLock(burst, scopeKeyOpt)
 	scopeLock.Lock()
 	defer scopeLock.Unlock()
-
-	triggerType := "discord"
-	if burst[0].ScheduleRunID != "" {
-		triggerType = "schedule"
-	} else if burst[0].AuthorID == "http-client" {
-		triggerType = "http"
-	}
 
 	te := &turnExecution{
 		pool:        p,
 		burst:       burst,
 		threadID:    threadID,
-		triggerType: triggerType,
+		triggerType: resolveBurstTriggerType(burst[0]),
 		execStart:   time.Now().UTC(),
 		wakeIdx:     -1,
 		isEphemeral: isBurstEphemeral(burst),
@@ -206,28 +269,13 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 	// Synchronous post_turn hook:
 	// Go defers execute LIFO. By placing post_turn right after scopeLock.Lock() / defer scopeLock.Unlock(),
 	// it executes AFTER handleTrailing and panic recovery, but BEFORE scopeLock.Unlock().
-	defer func() {
-		if te.turnAttempted && te.policy.Hooks.PostTurn != nil {
-			postReq := buildPostTurnRequest(te)
-			ctx, cancel := context.WithTimeout(context.Background(), te.policy.Hooks.PostTurn.GetTimeout())
-			defer cancel()
-			dispatcher, _ := te.resolveWebhookDispatcher()
-			if _, err := dispatcher.CallPostTurnHook(ctx, te.policy.Hooks.PostTurn, postReq); err != nil {
-				log.Printf("[WorkerPool] Warning: post_turn hook failed for thread %s: %v", te.threadID, err)
-			}
-		}
-	}()
+	defer te.runPostTurnHook()
 
-	defer func() {
-		te.stopIndicators()
-	}()
+	defer te.stopIndicators()
 
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("[WorkerPool] Panic in processBurst for thread %s: %v", te.threadID, r)
-			te.stopIndicators()
-			metrics.RecordTurnCompleted("panic", te.triggerType, te.pool.GetRuntimeConfig(), time.Since(te.execStart))
-			te.failBurstWithStatus("failed", fmt.Sprintf("panic: %v", r), "")
+			te.handleBurstPanic(r)
 		}
 	}()
 
@@ -243,44 +291,16 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 		return
 	}
 
-	// 1. Resolve active execution pool (primary vs medium vs low effort)
-	activePool, poolKey, poolErr := te.resolveExecutionPool()
-	if poolErr != nil {
-		te.failBurst(poolErr)
+	if !te.acquirePoolAndLease() {
 		return
 	}
-	te.activePool = activePool
-	te.isEphemeral = poolKey.Ephemeral
-
-	if activePool == nil {
-		te.failBurst(fmt.Errorf("queue: no agent execution pool available for thread %s", te.threadID))
-		return
-	}
-
-	// 2. Acquire exclusive session lease before prompt construction
-	leaseCtx, leaseCancel := context.WithTimeout(te.pool.ctx, 65*time.Second)
-	lease, leaseErr := activePool.AcquireLease(leaseCtx, te.threadID)
-	leaseCancel()
-	if leaseErr != nil {
-		te.failBurst(fmt.Errorf("queue: failed to acquire session lease for thread %s: %w", te.threadID, leaseErr))
-		return
-	}
-	te.lease = lease
 	defer func() {
-		if relErr := te.lease.Release(); relErr != nil {
-			log.Printf("[WorkerPool] Warning releasing lease for %s: %v", te.threadID, relErr)
+		if te.lease != nil {
+			if relErr := te.lease.Release(); relErr != nil {
+				log.Printf("[WorkerPool] Warning releasing lease for %s: %v", te.threadID, relErr)
+			}
 		}
 	}()
-
-	te.currentSessionID = lease.SessionID()
-	te.previousSessionID = lease.PreviousSessionID()
-	te.isCold = lease.IsCold()
-	te.isEphemeral = poolKey.Ephemeral || lease.IsEphemeral()
-	te.turnCount = lease.TurnCount()
-
-	if te.currentSessionID != "" && te.isCold && !te.isEphemeral {
-		te.saveSessionID(te.threadID, te.currentSessionID)
-	}
 
 	if !te.runPreTurnHook() {
 		return
@@ -446,73 +466,82 @@ func (te *turnExecution) deliveryTargetID() string {
 	return te.threadID
 }
 
-func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
-	if shouldEvaluateAmbientWake(te.policy.Mode, te.isThread, extractBurstSilent(te.burst), isHTTPClientBurst(te.burst)) {
-		botUserID := ""
-		var botRoleIDs []string
-		if sess := te.pool.getDiscordSession(); sess != nil && sess.State != nil {
-			if sess.State.User != nil {
-				botUserID = sess.State.User.ID
-			}
-			botRoleIDs = ResolveBotRoleIDs(sess, te.burst[0].GuildID, botUserID)
+func (te *turnExecution) resolveBotIdentity() (string, []string) {
+	botUserID := ""
+	var botRoleIDs []string
+	if sess := te.pool.getDiscordSession(); sess != nil && sess.State != nil {
+		if sess.State.User != nil {
+			botUserID = sess.State.User.ID
 		}
+		botRoleIDs = ResolveBotRoleIDs(sess, te.burst[0].GuildID, botUserID)
+	}
+	return botUserID, botRoleIDs
+}
 
-		wakeMode := te.policy.GetWakeMode()
-		hookOverride := te.resolveWakeHookOverride()
-
-		classifierFn := func(msgs []db.Message) (float64, string) {
-			var recentContext []db.Message
-			if te.pool != nil {
-				if r, err := te.getRecentThreadMessages(te.threadID, 10); err == nil {
-					recentContext = r
-				}
-			}
-			if te.pool == nil || te.pool.cfg.Classifier == nil {
-				return 0.0, "no classifier configured"
-			}
-			if len(msgs) == 1 {
-				res := te.pool.cfg.Classifier.Classify(te.pool.ctx, msgs[0], recentContext)
-				return res.Confidence, res.Reason
-			}
-			res := te.pool.cfg.Classifier.ClassifyBurst(te.pool.ctx, msgs, recentContext)
-			log.Printf("[AmbientClassifier] Channel %s | BurstSize %d | Score: %.2f (Threshold: %.2f) | Wake: %t | Reason: %s",
-				te.threadID, len(msgs), res.Confidence, te.policy.GetAmbientWakeThreshold(), res.Confidence >= te.policy.GetAmbientWakeThreshold(), res.Reason)
-			return res.Confidence, res.Reason
+func (te *turnExecution) classifyAmbientMessages(msgs []db.Message) (float64, string) {
+	var recentContext []db.Message
+	if te.pool != nil {
+		if r, err := te.getRecentThreadMessages(te.threadID, 10); err == nil {
+			recentContext = r
 		}
+	}
+	if te.pool == nil || te.pool.cfg.Classifier == nil {
+		return 0.0, "no classifier configured"
+	}
+	if len(msgs) == 1 {
+		res := te.pool.cfg.Classifier.Classify(te.pool.ctx, msgs[0], recentContext)
+		return res.Confidence, res.Reason
+	}
+	res := te.pool.cfg.Classifier.ClassifyBurst(te.pool.ctx, msgs, recentContext)
+	log.Printf("[AmbientClassifier] Channel %s | BurstSize %d | Score: %.2f (Threshold: %.2f) | Wake: %t | Reason: %s",
+		te.threadID, len(msgs), res.Confidence, te.policy.GetAmbientWakeThreshold(), res.Confidence >= te.policy.GetAmbientWakeThreshold(), res.Reason)
+	return res.Confidence, res.Reason
+}
 
-		plan := PlanBurstExecution(BurstPlanInput{
-			Burst: te.burst, WakeMode: wakeMode, Threshold: te.policy.GetAmbientWakeThreshold(),
-			BotUserID: botUserID, BotRoleIDs: botRoleIDs, HookOverride: hookOverride, ClassifierFn: classifierFn,
-		})
-		te.wakeIdx, te.wakeInfos = plan.WakeIndex, plan.WakeInfos
-
-		if plan.IsAllAmbient {
-			if te.pool != nil && te.pool.ctx != nil && te.pool.ctx.Err() != nil {
-				log.Printf("[WorkerPool] Context cancelled during ambient classification for thread %s. Resetting to PENDING for clean deployment recovery.", te.threadID)
-				metrics.RecordTurnCompleted("cancelled", te.triggerType, "classifier", time.Since(te.execStart))
-				for _, m := range te.burst {
-					te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
-				}
-				return true
-			}
-			te.markAmbientBurst()
-			return true
+func (te *turnExecution) handleAllAmbientPlan() bool {
+	if te.pool != nil && te.pool.ctx != nil && te.pool.ctx.Err() != nil {
+		log.Printf("[WorkerPool] Context cancelled during ambient classification for thread %s. Resetting to PENDING for clean deployment recovery.", te.threadID)
+		metrics.RecordTurnCompleted("cancelled", te.triggerType, "classifier", time.Since(te.execStart))
+		for _, m := range te.burst {
+			te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
 		}
+		return true
+	}
+	te.markAmbientBurst()
+	return true
+}
 
-		if te.currentSessionID != "" && te.pool.sessionMgr != nil && !te.pool.sessionMgr.SessionExistsOnDisk(te.currentSessionID) {
-			log.Printf("[Queue] Session %s for thread %s not found on disk. Clearing for fresh Turn 1.", te.currentSessionID, te.threadID)
-			te.currentSessionID = ""
-			te.saveSessionID(te.threadID, "")
-		}
+func (te *turnExecution) runChannelAmbientTriage() bool {
+	botUserID, botRoleIDs := te.resolveBotIdentity()
+	wakeMode := te.policy.GetWakeMode()
+	hookOverride := te.resolveWakeHookOverride()
 
-		for i, m := range plan.LeadingAmbient {
-			te.completeAmbientMessage(m, plan.WakeInfos[i])
-		}
-		te.trailingMsgs, te.trailingInfos = plan.TrailingMessages, plan.TrailingInfos
-		te.burst = []db.Message{plan.ActiveMessage}
-		metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "wake").Inc()
+	plan := PlanBurstExecution(BurstPlanInput{
+		Burst: te.burst, WakeMode: wakeMode, Threshold: te.policy.GetAmbientWakeThreshold(),
+		BotUserID: botUserID, BotRoleIDs: botRoleIDs, HookOverride: hookOverride, ClassifierFn: te.classifyAmbientMessages,
+	})
+	te.wakeIdx, te.wakeInfos = plan.WakeIndex, plan.WakeInfos
+
+	if plan.IsAllAmbient {
+		return te.handleAllAmbientPlan()
 	}
 
+	if te.currentSessionID != "" && te.pool.sessionMgr != nil && !te.pool.sessionMgr.SessionExistsOnDisk(te.currentSessionID) {
+		log.Printf("[Queue] Session %s for thread %s not found on disk. Clearing for fresh Turn 1.", te.currentSessionID, te.threadID)
+		te.currentSessionID = ""
+		te.saveSessionID(te.threadID, "")
+	}
+
+	for i, m := range plan.LeadingAmbient {
+		te.completeAmbientMessage(m, plan.WakeInfos[i])
+	}
+	te.trailingMsgs, te.trailingInfos = plan.TrailingMessages, plan.TrailingInfos
+	te.burst = []db.Message{plan.ActiveMessage}
+	metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "wake").Inc()
+	return false
+}
+
+func (te *turnExecution) startTurnIndicators() {
 	if !extractBurstSilent(te.burst) {
 		deliveryTarget := te.deliveryTargetID()
 		te.statusUpdater = NewStatusUpdater(te.pool.getDiscordSession(), deliveryTarget, te.isThread)
@@ -522,6 +551,16 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 			}
 		}
 	}
+}
+
+func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
+	if shouldEvaluateAmbientWake(te.policy.Mode, te.isThread, extractBurstSilent(te.burst), isHTTPClientBurst(te.burst)) {
+		if te.runChannelAmbientTriage() {
+			return true
+		}
+	}
+
+	te.startTurnIndicators()
 	var incErr error
 	te.turnCount, incErr = te.incrementSessionTurnCount(te.threadID)
 	if incErr != nil {
@@ -623,18 +662,327 @@ func (te *turnExecution) handleTrailing() {
 	}
 }
 
+func maxBurstRetryCount(burst []db.Message) int {
+	maxRetries := 0
+	for _, m := range burst {
+		if m.RetryCount > maxRetries {
+			maxRetries = m.RetryCount
+		}
+	}
+	return maxRetries
+}
+
+func (te *turnExecution) checkGlobalQuotaLockout(currentAPIKey, currentModel string) bool {
+	if currentAPIKey != "" {
+		return false
+	}
+	lockedUntilUnix := te.pool.quotaLockedUntil.Load()
+	if lockedUntilUnix <= 0 {
+		return false
+	}
+	lockedUntil := time.Unix(lockedUntilUnix, 0)
+	if !time.Now().Before(lockedUntil) {
+		return false
+	}
+	te.isQuotaPaused = true
+	remaining := time.Until(lockedUntil)
+	log.Printf("[WorkerPool] Global quota pause active for thread %s (%v remaining). Aborting turn.", te.threadID, remaining)
+	te.stopIndicators()
+	reason := fmt.Sprintf("[QUOTA_PAUSED reset_in=%v scheduled=false] global quota pause active", remaining)
+	metrics.RecordRunnerError("quota_paused", currentModel)
+	metrics.RecordTurnCompleted("quota_paused", te.triggerType, currentModel, time.Since(te.execStart))
+	pauseMsg := notifier.FormatQuotaPauseMessage(remaining, lockedUntil, false, false)
+	te.deliverQuotaNotice(pauseMsg, "quota pause message")
+	te.failBurstWithStatus("failed", reason, currentModel)
+	return true
+}
+
+func (te *turnExecution) prepareAttemptPrompt(attempt int, promptToSend, lastErrDetail, lastStderr string) string {
+	if promptToSend == "" {
+		promptToSend = te.turnPrompt
+	}
+	if attempt > 1 && promptToSend == te.turnPrompt {
+		if (runner.IsInactivityTimeout(lastErrDetail, lastStderr) || strings.Contains(lastErrDetail, "max duration exceeded") || strings.Contains(lastErrDetail, "print timeout") || strings.Contains(lastErrDetail, "empty response after")) && te.currentSessionID != "" && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(te.currentSessionID) {
+			return fmt.Sprintf(ContinuationPromptTemplate, te.turnPrompt)
+		}
+	}
+	return promptToSend
+}
+
+func (te *turnExecution) buildLeaseTurnContext(runCtx context.Context, currentModel, promptToSend string, sink runner.TurnSink) *runner.TurnContext {
+	if te.lease.SessionID() != "" && te.lease.SessionID() != te.currentSessionID && !te.isEphemeral {
+		te.currentSessionID = te.lease.SessionID()
+		te.saveSessionID(te.threadID, te.currentSessionID)
+	}
+	sessIDToSend := te.currentSessionID
+	if te.lease.SessionID() != "" && te.currentSessionID != "" {
+		sessIDToSend = te.lease.SessionID()
+	}
+	scopeInst := config.LoadScopeInstructions(te.effectiveName)
+	var memParts []string
+	for _, m := range te.burst {
+		if bt := strings.TrimSpace(m.BodyText()); bt != "" {
+			memParts = append(memParts, bt)
+		}
+	}
+	return &runner.TurnContext{
+		TurnID:              uuid.New().String(),
+		SessionID:           sessIDToSend,
+		Model:               currentModel,
+		Prompt:              promptToSend,
+		MemoryQuery:         strings.Join(memParts, "\n"),
+		ScopeInstructions:   scopeInst,
+		ChannelInstructions: scopeInst,
+		CoordinationContext: te.injectedHookContext,
+		Sink:                sink,
+		CreatedAt:           time.Now(),
+		Ctx:                 runCtx,
+	}
+}
+
+func (te *turnExecution) executeLeaseAttempt(currentModel, promptToSend string, currentTimeout int) (runner.TurnOutcome, *runner.TurnResult, string, error) {
+	// Pad Go context by +1 minute relative to runner watchdog ceiling so the runner watchdog always fires cleanly
+	runCtx, runCancel := context.WithTimeout(te.pool.ctx, time.Duration(currentTimeout+1)*time.Minute)
+	defer runCancel()
+
+	activePool := te.activePool
+	if activePool == nil {
+		if resolved, _, resolveErr := te.resolveExecutionPool(); resolveErr == nil {
+			activePool = resolved
+			te.activePool = activePool
+		}
+	}
+
+	if te.lease != nil {
+		if te.statusUpdater != nil {
+			te.statusUpdater.MarkTurnStarted()
+		}
+		sink := newDiscordTurnSink(te.statusUpdater)
+		turnCtx := te.buildLeaseTurnContext(runCtx, currentModel, promptToSend, sink)
+		turnRes, execErr := te.lease.Execute(runCtx, turnCtx)
+		outcome, stderr := te.resolveTurnOutcome(runCtx, turnRes, execErr)
+		return outcome, turnRes, stderr, execErr
+	}
+
+	err := fmt.Errorf("queue: no agent execution pool available for thread %s", te.threadID)
+	outcome, stderr := te.resolveTurnOutcome(runCtx, nil, err)
+	return outcome, nil, stderr, err
+}
+
+func (te *turnExecution) enrichFailureFromTranscript(outcome runner.TurnOutcome, stdout, stderr string, isSessionCorruption bool) (string, string) {
+	errDetail := outcome.ErrorDetail
+	targetSess := te.resolveAndPersistSessionID(outcome.SessionID, stdout, stderr, !isSessionCorruption && te.currentSessionID == "")
+	if targetSess != "" && te.pool != nil && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(targetSess) {
+		if transcriptErr, tErr := te.pool.sessionMgr.ExtractLastTurnError(te.poolCtx(), targetSess, te.execStart); tErr == nil && transcriptErr != "" {
+			log.Printf("[Queue] Extracted turn error from session %s transcript: %s", targetSess, transcriptErr)
+			return transcriptErr, transcriptErr
+		}
+	}
+	return errDetail, stderr
+}
+
+func isWatchdogTimeoutError(errDetail, stderr string) bool {
+	return runner.IsInactivityTimeout(errDetail, stderr) ||
+		strings.Contains(errDetail, "[watchdog]") ||
+		strings.Contains(errDetail, "inactivity timeout exceeded") ||
+		strings.Contains(errDetail, "max duration exceeded")
+}
+
+func classifyRunnerErrorCategory(isWatchdog, isTransient, isSessionCorruption bool) string {
+	if isWatchdog {
+		return "watchdog_timeout"
+	}
+	if isTransient {
+		return "transient"
+	}
+	if isSessionCorruption {
+		return "session_corrupt"
+	}
+	return "non_transient"
+}
+
+func (te *turnExecution) handleWatchdogFailure(attempt, maxAttempts int, currentAgyBin, currentAPIKey, errDetail, stderr, currentModel string) (shouldRetry bool) {
+	if attempt < maxAttempts {
+		if shutdown := te.handleRetryBackoff(attempt, maxAttempts, errDetail, currentModel); shutdown {
+			return false
+		}
+		log.Printf("[WorkerPool] Retrying watchdog timeout (attempt %d/%d, session %s)", attempt, maxAttempts, te.currentSessionID)
+		return true
+	}
+
+	for _, m := range te.burst {
+		te.incrementMessageRetry(m.ID, errDetail)
+	}
+	te.stopIndicators()
+
+	if te.pool.ctx.Err() != nil {
+		log.Printf("[WorkerPool] Pool shutting down on watchdog timeout for thread %s. Resetting to PENDING.", te.threadID)
+		metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
+		te.cancelBurstOnShutdown("timeout", currentModel, false)
+		return false
+	}
+
+	te.rotateSessionID(te.threadID, "")
+	metrics.RecordTurnCompleted("watchdog_timeout", te.triggerType, currentModel, time.Since(te.execStart))
+
+	te.deliverFailureNotice(currentAgyBin, currentAPIKey, errDetail, stderr, "execution timed out while processing the request", "watchdog notice")
+	te.failBurstWithStatus("timeout", errDetail, currentModel)
+	log.Printf("[WorkerPool] %d message(s) in thread %s marked FAILED after exhausting %d attempts on watchdog timeout: %s", len(te.burst), te.threadID, maxAttempts, errDetail)
+	return false
+}
+
+func (te *turnExecution) processSuccessfulAttempt(resp *runner.AgyResponse, exitCode int, stdout, stderr, currentModel string, attempt, maxAttempts int, autoResumeCount *int, accumulatedUsage *runner.TokenUsage, promptToSend *string) (done, yieldRetry bool, errDetail string) {
+	if resp == nil {
+		return false, false, ""
+	}
+	extSess := resp.ConversationID
+	if extSess == "" {
+		extSess = runner.ExtractSessionID(stdout+"\n"+stderr, te.execStart)
+	}
+	if te.currentSessionID == "" && (extSess == "" || !runner.IsValidUUID(extSess)) {
+		errDetail = "failed to latch active session UUID on cold start"
+		log.Printf("[Queue] Defensive Failure: %s for thread %s", errDetail, te.threadID)
+		return false, false, errDetail
+	}
+
+	te.resolveAndPersistSessionID(extSess, stdout, stderr, true)
+	if te.handleYieldTrap(resp, exitCode, stdout, stderr, autoResumeCount, accumulatedUsage, promptToSend, currentModel) {
+		return false, true, ""
+	}
+
+	var usage runner.TokenUsage
+	if accumulatedUsage != nil {
+		usage = *accumulatedUsage
+	}
+	if ok, emptyErr := te.deliverSuccessAndFinalize(resp, usage, currentModel, attempt, maxAttempts); ok {
+		return true, false, ""
+	} else {
+		return false, false, emptyErr
+	}
+}
+
+func (te *turnExecution) handleSessionCorruptionRetry(attempt, maxAttempts int, currentAgyBin, currentAPIKey, errDetail, stderr, currentModel string) (shutdown bool) {
+	te.deliverFailureNotice(currentAgyBin, currentAPIKey, errDetail, stderr, "session reset due to context corruption", "session reset notice")
+	te.rotateSessionID(te.threadID, "")
+	te.currentSessionID = ""
+	if te.lease != nil {
+		if relErr := te.lease.Release(); relErr != nil {
+			log.Printf("[WorkerPool] Warning releasing lease on corruption reset for %s: %v", te.threadID, relErr)
+		}
+		te.lease = nil
+	}
+	activePool := te.activePool
+	if activePool == nil {
+		if resolved, _, resolveErr := te.resolveExecutionPool(); resolveErr == nil {
+			activePool = resolved
+			te.activePool = activePool
+		}
+	}
+	if activePool != nil {
+		if newLease, lErr := activePool.AcquireLease(te.pool.ctx, te.threadID); lErr == nil {
+			te.lease, te.isEphemeral, te.currentSessionID = newLease, te.isEphemeral || newLease.IsEphemeral(), newLease.SessionID()
+		}
+	}
+	return te.handleRetryBackoff(attempt, maxAttempts, errDetail, currentModel)
+}
+
+func (te *turnExecution) handleNonTransientFailure(attempt, maxAttempts int, currentAgyBin, currentAPIKey, errDetail, stderr, currentModel string) {
+	te.stopIndicators()
+	if te.pool.ctx.Err() != nil {
+		log.Printf("[WorkerPool] Pool shutting down during non-transient error for thread %s. Resetting to PENDING.", te.threadID)
+		te.cancelBurstOnShutdown("failed", currentModel, false)
+		return
+	}
+
+	if te.currentSessionID != "" {
+		te.previousSessionID, te.currentSessionID = te.currentSessionID, ""
+		te.rotateSessionID(te.threadID, "")
+	}
+	metrics.RecordTurnCompleted("failed", te.triggerType, currentModel, time.Since(te.execStart))
+	te.deliverFailureNotice(currentAgyBin, currentAPIKey, errDetail, stderr, "execution failed with non-transient error", "non-transient failure notice")
+	for _, m := range te.burst {
+		te.incrementMessageRetry(m.ID, errDetail)
+	}
+	te.failBurstWithStatus("failed", errDetail, currentModel)
+	log.Printf("[WorkerPool] %d message(s) in thread %s marked FAILED due to non-transient error (attempt %d/%d): %s", len(te.burst), te.threadID, attempt, maxAttempts, errDetail)
+}
+
+func (te *turnExecution) handleAttemptsExhausted(maxAttempts int, currentAgyBin, currentAPIKey, lastErrDetail, lastStderr, currentModel string) {
+	te.stopIndicators()
+
+	if te.pool.ctx.Err() != nil {
+		log.Printf("[WorkerPool] Pool shutting down during turn for thread %s. Suppressing exhaustion alert and resetting to PENDING for deployment recovery.", te.threadID)
+		metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
+		te.cancelBurstOnShutdown("failed", currentModel, true)
+		return
+	}
+	te.deliverFailureNotice(currentAgyBin, currentAPIKey, lastErrDetail, lastStderr, fmt.Sprintf("execution failed after exhausting %d attempts", maxAttempts), "exhaustion notice")
+	metrics.RecordTurnCompleted("failed", te.triggerType, currentModel, time.Since(te.execStart))
+	te.failBurstWithStatus("failed", lastErrDetail, currentModel)
+	log.Printf("[WorkerPool] %d message(s) in thread %s marked FAILED after exhausting all %d attempts", len(te.burst), te.threadID, maxAttempts)
+}
+
+type attemptOutcomeState struct {
+	isFailure, isTransient, isSessionCorruption bool
+	errDetail, stderr, stdout                   string
+	resp                                        *runner.AgyResponse
+}
+
+func (te *turnExecution) unpackAttemptOutcome(outcome runner.TurnOutcome, turnRes *runner.TurnResult, rawStderr string, execErr error) attemptOutcomeState {
+	if outcome.IsSuccess {
+		stderr := rawStderr
+		if turnRes != nil && turnRes.Stderr != "" {
+			stderr = turnRes.Stderr
+		}
+		if outcome.SessionID != "" {
+			te.resolveAndPersistSessionID(outcome.SessionID, outcome.Response, stderr, true)
+		}
+		return attemptOutcomeState{
+			isFailure: false,
+			stdout:    outcome.Response,
+			stderr:    stderr,
+			resp: &runner.AgyResponse{
+				ConversationID: outcome.SessionID,
+				Status:         "SUCCESS",
+				Response:       outcome.Response,
+				Usage:          outcome.Usage,
+			},
+		}
+	}
+
+	lastStderr := outcome.ErrorDetail
+	if execErr != nil {
+		lastStderr = execErr.Error()
+	} else if rawStderr != "" {
+		lastStderr = rawStderr
+	}
+	return attemptOutcomeState{
+		isFailure:           true,
+		isTransient:         outcome.IsTransient,
+		isSessionCorruption: outcome.IsSessionCorruption,
+		errDetail:           outcome.ErrorDetail,
+		stderr:              lastStderr,
+	}
+}
+
+func (te *turnExecution) handleTransientRetry(attempt, maxAttempts int, errDetail, currentModel string) (shutdown bool) {
+	if te.lease != nil {
+		te.lease.MarkDirty()
+	}
+	if shutdown := te.handleRetryBackoff(attempt, maxAttempts, errDetail, currentModel); shutdown {
+		return true
+	}
+	log.Printf("[WorkerPool] Retrying transient error in %v (preserving session %s)", time.Duration(attempt)*te.pool.cfg.BackoffBase, te.currentSessionID)
+	return false
+}
+
 func (te *turnExecution) executeWithRetries() {
 	maxAttempts := te.pool.cfg.MaxAttempts
 	lastErrDetail := ""
 	lastStderr := ""
 	currentModel := te.pool.GetRuntimeConfig()
 
-	initialRetryCount := 0
-	for _, m := range te.burst {
-		if m.RetryCount > initialRetryCount {
-			initialRetryCount = m.RetryCount
-		}
-	}
+	initialRetryCount := maxBurstRetryCount(te.burst)
 
 	attemptCfg := te.resolveAttemptConfig(0)
 	currentAgyBin := attemptCfg.agyBin
@@ -652,128 +1000,34 @@ func (te *turnExecution) executeWithRetries() {
 		currentAPIKey = cfg.apiKey
 		burstEffort := resolveBurstEffort(te.burst)
 
-		// Global Quota Lockout Pre-check: if a quota pause is active across the pool and running in OAuth mode, fail-fast immediately
-		if currentAPIKey == "" {
-			if lockedUntilUnix := te.pool.quotaLockedUntil.Load(); lockedUntilUnix > 0 {
-				lockedUntil := time.Unix(lockedUntilUnix, 0)
-				if time.Now().Before(lockedUntil) {
-					te.isQuotaPaused = true
-					remaining := time.Until(lockedUntil)
-					log.Printf("[WorkerPool] Global quota pause active for thread %s (%v remaining). Aborting turn.", te.threadID, remaining)
-					te.stopIndicators()
-					reason := fmt.Sprintf("[QUOTA_PAUSED reset_in=%v scheduled=false] global quota pause active", remaining)
-					metrics.RecordRunnerError("quota_paused", currentModel)
-					metrics.RecordTurnCompleted("quota_paused", te.triggerType, currentModel, time.Since(te.execStart))
-					pauseMsg := notifier.FormatQuotaPauseMessage(remaining, lockedUntil, false, false)
-					te.deliverQuotaNotice(pauseMsg, "quota pause message")
-					te.failBurstWithStatus("failed", reason, currentModel)
-					return
-				}
-			}
+		if te.checkGlobalQuotaLockout(currentAPIKey, currentModel) {
+			return
 		}
 
-		if promptToSend == "" {
-			promptToSend = te.turnPrompt
-		}
-		if attempt > 1 && promptToSend == te.turnPrompt {
-			if (runner.IsInactivityTimeout(lastErrDetail, lastStderr) || strings.Contains(lastErrDetail, "max duration exceeded") || strings.Contains(lastErrDetail, "print timeout") || strings.Contains(lastErrDetail, "empty response after")) && te.currentSessionID != "" && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(te.currentSessionID) {
-				promptToSend = fmt.Sprintf(ContinuationPromptTemplate, te.turnPrompt)
-			}
-		}
+		promptToSend = te.prepareAttemptPrompt(attempt, promptToSend, lastErrDetail, lastStderr)
 
-		// Pad Go context by +1 minute relative to runner watchdog ceiling so the runner watchdog always fires cleanly
-		runCtx, runCancel := context.WithTimeout(te.pool.ctx, time.Duration(currentTimeout+1)*time.Minute)
-
-		var stdout, stderr string
-		var exitCode int
-		var err error
-		var isFailure, isTransient, isSessionCorruption bool
-		var errDetail string
 		runStart := time.Now()
+		outcome, turnRes, leaseStderr, err := te.executeLeaseAttempt(currentModel, promptToSend, currentTimeout)
+		runDur := time.Since(runStart)
 
-		activePool := te.activePool
-		if activePool == nil {
-			if resolved, _, resolveErr := te.resolveExecutionPool(); resolveErr == nil {
-				activePool = resolved
-				te.activePool = activePool
-			}
-		}
-
-		var resp *runner.AgyResponse
-		var outcome runner.TurnOutcome
-		var turnRes *runner.TurnResult
-
-		if te.lease != nil {
-			if te.statusUpdater != nil {
-				te.statusUpdater.MarkTurnStarted()
-			}
-			if te.lease.SessionID() != "" && te.lease.SessionID() != te.currentSessionID && !te.isEphemeral {
-				te.currentSessionID = te.lease.SessionID()
-				te.saveSessionID(te.threadID, te.currentSessionID)
-			}
-			sink := newDiscordTurnSink(te.statusUpdater)
-			sessIDToSend := te.currentSessionID
-			if te.lease.SessionID() != "" && te.currentSessionID != "" {
-				sessIDToSend = te.lease.SessionID()
-			}
-			scopeInst := config.LoadScopeInstructions(te.effectiveName)
-			var memParts []string
-			for _, m := range te.burst {
-				if bt := strings.TrimSpace(m.BodyText()); bt != "" {
-					memParts = append(memParts, bt)
-				}
-			}
-			turnCtx := &runner.TurnContext{
-				TurnID: uuid.New().String(), SessionID: sessIDToSend, Model: currentModel,
-				Prompt: promptToSend, MemoryQuery: strings.Join(memParts, "\n"),
-				ScopeInstructions: scopeInst, ChannelInstructions: scopeInst,
-				CoordinationContext: te.injectedHookContext, Sink: sink, CreatedAt: time.Now(), Ctx: runCtx,
-			}
-			var execErr error
-			turnRes, execErr = te.lease.Execute(runCtx, turnCtx)
-			if execErr != nil {
-				err = execErr
-			}
-			outcome, stderr = te.resolveTurnOutcome(runCtx, turnRes, execErr)
+		st := te.unpackAttemptOutcome(outcome, turnRes, leaseStderr, err)
+		isFailure, isTransient, isSessionCorruption := st.isFailure, st.isTransient, st.isSessionCorruption
+		errDetail, stdout, resp := st.errDetail, st.stdout, st.resp
+		var stderr string
+		if isFailure {
+			lastErrDetail, lastStderr = errDetail, st.stderr
+			stderr = st.stderr
 		} else {
-			err = fmt.Errorf("queue: no agent execution pool available for thread %s", te.threadID)
-			outcome, stderr = te.resolveTurnOutcome(runCtx, nil, err)
-		}
-		runCancel()
-
-		if outcome.IsSuccess {
-			isFailure, isTransient, isSessionCorruption = false, false, false
-			errDetail, lastErrDetail, lastStderr = "", "", ""
-			if turnRes != nil && turnRes.Stderr != "" {
-				stderr = turnRes.Stderr
-			}
-			resp = &runner.AgyResponse{ConversationID: outcome.SessionID, Status: "SUCCESS", Response: outcome.Response, Usage: outcome.Usage}
-			stdout = outcome.Response
-			if outcome.SessionID != "" {
-				te.resolveAndPersistSessionID(outcome.SessionID, stdout, stderr, true)
-			}
-		} else {
-			isFailure, isTransient, isSessionCorruption = true, outcome.IsTransient, outcome.IsSessionCorruption
-			errDetail, lastErrDetail = outcome.ErrorDetail, outcome.ErrorDetail
-			if err != nil {
-				lastStderr = err.Error()
-			} else {
-				lastStderr = outcome.ErrorDetail
-			}
+			lastErrDetail, lastStderr = "", ""
+			stderr = st.stderr
 		}
 
 		if isFailure {
 			promptToSend = te.turnPrompt
-			targetSess := te.resolveAndPersistSessionID(outcome.SessionID, stdout, stderr, !isSessionCorruption && te.currentSessionID == "")
-			if targetSess != "" && te.pool != nil && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(targetSess) {
-				if transcriptErr, tErr := te.pool.sessionMgr.ExtractLastTurnError(te.poolCtx(), targetSess, te.execStart); tErr == nil && transcriptErr != "" {
-					log.Printf("[Queue] Extracted turn error from session %s transcript: %s", targetSess, transcriptErr)
-					errDetail, stderr, lastErrDetail, lastStderr = transcriptErr, transcriptErr, transcriptErr, transcriptErr
-				}
-			}
+			errDetail, stderr = te.enrichFailureFromTranscript(outcome, stdout, stderr, isSessionCorruption)
+			lastErrDetail, lastStderr = errDetail, stderr
 		}
 
-		runDur := time.Since(runStart)
 		runStatus := "success"
 		if isFailure {
 			runStatus = "error"
@@ -789,74 +1043,30 @@ func (te *turnExecution) executeWithRetries() {
 				return
 			}
 
-			isWatchdog := runner.IsInactivityTimeout(errDetail, stderr) || strings.Contains(errDetail, "[watchdog]") || strings.Contains(errDetail, "inactivity timeout exceeded") || strings.Contains(errDetail, "max duration exceeded")
-
-			errCat := "non_transient"
-			if isWatchdog {
-				errCat = "watchdog_timeout"
-			} else if isTransient {
-				errCat = "transient"
-			} else if isSessionCorruption {
-				errCat = "session_corrupt"
-			}
+			isWatchdog := isWatchdogTimeoutError(errDetail, stderr)
+			errCat := classifyRunnerErrorCategory(isWatchdog, isTransient, isSessionCorruption)
 			metrics.RecordRunnerError(errCat, currentModel)
 
 			if isWatchdog {
-				if attempt < maxAttempts {
-					if shutdown := te.handleRetryBackoff(attempt, maxAttempts, errDetail, currentModel); shutdown {
-						return
-					}
-					log.Printf("[WorkerPool] Retrying watchdog timeout (attempt %d/%d, session %s)", attempt, maxAttempts, te.currentSessionID)
+				if te.handleWatchdogFailure(attempt, maxAttempts, currentAgyBin, currentAPIKey, errDetail, stderr, currentModel) {
 					continue
 				}
-
-				for _, m := range te.burst {
-					te.incrementMessageRetry(m.ID, errDetail)
-				}
-				te.stopIndicators()
-
-				if te.pool.ctx.Err() != nil {
-					log.Printf("[WorkerPool] Pool shutting down on watchdog timeout for thread %s. Resetting to PENDING.", te.threadID)
-					metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
-					te.cancelBurstOnShutdown("timeout", currentModel, false)
-					return
-				}
-
-				te.rotateSessionID(te.threadID, "")
-				metrics.RecordTurnCompleted("watchdog_timeout", te.triggerType, currentModel, time.Since(te.execStart))
-
-				te.deliverFailureNotice(currentAgyBin, currentAPIKey, errDetail, stderr, "execution timed out while processing the request", "watchdog notice")
-				te.failBurstWithStatus("timeout", errDetail, currentModel)
-				log.Printf("[WorkerPool] %d message(s) in thread %s marked FAILED after exhausting %d attempts on watchdog timeout: %s", len(te.burst), te.threadID, maxAttempts, errDetail)
 				return
 			}
 		}
 
 		if !isFailure {
-			if resp != nil {
-				extSess := resp.ConversationID
-				if extSess == "" {
-					extSess = runner.ExtractSessionID(stdout+"\n"+stderr, te.execStart)
-				}
-				if te.currentSessionID == "" && (extSess == "" || !runner.IsValidUUID(extSess)) {
-					isTransient = false
-					lastErrDetail = "failed to latch active session UUID on cold start"
-					errDetail = lastErrDetail
-					log.Printf("[Queue] Defensive Failure: %s for thread %s", lastErrDetail, te.threadID)
-				} else {
-					te.resolveAndPersistSessionID(extSess, stdout, stderr, true)
-					if te.handleYieldTrap(resp, exitCode, stdout, stderr, &autoResumeCount, &accumulatedUsage, &promptToSend, currentModel) {
-						attempt--
-						continue
-					}
-
-					if ok, emptyErr := te.deliverSuccessAndFinalize(resp, accumulatedUsage, currentModel, attempt, maxAttempts); ok {
-						return
-					} else {
-						lastErrDetail = emptyErr
-						errDetail = emptyErr
-					}
-				}
+			var done, yieldRetry bool
+			done, yieldRetry, errDetail = te.processSuccessfulAttempt(resp, 0, stdout, stderr, currentModel, attempt, maxAttempts, &autoResumeCount, &accumulatedUsage, &promptToSend)
+			if done {
+				return
+			}
+			if yieldRetry {
+				attempt--
+				continue
+			}
+			if errDetail != "" {
+				lastErrDetail = errDetail
 			}
 		}
 
@@ -872,67 +1082,22 @@ func (te *turnExecution) executeWithRetries() {
 			te.threadID, attempt, maxAttempts, isTransient, isSessionCorruption, errDetail)
 
 		if isSessionCorruption {
-			te.deliverFailureNotice(currentAgyBin, currentAPIKey, errDetail, stderr, "session reset due to context corruption", "session reset notice")
-			te.rotateSessionID(te.threadID, "")
-			te.currentSessionID = ""
-			if te.lease != nil {
-				if relErr := te.lease.Release(); relErr != nil {
-					log.Printf("[WorkerPool] Warning releasing lease on corruption reset for %s: %v", te.threadID, relErr)
-				}
-				te.lease = nil
-			}
-			if newLease, lErr := activePool.AcquireLease(te.pool.ctx, te.threadID); lErr == nil {
-				te.lease, te.isEphemeral, te.currentSessionID = newLease, te.isEphemeral || newLease.IsEphemeral(), newLease.SessionID()
-			}
-			if shutdown := te.handleRetryBackoff(attempt, maxAttempts, errDetail, currentModel); shutdown {
+			if te.handleSessionCorruptionRetry(attempt, maxAttempts, currentAgyBin, currentAPIKey, errDetail, stderr, currentModel) {
 				return
 			}
 			continue
 		}
 
 		if isTransient {
-			if te.lease != nil {
-				te.lease.MarkDirty()
-			}
-			if shutdown := te.handleRetryBackoff(attempt, maxAttempts, errDetail, currentModel); shutdown {
+			if te.handleTransientRetry(attempt, maxAttempts, errDetail, currentModel) {
 				return
 			}
-			log.Printf("[WorkerPool] Retrying transient error in %v (preserving session %s)", time.Duration(attempt)*te.pool.cfg.BackoffBase, te.currentSessionID)
 			continue
 		}
 
-		te.stopIndicators()
-		if te.pool.ctx.Err() != nil {
-			log.Printf("[WorkerPool] Pool shutting down during non-transient error for thread %s. Resetting to PENDING.", te.threadID)
-			te.cancelBurstOnShutdown("failed", currentModel, false)
-			return
-		}
-
-		if te.currentSessionID != "" {
-			te.previousSessionID, te.currentSessionID = te.currentSessionID, ""
-			te.rotateSessionID(te.threadID, "")
-		}
-		metrics.RecordTurnCompleted("failed", te.triggerType, currentModel, time.Since(te.execStart))
-		te.deliverFailureNotice(currentAgyBin, currentAPIKey, errDetail, stderr, "execution failed with non-transient error", "non-transient failure notice")
-		for _, m := range te.burst {
-			te.incrementMessageRetry(m.ID, errDetail)
-		}
-		te.failBurstWithStatus("failed", errDetail, currentModel)
-		log.Printf("[WorkerPool] %d message(s) in thread %s marked FAILED due to non-transient error (attempt %d/%d): %s", len(te.burst), te.threadID, attempt, maxAttempts, errDetail)
+		te.handleNonTransientFailure(attempt, maxAttempts, currentAgyBin, currentAPIKey, errDetail, stderr, currentModel)
 		return
 	}
 
-	// Total exhaustion after all attempts
-	te.stopIndicators()
-
-	if te.pool.ctx.Err() != nil {
-		log.Printf("[WorkerPool] Pool shutting down during turn for thread %s. Suppressing exhaustion alert and resetting to PENDING for deployment recovery.", te.threadID)
-		metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
-		te.cancelBurstOnShutdown("failed", currentModel, true)
-		return
-	}
-	te.deliverFailureNotice(currentAgyBin, currentAPIKey, lastErrDetail, lastStderr, fmt.Sprintf("execution failed after exhausting %d attempts", maxAttempts), "exhaustion notice")
-	metrics.RecordTurnCompleted("failed", te.triggerType, currentModel, time.Since(te.execStart))
-	te.failBurstWithStatus("failed", lastErrDetail, currentModel)
-	log.Printf("[WorkerPool] %d message(s) in thread %s marked FAILED after exhausting all %d attempts", len(te.burst), te.threadID, maxAttempts)
+	te.handleAttemptsExhausted(maxAttempts, currentAgyBin, currentAPIKey, lastErrDetail, lastStderr, currentModel)
 }
