@@ -403,6 +403,107 @@ func (sub *NomadStreamSubscriber) processStreamLine(ctx context.Context, line []
 	}
 }
 
+func deploymentEventIdempotencyKey(raw json.RawMessage) (string, bool) {
+	var depPayload NomadDeploymentEventPayload
+	if err := json.Unmarshal(raw, &depPayload); err != nil {
+		return "", false
+	}
+	status := depPayload.Deployment.Status
+	if !strings.EqualFold(status, "successful") && !strings.EqualFold(status, "failed") && !strings.EqualFold(status, "cancelled") {
+		return "", false
+	}
+	if depPayload.Deployment.ID != "" && depPayload.Deployment.JobID != "" {
+		return fmt.Sprintf("nomad:deployment:%s:%s:%s", depPayload.Deployment.JobID, depPayload.Deployment.ID, status), true
+	}
+	return "", true
+}
+
+func allocationEventIdempotencyKey(raw json.RawMessage) (string, bool) {
+	var allocPayload NomadAllocationEventPayload
+	if err := json.Unmarshal(raw, &allocPayload); err != nil {
+		return "", false
+	}
+	alloc := allocPayload.Allocation
+	isRunning := alloc.DesiredStatus == "run" && alloc.ClientStatus == "running"
+	isComplete := alloc.DesiredStatus == "run" && alloc.ClientStatus == "complete" && !hasFailedTaskState(alloc.TaskStates)
+	isFailed := strings.EqualFold(alloc.ClientStatus, "failed")
+	isExhausted := alloc.DesiredStatus == "run" && isAllocationRestartExhausted(alloc.TaskStates)
+	if !isRunning && !isComplete && !isFailed && !isExhausted {
+		return "", false
+	}
+	if alloc.ID != "" && alloc.JobID != "" {
+		if isFailed || isExhausted {
+			return fmt.Sprintf("nomad:allocation:%s:%s:failed", alloc.JobID, alloc.ID), true
+		}
+		return fmt.Sprintf("nomad:allocation:%s:%s:%s", alloc.JobID, alloc.ID, strings.ToLower(alloc.ClientStatus)), true
+	}
+	return "", true
+}
+
+func evaluationEventIdempotencyKey(raw json.RawMessage) (string, bool) {
+	var evalPayload NomadEvaluationEventPayload
+	if err := json.Unmarshal(raw, &evalPayload); err != nil {
+		return "", false
+	}
+	eval := evalPayload.Evaluation
+	if strings.TrimSpace(eval.JobID) == "" {
+		return "", false
+	}
+	if strings.EqualFold(eval.Status, "blocked") {
+		if !hasNonTransientPlacementFailure(eval.FailedTGAllocs, eval.QueuedAllocations) {
+			return "", false
+		}
+		return fmt.Sprintf("nomad:evaluation:%s:%s:blocked", eval.JobID, eval.ID), true
+	}
+	hasUnqueuedFailures := hasUnqueuedFailedAllocs(eval.FailedTGAllocs, eval.QueuedAllocations)
+	isExplicitFailure := strings.EqualFold(eval.Status, "failed") || strings.EqualFold(eval.Status, "canceled") || strings.EqualFold(eval.Status, "cancelled")
+
+	if hasUnqueuedFailures || isExplicitFailure {
+		// Pass through to River/ProcessNomadEvent for failure handling
+		return fmt.Sprintf("nomad:evaluation:%s:%s:%s", eval.JobID, eval.ID, eval.Status), true
+	}
+	if eval.BlockedEval != "" || allFailedTaskGroupsQueued(eval.FailedTGAllocs, eval.QueuedAllocations) {
+		// Blocked evaluation or all unplaced allocations queued for rollout; wait for follow-up allocation/deployment events
+		return "", false
+	}
+	if strings.EqualFold(eval.Status, "complete") {
+		// In-place or restart complete evaluation; pass through for success handling
+		return fmt.Sprintf("nomad:evaluation:%s:%s:complete", eval.JobID, eval.ID), true
+	}
+	return "", false
+}
+
+func jobRegisteredEventIdempotencyKey(eventType string, raw json.RawMessage) (string, bool) {
+	if !strings.EqualFold(eventType, "JobRegistered") {
+		return "", false
+	}
+	var jobPayload NomadJobEventPayload
+	if err := json.Unmarshal(raw, &jobPayload); err != nil {
+		return "", false
+	}
+	jobID := strings.TrimSpace(jobPayload.Job.ID)
+	if jobID == "" {
+		return "", false
+	}
+	return fmt.Sprintf("nomad:job:%s:%d:registered", jobID, jobPayload.Job.ModifyIndex), true
+}
+
+func resolveNomadEventIdempotencyKey(event NomadEvent) (string, bool) {
+	switch event.Topic {
+	case "Deployment":
+		return deploymentEventIdempotencyKey(event.Payload)
+	case "Allocation":
+		return allocationEventIdempotencyKey(event.Payload)
+	case "Evaluation":
+		return evaluationEventIdempotencyKey(event.Payload)
+	case "Job":
+		return jobRegisteredEventIdempotencyKey(event.Type, event.Payload)
+	default:
+		// Drop unhandled topics immediately
+		return "", false
+	}
+}
+
 // handleNomadEvent dispatches an individual Nomad event to its corresponding handler.
 func (sub *NomadStreamSubscriber) handleNomadEvent(ctx context.Context, event NomadEvent) {
 	// Pre-filter noise in memory before hitting River or DB
@@ -410,86 +511,9 @@ func (sub *NomadStreamSubscriber) handleNomadEvent(ctx context.Context, event No
 		// Ignore internal scheduler planning calculations (PlanResult is not a lifecycle state transition)
 		return
 	}
-	var idempotencyKey string
-	switch event.Topic {
-	case "Deployment":
-		var depPayload NomadDeploymentEventPayload
-		if err := json.Unmarshal(event.Payload, &depPayload); err != nil {
-			return
-		}
-		status := depPayload.Deployment.Status
-		if !strings.EqualFold(status, "successful") && !strings.EqualFold(status, "failed") && !strings.EqualFold(status, "cancelled") {
-			return
-		}
-		if depPayload.Deployment.ID != "" && depPayload.Deployment.JobID != "" {
-			idempotencyKey = fmt.Sprintf("nomad:deployment:%s:%s:%s", depPayload.Deployment.JobID, depPayload.Deployment.ID, status)
-		}
-	case "Allocation":
-		var allocPayload NomadAllocationEventPayload
-		if err := json.Unmarshal(event.Payload, &allocPayload); err != nil {
-			return
-		}
-		alloc := allocPayload.Allocation
-		isRunning := alloc.DesiredStatus == "run" && alloc.ClientStatus == "running"
-		isComplete := alloc.DesiredStatus == "run" && alloc.ClientStatus == "complete" && !hasFailedTaskState(alloc.TaskStates)
-		isFailed := strings.EqualFold(alloc.ClientStatus, "failed")
-		isExhausted := alloc.DesiredStatus == "run" && isAllocationRestartExhausted(alloc.TaskStates)
-		if !isRunning && !isComplete && !isFailed && !isExhausted {
-			return
-		}
-		if alloc.ID != "" && alloc.JobID != "" {
-			if isFailed || isExhausted {
-				idempotencyKey = fmt.Sprintf("nomad:allocation:%s:%s:failed", alloc.JobID, alloc.ID)
-			} else {
-				idempotencyKey = fmt.Sprintf("nomad:allocation:%s:%s:%s", alloc.JobID, alloc.ID, strings.ToLower(alloc.ClientStatus))
-			}
-		}
-	case "Evaluation":
-		var evalPayload NomadEvaluationEventPayload
-		if err := json.Unmarshal(event.Payload, &evalPayload); err != nil {
-			return
-		}
-		eval := evalPayload.Evaluation
-		if strings.TrimSpace(eval.JobID) == "" {
-			return
-		}
-		if strings.EqualFold(eval.Status, "blocked") {
-			if !hasNonTransientPlacementFailure(eval.FailedTGAllocs, eval.QueuedAllocations) {
-				return
-			}
-			idempotencyKey = fmt.Sprintf("nomad:evaluation:%s:%s:blocked", eval.JobID, eval.ID)
-		} else {
-			hasUnqueuedFailures := hasUnqueuedFailedAllocs(eval.FailedTGAllocs, eval.QueuedAllocations)
-			isExplicitFailure := strings.EqualFold(eval.Status, "failed") || strings.EqualFold(eval.Status, "canceled") || strings.EqualFold(eval.Status, "cancelled")
 
-			if hasUnqueuedFailures || isExplicitFailure {
-				// Pass through to River/ProcessNomadEvent for failure handling
-				idempotencyKey = fmt.Sprintf("nomad:evaluation:%s:%s:%s", eval.JobID, eval.ID, eval.Status)
-			} else if eval.BlockedEval != "" || allFailedTaskGroupsQueued(eval.FailedTGAllocs, eval.QueuedAllocations) {
-				// Blocked evaluation or all unplaced allocations queued for rollout; wait for follow-up allocation/deployment events
-				return
-			} else if strings.EqualFold(eval.Status, "complete") {
-				// In-place or restart complete evaluation; pass through for success handling
-				idempotencyKey = fmt.Sprintf("nomad:evaluation:%s:%s:complete", eval.JobID, eval.ID)
-			} else {
-				return
-			}
-		}
-	case "Job":
-		if !strings.EqualFold(event.Type, "JobRegistered") {
-			return
-		}
-		var jobPayload NomadJobEventPayload
-		if err := json.Unmarshal(event.Payload, &jobPayload); err != nil {
-			return
-		}
-		jobID := strings.TrimSpace(jobPayload.Job.ID)
-		if jobID == "" {
-			return
-		}
-		idempotencyKey = fmt.Sprintf("nomad:job:%s:%d:registered", jobID, jobPayload.Job.ModifyIndex)
-	default:
-		// Drop unhandled topics immediately
+	idempotencyKey, ok := resolveNomadEventIdempotencyKey(event)
+	if !ok {
 		return
 	}
 
@@ -517,6 +541,87 @@ func (sub *NomadStreamSubscriber) handleNomadEvent(ctx context.Context, event No
 	}
 }
 
+func (s *RouterServer) processNomadDeploymentEvent(ctx context.Context, rawPayload json.RawMessage) error {
+	var depPayload NomadDeploymentEventPayload
+	if err := json.Unmarshal(rawPayload, &depPayload); err != nil {
+		return fmt.Errorf("unmarshal nomad deployment payload: %w", err)
+	}
+	dep := depPayload.Deployment
+	if strings.EqualFold(dep.Status, "successful") {
+		return s.HandleNomadJobSuccess(ctx, dep.JobID, dep.ID)
+	} else if strings.EqualFold(dep.Status, "failed") || strings.EqualFold(dep.Status, "cancelled") {
+		return s.HandleNomadJobFailure(ctx, dep.JobID, dep.ID, dep.Status, dep.StatusDescription)
+	}
+	return nil
+}
+
+func (s *RouterServer) processNomadAllocationEvent(ctx context.Context, rawPayload json.RawMessage) error {
+	var allocPayload NomadAllocationEventPayload
+	if err := json.Unmarshal(rawPayload, &allocPayload); err != nil {
+		return fmt.Errorf("unmarshal nomad allocation payload: %w", err)
+	}
+	alloc := allocPayload.Allocation
+	if strings.EqualFold(alloc.ClientStatus, "failed") {
+		if s.isNomadJobHealthy(ctx, alloc.JobID) {
+			return nil
+		}
+		return s.HandleNomadJobFailure(ctx, alloc.JobID, alloc.ID, "failed", extractAllocationErrorDetails(alloc.ClientDescription, alloc.TaskStates))
+	}
+	if alloc.DesiredStatus == "run" && isAllocationRestartExhausted(alloc.TaskStates) {
+		return s.HandleNomadJobFailure(ctx, alloc.JobID, alloc.ID, "failed", extractAllocationErrorDetails(alloc.ClientDescription, alloc.TaskStates))
+	}
+	if isAllocationRestarting(alloc.TaskStates) {
+		return nil
+	}
+	if alloc.DesiredStatus == "run" && (alloc.ClientStatus == "running" || (alloc.ClientStatus == "complete" && !hasFailedTaskState(alloc.TaskStates))) && s.isNomadJobHealthy(ctx, alloc.JobID) {
+		return s.HandleNomadJobSuccess(ctx, alloc.JobID, alloc.ID)
+	}
+	return nil
+}
+
+func (s *RouterServer) processNomadEvaluationEvent(ctx context.Context, rawPayload json.RawMessage) error {
+	var evalPayload NomadEvaluationEventPayload
+	if err := json.Unmarshal(rawPayload, &evalPayload); err != nil {
+		return fmt.Errorf("unmarshal nomad evaluation payload: %w", err)
+	}
+	eval := evalPayload.Evaluation
+	if strings.EqualFold(eval.Status, "blocked") {
+		if !hasNonTransientPlacementFailure(eval.FailedTGAllocs, eval.QueuedAllocations) || s.isNomadJobHealthy(ctx, eval.JobID) {
+			return nil
+		}
+		return s.HandleNomadJobFailure(ctx, eval.JobID, eval.ID, eval.Status, formatFailedTGAllocs(eval.StatusDescription, eval.FailedTGAllocs))
+	}
+	hasUnqueuedFailures := hasUnqueuedFailedAllocs(eval.FailedTGAllocs, eval.QueuedAllocations)
+	isExplicitFailure := strings.EqualFold(eval.Status, "failed") || strings.EqualFold(eval.Status, "canceled") || strings.EqualFold(eval.Status, "cancelled")
+
+	if hasUnqueuedFailures || isExplicitFailure {
+		if s.isNomadJobHealthy(ctx, eval.JobID) {
+			return nil
+		}
+		return s.HandleNomadJobFailure(ctx, eval.JobID, eval.ID, eval.Status, formatFailedTGAllocs(eval.StatusDescription, eval.FailedTGAllocs))
+	} else if eval.BlockedEval != "" || allFailedTaskGroupsQueued(eval.FailedTGAllocs, eval.QueuedAllocations) {
+		return nil
+	} else if strings.EqualFold(eval.Status, "complete") && s.isNomadJobHealthy(ctx, eval.JobID) {
+		return s.HandleNomadJobSuccess(ctx, eval.JobID, eval.ID)
+	}
+	return nil
+}
+
+func (s *RouterServer) processNomadJobEvent(ctx context.Context, eventType string, rawPayload json.RawMessage) error {
+	if !strings.EqualFold(eventType, "JobRegistered") {
+		return nil
+	}
+	var jobPayload NomadJobEventPayload
+	if err := json.Unmarshal(rawPayload, &jobPayload); err != nil {
+		return fmt.Errorf("unmarshal nomad job payload: %w", err)
+	}
+	jobID := strings.TrimSpace(jobPayload.Job.ID)
+	if jobID != "" && s.isNomadBatchTemplateHealthy(ctx, jobID) {
+		return s.HandleNomadJobSuccess(ctx, jobID, fmt.Sprintf("job-registered-%d", jobPayload.Job.ModifyIndex))
+	}
+	return nil
+}
+
 // ProcessNomadEvent processes a filtered Nomad stream event synchronously.
 func (s *RouterServer) ProcessNomadEvent(ctx context.Context, topic, eventType string, rawPayload json.RawMessage) error {
 	if strings.EqualFold(eventType, "PlanResult") {
@@ -524,74 +629,13 @@ func (s *RouterServer) ProcessNomadEvent(ctx context.Context, topic, eventType s
 	}
 	switch topic {
 	case "Deployment":
-		var depPayload NomadDeploymentEventPayload
-		if err := json.Unmarshal(rawPayload, &depPayload); err != nil {
-			return fmt.Errorf("unmarshal nomad deployment payload: %w", err)
-		}
-		dep := depPayload.Deployment
-		if strings.EqualFold(dep.Status, "successful") {
-			return s.HandleNomadJobSuccess(ctx, dep.JobID, dep.ID)
-		} else if strings.EqualFold(dep.Status, "failed") || strings.EqualFold(dep.Status, "cancelled") {
-			return s.HandleNomadJobFailure(ctx, dep.JobID, dep.ID, dep.Status, dep.StatusDescription)
-		}
+		return s.processNomadDeploymentEvent(ctx, rawPayload)
 	case "Allocation":
-		var allocPayload NomadAllocationEventPayload
-		if err := json.Unmarshal(rawPayload, &allocPayload); err != nil {
-			return fmt.Errorf("unmarshal nomad allocation payload: %w", err)
-		}
-		alloc := allocPayload.Allocation
-		if strings.EqualFold(alloc.ClientStatus, "failed") {
-			if s.isNomadJobHealthy(ctx, alloc.JobID) {
-				return nil
-			}
-			return s.HandleNomadJobFailure(ctx, alloc.JobID, alloc.ID, "failed", extractAllocationErrorDetails(alloc.ClientDescription, alloc.TaskStates))
-		}
-		if alloc.DesiredStatus == "run" && isAllocationRestartExhausted(alloc.TaskStates) {
-			return s.HandleNomadJobFailure(ctx, alloc.JobID, alloc.ID, "failed", extractAllocationErrorDetails(alloc.ClientDescription, alloc.TaskStates))
-		}
-		if isAllocationRestarting(alloc.TaskStates) {
-			return nil
-		}
-		if alloc.DesiredStatus == "run" && (alloc.ClientStatus == "running" || (alloc.ClientStatus == "complete" && !hasFailedTaskState(alloc.TaskStates))) && s.isNomadJobHealthy(ctx, alloc.JobID) {
-			return s.HandleNomadJobSuccess(ctx, alloc.JobID, alloc.ID)
-		}
+		return s.processNomadAllocationEvent(ctx, rawPayload)
 	case "Evaluation":
-		var evalPayload NomadEvaluationEventPayload
-		if err := json.Unmarshal(rawPayload, &evalPayload); err != nil {
-			return fmt.Errorf("unmarshal nomad evaluation payload: %w", err)
-		}
-		eval := evalPayload.Evaluation
-		if strings.EqualFold(eval.Status, "blocked") {
-			if !hasNonTransientPlacementFailure(eval.FailedTGAllocs, eval.QueuedAllocations) || s.isNomadJobHealthy(ctx, eval.JobID) {
-				return nil
-			}
-			return s.HandleNomadJobFailure(ctx, eval.JobID, eval.ID, eval.Status, formatFailedTGAllocs(eval.StatusDescription, eval.FailedTGAllocs))
-		}
-		hasUnqueuedFailures := hasUnqueuedFailedAllocs(eval.FailedTGAllocs, eval.QueuedAllocations)
-		isExplicitFailure := strings.EqualFold(eval.Status, "failed") || strings.EqualFold(eval.Status, "canceled") || strings.EqualFold(eval.Status, "cancelled")
-
-		if hasUnqueuedFailures || isExplicitFailure {
-			if s.isNomadJobHealthy(ctx, eval.JobID) {
-				return nil
-			}
-			return s.HandleNomadJobFailure(ctx, eval.JobID, eval.ID, eval.Status, formatFailedTGAllocs(eval.StatusDescription, eval.FailedTGAllocs))
-		} else if eval.BlockedEval != "" || allFailedTaskGroupsQueued(eval.FailedTGAllocs, eval.QueuedAllocations) {
-			return nil
-		} else if strings.EqualFold(eval.Status, "complete") && s.isNomadJobHealthy(ctx, eval.JobID) {
-			return s.HandleNomadJobSuccess(ctx, eval.JobID, eval.ID)
-		}
+		return s.processNomadEvaluationEvent(ctx, rawPayload)
 	case "Job":
-		if !strings.EqualFold(eventType, "JobRegistered") {
-			return nil
-		}
-		var jobPayload NomadJobEventPayload
-		if err := json.Unmarshal(rawPayload, &jobPayload); err != nil {
-			return fmt.Errorf("unmarshal nomad job payload: %w", err)
-		}
-		jobID := strings.TrimSpace(jobPayload.Job.ID)
-		if jobID != "" && s.isNomadBatchTemplateHealthy(ctx, jobID) {
-			return s.HandleNomadJobSuccess(ctx, jobID, fmt.Sprintf("job-registered-%d", jobPayload.Job.ModifyIndex))
-		}
+		return s.processNomadJobEvent(ctx, eventType, rawPayload)
 	}
 	return nil
 }
@@ -730,8 +774,7 @@ func (s *RouterServer) classifyNomadJob(ctx context.Context, job string) (NomadJ
 	return NomadJobKindOneShotBatch, jobSpec.Status, jobSpec.Version, jobSpec.Stop
 }
 
-// isNomadJobHealthy queries the Nomad REST API to verify if the job has successfully deployed.
-func (s *RouterServer) isNomadJobHealthy(ctx context.Context, job string) bool {
+func (s *RouterServer) checkNomadDeploymentsHealthy(ctx context.Context, job string) (healthy, hasDeployments bool) {
 	var deps []struct {
 		ID                string `json:"ID"`
 		Status            string `json:"Status"`
@@ -739,21 +782,70 @@ func (s *RouterServer) isNomadJobHealthy(ctx context.Context, job string) bool {
 		JobVersion        uint64 `json:"JobVersion"`
 		CreateIndex       uint64 `json:"CreateIndex"`
 	}
-	if s.getNomadJSON(ctx, "/v1/job/"+job+"/deployments", &deps) && len(deps) > 0 {
-		sort.SliceStable(deps, func(i, j int) bool {
-			return deps[i].CreateIndex > deps[j].CreateIndex
-		})
-		latest := deps[0]
-		desc := strings.ToLower(latest.StatusDescription)
-		if !strings.EqualFold(latest.Status, "successful") || strings.Contains(desc, "roll") || strings.Contains(desc, "revert") {
+	if !s.getNomadJSON(ctx, "/v1/job/"+job+"/deployments", &deps) || len(deps) == 0 {
+		return false, false
+	}
+	sort.SliceStable(deps, func(i, j int) bool {
+		return deps[i].CreateIndex > deps[j].CreateIndex
+	})
+	latest := deps[0]
+	desc := strings.ToLower(latest.StatusDescription)
+	if !strings.EqualFold(latest.Status, "successful") || strings.Contains(desc, "roll") || strings.Contains(desc, "revert") {
+		return false, true
+	}
+	for _, d := range deps[1:] {
+		if d.JobVersion > latest.JobVersion {
+			return false, true
+		}
+	}
+	return true, true
+}
+
+func isBatchTemplateAllocsHealthy(allocs []NomadJobAllocSummary, jobStatus string, jobStop bool) bool {
+	for _, a := range allocs {
+		if a.DesiredStatus == "run" && (a.ClientStatus == "failed" || a.ClientStatus == "pending") {
 			return false
 		}
-		for _, d := range deps[1:] {
-			if d.JobVersion > latest.JobVersion {
-				return false
-			}
+	}
+	return strings.EqualFold(jobStatus, "running") && !jobStop
+}
+
+func isOneShotBatchAllocsHealthy(allocs []NomadJobAllocSummary, jobStatus string, jobVersion uint64, jobStop bool) bool {
+	if jobStop || strings.EqualFold(jobStatus, "pending") {
+		return false
+	}
+	hasComplete := false
+	for _, a := range allocs {
+		if a.JobVersion < jobVersion {
+			continue
 		}
-		return true
+		if a.DesiredStatus == "run" && (a.ClientStatus == "failed" || a.ClientStatus == "pending" || a.ClientStatus == "running") {
+			return false
+		}
+		if a.DesiredStatus == "run" && a.ClientStatus == "complete" {
+			hasComplete = true
+		}
+	}
+	return hasComplete
+}
+
+func isServiceAllocsHealthy(allocs []NomadJobAllocSummary) bool {
+	hasRunning := false
+	for _, a := range allocs {
+		if a.DesiredStatus == "run" && (a.ClientStatus == "failed" || a.ClientStatus == "pending") {
+			return false
+		}
+		if a.DesiredStatus == "run" && a.ClientStatus == "running" {
+			hasRunning = true
+		}
+	}
+	return hasRunning
+}
+
+// isNomadJobHealthy queries the Nomad REST API to verify if the job has successfully deployed.
+func (s *RouterServer) isNomadJobHealthy(ctx context.Context, job string) bool {
+	if healthy, hasDeployments := s.checkNomadDeploymentsHealthy(ctx, job); hasDeployments {
+		return healthy
 	}
 
 	var allocs []NomadJobAllocSummary
@@ -763,40 +855,11 @@ func (s *RouterServer) isNomadJobHealthy(ctx context.Context, job string) bool {
 	kind, jobStatus, jobVersion, jobStop := s.classifyNomadJob(ctx, job)
 	switch kind {
 	case NomadJobKindBatchTemplate:
-		for _, a := range allocs {
-			if a.DesiredStatus == "run" && (a.ClientStatus == "failed" || a.ClientStatus == "pending") {
-				return false
-			}
-		}
-		return strings.EqualFold(jobStatus, "running") && !jobStop
+		return isBatchTemplateAllocsHealthy(allocs, jobStatus, jobStop)
 	case NomadJobKindOneShotBatch:
-		if jobStop || strings.EqualFold(jobStatus, "pending") {
-			return false
-		}
-		hasComplete := false
-		for _, a := range allocs {
-			if a.JobVersion < jobVersion {
-				continue
-			}
-			if a.DesiredStatus == "run" && (a.ClientStatus == "failed" || a.ClientStatus == "pending" || a.ClientStatus == "running") {
-				return false
-			}
-			if a.DesiredStatus == "run" && a.ClientStatus == "complete" {
-				hasComplete = true
-			}
-		}
-		return hasComplete
+		return isOneShotBatchAllocsHealthy(allocs, jobStatus, jobVersion, jobStop)
 	default:
-		hasRunning := false
-		for _, a := range allocs {
-			if a.DesiredStatus == "run" && (a.ClientStatus == "failed" || a.ClientStatus == "pending") {
-				return false
-			}
-			if a.DesiredStatus == "run" && a.ClientStatus == "running" {
-				hasRunning = true
-			}
-		}
-		return hasRunning
+		return isServiceAllocsHealthy(allocs)
 	}
 }
 

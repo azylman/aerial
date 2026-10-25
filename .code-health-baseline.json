@@ -286,15 +286,6 @@
     "services/vanadis/main.go::*PostgresVanadisStore.CreateBuild": {
       "cc": 25
     },
-    "services/webhooks-router/nomad_stream.go::*NomadStreamSubscriber.handleNomadEvent": {
-      "cc": 45
-    },
-    "services/webhooks-router/nomad_stream.go::*RouterServer.ProcessNomadEvent": {
-      "cc": 38
-    },
-    "services/webhooks-router/nomad_stream.go::*RouterServer.isNomadJobHealthy": {
-      "cc": 32
-    },
     "services/eri/pkg/queue/turn_outcome.go::*turnExecution.handleQuotaPause": {
       "cc": 21
     }
