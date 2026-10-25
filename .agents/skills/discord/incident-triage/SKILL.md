@@ -13,7 +13,7 @@ This skill defines the standardized operational protocol for diagnosing runtime 
 ## 1. Principles & Boundaries
 
 - **Zero-Guessing Invariant**: Never guess why an action occurred or failed. Every conclusion MUST be backed by immutable telemetry: TSDB metrics, structured log entries, or database records.
-- **Two-Repository Boundary**: This skill is strictly generic and core-contained. It relies exclusively on generic core stack components (`aerial-brain`, `aerial-victoriametrics`, `aerial-openobserve`, `aerial-postgres`, `aerial-vector`, Docker daemon, Discord API). It MUST NEVER hardcode non-core service names, user-config overlays (`ha-mcp`, `google`, `ubereats`), custom sidecars, or private channel IDs. Services outside the core stack are discovered dynamically at runtime.
+- **Two-Repository Boundary**: This skill is strictly generic and core-contained. It relies exclusively on generic core stack components (`aerial-eri`, `aerial-victoriametrics`, `aerial-openobserve`, `aerial-postgres`, `aerial-vector`, Docker daemon, Discord API). It MUST NEVER hardcode non-core service names, user-config overlays (`ha-mcp`, `google`, `ubereats`), custom sidecars, or private channel IDs. Services outside the core stack are discovered dynamically at runtime.
 - **Metric-First Hierarchy**: Always query metrics first via VictoriaMetrics to pinpoint exact microsecond timestamps and duration boundaries before querying logs. Never jump directly to dumping raw container logs via Docker MCP unless observability services are offline.
 - **Strictly Zero Host Memory Inspection**: Never inspect host memory (`/proc/meminfo`, system memory heuristics). Container memory is observed strictly through cAdvisor metrics (`container_memory_rss`) in VictoriaMetrics.
 - **Silent Multi-Step Execution**: Perform all diagnostic queries silently without intermediate play-by-play status chatter.
@@ -99,10 +99,10 @@ VictoriaMetrics is the cluster-wide time-series database (TSDB) collecting metri
       - Event / Error Rate: `sum by (status) (rate(<metric>_total[2m])) * 60`
     - **Gauges**:
       - Instant Value / Queue Depth: `<metric>` or `avg_over_time(<metric>[5m])`
-- **Step 3: Ground-Truth Code Registry Fallback (`brain/pkg/metrics/metrics.go`)**:
-  - If the TSDB is cold or has no recent samples, inspect `brain/pkg/metrics/metrics.go` to look up declared metric types (`HistogramVec`, `Gauge`, `CounterVec`) and label key dimensions.
+- **Step 3: Ground-Truth Code Registry Fallback (`services/eri/pkg/metrics/metrics.go`)**:
+  - If the TSDB is cold or has no recent samples, inspect `services/eri/pkg/metrics/metrics.go` to look up declared metric types (`HistogramVec`, `Gauge`, `CounterVec`) and label key dimensions.
 - **cAdvisor Container Resource Metrics**:
-  - Query container resource metrics for `aerial-brain` or dynamically discovered `<target_services>`:
+  - Query container resource metrics for `aerial-eri` or dynamically discovered `<target_services>`:
     - Memory RSS: `container_memory_rss{name="<container_name>"}`
     - CPU Rate: `rate(container_cpu_usage_seconds_total{name="<container_name>"}[1m])`
     - OOM Events: `container_oom_events_total{name="<container_name>"}`
@@ -119,7 +119,7 @@ Once the event timestamp `t_event` and `<target_services>` are pinpointed from m
     ```sql
     SELECT _timestamp, service, level, message 
     FROM docker_logs 
-    WHERE service IN ('brain', '<target_services>')
+    WHERE service IN ('eri', '<target_services>')
       AND _timestamp >= <start_time_us> AND _timestamp <= <end_time_us>
     ORDER BY _timestamp ASC 
     LIMIT 50;
@@ -131,7 +131,7 @@ Once the event timestamp `t_event` and `<target_services>` are pinpointed from m
     - `AND level IN ('warn', 'error', 'fatal', 'panic')`
     - `AND (message LIKE '%error%' OR message LIKE '%timeout%' OR message LIKE '%disconnect%')`
 - **Tracing Across Service Boundaries**:
-  - Correlate timestamps across `brain` and `<target_services>` to determine whether latency or failure originated in `aerial-brain` or the external component.
+  - Correlate timestamps across `eri` and `<target_services>` to determine whether latency or failure originated in `aerial-eri` or the external component.
 
 ### Phase 4: Raw Docker Logs (Docker MCP)
 
@@ -170,7 +170,7 @@ Deliver the post-mortem directly to the user in clean Markdown (strictly < 1,800
 
 ### 🛠️ Root Cause & Remediation
 - **Why it happened**: [Clear technical explanation of code/runtime failure or bottleneck].
-- **Next Step**: [Failing test in `brain/pkg/...` via `systematic-debugging` or operational fix via `self-improvement`].
+- **Next Step**: [Failing test in `services/eri/pkg/...` via `systematic-debugging` or operational fix via `self-improvement`].
 ```
 
 ---
@@ -185,4 +185,4 @@ Deliver the post-mortem directly to the user in clean Markdown (strictly < 1,800
 - **NEVER** pass milliseconds to OpenObserve `_timestamp` (must be converted to microseconds: `ms * 1000`).
 - **NEVER** query a Prometheus histogram by its bare metric name (histograms only exist as `_bucket`, `_sum`, and `_count`; bare names return empty vectors `[]`).
 - **NEVER** guess PromQL formulas without checking Grafana dashboards (PostgreSQL `dashboard` table or `grafana/dashboards/*.json`) or running `victoriametrics:series` first.
-- **NEVER** touch production code without reproducing the failure via a failing unit test in `brain/pkg/...` first.
+- **NEVER** touch production code without reproducing the failure via a failing unit test in `services/eri/pkg/...` first.
