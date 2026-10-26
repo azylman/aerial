@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -21,18 +22,54 @@ const (
 	DefaultMaxRecords = 30
 	// DefaultPruneAge is the maximum age before state files are purged by opportunistic GC.
 	DefaultPruneAge = 1 * time.Hour
-	// minPaginatedReadLines is the minimum line span for a prior read to qualify as multi-page pagination.
-	minPaginatedReadLines = 400
+	// DefaultMinPaginatedReadLines is the default minimum line span for a prior read to qualify as multi-page pagination.
+	DefaultMinPaginatedReadLines = 150
+	// DefaultMaxMicroReads is the default number of allowed non-paginated read steps on the same file before blocking.
+	DefaultMaxMicroReads = 3
+	// DefaultMaxSequentialReads is the default number of allowed consecutive single-file read turns before requiring parallel batching.
+	DefaultMaxSequentialReads = 3
 )
 
 var (
-	gcMu            sync.Mutex
-	lastGCTime      time.Time
-	pytestRegex     = regexp.MustCompile(`^(python[0-9.]*\s+-m\s+)?pytest(\s+(-v|-q|-s|-x|--tb=\S+))*\s*$`)
-	goTestValFlags  = map[string]bool{"-timeout": true, "-tags": true, "-coverprofile": true, "-cpu": true, "-count": true, "-o": true, "-run": true, "-test.run": true}
-	goTestVerbose   = map[string]bool{"-v": true, "-test.v": true, "-v=true": true, "-test.v=true": true, "--v": true, "--test.v": true, "--v=true": true, "--test.v=true": true}
-	unscopedTargets = map[string]bool{"./...": true, "brain/...": true, "services/eri/...": true, "...": true}
+	gcMu               sync.Mutex
+	lastGCTime         time.Time
+	pytestRegex        = regexp.MustCompile(`^(python[0-9.]*\s+-m\s+)?pytest(\s+(-v|-q|-s|-x|--tb=\S+))*\s*$`)
+	goTestValFlags     = map[string]bool{"-timeout": true, "-tags": true, "-coverprofile": true, "-cpu": true, "-count": true, "-o": true, "-run": true, "-test.run": true}
+	goTestVerbose      = map[string]bool{"-v": true, "-test.v": true, "-v=true": true, "-test.v=true": true, "--v": true, "--test.v": true, "--v=true": true, "--test.v=true": true}
+	unscopedTargets    = map[string]bool{"./...": true, "brain/...": true, "services/eri/...": true, "...": true}
+	scratchVarPrefixes = []struct {
+		prefix string
+		envKey string
+	}{
+		{"${SCRATCH_DIR}", "SCRATCH_DIR"},
+		{"$SCRATCH_DIR", "SCRATCH_DIR"},
+		{"${SCRATCHDIR}", "SCRATCHDIR"},
+		{"$SCRATCHDIR", "SCRATCHDIR"},
+	}
 )
+
+func envPositiveInt(fallback int, keys ...string) int {
+	for _, k := range keys {
+		if raw := strings.TrimSpace(os.Getenv(k)); raw != "" {
+			if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+				return n
+			}
+		}
+	}
+	return fallback
+}
+
+func minPaginatedReadLines() int {
+	return envPositiveInt(DefaultMinPaginatedReadLines, "AERIAL_BATCH_MIN_PAGINATED_LINES")
+}
+
+func maxMicroReads() int {
+	return envPositiveInt(DefaultMaxMicroReads, "AERIAL_BATCH_MAX_MICRO_READS")
+}
+
+func maxSequentialReads() int {
+	return envPositiveInt(DefaultMaxSequentialReads, "AERIAL_BATCH_MAX_SEQUENTIAL_READS", "AERIAL_BATCH_MAX_SINGLE_READ_STEPS")
+}
 
 // GetBatchDir returns the active directory for batch guard state persistence.
 func GetBatchDir() string {
@@ -221,12 +258,64 @@ func isSingleInspection(cmd string) bool {
 	return false
 }
 
+func expandScratchEnvPrefix(p string) string {
+	for _, sv := range scratchVarPrefixes {
+		if p == sv.prefix || strings.HasPrefix(p, sv.prefix+"/") {
+			rest := strings.TrimPrefix(p, sv.prefix)
+			base := filepath.ToSlash(strings.TrimSpace(os.Getenv(sv.envKey)))
+			if base == "" {
+				base = "/share/aerial"
+			}
+			return strings.TrimRight(base, "/") + rest
+		}
+	}
+	return p
+}
+
+func scratchSegmentRepo(seg string) string {
+	base := seg
+	if dot := strings.IndexByte(base, '.'); dot > 0 {
+		base = base[:dot]
+	}
+	if base == "aerial-code-scratch" || base == "aerial-pr" || strings.HasPrefix(base, "aerial-pr-") {
+		return "aerial"
+	}
+	if strings.HasSuffix(base, "-scratch") && len(base) > len("-scratch") {
+		return strings.TrimSuffix(base, "-scratch")
+	}
+	return ""
+}
+
+func normalizeBatchTarget(path string) string {
+	p := filepath.ToSlash(strings.TrimSpace(path))
+	if p == "" {
+		return ""
+	}
+	p = expandScratchEnvPrefix(p)
+	if strings.HasPrefix(p, "/") {
+		p = filepath.ToSlash(filepath.Clean(p))
+	}
+	parts := strings.Split(p, "/")
+	for i, seg := range parts {
+		if repo := scratchSegmentRepo(seg); repo != "" && i+1 < len(parts) {
+			return "/share/" + repo + "/" + strings.Join(parts[i+1:], "/")
+		}
+	}
+	for _, key := range []string{"SCRATCH_DIR", "SCRATCHDIR"} {
+		envDir := strings.TrimRight(filepath.ToSlash(strings.TrimSpace(os.Getenv(key))), "/")
+		if envDir != "" && envDir != "/" && strings.HasPrefix(p, envDir+"/") {
+			return "/share/aerial" + strings.TrimPrefix(p, envDir)
+		}
+	}
+	return p
+}
+
 func categorizeInvocation(toolName string, args ToolArgs) (category, target string) {
 	switch normalizeToolName(toolName) {
 	case "view_file", "read_file":
-		return "read", args.FilePath()
+		return "read", normalizeBatchTarget(args.FilePath())
 	case "replace_file_content", "write_to_file", "edit_file", "write_file":
-		return "edit", args.FilePath()
+		return "edit", normalizeBatchTarget(args.FilePath())
 	case "run_command":
 		cmd := strings.TrimSpace(args.CommandLine)
 		if isUnscopedTest(cmd) {
@@ -386,13 +475,14 @@ func isPaginatedRead(priorRecords []ToolInvocation, target string, startLine, en
 	if startLine <= 0 || endLine < startLine {
 		return false
 	}
+	minLines := minPaginatedReadLines()
 	hasPrior := false
-	for _, r := range priorRecords {
+	for _, r := range readsSinceLastTargetEdit(priorRecords, target) {
 		if r.Category != "read" || r.Target != target {
 			continue
 		}
 		hasPrior = true
-		if r.EndLine-r.StartLine+1 < minPaginatedReadLines {
+		if r.EndLine-r.StartLine+1 < minLines {
 			return false
 		}
 		if startLine <= r.EndLine && endLine >= r.StartLine {
@@ -400,6 +490,15 @@ func isPaginatedRead(priorRecords []ToolInvocation, target string, startLine, en
 		}
 	}
 	return hasPrior
+}
+
+func readsSinceLastTargetEdit(records []ToolInvocation, target string) []ToolInvocation {
+	for i := len(records) - 1; i >= 0; i-- {
+		if records[i].Category == "edit" && records[i].Target == target {
+			return records[i+1:]
+		}
+	}
+	return records
 }
 
 func removeTargetInvocations(records []ToolInvocation, category, target string) []ToolInvocation {
@@ -515,11 +614,12 @@ func checkMicroReadViolation(category, target string, paginatedRead bool, priorR
 	if category != "read" || target == "" || paginatedRead {
 		return nil
 	}
-	if countTargetInvocations(priorRecords, "read", target) >= 2 {
+	maxReads := maxMicroReads()
+	if countTargetInvocations(readsSinceLastTargetEdit(priorRecords, target), "read", target) >= maxReads {
 		state.Records = removeTargetInvocations(state.Records, "read", target)
 		return &Decision{
 			Decision: DecisionDeny,
-			Reason:   "Iterative micro-read thrashing detected: 3 sequential reads targeting the same file across turns. Read the complete required range or whole file in a single view_file call (up to 800 lines) instead of small slices.",
+			Reason:   fmt.Sprintf("Iterative micro-read thrashing detected: %d sequential reads targeting the same file across turns. Consolidate reads into larger ranges (>= %d lines) or batch parallel reads in a single turn instead of small slices.", maxReads+1, minPaginatedReadLines()),
 		}
 	}
 	return nil
@@ -551,11 +651,12 @@ func checkMicroCommandViolation(category string, priorRecords []ToolInvocation, 
 }
 
 func checkSequentialReadViolation(category string, paginatedRead bool, priorRecords []ToolInvocation, state *BatchState) *Decision {
-	if category == "read" && !paginatedRead && hasConsecutiveSingleSteps(priorRecords, "read", 2) {
+	maxSeq := maxSequentialReads()
+	if category == "read" && !paginatedRead && hasConsecutiveSingleSteps(priorRecords, "read", maxSeq) {
 		state.Records = filterOutCategory(state.Records, "read")
 		return &Decision{
 			Decision: DecisionDeny,
-			Reason:   "Parallel Tool Batching Invariant Violated: 3 consecutive sequential single-file reads detected across turns. ALWAYS emit view_file, grep_search, and read tool calls in parallel within a single turn when inspecting multiple files.",
+			Reason:   fmt.Sprintf("Parallel Tool Batching Invariant Violated: %d consecutive sequential single-file reads detected across turns. ALWAYS emit view_file, grep_search, and read tool calls in parallel within a single turn when inspecting multiple files.", maxSeq+1),
 		}
 	}
 	return nil
@@ -610,7 +711,10 @@ func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time
 			return nil
 		}
 
-		// Allowed: record invocation
+		// Allowed: invalidate prior reads on edit and record invocation
+		if category == "edit" && target != "" {
+			state.Records = removeTargetInvocations(state.Records, "read", target)
+		}
 		inv := ToolInvocation{
 			Timestamp: ts,
 			StepIdx:   stepIdx,
