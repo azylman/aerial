@@ -29,8 +29,8 @@ var (
 	gcMu            sync.Mutex
 	lastGCTime      time.Time
 	pytestRegex     = regexp.MustCompile(`^(python[0-9.]*\s+-m\s+)?pytest(\s+(-v|-q|-s|-x|--tb=\S+))*\s*$`)
-	goTestValFlags  = map[string]bool{"-timeout": true, "-tags": true, "-coverprofile": true, "-cpu": true, "-count": true, "-o": true}
-	goTestVerbose   = map[string]bool{"-v": true, "-test.v": true, "-v=true": true, "-test.v=true": true}
+	goTestValFlags  = map[string]bool{"-timeout": true, "-tags": true, "-coverprofile": true, "-cpu": true, "-count": true, "-o": true, "-run": true, "-test.run": true}
+	goTestVerbose   = map[string]bool{"-v": true, "-test.v": true, "-v=true": true, "-test.v=true": true, "--v": true, "--test.v": true, "--v=true": true, "--test.v=true": true}
 	unscopedTargets = map[string]bool{"./...": true, "brain/...": true, "services/eri/...": true, "...": true}
 )
 
@@ -68,7 +68,7 @@ func isUnscopedTest(cmd string) bool {
 }
 
 func isUnscopedTestSingle(cmd string) bool {
-	fields := stripLeadingEnv(tokenizeQuoteAware(strings.TrimSpace(cmd)))
+	fields := stripLeadingEnv(tokenizeQuoteAware(strings.TrimSpace(strings.TrimLeft(cmd, "("))))
 	if len(fields) == 0 {
 		return false
 	}
@@ -102,21 +102,9 @@ func isUnscopedVerify(args []string) bool {
 
 func isUnscopedGoTest(args []string) bool {
 	var pkgArgs []string
-	hasVerbose := false
-	hasRun := false
 	for i := 0; i < len(args); i++ {
-		f := args[i]
-		if goTestVerbose[f] {
-			hasVerbose = true
-			continue
-		}
-		if f == "-run" || f == "-test.run" {
-			hasRun = true
-			i++
-			continue
-		}
-		if isAttachedRunFlag(f) {
-			hasRun = true
+		f := strings.TrimRight(args[i], ")")
+		if f == "" {
 			continue
 		}
 		if strings.HasPrefix(f, "-") {
@@ -127,7 +115,7 @@ func isUnscopedGoTest(args []string) bool {
 		}
 		pkgArgs = append(pkgArgs, f)
 	}
-	if len(pkgArgs) == 0 || (hasVerbose && !hasRun) {
+	if len(pkgArgs) == 0 {
 		return true
 	}
 	for _, arg := range pkgArgs {
@@ -138,13 +126,48 @@ func isUnscopedGoTest(args []string) bool {
 	return false
 }
 
-func isAttachedRunFlag(f string) bool {
-	for _, p := range []string{"-run=", "--run=", "-test.run="} {
-		if strings.HasPrefix(f, p) {
-			return true
+type byteSpan struct {
+	start int
+	end   int
+}
+
+func stripGoTestVerbose(cmdLine string) string {
+	var spans []byteSpan
+	for _, seg := range splitPipelineWithOffsets(cmdLine) {
+		tokens := tokenizeWithOffsets(seg.text, seg.offset)
+		idx := 0
+		for idx < len(tokens) && (tokens[idx].value == "(" || (strings.Contains(tokens[idx].value, "=") && !strings.HasPrefix(tokens[idx].value, "-"))) {
+			idx++
+		}
+		if idx+1 >= len(tokens) || filepath.Base(strings.TrimLeft(tokens[idx].value, "(")) != "go" || tokens[idx+1].value != "test" {
+			continue
+		}
+		for i := idx + 2; i < len(tokens); i++ {
+			tok := tokens[i]
+			cleanVal := strings.TrimRight(tok.value, ")")
+			if cleanVal == "--" || cleanVal == "-args" {
+				break
+			}
+			if goTestValFlags[cleanVal] {
+				i++
+				continue
+			}
+			if goTestVerbose[cleanVal] {
+				start := tok.startOffset
+				for start > 0 && (cmdLine[start-1] == ' ' || cmdLine[start-1] == '\t') {
+					start--
+				}
+				end := tok.endOffset - (len(tok.value) - len(cleanVal))
+				spans = append(spans, byteSpan{start: start, end: end})
+			}
 		}
 	}
-	return false
+	rewritten := cmdLine
+	for i := len(spans) - 1; i >= 0; i-- {
+		sp := spans[i]
+		rewritten = rewritten[:sp.start] + rewritten[sp.end:]
+	}
+	return rewritten
 }
 
 func isUnbatchedGitMutation(cmd string) bool {
@@ -458,7 +481,7 @@ func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time
 	if normalizedTool == "run_command" && isUnscopedTest(args.CommandLine) {
 		return &Decision{
 			Decision: DecisionDeny,
-			Reason:   "Unscoped test sweep detected. Run targeted package unit tests (e.g. 'go test ./pkg/<pkg>/...' or 'go test -v -run TestName ./pkg/<pkg>') during development; comprehensive monorepo sweeps are offloaded to GitHub Actions CI or './scripts/verify.sh --staged'.",
+			Reason:   "Unscoped test sweep detected. Run targeted package unit tests (e.g. 'go test ./pkg/<pkg>/...' or 'go test -run TestName ./pkg/<pkg>') during development; comprehensive monorepo sweeps are offloaded to GitHub Actions CI or './scripts/verify.sh --staged'.",
 		}
 	}
 
@@ -557,6 +580,11 @@ func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time
 		_ = saveState(dir, safeID, state) //nolint:errcheck
 		opportunisticGC(dir, now)
 		decision = &Decision{Decision: DecisionAllow}
+		if normalizedTool == "run_command" {
+			if rewritten := stripGoTestVerbose(args.CommandLine); rewritten != args.CommandLine {
+				decision.Overwrite = map[string]any{"CommandLine": rewritten}
+			}
+		}
 		return nil
 	})
 
