@@ -136,6 +136,12 @@ func TestCheckSearch(t *testing.T) {
 		{"pipe inside quotes allowed", "run_command", `grep "a | b" file.txt`, "", false, ""},
 		{"semicolon inside quotes allowed", "run_command", `git commit -m "fix; update search guard"`, "", false, ""},
 		{"or operator pipeline with bad find denied", "run_command", `test -d /foo || find / -maxdepth 1`, "", true, ""},
+		{"docker exec find without maxdepth denied", "run_command", `docker exec cc72895f4852 find /app -name "*live-session*"`, "", true, ""},
+		{"docker exec find with maxdepth allowed", "run_command", `docker exec -i -u root -w /app cc72895f4852 find /app -maxdepth 2 -name "*.js"`, "", false, ""},
+		{"docker exec recursive grep without limit denied", "run_command", `docker exec cc72895f4852 grep -rn "setupCanvas" /app`, "", true, ""},
+		{"docker exec recursive grep with limit allowed", "run_command", `docker exec -e FOO=bar cc72895f4852 grep -rn -m 20 --exclude-dir=.git "setupCanvas" /app`, "", false, ""},
+		{"docker exec sh -c unconstrained find denied", "run_command", `docker exec cc72895f4852 sh -c "find /app -name '*.js'"`, "", true, ""},
+		{"docker exec without inner command allowed", "run_command", `docker exec -it cc72895f4852`, "", false, ""},
 
 		// MCP tool_index & openobserve shaping (cmd = ToolName, cwd = Arguments JSON)
 		{"mcp non-index tool allowed", "call_mcp_tool", "list_devices", `{}`, false, ""},
@@ -316,6 +322,25 @@ func TestPsqlGuard(t *testing.T) {
 			cmd:           `psql "$DATABASE_URL" --command "\dt" -c "\d; SELECT id, author_name FROM messages LIMIT 5"`,
 			conn:          &fakeSQLCatalogConn{cols: twoCols, explainJSON: limitPlan, tableMeta: meta3},
 			wantOverwrite: `psql -A "$DATABASE_URL" --command "\dt" -c "\d; SELECT id, author_name FROM messages LIMIT 5"`,
+		},
+		{
+			name:          "docker exec psql injects -A",
+			cmd:           `docker exec -i -e PGPASSWORD=secret postgres psql -U aerial -d aerial -c "SELECT id, author_name FROM messages LIMIT 5"`,
+			conn:          &fakeSQLCatalogConn{cols: twoCols, explainJSON: limitPlan, tableMeta: meta3},
+			wantOverwrite: `docker exec -i -e PGPASSWORD=secret postgres psql -A -U aerial -d aerial -c "SELECT id, author_name FROM messages LIMIT 5"`,
+		},
+		{
+			name:          "docker exec psql select star denied",
+			cmd:           `docker exec postgres psql -U aerial -c "SELECT * FROM messages LIMIT 5"`,
+			conn:          &fakeSQLCatalogConn{cols: threeCols, explainJSON: limitPlan, tableMeta: meta3, relCounts: rel3},
+			wantDeny:      true,
+			wantReasonSub: "Available columns: id, author_name, content",
+		},
+		{
+			name:     "docker exec without inner command ignored by psql guard",
+			cmd:      `docker exec -e FOO=bar postgres`,
+			conn:     &fakeSQLCatalogConn{cols: twoCols, explainJSON: limitPlan, tableMeta: meta3},
+			wantDeny: false,
 		},
 	}
 

@@ -68,7 +68,7 @@ func isUnscopedTest(cmd string) bool {
 }
 
 func isUnscopedTestSingle(cmd string) bool {
-	fields := stripLeadingEnv(tokenizeQuoteAware(strings.TrimSpace(strings.TrimLeft(cmd, "("))))
+	fields := unwrapCommandTokens(tokenizeQuoteAware(strings.TrimSpace(strings.TrimLeft(cmd, "("))))
 	if len(fields) == 0 {
 		return false
 	}
@@ -82,6 +82,15 @@ func isUnscopedTestSingle(cmd string) bool {
 		return isUnscopedGoTest(fields[2:])
 	}
 	return false
+}
+
+func isTranscriptLogPath(path string) bool {
+	clean := filepath.ToSlash(strings.TrimSpace(path))
+	if !strings.Contains(clean, "/.system_generated/logs/") && !strings.HasPrefix(clean, ".system_generated/logs/") {
+		return false
+	}
+	base := filepath.Base(clean)
+	return strings.HasPrefix(base, "transcript") && strings.HasSuffix(base, ".jsonl")
 }
 
 func stripLeadingEnv(fields []string) []string {
@@ -135,10 +144,7 @@ func stripGoTestVerbose(cmdLine string) string {
 	var spans []byteSpan
 	for _, seg := range splitPipelineWithOffsets(cmdLine) {
 		tokens := tokenizeWithOffsets(seg.text, seg.offset)
-		idx := 0
-		for idx < len(tokens) && (tokens[idx].value == "(" || (strings.Contains(tokens[idx].value, "=") && !strings.HasPrefix(tokens[idx].value, "-"))) {
-			idx++
-		}
+		idx := skipEnvAndDockerExec(tokens)
 		if idx+1 >= len(tokens) || filepath.Base(strings.TrimLeft(tokens[idx].value, "(")) != "go" || tokens[idx+1].value != "test" {
 			continue
 		}
@@ -472,25 +478,36 @@ func CheckBatch(payload Payload, args ToolArgs) *Decision {
 	return CheckBatchWithDir(payload, args, GetBatchDir(), time.Now())
 }
 
+func checkStatelessBatchRules(normalizedTool string, args ToolArgs) *Decision {
+	if normalizedTool == "run_command" {
+		if isUnscopedTest(args.CommandLine) {
+			return &Decision{
+				Decision: DecisionDeny,
+				Reason:   "Unscoped test sweep detected. Run targeted package unit tests (e.g. 'go test ./pkg/<pkg>/...' or 'go test -run TestName ./pkg/<pkg>') during development; comprehensive monorepo sweeps are offloaded to GitHub Actions CI or './scripts/verify.sh --staged'.",
+			}
+		}
+		if isUnbatchedGitMutation(args.CommandLine) {
+			return &Decision{
+				Decision: DecisionDeny,
+				Reason:   "Unbatched git lifecycle command detected. Combine git operations into compound one-liners (e.g. 'git add -A && git commit -m ... && git push ...') or use 'scripts/aerial-pr.sh submit <scratch_dir> [commit_msg]' for automated pre-flight verification and submission.",
+			}
+		}
+	}
+	if (normalizedTool == "read_file" || normalizedTool == "view_file") && isTranscriptLogPath(args.FilePath()) {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Direct read_file/view_file on raw session transcripts (transcript*.jsonl) is prohibited because each JSONL line can exceed 30KB and floods the context window. Use the 'transcript-search' CLI skill or targeted 'jq' / 'rg -m 20' queries via run_command instead.",
+		}
+	}
+	return nil
+}
+
 // CheckBatchWithDir evaluates tool batching invariants with configurable state directory and timestamp.
 // Guaranteed fail-open: returns allow on unexpected errors or corrupted states.
 func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time) *Decision {
 	normalizedTool := normalizeToolName(payload.ToolCall.Name)
-
-	// Rule 1: Unscoped test sweeps
-	if normalizedTool == "run_command" && isUnscopedTest(args.CommandLine) {
-		return &Decision{
-			Decision: DecisionDeny,
-			Reason:   "Unscoped test sweep detected. Run targeted package unit tests (e.g. 'go test ./pkg/<pkg>/...' or 'go test -run TestName ./pkg/<pkg>') during development; comprehensive monorepo sweeps are offloaded to GitHub Actions CI or './scripts/verify.sh --staged'.",
-		}
-	}
-
-	// Rule 2: Unbatched git mutations
-	if normalizedTool == "run_command" && isUnbatchedGitMutation(args.CommandLine) {
-		return &Decision{
-			Decision: DecisionDeny,
-			Reason:   "Unbatched git lifecycle command detected. Combine git operations into compound one-liners (e.g. 'git add -A && git commit -m ... && git push ...') or use 'scripts/aerial-pr.sh submit <scratch_dir> [commit_msg]' for automated pre-flight verification and submission.",
-		}
+	if dec := checkStatelessBatchRules(normalizedTool, args); dec != nil {
+		return dec
 	}
 
 	category, target := categorizeInvocation(payload.ToolCall.Name, args)
