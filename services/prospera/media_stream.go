@@ -67,13 +67,6 @@ func NewCallSessionManager(
 	return m
 }
 
-// ActiveCount returns the number of currently active media stream sessions.
-func (m *CallSessionManager) ActiveCount() int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return len(m.sessions)
-}
-
 // GetSession retrieves an active session by callID.
 func (m *CallSessionManager) GetSession(callID string) (*MediaStreamSession, bool) {
 	m.mu.RLock()
@@ -164,7 +157,10 @@ func (m *CallSessionManager) EndCall(callID string) error {
 
 // HandleMediaWebSocket upgrades and handles the Twilio Media Stream connection.
 func (m *CallSessionManager) HandleMediaWebSocket(w http.ResponseWriter, r *http.Request) {
-	token := r.URL.Query().Get("token")
+	token := r.PathValue("token")
+	if token == "" {
+		token = r.URL.Query().Get("token")
+	}
 	callID, ok := m.tokenMgr.Consume(token)
 	if !ok || callID == "" {
 		http.Error(w, "unauthorized stream token", http.StatusUnauthorized)
@@ -197,8 +193,19 @@ func (m *CallSessionManager) HandleMediaWebSocket(w http.ResponseWriter, r *http
 	var openingGreeting, voicemailMsg, systemPrompt string
 	if call != nil {
 		openingGreeting = call.Brief.Task
+		if openingGreeting == "" {
+			if call.Direction == "inbound" {
+				openingGreeting = "Hello, thank you for calling. How can I help you today?"
+			} else {
+				openingGreeting = "Hello, I am calling on behalf of the account owner."
+			}
+		}
 		voicemailMsg = ResolveVoicemailMessage(call.Brief, openingGreeting)
-		systemPrompt = BuildSystemPrompt(call.Brief, ModeConversation, nil)
+		mode := ModeConversation
+		if call.Direction == "inbound" || call.CallbackOfCallID != "" {
+			mode = ModeCallback
+		}
+		systemPrompt = BuildSystemPrompt(call.Brief, mode, nil)
 	} else {
 		openingGreeting = "Hello, I am calling on behalf of the account owner."
 		voicemailMsg = openingGreeting

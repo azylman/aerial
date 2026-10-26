@@ -158,13 +158,20 @@ func TestHTTPContextConsultClient_ConsultCalendar(t *testing.T) {
 			overrideURL: ":\x7f",
 			wantErr:     true,
 		},
+		{
+			name:        "calendar empty url returns unavailable",
+			overrideURL: "none",
+			wantSubstr:  "unavailable",
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			calURL := tc.overrideURL
-			if calURL == "" {
+			if tc.overrideURL == "none" {
+				calURL = ""
+			} else if calURL == "" {
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					w.Header().Set("Content-Type", "application/json")
 					if tc.statusCode != 0 {
@@ -236,13 +243,20 @@ func TestHTTPContextConsultClient_ConsultMemory(t *testing.T) {
 			overrideURL: ":\x7f",
 			wantErr:     true,
 		},
+		{
+			name:        "memory empty url returns unavailable",
+			overrideURL: "none",
+			wantSubstr:  "unavailable",
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			memURL := tc.overrideURL
-			if memURL == "" {
+			if tc.overrideURL == "none" {
+				memURL = ""
+			} else if memURL == "" {
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					w.Header().Set("Content-Type", "text/plain")
 					if tc.statusCode != 0 {

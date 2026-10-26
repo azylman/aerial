@@ -49,7 +49,12 @@ func ValidateInitiateCallArgs(toRaw, fromNumber, message string, brief CallBrief
 		}
 	}
 
-	if strings.TrimSpace(message) == "" && strings.TrimSpace(brief.Task) == "" {
+	trimmedMessage := strings.TrimSpace(message)
+	if strings.TrimSpace(brief.Task) == "" && trimmedMessage != "" {
+		brief.Task = trimmedMessage
+	}
+
+	if strings.TrimSpace(brief.Task) == "" {
 		return "", brief, fmt.Errorf("opening message or task is required")
 	}
 

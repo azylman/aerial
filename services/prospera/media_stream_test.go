@@ -15,6 +15,13 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// ActiveCount returns the number of currently active media stream sessions in tests.
+func (m *CallSessionManager) ActiveCount() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.sessions)
+}
+
 type mockConsultClient struct {
 	mu           sync.Mutex
 	calendarResp string
@@ -616,6 +623,21 @@ func TestMediaStream_BargeInAndVoicemail(t *testing.T) {
 	sess.handleInboundTwilioMedia("invalid-base64!!!")
 
 	sess.executeToolCall(context.Background(), GeminiFunctionCall{
+		ID:   "call_dtmf_good",
+		Name: "send_dtmf",
+		Args: map[string]any{"digits": "123"},
+	})
+	sess.executeToolCall(context.Background(), GeminiFunctionCall{
+		ID:   "call_cal_good",
+		Name: "consult_calendar",
+		Args: map[string]any{"query": "schedule"},
+	})
+	sess.executeToolCall(context.Background(), GeminiFunctionCall{
+		ID:   "call_mem_good",
+		Name: "consult_memory",
+		Args: map[string]any{"query": "preferences"},
+	})
+	sess.executeToolCall(context.Background(), GeminiFunctionCall{
 		ID:   "call_dtmf_bad",
 		Name: "send_dtmf",
 		Args: map[string]any{"digits": "INVALID_DIGIT"},
@@ -954,6 +976,102 @@ func TestHandleMediaWebSocket_WithStoreCall(t *testing.T) {
 	}
 }
 
+func TestHandleMediaWebSocket_InboundMode(t *testing.T) {
+	t.Parallel()
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _, _ = conn.ReadMessage()
+		_ = conn.WriteJSON(map[string]any{"setupComplete": map[string]any{}})
+		for {
+			_, _, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(geminiServer.Close)
+
+	store := setUpTestStore(t)
+	callID := "call-inbound-mode-test"
+	_ = store.CreateInboundCall(context.Background(), VoiceCall{
+		CallID:     callID,
+		Direction:  "inbound",
+		State:      "in-progress",
+		FromNumber: "+15105550111",
+		ToNumber:   "+15105550100",
+		StartedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
+	})
+
+	tokenMgr := NewStreamTokenManager(time.Now)
+	sessionMgr := NewCallSessionManager(&Config{}, store, nil, nil, tokenMgr,
+		WithPacerInterval(1*time.Millisecond),
+		WithGeminiDialer(func(ctx context.Context, model string) (*websocket.Conn, error) {
+			dialer := websocket.DefaultDialer
+			conn, resp, err := dialer.DialContext(ctx, "ws"+strings.TrimPrefix(geminiServer.URL, "http"), nil)
+			if resp != nil && resp.Body != nil {
+				resp.Body.Close()
+			}
+			return conn, err
+		}),
+	)
+
+	token, _ := tokenMgr.Issue(callID, 30*time.Second)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sessionMgr.HandleMediaWebSocket(w, r)
+	}))
+	t.Cleanup(server.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "?token=" + token
+	twilioWS, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if resp != nil && resp.Body != nil {
+		resp.Body.Close()
+	}
+	if err != nil {
+		t.Fatalf("dial twilio ws failed: %v", err)
+	}
+	defer twilioWS.Close()
+
+	_ = twilioWS.WriteJSON(map[string]any{
+		"event":     "start",
+		"streamSid": "MZ_inbound_test",
+		"start":     map[string]any{"streamSid": "MZ_inbound_test", "callSid": "CA_inbound_test"},
+	})
+
+	sess, err := sessionMgr.WaitForSession(context.Background(), callID)
+	if err != nil || sess == nil {
+		t.Fatalf("WaitForSession failed: %v", err)
+	}
+
+	if !strings.Contains(sess.systemPrompt, "CALLBACK RECEPTIONIST MODE:") {
+		t.Fatalf("inbound session system prompt missing CALLBACK RECEPTIONIST MODE:\n%s", sess.systemPrompt)
+	}
+
+	select {
+	case <-sess.Started():
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for start")
+	}
+
+	_ = twilioWS.WriteJSON(map[string]any{
+		"event": "stop",
+		"stop":  map[string]any{"callSid": "CA_inbound_test"},
+	})
+
+	select {
+	case <-sess.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for done")
+	}
+}
+
 func TestMediaStream_DirectHandlers(t *testing.T) {
 	t.Parallel()
 
@@ -1101,4 +1219,23 @@ func (s *MediaStreamSession) StreamSID() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.streamSID
+}
+
+func TestMediaStreamSession_DisconnectedAMDActions(t *testing.T) {
+	t.Parallel()
+	sessNoGemini := &MediaStreamSession{
+		openingGreeting: "Hello from opening",
+	}
+	sessNoGemini.handleAMDAction(AMDActionSwitchToVoicemail)
+	sessNoGemini.handleAMDAction(AMDActionSpeakVoicemailAndHangup)
+	sessNoGemini.handleAMDAction(AMDActionReleaseGreeting)
+
+	sessWithDialFail := &MediaStreamSession{
+		geminiDialer: func(ctx context.Context, model string) (*websocket.Conn, error) {
+			return nil, errors.New("dial fail")
+		},
+	}
+	if ok := sessWithDialFail.reconnectGemini(context.Background()); ok {
+		t.Fatal("expected reconnect failure")
+	}
 }

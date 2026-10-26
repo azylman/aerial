@@ -23,6 +23,7 @@ func TestValidateInitiateCallArgs(t *testing.T) {
 		wantDisclose  string
 		wantMaxDur    int
 		wantApprovals string
+		wantTask      string
 	}{
 		{
 			name:       "valid standard call with defaults applied",
@@ -38,6 +39,21 @@ func TestValidateInitiateCallArgs(t *testing.T) {
 			wantDisclose:  "volunteer",
 			wantMaxDur:    300,
 			wantApprovals: defaultApprovalFirewall,
+			wantTask:      "Check dinner availability for 4 people at 7pm tonight.",
+		},
+		{
+			name:          "message copied to brief task when task empty",
+			toRaw:         "+15105550199",
+			fromNumber:    "+15105550100",
+			message:       "Calling for reservation",
+			brief:         CallBrief{},
+			wantErr:       false,
+			wantTo:        "+15105550199",
+			wantLanguage:  "en-US",
+			wantDisclose:  "volunteer",
+			wantMaxDur:    300,
+			wantApprovals: defaultApprovalFirewall,
+			wantTask:      "Calling for reservation",
 		},
 		{
 			name:       "custom brief fields preserved and max duration capped at 900",
@@ -157,8 +173,11 @@ func TestValidateInitiateCallArgs(t *testing.T) {
 			if gotBrief.MaxDurationSeconds != tc.wantMaxDur {
 				t.Errorf("gotBrief.MaxDurationSeconds = %d, want %d", gotBrief.MaxDurationSeconds, tc.wantMaxDur)
 			}
-			if gotBrief.Approvals != tc.wantApprovals {
+			if tc.wantApprovals != "" && gotBrief.Approvals != tc.wantApprovals {
 				t.Errorf("gotBrief.Approvals = %q, want %q", gotBrief.Approvals, tc.wantApprovals)
+			}
+			if tc.wantTask != "" && gotBrief.Task != tc.wantTask {
+				t.Errorf("gotBrief.Task = %q, want %q", gotBrief.Task, tc.wantTask)
 			}
 		})
 	}
