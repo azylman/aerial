@@ -160,6 +160,73 @@ var guildMemberFetcher = func(sess *discordgo.Session, guildID string, userID st
 	return sess.GuildMember(guildID, userID)
 }
 
+func addNonEmptyRoles(roleSet map[string]bool, roles []string) {
+	for _, rID := range roles {
+		if rID != "" {
+			roleSet[rID] = true
+		}
+	}
+}
+
+func isBotNamedRole(r *discordgo.Role, botUsername string) bool {
+	if r == nil {
+		return false
+	}
+	return strings.EqualFold(r.Name, "aerial") || strings.EqualFold(r.Name, "gundam") ||
+		(botUsername != "" && strings.EqualFold(r.Name, botUsername))
+}
+
+func collectStateBotRoles(sess *discordgo.Session, guilds []*discordgo.Guild, botUserID, botUsername string, roleSet map[string]bool) bool {
+	foundMemberInState := false
+	for _, g := range guilds {
+		if g == nil {
+			continue
+		}
+		if botUserID != "" {
+			if member, err := sess.State.Member(g.ID, botUserID); err == nil && member != nil {
+				foundMemberInState = true
+				addNonEmptyRoles(roleSet, member.Roles)
+			}
+		}
+		for _, r := range g.Roles {
+			if isBotNamedRole(r, botUsername) {
+				roleSet[r.ID] = true
+			}
+		}
+	}
+	return foundMemberInState
+}
+
+func fetchAndCacheBotMemberRoles(sess *discordgo.Session, guildID, botUserID string, roleSet map[string]bool) {
+	if botUserID == "" || guildID == "" || sess == nil {
+		return
+	}
+	sfKey := fmt.Sprintf("bot_member:%s:%s", guildID, botUserID)
+	if isRESTInCooldown(sfKey) {
+		return
+	}
+	res, sfErr, _ := restSingleFlight.Do(sfKey, func() (interface{}, error) {
+		m, err := guildMemberFetcher(sess, guildID, botUserID)
+		if err != nil || m == nil {
+			return nil, err
+		}
+		if m.GuildID == "" {
+			m.GuildID = guildID
+		}
+		if m.User != nil {
+			_ = sess.State.MemberAdd(m) //nolint:errcheck
+		}
+		return append([]string(nil), m.Roles...), nil
+	})
+	if sfErr != nil {
+		setRESTCooldown(sfKey, 30*time.Second)
+		return
+	}
+	if fetchedRoles, ok := res.([]string); ok {
+		addNonEmptyRoles(roleSet, fetchedRoles)
+	}
+}
+
 // ResolveBotRoleIDs returns all role IDs associated with the bot in the given guild.
 func ResolveBotRoleIDs(sess *discordgo.Session, guildID string, botUserID string) []string {
 	if sess == nil || sess.State == nil {
@@ -176,55 +243,9 @@ func ResolveBotRoleIDs(sess *discordgo.Session, guildID string, botUserID string
 	if sess.State.User != nil {
 		botUsername = sess.State.User.Username
 	}
-	foundMemberInState := false
-	for _, g := range guilds {
-		if g == nil {
-			continue
-		}
-		if botUserID != "" {
-			if member, err := sess.State.Member(g.ID, botUserID); err == nil && member != nil {
-				foundMemberInState = true
-				for _, rID := range member.Roles {
-					if rID != "" {
-						roleSet[rID] = true
-					}
-				}
-			}
-		}
-		for _, r := range g.Roles {
-			if r != nil && (strings.EqualFold(r.Name, "aerial") || strings.EqualFold(r.Name, "gundam") ||
-				(botUsername != "" && strings.EqualFold(r.Name, botUsername))) {
-				roleSet[r.ID] = true
-			}
-		}
-	}
-
-	if botUserID != "" && guildID != "" && !foundMemberInState && sess != nil {
-		sfKey := fmt.Sprintf("bot_member:%s:%s", guildID, botUserID)
-		if !isRESTInCooldown(sfKey) {
-			res, sfErr, _ := restSingleFlight.Do(sfKey, func() (interface{}, error) {
-				m, err := guildMemberFetcher(sess, guildID, botUserID)
-				if err != nil || m == nil {
-					return nil, err
-				}
-				if m.GuildID == "" {
-					m.GuildID = guildID
-				}
-				if m.User != nil {
-					_ = sess.State.MemberAdd(m) //nolint:errcheck
-				}
-				return append([]string(nil), m.Roles...), nil
-			})
-			if sfErr != nil {
-				setRESTCooldown(sfKey, 30*time.Second)
-			} else if fetchedRoles, ok := res.([]string); ok {
-				for _, rID := range fetchedRoles {
-					if rID != "" {
-						roleSet[rID] = true
-					}
-				}
-			}
-		}
+	foundMemberInState := collectStateBotRoles(sess, guilds, botUserID, botUsername, roleSet)
+	if !foundMemberInState {
+		fetchAndCacheBotMemberRoles(sess, guildID, botUserID, roleSet)
 	}
 
 	res := make([]string, 0, len(roleSet))
@@ -312,10 +333,7 @@ func matchesMentionOrAuthor(text, botID string, roleIDs, aliases []string) bool 
 	return false
 }
 
-func matchesWakeIdentity(content string, mentionIDs, roleIDs []string, botID string, aliases []string) bool {
-	if botID != "" && slices.Contains(mentionIDs, botID) {
-		return true
-	}
+func hasRoleOrAliasOverlap(mentionIDs, roleIDs, aliases []string) bool {
 	for _, rID := range roleIDs {
 		if rID != "" && (slices.Contains(mentionIDs, rID) || slices.Contains(aliases, rID)) {
 			return true
@@ -326,23 +344,38 @@ func matchesWakeIdentity(content string, mentionIDs, roleIDs []string, botID str
 			return true
 		}
 	}
-	if content != "" && !strings.Contains(content, "<USER_REQUEST>") {
-		if botID != "" && (strings.Contains(content, "<@"+botID+">") || strings.Contains(content, "<@!"+botID+">")) {
+	return false
+}
+
+func matchesRawContentMentions(content string, roleIDs []string, botID string, aliases []string) bool {
+	if content == "" || strings.Contains(content, "<USER_REQUEST>") {
+		return false
+	}
+	if botID != "" && (strings.Contains(content, "<@"+botID+">") || strings.Contains(content, "<@!"+botID+">")) {
+		return true
+	}
+	for _, rID := range roleIDs {
+		if rID != "" && strings.Contains(content, "<@&"+rID+">") {
 			return true
 		}
-		for _, rID := range roleIDs {
-			if rID != "" && strings.Contains(content, "<@&"+rID+">") {
-				return true
-			}
-		}
-		contentLower := strings.ToLower(content)
-		for _, a := range aliases {
-			if strings.Contains(contentLower, "<@"+a) || strings.Contains(contentLower, "<@!"+a) {
-				return true
-			}
+	}
+	contentLower := strings.ToLower(content)
+	for _, a := range aliases {
+		if strings.Contains(contentLower, "<@"+a) || strings.Contains(contentLower, "<@!"+a) {
+			return true
 		}
 	}
 	return false
+}
+
+func matchesWakeIdentity(content string, mentionIDs, roleIDs []string, botID string, aliases []string) bool {
+	if botID != "" && slices.Contains(mentionIDs, botID) {
+		return true
+	}
+	if hasRoleOrAliasOverlap(mentionIDs, roleIDs, aliases) {
+		return true
+	}
+	return matchesRawContentMentions(content, roleIDs, botID, aliases)
 }
 
 // FormatThreadTitle formats the thread title for a thread trigger, clamped to at most 100 runes.

@@ -359,6 +359,46 @@ type BurstPlanInput struct {
 	ClassifierFn func(msgs []db.Message) (score float64, reason string)
 }
 
+func normalizeWakeMode(raw string) string {
+	wm := strings.ToLower(strings.TrimSpace(raw))
+	switch wm {
+	case "mentions", "direct":
+		return "mention"
+	case "always":
+		return "all"
+	case "ambient", "":
+		return "classifier"
+	default:
+		return wm
+	}
+}
+
+func isAllBurstHeuristicSkip(burst []db.Message) bool {
+	for _, m := range burst {
+		if !classifier.IsHeuristicSkip(db.ExtractMessageBody(m.Content)) {
+			return false
+		}
+	}
+	return true
+}
+
+func populateTier1TrailingWakeInfos(burst []db.Message, wakeIdx int, wakeInfos []WakeInfo, wm string, threshold float64, botUserID string, botRoleIDs []string, classify func([]db.Message) (float64, string)) {
+	for i := 0; i < wakeIdx; i++ {
+		wakeInfos[i] = WakeInfo{IsWake: false, Score: 0.0, Threshold: threshold, Reason: "burst_prescan_leading"}
+	}
+	for i := wakeIdx + 1; i < len(burst); i++ {
+		m := burst[i]
+		if isTier1Wake(m, botUserID, botRoleIDs) {
+			wakeInfos[i] = WakeInfo{IsWake: true, Score: 1.0, Threshold: threshold, Reason: "direct_address"}
+		} else if wm == "mention" || threshold <= 0.0 || classifier.IsHeuristicSkip(db.ExtractMessageBody(m.Content)) {
+			wakeInfos[i] = WakeInfo{IsWake: false, Score: 0.0, Threshold: threshold, Reason: "heuristic_skip"}
+		} else {
+			score, reason := classify([]db.Message{m})
+			wakeInfos[i] = WakeInfo{IsWake: score >= threshold, Score: score, Threshold: threshold, Reason: reason}
+		}
+	}
+}
+
 // PlanBurstExecution deterministically partitions an incoming burst into leading ambient messages,
 // the active wake turn message, and trailing messages based on channel policy and wake criteria.
 func PlanBurstExecution(input BurstPlanInput) BurstPlan {
@@ -366,16 +406,7 @@ func PlanBurstExecution(input BurstPlanInput) BurstPlan {
 		return BurstPlan{WakeIndex: -1}
 	}
 
-	wm := strings.ToLower(strings.TrimSpace(input.WakeMode))
-	switch wm {
-	case "mentions", "direct":
-		wm = "mention"
-	case "always":
-		wm = "all"
-	case "ambient", "":
-		wm = "classifier"
-	}
-
+	wm := normalizeWakeMode(input.WakeMode)
 	classify := input.ClassifierFn
 	if classify == nil {
 		classify = func([]db.Message) (float64, string) { return 0.0, "no classifier configured" }
@@ -402,20 +433,7 @@ func PlanBurstExecution(input BurstPlanInput) BurstPlan {
 	}
 
 	if wakeIdx != -1 {
-		for i := 0; i < wakeIdx; i++ {
-			wakeInfos[i] = WakeInfo{IsWake: false, Score: 0.0, Threshold: threshold, Reason: "burst_prescan_leading"}
-		}
-		for i := wakeIdx + 1; i < len(input.Burst); i++ {
-			m := input.Burst[i]
-			if isTier1Wake(m, input.BotUserID, input.BotRoleIDs) {
-				wakeInfos[i] = WakeInfo{IsWake: true, Score: 1.0, Threshold: threshold, Reason: "direct_address"}
-			} else if wm == "mention" || threshold <= 0.0 || classifier.IsHeuristicSkip(db.ExtractMessageBody(m.Content)) {
-				wakeInfos[i] = WakeInfo{IsWake: false, Score: 0.0, Threshold: threshold, Reason: "heuristic_skip"}
-			} else {
-				score, reason := classify([]db.Message{m})
-				wakeInfos[i] = WakeInfo{IsWake: score >= threshold, Score: score, Threshold: threshold, Reason: reason}
-			}
-		}
+		populateTier1TrailingWakeInfos(input.Burst, wakeIdx, wakeInfos, wm, threshold, input.BotUserID, input.BotRoleIDs, classify)
 		return buildTriggeredBurstPlan(input.Burst, wakeIdx, wakeInfos)
 	}
 
@@ -429,14 +447,7 @@ func PlanBurstExecution(input BurstPlanInput) BurstPlan {
 		return BurstPlan{WakeIndex: -1, IsAllAmbient: true, WakeInfos: fillBurstWakeInfos(len(input.Burst), -1, 0.0, threshold, "classifier disabled", "classifier disabled")}
 	}
 
-	allSkip := true
-	for _, m := range input.Burst {
-		if !classifier.IsHeuristicSkip(db.ExtractMessageBody(m.Content)) {
-			allSkip = false
-			break
-		}
-	}
-	if allSkip {
+	if isAllBurstHeuristicSkip(input.Burst) {
 		return BurstPlan{WakeIndex: -1, IsAllAmbient: true, WakeInfos: fillBurstWakeInfos(len(input.Burst), -1, 0.0, threshold, "heuristic_skip", "heuristic_skip")}
 	}
 
