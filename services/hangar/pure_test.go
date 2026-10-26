@@ -869,6 +869,7 @@ job "raw-exec-job" {
 
 func TestJobHasContainerBuildChanges_TableDriven(t *testing.T) {
 	specVanadis := `job "vanadis" { task "vanadis" { config { image = "ghcr.io/azylman/aerial-vanadis:${var.image_tag}" } } }`
+	specProspera := `job "prospera" { task "prospera" { config { image = "ghcr.io/azylman/aerial-prospera:${var.image_tag}" } } }`
 	specDocs := `job "docs" { task "docs" { config { image = "ghcr.io/azylman/aerial-docs:${var.image_tag}" } } }`
 	specMCP := `job "discord-mcp" { task "mcp" { config { image = "ghcr.io/azylman/aerial-discord-mcp:${var.image_tag}" } } }`
 	specExternal := `job "coverage-ingest" { task "flush" { config { image = "golang:1.27.1-alpine" } } }`
@@ -880,12 +881,14 @@ func TestJobHasContainerBuildChanges_TableDriven(t *testing.T) {
 		want    bool
 	}{
 		{"matching services dir", specVanadis, []string{"services/vanadis/main.go"}, true},
+		{"matching prospera service dir", specProspera, []string{"services/prospera/main.go"}, true},
 		{"matching legacy root dir", specVanadis, []string{"vanadis/Dockerfile"}, false},
 		{"matching mcp dir", specMCP, []string{"mcp/discord-mcp/main.go"}, true},
 		{"matching kernel-mcp dir", `job "kernel-mcp" { task "kernel-mcp" { config { image = "ghcr.io/azylman/aerial-kernel-mcp:${var.image_tag}" } } }`, []string{"mcp/kernel-mcp/main.go"}, true},
 		{"matching docs-service alias", specDocs, []string{"services/docs-service/Dockerfile"}, true},
 		{"matching root Dockerfile", specVanadis, []string{"Dockerfile"}, true},
 		{"matching pkg dir", specVanadis, []string{"pkg/httpkit/httpkit.go"}, true},
+		{"matching pkg dir on prospera", specProspera, []string{"pkg/httpkit/httpkit.go"}, true},
 		{"matching pkg dir on mcp go service", specMCP, []string{"pkg/ollama/client.go"}, true},
 		{"matching pkg dir on kernel-mcp", `job "kernel-mcp" { task "kernel-mcp" { config { image = "ghcr.io/azylman/aerial-kernel-mcp:${var.image_tag}" } } }`, []string{"pkg/httpkit/httpkit.go"}, true},
 		{"pkg dir does not match non-pkg service", specDocs, []string{"pkg/httpkit/httpkit.go"}, false},
