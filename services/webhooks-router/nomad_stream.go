@@ -418,6 +418,16 @@ func deploymentEventIdempotencyKey(raw json.RawMessage) (string, bool) {
 	return "", true
 }
 
+func totalAllocationRestarts(taskStates map[string]NomadTaskState) int {
+	total := 0
+	for _, ts := range taskStates {
+		if ts.Restarts > 0 {
+			total += ts.Restarts
+		}
+	}
+	return total
+}
+
 func allocationEventIdempotencyKey(raw json.RawMessage) (string, bool) {
 	var allocPayload NomadAllocationEventPayload
 	if err := json.Unmarshal(raw, &allocPayload); err != nil {
@@ -431,11 +441,18 @@ func allocationEventIdempotencyKey(raw json.RawMessage) (string, bool) {
 	if !isRunning && !isComplete && !isFailed && !isExhausted {
 		return "", false
 	}
+	if isRunning && !isFailed && !isExhausted && isAllocationRestarting(alloc.TaskStates) {
+		return "", false
+	}
 	if alloc.ID != "" && alloc.JobID != "" {
 		if isFailed || isExhausted {
 			return fmt.Sprintf("nomad:allocation:%s:%s:failed", alloc.JobID, alloc.ID), true
 		}
-		return fmt.Sprintf("nomad:allocation:%s:%s:%s", alloc.JobID, alloc.ID, strings.ToLower(alloc.ClientStatus)), true
+		status := strings.ToLower(alloc.ClientStatus)
+		if restarts := totalAllocationRestarts(alloc.TaskStates); isRunning && restarts > 0 {
+			return fmt.Sprintf("nomad:allocation:%s:%s:%s:%d", alloc.JobID, alloc.ID, status, restarts), true
+		}
+		return fmt.Sprintf("nomad:allocation:%s:%s:%s", alloc.JobID, alloc.ID, status), true
 	}
 	return "", true
 }
@@ -975,15 +992,15 @@ func isAllocationRestartExhausted(taskStates map[string]NomadTaskState) bool {
 // isAllocationRestarting returns true if any task in the allocation is actively restarting or pending restart within policy.
 func isAllocationRestarting(taskStates map[string]NomadTaskState) bool {
 	for _, ts := range taskStates {
-		if isTaskRestartExhausted(ts) {
+		if isTaskRestartExhausted(ts) || strings.EqualFold(ts.State, "dead") {
 			continue
 		}
 		if strings.EqualFold(ts.State, "pending") || strings.EqualFold(ts.State, "restarting") {
 			return true
 		}
 		if len(ts.Events) > 0 {
-			lastType := ts.Events[len(ts.Events)-1].Type
-			if lastType == "Restart Signaled" || lastType == "Restarting" {
+			switch ts.Events[len(ts.Events)-1].Type {
+			case "Restart Signaled", "Killing", "Terminated", "Restarting":
 				return true
 			}
 		}

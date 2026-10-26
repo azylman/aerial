@@ -691,11 +691,15 @@ func TestNomadStreamSubscriber_RiverQueue(t *testing.T) {
 				`{"Index":2011,"Events":[{"Topic":"Job","Type":"JobRegistered","Payload":{"Job":{"ID":"coverage-ingest","ModifyIndex":42}}}]}`,
 				`{"Index":2012,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":{"Allocation":{"ID":"alloc-run","JobID":"scheduler-mcp","DesiredStatus":"run","ClientStatus":"complete"}}}]}`,
 				`{"Index":2013,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"ID":"eval-blk-1","JobID":"coven","Status":"blocked","FailedTGAllocs":{"coven":{"DimensionExhausted":{"memory":1}}}}}}]}`,
+				`{"Index":2014,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":{"Allocation":{"ID":"alloc-haro","JobID":"haro","DesiredStatus":"run","ClientStatus":"running","TaskStates":{"haro":{"State":"running","Restarts":0,"Events":[{"Type":"Started"},{"Type":"Restart Signaled"}]}}}}}]}`,
+				`{"Index":2015,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":{"Allocation":{"ID":"alloc-haro","JobID":"haro","DesiredStatus":"run","ClientStatus":"running","TaskStates":{"haro":{"State":"running","Restarts":0,"Events":[{"Type":"Started"},{"Type":"Restart Signaled"},{"Type":"Terminated","ExitCode":137}]}}}}}]}`,
+				`{"Index":2016,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":{"Allocation":{"ID":"alloc-haro","JobID":"haro","DesiredStatus":"run","ClientStatus":"running","TaskStates":{"haro":{"State":"pending","Restarts":1,"Events":[{"Type":"Started"},{"Type":"Restart Signaled"},{"Type":"Terminated","ExitCode":137},{"Type":"Restarting"}]}}}}}]}`,
+				`{"Index":2017,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":{"Allocation":{"ID":"alloc-haro","JobID":"haro","DesiredStatus":"run","ClientStatus":"running","TaskStates":{"haro":{"State":"running","Restarts":1,"Events":[{"Type":"Started"},{"Type":"Restart Signaled"},{"Type":"Terminated","ExitCode":137},{"Type":"Restarting"},{"Type":"Started"}]}}}}}]}`,
 				"{}",
 			},
-			wantJobs:    7,
-			wantTopics:  []string{"Deployment", "Allocation", "Deployment", "Allocation", "Job", "Allocation", "Evaluation"},
-			wantSubstrs: []string{"dep-succ", "nomad:allocation:scheduler-mcp:alloc-run:running", "dep-fail", ":failed", "nomad:job:coverage-ingest:42:registered", "nomad:allocation:scheduler-mcp:alloc-run:complete", "nomad:evaluation:coven:eval-blk-1:blocked"},
+			wantJobs:    8,
+			wantTopics:  []string{"Deployment", "Allocation", "Deployment", "Allocation", "Job", "Allocation", "Evaluation", "Allocation"},
+			wantSubstrs: []string{"dep-succ", "nomad:allocation:scheduler-mcp:alloc-run:running", "dep-fail", ":failed", "nomad:job:coverage-ingest:42:registered", "nomad:allocation:scheduler-mcp:alloc-run:complete", "nomad:evaluation:coven:eval-blk-1:blocked", "nomad:allocation:haro:alloc-haro:running:1"},
 		},
 		{
 			name: "duplicate nomad event increments skipped metric",
@@ -817,6 +821,27 @@ func TestIsAllocationRestarting_TableDriven(t *testing.T) {
 				"brain": {State: "running", Events: []NomadTaskEvent{{Type: "Started"}, {Type: "Restart Signaled", DisplayMessage: "Template with change_mode restart re-rendered"}}},
 			},
 			want: true,
+		},
+		{
+			name: "last event Killing",
+			taskStates: map[string]NomadTaskState{
+				"brain": {State: "running", Events: []NomadTaskEvent{{Type: "Started"}, {Type: "Restart Signaled"}, {Type: "Killing"}}},
+			},
+			want: true,
+		},
+		{
+			name: "last event Terminated on running task during restart",
+			taskStates: map[string]NomadTaskState{
+				"brain": {State: "running", Events: []NomadTaskEvent{{Type: "Started"}, {Type: "Restart Signaled"}, {Type: "Terminated", ExitCode: 137}}},
+			},
+			want: true,
+		},
+		{
+			name: "last event Terminated on dead completed batch task",
+			taskStates: map[string]NomadTaskState{
+				"migrate": {State: "dead", Events: []NomadTaskEvent{{Type: "Started"}, {Type: "Terminated", ExitCode: 0}}},
+			},
+			want: false,
 		},
 		{
 			name: "last event Restarting",
