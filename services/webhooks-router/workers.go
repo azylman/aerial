@@ -367,7 +367,7 @@ func (d *DefaultOutboundDispatcher) DispatchImageReady(ctx context.Context, req 
 }
 
 func (d *DefaultOutboundDispatcher) postBrainWithRetry(ctx context.Context, endpointPath, reqLabel, statusLabel, channelID string, maxAttempts int, defaultDelay time.Duration, expBackoff bool, payload any) error {
-	if !IsValidDiscordSnowflake(channelID) {
+	if !IsValidDiscordChannel(channelID) {
 		return fmt.Errorf("invalid discord snowflake channel id: %q", channelID)
 	}
 	bodyBytes, err := json.Marshal(payload)

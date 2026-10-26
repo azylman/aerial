@@ -45,9 +45,13 @@ type RouterYAMLConfig struct {
 	VanadisURL           string `yaml:"vanadis_url"`
 	HaroURL              string `yaml:"haro_url"`
 	SystemChannelID      string `yaml:"system_channel_id"`
+	SystemChannel        string `yaml:"system_channel"`
 }
 
-var webhooksRouterFallbackConfigPath = "/config/webhooks-router.yaml"
+var (
+	webhooksRouterFallbackConfigPath = "/config/webhooks-router.yaml"
+	webhooksRouterAerialConfigPath   = "/config/config.yaml"
+)
 
 func firstNonEmpty(vals ...string) string {
 	for _, v := range vals {
@@ -80,6 +84,16 @@ func LoadConfig(configPath string) Config {
 		}
 	}
 
+	sysChan := firstNonEmpty(fileCfg.SystemChannelID, fileCfg.SystemChannel)
+	if sysChan == "" && webhooksRouterAerialConfigPath != "" {
+		if data, err := os.ReadFile(webhooksRouterAerialConfigPath); err == nil {
+			var aerialCfg RouterYAMLConfig
+			if yaml.Unmarshal(data, &aerialCfg) == nil {
+				sysChan = firstNonEmpty(aerialCfg.SystemChannelID, aerialCfg.SystemChannel)
+			}
+		}
+	}
+
 	pgURL := firstNonEmpty(os.Getenv("POSTGRES_URL"), os.Getenv("DATABASE_URL"), "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable")
 
 	return Config{
@@ -98,7 +112,7 @@ func LoadConfig(configPath string) Config {
 		BrainURL:              strings.TrimRight(firstNonEmpty(os.Getenv("BRAIN_INTERNAL_URL"), os.Getenv("BRAIN_URL"), fileCfg.BrainURL, "http://127.0.0.1:8088"), "/"),
 		VanadisURL:            strings.TrimRight(firstNonEmpty(os.Getenv("VANADIS_URL"), fileCfg.VanadisURL, "http://vanadis.aerial"), "/"),
 		HaroURL:               strings.TrimRight(firstNonEmpty(os.Getenv("HARO_URL"), fileCfg.HaroURL, "http://haro.aerial"), "/"),
-		SystemChannelID:       strings.TrimSpace(firstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), os.Getenv("DISCORD_CHANNEL_ID"), fileCfg.SystemChannelID)),
+		SystemChannelID:       strings.TrimSpace(firstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), os.Getenv("DISCORD_CHANNEL_ID"), sysChan)),
 	}
 }
 
@@ -161,11 +175,19 @@ func dedupeTrimmedStrings(items []string) []string {
 	return out
 }
 
-// Discord Snowflake validation
-var snowflakeRegex = regexp.MustCompile(`^[0-9]{17,20}$`)
+// Discord Snowflake and Channel Name validation
+var (
+	snowflakeRegex   = regexp.MustCompile(`^[0-9]{17,20}$`)
+	channelNameRegex = regexp.MustCompile(`^#?[a-z0-9_-]{1,100}$`)
+)
 
 func IsValidDiscordSnowflake(id string) bool {
 	return snowflakeRegex.MatchString(strings.TrimSpace(id))
+}
+
+func IsValidDiscordChannel(id string) bool {
+	clean := strings.TrimSpace(id)
+	return IsValidDiscordSnowflake(clean) || channelNameRegex.MatchString(clean)
 }
 
 var re4xx = regexp.MustCompile(`\bstatus 4\d{2}\b`)

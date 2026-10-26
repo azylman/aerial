@@ -657,8 +657,12 @@ func (s *RouterServer) HandleNomadJobFailure(ctx context.Context, jobID, refID, 
 		return err
 	}
 	if !updated {
+		if prNumber > 0 {
+			return nil
+		}
 		return s.HandleUnmanagedJobCrash(ctx, cleanJob, refID, status, statusDesc)
 	}
+	targetID = firstNonEmpty(targetID, s.cfg.SystemChannelID)
 
 	log.Printf("[webhooks-router] [nomad] deployment failure confirmed for %s#%d (job: %s, commit: %s, target: %s, ref: %s, status: %s)",
 		repo, prNumber, cleanJob, mergeSHA, targetID, refID, status)
@@ -674,7 +678,11 @@ func (s *RouterServer) HandleNomadJobFailure(ctx context.Context, jobID, refID, 
 		fmt.Sprintf("Nomad deployment for job %s failed with status %q (PR #%d on %s, commit: %s, deployment ID: %s).", cleanJob, status, prNumber, repo, mergeSHA, refID),
 		statusDesc, "", "Please investigate and fix the deployment failure.",
 	)
-	return s.dispatchAlertWithPrompt(ctx, targetID, "failure", dmMsg, prompt, s.vanadisPromptOpts(ctx, repo, prNumber))
+	if err := s.dispatchAlertWithPrompt(ctx, targetID, "failure", dmMsg, prompt, s.vanadisPromptOpts(ctx, repo, prNumber)); err != nil {
+		s.setPRWidgetState(ctx, repo, prNumber, "deploying", "")
+		return err
+	}
+	return nil
 }
 
 // HandleNomadJobSuccess processes a confirmed successful deployment or running allocation for a Nomad job.
@@ -1041,7 +1049,7 @@ func (s *RouterServer) HandleUnmanagedJobCrash(ctx context.Context, jobID, alloc
 // ProcessCrashAlert delivers direct Discord messages and AI prompt notifications for unmanaged job crashes.
 func (s *RouterServer) ProcessCrashAlert(ctx context.Context, args NomadCrashAlertArgs) error {
 	channelID := strings.TrimSpace(s.cfg.SystemChannelID)
-	if !IsValidDiscordSnowflake(channelID) || s.dispatcher == nil {
+	if !s.isValidAlertTarget(channelID) || s.dispatcher == nil {
 		return nil
 	}
 	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)

@@ -39,6 +39,7 @@ job "webhooks-router" {
           disable = true
         }
         volumes = [
+          "/mnt/data/supervisor/share/aerial-config:/config:ro",
           "/mnt/data/supervisor/share/coverage/webhooks-router:/coverage:rw",
         ]
       }
@@ -80,7 +81,6 @@ EOH
 {{ with nomadVar "nomad/jobs/shared" }}
 {{ if .GITHUB_PAT }}GITHUB_PAT="{{ .GITHUB_PAT }}"{{ end }}
 {{ if .POSTGRES_PASSWORD }}POSTGRES_URL="postgres://aerial:{{ .POSTGRES_PASSWORD }}@postgres:5432/aerial?sslmode=disable"{{ end }}
-{{ if .SYSTEM_CHANNEL_ID }}SYSTEM_CHANNEL_ID="{{ .SYSTEM_CHANNEL_ID }}"{{ end }}
 {{ end }}
 {{ end }}
 EOH
