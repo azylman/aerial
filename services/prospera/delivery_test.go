@@ -568,6 +568,9 @@ func TestDeliverCallReport(t *testing.T) {
 			if tc.wantFailed && updated.ReportStatus != "failed" {
 				t.Fatalf("report status = %s, want failed", updated.ReportStatus)
 			}
+			if tc.wantDelivered && updated.LiveTranscriptCursor != len(call.Transcript) {
+				t.Fatalf("LiveTranscriptCursor = %d, want %d", updated.LiveTranscriptCursor, len(call.Transcript))
+			}
 			if tc.wantWith != "" && !strings.Contains(deliveredDiscordMsg, tc.wantWith) {
 				t.Fatalf("delivered discord msg %q does not contain wantWith %q", deliveredDiscordMsg, tc.wantWith)
 			}

@@ -136,6 +136,10 @@ func (h *ToolHandler) InitiateCall(ctx context.Context, args InitiateCallArgs) (
 		fromNumber = h.cfg.TwilioFromNumber
 	}
 
+	if strings.TrimSpace(args.Mode) != "" {
+		args.Brief.Mode = strings.TrimSpace(args.Mode)
+	}
+
 	normTo, sanitizedBrief, err := ValidateInitiateCallArgs(args.To, fromNumber, args.Message, args.Brief)
 	if err != nil {
 		return InitiateCallOutput{}, fmt.Errorf("initiate_call: validation error: %w", err)

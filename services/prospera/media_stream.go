@@ -202,7 +202,9 @@ func (m *CallSessionManager) HandleMediaWebSocket(w http.ResponseWriter, r *http
 		}
 		voicemailMsg = ResolveVoicemailMessage(call.Brief, openingGreeting)
 		mode := ModeConversation
-		if call.Direction == "inbound" || call.CallbackOfCallID != "" {
+		if call.Brief.Mode == string(ModeNotify) {
+			mode = ModeNotify
+		} else if call.Direction == "inbound" || call.CallbackOfCallID != "" {
 			mode = ModeCallback
 		}
 		systemPrompt = BuildSystemPrompt(call.Brief, mode, nil)

@@ -1072,6 +1072,106 @@ func TestHandleMediaWebSocket_InboundMode(t *testing.T) {
 	}
 }
 
+func TestHandleMediaWebSocket_NotifyMode(t *testing.T) {
+	t.Parallel()
+
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _, _ = conn.ReadMessage()
+		_ = conn.WriteJSON(map[string]any{"setupComplete": map[string]any{}})
+		for {
+			_, _, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(geminiServer.Close)
+
+	store := setUpTestStore(t)
+	callID := "call-notify-mode-test"
+	_ = store.CreateOutboundCall(context.Background(), VoiceCall{
+		CallID:     callID,
+		Direction:  "outbound",
+		State:      "in-progress",
+		FromNumber: "+15105550100",
+		ToNumber:   "+15105550199",
+		Brief: CallBrief{
+			Mode: "notify",
+			Task: "Alert: package delivered",
+		},
+		StartedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}, 5)
+
+	tokenMgr := NewStreamTokenManager(time.Now)
+	sessionMgr := NewCallSessionManager(&Config{}, store, nil, nil, tokenMgr,
+		WithPacerInterval(1*time.Millisecond),
+		WithGeminiDialer(func(ctx context.Context, model string) (*websocket.Conn, error) {
+			dialer := websocket.DefaultDialer
+			conn, resp, err := dialer.DialContext(ctx, "ws"+strings.TrimPrefix(geminiServer.URL, "http"), nil)
+			if resp != nil && resp.Body != nil {
+				resp.Body.Close()
+			}
+			return conn, err
+		}),
+	)
+
+	token, _ := tokenMgr.Issue(callID, 30*time.Second)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sessionMgr.HandleMediaWebSocket(w, r)
+	}))
+	t.Cleanup(server.Close)
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "?token=" + token
+	twilioWS, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if resp != nil && resp.Body != nil {
+		resp.Body.Close()
+	}
+	if err != nil {
+		t.Fatalf("dial twilio ws failed: %v", err)
+	}
+	defer twilioWS.Close()
+
+	_ = twilioWS.WriteJSON(map[string]any{
+		"event":     "start",
+		"streamSid": "MZ_notify_test",
+		"start":     map[string]any{"streamSid": "MZ_notify_test", "callSid": "CA_notify_test"},
+	})
+
+	sess, err := sessionMgr.WaitForSession(context.Background(), callID)
+	if err != nil || sess == nil {
+		t.Fatalf("WaitForSession failed: %v", err)
+	}
+
+	if !strings.Contains(sess.systemPrompt, "NOTIFY MODE:") {
+		t.Fatalf("notify session system prompt missing NOTIFY MODE:\n%s", sess.systemPrompt)
+	}
+
+	select {
+	case <-sess.Started():
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for start")
+	}
+
+	_ = twilioWS.WriteJSON(map[string]any{
+		"event": "stop",
+		"stop":  map[string]any{"callSid": "CA_notify_test"},
+	})
+
+	select {
+	case <-sess.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for done")
+	}
+}
+
 func TestMediaStream_DirectHandlers(t *testing.T) {
 	t.Parallel()
 

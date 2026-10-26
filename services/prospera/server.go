@@ -328,13 +328,15 @@ func (s *Server) handleTwilioAMD(w http.ResponseWriter, r *http.Request) {
 	callSid := r.PostForm.Get("CallSid")
 	answeredBy := r.PostForm.Get("AnsweredBy")
 
+	call := s.resolveAndBindCall(r.Context(), r, callSid)
+
 	if s.sessionMgr != nil && callSid != "" {
 		if amdErr := s.sessionMgr.HandleAMDWebhook(callSid, answeredBy); amdErr != nil {
 			log.Printf("server: handle amd webhook: %v", amdErr)
 		}
 	}
 
-	if call := s.resolveAndBindCall(r.Context(), r, callSid); call != nil {
+	if call != nil {
 		if updateErr := s.store.UpdateCallState(r.Context(), call.CallID, call.State, "", answeredBy); updateErr != nil {
 			log.Printf("server: update amd call state: %v", updateErr)
 		}

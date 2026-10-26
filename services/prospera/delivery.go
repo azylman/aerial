@@ -211,6 +211,11 @@ func (r *Reporter) DeliverCallReport(ctx context.Context, callID string) error {
 		return nil
 	}
 
+	// Flush any unsent live transcript turns before posting summary.
+	if flushErr := r.FlushLiveTranscript(ctx, callID); flushErr != nil {
+		log.Printf("reporter: flush live transcript before report: %v", flushErr)
+	}
+
 	prompt := BuildPostCallSummaryPrompt(call)
 	summary, err := r.generateGeminiSummary(ctx, prompt)
 	if err != nil || strings.TrimSpace(summary) == "" {

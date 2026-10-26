@@ -35,9 +35,10 @@ func TestToolHandler_InitiateCall(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		args    InitiateCallArgs
-		wantErr bool
+		name     string
+		args     InitiateCallArgs
+		wantErr  bool
+		wantMode string
 	}{
 		{
 			name: "valid initiate call",
@@ -45,7 +46,18 @@ func TestToolHandler_InitiateCall(t *testing.T) {
 				To:      "+15105550199",
 				Message: "Hello, this is an automated confirmation call.",
 			},
-			wantErr: false,
+			wantErr:  false,
+			wantMode: "conversation",
+		},
+		{
+			name: "valid initiate call with notify mode",
+			args: InitiateCallArgs{
+				To:      "+15105550199",
+				Message: "Hello, notification only.",
+				Mode:    "notify",
+			},
+			wantErr:  false,
+			wantMode: "notify",
 		},
 		{
 			name: "invalid phone number",
@@ -89,6 +101,9 @@ func TestToolHandler_InitiateCall(t *testing.T) {
 				savedCall, getErr := store.GetCall(context.Background(), out.CallID)
 				if getErr != nil || savedCall == nil || savedCall.Brief.Task != tc.args.Message {
 					t.Fatalf("savedCall.Brief.Task = %v, want %q", savedCall, tc.args.Message)
+				}
+				if tc.wantMode != "" && savedCall.Brief.Mode != tc.wantMode {
+					t.Fatalf("savedCall.Brief.Mode = %q, want %q", savedCall.Brief.Mode, tc.wantMode)
 				}
 			}
 		})

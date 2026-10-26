@@ -24,6 +24,7 @@ func TestValidateInitiateCallArgs(t *testing.T) {
 		wantMaxDur    int
 		wantApprovals string
 		wantTask      string
+		wantMode      string
 	}{
 		{
 			name:       "valid standard call with defaults applied",
@@ -40,6 +41,7 @@ func TestValidateInitiateCallArgs(t *testing.T) {
 			wantMaxDur:    300,
 			wantApprovals: defaultApprovalFirewall,
 			wantTask:      "Check dinner availability for 4 people at 7pm tonight.",
+			wantMode:      "conversation",
 		},
 		{
 			name:          "message copied to brief task when task empty",
@@ -149,6 +151,30 @@ func TestValidateInitiateCallArgs(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name:       "notify mode preserved",
+			toRaw:      "+15105550199",
+			fromNumber: "+15105550100",
+			message:    "Notification",
+			brief: CallBrief{
+				Mode: "notify",
+				Task: "Notify client",
+			},
+			wantErr:  false,
+			wantTo:   "+15105550199",
+			wantMode: "notify",
+		},
+		{
+			name:       "invalid mode rejected",
+			toRaw:      "+15105550199",
+			fromNumber: "+15105550100",
+			message:    "Test",
+			brief: CallBrief{
+				Mode: "invalid-mode",
+				Task: "Task",
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -164,13 +190,13 @@ func TestValidateInitiateCallArgs(t *testing.T) {
 			if gotTo != tc.wantTo {
 				t.Errorf("gotTo = %q, want %q", gotTo, tc.wantTo)
 			}
-			if gotBrief.Language != tc.wantLanguage {
+			if gotBrief.Language != tc.wantLanguage && tc.wantLanguage != "" {
 				t.Errorf("gotBrief.Language = %q, want %q", gotBrief.Language, tc.wantLanguage)
 			}
-			if gotBrief.Identity.Disclose != tc.wantDisclose {
+			if gotBrief.Identity.Disclose != tc.wantDisclose && tc.wantDisclose != "" {
 				t.Errorf("gotBrief.Identity.Disclose = %q, want %q", gotBrief.Identity.Disclose, tc.wantDisclose)
 			}
-			if gotBrief.MaxDurationSeconds != tc.wantMaxDur {
+			if tc.wantMaxDur != 0 && gotBrief.MaxDurationSeconds != tc.wantMaxDur {
 				t.Errorf("gotBrief.MaxDurationSeconds = %d, want %d", gotBrief.MaxDurationSeconds, tc.wantMaxDur)
 			}
 			if tc.wantApprovals != "" && gotBrief.Approvals != tc.wantApprovals {
@@ -178,6 +204,9 @@ func TestValidateInitiateCallArgs(t *testing.T) {
 			}
 			if tc.wantTask != "" && gotBrief.Task != tc.wantTask {
 				t.Errorf("gotBrief.Task = %q, want %q", gotBrief.Task, tc.wantTask)
+			}
+			if tc.wantMode != "" && gotBrief.Mode != tc.wantMode {
+				t.Errorf("gotBrief.Mode = %q, want %q", gotBrief.Mode, tc.wantMode)
 			}
 		})
 	}

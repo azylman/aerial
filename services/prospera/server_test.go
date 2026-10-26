@@ -257,6 +257,7 @@ func TestTwilioStatusAndVoicemailOrder(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("/status returned %d, want 200", rec.Code)
 	}
+	server.Wait()
 
 	callAfterStatus, _ := store.GetCall(context.Background(), callID)
 	if callAfterStatus.State != "completed" {
@@ -285,6 +286,7 @@ func TestTwilioStatusAndVoicemailOrder(t *testing.T) {
 	if recVM.Code != http.StatusOK {
 		t.Fatalf("/voicemail returned %d, want 200", recVM.Code)
 	}
+	server.Wait()
 }
 
 func TestTwilioWebhook_AMD(t *testing.T) {
@@ -420,6 +422,7 @@ func TestTwilioWebhook_StatusCompletedReport(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status webhook returned %d, want 200", rec.Code)
 	}
+	server.Wait()
 }
 
 func TestTwilioWebhook_StreamUnauthorized(t *testing.T) {
@@ -529,6 +532,7 @@ func TestServer_EdgeCases(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("voicemail webhook returned %d, want 200", rec.Code)
 		}
+		server.Wait()
 	})
 
 	t.Run("voice webhook with invalid phone numbers", func(t *testing.T) {
@@ -645,6 +649,7 @@ func TestServer_VoicemailVariations(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("voicemail with call_id in form returned %d", rec.Code)
 	}
+	server.Wait()
 
 	// 2. empty call_id and no CallSid
 	formEmpty := url.Values{
@@ -659,6 +664,7 @@ func TestServer_VoicemailVariations(t *testing.T) {
 	if recEmpty.Code != http.StatusOK {
 		t.Fatalf("voicemail with empty call_id returned %d", recEmpty.Code)
 	}
+	server.Wait()
 }
 
 func TestServer_StoreErrorsInHandlers(t *testing.T) {
@@ -716,6 +722,7 @@ func TestServer_StoreErrorsInHandlers(t *testing.T) {
 	if recStat.Code != http.StatusOK {
 		t.Fatalf("status returned %d, want 200", recStat.Code)
 	}
+	server.Wait()
 
 	// 4. SMS webhook with store error
 	smsForm := url.Values{
@@ -851,6 +858,7 @@ func TestServer_MoreBranches(t *testing.T) {
 	if recStat.Code != http.StatusOK {
 		t.Fatalf("status returned %d, want 200", recStat.Code)
 	}
+	serverFailRep.Wait()
 }
 
 func TestServer_BadFormRequests(t *testing.T) {
@@ -1042,6 +1050,11 @@ func TestTwilioStatusAndAMD_CallIDResolution(t *testing.T) {
 		StartedAt:       time.Now().UTC(),
 		UpdatedAt:       time.Now().UTC(),
 	}, 5)
+
+	sess := NewMediaStreamSession(MediaStreamSessionConfig{
+		CallID: "call-unbound-amd",
+	})
+	server.sessionMgr.registerSession("call-unbound-amd", sess)
 
 	amdForm := url.Values{
 		"CallSid":    []string{"CA-amd-unbound"},

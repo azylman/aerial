@@ -22,6 +22,7 @@ type CallIdentity struct {
 
 // CallBrief contains the intent, context, boundaries, and approval rules for a phone call.
 type CallBrief struct {
+	Mode               string       `json:"mode,omitempty"`
 	Task               string       `json:"task"`
 	Context            string       `json:"context,omitempty"`
 	Language           string       `json:"language,omitempty"`
@@ -49,6 +50,17 @@ func ValidateInitiateCallArgs(toRaw, fromNumber, message string, brief CallBrief
 		}
 	}
 
+	if trimmedMode := strings.TrimSpace(brief.Mode); trimmedMode != "" {
+		switch CallMode(trimmedMode) {
+		case ModeConversation, ModeNotify:
+			brief.Mode = trimmedMode
+		default:
+			return "", brief, fmt.Errorf("invalid mode %q: must be conversation or notify", brief.Mode)
+		}
+	} else {
+		brief.Mode = string(ModeConversation)
+	}
+
 	trimmedMessage := strings.TrimSpace(message)
 	if strings.TrimSpace(brief.Task) == "" && trimmedMessage != "" {
 		brief.Task = trimmedMessage
@@ -58,42 +70,56 @@ func ValidateInitiateCallArgs(toRaw, fromNumber, message string, brief CallBrief
 		return "", brief, fmt.Errorf("opening message or task is required")
 	}
 
-	if len(brief.Task) > 2000 {
-		return "", brief, fmt.Errorf("task exceeds 2000 characters (length: %d)", len(brief.Task))
-	}
-	if len(brief.Context) > 4000 {
-		return "", brief, fmt.Errorf("context exceeds 4000 characters (length: %d)", len(brief.Context))
-	}
-	if len(brief.Approvals) > 2000 {
-		return "", brief, fmt.Errorf("approvals exceeds 2000 characters (length: %d)", len(brief.Approvals))
-	}
-	if len(brief.VoicemailMessage) > 1000 {
-		return "", brief, fmt.Errorf("voicemail_message exceeds 1000 characters (length: %d)", len(brief.VoicemailMessage))
-	}
-	if len(brief.SuccessCriteria) > 1000 {
-		return "", brief, fmt.Errorf("success_criteria exceeds 1000 characters (length: %d)", len(brief.SuccessCriteria))
-	}
-	if len(brief.Disclosures) > 20 {
-		return "", brief, fmt.Errorf("disclosures exceeds 20 items (count: %d)", len(brief.Disclosures))
+	if err := validateBriefLimits(brief); err != nil {
+		return "", brief, err
 	}
 
-	if brief.Language == "" {
-		brief.Language = "en-US"
-	}
-	if brief.Identity.Disclose == "" {
-		brief.Identity.Disclose = "volunteer"
-	}
-	if brief.MaxDurationSeconds <= 0 {
-		brief.MaxDurationSeconds = 300
-	} else if brief.MaxDurationSeconds > 900 {
-		brief.MaxDurationSeconds = 900
-	}
-
-	if strings.TrimSpace(brief.Approvals) == "" {
-		brief.Approvals = defaultApprovalFirewall
-	}
-
+	normalizeBriefDefaults(&brief)
 	return normTo, brief, nil
+}
+
+func validateBriefLimits(b CallBrief) error {
+	limits := []struct {
+		name string
+		val  int
+		max  int
+	}{
+		{"task", len(b.Task), 2000},
+		{"context", len(b.Context), 4000},
+		{"approvals", len(b.Approvals), 2000},
+		{"voicemail_message", len(b.VoicemailMessage), 1000},
+		{"success_criteria", len(b.SuccessCriteria), 1000},
+		{"disclosures", len(b.Disclosures), 20},
+	}
+	for _, l := range limits {
+		if l.val > l.max {
+			unit := "characters"
+			metric := "length"
+			if l.name == "disclosures" {
+				unit = "items"
+				metric = "count"
+			}
+			return fmt.Errorf("%s exceeds %d %s (%s: %d)", l.name, l.max, unit, metric, l.val)
+		}
+	}
+	return nil
+}
+
+func normalizeBriefDefaults(b *CallBrief) {
+	if b.Language == "" {
+		b.Language = "en-US"
+	}
+	if b.Identity.Disclose == "" {
+		b.Identity.Disclose = "volunteer"
+	}
+	if b.MaxDurationSeconds <= 0 {
+		b.MaxDurationSeconds = 300
+	} else if b.MaxDurationSeconds > 900 {
+		b.MaxDurationSeconds = 900
+	}
+	if strings.TrimSpace(b.Approvals) == "" {
+		b.Approvals = defaultApprovalFirewall
+	}
 }
 
 // BuildSystemPrompt constructs the system prompt for the Gemini Live session.
