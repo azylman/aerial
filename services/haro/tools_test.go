@@ -331,6 +331,29 @@ func TestToolHandler_ScheduleAndList(t *testing.T) {
 	if err != nil || len(listFiltered.Recurring) != 1 || listFiltered.Recurring[0].Effort != "medium" || len(listFiltered.OneShot) != 1 || listFiltered.OneShot[0].Effort != "medium" {
 		t.Fatalf("expected medium effort on empty string, got %+v, err: %v", listFiltered, err)
 	}
+	if listFiltered.Recurring[0].Prompt != "" || listFiltered.OneShot[0].Prompt != "" || strings.Contains(listFiltered.Summary, "Prompt:") {
+		t.Fatalf("expected ListSchedules to omit prompt from structs and summary, got %+v", listFiltered)
+	}
+
+	gotCron, err := h.GetSchedule(ctx, GetScheduleArgs{ScheduleID: "c-empty"})
+	if err != nil || gotCron.Type != "recurring" || gotCron.Recurring == nil || gotCron.Recurring.Prompt != "p" {
+		t.Fatalf("expected GetSchedule recurring with prompt 'p', got %+v, err: %v", gotCron, err)
+	}
+	gotOnce, err := h.GetSchedule(ctx, GetScheduleArgs{ScheduleID: "o-empty"})
+	if err != nil || gotOnce.Type != "one_shot" || gotOnce.OneShot == nil || gotOnce.OneShot.Prompt != "p" {
+		t.Fatalf("expected GetSchedule one_shot with prompt 'p', got %+v, err: %v", gotOnce, err)
+	}
+	_ = InsertHeartbeatSchedule(ctx, db, HeartbeatSchedule{ID: "hb-get", TargetID: "ch-raw", CronExpr: "0 0 * * *", Prompt: "hb-p", NextRunAt: now, Enabled: true})
+	gotHB, err := h.GetSchedule(ctx, GetScheduleArgs{ScheduleID: "hb-get"})
+	if err != nil || gotHB.Type != "heartbeat" || gotHB.Heartbeat == nil || gotHB.Heartbeat.Prompt != "hb-p" {
+		t.Fatalf("expected GetSchedule heartbeat with prompt 'hb-p', got %+v, err: %v", gotHB, err)
+	}
+	if _, err := h.GetSchedule(ctx, GetScheduleArgs{ScheduleID: "  "}); err == nil {
+		t.Error("expected error for empty schedule_id in GetSchedule")
+	}
+	if _, err := h.GetSchedule(ctx, GetScheduleArgs{ScheduleID: "missing-id"}); err == nil {
+		t.Error("expected error for non-existent schedule_id in GetSchedule")
+	}
 
 	closedDB, _ := sql.Open("sqlite", ":memory:")
 	_ = closedDB.Close()
@@ -344,6 +367,9 @@ func TestToolHandler_ScheduleAndList(t *testing.T) {
 	}
 	if _, err := hClosed.ListSchedules(ctx, ListSchedulesArgs{TargetID: "t"}); err == nil {
 		t.Error("expected error with closed db in ListSchedules")
+	}
+	if _, err := hClosed.GetSchedule(ctx, GetScheduleArgs{ScheduleID: "c1"}); err == nil {
+		t.Error("expected error with closed db in GetSchedule")
 	}
 	effHigh := "high"
 	if _, err := hClosed.UpdateCronSchedule(ctx, UpdateCronScheduleArgs{ScheduleID: "c1", Effort: &effHigh}); err == nil {
