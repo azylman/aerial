@@ -173,16 +173,57 @@ func inspectOpenObserveSearchSQL(raw json.RawMessage) *Decision {
 	return &Decision{Decision: DecisionAllow}
 }
 
+func inspectDiscordSearchMessages(raw json.RawMessage) *Decision {
+	m := parseRawJSONMap(raw)
+	if lim, ok := m["limit"].(float64); ok && lim > MaxUnboundedPlanRows {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "discord_search_messages limit exceeds maximum allowed per page (25). Use limit <= 25 (default 25) and paginate via 'offset' or 'maxId' when 'has_more' is true.",
+		}
+	}
+	return &Decision{Decision: DecisionAllow}
+}
+
+func inspectGitHubGetFileContents(raw json.RawMessage) *Decision {
+	m := parseRawJSONMap(raw)
+	if m == nil {
+		return &Decision{Decision: DecisionAllow}
+	}
+	owner := strings.ToLower(strings.TrimSpace(stringField(m, "owner")))
+	repo := strings.ToLower(strings.TrimSpace(stringField(m, "repo")))
+	ref := strings.TrimSpace(stringField(m, "ref"))
+	sha := strings.TrimSpace(stringField(m, "sha"))
+	isDefaultRef := ref == "" || ref == "main" || ref == "refs/heads/main" || ref == "HEAD"
+	if (owner == "" || owner == "azylman") && (repo == "aerial" || repo == "aerial-config") && isDefaultRef && sha == "" {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Remote github-mcp get_file_contents on azylman/" + repo + " (default branch) is prohibited because /share/" + repo + " is mounted locally and remote fetches dump unpaginated files into the context window. Use read_file (with StartLine/EndLine) or rg/find on /share/" + repo + " instead, or pass an explicit non-main 'ref'/'sha' when inspecting an unmerged remote commit.",
+		}
+	}
+	if _, hasFields := m["fields"]; !hasFields {
+		m["fields"] = []string{"name", "type", "path", "size"}
+		return &Decision{
+			Decision:  DecisionAllow,
+			Overwrite: map[string]any{"Arguments": m},
+		}
+	}
+	return &Decision{Decision: DecisionAllow}
+}
+
 func inspectMCPToolCall(args ToolArgs) *Decision {
 	mcpTool := strings.ToLower(strings.Trim(strings.TrimSpace(args.ToolName), `"`))
-	if mcpTool == "streamschema" {
+	switch mcpTool {
+	case "streamschema":
 		return &Decision{
 			Decision: DecisionDeny,
 			Reason:   "openobserve StreamSchema is blocked because docker_logs contains 28,000+ historical dynamic attribute fields. Query openobserve SearchSQL directly using canonical columns: _timestamp, service, level, message, stream, container_name, host (never use SELECT *).",
 		}
-	}
-	if mcpTool == "searchsql" {
+	case "searchsql":
 		return inspectOpenObserveSearchSQL(args.Arguments)
+	case "discord_search_messages":
+		return inspectDiscordSearchMessages(args.Arguments)
+	case "get_file_contents":
+		return inspectGitHubGetFileContents(args.Arguments)
 	}
 	if mcpTool != "tool_index" && !strings.HasSuffix(mcpTool, "_tool_index") {
 		return &Decision{Decision: DecisionAllow}

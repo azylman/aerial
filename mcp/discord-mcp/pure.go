@@ -306,3 +306,172 @@ func BuildNodeEnv(environ []string, upstreamPort string) []string {
 func FormatUpstreamURL(upstreamPort string) string {
 	return "http://127.0.0.1:" + strings.TrimSpace(upstreamPort)
 }
+
+// ProjectedDiscordMessage contains only essential fields from a Discord search message.
+type ProjectedDiscordMessage struct {
+	ID        string `json:"id"`
+	Timestamp string `json:"timestamp"`
+	ChannelID string `json:"channel_id"`
+	Author    string `json:"author"`
+	AuthorID  string `json:"author_id,omitempty"`
+	Content   string `json:"content"`
+}
+
+// ShapedSearchResponse is the compact payload returned for discord_search_messages.
+type ShapedSearchResponse struct {
+	TotalResults  int                       `json:"total_results"`
+	ReturnedCount int                       `json:"returned_count"`
+	Offset        int                       `json:"offset"`
+	HasMore       bool                      `json:"has_more"`
+	Messages      []ProjectedDiscordMessage `json:"messages"`
+}
+
+type rawDiscordSearchPayload struct {
+	TotalResults int               `json:"total_results"`
+	Messages     []json.RawMessage `json:"messages"`
+}
+
+type rawDiscordMessage struct {
+	ID        string `json:"id"`
+	Timestamp string `json:"timestamp"`
+	ChannelID string `json:"channel_id"`
+	Content   string `json:"content"`
+	Hit       *bool  `json:"hit,omitempty"`
+	Author    struct {
+		ID         string `json:"id"`
+		Username   string `json:"username"`
+		GlobalName string `json:"global_name"`
+	} `json:"author"`
+}
+
+// ExtractSearchOffset extracts a non-negative offset parameter from a tools/call JSON-RPC request.
+func ExtractSearchOffset(rawReq []byte) int {
+	var req JSONRPCRequest
+	if err := json.Unmarshal(bytes.TrimSpace(rawReq), &req); err != nil || len(req.Params) == 0 {
+		return 0
+	}
+	var params ToolCallParams
+	if err := json.Unmarshal(req.Params, &params); err != nil || len(params.Arguments) == 0 {
+		return 0
+	}
+	var args struct {
+		Offset int `json:"offset"`
+	}
+	if err := json.Unmarshal(params.Arguments, &args); err != nil || args.Offset < 0 {
+		return 0
+	}
+	return args.Offset
+}
+
+func projectDiscordMessage(m rawDiscordMessage) ProjectedDiscordMessage {
+	author := strings.TrimSpace(m.Author.Username)
+	if g := strings.TrimSpace(m.Author.GlobalName); g != "" && !strings.EqualFold(g, author) {
+		if author != "" {
+			author = g + " (" + author + ")"
+		} else {
+			author = g
+		}
+	}
+	return ProjectedDiscordMessage{
+		ID:        m.ID,
+		Timestamp: m.Timestamp,
+		ChannelID: m.ChannelID,
+		Author:    author,
+		AuthorID:  m.Author.ID,
+		Content:   m.Content,
+	}
+}
+
+func parseSearchMessageEntry(raw json.RawMessage) []ProjectedDiscordMessage {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil
+	}
+	if trimmed[0] == '[' {
+		var group []rawDiscordMessage
+		if err := json.Unmarshal(trimmed, &group); err != nil {
+			return nil
+		}
+		var hits []ProjectedDiscordMessage
+		for _, m := range group {
+			if m.Hit != nil && *m.Hit {
+				hits = append(hits, projectDiscordMessage(m))
+			}
+		}
+		if len(hits) > 0 {
+			return hits
+		}
+		out := make([]ProjectedDiscordMessage, 0, len(group))
+		for _, m := range group {
+			out = append(out, projectDiscordMessage(m))
+		}
+		return out
+	}
+	var single rawDiscordMessage
+	if err := json.Unmarshal(trimmed, &single); err != nil {
+		return nil
+	}
+	return []ProjectedDiscordMessage{projectDiscordMessage(single)}
+}
+
+// ShapeSearchMessagesResponse projects a discord_search_messages JSON-RPC response down to essential fields and explicit pagination metadata.
+func ShapeSearchMessagesResponse(rawResp []byte, offset int) ([]byte, error) {
+	var resp JSONRPCResponse
+	if err := json.Unmarshal(rawResp, &resp); err != nil || len(resp.Result) == 0 {
+		return rawResp, err
+	}
+	var resMap map[string]json.RawMessage
+	if err := json.Unmarshal(bytes.TrimSpace(resp.Result), &resMap); err != nil {
+		return rawResp, err
+	}
+	contentRaw, ok := resMap["content"]
+	if !ok || len(contentRaw) == 0 {
+		return rawResp, nil
+	}
+	var contentList []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(contentRaw, &contentList); err != nil || len(contentList) == 0 || contentList[0].Text == "" {
+		return rawResp, err
+	}
+	var payload rawDiscordSearchPayload
+	if err := json.Unmarshal([]byte(contentList[0].Text), &payload); err != nil || payload.Messages == nil {
+		return rawResp, err
+	}
+
+	projected := make([]ProjectedDiscordMessage, 0, len(payload.Messages))
+	for _, entry := range payload.Messages {
+		projected = append(projected, parseSearchMessageEntry(entry)...)
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	total := payload.TotalResults
+	if total < len(projected) {
+		total = len(projected)
+	}
+	shaped := ShapedSearchResponse{
+		TotalResults:  total,
+		ReturnedCount: len(projected),
+		Offset:        offset,
+		HasMore:       total > offset+len(projected),
+		Messages:      projected,
+	}
+	shapedBytes, err := marshalFn(shaped)
+	if err != nil {
+		return rawResp, err
+	}
+	contentList[0].Text = string(shapedBytes)
+	newContentBytes, err := marshalFn(contentList)
+	if err != nil {
+		return rawResp, err
+	}
+	resMap["content"] = newContentBytes
+	newResBytes, err := marshalFn(resMap)
+	if err != nil {
+		return rawResp, err
+	}
+	resp.Result = newResBytes
+	return marshalFn(resp)
+}

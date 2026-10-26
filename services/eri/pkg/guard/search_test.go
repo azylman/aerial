@@ -161,6 +161,14 @@ func TestCheckSearch(t *testing.T) {
 		{"mcp openobserve SearchSQL explicit columns defaults query size", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"query":{"sql":"SELECT _timestamp, service, COUNT(*) FROM docker_logs WHERE message LIKE '%SELECT *%''s%' -- * comment\n GROUP BY _timestamp, service LIMIT 50"}}}`, false, `"size":50`},
 		{"mcp openobserve SearchSQL csv output_format rewritten to json", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"agent_options":{"output_format":"csv"},"query":{"size":20,"sql":"SELECT _timestamp, message FROM docker_logs LIMIT 10"}}}`, false, `"output_format":"json"`},
 		{"mcp openobserve SearchSQL bounded size and json output_format allowed", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"agent_options":{"output_format":"json"},"query":{"size":20,"sql":"SELECT _timestamp, message FROM docker_logs LIMIT 10"}}}`, false, ""},
+		{"mcp discord_search_messages default limit allowed", "call_mcp_tool", "discord_search_messages", `{"guildId":"123","content":"hello"}`, false, ""},
+		{"mcp discord_search_messages limit 25 allowed", "call_mcp_tool", "discord_search_messages", `{"guildId":"123","limit":25}`, false, ""},
+		{"mcp discord_search_messages limit 50 denied", "call_mcp_tool", "discord_search_messages", `{"guildId":"123","limit":50}`, true, ""},
+		{"mcp github get_file_contents empty args allowed", "call_mcp_tool", "get_file_contents", ``, false, ""},
+		{"mcp github get_file_contents local aerial default branch denied", "call_mcp_tool", "get_file_contents", `{"owner":"azylman","repo":"aerial","path":"services/eri/main.go"}`, true, ""},
+		{"mcp github get_file_contents local aerial-config main ref denied", "call_mcp_tool", "get_file_contents", `{"owner":"azylman","repo":"aerial-config","path":"config.yaml","ref":"main"}`, true, ""},
+		{"mcp github get_file_contents aerial feature branch allowed and injects fields", "call_mcp_tool", "get_file_contents", `{"owner":"azylman","repo":"aerial","path":"services/eri","ref":"feat/branch"}`, false, `"fields":["name","type","path","size"]`},
+		{"mcp github get_file_contents external repo with fields preserved", "call_mcp_tool", "get_file_contents", `{"owner":"golang","repo":"go","path":"README.md","fields":["name","type"]}`, false, ""},
 	}
 
 	for _, tc := range tests {
