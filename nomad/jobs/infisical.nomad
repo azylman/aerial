@@ -30,7 +30,7 @@ job "infisical" {
     }
 
     # Task 1: Redis cache & session backend
-    task "redis" {
+    task "infisical-redis" {
       driver = "docker"
 
       lifecycle {
@@ -75,7 +75,7 @@ job "infisical" {
     }
 
     # Task 2: Infisical secret management core server
-    task "server" {
+    task "infisical" {
       driver = "docker"
 
       config {
