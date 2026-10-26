@@ -86,37 +86,75 @@ func isEmittable(s string) bool {
 	return false
 }
 
+func matchDoubleNewlineBoundary(runes []rune, i, n int) (int, int, bool) {
+	if runes[i] != '\n' || i+1 >= n || runes[i+1] != '\n' {
+		return 0, 0, false
+	}
+	endIdx := i + 2
+	for endIdx < n && unicode.IsSpace(runes[endIdx]) {
+		endIdx++
+	}
+	return len(string(runes[:i])), len(string(runes[:endIdx])), true
+}
+
+func consumeTerminalPunctuation(runes []rune, i, n int) (int, bool, bool) {
+	isEllipsis := false
+	if runes[i] == '.' {
+		for i+1 < n && runes[i+1] == '.' {
+			isEllipsis = true
+			i++
+		}
+		if (i > 0 && unicode.IsDigit(runes[i-1]) && i+1 < n && unicode.IsDigit(runes[i+1])) ||
+			isNumberedListPrefix(runes, i) || isAbbrev(runes, i) {
+			return i, isEllipsis, true
+		}
+	}
+	return i, isEllipsis, false
+}
+
+func isEllipsisLowerContinuation(runes []rune, endIdx, n int) bool {
+	nextNonSpace := endIdx
+	for nextNonSpace < n && unicode.IsSpace(runes[nextNonSpace]) {
+		nextNonSpace++
+	}
+	return nextNonSpace < n && unicode.IsLower(runes[nextNonSpace])
+}
+
+func findSoftClauseBoundary(runes []rune, n int) (int, int) {
+	if n <= 180 {
+		return -1, -1
+	}
+	for i := 120; i < n; i++ {
+		r := runes[i]
+		if (r == ',' || r == ';' || r == ':') && i+1 < n && unicode.IsSpace(runes[i+1]) {
+			byteSplit := len(string(runes[:i+1]))
+			return byteSplit, byteSplit
+		}
+	}
+	return -1, -1
+}
+
 func findSentenceBoundary(txt string) (int, int) {
 	runes := []rune(txt)
 	n := len(runes)
 
 	for i := 0; i < n; i++ {
-		r := runes[i]
-
-		// Paragraph boundary: double newline
-		if r == '\n' && i+1 < n && runes[i+1] == '\n' {
-			endIdx := i + 2
-			for endIdx < n && unicode.IsSpace(runes[endIdx]) {
-				endIdx++
-			}
-			return len(string(runes[:i])), len(string(runes[:endIdx]))
+		if split, resume, ok := matchDoubleNewlineBoundary(runes, i, n); ok {
+			return split, resume
 		}
 
+		r := runes[i]
 		if r != '.' && r != '!' && r != '?' {
 			continue
 		}
 
-		// Handle ellipses: if consecutive dots, skip until the last dot
-		isEllipsis := false
-		if r == '.' {
-			for i+1 < n && runes[i+1] == '.' {
-				isEllipsis = true
-				i++
-			}
-			if (i > 0 && unicode.IsDigit(runes[i-1]) && i+1 < n && unicode.IsDigit(runes[i+1])) ||
-				isNumberedListPrefix(runes, i) || isAbbrev(runes, i) {
-				continue
-			}
+		var (
+			isEllipsis bool
+			skip       bool
+		)
+		i, isEllipsis, skip = consumeTerminalPunctuation(runes, i, n)
+		if skip {
+			continue
 		}
 
 		// Advance past closing quotes/brackets: ", ', ), ], ”, ’
@@ -127,32 +165,14 @@ func findSentenceBoundary(txt string) (int, int) {
 
 		// Boundary requires whitespace (or newline) after punctuation/closing quotes
 		if endIdx < n && unicode.IsSpace(runes[endIdx]) {
-			if isEllipsis {
-				nextNonSpace := endIdx
-				for nextNonSpace < n && unicode.IsSpace(runes[nextNonSpace]) {
-					nextNonSpace++
-				}
-				if nextNonSpace < n && unicode.IsLower(runes[nextNonSpace]) {
-					continue
-				}
+			if isEllipsis && isEllipsisLowerContinuation(runes, endIdx, n) {
+				continue
 			}
 			return len(string(runes[:i+1])), len(string(runes[:endIdx]))
 		}
 	}
 
-	// Soft ceiling: if buffer exceeds 180 chars without terminal punctuation,
-	// look for clause punctuation (, ; :) followed by space to avoid blocking playback
-	if n > 180 {
-		for i := 120; i < n; i++ {
-			r := runes[i]
-			if (r == ',' || r == ';' || r == ':') && i+1 < n && unicode.IsSpace(runes[i+1]) {
-				byteSplit := len(string(runes[:i+1]))
-				return byteSplit, byteSplit
-			}
-		}
-	}
-
-	return -1, -1
+	return findSoftClauseBoundary(runes, n)
 }
 
 func isClosingPunctuation(r rune) bool {

@@ -236,71 +236,87 @@ func (u *StatusUpdater) currentStatusText() string {
 	}
 }
 
-func (u *StatusUpdater) flush() {
-	u.mu.Lock()
+func (u *StatusUpdater) hasToolActivityLocked() bool {
+	return u.activeTool != "" || (u.lastCompletedTool != "" && time.Since(u.lastCompletedAt) < u.toolLatchDuration)
+}
+
+func (u *StatusUpdater) prepareFlushPayloadLocked() (string, string, bool) {
 	if u.disabled || u.inFlightREST {
-		u.mu.Unlock()
-		return
+		return "", "", false
 	}
-	hasToolActivity := u.activeTool != "" || (u.lastCompletedTool != "" && time.Since(u.lastCompletedAt) < u.toolLatchDuration)
+	hasToolActivity := u.hasToolActivityLocked()
 	hasActivePhase := hasToolActivity || u.phase == "thinking" || u.phase == "responding"
 	if !u.dirty && (u.statusMessageID == "" || !hasActivePhase) {
-		u.mu.Unlock()
-		return
+		return "", "", false
 	}
 	if u.statusMessageID == "" && !hasToolActivity && time.Since(u.turnStart) < u.debounceDelay {
-		u.mu.Unlock()
-		return
+		return "", "", false
 	}
 	text := u.currentStatusText()
 	if u.statusMessageID != "" && text == u.lastDelivered {
 		u.dirty = false
-		u.mu.Unlock()
-		return
+		return "", "", false
 	}
 	msgID := u.statusMessageID
 	u.inFlightREST, u.dirty = true, false
+	return msgID, text, true
+}
+
+func (u *StatusUpdater) sendInitialStatusMessage(text string) {
+	newID, err := u.sendFunc(u.threadID, text)
+	u.mu.Lock()
+	u.inFlightREST = false
+	if err != nil {
+		if delivery.IsThreadArchivedOrLockedError(err) || delivery.IsPermissionError(err) {
+			u.disabled = true
+		} else {
+			u.dirty = true
+		}
+		u.mu.Unlock()
+		return
+	}
+	if u.disabled {
+		u.mu.Unlock()
+		if err := u.deleteFunc(u.threadID, newID); err != nil && !delivery.IsMessageNotFoundError(err) {
+			log.Printf("[StatusUpdater] Warning deleting cancelled status message: %v", err)
+		}
+		return
+	}
+	u.statusMessageID, u.lastDelivered, u.lastEditAt = newID, text, time.Now()
 	u.mu.Unlock()
+}
+
+func (u *StatusUpdater) editExistingStatusMessage(msgID, text string) {
+	err := u.editFunc(u.threadID, msgID, text)
+	u.mu.Lock()
+	u.inFlightREST = false
+	if err != nil {
+		if delivery.IsMessageNotFoundError(err) {
+			u.statusMessageID, u.disabled = "", true
+		} else if delivery.IsThreadArchivedOrLockedError(err) || delivery.IsPermissionError(err) {
+			u.disabled = true
+		} else {
+			u.dirty = true
+		}
+	} else {
+		u.lastDelivered, u.lastEditAt = text, time.Now()
+	}
+	u.mu.Unlock()
+}
+
+func (u *StatusUpdater) flush() {
+	u.mu.Lock()
+	msgID, text, ok := u.prepareFlushPayloadLocked()
+	u.mu.Unlock()
+	if !ok {
+		return
+	}
 
 	if msgID == "" {
-		newID, err := u.sendFunc(u.threadID, text)
-		u.mu.Lock()
-		u.inFlightREST = false
-		if err != nil {
-			if delivery.IsThreadArchivedOrLockedError(err) || delivery.IsPermissionError(err) {
-				u.disabled = true
-			} else {
-				u.dirty = true
-			}
-			u.mu.Unlock()
-			return
-		}
-		if u.disabled {
-			u.mu.Unlock()
-			if err := u.deleteFunc(u.threadID, newID); err != nil && !delivery.IsMessageNotFoundError(err) {
-				log.Printf("[StatusUpdater] Warning deleting cancelled status message: %v", err)
-			}
-			return
-		}
-		u.statusMessageID, u.lastDelivered, u.lastEditAt = newID, text, time.Now()
-		u.mu.Unlock()
-	} else {
-		err := u.editFunc(u.threadID, msgID, text)
-		u.mu.Lock()
-		u.inFlightREST = false
-		if err != nil {
-			if delivery.IsMessageNotFoundError(err) {
-				u.statusMessageID, u.disabled = "", true
-			} else if delivery.IsThreadArchivedOrLockedError(err) || delivery.IsPermissionError(err) {
-				u.disabled = true
-			} else {
-				u.dirty = true
-			}
-		} else {
-			u.lastDelivered, u.lastEditAt = text, time.Now()
-		}
-		u.mu.Unlock()
+		u.sendInitialStatusMessage(text)
+		return
 	}
+	u.editExistingStatusMessage(msgID, text)
 }
 
 // Stop terminates the ticker loop and blocks until any active in-flight edit returns.
