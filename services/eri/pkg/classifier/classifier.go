@@ -608,6 +608,94 @@ func (c *Classifier) isSystemOne() bool {
 	return strings.EqualFold(cur.ClassifierProtocol, "systemone") && cur.ClassifierURL != ""
 }
 
+func (c *Classifier) executeSystemOneAttempt(ctx context.Context, httpClient *http.Client, endpointURL string, reqBytes []byte) (systemOneResponse, time.Duration, error) {
+	start := time.Now()
+	req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(reqBytes))
+	if reqErr != nil {
+		return systemOneResponse{}, 0, fmt.Errorf("failed to create http request: %w", reqErr)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	httpResp, doErr := httpClient.Do(req)
+	duration := time.Since(start)
+	if doErr != nil {
+		return systemOneResponse{}, duration, fmt.Errorf("systemone request failed: %w", doErr)
+	}
+
+	bodyBytes, readErr := io.ReadAll(io.LimitReader(httpResp.Body, 1<<20))
+	_ = httpResp.Body.Close()
+	if readErr != nil {
+		return systemOneResponse{}, duration, fmt.Errorf("failed to read systemone response body: %w", readErr)
+	}
+
+	if httpResp.StatusCode != http.StatusOK {
+		errMsg := strings.TrimSpace(string(bodyBytes))
+		if len(errMsg) > 200 {
+			errMsg = errMsg[:200] + "..."
+		}
+		return systemOneResponse{}, duration, fmt.Errorf("systemone HTTP %d: %s", httpResp.StatusCode, errMsg)
+	}
+
+	var parsedResp systemOneResponse
+	if unmarshalErr := json.Unmarshal(bodyBytes, &parsedResp); unmarshalErr != nil {
+		return systemOneResponse{}, duration, fmt.Errorf("failed to parse systemone json: %w", unmarshalErr)
+	}
+
+	if parsedResp.Error != "" {
+		return systemOneResponse{}, duration, fmt.Errorf("systemone returned error: %s", parsedResp.Error)
+	}
+
+	return parsedResp, duration, nil
+}
+
+func (c *Classifier) evaluateSystemOneResponse(endpointURL, modelName string, duration time.Duration, respPayload systemOneResponse, lastErr error) ClassificationResult {
+	const maxAttempts = 3
+	if lastErr != nil {
+		c.recordFailure()
+		metrics.RecordClassifierRun("error", modelName, duration, -1, "error")
+		log.Printf("[Classifier] System 1 endpoint %s failed after %d attempts: %v", endpointURL, maxAttempts, lastErr)
+		if c.OnSystemAlert != nil {
+			c.OnSystemAlert(endpointURL, lastErr)
+		}
+		return ClassificationResult{
+			Confidence: 0.0,
+			Reason:     fmt.Sprintf("systemone error after %d attempts: %v", maxAttempts, lastErr),
+		}
+	}
+
+	ans, ok := respPayload.Answers["should_wake"]
+	if !ok {
+		c.recordFailure()
+		metrics.RecordClassifierRun("parse_error", modelName, duration, -1, "missing_answer")
+		err := errors.New("systemone response missing 'should_wake' answer")
+		if c.OnSystemAlert != nil {
+			c.OnSystemAlert(endpointURL, err)
+		}
+		return ClassificationResult{
+			Confidence: 0.0,
+			Reason:     err.Error(),
+		}
+	}
+
+	confidence := ans.Confidence
+	if ans.Noul != nil {
+		confidence = *ans.Noul
+	}
+	if confidence < 0.0 {
+		confidence = 0.0
+	} else if confidence > 1.0 {
+		confidence = 1.0
+	}
+
+	c.recordSuccess()
+	metrics.RecordClassifierRun("success", modelName, duration, confidence, "evaluated")
+	return ClassificationResult{
+		Confidence: confidence,
+		Reason:     fmt.Sprintf("systemone (%s) evaluated with confidence %.4f", modelName, confidence),
+	}
+}
+
 func (c *Classifier) classifySystemOne(ctx context.Context, targetBurst []db.Message, recentContext []db.Message) ClassificationResult {
 	if ctx == nil {
 		ctx = context.Background()
@@ -685,52 +773,10 @@ func (c *Classifier) classifySystemOne(ctx context.Context, targetBurst []db.Mes
 			}
 		}
 
-		start := time.Now()
-		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(reqBytes))
-		if reqErr != nil {
-			lastErr = fmt.Errorf("failed to create http request: %w", reqErr)
+		respPayload, duration, lastErr = c.executeSystemOneAttempt(ctx, httpClient, endpointURL, reqBytes)
+		if lastErr == nil {
 			break
 		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json")
-
-		httpResp, doErr := httpClient.Do(req)
-		duration = time.Since(start)
-		if doErr != nil {
-			lastErr = fmt.Errorf("systemone request failed: %w", doErr)
-			continue
-		}
-
-		bodyBytes, readErr := io.ReadAll(io.LimitReader(httpResp.Body, 1<<20))
-		_ = httpResp.Body.Close()
-		if readErr != nil {
-			lastErr = fmt.Errorf("failed to read systemone response body: %w", readErr)
-			continue
-		}
-
-		if httpResp.StatusCode != http.StatusOK {
-			errMsg := strings.TrimSpace(string(bodyBytes))
-			if len(errMsg) > 200 {
-				errMsg = errMsg[:200] + "..."
-			}
-			lastErr = fmt.Errorf("systemone HTTP %d: %s", httpResp.StatusCode, errMsg)
-			continue
-		}
-
-		var parsedResp systemOneResponse
-		if unmarshalErr := json.Unmarshal(bodyBytes, &parsedResp); unmarshalErr != nil {
-			lastErr = fmt.Errorf("failed to parse systemone json: %w", unmarshalErr)
-			continue
-		}
-
-		if parsedResp.Error != "" {
-			lastErr = fmt.Errorf("systemone returned error: %s", parsedResp.Error)
-			continue
-		}
-
-		respPayload = parsedResp
-		lastErr = nil
-		break
 	}
 
 	modelName := "systemone"
@@ -740,49 +786,7 @@ func (c *Classifier) classifySystemOne(ctx context.Context, targetBurst []db.Mes
 		modelName = respPayload.Model
 	}
 
-	if lastErr != nil {
-		c.recordFailure()
-		metrics.RecordClassifierRun("error", modelName, duration, -1, "error")
-		log.Printf("[Classifier] System 1 endpoint %s failed after %d attempts: %v", endpointURL, maxAttempts, lastErr)
-		if c.OnSystemAlert != nil {
-			c.OnSystemAlert(endpointURL, lastErr)
-		}
-		return ClassificationResult{
-			Confidence: 0.0,
-			Reason:     fmt.Sprintf("systemone error after %d attempts: %v", maxAttempts, lastErr),
-		}
-	}
-
-	ans, ok := respPayload.Answers["should_wake"]
-	if !ok {
-		c.recordFailure()
-		metrics.RecordClassifierRun("parse_error", modelName, duration, -1, "missing_answer")
-		err := errors.New("systemone response missing 'should_wake' answer")
-		if c.OnSystemAlert != nil {
-			c.OnSystemAlert(endpointURL, err)
-		}
-		return ClassificationResult{
-			Confidence: 0.0,
-			Reason:     err.Error(),
-		}
-	}
-
-	confidence := ans.Confidence
-	if ans.Noul != nil {
-		confidence = *ans.Noul
-	}
-	if confidence < 0.0 {
-		confidence = 0.0
-	} else if confidence > 1.0 {
-		confidence = 1.0
-	}
-
-	c.recordSuccess()
-	metrics.RecordClassifierRun("success", modelName, duration, confidence, "evaluated")
-	return ClassificationResult{
-		Confidence: confidence,
-		Reason:     fmt.Sprintf("systemone (%s) evaluated with confidence %.4f", modelName, confidence),
-	}
+	return c.evaluateSystemOneResponse(endpointURL, modelName, duration, respPayload, lastErr)
 }
 
 // Classify evaluates a single target message against recentContext.
