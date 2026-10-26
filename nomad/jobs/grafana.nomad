@@ -96,6 +96,17 @@ providers:
     options:
       path: /share/aerial/nomad/grafana/dashboards
       foldersFromFilesStructure: true
+  - name: 'Aerial Custom'
+    orgId: 1
+    folder: ''
+    type: file
+    disableDeletion: false
+    editable: true
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /share/aerial-config/services/grafana/dashboards
+      foldersFromFilesStructure: true
 EOH
         destination = "local/provisioning/dashboards/dashboards.yml"
       }
