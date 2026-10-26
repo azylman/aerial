@@ -128,6 +128,9 @@ func TestCheckSearch(t *testing.T) {
 		{"grep for .zip string in source file allowed", "run_command", "grep '.zip' main.go", "", false, ""},
 		{"grep in file named bin.go allowed", "run_command", "grep 'pattern' bin.go", "", false, ""},
 		{"grep with explicit -e flag allowed", "run_command", "grep -e 'foo' main.go", "", false, ""},
+		{"bash safe command in search", "run_command", "bash -c 'echo safe'", "", false, ""},
+		{"grep short flag with digit", "run_command", "grep -m 10 foo file.txt", "", false, ""},
+		{"unclosed sql single quote", "run_command", `psql -A -c "SELECT 'unclosed"`, "", false, ""},
 
 		// Pipelines & Quotes
 		{"echo containing find in quotes allowed", "run_command", `echo "find / -name foo"`, "", false, ""},
@@ -349,6 +352,32 @@ func TestPsqlGuard(t *testing.T) {
 			cmd:      `docker exec -e FOO=bar postgres`,
 			conn:     &fakeSQLCatalogConn{cols: twoCols, explainJSON: limitPlan, tableMeta: meta3},
 			wantDeny: false,
+		},
+		{
+			name:          "psql empty query allowed",
+			cmd:           `psql "$DATABASE_URL" -c ""`,
+			wantDeny:      false,
+			wantOverwrite: `psql -A "$DATABASE_URL" -c ""`,
+		},
+		{
+			name:          "psql backslash stmt skipped",
+			cmd:           `psql "$DATABASE_URL" -c "SELECT id, author_name FROM messages LIMIT 5; \timing"`,
+			conn:          &fakeSQLCatalogConn{cols: twoCols, explainJSON: limitPlan, tableMeta: meta3},
+			wantOverwrite: `psql -A "$DATABASE_URL" -c "SELECT id, author_name FROM messages LIMIT 5; \timing"`,
+		},
+		{
+			name:          "schema hint connect failure returns empty",
+			cmd:           `psql "$DATABASE_URL" -c "SELECT bad_col FROM messages"`,
+			connErr:       errors.New("dial fail"),
+			conn:          &fakeSQLCatalogConn{prepareErr: &pgconn.PgError{Code: "42703", Message: `column "bad_col" does not exist`}},
+			wantDeny:      false,
+			wantOverwrite: `psql -A "$DATABASE_URL" -c "SELECT bad_col FROM messages"`,
+		},
+		{
+			name:          "psql empty explain plan ignored",
+			cmd:           `psql "$DATABASE_URL" -c "SELECT id FROM messages"`,
+			conn:          &fakeSQLCatalogConn{cols: twoCols, explainJSON: ""},
+			wantOverwrite: `psql -A "$DATABASE_URL" -c "SELECT id FROM messages"`,
 		},
 	}
 

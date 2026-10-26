@@ -225,6 +225,8 @@ func TestRepoAndCommitDetection(t *testing.T) {
 		{"git diff allowed", `git diff`, false, "", false},
 		{"git status allowed", `git status`, false, "", false},
 		{"aerial-pr.sh init allowed", `./scripts/aerial-pr.sh init azylman/aerial`, false, "", false},
+		{"submit without dir", `aerial-pr.sh submit --dry-run`, true, "", true},
+		{"bash -c echo", `bash -c "echo safe"`, false, "", false},
 	}
 
 	for _, tc := range commitTests {
@@ -248,6 +250,8 @@ func TestRepoAndCommitDetection(t *testing.T) {
 		{"bash -c git commit -m", "bash -c 'git commit -m msg'", false},
 		{"git commit -m only", "git commit -m 'msg'", false},
 		{"non-git command", "echo 'git commit -a'", false},
+		{"bash -c echo not all", `bash -c "echo safe"`, false},
+		{"empty command", "", false},
 	}
 	for _, tc := range allCommitTests {
 		t.Run("allcommit_"+tc.name, func(t *testing.T) {
@@ -419,6 +423,8 @@ func TestCheckCommit(t *testing.T) {
 		{name: "colon tool name and all commit", tool: "default_api:run_command", cmd: "git commit -a -m 'all'", cwd: "/workspace"},
 		{name: "relative dir clean", tool: "run_command", cmd: "./scripts/aerial-pr.sh submit relative/scratch 'clean'", cwd: "/data/repo"},
 		{name: "untracked secret denied", tool: "run_command", cmd: "./scripts/aerial-pr.sh submit " + tmpWorkspace + " 'add'", cwd: tmpWorkspace, untracked: true, wantDeny: true, wantReason: "GenericAPIKey"},
+		{name: "empty cwd fallback to dot", tool: "run_command", cmd: "git commit -m 'clean'", cwd: "", mockDiff: "diff --git a/pkg/file.go b/pkg/file.go\n+var x = 1\n"},
+		{name: "bash safe command allowed", tool: "run_command", cmd: "bash -c 'echo test'", cwd: "/workspace"},
 	}
 
 	for _, tc := range tests {

@@ -64,72 +64,10 @@ func (r *Router) handleStatus(s *discordgo.Session, i *discordgo.InteractionCrea
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	factCount := 0
-	latestFactStr := "none recorded yet"
-	memURL := strings.TrimRight(strings.TrimSpace(r.deps.MemoryURL), "/")
-	if memURL == "" {
-		memURL = strings.TrimRight(strings.TrimSpace(os.Getenv("MEMORY_MCP_URL")), "/")
-	}
-	if memURL == "" {
-		memURL = "http://coven.aerial"
-	}
-	if req, err := http.NewRequestWithContext(ctx, http.MethodGet, memURL+"/facts?limit=1", nil); err == nil {
-		if resp, err := http.DefaultClient.Do(req); err == nil {
-			defer resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				var res struct {
-					Total int `json:"total"`
-					Facts []struct {
-						FactText  string    `json:"fact_text"`
-						CreatedAt time.Time `json:"created_at"`
-					} `json:"facts"`
-				}
-				if json.NewDecoder(resp.Body).Decode(&res) == nil {
-					factCount = res.Total
-					if len(res.Facts) > 0 {
-						f := res.Facts[0]
-						timeAgo := formatRelativeTime(time.Since(f.CreatedAt))
-						latestFactStr = fmt.Sprintf("%q (%s ago)", truncateRunes(f.FactText, 60), timeAgo)
-					}
-				}
-			}
-		}
-	}
-
+	factCount, latestFactStr := r.fetchMemoryFactStatus(ctx)
 	nextActionStr := resolveNextScheduleAction(ctx, r.deps.HaroURL)
-
-	runtimeStr := "`Idle`"
-	if r.deps.Store != nil {
-		if tasks, err := r.deps.Store.GetActiveTasks(ctx); err == nil && len(tasks) > 0 {
-			t := tasks[0]
-			runtimeStr = fmt.Sprintf("`Active` (Task: %s | %s elapsed)", t.ID, formatRelativeDuration(time.Since(t.CreatedAt)))
-		}
-	}
-	if runtimeStr == "`Idle`" {
-		if pool := r.getPool(); pool != nil {
-			for _, procPool := range pool.StatefulProcessPools() {
-				if d, ok := procPool.Get(i.ChannelID); ok && d != nil && d.InflightCount() > 0 {
-					runtimeStr = fmt.Sprintf("`Active` (Turn in progress | %s elapsed)", formatRelativeDuration(time.Since(d.LastUsed())))
-					break
-				}
-			}
-		}
-	}
-
-	deployStr := "Live, healthy"
-	if r.deps.DeployStatusProvider != nil {
-		if st := r.deps.DeployStatusProvider(); strings.TrimSpace(st) != "" {
-			deployStr = st
-		}
-	} else {
-		gitCommit := os.Getenv("GIT_COMMIT")
-		if len(gitCommit) > 7 {
-			gitCommit = gitCommit[:7]
-		}
-		if gitCommit != "" {
-			deployStr = fmt.Sprintf("`aerial@%s` (Live, healthy)", gitCommit)
-		}
-	}
+	runtimeStr := r.resolveRuntimeStatus(ctx, i.ChannelID)
+	deployStr := r.resolveDeployStatus()
 
 	content := fmt.Sprintf(
 		"**Runtime**: %s\n**Deployment**: %s\n**Memory**: %d facts recorded • *Latest: %s*\n**Next Action**: %s",
@@ -145,6 +83,80 @@ func (r *Router) handleStatus(s *discordgo.Session, i *discordgo.InteractionCrea
 	}); err != nil {
 		log.Printf("[Interactions] Failed to respond to /status: %v", err)
 	}
+}
+
+func (r *Router) fetchMemoryFactStatus(ctx context.Context) (int, string) {
+	factCount := 0
+	latestFactStr := "none recorded yet"
+	memURL := strings.TrimRight(strings.TrimSpace(r.deps.MemoryURL), "/")
+	if memURL == "" {
+		memURL = strings.TrimRight(strings.TrimSpace(os.Getenv("MEMORY_MCP_URL")), "/")
+	}
+	if memURL == "" {
+		memURL = "http://coven.aerial"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, memURL+"/facts?limit=1", nil)
+	if err != nil {
+		return factCount, latestFactStr
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return factCount, latestFactStr
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return factCount, latestFactStr
+	}
+	var res struct {
+		Total int `json:"total"`
+		Facts []struct {
+			FactText  string    `json:"fact_text"`
+			CreatedAt time.Time `json:"created_at"`
+		} `json:"facts"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&res); err == nil {
+		factCount = res.Total
+		if len(res.Facts) > 0 {
+			f := res.Facts[0]
+			timeAgo := formatRelativeTime(time.Since(f.CreatedAt))
+			latestFactStr = fmt.Sprintf("%q (%s ago)", truncateRunes(f.FactText, 60), timeAgo)
+		}
+	}
+	return factCount, latestFactStr
+}
+
+func (r *Router) resolveRuntimeStatus(ctx context.Context, channelID string) string {
+	if r.deps.Store != nil {
+		if tasks, err := r.deps.Store.GetActiveTasks(ctx); err == nil && len(tasks) > 0 {
+			t := tasks[0]
+			return fmt.Sprintf("`Active` (Task: %s | %s elapsed)", t.ID, formatRelativeDuration(time.Since(t.CreatedAt)))
+		}
+	}
+	if pool := r.getPool(); pool != nil {
+		for _, procPool := range pool.StatefulProcessPools() {
+			if d, ok := procPool.Get(channelID); ok && d != nil && d.InflightCount() > 0 {
+				return fmt.Sprintf("`Active` (Turn in progress | %s elapsed)", formatRelativeDuration(time.Since(d.LastUsed())))
+			}
+		}
+	}
+	return "`Idle`"
+}
+
+func (r *Router) resolveDeployStatus() string {
+	if r.deps.DeployStatusProvider != nil {
+		if st := r.deps.DeployStatusProvider(); strings.TrimSpace(st) != "" {
+			return st
+		}
+	} else {
+		gitCommit := os.Getenv("GIT_COMMIT")
+		if len(gitCommit) > 7 {
+			gitCommit = gitCommit[:7]
+		}
+		if gitCommit != "" {
+			return fmt.Sprintf("`aerial@%s` (Live, healthy)", gitCommit)
+		}
+	}
+	return "Live, healthy"
 }
 
 func resolveNextScheduleAction(ctx context.Context, explicitHaroURL string) string {
@@ -285,6 +297,23 @@ func (r *Router) closeThreadProcesses(threadID, reason string) {
 	}
 }
 
+func (r *Router) drainThreadPendingMessages(ctx context.Context, targetThreadID string) {
+	if r.deps.Store == nil || targetThreadID == "" {
+		return
+	}
+	msgs, err := r.deps.Store.GetPendingOrProcessingMessages(ctx, 100)
+	if err != nil {
+		return
+	}
+	for _, m := range msgs {
+		if m.ThreadID == targetThreadID {
+			if err := r.deps.Store.UpdateMessageStatus(ctx, m.ID, db.StatusFailed, "interrupted by operator via slash command"); err != nil {
+				log.Printf("[Interactions] Warning: failed to update message status on interrupt: %v", err)
+			}
+		}
+	}
+}
+
 func (r *Router) handleInterrupt(s *discordgo.Session, i *discordgo.InteractionCreate, data discordgo.ApplicationCommandInteractionData) {
 	drainQueue := getBoolOption(data.Options, "drain_queue", true)
 	reset := getBoolOption(data.Options, "reset", false)
@@ -296,23 +325,12 @@ func (r *Router) handleInterrupt(s *discordgo.Session, i *discordgo.InteractionC
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if r.deps.Store != nil {
-		// Update active messages to cancelled
-		if drainQueue {
-			if msgs, err := r.deps.Store.GetPendingOrProcessingMessages(ctx, 100); err == nil {
-				for _, m := range msgs {
-					if m.ThreadID == targetThreadID {
-						if err := r.deps.Store.UpdateMessageStatus(ctx, m.ID, db.StatusFailed, "interrupted by operator via slash command"); err != nil {
-							log.Printf("[Interactions] Warning: failed to update message status on interrupt: %v", err)
-						}
-					}
-				}
-			}
-		}
-		if reset {
-			if err := r.deps.Store.RotateSessionID(ctx, targetThreadID, uuid.New().String()); err != nil {
-				log.Printf("[Interactions] Warning: failed to rotate session ID on interrupt: %v", err)
-			}
+	if drainQueue {
+		r.drainThreadPendingMessages(ctx, targetThreadID)
+	}
+	if reset && r.deps.Store != nil {
+		if err := r.deps.Store.RotateSessionID(ctx, targetThreadID, uuid.New().String()); err != nil {
+			log.Printf("[Interactions] Warning: failed to rotate session ID on interrupt: %v", err)
 		}
 	}
 
