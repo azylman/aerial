@@ -41,12 +41,13 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	// Invariant: ticker goroutine must be bound to a child context and strictly
 	// awaited on all exit paths before closing the database to prevent goroutine leaks
 	// and use-after-close on database shutdown.
+	dispatcher := NewHTTPPromptDispatcher(cfg.BrainURL)
 	tickerCtx, tickerCancel := context.WithCancel(ctx)
 	var tickerWg sync.WaitGroup
 	tickerWg.Add(1)
 	go func() {
 		defer tickerWg.Done()
-		ticker := NewTicker(database, NewHTTPPromptDispatcher(cfg.BrainURL), 30*time.Second)
+		ticker := NewTicker(database, dispatcher, 30*time.Second)
 		ticker.Start(tickerCtx)
 	}()
 	defer func() {
@@ -55,7 +56,7 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	}()
 
 	toolHandler := NewToolHandler(cfg, database)
-	server := NewServer(toolHandler)
+	server := NewServer(toolHandler, dispatcher)
 
 	httpServer := &http.Server{
 		Addr:    ":" + port,

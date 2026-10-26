@@ -1608,51 +1608,54 @@ func TestPureHelpers_ValidateEventWatchSpec(t *testing.T) {
 		source        string
 		target        string
 		eventType     string
+		extraSources  []string
 		wantSource    string
 		wantTarget    string
 		wantEventType string
 		wantErr       bool
 	}{
 		// empty target
-		{"empty target", "vanadis_build", "", "completed", "", "", "", true},
+		{"empty target", "vanadis_build", "", "completed", nil, "", "", "", true},
 		// vanadis_build
-		{"vanadis_build completed", "vanadis_build", "build-123-abc", "completed", "vanadis_build", "build-123-abc", "completed", false},
-		{"vanadis_build failed", "VANADIS_BUILD", "build-456", "FAILED", "vanadis_build", "build-456", "failed", false},
-		{"vanadis_build invalid event_type", "vanadis_build", "build-123", "running", "", "", "", true},
-		{"vanadis_build target with chunk rejected", "vanadis_build", "build-123-chunk-1", "completed", "", "", "", true},
-		{"vanadis_build invalid target regex", "vanadis_build", "invalid_build", "completed", "", "", "", true},
+		{"vanadis_build completed", "vanadis_build", "build-123-abc", "completed", nil, "vanadis_build", "build-123-abc", "completed", false},
+		{"vanadis_build failed", "VANADIS_BUILD", "build-456", "FAILED", nil, "vanadis_build", "build-456", "failed", false},
+		{"vanadis_build invalid event_type", "vanadis_build", "build-123", "running", nil, "", "", "", true},
+		{"vanadis_build target with chunk rejected", "vanadis_build", "build-123-chunk-1", "completed", nil, "", "", "", true},
+		{"vanadis_build invalid target regex", "vanadis_build", "invalid_build", "completed", nil, "", "", "", true},
 		// vanadis_chunk
-		{"vanadis_chunk merged", "vanadis_chunk", "build-123-chunk-1", "merged", "vanadis_chunk", "build-123-chunk-1", "merged", false},
-		{"vanadis_chunk failed", "vanadis_chunk", "anyprefix-chunk-99", "failed", "vanadis_chunk", "anyprefix-chunk-99", "failed", false},
-		{"vanadis_chunk invalid event_type", "vanadis_chunk", "build-123-chunk-1", "completed", "", "", "", true},
-		{"vanadis_chunk invalid target", "vanadis_chunk", "build-123", "merged", "", "", "", true},
+		{"vanadis_chunk merged", "vanadis_chunk", "build-123-chunk-1", "merged", nil, "vanadis_chunk", "build-123-chunk-1", "merged", false},
+		{"vanadis_chunk failed", "vanadis_chunk", "anyprefix-chunk-99", "failed", nil, "vanadis_chunk", "anyprefix-chunk-99", "failed", false},
+		{"vanadis_chunk invalid event_type", "vanadis_chunk", "build-123-chunk-1", "completed", nil, "", "", "", true},
+		{"vanadis_chunk invalid target", "vanadis_chunk", "build-123", "merged", nil, "", "", "", true},
 		// hangar
-		{"hangar bare repo sync_success", "hangar", "aerial", "sync_success", "hangar", "azylman/aerial", "sync_success", false},
-		{"hangar full repo sync_failed", "hangar", "azylman/aerial-config", "sync_failed", "hangar", "azylman/aerial-config", "sync_failed", false},
-		{"hangar invalid event_type", "hangar", "aerial", "deployed", "", "", "", true},
-		{"hangar unmanaged repo", "hangar", "other/repo", "sync_success", "", "", "", true},
+		{"hangar bare repo sync_success", "hangar", "aerial", "sync_success", nil, "hangar", "azylman/aerial", "sync_success", false},
+		{"hangar full repo sync_failed", "hangar", "azylman/aerial-config", "sync_failed", nil, "hangar", "azylman/aerial-config", "sync_failed", false},
+		{"hangar invalid event_type", "hangar", "aerial", "deployed", nil, "", "", "", true},
+		{"hangar unmanaged repo", "hangar", "other/repo", "sync_success", nil, "", "", "", true},
 		// github
-		{"github repo only pr_merged", "github", "aerial", "pr_merged", "github", "azylman/aerial", "pr_merged", false},
-		{"github repo with branch ci_passed", "github", "azylman/aerial:main", "ci_passed", "github", "azylman/aerial:main", "ci_passed", false},
-		{"github refs heads stripped ci_failed", "github", "aerial:refs/heads/feature/test", "ci_failed", "github", "azylman/aerial:feature/test", "ci_failed", false},
-		{"github PR number with hash rejected", "github", "aerial:#123", "ci_passed", "", "", "", true},
-		{"github PR number numeric rejected", "github", "aerial:123", "ci_passed", "", "", "", true},
-		{"github 40-char SHA rejected", "github", "aerial:0123456789abcdef0123456789abcdef01234567", "ci_passed", "", "", "", true},
-		{"github empty branch rejected", "github", "aerial:", "ci_passed", "", "", "", true},
-		{"github unmanaged repo rejected", "github", "unmanaged/repo:main", "ci_passed", "", "", "", true},
-		{"github invalid event_type", "github", "aerial", "completed", "", "", "", true},
+		{"github repo only pr_merged", "github", "aerial", "pr_merged", nil, "github", "azylman/aerial", "pr_merged", false},
+		{"github repo with branch ci_passed", "github", "azylman/aerial:main", "ci_passed", nil, "github", "azylman/aerial:main", "ci_passed", false},
+		{"github refs heads stripped ci_failed", "github", "aerial:refs/heads/feature/test", "ci_failed", nil, "github", "azylman/aerial:feature/test", "ci_failed", false},
+		{"github PR number with hash rejected", "github", "aerial:#123", "ci_passed", nil, "", "", "", true},
+		{"github PR number numeric rejected", "github", "aerial:123", "ci_passed", nil, "", "", "", true},
+		{"github 40-char SHA rejected", "github", "aerial:0123456789abcdef0123456789abcdef01234567", "ci_passed", nil, "", "", "", true},
+		{"github empty branch rejected", "github", "aerial:", "ci_passed", nil, "", "", "", true},
+		{"github unmanaged repo rejected", "github", "unmanaged/repo:main", "ci_passed", nil, "", "", "", true},
+		{"github invalid event_type", "github", "aerial", "completed", nil, "", "", "", true},
 		// nomad
-		{"nomad deploy_success", "nomad", "aerial-brain", "deploy_success", "nomad", "aerial-brain", "deploy_success", false},
-		{"nomad uppercase normalized deploy_failed", "nomad", "AERIAL-POSTGRES", "deploy_failed", "nomad", "aerial-postgres", "deploy_failed", false},
-		{"nomad invalid event_type", "nomad", "aerial-brain", "started", "", "", "", true},
-		{"nomad invalid target characters", "nomad", "aerial_brain", "deploy_success", "", "", "", true},
-		// unknown source
-		{"unknown source", "unknown_source", "target", "completed", "", "", "", true},
+		{"nomad deploy_success", "nomad", "aerial-brain", "deploy_success", nil, "nomad", "aerial-brain", "deploy_success", false},
+		{"nomad uppercase normalized deploy_failed", "nomad", "AERIAL-POSTGRES", "deploy_failed", nil, "nomad", "aerial-postgres", "deploy_failed", false},
+		{"nomad invalid event_type", "nomad", "aerial-brain", "started", nil, "", "", "", true},
+		{"nomad invalid target characters", "nomad", "aerial_brain", "deploy_success", nil, "", "", "", true},
+		// unknown source vs configured extra_event_sources
+		{"unknown source without extraSources", "custom_iot", "device.washer", "idle", nil, "", "", "", true},
+		{"configured extra source valid", "Custom_IoT", "device.washer", "IDLE", []string{"custom_iot"}, "custom_iot", "device.washer", "idle", false},
+		{"configured extra source empty event_type", "custom_iot", "device.washer", "   ", []string{"custom_iot"}, "", "", "", true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s, target, ev, err := ValidateEventWatchSpec(tc.source, tc.target, tc.eventType)
+			s, target, ev, err := ValidateEventWatchSpec(tc.source, tc.target, tc.eventType, tc.extraSources...)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("ValidateEventWatchSpec() err = %v, wantErr = %v", err, tc.wantErr)
 			}
@@ -1660,6 +1663,27 @@ func TestPureHelpers_ValidateEventWatchSpec(t *testing.T) {
 				if s != tc.wantSource || target != tc.wantTarget || ev != tc.wantEventType {
 					t.Errorf("got (%q, %q, %q), want (%q, %q, %q)", s, target, ev, tc.wantSource, tc.wantTarget, tc.wantEventType)
 				}
+			}
+		})
+	}
+}
+
+func TestPureHelpers_FormatEventTriggerPrompt(t *testing.T) {
+	tests := []struct {
+		name    string
+		header  string
+		prompt  string
+		wantStr string
+	}{
+		{"both header and prompt present", "Event trigger: test", "Proceed with task", "Event trigger: test\n\nProceed with task"},
+		{"empty header returns prompt", "   ", "Proceed with task", "Proceed with task"},
+		{"empty prompt returns header", "Event trigger: test", "   ", "Event trigger: test"},
+		{"both empty returns empty", "", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := FormatEventTriggerPrompt(tc.header, tc.prompt); got != tc.wantStr {
+				t.Fatalf("FormatEventTriggerPrompt() = %q, want %q", got, tc.wantStr)
 			}
 		})
 	}

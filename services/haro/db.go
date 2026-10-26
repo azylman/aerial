@@ -816,13 +816,8 @@ func scanEventTriggerRows(rows *sql.Rows) ([]EventTrigger, error) {
 	return results, rows.Err()
 }
 
-// ClaimEventTriggers atomically deletes and returns matching event triggers from event_triggers.
-func ClaimEventTriggers(ctx context.Context, database *sql.DB, source string, targets []string, eventType string) ([]EventTrigger, error) {
-	ctx, err := normCtxAndDB(ctx, database)
-	if err != nil {
-		return nil, err
-	}
-	source, eventType = strings.TrimSpace(source), strings.TrimSpace(eventType)
+func buildEventTriggerFilterArgs(source string, targets []string, eventType string) (string, []any, bool) {
+	source, eventType = strings.ToLower(strings.TrimSpace(source)), strings.ToLower(strings.TrimSpace(eventType))
 	var cleanTargets []string
 	seen := make(map[string]struct{}, len(targets))
 	for _, t := range targets {
@@ -834,7 +829,7 @@ func ClaimEventTriggers(ctx context.Context, database *sql.DB, source string, ta
 		}
 	}
 	if source == "" || eventType == "" || len(cleanTargets) == 0 {
-		return nil, nil
+		return "", nil, false
 	}
 	placeholders := make([]string, len(cleanTargets))
 	args := make([]any, 0, 2+len(cleanTargets))
@@ -843,7 +838,38 @@ func ClaimEventTriggers(ctx context.Context, database *sql.DB, source string, ta
 		placeholders[i] = fmt.Sprintf("$%d", i+3)
 		args = append(args, t)
 	}
-	rawQuery := fmt.Sprintf(`DELETE FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) RETURNING id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at`, strings.Join(placeholders, ", "))
+	return strings.Join(placeholders, ", "), args, true
+}
+
+// CheckEventTriggers reports whether at least one matching event trigger exists without deleting it.
+func CheckEventTriggers(ctx context.Context, database *sql.DB, source string, targets []string, eventType string) (bool, error) {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return false, err
+	}
+	placeholders, args, ok := buildEventTriggerFilterArgs(source, targets, eventType)
+	if !ok {
+		return false, nil
+	}
+	rawQuery := fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s))`, placeholders)
+	var matched bool
+	if err := database.QueryRowContext(ctx, rawQuery, args...).Scan(&matched); err != nil {
+		return false, err
+	}
+	return matched, nil
+}
+
+// ClaimEventTriggers atomically deletes and returns matching event triggers from event_triggers.
+func ClaimEventTriggers(ctx context.Context, database *sql.DB, source string, targets []string, eventType string) ([]EventTrigger, error) {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return nil, err
+	}
+	placeholders, args, ok := buildEventTriggerFilterArgs(source, targets, eventType)
+	if !ok {
+		return nil, nil
+	}
+	rawQuery := fmt.Sprintf(`DELETE FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) RETURNING id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at`, placeholders)
 	rows, err := database.QueryContext(ctx, rawQuery, args...)
 	if err != nil {
 		return nil, err

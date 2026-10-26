@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-func TestClaimEventTriggers(t *testing.T) {
+func TestCheckEventTriggers_HaroHTTP(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -20,17 +20,14 @@ func TestClaimEventTriggers(t *testing.T) {
 		eventType   string
 		httpStatus  int
 		httpBody    string
-		wantCount   int
+		wantMatched bool
 		wantErr     bool
 	}{
-		{name: "nil registry returns nil", nilRegistry: true, source: "github", targets: []string{"azylman/aerial"}, eventType: "ci_passed"},
-		{name: "empty targets returns nil", source: "github", targets: nil, eventType: "ci_passed"},
-		{name: "whitespace targets returns nil", source: "github", targets: []string{"   ", ""}, eventType: "ci_passed"},
-		{name: "empty source returns nil", source: "", targets: []string{"azylman/aerial"}, eventType: "ci_passed"},
-		{name: "empty eventType returns nil", source: "github", targets: []string{"azylman/aerial"}, eventType: ""},
-		{name: "server 500 error returns error", source: "github", targets: []string{"azylman/aerial"}, eventType: "ci_passed", httpStatus: http.StatusInternalServerError, httpBody: `{"error":"db error"}`, wantErr: true},
-		{name: "invalid json returns error", source: "github", targets: []string{"azylman/aerial"}, eventType: "ci_passed", httpStatus: http.StatusOK, httpBody: `{invalid`, wantErr: true},
-		{name: "successful claim with multiple rows", source: "github", targets: []string{"azylman/aerial", "azylman/aerial:main"}, eventType: "pr_merged", httpStatus: http.StatusOK, httpBody: `{"status":"ok","triggers":[{"id":"trig-1","channel_id":"1555405874565091380","source":"github","target":"azylman/aerial","event_type":"pr_merged","prompt":"Continue","effort":"high"},{"id":"trig-2","channel_id":"1555405874565091380","source":"github","target":"azylman/aerial:main","event_type":"pr_merged","prompt":"Report","effort":"medium"}]}`, wantCount: 2},
+		{name: "check nil registry returns false", nilRegistry: true, source: "custom_source", targets: []string{"device.alpha"}, eventType: "ready"},
+		{name: "check empty targets returns false", source: "custom_source", targets: nil, eventType: "ready"},
+		{name: "check 500 error returns error", source: "custom_source", targets: []string{"device.alpha"}, eventType: "ready", httpStatus: http.StatusInternalServerError, httpBody: `{"error":"db"}`, wantErr: true},
+		{name: "check matched true", source: "custom_source", targets: []string{"device.alpha"}, eventType: "ready", httpStatus: http.StatusOK, httpBody: `{"status":"ok","matched":true}`, wantMatched: true},
+		{name: "check matched false", source: "custom_source", targets: []string{"device.alpha"}, eventType: "ready", httpStatus: http.StatusOK, httpBody: `{"status":"ok","matched":false}`, wantMatched: false},
 	}
 
 	for _, tc := range tests {
@@ -39,7 +36,7 @@ func TestClaimEventTriggers(t *testing.T) {
 			var reg *PostgresPRRegistry
 			if !tc.nilRegistry {
 				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if r.URL.Path != "/event-triggers/claim" {
+					if r.URL.Path != "/event-triggers/check" {
 						http.NotFound(w, r)
 						return
 					}
@@ -53,12 +50,68 @@ func TestClaimEventTriggers(t *testing.T) {
 				defer ts.Close()
 				reg = NewPostgresPRRegistry(nil, WithHaroClient(ts.URL, ts.Client()))
 			}
-			got, err := reg.ClaimEventTriggers(context.Background(), tc.source, tc.targets, tc.eventType)
+			matched, err := reg.CheckEventTriggers(context.Background(), tc.source, tc.targets, tc.eventType)
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("ClaimEventTriggers() err = %v, wantErr = %v", err, tc.wantErr)
+				t.Fatalf("CheckEventTriggers() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if matched != tc.wantMatched {
+				t.Fatalf("CheckEventTriggers() matched = %v, want %v", matched, tc.wantMatched)
+			}
+		})
+	}
+}
+
+func TestFireEventTriggers_HaroHTTP(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		nilRegistry   bool
+		source        string
+		targets       []string
+		eventType     string
+		contextHeader string
+		httpStatus    int
+		httpBody      string
+		wantCount     int
+		wantErr       bool
+	}{
+		{name: "fire nil registry returns nil", nilRegistry: true, source: "github", targets: []string{"azylman/aerial"}, eventType: "ci_passed"},
+		{name: "fire empty targets returns nil", source: "github", targets: nil, eventType: "ci_passed"},
+		{name: "fire whitespace targets returns nil", source: "github", targets: []string{"   ", ""}, eventType: "ci_passed"},
+		{name: "fire empty source returns nil", source: "", targets: []string{"azylman/aerial"}, eventType: "ci_passed"},
+		{name: "fire empty eventType returns nil", source: "github", targets: []string{"azylman/aerial"}, eventType: ""},
+		{name: "fire server 500 error returns error", source: "github", targets: []string{"azylman/aerial"}, eventType: "ci_passed", httpStatus: http.StatusInternalServerError, httpBody: `{"error":"db error"}`, wantErr: true},
+		{name: "fire invalid json returns error", source: "github", targets: []string{"azylman/aerial"}, eventType: "ci_passed", httpStatus: http.StatusOK, httpBody: `{invalid`, wantErr: true},
+		{name: "fire successful with multiple rows and context_header", source: "github", targets: []string{"azylman/aerial", "azylman/aerial:main"}, eventType: "pr_merged", contextHeader: "GitHub pr_merged", httpStatus: http.StatusOK, httpBody: `{"status":"ok","fired":2,"triggers":[{"id":"trig-1","channel_id":"1555405874565091380","source":"github","target":"azylman/aerial","event_type":"pr_merged","prompt":"Continue","effort":"high"},{"id":"trig-2","channel_id":"1555405874565091380","source":"github","target":"azylman/aerial:main","event_type":"pr_merged","prompt":"Report","effort":"medium"}]}`, wantCount: 2},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var reg *PostgresPRRegistry
+			if !tc.nilRegistry {
+				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path != "/event-triggers/fire" {
+						http.NotFound(w, r)
+						return
+					}
+					status := tc.httpStatus
+					if status == 0 {
+						status = http.StatusOK
+					}
+					w.WriteHeader(status)
+					_, _ = w.Write([]byte(tc.httpBody))
+				}))
+				defer ts.Close()
+				reg = NewPostgresPRRegistry(nil, WithHaroClient(ts.URL, ts.Client()))
+			}
+			got, err := reg.FireEventTriggers(context.Background(), tc.source, tc.targets, tc.eventType, tc.contextHeader)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("FireEventTriggers() err = %v, wantErr = %v", err, tc.wantErr)
 			}
 			if len(got) != tc.wantCount {
-				t.Fatalf("ClaimEventTriggers() returned %d items, want %d", len(got), tc.wantCount)
+				t.Fatalf("FireEventTriggers() returned %d items, want %d", len(got), tc.wantCount)
 			}
 		})
 	}
@@ -181,47 +234,117 @@ func TestFailVanadisChunkDetailsByPR(t *testing.T) {
 	}
 }
 
-func TestFormatEventTriggerPrompt(t *testing.T) {
+func TestHandleEventsWebhook(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		header  string
-		prompt  string
-		wantStr string
+		name          string
+		body          string
+		withRiver     bool
+		riverErr      bool
+		checkMatched  bool
+		checkErr      bool
+		fireErr       bool
+		wantStatus    int
+		wantRiverJobs int
+		wantFired     int
 	}{
 		{
-			name:    "both header and prompt present",
-			header:  "Event trigger: test",
-			prompt:  "Proceed with task",
-			wantStr: "Event trigger: test\n\nProceed with task",
+			name:       "invalid json returns 400",
+			body:       `{invalid`,
+			wantStatus: http.StatusBadRequest,
 		},
 		{
-			name:    "empty header returns prompt",
-			header:  "   ",
-			prompt:  "Proceed with task",
-			wantStr: "Proceed with task",
+			name:       "missing required fields returns 400",
+			body:       `{"source":"custom_source"}`,
+			wantStatus: http.StatusBadRequest,
 		},
 		{
-			name:    "empty prompt returns header",
-			header:  "Event trigger: test",
-			prompt:  "   ",
-			wantStr: "Event trigger: test",
+			name:          "check returns 200 and matched false drops event without river enqueue",
+			body:          `{"source":"custom_source","target":"device.alpha","event_type":"running"}`,
+			withRiver:     true,
+			checkMatched:  false,
+			wantStatus:    http.StatusOK,
+			wantRiverJobs: 0,
 		},
 		{
-			name:    "both empty returns empty",
-			header:  "",
-			prompt:  "",
-			wantStr: "",
+			name:          "check returns matched true enqueues into river with 202",
+			body:          `{"source":"Custom_Source","target":"device.alpha","event_type":"IDLE","details":"Cycle complete"}`,
+			withRiver:     true,
+			checkMatched:  true,
+			wantStatus:    http.StatusAccepted,
+			wantRiverJobs: 1,
+		},
+		{
+			name:          "haro check error fails open and enqueues into river with 202",
+			body:          `{"source":"custom_source","targets":["device.alpha"],"event_type":"idle","context_header":"Custom header"}`,
+			withRiver:     true,
+			checkErr:      true,
+			wantStatus:    http.StatusAccepted,
+			wantRiverJobs: 1,
+		},
+		{
+			name:         "river insert error returns 500",
+			body:         `{"source":"custom_source","target":"device.alpha","event_type":"idle"}`,
+			withRiver:    true,
+			checkMatched: true,
+			riverErr:     true,
+			wantStatus:   http.StatusInternalServerError,
+		},
+		{
+			name:         "no river synchronous fire succeeds with 200",
+			body:         `{"source":"custom_source","target":"device.alpha","event_type":"idle"}`,
+			withRiver:    false,
+			checkMatched: true,
+			wantStatus:   http.StatusOK,
+			wantFired:    1,
+		},
+		{
+			name:         "no river synchronous fire error returns 502",
+			body:         `{"source":"custom_source","target":"device.alpha","event_type":"idle"}`,
+			withRiver:    false,
+			checkMatched: true,
+			fireErr:      true,
+			wantStatus:   http.StatusBadGateway,
+			wantFired:    1,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := formatEventTriggerPrompt(tc.header, tc.prompt)
-			if got != tc.wantStr {
-				t.Fatalf("formatEventTriggerPrompt() = %q, want %q", got, tc.wantStr)
+			mockReg := &mockPRRegistry{
+				checkTriggersRes: tc.checkMatched,
+			}
+			if tc.checkErr {
+				mockReg.checkTriggersErr = errors.New("haro unreachable")
+			}
+			if tc.fireErr {
+				mockReg.claimTriggersErr = errors.New("haro fire 502")
+			}
+			mockRiver := &mockRiverInserter{}
+			if tc.riverErr {
+				mockRiver.err = errors.New("river db down")
+			}
+
+			srv := NewRouterServer(Config{}, nil)
+			srv.SetRegistry(mockReg)
+			if tc.withRiver {
+				srv.SetRiverClient(mockRiver)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/webhooks/events", strings.NewReader(tc.body))
+			rec := httptest.NewRecorder()
+			srv.Routes().ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("got status %d, want %d (body: %s)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if len(mockRiver.insertedEventJobs) != tc.wantRiverJobs {
+				t.Fatalf("got %d river event jobs, want %d", len(mockRiver.insertedEventJobs), tc.wantRiverJobs)
+			}
+			if len(mockReg.claimTriggersCalls) != tc.wantFired {
+				t.Fatalf("got %d fire calls, want %d", len(mockReg.claimTriggersCalls), tc.wantFired)
 			}
 		})
 	}
@@ -233,26 +356,16 @@ func TestFireEventTriggers(t *testing.T) {
 	tests := []struct {
 		name             string
 		nilRegistry      bool
-		nilDispatcher    bool
 		targets          []string
 		claimErr         bool
-		claimedTriggers  []ClaimedEventTrigger
 		contextHeader    string
-		dispatchErr      bool
-		wantDispatched   int
-		wantPromptSubstr string
+		wantFired        int
+		wantHeaderSubstr string
 	}{
 		{
-			name:          "nil registry is no-op",
-			nilRegistry:   true,
-			targets:       []string{"azylman/aerial"},
-			nilDispatcher: false,
-		},
-		{
-			name:          "nil dispatcher is no-op",
-			nilRegistry:   false,
-			targets:       []string{"azylman/aerial"},
-			nilDispatcher: true,
+			name:        "nil registry is no-op",
+			nilRegistry: true,
+			targets:     []string{"azylman/aerial"},
 		},
 		{
 			name:    "empty targets is no-op",
@@ -263,87 +376,41 @@ func TestFireEventTriggers(t *testing.T) {
 			targets: []string{"   ", ""},
 		},
 		{
-			name:     "claim error is handled gracefully",
-			targets:  []string{"azylman/aerial"},
-			claimErr: true,
+			name:      "fire error is handled gracefully",
+			targets:   []string{"azylman/aerial"},
+			claimErr:  true,
+			wantFired: 1,
 		},
 		{
-			name:            "zero claimed triggers dispatches nothing",
-			targets:         []string{"azylman/aerial"},
-			claimedTriggers: nil,
-			wantDispatched:  0,
-		},
-		{
-			name:    "claimed triggers dispatched with context header",
-			targets: []string{"azylman/aerial"},
-			claimedTriggers: []ClaimedEventTrigger{
-				{
-					ID:        "trig-101",
-					ChannelID: "1555405874565091380",
-					Source:    "github",
-					Target:    "azylman/aerial",
-					EventType: "ci_passed",
-					Prompt:    "Verify passing checks",
-					Effort:    "low",
-				},
-			},
+			name:             "fires triggers via haro with context header",
+			targets:          []string{"azylman/aerial"},
 			contextHeader:    "GitHub ci_passed on azylman/aerial",
-			wantDispatched:   1,
-			wantPromptSubstr: "GitHub ci_passed on azylman/aerial\n\nVerify passing checks",
-		},
-		{
-			name:    "dispatcher error handled gracefully",
-			targets: []string{"azylman/aerial"},
-			claimedTriggers: []ClaimedEventTrigger{
-				{
-					ID:        "trig-102",
-					ChannelID: "1555405874565091380",
-					Source:    "github",
-					Target:    "azylman/aerial",
-					EventType: "ci_failed",
-					Prompt:    "Triage failure",
-				},
-			},
-			dispatchErr:    true,
-			wantDispatched: 0,
+			wantFired:        1,
+			wantHeaderSubstr: "GitHub ci_passed on azylman/aerial",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			mockReg := &mockPRRegistry{
-				claimTriggersRes: tc.claimedTriggers,
-			}
+			mockReg := &mockPRRegistry{}
 			if tc.claimErr {
-				mockReg.claimTriggersErr = errors.New("simulated claim error")
-			}
-			mockDisp := &mockOutboundDispatcher{}
-			if tc.dispatchErr {
-				mockDisp.promptErr = errors.New("simulated dispatch error")
+				mockReg.claimTriggersErr = errors.New("simulated fire error")
 			}
 
 			srv := NewRouterServer(Config{}, nil)
 			if !tc.nilRegistry {
 				srv.SetRegistry(mockReg)
 			}
-			if !tc.nilDispatcher {
-				srv.SetDispatcher(mockDisp)
-			}
 
 			srv.fireEventTriggers(context.Background(), "github", tc.targets, "ci_passed", tc.contextHeader)
 
-			prompts := mockDisp.PromptCalls()
-			if tc.dispatchErr {
-				// Dispatcher error occurred; prompt calls may be attempted but error logged
-				return
+			if len(mockReg.claimTriggersCalls) != tc.wantFired {
+				t.Fatalf("fireEventTriggers() fired %d times, want %d", len(mockReg.claimTriggersCalls), tc.wantFired)
 			}
-			if len(prompts) != tc.wantDispatched {
-				t.Fatalf("fireEventTriggers() dispatched %d prompts, want %d", len(prompts), tc.wantDispatched)
-			}
-			if tc.wantPromptSubstr != "" && len(prompts) > 0 {
-				if !strings.Contains(prompts[0].Prompt, tc.wantPromptSubstr) {
-					t.Fatalf("prompt = %q, want substr %q", prompts[0].Prompt, tc.wantPromptSubstr)
+			if tc.wantHeaderSubstr != "" && len(mockReg.claimTriggersCalls) > 0 {
+				if !strings.Contains(mockReg.claimTriggersCalls[0].contextHeader, tc.wantHeaderSubstr) {
+					t.Fatalf("contextHeader = %q, want substr %q", mockReg.claimTriggersCalls[0].contextHeader, tc.wantHeaderSubstr)
 				}
 			}
 		})
@@ -400,22 +467,9 @@ func TestEvaluateHangarEventTriggers(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			mockReg := &mockPRRegistry{
-				claimTriggersRes: []ClaimedEventTrigger{
-					{
-						ID:        "hangar-trig",
-						ChannelID: "1555405874565091380",
-						Source:    "hangar",
-						Target:    tc.wantTarget,
-						EventType: tc.wantEventType,
-						Prompt:    "Hangar updated",
-					},
-				},
-			}
-			mockDisp := &mockOutboundDispatcher{}
+			mockReg := &mockPRRegistry{}
 			srv := NewRouterServer(Config{}, nil)
 			srv.SetRegistry(mockReg)
-			srv.SetDispatcher(mockDisp)
 
 			srv.evaluateHangarEventTriggers(context.Background(), HangarDeployEvent{
 				Event:   tc.event,
@@ -425,23 +479,19 @@ func TestEvaluateHangarEventTriggers(t *testing.T) {
 
 			if !tc.wantFired {
 				if len(mockReg.claimTriggersCalls) != 0 {
-					t.Fatalf("expected 0 claim calls, got %d", len(mockReg.claimTriggersCalls))
+					t.Fatalf("expected 0 fire calls, got %d", len(mockReg.claimTriggersCalls))
 				}
 				return
 			}
 			if len(mockReg.claimTriggersCalls) != 1 {
-				t.Fatalf("expected 1 claim call, got %d", len(mockReg.claimTriggersCalls))
+				t.Fatalf("expected 1 fire call, got %d", len(mockReg.claimTriggersCalls))
 			}
 			call := mockReg.claimTriggersCalls[0]
 			if call.source != "hangar" || call.eventType != tc.wantEventType || len(call.targets) != 1 || call.targets[0] != tc.wantTarget {
-				t.Fatalf("unexpected claim call: %+v, want source=hangar target=%s event=%s", call, tc.wantTarget, tc.wantEventType)
+				t.Fatalf("unexpected fire call: %+v, want source=hangar target=%s event=%s", call, tc.wantTarget, tc.wantEventType)
 			}
-			prompts := mockDisp.PromptCalls()
-			if len(prompts) != 1 {
-				t.Fatalf("expected 1 prompt dispatched, got %d", len(prompts))
-			}
-			if !strings.Contains(prompts[0].Prompt, tc.wantPromptPart) {
-				t.Fatalf("prompt %q does not contain %q", prompts[0].Prompt, tc.wantPromptPart)
+			if !strings.Contains(call.contextHeader, tc.wantPromptPart) {
+				t.Fatalf("contextHeader %q does not contain %q", call.contextHeader, tc.wantPromptPart)
 			}
 		})
 	}

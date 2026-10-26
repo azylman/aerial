@@ -646,7 +646,7 @@ func HandleUpdateHeartbeat(ctx context.Context, db *sql.DB, args map[string]any)
 }
 
 // HandleWatchEvent registers a deterministic one-shot event watch trigger.
-func HandleWatchEvent(ctx context.Context, db *sql.DB, args map[string]any) (*mcp.CallToolResult, error) {
+func HandleWatchEvent(ctx context.Context, db *sql.DB, args map[string]any, extraSources ...string) (*mcp.CallToolResult, error) {
 	channelID := getMapString(args, "channel_id", "target_id")
 	if !IsNumericSnowflake(channelID) {
 		return nil, fmt.Errorf("'channel_id' is required and must be a valid numeric snowflake")
@@ -670,7 +670,7 @@ func HandleWatchEvent(ctx context.Context, db *sql.DB, args map[string]any) (*mc
 	target := getMapString(args, "target")
 	eventType := getMapString(args, "event_type")
 
-	normSource, normTarget, normEventType, err := ValidateEventWatchSpec(source, target, eventType)
+	normSource, normTarget, normEventType, err := ValidateEventWatchSpec(source, target, eventType, extraSources...)
 	if err != nil {
 		return nil, err
 	}

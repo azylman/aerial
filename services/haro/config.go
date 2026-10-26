@@ -32,19 +32,21 @@ func ResolveConfigPath(fallbackPath string) string {
 
 // Config represents the runtime configuration for the scheduler MCP server.
 type Config struct {
-	DatabaseURL string
-	Timezone    string `yaml:"timezone"`
-	Port        string `yaml:"port"`
-	BrainURL    string `yaml:"brain_url"`
-	VanadisURL  string `yaml:"vanadis_url"`
+	DatabaseURL       string
+	Timezone          string   `yaml:"timezone"`
+	Port              string   `yaml:"port"`
+	BrainURL          string   `yaml:"brain_url"`
+	VanadisURL        string   `yaml:"vanadis_url"`
+	ExtraEventSources []string `yaml:"extra_event_sources"`
 }
 
 // SchedulerYAMLConfig defines the declarative file schema for /config/config.yaml.
 type SchedulerYAMLConfig struct {
-	Port       string `yaml:"port"`
-	Timezone   string `yaml:"timezone"`
-	BrainURL   string `yaml:"brain_url"`
-	VanadisURL string `yaml:"vanadis_url"`
+	Port              string   `yaml:"port"`
+	Timezone          string   `yaml:"timezone"`
+	BrainURL          string   `yaml:"brain_url"`
+	VanadisURL        string   `yaml:"vanadis_url"`
+	ExtraEventSources []string `yaml:"extra_event_sources"`
 }
 
 // LoadConfig loads configuration from path using DATABASE_URL from the environment.
@@ -106,11 +108,23 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 	}
 	vanadisURL = strings.TrimRight(vanadisURL, "/")
 
+	var extraSources []string
+	seenSources := make(map[string]struct{}, len(ycfg.ExtraEventSources))
+	for _, raw := range ycfg.ExtraEventSources {
+		if s := strings.ToLower(strings.TrimSpace(raw)); s != "" {
+			if _, ok := seenSources[s]; !ok {
+				seenSources[s] = struct{}{}
+				extraSources = append(extraSources, s)
+			}
+		}
+	}
+
 	return &Config{
-		DatabaseURL: cleanDB,
-		Timezone:    tz,
-		Port:        port,
-		BrainURL:    brainURL,
-		VanadisURL:  vanadisURL,
+		DatabaseURL:       cleanDB,
+		Timezone:          tz,
+		Port:              port,
+		BrainURL:          brainURL,
+		VanadisURL:        vanadisURL,
+		ExtraEventSources: extraSources,
 	}, nil
 }
