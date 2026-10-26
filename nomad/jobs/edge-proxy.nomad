@@ -147,6 +147,21 @@ http {
             proxy_set_header X-GitHub-Event $http_x_github_event;
         }
 
+        location ^~ /api/webhooks/twilio/ {
+            set $prospera_upstream http://prospera.aerial;
+            proxy_pass $prospera_upstream;
+            proxy_http_version 1.1;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $forwarded_proto;
+            proxy_set_header X-Forwarded-Host $host;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $connection_upgrade;
+            proxy_buffering off;
+            proxy_read_timeout 960s;
+        }
+
         # Hard 404 for all other endpoints to prevent any route leakage
         location / {
             return 404 '{"error":"not found"}\n';

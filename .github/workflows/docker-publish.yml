@@ -41,6 +41,7 @@ jobs:
       hangar: ${{ steps.filter.outputs.hangar }}
       webhooks-router: ${{ steps.filter.outputs.webhooks-router }}
       vanadis: ${{ steps.filter.outputs.vanadis }}
+      prospera: ${{ steps.filter.outputs.prospera }}
       roborev-runner: ${{ steps.filter.outputs.roborev-runner }}
       matrix: ${{ steps.set-matrix.outputs.matrix }}
       has_builds: ${{ steps.set-matrix.outputs.has_builds }}
@@ -91,6 +92,9 @@ jobs:
             vanadis:
               - 'services/vanadis/**'
               - 'pkg/**'
+            prospera:
+              - 'services/prospera/**'
+              - 'pkg/**'
             roborev-runner:
               - 'services/roborev-runner/**'
 
@@ -114,6 +118,7 @@ jobs:
               hangar: "${{ steps.filter.outputs.hangar }}",
               "webhooks-router": "${{ steps.filter.outputs.webhooks-router }}",
               vanadis: "${{ steps.filter.outputs.vanadis }}",
+              prospera: "${{ steps.filter.outputs.prospera }}",
               "roborev-runner": "${{ steps.filter.outputs.roborev-runner }}"
             };
 
@@ -133,6 +138,7 @@ jobs:
               { service: "hangar", context: ".", file: "./services/hangar/Dockerfile", image_name: "aerial-hangar" },
               { service: "webhooks-router", context: ".", file: "./services/webhooks-router/Dockerfile", image_name: "aerial-webhooks-router" },
               { service: "vanadis", context: ".", file: "./services/vanadis/Dockerfile", image_name: "aerial-vanadis" },
+              { service: "prospera", context: ".", file: "./services/prospera/Dockerfile", image_name: "aerial-prospera" },
               { service: "roborev-runner", context: ".", file: "./services/roborev-runner/Dockerfile", image_name: "aerial-roborev-runner" }
             ];
 
