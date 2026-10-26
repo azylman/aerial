@@ -81,6 +81,7 @@ COPY --link --from=builder /usr/local/go /usr/local/go
 COPY --link --from=golangci/golangci-lint:v2.15.0 /usr/bin/golangci-lint /usr/local/bin/golangci-lint
 COPY --link --from=node:22-bookworm-slim /usr/local/bin/node /usr/local/bin/node
 COPY --link --from=arigaio/atlas:1.3.4 /atlas /usr/local/bin/atlas
+COPY --link --from=1password/op:2 /usr/local/bin/op /usr/local/bin/op
 ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
 
 # Install official Antigravity CLI binary
