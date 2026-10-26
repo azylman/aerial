@@ -148,7 +148,7 @@ http {
         }
 
         location ^~ /api/webhooks/twilio/ {
-            set $prospera_upstream http://prospera.aerial;
+            set $prospera_upstream http://prospera.aerial:4019;
             proxy_pass $prospera_upstream;
             proxy_http_version 1.1;
             proxy_set_header Host $host;
