@@ -44,17 +44,49 @@ type ToolCall struct {
 
 // ToolArgs represents commonly inspected tool parameters.
 type ToolArgs struct {
-	TargetFile   string          `json:"TargetFile"`
-	AbsolutePath string          `json:"AbsolutePath"`
-	Path         string          `json:"path"`
-	File         string          `json:"file"`
-	StartLine    int             `json:"StartLine"`
-	EndLine      int             `json:"EndLine"`
-	CommandLine  string          `json:"CommandLine"`
-	Cwd          string          `json:"Cwd"`
-	ServerName   string          `json:"ServerName"`
-	ToolName     string          `json:"ToolName"`
-	Arguments    json.RawMessage `json:"Arguments"`
+	TargetFile        string          `json:"TargetFile"`
+	AbsolutePath      string          `json:"AbsolutePath"`
+	Path              string          `json:"path"`
+	File              string          `json:"file"`
+	StartLine         int             `json:"StartLine"`
+	EndLine           int             `json:"EndLine"`
+	CommandLine       string          `json:"CommandLine"`
+	Cwd               string          `json:"Cwd"`
+	ServerName        string          `json:"ServerName"`
+	ToolName          string          `json:"ToolName"`
+	Arguments         json.RawMessage `json:"Arguments"`
+	Action            string          `json:"Action"`
+	WaitMsBeforeAsync json.RawMessage `json:"WaitMsBeforeAsync"`
+	IsDaemon          json.RawMessage `json:"IsDaemon"`
+}
+
+// NormalizedAction returns the lowercased, unquoted Action parameter.
+func (a ToolArgs) NormalizedAction() string {
+	return strings.ToLower(strings.Trim(strings.TrimSpace(a.Action), `"`))
+}
+
+// IsDaemonBool reports whether IsDaemon is set to true (handling bool or string JSON encodings).
+func (a ToolArgs) IsDaemonBool() bool {
+	return strings.EqualFold(strings.Trim(strings.TrimSpace(string(a.IsDaemon)), `"`), "true")
+}
+
+// WaitMs returns the parsed integer value of WaitMsBeforeAsync, or 0 if unset/unparseable.
+func (a ToolArgs) WaitMs() int {
+	raw := strings.Trim(strings.TrimSpace(string(a.WaitMsBeforeAsync)), `"`)
+	if raw == "" {
+		return 0
+	}
+	var n int
+	if err := json.Unmarshal([]byte(raw), &n); err == nil {
+		return n
+	}
+	return 0
+}
+
+func (a ToolArgs) hasAnyField() bool {
+	return a.FilePath() != "" || a.CommandLine != "" || a.Cwd != "" ||
+		a.ToolName != "" || a.ServerName != "" || a.Action != "" ||
+		len(a.WaitMsBeforeAsync) > 0 || len(a.IsDaemon) > 0
 }
 
 // FilePath returns the resolved file path from TargetFile, AbsolutePath, Path, or File.
@@ -79,7 +111,7 @@ func ParseArgs(raw json.RawMessage) ToolArgs {
 	}
 
 	// 1. Try direct object unmarshal
-	if err := json.Unmarshal(raw, &args); err == nil && (args.FilePath() != "" || args.CommandLine != "" || args.Cwd != "" || args.ToolName != "" || args.ServerName != "") {
+	if err := json.Unmarshal(raw, &args); err == nil && args.hasAnyField() {
 		return args
 	}
 
