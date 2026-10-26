@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -629,17 +631,32 @@ func TestPGStore_DatabaseErrors(t *testing.T) {
 
 func TestOpenDB(t *testing.T) {
 	t.Parallel()
-	db, err := OpenDB("sqlite://:memory:")
-	if err != nil {
-		t.Fatalf("OpenDB(sqlite) error = %v", err)
+	tests := []struct {
+		name    string
+		url     string
+		wantErr bool
+	}{
+		{name: "sqlite memory prefix", url: "sqlite://:memory:", wantErr: false},
+		{name: "sqlite file prefix", url: "file:test.db?mode=memory", wantErr: false},
+		{name: "sqlite memory keyword", url: ":memory:", wantErr: false},
+		{name: "postgres scheme", url: "postgres://user:pass@localhost:5432/testdb", wantErr: false},
+		{name: "postgresql scheme", url: "postgresql://user:pass@localhost:5432/testdb", wantErr: false},
+		{name: "empty url", url: "   ", wantErr: true},
+		{name: "unsupported scheme", url: "invalid://url", wantErr: true},
 	}
-	_ = db.Close()
 
-	pgDB, err := OpenDB("postgres://user:pass@localhost:5432/testdb")
-	if err != nil {
-		t.Fatalf("OpenDB(pg) error = %v", err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db, err := OpenDB(tc.url)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("OpenDB(%q) err = %v, wantErr = %v", tc.url, err, tc.wantErr)
+			}
+			if db != nil {
+				_ = db.Close()
+			}
+		})
 	}
-	_ = pgDB.Close()
 }
 
 func TestUnmarshalCallJSON(t *testing.T) {
@@ -656,5 +673,40 @@ func TestUnmarshalCallJSON(t *testing.T) {
 	}
 	if err := unmarshalCallJSON(&c, "", "", ""); err != nil {
 		t.Errorf("unexpected error on empty JSON strings: %v", err)
+	}
+}
+
+func TestPGStore_SaveVoiceMessage_Concurrent(t *testing.T) {
+	t.Parallel()
+	store := setUpTestStore(t)
+	ctx := context.Background()
+
+	const numGoroutines = 8
+	var wg sync.WaitGroup
+	var insertedCount int64
+	concurMsg := VoiceMessage{
+		MessageSID: "SM_CONCURRENT",
+		Direction:  "inbound",
+		FromNumber: "+15105550111",
+		ToNumber:   "+15105550222",
+		Body:       "concurrent race test",
+	}
+	wg.Add(numGoroutines)
+	for i := 0; i < numGoroutines; i++ {
+		go func() {
+			defer wg.Done()
+			ins, err := store.SaveVoiceMessage(ctx, concurMsg)
+			if err != nil {
+				t.Errorf("SaveVoiceMessage(concur) error = %v", err)
+				return
+			}
+			if ins {
+				atomic.AddInt64(&insertedCount, 1)
+			}
+		}()
+	}
+	wg.Wait()
+	if insertedCount != 1 {
+		t.Fatalf("expected exactly 1 insert to succeed, got %d", insertedCount)
 	}
 }

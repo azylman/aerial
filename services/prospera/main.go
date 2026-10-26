@@ -27,7 +27,7 @@ func setupRoutes(cfg *Config, store Store) http.Handler {
 		})
 	})
 
-	mux.Handle("GET /debug/coverage/flush", httpkit.HandleCoverageFlush("prospera", false))
+	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("prospera", false))
 
 	mux.HandleFunc("POST /internal/dsp-preview", func(w http.ResponseWriter, r *http.Request) {
 		handleDSPPreview(w, r)

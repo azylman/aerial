@@ -106,11 +106,18 @@ func NewPGStore(db *sql.DB) *PGStore {
 
 // OpenDB opens a database connection from a connection string.
 func OpenDB(databaseURL string) (*sql.DB, error) {
-	if strings.HasPrefix(databaseURL, "sqlite://") || strings.HasPrefix(databaseURL, "file:") || strings.Contains(databaseURL, ":memory:") {
-		trimmed := strings.TrimPrefix(databaseURL, "sqlite://")
-		return sql.Open("sqlite", trimmed)
+	trimmed := strings.TrimSpace(databaseURL)
+	if trimmed == "" {
+		return nil, fmt.Errorf("store: connection string cannot be empty")
 	}
-	return sql.Open("pgx", databaseURL)
+	if strings.HasPrefix(trimmed, "sqlite://") || strings.HasPrefix(trimmed, "file:") || strings.Contains(trimmed, ":memory:") {
+		sqlitePath := strings.TrimPrefix(trimmed, "sqlite://")
+		return sql.Open("sqlite", sqlitePath)
+	}
+	if !strings.HasPrefix(trimmed, "postgres://") && !strings.HasPrefix(trimmed, "postgresql://") {
+		return nil, fmt.Errorf("store: unsupported database scheme in %q: only postgres:// or postgresql:// supported", trimmed)
+	}
+	return sql.Open("pgx", trimmed)
 }
 
 const selectCallFields = `call_id, provider_call_sid, direction, state, end_reason,
@@ -684,14 +691,6 @@ func (s *PGStore) ReconcileOrphanedCalls(ctx context.Context, checkActive func(c
 
 // SaveVoiceMessage inserts a voice message record. Returns true if inserted, false if already exists (idempotent).
 func (s *PGStore) SaveVoiceMessage(ctx context.Context, msg VoiceMessage) (bool, error) {
-	var count int
-	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM voice_messages WHERE message_sid = $1", msg.MessageSID).Scan(&count); err != nil {
-		return false, fmt.Errorf("store: check message exists: %w", err)
-	}
-	if count > 0 {
-		return false, nil
-	}
-
 	mediaJSON, err := json.Marshal(msg.MediaURLs)
 	if err != nil {
 		return false, fmt.Errorf("store: marshal media urls: %w", err)
@@ -716,16 +715,21 @@ func (s *PGStore) SaveVoiceMessage(ctx context.Context, msg VoiceMessage) (bool,
 	) VALUES (
 		$1, $2, $3, $4, $5,
 		$6, $7, $8, $9
-	)`
+	) ON CONFLICT (message_sid) DO NOTHING`
 
-	_, err = s.db.ExecContext(ctx, query,
+	res, err := s.db.ExecContext(ctx, query,
 		msg.MessageSID, msg.Direction, msg.FromNumber, msg.ToNumber, msg.Body,
 		string(mediaJSON), relCallID, msg.DiscordDelivered, createdAt,
 	)
 	if err != nil {
 		return false, fmt.Errorf("store: insert message: %w", err)
 	}
-	return true, nil
+
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("store: check rows affected: %w", err)
+	}
+	return rows > 0, nil
 }
 
 // MarkVoiceMessageDelivered updates discord_delivered to true for a message.

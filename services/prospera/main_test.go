@@ -148,12 +148,25 @@ func TestRoutes_CoverageFlush(t *testing.T) {
 	store := setUpTestStore(t)
 	handler := setupRoutes(&Config{}, store)
 
-	req := httptest.NewRequest(http.MethodGet, "/debug/coverage/flush", nil)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	tests := []struct {
+		name   string
+		method string
+	}{
+		{name: "GET method", method: http.MethodGet},
+		{name: "POST method", method: http.MethodPost},
+	}
 
-	if rec.Code != http.StatusOK && rec.Code != http.StatusInternalServerError {
-		t.Errorf("GET /debug/coverage/flush status = %d, want 200 or 500", rec.Code)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req := httptest.NewRequest(tc.method, "/debug/coverage/flush", nil)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK && rec.Code != http.StatusInternalServerError {
+				t.Errorf("%s /debug/coverage/flush status = %d, want 200 or 500", tc.method, rec.Code)
+			}
+		})
 	}
 }
 
