@@ -256,7 +256,7 @@ func (r *PostgresPRRegistry) AtomicTransitionConflict(ctx context.Context, repo 
 }
 
 func (r *PostgresPRRegistry) AtomicTransitionDeployFailed(ctx context.Context, repo string, prNumber int) (string, bool, error) {
-	query := `UPDATE pr_registry SET status = 'deploy_failed', updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 AND status = 'deploying' RETURNING target_id;`
+	query := `UPDATE pr_registry SET status = 'deploy_failed', updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 AND status IN ('deploying', 'merged') RETURNING target_id;`
 	return r.execAtomicTransition(ctx, repo, prNumber, "atomic transition deploy_failed", query)
 }
 
@@ -634,7 +634,7 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployFailedByJob(ctx context.Conte
 	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	selectQuery := `SELECT id, target_id, pr_number, COALESCE(merge_sha, ''), repo FROM pr_registry WHERE status IN ('deploying', 'merged') AND metadata->'jobs' ? $1 ORDER BY updated_at DESC LIMIT 1;`
+	selectQuery := `SELECT id, target_id, pr_number, COALESCE(merge_sha, ''), repo FROM pr_registry WHERE status IN ('deploying', 'merged', 'deploy_failed') AND metadata->'jobs' ? $1 ORDER BY updated_at DESC LIMIT 1;`
 	var id int64
 	var targetID, mergeSHA, repoOut string
 	var prNum int
@@ -652,7 +652,7 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployFailedByJob(ctx context.Conte
 		return "", 0, "", "", false, fmt.Errorf("update pr deploy_failed: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return "", 0, "", "", false, nil
+		return targetID, prNum, mergeSHA, repoOut, false, nil
 	}
 	return targetID, prNum, mergeSHA, repoOut, true, nil
 }

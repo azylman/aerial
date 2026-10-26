@@ -653,6 +653,7 @@ func TestProcessHangarEvent(t *testing.T) {
 	tests := []struct {
 		name               string
 		evt                HangarDeployEvent
+		sysChan            string
 		nomadJobJSON       string
 		reg                *mockPRRegistry
 		disp               *mockOutboundDispatcher
@@ -763,6 +764,24 @@ func TestProcessHangarEvent(t *testing.T) {
 				"Deployment failed for job hangar",
 				"Please investigate and fix",
 			},
+		},
+		{
+			name:    "deploy_failed prompt error reverts state and returns error",
+			evt:     mkHangarEvt("deploy_failed", "eri", "azylman/aerial", "shabroken", 531, "1555405874565091380", "failed", "exit status 1"),
+			reg:     &mockPRRegistry{deployFailedUpdated: true},
+			disp:    &mockOutboundDispatcher{promptErr: errors.New("eri 502 bad gateway")},
+			wantErr: true,
+		},
+		{
+			name:           "deploy_rollback without targetID falls back to system_channel name",
+			evt:            mkHangarEvt("deploy_rollback", "eri", "azylman/aerial", "shafail", 532, "", "rollback", "dotenv parse error"),
+			sysChan:        "aerial-dev",
+			reg:            &mockPRRegistry{deployFailedUpdated: true},
+			disp:           &mockOutboundDispatcher{},
+			wantPR:         532,
+			wantTargetID:   "aerial-dev",
+			wantPrompts:    1,
+			wantPromptSubs: []string{"Deployment failed and rolled back"},
 		},
 		{
 			name: "sync_success without PR number",
@@ -1012,7 +1031,7 @@ func TestProcessHangarEvent(t *testing.T) {
 			if tc.disp != nil {
 				disp = tc.disp
 			}
-			cfg := Config{}
+			cfg := Config{SystemChannelID: tc.sysChan}
 			client := &http.Client{Transport: &zeroCallTransport{}}
 			if tc.nomadJobJSON != "" {
 				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1466,8 +1485,15 @@ func TestCrashAlerts(t *testing.T) {
 			wantPrompts: 1,
 		},
 		{
-			name:    "invalid snowflake is clean no-op",
-			channel: "invalid-snowflake",
+			name:        "named system channel dispatches DM and prompt",
+			channel:     "aerial-dev",
+			disp:        &mockOutboundDispatcher{},
+			wantDMs:     1,
+			wantPrompts: 1,
+		},
+		{
+			name:    "invalid channel is clean no-op",
+			channel: "invalid channel!",
 			disp:    &mockOutboundDispatcher{},
 		},
 		{

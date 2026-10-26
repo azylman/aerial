@@ -149,6 +149,7 @@ func TestLoadConfig_YAMLAndOverrides(t *testing.T) {
 		name            string
 		localYAML       string
 		fallbackYAML    string
+		aerialYAML      string
 		useEmptyPath    bool
 		missingFallback bool
 		env             map[string]string
@@ -229,6 +230,17 @@ brain_url: "http://brain.custom:8088"
 			wantSysChan: "112233445566778899",
 		},
 		{
+			name:        "system_channel loaded from local yaml",
+			localYAML:   "system_channel: \"aerial-dev\"\n",
+			wantSysChan: "aerial-dev",
+		},
+		{
+			name:        "system_channel loaded from aerial config.yaml fallback",
+			localYAML:   "port: \"4020\"\n",
+			aerialYAML:  "system_channel: \"aerial-dev\"\n",
+			wantSysChan: "aerial-dev",
+		},
+		{
 			name:      "invalid yaml logs warning and uses defaults",
 			localYAML: "invalid: [yaml",
 			wantPort:  "4020",
@@ -250,6 +262,18 @@ brain_url: "http://brain.custom:8088"
 					t.Fatalf("failed to write local config: %v", err)
 				}
 			}
+
+			oldAerial := webhooksRouterAerialConfigPath
+			if tc.aerialYAML != "" {
+				aerialPath := filepath.Join(tmpDir, "config.yaml")
+				if err := os.WriteFile(aerialPath, []byte(tc.aerialYAML), 0o644); err != nil {
+					t.Fatalf("failed to write aerial config: %v", err)
+				}
+				webhooksRouterAerialConfigPath = aerialPath
+			} else {
+				webhooksRouterAerialConfigPath = filepath.Join(tmpDir, "nonexistent-config.yaml")
+			}
+			t.Cleanup(func() { webhooksRouterAerialConfigPath = oldAerial })
 
 			if tc.fallbackYAML != "" || tc.missingFallback {
 				oldFallback := webhooksRouterFallbackConfigPath

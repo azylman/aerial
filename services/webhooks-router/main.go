@@ -322,7 +322,7 @@ func (s *RouterServer) setPRWidgetState(ctx context.Context, repo string, prNumb
 	if !ok || pgReg == nil || pgReg.pool == nil {
 		return
 	}
-	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	qCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	query := `
 		UPDATE pr_registry
@@ -586,8 +586,17 @@ func (s *RouterServer) advanceVanadisChunkOnSync(ctx context.Context, repo strin
 	return s.advanceVanadisChunk(ctx, repo, prNumber)
 }
 
+func (s *RouterServer) isValidAlertTarget(targetID string) bool {
+	clean := strings.TrimSpace(targetID)
+	if IsValidDiscordSnowflake(clean) {
+		return true
+	}
+	sys := strings.TrimSpace(s.cfg.SystemChannelID)
+	return sys != "" && clean == sys && IsValidDiscordChannel(clean)
+}
+
 func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, label, dmMsg, prompt string, vOpts ...vanadisPromptOpts) error {
-	if s.dispatcher == nil || !IsValidDiscordSnowflake(targetID) {
+	if s.dispatcher == nil || !s.isValidAlertTarget(targetID) {
 		return nil
 	}
 	var opt vanadisPromptOpts
@@ -653,6 +662,9 @@ func (s *RouterServer) enrichHangarEventPRAndTarget(ctx context.Context, evt *Ha
 			evt.TargetID = targetID
 		}
 	}
+	if evt.TargetID == "" && (evt.Event == "deploy_failed" || evt.Event == "deploy_rollback" || evt.Event == "sync_failed") {
+		evt.TargetID = strings.TrimSpace(s.cfg.SystemChannelID)
+	}
 }
 
 func (s *RouterServer) handleHangarDeployStartedRegistry(ctx context.Context, evt HangarDeployEvent) bool {
@@ -702,6 +714,7 @@ func (s *RouterServer) handleHangarDeployFailedOrRollback(ctx context.Context, e
 		}
 		targetID = firstNonEmpty(tID, targetID)
 	}
+	targetID = firstNonEmpty(targetID, s.cfg.SystemChannelID)
 	actionDesc, fixDesc := "Deployment failed", "deployment failure"
 	if evt.Event == "deploy_rollback" {
 		actionDesc, fixDesc = "Deployment failed and rolled back", "deployment rollback failure"
@@ -721,7 +734,11 @@ func (s *RouterServer) handleHangarDeployFailedOrRollback(ctx context.Context, e
 		fmt.Sprintf("%s for job %s on %s (PR #%d, commit: %s).", actionDesc, evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA),
 		evt.Details, "", fmt.Sprintf("Please investigate and fix the %s.", fixDesc),
 	)
-	return s.dispatchAlertWithPrompt(ctx, targetID, evt.Event, dmMsg, prompt, s.vanadisPromptOpts(ctx, evt.Repo, evt.PRNumber))
+	if err := s.dispatchAlertWithPrompt(ctx, targetID, evt.Event, dmMsg, prompt, s.vanadisPromptOpts(ctx, evt.Repo, evt.PRNumber)); err != nil {
+		s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "deploying", "")
+		return err
+	}
+	return nil
 }
 
 func (s *RouterServer) handleHangarSyncFailed(ctx context.Context, evt HangarDeployEvent, prefix string) error {
@@ -754,7 +771,7 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 
 	syncHasExpected := s.recordHangarSyncExpectedJobs(ctx, evt)
 
-	if !IsValidDiscordSnowflake(evt.TargetID) || s.dispatcher == nil {
+	if !s.isValidAlertTarget(evt.TargetID) || s.dispatcher == nil {
 		if evt.Event == "sync_success" && evt.PRNumber > 0 {
 			return &evt, s.advanceVanadisChunkOnSync(ctx, evt.Repo, evt.PRNumber, syncHasExpected)
 		}

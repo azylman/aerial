@@ -112,9 +112,15 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 		{
 			name:       "DispatchPrompt invalid snowflake",
 			callType:   "prompt",
-			snowflake:  "not-a-snowflake",
+			snowflake:  "invalid channel!",
 			wantErr:    true,
 			wantSubstr: "invalid discord snowflake",
+		},
+		{
+			name:         "DispatchPrompt valid channel name from config.yaml",
+			callType:     "prompt",
+			snowflake:    "aerial-dev",
+			responseBody: `{"status":"queued"}`,
 		},
 		{
 			name:         "DispatchPrompt retry on 500 then success",
@@ -145,7 +151,7 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 		{
 			name:       "DispatchDirectMessage invalid snowflake",
 			callType:   "direct_message",
-			snowflake:  "not-a-snowflake",
+			snowflake:  "invalid channel!",
 			wantErr:    true,
 			wantSubstr: "invalid discord snowflake",
 		},
