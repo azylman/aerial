@@ -69,6 +69,11 @@ scrape_configs:
 {{- else }}
       - targets: ["127.0.0.1:8083"]
 {{- end }}
+    metric_relabel_configs:
+      - source_labels: [name]
+        regex: "^(.+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        target_label: name
+        replacement: "$1"
 
   - job_name: "node-exporter"
     static_configs:
