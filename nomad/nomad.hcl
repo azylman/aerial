@@ -13,7 +13,7 @@ server {
 client {
   enabled                 = true
   node_class              = "quiet-zero"
-  cpu_total_compute       = 12000
+  cpu_total_compute       = 16000
   gc_interval             = "10m"
   gc_disk_usage_threshold = 90
   options = {

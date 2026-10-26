@@ -116,6 +116,7 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 		deploymentsJSON  string
 		allocationsJSON  string
 		jobSpecJSON      string
+		evalSpecJSON     string
 		reg              *mockPRRegistry
 		systemChannelID  string
 		wantDeployedJobs []string
@@ -325,11 +326,18 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 		{
 			name:             "evaluation blocked with non-transient memory exhaustion dispatches failure immediately",
 			streamLines:      []string{`{"Index":2062,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"ID":"eval-blocked-mem","JobID":"coven","Status":"blocked","StatusDescription":"created to place remaining allocations","FailedTGAllocs":{"coven":{"NodesExhausted":1,"DimensionExhausted":{"memory":1}}},"QueuedAllocations":{"coven":0}}}}]}`},
+			evalSpecJSON:     `{"ID":"eval-blocked-mem","Status":"blocked"}`,
 			reg:              mkDeployFailedReg(validThread, 971, validSHA, validRepo, true),
 			wantFailedJobs:   []string{"coven"},
 			wantPrompts:      1,
 			wantPromptSubstr: []string{`failed with status "blocked"`, "memory"},
 			wantDMs:          1,
+		},
+		{
+			name:         "evaluation blocked ignored when live evaluation already resolved",
+			streamLines:  []string{`{"Index":2063,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"ID":"eval-resolved-cpu","JobID":"coven","Status":"blocked","StatusDescription":"created to place remaining allocations","FailedTGAllocs":{"coven":{"NodesExhausted":1,"DimensionExhausted":{"cpu":1}}},"QueuedAllocations":{"coven":0}}}}]}`},
+			evalSpecJSON: `{"ID":"eval-resolved-cpu","Status":"complete"}`,
+			reg:          &mockPRRegistry{deployFailedJobUpdated: true},
 		},
 	}
 
@@ -352,6 +360,14 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 				if strings.Contains(r.URL.Path, "/allocations") {
 					if tt.allocationsJSON != "" {
 						_, _ = w.Write([]byte(tt.allocationsJSON))
+						return
+					}
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				if strings.HasPrefix(r.URL.Path, "/v1/evaluation/") {
+					if tt.evalSpecJSON != "" {
+						_, _ = w.Write([]byte(tt.evalSpecJSON))
 						return
 					}
 					w.WriteHeader(http.StatusNotFound)
