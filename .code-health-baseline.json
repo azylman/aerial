@@ -1,37 +1,6 @@
 {
   "files": {},
   "functions": {
-    "services/eri/pkg/delivery/delivery.go::SendMessageWithAttachments": {
-      "cc": 22
-    },
-    "services/eri/pkg/delivery/delivery.go::SplitMessage": {
-      "lines": 172,
-      "cc": 42
-    },
-    "services/eri/pkg/delivery/media.go::AutoAttachNewMedia": {
-      "cc": 23
-    },
-    "services/eri/pkg/delivery/media.go::ResolveAndValidateLocalImage": {
-      "cc": 27
-    },
-    "services/eri/pkg/delivery/media.go::SanitizeIntermediateStatus": {
-      "cc": 26
-    },
-    "services/eri/pkg/discord/widget.go::BuildStatusWidgetComponents": {
-      "cc": 22
-    },
-    "services/eri/pkg/env/hooks.go::*Provisioner.SyncHooks": {
-      "cc": 21
-    },
-    "services/eri/pkg/env/mcp.go::*Provisioner.LoadTargetMCPConfig": {
-      "cc": 35
-    },
-    "services/eri/pkg/env/rules.go::*Provisioner.linkSharedSessionStorage": {
-      "depth": 6
-    },
-    "services/eri/pkg/env/skills.go::*Provisioner.LinkTargetSkills": {
-      "cc": 21
-    },
     "services/eri/pkg/guard/batch.go::CheckBatchWithDir": {
       "cc": 28
     },

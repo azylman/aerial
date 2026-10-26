@@ -346,6 +346,39 @@ func (p *Provisioner) provisionRuntimeSharedAssets(runtimeHome string) {
 	p.linkSharedSessionStorage(runtimeGemini, canonicalBrain, canonicalConversations)
 }
 
+func migrateExistingSessionDir(targetDir, canonicalDir string) {
+	if entries, rErr := os.ReadDir(targetDir); rErr == nil {
+		for _, entry := range entries {
+			src := filepath.Join(targetDir, entry.Name())
+			dst := filepath.Join(canonicalDir, entry.Name())
+			if _, dErr := os.Stat(dst); os.IsNotExist(dErr) {
+				ignore(os.Rename(src, dst))
+			}
+		}
+	}
+	ignore(os.RemoveAll(targetDir))
+}
+
+func prepareSharedTargetDir(targetDir, cleanCanonical string) bool {
+	fi, err := os.Lstat(targetDir)
+	if err != nil {
+		return false
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		if linkTarget, rErr := os.Readlink(targetDir); rErr == nil && filepath.Clean(linkTarget) == cleanCanonical {
+			return true
+		}
+		ignore(os.Remove(targetDir))
+		return false
+	}
+	if fi.IsDir() {
+		migrateExistingSessionDir(targetDir, cleanCanonical)
+		return false
+	}
+	ignore(os.Remove(targetDir))
+	return false
+}
+
 func (p *Provisioner) linkSharedSessionStorage(targetGemini, canonicalBrain, canonicalConversations string) {
 	shared := []struct {
 		targetRel string
@@ -365,27 +398,8 @@ func (p *Provisioner) linkSharedSessionStorage(targetGemini, canonicalBrain, can
 			continue
 		}
 
-		if fi, err := os.Lstat(targetDir); err == nil {
-			if fi.Mode()&os.ModeSymlink != 0 {
-				if linkTarget, rErr := os.Readlink(targetDir); rErr == nil && filepath.Clean(linkTarget) == cleanCanonical {
-					continue
-				}
-				ignore(os.Remove(targetDir))
-			} else if fi.IsDir() {
-				// Migrate any existing files or sessions to canonical directory
-				if entries, rErr := os.ReadDir(targetDir); rErr == nil {
-					for _, entry := range entries {
-						src := filepath.Join(targetDir, entry.Name())
-						dst := filepath.Join(item.canonical, entry.Name())
-						if _, dErr := os.Stat(dst); os.IsNotExist(dErr) {
-							ignore(os.Rename(src, dst))
-						}
-					}
-				}
-				ignore(os.RemoveAll(targetDir))
-			} else {
-				ignore(os.Remove(targetDir))
-			}
+		if prepareSharedTargetDir(targetDir, cleanCanonical) {
+			continue
 		}
 
 		// Ensure parent directory exists (e.g. targetGemini/antigravity-cli)
