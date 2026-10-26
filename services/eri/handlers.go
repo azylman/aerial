@@ -178,6 +178,7 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			GuildID:    "",
 			AuthorID:   "http-client",
 			AuthorName: "HTTP Client",
+			IsAdmin:    true,
 			Content:    req.Prompt,
 			Summary:    db.CleanTaskSummary(req.Prompt),
 			Status:     db.StatusPending,
