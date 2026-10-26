@@ -187,6 +187,31 @@ func FilterAssistantMessages(msgs []HistoryMessage) []HistoryMessage {
 	return filtered
 }
 
+func resolveHistoryBeforeTime(ctx context.Context, store db.Store, beforeID string) time.Time {
+	if beforeID == "" || store == nil {
+		return time.Time{}
+	}
+	if beforeMsg, err := store.GetMessage(ctx, beforeID); err == nil && beforeMsg != nil && !beforeMsg.CreatedAt.IsZero() {
+		return beforeMsg.CreatedAt
+	}
+	if IsNumericSnowflake(beforeID) {
+		if ts, err := discordgo.SnowflakeTimestamp(beforeID); err == nil {
+			return ts
+		}
+	}
+	return time.Time{}
+}
+
+func classifyDBMessageRole(m db.Message) string {
+	if m.AuthorID == "assistant" || strings.EqualFold(m.AuthorName, "aerial") || strings.EqualFold(m.AuthorName, "assistant") {
+		return "Assistant"
+	}
+	if m.AuthorID == "bot" || strings.EqualFold(m.AuthorName, "bot") || strings.HasPrefix(m.AuthorID, "bot-") || m.AuthorID == "scheduler" {
+		return "Bot"
+	}
+	return "User"
+}
+
 func fetchHistoryFromDB(store db.Store, channelID, beforeID string, limit int, ctxOpt ...context.Context) ([]HistoryMessage, error) {
 	start := time.Now()
 	if store == nil {
@@ -197,16 +222,7 @@ func fetchHistoryFromDB(store db.Store, channelID, beforeID string, limit int, c
 		ctx = ctxOpt[0]
 	}
 
-	var beforeTime time.Time
-	if beforeID != "" {
-		if beforeMsg, err := store.GetMessage(ctx, beforeID); err == nil && beforeMsg != nil && !beforeMsg.CreatedAt.IsZero() {
-			beforeTime = beforeMsg.CreatedAt
-		} else if IsNumericSnowflake(beforeID) {
-			if ts, err := discordgo.SnowflakeTimestamp(beforeID); err == nil {
-				beforeTime = ts
-			}
-		}
-	}
+	beforeTime := resolveHistoryBeforeTime(ctx, store, beforeID)
 
 	fetchLimit := limit
 	if beforeID != "" {
@@ -229,12 +245,7 @@ func fetchHistoryFromDB(store db.Store, channelID, beforeID string, limit int, c
 		if len(results) >= limit {
 			break
 		}
-		role := "User"
-		if m.AuthorID == "assistant" || strings.EqualFold(m.AuthorName, "aerial") || strings.EqualFold(m.AuthorName, "assistant") {
-			role = "Assistant"
-		} else if m.AuthorID == "bot" || strings.EqualFold(m.AuthorName, "bot") || strings.HasPrefix(m.AuthorID, "bot-") || m.AuthorID == "scheduler" {
-			role = "Bot"
-		}
+		role := classifyDBMessageRole(m)
 		results = append(results, HistoryMessage{ID: m.ID, AuthorName: m.AuthorName, Role: role, Content: m.BodyText(), CreatedAt: m.CreatedAt})
 	}
 	metrics.RecordChannelHistoryFetch("database", "success", time.Since(start), len(results))

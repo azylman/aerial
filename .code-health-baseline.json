@@ -1,27 +1,12 @@
 {
   "files": {},
   "functions": {
-    "services/eri/pkg/queue/burst.go::PlanBurstExecution": {
-      "cc": 25
-    },
-    "services/eri/pkg/queue/channel_resolution.go::ResolveBotRoleIDs": {
-      "cc": 34
-    },
-    "services/eri/pkg/queue/channel_resolution.go::matchesWakeIdentity": {
-      "cc": 22
-    },
-    "services/eri/pkg/queue/history.go::fetchHistoryFromDB": {
-      "cc": 26
-    },
     "services/eri/pkg/queue/pool.go::*WorkerPool.ExecuteVoiceTurn": {
       "cc": 33
     },
     "services/eri/pkg/queue/pool.go::New": {
       "lines": 178,
       "cc": 49
-    },
-    "services/eri/pkg/queue/recovery.go::RecoverInterrupted": {
-      "cc": 38
     },
     "services/eri/pkg/queue/sentence_detector.go::findSentenceBoundary": {
       "cc": 35
