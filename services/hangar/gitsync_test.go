@@ -844,10 +844,17 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 
 	t.Run("service_config_mappings_and_non_yaml", func(t *testing.T) {
 		t.Parallel()
+		var foundKernelMCP bool
 		for _, m := range DefaultManagedServiceConfigs {
 			if strings.Contains(m.NomadVar, "orin-voice") || strings.Contains(m.NomadVar, "mirrormere") {
 				t.Errorf("expected DefaultManagedServiceConfigs to remain generic, found: %v", m)
 			}
+			if m.NomadVar == "nomad/jobs/kernel-mcp" {
+				foundKernelMCP = true
+			}
+		}
+		if !foundKernelMCP {
+			t.Errorf("expected DefaultManagedServiceConfigs to contain kernel-mcp mapping")
 		}
 
 		customDir := t.TempDir()

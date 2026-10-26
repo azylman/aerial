@@ -207,7 +207,7 @@ func ResolveCDPHost(ctx context.Context, host string) string {
 
 // BuildGetContentScript builds a JS expression to clone target element or body, remove scripts/styles, and return { title, url, text }.
 func BuildGetContentScript(selector string) string {
-	selJSON, _ := json.Marshal(selector)
+	selJSON, _ := json.Marshal(selector) //nolint:errcheck,errchkjson
 	return fmt.Sprintf(`(() => {
   const sel = %s;
   const el = (sel ? document.querySelector(sel) : document.body) || document.body;
@@ -237,7 +237,7 @@ type ClickResult struct {
 
 // BuildClickScript builds a JS expression to scroll the selector into view and return geometry.
 func BuildClickScript(selector string) string {
-	selJSON, _ := json.Marshal(selector)
+	selJSON, _ := json.Marshal(selector) //nolint:errcheck,errchkjson
 	return fmt.Sprintf(`(() => {
   const el = document.querySelector(%s);
   if (!el) return { found: false, tag: "", text: "", hasRect: false, x: 0, y: 0 };
@@ -269,8 +269,8 @@ type FocusResult struct {
 }
 
 // BuildFocusAndClearScript builds a JS expression to focus and optionally clear an input.
-func BuildFocusAndClearScript(selector string, clear bool) string {
-	selJSON, _ := json.Marshal(selector)
+func BuildFocusAndClearScript(selector string, shouldClear bool) string {
+	selJSON, _ := json.Marshal(selector) //nolint:errcheck,errchkjson
 	return fmt.Sprintf(`(() => {
   const el = document.querySelector(%s);
   if (!el) return { found: false, hasRect: false, x: 0, y: 0 };
@@ -284,12 +284,12 @@ func BuildFocusAndClearScript(selector string, clear bool) string {
   const x = hasRect ? Math.round(rect.left + rect.width / 2) : 0;
   const y = hasRect ? Math.round(rect.top + rect.height / 2) : 0;
   return { found: true, hasRect: hasRect, x: x, y: y };
-})()`, string(selJSON), clear)
+})()`, string(selJSON), shouldClear)
 }
 
 // BuildDispatchInputEventsScript builds a JS expression to trigger bubbling input and change events.
 func BuildDispatchInputEventsScript(selector string) string {
-	selJSON, _ := json.Marshal(selector)
+	selJSON, _ := json.Marshal(selector) //nolint:errcheck,errchkjson
 	return fmt.Sprintf(`(() => {
   const el = document.querySelector(%s);
   if (el) {
@@ -572,7 +572,13 @@ func applyYAMLFile(cfg *Config, configPath string) error {
 		return nil
 	}
 	fi, err := os.Stat(configPath)
-	if err != nil || fi.Size() == 0 {
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to stat config file %s: %w", configPath, err)
+	}
+	if fi.Size() == 0 {
 		return nil
 	}
 	data, readErr := os.ReadFile(configPath)

@@ -25,6 +25,9 @@ func startMainFakeCDPServer(t *testing.T) (*httptest.Server, *Config) {
 	var wsMu sync.Mutex
 	var activeWS *websocket.Conn
 	var lastNavURL string
+	var cartNavCount int
+	var cartEvalCount int
+	var clickCount int
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/json/list" {
@@ -83,7 +86,14 @@ func startMainFakeCDPServer(t *testing.T) (*httptest.Server, *Config) {
 						lastNavURL = p.URL
 						wsMu.Unlock()
 
-						if strings.Contains(p.URL, "fail-navigate") || strings.Contains(p.URL, "failnav") {
+						wsMu.Lock()
+						if strings.Contains(p.URL, "/cart/view.html") {
+							cartNavCount++
+						}
+						failNav := strings.Contains(p.URL, "fail-navigate") || strings.Contains(p.URL, "failnav") || (strings.Contains(p.URL, "/cart/view.html") && cartNavCount == 2)
+						wsMu.Unlock()
+
+						if failNav {
 							wsMu.Lock()
 							_ = ws.WriteJSON(map[string]any{
 								"id": req.ID,
@@ -129,6 +139,22 @@ func startMainFakeCDPServer(t *testing.T) (*httptest.Server, *Config) {
 								"text":  "Product details with card 4111-2222-3333-4444 here",
 							}
 						case strings.Contains(expr, "#sc-subtotal-amount-activecart"):
+							wsMu.Lock()
+							cartEvalCount++
+							failEval := cartEvalCount == 2
+							wsMu.Unlock()
+							if failEval {
+								wsMu.Lock()
+								_ = ws.WriteJSON(map[string]any{
+									"id": req.ID,
+									"error": map[string]any{
+										"code":    -32000,
+										"message": "Cart extraction failed",
+									},
+								})
+								wsMu.Unlock()
+								continue
+							}
 							evalVal = map[string]any{
 								"subtotal": "$49.99",
 								"count":    "1 item",
@@ -265,6 +291,24 @@ func startMainFakeCDPServer(t *testing.T) (*httptest.Server, *Config) {
 						result = map[string]any{
 							"data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
 						}
+					case "Input.dispatchMouseEvent":
+						wsMu.Lock()
+						clickCount++
+						failClick := clickCount == 4
+						wsMu.Unlock()
+						if failClick {
+							wsMu.Lock()
+							_ = ws.WriteJSON(map[string]any{
+								"id": req.ID,
+								"error": map[string]any{
+									"code":    -32000,
+									"message": "Click dispatch failed",
+								},
+							})
+							wsMu.Unlock()
+							continue
+						}
+						result = map[string]any{}
 					default:
 						result = map[string]any{}
 					}
@@ -560,6 +604,13 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 			wantSubstr: "clicked",
 			wantError:  false,
 		},
+		{
+			name:       "browser_click dispatch trusted click failure",
+			toolName:   "browser_click",
+			args:       `{"selector":".btn"}`,
+			wantSubstr: "Dispatch trusted click failed",
+			wantError:  true,
+		},
 		// 5. browser_type
 		{
 			name:       "browser_type missing selector",
@@ -647,6 +698,20 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 			args:       `{}`,
 			wantSubstr: "[REDACTED_CARD]",
 			wantError:  false,
+		},
+		{
+			name:       "amazon_get_cart navigation failure",
+			toolName:   "amazon_get_cart",
+			args:       `{}`,
+			wantSubstr: "Amazon cart navigation failed",
+			wantError:  true,
+		},
+		{
+			name:       "amazon_get_cart extraction failure",
+			toolName:   "amazon_get_cart",
+			args:       `{}`,
+			wantSubstr: "Amazon cart extraction failed",
+			wantError:  true,
 		},
 		// 9. amazon_add_to_cart
 		{
@@ -759,7 +824,7 @@ func TestRunServer_Execution(t *testing.T) {
 func TestMain_Execution_TableDriven(t *testing.T) {
 	tmpDir := t.TempDir()
 	badConfigPath := filepath.Join(tmpDir, "bad_config.yaml")
-	_ = os.WriteFile(badConfigPath, []byte("port: [unclosed"), 0600)
+	_ = os.WriteFile(badConfigPath, []byte("port: [unclosed"), 0o600)
 
 	tests := []struct {
 		name       string

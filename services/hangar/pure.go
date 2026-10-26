@@ -599,6 +599,7 @@ func serviceBuildDependsOnPkg(svc string) bool {
 		"haro", "scheduler-mcp",
 		"coven", "memory-mcp",
 		"discord-mcp",
+		"kernel-mcp",
 		"dashboard",
 		"hangar",
 		"webhooks-router",
