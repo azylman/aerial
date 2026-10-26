@@ -661,6 +661,7 @@ func TestClassify_SystemOne(t *testing.T) {
 	tests := []struct {
 		name          string
 		emptyURL      bool
+		customURL     string
 		customModel   string
 		statusCode    int
 		respBody      string
@@ -671,18 +672,19 @@ func TestClassify_SystemOne(t *testing.T) {
 		wantReasonSub string
 		wantAlert     bool
 	}{
-		{"empty ClassifierURL", true, "", 0, "", 0, false, false, 0.0, "classifier_url is empty", false},
-		{"success with noul", false, "", 200, `{"model":"orin-laya","answers":{"should_wake":{"type":"noul","noul":0.88}}}`, 0, false, false, 0.88, "systemone", false},
-		{"confidence fallback", false, "", 200, `{"answers":{"should_wake":{"type":"noul","confidence":0.65}}}`, 0, false, false, 0.65, "systemone", false},
-		{"clamp below zero", false, "", 200, `{"answers":{"should_wake":{"confidence":-0.5}}}`, 0, false, false, 0.0, "systemone", false},
-		{"clamp above one", false, "", 200, `{"answers":{"should_wake":{"confidence":1.5}}}`, 0, false, false, 1.0, "systemone", false},
-		{"missing should_wake", false, "", 200, `{"answers":{}}`, 0, false, false, 0.0, "missing 'should_wake'", true},
-		{"response error field", false, "", 200, `{"error":"model out of memory"}`, 0, false, false, 0.0, "model out of memory", true},
-		{"invalid json", false, "", 200, `not valid json {`, 0, false, false, 0.0, "failed to parse systemone json", true},
-		{"non-200 truncation", false, "", 503, strings.Repeat("error detail string ", 20), 0, false, false, 0.0, "HTTP 503", true},
-		{"3-attempt recovery", false, "", 200, `{"answers":{"should_wake":{"confidence":0.95}}}`, 2, false, false, 0.95, "systemone", false},
-		{"cancel during sleep", false, "", 500, "fail", 0, true, false, 0.0, "context cancelled", true},
-		{"burst model override", false, "custom-modernbert", 200, `{"answers":{"should_wake":{"confidence":0.77}}}`, 0, false, true, 0.77, "systemone", false},
+		{"empty ClassifierURL", true, "", "", 0, "", 0, false, false, 0.0, "classifier_url is empty", false},
+		{"success with noul", false, "", "", 200, `{"model":"orin-laya","answers":{"should_wake":{"type":"noul","noul":0.88}}}`, 0, false, false, 0.88, "systemone", false},
+		{"confidence fallback", false, "", "", 200, `{"answers":{"should_wake":{"type":"noul","confidence":0.65}}}`, 0, false, false, 0.65, "systemone", false},
+		{"clamp below zero", false, "", "", 200, `{"answers":{"should_wake":{"confidence":-0.5}}}`, 0, false, false, 0.0, "systemone", false},
+		{"clamp above one", false, "", "", 200, `{"answers":{"should_wake":{"confidence":1.5}}}`, 0, false, false, 1.0, "systemone", false},
+		{"missing should_wake", false, "", "", 200, `{"answers":{}}`, 0, false, false, 0.0, "missing 'should_wake'", true},
+		{"response error field", false, "", "", 200, `{"error":"model out of memory"}`, 0, false, false, 0.0, "model out of memory", true},
+		{"invalid json", false, "", "", 200, `not valid json {`, 0, false, false, 0.0, "failed to parse systemone json", true},
+		{"non-200 truncation", false, "", "", 503, strings.Repeat("error detail string ", 20), 0, false, false, 0.0, "HTTP 503", true},
+		{"3-attempt recovery", false, "", "", 200, `{"answers":{"should_wake":{"confidence":0.95}}}`, 2, false, false, 0.95, "systemone", false},
+		{"cancel during sleep", false, "", "", 500, "fail", 0, true, false, 0.0, "context cancelled", true},
+		{"burst model override", false, "", "custom-modernbert", 200, `{"answers":{"should_wake":{"confidence":0.77}}}`, 0, false, true, 0.77, "systemone", false},
+		{"malformed URL aborts immediately", false, "://bad-url", "", 0, "", 0, false, false, 0.0, "failed to create http request", true},
 	}
 
 	for _, tc := range tests {
@@ -707,6 +709,8 @@ func TestClassify_SystemOne(t *testing.T) {
 			serverURL := ts.URL
 			if tc.emptyURL {
 				serverURL = ""
+			} else if tc.customURL != "" {
+				serverURL = tc.customURL
 			}
 
 			cfg := config.NewFromData(&config.ConfigData{

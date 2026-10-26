@@ -266,6 +266,98 @@ type ConfigData struct {
 	MaxBackgroundTaskDuration time.Duration            `yaml:"max_background_task_duration,omitempty" json:"max_background_task_duration,omitempty"`
 }
 
+func normalizePrewarmedTargets(targets []string) []string {
+	if targets == nil {
+		return []string{"kiosk"}
+	}
+	cleanTargets := make([]string, 0, len(targets))
+	for _, t := range targets {
+		trimmed := strings.TrimSpace(t)
+		if trimmed != "" {
+			cleanTargets = append(cleanTargets, trimmed)
+		}
+	}
+	return cleanTargets
+}
+
+func applyDaemonDefaults(c *ConfigData, idleTimeout time.Duration, maxDaemons int, maxBgDuration time.Duration) {
+	if idleTimeout > 0 {
+		c.DaemonIdleTimeout = idleTimeout
+	} else {
+		c.DaemonIdleTimeout = 24 * time.Hour
+	}
+	if maxDaemons > 0 {
+		c.MaxConcurrentDaemons = maxDaemons
+	} else {
+		c.MaxConcurrentDaemons = 40
+	}
+	if maxBgDuration > 0 {
+		c.MaxBackgroundTaskDuration = maxBgDuration
+	} else {
+		c.MaxBackgroundTaskDuration = 2 * time.Hour
+	}
+}
+
+func unmarshalRawMCPConfig(rawMCP interface{}) (string, error) {
+	if rawMCP == nil {
+		return "", nil
+	}
+	switch v := rawMCP.(type) {
+	case string:
+		return v, nil
+	default:
+		b, err := json.Marshal(v)
+		if err != nil {
+			return "", fmt.Errorf("failed to marshal mcp_config to JSON: %w", err)
+		}
+		return string(b), nil
+	}
+}
+
+func populateTargetMcpServers(rawServers map[string]interface{}) (TargetMcpConfig, error) {
+	cfg := TargetMcpConfig{
+		Common:    make(map[string]json.RawMessage),
+		Discord:   make(map[string]json.RawMessage),
+		Voice:     make(map[string]json.RawMessage),
+		Ephemeral: make(map[string]json.RawMessage),
+	}
+	if rawServers == nil {
+		return cfg, nil
+	}
+	for targetKey, targetVal := range rawServers {
+		normalizedKey := strings.ToLower(strings.TrimSpace(targetKey))
+		var targetMap map[string]json.RawMessage
+		switch normalizedKey {
+		case "common":
+			targetMap = cfg.Common
+		case "discord":
+			targetMap = cfg.Discord
+		case "voice":
+			targetMap = cfg.Voice
+		case "ephemeral":
+			targetMap = cfg.Ephemeral
+		default:
+			return cfg, fmt.Errorf("mcp_servers contains unrecognized target category %q: only 'common', 'discord', 'voice', and 'ephemeral' are allowed", targetKey)
+		}
+
+		if targetVal == nil {
+			continue
+		}
+		subMap, ok := targetVal.(map[string]interface{})
+		if !ok {
+			return cfg, fmt.Errorf("mcp_servers category %q must be a mapping of server names to configurations", targetKey)
+		}
+		for srvName, srvConf := range subMap {
+			b, err := json.Marshal(srvConf)
+			if err != nil {
+				return cfg, fmt.Errorf("failed to marshal mcp_server %s/%s to JSON: %w", targetKey, srvName, err)
+			}
+			targetMap[srvName] = json.RawMessage(b)
+		}
+	}
+	return cfg, nil
+}
+
 func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	type rawConfigHelper struct {
 		GeminiHomeDir             string                   `yaml:"gemini_home_dir"`
@@ -315,18 +407,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	c.Channels = raw.Channels
 	c.Voice = raw.Voice
 	c.Voice.Engine = strings.TrimSpace(raw.Voice.Engine)
-	if raw.Voice.PrewarmedTargets != nil {
-		cleanTargets := make([]string, 0, len(c.Voice.PrewarmedTargets))
-		for _, t := range c.Voice.PrewarmedTargets {
-			trimmed := strings.TrimSpace(t)
-			if trimmed != "" {
-				cleanTargets = append(cleanTargets, trimmed)
-			}
-		}
-		c.Voice.PrewarmedTargets = cleanTargets
-	} else {
-		c.Voice.PrewarmedTargets = []string{"kiosk"}
-	}
+	c.Voice.PrewarmedTargets = normalizePrewarmedTargets(raw.Voice.PrewarmedTargets)
 	c.DatabaseURL = raw.DatabaseURL
 	c.Port = raw.Port
 	c.AgyBin = raw.AgyBin
@@ -350,74 +431,20 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	c.GeminiHomeDir = raw.GeminiHomeDir
 	c.DataDir = raw.DataDir
 
-	if raw.DaemonIdleTimeout > 0 {
-		c.DaemonIdleTimeout = raw.DaemonIdleTimeout
-	} else {
-		c.DaemonIdleTimeout = 24 * time.Hour
-	}
-	if raw.MaxConcurrentDaemons > 0 {
-		c.MaxConcurrentDaemons = raw.MaxConcurrentDaemons
-	} else {
-		c.MaxConcurrentDaemons = 40
-	}
-	if raw.MaxBackgroundTaskDuration > 0 {
-		c.MaxBackgroundTaskDuration = raw.MaxBackgroundTaskDuration
-	} else {
-		c.MaxBackgroundTaskDuration = 2 * time.Hour
-	}
+	applyDaemonDefaults(c, raw.DaemonIdleTimeout, raw.MaxConcurrentDaemons, raw.MaxBackgroundTaskDuration)
 
-	if raw.MCPConfig != nil {
-		switch v := raw.MCPConfig.(type) {
-		case string:
-			c.MCPConfig = v
-		default:
-			b, err := json.Marshal(v)
-			if err != nil {
-				return fmt.Errorf("failed to marshal mcp_config to JSON: %w", err)
-			}
-			c.MCPConfig = string(b)
-		}
+	mcpCfg, err := unmarshalRawMCPConfig(raw.MCPConfig)
+	if err != nil {
+		return err
 	}
+	c.MCPConfig = mcpCfg
 
-	c.McpServers = TargetMcpConfig{
-		Common:    make(map[string]json.RawMessage),
-		Discord:   make(map[string]json.RawMessage),
-		Voice:     make(map[string]json.RawMessage),
-		Ephemeral: make(map[string]json.RawMessage),
+	mcpServers, err := populateTargetMcpServers(raw.McpServers)
+	if err != nil {
+		return err
 	}
-	if raw.McpServers != nil {
-		for targetKey, targetVal := range raw.McpServers {
-			normalizedKey := strings.ToLower(strings.TrimSpace(targetKey))
-			var targetMap map[string]json.RawMessage
-			switch normalizedKey {
-			case "common":
-				targetMap = c.McpServers.Common
-			case "discord":
-				targetMap = c.McpServers.Discord
-			case "voice":
-				targetMap = c.McpServers.Voice
-			case "ephemeral":
-				targetMap = c.McpServers.Ephemeral
-			default:
-				return fmt.Errorf("mcp_servers contains unrecognized target category %q: only 'common', 'discord', 'voice', and 'ephemeral' are allowed", targetKey)
-			}
+	c.McpServers = mcpServers
 
-			if targetVal == nil {
-				continue
-			}
-			subMap, ok := targetVal.(map[string]interface{})
-			if !ok {
-				return fmt.Errorf("mcp_servers category %q must be a mapping of server names to configurations", targetKey)
-			}
-			for srvName, srvConf := range subMap {
-				b, err := json.Marshal(srvConf)
-				if err != nil {
-					return fmt.Errorf("failed to marshal mcp_server %s/%s to JSON: %w", targetKey, srvName, err)
-				}
-				targetMap[srvName] = json.RawMessage(b)
-			}
-		}
-	}
 	return nil
 }
 

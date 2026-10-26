@@ -31,6 +31,74 @@ type CLIConfig struct {
 	DirectDB bool
 }
 
+func splitSubcommandAndArgs(args []string) (string, []string, error) {
+	if len(args) == 0 {
+		return "", nil, fmt.Errorf("no arguments provided")
+	}
+	first := args[0]
+	switch first {
+	case "stats", "search", "get":
+		return first, args[1:], nil
+	default:
+		return "search", args, nil
+	}
+}
+
+func isFlagWithValue(name string) bool {
+	switch name {
+	case "query", "q", "mode", "m", "tool", "t", "session", "s", "limit", "n", "url", "step", "i", "context", "C":
+		return true
+	default:
+		return false
+	}
+}
+
+func partitionCLIFlagsAndPositional(remaining []string) ([]string, []string) {
+	var flags []string
+	var positional []string
+	for i := 0; i < len(remaining); i++ {
+		arg := remaining[i]
+		if !strings.HasPrefix(arg, "-") {
+			positional = append(positional, arg)
+			continue
+		}
+		flags = append(flags, arg)
+		if strings.Contains(arg, "=") {
+			continue
+		}
+		flagName := strings.TrimLeft(arg, "-")
+		if isFlagWithValue(flagName) && i+1 < len(remaining) && !strings.HasPrefix(remaining[i+1], "-") {
+			i++
+			flags = append(flags, remaining[i])
+		}
+	}
+	return flags, positional
+}
+
+func validateParsedCLIConfig(cfg *CLIConfig, positional []string) error {
+	if cfg.Limit < 0 {
+		return fmt.Errorf("limit must be non-negative")
+	}
+	if cfg.Context < 0 {
+		return fmt.Errorf("context window size must be non-negative")
+	}
+	if cfg.Command == "get" {
+		if strings.TrimSpace(cfg.Session) == "" && len(positional) > 0 {
+			cfg.Session = positional[0]
+		}
+		if strings.TrimSpace(cfg.Session) == "" {
+			return fmt.Errorf("session ID is required for get command (usage: transcript-search get --session <id> --step <N>)")
+		}
+		if cfg.Step < 0 {
+			return fmt.Errorf("step index is required and must be non-negative for get command (usage: transcript-search get --session <id> --step <N>)")
+		}
+	}
+	if cfg.Command == "search" && cfg.Query == "" && len(positional) > 0 {
+		cfg.Query = strings.Join(positional, " ")
+	}
+	return nil
+}
+
 func parseCLIArgs(args []string) (CLIConfig, error) {
 	cfg := CLIConfig{
 		Mode:    "auto",
@@ -44,48 +112,13 @@ func parseCLIArgs(args []string) (CLIConfig, error) {
 		cfg.BaseURL = strings.TrimRight(envURL, "/")
 	}
 
-	if len(args) == 0 {
-		return cfg, fmt.Errorf("no arguments provided")
+	cmd, remaining, err := splitSubcommandAndArgs(args)
+	if err != nil {
+		return cfg, err
 	}
+	cfg.Command = cmd
 
-	// Subcommand detection
-	first := args[0]
-	var remaining []string
-
-	if first == "stats" {
-		cfg.Command = "stats"
-		remaining = args[1:]
-	} else if first == "search" {
-		cfg.Command = "search"
-		remaining = args[1:]
-	} else if first == "get" {
-		cfg.Command = "get"
-		remaining = args[1:]
-	} else {
-		cfg.Command = "search"
-		remaining = args
-	}
-
-	var flags []string
-	var positional []string
-	for i := 0; i < len(remaining); i++ {
-		arg := remaining[i]
-		if strings.HasPrefix(arg, "-") {
-			flags = append(flags, arg)
-			flagName := strings.TrimLeft(arg, "-")
-			if !strings.Contains(arg, "=") {
-				switch flagName {
-				case "query", "q", "mode", "m", "tool", "t", "session", "s", "limit", "n", "url", "step", "i", "context", "C":
-					if i+1 < len(remaining) && !strings.HasPrefix(remaining[i+1], "-") {
-						i++
-						flags = append(flags, remaining[i])
-					}
-				}
-			}
-		} else {
-			positional = append(positional, arg)
-		}
-	}
+	flags, positional := partitionCLIFlagsAndPositional(remaining)
 
 	fs := flag.NewFlagSet("transcript-search", flag.ContinueOnError)
 	fs.StringVar(&cfg.Query, "query", cfg.Query, "Search query string")
@@ -110,20 +143,8 @@ func parseCLIArgs(args []string) (CLIConfig, error) {
 		return cfg, err
 	}
 
-	if cfg.Command == "get" {
-		if strings.TrimSpace(cfg.Session) == "" && len(positional) > 0 {
-			cfg.Session = positional[0]
-		}
-		if strings.TrimSpace(cfg.Session) == "" {
-			return cfg, fmt.Errorf("session ID is required for get command (usage: transcript-search get --session <id> --step <N>)")
-		}
-		if cfg.Step < 0 {
-			return cfg, fmt.Errorf("step index is required and must be non-negative for get command (usage: transcript-search get --session <id> --step <N>)")
-		}
-	}
-
-	if cfg.Command == "search" && cfg.Query == "" && len(positional) > 0 {
-		cfg.Query = strings.Join(positional, " ")
+	if err := validateParsedCLIConfig(&cfg, positional); err != nil {
+		return cfg, err
 	}
 
 	return cfg, nil
@@ -405,72 +426,54 @@ func executeGetDirectDB(ctx context.Context, cfg CLIConfig) (transcript.StepWind
 	return transcript.GetTranscriptStepWindow(ctx, store, cfg.Session, cfg.Step, cfg.Context)
 }
 
-func runCLI(ctx context.Context, args []string, out io.Writer) error {
-	cfg, err := parseCLIArgs(args)
-	if err != nil {
+func writeCLIOutput(out io.Writer, asJSON bool, payload any, formatted string) error {
+	if asJSON {
+		b, err := jsonMarshalIndent(payload, "", "  ")
+		if err != nil {
+			return err
+		}
+		_, err = fmt.Fprintln(out, string(b))
 		return err
 	}
+	_, err := fmt.Fprint(out, formatted)
+	return err
+}
 
-	if cfg.Command == "stats" {
-		stats, err := executeStatsHTTP(ctx, cfg)
-		if err != nil {
-			return fmt.Errorf("failed fetching stats: %w", err)
-		}
-		if cfg.JSON {
-			b, err := jsonMarshalIndent(stats, "", "  ")
-			if err != nil {
-				return err
-			}
-			if _, err := fmt.Fprintln(out, string(b)); err != nil {
-				return err
-			}
-		} else {
-			if _, err := fmt.Fprintf(out, "📊 Aerial Transcript Index Stats:\n- Total Indexed Sessions: %v\n- Status: %v\n", stats["total_sessions"], stats["status"]); err != nil {
-				return err
-			}
-		}
-		return nil
+func runStatsCLI(ctx context.Context, cfg CLIConfig, out io.Writer) error {
+	stats, err := executeStatsHTTP(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("failed fetching stats: %w", err)
 	}
+	formatted := fmt.Sprintf("📊 Aerial Transcript Index Stats:\n- Total Indexed Sessions: %v\n- Status: %v\n", stats["total_sessions"], stats["status"])
+	return writeCLIOutput(out, cfg.JSON, stats, formatted)
+}
 
-	if cfg.Command == "get" {
-		var res transcript.StepWindowResult
-		if !cfg.DirectDB {
-			httpRes, httpErr := executeGetHTTP(ctx, cfg)
-			if httpErr == nil {
-				res = httpRes
-			} else {
-				// Fallback to direct DB if HTTP daemon is down or unreachable
-				dbRes, dbErr := executeGetDirectDB(ctx, cfg)
-				if dbErr != nil {
-					return fmt.Errorf("get failed via HTTP (%w) and direct DB (%w)", httpErr, dbErr)
-				}
-				res = dbRes
-			}
+func runGetCLI(ctx context.Context, cfg CLIConfig, out io.Writer) error {
+	var res transcript.StepWindowResult
+	if !cfg.DirectDB {
+		httpRes, httpErr := executeGetHTTP(ctx, cfg)
+		if httpErr == nil {
+			res = httpRes
 		} else {
+			// Fallback to direct DB if HTTP daemon is down or unreachable
 			dbRes, dbErr := executeGetDirectDB(ctx, cfg)
 			if dbErr != nil {
-				return fmt.Errorf("direct DB get failed: %w", dbErr)
+				return fmt.Errorf("get failed via HTTP (%w) and direct DB (%w)", httpErr, dbErr)
 			}
 			res = dbRes
 		}
-
-		if cfg.JSON {
-			b, err := jsonMarshalIndent(res, "", "  ")
-			if err != nil {
-				return err
-			}
-			if _, err := fmt.Fprintln(out, string(b)); err != nil {
-				return err
-			}
-		} else {
-			if _, err := fmt.Fprint(out, formatStepWindow(res)); err != nil {
-				return err
-			}
+	} else {
+		dbRes, dbErr := executeGetDirectDB(ctx, cfg)
+		if dbErr != nil {
+			return fmt.Errorf("direct DB get failed: %w", dbErr)
 		}
-		return nil
+		res = dbRes
 	}
 
-	// Search execution
+	return writeCLIOutput(out, cfg.JSON, res, formatStepWindow(res))
+}
+
+func runSearchCLI(ctx context.Context, cfg CLIConfig, out io.Writer) error {
 	if cfg.Query == "" {
 		return fmt.Errorf("search query cannot be empty (usage: transcript-search search <query>)")
 	}
@@ -496,21 +499,23 @@ func runCLI(ctx context.Context, args []string, out io.Writer) error {
 		res = dbRes
 	}
 
-	if cfg.JSON {
-		b, err := jsonMarshalIndent(res, "", "  ")
-		if err != nil {
-			return err
-		}
-		if _, err := fmt.Fprintln(out, string(b)); err != nil {
-			return err
-		}
-	} else {
-		if _, err := fmt.Fprint(out, formatSearchResults(res)); err != nil {
-			return err
-		}
+	return writeCLIOutput(out, cfg.JSON, res, formatSearchResults(res))
+}
+
+func runCLI(ctx context.Context, args []string, out io.Writer) error {
+	cfg, err := parseCLIArgs(args)
+	if err != nil {
+		return err
 	}
 
-	return nil
+	switch cfg.Command {
+	case "stats":
+		return runStatsCLI(ctx, cfg, out)
+	case "get":
+		return runGetCLI(ctx, cfg, out)
+	default:
+		return runSearchCLI(ctx, cfg, out)
+	}
 }
 
 func runMain(args []string, out, errOut io.Writer) int {

@@ -1,26 +1,6 @@
 {
   "files": {},
   "functions": {
-    "services/eri/cmd/transcript-search/main.go::parseCLIArgs": {
-      "cc": 21
-    },
-    "services/eri/cmd/transcript-search/main.go::runCLI": {
-      "cc": 26
-    },
-    "services/eri/pkg/ambient/provider.go::*Provider.fetchAndRender": {
-      "depth": 6
-    },
-    "services/eri/pkg/ambient/provider.go::NewProvider": {
-      "cc": 26
-    },
-    "services/eri/pkg/classifier/classifier.go::*Classifier.classifySystemOne": {
-      "lines": 176,
-      "cc": 30
-    },
-    "services/eri/pkg/config/config.go::*ConfigData.UnmarshalYAML": {
-      "lines": 154,
-      "cc": 21
-    },
     "services/eri/pkg/delivery/delivery.go::SendMessageWithAttachments": {
       "cc": 22
     },
