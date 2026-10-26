@@ -53,6 +53,7 @@ job "prospera" {
         WHISPER_URL             = "http://orin-voice.aerial"
         DEFAULT_DISCORD_CHANNEL = "prospera"
         PUBLIC_WEBHOOK_BASE_URL = "https://webhooks.zylman.com"
+        GEMINI_VOICE_NAME       = "Kore"
       }
 
       template {

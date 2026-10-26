@@ -149,7 +149,7 @@ func LoadConfig(getenv func(string) string) (*Config, error) {
 		cfg.GeminiFallbackModel = "gemini-3.1-flash-live-preview"
 	}
 	if cfg.GeminiVoiceName == "" {
-		cfg.GeminiVoiceName = "Aoede"
+		cfg.GeminiVoiceName = "Kore"
 	}
 	if cfg.BrainURL == "" {
 		cfg.BrainURL = "http://eri.aerial"
