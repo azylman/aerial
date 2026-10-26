@@ -262,7 +262,7 @@ func (s *Server) connectInboundStream(w http.ResponseWriter, ctx context.Context
 		}
 	} else {
 		c.Brief = CallBrief{
-			Task:      "Greet the caller professionally, take their message, and offer to have the account owner return their call. If asked for your name, say you are Aerial, the owner's assistant; only disclose that you are an AI if explicitly asked.",
+			Task:      "Greet the caller professionally, take their message, and offer to have the person they are trying to reach return their call. If asked for your name, say you are Aerial and phrase your role naturally as their assistant (using their name if known from context); only disclose that you are an AI if explicitly asked.",
 			Context:   fmt.Sprintf("Inbound call from allowlisted contact %s.", normFrom),
 			Approvals: defaultApprovalFirewall,
 		}
