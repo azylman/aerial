@@ -211,7 +211,7 @@ func (m *CallSessionManager) HandleMediaWebSocket(w http.ResponseWriter, r *http
 	} else {
 		openingGreeting = "Hello, I am calling to help with an inquiry."
 		voicemailMsg = openingGreeting
-		systemPrompt = "You are Aerial, an assistant making or handling a phone call. Focus directly on the task without introducing yourself upfront. If asked who is calling, say your name is Aerial and phrase your role naturally for the situation (for example, '<Name>'s assistant' if their name is known); only disclose that you are an AI assistant if explicitly asked."
+		systemPrompt = "You are Aerial, an assistant making or handling a phone call. Speak like a warm, natural human on a live phone call—use a relaxed conversational cadence, natural contractions, and everyday phrasing rather than stiff or scripted readback. Focus directly on the task without introducing yourself upfront. If asked who is calling, say your name is Aerial and phrase your role naturally for the situation (for example, '<Name>'s assistant' if their name is known); only disclose that you are an AI assistant if explicitly asked."
 	}
 
 	sess := NewMediaStreamSession(MediaStreamSessionConfig{
@@ -364,7 +364,7 @@ func (s *MediaStreamSession) Run(parentCtx context.Context) {
 	}()
 
 	// Send initial setup handshake
-	setupMsg := BuildGeminiSetupMessage(model, s.systemPrompt)
+	setupMsg := BuildGeminiSetupMessage(model, s.systemPrompt, s.voiceName())
 	if err := s.sendGeminiJSON(setupMsg); err != nil {
 		log.Printf("prospera: gemini live setup error: %v", err)
 		return
@@ -550,7 +550,7 @@ func (s *MediaStreamSession) handleAMDAction(action AMDAction) {
 		s.mu.Unlock()
 
 		if !alreadyReleased {
-			turnMsg := BuildGeminiClientContent(fmt.Sprintf("Call connected. Speak your opening greeting: %s", s.openingGreeting), "user")
+			turnMsg := BuildGeminiClientContent(fmt.Sprintf("Call connected. Open the conversation naturally and warmly in your own words (do not read the task verbatim) for: %s", s.openingGreeting), "user")
 			if err := s.sendGeminiJSON(turnMsg); err != nil {
 				log.Printf("prospera: send turn msg err: %v", err)
 			}
@@ -833,7 +833,7 @@ func (s *MediaStreamSession) reconnectGemini(ctx context.Context) bool {
 	s.geminiConn = newConn
 	s.mu.Unlock()
 
-	setupMsg := BuildGeminiSetupMessage(fallbackModel, s.systemPrompt)
+	setupMsg := BuildGeminiSetupMessage(fallbackModel, s.systemPrompt, s.voiceName())
 	if err := s.sendGeminiJSON(setupMsg); err != nil {
 		return false
 	}
@@ -844,6 +844,13 @@ func (s *MediaStreamSession) reconnectGemini(ctx context.Context) bool {
 		return false
 	}
 	return true
+}
+
+func (s *MediaStreamSession) voiceName() string {
+	if s.cfg != nil && strings.TrimSpace(s.cfg.GeminiVoiceName) != "" {
+		return strings.TrimSpace(s.cfg.GeminiVoiceName)
+	}
+	return "Aoede"
 }
 
 func (s *MediaStreamSession) enqueueOutboundUlaw(ulawBytes []byte) {
@@ -879,9 +886,31 @@ func (s *MediaStreamSession) drainOutboundQueue() {
 	}
 }
 
+func (s *MediaStreamSession) popTalkspurtPayload(firstFrame []byte, inTalkspurt bool) []byte {
+	if inTalkspurt {
+		return firstFrame
+	}
+	const prebufferFrames = 3 // 60ms initial cushion at start of each talkspurt
+	combined := make([]byte, 0, len(firstFrame)*prebufferFrames)
+	combined = append(combined, firstFrame...)
+	for i := 1; i < prebufferFrames; i++ {
+		select {
+		case extra, ok := <-s.outboundFrames:
+			if ok && len(extra) > 0 {
+				combined = append(combined, extra...)
+			}
+		default:
+			return combined
+		}
+	}
+	return combined
+}
+
 func (s *MediaStreamSession) pacerLoop(ctx context.Context) {
 	ticker := time.NewTicker(s.pacerInterval)
 	defer ticker.Stop()
+
+	inTalkspurt := false
 
 	for {
 		select {
@@ -891,9 +920,11 @@ func (s *MediaStreamSession) pacerLoop(ctx context.Context) {
 			select {
 			case frame, ok := <-s.outboundFrames:
 				if ok && len(frame) > 0 {
-					s.sendTwilioMedia(frame)
+					s.sendTwilioMedia(s.popTalkspurtPayload(frame, inTalkspurt))
+					inTalkspurt = true
 				}
 			default:
+				inTalkspurt = false
 				s.mu.Lock()
 				pending := s.hangupPending && !s.hangupMarkSent
 				s.mu.Unlock()

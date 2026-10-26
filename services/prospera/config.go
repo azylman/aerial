@@ -19,6 +19,7 @@ type Config struct {
 	GeminiAPIKey          string
 	GeminiLiveModel       string
 	GeminiFallbackModel   string
+	GeminiVoiceName       string
 	BrainURL              string
 	GoogleMCPURL          string
 	CovenURL              string
@@ -123,6 +124,7 @@ func LoadConfig(getenv func(string) string) (*Config, error) {
 		GeminiAPIKey:          strings.TrimSpace(getenv("GEMINI_API_KEY")),
 		GeminiLiveModel:       strings.TrimSpace(getenv("GEMINI_LIVE_MODEL")),
 		GeminiFallbackModel:   strings.TrimSpace(getenv("GEMINI_FALLBACK_MODEL")),
+		GeminiVoiceName:       strings.TrimSpace(getenv("GEMINI_VOICE_NAME")),
 		BrainURL:              strings.TrimSpace(getenv("BRAIN_URL")),
 		GoogleMCPURL:          strings.TrimSpace(getenv("GOOGLE_MCP_URL")),
 		CovenURL:              strings.TrimSpace(getenv("COVEN_URL")),
@@ -145,6 +147,9 @@ func LoadConfig(getenv func(string) string) (*Config, error) {
 	}
 	if cfg.GeminiFallbackModel == "" {
 		cfg.GeminiFallbackModel = "gemini-3.1-flash-live-preview"
+	}
+	if cfg.GeminiVoiceName == "" {
+		cfg.GeminiVoiceName = "Aoede"
 	}
 	if cfg.BrainURL == "" {
 		cfg.BrainURL = "http://eri.aerial"

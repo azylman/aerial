@@ -52,6 +52,7 @@ func TestLoadConfig(t *testing.T) {
 		wantGeminiAPIKey       string
 		wantGeminiLiveModel    string
 		wantGeminiFallback     string
+		wantGeminiVoiceName    string
 		wantBrainURL           string
 		wantGoogleMCPURL       string
 		wantCovenURL           string
@@ -72,6 +73,7 @@ func TestLoadConfig(t *testing.T) {
 			wantDatabaseURL:        "postgres://user:pass@localhost:5432/testdb",
 			wantGeminiLiveModel:    "gemini-3.8-live",
 			wantGeminiFallback:     "gemini-3.1-flash-live-preview",
+			wantGeminiVoiceName:    "Aoede",
 			wantBrainURL:           "http://eri.aerial",
 			wantGoogleMCPURL:       "http://google-mcp.aerial/mcp",
 			wantCovenURL:           "http://coven.aerial",
@@ -93,6 +95,7 @@ func TestLoadConfig(t *testing.T) {
 				"GEMINI_HARNESS_API_KEY":  "harness_key_123",
 				"GEMINI_LIVE_MODEL":       "gemini-custom-live",
 				"GEMINI_FALLBACK_MODEL":   "gemini-custom-fallback",
+				"GEMINI_VOICE_NAME":       "Kore",
 				"BRAIN_URL":               "http://eri.custom",
 				"GOOGLE_MCP_URL":          "http://google-mcp.custom/mcp",
 				"COVEN_URL":               "http://coven.custom",
@@ -112,6 +115,7 @@ func TestLoadConfig(t *testing.T) {
 			wantGeminiAPIKey:       "harness_key_123",
 			wantGeminiLiveModel:    "gemini-custom-live",
 			wantGeminiFallback:     "gemini-custom-fallback",
+			wantGeminiVoiceName:    "Kore",
 			wantBrainURL:           "http://eri.custom",
 			wantGoogleMCPURL:       "http://google-mcp.custom/mcp",
 			wantCovenURL:           "http://coven.custom",
@@ -225,6 +229,9 @@ func TestLoadConfig(t *testing.T) {
 			}
 			if tc.wantGeminiFallback != "" && cfg.GeminiFallbackModel != tc.wantGeminiFallback {
 				t.Errorf("cfg.GeminiFallbackModel = %q, want %q", cfg.GeminiFallbackModel, tc.wantGeminiFallback)
+			}
+			if tc.wantGeminiVoiceName != "" && cfg.GeminiVoiceName != tc.wantGeminiVoiceName {
+				t.Errorf("cfg.GeminiVoiceName = %q, want %q", cfg.GeminiVoiceName, tc.wantGeminiVoiceName)
 			}
 			if tc.wantBrainURL != "" && cfg.BrainURL != tc.wantBrainURL {
 				t.Errorf("cfg.BrainURL = %q, want %q", cfg.BrainURL, tc.wantBrainURL)

@@ -119,7 +119,7 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 			recordGeminiMsg(msgStr)
 
 			if strings.Contains(msgStr, "Call connected") {
-				pcm24 := make([]byte, 480)
+				pcm24 := make([]byte, 4800)
 				_ = conn.WriteJSON(map[string]any{
 					"serverContent": map[string]any{
 						"modelTurn": map[string]any{
@@ -200,6 +200,7 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 	cfg := &Config{
 		GeminiLiveModel:     "gemini-3.8-live",
 		GeminiFallbackModel: "gemini-3.1-flash-live-preview",
+		GeminiVoiceName:     "Kore",
 	}
 
 	twilioClient := &mockTwilioClient{}
@@ -424,6 +425,7 @@ func TestMediaStream_TransparentReconnect(t *testing.T) {
 	cfg := &Config{
 		GeminiLiveModel:     "gemini-3.8-live",
 		GeminiFallbackModel: "gemini-3.1-flash-live-preview",
+		GeminiVoiceName:     "Kore",
 	}
 
 	tokenMgr := NewStreamTokenManager(time.Now)

@@ -174,8 +174,9 @@ type GeminiSetup struct {
 
 // GeminiGenerationConfig controls response modalities and speech synthesis.
 type GeminiGenerationConfig struct {
-	ResponseModalities []string            `json:"responseModalities,omitempty"`
-	SpeechConfig       *GeminiSpeechConfig `json:"speechConfig,omitempty"`
+	ResponseModalities    []string            `json:"responseModalities,omitempty"`
+	EnableAffectiveDialog bool                `json:"enableAffectiveDialog,omitempty"`
+	SpeechConfig          *GeminiSpeechConfig `json:"speechConfig,omitempty"`
 }
 
 // GeminiSpeechConfig defines voice personality and parameters.
@@ -314,10 +315,14 @@ type GeminiFunctionCall struct {
 	Args map[string]any `json:"args"`
 }
 
-// BuildGeminiSetupMessage constructs the handshake setup payload with the 4 bounded tools.
-func BuildGeminiSetupMessage(model, systemPrompt string) GeminiSetupMessage {
+// BuildGeminiSetupMessage constructs the handshake setup payload with a configurable voice (defaulting to Aoede) and the 4 bounded tools.
+func BuildGeminiSetupMessage(model, systemPrompt string, voice ...string) GeminiSetupMessage {
 	if !strings.HasPrefix(model, "models/") {
 		model = "models/" + model
+	}
+	voiceName := "Aoede"
+	if len(voice) > 0 && strings.TrimSpace(voice[0]) != "" {
+		voiceName = strings.TrimSpace(voice[0])
 	}
 
 	tools := []GeminiTool{
@@ -394,11 +399,12 @@ func BuildGeminiSetupMessage(model, systemPrompt string) GeminiSetupMessage {
 		Setup: GeminiSetup{
 			Model: model,
 			GenerationConfig: GeminiGenerationConfig{
-				ResponseModalities: []string{"AUDIO"},
+				ResponseModalities:    []string{"AUDIO"},
+				EnableAffectiveDialog: strings.Contains(model, "native-audio"),
 				SpeechConfig: &GeminiSpeechConfig{
 					VoiceConfig: GeminiVoiceConfig{
 						PrebuiltVoiceConfig: GeminiPrebuiltVoice{
-							VoiceName: "Aoede",
+							VoiceName: voiceName,
 						},
 					},
 				},
