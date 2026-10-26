@@ -167,9 +167,9 @@ func TestResample24kTo8k(t *testing.T) {
 
 	t.Run("downsample average values", func(t *testing.T) {
 		t.Parallel()
-		input := []int16{100, 200, 300, 400, 500, 600}
+		input := []int16{100, 200, 300, 400, 500, 600, 700, 800, 900}
 		got := Resample24kTo8k(input)
-		want := []int16{200, 500}
+		want := []int16{200, 500, 800}
 		if len(got) != len(want) {
 			t.Fatalf("len = %d, want %d", len(got), len(want))
 		}

@@ -82,7 +82,9 @@ func Resample8kTo16k(in []int16) []int16 {
 	return out
 }
 
-// Resample24kTo8k downsamples linear PCM audio from 24kHz to 8kHz by averaging 3-sample blocks.
+// Resample24kTo8k downsamples linear PCM audio from 24kHz to 8kHz using a 7-tap
+// low-pass anti-aliasing FIR filter ([1, 2, 3, 4, 3, 2, 1] / 16) centered on each
+// 3-sample block to suppress >4kHz vocal harmonics and sibilant aliasing before G.711 mu-law encoding.
 func Resample24kTo8k(in []int16) []int16 {
 	n := len(in) / 3
 	if n == 0 {
@@ -90,8 +92,20 @@ func Resample24kTo8k(in []int16) []int16 {
 	}
 	out := make([]int16, n)
 	for i := 0; i < n; i++ {
-		avg := (int32(in[3*i]) + int32(in[3*i+1]) + int32(in[3*i+2])) / 3
-		out[i] = int16(avg)
+		c := 3*i + 1
+		if c >= 3 && c+3 < len(in) {
+			filtered := int32(in[c-3]) +
+				2*int32(in[c-2]) +
+				3*int32(in[c-1]) +
+				4*int32(in[c]) +
+				3*int32(in[c+1]) +
+				2*int32(in[c+2]) +
+				int32(in[c+3])
+			out[i] = int16(filtered / 16)
+		} else {
+			avg := (int32(in[3*i]) + int32(in[3*i+1]) + int32(in[3*i+2])) / 3
+			out[i] = int16(avg)
+		}
 	}
 	return out
 }

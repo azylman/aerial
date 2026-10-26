@@ -90,6 +90,22 @@ func TestBuildGeminiMessages(t *testing.T) {
 	if msg1.Setup.InputAudioTranscription == nil || msg1.Setup.OutputAudioTranscription == nil {
 		t.Error("expected InputAudioTranscription and OutputAudioTranscription enabled in setup")
 	}
+	if msg1.Setup.GenerationConfig.SpeechConfig.VoiceConfig.PrebuiltVoiceConfig.VoiceName != "Aoede" {
+		t.Errorf("voice = %q, want Aoede", msg1.Setup.GenerationConfig.SpeechConfig.VoiceConfig.PrebuiltVoiceConfig.VoiceName)
+	}
+
+	msgNative := BuildGeminiSetupMessage("gemini-2.5-flash-native-audio-latest", "system instructions", "   ")
+	if !msgNative.Setup.GenerationConfig.EnableAffectiveDialog {
+		t.Error("expected EnableAffectiveDialog=true for native-audio model")
+	}
+	if msgNative.Setup.GenerationConfig.SpeechConfig.VoiceConfig.PrebuiltVoiceConfig.VoiceName != "Aoede" {
+		t.Errorf("fallback voice = %q, want Aoede", msgNative.Setup.GenerationConfig.SpeechConfig.VoiceConfig.PrebuiltVoiceConfig.VoiceName)
+	}
+
+	msgCustomVoice := BuildGeminiSetupMessage("models/gemini-3.8-live", "system instructions", "Kore")
+	if msgCustomVoice.Setup.GenerationConfig.SpeechConfig.VoiceConfig.PrebuiltVoiceConfig.VoiceName != "Kore" {
+		t.Errorf("custom voice = %q, want Kore", msgCustomVoice.Setup.GenerationConfig.SpeechConfig.VoiceConfig.PrebuiltVoiceConfig.VoiceName)
+	}
 
 	// 2. Audio chunk
 	chunk := BuildGeminiAudioChunk([]byte{0x01, 0x02})
