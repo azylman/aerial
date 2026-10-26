@@ -181,7 +181,7 @@ func (c *CDPClient) handleDisconnect(conn *websocket.Conn, err error) {
 		}
 	}
 	c.stateMu.Unlock()
-	_ = conn.Close()
+	_ = conn.Close() //nolint:errcheck
 }
 
 // EnsureConnection verifies or establishes the active CDP connection.
@@ -206,7 +206,10 @@ func (c *CDPClient) EnsureConnection(ctx context.Context) error {
 		return err
 	}
 
-	newConn, _, err := c.dialer.DialContext(ctx, wsURL, nil)
+	newConn, resp, err := c.dialer.DialContext(ctx, wsURL, nil)
+	if resp != nil && resp.Body != nil {
+		defer resp.Body.Close()
+	}
 	if err != nil {
 		return fmt.Errorf("dial cdp ws %s: %w", wsURL, err)
 	}
@@ -316,13 +319,6 @@ func (c *CDPClient) SendCDP(ctx context.Context, method string, params any) (jso
 	}
 
 	return c.sendCDPDirect(ctx, conn, method, params, sessID)
-}
-
-// EnsureStealthSession applies stealth settings once per active connection.
-func (c *CDPClient) EnsureStealthSession(ctx context.Context) error {
-	c.initMu.Lock()
-	defer c.initMu.Unlock()
-	return c.ensureStealthSessionLocked(ctx)
 }
 
 func (c *CDPClient) ensureStealthSessionLocked(ctx context.Context) error {

@@ -249,7 +249,7 @@ func (s *Server) toolBrowserGetContent(ctx context.Context, argsRaw json.RawMess
 		MaxLength int    `json:"maxLength"`
 		MaxChars  int    `json:"max_chars"`
 	}
-	_ = json.Unmarshal(argsRaw, &args)
+	_ = json.Unmarshal(argsRaw, &args) //nolint:errcheck
 	limit := args.MaxLength
 	if limit <= 0 {
 		limit = args.MaxChars
@@ -269,11 +269,14 @@ func (s *Server) toolBrowserGetContent(ctx context.Context, argsRaw json.RawMess
 		URL   string `json:"url"`
 		Text  string `json:"text"`
 	}
-	_ = json.Unmarshal(raw, &res)
+	_ = json.Unmarshal(raw, &res) //nolint:errcheck
 	truncatedText, _ := TruncateContent(res.Text, limit)
 	res.Text = truncatedText
 
-	outBytes, _ := json.Marshal(res)
+	outBytes, err := json.Marshal(res)
+	if err != nil {
+		return fmt.Sprintf("Failed to encode content result: %v", err), true
+	}
 	return SanitizePII(string(outBytes)), false
 }
 
@@ -302,12 +305,15 @@ func (s *Server) toolBrowserClick(ctx context.Context, argsRaw json.RawMessage) 
 		}
 	}
 
-	out, _ := json.Marshal(map[string]any{
+	out, err := json.Marshal(map[string]any{
 		"clicked": true,
 		"trusted": cr.HasRect,
 		"tag":     cr.Tag,
 		"text":    cr.Text,
 	})
+	if err != nil {
+		return fmt.Sprintf("Failed to encode click result: %v", err), true
+	}
 	return string(out), false
 }
 
@@ -320,12 +326,12 @@ func (s *Server) toolBrowserType(ctx context.Context, argsRaw json.RawMessage) (
 	if err := json.Unmarshal(argsRaw, &args); err != nil || strings.TrimSpace(args.Selector) == "" {
 		return "Argument 'selector' is required", true
 	}
-	clear := true
+	shouldClear := true
 	if args.Clear != nil {
-		clear = *args.Clear
+		shouldClear = *args.Clear
 	}
 
-	focusScript := BuildFocusAndClearScript(args.Selector, clear)
+	focusScript := BuildFocusAndClearScript(args.Selector, shouldClear)
 	raw, err := s.client.EvaluateJS(ctx, focusScript, true, true)
 	if err != nil {
 		return fmt.Sprintf("Focus evaluation failed: %v", err), true
@@ -337,7 +343,7 @@ func (s *Server) toolBrowserType(ctx context.Context, argsRaw json.RawMessage) (
 	}
 
 	if fr.HasRect {
-		_ = s.client.DispatchTrustedClick(ctx, fr.X, fr.Y)
+		_ = s.client.DispatchTrustedClick(ctx, fr.X, fr.Y) //nolint:errcheck
 	}
 
 	if err := s.client.InsertText(ctx, args.Text); err != nil {
@@ -345,12 +351,15 @@ func (s *Server) toolBrowserType(ctx context.Context, argsRaw json.RawMessage) (
 	}
 
 	dispatchScript := BuildDispatchInputEventsScript(args.Selector)
-	_, _ = s.client.EvaluateJS(ctx, dispatchScript, true, true)
+	_, _ = s.client.EvaluateJS(ctx, dispatchScript, true, true) //nolint:errcheck
 
-	out, _ := json.Marshal(map[string]any{
+	out, err := json.Marshal(map[string]any{
 		"typed":   true,
 		"trusted": true,
 	})
+	if err != nil {
+		return fmt.Sprintf("Failed to encode type result: %v", err), true
+	}
 	return string(out), false
 }
 
@@ -358,7 +367,7 @@ func (s *Server) toolBrowserScreenshot(ctx context.Context, argsRaw json.RawMess
 	var args struct {
 		Format string `json:"format"`
 	}
-	_ = json.Unmarshal(argsRaw, &args)
+	_ = json.Unmarshal(argsRaw, &args) //nolint:errcheck
 	format := strings.ToLower(strings.TrimSpace(args.Format))
 	if format == "" {
 		format = "png"
@@ -367,10 +376,13 @@ func (s *Server) toolBrowserScreenshot(ctx context.Context, argsRaw json.RawMess
 	if err != nil {
 		return fmt.Sprintf("Screenshot capture failed: %v", err), true
 	}
-	out, _ := json.Marshal(map[string]string{
+	out, err := json.Marshal(map[string]string{
 		"data":   data,
 		"format": format,
 	})
+	if err != nil {
+		return fmt.Sprintf("Failed to encode screenshot result: %v", err), true
+	}
 	return string(out), false
 }
 
@@ -451,18 +463,21 @@ func (s *Server) toolAmazonAddToCart(ctx context.Context, argsRaw json.RawMessag
 		}
 	}
 
-	_ = s.client.WaitSettle(ctx)
+	_ = s.client.WaitSettle(ctx) //nolint:errcheck
 
-	countRaw, _ := s.client.EvaluateJS(ctx, BuildAmazonCartCountScript(), true, true)
+	countRaw, _ := s.client.EvaluateJS(ctx, BuildAmazonCartCountScript(), true, true) //nolint:errcheck
 	var cartCount string
-	_ = json.Unmarshal(countRaw, &cartCount)
+	_ = json.Unmarshal(countRaw, &cartCount) //nolint:errcheck
 
-	out, _ := json.Marshal(map[string]any{
+	out, err := json.Marshal(map[string]any{
 		"added":        true,
 		"trusted":      btnRes.HasRect,
 		"productTitle": btnRes.ProductTitle,
 		"cartCount":    cartCount,
 	})
+	if err != nil {
+		return fmt.Sprintf("Failed to encode add to cart result: %v", err), true
+	}
 	return string(out), false
 }
 
@@ -505,7 +520,7 @@ func NewHTTPMux(srv *Server) *http.ServeMux {
 
 func runServer(ctx context.Context, cfg *Config) error {
 	client := NewCDPClient(cfg)
-	defer client.Close()
+	defer client.Close() //nolint:errcheck
 
 	srv := NewServer(cfg, client)
 	mux := NewHTTPMux(srv)

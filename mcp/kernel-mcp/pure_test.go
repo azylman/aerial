@@ -21,12 +21,14 @@ func TestSanitizePII(t *testing.T) {
 		{"no digits", "hello world", "hello world"},
 		{"short numbers", "order #12345 total $99", "order #12345 total $99"},
 		{"12 digits unchanged", "123456789012", "123456789012"},
+		{"matched pattern non-card digits unchanged", "123-456-789-01", "123-456-789-01"},
 		{"13 digits redacted", "4111222233334", "[REDACTED_CARD]"},
 		{"15 digits with spaces redacted", "3782 822463 10005", "[REDACTED_CARD]"},
 		{"16 digits with dashes redacted", "4111-2222-3333-4444", "[REDACTED_CARD]"},
 		{"16 digits raw redacted", "4111222233334444", "[REDACTED_CARD]"},
 		{"17 digits unchanged", "12345678901234567", "12345678901234567"},
 		{"embedded in sentence", "Card 4111-2222-3333-4444 was charged $50", "Card [REDACTED_CARD] was charged $50"},
+		{"dash format with invalid length", "12-34-56", "12-34-56"},
 	}
 
 	for _, tc := range tests {
@@ -132,6 +134,13 @@ func TestRewriteWSUrl(t *testing.T) {
 			"ws://localhost:4000/devtools/page/target1",
 		},
 		{
+			"scheme with empty path",
+			"ws://",
+			"localhost",
+			"4000",
+			"ws://localhost:4000",
+		},
+		{
 			"url with query params",
 			"ws://oldhost:9000/ws?token=xyz",
 			"newhost",
@@ -158,6 +167,27 @@ func TestRewriteWSUrl(t *testing.T) {
 			"browser.aerial",
 			"9222",
 			"ws://browser.aerial:9222",
+		},
+		{
+			"invalid raw url with slash prefix",
+			"http://[::1]:namedport/dev/page",
+			"browser.aerial",
+			"9222",
+			"ws://browser.aerial:9222",
+		},
+		{
+			"non-url path with leading slash",
+			"/dev/page",
+			"browser.aerial",
+			"9222",
+			"ws://browser.aerial:9222/dev/page",
+		},
+		{
+			"invalid url parse with leading slash and newline",
+			"/devtools/page\n",
+			"browser.aerial",
+			"9222",
+			"ws://browser.aerial:9222/devtools/page\n",
 		},
 	}
 
@@ -286,12 +316,17 @@ port: "4099"
 cdp_host: "custom.aerial"
 cdp_port: "9333"
 settle_delay: "250ms"
-`), 0600); err != nil {
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	emptyYAMLPath := filepath.Join(tmpDir, "empty.yaml")
+	if err := os.WriteFile(emptyYAMLPath, []byte(""), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	invalidYAMLPath := filepath.Join(tmpDir, "bad.yaml")
-	if err := os.WriteFile(invalidYAMLPath, []byte(`port: [invalid`), 0600); err != nil {
+	if err := os.WriteFile(invalidYAMLPath, []byte(`port: [invalid`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -316,6 +351,24 @@ settle_delay: "250ms"
 			wantErr:     false,
 		},
 		{
+			name:        "empty path returns default config",
+			path:        "",
+			wantPort:    "4018",
+			wantHost:    "browser.aerial",
+			wantCDPPort: "9222",
+			wantDelay:   500 * time.Millisecond,
+			wantErr:     false,
+		},
+		{
+			name:        "empty file returns default config",
+			path:        emptyYAMLPath,
+			wantPort:    "4018",
+			wantHost:    "browser.aerial",
+			wantCDPPort: "9222",
+			wantDelay:   500 * time.Millisecond,
+			wantErr:     false,
+		},
+		{
 			name:        "valid YAML loaded successfully",
 			path:        validYAMLPath,
 			wantPort:    "4099",
@@ -327,6 +380,11 @@ settle_delay: "250ms"
 		{
 			name:    "invalid YAML returns error",
 			path:    invalidYAMLPath,
+			wantErr: true,
+		},
+		{
+			name:    "directory path returns read error",
+			path:    tmpDir,
 			wantErr: true,
 		},
 		{

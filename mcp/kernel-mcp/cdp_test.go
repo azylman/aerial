@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -26,6 +27,8 @@ type fakeCDPOptions struct {
 	evalException    string
 	detachOnMethod   string
 	failPageEnable   bool
+	failUserAgent    bool
+	failAddScript    bool
 	failMouseMoved   bool
 	failMousePress   bool
 	failMouseRelease bool
@@ -150,6 +153,32 @@ func startFakeCDPServer(t *testing.T, opts fakeCDPOptions) (*fakeCDPServer, *Con
 						continue
 					}
 
+					if opts.failUserAgent && req.Method == "Emulation.setUserAgentOverride" {
+						wsMu.Lock()
+						_ = ws.WriteJSON(map[string]any{
+							"id": req.ID,
+							"error": map[string]any{
+								"code":    -32000,
+								"message": "setUserAgentOverride failed",
+							},
+						})
+						wsMu.Unlock()
+						continue
+					}
+
+					if opts.failAddScript && req.Method == "Page.addScriptToEvaluateOnNewDocument" {
+						wsMu.Lock()
+						_ = ws.WriteJSON(map[string]any{
+							"id": req.ID,
+							"error": map[string]any{
+								"code":    -32000,
+								"message": "addScriptToEvaluateOnNewDocument failed",
+							},
+						})
+						wsMu.Unlock()
+						continue
+					}
+
 					if req.Method == "Input.dispatchMouseEvent" {
 						var mp struct {
 							Type string `json:"type"`
@@ -228,6 +257,16 @@ func startFakeCDPServer(t *testing.T, opts fakeCDPOptions) (*fakeCDPServer, *Con
 					case "Input.dispatchMouseEvent", "Input.insertText", "Page.navigate":
 						result = map[string]any{}
 					case "Page.captureScreenshot":
+						var p struct {
+							Format string `json:"format"`
+						}
+						_ = json.Unmarshal(req.Params, &p)
+						if p.Format == "fail-unmarshal" {
+							wsMu.Lock()
+							_ = ws.WriteMessage(websocket.TextMessage, []byte(`{"id":`+fmt.Sprint(req.ID)+`,"result":"not-a-json-object"}`))
+							wsMu.Unlock()
+							continue
+						}
 						result = map[string]any{
 							"data": "dGVzdC1zY3JlZW5zaG90",
 						}
@@ -315,6 +354,18 @@ func TestCDPClient_EnsureConnectionTable(t *testing.T) {
 			wantErr:   true,
 			errSubstr: "Page.enable",
 		},
+		{
+			name:      "stealth Emulation.setUserAgentOverride failure",
+			opts:      fakeCDPOptions{failUserAgent: true},
+			wantErr:   true,
+			errSubstr: "Emulation.setUserAgentOverride",
+		},
+		{
+			name:      "stealth Page.addScriptToEvaluateOnNewDocument failure",
+			opts:      fakeCDPOptions{failAddScript: true},
+			wantErr:   true,
+			errSubstr: "Page.addScriptToEvaluateOnNewDocument",
+		},
 	}
 
 	for _, tc := range tests {
@@ -345,11 +396,6 @@ func TestCDPClient_EnsureConnectionTable(t *testing.T) {
 				if got := server.getAttachedTarget(); got != tc.wantAttachedTarget {
 					t.Fatalf("attached target = %q, want %q", got, tc.wantAttachedTarget)
 				}
-			}
-
-			// Calling EnsureStealthSession explicitly
-			if err := client.EnsureStealthSession(ctx); err != nil {
-				t.Fatalf("EnsureStealthSession() error: %v", err)
 			}
 
 			// Connected but stealthReady false
@@ -385,6 +431,7 @@ func TestCDPClient_CommandsTable(t *testing.T) {
 		{name: "navigate", action: "navigate"},
 		{name: "screenshot png", action: "screenshot"},
 		{name: "screenshot empty format defaults png", action: "screenshot-empty"},
+		{name: "screenshot unmarshal failure", action: "screenshot-bad-json", expectErr: true},
 		{name: "evaluate js", action: "eval"},
 		{name: "wait settle zero delay", action: "wait-settle-zero"},
 	}
@@ -411,6 +458,8 @@ func TestCDPClient_CommandsTable(t *testing.T) {
 				if err == nil && data != "dGVzdC1zY3JlZW5zaG90" {
 					t.Fatalf("CaptureScreenshot empty data = %q, want %q", data, "dGVzdC1zY3JlZW5zaG90")
 				}
+			case "screenshot-bad-json":
+				_, err = client.CaptureScreenshot(ctx, "fail-unmarshal")
 			case "eval":
 				var raw json.RawMessage
 				raw, err = client.EvaluateJS(ctx, "window.location.href", true, true)
