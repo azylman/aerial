@@ -135,19 +135,63 @@ func (d *DefaultWebhookDispatcher) CallPostTurnHook(ctx context.Context, endpoin
 	return dispatchWebhook[PostTurnRequest, PostTurnResponse](ctx, d, "post_turn", endpoint, req, func(r *PostTurnRequest) *time.Time { return &r.Timestamp }, "post_turn request")
 }
 
-func (d *DefaultWebhookDispatcher) dispatch(ctx context.Context, hook string, endpoint *config.WebhookEndpoint, payload any, respDest any) (err error) {
+func validateWebhookDispatchArgs(d *DefaultWebhookDispatcher, endpoint *config.WebhookEndpoint, payload any) (string, error) {
 	if d == nil {
-		return fmt.Errorf("webhook dispatcher is nil")
+		return "", fmt.Errorf("webhook dispatcher is nil")
 	}
 	if endpoint == nil {
-		return fmt.Errorf("webhook endpoint is nil")
+		return "", fmt.Errorf("webhook endpoint is nil")
 	}
 	url := strings.TrimSpace(endpoint.URL)
 	if url == "" {
-		return fmt.Errorf("webhook endpoint url is empty")
+		return "", fmt.Errorf("webhook endpoint url is empty")
 	}
 	if payload == nil {
-		return fmt.Errorf("webhook request payload is nil")
+		return "", fmt.Errorf("webhook request payload is nil")
+	}
+	return url, nil
+}
+
+func classifyWebhookDispatchStatus(err error, ctx, timeoutCtx context.Context) string {
+	if err == nil {
+		return "success"
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(timeoutCtx.Err(), context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return "timeout"
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+		return "canceled"
+	}
+	return "error"
+}
+
+func readAndDecodeWebhookResponse(httpResp *http.Response, respDest any) error {
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		respBody, readErr := io.ReadAll(io.LimitReader(httpResp.Body, 2048))
+		if readErr != nil {
+			return fmt.Errorf("webhook endpoint returned status %d (failed to read body: %w)", httpResp.StatusCode, readErr)
+		}
+		return fmt.Errorf("webhook endpoint returned status %d: %s", httpResp.StatusCode, string(respBody))
+	}
+
+	respBytes, err := io.ReadAll(io.LimitReader(httpResp.Body, 10*1024*1024))
+	if err != nil {
+		return fmt.Errorf("failed to read webhook response body: %w", err)
+	}
+
+	if respDest != nil {
+		if err := json.Unmarshal(respBytes, respDest); err != nil {
+			return fmt.Errorf("failed to unmarshal webhook response json: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (d *DefaultWebhookDispatcher) dispatch(ctx context.Context, hook string, endpoint *config.WebhookEndpoint, payload any, respDest any) (err error) {
+	url, valErr := validateWebhookDispatchArgs(d, endpoint, payload)
+	if valErr != nil {
+		return valErr
 	}
 
 	if ctx == nil {
@@ -160,16 +204,7 @@ func (d *DefaultWebhookDispatcher) dispatch(ctx context.Context, hook string, en
 
 	start := time.Now()
 	defer func() {
-		status := "success"
-		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) || errors.Is(timeoutCtx.Err(), context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				status = "timeout"
-			} else if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
-				status = "canceled"
-			} else {
-				status = "error"
-			}
-		}
+		status := classifyWebhookDispatchStatus(err, ctx, timeoutCtx)
 		metrics.RecordWebhookDispatch(hook, status, time.Since(start))
 	}()
 
@@ -205,26 +240,7 @@ func (d *DefaultWebhookDispatcher) dispatch(ctx context.Context, hook string, en
 		}
 	}()
 
-	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
-		respBody, readErr := io.ReadAll(io.LimitReader(httpResp.Body, 2048))
-		if readErr != nil {
-			return fmt.Errorf("webhook endpoint returned status %d (failed to read body: %w)", httpResp.StatusCode, readErr)
-		}
-		return fmt.Errorf("webhook endpoint returned status %d: %s", httpResp.StatusCode, string(respBody))
-	}
-
-	respBytes, err := io.ReadAll(io.LimitReader(httpResp.Body, 10*1024*1024))
-	if err != nil {
-		return fmt.Errorf("failed to read webhook response body: %w", err)
-	}
-
-	if respDest != nil {
-		if err := json.Unmarshal(respBytes, respDest); err != nil {
-			return fmt.Errorf("failed to unmarshal webhook response json: %w", err)
-		}
-	}
-
-	return nil
+	return readAndDecodeWebhookResponse(httpResp, respDest)
 }
 
 func buildPreTurnRequest(te *turnExecution) *PreTurnRequest {

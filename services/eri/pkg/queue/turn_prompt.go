@@ -98,6 +98,72 @@ func (te *turnExecution) isBurstMessage(id string) bool {
 	return false
 }
 
+func convertDiscordMessageToDBMessage(dm *discordgo.Message, threadID string) db.Message {
+	authorID, authorName := "", ""
+	if dm.Author != nil {
+		authorID, authorName = dm.Author.ID, dm.Author.Username
+	} else if dm.WebhookID != "" {
+		authorName = "Webhook"
+	}
+	createdAt := dm.Timestamp
+	if createdAt.IsZero() {
+		if ts, tsErr := discordgo.SnowflakeTimestamp(dm.ID); tsErr == nil {
+			createdAt = ts
+		} else {
+			createdAt = time.Now().UTC()
+		}
+	}
+	var mentions, mentionUserIDs []string
+	for _, u := range dm.Mentions {
+		if u != nil {
+			mentions = append(mentions, u.Username)
+			mentionUserIDs = append(mentionUserIDs, u.ID)
+		}
+	}
+	var replyingToAuthor string
+	if dm.ReferencedMessage != nil && dm.ReferencedMessage.Author != nil {
+		replyingToAuthor = "@" + dm.ReferencedMessage.Author.Username
+	}
+	return db.Message{
+		ID:               dm.ID,
+		ThreadID:         threadID,
+		AuthorID:         authorID,
+		AuthorName:       authorName,
+		Content:          dm.Content,
+		CreatedAt:        createdAt,
+		Mentions:         mentions,
+		MentionUserIDs:   mentionUserIDs,
+		ReplyingToAuthor: replyingToAuthor,
+	}
+}
+
+func (te *turnExecution) fetchLiveDiscordThreadMessages(dg *discordgo.Session, threadID string, limit int) ([]db.Message, bool) {
+	fetchCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	beforeID := ""
+	if len(te.burst) > 0 && IsNumericSnowflake(te.burst[0].ID) {
+		beforeID = te.burst[0].ID
+	}
+
+	discordMsgs, err := dg.ChannelMessages(threadID, limit, beforeID, "", "", discordgo.WithContext(fetchCtx))
+	if err != nil {
+		log.Printf("[Worker] Discord ChannelMessages failed for thread %s (falling back to database): %v", threadID, err)
+		return nil, false
+	}
+
+	msgs := make([]db.Message, 0, len(discordMsgs))
+	// ChannelMessages returns newest-first; iterate backwards for chronological order.
+	for i := len(discordMsgs) - 1; i >= 0; i-- {
+		dm := discordMsgs[i]
+		if dm == nil || te.isBurstMessage(dm.ID) {
+			continue
+		}
+		msgs = append(msgs, convertDiscordMessageToDBMessage(dm, threadID))
+	}
+	return msgs, true
+}
+
 func (te *turnExecution) getRecentThreadMessages(threadID string, limit int) ([]db.Message, error) {
 	if limit <= 0 {
 		limit = 10
@@ -108,57 +174,9 @@ func (te *turnExecution) getRecentThreadMessages(threadID string, limit int) ([]
 	// 1. Prefer live Discord messages if session and valid snowflake are available.
 	if te.pool != nil {
 		if dg := te.pool.getDiscordSession(); dg != nil && threadID != "" && IsNumericSnowflake(threadID) {
-			fetchCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-
-			beforeID := ""
-			if len(te.burst) > 0 && IsNumericSnowflake(te.burst[0].ID) {
-				beforeID = te.burst[0].ID
-			}
-
-			discordMsgs, err := dg.ChannelMessages(threadID, limit, beforeID, "", "", discordgo.WithContext(fetchCtx))
-			if err == nil {
-				msgs := make([]db.Message, 0, len(discordMsgs))
-				// ChannelMessages returns newest-first; iterate backwards for chronological order.
-				for i := len(discordMsgs) - 1; i >= 0; i-- {
-					dm := discordMsgs[i]
-					if dm == nil || te.isBurstMessage(dm.ID) {
-						continue
-					}
-					authorID, authorName := "", ""
-					if dm.Author != nil {
-						authorID, authorName = dm.Author.ID, dm.Author.Username
-					} else if dm.WebhookID != "" {
-						authorName = "Webhook"
-					}
-					createdAt := dm.Timestamp
-					if createdAt.IsZero() {
-						if ts, tsErr := discordgo.SnowflakeTimestamp(dm.ID); tsErr == nil {
-							createdAt = ts
-						} else {
-							createdAt = time.Now().UTC()
-						}
-					}
-					var mentions, mentionUserIDs []string
-					for _, u := range dm.Mentions {
-						if u != nil {
-							mentions = append(mentions, u.Username)
-							mentionUserIDs = append(mentionUserIDs, u.ID)
-						}
-					}
-					var replyingToAuthor string
-					if dm.ReferencedMessage != nil && dm.ReferencedMessage.Author != nil {
-						replyingToAuthor = "@" + dm.ReferencedMessage.Author.Username
-					}
-					msgs = append(msgs, db.Message{
-						ID: dm.ID, ThreadID: threadID, AuthorID: authorID, AuthorName: authorName,
-						Content: dm.Content, CreatedAt: createdAt,
-						Mentions: mentions, MentionUserIDs: mentionUserIDs, ReplyingToAuthor: replyingToAuthor,
-					})
-				}
+			if msgs, ok := te.fetchLiveDiscordThreadMessages(dg, threadID, limit); ok {
 				return msgs, nil
 			}
-			log.Printf("[Worker] Discord ChannelMessages failed for thread %s (falling back to database): %v", threadID, err)
 		}
 	}
 
@@ -250,39 +268,57 @@ func (te *turnExecution) resolveAttemptConfig(attempt int) attemptConfig {
 	return cfg
 }
 
+func daemonSessionID(pool runner.AgentPool, threadID string) string {
+	if d := getStreamingDaemon(pool, threadID); d != nil {
+		return d.SessionID()
+	}
+	return ""
+}
+
+func (te *turnExecution) extractVerifiedDiskSessionID(stdout, stderr string) string {
+	if stdout == "" && stderr == "" {
+		return ""
+	}
+	combinedOutput := stdout + "\n" + stderr
+	extSess := runner.ExtractSessionID(combinedOutput, te.execStart)
+	if extSess != "" && te.pool != nil && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(extSess) {
+		return extSess
+	}
+	return ""
+}
+
+func (te *turnExecution) probeCandidateSessionID(candidateID, stdout, stderr string) string {
+	if candidateID != "" {
+		return candidateID
+	}
+	if te.isEphemeral {
+		if s := daemonSessionID(te.activePool, te.threadID); s != "" {
+			return s
+		}
+	}
+	if te.lease != nil && te.lease.SessionID() != "" {
+		return te.lease.SessionID()
+	}
+	if te.currentSessionID != "" {
+		return te.currentSessionID
+	}
+	if s := te.extractVerifiedDiskSessionID(stdout, stderr); s != "" {
+		return s
+	}
+	if s := daemonSessionID(te.activePool, te.threadID); s != "" {
+		return s
+	}
+	if primaryPool := te.pool.AgentPool(); primaryPool != nil && primaryPool != te.activePool {
+		return daemonSessionID(primaryPool, te.threadID)
+	}
+	return ""
+}
+
 func (te *turnExecution) resolveAndPersistSessionID(candidateID, stdout, stderr string, allowPersist bool) string {
 	te.activeSessionMu.Lock()
 	defer te.activeSessionMu.Unlock()
 
-	targetSess := candidateID
-	if targetSess == "" && te.isEphemeral {
-		if d := getStreamingDaemon(te.activePool, te.threadID); d != nil && d.SessionID() != "" {
-			targetSess = d.SessionID()
-		}
-	}
-	if targetSess == "" && te.lease != nil && te.lease.SessionID() != "" {
-		targetSess = te.lease.SessionID()
-	}
-	if targetSess == "" {
-		targetSess = te.currentSessionID
-	}
-	if targetSess == "" && (stdout != "" || stderr != "") {
-		combinedOutput := stdout + "\n" + stderr
-		if extSess := runner.ExtractSessionID(combinedOutput, te.execStart); extSess != "" && te.pool != nil && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(extSess) {
-			targetSess = extSess
-		}
-	}
-	if targetSess == "" && te.activePool != nil {
-		if d := getStreamingDaemon(te.activePool, te.threadID); d != nil && d.SessionID() != "" {
-			targetSess = d.SessionID()
-		}
-	}
-	if primaryPool := te.pool.AgentPool(); targetSess == "" && primaryPool != nil && primaryPool != te.activePool {
-		if d := getStreamingDaemon(primaryPool, te.threadID); d != nil && d.SessionID() != "" {
-			targetSess = d.SessionID()
-		}
-	}
-
+	targetSess := te.probeCandidateSessionID(candidateID, stdout, stderr)
 	if targetSess != "" {
 		te.activeSessionID = targetSess
 		if allowPersist {
@@ -315,6 +351,48 @@ func (te *turnExecution) fetchTurnHistory(fetchCtx context.Context, limit int) [
 	return turnHistory
 }
 
+func (te *turnExecution) resolveColdStartPreviousSessionID(isColdStart bool) string {
+	if !isColdStart {
+		return ""
+	}
+	prevID := te.previousSessionID
+	if prevID == "" {
+		prevID = te.getPreviousSessionID(te.threadID)
+	}
+	if prevID != "" {
+		log.Printf("[WorkerPool] Injected previous session identifier (%s) into prompt for thread %s", prevID, te.threadID)
+	}
+	return prevID
+}
+
+func (te *turnExecution) resolveAmbientPromptContext() string {
+	if te.policy.AmbientContext == nil || te.pool == nil || te.pool.cfg.AmbientResolver == nil {
+		return ""
+	}
+	actx, ambErr := te.pool.cfg.AmbientResolver(te.poolCtx(), te.policy.AmbientContext)
+	if ambErr != nil {
+		log.Printf("[WorkerPool] Warning resolving ambient context for channel %s: %v", te.effectiveName, ambErr)
+		return ""
+	}
+	trimmed := strings.TrimSpace(actx)
+	if trimmed != "" {
+		log.Printf("[WorkerPool] Injected ambient context into prompt for #%s", te.effectiveName)
+		return trimmed
+	}
+	return ""
+}
+
+func (te *turnExecution) backfillBurstChannelAndThreadNames() {
+	for i := range te.burst {
+		if te.burst[i].ChannelName == "" && te.effectiveName != "" {
+			te.burst[i].ChannelName = te.effectiveName
+		}
+		if te.isThread && te.burst[i].ThreadName == "" && te.threadName != "" {
+			te.burst[i].ThreadName = te.threadName
+		}
+	}
+}
+
 func (te *turnExecution) buildTurnPrompt() {
 	var turnHistory []HistoryMessage
 	var turnHistoryFetched bool
@@ -336,16 +414,7 @@ func (te *turnExecution) buildTurnPrompt() {
 	isChannelMode := strings.EqualFold(te.policy.Mode, "channel")
 	summary, lookbackMsgs := te.buildColdStartLookback(snap, isColdStart, isChannelMode, getTurnHistory)
 
-	var prevID string
-	if isColdStart {
-		prevID = te.previousSessionID
-		if prevID == "" {
-			prevID = te.getPreviousSessionID(te.threadID)
-		}
-		if prevID != "" {
-			log.Printf("[WorkerPool] Injected previous session identifier (%s) into prompt for thread %s", prevID, te.threadID)
-		}
-	}
+	prevID := te.resolveColdStartPreviousSessionID(isColdStart)
 
 	instructions := config.LoadScopeInstructions(te.effectiveName)
 	if instructions != "" {
@@ -355,24 +424,8 @@ func (te *turnExecution) buildTurnPrompt() {
 		log.Printf("[WorkerPool] Injected coordination context into prompt for thread %s", te.threadID)
 	}
 
-	var ambientCtx string
-	if te.policy.AmbientContext != nil && te.pool != nil && te.pool.cfg.AmbientResolver != nil {
-		if actx, ambErr := te.pool.cfg.AmbientResolver(te.poolCtx(), te.policy.AmbientContext); ambErr != nil {
-			log.Printf("[WorkerPool] Warning resolving ambient context for channel %s: %v", te.effectiveName, ambErr)
-		} else if strings.TrimSpace(actx) != "" {
-			ambientCtx = actx
-			log.Printf("[WorkerPool] Injected ambient context into prompt for #%s", te.effectiveName)
-		}
-	}
-
-	for i := range te.burst {
-		if te.burst[i].ChannelName == "" && te.effectiveName != "" {
-			te.burst[i].ChannelName = te.effectiveName
-		}
-		if te.isThread && te.burst[i].ThreadName == "" && te.threadName != "" {
-			te.burst[i].ThreadName = te.threadName
-		}
-	}
+	ambientCtx := te.resolveAmbientPromptContext()
+	te.backfillBurstChannelAndThreadNames()
 
 	var tz string
 	if te.pool != nil && te.pool.appCfg != nil {
@@ -394,60 +447,81 @@ func (te *turnExecution) buildTurnPrompt() {
 	})
 }
 
-func (te *turnExecution) buildColdStartLookback(snap ChannelSnapshot, isColdStart, isChannelMode bool, getTurnHistory func(int) []HistoryMessage) (string, []HistoryMessage) {
-	var summary string
-	isThreadColdStart := snap.IsThread && snap.ParentID != "" && snap.ParentID != snap.ID && isColdStart && !isChannelMode
-	if isThreadColdStart {
-		cachedSum, lastMsgID := te.getThreadSummary(te.threadID)
-		histMsgs := getTurnHistory(100)
-		if len(histMsgs) > 0 {
-			var latestMsgID string
-			var maxTime time.Time
-			for _, m := range histMsgs {
-				if m.CreatedAt.After(maxTime) || latestMsgID == "" {
-					maxTime, latestMsgID = m.CreatedAt, m.ID
-				}
-			}
-			if cachedSum != "" && lastMsgID != "" && lastMsgID == latestMsgID {
-				summary = cachedSum
-				log.Printf("[WorkerPool] Using cached thread summary for thread %s (watermark msg: %s)", te.threadID, lastMsgID)
-			} else {
-				cfg := te.resolveAttemptConfig(0)
-				llmFn := te.pool.cfg.LLMFunc
-				if llmFn == nil && te.pool.cfg.Classifier != nil && te.pool.cfg.Classifier.LLMFunc != nil {
-					llmFn = te.pool.cfg.Classifier.LLMFunc
-				}
-				flashModel := cfg.model
-				if te.pool.cfg.Classifier != nil && te.pool.cfg.Classifier.Model != "" {
-					flashModel = te.pool.cfg.Classifier.Model
-				} else if cfg.lowEffortModel != "" {
-					flashModel = cfg.lowEffortModel
-				}
-				sumCtx, sumCancel := context.WithTimeout(te.pool.ctx, DefaultThreadSummaryTimeout)
-				newSum, sumErr := SummarizeThreadHistoryWithGroup(sumCtx, te.pool.SummaryGroup(), llmFn, flashModel, te.threadID, histMsgs)
-				sumCancel()
-				if sumErr != nil {
-					log.Printf("[WorkerPool] Warning: Thread history summarization failed for thread %s: %v. Falling back to raw lookback.", te.threadID, sumErr)
-				} else if newSum != "" {
-					summary = newSum
-					te.saveThreadSummary(te.threadID, summary, latestMsgID)
-				}
-			}
-		}
-		if summary != "" {
-			log.Printf("[WorkerPool] Injected <THREAD_SUMMARY> into Turn 1 prompt for thread %s", te.threadID)
+func latestHistoryMessageID(histMsgs []HistoryMessage) string {
+	var latestMsgID string
+	var maxTime time.Time
+	for _, m := range histMsgs {
+		if m.CreatedAt.After(maxTime) || latestMsgID == "" {
+			maxTime, latestMsgID = m.CreatedAt, m.ID
 		}
 	}
+	return latestMsgID
+}
 
-	var lookbackMsgs []HistoryMessage
+func (te *turnExecution) resolveSummarizerLLMAndModel() (LLMFunc, string) {
+	cfg := te.resolveAttemptConfig(0)
+	llmFn := te.pool.cfg.LLMFunc
+	if llmFn == nil && te.pool.cfg.Classifier != nil && te.pool.cfg.Classifier.LLMFunc != nil {
+		llmFn = te.pool.cfg.Classifier.LLMFunc
+	}
+	flashModel := cfg.model
+	if te.pool.cfg.Classifier != nil && te.pool.cfg.Classifier.Model != "" {
+		flashModel = te.pool.cfg.Classifier.Model
+	} else if cfg.lowEffortModel != "" {
+		flashModel = cfg.lowEffortModel
+	}
+	return llmFn, flashModel
+}
+
+func (te *turnExecution) resolveThreadColdStartSummary(getTurnHistory func(int) []HistoryMessage) string {
+	cachedSum, lastMsgID := te.getThreadSummary(te.threadID)
+	histMsgs := getTurnHistory(100)
+	if len(histMsgs) == 0 {
+		return ""
+	}
+	latestMsgID := latestHistoryMessageID(histMsgs)
+	if cachedSum != "" && lastMsgID != "" && lastMsgID == latestMsgID {
+		log.Printf("[WorkerPool] Using cached thread summary for thread %s (watermark msg: %s)", te.threadID, lastMsgID)
+		return cachedSum
+	}
+	llmFn, flashModel := te.resolveSummarizerLLMAndModel()
+	sumCtx, sumCancel := context.WithTimeout(te.pool.ctx, DefaultThreadSummaryTimeout)
+	defer sumCancel()
+	newSum, sumErr := SummarizeThreadHistoryWithGroup(sumCtx, te.pool.SummaryGroup(), llmFn, flashModel, te.threadID, histMsgs)
+	if sumErr != nil {
+		log.Printf("[WorkerPool] Warning: Thread history summarization failed for thread %s: %v. Falling back to raw lookback.", te.threadID, sumErr)
+		return ""
+	}
+	if newSum != "" {
+		te.saveThreadSummary(te.threadID, newSum, latestMsgID)
+	}
+	return newSum
+}
+
+func (te *turnExecution) resolveColdStartLookbackMessages(isColdStart, isChannelMode bool, getTurnHistory func(int) []HistoryMessage) []HistoryMessage {
 	if !te.isEphemeral && (isChannelMode || isColdStart || te.wakeIdx > 0 || len(te.burst) > 1) {
-		lookbackMsgs = getTurnHistory(10)
+		lookbackMsgs := getTurnHistory(10)
 		if isChannelMode && !isColdStart && len(lookbackMsgs) > 0 {
 			lookbackMsgs = FilterAssistantMessages(lookbackMsgs)
 		}
 		if len(lookbackMsgs) > 0 {
 			log.Printf("[WorkerPool] Injected channel history into prompt for thread %s", te.threadID)
 		}
+		return lookbackMsgs
 	}
+	return nil
+}
+
+func (te *turnExecution) buildColdStartLookback(snap ChannelSnapshot, isColdStart, isChannelMode bool, getTurnHistory func(int) []HistoryMessage) (string, []HistoryMessage) {
+	var summary string
+	isThreadColdStart := snap.IsThread && snap.ParentID != "" && snap.ParentID != snap.ID && isColdStart && !isChannelMode
+	if isThreadColdStart {
+		summary = te.resolveThreadColdStartSummary(getTurnHistory)
+		if summary != "" {
+			log.Printf("[WorkerPool] Injected <THREAD_SUMMARY> into Turn 1 prompt for thread %s", te.threadID)
+		}
+	}
+
+	lookbackMsgs := te.resolveColdStartLookbackMessages(isColdStart, isChannelMode, getTurnHistory)
 	return summary, lookbackMsgs
 }
