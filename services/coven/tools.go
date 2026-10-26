@@ -161,9 +161,8 @@ func (h *ToolHandler) MemorySearch(ctx context.Context, args MemorySearchArgs) (
 	}
 
 	return MemorySearchOutput{
-		Facts:   facts,
-		Count:   len(facts),
-		Context: FormatMemoryContext(facts),
+		Facts: facts,
+		Count: len(facts),
 	}, nil
 }
 

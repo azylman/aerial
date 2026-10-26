@@ -160,13 +160,13 @@ func findTranscriptFile(brainDir, sessionID string) string {
 }
 
 type transcriptScanState struct {
-	parsedSteps     []rawTranscriptStep
-	firstParsedStep int
-	maxStepIndex    int
-	step0Prompt     string
-	firstStepTime   time.Time
-	dialogueLines   []string
-	pendingToolName string
+	parsedSteps      []rawTranscriptStep
+	firstParsedStep  int
+	maxStepIndex     int
+	step0Prompt      string
+	firstStepTime    time.Time
+	dialogueLines    []string
+	pendingToolNames []string
 }
 
 func parseTranscriptTimestamp(rawTime string, fallback time.Time) time.Time {
@@ -182,23 +182,31 @@ func parseTranscriptTimestamp(rawTime string, fallback time.Time) time.Time {
 	return fallback
 }
 
-func resolveStepToolAssociation(raw rawTranscriptStep, pendingToolName string) (effectiveToolName, nextPending string) {
+func resolveStepToolAssociation(raw rawTranscriptStep, pendingToolNames []string) (effectiveToolName string, nextPending []string) {
 	effectiveToolName = raw.ToolName
 	if effectiveToolName == "" && len(raw.ToolCalls) > 0 {
 		effectiveToolName = raw.ToolCalls[0].Name
 	}
-	if effectiveToolName == "" && (raw.Type == "GENERIC" || raw.Type == "TOOL" || raw.Type == "RUN_COMMAND") {
-		effectiveToolName = pendingToolName
+	if raw.Type == "GENERIC" || raw.Type == "TOOL" || raw.Type == "RUN_COMMAND" {
+		if len(pendingToolNames) > 0 {
+			if effectiveToolName == "" {
+				effectiveToolName = pendingToolNames[0]
+			}
+			nextPending = pendingToolNames[1:]
+		}
+		return effectiveToolName, nextPending
 	}
-
-	nextPending = pendingToolName
-	if raw.Type == "PLANNER_RESPONSE" && len(raw.ToolCalls) > 0 {
-		nextPending = raw.ToolCalls[0].Name
-	} else if raw.Type != "PLANNER_RESPONSE" {
-		nextPending = ""
+	if raw.Type == "PLANNER_RESPONSE" {
+		if len(raw.ToolCalls) > 0 {
+			nextPending = make([]string, 0, len(raw.ToolCalls))
+			for _, tc := range raw.ToolCalls {
+				nextPending = append(nextPending, tc.Name)
+			}
+			return effectiveToolName, nextPending
+		}
+		return effectiveToolName, pendingToolNames
 	}
-
-	return effectiveToolName, nextPending
+	return effectiveToolName, nil
 }
 
 func (st *transcriptScanState) recordStep(raw rawTranscriptStep) {
@@ -227,7 +235,7 @@ func (st *transcriptScanState) recordStep(raw rawTranscriptStep) {
 	}
 
 	// Tool name association
-	raw.ToolName, st.pendingToolName = resolveStepToolAssociation(raw, st.pendingToolName)
+	raw.ToolName, st.pendingToolNames = resolveStepToolAssociation(raw, st.pendingToolNames)
 	st.parsedSteps = append(st.parsedSteps, raw)
 }
 

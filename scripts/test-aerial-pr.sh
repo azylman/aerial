@@ -796,6 +796,75 @@ assert_eq "true" "$(echo "$SUBMIT_IDEMPOTENCY_CHECK" | grep -q 'retry_preserved_
 assert_eq "true" "$(echo "$SUBMIT_IDEMPOTENCY_CHECK" | grep -q 'retry_submit_success:ok' && echo true || echo false)" "submit_scratch succeeds on second attempt without re-creating PR_DESCRIPTION.md"
 assert_eq "true" "$(echo "$SUBMIT_IDEMPOTENCY_CHECK" | grep -q 'remed_existing_pr:ok' && echo true || echo false)" "submit_scratch succeeds idempotently on existing PR branch with pre-committed changes and no local PR_DESCRIPTION.md"
 
+# Case 16: Tree-stamped pre-flight verification cache and init_scratch --branch
+TREE_CACHE_AND_BRANCH_CHECK=$(bash -c "
+    REPO_TEST_MODE=1
+    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
+    CACHE_DIR=\$(mktemp -d /tmp/aerial-pr-tree-cache.XXXXXX)
+    REMOTE_DIR=\$(mktemp -d /tmp/aerial-pr-branch-remote.XXXXXX)
+    SEED_DIR=\$(mktemp -d /tmp/aerial-pr-branch-seed.XXXXXX)
+    trap 'rm -rf \"\$CACHE_DIR\" \"\$REMOTE_DIR\" \"\$SEED_DIR\"' EXIT
+
+    git init -q \"\$CACHE_DIR\"
+    git -C \"\$CACHE_DIR\" config user.name 'Tester'
+    git -C \"\$CACHE_DIR\" config user.email 'tester@example.com'
+    mkdir -p \"\$CACHE_DIR/scripts\"
+    cat << 'EOF' > \"\$CACHE_DIR/scripts/verify.sh\"
+#!/bin/sh
+echo \"ran_verify_script\" >> .verify_runs
+printf '%s\n' \"\$(git write-tree)\" > \"\$(git rev-parse --git-dir)/.aerial-verified-tree\"
+exit 0
+EOF
+    chmod +x \"\$CACHE_DIR/scripts/verify.sh\"
+    echo 'v1' > \"\$CACHE_DIR/app.txt\"
+    git -C \"\$CACHE_DIR\" add scripts/verify.sh app.txt
+
+    # First run executes verify.sh and stamps .aerial-verified-tree
+    out1=\$(run_preflight_verification \"\$CACHE_DIR\" 2>&1)
+    # Second run with identical staged tree and clean working diff skips verify.sh
+    out2=\$(run_preflight_verification \"\$CACHE_DIR\" 2>&1)
+    if echo \"\$out2\" | grep -q 'Skipping duplicate pre-flight verification' && [ \"\$(wc -l < \"\$CACHE_DIR/.verify_runs\" | tr -d '[:space:]')\" = \"1\" ]; then
+        echo 'tree_cache_hit:ok'
+    else
+        echo \"tree_cache_hit:fail:\$out2\"
+    fi
+
+    # Unstaged modification invalidates cache and re-runs verify.sh
+    echo 'v2-unstaged' >> \"\$CACHE_DIR/app.txt\"
+    out3=\$(run_preflight_verification \"\$CACHE_DIR\" 2>&1)
+    if echo \"\$out3\" | grep -q 'Running pre-flight verification' && [ \"\$(wc -l < \"\$CACHE_DIR/.verify_runs\" | tr -d '[:space:]')\" = \"2\" ]; then
+        echo 'tree_cache_invalidated:ok'
+    else
+        echo \"tree_cache_invalidated:fail:\$out3\"
+    fi
+
+    # Test init_scratch --branch against local bare repo
+    git init -q --bare \"\$REMOTE_DIR\"
+    git clone -q \"\$REMOTE_DIR\" \"\$SEED_DIR\"
+    git -C \"\$SEED_DIR\" config user.name 'Tester'
+    git -C \"\$SEED_DIR\" config user.email 'tester@example.com'
+    git -C \"\$SEED_DIR\" checkout -q -b feat/existing-ci-branch
+    echo 'branch-content' > \"\$SEED_DIR/file.txt\"
+    git -C \"\$SEED_DIR\" add file.txt && git -C \"\$SEED_DIR\" commit -q -m 'branch commit'
+    git -C \"\$SEED_DIR\" push -q -u origin feat/existing-ci-branch
+
+    export GITHUB_PAT='mock_pat'
+    export AERIAL_REPO_URL_OVERRIDE=\"\$REMOTE_DIR\"
+    init_json=\$(init_scratch aerial --branch feat/existing-ci-branch)
+    cloned_dir=\$(echo \"\$init_json\" | jq -r '.scratch_dir')
+    cloned_branch=\$(echo \"\$init_json\" | jq -r '.branch')
+    actual_head=\$(git -C \"\$cloned_dir\" rev-parse --abbrev-ref HEAD)
+    rm -rf \"\$cloned_dir\"
+    if [ \"\$cloned_branch\" = \"feat/existing-ci-branch\" ] && [ \"\$actual_head\" = \"feat/existing-ci-branch\" ]; then
+        echo 'init_branch:ok'
+    else
+        echo \"init_branch:fail:\$cloned_branch:\$actual_head\"
+    fi
+")
+assert_eq "true" "$(echo "$TREE_CACHE_AND_BRANCH_CHECK" | grep -q 'tree_cache_hit:ok' && echo true || echo false)" "run_preflight_verification skips duplicate verify.sh when .aerial-verified-tree matches"
+assert_eq "true" "$(echo "$TREE_CACHE_AND_BRANCH_CHECK" | grep -q 'tree_cache_invalidated:ok' && echo true || echo false)" "run_preflight_verification re-runs verify.sh when unstaged changes exist"
+assert_eq "true" "$(echo "$TREE_CACHE_AND_BRANCH_CHECK" | grep -q 'init_branch:ok' && echo true || echo false)" "init_scratch --branch clones and stays on existing PR branch"
+
 echo "--------------------------------------------------------"
 echo "Test results: $PASSED passed, $FAILED failed"
 if [ "$FAILED" -gt 0 ]; then

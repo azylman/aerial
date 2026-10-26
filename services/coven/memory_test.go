@@ -1213,6 +1213,9 @@ func TestToolHandler_MemorySearch(t *testing.T) {
 			if !tc.wantErr && out.Count != tc.wantCount {
 				t.Errorf("out.Count = %d, want %d", out.Count, tc.wantCount)
 			}
+			if !tc.wantErr && out.Context != "" {
+				t.Errorf("expected empty out.Context on MemorySearchOutput, got %q", out.Context)
+			}
 		})
 	}
 }

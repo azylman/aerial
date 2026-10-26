@@ -229,9 +229,10 @@ type targetSymSpan struct {
 func loadTargetFiles(shareRoot, repo string, targetFiles []string) []targetFileInfo {
 	repoDir := filepath.Join(strings.TrimSpace(shareRoot), cleanRepoDirName(repo))
 	var files []targetFileInfo
+	seen := make(map[string]bool)
 	for _, tf := range targetFiles {
 		rel := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(tf), "./"), "/")
-		if rel == "" {
+		if rel == "" || seen[rel] {
 			continue
 		}
 		fullPath := filepath.Join(repoDir, rel)
@@ -239,6 +240,7 @@ func loadTargetFiles(shareRoot, repo string, targetFiles []string) []targetFileI
 		if err != nil {
 			continue
 		}
+		seen[rel] = true
 		lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
 		files = append(files, targetFileInfo{relFile: rel, lines: lines})
 	}
@@ -251,7 +253,6 @@ func runSymbolPass1(cleanSymbols []string, files []targetFileInfo, fileSpans map
 			if start, end, ok := findTopLevelSymbolSpan(f.lines, sym); ok {
 				fileSpans[f.relFile] = append(fileSpans[f.relFile], targetSymSpan{sym: sym, start: start, end: end})
 				resolved[sym] = true
-				break
 			}
 		}
 	}
@@ -266,7 +267,6 @@ func runSymbolPass2(cleanSymbols []string, files []targetFileInfo, fileSpans map
 			if start, end, ok := findFallbackSymbolLine(f.lines, sym); ok {
 				fileSpans[f.relFile] = append(fileSpans[f.relFile], targetSymSpan{sym: sym, start: start, end: end})
 				resolved[sym] = true
-				break
 			}
 		}
 	}
@@ -306,6 +306,11 @@ func formatSpanLines(targetFiles []string, fileSpans map[string][]targetSymSpan)
 
 // ResolveSymbolSpans resolves deterministic StartLine-EndLine spans across targetFiles under shareRoot/repo.
 func ResolveSymbolSpans(shareRoot, repo string, targetFiles, targetSymbols []string) ([]string, bool) {
+	files := loadTargetFiles(shareRoot, repo, targetFiles)
+	if len(files) == 0 {
+		return nil, false
+	}
+
 	var cleanSymbols []string
 	seenSyms := make(map[string]bool)
 	for _, s := range targetSymbols {
@@ -316,11 +321,11 @@ func ResolveSymbolSpans(shareRoot, repo string, targetFiles, targetSymbols []str
 		}
 	}
 	if len(cleanSymbols) == 0 {
-		return nil, false
-	}
-	files := loadTargetFiles(shareRoot, repo, targetFiles)
-	if len(files) == 0 {
-		return nil, false
+		spanLines := make([]string, 0, len(files))
+		for _, f := range files {
+			spanLines = append(spanLines, fmt.Sprintf("- %s (L1-L%d)", f.relFile, len(f.lines)))
+		}
+		return spanLines, len(spanLines) > 0
 	}
 
 	fileSpans := make(map[string][]targetSymSpan)

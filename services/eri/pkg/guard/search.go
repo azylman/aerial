@@ -448,17 +448,27 @@ func CheckSearchWithSQL(toolName string, args ToolArgs, describer SQLDescriber) 
 			continue
 		}
 
-		// 2. Evaluate grep / search / strings commands
-		if isGrepOrSearchBinary(bin) {
-			if dec := inspectGrepCommand(bin, tokens, ops[idx] == '|'); dec != nil {
-				return dec
-			}
-			continue
+		// 2. Evaluate grep / search / strings / git grep commands
+		if dec := inspectSearchSegment(bin, tokens, ops[idx] == '|'); dec != nil {
+			return dec
 		}
 	}
 
 	// 3. Evaluate psql invocations (schema validation, SELECT * ban, LIMIT gate, and -A shaping)
 	return inspectPsqlPipeline(args.CommandLine, describer)
+}
+
+func inspectSearchSegment(bin string, tokens []string, fromPipe bool) *Decision {
+	if bin == "git" {
+		if subTokens, ok := extractGitGrepTokens(tokens); ok {
+			return inspectGrepCommand("git-grep", subTokens, fromPipe)
+		}
+		return nil
+	}
+	if isGrepOrSearchBinary(bin) {
+		return inspectGrepCommand(bin, tokens, fromPipe)
+	}
+	return nil
 }
 
 func unwrapCommandTokens(tokens []string) []string {
@@ -477,6 +487,27 @@ func unwrapCommandTokens(tokens []string) []string {
 		}
 	}
 	return tokens
+}
+
+var gitGlobalValueFlags = map[string]bool{
+	"-C": true, "-c": true, "--git-dir": true, "--work-tree": true, "--namespace": true,
+}
+
+func extractGitGrepTokens(tokens []string) ([]string, bool) {
+	for i := 1; i < len(tokens); i++ {
+		t := tokens[i]
+		if strings.HasPrefix(t, "-") {
+			if gitGlobalValueFlags[t] && i+1 < len(tokens) {
+				i++
+			}
+			continue
+		}
+		if t == "grep" {
+			return tokens[i:], true
+		}
+		return nil, false
+	}
+	return nil, false
 }
 
 func isGrepOrSearchBinary(bin string) bool {
@@ -727,7 +758,7 @@ func collectNonFlagTokens(tokens []string) []string {
 
 func parseGrepTokens(bin string, tokens []string) grepScanFlags {
 	flags := grepScanFlags{
-		isRecursive: (bin == "rg" || bin == "ag" || bin == "ack"),
+		isRecursive: (bin == "rg" || bin == "ag" || bin == "ack" || bin == "git-grep"),
 	}
 
 	for i := 1; i < len(tokens); i++ {

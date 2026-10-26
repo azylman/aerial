@@ -89,10 +89,10 @@ When `webhooks-router` wakes Brain on a CI check failure or `roborev` review fai
 
 ### 3.1 Deterministic CI Check Failures (Tests, Lint, Coverage, Build)
 1. Inspect the pre-extracted failure log in the wake prompt (or fetch check details if needed).
-2. Initialize a scratch workspace and check out the PR branch:
+2. Initialize a scratch workspace on the PR branch:
    ```bash
-   /share/aerial/scripts/aerial-pr.sh init <repo>
-   cd <scratch_dir> && git checkout <branch>
+   /share/aerial/scripts/aerial-pr.sh init <repo> --branch <branch>
+   cd <scratch_dir>
    ```
 3. Fix the root cause locally, run `./scripts/verify.sh --staged` and targeted package tests to confirm exit code 0, and push directly to the PR branch (`git push origin <branch>`). Native auto-merge remains armed and will merge once CI turns green.
 
