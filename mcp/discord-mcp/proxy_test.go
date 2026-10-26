@@ -112,6 +112,10 @@ func setupMockDiscordUpstream(t *testing.T) *httptest.Server {
 		case "tools/list":
 			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"discord_send"},{"name":"discord_read_messages"}]}}`))
 		case "tools/call":
+			if strings.Contains(string(body), "discord_search_messages") {
+				_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"total_results\":10,\"messages\":[[{\"id\":\"m1\",\"timestamp\":\"2026-10-25T00:00:00Z\",\"channel_id\":\"c1\",\"content\":\"hello\",\"hit\":true,\"author\":{\"id\":\"u1\",\"username\":\"devuser\",\"global_name\":\"Dev\"}}]],\"threads\":[{\"id\":\"t1\"}]}"}]}}`))
+				return
+			}
 			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"executed"}]}}`))
 		default:
 			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":"ok"}`))
@@ -148,6 +152,7 @@ func TestProxyHandler_ServeHTTP(t *testing.T) {
 		{"tools/list filters discord_send", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":100,"method":"tools/list"}`), nil, false, http.StatusOK, "discord_read_messages", "discord_send"},
 		{"tools/call blocked for discord_send", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":200,"method":"tools/call","params":{"name":"discord_send","arguments":{"message":"test"}}}`), nil, false, http.StatusOK, "disabled", ""},
 		{"tools/call allowed for discord_read_messages", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":300,"method":"tools/call","params":{"name":"discord_read_messages","arguments":{"channelId":"123"}}}`), nil, false, http.StatusOK, "executed", ""},
+		{"tools/call shapes discord_search_messages", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":301,"method":"tools/call","params":{"name":"discord_search_messages","arguments":{"guildId":"123","offset":2}}}`), nil, false, http.StatusOK, "has_more", "threads"},
 		{"GET /health reverse proxies to upstream", handler, http.MethodGet, "/health", nil, nil, false, http.StatusOK, "ok", ""},
 		{"upstream returns invalid JSON for tools/list", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`), map[string]string{"X-Mock-Invalid-JSON": "1"}, false, http.StatusOK, "{invalid-tools-list", ""},
 		{"offline upstream returns BadGateway", offlineHandler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`), nil, false, http.StatusBadGateway, "", ""},

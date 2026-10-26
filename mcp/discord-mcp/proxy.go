@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 
 	"github.com/azylman/aerial/pkg/httpkit"
 )
@@ -107,6 +108,10 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			respBytes = filtered
 		} else {
 			log.Printf("[Proxy] Warning: failed to filter tools/list response: %v", err)
+		}
+	} else if strings.EqualFold(strings.TrimSpace(toolName), "discord_search_messages") && resp.StatusCode == http.StatusOK {
+		if shaped, shapeErr := ShapeSearchMessagesResponse(respBytes, ExtractSearchOffset(bodyBytes)); shapeErr == nil {
+			respBytes = shaped
 		}
 	}
 
