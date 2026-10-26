@@ -251,11 +251,11 @@ func TestResolveVoicemailMessage(t *testing.T) {
 		{
 			name: "explicit voicemail message in brief",
 			brief: CallBrief{
-				VoicemailMessage: "Hi, please call Alex back at 510-555-0100.",
+				VoicemailMessage: "Hi, please call the account owner back at 510-555-0100.",
 				Task:             "Book table",
 			},
 			openingMessage: "Hello, checking availability",
-			want:           "Hi, please call Alex back at 510-555-0100.",
+			want:           "Hi, please call the account owner back at 510-555-0100.",
 		},
 		{
 			name: "opening message fallback when voicemail message is empty",

@@ -46,24 +46,21 @@ func NormalizeE164(raw string) (string, error) {
 		return "", fmt.Errorf("empty phone number")
 	}
 
+	var candidate string
 	if strings.HasPrefix(cleaned, "+") {
-		if !e164Regex.MatchString(cleaned) {
-			return "", fmt.Errorf("invalid E.164 phone number: %q", raw)
-		}
-		return cleaned, nil
+		candidate = cleaned
+	} else if len(cleaned) == 11 && strings.HasPrefix(cleaned, "1") {
+		candidate = "+" + cleaned
+	} else if len(cleaned) == 10 && cleaned[0] >= '2' && cleaned[0] <= '9' {
+		candidate = "+1" + cleaned
+	} else {
+		return "", fmt.Errorf("invalid E.164 phone number: %q", raw)
 	}
 
-	// 11-digit US number starting with 1
-	if len(cleaned) == 11 && strings.HasPrefix(cleaned, "1") {
-		return "+" + cleaned, nil
+	if !e164Regex.MatchString(candidate) {
+		return "", fmt.Errorf("invalid E.164 phone number: %q", raw)
 	}
-
-	// 10-digit standard US number without country code
-	if len(cleaned) == 10 && cleaned[0] >= '2' && cleaned[0] <= '9' {
-		return "+1" + cleaned, nil
-	}
-
-	return "", fmt.Errorf("invalid E.164 phone number: %q", raw)
+	return candidate, nil
 }
 
 func parsePositiveInt(val string, defaultVal int, name string) (int, error) {
@@ -139,9 +136,6 @@ func LoadConfig(getenv func(string) string) (*Config, error) {
 
 	if cfg.Port == "" {
 		cfg.Port = "4019"
-	}
-	if cfg.PublicWebhookBaseURL == "" {
-		cfg.PublicWebhookBaseURL = "https://webhooks.zylman.com"
 	}
 	if cfg.GeminiAPIKey == "" {
 		cfg.GeminiAPIKey = strings.TrimSpace(getenv("GEMINI_HARNESS_API_KEY"))

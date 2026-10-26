@@ -96,12 +96,20 @@ type Store interface {
 
 // PGStore implements Store backed by PostgreSQL (or SQLite in tests).
 type PGStore struct {
-	db *sql.DB
+	db       *sql.DB
+	isSQLite bool
 }
 
 // NewPGStore constructs a new PGStore wrapping a sql.DB instance.
 func NewPGStore(db *sql.DB) *PGStore {
-	return &PGStore{db: db}
+	var isSQLite bool
+	if db != nil && db.Driver() != nil {
+		driverName := fmt.Sprintf("%T", db.Driver())
+		if strings.Contains(strings.ToLower(driverName), "sqlite") {
+			isSQLite = true
+		}
+	}
+	return &PGStore{db: db, isSQLite: isSQLite}
 }
 
 // OpenDB opens a database connection from a connection string.
@@ -484,8 +492,13 @@ func (s *PGStore) AppendTranscriptTurn(ctx context.Context, callID string, turn 
 	}
 	defer func() { _ = tx.Rollback() }() //nolint:errcheck
 
+	query := "SELECT transcript FROM voice_calls WHERE call_id = $1"
+	if !s.isSQLite {
+		query += " FOR UPDATE"
+	}
+
 	var transRaw string
-	err = tx.QueryRowContext(ctx, "SELECT transcript FROM voice_calls WHERE call_id = $1", callID).Scan(&transRaw)
+	err = tx.QueryRowContext(ctx, query, callID).Scan(&transRaw)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrCallNotFound
@@ -540,8 +553,13 @@ func (s *PGStore) AppendOwnerInstruction(ctx context.Context, callID string, ins
 	}
 	defer func() { _ = tx.Rollback() }() //nolint:errcheck
 
+	query := "SELECT owner_instructions FROM voice_calls WHERE call_id = $1"
+	if !s.isSQLite {
+		query += " FOR UPDATE"
+	}
+
 	var instrRaw string
-	err = tx.QueryRowContext(ctx, "SELECT owner_instructions FROM voice_calls WHERE call_id = $1", callID).Scan(&instrRaw)
+	err = tx.QueryRowContext(ctx, query, callID).Scan(&instrRaw)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrCallNotFound

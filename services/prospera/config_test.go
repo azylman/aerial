@@ -21,6 +21,8 @@ func TestNormalizeE164(t *testing.T) {
 		{name: "invalid short digits", raw: "123", wantErr: true},
 		{name: "invalid empty", raw: "", wantErr: true},
 		{name: "invalid letters", raw: "+1510555abcd", wantErr: true},
+		{name: "invalid letters 10 digit", raw: "510-555-abcd", wantErr: true},
+		{name: "invalid letters 11 digit", raw: "1-510-555-abcd", wantErr: true},
 		{name: "invalid zero country code", raw: "+0123456789", wantErr: true},
 		{name: "invalid too long", raw: "+1234567890123456", wantErr: true},
 	}
@@ -68,7 +70,6 @@ func TestLoadConfig(t *testing.T) {
 			wantErr:                false,
 			wantPort:               "4019",
 			wantDatabaseURL:        "postgres://user:pass@localhost:5432/testdb",
-			wantPublicWebhookBase:  "https://webhooks.zylman.com",
 			wantGeminiLiveModel:    "gemini-3.8-live",
 			wantGeminiFallback:     "gemini-3.1-flash-live-preview",
 			wantBrainURL:           "http://eri.aerial",

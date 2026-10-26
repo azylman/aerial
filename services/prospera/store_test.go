@@ -71,6 +71,14 @@ func setUpTestStore(t *testing.T) *PGStore {
 	return NewPGStore(db)
 }
 
+func TestPGStore_SQLiteDetection(t *testing.T) {
+	t.Parallel()
+	store := setUpTestStore(t)
+	if !store.isSQLite {
+		t.Errorf("store.isSQLite = false, want true for SQLite test store")
+	}
+}
+
 func TestPGStore_CallLifecycle(t *testing.T) {
 	t.Parallel()
 	store := setUpTestStore(t)
