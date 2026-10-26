@@ -42,11 +42,7 @@ job "grafana" {
 
       env {
         GF_PATHS_PROVISIONING          = "/local/provisioning"
-        GF_DATABASE_TYPE               = "postgres"
-        GF_DATABASE_HOST               = "postgres:5432"
-        GF_DATABASE_NAME               = "aerial"
-        GF_DATABASE_USER               = "aerial"
-        GF_DATABASE_SSL_MODE           = "disable"
+        GF_DATABASE_TYPE               = "sqlite3"
         GF_SERVER_ROOT_URL             = "%(protocol)s://%(domain)s:%(http_port)s/grafana/"
         GF_SERVER_SERVE_FROM_SUB_PATH  = "true"
         GF_SECURITY_ADMIN_USER         = "admin"
@@ -115,7 +111,6 @@ EOH
         data = <<EOH
 {{ if nomadVarExists "nomad/jobs/shared" }}
 {{ with nomadVar "nomad/jobs/shared" }}
-{{ if .POSTGRES_PASSWORD }}GF_DATABASE_PASSWORD="{{ .POSTGRES_PASSWORD }}"{{ end }}
 {{ if .GRAFANA_ADMIN_PASSWORD }}GF_SECURITY_ADMIN_PASSWORD="{{ .GRAFANA_ADMIN_PASSWORD }}"{{ else if .POSTGRES_PASSWORD }}GF_SECURITY_ADMIN_PASSWORD="{{ .POSTGRES_PASSWORD }}"{{ end }}
 {{ end }}
 {{ end }}
