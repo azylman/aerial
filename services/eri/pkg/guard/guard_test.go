@@ -104,6 +104,13 @@ func TestGuardProcess_EndToEnd(t *testing.T) {
 		{"search mode denies unconstrained find", "search", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "find / -name foo"}}}`, true, 0, ""},
 		{"search mode allows scoped grep", "search", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "grep -rn -m 20 --exclude-dir=.git foo ."}}}`, false, 0, ""},
 		{"commit mode allows safe commit command", "commit", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git status"}}}`, false, 0, ""},
+		{"batch mode unscoped test denied", "batch", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "go test ./..."}}}`, true, 0, ""},
+		{"python3 -c escaped char outside quotes", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "python3 -c 'print(f\"{x[\\\"k\\\"]}\")' \\ && true", "WaitMsBeforeAsync": 10000}}}`, false, 0, `python3 -c 'print(f"{x["k"]}")' \ && true`},
+		{"python3 -c unclosed fstring", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "python3 -c 'print(f\"{x)'", "WaitMsBeforeAsync": 10000}}}`, false, 0, ""},
+		{"python3 -c unclosed quote", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "python3 -c 'print(\"abc)'", "WaitMsBeforeAsync": 10000}}}`, false, 0, ""},
+		{"empty command in schedule", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "   "}}}`, false, 10000, ""},
+		{"empty tokens between semicolons in share", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "echo 1; ; echo 2", "Cwd": "/data"}}}`, false, 0, ""},
+		{"safe output redirect in share", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "echo safe > /data/scratch/output.txt", "Cwd": "/data"}}}`, false, 0, ""},
 	}
 
 	for _, tc := range tests {
@@ -189,6 +196,12 @@ func (panicReader) Read([]byte) (int, error) {
 	panic("simulated reader panic")
 }
 
+type errorWriter struct{}
+
+func (errorWriter) Write([]byte) (int, error) {
+	return 0, errors.New("simulated write failure")
+}
+
 func TestGuardProcess_IOAndModes(t *testing.T) {
 	t.Parallel()
 
@@ -222,6 +235,14 @@ func TestGuardProcess_IOAndModes(t *testing.T) {
 		})
 	}
 
+	t.Run("panic recovery with failing writer", func(t *testing.T) {
+		t.Parallel()
+		err := Process(panicReader{}, errorWriter{}, "all")
+		if err == nil {
+			t.Fatalf("expected error from failing writer during panic recovery, got nil")
+		}
+	})
+
 	parseTests := []struct {
 		name     string
 		raw      string
@@ -231,6 +252,7 @@ func TestGuardProcess_IOAndModes(t *testing.T) {
 		{"nil bytes", "", "", ""},
 		{"empty json string", `""`, "", ""},
 		{"plain string", `"plain non-json string"`, "", ""},
+		{"string not json map", `"not-a-json-map"`, "", ""},
 		{"json string encoded object", `"{\"CommandLine\": \"echo 1\", \"Cwd\": \"/data\"}"`, "", "echo 1"},
 		{"direct map object", `{"path": "/tmp/test.go", "CommandLine": "cat test.go"}`, "/tmp/test.go", "cat test.go"},
 	}
