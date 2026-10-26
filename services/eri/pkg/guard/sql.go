@@ -355,8 +355,9 @@ func validatePlanLimit(plan *SQLPlan) *Decision {
 }
 
 type locatedToken struct {
-	value     string
-	endOffset int
+	value       string
+	startOffset int
+	endOffset   int
 }
 
 type psqlInvocation struct {
@@ -566,40 +567,39 @@ func delimiterWidth(cmd string, i int) int {
 func tokenizeWithOffsets(sub string, baseOffset int) []locatedToken {
 	var tokens []locatedToken
 	var current strings.Builder
+	tokStart := 0
 	inToken, inSingle, inDouble, escaped := false, false, false, false
 
 	for i := 0; i < len(sub); i++ {
 		ch := sub[i]
-		if escaped {
-			current.WriteByte(ch)
-			inToken, escaped = true, false
-			continue
-		}
-		if ch == '\\' && !inSingle {
-			escaped, inToken = true, true
-			continue
-		}
-		if ch == '\'' && !inDouble {
-			inSingle, inToken = !inSingle, true
-			continue
-		}
-		if ch == '"' && !inSingle {
-			inDouble, inToken = !inDouble, true
-			continue
-		}
-		if !inSingle && !inDouble && (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
+		if !escaped && !inSingle && !inDouble && (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
 			if inToken {
-				tokens = append(tokens, locatedToken{value: current.String(), endOffset: baseOffset + i})
+				tokens = append(tokens, locatedToken{value: current.String(), startOffset: baseOffset + tokStart, endOffset: baseOffset + i})
 				current.Reset()
 				inToken = false
 			}
 			continue
 		}
-		current.WriteByte(ch)
-		inToken = true
+		if !inToken {
+			tokStart = i
+			inToken = true
+		}
+		switch {
+		case escaped:
+			current.WriteByte(ch)
+			escaped = false
+		case ch == '\\' && !inSingle:
+			escaped = true
+		case ch == '\'' && !inDouble:
+			inSingle = !inSingle
+		case ch == '"' && !inSingle:
+			inDouble = !inDouble
+		default:
+			current.WriteByte(ch)
+		}
 	}
 	if inToken {
-		tokens = append(tokens, locatedToken{value: current.String(), endOffset: baseOffset + len(sub)})
+		tokens = append(tokens, locatedToken{value: current.String(), startOffset: baseOffset + tokStart, endOffset: baseOffset + len(sub)})
 	}
 	return tokens
 }
