@@ -962,21 +962,26 @@ func (l *unifiedSessionLease) Execute(ctx context.Context, turn *TurnContext) (*
 		turn.Ctx = ctx
 	}
 
+	handleErr := func(err error) {
+		l.cancelRotation = true
+		if !IsQuotaPause(err.Error(), "") && !IsCapacityBlip(err.Error(), "") && l.daemon != nil {
+			l.daemon.MarkDirty()
+		}
+	}
+
+	if err := ctx.Err(); err != nil {
+		handleErr(err)
+		return nil, err
+	}
+
 	bufSink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
 	origSink := turn.Sink
 	turn.Sink = &leaseTurnSinkWrapper{inner: origSink, buf: bufSink}
 	defer func() { turn.Sink = origSink }()
 
 	if err := l.ensureActiveDaemon(ctx); err != nil {
+		handleErr(err)
 		return nil, err
-	}
-
-	handleErr := func(err error) {
-		if IsQuotaPause(err.Error(), "") || IsCapacityBlip(err.Error(), "") {
-			l.cancelRotation = true
-		} else if l.daemon != nil {
-			l.daemon.MarkDirty()
-		}
 	}
 
 	if err := l.daemon.Send(compileLeasePrompt(turn, l.isCold, l.prevSessID), turn); err != nil {
@@ -1005,7 +1010,7 @@ func (l *unifiedSessionLease) Release() error {
 	var releaseErr error
 	l.releaseOnce.Do(func() {
 		defer l.pool.releaseTargetLock(l.targetKey, l.lock, true)
-		if l.cancelRotation || strings.Contains(l.targetKey, "-ondemand-") {
+		if l.cancelRotation || strings.Contains(l.targetKey, "-ondemand-") || (l.daemon != nil && l.daemon.State() == StateClosed && !l.pool.isClosed()) {
 			return
 		}
 		shouldRotate, reason := l.pool.ShouldRotate(l.daemon)

@@ -1126,3 +1126,277 @@ func TestWorker_EvaluateAmbientWake_HTTPAndSilent_TableDriven(t *testing.T) {
 		})
 	}
 }
+
+type retryNotifyStore struct {
+	db.Store
+	onRetry func()
+}
+
+func (s *retryNotifyStore) IncrementMessageRetry(ctx context.Context, id, errMsg string) error {
+	err := s.Store.IncrementMessageRetry(ctx, id, errMsg)
+	if s.onRetry != nil {
+		s.onRetry()
+	}
+	return err
+}
+
+func TestWorkerPool_InterruptThread(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name               string
+		drainQueue         bool
+		reset              bool
+		firstAttemptErr    string
+		enqueueSecondMsg   bool
+		backoffBase        time.Duration
+		wantMsg1Status     string
+		wantMsg1Err        string
+		wantMsg1Retries    int
+		wantMsg1Attempts   int
+		wantMsg2Status     string
+		wantMsg2Err        string
+		wantMsg2Resp       string
+		wantSessionRotated bool
+	}{
+		{
+			name:               "ActiveTurn_DrainQueue_SuppressesRetryAndPreservesSession",
+			drainQueue:         true,
+			reset:              false,
+			firstAttemptErr:    "",
+			enqueueSecondMsg:   true,
+			backoffBase:        20 * time.Millisecond,
+			wantMsg1Status:     db.StatusFailed,
+			wantMsg1Err:        InterruptedByOperatorReason,
+			wantMsg1Retries:    0,
+			wantMsg1Attempts:   1,
+			wantMsg2Status:     db.StatusFailed,
+			wantMsg2Err:        InterruptedByOperatorReason,
+			wantSessionRotated: false,
+		},
+		{
+			name:               "DuringRetryBackoff_WithReset_AbortsSleepAndRotatesSession",
+			drainQueue:         true,
+			reset:              true,
+			firstAttemptErr:    "503 service unavailable",
+			enqueueSecondMsg:   false,
+			backoffBase:        30 * time.Second,
+			wantMsg1Status:     db.StatusFailed,
+			wantMsg1Err:        InterruptedByOperatorReason,
+			wantMsg1Retries:    1,
+			wantMsg1Attempts:   1,
+			wantSessionRotated: true,
+		},
+		{
+			name:               "DuringRetryBackoffNoReset",
+			drainQueue:         false,
+			reset:              false,
+			firstAttemptErr:    "503 service unavailable",
+			enqueueSecondMsg:   false,
+			backoffBase:        30 * time.Second,
+			wantMsg1Status:     db.StatusFailed,
+			wantMsg1Err:        InterruptedByOperatorReason,
+			wantMsg1Retries:    1,
+			wantMsg1Attempts:   1,
+			wantSessionRotated: false,
+		},
+		{
+			name:               "DuringCapacityBlipBackoff_AbortsSleepAndFails",
+			drainQueue:         true,
+			reset:              false,
+			firstAttemptErr:    "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.",
+			enqueueSecondMsg:   false,
+			backoffBase:        30 * time.Second,
+			wantMsg1Status:     db.StatusFailed,
+			wantMsg1Err:        InterruptedByOperatorReason,
+			wantMsg1Retries:    1,
+			wantMsg1Attempts:   1,
+			wantSessionRotated: false,
+		},
+		{
+			name:               "ActiveTurn_NoDrain_AbortsActiveTurnAndRunsQueuedMessage",
+			drainQueue:         false,
+			reset:              false,
+			firstAttemptErr:    "",
+			enqueueSecondMsg:   true,
+			backoffBase:        20 * time.Millisecond,
+			wantMsg1Status:     db.StatusFailed,
+			wantMsg1Err:        InterruptedByOperatorReason,
+			wantMsg1Retries:    0,
+			wantMsg1Attempts:   1,
+			wantMsg2Status:     db.StatusCompleted,
+			wantMsg2Resp:       "second turn ok",
+			wantSessionRotated: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			baseStore := setupTestStore(t)
+			tmpHome, tempData := t.TempDir(), t.TempDir()
+			initialSessID := "11111111-2222-3333-4444-555555555555"
+			threadID := "thread-interrupt-" + strings.ToLower(tc.name)
+
+			interruptReadyCh := make(chan struct{})
+			var readyOnce sync.Once
+			signalReady := func() {
+				readyOnce.Do(func() { close(interruptReadyCh) })
+			}
+
+			store := &retryNotifyStore{
+				Store: baseStore,
+				onRetry: func() {
+					if tc.firstAttemptErr != "" {
+						signalReady()
+					}
+				},
+			}
+			_ = store.SaveSessionID(context.Background(), threadID, initialSessID)
+
+			var msg1Attempts atomic.Int32
+			var spawnCount atomic.Int32
+			spawner := &mockDaemonSpawner{
+				SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+					inR, inW := io.Pipe()
+					outR, outW := io.Pipe()
+					errR, errW := io.Pipe()
+					n := spawnCount.Add(1)
+					sessID := cfg.SessionID
+					if sessID == "" {
+						if n == 1 {
+							sessID = initialSessID
+						} else {
+							sessID = fmt.Sprintf("sess-rotated-%d", n)
+						}
+					}
+					go func() {
+						defer outW.Close()
+						defer errW.Close()
+						_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", sessID)
+						scanner := bufio.NewScanner(inR)
+						for scanner.Scan() {
+							line := scanner.Text()
+							if strings.Contains(line, "first turn prompt") {
+								att := msg1Attempts.Add(1)
+								if tc.firstAttemptErr != "" && att == 1 {
+									_, _ = fmt.Fprintf(outW, "{\"event\":\"result\",\"result\":{\"status\":\"ERROR\",\"error\":%q,\"conversation_id\":%q}}\n", tc.firstAttemptErr, sessID)
+									continue
+								}
+								if tc.firstAttemptErr == "" && att == 1 {
+									signalReady()
+									_, _ = io.Copy(io.Discard, inR)
+									return
+								}
+							}
+							_, _ = fmt.Fprintf(outW, "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"second turn ok\",\"conversation_id\":%q,\"usage\":{\"total_tokens\":5}}}\n", sessID)
+						}
+					}()
+					return inW, outR, errR, newMockProcessHandle(34567), nil
+				},
+			}
+
+			procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+				DefaultModel: "gemini-2.5-flash",
+			}, spawner)
+			defer procPool.Close()
+
+			expectedCompletions := 1
+			if tc.enqueueSecondMsg {
+				expectedCompletions = 2
+			}
+			var completedCount atomic.Int32
+			doneCh := make(chan struct{})
+
+			cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
+			pool := New(cfg, WorkerPoolConfig{
+				ProcessPool:    procPool,
+				SessionManager: session.New(tmpHome, tempData),
+				Store:          store,
+				TimeoutMinutes: 1,
+				MaxAttempts:    3,
+				BackoffBase:    tc.backoffBase,
+				OnMessageCompleted: func(msg db.Message, status string) {
+					if int(completedCount.Add(1)) >= expectedCompletions {
+						select {
+						case <-doneCh:
+						default:
+							close(doneCh)
+						}
+					}
+				},
+			})
+			defer pool.Stop()
+
+			ctx := context.Background()
+			msg1 := db.Message{ID: "msg-1-" + tc.name, ThreadID: threadID, Content: "first turn prompt", Status: db.StatusPending, CreatedAt: time.Now().UTC()}
+			_ = store.InsertMessage(ctx, msg1)
+			pool.Enqueue(msg1)
+
+			select {
+			case <-interruptReadyCh:
+			case <-time.After(3 * time.Second):
+				t.Fatalf("timed out waiting for turn 1 to reach interrupt point")
+			}
+
+			msg2ID := "msg-2-" + tc.name
+			if tc.enqueueSecondMsg {
+				msg2 := db.Message{ID: msg2ID, ThreadID: threadID, Content: "second turn prompt", Status: db.StatusPending, CreatedAt: time.Now().UTC()}
+				_ = store.InsertMessage(ctx, msg2)
+				pool.Enqueue(msg2)
+			}
+			if tc.drainQueue {
+				_ = store.InsertMessage(ctx, db.Message{ID: "msg-db-pending-" + tc.name, ThreadID: threadID, Content: "unclaimed pending", Status: db.StatusPending, CreatedAt: time.Now().UTC()})
+			}
+
+			pool.InterruptThread(ctx, threadID, tc.drainQueue, tc.reset)
+
+			select {
+			case <-doneCh:
+			case <-time.After(2 * time.Second):
+				t.Fatalf("timed out waiting for messages to finalize after InterruptThread")
+			}
+
+			gotMsg1, err := store.GetMessage(ctx, msg1.ID)
+			if err != nil || gotMsg1 == nil {
+				t.Fatalf("failed to get msg1: %v", err)
+			}
+			if gotMsg1.Status != tc.wantMsg1Status {
+				t.Errorf("msg1 status = %q, want %q", gotMsg1.Status, tc.wantMsg1Status)
+			}
+			if gotMsg1.ErrorMessage != tc.wantMsg1Err {
+				t.Errorf("msg1 error = %q, want %q", gotMsg1.ErrorMessage, tc.wantMsg1Err)
+			}
+			if gotMsg1.RetryCount != tc.wantMsg1Retries {
+				t.Errorf("msg1 retry_count = %d, want %d", gotMsg1.RetryCount, tc.wantMsg1Retries)
+			}
+			if got := int(msg1Attempts.Load()); got != tc.wantMsg1Attempts {
+				t.Errorf("msg1 attempts = %d, want %d", got, tc.wantMsg1Attempts)
+			}
+
+			if tc.enqueueSecondMsg {
+				gotMsg2, err := store.GetMessage(ctx, msg2ID)
+				if err != nil || gotMsg2 == nil {
+					t.Fatalf("failed to get msg2: %v", err)
+				}
+				if gotMsg2.Status != tc.wantMsg2Status {
+					t.Errorf("msg2 status = %q, want %q", gotMsg2.Status, tc.wantMsg2Status)
+				}
+				if gotMsg2.ErrorMessage != tc.wantMsg2Err {
+					t.Errorf("msg2 error = %q, want %q", gotMsg2.ErrorMessage, tc.wantMsg2Err)
+				}
+				if gotMsg2.ResponseText != tc.wantMsg2Resp {
+					t.Errorf("msg2 response = %q, want %q", gotMsg2.ResponseText, tc.wantMsg2Resp)
+				}
+			}
+
+			gotSess, _ := store.GetSessionID(ctx, threadID)
+			if tc.wantSessionRotated {
+				if gotSess == "" || gotSess == initialSessID {
+					t.Errorf("expected session ID to rotate away from %q, got %q", initialSessID, gotSess)
+				}
+			} else if gotSess != initialSessID {
+				t.Errorf("expected session ID %q to be preserved, got %q", initialSessID, gotSess)
+			}
+		})
+	}
+}

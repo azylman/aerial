@@ -383,6 +383,8 @@ func (te *turnExecution) resolveAmbientPromptContext() string {
 }
 
 func (te *turnExecution) backfillBurstChannelAndThreadNames() {
+	te.activeSessionMu.Lock()
+	defer te.activeSessionMu.Unlock()
 	for i := range te.burst {
 		if te.burst[i].ChannelName == "" && te.effectiveName != "" {
 			te.burst[i].ChannelName = te.effectiveName
