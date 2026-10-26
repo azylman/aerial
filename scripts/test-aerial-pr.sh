@@ -658,8 +658,143 @@ PUSH_REBASED_CHECK=$(bash -c "
     else
         echo 'push_rebased:fail'
     fi
+
+    # Single-branch clone checkout via FETCH_HEAD (no prior refs/remotes/origin/feat/existing-pr)
+    SINGLE_DIR=\$(mktemp -d /tmp/aerial-pr-push-single.XXXXXX)
+    git clone -q --depth 20 --single-branch -b main \"\$REMOTE_DIR\" \"\$SINGLE_DIR\"
+    git -C \"\$SINGLE_DIR\" config user.name 'Tester'
+    git -C \"\$SINGLE_DIR\" config user.email 'tester@example.com'
+    git -C \"\$SINGLE_DIR\" fetch -q origin feat/existing-pr
+    git -C \"\$SINGLE_DIR\" checkout -q -b feat/existing-pr FETCH_HEAD
+    echo 'upstream-v3' > \"\$UPSTREAM_DIR/up.txt\"
+    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'upstream v3'
+    git -C \"\$UPSTREAM_DIR\" push -q origin main
+    cd \"\$SINGLE_DIR\"
+    echo 'v3' > feat.txt
+    git add feat.txt
+    rebase_staged_changes main 'feat v3' 2>/dev/null
+    git commit -q -m 'feat v3'
+    if push_scratch_branch feat/existing-pr 2>/dev/null && [ \"\${PUSH_UPDATED_EXISTING}\" = \"1\" ]; then
+        echo 'push_single_branch:ok'
+    else
+        echo 'push_single_branch:fail'
+    fi
+    rm -rf \"\$SINGLE_DIR\"
 ")
 assert_eq "true" "$(echo "$PUSH_REBASED_CHECK" | grep -q 'push_rebased:ok' && echo true || echo false)" "push_scratch_branch updates existing remote branch cleanly after rebase"
+assert_eq "true" "$(echo "$PUSH_REBASED_CHECK" | grep -q 'push_single_branch:ok' && echo true || echo false)" "push_scratch_branch updates existing remote branch from --single-branch FETCH_HEAD checkout"
+
+# Case 15: submit_scratch idempotency across verify failure retry, pre-committed changes, and existing open PRs
+SUBMIT_IDEMPOTENCY_CHECK=$(bash -c "
+    REMOTE_DIR=\$(mktemp -d /tmp/aerial-pr-idem-remote.XXXXXX)
+    UPSTREAM_DIR=\$(mktemp -d /tmp/aerial-pr-idem-up.XXXXXX)
+    WORK_DIR=\$(mktemp -d /tmp/aerial-pr-idem-work.XXXXXX)
+    trap 'rm -rf \"\$REMOTE_DIR\" \"\$UPSTREAM_DIR\" \"\$WORK_DIR\"' EXIT
+
+    git init -q --bare \"\$REMOTE_DIR\"
+    git clone -q \"\$REMOTE_DIR\" \"\$UPSTREAM_DIR\"
+    git -C \"\$UPSTREAM_DIR\" config user.name 'Tester'
+    git -C \"\$UPSTREAM_DIR\" config user.email 'tester@example.com'
+    git -C \"\$UPSTREAM_DIR\" checkout -q -b main
+    mkdir -p \"\$UPSTREAM_DIR/scripts\"
+    cat << 'EOF' > \"\$UPSTREAM_DIR/scripts/verify.sh\"
+#!/bin/sh
+[ ! -f .fail_verify ]
+EOF
+    chmod +x \"\$UPSTREAM_DIR/scripts/verify.sh\"
+    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'init'
+    git -C \"\$UPSTREAM_DIR\" push -q -u origin main
+
+    git clone -q --single-branch -b main \"\$REMOTE_DIR\" \"\$WORK_DIR\"
+    git -C \"\$WORK_DIR\" config user.name 'Tester'
+    git -C \"\$WORK_DIR\" config user.email 'tester@example.com'
+    git -C \"\$WORK_DIR\" checkout -q -b feat/idem-branch
+
+    # Attempt 1: verify.sh fails; PR_DESCRIPTION.md and workspace must be preserved
+    echo 'Summary of changes' > \"\$WORK_DIR/PR_DESCRIPTION.md\"
+    echo 'v1' > \"\$WORK_DIR/feature.txt\"
+    touch \"\$WORK_DIR/.fail_verify\"
+
+    export GITHUB_PAT='mock_pat'
+    export AERIAL_PR_REGISTER_URL='http://mock-router/internal/pr/register'
+    (
+        REPO_TEST_MODE=1
+        source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
+        submit_scratch \"\$WORK_DIR\" 'feat: initial attempt' >/dev/null 2>&1
+    ) || true
+
+    if [ -d \"\$WORK_DIR\" ] && [ -s \"\$WORK_DIR/PR_DESCRIPTION.md\" ]; then
+        echo 'retry_preserved_desc:ok'
+    else
+        echo 'retry_preserved_desc:fail'
+    fi
+
+    # Attempt 2: remove .fail_verify and re-run submit_scratch WITHOUT re-creating PR_DESCRIPTION.md
+    rm -f \"\$WORK_DIR/.fail_verify\" \"\$WORK_DIR/.git/index.lock\"
+    git -C \"\$WORK_DIR\" rm --cached -f .fail_verify >/dev/null 2>&1 || true
+    out2=\$(
+        REPO_TEST_MODE=1
+        source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
+        curl() {
+            if [[ \"\$*\" == *'/pulls'* ]] && [[ \"\$*\" == *'-X POST'* ]]; then
+                printf '{\"number\":77,\"html_url\":\"https://github.com/azylman/aerial/pull/77\",\"node_id\":\"PR_kwDO77\"}\n201'
+            elif [[ \"\$*\" == *'graphql'* ]]; then
+                printf '{\"data\":{\"enablePullRequestAutoMerge\":{\"pullRequest\":{\"autoMergeRequest\":{\"enabledAt\":\"now\"}}}}}'
+            elif [[ \"\$*\" == *'/internal/pr/register'* ]]; then
+                printf '{\"status\":\"registered\"}'
+            fi
+        }
+        export -f curl
+        submit_scratch \"\$WORK_DIR\" 'feat: initial attempt' 2>/dev/null
+    )
+    if echo \"\$out2\" | jq -e '.status == \"submitted\" and .pr_number == 77' >/dev/null 2>&1 && [ ! -d \"\$WORK_DIR\" ]; then
+        echo 'retry_submit_success:ok'
+    else
+        echo \"retry_submit_success:fail:\$out2\"
+    fi
+
+    # Attempt 3: Remediation checkout of existing PR branch with pre-committed fix and NO PR_DESCRIPTION.md
+    REMED_DIR=\$(mktemp -d /tmp/aerial-pr-idem-remed.XXXXXX)
+    git clone -q --single-branch -b main \"\$REMOTE_DIR\" \"\$REMED_DIR\"
+    git -C \"\$REMED_DIR\" config user.name 'Tester'
+    git -C \"\$REMED_DIR\" config user.email 'tester@example.com'
+    git -C \"\$REMED_DIR\" fetch -q origin feat/idem-branch
+    git -C \"\$REMED_DIR\" checkout -q -b feat/idem-branch FETCH_HEAD
+
+    # Advance upstream main while remediation worker commits a fix locally
+    echo 'upstream-advance' > \"\$UPSTREAM_DIR/upstream.txt\"
+    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'upstream advance'
+    git -C \"\$UPSTREAM_DIR\" push -q origin main
+
+    echo 'v2-remediated' > \"\$REMED_DIR/feature.txt\"
+    git -C \"\$REMED_DIR\" add feature.txt
+    git -C \"\$REMED_DIR\" commit -q -m 'fix: remediate lint'
+
+    out3=\$(
+        REPO_TEST_MODE=1
+        source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
+        curl() {
+            if [[ \"\$*\" == *'/pulls?state=open'* ]]; then
+                printf '[{\"number\":77,\"title\":\"feat: initial attempt\",\"body\":\"Existing PR body\",\"html_url\":\"https://github.com/azylman/aerial/pull/77\",\"node_id\":\"PR_kwDO77\"}]'
+            elif [[ \"\$*\" == *'graphql'* ]]; then
+                printf '{\"data\":{\"enablePullRequestAutoMerge\":{\"pullRequest\":{\"autoMergeRequest\":{\"enabledAt\":\"now\"}}}}}'
+            elif [[ \"\$*\" == *'/internal/pr/register'* ]]; then
+                printf '{\"status\":\"registered\"}'
+            fi
+        }
+        export -f curl
+        submit_scratch \"\$REMED_DIR\" 2>/dev/null
+    )
+    if echo \"\$out3\" | jq -e '.status == \"submitted\" and .pr_number == 77' >/dev/null 2>&1 && [ ! -d \"\$REMED_DIR\" ]; then
+        echo 'remed_existing_pr:ok'
+    else
+        echo \"remed_existing_pr:fail:\$out3\"
+    fi
+    rm -rf \"\$REMED_DIR\"
+")
+assert_eq "true" "$(echo "$SUBMIT_IDEMPOTENCY_CHECK" | grep -q 'retry_preserved_desc:ok' && echo true || echo false)" "submit_scratch restores PR_DESCRIPTION.md and preserves workspace on verify failure"
+assert_eq "true" "$(echo "$SUBMIT_IDEMPOTENCY_CHECK" | grep -q 'retry_submit_success:ok' && echo true || echo false)" "submit_scratch succeeds on second attempt without re-creating PR_DESCRIPTION.md"
+assert_eq "true" "$(echo "$SUBMIT_IDEMPOTENCY_CHECK" | grep -q 'remed_existing_pr:ok' && echo true || echo false)" "submit_scratch succeeds idempotently on existing PR branch with pre-committed changes and no local PR_DESCRIPTION.md"
 
 echo "--------------------------------------------------------"
 echo "Test results: $PASSED passed, $FAILED failed"

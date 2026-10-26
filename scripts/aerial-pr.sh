@@ -334,12 +334,20 @@ register_pr_in_brain() {
     return 1
 }
 
+PUSH_UPDATED_EXISTING=0
+
 push_scratch_branch() {
     local branch="$1"
+    PUSH_UPDATED_EXISTING=0
     if git push -u origin "$branch" >/dev/null 2>&1; then
         return 0
     fi
-    if git push --force-with-lease -u origin "$branch" >/dev/null 2>&1; then
+    git fetch origin "+refs/heads/${branch}:refs/remotes/origin/${branch}" >/dev/null 2>&1 || true
+    local remote_sha
+    remote_sha=$(git rev-parse "refs/remotes/origin/${branch}" 2>/dev/null || echo "")
+    if { [ -n "$remote_sha" ] && git push --force-with-lease="refs/heads/${branch}:${remote_sha}" -u origin "$branch" >/dev/null 2>&1; } || \
+       git push --force-with-lease -u origin "$branch" >/dev/null 2>&1; then
+        PUSH_UPDATED_EXISTING=1
         echo "🔄 [aerial-pr] Updated existing remote branch ${branch} with --force-with-lease." >&2
         return 0
     fi
@@ -373,10 +381,16 @@ rebase_staged_changes() {
     if [ -z "$upstream_sha" ] || [ "$head_sha" = "$upstream_sha" ]; then
         return 0
     fi
-    git commit -q -m "$msg" >/dev/null 2>&1
+    local had_staged=0
+    if ! git diff --cached --quiet; then
+        had_staged=1
+        git commit -q -m "$msg" >/dev/null 2>&1
+    fi
     if ! git rebase "origin/${target_branch}" >/dev/null 2>&1; then
         git rebase --abort >/dev/null 2>&1 || true
-        git reset --soft HEAD~1 >/dev/null 2>&1 || true
+        if [ "$had_staged" -eq 1 ]; then
+            git reset --soft HEAD~1 >/dev/null 2>&1 || true
+        fi
         echo "ERROR: Failed to rebase scratch branch onto origin/${target_branch} due to merge conflicts. Aborting submit." >&2
         if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
             echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
@@ -393,6 +407,7 @@ submit_scratch() {
     local target_id="$(resolve_target_id)"
     local scratch_dir=""
     local commit_msg=""
+    local commit_msg_explicit=0
     local pr_body=""
     local pr_body_file=""
     local vanadis_chunk_id="$(resolve_vanadis_chunk_id)"
@@ -468,6 +483,7 @@ submit_scratch() {
                         scratch_dir="$1"
                     elif [ -z "$commit_msg" ]; then
                         commit_msg="$1"
+                        commit_msg_explicit=1
                     else
                         echo "ERROR: Unexpected extra argument: $1" >&2
                         exit 1
@@ -485,6 +501,7 @@ submit_scratch() {
                     scratch_dir="$1"
                 elif [ -z "$commit_msg" ]; then
                     commit_msg="$1"
+                    commit_msg_explicit=1
                 else
                     echo "ERROR: Unexpected extra argument: $1" >&2
                     exit 1
@@ -523,9 +540,34 @@ submit_scratch() {
         pr_body=$(cat "$resolved_body_file")
     fi
 
+    local saved_pr_desc_file=""
+    local saved_pr_desc_content=""
+    if [ -s "${scratch_dir}/PR_DESCRIPTION.md" ]; then
+        saved_pr_desc_file="${scratch_dir}/PR_DESCRIPTION.md"
+        saved_pr_desc_content=$(cat "${scratch_dir}/PR_DESCRIPTION.md")
+    elif [ -s "${scratch_dir}/.pr_description.md" ]; then
+        saved_pr_desc_file="${scratch_dir}/.pr_description.md"
+        saved_pr_desc_content=$(cat "${scratch_dir}/.pr_description.md")
+    fi
+
     SCRATCH_DIR_CLEANUP="$scratch_dir"
-    # Ensure cleanup of scratch directory on exit
-    trap 'if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then rm -rf "${SCRATCH_DIR_CLEANUP}"; fi' EXIT INT TERM
+    SAVED_PR_DESC_FILE="$saved_pr_desc_file"
+    SAVED_PR_DESC_CONTENT="$saved_pr_desc_content"
+    # On non-zero exit, restore convention file and preserve scratch workspace; only remove on exit 0
+    trap '
+        exit_status=$?
+        if [ "$exit_status" -ne 0 ]; then
+            if [ -n "${SAVED_PR_DESC_FILE:-}" ] && [ -d "${scratch_dir}" ] && [ ! -f "${SAVED_PR_DESC_FILE}" ]; then
+                printf "%s\n" "${SAVED_PR_DESC_CONTENT}" > "${SAVED_PR_DESC_FILE}" 2>/dev/null || true
+            fi
+            if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
+                echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
+                SCRATCH_DIR_CLEANUP=""
+            fi
+        elif [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
+            rm -rf "${SCRATCH_DIR_CLEANUP}"
+        fi
+    ' EXIT INT TERM
 
     cd "$scratch_dir"
 
@@ -556,28 +598,33 @@ submit_scratch() {
             ;;
     esac
 
-    if [ -z "$commit_msg" ]; then
-        commit_msg="$default_title"
-    fi
-
     # Resolve PR description from convention file in scratch workspace if not explicitly passed
-    if [ -z "$pr_body" ]; then
-        if [ -s "${scratch_dir}/PR_DESCRIPTION.md" ]; then
-            pr_body=$(cat "${scratch_dir}/PR_DESCRIPTION.md")
-        elif [ -s "${scratch_dir}/.pr_description.md" ]; then
-            pr_body=$(cat "${scratch_dir}/.pr_description.md")
-        fi
+    if [ -z "$pr_body" ] && [ -n "$saved_pr_desc_content" ]; then
+        pr_body="$saved_pr_desc_content"
     fi
 
     # CRITICAL WORKSPACE HYGIENE: Always remove convention files from scratch workspace before staging
     # so they are NEVER staged by git add -A or permanently committed into git history on main!
     rm -f "${scratch_dir}/PR_DESCRIPTION.md" "${scratch_dir}/.pr_description.md"
 
-    # Title Hygiene: Extract first non-empty line, strip \r, \n, and whitespace, clamp to 256 chars
-    local clean_title
-    clean_title=$(printf "%s\n" "$commit_msg" | awk 'NF {print; exit}' | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | cut -c 1-256)
-    if [ -z "$clean_title" ]; then
-        clean_title="$default_title"
+    # If submitting on an existing PR branch without a local description, inherit metadata from the open PR
+    local current_branch existing_pr=""
+    current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+    if [ -z "${pr_body//[[:space:]]/}" ] && [ -n "${GITHUB_PAT:-}" ] && [ -n "$current_branch" ] && [ "$current_branch" != "$DEFAULT_BRANCH" ] && [ "$current_branch" != "HEAD" ]; then
+        existing_pr=$(lookup_existing_open_pr "$current_branch")
+        if [ -n "$existing_pr" ]; then
+            pr_body=$(echo "$existing_pr" | jq -r '.body // empty')
+            if [ -z "${pr_body//[[:space:]]/}" ]; then
+                pr_body=$(echo "$existing_pr" | jq -r '.title // "Automated update"')
+            fi
+            if [ "$commit_msg_explicit" -eq 0 ]; then
+                local existing_title
+                existing_title=$(echo "$existing_pr" | jq -r '.title // empty')
+                if [ -n "$existing_title" ]; then
+                    commit_msg="$existing_title"
+                fi
+            fi
+        fi
     fi
 
     # Mandatory PR Description Invariant: PR description must not be empty
@@ -596,15 +643,40 @@ submit_scratch() {
 > ⚠️ **[Aerial Notice]**: PR description was truncated because it exceeded 60,000 characters."
     fi
 
-    # 1. Check for modifications
-    if git diff --quiet && git diff --staged --quiet; then
+    # 1. Stage all modifications (defensively unstage any convention files if previously cached)
+    git add -A
+    git rm --cached -f PR_DESCRIPTION.md .pr_description.md 2>/dev/null || true
+
+    local has_committed_changes=0
+    if git rev-parse --verify "origin/${DEFAULT_BRANCH}" >/dev/null 2>&1; then
+        if [ "$(git rev-parse HEAD 2>/dev/null || echo "")" != "$(git rev-parse "origin/${DEFAULT_BRANCH}" 2>/dev/null || echo "")" ]; then
+            has_committed_changes=1
+            if [ "$commit_msg_explicit" -eq 0 ] && [ -z "$commit_msg" ]; then
+                local prior_msg
+                prior_msg=$(git log -1 --format=%B HEAD 2>/dev/null || true)
+                if [ -n "${prior_msg//[[:space:]]/}" ]; then
+                    commit_msg="$prior_msg"
+                fi
+            fi
+        fi
+    fi
+
+    if [ -z "$commit_msg" ]; then
+        commit_msg="$default_title"
+    fi
+
+    # Title Hygiene: Extract first non-empty line, strip \r, \n, and whitespace, clamp to 256 chars
+    local clean_title
+    clean_title=$(printf "%s\n" "$commit_msg" | awk 'NF {print; exit}' | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | cut -c 1-256)
+    if [ -z "$clean_title" ]; then
+        clean_title="$default_title"
+    fi
+
+    # 2. Check for modifications (either staged in index or already committed ahead of origin/DEFAULT_BRANCH)
+    if git diff --cached --quiet && [ "$has_committed_changes" -eq 0 ]; then
         echo "{\"status\":\"no_changes\",\"message\":\"No modifications detected in scratch directory.\"}"
         exit 0
     fi
-
-    # 2. Stage all modifications (defensively unstage any convention files if previously cached)
-    git add -A
-    git rm --cached -f PR_DESCRIPTION.md .pr_description.md 2>/dev/null || true
 
     local auth_header
     auth_header=$(build_auth_header)
@@ -616,7 +688,7 @@ submit_scratch() {
     export GIT_CONFIG_KEY_1="http.version"
     export GIT_CONFIG_VALUE_1="HTTP/1.1"
 
-    # 3. Rebase staged changes onto latest origin/DEFAULT_BRANCH before pre-flight verification
+    # 3. Rebase staged/committed branch changes onto latest origin/DEFAULT_BRANCH before pre-flight verification
     if ! rebase_staged_changes "$DEFAULT_BRANCH" "$commit_msg"; then
         exit 1
     fi
@@ -640,7 +712,9 @@ submit_scratch() {
 
     local pr_trailer
     pr_trailer=$(format_aerial_pr_trailer "$target_id" "$vanadis_chunk_id")
-    [ -n "$pr_trailer" ] && pr_body="${pr_body}"$'\n\n'"${pr_trailer}"
+    if [ -n "$pr_trailer" ] && [[ "$pr_body" != *"<!-- aerial-pr:"* ]]; then
+        pr_body="${pr_body}"$'\n\n'"${pr_trailer}"
+    fi
 
     # 6. Push branch to remote
     echo "📤 [aerial-pr] Pushing feature branch ${branch} to origin (${REPO_OWNER}/${REPO_NAME})..." >&2
@@ -653,44 +727,49 @@ submit_scratch() {
         exit 1
     fi
 
-    # 6. Open Pull Request via GitHub REST API safely using jq (or reuse existing open PR for branch)
-    local pr_payload
-    pr_payload=$(jq -n \
-        --arg title "$clean_title" \
-        --arg head "$branch" \
-        --arg base "$DEFAULT_BRANCH" \
-        --arg body "$pr_body" \
-        '{title: $title, head: $head, base: $base, body: $body}')
+    # 7. Open Pull Request via GitHub REST API safely using jq (or reuse existing open PR for branch)
+    local pr_code="" pr_resp=""
+    if [ -n "$existing_pr" ]; then
+        pr_resp="$existing_pr"
+        pr_code="200"
+        echo "🔄 [aerial-pr] Reusing existing open Pull Request for branch ${branch}." >&2
+    else
+        local pr_payload pr_raw
+        pr_payload=$(jq -n \
+            --arg title "$clean_title" \
+            --arg head "$branch" \
+            --arg base "$DEFAULT_BRANCH" \
+            --arg body "$pr_body" \
+            '{title: $title, head: $head, base: $base, body: $body}')
 
-    local pr_raw
-    pr_raw=$(curl -s --connect-timeout 3 -m 10 -w "\n%{http_code}" -X POST \
-        -H "Authorization: token ${GITHUB_PAT}" \
-        -H "Accept: application/vnd.github.v3+json" \
-        "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/pulls" \
-        -d "$pr_payload")
+        pr_raw=$(curl -s --connect-timeout 3 -m 10 -w "\n%{http_code}" -X POST \
+            -H "Authorization: token ${GITHUB_PAT}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/pulls" \
+            -d "$pr_payload")
 
-    local pr_code
-    pr_code=$(echo "$pr_raw" | tail -n1)
-    local pr_resp
-    pr_resp=$(echo "$pr_raw" | sed '$d')
+        pr_code=$(echo "$pr_raw" | tail -n1)
+        pr_resp=$(echo "$pr_raw" | sed '$d')
 
-    if [ "$pr_code" = "422" ]; then
-        local existing_pr
-        existing_pr=$(lookup_existing_open_pr "$branch")
-        if [ -n "$existing_pr" ]; then
-            pr_resp="$existing_pr"
-            pr_code="200"
-            echo "🔄 [aerial-pr] Reusing existing open Pull Request for branch ${branch}." >&2
+        if [ "$pr_code" = "422" ]; then
+            existing_pr=$(lookup_existing_open_pr "$branch")
+            if [ -n "$existing_pr" ]; then
+                pr_resp="$existing_pr"
+                pr_code="200"
+                echo "🔄 [aerial-pr] Reusing existing open Pull Request for branch ${branch}." >&2
+            fi
         fi
     fi
 
     if [ "$pr_code" -lt 200 ] || [ "$pr_code" -ge 300 ]; then
         echo "ERROR: Failed to create Pull Request (HTTP ${pr_code}): ${pr_resp}" >&2
-        # Prune remote branch
-        curl -s --connect-timeout 3 -m 10 -X DELETE \
-            -H "Authorization: token ${GITHUB_PAT}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/git/refs/heads/${branch}" >/dev/null 2>&1 || true
+        # Prune remote branch only when it was newly created (never delete an existing remote PR branch)
+        if [ "${PUSH_UPDATED_EXISTING:-0}" -eq 0 ] && [ -z "${existing_pr:-}" ]; then
+            curl -s --connect-timeout 3 -m 10 -X DELETE \
+                -H "Authorization: token ${GITHUB_PAT}" \
+                -H "Accept: application/vnd.github.v3+json" \
+                "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/git/refs/heads/${branch}" >/dev/null 2>&1 || true
+        fi
         # Prevent trap from nuking the local workspace so code can be recovered
         if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
             echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
