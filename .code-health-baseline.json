@@ -1,13 +1,6 @@
 {
   "files": {},
   "functions": {
-    "services/eri/pkg/queue/pool.go::*WorkerPool.ExecuteVoiceTurn": {
-      "cc": 33
-    },
-    "services/eri/pkg/queue/pool.go::New": {
-      "lines": 178,
-      "cc": 49
-    },
     "services/eri/pkg/queue/sentence_detector.go::findSentenceBoundary": {
       "cc": 35
     },

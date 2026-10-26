@@ -260,25 +260,29 @@ func initWorkerPools(appCfg *config.Config, isExplicitAppCfg bool, cfg WorkerPoo
 	return pools
 }
 
-// New creates a new WorkerPool with pure *config.Config dependency injection.
-func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
-	isExplicitAppCfg := (appCfg != nil)
-	if appCfg == nil {
-		def := config.DefaultConfigData()
-		if cfg.Model != "" {
-			def.Model = cfg.Model
-		}
-		if cfg.LowEffortModel != "" {
-			def.LowEffortModel = cfg.LowEffortModel
-		}
-		if cfg.MediumEffortModel != "" {
-			def.MediumEffortModel = cfg.MediumEffortModel
-		}
-		if cfg.SystemPrompt != "" {
-			def.SystemPrompt = cfg.SystemPrompt
-		}
-		appCfg = config.NewFromData(def)
+// resolveDefaultAppConfig resolves appCfg or creates a default configuration from WorkerPoolConfig overrides.
+func resolveDefaultAppConfig(appCfg *config.Config, cfg WorkerPoolConfig) (*config.Config, bool) {
+	if appCfg != nil {
+		return appCfg, true
 	}
+	def := config.DefaultConfigData()
+	if cfg.Model != "" {
+		def.Model = cfg.Model
+	}
+	if cfg.LowEffortModel != "" {
+		def.LowEffortModel = cfg.LowEffortModel
+	}
+	if cfg.MediumEffortModel != "" {
+		def.MediumEffortModel = cfg.MediumEffortModel
+	}
+	if cfg.SystemPrompt != "" {
+		def.SystemPrompt = cfg.SystemPrompt
+	}
+	return config.NewFromData(def), false
+}
+
+// applyWorkerPoolTimingDefaults applies default timeouts, retry limits, and intervals to WorkerPoolConfig.
+func applyWorkerPoolTimingDefaults(cfg *WorkerPoolConfig) {
 	if cfg.TimeoutMinutes <= 0 {
 		cfg.TimeoutMinutes = DefaultTimeoutMinutes
 	}
@@ -294,9 +298,13 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	if cfg.DrainTimeout <= 0 {
 		cfg.DrainTimeout = 10 * time.Second
 	}
+}
+
+// applyWorkerPoolHookDefaults applies default test hooks and delivery/notification functions to WorkerPoolConfig.
+func applyWorkerPoolHookDefaults(cfg *WorkerPoolConfig) {
 	hasCustomRunner := cfg.RunnerFunc != nil || cfg.RunnerWithOptionsFunc != nil
 	if hasCustomRunner && testPoolHook != nil {
-		if wrapped := testPoolHook(cfg); wrapped != nil {
+		if wrapped := testPoolHook(*cfg); wrapped != nil {
 			cfg.ProcessPool = wrapped
 		}
 	}
@@ -305,8 +313,9 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	}
 	if cfg.DeliveryWithAttachmentsFunc == nil {
 		if cfg.DeliveryFunc != nil {
+			deliveryFn := cfg.DeliveryFunc
 			cfg.DeliveryWithAttachmentsFunc = func(s *discordgo.Session, cID, txt string, atts []*delivery.Attachment) error {
-				return cfg.DeliveryFunc(s, cID, txt)
+				return deliveryFn(s, cID, txt)
 			}
 		} else {
 			cfg.DeliveryWithAttachmentsFunc = delivery.SendMessageWithAttachments
@@ -318,30 +327,15 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	if cfg.TypingFunc == nil {
 		cfg.TypingFunc = delivery.StartTyping
 	}
-	sessMgr := cfg.SessionManager
-	if sessMgr == nil {
-		sessMgr = session.New(appCfg.GeminiHomeDir(), appCfg.DataDir())
-	}
-	cfg.SessionManager = sessMgr
+}
 
+// applyWorkerPoolServiceDefaults applies default service dependencies to WorkerPoolConfig.
+func applyWorkerPoolServiceDefaults(appCfg *config.Config, cfg *WorkerPoolConfig) {
+	if cfg.SessionManager == nil {
+		cfg.SessionManager = session.New(appCfg.GeminiHomeDir(), appCfg.DataDir())
+	}
 	if cfg.Classifier == nil {
 		cfg.Classifier = classifier.New(nil)
-	}
-	pools := initWorkerPools(appCfg, isExplicitAppCfg, cfg, sessMgr, cfg.Store)
-	if cfg.LLMFunc == nil {
-		for _, candidate := range []runner.AgentPool{
-			pools[PoolKey{Ephemeral: true, Effort: "low"}],
-			pools[PoolKey{Ephemeral: false, Effort: "low"}],
-			pools[PoolKey{Ephemeral: false, Effort: "high"}],
-		} {
-			if candidate == nil {
-				continue
-			}
-			if ep, ok := candidate.(interface{ EphemeralLLMFunc(string) runner.LLMFunc }); ok {
-				cfg.LLMFunc = ep.EphemeralLLMFunc("ephemeral:summarizer")
-				break
-			}
-		}
 	}
 	if cfg.ResolveChannelPolicy == nil {
 		cfg.ResolveChannelPolicy = func(cID, cName string) config.ChannelPolicy {
@@ -354,11 +348,78 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	if cfg.WebhookDispatcher == nil {
 		cfg.WebhookDispatcher = NewDefaultWebhookDispatcher()
 	}
+}
+
+// resolveDefaultSummarizerLLM resolves an EphemeralLLMFunc for summarization from configured agent pools.
+func resolveDefaultSummarizerLLM(pools map[PoolKey]runner.AgentPool) LLMFunc {
+	for _, candidate := range []runner.AgentPool{
+		pools[PoolKey{Ephemeral: true, Effort: "low"}],
+		pools[PoolKey{Ephemeral: false, Effort: "low"}],
+		pools[PoolKey{Ephemeral: false, Effort: "high"}],
+	} {
+		if candidate == nil {
+			continue
+		}
+		if ep, ok := candidate.(interface{ EphemeralLLMFunc(string) runner.LLMFunc }); ok {
+			return ep.EphemeralLLMFunc("ephemeral:summarizer")
+		}
+	}
+	return nil
+}
+
+// formatClassifierParseAlert formats a diagnostic alert markdown string for classifier JSON parse errors.
+func formatClassifierParseAlert(model, raw string, parseErr error) string {
+	snippet := raw
+	if runes := []rune(snippet); len(runes) > 600 {
+		snippet = string(runes[:590]) + "\n... (truncated)"
+	}
+	snippet = strings.ReplaceAll(snippet, "```", "'''")
+	snippet = strings.ReplaceAll(snippet, "@everyone", "@\u200beveryone")
+	snippet = strings.ReplaceAll(snippet, "@here", "@\u200bhere")
+	return fmt.Sprintf("**Model**: `%s`\n**Parse Error**:\n```\n%v\n```\n**Raw Output**:\n```\n%s\n```", model, parseErr, snippet)
+}
+
+// registerClassifierAlertHandlers sets up alert reporting hooks on the configured classifier.
+func (p *WorkerPool) registerClassifierAlertHandlers() {
+	if p.cfg.Classifier == nil {
+		return
+	}
+	var lastAlertMu sync.Mutex
+	var lastClassifierAlertTime, lastSystemAlertTime time.Time
+
+	if p.cfg.Classifier.OnParseError == nil {
+		p.cfg.Classifier.OnParseError = func(model, raw string, parseErr error) {
+			p.makeDebouncedAlertHandler(&lastAlertMu, &lastClassifierAlertTime, "OnParseError", "Classifier JSON Parse Error", fmt.Sprintf("classifier JSON parse alert: %v", parseErr), func() string {
+				return formatClassifierParseAlert(model, raw, parseErr)
+			})
+		}
+	}
+
+	if p.cfg.Classifier.OnSystemAlert == nil {
+		p.cfg.Classifier.OnSystemAlert = func(endpoint string, endpointErr error) {
+			p.makeDebouncedAlertHandler(&lastAlertMu, &lastSystemAlertTime, "OnSystemAlert", "Classifier Endpoint Failure", fmt.Sprintf("classifier endpoint alert: %v", endpointErr), func() string {
+				return fmt.Sprintf("**Endpoint**: `%s`\n**Status**: Failed after 3 retry attempts with exponential backoff (failing closed to strict mention-only mode).\n**Error Trace**:\n```\n%v\n```", endpoint, endpointErr)
+			})
+		}
+	}
+}
+
+// New creates a new WorkerPool with pure *config.Config dependency injection.
+func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
+	resolvedAppCfg, isExplicitAppCfg := resolveDefaultAppConfig(appCfg, cfg)
+	applyWorkerPoolTimingDefaults(&cfg)
+	applyWorkerPoolHookDefaults(&cfg)
+	applyWorkerPoolServiceDefaults(resolvedAppCfg, &cfg)
+
+	pools := initWorkerPools(resolvedAppCfg, isExplicitAppCfg, cfg, cfg.SessionManager, cfg.Store)
+	if cfg.LLMFunc == nil {
+		cfg.LLMFunc = resolveDefaultSummarizerLLM(pools)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &WorkerPool{
-		appCfg: appCfg, cfg: cfg, pools: pools, voiceProcessPool: cfg.VoiceProcessPool,
-		sessionMgr: sessMgr, threadChs: make(map[string]*threadWorkerState), ctx: ctx, cancel: cancel,
+		appCfg: resolvedAppCfg, cfg: cfg, pools: pools, voiceProcessPool: cfg.VoiceProcessPool,
+		sessionMgr: cfg.SessionManager, threadChs: make(map[string]*threadWorkerState), ctx: ctx, cancel: cancel,
 		webhookDispatcher: cfg.WebhookDispatcher, createThreadFn: cfg.CreateThreadFunc,
 	}
 
@@ -368,30 +429,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		}
 	}
 
-	var lastAlertMu sync.Mutex
-	var lastClassifierAlertTime, lastSystemAlertTime time.Time
-	if p.cfg.Classifier != nil && p.cfg.Classifier.OnParseError == nil {
-		p.cfg.Classifier.OnParseError = func(model, raw string, parseErr error) {
-			p.makeDebouncedAlertHandler(&lastAlertMu, &lastClassifierAlertTime, "OnParseError", "Classifier JSON Parse Error", fmt.Sprintf("classifier JSON parse alert: %v", parseErr), func() string {
-				snippet := raw
-				if runes := []rune(snippet); len(runes) > 600 {
-					snippet = string(runes[:590]) + "\n... (truncated)"
-				}
-				snippet = strings.ReplaceAll(snippet, "```", "'''")
-				snippet = strings.ReplaceAll(snippet, "@everyone", "@\u200beveryone")
-				snippet = strings.ReplaceAll(snippet, "@here", "@\u200bhere")
-				return fmt.Sprintf("**Model**: `%s`\n**Parse Error**:\n```\n%v\n```\n**Raw Output**:\n```\n%s\n```", model, parseErr, snippet)
-			})
-		}
-	}
-
-	if p.cfg.Classifier != nil && p.cfg.Classifier.OnSystemAlert == nil {
-		p.cfg.Classifier.OnSystemAlert = func(endpoint string, endpointErr error) {
-			p.makeDebouncedAlertHandler(&lastAlertMu, &lastSystemAlertTime, "OnSystemAlert", "Classifier Endpoint Failure", fmt.Sprintf("classifier endpoint alert: %v", endpointErr), func() string {
-				return fmt.Sprintf("**Endpoint**: `%s`\n**Status**: Failed after 3 retry attempts with exponential backoff (failing closed to strict mention-only mode).\n**Error Trace**:\n```\n%v\n```", endpoint, endpointErr)
-			})
-		}
-	}
+	p.registerClassifierAlertHandlers()
 
 	return p
 }
@@ -831,29 +869,99 @@ func (p *WorkerPool) runnerCredentials() (string, string) {
 	return agyBin, apiKey
 }
 
-// ExecuteVoiceTurn synchronously executes a turn for voice queries.
-func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID string, onStatus func(status string), onSentence ...func(sentence string)) (string, string, error) {
+func (p *WorkerPool) checkVoiceTurnReady(ctx context.Context, sessionID string) (string, error) {
 	if p == nil {
-		return "", "", fmt.Errorf("worker pool is uninitialized")
+		return "", fmt.Errorf("worker pool is uninitialized")
 	}
 	p.mu.Lock()
-	if p.stopped {
-		p.mu.Unlock()
-		return "", "", fmt.Errorf("brain is shutting down")
-	}
+	stopped := p.stopped
 	p.mu.Unlock()
+	if stopped {
+		return "", fmt.Errorf("brain is shutting down")
+	}
 
 	select {
 	case <-p.ctx.Done():
-		return "", "", fmt.Errorf("brain is shutting down")
+		return "", fmt.Errorf("brain is shutting down")
 	case <-ctx.Done():
-		return "", "", ctx.Err()
+		return "", ctx.Err()
 	default:
 	}
 
 	deviceKey := strings.TrimSpace(sessionID)
 	if deviceKey == "" {
-		return "", "", fmt.Errorf("queue: session_id is required for voice turn routing")
+		return "", fmt.Errorf("queue: session_id is required for voice turn routing")
+	}
+	return deviceKey, nil
+}
+
+func (p *WorkerPool) executeCustomVoiceRunner(ctx context.Context, turnPrompt, deviceKey string, onStatus func(string), sentenceCb func(string)) (string, string, bool, error) {
+	hasCustomStream := p.cfg.VoiceStreamRunnerFunc != nil && sentenceCb != nil
+	if !hasCustomStream && p.cfg.VoiceRunnerFunc == nil {
+		return "", "", false, nil
+	}
+	start := time.Now()
+	var reply, conv string
+	var err error
+	if hasCustomStream {
+		reply, conv, err = p.cfg.VoiceStreamRunnerFunc(ctx, turnPrompt, deviceKey, onStatus, sentenceCb)
+	} else {
+		reply, conv, err = p.cfg.VoiceRunnerFunc(ctx, turnPrompt, deviceKey, onStatus)
+	}
+	runStatus := "success"
+	if err != nil {
+		runStatus = "error"
+	}
+	metrics.RecordRunnerExecution(runStatus, p.LowEffortModel(), "voice", time.Since(start))
+	return reply, conv, true, err
+}
+
+func (p *WorkerPool) resolveVoiceAgentPool() runner.AgentPool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.voiceProcessPool != nil {
+		return p.voiceProcessPool
+	}
+	if p.pools != nil {
+		return p.pools[PoolKey{Ephemeral: false, Effort: "high"}]
+	}
+	return nil
+}
+
+func finalizeVoiceTurnOutcome(ctx context.Context, outcome runner.TurnOutcome, turnErr error, activeSession, model string, start time.Time, sink *runner.BufferingTurnSink, detector *SentenceDetector, sentenceCb func(string)) (string, string, error) {
+	if outcome.IsSuccess {
+		metrics.RecordRunnerExecution("success", model, "voice", time.Since(start))
+		if outcome.Usage.TotalTokens > 0 {
+			metrics.RecordTokens(model, "voice", outcome.Usage.InputTokens, outcome.Usage.OutputTokens, outcome.Usage.ThinkingTokens, outcome.Usage.CacheReadTokens, outcome.Usage.TotalTokens)
+		}
+		if !sink.EmittedAny() && sentenceCb != nil && detector != nil && outcome.Response != "" {
+			emitSentence := func(s string) {
+				sink.MarkEmitted()
+				if sentenceCb != nil {
+					sentenceCb(s)
+				}
+			}
+			detector.Feed(outcome.Response, emitSentence)
+			detector.Flush(emitSentence)
+		}
+		return outcome.Response, outcome.SessionID, nil
+	}
+
+	metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
+	if turnErr != nil {
+		return "", activeSession, turnErr
+	}
+	if ctx.Err() != nil {
+		return "", activeSession, ctx.Err()
+	}
+	return "", activeSession, fmt.Errorf("%s", outcome.ErrorDetail)
+}
+
+// ExecuteVoiceTurn synchronously executes a turn for voice queries.
+func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID string, onStatus func(status string), onSentence ...func(sentence string)) (string, string, error) {
+	deviceKey, err := p.checkVoiceTurnReady(ctx, sessionID)
+	if err != nil {
+		return "", "", err
 	}
 	threadID := "voice-" + deviceKey
 
@@ -872,31 +980,11 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 	}
 
 	turnPrompt := prompt
-	if (p.cfg.VoiceStreamRunnerFunc != nil && sentenceCb != nil) || p.cfg.VoiceRunnerFunc != nil {
-		start := time.Now()
-		var reply, conv string
-		var err error
-		if p.cfg.VoiceStreamRunnerFunc != nil && sentenceCb != nil {
-			reply, conv, err = p.cfg.VoiceStreamRunnerFunc(ctx, turnPrompt, deviceKey, onStatus, sentenceCb)
-		} else {
-			reply, conv, err = p.cfg.VoiceRunnerFunc(ctx, turnPrompt, deviceKey, onStatus)
-		}
-		runStatus := "success"
-		if err != nil {
-			runStatus = "error"
-		}
-		metrics.RecordRunnerExecution(runStatus, p.LowEffortModel(), "voice", time.Since(start))
-		return reply, conv, err
+	if reply, conv, handled, customErr := p.executeCustomVoiceRunner(ctx, turnPrompt, deviceKey, onStatus, sentenceCb); handled {
+		return reply, conv, customErr
 	}
 
-	p.mu.Lock()
-	var procPool runner.AgentPool
-	if p.voiceProcessPool != nil {
-		procPool = p.voiceProcessPool
-	} else if p.pools != nil {
-		procPool = p.pools[PoolKey{Ephemeral: false, Effort: "high"}]
-	}
-	p.mu.Unlock()
+	procPool := p.resolveVoiceAgentPool()
 	if procPool == nil {
 		return "", deviceKey, fmt.Errorf("voice daemon pool unavailable")
 	}
@@ -937,32 +1025,7 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 	}
 
 	outcome := runner.NewTurnResolver().Resolve(ctx, turnRes, turnErr, activeSession)
-	if outcome.IsSuccess {
-		metrics.RecordRunnerExecution("success", model, "voice", time.Since(start))
-		if outcome.Usage.TotalTokens > 0 {
-			metrics.RecordTokens(model, "voice", outcome.Usage.InputTokens, outcome.Usage.OutputTokens, outcome.Usage.ThinkingTokens, outcome.Usage.CacheReadTokens, outcome.Usage.TotalTokens)
-		}
-		if !sink.EmittedAny() && sentenceCb != nil && detector != nil && outcome.Response != "" {
-			emitSentence := func(s string) {
-				sink.MarkEmitted()
-				if sentenceCb != nil {
-					sentenceCb(s)
-				}
-			}
-			detector.Feed(outcome.Response, emitSentence)
-			detector.Flush(emitSentence)
-		}
-		return outcome.Response, outcome.SessionID, nil
-	}
-
-	metrics.RecordRunnerExecution("error", model, "voice", time.Since(start))
-	if turnErr != nil {
-		return "", activeSession, turnErr
-	}
-	if ctx.Err() != nil {
-		return "", activeSession, ctx.Err()
-	}
-	return "", activeSession, fmt.Errorf("%s", outcome.ErrorDetail)
+	return finalizeVoiceTurnOutcome(ctx, outcome, turnErr, activeSession, model, start, sink, detector, sentenceCb)
 }
 
 func newVoiceTurnSink(ctx context.Context, onStatus func(string), onSentence func(string), detector *SentenceDetector) *runner.BufferingTurnSink {
