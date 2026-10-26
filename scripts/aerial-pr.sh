@@ -66,6 +66,18 @@ run_preflight_verification() {
     done
 
     if [ -f "${target_dir}/scripts/verify.sh" ]; then
+        if (
+            cd "${target_dir}" &&
+            git_dir=$(git rev-parse --git-dir 2>/dev/null) &&
+            [ -f "${git_dir}/.aerial-verified-tree" ] &&
+            git diff --quiet 2>/dev/null &&
+            verified_tree=$(cat "${git_dir}/.aerial-verified-tree" 2>/dev/null) &&
+            [ -n "$verified_tree" ] &&
+            [ "$(git write-tree 2>/dev/null)" = "$verified_tree" ]
+        ); then
+            echo "⚡ Skipping duplicate pre-flight verification (staged tree already verified)." >&2
+            return 0
+        fi
         echo "⚡ Running pre-flight verification checks in scratch checkout..." >&2
         chmod +x "${target_dir}/scripts/verify.sh" 2>/dev/null || true
         if ! (cd "${target_dir}" && ./scripts/verify.sh --staged) >&2; then
@@ -134,14 +146,9 @@ build_auth_header() {
 }
 
 init_scratch() {
-    # If first positional arg is given and not an option, treat as target repo
-    if [ $# -gt 0 ] && [[ "$1" != -* ]]; then
-        REPO_NAME="$(normalize_repo "$1")"
-        REPO_NAME_EXPLICIT=1
-        shift
-    fi
+    local init_branch=""
+    local positional_repo_set=0
 
-    # Allow trailing --repo inside init
     while [ $# -gt 0 ]; do
         case "$1" in
             --repo|-r)
@@ -158,14 +165,41 @@ init_scratch() {
                 REPO_NAME_EXPLICIT=1
                 shift 1
                 ;;
-            *)
+            --branch|-b)
+                if [ $# -lt 2 ] || [ -z "${2:-}" ]; then
+                    echo "ERROR: $1 requires a branch name." >&2
+                    exit 1
+                fi
+                init_branch="$2"
+                shift 2
+                ;;
+            --branch=*)
+                init_branch="${1#*=}"
+                if [ -z "$init_branch" ]; then
+                    echo "ERROR: --branch requires a branch name." >&2
+                    exit 1
+                fi
+                shift 1
+                ;;
+            -*)
                 echo "ERROR: Unexpected argument to init: $1" >&2
                 exit 1
+                ;;
+            *)
+                if [ "$positional_repo_set" -eq 0 ]; then
+                    REPO_NAME="$(normalize_repo "$1")"
+                    REPO_NAME_EXPLICIT=1
+                    positional_repo_set=1
+                    shift 1
+                else
+                    echo "ERROR: Unexpected argument to init: $1" >&2
+                    exit 1
+                fi
                 ;;
         esac
     done
 
-    REPO_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}.git"
+    REPO_URL="${AERIAL_REPO_URL_OVERRIDE:-https://github.com/${REPO_OWNER}/${REPO_NAME}.git}"
 
     local auth_header
     auth_header=$(build_auth_header)
@@ -208,6 +242,11 @@ init_scratch() {
     local rand_suffix
     rand_suffix=$(head -c 16 /dev/urandom | md5sum | head -c 6)
     local branch_name="${branch_prefix}-$(date +%Y%m%d%H%M%S)-${rand_suffix}"
+    local clone_branch="$DEFAULT_BRANCH"
+    if [ -n "$init_branch" ]; then
+        clone_branch="$init_branch"
+        branch_name="$init_branch"
+    fi
 
     export GIT_TERMINAL_PROMPT=0
     export GIT_CONFIG_COUNT=2
@@ -217,14 +256,16 @@ init_scratch() {
     export GIT_CONFIG_VALUE_1="HTTP/1.1"
 
     local clone_out=""
-    if ! clone_out=$(git clone --depth 20 --single-branch -b "$DEFAULT_BRANCH" "$REPO_URL" "$scratch_dir" 2>&1); then
+    if ! clone_out=$(git clone --depth 20 --single-branch -b "$clone_branch" "$REPO_URL" "$scratch_dir" 2>&1); then
         echo "ERROR: Failed to clone ${REPO_URL} into scratch directory: ${clone_out}" >&2
         rm -rf "$scratch_dir"
         exit 1
     fi
 
     cd "$scratch_dir"
-    git checkout -b "$branch_name" >/dev/null 2>&1
+    if [ -z "$init_branch" ]; then
+        git checkout -b "$branch_name" >/dev/null 2>&1
+    fi
     git config user.name "Aerial"
     git config user.email "aerial@noreply.github.com"
 
@@ -1051,7 +1092,7 @@ case "$cmd" in
         override_roborev "$@"
         ;;
     *)
-        echo "Usage: $0 [--repo <name>] {init [repo]|submit [-b <body>|--body <body>|-f <file>|--body-file <file>] <scratch_dir> [commit_msg]|override-roborev [-m <rebuttal>|--reason <rebuttal>|-f <path>|--reason-file <path>] <pr_num> [rebuttal]}" >&2
+        echo "Usage: $0 [--repo <name>] {init [repo] [-b|--branch <branch>]|submit [-b <body>|--body <body>|-f <file>|--body-file <file>] <scratch_dir> [commit_msg]|override-roborev [-m <rebuttal>|--reason <rebuttal>|-f <path>|--reason-file <path>] <pr_num> [rebuttal]}" >&2
         exit 1
         ;;
 esac

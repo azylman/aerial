@@ -206,8 +206,8 @@ func TestResolveSymbolSpans(t *testing.T) {
 		t.Fatalf("failed to create test dir: %v", err)
 	}
 
-	fooContent := "package pkg\n\nfunc Foo() {\n\treturn\n}\n\nfunc Helper() {\n\treturn\n}\n"
-	barContent := "package pkg\n\nfunc Bar() {\n\tHelper()\n}\n"
+	fooContent := "package pkg\n\nfunc Foo() {\n\tSharedCall()\n}\n\nfunc Helper() {\n\treturn\n}\n\nfunc Common() {\n\treturn\n}\n"
+	barContent := "package pkg\n\nfunc Bar() {\n\tHelper()\n\tSharedCall()\n}\n\nfunc Common() {\n\treturn\n}\n"
 	if err := os.WriteFile(filepath.Join(aerialDir, "pkg/foo.go"), []byte(fooContent), 0o600); err != nil {
 		t.Fatalf("failed to write foo.go: %v", err)
 	}
@@ -228,7 +228,23 @@ func TestResolveSymbolSpans(t *testing.T) {
 			repo:            "azylman/aerial",
 			targetFiles:     []string{"pkg/foo.go", "pkg/bar.go"},
 			targetSymbols:   []string{"Foo", "Bar"},
-			wantLines:       []string{"- pkg/foo.go: Foo (L3-L5)", "- pkg/bar.go: Bar (L3-L5)"},
+			wantLines:       []string{"- pkg/foo.go: Foo (L3-L5)", "- pkg/bar.go: Bar (L3-L6)"},
+			wantAllResolved: true,
+		},
+		{
+			name:            "multi-file top-level symbol resolved in both files",
+			repo:            "azylman/aerial",
+			targetFiles:     []string{"pkg/foo.go", "pkg/bar.go"},
+			targetSymbols:   []string{"Common"},
+			wantLines:       []string{"- pkg/foo.go: Common (L11-L13)", "- pkg/bar.go: Common (L8-L10)"},
+			wantAllResolved: true,
+		},
+		{
+			name:            "multi-file fallback pass 2 symbol resolved in both files",
+			repo:            "azylman/aerial",
+			targetFiles:     []string{"pkg/foo.go", "pkg/bar.go"},
+			targetSymbols:   []string{"SharedCall"},
+			wantLines:       []string{"- pkg/foo.go: SharedCall (L4-L4)", "- pkg/bar.go: SharedCall (L5-L5)"},
 			wantAllResolved: true,
 		},
 		{
@@ -264,12 +280,12 @@ func TestResolveSymbolSpans(t *testing.T) {
 			wantAllResolved: false,
 		},
 		{
-			name:            "empty symbols",
+			name:            "empty symbols emits full file line bounds",
 			repo:            "azylman/aerial",
-			targetFiles:     []string{"pkg/foo.go"},
+			targetFiles:     []string{"pkg/foo.go", "pkg/bar.go", "pkg/foo.go"},
 			targetSymbols:   nil,
-			wantLines:       nil,
-			wantAllResolved: false,
+			wantLines:       []string{"- pkg/foo.go (L1-L14)", "- pkg/bar.go (L1-L11)"},
+			wantAllResolved: true,
 		},
 		{
 			name:            "non existent file",

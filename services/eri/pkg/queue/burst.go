@@ -203,9 +203,14 @@ func FormatSingleDiscordPrompt(m db.Message, tzOpt ...string) string {
 			fmt.Fprintf(&sb, "- thread_name: %q\n", clean)
 		}
 	}
-	fmt.Fprintf(&sb, "- guild_id: %s\n- author_id: %s\n- author_username: %s\n- author_global_name: %s\n- author_bot: %t\n- is_admin: %t\n",
-		m.GuildID, m.AuthorID, sanitizePromptHeaderField(m.AuthorName),
-		sanitizePromptHeaderField(m.AuthorGlobalName), m.AuthorBot, m.IsAdmin)
+	if strings.TrimSpace(m.GuildID) != "" {
+		fmt.Fprintf(&sb, "- guild_id: %s\n", m.GuildID)
+	}
+	fmt.Fprintf(&sb, "- author_id: %s\n- author_username: %s\n", m.AuthorID, sanitizePromptHeaderField(m.AuthorName))
+	if cleanGlobal := sanitizePromptHeaderField(m.AuthorGlobalName); cleanGlobal != "" {
+		fmt.Fprintf(&sb, "- author_global_name: %s\n", cleanGlobal)
+	}
+	fmt.Fprintf(&sb, "- author_bot: %t\n- is_admin: %t\n", m.AuthorBot, m.IsAdmin)
 	if m.ReplyingToAuthor != "" || m.ReplyingToContent != "" {
 		authorName := m.ReplyingToAuthor
 		if authorName == "" {
@@ -230,9 +235,26 @@ func FormatSingleDiscordPrompt(m db.Message, tzOpt ...string) string {
 	if m.Silent {
 		closingInstruction = "This is a silent background turn; your response will not be delivered to Discord."
 	}
-	fmt.Fprintf(&sb, "- timestamp: %s\n- mentions: %v\n- mention_user_ids: %v\n- mention_role_ids: %v\n- attachments: %v\n\nOnly formulate and output your final response once all immediate work is complete. %s\n</USER_REQUEST>",
-		ts.Format(time.RFC3339), nonNilSlice(m.Mentions), nonNilSlice(m.MentionUserIDs), nonNilSlice(m.MentionRoleIDs), nonNilSlice(m.Attachments), closingInstruction)
+	fmt.Fprintf(&sb, "- timestamp: %s\n", ts.Format(time.RFC3339))
+	writeDiscordPromptSlices(&sb, m)
+	fmt.Fprintf(&sb, "\nOnly formulate and output your final response once all immediate work is complete. %s\n</USER_REQUEST>", closingInstruction)
 	return sb.String()
+}
+
+func writeDiscordPromptSlices(sb *strings.Builder, m db.Message) {
+	for _, kv := range []struct {
+		key  string
+		vals []string
+	}{
+		{"mentions", m.Mentions},
+		{"mention_user_ids", m.MentionUserIDs},
+		{"mention_role_ids", m.MentionRoleIDs},
+		{"attachments", m.Attachments},
+	} {
+		if len(kv.vals) > 0 {
+			fmt.Fprintf(sb, "- %s: %v\n", kv.key, kv.vals)
+		}
+	}
 }
 
 func extractBurstEphemeral(burst []db.Message) (bool, bool) {
@@ -279,13 +301,6 @@ func resolveBurstEffort(burst []db.Message) string {
 		return "low"
 	}
 	return "high"
-}
-
-func nonNilSlice(s []string) []string {
-	if s == nil {
-		return []string{}
-	}
-	return s
 }
 
 // CoalesceBurstPrompt formats a burst of messages into a single coalesced multi-message prompt turn.

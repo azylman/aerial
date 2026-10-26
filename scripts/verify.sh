@@ -430,6 +430,9 @@ run_atlas_validate() {
 }
 
 if [ "$MODE" = "staged" ]; then
+    if has_cmd git; then
+        git rm --cached -q PR_DESCRIPTION.md .pr_description.md 2>/dev/null || true
+    fi
     # Fast path: check only services that have staged changes
     STAGED_FILES=$(git diff --cached --name-only 2>/dev/null || true)
     if [ -z "$STAGED_FILES" ]; then
@@ -498,6 +501,14 @@ if [ "$MODE" = "staged" ]; then
     # Check Vector configuration syntax
     if echo "$STAGED_FILES" | grep -q -E "^(nomad/)?vector/"; then
         run_vector_syntax "nomad/vector/vector.yaml"
+    fi
+
+    if has_cmd git && git diff --quiet 2>/dev/null; then
+        git_dir=$(git rev-parse --git-dir 2>/dev/null || true)
+        tree_sha=$(git write-tree 2>/dev/null || true)
+        if [ -n "$git_dir" ] && [ -n "$tree_sha" ]; then
+            printf '%s\n' "$tree_sha" > "$git_dir/.aerial-verified-tree" 2>/dev/null || true
+        fi
     fi
 
     echo "✅ [Aerial Verify] Fast pre-commit checks passed cleanly."

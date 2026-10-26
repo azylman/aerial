@@ -175,7 +175,7 @@ func TestFormatSingleDiscordPrompt(t *testing.T) {
 		{
 			name:         "Empty channel and thread name omits fields",
 			msg:          db.Message{ID: "msg-203", ThreadID: "thread-203", Content: "Hello empty", ChannelID: "chan-203", CreatedAt: tsHash},
-			wantExcludes: []string{"- channel_name:", "- thread_name:"},
+			wantExcludes: []string{"- channel_name:", "- thread_name:", "- guild_id:", "- author_global_name:", "- mentions:", "- mention_user_ids:", "- mention_role_ids:", "- attachments:"},
 		},
 		{
 			name: "Timezone formatting",

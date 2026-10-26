@@ -81,9 +81,61 @@ type StreamingDaemon struct {
 	inflightMu     sync.Mutex
 	inflight       []*TurnContext
 	inFlightTools  map[int]inFlightToolCall
+	seenMemoryIDs  map[string]bool
 	readerWg       sync.WaitGroup
 	closeOnce      sync.Once
 	closed         atomic.Bool
+}
+
+func extractMemoryLineID(line string) string {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "- [id:") {
+		return ""
+	}
+	rest := trimmed[len("- [id:"):]
+	if end := strings.IndexByte(rest, ']'); end > 0 {
+		return rest[:end]
+	}
+	return ""
+}
+
+func deduplicateRetrievedMemory(prompt string, seen map[string]bool) string {
+	const openTag, closeTag = "<retrieved_memory>", "</retrieved_memory>"
+	startIdx := strings.Index(prompt, openTag)
+	if startIdx < 0 || seen == nil {
+		return prompt
+	}
+	endRel := strings.Index(prompt[startIdx:], closeTag)
+	if endRel < 0 {
+		return prompt
+	}
+	blockStart := startIdx + len(openTag)
+	blockEnd := startIdx + endRel
+	inner := strings.Trim(prompt[blockStart:blockEnd], "\r\n")
+	if inner == "" {
+		return prompt
+	}
+	lines := strings.Split(inner, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if id := extractMemoryLineID(line); id != "" {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+		}
+		kept = append(kept, line)
+	}
+	if len(kept) == len(lines) {
+		return prompt
+	}
+	if len(kept) == 0 {
+		after := strings.TrimPrefix(strings.TrimPrefix(prompt[blockEnd+len(closeTag):], "\r\n"), "\n")
+		after = strings.TrimPrefix(strings.TrimPrefix(after, "\r\n"), "\n")
+		return strings.TrimSpace(prompt[:startIdx] + after)
+	}
+	replacement := openTag + "\n" + strings.Join(kept, "\n") + "\n" + closeTag
+	return prompt[:startIdx] + replacement + prompt[blockEnd+len(closeTag):]
 }
 
 func closeStreamQuietly(c io.Closer, name string) {
@@ -128,6 +180,7 @@ func StartStreamingDaemon(ctx context.Context, cfg DaemonConfig, spawner DaemonS
 		stdout: stdout, stderrCloser: stderr,
 		state: StateStarting, lastUsed: time.Now(),
 		turnCount: cfg.InitialTurnCount, inFlightTools: make(map[int]inFlightToolCall),
+		seenMemoryIDs: make(map[string]bool),
 	}
 
 	timeout := DefaultHandshakeTimeout
@@ -259,6 +312,12 @@ func (d *StreamingDaemon) Send(prompt string, turnCtx *TurnContext) error {
 		memQuery = strings.TrimSpace(turnCtx.MemoryQuery)
 	}
 	payloadPrompt := injectRetrievedContext(ctx, prompt, memQuery, d.cfg.AmbientContextRetriever, 500*time.Millisecond, d.cfg.MemoryRetriever, 2*time.Second, "[StreamingDaemon]")
+	d.mu.Lock()
+	if d.seenMemoryIDs == nil {
+		d.seenMemoryIDs = make(map[string]bool)
+	}
+	payloadPrompt = deduplicateRetrievedMemory(payloadPrompt, d.seenMemoryIDs)
+	d.mu.Unlock()
 	encoded, err := json.Marshal(streamInputPayload{Event: "user", Message: streamInputMessage{Content: payloadPrompt}})
 	if err != nil {
 		return fmt.Errorf("failed to marshal turn prompt: %w", err)

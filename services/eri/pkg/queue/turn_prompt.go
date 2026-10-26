@@ -501,7 +501,7 @@ func (te *turnExecution) resolveThreadColdStartSummary(getTurnHistory func(int) 
 }
 
 func (te *turnExecution) resolveColdStartLookbackMessages(isColdStart, isChannelMode bool, getTurnHistory func(int) []HistoryMessage) []HistoryMessage {
-	if !te.isEphemeral && (isChannelMode || isColdStart || te.wakeIdx > 0 || len(te.burst) > 1) {
+	if !te.isEphemeral && (isColdStart || isChannelMode) {
 		lookbackMsgs := getTurnHistory(10)
 		if isChannelMode && !isColdStart && len(lookbackMsgs) > 0 {
 			lookbackMsgs = FilterAssistantMessages(lookbackMsgs)

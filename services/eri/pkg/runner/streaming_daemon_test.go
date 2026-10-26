@@ -662,6 +662,86 @@ func TestStreamingDaemon_Send_ContextRetrievers(t *testing.T) {
 	}
 }
 
+func TestDeduplicateRetrievedMemory(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		initialIDs []string
+		prompt     string
+		want       string
+		wantSeen   []string
+	}{
+		{
+			name:   "no memory block unchanged",
+			prompt: "Hello world",
+			want:   "Hello world",
+		},
+		{
+			name:   "unclosed memory block unchanged",
+			prompt: "<retrieved_memory>\n- [id:1] fact one",
+			want:   "<retrieved_memory>\n- [id:1] fact one",
+		},
+		{
+			name:   "empty memory block unchanged",
+			prompt: "<retrieved_memory>\n</retrieved_memory>\n\nHello",
+			want:   "<retrieved_memory>\n</retrieved_memory>\n\nHello",
+		},
+		{
+			name:     "first turn retains all facts and records IDs",
+			prompt:   "<retrieved_memory>\n- [id:10] User likes tea\n- [id:20] User lives in Oakland\n</retrieved_memory>\n\nHello",
+			want:     "<retrieved_memory>\n- [id:10] User likes tea\n- [id:20] User lives in Oakland\n</retrieved_memory>\n\nHello",
+			wantSeen: []string{"10", "20"},
+		},
+		{
+			name:       "partial overlap retains only unseen fact",
+			initialIDs: []string{"10"},
+			prompt:     "<retrieved_memory>\n- [id:10] User likes tea\n- [id:20] User lives in Oakland\n</retrieved_memory>\n\nFollow up",
+			want:       "<retrieved_memory>\n- [id:20] User lives in Oakland\n</retrieved_memory>\n\nFollow up",
+			wantSeen:   []string{"10", "20"},
+		},
+		{
+			name:       "all facts already seen strips entire retrieved_memory block",
+			initialIDs: []string{"10", "20"},
+			prompt:     "<retrieved_memory>\n- [id:10] User likes tea\n- [id:20] User lives in Oakland\n</retrieved_memory>\n\nFollow up",
+			want:       "Follow up",
+			wantSeen:   []string{"10", "20"},
+		},
+		{
+			name:       "all facts seen with ambient context preserves ambient block",
+			initialIDs: []string{"10"},
+			prompt:     "<ambient_context>\nLiving Room: ON\n</ambient_context>\n\n<retrieved_memory>\n- [id:10] User likes tea\n</retrieved_memory>\n\nFollow up",
+			want:       "<ambient_context>\nLiving Room: ON\n</ambient_context>\n\nFollow up",
+			wantSeen:   []string{"10"},
+		},
+		{
+			name:     "lines without id prefix are retained",
+			prompt:   "<retrieved_memory>\n- Custom note without id\n- [id:unclosed\n</retrieved_memory>\n\nHello",
+			want:     "<retrieved_memory>\n- Custom note without id\n- [id:unclosed\n</retrieved_memory>\n\nHello",
+			wantSeen: nil,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			seen := make(map[string]bool)
+			for _, id := range tc.initialIDs {
+				seen[id] = true
+			}
+			if got := deduplicateRetrievedMemory(tc.prompt, seen); got != tc.want {
+				t.Errorf("deduplicateRetrievedMemory() = %q, want %q", got, tc.want)
+			}
+			for _, id := range tc.wantSeen {
+				if !seen[id] {
+					t.Errorf("expected ID %q to be marked seen", id)
+				}
+			}
+		})
+	}
+	if got := deduplicateRetrievedMemory("<retrieved_memory>\n- [id:1] x\n</retrieved_memory>", nil); !strings.Contains(got, "[id:1]") {
+		t.Errorf("expected nil seen map to return prompt unchanged, got %q", got)
+	}
+}
+
 func TestExtractResponseStringAndPopulateUsage(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

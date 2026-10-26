@@ -76,8 +76,9 @@ func TestSyncTranscripts_Scenarios(t *testing.T) {
 					sessionID: "sess-alpha-001",
 					content: strings.Join([]string{
 						`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"Please check system health and memory usage"}`,
-						`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","tool_calls":[{"name":"run_command","args":{"CommandLine":"free -m"}}]}`,
+						`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","tool_calls":[{"name":"run_command","args":{"CommandLine":"free -m"}},{"name":"manage_task","args":{"Action":"status"}}]}`,
 						`{"step_index":2,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-10-01T10:00:05Z","content":"total: 32000, used: 8000, free: 24000"}`,
+						`{"step_index":3,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-10-01T10:00:06Z","content":"{\"status\":\"running\"}"}`,
 					}, "\n") + "\n",
 					age: 1 * time.Hour,
 				},
@@ -89,7 +90,7 @@ func TestSyncTranscripts_Scenarios(t *testing.T) {
 			wantStepsInserted: 3,
 			wantSummaries:     1,
 			wantSettled:       boolPtr(true),
-			wantLastIndexed:   2,
+			wantLastIndexed:   3,
 			wantSummaryText:   "Checked system health and free memory: 24GB available.",
 		},
 		{
