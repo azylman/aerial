@@ -36,6 +36,9 @@ var sleepCommandPattern = regexp.MustCompile(`(?:^|[;&|\n]\s*)(?:/bin/|/usr/bin/
 // whileSleepPattern matches while loops executing sleep commands.
 var whileSleepPattern = regexp.MustCompile(`while\s+.*?(?:do|;)\s*(?:/bin/|/usr/bin/)?sleep\s+`)
 
+// pythonSingleQuotePattern matches single-quoted `python -c '...'` or `python3 -c '...'` invocations.
+var pythonSingleQuotePattern = regexp.MustCompile(`(?:^|[;&|\n]\s*)(?:/usr/bin/|/usr/local/bin/|/bin/)?python[0-9.]*\s+-c\s+'`)
+
 // CheckSchedule evaluates tool calls against scheduling, sleep, polling, and synchronous wait invariants.
 func CheckSchedule(toolName string, args ToolArgs) *Decision {
 	switch normalizeToolName(toolName) {
@@ -66,13 +69,80 @@ func checkScheduleRunCommand(args ToolArgs) *Decision {
 	if isTaskLogPath(args.CommandLine) {
 		return &Decision{Decision: DecisionDeny, Reason: TaskPollDenyReason}
 	}
+
+	var overwrite map[string]any
+	if rewritten := rewritePythonInlineQuotes(args.CommandLine); rewritten != args.CommandLine {
+		overwrite = map[string]any{"CommandLine": rewritten}
+	}
 	if !args.IsDaemonBool() && args.WaitMs() != MaxSyncWaitMs {
-		return &Decision{
-			Decision:  DecisionAllow,
-			Overwrite: map[string]any{"WaitMsBeforeAsync": MaxSyncWaitMs},
+		if overwrite == nil {
+			overwrite = make(map[string]any)
+		}
+		overwrite["WaitMsBeforeAsync"] = MaxSyncWaitMs
+	}
+	return &Decision{Decision: DecisionAllow, Overwrite: overwrite}
+}
+
+func rewritePythonInlineQuotes(cmd string) string {
+	if !strings.Contains(cmd, "python") || !strings.Contains(cmd, "-c") || !strings.Contains(cmd, `\"`) {
+		return cmd
+	}
+	locs := pythonSingleQuotePattern.FindAllStringIndex(cmd, -1)
+	if len(locs) == 0 {
+		return cmd
+	}
+
+	rewritten := cmd
+	for i := len(locs) - 1; i >= 0; i-- {
+		start := locs[i][1]
+		end := findClosingSingleQuote(rewritten, start)
+		if end > start {
+			fixedBody := unescapeBracedQuotes(rewritten[start:end])
+			rewritten = rewritten[:start] + fixedBody + rewritten[end:]
 		}
 	}
-	return &Decision{Decision: DecisionAllow}
+	return rewritten
+}
+
+func findClosingSingleQuote(s string, start int) int {
+	for i := start; i < len(s); i++ {
+		if s[i] == '\'' {
+			if strings.HasPrefix(s[i:], `'\''`) {
+				i += 3
+				continue
+			}
+			return i
+		}
+	}
+	return -1
+}
+
+func unescapeBracedQuotes(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '{':
+			depth++
+			b.WriteByte('{')
+		case '}':
+			if depth > 0 {
+				depth--
+			}
+			b.WriteByte('}')
+		case '\\':
+			if depth > 0 && i+1 < len(s) && s[i+1] == '"' {
+				b.WriteByte('"')
+				i++
+				continue
+			}
+			b.WriteByte('\\')
+		default:
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String()
 }
 
 func isTaskLogPath(s string) bool {
