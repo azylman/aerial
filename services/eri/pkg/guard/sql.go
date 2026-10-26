@@ -323,11 +323,26 @@ func isFullTableProjection(info *SQLStatementInfo) bool {
 			return true
 		}
 	}
-	if !hasTableOID {
+	if !hasTableOID && !hasAggregatePlan(info.Plan) {
 		for _, total := range info.RelColCounts {
 			if total > 0 && len(info.Columns) == total {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func hasAggregatePlan(plan *SQLPlan) bool {
+	if plan == nil {
+		return false
+	}
+	if plan.NodeType == "Aggregate" || plan.NodeType == "Group" {
+		return true
+	}
+	for i := range plan.Plans {
+		if hasAggregatePlan(&plan.Plans[i]) {
+			return true
 		}
 	}
 	return false

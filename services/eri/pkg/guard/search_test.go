@@ -217,6 +217,7 @@ func TestPsqlGuard(t *testing.T) {
 	schemaRows := [][3]string{{"messages", "id", "text"}, {"messages", "author_name", "text"}, {"messages", "content", "text"}}
 
 	limitPlan := `[{"Plan": {"Node Type": "Limit", "Plan Rows": 10, "Plans": [{"Node Type": "Seq Scan", "Relation Name": "messages", "Plan Rows": 100}]}}]`
+	aggLimitPlan := `[{"Plan": {"Node Type": "Limit", "Plan Rows": 10, "Plans": [{"Node Type": "Aggregate", "Plan Rows": 10, "Plans": [{"Node Type": "Seq Scan", "Relation Name": "messages", "Plan Rows": 100}]}]}}]`
 	overLimitPlan := `[{"Plan": {"Node Type": "Limit", "Plan Rows": 100, "Plans": [{"Node Type": "Seq Scan", "Relation Name": "messages", "Plan Rows": 200}]}}]`
 	unboundedPlan := `[{"Plan": {"Node Type": "Sort", "Plan Rows": 103, "Plans": [{"Node Type": "Seq Scan", "Relation Name": "messages", "Plan Rows": 103}]}}]`
 	pkPlan := `[{"Plan": {"Node Type": "Index Scan", "Relation Name": "messages", "Plan Rows": 1}}]`
@@ -274,6 +275,13 @@ func TestPsqlGuard(t *testing.T) {
 			conn:          &fakeSQLCatalogConn{cols: cteCols, explainJSON: limitPlan, tableMeta: meta3, relCounts: rel3},
 			wantDeny:      true,
 			wantReasonSub: "Wildcard SELECT * is prohibited",
+		},
+		{
+			name:          "aggregate group by with matching column count allowed",
+			cmd:           `psql "$DATABASE_URL" -c "SELECT author_name, count(1), max(id) FROM messages GROUP BY author_name LIMIT 10"`,
+			conn:          &fakeSQLCatalogConn{cols: cteCols, explainJSON: aggLimitPlan, tableMeta: meta3, relCounts: rel3},
+			wantDeny:      false,
+			wantOverwrite: `psql -A "$DATABASE_URL" -c "SELECT author_name, count(1), max(id) FROM messages GROUP BY author_name LIMIT 10"`,
 		},
 		{
 			name:          "unbounded multi-row select without LIMIT denied",
