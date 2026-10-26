@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -16,7 +17,32 @@ import (
 	"github.com/azylman/aerial/pkg/httpkit"
 )
 
-func setupRoutes(cfg *Config, store Store) http.Handler {
+// AppDeps encapsulates subsystem dependencies for Prospera.
+type AppDeps struct {
+	TwilioClient  TwilioClient
+	TokenMgr      *StreamTokenManager
+	ConsultClient ContextConsultClient
+	SessionMgr    *CallSessionManager
+}
+
+func setupRoutes(cfg *Config, store Store, optionalDeps ...AppDeps) http.Handler {
+	var deps AppDeps
+	if len(optionalDeps) > 0 {
+		deps = optionalDeps[0]
+	}
+	if deps.TwilioClient == nil {
+		deps.TwilioClient = NewHTTPTwilioClient(cfg.TwilioAccountSID, cfg.TwilioAuthToken)
+	}
+	if deps.TokenMgr == nil {
+		deps.TokenMgr = NewStreamTokenManager(time.Now)
+	}
+	if deps.ConsultClient == nil {
+		deps.ConsultClient = NewHTTPContextConsultClient(cfg.GoogleMCPURL, cfg.CovenURL)
+	}
+	if deps.SessionMgr == nil {
+		deps.SessionMgr = NewCallSessionManager(cfg, store, deps.TwilioClient, deps.ConsultClient, deps.TokenMgr)
+	}
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -35,6 +61,12 @@ func setupRoutes(cfg *Config, store Store) http.Handler {
 
 	mux.HandleFunc("POST /internal/store-preview", func(w http.ResponseWriter, r *http.Request) {
 		handleStorePreview(w, r, store)
+	})
+
+	mux.HandleFunc("/twilio/media-stream", deps.SessionMgr.HandleMediaWebSocket)
+
+	mux.HandleFunc("POST /internal/bridge-preview", func(w http.ResponseWriter, r *http.Request) {
+		handleBridgePreview(w, r, deps)
 	})
 
 	return mux
@@ -181,6 +213,149 @@ func handleStorePreview(w http.ResponseWriter, r *http.Request, store Store) {
 	}
 }
 
+type bridgePreviewRequest struct {
+	Action       string            `json:"action"`
+	AuthToken    string            `json:"auth_token"`
+	FullURL      string            `json:"full_url"`
+	Form         map[string]string `json:"form"`
+	Signature    string            `json:"signature"`
+	CallID       string            `json:"call_id"`
+	TTLSeconds   int               `json:"ttl_seconds"`
+	Token        string            `json:"token"`
+	WSURL        string            `json:"ws_url"`
+	Greeting     string            `json:"greeting"`
+	CallbackURL  string            `json:"callback_url"`
+	ToNumber     string            `json:"to_number"`
+	FromNumber   string            `json:"from_number"`
+	TwiMLURL     string            `json:"twiml_url"`
+	ProviderSID  string            `json:"provider_sid"`
+	SMSBody      string            `json:"sms_body"`
+	AreaCode     string            `json:"area_code"`
+	RecordingURL string            `json:"recording_url"`
+	RMS          float64           `json:"rms"`
+	ElapsedMs    int               `json:"elapsed_ms"`
+	AnsweredBy   string            `json:"answered_by"`
+	Query        string            `json:"query"`
+	SteerMessage string            `json:"steer_message"`
+	SteerMode    string            `json:"steer_mode"`
+}
+
+func handleBridgePreview(w http.ResponseWriter, r *http.Request, deps AppDeps) {
+	var req bridgePreviewRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err.Error() != "EOF" {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	switch req.Action {
+	case "validate_signature", "stream_token", "twiml", "twilio_rest":
+		handlePreviewTelephony(w, r, req, deps)
+	case "amd_eval", "consult", "session_mgr":
+		handlePreviewLive(w, r, req, deps)
+	default:
+		httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+	}
+}
+
+func handlePreviewTelephony(w http.ResponseWriter, r *http.Request, req bridgePreviewRequest, deps AppDeps) {
+	ctx := r.Context()
+	switch req.Action {
+	case "validate_signature":
+		uv := url.Values{}
+		for k, v := range req.Form {
+			uv.Set(k, v)
+		}
+		valid := ValidateTwilioSignature(req.AuthToken, req.FullURL, uv, req.Signature)
+		httpkit.WriteJSON(w, http.StatusOK, map[string]bool{"valid": valid})
+	case "stream_token":
+		issued, err := deps.TokenMgr.Issue(req.CallID, time.Duration(req.TTLSeconds)*time.Second)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		tok := req.Token
+		if tok == "" {
+			tok = issued
+		}
+		consumedID, ok := deps.TokenMgr.Consume(tok)
+		httpkit.WriteJSON(w, http.StatusOK, map[string]any{
+			"issued":           issued,
+			"consumed_call_id": consumedID,
+			"consumed_ok":      ok,
+		})
+	case "twiml":
+		sXML := GenerateConnectStreamTwiML(req.WSURL)
+		vXML := GenerateVoicemailTwiML(req.Greeting, req.CallbackURL)
+		httpkit.WriteJSON(w, http.StatusOK, map[string]string{
+			"stream_twiml":    sXML,
+			"voicemail_twiml": vXML,
+		})
+	case "twilio_rest":
+		if _, err := deps.TwilioClient.CreateCall(ctx, CreateCallRequest{To: req.ToNumber, From: req.FromNumber, TwiMLURL: req.TwiMLURL}); err != nil {
+			log.Printf("preview create call err: %v", err)
+		}
+		if err := deps.TwilioClient.HangupCall(ctx, req.ProviderSID); err != nil {
+			log.Printf("preview hangup err: %v", err)
+		}
+		if _, err := deps.TwilioClient.IsCallActive(ctx, req.ProviderSID); err != nil {
+			log.Printf("preview is call active err: %v", err)
+		}
+		if _, err := deps.TwilioClient.SendSMS(ctx, req.ToNumber, req.FromNumber, req.SMSBody); err != nil {
+			log.Printf("preview send sms err: %v", err)
+		}
+		if _, err := deps.TwilioClient.EnsurePhoneNumber(ctx, req.AreaCode, req.CallbackURL); err != nil {
+			log.Printf("preview ensure phone err: %v", err)
+		}
+		if _, _, err := deps.TwilioClient.DownloadRecording(ctx, req.RecordingURL); err != nil {
+			log.Printf("preview download recording err: %v", err)
+		}
+		httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "exercised"})
+	}
+}
+
+func handlePreviewLive(w http.ResponseWriter, r *http.Request, req bridgePreviewRequest, deps AppDeps) {
+	ctx := r.Context()
+	switch req.Action {
+	case "amd_eval":
+		ctrl := NewAMDGreetingController(0.015)
+		act1 := ctrl.OnInboundFrame(req.RMS, req.ElapsedMs)
+		act2 := ctrl.OnAMDWebhook(req.AnsweredBy)
+		_ = ctrl.State()
+		_ = ctrl.IsReleased()
+		httpkit.WriteJSON(w, http.StatusOK, map[string]int{
+			"frame_action":   int(act1),
+			"webhook_action": int(act2),
+		})
+	case "consult":
+		cal, calErr := deps.ConsultClient.ConsultCalendar(ctx, req.Query, "", "")
+		if calErr != nil {
+			log.Printf("preview consult cal err: %v", calErr)
+		}
+		mem, memErr := deps.ConsultClient.ConsultMemory(ctx, req.Query)
+		if memErr != nil {
+			log.Printf("preview consult mem err: %v", memErr)
+		}
+		httpkit.WriteJSON(w, http.StatusOK, map[string]string{
+			"calendar": cal,
+			"memory":   mem,
+		})
+	case "session_mgr":
+		_ = deps.SessionMgr.ActiveCount()
+		if err := deps.SessionMgr.SteerCall(req.CallID, req.SteerMessage, req.SteerMode); err != nil {
+			log.Printf("preview steer err: %v", err)
+		}
+		if err := deps.SessionMgr.HandleAMDWebhook(req.ProviderSID, req.AnsweredBy); err != nil {
+			log.Printf("preview amd err: %v", err)
+		}
+		if err := deps.SessionMgr.EndCall(req.CallID); err != nil {
+			log.Printf("preview end call err: %v", err)
+		}
+		_, _ = deps.SessionMgr.GetSession(req.CallID)
+		_, _ = deps.SessionMgr.GetSessionByProviderSID(req.ProviderSID)
+		httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "exercised"})
+	}
+}
+
 // RunApp bootstraps and runs the Prospera service HTTP server with graceful shutdown.
 func RunApp(ctx context.Context, cfg *Config) error {
 	if cfg == nil {
@@ -203,7 +378,17 @@ func RunApp(ctx context.Context, cfg *Config) error {
 		log.Printf("prospera: initial orphan reconciliation notice: %v", err)
 	}
 
-	mux := setupRoutes(cfg, store)
+	twilioClient := NewHTTPTwilioClient(cfg.TwilioAccountSID, cfg.TwilioAuthToken)
+	tokenMgr := NewStreamTokenManager(time.Now)
+	consultClient := NewHTTPContextConsultClient(cfg.GoogleMCPURL, cfg.CovenURL)
+	sessionMgr := NewCallSessionManager(cfg, store, twilioClient, consultClient, tokenMgr)
+
+	mux := setupRoutes(cfg, store, AppDeps{
+		TwilioClient:  twilioClient,
+		TokenMgr:      tokenMgr,
+		ConsultClient: consultClient,
+		SessionMgr:    sessionMgr,
+	})
 
 	server := &http.Server{
 		Addr:              ":" + port,
