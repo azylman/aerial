@@ -226,7 +226,7 @@ func FormatSingleDiscordPrompt(m db.Message, tzOpt ...string) string {
 			ts = ts.In(loc)
 		}
 	}
-	closingInstruction := "It will be delivered directly to Discord."
+	closingInstruction := "It will be delivered directly to Discord. Keep responses proportional to the turn; for routine actions or things just discussed, confirm briefly without echoing tool IDs, exact timestamps, or context already in thread."
 	if m.Silent {
 		closingInstruction = "This is a silent background turn; your response will not be delivered to Discord."
 	}
