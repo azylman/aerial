@@ -53,12 +53,15 @@ func handlePoisonPillMessage(ctx context.Context, store db.Store, pool *WorkerPo
 }
 
 func evaluateRecoveryStaleness(ctx context.Context, store db.Store, m db.Message, stalenessTTL time.Duration) (bool, string) {
+	if !isDiscordMessage(m) {
+		return false, ""
+	}
 	stats, statsErr := store.GetSessionActivityStats(ctx, m.ThreadID)
 	if statsErr == nil && stats != nil && !stats.LastCompletedMessageCreatedAt.IsZero() && stats.LastCompletedMessageCreatedAt.After(m.CreatedAt) {
 		return true, fmt.Sprintf("superseded by newer completed message in thread (completed created_at %s > msg %s)",
 			stats.LastCompletedMessageCreatedAt.Format(time.RFC3339), m.CreatedAt.Format(time.RFC3339))
 	}
-	if m.Status == db.StatusPending && !m.CreatedAt.IsZero() && time.Since(m.CreatedAt) > stalenessTTL {
+	if m.Status == db.StatusPending && m.ErrorMessage != "deployment_drain" && !m.CreatedAt.IsZero() && time.Since(m.CreatedAt) > stalenessTTL {
 		return true, fmt.Sprintf("stranded pending message age %v exceeds staleness TTL %v",
 			time.Since(m.CreatedAt).Round(time.Second), stalenessTTL)
 	}

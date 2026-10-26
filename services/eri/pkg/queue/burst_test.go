@@ -431,6 +431,9 @@ func TestEvaluateBurstStaleness(t *testing.T) {
 		{"Message older than TTL in existing thread with inactive session is dropped", []db.Message{{ID: "m1", CreatedAt: baseTime}}, ttl, false, baseTime.Add(2 * time.Minute), baseTime.Add(35 * time.Minute), true, "existing session inactive"},
 		{"Recovered message (RetryCount > 0) older than TTL is retained", []db.Message{{ID: "m1", CreatedAt: baseTime, RetryCount: 1}}, ttl, true, time.Time{}, baseTime.Add(40 * time.Minute), false, ""},
 		{"Recovered message (RestartCount > 0) older than TTL is retained", []db.Message{{ID: "m1", CreatedAt: baseTime, RestartCount: 1}}, ttl, true, time.Time{}, baseTime.Add(40 * time.Minute), false, ""},
+		{"Deployment-drained message older than TTL is retained", []db.Message{{ID: "m1", CreatedAt: baseTime, ErrorMessage: "deployment_drain"}}, ttl, true, time.Time{}, baseTime.Add(40 * time.Minute), false, ""},
+		{"HTTP client message is never stale even beyond hard cap", []db.Message{{ID: "m-http", AuthorID: "http-client", CreatedAt: baseTime}}, ttl, true, time.Time{}, baseTime.Add(3 * time.Hour), false, ""},
+		{"Scheduler message is never stale even beyond hard cap", []db.Message{{ID: "m-sched", ScheduleRunID: "run-1", CreatedAt: baseTime}}, ttl, true, time.Time{}, baseTime.Add(3 * time.Hour), false, ""},
 		{"Burst atomicity: if any message recovered, whole burst retained", []db.Message{{ID: "m1", CreatedAt: baseTime}, {ID: "m2", CreatedAt: baseTime.Add(time.Second), RetryCount: 1}}, ttl, true, time.Time{}, baseTime.Add(45 * time.Minute), false, ""},
 		{"Multi-message burst evaluates against newest message timestamp", []db.Message{{ID: "m1", CreatedAt: baseTime}, {ID: "m2", CreatedAt: baseTime.Add(20 * time.Minute)}}, ttl, true, time.Time{}, baseTime.Add(35 * time.Minute), false, ""},
 	}

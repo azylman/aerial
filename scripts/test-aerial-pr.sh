@@ -618,6 +618,49 @@ TRAILER_CHECK=$(bash -c "
 assert_eq 't1:<!-- aerial-pr: {"target_id":"1562162630997581946","vanadis_chunk_id":"build-123-chunk-2"} -->' "$(echo "$TRAILER_CHECK" | grep '^t1:')" "format_aerial_pr_trailer formats compact JSON trailer comment"
 assert_eq "t2:" "$(echo "$TRAILER_CHECK" | grep '^t2:')" "format_aerial_pr_trailer returns empty string when all metadata fields are empty"
 
+# Case 14: push_scratch_branch falls back to --force-with-lease when rebased branch already exists on remote
+PUSH_REBASED_CHECK=$(bash -c "
+    REPO_TEST_MODE=1
+    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
+    REMOTE_DIR=\$(mktemp -d /tmp/aerial-pr-push-remote.XXXXXX)
+    WORK_DIR=\$(mktemp -d /tmp/aerial-pr-push-work.XXXXXX)
+    UPSTREAM_DIR=\$(mktemp -d /tmp/aerial-pr-push-up.XXXXXX)
+    trap 'rm -rf \"\$REMOTE_DIR\" \"\$WORK_DIR\" \"\$UPSTREAM_DIR\"' EXIT
+
+    git init -q --bare \"\$REMOTE_DIR\"
+    git clone -q \"\$REMOTE_DIR\" \"\$UPSTREAM_DIR\"
+    git -C \"\$UPSTREAM_DIR\" config user.name 'Tester'
+    git -C \"\$UPSTREAM_DIR\" config user.email 'tester@example.com'
+    git -C \"\$UPSTREAM_DIR\" checkout -q -b main
+    echo 'base' > \"\$UPSTREAM_DIR/base.txt\"
+    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'initial'
+    git -C \"\$UPSTREAM_DIR\" push -q -u origin main
+
+    git clone -q -b main \"\$REMOTE_DIR\" \"\$WORK_DIR\"
+    git -C \"\$WORK_DIR\" config user.name 'Tester'
+    git -C \"\$WORK_DIR\" config user.email 'tester@example.com'
+    git -C \"\$WORK_DIR\" checkout -q -b feat/existing-pr
+    echo 'v1' > \"\$WORK_DIR/feat.txt\"
+    git -C \"\$WORK_DIR\" add . && git -C \"\$WORK_DIR\" commit -q -m 'feat v1'
+    git -C \"\$WORK_DIR\" push -q -u origin feat/existing-pr
+
+    echo 'upstream-v2' > \"\$UPSTREAM_DIR/up.txt\"
+    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'upstream v2'
+    git -C \"\$UPSTREAM_DIR\" push -q origin main
+
+    cd \"\$WORK_DIR\"
+    echo 'v2' > feat.txt
+    git add feat.txt
+    rebase_staged_changes main 'feat v2' 2>/dev/null
+    git commit -q -m 'feat v2'
+    if push_scratch_branch feat/existing-pr 2>/dev/null; then
+        echo 'push_rebased:ok'
+    else
+        echo 'push_rebased:fail'
+    fi
+")
+assert_eq "true" "$(echo "$PUSH_REBASED_CHECK" | grep -q 'push_rebased:ok' && echo true || echo false)" "push_scratch_branch updates existing remote branch cleanly after rebase"
+
 echo "--------------------------------------------------------"
 echo "Test results: $PASSED passed, $FAILED failed"
 if [ "$FAILED" -gt 0 ]; then

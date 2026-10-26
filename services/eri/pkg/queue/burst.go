@@ -531,9 +531,23 @@ func AssembleTurnPrompt(input TurnPromptInput) string {
 	return strings.TrimSpace(basePrompt)
 }
 
+// isDiscordMessage returns true if the message originated from Discord rather than HTTP (/prompt) or the scheduler.
+func isDiscordMessage(m db.Message) bool {
+	return m.AuthorID != "http-client" && m.AuthorID != "scheduler" && m.ScheduleRunID == ""
+}
+
+func isDiscordBurst(burst []db.Message) bool {
+	for _, m := range burst {
+		if !isDiscordMessage(m) {
+			return false
+		}
+	}
+	return len(burst) > 0
+}
+
 // EvaluateBurstStaleness evaluates staleness atomically across an entire message burst.
 func EvaluateBurstStaleness(burst []db.Message, stalenessTTL time.Duration, isColdThread bool, lastSessionActivity, now time.Time) (bool, string) {
-	if len(burst) == 0 {
+	if !isDiscordBurst(burst) {
 		return false, ""
 	}
 	if now.IsZero() {
@@ -563,7 +577,7 @@ func EvaluateBurstStaleness(burst []db.Message, stalenessTTL time.Duration, isCo
 
 	hasRecovered := false
 	for _, m := range burst {
-		if m.RetryCount > 0 || m.RestartCount > 0 {
+		if m.RetryCount > 0 || m.RestartCount > 0 || m.ErrorMessage == "deployment_drain" {
 			hasRecovered = true
 			break
 		}
