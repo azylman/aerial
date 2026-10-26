@@ -11,9 +11,8 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
-	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
-	"github.com/azylman/aerial/services/eri/pkg/runner"
+	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
 )
@@ -279,39 +278,13 @@ func (r *Router) handleRotate(s *discordgo.Session, i *discordgo.InteractionCrea
 }
 
 func (r *Router) closeThreadProcesses(threadID, reason string) {
-	pool := r.getPool()
-	if pool == nil {
-		return
-	}
-	seen := make(map[*runner.UnifiedProcessPool]bool)
-	for _, target := range append(pool.StatefulProcessPools(), pool.ProcessPool(), pool.LowEffortProcessPool(), pool.MediumEffortProcessPool()) {
-		if target == nil || seen[target] {
-			continue
-		}
-		seen[target] = true
-		if d, ok := target.Get(threadID); ok && d != nil {
-			if err := d.Close(); err != nil {
-				log.Printf("[Interactions] Warning: failed to close process on %s: %v", reason, err)
-			}
-		}
+	if pool := r.getPool(); pool != nil {
+		pool.CloseThreadProcesses(threadID, reason)
 	}
 }
 
 func (r *Router) drainThreadPendingMessages(ctx context.Context, targetThreadID string) {
-	if r.deps.Store == nil || targetThreadID == "" {
-		return
-	}
-	msgs, err := r.deps.Store.GetPendingOrProcessingMessages(ctx, 100)
-	if err != nil {
-		return
-	}
-	for _, m := range msgs {
-		if m.ThreadID == targetThreadID {
-			if err := r.deps.Store.UpdateMessageStatus(ctx, m.ID, db.StatusFailed, "interrupted by operator via slash command"); err != nil {
-				log.Printf("[Interactions] Warning: failed to update message status on interrupt: %v", err)
-			}
-		}
-	}
+	queue.DrainThreadPendingMessages(ctx, r.deps.Store, targetThreadID, queue.InterruptedByOperatorReason)
 }
 
 func (r *Router) handleInterrupt(s *discordgo.Session, i *discordgo.InteractionCreate, data discordgo.ApplicationCommandInteractionData) {
@@ -319,18 +292,21 @@ func (r *Router) handleInterrupt(s *discordgo.Session, i *discordgo.InteractionC
 	reset := getBoolOption(data.Options, "reset", false)
 	targetThreadID := i.ChannelID
 
-	// Terminate active running daemon and process group
-	r.closeThreadProcesses(targetThreadID, "interrupt")
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if drainQueue {
-		r.drainThreadPendingMessages(ctx, targetThreadID)
+	pool := r.getPool()
+	if pool != nil {
+		pool.InterruptThread(ctx, targetThreadID, drainQueue, reset)
 	}
-	if reset && r.deps.Store != nil {
-		if err := r.deps.Store.RotateSessionID(ctx, targetThreadID, uuid.New().String()); err != nil {
-			log.Printf("[Interactions] Warning: failed to rotate session ID on interrupt: %v", err)
+	if pool == nil || pool.Store() == nil {
+		if drainQueue {
+			r.drainThreadPendingMessages(ctx, targetThreadID)
+		}
+		if reset && r.deps.Store != nil {
+			if err := r.deps.Store.RotateSessionID(ctx, targetThreadID, uuid.New().String()); err != nil {
+				log.Printf("[Interactions] Warning: failed to rotate session ID on interrupt: %v", err)
+			}
 		}
 	}
 

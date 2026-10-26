@@ -115,7 +115,11 @@ func (te *turnExecution) handleRetryBackoff(attempt, maxAttempts int, errDetail,
 	select {
 	case <-time.After(backoff):
 		return false
-	case <-te.pool.ctx.Done():
+	case <-te.turnDone():
+		if te.isInterrupted() {
+			te.finalizeInterruptedTurn(currentModel)
+			return true
+		}
 		metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
 		te.cancelBurstOnShutdown("failed", currentModel, true)
 		return true
@@ -215,14 +219,15 @@ func (te *turnExecution) handleQuotaPause(errDetail, stderr, currentModel, burst
 			if te.pool != nil && te.pool.cfg.RetryDelayOverride > 0 {
 				delay = te.pool.cfg.RetryDelayOverride
 			}
-			var cancelChan <-chan struct{}
-			if te.pool != nil && te.pool.ctx != nil {
-				cancelChan = te.pool.ctx.Done()
-			}
+			cancelChan := te.turnDone()
 			select {
 			case <-time.After(delay):
 				return true
 			case <-cancelChan:
+				if te.isInterrupted() {
+					te.finalizeInterruptedTurn(currentModel)
+					return false
+				}
 				log.Printf("[WorkerPool] Context cancelled during capacity blip backoff for thread %s", te.threadID)
 				te.stopIndicators()
 				te.cancelBurstOnShutdown("pending", currentModel, false)

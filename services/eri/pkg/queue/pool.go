@@ -38,6 +38,7 @@ const (
 	ContinuationPromptTemplate  = "Your previous execution timed out or was interrupted while working. Please inspect where you left off in the conversation transcript and continue the task to completion.\n\nOriginal user request:\n%s"
 	MaxYieldTrapAutoResumes     = 2
 	YieldTrapResumePrompt       = "[SYSTEM NOTICE]: Your previous turn yielded prematurely while background task(s) were still running, causing the runtime to terminate them. Inspect current status (check git status, PR state, or process logs) and continue your workflow to completion. Do NOT end the turn with waiting text."
+	InterruptedByOperatorReason = "interrupted by operator via slash command"
 )
 
 func sanitizeErrorText(errStr string) string {
@@ -125,6 +126,7 @@ type WorkerPool struct {
 	sessionMgr        *session.Manager
 	mu                sync.Mutex
 	threadChs         map[string]*threadWorkerState
+	activeTurns       map[string]*turnExecution
 	wg                sync.WaitGroup
 	ctx               context.Context
 	cancel            context.CancelFunc
@@ -419,7 +421,8 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &WorkerPool{
 		appCfg: resolvedAppCfg, cfg: cfg, pools: pools, voiceProcessPool: cfg.VoiceProcessPool,
-		sessionMgr: cfg.SessionManager, threadChs: make(map[string]*threadWorkerState), ctx: ctx, cancel: cancel,
+		sessionMgr: cfg.SessionManager, threadChs: make(map[string]*threadWorkerState),
+		activeTurns: make(map[string]*turnExecution), ctx: ctx, cancel: cancel,
 		webhookDispatcher: cfg.WebhookDispatcher, createThreadFn: cfg.CreateThreadFunc,
 	}
 
@@ -813,6 +816,165 @@ func (p *WorkerPool) MediumEffortProcessPool() *runner.UnifiedProcessPool {
 // AgentPool returns the configured primary runner.AgentPool.
 func (p *WorkerPool) AgentPool() runner.AgentPool {
 	return p.Pool(PoolKey{Ephemeral: false, Effort: "high"})
+}
+
+func (p *WorkerPool) registerActiveTurn(scopeKey string, te *turnExecution) {
+	p.mu.Lock()
+	if p.activeTurns == nil {
+		p.activeTurns = make(map[string]*turnExecution)
+	}
+	p.activeTurns[scopeKey] = te
+	p.mu.Unlock()
+}
+
+func (p *WorkerPool) unregisterActiveTurn(scopeKey string, te *turnExecution) {
+	p.mu.Lock()
+	if p.activeTurns[scopeKey] == te {
+		delete(p.activeTurns, scopeKey)
+	}
+	p.mu.Unlock()
+}
+
+func isScopeKeyForThread(scopeKey, threadID string) bool {
+	return scopeKey == threadID || strings.HasSuffix(scopeKey, ":"+threadID)
+}
+
+func logInterruptWarning(op string, err error) {
+	if err != nil {
+		log.Printf("[WorkerPool] Warning on %s: %v", op, err)
+	}
+}
+
+// CloseThreadProcesses marks any active turn for threadID as interrupted, cancels its per-turn context,
+// and terminates any active StreamingDaemon processes for threadID across all pools.
+func (p *WorkerPool) CloseThreadProcesses(threadID, reason string) {
+	if p == nil || threadID == "" {
+		return
+	}
+	p.mu.Lock()
+	var active []*turnExecution
+	for scopeKey, te := range p.activeTurns {
+		if te != nil && (te.threadID == threadID || isScopeKeyForThread(scopeKey, threadID)) {
+			te.interrupted.Store(true)
+			active = append(active, te)
+		}
+	}
+	p.mu.Unlock()
+
+	for _, te := range active {
+		te.cancelTurn()
+	}
+
+	for _, target := range append(p.StatefulProcessPools(), p.ProcessPool(), p.LowEffortProcessPool(), p.MediumEffortProcessPool()) {
+		if target != nil {
+			if d, ok := target.Get(threadID); ok && d != nil {
+				logInterruptWarning(reason, d.Close())
+			}
+		}
+	}
+}
+
+// DrainThreadPendingMessages marks all pending or processing DB messages for targetThreadID as FAILED.
+func DrainThreadPendingMessages(ctx context.Context, store db.Store, targetThreadID, reason string) {
+	if store == nil || targetThreadID == "" {
+		return
+	}
+	msgs, err := store.GetPendingOrProcessingMessages(ctx, 100)
+	if err != nil {
+		return
+	}
+	for _, m := range msgs {
+		if m.ThreadID == targetThreadID {
+			logInterruptWarning("drain pending message", store.UpdateMessageStatus(ctx, m.ID, db.StatusFailed, reason))
+		}
+	}
+}
+
+func (p *WorkerPool) latchInterruptAndDrainLocked(threadID string, drainQueue bool) ([]*turnExecution, []string, []db.Message) {
+	var active []*turnExecution
+	var burstMsgIDs []string
+	var drainedMsgs []db.Message
+
+	for scopeKey, te := range p.activeTurns {
+		if te == nil || (te.threadID != threadID && !isScopeKeyForThread(scopeKey, threadID)) {
+			continue
+		}
+		te.interrupted.Store(true)
+		active = append(active, te)
+
+		te.activeSessionMu.Lock()
+		for i := range te.burst {
+			burstMsgIDs = append(burstMsgIDs, te.burst[i].ID)
+		}
+		if drainQueue && len(te.trailingMsgs) > 0 {
+			drainedMsgs = append(drainedMsgs, te.trailingMsgs...)
+			te.trailingMsgs, te.trailingInfos = nil, nil
+		}
+		te.activeSessionMu.Unlock()
+	}
+
+	if drainQueue {
+		for scopeKey, state := range p.threadChs {
+			if !isScopeKeyForThread(scopeKey, threadID) || state == nil {
+				continue
+			}
+		drainCh:
+			for {
+				select {
+				case m := <-state.ch:
+					metrics.QueueDepth.Dec()
+					drainedMsgs = append(drainedMsgs, m)
+				default:
+					break drainCh
+				}
+			}
+		}
+	}
+	return active, burstMsgIDs, drainedMsgs
+}
+
+// InterruptThread interrupts an active turn for threadID in 4 ordered steps:
+// 1. Latch in-memory interrupt gate on active turns and drain queued channel/trailing messages.
+// 2. Commit terminal FAILED status (and optional session rotation) in Postgres.
+// 3. Cancel per-turn context to wake any in-flight execution or retry/capacity sleep.
+// 4. Terminate active StreamingDaemon processes for threadID.
+func (p *WorkerPool) InterruptThread(ctx context.Context, threadID string, drainQueue bool, reset ...bool) {
+	if p == nil || threadID == "" {
+		return
+	}
+	shouldReset := len(reset) > 0 && reset[0]
+
+	// Step 1: Latch In-Memory Interrupt Gate & Drain Channel Buffer under p.mu
+	p.mu.Lock()
+	active, burstMsgIDs, drainedMsgs := p.latchInterruptAndDrainLocked(threadID, drainQueue)
+	p.mu.Unlock()
+
+	// Step 2: Commit Terminal FAILED State & Optional Session Rotation in Postgres
+	if store := p.Store(); store != nil {
+		for _, id := range burstMsgIDs {
+			logInterruptWarning("interrupt active message", store.UpdateMessageStatus(ctx, id, db.StatusFailed, InterruptedByOperatorReason))
+		}
+		for _, m := range drainedMsgs {
+			logInterruptWarning("interrupt drained message", store.UpdateMessageStatus(ctx, m.ID, db.StatusFailed, InterruptedByOperatorReason))
+			if p.cfg.OnMessageCompleted != nil {
+				p.cfg.OnMessageCompleted(m, db.StatusFailed)
+			}
+		}
+		if drainQueue {
+			DrainThreadPendingMessages(ctx, store, threadID, InterruptedByOperatorReason)
+		}
+		if shouldReset {
+			logInterruptWarning("interrupt rotate session", store.RotateSessionID(ctx, threadID, uuid.New().String()))
+		}
+	}
+
+	// Step 3: Cancel Per-Turn Context
+	for _, te := range active {
+		te.cancelTurn()
+	}
+
+	// Step 4: Terminate Daemon Process Group
+	p.CloseThreadProcesses(threadID, "interrupt")
 }
 
 // MarkDirty notifies the process pools to mark active daemons dirty and evict idle daemons.
