@@ -120,10 +120,62 @@ func findClosingSingleQuote(s string, start int) int {
 func unescapeBracedQuotes(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
-	depth := 0
 	for i := 0; i < len(s); i++ {
+		if qTok := quoteTokenAt(s, i, false); qTok != "" {
+			if isFStringPrefix(s, i) {
+				i = scanFString(s, i, qTok, &b)
+			} else {
+				i = copyQuotedString(s, i, qTok, &b)
+			}
+			continue
+		}
+		if s[i] == '\\' && i+1 < len(s) {
+			b.WriteByte('\\')
+			i++
+			b.WriteByte(s[i])
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// scanFString scans a Python f-string literal and unescapes \" only inside {...} interpolation expressions.
+func scanFString(s string, start int, closeTok string, b *strings.Builder) int {
+	outQuote := closeTok
+	if closeTok == `\"` {
+		outQuote = `"`
+	}
+	b.WriteString(outQuote)
+	depth := 0
+	for i := start + len(closeTok); i < len(s); i++ {
+		if depth == 0 && strings.HasPrefix(s[i:], closeTok) {
+			b.WriteString(outQuote)
+			return i + len(closeTok) - 1
+		}
+		if depth > 0 {
+			if qTok := quoteTokenAt(s, i, true); qTok != "" {
+				if isFStringPrefix(s, i) {
+					i = scanFString(s, i, qTok, b)
+				} else {
+					i = copyQuotedString(s, i, qTok, b)
+				}
+				continue
+			}
+		}
+		if s[i] == '\\' && i+1 < len(s) {
+			b.WriteByte('\\')
+			i++
+			b.WriteByte(s[i])
+			continue
+		}
 		switch s[i] {
 		case '{':
+			if depth == 0 && i+1 < len(s) && s[i+1] == '{' {
+				b.WriteString("{{")
+				i++
+				continue
+			}
 			depth++
 			b.WriteByte('{')
 		case '}':
@@ -131,18 +183,65 @@ func unescapeBracedQuotes(s string) string {
 				depth--
 			}
 			b.WriteByte('}')
-		case '\\':
-			if depth > 0 && i+1 < len(s) && s[i+1] == '"' {
-				b.WriteByte('"')
-				i++
-				continue
-			}
-			b.WriteByte('\\')
 		default:
 			b.WriteByte(s[i])
 		}
 	}
-	return b.String()
+	return len(s) - 1
+}
+
+func copyQuotedString(s string, start int, closeTok string, b *strings.Builder) int {
+	outQuote := closeTok
+	if closeTok == `\"` {
+		outQuote = `"`
+	}
+	b.WriteString(outQuote)
+	for i := start + len(closeTok); i < len(s); i++ {
+		if strings.HasPrefix(s[i:], closeTok) {
+			b.WriteString(outQuote)
+			return i + len(closeTok) - 1
+		}
+		if s[i] == '\\' && i+1 < len(s) {
+			b.WriteByte('\\')
+			i++
+			b.WriteByte(s[i])
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return len(s) - 1
+}
+
+func quoteTokenAt(s string, i int, allowEscapedDouble bool) string {
+	if allowEscapedDouble && strings.HasPrefix(s[i:], `\"`) {
+		return `\"`
+	}
+	if s[i] == '"' {
+		return `"`
+	}
+	if strings.HasPrefix(s[i:], `'\''`) {
+		return `'\''`
+	}
+	return ""
+}
+
+func isFStringPrefix(s string, quoteIdx int) bool {
+	if quoteIdx >= 2 && isFAndR(s[quoteIdx-2], s[quoteIdx-1]) {
+		return quoteIdx == 2 || !isIdentChar(s[quoteIdx-3])
+	}
+	if quoteIdx >= 1 && (s[quoteIdx-1]|0x20) == 'f' {
+		return quoteIdx == 1 || !isIdentChar(s[quoteIdx-2])
+	}
+	return false
+}
+
+func isFAndR(a, b byte) bool {
+	al, bl := a|0x20, b|0x20
+	return (al == 'f' && bl == 'r') || (al == 'r' && bl == 'f')
+}
+
+func isIdentChar(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
 }
 
 func isTaskLogPath(s string) bool {
