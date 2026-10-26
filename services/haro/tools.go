@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"regexp"
@@ -260,13 +261,13 @@ type ListSchedulesOutput struct {
 func FormatSchedulesSummary(out ListSchedulesOutput) string {
 	var lines []string
 	for _, r := range out.Recurring {
-		lines = append(lines, fmt.Sprintf("[RECURRING] ID: %s | Cron: %s | Channel: %s | Effort: %s | Next: %s | Prompt: %s", r.ID, r.CronExpr, r.TargetID, r.Effort, r.NextRunAt.Format(time.RFC3339), r.Prompt))
+		lines = append(lines, fmt.Sprintf("[RECURRING] ID: %s | Title: %s | Cron: %s | Channel: %s | Effort: %s | Next: %s", r.ID, r.TitlePrefix, r.CronExpr, r.TargetID, r.Effort, r.NextRunAt.Format(time.RFC3339)))
 	}
 	for _, o := range out.OneShot {
-		lines = append(lines, fmt.Sprintf("[ONE_SHOT] ID: %s | Target: %s | Effort: %s | RunAt: %s | Prompt: %s", o.ID, o.ThreadID, o.Effort, o.RunAt.Format(time.RFC3339), o.Prompt))
+		lines = append(lines, fmt.Sprintf("[ONE_SHOT] ID: %s | Target: %s | Effort: %s | RunAt: %s", o.ID, o.ThreadID, o.Effort, o.RunAt.Format(time.RFC3339)))
 	}
 	for _, h := range out.Heartbeats {
-		lines = append(lines, fmt.Sprintf("[HEARTBEAT] ID: %s | Cron: %s | Channel: %s | Effort: %s | Next: %s | Prompt: %s", h.ID, h.CronExpr, h.TargetID, h.Effort, h.NextRunAt.Format(time.RFC3339), h.Prompt))
+		lines = append(lines, fmt.Sprintf("[HEARTBEAT] ID: %s | Title: %s | Cron: %s | Channel: %s | Effort: %s | Next: %s", h.ID, h.TitlePrefix, h.CronExpr, h.TargetID, h.Effort, h.NextRunAt.Format(time.RFC3339)))
 	}
 	if len(lines) == 0 {
 		return "No active schedules found."
@@ -297,9 +298,52 @@ func (h *ToolHandler) ListSchedules(ctx context.Context, args ListSchedulesArgs)
 	if heartbeats == nil {
 		heartbeats = []HeartbeatSchedule{}
 	}
+	for i := range crons {
+		crons[i].Prompt = ""
+	}
+	for i := range oneShots {
+		oneShots[i].Prompt = ""
+	}
+	for i := range heartbeats {
+		heartbeats[i].Prompt = ""
+	}
 	out := ListSchedulesOutput{Recurring: crons, OneShot: oneShots, Heartbeats: heartbeats}
 	out.Summary = FormatSchedulesSummary(out)
 	return out, nil
+}
+
+type GetScheduleArgs struct {
+	ScheduleID string `json:"schedule_id" jsonschema:"The ID of the schedule to retrieve."`
+}
+
+type GetScheduleOutput struct {
+	Type      string             `json:"type"`
+	Recurring *CronSchedule      `json:"recurring,omitempty"`
+	OneShot   *OneShotSchedule   `json:"one_shot,omitempty"`
+	Heartbeat *HeartbeatSchedule `json:"heartbeat,omitempty"`
+}
+
+func (h *ToolHandler) GetSchedule(ctx context.Context, args GetScheduleArgs) (GetScheduleOutput, error) {
+	id := strings.TrimSpace(args.ScheduleID)
+	if id == "" {
+		return GetScheduleOutput{}, fmt.Errorf("'schedule_id' is required")
+	}
+	if c, err := GetCronSchedule(ctx, h.db, id); err == nil {
+		return GetScheduleOutput{Type: "recurring", Recurring: c}, nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return GetScheduleOutput{}, fmt.Errorf("failed to query recurring schedule %s: %w", id, err)
+	}
+	if o, err := GetOneShotSchedule(ctx, h.db, id); err == nil {
+		return GetScheduleOutput{Type: "one_shot", OneShot: o}, nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return GetScheduleOutput{}, fmt.Errorf("failed to query one-shot schedule %s: %w", id, err)
+	}
+	if hb, err := GetHeartbeatSchedule(ctx, h.db, id); err == nil {
+		return GetScheduleOutput{Type: "heartbeat", Heartbeat: hb}, nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return GetScheduleOutput{}, fmt.Errorf("failed to query heartbeat schedule %s: %w", id, err)
+	}
+	return GetScheduleOutput{}, fmt.Errorf("schedule with ID %q not found", id)
 }
 
 type CancelScheduleArgs struct {

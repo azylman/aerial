@@ -114,6 +114,14 @@ func (s *Server) registerTools() {
 	})
 
 	mcp.AddTool(s.mcpServer, &mcp.Tool{
+		Name:        "get_schedule",
+		Description: "Get full details (including prompt) for a single recurring, one-shot, or heartbeat schedule by schedule ID.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args GetScheduleArgs) (*mcp.CallToolResult, GetScheduleOutput, error) {
+		out, err := s.handler.GetSchedule(ctx, args)
+		return nil, out, err
+	})
+
+	mcp.AddTool(s.mcpServer, &mcp.Tool{
 		Name:        "cancel_schedule",
 		Description: "Cancel and delete an existing schedule by schedule ID.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args CancelScheduleArgs) (*mcp.CallToolResult, CancelScheduleOutput, error) {
