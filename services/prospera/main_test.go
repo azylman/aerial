@@ -36,6 +36,11 @@ func TestRunApp_Validation(t *testing.T) {
 			cfg:     &Config{Port: "4019", DatabaseURL: "invalid://url"},
 			wantErr: true,
 		},
+		{
+			name:    "server listen error",
+			cfg:     &Config{Port: "-1", DatabaseURL: "sqlite://:memory:"},
+			wantErr: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -143,7 +148,7 @@ func TestRoutes_Health(t *testing.T) {
 	}
 }
 
-func TestRoutes_CoverageFlush(t *testing.T) {
+func TestRoutes_HTTPMethods(t *testing.T) {
 	t.Parallel()
 	store := setUpTestStore(t)
 	handler := setupRoutes(&Config{}, store)
@@ -371,6 +376,77 @@ func TestMain_Execution(t *testing.T) {
 
 			if exited != tc.wantExit {
 				t.Errorf("main() exited = %v, want %v", exited, tc.wantExit)
+			}
+		})
+	}
+}
+
+func TestRoutes_BridgePreview(t *testing.T) {
+	t.Parallel()
+	store := setUpTestStore(t)
+	handler := setupRoutes(&Config{}, store)
+
+	tests := []struct {
+		name       string
+		body       string
+		wantStatus int
+	}{
+		{
+			name:       "default action",
+			body:       `{"action":""}`,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "malformed JSON",
+			body:       `{malformed`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "validate signature",
+			body:       `{"action":"validate_signature","auth_token":"token","full_url":"https://test","form":{"CallSid":"CA123"},"signature":"sig"}`,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "stream token",
+			body:       `{"action":"stream_token","call_id":"c123","ttl_seconds":30}`,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "twiml",
+			body:       `{"action":"twiml","ws_url":"wss://test","greeting":"hello","callback_url":"https://cb"}`,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "amd eval",
+			body:       `{"action":"amd_eval","rms":0.05,"elapsed_ms":20,"answered_by":"human"}`,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "consult",
+			body:       `{"action":"consult","query":"test"}`,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "session mgr",
+			body:       `{"action":"session_mgr","call_id":"c123","steer_message":"msg","steer_mode":"guidance","provider_sid":"CA123","answered_by":"human"}`,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "twilio rest",
+			body:       `{"action":"twilio_rest","to_number":"+15105550199","from_number":"+15105550100","twiml_url":"https://test","provider_sid":"CA123","sms_body":"hi","area_code":"510","callback_url":"https://cb","recording_url":"https://api.twilio.com/rec"}`,
+			wantStatus: http.StatusOK,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req := httptest.NewRequest(http.MethodPost, "/internal/bridge-preview", bytes.NewBufferString(tc.body))
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("POST /internal/bridge-preview status = %d, want %d", rec.Code, tc.wantStatus)
 			}
 		})
 	}
