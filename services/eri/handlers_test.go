@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
+	"github.com/azylman/aerial/services/eri/pkg/delivery"
 	"github.com/azylman/aerial/services/eri/pkg/discord"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
@@ -47,6 +49,23 @@ func TestHandlePromptValidation(t *testing.T) {
 	closedStore := dbtest.NewFakeStore()
 	_ = closedStore.Close()
 
+	mockSess, _ := discordgo.New("Bot fake-token")
+	mockSess.State = discordgo.NewState()
+	mockSess.State.GuildAdd(&discordgo.Guild{
+		ID: "guild-1",
+		Channels: []*discordgo.Channel{
+			{ID: "1564150557705248879", Name: "prospera"},
+		},
+	})
+	prosperaPromptPool := queue.New(nil, queue.WorkerPoolConfig{
+		Store:          store,
+		DiscordSession: mockSess,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return `{"event":"result","result":{"status":"SUCCESS","response":"mock"}}`, "", 0, nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+	})
+
 	for _, tc := range []struct {
 		name       string
 		method     string
@@ -63,6 +82,9 @@ func TestHandlePromptValidation(t *testing.T) {
 		{"whitespace prompt", http.MethodPost, store, pool, strings.NewReader(`{"prompt":"   "}`), http.StatusBadRequest, "Invalid payload: 'prompt' field is required and cannot be empty"},
 		{"missing channel_id", http.MethodPost, store, pool, strings.NewReader(`{"prompt":"hello"}`), http.StatusBadRequest, "Invalid payload: 'channel_id' field is required and cannot be empty"},
 		{"non-snowflake channel_id", http.MethodPost, store, pool, strings.NewReader(`{"prompt":"hello","channel_id":"not-a-snowflake"}`), http.StatusBadRequest, "Invalid payload: 'channel_id' must be a valid numeric Discord snowflake"},
+		{"channel name resolution prospera", http.MethodPost, store, prosperaPromptPool, strings.NewReader(`{"prompt":"hello","channel_id":"prospera"}`), http.StatusAccepted, "1564150557705248879"},
+		{"channel name resolution hash prospera", http.MethodPost, store, prosperaPromptPool, strings.NewReader(`{"prompt":"hello","channel_id":"#prospera"}`), http.StatusAccepted, "1564150557705248879"},
+		{"channel name unresolvable falls back to snowflake validation", http.MethodPost, store, prosperaPromptPool, strings.NewReader(`{"prompt":"hello","channel_id":"unknown-channel"}`), http.StatusBadRequest, "must be a valid numeric Discord snowflake"},
 		{"invalid session_id", http.MethodPost, store, pool, strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873","session_id":"invalid:colon"}`), http.StatusBadRequest, "session_id"},
 		{"ephemeral true with high effort rejected", http.MethodPost, store, pool, strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873","ephemeral":true,"effort":"high"}`), http.StatusBadRequest, "ephemeral: true cannot be combined with high effort"},
 		{"ephemeral true with default high effort rejected", http.MethodPost, store, pool, strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873","ephemeral":true}`), http.StatusBadRequest, "ephemeral: true cannot be combined with high effort"},
@@ -207,6 +229,24 @@ func TestHandlePrompt_SkipIfActive(t *testing.T) {
 }
 
 func TestHandleDirectMessage(t *testing.T) {
+	mockSess, _ := discordgo.New("Bot fake-token")
+	mockSess.State = discordgo.NewState()
+	mockSess.State.GuildAdd(&discordgo.Guild{
+		ID: "guild-1",
+		Channels: []*discordgo.Channel{
+			{ID: "1564150557705248879", Name: "prospera"},
+		},
+	})
+
+	prosperaPool := queue.New(nil, queue.WorkerPoolConfig{
+		DiscordSession: mockSess,
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return nil
+		},
+		DeliveryWithAttachmentsFunc: func(s *discordgo.Session, channelID, text string, atts []*delivery.Attachment) error {
+			return nil
+		},
+	})
 	restErrPool := queue.New(nil, queue.WorkerPoolConfig{
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			return &discordgo.RESTError{Response: &http.Response{StatusCode: 403}}
@@ -217,6 +257,8 @@ func TestHandleDirectMessage(t *testing.T) {
 			return errors.New("cannot send messages to this thread")
 		},
 	})
+
+	oversizedB64 := base64.StdEncoding.EncodeToString(make([]byte, 8*1024*1024+1))
 
 	for _, tc := range []struct {
 		name       string
@@ -232,7 +274,16 @@ func TestHandleDirectMessage(t *testing.T) {
 		{"invalid JSON", http.MethodPost, &queue.WorkerPool{}, strings.NewReader("{invalid-json"), http.StatusBadRequest, "Invalid JSON payload"},
 		{"missing channel_id", http.MethodPost, &queue.WorkerPool{}, strings.NewReader(`{"content":"hello"}`), http.StatusBadRequest, "Invalid payload: 'channel_id' field is required and cannot be empty"},
 		{"non-snowflake channel_id", http.MethodPost, &queue.WorkerPool{}, strings.NewReader(`{"channel_id":"not-a-snowflake","content":"hello"}`), http.StatusBadRequest, "Invalid payload: 'channel_id' must be a valid numeric Discord snowflake"},
-		{"empty content", http.MethodPost, &queue.WorkerPool{}, strings.NewReader(`{"channel_id":"1542423172400291873","content":"  "}`), http.StatusBadRequest, "Invalid payload: 'content' field is required and cannot be empty"},
+		{"unresolvable channel name", http.MethodPost, prosperaPool, strings.NewReader(`{"channel_id":"unknown-channel","content":"hello"}`), http.StatusBadRequest, "Invalid payload: 'channel_id' must be a valid numeric Discord snowflake"},
+		{"resolve channel name prospera", http.MethodPost, prosperaPool, strings.NewReader(`{"channel_id":"prospera","content":"hello"}`), http.StatusOK, "1564150557705248879"},
+		{"resolve hash channel name prospera", http.MethodPost, prosperaPool, strings.NewReader(`{"channel_id":"#prospera","content":"hello"}`), http.StatusOK, "1564150557705248879"},
+		{"empty content without attachments", http.MethodPost, &queue.WorkerPool{}, strings.NewReader(`{"channel_id":"1542423172400291873","content":"  "}`), http.StatusBadRequest, "Invalid payload: 'content' field is required and cannot be empty"},
+		{"too many attachments", http.MethodPost, prosperaPool, strings.NewReader(`{"channel_id":"1542423172400291873","content":"hi","attachments":[{"filename":"1","content_base64":"YQ=="},{"filename":"2","content_base64":"YQ=="},{"filename":"3","content_base64":"YQ=="},{"filename":"4","content_base64":"YQ=="},{"filename":"5","content_base64":"YQ=="},{"filename":"6","content_base64":"YQ=="},{"filename":"7","content_base64":"YQ=="},{"filename":"8","content_base64":"YQ=="},{"filename":"9","content_base64":"YQ=="},{"filename":"10","content_base64":"YQ=="},{"filename":"11","content_base64":"YQ=="}]}`), http.StatusBadRequest, "Too many attachments"},
+		{"empty attachment filename", http.MethodPost, prosperaPool, strings.NewReader(`{"channel_id":"1542423172400291873","attachments":[{"filename":"   ","content_base64":"YQ=="}]}`), http.StatusBadRequest, "Invalid attachment: 'filename' is required"},
+		{"invalid base64", http.MethodPost, prosperaPool, strings.NewReader(`{"channel_id":"1542423172400291873","attachments":[{"filename":"a.txt","content_base64":"not@base64"}]}`), http.StatusBadRequest, "Invalid attachment base64"},
+		{"empty base64 decoded data", http.MethodPost, prosperaPool, strings.NewReader(`{"channel_id":"1542423172400291873","attachments":[{"filename":"a.txt","content_base64":""}]}`), http.StatusBadRequest, "Invalid attachment: payload is empty"},
+		{"oversized attachment", http.MethodPost, prosperaPool, strings.NewReader(`{"channel_id":"1542423172400291873","attachments":[{"filename":"huge.bin","content_base64":"` + oversizedB64 + `"}]}`), http.StatusBadRequest, "exceeds maximum size"},
+		{"attachment with empty content allowed", http.MethodPost, prosperaPool, strings.NewReader(`{"channel_id":"1542423172400291873","attachments":[{"filename":"audio.wav","content_base64":"UklGRg=="}]}`), http.StatusOK, "sent"},
 		{"discord session not connected", http.MethodPost, &queue.WorkerPool{}, strings.NewReader(`{"channel_id":"1542423172400291873","content":"hello"}`), http.StatusServiceUnavailable, "Discord session not connected"},
 		{"discord client RESTError", http.MethodPost, restErrPool, strings.NewReader(`{"channel_id":"1542423172400291873","content":"hello"}`), http.StatusForbidden, "Discord client error"},
 		{"discord client cannot send", http.MethodPost, sendErrPool, strings.NewReader(`{"channel_id":"1542423172400291873","content":"hello"}`), http.StatusBadRequest, "Discord client error"},
@@ -267,6 +318,23 @@ func TestHandleDirectMessage(t *testing.T) {
 		w2 := runHTTP(handler, http.MethodPost, "/discord/message", strings.NewReader(`{"thread_id":"1542423172400291874","text":"Deploy failed!"}`))
 		if w2.Code != http.StatusOK || capturedChannelID != "1542423172400291874" || capturedText != "Deploy failed!" {
 			t.Fatalf("unexpected fallback: code=%d, ch=%q, txt=%q", w2.Code, capturedChannelID, capturedText)
+		}
+
+		w3 := runHTTP(handler, http.MethodPost, "/discord/message", strings.NewReader(`{"channel_id":"1542423172400291873","thread_id":"1542423172400291875","content":"Priority check"}`))
+		if w3.Code != http.StatusOK || capturedChannelID != "1542423172400291875" || capturedText != "Priority check" {
+			t.Fatalf("unexpected thread priority: code=%d, ch=%q, txt=%q", w3.Code, capturedChannelID, capturedText)
+		}
+
+		var capturedAtts []*delivery.Attachment
+		attHandler := handleDirectMessage(queue.New(nil, queue.WorkerPoolConfig{
+			DeliveryWithAttachmentsFunc: func(s *discordgo.Session, channelID, text string, atts []*delivery.Attachment) error {
+				capturedChannelID, capturedText, capturedAtts = channelID, text, atts
+				return nil
+			},
+		}))
+		wAtt := runHTTP(attHandler, http.MethodPost, "/discord/message", strings.NewReader(`{"channel_id":"1542423172400291873","content":"Voicemail received","attachments":[{"filename":"test.wav","content_type":"audio/wav","content_base64":"UklGRg=="}]}`))
+		if wAtt.Code != http.StatusOK || len(capturedAtts) != 1 || capturedAtts[0].Filename != "test.wav" || string(capturedAtts[0].Data) != "RIFF" {
+			t.Fatalf("unexpected attachment delivery: code=%d, atts=%+v", wAtt.Code, capturedAtts)
 		}
 	})
 

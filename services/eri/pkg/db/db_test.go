@@ -551,3 +551,33 @@ func TestGetActiveTasks_FiltersAndOrdering(t *testing.T) {
 		})
 	}
 }
+
+func TestSchemaContainsVoiceTables(t *testing.T) {
+	t.Parallel()
+	schemaBytes, err := os.ReadFile("schema.sql")
+	if err != nil {
+		t.Fatalf("failed to read schema.sql: %v", err)
+	}
+	schema := string(schemaBytes)
+
+	tests := []struct {
+		name       string
+		targetText string
+	}{
+		{name: "voice_calls table", targetText: "CREATE TABLE IF NOT EXISTS voice_calls"},
+		{name: "voice_messages table", targetText: "CREATE TABLE IF NOT EXISTS voice_messages"},
+		{name: "idx_voice_calls_to_started", targetText: "idx_voice_calls_to_started"},
+		{name: "idx_voice_calls_state", targetText: "idx_voice_calls_state"},
+		{name: "idx_voice_messages_created", targetText: "idx_voice_messages_created"},
+		{name: "e164 regex check", targetText: "CHECK (from_number ~ '^\\+[1-9][0-9]{1,14}$')"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if !strings.Contains(schema, tc.targetText) {
+				t.Fatalf("schema.sql missing expected definition %q", tc.targetText)
+			}
+		})
+	}
+}

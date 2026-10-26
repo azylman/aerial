@@ -500,6 +500,19 @@ func (p *WorkerPool) getDiscordSession() *discordgo.Session {
 
 func (p *WorkerPool) DiscordSession() *discordgo.Session { return p.getDiscordSession() }
 
+// ResolveChannelID resolves a channel name (e.g. "prospera" or "#prospera") or numeric snowflake ID to a channel ID.
+func (p *WorkerPool) ResolveChannelID(nameOrID string) (string, error) {
+	trimmed := strings.TrimSpace(nameOrID)
+	trimmed = strings.TrimPrefix(trimmed, "#")
+	if IsNumericSnowflake(trimmed) {
+		return trimmed, nil
+	}
+	if p == nil {
+		return "", errors.New("worker pool is nil")
+	}
+	return delivery.ResolveChannelByNameOrID(p.DiscordSession(), nameOrID)
+}
+
 func (p *WorkerPool) DeliverDirect(channelID, text string) error {
 	if p == nil {
 		return errors.New("worker pool is nil")
@@ -512,6 +525,23 @@ func (p *WorkerPool) DeliverDirect(channelID, text string) error {
 		return p.cfg.DeliveryFunc(sess, channelID, text)
 	}
 	return delivery.SendMessage(sess, channelID, text)
+}
+
+// DeliverDirectWithAttachments delivers text and memory-safe attachments directly to a channel or thread.
+func (p *WorkerPool) DeliverDirectWithAttachments(channelID, text string, attachments []*delivery.Attachment) error {
+	if len(attachments) == 0 {
+		return p.DeliverDirect(channelID, text)
+	}
+	if p == nil {
+		return errors.New("worker pool is nil")
+	}
+	if p.cfg.DeliveryWithAttachmentsFunc != nil {
+		return p.cfg.DeliveryWithAttachmentsFunc(p.DiscordSession(), channelID, text, attachments)
+	}
+	if p.DiscordSession() == nil {
+		return errors.New("discord session is not connected")
+	}
+	return delivery.SendMessageWithAttachments(p.DiscordSession(), channelID, text, attachments)
 }
 
 func (p *WorkerPool) DeliverStatusWidget(req discord.StatusWidgetRequest) (string, error) {
