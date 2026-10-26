@@ -586,7 +586,7 @@ func (s *RouterServer) processNomadEvaluationEvent(ctx context.Context, rawPaylo
 	}
 	eval := evalPayload.Evaluation
 	if strings.EqualFold(eval.Status, "blocked") {
-		if !hasNonTransientPlacementFailure(eval.FailedTGAllocs, eval.QueuedAllocations) || s.isNomadJobHealthy(ctx, eval.JobID) {
+		if !hasNonTransientPlacementFailure(eval.FailedTGAllocs, eval.QueuedAllocations) || s.isNomadEvalResolved(ctx, eval.ID) || s.isNomadJobHealthy(ctx, eval.JobID) {
 			return nil
 		}
 		return s.HandleNomadJobFailure(ctx, eval.JobID, eval.ID, eval.Status, formatFailedTGAllocs(eval.StatusDescription, eval.FailedTGAllocs))
@@ -876,6 +876,18 @@ func (s *RouterServer) isNomadJobHealthy(ctx context.Context, job string) bool {
 func (s *RouterServer) isNomadBatchTemplateHealthy(ctx context.Context, job string) bool {
 	kind, status, _, stop := s.classifyNomadJob(ctx, job)
 	return kind == NomadJobKindBatchTemplate && strings.EqualFold(status, "running") && !stop
+}
+
+// isNomadEvalResolved queries Nomad for the live status of an evaluation and returns true
+// when the evaluation has already transitioned out of the "blocked" state.
+func (s *RouterServer) isNomadEvalResolved(ctx context.Context, evalID string) bool {
+	var liveEval struct {
+		Status string `json:"Status"`
+	}
+	if !s.getNomadJSON(ctx, "/v1/evaluation/"+strings.TrimSpace(evalID), &liveEval) {
+		return false
+	}
+	return liveEval.Status != "" && !strings.EqualFold(liveEval.Status, "blocked")
 }
 
 // extractStringSliceFromMetadata extracts a slice of strings stored under key in metadata JSONB.
