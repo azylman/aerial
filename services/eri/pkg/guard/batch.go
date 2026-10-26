@@ -41,6 +41,8 @@ var (
 	gitStatusFormatFlags = map[string]bool{"--short": true, "--porcelain": true, "--long": true, "--help": true, "-h": true, "-v": true, "--verbose": true}
 	gitDiffSummaryFlags  = map[string]bool{"--stat": true, "--shortstat": true, "--numstat": true, "--summary": true, "--name-only": true, "--name-status": true, "--dirstat": true, "--check": true, "--quiet": true, "--exit-code": true, "-s": true, "--no-patch": true, "-h": true, "--help": true}
 	gitDiffValFlags      = map[string]bool{"-U": true, "--unified": true, "-O": true, "-S": true, "-G": true, "--diff-filter": true, "--inter-hunk-context": true}
+	singleInspectionBins = map[string]bool{"cat": true, "head": true, "tail": true, "nl": true, "wc": true, "ls": true, "find": true, "which": true, "file": true, "stat": true, "echo": true, "awk": true}
+	fileSlicePipeBins    = map[string]bool{"cat": true, "nl": true, "head": true, "tail": true, "awk": true}
 	scratchVarPrefixes   = []struct {
 		prefix string
 		envKey string
@@ -239,27 +241,53 @@ func isUnbatchedGitMutation(cmd string) bool {
 	return false
 }
 
+func isSedInPlace(tokens []string) bool {
+	for _, t := range tokens[1:] {
+		if t == "--" {
+			break
+		}
+		if t == "--in-place" || strings.HasPrefix(t, "--in-place=") || strings.HasPrefix(t, "-i") || hasShortFlag(t, 'i') {
+			return true
+		}
+	}
+	return false
+}
+
+func isStageInSet(tokens []string, allowed map[string]bool) bool {
+	if len(tokens) == 0 {
+		return false
+	}
+	bin := filepath.Base(tokens[0])
+	if bin == "sed" {
+		return !isSedInPlace(tokens)
+	}
+	return allowed[bin]
+}
+
 func isSingleInspection(cmd string) bool {
 	trimmed := strings.TrimSpace(cmd)
 	if trimmed == "" {
 		return false
 	}
 
-	if strings.Contains(trimmed, "&&") || strings.Contains(trimmed, ";") || strings.Contains(trimmed, "||") || strings.Contains(trimmed, "|") {
+	cmds, ops := splitPipelineSegments(trimmed)
+	if len(cmds) == 0 {
 		return false
 	}
-
-	parts := strings.Fields(trimmed)
-	if len(parts) == 0 {
-		return false
+	if len(cmds) == 1 {
+		return isStageInSet(tokenizeQuoteAware(cmds[0]), singleInspectionBins)
 	}
-	bin := filepath.Base(parts[0])
-	switch bin {
-	case "cat", "head", "tail", "ls", "find", "which", "file", "stat", "echo":
-		return true
+	for i := 1; i < len(ops); i++ {
+		if ops[i] != '|' {
+			return false
+		}
 	}
-
-	return false
+	for _, stage := range cmds {
+		if !isStageInSet(tokenizeQuoteAware(stage), fileSlicePipeBins) {
+			return false
+		}
+	}
+	return true
 }
 
 func expandScratchEnvPrefix(p string) string {
