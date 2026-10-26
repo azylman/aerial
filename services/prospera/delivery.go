@@ -243,15 +243,19 @@ func (r *Reporter) DeliverCallReport(ctx context.Context, callID string) error {
 	return nil
 }
 
+func resolveRESTModel(cfg *Config) string {
+	if cfg != nil && cfg.GeminiFallbackModel != "" && !strings.Contains(cfg.GeminiFallbackModel, "live") {
+		return cfg.GeminiFallbackModel
+	}
+	return "gemini-2.5-flash"
+}
+
 func (r *Reporter) generateGeminiSummary(ctx context.Context, prompt string) (string, error) {
 	if r.cfg == nil || strings.TrimSpace(r.cfg.GeminiAPIKey) == "" {
 		return "", fmt.Errorf("reporter: gemini api key not configured")
 	}
 
-	model := r.cfg.GeminiFallbackModel
-	if model == "" {
-		model = "gemini-2.5-flash"
-	}
+	model := resolveRESTModel(r.cfg)
 
 	reqBody := map[string]any{
 		"contents": []map[string]any{
@@ -445,10 +449,7 @@ func (r *Reporter) transcribeViaWhisper(ctx context.Context, audioBytes []byte) 
 }
 
 func (r *Reporter) transcribeViaGeminiFlash(ctx context.Context, audioBytes []byte, contentType string) (string, error) {
-	model := r.cfg.GeminiFallbackModel
-	if model == "" {
-		model = "gemini-2.5-flash"
-	}
+	model := resolveRESTModel(r.cfg)
 
 	b64Data := base64.StdEncoding.EncodeToString(audioBytes)
 	reqBody := map[string]any{

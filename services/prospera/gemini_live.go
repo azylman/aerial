@@ -164,10 +164,12 @@ type GeminiSetupMessage struct {
 
 // GeminiSetup specifies model, generation config, system instructions, and tool declarations.
 type GeminiSetup struct {
-	Model             string                 `json:"model"`
-	GenerationConfig  GeminiGenerationConfig `json:"generationConfig,omitempty"`
-	SystemInstruction *GeminiContent         `json:"systemInstruction,omitempty"`
-	Tools             []GeminiTool           `json:"tools,omitempty"`
+	Model                    string                 `json:"model"`
+	GenerationConfig         GeminiGenerationConfig `json:"generationConfig,omitempty"`
+	InputAudioTranscription  map[string]any         `json:"inputAudioTranscription,omitempty"`
+	OutputAudioTranscription map[string]any         `json:"outputAudioTranscription,omitempty"`
+	SystemInstruction        *GeminiContent         `json:"systemInstruction,omitempty"`
+	Tools                    []GeminiTool           `json:"tools,omitempty"`
 }
 
 // GeminiGenerationConfig controls response modalities and speech synthesis.
@@ -196,11 +198,19 @@ type GeminiContent struct {
 	Parts []GeminiPart `json:"parts"`
 }
 
-// GeminiPart represents a single content part (text or audio).
-type GeminiPart struct {
-	Text     string `json:"text,omitempty"`
+// GeminiInlineData holds nested inline binary audio or media data in a GeminiPart.
+type GeminiInlineData struct {
 	MimeType string `json:"mimeType,omitempty"`
 	Data     string `json:"data,omitempty"`
+}
+
+// GeminiPart represents a single content part (text or audio).
+type GeminiPart struct {
+	Text       string            `json:"text,omitempty"`
+	Thought    bool              `json:"thought,omitempty"`
+	InlineData *GeminiInlineData `json:"inlineData,omitempty"`
+	MimeType   string            `json:"mimeType,omitempty"`
+	Data       string            `json:"data,omitempty"`
 }
 
 // GeminiTool defines function declarations exposed to Gemini Live.
@@ -271,11 +281,19 @@ type GeminiServerMessage struct {
 	ToolCall      *GeminiToolCall      `json:"toolCall,omitempty"`
 }
 
+// GeminiTranscription holds streaming input or output audio transcription text.
+type GeminiTranscription struct {
+	Text string `json:"text,omitempty"`
+}
+
 // GeminiServerContent represents generated audio or text parts.
 type GeminiServerContent struct {
-	ModelTurn    *GeminiModelTurn `json:"modelTurn,omitempty"`
-	TurnComplete bool             `json:"turnComplete,omitempty"`
-	Interrupted  bool             `json:"interrupted,omitempty"`
+	ModelTurn           *GeminiModelTurn     `json:"modelTurn,omitempty"`
+	InputTranscription  *GeminiTranscription `json:"inputTranscription,omitempty"`
+	OutputTranscription *GeminiTranscription `json:"outputTranscription,omitempty"`
+	GenerationComplete  bool                 `json:"generationComplete,omitempty"`
+	TurnComplete        bool                 `json:"turnComplete,omitempty"`
+	Interrupted         bool                 `json:"interrupted,omitempty"`
 }
 
 // GeminiModelTurn holds the parts generated in a turn.
@@ -384,6 +402,8 @@ func BuildGeminiSetupMessage(model, systemPrompt string) GeminiSetupMessage {
 					},
 				},
 			},
+			InputAudioTranscription:  map[string]any{},
+			OutputAudioTranscription: map[string]any{},
 			SystemInstruction: &GeminiContent{
 				Parts: []GeminiPart{{Text: systemPrompt}},
 			},

@@ -87,6 +87,9 @@ func TestBuildGeminiMessages(t *testing.T) {
 	if len(msg1.Setup.Tools) == 0 || len(msg1.Setup.Tools[0].FunctionDeclarations) != 4 {
 		t.Errorf("expected 4 tool declarations, got %d", len(msg1.Setup.Tools[0].FunctionDeclarations))
 	}
+	if msg1.Setup.InputAudioTranscription == nil || msg1.Setup.OutputAudioTranscription == nil {
+		t.Error("expected InputAudioTranscription and OutputAudioTranscription enabled in setup")
+	}
 
 	// 2. Audio chunk
 	chunk := BuildGeminiAudioChunk([]byte{0x01, 0x02})

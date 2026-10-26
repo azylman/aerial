@@ -125,13 +125,19 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 						"modelTurn": map[string]any{
 							"parts": []map[string]any{
 								{
-									"mimeType": "audio/pcm;rate=24000",
-									"data":     base64.StdEncoding.EncodeToString(pcm24),
+									"inlineData": map[string]any{
+										"mimeType": "audio/pcm;rate=24000",
+										"data":     base64.StdEncoding.EncodeToString(pcm24),
+									},
 								},
 								{
-									"text": "Hello, this is Prospera speaking.",
+									"text":    "Internal thinking reasoning",
+									"thought": true,
 								},
 							},
+						},
+						"outputTranscription": map[string]any{
+							"text": "Hello, this is Prospera speaking.",
 						},
 						"turnComplete": true,
 					},
@@ -1188,11 +1194,32 @@ func TestMediaStream_DirectHandlers(t *testing.T) {
 	})
 
 	sess.handleServerContent(context.Background(), &GeminiServerContent{
+		InputTranscription: &GeminiTranscription{Text: "Caller hello "},
+	})
+	sess.handleServerContent(context.Background(), &GeminiServerContent{
+		InputTranscription:  &GeminiTranscription{Text: "world"},
+		OutputTranscription: &GeminiTranscription{Text: "Hi from "},
+	})
+	sess.handleServerContent(context.Background(), &GeminiServerContent{
+		OutputTranscription: &GeminiTranscription{Text: "Prospera"},
+		GenerationComplete:  true,
+	})
+	sess.handleServerContent(context.Background(), &GeminiServerContent{
 		Interrupted: true,
 		ModelTurn: &GeminiModelTurn{
 			Parts: []GeminiPart{
 				{
 					Text: "Assistant turn response",
+				},
+				{
+					Text:    "Hidden internal thought",
+					Thought: true,
+				},
+				{
+					InlineData: &GeminiInlineData{
+						MimeType: "audio/pcm;rate=24000",
+						Data:     base64.StdEncoding.EncodeToString(make([]byte, 480)),
+					},
 				},
 				{
 					MimeType: "audio/pcm;rate=24000",
@@ -1202,6 +1229,9 @@ func TestMediaStream_DirectHandlers(t *testing.T) {
 		},
 	})
 
+	sess.handleServerContent(context.Background(), &GeminiServerContent{
+		OutputTranscription: &GeminiTranscription{Text: "Closing words before tool call"},
+	})
 	sess.executeToolCall(context.Background(), GeminiFunctionCall{
 		ID:   "call_dtmf_good",
 		Name: "send_dtmf",
