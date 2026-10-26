@@ -182,6 +182,13 @@ func TestFormatSingleDiscordPrompt(t *testing.T) {
 			msg:  db.Message{ID: "msg-tz", ThreadID: "t-tz", Content: "tz check", CreatedAt: ts},
 			tz:   "America/New_York", wantContains: []string{"- timestamp: 2026-09-23T08:00:00-04:00\n"},
 		},
+		{
+			name:         "Internal http-client prompt uses internal header and forces is_admin true",
+			msg:          db.Message{ID: "msg-http", ThreadID: "t-lounge", ChannelID: "t-lounge", ChannelName: "#lounge", AuthorID: "http-client", AuthorName: "HTTP Client", IsAdmin: false, Content: "Check dryer status", CreatedAt: ts},
+			wantPrefix:   "<USER_REQUEST>\nHere's an internal system or scheduled prompt:\n\n",
+			wantContains: []string{"- author_id: http-client\n", "- is_admin: true\n", "- content: Check dryer status\n"},
+			wantExcludes: []string{"Here's a message someone sent you from Discord:", "- is_admin: false"},
+		},
 	}
 
 	for _, tc := range tests {

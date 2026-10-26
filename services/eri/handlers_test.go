@@ -170,6 +170,9 @@ func TestHandlePromptValidation(t *testing.T) {
 				if tc.wantSilent && !msg.Silent {
 					t.Errorf("expected silent=true, got %v", msg.Silent)
 				}
+				if !msg.IsAdmin {
+					t.Errorf("expected is_admin=true for /prompt message, got false")
+				}
 			}
 		})
 	}

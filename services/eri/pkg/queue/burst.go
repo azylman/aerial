@@ -183,25 +183,26 @@ func (p *WorkerPool) runThreadWorker(scopeKey string, state *threadWorkerState) 
 // FormatSingleDiscordPrompt formats a single structured Discord message into the canonical <USER_REQUEST> prompt envelope JIT.
 func FormatSingleDiscordPrompt(m db.Message, tzOpt ...string) string {
 	var sb strings.Builder
-	sb.WriteString("<USER_REQUEST>\nHere's a message someone sent you from Discord:\n\n")
+	isDiscord := isDiscordMessage(m)
+	if isDiscord {
+		sb.WriteString("<USER_REQUEST>\nHere's a message someone sent you from Discord:\n\n")
+	} else {
+		sb.WriteString("<USER_REQUEST>\nHere's an internal system or scheduled prompt:\n\n")
+	}
 	channelID := m.ChannelID
 	if channelID == "" {
 		channelID = m.ThreadID
 	}
 	fmt.Fprintf(&sb, "- id: %s\n- channel_id: %s\n", m.ID, channelID)
-	if m.ChannelName != "" {
-		if clean := sanitizePromptHeaderField(m.ChannelName); clean != "" {
-			if !strings.HasPrefix(clean, "#") {
-				clean = "#" + clean
-			}
-			fmt.Fprintf(&sb, "- channel_name: %q\n", clean)
+	if clean := sanitizePromptHeaderField(m.ChannelName); clean != "" {
+		if !strings.HasPrefix(clean, "#") {
+			clean = "#" + clean
 		}
+		fmt.Fprintf(&sb, "- channel_name: %q\n", clean)
 	}
 	fmt.Fprintf(&sb, "- thread_id: %s\n", m.ThreadID)
-	if m.ThreadName != "" {
-		if clean := sanitizePromptHeaderField(m.ThreadName); clean != "" {
-			fmt.Fprintf(&sb, "- thread_name: %q\n", clean)
-		}
+	if clean := sanitizePromptHeaderField(m.ThreadName); clean != "" {
+		fmt.Fprintf(&sb, "- thread_name: %q\n", clean)
 	}
 	if strings.TrimSpace(m.GuildID) != "" {
 		fmt.Fprintf(&sb, "- guild_id: %s\n", m.GuildID)
@@ -210,27 +211,10 @@ func FormatSingleDiscordPrompt(m db.Message, tzOpt ...string) string {
 	if cleanGlobal := sanitizePromptHeaderField(m.AuthorGlobalName); cleanGlobal != "" {
 		fmt.Fprintf(&sb, "- author_global_name: %s\n", cleanGlobal)
 	}
-	fmt.Fprintf(&sb, "- author_bot: %t\n- is_admin: %t\n", m.AuthorBot, m.IsAdmin)
-	if m.ReplyingToAuthor != "" || m.ReplyingToContent != "" {
-		authorName := m.ReplyingToAuthor
-		if authorName == "" {
-			authorName = "Unknown"
-		}
-		if !strings.HasPrefix(authorName, "@") && authorName != "Unknown" {
-			authorName = "@" + authorName
-		}
-		fmt.Fprintf(&sb, "- replying_to:\n    author: %q\n    content: %q\n", authorName, sanitizer.SanitizePromptTags(m.ReplyingToContent))
-	}
+	fmt.Fprintf(&sb, "- author_bot: %t\n- is_admin: %t\n", m.AuthorBot, m.IsAdmin || !isDiscord)
+	writeDiscordPromptReply(&sb, m)
 	fmt.Fprintf(&sb, "- content: %s\n", sanitizer.SanitizePromptTags(m.Content))
-	ts := m.CreatedAt
-	if ts.IsZero() {
-		ts = time.Now()
-	}
-	if len(tzOpt) > 0 && strings.TrimSpace(tzOpt[0]) != "" {
-		if loc, err := time.LoadLocation(strings.TrimSpace(tzOpt[0])); err == nil && loc != nil {
-			ts = ts.In(loc)
-		}
-	}
+	ts := resolvePromptTimestamp(m.CreatedAt, tzOpt...)
 	closingInstruction := "It will be delivered directly to Discord. Keep responses proportional to the turn; for routine actions or things just discussed, confirm briefly without echoing tool IDs, exact timestamps, or context already in thread."
 	if m.Silent {
 		closingInstruction = "This is a silent background turn; your response will not be delivered to Discord."
@@ -239,6 +223,31 @@ func FormatSingleDiscordPrompt(m db.Message, tzOpt ...string) string {
 	writeDiscordPromptSlices(&sb, m)
 	fmt.Fprintf(&sb, "\nOnly formulate and output your final response once all immediate work is complete. %s\n</USER_REQUEST>", closingInstruction)
 	return sb.String()
+}
+
+func writeDiscordPromptReply(sb *strings.Builder, m db.Message) {
+	if m.ReplyingToAuthor == "" && m.ReplyingToContent == "" {
+		return
+	}
+	authorName := m.ReplyingToAuthor
+	if authorName == "" {
+		authorName = "Unknown"
+	} else if !strings.HasPrefix(authorName, "@") && authorName != "Unknown" {
+		authorName = "@" + authorName
+	}
+	fmt.Fprintf(sb, "- replying_to:\n    author: %q\n    content: %q\n", authorName, sanitizer.SanitizePromptTags(m.ReplyingToContent))
+}
+
+func resolvePromptTimestamp(ts time.Time, tzOpt ...string) time.Time {
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	if len(tzOpt) > 0 && strings.TrimSpace(tzOpt[0]) != "" {
+		if loc, err := time.LoadLocation(strings.TrimSpace(tzOpt[0])); err == nil && loc != nil {
+			ts = ts.In(loc)
+		}
+	}
+	return ts
 }
 
 func writeDiscordPromptSlices(sb *strings.Builder, m db.Message) {
