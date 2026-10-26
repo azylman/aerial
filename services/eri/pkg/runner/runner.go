@@ -170,6 +170,32 @@ func (e *StepUpdateEvent) ResolvedCommandName() string {
 	return ExtractCommandName(e.ResolvedCommandLine())
 }
 
+func isShellOperatorToken(tok string) bool {
+	return tok == "&&" || tok == "||" || tok == ";" || tok == "|" || tok == "&"
+}
+
+func isCommandWrapperToken(tok string) bool {
+	return tok == "sudo" || tok == "nohup" || tok == "time" || tok == "exec"
+}
+
+func isEnvAssignmentToken(tok string) bool {
+	eq := strings.IndexByte(tok, '=')
+	return eq > 0 && isPOSIXIdentifier(tok[:eq])
+}
+
+func consumeEnvCommandFlags(tokens []string, i int) (nextIdx int, isBareEnv bool) {
+	for i++; i < len(tokens) && strings.HasPrefix(tokens[i], "-"); i++ {
+		if tokens[i] != "-i" && tokens[i] != "--ignore-environment" {
+			return i, true
+		}
+	}
+	return i, false
+}
+
+func isValidCommandCandidate(candidate string) bool {
+	return candidate != "." && candidate != ".." && len(candidate) > 0 && len(candidate) <= 24 && safeCmdRegex.MatchString(candidate)
+}
+
 func ExtractCommandName(cmdLine string) string {
 	tokens, ok := tokenizeCommandLine(strings.TrimSpace(cmdLine))
 	if !ok || len(tokens) == 0 {
@@ -179,22 +205,18 @@ func ExtractCommandName(cmdLine string) string {
 	i := 0
 	for i < len(tokens) {
 		tok := tokens[i]
-		if tok == "&&" || tok == "||" || tok == ";" || tok == "|" || tok == "&" {
+		if isShellOperatorToken(tok) {
 			return ""
 		}
-		if eq := strings.IndexByte(tok, '='); eq > 0 && isPOSIXIdentifier(tok[:eq]) {
-			i++
-			continue
-		}
-		if tok == "sudo" || tok == "nohup" || tok == "time" || tok == "exec" {
+		if isEnvAssignmentToken(tok) || isCommandWrapperToken(tok) {
 			i++
 			continue
 		}
 		if tok == "env" {
-			for i++; i < len(tokens) && strings.HasPrefix(tokens[i], "-"); i++ {
-				if tokens[i] != "-i" && tokens[i] != "--ignore-environment" {
-					return "env"
-				}
+			var isBareEnv bool
+			i, isBareEnv = consumeEnvCommandFlags(tokens, i)
+			if isBareEnv {
+				return "env"
 			}
 			continue
 		}
@@ -205,10 +227,43 @@ func ExtractCommandName(cmdLine string) string {
 		return ""
 	}
 	candidate := path.Base(strings.ReplaceAll(tokens[i], "\\", "/"))
-	if candidate == "." || candidate == ".." || len(candidate) == 0 || len(candidate) > 24 || !safeCmdRegex.MatchString(candidate) {
+	if !isValidCommandCandidate(candidate) {
 		return ""
 	}
 	return candidate
+}
+
+func consumeEscapedRune(runes []rune, i int, inDouble bool, cur *strings.Builder) (nextIdx int, ok bool) {
+	if i+1 >= len(runes) {
+		return i, false
+	}
+	next := runes[i+1]
+	if inDouble {
+		if next == '$' || next == '`' || next == '"' || next == '\\' || next == '\n' {
+			cur.WriteRune(next)
+			return i + 1, true
+		}
+		cur.WriteRune('\\')
+		return i, true
+	}
+	if strings.ContainsRune(" \t\n\r\"'\\", next) {
+		cur.WriteRune(next)
+		return i + 1, true
+	}
+	cur.WriteRune('\\')
+	return i, true
+}
+
+func isTokenWhitespace(r rune) bool {
+	return r == ' ' || r == '\t' || r == '\n' || r == '\r'
+}
+
+func appendNonEmptyToken(tokens []string, cur *strings.Builder) []string {
+	if cur.Len() > 0 {
+		tokens = append(tokens, cur.String())
+		cur.Reset()
+	}
+	return tokens
 }
 
 func tokenizeCommandLine(s string) ([]string, bool) {
@@ -220,37 +275,32 @@ func tokenizeCommandLine(s string) ([]string, bool) {
 
 	for i := 0; i < n; i++ {
 		r := runes[i]
-		if r == '\\' && !inSingle {
-			if i+1 < n {
-				next := runes[i+1]
-				if inDouble && (next == '$' || next == '`' || next == '"' || next == '\\' || next == '\n') {
-					cur.WriteRune(next)
-					i++
-					continue
-				}
-				if !inDouble && strings.ContainsRune(" \t\n\r\"'\\", next) {
-					cur.WriteRune(next)
-					i++
-					continue
-				}
+		if inSingle {
+			if r == '\'' {
+				inSingle = false
+			} else {
 				cur.WriteRune(r)
-				continue
 			}
-			return nil, false
-		}
-		if r == '\'' && !inDouble {
-			inSingle = !inSingle
 			continue
 		}
-		if r == '"' && !inSingle {
+		if r == '\\' {
+			var ok bool
+			i, ok = consumeEscapedRune(runes, i, inDouble, &cur)
+			if !ok {
+				return nil, false
+			}
+			continue
+		}
+		if r == '\'' && !inDouble {
+			inSingle = true
+			continue
+		}
+		if r == '"' {
 			inDouble = !inDouble
 			continue
 		}
-		if !inSingle && !inDouble && (r == ' ' || r == '\t' || r == '\n' || r == '\r') {
-			if cur.Len() > 0 {
-				tokens = append(tokens, cur.String())
-				cur.Reset()
-			}
+		if !inDouble && isTokenWhitespace(r) {
+			tokens = appendNonEmptyToken(tokens, &cur)
 			continue
 		}
 		cur.WriteRune(r)
@@ -258,9 +308,7 @@ func tokenizeCommandLine(s string) ([]string, bool) {
 	if inSingle || inDouble {
 		return nil, false
 	}
-	if cur.Len() > 0 {
-		tokens = append(tokens, cur.String())
-	}
+	tokens = appendNonEmptyToken(tokens, &cur)
 	return tokens, true
 }
 
