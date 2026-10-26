@@ -124,8 +124,8 @@ check_rule_file_sizes() {
     done
 }
 
-# Go services in the monorepo
-GO_SERVICES="pkg services/eri services/haro mcp/discord-mcp mcp/kernel-mcp services/dashboard services/hangar services/webhooks-router services/vanadis services/coven scripts/code-health"
+# Dynamically discover all Go modules in the monorepo
+GO_SERVICES=$(cd "$REPO_ROOT" && find . -maxdepth 3 -name "go.mod" ! -path "*/.*" ! -path "*/vendor/*" | sed 's|^\./||; s|/go\.mod$||' | sort | tr '\n' ' ' | sed 's/[[:space:]]*$//')
 
 run_go_vet() {
     svc="$1"
@@ -461,9 +461,6 @@ if [ "$MODE" = "staged" ]; then
                 done
                 run_deadcode "$svc"
             fi
-        elif echo "$STAGED_FILES" | grep -q -E "^scripts/(verify|check-coverage)\.sh$" && git diff --cached -- scripts/verify.sh scripts/check-coverage.sh 2>/dev/null | grep -q -F "$svc"; then
-            run_golangci_lint "$svc" "./..."
-            run_deadcode "$svc"
         fi
     done
 
