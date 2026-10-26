@@ -850,7 +850,7 @@ func (s *MediaStreamSession) voiceName() string {
 	if s.cfg != nil && strings.TrimSpace(s.cfg.GeminiVoiceName) != "" {
 		return strings.TrimSpace(s.cfg.GeminiVoiceName)
 	}
-	return "Aoede"
+	return "Kore"
 }
 
 func (s *MediaStreamSession) enqueueOutboundUlaw(ulawBytes []byte) {

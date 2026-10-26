@@ -315,12 +315,12 @@ type GeminiFunctionCall struct {
 	Args map[string]any `json:"args"`
 }
 
-// BuildGeminiSetupMessage constructs the handshake setup payload with a configurable voice (defaulting to Aoede) and the 4 bounded tools.
+// BuildGeminiSetupMessage constructs the handshake setup payload with a configurable voice (defaulting to Kore) and the 4 bounded tools.
 func BuildGeminiSetupMessage(model, systemPrompt string, voice ...string) GeminiSetupMessage {
 	if !strings.HasPrefix(model, "models/") {
 		model = "models/" + model
 	}
-	voiceName := "Aoede"
+	voiceName := "Kore"
 	if len(voice) > 0 && strings.TrimSpace(voice[0]) != "" {
 		voiceName = strings.TrimSpace(voice[0])
 	}
