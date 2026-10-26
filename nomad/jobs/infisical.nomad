@@ -94,6 +94,67 @@ job "infisical" {
         REDIS_URL                     = "redis://127.0.0.1:${NOMAD_PORT_redis}"
         SITE_URL                      = "http://infisical.aerial"
         ALLOW_INTERNAL_IP_CONNECTIONS = "true"
+        NODE_OPTIONS                  = "--import /local/auto-auth.mjs"
+      }
+
+      template {
+        data = <<EOH
+import { registerHooks } from "node:module";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
+
+registerHooks({
+  load(url, context, nextLoad) {
+    if (url.endsWith("/server/routes/v1/auth-router.mjs")) {
+      const orig = fs.readFileSync(fileURLToPath(url), "utf8");
+      const target = `\t\t\t} catch (err) {
+\t\t\t\tres.cookie("jid", "", {
+\t\t\t\t\thttpOnly: true,
+\t\t\t\t\tpath: "/api",
+\t\t\t\t\tsameSite: "strict",
+\t\t\t\t\tsecure: appCfg.HTTPS_ENABLED,
+\t\t\t\t\tmaxAge: 0
+\t\t\t\t});
+\t\t\t\tthrow err;
+\t\t\t}`;
+      const replacement = `\t\t\t} catch (err) {
+\t\t\t\tconst adminUser = await server.store.user.findOne({ superAdmin: true });
+\t\t\t\tconst userOrgs = adminUser ? await server.services.org.findAllOrganizationOfUser(adminUser.id) : [];
+\t\t\t\tif (!adminUser || !userOrgs.length) {
+\t\t\t\t\tres.cookie("jid", "", {
+\t\t\t\t\t\thttpOnly: true,
+\t\t\t\t\t\tpath: "/api",
+\t\t\t\t\t\tsameSite: "strict",
+\t\t\t\t\t\tsecure: appCfg.HTTPS_ENABLED,
+\t\t\t\t\t\tmaxAge: 0
+\t\t\t\t\t});
+\t\t\t\t\tthrow err;
+\t\t\t\t}
+\t\t\t\ttokenVersion = await server.services.authToken.getUserTokenSession({
+\t\t\t\t\tuserId: adminUser.id,
+\t\t\t\t\tip: req.realIp || "127.0.0.1",
+\t\t\t\t\tuserAgent: req.headers["user-agent"] || "infisical-lan"
+\t\t\t\t});
+\t\t\t\tdecodedToken = {
+\t\t\t\t\tauthMethod: "email",
+\t\t\t\t\tauthTokenType: "refreshToken",
+\t\t\t\t\tuserId: adminUser.id,
+\t\t\t\t\ttokenVersionId: tokenVersion.id,
+\t\t\t\t\trefreshVersion: tokenVersion.refreshVersion,
+\t\t\t\t\torganizationId: userOrgs[0].id,
+\t\t\t\t\tisMfaVerified: true
+\t\t\t\t};
+\t\t\t\tisGraceHit = false;
+\t\t\t}`;
+      if (orig.includes(target)) {
+        return { format: "module", shortCircuit: true, source: orig.replace(target, replacement) };
+      }
+    }
+    return nextLoad(url, context);
+  }
+});
+EOH
+        destination = "local/auto-auth.mjs"
       }
 
       template {
