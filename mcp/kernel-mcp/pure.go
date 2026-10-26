@@ -66,14 +66,20 @@ var StealthUAMetadata = UAMetadata{
 // Notice single backslashes in regexes inside raw string literal.
 const StealthInitScript = `(() => {
   try {
+    const nativeNames = new WeakMap();
+    const maskNative = (fn, name) => { if (typeof fn === 'function') nativeNames.set(fn, name); return fn; };
+    const origToString = Function.prototype.toString;
+    Function.prototype.toString = maskNative(new Proxy(origToString, {
+      apply(t, thisArg, args) { return nativeNames.has(thisArg) ? 'function ' + nativeNames.get(thisArg) + '() { [native code] }' : Reflect.apply(t, thisArg, args); },
+    }), 'toString');
     if (navigator.webdriver !== false) {
       Object.defineProperty(Navigator.prototype, 'webdriver', {
-        get: () => false, configurable: true, enumerable: true,
+        get: maskNative(() => false, 'get webdriver'), configurable: true, enumerable: true,
       });
     }
     if (!navigator.languages || navigator.languages.length < 2) {
       Object.defineProperty(Navigator.prototype, 'languages', {
-        get: () => ['en-US', 'en'], configurable: true, enumerable: true,
+        get: maskNative(() => ['en-US', 'en'], 'get languages'), configurable: true, enumerable: true,
       });
     }
     if (!window.chrome) {
@@ -81,6 +87,9 @@ const StealthInitScript = `(() => {
         value: {}, writable: true, configurable: true, enumerable: true,
       });
     }
+    if (!window.chrome.app) window.chrome.app = { isInstalled: false, InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' }, RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' } };
+    if (!window.chrome.csi) window.chrome.csi = maskNative(function csi() { return {}; }, 'csi');
+    if (!window.chrome.loadTimes) window.chrome.loadTimes = maskNative(function loadTimes() { return {}; }, 'loadTimes');
     if (!window.chrome.runtime || !window.chrome.runtime.OnInstalledReason) {
       window.chrome.runtime = {
         OnInstalledReason: { CHROME_UPDATE: 'chrome_update', INSTALL: 'install', SHARED_MODULE_UPDATE: 'shared_module_update', UPDATE: 'update' },
@@ -90,14 +99,16 @@ const StealthInitScript = `(() => {
         PlatformOs: { ANDROID: 'android', CROS: 'cros', LINUX: 'linux', MAC: 'mac', OPENBSD: 'openbsd', WIN: 'win' },
         RequestUpdateCheckStatus: { NO_UPDATE: 'no_update', THROTTLED: 'throttled', UPDATE_AVAILABLE: 'update_available' },
         id: undefined,
-        connect: function connect() {},
-        sendMessage: function sendMessage() {},
+        connect: maskNative(function connect() {}, 'connect'),
+        sendMessage: maskNative(function sendMessage() {}, 'sendMessage'),
       };
     }
+    const patchedProtos = new WeakSet();
     const patchWebGL = (ctxProto) => {
-      if (!ctxProto || !ctxProto.getParameter) return;
+      if (!ctxProto || !ctxProto.getParameter || patchedProtos.has(ctxProto)) return;
+      patchedProtos.add(ctxProto);
       const origGetParameter = ctxProto.getParameter;
-      ctxProto.getParameter = new Proxy(origGetParameter, {
+      ctxProto.getParameter = maskNative(new Proxy(origGetParameter, {
         apply(target, thisArg, args) {
           const parameter = args[0];
           const val = Reflect.apply(target, thisArg, args);
@@ -109,17 +120,53 @@ const StealthInitScript = `(() => {
           }
           return val;
         },
-      });
+      }), 'getParameter');
     };
     if (typeof WebGLRenderingContext !== 'undefined') patchWebGL(WebGLRenderingContext.prototype);
     if (typeof WebGL2RenderingContext !== 'undefined') patchWebGL(WebGL2RenderingContext.prototype);
+    if (typeof OffscreenCanvas !== 'undefined' && OffscreenCanvas.prototype.getContext) {
+      OffscreenCanvas.prototype.getContext = maskNative(new Proxy(OffscreenCanvas.prototype.getContext, {
+        apply(t, thisArg, args) { const ctx = Reflect.apply(t, thisArg, args); if (ctx) patchWebGL(Object.getPrototypeOf(ctx)); return ctx; },
+      }), 'getContext');
+    }
+    if (navigator.gpu && typeof navigator.gpu.requestAdapter === 'function') {
+      navigator.gpu.requestAdapter = maskNative(new Proxy(navigator.gpu.requestAdapter, {
+        async apply(t, thisArg, args) {
+          const a = await Reflect.apply(t, thisArg, args);
+          if (a && (a.isFallbackAdapter || /swiftshader|subzero|llvmpipe/i.test(JSON.stringify(a.info || {})))) {
+            Object.defineProperty(a, 'isFallbackAdapter', { get: maskNative(() => false, 'get isFallbackAdapter') });
+            Object.defineProperty(a, 'info', { get: maskNative(() => ({ vendor: 'intel', architecture: 'gen-9', device: 'Mesa Intel(R) UHD Graphics 630 (CFL GT2)', description: '' }), 'get info') });
+          }
+          return a;
+        },
+      }), 'requestAdapter');
+    }
   } catch (_) {}
 })();`
 
 var (
-	cardPattern = regexp.MustCompile(`\b(?:\d[ -]*?){13,16}\b`)
-	asinPattern = regexp.MustCompile(`^[A-Za-z0-9]{10}$`)
+	cardPattern        = regexp.MustCompile(`\b(?:\d[ -]*?){13,16}\b`)
+	asinPattern        = regexp.MustCompile(`^[A-Za-z0-9]{10}$`)
+	evalBlockedPattern = regexp.MustCompile(`(?i)\b(?:fetch\s*\(|XMLHttpRequest\b)|(?:\.\s*|\?\.\s*)click\s*\(`)
 )
+
+// ValidateEvaluateExpression blocks in-page scraping bursts (fetch/XMLHttpRequest) and untrusted synthetic DOM clicks (.click()).
+func ValidateEvaluateExpression(expr string) error {
+	if evalBlockedPattern.MatchString(expr) {
+		return fmt.Errorf("blocked unsafe browser_evaluate pattern: use browser_navigate/amazon_search for page loads and browser_click for trusted clicks")
+	}
+	return nil
+}
+
+// JitterCoord applies a deterministic, bounded interior offset when element dimensions exceed 6px.
+func JitterCoord(x, y, width, height int) (int, int) {
+	if width <= 6 || height <= 6 {
+		return x, y
+	}
+	dx := 1 + ((x*31 + y*17 + width) % (width / 6))
+	dy := 1 + ((y*29 + x*13 + height) % (height / 6))
+	return x + dx, y - dy
+}
 
 // SanitizePII redacts potential 13-16 digit payment card numbers.
 func SanitizePII(text string) string {
@@ -233,6 +280,8 @@ type ClickResult struct {
 	HasRect bool   `json:"hasRect"`
 	X       int    `json:"x"`
 	Y       int    `json:"y"`
+	Width   int    `json:"width"`
+	Height  int    `json:"height"`
 }
 
 // BuildClickScript builds a JS expression to scroll the selector into view and return geometry.
@@ -240,12 +289,14 @@ func BuildClickScript(selector string) string {
 	selJSON, _ := json.Marshal(selector) //nolint:errcheck,errchkjson
 	return fmt.Sprintf(`(() => {
   const el = document.querySelector(%s);
-  if (!el) return { found: false, tag: "", text: "", hasRect: false, x: 0, y: 0 };
+  if (!el) return { found: false, tag: "", text: "", hasRect: false, x: 0, y: 0, width: 0, height: 0 };
   el.scrollIntoView({ behavior: "instant", block: "center" });
   const rect = el.getBoundingClientRect();
   const hasRect = !!(rect && rect.width > 0 && rect.height > 0);
   const x = hasRect ? Math.round(rect.left + rect.width / 2) : 0;
   const y = hasRect ? Math.round(rect.top + rect.height / 2) : 0;
+  const width = hasRect ? Math.round(rect.width) : 0;
+  const height = hasRect ? Math.round(rect.height) : 0;
   if (!hasRect) {
     try { el.click(); } catch (_) {}
   }
@@ -255,7 +306,9 @@ func BuildClickScript(selector string) string {
     text: (el.innerText || el.value || el.getAttribute("aria-label") || "").trim(),
     hasRect: hasRect,
     x: x,
-    y: y
+    y: y,
+    width: width,
+    height: height
   };
 })()`, string(selJSON))
 }
@@ -311,8 +364,9 @@ func BuildAmazonSearchScript(maxResults int) string {
   for (let i = 0; i < limit; i++) {
     const el = nodes[i];
     const asin = el.getAttribute('data-asin') || '';
+    const spans = Array.from(el.querySelectorAll('h2 span')).map(s => (s.innerText || s.textContent || '').trim()).filter((v, idx, a) => v && a.indexOf(v) === idx);
     const titleEl = el.querySelector('h2 a span') || el.querySelector('h2');
-    const title = titleEl ? titleEl.innerText.trim() : '';
+    const title = spans.length ? spans.join(' ') : (titleEl ? titleEl.innerText.trim() : '');
     const priceEl = el.querySelector('.a-price .a-offscreen') || el.querySelector('.a-price');
     const price = priceEl ? priceEl.innerText.trim() : '';
     const ratingEl = el.querySelector('.a-icon-alt');
@@ -320,12 +374,14 @@ func BuildAmazonSearchScript(maxResults int) string {
     const reviewsEl = el.querySelector('.a-size-small .a-link-normal span') || el.querySelector('[aria-label*="ratings"]');
     const reviews = reviewsEl ? reviewsEl.innerText.trim() : '';
     const prime = !!(el.querySelector('.a-icon-prime') || el.querySelector('[aria-label="Amazon Prime"]'));
-    const linkEl = el.querySelector('h2 a');
+    const delivEl = el.querySelector('[data-cy="delivery-recipe"]');
+    const delivery = delivEl ? (delivEl.innerText || delivEl.textContent || '').replace(/\s+/g, ' ').trim() : '';
+    const linkEl = el.querySelector('h2 a') || (el.querySelector('h2') && el.querySelector('h2').closest('a')) || el.querySelector('a[href*="/dp/"]');
     let itemUrl = linkEl ? linkEl.getAttribute('href') : '';
     if (itemUrl && itemUrl.startsWith('/')) {
       itemUrl = 'https://www.amazon.com' + itemUrl;
     }
-    items.push({ asin, title, price, rating, reviews, prime, url: itemUrl });
+    items.push({ asin, title, price, rating, reviews, prime, delivery, url: itemUrl });
   }
   return items;
 })()`, maxResults)
@@ -344,11 +400,11 @@ func BuildAmazonCartScript() string {
   itemNodes.forEach(el => {
     const asin = el.getAttribute('data-asin') || '';
     if (!asin || items.some(it => it.asin === asin)) return;
-    const titleEl = el.querySelector('.sc-product-title') || el.querySelector('.a-truncate-cut');
-    const title = titleEl ? titleEl.innerText.trim() : '';
+    const titleEl = el.querySelector('.a-truncate-full') || el.querySelector('.sc-product-title') || el.querySelector('.a-truncate-cut');
+    const title = titleEl ? (titleEl.textContent || titleEl.innerText || '').trim() : '';
     const priceEl = el.querySelector('.sc-product-price') || el.querySelector('.a-price .a-offscreen');
     const price = priceEl ? priceEl.innerText.trim() : '';
-    const qtyEl = el.querySelector('input[name="quantity"]') || el.querySelector('.a-dropdown-prompt') || el.querySelector('[data-quantity]');
+    const qtyEl = el.querySelector('input[name="quantity"]') || el.querySelector('select[name="quantity"]') || el.querySelector('.a-dropdown-prompt') || el.querySelector('[data-quantity]');
     const quantity = qtyEl ? (qtyEl.value || qtyEl.innerText || qtyEl.getAttribute('data-quantity') || '1').trim() : '1';
     if (title || price) {
       items.push({ asin, title, price, quantity });
@@ -359,28 +415,37 @@ func BuildAmazonCartScript() string {
 })()`
 }
 
-// BuildAmazonAddToCartScript builds a JS expression locating the add to cart button.
+// BuildAmazonAddToCartScript builds a JS expression locating the add to cart button, expanding collapsed New buybox accordions if needed.
 func BuildAmazonAddToCartScript() string {
 	return `(() => {
-  const btn = document.querySelector('#add-to-cart-button') || document.querySelector('input[name="submit.add-to-cart"]') || document.querySelector('#buy-now-button');
+  const sel = '#add-to-cart-button, input[name="submit.add-to-cart"], #buy-now-button';
+  let btn = document.querySelector(sel);
+  if (!btn) {
+    const acc = document.querySelector('#newAccordionRow_0 a, #newAccordionRow_1 a, [data-csa-c-slot-id="newAccordionRow"] a');
+    if (acc) { try { acc.click(); } catch (_) {} btn = document.querySelector(sel); }
+  }
   const titleEl = document.querySelector('#productTitle');
   const productTitle = titleEl ? titleEl.innerText.trim() : '';
-  if (!btn) return { found: false, hasRect: false, x: 0, y: 0, productTitle };
+  if (!btn) return { found: false, hasRect: false, x: 0, y: 0, width: 0, height: 0, productTitle };
   btn.scrollIntoView({ behavior: 'instant', block: 'center' });
   const rect = btn.getBoundingClientRect();
   const hasRect = !!(rect && rect.width > 0 && rect.height > 0);
   const x = hasRect ? Math.round(rect.left + rect.width / 2) : 0;
   const y = hasRect ? Math.round(rect.top + rect.height / 2) : 0;
+  const width = hasRect ? Math.round(rect.width) : 0;
+  const height = hasRect ? Math.round(rect.height) : 0;
   if (!hasRect) {
     try { btn.click(); } catch (_) {}
   }
-  return { found: true, hasRect, x, y, productTitle };
+  return { found: true, hasRect, x, y, width, height, productTitle };
 })()`
 }
 
-// BuildAmazonCartCountScript extracts the active nav cart count.
+// BuildAmazonCartCountScript dismisses any post-add warranty drawer and extracts the active nav cart count.
 func BuildAmazonCartCountScript() string {
 	return `(() => {
+  const noThanks = document.querySelector('#attachSiNoCoverage input, #attachSiNoCoverage-announce, button[id*="SiNoCoverage"]');
+  if (noThanks) { try { noThanks.click(); } catch (_) {} }
   const el = document.querySelector('#nav-cart-count');
   return el ? el.innerText.trim() : '';
 })()`

@@ -560,6 +560,13 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 			wantSubstr: "Uncaught Error: boom",
 			wantError:  true,
 		},
+		{
+			name:       "browser_evaluate blocks unsafe patterns",
+			toolName:   "browser_evaluate",
+			args:       `{"expression":"fetch('https://www.amazon.com/s?k=gpu')"}`,
+			wantSubstr: "blocked unsafe browser_evaluate pattern",
+			wantError:  true,
+		},
 		// 3. browser_get_content
 		{
 			name:       "browser_get_content success and sanitizes card PII",
