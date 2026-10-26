@@ -28,7 +28,7 @@ Options:
   --check               Exit with status 1 if any coverage threshold is violated
   --summary             Output Markdown summary table (also written to \$GITHUB_STEP_SUMMARY if set)
   --gaps                Print top uncovered functions and statement deficit for below-target packages
-  --service <name>      Target a specific microservice (pkg, services/eri, eri, brain, services/haro, haro, mcp/discord-mcp, mcp/kernel-mcp, kernel-mcp, services/dashboard, dashboard, services/hangar, hangar, services/vanadis, vanadis, services/webhooks-router, webhooks-router, services/coven, coven, scripts/code-health, code-health)
+  --service <name>      Target a specific Go module by path or directory basename (e.g., pkg, eri, services/eri, haro, discord-mcp, code-health)
   --profile-dir <dir>   Store intermediate coverage profiles in the specified directory
   -h, --help            Show this help message
 EOF
@@ -112,24 +112,27 @@ NC='\033[0m'
 
 echo "${CYAN}⚡ [Aerial Coverage] Starting monorepo coverage measurement...${NC}"
 
+# Dynamically discover all Go modules in the monorepo
+DISCOVERED_GO_SERVICES=$(find . -maxdepth 3 -name "go.mod" ! -path "*/.*" ! -path "*/vendor/*" | sed 's|^\./||; s|/go\.mod$||' | sort | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+
 # Define Services to Check
 if [ -n "$TARGET_SERVICE" ]; then
     case "$TARGET_SERVICE" in
-        pkg) TARGET_SERVICE="pkg" ;;
-        haro|services/haro|scheduler-mcp) TARGET_SERVICE="services/haro" ;;
-        discord-mcp) TARGET_SERVICE="mcp/discord-mcp" ;;
-        kernel-mcp|mcp/kernel-mcp) TARGET_SERVICE="mcp/kernel-mcp" ;;
-        memory-mcp|coven) TARGET_SERVICE="services/coven" ;;
-        brain|eri) TARGET_SERVICE="services/eri" ;;
-        dashboard) TARGET_SERVICE="services/dashboard" ;;
-        hangar) TARGET_SERVICE="services/hangar" ;;
-        vanadis) TARGET_SERVICE="services/vanadis" ;;
-        webhooks-router) TARGET_SERVICE="services/webhooks-router" ;;
-        code-health) TARGET_SERVICE="scripts/code-health" ;;
+        scheduler-mcp) TARGET_SERVICE="services/haro" ;;
+        memory-mcp) TARGET_SERVICE="services/coven" ;;
+        brain) TARGET_SERVICE="services/eri" ;;
+        *)
+            for svc in $DISCOVERED_GO_SERVICES; do
+                if [ "$svc" = "$TARGET_SERVICE" ] || [ "${svc##*/}" = "$TARGET_SERVICE" ]; then
+                    TARGET_SERVICE="$svc"
+                    break
+                fi
+            done
+            ;;
     esac
     ALL_GO_SERVICES="$TARGET_SERVICE"
 else
-    ALL_GO_SERVICES="pkg services/eri services/haro mcp/discord-mcp mcp/kernel-mcp services/dashboard services/hangar services/vanadis services/webhooks-router services/coven scripts/code-health"
+    ALL_GO_SERVICES="$DISCOVERED_GO_SERVICES"
 fi
 
 # Target Minimum Monorepo Coverage Threshold (Uniform 95.0% floor)
