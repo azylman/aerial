@@ -341,7 +341,7 @@ func (te *turnExecution) claimAndFilterStale() bool {
 		if m.CreatedAt.After(latestMsg.CreatedAt) {
 			latestMsg = m
 		}
-		if m.RetryCount > 0 || m.RestartCount > 0 {
+		if m.RetryCount > 0 || m.RestartCount > 0 || m.ErrorMessage == "deployment_drain" {
 			hasRecovered = true
 		}
 	}
@@ -354,7 +354,7 @@ func (te *turnExecution) claimAndFilterStale() bool {
 		msgAge = now.Sub(latestMsg.CreatedAt)
 	}
 
-	if msgAge > stalenessTTL && !hasRecovered {
+	if isDiscordBurst(te.burst) && msgAge > stalenessTTL && !hasRecovered {
 		var err error
 		lastActivity, isColdThread, err = GetSessionLastActivity(te.store(), te.threadID, te.pool.sessionMgr)
 		if err != nil {

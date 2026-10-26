@@ -334,6 +334,26 @@ register_pr_in_brain() {
     return 1
 }
 
+push_scratch_branch() {
+    local branch="$1"
+    if git push -u origin "$branch" >/dev/null 2>&1; then
+        return 0
+    fi
+    if git push --force-with-lease -u origin "$branch" >/dev/null 2>&1; then
+        echo "🔄 [aerial-pr] Updated existing remote branch ${branch} with --force-with-lease." >&2
+        return 0
+    fi
+    return 1
+}
+
+lookup_existing_open_pr() {
+    local branch="$1"
+    curl -s --connect-timeout 3 -m 10 \
+        -H "Authorization: token ${GITHUB_PAT}" \
+        -H "Accept: application/vnd.github.v3+json" \
+        "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/pulls?state=open&head=${REPO_OWNER}:${branch}" 2>/dev/null | jq -c '.[0] // empty' 2>/dev/null || true
+}
+
 format_aerial_pr_trailer() {
     local t_id="${1:-}" v_id="${2:-}"
     [ -z "$t_id" ] && [ -z "$v_id" ] && return 0
@@ -624,16 +644,16 @@ submit_scratch() {
 
     # 6. Push branch to remote
     echo "📤 [aerial-pr] Pushing feature branch ${branch} to origin (${REPO_OWNER}/${REPO_NAME})..." >&2
-    git push -u origin "$branch" >/dev/null 2>&1 || {
+    if ! push_scratch_branch "$branch"; then
         echo "ERROR: Failed to push branch ${branch} to GitHub." >&2
         if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
             echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
             SCRATCH_DIR_CLEANUP=""
         fi
         exit 1
-    }
+    fi
 
-    # 6. Open Pull Request via GitHub REST API safely using jq
+    # 6. Open Pull Request via GitHub REST API safely using jq (or reuse existing open PR for branch)
     local pr_payload
     pr_payload=$(jq -n \
         --arg title "$clean_title" \
@@ -653,6 +673,16 @@ submit_scratch() {
     pr_code=$(echo "$pr_raw" | tail -n1)
     local pr_resp
     pr_resp=$(echo "$pr_raw" | sed '$d')
+
+    if [ "$pr_code" = "422" ]; then
+        local existing_pr
+        existing_pr=$(lookup_existing_open_pr "$branch")
+        if [ -n "$existing_pr" ]; then
+            pr_resp="$existing_pr"
+            pr_code="200"
+            echo "🔄 [aerial-pr] Reusing existing open Pull Request for branch ${branch}." >&2
+        fi
+    fi
 
     if [ "$pr_code" -lt 200 ] || [ "$pr_code" -ge 300 ]; then
         echo "ERROR: Failed to create Pull Request (HTTP ${pr_code}): ${pr_resp}" >&2

@@ -785,7 +785,7 @@ func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
 	pDrain.StopWithTimeout(0)
 
 	recStore := setupTestStore(t)
-	_ = recStore.InsertMessage(ctx, db.Message{ID: "m-rec-stale", ThreadID: "t-rec-stale", AuthorID: "u1", ScheduleRunID: "run-stale-rec", Status: db.StatusPending, CreatedAt: time.Now().UTC().Add(-2 * time.Hour)})
+	_ = recStore.InsertMessage(ctx, db.Message{ID: "m-rec-stale", ThreadID: "t-rec-stale", AuthorID: "u1", Status: db.StatusPending, CreatedAt: time.Now().UTC().Add(-2 * time.Hour)})
 	_ = recStore.InsertMessage(ctx, db.Message{ID: "m-rec-poison", ThreadID: "t-rec-poison", AuthorID: "u1", Content: "poison content with a rather long snippet that exceeds sixty characters easily", Status: db.StatusProcessing, RetryCount: 5})
 	pRec := New(nil, WorkerPoolConfig{Store: recStore, NotifierFunc: func(b, k, d string) string { return "poison alert" }, DeliveryFunc: func(s *discordgo.Session, c, txt string) error { return nil }})
 	RecoverInterrupted(recStore, pRec)
@@ -963,7 +963,7 @@ func TestWorkerPool_ProcessBurstEdgeCases(t *testing.T) {
 	}{
 		{name: "claim_error_aborts_burst", msg: db.Message{ID: "m-err-claim", ThreadID: "t-claim", Status: db.StatusPending, CreatedAt: now}, claimErr: errors.New("db lock error")},
 		{name: "unclaimed_message_skipped", msg: db.Message{ID: "m-unclaimed", ThreadID: "t-unclaimed", Status: db.StatusPending, CreatedAt: now}, unclaimed: true},
-		{name: "stale_schedule_run_expired", msg: db.Message{ID: "msg-stale-burst-1", ThreadID: "thread-stale-burst", AuthorID: "user-1", ScheduleRunID: "run-stale-burst-1", Content: "old prompt", Status: db.StatusPending, CreatedAt: now.Add(-2 * time.Hour)}, wantMsgStatus: db.StatusCompleted},
+		{name: "stale_schedule_run_expired", msg: db.Message{ID: "msg-stale-burst-1", ThreadID: "thread-stale-burst", AuthorID: "user-1", Content: "old prompt", Status: db.StatusPending, CreatedAt: now.Add(-2 * time.Hour)}, wantMsgStatus: db.StatusCompleted},
 		{name: "ignored_channel_completes_schedule_run", msg: db.Message{ID: "m-ign-extra", ThreadID: "t-ign-extra", AuthorID: "u1", ScheduleRunID: "run-ignored-extra", Content: "ignored prompt", Status: db.StatusPending, CreatedAt: now}, policy: &config.ChannelPolicy{Mode: "ignore"}, wantMsgStatus: db.StatusCompleted},
 		{name: "bad_json_output_fails_after_attempt", msg: db.Message{ID: "m-badparse", ThreadID: "t-badparse", AuthorID: "u1", Content: "hello", Status: db.StatusPending, CreatedAt: now}, runnerOut: "definitely not json", wantMsgStatus: db.StatusFailed},
 		{name: "rate_limit_fails_schedule_run", msg: db.Message{ID: "m-rate-1", ThreadID: "t-rate", AuthorID: "u1", ScheduleRunID: "run-ratelimit-1", Content: "query", Status: db.StatusPending, CreatedAt: now}, runnerErrOut: "Resource has been exhausted: rate limit exceeded 429", runnerCode: 1, runnerErr: errors.New("exit 1"), wantMsgStatus: db.StatusFailed},

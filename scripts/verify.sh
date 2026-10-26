@@ -461,6 +461,9 @@ if [ "$MODE" = "staged" ]; then
                 done
                 run_deadcode "$svc"
             fi
+        elif echo "$STAGED_FILES" | grep -q -E "^scripts/(verify|check-coverage)\.sh$" && git diff --cached -- scripts/verify.sh scripts/check-coverage.sh 2>/dev/null | grep -q -F "$svc"; then
+            run_golangci_lint "$svc" "./..."
+            run_deadcode "$svc"
         fi
     done
 
