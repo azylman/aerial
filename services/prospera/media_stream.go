@@ -524,7 +524,7 @@ func (s *MediaStreamSession) handleInboundTwilioMedia(base64Payload string) {
 	}
 
 	pcm8k := MuLawToPCM16(ulawBytes)
-	rms := ComputeRMS(pcm8k)
+	rms := ComputeRMS(pcm8k) / 32768.0
 
 	action := s.amd.OnInboundFrame(rms, 20)
 	s.handleAMDAction(action)

@@ -93,8 +93,8 @@ func TestBuildGeminiMessages(t *testing.T) {
 
 	// 2. Audio chunk
 	chunk := BuildGeminiAudioChunk([]byte{0x01, 0x02})
-	if len(chunk.RealtimeInput.MediaChunks) == 0 || chunk.RealtimeInput.MediaChunks[0].Data == "" {
-		t.Error("expected non-empty audio chunk")
+	if chunk.RealtimeInput.Audio == nil || chunk.RealtimeInput.Audio.Data == "" || chunk.RealtimeInput.Audio.MimeType != "audio/pcm;rate=16000" {
+		t.Error("expected non-empty realtimeInput.audio chunk with 16kHz PCM mimeType")
 	}
 
 	// 3. Client content

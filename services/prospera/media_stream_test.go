@@ -266,7 +266,11 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 		t.Fatal("timed out waiting for session start event")
 	}
 
-	speechFrame := base64.StdEncoding.EncodeToString(make([]byte, 160))
+	quietUlaw := make([]byte, 160)
+	for i := range quietUlaw {
+		quietUlaw[i] = 0xFE // low-level line noise (PCM16 amplitude 8, normalized RMS ~0.00024 < 0.015)
+	}
+	quietPayload := base64.StdEncoding.EncodeToString(quietUlaw)
 	loudUlaw := make([]byte, 160)
 	for i := range loudUlaw {
 		loudUlaw[i] = 0x00
@@ -287,7 +291,7 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 			"event":     "media",
 			"streamSid": "MZ123",
 			"media": map[string]any{
-				"payload": speechFrame,
+				"payload": quietPayload,
 			},
 		})
 	}
@@ -356,6 +360,19 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 	case <-sess.Done():
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for session to complete")
+	}
+
+	geminiMu.Lock()
+	var sawRealtimeAudio bool
+	for _, msg := range geminiReceivedMessages {
+		if strings.Contains(msg, `"audio":{"mimeType":"audio/pcm;rate=16000"`) {
+			sawRealtimeAudio = true
+			break
+		}
+	}
+	geminiMu.Unlock()
+	if !sawRealtimeAudio {
+		t.Error("expected Gemini Live to receive realtimeInput.audio chunk after normalized AMD cadence release")
 	}
 }
 

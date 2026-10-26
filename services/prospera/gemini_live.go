@@ -230,9 +230,10 @@ type GeminiRealtimeInput struct {
 	RealtimeInput GeminiRealtimeMedia `json:"realtimeInput"`
 }
 
-// GeminiRealtimeMedia wraps media chunks.
+// GeminiRealtimeMedia wraps streaming audio or media chunks.
 type GeminiRealtimeMedia struct {
-	MediaChunks []GeminiMediaChunk `json:"mediaChunks"`
+	Audio       *GeminiMediaChunk  `json:"audio,omitempty"`
+	MediaChunks []GeminiMediaChunk `json:"mediaChunks,omitempty"`
 }
 
 // GeminiMediaChunk contains base64 encoded audio.
@@ -416,11 +417,9 @@ func BuildGeminiSetupMessage(model, systemPrompt string) GeminiSetupMessage {
 func BuildGeminiAudioChunk(pcm16LEBytes []byte) GeminiRealtimeInput {
 	return GeminiRealtimeInput{
 		RealtimeInput: GeminiRealtimeMedia{
-			MediaChunks: []GeminiMediaChunk{
-				{
-					MimeType: "audio/pcm;rate=16000",
-					Data:     base64.StdEncoding.EncodeToString(pcm16LEBytes),
-				},
+			Audio: &GeminiMediaChunk{
+				MimeType: "audio/pcm;rate=16000",
+				Data:     base64.StdEncoding.EncodeToString(pcm16LEBytes),
 			},
 		},
 	}
