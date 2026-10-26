@@ -608,11 +608,11 @@ func (c *Classifier) isSystemOne() bool {
 	return strings.EqualFold(cur.ClassifierProtocol, "systemone") && cur.ClassifierURL != ""
 }
 
-func (c *Classifier) executeSystemOneAttempt(ctx context.Context, httpClient *http.Client, endpointURL string, reqBytes []byte) (systemOneResponse, time.Duration, error) {
+func (c *Classifier) executeSystemOneAttempt(ctx context.Context, httpClient *http.Client, endpointURL string, reqBytes []byte) (systemOneResponse, time.Duration, bool, error) {
 	start := time.Now()
 	req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, bytes.NewReader(reqBytes))
 	if reqErr != nil {
-		return systemOneResponse{}, 0, fmt.Errorf("failed to create http request: %w", reqErr)
+		return systemOneResponse{}, 0, false, fmt.Errorf("failed to create http request: %w", reqErr)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
@@ -620,13 +620,13 @@ func (c *Classifier) executeSystemOneAttempt(ctx context.Context, httpClient *ht
 	httpResp, doErr := httpClient.Do(req)
 	duration := time.Since(start)
 	if doErr != nil {
-		return systemOneResponse{}, duration, fmt.Errorf("systemone request failed: %w", doErr)
+		return systemOneResponse{}, duration, true, fmt.Errorf("systemone request failed: %w", doErr)
 	}
 
 	bodyBytes, readErr := io.ReadAll(io.LimitReader(httpResp.Body, 1<<20))
 	_ = httpResp.Body.Close()
 	if readErr != nil {
-		return systemOneResponse{}, duration, fmt.Errorf("failed to read systemone response body: %w", readErr)
+		return systemOneResponse{}, duration, true, fmt.Errorf("failed to read systemone response body: %w", readErr)
 	}
 
 	if httpResp.StatusCode != http.StatusOK {
@@ -634,19 +634,19 @@ func (c *Classifier) executeSystemOneAttempt(ctx context.Context, httpClient *ht
 		if len(errMsg) > 200 {
 			errMsg = errMsg[:200] + "..."
 		}
-		return systemOneResponse{}, duration, fmt.Errorf("systemone HTTP %d: %s", httpResp.StatusCode, errMsg)
+		return systemOneResponse{}, duration, true, fmt.Errorf("systemone HTTP %d: %s", httpResp.StatusCode, errMsg)
 	}
 
 	var parsedResp systemOneResponse
 	if unmarshalErr := json.Unmarshal(bodyBytes, &parsedResp); unmarshalErr != nil {
-		return systemOneResponse{}, duration, fmt.Errorf("failed to parse systemone json: %w", unmarshalErr)
+		return systemOneResponse{}, duration, true, fmt.Errorf("failed to parse systemone json: %w", unmarshalErr)
 	}
 
 	if parsedResp.Error != "" {
-		return systemOneResponse{}, duration, fmt.Errorf("systemone returned error: %s", parsedResp.Error)
+		return systemOneResponse{}, duration, true, fmt.Errorf("systemone returned error: %s", parsedResp.Error)
 	}
 
-	return parsedResp, duration, nil
+	return parsedResp, duration, false, nil
 }
 
 func (c *Classifier) evaluateSystemOneResponse(endpointURL, modelName string, duration time.Duration, respPayload systemOneResponse, lastErr error) ClassificationResult {
@@ -773,8 +773,9 @@ func (c *Classifier) classifySystemOne(ctx context.Context, targetBurst []db.Mes
 			}
 		}
 
-		respPayload, duration, lastErr = c.executeSystemOneAttempt(ctx, httpClient, endpointURL, reqBytes)
-		if lastErr == nil {
+		var retryable bool
+		respPayload, duration, retryable, lastErr = c.executeSystemOneAttempt(ctx, httpClient, endpointURL, reqBytes)
+		if lastErr == nil || !retryable {
 			break
 		}
 	}

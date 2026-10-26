@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,149 +22,234 @@ import (
 )
 
 func TestParseCLIArgs(t *testing.T) {
-	t.Run("EmptyArgs", func(t *testing.T) {
-		_, err := parseCLIArgs([]string{})
-		if err == nil {
-			t.Fatal("expected error on empty args")
-		}
-	})
+	tests := []struct {
+		name        string
+		args        []string
+		envURL      string
+		wantCmd     string
+		wantQuery   string
+		wantMode    string
+		wantTool    string
+		wantSession string
+		wantLimit   int
+		wantStep    int
+		wantContext int
+		wantJSON    bool
+		wantDirect  bool
+		wantURL     string
+		wantErrSub  string
+		wantErrIs   error
+	}{
+		{
+			name:       "EmptyArgs",
+			args:       []string{},
+			wantErrSub: "no arguments provided",
+		},
+		{
+			name:        "BareQuery",
+			args:        []string{"docker compose"},
+			wantCmd:     "search",
+			wantQuery:   "docker compose",
+			wantMode:    "auto",
+			wantLimit:   10,
+			wantStep:    -1,
+			wantContext: 2,
+		},
+		{
+			name:        "SubcommandStats",
+			args:        []string{"stats", "--json", "--url", "http://test:8080"},
+			wantCmd:     "stats",
+			wantMode:    "auto",
+			wantLimit:   10,
+			wantStep:    -1,
+			wantContext: 2,
+			wantJSON:    true,
+			wantURL:     "http://test:8080",
+		},
+		{
+			name: "SubcommandSearchWithFlags",
+			args: []string{
+				"search",
+				"--query", "memory leak",
+				"--mode", "steps",
+				"--tool", "run_command",
+				"--session", "sess-123",
+				"--limit", "25",
+				"--json",
+				"--direct-db",
+			},
+			wantCmd:     "search",
+			wantQuery:   "memory leak",
+			wantMode:    "steps",
+			wantTool:    "run_command",
+			wantSession: "sess-123",
+			wantLimit:   25,
+			wantStep:    -1,
+			wantContext: 2,
+			wantJSON:    true,
+			wantDirect:  true,
+		},
+		{
+			name: "SubcommandGetWithFlags",
+			args: []string{
+				"get",
+				"--session", "sess-123",
+				"--step", "4",
+				"--context", "5",
+				"--json",
+				"--direct-db",
+			},
+			wantCmd:     "get",
+			wantMode:    "auto",
+			wantSession: "sess-123",
+			wantLimit:   10,
+			wantStep:    4,
+			wantContext: 5,
+			wantJSON:    true,
+			wantDirect:  true,
+		},
+		{
+			name:        "SubcommandGetShorthandAndPositional",
+			args:        []string{"get", "-s", "sess-abc", "-i", "2", "-C", "1"},
+			wantCmd:     "get",
+			wantMode:    "auto",
+			wantSession: "sess-abc",
+			wantLimit:   10,
+			wantStep:    2,
+			wantContext: 1,
+		},
+		{
+			name:        "SubcommandGetPositionalSession",
+			args:        []string{"get", "sess-xyz", "-i", "3"},
+			wantCmd:     "get",
+			wantMode:    "auto",
+			wantSession: "sess-xyz",
+			wantLimit:   10,
+			wantStep:    3,
+			wantContext: 2,
+		},
+		{
+			name:       "SubcommandGetMissingSession",
+			args:       []string{"get", "--step", "2"},
+			wantErrSub: "session ID is required",
+		},
+		{
+			name:       "SubcommandGetMissingStep",
+			args:       []string{"get", "--session", "sess-1"},
+			wantErrSub: "step index is required",
+		},
+		{
+			name:       "SubcommandGetNegativeStep",
+			args:       []string{"get", "--session", "sess-1", "--step", "-5"},
+			wantErrSub: "step index is required and must be non-negative",
+		},
+		{
+			name: "ShorthandFlagsAndPositional",
+			args: []string{
+				"search",
+				"-m", "sessions",
+				"-t", "view_file",
+				"-s", "sess-abc",
+				"-n", "5",
+				"OOM error",
+			},
+			wantCmd:     "search",
+			wantQuery:   "OOM error",
+			wantMode:    "sessions",
+			wantTool:    "view_file",
+			wantSession: "sess-abc",
+			wantLimit:   5,
+			wantStep:    -1,
+			wantContext: 2,
+		},
+		{
+			name:        "FlagPrefixWithoutSubcommand",
+			args:        []string{"-q", "quick test"},
+			wantCmd:     "search",
+			wantQuery:   "quick test",
+			wantMode:    "auto",
+			wantLimit:   10,
+			wantStep:    -1,
+			wantContext: 2,
+		},
+		{
+			name:        "EnvURLOverride",
+			args:        []string{"stats"},
+			envURL:      "http://env-host:9090/",
+			wantCmd:     "stats",
+			wantMode:    "auto",
+			wantLimit:   10,
+			wantStep:    -1,
+			wantContext: 2,
+			wantURL:     "http://env-host:9090",
+		},
+		{
+			name:       "InvalidFlag",
+			args:       []string{"search", "--invalid-nonexistent-flag"},
+			wantErrSub: "flag provided but not defined",
+		},
+		{
+			name:      "HelpShortFlag",
+			args:      []string{"-h"},
+			wantErrIs: flag.ErrHelp,
+		},
+		{
+			name:      "HelpLongFlag",
+			args:      []string{"--help"},
+			wantErrIs: flag.ErrHelp,
+		},
+		{
+			name:        "BareHelpQuery",
+			args:        []string{"help"},
+			wantCmd:     "search",
+			wantQuery:   "help",
+			wantMode:    "auto",
+			wantLimit:   10,
+			wantStep:    -1,
+			wantContext: 2,
+		},
+		{
+			name:       "NegativeLimit",
+			args:       []string{"search", "--limit", "-1", "query"},
+			wantErrSub: "limit must be non-negative",
+		},
+		{
+			name:       "NegativeContext",
+			args:       []string{"search", "--context", "-1", "query"},
+			wantErrSub: "context window size must be non-negative",
+		},
+	}
 
-	t.Run("BareQuery", func(t *testing.T) {
-		cfg, err := parseCLIArgs([]string{"docker compose"})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if cfg.Command != "search" || cfg.Query != "docker compose" || cfg.Mode != "auto" {
-			t.Errorf("unexpected cfg: %+v", cfg)
-		}
-	})
-
-	t.Run("SubcommandStats", func(t *testing.T) {
-		cfg, err := parseCLIArgs([]string{"stats", "--json", "--url", "http://test:8080"})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if cfg.Command != "stats" || !cfg.JSON || cfg.BaseURL != "http://test:8080" {
-			t.Errorf("unexpected cfg: %+v", cfg)
-		}
-	})
-
-	t.Run("SubcommandSearchWithFlags", func(t *testing.T) {
-		cfg, err := parseCLIArgs([]string{
-			"search",
-			"--query", "memory leak",
-			"--mode", "steps",
-			"--tool", "run_command",
-			"--session", "sess-123",
-			"--limit", "25",
-			"--json",
-			"--direct-db",
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.envURL != "" {
+				t.Setenv("AERIAL_BRAIN_URL", tc.envURL)
+			}
+			cfg, err := parseCLIArgs(tc.args)
+			if tc.wantErrIs != nil {
+				if !errors.Is(err, tc.wantErrIs) {
+					t.Fatalf("expected error %v, got %v", tc.wantErrIs, err)
+				}
+				return
+			}
+			if tc.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantErrSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.Command != tc.wantCmd || cfg.Query != tc.wantQuery || cfg.Mode != tc.wantMode ||
+				cfg.Tool != tc.wantTool || cfg.Session != tc.wantSession || cfg.Limit != tc.wantLimit ||
+				cfg.Step != tc.wantStep || cfg.Context != tc.wantContext || cfg.JSON != tc.wantJSON ||
+				cfg.DirectDB != tc.wantDirect || (tc.wantURL != "" && cfg.BaseURL != tc.wantURL) {
+				t.Errorf("unexpected cfg: %+v, want cmd=%q query=%q mode=%q tool=%q session=%q limit=%d step=%d ctx=%d json=%v direct=%v url=%q",
+					cfg, tc.wantCmd, tc.wantQuery, tc.wantMode, tc.wantTool, tc.wantSession, tc.wantLimit, tc.wantStep, tc.wantContext, tc.wantJSON, tc.wantDirect, tc.wantURL)
+			}
 		})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if cfg.Command != "search" || cfg.Query != "memory leak" || cfg.Mode != "steps" ||
-			cfg.Tool != "run_command" || cfg.Session != "sess-123" || cfg.Limit != 25 ||
-			!cfg.JSON || !cfg.DirectDB {
-			t.Errorf("unexpected cfg: %+v", cfg)
-		}
-	})
-
-	t.Run("SubcommandGetWithFlags", func(t *testing.T) {
-		cfg, err := parseCLIArgs([]string{
-			"get",
-			"--session", "sess-123",
-			"--step", "4",
-			"--context", "5",
-			"--json",
-			"--direct-db",
-		})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if cfg.Command != "get" || cfg.Session != "sess-123" || cfg.Step != 4 ||
-			cfg.Context != 5 || !cfg.JSON || !cfg.DirectDB {
-			t.Errorf("unexpected cfg: %+v", cfg)
-		}
-	})
-
-	t.Run("SubcommandGetShorthandAndPositional", func(t *testing.T) {
-		cfg, err := parseCLIArgs([]string{
-			"get",
-			"-s", "sess-abc",
-			"-i", "2",
-			"-C", "1",
-		})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if cfg.Command != "get" || cfg.Session != "sess-abc" || cfg.Step != 2 || cfg.Context != 1 {
-			t.Errorf("unexpected cfg: %+v", cfg)
-		}
-
-		cfgPos, errPos := parseCLIArgs([]string{"get", "sess-xyz", "-i", "3"})
-		if errPos != nil || cfgPos.Session != "sess-xyz" || cfgPos.Step != 3 {
-			t.Errorf("unexpected positional get cfg: %+v, err: %v", cfgPos, errPos)
-		}
-	})
-
-	t.Run("SubcommandGetValidationErrors", func(t *testing.T) {
-		if _, err := parseCLIArgs([]string{"get", "--step", "2"}); err == nil {
-			t.Error("expected error for get with missing session")
-		}
-		if _, err := parseCLIArgs([]string{"get", "--session", "sess-1"}); err == nil {
-			t.Error("expected error for get with missing step")
-		}
-		if _, err := parseCLIArgs([]string{"get", "--session", "sess-1", "--step", "-5"}); err == nil {
-			t.Error("expected error for get with negative step")
-		}
-	})
-
-	t.Run("ShorthandFlagsAndPositional", func(t *testing.T) {
-		cfg, err := parseCLIArgs([]string{
-			"search",
-			"-m", "sessions",
-			"-t", "view_file",
-			"-s", "sess-abc",
-			"-n", "5",
-			"OOM error",
-		})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if cfg.Command != "search" || cfg.Query != "OOM error" || cfg.Mode != "sessions" ||
-			cfg.Tool != "view_file" || cfg.Session != "sess-abc" || cfg.Limit != 5 {
-			t.Errorf("unexpected cfg: %+v", cfg)
-		}
-	})
-
-	t.Run("FlagPrefixWithoutSubcommand", func(t *testing.T) {
-		cfg, err := parseCLIArgs([]string{"-q", "quick test"})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if cfg.Command != "search" || cfg.Query != "quick test" {
-			t.Errorf("unexpected cfg: %+v", cfg)
-		}
-	})
-
-	t.Run("EnvURLOverride", func(t *testing.T) {
-		t.Setenv("AERIAL_BRAIN_URL", "http://env-host:9090/")
-		cfg, err := parseCLIArgs([]string{"stats"})
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if cfg.BaseURL != "http://env-host:9090" {
-			t.Errorf("expected BaseURL trimmed, got %s", cfg.BaseURL)
-		}
-	})
-
-	t.Run("InvalidFlag", func(t *testing.T) {
-		_, err := parseCLIArgs([]string{"search", "--invalid-nonexistent-flag"})
-		if err == nil {
-			t.Fatal("expected error on unknown flag")
-		}
-	})
+	}
 }
 
 func TestFormatSearchResults(t *testing.T) {

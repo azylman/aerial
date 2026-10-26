@@ -37,8 +37,6 @@ func splitSubcommandAndArgs(args []string) (string, []string, error) {
 	}
 	first := args[0]
 	switch first {
-	case "help", "-h", "--help":
-		return "help", args[1:], flag.ErrHelp
 	case "stats", "search", "get":
 		return first, args[1:], nil
 	default:
