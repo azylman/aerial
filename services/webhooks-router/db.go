@@ -105,6 +105,7 @@ type PRRegistryUpdater interface {
 	ListDeployingPRs(ctx context.Context) ([]DeployingPR, error)
 	AdvanceVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisAdvancementResult, error)
 	ShouldSuppressVanadisDeployWake(ctx context.Context, repo string, prNumber int) (bool, error)
+	IsFinalVanadisChunk(ctx context.Context, repo string, prNumber int) (bool, error)
 	FailVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (bool, error)
 	FailVanadisChunkDetailsByPR(ctx context.Context, repo string, prNumber int) (buildID, chunkID string, failed bool, err error)
 	IncrementCIFailCount(ctx context.Context, repo string, prNumber int) (int, error)
@@ -786,7 +787,18 @@ func (r *PostgresPRRegistry) ShouldSuppressVanadisDeployWake(ctx context.Context
 	if lookup == nil || !lookup.Matched {
 		return false, nil
 	}
-	return lookup.HasRemainingChunks, nil
+	return true, nil
+}
+
+func (r *PostgresPRRegistry) IsFinalVanadisChunk(ctx context.Context, repo string, prNumber int) (bool, error) {
+	lookup, err := r.getChunkByPR(ctx, repo, prNumber)
+	if err != nil {
+		return false, err
+	}
+	if lookup == nil || !lookup.Matched {
+		return false, nil
+	}
+	return !lookup.HasRemainingChunks, nil
 }
 
 func (r *PostgresPRRegistry) FailVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (bool, error) {

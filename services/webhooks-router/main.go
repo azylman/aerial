@@ -563,6 +563,29 @@ func (s *RouterServer) isVanadisPR(ctx context.Context, repo string, prNum int) 
 	return suppressed
 }
 
+func (s *RouterServer) isFinalVanadisChunk(ctx context.Context, repo string, prNum int) bool {
+	if s.registry == nil || prNum <= 0 {
+		return false
+	}
+	finalChunk, err := s.registry.IsFinalVanadisChunk(ctx, repo, prNum)
+	if err != nil {
+		log.Printf("[webhooks-router] [vanadis] warning checking Vanadis final chunk status for %s#%d: %v", repo, prNum, err)
+		return false
+	}
+	return finalChunk
+}
+
+func (s *RouterServer) advanceVanadisChunkOnSync(ctx context.Context, repo string, prNumber int, syncHasExpected bool) error {
+	if s.registry == nil || prNumber <= 0 {
+		return nil
+	}
+	if syncHasExpected && s.isFinalVanadisChunk(ctx, repo, prNumber) {
+		log.Printf("[webhooks-router] [vanadis] deferring final chunk advancement on sync_success for %s#%d until deploy_success", repo, prNumber)
+		return nil
+	}
+	return s.advanceVanadisChunk(ctx, repo, prNumber)
+}
+
 func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, label, dmMsg, prompt string, vOpts ...vanadisPromptOpts) error {
 	if s.dispatcher == nil || !IsValidDiscordSnowflake(targetID) {
 		return nil
@@ -733,7 +756,7 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 
 	if !IsValidDiscordSnowflake(evt.TargetID) || s.dispatcher == nil {
 		if evt.Event == "sync_success" && evt.PRNumber > 0 {
-			return &evt, s.advanceVanadisChunk(ctx, evt.Repo, evt.PRNumber)
+			return &evt, s.advanceVanadisChunkOnSync(ctx, evt.Repo, evt.PRNumber, syncHasExpected)
 		}
 		return &evt, nil
 	}
@@ -762,7 +785,7 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 					log.Printf("[webhooks-router] [widget] warning syncing sync_success widget: %v", err)
 				}
 			}
-			if err := s.advanceVanadisChunk(ctx, evt.Repo, evt.PRNumber); err != nil {
+			if err := s.advanceVanadisChunkOnSync(ctx, evt.Repo, evt.PRNumber, syncHasExpected); err != nil {
 				return &evt, err
 			}
 		}
@@ -778,13 +801,19 @@ func (s *RouterServer) dispatchDeploymentSuccessPrompt(ctx context.Context, targ
 		return nil
 	}
 
+	vanadisPR := s.isVanadisPR(ctx, repo, prNum)
+	if vanadisPR && s.isFinalVanadisChunk(ctx, repo, prNum) {
+		log.Printf("[webhooks-router] [vanadis] suppressing deploy_success /prompt wake and advancing final chunk for %s#%d (job=%s)", repo, prNum, jobName)
+		return s.advanceVanadisChunk(ctx, repo, prNum)
+	}
+
 	if prNum > 0 {
 		if err := s.SyncPRWidget(ctx, repo, prNum); err != nil {
 			log.Printf("[webhooks-router] [widget] warning syncing deploy_success widget: %v", err)
 		}
 	}
 
-	if s.isVanadisPR(ctx, repo, prNum) {
+	if vanadisPR {
 		log.Printf("[webhooks-router] [vanadis] suppressing mid-run deploy_success /prompt wake for %s#%d (job=%s)", repo, prNum, jobName)
 		return nil
 	}

@@ -158,6 +158,9 @@ type mockPRRegistry struct {
 	suppressVanadisCalls []prCall
 	suppressVanadisRes   bool
 	suppressVanadisErr   error
+	finalVanadisCalls    []prCall
+	finalVanadisRes      bool
+	finalVanadisErr      error
 
 	failVanadisCalls   []prCall
 	failVanadisRes     bool
@@ -339,6 +342,14 @@ func (m *mockPRRegistry) ShouldSuppressVanadisDeployWake(ctx context.Context, re
 		return false, err
 	}
 	return m.suppressVanadisRes, nil
+}
+
+func (m *mockPRRegistry) IsFinalVanadisChunk(ctx context.Context, repo string, prNumber int) (bool, error) {
+	m.finalVanadisCalls = append(m.finalVanadisCalls, prCall{repo: repo, prNumber: prNumber})
+	if err := m.checkErr(m.finalVanadisErr); err != nil {
+		return false, err
+	}
+	return m.finalVanadisRes || (m.advanceVanadisRes != nil && m.advanceVanadisRes.Matched && m.advanceVanadisRes.BuildCompleted), nil
 }
 
 func (m *mockPRRegistry) FailVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (bool, error) {
@@ -922,6 +933,72 @@ func TestProcessHangarEvent(t *testing.T) {
 			wantTargetID:     "1555405874565091380",
 			wantAdvanceCalls: 1,
 		},
+		{
+			name: "sync_success with expected_jobs on final Vanadis chunk defers advancement until deploy_success",
+			evt: HangarDeployEvent{
+				Event: "sync_success", JobName: "git-sync", ExpectedJobs: []string{"eri"},
+				Repo: "azylman/aerial", CommitSHA: "sha_final_defer", PRNumber: 976, TargetID: "1555405874565091380", Status: "success",
+			},
+			reg: &mockPRRegistry{
+				advanceVanadisRes: &VanadisAdvancementResult{Matched: true, Advanced: true, BuildID: "build-final", ThreadID: "1555405874565091380", BuildCompleted: true},
+			},
+			disp:             &mockOutboundDispatcher{},
+			wantPR:           976,
+			wantTargetID:     "1555405874565091380",
+			wantAdvanceCalls: 0,
+			wantPrompts:      0,
+		},
+		{
+			name: "sync_success with expected_jobs and empty targetID on final Vanadis chunk defers advancement",
+			evt:  mkHangarEvt("sync_success", "git-sync", "azylman/aerial", "sha_final_empty_tid", 977, "", "success", ""),
+			reg: &mockPRRegistry{
+				recordExpectedRes: true,
+				finalVanadisRes:   true,
+			},
+			wantPR:           977,
+			wantAdvanceCalls: 0,
+		},
+		{
+			name: "sync_success without expected_jobs on final Vanadis chunk advances and dispatches build completed prompt",
+			evt:  mkHangarEvt("sync_success", "git-sync", "azylman/aerial-config", "sha_final_sync_only", 978, "1555405874565091380", "success", ""),
+			reg: &mockPRRegistry{
+				advanceVanadisRes: &VanadisAdvancementResult{Matched: true, Advanced: true, BuildID: "build-skill-sync", ThreadID: "1555405874565091380", BuildCompleted: true},
+			},
+			disp:             &mockOutboundDispatcher{},
+			wantPR:           978,
+			wantTargetID:     "1555405874565091380",
+			wantAdvanceCalls: 1,
+			wantPrompts:      1,
+			wantPromptSubs:   []string{"Vanadis build build-skill-sync completed"},
+		},
+		{
+			name: "deploy_success on final Vanadis chunk suppresses deploy prompt and dispatches build completed prompt",
+			evt:  mkHangarEvt("deploy_success", "eri", "azylman/aerial", "sha_final_deploy", 979, "1555405874565091380", "success", ""),
+			reg: &mockPRRegistry{
+				suppressVanadisRes: true,
+				advanceVanadisRes:  &VanadisAdvancementResult{Matched: true, Advanced: true, BuildID: "build-final-deploy", ThreadID: "1555405874565091380", BuildCompleted: true},
+			},
+			disp:             &mockOutboundDispatcher{},
+			wantPR:           979,
+			wantTargetID:     "1555405874565091380",
+			wantAdvanceCalls: 1,
+			wantPrompts:      1,
+			wantPromptSubs:   []string{"Vanadis build build-final-deploy completed"},
+		},
+		{
+			name: "sync_success with expected_jobs tolerates IsFinalVanadisChunk error and advances",
+			evt: HangarDeployEvent{
+				Event: "sync_success", JobName: "git-sync", ExpectedJobs: []string{"eri"},
+				Repo: "azylman/aerial", CommitSHA: "sha_final_err", PRNumber: 980, TargetID: "1555405874565091380", Status: "success",
+			},
+			reg: &mockPRRegistry{
+				finalVanadisErr: errors.New("vanadis final check err"),
+			},
+			disp:             &mockOutboundDispatcher{},
+			wantPR:           980,
+			wantTargetID:     "1555405874565091380",
+			wantAdvanceCalls: 1,
+		},
 	}
 
 	for _, tc := range tests {
@@ -1140,6 +1217,7 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 		targetID            string
 		suppressVanadis     bool
 		suppressVanadisErr  error
+		advanceVanadisRes   *VanadisAdvancementResult
 		wantTargetID        string
 		wantErr             bool
 		wantPrompts         int
@@ -1193,6 +1271,23 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 			wantWidgets:         1,
 		},
 		{
+			name:                "dispatchDeploymentSuccessPrompt final Vanadis chunk advances build and dispatches completion prompt",
+			isDeploymentSuccess: true,
+			targetID:            validSnowflake,
+			suppressVanadis:     true,
+			advanceVanadisRes: &VanadisAdvancementResult{
+				Matched:        true,
+				Advanced:       true,
+				BuildID:        "build-done",
+				ThreadID:       validSnowflake,
+				BuildCompleted: true,
+			},
+			wantPrompts:    1,
+			wantPromptSubs: []string{"Vanadis build build-done completed"},
+			wantDMs:        0,
+			wantWidgets:    1,
+		},
+		{
 			name:                "dispatchDeploymentSuccessPrompt Vanadis wake suppression DB error fallback",
 			isDeploymentSuccess: true,
 			targetID:            validSnowflake,
@@ -1212,6 +1307,7 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 					resolveTargetID:    tc.targetID,
 					suppressVanadisRes: tc.suppressVanadis,
 					suppressVanadisErr: tc.suppressVanadisErr,
+					advanceVanadisRes:  tc.advanceVanadisRes,
 				}
 			}
 			mockDisp := &mockOutboundDispatcher{widgetErr: tc.widgetErr}
@@ -1768,6 +1864,14 @@ func TestAdvanceVanadisChunk(t *testing.T) {
 			err := srv.advanceVanadisChunk(ctx, "azylman/aerial", tc.prNumber)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("advanceVanadisChunk() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.useNilRegistry || tc.prNumber <= 0 {
+				if srv.isFinalVanadisChunk(ctx, "azylman/aerial", tc.prNumber) {
+					t.Errorf("expected isFinalVanadisChunk false for guard case")
+				}
+				if err := srv.advanceVanadisChunkOnSync(ctx, "azylman/aerial", tc.prNumber, true); err != nil {
+					t.Errorf("expected advanceVanadisChunkOnSync nil error for guard case, got %v", err)
+				}
 			}
 			if len(disp.PromptCalls()) != tc.wantPrompts {
 				t.Errorf("got %d prompts, want %d", len(disp.PromptCalls()), tc.wantPrompts)

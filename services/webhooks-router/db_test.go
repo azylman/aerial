@@ -832,6 +832,12 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 			wantBool:       false,
 		},
 		{
+			name:           "IsFinalVanadisChunk typed nil registry returns false",
+			method:         "IsFinalVanadisChunk",
+			useNilRegistry: true,
+			wantBool:       false,
+		},
+		{
 			name:           "ResolveVanadisChunkForPR typed nil registry returns false",
 			method:         "ResolveVanadisChunkForPR",
 			useNilRegistry: true,
@@ -848,6 +854,11 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 		{
 			name:       "ShouldSuppressVanadisDeployWake empty guard",
 			method:     "ShouldSuppressVanadisDeployWake",
+			emptyGuard: true,
+		},
+		{
+			name:       "IsFinalVanadisChunk empty guard",
+			method:     "IsFinalVanadisChunk",
 			emptyGuard: true,
 		},
 		{
@@ -875,11 +886,11 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 			wantBool:   true,
 		},
 		{
-			name:       "ShouldSuppressVanadisDeployWake returns false when no remaining chunks",
+			name:       "ShouldSuppressVanadisDeployWake returns true when no remaining chunks",
 			method:     "ShouldSuppressVanadisDeployWake",
 			httpStatus: http.StatusOK,
 			httpBody:   `{"matched":true,"chunk_id":"c1","build_id":"b1","has_remaining_chunks":false}`,
-			wantBool:   false,
+			wantBool:   true,
 		},
 		{
 			name:       "ShouldSuppressVanadisDeployWake returns false when not matched",
@@ -898,6 +909,43 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 		{
 			name:       "ShouldSuppressVanadisDeployWake returns error on invalid json",
 			method:     "ShouldSuppressVanadisDeployWake",
+			httpStatus: http.StatusOK,
+			httpBody:   `{invalid-json`,
+			wantErr:    true,
+		},
+
+		// IsFinalVanadisChunk
+		{
+			name:       "IsFinalVanadisChunk returns false on match with remaining chunks",
+			method:     "IsFinalVanadisChunk",
+			httpStatus: http.StatusOK,
+			httpBody:   `{"matched":true,"chunk_id":"c1","build_id":"b1","has_remaining_chunks":true}`,
+			wantBool:   false,
+		},
+		{
+			name:       "IsFinalVanadisChunk returns true when no remaining chunks",
+			method:     "IsFinalVanadisChunk",
+			httpStatus: http.StatusOK,
+			httpBody:   `{"matched":true,"chunk_id":"c1","build_id":"b1","has_remaining_chunks":false}`,
+			wantBool:   true,
+		},
+		{
+			name:       "IsFinalVanadisChunk returns false when not matched",
+			method:     "IsFinalVanadisChunk",
+			httpStatus: http.StatusOK,
+			httpBody:   `{"matched":false}`,
+			wantBool:   false,
+		},
+		{
+			name:       "IsFinalVanadisChunk returns error on 500",
+			method:     "IsFinalVanadisChunk",
+			httpStatus: http.StatusInternalServerError,
+			httpBody:   `{"error":"fail"}`,
+			wantErr:    true,
+		},
+		{
+			name:       "IsFinalVanadisChunk returns error on invalid json",
+			method:     "IsFinalVanadisChunk",
 			httpStatus: http.StatusOK,
 			httpBody:   `{invalid-json`,
 			wantErr:    true,
@@ -1053,6 +1101,14 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 				}
 				if !tc.wantErr && sup != tc.wantBool {
 					t.Errorf("got %v, want %v", sup, tc.wantBool)
+				}
+			case "IsFinalVanadisChunk":
+				finalChunk, err := reg.IsFinalVanadisChunk(ctx, repo, prNum)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("IsFinalVanadisChunk() err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if !tc.wantErr && finalChunk != tc.wantBool {
+					t.Errorf("got %v, want %v", finalChunk, tc.wantBool)
 				}
 			case "ResolveVanadisChunkForPR":
 				matched, _, effort, err := reg.ResolveVanadisChunkForPR(ctx, repo, prNum)
