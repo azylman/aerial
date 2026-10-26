@@ -1,20 +1,4 @@
 {
   "files": {},
-  "functions": {
-    "services/eri/pkg/runner/runner.go::ExtractCommandName": {
-      "cc": 26
-    },
-    "services/eri/pkg/runner/runner.go::tokenizeCommandLine": {
-      "cc": 27
-    },
-    "services/eri/pkg/runner/unified_pool.go::*UnifiedProcessPool.GetOrCreate": {
-      "cc": 36
-    },
-    "services/eri/pkg/runner/unified_pool.go::*UnifiedProcessPool.MarkDirty": {
-      "cc": 22
-    },
-    "services/eri/pkg/runner/unified_pool.go::*unifiedSessionLease.Execute": {
-      "cc": 30
-    }
-  }
+  "functions": {}
 }

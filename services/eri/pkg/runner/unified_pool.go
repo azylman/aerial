@@ -188,6 +188,97 @@ func (p *UnifiedProcessPool) closeEvictedDaemon(oldD *StreamingDaemon, targetKey
 	}(oldD, targetKey)
 }
 
+func (p *UnifiedProcessPool) canReuseDaemon(d *StreamingDaemon, trimmedSess string) bool {
+	if !isDaemonMatch(d, trimmedSess) {
+		return false
+	}
+	if trimmedSess != "" {
+		return true
+	}
+	should, _ := p.ShouldRotate(d)
+	return !should
+}
+
+func (p *UnifiedProcessPool) checkExistingDaemonForCreateLocked(targetKey, trimmedSess string) (*StreamingDaemon, string, bool) {
+	d, exists := p.daemons[targetKey]
+	if !exists || d == nil {
+		return nil, trimmedSess, false
+	}
+	should, rotReason := p.ShouldRotate(d)
+	if isDaemonMatch(d, trimmedSess) && (trimmedSess != "" || !should) {
+		return d, trimmedSess, true
+	}
+	if !should && trimmedSess == "" && d.SessionID() != "" && !strings.Contains(targetKey, ":") {
+		trimmedSess = d.SessionID()
+	}
+	delete(p.daemons, targetKey)
+	p.closeEvictedDaemon(d, targetKey)
+	if should && trimmedSess == "" {
+		metrics.RecordSessionRotation("pre_flight", "pool", rotReason)
+	}
+	return nil, trimmedSess, false
+}
+
+func (p *UnifiedProcessPool) buildDaemonConfig(targetKey, trimmedSess string, initialTurns []int) (DaemonConfig, error) {
+	daemonEnv := filterVanadisChunkEnv(p.cfg.Env)
+	if home := strings.TrimSpace(p.cfg.GeminiHomeDir); home != "" {
+		geminiDir := filepath.Join(home, ".gemini")
+		if err := os.MkdirAll(geminiDir, 0o755); err != nil {
+			return DaemonConfig{}, fmt.Errorf("failed to create runtime home directory %q: %w", geminiDir, err)
+		}
+		daemonEnv = BuildAgyEnv(AgyEnvInput{
+			BaseEnv:  p.cfg.Env,
+			HomeDir:  home,
+			TargetID: targetKey,
+			Timezone: p.cfg.Timezone,
+		})
+	}
+
+	initTurnCount := 0
+	if len(initialTurns) > 0 && initialTurns[0] > 0 {
+		initTurnCount = initialTurns[0]
+	}
+
+	return DaemonConfig{
+		ThreadID: targetKey, SessionID: trimmedSess, InitialTurnCount: initTurnCount,
+		Model: p.cfg.Model, AgyBin: p.cfg.AgyBin, Cwd: p.cfg.Cwd, Env: daemonEnv,
+		GeminiHomeDir: p.cfg.GeminiHomeDir, Timeout: p.cfg.HandshakeTimeout,
+		TranscriptRescuer: p.cfg.TranscriptRescuer, MemoryRetriever: p.cfg.MemoryRetriever,
+		AmbientContextRetriever: p.cfg.AmbientContextRetriever,
+	}, nil
+}
+
+func (p *UnifiedProcessPool) spawnStreamingDaemonWithRetry(ctx context.Context, targetKey string, daemonCfg DaemonConfig) (*StreamingDaemon, error) {
+	daemon, spawnErr := StartStreamingDaemon(p.ctx, daemonCfg, p.spawner)
+	if spawnErr != nil && strings.Contains(spawnErr.Error(), "daemon startup timed out waiting for init event") && p.ctx.Err() == nil && ctx.Err() == nil {
+		log.Printf("[UnifiedProcessPool] Warning: cold-start handshake timed out for target %q; retrying once...", targetKey)
+		daemon, spawnErr = StartStreamingDaemon(p.ctx, daemonCfg, p.spawner)
+	}
+	if spawnErr != nil {
+		if p.isClosed() {
+			return nil, fmt.Errorf("process pool is closed")
+		}
+		return nil, fmt.Errorf("failed to start daemon for target %q: %w", targetKey, spawnErr)
+	}
+	return daemon, nil
+}
+
+func (p *UnifiedProcessPool) registerSpawnedDaemon(targetKey string, daemon *StreamingDaemon) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		if closeErr := daemon.Close(); closeErr != nil {
+			log.Printf("[UnifiedProcessPool] Warning: failed closing daemon after pool closed: %v", closeErr)
+		}
+		return fmt.Errorf("process pool is closed")
+	}
+	if prev, exists := p.daemons[targetKey]; exists && prev != nil && prev != daemon {
+		p.closeEvictedDaemon(prev, targetKey)
+	}
+	p.daemons[targetKey] = daemon
+	return nil
+}
+
 // GetOrCreate retrieves an active StreamingDaemon for targetKey, or starts one via singleflight.
 func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, sessionID string, initialTurns ...int) (*StreamingDaemon, error) {
 	trimmedSess := strings.TrimSpace(sessionID)
@@ -196,11 +287,9 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 		p.mu.RUnlock()
 		return nil, fmt.Errorf("process pool is closed")
 	}
-	if d, exists := p.daemons[targetKey]; exists {
-		if should, _ := p.ShouldRotate(d); isDaemonMatch(d, trimmedSess) && (trimmedSess != "" || !should) {
-			p.mu.RUnlock()
-			return d, nil
-		}
+	if d := p.daemons[targetKey]; p.canReuseDaemon(d, trimmedSess) {
+		p.mu.RUnlock()
+		return d, nil
 	}
 	p.mu.RUnlock()
 
@@ -210,75 +299,26 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 			p.mu.Unlock()
 			return nil, fmt.Errorf("process pool is closed")
 		}
-		if d, exists := p.daemons[targetKey]; exists && d != nil {
-			should, rotReason := p.ShouldRotate(d)
-			if isDaemonMatch(d, trimmedSess) && (trimmedSess != "" || !should) {
-				p.mu.Unlock()
-				return d, nil
-			}
-			if !should && trimmedSess == "" && d.SessionID() != "" && !strings.Contains(targetKey, ":") {
-				trimmedSess = d.SessionID()
-			}
-			delete(p.daemons, targetKey)
-			p.closeEvictedDaemon(d, targetKey)
-			if should && trimmedSess == "" {
-				metrics.RecordSessionRotation("pre_flight", "pool", rotReason)
-			}
-		}
+		reusable, updatedSess, reused := p.checkExistingDaemonForCreateLocked(targetKey, trimmedSess)
+		trimmedSess = updatedSess
 		p.mu.Unlock()
-
-		daemonEnv := filterVanadisChunkEnv(p.cfg.Env)
-		if home := strings.TrimSpace(p.cfg.GeminiHomeDir); home != "" {
-			geminiDir := filepath.Join(home, ".gemini")
-			if err := os.MkdirAll(geminiDir, 0o755); err != nil {
-				return nil, fmt.Errorf("failed to create runtime home directory %q: %w", geminiDir, err)
-			}
-			daemonEnv = BuildAgyEnv(AgyEnvInput{
-				BaseEnv:  p.cfg.Env,
-				HomeDir:  home,
-				TargetID: targetKey,
-				Timezone: p.cfg.Timezone,
-			})
+		if reused {
+			return reusable, nil
 		}
 
-		initTurnCount := 0
-		if len(initialTurns) > 0 && initialTurns[0] > 0 {
-			initTurnCount = initialTurns[0]
+		daemonCfg, err := p.buildDaemonConfig(targetKey, trimmedSess, initialTurns)
+		if err != nil {
+			return nil, err
 		}
 
-		daemonCfg := DaemonConfig{
-			ThreadID: targetKey, SessionID: trimmedSess, InitialTurnCount: initTurnCount,
-			Model: p.cfg.Model, AgyBin: p.cfg.AgyBin, Cwd: p.cfg.Cwd, Env: daemonEnv,
-			GeminiHomeDir: p.cfg.GeminiHomeDir, Timeout: p.cfg.HandshakeTimeout,
-			TranscriptRescuer: p.cfg.TranscriptRescuer, MemoryRetriever: p.cfg.MemoryRetriever,
-			AmbientContextRetriever: p.cfg.AmbientContextRetriever,
+		daemon, err := p.spawnStreamingDaemonWithRetry(ctx, targetKey, daemonCfg)
+		if err != nil {
+			return nil, err
 		}
 
-		daemon, spawnErr := StartStreamingDaemon(p.ctx, daemonCfg, p.spawner)
-		if spawnErr != nil && strings.Contains(spawnErr.Error(), "daemon startup timed out waiting for init event") && p.ctx.Err() == nil && ctx.Err() == nil {
-			log.Printf("[UnifiedProcessPool] Warning: cold-start handshake timed out for target %q; retrying once...", targetKey)
-			daemon, spawnErr = StartStreamingDaemon(p.ctx, daemonCfg, p.spawner)
+		if err := p.registerSpawnedDaemon(targetKey, daemon); err != nil {
+			return nil, err
 		}
-		if spawnErr != nil {
-			if p.isClosed() {
-				return nil, fmt.Errorf("process pool is closed")
-			}
-			return nil, fmt.Errorf("failed to start daemon for target %q: %w", targetKey, spawnErr)
-		}
-
-		p.mu.Lock()
-		if p.closed {
-			p.mu.Unlock()
-			if closeErr := daemon.Close(); closeErr != nil {
-				log.Printf("[UnifiedProcessPool] Warning: failed closing daemon after pool closed: %v", closeErr)
-			}
-			return nil, fmt.Errorf("process pool is closed")
-		}
-		if prev, exists := p.daemons[targetKey]; exists && prev != nil && prev != daemon {
-			p.closeEvictedDaemon(prev, targetKey)
-		}
-		p.daemons[targetKey] = daemon
-		p.mu.Unlock()
 		return daemon, nil
 	})
 
@@ -402,21 +442,20 @@ func (p *UnifiedProcessPool) UpdatePrewarmedTargets(targets []string) {
 	p.cfg.PrewarmedTargets = newTargets
 }
 
-// MarkDirty marks all active daemons as dirty and optimistically rotates idle daemons.
-func (p *UnifiedProcessPool) MarkDirty() {
-	if p == nil {
-		return
-	}
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
-		return
-	}
+type evictedEntry struct {
+	targetKey string
+	daemon    *StreamingDaemon
+}
 
-	type evictedEntry struct {
-		targetKey string
-		daemon    *StreamingDaemon
+func (p *UnifiedProcessPool) shouldPrewarmTargetLocked(target string) bool {
+	if p.prewarming[target] || p.isTargetLocked(target) {
+		return false
 	}
+	d, exists := p.daemons[target]
+	return !exists || d == nil || d.State() == StateClosed
+}
+
+func (p *UnifiedProcessPool) collectDirtyEvictionsAndPrewarmsLocked() ([]evictedEntry, []string) {
 	var toClose []evictedEntry
 	var toPrewarm []string
 
@@ -442,19 +481,30 @@ func (p *UnifiedProcessPool) MarkDirty() {
 		}
 	}
 
-	for _, target := range p.cfg.PrewarmedTargets {
-		target = strings.TrimSpace(target)
-		if target == "" {
-			continue
-		}
-		d, exists := p.daemons[target]
-		if (!exists || d == nil || d.State() == StateClosed) && !p.prewarming[target] && !p.isTargetLocked(target) {
+	for _, rawTarget := range p.cfg.PrewarmedTargets {
+		target := strings.TrimSpace(rawTarget)
+		if target != "" && p.shouldPrewarmTargetLocked(target) {
 			p.prewarming[target] = true
 			toPrewarm = append(toPrewarm, target)
 		}
 	}
 
 	p.bgWg.Add(len(toClose) + len(toPrewarm))
+	return toClose, toPrewarm
+}
+
+// MarkDirty marks all active daemons as dirty and optimistically rotates idle daemons.
+func (p *UnifiedProcessPool) MarkDirty() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
+
+	toClose, toPrewarm := p.collectDirtyEvictionsAndPrewarmsLocked()
 	p.mu.Unlock()
 
 	for _, entry := range toClose {
@@ -871,6 +921,38 @@ func (s *leaseTurnSinkWrapper) OnError(err error) {
 	s.buf.OnError(err)
 }
 
+func (l *unifiedSessionLease) ensureActiveDaemon(ctx context.Context) error {
+	if l.pool == nil || (l.daemon != nil && l.daemon.State() != StateClosed && !l.daemon.IsDirty()) {
+		return nil
+	}
+	refreshed, err := l.pool.GetOrCreate(ctx, l.targetKey, l.sessionID, l.turnCount)
+	if err != nil {
+		return err
+	}
+	l.daemon = refreshed
+	if refreshed.SessionID() != "" {
+		l.sessionID = refreshed.SessionID()
+	}
+	return nil
+}
+
+func (l *unifiedSessionLease) evaluateEmptyResponseOutcome(ctx context.Context, turn *TurnContext, res *TurnResult) {
+	if res == nil || IsSubstantiveResponse(res.Response) {
+		return
+	}
+	isQuota := IsQuotaPause(res.Stderr, "") || IsCapacityBlip(res.Stderr, "")
+	if !isQuota && l.pool != nil && l.pool.cfg.SessionManager != nil && l.sessionID != "" {
+		if tErr, err := l.pool.cfg.SessionManager.ExtractLastTurnError(ctx, l.sessionID, turn.CreatedAt); err == nil && (IsQuotaPause(tErr, "") || IsCapacityBlip(tErr, "")) {
+			isQuota = true
+		}
+	}
+	if isQuota {
+		l.cancelRotation = true
+	} else if l.daemon != nil {
+		l.daemon.MarkDirty()
+	}
+}
+
 func (l *unifiedSessionLease) Execute(ctx context.Context, turn *TurnContext) (*TurnResult, error) {
 	if turn == nil {
 		return nil, errors.New("turn context cannot be nil")
@@ -885,15 +967,8 @@ func (l *unifiedSessionLease) Execute(ctx context.Context, turn *TurnContext) (*
 	turn.Sink = &leaseTurnSinkWrapper{inner: origSink, buf: bufSink}
 	defer func() { turn.Sink = origSink }()
 
-	if l.pool != nil && (l.daemon == nil || l.daemon.State() == StateClosed || l.daemon.IsDirty()) {
-		refreshed, err := l.pool.GetOrCreate(ctx, l.targetKey, l.sessionID, l.turnCount)
-		if err != nil {
-			return nil, err
-		}
-		l.daemon = refreshed
-		if refreshed.SessionID() != "" {
-			l.sessionID = refreshed.SessionID()
-		}
+	if err := l.ensureActiveDaemon(ctx); err != nil {
+		return nil, err
 	}
 
 	handleErr := func(err error) {
@@ -920,19 +995,7 @@ func (l *unifiedSessionLease) Execute(ctx context.Context, turn *TurnContext) (*
 		handleErr(waitErr)
 		return nil, waitErr
 	}
-	if res != nil && !IsSubstantiveResponse(res.Response) {
-		isQuota := IsQuotaPause(res.Stderr, "") || IsCapacityBlip(res.Stderr, "")
-		if !isQuota && l.pool != nil && l.pool.cfg.SessionManager != nil && l.sessionID != "" {
-			if tErr, err := l.pool.cfg.SessionManager.ExtractLastTurnError(ctx, l.sessionID, turn.CreatedAt); err == nil && (IsQuotaPause(tErr, "") || IsCapacityBlip(tErr, "")) {
-				isQuota = true
-			}
-		}
-		if isQuota {
-			l.cancelRotation = true
-		} else if l.daemon != nil {
-			l.daemon.MarkDirty()
-		}
-	}
+	l.evaluateEmptyResponseOutcome(ctx, turn, res)
 	l.turnCount++
 	l.isCold = false
 	return res, nil
