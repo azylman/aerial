@@ -634,7 +634,18 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployFailedByJob(ctx context.Conte
 	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	selectQuery := `SELECT id, target_id, pr_number, COALESCE(merge_sha, ''), repo FROM pr_registry WHERE status IN ('deploying', 'merged', 'deploy_failed') AND metadata->'jobs' ? $1 ORDER BY updated_at DESC LIMIT 1;`
+	selectQuery := `
+		WITH latest AS (
+			SELECT id, target_id, pr_number, COALESCE(merge_sha, '') AS merge_sha, repo, status
+			FROM pr_registry
+			WHERE (status IN ('deploying', 'merged', 'deploy_failed') AND metadata->'jobs' ? $1)
+			   OR (status = 'deployed' AND metadata->'deployed_jobs' ? $1)
+			ORDER BY updated_at DESC, id DESC
+			LIMIT 1
+		)
+		SELECT id, target_id, pr_number, merge_sha, repo
+		FROM latest
+		WHERE status IN ('deploying', 'merged', 'deploy_failed');`
 	var id int64
 	var targetID, mergeSHA, repoOut string
 	var prNum int
