@@ -34,7 +34,7 @@ type CallBrief struct {
 	MaxDurationSeconds int          `json:"max_duration_seconds,omitempty"`
 }
 
-const defaultApprovalFirewall = "ZERO SPEND AUTHORIZED. You are not authorized to agree to any financial charges, fees, deposits, or non-refundable commitments. If the other party requires payment or financial authorization, politely inform them you will have the account owner follow up directly."
+const defaultApprovalFirewall = "ZERO SPEND AUTHORIZED. You are not authorized to agree to any financial charges, fees, deposits, or non-refundable commitments. If the other party requires payment or financial authorization, politely inform them you will have the person you are calling for follow up directly."
 
 // ValidateInitiateCallArgs validates and normalizes arguments for initiating a call.
 func ValidateInitiateCallArgs(toRaw, fromNumber, message string, brief CallBrief) (string, CallBrief, error) {
@@ -126,7 +126,7 @@ func normalizeBriefDefaults(b *CallBrief) {
 func BuildSystemPrompt(brief CallBrief, mode CallMode, ownerInstructions []string) string {
 	var sb strings.Builder
 
-	sb.WriteString("You are Aerial, calling on behalf of the owner.\n")
+	sb.WriteString("You are Aerial, an assistant making or handling a phone call.\n")
 	sb.WriteString("Speak naturally, concisely, and professionally. Keep spoken turns brief (1-2 sentences) suited for real-time telephone conversation.\n\n")
 
 	if brief.Language != "" {
@@ -139,9 +139,9 @@ func BuildSystemPrompt(brief CallBrief, mode CallMode, ownerInstructions []strin
 	switch brief.Identity.Disclose {
 	case "", "when-asked":
 		if brief.Identity.Introduction == "" {
-			sb.WriteString("AI IDENTITY DISCLOSURE POLICY: when-asked (Progressive disclosure: focus directly on the task without introducing yourself upfront. If asked who is calling or for your name, state that your name is Aerial and you are the owner's assistant. Only disclose that you are an AI assistant if explicitly asked whether you are an AI or automated system.)\n\n")
+			sb.WriteString("AI IDENTITY DISCLOSURE POLICY: when-asked (Progressive disclosure: focus directly on the task without introducing yourself upfront. If asked who is calling or for your name, state that your name is Aerial and phrase your role naturally for the situation—for example, '<Name>'s assistant' when the person's name has been given or is in the permitted disclosures/context, 'the homeowner's assistant' for a contractor, or simply that you are an assistant helping schedule or check on this—never literally say 'the owner's assistant' where it sounds unnatural like at a restaurant or dentist. Only disclose that you are an AI assistant if explicitly asked whether you are an AI or automated system.)\n\n")
 		} else {
-			sb.WriteString("AI IDENTITY DISCLOSURE POLICY: when-asked (Progressive disclosure: if asked who is calling or for your name, state that your name is Aerial and you are the owner's assistant. Only disclose that you are an AI assistant if explicitly asked whether you are an AI or automated system.)\n\n")
+			sb.WriteString("AI IDENTITY DISCLOSURE POLICY: when-asked (Progressive disclosure: if asked who is calling or for your name, state that your name is Aerial and phrase your role naturally for the situation—for example, '<Name>'s assistant' when the person's name has been given or is in the permitted disclosures/context, 'the homeowner's assistant' for a contractor, or simply that you are an assistant helping schedule or check on this—never literally say 'the owner's assistant' where it sounds unnatural like at a restaurant or dentist. Only disclose that you are an AI assistant if explicitly asked whether you are an AI or automated system.)\n\n")
 		}
 	default:
 		sb.WriteString(fmt.Sprintf("AI IDENTITY DISCLOSURE POLICY: %s\n\n", brief.Identity.Disclose))

@@ -276,7 +276,7 @@ func TestBuildSystemPrompt(t *testing.T) {
 				"NOTIFY MODE",
 				"technician has arrived",
 				"IDENTITY INTRODUCTION: Hi, calling from the office",
-				"Progressive disclosure: if asked who is calling or for your name, state that your name is Aerial and you are the owner's assistant",
+				"Progressive disclosure: if asked who is calling or for your name, state that your name is Aerial and phrase your role naturally for the situation",
 			},
 		},
 	}

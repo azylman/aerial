@@ -197,7 +197,7 @@ func (m *CallSessionManager) HandleMediaWebSocket(w http.ResponseWriter, r *http
 			if call.Direction == "inbound" {
 				openingGreeting = "Hello, thank you for calling. How can I help you today?"
 			} else {
-				openingGreeting = "Hello, I am calling on behalf of the account owner."
+				openingGreeting = "Hello, I am calling to help with an inquiry."
 			}
 		}
 		voicemailMsg = ResolveVoicemailMessage(call.Brief, openingGreeting)
@@ -209,9 +209,9 @@ func (m *CallSessionManager) HandleMediaWebSocket(w http.ResponseWriter, r *http
 		}
 		systemPrompt = BuildSystemPrompt(call.Brief, mode, nil)
 	} else {
-		openingGreeting = "Hello, I am calling on behalf of the account owner."
+		openingGreeting = "Hello, I am calling to help with an inquiry."
 		voicemailMsg = openingGreeting
-		systemPrompt = "You are Aerial, calling on behalf of the owner. Focus directly on the task without introducing yourself upfront. If asked who is calling, say your name is Aerial and you are the owner's assistant; only disclose that you are an AI assistant if explicitly asked."
+		systemPrompt = "You are Aerial, an assistant making or handling a phone call. Focus directly on the task without introducing yourself upfront. If asked who is calling, say your name is Aerial and phrase your role naturally for the situation (for example, '<Name>'s assistant' if their name is known); only disclose that you are an AI assistant if explicitly asked."
 	}
 
 	sess := NewMediaStreamSession(MediaStreamSessionConfig{
