@@ -227,6 +227,9 @@ func (s *Server) toolBrowserEvaluate(ctx context.Context, argsRaw json.RawMessag
 	if err := json.Unmarshal(argsRaw, &args); err != nil || strings.TrimSpace(args.Expression) == "" {
 		return "Argument 'expression' is required", true
 	}
+	if err := ValidateEvaluateExpression(args.Expression); err != nil {
+		return err.Error(), true
+	}
 	awaitPromise := true
 	if args.AwaitPromise != nil {
 		awaitPromise = *args.AwaitPromise
@@ -300,7 +303,8 @@ func (s *Server) toolBrowserClick(ctx context.Context, argsRaw json.RawMessage) 
 	}
 
 	if cr.HasRect {
-		if err := s.client.DispatchTrustedClick(ctx, cr.X, cr.Y); err != nil {
+		jx, jy := JitterCoord(cr.X, cr.Y, cr.Width, cr.Height)
+		if err := s.client.DispatchTrustedClick(ctx, jx, jy); err != nil {
 			return fmt.Sprintf("Dispatch trusted click failed: %v", err), true
 		}
 	}
@@ -451,6 +455,8 @@ func (s *Server) toolAmazonAddToCart(ctx context.Context, argsRaw json.RawMessag
 		HasRect      bool   `json:"hasRect"`
 		X            int    `json:"x"`
 		Y            int    `json:"y"`
+		Width        int    `json:"width"`
+		Height       int    `json:"height"`
 		ProductTitle string `json:"productTitle"`
 	}
 	if err := json.Unmarshal(raw, &btnRes); err != nil || !btnRes.Found {
@@ -458,7 +464,8 @@ func (s *Server) toolAmazonAddToCart(ctx context.Context, argsRaw json.RawMessag
 	}
 
 	if btnRes.HasRect {
-		if err := s.client.DispatchTrustedClick(ctx, btnRes.X, btnRes.Y); err != nil {
+		jx, jy := JitterCoord(btnRes.X, btnRes.Y, btnRes.Width, btnRes.Height)
+		if err := s.client.DispatchTrustedClick(ctx, jx, jy); err != nil {
 			return fmt.Sprintf("Click add to cart failed: %v", err), true
 		}
 	}

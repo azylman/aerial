@@ -49,6 +49,7 @@ type CDPClient struct {
 	activeConn      *websocket.Conn
 	activeSessionID string
 	stealthReady    bool
+	lastNavHost     string
 	pending         map[int64]chan cdpResponse
 	msgID           int64
 }
@@ -173,6 +174,7 @@ func (c *CDPClient) handleDisconnect(conn *websocket.Conn, err error) {
 		c.activeConn = nil
 		c.activeSessionID = ""
 		c.stealthReady = false
+		c.lastNavHost = ""
 	}
 	for id, ch := range c.pending {
 		delete(c.pending, id)
@@ -386,6 +388,8 @@ func (c *CDPClient) DispatchTrustedClick(ctx context.Context, x, y int) error {
 		return fmt.Errorf("mousePressed: %w", err)
 	}
 
+	_ = c.WaitSettle(ctx) //nolint:errcheck
+
 	if _, err := c.SendCDP(ctx, "Input.dispatchMouseEvent", map[string]any{
 		"type":       "mouseReleased",
 		"x":          x,
@@ -439,13 +443,26 @@ func (c *CDPClient) EvaluateJS(ctx context.Context, expr string, awaitPromise, r
 	return evalRes.Result.Value, nil
 }
 
-// Navigate tells CDP to navigate to url and waits for settle delay.
+// Navigate tells CDP to navigate to url with per-host pacing and waits for settle delay.
 func (c *CDPClient) Navigate(ctx context.Context, destURL string) error {
+	host, _ := parseURLHostPort(destURL)
+	c.stateMu.Lock()
+	sameHost := host != "" && c.lastNavHost == host
+	c.stateMu.Unlock()
+	if sameHost {
+		_ = c.WaitSettle(ctx) //nolint:errcheck
+	}
+
 	if _, err := c.SendCDP(ctx, "Page.navigate", map[string]any{
 		"url": destURL,
 	}); err != nil {
 		return fmt.Errorf("Page.navigate: %w", err)
 	}
+
+	c.stateMu.Lock()
+	c.lastNavHost = host
+	c.stateMu.Unlock()
+
 	return c.WaitSettle(ctx)
 }
 
@@ -499,6 +516,7 @@ func (c *CDPClient) Close() error {
 	c.activeConn = nil
 	c.stealthReady = false
 	c.activeSessionID = ""
+	c.lastNavHost = ""
 	c.stateMu.Unlock()
 
 	if conn != nil {

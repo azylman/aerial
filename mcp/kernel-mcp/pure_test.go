@@ -252,9 +252,11 @@ func TestScriptBuilders(t *testing.T) {
 		{"build dispatch input events", BuildDispatchInputEventsScript("input#name"), `Event("input"`},
 		{"build amazon search script limit", BuildAmazonSearchScript(7), "Math.min(nodes.length, 7)"},
 		{"build amazon search script default limit", BuildAmazonSearchScript(0), "Math.min(nodes.length, 5)"},
-		{"build amazon cart script", BuildAmazonCartScript(), "#sc-subtotal-amount-activecart"},
-		{"build amazon add to cart script", BuildAmazonAddToCartScript(), "#add-to-cart-button"},
-		{"build amazon cart count script", BuildAmazonCartCountScript(), "#nav-cart-count"},
+		{"build amazon search script delivery recipe", BuildAmazonSearchScript(5), `delivery-recipe`},
+		{"build amazon cart script", BuildAmazonCartScript(), ".a-truncate-full"},
+		{"build amazon add to cart script", BuildAmazonAddToCartScript(), "#newAccordionRow_0"},
+		{"build amazon cart count script", BuildAmazonCartCountScript(), "#attachSiNoCoverage"},
+		{"stealth init script webgpu and offscreen", StealthInitScript, "OffscreenCanvas"},
 	}
 
 	for _, tc := range tests {
@@ -262,6 +264,49 @@ func TestScriptBuilders(t *testing.T) {
 			t.Parallel()
 			if !strings.Contains(tc.script, tc.contains) {
 				t.Fatalf("Script in %s did not contain %q", tc.name, tc.contains)
+			}
+		})
+	}
+}
+
+func TestValidateEvaluateExpression(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		expr    string
+		wantErr bool
+	}{
+		{"safe dom read", "document.querySelector('#price')?.innerText", false},
+		{"blocked fetch", "fetch('https://www.amazon.com/s?k=ram')", true},
+		{"blocked xhr", "new XMLHttpRequest()", true},
+		{"blocked click", "btn?.click()", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if gotErr := ValidateEvaluateExpression(tc.expr) != nil; gotErr != tc.wantErr {
+				t.Fatalf("ValidateEvaluateExpression(%q) gotErr = %v, want %v", tc.expr, gotErr, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestJitterCoord(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		x, y, w, h  int
+		wantChanged bool
+	}{
+		{"small unchanged", 100, 200, 6, 6, false},
+		{"standard jittered", 200, 150, 120, 40, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gx, gy := JitterCoord(tc.x, tc.y, tc.w, tc.h)
+			if (gx != tc.x || gy != tc.y) != tc.wantChanged {
+				t.Fatalf("JitterCoord(%d,%d,%d,%d) = (%d,%d)", tc.x, tc.y, tc.w, tc.h, gx, gy)
 			}
 		})
 	}

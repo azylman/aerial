@@ -429,6 +429,7 @@ func TestCDPClient_CommandsTable(t *testing.T) {
 		{name: "trusted click", action: "click"},
 		{name: "insert text", action: "type"},
 		{name: "navigate", action: "navigate"},
+		{name: "navigate same host paced", action: "navigate"},
 		{name: "screenshot png", action: "screenshot"},
 		{name: "screenshot empty format defaults png", action: "screenshot-empty"},
 		{name: "screenshot unmarshal failure", action: "screenshot-bad-json", expectErr: true},
