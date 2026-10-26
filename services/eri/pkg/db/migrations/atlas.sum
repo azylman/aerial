@@ -1,4 +1,4 @@
-h1:QYF+7GNehK8CU7tNuTCxew4miFROEgYXsSXux2hKq28=
+h1:kJDIKuSxTMBePPj+sAbGQhCqg0nJpRCdVESuENBG024=
 20261001221347_baseline.sql h1:uwrTrII8CWvC/4E6FLZx5vGvYuO48AxqjCh+Wi/43kg=
 20261002155428_add_pr_registry.sql h1:tfYt/SDhTn/o/uTIcpHMD+XnpPELqiYySBkrwS+imJQ=
 20261002164500_add_river_queue.sql h1:TOtzV6uJrR9mibPzmVN8RRQ7fVAS95WmFLTvMQ9vETk=
@@ -15,3 +15,4 @@ h1:QYF+7GNehK8CU7tNuTCxew4miFROEgYXsSXux2hKq28=
 20261023091347_add_heartbeat_schedules.sql h1:+HBdnNPSJO0L+yREcGI+h4RTQjP9PImC/rIz0ZdZ1qs=
 20261023152500_add_event_triggers.sql h1:zlcUoaOmzJ7MtsrcjjrqtulLV4cmtb+APu9Mzsrn+Ls=
 20261024212844_flatten_messages_and_extraction_watermarks.sql h1:fv4lb6GIA6yfdTAU+Rxf+RsbbkiEYXTg3ewDtBpGJ7I=
+20261026060555_add_prospera_voice_tables.sql h1:Bkw/jgiQ2bgZk11p1Wk9jtRuHK/V0f9a5CrSV/BYwyY=

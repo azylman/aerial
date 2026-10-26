@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/delivery"
 	"github.com/azylman/aerial/services/eri/pkg/discord"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
@@ -87,6 +89,34 @@ func checkPromptActiveTurn(ctx context.Context, store db.Store, skipIfActive boo
 	return active, checkID, err
 }
 
+func resolvePromptChannelID(channelID string, pool *queue.WorkerPool) string {
+	channelID = strings.TrimSpace(channelID)
+	if channelID != "" && !queue.IsNumericSnowflake(channelID) && pool != nil {
+		if resolved, err := pool.ResolveChannelID(channelID); err == nil {
+			return resolved
+		}
+	}
+	return channelID
+}
+
+func validatePromptSessionID(w http.ResponseWriter, sessionID string) bool {
+	if sessionID != "" && !queue.IsValidThreadKey(sessionID) {
+		writeErr(w, http.StatusBadRequest, "Invalid payload: 'session_id' must be a valid alphanumeric/hyphen/underscore key")
+		return false
+	}
+	return true
+}
+
+func resolvePromptSessionID(pool *queue.WorkerPool, channelID, sessionID, title, prompt string, silent bool) (string, string) {
+	if sessionID != "" {
+		return channelID, sessionID
+	}
+	if !silent && pool != nil {
+		channelID = pool.ResolveTargetThread(channelID, strings.TrimSpace(title), prompt, time.Now().UTC())
+	}
+	return channelID, channelID
+}
+
 func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -103,7 +133,7 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		channelID := strings.TrimSpace(req.ChannelID)
+		channelID := resolvePromptChannelID(req.ChannelID, pool)
 		if !validateSnowflakeID(w, channelID, "channel_id") {
 			return
 		}
@@ -116,11 +146,8 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 		}
 
 		sessionID := strings.TrimSpace(req.SessionID)
-		if sessionID != "" {
-			if !queue.IsValidThreadKey(sessionID) {
-				writeErr(w, http.StatusBadRequest, "Invalid payload: 'session_id' must be a valid alphanumeric/hyphen/underscore key")
-				return
-			}
+		if !validatePromptSessionID(w, sessionID) {
+			return
 		}
 
 		active, checkID, err := checkPromptActiveTurn(r.Context(), store, req.SkipIfActive, sessionID, channelID)
@@ -138,12 +165,7 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		if sessionID == "" {
-			if !req.Silent && pool != nil {
-				channelID = pool.ResolveTargetThread(channelID, strings.TrimSpace(req.Title), req.Prompt, time.Now().UTC())
-			}
-			sessionID = channelID
-		}
+		channelID, sessionID = resolvePromptSessionID(pool, channelID, sessionID, req.Title, req.Prompt, req.Silent)
 
 		msgID := strings.TrimSpace(req.MessageID)
 		if msgID == "" {
@@ -196,15 +218,26 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 	}
 }
 
+type DirectAttachmentPayload struct {
+	Filename      string `json:"filename"`
+	ContentType   string `json:"content_type,omitempty"`
+	ContentBase64 string `json:"content_base64"`
+}
+
 type DirectMessageRequest struct {
-	ChannelID string `json:"channel_id"`
-	ThreadID  string `json:"thread_id,omitempty"`
-	Content   string `json:"content"`
-	Text      string `json:"text,omitempty"`
+	ChannelID   string                    `json:"channel_id"`
+	ThreadID    string                    `json:"thread_id,omitempty"`
+	Content     string                    `json:"content"`
+	Text        string                    `json:"text,omitempty"`
+	Attachments []DirectAttachmentPayload `json:"attachments,omitempty"`
 }
 
 func readPostJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	return readPostJSONWithLimit(w, r, dst, 1<<20)
+}
+
+func readPostJSONWithLimit(w http.ResponseWriter, r *http.Request, dst any, maxBytes int64) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	body, err := io.ReadAll(r.Body)
 	if closeErr := r.Body.Close(); closeErr != nil {
 		log.Printf("[HTTP] Warning closing request body: %v", closeErr)
@@ -259,28 +292,65 @@ func handleDirectMessage(pool *queue.WorkerPool) http.HandlerFunc {
 		}
 
 		var req DirectMessageRequest
-		if !readPostJSON(w, r, &req) {
+		if !readPostJSONWithLimit(w, r, &req, 12<<20) {
 			return
 		}
 
-		targetID := strings.TrimSpace(req.ChannelID)
+		targetID := strings.TrimSpace(req.ThreadID)
 		if targetID == "" {
-			targetID = strings.TrimSpace(req.ThreadID)
+			targetID = strings.TrimSpace(req.ChannelID)
+		}
+		if !queue.IsNumericSnowflake(targetID) && targetID != "" {
+			if resolved, err := pool.ResolveChannelID(targetID); err == nil {
+				targetID = resolved
+			}
 		}
 		if !validateSnowflakeID(w, targetID, "channel_id") {
 			return
+		}
+
+		if len(req.Attachments) > delivery.MaxAttachmentsPerMessage {
+			writeErr(w, http.StatusBadRequest, fmt.Sprintf("Too many attachments: maximum is %d", delivery.MaxAttachmentsPerMessage))
+			return
+		}
+
+		var attachments []*delivery.Attachment
+		for _, att := range req.Attachments {
+			filename := strings.TrimSpace(att.Filename)
+			if filename == "" {
+				writeErr(w, http.StatusBadRequest, "Invalid attachment: 'filename' is required")
+				return
+			}
+			data, err := base64.StdEncoding.DecodeString(att.ContentBase64)
+			if err != nil {
+				writeErr(w, http.StatusBadRequest, fmt.Sprintf("Invalid attachment base64: %v", err))
+				return
+			}
+			if len(data) == 0 {
+				writeErr(w, http.StatusBadRequest, "Invalid attachment: payload is empty")
+				return
+			}
+			if int64(len(data)) > delivery.MaxAttachmentSizeBytes {
+				writeErr(w, http.StatusBadRequest, fmt.Sprintf("Attachment %s exceeds maximum size of %d bytes", filename, delivery.MaxAttachmentSizeBytes))
+				return
+			}
+			attachments = append(attachments, &delivery.Attachment{
+				Filename:    filename,
+				ContentType: strings.TrimSpace(att.ContentType),
+				Data:        data,
+			})
 		}
 
 		content := strings.TrimSpace(req.Content)
 		if content == "" {
 			content = strings.TrimSpace(req.Text)
 		}
-		if content == "" {
+		if content == "" && len(attachments) == 0 {
 			writeErr(w, http.StatusBadRequest, "Invalid payload: 'content' field is required and cannot be empty")
 			return
 		}
 
-		if err := pool.DeliverDirect(targetID, content); err != nil {
+		if err := pool.DeliverDirectWithAttachments(targetID, content, attachments); err != nil {
 			writeDiscordDeliveryError(w, err, "Failed to deliver message")
 			return
 		}

@@ -408,3 +408,53 @@ CREATE TABLE IF NOT EXISTS event_triggers (
 
 CREATE INDEX IF NOT EXISTS idx_event_triggers_lookup ON event_triggers (source, target, event_type);
 CREATE INDEX IF NOT EXISTS idx_event_triggers_channel ON event_triggers (channel_id, created_at ASC);
+
+-- Prospera Voice Subsystem Tables (owned exclusively by services/prospera)
+CREATE TABLE IF NOT EXISTS voice_calls (
+    call_id TEXT PRIMARY KEY,
+    provider_call_sid TEXT UNIQUE,
+    direction TEXT NOT NULL CHECK (direction IN ('outbound', 'inbound')),
+    state TEXT NOT NULL,
+    end_reason TEXT,
+    from_number TEXT NOT NULL CHECK (from_number ~ '^\+[1-9][0-9]{1,14}$'),
+    to_number TEXT NOT NULL CHECK (to_number ~ '^\+[1-9][0-9]{1,14}$'),
+    callback_of_call_id TEXT REFERENCES voice_calls(call_id) ON DELETE SET NULL,
+    discord_channel_id TEXT,
+    discord_thread_id TEXT,
+    brief JSONB NOT NULL DEFAULT '{}'::jsonb,
+    owner_instructions JSONB NOT NULL DEFAULT '[]'::jsonb,
+    transcript JSONB NOT NULL DEFAULT '[]'::jsonb,
+    live_transcript_cursor INTEGER NOT NULL DEFAULT 0,
+    answered_by TEXT,
+    voicemail_recording_url TEXT,
+    report_status TEXT NOT NULL DEFAULT 'pending' CHECK (report_status IN ('pending', 'awaiting_recording', 'processing', 'delivered', 'failed')),
+    report_summary TEXT,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    answered_at TIMESTAMPTZ,
+    ended_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_voice_calls_to_started
+    ON voice_calls (to_number, started_at DESC)
+    WHERE direction = 'outbound';
+
+CREATE INDEX IF NOT EXISTS idx_voice_calls_state
+    ON voice_calls (state)
+    WHERE ended_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS voice_messages (
+    message_sid TEXT PRIMARY KEY,
+    direction TEXT NOT NULL CHECK (direction IN ('outbound', 'inbound')),
+    from_number TEXT NOT NULL CHECK (from_number ~ '^\+[1-9][0-9]{1,14}$'),
+    to_number TEXT NOT NULL CHECK (to_number ~ '^\+[1-9][0-9]{1,14}$'),
+    body TEXT NOT NULL,
+    media_urls JSONB NOT NULL DEFAULT '[]'::jsonb,
+    related_call_id TEXT REFERENCES voice_calls(call_id) ON DELETE SET NULL,
+    discord_delivered BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_voice_messages_created
+    ON voice_messages (created_at DESC);
+

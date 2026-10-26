@@ -3037,3 +3037,110 @@ func TestWorkerPool_ClassifierAlertDebouncing(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkerPool_ResolveChannelID(t *testing.T) {
+	t.Parallel()
+	mockSess, _ := discordgo.New("Bot fake-token")
+	mockSess.State = discordgo.NewState()
+	mockSess.State.GuildAdd(&discordgo.Guild{
+		ID: "guild-1",
+		Channels: []*discordgo.Channel{
+			{ID: "1564150557705248879", Name: "prospera"},
+		},
+	})
+	pool := New(nil, WorkerPoolConfig{DiscordSession: mockSess})
+	nilSessPool := New(nil, WorkerPoolConfig{})
+
+	tests := []struct {
+		name       string
+		pool       *WorkerPool
+		input      string
+		want       string
+		wantErr    bool
+		wantErrSub string
+	}{
+		{name: "nil pool with snowflake", pool: nil, input: "1564150557705248879", want: "1564150557705248879"},
+		{name: "nil pool with hash snowflake", pool: nil, input: "#1564150557705248879", want: "1564150557705248879"},
+		{name: "nil pool with name", pool: nil, input: "prospera", wantErr: true, wantErrSub: "worker pool is nil"},
+		{name: "direct numeric snowflake", pool: pool, input: "1564150557705248879", want: "1564150557705248879"},
+		{name: "hash numeric snowflake", pool: pool, input: "#1564150557705248879", want: "1564150557705248879"},
+		{name: "whitespace padded snowflake", pool: pool, input: "  1564150557705248879  ", want: "1564150557705248879"},
+		{name: "channel name resolved", pool: pool, input: "prospera", want: "1564150557705248879"},
+		{name: "hash channel name resolved", pool: pool, input: "#prospera", want: "1564150557705248879"},
+		{name: "nil discord session error", pool: nilSessPool, input: "prospera", wantErr: true, wantErrSub: "discord session is nil"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := tc.pool.ResolveChannelID(tc.input)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ResolveChannelID(%q) error = %v, wantErr = %v", tc.input, err, tc.wantErr)
+			}
+			if tc.wantErrSub != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrSub)) {
+				t.Fatalf("ResolveChannelID(%q) error = %v, want error containing %q", tc.input, err, tc.wantErrSub)
+			}
+			if got != tc.want {
+				t.Fatalf("ResolveChannelID(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWorkerPool_DeliverDirectWithAttachments(t *testing.T) {
+	t.Parallel()
+	mockPool := New(nil, WorkerPoolConfig{
+		DeliveryWithAttachmentsFunc: func(s *discordgo.Session, channelID, text string, atts []*delivery.Attachment) error {
+			if channelID == "error-channel" {
+				return errors.New("delivery failed")
+			}
+			return nil
+		},
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			if channelID == "error-channel" {
+				return errors.New("direct delivery failed")
+			}
+			return nil
+		},
+	})
+	nilHandlerPool := &WorkerPool{}
+	nilSessWithHandlerPool := &WorkerPool{
+		cfg: WorkerPoolConfig{
+			DeliveryWithAttachmentsFunc: nil,
+		},
+	}
+
+	att := &delivery.Attachment{Filename: "audio.wav", ContentType: "audio/wav", Data: []byte("wavdata")}
+
+	tests := []struct {
+		name        string
+		pool        *WorkerPool
+		channelID   string
+		text        string
+		attachments []*delivery.Attachment
+		wantErr     bool
+		wantErrSub  string
+	}{
+		{name: "nil pool with attachments", pool: nil, channelID: "1564150557705248879", text: "hello", attachments: []*delivery.Attachment{att}, wantErr: true, wantErrSub: "worker pool is nil"},
+		{name: "nil pool with zero attachments delegates to DeliverDirect", pool: nil, channelID: "1564150557705248879", text: "hello", attachments: nil, wantErr: true, wantErrSub: "worker pool is nil"},
+		{name: "zero attachments delegates to DeliverDirect success", pool: mockPool, channelID: "1564150557705248879", text: "text only", attachments: nil, wantErr: false},
+		{name: "zero attachments delegates to DeliverDirect error", pool: mockPool, channelID: "error-channel", text: "text only", attachments: nil, wantErr: true, wantErrSub: "direct delivery failed"},
+		{name: "valid delivery with attachments success", pool: mockPool, channelID: "1564150557705248879", text: "with audio", attachments: []*delivery.Attachment{att}, wantErr: false},
+		{name: "valid delivery with attachments error", pool: mockPool, channelID: "error-channel", text: "with audio", attachments: []*delivery.Attachment{att}, wantErr: true, wantErrSub: "delivery failed"},
+		{name: "nil discord session and nil handler returns error", pool: nilHandlerPool, channelID: "1564150557705248879", text: "hello", attachments: []*delivery.Attachment{att}, wantErr: true, wantErrSub: "discord session is not connected"},
+		{name: "nil discord session with nil handler on struct", pool: nilSessWithHandlerPool, channelID: "1564150557705248879", text: "hello", attachments: []*delivery.Attachment{att}, wantErr: true, wantErrSub: "discord session is not connected"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := tc.pool.DeliverDirectWithAttachments(tc.channelID, tc.text, tc.attachments)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("DeliverDirectWithAttachments error = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantErrSub != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrSub)) {
+				t.Fatalf("DeliverDirectWithAttachments error = %v, want error containing %q", err, tc.wantErrSub)
+			}
+		})
+	}
+}
