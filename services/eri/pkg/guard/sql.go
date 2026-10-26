@@ -25,8 +25,9 @@ const (
 )
 
 var (
-	psqlFormatFlags = map[string]bool{"-A": true, "--no-align": true, "--csv": true, "-H": true, "--html": true}
-	schemaErrCodes  = map[string]bool{"42703": true, "42P01": true, "42704": true, "42883": true}
+	psqlFormatFlags    = map[string]bool{"-A": true, "--no-align": true, "--csv": true, "-H": true, "--html": true}
+	schemaErrCodes     = map[string]bool{"42703": true, "42P01": true, "42704": true, "42883": true}
+	dockerExecValFlags = map[string]bool{"-e": true, "--env": true, "--env-file": true, "-u": true, "--user": true, "-w": true, "--workdir": true, "--detach-keys": true}
 )
 
 // SQLColumn describes a resolved output column from PostgreSQL RowDescription.
@@ -355,8 +356,9 @@ func validatePlanLimit(plan *SQLPlan) *Decision {
 }
 
 type locatedToken struct {
-	value     string
-	endOffset int
+	value       string
+	startOffset int
+	endOffset   int
 }
 
 type psqlInvocation struct {
@@ -436,7 +438,7 @@ func findPsqlInvocations(cmdLine string) []psqlInvocation {
 	var invocations []psqlInvocation
 	for _, seg := range splitPipelineWithOffsets(cmdLine) {
 		tokens := tokenizeWithOffsets(seg.text, seg.offset)
-		idx := skipEnvTokens(tokens)
+		idx := skipEnvAndDockerExec(tokens)
 		if idx < len(tokens) && filepath.Base(tokens[idx].value) == "psql" {
 			invocations = append(invocations, parsePsqlArgs(tokens[idx].endOffset, tokens[idx+1:]))
 		}
@@ -446,10 +448,29 @@ func findPsqlInvocations(cmdLine string) []psqlInvocation {
 
 func skipEnvTokens(tokens []locatedToken) int {
 	idx := 0
-	for idx < len(tokens) && strings.Contains(tokens[idx].value, "=") && !strings.HasPrefix(tokens[idx].value, "-") {
+	for idx < len(tokens) && (tokens[idx].value == "(" || (strings.Contains(tokens[idx].value, "=") && !strings.HasPrefix(tokens[idx].value, "-"))) {
 		idx++
 	}
 	return idx
+}
+
+func skipEnvAndDockerExec(tokens []locatedToken) int {
+	idx := skipEnvTokens(tokens)
+	if idx+2 >= len(tokens) || filepath.Base(strings.TrimLeft(tokens[idx].value, "(")) != "docker" || tokens[idx+1].value != "exec" {
+		return idx
+	}
+	i := idx + 2
+	for i < len(tokens) && strings.HasPrefix(tokens[i].value, "-") {
+		if dockerExecValFlags[tokens[i].value] {
+			i += 2
+		} else {
+			i++
+		}
+	}
+	if i+1 >= len(tokens) {
+		return idx
+	}
+	return i + 1 + skipEnvTokens(tokens[i+1:])
 }
 
 func parsePsqlArgs(insertOffset int, tokens []locatedToken) psqlInvocation {
@@ -566,40 +587,39 @@ func delimiterWidth(cmd string, i int) int {
 func tokenizeWithOffsets(sub string, baseOffset int) []locatedToken {
 	var tokens []locatedToken
 	var current strings.Builder
+	tokStart := 0
 	inToken, inSingle, inDouble, escaped := false, false, false, false
 
 	for i := 0; i < len(sub); i++ {
 		ch := sub[i]
-		if escaped {
-			current.WriteByte(ch)
-			inToken, escaped = true, false
-			continue
-		}
-		if ch == '\\' && !inSingle {
-			escaped, inToken = true, true
-			continue
-		}
-		if ch == '\'' && !inDouble {
-			inSingle, inToken = !inSingle, true
-			continue
-		}
-		if ch == '"' && !inSingle {
-			inDouble, inToken = !inDouble, true
-			continue
-		}
-		if !inSingle && !inDouble && (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
+		if !escaped && !inSingle && !inDouble && (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
 			if inToken {
-				tokens = append(tokens, locatedToken{value: current.String(), endOffset: baseOffset + i})
+				tokens = append(tokens, locatedToken{value: current.String(), startOffset: baseOffset + tokStart, endOffset: baseOffset + i})
 				current.Reset()
 				inToken = false
 			}
 			continue
 		}
-		current.WriteByte(ch)
-		inToken = true
+		if !inToken {
+			tokStart = i
+			inToken = true
+		}
+		switch {
+		case escaped:
+			current.WriteByte(ch)
+			escaped = false
+		case ch == '\\' && !inSingle:
+			escaped = true
+		case ch == '\'' && !inDouble:
+			inSingle = !inSingle
+		case ch == '"' && !inSingle:
+			inDouble = !inDouble
+		default:
+			current.WriteByte(ch)
+		}
 	}
 	if inToken {
-		tokens = append(tokens, locatedToken{value: current.String(), endOffset: baseOffset + len(sub)})
+		tokens = append(tokens, locatedToken{value: current.String(), startOffset: baseOffset + tokStart, endOffset: baseOffset + len(sub)})
 	}
 	return tokens
 }

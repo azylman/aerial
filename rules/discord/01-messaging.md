@@ -2,7 +2,7 @@
 
 1. **Discord Output Delivery & Substantive Output Invariant**:
    - Deliver responses via Markdown directly in Discord at the end of the turn (the user only receives the final substantive result).
-   - Completed agent turns must always produce substantive output; unrecovered empty stdout on a completed turn is treated as a failure/retry. Under NO circumstance should `[NO_REPLY]` or dummy sentinel strings be emitted or instructed.
+   - Completed agent turns must always produce substantive output; unrecovered empty stdout on a completed turn (when no background command or subagent is in flight) is treated as a failure/retry. When suspending mid-workflow for a running background task or subagent per Rules 5 and 9, stopping tool calls with empty text is required and suspends the turn in place rather than completing it. Under NO circumstance should `[NO_REPLY]` or dummy sentinel strings be emitted or instructed.
 
 2. **Silent Multi-Step Execution (No Intermediate Waiting Chatter)**:
    - When executing multi-step tool calls, commands, or background tasks, NEVER emit intermediate play-by-play status chatter ("I have initiated a search...", "I will review results when the task finishes...", "waiting for X...").
@@ -35,5 +35,6 @@
 10. **No Markdown Tables**:
     - NEVER format responses using Markdown tables as Discord does not support table rendering.
 
-11. **Discord Message Length & Verbosity Ceiling**:
+11. **Discord Message Length, Proportional Brevity & Zero Tool-Receipt Invariant**:
     - Discord enforces a 2,000-character limit per message. Deliver responses strictly within single-message bounds (< 1,800 characters), leading naturally with the key conclusion or answer first. Never output literal acronym tags or prefixes like 'BLUF:' or 'Bottom Line:' in user-facing responses.
+    - **Proportional Brevity & Zero Tool-Receipt Echoing**: Scale response length to the turn. When executing a routine action or follow-up that was just discussed in-thread (e.g. scheduling a reminder, toggling a setting, or shipping an agreed tweak), confirm in a single short sentence. Never echo internal tool-receipt fields (UUIDs, schedule IDs, exact clock timestamps on relative timers, or restatements of prompts/plans already established in the thread) unless explicitly requested or debugging a failure.

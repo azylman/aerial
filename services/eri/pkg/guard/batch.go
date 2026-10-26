@@ -29,8 +29,8 @@ var (
 	gcMu            sync.Mutex
 	lastGCTime      time.Time
 	pytestRegex     = regexp.MustCompile(`^(python[0-9.]*\s+-m\s+)?pytest(\s+(-v|-q|-s|-x|--tb=\S+))*\s*$`)
-	goTestValFlags  = map[string]bool{"-timeout": true, "-tags": true, "-coverprofile": true, "-cpu": true, "-count": true, "-o": true}
-	goTestVerbose   = map[string]bool{"-v": true, "-test.v": true, "-v=true": true, "-test.v=true": true}
+	goTestValFlags  = map[string]bool{"-timeout": true, "-tags": true, "-coverprofile": true, "-cpu": true, "-count": true, "-o": true, "-run": true, "-test.run": true}
+	goTestVerbose   = map[string]bool{"-v": true, "-test.v": true, "-v=true": true, "-test.v=true": true, "--v": true, "--test.v": true, "--v=true": true, "--test.v=true": true}
 	unscopedTargets = map[string]bool{"./...": true, "brain/...": true, "services/eri/...": true, "...": true}
 )
 
@@ -68,7 +68,7 @@ func isUnscopedTest(cmd string) bool {
 }
 
 func isUnscopedTestSingle(cmd string) bool {
-	fields := stripLeadingEnv(tokenizeQuoteAware(strings.TrimSpace(cmd)))
+	fields := unwrapCommandTokens(tokenizeQuoteAware(strings.TrimSpace(strings.TrimLeft(cmd, "("))))
 	if len(fields) == 0 {
 		return false
 	}
@@ -82,6 +82,15 @@ func isUnscopedTestSingle(cmd string) bool {
 		return isUnscopedGoTest(fields[2:])
 	}
 	return false
+}
+
+func isTranscriptLogPath(path string) bool {
+	clean := filepath.ToSlash(strings.TrimSpace(path))
+	if !strings.Contains(clean, "/.system_generated/logs/") && !strings.HasPrefix(clean, ".system_generated/logs/") {
+		return false
+	}
+	base := filepath.Base(clean)
+	return strings.HasPrefix(base, "transcript") && strings.HasSuffix(base, ".jsonl")
 }
 
 func stripLeadingEnv(fields []string) []string {
@@ -102,21 +111,9 @@ func isUnscopedVerify(args []string) bool {
 
 func isUnscopedGoTest(args []string) bool {
 	var pkgArgs []string
-	hasVerbose := false
-	hasRun := false
 	for i := 0; i < len(args); i++ {
-		f := args[i]
-		if goTestVerbose[f] {
-			hasVerbose = true
-			continue
-		}
-		if f == "-run" || f == "-test.run" {
-			hasRun = true
-			i++
-			continue
-		}
-		if isAttachedRunFlag(f) {
-			hasRun = true
+		f := strings.TrimRight(args[i], ")")
+		if f == "" {
 			continue
 		}
 		if strings.HasPrefix(f, "-") {
@@ -127,7 +124,7 @@ func isUnscopedGoTest(args []string) bool {
 		}
 		pkgArgs = append(pkgArgs, f)
 	}
-	if len(pkgArgs) == 0 || (hasVerbose && !hasRun) {
+	if len(pkgArgs) == 0 {
 		return true
 	}
 	for _, arg := range pkgArgs {
@@ -138,13 +135,45 @@ func isUnscopedGoTest(args []string) bool {
 	return false
 }
 
-func isAttachedRunFlag(f string) bool {
-	for _, p := range []string{"-run=", "--run=", "-test.run="} {
-		if strings.HasPrefix(f, p) {
-			return true
+type byteSpan struct {
+	start int
+	end   int
+}
+
+func stripGoTestVerbose(cmdLine string) string {
+	var spans []byteSpan
+	for _, seg := range splitPipelineWithOffsets(cmdLine) {
+		tokens := tokenizeWithOffsets(seg.text, seg.offset)
+		idx := skipEnvAndDockerExec(tokens)
+		if idx+1 >= len(tokens) || filepath.Base(strings.TrimLeft(tokens[idx].value, "(")) != "go" || tokens[idx+1].value != "test" {
+			continue
+		}
+		for i := idx + 2; i < len(tokens); i++ {
+			tok := tokens[i]
+			cleanVal := strings.TrimRight(tok.value, ")")
+			if cleanVal == "--" || cleanVal == "-args" {
+				break
+			}
+			if goTestValFlags[cleanVal] {
+				i++
+				continue
+			}
+			if goTestVerbose[cleanVal] {
+				start := tok.startOffset
+				for start > 0 && (cmdLine[start-1] == ' ' || cmdLine[start-1] == '\t') {
+					start--
+				}
+				end := tok.endOffset - (len(tok.value) - len(cleanVal))
+				spans = append(spans, byteSpan{start: start, end: end})
+			}
 		}
 	}
-	return false
+	rewritten := cmdLine
+	for i := len(spans) - 1; i >= 0; i-- {
+		sp := spans[i]
+		rewritten = rewritten[:sp.start] + rewritten[sp.end:]
+	}
+	return rewritten
 }
 
 func isUnbatchedGitMutation(cmd string) bool {
@@ -449,25 +478,104 @@ func CheckBatch(payload Payload, args ToolArgs) *Decision {
 	return CheckBatchWithDir(payload, args, GetBatchDir(), time.Now())
 }
 
+func checkStatelessBatchRules(normalizedTool string, args ToolArgs) *Decision {
+	if normalizedTool == "run_command" {
+		if isUnscopedTest(args.CommandLine) {
+			return &Decision{
+				Decision: DecisionDeny,
+				Reason:   "Unscoped test sweep detected. Run targeted package unit tests (e.g. 'go test ./pkg/<pkg>/...' or 'go test -run TestName ./pkg/<pkg>') during development; comprehensive monorepo sweeps are offloaded to GitHub Actions CI or './scripts/verify.sh --staged'.",
+			}
+		}
+		if isUnbatchedGitMutation(args.CommandLine) {
+			return &Decision{
+				Decision: DecisionDeny,
+				Reason:   "Unbatched git lifecycle command detected. Combine git operations into compound one-liners (e.g. 'git add -A && git commit -m ... && git push ...') or use 'scripts/aerial-pr.sh submit <scratch_dir> [commit_msg]' for automated pre-flight verification and submission.",
+			}
+		}
+	}
+	if (normalizedTool == "read_file" || normalizedTool == "view_file") && isTranscriptLogPath(args.FilePath()) {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Direct read_file/view_file on raw session transcripts (transcript*.jsonl) is prohibited because each JSONL line can exceed 30KB and floods the context window. Use the 'transcript-search' CLI skill or targeted 'jq' / 'rg -m 20' queries via run_command instead.",
+		}
+	}
+	return nil
+}
+
+func checkMicroReadViolation(category, target string, paginatedRead bool, priorRecords []ToolInvocation, state *BatchState) *Decision {
+	if category != "read" || target == "" || paginatedRead {
+		return nil
+	}
+	if countTargetInvocations(priorRecords, "read", target) >= 2 {
+		state.Records = removeTargetInvocations(state.Records, target)
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Iterative micro-read thrashing detected: 3 sequential reads targeting the same file across turns. Read the complete required range or whole file in a single view_file call (up to 800 lines) instead of small slices.",
+		}
+	}
+	return nil
+}
+
+func checkMicroEditViolation(category, target string, priorRecords []ToolInvocation, state *BatchState) *Decision {
+	if category != "edit" || target == "" {
+		return nil
+	}
+	if countTargetInvocations(priorRecords, "edit", target) >= 2 {
+		state.Records = removeTargetInvocations(state.Records, target)
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Coarse-Grained Code Editing Invariant Violated: 3 consecutive micro-edits targeting the same file across turns. Formulate the complete target diff and apply it in a single comprehensive edit, or rewrite the file via write_to_file.",
+		}
+	}
+	return nil
+}
+
+func checkMicroCommandViolation(category string, priorRecords []ToolInvocation, state *BatchState) *Decision {
+	if category == "inspection" && hasConsecutiveSingleSteps(priorRecords, "inspection", 3) {
+		state.Records = filterOutCategory(state.Records, "inspection")
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Micro-command thrashing detected: 4 consecutive single inspection commands across turns. Combine commands into compound one-liners (e.g. with && or ;) or execute an ephemeral scratch script in brain/<id>/scratch/ to collect diagnostics.",
+		}
+	}
+	return nil
+}
+
+func checkSequentialReadViolation(category string, paginatedRead bool, priorRecords []ToolInvocation, state *BatchState) *Decision {
+	if category == "read" && !paginatedRead && hasConsecutiveSingleSteps(priorRecords, "read", 2) {
+		state.Records = filterOutCategory(state.Records, "read")
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Parallel Tool Batching Invariant Violated: 3 consecutive sequential single-file reads detected across turns. ALWAYS emit view_file, grep_search, and read tool calls in parallel within a single turn when inspecting multiple files.",
+		}
+	}
+	return nil
+}
+
+func evaluatePriorBatchViolations(category, target string, args ToolArgs, priorRecords []ToolInvocation, state *BatchState) *Decision {
+	paginatedRead := category == "read" && target != "" && isPaginatedRead(priorRecords, target, args.StartLine, args.EndLine)
+
+	if dec := checkMicroReadViolation(category, target, paginatedRead, priorRecords, state); dec != nil {
+		return dec
+	}
+	if dec := checkMicroEditViolation(category, target, priorRecords, state); dec != nil {
+		return dec
+	}
+	if dec := checkMicroCommandViolation(category, priorRecords, state); dec != nil {
+		return dec
+	}
+	if dec := checkSequentialReadViolation(category, paginatedRead, priorRecords, state); dec != nil {
+		return dec
+	}
+	return nil
+}
+
 // CheckBatchWithDir evaluates tool batching invariants with configurable state directory and timestamp.
 // Guaranteed fail-open: returns allow on unexpected errors or corrupted states.
 func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time) *Decision {
 	normalizedTool := normalizeToolName(payload.ToolCall.Name)
-
-	// Rule 1: Unscoped test sweeps
-	if normalizedTool == "run_command" && isUnscopedTest(args.CommandLine) {
-		return &Decision{
-			Decision: DecisionDeny,
-			Reason:   "Unscoped test sweep detected. Run targeted package unit tests (e.g. 'go test ./pkg/<pkg>/...' or 'go test -v -run TestName ./pkg/<pkg>') during development; comprehensive monorepo sweeps are offloaded to GitHub Actions CI or './scripts/verify.sh --staged'.",
-		}
-	}
-
-	// Rule 2: Unbatched git mutations
-	if normalizedTool == "run_command" && isUnbatchedGitMutation(args.CommandLine) {
-		return &Decision{
-			Decision: DecisionDeny,
-			Reason:   "Unbatched git lifecycle command detected. Combine git operations into compound one-liners (e.g. 'git add -A && git commit -m ... && git push ...') or use 'scripts/aerial-pr.sh submit <scratch_dir> [commit_msg]' for automated pre-flight verification and submission.",
-		}
+	if dec := checkStatelessBatchRules(normalizedTool, args); dec != nil {
+		return dec
 	}
 
 	category, target := categorizeInvocation(payload.ToolCall.Name, args)
@@ -487,54 +595,8 @@ func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time
 			}
 		}
 
-		paginatedRead := category == "read" && target != "" && isPaginatedRead(priorRecords, target, args.StartLine, args.EndLine)
-
-		// Rule 4: Micro-reads to the same file (view_file / read_file)
-		if category == "read" && target != "" && !paginatedRead {
-			reads := countTargetInvocations(priorRecords, "read", target)
-			if reads >= 2 {
-				decision = &Decision{
-					Decision: DecisionDeny,
-					Reason:   "Iterative micro-read thrashing detected: 3 sequential reads targeting the same file across turns. Read the complete required range or whole file in a single view_file call (up to 800 lines) instead of small slices.",
-				}
-				state.Records = removeTargetInvocations(state.Records, target)
-				_ = saveState(dir, safeID, state) //nolint:errcheck
-				return nil
-			}
-		}
-
-		// Rule 6: Micro-edits to the same file (replace_file_content / write_to_file / edit_file / write_file)
-		if category == "edit" && target != "" {
-			edits := countTargetInvocations(priorRecords, "edit", target)
-			if edits >= 2 {
-				decision = &Decision{
-					Decision: DecisionDeny,
-					Reason:   "Coarse-Grained Code Editing Invariant Violated: 3 consecutive micro-edits targeting the same file across turns. Formulate the complete target diff and apply it in a single comprehensive edit, or rewrite the file via write_to_file.",
-				}
-				state.Records = removeTargetInvocations(state.Records, target)
-				_ = saveState(dir, safeID, state) //nolint:errcheck
-				return nil
-			}
-		}
-
-		// Rule 3: Micro-command inspection thrashing (run_command)
-		if category == "inspection" && hasConsecutiveSingleSteps(priorRecords, "inspection", 3) {
-			decision = &Decision{
-				Decision: DecisionDeny,
-				Reason:   "Micro-command thrashing detected: 4 consecutive single inspection commands across turns. Combine commands into compound one-liners (e.g. with && or ;) or execute an ephemeral scratch script in brain/<id>/scratch/ to collect diagnostics.",
-			}
-			state.Records = filterOutCategory(state.Records, "inspection")
-			_ = saveState(dir, safeID, state) //nolint:errcheck
-			return nil
-		}
-
-		// Rule 5: Sequential single-file reads across turns (view_file / read_file)
-		if category == "read" && !paginatedRead && hasConsecutiveSingleSteps(priorRecords, "read", 2) {
-			decision = &Decision{
-				Decision: DecisionDeny,
-				Reason:   "Parallel Tool Batching Invariant Violated: 3 consecutive sequential single-file reads detected across turns. ALWAYS emit view_file, grep_search, and read tool calls in parallel within a single turn when inspecting multiple files.",
-			}
-			state.Records = filterOutCategory(state.Records, "read")
+		if dec := evaluatePriorBatchViolations(category, target, args, priorRecords, &state); dec != nil {
+			decision = dec
 			_ = saveState(dir, safeID, state) //nolint:errcheck
 			return nil
 		}
@@ -557,6 +619,11 @@ func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time
 		_ = saveState(dir, safeID, state) //nolint:errcheck
 		opportunisticGC(dir, now)
 		decision = &Decision{Decision: DecisionAllow}
+		if normalizedTool == "run_command" {
+			if rewritten := stripGoTestVerbose(args.CommandLine); rewritten != args.CommandLine {
+				decision.Overwrite = map[string]any{"CommandLine": rewritten}
+			}
+		}
 		return nil
 	})
 

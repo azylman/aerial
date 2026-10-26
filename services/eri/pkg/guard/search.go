@@ -173,16 +173,57 @@ func inspectOpenObserveSearchSQL(raw json.RawMessage) *Decision {
 	return &Decision{Decision: DecisionAllow}
 }
 
+func inspectDiscordSearchMessages(raw json.RawMessage) *Decision {
+	m := parseRawJSONMap(raw)
+	if lim, ok := m["limit"].(float64); ok && lim > MaxUnboundedPlanRows {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "discord_search_messages limit exceeds maximum allowed per page (25). Use limit <= 25 (default 25) and paginate via 'offset' or 'maxId' when 'has_more' is true.",
+		}
+	}
+	return &Decision{Decision: DecisionAllow}
+}
+
+func inspectGitHubGetFileContents(raw json.RawMessage) *Decision {
+	m := parseRawJSONMap(raw)
+	if m == nil {
+		return &Decision{Decision: DecisionAllow}
+	}
+	owner := strings.ToLower(strings.TrimSpace(stringField(m, "owner")))
+	repo := strings.ToLower(strings.TrimSpace(stringField(m, "repo")))
+	ref := strings.TrimSpace(stringField(m, "ref"))
+	sha := strings.TrimSpace(stringField(m, "sha"))
+	isDefaultRef := ref == "" || ref == "main" || ref == "refs/heads/main" || ref == "HEAD"
+	if (owner == "" || owner == "azylman") && (repo == "aerial" || repo == "aerial-config") && isDefaultRef && sha == "" {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Remote github-mcp get_file_contents on azylman/" + repo + " (default branch) is prohibited because /share/" + repo + " is mounted locally and remote fetches dump unpaginated files into the context window. Use read_file (with StartLine/EndLine) or rg/find on /share/" + repo + " instead, or pass an explicit non-main 'ref'/'sha' when inspecting an unmerged remote commit.",
+		}
+	}
+	if _, hasFields := m["fields"]; !hasFields {
+		m["fields"] = []string{"name", "type", "path", "size"}
+		return &Decision{
+			Decision:  DecisionAllow,
+			Overwrite: map[string]any{"Arguments": m},
+		}
+	}
+	return &Decision{Decision: DecisionAllow}
+}
+
 func inspectMCPToolCall(args ToolArgs) *Decision {
 	mcpTool := strings.ToLower(strings.Trim(strings.TrimSpace(args.ToolName), `"`))
-	if mcpTool == "streamschema" {
+	switch mcpTool {
+	case "streamschema":
 		return &Decision{
 			Decision: DecisionDeny,
 			Reason:   "openobserve StreamSchema is blocked because docker_logs contains 28,000+ historical dynamic attribute fields. Query openobserve SearchSQL directly using canonical columns: _timestamp, service, level, message, stream, container_name, host (never use SELECT *).",
 		}
-	}
-	if mcpTool == "searchsql" {
+	case "searchsql":
 		return inspectOpenObserveSearchSQL(args.Arguments)
+	case "discord_search_messages":
+		return inspectDiscordSearchMessages(args.Arguments)
+	case "get_file_contents":
+		return inspectGitHubGetFileContents(args.Arguments)
 	}
 	if mcpTool != "tool_index" && !strings.HasSuffix(mcpTool, "_tool_index") {
 		return &Decision{Decision: DecisionAllow}
@@ -386,12 +427,18 @@ func CheckSearchWithSQL(toolName string, args ToolArgs, describer SQLDescriber) 
 
 	commands, ops := splitPipelineSegments(cmdLine)
 	for idx, cmd := range commands {
-		tokens := tokenizeQuoteAware(cmd)
+		tokens := unwrapCommandTokens(tokenizeQuoteAware(cmd))
 		if len(tokens) == 0 {
 			continue
 		}
 
-		bin := filepath.Base(tokens[0])
+		bin := filepath.Base(strings.TrimLeft(tokens[0], "("))
+		if (bin == "sh" || bin == "bash") && len(tokens) >= 3 && tokens[1] == "-c" {
+			if dec := CheckSearchWithSQL("run_command", ToolArgs{CommandLine: tokens[2], Cwd: args.Cwd}, describer); dec != nil && dec.Decision == DecisionDeny {
+				return dec
+			}
+			continue
+		}
 
 		// 1. Evaluate find commands
 		if bin == "find" {
@@ -412,6 +459,24 @@ func CheckSearchWithSQL(toolName string, args ToolArgs, describer SQLDescriber) 
 
 	// 3. Evaluate psql invocations (schema validation, SELECT * ban, LIMIT gate, and -A shaping)
 	return inspectPsqlPipeline(args.CommandLine, describer)
+}
+
+func unwrapCommandTokens(tokens []string) []string {
+	tokens = stripLeadingEnv(tokens)
+	if len(tokens) >= 3 && filepath.Base(strings.TrimLeft(tokens[0], "(")) == "docker" && tokens[1] == "exec" {
+		i := 2
+		for i < len(tokens) && strings.HasPrefix(tokens[i], "-") {
+			if dockerExecValFlags[tokens[i]] {
+				i += 2
+			} else {
+				i++
+			}
+		}
+		if i+1 < len(tokens) {
+			tokens = stripLeadingEnv(tokens[i+1:])
+		}
+	}
+	return tokens
 }
 
 func isGrepOrSearchBinary(bin string) bool {
@@ -450,6 +515,60 @@ func isGrepMatchLimitFlag(t string) (isLimit, takesArg bool) {
 	return false, false
 }
 
+var findValueFlags = map[string]bool{
+	"-name":     true,
+	"-iname":    true,
+	"-path":     true,
+	"-ipath":    true,
+	"-type":     true,
+	"-maxdepth": true,
+	"-mindepth": true,
+	"-mtime":    true,
+	"-ctime":    true,
+	"-atime":    true,
+	"-perm":     true,
+	"-size":     true,
+	"-user":     true,
+	"-group":    true,
+	"-exec":     true,
+	"-execdir":  true,
+	"-ok":       true,
+	"-okdir":    true,
+	"-regex":    true,
+	"-iregex":   true,
+	"-printf":   true,
+}
+
+func isFindValueFlag(t string) bool {
+	return findValueFlags[t]
+}
+
+func validateFindPathToken(t, cwd string) *Decision {
+	clean := filepath.Clean(t)
+	if clean == "/" || clean == "/proc" || clean == "/sys" || clean == "/dev" || clean == "/root" {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Unconstrained root search detected. Avoid searching the root filesystem ('/') or system directories directly. Scope searches to specific package or workspace directories.",
+		}
+	}
+
+	if cwd == "/" && (clean == "." || clean == "./") {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Unconstrained root search detected. Current working directory is root ('/'). Scope searches to specific workspace directories.",
+		}
+	}
+
+	if clean == ".git" || strings.HasPrefix(clean, ".git/") || clean == "node_modules" || strings.HasPrefix(clean, "node_modules/") {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Direct search into large internal repository directory (.git/node_modules) detected. Exclude internal version control and dependency trees from searches.",
+		}
+	}
+
+	return nil
+}
+
 func inspectFindCommand(tokens []string, cwd string) *Decision {
 	hasMaxdepth := false
 	for i := 1; i < len(tokens); i++ {
@@ -466,34 +585,14 @@ func inspectFindCommand(tokens []string, cwd string) *Decision {
 	for i := 1; i < len(tokens); i++ {
 		t := tokens[i]
 		if strings.HasPrefix(t, "-") {
-			// Skip flags and their arguments if flag takes an argument
-			if t == "-name" || t == "-iname" || t == "-path" || t == "-ipath" || t == "-type" || t == "-maxdepth" || t == "-mindepth" || t == "-mtime" || t == "-ctime" || t == "-atime" || t == "-perm" || t == "-size" || t == "-user" || t == "-group" {
+			if isFindValueFlag(t) && i+1 < len(tokens) {
 				i++
 			}
 			continue
 		}
 
-		// Target path token
-		clean := filepath.Clean(t)
-		if clean == "/" || clean == "/proc" || clean == "/sys" || clean == "/dev" || clean == "/root" {
-			return &Decision{
-				Decision: DecisionDeny,
-				Reason:   "Unconstrained root search detected. Avoid searching the root filesystem ('/') or system directories directly. Scope searches to specific package or workspace directories.",
-			}
-		}
-
-		if cwd == "/" && (clean == "." || clean == "./") {
-			return &Decision{
-				Decision: DecisionDeny,
-				Reason:   "Unconstrained root search detected. Current working directory is root ('/'). Scope searches to specific workspace directories.",
-			}
-		}
-
-		if clean == ".git" || strings.HasPrefix(clean, ".git/") || clean == "node_modules" || strings.HasPrefix(clean, "node_modules/") {
-			return &Decision{
-				Decision: DecisionDeny,
-				Reason:   "Direct search into large internal repository directory (.git/node_modules) detected. Exclude internal version control and dependency trees from searches.",
-			}
+		if dec := validateFindPathToken(t, cwd); dec != nil {
+			return dec
 		}
 	}
 
@@ -558,70 +657,119 @@ var grepNoPatternLongFlags = map[string]bool{
 	"--version": true,
 }
 
-func inspectGrepCommand(bin string, tokens []string, fromPipe bool) *Decision {
-	hasExcludeDir, hasMatchLimit, hasExplicitPattern := false, false, false
-	isRecursive := (bin == "rg" || bin == "ag" || bin == "ack")
-	var pathTokens []string
+var grepPatternFlags = map[string]bool{
+	"-e":       true,
+	"-f":       true,
+	"--regexp": true,
+	"--file":   true,
+}
+
+func isExcludeDirFlag(t string) (matches bool, takesArg bool) {
+	if t == "--exclude-dir" || t == "--exclude" {
+		return true, true
+	}
+	if strings.HasPrefix(t, "--exclude-dir=") || strings.HasPrefix(t, "--exclude=") {
+		return true, false
+	}
+	return false, false
+}
+
+func isStandardGrepRecursive(bin, t string) bool {
+	if !isStandardGrep(bin) {
+		return false
+	}
+	return t == "--recursive" || hasShortFlag(t, 'r') || hasShortFlag(t, 'R')
+}
+
+type grepScanFlags struct {
+	hasExcludeDir      bool
+	hasMatchLimit      bool
+	hasExplicitPattern bool
+	isRecursive        bool
+	pathTokens         []string
+}
+
+func (f *grepScanFlags) applyGrepFlag(bin, t string, hasNext bool) (consumeNext, handled bool) {
+	if matches, takesArg := isExcludeDirFlag(t); matches {
+		f.hasExcludeDir = true
+		return takesArg && hasNext, true
+	}
+	if isStandardGrepRecursive(bin, t) {
+		f.isRecursive = true
+		handled = true
+	}
+	if limit, takesArg := isGrepMatchLimitFlag(t); limit {
+		f.hasMatchLimit = true
+		if grepNoPatternLongFlags[t] {
+			f.hasExplicitPattern = true
+		}
+		return takesArg && hasNext, true
+	}
+	if grepPatternFlags[t] {
+		f.hasExplicitPattern = true
+		return hasNext, true
+	}
+	if grepValueFlags[t] && hasNext {
+		return true, true
+	}
+	return false, handled
+}
+
+func collectNonFlagTokens(tokens []string) []string {
+	var nonFlags []string
+	for _, t := range tokens {
+		if !strings.HasPrefix(t, "-") {
+			nonFlags = append(nonFlags, t)
+		}
+	}
+	return nonFlags
+}
+
+func parseGrepTokens(bin string, tokens []string) grepScanFlags {
+	flags := grepScanFlags{
+		isRecursive: (bin == "rg" || bin == "ag" || bin == "ack"),
+	}
 
 	for i := 1; i < len(tokens); i++ {
 		t := tokens[i]
 		if strings.HasPrefix(t, "-") {
-			if strings.HasPrefix(t, "--exclude-dir") || strings.HasPrefix(t, "--exclude") {
-				hasExcludeDir = true
-				if (t == "--exclude-dir" || t == "--exclude") && i+1 < len(tokens) {
-					i++
-				}
-			}
-			if isStandardGrep(bin) && (t == "--recursive" || hasShortFlag(t, 'r') || hasShortFlag(t, 'R')) {
-				isRecursive = true
-			}
-			if limit, takesArg := isGrepMatchLimitFlag(t); limit {
-				hasMatchLimit = true
-				if grepNoPatternLongFlags[t] {
-					hasExplicitPattern = true
-				}
-				if takesArg && i+1 < len(tokens) {
-					i++
-				}
-			}
-			if t == "-e" || t == "-f" || t == "--regexp" || t == "--file" {
-				hasExplicitPattern = true
-				i++
-			} else if grepValueFlags[t] && i+1 < len(tokens) {
+			consumeNext, _ := flags.applyGrepFlag(bin, t, i+1 < len(tokens))
+			if consumeNext {
 				i++
 			}
 			continue
 		}
-		if !hasExplicitPattern {
-			hasExplicitPattern = true
+		if !flags.hasExplicitPattern {
+			flags.hasExplicitPattern = true
 			continue
 		}
-		pathTokens = append(pathTokens, t)
+		flags.pathTokens = append(flags.pathTokens, t)
 	}
 
 	if bin == "strings" {
-		pathTokens = nil
-		for _, t := range tokens[1:] {
-			if !strings.HasPrefix(t, "-") {
-				pathTokens = append(pathTokens, t)
-			}
-		}
+		flags.pathTokens = collectNonFlagTokens(tokens[1:])
 	}
 
-	for _, pt := range pathTokens {
+	return flags
+}
+
+func inspectGrepCommand(bin string, tokens []string, fromPipe bool) *Decision {
+	flags := parseGrepTokens(bin, tokens)
+
+	for _, pt := range flags.pathTokens {
 		if dec := validateGrepPathToken(pt); dec != nil {
 			return dec
 		}
 	}
 
-	if isRecursive && isStandardGrep(bin) && !hasExcludeDir && hasBroadPathToken(pathTokens) {
+	if flags.isRecursive && isStandardGrep(bin) && !flags.hasExcludeDir && hasBroadPathToken(flags.pathTokens) {
 		return &Decision{
 			Decision: DecisionDeny,
 			Reason:   "Recursive grep without directory exclusions detected. Add '--exclude-dir=.git' (or use ripgrep/rg, which excludes .git by default) to prevent scanning raw git packfiles and binary objects.",
 		}
 	}
 
-	if isRecursive && !(fromPipe && len(pathTokens) == 0) && !hasMatchLimit {
+	if flags.isRecursive && !(fromPipe && len(flags.pathTokens) == 0) && !flags.hasMatchLimit {
 		return &Decision{
 			Decision: DecisionDeny,
 			Reason:   "Unbounded recursive text search detected. Bound output with '-m <N>' / '--max-count=<N>' (e.g. 'rg -n -m 20 <pattern> <path>'), '-l' ('--files-with-matches'), or '-c' ('--count') per the shell-filesystem-traversal skill to prevent context window bloat.",

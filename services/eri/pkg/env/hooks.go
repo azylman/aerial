@@ -8,11 +8,61 @@ import (
 )
 
 // Default canonical hooks.json payload used when external file is absent.
-const defaultCanonicalHooksJSON = `{"share-guard":{"PreToolUse":[{"matcher":"replace_file_content|write_to_file|edit_file|write_file|run_command","hooks":[{"type":"command","command":"hook-guard share","timeout":5}]}]},"schedule-guard":{"PreToolUse":[{"matcher":"schedule|run_command","hooks":[{"type":"command","command":"hook-guard schedule","timeout":5}]}]},"batch-guard":{"PreToolUse":[{"matcher":"view_file|read_file|replace_file_content|write_to_file|edit_file|write_file|run_command","hooks":[{"type":"command","command":"hook-guard batch","timeout":5}]}]},"search-guard":{"PreToolUse":[{"matcher":"run_command","hooks":[{"type":"command","command":"hook-guard search","timeout":5}]}]},"commit-guard":{"PreToolUse":[{"matcher":"run_command","hooks":[{"type":"command","command":"hook-guard commit","timeout":5}]}]}}`
+const defaultCanonicalHooksJSON = `{"share-guard":{"PreToolUse":[{"matcher":"replace_file_content|write_to_file|edit_file|write_file|run_command","hooks":[{"type":"command","command":"hook-guard share","timeout":5}]}]},"schedule-guard":{"PreToolUse":[{"matcher":"schedule|run_command|manage_task|manage_subagents|view_file|read_file","hooks":[{"type":"command","command":"hook-guard schedule","timeout":5}]}]},"batch-guard":{"PreToolUse":[{"matcher":"view_file|read_file|replace_file_content|write_to_file|edit_file|write_file|run_command","hooks":[{"type":"command","command":"hook-guard batch","timeout":5}]}]},"search-guard":{"PreToolUse":[{"matcher":"run_command|call_mcp_tool","hooks":[{"type":"command","command":"hook-guard search","timeout":5}]}]},"commit-guard":{"PreToolUse":[{"matcher":"run_command","hooks":[{"type":"command","command":"hook-guard commit","timeout":5}]}]}}`
 
 // DefaultHooksSearchPaths defines priority search roots for hook assets.
 var DefaultHooksSearchPaths = []string{
 	"/share/aerial/scripts/hooks", "/app/scripts/hooks", "./scripts/hooks", "../scripts/hooks", "../../scripts/hooks", "../../../scripts/hooks", "../../../../scripts/hooks",
+}
+
+func (p *Provisioner) copyHookScriptsToTarget(hooksDir, targetHooksScriptsDir string) {
+	if hooksDir == "" {
+		return
+	}
+	if err := os.MkdirAll(targetHooksScriptsDir, 0o755); err != nil {
+		log.Printf("[Env] Warning: failed to mkdir %s for hook scripts: %v", targetHooksScriptsDir, err)
+		return
+	}
+
+	entries, err := os.ReadDir(hooksDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || entry.Name() == "hooks.json" {
+			continue
+		}
+		srcPath := filepath.Join(hooksDir, entry.Name())
+		dstPath := filepath.Join(targetHooksScriptsDir, entry.Name())
+
+		scriptData, rErr := os.ReadFile(srcPath)
+		if rErr != nil {
+			continue
+		}
+		if wErr := p.writeAtomic(dstPath, string(scriptData)); wErr != nil {
+			log.Printf("[Env] Warning: failed to write hook script %s: %v", dstPath, wErr)
+		} else {
+			ignore(os.Chmod(dstPath, 0o755))
+		}
+	}
+}
+
+func (p *Provisioner) provisionTargetHooks(targetGemini, hooksJSONContent, hooksDir string) {
+	configDir := filepath.Join(targetGemini, "config")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		log.Printf("[Env] Warning: failed to mkdir %s for hooks: %v", configDir, err)
+		return
+	}
+
+	// Write hooks.json
+	targetHooksJSON := filepath.Join(configDir, "hooks.json")
+	if err := p.writeAtomic(targetHooksJSON, hooksJSONContent); err != nil {
+		log.Printf("[Env] Warning: failed to write hooks.json to %s: %v", targetHooksJSON, err)
+	}
+
+	// Copy hook scripts if source directory exists
+	targetHooksScriptsDir := filepath.Join(configDir, "hooks")
+	p.copyHookScriptsToTarget(hooksDir, targetHooksScriptsDir)
 }
 
 // SyncHooks provisions hooks.json and executable hook scripts into primary ~/.gemini and all runtime targets.
@@ -51,47 +101,7 @@ func (p *Provisioner) SyncHooks() error {
 
 	// 3. Provision hooks into each target root
 	for _, targetGemini := range targetRoots {
-		configDir := filepath.Join(targetGemini, "config")
-		if err := os.MkdirAll(configDir, 0o755); err != nil {
-			log.Printf("[Env] Warning: failed to mkdir %s for hooks: %v", configDir, err)
-			continue
-		}
-
-		// Write hooks.json
-		targetHooksJSON := filepath.Join(configDir, "hooks.json")
-		if err := p.writeAtomic(targetHooksJSON, hooksJSONContent); err != nil {
-			log.Printf("[Env] Warning: failed to write hooks.json to %s: %v", targetHooksJSON, err)
-		}
-
-		// Copy hook scripts if source directory exists
-		if hooksDir != "" {
-			targetHooksScriptsDir := filepath.Join(configDir, "hooks")
-			if err := os.MkdirAll(targetHooksScriptsDir, 0o755); err != nil {
-				log.Printf("[Env] Warning: failed to mkdir %s for hook scripts: %v", targetHooksScriptsDir, err)
-				continue
-			}
-
-			entries, err := os.ReadDir(hooksDir)
-			if err == nil {
-				for _, entry := range entries {
-					if entry.IsDir() || entry.Name() == "hooks.json" {
-						continue
-					}
-					srcPath := filepath.Join(hooksDir, entry.Name())
-					dstPath := filepath.Join(targetHooksScriptsDir, entry.Name())
-
-					scriptData, rErr := os.ReadFile(srcPath)
-					if rErr != nil {
-						continue
-					}
-					if wErr := p.writeAtomic(dstPath, string(scriptData)); wErr != nil {
-						log.Printf("[Env] Warning: failed to write hook script %s: %v", dstPath, wErr)
-					} else {
-						ignore(os.Chmod(dstPath, 0o755))
-					}
-				}
-			}
-		}
+		p.provisionTargetHooks(targetGemini, hooksJSONContent, hooksDir)
 	}
 
 	log.Printf("[Env] Synchronized lifecycle hooks across %d runtime targets", len(targetRoots))

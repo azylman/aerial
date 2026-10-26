@@ -1,110 +1,6 @@
 {
   "files": {},
   "functions": {
-    "services/dashboard/config.go::NewDashboardConfigFromLookup": {
-      "cc": 46
-    },
-    "services/dashboard/github.go::*GitHubPoller.pollOnce": {
-      "cc": 21
-    },
-    "services/dashboard/github.go::*GitHubPoller.pollRepo": {
-      "cc": 28
-    },
-    "services/eri/cmd/transcript-search/main.go::parseCLIArgs": {
-      "cc": 21
-    },
-    "services/eri/cmd/transcript-search/main.go::runCLI": {
-      "cc": 26
-    },
-    "services/eri/pkg/ambient/provider.go::*Provider.fetchAndRender": {
-      "depth": 6
-    },
-    "services/eri/pkg/ambient/provider.go::NewProvider": {
-      "cc": 26
-    },
-    "services/eri/pkg/classifier/classifier.go::*Classifier.classifySystemOne": {
-      "lines": 176,
-      "cc": 30
-    },
-    "services/eri/pkg/config/config.go::*ConfigData.UnmarshalYAML": {
-      "lines": 154,
-      "cc": 21
-    },
-    "services/eri/pkg/delivery/delivery.go::SendMessageWithAttachments": {
-      "cc": 22
-    },
-    "services/eri/pkg/delivery/delivery.go::SplitMessage": {
-      "lines": 172,
-      "cc": 42
-    },
-    "services/eri/pkg/delivery/media.go::AutoAttachNewMedia": {
-      "cc": 23
-    },
-    "services/eri/pkg/delivery/media.go::ResolveAndValidateLocalImage": {
-      "cc": 27
-    },
-    "services/eri/pkg/delivery/media.go::SanitizeIntermediateStatus": {
-      "cc": 26
-    },
-    "services/eri/pkg/discord/widget.go::BuildStatusWidgetComponents": {
-      "cc": 22
-    },
-    "services/eri/pkg/env/hooks.go::*Provisioner.SyncHooks": {
-      "cc": 21
-    },
-    "services/eri/pkg/env/mcp.go::*Provisioner.LoadTargetMCPConfig": {
-      "cc": 35
-    },
-    "services/eri/pkg/env/rules.go::*Provisioner.linkSharedSessionStorage": {
-      "depth": 6
-    },
-    "services/eri/pkg/env/skills.go::*Provisioner.LinkTargetSkills": {
-      "cc": 21
-    },
-    "services/eri/pkg/guard/batch.go::CheckBatchWithDir": {
-      "cc": 28
-    },
-    "services/eri/pkg/guard/commit.go::CheckCommit": {
-      "cc": 27,
-      "depth": 6
-    },
-    "services/eri/pkg/guard/commit.go::IsCommitCommand": {
-      "cc": 24,
-      "depth": 7
-    },
-    "services/eri/pkg/guard/commit.go::ScanDiffWithPatterns": {
-      "cc": 26
-    },
-    "services/eri/pkg/guard/commit.go::isAllCommit": {
-      "cc": 21
-    },
-    "services/eri/pkg/guard/commit.go::parsePatternPayload": {
-      "cc": 23
-    },
-    "services/eri/pkg/guard/search.go::inspectFindCommand": {
-      "cc": 37
-    },
-    "services/eri/pkg/guard/search.go::inspectGrepCommand": {
-      "cc": 49
-    },
-    "services/eri/pkg/guard/share.go::inspectRunCommand": {
-      "cc": 38
-    },
-    "services/eri/pkg/interactions/handlers.go::*Router.handleInterrupt": {
-      "depth": 6
-    },
-    "services/eri/pkg/interactions/handlers.go::*Router.handleStatus": {
-      "cc": 35
-    },
-    "services/eri/pkg/mcp/dispatcher.go::*DefaultDispatcher.EnsureSession": {
-      "cc": 27
-    },
-    "services/eri/pkg/mcp/dispatcher.go::*DefaultDispatcher.Execute": {
-      "cc": 25
-    },
-    "services/eri/pkg/notifier/notifier.go::StaticFallback": {
-      "cc": 26
-    },
     "services/eri/pkg/queue/burst.go::PlanBurstExecution": {
       "cc": 25
     },
@@ -163,21 +59,6 @@
     },
     "services/eri/pkg/runner/unified_pool.go::*unifiedSessionLease.Execute": {
       "cc": 30
-    },
-    "services/hangar/pure.go::ExtractNomadJobImages": {
-      "depth": 7
-    },
-    "services/hangar/pure.go::ParseImageReference": {
-      "cc": 21
-    },
-    "services/hangar/reconcile.go::*SyncDaemon.CheckAndReconcileNomadImages": {
-      "depth": 6
-    },
-    "services/hangar/reconcile.go::*SyncDaemon.StartReconcilerLoop": {
-      "depth": 7
-    },
-    "services/vanadis/main.go::*PostgresVanadisStore.CreateBuild": {
-      "cc": 25
     }
   }
 }

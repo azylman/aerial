@@ -14,6 +14,128 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/config"
 )
 
+func loadOpenObserveMCPServer(cur *config.ConfigData, mergedServers map[string]interface{}) {
+	if cur.OpenObserveUser == "" || cur.OpenObservePassword == "" {
+		return
+	}
+	ooURL := cur.OpenObserveURL
+	if ooURL == "" {
+		ooURL = "http://openobserve:5080/openobserve"
+	}
+	ooOrg := cur.OpenObserveOrg
+	if ooOrg == "" {
+		ooOrg = "default"
+	}
+	mcpEndpoint := fmt.Sprintf("%s/api/%s/mcp", strings.TrimSuffix(ooURL, "/"), ooOrg)
+	authVal := base64.StdEncoding.EncodeToString([]byte(cur.OpenObserveUser + ":" + cur.OpenObservePassword))
+	mergedServers["openobserve"] = map[string]interface{}{
+		"serverUrl": mcpEndpoint,
+		"headers": map[string]string{
+			"Authorization": "Basic " + authVal,
+		},
+	}
+}
+
+func loadFileBasedMCPServers(dataDir, fallbackConfig string, mergedServers map[string]interface{}) {
+	configPaths := []string{
+		"/share/aerial-config/mcp.config.json",
+		"/share/aerial-config/mcp.json",
+		"/config/mcp.config.json",
+		"/config/mcp.json",
+	}
+	if dataDir != "" {
+		configPaths = append(configPaths, filepath.Join(dataDir, "mcp.config.json"))
+	}
+	configPaths = append(configPaths, "./mcp.config.json")
+
+	var rawBytes []byte
+	for _, cp := range configPaths {
+		if data, err := os.ReadFile(cp); err == nil && len(bytes.TrimSpace(data)) > 0 {
+			log.Printf("Loaded MCP configuration from %s", cp)
+			rawBytes = data
+			break
+		}
+	}
+
+	if len(rawBytes) == 0 && fallbackConfig != "" {
+		rawBytes = []byte(fallbackConfig)
+	}
+
+	if len(rawBytes) > 0 {
+		var parsed map[string]interface{}
+		if err := json.Unmarshal(rawBytes, &parsed); err == nil {
+			if servers, ok := parsed["mcpServers"].(map[string]interface{}); ok {
+				for k, v := range servers {
+					mergedServers[k] = v
+				}
+			}
+		}
+	}
+}
+
+func (p *Provisioner) loadDiscordBaseMCPServers(cfg *config.Config, mergedServers map[string]interface{}) {
+	mergedServers["discord"] = map[string]interface{}{
+		"serverUrl": "http://discord-mcp:4001/mcp",
+	}
+
+	if cfg != nil {
+		cur := cfg.Current()
+		if cur.GitHubPAT != "" {
+			mergedServers["github"] = map[string]interface{}{
+				"serverUrl": "http://github-mcp:4003/mcp",
+			}
+		}
+		loadOpenObserveMCPServer(cur, mergedServers)
+	}
+
+	dataDir := ""
+	if p != nil {
+		dataDir = p.dataDir
+	}
+	fallbackConfig := ""
+	if cfg != nil {
+		fallbackConfig = cfg.Current().MCPConfig
+	}
+	loadFileBasedMCPServers(dataDir, fallbackConfig, mergedServers)
+}
+
+func overlayConfigMCPServers(cfg *config.Config, target RuleTarget, mergedServers map[string]interface{}) {
+	if cfg == nil {
+		return
+	}
+	cur := cfg.Current()
+	var targetServers []map[string]json.RawMessage
+	if target == TargetEphemeral {
+		if cur.McpServers.Ephemeral != nil {
+			targetServers = append(targetServers, cur.McpServers.Ephemeral)
+		}
+	} else {
+		if cur.McpServers.Common != nil {
+			targetServers = append(targetServers, cur.McpServers.Common)
+		}
+		if target == TargetDiscord {
+			if cur.McpServers.Discord != nil {
+				targetServers = append(targetServers, cur.McpServers.Discord)
+			}
+		} else if target == TargetVoice {
+			if cur.McpServers.Voice != nil {
+				targetServers = append(targetServers, cur.McpServers.Voice)
+			}
+		}
+	}
+
+	for _, srvMap := range targetServers {
+		for k, v := range srvMap {
+			var parsedVal interface{}
+			if err := json.Unmarshal(v, &parsedVal); err == nil {
+				mergedServers[k] = parsedVal
+			} else {
+				mergedServers[k] = v
+			}
+		}
+	}
+}
+
 // LoadTargetMCPConfig constructs the merged MCP configuration partitioned for target runtime.
 func (p *Provisioner) LoadTargetMCPConfig(cfg *config.Config, target RuleTarget) json.RawMessage {
 	mergedServers := make(map[string]interface{})
@@ -30,113 +152,11 @@ func (p *Provisioner) LoadTargetMCPConfig(cfg *config.Config, target RuleTarget)
 	}
 
 	if target == TargetDiscord {
-		mergedServers["discord"] = map[string]interface{}{
-			"serverUrl": "http://discord-mcp:4001/mcp",
-		}
-
-		var gitHubPAT string
-		if cfg != nil && cfg.Current().GitHubPAT != "" {
-			gitHubPAT = cfg.Current().GitHubPAT
-		}
-		if gitHubPAT != "" {
-			mergedServers["github"] = map[string]interface{}{
-				"serverUrl": "http://github-mcp:4003/mcp",
-			}
-		}
-
-		if cfg != nil {
-			cur := cfg.Current()
-			if cur.OpenObserveUser != "" && cur.OpenObservePassword != "" {
-				ooURL := cur.OpenObserveURL
-				if ooURL == "" {
-					ooURL = "http://openobserve:5080/openobserve"
-				}
-				ooOrg := cur.OpenObserveOrg
-				if ooOrg == "" {
-					ooOrg = "default"
-				}
-				mcpEndpoint := fmt.Sprintf("%s/api/%s/mcp", strings.TrimSuffix(ooURL, "/"), ooOrg)
-				authVal := base64.StdEncoding.EncodeToString([]byte(cur.OpenObserveUser + ":" + cur.OpenObservePassword))
-				mergedServers["openobserve"] = map[string]interface{}{
-					"serverUrl": mcpEndpoint,
-					"headers": map[string]string{
-						"Authorization": "Basic " + authVal,
-					},
-				}
-			}
-		}
-
-		// 2. Check for file-based overrides (applied to Discord target only)
-		configPaths := []string{
-			"/share/aerial-config/mcp.config.json",
-			"/share/aerial-config/mcp.json",
-			"/config/mcp.config.json",
-			"/config/mcp.json",
-		}
-		if p != nil && p.dataDir != "" {
-			configPaths = append(configPaths, filepath.Join(p.dataDir, "mcp.config.json"))
-		}
-		configPaths = append(configPaths, "./mcp.config.json")
-
-		var rawBytes []byte
-		for _, cp := range configPaths {
-			if data, err := os.ReadFile(cp); err == nil && len(bytes.TrimSpace(data)) > 0 {
-				log.Printf("Loaded MCP configuration from %s", cp)
-				rawBytes = data
-				break
-			}
-		}
-
-		if len(rawBytes) == 0 && cfg != nil && cfg.Current().MCPConfig != "" {
-			rawBytes = []byte(cfg.Current().MCPConfig)
-		}
-
-		if len(rawBytes) > 0 {
-			var parsed map[string]interface{}
-			if err := json.Unmarshal(rawBytes, &parsed); err == nil {
-				if servers, ok := parsed["mcpServers"].(map[string]interface{}); ok {
-					for k, v := range servers {
-						mergedServers[k] = v
-					}
-				}
-			}
-		}
+		p.loadDiscordBaseMCPServers(cfg, mergedServers)
 	}
 
 	// 3. Overlay custom MCP servers from config.yaml
-	if cfg != nil {
-		cur := cfg.Current()
-		var targetServers []map[string]json.RawMessage
-		if target == TargetEphemeral {
-			if cur.McpServers.Ephemeral != nil {
-				targetServers = append(targetServers, cur.McpServers.Ephemeral)
-			}
-		} else {
-			if cur.McpServers.Common != nil {
-				targetServers = append(targetServers, cur.McpServers.Common)
-			}
-			if target == TargetDiscord {
-				if cur.McpServers.Discord != nil {
-					targetServers = append(targetServers, cur.McpServers.Discord)
-				}
-			} else if target == TargetVoice {
-				if cur.McpServers.Voice != nil {
-					targetServers = append(targetServers, cur.McpServers.Voice)
-				}
-			}
-		}
-
-		for _, srvMap := range targetServers {
-			for k, v := range srvMap {
-				var parsedVal interface{}
-				if err := json.Unmarshal(v, &parsedVal); err == nil {
-					mergedServers[k] = parsedVal
-				} else {
-					mergedServers[k] = v
-				}
-			}
-		}
-	}
+	overlayConfigMCPServers(cfg, target, mergedServers)
 
 	finalConfig := map[string]interface{}{
 		"mcpServers": mergedServers,

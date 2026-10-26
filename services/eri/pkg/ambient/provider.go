@@ -44,78 +44,60 @@ type Provider struct {
 	cacheTTL      time.Duration
 }
 
-// NewProvider creates and initializes a new ambient context Provider.
-func NewProvider(cfg config.AmbientContextConfig, invoker MCPInvoker) (*Provider, error) {
-	tmplStr := cfg.Template
-	if tmplStr == "" && cfg.TemplatePath != "" {
-		data, err := os.ReadFile(cfg.TemplatePath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read template file: %w", err)
-		}
-		tmplStr = string(data)
+func stringifyTemplateArg(s any) string {
+	if s == nil {
+		return ""
 	}
+	str := fmt.Sprint(s)
+	if str == "<no value>" {
+		return ""
+	}
+	return str
+}
 
-	funcMap := template.FuncMap{
-		"default": func(def any, val any) any {
-			if val == nil {
+func defaultTemplateFunc(def any, val any) any {
+	if val == nil {
+		return def
+	}
+	switch v := val.(type) {
+	case string:
+		if v == "" || v == "<no value>" {
+			return def
+		}
+	case bool:
+		if !v {
+			return def
+		}
+	default:
+		rv := reflect.ValueOf(val)
+		if !rv.IsValid() {
+			return def
+		}
+		switch rv.Kind() {
+		case reflect.Array, reflect.Slice, reflect.Map, reflect.String:
+			if rv.Len() == 0 {
 				return def
 			}
-			switch v := val.(type) {
-			case string:
-				if v == "" || v == "<no value>" {
-					return def
-				}
-			case bool:
-				if !v {
-					return def
-				}
-			default:
-				rv := reflect.ValueOf(val)
-				if !rv.IsValid() {
-					return def
-				}
-				switch rv.Kind() {
-				case reflect.Array, reflect.Slice, reflect.Map, reflect.String:
-					if rv.Len() == 0 {
-						return def
-					}
-				default:
-					if rv.IsZero() {
-						return def
-					}
-				}
+		default:
+			if rv.IsZero() {
+				return def
 			}
-			return val
-		},
+		}
+	}
+	return val
+}
+
+func ambientTemplateFuncMap() template.FuncMap {
+	return template.FuncMap{
+		"default": defaultTemplateFunc,
 		"trim": func(s any) string {
-			if s == nil {
-				return ""
-			}
-			str := fmt.Sprint(s)
-			if str == "<no value>" {
-				return ""
-			}
-			return strings.TrimSpace(str)
+			return strings.TrimSpace(stringifyTemplateArg(s))
 		},
 		"lower": func(s any) string {
-			if s == nil {
-				return ""
-			}
-			str := fmt.Sprint(s)
-			if str == "<no value>" {
-				return ""
-			}
-			return strings.ToLower(str)
+			return strings.ToLower(stringifyTemplateArg(s))
 		},
 		"upper": func(s any) string {
-			if s == nil {
-				return ""
-			}
-			str := fmt.Sprint(s)
-			if str == "<no value>" {
-				return ""
-			}
-			return strings.ToUpper(str)
+			return strings.ToUpper(stringifyTemplateArg(s))
 		},
 		"json": func(v any) string {
 			if v == nil {
@@ -128,10 +110,22 @@ func NewProvider(cfg config.AmbientContextConfig, invoker MCPInvoker) (*Provider
 			return string(b)
 		},
 	}
+}
+
+// NewProvider creates and initializes a new ambient context Provider.
+func NewProvider(cfg config.AmbientContextConfig, invoker MCPInvoker) (*Provider, error) {
+	tmplStr := cfg.Template
+	if tmplStr == "" && cfg.TemplatePath != "" {
+		data, err := os.ReadFile(cfg.TemplatePath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read template file: %w", err)
+		}
+		tmplStr = string(data)
+	}
 
 	parsedTmpl, err := template.New("ambient").
 		Option("missingkey=zero").
-		Funcs(funcMap).
+		Funcs(ambientTemplateFuncMap()).
 		Parse(tmplStr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse ambient template: %w", err)
@@ -164,6 +158,51 @@ func (p *Provider) Prime(ctx context.Context) error {
 	return err
 }
 
+func (p *Provider) invokeAmbientTool(ctx context.Context, t config.AmbientToolConfig) any {
+	if p.invoker == nil {
+		return map[string]any{"error": "nil mcp invoker"}
+	}
+	resText, err := p.invoker.Execute(ctx, t.Tool, t.Arguments)
+	if err != nil {
+		return map[string]any{"error": err.Error()}
+	}
+	var parsed any
+	if err := json.Unmarshal([]byte(resText), &parsed); err == nil {
+		return parsed
+	}
+	return map[string]any{"raw": resText, "text": resText}
+}
+
+func (p *Provider) collectAmbientToolData(ctx context.Context) (map[string]any, error) {
+	timeout := 250 * time.Millisecond
+	if p.cfg.TimeoutMs > 0 {
+		timeout = time.Duration(p.cfg.TimeoutMs) * time.Millisecond
+	}
+	toolCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	g, groupCtx := errgroup.WithContext(toolCtx)
+	data := make(map[string]any)
+	var dataMu sync.Mutex
+
+	for _, tool := range p.cfg.Tools {
+		t := tool
+		g.Go(func() error {
+			val := p.invokeAmbientTool(groupCtx, t)
+			dataMu.Lock()
+			data[t.Name] = val
+			dataMu.Unlock()
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+
+	data["now"] = p.now().Format("15:04:05")
+	return data, nil
+}
+
 func (p *Provider) fetchAndRender(ctx context.Context) (string, error) {
 	res, err, _ := p.sf.Do("ambient_fetch", func() (interface{}, error) {
 		curNow := p.now()
@@ -175,47 +214,10 @@ func (p *Provider) fetchAndRender(ctx context.Context) (string, error) {
 		}
 		p.mu.RUnlock()
 
-		timeout := 250 * time.Millisecond
-		if p.cfg.TimeoutMs > 0 {
-			timeout = time.Duration(p.cfg.TimeoutMs) * time.Millisecond
-		}
-		toolCtx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
-
-		g, groupCtx := errgroup.WithContext(toolCtx)
-		data := make(map[string]any)
-		var dataMu sync.Mutex
-
-		for _, tool := range p.cfg.Tools {
-			t := tool
-			g.Go(func() error {
-				var val any
-				if p.invoker == nil {
-					val = map[string]any{"error": "nil mcp invoker"}
-				} else {
-					resText, err := p.invoker.Execute(groupCtx, t.Tool, t.Arguments)
-					if err != nil {
-						val = map[string]any{"error": err.Error()}
-					} else {
-						var parsed any
-						if err := json.Unmarshal([]byte(resText), &parsed); err == nil {
-							val = parsed
-						} else {
-							val = map[string]any{"raw": resText, "text": resText}
-						}
-					}
-				}
-				dataMu.Lock()
-				data[t.Name] = val
-				dataMu.Unlock()
-				return nil
-			})
-		}
-		if err := g.Wait(); err != nil {
+		data, err := p.collectAmbientToolData(ctx)
+		if err != nil {
 			return nil, err
 		}
-
-		data["now"] = p.now().Format("15:04:05")
 
 		var buf bytes.Buffer
 		if err := p.parsedTmpl.Execute(&buf, data); err != nil {

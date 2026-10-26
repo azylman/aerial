@@ -67,32 +67,62 @@ func FormatQuotaPauseMessage(resetDur time.Duration, runAt time.Time, scheduled 
 	return fmt.Sprintf("Personal subscription quota limit reached. Quota resets in **%s**%s. Please try again once quota refreshes, or add `GEMINI_API_KEY` into `.env` to unlock direct access.", durHuman, countdown)
 }
 
+type staticFallbackRule struct {
+	keywords []string
+	response string
+}
+
+var staticFallbackRules = []staticFallbackRule{
+	{
+		keywords: []string{"capacity"},
+		response: "Model capacity temporarily reached. Please try again in a moment.",
+	},
+	{
+		keywords: []string{"quota", "individual quota", "resource_exhausted"},
+		response: "Personal subscription quota limit reached. Please try again once quota refreshes, or add `GEMINI_API_KEY` into `.env` to bypass subscription limits.",
+	},
+	{
+		keywords: []string{"503", "unavailable", "high demand", "rate limit"},
+		response: ModelUnavailableMessage(),
+	},
+	{
+		keywords: []string{"poison", "crash", "dropped"},
+		response: "The message caused repeated process crashes and was skipped to restore normal operation. Please try rephrasing or simplifying the request.",
+	},
+	{
+		keywords: []string{"reset", "corrupt", "session"},
+		response: "The conversation context became corrupted and has been reset. Please try sending your message again.",
+	},
+	{
+		keywords: []string{"authentication failed", "auth failed", "unauthorized", "invalid api key", "invalid_api_key"},
+		response: "Authentication failed while processing the request. Please check your API credentials or re-authenticate.",
+	},
+	{
+		keywords: []string{"watchdog", "inactivity", "max duration", "timed out"},
+		response: "Execution timed out while processing the request. Please try again or break the request into smaller steps.",
+	},
+	{
+		keywords: []string{"exhausting", "exhausted all"},
+		response: "Execution failed after exhausting retry attempts. Please check request parameters or try again later.",
+	},
+}
+
+func containsAnySubstring(lower string, keywords []string) bool {
+	for _, kw := range keywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
 // StaticFallback returns a neutral default notification based on the error context.
 func StaticFallback(contextDescription string) string {
 	lower := strings.ToLower(contextDescription)
-	if strings.Contains(lower, "capacity") {
-		return "Model capacity temporarily reached. Please try again in a moment."
-	}
-	if strings.Contains(lower, "quota") || strings.Contains(lower, "individual quota") || strings.Contains(lower, "resource_exhausted") {
-		return "Personal subscription quota limit reached. Please try again once quota refreshes, or add `GEMINI_API_KEY` into `.env` to bypass subscription limits."
-	}
-	if strings.Contains(lower, "503") || strings.Contains(lower, "unavailable") || strings.Contains(lower, "high demand") || strings.Contains(lower, "rate limit") {
-		return ModelUnavailableMessage()
-	}
-	if strings.Contains(lower, "poison") || strings.Contains(lower, "crash") || strings.Contains(lower, "dropped") {
-		return "The message caused repeated process crashes and was skipped to restore normal operation. Please try rephrasing or simplifying the request."
-	}
-	if strings.Contains(lower, "reset") || strings.Contains(lower, "corrupt") || strings.Contains(lower, "session") {
-		return "The conversation context became corrupted and has been reset. Please try sending your message again."
-	}
-	if strings.Contains(lower, "authentication failed") || strings.Contains(lower, "auth failed") || strings.Contains(lower, "unauthorized") || strings.Contains(lower, "invalid api key") || strings.Contains(lower, "invalid_api_key") {
-		return "Authentication failed while processing the request. Please check your API credentials or re-authenticate."
-	}
-	if strings.Contains(lower, "watchdog") || strings.Contains(lower, "inactivity") || strings.Contains(lower, "max duration") || strings.Contains(lower, "timed out") {
-		return "Execution timed out while processing the request. Please try again or break the request into smaller steps."
-	}
-	if strings.Contains(lower, "exhausting") || strings.Contains(lower, "exhausted all") {
-		return "Execution failed after exhausting retry attempts. Please check request parameters or try again later."
+	for _, rule := range staticFallbackRules {
+		if containsAnySubstring(lower, rule.keywords) {
+			return rule.response
+		}
 	}
 	return "An unexpected error occurred while processing the request. Please try again."
 }

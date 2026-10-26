@@ -128,6 +128,9 @@ func TestCheckSearch(t *testing.T) {
 		{"grep for .zip string in source file allowed", "run_command", "grep '.zip' main.go", "", false, ""},
 		{"grep in file named bin.go allowed", "run_command", "grep 'pattern' bin.go", "", false, ""},
 		{"grep with explicit -e flag allowed", "run_command", "grep -e 'foo' main.go", "", false, ""},
+		{"bash safe command in search", "run_command", "bash -c 'echo safe'", "", false, ""},
+		{"grep short flag with digit", "run_command", "grep -m 10 foo file.txt", "", false, ""},
+		{"unclosed sql single quote", "run_command", `psql -A -c "SELECT 'unclosed"`, "", false, ""},
 
 		// Pipelines & Quotes
 		{"echo containing find in quotes allowed", "run_command", `echo "find / -name foo"`, "", false, ""},
@@ -136,6 +139,12 @@ func TestCheckSearch(t *testing.T) {
 		{"pipe inside quotes allowed", "run_command", `grep "a | b" file.txt`, "", false, ""},
 		{"semicolon inside quotes allowed", "run_command", `git commit -m "fix; update search guard"`, "", false, ""},
 		{"or operator pipeline with bad find denied", "run_command", `test -d /foo || find / -maxdepth 1`, "", true, ""},
+		{"docker exec find without maxdepth denied", "run_command", `docker exec cc72895f4852 find /app -name "*live-session*"`, "", true, ""},
+		{"docker exec find with maxdepth allowed", "run_command", `docker exec -i -u root -w /app cc72895f4852 find /app -maxdepth 2 -name "*.js"`, "", false, ""},
+		{"docker exec recursive grep without limit denied", "run_command", `docker exec cc72895f4852 grep -rn "setupCanvas" /app`, "", true, ""},
+		{"docker exec recursive grep with limit allowed", "run_command", `docker exec -e FOO=bar cc72895f4852 grep -rn -m 20 --exclude-dir=.git "setupCanvas" /app`, "", false, ""},
+		{"docker exec sh -c unconstrained find denied", "run_command", `docker exec cc72895f4852 sh -c "find /app -name '*.js'"`, "", true, ""},
+		{"docker exec without inner command allowed", "run_command", `docker exec -it cc72895f4852`, "", false, ""},
 
 		// MCP tool_index & openobserve shaping (cmd = ToolName, cwd = Arguments JSON)
 		{"mcp non-index tool allowed", "call_mcp_tool", "list_devices", `{}`, false, ""},
@@ -155,6 +164,14 @@ func TestCheckSearch(t *testing.T) {
 		{"mcp openobserve SearchSQL explicit columns defaults query size", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"query":{"sql":"SELECT _timestamp, service, COUNT(*) FROM docker_logs WHERE message LIKE '%SELECT *%''s%' -- * comment\n GROUP BY _timestamp, service LIMIT 50"}}}`, false, `"size":50`},
 		{"mcp openobserve SearchSQL csv output_format rewritten to json", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"agent_options":{"output_format":"csv"},"query":{"size":20,"sql":"SELECT _timestamp, message FROM docker_logs LIMIT 10"}}}`, false, `"output_format":"json"`},
 		{"mcp openobserve SearchSQL bounded size and json output_format allowed", "call_mcp_tool", "SearchSQL", `{"org_id":"default","request_body":{"agent_options":{"output_format":"json"},"query":{"size":20,"sql":"SELECT _timestamp, message FROM docker_logs LIMIT 10"}}}`, false, ""},
+		{"mcp discord_search_messages default limit allowed", "call_mcp_tool", "discord_search_messages", `{"guildId":"123","content":"hello"}`, false, ""},
+		{"mcp discord_search_messages limit 25 allowed", "call_mcp_tool", "discord_search_messages", `{"guildId":"123","limit":25}`, false, ""},
+		{"mcp discord_search_messages limit 50 denied", "call_mcp_tool", "discord_search_messages", `{"guildId":"123","limit":50}`, true, ""},
+		{"mcp github get_file_contents empty args allowed", "call_mcp_tool", "get_file_contents", ``, false, ""},
+		{"mcp github get_file_contents local aerial default branch denied", "call_mcp_tool", "get_file_contents", `{"owner":"azylman","repo":"aerial","path":"services/eri/main.go"}`, true, ""},
+		{"mcp github get_file_contents local aerial-config main ref denied", "call_mcp_tool", "get_file_contents", `{"owner":"azylman","repo":"aerial-config","path":"config.yaml","ref":"main"}`, true, ""},
+		{"mcp github get_file_contents aerial feature branch allowed and injects fields", "call_mcp_tool", "get_file_contents", `{"owner":"azylman","repo":"aerial","path":"services/eri","ref":"feat/branch"}`, false, `"fields":["name","type","path","size"]`},
+		{"mcp github get_file_contents external repo with fields preserved", "call_mcp_tool", "get_file_contents", `{"owner":"golang","repo":"go","path":"README.md","fields":["name","type"]}`, false, ""},
 	}
 
 	for _, tc := range tests {
@@ -316,6 +333,51 @@ func TestPsqlGuard(t *testing.T) {
 			cmd:           `psql "$DATABASE_URL" --command "\dt" -c "\d; SELECT id, author_name FROM messages LIMIT 5"`,
 			conn:          &fakeSQLCatalogConn{cols: twoCols, explainJSON: limitPlan, tableMeta: meta3},
 			wantOverwrite: `psql -A "$DATABASE_URL" --command "\dt" -c "\d; SELECT id, author_name FROM messages LIMIT 5"`,
+		},
+		{
+			name:          "docker exec psql injects -A",
+			cmd:           `docker exec -i -e PGPASSWORD=secret postgres psql -U aerial -d aerial -c "SELECT id, author_name FROM messages LIMIT 5"`,
+			conn:          &fakeSQLCatalogConn{cols: twoCols, explainJSON: limitPlan, tableMeta: meta3},
+			wantOverwrite: `docker exec -i -e PGPASSWORD=secret postgres psql -A -U aerial -d aerial -c "SELECT id, author_name FROM messages LIMIT 5"`,
+		},
+		{
+			name:          "docker exec psql select star denied",
+			cmd:           `docker exec postgres psql -U aerial -c "SELECT * FROM messages LIMIT 5"`,
+			conn:          &fakeSQLCatalogConn{cols: threeCols, explainJSON: limitPlan, tableMeta: meta3, relCounts: rel3},
+			wantDeny:      true,
+			wantReasonSub: "Available columns: id, author_name, content",
+		},
+		{
+			name:     "docker exec without inner command ignored by psql guard",
+			cmd:      `docker exec -e FOO=bar postgres`,
+			conn:     &fakeSQLCatalogConn{cols: twoCols, explainJSON: limitPlan, tableMeta: meta3},
+			wantDeny: false,
+		},
+		{
+			name:          "psql empty query allowed",
+			cmd:           `psql "$DATABASE_URL" -c ""`,
+			wantDeny:      false,
+			wantOverwrite: `psql -A "$DATABASE_URL" -c ""`,
+		},
+		{
+			name:          "psql backslash stmt skipped",
+			cmd:           `psql "$DATABASE_URL" -c "SELECT id, author_name FROM messages LIMIT 5; \timing"`,
+			conn:          &fakeSQLCatalogConn{cols: twoCols, explainJSON: limitPlan, tableMeta: meta3},
+			wantOverwrite: `psql -A "$DATABASE_URL" -c "SELECT id, author_name FROM messages LIMIT 5; \timing"`,
+		},
+		{
+			name:          "schema hint connect failure returns empty",
+			cmd:           `psql "$DATABASE_URL" -c "SELECT bad_col FROM messages"`,
+			connErr:       errors.New("dial fail"),
+			conn:          &fakeSQLCatalogConn{prepareErr: &pgconn.PgError{Code: "42703", Message: `column "bad_col" does not exist`}},
+			wantDeny:      false,
+			wantOverwrite: `psql -A "$DATABASE_URL" -c "SELECT bad_col FROM messages"`,
+		},
+		{
+			name:          "psql empty explain plan ignored",
+			cmd:           `psql "$DATABASE_URL" -c "SELECT id FROM messages"`,
+			conn:          &fakeSQLCatalogConn{cols: twoCols, explainJSON: ""},
+			wantOverwrite: `psql -A "$DATABASE_URL" -c "SELECT id FROM messages"`,
 		},
 	}
 

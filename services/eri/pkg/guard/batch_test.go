@@ -30,33 +30,40 @@ func TestCheckBatch(t *testing.T) {
 		steps            [][]batchHookInput
 		wantLastDecision DecisionType
 		wantReasonSubstr string
+		wantOverwriteCmd string
 	}{
-		{"unscoped go test", turns(turn(batchHookInput{tool: "run_command", cmd: "go test ./..."})), DecisionDeny, "Unscoped test sweep"},
-		{"unscoped test brain/...", turns(turn(batchHookInput{tool: "run_command", cmd: "go test brain/..."})), DecisionDeny, "Unscoped test sweep"},
-		{"unscoped test services/eri/...", turns(turn(batchHookInput{tool: "run_command", cmd: "go test services/eri/..."})), DecisionDeny, "Unscoped test sweep"},
-		{"unscoped pytest", turns(turn(batchHookInput{tool: "run_command", cmd: "pytest"})), DecisionDeny, "Unscoped test sweep"},
-		{"unscoped verify.sh", turns(turn(batchHookInput{tool: "run_command", cmd: "./scripts/verify.sh"})), DecisionDeny, "Unscoped test sweep"},
-		{"scoped test allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "go test ./pkg/guard"})), DecisionAllow, ""},
-		{"verbose test without run denied", turns(turn(batchHookInput{tool: "run_command", cmd: "go test -v ./pkg/guard"})), DecisionDeny, "Unscoped test sweep"},
-		{"verbose test with run allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "go test -v -run TestCheckBatch ./pkg/guard"})), DecisionAllow, ""},
-		{"compound unscoped test denied", turns(turn(batchHookInput{tool: "run_command", cmd: "cd /tmp && go test ./..."})), DecisionDeny, "Unscoped test sweep"},
-		{"scoped verify staged", turns(turn(batchHookInput{tool: "run_command", cmd: "./scripts/verify.sh --staged"})), DecisionAllow, ""},
-		{"unbatched git add", turns(turn(batchHookInput{tool: "run_command", cmd: "git add main.go"})), DecisionDeny, "Unbatched git lifecycle"},
-		{"unbatched git commit", turns(turn(batchHookInput{tool: "run_command", cmd: "git commit -m 'fix'"})), DecisionDeny, "Unbatched git lifecycle"},
-		{"safe git status", turns(turn(batchHookInput{tool: "run_command", cmd: "git status"})), DecisionAllow, ""},
-		{"micro inspection thrashing", turns(turn(batchHookInput{tool: "run_command", cmd: "cat a.txt"}), turn(batchHookInput{tool: "run_command", cmd: "head b.txt"}), turn(batchHookInput{tool: "run_command", cmd: "tail c.txt"}), turn(batchHookInput{tool: "run_command", cmd: "which d.txt"})), DecisionDeny, "Micro-command thrashing detected"},
-		{"micro read thrashing same file", turns(turn(batchHookInput{tool: "view_file", path: "/tmp/foo.go"}), turn(batchHookInput{tool: "view_file", path: "/tmp/foo.go"}), turn(batchHookInput{tool: "view_file", path: "/tmp/foo.go"})), DecisionDeny, "Iterative micro-read thrashing"},
-		{"micro read_file thrashing same file", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go"})), DecisionDeny, "Iterative micro-read thrashing"},
-		{"sequential single file reads", turns(turn(batchHookInput{tool: "view_file", path: "/tmp/a.go"}), turn(batchHookInput{tool: "view_file", path: "/tmp/b.go"}), turn(batchHookInput{tool: "view_file", path: "/tmp/c.go"})), DecisionDeny, "Parallel Tool Batching Invariant Violated"},
-		{"sequential single read_file calls", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/a.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/b.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/c.go"})), DecisionDeny, "Parallel Tool Batching Invariant Violated"},
-		{"parallel reads allowed", turns(turn(batchHookInput{tool: "view_file", path: "/tmp/a.go"}, batchHookInput{tool: "view_file", path: "/tmp/b.go"}, batchHookInput{tool: "view_file", path: "/tmp/c.go"})), DecisionAllow, ""},
-		{"micro edit thrashing", turns(turn(batchHookInput{tool: "replace_file_content", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "replace_file_content", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "replace_file_content", path: "/tmp/mod.go"})), DecisionDeny, "Coarse-Grained Code Editing Invariant Violated"},
-		{"micro edit_file thrashing", turns(turn(batchHookInput{tool: "edit_file", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "write_file", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "edit_file", path: "/tmp/mod.go"})), DecisionDeny, "Coarse-Grained Code Editing Invariant Violated"},
-		{"read different file allowed", turns(turn(batchHookInput{tool: "view_file", path: "/tmp/foo.go"}, batchHookInput{tool: "view_file", path: "/tmp/extra1.go"}), turn(batchHookInput{tool: "view_file", path: "/tmp/foo.go"}, batchHookInput{tool: "view_file", path: "/tmp/extra2.go"}), turn(batchHookInput{tool: "view_file", path: "/tmp/other.go"}, batchHookInput{tool: "view_file", path: "/tmp/extra1.go"})), DecisionAllow, ""},
-		{"parallel same-file reads in turn 1 plus turn 2 read allowed", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/big.go", start: 10, end: 60}, batchHookInput{tool: "read_file", path: "/tmp/big.go", start: 800, end: 860}), turn(batchHookInput{tool: "read_file", path: "/tmp/big.go", start: 861, end: 950})), DecisionAllow, ""},
-		{"non-overlapping paginated read_file allowed", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 1, end: 500}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 501, end: 1000}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 1001, end: 1400})), DecisionAllow, ""},
-		{"overlapping paginated read_file denied", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 1, end: 500}, batchHookInput{tool: "read_file", path: "/tmp/o1.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 501, end: 1000}, batchHookInput{tool: "read_file", path: "/tmp/o2.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 400, end: 900})), DecisionDeny, "Iterative micro-read thrashing"},
-		{"small non-overlapping micro-reads denied", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 1, end: 50}, batchHookInput{tool: "read_file", path: "/tmp/o1.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 51, end: 100}, batchHookInput{tool: "read_file", path: "/tmp/o2.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 101, end: 150})), DecisionDeny, "Iterative micro-read thrashing"},
+		{"unscoped go test", turns(turn(batchHookInput{tool: "run_command", cmd: "go test ./..."})), DecisionDeny, "Unscoped test sweep", ""},
+		{"unscoped test brain/...", turns(turn(batchHookInput{tool: "run_command", cmd: "go test brain/..."})), DecisionDeny, "Unscoped test sweep", ""},
+		{"unscoped test services/eri/...", turns(turn(batchHookInput{tool: "run_command", cmd: "go test services/eri/..."})), DecisionDeny, "Unscoped test sweep", ""},
+		{"unscoped pytest", turns(turn(batchHookInput{tool: "run_command", cmd: "pytest"})), DecisionDeny, "Unscoped test sweep", ""},
+		{"unscoped verify.sh", turns(turn(batchHookInput{tool: "run_command", cmd: "./scripts/verify.sh"})), DecisionDeny, "Unscoped test sweep", ""},
+		{"scoped test allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "go test ./pkg/guard"})), DecisionAllow, "", ""},
+		{"verbose test stripped and allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "go test -v ./pkg/guard"})), DecisionAllow, "", "go test ./pkg/guard"},
+		{"verbose test with run stripped and allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "go test -v -run TestCheckBatch ./pkg/guard"})), DecisionAllow, "", "go test -run TestCheckBatch ./pkg/guard"},
+		{"compound unscoped test denied", turns(turn(batchHookInput{tool: "run_command", cmd: "cd /tmp && go test ./..."})), DecisionDeny, "Unscoped test sweep", ""},
+		{"scoped verify staged", turns(turn(batchHookInput{tool: "run_command", cmd: "./scripts/verify.sh --staged"})), DecisionAllow, "", ""},
+		{"verify help allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "./scripts/verify.sh --help"})), DecisionAllow, "", ""},
+		{"empty command in batch allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "   "})), DecisionAllow, "", ""},
+		{"unbatched git add", turns(turn(batchHookInput{tool: "run_command", cmd: "git add main.go"})), DecisionDeny, "Unbatched git lifecycle", ""},
+		{"unbatched git commit", turns(turn(batchHookInput{tool: "run_command", cmd: "git commit -m 'fix'"})), DecisionDeny, "Unbatched git lifecycle", ""},
+		{"safe git status", turns(turn(batchHookInput{tool: "run_command", cmd: "git status"})), DecisionAllow, "", ""},
+		{"read_file on transcript.jsonl denied", turns(turn(batchHookInput{tool: "read_file", path: "/data/runtimes/discord/.gemini/antigravity-cli/brain/361f6998/.system_generated/logs/transcript.jsonl"})), DecisionDeny, "transcript-search", ""},
+		{"view_file on transcript_full.jsonl denied", turns(turn(batchHookInput{tool: "view_file", path: ".system_generated/logs/transcript_full.jsonl"})), DecisionDeny, "transcript-search", ""},
+		{"docker exec go test -v stripped and allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "docker exec -i eri go test -v ./pkg/guard"})), DecisionAllow, "", "docker exec -i eri go test ./pkg/guard"},
+		{"docker exec unscoped go test denied", turns(turn(batchHookInput{tool: "run_command", cmd: "docker exec eri go test ./..."})), DecisionDeny, "Unscoped test sweep", ""},
+		{"micro inspection thrashing", turns(turn(batchHookInput{tool: "run_command", cmd: "cat a.txt"}), turn(batchHookInput{tool: "run_command", cmd: "head b.txt"}), turn(batchHookInput{tool: "run_command", cmd: "tail c.txt"}), turn(batchHookInput{tool: "run_command", cmd: "which d.txt"})), DecisionDeny, "Micro-command thrashing detected", ""},
+		{"micro read thrashing same file", turns(turn(batchHookInput{tool: "view_file", path: "/tmp/foo.go"}), turn(batchHookInput{tool: "view_file", path: "/tmp/foo.go"}), turn(batchHookInput{tool: "view_file", path: "/tmp/foo.go"})), DecisionDeny, "Iterative micro-read thrashing", ""},
+		{"micro read_file thrashing same file", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go"})), DecisionDeny, "Iterative micro-read thrashing", ""},
+		{"sequential single file reads", turns(turn(batchHookInput{tool: "view_file", path: "/tmp/a.go"}), turn(batchHookInput{tool: "view_file", path: "/tmp/b.go"}), turn(batchHookInput{tool: "view_file", path: "/tmp/c.go"})), DecisionDeny, "Parallel Tool Batching Invariant Violated", ""},
+		{"sequential single read_file calls", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/a.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/b.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/c.go"})), DecisionDeny, "Parallel Tool Batching Invariant Violated", ""},
+		{"parallel reads allowed", turns(turn(batchHookInput{tool: "view_file", path: "/tmp/a.go"}, batchHookInput{tool: "view_file", path: "/tmp/b.go"}, batchHookInput{tool: "view_file", path: "/tmp/c.go"})), DecisionAllow, "", ""},
+		{"micro edit thrashing", turns(turn(batchHookInput{tool: "replace_file_content", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "replace_file_content", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "replace_file_content", path: "/tmp/mod.go"})), DecisionDeny, "Coarse-Grained Code Editing Invariant Violated", ""},
+		{"micro edit_file thrashing", turns(turn(batchHookInput{tool: "edit_file", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "write_file", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "edit_file", path: "/tmp/mod.go"})), DecisionDeny, "Coarse-Grained Code Editing Invariant Violated", ""},
+		{"read different file allowed", turns(turn(batchHookInput{tool: "view_file", path: "/tmp/foo.go"}, batchHookInput{tool: "view_file", path: "/tmp/extra1.go"}), turn(batchHookInput{tool: "view_file", path: "/tmp/foo.go"}, batchHookInput{tool: "view_file", path: "/tmp/extra2.go"}), turn(batchHookInput{tool: "view_file", path: "/tmp/other.go"}, batchHookInput{tool: "view_file", path: "/tmp/extra1.go"})), DecisionAllow, "", ""},
+		{"parallel same-file reads in turn 1 plus turn 2 read allowed", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/big.go", start: 10, end: 60}, batchHookInput{tool: "read_file", path: "/tmp/big.go", start: 800, end: 860}), turn(batchHookInput{tool: "read_file", path: "/tmp/big.go", start: 861, end: 950})), DecisionAllow, "", ""},
+		{"non-overlapping paginated read_file allowed", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 1, end: 500}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 501, end: 1000}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 1001, end: 1400})), DecisionAllow, "", ""},
+		{"overlapping paginated read_file denied", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 1, end: 500}, batchHookInput{tool: "read_file", path: "/tmp/o1.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 501, end: 1000}, batchHookInput{tool: "read_file", path: "/tmp/o2.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 400, end: 900})), DecisionDeny, "Iterative micro-read thrashing", ""},
+		{"small non-overlapping micro-reads denied", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 1, end: 50}, batchHookInput{tool: "read_file", path: "/tmp/o1.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 51, end: 100}, batchHookInput{tool: "read_file", path: "/tmp/o2.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 101, end: 150})), DecisionDeny, "Iterative micro-read thrashing", ""},
 	}
 
 	for _, tc := range stepTests {
@@ -93,6 +100,13 @@ func TestCheckBatch(t *testing.T) {
 			}
 			if tc.wantReasonSubstr != "" && !strings.Contains(lastDec.Reason, tc.wantReasonSubstr) {
 				t.Fatalf("expected reason containing %q, got %q", tc.wantReasonSubstr, lastDec.Reason)
+			}
+			if strings.Contains(lastDec.Reason, " -v ") {
+				t.Fatalf("unexpected -v recommendation in reason: %q", lastDec.Reason)
+			}
+			gotOverwrite, _ := lastDec.Overwrite["CommandLine"].(string)
+			if gotOverwrite != tc.wantOverwriteCmd {
+				t.Fatalf("Overwrite[CommandLine] = %q, want %q", gotOverwrite, tc.wantOverwriteCmd)
 			}
 		})
 	}
@@ -217,10 +231,11 @@ func TestBatchHelpers(t *testing.T) {
 		{"scripts/verify.sh", true},
 		{"./scripts/verify.sh", true},
 		{"go test ./pkg/guard", false},
-		{"go test -v ./pkg/guard", true},
+		{"go test -v ./pkg/guard", false},
 		{"go test -v -run TestFoo ./pkg/guard", false},
 		{"go test -v=true -run=TestFoo -timeout 30s ./pkg/guard", false},
 		{"cd services/eri && go test ./...", true},
+		{"(cd services/eri && go test ./...)", true},
 		{"CGO_ENABLED=0 go test ./...", true},
 		{"scripts/verify.sh --staged", false},
 		{"scripts/verify.sh -h", false},
@@ -231,6 +246,30 @@ func TestBatchHelpers(t *testing.T) {
 			t.Parallel()
 			if got := isUnscopedTest(tc.cmd); got != tc.want {
 				t.Fatalf("isUnscopedTest(%q) = %v, want %v", tc.cmd, got, tc.want)
+			}
+		})
+	}
+
+	stripVerboseTests := []struct {
+		cmd  string
+		want string
+	}{
+		{"go test ./pkg/guard", "go test ./pkg/guard"},
+		{"go test -v ./pkg/guard", "go test ./pkg/guard"},
+		{"go test -test.v ./pkg/guard", "go test ./pkg/guard"},
+		{"go test -v=true -test.v=true --v --test.v ./pkg/guard", "go test ./pkg/guard"},
+		{"go test -v -run TestFoo ./pkg/guard", "go test -run TestFoo ./pkg/guard"},
+		{"cd /tmp && CGO_ENABLED=1 go test -v -race ./pkg/guard", "cd /tmp && CGO_ENABLED=1 go test -race ./pkg/guard"},
+		{"(cd /tmp && go test ./pkg/guard -v)", "(cd /tmp && go test ./pkg/guard)"},
+		{"(go test -v ./pkg/guard)", "(go test ./pkg/guard)"},
+		{"go test -v ./pkg/guard -- -v", "go test ./pkg/guard -- -v"},
+		{"go test -run -v -v ./pkg/guard", "go test -run -v ./pkg/guard"},
+	}
+	for _, tc := range stripVerboseTests {
+		t.Run("strip_verbose_"+tc.cmd, func(t *testing.T) {
+			t.Parallel()
+			if got := stripGoTestVerbose(tc.cmd); got != tc.want {
+				t.Fatalf("stripGoTestVerbose(%q) = %q, want %q", tc.cmd, got, tc.want)
 			}
 		})
 	}

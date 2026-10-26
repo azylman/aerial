@@ -214,12 +214,7 @@ type DashboardYAMLConfig struct {
 	HaroURL    string   `yaml:"haro_url"`
 }
 
-// NewDashboardConfigFromLookup parses DashboardConfig using a key lookup function with YAML config file support.
-func NewDashboardConfigFromLookup(lookup func(string) string) DashboardConfig {
-	if lookup == nil {
-		lookup = func(string) string { return "" }
-	}
-
+func loadDashboardYAMLFile(lookup func(string) string) DashboardYAMLConfig {
 	cfgFile := strings.TrimSpace(lookup("CONFIG_PATH"))
 	if cfgFile == "" && flag.Lookup("test.v") == nil {
 		if _, err := os.Stat("/config/config.yaml"); err == nil {
@@ -237,59 +232,38 @@ func NewDashboardConfigFromLookup(lookup func(string) string) DashboardConfig {
 			}
 		}
 	}
+	return ycfg
+}
 
-	brainURL := strings.TrimSpace(lookup("BRAIN_URL"))
-	if brainURL == "" && ycfg.BrainURL != "" {
-		brainURL = strings.TrimSpace(ycfg.BrainURL)
+func firstConfiguredValue(lookup func(string) string, envKeys []string, yamlFallbacks []string, defaultVal string) string {
+	for _, k := range envKeys {
+		if v := strings.TrimSpace(lookup(k)); v != "" {
+			return v
+		}
 	}
-	if brainURL == "" {
-		brainURL = "http://brain:8080"
+	for _, v := range yamlFallbacks {
+		if v = strings.TrimSpace(v); v != "" {
+			return v
+		}
+	}
+	return defaultVal
+}
+
+// NewDashboardConfigFromLookup parses DashboardConfig using a key lookup function with YAML config file support.
+func NewDashboardConfigFromLookup(lookup func(string) string) DashboardConfig {
+	if lookup == nil {
+		lookup = func(string) string { return "" }
 	}
 
-	memoryURL := strings.TrimSpace(lookup("MEMORY_MCP_URL"))
-	if memoryURL == "" && ycfg.MemoryURL != "" {
-		memoryURL = strings.TrimSpace(ycfg.MemoryURL)
-	}
-	if memoryURL == "" {
-		memoryURL = "http://coven.aerial"
-	}
+	ycfg := loadDashboardYAMLFile(lookup)
 
+	brainURL := firstConfiguredValue(lookup, []string{"BRAIN_URL"}, []string{ycfg.BrainURL}, "http://brain:8080")
+	memoryURL := firstConfiguredValue(lookup, []string{"MEMORY_MCP_URL"}, []string{ycfg.MemoryURL}, "http://coven.aerial")
 	ghRepo, ghRepos := resolveDashboardGitHubRepos(lookup, ycfg.GHRepos, ycfg.GHRepo)
-
-	ghToken := strings.TrimSpace(lookup("GITHUB_PAT"))
-	if ghToken == "" {
-		ghToken = strings.TrimSpace(lookup("GITHUB_PERSONAL_ACCESS_TOKEN"))
-	}
-
-	port := strings.TrimSpace(lookup("PORT"))
-	if port == "" && ycfg.Port != "" {
-		port = strings.TrimSpace(ycfg.Port)
-	}
-	if port == "" {
-		port = "8080"
-	}
-
-	hangarURL := strings.TrimSpace(lookup("HANGAR_URL"))
-	if hangarURL == "" {
-		hangarURL = strings.TrimSpace(lookup("GITSYNC_URL"))
-	}
-	if hangarURL == "" && ycfg.HangarURL != "" {
-		hangarURL = strings.TrimSpace(ycfg.HangarURL)
-	}
-	if hangarURL == "" && ycfg.GitSyncURL != "" {
-		hangarURL = strings.TrimSpace(ycfg.GitSyncURL)
-	}
-	if hangarURL == "" {
-		hangarURL = "http://hangar:8080"
-	}
-
-	configPath := strings.TrimSpace(lookup("AERIAL_CONFIG_PATH"))
-	if configPath == "" && ycfg.ConfigPath != "" {
-		configPath = strings.TrimSpace(ycfg.ConfigPath)
-	}
-	if configPath == "" {
-		configPath = "/share/aerial-config/config.yaml"
-	}
+	ghToken := firstConfiguredValue(lookup, []string{"GITHUB_PAT", "GITHUB_PERSONAL_ACCESS_TOKEN"}, nil, "")
+	port := firstConfiguredValue(lookup, []string{"PORT"}, []string{ycfg.Port}, "8080")
+	hangarURL := firstConfiguredValue(lookup, []string{"HANGAR_URL", "GITSYNC_URL"}, []string{ycfg.HangarURL, ycfg.GitSyncURL}, "http://hangar:8080")
+	configPath := firstConfiguredValue(lookup, []string{"AERIAL_CONFIG_PATH"}, []string{ycfg.ConfigPath}, "/share/aerial-config/config.yaml")
 
 	gitCommit := normalizeGitCommit(lookup("GIT_COMMIT"))
 	if gitCommit == "" {

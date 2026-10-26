@@ -31,55 +31,86 @@ func TestGuardProcess_EndToEnd(t *testing.T) {
 	t.Setenv("DATABASE_URL", ":memory:")
 
 	tests := []struct {
-		name     string
-		mode     string
-		input    string
-		wantDeny bool
+		name             string
+		mode             string
+		input            string
+		wantDeny         bool
+		wantWaitMs       int
+		wantOverwriteCmd string
 	}{
-		{"direct write to share aerial", "share", `{"toolCall": {"name": "write_to_file", "args": {"TargetFile": "/share/aerial/main.go"}}}`, true},
-		{"edit_file in share aerial", "share", `{"toolCall": {"name": "edit_file", "args": {"path": "/share/aerial/main.go"}}}`, true},
-		{"write_file in share aerial-config", "share", `{"toolCall": {"name": "write_file", "args": {"path": "/share/aerial-config/config.yaml"}}}`, true},
-		{"replace content in share aerial-config", "share", `{"toolCall": {"name": "default_api:replace_file_content", "args": {"TargetFile": "/share/aerial-config/config.yaml"}}}`, true},
-		{"relative traversal to share aerial", "share", `{"toolCall": {"name": "write_to_file", "args": {"TargetFile": "/data/../share/aerial/file.txt"}}}`, true},
-		{"write to safe workspace", "share", `{"toolCall": {"name": "write_to_file", "args": {"TargetFile": "/data/scratch/workspace/file.txt"}}}`, false},
-		{"mutating git checkout in share Cwd", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git checkout -b feature", "Cwd": "/share/aerial"}}}`, true},
-		{"mutating git commit in share Cwd", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git commit -m 'test'", "Cwd": "/share/aerial"}}}`, true},
-		{"mutating git branch -D in share Cwd", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git branch -D old", "Cwd": "/share/aerial-config"}}}`, true},
-		{"read-only git status in share Cwd", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git status", "Cwd": "/share/aerial"}}}`, false},
-		{"read-only git log in share Cwd", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git log -n 5", "Cwd": "/share/aerial"}}}`, false},
-		{"git -C share checkout denied", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git -C /share/aerial checkout main", "Cwd": "/data"}}}`, true},
-		{"git -C attached share checkout denied", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git -C/share/aerial --no-pager checkout main", "Cwd": "/data"}}}`, true},
-		{"git --git-dir share checkout denied", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git --git-dir=/share/aerial/.git checkout main", "Cwd": "/data"}}}`, true},
-		{"git --work-tree share branch -d denied", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git --work-tree=/share/aerial branch -d old", "Cwd": "/data"}}}`, true},
-		{"git -C share diff allowed", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git -C /share/aerial diff", "Cwd": "/data"}}}`, false},
-		{"file redirection into share", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "echo 'bad' > /share/aerial/pwn.txt", "Cwd": "/data"}}}`, true},
-		{"attached redirect into share", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "echo 'bad' >/share/aerial/pwn.txt", "Cwd": "/data"}}}`, true},
-		{"mutating binary rm targeting share", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "rm -rf /share/aerial-config", "Cwd": "/data"}}}`, true},
-		{"mutating binary in protected cwd", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "touch foo.txt", "Cwd": "/share/aerial"}}}`, true},
-		{"bash -c mutating rm in share", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "bash -c 'rm -rf /share/aerial/file.txt'", "Cwd": "/data"}}}`, true},
-		{"bash -c safe echo in share", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": " ; bash -c 'echo ok'", "Cwd": "/data"}}}`, false},
-		{"safe run_command allowed", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "echo 'hello'", "Cwd": "/data"}}}`, false},
-		{"schedule tool direct invocation", "schedule", `{"toolCall": {"name": "schedule", "args": {"CommandLine": "echo 1"}}}`, true},
-		{"default_api:schedule invocation", "schedule", `{"toolCall": {"name": "default_api:schedule", "args": {"CommandLine": "echo 1"}}}`, true},
-		{"sleep 10 command", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "sleep 10"}}}`, true},
-		{"/bin/sleep 5 command", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "/bin/sleep 5"}}}`, true},
-		{"chained sleep", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "make build && sleep 20"}}}`, true},
-		{"semicolon chained sleep", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "echo 1; sleep 5; echo 2"}}}`, true},
-		{"sleep in while loop", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "while true; do sleep 1; done"}}}`, true},
-		{"sleep 0 allowed", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "sleep 0"}}}`, false},
-		{"command with substring sleep in identifier", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git log --grep='sleep fix'"}}}`, false},
-		{"python script with sleep in name", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "python3 check_sleep_timer.py"}}}`, false},
-		{"non-schedule non-sleep run_command", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "ls -la"}}}`, false},
-		{"all mode denies share violation", "all", `{"toolCall": {"name": "write_to_file", "args": {"TargetFile": "/share/aerial/evil.go"}}}`, true},
-		{"all mode denies sleep violation", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "sleep 5"}}}`, true},
-		{"all mode denies unconstrained search", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "find / -name secret"}}}`, true},
-		{"all mode allows safe command", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git status", "Cwd": "/data"}}}`, false},
-		{"all mode preserves psql -A overwrite", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "psql -c \"\\dt\"", "Cwd": "/data"}}}`, false},
-		{"non-intercepted view_file", "all", `{"toolCall": {"name": "view_file", "args": {"AbsolutePath": "/share/aerial/README.md"}}}`, false},
-		{"empty tool call", "all", `{"toolCall": {"name": "", "args": {}}}`, false},
-		{"search mode denies unconstrained find", "search", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "find / -name foo"}}}`, true},
-		{"search mode allows scoped grep", "search", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "grep -rn -m 20 --exclude-dir=.git foo ."}}}`, false},
-		{"commit mode allows safe commit command", "commit", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git status"}}}`, false},
+		{"direct write to share aerial", "share", `{"toolCall": {"name": "write_to_file", "args": {"TargetFile": "/share/aerial/main.go"}}}`, true, 0, ""},
+		{"edit_file in share aerial", "share", `{"toolCall": {"name": "edit_file", "args": {"path": "/share/aerial/main.go"}}}`, true, 0, ""},
+		{"write_file in share aerial-config", "share", `{"toolCall": {"name": "write_file", "args": {"path": "/share/aerial-config/config.yaml"}}}`, true, 0, ""},
+		{"replace content in share aerial-config", "share", `{"toolCall": {"name": "default_api:replace_file_content", "args": {"TargetFile": "/share/aerial-config/config.yaml"}}}`, true, 0, ""},
+		{"relative traversal to share aerial", "share", `{"toolCall": {"name": "write_to_file", "args": {"TargetFile": "/data/../share/aerial/file.txt"}}}`, true, 0, ""},
+		{"write to safe workspace", "share", `{"toolCall": {"name": "write_to_file", "args": {"TargetFile": "/data/scratch/workspace/file.txt"}}}`, false, 0, ""},
+		{"mutating git checkout in share Cwd", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git checkout -b feature", "Cwd": "/share/aerial"}}}`, true, 0, ""},
+		{"mutating git commit in share Cwd", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git commit -m 'test'", "Cwd": "/share/aerial"}}}`, true, 0, ""},
+		{"mutating git branch -D in share Cwd", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git branch -D old", "Cwd": "/share/aerial-config"}}}`, true, 0, ""},
+		{"read-only git status in share Cwd", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git status", "Cwd": "/share/aerial"}}}`, false, 0, ""},
+		{"read-only git log in share Cwd", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git log -n 5", "Cwd": "/share/aerial"}}}`, false, 0, ""},
+		{"git -C share checkout denied", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git -C /share/aerial checkout main", "Cwd": "/data"}}}`, true, 0, ""},
+		{"git -C attached share checkout denied", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git -C/share/aerial --no-pager checkout main", "Cwd": "/data"}}}`, true, 0, ""},
+		{"git --git-dir share checkout denied", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git --git-dir=/share/aerial/.git checkout main", "Cwd": "/data"}}}`, true, 0, ""},
+		{"git --work-tree share branch -d denied", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git --work-tree=/share/aerial branch -d old", "Cwd": "/data"}}}`, true, 0, ""},
+		{"git -C share diff allowed", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git -C /share/aerial diff", "Cwd": "/data"}}}`, false, 0, ""},
+		{"file redirection into share", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "echo 'bad' > /share/aerial/pwn.txt", "Cwd": "/data"}}}`, true, 0, ""},
+		{"attached redirect into share", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "echo 'bad' >/share/aerial/pwn.txt", "Cwd": "/data"}}}`, true, 0, ""},
+		{"mutating binary rm targeting share", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "rm -rf /share/aerial-config", "Cwd": "/data"}}}`, true, 0, ""},
+		{"mutating binary in protected cwd", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "touch foo.txt", "Cwd": "/share/aerial"}}}`, true, 0, ""},
+		{"bash -c mutating rm in share", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "bash -c 'rm -rf /share/aerial/file.txt'", "Cwd": "/data"}}}`, true, 0, ""},
+		{"bash -c safe echo in share", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": " ; bash -c 'echo ok'", "Cwd": "/data"}}}`, false, 0, ""},
+		{"safe run_command allowed", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "echo 'hello'", "Cwd": "/data"}}}`, false, 0, ""},
+		{"schedule tool direct invocation", "schedule", `{"toolCall": {"name": "schedule", "args": {"CommandLine": "echo 1"}}}`, true, 0, ""},
+		{"default_api:schedule invocation", "schedule", `{"toolCall": {"name": "default_api:schedule", "args": {"CommandLine": "echo 1"}}}`, true, 0, ""},
+		{"sleep 10 command", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "sleep 10"}}}`, true, 0, ""},
+		{"sleep 3 command", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "sleep 3"}}}`, true, 0, ""},
+		{"sleep 1 command", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "sleep 1"}}}`, true, 0, ""},
+		{"/bin/sleep 5 command", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "/bin/sleep 5"}}}`, true, 0, ""},
+		{"chained sleep", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "make build && sleep 20"}}}`, true, 0, ""},
+		{"semicolon chained sleep", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "echo 1; sleep 5; echo 2"}}}`, true, 0, ""},
+		{"sleep in while loop", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "while true; do sleep 1; done"}}}`, true, 0, ""},
+		{"sleep 0 allowed and overwrites WaitMsBeforeAsync", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "sleep 0"}}}`, false, 10000, ""},
+		{"manage_task status denied", "schedule", `{"toolCall": {"name": "manage_task", "args": {"Action": "status", "TaskId": "t1"}}}`, true, 0, ""},
+		{"manage_task quoted status denied", "schedule", `{"toolCall": {"name": "default_api:manage_task", "args": {"Action": "\"status\"", "TaskId": "t1"}}}`, true, 0, ""},
+		{"manage_task list denied", "schedule", `{"toolCall": {"name": "manage_task", "args": {"Action": "list"}}}`, true, 0, ""},
+		{"manage_task kill allowed", "schedule", `{"toolCall": {"name": "manage_task", "args": {"Action": "kill", "TaskId": "t1"}}}`, false, 0, ""},
+		{"manage_subagents list denied", "schedule", `{"toolCall": {"name": "manage_subagents", "args": {"Action": "list"}}}`, true, 0, ""},
+		{"manage_subagents kill allowed", "schedule", `{"toolCall": {"name": "manage_subagents", "args": {"Action": "kill"}}}`, false, 0, ""},
+		{"view_file task log denied", "schedule", `{"toolCall": {"name": "view_file", "args": {"AbsolutePath": "/data/runtimes/discord/.gemini/antigravity-cli/brain/abc/.system_generated/tasks/task-1.log"}}}`, true, 0, ""},
+		{"read_file task log denied", "schedule", `{"toolCall": {"name": "read_file", "args": {"Path": "/data/runtimes/discord/.gemini/antigravity-cli/brain/abc/.system_generated/tasks/task-1.log"}}}`, true, 0, ""},
+		{"run_command cat task log denied", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "cat /data/brain/abc/.system_generated/tasks/task-1.log | tail -n 20"}}}`, true, 0, ""},
+		{"run_command 5000ms overwritten to 10000ms", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "ls -la", "WaitMsBeforeAsync": 5000}}}`, false, 10000, ""},
+		{"run_command string 5000ms overwritten to 10000ms", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "ls -la", "WaitMsBeforeAsync": "5000"}}}`, false, 10000, ""},
+		{"run_command invalid waitMs overwritten to 10000ms", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "ls -la", "WaitMsBeforeAsync": "bad"}}}`, false, 10000, ""},
+		{"run_command 10000ms not overwritten", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "ls -la", "WaitMsBeforeAsync": 10000}}}`, false, 0, ""},
+		{"run_command daemon not overwritten", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "ls -la", "WaitMsBeforeAsync": 500, "IsDaemon": true}}}`, false, 0, ""},
+		{"python3 -c braced escaped quotes rewritten", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "python3 -c 'print(f\"{x[\\\"k\\\"]}\"); print('\\''ok'\\'')'", "WaitMsBeforeAsync": 10000}}}`, false, 0, `python3 -c 'print(f"{x["k"]}"); print('\''ok'\'')'`},
+		{"python3 -c nested f-string and rf prefix rewritten", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "python3 -c 'print(rf\"{len({1: x[\\\"k\\\"]})} {f\\\"{y[\\\"z\\\"]}\\\"}\")'", "WaitMsBeforeAsync": 10000}}}`, false, 0, `python3 -c 'print(rf"{len({1: x["k"]})} {f"{y["z"]}"}")'`},
+		{"python3 -c f-string escaped backslash and literal braces preserved", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "python3 -c 'print(f\"\\\"lit\\\" {{x}} {d[\\\"a\\\\\\\\\\\"]}\")'", "WaitMsBeforeAsync": 10000}}}`, false, 0, `python3 -c 'print(f"\"lit\" {{x}} {d["a\\\\"]}")'`},
+		{"python3 -c dict and json string escaped quotes untouched", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "python3 -c 'import json; d = {\"k\": \"a\\\"b\"}; json.loads(\"{\\\"k\\\": 1}\"); print(f\"{d[\"a\\\"b\"]}\")'", "WaitMsBeforeAsync": 10000}}}`, false, 0, ""},
+		{"python3 -c unclosed single quote untouched", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "python3 -c 'print(f\"{x[\\\"k\\\"]}\")", "WaitMsBeforeAsync": 10000}}}`, false, 0, ""},
+		{"non-python escaped quotes untouched", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "python3 script.py -c \"{\\\"k\\\"}\"", "WaitMsBeforeAsync": 10000}}}`, false, 0, ""},
+		{"command with substring sleep in identifier", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git log --grep='sleep fix'", "WaitMsBeforeAsync": 10000}}}`, false, 0, ""},
+		{"python script with sleep in name", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "python3 check_sleep_timer.py", "WaitMsBeforeAsync": 10000}}}`, false, 0, ""},
+		{"non-schedule non-sleep run_command", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "ls -la", "WaitMsBeforeAsync": 10000}}}`, false, 0, ""},
+		{"all mode denies share violation", "all", `{"toolCall": {"name": "write_to_file", "args": {"TargetFile": "/share/aerial/evil.go"}}}`, true, 0, ""},
+		{"all mode denies sleep violation", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "sleep 5"}}}`, true, 0, ""},
+		{"all mode denies unconstrained search", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "find / -name secret"}}}`, true, 0, ""},
+		{"all mode allows safe command and overwrites WaitMsBeforeAsync", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git status", "Cwd": "/data", "WaitMsBeforeAsync": 5000}}}`, false, 10000, ""},
+		{"all mode preserves psql -A overwrite and WaitMsBeforeAsync", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "psql -c \"\\dt\"", "Cwd": "/data"}}}`, false, 10000, `psql -A -c "\dt"`},
+		{"non-intercepted view_file", "all", `{"toolCall": {"name": "view_file", "args": {"AbsolutePath": "/share/aerial/README.md"}}}`, false, 0, ""},
+		{"empty tool call", "all", `{"toolCall": {"name": "", "args": {}}}`, false, 0, ""},
+		{"search mode denies unconstrained find", "search", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "find / -name foo"}}}`, true, 0, ""},
+		{"search mode allows scoped grep", "search", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "grep -rn -m 20 --exclude-dir=.git foo ."}}}`, false, 0, ""},
+		{"commit mode allows safe commit command", "commit", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git status"}}}`, false, 0, ""},
+		{"batch mode unscoped test denied", "batch", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "go test ./..."}}}`, true, 0, ""},
+		{"python3 -c escaped char outside quotes", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "python3 -c 'print(f\"{x[\\\"k\\\"]}\")' \\ && true", "WaitMsBeforeAsync": 10000}}}`, false, 0, `python3 -c 'print(f"{x["k"]}")' \ && true`},
+		{"python3 -c unclosed fstring", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "python3 -c 'print(f\"{x)'", "WaitMsBeforeAsync": 10000}}}`, false, 0, ""},
+		{"python3 -c unclosed quote", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "python3 -c 'print(\"abc)'", "WaitMsBeforeAsync": 10000}}}`, false, 0, ""},
+		{"empty command in schedule", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "   "}}}`, false, 10000, ""},
+		{"empty tokens between semicolons in share", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "echo 1; ; echo 2", "Cwd": "/data"}}}`, false, 0, ""},
+		{"safe output redirect in share", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "echo safe > /data/scratch/output.txt", "Cwd": "/data"}}}`, false, 0, ""},
 	}
 
 	for _, tc := range tests {
@@ -90,6 +121,22 @@ func TestGuardProcess_EndToEnd(t *testing.T) {
 			}
 			if !tc.wantDeny && d.Decision != DecisionAllow {
 				t.Fatalf("mode=%q input=%s: expected allow, got deny: %v", tc.mode, tc.input, d)
+			}
+			if tc.wantWaitMs > 0 {
+				gotWait, _ := d.Overwrite["WaitMsBeforeAsync"].(float64)
+				if int(gotWait) != tc.wantWaitMs {
+					t.Fatalf("mode=%q input=%s: Overwrite[WaitMsBeforeAsync]=%v, want %d", tc.mode, tc.input, d.Overwrite["WaitMsBeforeAsync"], tc.wantWaitMs)
+				}
+			} else if d.Overwrite != nil && d.Overwrite["WaitMsBeforeAsync"] != nil {
+				t.Fatalf("mode=%q input=%s: unexpected WaitMsBeforeAsync overwrite: %v", tc.mode, tc.input, d.Overwrite)
+			}
+			if tc.wantOverwriteCmd != "" {
+				gotCmd, _ := d.Overwrite["CommandLine"].(string)
+				if gotCmd != tc.wantOverwriteCmd {
+					t.Fatalf("mode=%q input=%s: Overwrite[CommandLine]=%q, want %q", tc.mode, tc.input, gotCmd, tc.wantOverwriteCmd)
+				}
+			} else if d.Overwrite != nil && d.Overwrite["CommandLine"] != nil {
+				t.Fatalf("mode=%q input=%s: unexpected CommandLine overwrite: %v", tc.mode, tc.input, d.Overwrite)
 			}
 		})
 	}
@@ -149,6 +196,12 @@ func (panicReader) Read([]byte) (int, error) {
 	panic("simulated reader panic")
 }
 
+type errorWriter struct{}
+
+func (errorWriter) Write([]byte) (int, error) {
+	return 0, errors.New("simulated write failure")
+}
+
 func TestGuardProcess_IOAndModes(t *testing.T) {
 	t.Parallel()
 
@@ -182,6 +235,14 @@ func TestGuardProcess_IOAndModes(t *testing.T) {
 		})
 	}
 
+	t.Run("panic recovery with failing writer", func(t *testing.T) {
+		t.Parallel()
+		err := Process(panicReader{}, errorWriter{}, "all")
+		if err == nil {
+			t.Fatalf("expected error from failing writer during panic recovery, got nil")
+		}
+	})
+
 	parseTests := []struct {
 		name     string
 		raw      string
@@ -191,6 +252,7 @@ func TestGuardProcess_IOAndModes(t *testing.T) {
 		{"nil bytes", "", "", ""},
 		{"empty json string", `""`, "", ""},
 		{"plain string", `"plain non-json string"`, "", ""},
+		{"string not json map", `"not-a-json-map"`, "", ""},
 		{"json string encoded object", `"{\"CommandLine\": \"echo 1\", \"Cwd\": \"/data\"}"`, "", "echo 1"},
 		{"direct map object", `{"path": "/tmp/test.go", "CommandLine": "cat test.go"}`, "/tmp/test.go", "cat test.go"},
 	}

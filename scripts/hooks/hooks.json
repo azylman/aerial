@@ -16,7 +16,7 @@
   "schedule-guard": {
     "PreToolUse": [
       {
-        "matcher": "schedule|run_command",
+        "matcher": "schedule|run_command|manage_task|manage_subagents|view_file|read_file",
         "hooks": [
           {
             "type": "command",

@@ -75,9 +75,19 @@ check_gofmt() {
             unformatted=$(gofmt -l . 2>/dev/null | grep -v -E '(^|/)vendor/' || true)
         fi
         if [ -n "$unformatted" ]; then
-            echo "🚨 [Aerial Verify] Error: Unformatted Go files detected (run gofmt -w or golangci-lint fmt):" >&2
-            echo "$unformatted" | sed 's/^/   • /' >&2
-            exit 1
+            if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+                echo "🚨 [Aerial Verify] Error: Unformatted Go files detected (run gofmt -w or golangci-lint fmt):" >&2
+                echo "$unformatted" | sed 's/^/   • /' >&2
+                exit 1
+            fi
+            echo "$unformatted" | while read -r gf; do
+                if [ -n "$gf" ] && [ -f "$gf" ]; then
+                    gofmt -w "$gf"
+                    if [ "$MODE" = "staged" ] && has_cmd git; then
+                        git add "$gf"
+                    fi
+                fi
+            done
         fi
     fi
 }

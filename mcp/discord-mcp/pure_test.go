@@ -387,3 +387,64 @@ func TestResolveConfigPath_TableDriven(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractSearchOffset_TableDriven(t *testing.T) {
+	tests := []struct {
+		name   string
+		rawReq string
+		want   int
+	}{
+		{"valid positive offset", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"discord_search_messages","arguments":{"guildId":"1","offset":25}}}`, 25},
+		{"negative offset clamps to 0", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"discord_search_messages","arguments":{"guildId":"1","offset":-5}}}`, 0},
+		{"missing arguments returns 0", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"discord_search_messages"}}`, 0},
+		{"malformed params returns 0", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":"bad"}`, 0},
+		{"malformed json returns 0", `{bad`, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ExtractSearchOffset([]byte(tc.rawReq)); got != tc.want {
+				t.Errorf("ExtractSearchOffset(%s) = %d, want %d", tc.rawReq, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestShapeSearchMessagesResponse_TableDriven(t *testing.T) {
+	nestedHitResp := `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"total_results\":46,\"messages\":[[{\"id\":\"m0\",\"content\":\"ctx\",\"hit\":false,\"author\":{\"username\":\"bot\"}},{\"id\":\"m1\",\"timestamp\":\"2026-10-26T00:00:00Z\",\"channel_id\":\"c1\",\"content\":\"hello\",\"hit\":true,\"author\":{\"id\":\"u1\",\"username\":\"user123\",\"global_name\":\"DisplayUser\"}}], [{\"id\":\"m2\",\"timestamp\":\"2026-10-26T00:01:00Z\",\"channel_id\":\"c1\",\"content\":\"world\",\"author\":{\"id\":\"u2\",\"username\":\"same\",\"global_name\":\"same\"}}], {\"id\":\"m3\",\"timestamp\":\"2026-10-26T00:02:00Z\",\"channel_id\":\"c1\",\"content\":\"flat\",\"author\":{\"id\":\"u3\",\"global_name\":\"OnlyGlobal\"}}],\"threads\":[{\"id\":\"t1\"}]}"}]}}`
+	lastPageResp := `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"total_results\":0,\"messages\":[[{\"id\":\"m1\",\"content\":\"only\"}]]}"}]}}`
+
+	tests := []struct {
+		name       string
+		rawResp    string
+		offset     int
+		wantSub    string
+		wantAbsent string
+		wantErr    bool
+	}{
+		{"nested hit group + flat + global_name formatting", nestedHitResp, 0, `\"has_more\":true`, "threads", false},
+		{"author formatted with global_name and username", nestedHitResp, 0, `DisplayUser (user123)`, "ctx", false},
+		{"last page has_more false and negative offset clamped", lastPageResp, -1, `\"has_more\":false`, "", false},
+		{"non-search text payload left unchanged", `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"other\":1}"}]}}`, 0, `\"other\"`, "", false},
+		{"missing content array left unchanged", `{"jsonrpc":"2.0","id":1,"result":{"other":1}}`, 0, `"other":1`, "", false},
+		{"empty result left unchanged", `{"jsonrpc":"2.0","id":1}`, 0, `"id":1`, "", false},
+		{"invalid top-level json returns error", `{bad`, 0, "", "", true},
+		{"invalid result json returns error", `{"jsonrpc":"2.0","id":1,"result":"bad"}`, 0, "", "", true},
+		{"invalid content json returns error", `{"jsonrpc":"2.0","id":1,"result":{"content":"bad"}}`, 0, "", "", true},
+		{"invalid inner text json returns error", `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{bad"}]}}`, 0, "", "", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := ShapeSearchMessagesResponse([]byte(tc.rawResp), tc.offset)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			outStr := string(out)
+			if tc.wantSub != "" && !strings.Contains(outStr, tc.wantSub) {
+				t.Errorf("expected %q in %s", tc.wantSub, outStr)
+			}
+			if tc.wantAbsent != "" && strings.Contains(outStr, tc.wantAbsent) {
+				t.Errorf("expected %q absent from %s", tc.wantAbsent, outStr)
+			}
+		})
+	}
+}

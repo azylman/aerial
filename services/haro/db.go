@@ -52,7 +52,7 @@ type CronSchedule struct {
 	TargetID    string    `json:"channel_id"`
 	TitlePrefix string    `json:"title_prefix"`
 	CronExpr    string    `json:"cron_expression"`
-	Prompt      string    `json:"prompt"`
+	Prompt      string    `json:"prompt,omitempty"`
 	Timezone    string    `json:"timezone"`
 	NextRunAt   time.Time `json:"next_run_at"`
 	Enabled     bool      `json:"enabled"`
@@ -63,7 +63,7 @@ type CronSchedule struct {
 type OneShotSchedule struct {
 	ID        string    `json:"id"`
 	ThreadID  string    `json:"thread_id"`
-	Prompt    string    `json:"prompt"`
+	Prompt    string    `json:"prompt,omitempty"`
 	RunAt     time.Time `json:"run_at"`
 	CreatedAt time.Time `json:"created_at"`
 	Effort    string    `json:"effort,omitempty"`
@@ -74,7 +74,7 @@ type HeartbeatSchedule struct {
 	TargetID    string    `json:"channel_id"`
 	TitlePrefix string    `json:"title_prefix"`
 	CronExpr    string    `json:"cron_expression"`
-	Prompt      string    `json:"prompt"`
+	Prompt      string    `json:"prompt,omitempty"`
 	Timezone    string    `json:"timezone"`
 	Effort      string    `json:"effort,omitempty"`
 	NextRunAt   time.Time `json:"next_run_at"`
@@ -303,6 +303,48 @@ func ListHeartbeatSchedules(ctx context.Context, database *sql.DB, targetID stri
 	})
 }
 
+func GetCronSchedule(ctx context.Context, database *sql.DB, id string) (*CronSchedule, error) {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return nil, err
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, fmt.Errorf("schedule_id cannot be empty")
+	}
+	query := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM cron_schedules WHERE id = $1`
+	var c CronSchedule
+	row := database.QueryRowContext(ctx, query, id)
+	if err := row.Scan(&c.ID, &c.TargetID, &c.TitlePrefix, &c.CronExpr, &c.Prompt, &c.Timezone, &c.NextRunAt, &c.Enabled, &c.CreatedAt, &c.Effort); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("cron schedule %q not found: %w", id, sql.ErrNoRows)
+		}
+		return nil, err
+	}
+	return &c, nil
+}
+
+func GetOneShotSchedule(ctx context.Context, database *sql.DB, id string) (*OneShotSchedule, error) {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return nil, err
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, fmt.Errorf("schedule_id cannot be empty")
+	}
+	query := `SELECT id, thread_id, prompt, run_at, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM one_shot_schedules WHERE id = $1`
+	var s OneShotSchedule
+	row := database.QueryRowContext(ctx, query, id)
+	if err := row.Scan(&s.ID, &s.ThreadID, &s.Prompt, &s.RunAt, &s.CreatedAt, &s.Effort); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("one-shot schedule %q not found: %w", id, sql.ErrNoRows)
+		}
+		return nil, err
+	}
+	return &s, nil
+}
+
 func GetHeartbeatSchedule(ctx context.Context, database *sql.DB, id string) (*HeartbeatSchedule, error) {
 	ctx, err := normCtxAndDB(ctx, database)
 	if err != nil {
@@ -317,7 +359,7 @@ func GetHeartbeatSchedule(ctx context.Context, database *sql.DB, id string) (*He
 	row := database.QueryRowContext(ctx, query, id)
 	if err := row.Scan(&h.ID, &h.TargetID, &h.TitlePrefix, &h.CronExpr, &h.Prompt, &h.Timezone, &h.NextRunAt, &h.Enabled, &h.CreatedAt, &h.Effort); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("heartbeat schedule %q not found", id)
+			return nil, fmt.Errorf("heartbeat schedule %q not found: %w", id, sql.ErrNoRows)
 		}
 		return nil, err
 	}

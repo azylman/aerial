@@ -141,7 +141,7 @@ func TestFormatSingleDiscordPrompt(t *testing.T) {
 				CreatedAt: ts,
 			},
 			wantPrefix: "<USER_REQUEST>\nHere's a message someone sent you from Discord:\n\n",
-			wantSuffix: "Only formulate and output your final response once all immediate work is complete. It will be delivered directly to Discord.\n</USER_REQUEST>",
+			wantSuffix: "Only formulate and output your final response once all immediate work is complete. It will be delivered directly to Discord. Keep responses proportional to the turn; for routine actions or things just discussed, confirm briefly without echoing tool IDs, exact timestamps, or context already in thread.\n</USER_REQUEST>",
 			wantContains: []string{
 				"- id: msg-101\n", "- channel_id: chan-101\n", "- thread_id: thread-101\n", "- guild_id: guild-101\n",
 				"- author_id: author-101\n", "- author_username: alice withnewline\n", "- author_global_name: Alice In Wonderland\n",
