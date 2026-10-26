@@ -133,38 +133,93 @@ func formatChunkRuntimeSuffix(c StatusWidgetChunk) string {
 	}
 }
 
+func buildWidgetHeaderText(req StatusWidgetRequest) string {
+	isBuild := strings.HasPrefix(req.ID, "build-") || len(req.Chunks) > 1 || req.Tier > 0
+	if isBuild {
+		if trimmedTitle := strings.TrimSpace(req.Title); trimmedTitle != "" {
+			return fmt.Sprintf("### 🛠️ %s", trimmedTitle)
+		}
+		return "### 🛠️ Vanadis Build"
+	}
+
+	prNum := 0
+	shortRepo := ""
+	if len(req.Chunks) == 1 {
+		prNum = req.Chunks[0].PRNumber
+		_, shortRepo = NormalizeRepo(req.Chunks[0].Repo)
+	}
+	repoTag := shortRepo
+	if repoTag == "" {
+		repoTag = "aerial"
+	}
+	if prNum > 0 {
+		return fmt.Sprintf("### 🛠️ Pull Request #%d · `%s`\n%s", prNum, repoTag, strings.TrimSpace(req.Title))
+	}
+	return fmt.Sprintf("### 🛠️ Pull Request · `%s`\n%s", repoTag, strings.TrimSpace(req.Title))
+}
+
+func collapseCompletedWidgetChunks(chunks []StatusWidgetChunk) ([]StatusWidgetChunk, string) {
+	if len(chunks) <= 10 {
+		return chunks, ""
+	}
+
+	var activeChunks []StatusWidgetChunk
+	var collapsedMerged []StatusWidgetChunk
+
+	for i, c := range chunks {
+		norm := strings.ToLower(strings.TrimSpace(c.Status))
+		isCompleted := (norm == "merged" || norm == "deployed" || norm == "completed" || norm == "success")
+		if isCompleted && i < len(chunks)-5 {
+			collapsedMerged = append(collapsedMerged, c)
+		} else {
+			activeChunks = append(activeChunks, c)
+		}
+	}
+
+	if len(collapsedMerged) > 0 {
+		summaryText := fmt.Sprintf("✅ *%d earlier chunks completed and merged*", len(collapsedMerged))
+		return activeChunks, summaryText
+	}
+	return chunks, ""
+}
+
+func buildWidgetChunkComponent(c StatusWidgetChunk) discordgo.MessageComponent {
+	badge := statusBadge(c.Status)
+	fullRepo, shortRepo := NormalizeRepo(c.Repo)
+	repoTag := shortRepo
+	if repoTag == "" {
+		repoTag = "aerial"
+	}
+
+	rowText := fmt.Sprintf("%s **`%s`**: %s%s", badge, repoTag, strings.TrimSpace(c.Title), formatChunkRuntimeSuffix(c))
+
+	if c.PRNumber > 0 && fullRepo != "" {
+		prURL := fmt.Sprintf("https://github.com/%s/pull/%d", fullRepo, c.PRNumber)
+		return &discordgo.Section{
+			Components: []discordgo.MessageComponent{
+				&discordgo.TextDisplay{
+					Content: rowText,
+				},
+			},
+			Accessory: &discordgo.Button{
+				Style: discordgo.LinkButton,
+				Label: fmt.Sprintf("PR #%d ↗", c.PRNumber),
+				URL:   prURL,
+			},
+		}
+	}
+	return &discordgo.TextDisplay{
+		Content: rowText,
+	}
+}
+
 // BuildStatusWidgetComponents constructs a Components V2 Container message component.
 func BuildStatusWidgetComponents(req StatusWidgetRequest, now time.Time) ([]discordgo.MessageComponent, error) {
 	color := AccentColor(req.Status)
 	var containerComponents []discordgo.MessageComponent
 
 	// Header TextDisplay
-	var headerText string
-	isBuild := strings.HasPrefix(req.ID, "build-") || len(req.Chunks) > 1 || req.Tier > 0
-	if isBuild {
-		if trimmedTitle := strings.TrimSpace(req.Title); trimmedTitle != "" {
-			headerText = fmt.Sprintf("### 🛠️ %s", trimmedTitle)
-		} else {
-			headerText = "### 🛠️ Vanadis Build"
-		}
-	} else {
-		// Standalone PR
-		prNum := 0
-		shortRepo := ""
-		if len(req.Chunks) == 1 {
-			prNum = req.Chunks[0].PRNumber
-			_, shortRepo = NormalizeRepo(req.Chunks[0].Repo)
-		}
-		repoTag := shortRepo
-		if repoTag == "" {
-			repoTag = "aerial"
-		}
-		if prNum > 0 {
-			headerText = fmt.Sprintf("### 🛠️ Pull Request #%d · `%s`\n%s", prNum, repoTag, strings.TrimSpace(req.Title))
-		} else {
-			headerText = fmt.Sprintf("### 🛠️ Pull Request · `%s`\n%s", repoTag, strings.TrimSpace(req.Title))
-		}
-	}
+	headerText := buildWidgetHeaderText(req)
 	containerComponents = append(containerComponents, &discordgo.TextDisplay{
 		Content: strings.TrimSpace(headerText),
 	})
@@ -178,63 +233,16 @@ func BuildStatusWidgetComponents(req StatusWidgetRequest, now time.Time) ([]disc
 
 	// 40-Component Ceiling Guard
 	// If len(req.Chunks) > 10, collapse older completed/merged chunks into a single summary TextDisplay.
-	chunks := req.Chunks
-	if len(chunks) > 10 {
-		var activeChunks []StatusWidgetChunk
-		var collapsedMerged []StatusWidgetChunk
-
-		// Identify candidate chunks: completed/merged/deployed
-		for i, c := range chunks {
-			norm := strings.ToLower(strings.TrimSpace(c.Status))
-			isCompleted := (norm == "merged" || norm == "deployed" || norm == "completed" || norm == "success")
-			// Keep recent chunks active (e.g., if near the end), but collapse earlier ones if completed
-			if isCompleted && i < len(chunks)-5 {
-				collapsedMerged = append(collapsedMerged, c)
-			} else {
-				activeChunks = append(activeChunks, c)
-			}
-		}
-
-		if len(collapsedMerged) > 0 {
-			summaryText := fmt.Sprintf("✅ *%d earlier chunks completed and merged*", len(collapsedMerged))
-			containerComponents = append(containerComponents, &discordgo.TextDisplay{
-				Content: summaryText,
-			})
-			chunks = activeChunks
-		}
+	chunks, summaryText := collapseCompletedWidgetChunks(req.Chunks)
+	if summaryText != "" {
+		containerComponents = append(containerComponents, &discordgo.TextDisplay{
+			Content: summaryText,
+		})
 	}
 
 	// Chunk rows
 	for _, c := range chunks {
-		badge := statusBadge(c.Status)
-		fullRepo, shortRepo := NormalizeRepo(c.Repo)
-		repoTag := shortRepo
-		if repoTag == "" {
-			repoTag = "aerial"
-		}
-
-		rowText := fmt.Sprintf("%s **`%s`**: %s%s", badge, repoTag, strings.TrimSpace(c.Title), formatChunkRuntimeSuffix(c))
-
-		if c.PRNumber > 0 && fullRepo != "" {
-			prURL := fmt.Sprintf("https://github.com/%s/pull/%d", fullRepo, c.PRNumber)
-			section := &discordgo.Section{
-				Components: []discordgo.MessageComponent{
-					&discordgo.TextDisplay{
-						Content: rowText,
-					},
-				},
-				Accessory: &discordgo.Button{
-					Style: discordgo.LinkButton,
-					Label: fmt.Sprintf("PR #%d ↗", c.PRNumber),
-					URL:   prURL,
-				},
-			}
-			containerComponents = append(containerComponents, section)
-		} else {
-			containerComponents = append(containerComponents, &discordgo.TextDisplay{
-				Content: rowText,
-			})
-		}
+		containerComponents = append(containerComponents, buildWidgetChunkComponent(c))
 	}
 
 	// Footer TextDisplay

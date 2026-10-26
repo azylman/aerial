@@ -15,6 +15,56 @@ var DefaultHooksSearchPaths = []string{
 	"/share/aerial/scripts/hooks", "/app/scripts/hooks", "./scripts/hooks", "../scripts/hooks", "../../scripts/hooks", "../../../scripts/hooks", "../../../../scripts/hooks",
 }
 
+func (p *Provisioner) copyHookScriptsToTarget(hooksDir, targetHooksScriptsDir string) {
+	if hooksDir == "" {
+		return
+	}
+	if err := os.MkdirAll(targetHooksScriptsDir, 0o755); err != nil {
+		log.Printf("[Env] Warning: failed to mkdir %s for hook scripts: %v", targetHooksScriptsDir, err)
+		return
+	}
+
+	entries, err := os.ReadDir(hooksDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || entry.Name() == "hooks.json" {
+			continue
+		}
+		srcPath := filepath.Join(hooksDir, entry.Name())
+		dstPath := filepath.Join(targetHooksScriptsDir, entry.Name())
+
+		scriptData, rErr := os.ReadFile(srcPath)
+		if rErr != nil {
+			continue
+		}
+		if wErr := p.writeAtomic(dstPath, string(scriptData)); wErr != nil {
+			log.Printf("[Env] Warning: failed to write hook script %s: %v", dstPath, wErr)
+		} else {
+			ignore(os.Chmod(dstPath, 0o755))
+		}
+	}
+}
+
+func (p *Provisioner) provisionTargetHooks(targetGemini, hooksJSONContent, hooksDir string) {
+	configDir := filepath.Join(targetGemini, "config")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		log.Printf("[Env] Warning: failed to mkdir %s for hooks: %v", configDir, err)
+		return
+	}
+
+	// Write hooks.json
+	targetHooksJSON := filepath.Join(configDir, "hooks.json")
+	if err := p.writeAtomic(targetHooksJSON, hooksJSONContent); err != nil {
+		log.Printf("[Env] Warning: failed to write hooks.json to %s: %v", targetHooksJSON, err)
+	}
+
+	// Copy hook scripts if source directory exists
+	targetHooksScriptsDir := filepath.Join(configDir, "hooks")
+	p.copyHookScriptsToTarget(hooksDir, targetHooksScriptsDir)
+}
+
 // SyncHooks provisions hooks.json and executable hook scripts into primary ~/.gemini and all runtime targets.
 func (p *Provisioner) SyncHooks() error {
 	if p == nil || p.homeDir == "" {
@@ -51,47 +101,7 @@ func (p *Provisioner) SyncHooks() error {
 
 	// 3. Provision hooks into each target root
 	for _, targetGemini := range targetRoots {
-		configDir := filepath.Join(targetGemini, "config")
-		if err := os.MkdirAll(configDir, 0o755); err != nil {
-			log.Printf("[Env] Warning: failed to mkdir %s for hooks: %v", configDir, err)
-			continue
-		}
-
-		// Write hooks.json
-		targetHooksJSON := filepath.Join(configDir, "hooks.json")
-		if err := p.writeAtomic(targetHooksJSON, hooksJSONContent); err != nil {
-			log.Printf("[Env] Warning: failed to write hooks.json to %s: %v", targetHooksJSON, err)
-		}
-
-		// Copy hook scripts if source directory exists
-		if hooksDir != "" {
-			targetHooksScriptsDir := filepath.Join(configDir, "hooks")
-			if err := os.MkdirAll(targetHooksScriptsDir, 0o755); err != nil {
-				log.Printf("[Env] Warning: failed to mkdir %s for hook scripts: %v", targetHooksScriptsDir, err)
-				continue
-			}
-
-			entries, err := os.ReadDir(hooksDir)
-			if err == nil {
-				for _, entry := range entries {
-					if entry.IsDir() || entry.Name() == "hooks.json" {
-						continue
-					}
-					srcPath := filepath.Join(hooksDir, entry.Name())
-					dstPath := filepath.Join(targetHooksScriptsDir, entry.Name())
-
-					scriptData, rErr := os.ReadFile(srcPath)
-					if rErr != nil {
-						continue
-					}
-					if wErr := p.writeAtomic(dstPath, string(scriptData)); wErr != nil {
-						log.Printf("[Env] Warning: failed to write hook script %s: %v", dstPath, wErr)
-					} else {
-						ignore(os.Chmod(dstPath, 0o755))
-					}
-				}
-			}
-		}
+		p.provisionTargetHooks(targetGemini, hooksJSONContent, hooksDir)
 	}
 
 	log.Printf("[Env] Synchronized lifecycle hooks across %d runtime targets", len(targetRoots))

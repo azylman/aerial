@@ -141,6 +141,46 @@ var validImageExts = map[string]bool{
 	".webp": true,
 }
 
+func tryAutoAttachEntry(dir string, entry os.DirEntry, baseDir string, cutoff time.Time, existingCanonical map[string]bool) *Attachment {
+	if !entry.Type().IsRegular() || strings.HasPrefix(entry.Name(), ".") {
+		return nil
+	}
+
+	ext := strings.ToLower(filepath.Ext(entry.Name()))
+	if !validImageExts[ext] {
+		return nil
+	}
+
+	fullPath := filepath.Join(dir, entry.Name())
+	info, err := entry.Info()
+	if err != nil || info.Size() <= 0 || info.Size() > MaxAttachmentSizeBytes {
+		return nil
+	}
+
+	if info.ModTime().Before(cutoff) {
+		return nil
+	}
+
+	canonicalPath, err := filepath.EvalSymlinks(fullPath)
+	if err != nil {
+		canonicalPath = fullPath
+	}
+	baseName := filepath.Base(canonicalPath)
+	if existingCanonical[baseName] || existingCanonical[entry.Name()] {
+		return nil
+	}
+
+	att, err := ResolveAndValidateLocalImage(fullPath, baseDir)
+	if err != nil {
+		return nil
+	}
+
+	existingCanonical[att.Filename] = true
+	existingCanonical[baseName] = true
+	existingCanonical[entry.Name()] = true
+	return att
+}
+
 // AutoAttachNewMedia scans top-level baseDir and baseDir/scratch for newly created/modified
 // image files since turnStartTime (with a 2-second safety buffer for OS timestamp truncation)
 // and appends resolved attachments up to MaxAttachmentsPerMessage.
@@ -178,43 +218,10 @@ func AutoAttachNewMedia(baseDir string, sinceTime time.Time, existing []*Attachm
 			if len(result) >= MaxAttachmentsPerMessage {
 				break
 			}
-
-			if !entry.Type().IsRegular() || strings.HasPrefix(entry.Name(), ".") {
-				continue
+			att := tryAutoAttachEntry(dir, entry, baseDir, cutoff, existingCanonical)
+			if att != nil {
+				result = append(result, att)
 			}
-
-			ext := strings.ToLower(filepath.Ext(entry.Name()))
-			if !validImageExts[ext] {
-				continue
-			}
-
-			fullPath := filepath.Join(dir, entry.Name())
-			info, err := entry.Info()
-			if err != nil || info.Size() <= 0 || info.Size() > MaxAttachmentSizeBytes {
-				continue
-			}
-
-			if info.ModTime().Before(cutoff) {
-				continue
-			}
-
-			canonicalPath, err := filepath.EvalSymlinks(fullPath)
-			if err != nil {
-				canonicalPath = fullPath
-			}
-			baseName := filepath.Base(canonicalPath)
-			if existingCanonical[baseName] || existingCanonical[entry.Name()] {
-				continue
-			}
-
-			att, err := ResolveAndValidateLocalImage(fullPath, baseDir)
-			if err != nil {
-				continue
-			}
-
-			result = append(result, att)
-			existingCanonical[att.Filename] = true
-			existingCanonical[baseName] = true
 		}
 	}
 
@@ -237,17 +244,8 @@ func isSubstantiveContent(s string) bool {
 	return len(clean) > 0
 }
 
-// SanitizeIntermediateStatus strips repetitive intermediate task status preambles
-// and harness wait lines when followed by substantive response content, and deduplicates consecutive identical lines.
-func SanitizeIntermediateStatus(s string) string {
-	trimmed := strings.TrimSpace(s)
-	if trimmed == "" {
-		return ""
-	}
-
-	// 1. If the message starts with one or more intermediate status phrases followed by other content,
-	// strip them off so the final substantive response is not cluttered with status updates.
-	working := trimmed
+func stripLeadingStatusPhrases(s string) string {
+	working := s
 	for {
 		stripped := false
 		for _, phrase := range intermediateStatusPhrases {
@@ -266,6 +264,44 @@ func SanitizeIntermediateStatus(s string) string {
 			break
 		}
 	}
+	return working
+}
+
+func matchesHarnessStatusChatter(trimmedLine string) bool {
+	if trimmedLine == "" {
+		return false
+	}
+	for _, re := range intermediateStatusRegexes {
+		if re.MatchString(trimmedLine) {
+			return true
+		}
+	}
+	return false
+}
+
+func updateFenceState(trimmedLine, activeFence string, activeFenceLen int) (string, int) {
+	fenceMarker, fenceLen, isSingleLineSpan := parseCodeFence(trimmedLine)
+	if fenceMarker != "" && !isSingleLineSpan {
+		if activeFence == "" {
+			return fenceMarker, fenceLen
+		} else if activeFence == fenceMarker && fenceLen >= activeFenceLen {
+			return "", 0
+		}
+	}
+	return activeFence, activeFenceLen
+}
+
+// SanitizeIntermediateStatus strips repetitive intermediate task status preambles
+// and harness wait lines when followed by substantive response content, and deduplicates consecutive identical lines.
+func SanitizeIntermediateStatus(s string) string {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return ""
+	}
+
+	// 1. If the message starts with one or more intermediate status phrases followed by other content,
+	// strip them off so the final substantive response is not cluttered with status updates.
+	working := stripLeadingStatusPhrases(trimmed)
 
 	// 2. Filter intermediate harness status chatter and deduplicate consecutive identical lines outside code blocks.
 	// Track code fences accurately to prevent inverting on single-line spans, blockquotes, or tildes.
@@ -277,29 +313,11 @@ func SanitizeIntermediateStatus(s string) string {
 
 	for _, l := range lines {
 		trimmedLine := strings.TrimSpace(l)
-		fenceMarker, fenceLen, isSingleLineSpan := parseCodeFence(trimmedLine)
-		if fenceMarker != "" && !isSingleLineSpan {
-			if activeFence == "" {
-				activeFence = fenceMarker
-				activeFenceLen = fenceLen
-			} else if activeFence == fenceMarker && fenceLen >= activeFenceLen {
-				activeFence = ""
-				activeFenceLen = 0
-			}
-		}
+		activeFence, activeFenceLen = updateFenceState(trimmedLine, activeFence, activeFenceLen)
 
 		inCodeBlock := activeFence != ""
-		if !inCodeBlock && trimmedLine != "" {
-			isHarnessChatter := false
-			for _, re := range intermediateStatusRegexes {
-				if re.MatchString(trimmedLine) {
-					isHarnessChatter = true
-					break
-				}
-			}
-			if isHarnessChatter {
-				continue
-			}
+		if !inCodeBlock && matchesHarnessStatusChatter(trimmedLine) {
+			continue
 		}
 
 		if !inCodeBlock && trimmedLine != "" && trimmedLine == prevLine {
@@ -362,8 +380,7 @@ func cleanDuplicateBlankLines(s string) string {
 	return strings.TrimSpace(s)
 }
 
-// ResolveAndValidateLocalImage validates path sandboxing, symlinks, file type, size, and MIME header.
-func ResolveAndValidateLocalImage(rawPath string, baseDir string) (*Attachment, error) {
+func resolveSandboxedImagePath(rawPath, baseDir string) (string, error) {
 	cleanRaw := strings.TrimPrefix(rawPath, "file://")
 
 	var targetPath string
@@ -378,7 +395,7 @@ func ResolveAndValidateLocalImage(rawPath string, baseDir string) (*Attachment, 
 	// 1. Evaluate symlinks and get canonical path
 	canonicalPath, err := filepath.EvalSymlinks(targetPath)
 	if err != nil {
-		return nil, fmt.Errorf("file resolution error: %w", err)
+		return "", fmt.Errorf("file resolution error: %w", err)
 	}
 
 	// 2. Validate against allowed root directories
@@ -395,7 +412,44 @@ func ResolveAndValidateLocalImage(rawPath string, baseDir string) (*Attachment, 
 	}
 
 	if !isAllowed {
-		return nil, fmt.Errorf("access denied: path %q is outside allowed sandbox roots", rawPath)
+		return "", fmt.Errorf("access denied: path %q is outside allowed sandbox roots", rawPath)
+	}
+	return canonicalPath, nil
+}
+
+func detectImageMIMEType(f *os.File, canonicalPath string) (string, error) {
+	header := make([]byte, 512)
+	n, err := f.Read(header)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", fmt.Errorf("failed to read file header: %w", err)
+	}
+	mimeType := http.DetectContentType(header[:n])
+	if !strings.HasPrefix(mimeType, "image/") {
+		if mimeType == "application/octet-stream" {
+			ext := strings.ToLower(filepath.Ext(canonicalPath))
+			switch ext {
+			case ".png":
+				mimeType = "image/png"
+			case ".jpg", ".jpeg":
+				mimeType = "image/jpeg"
+			case ".gif":
+				mimeType = "image/gif"
+			case ".webp":
+				mimeType = "image/webp"
+			}
+		}
+	}
+	if !strings.HasPrefix(mimeType, "image/") {
+		return "", fmt.Errorf("unsupported MIME type %q: only image/* allowed", mimeType)
+	}
+	return mimeType, nil
+}
+
+// ResolveAndValidateLocalImage validates path sandboxing, symlinks, file type, size, and MIME header.
+func ResolveAndValidateLocalImage(rawPath string, baseDir string) (*Attachment, error) {
+	canonicalPath, err := resolveSandboxedImagePath(rawPath, baseDir)
+	if err != nil {
+		return nil, err
 	}
 
 	// 3. Open file
@@ -424,29 +478,9 @@ func ResolveAndValidateLocalImage(rawPath string, baseDir string) (*Attachment, 
 	}
 
 	// 6. Sniff MIME type using first 512 bytes
-	header := make([]byte, 512)
-	n, err := f.Read(header)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("failed to read file header: %w", err)
-	}
-	mimeType := http.DetectContentType(header[:n])
-	if !strings.HasPrefix(mimeType, "image/") {
-		if mimeType == "application/octet-stream" {
-			ext := strings.ToLower(filepath.Ext(canonicalPath))
-			switch ext {
-			case ".png":
-				mimeType = "image/png"
-			case ".jpg", ".jpeg":
-				mimeType = "image/jpeg"
-			case ".gif":
-				mimeType = "image/gif"
-			case ".webp":
-				mimeType = "image/webp"
-			}
-		}
-	}
-	if !strings.HasPrefix(mimeType, "image/") {
-		return nil, fmt.Errorf("unsupported MIME type %q: only image/* allowed", mimeType)
+	mimeType, err := detectImageMIMEType(f, canonicalPath)
+	if err != nil {
+		return nil, err
 	}
 
 	// 7. Read full file data into memory buffer

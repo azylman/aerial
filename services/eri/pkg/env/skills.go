@@ -77,6 +77,34 @@ func collectValidSkills(srcDir string, allowed map[string]string) {
 	}
 }
 
+func warnRootLevelSkills(srcBase string) {
+	entries, err := os.ReadDir(srcBase)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() && entry.Type()&os.ModeSymlink == 0 {
+			continue
+		}
+		name := entry.Name()
+		if name == "common" || name == "discord" || name == "voice" || name == "ephemeral" {
+			continue
+		}
+		candidateMD := filepath.Join(srcBase, name, "SKILL.md")
+		if fi, err := os.Stat(candidateMD); err == nil && !fi.IsDir() {
+			log.Printf("[Skills] Warning: ignoring root-level skill %q in %s; skills must be categorized under 'common', 'discord', 'voice', or 'ephemeral'", name, srcBase)
+		}
+	}
+}
+
+func (p *Provisioner) sourceSkillDirs() []string {
+	sourceDirs := []string{p.customSkillsDir, "/share/aerial/.agents/skills"}
+	if p.agentsSkillsDir != "" && p.agentsSkillsDir != "/share/aerial/.agents/skills" {
+		sourceDirs = append(sourceDirs, p.agentsSkillsDir)
+	}
+	return sourceDirs
+}
+
 // LinkTargetSkills links categorized skills for the specified target (discord, voice, or ephemeral) into targetDir.
 // It scans {source}/common/ and {source}/{target}/ (or only {source}/ephemeral/ for TargetEphemeral), rejects flat un-nested skills with a warning,
 // validates that SKILL.md is non-empty (>0 bytes), and actively prunes unauthorized symlinks.
@@ -86,14 +114,7 @@ func (p *Provisioner) LinkTargetSkills(targetDir string, target RuleTarget) int 
 	}
 
 	allowedSkills := make(map[string]string)
-
-	// Source directories in priority order:
-	// 1. Custom user skills
-	// 2. Built-in skills
-	sourceDirs := []string{p.customSkillsDir, "/share/aerial/.agents/skills"}
-	if p.agentsSkillsDir != "" && p.agentsSkillsDir != "/share/aerial/.agents/skills" {
-		sourceDirs = append(sourceDirs, p.agentsSkillsDir)
-	}
+	sourceDirs := p.sourceSkillDirs()
 
 	targetSubdirs := []string{"common", string(target)}
 	if target == TargetEphemeral {
@@ -106,21 +127,7 @@ func (p *Provisioner) LinkTargetSkills(targetDir string, target RuleTarget) int 
 		}
 
 		// Log warning for un-nested root skills
-		if entries, err := os.ReadDir(srcBase); err == nil {
-			for _, entry := range entries {
-				if !entry.IsDir() && entry.Type()&os.ModeSymlink == 0 {
-					continue
-				}
-				name := entry.Name()
-				if name == "common" || name == "discord" || name == "voice" || name == "ephemeral" {
-					continue
-				}
-				candidateMD := filepath.Join(srcBase, name, "SKILL.md")
-				if fi, err := os.Stat(candidateMD); err == nil && !fi.IsDir() {
-					log.Printf("[Skills] Warning: ignoring root-level skill %q in %s; skills must be categorized under 'common', 'discord', 'voice', or 'ephemeral'", name, srcBase)
-				}
-			}
-		}
+		warnRootLevelSkills(srcBase)
 
 		// Scan allowed target subdirectories: common and <target>
 		for _, sub := range targetSubdirs {

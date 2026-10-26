@@ -14,6 +14,161 @@ import (
 
 const MaxDiscordMessageLength = 2000
 
+type messageSplitState struct {
+	chunks       []string
+	current      strings.Builder
+	currentRunes int
+	inCodeBlock  bool
+	currentLang  string
+	limit        int
+}
+
+func (st *messageSplitState) flush() {
+	if st.current.Len() == 0 {
+		return
+	}
+	if st.inCodeBlock {
+		st.current.WriteString("\n```")
+	}
+	chunkStr := strings.TrimRight(st.current.String(), "\r\n")
+	if strings.TrimSpace(chunkStr) != "" {
+		st.chunks = append(st.chunks, chunkStr)
+	}
+	st.current.Reset()
+	st.currentRunes = 0
+}
+
+func (st *messageSplitState) startNextChunk() {
+	if st.inCodeBlock {
+		openFence := "```" + st.currentLang + "\n"
+		st.current.WriteString(openFence)
+		st.currentRunes = len([]rune(openFence))
+	}
+}
+
+func (st *messageSplitState) closingMargin(willCloseFence bool) int {
+	if st.inCodeBlock && !willCloseFence {
+		return len([]rune("\n```"))
+	}
+	return 0
+}
+
+func (st *messageSplitState) splitOversizedLine(lineRunes []rune, willCloseFence bool) {
+	remaining := lineRunes
+	for len(remaining) > 0 {
+		avail := st.limit - st.currentRunes - st.closingMargin(willCloseFence)
+		if avail <= 0 {
+			st.flush()
+			st.startNextChunk()
+			avail = st.limit - st.currentRunes - st.closingMargin(willCloseFence)
+		}
+
+		take := len(remaining)
+		if take > avail {
+			take = avail
+		}
+		part := string(remaining[:take])
+		st.current.WriteString(part)
+		st.currentRunes += len([]rune(part))
+		remaining = remaining[take:]
+
+		if len(remaining) > 0 {
+			st.flush()
+			st.startNextChunk()
+		}
+	}
+}
+
+func inspectFenceLine(trimmedLine string, inCodeBlock bool, limit int) (willOpen, willClose bool, lang string) {
+	isFence := limit > 8 && strings.HasPrefix(trimmedLine, "```") && !(strings.HasSuffix(trimmedLine, "```") && len(trimmedLine) >= 6)
+	if !isFence {
+		return false, false, ""
+	}
+	if !inCodeBlock {
+		willOpen = true
+		lang = strings.TrimSpace(strings.TrimPrefix(trimmedLine, "```"))
+		if strings.ContainsAny(lang, " \t`") || len([]rune("```"+lang+"\n"))+4 >= limit {
+			lang = ""
+		}
+		return willOpen, false, lang
+	}
+	return false, true, ""
+}
+
+func (st *messageSplitState) tryFitLine(line string, lineLen, sepLen, fitMargin int, willOpenFence, willCloseFence bool, fenceLang string) bool {
+	if st.currentRunes+sepLen+lineLen+fitMargin > st.limit {
+		return false
+	}
+	if sepLen > 0 {
+		st.current.WriteString("\n")
+		st.currentRunes += sepLen
+	}
+	st.current.WriteString(line)
+	st.currentRunes += lineLen
+	if willOpenFence {
+		st.inCodeBlock = true
+		st.currentLang = fenceLang
+	} else if willCloseFence {
+		st.inCodeBlock = false
+		st.currentLang = ""
+	}
+	return true
+}
+
+func (st *messageSplitState) addLineToChunk(line string, lineRunes []rune, willCloseFence bool) {
+	margin := st.closingMargin(willCloseFence)
+	if st.currentRunes+len(lineRunes)+margin <= st.limit {
+		st.current.WriteString(line)
+		st.currentRunes += len(lineRunes)
+		return
+	}
+	st.splitOversizedLine(lineRunes, willCloseFence)
+}
+
+func (st *messageSplitState) processLine(i int, line string, lines []string) {
+	trimmedLine := strings.TrimSpace(line)
+	willOpenFence, willCloseFence, fenceLang := inspectFenceLine(trimmedLine, st.inCodeBlock, st.limit)
+
+	lineRunes := []rune(line)
+	lineLen := len(lineRunes)
+
+	sepLen := 0
+	if st.current.Len() > 0 {
+		sepLen = 1
+	}
+
+	margin := 0
+	if (st.inCodeBlock && !willCloseFence) || willOpenFence {
+		margin = len([]rune("\n```"))
+	}
+	fitMargin := margin
+	if willOpenFence && st.current.Len() > 0 && i+1 < len(lines) {
+		fitMargin += 1 + len([]rune(lines[i+1]))
+	}
+
+	if st.tryFitLine(line, lineLen, sepLen, fitMargin, willOpenFence, willCloseFence, fenceLang) {
+		return
+	}
+
+	if willCloseFence {
+		st.flush()
+		st.inCodeBlock = false
+		st.currentLang = ""
+		return
+	}
+
+	if st.current.Len() > 0 {
+		st.flush()
+		st.startNextChunk()
+	}
+	if willOpenFence {
+		st.inCodeBlock = true
+		st.currentLang = fenceLang
+	}
+
+	st.addLineToChunk(line, lineRunes, willCloseFence)
+}
+
 // SplitMessage splits text into chunks that do not exceed the specified limit (defaults to 2000).
 // It is Markdown-aware: if a chunk cuts inside an open code block fence (```<lang>), it closes the
 // fence (```) at the end of the chunk and reopens it (```<lang>) at the start of the next chunk.
@@ -31,168 +186,63 @@ func SplitMessage(text string, limit int) []string {
 		return []string{text}
 	}
 
-	var chunks []string
-	var current strings.Builder
-	var currentRunes int
-	var inCodeBlock bool
-	var currentLang string
-
-	flushCurrent := func() {
-		if current.Len() == 0 {
-			return
-		}
-		if inCodeBlock {
-			current.WriteString("\n```")
-		}
-		chunkStr := strings.TrimRight(current.String(), "\r\n")
-		if strings.TrimSpace(chunkStr) != "" {
-			chunks = append(chunks, chunkStr)
-		}
-		current.Reset()
-		currentRunes = 0
-	}
-
-	startNextChunk := func() {
-		if inCodeBlock {
-			openFence := "```" + currentLang + "\n"
-			current.WriteString(openFence)
-			currentRunes = len([]rune(openFence))
-		}
-	}
-
+	st := &messageSplitState{limit: limit}
 	lines := strings.Split(text, "\n")
 	for i, line := range lines {
-		trimmedLine := strings.TrimSpace(line)
-		isFence := limit > 8 && strings.HasPrefix(trimmedLine, "```") && !(strings.HasSuffix(trimmedLine, "```") && len(trimmedLine) >= 6)
-
-		// If this line toggles a code fence
-		var willOpenFence, willCloseFence bool
-		var fenceLang string
-		if isFence {
-			if !inCodeBlock {
-				willOpenFence = true
-				fenceLang = strings.TrimSpace(strings.TrimPrefix(trimmedLine, "```"))
-				if strings.ContainsAny(fenceLang, " \t`") || len([]rune("```"+fenceLang+"\n"))+4 >= limit {
-					fenceLang = ""
-				}
-			} else {
-				willCloseFence = true
-			}
-		}
-
-		lineRunes := []rune(line)
-		lineLen := len(lineRunes)
-
-		// Determine separator if current has content
-		sep := ""
-		sepLen := 0
-		if current.Len() > 0 {
-			sep = "\n"
-			sepLen = 1
-		}
-
-		// Extra safety margin for closing fence if inside code block (and not currently closing it)
-		closingMargin := 0
-		if (inCodeBlock && !willCloseFence) || willOpenFence {
-			closingMargin = len([]rune("\n```"))
-		}
-		fitMargin := closingMargin
-		if willOpenFence && current.Len() > 0 && i+1 < len(lines) {
-			fitMargin += 1 + len([]rune(lines[i+1]))
-		}
-
-		// If adding this line fits within limit
-		if currentRunes+sepLen+lineLen+fitMargin <= limit {
-			if sepLen > 0 {
-				current.WriteString(sep)
-				currentRunes += sepLen
-			}
-			current.WriteString(line)
-			currentRunes += lineLen
-			if willOpenFence {
-				inCodeBlock = true
-				currentLang = fenceLang
-			} else if willCloseFence {
-				inCodeBlock = false
-				currentLang = ""
-			}
-			continue
-		}
-
-		if willCloseFence {
-			flushCurrent()
-			inCodeBlock = false
-			currentLang = ""
-			continue
-		}
-
-		// Line doesn't fit in current chunk
-		if current.Len() > 0 {
-			flushCurrent()
-			startNextChunk()
-		}
-		if willOpenFence {
-			inCodeBlock = true
-			currentLang = fenceLang
-		}
-
-		// Recompute margin in fresh chunk
-		closingMargin = 0
-		if inCodeBlock && !willCloseFence {
-			closingMargin = len([]rune("\n```"))
-		}
-
-		// If line fits in fresh chunk
-		if currentRunes+lineLen+closingMargin <= limit {
-			current.WriteString(line)
-			currentRunes += lineLen
-			continue
-		}
-
-		// Line is larger than an entire chunk limit: slice line across chunks
-		remaining := lineRunes
-		for len(remaining) > 0 {
-			avail := limit - currentRunes - closingMargin
-			if avail <= 0 {
-				flushCurrent()
-				startNextChunk()
-				closingMargin = 0
-				if inCodeBlock && !willCloseFence {
-					closingMargin = len([]rune("\n```"))
-				}
-				avail = limit - currentRunes - closingMargin
-			}
-
-			take := len(remaining)
-			if take > avail {
-				take = avail
-			}
-			part := string(remaining[:take])
-			current.WriteString(part)
-			currentRunes += len([]rune(part))
-			remaining = remaining[take:]
-
-			if len(remaining) > 0 {
-				flushCurrent()
-				startNextChunk()
-				closingMargin = 0
-				if inCodeBlock && !willCloseFence {
-					closingMargin = len([]rune("\n```"))
-				}
-			}
-		}
+		st.processLine(i, line, lines)
 	}
 
-	if current.Len() > 0 {
-		flushCurrent()
+	if st.current.Len() > 0 {
+		st.flush()
 	}
 
-	return chunks
+	return st.chunks
 }
 
 // SendMessage delivers text to the target Discord channel/thread, chunking at the 2000-character limit.
 func SendMessage(s *discordgo.Session, channelID, text string) error {
 	return SendMessageWithAttachments(s, channelID, text, nil)
+}
+
+func collectDiscordFiles(attachments []*Attachment) []*discordgo.File {
+	var discordFiles []*discordgo.File
+	for _, att := range attachments {
+		if att != nil && len(att.Data) > 0 {
+			discordFiles = append(discordFiles, att.ToDiscordFile())
+		}
+	}
+	return discordFiles
+}
+
+func sendChunkedDiscordMessages(s *discordgo.Session, channelID string, chunks []string, discordFiles []*discordgo.File) error {
+	if len(chunks) == 0 && len(discordFiles) > 0 {
+		msg := &discordgo.MessageSend{
+			Files: discordFiles,
+			Flags: discordgo.MessageFlagsSuppressEmbeds,
+		}
+		if _, sendErr := s.ChannelMessageSendComplex(channelID, msg); sendErr != nil {
+			return fmt.Errorf("failed to send attachments: %w", sendErr)
+		}
+		return nil
+	}
+
+	for i, chunk := range chunks {
+		if strings.TrimSpace(chunk) == "" && (i != len(chunks)-1 || len(discordFiles) == 0) {
+			continue
+		}
+		msg := &discordgo.MessageSend{
+			Content: chunk,
+			Flags:   discordgo.MessageFlagsSuppressEmbeds,
+		}
+		if i == len(chunks)-1 && len(discordFiles) > 0 {
+			msg.Files = discordFiles
+		}
+
+		if _, sendErr := s.ChannelMessageSendComplex(channelID, msg); sendErr != nil {
+			return fmt.Errorf("failed to send message chunk %d: %w", i, sendErr)
+		}
+	}
+	return nil
 }
 
 // SendMessageWithAttachments delivers text to the target Discord channel/thread, chunking at 2000 characters,
@@ -224,41 +274,8 @@ func SendMessageWithAttachments(s *discordgo.Session, channelID, text string, at
 		metrics.RecordMessageChunked()
 	}
 
-	var discordFiles []*discordgo.File
-	for _, att := range attachments {
-		if att != nil && len(att.Data) > 0 {
-			discordFiles = append(discordFiles, att.ToDiscordFile())
-		}
-	}
-
-	if len(chunks) == 0 && len(discordFiles) > 0 {
-		msg := &discordgo.MessageSend{
-			Files: discordFiles,
-			Flags: discordgo.MessageFlagsSuppressEmbeds,
-		}
-		if _, sendErr := s.ChannelMessageSendComplex(channelID, msg); sendErr != nil {
-			return fmt.Errorf("failed to send attachments: %w", sendErr)
-		}
-		return nil
-	}
-
-	for i, chunk := range chunks {
-		if strings.TrimSpace(chunk) == "" && (i != len(chunks)-1 || len(discordFiles) == 0) {
-			continue
-		}
-		msg := &discordgo.MessageSend{
-			Content: chunk,
-			Flags:   discordgo.MessageFlagsSuppressEmbeds,
-		}
-		if i == len(chunks)-1 && len(discordFiles) > 0 {
-			msg.Files = discordFiles
-		}
-
-		if _, sendErr := s.ChannelMessageSendComplex(channelID, msg); sendErr != nil {
-			return fmt.Errorf("failed to send message chunk %d: %w", i, sendErr)
-		}
-	}
-	return nil
+	discordFiles := collectDiscordFiles(attachments)
+	return sendChunkedDiscordMessages(s, channelID, chunks, discordFiles)
 }
 
 // StartTyping sends a Discord typing indicator immediately and keeps it active every 8 seconds until stopped.
