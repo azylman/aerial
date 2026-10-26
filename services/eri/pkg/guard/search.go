@@ -474,6 +474,60 @@ func isGrepMatchLimitFlag(t string) (isLimit, takesArg bool) {
 	return false, false
 }
 
+var findValueFlags = map[string]bool{
+	"-name":     true,
+	"-iname":    true,
+	"-path":     true,
+	"-ipath":    true,
+	"-type":     true,
+	"-maxdepth": true,
+	"-mindepth": true,
+	"-mtime":    true,
+	"-ctime":    true,
+	"-atime":    true,
+	"-perm":     true,
+	"-size":     true,
+	"-user":     true,
+	"-group":    true,
+	"-exec":     true,
+	"-execdir":  true,
+	"-ok":       true,
+	"-okdir":    true,
+	"-regex":    true,
+	"-iregex":   true,
+	"-printf":   true,
+}
+
+func isFindValueFlag(t string) bool {
+	return findValueFlags[t]
+}
+
+func validateFindPathToken(t, cwd string) *Decision {
+	clean := filepath.Clean(t)
+	if clean == "/" || clean == "/proc" || clean == "/sys" || clean == "/dev" || clean == "/root" {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Unconstrained root search detected. Avoid searching the root filesystem ('/') or system directories directly. Scope searches to specific package or workspace directories.",
+		}
+	}
+
+	if cwd == "/" && (clean == "." || clean == "./") {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Unconstrained root search detected. Current working directory is root ('/'). Scope searches to specific workspace directories.",
+		}
+	}
+
+	if clean == ".git" || strings.HasPrefix(clean, ".git/") || clean == "node_modules" || strings.HasPrefix(clean, "node_modules/") {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Direct search into large internal repository directory (.git/node_modules) detected. Exclude internal version control and dependency trees from searches.",
+		}
+	}
+
+	return nil
+}
+
 func inspectFindCommand(tokens []string, cwd string) *Decision {
 	hasMaxdepth := false
 	for i := 1; i < len(tokens); i++ {
@@ -490,34 +544,14 @@ func inspectFindCommand(tokens []string, cwd string) *Decision {
 	for i := 1; i < len(tokens); i++ {
 		t := tokens[i]
 		if strings.HasPrefix(t, "-") {
-			// Skip flags and their arguments if flag takes an argument
-			if t == "-name" || t == "-iname" || t == "-path" || t == "-ipath" || t == "-type" || t == "-maxdepth" || t == "-mindepth" || t == "-mtime" || t == "-ctime" || t == "-atime" || t == "-perm" || t == "-size" || t == "-user" || t == "-group" {
+			if isFindValueFlag(t) && i+1 < len(tokens) {
 				i++
 			}
 			continue
 		}
 
-		// Target path token
-		clean := filepath.Clean(t)
-		if clean == "/" || clean == "/proc" || clean == "/sys" || clean == "/dev" || clean == "/root" {
-			return &Decision{
-				Decision: DecisionDeny,
-				Reason:   "Unconstrained root search detected. Avoid searching the root filesystem ('/') or system directories directly. Scope searches to specific package or workspace directories.",
-			}
-		}
-
-		if cwd == "/" && (clean == "." || clean == "./") {
-			return &Decision{
-				Decision: DecisionDeny,
-				Reason:   "Unconstrained root search detected. Current working directory is root ('/'). Scope searches to specific workspace directories.",
-			}
-		}
-
-		if clean == ".git" || strings.HasPrefix(clean, ".git/") || clean == "node_modules" || strings.HasPrefix(clean, "node_modules/") {
-			return &Decision{
-				Decision: DecisionDeny,
-				Reason:   "Direct search into large internal repository directory (.git/node_modules) detected. Exclude internal version control and dependency trees from searches.",
-			}
+		if dec := validateFindPathToken(t, cwd); dec != nil {
+			return dec
 		}
 	}
 
@@ -582,70 +616,119 @@ var grepNoPatternLongFlags = map[string]bool{
 	"--version": true,
 }
 
-func inspectGrepCommand(bin string, tokens []string, fromPipe bool) *Decision {
-	hasExcludeDir, hasMatchLimit, hasExplicitPattern := false, false, false
-	isRecursive := (bin == "rg" || bin == "ag" || bin == "ack")
-	var pathTokens []string
+var grepPatternFlags = map[string]bool{
+	"-e":       true,
+	"-f":       true,
+	"--regexp": true,
+	"--file":   true,
+}
+
+func isExcludeDirFlag(t string) (matches bool, takesArg bool) {
+	if t == "--exclude-dir" || t == "--exclude" {
+		return true, true
+	}
+	if strings.HasPrefix(t, "--exclude-dir=") || strings.HasPrefix(t, "--exclude=") {
+		return true, false
+	}
+	return false, false
+}
+
+func isStandardGrepRecursive(bin, t string) bool {
+	if !isStandardGrep(bin) {
+		return false
+	}
+	return t == "--recursive" || hasShortFlag(t, 'r') || hasShortFlag(t, 'R')
+}
+
+type grepScanFlags struct {
+	hasExcludeDir      bool
+	hasMatchLimit      bool
+	hasExplicitPattern bool
+	isRecursive        bool
+	pathTokens         []string
+}
+
+func (f *grepScanFlags) applyGrepFlag(bin, t string, hasNext bool) (consumeNext, handled bool) {
+	if matches, takesArg := isExcludeDirFlag(t); matches {
+		f.hasExcludeDir = true
+		return takesArg && hasNext, true
+	}
+	if isStandardGrepRecursive(bin, t) {
+		f.isRecursive = true
+		handled = true
+	}
+	if limit, takesArg := isGrepMatchLimitFlag(t); limit {
+		f.hasMatchLimit = true
+		if grepNoPatternLongFlags[t] {
+			f.hasExplicitPattern = true
+		}
+		return takesArg && hasNext, true
+	}
+	if grepPatternFlags[t] {
+		f.hasExplicitPattern = true
+		return hasNext, true
+	}
+	if grepValueFlags[t] && hasNext {
+		return true, true
+	}
+	return false, handled
+}
+
+func collectNonFlagTokens(tokens []string) []string {
+	var nonFlags []string
+	for _, t := range tokens {
+		if !strings.HasPrefix(t, "-") {
+			nonFlags = append(nonFlags, t)
+		}
+	}
+	return nonFlags
+}
+
+func parseGrepTokens(bin string, tokens []string) grepScanFlags {
+	flags := grepScanFlags{
+		isRecursive: (bin == "rg" || bin == "ag" || bin == "ack"),
+	}
 
 	for i := 1; i < len(tokens); i++ {
 		t := tokens[i]
 		if strings.HasPrefix(t, "-") {
-			if strings.HasPrefix(t, "--exclude-dir") || strings.HasPrefix(t, "--exclude") {
-				hasExcludeDir = true
-				if (t == "--exclude-dir" || t == "--exclude") && i+1 < len(tokens) {
-					i++
-				}
-			}
-			if isStandardGrep(bin) && (t == "--recursive" || hasShortFlag(t, 'r') || hasShortFlag(t, 'R')) {
-				isRecursive = true
-			}
-			if limit, takesArg := isGrepMatchLimitFlag(t); limit {
-				hasMatchLimit = true
-				if grepNoPatternLongFlags[t] {
-					hasExplicitPattern = true
-				}
-				if takesArg && i+1 < len(tokens) {
-					i++
-				}
-			}
-			if t == "-e" || t == "-f" || t == "--regexp" || t == "--file" {
-				hasExplicitPattern = true
-				i++
-			} else if grepValueFlags[t] && i+1 < len(tokens) {
+			consumeNext, _ := flags.applyGrepFlag(bin, t, i+1 < len(tokens))
+			if consumeNext {
 				i++
 			}
 			continue
 		}
-		if !hasExplicitPattern {
-			hasExplicitPattern = true
+		if !flags.hasExplicitPattern {
+			flags.hasExplicitPattern = true
 			continue
 		}
-		pathTokens = append(pathTokens, t)
+		flags.pathTokens = append(flags.pathTokens, t)
 	}
 
 	if bin == "strings" {
-		pathTokens = nil
-		for _, t := range tokens[1:] {
-			if !strings.HasPrefix(t, "-") {
-				pathTokens = append(pathTokens, t)
-			}
-		}
+		flags.pathTokens = collectNonFlagTokens(tokens[1:])
 	}
 
-	for _, pt := range pathTokens {
+	return flags
+}
+
+func inspectGrepCommand(bin string, tokens []string, fromPipe bool) *Decision {
+	flags := parseGrepTokens(bin, tokens)
+
+	for _, pt := range flags.pathTokens {
 		if dec := validateGrepPathToken(pt); dec != nil {
 			return dec
 		}
 	}
 
-	if isRecursive && isStandardGrep(bin) && !hasExcludeDir && hasBroadPathToken(pathTokens) {
+	if flags.isRecursive && isStandardGrep(bin) && !flags.hasExcludeDir && hasBroadPathToken(flags.pathTokens) {
 		return &Decision{
 			Decision: DecisionDeny,
 			Reason:   "Recursive grep without directory exclusions detected. Add '--exclude-dir=.git' (or use ripgrep/rg, which excludes .git by default) to prevent scanning raw git packfiles and binary objects.",
 		}
 	}
 
-	if isRecursive && !(fromPipe && len(pathTokens) == 0) && !hasMatchLimit {
+	if flags.isRecursive && !(fromPipe && len(flags.pathTokens) == 0) && !flags.hasMatchLimit {
 		return &Decision{
 			Decision: DecisionDeny,
 			Reason:   "Unbounded recursive text search detected. Bound output with '-m <N>' / '--max-count=<N>' (e.g. 'rg -n -m 20 <pattern> <path>'), '-l' ('--files-with-matches'), or '-c' ('--count') per the shell-filesystem-traversal skill to prevent context window bloat.",

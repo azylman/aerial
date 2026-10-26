@@ -1,35 +1,6 @@
 {
   "files": {},
   "functions": {
-    "services/eri/pkg/guard/batch.go::CheckBatchWithDir": {
-      "cc": 28
-    },
-    "services/eri/pkg/guard/commit.go::CheckCommit": {
-      "cc": 27,
-      "depth": 6
-    },
-    "services/eri/pkg/guard/commit.go::IsCommitCommand": {
-      "cc": 24,
-      "depth": 7
-    },
-    "services/eri/pkg/guard/commit.go::ScanDiffWithPatterns": {
-      "cc": 26
-    },
-    "services/eri/pkg/guard/commit.go::isAllCommit": {
-      "cc": 21
-    },
-    "services/eri/pkg/guard/commit.go::parsePatternPayload": {
-      "cc": 23
-    },
-    "services/eri/pkg/guard/search.go::inspectFindCommand": {
-      "cc": 37
-    },
-    "services/eri/pkg/guard/search.go::inspectGrepCommand": {
-      "cc": 49
-    },
-    "services/eri/pkg/guard/share.go::inspectRunCommand": {
-      "cc": 38
-    },
     "services/eri/pkg/interactions/handlers.go::*Router.handleInterrupt": {
       "depth": 6
     },
