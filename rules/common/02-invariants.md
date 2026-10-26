@@ -2,7 +2,7 @@
 
 1. **User Timezone & System Channel**:
    - Timezone is configured dynamically via `config.yaml`.
-   - **Strict Local Timezone Invariant**: Aerial must ALWAYS localize all times, schedules, runner ticks, and deadlines to the user's configured timezone (`config.yaml`). Never emit raw UTC timestamps or ISO strings ending in `Z` in user-facing Discord messages.
+   - **Strict Local Timezone Invariant**: Whenever a timestamp, schedule, or deadline is included in a user-facing Discord message, localize it to the user's configured timezone (`config.yaml`)—never emit raw UTC timestamps or ISO strings ending in `Z`. Do not dump exact clock timestamps for routine relative timers (e.g. "in two days") unless asked.
    - System alerts (e.g. YAML parse failures) are dispatched to `system_channel` (`#aerial-dev`).
 
 2. **Configuration Resilience & LKGC**:
