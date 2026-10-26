@@ -25,8 +25,9 @@ const (
 )
 
 var (
-	psqlFormatFlags = map[string]bool{"-A": true, "--no-align": true, "--csv": true, "-H": true, "--html": true}
-	schemaErrCodes  = map[string]bool{"42703": true, "42P01": true, "42704": true, "42883": true}
+	psqlFormatFlags    = map[string]bool{"-A": true, "--no-align": true, "--csv": true, "-H": true, "--html": true}
+	schemaErrCodes     = map[string]bool{"42703": true, "42P01": true, "42704": true, "42883": true}
+	dockerExecValFlags = map[string]bool{"-e": true, "--env": true, "--env-file": true, "-u": true, "--user": true, "-w": true, "--workdir": true, "--detach-keys": true}
 )
 
 // SQLColumn describes a resolved output column from PostgreSQL RowDescription.
@@ -437,7 +438,7 @@ func findPsqlInvocations(cmdLine string) []psqlInvocation {
 	var invocations []psqlInvocation
 	for _, seg := range splitPipelineWithOffsets(cmdLine) {
 		tokens := tokenizeWithOffsets(seg.text, seg.offset)
-		idx := skipEnvTokens(tokens)
+		idx := skipEnvAndDockerExec(tokens)
 		if idx < len(tokens) && filepath.Base(tokens[idx].value) == "psql" {
 			invocations = append(invocations, parsePsqlArgs(tokens[idx].endOffset, tokens[idx+1:]))
 		}
@@ -447,10 +448,29 @@ func findPsqlInvocations(cmdLine string) []psqlInvocation {
 
 func skipEnvTokens(tokens []locatedToken) int {
 	idx := 0
-	for idx < len(tokens) && strings.Contains(tokens[idx].value, "=") && !strings.HasPrefix(tokens[idx].value, "-") {
+	for idx < len(tokens) && (tokens[idx].value == "(" || (strings.Contains(tokens[idx].value, "=") && !strings.HasPrefix(tokens[idx].value, "-"))) {
 		idx++
 	}
 	return idx
+}
+
+func skipEnvAndDockerExec(tokens []locatedToken) int {
+	idx := skipEnvTokens(tokens)
+	if idx+2 >= len(tokens) || filepath.Base(strings.TrimLeft(tokens[idx].value, "(")) != "docker" || tokens[idx+1].value != "exec" {
+		return idx
+	}
+	i := idx + 2
+	for i < len(tokens) && strings.HasPrefix(tokens[i].value, "-") {
+		if dockerExecValFlags[tokens[i].value] {
+			i += 2
+		} else {
+			i++
+		}
+	}
+	if i+1 >= len(tokens) {
+		return idx
+	}
+	return i + 1 + skipEnvTokens(tokens[i+1:])
 }
 
 func parsePsqlArgs(insertOffset int, tokens []locatedToken) psqlInvocation {

@@ -386,12 +386,18 @@ func CheckSearchWithSQL(toolName string, args ToolArgs, describer SQLDescriber) 
 
 	commands, ops := splitPipelineSegments(cmdLine)
 	for idx, cmd := range commands {
-		tokens := tokenizeQuoteAware(cmd)
+		tokens := unwrapCommandTokens(tokenizeQuoteAware(cmd))
 		if len(tokens) == 0 {
 			continue
 		}
 
-		bin := filepath.Base(tokens[0])
+		bin := filepath.Base(strings.TrimLeft(tokens[0], "("))
+		if (bin == "sh" || bin == "bash") && len(tokens) >= 3 && tokens[1] == "-c" {
+			if dec := CheckSearchWithSQL("run_command", ToolArgs{CommandLine: tokens[2], Cwd: args.Cwd}, describer); dec != nil && dec.Decision == DecisionDeny {
+				return dec
+			}
+			continue
+		}
 
 		// 1. Evaluate find commands
 		if bin == "find" {
@@ -412,6 +418,24 @@ func CheckSearchWithSQL(toolName string, args ToolArgs, describer SQLDescriber) 
 
 	// 3. Evaluate psql invocations (schema validation, SELECT * ban, LIMIT gate, and -A shaping)
 	return inspectPsqlPipeline(args.CommandLine, describer)
+}
+
+func unwrapCommandTokens(tokens []string) []string {
+	tokens = stripLeadingEnv(tokens)
+	if len(tokens) >= 3 && filepath.Base(strings.TrimLeft(tokens[0], "(")) == "docker" && tokens[1] == "exec" {
+		i := 2
+		for i < len(tokens) && strings.HasPrefix(tokens[i], "-") {
+			if dockerExecValFlags[tokens[i]] {
+				i += 2
+			} else {
+				i++
+			}
+		}
+		if i+1 < len(tokens) {
+			tokens = stripLeadingEnv(tokens[i+1:])
+		}
+	}
+	return tokens
 }
 
 func isGrepOrSearchBinary(bin string) bool {
