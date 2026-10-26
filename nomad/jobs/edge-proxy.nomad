@@ -24,7 +24,7 @@ job "edge-proxy" {
       }
     }
 
-    task "nginx" {
+    task "edge-proxy" {
       driver = "docker"
 
       config {
