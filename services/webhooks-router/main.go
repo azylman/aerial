@@ -111,6 +111,8 @@ func (s *RouterServer) Routes() http.Handler {
 	mux.HandleFunc("POST /webhooks/github", s.handleGitHubWebhook)
 	mux.HandleFunc("POST /api/webhooks/hangar", s.handleHangarWebhook)
 	mux.HandleFunc("POST /webhooks/hangar", s.handleHangarWebhook)
+	mux.HandleFunc("POST /api/webhooks/events", s.handleEventsWebhook)
+	mux.HandleFunc("POST /webhooks/events", s.handleEventsWebhook)
 	coverageFlush := httpkit.HandleCoverageFlush("webhooks-router", true)
 	mux.HandleFunc("POST /debug/coverage/flush", coverageFlush)
 	mux.HandleFunc("GET /debug/coverage/flush", coverageFlush)
@@ -904,6 +906,7 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 		river.AddWorker(workers, &NomadEventWorker{server: server})
 		river.AddWorker(workers, &NomadCrashAlertWorker{server: server})
 		river.AddWorker(workers, &WidgetSyncWorker{server: server})
+		river.AddWorker(workers, &EventTriggerWebhookWorker{server: server})
 
 		rc, err := river.NewClient(riverpgxv5.New(dbPool), &river.Config{
 			Queues: map[string]river.QueueConfig{

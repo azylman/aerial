@@ -31,6 +31,7 @@ type mockRiverInserter struct {
 	insertedNomadJobs      []NomadEventArgs
 	insertedCrashAlertJobs []NomadCrashAlertArgs
 	insertedWidgetSyncJobs []WidgetSyncArgs
+	insertedEventJobs      []EventTriggerWebhookArgs
 	insertedOpts           []*river.InsertOpts
 	skipDuplicate          bool
 	err                    error
@@ -54,6 +55,8 @@ func (m *mockRiverInserter) Insert(ctx context.Context, args river.JobArgs, opts
 		m.insertedCrashAlertJobs = append(m.insertedCrashAlertJobs, a)
 	case WidgetSyncArgs:
 		m.insertedWidgetSyncJobs = append(m.insertedWidgetSyncJobs, a)
+	case EventTriggerWebhookArgs:
+		m.insertedEventJobs = append(m.insertedEventJobs, a)
 	}
 	return &rivertype.JobInsertResult{
 		Job:                      &rivertype.JobRow{ID: 1},
@@ -171,6 +174,8 @@ type mockPRRegistry struct {
 	claimTriggersCalls []claimTriggersCall
 	claimTriggersRes   []ClaimedEventTrigger
 	claimTriggersErr   error
+	checkTriggersRes   bool
+	checkTriggersErr   error
 
 	ciFailCount    int
 	ciFailCountErr error
@@ -366,16 +371,25 @@ func (m *mockPRRegistry) FailVanadisChunkDetailsByPR(ctx context.Context, repo s
 }
 
 type claimTriggersCall struct {
-	source    string
-	targets   []string
-	eventType string
+	source        string
+	targets       []string
+	eventType     string
+	contextHeader string
 }
 
-func (m *mockPRRegistry) ClaimEventTriggers(ctx context.Context, source string, targets []string, eventType string) ([]ClaimedEventTrigger, error) {
+func (m *mockPRRegistry) CheckEventTriggers(ctx context.Context, source string, targets []string, eventType string) (bool, error) {
+	if err := m.checkErr(m.checkTriggersErr); err != nil {
+		return false, err
+	}
+	return m.checkTriggersRes, nil
+}
+
+func (m *mockPRRegistry) FireEventTriggers(ctx context.Context, source string, targets []string, eventType, contextHeader string) ([]ClaimedEventTrigger, error) {
 	m.claimTriggersCalls = append(m.claimTriggersCalls, claimTriggersCall{
-		source:    source,
-		targets:   targets,
-		eventType: eventType,
+		source:        source,
+		targets:       targets,
+		eventType:     eventType,
+		contextHeader: contextHeader,
 	})
 	if err := m.checkErr(m.claimTriggersErr); err != nil {
 		return nil, err

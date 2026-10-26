@@ -214,6 +214,37 @@ func (w *WidgetSyncWorker) Work(ctx context.Context, job *river.Job[WidgetSyncAr
 	return nil
 }
 
+// EventTriggerWebhookArgs contains payload data for durable background firing of generic event triggers via Haro.
+type EventTriggerWebhookArgs struct {
+	Source        string   `json:"source"`
+	Targets       []string `json:"targets"`
+	EventType     string   `json:"event_type"`
+	ContextHeader string   `json:"context_header,omitempty"`
+}
+
+func (EventTriggerWebhookArgs) Kind() string { return "event_trigger_webhook" }
+func (EventTriggerWebhookArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{MaxAttempts: 5}
+}
+
+// EventTriggerWebhookWorker processes enqueued external event triggers asynchronously from River.
+type EventTriggerWebhookWorker struct {
+	river.WorkerDefaults[EventTriggerWebhookArgs]
+	server *RouterServer
+}
+
+func (w *EventTriggerWebhookWorker) Work(ctx context.Context, job *river.Job[EventTriggerWebhookArgs]) error {
+	if w.server == nil {
+		return errors.New("router server not configured on worker")
+	}
+	log.Printf("[webhooks-router] [river] processing event trigger job id=%d source=%s event_type=%s targets=%v", job.ID, job.Args.Source, job.Args.EventType, job.Args.Targets)
+	if err := w.server.ProcessEventTriggerWebhook(ctx, job.Args); err != nil {
+		log.Printf("[webhooks-router] [river] error processing event trigger job id=%d: %v", job.ID, err)
+		return err
+	}
+	return nil
+}
+
 // StatusWidgetChunk represents a chunk in a Vanadis build or a PR task.
 // Note: eri's BuildStatusWidgetComponents (services/eri/pkg/discord/widget.go) renders
 // chunk status badges, repo tags, titles, PR links, and runtime durations only; it does

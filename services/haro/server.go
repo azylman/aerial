@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 type Server struct {
 	handler        *ToolHandler
+	dispatcher     PromptDispatcher
 	mcpServer      *mcp.Server
 	opts           *mcp.StreamableHTTPOptions
 	streamHandler  http.Handler
@@ -34,9 +36,16 @@ func (s *Server) InvalidateSchedulesCache() {
 	s.schedulesCache.mu.Unlock()
 }
 
-func NewServer(handler *ToolHandler) *Server {
+func NewServer(handler *ToolHandler, dispatcher ...PromptDispatcher) *Server {
 	if handler == nil {
 		panic("server: handler cannot be nil")
+	}
+
+	var disp PromptDispatcher
+	if len(dispatcher) > 0 && dispatcher[0] != nil {
+		disp = dispatcher[0]
+	} else if handler.cfg != nil {
+		disp = NewHTTPPromptDispatcher(handler.cfg.BrainURL)
 	}
 
 	opts := &mcp.StreamableHTTPOptions{
@@ -50,9 +59,10 @@ func NewServer(handler *ToolHandler) *Server {
 	}, nil)
 
 	s := &Server{
-		handler:   handler,
-		mcpServer: mcpServer,
-		opts:      opts,
+		handler:    handler,
+		dispatcher: disp,
+		mcpServer:  mcpServer,
+		opts:       opts,
 	}
 	s.registerTools()
 
@@ -158,7 +168,11 @@ func (s *Server) registerTools() {
 		Name:        "watch_event",
 		Description: "Register a deterministic one-shot event watch trigger fired when an external event occurs.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
-		res, err := HandleWatchEvent(ctx, s.handler.db, args)
+		var extraSources []string
+		if s.handler != nil && s.handler.cfg != nil {
+			extraSources = s.handler.cfg.ExtraEventSources
+		}
+		res, err := HandleWatchEvent(ctx, s.handler.db, args, extraSources...)
 		return res, nil, err
 	})
 
@@ -186,7 +200,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/schedules", s.handleSchedules)
 	mux.HandleFunc("/schedules/runs", s.handleScheduleRuns)
 	mux.HandleFunc("/schedules/oneshot", s.handleScheduleOneShot)
+	mux.HandleFunc("/event-triggers/check", s.handleCheckEventTriggers)
 	mux.HandleFunc("/event-triggers/claim", s.handleClaimEventTriggers)
+	mux.HandleFunc("/event-triggers/fire", s.handleFireEventTriggers)
 
 	mcpBridge := http.HandlerFunc(s.handleMCP)
 	mux.Handle("/mcp", mcpBridge)
@@ -224,8 +240,16 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		s.handleScheduleOneShot(w, r)
 		return
 	}
+	if r.URL.Path == "/event-triggers/check" {
+		s.handleCheckEventTriggers(w, r)
+		return
+	}
 	if r.URL.Path == "/event-triggers/claim" {
 		s.handleClaimEventTriggers(w, r)
+		return
+	}
+	if r.URL.Path == "/event-triggers/fire" {
+		s.handleFireEventTriggers(w, r)
 		return
 	}
 
@@ -415,36 +439,68 @@ func (s *Server) handleScheduleOneShot(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) handleClaimEventTriggers(w http.ResponseWriter, r *http.Request) {
+type eventTriggerActionRequest struct {
+	Source        string   `json:"source"`
+	Target        string   `json:"target,omitempty"`
+	Targets       []string `json:"targets,omitempty"`
+	EventType     string   `json:"event_type"`
+	ContextHeader string   `json:"context_header,omitempty"`
+}
+
+func (s *Server) parseEventTriggerActionRequest(w http.ResponseWriter, r *http.Request) (eventTriggerActionRequest, bool) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
 		httpkit.WriteJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-		return
+		return eventTriggerActionRequest{}, false
 	}
 	if s.handler == nil || s.handler.db == nil {
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "database not initialized"})
-		return
+		return eventTriggerActionRequest{}, false
 	}
-	var req struct {
-		Source    string   `json:"source"`
-		Targets   []string `json:"targets"`
-		EventType string   `json:"event_type"`
-	}
+	var req eventTriggerActionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body: " + err.Error()})
-		return
+		return eventTriggerActionRequest{}, false
 	}
+	req.Source = strings.ToLower(strings.TrimSpace(req.Source))
+	req.EventType = strings.ToLower(strings.TrimSpace(req.EventType))
+	rawTargets := append([]string{req.Target}, req.Targets...)
 	var cleanTargets []string
-	for _, t := range req.Targets {
+	for _, t := range rawTargets {
 		if clean := strings.TrimSpace(t); clean != "" {
 			cleanTargets = append(cleanTargets, clean)
 		}
 	}
-	if strings.TrimSpace(req.Source) == "" || strings.TrimSpace(req.EventType) == "" || len(cleanTargets) == 0 {
+	req.Targets = cleanTargets
+	if req.Source == "" || req.EventType == "" || len(req.Targets) == 0 {
 		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "source, event_type, and targets are required"})
+		return eventTriggerActionRequest{}, false
+	}
+	return req, true
+}
+
+func (s *Server) handleCheckEventTriggers(w http.ResponseWriter, r *http.Request) {
+	req, ok := s.parseEventTriggerActionRequest(w, r)
+	if !ok {
 		return
 	}
-	triggers, err := ClaimEventTriggers(r.Context(), s.handler.db, req.Source, cleanTargets, req.EventType)
+	matched, err := CheckEventTriggers(r.Context(), s.handler.db, req.Source, req.Targets, req.EventType)
+	if err != nil {
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
+		"status":  "ok",
+		"matched": matched,
+	})
+}
+
+func (s *Server) handleClaimEventTriggers(w http.ResponseWriter, r *http.Request) {
+	req, ok := s.parseEventTriggerActionRequest(w, r)
+	if !ok {
+		return
+	}
+	triggers, err := ClaimEventTriggers(r.Context(), s.handler.db, req.Source, req.Targets, req.EventType)
 	if err != nil {
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -455,5 +511,50 @@ func (s *Server) handleClaimEventTriggers(w http.ResponseWriter, r *http.Request
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
 		"status":   "ok",
 		"triggers": triggers,
+	})
+}
+
+func (s *Server) handleFireEventTriggers(w http.ResponseWriter, r *http.Request) {
+	req, ok := s.parseEventTriggerActionRequest(w, r)
+	if !ok {
+		return
+	}
+	if s.dispatcher == nil {
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "dispatcher not initialized"})
+		return
+	}
+	triggers, err := ClaimEventTriggers(r.Context(), s.handler.db, req.Source, req.Targets, req.EventType)
+	if err != nil {
+		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	fired := make([]EventTrigger, 0, len(triggers))
+	var firstDispatchErr error
+	for _, trig := range triggers {
+		prompt := FormatEventTriggerPrompt(req.ContextHeader, trig.Prompt)
+		_, dispErr := s.dispatcher.DispatchPrompt(r.Context(), PromptDispatchRequest{
+			ChannelID: trig.ChannelID,
+			Prompt:    prompt,
+			Effort:    trig.Effort,
+		})
+		if dispErr != nil {
+			if reinsertErr := InsertEventTrigger(context.WithoutCancel(r.Context()), s.handler.db, trig); reinsertErr != nil {
+				log.Printf("[Haro] failed to re-insert event trigger %s after dispatch error: %v", trig.ID, reinsertErr)
+			}
+			if firstDispatchErr == nil {
+				firstDispatchErr = dispErr
+			}
+			continue
+		}
+		fired = append(fired, trig)
+	}
+	if firstDispatchErr != nil {
+		httpkit.WriteJSON(w, http.StatusBadGateway, map[string]string{"error": firstDispatchErr.Error()})
+		return
+	}
+	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
+		"status":   "ok",
+		"fired":    len(fired),
+		"triggers": fired,
 	})
 }

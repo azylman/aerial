@@ -353,6 +353,9 @@ func TestRiverWorkers(t *testing.T) {
 		{name: "WidgetSyncWorker valid job", workerType: "widget"},
 		{name: "WidgetSyncWorker nil server error", workerType: "widget", nilServer: true, wantErr: true},
 		{name: "WidgetSyncWorker downstream dispatch error", workerType: "widget", downstreamErr: true, wantErr: true},
+		{name: "EventTriggerWebhookWorker valid job", workerType: "event_trigger"},
+		{name: "EventTriggerWebhookWorker nil server error", workerType: "event_trigger", nilServer: true, wantErr: true},
+		{name: "EventTriggerWebhookWorker downstream fire error", workerType: "event_trigger", downstreamErr: true, wantErr: true},
 	}
 
 	for _, tc := range tests {
@@ -371,6 +374,9 @@ func TestRiverWorkers(t *testing.T) {
 			if tc.downstreamErr {
 				mockDisp.promptErr = errors.New("503 downstream failure")
 				mockDisp.widgetErr = errors.New("503 downstream failure")
+				if tc.workerType == "event_trigger" {
+					mockReg.claimTriggersErr = errors.New("502 haro fire failure")
+				}
 			}
 			srv := newTestRouter(Config{
 				NomadAddr:       nomadServer.URL,
@@ -454,6 +460,21 @@ func TestRiverWorkers(t *testing.T) {
 					},
 				}
 				err = w.Work(ctx, job)
+			case "event_trigger":
+				w := &EventTriggerWebhookWorker{server: srv}
+				if tc.nilServer {
+					w.server = nil
+				}
+				job := &river.Job[EventTriggerWebhookArgs]{
+					JobRow: &rivertype.JobRow{ID: 601},
+					Args: EventTriggerWebhookArgs{
+						Source:        "custom_source",
+						Targets:       []string{"device.alpha"},
+						EventType:     "ready",
+						ContextHeader: "External event",
+					},
+				}
+				err = w.Work(ctx, job)
 			}
 
 			if (err != nil) != tc.wantErr {
@@ -505,6 +526,12 @@ func TestRiverJobArgsAndUniqueOpts(t *testing.T) {
 			name:         "WidgetSyncArgs",
 			args:         WidgetSyncArgs{Repo: "azylman/aerial", PRNumber: 101},
 			wantKind:     "widget_sync",
+			wantAttempts: 5,
+		},
+		{
+			name:         "EventTriggerWebhookArgs",
+			args:         EventTriggerWebhookArgs{Source: "custom_source", Targets: []string{"device.alpha"}, EventType: "ready"},
+			wantKind:     "event_trigger_webhook",
 			wantAttempts: 5,
 		},
 	}

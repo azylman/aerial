@@ -168,8 +168,21 @@ func validateNomad(target, eventType, normEventType string) (string, error) {
 	return target, nil
 }
 
+// FormatEventTriggerPrompt combines an optional context header with an event trigger prompt.
+func FormatEventTriggerPrompt(contextHeader, prompt string) string {
+	header := strings.TrimSpace(contextHeader)
+	body := strings.TrimSpace(prompt)
+	if header == "" {
+		return body
+	}
+	if body == "" {
+		return header
+	}
+	return header + "\n\n" + body
+}
+
 // ValidateEventWatchSpec validates and normalizes event trigger parameters.
-func ValidateEventWatchSpec(source, target, eventType string) (normSource, normTarget, normEventType string, err error) {
+func ValidateEventWatchSpec(source, target, eventType string, extraSources ...string) (normSource, normTarget, normEventType string, err error) {
 	normSource = strings.ToLower(strings.TrimSpace(source))
 	normEventType = strings.ToLower(strings.TrimSpace(eventType))
 	normTarget = strings.TrimSpace(target)
@@ -190,7 +203,19 @@ func ValidateEventWatchSpec(source, target, eventType string) (normSource, normT
 	case "nomad":
 		normTarget, err = validateNomad(normTarget, eventType, normEventType)
 	default:
-		return "", "", "", fmt.Errorf("invalid source %q: expected 'vanadis_build', 'vanadis_chunk', 'hangar', 'github', or 'nomad'", source)
+		allowedExtra := false
+		for _, extra := range extraSources {
+			if normSource != "" && normSource == strings.ToLower(strings.TrimSpace(extra)) {
+				allowedExtra = true
+				break
+			}
+		}
+		if !allowedExtra {
+			return "", "", "", fmt.Errorf("invalid source %q: expected 'vanadis_build', 'vanadis_chunk', 'hangar', 'github', or 'nomad'", source)
+		}
+		if normEventType == "" {
+			return "", "", "", fmt.Errorf("event_type cannot be empty for source %q", normSource)
+		}
 	}
 
 	if err != nil {

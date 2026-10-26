@@ -1286,7 +1286,9 @@ func TestServer_ScheduleRoutesDispatchViaMCP(t *testing.T) {
 		{"mcp dispatch schedules", http.MethodGet, "/schedules", "", http.StatusOK},
 		{"mcp dispatch schedules runs", http.MethodGet, "/schedules/runs", "", http.StatusOK},
 		{"mcp dispatch schedules oneshot invalid", http.MethodPost, "/schedules/oneshot", `{}`, http.StatusBadRequest},
+		{"mcp dispatch event triggers check invalid", http.MethodPost, "/event-triggers/check", `{}`, http.StatusBadRequest},
 		{"mcp dispatch event triggers claim invalid", http.MethodPost, "/event-triggers/claim", `{}`, http.StatusBadRequest},
+		{"mcp dispatch event triggers fire invalid", http.MethodPost, "/event-triggers/fire", `{}`, http.StatusBadRequest},
 	}
 
 	for _, tc := range tests {
@@ -1356,6 +1358,131 @@ func TestHandleClaimEventTriggers_Table(t *testing.T) {
 				}
 				if len(resp.Triggers) != tc.wantCount {
 					t.Fatalf("got %d triggers, want %d", len(resp.Triggers), tc.wantCount)
+				}
+			}
+		})
+	}
+}
+
+func TestHandleCheckEventTriggers_Table(t *testing.T) {
+	server, ts := setupTestServer(t)
+	defer ts.Close()
+
+	_ = InsertEventTrigger(context.Background(), server.handler.db, EventTrigger{
+		ID:        "trig-check-1",
+		ChannelID: "1555405874565091380",
+		Source:    "custom_source",
+		Target:    "device.alpha",
+		EventType: "ready",
+		Prompt:    "Device alpha ready",
+		Effort:    "low",
+	})
+
+	closedDB, err := OpenDB(&Config{DatabaseURL: ":memory:"})
+	if err != nil {
+		t.Fatalf("OpenDB failed: %v", err)
+	}
+	_ = closedDB.Close()
+	serverClosed := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, closedDB))
+
+	tests := []struct {
+		name        string
+		method      string
+		body        string
+		useServer   *Server
+		wantStatus  int
+		wantMatched bool
+	}{
+		{"check method not allowed", http.MethodGet, "", server, http.StatusMethodNotAllowed, false},
+		{"check closed db error", http.MethodPost, `{"source":"custom_source","target":"device.alpha","event_type":"ready"}`, serverClosed, http.StatusInternalServerError, false},
+		{"check unmatched target", http.MethodPost, `{"source":"custom_source","target":"device.beta","event_type":"ready"}`, server, http.StatusOK, false},
+		{"check matched target", http.MethodPost, `{"source":"custom_source","target":"device.alpha","event_type":"ready"}`, server, http.StatusOK, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(tc.method, "/event-triggers/check", strings.NewReader(tc.body))
+			tc.useServer.handleCheckEventTriggers(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("%s got status %d, want %d (%s)", tc.name, rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if tc.wantStatus == http.StatusOK {
+				var resp struct {
+					Matched bool `json:"matched"`
+				}
+				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+					t.Fatalf("decode failed: %v", err)
+				}
+				if resp.Matched != tc.wantMatched {
+					t.Fatalf("got matched=%v, want %v", resp.Matched, tc.wantMatched)
+				}
+			}
+		})
+	}
+}
+
+func TestHandleFireEventTriggers_Table(t *testing.T) {
+	server, ts := setupTestServer(t)
+	defer ts.Close()
+
+	_ = InsertEventTrigger(context.Background(), server.handler.db, EventTrigger{
+		ID:        "trig-fire-1",
+		ChannelID: "1555405874565091380",
+		Source:    "custom_source",
+		Target:    "device.alpha",
+		EventType: "ready",
+		Prompt:    "Device alpha ready",
+		Effort:    "low",
+	})
+
+	closedDB, err := OpenDB(&Config{DatabaseURL: ":memory:"})
+	if err != nil {
+		t.Fatalf("OpenDB failed: %v", err)
+	}
+	_ = closedDB.Close()
+	serverClosed := NewServer(NewToolHandler(&Config{DatabaseURL: ":memory:"}, closedDB))
+
+	mockDispFail := &mockDispatcher{err: errors.New("eri unavailable")}
+	mockDispOK := &mockDispatcher{response: PromptDispatchResponse{Status: "ok", MessageID: "msg-1"}}
+	serverNoDisp := NewServer(server.handler)
+	serverNoDisp.dispatcher = nil
+	serverFailDisp := NewServer(server.handler, mockDispFail)
+	serverOKDisp := NewServer(server.handler, mockDispOK)
+
+	tests := []struct {
+		name       string
+		method     string
+		body       string
+		useServer  *Server
+		wantStatus int
+		wantFired  int
+	}{
+		{"fire method not allowed", http.MethodGet, "", serverOKDisp, http.StatusMethodNotAllowed, 0},
+		{"fire nil dispatcher", http.MethodPost, `{"source":"custom_source","target":"device.alpha","event_type":"ready"}`, serverNoDisp, http.StatusInternalServerError, 0},
+		{"fire closed db error", http.MethodPost, `{"source":"custom_source","target":"device.alpha","event_type":"ready"}`, serverClosed, http.StatusInternalServerError, 0},
+		{"fire dispatch error re-inserts trigger and returns 502", http.MethodPost, `{"source":"custom_source","target":"device.alpha","event_type":"ready","context_header":"External state change"}`, serverFailDisp, http.StatusBadGateway, 0},
+		{"fire retry succeeds after re-insert", http.MethodPost, `{"source":"custom_source","target":"device.alpha","event_type":"ready","context_header":"External state change"}`, serverOKDisp, http.StatusOK, 1},
+		{"fire subsequent call returns 0 fired", http.MethodPost, `{"source":"custom_source","target":"device.alpha","event_type":"ready"}`, serverOKDisp, http.StatusOK, 0},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(tc.method, "/event-triggers/fire", strings.NewReader(tc.body))
+			tc.useServer.handleFireEventTriggers(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("%s got status %d, want %d (%s)", tc.name, rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if tc.wantStatus == http.StatusOK {
+				var resp struct {
+					Fired int `json:"fired"`
+				}
+				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+					t.Fatalf("decode failed: %v", err)
+				}
+				if resp.Fired != tc.wantFired {
+					t.Fatalf("got fired=%d, want %d", resp.Fired, tc.wantFired)
 				}
 			}
 		})

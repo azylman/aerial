@@ -48,26 +48,30 @@ func TestResolveConfigPath(t *testing.T) {
 func TestLoadConfigFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	validPath, noPortPath, noTZPath, malformedPath := filepath.Join(tmpDir, "valid.yaml"), filepath.Join(tmpDir, "no_port.yaml"), filepath.Join(tmpDir, "no_tz.yaml"), filepath.Join(tmpDir, "malformed.yaml")
+	extraPath := filepath.Join(tmpDir, "extra.yaml")
 	_ = os.WriteFile(validPath, []byte("port: '4005'\ntimezone: 'America/Chicago'\n"), 0o644)
+	_ = os.WriteFile(extraPath, []byte("port: '4005'\ntimezone: 'America/Chicago'\nextra_event_sources:\n  - ' Custom_Source '\n  - ''\n  - 'custom_source'\n"), 0o644)
 	_ = os.WriteFile(noPortPath, []byte("timezone: 'America/Chicago'\n"), 0o644)
 	_ = os.WriteFile(noTZPath, []byte("port: '4005'\n"), 0o644)
 	_ = os.WriteFile(malformedPath, []byte("port: [unclosed"), 0o644)
 
 	tests := []struct {
-		name     string
-		path     string
-		dbURL    string
-		wantErr  bool
-		wantPort string
-		wantTZ   string
+		name        string
+		path        string
+		dbURL       string
+		wantErr     bool
+		wantPort    string
+		wantTZ      string
+		wantSources int
 	}{
-		{"valid config", validPath, "postgres://user:pass@host:5432/db", false, "4005", "America/Chicago"},
-		{"missing file", filepath.Join(tmpDir, "missing.yaml"), "postgres://localhost/db", true, "", ""},
-		{"malformed yaml", malformedPath, "postgres://localhost/db", true, "", ""},
-		{"missing port", noPortPath, "postgres://localhost/db", true, "", ""},
-		{"missing timezone", noTZPath, "postgres://localhost/db", true, "", ""},
-		{"empty dbURL", validPath, "", true, "", ""},
-		{"empty path", "", "postgres://localhost/db", true, "", ""},
+		{"valid config", validPath, "postgres://user:pass@host:5432/db", false, "4005", "America/Chicago", 0},
+		{"valid config with extra_event_sources", extraPath, "postgres://user:pass@host:5432/db", false, "4005", "America/Chicago", 1},
+		{"missing file", filepath.Join(tmpDir, "missing.yaml"), "postgres://localhost/db", true, "", "", 0},
+		{"malformed yaml", malformedPath, "postgres://localhost/db", true, "", "", 0},
+		{"missing port", noPortPath, "postgres://localhost/db", true, "", "", 0},
+		{"missing timezone", noTZPath, "postgres://localhost/db", true, "", "", 0},
+		{"empty dbURL", validPath, "", true, "", "", 0},
+		{"empty path", "", "postgres://localhost/db", true, "", "", 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -75,7 +79,7 @@ func TestLoadConfigFile(t *testing.T) {
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("LoadConfigFile() err = %v, wantErr = %v", err, tc.wantErr)
 			}
-			if !tc.wantErr && (cfg.Port != tc.wantPort || cfg.Timezone != tc.wantTZ || cfg.DatabaseURL != tc.dbURL) {
+			if !tc.wantErr && (cfg.Port != tc.wantPort || cfg.Timezone != tc.wantTZ || cfg.DatabaseURL != tc.dbURL || len(cfg.ExtraEventSources) != tc.wantSources) {
 				t.Fatalf("unexpected config: %+v", cfg)
 			}
 		})
