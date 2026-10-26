@@ -2,7 +2,7 @@
 
 1. **Discord Output Delivery & Substantive Output Invariant**:
    - Deliver responses via Markdown directly in Discord at the end of the turn (the user only receives the final substantive result).
-   - Completed agent turns must always produce substantive output; unrecovered empty stdout on a completed turn is treated as a failure/retry. Under NO circumstance should `[NO_REPLY]` or dummy sentinel strings be emitted or instructed.
+   - Completed agent turns must always produce substantive output; unrecovered empty stdout on a completed turn (when no background command or subagent is in flight) is treated as a failure/retry. When suspending mid-workflow for a running background task or subagent per Rules 5 and 9, stopping tool calls with empty text is required and suspends the turn in place rather than completing it. Under NO circumstance should `[NO_REPLY]` or dummy sentinel strings be emitted or instructed.
 
 2. **Silent Multi-Step Execution (No Intermediate Waiting Chatter)**:
    - When executing multi-step tool calls, commands, or background tasks, NEVER emit intermediate play-by-play status chatter ("I have initiated a search...", "I will review results when the task finishes...", "waiting for X...").
