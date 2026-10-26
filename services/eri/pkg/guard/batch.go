@@ -402,14 +402,23 @@ func isPaginatedRead(priorRecords []ToolInvocation, target string, startLine, en
 	return hasPrior
 }
 
-func removeTargetInvocations(records []ToolInvocation, target string) []ToolInvocation {
+func removeTargetInvocations(records []ToolInvocation, category, target string) []ToolInvocation {
 	var kept []ToolInvocation
 	for _, r := range records {
-		if r.Target != target {
+		if r.Category != category || r.Target != target {
 			kept = append(kept, r)
 		}
 	}
 	return kept
+}
+
+func recordsSinceLastCommand(records []ToolInvocation) []ToolInvocation {
+	for i := len(records) - 1; i >= 0; i-- {
+		if records[i].Category == "command" {
+			return records[i+1:]
+		}
+	}
+	return records
 }
 
 func filterOutCategory(records []ToolInvocation, category string) []ToolInvocation {
@@ -507,7 +516,7 @@ func checkMicroReadViolation(category, target string, paginatedRead bool, priorR
 		return nil
 	}
 	if countTargetInvocations(priorRecords, "read", target) >= 2 {
-		state.Records = removeTargetInvocations(state.Records, target)
+		state.Records = removeTargetInvocations(state.Records, "read", target)
 		return &Decision{
 			Decision: DecisionDeny,
 			Reason:   "Iterative micro-read thrashing detected: 3 sequential reads targeting the same file across turns. Read the complete required range or whole file in a single view_file call (up to 800 lines) instead of small slices.",
@@ -520,8 +529,8 @@ func checkMicroEditViolation(category, target string, priorRecords []ToolInvocat
 	if category != "edit" || target == "" {
 		return nil
 	}
-	if countTargetInvocations(priorRecords, "edit", target) >= 2 {
-		state.Records = removeTargetInvocations(state.Records, target)
+	if countTargetInvocations(recordsSinceLastCommand(priorRecords), "edit", target) >= 2 {
+		state.Records = removeTargetInvocations(state.Records, "edit", target)
 		return &Decision{
 			Decision: DecisionDeny,
 			Reason:   "Coarse-Grained Code Editing Invariant Violated: 3 consecutive micro-edits targeting the same file across turns. Formulate the complete target diff and apply it in a single comprehensive edit, or rewrite the file via write_to_file.",

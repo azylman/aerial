@@ -59,6 +59,7 @@ func TestCheckBatch(t *testing.T) {
 		{"parallel reads allowed", turns(turn(batchHookInput{tool: "view_file", path: "/tmp/a.go"}, batchHookInput{tool: "view_file", path: "/tmp/b.go"}, batchHookInput{tool: "view_file", path: "/tmp/c.go"})), DecisionAllow, "", ""},
 		{"micro edit thrashing", turns(turn(batchHookInput{tool: "replace_file_content", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "replace_file_content", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "replace_file_content", path: "/tmp/mod.go"})), DecisionDeny, "Coarse-Grained Code Editing Invariant Violated", ""},
 		{"micro edit_file thrashing", turns(turn(batchHookInput{tool: "edit_file", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "write_file", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "edit_file", path: "/tmp/mod.go"})), DecisionDeny, "Coarse-Grained Code Editing Invariant Violated", ""},
+		{"post-test edit after go test allowed", turns(turn(batchHookInput{tool: "write_file", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "run_command", cmd: "go test ./pkg/guard"}), turn(batchHookInput{tool: "edit_file", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "edit_file", path: "/tmp/mod.go"})), DecisionAllow, "", ""},
 		{"read different file allowed", turns(turn(batchHookInput{tool: "view_file", path: "/tmp/foo.go"}, batchHookInput{tool: "view_file", path: "/tmp/extra1.go"}), turn(batchHookInput{tool: "view_file", path: "/tmp/foo.go"}, batchHookInput{tool: "view_file", path: "/tmp/extra2.go"}), turn(batchHookInput{tool: "view_file", path: "/tmp/other.go"}, batchHookInput{tool: "view_file", path: "/tmp/extra1.go"})), DecisionAllow, "", ""},
 		{"parallel same-file reads in turn 1 plus turn 2 read allowed", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/big.go", start: 10, end: 60}, batchHookInput{tool: "read_file", path: "/tmp/big.go", start: 800, end: 860}), turn(batchHookInput{tool: "read_file", path: "/tmp/big.go", start: 861, end: 950})), DecisionAllow, "", ""},
 		{"non-overlapping paginated read_file allowed", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 1, end: 500}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 501, end: 1000}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 1001, end: 1400})), DecisionAllow, "", ""},
@@ -398,8 +399,8 @@ func TestBatchHelpers(t *testing.T) {
 	if count := countTargetInvocations(list, "read", "a.go"); count != 2 {
 		t.Fatalf("countTargetInvocations = %d, want 2", count)
 	}
-	afterRemove := removeTargetInvocations(list, "a.go")
-	if len(afterRemove) != 1 || afterRemove[0].Target != "b.go" {
+	afterRemove := removeTargetInvocations(list, "read", "a.go")
+	if len(afterRemove) != 2 || afterRemove[0].Target != "b.go" || afterRemove[1].Category != "edit" {
 		t.Fatalf("removeTargetInvocations failed: %+v", afterRemove)
 	}
 	afterFilter := filterOutCategory(list, "read")
