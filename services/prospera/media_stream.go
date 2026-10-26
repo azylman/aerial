@@ -251,35 +251,37 @@ type MediaStreamSessionConfig struct {
 
 // MediaStreamSession coordinates the live audio bridge between Twilio and Gemini Live.
 type MediaStreamSession struct {
-	mu               sync.Mutex
-	writeMu          sync.Mutex
-	geminiWriteMu    sync.Mutex
-	callID           string
-	providerCallSID  string
-	streamSID        string
-	twilioConn       *websocket.Conn
-	geminiConn       *websocket.Conn
-	cfg              *Config
-	store            Store
-	twilioClient     TwilioClient
-	consultClient    ContextConsultClient
-	openingGreeting  string
-	voicemailMessage string
-	systemPrompt     string
-	pacerInterval    time.Duration
-	geminiDialer     func(ctx context.Context, model string) (*websocket.Conn, error)
-	amd              *AMDGreetingController
-	outboundFrames   chan []byte
-	started          chan struct{}
-	startedOnce      sync.Once
-	doneCh           chan struct{}
-	doneOnce         sync.Once
-	greetingReleased bool
-	hangupPending    bool
-	hangupReason     string
-	hangupMarkSent   bool
-	closed           bool
-	cancel           context.CancelFunc
+	mu                  sync.Mutex
+	writeMu             sync.Mutex
+	geminiWriteMu       sync.Mutex
+	callID              string
+	providerCallSID     string
+	streamSID           string
+	twilioConn          *websocket.Conn
+	geminiConn          *websocket.Conn
+	cfg                 *Config
+	store               Store
+	twilioClient        TwilioClient
+	consultClient       ContextConsultClient
+	openingGreeting     string
+	voicemailMessage    string
+	systemPrompt        string
+	pacerInterval       time.Duration
+	geminiDialer        func(ctx context.Context, model string) (*websocket.Conn, error)
+	amd                 *AMDGreetingController
+	outboundFrames      chan []byte
+	started             chan struct{}
+	startedOnce         sync.Once
+	doneCh              chan struct{}
+	doneOnce            sync.Once
+	greetingReleased    bool
+	hangupPending       bool
+	hangupReason        string
+	hangupMarkSent      bool
+	closed              bool
+	cancel              context.CancelFunc
+	inputTranscriptBuf  strings.Builder
+	outputTranscriptBuf strings.Builder
 }
 
 // NewMediaStreamSession creates a new MediaStreamSession.
@@ -321,6 +323,7 @@ func (s *MediaStreamSession) Run(parentCtx context.Context) {
 	s.cancel = cancel
 	s.mu.Unlock()
 	defer func() {
+		s.flushPendingTranscripts(context.WithoutCancel(parentCtx))
 		cancel()
 		s.doneOnce.Do(func() {
 			close(s.doneCh)
@@ -465,6 +468,7 @@ func (s *MediaStreamSession) dispatchTwilioEvent(ctx context.Context, msg twilio
 			return true
 		}
 	case "stop":
+		s.flushPendingTranscripts(context.WithoutCancel(ctx))
 		if s.store != nil {
 			if err := s.store.UpdateCallState(ctx, s.callID, "completed", "completed_by_remote", ""); err != nil {
 				log.Printf("prospera: update call state err: %v", err)
@@ -496,6 +500,7 @@ func (s *MediaStreamSession) handleTwilioStart(ctx context.Context, streamSID, c
 }
 
 func (s *MediaStreamSession) handleTwilioHangupMark(ctx context.Context) {
+	s.flushPendingTranscripts(context.WithoutCancel(ctx))
 	s.mu.Lock()
 	sid := s.providerCallSID
 	s.mu.Unlock()
@@ -622,6 +627,7 @@ func (s *MediaStreamSession) readGeminiLoop(ctx context.Context) {
 		}
 
 		if srvMsg.ToolCall != nil {
+			s.flushPendingTranscripts(ctx)
 			for _, fc := range srvMsg.ToolCall.FunctionCalls {
 				s.executeToolCall(ctx, fc)
 			}
@@ -631,19 +637,64 @@ func (s *MediaStreamSession) readGeminiLoop(ctx context.Context) {
 
 func (s *MediaStreamSession) handleServerContent(ctx context.Context, sc *GeminiServerContent) {
 	if sc.Interrupted {
+		s.flushTranscriptBuf(ctx, "assistant", &s.outputTranscriptBuf)
 		s.drainOutboundQueue()
 		s.sendTwilioClear()
 	}
+	if sc.InputTranscription != nil && sc.InputTranscription.Text != "" {
+		s.flushTranscriptBuf(ctx, "assistant", &s.outputTranscriptBuf)
+		s.mu.Lock()
+		s.inputTranscriptBuf.WriteString(sc.InputTranscription.Text)
+		s.mu.Unlock()
+	}
+	if sc.OutputTranscription != nil && sc.OutputTranscription.Text != "" {
+		s.flushTranscriptBuf(ctx, "user", &s.inputTranscriptBuf)
+		s.mu.Lock()
+		s.outputTranscriptBuf.WriteString(sc.OutputTranscription.Text)
+		s.mu.Unlock()
+	}
 	if sc.ModelTurn != nil {
+		s.flushTranscriptBuf(ctx, "user", &s.inputTranscriptBuf)
 		for _, part := range sc.ModelTurn.Parts {
 			s.handleModelTurnPart(ctx, part)
 		}
 	}
+	if sc.GenerationComplete || sc.TurnComplete {
+		s.flushPendingTranscripts(ctx)
+	}
+}
+
+func (s *MediaStreamSession) flushPendingTranscripts(ctx context.Context) {
+	s.flushTranscriptBuf(ctx, "user", &s.inputTranscriptBuf)
+	s.flushTranscriptBuf(ctx, "assistant", &s.outputTranscriptBuf)
+}
+
+func (s *MediaStreamSession) flushTranscriptBuf(ctx context.Context, role string, buf *strings.Builder) {
+	s.mu.Lock()
+	text := strings.TrimSpace(buf.String())
+	buf.Reset()
+	s.mu.Unlock()
+	if text == "" || s.store == nil {
+		return
+	}
+	if err := s.store.AppendTranscriptTurn(ctx, s.callID, TranscriptTurn{
+		Role:      role,
+		Text:      text,
+		Timestamp: time.Now().UTC(),
+	}); err != nil {
+		log.Printf("prospera: append transcript turn err: %v", err)
+	}
 }
 
 func (s *MediaStreamSession) handleModelTurnPart(ctx context.Context, part GeminiPart) {
-	if strings.HasPrefix(part.MimeType, "audio/pcm") && part.Data != "" {
-		raw24, err := base64.StdEncoding.DecodeString(part.Data)
+	mimeType := part.MimeType
+	data := part.Data
+	if part.InlineData != nil && part.InlineData.Data != "" {
+		mimeType = part.InlineData.MimeType
+		data = part.InlineData.Data
+	}
+	if strings.HasPrefix(mimeType, "audio/pcm") && data != "" {
+		raw24, err := base64.StdEncoding.DecodeString(data)
 		if err == nil {
 			pcm24k := LEBytesToPCM16(raw24)
 			pcm8k := Resample24kTo8k(pcm24k)
@@ -651,7 +702,7 @@ func (s *MediaStreamSession) handleModelTurnPart(ctx context.Context, part Gemin
 			s.enqueueOutboundUlaw(ulaw)
 		}
 	}
-	if part.Text != "" && s.store != nil {
+	if part.Text != "" && !part.Thought && s.store != nil {
 		if err := s.store.AppendTranscriptTurn(ctx, s.callID, TranscriptTurn{
 			Role:      "assistant",
 			Text:      part.Text,
@@ -663,6 +714,7 @@ func (s *MediaStreamSession) handleModelTurnPart(ctx context.Context, part Gemin
 }
 
 func (s *MediaStreamSession) executeToolCall(ctx context.Context, fc GeminiFunctionCall) {
+	s.flushPendingTranscripts(ctx)
 	switch fc.Name {
 	case "send_dtmf":
 		s.toolSendDTMF(fc)

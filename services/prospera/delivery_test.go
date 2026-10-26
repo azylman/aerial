@@ -523,6 +523,9 @@ func TestDeliverCallReport(t *testing.T) {
 			var deliveredDiscordMsg string
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if strings.Contains(r.URL.Path, "generateContent") {
+					if strings.Contains(r.URL.Path, "live") {
+						t.Errorf("REST generateContent should not use live websocket model in path: %s", r.URL.Path)
+					}
 					var reqBody map[string]any
 					_ = json.NewDecoder(r.Body).Decode(&reqBody)
 					tools, hasTools := reqBody["tools"].([]any)
@@ -546,7 +549,7 @@ func TestDeliverCallReport(t *testing.T) {
 			cfg := &Config{
 				BrainURL:              srv.URL,
 				GeminiAPIKey:          "test-key",
-				GeminiFallbackModel:   "gemini-2.5-flash",
+				GeminiFallbackModel:   "gemini-3.1-flash-live-preview",
 				DefaultDiscordChannel: "prospera",
 			}
 
