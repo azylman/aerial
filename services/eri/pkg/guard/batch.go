@@ -31,13 +31,17 @@ const (
 )
 
 var (
-	gcMu               sync.Mutex
-	lastGCTime         time.Time
-	pytestRegex        = regexp.MustCompile(`^(python[0-9.]*\s+-m\s+)?pytest(\s+(-v|-q|-s|-x|--tb=\S+))*\s*$`)
-	goTestValFlags     = map[string]bool{"-timeout": true, "-tags": true, "-coverprofile": true, "-cpu": true, "-count": true, "-o": true, "-run": true, "-test.run": true}
-	goTestVerbose      = map[string]bool{"-v": true, "-test.v": true, "-v=true": true, "-test.v=true": true, "--v": true, "--test.v": true, "--v=true": true, "--test.v=true": true}
-	unscopedTargets    = map[string]bool{"./...": true, "brain/...": true, "services/eri/...": true, "...": true}
-	scratchVarPrefixes = []struct {
+	gcMu                 sync.Mutex
+	lastGCTime           time.Time
+	pytestRegex          = regexp.MustCompile(`^(python[0-9.]*\s+-m\s+)?pytest(\s+(-v|-q|-s|-x|--tb=\S+))*\s*$`)
+	goTestValFlags       = map[string]bool{"-timeout": true, "-tags": true, "-coverprofile": true, "-cpu": true, "-count": true, "-o": true, "-run": true, "-test.run": true}
+	goTestVerbose        = map[string]bool{"-v": true, "-test.v": true, "-v=true": true, "-test.v=true": true, "--v": true, "--test.v": true, "--v=true": true, "--test.v=true": true}
+	unscopedTargets      = map[string]bool{"./...": true, "brain/...": true, "services/eri/...": true, "...": true}
+	gitGlobalValFlags    = map[string]bool{"-C": true, "-c": true, "--git-dir": true, "--work-tree": true, "--namespace": true, "--super-prefix": true, "--config-env": true}
+	gitStatusFormatFlags = map[string]bool{"--short": true, "--porcelain": true, "--long": true, "--help": true, "-h": true, "-v": true, "--verbose": true}
+	gitDiffSummaryFlags  = map[string]bool{"--stat": true, "--shortstat": true, "--numstat": true, "--summary": true, "--name-only": true, "--name-status": true, "--dirstat": true, "--check": true, "--quiet": true, "--exit-code": true, "-s": true, "--no-patch": true, "-h": true, "--help": true}
+	gitDiffValFlags      = map[string]bool{"-U": true, "--unified": true, "-O": true, "-S": true, "-G": true, "--diff-filter": true, "--inter-hunk-context": true}
+	scratchVarPrefixes   = []struct {
 		prefix string
 		envKey string
 	}{
@@ -586,6 +590,148 @@ func CheckBatch(payload Payload, args ToolArgs) *Decision {
 	return CheckBatchWithDir(payload, args, GetBatchDir(), time.Now())
 }
 
+func findGitSubcommand(tokens []locatedToken, gitIdx int) int {
+	for i := gitIdx + 1; i < len(tokens); i++ {
+		val := strings.TrimRight(tokens[i].value, ")")
+		if gitGlobalValFlags[val] {
+			i++
+			continue
+		}
+		if strings.HasPrefix(val, "-") {
+			continue
+		}
+		return i
+	}
+	return -1
+}
+
+func hasGitStatusFormatFlag(args []locatedToken) bool {
+	for _, tok := range args {
+		val := strings.TrimRight(tok.value, ")")
+		if gitStatusFormatFlags[val] || strings.HasPrefix(val, "--porcelain=") || hasShortFlag(val, 's') || hasShortFlag(val, 'z') {
+			return true
+		}
+	}
+	return false
+}
+
+func shapeGitStatus(cmdLine string) string {
+	var insertOffsets []int
+	for _, seg := range splitPipelineWithOffsets(cmdLine) {
+		tokens := tokenizeWithOffsets(seg.text, seg.offset)
+		idx := skipEnvAndDockerExec(tokens)
+		if idx >= len(tokens) || filepath.Base(strings.TrimLeft(tokens[idx].value, "(")) != "git" {
+			continue
+		}
+		subIdx := findGitSubcommand(tokens, idx)
+		if subIdx < 0 {
+			continue
+		}
+		subTok := tokens[subIdx]
+		cleanSub := strings.TrimRight(subTok.value, ")")
+		if cleanSub == "status" && !hasGitStatusFormatFlag(tokens[subIdx+1:]) {
+			pos := subTok.endOffset - (len(subTok.value) - len(cleanSub))
+			insertOffsets = append(insertOffsets, pos)
+		}
+	}
+	rewritten := cmdLine
+	for i := len(insertOffsets) - 1; i >= 0; i-- {
+		pos := insertOffsets[i]
+		rewritten = rewritten[:pos] + " -sb" + rewritten[pos:]
+	}
+	return rewritten
+}
+
+func isGitLogBounded(args []locatedToken) bool {
+	for _, tok := range args {
+		val := strings.TrimRight(tok.value, ")")
+		if val == "-n" || val == "--max-count" || val == "-h" || val == "--help" || strings.HasPrefix(val, "--max-count=") {
+			return true
+		}
+		if strings.HasPrefix(val, "-n") && len(val) > 2 && val[2] >= '0' && val[2] <= '9' {
+			return true
+		}
+		if len(val) >= 2 && val[0] == '-' && val[1] >= '1' && val[1] <= '9' {
+			return true
+		}
+	}
+	return false
+}
+
+func isScopedGitDiffPath(val string) bool {
+	if val == "" || val == "." || val == "./" || strings.Contains(val, "..") {
+		return false
+	}
+	if val == "HEAD" || strings.HasPrefix(val, "HEAD~") || strings.HasPrefix(val, "HEAD^") || strings.HasPrefix(val, "@") || val == "main" || val == "master" {
+		return false
+	}
+	if strings.HasPrefix(val, "origin/") || strings.HasPrefix(val, "upstream/") || strings.HasPrefix(val, "refs/") {
+		return false
+	}
+	return strings.Contains(val, "/") || strings.Contains(val, ".") || val == "Makefile" || val == "Dockerfile"
+}
+
+func hasScopedPathAfterDashDash(args []locatedToken) bool {
+	for _, tok := range args {
+		val := strings.TrimRight(tok.value, ")")
+		if val != "" && val != "." && val != "./" && val != ".." {
+			return true
+		}
+	}
+	return false
+}
+
+func isGitDiffScoped(args []locatedToken) bool {
+	for i := 0; i < len(args); i++ {
+		val := strings.TrimRight(args[i].value, ")")
+		if val == "--" {
+			return hasScopedPathAfterDashDash(args[i+1:])
+		}
+		if gitDiffSummaryFlags[val] || strings.HasPrefix(val, "--stat=") || strings.HasPrefix(val, "--dirstat=") {
+			return true
+		}
+		if strings.HasPrefix(val, "-") {
+			if gitDiffValFlags[val] {
+				i++
+			}
+			continue
+		}
+		if isScopedGitDiffPath(val) {
+			return true
+		}
+	}
+	return false
+}
+
+func inspectGitBatchCommand(cmdLine string) *Decision {
+	for _, seg := range splitPipelineWithOffsets(cmdLine) {
+		tokens := tokenizeWithOffsets(seg.text, seg.offset)
+		idx := skipEnvAndDockerExec(tokens)
+		if idx >= len(tokens) || filepath.Base(strings.TrimLeft(tokens[idx].value, "(")) != "git" {
+			continue
+		}
+		subIdx := findGitSubcommand(tokens, idx)
+		if subIdx < 0 {
+			continue
+		}
+		sub := strings.TrimRight(tokens[subIdx].value, ")")
+		rest := tokens[subIdx+1:]
+		if sub == "log" && !isGitLogBounded(rest) {
+			return &Decision{
+				Decision: DecisionDeny,
+				Reason:   "Unbounded git log detected. Specify a commit count limit such as '-n <N>' or '-<N>' (e.g. 'git log -n 10 --oneline' or 'git log -5') to prevent dumping unconstrained commit history into the context window.",
+			}
+		}
+		if sub == "diff" && !isGitDiffScoped(rest) {
+			return &Decision{
+				Decision: DecisionDeny,
+				Reason:   "Unscoped full-patch git diff detected. Pass '--stat' or '--name-only' for repository-wide summaries, or scope the diff to specific file paths (e.g. 'git diff -- <path>') to avoid dumping large patches into the context window.",
+			}
+		}
+	}
+	return nil
+}
+
 func checkStatelessBatchRules(normalizedTool string, args ToolArgs) *Decision {
 	if normalizedTool == "run_command" {
 		if isUnscopedTest(args.CommandLine) {
@@ -599,6 +745,9 @@ func checkStatelessBatchRules(normalizedTool string, args ToolArgs) *Decision {
 				Decision: DecisionDeny,
 				Reason:   "Unbatched git lifecycle command detected. Combine git operations into compound one-liners (e.g. 'git add -A && git commit -m ... && git push ...') or use 'scripts/aerial-pr.sh submit <scratch_dir> [commit_msg]' for automated pre-flight verification and submission.",
 			}
+		}
+		if dec := inspectGitBatchCommand(args.CommandLine); dec != nil {
+			return dec
 		}
 	}
 	if (normalizedTool == "read_file" || normalizedTool == "view_file") && isTranscriptLogPath(args.FilePath()) {
@@ -733,7 +882,7 @@ func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time
 		opportunisticGC(dir, now)
 		decision = &Decision{Decision: DecisionAllow}
 		if normalizedTool == "run_command" {
-			if rewritten := stripGoTestVerbose(args.CommandLine); rewritten != args.CommandLine {
+			if rewritten := shapeGitStatus(stripGoTestVerbose(args.CommandLine)); rewritten != args.CommandLine {
 				decision.Overwrite = map[string]any{"CommandLine": rewritten}
 			}
 		}
