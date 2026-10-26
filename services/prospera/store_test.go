@@ -718,3 +718,60 @@ func TestPGStore_SaveVoiceMessage_Concurrent(t *testing.T) {
 		t.Fatalf("expected exactly 1 insert to succeed, got %d", insertedCount)
 	}
 }
+
+func TestPGStore_MissingCallErrorsAndFullFields(t *testing.T) {
+	t.Parallel()
+	store := setUpTestStore(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	callFull := VoiceCall{
+		CallID:                "call-full-fields",
+		ProviderCallSID:       "CA-full-1",
+		Direction:             "outbound",
+		State:                 "completed",
+		EndReason:             "normal",
+		FromNumber:            "+15105550100",
+		ToNumber:              "+15105550199",
+		CallbackOfCallID:      "call-prior",
+		DiscordChannelID:      "chan-1",
+		DiscordThreadID:       "thread-1",
+		AnsweredBy:            "human",
+		VoicemailRecordingURL: "https://rec.wav",
+		ReportSummary:         "summary text",
+		AnsweredAt:            &now,
+		EndedAt:               &now,
+	}
+	if err := store.CreateInboundCall(ctx, callFull); err != nil {
+		t.Fatalf("CreateInboundCall(callFull) err: %v", err)
+	}
+
+	fetched, err := store.GetCall(ctx, "call-full-fields")
+	if err != nil {
+		t.Fatalf("GetCall err: %v", err)
+	}
+	if fetched.AnsweredBy != "human" || fetched.VoicemailRecordingURL != "https://rec.wav" || fetched.ReportSummary != "summary text" {
+		t.Fatalf("unexpected fetched call fields: %+v", fetched)
+	}
+
+	// Missing call operations
+	missingID := "call-missing-999"
+	if err := store.AppendTranscriptTurn(ctx, missingID, TranscriptTurn{Role: "user", Text: "hi"}); !errors.Is(err, ErrCallNotFound) {
+		t.Fatalf("AppendTranscriptTurn missing call: %v, want ErrCallNotFound", err)
+	}
+	if err := store.AppendOwnerInstruction(ctx, missingID, OwnerInstruction{Instruction: "say hi"}); !errors.Is(err, ErrCallNotFound) {
+		t.Fatalf("AppendOwnerInstruction missing call: %v, want ErrCallNotFound", err)
+	}
+	if err := store.SetVoicemailRecording(ctx, missingID, "http://rec"); !errors.Is(err, ErrCallNotFound) {
+		t.Fatalf("SetVoicemailRecording missing call: %v, want ErrCallNotFound", err)
+	}
+	if ok, err := store.AdvanceLiveTranscriptCursor(ctx, missingID, 0, 1); err != nil || ok {
+		t.Fatalf("AdvanceLiveTranscriptCursor missing call: ok=%v, err=%v", ok, err)
+	}
+	if err := store.BindProviderCallSID(ctx, missingID, "CA-123"); !errors.Is(err, ErrCallNotFound) {
+		t.Fatalf("BindProviderCallSID missing call: %v, want ErrCallNotFound", err)
+	}
+	if err := store.UpdateCallState(ctx, missingID, "completed", "", ""); !errors.Is(err, ErrCallNotFound) {
+		t.Fatalf("UpdateCallState missing call: %v, want ErrCallNotFound", err)
+	}
+}

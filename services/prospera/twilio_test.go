@@ -410,10 +410,11 @@ func TestHTTPTwilioClient_CreateCall(t *testing.T) {
 		{
 			name: "successful call creation with AMD and SendDigits",
 			req: CreateCallRequest{
-				To:         "+15105550199",
-				From:       "+15105550100",
-				TwiMLURL:   "https://prospera.aerial/twilio/voice",
-				SendDigits: "ww1w2",
+				To:                     "+15105550199",
+				From:                   "+15105550100",
+				TwiMLURL:               "https://prospera.aerial/twilio/voice",
+				AsyncAmdStatusCallback: "https://prospera.aerial/twilio/amd",
+				SendDigits:             "ww1w2",
 			},
 			statusCode: http.StatusOK,
 			respBody:   `{"sid":"CA9988776655"}`,
@@ -462,6 +463,10 @@ func TestHTTPTwilioClient_CreateCall(t *testing.T) {
 				_ = r.ParseForm()
 				if tc.req.SendDigits != "" && r.FormValue("SendDigits") != tc.req.SendDigits {
 					http.Error(w, "missing SendDigits", http.StatusBadRequest)
+					return
+				}
+				if tc.req.AsyncAmdStatusCallback != "" && r.FormValue("AsyncAmdStatusCallback") != tc.req.AsyncAmdStatusCallback {
+					http.Error(w, "missing AsyncAmdStatusCallback", http.StatusBadRequest)
 					return
 				}
 				if r.FormValue("AsyncAmd") != "true" || r.FormValue("MachineDetection") != "DetectMessageEnd" {
@@ -768,6 +773,17 @@ func TestHTTPTwilioClient_EnsurePhoneNumber(t *testing.T) {
 					}
 					_, _ = w.Write([]byte(tc.ownedBody))
 				case r.Method == http.MethodPost && r.URL.Path == "/2010-04-01/Accounts/AC123/IncomingPhoneNumbers/PN111.json":
+					if err := r.ParseForm(); err == nil {
+						if r.FormValue("VoiceUrl") != "https://prospera.aerial/api/webhooks/twilio/voice" {
+							t.Errorf("VoiceUrl = %q, want https://prospera.aerial/api/webhooks/twilio/voice", r.FormValue("VoiceUrl"))
+						}
+						if r.FormValue("StatusCallback") != "https://prospera.aerial/api/webhooks/twilio/status" {
+							t.Errorf("StatusCallback = %q, want https://prospera.aerial/api/webhooks/twilio/status", r.FormValue("StatusCallback"))
+						}
+						if r.FormValue("SmsUrl") != "https://prospera.aerial/api/webhooks/twilio/sms" {
+							t.Errorf("SmsUrl = %q, want https://prospera.aerial/api/webhooks/twilio/sms", r.FormValue("SmsUrl"))
+						}
+					}
 					if tc.updateCode != 0 {
 						w.WriteHeader(tc.updateCode)
 					}
@@ -777,6 +793,11 @@ func TestHTTPTwilioClient_EnsurePhoneNumber(t *testing.T) {
 					}
 					_, _ = w.Write([]byte(tc.searchBody))
 				case r.Method == http.MethodPost && r.URL.Path == "/2010-04-01/Accounts/AC123/IncomingPhoneNumbers.json":
+					if err := r.ParseForm(); err == nil && r.FormValue("VoiceUrl") != "" {
+						if r.FormValue("VoiceUrl") != "https://prospera.aerial/api/webhooks/twilio/voice" {
+							t.Errorf("buy VoiceUrl = %q, want https://prospera.aerial/api/webhooks/twilio/voice", r.FormValue("VoiceUrl"))
+						}
+					}
 					if tc.buyCode != 0 {
 						w.WriteHeader(tc.buyCode)
 					}
@@ -856,5 +877,119 @@ func WithTwilioBaseURL(baseURL string) TwilioOption {
 func WithTwilioHTTPClient(client *http.Client) TwilioOption {
 	return func(c *HTTPTwilioClient) {
 		c.httpClient = client
+	}
+}
+
+func TestEscapeXML(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"normal", "normal"},
+		{"<tag>&'\"", "&lt;tag&gt;&amp;&#39;&#34;"},
+	}
+	for _, tc := range tests {
+		if got := escapeXML(tc.in); got != tc.want {
+			t.Fatalf("escapeXML(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func TestHTTPTwilioClient_DownloadRecording_AllBranches(t *testing.T) {
+	t.Parallel()
+
+	client := NewHTTPTwilioClient("AC123", "token123")
+
+	t.Run("invalid url", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := client.DownloadRecording(context.Background(), "::not-a-url")
+		if err == nil {
+			t.Fatal("expected error on invalid url")
+		}
+	})
+
+	t.Run("non https scheme", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := client.DownloadRecording(context.Background(), "http://api.twilio.com/rec.wav")
+		if err == nil {
+			t.Fatal("expected error on non-https scheme")
+		}
+	})
+
+	t.Run("untrusted host", func(t *testing.T) {
+		t.Parallel()
+		_, _, err := client.DownloadRecording(context.Background(), "https://evil.com/rec.wav")
+		if err == nil {
+			t.Fatal("expected error on untrusted host")
+		}
+	})
+
+	t.Run("transport error", func(t *testing.T) {
+		t.Parallel()
+		c := NewHTTPTwilioClient("AC123", "token123", WithTwilioHTTPClient(&http.Client{
+			Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+				return nil, errors.New("network drop")
+			}),
+		}))
+		_, _, err := c.DownloadRecording(context.Background(), "https://api.twilio.com/rec.wav")
+		if err == nil {
+			t.Fatal("expected error on transport failure")
+		}
+	})
+
+	t.Run("status error", func(t *testing.T) {
+		t.Parallel()
+		c := NewHTTPTwilioClient("AC123", "token123", WithTwilioHTTPClient(&http.Client{
+			Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusNotFound,
+					Body:       io.NopCloser(strings.NewReader("not found")),
+				}, nil
+			}),
+		}))
+		_, _, err := c.DownloadRecording(context.Background(), "https://api.twilio.com/rec.wav")
+		if err == nil {
+			t.Fatal("expected error on status 404")
+		}
+	})
+
+	t.Run("success wav", func(t *testing.T) {
+		t.Parallel()
+		c := NewHTTPTwilioClient("AC123", "token123", WithTwilioHTTPClient(&http.Client{
+			Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+				header := make(http.Header)
+				header.Set("Content-Type", "audio/wav")
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     header,
+					Body:       io.NopCloser(bytes.NewReader([]byte("RIFF1234WAVEfmt"))),
+				}, nil
+			}),
+		}))
+		data, ctype, err := c.DownloadRecording(context.Background(), "https://api.twilio.com/rec.wav")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if ctype != "audio/wav" || len(data) == 0 {
+			t.Fatalf("unexpected recording response: %q, len=%d", ctype, len(data))
+		}
+	})
+}
+
+func TestStreamTokenManager_EntropyError(t *testing.T) {
+	t.Parallel()
+	mgr := NewStreamTokenManager(nil)
+	mgr.randFn = func([]byte) (int, error) {
+		return 0, errors.New("entropy error")
+	}
+	if _, err := mgr.Issue("c1", time.Minute); err == nil {
+		t.Fatal("expected error on entropy failure")
 	}
 }

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -9,7 +8,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
-	"encoding/xml"
 	"fmt"
 	"io"
 	"net/http"
@@ -60,6 +58,7 @@ type streamTokenEntry struct {
 type StreamTokenManager struct {
 	mu     sync.Mutex
 	nowFn  func() time.Time
+	randFn func([]byte) (int, error)
 	tokens map[string]streamTokenEntry
 }
 
@@ -77,7 +76,11 @@ func NewStreamTokenManager(nowFn func() time.Time) *StreamTokenManager {
 // Issue generates a 32-byte crypto-random hex token bound to callID with a specified TTL.
 func (m *StreamTokenManager) Issue(callID string, ttl time.Duration) (string, error) {
 	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
+	readRand := rand.Read
+	if m.randFn != nil {
+		readRand = m.randFn
+	}
+	if _, err := readRand(b); err != nil {
 		return "", fmt.Errorf("stream token: generate random bytes: %w", err)
 	}
 	token := hex.EncodeToString(b)
@@ -120,12 +123,16 @@ func (m *StreamTokenManager) cleanupLocked() {
 	}
 }
 
+var xmlEscaper = strings.NewReplacer(
+	"&", "&amp;",
+	"<", "&lt;",
+	">", "&gt;",
+	"\"", "&#34;",
+	"'", "&#39;",
+)
+
 func escapeXML(s string) string {
-	var buf bytes.Buffer
-	if err := xml.EscapeText(&buf, []byte(s)); err != nil {
-		return s
-	}
-	return buf.String()
+	return xmlEscaper.Replace(s)
 }
 
 func readBodySnippet(r io.Reader) string {
@@ -148,13 +155,14 @@ func GenerateVoicemailTwiML(greeting, callbackURL string) string {
 
 // CreateCallRequest encapsulates arguments for dialing an outbound call via Twilio.
 type CreateCallRequest struct {
-	To               string
-	From             string
-	TwiMLURL         string
-	StatusCallback   string
-	SendDigits       string
-	MachineDetection string
-	AsyncAmd         string
+	To                     string
+	From                   string
+	TwiMLURL               string
+	StatusCallback         string
+	AsyncAmdStatusCallback string
+	SendDigits             string
+	MachineDetection       string
+	AsyncAmd               string
 }
 
 // TwilioClient defines the outbound Twilio telephony interface.
@@ -219,6 +227,9 @@ func (c *HTTPTwilioClient) CreateCall(ctx context.Context, req CreateCallRequest
 	}
 	vals.Set("MachineDetection", machDetection)
 	vals.Set("AsyncAmd", asyncAmd)
+	if req.AsyncAmdStatusCallback != "" {
+		vals.Set("AsyncAmdStatusCallback", req.AsyncAmdStatusCallback)
+	}
 
 	endpoint := fmt.Sprintf("%s/2010-04-01/Accounts/%s/Calls.json", c.baseURL, c.accountSID)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(vals.Encode()))
@@ -360,10 +371,16 @@ func (c *HTTPTwilioClient) SendSMS(ctx context.Context, to, from, body string) (
 
 // EnsurePhoneNumber discovers or purchases an incoming phone number and updates webhook URLs.
 func (c *HTTPTwilioClient) EnsurePhoneNumber(ctx context.Context, areaCode, webhookBaseURL string) (string, error) {
-	webhookBaseURL = strings.TrimRight(webhookBaseURL, "/")
-	voiceURL := webhookBaseURL + "/twilio/voice"
-	statusURL := webhookBaseURL + "/twilio/status"
-	smsURL := webhookBaseURL + "/twilio/sms"
+	var voiceURL, statusURL, smsURL string
+	if webhookBaseURL != "" {
+		webhookBaseURL = strings.TrimRight(webhookBaseURL, "/")
+		if !strings.HasSuffix(webhookBaseURL, "/api/webhooks") {
+			webhookBaseURL += "/api/webhooks"
+		}
+		voiceURL = webhookBaseURL + "/twilio/voice"
+		statusURL = webhookBaseURL + "/twilio/status"
+		smsURL = webhookBaseURL + "/twilio/sms"
+	}
 
 	existing, err := c.listIncomingPhoneNumbers(ctx)
 	if err != nil {

@@ -108,8 +108,9 @@ func TestRunApp_Lifecycle(t *testing.T) {
 	_ = db.Close()
 
 	cfg := &Config{
-		Port:        "0",
-		DatabaseURL: "sqlite://" + dbPath,
+		Port:                  "0",
+		DatabaseURL:           "sqlite://" + dbPath,
+		DefaultDiscordChannel: "prospera",
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -131,161 +132,73 @@ func TestRunApp_Lifecycle(t *testing.T) {
 	}
 }
 
-func TestRoutes_Health(t *testing.T) {
+func TestRunApp_TranscriptBatcher(t *testing.T) {
 	t.Parallel()
-	store := setUpTestStore(t)
-	handler := setupRoutes(&Config{Port: "4019"}, store)
 
-	req := httptest.NewRequest(http.MethodGet, "/health", nil)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	cfg := &Config{DefaultDiscordChannel: "prospera"}
+	store := newMockStoreForDelivery()
+	sessionMgr := NewCallSessionManager(cfg, store, &mockTwilioForDelivery{}, nil, nil)
+	reporter := NewReporter(cfg, store, &mockTwilioForDelivery{})
 
-	if rec.Code != http.StatusOK {
-		t.Errorf("GET /health status = %d, want %d", rec.Code, http.StatusOK)
+	// Test flush with nil sessionMgr or reporter
+	flushActiveSessions(context.Background(), nil, reporter)
+	flushActiveSessions(context.Background(), sessionMgr, nil)
+
+	// Test flush with no sessions
+	flushActiveSessions(context.Background(), sessionMgr, reporter)
+
+	// Test flush with active session
+	sess := &MediaStreamSession{
+		callID: "call-batch-test",
 	}
-	if !bytes.Contains(rec.Body.Bytes(), []byte(`"status":"ok"`)) {
-		t.Errorf("unexpected health response body: %s", rec.Body.String())
-	}
+	sessionMgr.registerSession("call-batch-test", sess)
+	_ = store.CreateOutboundCall(context.Background(), VoiceCall{
+		CallID: "call-batch-test",
+		Transcript: []TranscriptTurn{
+			{Role: "user", Text: "Batch turn"},
+		},
+	}, 5)
+
+	flushActiveSessions(context.Background(), sessionMgr, reporter)
+
+	// Test runTranscriptBatcher exiting immediately on canceled context
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	runTranscriptBatcher(ctx, sessionMgr, reporter)
 }
 
-func TestRoutes_HTTPMethods(t *testing.T) {
+func TestRoutes_HealthAndCoverage(t *testing.T) {
 	t.Parallel()
-	store := setUpTestStore(t)
-	handler := setupRoutes(&Config{}, store)
 
-	tests := []struct {
-		name   string
-		method string
-	}{
-		{name: "GET method", method: http.MethodGet},
-		{name: "POST method", method: http.MethodPost},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			req := httptest.NewRequest(tc.method, "/debug/coverage/flush", nil)
-			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, req)
-
-			if rec.Code != http.StatusOK && rec.Code != http.StatusInternalServerError {
-				t.Errorf("%s /debug/coverage/flush status = %d, want 200 or 500", tc.method, rec.Code)
-			}
-		})
-	}
-}
-
-func TestRoutes_DSPPreview(t *testing.T) {
-	t.Parallel()
-	store := setUpTestStore(t)
-	handler := setupRoutes(&Config{}, store)
+	cfg := &Config{Port: "4019"}
+	store := newMockStoreForDelivery()
+	server := NewServer(cfg, store, &mockTwilioForDelivery{}, nil, nil, nil)
+	handler := server.Routes()
 
 	tests := []struct {
 		name       string
-		body       string
+		method     string
+		path       string
 		wantStatus int
+		wantBody   string
 	}{
 		{
-			name:       "valid sequence",
-			body:       `{"sequence":"12w3"}`,
+			name:       "health endpoint",
+			method:     http.MethodGet,
+			path:       "/health",
+			wantStatus: http.StatusOK,
+			wantBody:   `"status":"ok"`,
+		},
+		{
+			name:       "coverage flush get",
+			method:     http.MethodGet,
+			path:       "/debug/coverage/flush",
 			wantStatus: http.StatusOK,
 		},
 		{
-			name:       "invalid sequence character",
-			body:       `{"sequence":"Z"}`,
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "malformed JSON",
-			body:       `{not-valid-json`,
-			wantStatus: http.StatusBadRequest,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			req := httptest.NewRequest(http.MethodPost, "/internal/dsp-preview", bytes.NewBufferString(tc.body))
-			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, req)
-
-			if rec.Code != tc.wantStatus {
-				t.Fatalf("POST /internal/dsp-preview status = %d, want %d", rec.Code, tc.wantStatus)
-			}
-		})
-	}
-}
-
-func TestRoutes_StorePreview(t *testing.T) {
-	t.Parallel()
-	store := setUpTestStore(t)
-	handler := setupRoutes(&Config{}, store)
-
-	tests := []struct {
-		name       string
-		body       string
-		wantStatus int
-	}{
-		{
-			name:       "default action",
-			body:       `{"action":""}`,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "malformed JSON",
-			body:       `{invalid-json`,
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name: "validate_and_build valid",
-			body: `{
-				"action": "validate_and_build",
-				"to_raw": "(510) 555-0199",
-				"from_number": "+15105550100",
-				"message": "Hello",
-				"brief": {"task": "Schedule dinner"}
-			}`,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name: "validate_and_build invalid phone",
-			body: `{
-				"action": "validate_and_build",
-				"to_raw": "invalid",
-				"brief": {"task": "Schedule dinner"}
-			}`,
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "list_calls",
-			body:       `{"action":"list_calls"}`,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "list_messages",
-			body:       `{"action":"list_messages"}`,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "recent_outbound",
-			body:       `{"action":"recent_outbound","to_raw":"+15105550199"}`,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name: "demo_lifecycle",
-			body: `{
-				"action": "demo_lifecycle",
-				"call_id": "call-preview-1",
-				"provider_sid": "CA_prev_1",
-				"message_sid": "SM_prev_1",
-				"voice_msg": {
-					"message_sid": "SM_prev_1",
-					"direction": "inbound",
-					"from_number": "+15105550199",
-					"to_number": "+15105550100",
-					"body": "test msg"
-				}
-			}`,
+			name:       "coverage flush post",
+			method:     http.MethodPost,
+			path:       "/debug/coverage/flush",
 			wantStatus: http.StatusOK,
 		},
 	}
@@ -293,40 +206,28 @@ func TestRoutes_StorePreview(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			req := httptest.NewRequest(http.MethodPost, "/internal/store-preview", bytes.NewBufferString(tc.body))
+			req := httptest.NewRequest(tc.method, tc.path, nil)
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, req)
 
-			if rec.Code != tc.wantStatus {
-				t.Fatalf("POST /internal/store-preview (%s) status = %d, want %d (body: %s)", tc.name, rec.Code, tc.wantStatus, rec.Body.String())
+			if rec.Code != tc.wantStatus && rec.Code != http.StatusInternalServerError {
+				t.Fatalf("%s %s status = %d, want %d", tc.method, tc.path, rec.Code, tc.wantStatus)
+			}
+			if tc.wantBody != "" && !bytes.Contains(rec.Body.Bytes(), []byte(tc.wantBody)) {
+				t.Fatalf("body %s missing %s", rec.Body.String(), tc.wantBody)
 			}
 		})
 	}
 }
 
-func TestRoutes_StorePreview_Errors(t *testing.T) {
-	t.Parallel()
-	db, _ := sql.Open("sqlite", ":memory:")
-	store := NewPGStore(db)
-	_ = db.Close()
-	handler := setupRoutes(&Config{}, store)
-
-	actions := []string{"list_calls", "list_messages", "recent_outbound", "demo_lifecycle"}
-	for _, action := range actions {
-		req := httptest.NewRequest(http.MethodPost, "/internal/store-preview", bytes.NewBufferString(`{"action":"`+action+`"}`))
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
-
-		if rec.Code != http.StatusInternalServerError {
-			t.Errorf("action %q on closed store status = %d, want %d", action, rec.Code, http.StatusInternalServerError)
-		}
-	}
-}
-
-func TestMain_Execution(t *testing.T) {
-	origLoad, origRun, origExit := loadConfigFn, runAppFn, exitFn
+func TestRunApp_MainSignal(t *testing.T) {
+	origLoad := loadConfigFn
+	origRun := runAppFn
+	origExit := exitFn
 	defer func() {
-		loadConfigFn, runAppFn, exitFn = origLoad, origRun, origExit
+		loadConfigFn = origLoad
+		runAppFn = origRun
+		exitFn = origExit
 	}()
 
 	tests := []struct {
@@ -376,77 +277,6 @@ func TestMain_Execution(t *testing.T) {
 
 			if exited != tc.wantExit {
 				t.Errorf("main() exited = %v, want %v", exited, tc.wantExit)
-			}
-		})
-	}
-}
-
-func TestRoutes_BridgePreview(t *testing.T) {
-	t.Parallel()
-	store := setUpTestStore(t)
-	handler := setupRoutes(&Config{}, store)
-
-	tests := []struct {
-		name       string
-		body       string
-		wantStatus int
-	}{
-		{
-			name:       "default action",
-			body:       `{"action":""}`,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "malformed JSON",
-			body:       `{malformed`,
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "validate signature",
-			body:       `{"action":"validate_signature","auth_token":"token","full_url":"https://test","form":{"CallSid":"CA123"},"signature":"sig"}`,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "stream token",
-			body:       `{"action":"stream_token","call_id":"c123","ttl_seconds":30}`,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "twiml",
-			body:       `{"action":"twiml","ws_url":"wss://test","greeting":"hello","callback_url":"https://cb"}`,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "amd eval",
-			body:       `{"action":"amd_eval","rms":0.05,"elapsed_ms":20,"answered_by":"human"}`,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "consult",
-			body:       `{"action":"consult","query":"test"}`,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "session mgr",
-			body:       `{"action":"session_mgr","call_id":"c123","steer_message":"msg","steer_mode":"guidance","provider_sid":"CA123","answered_by":"human"}`,
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "twilio rest",
-			body:       `{"action":"twilio_rest","to_number":"+15105550199","from_number":"+15105550100","twiml_url":"https://test","provider_sid":"CA123","sms_body":"hi","area_code":"510","callback_url":"https://cb","recording_url":"https://api.twilio.com/rec"}`,
-			wantStatus: http.StatusOK,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			req := httptest.NewRequest(http.MethodPost, "/internal/bridge-preview", bytes.NewBufferString(tc.body))
-			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, req)
-
-			if rec.Code != tc.wantStatus {
-				t.Fatalf("POST /internal/bridge-preview status = %d, want %d", rec.Code, tc.wantStatus)
 			}
 		})
 	}
