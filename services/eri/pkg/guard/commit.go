@@ -82,73 +82,91 @@ func LoadCustomPatterns(homeDir string) []PatternRule {
 	return rules
 }
 
-func parsePatternPayload(data []byte) []PatternRule {
-	var rules []PatternRule
-	trimmed := strings.TrimSpace(string(data))
-	if trimmed == "" {
-		return rules
+func compilePatternEntry(cat, pat string) (PatternRule, bool) {
+	if pat == "" {
+		return PatternRule{}, false
 	}
+	re, err := regexp.Compile(pat)
+	if err != nil {
+		return PatternRule{}, false
+	}
+	if cat == "" {
+		cat = "CustomRule"
+	}
+	return PatternRule{Category: cat, Regex: re}, true
+}
 
-	// Try format 1: [{"category": "...", "pattern": "..."}] or format 2: {"patterns": [...]}
-	type rawEntry struct {
-		Category string `json:"category"`
-		Pattern  string `json:"pattern"`
-	}
-	var entries []rawEntry
+type rawPatternEntry struct {
+	Category string `json:"category"`
+	Pattern  string `json:"pattern"`
+}
+
+func parseJSONPatternEntries(data []byte) []PatternRule {
+	var entries []rawPatternEntry
 	if err := json.Unmarshal(data, &entries); err != nil || len(entries) == 0 {
 		var wrapper struct {
-			Patterns []rawEntry `json:"patterns"`
+			Patterns []rawPatternEntry `json:"patterns"`
 		}
 		if err := json.Unmarshal(data, &wrapper); err == nil {
 			entries = wrapper.Patterns
 		}
 	}
-	if len(entries) > 0 {
-		for _, e := range entries {
-			if e.Pattern != "" {
-				if re, err := regexp.Compile(e.Pattern); err == nil {
-					cat := e.Category
-					if cat == "" {
-						cat = "CustomRule"
-					}
-					rules = append(rules, PatternRule{Category: cat, Regex: re})
-				}
-			}
-		}
-		return rules
+	if len(entries) == 0 {
+		return nil
 	}
+	rules := make([]PatternRule, 0, len(entries))
+	for _, e := range entries {
+		if rule, ok := compilePatternEntry(e.Category, e.Pattern); ok {
+			rules = append(rules, rule)
+		}
+	}
+	return rules
+}
 
-	// Try format 3: map[string]string {"Category": "Pattern"}
+func parseJSONPatternMap(data []byte) []PatternRule {
 	var kv map[string]string
-	if err := json.Unmarshal(data, &kv); err == nil && len(kv) > 0 {
-		for k, v := range kv {
-			if v != "" {
-				if re, err := regexp.Compile(v); err == nil {
-					rules = append(rules, PatternRule{Category: k, Regex: re})
-				}
-			}
-		}
-		return rules
+	if err := json.Unmarshal(data, &kv); err != nil || len(kv) == 0 {
+		return nil
 	}
+	rules := make([]PatternRule, 0, len(kv))
+	for k, v := range kv {
+		if rule, ok := compilePatternEntry(k, v); ok {
+			rules = append(rules, rule)
+		}
+	}
+	return rules
+}
 
-	// Try format 4: line or comma delimited raw patterns
+func parseDelimitedPatternLines(trimmed string) []PatternRule {
 	lines := strings.Split(trimmed, "\n")
 	if len(lines) == 1 && strings.Contains(trimmed, ",") && !strings.HasPrefix(trimmed, "{") && !strings.HasPrefix(trimmed, "[") {
 		lines = strings.Split(trimmed, ",")
 	}
+	var rules []PatternRule
 	for i, l := range lines {
 		l = strings.TrimSpace(l)
 		if l != "" && !strings.HasPrefix(l, "#") {
-			if re, err := regexp.Compile(l); err == nil {
-				rules = append(rules, PatternRule{
-					Category: fmt.Sprintf("CustomRule_%d", i+1),
-					Regex:    re,
-				})
+			defaultCat := fmt.Sprintf("CustomRule_%d", i+1)
+			if rule, ok := compilePatternEntry(defaultCat, l); ok {
+				rules = append(rules, rule)
 			}
 		}
 	}
-
 	return rules
+}
+
+func parsePatternPayload(data []byte) []PatternRule {
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" {
+		return nil
+	}
+	if rules := parseJSONPatternEntries(data); rules != nil {
+		return rules
+	}
+	if rules := parseJSONPatternMap(data); rules != nil {
+		return rules
+	}
+	return parseDelimitedPatternLines(trimmed)
 }
 
 // GetActivePatterns returns BuiltinPatterns augmented with any custom user patterns.
@@ -192,6 +210,30 @@ func isTestFile(path string) bool {
 	}
 
 	return false
+}
+
+func isImplicitHunkStart(inHunk bool, lineNum int, line string) bool {
+	return !inHunk && lineNum == 0 && (strings.HasPrefix(line, "+") || strings.HasPrefix(line, " "))
+}
+
+func isDiffContextLine(inHunk bool, line string) bool {
+	return inHunk && (strings.HasPrefix(line, " ") || line == "")
+}
+
+func scanAddedLinePatterns(content, currentFile string, lineNum int, patterns []PatternRule) []Violation {
+	var violations []Violation
+	for _, p := range patterns {
+		if match := p.Regex.FindString(content); match != "" {
+			violations = append(violations, Violation{
+				Category: p.Category,
+				Pattern:  p.Regex.String(),
+				Sample:   match,
+				File:     currentFile,
+				LineNum:  lineNum,
+			})
+		}
+	}
+	return violations
 }
 
 // ScanDiffWithPatterns parses a unified diff and checks added lines against the supplied patterns.
@@ -254,7 +296,7 @@ func ScanDiffWithPatterns(diff string, checkTestFiles bool, patterns []PatternRu
 		}
 
 		// If no hunk header was encountered (e.g. raw diff), start line numbering at 1
-		if !inHunk && lineNum == 0 && (strings.HasPrefix(line, "+") || strings.HasPrefix(line, " ")) {
+		if isImplicitHunkStart(inHunk, lineNum, line) {
 			inHunk = true
 			lineNum = 1
 		}
@@ -269,22 +311,12 @@ func ScanDiffWithPatterns(diff string, checkTestFiles bool, patterns []PatternRu
 			}
 
 			content := line[1:]
-			for _, p := range patterns {
-				if match := p.Regex.FindString(content); match != "" {
-					violations = append(violations, Violation{
-						Category: p.Category,
-						Pattern:  p.Regex.String(),
-						Sample:   match,
-						File:     currentFile,
-						LineNum:  currentLineNum,
-					})
-				}
-			}
+			violations = append(violations, scanAddedLinePatterns(content, currentFile, currentLineNum, patterns)...)
 			continue
 		}
 
 		// Context line: unified diffs emit ' ' prefix or an empty line for empty lines
-		if inHunk && (strings.HasPrefix(line, " ") || line == "") {
+		if isDiffContextLine(inHunk, line) {
 			lineNum++
 			continue
 		}
@@ -312,6 +344,70 @@ func parseHunkLineNum(hunkHeader string) int {
 	return 1
 }
 
+// unwrapShellScriptCommand unwraps bash/sh/zsh -c <script> commands.
+func unwrapShellScriptCommand(tokens []string) (string, bool) {
+	if len(tokens) < 3 {
+		return "", false
+	}
+	bin := strings.ToLower(filepath.Base(tokens[0]))
+	if bin != "bash" && bin != "sh" && bin != "zsh" {
+		return "", false
+	}
+	for i, t := range tokens {
+		if t == "-c" && i+1 < len(tokens) {
+			return tokens[i+1], true
+		}
+	}
+	return "", false
+}
+
+func findSubmitTargetDir(tokens []string) string {
+	for _, tok := range tokens {
+		if !strings.HasPrefix(tok, "-") {
+			return tok
+		}
+	}
+	return ""
+}
+
+func matchAerialPRSubmit(tokens []string) (bool, string) {
+	for i, t := range tokens {
+		base := filepath.Base(t)
+		if base != "aerial-pr.sh" && !strings.HasSuffix(t, "aerial-pr.sh") {
+			continue
+		}
+		for j := i + 1; j < len(tokens); j++ {
+			if tokens[j] == "submit" {
+				return true, findSubmitTargetDir(tokens[j+1:])
+			}
+		}
+	}
+	return false, ""
+}
+
+func matchGitCommitTokens(tokens []string) (bool, string) {
+	if len(tokens) == 0 {
+		return false, ""
+	}
+	bin := strings.ToLower(filepath.Base(tokens[0]))
+	if bin != "git" {
+		return false, ""
+	}
+	var foundDir string
+	for i := 1; i < len(tokens); i++ {
+		tok := tokens[i]
+		if tok == "-C" && i+1 < len(tokens) {
+			foundDir = tokens[i+1]
+			i++
+		} else if strings.HasPrefix(tok, "-C") && len(tok) > 2 {
+			foundDir = strings.TrimPrefix(tok, "-C")
+		} else if tok == "commit" {
+			return true, foundDir
+		}
+	}
+	return false, ""
+}
+
 // IsCommitCommand determines whether a command executes a git commit or aerial-pr.sh submit.
 // It parses compound commands (&&, ;, ||, |) and extracts target directory and submit flag.
 func IsCommitCommand(cmd string) (isCommit bool, targetDir string, isSubmit bool) {
@@ -323,56 +419,20 @@ func IsCommitCommand(cmd string) (isCommit bool, targetDir string, isSubmit bool
 		}
 
 		// Unwrap bash -c <script> or sh -c <script>
-		bin := strings.ToLower(filepath.Base(tokens[0]))
-		if (bin == "bash" || bin == "sh") && len(tokens) >= 3 {
-			for i, t := range tokens {
-				if t == "-c" && i+1 < len(tokens) {
-					c, d, s := IsCommitCommand(tokens[i+1])
-					if c {
-						return c, d, s
-					}
-					break
-				}
+		if script, ok := unwrapShellScriptCommand(tokens); ok {
+			if c, d, s := IsCommitCommand(script); c {
+				return c, d, s
 			}
 		}
 
 		// 1. Check for aerial-pr.sh submit
-		for i, t := range tokens {
-			base := filepath.Base(t)
-			if base == "aerial-pr.sh" || strings.HasSuffix(t, "aerial-pr.sh") {
-				for j := i + 1; j < len(tokens); j++ {
-					if tokens[j] == "submit" {
-						isCommit = true
-						isSubmit = true
-						for k := j + 1; k < len(tokens); k++ {
-							if !strings.HasPrefix(tokens[k], "-") {
-								targetDir = tokens[k]
-								break
-							}
-						}
-						return
-					}
-				}
-			}
+		if matched, dir := matchAerialPRSubmit(tokens); matched {
+			return true, dir, true
 		}
 
 		// 2. Check for git commit
-		if bin == "git" {
-			var foundDir string
-			for i := 1; i < len(tokens); i++ {
-				tok := tokens[i]
-				if tok == "-C" && i+1 < len(tokens) {
-					foundDir = tokens[i+1]
-					i++
-				} else if strings.HasPrefix(tok, "-C") && len(tok) > 2 {
-					foundDir = strings.TrimPrefix(tok, "-C")
-				} else if tok == "commit" {
-					isCommit = true
-					isSubmit = false
-					targetDir = foundDir
-					return
-				}
-			}
+		if matched, dir := matchGitCommitTokens(tokens); matched {
+			return true, dir, false
 		}
 	}
 	return false, "", false
@@ -477,6 +537,27 @@ func IsCoreAerial(targetDir string, cmd string) bool {
 	return false
 }
 
+func hasGitCommitAllFlags(tokens []string) bool {
+	if len(tokens) == 0 {
+		return false
+	}
+	bin := strings.ToLower(filepath.Base(tokens[0]))
+	if bin != "git" {
+		return false
+	}
+	isCommit := false
+	hasAll := false
+	for _, tok := range tokens[1:] {
+		if tok == "commit" {
+			isCommit = true
+		}
+		if tok == "-a" || tok == "--all" || strings.HasPrefix(tok, "-a") || (strings.HasPrefix(tok, "-") && !strings.HasPrefix(tok, "--") && strings.Contains(tok, "a")) {
+			hasAll = true
+		}
+	}
+	return isCommit && hasAll
+}
+
 // isAllCommit checks if git commit was called with -a, -am, or --all flags.
 func isAllCommit(cmd string) bool {
 	subCommands := splitPipeline(cmd)
@@ -485,31 +566,13 @@ func isAllCommit(cmd string) bool {
 		if len(tokens) == 0 {
 			continue
 		}
-		bin := strings.ToLower(filepath.Base(tokens[0]))
-		if (bin == "bash" || bin == "sh") && len(tokens) >= 3 {
-			for i, t := range tokens {
-				if t == "-c" && i+1 < len(tokens) {
-					if isAllCommit(tokens[i+1]) {
-						return true
-					}
-					break
-				}
-			}
-		}
-		if bin == "git" {
-			isCommit := false
-			hasAll := false
-			for _, tok := range tokens[1:] {
-				if tok == "commit" {
-					isCommit = true
-				}
-				if tok == "-a" || tok == "--all" || strings.HasPrefix(tok, "-a") || (strings.HasPrefix(tok, "-") && !strings.HasPrefix(tok, "--") && strings.Contains(tok, "a")) {
-					hasAll = true
-				}
-			}
-			if isCommit && hasAll {
+		if script, ok := unwrapShellScriptCommand(tokens); ok {
+			if isAllCommit(script) {
 				return true
 			}
+		}
+		if hasGitCommitAllFlags(tokens) {
+			return true
 		}
 	}
 	return false
@@ -526,6 +589,66 @@ func FormatCommitDenyReason(violations []Violation) string {
 	sb.WriteString("Please remove secrets, tokens, or PII before committing. ")
 	sb.WriteString("If this is a configuration change intended for aerial-config, author changes in aerial-config where this guard is disabled.")
 	return sb.String()
+}
+
+func appendUntrackedFilesDiff(diffBuilder *strings.Builder, dir, untrackedOut string) {
+	for _, f := range strings.Split(untrackedOut, "\n") {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		filePath := filepath.Join(dir, f)
+		fi, statErr := os.Stat(filePath)
+		if statErr != nil || fi.IsDir() || fi.Size() >= 1024*1024 {
+			continue
+		}
+		data, readErr := os.ReadFile(filePath)
+		if readErr != nil {
+			continue
+		}
+		diffBuilder.WriteString("\ndiff --git a/" + f + " b/" + f + "\n")
+		diffBuilder.WriteString("--- /dev/null\n")
+		diffBuilder.WriteString("+++ b/" + f + "\n")
+		diffBuilder.WriteString("@@ -0,0 +1,1 @@\n")
+		for _, line := range strings.Split(string(data), "\n") {
+			diffBuilder.WriteString("+" + line + "\n")
+		}
+	}
+}
+
+func collectSubmitDiff(dir string) string {
+	var diffBuilder strings.Builder
+	diffOut, err := gitCmdRunner(dir, "diff", "HEAD")
+	if err != nil {
+		emptyTree := "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+		diffOut, err = gitCmdRunner(dir, "diff", emptyTree)
+		if err != nil {
+			if fallbackDiff, diffErr := gitCmdRunner(dir, "diff"); diffErr == nil {
+				diffOut = fallbackDiff
+			}
+		}
+	}
+	diffBuilder.WriteString(diffOut)
+
+	if untrackedOut, err := gitCmdRunner(dir, "ls-files", "--others", "--exclude-standard"); err == nil {
+		appendUntrackedFilesDiff(&diffBuilder, dir, untrackedOut)
+	}
+	return diffBuilder.String()
+}
+
+func collectCommitDiff(dir, cmdLine string) string {
+	var diffBuilder strings.Builder
+	if cachedDiff, err := gitCmdRunner(dir, "diff", "--cached"); err == nil {
+		diffBuilder.WriteString(cachedDiff)
+	}
+
+	if isAllCommit(cmdLine) {
+		if unstagedDiff, err := gitCmdRunner(dir, "diff"); err == nil {
+			diffBuilder.WriteString("\n")
+			diffBuilder.WriteString(unstagedDiff)
+		}
+	}
+	return diffBuilder.String()
 }
 
 // CheckCommit evaluates run_command tool calls against commit safety guard invariants.
@@ -556,58 +679,13 @@ func CheckCommit(toolName string, args ToolArgs) *Decision {
 		return &Decision{Decision: DecisionAllow}
 	}
 
-	var diffBuilder strings.Builder
-
+	var diff string
 	if isSubmit {
-		// aerial-pr.sh submit: check diff against HEAD, fallback to empty tree hash ONLY if HEAD does not exist (err != nil)
-		diffOut, err := gitCmdRunner(dir, "diff", "HEAD")
-		if err != nil {
-			emptyTree := "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-			diffOut, err = gitCmdRunner(dir, "diff", emptyTree)
-			if err != nil {
-				if fallbackDiff, diffErr := gitCmdRunner(dir, "diff"); diffErr == nil {
-					diffOut = fallbackDiff
-				}
-			}
-		}
-		diffBuilder.WriteString(diffOut)
-
-		// Untracked files: git ls-files --others --exclude-standard
-		if untrackedOut, err := gitCmdRunner(dir, "ls-files", "--others", "--exclude-standard"); err == nil {
-			for _, f := range strings.Split(untrackedOut, "\n") {
-				f = strings.TrimSpace(f)
-				if f == "" {
-					continue
-				}
-				filePath := filepath.Join(dir, f)
-				if fi, statErr := os.Stat(filePath); statErr == nil && !fi.IsDir() && fi.Size() < 1024*1024 {
-					if data, readErr := os.ReadFile(filePath); readErr == nil {
-						diffBuilder.WriteString("\ndiff --git a/" + f + " b/" + f + "\n")
-						diffBuilder.WriteString("--- /dev/null\n")
-						diffBuilder.WriteString("+++ b/" + f + "\n")
-						diffBuilder.WriteString("@@ -0,0 +1,1 @@\n")
-						for _, line := range strings.Split(string(data), "\n") {
-							diffBuilder.WriteString("+" + line + "\n")
-						}
-					}
-				}
-			}
-		}
+		diff = collectSubmitDiff(dir)
 	} else {
-		// git commit: inspect staged diff
-		if cachedDiff, err := gitCmdRunner(dir, "diff", "--cached"); err == nil {
-			diffBuilder.WriteString(cachedDiff)
-		}
-
-		if isAllCommit(args.CommandLine) {
-			if unstagedDiff, err := gitCmdRunner(dir, "diff"); err == nil {
-				diffBuilder.WriteString("\n")
-				diffBuilder.WriteString(unstagedDiff)
-			}
-		}
+		diff = collectCommitDiff(dir, args.CommandLine)
 	}
 
-	diff := diffBuilder.String()
 	patterns := GetActivePatterns()
 	if IsCoreAerial(dir, args.CommandLine) {
 		filtered := make([]PatternRule, 0, len(patterns))

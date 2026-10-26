@@ -502,6 +502,74 @@ func checkStatelessBatchRules(normalizedTool string, args ToolArgs) *Decision {
 	return nil
 }
 
+func checkMicroReadViolation(category, target string, paginatedRead bool, priorRecords []ToolInvocation, state *BatchState) *Decision {
+	if category != "read" || target == "" || paginatedRead {
+		return nil
+	}
+	if countTargetInvocations(priorRecords, "read", target) >= 2 {
+		state.Records = removeTargetInvocations(state.Records, target)
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Iterative micro-read thrashing detected: 3 sequential reads targeting the same file across turns. Read the complete required range or whole file in a single view_file call (up to 800 lines) instead of small slices.",
+		}
+	}
+	return nil
+}
+
+func checkMicroEditViolation(category, target string, priorRecords []ToolInvocation, state *BatchState) *Decision {
+	if category != "edit" || target == "" {
+		return nil
+	}
+	if countTargetInvocations(priorRecords, "edit", target) >= 2 {
+		state.Records = removeTargetInvocations(state.Records, target)
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Coarse-Grained Code Editing Invariant Violated: 3 consecutive micro-edits targeting the same file across turns. Formulate the complete target diff and apply it in a single comprehensive edit, or rewrite the file via write_to_file.",
+		}
+	}
+	return nil
+}
+
+func checkMicroCommandViolation(category string, priorRecords []ToolInvocation, state *BatchState) *Decision {
+	if category == "inspection" && hasConsecutiveSingleSteps(priorRecords, "inspection", 3) {
+		state.Records = filterOutCategory(state.Records, "inspection")
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Micro-command thrashing detected: 4 consecutive single inspection commands across turns. Combine commands into compound one-liners (e.g. with && or ;) or execute an ephemeral scratch script in brain/<id>/scratch/ to collect diagnostics.",
+		}
+	}
+	return nil
+}
+
+func checkSequentialReadViolation(category string, paginatedRead bool, priorRecords []ToolInvocation, state *BatchState) *Decision {
+	if category == "read" && !paginatedRead && hasConsecutiveSingleSteps(priorRecords, "read", 2) {
+		state.Records = filterOutCategory(state.Records, "read")
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Parallel Tool Batching Invariant Violated: 3 consecutive sequential single-file reads detected across turns. ALWAYS emit view_file, grep_search, and read tool calls in parallel within a single turn when inspecting multiple files.",
+		}
+	}
+	return nil
+}
+
+func evaluatePriorBatchViolations(category, target string, args ToolArgs, priorRecords []ToolInvocation, state *BatchState) *Decision {
+	paginatedRead := category == "read" && target != "" && isPaginatedRead(priorRecords, target, args.StartLine, args.EndLine)
+
+	if dec := checkMicroReadViolation(category, target, paginatedRead, priorRecords, state); dec != nil {
+		return dec
+	}
+	if dec := checkMicroEditViolation(category, target, priorRecords, state); dec != nil {
+		return dec
+	}
+	if dec := checkMicroCommandViolation(category, priorRecords, state); dec != nil {
+		return dec
+	}
+	if dec := checkSequentialReadViolation(category, paginatedRead, priorRecords, state); dec != nil {
+		return dec
+	}
+	return nil
+}
+
 // CheckBatchWithDir evaluates tool batching invariants with configurable state directory and timestamp.
 // Guaranteed fail-open: returns allow on unexpected errors or corrupted states.
 func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time) *Decision {
@@ -527,54 +595,8 @@ func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time
 			}
 		}
 
-		paginatedRead := category == "read" && target != "" && isPaginatedRead(priorRecords, target, args.StartLine, args.EndLine)
-
-		// Rule 4: Micro-reads to the same file (view_file / read_file)
-		if category == "read" && target != "" && !paginatedRead {
-			reads := countTargetInvocations(priorRecords, "read", target)
-			if reads >= 2 {
-				decision = &Decision{
-					Decision: DecisionDeny,
-					Reason:   "Iterative micro-read thrashing detected: 3 sequential reads targeting the same file across turns. Read the complete required range or whole file in a single view_file call (up to 800 lines) instead of small slices.",
-				}
-				state.Records = removeTargetInvocations(state.Records, target)
-				_ = saveState(dir, safeID, state) //nolint:errcheck
-				return nil
-			}
-		}
-
-		// Rule 6: Micro-edits to the same file (replace_file_content / write_to_file / edit_file / write_file)
-		if category == "edit" && target != "" {
-			edits := countTargetInvocations(priorRecords, "edit", target)
-			if edits >= 2 {
-				decision = &Decision{
-					Decision: DecisionDeny,
-					Reason:   "Coarse-Grained Code Editing Invariant Violated: 3 consecutive micro-edits targeting the same file across turns. Formulate the complete target diff and apply it in a single comprehensive edit, or rewrite the file via write_to_file.",
-				}
-				state.Records = removeTargetInvocations(state.Records, target)
-				_ = saveState(dir, safeID, state) //nolint:errcheck
-				return nil
-			}
-		}
-
-		// Rule 3: Micro-command inspection thrashing (run_command)
-		if category == "inspection" && hasConsecutiveSingleSteps(priorRecords, "inspection", 3) {
-			decision = &Decision{
-				Decision: DecisionDeny,
-				Reason:   "Micro-command thrashing detected: 4 consecutive single inspection commands across turns. Combine commands into compound one-liners (e.g. with && or ;) or execute an ephemeral scratch script in brain/<id>/scratch/ to collect diagnostics.",
-			}
-			state.Records = filterOutCategory(state.Records, "inspection")
-			_ = saveState(dir, safeID, state) //nolint:errcheck
-			return nil
-		}
-
-		// Rule 5: Sequential single-file reads across turns (view_file / read_file)
-		if category == "read" && !paginatedRead && hasConsecutiveSingleSteps(priorRecords, "read", 2) {
-			decision = &Decision{
-				Decision: DecisionDeny,
-				Reason:   "Parallel Tool Batching Invariant Violated: 3 consecutive sequential single-file reads detected across turns. ALWAYS emit view_file, grep_search, and read tool calls in parallel within a single turn when inspecting multiple files.",
-			}
-			state.Records = filterOutCategory(state.Records, "read")
+		if dec := evaluatePriorBatchViolations(category, target, args, priorRecords, &state); dec != nil {
+			decision = dec
 			_ = saveState(dir, safeID, state) //nolint:errcheck
 			return nil
 		}

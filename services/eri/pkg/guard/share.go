@@ -114,26 +114,58 @@ func CheckShare(toolName string, args ToolArgs) *Decision {
 	return &Decision{Decision: DecisionAllow}
 }
 
-func inspectRunCommand(cmd, cwd string) bool {
-	cwdProtected := IsProtectedPath(cwd)
-
-	// Check for output redirection to protected path: > /share/... or >> /share/...
-	if strings.Contains(cmd, ">") {
-		tokens := strings.Fields(cmd)
-		for i, t := range tokens {
-			if strings.HasPrefix(t, ">") {
-				target := strings.TrimLeft(t, ">")
-				if target == "" && i+1 < len(tokens) {
-					target = tokens[i+1]
-				}
-				if target != "" && IsProtectedPath(target) {
-					return true
-				}
+func hasProtectedOutputRedirect(cmd string) bool {
+	if !strings.Contains(cmd, ">") {
+		return false
+	}
+	tokens := strings.Fields(cmd)
+	for i, t := range tokens {
+		if strings.HasPrefix(t, ">") {
+			target := strings.TrimLeft(t, ">")
+			if target == "" && i+1 < len(tokens) {
+				target = tokens[i+1]
+			}
+			if target != "" && IsProtectedPath(target) {
+				return true
 			}
 		}
 	}
+	return false
+}
 
-	// Split compound commands by operators (;, &&, ||, |, \n)
+func gitCommandTargetsShare(tokens []string) bool {
+	for i, t := range tokens {
+		if t == "-C" && i+1 < len(tokens) && IsProtectedPath(tokens[i+1]) {
+			return true
+		} else if strings.HasPrefix(t, "-C") && len(t) > 2 && IsProtectedPath(strings.TrimPrefix(t, "-C")) {
+			return true
+		} else if strings.HasPrefix(t, "--git-dir=") && IsProtectedPath(strings.TrimPrefix(t, "--git-dir=")) {
+			return true
+		} else if strings.HasPrefix(t, "--work-tree=") && IsProtectedPath(strings.TrimPrefix(t, "--work-tree=")) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasProtectedPositionalArg(args []string) bool {
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		if IsProtectedPath(arg) {
+			return true
+		}
+	}
+	return false
+}
+
+func inspectRunCommand(cmd, cwd string) bool {
+	if hasProtectedOutputRedirect(cmd) {
+		return true
+	}
+
+	cwdProtected := IsProtectedPath(cwd)
 	subCommands := splitPipeline(cmd)
 	for _, sub := range subCommands {
 		tokens := tokenizeQuoteAware(sub)
@@ -142,15 +174,9 @@ func inspectRunCommand(cmd, cwd string) bool {
 		}
 
 		// Unwrap bash -c <script> or sh -c <script>
-		bin := strings.ToLower(filepath.Base(tokens[0]))
-		if (bin == "bash" || bin == "sh") && len(tokens) >= 3 {
-			for i, t := range tokens {
-				if t == "-c" && i+1 < len(tokens) {
-					if inspectRunCommand(tokens[i+1], cwd) {
-						return true
-					}
-					break
-				}
+		if script, ok := unwrapShellScriptCommand(tokens); ok {
+			if inspectRunCommand(script, cwd) {
+				return true
 			}
 		}
 
@@ -158,23 +184,7 @@ func inspectRunCommand(cmd, cwd string) bool {
 
 		// Inspect git operations
 		if cmdBin == "git" {
-			targetsShare := false
-			for i, t := range tokens {
-				if t == "-C" && i+1 < len(tokens) && IsProtectedPath(tokens[i+1]) {
-					targetsShare = true
-					break
-				} else if strings.HasPrefix(t, "-C") && len(t) > 2 && IsProtectedPath(strings.TrimPrefix(t, "-C")) {
-					targetsShare = true
-					break
-				} else if strings.HasPrefix(t, "--git-dir=") && IsProtectedPath(strings.TrimPrefix(t, "--git-dir=")) {
-					targetsShare = true
-					break
-				} else if strings.HasPrefix(t, "--work-tree=") && IsProtectedPath(strings.TrimPrefix(t, "--work-tree=")) {
-					targetsShare = true
-					break
-				}
-			}
-
+			targetsShare := gitCommandTargetsShare(tokens)
 			if (cwdProtected || targetsShare) && isGitMutating(tokens[1:]) {
 				return true
 			}
@@ -186,15 +196,8 @@ func inspectRunCommand(cmd, cwd string) bool {
 		}
 
 		// If mutating binary called from anywhere with target arg in share
-		if mutatingBinaries[cmdBin] {
-			for _, arg := range tokens[1:] {
-				if strings.HasPrefix(arg, "-") {
-					continue
-				}
-				if IsProtectedPath(arg) {
-					return true
-				}
-			}
+		if mutatingBinaries[cmdBin] && hasProtectedPositionalArg(tokens[1:]) {
+			return true
 		}
 	}
 
