@@ -105,6 +105,51 @@ func (d *DefaultDispatcher) getServerConfig(serverName string) (ServerConfig, bo
 	return ServerConfig{}, false
 }
 
+func extractMCPSessionID(h http.Header) string {
+	sessID := h.Get("mcp-session-id")
+	if sessID == "" {
+		sessID = h.Get("Mcp-Session-Id")
+	}
+	if sessID == "" {
+		for k, v := range h {
+			if strings.EqualFold(k, "mcp-session-id") && len(v) > 0 {
+				sessID = v[0]
+				break
+			}
+		}
+	}
+	return sessID
+}
+
+func (d *DefaultDispatcher) sendInitializedNotification(ctx context.Context, srv ServerConfig, sessID string) {
+	notifyReqBody, err := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "notifications/initialized",
+	})
+	if err != nil {
+		return
+	}
+	notifyReq, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.ServerURL, bytes.NewReader(notifyReqBody))
+	if err != nil {
+		return
+	}
+	notifyReq.Header.Set("Content-Type", "application/json")
+	notifyReq.Header.Set("Accept", "application/json, text/event-stream")
+	for k, v := range srv.Headers {
+		notifyReq.Header.Set(k, v)
+	}
+	if sessID != "" {
+		notifyReq.Header.Set("mcp-session-id", sessID)
+	}
+	notifyResp, nErr := d.httpClient.Do(notifyReq)
+	if nErr == nil && notifyResp != nil {
+		if _, drainErr := io.Copy(io.Discard, io.LimitReader(notifyResp.Body, 64*1024)); drainErr != nil {
+			log.Printf("[MCP] Warning reading notification body: %v", drainErr)
+		}
+		_ = notifyResp.Body.Close()
+	}
+}
+
 // EnsureSession performs the standard MCP initialize handshake and caches the session ID.
 func (d *DefaultDispatcher) EnsureSession(ctx context.Context, serverName string) (string, error) {
 	if d == nil {
@@ -172,50 +217,14 @@ func (d *DefaultDispatcher) EnsureSession(ctx context.Context, serverName string
 		return "", fmt.Errorf("mcp server %s initialize returned status %d: %s", srv.Name, initResp.StatusCode, string(initRespBytes))
 	}
 
-	sessID = initResp.Header.Get("mcp-session-id")
-	if sessID == "" {
-		sessID = initResp.Header.Get("Mcp-Session-Id")
-	}
-	if sessID == "" {
-		for k, v := range initResp.Header {
-			if strings.EqualFold(k, "mcp-session-id") && len(v) > 0 {
-				sessID = v[0]
-				break
-			}
-		}
-	}
-
+	sessID = extractMCPSessionID(initResp.Header)
 	if sessID != "" {
 		d.mu.Lock()
 		d.sessionIDs[srv.Name] = sessID
 		d.mu.Unlock()
 	}
 
-	// Send notifications/initialized notification with mcp-session-id header
-	notifyReqBody, err := json.Marshal(map[string]interface{}{
-		"jsonrpc": "2.0",
-		"method":  "notifications/initialized",
-	})
-	if err == nil {
-		notifyReq, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.ServerURL, bytes.NewReader(notifyReqBody))
-		if err == nil {
-			notifyReq.Header.Set("Content-Type", "application/json")
-			notifyReq.Header.Set("Accept", "application/json, text/event-stream")
-			for k, v := range srv.Headers {
-				notifyReq.Header.Set(k, v)
-			}
-			if sessID != "" {
-				notifyReq.Header.Set("mcp-session-id", sessID)
-			}
-			notifyResp, nErr := d.httpClient.Do(notifyReq)
-			if nErr == nil && notifyResp != nil {
-				if _, drainErr := io.Copy(io.Discard, io.LimitReader(notifyResp.Body, 64*1024)); drainErr != nil {
-					log.Printf("[MCP] Warning reading notification body: %v", drainErr)
-				}
-				_ = notifyResp.Body.Close()
-			}
-		}
-	}
+	d.sendInitializedNotification(ctx, srv, sessID)
 
 	return sessID, nil
 }
@@ -353,17 +362,12 @@ func (d *DefaultDispatcher) ListTools(ctx context.Context) ([]Tool, error) {
 	return allTools, nil
 }
 
-// Execute calls a named tool on the corresponding MCP server with the provided arguments.
-func (d *DefaultDispatcher) Execute(ctx context.Context, name string, args map[string]interface{}) (string, error) {
-	if d == nil {
-		return "", errors.New("mcp dispatcher is nil")
-	}
-
+func (d *DefaultDispatcher) resolveToolServer(ctx context.Context, name string) (ServerConfig, error) {
 	d.mu.RLock()
 	if d.allowedTools != nil {
 		if _, allowed := d.allowedTools[name]; !allowed {
 			d.mu.RUnlock()
-			return "", fmt.Errorf("tool %q is not in the allowed tools list", name)
+			return ServerConfig{}, fmt.Errorf("tool %q is not in the allowed tools list", name)
 		}
 	}
 	srv, ok := d.toolRoutes[name]
@@ -377,57 +381,30 @@ func (d *DefaultDispatcher) Execute(ctx context.Context, name string, args map[s
 		srv, ok = d.toolRoutes[name]
 		d.mu.RUnlock()
 		if !ok {
-			return "", fmt.Errorf("tool %q not found on any configured MCP server", name)
+			return ServerConfig{}, fmt.Errorf("tool %q not found on any configured MCP server", name)
 		}
 	}
+	return srv, nil
+}
 
-	d.mu.RLock()
-	sessID := d.sessionIDs[srv.Name]
-	d.mu.RUnlock()
-
-	if sessID == "" {
-		var sErr error
-		sessID, sErr = d.EnsureSession(ctx, srv.Name)
-		if sErr != nil {
-			log.Printf("[MCP] Failed to ensure session for %s before execute: %v", srv.Name, sErr)
-		}
-	}
-
+func prepareToolCallArgs(args map[string]interface{}) map[string]interface{} {
 	if args == nil {
-		args = make(map[string]interface{})
-	} else {
-		copiedArgs := make(map[string]interface{}, len(args))
-		for k, v := range args {
-			copiedArgs[k] = v
-		}
-		args = copiedArgs
+		return make(map[string]interface{})
 	}
-
-	if val, ok := args["user_google_email"].(string); ok {
+	copiedArgs := make(map[string]interface{}, len(args))
+	for k, v := range args {
+		copiedArgs[k] = v
+	}
+	if val, ok := copiedArgs["user_google_email"].(string); ok {
 		trimmed := strings.ToLower(strings.TrimSpace(val))
 		if trimmed == "primary" || trimmed == "me" || trimmed == "default" || trimmed == "" {
-			delete(args, "user_google_email")
+			delete(copiedArgs, "user_google_email")
 		}
 	}
+	return copiedArgs
+}
 
-	reqBody, err := json.Marshal(map[string]interface{}{
-		"jsonrpc": "2.0",
-		"id":      1,
-		"method":  "tools/call",
-		"params": map[string]interface{}{
-			"name":      name,
-			"arguments": args,
-		},
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal tools/call request: %w", err)
-	}
-
-	rpcResp, err := d.doJSONRPCWithRetry(ctx, srv, sessID, reqBody, 50<<20)
-	if err != nil {
-		return "", err
-	}
-
+func decodeToolCallResult(name string, raw json.RawMessage) (string, error) {
 	var callResult struct {
 		Content []struct {
 			Type string `json:"type"`
@@ -436,7 +413,7 @@ func (d *DefaultDispatcher) Execute(ctx context.Context, name string, args map[s
 		IsError bool `json:"isError,omitempty"`
 	}
 
-	if err := json.Unmarshal(rpcResp.Result, &callResult); err == nil && len(callResult.Content) > 0 {
+	if err := json.Unmarshal(raw, &callResult); err == nil && len(callResult.Content) > 0 {
 		var sb strings.Builder
 		for _, c := range callResult.Content {
 			if c.Text != "" {
@@ -454,11 +431,57 @@ func (d *DefaultDispatcher) Execute(ctx context.Context, name string, args map[s
 	}
 
 	var str string
-	if err := json.Unmarshal(rpcResp.Result, &str); err == nil {
+	if err := json.Unmarshal(raw, &str); err == nil {
 		return str, nil
 	}
 
-	return string(rpcResp.Result), nil
+	return string(raw), nil
+}
+
+// Execute calls a named tool on the corresponding MCP server with the provided arguments.
+func (d *DefaultDispatcher) Execute(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+	if d == nil {
+		return "", errors.New("mcp dispatcher is nil")
+	}
+
+	srv, err := d.resolveToolServer(ctx, name)
+	if err != nil {
+		return "", err
+	}
+
+	d.mu.RLock()
+	sessID := d.sessionIDs[srv.Name]
+	d.mu.RUnlock()
+
+	if sessID == "" {
+		var sErr error
+		sessID, sErr = d.EnsureSession(ctx, srv.Name)
+		if sErr != nil {
+			log.Printf("[MCP] Failed to ensure session for %s before execute: %v", srv.Name, sErr)
+		}
+	}
+
+	callArgs := prepareToolCallArgs(args)
+
+	reqBody, err := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "tools/call",
+		"params": map[string]interface{}{
+			"name":      name,
+			"arguments": callArgs,
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal tools/call request: %w", err)
+	}
+
+	rpcResp, err := d.doJSONRPCWithRetry(ctx, srv, sessID, reqBody, 50<<20)
+	if err != nil {
+		return "", err
+	}
+
+	return decodeToolCallResult(name, rpcResp.Result)
 }
 
 // Prime warms up sessions and discovers tools across all configured MCP servers concurrently.

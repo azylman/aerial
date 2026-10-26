@@ -1,21 +1,6 @@
 {
   "files": {},
   "functions": {
-    "services/eri/pkg/interactions/handlers.go::*Router.handleInterrupt": {
-      "depth": 6
-    },
-    "services/eri/pkg/interactions/handlers.go::*Router.handleStatus": {
-      "cc": 35
-    },
-    "services/eri/pkg/mcp/dispatcher.go::*DefaultDispatcher.EnsureSession": {
-      "cc": 27
-    },
-    "services/eri/pkg/mcp/dispatcher.go::*DefaultDispatcher.Execute": {
-      "cc": 25
-    },
-    "services/eri/pkg/notifier/notifier.go::StaticFallback": {
-      "cc": 26
-    },
     "services/eri/pkg/queue/burst.go::PlanBurstExecution": {
       "cc": 25
     },
