@@ -755,32 +755,47 @@ func TestNomadJobReconciliation_TableDriven(t *testing.T) {
 		_ = os.WriteFile(filepath.Join(jobsDir, "valid.nomad"), []byte(`job "valid" {}`), 0o644)
 		_ = os.WriteFile(filepath.Join(jobsDir, "invalid.nomad"), []byte(`job "invalid" {}`), 0o644)
 		_ = os.WriteFile(filepath.Join(jobsDir, "runfail.nomad"), []byte(`job "runfail" {}`), 0o644)
+		_ = os.WriteFile(filepath.Join(jobsDir, "typechange.nomad"), []byte(`job "typechange" {}`), 0o644)
+		_ = os.WriteFile(filepath.Join(jobsDir, "typechange_stopfail.nomad"), []byte(`job "typechange_stopfail" {}`), 0o644)
+		_ = os.WriteFile(filepath.Join(jobsDir, "typechange_retryfail.nomad"), []byte(`job "typechange_retryfail" {}`), 0o644)
 
 		var executedCalls [][]string
+		purgedJobs := make(map[string]bool)
 		var mu sync.Mutex
 		dReconcile := newNomadReconcileDaemon(func(cfg *DaemonConfig) {
 			cfg.NomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
 				mu.Lock()
 				executedCalls = append(executedCalls, args)
-				mu.Unlock()
 				if len(args) >= 3 && args[0] == "job" && args[1] == "validate" {
+					mu.Unlock()
 					if strings.Contains(args[2], "invalid.nomad") {
 						return nil, []byte("invalid HCL"), errors.New("val error")
 					}
 					return []byte("valid"), nil, nil
 				}
 				if len(args) >= 4 && args[0] == "job" && args[1] == "run" {
-					if strings.Contains(args[3], "runfail.nomad") {
+					target := args[len(args)-1]
+					if strings.Contains(target, "typechange") && !purgedJobs[filepath.Base(target)] {
+						mu.Unlock()
+						return nil, []byte(`Error submitting job: Unexpected response code: 500 (cannot update job from type "service" to "system")`), errors.New("exit status 1")
+					}
+					mu.Unlock()
+					if strings.Contains(target, "runfail.nomad") || strings.Contains(target, "typechange_retryfail.nomad") {
 						return []byte("fail"), []byte("alloc failed"), errors.New("run error")
 					}
 					return []byte("Evaluation ID: 12345"), nil, nil
 				}
 				if len(args) >= 4 && args[0] == "job" && args[1] == "stop" {
-					if args[3] == "stop-fail" {
+					jobID := args[3]
+					if jobID == "stop-fail" || jobID == "typechange_stopfail" {
+						mu.Unlock()
 						return nil, []byte("stop fail"), errors.New("stop error")
 					}
+					purgedJobs[jobID+".nomad"] = true
+					mu.Unlock()
 					return []byte("stopped"), nil, nil
 				}
+				mu.Unlock()
 				return nil, nil, nil
 			}
 		})
@@ -838,6 +853,26 @@ func TestNomadJobReconciliation_TableDriven(t *testing.T) {
 				name: "apply change run failure",
 				changes: []NomadFileChange{
 					{JobName: "runfail", Path: "jobs/runfail.nomad", Action: "apply"},
+				},
+				wantErr: true,
+			},
+			{
+				name: "apply change scheduler type transition purges and retries",
+				changes: []NomadFileChange{
+					{JobName: "typechange", Path: "jobs/typechange.nomad", Action: "apply"},
+				},
+			},
+			{
+				name: "apply change scheduler type transition stop failure",
+				changes: []NomadFileChange{
+					{JobName: "typechange_stopfail", Path: "jobs/typechange_stopfail.nomad", Action: "apply"},
+				},
+				wantErr: true,
+			},
+			{
+				name: "apply change scheduler type transition retry failure",
+				changes: []NomadFileChange{
+					{JobName: "typechange_retryfail", Path: "jobs/typechange_retryfail.nomad", Action: "apply"},
 				},
 				wantErr: true,
 			},
