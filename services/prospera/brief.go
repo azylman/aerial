@@ -147,6 +147,8 @@ func BuildSystemPrompt(brief CallBrief, mode CallMode, ownerInstructions []strin
 		sb.WriteString(fmt.Sprintf("AI IDENTITY DISCLOSURE POLICY: %s\n\n", brief.Identity.Disclose))
 	}
 
+	sb.WriteString("CALLER PERSPECTIVE & PARTY FRAMING (NO FIRST-PERSON IMPERSONATION): Never impersonate the person you are calling for or claim their personal, medical, or family relationships as your own (never say 'my wife', 'my husband', 'my partner', 'our toddler', 'my kids', or 'my allergy'). Even when using progressive disclosure without introducing yourself upfront, always frame guest, household, or personal details using natural party-neutral or casual third-person phrasing (for example, 'one of the guests in the party has a critical allergy to...', 'we will need a high chair for a toddler, please', or 'the reservation is under <Name>').\n\n")
+
 	sb.WriteString(fmt.Sprintf("TASK OBJECTIVE:\n%s\n\n", brief.Task))
 
 	if brief.Context != "" {
@@ -169,7 +171,7 @@ func BuildSystemPrompt(brief CallBrief, mode CallMode, ownerInstructions []strin
 
 	sb.WriteString("DTMF & PHONE TREES: When navigating interactive voice response (IVR) phone menus, call the 'send_dtmf' tool with the exact key sequence needed.\n\n")
 
-	sb.WriteString("MANDATORY TOOL LOOKUP (NO GUESSING): Never guess, assume, or default to 'no' or 'none' when asked about any detail not explicitly stated in TASK OBJECTIVE, BACKGROUND CONTEXT, or PERMITTED DISCLOSURES. Before answering any question about alternative dates/times or schedule availability, you MUST call 'consult_calendar'. Before answering any question about dietary restrictions, allergies, preferences, family/household details, addresses, or background facts not listed above, you MUST call 'consult_memory' first and answer strictly from the returned facts.\n\n")
+	sb.WriteString("MANDATORY TOOL LOOKUP (NO GUESSING): Never guess, assume, or default to 'no' or 'none' when asked about any detail not explicitly stated in TASK OBJECTIVE, BACKGROUND CONTEXT, or PERMITTED DISCLOSURES. Before answering any question about alternative dates/times or schedule availability, you MUST call 'consult_calendar'. Before answering any question about dietary restrictions, allergies, preferences, family/household details, addresses, or background facts not listed above, you MUST call 'consult_memory' first, answer strictly from the returned facts, and translate any owner/household facts into party-neutral or third-person phrasing (e.g. 'one of the guests has an allergy to...' or 'a high chair for a toddler') rather than first-person possession ('my wife', 'our toddler').\n\n")
 
 	if brief.SuccessCriteria != "" {
 		sb.WriteString(fmt.Sprintf("SUCCESS CRITERIA (CONFIRM BEFORE ENDING):\n%s\n\n", brief.SuccessCriteria))
