@@ -38,10 +38,30 @@ job "docs" {
         healthchecks {
           disable = true
         }
-        volumes = [
-          "/mnt/data/supervisor/share/aerial-config:/share/aerial-config:ro",
-          "/mnt/data/supervisor/share/aerial/services/docs-service/app:/usr/share/nginx/html:ro"
-        ]
+        entrypoint         = ["/bin/sh", "-c", "mkdir -p /share/aerial-config/docs && cp -a /local/docs/app/. /usr/share/nginx/html/ && cp -a /local/docs/content/. /share/aerial-config/docs/ && exec /docker-entrypoint.sh nginx -g 'daemon off;'"]
+      }
+
+      artifact {
+        source      = "http://hangar.aerial/internal/artifacts/docs.tar.gz"
+        destination = "local/docs"
+      }
+
+      template {
+        data = <<EOH
+{{- if nomadVarExists "nomad/jobs/docs" -}}
+{{- with nomadVar "nomad/jobs/docs" -}}
+{{- if .ASSET_HASH -}}{{- .ASSET_HASH -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+EOH
+        destination = "local/assets.sha256"
+        change_mode = "script"
+        change_script {
+          command       = "/bin/sh"
+          args          = ["-c", "rm -rf /tmp/docs-stage && mkdir -p /tmp/docs-stage && wget -qO /tmp/docs.tar.gz http://hangar.aerial/internal/artifacts/docs.tar.gz && tar -xzf /tmp/docs.tar.gz -C /tmp/docs-stage && cp -a /tmp/docs-stage/app/. /usr/share/nginx/html/ && rm -rf /share/aerial-config/docs/* && cp -a /tmp/docs-stage/content/. /share/aerial-config/docs/ && rm -rf /tmp/docs-stage /tmp/docs.tar.gz"]
+          timeout       = "30s"
+          fail_on_error = false
+        }
       }
 
       service {

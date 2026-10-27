@@ -3,12 +3,10 @@ package main
 
 import (
 	"context"
-	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log"
 	"log/slog"
 	"net"
@@ -16,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -23,8 +22,17 @@ import (
 	"github.com/azylman/aerial/pkg/httpkit"
 )
 
-//go:embed static/*
-var content embed.FS
+func resolveStaticDir(candidates ...string) string {
+	if len(candidates) == 0 {
+		candidates = []string{"/local/static", "static"}
+	}
+	for _, dir := range candidates {
+		if _, err := os.Stat(filepath.Join(dir, "index.html")); err == nil {
+			return dir
+		}
+	}
+	return "static"
+}
 
 var startTime = time.Now().UTC()
 
@@ -583,19 +591,36 @@ func SetupDashboardMux(cfg DashboardConfig, assetReg *AssetRegistry) http.Handle
 
 // RunDashboardServer starts the GitHub poller, creates the asset registry, and listens on the configured port.
 func RunDashboardServer(ctx context.Context, cfg DashboardConfig) error {
-	staticFS, err := fs.Sub(content, "static")
-	if err != nil {
-		return fmt.Errorf("failed to create static sub filesystem: %w", err)
-	}
+	staticDir := resolveStaticDir()
 
 	gitCommit := cfg.GitCommit
 	if gitCommit == "" {
 		gitCommit = "latest"
 	}
-	assetReg, err := NewAssetRegistry(staticFS, gitCommit)
+	assetReg, err := NewAssetRegistry(os.DirFS(staticDir), gitCommit)
 	if err != nil {
 		return fmt.Errorf("failed to initialize asset registry: %w", err)
 	}
+
+	sighupCh := make(chan os.Signal, 1)
+	signal.Notify(sighupCh, syscall.SIGHUP)
+	defer signal.Stop(sighupCh)
+
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-sighupCh:
+				log.Println("Received SIGHUP, reloading dashboard static assets...")
+				if err := assetReg.Reload(os.DirFS(staticDir), gitCommit); err != nil {
+					log.Printf("failed to reload dashboard static assets: %v", err)
+				} else {
+					log.Println("Dashboard static assets reloaded successfully")
+				}
+			}
+		}
+	}()
 
 	repos := cfg.GHRepos
 	if len(repos) == 0 && cfg.GHRepo != "" {

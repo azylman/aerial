@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/azylman/aerial/pkg/httpkit"
 )
@@ -22,13 +23,12 @@ type StaticAsset struct {
 }
 
 type AssetRegistry struct {
+	mu     sync.RWMutex
 	assets map[string]StaticAsset
 }
 
-func NewAssetRegistry(fsys fs.FS, versionToken string) (*AssetRegistry, error) {
-	reg := &AssetRegistry{
-		assets: make(map[string]StaticAsset),
-	}
+func buildAssetMap(fsys fs.FS, versionToken string) (map[string]StaticAsset, error) {
+	assets := make(map[string]StaticAsset)
 
 	// 1. Compute content hashes for individual assets
 	var appJSHash, styleCSSHash string
@@ -57,7 +57,7 @@ func NewAssetRegistry(fsys fs.FS, versionToken string) (*AssetRegistry, error) {
 		}
 	}
 
-	// 2. Walk the embedded filesystem and populate registry
+	// 2. Walk the filesystem and populate registry
 	err := fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
@@ -89,7 +89,7 @@ func NewAssetRegistry(fsys fs.FS, versionToken string) (*AssetRegistry, error) {
 		hashStr := hex.EncodeToString(hash[:])
 		etag := fmt.Sprintf(`"%s"`, hashStr[:16])
 
-		reg.assets[cleanPath] = StaticAsset{
+		assets[cleanPath] = StaticAsset{
 			Data:        finalBytes,
 			Hash:        hashStr,
 			ETag:        etag,
@@ -102,7 +102,28 @@ func NewAssetRegistry(fsys fs.FS, versionToken string) (*AssetRegistry, error) {
 		return nil, err
 	}
 
-	return reg, nil
+	return assets, nil
+}
+
+func NewAssetRegistry(fsys fs.FS, versionToken string) (*AssetRegistry, error) {
+	assets, err := buildAssetMap(fsys, versionToken)
+	if err != nil {
+		return nil, err
+	}
+	return &AssetRegistry{
+		assets: assets,
+	}, nil
+}
+
+func (ar *AssetRegistry) Reload(fsys fs.FS, versionToken string) error {
+	built, err := buildAssetMap(fsys, versionToken)
+	if err != nil {
+		return err
+	}
+	ar.mu.Lock()
+	ar.assets = built
+	ar.mu.Unlock()
+	return nil
 }
 
 func (ar *AssetRegistry) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -118,7 +139,9 @@ func (ar *AssetRegistry) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reqPath = "index.html"
 	}
 
+	ar.mu.RLock()
 	asset, exists := ar.assets[reqPath]
+	ar.mu.RUnlock()
 	if !exists {
 		http.NotFound(w, r)
 		return

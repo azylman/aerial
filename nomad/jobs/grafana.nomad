@@ -34,10 +34,12 @@ job "grafana" {
           disable = true
         }
         security_opt = ["no-new-privileges:true"]
-        volumes = [
-          "/mnt/data/supervisor/share/aerial:/share/aerial:ro",
-          "/mnt/data/supervisor/share/aerial-config:/share/aerial-config:ro"
-        ]
+        entrypoint   = ["/bin/sh", "-c", "mkdir -p /local/dashboards/system /local/dashboards/custom && cp -a /local/dashboards-seed/. /local/dashboards/ && exec /run.sh"]
+      }
+
+      artifact {
+        source      = "http://hangar.aerial/internal/artifacts/grafana.tar.gz"
+        destination = "local/dashboards-seed"
       }
 
       env {
@@ -56,6 +58,24 @@ job "grafana" {
         GF_PANELS_DISABLE_SANITIZE_HTML = "true"
         GF_LOG_MODE                    = "console"
         GF_LOG_CONSOLE_FORMAT          = "json"
+      }
+
+      template {
+        data = <<EOH
+{{- if nomadVarExists "nomad/jobs/grafana" -}}
+{{- with nomadVar "nomad/jobs/grafana" -}}
+{{- if .ASSET_HASH -}}{{- .ASSET_HASH -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+EOH
+        destination = "local/assets.sha256"
+        change_mode = "script"
+        change_script {
+          command       = "/bin/sh"
+          args          = ["-c", "rm -rf /tmp/grafana-stage && mkdir -p /tmp/grafana-stage && wget -qO /tmp/grafana.tar.gz http://hangar.aerial/internal/artifacts/grafana.tar.gz && tar -xzf /tmp/grafana.tar.gz -C /tmp/grafana-stage && cp -a /tmp/grafana-stage/system/. /local/dashboards/system/ && cp -a /tmp/grafana-stage/custom/. /local/dashboards/custom/ && rm -rf /tmp/grafana-stage /tmp/grafana.tar.gz"]
+          timeout       = "30s"
+          fail_on_error = false
+        }
       }
 
       template {
@@ -90,7 +110,7 @@ providers:
     updateIntervalSeconds: 30
     allowUiUpdates: false
     options:
-      path: /share/aerial/nomad/grafana/dashboards
+      path: /local/dashboards/system
       foldersFromFilesStructure: true
   - name: 'Aerial Custom'
     orgId: 1
@@ -101,7 +121,7 @@ providers:
     updateIntervalSeconds: 30
     allowUiUpdates: false
     options:
-      path: /share/aerial-config/services/grafana/dashboards
+      path: /local/dashboards/custom
       foldersFromFilesStructure: true
 EOH
         destination = "local/provisioning/dashboards/dashboards.yml"

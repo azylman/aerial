@@ -44,11 +44,34 @@ job "dashboard" {
         ]
       }
 
+      artifact {
+        source      = "http://hangar.aerial/internal/artifacts/dashboard.tar.gz"
+        destination = "local/static"
+      }
+
       env {
         CONFIG_PATH        = "/local/dashboard.yaml"
         AERIAL_CONFIG_PATH = "/local/config.yaml"
         NOMAD_ADDR         = "http://${attr.unique.network.ip-address}:4646"
         GOCOVERDIR         = "/coverage"
+      }
+
+      template {
+        data = <<EOH
+{{- if nomadVarExists "nomad/jobs/dashboard" -}}
+{{- with nomadVar "nomad/jobs/dashboard" -}}
+{{- if .ASSET_HASH -}}{{- .ASSET_HASH -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+EOH
+        destination = "local/assets.sha256"
+        change_mode = "script"
+        change_script {
+          command       = "/bin/sh"
+          args          = ["-c", "rm -rf /tmp/dashboard-stage && mkdir -p /tmp/dashboard-stage && wget -qO /tmp/dashboard.tar.gz http://hangar.aerial/internal/artifacts/dashboard.tar.gz && tar -xzf /tmp/dashboard.tar.gz -C /tmp/dashboard-stage && cp -a /tmp/dashboard-stage/. /local/static/ && rm -rf /tmp/dashboard-stage /tmp/dashboard.tar.gz && kill -HUP 1"]
+          timeout       = "30s"
+          fail_on_error = false
+        }
       }
 
       template {

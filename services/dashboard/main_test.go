@@ -553,6 +553,51 @@ func TestSecurityHeadersMiddleware(t *testing.T) {
 	}
 }
 
+func TestResolveStaticDir(t *testing.T) {
+	tempDirWithIndex := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tempDirWithIndex, "index.html"), []byte("ok"), 0o644); err != nil {
+		t.Fatalf("failed to create test index.html: %v", err)
+	}
+
+	tempDirWithoutIndex := t.TempDir()
+
+	tests := []struct {
+		name       string
+		candidates []string
+		wantDir    string
+	}{
+		{
+			name:       "default_candidates_finds_static",
+			candidates: nil,
+			wantDir:    "static",
+		},
+		{
+			name:       "custom_dir_with_index",
+			candidates: []string{tempDirWithIndex},
+			wantDir:    tempDirWithIndex,
+		},
+		{
+			name:       "first_missing_second_exists",
+			candidates: []string{tempDirWithoutIndex, tempDirWithIndex},
+			wantDir:    tempDirWithIndex,
+		},
+		{
+			name:       "none_matching_fallback_to_static",
+			candidates: []string{tempDirWithoutIndex, "/nonexistent/static/dir"},
+			wantDir:    "static",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveStaticDir(tc.candidates...)
+			if got != tc.wantDir {
+				t.Errorf("resolveStaticDir(%v) = %q, want %q", tc.candidates, got, tc.wantDir)
+			}
+		})
+	}
+}
+
 func TestDashboardServerLifecycle(t *testing.T) {
 	// 1. Bad port errors
 	errBadPort := RunDashboardServer(context.Background(), DashboardConfig{Port: "bad-port-string"})
@@ -614,6 +659,22 @@ func TestDashboardServerLifecycle(t *testing.T) {
 	}
 	if !started {
 		t.Fatalf("server failed to start on %s within deadline", probeAddr)
+	}
+
+	// Send SIGHUP to exercise static asset reload
+	if err := syscall.Kill(syscall.Getpid(), syscall.SIGHUP); err != nil {
+		t.Errorf("failed to send SIGHUP: %v", err)
+	}
+
+	// Verify server remains responsive after SIGHUP
+	resp, err := http.Get("http://" + probeAddr + "/health")
+	if err != nil {
+		t.Errorf("server health check failed after SIGHUP: %v", err)
+	} else {
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("expected 200 OK after SIGHUP, got %d", resp.StatusCode)
+		}
 	}
 
 	cancel()
