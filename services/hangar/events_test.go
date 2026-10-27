@@ -1533,6 +1533,7 @@ func TestExecuteGitPushEvent_AssetBundles_TableDriven(t *testing.T) {
 
 			var pushedVars []string
 			var mu sync.Mutex
+			var revCalls int
 
 			d := NewDaemon(DaemonConfig{
 				Repos:      []string{aerialDir, configDir, mirrormereDir},
@@ -1543,7 +1544,14 @@ func TestExecuteGitPushEvent_AssetBundles_TableDriven(t *testing.T) {
 						return []byte(strings.Join(tc.changedFiles, "\n")), nil, nil
 					}
 					if len(args) > 1 && args[0] == "rev-parse" {
-						return []byte("sha123"), nil, nil
+						mu.Lock()
+						revCalls++
+						c := revCalls
+						mu.Unlock()
+						if c == 1 {
+							return []byte("sha_before\n"), nil, nil
+						}
+						return []byte("sha_after\n"), nil, nil
 					}
 					return []byte(""), nil, nil
 				},
@@ -1570,6 +1578,33 @@ func TestExecuteGitPushEvent_AssetBundles_TableDriven(t *testing.T) {
 			}
 			if resp.ContainersBuilding != tc.wantContainersBuild {
 				t.Errorf("ExecuteGitPushEvent() containersBuilding = %v, want %v", resp.ContainersBuilding, tc.wantContainersBuild)
+			}
+		})
+	}
+}
+
+func TestIsAllZeros_TableDriven(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		input      string
+		wantResult bool
+	}{
+		{"empty string", "", false},
+		{"single zero", "0", true},
+		{"sha of all zeros", "0000000000000000000000000000000000000000", true},
+		{"mixed digits with trailing one", "0000000000000000000000000000000000000001", false},
+		{"letters", "abcdef", false},
+		{"starts with zero but has letter", "000a000", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := isAllZeros(tc.input)
+			if got != tc.wantResult {
+				t.Errorf("isAllZeros(%q) = %v, want %v", tc.input, got, tc.wantResult)
 			}
 		})
 	}

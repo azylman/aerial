@@ -1048,3 +1048,262 @@ func TestSyncAssetBundlesToNomad_TableDriven(t *testing.T) {
 		})
 	}
 }
+
+func TestIsServiceConfigChangedInGit_TableDriven(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		nomadVar     string
+		diffGated    bool
+		checkPaths   []string
+		changedFiles []string
+		wantResult   bool
+	}{
+		{
+			name:         "not diff gated returns true unconditionally",
+			nomadVar:     "nomad/jobs/dashboard",
+			diffGated:    false,
+			checkPaths:   []string{"foo.yaml"},
+			changedFiles: nil,
+			wantResult:   true,
+		},
+		{
+			name:         "diff gated matches direct check path",
+			nomadVar:     "nomad/jobs/dashboard",
+			diffGated:    true,
+			checkPaths:   []string{"services/dashboard/dashboard.yaml"},
+			changedFiles: []string{"services/dashboard/dashboard.yaml"},
+			wantResult:   true,
+		},
+		{
+			name:         "diff gated matches dashboard asset bundle change",
+			nomadVar:     "nomad/jobs/dashboard",
+			diffGated:    true,
+			checkPaths:   []string{"services/dashboard/dashboard.yaml"},
+			changedFiles: []string{"services/dashboard/static/index.html"},
+			wantResult:   true,
+		},
+		{
+			name:         "diff gated matches mirrormere asset bundle change",
+			nomadVar:     "nomad/jobs/mirrormere-core",
+			diffGated:    true,
+			checkPaths:   []string{"services/mirrormere/mirrormere.yaml"},
+			changedFiles: []string{"widgets/clock.js"},
+			wantResult:   true,
+		},
+		{
+			name:         "diff gated with unrelated file for dashboard returns false",
+			nomadVar:     "nomad/jobs/dashboard",
+			diffGated:    true,
+			checkPaths:   []string{"services/dashboard/dashboard.yaml"},
+			changedFiles: []string{"services/eri/main.go"},
+			wantResult:   false,
+		},
+		{
+			name:         "diff gated with unrelated file for mirrormere returns false",
+			nomadVar:     "nomad/jobs/mirrormere-core",
+			diffGated:    true,
+			checkPaths:   []string{"services/mirrormere/mirrormere.yaml"},
+			changedFiles: []string{"services/eri/main.go"},
+			wantResult:   false,
+		},
+		{
+			name:         "diff gated for unknown job returns false",
+			nomadVar:     "nomad/jobs/other",
+			diffGated:    true,
+			checkPaths:   []string{"services/other/config.yaml"},
+			changedFiles: []string{"services/eri/main.go"},
+			wantResult:   false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := isServiceConfigChangedInGit(tc.nomadVar, tc.diffGated, tc.checkPaths, tc.changedFiles)
+			if got != tc.wantResult {
+				t.Errorf("isServiceConfigChangedInGit(%s) = %v, want %v", tc.nomadVar, got, tc.wantResult)
+			}
+		})
+	}
+}
+
+func TestAppendServiceAssetHash_TableDriven(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	composeDir := filepath.Join(tmpDir, "aerial")
+	_ = os.MkdirAll(filepath.Join(composeDir, "services", "dashboard", "static"), 0o755)
+	_ = os.WriteFile(filepath.Join(composeDir, "services", "dashboard", "static", "index.html"), []byte("<h1>Dash</h1>"), 0o644)
+
+	d := &SyncDaemon{
+		composeDir: composeDir,
+		repos:      []string{composeDir},
+	}
+
+	tests := []struct {
+		name        string
+		nomadVar    string
+		configDir   string
+		initialKeys []string
+		initialArgs []string
+		wantKeyLen  int
+		wantArgLen  int
+	}{
+		{
+			name:        "dashboard job appends asset hash",
+			nomadVar:    "nomad/jobs/dashboard",
+			configDir:   tmpDir,
+			initialKeys: []string{"CONFIG_YAML"},
+			initialArgs: []string{"CONFIG_YAML=@path"},
+			wantKeyLen:  2,
+			wantArgLen:  2,
+		},
+		{
+			name:        "other job does not append asset hash",
+			nomadVar:    "nomad/jobs/other",
+			configDir:   tmpDir,
+			initialKeys: []string{"CONFIG_YAML"},
+			initialArgs: []string{"CONFIG_YAML=@path"},
+			wantKeyLen:  1,
+			wantArgLen:  1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var sb strings.Builder
+			gotKeys, gotArgs := d.appendServiceAssetHash(tc.nomadVar, tc.configDir, tc.initialKeys, tc.initialArgs, &sb)
+			if len(gotKeys) != tc.wantKeyLen {
+				t.Errorf("gotKeys len = %d, want %d", len(gotKeys), tc.wantKeyLen)
+			}
+			if len(gotArgs) != tc.wantArgLen {
+				t.Errorf("gotArgs len = %d, want %d", len(gotArgs), tc.wantArgLen)
+			}
+		})
+	}
+}
+
+func TestEnqueuePostSyncReconciliation_TableDriven(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                 string
+		diffOutput           string
+		diffErr              error
+		syncCtx              []ConfigSyncContext
+		wantServerRestart    bool
+		wantPendingNomadJob  string
+		wantReconcileTrigger bool
+	}{
+		{
+			name:                 "nomad daemon config change triggers restart and reconcile",
+			diffOutput:           "nomad/server.hcl\n",
+			diffErr:              nil,
+			syncCtx:              nil,
+			wantServerRestart:    true,
+			wantPendingNomadJob:  "",
+			wantReconcileTrigger: true,
+		},
+		{
+			name:       "nomad job change with sync context records changes",
+			diffOutput: "M\tnomad/jobs/dashboard.nomad\n",
+			diffErr:    nil,
+			syncCtx: []ConfigSyncContext{
+				{
+					Repo:      "azylman/aerial",
+					CommitSHA: "abc1234",
+					TargetID:  "thread-1",
+					PRNumber:  42,
+				},
+			},
+			wantServerRestart:    false,
+			wantPendingNomadJob:  "dashboard",
+			wantReconcileTrigger: true,
+		},
+		{
+			name:                 "nomad job change with empty sync context uses fallback metadata",
+			diffOutput:           "A\tnomad/jobs/bot.nomad\n",
+			diffErr:              nil,
+			syncCtx:              nil,
+			wantServerRestart:    false,
+			wantPendingNomadJob:  "bot",
+			wantReconcileTrigger: true,
+		},
+		{
+			name:       "skip pending nomad in sync context returns early",
+			diffOutput: "M\tnomad/jobs/dashboard.nomad\n",
+			diffErr:    nil,
+			syncCtx: []ConfigSyncContext{
+				{
+					SkipPendingNomad: true,
+				},
+			},
+			wantServerRestart:    false,
+			wantPendingNomadJob:  "",
+			wantReconcileTrigger: false,
+		},
+		{
+			name:                 "git diff error logged safely without panic",
+			diffOutput:           "",
+			diffErr:              errors.New("git diff error"),
+			syncCtx:              nil,
+			wantServerRestart:    false,
+			wantPendingNomadJob:  "",
+			wantReconcileTrigger: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tmpDir := t.TempDir()
+			reconcileCh := make(chan struct{}, 10)
+			d := &SyncDaemon{
+				gitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+					if tc.diffErr != nil {
+						return nil, []byte(tc.diffErr.Error()), tc.diffErr
+					}
+					return []byte(tc.diffOutput), nil, nil
+				},
+				reconcileCh: reconcileCh,
+			}
+
+			d.enqueuePostSyncReconciliation(context.Background(), tmpDir, "sha1", "sha2", tc.syncCtx)
+
+			gotRestart := d.consumePendingNomadServerRestart()
+			if gotRestart != tc.wantServerRestart {
+				t.Errorf("consumePendingNomadServerRestart() = %v, want %v", gotRestart, tc.wantServerRestart)
+			}
+
+			d.pendingNomadMu.Lock()
+			hasChanges := len(d.pendingNomadChanges) > 0
+			var firstJob string
+			if hasChanges && len(d.pendingNomadChanges[0].Changes) > 0 {
+				firstJob = d.pendingNomadChanges[0].Changes[0].JobName
+			}
+			d.pendingNomadMu.Unlock()
+
+			if tc.wantPendingNomadJob != "" {
+				if firstJob != tc.wantPendingNomadJob {
+					t.Errorf("firstJob = %q, want %q", firstJob, tc.wantPendingNomadJob)
+				}
+			} else if hasChanges {
+				t.Errorf("unexpected pending nomad changes: %+v", d.pendingNomadChanges)
+			}
+
+			select {
+			case <-reconcileCh:
+				if !tc.wantReconcileTrigger {
+					t.Errorf("unexpected reconcile trigger")
+				}
+			default:
+				if tc.wantReconcileTrigger {
+					t.Errorf("expected reconcile trigger, got none")
+				}
+			}
+		})
+	}
+}

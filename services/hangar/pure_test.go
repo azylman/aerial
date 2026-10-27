@@ -1680,6 +1680,14 @@ func TestBuildAssetBundleTarGz_TableDriven(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(src1, "test", "ignore.js"), []byte("test"), 0o644)
 	_ = os.WriteFile(filepath.Join(src1, ".hidden"), []byte("skip"), 0o644)
 	_ = os.WriteFile(filepath.Join(src1, "scratch.tmp"), []byte("skip"), 0o644)
+	_ = os.MkdirAll(filepath.Join(src1, ".git"), 0o755)
+	_ = os.WriteFile(filepath.Join(src1, ".git", "config"), []byte("skip"), 0o644)
+	_ = os.MkdirAll(filepath.Join(src1, ".hidden_dir"), 0o755)
+	_ = os.WriteFile(filepath.Join(src1, ".hidden_dir", "file"), []byte("skip"), 0o644)
+	_ = os.MkdirAll(filepath.Join(src1, "build.tmp"), 0o755)
+	_ = os.WriteFile(filepath.Join(src1, "build.tmp", "file"), []byte("skip"), 0o644)
+	fileAsSrc := filepath.Join(tmpDir, "regular_file.txt")
+	_ = os.WriteFile(fileAsSrc, []byte("regular file"), 0o644)
 	_ = os.WriteFile(filepath.Join(src2, "world.txt"), []byte("world"), 0o644)
 
 	tests := []struct {
@@ -1712,6 +1720,10 @@ func TestBuildAssetBundleTarGz_TableDriven(t *testing.T) {
 				"prefix1/test/ignore.js",
 				"prefix1/.hidden",
 				"prefix1/scratch.tmp",
+				"prefix1/.git",
+				"prefix1/.git/config",
+				"prefix1/.hidden_dir",
+				"prefix1/build.tmp",
 			},
 			wantErr: false,
 		},
@@ -1735,6 +1747,18 @@ func TestBuildAssetBundleTarGz_TableDriven(t *testing.T) {
 			excludeRel: nil,
 			wantFiles: []string{
 				"absent/",
+			},
+			dontWantFiles: nil,
+			wantErr:       false,
+		},
+		{
+			name: "file source path is skipped",
+			sources: map[string]string{
+				"file_src": fileAsSrc,
+			},
+			excludeRel: nil,
+			wantFiles: []string{
+				"file_src/",
 			},
 			dontWantFiles: nil,
 			wantErr:       false,

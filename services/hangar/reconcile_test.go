@@ -1240,3 +1240,58 @@ func TestNomadJobReconciliation_TableDriven(t *testing.T) {
 		}
 	})
 }
+
+func TestSleepWithContext_TableDriven(t *testing.T) {
+	t.Parallel()
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	tests := []struct {
+		name       string
+		ctx        context.Context
+		duration   time.Duration
+		wantResult bool
+	}{
+		{
+			name:       "zero duration with active context",
+			ctx:        context.Background(),
+			duration:   0,
+			wantResult: true,
+		},
+		{
+			name:       "negative duration with active context",
+			ctx:        context.Background(),
+			duration:   -time.Second,
+			wantResult: true,
+		},
+		{
+			name:       "zero duration with canceled context",
+			ctx:        canceledCtx,
+			duration:   0,
+			wantResult: false,
+		},
+		{
+			name:       "positive duration with canceled context returns false immediately",
+			ctx:        canceledCtx,
+			duration:   5 * time.Second,
+			wantResult: false,
+		},
+		{
+			name:       "short positive duration with active context elapses",
+			ctx:        context.Background(),
+			duration:   time.Millisecond,
+			wantResult: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := sleepWithContext(tc.ctx, tc.duration)
+			if got != tc.wantResult {
+				t.Errorf("sleepWithContext() = %v, want %v", got, tc.wantResult)
+			}
+		})
+	}
+}

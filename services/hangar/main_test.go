@@ -905,10 +905,15 @@ func TestHandleArtifactBundle_TableDriven(t *testing.T) {
 	_ = os.MkdirAll(filepath.Join(configDir, "homepage"), 0o755)
 	_ = os.WriteFile(filepath.Join(configDir, "homepage", "services.yaml"), []byte("services: []\n"), 0o644)
 
+	_ = os.MkdirAll(filepath.Join(mirrormereDir, "web"), 0o755)
+	_ = os.WriteFile(filepath.Join(mirrormereDir, "web", "index.html"), []byte("<h1>Mirrormere</h1>"), 0o644)
+	_ = os.MkdirAll(filepath.Join(mirrormereDir, "widgets"), 0o755)
+	_ = os.WriteFile(filepath.Join(mirrormereDir, "widgets", "clock.js"), []byte("// clock"), 0o644)
+
 	d := &SyncDaemon{
 		composeDir: composeDir,
 		configDir:  configDir,
-		repos:      []string{composeDir, configDir, mirrormereDir},
+		repos:      []string{composeDir, configDir},
 	}
 	handler := SetupMux(d)
 
@@ -940,6 +945,14 @@ func TestHandleArtifactBundle_TableDriven(t *testing.T) {
 			name:            "homepage bundle with excluded test",
 			method:          http.MethodGet,
 			url:             "/internal/artifacts/homepage.tar.gz",
+			wantStatusCode:  http.StatusOK,
+			wantContentType: "application/gzip",
+			wantHeaderHash:  true,
+		},
+		{
+			name:            "mirrormere bundle with compose dir fallback resolution",
+			method:          http.MethodGet,
+			url:             "/internal/artifacts/mirrormere.tar.gz",
 			wantStatusCode:  http.StatusOK,
 			wantContentType: "application/gzip",
 			wantHeaderHash:  true,
