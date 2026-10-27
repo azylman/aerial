@@ -199,13 +199,12 @@ func (s *RouterServer) fetchLatestRoboRevComment(ctx context.Context, repo strin
 }
 
 func (s *RouterServer) dispatchCIFailurePrompt(ctx context.Context, targetID, checkName, repo, headSHA string, prNum int, details, checkURL string, branchOpt ...string) error {
-	dmMsg := fmt.Sprintf("❌ %sCI check %q failed. Following up...", formatDirectMessagePrefix(prNum, repo), checkName)
 	if prNum > 0 && s.registry != nil {
 		if _, isPg := s.registry.(*PostgresPRRegistry); isPg {
 			banner := fmt.Sprintf("CI check %q failed", checkName)
 			s.setPRWidgetState(ctx, repo, prNum, "", banner)
-			if err := s.SyncPRWidget(ctx, repo, prNum); err == nil {
-				dmMsg = ""
+			if err := s.SyncPRWidget(ctx, repo, prNum); err != nil {
+				log.Printf("[webhooks-router] [widget] warning syncing ci_failed widget: %v", err)
 			}
 		}
 	}
@@ -229,7 +228,9 @@ func (s *RouterServer) dispatchCIFailurePrompt(ctx context.Context, targetID, ch
 		details, extraLine,
 		directive,
 	)
-	return s.dispatchAlertWithPrompt(ctx, targetID, "ci_failed", dmMsg, prompt, s.vanadisPromptOpts(ctx, repo, prNum))
+	opts := s.vanadisPromptOpts(ctx, repo, prNum)
+	opts.silent = true
+	return s.dispatchAlertWithPrompt(ctx, targetID, "ci_failed", "", prompt, opts)
 }
 
 func (s *RouterServer) completeCIFailureTransition(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) error {
