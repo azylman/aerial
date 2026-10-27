@@ -37,14 +37,6 @@ job "roborev-runner" {
         image              = "ghcr.io/azylman/aerial-roborev-runner:${var.image_tag}"
         dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
-        mounts = [
-          {
-            type     = "volume"
-            target   = "/mnt/gemini-auth"
-            source   = "aerial-brain-gemini"
-            readonly = true
-          }
-        ]
       }
 
       env {
@@ -65,6 +57,19 @@ EOH
         change_mode = "restart"
       }
 
+      template {
+        data = <<EOH
+{{- if nomadVarExists "nomad/jobs/shared" -}}
+{{- with nomadVar "nomad/jobs/shared" -}}
+{{- if .ANTIGRAVITY_OAUTH_TOKEN -}}{{- .ANTIGRAVITY_OAUTH_TOKEN -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+EOH
+        destination = "secrets/antigravity-oauth-token"
+        perms       = "0600"
+        change_mode = "restart"
+      }
+
       resources {
         cpu        = 100
         memory     = 512
@@ -82,14 +87,6 @@ EOH
         image              = "ghcr.io/azylman/aerial-roborev-runner:${var.image_tag}"
         dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
-        mounts = [
-          {
-            type     = "volume"
-            target   = "/mnt/gemini-auth"
-            source   = "aerial-brain-gemini"
-            readonly = true
-          }
-        ]
       }
 
       env {
@@ -110,6 +107,19 @@ EOH
         change_mode = "restart"
       }
 
+      template {
+        data = <<EOH
+{{- if nomadVarExists "nomad/jobs/shared" -}}
+{{- with nomadVar "nomad/jobs/shared" -}}
+{{- if .ANTIGRAVITY_OAUTH_TOKEN -}}{{- .ANTIGRAVITY_OAUTH_TOKEN -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+EOH
+        destination = "secrets/antigravity-oauth-token"
+        perms       = "0600"
+        change_mode = "restart"
+      }
+
       resources {
         cpu        = 100
         memory     = 512
@@ -127,14 +137,6 @@ EOH
         image              = "ghcr.io/azylman/aerial-roborev-runner:${var.image_tag}"
         dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
-        mounts = [
-          {
-            type     = "volume"
-            target   = "/mnt/gemini-auth"
-            source   = "aerial-brain-gemini"
-            readonly = true
-          }
-        ]
       }
 
       env {
@@ -155,6 +157,19 @@ EOH
         change_mode = "restart"
       }
 
+      template {
+        data = <<EOH
+{{- if nomadVarExists "nomad/jobs/shared" -}}
+{{- with nomadVar "nomad/jobs/shared" -}}
+{{- if .ANTIGRAVITY_OAUTH_TOKEN -}}{{- .ANTIGRAVITY_OAUTH_TOKEN -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+EOH
+        destination = "secrets/antigravity-oauth-token"
+        perms       = "0600"
+        change_mode = "restart"
+      }
+
       resources {
         cpu        = 100
         memory     = 512
@@ -172,14 +187,6 @@ EOH
         image              = "ghcr.io/azylman/aerial-roborev-runner:${var.image_tag}"
         dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
-        mounts = [
-          {
-            type     = "volume"
-            target   = "/mnt/gemini-auth"
-            source   = "aerial-brain-gemini"
-            readonly = true
-          }
-        ]
       }
 
       env {
@@ -197,6 +204,19 @@ EOH
 EOH
         destination = "secrets/runner.env"
         env         = true
+        change_mode = "restart"
+      }
+
+      template {
+        data = <<EOH
+{{- if nomadVarExists "nomad/jobs/shared" -}}
+{{- with nomadVar "nomad/jobs/shared" -}}
+{{- if .ANTIGRAVITY_OAUTH_TOKEN -}}{{- .ANTIGRAVITY_OAUTH_TOKEN -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+EOH
+        destination = "secrets/antigravity-oauth-token"
+        perms       = "0600"
         change_mode = "restart"
       }
 

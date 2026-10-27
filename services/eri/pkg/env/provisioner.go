@@ -11,18 +11,20 @@ import (
 	"sync"
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
+	"github.com/google/uuid"
 )
 
 // Provisioner manages filesystem provisioning and synchronization of ~/.gemini runtime environments.
 type Provisioner struct {
-	homeDir         string
-	dataDir         string
-	customSkillsDir string
-	superpowersDir  string
-	agentsSkillsDir string
-	aerialRulesDir  string
-	configRulesDir  string
-	hooksDir        string
+	homeDir              string
+	dataDir              string
+	customSkillsDir      string
+	superpowersDir       string
+	agentsSkillsDir      string
+	aerialRulesDir       string
+	configRulesDir       string
+	hooksDir             string
+	oauthTokenSourcePath string
 
 	mu sync.Mutex
 }
@@ -45,14 +47,15 @@ func New(homeDir, dataDir string) *Provisioner {
 		agentsSkillsDir = "/app/.agents/skills"
 	}
 	return &Provisioner{
-		homeDir:         strings.TrimSpace(homeDir),
-		dataDir:         strings.TrimSpace(dataDir),
-		customSkillsDir: "/share/aerial-config/custom-skills",
-		superpowersDir:  skillsDir,
-		agentsSkillsDir: agentsSkillsDir,
-		aerialRulesDir:  "/share/aerial/rules",
-		configRulesDir:  "/share/aerial-config/rules",
-		hooksDir:        "/share/aerial/scripts/hooks",
+		homeDir:              strings.TrimSpace(homeDir),
+		dataDir:              strings.TrimSpace(dataDir),
+		customSkillsDir:      "/share/aerial-config/custom-skills",
+		superpowersDir:       skillsDir,
+		agentsSkillsDir:      agentsSkillsDir,
+		aerialRulesDir:       "/share/aerial/rules",
+		configRulesDir:       "/share/aerial-config/rules",
+		hooksDir:             "/share/aerial/scripts/hooks",
+		oauthTokenSourcePath: "/secrets/antigravity-oauth-token",
 	}
 }
 
@@ -66,6 +69,69 @@ func NewFromConfig(cfg *config.Config) *Provisioner {
 
 func (p *Provisioner) runtimeHomeDir(t RuleTarget) string {
 	return filepath.Join(p.dataDir, "runtimes", string(t))
+}
+
+func fileMissingOrEmpty(path string) bool {
+	data, err := os.ReadFile(path)
+	return err != nil || len(strings.TrimSpace(string(data))) == 0
+}
+
+func formatJetskiState(installID string) string {
+	return fmt.Sprintf(`post_onboarding:  {
+  completed_steps:  POST_ONBOARDING_STEP_TYPE_MANAGER_WELCOME
+  completed_steps:  POST_ONBOARDING_STEP_TYPE_USAGE_MODE
+  completed_steps:  POST_ONBOARDING_STEP_TYPE_AGENT_CONFIGURATION
+  completed_steps:  POST_ONBOARDING_STEP_TYPE_ADD_WORKSPACE
+}
+installation_uuid:  %q
+migrations:  {
+  key:  3
+  value:  MIGRATION_STATUS_COMPLETED
+}
+migrations:  {
+  key:  4
+  value:  MIGRATION_STATUS_COMPLETED
+}
+migrations:  {
+  key:  5
+  value:  MIGRATION_STATUS_COMPLETED
+}
+`, installID)
+}
+
+func (p *Provisioner) provisionOAuthState(configDir string) error {
+	p.mu.Lock()
+	srcPath := p.oauthTokenSourcePath
+	p.mu.Unlock()
+
+	tokenDest := filepath.Join(configDir, "antigravity-oauth-token")
+	if srcPath != "" && fileMissingOrEmpty(tokenDest) {
+		if srcData, err := os.ReadFile(srcPath); err == nil && len(strings.TrimSpace(string(srcData))) > 0 {
+			if err := os.WriteFile(tokenDest, srcData, 0o600); err != nil {
+				return fmt.Errorf("failed to seed antigravity-oauth-token: %w", err)
+			}
+		}
+	}
+
+	installIDPath := filepath.Join(configDir, "installation_id")
+	var installID string
+	if existingID, err := os.ReadFile(installIDPath); err == nil && len(strings.TrimSpace(string(existingID))) > 0 {
+		installID = strings.TrimSpace(string(existingID))
+	} else {
+		installID = uuid.New().String()
+		if err := os.WriteFile(installIDPath, []byte(installID+"\n"), 0o600); err != nil {
+			return fmt.Errorf("failed to write installation_id: %w", err)
+		}
+	}
+
+	jetskiPath := filepath.Join(configDir, "jetski_state.pbtxt")
+	if fileMissingOrEmpty(jetskiPath) {
+		if err := os.WriteFile(jetskiPath, []byte(formatJetskiState(installID)), 0o600); err != nil {
+			return fmt.Errorf("failed to write jetski_state.pbtxt: %w", err)
+		}
+	}
+
+	return nil
 }
 
 // SyncSettings writes ~/.gemini/antigravity-cli/settings.json matching the authentication mode.
@@ -95,6 +161,15 @@ func (p *Provisioner) SyncSettings(apiKey, model string) error {
 			delete(settings, "modelProvider")
 		}
 		delete(settings, "apiKey")
+		if _, exists := settings["useG1Credits"]; !exists {
+			settings["useG1Credits"] = true
+		}
+		if _, exists := settings["trustedWorkspaces"]; !exists {
+			settings["trustedWorkspaces"] = []string{"/app"}
+		}
+		if err := p.provisionOAuthState(configDir); err != nil {
+			return err
+		}
 	} else {
 		// API Key authentication mode
 		settings["apiKey"] = apiKey

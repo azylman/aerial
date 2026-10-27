@@ -32,19 +32,46 @@ Global Aerial Stack & Cluster Invariants (applies across all repositories):
 EOF
 chmod 0600 /root/.roborev/config.toml
 
-# Symlink ONLY antigravity-oauth-token, installation_id, and jetski_state.pbtxt from /mnt/gemini-auth/antigravity-cli/
-AUTH_SRC="/mnt/gemini-auth/antigravity-cli"
-if [ -d "${AUTH_SRC}" ]; then
-  for item in antigravity-oauth-token installation_id jetski_state.pbtxt; do
-    if [ -e "${AUTH_SRC}/${item}" ]; then
-      ln -sf "${AUTH_SRC}/${item}" "/root/.gemini/antigravity-cli/${item}"
-    fi
-  done
+# Seed antigravity-oauth-token as a writable 0600 file from /secrets/antigravity-oauth-token
+if [ -s "/secrets/antigravity-oauth-token" ]; then
+  cp -f "/secrets/antigravity-oauth-token" "/root/.gemini/antigravity-cli/antigravity-oauth-token"
+  chmod 0600 "/root/.gemini/antigravity-cli/antigravity-oauth-token"
 fi
 
+# Generate installation_id if not already present
+if [ ! -s "/root/.gemini/antigravity-cli/installation_id" ]; then
+  cat /proc/sys/kernel/random/uuid > "/root/.gemini/antigravity-cli/installation_id"
+  chmod 0600 "/root/.gemini/antigravity-cli/installation_id"
+fi
+INSTALLATION_ID=$(tr -d '\r\n' < "/root/.gemini/antigravity-cli/installation_id")
+
+# Pre-populate jetski_state.pbtxt with completed onboarding steps and migrations
+cat > "/root/.gemini/antigravity-cli/jetski_state.pbtxt" <<EOF
+post_onboarding:  {
+  completed_steps:  POST_ONBOARDING_STEP_TYPE_MANAGER_WELCOME
+  completed_steps:  POST_ONBOARDING_STEP_TYPE_USAGE_MODE
+  completed_steps:  POST_ONBOARDING_STEP_TYPE_AGENT_CONFIGURATION
+  completed_steps:  POST_ONBOARDING_STEP_TYPE_ADD_WORKSPACE
+}
+installation_uuid:  "${INSTALLATION_ID}"
+migrations:  {
+  key:  3
+  value:  MIGRATION_STATUS_COMPLETED
+}
+migrations:  {
+  key:  4
+  value:  MIGRATION_STATUS_COMPLETED
+}
+migrations:  {
+  key:  5
+  value:  MIGRATION_STATUS_COMPLETED
+}
+EOF
+chmod 0600 "/root/.gemini/antigravity-cli/jetski_state.pbtxt"
+
 # Pre-populate /root/.gemini/antigravity-cli/permissions.json with read-only review tool permissions
-# and merge with Brain's /mnt/gemini-auth/antigravity-cli/settings.json (inheriting useG1Credits, model, etc.)
-# so concurrent agy review goroutines inherit Brain settings without racing on settings.json updates.
+# and merge with base defaults into /root/.gemini/antigravity-cli/settings.json
+# so concurrent agy review goroutines inherit settings without racing on updates.
 cat > /root/.gemini/antigravity-cli/permissions.json <<'EOF'
 {
   "permissions": {
@@ -130,17 +157,17 @@ cat > /usr/local/bin/sync-gemini-settings <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-AUTH_SETTINGS="${AUTH_SRC:-/mnt/gemini-auth/antigravity-cli}/settings.json"
+BASE_DEFAULTS='{"model": "gemini-4-argon-high", "trustedWorkspaces": ["/app", "/actions-runner"], "useG1Credits": true}'
 PERMS_FILE="/root/.gemini/antigravity-cli/permissions.json"
 TARGET_SETTINGS="/root/.gemini/antigravity-cli/settings.json"
 TMP_SETTINGS="/root/.gemini/antigravity-cli/.settings.json.tmp.$$"
 
 trap 'rm -f "${TMP_SETTINGS}"' EXIT
 
-if [ -f "${AUTH_SETTINGS}" ] && jq -e 'type == "object"' "${AUTH_SETTINGS}" >/dev/null 2>&1; then
-  jq -s '.[0] * .[1]' "${AUTH_SETTINGS}" "${PERMS_FILE}" > "${TMP_SETTINGS}"
+if [ -f "${PERMS_FILE}" ] && jq -e 'type == "object"' "${PERMS_FILE}" >/dev/null 2>&1; then
+  jq -n --argjson base "${BASE_DEFAULTS}" --slurpfile perms "${PERMS_FILE}" '$base * $perms[0]' > "${TMP_SETTINGS}"
 else
-  cp "${PERMS_FILE}" "${TMP_SETTINGS}"
+  echo "${BASE_DEFAULTS}" | jq '.' > "${TMP_SETTINGS}"
 fi
 
 chmod 0600 "${TMP_SETTINGS}"
