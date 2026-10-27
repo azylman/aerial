@@ -245,7 +245,7 @@ func TestBuildSystemPrompt(t *testing.T) {
 				"HOLD MUSIC & SILENCE RULE",
 				"DTMF & PHONE TREES",
 				"CALLER PERSPECTIVE & PARTY FRAMING (NO FIRST-PERSON IMPERSONATION)",
-				"one of the guests in the party",
+				"one of the people in the group",
 				"MANDATORY TOOL LOOKUP (NO GUESSING)",
 				"politely decline other dates directly without calling 'consult_calendar'",
 				"Zero spend authorized.",
