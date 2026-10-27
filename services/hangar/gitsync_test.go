@@ -912,3 +912,139 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 		}
 	})
 }
+
+func TestSyncAssetBundlesToNomad_TableDriven(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                 string
+		diffGated            bool
+		changedFiles         []string
+		wantDocsPushed       bool
+		wantGrafanaPushed    bool
+		wantDashboardPushed  bool
+		wantMirrormerePushed bool
+	}{
+		{
+			name:                 "full sync without diff gating pushes all bundles",
+			diffGated:            false,
+			changedFiles:         nil,
+			wantDocsPushed:       true,
+			wantGrafanaPushed:    true,
+			wantDashboardPushed:  true,
+			wantMirrormerePushed: true,
+		},
+		{
+			name:                 "diff gated with docs changed only",
+			diffGated:            true,
+			changedFiles:         []string{"services/docs-service/app/index.html"},
+			wantDocsPushed:       true,
+			wantGrafanaPushed:    false,
+			wantDashboardPushed:  false,
+			wantMirrormerePushed: false,
+		},
+		{
+			name:                 "diff gated with grafana dashboard changed only",
+			diffGated:            true,
+			changedFiles:         []string{"nomad/grafana/dashboards/sys.json"},
+			wantDocsPushed:       false,
+			wantGrafanaPushed:    true,
+			wantDashboardPushed:  false,
+			wantMirrormerePushed: false,
+		},
+		{
+			name:                 "diff gated with dashboard static asset changed",
+			diffGated:            true,
+			changedFiles:         []string{"services/dashboard/static/app.js"},
+			wantDocsPushed:       false,
+			wantGrafanaPushed:    false,
+			wantDashboardPushed:  true,
+			wantMirrormerePushed: false,
+		},
+		{
+			name:                 "diff gated with mirrormere widget changed",
+			diffGated:            true,
+			changedFiles:         []string{"widgets/weather.js"},
+			wantDocsPushed:       false,
+			wantGrafanaPushed:    false,
+			wantDashboardPushed:  false,
+			wantMirrormerePushed: true,
+		},
+		{
+			name:                 "diff gated with unrelated file changed",
+			diffGated:            true,
+			changedFiles:         []string{"services/eri/main.go"},
+			wantDocsPushed:       false,
+			wantGrafanaPushed:    false,
+			wantDashboardPushed:  false,
+			wantMirrormerePushed: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := newNomadConfigSyncTestEnv(t)
+			ctx := context.Background()
+
+			composeDir := filepath.Join(env.configDir, "aerial")
+			mirrormereDir := filepath.Join(env.configDir, "mirrormere")
+			_ = os.MkdirAll(filepath.Join(composeDir, "services", "dashboard", "static"), 0o755)
+			_ = os.WriteFile(filepath.Join(composeDir, "services", "dashboard", "static", "index.html"), []byte("<h1>Dash</h1>"), 0o644)
+			_ = os.MkdirAll(filepath.Join(composeDir, "services", "docs-service", "app"), 0o755)
+			_ = os.WriteFile(filepath.Join(composeDir, "services", "docs-service", "app", "index.html"), []byte("<h1>Docs</h1>"), 0o644)
+			_ = os.MkdirAll(filepath.Join(composeDir, "nomad", "grafana", "dashboards"), 0o755)
+			_ = os.WriteFile(filepath.Join(composeDir, "nomad", "grafana", "dashboards", "sys.json"), []byte("{}"), 0o644)
+			_ = os.MkdirAll(filepath.Join(mirrormereDir, "web"), 0o755)
+			_ = os.WriteFile(filepath.Join(mirrormereDir, "web", "index.html"), []byte("<h1>Mirrormere</h1>"), 0o644)
+			_ = os.MkdirAll(filepath.Join(env.configDir, "services", "mirrormere"), 0o755)
+			_ = os.WriteFile(filepath.Join(env.configDir, "services", "mirrormere", "mirrormere.yaml"), []byte("port: 8080\n"), 0o644)
+
+			env.daemon.composeDir = composeDir
+			env.daemon.repos = []string{composeDir, env.configDir, mirrormereDir}
+			env.daemon.serviceConfigs = []ServiceConfigMapping{
+				{RelPath: "services/dashboard/dashboard.yaml", NomadVar: "nomad/jobs/dashboard", VarKey: "CONFIG_YAML"},
+			}
+
+			var syncCtx []ConfigSyncContext
+			if tc.diffGated {
+				syncCtx = append(syncCtx, ConfigSyncContext{
+					DiffGated:    true,
+					ChangedFiles: tc.changedFiles,
+				})
+			}
+
+			err := env.daemon.SyncAssetBundlesToNomad(ctx, env.configDir, syncCtx...)
+			if err != nil {
+				t.Fatalf("SyncAssetBundlesToNomad failed: %v", err)
+			}
+
+			calls := env.nomadCalls()
+			joinedCalls := make([]string, len(calls))
+			for i, c := range calls {
+				joinedCalls[i] = strings.Join(c, " ")
+			}
+			allCalls := strings.Join(joinedCalls, " | ")
+
+			docsFound := strings.Contains(allCalls, "var put -force nomad/jobs/docs ASSET_HASH=")
+			if docsFound != tc.wantDocsPushed {
+				t.Errorf("docs push = %v, want %v (calls: %s)", docsFound, tc.wantDocsPushed, allCalls)
+			}
+
+			grafanaFound := strings.Contains(allCalls, "var put -force nomad/jobs/grafana ASSET_HASH=")
+			if grafanaFound != tc.wantGrafanaPushed {
+				t.Errorf("grafana push = %v, want %v (calls: %s)", grafanaFound, tc.wantGrafanaPushed, allCalls)
+			}
+
+			dashboardFound := strings.Contains(allCalls, "var put -force nomad/jobs/dashboard") && strings.Contains(allCalls, "ASSET_HASH=")
+			if dashboardFound != tc.wantDashboardPushed {
+				t.Errorf("dashboard push = %v, want %v (calls: %s)", dashboardFound, tc.wantDashboardPushed, allCalls)
+			}
+
+			mirrormereFound := strings.Contains(allCalls, "var put -force nomad/jobs/mirrormere-core") && strings.Contains(allCalls, "ASSET_HASH=")
+			if mirrormereFound != tc.wantMirrormerePushed {
+				t.Errorf("mirrormere push = %v, want %v (calls: %s)", mirrormereFound, tc.wantMirrormerePushed, allCalls)
+			}
+		})
+	}
+}

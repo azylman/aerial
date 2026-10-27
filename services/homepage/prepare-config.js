@@ -11,8 +11,15 @@ const {
   mergeCustomCss
 } = require('./lib/merge');
 
+function resolveDefaultUserDir(existsFn = fs.existsSync) {
+  if (existsFn('/local/user-homepage')) {
+    return '/local/user-homepage';
+  }
+  return '/share/aerial-config/homepage';
+}
+
 const CORE_DIR = process.env.CORE_CONFIG_DIR || '/app/core-homepage/config';
-const USER_DIR = process.env.USER_CONFIG_DIR || '/share/aerial-config/homepage';
+const USER_DIR = process.env.USER_CONFIG_DIR || resolveDefaultUserDir();
 const TARGET_DIR = process.env.TARGET_CONFIG_DIR || '/config';
 
 function resolveYamlParser() {
@@ -102,7 +109,7 @@ function copyFallback(srcDir, dstDir) {
 
 function run(dirs = {}) {
   const coreDir = dirs.coreDir || process.env.CORE_CONFIG_DIR || CORE_DIR;
-  const userDir = dirs.userDir || process.env.USER_CONFIG_DIR || USER_DIR;
+  const userDir = dirs.userDir || process.env.USER_CONFIG_DIR || resolveDefaultUserDir();
   const targetDir = dirs.targetDir || process.env.TARGET_CONFIG_DIR || TARGET_DIR;
 
   console.log(`[prepare-config] Initializing Homepage configuration...`);
@@ -265,6 +272,7 @@ if (require.main === module) {
 
 module.exports = {
   run,
+  resolveDefaultUserDir,
   resolveYamlParser,
   parseYaml,
   safeRead,

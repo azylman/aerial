@@ -298,11 +298,27 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 		return d.handleAerialConfigPush(ctx, repoPath, req, sc, resp, changedFiles, nomadChanges, expectedJobs)
 	}
 
+	return d.handleAuxiliaryRepoPush(ctx, cleanRepo, changedFiles, resp)
+}
+
+func (d *SyncDaemon) handleAuxiliaryRepoPush(ctx context.Context, cleanRepo string, changedFiles []string, resp GitPushEventResponse) (GitPushEventResponse, int) {
+	if strings.Contains(cleanRepo, "mirrormere") && d.configDir != "" {
+		if err := d.SyncAssetBundlesToNomad(ctx, d.configDir, ConfigSyncContext{DiffGated: true, ChangedFiles: changedFiles}); err != nil {
+			log.Printf("[Hangar:GitPush] Notice: SyncAssetBundlesToNomad: %v", err)
+		}
+	}
 	resp.Message = "repository synced"
 	return resp, http.StatusOK
 }
 
 func (d *SyncDaemon) handleAerialCorePush(ctx context.Context, repoPath string, req GitPushEventRequest, resp GitPushEventResponse, changedFiles []string, errDiff error, nomadChanges []NomadFileChange, errNomad error, expectedJobs []string) (GitPushEventResponse, int) {
+	if d.configDir != "" && (AssetBundleChangedInList("dashboard", changedFiles) ||
+		AssetBundleChangedInList("docs", changedFiles) ||
+		AssetBundleChangedInList("grafana", changedFiles) ||
+		AssetBundleChangedInList("homepage", changedFiles)) {
+		d.syncAllConfigsToNomad(ctx, "[Hangar:GitPush]", d.configDir, ConfigSyncContext{DiffGated: true, ChangedFiles: changedFiles})
+	}
+
 	containersBuilding := errDiff == nil && HasContainerBuildChanges(repoPath, changedFiles)
 	if containersBuilding {
 		resp.ContainersBuilding = true

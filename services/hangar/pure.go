@@ -1,11 +1,17 @@
 package main
 
 import (
+	"archive/tar"
 	"bufio"
 	"bytes"
+	"compress/gzip"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"io/fs"
 	"net/url"
 	"os"
 	"os/exec"
@@ -611,6 +617,11 @@ func serviceBuildDependsOnPkg(svc string) bool {
 	}
 }
 
+func isStaticAssetOnlyFile(clean string) bool {
+	c := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(clean)), "/")
+	return strings.HasPrefix(c, "services/dashboard/static/") || strings.HasPrefix(c, "services/docs-service/app/")
+}
+
 // JobHasContainerBuildChanges returns true if any azylman/aerial container image referenced
 // in jobSpec has matching source file modifications in changedFiles.
 func JobHasContainerBuildChanges(jobSpec string, changedFiles []string) bool {
@@ -628,6 +639,9 @@ func JobHasContainerBuildChanges(jobSpec string, changedFiles []string) bool {
 		}
 		for _, f := range changedFiles {
 			clean := strings.TrimPrefix(path.Clean(strings.ReplaceAll(strings.TrimSpace(f), "\\", "/")), "/")
+			if isStaticAssetOnlyFile(clean) {
+				continue
+			}
 			if clean == "Dockerfile" || clean == ".dockerignore" {
 				return true
 			}
@@ -923,6 +937,9 @@ func HasContainerBuildChanges(repoPath string, changedFiles []string) bool {
 	for _, file := range changedFiles {
 		cleanFile := strings.TrimPrefix(filepath.Clean(file), "/")
 		cleanFile = strings.ReplaceAll(cleanFile, "\\", "/")
+		if isStaticAssetOnlyFile(cleanFile) {
+			continue
+		}
 		for _, buildPath := range CoreBuildPaths {
 			if strings.HasSuffix(buildPath, "/") {
 				if strings.HasPrefix(cleanFile, buildPath) {
@@ -933,6 +950,168 @@ func HasContainerBuildChanges(repoPath string, changedFiles []string) bool {
 					return true
 				}
 			}
+		}
+	}
+	return false
+}
+
+// ResolveAssetBundleSources maps a bundle name ("migrations", "dashboard", "docs", "grafana", "homepage", "mirrormere")
+// to its prefix->sourceDir map and excluded relative paths.
+func ResolveAssetBundleSources(bundle, composeDir, configDir, mirrormereDir string) (map[string]string, []string, error) {
+	switch strings.Trim(strings.TrimSuffix(strings.Trim(filepath.ToSlash(bundle), "/"), ".tar.gz"), "/") {
+	case "migrations":
+		return map[string]string{".": filepath.Join(composeDir, "services/eri/pkg/db/migrations")}, nil, nil
+	case "dashboard":
+		return map[string]string{".": filepath.Join(composeDir, "services/dashboard/static")}, nil, nil
+	case "docs":
+		return map[string]string{"app": filepath.Join(composeDir, "services/docs-service/app"), "content": filepath.Join(configDir, "docs")}, nil, nil
+	case "grafana":
+		return map[string]string{"system": filepath.Join(composeDir, "nomad/grafana/dashboards"), "custom": filepath.Join(configDir, "services/grafana/dashboards")}, nil, nil
+	case "homepage":
+		return map[string]string{"core-homepage": filepath.Join(composeDir, "services/homepage"), "user-homepage": filepath.Join(configDir, "homepage")}, []string{"core-homepage/test"}, nil
+	case "mirrormere":
+		return map[string]string{"web": filepath.Join(mirrormereDir, "web"), "widgets": filepath.Join(mirrormereDir, "widgets")}, nil, nil
+	}
+	return nil, nil, fmt.Errorf("unknown asset bundle: %s", bundle)
+}
+
+func writeTarFile(tw *tar.Writer, p, arcPath string, d fs.DirEntry) error {
+	info, err := d.Info()
+	if err != nil {
+		return err
+	}
+	if d.IsDir() {
+		return tw.WriteHeader(&tar.Header{Name: arcPath + "/", Typeflag: tar.TypeDir, Mode: 0o755, ModTime: time.Unix(0, 0).UTC()})
+	}
+	mode := int64(0o644)
+	if info.Mode()&0o111 != 0 || strings.HasSuffix(strings.ToLower(d.Name()), ".sh") {
+		mode = 0o755
+	}
+	if err := tw.WriteHeader(&tar.Header{Name: arcPath, Typeflag: tar.TypeReg, Mode: mode, Size: info.Size(), ModTime: time.Unix(0, 0).UTC()}); err != nil {
+		return err
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(tw, f)
+	if cErr := f.Close(); copyErr == nil {
+		copyErr = cErr
+	}
+	return copyErr
+}
+
+func walkTarSource(tw *tar.Writer, prefix, srcDir string, excludeRelPaths []string) error {
+	stat, err := os.Stat(srcDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if !stat.IsDir() {
+		return nil
+	}
+	return filepath.WalkDir(srcDir, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil || p == srcDir {
+			return walkErr
+		}
+		if name := d.Name(); name == ".git" || strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".tmp") {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !d.Type().IsRegular() && !d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(srcDir, p)
+		if err != nil {
+			return err
+		}
+		arcPath := filepath.ToSlash(rel)
+		if prefix != "" {
+			arcPath = prefix + "/" + arcPath
+		}
+		for _, excl := range excludeRelPaths {
+			if c := strings.Trim(filepath.ToSlash(excl), "/"); c != "" && (arcPath == c || strings.HasPrefix(arcPath, c+"/")) {
+				if d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+		}
+		return writeTarFile(tw, p, arcPath, d)
+	})
+}
+
+// BuildAssetBundleTarGz packs one or more source directories (mapped to archive prefixes)
+// into a deterministic gzip-compressed tar archive and returns the raw bytes and hex SHA-256 digest.
+func BuildAssetBundleTarGz(sources map[string]string, excludeRelPaths ...string) ([]byte, string, error) {
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	gw.ModTime = time.Unix(0, 0).UTC()
+	tw := tar.NewWriter(gw)
+
+	prefixes := make([]string, 0, len(sources))
+	for p := range sources {
+		prefixes = append(prefixes, p)
+	}
+	sort.Strings(prefixes)
+	for _, prefixKey := range prefixes {
+		prefix := strings.Trim(filepath.ToSlash(prefixKey), "/")
+		if prefix == "." {
+			prefix = ""
+		}
+		if prefix != "" && tw.WriteHeader(&tar.Header{Name: prefix + "/", Typeflag: tar.TypeDir, Mode: 0o755, ModTime: time.Unix(0, 0).UTC()}) != nil {
+			return nil, "", fmt.Errorf("failed writing tar header for %s", prefix)
+		}
+		if err := walkTarSource(tw, prefix, sources[prefixKey], excludeRelPaths); err != nil {
+			return nil, "", err
+		}
+	}
+	if err := tw.Close(); err != nil {
+		return nil, "", err
+	}
+	if err := gw.Close(); err != nil {
+		return nil, "", err
+	}
+	sum := sha256.Sum256(buf.Bytes())
+	return buf.Bytes(), hex.EncodeToString(sum[:]), nil
+}
+
+func isJobMatch(clean, job string) bool {
+	return clean == "nomad/jobs/"+job+".nomad" || clean == "jobs/"+job+".nomad"
+}
+
+func isHomepageBundleFile(clean string) bool {
+	return isJobMatch(clean, "homepage") || clean == "services/homepage/homepage.yaml" || clean == "homepage" || strings.HasPrefix(clean, "homepage/") || (strings.HasPrefix(clean, "services/homepage/") && !strings.HasPrefix(clean, "services/homepage/test/"))
+}
+
+func matchBundleFile(b, clean string) bool {
+	switch b {
+	case "dashboard":
+		return strings.HasPrefix(clean, "services/dashboard/static/") || isJobMatch(clean, "dashboard")
+	case "docs":
+		return strings.HasPrefix(clean, "services/docs-service/app/") || strings.HasPrefix(clean, "docs/") || clean == "docs" || isJobMatch(clean, "docs")
+	case "grafana":
+		return strings.HasPrefix(clean, "nomad/grafana/dashboards/") || strings.HasPrefix(clean, "services/grafana/dashboards/") || isJobMatch(clean, "grafana")
+	case "homepage":
+		return isHomepageBundleFile(clean)
+	case "mirrormere":
+		return isJobMatch(clean, "mirrormere-core") || clean == "web" || strings.HasPrefix(clean, "web/") || clean == "widgets" || strings.HasPrefix(clean, "widgets/")
+	case "migrations":
+		return strings.HasPrefix(clean, "services/eri/pkg/db/migrations/") || isJobMatch(clean, "db-migrate")
+	}
+	return false
+}
+
+// AssetBundleChangedInList evaluates whether any changed file affects the specified asset bundle.
+func AssetBundleChangedInList(bundle string, changedFiles []string) bool {
+	b := strings.Trim(strings.TrimSuffix(strings.ToLower(strings.TrimSpace(bundle)), ".tar.gz"), "/")
+	for _, f := range changedFiles {
+		if matchBundleFile(b, strings.TrimPrefix(filepath.ToSlash(filepath.Clean(strings.TrimSpace(f))), "/")) {
+			return true
 		}
 	}
 	return false

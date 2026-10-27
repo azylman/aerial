@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -371,6 +372,26 @@ func (d *SyncDaemon) pushNomadConfigVar(ctx context.Context, cacheKey, nomadVar,
 	return true, nil
 }
 
+func (d *SyncDaemon) pushNomadVarQuiet(ctx context.Context, cacheKey, nomadVar, jobName, configHash string, isChangedInGit bool, varArgs []string) (bool, error) {
+	return d.pushNomadConfigVar(ctx, cacheKey, nomadVar, jobName, configHash, isChangedInGit, varArgs, nil)
+}
+
+func (d *SyncDaemon) computeBundleHash(bundle, configDir string) string {
+	mirrormereDir := ResolveRepoPath("mirrormere", d.repos)
+	if mirrormereDir == "" && d.composeDir != "" {
+		mirrormereDir = filepath.Join(filepath.Dir(d.composeDir), "mirrormere")
+	}
+	sources, excludes, err := ResolveAssetBundleSources(bundle, d.composeDir, configDir, mirrormereDir)
+	if err != nil {
+		return ""
+	}
+	_, hash, err := BuildAssetBundleTarGz(sources, excludes...)
+	if err != nil {
+		return ""
+	}
+	return hash
+}
+
 func (d *SyncDaemon) syncAllConfigsToNomad(ctx context.Context, logPrefix, configDir string, syncCtx ...ConfigSyncContext) {
 	if err := d.SyncBrainConfigToNomad(ctx, configDir, syncCtx...); err != nil {
 		log.Printf("%s Notice: SyncBrainConfigToNomad: %v", logPrefix, err)
@@ -380,6 +401,9 @@ func (d *SyncDaemon) syncAllConfigsToNomad(ctx context.Context, logPrefix, confi
 	}
 	if err := d.SyncServiceConfigsToNomad(ctx, configDir, syncCtx...); err != nil {
 		log.Printf("%s Notice: SyncServiceConfigsToNomad: %v", logPrefix, err)
+	}
+	if err := d.SyncAssetBundlesToNomad(ctx, configDir, syncCtx...); err != nil {
+		log.Printf("%s Notice: SyncAssetBundlesToNomad: %v", logPrefix, err)
 	}
 }
 
@@ -485,14 +509,22 @@ func (d *SyncDaemon) SyncHomepageConfigToNomad(ctx context.Context, configDir st
 		}
 	}
 
+	assetHash := d.computeBundleHash("homepage", configDir)
+	if assetHash != "" {
+		h.Write([]byte("assetHash:" + assetHash + "\n"))
+	}
+
 	configHash := hex.EncodeToString(h.Sum(nil))
 
 	diffGated := len(syncCtx) > 0 && syncCtx[0].DiffGated
-	isChangedInGit := !diffGated || homepageInChangedList(syncCtx[0].ChangedFiles)
+	isChangedInGit := !diffGated || homepageInChangedList(syncCtx[0].ChangedFiles) || AssetBundleChangedInList("homepage", syncCtx[0].ChangedFiles)
 
 	varArgs := []string{"CONFIG_HASH=" + configHash}
 	if len(raw) > 0 {
 		varArgs = append(varArgs, "HOMEPAGE_YAML=@"+homepageConfigPath)
+	}
+	if assetHash != "" {
+		varArgs = append(varArgs, "ASSET_HASH="+assetHash)
 	}
 
 	pushed, err := d.pushNomadConfigVar(ctx, "nomad/jobs/homepage", "nomad/jobs/homepage", "homepage", configHash, isChangedInGit, varArgs, syncCtx)
@@ -601,20 +633,22 @@ func (d *SyncDaemon) SyncServiceConfigsToNomad(ctx context.Context, configDir st
 			h.Write(raw)
 			h.Write([]byte("\n"))
 		}
+		varKeys, varArgs = d.appendServiceAssetHash(nomadVar, configDir, varKeys, varArgs, h)
+
 		if len(varArgs) == 0 {
 			continue
 		}
 		jobName := strings.TrimPrefix(nomadVar, "nomad/jobs/")
 		checkPaths = append(checkPaths, "jobs/"+jobName+".nomad", "nomad/jobs/"+jobName+".nomad")
 		var configHash string
-		if len(varArgs) == 1 {
+		if len(varArgs) == 1 && len(varKeys) == 1 && varKeys[0] != "ASSET_HASH" {
 			sum := sha256.Sum256(singleRaw)
 			configHash = hex.EncodeToString(sum[:])
 		} else {
 			configHash = hex.EncodeToString(h.Sum(nil))
 		}
 		cacheKey := nomadVar + ":" + strings.Join(varKeys, "+")
-		isChangedInGit := !diffGated || anyFileInChangedList(checkPaths, changedFiles)
+		isChangedInGit := isServiceConfigChangedInGit(nomadVar, diffGated, checkPaths, changedFiles)
 		pushed, err := d.pushNomadConfigVar(ctx, cacheKey, nomadVar, jobName, configHash, isChangedInGit, varArgs, syncCtx)
 		if err != nil {
 			return err
@@ -624,6 +658,74 @@ func (d *SyncDaemon) SyncServiceConfigsToNomad(ctx context.Context, configDir st
 		}
 	}
 	return nil
+}
+
+// SyncAssetBundlesToNomad computes asset bundle hashes and synchronizes ASSET_HASH to Nomad variables
+// for docs, grafana, dashboard (on static changes), and mirrormere-core without emitting deploy_started events.
+func (d *SyncDaemon) SyncAssetBundlesToNomad(ctx context.Context, configDir string, syncCtx ...ConfigSyncContext) error {
+	diffGated := len(syncCtx) > 0 && syncCtx[0].DiffGated
+	var changedFiles []string
+	if len(syncCtx) > 0 {
+		changedFiles = syncCtx[0].ChangedFiles
+	}
+
+	var firstErr error
+	recordErr := func(err error) {
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+
+	if docsHash := d.computeBundleHash("docs", configDir); docsHash != "" {
+		isChanged := !diffGated || AssetBundleChangedInList("docs", changedFiles)
+		if _, err := d.pushNomadVarQuiet(ctx, "nomad/jobs/docs:ASSET_HASH", "nomad/jobs/docs", "docs", docsHash, isChanged, []string{"ASSET_HASH=" + docsHash}); err != nil {
+			log.Printf("[Hangar:Nomad] Notice: SyncAssetBundlesToNomad (docs): %v", err)
+			recordErr(err)
+		}
+	}
+
+	if grafanaHash := d.computeBundleHash("grafana", configDir); grafanaHash != "" {
+		isChanged := !diffGated || AssetBundleChangedInList("grafana", changedFiles)
+		if _, err := d.pushNomadVarQuiet(ctx, "nomad/jobs/grafana:ASSET_HASH", "nomad/jobs/grafana", "grafana", grafanaHash, isChanged, []string{"ASSET_HASH=" + grafanaHash}); err != nil {
+			log.Printf("[Hangar:Nomad] Notice: SyncAssetBundlesToNomad (grafana): %v", err)
+			recordErr(err)
+		}
+	}
+
+	if !diffGated || AssetBundleChangedInList("dashboard", changedFiles) {
+		if err := d.SyncServiceConfigsToNomad(ctx, configDir); err != nil {
+			log.Printf("[Hangar:Nomad] Notice: SyncAssetBundlesToNomad (dashboard): %v", err)
+			recordErr(err)
+		}
+	}
+
+	if mirrormereHash := d.computeBundleHash("mirrormere", configDir); mirrormereHash != "" {
+		mirrormereYamlPath := filepath.Join(configDir, "services", "mirrormere", "mirrormere.yaml")
+		varKeys := []string{"ASSET_HASH"}
+		varArgs := []string{"ASSET_HASH=" + mirrormereHash}
+		h := sha256.New()
+		h.Write([]byte("ASSET_HASH:" + mirrormereHash + "\n"))
+
+		raw, err := readAndValidateYAML(mirrormereYamlPath, "mirrormere config", nil)
+		if err == nil && len(raw) > 0 {
+			varKeys = append(varKeys, "CONFIG_YAML")
+			varArgs = append(varArgs, "CONFIG_YAML=@"+mirrormereYamlPath)
+			h.Write([]byte("CONFIG_YAML:"))
+			h.Write(raw)
+			h.Write([]byte("\n"))
+		}
+
+		isChanged := !diffGated || AssetBundleChangedInList("mirrormere", changedFiles)
+		cacheKey := "nomad/jobs/mirrormere-core:" + strings.Join(varKeys, "+")
+		configHash := hex.EncodeToString(h.Sum(nil))
+
+		if _, err := d.pushNomadVarQuiet(ctx, cacheKey, "nomad/jobs/mirrormere-core", "mirrormere-core", configHash, isChanged, varArgs); err != nil {
+			log.Printf("[Hangar:Nomad] Notice: SyncAssetBundlesToNomad (mirrormere): %v", err)
+			recordErr(err)
+		}
+	}
+
+	return firstErr
 }
 
 // StartPeriodicLoop runs the background ticker loop.
@@ -793,4 +895,38 @@ func (d *SyncDaemon) GetStatus(ctx context.Context) HangarStatusResponse {
 	resp.Status = CalculateSyncStatus(resp.Repos)
 
 	return resp
+}
+
+func (d *SyncDaemon) appendServiceAssetHash(nomadVar, configDir string, varKeys, varArgs []string, h io.Writer) ([]string, []string) {
+	var bundle string
+	switch nomadVar {
+	case "nomad/jobs/dashboard":
+		bundle = "dashboard"
+	case "nomad/jobs/mirrormere-core":
+		bundle = "mirrormere"
+	default:
+		return varKeys, varArgs
+	}
+	if assetHash := d.computeBundleHash(bundle, configDir); assetHash != "" {
+		varKeys = append(varKeys, "ASSET_HASH")
+		varArgs = append(varArgs, "ASSET_HASH="+assetHash)
+		if _, err := h.Write([]byte("ASSET_HASH:" + assetHash + "\n")); err != nil {
+			return varKeys, varArgs
+		}
+	}
+	return varKeys, varArgs
+}
+
+func isServiceConfigChangedInGit(nomadVar string, diffGated bool, checkPaths, changedFiles []string) bool {
+	if !diffGated || anyFileInChangedList(checkPaths, changedFiles) {
+		return true
+	}
+	switch nomadVar {
+	case "nomad/jobs/dashboard":
+		return AssetBundleChangedInList("dashboard", changedFiles)
+	case "nomad/jobs/mirrormere-core":
+		return AssetBundleChangedInList("mirrormere", changedFiles)
+	default:
+		return false
+	}
 }

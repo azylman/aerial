@@ -888,3 +888,106 @@ func TestHangarHelpers_TableDriven(t *testing.T) {
 		}
 	})
 }
+
+func TestHandleArtifactBundle_TableDriven(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	composeDir := filepath.Join(tmpDir, "aerial")
+	configDir := filepath.Join(tmpDir, "aerial-config")
+	mirrormereDir := filepath.Join(tmpDir, "mirrormere")
+
+	_ = os.MkdirAll(filepath.Join(composeDir, "services", "dashboard", "static"), 0o755)
+	_ = os.WriteFile(filepath.Join(composeDir, "services", "dashboard", "static", "index.html"), []byte("<h1>Dashboard</h1>"), 0o644)
+
+	_ = os.MkdirAll(filepath.Join(composeDir, "services", "homepage"), 0o755)
+	_ = os.WriteFile(filepath.Join(composeDir, "services", "homepage", "entrypoint.sh"), []byte("#!/bin/sh\n"), 0o755)
+	_ = os.MkdirAll(filepath.Join(configDir, "homepage"), 0o755)
+	_ = os.WriteFile(filepath.Join(configDir, "homepage", "services.yaml"), []byte("services: []\n"), 0o644)
+
+	d := &SyncDaemon{
+		composeDir: composeDir,
+		configDir:  configDir,
+		repos:      []string{composeDir, configDir, mirrormereDir},
+	}
+	handler := SetupMux(d)
+
+	tests := []struct {
+		name            string
+		method          string
+		url             string
+		wantStatusCode  int
+		wantContentType string
+		wantHeaderHash  bool
+	}{
+		{
+			name:            "dashboard tar gz bundle",
+			method:          http.MethodGet,
+			url:             "/internal/artifacts/dashboard.tar.gz",
+			wantStatusCode:  http.StatusOK,
+			wantContentType: "application/gzip",
+			wantHeaderHash:  true,
+		},
+		{
+			name:            "dashboard raw bundle without extension",
+			method:          http.MethodGet,
+			url:             "/internal/artifacts/dashboard",
+			wantStatusCode:  http.StatusOK,
+			wantContentType: "application/gzip",
+			wantHeaderHash:  true,
+		},
+		{
+			name:            "homepage bundle with excluded test",
+			method:          http.MethodGet,
+			url:             "/internal/artifacts/homepage.tar.gz",
+			wantStatusCode:  http.StatusOK,
+			wantContentType: "application/gzip",
+			wantHeaderHash:  true,
+		},
+		{
+			name:            "unknown bundle returns 404",
+			method:          http.MethodGet,
+			url:             "/internal/artifacts/nonexistent.tar.gz",
+			wantStatusCode:  http.StatusNotFound,
+			wantContentType: "application/json",
+			wantHeaderHash:  false,
+		},
+		{
+			name:            "empty bundle name returns 400",
+			method:          http.MethodGet,
+			url:             "/internal/artifacts/",
+			wantStatusCode:  http.StatusBadRequest,
+			wantContentType: "application/json",
+			wantHeaderHash:  false,
+		},
+		{
+			name:            "disallowed POST method returns 405",
+			method:          http.MethodPost,
+			url:             "/internal/artifacts/dashboard.tar.gz",
+			wantStatusCode:  http.StatusMethodNotAllowed,
+			wantContentType: "text/plain",
+			wantHeaderHash:  false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req := httptest.NewRequest(tc.method, tc.url, nil)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatusCode {
+				t.Errorf("HandleArtifactBundle(%s %s) code = %d, want %d (body: %s)", tc.method, tc.url, rec.Code, tc.wantStatusCode, rec.Body.String())
+			}
+			ct := rec.Header().Get("Content-Type")
+			if !strings.HasPrefix(ct, tc.wantContentType) {
+				t.Errorf("HandleArtifactBundle(%s %s) content-type = %s, want prefix %s", tc.method, tc.url, ct, tc.wantContentType)
+			}
+			hash := rec.Header().Get("X-Asset-Hash")
+			if tc.wantHeaderHash && hash == "" {
+				t.Errorf("HandleArtifactBundle(%s %s) missing expected X-Asset-Hash header", tc.method, tc.url)
+			}
+		})
+	}
+}

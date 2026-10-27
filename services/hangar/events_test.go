@@ -1484,3 +1484,93 @@ func TestImageRolloutQueue_TableDriven(t *testing.T) {
 		}
 	})
 }
+
+func TestExecuteGitPushEvent_AssetBundles_TableDriven(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                string
+		repoName            string
+		changedFiles        []string
+		wantContainersBuild bool
+		wantStatus          string
+	}{
+		{
+			name:                "aerial core push with static asset change only",
+			repoName:            "aerial",
+			changedFiles:        []string{"services/dashboard/static/app.js"},
+			wantContainersBuild: false,
+			wantStatus:          "accepted",
+		},
+		{
+			name:                "aerial core push with docs service app static change only",
+			repoName:            "aerial",
+			changedFiles:        []string{"services/docs-service/app/index.html"},
+			wantContainersBuild: false,
+			wantStatus:          "accepted",
+		},
+		{
+			name:                "mirrormere push triggers asset bundle sync",
+			repoName:            "mirrormere",
+			changedFiles:        []string{"web/index.html"},
+			wantContainersBuild: false,
+			wantStatus:          "accepted",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tmpDir := t.TempDir()
+			aerialDir := filepath.Join(tmpDir, "aerial")
+			configDir := filepath.Join(tmpDir, "aerial-config")
+			mirrormereDir := filepath.Join(tmpDir, "mirrormere")
+
+			_ = os.MkdirAll(filepath.Join(aerialDir, ".git"), 0o755)
+			_ = os.MkdirAll(filepath.Join(configDir, ".git"), 0o755)
+			_ = os.MkdirAll(filepath.Join(mirrormereDir, ".git"), 0o755)
+			_ = os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("channels:\n  default: {}\n"), 0o644)
+
+			var pushedVars []string
+			var mu sync.Mutex
+
+			d := NewDaemon(DaemonConfig{
+				Repos:      []string{aerialDir, configDir, mirrormereDir},
+				ComposeDir: aerialDir,
+				ConfigDir:  configDir,
+				GitExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
+					if len(args) > 0 && args[0] == "diff" {
+						return []byte(strings.Join(tc.changedFiles, "\n")), nil, nil
+					}
+					if len(args) > 1 && args[0] == "rev-parse" {
+						return []byte("sha123"), nil, nil
+					}
+					return []byte(""), nil, nil
+				},
+				NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+					mu.Lock()
+					pushedVars = append(pushedVars, strings.Join(args, " "))
+					mu.Unlock()
+					return []byte("ok"), nil, nil
+				},
+				NomadAddr: "http://127.0.0.1:4646",
+			})
+
+			ctx := context.Background()
+			resp, code := d.ExecuteGitPushEvent(ctx, GitPushEventRequest{
+				Repo: tc.repoName,
+				Ref:  "refs/heads/main",
+			})
+
+			if code != http.StatusOK {
+				t.Fatalf("ExecuteGitPushEvent() code = %d, want 200 (msg: %s)", code, resp.Message)
+			}
+			if resp.Status != tc.wantStatus {
+				t.Errorf("ExecuteGitPushEvent() status = %q, want %q", resp.Status, tc.wantStatus)
+			}
+			if resp.ContainersBuilding != tc.wantContainersBuild {
+				t.Errorf("ExecuteGitPushEvent() containersBuilding = %v, want %v", resp.ContainersBuilding, tc.wantContainersBuild)
+			}
+		})
+	}
+}

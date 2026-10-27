@@ -6,16 +6,27 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const prepareConfig = require('../prepare-config');
-const { run, resolveYamlParser, parseYaml, safeRead, writeAtomic, copyFallback } = prepareConfig;
+const { run, resolveDefaultUserDir, resolveYamlParser, parseYaml, safeRead, writeAtomic, copyFallback } = prepareConfig;
 
 test('prepare-config: exports correct functions and omits startWatcher', () => {
   assert.equal(typeof run, 'function');
+  assert.equal(typeof resolveDefaultUserDir, 'function');
   assert.equal(typeof resolveYamlParser, 'function');
   assert.equal(typeof parseYaml, 'function');
   assert.equal(typeof safeRead, 'function');
   assert.equal(typeof writeAtomic, 'function');
   assert.equal(typeof copyFallback, 'function');
   assert.equal(prepareConfig.startWatcher, undefined);
+});
+
+test('prepare-config: resolveDefaultUserDir prefers /local/user-homepage when present', () => {
+  const dir = resolveDefaultUserDir((p) => p === '/local/user-homepage');
+  assert.equal(dir, '/local/user-homepage');
+});
+
+test('prepare-config: resolveDefaultUserDir falls back to /share/aerial-config/homepage when /local/user-homepage absent', () => {
+  const dir = resolveDefaultUserDir(() => false);
+  assert.equal(dir, '/share/aerial-config/homepage');
 });
 
 test('prepare-config: run executes clean one-shot merge', () => {
