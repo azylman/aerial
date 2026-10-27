@@ -464,79 +464,67 @@ func TestResolveConfigPathWithLocal_TableDriven(t *testing.T) {
 }
 
 func TestHandleCoverageFlush_TableDriven(t *testing.T) {
-	// Not t.Parallel() because it mutates package variables WriteCountersDirFn/WriteMetaDirFn and env
+	// Not t.Parallel() because it mutates package variables WriteCountersDirFn/WriteMetaDirFn and TMPDIR
 	origCounters := WriteCountersDirFn
 	origMeta := WriteMetaDirFn
 	defer func() {
 		WriteCountersDirFn = origCounters
 		WriteMetaDirFn = origMeta
-		os.Unsetenv("GOCOVERDIR")
 	}()
 
 	tests := []struct {
 		name           string
-		jsonResp       bool
-		covDir         string
+		invalidTmpDir  bool
+		writeDummyFile bool
 		metaErr        error
 		countersErr    error
 		wantStatus     int
+		wantCT         string
 		wantBodySubstr string
 	}{
 		{
-			name:           "json response without gocoverdir",
-			jsonResp:       true,
-			covDir:         "",
+			name:           "successful flush streams tar archive",
+			writeDummyFile: true,
 			wantStatus:     http.StatusOK,
-			wantBodySubstr: `{"status":"flushed"}`,
+			wantCT:         "application/x-tar",
+			wantBodySubstr: "covmeta.test",
 		},
 		{
-			name:           "plain text response without gocoverdir",
-			jsonResp:       false,
-			covDir:         "",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: "ok\n",
+			name:       "meta error still succeeds when counters succeed",
+			metaErr:    errors.New("meta failure"),
+			wantStatus: http.StatusOK,
+			wantCT:     "application/x-tar",
 		},
 		{
-			name:           "gocoverdir set with successful flush",
-			jsonResp:       false,
-			covDir:         "/tmp/coverage",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: "ok\n",
-		},
-		{
-			name:           "gocoverdir set with meta error but successful counters",
-			jsonResp:       false,
-			covDir:         "/tmp/coverage",
-			metaErr:        errors.New("meta failure"),
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: "ok\n",
-		},
-		{
-			name:           "gocoverdir set with counters error returns 500",
-			jsonResp:       false,
-			covDir:         "/tmp/coverage",
+			name:           "counters error returns 500",
 			countersErr:    errors.New("counters write failed"),
 			wantStatus:     http.StatusInternalServerError,
 			wantBodySubstr: "counters write failed",
+		},
+		{
+			name:          "mkdirtemp error returns 500",
+			invalidTmpDir: true,
+			wantStatus:    http.StatusInternalServerError,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.covDir != "" {
-				os.Setenv("GOCOVERDIR", tc.covDir)
-			} else {
-				os.Unsetenv("GOCOVERDIR")
+			if tc.invalidTmpDir {
+				t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "nonexistent", "subdir"))
 			}
 
-			WriteMetaDirFn = func(string) error {
+			WriteMetaDirFn = func(dir string) error {
+				if tc.writeDummyFile {
+					_ = os.WriteFile(filepath.Join(dir, "covmeta.test"), []byte("meta-bytes"), 0o600)
+				}
 				return tc.metaErr
 			}
 			WriteCountersDirFn = func(string) error {
 				return tc.countersErr
 			}
 
-			handler := HandleCoverageFlush("test-svc", tc.jsonResp)
+			handler := HandleCoverageFlush("test-svc")
 			req := httptest.NewRequest(http.MethodPost, "/debug/coverage/flush", nil)
 			rec := httptest.NewRecorder()
 
@@ -545,7 +533,10 @@ func TestHandleCoverageFlush_TableDriven(t *testing.T) {
 			if rec.Code != tc.wantStatus {
 				t.Errorf("HandleCoverageFlush status = %d, want %d", rec.Code, tc.wantStatus)
 			}
-			if !strings.Contains(rec.Body.String(), tc.wantBodySubstr) {
+			if tc.wantCT != "" && rec.Header().Get("Content-Type") != tc.wantCT {
+				t.Errorf("HandleCoverageFlush Content-Type = %q, want %q", rec.Header().Get("Content-Type"), tc.wantCT)
+			}
+			if tc.wantBodySubstr != "" && !strings.Contains(rec.Body.String(), tc.wantBodySubstr) {
 				t.Errorf("HandleCoverageFlush body = %q, want substring %q", rec.Body.String(), tc.wantBodySubstr)
 			}
 		})

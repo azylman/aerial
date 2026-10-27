@@ -38,9 +38,6 @@ job "webhooks-router" {
         healthchecks {
           disable = true
         }
-        volumes = [
-          "/mnt/data/supervisor/share/coverage/webhooks-router:/coverage:rw",
-        ]
       }
 
       env {
@@ -52,7 +49,6 @@ job "webhooks-router" {
         VANADIS_URL   = "http://vanadis.aerial"
         HARO_URL      = "http://haro.aerial"
         PORT          = "4020"
-        GOCOVERDIR  = "/coverage"
       }
 
       template {

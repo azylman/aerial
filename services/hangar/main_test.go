@@ -451,21 +451,6 @@ func TestSetupMuxAndDaemonLifecycle_TableDriven(t *testing.T) {
 
 	t.Run("coverage_flush_endpoint", func(t *testing.T) {
 		mux := SetupMux(&SyncDaemon{})
-		orig := os.Getenv("GOCOVERDIR")
-		_ = os.Unsetenv("GOCOVERDIR")
-		defer func() {
-			if orig != "" {
-				_ = os.Setenv("GOCOVERDIR", orig)
-			} else {
-				_ = os.Unsetenv("GOCOVERDIR")
-			}
-		}()
-
-		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/debug/coverage/flush", nil))
-		if rec.Code != http.StatusOK {
-			t.Errorf("expected 200 OK without GOCOVERDIR, got: %d", rec.Code)
-		}
 
 		oldFn, oldMetaFn := httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn
 		defer func() { httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn = oldFn, oldMetaFn }()
@@ -479,7 +464,6 @@ func TestSetupMuxAndDaemonLifecycle_TableDriven(t *testing.T) {
 			metaCalled = true
 			return nil
 		}
-		_ = os.Setenv("GOCOVERDIR", t.TempDir())
 
 		rec2 := httptest.NewRecorder()
 		mux.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/debug/coverage/flush", nil))

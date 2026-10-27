@@ -38,13 +38,9 @@ job "haro" {
         healthchecks {
           disable = true
         }
-        volumes = [
-          "/mnt/data/supervisor/share/coverage/haro:/coverage:rw",
-        ]
       }
 
       env {
-        GOCOVERDIR = "/coverage"
         BRAIN_INTERNAL_URL = "http://eri.aerial"
         VANADIS_URL = "http://vanadis.aerial"
       }

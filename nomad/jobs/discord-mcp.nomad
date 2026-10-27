@@ -39,13 +39,6 @@ job "discord-mcp" {
         healthchecks {
           disable = true
         }
-        volumes = [
-          "/mnt/data/supervisor/share/coverage/discord-mcp:/coverage:rw",
-        ]
-      }
-
-      env {
-        GOCOVERDIR = "/coverage"
       }
 
       template {

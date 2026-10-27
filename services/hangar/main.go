@@ -460,7 +460,7 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 		writeJSON(w, r, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
-	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("hangar", false))
+	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("hangar"))
 
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		if !requireMethod(w, r, http.MethodGet) {

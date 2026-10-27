@@ -499,27 +499,19 @@ func TestCoverageFlushEndpoint_TableDriven(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		useDir     bool
 		metaErr    error
 		counterErr error
 		wantStatus int
 	}{
-		{"without GOCOVERDIR", false, nil, nil, http.StatusOK},
-		{"with GOCOVERDIR success", true, nil, nil, http.StatusOK},
-		{"with GOCOVERDIR meta error ignored", true, errors.New("meta err"), nil, http.StatusOK},
-		{"with GOCOVERDIR counter error returns 500", true, nil, errors.New("counter err"), http.StatusInternalServerError},
+		{"flush success", nil, nil, http.StatusOK},
+		{"flush meta error ignored", errors.New("meta err"), nil, http.StatusOK},
+		{"flush counter error returns 500", nil, errors.New("counter err"), http.StatusInternalServerError},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			oldFn, oldMetaFn := httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn
 			t.Cleanup(func() { httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn = oldFn, oldMetaFn })
-
-			if tc.useDir {
-				t.Setenv("GOCOVERDIR", t.TempDir())
-			} else {
-				_ = os.Unsetenv("GOCOVERDIR")
-			}
 
 			httpkit.WriteCountersDirFn = func(dir string) error { return tc.counterErr }
 			httpkit.WriteMetaDirFn = func(dir string) error { return tc.metaErr }

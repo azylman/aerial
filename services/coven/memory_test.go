@@ -1501,7 +1501,6 @@ func TestServer_Endpoints(t *testing.T) {
 		path       string
 		headers    map[string]string
 		body       string
-		coverDir   string
 		counterErr error
 		storeFail  string
 		directMCP  bool
@@ -1520,15 +1519,12 @@ func TestServer_Endpoints(t *testing.T) {
 			name:       "CoverageFlush",
 			method:     http.MethodGet,
 			path:       "/debug/coverage/flush",
-			coverDir:   t.TempDir(),
 			wantStatus: http.StatusOK,
-			wantSubstr: "ok",
 		},
 		{
 			name:       "CoverageFlushError",
 			method:     http.MethodGet,
 			path:       "/debug/coverage/flush",
-			coverDir:   t.TempDir(),
 			counterErr: errors.New("flush err"),
 			wantStatus: http.StatusInternalServerError,
 		},
@@ -1681,7 +1677,6 @@ func TestServer_Endpoints(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("GOCOVERDIR", tc.coverDir)
 			httpkit.WriteCountersDirFn = func(string) error { return tc.counterErr }
 			httpkit.WriteMetaDirFn = func(string) error { return tc.counterErr }
 			if tc.storeFail != "" {

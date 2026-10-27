@@ -554,16 +554,6 @@ func TestCoverageFlushEndpoint(t *testing.T) {
 	ts := httptest.NewServer(server.Routes())
 	defer ts.Close()
 
-	orig := os.Getenv("GOCOVERDIR")
-	_ = os.Unsetenv("GOCOVERDIR")
-	defer func() {
-		if orig != "" {
-			_ = os.Setenv("GOCOVERDIR", orig)
-		} else {
-			_ = os.Unsetenv("GOCOVERDIR")
-		}
-	}()
-
 	doFlush := func(wantStatus int) {
 		t.Helper()
 		resp, err := http.Get(ts.URL + "/debug/coverage/flush")
@@ -572,8 +562,6 @@ func TestCoverageFlushEndpoint(t *testing.T) {
 		}
 		_ = resp.Body.Close()
 	}
-
-	doFlush(http.StatusOK)
 
 	oldFn, oldMetaFn := httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn
 	defer func() { httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn = oldFn, oldMetaFn }()
@@ -587,7 +575,6 @@ func TestCoverageFlushEndpoint(t *testing.T) {
 		metaCalled = true
 		return nil
 	}
-	_ = os.Setenv("GOCOVERDIR", t.TempDir())
 
 	doFlush(http.StatusOK)
 	if !called || !metaCalled {

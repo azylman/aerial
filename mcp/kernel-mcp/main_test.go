@@ -348,7 +348,6 @@ func startMainFakeCDPServer(t *testing.T) (*httptest.Server, *Config) {
 }
 
 func TestServer_HTTPRoutesTable(t *testing.T) {
-	t.Setenv("GOCOVERDIR", "")
 	oldCountersFn := httpkit.WriteCountersDirFn
 	oldMetaFn := httpkit.WriteMetaDirFn
 	httpkit.WriteCountersDirFn = func(dir string) error { return nil }
@@ -396,7 +395,6 @@ func TestServer_HTTPRoutesTable(t *testing.T) {
 			method:     http.MethodGet,
 			path:       "/debug/coverage/flush",
 			wantStatus: http.StatusOK,
-			wantSubstr: "ok",
 		},
 		{
 			name:       "mcp GET returns ready banner",

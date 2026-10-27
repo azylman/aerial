@@ -42,7 +42,6 @@ job "vanadis" {
           "/mnt/data/supervisor/share/aerial:/share/aerial:ro",
           "/mnt/data/supervisor/share/aerial-config:/share/aerial-config:ro",
           "/mnt/data/supervisor/share/mirrormere:/share/mirrormere:ro",
-          "/mnt/data/supervisor/share/coverage/vanadis:/coverage:rw",
         ]
       }
 
@@ -50,7 +49,6 @@ job "vanadis" {
         CONFIG_PATH   = "/local/vanadis.yaml"
         BRAIN_URL     = "http://eri.aerial"
         PORT          = "4025"
-        GOCOVERDIR    = "/coverage"
       }
 
       template {

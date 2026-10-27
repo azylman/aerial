@@ -113,7 +113,7 @@ func (s *RouterServer) Routes() http.Handler {
 	mux.HandleFunc("POST /webhooks/hangar", s.handleHangarWebhook)
 	mux.HandleFunc("POST /api/webhooks/events", s.handleEventsWebhook)
 	mux.HandleFunc("POST /webhooks/events", s.handleEventsWebhook)
-	coverageFlush := httpkit.HandleCoverageFlush("webhooks-router", true)
+	coverageFlush := httpkit.HandleCoverageFlush("webhooks-router")
 	mux.HandleFunc("POST /debug/coverage/flush", coverageFlush)
 	mux.HandleFunc("GET /debug/coverage/flush", coverageFlush)
 	return mux

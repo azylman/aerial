@@ -38,9 +38,6 @@ job "dashboard" {
         healthchecks {
           disable = true
         }
-        volumes = [
-          "/mnt/data/supervisor/share/coverage/dashboard:/coverage:rw"
-        ]
       }
 
       artifact {
@@ -52,7 +49,6 @@ job "dashboard" {
         CONFIG_PATH        = "/local/dashboard.yaml"
         AERIAL_CONFIG_PATH = "/local/config.yaml"
         NOMAD_ADDR         = "http://${attr.unique.network.ip-address}:4646"
-        GOCOVERDIR         = "/coverage"
       }
 
       template {

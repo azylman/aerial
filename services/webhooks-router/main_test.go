@@ -1580,8 +1580,6 @@ func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
 		name         string
 		method       string
 		path         string
-		gocoverdir   string
-		useTempDir   bool
 		mockMetaErr  error
 		mockCountErr error
 		wantCode     int
@@ -1602,24 +1600,15 @@ func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
 			wantBodySubs: []string{"webhooks_router_unique_skipped_total", `kind="test_kind_metric"`},
 		},
 		{
-			name:       "/debug/coverage/flush with empty GOCOVERDIR returns 200",
-			method:     http.MethodGet,
-			path:       "/debug/coverage/flush",
-			gocoverdir: "",
-			wantCode:   http.StatusOK,
-		},
-		{
-			name:       "/debug/coverage/flush with valid GOCOVERDIR calls flush and returns 200",
-			method:     http.MethodGet,
-			path:       "/debug/coverage/flush",
-			useTempDir: true,
-			wantCode:   http.StatusOK,
+			name:     "/debug/coverage/flush calls flush and returns 200",
+			method:   http.MethodGet,
+			path:     "/debug/coverage/flush",
+			wantCode: http.StatusOK,
 		},
 		{
 			name:        "/debug/coverage/flush meta error still returns 200",
 			method:      http.MethodGet,
 			path:        "/debug/coverage/flush",
-			useTempDir:  true,
 			mockMetaErr: errors.New("simulated meta flush error"),
 			wantCode:    http.StatusOK,
 		},
@@ -1627,7 +1616,6 @@ func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
 			name:         "/debug/coverage/flush counters error returns 500",
 			method:       http.MethodGet,
 			path:         "/debug/coverage/flush",
-			useTempDir:   true,
 			mockCountErr: errors.New("simulated counters flush error"),
 			wantCode:     http.StatusInternalServerError,
 		},
@@ -1635,11 +1623,6 @@ func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.useTempDir {
-				t.Setenv("GOCOVERDIR", t.TempDir())
-			} else {
-				t.Setenv("GOCOVERDIR", tc.gocoverdir)
-			}
 			httpkit.WriteMetaDirFn = func(dir string) error {
 				return tc.mockMetaErr
 			}

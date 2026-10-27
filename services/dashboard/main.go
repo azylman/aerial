@@ -615,7 +615,7 @@ func SetupDashboardMux(cfg DashboardConfig, assetReg *AssetRegistry) http.Handle
 	mux.HandleFunc("/dashboard/api/builds", buildsHandler(cfg.VanadisURL))
 	mux.HandleFunc("/api/builds/", buildDetailHandler(cfg.VanadisURL))
 	mux.HandleFunc("/dashboard/api/builds/", buildDetailHandler(cfg.VanadisURL))
-	coverageFlush := httpkit.HandleCoverageFlush("dashboard", false)
+	coverageFlush := httpkit.HandleCoverageFlush("dashboard")
 	mux.HandleFunc("/debug/coverage/flush", coverageFlush)
 	mux.HandleFunc("/dashboard/debug/coverage/flush", coverageFlush)
 

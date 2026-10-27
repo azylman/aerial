@@ -39,13 +39,9 @@ job "prospera" {
         healthchecks {
           disable = true
         }
-        volumes = [
-          "/mnt/data/supervisor/share/coverage/prospera:/coverage:rw",
-        ]
       }
 
       env {
-        GOCOVERDIR              = "/coverage"
         PORT                    = "4019"
         BRAIN_URL               = "http://eri.aerial"
         GOOGLE_MCP_URL          = "http://google-mcp.aerial/mcp"

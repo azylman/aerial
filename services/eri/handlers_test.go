@@ -889,17 +889,11 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 
 	httpkit.WriteJSON(httptest.NewRecorder(), http.StatusOK, make(chan int))
 
-	t.Setenv("GOCOVERDIR", "")
-	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/debug/coverage/flush", nil); w.Code != http.StatusOK {
-		t.Errorf("expected 200 OK without GOCOVERDIR, got %d", w.Code)
-	}
-
 	oldFn := httpkit.WriteCountersDirFn
 	defer func() { httpkit.WriteCountersDirFn = oldFn }()
 	oldMetaFn := httpkit.WriteMetaDirFn
 	defer func() { httpkit.WriteMetaDirFn = oldMetaFn }()
 
-	t.Setenv("GOCOVERDIR", t.TempDir())
 	called, metaCalled := false, false
 	httpkit.WriteCountersDirFn = func(dir string) error {
 		called = true
@@ -911,7 +905,7 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 	}
 
 	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/debug/coverage/flush", nil); w.Code != http.StatusOK || !called || !metaCalled {
-		t.Errorf("expected 200 OK with GOCOVERDIR and mocks called, got %d", w.Code)
+		t.Errorf("expected 200 OK with mocks called, got %d", w.Code)
 	}
 
 	httpkit.WriteMetaDirFn = func(dir string) error { return errors.New("simulated meta flush error") }
