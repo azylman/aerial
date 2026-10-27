@@ -18,9 +18,8 @@ job "edge-proxy" {
     count = 1
 
     network {
-      mode = "host"
       port "http" {
-        static = 4021
+        to = 4021
       }
     }
 
@@ -31,10 +30,10 @@ job "edge-proxy" {
         healthchecks {
           disable = true
         }
-        dns_servers        = ["127.0.0.1"]
+        dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["lan", "aerial"]
         image        = "nginx:1.31-alpine"
-        network_mode = "host"
+        ports        = ["http"]
         command      = "nginx"
         args         = ["-g", "daemon off;", "-c", "/local/nginx.conf"]
       }
@@ -87,7 +86,7 @@ http {
     }
 
     # DNS resolver for internal Nomad services via CoreDNS
-    resolver 127.0.0.1 valid=10s ipv6=off;
+    resolver {{ env "attr.unique.network.ip-address" }} valid=10s ipv6=off;
     resolver_timeout 5s;
 
     js_import auth from /local/auth.js;
