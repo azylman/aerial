@@ -1420,11 +1420,14 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 	if len(pgPrompts) < 3 {
 		t.Fatalf("expected at least 3 prompts from srvPG, got %d", len(pgPrompts))
 	}
-	if !strings.Contains(pgPrompts[1].Prompt, "Please investigate and fix the failure by inspecting the failing logs") || !pgPrompts[1].Silent {
-		t.Errorf("expected silent standard CI prompt, got %+v", pgPrompts[1])
+	if !strings.Contains(pgPrompts[0].Prompt, "Merge conflict detected on PR #42") || !pgPrompts[0].Silent || pgPrompts[0].Effort != "medium" {
+		t.Errorf("expected silent medium-effort conflict prompt for standalone PR, got %+v", pgPrompts[0])
 	}
-	if !strings.Contains(pgPrompts[2].Prompt, "override-roborev 42") || !pgPrompts[2].Silent {
-		t.Errorf("expected silent roborev override prompt, got %+v", pgPrompts[2])
+	if !strings.Contains(pgPrompts[1].Prompt, "Please investigate and fix the failure by inspecting the failing logs") || !pgPrompts[1].Silent || pgPrompts[1].Effort != "medium" {
+		t.Errorf("expected silent medium-effort standard CI prompt, got %+v", pgPrompts[1])
+	}
+	if !strings.Contains(pgPrompts[2].Prompt, "override-roborev 42") || !pgPrompts[2].Silent || pgPrompts[2].Effort != "medium" {
+		t.Errorf("expected silent medium-effort roborev override prompt, got %+v", pgPrompts[2])
 	}
 
 	// dispatchAlertWithPrompt with DM error

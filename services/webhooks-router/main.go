@@ -536,24 +536,16 @@ func (s *RouterServer) vanadisPromptOpts(ctx context.Context, repo string, prNum
 	if prNum <= 0 {
 		return vanadisPromptOpts{}
 	}
-	opts := vanadisPromptOpts{silent: true}
-	if s == nil || s.registry == nil {
-		return opts
-	}
-	if pgReg, ok := s.registry.(*PostgresPRRegistry); ok {
-		if matched, chunkID, effort, err := pgReg.ResolveVanadisChunkForPR(ctx, repo, prNum); err == nil && matched {
-			opts.chunkID = chunkID
-			opts.effort = effort
+	opts := vanadisPromptOpts{silent: true, effort: "medium"}
+	if s != nil && s.registry != nil {
+		if pgReg, ok := s.registry.(*PostgresPRRegistry); ok {
+			if matched, chunkID, effort, err := pgReg.ResolveVanadisChunkForPR(ctx, repo, prNum); err == nil && matched {
+				opts.chunkID = chunkID
+				if effort != "" {
+					opts.effort = effort
+				}
+			}
 		}
-		return opts
-	}
-	suppressed, err := s.registry.ShouldSuppressVanadisDeployWake(ctx, repo, prNum)
-	if err != nil {
-		log.Printf("[webhooks-router] [vanadis] warning checking Vanadis status for %s#%d: %v", repo, prNum, err)
-		return opts
-	}
-	if suppressed {
-		opts.effort = "medium"
 	}
 	return opts
 }

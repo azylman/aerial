@@ -230,6 +230,9 @@ func (s *RouterServer) dispatchCIFailurePrompt(ctx context.Context, targetID, ch
 	)
 	opts := s.vanadisPromptOpts(ctx, repo, prNum)
 	opts.silent = true
+	if opts.effort == "" {
+		opts.effort = "medium"
+	}
 	return s.dispatchAlertWithPrompt(ctx, targetID, "ci_failed", "", prompt, opts)
 }
 
