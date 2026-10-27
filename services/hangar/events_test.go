@@ -192,23 +192,10 @@ func (env *pushEventTestEnv) setupCase(tc gitPushCase) {
 	switch tc.registryMode {
 	case "not_found":
 		env.daemon.registryClient = &http.Client{Transport: &roundTripperFunc{fn: func(req *http.Request) (*http.Response, error) {
-			if strings.Contains(req.URL.String(), "actions/runs") {
-				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: ioNopCloser(strings.NewReader(`{"total_count": 0, "workflow_runs": []}`))}, nil
-			}
 			return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: ioNopCloser(strings.NewReader(`{"errors":[{"code":"MANIFEST_UNKNOWN"}]}`))}, nil
-		}}}
-	case "runs_active":
-		env.daemon.registryClient = &http.Client{Transport: &roundTripperFunc{fn: func(req *http.Request) (*http.Response, error) {
-			if strings.Contains(req.URL.String(), "actions/runs") {
-				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: ioNopCloser(strings.NewReader(`{"total_count": 1, "workflow_runs": [{}]}`))}, nil
-			}
-			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: ioNopCloser(strings.NewReader(`{}`))}, nil
 		}}}
 	case "digest_ready":
 		env.daemon.registryClient = &http.Client{Transport: &roundTripperFunc{fn: func(req *http.Request) (*http.Response, error) {
-			if strings.Contains(req.URL.String(), "actions/runs") {
-				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: ioNopCloser(strings.NewReader(`{"total_count": 0, "workflow_runs": []}`))}, nil
-			}
 			resp := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: ioNopCloser(strings.NewReader(`{}`))}
 			resp.Header.Set("Docker-Content-Digest", "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 			return resp, nil
@@ -444,10 +431,10 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) { // t.Run(
 			wantEvents:       []string{"sync_success", "deploy_started"},
 		},
 		{
-			name:             "deferred nomad job due to active build",
+			name:             "deferred nomad job when image missing in registry",
 			gitScript:        mockGitScript{beforeSHA: "sha_before", afterSHA: "sha_after", nameStatus: "M jobs/webhooks-router.nomad\n"},
 			jobFiles:         map[string]string{"jobs/webhooks-router.nomad": jobWithAerialImg},
-			registryMode:     "runs_active",
+			registryMode:     "not_found",
 			req:              GitPushEventRequest{Repo: "aerial-config", Ref: "refs/heads/main"},
 			wantCode:         http.StatusOK,
 			wantBuilding:     true,

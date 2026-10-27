@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -328,55 +327,4 @@ func EnsureDockerAuthPath(
 	}
 
 	return nil
-}
-
-// CheckGitHubRepoBuildInProgress checks if any GitHub Actions workflow runs are queued or in progress for a repo.
-func (d *SyncDaemon) CheckGitHubRepoBuildInProgress(ctx context.Context, repoSlug string) bool {
-	if d == nil {
-		return false
-	}
-	slug := NormalizeGitHubSlug(repoSlug)
-	if slug == "" {
-		return false
-	}
-
-	client := d.getRegistryClient()
-	checkStatus := func(status string) bool {
-		apiURL := fmt.Sprintf("https://api.github.com/repos/%s/actions/runs?status=%s&per_page=5", slug, status)
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
-		if err != nil {
-			log.Printf("[Hangar:GitHub] Warning: failed to create actions request for %s: %v", slug, err)
-			return false
-		}
-		req.Header.Set("Accept", "application/vnd.github+json")
-		if strings.TrimSpace(d.pat) != "" {
-			req.Header.Set("Authorization", "Bearer "+d.pat)
-		}
-
-		resp, err := client.Do(req) //nolint:bodyclose // closed by httpkit.CloseWarn
-		if err != nil {
-			log.Printf("[Hangar:GitHub] Warning: actions API request failed for %s: %v", slug, err)
-			return false
-		}
-		defer httpkit.CloseWarn(resp.Body, "github actions response body")
-
-		if resp.StatusCode == http.StatusOK {
-			var data struct {
-				TotalCount int `json:"total_count"`
-			}
-			if err := json.NewDecoder(resp.Body).Decode(&data); err == nil && data.TotalCount > 0 {
-				log.Printf("[Hangar:GitHub] %d %s workflow run(s) for %s", data.TotalCount, status, slug)
-				return true
-			}
-		}
-		return false
-	}
-
-	for _, status := range []string{"in_progress", "queued"} {
-		if checkStatus(status) {
-			return true
-		}
-	}
-
-	return false
 }
