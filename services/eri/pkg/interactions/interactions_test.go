@@ -477,7 +477,9 @@ func TestRouter_HandleStatus(t *testing.T) {
 }
 
 func TestRouter_HandleQuota(t *testing.T) {
-	resetStr := time.Now().UTC().Add(2*time.Hour + 30*time.Minute).Format(time.RFC3339)
+	now := time.Now().UTC()
+	resetStr := now.Add(2*time.Hour + 30*time.Minute).Format(time.RFC3339)
+	refreshedAt := now.Add(-4 * time.Minute)
 	sampleGroups := []metrics.QuotaGroup{
 		{
 			Name: "Gemini Models",
@@ -491,20 +493,22 @@ func TestRouter_HandleQuota(t *testing.T) {
 	tests := []struct {
 		name        string
 		groups      []metrics.QuotaGroup
+		updatedAt   time.Time
 		useProvider bool
 		httpStatus  int
 		wantSubstrs []string
 	}{
-		{"WithActiveQuotaBuckets", sampleGroups, true, 0, []string{"**Gemini Models**", "**weekly**: `87%` remaining", "resets in 2h"}},
-		{"EmptyQuotaFallback", nil, false, 0, []string{"No quota telemetry recorded yet"}},
-		{"ErrorLoggingHttp500", nil, true, http.StatusInternalServerError, nil},
+		{"WithActiveQuotaBuckets", sampleGroups, refreshedAt, true, 0, []string{"**Gemini Models**", "**weekly**: `87%` remaining", "resets in 2h", "Last refreshed: 4m ago", `\u003ct:`}},
+		{"EmptyQuotaFallback", nil, time.Time{}, false, 0, []string{"No quota telemetry recorded yet"}},
+		{"ErrorLoggingHttp500", nil, time.Time{}, true, http.StatusInternalServerError, nil},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			router, _, transport, session := setupTestRouter("admin-123", tc.httpStatus)
 			if tc.useProvider {
-				g := tc.groups
+				g, u := tc.groups, tc.updatedAt
 				router.deps.QuotaProvider = func() []metrics.QuotaGroup { return g }
+				router.deps.QuotaTimeProvider = func() time.Time { return u }
 			}
 			router.Handle(session, mkCmd("int-quota", "chan-1", "admin-123", "quota"))
 			reqs := transport.Requests()
