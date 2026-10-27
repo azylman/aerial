@@ -477,7 +477,7 @@ func (d *SyncDaemon) ReconcileNomadChanges(ctx context.Context, repoPath string,
 	recCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
 
-	_, _, err := d.applyNomadChangesDirectly(recCtx, repoPath, changes, false, true, false, nil, nil, repo, commit, targetID, strconv.Itoa(prNumber))
+	_, _, err := d.applyNomadChangesDirectly(recCtx, repoPath, changes, true, false, nil, nil, repo, commit, targetID, strconv.Itoa(prNumber))
 	return err
 }
 

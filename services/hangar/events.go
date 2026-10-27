@@ -74,14 +74,10 @@ func splitLines(s string) []string {
 	return lines
 }
 
-func (d *SyncDaemon) shouldDeferNomadJob(ctx context.Context, jobName, jobSpec string, checkRepoBuilds bool) bool {
+func (d *SyncDaemon) shouldDeferNomadJob(ctx context.Context, jobName, jobSpec string) bool {
 	for _, img := range ExtractNomadJobImages(jobSpec) {
 		srcRepo := ImageSourceRepo(img)
 		if srcRepo != "" {
-			if checkRepoBuilds && d.CheckGitHubRepoBuildInProgress(ctx, srcRepo) {
-				log.Printf("[Hangar:GitPush] Job %s deferred: source repo %s has builds in progress", jobName, srcRepo)
-				return true
-			}
 			dgst, dgstErr := d.GetRemoteImageDigest(ctx, img)
 			if dgstErr != nil || dgst == "" {
 				log.Printf("[Hangar:GitPush] Job %s deferred: image %s not ready in registry (%v)", jobName, img, dgstErr)
@@ -92,7 +88,7 @@ func (d *SyncDaemon) shouldDeferNomadJob(ctx context.Context, jobName, jobSpec s
 	return false
 }
 
-func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath string, changes []NomadFileChange, checkRepoBuilds, failOnJobErr, containersBuilding bool, changedFiles, expectedJobs []string, meta ...string) (applied, deferred []string, err error) {
+func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath string, changes []NomadFileChange, failOnJobErr, containersBuilding bool, changedFiles, expectedJobs []string, meta ...string) (applied, deferred []string, err error) {
 	repo, commit, targetID, prNumber := parseNomadMeta(meta)
 
 	SortNomadChangesHangarLast(changes)
@@ -119,7 +115,7 @@ func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath str
 			continue
 		}
 		jobSpec := string(content)
-		if (containersBuilding && JobHasContainerBuildChanges(jobSpec, changedFiles)) || d.shouldDeferNomadJob(ctx, ch.JobName, jobSpec, checkRepoBuilds) {
+		if (containersBuilding && JobHasContainerBuildChanges(jobSpec, changedFiles)) || d.shouldDeferNomadJob(ctx, ch.JobName, jobSpec) {
 			log.Printf("[Hangar:GitPush] Deferring Nomad job %s until container image is ready", ch.JobName)
 			deferred = append(deferred, ch.JobName)
 			continue
@@ -129,7 +125,7 @@ func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath str
 
 	// Phase 1: Teardowns (stop deleted jobs, or defer if core container build rollout is pending)
 	if len(deleteChanges) > 0 {
-		if !checkRepoBuilds && (containersBuilding || len(deferred) > 0) {
+		if containersBuilding || len(deferred) > 0 {
 			d.recordPendingNomadChanges(repoPath, deleteChanges, repo, commit, targetID, strconv.Itoa(prNumber))
 		} else {
 			for _, ch := range deleteChanges {
@@ -326,7 +322,7 @@ func (d *SyncDaemon) handleAerialCorePush(ctx context.Context, repoPath string, 
 
 	if errNomad == nil && len(nomadChanges) > 0 {
 		resp.NomadChanged = true
-		applied, deferred, errRec := d.applyNomadChangesDirectly(ctx, repoPath, nomadChanges, false, true, containersBuilding, changedFiles, expectedJobs, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
+		applied, deferred, errRec := d.applyNomadChangesDirectly(ctx, repoPath, nomadChanges, true, containersBuilding, changedFiles, expectedJobs, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
 		resp.AppliedJobs = applied
 		if len(deferred) > 0 {
 			resp.ContainersBuilding = true
@@ -362,7 +358,7 @@ func (d *SyncDaemon) handleAerialConfigPush(ctx context.Context, repoPath string
 
 	if len(nomadChanges) > 0 {
 		resp.NomadChanged = true
-		applied, deferred, errRec := d.applyNomadChangesDirectly(ctx, repoPath, nomadChanges, true, false, false, nil, expectedJobs, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
+		applied, deferred, errRec := d.applyNomadChangesDirectly(ctx, repoPath, nomadChanges, false, false, nil, expectedJobs, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
 		if errRec != nil {
 			log.Printf("[Hangar:GitPush] Notice: applyNomadChangesDirectly notice: %v", errRec)
 		}
