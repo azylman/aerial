@@ -42,15 +42,9 @@ job "agentsview" {
         mounts = [
           {
             type     = "volume"
-            target   = "/agentsview-data"
-            source   = "aerial-agentsview-data"
-            readonly = false
-          },
-          {
-            type     = "volume"
             target   = "/data"
             source   = "aerial-brain-data"
-            readonly = true
+            readonly = false
           }
         ]
       }
@@ -58,7 +52,7 @@ job "agentsview" {
       template {
         data = <<EOH
 #!/bin/sh
-mkdir -p /root/.gemini/antigravity-cli
+mkdir -p /data/agentsview /root/.gemini/antigravity-cli
 ln -sfn /data/brain /root/.gemini/antigravity-cli/brain
 ln -sfn /data/conversations /root/.gemini/antigravity-cli/conversations
 ln -sfn /data/runtimes/discord/.gemini/antigravity-cli/implicit /root/.gemini/antigravity-cli/implicit
@@ -84,7 +78,7 @@ EOH
       }
 
       env {
-        AGENTSVIEW_DATA_DIR = "/agentsview-data"
+        AGENTSVIEW_DATA_DIR = "/data/agentsview"
       }
 
       service {
