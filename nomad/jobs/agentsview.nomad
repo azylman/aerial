@@ -51,12 +51,6 @@ job "agentsview" {
             target   = "/data"
             source   = "aerial-brain-data"
             readonly = true
-          },
-          {
-            type     = "volume"
-            target   = "/root/.gemini"
-            source   = "aerial-brain-gemini"
-            readonly = true
           }
         ]
       }
