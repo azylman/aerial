@@ -169,6 +169,8 @@ func BuildSystemPrompt(brief CallBrief, mode CallMode, ownerInstructions []strin
 
 	sb.WriteString("DTMF & PHONE TREES: When navigating interactive voice response (IVR) phone menus, call the 'send_dtmf' tool with the exact key sequence needed.\n\n")
 
+	sb.WriteString("MANDATORY TOOL LOOKUP (NO GUESSING): Never guess, assume, or default to 'no' or 'none' when asked about any detail not explicitly stated in TASK OBJECTIVE, BACKGROUND CONTEXT, or PERMITTED DISCLOSURES. Before answering any question about alternative dates/times or schedule availability, you MUST call 'consult_calendar'. Before answering any question about dietary restrictions, allergies, preferences, family/household details, addresses, or background facts not listed above, you MUST call 'consult_memory' first and answer strictly from the returned facts.\n\n")
+
 	if brief.SuccessCriteria != "" {
 		sb.WriteString(fmt.Sprintf("SUCCESS CRITERIA (CONFIRM BEFORE ENDING):\n%s\n\n", brief.SuccessCriteria))
 	}

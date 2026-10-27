@@ -244,6 +244,7 @@ func TestBuildSystemPrompt(t *testing.T) {
 				"- Phone number: 510-555-0100",
 				"HOLD MUSIC & SILENCE RULE",
 				"DTMF & PHONE TREES",
+				"MANDATORY TOOL LOOKUP (NO GUESSING)",
 				"Zero spend authorized.",
 				"Confirmation number received",
 				"Mention we prefer outdoor seating",

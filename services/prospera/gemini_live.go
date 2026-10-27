@@ -373,7 +373,7 @@ func BuildGeminiSetupMessage(model, systemPrompt string, voice ...string) Gemini
 				},
 				{
 					Name:        "consult_calendar",
-					Description: "Consult the owner's calendar for events, commitments, or schedule availability",
+					Description: "Consult the owner's calendar for events, commitments, or schedule availability. MUST be called before answering about any dates or times not confirmed in the brief.",
 					Parameters: map[string]any{
 						"type": "OBJECT",
 						"properties": map[string]any{
@@ -395,7 +395,7 @@ func BuildGeminiSetupMessage(model, systemPrompt string, voice ...string) Gemini
 				},
 				{
 					Name:        "consult_memory",
-					Description: "Consult the owner's long-term memory for background facts, addresses, or preferences",
+					Description: "Consult the owner's long-term memory for dietary restrictions, allergies, preferences, family/household details, or addresses. MUST be called whenever asked about any detail not explicitly provided in the call brief—never assume 'none' without checking.",
 					Parameters: map[string]any{
 						"type": "OBJECT",
 						"properties": map[string]any{
