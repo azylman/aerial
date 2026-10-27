@@ -125,14 +125,6 @@ func runSubprocess(ctx context.Context, bin, dir string, env []string, waitDelay
 	return stdout.Bytes(), stderr.Bytes(), err
 }
 
-// ComposeExecutor executes docker compose commands.
-type ComposeExecutor func(ctx context.Context, dir string, args ...string) (stdout []byte, stderr []byte, err error)
-
-func defaultComposeExecutor(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-	cmdArgs := append([]string{"compose"}, args...)
-	return runSubprocess(ctx, "docker", dir, ScrubComposeEnv(os.Environ()), 10*time.Second, cmdArgs...)
-}
-
 // GitExecutor executes git CLI commands.
 type GitExecutor func(ctx context.Context, dir string, args ...string) (stdout []byte, stderr []byte, err error)
 
@@ -199,7 +191,6 @@ type SyncDaemon struct {
 
 	brainInternalURL string
 	extraSecrets     []string
-	composeExecutor  ComposeExecutor
 	gitExecutor      GitExecutor
 
 	// Nomad Orchestration
@@ -238,13 +229,6 @@ type SyncDaemon struct {
 	lastPushedConfig   map[string]string
 
 	serviceConfigs []ServiceConfigMapping
-}
-
-func (d *SyncDaemon) getComposeExecutor() ComposeExecutor {
-	if d != nil && d.composeExecutor != nil {
-		return d.composeExecutor
-	}
-	return defaultComposeExecutor
 }
 
 func (d *SyncDaemon) getNomadExecutor() NomadExecutor {
@@ -375,7 +359,6 @@ type DaemonConfig struct {
 	DiscordWebhookURL string
 	BrainInternalURL  string
 	ExtraSecrets      []string
-	ComposeExecutor   ComposeExecutor
 	GitExecutor       GitExecutor
 	NomadExecutor     NomadExecutor
 	NomadAddr         string
@@ -422,7 +405,6 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 		configDir:            cfg.ConfigDir,
 		brainInternalURL:     cfg.BrainInternalURL,
 		extraSecrets:         extraSecrets,
-		composeExecutor:      cfg.ComposeExecutor,
 		gitExecutor:          cfg.GitExecutor,
 		nomadExecutor:        cfg.NomadExecutor,
 		nomadAddr:            cfg.NomadAddr,

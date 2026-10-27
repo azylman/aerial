@@ -31,7 +31,6 @@ jobs:
       coven: ${{ steps.filter.outputs.coven }}
       discord-mcp: ${{ steps.filter.outputs.discord-mcp }}
       kernel-mcp: ${{ steps.filter.outputs.kernel-mcp }}
-      docker-mcp: ${{ steps.filter.outputs.docker-mcp }}
       github-mcp: ${{ steps.filter.outputs.github-mcp }}
       nomad-mcp: ${{ steps.filter.outputs.nomad-mcp }}
       infisical-mcp: ${{ steps.filter.outputs.infisical-mcp }}
@@ -68,8 +67,6 @@ jobs:
             kernel-mcp:
               - 'mcp/kernel-mcp/**'
               - 'pkg/**'
-            docker-mcp:
-              - 'mcp/docker-mcp/**'
             github-mcp:
               - 'mcp/github-mcp/**'
             nomad-mcp:
@@ -108,7 +105,6 @@ jobs:
               coven: "${{ steps.filter.outputs.coven }}",
               "discord-mcp": "${{ steps.filter.outputs.discord-mcp }}",
               "kernel-mcp": "${{ steps.filter.outputs.kernel-mcp }}",
-              "docker-mcp": "${{ steps.filter.outputs.docker-mcp }}",
               "github-mcp": "${{ steps.filter.outputs.github-mcp }}",
               "nomad-mcp": "${{ steps.filter.outputs.nomad-mcp }}",
               "infisical-mcp": "${{ steps.filter.outputs.infisical-mcp }}",
@@ -128,7 +124,6 @@ jobs:
               { service: "coven", context: ".", file: "./services/coven/Dockerfile", image_name: "aerial-coven" },
               { service: "discord-mcp", context: ".", file: "./mcp/discord-mcp/Dockerfile", image_name: "aerial-discord-mcp" },
               { service: "kernel-mcp", context: ".", file: "./mcp/kernel-mcp/Dockerfile", image_name: "aerial-kernel-mcp" },
-              { service: "docker-mcp", context: "./mcp/docker-mcp", file: "./mcp/docker-mcp/Dockerfile", image_name: "aerial-docker-mcp" },
               { service: "github-mcp", context: "./mcp/github-mcp", file: "./mcp/github-mcp/Dockerfile", image_name: "aerial-github-mcp" },
               { service: "nomad-mcp", context: "./mcp/nomad-mcp", file: "./mcp/nomad-mcp/Dockerfile", image_name: "aerial-nomad-mcp" },
               { service: "infisical-mcp", context: "./mcp/infisical-mcp", file: "./mcp/infisical-mcp/Dockerfile", image_name: "aerial-infisical-mcp" },

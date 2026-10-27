@@ -64,9 +64,6 @@ func TestReconcilerAndPeriodicLoops_TableDriven(t *testing.T) {
 		d := NewDaemon(DaemonConfig{
 			ComposeDir: tempDir,
 			ConfigDir:  tempDir,
-			ComposeExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-				return nil, nil, errors.New("compose fail")
-			},
 			NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
 				select {
 				case nomadExecuted <- struct{}{}:
@@ -430,9 +427,6 @@ func TestSetupMuxAndDaemonLifecycle_TableDriven(t *testing.T) {
 						}
 						return []byte("abc1234"), nil, nil
 					}
-					cfg.ComposeExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-						return []byte("ok"), nil, nil
-					}
 					go func() {
 						select {
 						case <-started:
@@ -528,27 +522,28 @@ func ioNopCloser(r io.Reader) io.ReadCloser {
 }
 
 func TestExecutorsAndDispatchers_TableDriven(t *testing.T) {
-	t.Run("defaultComposeExecutor CLI mocking", func(t *testing.T) {
+	t.Run("runSubprocess CLI mocking", func(t *testing.T) {
 		tempDir := t.TempDir()
 		binDir := filepath.Join(tempDir, "bin")
 		if err := os.MkdirAll(binDir, 0o755); err != nil {
 			t.Fatalf("failed to create bin dir: %v", err)
 		}
+		mockBin := filepath.Join(binDir, "mockbin")
 		if runtime.GOOS == "windows" {
-			script := "@echo off\r\nset \"arg=%*\"\r\necho %arg% | findstr /i \"waitloop\" >nul && goto do_wait\r\necho %arg% | findstr /i \"compose\" >nul && (echo Docker Compose mock v2.0 & exit /b 0)\r\necho %arg% | findstr /i \"version\" >nul && (echo Docker mock v24.0 & exit /b 0)\r\necho unknown cmd >&2\r\nexit /b 1\r\n:do_wait\r\ngoto do_wait\r\n"
-			_ = os.WriteFile(filepath.Join(binDir, "docker.cmd"), []byte(script), 0o755)
+			mockBin = filepath.Join(binDir, "mockbin.cmd")
+			script := "@echo off\r\nset \"arg=%*\"\r\necho %arg% | findstr /i \"waitloop\" >nul && goto do_wait\r\necho %arg% | findstr /i \"version\" >nul && (echo Mock CLI v2.0 & exit /b 0)\r\necho unknown cmd >&2\r\nexit /b 1\r\n:do_wait\r\ngoto do_wait\r\n"
+			_ = os.WriteFile(mockBin, []byte(script), 0o755)
 		} else {
-			script := "#!/bin/sh\ncase \"$*\" in\n  *\"waitloop\"*) trap 'exit 0' TERM INT; while :; do :; done;;\n  *\"compose\"*) echo \"Docker Compose mock v2.0\"; exit 0;;\n  *\"version\"*) echo \"Docker mock v24.0\"; exit 0;;\n  *) echo \"unknown cmd\" >&2; exit 1;;\nesac\n"
-			_ = os.WriteFile(filepath.Join(binDir, "docker"), []byte(script), 0o755)
+			script := "#!/bin/sh\ncase \"$*\" in\n  *\"waitloop\"*) trap 'exit 0' TERM INT; while :; do :; done;;\n  *\"version\"*) echo \"Mock CLI v2.0\"; exit 0;;\n  *) echo \"unknown cmd\" >&2; exit 1;;\nesac\n"
+			_ = os.WriteFile(mockBin, []byte(script), 0o755)
 		}
-		t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 		for _, tc := range []struct {
 			name, arg, wantOut string
 			cancelCtx, wantErr bool
 		}{
-			{name: "compose executor success", arg: "version", wantOut: "Docker Compose mock"},
-			{name: "compose executor cancel", arg: "waitloop", cancelCtx: true, wantErr: true},
+			{name: "subprocess success", arg: "version", wantOut: "Mock CLI v2.0"},
+			{name: "subprocess cancel", arg: "waitloop", cancelCtx: true, wantErr: true},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				ctx := context.Background()
@@ -557,7 +552,7 @@ func TestExecutorsAndDispatchers_TableDriven(t *testing.T) {
 					ctx, cancel = context.WithTimeout(ctx, 50*time.Millisecond)
 					defer cancel()
 				}
-				stdout, stderr, err := defaultComposeExecutor(ctx, tempDir, tc.arg)
+				stdout, stderr, err := runSubprocess(ctx, mockBin, tempDir, os.Environ(), 10*time.Second, tc.arg)
 				if (err != nil) != tc.wantErr {
 					t.Errorf("error = %v, wantErr = %v", err, tc.wantErr)
 				}
@@ -584,19 +579,6 @@ func TestExecutorsAndDispatchers_TableDriven(t *testing.T) {
 		}
 		if defaultExec := (&SyncDaemon{pat: "pat"}).getGitExecutor(); defaultExec != nil {
 			_, _, _ = defaultExec(context.Background(), t.TempDir(), "version")
-		}
-
-		if nilDaemon.getComposeExecutor() == nil || (&SyncDaemon{}).getComposeExecutor() == nil {
-			t.Errorf("expected non-nil default compose executor")
-		}
-		customCompose := false
-		dCustomCompose := &SyncDaemon{composeExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-			customCompose = true
-			return nil, nil, nil
-		}}
-		_, _, _ = dCustomCompose.getComposeExecutor()(context.Background(), "", "")
-		if !customCompose {
-			t.Errorf("expected custom compose executor to be called")
 		}
 
 		if fnNil := nilDaemon.getDeployDispatcher(); fnNil == nil || fnNil(context.Background(), HangarDeployEvent{}) == nil {

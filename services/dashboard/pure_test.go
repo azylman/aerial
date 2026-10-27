@@ -502,7 +502,6 @@ func TestExtractServiceNameFromJobName_TableDriven(t *testing.T) {
 		{name: "eri service build parentheses", jobName: "build (eri)", expected: "eri"},
 		{name: "discord mcp", jobName: "discord-mcp Tests", expected: "discord-mcp"},
 		{name: "kernel mcp", jobName: "kernel-mcp Tests", expected: "kernel-mcp"},
-		{name: "docker mcp", jobName: "docker-mcp Unit", expected: "docker-mcp"},
 		{name: "github mcp", jobName: "github-mcp Deploy", expected: "github-mcp"},
 		{name: "nomad mcp", jobName: "nomad-mcp Build", expected: "nomad-mcp"},
 		{name: "infisical mcp", jobName: "infisical-mcp Build", expected: "infisical-mcp"},

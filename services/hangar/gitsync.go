@@ -549,7 +549,6 @@ type ServiceConfigMapping struct {
 // synchronized into Nomad variables when not overridden by services/hangar/hangar.yaml.
 var DefaultManagedServiceConfigs = []ServiceConfigMapping{
 	{RelPath: "services/haro/haro.yaml", NomadVar: "nomad/jobs/haro", VarKey: "CONFIG_YAML"},
-	{RelPath: "services/mcp/docker-mcp.yaml", NomadVar: "nomad/jobs/docker-mcp", VarKey: "CONFIG_YAML"},
 	{RelPath: "services/mcp/github-mcp.yaml", NomadVar: "nomad/jobs/github-mcp", VarKey: "CONFIG_YAML"},
 	{RelPath: "services/mcp/nomad-mcp.yaml", NomadVar: "nomad/jobs/nomad-mcp", VarKey: "CONFIG_YAML"},
 	{RelPath: "services/mcp/discord-mcp.yaml", NomadVar: "nomad/jobs/discord-mcp", VarKey: "CONFIG_YAML"},

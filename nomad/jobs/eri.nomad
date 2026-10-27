@@ -88,12 +88,6 @@ job "eri" {
           },
           {
             type     = "bind"
-            target   = "/var/run/docker.sock"
-            source   = "/var/run/docker.sock"
-            readonly = false
-          },
-          {
-            type     = "bind"
             target   = "/share/aerial-config"
             source   = "/mnt/data/supervisor/share/aerial-config"
             readonly = true

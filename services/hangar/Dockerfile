@@ -15,13 +15,10 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 FROM alpine:3.24
 
-RUN apk add --no-cache ca-certificates git bash tzdata docker-cli && \
+RUN apk add --no-cache ca-certificates git bash tzdata && \
     mkdir -p /mnt/data/supervisor/share && \
     ln -s /share/aerial /mnt/data/supervisor/share/aerial && \
     ln -s /share/aerial-config /mnt/data/supervisor/share/aerial-config
-
-COPY --link --from=docker/compose-bin:v5.6.0 /docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
-RUN ln -s /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/bin/docker-compose
 
 COPY --link --from=hashicorp/nomad:2.0.7 /bin/nomad /usr/local/bin/nomad
 COPY --link --from=hashicorp/nomad:2.0.7 /lib/ld-linux-x86-64.so.2 /lib/libc.so.6 /lib/libresolv.so.2 /lib/libpthread.so.0 /lib/libm.so.6 /lib/
