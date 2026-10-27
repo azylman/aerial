@@ -27,13 +27,14 @@ const (
 
 // AMDGreetingController manages audio release and voicemail transition based on inbound cadence and webhooks.
 type AMDGreetingController struct {
-	mu               sync.Mutex
-	rmsThreshold     float64
-	state            AMDState
-	totalElapsedMs   int
-	currentSpeechMs  int
-	currentSilenceMs int
-	qualifiedSpeech  bool
+	mu                 sync.Mutex
+	rmsThreshold       float64
+	state              AMDState
+	totalElapsedMs     int
+	currentSpeechMs    int
+	currentSilenceMs   int
+	qualifiedSpeech    bool
+	conversationActive bool
 }
 
 // NewAMDGreetingController initializes an AMDGreetingController.
@@ -59,6 +60,13 @@ func (c *AMDGreetingController) IsReleased() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.state >= AMDStateReleased
+}
+
+// MarkConversationActive locks the controller in live human conversation mode so late async AMD webhooks cannot hijack the call.
+func (c *AMDGreetingController) MarkConversationActive() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.conversationActive = true
 }
 
 // OnInboundFrame processes an inbound audio frame RMS and elapsed duration or timestamp.
@@ -95,7 +103,7 @@ func (c *AMDGreetingController) OnInboundFrame(rms float64, elapsedMs int) AMDAc
 	}
 
 	if c.totalElapsedMs >= 2500 {
-		if c.currentSpeechMs < 2000 {
+		if c.currentSpeechMs == 0 && !c.qualifiedSpeech {
 			c.state = AMDStateReleased
 			return AMDActionReleaseGreeting
 		}
@@ -109,6 +117,10 @@ func (c *AMDGreetingController) OnAMDWebhook(answeredBy string) AMDAction {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if c.conversationActive {
+		return AMDActionNone
+	}
+
 	norm := strings.ToLower(strings.TrimSpace(answeredBy))
 	switch {
 	case norm == "human" || norm == "unknown":
@@ -121,6 +133,9 @@ func (c *AMDGreetingController) OnAMDWebhook(answeredBy string) AMDAction {
 		c.state = AMDStateMachineDetected
 		return AMDActionSwitchToVoicemail
 	case strings.HasPrefix(norm, "machine_end"):
+		if norm == "machine_end_other" && c.state == AMDStateReleased {
+			return AMDActionNone
+		}
 		c.state = AMDStateVoicemailReady
 		return AMDActionSpeakVoicemailAndHangup
 	default:

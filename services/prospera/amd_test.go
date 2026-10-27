@@ -103,11 +103,12 @@ func TestAMDGreetingController_Webhooks(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name         string
-		events       []string
-		wantActions  []AMDAction
-		wantState    AMDState
-		wantReleased bool
+		name               string
+		conversationActive bool
+		events             []string
+		wantActions        []AMDAction
+		wantState          AMDState
+		wantReleased       bool
 	}{
 		{
 			name:         "webhook human releases greeting and repeated call returns none",
@@ -145,6 +146,21 @@ func TestAMDGreetingController_Webhooks(t *testing.T) {
 			wantReleased: true,
 		},
 		{
+			name:         "webhook machine_end_other after release is ignored",
+			events:       []string{"human", "machine_end_other"},
+			wantActions:  []AMDAction{AMDActionReleaseGreeting, AMDActionNone},
+			wantState:    AMDStateReleased,
+			wantReleased: true,
+		},
+		{
+			name:               "late machine webhook during active conversation is ignored",
+			conversationActive: true,
+			events:             []string{"machine_end_beep", "machine_start"},
+			wantActions:        []AMDAction{AMDActionNone, AMDActionNone},
+			wantState:          AMDStateHolding,
+			wantReleased:       false,
+		},
+		{
 			name:         "webhook unrecognized returns none",
 			events:       []string{"unrecognized_event_type"},
 			wantActions:  []AMDAction{AMDActionNone},
@@ -157,6 +173,9 @@ func TestAMDGreetingController_Webhooks(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			ctrl := NewAMDGreetingController(0.015)
+			if tc.conversationActive {
+				ctrl.MarkConversationActive()
+			}
 
 			for i, evt := range tc.events {
 				act := ctrl.OnAMDWebhook(evt)

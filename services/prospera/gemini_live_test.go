@@ -132,6 +132,9 @@ func TestHTTPContextConsultClient_ConsultCalendar(t *testing.T) {
 	tests := []struct {
 		name        string
 		overrideURL string
+		sessionID   string
+		startISO    string
+		endISO      string
 		statusCode  int
 		respBody    string
 		wantSubstr  string
@@ -142,6 +145,15 @@ func TestHTTPContextConsultClient_ConsultCalendar(t *testing.T) {
 			statusCode: http.StatusOK,
 			respBody:   `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Line 1"},{"type":"text","text":"Line 2"}]}}`,
 			wantSubstr: "Line 1\nLine 2",
+		},
+		{
+			name:       "calendar streamable http sse with session id and time range",
+			sessionID:  "mcp-sess-123",
+			startISO:   "2026-11-01T00:00:00Z",
+			endISO:     "2026-11-02T00:00:00Z",
+			statusCode: http.StatusOK,
+			respBody:   "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Sunday is free\"}]}}\n\n",
+			wantSubstr: "Sunday is free",
 		},
 		{
 			name:       "calendar 500 error",
@@ -192,6 +204,9 @@ func TestHTTPContextConsultClient_ConsultCalendar(t *testing.T) {
 				calURL = ""
 			} else if calURL == "" {
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if tc.sessionID != "" {
+						w.Header().Set("Mcp-Session-Id", tc.sessionID)
+					}
 					w.Header().Set("Content-Type", "application/json")
 					if tc.statusCode != 0 {
 						w.WriteHeader(tc.statusCode)
@@ -206,7 +221,7 @@ func TestHTTPContextConsultClient_ConsultCalendar(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 			defer cancel()
 
-			res, err := client.ConsultCalendar(ctx, "q", "", "")
+			res, err := client.ConsultCalendar(ctx, "q", tc.startISO, tc.endISO)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")

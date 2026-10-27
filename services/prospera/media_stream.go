@@ -280,6 +280,7 @@ type MediaStreamSession struct {
 	hangupMarkSent      bool
 	closed              bool
 	cancel              context.CancelFunc
+	userTurns           int
 	inputTranscriptBuf  strings.Builder
 	outputTranscriptBuf strings.Builder
 }
@@ -673,6 +674,12 @@ func (s *MediaStreamSession) flushTranscriptBuf(ctx context.Context, role string
 	s.mu.Lock()
 	text := strings.TrimSpace(buf.String())
 	buf.Reset()
+	if role == "user" && text != "" {
+		s.userTurns++
+		if s.userTurns >= 2 {
+			s.amd.MarkConversationActive()
+		}
+	}
 	s.mu.Unlock()
 	if text == "" || s.store == nil {
 		return
@@ -714,6 +721,7 @@ func (s *MediaStreamSession) handleModelTurnPart(ctx context.Context, part Gemin
 }
 
 func (s *MediaStreamSession) executeToolCall(ctx context.Context, fc GeminiFunctionCall) {
+	s.amd.MarkConversationActive()
 	s.flushPendingTranscripts(ctx)
 	switch fc.Name {
 	case "send_dtmf":
