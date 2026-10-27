@@ -58,6 +58,7 @@ http {
     set_real_ip_from 127.0.0.1;
     set_real_ip_from 10.0.0.0/8;
     set_real_ip_from 172.16.0.0/12;
+    set_real_ip_from {{ "192." }}{{ "168.0.0/16" }};
 {{- if nomadVarExists "nomad/jobs/edge-proxy" -}}
   {{- with nomadVar "nomad/jobs/edge-proxy" -}}
     {{- if .REAL_IP_FROM.Value }}
@@ -90,6 +91,7 @@ http {
     resolver_timeout 5s;
 
     js_import auth from /local/auth.js;
+    include /local/upstreams.conf;
 
     # 1. Public GitHub Webhooks Entrypoint
     server {
@@ -115,6 +117,7 @@ http {
             allow 127.0.0.1;
             allow 10.0.0.0/8;
             allow 172.16.0.0/12;
+            allow {{ "192." }}{{ "168.0.0/16" }};
 {{- if nomadVarExists "nomad/jobs/edge-proxy" -}}
   {{- with nomadVar "nomad/jobs/edge-proxy" -}}
     {{- if .ALLOW_CIDRS.Value }}
@@ -137,7 +140,7 @@ http {
 
         # Upstream proxy target for validated GitHub webhooks
         location @backend {
-            proxy_pass http://webhooks-router.aerial;
+            proxy_pass http://webhooks_router;
             proxy_http_version 1.1;
             proxy_set_header Host webhooks-router.aerial;
             proxy_set_header X-Real-IP $remote_addr;
@@ -148,8 +151,7 @@ http {
         }
 
         location ^~ /api/webhooks/twilio/ {
-            set $prospera_upstream http://prospera.aerial:4019;
-            proxy_pass $prospera_upstream;
+            proxy_pass http://prospera;
             proxy_http_version 1.1;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
@@ -175,7 +177,7 @@ http {
         server_name {{ if nomadVarExists "nomad/jobs/edge-proxy" }}{{ with nomadVar "nomad/jobs/edge-proxy" }}{{ if .docs_domain.Value }}{{ .docs_domain.Value }}{{ else }}docs.*{{ end }}{{ end }}{{ else if nomadVarExists "nomad/jobs/aerial-edge-proxy" }}{{ with nomadVar "nomad/jobs/aerial-edge-proxy" }}{{ if .docs_domain.Value }}{{ .docs_domain.Value }}{{ else }}docs.*{{ end }}{{ end }}{{ else }}docs.*{{ end }};
 
         location / {
-            proxy_pass http://127.0.0.1:80;
+            proxy_pass http://mesh_proxy;
             proxy_http_version 1.1;
             proxy_set_header Host docs.aerial;
             proxy_set_header X-Real-IP $remote_addr;
@@ -192,7 +194,7 @@ http {
         server_name {{ if nomadVarExists "nomad/jobs/edge-proxy" }}{{ with nomadVar "nomad/jobs/edge-proxy" }}{{ if .app_domain.Value }}{{ .app_domain.Value }}{{ else }}aerial.*{{ end }}{{ end }}{{ else if nomadVarExists "nomad/jobs/aerial-edge-proxy" }}{{ with nomadVar "nomad/jobs/aerial-edge-proxy" }}{{ if .app_domain.Value }}{{ .app_domain.Value }}{{ else }}aerial.*{{ end }}{{ end }}{{ else }}aerial.*{{ end }};
 
         location / {
-            proxy_pass http://127.0.0.1:80;
+            proxy_pass http://mesh_proxy;
             proxy_http_version 1.1;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
@@ -214,7 +216,7 @@ http {
         server_name {{ if nomadVarExists "nomad/jobs/edge-proxy" }}{{ with nomadVar "nomad/jobs/edge-proxy" }}{{ if .browser_domain.Value }}{{ .browser_domain.Value }}{{ else }}browser.*{{ end }}{{ end }}{{ else if nomadVarExists "nomad/jobs/aerial-edge-proxy" }}{{ with nomadVar "nomad/jobs/aerial-edge-proxy" }}{{ if .browser_domain.Value }}{{ .browser_domain.Value }}{{ else }}browser.*{{ end }}{{ end }}{{ else }}browser.*{{ end }};
 
         location / {
-            proxy_pass http://127.0.0.1:80;
+            proxy_pass http://mesh_proxy;
             proxy_http_version 1.1;
             proxy_set_header Host browser.aerial;
             proxy_set_header X-Real-IP $remote_addr;
@@ -232,6 +234,41 @@ http {
 }
 EOH
         destination = "local/nginx.conf"
+      }
+
+      template {
+        data = <<EOH
+# Dynamic Nomad service upstreams rendered by Nomad template
+upstream mesh_proxy {
+{{- range nomadService "mesh-proxy" }}
+    server {{ if contains ":" .Address }}[{{ .Address }}]{{ else }}{{ .Address }}{{ end }}:{{ .Port }};
+{{- else }}
+    server 127.0.0.1:65535 down;
+{{- end }}
+    keepalive 16;
+}
+
+upstream webhooks_router {
+{{- range nomadService "webhooks-router" }}
+    server {{ if contains ":" .Address }}[{{ .Address }}]{{ else }}{{ .Address }}{{ end }}:{{ .Port }};
+{{- else }}
+    server 127.0.0.1:65535 down;
+{{- end }}
+    keepalive 16;
+}
+
+upstream prospera {
+{{- range nomadService "prospera" }}
+    server {{ if contains ":" .Address }}[{{ .Address }}]{{ else }}{{ .Address }}{{ end }}:{{ .Port }};
+{{- else }}
+    server 127.0.0.1:65535 down;
+{{- end }}
+    keepalive 16;
+}
+EOH
+        destination   = "local/upstreams.conf"
+        change_mode   = "signal"
+        change_signal = "SIGHUP"
       }
 
       template {
