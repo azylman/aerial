@@ -32,8 +32,11 @@ Global Aerial Stack & Cluster Invariants (applies across all repositories):
 EOF
 chmod 0600 /root/.roborev/config.toml
 
-# Seed antigravity-oauth-token as a writable 0600 file from /secrets/antigravity-oauth-token
-if [ -s "/secrets/antigravity-oauth-token" ]; then
+# Seed antigravity-oauth-token as a writable 0600 file from /local/antigravity-oauth-token (or fallback /secrets/antigravity-oauth-token)
+if [ -s "/local/antigravity-oauth-token" ]; then
+  cp -f "/local/antigravity-oauth-token" "/root/.gemini/antigravity-cli/antigravity-oauth-token"
+  chmod 0600 "/root/.gemini/antigravity-cli/antigravity-oauth-token"
+elif [ -s "/secrets/antigravity-oauth-token" ]; then
   cp -f "/secrets/antigravity-oauth-token" "/root/.gemini/antigravity-cli/antigravity-oauth-token"
   chmod 0600 "/root/.gemini/antigravity-cli/antigravity-oauth-token"
 fi

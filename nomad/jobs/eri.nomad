@@ -124,7 +124,7 @@ job "eri" {
 {{- end -}}
 {{- end -}}
 EOH
-        destination = "secrets/antigravity-oauth-token"
+        destination = "local/antigravity-oauth-token"
         perms       = "0600"
         change_mode = "noop"
       }

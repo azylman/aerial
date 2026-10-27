@@ -55,7 +55,7 @@ func New(homeDir, dataDir string) *Provisioner {
 		aerialRulesDir:       "/share/aerial/rules",
 		configRulesDir:       "/share/aerial-config/rules",
 		hooksDir:             "/share/aerial/scripts/hooks",
-		oauthTokenSourcePath: "/secrets/antigravity-oauth-token",
+		oauthTokenSourcePath: "/local/antigravity-oauth-token",
 	}
 }
 

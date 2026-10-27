@@ -169,6 +169,9 @@ func TestProvisioner_InitAndGetters(t *testing.T) {
 
 			if tc.testSetters {
 				p := New("/h", "/d")
+				if p.oauthTokenSourcePath != "/local/antigravity-oauth-token" {
+					t.Fatalf("unexpected default oauthTokenSourcePath: %q", p.oauthTokenSourcePath)
+				}
 				p.SetCustomSkillsDir("/custom/skills")
 				p.SetSuperpowersDir("/super/skills")
 				p.SetAgentsSkillsDir("/agents/skills")
