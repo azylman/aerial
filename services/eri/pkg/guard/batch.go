@@ -28,6 +28,9 @@ const (
 	DefaultMaxMicroReads = 3
 	// DefaultMaxSequentialReads is the default number of allowed consecutive single-file read turns before requiring parallel batching.
 	DefaultMaxSequentialReads = 3
+	// DefaultStepBudgetNudge and StepBudgetNudgeMessage configure the PreInvocation turn step-budget warning.
+	DefaultStepBudgetNudge = 25
+	StepBudgetNudgeMessage = "Step budget warning: you have reached 25 invocations in this turn (approaching the 30-step ceiling). Wrap up current work and deliver your response, or delegate remaining exploration and test cycles to an isolated subagent via invoke_subagent."
 )
 
 var (
@@ -77,6 +80,10 @@ func maxSequentialReads() int {
 	return envPositiveInt(DefaultMaxSequentialReads, "AERIAL_BATCH_MAX_SEQUENTIAL_READS", "AERIAL_BATCH_MAX_SINGLE_READ_STEPS")
 }
 
+func stepBudgetNudge() int {
+	return envPositiveInt(DefaultStepBudgetNudge, "AERIAL_BATCH_STEP_BUDGET_NUDGE")
+}
+
 // GetBatchDir returns the active directory for batch guard state persistence.
 func GetBatchDir() string {
 	if env := os.Getenv("AERIAL_BATCH_GUARD_DIR"); env != "" {
@@ -89,6 +96,7 @@ func GetBatchDir() string {
 type ToolInvocation struct {
 	Timestamp int64  `json:"timestamp"`
 	StepIdx   int    `json:"stepIdx"`
+	Turn      int    `json:"invocationNum,omitempty"`
 	ToolName  string `json:"toolName"`
 	Target    string `json:"target"`
 	Category  string `json:"category"`
@@ -98,7 +106,8 @@ type ToolInvocation struct {
 
 // BatchState persists recent tool invocations for a conversation.
 type BatchState struct {
-	Records []ToolInvocation `json:"records"`
+	InvocationNum int              `json:"invocationNum,omitempty"`
+	Records       []ToolInvocation `json:"records"`
 }
 
 func isUnscopedTest(cmd string) bool {
@@ -596,7 +605,7 @@ func groupSteps(records []ToolInvocation) [][]ToolInvocation {
 		if diff < 0 {
 			diff = -diff
 		}
-		same := (currentStep > 0 && r.StepIdx > 0 && r.StepIdx == currentStep) || (diff <= 1)
+		same := ((currentStep > 0 && r.StepIdx > 0 && r.StepIdx == currentStep) || (diff <= 1)) && (current[0].Turn == 0 || r.Turn == 0) || (current[0].Turn > 0 && r.Turn == current[0].Turn)
 
 		if same {
 			current = append(current, r)
@@ -857,6 +866,20 @@ func evaluatePriorBatchViolations(category, target string, args ToolArgs, priorR
 	return nil
 }
 
+func resolvePriorRecords(state *BatchState, payload Payload, ts int64) (int, []ToolInvocation) {
+	if payload.InvocationNum > 0 {
+		state.InvocationNum = payload.InvocationNum
+	}
+	invNum := state.InvocationNum
+	var prior []ToolInvocation
+	for _, r := range state.Records {
+		if !((invNum > 0 && r.Turn > 0 && r.Turn == invNum) || ((invNum == 0 || r.Turn == 0) && isSameStep(r, payload.StepIdx, ts))) {
+			prior = append(prior, r)
+		}
+	}
+	return invNum, prior
+}
+
 // CheckBatchWithDir evaluates tool batching invariants with configurable state directory and timestamp.
 // Guaranteed fail-open: returns allow on unexpected errors or corrupted states.
 func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time) *Decision {
@@ -874,13 +897,7 @@ func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time
 		state := loadState(dir, safeID, now)
 		stepIdx := payload.StepIdx
 		ts := now.Unix()
-
-		var priorRecords []ToolInvocation
-		for _, r := range state.Records {
-			if !isSameStep(r, stepIdx, ts) {
-				priorRecords = append(priorRecords, r)
-			}
-		}
+		invNum, priorRecords := resolvePriorRecords(&state, payload, ts)
 
 		if dec := evaluatePriorBatchViolations(category, target, args, priorRecords, &state); dec != nil {
 			decision = dec
@@ -895,6 +912,7 @@ func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time
 		inv := ToolInvocation{
 			Timestamp: ts,
 			StepIdx:   stepIdx,
+			Turn:      invNum,
 			ToolName:  payload.ToolCall.Name,
 			Target:    target,
 			Category:  category,
@@ -921,4 +939,63 @@ func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time
 		return &Decision{Decision: DecisionAllow}
 	}
 	return decision
+}
+
+// RecordPreInvocation records the current turn invocationNum and optionally returns a step-budget nudge.
+func RecordPreInvocation(payload Payload) *InvocationResponse {
+	return RecordPreInvocationWithDir(payload, GetBatchDir(), time.Now())
+}
+
+// RecordPreInvocationWithDir records the active invocationNum in state and returns an ephemeral nudge at the step budget threshold.
+func RecordPreInvocationWithDir(payload Payload, dir string, now time.Time) *InvocationResponse {
+	if payload.InvocationNum > 0 {
+		safeID := sanitizeID(payload.ConversationID)
+		_ = withStateLock(dir, safeID, func() error { //nolint:errcheck
+			state := loadState(dir, safeID, now)
+			state.InvocationNum = payload.InvocationNum
+			return saveState(dir, safeID, state)
+		})
+	}
+	if payload.InvocationNum > 0 && payload.InvocationNum == stepBudgetNudge() {
+		return &InvocationResponse{InjectSteps: []EphemeralStep{{EphemeralMessage: StepBudgetNudgeMessage}}}
+	}
+	return &InvocationResponse{}
+}
+
+func rollbackFailedEdit(records []ToolInvocation, target string, stepIdx int) ([]ToolInvocation, bool) {
+	matchIdx := -1
+	for i := len(records) - 1; i >= 0; i-- {
+		if records[i].Category == "edit" && records[i].Target == target {
+			if stepIdx <= 0 || records[i].StepIdx == stepIdx {
+				return append(records[:i], records[i+1:]...), true
+			} else if matchIdx < 0 {
+				matchIdx = i
+			}
+		}
+	}
+	if matchIdx >= 0 {
+		return append(records[:matchIdx], records[matchIdx+1:]...), true
+	}
+	return records, false
+}
+
+// RecordPostBatch rolls back batch-guard edit state when an edit tool execution fails.
+func RecordPostBatch(payload Payload, args ToolArgs) *InvocationResponse {
+	return RecordPostBatchWithDir(payload, args, GetBatchDir(), time.Now())
+}
+
+// RecordPostBatchWithDir rolls back a failed edit invocation in the specified state directory.
+func RecordPostBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time) *InvocationResponse {
+	if cat, target := categorizeInvocation(payload.ToolCall.Name, args); strings.TrimSpace(payload.Error) != "" && cat == "edit" && target != "" {
+		safeID := sanitizeID(payload.ConversationID)
+		_ = withStateLock(dir, safeID, func() error { //nolint:errcheck
+			state := loadState(dir, safeID, now)
+			if updated, removed := rollbackFailedEdit(state.Records, target, payload.StepIdx); removed {
+				state.Records = updated
+				return saveState(dir, safeID, state)
+			}
+			return nil
+		})
+	}
+	return &InvocationResponse{}
 }

@@ -263,6 +263,31 @@ func TestCheckBatch(t *testing.T) {
 		t.Fatalf("expected new file to remain")
 	}
 	opportunisticGC(gcDir, now)
+
+	// PreInvocation turn grouping (parallel multi-region edit_file taking >1s each) and step-budget nudge
+	invDir := t.TempDir()
+	t.Setenv("AERIAL_BATCH_GUARD_DIR", invDir)
+	t.Setenv("AERIAL_BATCH_STEP_BUDGET_NUDGE", "25")
+	_ = RecordPreInvocation(Payload{ConversationID: "inv-s", InvocationNum: 1})
+	for i := 0; i < 4; i++ {
+		if d := CheckBatchWithDir(Payload{ConversationID: "inv-s", StepIdx: 10 + i, ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/same_turn.go"}, invDir, now.Add(time.Duration(i*3)*time.Second)); d.Decision != DecisionAllow {
+			t.Fatalf("parallel edit %d in same invocationNum=1 should be allowed, got: %+v", i, d)
+		}
+	}
+	if r25, r26 := RecordPreInvocation(Payload{ConversationID: "inv-s", InvocationNum: 25}), RecordPreInvocation(Payload{ConversationID: "inv-s", InvocationNum: 26}); len(r25.InjectSteps) != 1 || len(r26.InjectSteps) != 0 {
+		t.Fatalf("unexpected step budget nudge responses: r25=%+v r26=%+v", r25, r26)
+	}
+	for i := 1; i <= 3; i++ {
+		_ = RecordPreInvocationWithDir(Payload{ConversationID: "post-s", InvocationNum: i}, invDir, now.Add(time.Duration(i*2)*time.Second))
+		if d := CheckBatchWithDir(Payload{ConversationID: "post-s", StepIdx: i, ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"}, invDir, now.Add(time.Duration(i*2)*time.Second)); d.Decision != DecisionAllow {
+			t.Fatalf("turn %d expected allow after rolling back turn 2 failed edit, got: %+v", i, d)
+		}
+		if i == 2 {
+			_ = RecordPostBatch(Payload{ConversationID: "post-s", StepIdx: 2, Error: "not found", ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"})
+		}
+	}
+	_ = RecordPostBatchWithDir(Payload{ConversationID: "post-s", StepIdx: 99, Error: "failed", ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"}, invDir, now)
+	_ = RecordPostBatchWithDir(Payload{ConversationID: "post-s", StepIdx: 3, Error: "", ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"}, invDir, now)
 }
 
 func TestBatchHelpers(t *testing.T) {

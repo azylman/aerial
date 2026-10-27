@@ -14,15 +14,25 @@ const (
 	ModeShare    Mode = "share"
 	ModeSchedule Mode = "schedule"
 	ModeBatch    Mode = "batch"
+	ModePost     Mode = "post-batch"
+	ModeInv      Mode = "pre-invocation"
 	ModeSearch   Mode = "search"
 	ModeCommit   Mode = "commit"
 )
+
+// IsInvocationMode reports whether mode uses the InvocationResponse ({}) stdout contract.
+func IsInvocationMode(mode string) bool {
+	return mode == string(ModeInv) || mode == "invocation" || mode == string(ModePost) || mode == "post-tool"
+}
 
 // Process reads an Antigravity PreToolUse hook payload from r, evaluates guards per mode,
 // and writes the resulting Decision JSON to w.
 // Guaranteed fail-open: on unexpected error or panic, it outputs {"decision": "allow"}.
 func Process(r io.Reader, w io.Writer, mode string) (err error) {
 	writeAllow := func() error {
+		if IsInvocationMode(mode) {
+			return json.NewEncoder(w).Encode(InvocationResponse{})
+		}
 		return json.NewEncoder(w).Encode(Decision{Decision: DecisionAllow})
 	}
 
@@ -47,6 +57,13 @@ func Process(r io.Reader, w io.Writer, mode string) (err error) {
 	}
 
 	args := ParseArgs(payload.ToolCall.Args)
+
+	switch mode {
+	case string(ModeInv), "invocation":
+		return json.NewEncoder(w).Encode(RecordPreInvocation(payload))
+	case string(ModePost), "post-tool":
+		return json.NewEncoder(w).Encode(RecordPostBatch(payload, args))
+	}
 
 	var decision *Decision
 	switch mode {

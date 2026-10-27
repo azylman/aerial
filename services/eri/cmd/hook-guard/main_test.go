@@ -179,6 +179,10 @@ func TestRunCLI(t *testing.T) {
 			wantDeny: false,
 			wantCode: 0,
 		},
+		{name: "pre-invocation normal", args: []string{"hook-guard", "pre-invocation"}, input: `{"conversationId":"c1","invocationNum":1}`, wantOutput: "{}", wantCode: 0},
+		{name: "invocation-guard symlink nudge", args: []string{"/usr/local/bin/invocation-guard"}, input: `{"conversationId":"c1","invocationNum":25}`, wantOutput: "injectSteps", wantCode: 0},
+		{name: "post-batch subcommand", args: []string{"hook-guard", "post-batch"}, input: `{"conversationId":"c2","stepIdx":1,"error":"e","toolCall":{"name":"edit_file","args":{"Path":"/tmp/a.go"}}}`, wantOutput: "{}", wantCode: 0},
+		{name: "post-batch-guard symlink", args: []string{"/usr/local/bin/post-batch-guard"}, input: `{"conversationId":"c2","stepIdx":1,"toolCall":{"name":"edit_file","args":{"Path":"/tmp/a.go"}}}`, wantOutput: "{}", wantCode: 0},
 	}
 
 	for _, tt := range tests {
@@ -216,6 +220,9 @@ func TestRunCLI(t *testing.T) {
 		code := RunCLI([]string{"hook-guard"}, strings.NewReader(`{malformed`), &errWriter{})
 		if code != 0 && code != 1 {
 			t.Errorf("unexpected code %d", code)
+		}
+		if c := RunCLI([]string{"hook-guard", "pre-invocation"}, strings.NewReader(`{malformed`), &errWriter{}); c != 0 && c != 1 {
+			t.Errorf("unexpected code %d", c)
 		}
 	})
 
