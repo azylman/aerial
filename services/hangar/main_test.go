@@ -171,19 +171,15 @@ func TestNewConfigFromLookup_TableDriven(t *testing.T) {
 		t.Errorf("NewConfigFromLookup(nil) Port = %q, want 8087", cfg.Port)
 	}
 
-	baseYAML := `
-port: "8087"
+	baseYAML := `port: "8087"
 sync_interval: "45s"
-sync_repos:
-  - "/repo/a"
-  - "/repo/b"
+sync_repos: ["/repo/a", "/repo/b"]
 nomad_addr: "http://nomad.cluster:4646"
 brain_internal_url: "http://brain.cluster:8088/internal/reload"
 service_configs:
   - rel_path: "services/voice/voice.yaml"
     nomad_var: "nomad/jobs/orin-voice"
-    var_key: "CONFIG_YAML"
-`
+    var_key: "CONFIG_YAML"`
 	tests := []struct {
 		name                     string
 		yamlContent              string
@@ -201,6 +197,7 @@ service_configs:
 		wantBrainURL             string
 		wantExtraSecretsLen      int
 		checkExtraSecrets        bool
+		checkRepoURLs            bool
 		wantServiceConfigRelPath string
 	}{
 		{
@@ -224,7 +221,8 @@ service_configs:
 			name: "empty lookup defaults", env: map[string]string{},
 			wantPort: "8087", wantInterval: 60 * time.Second, wantComposeDir: "/share/aerial",
 			wantConfigDir: "/share/aerial-config", wantBrainURL: "http://brain:8088/internal/reload",
-			wantExtraSecretsLen: 0, checkExtraSecrets: true,
+			wantRepos:           []string{"/share/aerial-config", "/share/aerial", "/share/mirrormere"},
+			wantExtraSecretsLen: 0, checkExtraSecrets: true, checkRepoURLs: true,
 		},
 		{
 			name: "CONFIG_PATH YAML loading and service configs", yamlContent: baseYAML,
@@ -305,6 +303,9 @@ service_configs:
 				if len(cfg.ServiceConfigs) != 1 || cfg.ServiceConfigs[0].RelPath != tt.wantServiceConfigRelPath {
 					t.Errorf("ServiceConfigs = %v, want RelPath %q", cfg.ServiceConfigs, tt.wantServiceConfigRelPath)
 				}
+			}
+			if tt.checkRepoURLs && (cfg.RepoURLs[cfg.ComposeDir] != "https://github.com/azylman/aerial.git" || cfg.RepoURLs[filepath.Join(filepath.Dir(cfg.ComposeDir), "mirrormere")] != "https://github.com/azylman/mirrormere.git") {
+				t.Errorf("RepoURLs missing compose/mirrormere: %v", cfg.RepoURLs)
 			}
 		})
 	}

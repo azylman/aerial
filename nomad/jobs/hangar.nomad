@@ -42,10 +42,13 @@ job "hangar" {
         healthchecks {
           disable = true
         }
-        volumes = [
-          "/mnt/data/supervisor/share/aerial-config:/share/aerial-config:rw",
-          "/mnt/data/supervisor/share/aerial:/share/aerial:rw",
-          "/mnt/data/supervisor/share/mirrormere:/share/mirrormere:rw",
+        mounts = [
+          {
+            type     = "volume"
+            target   = "/share"
+            source   = "aerial-share"
+            readonly = false
+          }
         ]
       }
 

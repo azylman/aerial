@@ -39,7 +39,7 @@ func (d *SyncDaemon) EnsureRepo(ctx context.Context, repoPath, repoURL string) e
 	}
 
 	if len(entries) == 0 {
-		out, errBytes, err := d.getGitExecutor()(ctx, "", "clone", "--depth", "1", "-b", "main", repoURL, repoPath)
+		out, errBytes, err := d.getGitExecutor()(ctx, "", "clone", "--depth", "50", "-b", "main", repoURL, repoPath)
 		if err != nil {
 			combined := string(append(out, errBytes...))
 			return fmt.Errorf("git clone failed for %s: %s (%w)", repoPath, SanitizeLog(combined), err)
@@ -55,7 +55,7 @@ func (d *SyncDaemon) EnsureRepo(ctx context.Context, repoPath, repoURL string) e
 	if _, _, err := d.getGitExecutor()(ctx, repoPath, "remote", "add", "origin", repoURL); err != nil {
 		log.Printf("[Hangar] Notice adding remote origin for %s (continuing): %v", repoPath, err)
 	}
-	out, errBytes, err := d.getGitExecutor()(ctx, repoPath, "fetch", "--depth", "1", "origin", "main")
+	out, errBytes, err := d.getGitExecutor()(ctx, repoPath, "fetch", "--depth", "50", "origin", "main")
 	if err != nil {
 		combined := string(append(out, errBytes...))
 		return fmt.Errorf("git fetch failed during adoption for %s: %s (%w)", repoPath, SanitizeLog(combined), err)

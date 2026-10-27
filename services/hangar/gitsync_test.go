@@ -258,6 +258,9 @@ func TestEnsureRepoAndSync_TableDriven(t *testing.T) {
 						if len(args) > 0 {
 							cmd := args[0]
 							calls = append(calls, cmd)
+							if (cmd == "clone" || cmd == "fetch") && !strings.Contains(strings.Join(args, " "), "--depth 50") {
+								t.Errorf("expected --depth 50 in %s call, got %v", cmd, args)
+							}
 							if cmd == "clone" && tc.cloneCreatesGitDir {
 								cloneCalled = true
 								_ = os.MkdirAll(filepath.Join(args[len(args)-1], ".git"), 0o755)
