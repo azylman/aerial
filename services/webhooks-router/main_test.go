@@ -1416,11 +1416,11 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 	if len(pgPrompts) < 3 {
 		t.Fatalf("expected at least 3 prompts from srvPG, got %d", len(pgPrompts))
 	}
-	if !strings.Contains(pgPrompts[1].Prompt, "Please investigate and fix the failure by inspecting the failing logs") {
-		t.Errorf("expected standard CI prompt, got %s", pgPrompts[1].Prompt)
+	if !strings.Contains(pgPrompts[1].Prompt, "Please investigate and fix the failure by inspecting the failing logs") || !pgPrompts[1].Silent {
+		t.Errorf("expected silent standard CI prompt, got %+v", pgPrompts[1])
 	}
-	if !strings.Contains(pgPrompts[2].Prompt, "override-roborev 42") {
-		t.Errorf("expected roborev override prompt, got %s", pgPrompts[2].Prompt)
+	if !strings.Contains(pgPrompts[2].Prompt, "override-roborev 42") || !pgPrompts[2].Silent {
+		t.Errorf("expected silent roborev override prompt, got %+v", pgPrompts[2])
 	}
 
 	// dispatchAlertWithPrompt with DM error

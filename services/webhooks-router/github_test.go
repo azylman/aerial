@@ -279,14 +279,14 @@ func TestProcessGitHubEvent(t *testing.T) {
 			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"roborev","head_sha":"robo525abcdef","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/525","output":{"title":"Review Failed","summary":"Found issues"},"pull_requests":[{"number":525,"head":{"ref":"feat/test","sha":"robo525abcdef"}}]}}`,
 			reg:               &mockPRRegistry{ciFailedTargetID: "1555405874565091380", ciFailedUpdated: true},
 			disp:              &mockOutboundDispatcher{},
-			wantCIFailedCalls: 1, wantDMs: 1, wantDMSubstr: "roborev", wantPrompts: 1, wantPromptSubstr: "Found SQL injection in query",
+			wantCIFailedCalls: 1, wantDMs: 0, wantPrompts: 1, wantPromptSubstr: "Found SQL injection in query",
 		},
 		{
 			name: "check_run failure for roborev produces critical evaluation and override prompt", event: "check_run", delivery: "del-cr-roborev-override",
 			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"roborev","head_sha":"robo525abcdef","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/525","output":{"title":"Review Failed","summary":"Found issues"},"pull_requests":[{"number":525,"head":{"ref":"feat/test","sha":"robo525abcdef"}}]}}`,
 			reg:               &mockPRRegistry{ciFailedTargetID: "1555405874565091380", ciFailedUpdated: true},
 			disp:              &mockOutboundDispatcher{},
-			wantCIFailedCalls: 1, wantDMs: 1, wantDMSubstr: "roborev", wantPrompts: 1, wantPromptSubstr: "override-roborev 525",
+			wantCIFailedCalls: 1, wantDMs: 0, wantPrompts: 1, wantPromptSubstr: "override-roborev 525",
 		},
 		{
 			name: "check_run success for roborev calls UpdatePRSync", event: "check_run", delivery: "del-cr-roborev-success",
@@ -321,7 +321,7 @@ func TestProcessGitHubEvent(t *testing.T) {
 			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Unit Tests","head_sha":"headsha789","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/123","output":{"title":"Failed"},"pull_requests":[{"number":530,"head":{"ref":"feat/test"}}]}}`,
 			reg:               &mockPRRegistry{ciFailedTargetID: "1555405874565091380", ciFailedUpdated: true},
 			disp:              &mockOutboundDispatcher{},
-			wantCIFailedCalls: 1, wantDMs: 1, wantDMSubstr: "Unit Tests", wantPrompts: 1, wantPromptSubstr: "Please investigate and fix the failure by inspecting the failing logs",
+			wantCIFailedCalls: 1, wantDMs: 0, wantPrompts: 1, wantPromptSubstr: "Please investigate and fix the failure by inspecting the failing logs",
 		},
 		{
 			name: "check_run failure with ciFailCount exceeding cap suppresses prompt and dispatches cap DM", event: "check_run", delivery: "del-cr-cap",
@@ -335,7 +335,7 @@ func TestProcessGitHubEvent(t *testing.T) {
 			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Lint","head_sha":"headsha789","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/123","output":{"title":"Failed"},"pull_requests":[{"number":530,"head":{"ref":"feat/test"}}]}}`,
 			reg:               &mockPRRegistry{ciFailedTargetID: "1555405874565091380", ciFailedUpdated: true, ciFailCountErr: errors.New("db error")},
 			disp:              &mockOutboundDispatcher{},
-			wantCIFailedCalls: 1, wantDMs: 1, wantDMSubstr: "Lint", wantPrompts: 1, wantPromptSubstr: "Lint",
+			wantCIFailedCalls: 1, wantDMs: 0, wantPrompts: 1, wantPromptSubstr: "Lint",
 		},
 		{
 			name: "check_run timed_out with PR in payload transitions registry", event: "check_run", delivery: "del-cr-timeout",
@@ -430,7 +430,7 @@ func TestProcessGitHubEvent(t *testing.T) {
 			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Service Unit Tests","head_sha":"headsha789","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/123","output":{"title":"Build Failed","summary":"Compilation error in brain/main.go:42"},"pull_requests":[{"number":530,"head":{"ref":"feat/test"}}]}}`,
 			reg:               &mockPRRegistry{ciFailedTargetID: "1555405874565091380", ciFailedUpdated: true},
 			disp:              &mockOutboundDispatcher{},
-			wantCIFailedCalls: 1, wantDMs: 1, wantDMSubstr: "Service Unit Tests", wantPrompts: 1, wantPromptSubstr: "Service Unit Tests",
+			wantCIFailedCalls: 1, wantDMs: 0, wantPrompts: 1, wantPromptSubstr: "Service Unit Tests",
 		},
 		{
 			name: "check_run failure duplicate does not trigger prompt", event: "check_run", delivery: "del-cr-dup-prompt",
