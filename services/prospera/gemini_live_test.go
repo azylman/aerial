@@ -93,18 +93,27 @@ func TestBuildGeminiMessages(t *testing.T) {
 	if msg1.Setup.GenerationConfig.SpeechConfig.VoiceConfig.PrebuiltVoiceConfig.VoiceName != "Kore" {
 		t.Errorf("voice = %q, want Kore", msg1.Setup.GenerationConfig.SpeechConfig.VoiceConfig.PrebuiltVoiceConfig.VoiceName)
 	}
+	if msg1.Setup.GenerationConfig.SpeechConfig.LanguageCode != "en-US" {
+		t.Errorf("languageCode = %q, want en-US", msg1.Setup.GenerationConfig.SpeechConfig.LanguageCode)
+	}
 
-	msgNative := BuildGeminiSetupMessage("gemini-2.5-flash-native-audio-latest", "system instructions", "   ")
+	msgNative := BuildGeminiSetupMessage("gemini-2.5-flash-native-audio-latest", "system instructions", "   ", "   ")
 	if !msgNative.Setup.GenerationConfig.EnableAffectiveDialog {
 		t.Error("expected EnableAffectiveDialog=true for native-audio model")
 	}
 	if msgNative.Setup.GenerationConfig.SpeechConfig.VoiceConfig.PrebuiltVoiceConfig.VoiceName != "Kore" {
 		t.Errorf("fallback voice = %q, want Kore", msgNative.Setup.GenerationConfig.SpeechConfig.VoiceConfig.PrebuiltVoiceConfig.VoiceName)
 	}
+	if msgNative.Setup.GenerationConfig.SpeechConfig.LanguageCode != "en-US" {
+		t.Errorf("fallback languageCode = %q, want en-US", msgNative.Setup.GenerationConfig.SpeechConfig.LanguageCode)
+	}
 
-	msgCustomVoice := BuildGeminiSetupMessage("models/gemini-3.8-live", "system instructions", "Aoede")
+	msgCustomVoice := BuildGeminiSetupMessage("models/gemini-3.8-live", "system instructions", "Aoede", "es-US")
 	if msgCustomVoice.Setup.GenerationConfig.SpeechConfig.VoiceConfig.PrebuiltVoiceConfig.VoiceName != "Aoede" {
 		t.Errorf("custom voice = %q, want Aoede", msgCustomVoice.Setup.GenerationConfig.SpeechConfig.VoiceConfig.PrebuiltVoiceConfig.VoiceName)
+	}
+	if msgCustomVoice.Setup.GenerationConfig.SpeechConfig.LanguageCode != "es-US" {
+		t.Errorf("custom languageCode = %q, want es-US", msgCustomVoice.Setup.GenerationConfig.SpeechConfig.LanguageCode)
 	}
 
 	// 2. Audio chunk

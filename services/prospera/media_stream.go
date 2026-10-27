@@ -219,7 +219,7 @@ func (m *CallSessionManager) HandleMediaWebSocket(w http.ResponseWriter, r *http
 		}
 	}
 
-	var openingGreeting, voicemailMsg, systemPrompt string
+	var openingGreeting, voicemailMsg, systemPrompt, language string
 	if call != nil {
 		openingGreeting = call.Brief.Task
 		if openingGreeting == "" {
@@ -236,6 +236,7 @@ func (m *CallSessionManager) HandleMediaWebSocket(w http.ResponseWriter, r *http
 		} else if call.Direction == "inbound" || call.CallbackOfCallID != "" {
 			mode = ModeCallback
 		}
+		language = call.Brief.Language
 		systemPrompt = BuildSystemPrompt(call.Brief, mode, nil)
 	} else {
 		openingGreeting = "Hello, I am calling to help with an inquiry."
@@ -253,6 +254,7 @@ func (m *CallSessionManager) HandleMediaWebSocket(w http.ResponseWriter, r *http
 		OpeningGreeting:  openingGreeting,
 		VoicemailMessage: voicemailMsg,
 		SystemPrompt:     systemPrompt,
+		Language:         language,
 		PacerInterval:    m.pacerInterval,
 		GeminiDialer:     m.geminiDialer,
 	})
@@ -274,6 +276,7 @@ type MediaStreamSessionConfig struct {
 	OpeningGreeting  string
 	VoicemailMessage string
 	SystemPrompt     string
+	Language         string
 	PacerInterval    time.Duration
 	GeminiDialer     func(ctx context.Context, model string) (*websocket.Conn, error)
 }
@@ -295,6 +298,7 @@ type MediaStreamSession struct {
 	openingGreeting     string
 	voicemailMessage    string
 	systemPrompt        string
+	language            string
 	pacerInterval       time.Duration
 	geminiDialer        func(ctx context.Context, model string) (*websocket.Conn, error)
 	amd                 *AMDGreetingController
@@ -333,6 +337,7 @@ func NewMediaStreamSession(cfg MediaStreamSessionConfig) *MediaStreamSession {
 		openingGreeting:  cfg.OpeningGreeting,
 		voicemailMessage: cfg.VoicemailMessage,
 		systemPrompt:     cfg.SystemPrompt,
+		language:         cfg.Language,
 		pacerInterval:    cfg.PacerInterval,
 		geminiDialer:     cfg.GeminiDialer,
 		amd:              NewAMDGreetingController(0.015),
@@ -397,7 +402,7 @@ func (s *MediaStreamSession) Run(parentCtx context.Context) {
 	}()
 
 	// Send initial setup handshake
-	setupMsg := BuildGeminiSetupMessage(model, s.systemPrompt, s.voiceName())
+	setupMsg := BuildGeminiSetupMessage(model, s.systemPrompt, s.voiceName(), s.language)
 	if err := s.sendGeminiJSON(setupMsg); err != nil {
 		log.Printf("prospera: gemini live setup error: %v", err)
 		return
@@ -919,7 +924,7 @@ func (s *MediaStreamSession) reconnectGemini(ctx context.Context) bool {
 	s.geminiConn = newConn
 	s.mu.Unlock()
 
-	setupMsg := BuildGeminiSetupMessage(fallbackModel, s.systemPrompt, s.voiceName())
+	setupMsg := BuildGeminiSetupMessage(fallbackModel, s.systemPrompt, s.voiceName(), s.language)
 	if err := s.sendGeminiJSON(setupMsg); err != nil {
 		return false
 	}
