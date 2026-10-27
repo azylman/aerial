@@ -972,7 +972,31 @@ func TestHTTPEndpoints(t *testing.T) {
 	memStore.updateBuildErr = errors.New("cancel db err")
 	checkCode(http.MethodPost, "/builds/"+buildID+"/cancel", nil, http.StatusInternalServerError)
 	memStore.updateBuildErr = nil
+	var cancelPromptBuildID, cancelWidgetStatus string
+	var cancelWidgetChunkStatuses []string
+	cancelBrainSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/prompt/cancel" {
+			var req map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			cancelPromptBuildID = req["build_id"]
+			httpkit.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "cancelled_count": 1})
+			return
+		}
+		var req StatusWidgetRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		cancelWidgetStatus, cancelWidgetChunkStatuses = req.Status, []string{req.Chunks[0].Status, req.Chunks[1].Status}
+		httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok", "message_id": "msg-cancel-widget"})
+	}))
+	defer cancelBrainSrv.Close()
+	srv.cfg.BrainURL = cancelBrainSrv.URL
+	_ = memStore.UpdateChunkStatus(context.Background(), buildID+"-chunk-1", "merged")
+	_ = memStore.UpdateChunkStatus(context.Background(), "custom-chunk-2", "running")
+	memStore.updateChunkErr = errors.New("simulated chunk cancel update err")
 	checkCode(http.MethodPost, "/builds/"+buildID+"/cancel", bytes.NewReader(nil), http.StatusOK)
+	memStore.updateChunkErr = nil
+	if cancelPromptBuildID != buildID || cancelWidgetStatus != "cancelled" || len(cancelWidgetChunkStatuses) != 2 || cancelWidgetChunkStatuses[0] != "merged" || cancelWidgetChunkStatuses[1] != "cancelled" {
+		t.Fatalf("unexpected cancel brain notifications: promptBuildID=%q widgetStatus=%q chunks=%v", cancelPromptBuildID, cancelWidgetStatus, cancelWidgetChunkStatuses)
+	}
 	_ = memStore.UpdateBuildStatus(context.Background(), buildID, "completed")
 	checkCode(http.MethodPost, "/builds/"+buildID+"/cancel", bytes.NewReader(nil), http.StatusConflict)
 	wPost := httptest.NewRecorder()
