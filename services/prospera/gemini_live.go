@@ -373,7 +373,7 @@ func BuildGeminiSetupMessage(model, systemPrompt string, voice ...string) Gemini
 				},
 				{
 					Name:        "consult_calendar",
-					Description: "Consult the owner's calendar for events, commitments, or schedule availability. MUST be called before answering about any dates or times not confirmed in the brief.",
+					Description: "Consult the owner's calendar for events, commitments, or schedule availability when the brief allows date/time flexibility or requires checking whether a proposed slot is free. Do not call if the task is strictly limited to a fixed date/time and alternative dates are not permitted.",
 					Parameters: map[string]any{
 						"type": "OBJECT",
 						"properties": map[string]any{
