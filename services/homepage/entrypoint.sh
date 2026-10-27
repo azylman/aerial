@@ -3,6 +3,19 @@ set -e
 
 mkdir -p /config
 
+if [ -d "/local/user-homepage" ]; then
+    USER_HOMEPAGE_DIR="/local/user-homepage"
+else
+    USER_HOMEPAGE_DIR="/share/aerial-config/homepage"
+fi
+
+if [ -d "$USER_HOMEPAGE_DIR" ]; then
+    mkdir -p /app/config
+    for ext in yaml yml css js; do
+        cp -f "$USER_HOMEPAGE_DIR"/*."$ext" /app/config/ 2>/dev/null || true
+    done
+fi
+
 # Execute config preparation with explicit raw-copy fallback
 if ! NODE_PATH=/app/node_modules node /app/core-homepage/prepare-config.js; then
     echo "🚨 [Homepage Entrypoint] Config preparation failed! Falling back to raw core baseline..." >&2
@@ -12,6 +25,7 @@ fi
 # Chown config directory for node user if running as root
 if [ "$(id -u)" = "0" ]; then
     chown -R node:node /config 2>/dev/null || true
+    chown -R node:node /app/config 2>/dev/null || true
 fi
 
 # Export variables from runtime.env if generated from declarative YAML

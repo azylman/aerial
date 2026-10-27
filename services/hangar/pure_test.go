@@ -1,9 +1,13 @@
 package main
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1584,6 +1588,313 @@ func TestResolveExpectedDeployJobs_TableDriven(t *testing.T) {
 				if got[i] != tc.want[i] {
 					t.Errorf("ResolveExpectedDeployJobs()[%d] = %q, want %q (full: %v)", i, got[i], tc.want[i], got)
 				}
+			}
+		})
+	}
+}
+
+func TestIsStaticAssetOnlyFile_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		path     string
+		expected bool
+	}{
+		{"dashboard static file", "services/dashboard/static/index.html", true},
+		{"dashboard static nested", "services/dashboard/static/assets/app.js", true},
+		{"dashboard static leading slash", "/services/dashboard/static/app.css", true},
+		{"docs service app file", "services/docs-service/app/index.html", true},
+		{"docs service app nested", "services/docs-service/app/vendor/docsify.js", true},
+		{"dashboard go file", "services/dashboard/main.go", false},
+		{"docs service go file", "services/docs-service/main.go", false},
+		{"unrelated service", "services/eri/pkg/db/db.go", false},
+		{"root Dockerfile", "Dockerfile", false},
+		{"empty path", "", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := isStaticAssetOnlyFile(tc.path)
+			if got != tc.expected {
+				t.Errorf("isStaticAssetOnlyFile(%q) = %v, want %v", tc.path, got, tc.expected)
+			}
+		})
+	}
+}
+
+func TestResolveAssetBundleSources_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		bundle      string
+		composeDir  string
+		configDir   string
+		mirrormere  string
+		wantSources int
+		wantExcl    int
+		wantErr     bool
+	}{
+		{"migrations bundle", "migrations", "/compose", "/config", "/mirrormere", 1, 0, false},
+		{"migrations bundle with ext", "migrations.tar.gz", "/compose", "/config", "/mirrormere", 1, 0, false},
+		{"dashboard bundle", "dashboard", "/compose", "/config", "/mirrormere", 1, 0, false},
+		{"dashboard bundle with slashes", "/dashboard.tar.gz/", "/compose", "/config", "/mirrormere", 1, 0, false},
+		{"docs bundle", "docs", "/compose", "/config", "/mirrormere", 2, 0, false},
+		{"grafana bundle", "grafana", "/compose", "/config", "/mirrormere", 2, 0, false},
+		{"homepage bundle", "homepage", "/compose", "/config", "/mirrormere", 2, 1, false},
+		{"mirrormere bundle", "mirrormere", "/compose", "/config", "/mirrormere", 2, 0, false},
+		{"unknown bundle", "invalid-bundle", "/compose", "/config", "/mirrormere", 0, 0, true},
+		{"empty bundle", "", "/compose", "/config", "/mirrormere", 0, 0, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sources, excl, err := ResolveAssetBundleSources(tc.bundle, tc.composeDir, tc.configDir, tc.mirrormere)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ResolveAssetBundleSources(%q) err = %v, wantErr = %v", tc.bundle, err, tc.wantErr)
+			}
+			if len(sources) != tc.wantSources {
+				t.Errorf("ResolveAssetBundleSources(%q) len(sources) = %d, want %d", tc.bundle, len(sources), tc.wantSources)
+			}
+			if len(excl) != tc.wantExcl {
+				t.Errorf("ResolveAssetBundleSources(%q) len(excl) = %d, want %d", tc.bundle, len(excl), tc.wantExcl)
+			}
+		})
+	}
+}
+
+func TestBuildAssetBundleTarGz_TableDriven(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	src1 := filepath.Join(tmpDir, "src1")
+	src2 := filepath.Join(tmpDir, "src2")
+	_ = os.MkdirAll(filepath.Join(src1, "sub"), 0o755)
+	_ = os.MkdirAll(filepath.Join(src1, "test"), 0o755)
+	_ = os.MkdirAll(src2, 0o755)
+
+	_ = os.WriteFile(filepath.Join(src1, "hello.txt"), []byte("hello"), 0o644)
+	_ = os.WriteFile(filepath.Join(src1, "run.sh"), []byte("#!/bin/sh\necho hi"), 0o755)
+	_ = os.WriteFile(filepath.Join(src1, "sub", "data.json"), []byte("{}"), 0o644)
+	_ = os.WriteFile(filepath.Join(src1, "test", "ignore.js"), []byte("test"), 0o644)
+	_ = os.WriteFile(filepath.Join(src1, ".hidden"), []byte("skip"), 0o644)
+	_ = os.WriteFile(filepath.Join(src1, "scratch.tmp"), []byte("skip"), 0o644)
+	_ = os.MkdirAll(filepath.Join(src1, ".git"), 0o755)
+	_ = os.WriteFile(filepath.Join(src1, ".git", "config"), []byte("skip"), 0o644)
+	_ = os.MkdirAll(filepath.Join(src1, ".hidden_dir"), 0o755)
+	_ = os.WriteFile(filepath.Join(src1, ".hidden_dir", "file"), []byte("skip"), 0o644)
+	_ = os.MkdirAll(filepath.Join(src1, "build.tmp"), 0o755)
+	_ = os.WriteFile(filepath.Join(src1, "build.tmp", "file"), []byte("skip"), 0o644)
+	fileAsSrc := filepath.Join(tmpDir, "regular_file.txt")
+	_ = os.WriteFile(fileAsSrc, []byte("regular file"), 0o644)
+	_ = os.WriteFile(filepath.Join(src2, "world.txt"), []byte("world"), 0o644)
+
+	tests := []struct {
+		name          string
+		sources       map[string]string
+		excludeRel    []string
+		wantFiles     []string
+		wantExec      []string
+		dontWantFiles []string
+		wantErr       bool
+	}{
+		{
+			name: "multi source with prefix and exclude",
+			sources: map[string]string{
+				"prefix1": src1,
+				"prefix2": src2,
+			},
+			excludeRel: []string{"prefix1/test"},
+			wantFiles: []string{
+				"prefix1/",
+				"prefix1/hello.txt",
+				"prefix1/run.sh",
+				"prefix1/sub/",
+				"prefix1/sub/data.json",
+				"prefix2/",
+				"prefix2/world.txt",
+			},
+			wantExec: []string{"prefix1/run.sh"},
+			dontWantFiles: []string{
+				"prefix1/test/ignore.js",
+				"prefix1/.hidden",
+				"prefix1/scratch.tmp",
+				"prefix1/.git",
+				"prefix1/.git/config",
+				"prefix1/.hidden_dir",
+				"prefix1/build.tmp",
+			},
+			wantErr: false,
+		},
+		{
+			name: "root prefix with dot",
+			sources: map[string]string{
+				".": src2,
+			},
+			excludeRel: nil,
+			wantFiles: []string{
+				"world.txt",
+			},
+			dontWantFiles: nil,
+			wantErr:       false,
+		},
+		{
+			name: "missing source directory emits prefix dir",
+			sources: map[string]string{
+				"absent": filepath.Join(tmpDir, "does-not-exist"),
+			},
+			excludeRel: nil,
+			wantFiles: []string{
+				"absent/",
+			},
+			dontWantFiles: nil,
+			wantErr:       false,
+		},
+		{
+			name: "file source path is skipped",
+			sources: map[string]string{
+				"file_src": fileAsSrc,
+			},
+			excludeRel: nil,
+			wantFiles: []string{
+				"file_src/",
+			},
+			dontWantFiles: nil,
+			wantErr:       false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			raw, hash, err := BuildAssetBundleTarGz(tc.sources, tc.excludeRel...)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("BuildAssetBundleTarGz() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if hash == "" {
+				t.Errorf("expected non-empty hash")
+			}
+
+			gr, err := gzip.NewReader(bytes.NewReader(raw))
+			if err != nil {
+				t.Fatalf("gzip reader err = %v", err)
+			}
+			defer gr.Close()
+
+			tr := tar.NewReader(gr)
+			seen := make(map[string]tar.Header)
+			for {
+				hdr, trErr := tr.Next()
+				if trErr == io.EOF {
+					break
+				}
+				if trErr != nil {
+					t.Fatalf("tar next err = %v", trErr)
+				}
+				seen[hdr.Name] = *hdr
+			}
+
+			for _, wf := range tc.wantFiles {
+				if _, ok := seen[wf]; !ok {
+					t.Errorf("missing expected archive file: %s (seen: %v)", wf, seen)
+				}
+			}
+
+			for _, dwf := range tc.dontWantFiles {
+				if _, ok := seen[dwf]; ok {
+					t.Errorf("unexpected file present in archive: %s", dwf)
+				}
+			}
+
+			for _, ef := range tc.wantExec {
+				hdr, ok := seen[ef]
+				if !ok {
+					continue
+				}
+				if hdr.Mode != 0o755 {
+					t.Errorf("expected file %s mode 0755, got %o", ef, hdr.Mode)
+				}
+			}
+		})
+	}
+}
+
+func TestAssetBundleChangedInList_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		bundle   string
+		files    []string
+		expected bool
+	}{
+		{"dashboard static change", "dashboard", []string{"services/dashboard/static/app.js"}, true},
+		{"dashboard job change", "dashboard", []string{"nomad/jobs/dashboard.nomad"}, true},
+		{"dashboard job change alt", "dashboard", []string{"jobs/dashboard.nomad"}, true},
+		{"dashboard unrelated go change", "dashboard", []string{"services/dashboard/main.go"}, false},
+		{"docs service app change", "docs", []string{"services/docs-service/app/index.html"}, true},
+		{"docs markdown change", "docs", []string{"docs/index.md"}, true},
+		{"docs job change", "docs", []string{"nomad/jobs/docs.nomad"}, true},
+		{"docs unrelated go change", "docs", []string{"services/docs-service/main.go"}, false},
+		{"grafana system dashboard change", "grafana", []string{"nomad/grafana/dashboards/sys.json"}, true},
+		{"grafana custom dashboard change", "grafana", []string{"services/grafana/dashboards/user.json"}, true},
+		{"grafana job change", "grafana", []string{"nomad/jobs/grafana.nomad"}, true},
+		{"grafana unrelated change", "grafana", []string{"services/grafana/main.go"}, false},
+		{"homepage core change", "homepage", []string{"services/homepage/entrypoint.sh"}, true},
+		{"homepage user config change", "homepage", []string{"homepage/services.yaml"}, true},
+		{"homepage service yaml change", "homepage", []string{"services/homepage/homepage.yaml"}, true},
+		{"homepage job change", "homepage", []string{"nomad/jobs/homepage.nomad"}, true},
+		{"homepage test directory excluded", "homepage", []string{"services/homepage/test/prepare-config.test.js"}, false},
+		{"homepage unrelated change", "homepage", []string{"services/eri/main.go"}, false},
+		{"mirrormere web change", "mirrormere", []string{"web/index.html"}, true},
+		{"mirrormere widgets change", "mirrormere", []string{"widgets/weather.js"}, true},
+		{"mirrormere job change", "mirrormere", []string{"jobs/mirrormere-core.nomad"}, true},
+		{"mirrormere unrelated change", "mirrormere", []string{"server.go"}, false},
+		{"migrations sql change", "migrations", []string{"services/eri/pkg/db/migrations/001_init.sql"}, true},
+		{"migrations job change", "migrations", []string{"nomad/jobs/db-migrate.nomad"}, true},
+		{"migrations unrelated change", "migrations", []string{"services/eri/main.go"}, false},
+		{"unknown bundle", "unknown", []string{"services/dashboard/static/app.js"}, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := AssetBundleChangedInList(tc.bundle, tc.files)
+			if got != tc.expected {
+				t.Errorf("AssetBundleChangedInList(%q, %v) = %v, want %v", tc.bundle, tc.files, got, tc.expected)
+			}
+		})
+	}
+}
+
+func TestJobHasContainerBuildChanges_StaticAssetExclusion(t *testing.T) {
+	t.Parallel()
+	spec := `job "dashboard" {
+		task "dashboard" {
+			driver = "docker"
+			config {
+				image = "ghcr.io/azylman/aerial-dashboard:latest"
+			}
+		}
+	}`
+
+	tests := []struct {
+		name     string
+		files    []string
+		expected bool
+	}{
+		{"static file change only", []string{"services/dashboard/static/index.html"}, false},
+		{"static nested file change only", []string{"services/dashboard/static/assets/bundle.js"}, false},
+		{"code change in service", []string{"services/dashboard/main.go"}, true},
+		{"dockerfile change", []string{"Dockerfile"}, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := JobHasContainerBuildChanges(spec, tc.files)
+			if got != tc.expected {
+				t.Errorf("JobHasContainerBuildChanges() = %v, want %v for %v", got, tc.expected, tc.files)
 			}
 		})
 	}

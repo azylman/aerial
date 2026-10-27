@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -581,7 +582,46 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 		writeJSON(w, r, code, resp)
 	})
 
+	mux.HandleFunc("/internal/artifacts/", daemon.HandleArtifactBundle)
+
 	return mux
+}
+
+// HandleArtifactBundle handles GET /internal/artifacts/{bundle}.tar.gz and /internal/artifacts/{bundle}.
+func (d *SyncDaemon) HandleArtifactBundle(w http.ResponseWriter, r *http.Request) {
+	if !requireMethod(w, r, http.MethodGet) {
+		return
+	}
+	raw := strings.TrimPrefix(r.URL.Path, "/internal/artifacts/")
+	bundle := strings.TrimSuffix(strings.Trim(raw, "/"), ".tar.gz")
+	if bundle == "" {
+		writeJSON(w, r, http.StatusBadRequest, map[string]string{"error": "bundle name is required"})
+		return
+	}
+
+	mirrormereDir := ResolveRepoPath("mirrormere", d.repos)
+	if mirrormereDir == "" && d.composeDir != "" {
+		mirrormereDir = filepath.Join(filepath.Dir(d.composeDir), "mirrormere")
+	}
+
+	sources, excludeRelPaths, err := ResolveAssetBundleSources(bundle, d.composeDir, d.configDir, mirrormereDir)
+	if err != nil {
+		writeJSON(w, r, http.StatusNotFound, map[string]string{"error": err.Error()})
+		return
+	}
+
+	data, hash, err := BuildAssetBundleTarGz(sources, excludeRelPaths...)
+	if err != nil {
+		writeJSON(w, r, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("failed to build asset bundle: %v", err)})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Header().Set("X-Asset-Hash", hash)
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(data); err != nil {
+		log.Printf("[Hangar:HTTP] Failed writing artifact response: %v", err)
+	}
 }
 
 // RunDaemon starts the background sync daemon and HTTP server.
