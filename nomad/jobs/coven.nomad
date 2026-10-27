@@ -51,7 +51,6 @@ job "coven" {
       env {
         BRAIN_URL         = "http://eri.aerial"
         BRAIN_LLM_URL     = "http://eri.aerial/internal/llm"
-        CONFIG_PATH       = "/share/aerial-config/config.yaml"
         CUSTOM_SKILLS_DIR = "/share/aerial-config/custom-skills"
         RULES_DIR         = "/share/aerial-config/rules"
       }
