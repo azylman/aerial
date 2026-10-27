@@ -36,6 +36,9 @@ func TestRecordUsageJSON(t *testing.T) {
 			if len(LatestQuotaGroups()) == 0 {
 				t.Errorf("%s: expected LatestQuotaGroups() to be populated", tc.name)
 			}
+			if LatestQuotaUpdatedAt().IsZero() {
+				t.Errorf("%s: expected LatestQuotaUpdatedAt() to be populated", tc.name)
+			}
 		}
 	}
 }

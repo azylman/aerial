@@ -23,8 +23,9 @@ var (
 		Name: "aerial_brain_usage_quota_reset_timestamp_seconds",
 		Help: "Unix timestamp in seconds when the agy /usage quota window resets.",
 	}, []string{"bucket_id", "group", "window"})
-	latestQuotaMu     sync.RWMutex
-	latestQuotaGroups []QuotaGroup
+	latestQuotaMu        sync.RWMutex
+	latestQuotaGroups    []QuotaGroup
+	latestQuotaUpdatedAt time.Time
 )
 
 func init() {
@@ -63,6 +64,12 @@ func LatestQuotaGroups() []QuotaGroup {
 	return out
 }
 
+func LatestQuotaUpdatedAt() time.Time {
+	latestQuotaMu.RLock()
+	defer latestQuotaMu.RUnlock()
+	return latestQuotaUpdatedAt
+}
+
 func RecordUsageJSON(raw []byte) error {
 	var resp usageCLIResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
@@ -73,6 +80,7 @@ func RecordUsageJSON(raw []byte) error {
 	}
 	latestQuotaMu.Lock()
 	latestQuotaGroups = resp.Command.Data.Groups
+	latestQuotaUpdatedAt = time.Now().UTC()
 	latestQuotaMu.Unlock()
 	UsageQuotaRemainingFraction.Reset()
 	UsageQuotaResetTimestampSeconds.Reset()

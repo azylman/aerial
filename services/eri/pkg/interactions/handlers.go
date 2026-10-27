@@ -24,10 +24,15 @@ var (
 
 func (r *Router) handleQuota(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	var groups []metrics.QuotaGroup
+	var updatedAt time.Time
 	if r.deps.QuotaProvider != nil {
 		groups = r.deps.QuotaProvider()
 	} else {
 		groups = metrics.LatestQuotaGroups()
+		updatedAt = metrics.LatestQuotaUpdatedAt()
+	}
+	if r.deps.QuotaTimeProvider != nil {
+		updatedAt = r.deps.QuotaTimeProvider()
 	}
 	var lines []string
 	now := time.Now().UTC()
@@ -46,6 +51,9 @@ func (r *Router) handleQuota(s *discordgo.Session, i *discordgo.InteractionCreat
 		if len(bLines) > 0 {
 			lines = append(lines, fmt.Sprintf("**%s**\n%s", g.Name, strings.Join(bLines, "\n")))
 		}
+	}
+	if len(lines) > 0 && !updatedAt.IsZero() {
+		lines = append(lines, fmt.Sprintf("*Last refreshed: %s ago (<t:%d:t>)*", formatRelativeDuration(now.Sub(updatedAt)), updatedAt.Unix()))
 	}
 	content := "⏳ No quota telemetry recorded yet."
 	if len(lines) > 0 {

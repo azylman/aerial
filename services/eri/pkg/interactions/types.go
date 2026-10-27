@@ -2,6 +2,7 @@ package interactions
 
 import (
 	"context"
+	"time"
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
@@ -14,6 +15,9 @@ type DeployStatusProvider func() string
 
 // QuotaProvider supplies current model quota groups for /quota.
 type QuotaProvider func() []metrics.QuotaGroup
+
+// QuotaTimeProvider supplies the timestamp when model quota telemetry was last refreshed.
+type QuotaTimeProvider func() time.Time
 
 // GitOpsChannelUpdater supplies the update function for modifying channel configurations.
 type GitOpsChannelUpdater func(ctx context.Context, channelKey string, mutateFn func(p *config.ChannelPolicy)) (commitSHA string, err error)
@@ -34,6 +38,7 @@ type InteractionDeps struct {
 	AppID                string
 	DeployStatusProvider DeployStatusProvider
 	QuotaProvider        QuotaProvider
+	QuotaTimeProvider    QuotaTimeProvider
 	GitOpsChannelUpdater GitOpsChannelUpdater
 	MemoryURL            string
 	HaroURL              string
