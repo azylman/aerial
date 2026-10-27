@@ -255,9 +255,8 @@ func (s *Server) connectInboundStream(w http.ResponseWriter, ctx context.Context
 	if callbackOf != nil {
 		c.CallbackOfCallID = callbackOf.CallID
 		c.Brief = CallBrief{
-			Task: fmt.Sprintf("Take a message or update regarding prior call %s (%s). Do not commit to new terms beyond original approvals.",
-				callbackOf.CallID, callbackOf.Brief.Task),
-			Context:   fmt.Sprintf("Prior call context: %s", callbackOf.Brief.Context),
+			Task:      "Answer the inbound call naturally, listen to what the caller needs, and take a message or update without volunteering prior call details upfront before the caller brings them up. Do not commit to new terms beyond original approvals.",
+			Context:   fmt.Sprintf("Inbound callback regarding prior call %s (Prior task: %s; Prior context: %s)", callbackOf.CallID, callbackOf.Brief.Task, callbackOf.Brief.Context),
 			Approvals: callbackOf.Brief.Approvals,
 		}
 	} else {

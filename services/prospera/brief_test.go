@@ -264,6 +264,7 @@ func TestBuildSystemPrompt(t *testing.T) {
 			wantContains: []string{
 				"You are Aerial",
 				"CALLBACK RECEPTIONIST MODE",
+				"Do not dump prior call details upfront on pickup",
 				"dentist appointment",
 				"Progressive disclosure: focus directly on the task without introducing yourself upfront",
 			},

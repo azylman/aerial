@@ -205,6 +205,9 @@ func TestTwilioVoiceWebhook_ThreeTierInbound(t *testing.T) {
 				if c.CallbackOfCallID != "call-out-prior" {
 					t.Fatalf("tier2 CallbackOfCallID = %q, want 'call-out-prior'", c.CallbackOfCallID)
 				}
+				if !strings.Contains(c.Brief.Context, "Dentist appointment confirmation") {
+					t.Fatalf("tier2 Context = %q, want prior call task in context", c.Brief.Context)
+				}
 			} else if tc.wantCallTier == "tier3" {
 				c, err := store.GetCallByProviderSID(context.Background(), "CA-in-tier3")
 				if err != nil || c == nil {

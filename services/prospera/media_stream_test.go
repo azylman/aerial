@@ -1079,6 +1079,9 @@ func TestHandleMediaWebSocket_InboundMode(t *testing.T) {
 	if !strings.Contains(sess.systemPrompt, "CALLBACK RECEPTIONIST MODE:") {
 		t.Fatalf("inbound session system prompt missing CALLBACK RECEPTIONIST MODE:\n%s", sess.systemPrompt)
 	}
+	if !strings.Contains(sess.openingGreeting, "Answer the incoming call with a warm, brief greeting") {
+		t.Fatalf("inbound session openingGreeting = %q, want brief natural greeting instruction", sess.openingGreeting)
+	}
 
 	select {
 	case <-sess.Started():
