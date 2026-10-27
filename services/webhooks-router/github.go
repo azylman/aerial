@@ -589,7 +589,7 @@ func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGi
 		if err != nil {
 			log.Printf("[webhooks-router] [registry] warning checking expected deploy jobs for %s#%d: %v", res.Repo, res.PRNumber, err)
 		}
-		if !hasExpected {
+		if !hasExpected && isHangarSyncedRepo(res.Repo) {
 			if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
 				log.Printf("[webhooks-router] [widget] warning syncing pr_merged widget for %s#%d: %v", res.Repo, res.PRNumber, err)
 			}
