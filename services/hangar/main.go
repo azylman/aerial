@@ -703,7 +703,7 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 		}
 	}
 	if len(repos) == 0 {
-		repos = []string{"/share/aerial-config", "/share/aerial"}
+		repos = []string{"/share/aerial-config", "/share/aerial", "/share/mirrormere"}
 	}
 
 	intervalStr := firstNonEmpty(lookup("SYNC_INTERVAL"), fileCfg.SyncInterval)
@@ -719,9 +719,12 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 	composeDir := firstNonEmpty(lookup("AERIAL_INTERNAL_PROJECT_DIR"), lookup("AERIAL_PROJECT_DIR"), "/share/aerial")
 	configDir := firstNonEmpty(lookup("AERIAL_INTERNAL_CONFIG_DIR"), lookup("AERIAL_CONFIG_DIR"), "/share/aerial-config")
 
+	mirrormereDir := filepath.Join(filepath.Dir(composeDir), "mirrormere")
+
 	repoUrls := map[string]string{
-		configDir:  configRepoURL,
-		composeDir: "https://github.com/azylman/aerial.git",
+		configDir:     configRepoURL,
+		composeDir:    "https://github.com/azylman/aerial.git",
+		mirrormereDir: "https://github.com/azylman/mirrormere.git",
 	}
 
 	discordToken := firstNonEmpty(lookup("DISCORD_BOT_TOKEN"), lookup("DISCORD_TOKEN"))
