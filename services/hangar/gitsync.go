@@ -693,7 +693,9 @@ func (d *SyncDaemon) SyncAssetBundlesToNomad(ctx context.Context, configDir stri
 	}
 
 	if !diffGated || AssetBundleChangedInList("dashboard", changedFiles) {
-		if err := d.SyncServiceConfigsToNomad(ctx, configDir); err != nil {
+		// Invariant: Forward diff-gating context to ensure unchanged service configs
+		// are not re-pushed when only dashboard static assets change.
+		if err := d.SyncServiceConfigsToNomad(ctx, configDir, syncCtx...); err != nil {
 			log.Printf("[Hangar:Nomad] Notice: SyncAssetBundlesToNomad (dashboard): %v", err)
 			recordErr(err)
 		}
@@ -701,27 +703,35 @@ func (d *SyncDaemon) SyncAssetBundlesToNomad(ctx context.Context, configDir stri
 
 	if mirrormereHash := d.computeBundleHash("mirrormere", configDir); mirrormereHash != "" {
 		mirrormereYamlPath := filepath.Join(configDir, "services", "mirrormere", "mirrormere.yaml")
-		varKeys := []string{"ASSET_HASH"}
-		varArgs := []string{"ASSET_HASH=" + mirrormereHash}
-		h := sha256.New()
-		h.Write([]byte("ASSET_HASH:" + mirrormereHash + "\n"))
-
-		raw, err := readAndValidateYAML(mirrormereYamlPath, "mirrormere config", nil)
-		if err == nil && len(raw) > 0 {
-			varKeys = append(varKeys, "CONFIG_YAML")
-			varArgs = append(varArgs, "CONFIG_YAML=@"+mirrormereYamlPath)
-			h.Write([]byte("CONFIG_YAML:"))
-			h.Write(raw)
-			h.Write([]byte("\n"))
-		}
-
-		isChanged := !diffGated || AssetBundleChangedInList("mirrormere", changedFiles)
-		cacheKey := "nomad/jobs/mirrormere-core:" + strings.Join(varKeys, "+")
-		configHash := hex.EncodeToString(h.Sum(nil))
-
-		if _, err := d.pushNomadVarQuiet(ctx, cacheKey, "nomad/jobs/mirrormere-core", "mirrormere-core", configHash, isChanged, varArgs); err != nil {
+		var parsed any
+		raw, err := readAndValidateYAML(mirrormereYamlPath, "mirrormere config", &parsed)
+		if err != nil {
 			log.Printf("[Hangar:Nomad] Notice: SyncAssetBundlesToNomad (mirrormere): %v", err)
 			recordErr(err)
+		} else {
+			// Invariant: CONFIG_YAML must precede ASSET_HASH in varKeys, varArgs, and digest hashing
+			// to maintain identical cacheKey and configHash with SyncServiceConfigsToNomad (appendServiceAssetHash).
+			var varKeys, varArgs []string
+			h := sha256.New()
+			if len(raw) > 0 {
+				varKeys = append(varKeys, "CONFIG_YAML")
+				varArgs = append(varArgs, "CONFIG_YAML=@"+mirrormereYamlPath)
+				h.Write([]byte("CONFIG_YAML:"))
+				h.Write(raw)
+				h.Write([]byte("\n"))
+			}
+			varKeys = append(varKeys, "ASSET_HASH")
+			varArgs = append(varArgs, "ASSET_HASH="+mirrormereHash)
+			h.Write([]byte("ASSET_HASH:" + mirrormereHash + "\n"))
+
+			isChanged := !diffGated || AssetBundleChangedInList("mirrormere", changedFiles)
+			cacheKey := "nomad/jobs/mirrormere-core:" + strings.Join(varKeys, "+")
+			configHash := hex.EncodeToString(h.Sum(nil))
+
+			if _, err := d.pushNomadVarQuiet(ctx, cacheKey, "nomad/jobs/mirrormere-core", "mirrormere-core", configHash, isChanged, varArgs); err != nil {
+				log.Printf("[Hangar:Nomad] Notice: SyncAssetBundlesToNomad (mirrormere): %v", err)
+				recordErr(err)
+			}
 		}
 	}
 

@@ -920,18 +920,22 @@ func TestSyncAssetBundlesToNomad_TableDriven(t *testing.T) {
 		name                 string
 		diffGated            bool
 		changedFiles         []string
+		invalidMirrormere    bool
+		wantErr              bool
 		wantDocsPushed       bool
 		wantGrafanaPushed    bool
 		wantDashboardPushed  bool
+		wantHaroPushed       bool
 		wantMirrormerePushed bool
 	}{
 		{
-			name:                 "full sync without diff gating pushes all bundles",
+			name:                 "full sync without diff gating pushes all bundles and configs",
 			diffGated:            false,
 			changedFiles:         nil,
 			wantDocsPushed:       true,
 			wantGrafanaPushed:    true,
 			wantDashboardPushed:  true,
+			wantHaroPushed:       true,
 			wantMirrormerePushed: true,
 		},
 		{
@@ -941,6 +945,7 @@ func TestSyncAssetBundlesToNomad_TableDriven(t *testing.T) {
 			wantDocsPushed:       true,
 			wantGrafanaPushed:    false,
 			wantDashboardPushed:  false,
+			wantHaroPushed:       false,
 			wantMirrormerePushed: false,
 		},
 		{
@@ -950,15 +955,17 @@ func TestSyncAssetBundlesToNomad_TableDriven(t *testing.T) {
 			wantDocsPushed:       false,
 			wantGrafanaPushed:    true,
 			wantDashboardPushed:  false,
+			wantHaroPushed:       false,
 			wantMirrormerePushed: false,
 		},
 		{
-			name:                 "diff gated with dashboard static asset changed",
+			name:                 "diff gated with dashboard static asset changed forwards diff gating",
 			diffGated:            true,
 			changedFiles:         []string{"services/dashboard/static/app.js"},
 			wantDocsPushed:       false,
 			wantGrafanaPushed:    false,
 			wantDashboardPushed:  true,
+			wantHaroPushed:       false,
 			wantMirrormerePushed: false,
 		},
 		{
@@ -968,6 +975,7 @@ func TestSyncAssetBundlesToNomad_TableDriven(t *testing.T) {
 			wantDocsPushed:       false,
 			wantGrafanaPushed:    false,
 			wantDashboardPushed:  false,
+			wantHaroPushed:       false,
 			wantMirrormerePushed: true,
 		},
 		{
@@ -977,6 +985,19 @@ func TestSyncAssetBundlesToNomad_TableDriven(t *testing.T) {
 			wantDocsPushed:       false,
 			wantGrafanaPushed:    false,
 			wantDashboardPushed:  false,
+			wantHaroPushed:       false,
+			wantMirrormerePushed: false,
+		},
+		{
+			name:                 "invalid mirrormere yaml returns error and skips mirrormere push",
+			diffGated:            false,
+			changedFiles:         nil,
+			invalidMirrormere:    true,
+			wantErr:              true,
+			wantDocsPushed:       true,
+			wantGrafanaPushed:    true,
+			wantDashboardPushed:  true,
+			wantHaroPushed:       true,
 			wantMirrormerePushed: false,
 		},
 	}
@@ -991,19 +1012,33 @@ func TestSyncAssetBundlesToNomad_TableDriven(t *testing.T) {
 			mirrormereDir := filepath.Join(env.configDir, "mirrormere")
 			_ = os.MkdirAll(filepath.Join(composeDir, "services", "dashboard", "static"), 0o755)
 			_ = os.WriteFile(filepath.Join(composeDir, "services", "dashboard", "static", "index.html"), []byte("<h1>Dash</h1>"), 0o644)
+			_ = os.MkdirAll(filepath.Join(composeDir, "services", "dashboard"), 0o755)
+			_ = os.WriteFile(filepath.Join(composeDir, "services", "dashboard", "dashboard.yaml"), []byte("title: Dashboard\n"), 0o644)
 			_ = os.MkdirAll(filepath.Join(composeDir, "services", "docs-service", "app"), 0o755)
 			_ = os.WriteFile(filepath.Join(composeDir, "services", "docs-service", "app", "index.html"), []byte("<h1>Docs</h1>"), 0o644)
 			_ = os.MkdirAll(filepath.Join(composeDir, "nomad", "grafana", "dashboards"), 0o755)
 			_ = os.WriteFile(filepath.Join(composeDir, "nomad", "grafana", "dashboards", "sys.json"), []byte("{}"), 0o644)
 			_ = os.MkdirAll(filepath.Join(mirrormereDir, "web"), 0o755)
 			_ = os.WriteFile(filepath.Join(mirrormereDir, "web", "index.html"), []byte("<h1>Mirrormere</h1>"), 0o644)
+
+			mirrormereContent := []byte("port: 8080\n")
+			if tc.invalidMirrormere {
+				mirrormereContent = []byte("invalid: [unclosed yaml\n")
+			}
 			_ = os.MkdirAll(filepath.Join(env.configDir, "services", "mirrormere"), 0o755)
-			_ = os.WriteFile(filepath.Join(env.configDir, "services", "mirrormere", "mirrormere.yaml"), []byte("port: 8080\n"), 0o644)
+			_ = os.WriteFile(filepath.Join(env.configDir, "services", "mirrormere", "mirrormere.yaml"), mirrormereContent, 0o644)
+
+			_ = os.MkdirAll(filepath.Join(env.configDir, "services", "dashboard"), 0o755)
+			_ = os.WriteFile(filepath.Join(env.configDir, "services", "dashboard", "dashboard.yaml"), []byte("title: Dashboard\n"), 0o644)
+
+			_ = os.MkdirAll(filepath.Join(env.configDir, "services", "haro"), 0o755)
+			_ = os.WriteFile(filepath.Join(env.configDir, "services", "haro", "haro.yaml"), []byte("log_level: info\n"), 0o644)
 
 			env.daemon.composeDir = composeDir
 			env.daemon.repos = []string{composeDir, env.configDir, mirrormereDir}
 			env.daemon.serviceConfigs = []ServiceConfigMapping{
 				{RelPath: "services/dashboard/dashboard.yaml", NomadVar: "nomad/jobs/dashboard", VarKey: "CONFIG_YAML"},
+				{RelPath: "services/haro/haro.yaml", NomadVar: "nomad/jobs/haro", VarKey: "CONFIG_YAML"},
 			}
 
 			var syncCtx []ConfigSyncContext
@@ -1015,8 +1050,8 @@ func TestSyncAssetBundlesToNomad_TableDriven(t *testing.T) {
 			}
 
 			err := env.daemon.SyncAssetBundlesToNomad(ctx, env.configDir, syncCtx...)
-			if err != nil {
-				t.Fatalf("SyncAssetBundlesToNomad failed: %v", err)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("SyncAssetBundlesToNomad err = %v, wantErr = %v", err, tc.wantErr)
 			}
 
 			calls := env.nomadCalls()
@@ -1041,9 +1076,29 @@ func TestSyncAssetBundlesToNomad_TableDriven(t *testing.T) {
 				t.Errorf("dashboard push = %v, want %v (calls: %s)", dashboardFound, tc.wantDashboardPushed, allCalls)
 			}
 
+			haroFound := strings.Contains(allCalls, "var put -force nomad/jobs/haro")
+			if haroFound != tc.wantHaroPushed {
+				t.Errorf("haro push = %v, want %v (calls: %s)", haroFound, tc.wantHaroPushed, allCalls)
+			}
+
 			mirrormereFound := strings.Contains(allCalls, "var put -force nomad/jobs/mirrormere-core") && strings.Contains(allCalls, "ASSET_HASH=")
 			if mirrormereFound != tc.wantMirrormerePushed {
 				t.Errorf("mirrormere push = %v, want %v (calls: %s)", mirrormereFound, tc.wantMirrormerePushed, allCalls)
+			}
+
+			if tc.wantMirrormerePushed {
+				var mirrormereCall string
+				for _, c := range joinedCalls {
+					if strings.Contains(c, "nomad/jobs/mirrormere-core") {
+						mirrormereCall = c
+						break
+					}
+				}
+				cfgIdx := strings.Index(mirrormereCall, "CONFIG_YAML=@")
+				assetIdx := strings.Index(mirrormereCall, "ASSET_HASH=")
+				if cfgIdx == -1 || assetIdx == -1 || cfgIdx >= assetIdx {
+					t.Errorf("expected CONFIG_YAML to precede ASSET_HASH in mirrormere call: %s", mirrormereCall)
+				}
 			}
 		})
 	}
