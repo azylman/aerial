@@ -1,3 +1,29 @@
+variable "data_stream_dir" {
+  type    = string
+  default = "/data/stream"
+}
+
+variable "extra_mounts" {
+  type = list(object({
+    type     = string
+    target   = string
+    source   = string
+    readonly = bool
+    volume_options = list(object({
+      driver_config = list(object({
+        name    = string
+        options = list(map(string))
+      }))
+    }))
+  }))
+  default = []
+}
+
+variable "extra_env_template" {
+  type    = string
+  default = ""
+}
+
 job "openobserve" {
   datacenters = ["dc1"]
   type        = "service"
@@ -40,19 +66,30 @@ job "openobserve" {
         healthchecks {
           disable = true
         }
-        mounts = [
+        mounts = concat([
           {
             type     = "volume"
             target   = "/data"
             source   = "aerial-openobserve-data"
             readonly = false
           }
-        ]
+        ], var.extra_mounts)
       }
 
       env {
         ZO_ROOT_USER_EMAIL           = "admin@aerial.local"
         ZO_DATA_DIR                  = "/data"
+        ZO_DATA_WAL_DIR              = "/data/wal"
+        ZO_DATA_STREAM_DIR           = "${var.data_stream_dir}"
+        ZO_META_STORE                = "postgres"
+        ZO_META_POSTGRES_HOST        = "postgres"
+        ZO_META_POSTGRES_PORT        = "5432"
+        ZO_META_POSTGRES_USER        = "aerial"
+        ZO_META_POSTGRES_DBNAME      = "openobserve"
+        ZO_MEM_PERSIST_INTERVAL      = "5"
+        ZO_MAX_FILE_RETENTION_TIME   = "1800"
+        ZO_FILE_PUSH_INTERVAL        = "300"
+        ZO_COMPACT_INTERVAL          = "14400"
         ZO_BASE_URI                  = "/openobserve"
         ZO_TELEMETRY                 = "false"
         ZO_AUTO_QUERY_ENABLED        = "true"
@@ -71,8 +108,10 @@ job "openobserve" {
 {{ if nomadVarExists "nomad/jobs/shared" }}
 {{ with nomadVar "nomad/jobs/shared" }}
 {{ if .OPENOBSERVE_ROOT_USER_PASSWORD }}ZO_ROOT_USER_PASSWORD="{{ .OPENOBSERVE_ROOT_USER_PASSWORD }}"{{ end }}
+{{ if .POSTGRES_PASSWORD }}ZO_META_POSTGRES_PASSWORD="{{ .POSTGRES_PASSWORD }}"{{ end }}
 {{ end }}
 {{ end }}
+${var.extra_env_template}
 EOH
         destination = "secrets/openobserve.env"
         env         = true
