@@ -84,16 +84,36 @@ job "eri" {
             readonly = true
           },
           {
-            type     = "bind"
+            type     = "volume"
             target   = "/mnt/nas"
-            source   = "/mnt/data/supervisor/share/NAS"
+            source   = "nas-public"
             readonly = true
+            volume_options = [{
+              driver_config = [{
+                name = "local"
+                options = [{
+                  type   = "cifs"
+                  device = "//${NAS_HOST}/Public"
+                  o      = "ro,addr=${NAS_HOST},vers=3.1.1,username=aerial,password=${QNAP_PASS},uid=0,gid=0,file_mode=0755,dir_mode=0755,soft,nounix,mapposix"
+                }]
+              }]
+            }]
           },
           {
-            type     = "bind"
+            type     = "volume"
             target   = "/mnt/nas-scratch"
-            source   = "/mnt/data/supervisor/share/Aerial"
+            source   = "nas-aerial"
             readonly = false
+            volume_options = [{
+              driver_config = [{
+                name = "local"
+                options = [{
+                  type   = "cifs"
+                  device = "//${NAS_HOST}/Aerial"
+                  o      = "addr=${NAS_HOST},vers=3.1.1,username=aerial,password=${QNAP_PASS},uid=0,gid=0,file_mode=0755,dir_mode=0755,soft,nounix,mapposix"
+                }]
+              }]
+            }]
           },
           {
             type     = "bind"
@@ -154,6 +174,8 @@ DISCORD_TOKEN="{{ .DISCORD_BOT_TOKEN }}"{{ end }}
 {{ if .OPENOBSERVE_ROOT_USER_PASSWORD }}OPENOBSERVE_ROOT_USER_PASSWORD="{{ .OPENOBSERVE_ROOT_USER_PASSWORD }}"{{ end }}
 {{ if .UNIFI_PASS }}UNIFI_PASS="{{ .UNIFI_PASS }}"
 UNIFI_PASSWORD="{{ .UNIFI_PASS }}"{{ end }}
+{{ if .NAS_HOST }}NAS_HOST="{{ .NAS_HOST }}"{{ end }}
+{{ if .QNAP_PASS }}QNAP_PASS="{{ .QNAP_PASS }}"{{ end }}
 {{ with index . "1PASSWORD_SERVICE_ACCOUNT_TOKEN" }}OP_SERVICE_ACCOUNT_TOKEN="{{ . }}"{{ end }}
 {{ end }}
 {{ end }}

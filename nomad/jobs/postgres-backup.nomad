@@ -34,8 +34,23 @@ job "postgres-backup" {
         healthchecks {
           disable = true
         }
-        volumes = [
-          "/mnt/data/supervisor/share/Aerial/backups/postgres:/backups"
+        mounts = [
+          {
+            type     = "volume"
+            target   = "/backups"
+            source   = "nas-aerial-backups"
+            readonly = false
+            volume_options = [{
+              driver_config = [{
+                name = "local"
+                options = [{
+                  type   = "cifs"
+                  device = "//${NAS_HOST}/Aerial/backups/postgres"
+                  o      = "addr=${NAS_HOST},vers=3.1.1,username=aerial,password=${QNAP_PASS},uid=0,gid=0,file_mode=0755,dir_mode=0755,soft,nounix,mapposix"
+                }]
+              }]
+            }]
+          }
         ]
       }
 
@@ -58,6 +73,8 @@ job "postgres-backup" {
 {{ if nomadVarExists "nomad/jobs/shared" }}
 {{ with nomadVar "nomad/jobs/shared" }}
 {{ if .POSTGRES_PASSWORD }}POSTGRES_PASSWORD="{{ .POSTGRES_PASSWORD }}"{{ end }}
+{{ if .NAS_HOST }}NAS_HOST="{{ .NAS_HOST }}"{{ end }}
+{{ if .QNAP_PASS }}QNAP_PASS="{{ .QNAP_PASS }}"{{ end }}
 {{ end }}
 {{ end }}
 EOH
