@@ -87,15 +87,9 @@ job "eri" {
             readonly = false
           },
           {
-            type     = "bind"
-            target   = "/share/aerial-config"
-            source   = "/mnt/data/supervisor/share/aerial-config"
-            readonly = true
-          },
-          {
-            type     = "bind"
-            target   = "/share/aerial"
-            source   = "/mnt/data/supervisor/share/aerial"
+            type     = "volume"
+            target   = "/share"
+            source   = "aerial-share"
             readonly = true
           }
         ], var.extra_mounts)
