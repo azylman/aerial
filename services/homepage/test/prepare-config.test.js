@@ -6,10 +6,11 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const prepareConfig = require('../prepare-config');
-const { run, resolveDefaultUserDir, resolveYamlParser, parseYaml, safeRead, writeAtomic, copyFallback } = prepareConfig;
+const { run, resolveDefaultCoreDir, resolveDefaultUserDir, resolveYamlParser, parseYaml, safeRead, writeAtomic, copyFallback } = prepareConfig;
 
 test('prepare-config: exports correct functions and omits startWatcher', () => {
   assert.equal(typeof run, 'function');
+  assert.equal(typeof resolveDefaultCoreDir, 'function');
   assert.equal(typeof resolveDefaultUserDir, 'function');
   assert.equal(typeof resolveYamlParser, 'function');
   assert.equal(typeof parseYaml, 'function');
@@ -17,6 +18,16 @@ test('prepare-config: exports correct functions and omits startWatcher', () => {
   assert.equal(typeof writeAtomic, 'function');
   assert.equal(typeof copyFallback, 'function');
   assert.equal(prepareConfig.startWatcher, undefined);
+});
+
+test('prepare-config: resolveDefaultCoreDir prefers /local/core-homepage/config when present', () => {
+  const dir = resolveDefaultCoreDir((p) => p === '/local/core-homepage/config');
+  assert.equal(dir, '/local/core-homepage/config');
+});
+
+test('prepare-config: resolveDefaultCoreDir falls back to /app/core-homepage/config when /local/core-homepage/config absent', () => {
+  const dir = resolveDefaultCoreDir(() => false);
+  assert.equal(dir, '/app/core-homepage/config');
 });
 
 test('prepare-config: resolveDefaultUserDir prefers /local/user-homepage when present', () => {

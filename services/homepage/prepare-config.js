@@ -11,6 +11,13 @@ const {
   mergeCustomCss
 } = require('./lib/merge');
 
+function resolveDefaultCoreDir(existsFn = fs.existsSync) {
+  if (existsFn('/local/core-homepage/config')) {
+    return '/local/core-homepage/config';
+  }
+  return '/app/core-homepage/config';
+}
+
 function resolveDefaultUserDir(existsFn = fs.existsSync) {
   if (existsFn('/local/user-homepage')) {
     return '/local/user-homepage';
@@ -18,7 +25,7 @@ function resolveDefaultUserDir(existsFn = fs.existsSync) {
   return '/share/aerial-config/homepage';
 }
 
-const CORE_DIR = process.env.CORE_CONFIG_DIR || '/app/core-homepage/config';
+const CORE_DIR = process.env.CORE_CONFIG_DIR || resolveDefaultCoreDir();
 const USER_DIR = process.env.USER_CONFIG_DIR || resolveDefaultUserDir();
 const TARGET_DIR = process.env.TARGET_CONFIG_DIR || '/config';
 
@@ -272,6 +279,7 @@ if (require.main === module) {
 
 module.exports = {
   run,
+  resolveDefaultCoreDir,
   resolveDefaultUserDir,
   resolveYamlParser,
   parseYaml,
