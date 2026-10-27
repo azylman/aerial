@@ -81,6 +81,9 @@ func TestRunCLI(t *testing.T) {
 			wantOutput: "Usage: hook-guard",
 			wantCode:   0,
 		},
+		{name: "subcommand followed by --help outputs usage", args: []string{"hook-guard", "commit", "--help"}, wantOutput: "Usage: hook-guard", wantCode: 0},
+		{name: "subcommand followed by -h outputs usage", args: []string{"hook-guard", "share", "-h"}, wantOutput: "Usage: hook-guard", wantCode: 0},
+		{name: "help flag followed by subcommand outputs usage", args: []string{"hook-guard", "--help", "commit"}, wantOutput: "Usage: hook-guard", wantCode: 0},
 		{
 			name:     "empty args defaults to all",
 			args:     []string{},

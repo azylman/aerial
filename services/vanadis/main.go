@@ -969,6 +969,38 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 	})
 }
 
+func isCancellableChunkStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "pending", "running", "coding":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *VanadisServer) cancelBuildChunksAndPrompts(ctx context.Context, buildID string, existing *VanadisBuild, existingChunks []VanadisChunk) {
+	now := time.Now().UTC()
+	for i := range existingChunks {
+		if !isCancellableChunkStatus(existingChunks[i].Status) {
+			continue
+		}
+		if s.store != nil {
+			if err := s.store.UpdateChunkStatus(ctx, existingChunks[i].ID, "cancelled"); err != nil {
+				log.Printf("[vanadis] warning: failed marking chunk %s cancelled: %v", existingChunks[i].ID, err)
+			}
+		}
+		existingChunks[i].Status = "cancelled"
+		existingChunks[i].UpdatedAt = now
+	}
+	if _, err := s.postBrainJSON(ctx, "/prompt/cancel", map[string]string{"build_id": buildID}, 4<<10); err != nil {
+		log.Printf("[vanadis] warning: failed cancelling pending brain prompts for build %s: %v", buildID, err)
+	}
+	if existing != nil {
+		existing.Status = "cancelled"
+		s.syncBuildWidget(ctx, *existing, existingChunks, "")
+	}
+}
+
 func (s *VanadisServer) handleBuildByID(w http.ResponseWriter, r *http.Request) {
 	if s.store == nil {
 		writeErr(w, http.StatusInternalServerError, "vanadis store not configured")
@@ -997,10 +1029,7 @@ func (s *VanadisServer) handleBuildByID(w http.ResponseWriter, r *http.Request) 
 			writeStoreErr(w, err)
 			return
 		}
-		if existing != nil {
-			existing.Status = "cancelled"
-			s.syncBuildWidget(r.Context(), *existing, existingChunks, "")
-		}
+		s.cancelBuildChunksAndPrompts(r.Context(), id, existing, existingChunks)
 		httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "cancelled", "build_id": id})
 		return
 	}

@@ -231,6 +231,63 @@ func TestHandlePrompt_SkipIfActive(t *testing.T) {
 	}
 }
 
+func TestHandleCancelPrompt(t *testing.T) {
+	t.Parallel()
+	seedStore := func(failOp string) *dbtest.FakeStore {
+		s := dbtest.NewFakeStore()
+		ctx := context.Background()
+		for _, m := range []db.Message{
+			{ID: "msg-b1-c2", ThreadID: "1542423172400291873", Content: "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: build-1\nChunk ID: build-1-chunk-2\n", Status: db.StatusPending},
+			{ID: "msg-b10-c1", ThreadID: "1542423172400291873", Content: "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: build-10\nChunk ID: build-10-chunk-1\n", Status: db.StatusPending},
+			{ID: "msg-b1-run", ThreadID: "1542423172400291873", Content: "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: build-1\nChunk ID: build-1-chunk-1\n", Status: db.StatusProcessing},
+			{ID: "msg-direct-1", ThreadID: "1542423172400291873", Content: "Direct prompt", Status: db.StatusPending},
+		} {
+			_ = s.InsertMessage(ctx, m)
+		}
+		if failOp != "" {
+			s.FailNext(failOp, errors.New("simulated "+failOp+" error"))
+		}
+		return s
+	}
+
+	for _, tc := range []struct {
+		name, method  string
+		store         db.Store
+		body          string
+		wantStatus    int
+		wantSubstr    string
+		checkID, wErr string
+	}{
+		{"method not allowed", http.MethodGet, seedStore(""), "", http.StatusMethodNotAllowed, "Method not allowed", "", ""},
+		{"nil store", http.MethodPost, nil, `{"build_id":"build-1"}`, http.StatusInternalServerError, "Database store not configured", "", ""},
+		{"invalid json", http.MethodPost, seedStore(""), `{invalid`, http.StatusBadRequest, "Invalid JSON payload", "", ""},
+		{"missing ids", http.MethodPost, seedStore(""), `{"reason":"no ids"}`, http.StatusBadRequest, "'message_id' or 'build_id' is required", "", ""},
+		{"store query error", http.MethodPost, seedStore("GetPendingOrProcessingMessages"), `{"build_id":"build-1"}`, http.StatusInternalServerError, "Failed to fetch pending messages", "", ""},
+		{"claim error skips message", http.MethodPost, seedStore("ClaimPendingMessage"), `{"build_id":"build-1"}`, http.StatusOK, `"cancelled_count":0`, "", ""},
+		{"update status error", http.MethodPost, seedStore("UpdateMessageStatus"), `{"build_id":"build-1"}`, http.StatusOK, `"cancelled_count":1`, "", ""},
+		{"cancel by build_id", http.MethodPost, seedStore(""), `{"build_id":"build-1"}`, http.StatusOK, `"cancelled_ids":["msg-b1-c2"]`, "msg-b1-c2", "cancelled vanadis build build-1"},
+		{"cancel by message_id custom reason", http.MethodPost, seedStore(""), `{"message_id":"msg-direct-1","reason":"superseded"}`, http.StatusOK, `"cancelled_ids":["msg-direct-1"]`, "msg-direct-1", "superseded"},
+		{"cancel by message_id default reason", http.MethodPost, seedStore(""), `{"message_id":"msg-direct-1"}`, http.StatusOK, `"cancelled_ids":["msg-direct-1"]`, "msg-direct-1", "cancelled prompt msg-direct-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w := runHTTP(handleCancelPrompt(tc.store), tc.method, "/prompt/cancel", strings.NewReader(tc.body))
+			if w.Code != tc.wantStatus || !strings.Contains(w.Body.String(), tc.wantSubstr) {
+				t.Fatalf("got status=%d body=%q, want status=%d substr=%q", w.Code, w.Body.String(), tc.wantStatus, tc.wantSubstr)
+			}
+			if tc.checkID != "" && tc.store != nil {
+				m, err := tc.store.GetMessage(context.Background(), tc.checkID)
+				if err != nil || m == nil || m.Status != db.StatusFailed || !strings.Contains(m.ErrorMessage, tc.wErr) {
+					t.Fatalf("message %s got=%+v err=%v, want FAILED with %q", tc.checkID, m, err, tc.wErr)
+				}
+				if other, _ := tc.store.GetMessage(context.Background(), "msg-b10-c1"); other != nil && other.Status != db.StatusPending {
+					t.Fatalf("expected build-10 prompt to remain PENDING, got %q", other.Status)
+				}
+			}
+		})
+	}
+}
+
 func TestHandleDirectMessage(t *testing.T) {
 	mockSess, _ := discordgo.New("Bot fake-token")
 	mockSess.State = discordgo.NewState()
@@ -707,6 +764,7 @@ func TestNormalizeRoute(t *testing.T) {
 		input, expected string
 	}{
 		{"/prompt", "/prompt"},
+		{"/prompt/cancel", "/prompt/cancel"},
 		{"/transcripts/abc-123", "/transcripts"},
 		{"/api/transcripts/steps", "/transcripts"},
 		{"/api/transcripts/search", "/transcripts"},

@@ -62,8 +62,8 @@ func ParseCLIConfig(args []string) Config {
 	}
 
 	// 2. Allow explicit CLI argument to override mode
-	if len(args) > 1 {
-		arg := strings.ToLower(strings.TrimSpace(args[1]))
+	for i := 1; i < len(args); i++ {
+		arg := strings.ToLower(strings.TrimSpace(args[i]))
 		switch arg {
 		case "share", "share-guard":
 			cfg.Mode = ModeShare
