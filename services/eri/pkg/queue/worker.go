@@ -20,27 +20,27 @@ import (
 type wakeInfo = WakeInfo
 
 type turnExecution struct {
-	pool                                                                             *WorkerPool
-	activePool                                                                       runner.AgentPool
-	burst, trailingMsgs                                                              []db.Message
-	threadID, triggerType, activeSessionID, currentSessionID, previousSessionID      string
-	effectiveID, effectiveName, threadName, turnPrompt, turnStatus, turnResponseText string
-	turnError, injectedHookContext                                                   string
-	execStart                                                                        time.Time
-	activeSessionMu                                                                  sync.Mutex
-	turnCount, wakeIdx                                                               int
-	turnDurationMs                                                                   int64
-	lease                                                                            runner.SessionLease
-	isCold, isEphemeral, isThread, isQuotaPaused, turnAttempted                      bool
-	policy                                                                           config.ChannelPolicy
-	wakeInfos, trailingInfos                                                         []wakeInfo
-	statusUpdater                                                                    *StatusUpdater
-	stopTyping                                                                       func()
-	hookMetadata                                                                     map[string]any
-	turnTokenUsage                                                                   runner.TokenUsage
-	turnCtx                                                                          context.Context
-	turnCancel                                                                       context.CancelFunc
-	interrupted                                                                      atomic.Bool
+	pool                                                                                        *WorkerPool
+	activePool                                                                                  runner.AgentPool
+	burst, trailingMsgs                                                                         []db.Message
+	threadID, triggerType, activeSessionID, currentSessionID, previousSessionID, leaseSessionID string
+	effectiveID, effectiveName, threadName, turnPrompt, turnStatus, turnResponseText            string
+	turnError, injectedHookContext                                                              string
+	execStart                                                                                   time.Time
+	activeSessionMu                                                                             sync.Mutex
+	turnCount, wakeIdx                                                                          int
+	turnDurationMs                                                                              int64
+	lease                                                                                       runner.SessionLease
+	isCold, isEphemeral, isThread, isQuotaPaused, turnAttempted                                 bool
+	policy                                                                                      config.ChannelPolicy
+	wakeInfos, trailingInfos                                                                    []wakeInfo
+	statusUpdater                                                                               *StatusUpdater
+	stopTyping                                                                                  func()
+	hookMetadata                                                                                map[string]any
+	turnTokenUsage                                                                              runner.TokenUsage
+	turnCtx                                                                                     context.Context
+	turnCancel                                                                                  context.CancelFunc
+	interrupted                                                                                 atomic.Bool
 }
 
 func (te *turnExecution) turnCtxValue() context.Context {
@@ -268,7 +268,8 @@ func (te *turnExecution) acquirePoolAndLease() bool {
 	}
 	te.activeSessionMu.Lock()
 	te.lease = lease
-	te.currentSessionID = lease.SessionID()
+	te.leaseSessionID = lease.SessionID()
+	te.currentSessionID = te.leaseSessionID
 	te.previousSessionID = lease.PreviousSessionID()
 	te.isCold = lease.IsCold()
 	te.isEphemeral = poolKey.Ephemeral || lease.IsEphemeral()
@@ -774,6 +775,7 @@ func (te *turnExecution) prepareAttemptPrompt(attempt int, promptToSend, lastErr
 func (te *turnExecution) buildLeaseTurnContext(runCtx context.Context, currentModel, promptToSend string, sink runner.TurnSink) *runner.TurnContext {
 	te.activeSessionMu.Lock()
 	leaseSess := te.lease.SessionID()
+	te.leaseSessionID = leaseSess
 	shouldSave := leaseSess != "" && leaseSess != te.currentSessionID && !te.isEphemeral
 	if shouldSave {
 		te.currentSessionID = leaseSess
@@ -934,6 +936,8 @@ func (te *turnExecution) handleSessionCorruptionRetry(attempt, maxAttempts int, 
 	te.rotateSessionID(te.threadID, "")
 	te.activeSessionMu.Lock()
 	te.currentSessionID = ""
+	te.activeSessionID = ""
+	te.leaseSessionID = ""
 	oldLease := te.lease
 	te.lease = nil
 	te.activeSessionMu.Unlock()
@@ -954,7 +958,7 @@ func (te *turnExecution) handleSessionCorruptionRetry(attempt, maxAttempts int, 
 	if activePool != nil {
 		if newLease, lErr := activePool.AcquireLease(te.pool.ctx, te.threadID); lErr == nil {
 			te.activeSessionMu.Lock()
-			te.lease, te.isEphemeral, te.currentSessionID = newLease, te.isEphemeral || newLease.IsEphemeral(), newLease.SessionID()
+			te.lease, te.leaseSessionID, te.isEphemeral, te.currentSessionID = newLease, newLease.SessionID(), te.isEphemeral || newLease.IsEphemeral(), newLease.SessionID()
 			te.activeSessionMu.Unlock()
 		}
 	}
@@ -974,6 +978,8 @@ func (te *turnExecution) handleNonTransientFailure(attempt, maxAttempts int, cur
 	if hasCurr {
 		te.previousSessionID, te.currentSessionID = te.currentSessionID, ""
 	}
+	te.activeSessionID = ""
+	te.leaseSessionID = ""
 	te.activeSessionMu.Unlock()
 	if hasCurr {
 		te.rotateSessionID(te.threadID, "")

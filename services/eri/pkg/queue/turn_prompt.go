@@ -107,10 +107,8 @@ func (te *turnExecution) liveSessionIDForMessage(msgID string) (string, bool) {
 	if te.activeSessionID != "" {
 		return te.activeSessionID, true
 	}
-	if te.lease != nil {
-		if s := te.lease.SessionID(); s != "" {
-			return s, true
-		}
+	if te.leaseSessionID != "" {
+		return te.leaseSessionID, true
 	}
 	if !te.isEphemeral && te.currentSessionID != "" {
 		return te.currentSessionID, true
@@ -341,6 +339,7 @@ func (te *turnExecution) resolveAndPersistSessionID(candidateID, stdout, stderr 
 	targetSess := te.probeCandidateSessionID(candidateID, stdout, stderr)
 	if targetSess != "" {
 		te.activeSessionID = targetSess
+		te.leaseSessionID = targetSess
 		if allowPersist {
 			if !te.isEphemeral && targetSess != te.previousSessionID && targetSess != te.currentSessionID {
 				log.Printf("[Queue] Synchronizing active session for thread %s: %s -> %s", te.threadID, te.currentSessionID, targetSess)

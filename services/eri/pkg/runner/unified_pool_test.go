@@ -1595,3 +1595,49 @@ func TestAgentPool_InterfacesAndMockBehavior(t *testing.T) {
 		t.Fatal("expected error on closed mock pool")
 	}
 }
+
+func TestUnifiedSessionLease_ThreadSafety(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		initialID  string
+		writers    int
+		readers    int
+		iterations int
+	}{
+		{name: "concurrent reads and writes", initialID: "init-id", writers: 4, readers: 8, iterations: 50},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			lease := &unifiedSessionLease{sessionID: tc.initialID}
+			var wg sync.WaitGroup
+			for i := 0; i < tc.readers; i++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for j := 0; j < tc.iterations; j++ {
+						if id := lease.SessionID(); id == "" {
+							t.Errorf("expected non-empty session ID")
+						}
+						lease.MarkDirty()
+					}
+				}()
+			}
+			for i := 0; i < tc.writers; i++ {
+				wg.Add(1)
+				go func(idx int) {
+					defer wg.Done()
+					for j := 0; j < tc.iterations; j++ {
+						lease.mu.Lock()
+						lease.sessionID = fmt.Sprintf("sess-%d-%d", idx, j)
+						lease.mu.Unlock()
+					}
+				}(i)
+			}
+			wg.Wait()
+		})
+	}
+}
