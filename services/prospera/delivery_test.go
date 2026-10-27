@@ -455,10 +455,12 @@ func TestDeliverCallReport(t *testing.T) {
 		geminiCode    int
 		geminiResp    string
 		discordCode   int
+		recordingWAV  []byte
 		wantDelivered bool
 		wantFailed    bool
 		wantErr       bool
 		wantWith      string
+		wantFilename  string
 	}{
 		{
 			name:          "successful report with gemini tools empty",
@@ -468,8 +470,10 @@ func TestDeliverCallReport(t *testing.T) {
 			toNumber:      "+15105550199",
 			geminiCode:    http.StatusOK,
 			geminiResp:    `{"candidates":[{"content":{"parts":[{"text":"Call resolved successfully."}]}}]}`,
+			recordingWAV:  EncodePCM16WAV([]int16{100, -100, 200}, 8000),
 			wantDelivered: true,
 			wantWith:      "+15105550199",
+			wantFilename:  "call-rep-1.wav",
 		},
 		{
 			name:          "already processing skipped",
@@ -553,7 +557,16 @@ func TestDeliverCallReport(t *testing.T) {
 				DefaultDiscordChannel: "prospera",
 			}
 
-			reporter := NewReporter(cfg, store, &mockTwilioForDelivery{}, WithReporterHTTPClient(srv.Client()), WithReporterGeminiBaseURL(srv.URL))
+			reporter := NewReporter(
+				cfg,
+				store,
+				&mockTwilioForDelivery{},
+				WithReporterHTTPClient(srv.Client()),
+				WithReporterGeminiBaseURL(srv.URL),
+				WithReporterRecordingProvider(func(id string) []byte {
+					return tc.recordingWAV
+				}),
+			)
 			err := reporter.DeliverCallReport(context.Background(), call.CallID)
 			if tc.wantErr {
 				if err == nil {
@@ -576,6 +589,9 @@ func TestDeliverCallReport(t *testing.T) {
 			}
 			if tc.wantWith != "" && !strings.Contains(deliveredDiscordMsg, tc.wantWith) {
 				t.Fatalf("delivered discord msg %q does not contain wantWith %q", deliveredDiscordMsg, tc.wantWith)
+			}
+			if tc.wantFilename != "" && !strings.Contains(deliveredDiscordMsg, tc.wantFilename) {
+				t.Fatalf("delivered discord msg %q does not contain wantFilename %q", deliveredDiscordMsg, tc.wantFilename)
 			}
 		})
 	}

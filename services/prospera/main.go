@@ -77,7 +77,7 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	tokenMgr := NewStreamTokenManager(time.Now)
 	consultClient := NewHTTPContextConsultClient(cfg.GoogleMCPURL, cfg.CovenURL)
 	sessionMgr := NewCallSessionManager(cfg, store, twilioClient, consultClient, tokenMgr)
-	reporter := NewReporter(cfg, store, twilioClient)
+	reporter := NewReporter(cfg, store, twilioClient, WithReporterRecordingProvider(sessionMgr.GetRecordingWAV))
 
 	server := NewServer(cfg, store, twilioClient, tokenMgr, sessionMgr, reporter)
 

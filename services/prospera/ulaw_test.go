@@ -244,3 +244,37 @@ func TestComputeRMS(t *testing.T) {
 		})
 	}
 }
+
+func TestEncodePCM16WAV(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		samples    []int16
+		sampleRate int
+		wantLen    int
+	}{
+		{name: "empty samples", samples: nil, sampleRate: 8000, wantLen: 0},
+		{name: "default sample rate when non-positive", samples: []int16{100, -100}, sampleRate: 0, wantLen: 48},
+		{name: "explicit 8kHz mono frame", samples: []int16{1000, -1000, 0}, sampleRate: 8000, wantLen: 50},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			wav := EncodePCM16WAV(tc.samples, tc.sampleRate)
+			if len(wav) != tc.wantLen {
+				t.Fatalf("len(EncodePCM16WAV()) = %d, want %d", len(wav), tc.wantLen)
+			}
+			if tc.wantLen > 0 && (string(wav[0:4]) != "RIFF" || string(wav[8:12]) != "WAVE" || string(wav[36:40]) != "data") {
+				t.Fatalf("invalid WAV header markers: %q / %q / %q", wav[0:4], wav[8:12], wav[36:40])
+			}
+		})
+	}
+
+	if got := clampInt16(40000); got != 32767 {
+		t.Fatalf("clampInt16(40000) = %d, want 32767", got)
+	}
+	if got := clampInt16(-40000); got != -32768 {
+		t.Fatalf("clampInt16(-40000) = %d, want -32768", got)
+	}
+}
