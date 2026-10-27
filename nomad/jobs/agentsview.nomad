@@ -58,6 +58,16 @@ job "agentsview" {
       template {
         data = <<EOH
 #!/bin/sh
+mkdir -p /root/.gemini/antigravity-cli
+ln -sfn /data/brain /root/.gemini/antigravity-cli/brain
+ln -sfn /data/conversations /root/.gemini/antigravity-cli/conversations
+ln -sfn /data/runtimes/discord/.gemini/antigravity-cli/implicit /root/.gemini/antigravity-cli/implicit
+ln -sfn /data/runtimes/discord/.gemini/antigravity-cli/cache /root/.gemini/antigravity-cli/cache
+ln -sfn /data/runtimes/discord/.gemini/antigravity-cli/annotations /root/.gemini/antigravity-cli/annotations
+ln -sfn /data/runtimes/discord/.gemini/antigravity-cli/conversation_summaries.db /root/.gemini/antigravity-cli/conversation_summaries.db
+ln -sfn /data/runtimes/discord/.gemini/antigravity-cli/conversation_summaries.db-wal /root/.gemini/antigravity-cli/conversation_summaries.db-wal
+ln -sfn /data/runtimes/discord/.gemini/antigravity-cli/conversation_summaries.db-shm /root/.gemini/antigravity-cli/conversation_summaries.db-shm
+
 PUBLIC_URL="{{ if nomadVarExists "nomad/jobs/agentsview" }}{{ with nomadVar "nomad/jobs/agentsview" }}{{ if .PUBLIC_URL }}{{ .PUBLIC_URL }}{{ else }}http://localhost:8089{{ end }}{{ end }}{{ else }}http://localhost:8089{{ end }}"
 PUBLIC_ORIGIN="{{ if nomadVarExists "nomad/jobs/agentsview" }}{{ with nomadVar "nomad/jobs/agentsview" }}{{ if .PUBLIC_ORIGIN }}{{ .PUBLIC_ORIGIN }}{{ else }}http://localhost:8089,http://127.0.0.1:8089{{ end }}{{ end }}{{ else }}http://localhost:8089,http://127.0.0.1:8089{{ end }}"
 
@@ -65,6 +75,7 @@ exec agentsview serve \
   --host=0.0.0.0 \
   --port=8082 \
   --base-path=/agentsview \
+  --write-timeout=2m \
   --public-origin="$PUBLIC_ORIGIN" \
   --public-url="$PUBLIC_URL"
 EOH
@@ -96,7 +107,7 @@ EOH
       }
 
       resources {
-        cpu        = 200
+        cpu        = 1000
         memory     = 512
         memory_max = 1024
       }
