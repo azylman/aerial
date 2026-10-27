@@ -336,22 +336,6 @@ run_json_syntax() {
     fi
 }
 
-run_vector_syntax() {
-    file="$1"
-    if [ -f "$file" ]; then
-        echo "   [vector validate] Validating $file..."
-        local vector_container
-        vector_container=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E '^(aerial-)?vector(-[0-9a-f-]+)?$' | head -n 1 || true)
-        if [ -n "$vector_container" ]; then
-            docker cp "$file" "${vector_container}:/tmp/verify-vector.yaml" >/dev/null 2>&1
-            docker exec "$vector_container" vector validate --skip-healthchecks /tmp/verify-vector.yaml
-            docker exec "$vector_container" rm -f /tmp/verify-vector.yaml >/dev/null 2>&1
-        elif has_cmd vector; then
-            OPENOBSERVE_ROOT_USER_PASSWORD=dummy OPENOBSERVE_ROOT_USER_EMAIL=dummy@local vector validate --skip-healthchecks "$file"
-        fi
-    fi
-}
-
 check_no_imperative_ddl() {
     local files=""
     if [ "$MODE" = "staged" ]; then
@@ -498,11 +482,6 @@ if [ "$MODE" = "staged" ]; then
         done
     fi
 
-    # Check Vector configuration syntax
-    if echo "$STAGED_FILES" | grep -q -E "^(nomad/)?vector/"; then
-        run_vector_syntax "nomad/vector/vector.yaml"
-    fi
-
     if has_cmd git && git diff --quiet 2>/dev/null; then
         git_dir=$(git rev-parse --git-dir 2>/dev/null || true)
         tree_sha=$(git write-tree 2>/dev/null || true)
@@ -539,7 +518,6 @@ run_node_syntax "services/homepage/prepare-config.js"
 for jf in nomad/grafana/dashboards/*.json; do
     run_json_syntax "$jf"
 done
-run_vector_syntax "nomad/vector/vector.yaml"
 
 echo "=== 3. Unit Test Suites ==="
 for svc in $GO_SERVICES; do

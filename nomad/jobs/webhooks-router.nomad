@@ -39,7 +39,6 @@ job "webhooks-router" {
           disable = true
         }
         volumes = [
-          "/mnt/data/supervisor/share/aerial-config:/config:ro",
           "/mnt/data/supervisor/share/coverage/webhooks-router:/coverage:rw",
         ]
       }

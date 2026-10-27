@@ -525,6 +525,8 @@ var DefaultManagedServiceConfigs = []ServiceConfigMapping{
 	{RelPath: "services/mcp/infisical-mcp.yaml", NomadVar: "nomad/jobs/infisical-mcp", VarKey: "CONFIG_YAML"},
 	{RelPath: "services/webhooks-router/webhooks-router.yaml", NomadVar: "nomad/jobs/webhooks-router", VarKey: "CONFIG_YAML"},
 	{RelPath: "services/victoriametrics/scrape.yml", NomadVar: "nomad/jobs/victoriametrics", VarKey: "CONFIG_YAML"},
+	{RelPath: "services/dashboard/dashboard.yaml", NomadVar: "nomad/jobs/dashboard", VarKey: "CONFIG_YAML"},
+	{RelPath: "config.yaml", NomadVar: "nomad/jobs/dashboard", VarKey: "BRAIN_CONFIG_YAML"},
 }
 
 // GetServiceConfigMappings resolves the active service config mappings for a given configDir.
@@ -544,44 +546,83 @@ func (d *SyncDaemon) GetServiceConfigMappings(configDir string) []ServiceConfigM
 	return DefaultManagedServiceConfigs
 }
 
+func anyFileInChangedList(targets []string, changedFiles []string) bool {
+	for _, t := range targets {
+		if fileInChangedList(t, changedFiles) {
+			return true
+		}
+	}
+	return false
+}
+
 // SyncServiceConfigsToNomad iterates over resolved service config mappings, validates YAML syntax,
 // and pushes non-empty configurations to their respective Nomad variables using `nomad var put`.
 func (d *SyncDaemon) SyncServiceConfigsToNomad(ctx context.Context, configDir string, syncCtx ...ConfigSyncContext) error {
-	for _, mapping := range d.GetServiceConfigMappings(configDir) {
-		filePath := filepath.Join(configDir, mapping.RelPath)
-		ext := strings.ToLower(filepath.Ext(filePath))
-		var parsedTarget any
-		if ext == ".yaml" || ext == ".yml" {
-			var parsed any
-			parsedTarget = &parsed
+	mappings := d.GetServiceConfigMappings(configDir)
+	var order []string
+	grouped := make(map[string][]ServiceConfigMapping)
+	for _, m := range mappings {
+		if _, ok := grouped[m.NomadVar]; !ok {
+			order = append(order, m.NomadVar)
 		}
-		raw, err := readAndValidateYAML(filePath, "service config", parsedTarget)
-		if err != nil {
-			return err
+		grouped[m.NomadVar] = append(grouped[m.NomadVar], m)
+	}
+
+	diffGated := len(syncCtx) > 0 && syncCtx[0].DiffGated
+	var changedFiles []string
+	if len(syncCtx) > 0 {
+		changedFiles = syncCtx[0].ChangedFiles
+	}
+
+	for _, nomadVar := range order {
+		var varArgs, varKeys, checkPaths []string
+		var singleRaw []byte
+		h := sha256.New()
+		for _, mapping := range grouped[nomadVar] {
+			filePath := filepath.Join(configDir, mapping.RelPath)
+			ext := strings.ToLower(filepath.Ext(filePath))
+			var parsedTarget any
+			if ext == ".yaml" || ext == ".yml" {
+				var parsed any
+				parsedTarget = &parsed
+			}
+			raw, err := readAndValidateYAML(filePath, "service config", parsedTarget)
+			if err != nil {
+				return err
+			}
+			if raw == nil {
+				continue
+			}
+			singleRaw = raw
+			varKeys = append(varKeys, mapping.VarKey)
+			varArgs = append(varArgs, mapping.VarKey+"=@"+filePath)
+			checkPaths = append(checkPaths, mapping.RelPath)
+			h.Write([]byte(mapping.VarKey + ":"))
+			h.Write(raw)
+			h.Write([]byte("\n"))
 		}
-		if raw == nil {
+		if len(varArgs) == 0 {
 			continue
 		}
-
-		h := sha256.Sum256(raw)
-		configHash := hex.EncodeToString(h[:])
-		cacheKey := mapping.NomadVar + ":" + mapping.VarKey
-
-		diffGated := len(syncCtx) > 0 && syncCtx[0].DiffGated
-		isChangedInGit := !diffGated || fileInChangedList(mapping.RelPath, syncCtx[0].ChangedFiles)
-
-		jobName := strings.TrimPrefix(mapping.NomadVar, "nomad/jobs/")
-		varArgs := []string{mapping.VarKey + "=@" + filePath}
-
-		pushed, err := d.pushNomadConfigVar(ctx, cacheKey, mapping.NomadVar, jobName, configHash, isChangedInGit, varArgs, syncCtx)
+		jobName := strings.TrimPrefix(nomadVar, "nomad/jobs/")
+		checkPaths = append(checkPaths, "jobs/"+jobName+".nomad", "nomad/jobs/"+jobName+".nomad")
+		var configHash string
+		if len(varArgs) == 1 {
+			sum := sha256.Sum256(singleRaw)
+			configHash = hex.EncodeToString(sum[:])
+		} else {
+			configHash = hex.EncodeToString(h.Sum(nil))
+		}
+		cacheKey := nomadVar + ":" + strings.Join(varKeys, "+")
+		isChangedInGit := !diffGated || anyFileInChangedList(checkPaths, changedFiles)
+		pushed, err := d.pushNomadConfigVar(ctx, cacheKey, nomadVar, jobName, configHash, isChangedInGit, varArgs, syncCtx)
 		if err != nil {
 			return err
 		}
 		if pushed {
-			log.Printf("[Hangar:Nomad] Successfully pushed %s to %s", mapping.VarKey, mapping.NomadVar)
+			log.Printf("[Hangar:Nomad] Successfully pushed %s to %s", strings.Join(varKeys, ", "), nomadVar)
 		}
 	}
-
 	return nil
 }
 

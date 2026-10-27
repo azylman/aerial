@@ -881,5 +881,34 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 		if err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir); err != nil || len(env.nomadCalls()) != 1 {
 			t.Fatalf("expected non-YAML config to sync with 1 call, err=%v, calls=%d", err, len(env.nomadCalls()))
 		}
+
+		multiEnv := newNomadConfigSyncTestEnv(t)
+		multiEnv.daemon.serviceConfigs = []ServiceConfigMapping{
+			{RelPath: "services/multi/config.yaml", NomadVar: "nomad/jobs/multi-job", VarKey: "CONFIG_YAML"},
+			{RelPath: "services/multi/extra.yaml", NomadVar: "nomad/jobs/multi-job", VarKey: "EXTRA_YAML"},
+		}
+		_ = os.MkdirAll(filepath.Join(multiEnv.configDir, "services", "multi"), 0o755)
+		_ = os.WriteFile(filepath.Join(multiEnv.configDir, "services", "multi", "config.yaml"), []byte("foo: bar\n"), 0o644)
+		_ = os.WriteFile(filepath.Join(multiEnv.configDir, "services", "multi", "extra.yaml"), []byte("baz: qux\n"), 0o644)
+
+		if err := multiEnv.daemon.SyncServiceConfigsToNomad(ctx, multiEnv.configDir); err != nil || len(multiEnv.nomadCalls()) != 1 {
+			t.Fatalf("expected grouped multi-key config to sync with 1 call, err=%v, calls=%d", err, len(multiEnv.nomadCalls()))
+		}
+		initialCall := strings.Join(multiEnv.nomadCalls()[0], " ")
+		if !strings.Contains(initialCall, "var put -force nomad/jobs/multi-job") ||
+			!strings.Contains(initialCall, "CONFIG_YAML=@") ||
+			!strings.Contains(initialCall, "EXTRA_YAML=@") {
+			t.Fatalf("unexpected call args for grouped multi-job: %s", initialCall)
+		}
+
+		unrelatedCtx := ConfigSyncContext{DiffGated: true, ChangedFiles: []string{"services/other/other.yaml"}, CommitSHA: "sha1"}
+		if err := multiEnv.daemon.SyncServiceConfigsToNomad(ctx, multiEnv.configDir, unrelatedCtx); err != nil || len(multiEnv.nomadCalls()) != 1 {
+			t.Fatalf("expected diff-gating to suppress sync for unrelated change, calls=%d", len(multiEnv.nomadCalls()))
+		}
+
+		jobNomadCtx := ConfigSyncContext{DiffGated: true, ChangedFiles: []string{"jobs/multi-job.nomad"}, CommitSHA: "sha2"}
+		if err := multiEnv.daemon.SyncServiceConfigsToNomad(ctx, multiEnv.configDir, jobNomadCtx); err != nil || len(multiEnv.nomadCalls()) != 2 {
+			t.Fatalf("expected diff-gating to trigger on jobs/multi-job.nomad, calls=%d", len(multiEnv.nomadCalls()))
+		}
 	})
 }

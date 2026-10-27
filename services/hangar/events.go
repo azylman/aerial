@@ -342,6 +342,8 @@ func (d *SyncDaemon) handleAerialConfigPush(ctx context.Context, repoPath string
 	sc.DiffGated = true
 	sc.ChangedFiles = changedFiles
 
+	d.syncAllConfigsToNomad(ctx, "[Hangar:GitPush]", repoPath, sc)
+
 	if len(nomadChanges) > 0 {
 		resp.NomadChanged = true
 		applied, deferred, errRec := d.applyNomadChangesDirectly(ctx, repoPath, nomadChanges, true, false, false, nil, expectedJobs, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
@@ -358,8 +360,6 @@ func (d *SyncDaemon) handleAerialConfigPush(ctx context.Context, repoPath string
 	} else {
 		resp.Message = "configuration synced; no nomad job changes"
 	}
-
-	d.syncAllConfigsToNomad(ctx, "[Hangar:GitPush]", repoPath, sc)
 
 	return resp, http.StatusOK
 }
