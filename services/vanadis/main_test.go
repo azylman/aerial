@@ -307,9 +307,6 @@ func (m *memoryVanadisStore) AttachChunkPR(_ context.Context, chunkID string, pr
 				if repo != "" && list[i].Repo != repo {
 					return "", fmt.Errorf("chunk %s repo %q does not match %q", chunkID, list[i].Repo, repo)
 				}
-				if list[i].PRNumber > 0 && list[i].PRNumber != prNumber {
-					return "", fmt.Errorf("chunk %s pr number already set to %d", chunkID, list[i].PRNumber)
-				}
 				list[i].PRNumber = prNumber
 				if list[i].Status != "merged" && list[i].Status != "failed" {
 					list[i].Status = "pr_opened"

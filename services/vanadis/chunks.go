@@ -198,10 +198,10 @@ func (s *PostgresVanadisStore) AttachChunkPR(ctx context.Context, chunkID string
 	var threadID string
 	var err error
 	if repo != "" {
-		const qWithRepo = `UPDATE vanadis_chunks c SET pr_number = $1, status = CASE WHEN c.status IN ('merged', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $2 AND c.repo = $3 AND (c.pr_number IS NULL OR c.pr_number = 0 OR c.pr_number = $1) RETURNING b.thread_id;`
+		const qWithRepo = `UPDATE vanadis_chunks c SET pr_number = $1, status = CASE WHEN c.status IN ('merged', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $2 AND c.repo = $3 RETURNING b.thread_id;`
 		err = s.db.QueryRow(ctx, qWithRepo, prNumber, chunkID, repo).Scan(&threadID)
 	} else {
-		const qNoRepo = `UPDATE vanadis_chunks c SET pr_number = $1, status = CASE WHEN c.status IN ('merged', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $2 AND (c.pr_number IS NULL OR c.pr_number = 0 OR c.pr_number = $1) RETURNING b.thread_id;`
+		const qNoRepo = `UPDATE vanadis_chunks c SET pr_number = $1, status = CASE WHEN c.status IN ('merged', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $2 RETURNING b.thread_id;`
 		err = s.db.QueryRow(ctx, qNoRepo, prNumber, chunkID).Scan(&threadID)
 	}
 	if err != nil {
@@ -211,7 +211,7 @@ func (s *PostgresVanadisStore) AttachChunkPR(ctx context.Context, chunkID string
 			if checkErr == nil && !exists {
 				return "", ErrChunkNotFound
 			}
-			return "", fmt.Errorf("chunk %s cannot attach pr %d (mismatched repo or pr already set)", chunkID, prNumber)
+			return "", fmt.Errorf("chunk %s cannot attach pr %d (mismatched repo)", chunkID, prNumber)
 		}
 		return "", fmt.Errorf("attach chunk pr %s#%d: %w", repo, prNumber, err)
 	}
