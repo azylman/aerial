@@ -33,16 +33,37 @@ job "homepage" {
         healthchecks {
           disable = true
         }
-        entrypoint   = ["/bin/sh", "/app/core-homepage/entrypoint.sh"]
+        entrypoint   = ["/bin/sh", "/local/core-homepage/entrypoint.sh"]
         volumes = [
-          "/var/run/docker.sock:/var/run/docker.sock:ro",
-          "/mnt/data/supervisor/share/aerial/services/homepage:/app/core-homepage:ro",
-          "/mnt/data/supervisor/share/aerial-config:/share/aerial-config:ro"
+          "/var/run/docker.sock:/var/run/docker.sock:ro"
         ]
+      }
+
+      artifact {
+        source      = "http://hangar.aerial/internal/artifacts/homepage.tar.gz"
+        destination = "local"
       }
 
       env {
         CONFIG_PATH = "/local/homepage.yaml"
+      }
+
+      template {
+        data = <<EOH
+{{- if nomadVarExists "nomad/jobs/homepage" -}}
+{{- with nomadVar "nomad/jobs/homepage" -}}
+{{- if .ASSET_HASH -}}{{- .ASSET_HASH -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+EOH
+        destination = "local/assets.sha256"
+        change_mode = "script"
+        change_script {
+          command       = "/bin/sh"
+          args          = ["-c", "rm -rf /tmp/homepage-stage && mkdir -p /tmp/homepage-stage && wget -qO /tmp/homepage.tar.gz http://hangar.aerial/internal/artifacts/homepage.tar.gz && tar -xzf /tmp/homepage.tar.gz -C /tmp/homepage-stage && cp -a /tmp/homepage-stage/core-homepage/. /local/core-homepage/ && mkdir -p /local/user-homepage && cp -a /tmp/homepage-stage/user-homepage/. /local/user-homepage/ && rm -rf /tmp/homepage-stage /tmp/homepage.tar.gz && node /local/core-homepage/prepare-config.js"]
+          timeout       = "30s"
+          fail_on_error = false
+        }
       }
 
       template {

@@ -1,15 +1,23 @@
 package main
 
 import (
+	"errors"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
 
-func TestEmbeddedStaticAssetsIntegrity(t *testing.T) {
+type errorFS struct{}
+
+func (errorFS) Open(name string) (fs.File, error) {
+	return nil, errors.New("simulated filesystem failure")
+}
+
+func TestStaticAssetsIntegrity(t *testing.T) {
 	requiredFiles := []string{
 		"static/index.html",
 		"static/style.css",
@@ -22,19 +30,19 @@ func TestEmbeddedStaticAssetsIntegrity(t *testing.T) {
 	}
 
 	for _, reqFile := range requiredFiles {
-		data, err := content.ReadFile(reqFile)
+		data, err := os.ReadFile(reqFile)
 		if err != nil {
-			t.Errorf("failed to read required embedded file %s: %v", reqFile, err)
+			t.Errorf("failed to read required file %s: %v", reqFile, err)
 			continue
 		}
 		if len(data) == 0 {
-			t.Errorf("embedded file %s is empty", reqFile)
+			t.Errorf("file %s is empty", reqFile)
 		}
 	}
 }
 
 func TestAppJSDeclaredFunctions(t *testing.T) {
-	data, err := content.ReadFile("static/app.js")
+	data, err := os.ReadFile("static/app.js")
 	if err != nil {
 		t.Fatalf("failed to read static/app.js: %v", err)
 	}
@@ -61,7 +69,7 @@ func TestAppJSDeclaredFunctions(t *testing.T) {
 }
 
 func TestIndexHTMLRequiredDOMBindings(t *testing.T) {
-	data, err := content.ReadFile("static/index.html")
+	data, err := os.ReadFile("static/index.html")
 	if err != nil {
 		t.Fatalf("failed to read static/index.html: %v", err)
 	}
@@ -109,7 +117,7 @@ func TestZeroPersonalDataAndHardcodedIPs(t *testing.T) {
 	files := []string{"static/app.js", "static/index.html", "static/style.css"}
 
 	for _, f := range files {
-		data, err := content.ReadFile(f)
+		data, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatalf("failed to read %s: %v", f, err)
 		}
@@ -126,10 +134,7 @@ func TestZeroPersonalDataAndHardcodedIPs(t *testing.T) {
 }
 
 func TestAssetRegistry_ServeHTTP(t *testing.T) {
-	staticFS, err := fs.Sub(content, "static")
-	if err != nil {
-		t.Fatalf("failed to create sub filesystem: %v", err)
-	}
+	staticFS := os.DirFS("static")
 
 	defaultReg, err := NewAssetRegistry(staticFS, "testcommit123")
 	if err != nil {
@@ -336,6 +341,66 @@ func TestAssetRegistry_ServeHTTP(t *testing.T) {
 				if !strings.Contains(bodyStr, sub) {
 					t.Errorf("expected body to contain %q, got: %s", sub, bodyStr)
 				}
+			}
+		})
+	}
+}
+
+func TestAssetRegistry_Reload(t *testing.T) {
+	initialDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(initialDir, "index.html"), []byte("<h1>Initial</h1>"), 0o644); err != nil {
+		t.Fatalf("failed to create initial index.html: %v", err)
+	}
+
+	reg, err := NewAssetRegistry(os.DirFS(initialDir), "v1")
+	if err != nil {
+		t.Fatalf("NewAssetRegistry failed: %v", err)
+	}
+
+	updatedDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(updatedDir, "index.html"), []byte("<h1>Reloaded</h1>"), 0o644); err != nil {
+		t.Fatalf("failed to create updated index.html: %v", err)
+	}
+
+	tests := []struct {
+		name          string
+		fsys          fs.FS
+		versionToken  string
+		wantErr       bool
+		wantBodyMatch string
+	}{
+		{
+			name:          "successful_reload_updates_content",
+			fsys:          os.DirFS(updatedDir),
+			versionToken:  "v2",
+			wantErr:       false,
+			wantBodyMatch: "<h1>Reloaded</h1>",
+		},
+		{
+			name:          "unreadable_fs_retains_existing_content",
+			fsys:          errorFS{},
+			versionToken:  "v3",
+			wantErr:       true,
+			wantBodyMatch: "<h1>Reloaded</h1>",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := reg.Reload(tc.fsys, tc.versionToken)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Reload() error = %v, wantErr %v", err, tc.wantErr)
+			}
+
+			req := httptest.NewRequest("GET", "/", nil)
+			rec := httptest.NewRecorder()
+			reg.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("ServeHTTP status = %d, want %d", rec.Code, http.StatusOK)
+			}
+			if !strings.Contains(rec.Body.String(), tc.wantBodyMatch) {
+				t.Errorf("expected body to contain %q, got: %s", tc.wantBodyMatch, rec.Body.String())
 			}
 		})
 	}

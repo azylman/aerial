@@ -38,12 +38,11 @@ job "db-migrate" {
           "--env", "core",
           "--config", "file:///local/atlas.hcl"
         ]
-        mount {
-          type     = "bind"
-          target   = "/migrations"
-          source   = "/mnt/data/supervisor/share/aerial/services/eri/pkg/db/migrations"
-          readonly = true
-        }
+      }
+
+      artifact {
+        source      = "http://hangar.aerial/internal/artifacts/migrations.tar.gz"
+        destination = "local/migrations"
       }
 
       template {
@@ -56,7 +55,7 @@ variable "postgres_url" {
 env "core" {
   url = var.postgres_url
   migration {
-    dir = "file:///migrations"
+    dir = "file:///local/migrations"
   }
 }
 EOH
