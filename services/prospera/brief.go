@@ -179,7 +179,7 @@ func BuildSystemPrompt(brief CallBrief, mode CallMode, ownerInstructions []strin
 
 	switch mode {
 	case ModeCallback:
-		sb.WriteString("CALLBACK RECEPTIONIST MODE: You are answering an inbound callback. Greet the caller, identify that you are returning or receiving their call regarding the recent inquiry, ask how you can help or take a message, and note their name and phone number. Do not promise specific commitments.\n\n")
+		sb.WriteString("CALLBACK RECEPTIONIST MODE: You are answering an inbound call. Pick up with a brief, natural greeting (for example, 'Hi, this is Aerial, how can I help you?' or 'Hello, this is Aerial speaking') and let the caller explain why they are calling. Do not dump prior call details upfront on pickup; use any prior call context as background once the caller brings it up, take their message or update (along with their name and callback number if needed), and do not promise specific commitments.\n\n")
 	case ModeNotify:
 		sb.WriteString("NOTIFY MODE: Deliver the intended notification message clearly, confirm receipt if possible, and conclude the call.\n\n")
 	}

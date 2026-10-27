@@ -222,12 +222,8 @@ func (m *CallSessionManager) HandleMediaWebSocket(w http.ResponseWriter, r *http
 	var openingGreeting, voicemailMsg, systemPrompt, language string
 	if call != nil {
 		openingGreeting = call.Brief.Task
-		if openingGreeting == "" {
-			if call.Direction == "inbound" {
-				openingGreeting = "Hello, thank you for calling. How can I help you today?"
-			} else {
-				openingGreeting = "Hello, I am calling to help with an inquiry."
-			}
+		if call.Direction == "inbound" || openingGreeting == "" {
+			openingGreeting = "Answer the incoming call with a warm, brief greeting (such as 'Hi, this is Aerial, how can I help you?') and let the caller state why they are calling."
 		}
 		voicemailMsg = ResolveVoicemailMessage(call.Brief, openingGreeting)
 		mode := ModeConversation
