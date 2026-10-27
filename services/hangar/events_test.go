@@ -478,10 +478,12 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) { // t.Run(
 		},
 		{
 			name:      "complex aerial-config diff",
-			gitScript: mockGitScript{beforeSHA: "sha_before", afterSHA: "sha_after", nameStatus: "D jobs/deleted.nomad\nM jobs/deferred.nomad\nM jobs/invalid.nomad\nM jobs/nonexistent.nomad\nM jobs/broken.nomad\n"},
+			gitScript: mockGitScript{beforeSHA: "sha_before", afterSHA: "sha_after", nameStatus: "D jobs/deleted.nomad\nM jobs/deferred.nomad\nM jobs/invalid.nomad\nM jobs/nonexistent.nomad\nM jobs/broken.nomad\nM jobs/orphan.vars.hcl\nM jobs/valid.vars.hcl\n"},
 			jobFiles: map[string]string{
-				"jobs/invalid.nomad": `job "invalid" {}`,
-				"jobs/broken.nomad":  `job "broken" {}`,
+				"jobs/invalid.nomad":  `job "invalid" {}`,
+				"jobs/broken.nomad":   `job "broken" {}`,
+				"jobs/valid.nomad":    `job "valid" {}`,
+				"jobs/valid.vars.hcl": `extra_mounts = []`,
 			},
 			nomadFailCmd:     "complex",
 			req:              GitPushEventRequest{Repo: "aerial-config", Ref: "refs/heads/main"},
@@ -823,6 +825,7 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) { // t.Run(
 		jobDir               string
 		jobFile              string
 		jobHCL               string
+		varFile              string
 		req                  ImageReadyEventRequest
 		valErr               error
 		runErr               error
@@ -1083,6 +1086,21 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) { // t.Run(
 			wantStoppedJobs:      []string{"memory-mcp"},
 			wantRemainingPending: 1,
 		},
+		{
+			name:    "var file and commit SHA variable injection",
+			jobDir:  "core",
+			jobFile: "router.nomad",
+			jobHCL:  routerHCL,
+			varFile: "router.vars.hcl",
+			req: ImageReadyEventRequest{
+				Image:     "ghcr.io/azylman/aerial-webhooks-router:latest",
+				CommitSHA: "sha_varfile",
+			},
+			wantCode:   http.StatusOK,
+			wantStatus: "accepted",
+			wantRuns:   1,
+			wantRunArg: "-var-file=",
+		},
 	}
 
 	for _, tc := range cases {
@@ -1099,6 +1117,9 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) { // t.Run(
 					dir = "jobs"
 				}
 				jobPath = env.writeJob(dir, tc.jobFile, tc.jobHCL)
+			}
+			if tc.varFile != "" {
+				env.writeJob("jobs", tc.varFile, "extra_mounts = []\n")
 			}
 			if tc.registryNotFound {
 				env.daemon.registryClient = &http.Client{

@@ -3,6 +3,27 @@ variable "image_tag" {
   default = "latest"
 }
 
+variable "extra_mounts" {
+  type = list(object({
+    type     = string
+    target   = string
+    source   = string
+    readonly = bool
+    volume_options = list(object({
+      driver_config = list(object({
+        name    = string
+        options = list(map(string))
+      }))
+    }))
+  }))
+  default = []
+}
+
+variable "extra_env_template" {
+  type    = string
+  default = ""
+}
+
 job "eri" {
   datacenters = ["dc1"]
   type        = "service"
@@ -58,7 +79,7 @@ job "eri" {
           disable = true
         }
 
-        mounts = [
+        mounts = concat([
           {
             type     = "volume"
             target   = "/data"
@@ -85,23 +106,11 @@ job "eri" {
           },
           {
             type     = "bind"
-            target   = "/mnt/nas"
-            source   = "/mnt/data/supervisor/share/NAS"
-            readonly = true
-          },
-          {
-            type     = "bind"
-            target   = "/mnt/nas-scratch"
-            source   = "/mnt/data/supervisor/share/Aerial"
-            readonly = false
-          },
-          {
-            type     = "bind"
             target   = "/coverage"
             source   = "/mnt/data/supervisor/share/coverage/eri"
             readonly = false
           }
-        ]
+        ], var.extra_mounts)
       }
 
       env {
@@ -157,6 +166,7 @@ UNIFI_PASSWORD="{{ .UNIFI_PASS }}"{{ end }}
 {{ with index . "1PASSWORD_SERVICE_ACCOUNT_TOKEN" }}OP_SERVICE_ACCOUNT_TOKEN="{{ . }}"{{ end }}
 {{ end }}
 {{ end }}
+${var.extra_env_template}
 EOH
         destination = "secrets/eri.env"
         env         = true
