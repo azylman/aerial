@@ -36,6 +36,15 @@ func (p *Provisioner) SetHooksDir(dir string) {
 	p.hooksDir = dir
 }
 
+func (p *Provisioner) SetOAuthTokenSourcePath(path string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.oauthTokenSourcePath = path
+}
+
 func newTestConfig(mutators ...func(*config.ConfigData)) *config.Config {
 	data := config.DefaultConfigData()
 	data.DatabaseURL, data.Port = ":memory:", "0"
@@ -135,6 +144,7 @@ func TestProvisioner_InitAndGetters(t *testing.T) {
 
 			if tc.testNilReceiver {
 				var pNil *Provisioner
+				pNil.SetOAuthTokenSourcePath("/ignored")
 
 				if err := pNil.Sync(context.Background(), nil); err != nil {
 					t.Errorf("expected nil error on Sync with nil receiver")
@@ -165,10 +175,12 @@ func TestProvisioner_InitAndGetters(t *testing.T) {
 				p.SetAerialRulesDir("/aerial/rules")
 				p.SetConfigRulesDir("/config/rules")
 				p.SetHooksDir("/hooks/dir")
+				p.SetOAuthTokenSourcePath("/custom/oauth")
 
 				if p.customSkillsDir != "/custom/skills" || p.superpowersDir != "/super/skills" ||
 					p.agentsSkillsDir != "/agents/skills" || p.aerialRulesDir != "/aerial/rules" ||
-					p.configRulesDir != "/config/rules" || p.hooksDir != "/hooks/dir" {
+					p.configRulesDir != "/config/rules" || p.hooksDir != "/hooks/dir" ||
+					p.oauthTokenSourcePath != "/custom/oauth" {
 					t.Fatalf("setters failed to update Provisioner fields")
 				}
 				if p.homeDir != "/h" || p.dataDir != "/d" {
@@ -292,19 +304,29 @@ func TestSync_EndToEndAndIsolation(t *testing.T) {
 
 func TestSyncSettings(t *testing.T) {
 	tests := []struct {
-		name              string
-		apiKey            string
-		model             string
-		preSeedOAuth      bool
-		corruptedInput    bool
-		blockFile         bool
-		createTempFail    bool
-		atomicEmptyDir    bool
-		atomicNonEmptyDir bool
-		wantErr           bool
+		name                  string
+		apiKey                string
+		model                 string
+		preSeedOAuth          bool
+		seedOAuthSource       bool
+		preExistingOAuthFiles bool
+		blockOAuthToken       bool
+		blockInstallID        bool
+		blockJetskiState      bool
+		corruptedInput        bool
+		blockFile             bool
+		createTempFail        bool
+		atomicEmptyDir        bool
+		atomicNonEmptyDir     bool
+		wantErr               bool
 	}{
 		{name: "api key and custom model", apiKey: "api-secret-123", model: "gemini-2.5-pro"},
 		{name: "oauth mode without api key removes apiKey and provider", apiKey: "", model: "gemini-flash", preSeedOAuth: true},
+		{name: "oauth mode seeds token from source and generates installation_id and jetski_state", apiKey: "", model: "gemini-flash", seedOAuthSource: true},
+		{name: "oauth mode preserves existing token and installation_id across reloads", apiKey: "", model: "gemini-flash", seedOAuthSource: true, preExistingOAuthFiles: true},
+		{name: "oauth mode fails when token destination is blocked by directory", apiKey: "", seedOAuthSource: true, blockOAuthToken: true, wantErr: true},
+		{name: "oauth mode fails when installation_id destination is blocked by directory", apiKey: "", blockInstallID: true, wantErr: true},
+		{name: "oauth mode fails when jetski_state destination is blocked by directory", apiKey: "", blockJetskiState: true, wantErr: true},
 		{name: "recovers gracefully from corrupted json file", apiKey: "rec-key", model: "rec-model", corruptedInput: true},
 		{name: "write failure returns error when parent dir blocked", blockFile: true, wantErr: true},
 		{name: "writeAtomic fails on parent directory blocker", createTempFail: true, wantErr: true},
@@ -348,7 +370,28 @@ func TestSyncSettings(t *testing.T) {
 
 			tmpHome := t.TempDir()
 			p := New(tmpHome, "")
-			settingsPath := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "settings.json")
+			p.SetOAuthTokenSourcePath(filepath.Join(tmpHome, "nonexistent-oauth-source"))
+			configDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli")
+			settingsPath := filepath.Join(configDir, "settings.json")
+
+			if tc.seedOAuthSource {
+				srcTokenPath := writeTestFile(t, filepath.Join(tmpHome, "secret-oauth-token"), `{"refresh_token":"seeded-tok"}`)
+				p.SetOAuthTokenSourcePath(srcTokenPath)
+			}
+			if tc.preExistingOAuthFiles {
+				writeTestFile(t, filepath.Join(configDir, "antigravity-oauth-token"), `{"access_token":"refreshed-tok"}`)
+				writeTestFile(t, filepath.Join(configDir, "installation_id"), "existing-uuid-123\n")
+				writeTestFile(t, filepath.Join(configDir, "jetski_state.pbtxt"), "existing-jetski-state\n")
+			}
+			if tc.blockOAuthToken {
+				writeTestFile(t, filepath.Join(configDir, "antigravity-oauth-token", "blocker"), "b")
+			}
+			if tc.blockInstallID {
+				writeTestFile(t, filepath.Join(configDir, "installation_id", "blocker"), "b")
+			}
+			if tc.blockJetskiState {
+				writeTestFile(t, filepath.Join(configDir, "jetski_state.pbtxt", "blocker"), "b")
+			}
 
 			if tc.preSeedOAuth {
 				_ = os.MkdirAll(filepath.Dir(settingsPath), 0o755)
@@ -389,6 +432,33 @@ func TestSyncSettings(t *testing.T) {
 					}
 					if _, hasProvider := parsed["modelProvider"]; hasProvider {
 						t.Errorf("expected modelProvider deleted in OAuth mode")
+					}
+					if parsed["useG1Credits"] != true {
+						t.Errorf("expected useG1Credits=true in OAuth mode, got %v", parsed["useG1Credits"])
+					}
+					if _, hasTW := parsed["trustedWorkspaces"]; !hasTW {
+						t.Errorf("expected trustedWorkspaces in OAuth mode, got %v", parsed["trustedWorkspaces"])
+					}
+					installBytes, err := os.ReadFile(filepath.Join(configDir, "installation_id"))
+					if err != nil || len(strings.TrimSpace(string(installBytes))) == 0 {
+						t.Fatalf("expected non-empty installation_id, err=%v", err)
+					}
+					jetskiBytes, err := os.ReadFile(filepath.Join(configDir, "jetski_state.pbtxt"))
+					if err != nil || len(strings.TrimSpace(string(jetskiBytes))) == 0 {
+						t.Fatalf("expected non-empty jetski_state.pbtxt, err=%v", err)
+					}
+					if tc.seedOAuthSource {
+						tokBytes, err := os.ReadFile(filepath.Join(configDir, "antigravity-oauth-token"))
+						if err != nil {
+							t.Fatalf("expected antigravity-oauth-token: %v", err)
+						}
+						wantSub := "seeded-tok"
+						if tc.preExistingOAuthFiles {
+							wantSub = "refreshed-tok"
+						}
+						if !strings.Contains(string(tokBytes), wantSub) {
+							t.Errorf("unexpected token content %q, want substring %q", string(tokBytes), wantSub)
+						}
 					}
 				}
 				if tc.model != "" && parsed["model"] != tc.model {

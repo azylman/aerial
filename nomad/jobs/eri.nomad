@@ -66,12 +66,6 @@ job "eri" {
             readonly = false
           },
           {
-            type     = "volume"
-            target   = "/root/.gemini"
-            source   = "aerial-brain-gemini"
-            readonly = false
-          },
-          {
             type     = "bind"
             target   = "/var/run/docker.sock"
             source   = "/var/run/docker.sock"
@@ -120,6 +114,19 @@ job "eri" {
         GOMODCACHE          = "/data/cache/go/pkg/mod"
         GOLANGCI_LINT_CACHE = "/data/cache/golangci-lint"
         GOCOVERDIR          = "/coverage"
+      }
+
+      template {
+        data = <<EOH
+{{- if nomadVarExists "nomad/jobs/shared" -}}
+{{- with nomadVar "nomad/jobs/shared" -}}
+{{- if .ANTIGRAVITY_OAUTH_TOKEN -}}{{- .ANTIGRAVITY_OAUTH_TOKEN -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+EOH
+        destination = "secrets/antigravity-oauth-token"
+        perms       = "0600"
+        change_mode = "noop"
       }
 
       template {
