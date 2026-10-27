@@ -3,6 +3,12 @@ set -e
 
 mkdir -p /config
 
+if [ -d "/local/core-homepage" ]; then
+    CORE_HOMEPAGE_DIR="/local/core-homepage"
+else
+    CORE_HOMEPAGE_DIR="/app/core-homepage"
+fi
+
 if [ -d "/local/user-homepage" ]; then
     USER_HOMEPAGE_DIR="/local/user-homepage"
 else
@@ -17,9 +23,9 @@ if [ -d "$USER_HOMEPAGE_DIR" ]; then
 fi
 
 # Execute config preparation with explicit raw-copy fallback
-if ! NODE_PATH=/app/node_modules node /app/core-homepage/prepare-config.js; then
+if ! NODE_PATH=/app/node_modules node "$CORE_HOMEPAGE_DIR"/prepare-config.js; then
     echo "🚨 [Homepage Entrypoint] Config preparation failed! Falling back to raw core baseline..." >&2
-    cp -rf /app/core-homepage/config/. /config/ 2>/dev/null || true
+    cp -rf "$CORE_HOMEPAGE_DIR"/config/. /config/ 2>/dev/null || true
 fi
 
 # Chown config directory for node user if running as root
