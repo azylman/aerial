@@ -49,6 +49,9 @@ func TestStatusHandler(t *testing.T) {
 				Status:        "synced",
 				MaxLagSeconds: 0,
 				LastSyncTime:  time.Now().UTC(),
+				Repos: map[string]RepoStatus{
+					"/share/aerial": {DiskCommit: "abcdef123456"},
+				},
 			})
 		case strings.HasPrefix(r.URL.Path, "/hangar/swapping/status"):
 			_ = json.NewEncoder(w).Encode(GitSyncStatusResponse{
@@ -62,11 +65,10 @@ func TestStatusHandler(t *testing.T) {
 				},
 			})
 		case strings.HasPrefix(r.URL.Path, "/nomad/ok/v1/jobs"):
-			_, _ = w.Write([]byte(`[{"ID":"nomad-brain","Type":"service","Status":"running"},{"ID":"nomad-proxy","Type":"service","Status":"running"}]`))
+			_, _ = w.Write([]byte(`[{"ID":"nomad-brain","Type":"service","Status":"running"},{"ID":"nomad-proxy","Type":"service","Status":"dead"}]`))
 		case strings.HasPrefix(r.URL.Path, "/nomad/ok/v1/allocations"):
 			_, _ = w.Write([]byte(`[
-				{"ID":"a1","JobID":"nomad-brain","ClientStatus":"running","DeploymentStatus":{"Healthy":true}},
-				{"ID":"a2","JobID":"nomad-proxy","ClientStatus":"running","DeploymentStatus":{"Healthy":true}}
+				{"ID":"a1","JobID":"nomad-brain","ClientStatus":"running","DeploymentStatus":{"Healthy":true}}
 			]`))
 		case strings.HasPrefix(r.URL.Path, "/nomad/error500"):
 			http.Error(w, "server error", http.StatusInternalServerError)
@@ -85,6 +87,7 @@ func TestStatusHandler(t *testing.T) {
 		brainMode         string
 		gitSyncMode       string
 		nomadMode         string
+		emptyCommit       bool
 		dockerJSON        string
 		pollerRuns        []GitHubRun
 		pollerJobs        map[int64][]GitHubJob
@@ -161,6 +164,8 @@ func TestStatusHandler(t *testing.T) {
 		{
 			name:            "NomadPrimary",
 			nomadMode:       "ok",
+			gitSyncMode:     "synced",
+			emptyCommit:     true,
 			wantCode:        http.StatusOK,
 			wantMinServices: 2,
 			wantServiceName: "nomad-brain",
@@ -256,6 +261,10 @@ func TestStatusHandler(t *testing.T) {
 				nomadAddr = mockServer.URL + "/nomad/empty"
 			}
 
+			commitArg := "testcommit"
+			if tc.emptyCommit {
+				commitArg = ""
+			}
 			var h http.Handler
 			if tc.useMux {
 				cfg := DashboardConfig{
@@ -263,12 +272,12 @@ func TestStatusHandler(t *testing.T) {
 					BrainURL:   brainURL,
 					GitSyncURL: gitSyncURL,
 					ConfigPath: cfgFile,
-					GitCommit:  "testcommit",
+					GitCommit:  commitArg,
 					NomadAddr:  nomadAddr,
 				}
 				h = SetupDashboardMux(cfg, nil)
 			} else {
-				h = statusHandler(brainURL, gitSyncURL, cfgFile, "testcommit", nomadAddr)
+				h = statusHandler(brainURL, gitSyncURL, cfgFile, commitArg, nomadAddr)
 			}
 
 			method := tc.method

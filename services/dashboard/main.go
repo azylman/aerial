@@ -438,6 +438,58 @@ func fetchGitSyncStatus(ctx context.Context, gitsyncURL string) GitSyncStatusRes
 	return status
 }
 
+// synthesizeContainersFromServices converts Nomad ServiceStatus entries into DockerContainerJSON
+// records without stamping aerial.commit_sha so resolveContainerCommit can match recon.TargetServices
+// before falling back to currentCommit.
+func synthesizeContainersFromServices(services []ServiceStatus, now time.Time) []DockerContainerJSON {
+	out := make([]DockerContainerJSON, 0, len(services))
+	for _, svc := range services {
+		state := "running"
+		if svc.Status == "unhealthy" {
+			state = "exited"
+		}
+		out = append(out, DockerContainerJSON{
+			Names:   []string{"/" + svc.Name},
+			Created: now.Unix() - svc.UptimeSeconds,
+			State:   state,
+			Status:  svc.Status,
+			Labels:  map[string]string{"aerial.service": svc.Name},
+			Health:  &DockerContainerHealth{Status: svc.Status},
+		})
+	}
+	return out
+}
+
+func resolveClusterState(ctx context.Context, nomadAddr, gitCommit string, gitSync GitSyncStatusResponse, now time.Time) ([]ServiceStatus, []DockerContainerJSON, string, error) {
+	var services []ServiceStatus
+	var rawContainers []DockerContainerJSON
+	var err error
+	if nomadAddr != "" {
+		nomadServices, nomadErr := fetchNomadClusterState(ctx, nomadAddr)
+		if nomadErr == nil && len(nomadServices) > 0 {
+			services = nomadServices
+		} else if nomadErr != nil {
+			log.Printf("[dashboard] Warning: Failed to fetch Nomad cluster state (%s): %v, falling back to Docker", nomadAddr, nomadErr)
+		}
+	}
+	if len(services) == 0 {
+		services, rawContainers, err = fetchDockerClusterState(ctx)
+	}
+	currentCommit := gitCommit
+	if currentCommit == "" {
+		currentCommit = "latest"
+	}
+	if currentCommit == "latest" && gitSync.Repos != nil {
+		if r, ok := gitSync.Repos["/share/aerial"]; ok && r.DiskCommit != "" {
+			currentCommit = shortenSHA(r.DiskCommit)
+		}
+	}
+	if len(rawContainers) == 0 && len(services) > 0 {
+		rawContainers = synthesizeContainersFromServices(services, now)
+	}
+	return services, rawContainers, currentCommit, err
+}
+
 func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalNomadAddr ...string) http.HandlerFunc {
 	nomadAddr := ""
 	if len(optionalNomadAddr) > 0 {
@@ -453,12 +505,6 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalN
 		defer cancel()
 
 		now := time.Now().UTC()
-		services, rawContainers, err := fetchDockerClusterState(ctx)
-		currentCommit := gitCommit
-		if currentCommit == "" {
-			currentCommit = "latest"
-		}
-
 		var ghRuns []GitHubRun
 		var ghJobs map[int64][]GitHubJob
 		if globalGHPoller != nil {
@@ -466,6 +512,7 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalN
 		}
 
 		gitSync := fetchGitSyncStatus(ctx, gitsyncURL)
+		services, rawContainers, currentCommit, err := resolveClusterState(ctx, nomadAddr, gitCommit, gitSync, now)
 		deployments := mergeClusterDeploymentsWithHangar(rawContainers, ghRuns, ghJobs, gitSync, currentCommit)
 		if deployments == nil {
 			deployments = []DeploymentStatus{}
@@ -501,15 +548,6 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalN
 				{Name: "autoheal", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "proxy", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "dashboard", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-			}
-		}
-
-		if nomadAddr != "" {
-			nomadServices, nomadErr := fetchNomadClusterState(ctx, nomadAddr)
-			if nomadErr == nil && len(nomadServices) > 0 {
-				services = nomadServices
-			} else if nomadErr != nil {
-				log.Printf("[dashboard] Warning: Failed to fetch Nomad cluster state (%s): %v, falling back to Docker", nomadAddr, nomadErr)
 			}
 		}
 
