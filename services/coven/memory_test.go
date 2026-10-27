@@ -802,6 +802,12 @@ func TestResolveConfigPath(t *testing.T) {
 			want:      existingLocal,
 		},
 		{
+			name:      "LocalConfigPrecedesDefaultConfigPath",
+			localPath: existingLocal,
+			fallback:  DefaultConfigPath,
+			want:      existingLocal,
+		},
+		{
 			name:      "FallbackUsed",
 			localPath: missingLocal,
 			fallback:  "/default/path.yaml",

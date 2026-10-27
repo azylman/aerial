@@ -11,7 +11,7 @@ import (
 )
 
 // DefaultConfigPath is the canonical in-container configuration path.
-const DefaultConfigPath = "/config/config.yaml"
+const DefaultConfigPath = "/share/aerial-config/config.yaml"
 
 // DefaultPort is the fallback port when unspecified.
 const DefaultPort = "4008"
@@ -56,7 +56,7 @@ func ResolveConfigPath(fallbackPath string) string {
 	if fallbackPath != "" {
 		return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, fallbackPath)
 	}
-	return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, "config.yaml", "/config/config.yaml", "/share/aerial-config/config.yaml", "/data/config.yaml")
+	return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, DefaultConfigPath, "/config/config.yaml", "config.yaml", "/data/config.yaml")
 }
 
 // OllamaConfig defines Ollama embedding client settings.

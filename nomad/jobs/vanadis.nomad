@@ -38,10 +38,13 @@ job "vanadis" {
         healthchecks {
           disable = true
         }
-        volumes = [
-          "/mnt/data/supervisor/share/aerial:/share/aerial:ro",
-          "/mnt/data/supervisor/share/aerial-config:/share/aerial-config:ro",
-          "/mnt/data/supervisor/share/mirrormere:/share/mirrormere:ro",
+        mounts = [
+          {
+            type     = "volume"
+            target   = "/share"
+            source   = "aerial-share"
+            readonly = true
+          }
         ]
       }
 
