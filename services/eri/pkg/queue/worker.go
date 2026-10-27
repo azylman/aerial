@@ -241,8 +241,10 @@ func (te *turnExecution) acquirePoolAndLease() bool {
 		te.failBurst(poolErr)
 		return false
 	}
+	te.activeSessionMu.Lock()
 	te.activePool = activePool
 	te.isEphemeral = poolKey.Ephemeral
+	te.activeSessionMu.Unlock()
 
 	if activePool == nil {
 		te.failBurst(fmt.Errorf("queue: no agent execution pool available for thread %s", te.threadID))
@@ -264,16 +266,18 @@ func (te *turnExecution) acquirePoolAndLease() bool {
 		te.failBurst(fmt.Errorf("queue: failed to acquire session lease for thread %s: %w", te.threadID, leaseErr))
 		return false
 	}
+	te.activeSessionMu.Lock()
 	te.lease = lease
-
 	te.currentSessionID = lease.SessionID()
 	te.previousSessionID = lease.PreviousSessionID()
 	te.isCold = lease.IsCold()
 	te.isEphemeral = poolKey.Ephemeral || lease.IsEphemeral()
 	te.turnCount = lease.TurnCount()
+	currSess, isCold, isEphem := te.currentSessionID, te.isCold, te.isEphemeral
+	te.activeSessionMu.Unlock()
 
-	if te.currentSessionID != "" && te.isCold && !te.isEphemeral {
-		te.saveSessionID(te.threadID, te.currentSessionID)
+	if currSess != "" && isCold && !isEphem {
+		te.saveSessionID(te.threadID, currSess)
 	}
 	return true
 }
@@ -459,11 +463,13 @@ func (te *turnExecution) resolveTurnPolicy() bool {
 		return false
 	}
 
-	var getSessErr error
-	te.currentSessionID, getSessErr = te.getSessionID(te.threadID)
+	sessID, getSessErr := te.getSessionID(te.threadID)
 	if getSessErr != nil {
 		log.Printf("[Worker] Warning getting session ID for thread %s: %v", te.threadID, getSessErr)
 	}
+	te.activeSessionMu.Lock()
+	te.currentSessionID = sessID
+	te.activeSessionMu.Unlock()
 	return true
 }
 
@@ -575,7 +581,9 @@ func (te *turnExecution) runChannelAmbientTriage() bool {
 
 	if te.currentSessionID != "" && te.pool.sessionMgr != nil && !te.pool.sessionMgr.SessionExistsOnDisk(te.currentSessionID) {
 		log.Printf("[Queue] Session %s for thread %s not found on disk. Clearing for fresh Turn 1.", te.currentSessionID, te.threadID)
+		te.activeSessionMu.Lock()
 		te.currentSessionID = ""
+		te.activeSessionMu.Unlock()
 		te.saveSessionID(te.threadID, "")
 	}
 
@@ -764,13 +772,19 @@ func (te *turnExecution) prepareAttemptPrompt(attempt int, promptToSend, lastErr
 }
 
 func (te *turnExecution) buildLeaseTurnContext(runCtx context.Context, currentModel, promptToSend string, sink runner.TurnSink) *runner.TurnContext {
-	if te.lease.SessionID() != "" && te.lease.SessionID() != te.currentSessionID && !te.isEphemeral {
-		te.currentSessionID = te.lease.SessionID()
-		te.saveSessionID(te.threadID, te.currentSessionID)
+	te.activeSessionMu.Lock()
+	leaseSess := te.lease.SessionID()
+	shouldSave := leaseSess != "" && leaseSess != te.currentSessionID && !te.isEphemeral
+	if shouldSave {
+		te.currentSessionID = leaseSess
 	}
 	sessIDToSend := te.currentSessionID
-	if te.lease.SessionID() != "" && te.currentSessionID != "" {
-		sessIDToSend = te.lease.SessionID()
+	if leaseSess != "" && te.currentSessionID != "" {
+		sessIDToSend = leaseSess
+	}
+	te.activeSessionMu.Unlock()
+	if shouldSave {
+		te.saveSessionID(te.threadID, leaseSess)
 	}
 	scopeInst := config.LoadScopeInstructions(te.effectiveName)
 	var memParts []string
@@ -918,23 +932,30 @@ func (te *turnExecution) processSuccessfulAttempt(resp *runner.AgyResponse, exit
 func (te *turnExecution) handleSessionCorruptionRetry(attempt, maxAttempts int, currentAgyBin, currentAPIKey, errDetail, stderr, currentModel string) (shutdown bool) {
 	te.deliverFailureNotice(currentAgyBin, currentAPIKey, errDetail, stderr, "session reset due to context corruption", "session reset notice")
 	te.rotateSessionID(te.threadID, "")
+	te.activeSessionMu.Lock()
 	te.currentSessionID = ""
-	if te.lease != nil {
-		if relErr := te.lease.Release(); relErr != nil {
+	oldLease := te.lease
+	te.lease = nil
+	te.activeSessionMu.Unlock()
+	if oldLease != nil {
+		if relErr := oldLease.Release(); relErr != nil {
 			log.Printf("[WorkerPool] Warning releasing lease on corruption reset for %s: %v", te.threadID, relErr)
 		}
-		te.lease = nil
 	}
 	activePool := te.activePool
 	if activePool == nil {
 		if resolved, _, resolveErr := te.resolveExecutionPool(); resolveErr == nil {
 			activePool = resolved
+			te.activeSessionMu.Lock()
 			te.activePool = activePool
+			te.activeSessionMu.Unlock()
 		}
 	}
 	if activePool != nil {
 		if newLease, lErr := activePool.AcquireLease(te.pool.ctx, te.threadID); lErr == nil {
+			te.activeSessionMu.Lock()
 			te.lease, te.isEphemeral, te.currentSessionID = newLease, te.isEphemeral || newLease.IsEphemeral(), newLease.SessionID()
+			te.activeSessionMu.Unlock()
 		}
 	}
 	return te.handleRetryBackoff(attempt, maxAttempts, errDetail, currentModel)
@@ -948,8 +969,13 @@ func (te *turnExecution) handleNonTransientFailure(attempt, maxAttempts int, cur
 		return
 	}
 
-	if te.currentSessionID != "" {
+	te.activeSessionMu.Lock()
+	hasCurr := te.currentSessionID != ""
+	if hasCurr {
 		te.previousSessionID, te.currentSessionID = te.currentSessionID, ""
+	}
+	te.activeSessionMu.Unlock()
+	if hasCurr {
 		te.rotateSessionID(te.threadID, "")
 	}
 	metrics.RecordTurnCompleted("failed", te.triggerType, currentModel, time.Since(te.execStart))

@@ -88,8 +88,25 @@ func InferTriggerType(authorID, scheduleRunID string) string {
 	return "reminder"
 }
 
+// IsEphemeralTaskMessage returns true when a message routes to an ephemeral execution pool
+// and therefore does not share the thread's persistent stateful session in the sessions table.
+func IsEphemeralTaskMessage(ephemeral *bool, effort, model string) bool {
+	if ephemeral != nil {
+		return *ephemeral
+	}
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "low", "medium":
+		return true
+	case "":
+		m := strings.ToLower(strings.TrimSpace(model))
+		return strings.Contains(m, "medium") || strings.Contains(m, "flash")
+	default:
+		return false
+	}
+}
+
 func buildActiveTasksQuery(flt TasksFilter, hasFilter bool) (string, []any) {
-	baseQuery := `SELECT m.id, COALESCE(m.row_id, 0), m.thread_id, COALESCE(s.internal_session_id, ''), COALESCE(s.previous_session_id, ''), COALESCE(s.summary, ''), m.author_name, m.author_id, m.content, COALESCE(m.summary, ''), COALESCE(m.response_text, ''), m.is_admin, m.status, m.retry_count, COALESCE(m.schedule_run_id, ''), m.created_at, m.updated_at FROM messages m LEFT JOIN sessions s ON m.thread_id = s.thread_id`
+	baseQuery := `SELECT m.id, COALESCE(m.row_id, 0), m.thread_id, COALESCE(s.internal_session_id, ''), COALESCE(s.previous_session_id, ''), COALESCE(s.summary, ''), m.author_name, m.author_id, m.content, COALESCE(m.summary, ''), COALESCE(m.response_text, ''), m.is_admin, m.status, m.retry_count, COALESCE(m.schedule_run_id, ''), m.ephemeral, COALESCE(m.effort, ''), COALESCE(m.model, ''), m.created_at, m.updated_at FROM messages m LEFT JOIN sessions s ON m.thread_id = s.thread_id`
 	if !hasFilter {
 		return baseQuery + ` WHERE m.status IN ('PENDING', 'PROCESSING') ORDER BY m.created_at ASC LIMIT 50;`, nil
 	}
@@ -163,6 +180,8 @@ func scanActiveTasks(rows *sql.Rows) ([]ActiveTask, error) {
 	tasks := make([]ActiveTask, 0)
 	for rows.Next() {
 		var t ActiveTask
+		var ephemeral sql.NullBool
+		var effort, model string
 		if err := rows.Scan(
 			&t.ID,
 			&t.RowID,
@@ -179,10 +198,21 @@ func scanActiveTasks(rows *sql.Rows) ([]ActiveTask, error) {
 			&t.Status,
 			&t.RetryCount,
 			&t.ScheduleRunID,
+			&ephemeral,
+			&effort,
+			&model,
 			&t.CreatedAt,
 			&t.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan active task: %w", err)
+		}
+		var ephemPtr *bool
+		if ephemeral.Valid {
+			ephemPtr = &ephemeral.Bool
+		}
+		if IsEphemeralTaskMessage(ephemPtr, effort, model) {
+			t.SessionID = ""
+			t.PreviousSessionID = ""
 		}
 		if t.Summary == "" {
 			t.Summary = CleanTaskSummary(t.Prompt)

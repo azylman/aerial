@@ -219,6 +219,7 @@ func TestFakeStore_GetActiveTasks_FiltersAndOrdering(t *testing.T) {
 		Summary:      "Summary 2",
 		ResponseText: "Response 2",
 		Status:       db.StatusPending,
+		Effort:       "medium",
 		IsAdmin:      false,
 		CreatedAt:    now.Add(-2 * time.Minute),
 		UpdatedAt:    now.Add(-2 * time.Minute),
@@ -240,6 +241,8 @@ func TestFakeStore_GetActiveTasks_FiltersAndOrdering(t *testing.T) {
 		filter        db.TasksFilter
 		wantCount     int
 		wantFirstID   string
+		wantSess      string
+		checkSess     bool
 		wantPrevSess  string
 		wantThreadSum string
 		wantRespText  string
@@ -249,15 +252,19 @@ func TestFakeStore_GetActiveTasks_FiltersAndOrdering(t *testing.T) {
 			filter:        db.TasksFilter{ThreadID: "th-filter", Statuses: []string{"COMPLETED"}},
 			wantCount:     1,
 			wantFirstID:   "msg-f1",
+			wantSess:      "int-sess-1",
+			checkSess:     true,
 			wantPrevSess:  "prev-sess-0",
 			wantThreadSum: "Summary of thread filter",
 			wantRespText:  "Response 1",
 		},
 		{
-			name:        "is_admin false filter",
+			name:        "is_admin false filter omits parent session for ephemeral effort",
 			filter:      db.TasksFilter{IsAdmin: &adminFalse},
 			wantCount:   1,
 			wantFirstID: "msg-f2",
+			wantSess:    "",
+			checkSess:   true,
 		},
 		{
 			name:        "is_admin true filter with status",
@@ -324,6 +331,9 @@ func TestFakeStore_GetActiveTasks_FiltersAndOrdering(t *testing.T) {
 			if tc.wantCount > 0 {
 				if tasks[0].ID != tc.wantFirstID {
 					t.Errorf("got first ID %q, want %q", tasks[0].ID, tc.wantFirstID)
+				}
+				if tc.checkSess && tasks[0].SessionID != tc.wantSess {
+					t.Errorf("got SessionID %q, want %q", tasks[0].SessionID, tc.wantSess)
 				}
 				if tc.wantPrevSess != "" && tasks[0].PreviousSessionID != tc.wantPrevSess {
 					t.Errorf("got PreviousSessionID %q, want %q", tasks[0].PreviousSessionID, tc.wantPrevSess)

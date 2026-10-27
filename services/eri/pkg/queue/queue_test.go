@@ -3144,3 +3144,43 @@ func TestWorkerPool_DeliverDirectWithAttachments(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkerPool_ActiveTurnSessionID(t *testing.T) {
+	t.Parallel()
+	leaseWithSess := &testSessionLease{sessionID: "lease-ephem-sess-1"}
+	emptyLease := &testSessionLease{sessionID: ""}
+
+	tests := []struct {
+		name       string
+		nilPool    bool
+		msgID      string
+		activeTurn *turnExecution
+		wantSess   string
+		wantOK     bool
+	}{
+		{name: "nil pool", nilPool: true, msgID: "msg-1", wantSess: "", wantOK: false},
+		{name: "empty msgID", msgID: "", wantSess: "", wantOK: false},
+		{name: "unmatched msgID", msgID: "msg-missing", activeTurn: &turnExecution{burst: []db.Message{{ID: "msg-other"}}, activeSessionID: "sess-1"}, wantSess: "", wantOK: false},
+		{name: "matched activeSessionID priority", msgID: "msg-1", activeTurn: &turnExecution{burst: []db.Message{{ID: "msg-1"}}, activeSessionID: "active-sess-1", lease: leaseWithSess}, wantSess: "active-sess-1", wantOK: true},
+		{name: "matched ephemeral lease session ID", msgID: "msg-2", activeTurn: &turnExecution{burst: []db.Message{{ID: "msg-2"}}, lease: leaseWithSess, isEphemeral: true, currentSessionID: "parent-sess-ignored"}, wantSess: "lease-ephem-sess-1", wantOK: true},
+		{name: "matched stateful currentSessionID fallback", msgID: "msg-3", activeTurn: &turnExecution{burst: []db.Message{{ID: "msg-3"}}, lease: emptyLease, isEphemeral: false, currentSessionID: "stateful-sess-1"}, wantSess: "stateful-sess-1", wantOK: true},
+		{name: "matched ephemeral pre-lease suppresses parent session", msgID: "msg-4", activeTurn: &turnExecution{burst: []db.Message{{ID: "msg-4"}}, lease: emptyLease, isEphemeral: true, currentSessionID: "parent-sess-ignored"}, wantSess: "", wantOK: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var p *WorkerPool
+			if !tc.nilPool {
+				p = New(nil, WorkerPoolConfig{})
+				if tc.activeTurn != nil {
+					p.registerActiveTurn("scope-1", tc.activeTurn)
+				}
+			}
+			gotSess, gotOK := p.ActiveTurnSessionID(tc.msgID)
+			if gotSess != tc.wantSess || gotOK != tc.wantOK {
+				t.Fatalf("ActiveTurnSessionID(%q) = (%q, %v), want (%q, %v)", tc.msgID, gotSess, gotOK, tc.wantSess, tc.wantOK)
+			}
+		})
+	}
+}
