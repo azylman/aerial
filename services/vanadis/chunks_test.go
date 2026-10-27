@@ -131,18 +131,22 @@ func TestVanadisStore_ChunkLifecycle(t *testing.T) {
 		if c.PRNumber != 101 || c.Status != "pr_opened" {
 			t.Errorf("expected pr_number=101, status=pr_opened, got %+v", c)
 		}
+
+		threadID, err = s.AttachChunkPR(ctx, cIDs[0], 102, "aerial")
+		if err != nil || threadID != "123456789012345678" {
+			t.Fatalf("AttachChunkPR overwrite err=%v, threadID=%q", err, threadID)
+		}
+		c, _, _ = s.GetChunk(ctx, cIDs[0])
+		if c.PRNumber != 102 {
+			t.Errorf("expected overwritten pr_number=102, got %d", c.PRNumber)
+		}
 	})
 
 	t.Run("AttachChunkPR_Errors", func(t *testing.T) {
 		s, _, cIDs := setupTestStoreWithBuild()
 		_, _ = s.AttachChunkPR(ctx, cIDs[0], 101, "aerial")
 
-		_, err := s.AttachChunkPR(ctx, cIDs[0], 102, "aerial")
-		if err == nil {
-			t.Error("expected error attaching different PR number to chunk")
-		}
-
-		_, err = s.AttachChunkPR(ctx, cIDs[0], 101, "other-repo")
+		_, err := s.AttachChunkPR(ctx, cIDs[0], 101, "other-repo")
 		if err == nil {
 			t.Error("expected error attaching mismatched repo to chunk")
 		}
