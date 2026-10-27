@@ -684,7 +684,6 @@ func (s *RouterServer) HandleNomadJobFailure(ctx context.Context, jobID, refID, 
 	log.Printf("[webhooks-router] [nomad] deployment failure confirmed for %s#%d (job: %s, commit: %s, target: %s, ref: %s, status: %s)",
 		repo, prNumber, cleanJob, mergeSHA, targetID, refID, status)
 
-	dmMsg := fmt.Sprintf("💥 %sNomad deployment failed for %s. Following up...", formatDirectMessagePrefix(prNumber, repo), cleanJob)
 	if prNumber > 0 {
 		s.setPRWidgetState(ctx, repo, prNumber, "deploy_failed", fmt.Sprintf("Nomad deployment failed for %s", cleanJob))
 		if err := s.SyncPRWidget(ctx, repo, prNumber); err != nil {
@@ -695,7 +694,7 @@ func (s *RouterServer) HandleNomadJobFailure(ctx context.Context, jobID, refID, 
 		fmt.Sprintf("Nomad deployment for job %s failed with status %q (PR #%d on %s, commit: %s, deployment ID: %s).", cleanJob, status, prNumber, repo, mergeSHA, refID),
 		statusDesc, "", "Please investigate and fix the deployment failure.",
 	)
-	if err := s.dispatchAlertWithPrompt(ctx, targetID, "failure", dmMsg, prompt, s.vanadisPromptOpts(ctx, repo, prNumber)); err != nil {
+	if err := s.dispatchAlertWithPrompt(ctx, targetID, "failure", "", prompt, s.vanadisPromptOpts(ctx, repo, prNumber)); err != nil {
 		s.setPRWidgetState(ctx, repo, prNumber, "deploying", "")
 		return err
 	}

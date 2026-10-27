@@ -346,7 +346,7 @@ func (m *mockPRRegistry) ShouldSuppressVanadisDeployWake(ctx context.Context, re
 	if err := m.checkErr(m.suppressVanadisErr); err != nil {
 		return false, err
 	}
-	return m.suppressVanadisRes, nil
+	return m.suppressVanadisRes || (m.advanceVanadisRes != nil && m.advanceVanadisRes.Matched), nil
 }
 
 func (m *mockPRRegistry) IsFinalVanadisChunk(ctx context.Context, repo string, prNumber int) (bool, error) {
@@ -837,6 +837,8 @@ func TestProcessHangarEvent(t *testing.T) {
 			wantPR:           241,
 			wantTargetID:     "1555405874565091380",
 			wantAdvanceCalls: 1,
+			wantPrompts:      1,
+			wantPromptSubs:   []string{"Continuous Delivery deployment completed for job git-sync on azylman/aerial-config"},
 		},
 		{
 			name:         "deploy_success on aerial-config",
@@ -874,7 +876,7 @@ func TestProcessHangarEvent(t *testing.T) {
 		{
 			name:             "sync_success advances Vanadis with valid targetID",
 			evt:              mkHangarEvt("sync_success", "", "azylman/aerial-config", "sha_vanadis_1", 301, "1555405874565091380", "success", ""),
-			reg:              &mockPRRegistry{},
+			reg:              &mockPRRegistry{suppressVanadisRes: true},
 			disp:             &mockOutboundDispatcher{},
 			wantPR:           301,
 			wantTargetID:     "1555405874565091380",
@@ -965,6 +967,8 @@ func TestProcessHangarEvent(t *testing.T) {
 			wantPR:           975,
 			wantTargetID:     "1555405874565091380",
 			wantAdvanceCalls: 1,
+			wantPrompts:      1,
+			wantPromptSubs:   []string{"Continuous Delivery deployment completed for job git-sync on azylman/aerial-config"},
 		},
 		{
 			name: "sync_success with expected_jobs on final Vanadis chunk defers advancement until deploy_success",

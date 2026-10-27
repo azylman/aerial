@@ -533,24 +533,29 @@ type vanadisPromptOpts struct {
 }
 
 func (s *RouterServer) vanadisPromptOpts(ctx context.Context, repo string, prNum int) vanadisPromptOpts {
-	if s == nil || s.registry == nil || prNum <= 0 {
+	if prNum <= 0 {
 		return vanadisPromptOpts{}
+	}
+	opts := vanadisPromptOpts{silent: true}
+	if s == nil || s.registry == nil {
+		return opts
 	}
 	if pgReg, ok := s.registry.(*PostgresPRRegistry); ok {
 		if matched, chunkID, effort, err := pgReg.ResolveVanadisChunkForPR(ctx, repo, prNum); err == nil && matched {
-			return vanadisPromptOpts{silent: true, chunkID: chunkID, effort: effort}
+			opts.chunkID = chunkID
+			opts.effort = effort
 		}
-		return vanadisPromptOpts{}
+		return opts
 	}
 	suppressed, err := s.registry.ShouldSuppressVanadisDeployWake(ctx, repo, prNum)
 	if err != nil {
 		log.Printf("[webhooks-router] [vanadis] warning checking Vanadis status for %s#%d: %v", repo, prNum, err)
-		return vanadisPromptOpts{}
+		return opts
 	}
-	if !suppressed {
-		return vanadisPromptOpts{}
+	if suppressed {
+		opts.effort = "medium"
 	}
-	return vanadisPromptOpts{silent: true, effort: "medium"}
+	return opts
 }
 
 func (s *RouterServer) isVanadisPR(ctx context.Context, repo string, prNum int) bool {
@@ -799,13 +804,12 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 		return &evt, s.handleHangarDeployFailedOrRollback(ctx, evt, prefix)
 	case "sync_success":
 		if evt.PRNumber > 0 {
-			if !syncHasExpected {
-				if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber); err != nil {
-					log.Printf("[webhooks-router] [widget] warning syncing sync_success widget: %v", err)
-				}
-			}
 			if err := s.advanceVanadisChunkOnSync(ctx, evt.Repo, evt.PRNumber, syncHasExpected); err != nil {
 				return &evt, err
+			}
+			if !syncHasExpected && !s.isVanadisPR(ctx, evt.Repo, evt.PRNumber) {
+				s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "deployed", "")
+				return &evt, s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, firstNonEmpty(evt.JobName, "git-sync"), evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID)
 			}
 		}
 		return &evt, nil

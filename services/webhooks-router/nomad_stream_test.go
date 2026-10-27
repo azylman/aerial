@@ -153,8 +153,6 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 			wantFailedJobs:   []string{"brain"},
 			wantPrompts:      1,
 			wantPromptSubstr: []string{"Nomad deployment for job brain failed", "Allocation failed health check: connection refused on port 8080", "Please investigate and fix the deployment failure."},
-			wantDMs:          1,
-			wantDMSubstr:     "💥 **(PR: #553, repo: aerial)** Nomad deployment failed for brain. Following up...",
 		},
 		{
 			name:             "config reload allocation running dispatches prompt",
@@ -188,7 +186,6 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 			wantFailedJobs:   []string{"brain"},
 			wantPrompts:      1,
 			wantPromptSubstr: []string{`failed with status "complete"`},
-			wantDMs:          1,
 		},
 		{
 			name:             "evaluation status failed treated as failure",
@@ -197,7 +194,6 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 			wantFailedJobs:   []string{"brain"},
 			wantPrompts:      1,
 			wantPromptSubstr: []string{"scheduling timeout"},
-			wantDMs:          1,
 		},
 		{
 			name:            "allocation restarting guarded",
@@ -222,8 +218,6 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 			wantFailedJobs:   []string{"brain"},
 			wantPrompts:      1,
 			wantPromptSubstr: []string{"Nomad deployment for job brain failed", "bind source path does not exist: /mnt/data/supervisor/share/coverage/brain"},
-			wantDMs:          1,
-			wantDMSubstr:     "💥 **(PR: #613, repo: aerial)** Nomad deployment failed for brain. Following up...",
 		},
 		{
 			name:        "evaluation queued allocations ignored",
@@ -237,7 +231,6 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 			wantFailedJobs:   []string{"brain"},
 			wantPrompts:      1,
 			wantPromptSubstr: []string{"failed task group allocations"},
-			wantDMs:          1,
 		},
 		{
 			name: "plan result events ignored across all topics",
@@ -276,7 +269,6 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 			reg:            mkDeployFailedReg(validThread, 637, "sha_mixed_fail", validRepo, true),
 			wantFailedJobs: []string{"brain"},
 			wantPrompts:    1,
-			wantDMs:        1,
 		},
 		{
 			name:        "evaluation blocked with FailedTGAllocs ignored",
@@ -291,7 +283,6 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 			wantFailedJobs:   []string{"infisical"},
 			wantPrompts:      1,
 			wantPromptSubstr: []string{"infisical", `task "server"`, "exited with code 1"},
-			wantDMs:          1,
 		},
 		{
 			name:             "allocation restart exhaustion triggers unmanaged crash alert",
@@ -331,7 +322,6 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 			wantFailedJobs:   []string{"coven"},
 			wantPrompts:      1,
 			wantPromptSubstr: []string{`failed with status "blocked"`, "memory"},
-			wantDMs:          1,
 		},
 		{
 			name:         "evaluation blocked ignored when live evaluation already resolved",
@@ -1102,8 +1092,8 @@ func TestNomadUnmanagedJobCrashAndDelegation(t *testing.T) {
 		{name: "HandleUnmanagedJobCrash empty job ID no-op", noRiver: true, jobID: ""},
 		{name: "HandleNomadJobFailure untracked in registry", useFailure: true, noRiver: true, reg: &mockPRRegistry{deployFailedJobUpdated: false}, jobID: "openobserve", allocID: "alloc-99", status: "failed", desc: "Task OOM killed", wantDMs: 1, wantPrompts: 1},
 		{name: "HandleNomadJobFailure already deploy_failed PR skips unmanaged crash alert", useFailure: true, noRiver: true, reg: &mockPRRegistry{deployFailedJobPRNum: 613, deployFailedJobUpdated: false}, jobID: "eri", allocID: "alloc-613", status: "failed", desc: "dotenv error", wantDMs: 0, wantPrompts: 0},
-		{name: "HandleNomadJobFailure tracked syncs widget", useFailure: true, noRiver: true, reg: &mockPRRegistry{deployFailedJobTargetID: "1555405874565091380", deployFailedJobPRNum: 613, deployFailedJobMergeSHA: "sha613", deployFailedJobRepo: "azylman/aerial", deployFailedJobUpdated: true, resolveTargetID: "1555405874565091380", resolveBranch: "feat/x"}, jobID: "brain", allocID: "alloc-613", status: "failed", desc: "Task OOM killed", widgetErr: errors.New("widget err"), wantDMs: 1, wantPrompts: 1, wantWidgets: 1},
-		{name: "HandleNomadJobFailure prompt error returns error for retry", useFailure: true, noRiver: true, reg: &mockPRRegistry{deployFailedJobTargetID: "", deployFailedJobPRNum: 614, deployFailedJobMergeSHA: "sha614", deployFailedJobRepo: "azylman/aerial", deployFailedJobUpdated: true}, jobID: "eri", allocID: "alloc-614", status: "failed", desc: "dotenv error", promptErr: errors.New("502 bad gateway"), wantDMs: 1, wantPrompts: 1, wantErr: true},
+		{name: "HandleNomadJobFailure tracked syncs widget", useFailure: true, noRiver: true, reg: &mockPRRegistry{deployFailedJobTargetID: "1555405874565091380", deployFailedJobPRNum: 613, deployFailedJobMergeSHA: "sha613", deployFailedJobRepo: "azylman/aerial", deployFailedJobUpdated: true, resolveTargetID: "1555405874565091380", resolveBranch: "feat/x"}, jobID: "brain", allocID: "alloc-613", status: "failed", desc: "Task OOM killed", widgetErr: errors.New("widget err"), wantDMs: 0, wantPrompts: 1, wantWidgets: 1},
+		{name: "HandleNomadJobFailure prompt error returns error for retry", useFailure: true, noRiver: true, reg: &mockPRRegistry{deployFailedJobTargetID: "", deployFailedJobPRNum: 614, deployFailedJobMergeSHA: "sha614", deployFailedJobRepo: "azylman/aerial", deployFailedJobUpdated: true}, jobID: "eri", allocID: "alloc-614", status: "failed", desc: "dotenv error", promptErr: errors.New("502 bad gateway"), wantDMs: 0, wantPrompts: 1, wantErr: true},
 		{name: "HandleNomadJobFailure nil registry", useFailure: true, noRiver: true, reg: nil, jobID: "cadvisor", allocID: "alloc-99", status: "failed", desc: "Docker daemon died", wantDMs: 1, wantPrompts: 1},
 		{name: "HandleNomadJobFailure empty job ID no-op", useFailure: true, noRiver: true, jobID: "", allocID: "alloc-1", status: "failed", desc: "oom"},
 		{name: "HandleNomadJobFailure registry error", useFailure: true, noRiver: true, reg: &mockPRRegistry{err: errors.New("registry failure")}, jobID: "vector", allocID: "alloc-99", status: "failed", desc: "Config parse failed", wantErr: true},
