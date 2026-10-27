@@ -28,6 +28,13 @@
     ]
   },
   "batch-guard": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "hook-guard pre-invocation",
+        "timeout": 5
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "view_file|read_file|replace_file_content|write_to_file|edit_file|write_file|run_command",
@@ -35,6 +42,18 @@
           {
             "type": "command",
             "command": "hook-guard batch",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "replace_file_content|write_to_file|edit_file|write_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "hook-guard post-batch",
             "timeout": 5
           }
         ]

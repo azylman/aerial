@@ -216,6 +216,10 @@ func TestGuardProcess_IOAndModes(t *testing.T) {
 		{"empty reader fail-open", strings.NewReader(""), "all", DecisionAllow},
 		{"whitespace reader fail-open", strings.NewReader("   \n\t  "), "all", DecisionAllow},
 		{"invalid json fail-open", strings.NewReader("invalid-json{"), "all", DecisionAllow},
+		{"pre-invocation failing reader fail-open", errorReader{}, "pre-invocation", ""},
+		{"post-batch invalid json fail-open", strings.NewReader("invalid-json{"), "post-batch", ""},
+		{"pre-invocation valid payload", strings.NewReader(`{"conversationId":"c1","invocationNum":2}`), "pre-invocation", ""},
+		{"post-batch valid payload", strings.NewReader(`{"conversationId":"c1","stepIdx":1,"toolCall":{"name":"edit_file","args":{"Path":"/tmp/a.go"}}}`), "post-batch", ""},
 	}
 	for _, tc := range ioTests {
 		t.Run(tc.name, func(t *testing.T) {

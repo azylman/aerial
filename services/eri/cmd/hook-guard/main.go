@@ -18,6 +18,8 @@ const (
 	ModeShare    Mode = "share"
 	ModeSchedule Mode = "schedule"
 	ModeBatch    Mode = "batch"
+	ModePost     Mode = "post-batch"
+	ModeInv      Mode = "pre-invocation"
 	ModeSearch   Mode = "search"
 	ModeCommit   Mode = "commit"
 )
@@ -30,7 +32,7 @@ type Config struct {
 
 // HelpMessage returns the CLI usage documentation.
 func HelpMessage() string {
-	return "Usage: hook-guard [share|schedule|batch|search|commit|all]"
+	return "Usage: hook-guard [share|schedule|batch|post-batch|pre-invocation|search|commit|all]"
 }
 
 // ParseCLIConfig parses command line arguments and infers mode from executable name.
@@ -46,6 +48,10 @@ func ParseCLIConfig(args []string) Config {
 			cfg.Mode = ModeShare
 		} else if strings.Contains(base, "schedule") {
 			cfg.Mode = ModeSchedule
+		} else if strings.Contains(base, "post-batch") || strings.Contains(base, "post-tool") {
+			cfg.Mode = ModePost
+		} else if strings.Contains(base, "invocation") {
+			cfg.Mode = ModeInv
 		} else if strings.Contains(base, "batch") {
 			cfg.Mode = ModeBatch
 		} else if strings.Contains(base, "search") {
@@ -63,6 +69,10 @@ func ParseCLIConfig(args []string) Config {
 			cfg.Mode = ModeShare
 		case "schedule", "schedule-guard":
 			cfg.Mode = ModeSchedule
+		case "post-batch", "post-batch-guard", "post-tool":
+			cfg.Mode = ModePost
+		case "pre-invocation", "invocation", "invocation-guard":
+			cfg.Mode = ModeInv
 		case "batch", "batch-guard":
 			cfg.Mode = ModeBatch
 		case "search", "search-guard":
@@ -91,7 +101,11 @@ func RunCLI(args []string, r io.Reader, w io.Writer) int {
 
 	if err := guard.Process(r, w, string(cfg.Mode)); err != nil {
 		// Preserves fail-open invariant
-		_, _ = fmt.Fprintln(w, `{"decision":"allow"}`) //nolint:errcheck
+		out := `{"decision":"allow"}`
+		if guard.IsInvocationMode(string(cfg.Mode)) {
+			out = `{}`
+		}
+		_, _ = fmt.Fprintln(w, out) //nolint:errcheck
 		return 1
 	}
 	return 0
