@@ -40,15 +40,39 @@ job "dashboard" {
         }
         volumes = [
           "/var/run/docker.sock:/var/run/docker.sock:ro",
-          "/mnt/data/supervisor/share/aerial-config:/share/aerial-config:ro",
           "/mnt/data/supervisor/share/coverage/dashboard:/coverage:rw"
         ]
       }
 
       env {
-        CONFIG_PATH = "/share/aerial-config/services/dashboard/dashboard.yaml"
-        NOMAD_ADDR  = "http://${attr.unique.network.ip-address}:4646"
-        GOCOVERDIR  = "/coverage"
+        CONFIG_PATH        = "/local/dashboard.yaml"
+        AERIAL_CONFIG_PATH = "/local/config.yaml"
+        NOMAD_ADDR         = "http://${attr.unique.network.ip-address}:4646"
+        GOCOVERDIR         = "/coverage"
+      }
+
+      template {
+        data = <<EOH
+{{- if nomadVarExists "nomad/jobs/dashboard" -}}
+{{- with nomadVar "nomad/jobs/dashboard" -}}
+{{- if .CONFIG_YAML -}}{{- .CONFIG_YAML -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+EOH
+        destination = "local/dashboard.yaml"
+        change_mode = "restart"
+      }
+
+      template {
+        data = <<EOH
+{{- if nomadVarExists "nomad/jobs/dashboard" -}}
+{{- with nomadVar "nomad/jobs/dashboard" -}}
+{{- if .BRAIN_CONFIG_YAML -}}{{- .BRAIN_CONFIG_YAML -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+EOH
+        destination = "local/config.yaml"
+        change_mode = "restart"
       }
 
       template {
