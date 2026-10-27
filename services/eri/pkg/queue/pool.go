@@ -865,6 +865,28 @@ func (p *WorkerPool) unregisterActiveTurn(scopeKey string, te *turnExecution) {
 	p.mu.Unlock()
 }
 
+// ActiveTurnSessionID returns the live session ID for an in-flight message ID if the message
+// belongs to an active turn in the worker pool.
+func (p *WorkerPool) ActiveTurnSessionID(msgID string) (string, bool) {
+	if p == nil || msgID == "" {
+		return "", false
+	}
+	p.mu.Lock()
+	turns := make([]*turnExecution, 0, len(p.activeTurns))
+	for _, te := range p.activeTurns {
+		if te != nil {
+			turns = append(turns, te)
+		}
+	}
+	p.mu.Unlock()
+	for _, te := range turns {
+		if sessID, ok := te.liveSessionIDForMessage(msgID); ok {
+			return sessID, true
+		}
+	}
+	return "", false
+}
+
 func isScopeKeyForThread(scopeKey, threadID string) bool {
 	return scopeKey == threadID || strings.HasSuffix(scopeKey, ":"+threadID)
 }

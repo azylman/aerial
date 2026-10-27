@@ -98,6 +98,24 @@ func (te *turnExecution) isBurstMessage(id string) bool {
 	return false
 }
 
+func (te *turnExecution) liveSessionIDForMessage(msgID string) (string, bool) {
+	te.activeSessionMu.Lock()
+	defer te.activeSessionMu.Unlock()
+	if !te.isBurstMessage(msgID) {
+		return "", false
+	}
+	if te.activeSessionID != "" {
+		return te.activeSessionID, true
+	}
+	if te.leaseSessionID != "" {
+		return te.leaseSessionID, true
+	}
+	if !te.isEphemeral && te.currentSessionID != "" {
+		return te.currentSessionID, true
+	}
+	return "", true
+}
+
 func convertDiscordMessageToDBMessage(dm *discordgo.Message, threadID string) db.Message {
 	authorID, authorName := "", ""
 	if dm.Author != nil {
@@ -321,6 +339,7 @@ func (te *turnExecution) resolveAndPersistSessionID(candidateID, stdout, stderr 
 	targetSess := te.probeCandidateSessionID(candidateID, stdout, stderr)
 	if targetSess != "" {
 		te.activeSessionID = targetSess
+		te.leaseSessionID = targetSess
 		if allowPersist {
 			if !te.isEphemeral && targetSess != te.previousSessionID && targetSess != te.currentSessionID {
 				log.Printf("[Queue] Synchronizing active session for thread %s: %s -> %s", te.threadID, te.currentSessionID, targetSess)

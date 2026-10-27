@@ -447,6 +447,7 @@ func TestGetActiveTasks_FiltersAndOrdering(t *testing.T) {
 		Summary:      "Summary 2",
 		ResponseText: "Response 2",
 		Status:       StatusPending,
+		Effort:       "medium",
 		IsAdmin:      false,
 		CreatedAt:    now.Add(-2 * time.Minute),
 		UpdatedAt:    now.Add(-2 * time.Minute),
@@ -468,6 +469,8 @@ func TestGetActiveTasks_FiltersAndOrdering(t *testing.T) {
 		filter        TasksFilter
 		wantCount     int
 		wantFirstID   string
+		wantSess      string
+		checkSess     bool
 		wantPrevSess  string
 		wantThreadSum string
 		wantRespText  string
@@ -477,15 +480,19 @@ func TestGetActiveTasks_FiltersAndOrdering(t *testing.T) {
 			filter:        TasksFilter{ThreadID: "th-filter", Statuses: []string{"COMPLETED"}},
 			wantCount:     1,
 			wantFirstID:   "msg-f1",
+			wantSess:      "int-sess-1",
+			checkSess:     true,
 			wantPrevSess:  "prev-sess-0",
 			wantThreadSum: "Summary of thread filter",
 			wantRespText:  "Response 1",
 		},
 		{
-			name:        "is_admin false filter",
+			name:        "is_admin false filter omits parent session for ephemeral effort",
 			filter:      TasksFilter{IsAdmin: &adminFalse},
 			wantCount:   1,
 			wantFirstID: "msg-f2",
+			wantSess:    "",
+			checkSess:   true,
 		},
 		{
 			name:        "is_admin true filter with status",
@@ -535,8 +542,11 @@ func TestGetActiveTasks_FiltersAndOrdering(t *testing.T) {
 				t.Fatalf("got count %d, want %d", len(tasks), tc.wantCount)
 			}
 			if tc.wantCount > 0 {
-				if tasks[0].ID != tc.wantFirstID {
+				if tc.wantFirstID != "" && tasks[0].ID != tc.wantFirstID {
 					t.Errorf("got first ID %q, want %q", tasks[0].ID, tc.wantFirstID)
+				}
+				if tc.checkSess && tasks[0].SessionID != tc.wantSess {
+					t.Errorf("got SessionID %q, want %q", tasks[0].SessionID, tc.wantSess)
 				}
 				if tc.wantPrevSess != "" && tasks[0].PreviousSessionID != tc.wantPrevSess {
 					t.Errorf("got PreviousSessionID %q, want %q", tasks[0].PreviousSessionID, tc.wantPrevSess)
@@ -547,6 +557,36 @@ func TestGetActiveTasks_FiltersAndOrdering(t *testing.T) {
 				if tc.wantRespText != "" && tasks[0].ResponseText != tc.wantRespText {
 					t.Errorf("got ResponseText %q, want %q", tasks[0].ResponseText, tc.wantRespText)
 				}
+			}
+		})
+	}
+}
+
+func TestIsEphemeralTaskMessage(t *testing.T) {
+	t.Parallel()
+	bTrue := true
+	bFalse := false
+	tests := []struct {
+		name      string
+		ephemeral *bool
+		effort    string
+		model     string
+		want      bool
+	}{
+		{name: "explicit ephemeral true", ephemeral: &bTrue, effort: "high", want: true},
+		{name: "explicit ephemeral false", ephemeral: &bFalse, effort: "medium", want: false},
+		{name: "nil ephemeral medium effort", effort: "medium", want: true},
+		{name: "nil ephemeral low effort", effort: "low", want: true},
+		{name: "nil ephemeral high effort", effort: "high", want: false},
+		{name: "empty effort medium model", model: "gemini-3.8-flash-medium", want: true},
+		{name: "empty effort flash model", model: "gemini-2.5-flash", want: true},
+		{name: "empty effort pro model", model: "gemini-3.7-pro", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsEphemeralTaskMessage(tc.ephemeral, tc.effort, tc.model); got != tc.want {
+				t.Fatalf("IsEphemeralTaskMessage(%v, %q, %q) = %v, want %v", tc.ephemeral, tc.effort, tc.model, got, tc.want)
 			}
 		})
 	}

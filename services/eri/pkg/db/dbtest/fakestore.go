@@ -404,7 +404,7 @@ func buildActiveTaskRecord(m *db.Message, sess *db.SessionInfo, threadSummary st
 		summary = db.CleanTaskSummary(m.Content)
 	}
 	var sessID, prevSessID string
-	if sess != nil {
+	if sess != nil && !db.IsEphemeralTaskMessage(m.Ephemeral, m.Effort, m.Model) {
 		sessID = sess.InternalSessionID
 		prevSessID = sess.PreviousSessionID
 	}

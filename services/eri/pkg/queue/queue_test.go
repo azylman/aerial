@@ -3144,3 +3144,86 @@ func TestWorkerPool_DeliverDirectWithAttachments(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkerPool_ActiveTurnSessionID(t *testing.T) {
+	t.Parallel()
+	leaseWithSess := &testSessionLease{sessionID: "lease-ephem-sess-1"}
+	emptyLease := &testSessionLease{sessionID: ""}
+
+	tests := []struct {
+		name       string
+		nilPool    bool
+		msgID      string
+		activeTurn *turnExecution
+		wantSess   string
+		wantOK     bool
+	}{
+		{name: "nil pool", nilPool: true, msgID: "msg-1", wantSess: "", wantOK: false},
+		{name: "empty msgID", msgID: "", wantSess: "", wantOK: false},
+		{name: "unmatched msgID", msgID: "msg-missing", activeTurn: &turnExecution{burst: []db.Message{{ID: "msg-other"}}, activeSessionID: "sess-1"}, wantSess: "", wantOK: false},
+		{name: "matched activeSessionID priority", msgID: "msg-1", activeTurn: &turnExecution{burst: []db.Message{{ID: "msg-1"}}, activeSessionID: "active-sess-1", leaseSessionID: "lease-ephem-sess-1", lease: leaseWithSess}, wantSess: "active-sess-1", wantOK: true},
+		{name: "matched ephemeral lease session ID", msgID: "msg-2", activeTurn: &turnExecution{burst: []db.Message{{ID: "msg-2"}}, leaseSessionID: "lease-ephem-sess-1", lease: leaseWithSess, isEphemeral: true, currentSessionID: "parent-sess-ignored"}, wantSess: "lease-ephem-sess-1", wantOK: true},
+		{name: "matched stateful currentSessionID fallback", msgID: "msg-3", activeTurn: &turnExecution{burst: []db.Message{{ID: "msg-3"}}, lease: emptyLease, isEphemeral: false, currentSessionID: "stateful-sess-1"}, wantSess: "stateful-sess-1", wantOK: true},
+		{name: "matched ephemeral pre-lease suppresses parent session", msgID: "msg-4", activeTurn: &turnExecution{burst: []db.Message{{ID: "msg-4"}}, lease: emptyLease, isEphemeral: true, currentSessionID: "parent-sess-ignored"}, wantSess: "", wantOK: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var p *WorkerPool
+			if !tc.nilPool {
+				p = New(nil, WorkerPoolConfig{})
+				if tc.activeTurn != nil {
+					p.registerActiveTurn("scope-1", tc.activeTurn)
+				}
+			}
+			gotSess, gotOK := p.ActiveTurnSessionID(tc.msgID)
+			if gotSess != tc.wantSess || gotOK != tc.wantOK {
+				t.Fatalf("ActiveTurnSessionID(%q) = (%q, %v), want (%q, %v)", tc.msgID, gotSess, gotOK, tc.wantSess, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestTurnExecution_FailureResetsActiveSessionID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		isCorruption  bool
+		wantActive    string
+		wantLeaseSess string
+	}{
+		{name: "corruption retry clears active and lease session", isCorruption: true, wantActive: "", wantLeaseSess: ""},
+		{name: "non-transient failure clears active and lease session", isCorruption: false, wantActive: "", wantLeaseSess: ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := dbtest.NewFakeStore()
+			pool := New(nil, WorkerPoolConfig{Store: store})
+			te := &turnExecution{
+				pool:              pool,
+				threadID:          "th-1",
+				burst:             []db.Message{{ID: "m-1", ThreadID: "th-1"}},
+				activeSessionID:   "stale-active-sess",
+				leaseSessionID:    "stale-lease-sess",
+				currentSessionID:  "curr-sess",
+				previousSessionID: "prev-sess",
+			}
+			if tc.isCorruption {
+				te.handleSessionCorruptionRetry(1, 2, "", "", "corrupted", "", "model-1")
+			} else {
+				te.handleNonTransientFailure(1, 1, "", "", "fatal error", "", "model-1")
+			}
+			te.activeSessionMu.Lock()
+			gotActive := te.activeSessionID
+			gotLease := te.leaseSessionID
+			te.activeSessionMu.Unlock()
+			if gotActive != tc.wantActive || gotLease != tc.wantLeaseSess {
+				t.Fatalf("after failure, activeSessionID=%q leaseSessionID=%q, want (%q, %q)", gotActive, gotLease, tc.wantActive, tc.wantLeaseSess)
+			}
+		})
+	}
+}

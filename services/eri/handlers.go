@@ -882,9 +882,18 @@ func parseTasksFilter(q url.Values) (db.TasksFilter, bool) {
 	return filter, hasFilter
 }
 
-func sanitizeActiveTasks(rawTasks []db.ActiveTask) []db.ActiveTask {
+func sanitizeActiveTasks(rawTasks []db.ActiveTask, poolOpt ...*queue.WorkerPool) []db.ActiveTask {
+	var pool *queue.WorkerPool
+	if len(poolOpt) > 0 {
+		pool = poolOpt[0]
+	}
 	tasks := make([]db.ActiveTask, 0, len(rawTasks))
 	for _, task := range rawTasks {
+		if pool != nil && task.Status == db.StatusProcessing {
+			if liveSess, ok := pool.ActiveTurnSessionID(task.ID); ok {
+				task.SessionID = liveSess
+			}
+		}
 		task.Prompt = sanitizer.SanitizeString(task.Prompt)
 		task.Summary = sanitizer.SanitizeString(task.Summary)
 		task.ResponseText = sanitizer.SanitizeString(task.ResponseText)
@@ -895,7 +904,7 @@ func sanitizeActiveTasks(rawTasks []db.ActiveTask) []db.ActiveTask {
 	return tasks
 }
 
-func handleTasks(store db.Store) http.HandlerFunc {
+func handleTasks(store db.Store, poolOpt ...*queue.WorkerPool) http.HandlerFunc {
 	cache := &tasksCache{}
 
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -934,7 +943,7 @@ func handleTasks(store db.Store) http.HandlerFunc {
 			return
 		}
 
-		tasks := sanitizeActiveTasks(rawTasks)
+		tasks := sanitizeActiveTasks(rawTasks, poolOpt...)
 
 		if !hasFilter {
 			cache.mu.Lock()
@@ -1019,7 +1028,7 @@ func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, embedder 
 	mux.HandleFunc("/api/transcripts/stats", handleTranscriptStats(store))
 	mux.HandleFunc("/transcripts/steps", handleTranscriptSteps(store))
 	mux.HandleFunc("/api/transcripts/steps", handleTranscriptSteps(store))
-	mux.HandleFunc("/tasks", handleTasks(store))
+	mux.HandleFunc("/tasks", handleTasks(store, pool))
 	var llmFn func(context.Context, string, string) (string, error)
 	if pool != nil {
 		llmFn = pool.LLMFunc()
