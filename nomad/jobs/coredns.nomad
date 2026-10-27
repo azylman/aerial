@@ -1,8 +1,8 @@
 job "coredns" {
   datacenters = ["dc1"]
-  type        = "service"
+  type        = "system"
 
-  node_pool   = "default"
+  node_pool   = "all"
 
   update {
     max_parallel      = 1
@@ -14,8 +14,6 @@ job "coredns" {
   }
 
   group "coredns" {
-    count = 1
-
     network {
       mode = "host"
       port "dns" {
@@ -41,6 +39,7 @@ job "coredns" {
       template {
         data = <<EOH
 aerial:53 {
+    bind {{ env "attr.unique.network.ip-address" }} 127.0.0.1
     hosts /local/hosts {
         reload 5s
     }
@@ -52,6 +51,7 @@ aerial:53 {
 }
 
 lan:53 {
+    bind {{ env "attr.unique.network.ip-address" }} 127.0.0.1
     hosts /local/hosts {
         reload 5s
         fallthrough
@@ -65,6 +65,7 @@ lan:53 {
 }
 
 .:53 {
+    bind {{ env "attr.unique.network.ip-address" }} 127.0.0.1
     hosts /local/hosts {
         reload 5s
         fallthrough

@@ -1,8 +1,13 @@
 job "cadvisor" {
   datacenters = ["dc1"]
-  type        = "service"
+  type        = "system"
 
-  node_pool   = "default"
+  node_pool   = "all"
+
+  constraint {
+    attribute = "${attr.driver.docker.volumes.enabled}"
+    value     = "true"
+  }
 
   update {
     max_parallel      = 1
@@ -14,8 +19,6 @@ job "cadvisor" {
   }
 
   group "cadvisor" {
-    count = 1
-
     network {
       mode = "host"
       port "metrics" {}
@@ -55,6 +58,7 @@ job "cadvisor" {
         name     = "cadvisor"
         port     = "metrics"
         provider = "nomad"
+        tags     = ["${node.unique.name}"]
 
         check {
           name     = "cadvisor-http"

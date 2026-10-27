@@ -1,8 +1,13 @@
 job "vector" {
   datacenters = ["dc1"]
-  type        = "service"
+  type        = "system"
 
-  node_pool   = "default"
+  node_pool   = "all"
+
+  constraint {
+    attribute = "${attr.driver.docker.volumes.enabled}"
+    value     = "true"
+  }
 
   update {
     max_parallel      = 1
@@ -14,8 +19,6 @@ job "vector" {
   }
 
   group "vector" {
-    count = 1
-
     network {
       port "api" {
         to = 8686
@@ -69,7 +72,7 @@ sources:
     type: docker_logs
     docker_host: "unix:///var/run/docker.sock"
     exclude_containers:
-      - "aerial-vector"
+      - "vector-"
     auto_partial_merge: true
 
 transforms:
@@ -78,6 +81,8 @@ transforms:
     inputs:
       - docker_logs
     source: |
+      .host = "{{ env "node.unique.name" }}"
+
       # 1. Sanitize input & strip ANSI escape codes before parsing
       if is_string(.message) {
         .message = strip_ansi_escape_codes(to_string!(.message))

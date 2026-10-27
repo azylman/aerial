@@ -66,6 +66,11 @@ scrape_configs:
     static_configs:
 {{- range nomadService "cadvisor" }}
       - targets: ["{{ .Address }}:{{ .Port }}"]
+{{- range $i, $t := .Tags }}{{- if eq $i 0 }}
+        labels:
+          instance: "{{ $t }}"
+          node: "{{ $t }}"
+{{- end }}{{- end }}
 {{- else }}
       - targets: ["127.0.0.1:8083"]
 {{- end }}
@@ -79,6 +84,11 @@ scrape_configs:
     static_configs:
 {{- range nomadService "node-exporter" }}
       - targets: ["{{ .Address }}:{{ .Port }}"]
+{{- range $i, $t := .Tags }}{{- if eq $i 0 }}
+        labels:
+          instance: "{{ $t }}"
+          node: "{{ $t }}"
+{{- end }}{{- end }}
 {{- else }}
       - targets: ["127.0.0.1:9100"]
 {{- end }}

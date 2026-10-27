@@ -1,8 +1,19 @@
 job "node-exporter" {
   datacenters = ["dc1"]
-  type        = "service"
+  type        = "system"
 
-  node_pool   = "default"
+  node_pool   = "all"
+
+  constraint {
+    attribute = "${attr.driver.docker.volumes.enabled}"
+    value     = "true"
+  }
+
+  constraint {
+    attribute = "${node.pool}"
+    operator  = "!="
+    value     = "cockpit"
+  }
 
   update {
     max_parallel      = 1
@@ -14,8 +25,6 @@ job "node-exporter" {
   }
 
   group "node-exporter" {
-    count = 1
-
     network {
       mode = "host"
       port "metrics" {}
@@ -52,6 +61,7 @@ job "node-exporter" {
         name     = "node-exporter"
         port     = "metrics"
         provider = "nomad"
+        tags     = ["${node.unique.name}"]
 
         check {
           name     = "node-exporter-http"
