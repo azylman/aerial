@@ -788,6 +788,12 @@ job "mirrormere-core" {
 			fallbackFileName: "jobs/kiosk-client.nomad.hcl",
 			expected:         "kiosk-client",
 		},
+		{
+			name:             "fallback strips vars hcl extension",
+			content:          `extra_mounts = []`,
+			fallbackFileName: "jobs/eri.vars.hcl",
+			expected:         "eri",
+		},
 	}
 
 	for _, tt := range tests {
@@ -984,6 +990,19 @@ R100	jobs/old.nomad	jobs/new.nomad
 	ensured := EnsureDBMigrateNomadChange([]NomadFileChange{{Path: "nomad/jobs/vanadis.nomad", Action: "apply", JobName: "vanadis"}, {Path: "nomad/jobs/db-migrate.nomad", Action: "apply", JobName: "db-migrate"}})
 	if len(ensured) != 2 || ensured[0].JobName != "db-migrate" || ensured[1].JobName != "vanadis" || len(EnsureDBMigrateNomadChange(ensured)) != 2 {
 		t.Errorf("expected db-migrate moved to index 0 and idempotent, got %+v", ensured)
+	}
+	varStatus := ParseNomadGitStatus("M\tjobs/eri.vars.hcl\nD\tjobs/vanadis.vars.hcl\nR100\tjobs/old.vars.hcl\tjobs/new.vars.hcl\n")
+	if len(varStatus) != 4 || varStatus[0].Action != "apply" || varStatus[0].JobName != "eri" || varStatus[1].Action != "apply" || varStatus[1].JobName != "vanadis" || varStatus[2].Action != "apply" || varStatus[2].JobName != "old" || varStatus[3].Action != "apply" || varStatus[3].JobName != "new" {
+		t.Errorf("expected apply actions for .vars.hcl modifications, deletes, and renames, got %+v", varStatus)
+	}
+	if !IsNomadVarFile("jobs/eri.vars.hcl") || IsNomadVarFile(".vars.hcl") || IsNomadVarFile("jobs/eri.nomad") {
+		t.Errorf("unexpected IsNomadVarFile classification")
+	}
+	if ResolveJobVarFile("", "/cfg") != "" || ResolveJobVarFile("eri", "") != "" || ResolveJobVarFile("eri", "/cfg", func(string) bool { return false }) != "" {
+		t.Errorf("expected empty ResolveJobVarFile when inputs empty or not found")
+	}
+	if got := ResolveJobVarFile("eri", "/cfg", func(p string) bool { return strings.HasSuffix(filepath.ToSlash(p), "jobs/eri.vars.hcl") }); got == "" {
+		t.Errorf("expected ResolveJobVarFile to resolve jobs/eri.vars.hcl")
 	}
 }
 

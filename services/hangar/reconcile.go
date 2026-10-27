@@ -323,7 +323,7 @@ func sleepWithContext(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-func (d *SyncDaemon) runNomadValidate(ctx context.Context, subCmd, targetPath string, requireNonNilExec bool) error {
+func (d *SyncDaemon) runNomadValidate(ctx context.Context, subCmd, targetPath string, requireNonNilExec bool, extraArgs ...string) error {
 	valCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
@@ -331,7 +331,9 @@ func (d *SyncDaemon) runNomadValidate(ctx context.Context, subCmd, targetPath st
 	if requireNonNilExec && nomadExec == nil {
 		return errors.New("nomad executor unavailable, failing safe")
 	}
-	stdout, stderr, err := nomadExec(valCtx, subCmd, "validate", targetPath)
+	args := append([]string{subCmd, "validate"}, extraArgs...)
+	args = append(args, targetPath)
+	stdout, stderr, err := nomadExec(valCtx, args...)
 	if err != nil {
 		combined := string(append(stdout, stderr...))
 		return fmt.Errorf("nomad %s validate failed for %s: %s (%w)", subCmd, targetPath, SanitizeLog(strings.TrimSpace(combined)), err)
@@ -339,9 +341,69 @@ func (d *SyncDaemon) runNomadValidate(ctx context.Context, subCmd, targetPath st
 	return nil
 }
 
+// ResolveJobVarFile locates an optional <jobName>.vars.hcl file inside configDir/jobs or configDir/nomad/jobs.
+func ResolveJobVarFile(jobName, configDir string, fileExists ...func(string) bool) string {
+	jobName = strings.TrimSpace(jobName)
+	configDir = strings.TrimSpace(configDir)
+	if jobName == "" || configDir == "" {
+		return ""
+	}
+	exists := func(p string) bool {
+		if len(fileExists) > 0 && fileExists[0] != nil {
+			return fileExists[0](p)
+		}
+		fi, err := os.Stat(p)
+		return err == nil && !fi.IsDir()
+	}
+	for _, sub := range []string{"jobs", filepath.Join("nomad", "jobs")} {
+		cand := filepath.Join(filepath.Clean(configDir), sub, jobName+".vars.hcl")
+		if exists(cand) {
+			return cand
+		}
+	}
+	return ""
+}
+
+func (d *SyncDaemon) resolveApplyJobPath(repoPath string, ch NomadFileChange) (string, bool) {
+	if IsNomadVarFile(ch.Path) {
+		foundPath, ok := FindJobDefinitionInRepos(ch.JobName, "", d.candidateJobRepos())
+		if !ok {
+			log.Printf("[Hangar:Nomad] Notice: job file for %s (%s) not found across repos, skipping", ch.JobName, ch.Path)
+			return "", false
+		}
+		return foundPath, true
+	}
+	fullPath := filepath.Join(repoPath, ch.Path)
+	if !IsSafeJobPath(repoPath, fullPath) {
+		return "", false
+	}
+	return fullPath, true
+}
+
+func (d *SyncDaemon) nomadJobRunArgs(jobName, fullPath string) []string {
+	runArgs := []string{"job", "run", "-detach"}
+	if d != nil && d.configDir != "" {
+		if vf := ResolveJobVarFile(jobName, d.configDir); vf != "" {
+			runArgs = append(runArgs, "-var-file="+vf)
+		}
+	}
+	return append(runArgs, fullPath)
+}
+
 // ValidateNomadJob validates a Nomad job specification using nomad job validate.
 func (d *SyncDaemon) ValidateNomadJob(ctx context.Context, jobPath string) error {
-	return d.runNomadValidate(ctx, "job", jobPath, false)
+	var extraArgs []string
+	if d != nil && d.configDir != "" {
+		var content []byte
+		if raw, err := os.ReadFile(jobPath); err == nil {
+			content = raw
+		}
+		jobName := ExtractJobName(string(content), jobPath)
+		if vf := ResolveJobVarFile(jobName, d.configDir); vf != "" {
+			extraArgs = append(extraArgs, "-var-file="+vf)
+		}
+	}
+	return d.runNomadValidate(ctx, "job", jobPath, false, extraArgs...)
 }
 
 // ValidateNomadConfig validates a Nomad daemon configuration path using nomad config validate.

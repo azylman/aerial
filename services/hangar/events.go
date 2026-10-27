@@ -109,8 +109,8 @@ func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath str
 			deleteChanges = append(deleteChanges, ch)
 			continue
 		}
-		fullPath := filepath.Join(repoPath, ch.Path)
-		if !IsSafeJobPath(repoPath, fullPath) {
+		fullPath, ok := d.resolveApplyJobPath(repoPath, ch)
+		if !ok {
 			continue
 		}
 		content, readErr := os.ReadFile(fullPath)
@@ -159,7 +159,7 @@ func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath str
 		}
 
 		log.Printf("[Hangar:Nomad] Applying job %s (%s)...", ch.JobName, ch.Path)
-		out, sanitizedCombined, errRun := d.runNomadJobWithEvents(ctx, baseEvt, "job", "run", "-detach", fullPath)
+		out, sanitizedCombined, errRun := d.runNomadJobWithEvents(ctx, baseEvt, d.nomadJobRunArgs(ch.JobName, fullPath)...)
 		if errRun != nil {
 			log.Printf("[Hangar:Nomad] nomad job run failed for %s: %s (%v)", ch.JobName, sanitizedCombined, errRun)
 			if failOnJobErr {
@@ -473,8 +473,11 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 	}, http.StatusOK
 }
 
-func buildImageReadyNomadRunArgs(jobSpec, jobPath, commitSHA, digest string) ([]string, bool) {
+func buildImageReadyNomadRunArgs(jobSpec, jobPath, commitSHA, digest string, varFile ...string) ([]string, bool) {
 	runArgs := []string{"job", "run", "-detach"}
+	if len(varFile) > 0 && strings.TrimSpace(varFile[0]) != "" {
+		runArgs = append(runArgs, "-var-file="+strings.TrimSpace(varFile[0]))
+	}
 	varInjected := false
 	if HasNomadJobVariable(jobSpec, "image_tag") {
 		tag := commitSHA
@@ -520,7 +523,11 @@ func (d *SyncDaemon) applyImageReadyToJob(ctx context.Context, job MatchedNomadJ
 		Digest:    digest,
 	}
 
-	runArgs, varInjected := buildImageReadyNomadRunArgs(jobSpec, job.JobPath, req.CommitSHA, digest)
+	var vf string
+	if d != nil && d.configDir != "" {
+		vf = ResolveJobVarFile(job.JobName, d.configDir)
+	}
+	runArgs, varInjected := buildImageReadyNomadRunArgs(jobSpec, job.JobPath, req.CommitSHA, digest, vf)
 
 	log.Printf("[Hangar:ImageReady] Applying Nomad job %s from %s (args: %v)...", job.JobName, job.JobPath, runArgs)
 	if _, sanitizedCombined, errRun := d.runNomadJobWithEvents(ctx, baseEvt, runArgs...); errRun != nil {

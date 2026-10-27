@@ -71,34 +71,13 @@ func CalculateSyncStatus(repos map[string]RepoStatus) string {
 }
 
 var allowedExactKeys = map[string]struct{}{
-	"path":            {},
-	"home":            {},
-	"user":            {},
-	"tmpdir":          {},
-	"temp":            {},
-	"tmp":             {},
-	"hostname":        {},
-	"lang":            {},
-	"lc_all":          {},
-	"lc_ctype":        {},
-	"xdg_runtime_dir": {},
-	"ci":              {},
-	"http_proxy":      {},
-	"https_proxy":     {},
-	"no_proxy":        {},
-	"all_proxy":       {},
-	"ssl_cert_file":   {},
-	"ssl_cert_dir":    {},
-	"systemroot":      {},
-	"systemdrive":     {},
-	"comspec":         {},
-	"pathext":         {},
+	"path": {}, "home": {}, "user": {}, "tmpdir": {}, "temp": {}, "tmp": {},
+	"hostname": {}, "lang": {}, "lc_all": {}, "lc_ctype": {}, "xdg_runtime_dir": {}, "ci": {},
+	"http_proxy": {}, "https_proxy": {}, "no_proxy": {}, "all_proxy": {}, "ssl_cert_file": {}, "ssl_cert_dir": {},
+	"systemroot": {}, "systemdrive": {}, "comspec": {}, "pathext": {},
 }
 
-var allowedPrefixes = []string{
-	"docker_",
-	"compose_",
-}
+var allowedPrefixes = []string{"docker_", "compose_"}
 
 func isAllowedEnvKey(key string) bool {
 	lower := strings.ToLower(strings.TrimSpace(key))
@@ -522,8 +501,15 @@ func IsNomadJobFile(p string) bool {
 	return strings.HasSuffix(lower, ".nomad") || strings.HasSuffix(lower, ".nomad.hcl")
 }
 
+// IsNomadVarFile returns true if the given path or filename corresponds to a Nomad job variable file (*.vars.hcl).
+func IsNomadVarFile(p string) bool {
+	cleanPath := strings.ReplaceAll(strings.TrimSpace(p), "\\", "/")
+	lower := strings.ToLower(path.Base(cleanPath))
+	return strings.HasSuffix(lower, ".vars.hcl") && len(lower) > len(".vars.hcl")
+}
+
 // ExtractJobName extracts the Nomad job name from job specification content (e.g. job "name" { ... }).
-// If parsing fails, it falls back to the file basename stripped of .nomad extensions.
+// If parsing fails, it falls back to the file basename stripped of .nomad or .vars.hcl extensions.
 func ExtractJobName(content string, fallbackFileName string) string {
 	scanner := bufio.NewScanner(strings.NewReader(content))
 	buf := make([]byte, 1024*1024)
@@ -544,6 +530,7 @@ func ExtractJobName(content string, fallbackFileName string) string {
 		}
 	}
 	base := path.Base(strings.ReplaceAll(strings.TrimSpace(fallbackFileName), "\\", "/"))
+	base = strings.TrimSuffix(base, ".vars.hcl")
 	base = strings.TrimSuffix(base, ".nomad.hcl")
 	base = strings.TrimSuffix(base, ".nomad")
 	return base
@@ -757,8 +744,14 @@ func ParseNomadGitStatus(gitStatusOutput string) []NomadFileChange {
 					Action:  "delete",
 					JobName: ExtractJobName("", oldPath),
 				})
+			} else if IsNomadVarFile(oldPath) {
+				changes = append(changes, NomadFileChange{
+					Path:    oldPath,
+					Action:  "apply",
+					JobName: ExtractJobName("", oldPath),
+				})
 			}
-			if IsNomadJobFile(newPath) {
+			if IsNomadJobFile(newPath) || IsNomadVarFile(newPath) {
 				changes = append(changes, NomadFileChange{
 					Path:    newPath,
 					Action:  "apply",
@@ -773,6 +766,14 @@ func ParseNomadGitStatus(gitStatusOutput string) []NomadFileChange {
 		filePath := parts[len(parts)-1]
 		if !strings.HasPrefix(status, "D") && IsMigrationFile(filePath) {
 			hasMigrations = true
+		}
+		if IsNomadVarFile(filePath) {
+			changes = append(changes, NomadFileChange{
+				Path:    filePath,
+				Action:  "apply",
+				JobName: ExtractJobName("", filePath),
+			})
+			continue
 		}
 		if !IsNomadJobFile(filePath) {
 			continue
