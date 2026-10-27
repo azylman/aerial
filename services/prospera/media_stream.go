@@ -29,6 +29,7 @@ type CallSessionManager struct {
 	geminiDialer   func(ctx context.Context, model string) (*websocket.Conn, error)
 	sessions       map[string]*MediaStreamSession
 	sessionWaiters map[string]chan *MediaStreamSession
+	recordings     map[string][]byte
 	upgrader       websocket.Upgrader
 }
 
@@ -54,6 +55,7 @@ func NewCallSessionManager(
 		pacerInterval:  20 * time.Millisecond,
 		sessions:       make(map[string]*MediaStreamSession),
 		sessionWaiters: make(map[string]chan *MediaStreamSession),
+		recordings:     make(map[string][]byte),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true
@@ -103,7 +105,34 @@ func (m *CallSessionManager) registerSession(callID string, sess *MediaStreamSes
 func (m *CallSessionManager) deregisterSession(callID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if sess, ok := m.sessions[callID]; ok && sess != nil {
+		if wav := sess.RecordingWAV(); len(wav) > 0 {
+			if len(m.recordings) >= 32 {
+				for k := range m.recordings {
+					delete(m.recordings, k)
+					break
+				}
+			}
+			m.recordings[callID] = wav
+		}
+	}
 	delete(m.sessions, callID)
+}
+
+// GetRecordingWAV returns and consumes the recorded WAV payload for callID, or snapshots an active session.
+func (m *CallSessionManager) GetRecordingWAV(callID string) []byte {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if sess, ok := m.sessions[callID]; ok && sess != nil {
+		if wav := sess.RecordingWAV(); len(wav) > 0 {
+			return wav
+		}
+	}
+	if wav, ok := m.recordings[callID]; ok {
+		delete(m.recordings, callID)
+		return wav
+	}
+	return nil
 }
 
 // SteerCall injects an instruction turn into an active call session.
@@ -283,6 +312,9 @@ type MediaStreamSession struct {
 	userTurns           int
 	inputTranscriptBuf  strings.Builder
 	outputTranscriptBuf strings.Builder
+	recordedPCM         []int16
+	inCursor            int
+	outCursor           int
 }
 
 // NewMediaStreamSession creates a new MediaStreamSession.
@@ -525,6 +557,7 @@ func (s *MediaStreamSession) handleInboundTwilioMedia(base64Payload string) {
 	}
 
 	pcm8k := MuLawToPCM16(ulawBytes)
+	s.recordInboundPCM(pcm8k)
 	rms := ComputeRMS(pcm8k) / 32768.0
 
 	action := s.amd.OnInboundFrame(rms, 20)
@@ -540,6 +573,51 @@ func (s *MediaStreamSession) handleInboundTwilioMedia(base64Payload string) {
 	if sendErr := s.sendGeminiJSON(audioChunkMsg); sendErr != nil {
 		log.Printf("prospera: send audio chunk err: %v", sendErr)
 	}
+}
+
+const maxRecordingSamples = 8000 * 300
+
+func (s *MediaStreamSession) recordInboundPCM(pcm8k []int16) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, sample := range pcm8k {
+		if s.inCursor >= maxRecordingSamples {
+			break
+		}
+		if s.inCursor < len(s.recordedPCM) {
+			s.recordedPCM[s.inCursor] = clampInt16(int32(s.recordedPCM[s.inCursor]) + int32(sample))
+		} else {
+			s.recordedPCM = append(s.recordedPCM, sample)
+		}
+		s.inCursor++
+	}
+}
+
+func (s *MediaStreamSession) recordOutboundUlaw(ulaw []byte) {
+	pcm8k := MuLawToPCM16(ulaw)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.outCursor < s.inCursor {
+		s.outCursor = s.inCursor
+	}
+	for _, sample := range pcm8k {
+		if s.outCursor >= maxRecordingSamples {
+			break
+		}
+		if s.outCursor < len(s.recordedPCM) {
+			s.recordedPCM[s.outCursor] = clampInt16(int32(s.recordedPCM[s.outCursor]) + int32(sample))
+		} else {
+			s.recordedPCM = append(s.recordedPCM, sample)
+		}
+		s.outCursor++
+	}
+}
+
+// RecordingWAV encodes the session's recorded 8 kHz mono audio buffer into a WAV byte slice.
+func (s *MediaStreamSession) RecordingWAV() []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return EncodePCM16WAV(s.recordedPCM, 8000)
 }
 
 func (s *MediaStreamSession) handleAMDAction(action AMDAction) {
@@ -954,6 +1032,7 @@ func (s *MediaStreamSession) sendTwilioMedia(frame []byte) {
 	if streamSID == "" {
 		return
 	}
+	s.recordOutboundUlaw(frame)
 
 	payload := base64.StdEncoding.EncodeToString(frame)
 	msg := map[string]any{
@@ -969,6 +1048,10 @@ func (s *MediaStreamSession) sendTwilioMedia(frame []byte) {
 func (s *MediaStreamSession) sendTwilioClear() {
 	s.mu.Lock()
 	streamSID := s.streamSID
+	if s.outCursor > s.inCursor && s.inCursor <= len(s.recordedPCM) {
+		s.recordedPCM = s.recordedPCM[:s.inCursor]
+		s.outCursor = s.inCursor
+	}
 	s.mu.Unlock()
 	if streamSID == "" {
 		return

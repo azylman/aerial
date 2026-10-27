@@ -45,15 +45,23 @@ func BuildPostCallSummaryPrompt(call *VoiceCall) string {
 
 // Reporter coordinates live transcript batching, post-call reports, voicemail transcription, and SMS delivery.
 type Reporter struct {
-	cfg           *Config
-	store         Store
-	twilio        TwilioClient
-	httpClient    *http.Client
-	geminiBaseURL string
+	cfg               *Config
+	store             Store
+	twilio            TwilioClient
+	httpClient        *http.Client
+	geminiBaseURL     string
+	recordingProvider func(callID string) []byte
 }
 
 // ReporterOption configures Reporter.
 type ReporterOption func(*Reporter)
+
+// WithReporterRecordingProvider configures an optional callback to fetch an in-memory WAV recording for a call.
+func WithReporterRecordingProvider(fn func(callID string) []byte) ReporterOption {
+	return func(r *Reporter) {
+		r.recordingProvider = fn
+	}
+}
 
 // NewReporter creates a new Reporter.
 func NewReporter(cfg *Config, store Store, twilio TwilioClient, opts ...ReporterOption) *Reporter {
@@ -231,7 +239,20 @@ func (r *Reporter) DeliverCallReport(ctx context.Context, callID string) error {
 	msgContent := fmt.Sprintf("📋 **Call Summary (%s)**\n**Direction**: %s | **With**: %s\n**State**: %s | **End Reason**: %s\n\n%s",
 		call.CallID, call.Direction, withNumber, call.State, call.EndReason, summary)
 
-	if postErr := r.postDiscordMessage(ctx, channel, call.DiscordThreadID, msgContent, nil); postErr != nil {
+	var attachments []discordAttachmentPayload
+	if r.recordingProvider != nil {
+		if wavBytes := r.recordingProvider(callID); len(wavBytes) > 0 {
+			attachments = []discordAttachmentPayload{
+				{
+					Filename:      call.CallID + ".wav",
+					ContentType:   "audio/wav",
+					ContentBase64: base64.StdEncoding.EncodeToString(wavBytes),
+				},
+			}
+		}
+	}
+
+	if postErr := r.postDiscordMessage(ctx, channel, call.DiscordThreadID, msgContent, attachments); postErr != nil {
 		if _, transErr := r.store.TransitionReportStatus(ctx, callID, []string{"processing"}, "failed", "discord post failed: "+postErr.Error()); transErr != nil {
 			log.Printf("reporter: transition report status to failed: %v", transErr)
 		}

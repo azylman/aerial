@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1386,5 +1387,58 @@ func TestMediaStreamSession_DisconnectedAMDActions(t *testing.T) {
 	}
 	if ok := sessWithDialFail.reconnectGemini(context.Background()); ok {
 		t.Fatal("expected reconnect failure")
+	}
+}
+
+func TestMediaStreamSession_RecordingWAVAndManager(t *testing.T) {
+	t.Parallel()
+
+	mgr := NewCallSessionManager(&Config{}, nil, nil, nil, nil)
+	if wav := mgr.GetRecordingWAV("missing"); wav != nil {
+		t.Fatalf("expected nil wav for missing call, got %d bytes", len(wav))
+	}
+
+	sess := NewMediaStreamSession(MediaStreamSessionConfig{CallID: "call-rec-1"})
+	sess.mu.Lock()
+	sess.streamSID = "MZ_rec_1"
+	sess.mu.Unlock()
+
+	sess.recordInboundPCM([]int16{1000, 2000})
+	sess.sendTwilioMedia(PCM16ToMuLaw([]int16{500, 500, 500, 500}))
+	sess.recordInboundPCM([]int16{300, 400})
+	sess.sendTwilioClear()
+
+	mgr.registerSession("call-rec-1", sess)
+	if activeWAV := mgr.GetRecordingWAV("call-rec-1"); len(activeWAV) <= 44 {
+		t.Fatalf("expected active session WAV > 44 bytes, got %d", len(activeWAV))
+	}
+
+	for i := 0; i < 33; i++ {
+		id := "call-cap-" + strconv.Itoa(i)
+		s := NewMediaStreamSession(MediaStreamSessionConfig{CallID: id})
+		s.recordInboundPCM([]int16{100})
+		mgr.registerSession(id, s)
+		mgr.deregisterSession(id)
+	}
+
+	mgr.deregisterSession("call-rec-1")
+	deregWAV := mgr.GetRecordingWAV("call-rec-1")
+	if len(deregWAV) <= 44 {
+		t.Fatalf("expected deregistered session WAV > 44 bytes, got %d", len(deregWAV))
+	}
+	if secondRead := mgr.GetRecordingWAV("call-rec-1"); secondRead != nil {
+		t.Fatalf("expected consumed recording to return nil on second read, got %d bytes", len(secondRead))
+	}
+
+	capSess := NewMediaStreamSession(MediaStreamSessionConfig{CallID: "call-max-cap"})
+	capSess.mu.Lock()
+	capSess.inCursor = maxRecordingSamples - 1
+	capSess.outCursor = maxRecordingSamples - 1
+	capSess.recordedPCM = make([]int16, maxRecordingSamples-1)
+	capSess.mu.Unlock()
+	capSess.recordInboundPCM([]int16{10, 20, 30})
+	capSess.recordOutboundUlaw(PCM16ToMuLaw([]int16{40, 50}))
+	if len(capSess.recordedPCM) != maxRecordingSamples {
+		t.Fatalf("len(recordedPCM) = %d, want %d", len(capSess.recordedPCM), maxRecordingSamples)
 	}
 }

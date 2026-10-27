@@ -141,3 +141,42 @@ func ComputeRMS(samples []int16) float64 {
 	}
 	return math.Sqrt(sum / float64(len(samples)))
 }
+
+// EncodePCM16WAV encodes mono 16-bit signed linear PCM samples into a standard RIFF/WAVE payload.
+func EncodePCM16WAV(samples []int16, sampleRate int) []byte {
+	if len(samples) == 0 {
+		return nil
+	}
+	if sampleRate <= 0 {
+		sampleRate = 8000
+	}
+	dataSize := len(samples) * 2
+	out := make([]byte, 44+dataSize)
+	copy(out[0:4], "RIFF")
+	binary.LittleEndian.PutUint32(out[4:8], uint32(36+dataSize))
+	copy(out[8:12], "WAVE")
+	copy(out[12:16], "fmt ")
+	binary.LittleEndian.PutUint32(out[16:20], 16)
+	binary.LittleEndian.PutUint16(out[20:22], 1)
+	binary.LittleEndian.PutUint16(out[22:24], 1)
+	binary.LittleEndian.PutUint32(out[24:28], uint32(sampleRate))
+	binary.LittleEndian.PutUint32(out[28:32], uint32(sampleRate*2))
+	binary.LittleEndian.PutUint16(out[32:34], 2)
+	binary.LittleEndian.PutUint16(out[34:36], 16)
+	copy(out[36:40], "data")
+	binary.LittleEndian.PutUint32(out[40:44], uint32(dataSize))
+	for i, s := range samples {
+		binary.LittleEndian.PutUint16(out[44+2*i:], uint16(s))
+	}
+	return out
+}
+
+func clampInt16(v int32) int16 {
+	if v > 32767 {
+		return 32767
+	}
+	if v < -32768 {
+		return -32768
+	}
+	return int16(v)
+}
