@@ -39,7 +39,6 @@ job "dashboard" {
           disable = true
         }
         volumes = [
-          "/var/run/docker.sock:/var/run/docker.sock:ro",
           "/mnt/data/supervisor/share/coverage/dashboard:/coverage:rw"
         ]
       }

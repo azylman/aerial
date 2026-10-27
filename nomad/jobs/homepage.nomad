@@ -34,9 +34,6 @@ job "homepage" {
           disable = true
         }
         entrypoint   = ["/bin/sh", "/local/core-homepage/entrypoint.sh"]
-        volumes = [
-          "/var/run/docker.sock:/var/run/docker.sock:ro"
-        ]
       }
 
       artifact {
