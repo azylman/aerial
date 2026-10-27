@@ -28,9 +28,6 @@ const (
 	DefaultMaxMicroReads = 3
 	// DefaultMaxSequentialReads is the default number of allowed consecutive single-file read turns before requiring parallel batching.
 	DefaultMaxSequentialReads = 3
-	// DefaultStepBudgetNudge and StepBudgetNudgeMessage configure the PreInvocation turn step-budget warning.
-	DefaultStepBudgetNudge = 25
-	StepBudgetNudgeMessage = "Step budget warning: you have reached 25 invocations in this turn (approaching the 30-step ceiling). Wrap up current work and deliver your response, or delegate remaining exploration and test cycles to an isolated subagent via invoke_subagent."
 )
 
 var (
@@ -78,10 +75,6 @@ func maxMicroReads() int {
 
 func maxSequentialReads() int {
 	return envPositiveInt(DefaultMaxSequentialReads, "AERIAL_BATCH_MAX_SEQUENTIAL_READS", "AERIAL_BATCH_MAX_SINGLE_READ_STEPS")
-}
-
-func stepBudgetNudge() int {
-	return envPositiveInt(DefaultStepBudgetNudge, "AERIAL_BATCH_STEP_BUDGET_NUDGE")
 }
 
 // GetBatchDir returns the active directory for batch guard state persistence.
@@ -941,12 +934,12 @@ func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time
 	return decision
 }
 
-// RecordPreInvocation records the current turn invocationNum and optionally returns a step-budget nudge.
+// RecordPreInvocation records the current turn invocationNum.
 func RecordPreInvocation(payload Payload) *InvocationResponse {
 	return RecordPreInvocationWithDir(payload, GetBatchDir(), time.Now())
 }
 
-// RecordPreInvocationWithDir records the active invocationNum in state and returns an ephemeral nudge at the step budget threshold.
+// RecordPreInvocationWithDir records the active invocationNum in state.
 func RecordPreInvocationWithDir(payload Payload, dir string, now time.Time) *InvocationResponse {
 	if payload.InvocationNum > 0 {
 		safeID := sanitizeID(payload.ConversationID)
@@ -955,9 +948,6 @@ func RecordPreInvocationWithDir(payload Payload, dir string, now time.Time) *Inv
 			state.InvocationNum = payload.InvocationNum
 			return saveState(dir, safeID, state)
 		})
-	}
-	if payload.InvocationNum > 0 && payload.InvocationNum == stepBudgetNudge() {
-		return &InvocationResponse{InjectSteps: []EphemeralStep{{EphemeralMessage: StepBudgetNudgeMessage}}}
 	}
 	return &InvocationResponse{}
 }

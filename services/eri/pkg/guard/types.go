@@ -29,15 +29,8 @@ type Decision struct {
 	Overwrite map[string]any `json:"overwrite,omitempty"`
 }
 
-// EphemeralStep represents a transient step injected via PreInvocation/PostInvocation.
-type EphemeralStep struct {
-	EphemeralMessage string `json:"ephemeralMessage,omitempty"`
-}
-
 // InvocationResponse is the JSON payload returned for PreInvocation and PostToolUse hooks.
-type InvocationResponse struct {
-	InjectSteps []EphemeralStep `json:"injectSteps,omitempty"`
-}
+type InvocationResponse struct{}
 
 // Payload is the root JSON structure received from Antigravity via stdin.
 type Payload struct {
