@@ -598,6 +598,10 @@ func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGi
 			if err := s.advanceVanadisChunk(ctx, res.Repo, res.PRNumber); err != nil {
 				return err
 			}
+			if !hasExpected && !s.isVanadisPR(ctx, res.Repo, res.PRNumber) {
+				s.setPRWidgetState(ctx, res.Repo, res.PRNumber, "deployed", "")
+				return s.dispatchDeploymentSuccessPrompt(ctx, res.TargetID, "git-merge", res.Repo, res.MergeSHA, res.PRNumber, "")
+			}
 		}
 	} else {
 		targetID, err := s.registry.UpdatePRClosedUnmerged(ctx, res.Repo, res.PRNumber)
