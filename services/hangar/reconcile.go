@@ -419,6 +419,10 @@ func (d *SyncDaemon) stopDeletedNomadJob(ctx context.Context, logPrefix, repoPat
 	}
 }
 
+func isNomadJobTypeChangeError(output string) bool {
+	return strings.Contains(strings.ToLower(output), "cannot update job from type")
+}
+
 func (d *SyncDaemon) runNomadJobWithEvents(ctx context.Context, baseEvt HangarDeployEvent, runArgs ...string) (out []byte, sanitizedCombined string, err error) {
 	baseEvt.Event = "deploy_started"
 	baseEvt.Status = "started"
@@ -429,6 +433,19 @@ func (d *SyncDaemon) runNomadJobWithEvents(ctx context.Context, baseEvt HangarDe
 	out, errBytes, err = d.getNomadExecutor()(ctx, runArgs...)
 	if err != nil {
 		sanitizedCombined = SanitizeLog(strings.TrimSpace(string(append(out, errBytes...))))
+		if baseEvt.JobName != "" && isNomadJobTypeChangeError(sanitizedCombined) {
+			log.Printf("[Hangar:Nomad] Job %s changed scheduler type (%s); stopping with -purge before re-applying...", baseEvt.JobName, sanitizedCombined)
+			if stopOut, stopErrBytes, stopErr := d.getNomadExecutor()(ctx, "job", "stop", "-purge", baseEvt.JobName); stopErr != nil {
+				log.Printf("[Hangar:Nomad] Warning: failed to purge job %s during type transition: %s (%v)", baseEvt.JobName, SanitizeLog(strings.TrimSpace(string(append(stopOut, stopErrBytes...)))), stopErr)
+			} else {
+				out, errBytes, err = d.getNomadExecutor()(ctx, runArgs...)
+				if err != nil {
+					sanitizedCombined = SanitizeLog(strings.TrimSpace(string(append(out, errBytes...))))
+				}
+			}
+		}
+	}
+	if err != nil {
 		failEvt := baseEvt
 		failEvt.Event = "deploy_failed"
 		failEvt.Status = "failed"
