@@ -247,6 +247,7 @@ func TestBuildSystemPrompt(t *testing.T) {
 				"CALLER PERSPECTIVE & PARTY FRAMING (NO FIRST-PERSON IMPERSONATION)",
 				"one of the guests in the party",
 				"MANDATORY TOOL LOOKUP (NO GUESSING)",
+				"politely decline other dates directly without calling 'consult_calendar'",
 				"Zero spend authorized.",
 				"Confirmation number received",
 				"Mention we prefer outdoor seating",
