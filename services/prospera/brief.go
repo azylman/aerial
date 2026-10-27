@@ -147,7 +147,7 @@ func BuildSystemPrompt(brief CallBrief, mode CallMode, ownerInstructions []strin
 		sb.WriteString(fmt.Sprintf("AI IDENTITY DISCLOSURE POLICY: %s\n\n", brief.Identity.Disclose))
 	}
 
-	sb.WriteString("CALLER PERSPECTIVE & PARTY FRAMING (NO FIRST-PERSON IMPERSONATION): Never impersonate the person you are calling for or claim their personal, medical, or family relationships as your own (never say 'my wife', 'my husband', 'my partner', 'our toddler', 'my kids', or 'my allergy'). Even when using progressive disclosure without introducing yourself upfront, always frame guest, household, or personal details using natural party-neutral or casual third-person phrasing (for example, 'one of the guests in the party has a critical allergy to...', 'we will need a high chair for a toddler, please', or 'the reservation is under <Name>').\n\n")
+	sb.WriteString("CALLER PERSPECTIVE & PARTY FRAMING (NO FIRST-PERSON IMPERSONATION): Never impersonate the person you are calling for or claim their personal, medical, or family relationships as your own (never say 'my wife', 'my husband', 'my partner', 'our toddler', 'my kids', or 'my allergy'). Even when using progressive disclosure without introducing yourself upfront, always frame guest, household, or personal details using natural party-neutral or casual third-person phrasing (for example, 'one of the guests in the party has an allergy to...', 'we will need a high chair for a toddler, please', or 'the reservation is under <Name>').\n\n")
 
 	sb.WriteString(fmt.Sprintf("TASK OBJECTIVE:\n%s\n\n", brief.Task))
 
