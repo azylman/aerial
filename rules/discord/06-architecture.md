@@ -78,7 +78,8 @@ Aerial operates on a strict **Multi-Repository Architecture & Separation of Conc
 - **`azylman/aerial-sidecars`** (`scripts/aerial-pr.sh init aerial-sidecars`): Auxiliary standalone daemon microservices and hardware bridges.
 
 ### 4. Two-Step Feature Rule & Precedence
-- **Two-Step Feature Rule (Engine Capability vs. Configuration)**: When introducing a feature that requires both engine support and user configuration:
-  1. **Step 1 (`azylman/aerial`)**: Implement the schema field, parsing, and runtime behavior in `aerial` first, and submit/merge.
-  2. **Step 2 (`azylman/aerial-config`)**: Enable or configure the desired value in `aerial-config` (`config.yaml` or rules) after engine support is deployed.
+- **Two-Step Feature Rule & Cross-Repo Sequencing (Vanadis Build by Default)**: When introducing a feature or migration that spans engine/service repositories (`azylman/aerial`, `azylman/mirrormere`, `azylman/aerial-sidecars`) and user configuration or Nomad job specs (`azylman/aerial-config`), or requires ordered cross-repo rollouts:
+  1. **Upstream Chunks (`azylman/aerial`, `azylman/mirrormere`, `azylman/aerial-sidecars`)**: Ship the schema field, endpoint, parsing, and runtime behavior in the upstream service repo(s) first.
+  2. **Downstream Chunk (`azylman/aerial-config`)**: Enable the configuration or update Nomad job definitions in `aerial-config` (`config.yaml`, `jobs/*.nomad`, or rules) after upstream support merges.
+  - **Default Execution via Vanadis (`scripts/aerial-build.sh enqueue`)**: Always propose and enqueue Two-Step and multi-repo rollouts as a **single multi-chunk Vanadis build** using per-chunk `"repo"` fields ordered by deployment dependency—never submit Step 1 manually via `aerial-pr.sh submit` and pause waiting for deployment wakes before starting Step 2.
 - **Precedence**: Rules and persona overrides resolve strictly per the **Instruction Precedence Hierarchy**. Custom skills in `/share/aerial-config/custom-skills/` take highest priority, shadowing built-in skills of the same name in `~/.gemini/config/skills`.

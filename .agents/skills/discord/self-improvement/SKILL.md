@@ -25,10 +25,11 @@ Scale review rigor and subagent orchestration dynamically by blast radius:
   - **Review Overhead**: None (plan and diff review subagents bypassed).
   - **Execution**: Continuous autonomous execution. Run single-file edits inline; delegate multi-file triage or iterative test fixes to a scoped subagent to keep the root transcript featherweight. Verify via targeted package unit tests and `./scripts/verify.sh --staged`.
 
-- **Tier 2 (50–200 LOC, standard features & multi-package refactors)**:
+- **Tier 2 (50–200 LOC, multi-PR/cross-repo rollouts, standard features & multi-package refactors)**:
   - **Plan Review**: The Girl Gang review panel audits the plan in a single isolated subagent across 4 disciplines (~45s).
-  - **Execution**: Continuous autonomous execution (incorporate plan feedback directly; zero mid-task human stops). Dispatch scoped implementation subagents per ~15-minute task.
-  - **Diff Review**: Consolidated Devil's Advocate audits the unified `git diff` via an isolated subagent before opening the PR (~30s).
+  - **Execution**:
+    - **Multi-PR / Cross-Repo Plans (≥ 2 PRs)**: Enqueue as a single multi-chunk Vanadis build via `scripts/aerial-build.sh enqueue <plan.json>` (see [`references/vanadis-build-authoring.md`](references/vanadis-build-authoring.md)).
+    - **Single-PR Plans (1 PR in 1 repo)**: Continuous autonomous execution inline or via scoped implementation subagents, followed by Consolidated Devil's Advocate diff review (~30s) before `scripts/aerial-pr.sh submit`.
 
 - **Tier 3 (> 200 LOC, core architecture, core queue/runner logic, database migrations, breaking changes)**:
   - **Triggers**:
@@ -38,9 +39,8 @@ Scale review rigor and subagent orchestration dynamically by blast radius:
     - Database schema migrations (`schema.sql`, SQL migrations) or service topology changes (`nomad/jobs/*.nomad`, Dockerfiles).
     - Cross-cutting architectural overhauls or breaking API changes.
   - **Plan Review**: The Girl Gang audits the plan in an isolated subagent across 4 disciplines (~45s).
-  - **Human Checkpoint**: **MANDATORY HUMAN REVIEW CHECKPOINT (STOP)**—synthesize panel findings and wait for explicit user approval before touching code.
-  - **Execution**: Continuous implementation once approved (or via Vanadis build queue).
-  - **Diff Review**: Full 4-discipline Girl Gang diff audit via isolated subagent before merge (~45s).
+  - **Human Checkpoint**: **MANDATORY HUMAN REVIEW CHECKPOINT (STOP)**—synthesize panel findings and wait for explicit user approval before touching code or enqueueing a Vanadis build.
+  - **Execution**: Once approved, enqueue multi-PR/multi-chunk plans via `scripts/aerial-build.sh enqueue <plan.json>` (default), or execute single-PR changes with a full 4-discipline Girl Gang diff audit before `scripts/aerial-pr.sh submit`.
 
 ### Review Panel Composition & Subagent Execution Invariants
 - **The Girl Gang (4 Disciplines)**: 3 domain specialists dynamically tailored to the change (e.g., Systems/Concurrency, Architecture, Security, Data Integrity, or PWA/Frontend when user-facing UI is touched) + 1 mandatory Adversarial Devil's Advocate.
@@ -50,17 +50,19 @@ Scale review rigor and subagent orchestration dynamically by blast radius:
 
 ## 2. Execution Stages & Dynamic Scope Re-Tiering
 
-### Stage 1: Specification & ~15-Minute Task Sizing
-1. Initialize the scratch workspace via `/share/aerial/scripts/aerial-pr.sh init [repo]`.
-2. For Tier 2/3 work, decompose the plan into discrete, self-contained tasks sized to **~15 minutes** (1 failing test + minimal implementation + local verification + atomic commit). This keeps subagent contexts small (<20 steps) and creates clean turn boundaries for `UnifiedProcessPool` session rotation when `InflightCount() == 0`.
+### Stage 1: Specification & Execution Routing (Vanadis Build vs. Single-PR)
+1. **Multi-PR / Cross-Repo / Sequential Plans (≥ 2 PRs — Default to Vanadis)**:
+   - Whenever a rollout requires ≥ 2 PRs (across `aerial`, `aerial-config`, `mirrormere`, or `aerial-sidecars`, including Two-Step Feature Rule changes, or multiple sequential chunks in one repo), load [`references/vanadis-build-authoring.md`](references/vanadis-build-authoring.md), batch-read the target files once up front, and design a single multi-chunk Vanadis build plan (`plan.json` with per-chunk `"repo"` fields). Never propose or execute manual turn-by-turn *"Step 1 PR now, then wait for deploy to run Step 2"* loops.
+2. **Single-PR Plans (1 PR in 1 repo)**:
+   - Initialize the scratch workspace via `/share/aerial/scripts/aerial-pr.sh init [repo]` and decompose Tier 2/3 work into discrete, self-contained tasks sized to **~15 minutes** (1 failing test + minimal implementation + local verification + atomic commit).
 
 ### Stage 2–3: Plan Audit & Tier 3 Checkpoint
 - Run the Tier 2/3 Girl Gang plan review subagent and fold valid objections into the plan.
-- For **Tier 3**, **STOP** and present the plan and review synthesis to the user for explicit approval before writing code. (Tiers 0–2 proceed immediately to Stage 4.)
+- For **Tier 3**, **STOP** and present the plan and review synthesis to the user for explicit approval before writing code or enqueueing the Vanadis build. (Tiers 0–2 proceed immediately to Stage 4.)
 
-### Stage 4: Autonomous Continuous Implementation (TDD)
-- Follow strict TDD (write failing test -> confirm RED -> write minimal code -> verify GREEN with `go test -race` -> refactor).
-- For Tier 2+ multi-task plans (when not enqueueing a Vanadis build via [`references/vanadis-build-authoring.md`](references/vanadis-build-authoring.md)), act as orchestrator and dispatch a dedicated, scoped subagent per ~15-minute task.
+### Stage 4: Enqueue Vanadis Build (≥ 2 PRs) or Autonomous Implementation (Single PR)
+- **If ≥ 2 PRs / Multi-Chunk**: Enqueue the build directly via `/share/aerial/scripts/aerial-build.sh enqueue <plan.json>` and terminate the turn immediately (`"turn_action": "end_turn"`).
+- **If Single PR**: Follow strict TDD (write failing test -> confirm RED -> write minimal code -> verify GREEN with `go test -race` -> refactor), dispatching scoped subagents per ~15-minute task if needed.
 
 ### Stage 5: Dynamic Scope Reconciliation & Post-Implementation Re-Tiering Gate
 *MANDATORY: Never submit a PR based solely on upfront tier estimates.*

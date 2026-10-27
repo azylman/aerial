@@ -1,8 +1,9 @@
 # Vanadis Multi-Chunk Build Authoring Runbook (`scripts/aerial-build.sh enqueue <plan.json>`)
 
-For multi-step autonomous builds spanning multiple PRs or services, author a declarative build plan JSON and enqueue via `/share/aerial/scripts/aerial-build.sh enqueue <plan.json>`.
+Whenever a change requires **≥ 2 PRs**—whether across multiple repositories (`azylman/aerial`, `azylman/aerial-config`, `azylman/mirrormere`, `azylman/aerial-sidecars`), Two-Step Feature Rule rollouts, or sequential multi-chunk refactors in a single repository—**always default to a single declarative Vanadis build** enqueued via `/share/aerial/scripts/aerial-build.sh enqueue <plan.json>`. Never propose or execute manual turn-by-turn *"Step 1 PR now, wait for deploy, then Step 2 PR"* loops.
 
-## 1. Architect/Planner Up-Front Inspection & Scope Inventory
+## 1. Architect/Planner Up-Front Inspection, Cross-Repo Sequencing & Scope Inventory
+- **Cross-Repo & Two-Step Chunk Ordering (`"repo"` per Chunk)**: Each chunk in `chunks` supports its own `"repo"` field (`"azylman/mirrormere"`, `"azylman/aerial-sidecars"`, `"azylman/aerial"`, `"azylman/aerial-config"`). Order chunks strictly by deployment dependency (e.g., upstream service endpoints in Chunks 1–2 -> shared package / collector changes in Chunk 3 -> `aerial-config` job specs in Chunk 4). Vanadis and `webhooks-router` track all repositories on a single Discord status widget, suppress intermediate deployment wakes, and advance chunks automatically through final rollout.
 - Before writing the build plan JSON, the Planner MUST batch parallel `read_file` / `view_file` calls across the target files once up front (`O(1)` cached input tokens) rather than planning blind, authoring detailed per-chunk `instructions`.
 - When a build targets an entire package or subsystem, cross-check `git ls-files <pkg>` against the union of chunk `target_files` before enqueueing so no intended file silently drops out of scope.
 
