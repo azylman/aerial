@@ -40,12 +40,10 @@ job "coven" {
         }
         volumes = [
           "/mnt/data/supervisor/share/aerial-config:/config:ro",
-          "/mnt/data/supervisor/share/coverage/coven:/coverage:rw",
         ]
       }
 
       env {
-        GOCOVERDIR    = "/coverage"
         BRAIN_URL     = "http://eri.aerial"
         BRAIN_LLM_URL = "http://eri.aerial/internal/llm"
       }

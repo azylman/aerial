@@ -906,7 +906,6 @@ func TestHTTPEndpoints(t *testing.T) {
 	for _, p := range []string{"/health", "/healthz", "/metrics"} {
 		checkCode(http.MethodGet, p, nil, http.StatusOK)
 	}
-	t.Setenv("GOCOVERDIR", t.TempDir())
 	origMeta, origCounters := httpkit.WriteMetaDirFn, httpkit.WriteCountersDirFn
 	defer func() { httpkit.WriteMetaDirFn, httpkit.WriteCountersDirFn = origMeta, origCounters }()
 	httpkit.WriteMetaDirFn, httpkit.WriteCountersDirFn = func(string) error { return errors.New("meta err") }, func(string) error { return nil }

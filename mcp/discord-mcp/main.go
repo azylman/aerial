@@ -135,7 +135,7 @@ func StartProxyServer(port, upstreamBase string) (*http.Server, error) {
 		w.WriteHeader(http.StatusOK)
 		httpkit.WriteResponse(w, r, "discord-mcp", BuildHealthResponse("aerial-discord-mcp", DefaultBlockedToolList))
 	})
-	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("discord-mcp", false))
+	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("discord-mcp"))
 	mux.Handle("/mcp", proxyHandler)
 	mux.Handle("/", proxyHandler)
 

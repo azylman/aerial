@@ -79,7 +79,7 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /health", s.handleHealth)
-	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("prospera", false))
+	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("prospera"))
 
 	mcpBridge := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		httpkit.ServeMCPStream(w, r, s.streamHandler, "Prospera Voice Subsystem MCP Server Ready\n", "", "")

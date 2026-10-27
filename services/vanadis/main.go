@@ -859,7 +859,7 @@ func writeStoreErr(w http.ResponseWriter, err error) {
 func SetupMux(server *VanadisServer) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", promhttp.Handler())
-	coverageFlush := httpkit.HandleCoverageFlush("vanadis", true)
+	coverageFlush := httpkit.HandleCoverageFlush("vanadis")
 	for p, h := range map[string]http.HandlerFunc{
 		"GET /health": server.handleHealth, "GET /healthz": server.handleHealth,
 		"GET /builds": server.handleListBuilds, "GET /runs": server.handleListBuilds,

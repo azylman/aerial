@@ -954,7 +954,7 @@ func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, embedder 
 		llmFn = pool.LLMFunc()
 	}
 	mux.HandleFunc("/internal/llm", handleInternalLLM(llmFn))
-	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("eri", false))
+	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("eri"))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)

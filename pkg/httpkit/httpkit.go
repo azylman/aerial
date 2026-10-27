@@ -1,6 +1,7 @@
 package httpkit
 
 import (
+	"archive/tar"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime/coverage"
 	"strings"
 	"syscall"
@@ -19,32 +21,50 @@ var (
 	WriteMetaDirFn     = coverage.WriteMetaDir
 )
 
-// HandleCoverageFlush returns an HTTP handler for /debug/coverage/flush.
-// When jsonResp is true (used by vanadis and webhooks-router), it responds with JSON {"status":"flushed"}.
-// When jsonResp is false (used by eri, coven, haro, dashboard, hangar, discord-mcp), it responds with plain text "ok\n".
-func HandleCoverageFlush(service string, jsonResp bool) http.HandlerFunc {
+// HandleCoverageFlush returns an HTTP handler for /debug/coverage/flush that writes
+// runtime coverage metadata and counters to an ephemeral directory and streams them
+// back as an application/x-tar archive.
+func HandleCoverageFlush(service string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if dir := os.Getenv("GOCOVERDIR"); dir != "" {
-			if WriteMetaDirFn != nil {
-				if err := WriteMetaDirFn(dir); err != nil {
-					log.Printf("[%s] coverage flush meta error: %v", service, err)
-				}
-			}
-			if WriteCountersDirFn != nil {
-				if err := WriteCountersDirFn(dir); err != nil {
-					log.Printf("[%s] coverage flush error: %v", service, err)
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-					return
-				}
-			}
-		}
-		if jsonResp {
-			WriteJSON(w, http.StatusOK, map[string]string{"status": "flushed"})
+		tmpDir, err := os.MkdirTemp("", "covflush-*")
+		if err != nil {
+			log.Printf("[%s] coverage flush mkdir error: %v", service, err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		defer func() { _ = os.RemoveAll(tmpDir) }() //nolint:errcheck
+
+		if WriteMetaDirFn != nil {
+			if err := WriteMetaDirFn(tmpDir); err != nil {
+				log.Printf("[%s] coverage flush meta error: %v", service, err)
+			}
+		}
+		if WriteCountersDirFn != nil {
+			if err := WriteCountersDirFn(tmpDir); err != nil {
+				log.Printf("[%s] coverage flush error: %v", service, err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+
+		entries, _ := os.ReadDir(tmpDir) //nolint:errcheck
+		var buf bytes.Buffer
+		tw := tar.NewWriter(&buf)
+		for _, entry := range entries {
+			if data, readErr := os.ReadFile(filepath.Join(tmpDir, entry.Name())); readErr == nil {
+				_ = tw.WriteHeader(&tar.Header{ //nolint:errcheck
+					Name: entry.Name(),
+					Mode: 0o600,
+					Size: int64(len(data)),
+				})
+				_, _ = tw.Write(data) //nolint:errcheck
+			}
+		}
+		CloseWarn(tw, "coverage tar writer")
+
+		w.Header().Set("Content-Type", "application/x-tar")
 		w.WriteHeader(http.StatusOK)
-		WriteResponse(w, r, service, []byte("ok\n"))
+		WriteResponse(w, r, service, buf.Bytes())
 	}
 }
 

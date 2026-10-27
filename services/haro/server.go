@@ -196,7 +196,7 @@ func (s *Server) registerTools() {
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
-	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("haro", false))
+	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("haro"))
 	mux.HandleFunc("/schedules", s.handleSchedules)
 	mux.HandleFunc("/schedules/runs", s.handleScheduleRuns)
 	mux.HandleFunc("/schedules/oneshot", s.handleScheduleOneShot)
@@ -225,7 +225,7 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Path == "/debug/coverage/flush" {
-		httpkit.HandleCoverageFlush("haro", false)(w, r)
+		httpkit.HandleCoverageFlush("haro")(w, r)
 		return
 	}
 	if r.URL.Path == "/schedules" {

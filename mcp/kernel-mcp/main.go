@@ -520,7 +520,7 @@ func (s *Server) executeTool(ctx context.Context, toolName string, argsRaw json.
 func NewHTTPMux(srv *Server) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", srv.HandleHealth)
-	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("kernel-mcp", false))
+	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("kernel-mcp"))
 	mux.HandleFunc("/mcp", srv.HandleMCPStreamable)
 	return mux
 }

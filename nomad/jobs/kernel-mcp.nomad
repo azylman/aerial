@@ -39,13 +39,6 @@ job "kernel-mcp" {
         healthchecks {
           disable = true
         }
-        volumes = [
-          "/mnt/data/supervisor/share/coverage/kernel-mcp:/coverage:rw",
-        ]
-      }
-
-      env {
-        GOCOVERDIR = "/coverage"
       }
 
       template {

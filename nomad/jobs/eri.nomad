@@ -103,12 +103,6 @@ job "eri" {
             target   = "/share/aerial"
             source   = "/mnt/data/supervisor/share/aerial"
             readonly = true
-          },
-          {
-            type     = "bind"
-            target   = "/coverage"
-            source   = "/mnt/data/supervisor/share/coverage/eri"
-            readonly = false
           }
         ], var.extra_mounts)
       }
@@ -122,7 +116,6 @@ job "eri" {
         GOPATH              = "/data/cache/go"
         GOMODCACHE          = "/data/cache/go/pkg/mod"
         GOLANGCI_LINT_CACHE = "/data/cache/golangci-lint"
-        GOCOVERDIR          = "/coverage"
       }
 
       template {
