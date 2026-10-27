@@ -180,7 +180,7 @@ func TestRunCLI(t *testing.T) {
 			wantCode: 0,
 		},
 		{name: "pre-invocation normal", args: []string{"hook-guard", "pre-invocation"}, input: `{"conversationId":"c1","invocationNum":1}`, wantOutput: "{}", wantCode: 0},
-		{name: "invocation-guard symlink nudge", args: []string{"/usr/local/bin/invocation-guard"}, input: `{"conversationId":"c1","invocationNum":25}`, wantOutput: "injectSteps", wantCode: 0},
+		{name: "invocation-guard symlink", args: []string{"/usr/local/bin/invocation-guard"}, input: `{"conversationId":"c1","invocationNum":25}`, wantOutput: "{}", wantCode: 0},
 		{name: "post-batch subcommand", args: []string{"hook-guard", "post-batch"}, input: `{"conversationId":"c2","stepIdx":1,"error":"e","toolCall":{"name":"edit_file","args":{"Path":"/tmp/a.go"}}}`, wantOutput: "{}", wantCode: 0},
 		{name: "post-batch-guard symlink", args: []string{"/usr/local/bin/post-batch-guard"}, input: `{"conversationId":"c2","stepIdx":1,"toolCall":{"name":"edit_file","args":{"Path":"/tmp/a.go"}}}`, wantOutput: "{}", wantCode: 0},
 	}

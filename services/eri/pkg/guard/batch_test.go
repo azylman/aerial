@@ -264,18 +264,14 @@ func TestCheckBatch(t *testing.T) {
 	}
 	opportunisticGC(gcDir, now)
 
-	// PreInvocation turn grouping (parallel multi-region edit_file taking >1s each) and step-budget nudge
+	// PreInvocation turn grouping (parallel multi-region edit_file taking >1s each)
 	invDir := t.TempDir()
 	t.Setenv("AERIAL_BATCH_GUARD_DIR", invDir)
-	t.Setenv("AERIAL_BATCH_STEP_BUDGET_NUDGE", "25")
 	_ = RecordPreInvocation(Payload{ConversationID: "inv-s", InvocationNum: 1})
 	for i := 0; i < 4; i++ {
 		if d := CheckBatchWithDir(Payload{ConversationID: "inv-s", StepIdx: 10 + i, ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/same_turn.go"}, invDir, now.Add(time.Duration(i*3)*time.Second)); d.Decision != DecisionAllow {
 			t.Fatalf("parallel edit %d in same invocationNum=1 should be allowed, got: %+v", i, d)
 		}
-	}
-	if r25, r26 := RecordPreInvocation(Payload{ConversationID: "inv-s", InvocationNum: 25}), RecordPreInvocation(Payload{ConversationID: "inv-s", InvocationNum: 26}); len(r25.InjectSteps) != 1 || len(r26.InjectSteps) != 0 {
-		t.Fatalf("unexpected step budget nudge responses: r25=%+v r26=%+v", r25, r26)
 	}
 	for i := 1; i <= 3; i++ {
 		_ = RecordPreInvocationWithDir(Payload{ConversationID: "post-s", InvocationNum: i}, invDir, now.Add(time.Duration(i*2)*time.Second))
