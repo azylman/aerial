@@ -210,7 +210,8 @@ type GeminiGenerationConfig struct {
 
 // GeminiSpeechConfig defines voice personality and parameters.
 type GeminiSpeechConfig struct {
-	VoiceConfig GeminiVoiceConfig `json:"voiceConfig"`
+	VoiceConfig  GeminiVoiceConfig `json:"voiceConfig"`
+	LanguageCode string            `json:"languageCode,omitempty"`
 }
 
 // GeminiVoiceConfig encapsulates prebuilt voice choices.
@@ -344,14 +345,18 @@ type GeminiFunctionCall struct {
 	Args map[string]any `json:"args"`
 }
 
-// BuildGeminiSetupMessage constructs the handshake setup payload with a configurable voice (defaulting to Kore) and the 4 bounded tools.
-func BuildGeminiSetupMessage(model, systemPrompt string, voice ...string) GeminiSetupMessage {
+// BuildGeminiSetupMessage constructs the handshake setup payload with a configurable voice (defaulting to Kore), language code (defaulting to en-US), and the 4 bounded tools.
+func BuildGeminiSetupMessage(model, systemPrompt string, opts ...string) GeminiSetupMessage {
 	if !strings.HasPrefix(model, "models/") {
 		model = "models/" + model
 	}
 	voiceName := "Kore"
-	if len(voice) > 0 && strings.TrimSpace(voice[0]) != "" {
-		voiceName = strings.TrimSpace(voice[0])
+	if len(opts) > 0 && strings.TrimSpace(opts[0]) != "" {
+		voiceName = strings.TrimSpace(opts[0])
+	}
+	languageCode := "en-US"
+	if len(opts) > 1 && strings.TrimSpace(opts[1]) != "" {
+		languageCode = strings.TrimSpace(opts[1])
 	}
 
 	tools := []GeminiTool{
@@ -436,6 +441,7 @@ func BuildGeminiSetupMessage(model, systemPrompt string, voice ...string) Gemini
 							VoiceName: voiceName,
 						},
 					},
+					LanguageCode: languageCode,
 				},
 			},
 			InputAudioTranscription:  map[string]any{},
