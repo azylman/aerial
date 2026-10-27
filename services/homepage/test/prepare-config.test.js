@@ -6,12 +6,13 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const prepareConfig = require('../prepare-config');
-const { run, resolveDefaultCoreDir, resolveDefaultUserDir, resolveYamlParser, parseYaml, safeRead, writeAtomic, copyFallback } = prepareConfig;
+const { run, resolveDefaultCoreDir, resolveDefaultUserDir, resolveDefaultAppConfigDir, resolveYamlParser, parseYaml, safeRead, writeAtomic, copyFallback } = prepareConfig;
 
 test('prepare-config: exports correct functions and omits startWatcher', () => {
   assert.equal(typeof run, 'function');
   assert.equal(typeof resolveDefaultCoreDir, 'function');
   assert.equal(typeof resolveDefaultUserDir, 'function');
+  assert.equal(typeof resolveDefaultAppConfigDir, 'function');
   assert.equal(typeof resolveYamlParser, 'function');
   assert.equal(typeof parseYaml, 'function');
   assert.equal(typeof safeRead, 'function');
@@ -38,6 +39,49 @@ test('prepare-config: resolveDefaultUserDir prefers /local/user-homepage when pr
 test('prepare-config: resolveDefaultUserDir falls back to /share/aerial-config/homepage when /local/user-homepage absent', () => {
   const dir = resolveDefaultUserDir(() => false);
   assert.equal(dir, '/share/aerial-config/homepage');
+});
+
+test('prepare-config: resolveDefaultAppConfigDir returns /app/config when present and null when absent', () => {
+  assert.equal(resolveDefaultAppConfigDir((p) => p === '/app/config'), '/app/config');
+  assert.equal(resolveDefaultAppConfigDir(() => false), null);
+});
+
+test('prepare-config: run mirrors merged custom.css and configs to appConfigDir when user custom.css is absent', () => {
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'aerial-prepare-appcfg-'));
+  const userDir = path.join(tmpBase, 'user');
+  const coreDir = path.join(tmpBase, 'core');
+  const targetDir = path.join(tmpBase, 'target');
+  const appConfigDir = path.join(tmpBase, 'app-config');
+
+  fs.mkdirSync(userDir, { recursive: true });
+  fs.mkdirSync(coreDir, { recursive: true });
+  fs.mkdirSync(targetDir, { recursive: true });
+  fs.mkdirSync(appConfigDir, { recursive: true });
+
+  try {
+    fs.writeFileSync(path.join(coreDir, 'custom.css'), '/* core permet theme */\nbody { background: #06050a; }\n', 'utf8');
+    fs.writeFileSync(path.join(coreDir, 'settings.yaml'), '{"theme":"dark","color":"slate"}\n', 'utf8');
+    fs.writeFileSync(path.join(userDir, 'settings.yaml'), '{"showStats":true}\n', 'utf8');
+    fs.writeFileSync(path.join(coreDir, 'extra.js'), '// core extra js\n', 'utf8');
+    // Simulate upstream homepage having initialized an empty 0-byte custom.css and extra.js in /app/config
+    fs.writeFileSync(path.join(appConfigDir, 'custom.css'), '', 'utf8');
+    fs.writeFileSync(path.join(appConfigDir, 'extra.js'), '', 'utf8');
+
+    const stubYaml = {
+      load: (str) => JSON.parse(str),
+      dump: (obj) => JSON.stringify(obj)
+    };
+    run({ coreDir, userDir, targetDir, appConfigDir, yaml: stubYaml, candidatePaths: [] });
+
+    const appCss = fs.readFileSync(path.join(appConfigDir, 'custom.css'), 'utf8');
+    assert.ok(appCss.includes('core permet theme'));
+    const appSettings = JSON.parse(fs.readFileSync(path.join(appConfigDir, 'settings.yaml'), 'utf8'));
+    assert.equal(appSettings.theme, 'dark');
+    assert.equal(appSettings.showStats, true);
+    assert.equal(fs.readFileSync(path.join(appConfigDir, 'extra.js'), 'utf8'), '// core extra js\n');
+  } finally {
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
 });
 
 test('prepare-config: run executes clean one-shot merge', () => {

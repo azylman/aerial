@@ -25,6 +25,13 @@ function resolveDefaultUserDir(existsFn = fs.existsSync) {
   return '/share/aerial-config/homepage';
 }
 
+function resolveDefaultAppConfigDir(existsFn = fs.existsSync) {
+  if (existsFn('/app/config')) {
+    return '/app/config';
+  }
+  return null;
+}
+
 const CORE_DIR = process.env.CORE_CONFIG_DIR || resolveDefaultCoreDir();
 const USER_DIR = process.env.USER_CONFIG_DIR || resolveDefaultUserDir();
 const TARGET_DIR = process.env.TARGET_CONFIG_DIR || '/config';
@@ -118,18 +125,41 @@ function run(dirs = {}) {
   const coreDir = dirs.coreDir || process.env.CORE_CONFIG_DIR || CORE_DIR;
   const userDir = dirs.userDir || process.env.USER_CONFIG_DIR || resolveDefaultUserDir();
   const targetDir = dirs.targetDir || process.env.TARGET_CONFIG_DIR || TARGET_DIR;
+  const appConfigDir = dirs.appConfigDir !== undefined
+    ? dirs.appConfigDir
+    : (!dirs.targetDir && !process.env.TARGET_CONFIG_DIR ? resolveDefaultAppConfigDir() : null);
+  const targetDirs = appConfigDir && appConfigDir !== targetDir
+    ? [targetDir, appConfigDir]
+    : [targetDir];
 
   console.log(`[prepare-config] Initializing Homepage configuration...`);
-  console.log(`[prepare-config] Core: ${coreDir} | User: ${userDir} | Target: ${targetDir}`);
+  console.log(`[prepare-config] Core: ${coreDir} | User: ${userDir} | Targets: ${targetDirs.join(', ')}`);
 
-  if (!fs.existsSync(targetDir)) {
-    fs.mkdirSync(targetDir, { recursive: true, mode: 0o755 });
+  for (const dir of targetDirs) {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
+    }
   }
 
-  const yaml = resolveYamlParser();
+  const writeTargets = (filename, content) => {
+    for (const dir of targetDirs) {
+      writeAtomic(dir, filename, content);
+    }
+  };
+
+  const yaml = dirs.yaml || resolveYamlParser();
   if (!yaml) {
     console.error(`[prepare-config] js-yaml not found in container environment. Falling back to raw core copy.`);
-    copyFallback(coreDir, targetDir);
+    for (const dir of targetDirs) {
+      copyFallback(coreDir, dir);
+    }
+    try {
+      const mergedCss = mergeCustomCss(
+        safeRead(path.join(coreDir, 'custom.css')),
+        safeRead(path.join(userDir, 'custom.css'))
+      );
+      writeTargets('custom.css', mergedCss);
+    } catch (_) {}
     return;
   }
 
@@ -170,11 +200,11 @@ function run(dirs = {}) {
 
         const defaultFallback = (cfg.name === 'settings.yaml' || cfg.name === 'docker.yaml') ? {} : [];
         const dumped = yaml.dump(finalObj !== null && finalObj !== undefined ? finalObj : defaultFallback);
-        writeAtomic(targetDir, cfg.name, dumped);
+        writeTargets(cfg.name, dumped);
       } else {
         // Custom CSS
         const mergedCss = cfg.merger(coreRaw, userRaw);
-        writeAtomic(targetDir, cfg.name, mergedCss);
+        writeTargets(cfg.name, mergedCss);
         logEntries.push(`${cfg.name}: concatenated successfully`);
       }
     } catch (err) {
@@ -185,7 +215,7 @@ function run(dirs = {}) {
       if (fs.existsSync(corePath)) {
         try {
           const content = fs.readFileSync(corePath, 'utf8');
-          writeAtomic(targetDir, cfg.name, content);
+          writeTargets(cfg.name, content);
         } catch (_) {}
       }
     }
@@ -198,10 +228,14 @@ function run(dirs = {}) {
       for (const file of coreFiles) {
         if (!configFiles.some(c => c.name === file)) {
           const src = path.join(coreDir, file);
-          const dst = path.join(targetDir, file);
-          if (fs.statSync(src).isFile() && !fs.existsSync(dst)) {
+          if (fs.statSync(src).isFile()) {
             const data = fs.readFileSync(src);
-            writeAtomic(targetDir, file, data);
+            for (const dir of targetDirs) {
+              const dst = path.join(dir, file);
+              if (!fs.existsSync(dst) || fs.statSync(dst).size === 0) {
+                writeAtomic(dir, file, data);
+              }
+            }
             logEntries.push(`${file}: copied from core`);
           }
         }
@@ -213,7 +247,7 @@ function run(dirs = {}) {
 
   // Generate runtime.env from declarative service configuration if present
   try {
-    const candidatePaths = [
+    const candidatePaths = dirs.candidatePaths || [
       process.env.CONFIG_PATH,
       '/local/homepage.yaml',
       '/share/aerial-config/services/homepage/homepage.yaml',
@@ -273,6 +307,10 @@ if (require.main === module) {
     console.error(`[prepare-config] Fatal error during config preparation: ${fatalErr.message}`);
     console.error(`[prepare-config] Copying raw core configs to prevent container crash loop.`);
     copyFallback(CORE_DIR, TARGET_DIR);
+    const appCfg = resolveDefaultAppConfigDir();
+    if (appCfg && appCfg !== TARGET_DIR) {
+      copyFallback(CORE_DIR, appCfg);
+    }
     process.exit(0);
   }
 }
@@ -281,10 +319,10 @@ module.exports = {
   run,
   resolveDefaultCoreDir,
   resolveDefaultUserDir,
+  resolveDefaultAppConfigDir,
   resolveYamlParser,
   parseYaml,
   safeRead,
   writeAtomic,
   copyFallback
 };
-

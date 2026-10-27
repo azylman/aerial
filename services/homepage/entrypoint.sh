@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-mkdir -p /config
+mkdir -p /config /app/config
 
 if [ -d "/local/core-homepage" ]; then
     CORE_HOMEPAGE_DIR="/local/core-homepage"
@@ -16,7 +16,6 @@ else
 fi
 
 if [ -d "$USER_HOMEPAGE_DIR" ]; then
-    mkdir -p /app/config
     for ext in yaml yml css js; do
         cp -f "$USER_HOMEPAGE_DIR"/*."$ext" /app/config/ 2>/dev/null || true
     done
@@ -26,6 +25,7 @@ fi
 if ! NODE_PATH=/app/node_modules node "$CORE_HOMEPAGE_DIR"/prepare-config.js; then
     echo "🚨 [Homepage Entrypoint] Config preparation failed! Falling back to raw core baseline..." >&2
     cp -rf "$CORE_HOMEPAGE_DIR"/config/. /config/ 2>/dev/null || true
+    cp -rf "$CORE_HOMEPAGE_DIR"/config/. /app/config/ 2>/dev/null || true
 fi
 
 # Chown config directory for node user if running as root
