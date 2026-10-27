@@ -13,94 +13,6 @@ import (
 	"time"
 )
 
-func TestGetComposeArgs_TableDriven(t *testing.T) {
-	tests := []struct {
-		name                    string
-		subArgs                 []string
-		writeBaseCompose        bool
-		writeConfigOverride     bool
-		sameComposeAndConfigDir bool
-		writeLocalOverride      bool
-		writeEnvFile            bool
-		wantFFlags              int
-		checkExactArgs          bool
-	}{
-		{name: "base_only", subArgs: []string{"config", "--quiet"}, writeBaseCompose: true, wantFFlags: 1, checkExactArgs: true},
-		{name: "with_config_override", subArgs: []string{"up", "-d", "--no-recreate", "gitsync"}, writeBaseCompose: true, writeConfigOverride: true, wantFFlags: 2, checkExactArgs: true},
-		{name: "deduplication", subArgs: []string{"config"}, writeBaseCompose: true, writeLocalOverride: true, sameComposeAndConfigDir: true, wantFFlags: 2},
-		{name: "with_env_file", subArgs: []string{"config"}, writeBaseCompose: true, writeEnvFile: true, wantFFlags: 1},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			composeDir := t.TempDir()
-			configDir := t.TempDir()
-			if tc.sameComposeAndConfigDir {
-				configDir = composeDir
-			}
-			baseFile := filepath.Join(composeDir, "docker-compose.yml")
-			if tc.writeBaseCompose {
-				if err := os.WriteFile(baseFile, []byte("services: {}"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-			}
-			overrideFile := filepath.Join(configDir, "docker-compose.override.yml")
-			if tc.writeConfigOverride {
-				if err := os.WriteFile(overrideFile, []byte("services: { brain: {} }"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if tc.writeLocalOverride {
-				localOverride := filepath.Join(composeDir, "docker-compose.override.yml")
-				if err := os.WriteFile(localOverride, []byte("services: { brain: {} }"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-			}
-			envFile := filepath.Join(composeDir, ".env")
-			if tc.writeEnvFile {
-				if err := os.WriteFile(envFile, []byte("TEST_KEY=123"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-			}
-
-			daemon := &SyncDaemon{composeDir: composeDir, configDir: configDir}
-			args := daemon.getComposeArgs(composeDir, tc.subArgs...)
-
-			fCount := 0
-			hasEnvFile := false
-			for i, a := range args {
-				if a == "-f" {
-					fCount++
-				}
-				if a == "--env-file" && i+1 < len(args) && args[i+1] == envFile {
-					hasEnvFile = true
-				}
-			}
-			if fCount != tc.wantFFlags {
-				t.Fatalf("expected %d -f flags, got %d: %v", tc.wantFFlags, fCount, args)
-			}
-			if tc.writeEnvFile && !hasEnvFile {
-				t.Fatalf("expected --env-file %s in args, got: %v", envFile, args)
-			}
-			if tc.checkExactArgs {
-				want := []string{"--project-name", "aerial", "--project-directory", composeDir, "-f", baseFile}
-				if tc.writeConfigOverride {
-					want = append(want, "-f", filepath.Clean(overrideFile))
-				}
-				want = append(want, tc.subArgs...)
-				if len(args) != len(want) {
-					t.Fatalf("expected %d args, got %d: %v", len(want), len(args), args)
-				}
-				for i := range want {
-					if args[i] != want[i] {
-						t.Errorf("arg[%d] = %q, want %q", i, args[i], want[i])
-					}
-				}
-			}
-		})
-	}
-}
-
 func TestRepoLock_ThreadSafety(t *testing.T) {
 	daemon := NewDaemon(DaemonConfig{})
 	pathA, pathB := filepath.Clean("/share/aerial"), filepath.Clean("/share/aerial-config")
@@ -667,7 +579,6 @@ func TestNomadValidationAndServerReconcile_TableDriven(t *testing.T) {
 			_, _, _ = fn(cancelCtx, "version")
 		}
 
-		_, _, _ = defaultComposeExecutor(cancelCtx, "", "version")
 		_, _, _ = runGitCommand(cancelCtx, "", "", "version")
 
 		var nilDaemon *SyncDaemon
@@ -746,34 +657,23 @@ func TestNomadValidationAndServerReconcile_TableDriven(t *testing.T) {
 		}
 
 		tests := []struct {
-			name         string
-			valErr       error
-			composeErr   error
-			wantErr      bool
-			expectCalled bool
+			name    string
+			valErr  error
+			wantErr bool
 		}{
 			{
-				name:         "validation failure aborts compose restart",
-				valErr:       errors.New("val fail"),
-				wantErr:      true,
-				expectCalled: false,
+				name:    "validation failure returns error",
+				valErr:  errors.New("val fail"),
+				wantErr: true,
 			},
 			{
-				name:         "validation success and restart success",
-				wantErr:      false,
-				expectCalled: true,
-			},
-			{
-				name:         "validation success and restart failure",
-				composeErr:   errors.New("compose fail"),
-				wantErr:      true,
-				expectCalled: true,
+				name:    "validation success",
+				wantErr: false,
 			},
 		}
 
 		for _, tc := range tests {
 			t.Run(tc.name, func(t *testing.T) {
-				called := false
 				d := &SyncDaemon{
 					nomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
 						if tc.valErr != nil {
@@ -781,17 +681,10 @@ func TestNomadValidationAndServerReconcile_TableDriven(t *testing.T) {
 						}
 						return []byte("valid"), nil, nil
 					},
-					composeExecutor: func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
-						called = true
-						if tc.composeErr != nil {
-							return nil, []byte("compose down"), tc.composeErr
-						}
-						return []byte("restarted"), nil, nil
-					},
 				}
 				err := d.reconcileNomadServer(context.Background(), tmpDir)
-				if (err != nil) != tc.wantErr || called != tc.expectCalled {
-					t.Fatalf("reconcileNomadServer() err=%v (wantErr:%v), restartCalled=%v (expectCalled:%v)", err, tc.wantErr, called, tc.expectCalled)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("reconcileNomadServer() err=%v (wantErr:%v)", err, tc.wantErr)
 				}
 			})
 		}

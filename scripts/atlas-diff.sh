@@ -69,8 +69,14 @@ echo "🧭 [atlas-diff] Target configuration: ${TARGET_DIR}/atlas.hcl" >&2
 
 # 3. Dev Database Setup
 DEV_CONTAINER=""
+DEV_DB_NAME=""
+DEV_ADMIN_URL=""
 cleanup() {
     local exit_code=$?
+    if [ -n "$DEV_DB_NAME" ] && [ -n "$DEV_ADMIN_URL" ]; then
+        echo "🧹 [atlas-diff] Dropping ephemeral dev database: ${DEV_DB_NAME}..." >&2
+        psql "$DEV_ADMIN_URL" -v ON_ERROR_STOP=0 -q -c "DROP DATABASE IF EXISTS \"${DEV_DB_NAME}\" WITH (FORCE);" >/dev/null 2>&1 || true
+    fi
     if [ -n "$DEV_CONTAINER" ]; then
         echo "🧹 [atlas-diff] Cleaning up ephemeral dev container: ${DEV_CONTAINER}..." >&2
         docker rm -f "$DEV_CONTAINER" >/dev/null 2>&1 || true
@@ -80,6 +86,22 @@ cleanup() {
 trap cleanup EXIT INT TERM ERR
 
 DEV_URL="${ATLAS_DEV_URL:-}"
+BASE_PG_URL="${DATABASE_URL:-${POSTGRES_URL:-}}"
+
+if [ -z "$DEV_URL" ] && [ -n "$BASE_PG_URL" ] && command -v psql >/dev/null 2>&1; then
+    DEV_DB_NAME="atlas_dev_$$_$(date +%s)"
+    DEV_ADMIN_URL=$(printf '%s' "$BASE_PG_URL" | sed -E 's|^([^?]+/)[^/?]+(\?.*)?$|\1postgres\2|')
+    CANDIDATE_DEV_URL=$(printf '%s' "$BASE_PG_URL" | sed -E "s|^([^?]+/)[^/?]+(\?.*)?$|\1${DEV_DB_NAME}\2|")
+    echo "🚀 [atlas-diff] Creating ephemeral dev database: ${DEV_DB_NAME}..." >&2
+    if psql "$DEV_ADMIN_URL" -v ON_ERROR_STOP=1 -q -c "CREATE DATABASE \"${DEV_DB_NAME}\";" >/dev/null 2>&1 && \
+       psql "$CANDIDATE_DEV_URL" -v ON_ERROR_STOP=1 -q -c "CREATE EXTENSION IF NOT EXISTS vector;" >/dev/null 2>&1; then
+        DEV_URL="$CANDIDATE_DEV_URL"
+    else
+        echo "⚠️ [atlas-diff] Could not create ephemeral database on DATABASE_URL; falling back to Docker..." >&2
+        DEV_DB_NAME=""
+        DEV_ADMIN_URL=""
+    fi
+fi
 
 if [ -z "$DEV_URL" ]; then
     if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then

@@ -46,7 +46,6 @@ job "hangar" {
           "/mnt/data/supervisor/share/aerial-config:/share/aerial-config:rw",
           "/mnt/data/supervisor/share/aerial:/share/aerial:rw",
           "/mnt/data/supervisor/share/mirrormere:/share/mirrormere:rw",
-          "/var/run/docker.sock:/var/run/docker.sock:rw"
         ]
       }
 

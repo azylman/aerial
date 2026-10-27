@@ -201,49 +201,6 @@ func (d *SyncDaemon) drainPendingNomadDeletes() []NomadChangeEvent {
 	return deleteEvents
 }
 
-// getComposeArgs constructs the compose CLI flags with base docker-compose.yml and any present overrides.
-func (d *SyncDaemon) getComposeArgs(composeDir string, subCmd ...string) []string {
-	baseFile := filepath.Join(composeDir, "docker-compose.yml")
-	args := []string{
-		"--project-name", "aerial",
-		"--project-directory", composeDir,
-		"-f", baseFile,
-	}
-
-	envFile := filepath.Join(composeDir, ".env")
-	if fi, err := os.Stat(envFile); err == nil && !fi.IsDir() {
-		args = append(args, "--env-file", envFile)
-	}
-
-	configDir := d.configDir
-
-	var overrideCandidates []string
-	overrideCandidates = append(overrideCandidates,
-		filepath.Join(composeDir, "docker-compose.override.yml"),
-		filepath.Join(composeDir, "docker-compose.override.yaml"),
-	)
-	if configDir != "" {
-		overrideCandidates = append(overrideCandidates,
-			filepath.Join(configDir, "docker-compose.override.yml"),
-			filepath.Join(configDir, "docker-compose.override.yaml"),
-		)
-	}
-
-	seen := make(map[string]bool)
-	for _, cand := range overrideCandidates {
-		cleaned := filepath.Clean(cand)
-		if seen[cleaned] {
-			continue
-		}
-		seen[cleaned] = true
-		if _, err := os.Stat(cleaned); err == nil {
-			args = append(args, "-f", cleaned)
-		}
-	}
-
-	return append(args, subCmd...)
-}
-
 func (d *SyncDaemon) getRepoLock(repoPath string) *sync.Mutex {
 	cleaned := filepath.Clean(repoPath)
 	d.repoLocksMu.Lock()
@@ -411,31 +368,18 @@ func (d *SyncDaemon) ValidateNomadConfig(ctx context.Context, configPath string)
 	return d.runNomadValidate(ctx, "config", configPath, true)
 }
 
-// reconcileNomadServer safely restarts the nomad-server container after validating daemon configuration.
+// reconcileNomadServer validates the Nomad daemon configuration when nomad/ files change.
 func (d *SyncDaemon) reconcileNomadServer(ctx context.Context, composeDir string) error {
 	nomadDir := filepath.Join(composeDir, "nomad")
-	if _, statErr := os.Stat(nomadDir); statErr != nil {
-		log.Printf("[Hangar:GitOps] Notice: %s not found on disk, skipping nomad-server restart", nomadDir)
+	if info, err := os.Stat(nomadDir); err == nil && info.IsDir() {
+		if errVal := d.ValidateNomadConfig(ctx, nomadDir); errVal != nil {
+			log.Printf("[Hangar:GitOps] ERROR: %v. Aborting nomad-server config reconcile.", errVal)
+			return errVal
+		}
+		log.Printf("[Hangar:GitOps] Nomad daemon configuration changes detected and validated.")
 		return nil
 	}
-
-	if errVal := d.ValidateNomadConfig(ctx, nomadDir); errVal != nil {
-		log.Printf("[Hangar:GitOps] ERROR: %v. Aborting nomad-server restart to prevent control plane outage.", errVal)
-		return errVal
-	}
-
-	log.Printf("[Hangar:GitOps] Nomad daemon configuration changes detected and validated. Restarting nomad-server...")
-	restartCtx, restartCancel := context.WithTimeout(ctx, 60*time.Second)
-	defer restartCancel()
-
-	restartArgs := d.getComposeArgs(composeDir, "restart", "nomad-server")
-	out, stderr, err := d.getComposeExecutor()(restartCtx, composeDir, restartArgs...)
-	if err != nil {
-		combined := SanitizeLog(strings.TrimSpace(string(append(out, stderr...))))
-		log.Printf("[Hangar:GitOps] ERROR: Failed to restart nomad-server: %s (%v)", combined, err)
-		return fmt.Errorf("failed to restart nomad-server: %s (%w)", combined, err)
-	}
-	log.Printf("[Hangar:GitOps] Successfully restarted nomad-server for updated daemon configuration.")
+	log.Printf("[Hangar:GitOps] Notice: %s not found on disk, skipping nomad-server config validation", nomadDir)
 	return nil
 }
 

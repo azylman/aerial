@@ -23,7 +23,6 @@ Aerial runs as a multi-node HashiCorp Nomad cluster supervised by Nomad and `han
   - **`infisical-mcp`**: Native Streamable HTTP MCP server for Infisical secret management and rotation.
   - **`victoriametrics-mcp`**: Streamable HTTP MCP server for TSDB metric querying and alert rule inspection.
   - **`openobserve`**: Native Streamable HTTP MCP server for telemetry, structured log exploration, and SQL search.
-  - **`docker-mcp`**: Streamable HTTP MCP server for auxiliary host Docker inspection.
 
 - **Web, Gateway & Ingress Services**:
   - **`homepage`**: Root landing portal and service discovery HUD.
@@ -56,7 +55,7 @@ Aerial operates on a strict **Multi-Repository Architecture & Separation of Conc
 
 ### 1. Core Engine Monorepo (`azylman/aerial` at `/share/aerial` — `scripts/aerial-pr.sh init aerial`)
 - **Purpose**: Generic, domain-agnostic open-source foundation.
-- **Contents**: Core Go services (`services/eri`, `services/haro`, `services/coven`, `services/vanadis`, `services/hangar`, `services/webhooks-router`, `services/dashboard`), MCP servers (`mcp/discord-mcp`, `mcp/docker-mcp`, `mcp/github-mcp`, `mcp/infisical-mcp`, `mcp/nomad-mcp`), shared Go packages (`pkg/`), base system rules (`rules/`), built-in skills (`.agents/skills/`), Nomad job definitions (`nomad/jobs/*.nomad`), Dockerfiles, and CI/verification scripts (`scripts/`).
+- **Contents**: Core Go services (`services/eri`, `services/haro`, `services/coven`, `services/vanadis`, `services/hangar`, `services/webhooks-router`, `services/dashboard`), MCP servers (`mcp/discord-mcp`, `mcp/github-mcp`, `mcp/infisical-mcp`, `mcp/nomad-mcp`), shared Go packages (`pkg/`), base system rules (`rules/`), built-in skills (`.agents/skills/`), Nomad job definitions (`nomad/jobs/*.nomad`), Dockerfiles, and CI/verification scripts (`scripts/`).
 - **Strict Invariants**:
   - **100% Generic & Domain-Agnostic**: All prompts, code, error handlers, and schemas must remain completely generic and reusable for any user.
   - **Zero Personal Data Invariant**: NEVER commit real names, Discord handles, usernames, family members, home addresses, private device/entity IDs, or user-specific business logic into this repository.

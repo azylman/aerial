@@ -68,9 +68,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy statically linked Docker CLI (avoids heavy docker.io/containerd apt packages)
-COPY --link --from=docker:cli /usr/local/bin/docker /usr/local/bin/docker
-
 # Configure default SSH client with include for aerial-config
 RUN mkdir -p -m 0700 /root/.ssh && \
     echo "Include /share/aerial-config/ssh/config" > /root/.ssh/config && \
