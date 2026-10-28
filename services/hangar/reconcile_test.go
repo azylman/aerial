@@ -758,6 +758,7 @@ func TestNomadJobReconciliation_TableDriven(t *testing.T) {
 		_ = os.WriteFile(filepath.Join(jobsDir, "typechange.nomad"), []byte(`job "typechange" {}`), 0o644)
 		_ = os.WriteFile(filepath.Join(jobsDir, "typechange_stopfail.nomad"), []byte(`job "typechange_stopfail" {}`), 0o644)
 		_ = os.WriteFile(filepath.Join(jobsDir, "typechange_retryfail.nomad"), []byte(`job "typechange_retryfail" {}`), 0o644)
+		_ = os.WriteFile(filepath.Join(jobsDir, "db-migrate.nomad"), []byte(`job "db-migrate" { type = "batch" }`), 0o644)
 
 		var executedCalls [][]string
 		purgedJobs := make(map[string]bool)
@@ -775,7 +776,7 @@ func TestNomadJobReconciliation_TableDriven(t *testing.T) {
 				}
 				if len(args) >= 4 && args[0] == "job" && args[1] == "run" {
 					target := args[len(args)-1]
-					if strings.Contains(target, "typechange") && !purgedJobs[filepath.Base(target)] {
+					if (strings.Contains(target, "typechange") || strings.Contains(target, "db-migrate.nomad")) && !purgedJobs[filepath.Base(target)] {
 						mu.Unlock()
 						return nil, []byte(`Error submitting job: Unexpected response code: 500 (cannot update job from type "service" to "system")`), errors.New("exit status 1")
 					}
@@ -787,7 +788,7 @@ func TestNomadJobReconciliation_TableDriven(t *testing.T) {
 				}
 				if len(args) >= 4 && args[0] == "job" && args[1] == "stop" {
 					jobID := args[3]
-					if jobID == "stop-fail" || jobID == "typechange_stopfail" {
+					if jobID == "stop-fail" || jobID == "typechange_stopfail" || (jobID == "db-migrate" && purgedJobs["db-migrate.nomad"]) {
 						mu.Unlock()
 						return nil, []byte("stop fail"), errors.New("stop error")
 					}
@@ -875,6 +876,18 @@ func TestNomadJobReconciliation_TableDriven(t *testing.T) {
 					{JobName: "typechange_retryfail", Path: "jobs/typechange_retryfail.nomad", Action: "apply"},
 				},
 				wantErr: true,
+			},
+			{
+				name: "db-migrate purges dead batch job before running",
+				changes: []NomadFileChange{
+					{JobName: "db-migrate", Path: "jobs/db-migrate.nomad", Action: "apply"},
+				},
+			},
+			{
+				name: "db-migrate pre-run purge notice continues to run",
+				changes: []NomadFileChange{
+					{JobName: "db-migrate", Path: "jobs/db-migrate.nomad", Action: "apply"},
+				},
 			},
 			{
 				name: "combined apply and delete with teardown first",
