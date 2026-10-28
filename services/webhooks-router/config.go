@@ -181,6 +181,26 @@ var (
 	channelNameRegex = regexp.MustCompile(`^#?[a-z0-9_-]{1,100}$`)
 )
 
+// NormalizeDiscordTargetID strips Model 2 session prefixes ("discord-" and optional
+// colon-delimited pool scopes like "stateful_medium:discord-") from a target identifier.
+func NormalizeDiscordTargetID(id string) string {
+	clean := strings.TrimSpace(id)
+	if idx := strings.LastIndex(clean, ":"); idx >= 0 {
+		clean = strings.TrimSpace(clean[idx+1:])
+	}
+	return strings.TrimSpace(strings.TrimPrefix(clean, "discord-"))
+}
+
+// IsHeadlessSessionKey returns true if id is a Model 2 headless dispatch or heartbeat session key
+// (e.g. "dispatch-<uuid>", "heartbeat-<id>", or pool-scoped "*:dispatch-<uuid>").
+func IsHeadlessSessionKey(id string) bool {
+	clean := strings.TrimSpace(id)
+	if idx := strings.LastIndex(clean, ":"); idx >= 0 {
+		clean = strings.TrimSpace(clean[idx+1:])
+	}
+	return strings.HasPrefix(clean, "dispatch-") || strings.HasPrefix(clean, "heartbeat-")
+}
+
 func IsValidDiscordSnowflake(id string) bool {
 	return snowflakeRegex.MatchString(strings.TrimSpace(id))
 }

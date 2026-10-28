@@ -792,6 +792,14 @@ func (s *VanadisServer) dispatchBrainDispatch(ctx context.Context, payload Brain
 	return err
 }
 
+func normalizeDiscordThreadID(s string) string {
+	clean := strings.TrimSpace(s)
+	if idx := strings.LastIndex(clean, ":"); idx >= 0 {
+		clean = strings.TrimSpace(clean[idx+1:])
+	}
+	return strings.TrimSpace(strings.TrimPrefix(clean, "discord-"))
+}
+
 func isNumericSnowflake(s string) bool {
 	if s == "" {
 		return false
@@ -905,7 +913,7 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 	if repo == "" && len(req.Chunks) > 0 {
 		repo = normalizeRepo(req.Chunks[0].Repo)
 	}
-	threadID, objective := strings.TrimSpace(req.ThreadID), strings.TrimSpace(req.Objective)
+	threadID, objective := normalizeDiscordThreadID(req.ThreadID), strings.TrimSpace(req.Objective)
 	switch {
 	case repo == "":
 		writeErr(w, http.StatusBadRequest, "repo is required")

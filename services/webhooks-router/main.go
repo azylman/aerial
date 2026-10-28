@@ -119,6 +119,20 @@ func (s *RouterServer) Routes() http.Handler {
 	return mux
 }
 
+func (s *RouterServer) resolveHeadlessPRTargetID(ctx context.Context, repo string, prNumber int) string {
+	if s.registry != nil {
+		if existingTID, _, _, _, err := s.registry.ResolvePRByNumber(ctx, normalizeRepo(repo), prNumber); err == nil {
+			if norm := NormalizeDiscordTargetID(existingTID); IsValidDiscordSnowflake(norm) {
+				return norm
+			}
+		}
+	}
+	if sys := NormalizeDiscordTargetID(s.cfg.SystemChannelID); IsValidDiscordSnowflake(sys) {
+		return sys
+	}
+	return ""
+}
+
 func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) {
 	if s == nil || s.registry == nil {
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "registry not initialized"})
@@ -133,7 +147,8 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 	req.Repo = strings.TrimSpace(req.Repo)
 	req.Branch = strings.TrimSpace(req.Branch)
 	req.HeadSHA = strings.TrimSpace(req.HeadSHA)
-	req.TargetID = strings.TrimSpace(req.TargetID)
+	rawTargetID := strings.TrimSpace(req.TargetID)
+	req.TargetID = NormalizeDiscordTargetID(rawTargetID)
 	req.Title = strings.TrimSpace(req.Title)
 	chunkID := strings.TrimSpace(req.VanadisChunkID)
 
@@ -154,9 +169,12 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if chunkID == "" {
-		if req.TargetID == "" {
+		if rawTargetID == "" {
 			httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id cannot be empty"})
 			return
+		}
+		if !IsValidDiscordSnowflake(req.TargetID) && IsHeadlessSessionKey(rawTargetID) {
+			req.TargetID = s.resolveHeadlessPRTargetID(r.Context(), req.Repo, req.PRNumber)
 		}
 		if !IsValidDiscordSnowflake(req.TargetID) {
 			httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id must be a valid Discord snowflake (17-20 digits)"})
