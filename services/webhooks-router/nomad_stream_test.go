@@ -329,6 +329,23 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 			evalSpecJSON: `{"ID":"eval-resolved-cpu","Status":"complete"}`,
 			reg:          &mockPRRegistry{deployFailedJobUpdated: true},
 		},
+		{
+			name:             "running allocation with pending poststop hook verified via job API dispatches success",
+			streamLines:      []string{`{"Index":2064,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":{"Allocation":{"ID":"alloc-kb-1","JobID":"kernel-browser","DesiredStatus":"run","ClientStatus":"running","TaskStates":{"cleanup-locks":{"State":"dead","Failed":false,"Events":[{"Type":"Started"},{"Type":"Terminated","ExitCode":0}]},"kernel-browser":{"State":"running","Failed":false,"Events":[{"Type":"Started"}]},"persist-profile":{"State":"pending","Failed":false,"Restarts":0,"Events":[{"Type":"Received"}]}}}}}]}`},
+			allocationsJSON:  `[{"ID":"alloc-kb-1","JobID":"kernel-browser","DesiredStatus":"run","ClientStatus":"running","JobVersion":5}]`,
+			jobSpecJSON:      `{"ID":"kernel-browser","Type":"service","Status":"running","Version":5,"Stop":false,"TaskGroups":[{"Name":"kernel-browser","Tasks":[{"Name":"cleanup-locks","Lifecycle":{"Hook":"prestart","Sidecar":false}},{"Name":"kernel-browser"},{"Name":"persist-profile","Lifecycle":{"Hook":"poststop","Sidecar":false}}]}]}`,
+			reg:              mkDeployedReg(validThread, 461, validSHA, validRepo, true),
+			wantDeployedJobs: []string{"kernel-browser"},
+			wantPrompts:      1,
+			wantPromptSubstr: []string{"Continuous Delivery deployment completed for job kernel-browser", "ref: alloc-kb-1"},
+		},
+		{
+			name:            "running allocation with pending non-poststop sibling task verified via job API ignored",
+			streamLines:     []string{`{"Index":2065,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":{"Allocation":{"ID":"alloc-multi-1","JobID":"roborev-runner","DesiredStatus":"run","ClientStatus":"running","TaskStates":{"runner-1":{"State":"running","Failed":false,"Events":[{"Type":"Started"}]},"runner-2":{"State":"pending","Failed":false,"Restarts":0,"Events":[{"Type":"Received"}]}}}}}]}`},
+			allocationsJSON: `[{"ID":"alloc-multi-1","JobID":"roborev-runner","DesiredStatus":"run","ClientStatus":"running","JobVersion":1}]`,
+			jobSpecJSON:     `{"ID":"roborev-runner","Type":"service","Status":"running","Version":1,"Stop":false,"TaskGroups":[{"Name":"runners","Tasks":[{"Name":"runner-1"},{"Name":"runner-2"}]}]}`,
+			reg:             mkDeployedReg(validThread, 462, validSHA, validRepo, true),
+		},
 	}
 
 	for _, tt := range tests {
@@ -797,9 +814,10 @@ func TestNomadStreamSubscriber_RiverQueue(t *testing.T) {
 
 func TestIsAllocationRestarting_TableDriven(t *testing.T) {
 	tests := []struct {
-		name       string
-		taskStates map[string]NomadTaskState
-		want       bool
+		name          string
+		taskStates    map[string]NomadTaskState
+		poststopTasks map[string]bool
+		want          bool
 	}{
 		{name: "nil or empty map", taskStates: nil, want: false},
 		{name: "running task without events", taskStates: map[string]NomadTaskState{"brain": {State: "running", Failed: false}}, want: false},
@@ -855,35 +873,38 @@ func TestIsAllocationRestarting_TableDriven(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "dormant poststop hook pending alongside running main task returns false",
+			name: "dormant poststop hook verified in poststopTasks map returns false",
 			taskStates: map[string]NomadTaskState{
 				"cleanup-locks":   {State: "dead", Events: []NomadTaskEvent{{Type: "Started"}, {Type: "Terminated", ExitCode: 0}}},
 				"kernel-browser":  {State: "running", Events: []NomadTaskEvent{{Type: "Task Setup"}, {Type: "Started"}}},
 				"persist-profile": {State: "pending", Restarts: 0, Events: []NomadTaskEvent{{Type: "Received"}}},
 			},
-			want: false,
+			poststopTasks: map[string]bool{"persist-profile": true},
+			want:          false,
 		},
 		{
-			name: "pending task with restarts alongside running sibling returns true",
+			name: "unverified pending task with only Received event alongside running sibling returns true",
 			taskStates: map[string]NomadTaskState{
 				"main":    {State: "running", Events: []NomadTaskEvent{{Type: "Started"}}},
-				"sidecar": {State: "pending", Restarts: 1, Events: []NomadTaskEvent{{Type: "Received"}, {Type: "Terminated", ExitCode: 1}}},
+				"sidecar": {State: "pending", Restarts: 0, Events: []NomadTaskEvent{{Type: "Received"}}},
 			},
-			want: true,
+			poststopTasks: nil,
+			want:          true,
 		},
 		{
-			name: "pending task with Task Setup event alongside running sibling returns true",
+			name: "poststop task with positive restarts returns true",
 			taskStates: map[string]NomadTaskState{
-				"main":    {State: "running", Events: []NomadTaskEvent{{Type: "Started"}}},
-				"sidecar": {State: "pending", Restarts: 0, Events: []NomadTaskEvent{{Type: "Received"}, {Type: "Task Setup"}}},
+				"main":            {State: "running", Events: []NomadTaskEvent{{Type: "Started"}}},
+				"persist-profile": {State: "pending", Restarts: 1, Events: []NomadTaskEvent{{Type: "Received"}, {Type: "Terminated", ExitCode: 1}}},
 			},
-			want: true,
+			poststopTasks: map[string]bool{"persist-profile": true},
+			want:          true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isAllocationRestarting(tt.taskStates); got != tt.want {
+			if got := isAllocationRestarting(tt.taskStates, tt.poststopTasks); got != tt.want {
 				t.Errorf("isAllocationRestarting() = %v, want %v", got, tt.want)
 			}
 		})
