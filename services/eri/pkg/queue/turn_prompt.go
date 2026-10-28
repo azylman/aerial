@@ -267,7 +267,16 @@ func (te *turnExecution) resolveAttemptConfig(attempt int) attemptConfig {
 		cfg.mediumEffortModel = config.GetRuntimeConfig().MediumEffortModel
 	}
 
-	switch resolveBurstEffort(te.burst) {
+	effort := resolveBurstEffort(te.burst)
+	reqModel := extractBurstModel(te.burst)
+	if te.dispatch != nil {
+		effort = resolveDispatchEffort(*te.dispatch, te.isEphemeral)
+		if strings.TrimSpace(te.dispatch.Model) != "" {
+			reqModel = strings.TrimSpace(te.dispatch.Model)
+		}
+	}
+
+	switch effort {
 	case "medium":
 		if strings.TrimSpace(cfg.mediumEffortModel) != "" {
 			cfg.model = cfg.mediumEffortModel
@@ -277,7 +286,7 @@ func (te *turnExecution) resolveAttemptConfig(attempt int) attemptConfig {
 			cfg.model = cfg.lowEffortModel
 		}
 	}
-	if reqModel := extractBurstModel(te.burst); reqModel != "" {
+	if reqModel != "" {
 		cfg.model = reqModel
 	}
 	if overrideModel != "" {
@@ -361,7 +370,11 @@ func (te *turnExecution) fetchTurnHistory(fetchCtx context.Context, limit int) [
 	var err error
 	var turnHistory []HistoryMessage
 	if te.pool.cfg.HistoryFetcher != nil {
-		turnHistory, err = te.pool.cfg.HistoryFetcher(fetchCtx, te.threadID, te.burst[0].ID, limit)
+		var beforeID string
+		if len(te.burst) > 0 {
+			beforeID = te.burst[0].ID
+		}
+		turnHistory, err = te.pool.cfg.HistoryFetcher(fetchCtx, te.threadID, beforeID, limit)
 	} else {
 		turnHistory, err = FetchRecentThreadHistory(fetchCtx, te.pool.getDiscordSession(), te.store(), te.threadID, limit)
 	}

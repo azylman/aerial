@@ -244,6 +244,16 @@ func (te *turnExecution) deliverQuotaNotice(pauseMsg string, logPrefix string) {
 	}
 }
 
+func (te *turnExecution) isQuotaRetry() bool {
+	if len(te.burst) > 0 {
+		return te.burst[0].ScheduleRunID != "" || strings.HasPrefix(te.burst[0].Content, "[QUOTA_RETRY]") || strings.Contains(te.turnPrompt, "[QUOTA_RETRY]")
+	}
+	if te.dispatch != nil {
+		return strings.Contains(te.turnPrompt, "[QUOTA_RETRY]") || strings.Contains(te.dispatch.Prompt, "[QUOTA_RETRY]")
+	}
+	return strings.Contains(te.turnPrompt, "[QUOTA_RETRY]")
+}
+
 func (te *turnExecution) handleQuotaPause(errDetail, stderr, currentModel, burstEffort string, attempt, maxAttempts int) bool {
 	resetDur, _ := runner.ExtractQuotaResetDuration(errDetail, stderr)
 	if runner.IsCapacityBlip(errDetail, stderr) || resetDur <= 5*time.Second {
@@ -285,16 +295,18 @@ func (te *turnExecution) handleQuotaPause(errDetail, stderr, currentModel, burst
 		return false
 	}
 	te.isQuotaPaused = true
-	te.stopTyping()
+	if te.stopTyping != nil {
+		te.stopTyping()
+	}
 	log.Printf("[WorkerPool] Quota pause detected for thread %s on attempt %d/%d: %s", te.threadID, attempt, maxAttempts, errDetail)
-	isAlreadyRetry := te.burst[0].ScheduleRunID != "" || strings.HasPrefix(te.burst[0].Content, "[QUOTA_RETRY]") || strings.Contains(te.turnPrompt, "[QUOTA_RETRY]")
+	isAlreadyRetry := te.isQuotaRetry()
 	jitterSec := 5 + rand.Intn(16)
 	runAt := time.Now().UTC().Add(resetDur).Add(30 * time.Second).Add(time.Duration(jitterSec) * time.Second)
 	if te.pool != nil {
 		te.pool.quotaLockedUntil.Store(runAt.Unix())
 	}
 	var scheduled bool
-	if !isAlreadyRetry {
+	if !isAlreadyRetry && te.dispatch == nil {
 		oneShotID := uuid.New().String()
 		oneShot := oneShotScheduleRequest{
 			ID:       oneShotID,
