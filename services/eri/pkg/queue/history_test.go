@@ -99,6 +99,29 @@ func TestFormatChannelHistory(t *testing.T) {
 			msgs:  []HistoryMessage{{ID: "msg-inv", AuthorName: "Bob", Role: "User", Content: "Hello inv", CreatedAt: now.Add(-5 * time.Minute)}},
 			tzOpt: []string{"Invalid/Zone"}, wantContains: []string{now.Add(-5 * time.Minute).UTC().Format("2006-01-02 15:04:05 UTC")},
 		},
+		{
+			name: "message with attachments formatted",
+			msgs: []HistoryMessage{{
+				ID:          "msg-att",
+				AuthorName:  "Alice",
+				Role:        "User",
+				Content:     "Check this screenshot",
+				Attachments: []string{"https://cdn.discordapp.com/1.png", "https://cdn.discordapp.com/2.png"},
+				CreatedAt:   now.Add(-5 * time.Minute),
+			}},
+			wantContains: []string{"Check this screenshot [attachments: https://cdn.discordapp.com/1.png, https://cdn.discordapp.com/2.png]"},
+		},
+		{
+			name: "message with attachments only",
+			msgs: []HistoryMessage{{
+				ID:          "msg-att-only",
+				AuthorName:  "Bob",
+				Role:        "User",
+				Attachments: []string{"https://cdn.discordapp.com/image.png"},
+				CreatedAt:   now.Add(-2 * time.Minute),
+			}},
+			wantContains: []string{"[attachments: https://cdn.discordapp.com/image.png]"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -374,5 +397,67 @@ func TestFormatPreviousSession(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestConvertDiscordMessagesToHistory(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	dg := &discordgo.Session{
+		State: &discordgo.State{
+			Ready: discordgo.Ready{
+				User: &discordgo.User{ID: "bot-id", Username: "aerial"},
+			},
+		},
+	}
+
+	msgs := []*discordgo.Message{
+		nil,
+		{
+			ID:        "msg-user",
+			Content:   "user msg",
+			Timestamp: now,
+			Author:    &discordgo.User{ID: "user-1", Username: "alice", Bot: false},
+			Attachments: []*discordgo.MessageAttachment{
+				nil,
+				{URL: "https://cdn.discordapp.com/file1.png"},
+				{URL: ""},
+			},
+		},
+		{
+			ID:        "msg-bot",
+			Content:   "bot msg",
+			Timestamp: now,
+			Author:    &discordgo.User{ID: "bot-2", Username: "otherbot", Bot: true},
+		},
+		{
+			ID:        "msg-asst",
+			Content:   "asst msg",
+			Timestamp: now,
+			Author:    &discordgo.User{ID: "bot-id", Username: "aerial", Bot: true},
+		},
+		{
+			ID:        "msg-webhook",
+			Content:   "webhook msg",
+			Timestamp: now,
+			WebhookID: "hook-1",
+		},
+	}
+
+	results := convertDiscordMessagesToHistory(dg, msgs)
+	if len(results) != 4 {
+		t.Fatalf("expected 4 results, got %d", len(results))
+	}
+	if results[0].Role != "User" || len(results[0].Attachments) != 1 || results[0].Attachments[0] != "https://cdn.discordapp.com/file1.png" {
+		t.Errorf("unexpected user message: %+v", results[0])
+	}
+	if results[1].Role != "Bot" {
+		t.Errorf("expected Bot role, got %s", results[1].Role)
+	}
+	if results[2].Role != "Assistant" {
+		t.Errorf("expected Assistant role, got %s", results[2].Role)
+	}
+	if results[3].Role != "Bot" || results[3].AuthorName != "Webhook" {
+		t.Errorf("expected Webhook Bot, got %+v", results[3])
 	}
 }
