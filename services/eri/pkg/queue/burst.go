@@ -805,7 +805,7 @@ func (te *turnExecution) resolveExecutionPool() (runner.AgentPool, PoolKey, erro
 }
 
 func getStreamingDaemon(pool runner.AgentPool, threadID string) *runner.StreamingDaemon {
-	if pool == nil {
+	if pool == nil || threadID == "" {
 		return nil
 	}
 	if dPool, ok := pool.(interface {
@@ -813,6 +813,15 @@ func getStreamingDaemon(pool runner.AgentPool, threadID string) *runner.Streamin
 	}); ok {
 		if d, ok := dPool.Get(threadID); ok && d != nil {
 			return d
+		}
+		if norm := db.DiscordSessionID(threadID); norm != threadID {
+			if d, ok := dPool.Get(norm); ok && d != nil {
+				return d
+			}
+		} else if trimmed := strings.TrimPrefix(threadID, "discord-"); trimmed != threadID && trimmed != "" {
+			if d, ok := dPool.Get(trimmed); ok && d != nil {
+				return d
+			}
 		}
 	}
 	return nil

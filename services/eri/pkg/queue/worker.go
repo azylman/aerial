@@ -1086,7 +1086,8 @@ func (te *turnExecution) handleSessionCorruptionRetry(attempt, maxAttempts int, 
 		}
 	}
 	if activePool != nil {
-		if newLease, lErr := activePool.AcquireLease(te.pool.ctx, te.threadID); lErr == nil {
+		// Acquire replacement lease using te.leaseKey() so Discord threads retain "discord-<id>" pool scoping.
+		if newLease, lErr := activePool.AcquireLease(te.pool.ctx, te.leaseKey()); lErr == nil {
 			te.activeSessionMu.Lock()
 			te.lease, te.leaseSessionID, te.isEphemeral, te.currentSessionID = newLease, newLease.SessionID(), te.isEphemeral || newLease.IsEphemeral(), newLease.SessionID()
 			te.activeSessionMu.Unlock()

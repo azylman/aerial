@@ -3786,8 +3786,32 @@ func TestMakeSessionCallbacks(t *testing.T) {
 	}
 }
 
+type mockDaemonGetterPool struct {
+	runner.AgentPool
+	daemons map[string]*runner.StreamingDaemon
+}
+
+func (m *mockDaemonGetterPool) Get(key string) (*runner.StreamingDaemon, bool) {
+	if m == nil || m.daemons == nil {
+		return nil, false
+	}
+	d, ok := m.daemons[key]
+	return d, ok
+}
+
 func TestStreamingDaemonHelpers(t *testing.T) {
 	t.Parallel()
+
+	d1 := &runner.StreamingDaemon{}
+	d1.SetSessionID("sess-1")
+	dNorm := &runner.StreamingDaemon{}
+	dNorm.SetSessionID("sess-norm")
+	dTrimmed := &runner.StreamingDaemon{}
+	dTrimmed.SetSessionID("sess-trimmed")
+
+	poolDirect := &mockDaemonGetterPool{daemons: map[string]*runner.StreamingDaemon{"thread-1": d1}}
+	poolNorm := &mockDaemonGetterPool{daemons: map[string]*runner.StreamingDaemon{"discord-12345": dNorm}}
+	poolTrimmed := &mockDaemonGetterPool{daemons: map[string]*runner.StreamingDaemon{"12345": dTrimmed}}
 
 	tests := []struct {
 		name       string
@@ -3797,6 +3821,10 @@ func TestStreamingDaemonHelpers(t *testing.T) {
 		wantSessID string
 	}{
 		{name: "nil pool", pool: nil, threadID: "thread-1", wantDaemon: false, wantSessID: ""},
+		{name: "pool missing key", pool: poolDirect, threadID: "non-existent", wantDaemon: false, wantSessID: ""},
+		{name: "pool direct match", pool: poolDirect, threadID: "thread-1", wantDaemon: true, wantSessID: "sess-1"},
+		{name: "pool normalized discord snowflake fallback", pool: poolNorm, threadID: "12345", wantDaemon: true, wantSessID: "sess-norm"},
+		{name: "pool trimmed discord prefix fallback", pool: poolTrimmed, threadID: "discord-12345", wantDaemon: true, wantSessID: "sess-trimmed"},
 	}
 
 	for _, tc := range tests {
@@ -3993,8 +4021,14 @@ func TestTurnExecution_DispatchClosedStoreAndExhausted(t *testing.T) {
 func TestProbeCandidateSessionID(t *testing.T) {
 	t.Parallel()
 
+	dNorm := &runner.StreamingDaemon{}
+	dNorm.SetSessionID("sess-norm-daemon")
+	poolNorm := &mockDaemonGetterPool{daemons: map[string]*runner.StreamingDaemon{"discord-12345": dNorm}}
+
 	tests := []struct {
 		name             string
+		threadID         string
+		activePool       runner.AgentPool
 		currentSessionID string
 		candidate        string
 		want             string
@@ -4002,12 +4036,13 @@ func TestProbeCandidateSessionID(t *testing.T) {
 		{name: "direct candidate preferred", currentSessionID: "sess-probe-1", candidate: "direct-candidate", want: "direct-candidate"},
 		{name: "fallback to current session", currentSessionID: "sess-probe-1", candidate: "", want: "sess-probe-1"},
 		{name: "empty fallback", currentSessionID: "", candidate: "", want: ""},
+		{name: "fallback to active pool via leaseKey", threadID: "12345", activePool: poolNorm, candidate: "", want: "sess-norm-daemon"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			te := &turnExecution{currentSessionID: tc.currentSessionID}
+			te := &turnExecution{threadID: tc.threadID, activePool: tc.activePool, currentSessionID: tc.currentSessionID}
 			if got := te.probeCandidateSessionID(tc.candidate, "", ""); got != tc.want {
 				t.Fatalf("probeCandidateSessionID() got %q, want %q", got, tc.want)
 			}

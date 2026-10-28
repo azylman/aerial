@@ -319,8 +319,9 @@ func (te *turnExecution) probeCandidateSessionID(candidateID, stdout, stderr str
 	if candidateID != "" {
 		return candidateID
 	}
+	leaseKey := te.leaseKey()
 	if te.isEphemeral {
-		if s := daemonSessionID(te.activePool, te.threadID); s != "" {
+		if s := daemonSessionID(te.activePool, leaseKey); s != "" {
 			return s
 		}
 	}
@@ -333,11 +334,11 @@ func (te *turnExecution) probeCandidateSessionID(candidateID, stdout, stderr str
 	if s := te.extractVerifiedDiskSessionID(stdout, stderr); s != "" {
 		return s
 	}
-	if s := daemonSessionID(te.activePool, te.threadID); s != "" {
+	if s := daemonSessionID(te.activePool, leaseKey); s != "" {
 		return s
 	}
 	if primaryPool := te.pool.AgentPool(); primaryPool != nil && primaryPool != te.activePool {
-		return daemonSessionID(primaryPool, te.threadID)
+		return daemonSessionID(primaryPool, leaseKey)
 	}
 	return ""
 }
