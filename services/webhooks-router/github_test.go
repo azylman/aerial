@@ -275,6 +275,18 @@ func TestProcessGitHubEvent(t *testing.T) {
 			wantPR:  518, wantCIFailedCalls: 1,
 		},
 		{
+			name: "check_run failure for Container Builds Gate is ignored", event: "check_run", delivery: "del-cr-gate-ignore",
+			payload: `{"action":"completed","check_run":{"name":"Container Builds Gate","head_sha":"checkhead444","status":"completed","conclusion":"failure","pull_requests":[{"number":518,"head":{"ref":"feat/test","sha":"checkhead444"}}]},"repository":{"full_name":"azylman/aerial"}}`,
+			reg:     &mockPRRegistry{ciFailedTargetID: "target-111", ciFailedUpdated: true},
+			wantPR:  518, wantCIFailedCalls: 0,
+		},
+		{
+			name: "check_run failure for superseded commit SHA is ignored", event: "check_run", delivery: "del-cr-stale-sha",
+			payload: `{"action":"completed","check_run":{"name":"Run Service Unit Tests","head_sha":"stalehead111","status":"completed","conclusion":"failure","pull_requests":[{"number":518,"head":{"ref":"feat/test","sha":"stalehead111"}}]},"repository":{"full_name":"azylman/aerial"}}`,
+			reg:     &mockPRRegistry{resolveHeadSHA: "newerhead999", ciFailedTargetID: "target-111", ciFailedUpdated: true},
+			wantPR:  518, wantCIFailedCalls: 0,
+		},
+		{
 			name: "check_run failure for roborev enriches prompt with latest comment", event: "check_run", delivery: "del-cr-roborev",
 			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"roborev","head_sha":"robo525abcdef","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/525","output":{"title":"Review Failed","summary":"Found issues"},"pull_requests":[{"number":525,"head":{"ref":"feat/test","sha":"robo525abcdef"}}]}}`,
 			reg:               &mockPRRegistry{ciFailedTargetID: "1555405874565091380", ciFailedUpdated: true},

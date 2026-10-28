@@ -513,6 +513,10 @@ func isRoboRevCheck(checkName string) bool {
 	return strings.EqualFold(trimmed, "roborev") || strings.EqualFold(trimmed, "RoboRev Code Review")
 }
 
+func isGateAggregatorCheck(checkName string) bool {
+	return strings.EqualFold(strings.TrimSpace(checkName), "Container Builds Gate")
+}
+
 func prCheckKey(repo string, prNumber int) string {
 	return fmt.Sprintf("%s#%d", normalizeRepo(repo), prNumber)
 }
@@ -529,8 +533,23 @@ func (s *RouterServer) canRecoverRoboRevSuccess(ctx context.Context, repo string
 	return comment != "" && !strings.Contains(comment, "## roborev: Review Passed")
 }
 
+func (s *RouterServer) isStaleOrIgnoredCIFailure(ctx context.Context, res *ResolvedGitHubEvent) bool {
+	if s.registry == nil || (res.Conclusion != "failure" && res.Conclusion != "timed_out") || isGateAggregatorCheck(res.CheckName) {
+		return true
+	}
+	if res.PRNumber <= 0 || res.HeadSHA == "" || isZeroSHA(res.HeadSHA) {
+		return false
+	}
+	_, _, regHeadSHA, _, err := s.registry.ResolvePRByNumber(ctx, res.Repo, res.PRNumber)
+	if err == nil && regHeadSHA != "" && !strings.EqualFold(regHeadSHA, strings.TrimSpace(res.HeadSHA)) {
+		log.Printf("[webhooks-router] [github] ignoring stale CI failure on %s#%d for superseded commit %s (current head_sha=%s)", res.Repo, res.PRNumber, res.HeadSHA, regHeadSHA)
+		return true
+	}
+	return false
+}
+
 func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) error {
-	if s.registry == nil || (res.Conclusion != "failure" && res.Conclusion != "timed_out") {
+	if s.isStaleOrIgnoredCIFailure(ctx, res) {
 		return nil
 	}
 	if res.PRNumber > 0 && res.HeadSHA != "" && !isRoboRevCheck(res.CheckName) {

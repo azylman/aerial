@@ -299,6 +299,77 @@ run_go_test() {
     fi
 }
 
+run_go_pkg_coverage() {
+    svc="$1"
+    targetPkg="${2:-.}"
+    if [ -d "$svc" ] && has_cmd go; then
+        cgo_val="${CGO_ENABLED:-}"
+        if [ -z "$cgo_val" ]; then
+            if has_cmd gcc || has_cmd clang; then
+                cgo_val=1
+            else
+                cgo_val=0
+            fi
+        fi
+        prof_file=$(mktemp /tmp/aerial-staged-cov.XXXXXX)
+        if ! (cd "$svc" && env -i \
+            ${PATH:+PATH="$PATH"} \
+            ${HOME:+HOME="$HOME"} \
+            ${GOROOT:+GOROOT="$GOROOT"} \
+            ${GOPATH:+GOPATH="$GOPATH"} \
+            ${GOCACHE:+GOCACHE="$GOCACHE"} \
+            ${GOMODCACHE:+GOMODCACHE="$GOMODCACHE"} \
+            ${GOLANGCI_LINT_CACHE:+GOLANGCI_LINT_CACHE="$GOLANGCI_LINT_CACHE"} \
+            ${TMPDIR:+TMPDIR="$TMPDIR"} \
+            ${SystemRoot:+SystemRoot="$SystemRoot"} \
+            ${SYSTEMROOT:+SYSTEMROOT="$SYSTEMROOT"} \
+            ${USERPROFILE:+USERPROFILE="$USERPROFILE"} \
+            ${HOMEDRIVE:+HOMEDRIVE="$HOMEDRIVE"} \
+            ${HOMEPATH:+HOMEPATH="$HOMEPATH"} \
+            ${TMP:+TMP="$TMP"} \
+            ${TEMP:+TEMP="$TEMP"} \
+            ${LOCALAPPDATA:+LOCALAPPDATA="$LOCALAPPDATA"} \
+            ${APPDATA:+APPDATA="$APPDATA"} \
+            ${COMSPEC:+COMSPEC="$COMSPEC"} \
+            ${PATHEXT:+PATHEXT="$PATHEXT"} \
+            MSYS_NO_PATHCONV=1 \
+            LANG="${LANG:-en_US.UTF-8}" \
+            LC_ALL="${LC_ALL:-en_US.UTF-8}" \
+            GIT_TERMINAL_PROMPT=0 \
+            CGO_ENABLED="$cgo_val" \
+            go test -timeout "${AERIAL_TEST_TIMEOUT:-180s}" -coverprofile="$prof_file" "$targetPkg"); then
+            rm -f "$prof_file"
+            exit 1
+        fi
+        if [ -f "$prof_file" ]; then
+            counts=$(awk '
+                BEGIN { tot=0; cov=0 }
+                /^mode:/ { next }
+                NF >= 3 {
+                    stmts = $(NF-1) + 0
+                    count = $NF + 0
+                    tot += stmts
+                    if (count > 0) cov += stmts
+                }
+                END { printf("%d %d\n", tot, cov) }
+            ' "$prof_file")
+            pkg_tot=$(echo "$counts" | awk '{print $1}')
+            pkg_cov=$(echo "$counts" | awk '{print $2}')
+            if [ "$pkg_tot" -gt 0 ]; then
+                pct_val=$(awk "BEGIN { printf \"%.1f\", ($pkg_cov / $pkg_tot) * 100.0 }")
+                is_violation=$(awk "BEGIN { print ($pct_val < 95.0) ? 1 : 0 }")
+                if [ "$is_violation" -eq 1 ]; then
+                    echo "🚨 [Aerial Verify] Package $svc ($targetPkg) coverage ($pct_val% — $pkg_cov/$pkg_tot stmts) is below required 95.0% floor." >&2
+                    (cd "$svc" && go tool cover -func="$prof_file" 2>/dev/null | awk '$1 !~ /^total:/ && $NF != "100.0%"' | sort -k3 -n | head -n 5 | sed 's/^/   • /') >&2 || true
+                    rm -f "$prof_file"
+                    exit 1
+                fi
+            fi
+            rm -f "$prof_file"
+        fi
+    fi
+}
+
 run_node_syntax() {
     file="$1"
     if [ -f "$file" ]; then
@@ -442,8 +513,10 @@ if [ "$MODE" = "staged" ]; then
                     fi
                     if [ "$p" = "." ]; then
                         run_golangci_lint "$svc" "."
+                        run_go_pkg_coverage "$svc" "."
                     else
                         run_golangci_lint "$svc" "./$p"
+                        run_go_pkg_coverage "$svc" "./$p"
                     fi
                 done
                 run_deadcode "$svc"
