@@ -122,6 +122,7 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 		wantDeployedJobs []string
 		wantFailedJobs   []string
 		wantPrompts      int
+		wantDispatches   int
 		wantPromptSubstr []string
 		wantDMs          int
 		wantDMSubstr     string
@@ -151,7 +152,7 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 			streamLines:      []string{`{"Index":1003,"Events":[{"Topic":"Deployment","Type":"DeploymentStatusUpdate","Payload":{"Deployment":{"ID":"dep-fail-1","JobID":"brain","Status":"failed","StatusDescription":"Allocation failed health check: connection refused on port 8080"}}}]}`},
 			reg:              mkDeployFailedReg(validThread, 553, "sha123456", validRepo, true),
 			wantFailedJobs:   []string{"brain"},
-			wantPrompts:      1,
+			wantDispatches:   1,
 			wantPromptSubstr: []string{"Nomad deployment for job brain failed", "Allocation failed health check: connection refused on port 8080", "Please investigate and fix the deployment failure."},
 		},
 		{
@@ -184,7 +185,7 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 			streamLines:      []string{`{"Index":1006,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"ID":"eval-fail-allocs","JobID":"brain","Status":"complete","DeploymentID":"","FailedTGAllocs":{"brain":{"AllocationResourceExhausted":1}}}}}]}`},
 			reg:              mkDeployFailedReg(validThread, 586, "sha_eval_fail", validRepo, true),
 			wantFailedJobs:   []string{"brain"},
-			wantPrompts:      1,
+			wantDispatches:   1,
 			wantPromptSubstr: []string{`failed with status "complete"`},
 		},
 		{
@@ -192,7 +193,7 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 			streamLines:      []string{`{"Index":1007,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"ID":"eval-status-failed","JobID":"brain","Status":"failed","StatusDescription":"scheduling timeout","DeploymentID":""}}}]}`},
 			reg:              mkDeployFailedReg(validThread, 587, "sha_eval_fail_status", validRepo, true),
 			wantFailedJobs:   []string{"brain"},
-			wantPrompts:      1,
+			wantDispatches:   1,
 			wantPromptSubstr: []string{"scheduling timeout"},
 		},
 		{
@@ -216,7 +217,7 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 			streamLines:      []string{`{"Index":1009,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":{"Allocation":{"ID":"alloc-fail-1","JobID":"brain","DesiredStatus":"stop","ClientStatus":"failed","ClientDescription":"Failed tasks","TaskStates":{"brain":{"State":"dead","Failed":true,"Events":[{"Type":"Driver Failure","DriverError":"invalid mount config: bind source path does not exist: /mnt/data/supervisor/share/coverage/brain"}]}}}}}]}`},
 			reg:              mkDeployFailedReg(validThread, 613, "7cbc1f9b1234567890", validRepo, true),
 			wantFailedJobs:   []string{"brain"},
-			wantPrompts:      1,
+			wantDispatches:   1,
 			wantPromptSubstr: []string{"Nomad deployment for job brain failed", "bind source path does not exist: /mnt/data/supervisor/share/coverage/brain"},
 		},
 		{
@@ -229,7 +230,7 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 			streamLines:      []string{`{"Index":2021,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"ID":"eval-multi-fail","JobID":"brain","Status":"complete","DeploymentID":"","FailedTGAllocs":{"taskGroupA":{"ResourceExhausted":1}},"QueuedAllocations":{"taskGroupB":1}}}}]}`},
 			reg:              mkDeployFailedReg(validThread, 630, "sha_multi_tg_fail", validRepo, true),
 			wantFailedJobs:   []string{"brain"},
-			wantPrompts:      1,
+			wantDispatches:   1,
 			wantPromptSubstr: []string{"failed task group allocations"},
 		},
 		{
@@ -268,7 +269,7 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 			streamLines:    []string{`{"Index":2052,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"ID":"eval-mixed-fail","JobID":"brain","Status":"complete","BlockedEval":"eval-blocked-b","FailedTGAllocs":{"groupA":{"DimensionExhausted":{"network: port collision":1}},"groupB":{"ConstraintFiltered":1}},"QueuedAllocations":{"groupA":1,"groupB":0}}}}]}`},
 			reg:            mkDeployFailedReg(validThread, 637, "sha_mixed_fail", validRepo, true),
 			wantFailedJobs: []string{"brain"},
-			wantPrompts:    1,
+			wantDispatches: 1,
 		},
 		{
 			name:        "evaluation blocked with FailedTGAllocs ignored",
@@ -281,7 +282,7 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 			deploymentsJSON:  `[{"ID":"dep-old-1","Status":"successful","StatusDescription":"Deployment completed successfully","JobVersion":5,"CreateIndex":100}]`,
 			reg:              mkDeployFailedReg(validThread, 667, "sha-infisical-test", validRepo, true),
 			wantFailedJobs:   []string{"infisical"},
-			wantPrompts:      1,
+			wantDispatches:   1,
 			wantPromptSubstr: []string{"infisical", `task "server"`, "exited with code 1"},
 		},
 		{
@@ -320,7 +321,7 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 			evalSpecJSON:     `{"ID":"eval-blocked-mem","Status":"blocked"}`,
 			reg:              mkDeployFailedReg(validThread, 971, validSHA, validRepo, true),
 			wantFailedJobs:   []string{"coven"},
-			wantPrompts:      1,
+			wantDispatches:   1,
 			wantPromptSubstr: []string{`failed with status "blocked"`, "memory"},
 		},
 		{
@@ -415,9 +416,26 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 			if len(pCalls) != tt.wantPrompts {
 				t.Fatalf("prompt calls = %d, want %d", len(pCalls), tt.wantPrompts)
 			}
+			dCalls := mockDisp.DispatchCalls()
+			if len(dCalls) != tt.wantDispatches {
+				t.Fatalf("dispatch calls = %d, want %d", len(dCalls), tt.wantDispatches)
+			}
 			for _, subStr := range tt.wantPromptSubstr {
-				if len(pCalls) == 0 || !strings.Contains(pCalls[0].Prompt, subStr) {
-					t.Errorf("prompt missing %q in %q", subStr, pCalls[0].Prompt)
+				found := false
+				for _, p := range pCalls {
+					if strings.Contains(p.Prompt, subStr) {
+						found = true
+						break
+					}
+				}
+				for _, d := range dCalls {
+					if strings.Contains(d.Prompt, subStr) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("prompt/dispatch missing %q", subStr)
 				}
 			}
 
@@ -1121,10 +1139,12 @@ func TestNomadUnmanagedJobCrashAndDelegation(t *testing.T) {
 		desc             string
 		dmErr            error
 		promptErr        error
+		dispatchErr      error
 		widgetErr        error
 		wantCrashJobs    int
 		wantDMs          int
 		wantPrompts      int
+		wantDispatches   int
 		wantWidgets      int
 		wantMetricSubstr string
 		wantErr          bool
@@ -1138,8 +1158,8 @@ func TestNomadUnmanagedJobCrashAndDelegation(t *testing.T) {
 		{name: "HandleUnmanagedJobCrash empty job ID no-op", noRiver: true, jobID: ""},
 		{name: "HandleNomadJobFailure untracked in registry", useFailure: true, noRiver: true, reg: &mockPRRegistry{deployFailedJobUpdated: false}, jobID: "openobserve", allocID: "alloc-99", status: "failed", desc: "Task OOM killed", wantDMs: 1, wantPrompts: 1},
 		{name: "HandleNomadJobFailure already deploy_failed PR skips unmanaged crash alert", useFailure: true, noRiver: true, reg: &mockPRRegistry{deployFailedJobPRNum: 613, deployFailedJobUpdated: false}, jobID: "eri", allocID: "alloc-613", status: "failed", desc: "dotenv error", wantDMs: 0, wantPrompts: 0},
-		{name: "HandleNomadJobFailure tracked syncs widget", useFailure: true, noRiver: true, reg: &mockPRRegistry{deployFailedJobTargetID: "1555405874565091380", deployFailedJobPRNum: 613, deployFailedJobMergeSHA: "sha613", deployFailedJobRepo: "azylman/aerial", deployFailedJobUpdated: true, resolveTargetID: "1555405874565091380", resolveBranch: "feat/x"}, jobID: "brain", allocID: "alloc-613", status: "failed", desc: "Task OOM killed", widgetErr: errors.New("widget err"), wantDMs: 0, wantPrompts: 1, wantWidgets: 1},
-		{name: "HandleNomadJobFailure prompt error returns error for retry", useFailure: true, noRiver: true, reg: &mockPRRegistry{deployFailedJobTargetID: "", deployFailedJobPRNum: 614, deployFailedJobMergeSHA: "sha614", deployFailedJobRepo: "azylman/aerial", deployFailedJobUpdated: true}, jobID: "eri", allocID: "alloc-614", status: "failed", desc: "dotenv error", promptErr: errors.New("502 bad gateway"), wantDMs: 0, wantPrompts: 1, wantErr: true},
+		{name: "HandleNomadJobFailure tracked syncs widget", useFailure: true, noRiver: true, reg: &mockPRRegistry{deployFailedJobTargetID: "1555405874565091380", deployFailedJobPRNum: 613, deployFailedJobMergeSHA: "sha613", deployFailedJobRepo: "azylman/aerial", deployFailedJobUpdated: true, resolveTargetID: "1555405874565091380", resolveBranch: "feat/x"}, jobID: "brain", allocID: "alloc-613", status: "failed", desc: "Task OOM killed", widgetErr: errors.New("widget err"), wantDMs: 0, wantDispatches: 1, wantWidgets: 1},
+		{name: "HandleNomadJobFailure prompt error returns error for retry", useFailure: true, noRiver: true, reg: &mockPRRegistry{deployFailedJobTargetID: "", deployFailedJobPRNum: 614, deployFailedJobMergeSHA: "sha614", deployFailedJobRepo: "azylman/aerial", deployFailedJobUpdated: true}, jobID: "eri", allocID: "alloc-614", status: "failed", desc: "dotenv error", dispatchErr: errors.New("502 bad gateway"), wantDMs: 0, wantDispatches: 1, wantErr: true},
 		{name: "HandleNomadJobFailure nil registry", useFailure: true, noRiver: true, reg: nil, jobID: "cadvisor", allocID: "alloc-99", status: "failed", desc: "Docker daemon died", wantDMs: 1, wantPrompts: 1},
 		{name: "HandleNomadJobFailure empty job ID no-op", useFailure: true, noRiver: true, jobID: "", allocID: "alloc-1", status: "failed", desc: "oom"},
 		{name: "HandleNomadJobFailure registry error", useFailure: true, noRiver: true, reg: &mockPRRegistry{err: errors.New("registry failure")}, jobID: "vector", allocID: "alloc-99", status: "failed", desc: "Config parse failed", wantErr: true},
@@ -1154,7 +1174,7 @@ func TestNomadUnmanagedJobCrashAndDelegation(t *testing.T) {
 				mockRiver = &mockRiverInserter{skipDuplicate: tc.skipDuplicate, err: tc.riverErr}
 				riverArgs = append(riverArgs, mockRiver)
 			}
-			mockDisp := &mockOutboundDispatcher{directMessageErr: tc.dmErr, promptErr: tc.promptErr, widgetErr: tc.widgetErr}
+			mockDisp := &mockOutboundDispatcher{directMessageErr: tc.dmErr, promptErr: tc.promptErr, dispatchErr: tc.dispatchErr, widgetErr: tc.widgetErr}
 			srv := NewRouterServer(Config{SystemChannelID: "1555405874565091380"}, nil, riverArgs...)
 			srv.SetRegistry(tc.reg)
 			srv.SetDispatcher(mockDisp)
@@ -1174,6 +1194,9 @@ func TestNomadUnmanagedJobCrashAndDelegation(t *testing.T) {
 			}
 			if len(mockDisp.PromptCalls()) != tc.wantPrompts {
 				t.Errorf("Prompt calls = %d, want %d", len(mockDisp.PromptCalls()), tc.wantPrompts)
+			}
+			if len(mockDisp.DispatchCalls()) != tc.wantDispatches {
+				t.Errorf("Dispatch calls = %d, want %d", len(mockDisp.DispatchCalls()), tc.wantDispatches)
 			}
 			if len(mockDisp.WidgetCalls()) != tc.wantWidgets {
 				t.Errorf("Widget calls = %d, want %d", len(mockDisp.WidgetCalls()), tc.wantWidgets)

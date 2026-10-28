@@ -598,12 +598,12 @@ func (w *ExecuteChunkWorker) Work(ctx context.Context, job *river.Job[ExecuteChu
 	return w.server.ProcessExecuteChunk(ctx, job.Args.BuildID, job.Args.ChunkIndex, isFinalAttempt)
 }
 
-// BrainPromptRequest represents the JSON payload dispatched to Brain's POST /prompt endpoint.
-type BrainPromptRequest struct {
-	ChannelID string `json:"channel_id"`
-	Prompt    string `json:"prompt"`
-	Effort    string `json:"effort,omitempty"`
-	Silent    bool   `json:"silent,omitempty"`
+// BrainDispatchRequest represents the JSON payload dispatched to Brain's POST /dispatch endpoint.
+type BrainDispatchRequest struct {
+	ID     string `json:"id,omitempty"`
+	Source string `json:"source"`
+	Prompt string `json:"prompt"`
+	Effort string `json:"effort,omitempty"`
 }
 
 // StatusWidgetChunk represents a chunk in a Vanadis build or a PR task for widget rendering.
@@ -766,11 +766,12 @@ func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string,
 	if err != nil {
 		return fmt.Errorf("format chunk prompt: %w", err)
 	}
-	reqPayload := BrainPromptRequest{
-		ChannelID: build.ThreadID, Prompt: prompt, Effort: capChunkEffort(chunk.Effort),
-		Silent: true,
+	reqPayload := BrainDispatchRequest{
+		Source: "vanadis",
+		Prompt: prompt,
+		Effort: capChunkEffort(chunk.Effort),
 	}
-	if err := s.dispatchBrainPrompt(ctx, reqPayload); err != nil {
+	if err := s.dispatchBrainDispatch(ctx, reqPayload); err != nil {
 		if isFinalAttempt {
 			if cErr := s.store.UpdateChunkStatus(ctx, chunk.ID, "failed"); cErr != nil {
 				log.Printf("[vanadis] failed marking chunk %s failed on final attempt: %v", chunk.ID, cErr)
@@ -786,8 +787,8 @@ func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string,
 	return nil
 }
 
-func (s *VanadisServer) dispatchBrainPrompt(ctx context.Context, payload BrainPromptRequest) error {
-	_, err := s.postBrainJSON(ctx, "/prompt", payload, 64<<10)
+func (s *VanadisServer) dispatchBrainDispatch(ctx context.Context, payload BrainDispatchRequest) error {
+	_, err := s.postBrainJSON(ctx, "/dispatch", payload, 64<<10)
 	return err
 }
 
@@ -992,8 +993,8 @@ func (s *VanadisServer) cancelBuildChunksAndPrompts(ctx context.Context, buildID
 		existingChunks[i].Status = "cancelled"
 		existingChunks[i].UpdatedAt = now
 	}
-	if _, err := s.postBrainJSON(ctx, "/prompt/cancel", map[string]string{"build_id": buildID}, 4<<10); err != nil {
-		log.Printf("[vanadis] warning: failed cancelling pending brain prompts for build %s: %v", buildID, err)
+	if _, err := s.postBrainJSON(ctx, "/dispatch/cancel", map[string]string{"build_id": buildID}, 4<<10); err != nil {
+		log.Printf("[vanadis] warning: failed cancelling pending brain dispatches for build %s: %v", buildID, err)
 	}
 	if existing != nil {
 		existing.Status = "cancelled"

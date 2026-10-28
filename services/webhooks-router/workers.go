@@ -292,7 +292,13 @@ type PromptRequest struct {
 	ChannelID string `json:"channel_id"`
 	Prompt    string `json:"prompt"`
 	Effort    string `json:"effort,omitempty"`
-	Silent    bool   `json:"silent,omitempty"`
+}
+
+type DispatchRequest struct {
+	Source    string `json:"source"`
+	SessionID string `json:"session_id,omitempty"`
+	Prompt    string `json:"prompt"`
+	Effort    string `json:"effort,omitempty"`
 }
 
 type DirectMessageRequest struct {
@@ -313,6 +319,7 @@ type OutboundDispatcher interface {
 	DispatchPrompt(ctx context.Context, req PromptRequest) error
 	DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error
 	DispatchWidget(ctx context.Context, payload StatusWidgetRequest) (string, error)
+	DispatchBackground(ctx context.Context, req DispatchRequest) error
 }
 
 type DefaultOutboundDispatcher struct {
@@ -398,8 +405,10 @@ func (d *DefaultOutboundDispatcher) DispatchImageReady(ctx context.Context, req 
 }
 
 func (d *DefaultOutboundDispatcher) postBrainWithRetry(ctx context.Context, endpointPath, reqLabel, statusLabel, channelID string, maxAttempts int, defaultDelay time.Duration, expBackoff bool, payload any) error {
-	if !IsValidDiscordChannel(channelID) {
-		return fmt.Errorf("invalid discord snowflake channel id: %q", channelID)
+	if channelID != "" || endpointPath != "/dispatch" {
+		if !IsValidDiscordChannel(channelID) {
+			return fmt.Errorf("invalid discord snowflake channel id: %q", channelID)
+		}
 	}
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -465,6 +474,10 @@ func (d *DefaultOutboundDispatcher) DispatchPrompt(ctx context.Context, req Prom
 
 func (d *DefaultOutboundDispatcher) DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error {
 	return d.postBrainWithRetry(ctx, "/discord/message", "direct message", "brain internal message", req.ChannelID, 3, 500*time.Millisecond, false, req)
+}
+
+func (d *DefaultOutboundDispatcher) DispatchBackground(ctx context.Context, req DispatchRequest) error {
+	return d.postBrainWithRetry(ctx, "/dispatch", "dispatch", "brain dispatch", "", d.maxAttempts, 1500*time.Millisecond, true, req)
 }
 
 func (d *DefaultOutboundDispatcher) DispatchWidget(ctx context.Context, payload StatusWidgetRequest) (string, error) {
