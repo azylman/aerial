@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/azylman/aerial/services/eri/pkg/db"
@@ -19,6 +18,7 @@ import (
 var (
 	_ db.Store           = (*FakeStore)(nil)
 	_ db.MessageStore    = (*FakeStore)(nil)
+	_ db.DispatchStore   = (*FakeStore)(nil)
 	_ db.SessionStore    = (*FakeStore)(nil)
 	_ db.TranscriptStore = (*FakeStore)(nil)
 )
@@ -77,6 +77,10 @@ type FakeStore struct {
 	messageOrder []string
 	nextRowID    int64
 
+	dispatches        map[string]*db.Dispatch
+	dispatchOrder     []string
+	nextDispatchRowID int64
+
 	sessions        map[string]*db.SessionInfo
 	threadSummaries map[string]threadSummaryRecord
 
@@ -86,9 +90,17 @@ type FakeStore struct {
 
 // NewFakeStore constructs an initialized, empty in-memory FakeStore.
 func NewFakeStore() *FakeStore {
-	f := &FakeStore{failNext: make(map[string]error), messages: make(map[string]*db.Message), messageOrder: make([]string, 0)}
-	f.sessions, f.threadSummaries = make(map[string]*db.SessionInfo), make(map[string]threadSummaryRecord)
-	f.sessionSummaries, f.transcriptSteps = make(map[string]*db.SessionSummary), make(map[string][]db.TranscriptStep)
+	f := &FakeStore{
+		failNext:         make(map[string]error),
+		messages:         make(map[string]*db.Message),
+		messageOrder:     make([]string, 0),
+		dispatches:       make(map[string]*db.Dispatch),
+		dispatchOrder:    make([]string, 0),
+		sessions:         make(map[string]*db.SessionInfo),
+		threadSummaries:  make(map[string]threadSummaryRecord),
+		sessionSummaries: make(map[string]*db.SessionSummary),
+		transcriptSteps:  make(map[string][]db.TranscriptStep),
+	}
 	return f
 }
 
@@ -173,6 +185,14 @@ func cloneMessage(m *db.Message) *db.Message {
 	return &cp
 }
 
+func cloneDispatch(d *db.Dispatch) *db.Dispatch {
+	if d == nil {
+		return nil
+	}
+	cp := *d
+	return &cp
+}
+
 func cloneSessionSummary(s *db.SessionSummary) *db.SessionSummary {
 	if s == nil {
 		return nil
@@ -200,31 +220,42 @@ func textMatchScore(text, qLower string, words []string) float64 {
 			matched++
 		}
 	}
-	if len(words) > 0 {
-		return float64(matched) / float64(len(words))
+	if len(words) == 0 {
+		return 0
 	}
-	return 0
+	return float64(matched) / float64(len(words))
 }
 
-func textContainsAll(text, qLower string, words []string) bool {
-	lower := strings.ToLower(text)
+func textContainsAll(content, qLower string, words []string) bool {
+	lower := strings.ToLower(content)
 	if strings.Contains(lower, qLower) {
 		return true
 	}
-	return len(words) > 0 && !slices.ContainsFunc(words, func(w string) bool { return !strings.Contains(lower, w) })
+	for _, w := range words {
+		if !strings.Contains(lower, w) {
+			return false
+		}
+	}
+	return len(words) > 0
 }
 
 func (f *FakeStore) insertMessageLocked(msg db.Message) {
+	if strings.TrimSpace(msg.ID) == "" {
+		return
+	}
 	if _, exists := f.messages[msg.ID]; exists {
 		return
 	}
-	msg.RowID = atomic.AddInt64(&f.nextRowID, 1)
 	now := time.Now().UTC()
 	if msg.CreatedAt.IsZero() {
 		msg.CreatedAt = now
 	}
 	if msg.UpdatedAt.IsZero() {
 		msg.UpdatedAt = now
+	}
+	f.nextRowID++
+	if msg.RowID == 0 {
+		msg.RowID = f.nextRowID
 	}
 	if msg.Status == "" {
 		msg.Status = db.StatusPending
@@ -254,8 +285,13 @@ func (f *FakeStore) UpdateMessageStatus(ctx context.Context, id, status, errorMs
 	return f.mutateMessage("UpdateMessageStatus", id, func(m *db.Message) { m.Status, m.ErrorMessage = status, errorMsg })
 }
 
-func (f *FakeStore) UpdateMessageCompleted(ctx context.Context, id, responseText string) error {
-	return f.mutateMessage("UpdateMessageCompleted", id, func(m *db.Message) { m.Status, m.ResponseText = db.StatusCompleted, responseText })
+func (f *FakeStore) UpdateMessageCompleted(ctx context.Context, id, responseText string, conversationID ...string) error {
+	return f.mutateMessage("UpdateMessageCompleted", id, func(m *db.Message) {
+		m.Status, m.ResponseText, m.ErrorMessage = db.StatusCompleted, responseText, ""
+		if len(conversationID) > 0 && strings.TrimSpace(conversationID[0]) != "" {
+			m.ConversationID = strings.TrimSpace(conversationID[0])
+		}
+	})
 }
 
 func (f *FakeStore) IncrementMessageRetry(ctx context.Context, id, errorMsg string) error {
@@ -288,10 +324,11 @@ func (f *FakeStore) GetPendingOrProcessingMessages(ctx context.Context, limit in
 
 func (f *FakeStore) GetMessage(ctx context.Context, id string) (*db.Message, error) {
 	return withFakeLock(f, "GetMessage", func() (*db.Message, error) {
-		if m, ok := f.messages[id]; ok {
-			return cloneMessage(m), nil
+		m, ok := f.messages[id]
+		if !ok {
+			return nil, sql.ErrNoRows
 		}
-		return nil, sql.ErrNoRows
+		return cloneMessage(m), nil
 	})
 }
 
@@ -321,6 +358,15 @@ func (f *FakeStore) GetActiveRecentThreadIDs(ctx context.Context, since time.Dur
 			if m := f.messages[f.messageOrder[i]]; m != nil && m.ThreadID != "" && m.UpdatedAt.After(cutoff) && !seen[m.ThreadID] {
 				seen[m.ThreadID] = true
 				threadIDs = append(threadIDs, m.ThreadID)
+			}
+		}
+		for key, s := range f.sessions {
+			if s != nil && strings.HasPrefix(key, "discord-") && s.UpdatedAt.After(cutoff) {
+				tid := strings.TrimPrefix(key, "discord-")
+				if tid != "" && !seen[tid] {
+					seen[tid] = true
+					threadIDs = append(threadIDs, tid)
+				}
 			}
 		}
 		return threadIDs, nil
@@ -360,8 +406,9 @@ func (f *FakeStore) HasActiveThreadTurn(ctx context.Context, threadID string) (b
 }
 
 func (f *FakeStore) SetSessionUpdatedAt(threadID string, t time.Time) {
+	key := db.DiscordSessionID(threadID)
 	f.withLock(func() {
-		if s := f.sessions[threadID]; s != nil {
+		if s := f.sessions[key]; s != nil {
 			s.UpdatedAt = t
 		}
 	})
@@ -404,9 +451,14 @@ func buildActiveTaskRecord(m *db.Message, sess *db.SessionInfo, threadSummary st
 		summary = db.CleanTaskSummary(m.Content)
 	}
 	var sessID, prevSessID string
-	if sess != nil && !db.IsEphemeralTaskMessage(m.Ephemeral, m.Effort, m.Model) {
-		sessID = sess.InternalSessionID
-		prevSessID = sess.PreviousSessionID
+	if !db.IsEphemeralTaskMessage(m.Ephemeral, m.Effort, m.Model) {
+		sessID = m.ConversationID
+		if sessID == "" && sess != nil {
+			sessID = sess.InternalSessionID
+		}
+		if sess != nil {
+			prevSessID = sess.PreviousSessionID
+		}
 	}
 	return db.ActiveTask{
 		ID:                m.ID,
@@ -430,65 +482,312 @@ func buildActiveTaskRecord(m *db.Message, sess *db.SessionInfo, threadSummary st
 	}
 }
 
+func buildActiveTaskFromDispatch(d *db.Dispatch, sess *db.SessionInfo, threadSummary string) db.ActiveTask {
+	summary := d.Summary
+	if summary == "" {
+		summary = db.CleanTaskSummary(d.Prompt)
+	}
+	threadID := d.SessionID
+	if threadID == "" {
+		threadID = "dispatch-" + d.ID
+	}
+	var sessID, prevSessID string
+	if sess != nil {
+		prevSessID = sess.PreviousSessionID
+	}
+	if d.SessionID != "" {
+		sessID = d.ConversationID
+		if sessID == "" && sess != nil {
+			sessID = sess.InternalSessionID
+		}
+	}
+	return db.ActiveTask{
+		ID:                d.ID,
+		RowID:             d.RowID,
+		ThreadID:          threadID,
+		SessionID:         sessID,
+		PreviousSessionID: prevSessID,
+		ThreadSummary:     threadSummary,
+		AuthorName:        d.Source,
+		AuthorID:          "dispatch:" + d.Source,
+		Prompt:            d.Prompt,
+		Summary:           summary,
+		ResponseText:      d.ResponseText,
+		IsAdmin:           true,
+		Status:            d.Status,
+		RetryCount:        d.RetryCount,
+		ScheduleRunID:     "",
+		TriggerType:       d.Source,
+		CreatedAt:         d.CreatedAt,
+		UpdatedAt:         d.UpdatedAt,
+	}
+}
+
+func (f *FakeStore) getActiveTasksUnfiltered() []db.ActiveTask {
+	var matchedMsgs []*db.Message
+	for _, id := range f.messageOrder {
+		m := f.messages[id]
+		if m != nil && (m.Status == db.StatusPending || m.Status == db.StatusProcessing) {
+			matchedMsgs = append(matchedMsgs, m)
+		}
+	}
+
+	var activeDispatches []*db.Dispatch
+	for _, id := range f.dispatchOrder {
+		d := f.dispatches[id]
+		if d != nil && (d.Status == db.StatusPending || d.Status == db.StatusProcessing) {
+			activeDispatches = append(activeDispatches, d)
+		}
+	}
+
+	tasks := make([]db.ActiveTask, 0, len(matchedMsgs)+len(activeDispatches))
+	for _, m := range matchedMsgs {
+		sessKey := db.DiscordSessionID(m.ThreadID)
+		tasks = append(tasks, buildActiveTaskRecord(m, f.sessions[sessKey], f.threadSummaries[sessKey].summary))
+	}
+	for _, d := range activeDispatches {
+		var sess *db.SessionInfo
+		var threadSum string
+		if d.SessionID != "" {
+			sess = f.sessions[d.SessionID]
+			threadSum = f.threadSummaries[d.SessionID].summary
+		}
+		tasks = append(tasks, buildActiveTaskFromDispatch(d, sess, threadSum))
+	}
+
+	sort.Slice(tasks, func(i, j int) bool {
+		return tasks[i].CreatedAt.Before(tasks[j].CreatedAt) || (tasks[i].CreatedAt.Equal(tasks[j].CreatedAt) && tasks[i].ID < tasks[j].ID)
+	})
+	if len(tasks) > 50 {
+		tasks = tasks[:50]
+	}
+	return tasks
+}
+
+func (f *FakeStore) getActiveTasksFiltered(flt db.TasksFilter) []db.ActiveTask {
+	var matchedMsgs []*db.Message
+	for _, id := range f.messageOrder {
+		m := f.messages[id]
+		if m != nil && matchesTaskFilter(m, flt) {
+			matchedMsgs = append(matchedMsgs, m)
+		}
+	}
+
+	limit := 50
+	if flt.AfterRowID > 0 {
+		sort.Slice(matchedMsgs, func(i, j int) bool {
+			return matchedMsgs[i].RowID < matchedMsgs[j].RowID
+		})
+	} else {
+		sort.Slice(matchedMsgs, func(i, j int) bool {
+			return matchedMsgs[i].RowID > matchedMsgs[j].RowID
+		})
+	}
+	if flt.Limit > 0 {
+		limit = flt.Limit
+		if limit > 200 {
+			limit = 200
+		}
+	}
+
+	if len(matchedMsgs) > limit {
+		matchedMsgs = matchedMsgs[:limit]
+	}
+	tasks := make([]db.ActiveTask, len(matchedMsgs))
+	for i, m := range matchedMsgs {
+		sessKey := db.DiscordSessionID(m.ThreadID)
+		tasks[i] = buildActiveTaskRecord(m, f.sessions[sessKey], f.threadSummaries[sessKey].summary)
+	}
+	return tasks
+}
+
 func (f *FakeStore) GetActiveTasks(ctx context.Context, filter ...db.TasksFilter) ([]db.ActiveTask, error) {
 	return withFakeLock(f, "GetActiveTasks", func() ([]db.ActiveTask, error) {
-		var hasFilter bool
-		var flt db.TasksFilter
-		if len(filter) > 0 && !filter[0].IsZero() {
-			hasFilter = true
-			flt = filter[0]
+		if len(filter) == 0 || filter[0].IsZero() {
+			return f.getActiveTasksUnfiltered(), nil
 		}
-
-		var matchedMsgs []*db.Message
-		for _, id := range f.messageOrder {
-			m := f.messages[id]
-			if m == nil {
-				continue
-			}
-			if !hasFilter {
-				if m.Status == db.StatusPending || m.Status == db.StatusProcessing {
-					matchedMsgs = append(matchedMsgs, m)
-				}
-				continue
-			}
-			if matchesTaskFilter(m, flt) {
-				matchedMsgs = append(matchedMsgs, m)
-			}
-		}
-
-		limit := 50
-		if !hasFilter {
-			sort.Slice(matchedMsgs, func(i, j int) bool {
-				return matchedMsgs[i].CreatedAt.Before(matchedMsgs[j].CreatedAt) || (matchedMsgs[i].CreatedAt.Equal(matchedMsgs[j].CreatedAt) && matchedMsgs[i].ID < matchedMsgs[j].ID)
-			})
-		} else {
-			if flt.AfterRowID > 0 {
-				sort.Slice(matchedMsgs, func(i, j int) bool {
-					return matchedMsgs[i].RowID < matchedMsgs[j].RowID
-				})
-			} else {
-				sort.Slice(matchedMsgs, func(i, j int) bool {
-					return matchedMsgs[i].RowID > matchedMsgs[j].RowID
-				})
-			}
-			if flt.Limit > 0 {
-				limit = flt.Limit
-				if limit > 200 {
-					limit = 200
-				}
-			}
-		}
-
-		if len(matchedMsgs) > limit {
-			matchedMsgs = matchedMsgs[:limit]
-		}
-		tasks := make([]db.ActiveTask, len(matchedMsgs))
-		for i, m := range matchedMsgs {
-			tasks[i] = buildActiveTaskRecord(m, f.sessions[m.ThreadID], f.threadSummaries[m.ThreadID].summary)
-		}
-		return tasks, nil
+		return f.getActiveTasksFiltered(filter[0]), nil
 	})
 }
+
+// DispatchStore implementation for FakeStore
+
+func (f *FakeStore) InsertDispatch(ctx context.Context, d db.Dispatch) error {
+	return f.withLockErr("InsertDispatch", func() error {
+		if strings.TrimSpace(d.ID) == "" {
+			return fmt.Errorf("dispatch id cannot be empty")
+		}
+		if _, exists := f.dispatches[d.ID]; exists {
+			return nil
+		}
+		if d.Status == "" {
+			d.Status = db.StatusPending
+		}
+		if strings.TrimSpace(d.Summary) == "" {
+			d.Summary = db.CleanTaskSummary(d.Prompt)
+		}
+		now := time.Now().UTC()
+		if d.CreatedAt.IsZero() {
+			d.CreatedAt = now
+		}
+		if d.UpdatedAt.IsZero() {
+			d.UpdatedAt = now
+		}
+		f.nextDispatchRowID++
+		if d.RowID == 0 {
+			d.RowID = f.nextDispatchRowID
+		}
+		f.dispatches[d.ID] = cloneDispatch(&d)
+		f.dispatchOrder = append(f.dispatchOrder, d.ID)
+		return nil
+	})
+}
+
+func (f *FakeStore) GetDispatch(ctx context.Context, id string) (*db.Dispatch, error) {
+	return withFakeLock(f, "GetDispatch", func() (*db.Dispatch, error) {
+		d, ok := f.dispatches[id]
+		if !ok {
+			return nil, nil
+		}
+		return cloneDispatch(d), nil
+	})
+}
+
+func (f *FakeStore) ClaimPendingDispatch(ctx context.Context, id string) (bool, error) {
+	return withFakeLock(f, "ClaimPendingDispatch", func() (bool, error) {
+		d, ok := f.dispatches[id]
+		if !ok || d.Status != db.StatusPending {
+			return false, nil
+		}
+		d.Status, d.UpdatedAt = db.StatusProcessing, time.Now().UTC()
+		return true, nil
+	})
+}
+
+func (f *FakeStore) UpdateDispatchStatus(ctx context.Context, id, status, errorMsg string) error {
+	return f.withLockErr("UpdateDispatchStatus", func() error {
+		if d, ok := f.dispatches[id]; ok {
+			d.Status, d.ErrorMessage, d.UpdatedAt = status, errorMsg, time.Now().UTC()
+		}
+		return nil
+	})
+}
+
+func (f *FakeStore) UpdateDispatchCompleted(ctx context.Context, id, responseText string, conversationID ...string) error {
+	return f.withLockErr("UpdateDispatchCompleted", func() error {
+		if d, ok := f.dispatches[id]; ok {
+			d.Status, d.ResponseText, d.ErrorMessage, d.UpdatedAt = db.StatusCompleted, responseText, "", time.Now().UTC()
+			if len(conversationID) > 0 && strings.TrimSpace(conversationID[0]) != "" {
+				d.ConversationID = strings.TrimSpace(conversationID[0])
+			}
+		}
+		return nil
+	})
+}
+
+func (f *FakeStore) IncrementDispatchRetry(ctx context.Context, id, errorMsg string) error {
+	return f.withLockErr("IncrementDispatchRetry", func() error {
+		if d, ok := f.dispatches[id]; ok {
+			d.RetryCount++
+			d.ErrorMessage, d.UpdatedAt = errorMsg, time.Now().UTC()
+		}
+		return nil
+	})
+}
+
+func (f *FakeStore) ResetDispatchToPendingWithRestart(ctx context.Context, id, reason string) error {
+	return f.withLockErr("ResetDispatchToPendingWithRestart", func() error {
+		if d, ok := f.dispatches[id]; ok && d.Status == db.StatusProcessing {
+			d.RestartCount++
+			d.Status, d.ErrorMessage, d.UpdatedAt = db.StatusPending, reason, time.Now().UTC()
+		}
+		return nil
+	})
+}
+
+func (f *FakeStore) GetPendingOrProcessingDispatches(ctx context.Context, limit int) ([]db.Dispatch, error) {
+	return withFakeLock(f, "GetPendingOrProcessingDispatches", func() ([]db.Dispatch, error) {
+		var results []db.Dispatch
+		for _, id := range f.dispatchOrder {
+			if d := f.dispatches[id]; d != nil && (d.Status == db.StatusPending || d.Status == db.StatusProcessing) {
+				results = append(results, *cloneDispatch(d))
+			}
+		}
+		sort.Slice(results, func(i, j int) bool {
+			return results[i].CreatedAt.Before(results[j].CreatedAt)
+		})
+		if limit > 0 && len(results) > limit {
+			results = results[:limit]
+		}
+		return results, nil
+	})
+}
+
+func (f *FakeStore) GetRecentSessionDispatches(ctx context.Context, sessionID string, limit int) ([]db.Dispatch, error) {
+	return withFakeLock(f, "GetRecentSessionDispatches", func() ([]db.Dispatch, error) {
+		if strings.TrimSpace(sessionID) == "" {
+			return nil, nil
+		}
+		limit = defaultVal(limit, 10)
+		var matches []db.Dispatch
+		for i := len(f.dispatchOrder) - 1; i >= 0; i-- {
+			if d := f.dispatches[f.dispatchOrder[i]]; d != nil && d.SessionID == sessionID && d.Status == db.StatusCompleted {
+				matches = append(matches, *cloneDispatch(d))
+				if len(matches) >= limit {
+					break
+				}
+			}
+		}
+		slices.Reverse(matches)
+		return matches, nil
+	})
+}
+
+func (f *FakeStore) HasActiveDispatchTurn(ctx context.Context, sessionID, id string) (bool, error) {
+	return withFakeLock(f, "HasActiveDispatchTurn", func() (bool, error) {
+		sID := strings.TrimSpace(sessionID)
+		tID := strings.TrimSpace(id)
+		if sID == "" && tID == "" {
+			return false, nil
+		}
+		for _, d := range f.dispatches {
+			if d != nil && (d.Status == db.StatusPending || d.Status == db.StatusProcessing) {
+				if (sID != "" && d.SessionID == sID) || (tID != "" && d.ID == tID) {
+					return true, nil
+				}
+			}
+		}
+		return false, nil
+	})
+}
+
+func (f *FakeStore) CancelPendingDispatches(ctx context.Context, dispatchID, buildID, reason string) ([]string, error) {
+	return withFakeLock(f, "CancelPendingDispatches", func() ([]string, error) {
+		dID := strings.TrimSpace(dispatchID)
+		bID := strings.TrimSpace(buildID)
+		if dID == "" && bID == "" {
+			return nil, nil
+		}
+		var cancelled []string
+		now := time.Now().UTC()
+		for _, id := range f.dispatchOrder {
+			d := f.dispatches[id]
+			if d == nil || d.Status != db.StatusPending {
+				continue
+			}
+			match := (dID != "" && d.ID == dID) || (bID != "" && strings.Contains(d.Prompt, "Build ID: "+bID+"\n"))
+			if match {
+				d.Status = db.StatusFailed
+				d.ErrorMessage = reason
+				d.UpdatedAt = now
+				cancelled = append(cancelled, d.ID)
+			}
+		}
+		return cancelled, nil
+	})
+}
+
+// SessionStore helpers
 
 func sessionInternalID(s *db.SessionInfo) string {
 	if s == nil {
@@ -512,20 +811,21 @@ func sessionTurnCount(s *db.SessionInfo) int {
 }
 
 func (f *FakeStore) getOrCreateSession(key string) *db.SessionInfo {
-	s := f.sessions[key]
+	normKey := db.DiscordSessionID(key)
+	s := f.sessions[normKey]
 	if s == nil {
-		s = &db.SessionInfo{ThreadID: key, CreatedAt: time.Now().UTC()}
-		f.sessions[key] = s
+		s = &db.SessionInfo{ThreadID: normKey, CreatedAt: time.Now().UTC()}
+		f.sessions[normKey] = s
 	}
 	return s
 }
 
 func (f *FakeStore) GetSessionID(ctx context.Context, threadID string) (string, error) {
-	return withFakeLock(f, "GetSessionID", func() (string, error) { return sessionInternalID(f.sessions[threadID]), nil })
+	return withFakeLock(f, "GetSessionID", func() (string, error) { return sessionInternalID(f.sessions[db.DiscordSessionID(threadID)]), nil })
 }
 
 func (f *FakeStore) GetPreviousSessionID(ctx context.Context, threadID string) (string, error) {
-	return withFakeLock(f, "GetPreviousSessionID", func() (string, error) { return sessionPrevID(f.sessions[threadID]), nil })
+	return withFakeLock(f, "GetPreviousSessionID", func() (string, error) { return sessionPrevID(f.sessions[db.DiscordSessionID(threadID)]), nil })
 }
 
 func (f *FakeStore) SaveSessionID(ctx context.Context, threadID, sessionID string) error {
@@ -546,15 +846,16 @@ func (f *FakeStore) IncrementSessionTurnCount(ctx context.Context, sessionKey st
 }
 
 func (f *FakeStore) GetSessionTurnCount(ctx context.Context, sessionKey string) (int, error) {
-	return withFakeLock(f, "GetSessionTurnCount", func() (int, error) { return sessionTurnCount(f.sessions[sessionKey]), nil })
+	return withFakeLock(f, "GetSessionTurnCount", func() (int, error) { return sessionTurnCount(f.sessions[db.DiscordSessionID(sessionKey)]), nil })
 }
 
 func (f *FakeStore) RotateSessionID(ctx context.Context, sessionKey, newSessionID string) error {
 	return f.withLockErr("RotateSessionID", func() error {
+		normKey := db.DiscordSessionID(sessionKey)
 		now := time.Now().UTC()
-		s := f.sessions[sessionKey]
+		s := f.sessions[normKey]
 		if s == nil {
-			f.sessions[sessionKey] = &db.SessionInfo{ThreadID: sessionKey, InternalSessionID: newSessionID, CreatedAt: now, UpdatedAt: now}
+			f.sessions[normKey] = &db.SessionInfo{ThreadID: normKey, InternalSessionID: newSessionID, CreatedAt: now, UpdatedAt: now}
 			return nil
 		}
 		s.PreviousSessionID, s.InternalSessionID, s.TurnCount, s.UpdatedAt = s.InternalSessionID, newSessionID, 0, now
@@ -583,14 +884,14 @@ func (f *FakeStore) FindUnrotatedSessions(ctx context.Context, minTurns int, max
 
 func (f *FakeStore) GetThreadSummary(ctx context.Context, threadID string) (string, string, error) {
 	return withFakeLock2(f, "GetThreadSummary", func() (string, string, error) {
-		rec := f.threadSummaries[threadID]
+		rec := f.threadSummaries[db.DiscordSessionID(threadID)]
 		return rec.summary, rec.watermark, nil
 	})
 }
 
 func (f *FakeStore) SaveThreadSummary(ctx context.Context, threadID, summary, lastSummarizedMsgID string) error {
 	return f.withLockErr("SaveThreadSummary", func() error {
-		f.threadSummaries[threadID] = threadSummaryRecord{summary: summary, watermark: lastSummarizedMsgID}
+		f.threadSummaries[db.DiscordSessionID(threadID)] = threadSummaryRecord{summary: summary, watermark: lastSummarizedMsgID}
 		return nil
 	})
 }
@@ -604,12 +905,14 @@ func maxTime(dst *time.Time, t time.Time) {
 func (f *FakeStore) GetSessionActivityStats(ctx context.Context, threadID string) (*db.SessionActivityStats, error) {
 	return withFakeLock(f, "GetSessionActivityStats", func() (*db.SessionActivityStats, error) {
 		stats := &db.SessionActivityStats{}
-		if s := f.sessions[threadID]; s != nil {
+		sessKey := db.DiscordSessionID(threadID)
+		rawMsgThreadID := strings.TrimPrefix(strings.TrimSpace(threadID), "discord-")
+		if s := f.sessions[sessKey]; s != nil {
 			stats.InternalSessionID, stats.TurnCount, stats.SessionUpdatedAt = s.InternalSessionID, s.TurnCount, s.UpdatedAt
 		}
 		for _, id := range f.messageOrder {
 			m := f.messages[id]
-			if m != nil && m.ThreadID == threadID && m.Status == db.StatusCompleted && !strings.HasPrefix(m.ResponseText, "[EXPIRED_STALE]") && !strings.HasPrefix(m.ResponseText, "[AMBIENT") && !strings.HasPrefix(m.ResponseText, "[IGNORED") {
+			if m != nil && m.ThreadID == rawMsgThreadID && m.Status == db.StatusCompleted && !strings.HasPrefix(m.ResponseText, "[EXPIRED_STALE]") && !strings.HasPrefix(m.ResponseText, "[AMBIENT") && !strings.HasPrefix(m.ResponseText, "[IGNORED") {
 				stats.CompletedTurns++
 				maxTime(&stats.LastMessageAt, m.UpdatedAt)
 				maxTime(&stats.LastCompletedMessageCreatedAt, m.CreatedAt)
@@ -620,6 +923,7 @@ func (f *FakeStore) GetSessionActivityStats(ctx context.Context, threadID string
 }
 
 func (f *FakeStore) SetSessionInfo(s db.SessionInfo) {
+	s.ThreadID = db.DiscordSessionID(s.ThreadID)
 	f.withLock(func() { f.sessions[s.ThreadID] = clonePtr(&s) })
 }
 

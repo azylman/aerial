@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"math"
+	"slices"
 	"testing"
 	"time"
 
@@ -778,5 +779,213 @@ func TestTranscriptStore_FakeStore_GetTranscriptStepRange(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestFakeStore_DiscordSessionIDNormalization(t *testing.T) {
+	s := NewFakeStore()
+	ctx := context.Background()
+
+	// 1. Save and Get session ID with raw numeric snowflake
+	mustOK(t, s.SaveSessionID(ctx, "1234567890", "conv-1"), "SaveSessionID raw")
+	sessID, err := s.GetSessionID(ctx, "1234567890")
+	mustOK(t, err, "GetSessionID raw")
+	if sessID != "conv-1" {
+		t.Errorf("expected conv-1, got %s", sessID)
+	}
+
+	// 2. Fetch using discord-prefixed key
+	sessIDPrefixed, err := s.GetSessionID(ctx, "discord-1234567890")
+	mustOK(t, err, "GetSessionID prefixed")
+	if sessIDPrefixed != "conv-1" {
+		t.Errorf("expected conv-1, got %s", sessIDPrefixed)
+	}
+
+	// 3. Turn counts and rotation
+	turns, err := s.IncrementSessionTurnCount(ctx, "1234567890")
+	mustOK(t, err, "IncrementSessionTurnCount")
+	if turns != 1 {
+		t.Errorf("expected 1 turn, got %d", turns)
+	}
+
+	mustOK(t, s.RotateSessionID(ctx, "1234567890", "conv-2"), "RotateSessionID")
+	newTurns, _ := s.GetSessionTurnCount(ctx, "discord-1234567890")
+	if newTurns != 0 {
+		t.Errorf("expected 0 turns after rotation, got %d", newTurns)
+	}
+	prevID, _ := s.GetPreviousSessionID(ctx, "1234567890")
+	if prevID != "conv-1" {
+		t.Errorf("expected prevID conv-1, got %s", prevID)
+	}
+}
+
+func TestFakeStore_DispatchStoreLifecycle(t *testing.T) {
+	s := NewFakeStore()
+	ctx := context.Background()
+
+	// 1. Insert & Get
+	d1 := db.Dispatch{
+		ID:        "disp-f1",
+		Source:    "heartbeat",
+		SessionID: "heartbeat-hb-1",
+		Prompt:    "Prompt for fake dispatch 1",
+	}
+	mustOK(t, s.InsertDispatch(ctx, d1), "InsertDispatch")
+
+	got, err := s.GetDispatch(ctx, "disp-f1")
+	mustOK(t, err, "GetDispatch")
+	if got == nil || got.ID != "disp-f1" || got.Status != db.StatusPending || got.Summary == "" {
+		t.Fatalf("unexpected dispatch: %+v", got)
+	}
+
+	// 2. Claim pending
+	claimed, err := s.ClaimPendingDispatch(ctx, "disp-f1")
+	mustOK(t, err, "ClaimPendingDispatch")
+	if !claimed {
+		t.Errorf("expected claimed=true")
+	}
+	claimedAgain, err := s.ClaimPendingDispatch(ctx, "disp-f1")
+	mustOK(t, err, "ClaimPendingDispatch again")
+	if claimedAgain {
+		t.Errorf("expected claimed=false for already processing dispatch")
+	}
+
+	// 3. Update status & retry
+	mustOK(t, s.UpdateDispatchStatus(ctx, "disp-f1", "PROCESSING", "in flight"), "UpdateDispatchStatus")
+	mustOK(t, s.IncrementDispatchRetry(ctx, "disp-f1", "network error"), "IncrementDispatchRetry")
+	got, _ = s.GetDispatch(ctx, "disp-f1")
+	if got.RetryCount != 1 || got.ErrorMessage != "network error" {
+		t.Errorf("unexpected retry state: %+v", got)
+	}
+
+	// 4. Reset to pending with restart
+	mustOK(t, s.ResetDispatchToPendingWithRestart(ctx, "disp-f1", "runner restart"), "ResetDispatchToPendingWithRestart")
+	got, _ = s.GetDispatch(ctx, "disp-f1")
+	if got.Status != db.StatusPending || got.RestartCount != 1 {
+		t.Errorf("unexpected restart state: %+v", got)
+	}
+
+	// 5. Update completed with conversation ID
+	mustOK(t, s.UpdateDispatchCompleted(ctx, "disp-f1", "Result text", "conv-f123"), "UpdateDispatchCompleted")
+	got, _ = s.GetDispatch(ctx, "disp-f1")
+	if got.Status != db.StatusCompleted || got.ResponseText != "Result text" || got.ConversationID != "conv-f123" {
+		t.Errorf("unexpected completed state: %+v", got)
+	}
+
+	// 6. Recent session dispatches
+	d2 := db.Dispatch{
+		ID:        "disp-f2",
+		Source:    "heartbeat",
+		SessionID: "heartbeat-hb-1",
+		Prompt:    "Prompt for fake dispatch 2",
+	}
+	mustOK(t, s.InsertDispatch(ctx, d2), "InsertDispatch disp-f2")
+	mustOK(t, s.UpdateDispatchCompleted(ctx, "disp-f2", "Result 2"), "UpdateDispatchCompleted disp-f2")
+
+	recent, err := s.GetRecentSessionDispatches(ctx, "heartbeat-hb-1", 10)
+	mustOK(t, err, "GetRecentSessionDispatches")
+	if len(recent) != 2 || recent[0].ID != "disp-f1" || recent[1].ID != "disp-f2" {
+		t.Errorf("unexpected recent session dispatches: %+v", recent)
+	}
+
+	// 7. Active check
+	d3 := db.Dispatch{
+		ID:        "disp-f3",
+		Source:    "vanadis",
+		SessionID: "build-1",
+		Prompt:    "Build ID: b-999\nChunk 1",
+	}
+	mustOK(t, s.InsertDispatch(ctx, d3), "InsertDispatch disp-f3")
+	hasActive, err := s.HasActiveDispatchTurn(ctx, "build-1", "")
+	mustOK(t, err, "HasActiveDispatchTurn")
+	if !hasActive {
+		t.Errorf("expected active dispatch for session build-1")
+	}
+
+	// 8. Cancel pending dispatches
+	cancelled, err := s.CancelPendingDispatches(ctx, "", "b-999", "cancelled build")
+	mustOK(t, err, "CancelPendingDispatches")
+	if len(cancelled) != 1 || cancelled[0] != "disp-f3" {
+		t.Errorf("expected cancelled [disp-f3], got %v", cancelled)
+	}
+	got, _ = s.GetDispatch(ctx, "disp-f3")
+	if got.Status != db.StatusFailed || got.ErrorMessage != "cancelled build" {
+		t.Errorf("unexpected status after cancel: %+v", got)
+	}
+}
+
+func TestFakeStore_GetActiveTasks_DispatchesUnion(t *testing.T) {
+	s := NewFakeStore()
+	ctx := context.Background()
+
+	now := time.Now().UTC().Truncate(time.Second)
+
+	mustOK(t, s.InsertMessage(ctx, db.Message{
+		ID:        "msg-fake-1",
+		ThreadID:  "123456",
+		Content:   "Discord user prompt",
+		Status:    db.StatusPending,
+		CreatedAt: now.Add(-2 * time.Minute),
+		UpdatedAt: now.Add(-2 * time.Minute),
+	}), "InsertMessage")
+
+	mustOK(t, s.InsertDispatch(ctx, db.Dispatch{
+		ID:        "disp-fake-stateful",
+		Source:    "heartbeat",
+		SessionID: "heartbeat-hb-1",
+		Prompt:    "Heartbeat prompt",
+		Status:    db.StatusPending,
+		CreatedAt: now.Add(-1 * time.Minute),
+		UpdatedAt: now.Add(-1 * time.Minute),
+	}), "InsertDispatch stateful")
+
+	mustOK(t, s.InsertDispatch(ctx, db.Dispatch{
+		ID:        "disp-fake-ephem",
+		Source:    "webhook",
+		SessionID: "",
+		Prompt:    "Webhook prompt",
+		Status:    db.StatusPending,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}), "InsertDispatch ephem")
+
+	// Unfiltered query unions messages and dispatches
+	unfiltered, err := s.GetActiveTasks(ctx)
+	mustOK(t, err, "GetActiveTasks unfiltered")
+	if len(unfiltered) != 3 {
+		t.Fatalf("expected 3 tasks in unfiltered HUD, got %d", len(unfiltered))
+	}
+	if unfiltered[0].ID != "msg-fake-1" || unfiltered[1].ID != "disp-fake-stateful" || unfiltered[2].ID != "disp-fake-ephem" {
+		t.Errorf("unexpected task order: %+v", unfiltered)
+	}
+	if unfiltered[1].TriggerType != "heartbeat" || unfiltered[2].TriggerType != "webhook" {
+		t.Errorf("unexpected trigger types: %s, %s", unfiltered[1].TriggerType, unfiltered[2].TriggerType)
+	}
+	if unfiltered[2].ThreadID != "dispatch-disp-fake-ephem" {
+		t.Errorf("unexpected threadID for ephemeral dispatch: %s", unfiltered[2].ThreadID)
+	}
+
+	// Filtered query excludes dispatches
+	filtered, err := s.GetActiveTasks(ctx, db.TasksFilter{Statuses: []string{"PENDING"}})
+	mustOK(t, err, "GetActiveTasks filtered")
+	if len(filtered) != 1 || filtered[0].ID != "msg-fake-1" {
+		t.Errorf("expected filtered tasks to contain only messages, got %+v", filtered)
+	}
+}
+
+func TestFakeStore_GetActiveRecentThreadIDs_StrippingDiscordPrefix(t *testing.T) {
+	s := NewFakeStore()
+	ctx := context.Background()
+
+	mustOK(t, s.SaveSessionID(ctx, "112233445566778899", "conv-sess-1"), "SaveSessionID numeric")
+	mustOK(t, s.SaveSessionID(ctx, "discord-998877665544332211", "conv-sess-2"), "SaveSessionID discord prefixed")
+
+	threadIDs, err := s.GetActiveRecentThreadIDs(ctx, time.Hour)
+	mustOK(t, err, "GetActiveRecentThreadIDs")
+
+	found1 := slices.Contains(threadIDs, "112233445566778899")
+	found2 := slices.Contains(threadIDs, "998877665544332211")
+	if !found1 || !found2 {
+		t.Errorf("GetActiveRecentThreadIDs missing stripped thread IDs: got %v", threadIDs)
 	}
 }

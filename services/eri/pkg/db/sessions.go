@@ -11,6 +11,21 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
+// DiscordSessionID normalizes a raw numeric Discord snowflake into 'discord-<id>'
+// while preserving keys that already carry a '<source>-' prefix (e.g. 'discord-*', 'heartbeat-*', 'dispatch-*').
+func DiscordSessionID(key string) string {
+	trimmed := strings.TrimSpace(key)
+	if trimmed == "" {
+		return ""
+	}
+	for i := 0; i < len(trimmed); i++ {
+		if trimmed[i] < '0' || trimmed[i] > '9' {
+			return trimmed
+		}
+	}
+	return "discord-" + trimmed
+}
+
 func (s *SQLStore) querySessionString(ctx context.Context, key, query string) (string, error) {
 	if err := s.checkDB(); err != nil {
 		return "", err
@@ -31,12 +46,12 @@ func (s *SQLStore) querySessionString(ctx context.Context, key, query string) (s
 
 // GetSessionID retrieves the active session ID for a thread.
 func (s *SQLStore) GetSessionID(ctx context.Context, threadID string) (string, error) {
-	return s.querySessionString(ctx, threadID, "SELECT internal_session_id FROM sessions WHERE thread_id = $1")
+	return s.querySessionString(ctx, DiscordSessionID(threadID), "SELECT conversation_id FROM sessions WHERE session_id = $1")
 }
 
 // GetPreviousSessionID retrieves the previous session ID for a thread.
 func (s *SQLStore) GetPreviousSessionID(ctx context.Context, threadID string) (string, error) {
-	return s.querySessionString(ctx, threadID, "SELECT previous_session_id FROM sessions WHERE thread_id = $1")
+	return s.querySessionString(ctx, DiscordSessionID(threadID), "SELECT previous_conversation_id FROM sessions WHERE session_id = $1")
 }
 
 var dbTimeLayouts = []string{
@@ -108,10 +123,11 @@ func scanSessionInfo(scanner interface{ Scan(dest ...any) error }) (SessionInfo,
 
 // SaveSessionID associates an internal session ID with a thread ID.
 func (s *SQLStore) SaveSessionID(ctx context.Context, threadID, sessionID string) error {
+	threadID = DiscordSessionID(threadID)
 	if threadID == "" || sessionID == "" {
 		return nil
 	}
-	query := `INSERT INTO sessions (thread_id, internal_session_id, created_at, updated_at) VALUES ($1, $2, $3, $4) ON CONFLICT(thread_id) DO UPDATE SET created_at = CASE WHEN sessions.internal_session_id != EXCLUDED.internal_session_id THEN EXCLUDED.created_at ELSE sessions.created_at END, internal_session_id = EXCLUDED.internal_session_id, updated_at = EXCLUDED.updated_at`
+	query := `INSERT INTO sessions (session_id, conversation_id, created_at, updated_at) VALUES ($1, $2, $3, $4) ON CONFLICT(session_id) DO UPDATE SET created_at = CASE WHEN sessions.conversation_id != EXCLUDED.conversation_id THEN EXCLUDED.created_at ELSE sessions.created_at END, conversation_id = EXCLUDED.conversation_id, updated_at = EXCLUDED.updated_at`
 	return s.execWithTimeout(ctx, query, threadID, sessionID, time.Now().UTC(), time.Now().UTC())
 }
 
@@ -120,13 +136,14 @@ func (s *SQLStore) IncrementSessionTurnCount(ctx context.Context, sessionKey str
 	if err := s.checkDB(); err != nil {
 		return 0, err
 	}
+	sessionKey = DiscordSessionID(sessionKey)
 	if sessionKey == "" {
 		return 0, fmt.Errorf("session key cannot be empty")
 	}
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := `INSERT INTO sessions (thread_id, internal_session_id, turn_count, created_at, updated_at) VALUES ($1, '', 1, $2, $3) ON CONFLICT(thread_id) DO UPDATE SET turn_count = sessions.turn_count + 1, updated_at = EXCLUDED.updated_at RETURNING turn_count;`
+	query := `INSERT INTO sessions (session_id, conversation_id, turn_count, created_at, updated_at) VALUES ($1, '', 1, $2, $3) ON CONFLICT(session_id) DO UPDATE SET turn_count = sessions.turn_count + 1, updated_at = EXCLUDED.updated_at RETURNING turn_count;`
 	var turnCount int
 	err := s.db.QueryRowContext(queryCtx, query, sessionKey, time.Now().UTC(), time.Now().UTC()).Scan(&turnCount)
 	return turnCount, err
@@ -134,10 +151,11 @@ func (s *SQLStore) IncrementSessionTurnCount(ctx context.Context, sessionKey str
 
 // RotateSessionID updates the internal session ID, stores the previous session ID, and resets turn count to zero.
 func (s *SQLStore) RotateSessionID(ctx context.Context, sessionKey, newSessionID string) error {
+	sessionKey = DiscordSessionID(sessionKey)
 	if sessionKey == "" {
 		return fmt.Errorf("session key cannot be empty")
 	}
-	query := `INSERT INTO sessions (thread_id, internal_session_id, previous_session_id, turn_count, created_at, updated_at) VALUES ($1, $2, '', 0, $3, $4) ON CONFLICT(thread_id) DO UPDATE SET previous_session_id = CASE WHEN sessions.internal_session_id != '' AND sessions.internal_session_id != EXCLUDED.internal_session_id THEN sessions.internal_session_id ELSE sessions.previous_session_id END, internal_session_id = EXCLUDED.internal_session_id, turn_count = 0, created_at = EXCLUDED.created_at, updated_at = EXCLUDED.updated_at;`
+	query := `INSERT INTO sessions (session_id, conversation_id, previous_conversation_id, turn_count, created_at, updated_at) VALUES ($1, $2, '', 0, $3, $4) ON CONFLICT(session_id) DO UPDATE SET previous_conversation_id = CASE WHEN sessions.conversation_id != '' AND sessions.conversation_id != EXCLUDED.conversation_id THEN sessions.conversation_id ELSE sessions.previous_conversation_id END, conversation_id = EXCLUDED.conversation_id, turn_count = 0, created_at = EXCLUDED.created_at, updated_at = EXCLUDED.updated_at;`
 	return s.execWithTimeout(ctx, query, sessionKey, newSessionID, time.Now().UTC(), time.Now().UTC())
 }
 
@@ -146,6 +164,7 @@ func (s *SQLStore) GetSessionTurnCount(ctx context.Context, sessionKey string) (
 	if err := s.checkDB(); err != nil {
 		return 0, err
 	}
+	sessionKey = DiscordSessionID(sessionKey)
 	if sessionKey == "" {
 		return 0, nil
 	}
@@ -153,7 +172,7 @@ func (s *SQLStore) GetSessionTurnCount(ctx context.Context, sessionKey string) (
 	defer cancel()
 
 	var count int
-	err := s.db.QueryRowContext(queryCtx, "SELECT turn_count FROM sessions WHERE thread_id = $1", sessionKey).Scan(&count)
+	err := s.db.QueryRowContext(queryCtx, "SELECT turn_count FROM sessions WHERE session_id = $1", sessionKey).Scan(&count)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
@@ -162,10 +181,11 @@ func (s *SQLStore) GetSessionTurnCount(ctx context.Context, sessionKey string) (
 
 // SaveThreadSummary persists a thread summary and its last summarized message ID watermark in the sessions table.
 func (s *SQLStore) SaveThreadSummary(ctx context.Context, threadID, summary, lastSummarizedMsgID string) error {
+	threadID = DiscordSessionID(threadID)
 	if threadID == "" {
 		return nil
 	}
-	query := `INSERT INTO sessions (thread_id, summary, last_summarized_message_id, created_at, updated_at) VALUES ($1, $2, $3, $4, $4) ON CONFLICT(thread_id) DO UPDATE SET summary = EXCLUDED.summary, last_summarized_message_id = EXCLUDED.last_summarized_message_id, updated_at = EXCLUDED.updated_at`
+	query := `INSERT INTO sessions (session_id, summary, last_summarized_message_id, created_at, updated_at) VALUES ($1, $2, $3, $4, $4) ON CONFLICT(session_id) DO UPDATE SET summary = EXCLUDED.summary, last_summarized_message_id = EXCLUDED.last_summarized_message_id, updated_at = EXCLUDED.updated_at`
 	return s.execWithTimeout(ctx, query, threadID, summary, lastSummarizedMsgID, time.Now().UTC())
 }
 
@@ -174,6 +194,7 @@ func (s *SQLStore) GetThreadSummary(ctx context.Context, threadID string) (strin
 	if err := s.checkDB(); err != nil {
 		return "", "", err
 	}
+	threadID = DiscordSessionID(threadID)
 	if threadID == "" {
 		return "", "", nil
 	}
@@ -181,7 +202,7 @@ func (s *SQLStore) GetThreadSummary(ctx context.Context, threadID string) (strin
 	defer cancel()
 
 	var sum, lastMsgID sql.NullString
-	err := s.db.QueryRowContext(queryCtx, "SELECT summary, last_summarized_message_id FROM sessions WHERE thread_id = $1", threadID).Scan(&sum, &lastMsgID)
+	err := s.db.QueryRowContext(queryCtx, "SELECT summary, last_summarized_message_id FROM sessions WHERE session_id = $1", threadID).Scan(&sum, &lastMsgID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", nil
 	}
@@ -199,6 +220,9 @@ func (s *SQLStore) GetSessionActivityStats(ctx context.Context, threadID string)
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
+	sessKey := DiscordSessionID(threadID)
+	rawMsgThreadID := strings.TrimPrefix(strings.TrimSpace(threadID), "discord-")
+
 	var (
 		internalSessionID            sql.NullString
 		turnCount                    sql.NullInt64
@@ -206,10 +230,10 @@ func (s *SQLStore) GetSessionActivityStats(ctx context.Context, threadID string)
 		completedCount               int64
 		rawMsgUpdated, rawMsgCreated any
 	)
-	if err := s.db.QueryRowContext(queryCtx, `SELECT internal_session_id, turn_count, updated_at FROM sessions WHERE thread_id = $1`, threadID).Scan(&internalSessionID, &turnCount, &rawSessUpdatedAt); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err := s.db.QueryRowContext(queryCtx, `SELECT conversation_id, turn_count, updated_at FROM sessions WHERE session_id = $1`, sessKey).Scan(&internalSessionID, &turnCount, &rawSessUpdatedAt); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("querying session for thread %s: %w", threadID, err)
 	}
-	if err := s.db.QueryRowContext(queryCtx, `SELECT COUNT(*), MAX(updated_at), MAX(created_at) FROM messages WHERE thread_id = $1 AND status = 'COMPLETED' AND response_text NOT LIKE '[EXPIRED_STALE]%' AND response_text NOT LIKE '[AMBIENT%' AND response_text NOT LIKE '[IGNORED%'`, threadID).Scan(&completedCount, &rawMsgUpdated, &rawMsgCreated); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err := s.db.QueryRowContext(queryCtx, `SELECT COUNT(*), MAX(updated_at), MAX(created_at) FROM messages WHERE thread_id = $1 AND status = 'COMPLETED' AND response_text NOT LIKE '[EXPIRED_STALE]%' AND response_text NOT LIKE '[AMBIENT%' AND response_text NOT LIKE '[IGNORED%'`, rawMsgThreadID).Scan(&completedCount, &rawMsgUpdated, &rawMsgCreated); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("querying completed messages for thread %s: %w", threadID, err)
 	}
 
@@ -247,7 +271,7 @@ func (s *SQLStore) FindUnrotatedSessions(ctx context.Context, minTurns int, maxA
 		limitAge = maxAge[0]
 	}
 
-	query, args := `SELECT thread_id, internal_session_id, COALESCE(previous_session_id, ''), turn_count, created_at, updated_at FROM sessions WHERE turn_count > $1`, []any{minTurns}
+	query, args := `SELECT session_id, conversation_id, COALESCE(previous_conversation_id, ''), turn_count, created_at, updated_at FROM sessions WHERE turn_count > $1`, []any{minTurns}
 	if limitAge > 0 {
 		query += ` AND updated_at >= $2`
 		args = append(args, time.Now().UTC().Add(-limitAge))
