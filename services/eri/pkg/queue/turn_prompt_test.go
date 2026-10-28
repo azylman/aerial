@@ -47,7 +47,6 @@ func TestTurnExecution_GetRecentThreadMessages(t *testing.T) {
 	fakeStore := dbtest.NewFakeStore()
 	ctx := context.Background()
 	_ = fakeStore.InsertMessage(ctx, db.Message{ID: "msg-1", ThreadID: "1552732003076669460", AuthorName: "test-user", Content: "Normal chat", CreatedAt: now.Add(-2 * time.Minute)})
-	_ = fakeStore.InsertMessage(ctx, db.Message{ID: "msg-sched", ThreadID: "1552732003076669460", AuthorName: "Scheduler", Content: "Check PR", ScheduleRunID: "run-123", CreatedAt: now.Add(-1 * time.Minute)})
 
 	tests := []struct {
 		name, firstID, firstAuthor string
@@ -58,7 +57,7 @@ func TestTurnExecution_GetRecentThreadMessages(t *testing.T) {
 		wantErr                    bool
 	}{
 		{name: "DiscordAPI_Success", dg: dgSuccess, burst: []db.Message{{ID: "1552732003076669099"}}, limit: 10, wantCount: 3, firstID: "1552732003076669000", firstAuthor: "Webhook"},
-		{name: "FallbackDB_Filtered", dg: dgFail, store: fakeStore, limit: 0, wantCount: 1, firstID: "msg-1", firstAuthor: "test-user"},
+		{name: "FallbackDB_Direct", dg: dgFail, store: fakeStore, limit: 0, wantCount: 1, firstID: "msg-1", firstAuthor: "test-user"},
 		{name: "FallbackDB_ClampedLimit", dg: dgFail, store: fakeStore, limit: 200, wantCount: 1, firstID: "msg-1", firstAuthor: "test-user"},
 		{name: "StoreError", store: &mockErrRecentStore{}, limit: 10, wantErr: true},
 		{name: "NilStore", limit: 10, wantCount: 0},

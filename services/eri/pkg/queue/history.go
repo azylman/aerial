@@ -229,7 +229,7 @@ func classifyDBMessageRole(m db.Message) string {
 	if m.AuthorID == "assistant" || strings.EqualFold(m.AuthorName, "aerial") || strings.EqualFold(m.AuthorName, "assistant") {
 		return "Assistant"
 	}
-	if m.AuthorID == "bot" || strings.EqualFold(m.AuthorName, "bot") || strings.HasPrefix(m.AuthorID, "bot-") || m.AuthorID == "scheduler" {
+	if m.AuthorID == "bot" || strings.EqualFold(m.AuthorName, "bot") || strings.HasPrefix(m.AuthorID, "bot-") {
 		return "Bot"
 	}
 	return "User"

@@ -1,4 +1,4 @@
-h1:aez3W/K3Tei/VHJaPxDvnOpTgBgDp9WhtMjsDMUtdQk=
+h1:5HPGirmwiecMIZedc8NbueuIa9NnwiMYSsAUC53iCwg=
 20261001221347_baseline.sql h1:uwrTrII8CWvC/4E6FLZx5vGvYuO48AxqjCh+Wi/43kg=
 20261002155428_add_pr_registry.sql h1:tfYt/SDhTn/o/uTIcpHMD+XnpPELqiYySBkrwS+imJQ=
 20261002164500_add_river_queue.sql h1:TOtzV6uJrR9mibPzmVN8RRQ7fVAS95WmFLTvMQ9vETk=
@@ -19,3 +19,4 @@ h1:aez3W/K3Tei/VHJaPxDvnOpTgBgDp9WhtMjsDMUtdQk=
 20261026214100_drop_legacy_grafana_tables.sql h1:KsSG8axX0GiOO6QZnnTzyQ85DnT5nr5WmhLwx2FpNB4=
 20261028125256_add_dispatches_and_prefix_sessions.sql h1:DC9Ahcb5DGjyQTum8+RC62UQ/Z9TdusnkQUF6eM+NCY=
 20261028152516_migrate_silent_messages_and_drop_columns.sql h1:md77TPrb8kslbsGFFvPtLJwbL5R9C/DcFh7y6rd3aEU=
+20261028172220_drop_messages_schedule_run_id.sql h1:HFeg7iYmZt3fxJxgXj9xEbE7LKASRWBOvUQ7xxGeywk=

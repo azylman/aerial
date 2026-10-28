@@ -86,7 +86,6 @@ func TestHandlePromptValidation(t *testing.T) {
 		{"channel name resolution prospera", http.MethodPost, store, prosperaPromptPool, strings.NewReader(`{"prompt":"hello","channel_id":"prospera"}`), http.StatusAccepted, "1564150557705248879"},
 		{"channel name resolution hash prospera", http.MethodPost, store, prosperaPromptPool, strings.NewReader(`{"prompt":"hello","channel_id":"#prospera"}`), http.StatusAccepted, "1564150557705248879"},
 		{"channel name unresolvable falls back to snowflake validation", http.MethodPost, store, prosperaPromptPool, strings.NewReader(`{"prompt":"hello","channel_id":"unknown-channel"}`), http.StatusBadRequest, "must be a valid numeric Discord snowflake"},
-		{"invalid session_id", http.MethodPost, store, pool, strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873","session_id":"invalid:colon"}`), http.StatusBadRequest, "session_id"},
 		{"nil store", http.MethodPost, nil, pool, strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873"}`), http.StatusInternalServerError, "Database store not configured"},
 		{"closed store", http.MethodPost, closedStore, pool, strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873"}`), http.StatusInternalServerError, "Failed to persist prompt message"},
 		{"body close error", http.MethodPost, store, pool, &errReadCloser{reader: strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873"}`), closeErr: errors.New("close error")}, http.StatusAccepted, "channel_id"},
@@ -120,8 +119,7 @@ func TestHandlePromptValidation(t *testing.T) {
 		{"default effort", pool, `{"prompt":"Test valid prompt","channel_id":"1542423172400291873","message_id":"msg-123"}`, "msg-123", "1542423172400291873", "1542423172400291873", "", "", "Test valid prompt"},
 		{"nil pool", nil, `{"prompt":"hello nil pool","channel_id":"1542423172400291873","message_id":"msg-nil-pool"}`, "msg-nil-pool", "1542423172400291873", "1542423172400291873", "", "", "hello nil pool"},
 		{"auto-generated uuid when message_id omitted", pool, `{"prompt":"auto uuid prompt","channel_id":"1542423172400291873"}`, "", "", "", "", "", "auto uuid prompt"},
-		{"custom session_id", pool, `{"prompt":"custom session prompt","channel_id":"1542423172400291873","session_id":"custom-session-123","message_id":"msg-sess-123"}`, "msg-sess-123", "custom-session-123", "1542423172400291873", "", "", "custom session prompt"},
-		{"resolve target thread when session_id omitted", threadPool, `{"prompt":"create thread prompt","channel_id":"1542423172400291873","title":"Heartbeat Alert","message_id":"msg-thread-create"}`, "msg-thread-create", "1542999999999999999", "1542999999999999999", "", "", "create thread prompt"},
+		{"resolve target thread", threadPool, `{"prompt":"create thread prompt","channel_id":"1542423172400291873","title":"Heartbeat Alert","message_id":"msg-thread-create"}`, "msg-thread-create", "1542999999999999999", "1542999999999999999", "", "", "create thread prompt"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := runHTTP(handlePrompt(store, tc.pool), http.MethodPost, "/prompt", strings.NewReader(tc.payload))

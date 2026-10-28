@@ -596,11 +596,10 @@ func TestWakeModeMentionAndClassifierAlertMatrix(t *testing.T) {
 	t.Parallel()
 
 	type tier1Case struct {
-		authorID      string
-		scheduleRunID string
-		content       string
-		roles         []string
-		want          bool
+		authorID string
+		content  string
+		roles    []string
+		want     bool
 	}
 
 	tests := []struct {
@@ -622,8 +621,7 @@ func TestWakeModeMentionAndClassifierAlertMatrix(t *testing.T) {
 			{content: "<USER_REQUEST>\n- content: Here is the role '<@&role-aerial-managed>' in quotes\n- mention_role_ids: []\n- mentions: [harperwallbanger]\n</USER_REQUEST>", roles: []string{"role-aerial-managed"}, want: false},
 			{content: "<USER_REQUEST>\n- content: Did you see '<@bot-12345>' in code?\n- mention_user_ids: []\n- mentions: []\n</USER_REQUEST>", want: false},
 			{content: "<USER_REQUEST>\n- replying_to:\n    author: \"@bob\"\n    content: \"Look at this aerial photo of the bridge\"\n- content: Nice shot!\n</USER_REQUEST>", want: false},
-			{authorID: "scheduler", content: "check system health", want: true},
-			{authorID: "user-456", scheduleRunID: "run-uuid-999", content: "run cron report", want: true},
+			{authorID: "http-client", content: "check system health", want: true},
 		}},
 		{name: "ProcessBurst_WakeModeMention_BypassClassifier", burst: &burstTestCase{channelID: "chan-lounge-mention", seedSession: true, classifierJSON: `{"confidence": 0.95, "reason": "classifier should not be called"}`, policy: config.ChannelPolicy{Mode: "channel", WakeMode: "mention"}, runnerResponse: "Response!", messages: []db.Message{{ID: "msg-amb-1", AuthorName: "Alice", Content: "Just talking about aerial views and drones"}}, wantClassifierCalls: 0, checkClassifierCalls: true, wantRunnerCalls: 0, wantDeliveryCalls: 0, checkDeliveryCalls: true, wantTurnCount: 0}},
 		{name: "ProcessBurst_WakeModeMention_DirectMentionWakes", burst: &burstTestCase{channelID: "chan-lounge-wake", seedSession: true, policy: config.ChannelPolicy{Mode: "channel", WakeMode: "mention"}, runnerResponse: "Hello Alice!", preserveSessionInRunner: true, messages: []db.Message{{ID: "msg-mention-1", AuthorName: "Alice", Content: "<USER_REQUEST>\n- mentions: [Aerial]\n- content: @Aerial what is the plan today?\n</USER_REQUEST>"}}, wantRunnerCalls: 1, wantDeliveryCalls: 1, checkDeliveryCalls: true, wantDeliveredText: "Hello Alice!", wantTurnCount: 1}},
@@ -635,7 +633,7 @@ func TestWakeModeMentionAndClassifierAlertMatrix(t *testing.T) {
 				runBurstTestCase(t, *tc.burst)
 			}
 			for _, c := range tc.tier1Cases {
-				m := db.Message{AuthorID: c.authorID, ScheduleRunID: c.scheduleRunID, Content: c.content}
+				m := db.Message{AuthorID: c.authorID, Content: c.content}
 				if got := isTier1Wake(m, "bot-12345", c.roles); got != c.want {
 					t.Errorf("isTier1Wake(m=%+v, roles=%v) = %v, want %v", m, c.roles, got, c.want)
 				}
@@ -931,7 +929,7 @@ func TestProcessBurst_QuotaPause_Suite(t *testing.T) {
 		wantMinRunAtDelay                                                              time.Duration
 	}{
 		{name: "SchedulesOneShotAndNotifies", threadID: "chan-quota-suite-1", runnerStderr: "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 16m58s.", messages: []db.Message{{ID: "msg-quota-suite-1", Content: "<@bot> can you analyze our code coverage?"}}, wantOneShotCount: 1, wantPromptSub: []string{"[QUOTA_RETRY]", "code coverage"}, wantMinRunAtDelay: 16 * time.Minute, wantDeliveredSub: []string{"16m 58s", "<t:", ":R>", "automatically scheduled a retry"}, wantLastMsgStatus: db.StatusFailed, wantLastMsgErrSub: "[QUOTA_PAUSED"},
-		{name: "CircuitBreakerDoesNotReschedule", threadID: "chan-circuit-suite-1", runnerStderr: "Individual quota reached. Resets in 10m.", messages: []db.Message{{ID: "msg-circuit-suite-1", ScheduleRunID: "run-sched-previous-1", Content: "[QUOTA_RETRY] Previous failed question"}}, wantOneShotCount: 0, wantDeliveredSub: []string{"paused automated retries"}, wantLastMsgStatus: db.StatusFailed},
+		{name: "CircuitBreakerDoesNotReschedule", threadID: "chan-circuit-suite-1", runnerStderr: "Individual quota reached. Resets in 10m.", messages: []db.Message{{ID: "msg-circuit-suite-1", Content: "[QUOTA_RETRY] Previous failed question"}}, wantOneShotCount: 0, wantDeliveredSub: []string{"paused automated retries"}, wantLastMsgStatus: db.StatusFailed},
 		{name: "TrailingBurstSuppression", threadID: "chan-burst-suppress-suite-1", policyMode: "channel", useProcessBurst: true, runnerStderr: "Individual quota reached. Resets in 16m58s.", messages: []db.Message{{ID: "msg-burst-suite-1", Content: "<@aerial> Question 1"}, {ID: "msg-burst-suite-2", Content: "<@aerial> Question 2"}}, wantOneShotCount: 1, wantLastMsgStatus: db.StatusFailed, wantLastMsgErrSub: "Trailing message suppressed"},
 	}
 	for _, tc := range tests {
@@ -1419,7 +1417,7 @@ func TestWorkerPool_EffortRouting(t *testing.T) {
 		{"run-low-1", "cron-low", "msg-low-1", "thread-low", "low", "claude-sonnet-4-6-thinking"},
 	}
 	for _, c := range cases {
-		msg := db.Message{ID: c.msgID, ThreadID: c.threadID, AuthorID: "scheduler", AuthorName: "Scheduler", Content: "Run routine", Status: db.StatusPending, ScheduleRunID: c.runID, Effort: c.effort, CreatedAt: time.Now().UTC()}
+		msg := db.Message{ID: c.msgID, ThreadID: c.threadID, AuthorID: "scheduler", AuthorName: "Scheduler", Content: "Run routine", Status: db.StatusPending, Effort: c.effort, CreatedAt: time.Now().UTC()}
 		_ = insertMessage(store, msg)
 		pool.Enqueue(msg)
 		waitForCompletion(t, doneCh, 3*time.Second, c.msgID)
@@ -1737,7 +1735,7 @@ func TestWorkerPool_CancellationDuringBackoffSuite(t *testing.T) {
 			defer pool.Stop()
 
 			msgID := "msg-" + tt.name
-			msg := db.Message{ID: msgID, ThreadID: tt.threadID, Content: "cancel test", ScheduleRunID: tt.scheduleRunID}
+			msg := db.Message{ID: msgID, ThreadID: tt.threadID, Content: "cancel test"}
 			_ = insertMessage(store, msg)
 			pool.Enqueue(msg)
 			waitPoolWorkersDone(t, pool, 2*time.Second)
@@ -1836,7 +1834,7 @@ func TestOnWakeHook_Lifecycle(t *testing.T) {
 		{name: "TimeoutFallback_Wake", msgs: []db.Message{{ID: "m-tw1", ThreadID: "ch-gen", Content: "err-wake", Status: db.StatusProcessing}}, hookErr: errors.New("conn refused"), timeoutAction: "wake", classifierResp: `{"confidence": 0.10}`},
 		{name: "TimeoutFallback_Drop", msgs: []db.Message{{ID: "m-td1", ThreadID: "ch-gen", Content: "err-drop", Status: db.StatusProcessing}}, hookErr: errors.New("timeout"), timeoutAction: "drop", classifierResp: `{"confidence": 0.95}`, wantExit: true},
 		{name: "MultiMessageBurst", msgs: []db.Message{{ID: "m-m1", ThreadID: "ch-multi", Content: "wake 1", Status: db.StatusProcessing}, {ID: "m-m2", ThreadID: "ch-multi", Content: "trail 2", Status: db.StatusProcessing}}, hookResp: &WakeResponse{Override: "wake"}, wantBurstLen: 1, wantTrailLen: 1, wantTurns: 1},
-		{name: "DropWithScheduleRun", msgs: []db.Message{{ID: "m-s1", ThreadID: "ch-sched", Content: "sched noise", ScheduleRunID: "sched-run-amb", Status: db.StatusProcessing}}, hookResp: &WakeResponse{Override: "drop"}, isSched: true, schedRunID: "sched-run-amb", wantExit: true},
+		{name: "DropWithScheduleRun", msgs: []db.Message{{ID: "m-s1", ThreadID: "ch-sched", Content: "sched noise", Status: db.StatusProcessing}}, hookResp: &WakeResponse{Override: "drop"}, isSched: true, schedRunID: "sched-run-amb", wantExit: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1996,9 +1994,6 @@ func runPreTurnHookBurst(t *testing.T, hookResps []*PreTurnResponse, hookErr err
 	})
 	now := time.Now().UTC()
 	msg := db.Message{ID: "msg-preturn-test", ThreadID: "chan-preturn", AuthorName: "user-alpha", Content: "test prompt for pre-turn", Status: db.StatusPending, RetryCount: initialRetry, CreatedAt: now}
-	if schedRunID != "" {
-		msg.ScheduleRunID = schedRunID
-	}
 	_ = insertMessage(store, msg)
 	pool.processBurst([]db.Message{msg})
 	if waitAsync {
@@ -2066,7 +2061,7 @@ func TestPreTurnHook_HelperEdgeCases(t *testing.T) {
 
 	store, completedStatus := setupTestStore(t), ""
 	pool := NewWorkerPool(WorkerPoolConfig{Store: store, OnMessageCompleted: func(msg db.Message, status string) { completedStatus = status }})
-	schedMsg := db.Message{ID: "msg-sched-abort", ThreadID: "chan-sched", ScheduleRunID: "run-sched-abort", Status: db.StatusPending}
+	schedMsg := db.Message{ID: "msg-sched-abort", ThreadID: "chan-sched", Status: db.StatusPending}
 	_ = insertMessage(store, schedMsg)
 	(&turnExecution{pool: pool, burst: []db.Message{schedMsg}, threadID: "chan-sched"}).abortBurst("manual abort")
 	if completedStatus != db.StatusCompleted {

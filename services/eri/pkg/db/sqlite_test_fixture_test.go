@@ -28,7 +28,6 @@ const sqliteSchema = `CREATE TABLE IF NOT EXISTS messages (
     error_message TEXT,
     response_text TEXT,
     conversation_id TEXT NOT NULL DEFAULT '',
-    schedule_run_id TEXT NOT NULL DEFAULT '',
     channel_id TEXT NOT NULL DEFAULT '',
     channel_name TEXT NOT NULL DEFAULT '',
     thread_name TEXT NOT NULL DEFAULT '',
