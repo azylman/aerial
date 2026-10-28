@@ -647,81 +647,6 @@ func TestWorker_DeliverFailureNotice_And_QuotaPause_Silent_TableDriven(t *testin
 	}
 }
 
-func TestWorker_DeliveryTargetID_TableDriven(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name           string
-		threadID       string
-		effectiveID    string
-		burstChannelID string
-		wantTargetID   string
-	}{
-		{
-			name:           "numeric snowflake threadID returned as-is",
-			threadID:       "1542423172400291873",
-			effectiveID:    "123456789",
-			burstChannelID: "987654321",
-			wantTargetID:   "1542423172400291873",
-		},
-		{
-			name:           "custom session key falls back to snowflake burst channelID",
-			threadID:       "custom-session-123",
-			effectiveID:    "",
-			burstChannelID: "1542423172400291873",
-			wantTargetID:   "1542423172400291873",
-		},
-		{
-			name:           "custom session key with empty burst channelID falls back to snowflake effectiveID",
-			threadID:       "custom-session-456",
-			effectiveID:    "1542423172400291873",
-			burstChannelID: "",
-			wantTargetID:   "1542423172400291873",
-		},
-		{
-			name:           "custom session key with non-snowflake burst channelID returns burst channelID",
-			threadID:       "custom-session-789",
-			effectiveID:    "non-snowflake-eff",
-			burstChannelID: "non-snowflake-burst",
-			wantTargetID:   "non-snowflake-burst",
-		},
-		{
-			name:           "custom session key with empty burst channelID and non-snowflake effectiveID falls back to threadID",
-			threadID:       "custom-session-abc",
-			effectiveID:    "eff-key",
-			burstChannelID: "",
-			wantTargetID:   "custom-session-abc",
-		},
-		{
-			name:           "custom session key with empty burst and empty effectiveID falls back to threadID",
-			threadID:       "custom-session-fallback",
-			effectiveID:    "",
-			burstChannelID: "",
-			wantTargetID:   "custom-session-fallback",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			te := &turnExecution{
-				threadID:    tc.threadID,
-				effectiveID: tc.effectiveID,
-				burst: []db.Message{
-					{
-						ID:        "msg-delivery-target",
-						ThreadID:  tc.threadID,
-						ChannelID: tc.burstChannelID,
-					},
-				},
-			}
-			got := te.deliveryTargetID()
-			if got != tc.wantTargetID {
-				t.Errorf("deliveryTargetID() = %q, want %q", got, tc.wantTargetID)
-			}
-		})
-	}
-}
-
 func TestWorker_GlobalQuotaLockout_SilentAndDeliveryTarget_TableDriven(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -734,7 +659,7 @@ func TestWorker_GlobalQuotaLockout_SilentAndDeliveryTarget_TableDriven(t *testin
 	}{
 		{
 			name:           "silent turn hitting global quota lockout suppresses quota message",
-			threadID:       "custom-session-silent",
+			threadID:       "1542423172400291873",
 			channelID:      "1542423172400291873",
 			silent:         true,
 			wantDelivered:  false,
@@ -742,7 +667,7 @@ func TestWorker_GlobalQuotaLockout_SilentAndDeliveryTarget_TableDriven(t *testin
 		},
 		{
 			name:           "non-silent turn hitting global quota lockout delivers to deliveryTargetID snowflake",
-			threadID:       "custom-session-visible",
+			threadID:       "1542423172400291873",
 			channelID:      "1542423172400291873",
 			silent:         false,
 			wantDelivered:  true,
@@ -824,7 +749,7 @@ func TestWorker_DeliverSuccessAndFinalize_CustomSessionTarget_TableDriven(t *tes
 	}{
 		{
 			name:           "custom session non-silent delivers to snowflake channelID",
-			threadID:       "custom-session-success",
+			threadID:       "1542423172400291873",
 			channelID:      "1542423172400291873",
 			silent:         false,
 			wantDelivered:  true,
@@ -832,7 +757,7 @@ func TestWorker_DeliverSuccessAndFinalize_CustomSessionTarget_TableDriven(t *tes
 		},
 		{
 			name:           "custom session silent suppresses delivery",
-			threadID:       "custom-session-silent",
+			threadID:       "1542423172400291873",
 			channelID:      "1542423172400291873",
 			silent:         true,
 			wantDelivered:  false,

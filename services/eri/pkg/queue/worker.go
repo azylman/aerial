@@ -254,9 +254,7 @@ func (p *WorkerPool) resolveBurstScopeLock(burst []db.Message, scopeKeyOpt []str
 }
 
 func resolveBurstTriggerType(firstMsg db.Message) string {
-	if firstMsg.ScheduleRunID != "" {
-		return "schedule"
-	} else if firstMsg.AuthorID == "http-client" {
+	if firstMsg.AuthorID == "http-client" {
 		return "http"
 	}
 	return "discord"
@@ -625,25 +623,6 @@ func (te *turnExecution) resolveWakeHookOverride() string {
 	return hookOverride
 }
 
-// deliveryTargetID returns the Discord channel or thread snowflake to target for status updates,
-// typing indicators, response delivery, and notices. When te.threadID is an internal non-snowflake
-// session key (e.g. from /prompt session_id), it falls back to the message's Discord ChannelID or effectiveID.
-func (te *turnExecution) deliveryTargetID() string {
-	if IsNumericSnowflake(te.threadID) {
-		return te.threadID
-	}
-	if len(te.burst) > 0 && IsNumericSnowflake(te.burst[0].ChannelID) {
-		return te.burst[0].ChannelID
-	}
-	if IsNumericSnowflake(te.effectiveID) {
-		return te.effectiveID
-	}
-	if len(te.burst) > 0 && te.burst[0].ChannelID != "" {
-		return te.burst[0].ChannelID
-	}
-	return te.threadID
-}
-
 func (te *turnExecution) resolveBotIdentity() (string, []string) {
 	botUserID := ""
 	var botRoleIDs []string
@@ -726,7 +705,7 @@ func (te *turnExecution) runChannelAmbientTriage() bool {
 }
 
 func (te *turnExecution) startTurnIndicators() {
-	deliveryTarget := te.deliveryTargetID()
+	deliveryTarget := te.threadID
 	te.statusUpdater = NewStatusUpdater(te.pool.getDiscordSession(), deliveryTarget, te.isThread)
 	if te.pool.cfg.TypingFunc != nil {
 		if stop := te.pool.cfg.TypingFunc(te.pool.getDiscordSession(), deliveryTarget); stop != nil {

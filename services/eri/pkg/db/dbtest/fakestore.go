@@ -472,8 +472,7 @@ func buildActiveTaskRecord(m *db.Message, sess *db.SessionInfo, threadSummary st
 		IsAdmin:           m.IsAdmin,
 		Status:            m.Status,
 		RetryCount:        m.RetryCount,
-		ScheduleRunID:     m.ScheduleRunID,
-		TriggerType:       db.InferTriggerType(m.AuthorID, m.ScheduleRunID),
+		TriggerType:       db.InferTriggerType(m.AuthorID),
 		CreatedAt:         m.CreatedAt,
 		UpdatedAt:         m.UpdatedAt,
 	}
@@ -513,7 +512,6 @@ func buildActiveTaskFromDispatch(d *db.Dispatch, sess *db.SessionInfo, threadSum
 		IsAdmin:           true,
 		Status:            d.Status,
 		RetryCount:        d.RetryCount,
-		ScheduleRunID:     "",
 		TriggerType:       d.Source,
 		CreatedAt:         d.CreatedAt,
 		UpdatedAt:         d.UpdatedAt,

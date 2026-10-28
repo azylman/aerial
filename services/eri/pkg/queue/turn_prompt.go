@@ -199,20 +199,13 @@ func (te *turnExecution) getRecentThreadMessages(threadID string, limit int) ([]
 		}
 	}
 
-	// 2. Fallback to database on disk (ignoring internal scheduler prompts to avoid prompt injection).
+	// 2. Fallback to database on disk.
 	if s := te.store(); s != nil {
 		dbMsgs, err := s.GetRecentThreadMessages(context.Background(), threadID, limit)
 		if err != nil {
 			return nil, err
 		}
-		filtered := make([]db.Message, 0, len(dbMsgs))
-		for _, m := range dbMsgs {
-			if m.ScheduleRunID != "" || strings.EqualFold(m.AuthorName, "Scheduler") {
-				continue
-			}
-			filtered = append(filtered, m)
-		}
-		return filtered, nil
+		return dbMsgs, nil
 	}
 	return nil, nil
 }

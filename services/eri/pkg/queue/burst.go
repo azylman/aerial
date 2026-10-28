@@ -626,9 +626,9 @@ func AssembleTurnPrompt(input TurnPromptInput) string {
 	return strings.TrimSpace(basePrompt)
 }
 
-// isDiscordMessage returns true if the message originated from Discord rather than HTTP (/prompt) or the scheduler.
+// isDiscordMessage returns true if the message originated from Discord rather than HTTP (/prompt).
 func isDiscordMessage(m db.Message) bool {
-	return m.AuthorID != "http-client" && m.AuthorID != "scheduler" && m.ScheduleRunID == ""
+	return m.AuthorID != "http-client"
 }
 
 func isDiscordBurst(burst []db.Message) bool {

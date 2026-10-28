@@ -32,7 +32,6 @@ import (
 type PromptRequest struct {
 	Prompt       string `json:"prompt"`
 	ChannelID    string `json:"channel_id"`
-	SessionID    string `json:"session_id,omitempty"`
 	Title        string `json:"title,omitempty"`
 	MessageID    string `json:"message_id,omitempty"`
 	Model        string `json:"model,omitempty"`
@@ -75,16 +74,11 @@ func resolvePromptEffort(model, effort string) string {
 	return ""
 }
 
-func checkPromptActiveTurn(ctx context.Context, store db.Store, skipIfActive bool, sessionID, channelID string) (bool, string, error) {
+func checkPromptActiveTurn(ctx context.Context, store db.Store, skipIfActive bool, channelID string) (bool, error) {
 	if !skipIfActive || store == nil {
-		return false, "", nil
+		return false, nil
 	}
-	checkID := sessionID
-	if checkID == "" {
-		checkID = channelID
-	}
-	active, err := store.HasActiveThreadTurn(ctx, checkID)
-	return active, checkID, err
+	return store.HasActiveThreadTurn(ctx, channelID)
 }
 
 func resolvePromptChannelID(channelID string, pool *queue.WorkerPool) string {
@@ -95,24 +89,6 @@ func resolvePromptChannelID(channelID string, pool *queue.WorkerPool) string {
 		}
 	}
 	return channelID
-}
-
-func validatePromptSessionID(w http.ResponseWriter, sessionID string) bool {
-	if sessionID != "" && !queue.IsValidThreadKey(sessionID) {
-		writeErr(w, http.StatusBadRequest, "Invalid payload: 'session_id' must be a valid alphanumeric/hyphen/underscore key")
-		return false
-	}
-	return true
-}
-
-func resolvePromptSessionID(pool *queue.WorkerPool, channelID, sessionID, title, prompt string) (string, string) {
-	if sessionID != "" {
-		return channelID, sessionID
-	}
-	if pool != nil {
-		channelID = pool.ResolveTargetThread(channelID, strings.TrimSpace(title), prompt, time.Now().UTC())
-	}
-	return channelID, channelID
 }
 
 func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
@@ -139,14 +115,9 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 		model := strings.TrimSpace(req.Model)
 		effort := resolvePromptEffort(model, strings.TrimSpace(req.Effort))
 
-		sessionID := strings.TrimSpace(req.SessionID)
-		if !validatePromptSessionID(w, sessionID) {
-			return
-		}
-
-		active, checkID, err := checkPromptActiveTurn(r.Context(), store, req.SkipIfActive, sessionID, channelID)
+		active, err := checkPromptActiveTurn(r.Context(), store, req.SkipIfActive, channelID)
 		if err != nil {
-			log.Printf("[HTTP] Failed to check active turn for %s: %v", checkID, err)
+			log.Printf("[HTTP] Failed to check active turn for %s: %v", channelID, err)
 			writeErr(w, http.StatusInternalServerError, "Failed to check active turn")
 			return
 		}
@@ -154,12 +125,14 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			httpkit.WriteJSON(w, http.StatusOK, map[string]string{
 				"status":     "skipped_active",
 				"channel_id": channelID,
-				"session_id": checkID,
+				"session_id": channelID,
 			})
 			return
 		}
 
-		channelID, sessionID = resolvePromptSessionID(pool, channelID, sessionID, req.Title, req.Prompt)
+		if pool != nil {
+			channelID = pool.ResolveTargetThread(channelID, strings.TrimSpace(req.Title), req.Prompt, time.Now().UTC())
+		}
 
 		msgID := strings.TrimSpace(req.MessageID)
 		if msgID == "" {
@@ -168,7 +141,7 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 
 		msg := db.Message{
 			ID:         msgID,
-			ThreadID:   sessionID,
+			ThreadID:   channelID,
 			GuildID:    "",
 			AuthorID:   "http-client",
 			AuthorName: "HTTP Client",
@@ -204,7 +177,7 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 		httpkit.WriteJSON(w, http.StatusAccepted, map[string]string{
 			"status":     "accepted",
 			"channel_id": channelID,
-			"session_id": sessionID,
+			"session_id": channelID,
 			"message_id": msgID,
 			"message":    "Prompt execution enqueued in background",
 		})

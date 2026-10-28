@@ -51,7 +51,6 @@ type ActiveTask struct {
 	IsAdmin           bool      `json:"is_admin,omitempty"`
 	Status            string    `json:"status"`
 	RetryCount        int       `json:"retry_count"`
-	ScheduleRunID     string    `json:"schedule_run_id,omitempty"`
 	TriggerType       string    `json:"trigger_type"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
@@ -74,21 +73,15 @@ func CleanTaskSummary(content string) string {
 	return cleaned
 }
 
-// InferTriggerType deduces the source trigger type for a task from its author and schedule metadata.
-func InferTriggerType(authorID, scheduleRunID string) string {
+// InferTriggerType deduces the source trigger type for a task from its author.
+func InferTriggerType(authorID string) string {
 	if strings.HasPrefix(authorID, "dispatch:") {
 		return strings.TrimPrefix(authorID, "dispatch:")
 	}
 	if authorID == "http-client" {
 		return "http"
 	}
-	if scheduleRunID == "" {
-		return "discord"
-	}
-	if strings.HasPrefix(scheduleRunID, "cron-") {
-		return "cron"
-	}
-	return "reminder"
+	return "discord"
 }
 
 // IsEphemeralTaskMessage returns true when a message routes to an ephemeral execution pool
@@ -109,10 +102,10 @@ func IsEphemeralTaskMessage(ephemeral *bool, effort, model string) bool {
 }
 
 func buildActiveTasksQuery(flt TasksFilter, hasFilter bool) (string, []any) {
-	baseQuery := `SELECT m.id, COALESCE(m.row_id, 0) AS row_id, m.thread_id, COALESCE(NULLIF(m.conversation_id, ''), COALESCE(s.conversation_id, '')) AS session_id, COALESCE(s.previous_conversation_id, '') AS previous_session_id, COALESCE(s.summary, '') AS thread_summary, m.author_name, m.author_id, m.content AS prompt, COALESCE(m.summary, '') AS summary, COALESCE(m.response_text, '') AS response_text, m.is_admin, m.status, m.retry_count, COALESCE(m.schedule_run_id, '') AS schedule_run_id, false AS ephemeral, COALESCE(m.effort, '') AS effort, COALESCE(m.model, '') AS model, m.created_at, m.updated_at FROM messages m LEFT JOIN sessions s ON s.session_id = 'discord-' || m.thread_id`
+	baseQuery := `SELECT m.id, COALESCE(m.row_id, 0) AS row_id, m.thread_id, COALESCE(NULLIF(m.conversation_id, ''), COALESCE(s.conversation_id, '')) AS session_id, COALESCE(s.previous_conversation_id, '') AS previous_session_id, COALESCE(s.summary, '') AS thread_summary, m.author_name, m.author_id, m.content AS prompt, COALESCE(m.summary, '') AS summary, COALESCE(m.response_text, '') AS response_text, m.is_admin, m.status, m.retry_count, false AS ephemeral, COALESCE(m.effort, '') AS effort, COALESCE(m.model, '') AS model, m.created_at, m.updated_at FROM messages m LEFT JOIN sessions s ON s.session_id = 'discord-' || m.thread_id`
 	if !hasFilter {
-		dispatchesQuery := `SELECT d.id, COALESCE(d.row_id, 0) AS row_id, COALESCE(NULLIF(d.session_id, ''), 'dispatch-' || d.id) AS thread_id, COALESCE(NULLIF(d.conversation_id, ''), COALESCE(s.conversation_id, '')) AS session_id, COALESCE(s.previous_conversation_id, '') AS previous_session_id, COALESCE(s.summary, '') AS thread_summary, d.source AS author_name, 'dispatch:' || d.source AS author_id, d.prompt, COALESCE(d.summary, '') AS summary, COALESCE(d.response_text, '') AS response_text, true AS is_admin, d.status, d.retry_count, '' AS schedule_run_id, CASE WHEN d.session_id = '' THEN true ELSE false END AS ephemeral, COALESCE(d.effort, '') AS effort, COALESCE(d.model, '') AS model, d.created_at, d.updated_at FROM dispatches d LEFT JOIN sessions s ON d.session_id != '' AND s.session_id = d.session_id WHERE d.status IN ('PENDING', 'PROCESSING')`
-		return `SELECT id, row_id, thread_id, session_id, previous_session_id, thread_summary, author_name, author_id, prompt, summary, response_text, is_admin, status, retry_count, schedule_run_id, ephemeral, effort, model, created_at, updated_at FROM (` + baseQuery + ` WHERE m.status IN ('PENDING', 'PROCESSING') UNION ALL ` + dispatchesQuery + `) combined ORDER BY created_at ASC LIMIT 50;`, nil
+		dispatchesQuery := `SELECT d.id, COALESCE(d.row_id, 0) AS row_id, COALESCE(NULLIF(d.session_id, ''), 'dispatch-' || d.id) AS thread_id, COALESCE(NULLIF(d.conversation_id, ''), COALESCE(s.conversation_id, '')) AS session_id, COALESCE(s.previous_conversation_id, '') AS previous_session_id, COALESCE(s.summary, '') AS thread_summary, d.source AS author_name, 'dispatch:' || d.source AS author_id, d.prompt, COALESCE(d.summary, '') AS summary, COALESCE(d.response_text, '') AS response_text, true AS is_admin, d.status, d.retry_count, CASE WHEN d.session_id = '' THEN true ELSE false END AS ephemeral, COALESCE(d.effort, '') AS effort, COALESCE(d.model, '') AS model, d.created_at, d.updated_at FROM dispatches d LEFT JOIN sessions s ON d.session_id != '' AND s.session_id = d.session_id WHERE d.status IN ('PENDING', 'PROCESSING')`
+		return `SELECT id, row_id, thread_id, session_id, previous_session_id, thread_summary, author_name, author_id, prompt, summary, response_text, is_admin, status, retry_count, ephemeral, effort, model, created_at, updated_at FROM (` + baseQuery + ` WHERE m.status IN ('PENDING', 'PROCESSING') UNION ALL ` + dispatchesQuery + `) combined ORDER BY created_at ASC LIMIT 50;`, nil
 	}
 
 	var whereClauses []string
@@ -201,7 +194,6 @@ func scanActiveTasks(rows *sql.Rows) ([]ActiveTask, error) {
 			&t.IsAdmin,
 			&t.Status,
 			&t.RetryCount,
-			&t.ScheduleRunID,
 			&ephemeral,
 			&effort,
 			&model,
@@ -221,7 +213,7 @@ func scanActiveTasks(rows *sql.Rows) ([]ActiveTask, error) {
 		if t.Summary == "" {
 			t.Summary = CleanTaskSummary(t.Prompt)
 		}
-		t.TriggerType = InferTriggerType(t.AuthorID, t.ScheduleRunID)
+		t.TriggerType = InferTriggerType(t.AuthorID)
 		tasks = append(tasks, t)
 	}
 	return tasks, rows.Err()

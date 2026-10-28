@@ -387,21 +387,19 @@ func TestTaskHelpers(t *testing.T) {
 
 	// Table-driven InferTriggerType
 	triggerTests := []struct {
-		name          string
-		authorID      string
-		scheduleRunID string
-		expected      string
+		name     string
+		authorID string
+		expected string
 	}{
-		{name: "http_client", authorID: "http-client", scheduleRunID: "", expected: "http"},
-		{name: "cron_prefix", authorID: "user-1", scheduleRunID: "cron-123", expected: "cron"},
-		{name: "reminder_run", authorID: "user-1", scheduleRunID: "run-456", expected: "reminder"},
-		{name: "user_message", authorID: "user-1", scheduleRunID: "", expected: "discord"},
+		{name: "dispatch_prefix", authorID: "dispatch:heartbeat", expected: "heartbeat"},
+		{name: "http_client", authorID: "http-client", expected: "http"},
+		{name: "user_message", authorID: "user-1", expected: "discord"},
 	}
 	for _, tc := range triggerTests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := InferTriggerType(tc.authorID, tc.scheduleRunID)
+			got := InferTriggerType(tc.authorID)
 			if got != tc.expected {
-				t.Errorf("InferTriggerType(%q, %q) = %q, want %q", tc.authorID, tc.scheduleRunID, got, tc.expected)
+				t.Errorf("InferTriggerType(%q) = %q, want %q", tc.authorID, got, tc.expected)
 			}
 		})
 	}

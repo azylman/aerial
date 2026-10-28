@@ -286,8 +286,6 @@ func TestIsTier1Wake(t *testing.T) {
 		{"Quoted raw mention in content with clean metadata", db.Message{Content: "Look at `<@bot-aerial-id>` and `<@&role-aerial-1>`", ChannelID: "chan-1"}, botID, botRoles, false},
 		{"Empty botUserID and empty roles", db.Message{MentionUserIDs: []string{"123"}, MentionRoleIDs: []string{"456"}}, "", nil, false},
 		{"http-client author", db.Message{AuthorID: "http-client"}, "", nil, true},
-		{"scheduler author", db.Message{AuthorID: "scheduler"}, "", nil, true},
-		{"schedule run ID", db.Message{ScheduleRunID: "run-123"}, "", nil, true},
 		{"direct user mention", db.Message{Content: "Hey <@bot-123>"}, "bot-123", nil, true},
 		{"direct nickname mention", db.Message{Content: "Hey <@!bot-123>"}, "bot-123", nil, true},
 		{"direct role mention", db.Message{Content: "Alert <@&role-999>"}, "", []string{"role-999"}, true},
@@ -440,7 +438,6 @@ func TestEvaluateBurstStaleness(t *testing.T) {
 		{"Recovered message (RestartCount > 0) older than TTL is retained", []db.Message{{ID: "m1", CreatedAt: baseTime, RestartCount: 1}}, ttl, true, time.Time{}, baseTime.Add(40 * time.Minute), false, ""},
 		{"Deployment-drained message older than TTL is retained", []db.Message{{ID: "m1", CreatedAt: baseTime, ErrorMessage: "deployment_drain"}}, ttl, true, time.Time{}, baseTime.Add(40 * time.Minute), false, ""},
 		{"HTTP client message is never stale even beyond hard cap", []db.Message{{ID: "m-http", AuthorID: "http-client", CreatedAt: baseTime}}, ttl, true, time.Time{}, baseTime.Add(3 * time.Hour), false, ""},
-		{"Scheduler message is never stale even beyond hard cap", []db.Message{{ID: "m-sched", ScheduleRunID: "run-1", CreatedAt: baseTime}}, ttl, true, time.Time{}, baseTime.Add(3 * time.Hour), false, ""},
 		{"Burst atomicity: if any message recovered, whole burst retained", []db.Message{{ID: "m1", CreatedAt: baseTime}, {ID: "m2", CreatedAt: baseTime.Add(time.Second), RetryCount: 1}}, ttl, true, time.Time{}, baseTime.Add(45 * time.Minute), false, ""},
 		{"Multi-message burst evaluates against newest message timestamp", []db.Message{{ID: "m1", CreatedAt: baseTime}, {ID: "m2", CreatedAt: baseTime.Add(20 * time.Minute)}}, ttl, true, time.Time{}, baseTime.Add(35 * time.Minute), false, ""},
 	}

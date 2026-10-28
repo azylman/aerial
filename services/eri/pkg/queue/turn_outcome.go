@@ -194,7 +194,7 @@ func (te *turnExecution) deliverSuccessAndFinalize(resp *runner.AgyResponse, acc
 }
 
 func (te *turnExecution) deliverDiscordSuccess(cleanText string, attachments []*delivery.Attachment) {
-	deliveryTarget := te.deliveryTargetID()
+	deliveryTarget := te.threadID
 	var deliveryErr error
 	if te.pool.cfg.DeliveryWithAttachmentsFunc != nil {
 		deliveryErr = te.pool.cfg.DeliveryWithAttachmentsFunc(te.pool.getDiscordSession(), deliveryTarget, cleanText, attachments)
@@ -212,7 +212,7 @@ func (te *turnExecution) resolveTokenChannel() string {
 		tokenChannel = te.burst[0].ChannelName
 	}
 	if tokenChannel == "" {
-		if te.triggerType == "schedule" || te.triggerType == "http" {
+		if te.triggerType == "http" || strings.HasPrefix(te.triggerType, "dispatch:") {
 			tokenChannel = te.triggerType
 		} else if !IsNumericSnowflake(te.threadID) && te.threadID != "" {
 			tokenChannel = te.threadID
@@ -236,17 +236,15 @@ func (te *turnExecution) deliverQuotaNotice(pauseMsg string, logPrefix string) {
 	if te.dispatch != nil || te.pool == nil || te.pool.cfg.DeliveryFunc == nil {
 		return
 	}
-	if true {
-		deliveryTarget := te.deliveryTargetID()
-		if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), deliveryTarget, pauseMsg); err != nil {
-			log.Printf("[WorkerPool] Failed to deliver %s for thread %s: %v", logPrefix, te.threadID, err)
-		}
+	deliveryTarget := te.threadID
+	if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), deliveryTarget, pauseMsg); err != nil {
+		log.Printf("[WorkerPool] Failed to deliver %s for thread %s: %v", logPrefix, te.threadID, err)
 	}
 }
 
 func (te *turnExecution) isQuotaRetry() bool {
 	if len(te.burst) > 0 {
-		return te.burst[0].ScheduleRunID != "" || strings.HasPrefix(te.burst[0].Content, "[QUOTA_RETRY]") || strings.Contains(te.turnPrompt, "[QUOTA_RETRY]")
+		return strings.HasPrefix(te.burst[0].Content, "[QUOTA_RETRY]") || strings.Contains(te.turnPrompt, "[QUOTA_RETRY]")
 	}
 	if te.dispatch != nil {
 		return strings.Contains(te.turnPrompt, "[QUOTA_RETRY]") || strings.Contains(te.dispatch.Prompt, "[QUOTA_RETRY]")
@@ -484,7 +482,7 @@ func (te *turnExecution) deliverFailureNotice(agyBin, apiKey, errDetail, stderr,
 		}
 		notif = te.pool.cfg.NotifierFunc(agyBin, apiKey, desc)
 	}
-	deliveryTarget := te.deliveryTargetID()
+	deliveryTarget := te.threadID
 	if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), deliveryTarget, notif); err != nil {
 		log.Printf("[WorkerPool] Failed to deliver %s for thread %s: %v", logLabel, te.threadID, err)
 	}
