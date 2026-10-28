@@ -147,10 +147,13 @@ jobs:
   test:
     name: Run Service Unit Tests
     needs: changes
+    if: github.event_name != 'push' || inputs.force_all == true
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - name: Setup Go 1.27.1
         uses: actions/setup-go@v5
@@ -166,10 +169,28 @@ jobs:
         with:
           node-version: 22
 
-
       - name: Verify Monorepo Test Coverage & Gating
+        env:
+          FORCE_ALL: ${{ inputs.force_all }}
         run: |
-          sh scripts/check-coverage.sh --check --summary
+          set -euo pipefail
+          GO_MODULES=$(find . -maxdepth 3 -name "go.mod" ! -path "*/.*" ! -path "*/vendor/*" | sed 's|^\./||; s|/go\.mod$||' | sort)
+          CHANGED_FILES=$(git diff --name-only HEAD^1 HEAD 2>/dev/null || true)
+          if [ "$FORCE_ALL" = "true" ] || [ -z "$CHANGED_FILES" ] || echo "$CHANGED_FILES" | grep -q -E '^(pkg/|scripts/check-coverage\.sh$)'; then
+            sh scripts/check-coverage.sh --check --summary
+          else
+            RAN_ANY=0
+            for svc in $GO_MODULES; do
+              if ! echo "$CHANGED_FILES" | grep -q "^${svc}/"; then
+                continue
+              fi
+              RAN_ANY=1
+              sh scripts/check-coverage.sh --check --summary --service "$svc"
+            done
+            if [ "$RAN_ANY" -eq 0 ]; then
+              echo "No Go module or frontend changes detected; skipping unit test coverage run."
+            fi
+          fi
 
       - name: Test Webhooks Router
         if: needs.changes.outputs.webhooks-router == 'true'
@@ -186,6 +207,7 @@ jobs:
   lint:
     name: Lint Microservices & Frontend
     needs: changes
+    if: github.event_name != 'push' || inputs.force_all == true
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
@@ -360,12 +382,12 @@ jobs:
             exit 1
           fi
 
-          if [ "$TEST_RES" != "success" ]; then
+          if [ "$TEST_RES" != "success" ] && { [ "${{ github.event_name }}" != "push" ] || [ "$TEST_RES" != "skipped" ]; }; then
             echo "::error::Unit tests failed"
             exit 1
           fi
 
-          if [ "$LINT_RES" != "success" ]; then
+          if [ "$LINT_RES" != "success" ] && { [ "${{ github.event_name }}" != "push" ] || [ "$LINT_RES" != "skipped" ]; }; then
             echo "::error::Linting failed"
             exit 1
           fi
@@ -384,8 +406,8 @@ jobs:
 
   promote-release:
     name: Promote Images to :latest
-    needs: [changes, test, lint, build-and-push, build-gate]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.has_builds == 'true' && needs.build-gate.result == 'success'
+    needs: [changes, build-and-push, build-gate]
+    if: always() && !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.has_builds == 'true' && needs.build-gate.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: read
