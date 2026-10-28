@@ -19,8 +19,6 @@ func TestMessage_HasStructuredFields(t *testing.T) {
 	if (Message{}).HasStructuredFields() {
 		t.Errorf("expected empty Message to return false for HasStructuredFields")
 	}
-	tVal := true
-	fVal := false
 	tests := []struct {
 		name string
 		msg  Message
@@ -38,9 +36,6 @@ func TestMessage_HasStructuredFields(t *testing.T) {
 		{"replying_to_content", Message{ReplyingToContent: "hello"}},
 		{"attachments", Message{Attachments: []string{"http://example.com/img.png"}}},
 		{"model", Message{Model: "gemini-4-flash"}},
-		{"silent", Message{Silent: true}},
-		{"ephemeral_true", Message{Ephemeral: &tVal}},
-		{"ephemeral_false", Message{Ephemeral: &fVal}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

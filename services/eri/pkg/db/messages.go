@@ -48,8 +48,6 @@ type Message struct {
 	ReplyingToContent string    `json:"replying_to_content,omitempty"`
 	Attachments       []string  `json:"attachments,omitempty"`
 	Model             string    `json:"model,omitempty"`
-	Silent            bool      `json:"silent,omitempty"`
-	Ephemeral         *bool     `json:"ephemeral,omitempty"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
 }
@@ -59,7 +57,7 @@ func (m Message) HasStructuredFields() bool {
 		m.AuthorGlobalName != "" || m.AuthorBot || m.IsAdmin ||
 		len(m.Mentions) > 0 || len(m.MentionUserIDs) > 0 || len(m.MentionRoleIDs) > 0 ||
 		m.ReplyingToAuthor != "" || m.ReplyingToContent != "" || len(m.Attachments) > 0 ||
-		m.Model != "" || m.Silent || m.Ephemeral != nil
+		m.Model != ""
 }
 
 func unescapeUserRequest(s string) string {
@@ -103,7 +101,7 @@ func (m Message) BodyText() string {
 	return m.Content
 }
 
-const messageSelectCols = "id, COALESCE(row_id, 0) AS row_id, thread_id, guild_id, author_id, author_name, content, COALESCE(summary, '') AS summary, status, retry_count, COALESCE(restart_count, 0) AS restart_count, COALESCE(effort, '') AS effort, COALESCE(error_message, '') AS error_message, COALESCE(response_text, '') AS response_text, COALESCE(conversation_id, '') AS conversation_id, COALESCE(schedule_run_id, '') AS schedule_run_id, COALESCE(channel_id, '') AS channel_id, COALESCE(channel_name, '') AS channel_name, COALESCE(thread_name, '') AS thread_name, COALESCE(author_global_name, '') AS author_global_name, COALESCE(author_bot, false) AS author_bot, COALESCE(is_admin, false) AS is_admin, mentions, mention_user_ids, mention_role_ids, COALESCE(replying_to_author, '') AS replying_to_author, COALESCE(replying_to_content, '') AS replying_to_content, attachments, COALESCE(model, '') AS model, COALESCE(silent, false) AS silent, ephemeral, created_at, updated_at"
+const messageSelectCols = "id, COALESCE(row_id, 0) AS row_id, thread_id, guild_id, author_id, author_name, content, COALESCE(summary, '') AS summary, status, retry_count, COALESCE(restart_count, 0) AS restart_count, COALESCE(effort, '') AS effort, COALESCE(error_message, '') AS error_message, COALESCE(response_text, '') AS response_text, COALESCE(conversation_id, '') AS conversation_id, COALESCE(schedule_run_id, '') AS schedule_run_id, COALESCE(channel_id, '') AS channel_id, COALESCE(channel_name, '') AS channel_name, COALESCE(thread_name, '') AS thread_name, COALESCE(author_global_name, '') AS author_global_name, COALESCE(author_bot, false) AS author_bot, COALESCE(is_admin, false) AS is_admin, mentions, mention_user_ids, mention_role_ids, COALESCE(replying_to_author, '') AS replying_to_author, COALESCE(replying_to_content, '') AS replying_to_content, attachments, COALESCE(model, '') AS model, created_at, updated_at"
 
 // InsertMessage stores a new message in the database.
 func (s *SQLStore) InsertMessage(ctx context.Context, msg Message) (err error) {
@@ -134,7 +132,7 @@ func (s *SQLStore) InsertMessage(ctx context.Context, msg Message) (err error) {
 		channel_id, channel_name, thread_name, author_global_name,
 		author_bot, is_admin, mentions, mention_user_ids,
 		mention_role_ids, replying_to_author, replying_to_content, attachments,
-		model, silent, ephemeral, created_at, updated_at
+		model, created_at, updated_at
 	) VALUES (
 		$1, $2, $3, $4, $5,
 		$6, $7, $8, $9, $10,
@@ -142,7 +140,7 @@ func (s *SQLStore) InsertMessage(ctx context.Context, msg Message) (err error) {
 		$16, $17, $18, $19,
 		$20, $21, $22, $23,
 		$24, $25, $26, $27,
-		$28, $29, $30, $31, $32
+		$28, $29, $30
 	) ON CONFLICT (id) DO NOTHING;`,
 		msg.ID, msg.ThreadID, msg.GuildID, msg.AuthorID, msg.AuthorName,
 		msg.Content, msg.Summary, msg.Status, msg.RetryCount, msg.RestartCount,
@@ -150,7 +148,7 @@ func (s *SQLStore) InsertMessage(ctx context.Context, msg Message) (err error) {
 		msg.ChannelID, msg.ChannelName, msg.ThreadName, msg.AuthorGlobalName,
 		msg.AuthorBot, msg.IsAdmin, pgutil.FormatPGTextArray(msg.Mentions), pgutil.FormatPGTextArray(msg.MentionUserIDs),
 		pgutil.FormatPGTextArray(msg.MentionRoleIDs), msg.ReplyingToAuthor, msg.ReplyingToContent, pgutil.FormatPGTextArray(msg.Attachments),
-		msg.Model, msg.Silent, msg.Ephemeral, msg.CreatedAt, msg.UpdatedAt,
+		msg.Model, msg.CreatedAt, msg.UpdatedAt,
 	)
 	return err
 }
@@ -158,7 +156,6 @@ func (s *SQLStore) InsertMessage(ctx context.Context, msg Message) (err error) {
 func scanMessage(scanner interface{ Scan(dest ...any) error }, autoCleanSummary bool) (Message, error) {
 	var m Message
 	var errMsg, respText, convID, schedID sql.NullString
-	var ephemeral sql.NullBool
 	if err := scanner.Scan(
 		&m.ID, &m.RowID, &m.ThreadID, &m.GuildID, &m.AuthorID, &m.AuthorName, &m.Content, &m.Summary,
 		&m.Status, &m.RetryCount, &m.RestartCount, &m.Effort, &errMsg, &respText, &convID, &schedID,
@@ -169,15 +166,12 @@ func scanMessage(scanner interface{ Scan(dest ...any) error }, autoCleanSummary 
 		&pgutil.PGStringSlice{Dest: &m.MentionRoleIDs},
 		&m.ReplyingToAuthor, &m.ReplyingToContent,
 		&pgutil.PGStringSlice{Dest: &m.Attachments},
-		&m.Model, &m.Silent, &ephemeral,
+		&m.Model,
 		&m.CreatedAt, &m.UpdatedAt,
 	); err != nil {
 		return Message{}, err
 	}
 	m.ErrorMessage, m.ResponseText, m.ConversationID, m.ScheduleRunID = errMsg.String, respText.String, convID.String, schedID.String
-	if ephemeral.Valid {
-		m.Ephemeral = &ephemeral.Bool
-	}
 	if autoCleanSummary && m.Summary == "" {
 		m.Summary = CleanTaskSummary(m.Content)
 	}

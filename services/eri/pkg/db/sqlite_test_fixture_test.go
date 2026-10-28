@@ -42,8 +42,6 @@ const sqliteSchema = `CREATE TABLE IF NOT EXISTS messages (
     replying_to_content TEXT NOT NULL DEFAULT '',
     attachments TEXT NOT NULL DEFAULT '{}',
     model TEXT NOT NULL DEFAULT '',
-    silent BOOLEAN NOT NULL DEFAULT 0,
-    ephemeral BOOLEAN,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
