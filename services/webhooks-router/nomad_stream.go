@@ -988,13 +988,40 @@ func isAllocationRestartExhausted(taskStates map[string]NomadTaskState) bool {
 	return false
 }
 
+// isDormantPoststopTask returns true when a pending task has never started or restarted
+// (only "Received" events) while another task in the allocation is already running.
+func isDormantPoststopTask(ts NomadTaskState, hasRunningTask bool) bool {
+	if !hasRunningTask || ts.Restarts > 0 || len(ts.Events) == 0 {
+		return false
+	}
+	for _, evt := range ts.Events {
+		if !strings.EqualFold(evt.Type, "Received") {
+			return false
+		}
+	}
+	return true
+}
+
 // isAllocationRestarting returns true if any task in the allocation is actively restarting or pending restart within policy.
 func isAllocationRestarting(taskStates map[string]NomadTaskState) bool {
+	hasRunningTask := false
+	for _, ts := range taskStates {
+		if strings.EqualFold(ts.State, "running") {
+			hasRunningTask = true
+			break
+		}
+	}
 	for _, ts := range taskStates {
 		if isTaskRestartExhausted(ts) || strings.EqualFold(ts.State, "dead") {
 			continue
 		}
-		if strings.EqualFold(ts.State, "pending") || strings.EqualFold(ts.State, "restarting") {
+		if strings.EqualFold(ts.State, "restarting") {
+			return true
+		}
+		if strings.EqualFold(ts.State, "pending") {
+			if isDormantPoststopTask(ts, hasRunningTask) {
+				continue
+			}
 			return true
 		}
 		if len(ts.Events) > 0 {
