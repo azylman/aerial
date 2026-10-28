@@ -785,6 +785,7 @@ func TestProcessHangarEvent(t *testing.T) {
 				"Deployment failed and rolled back",
 				"Please investigate and fix",
 				"```",
+				"thread_id: 1555405874565091380",
 			},
 		},
 		{
@@ -798,6 +799,7 @@ func TestProcessHangarEvent(t *testing.T) {
 			wantPromptSubs: []string{
 				"Deployment failed for job hangar",
 				"Please investigate and fix",
+				"thread_id: 1555405874565091380",
 			},
 		},
 		{
@@ -1454,20 +1456,27 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 	if len(pgDispatches) < 3 {
 		t.Fatalf("expected at least 3 dispatches from srvPG, got %d", len(pgDispatches))
 	}
-	if !strings.Contains(pgDispatches[0].Prompt, "Merge conflict detected on PR #42") || pgDispatches[0].Source != "webhook" || pgDispatches[0].Effort != "medium" {
-		t.Errorf("expected silent medium-effort conflict dispatch for standalone PR, got %+v", pgDispatches[0])
+	if !strings.Contains(pgDispatches[0].Prompt, "Merge conflict detected on PR #42") || !strings.Contains(pgDispatches[0].Prompt, "thread_id: "+validSnowflake) || pgDispatches[0].Source != "webhook" || pgDispatches[0].Effort != "medium" {
+		t.Errorf("expected silent medium-effort conflict dispatch with thread_id for standalone PR, got %+v", pgDispatches[0])
 	}
-	if !strings.Contains(pgDispatches[1].Prompt, "Please investigate and fix the failure by inspecting the failing logs") || pgDispatches[1].Source != "webhook" || pgDispatches[1].Effort != "medium" {
-		t.Errorf("expected silent medium-effort standard CI dispatch, got %+v", pgDispatches[1])
+	if !strings.Contains(pgDispatches[1].Prompt, "Please investigate and fix the failure by inspecting the failing logs") || !strings.Contains(pgDispatches[1].Prompt, "thread_id: "+validSnowflake) || pgDispatches[1].Source != "webhook" || pgDispatches[1].Effort != "medium" {
+		t.Errorf("expected silent medium-effort standard CI dispatch with thread_id, got %+v", pgDispatches[1])
 	}
-	if !strings.Contains(pgDispatches[2].Prompt, "override-roborev 42") || pgDispatches[2].Source != "webhook" || pgDispatches[2].Effort != "medium" {
-		t.Errorf("expected silent medium-effort roborev override dispatch, got %+v", pgDispatches[2])
+	if !strings.Contains(pgDispatches[2].Prompt, "override-roborev 42") || !strings.Contains(pgDispatches[2].Prompt, "thread_id: "+validSnowflake) || pgDispatches[2].Source != "webhook" || pgDispatches[2].Effort != "medium" {
+		t.Errorf("expected silent medium-effort roborev override dispatch with thread_id, got %+v", pgDispatches[2])
 	}
 
-	// dispatchAlertWithPrompt with DM error
-	srvAlert := newTestRouter(Config{}, nil, nil, &mockOutboundDispatcher{directMessageErr: errors.New("dm failed")})
+	// dispatchAlertWithPrompt with DM error and silent prefixed targetID deduplication
+	dispAlert := &mockOutboundDispatcher{directMessageErr: errors.New("dm failed")}
+	srvAlert := newTestRouter(Config{}, nil, nil, dispAlert)
 	if err := srvAlert.dispatchAlertWithPrompt(ctx, validSnowflake, "alert", "dm text", "prompt text"); err != nil {
 		t.Errorf("dispatchAlertWithPrompt with dm err: %v", err)
+	}
+	if err := srvAlert.dispatchAlertWithPrompt(ctx, "stateful_medium:discord-"+validSnowflake, "silent_alert", "", "prompt text\nthread_id: "+validSnowflake, vanadisPromptOpts{silent: true}); err != nil {
+		t.Errorf("dispatchAlertWithPrompt silent prefixed: %v", err)
+	}
+	if got := dispAlert.DispatchCalls(); len(got) != 1 || strings.Count(got[0].Prompt, "thread_id: "+validSnowflake) != 1 {
+		t.Errorf("expected single deduplicated thread_id in silent dispatch, got %+v", got)
 	}
 
 	// Vanadis silent auto-fix prompts suppress DM and set Silent: true with Vanadis effort/chunk routing
