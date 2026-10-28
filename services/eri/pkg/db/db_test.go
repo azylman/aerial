@@ -488,11 +488,11 @@ func TestGetActiveTasks_FiltersAndOrdering(t *testing.T) {
 			wantRespText:  "Response 1",
 		},
 		{
-			name:        "is_admin false filter omits parent session for ephemeral effort",
+			name:        "is_admin false filter matches thread session",
 			filter:      TasksFilter{IsAdmin: &adminFalse},
 			wantCount:   1,
 			wantFirstID: "msg-f2",
-			wantSess:    "",
+			wantSess:    "int-sess-1",
 			checkSess:   true,
 		},
 		{

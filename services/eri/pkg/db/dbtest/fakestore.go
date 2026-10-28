@@ -181,7 +181,6 @@ func cloneMessage(m *db.Message) *db.Message {
 	cp := *m
 	cp.Mentions, cp.MentionUserIDs = cloneSlice(m.Mentions), cloneSlice(m.MentionUserIDs)
 	cp.MentionRoleIDs, cp.Attachments = cloneSlice(m.MentionRoleIDs), cloneSlice(m.Attachments)
-	cp.Ephemeral = clonePtr(m.Ephemeral)
 	return &cp
 }
 
@@ -451,14 +450,12 @@ func buildActiveTaskRecord(m *db.Message, sess *db.SessionInfo, threadSummary st
 		summary = db.CleanTaskSummary(m.Content)
 	}
 	var sessID, prevSessID string
-	if !db.IsEphemeralTaskMessage(m.Ephemeral, m.Effort, m.Model) {
-		sessID = m.ConversationID
-		if sessID == "" && sess != nil {
-			sessID = sess.InternalSessionID
-		}
-		if sess != nil {
-			prevSessID = sess.PreviousSessionID
-		}
+	sessID = m.ConversationID
+	if sessID == "" && sess != nil {
+		sessID = sess.InternalSessionID
+	}
+	if sess != nil {
+		prevSessID = sess.PreviousSessionID
 	}
 	return db.ActiveTask{
 		ID:                m.ID,
