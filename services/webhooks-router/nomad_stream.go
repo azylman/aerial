@@ -428,7 +428,7 @@ func totalAllocationRestarts(taskStates map[string]NomadTaskState) int {
 	return total
 }
 
-func allocationEventIdempotencyKey(raw json.RawMessage) (string, bool) {
+func allocationEventIdempotencyKey(raw json.RawMessage, poststopLookup func(jobID string) map[string]bool) (string, bool) {
 	var allocPayload NomadAllocationEventPayload
 	if err := json.Unmarshal(raw, &allocPayload); err != nil {
 		return "", false
@@ -441,7 +441,7 @@ func allocationEventIdempotencyKey(raw json.RawMessage) (string, bool) {
 	if !isRunning && !isComplete && !isFailed && !isExhausted {
 		return "", false
 	}
-	if isRunning && !isFailed && !isExhausted && isAllocationRestarting(alloc.TaskStates) {
+	if isRunning && !isFailed && !isExhausted && isAllocationRestartingWithLookup(alloc.JobID, alloc.TaskStates, poststopLookup) {
 		return "", false
 	}
 	if alloc.ID != "" && alloc.JobID != "" {
@@ -505,12 +505,12 @@ func jobRegisteredEventIdempotencyKey(eventType string, raw json.RawMessage) (st
 	return fmt.Sprintf("nomad:job:%s:%d:registered", jobID, jobPayload.Job.ModifyIndex), true
 }
 
-func resolveNomadEventIdempotencyKey(event NomadEvent) (string, bool) {
+func resolveNomadEventIdempotencyKey(event NomadEvent, poststopLookup func(jobID string) map[string]bool) (string, bool) {
 	switch event.Topic {
 	case "Deployment":
 		return deploymentEventIdempotencyKey(event.Payload)
 	case "Allocation":
-		return allocationEventIdempotencyKey(event.Payload)
+		return allocationEventIdempotencyKey(event.Payload, poststopLookup)
 	case "Evaluation":
 		return evaluationEventIdempotencyKey(event.Payload)
 	case "Job":
@@ -529,7 +529,13 @@ func (sub *NomadStreamSubscriber) handleNomadEvent(ctx context.Context, event No
 		return
 	}
 
-	idempotencyKey, ok := resolveNomadEventIdempotencyKey(event)
+	var lookup func(jobID string) map[string]bool
+	if sub.server != nil {
+		lookup = func(jobID string) map[string]bool {
+			return sub.server.fetchPoststopTasks(ctx, jobID)
+		}
+	}
+	idempotencyKey, ok := resolveNomadEventIdempotencyKey(event, lookup)
 	if !ok {
 		return
 	}
@@ -587,7 +593,7 @@ func (s *RouterServer) processNomadAllocationEvent(ctx context.Context, rawPaylo
 	if alloc.DesiredStatus == "run" && isAllocationRestartExhausted(alloc.TaskStates) {
 		return s.HandleNomadJobFailure(ctx, alloc.JobID, alloc.ID, "failed", extractAllocationErrorDetails(alloc.ClientDescription, alloc.TaskStates))
 	}
-	if isAllocationRestarting(alloc.TaskStates) {
+	if s.isAllocationRestartingForJob(ctx, alloc.JobID, alloc.TaskStates) {
 		return nil
 	}
 	if alloc.DesiredStatus == "run" && (alloc.ClientStatus == "running" || (alloc.ClientStatus == "complete" && !hasFailedTaskState(alloc.TaskStates))) && s.isNomadJobHealthy(ctx, alloc.JobID) {
@@ -988,30 +994,77 @@ func isAllocationRestartExhausted(taskStates map[string]NomadTaskState) bool {
 	return false
 }
 
-// isDormantPoststopTask returns true when a pending task has never started or restarted
-// (only "Received" events) while another task in the allocation is already running.
-func isDormantPoststopTask(ts NomadTaskState, hasRunningTask bool) bool {
-	if !hasRunningTask || ts.Restarts > 0 || len(ts.Events) == 0 {
-		return false
-	}
-	for _, evt := range ts.Events {
-		if !strings.EqualFold(evt.Type, "Received") {
-			return false
+// hasUnrestartedPendingTask returns true if any non-exhausted task in taskStates is in "pending" state with zero restarts.
+func hasUnrestartedPendingTask(taskStates map[string]NomadTaskState) bool {
+	for _, ts := range taskStates {
+		if !isTaskRestartExhausted(ts) && strings.EqualFold(ts.State, "pending") && ts.Restarts == 0 {
+			return true
 		}
 	}
-	return true
+	return false
+}
+
+// fetchPoststopTasks queries Nomad's /v1/job/{job} endpoint and returns the set of task names
+// explicitly configured with Lifecycle.Hook == "poststop".
+func (s *RouterServer) fetchPoststopTasks(ctx context.Context, jobID string) map[string]bool {
+	cleanJob := strings.TrimSpace(jobID)
+	if s == nil || cleanJob == "" {
+		return nil
+	}
+	var jobSpec struct {
+		TaskGroups []struct {
+			Tasks []struct {
+				Name      string `json:"Name"`
+				Lifecycle *struct {
+					Hook string `json:"Hook"`
+				} `json:"Lifecycle"`
+			} `json:"Tasks"`
+		} `json:"TaskGroups"`
+	}
+	if !s.getNomadJSON(ctx, "/v1/job/"+cleanJob, &jobSpec) {
+		return nil
+	}
+	var poststop map[string]bool
+	for _, tg := range jobSpec.TaskGroups {
+		for _, task := range tg.Tasks {
+			if task.Lifecycle != nil && strings.EqualFold(task.Lifecycle.Hook, "poststop") {
+				if poststop == nil {
+					poststop = make(map[string]bool)
+				}
+				poststop[task.Name] = true
+			}
+		}
+	}
+	return poststop
+}
+
+// isAllocationRestartingWithLookup resolves poststop tasks via poststopLookup only when an unrestarted pending task exists.
+func isAllocationRestartingWithLookup(jobID string, taskStates map[string]NomadTaskState, poststopLookup func(string) map[string]bool) bool {
+	var poststop map[string]bool
+	if poststopLookup != nil && hasUnrestartedPendingTask(taskStates) {
+		poststop = poststopLookup(jobID)
+	}
+	return isAllocationRestarting(taskStates, poststop)
+}
+
+// isAllocationRestartingForJob checks whether any task in taskStates is restarting or pending startup,
+// cross-checking Nomad's /v1/job/{job} API to ignore dormant poststop lifecycle hooks.
+func (s *RouterServer) isAllocationRestartingForJob(ctx context.Context, jobID string, taskStates map[string]NomadTaskState) bool {
+	if s == nil {
+		return isAllocationRestarting(taskStates)
+	}
+	return isAllocationRestartingWithLookup(jobID, taskStates, func(id string) map[string]bool {
+		return s.fetchPoststopTasks(ctx, id)
+	})
 }
 
 // isAllocationRestarting returns true if any task in the allocation is actively restarting or pending restart within policy.
-func isAllocationRestarting(taskStates map[string]NomadTaskState) bool {
-	hasRunningTask := false
-	for _, ts := range taskStates {
-		if strings.EqualFold(ts.State, "running") {
-			hasRunningTask = true
-			break
-		}
+func isAllocationRestarting(taskStates map[string]NomadTaskState, poststopTasks ...map[string]bool) bool {
+	var poststop map[string]bool
+	if len(poststopTasks) > 0 {
+		poststop = poststopTasks[0]
 	}
-	for _, ts := range taskStates {
+	for name, ts := range taskStates {
 		if isTaskRestartExhausted(ts) || strings.EqualFold(ts.State, "dead") {
 			continue
 		}
@@ -1019,7 +1072,7 @@ func isAllocationRestarting(taskStates map[string]NomadTaskState) bool {
 			return true
 		}
 		if strings.EqualFold(ts.State, "pending") {
-			if isDormantPoststopTask(ts, hasRunningTask) {
+			if ts.Restarts == 0 && poststop[name] {
 				continue
 			}
 			return true
