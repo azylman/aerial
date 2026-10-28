@@ -1472,11 +1472,18 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 	if err := srvAlert.dispatchAlertWithPrompt(ctx, validSnowflake, "alert", "dm text", "prompt text"); err != nil {
 		t.Errorf("dispatchAlertWithPrompt with dm err: %v", err)
 	}
-	if err := srvAlert.dispatchAlertWithPrompt(ctx, "stateful_medium:discord-"+validSnowflake, "silent_alert", "", "prompt text\nthread_id: "+validSnowflake, vanadisPromptOpts{silent: true}); err != nil {
+	if err := srvAlert.dispatchAlertWithPrompt(ctx, "stateful_medium:discord-"+validSnowflake, "silent_alert", "", "prompt text\nthread_id: "+validSnowflake, vanadisPromptOpts{silent: true, chunkID: "c-alert"}); err != nil {
 		t.Errorf("dispatchAlertWithPrompt silent prefixed: %v", err)
 	}
-	if got := dispAlert.DispatchCalls(); len(got) != 1 || strings.Count(got[0].Prompt, "thread_id: "+validSnowflake) != 1 {
-		t.Errorf("expected single deduplicated thread_id in silent dispatch, got %+v", got)
+	if got := dispAlert.DispatchCalls(); len(got) != 1 || got[0].SessionID != "vanadis-c-alert" || strings.Count(got[0].Prompt, "thread_id: "+validSnowflake) != 1 {
+		t.Errorf("expected single deduplicated thread_id and session_id in silent dispatch, got %+v", got)
+	}
+	// invalid chunkID should not populate SessionID
+	if err := srvAlert.dispatchAlertWithPrompt(ctx, "stateful_medium:discord-"+validSnowflake, "silent_alert", "", "prompt text", vanadisPromptOpts{silent: true, chunkID: "bad:chunk:id"}); err != nil {
+		t.Errorf("dispatchAlertWithPrompt bad chunk id: %v", err)
+	}
+	if got := dispAlert.DispatchCalls(); len(got) != 2 || got[1].SessionID != "" {
+		t.Errorf("expected empty SessionID on invalid chunk id, got %+v", got)
 	}
 
 	// Vanadis silent auto-fix prompts suppress DM and set Silent: true with Vanadis effort/chunk routing
@@ -1515,7 +1522,7 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 		t.Errorf("dispatchCIFailurePrompt(vanadis pg): %v", err)
 	}
 	vpgDispatches := dispVanadisPG.DispatchCalls()
-	if len(vpgDispatches) != 1 || vpgDispatches[0].Source != "webhook" || vpgDispatches[0].Effort != "low" || !strings.Contains(vpgDispatches[0].Prompt, "Chunk ID: chunk-885") {
+	if len(vpgDispatches) != 1 || vpgDispatches[0].Source != "webhook" || vpgDispatches[0].SessionID != "vanadis-chunk-885" || vpgDispatches[0].Effort != "low" || !strings.Contains(vpgDispatches[0].Prompt, "Chunk ID: chunk-885") {
 		t.Errorf("expected silent low-effort dispatch with chunk-885, got %+v", vpgDispatches)
 	}
 }

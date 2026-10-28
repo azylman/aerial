@@ -858,7 +858,7 @@ func TestExecuteChunkWorkerAndProcessExecuteChunk(t *testing.T) {
 	if err := worker.Work(ctx, job); err != nil {
 		t.Fatalf("unexpected worker error: %v", err)
 	}
-	if len(gotPrompts) != 1 || gotPrompts[0].Source != "vanadis" || gotPrompts[0].Effort != "medium" || !strings.Contains(gotPrompts[0].Prompt, "Chunk ID: c-1") {
+	if len(gotPrompts) != 1 || gotPrompts[0].Source != "vanadis" || gotPrompts[0].SessionID != "vanadis-c-1" || gotPrompts[0].Effort != "medium" || !strings.Contains(gotPrompts[0].Prompt, "Chunk ID: c-1") {
 		t.Fatalf("unexpected dispatched prompts: %+v", gotPrompts)
 	}
 	brainStatus = http.StatusBadGateway
@@ -925,8 +925,12 @@ func TestHTTPEndpoints(t *testing.T) {
 		`{"repo":"aerial","thread_id":"123","objective":"obj","chunks":[{"title":"","instructions":"i"}]}`,
 		`{"repo":"aerial","thread_id":"123","objective":"obj","chunks":[{"title":"t","instructions":""}]}`,
 		`{"repo":"aerial","thread_id":"123","objective":"obj","chunks":[{"title":"t","instructions":"i","effort":"unsupported"}]}`,
+		`{"repo":"aerial","thread_id":"123","objective":"obj","chunks":[{"id":"bad:id","title":"t","instructions":"i"}]}`,
 	} {
 		checkCode(http.MethodPost, "/builds", strings.NewReader(p), http.StatusBadRequest)
+	}
+	if err := validateCreateBuildInputs("b1", "123", "obj", []VanadisChunk{{ID: "bad:id", Title: "t", Instructions: "i"}}); err == nil || !strings.Contains(err.Error(), "chunks[0].id must be 1..120 characters") {
+		t.Fatalf("expected validateCreateBuildInputs chunk id error, got %v", err)
 	}
 	validPayload := `{"repo":"aerial","thread_id":"stateful_medium:discord-1555999","title":"Implement Feature X Build Title","objective":"Implement feature X","shared_context":"Targeting Nomad cluster","chunks":[{"title":"Part 1","instructions":"Do part 1","effort":"low"},{"id":"custom-chunk-2","title":"Part 2","instructions":"Do part 2","target_files":["a.go"],"target_symbols":["A"],"effort":"high","acceptance_criteria":["All green"]}]}`
 	memStore.createErr = errors.New("create failed")
