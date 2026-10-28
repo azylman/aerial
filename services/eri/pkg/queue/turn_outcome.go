@@ -337,7 +337,7 @@ func (te *turnExecution) handleYieldTrap(resp *runner.AgyResponse, exitCode int,
 	accumulatedUsage.CacheReadTokens += resp.Usage.CacheReadTokens
 	accumulatedUsage.TotalTokens += resp.Usage.TotalTokens
 
-	if *promptToSend == te.turnPrompt || *promptToSend == "" {
+	if *promptToSend != YieldTrapResumePrompt && !strings.Contains(*promptToSend, "<SYSTEM_MESSAGE>") {
 		*promptToSend = YieldTrapResumePrompt
 	}
 	log.Printf("[YieldTrap] Intercepted background command exit for thread %s in session %s (auto-resume %d/%d, source=%s, taskCount=%d): suppressing intermediate waiting output and auto-resuming turn.",

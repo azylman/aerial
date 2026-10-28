@@ -91,6 +91,11 @@ func TestBuildAgyEnv(t *testing.T) {
 			[]string{"GIT_TERMINAL_PROMPT=0"},
 			[]string{"AERIAL_TARGET_ID="},
 		},
+		{
+			AgyEnvInput{BaseEnv: []string{"AERIAL_TARGET_ID=stale-target"}, TargetID: "vanadis-chunk-1"},
+			[]string{"GIT_TERMINAL_PROMPT=0"},
+			[]string{"AERIAL_TARGET_ID="},
+		},
 	} {
 		assertContainsAndOmits(t, strings.Join(BuildAgyEnv(tc.input), "\n"), tc.contains, tc.notContains, tc.input)
 	}

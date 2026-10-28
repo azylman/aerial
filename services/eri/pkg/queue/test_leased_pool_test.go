@@ -152,6 +152,28 @@ func (p *testRunnerAgentPool) AcquireLease(ctx context.Context, targetKey string
 	}, nil
 }
 
+func (p *testRunnerAgentPool) EvictSession(targetKey string) error {
+	p.mu.Lock()
+	if p.sessions != nil {
+		delete(p.sessions, targetKey)
+	}
+	p.mu.Unlock()
+	if ep, ok := p.trackerPool.(interface{ EvictSession(string) error }); ok {
+		return ep.EvictSession(targetKey)
+	}
+	return nil
+}
+
+func (p *testRunnerAgentPool) HasSession(targetKey string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.sessions == nil {
+		return false
+	}
+	_, exists := p.sessions[targetKey]
+	return exists
+}
+
 func (p *testRunnerAgentPool) Initialize(ctx context.Context) error { return nil }
 func (p *testRunnerAgentPool) Close() error {
 	p.mu.Lock()
