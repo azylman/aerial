@@ -637,24 +637,24 @@ func TestBuildSystemOneState(t *testing.T) {
 		t.Fatalf("unexpected state formatting: %q", state)
 	}
 
-	longMsg := db.Message{AuthorName: "alice", Content: "START_OF_MESSAGE " + strings.Repeat("x", 500) + " END_OF_MESSAGE"}
+	longMsg := db.Message{AuthorName: "alice", Content: "START_OF_MESSAGE " + strings.Repeat("x", 600) + " END_OF_MESSAGE"}
 	longState := BuildSystemOneState([]db.Message{longMsg}, nil)
-	if len([]rune(longState)) != 350 || !strings.Contains(longState, "START_OF_MESSAGE") || !strings.Contains(longState, "END_OF_MESSAGE") || !strings.Contains(longState, " ... [snip] ... ") {
-		t.Fatalf("expected head, tail, and indicator capped at 350 runes: %q", longState)
+	if len([]rune(longState)) != 500 || !strings.Contains(longState, "START_OF_MESSAGE") || !strings.Contains(longState, "END_OF_MESSAGE") || !strings.Contains(longState, " ... [snip] ... ") {
+		t.Fatalf("expected head, tail, and indicator capped at 500 runes: %q", longState)
 	}
 
 	historyMulti := []db.Message{
-		{AuthorName: "user1", Content: strings.Repeat("1", 400)},
-		{AuthorName: "user2", Content: strings.Repeat("2", 400)},
-		{AuthorName: "user3", Content: strings.Repeat("3", 400)},
-		{AuthorName: "user4", Content: strings.Repeat("4", 400)},
-		{AuthorName: "user5", Content: strings.Repeat("5", 400)},
-		{AuthorName: "user6", Content: strings.Repeat("6", 400)},
+		{AuthorName: "user1", Content: strings.Repeat("1", 600)},
+		{AuthorName: "user2", Content: strings.Repeat("2", 600)},
+		{AuthorName: "user3", Content: strings.Repeat("3", 600)},
+		{AuthorName: "user4", Content: strings.Repeat("4", 600)},
+		{AuthorName: "user5", Content: strings.Repeat("5", 600)},
+		{AuthorName: "user6", Content: strings.Repeat("6", 600)},
 	}
-	burstMulti := []db.Message{{AuthorName: "user7", Content: strings.Repeat("7", 400)}}
+	burstMulti := []db.Message{{AuthorName: "user7", Content: strings.Repeat("7", 600)}}
 	multiState := BuildSystemOneState(burstMulti, historyMulti)
-	if len([]rune(multiState)) > 1800 || strings.Contains(multiState, "user1:") || strings.Contains(multiState, "user2:") ||
-		!strings.Contains(multiState, "user3:") || !strings.Contains(multiState, "user4:") || !strings.Contains(multiState, "user7:") {
+	if len([]rune(multiState)) > 3200 || strings.Contains(multiState, "user1:") ||
+		!strings.Contains(multiState, "user2:") || !strings.Contains(multiState, "user3:") || !strings.Contains(multiState, "user7:") {
 		t.Fatalf("unexpected tail-style multi-message state: %q", multiState)
 	}
 }
