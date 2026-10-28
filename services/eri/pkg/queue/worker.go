@@ -192,9 +192,6 @@ func (te *turnExecution) incrementSessionTurnCount(threadID string) (int, error)
 	if te == nil || te.isEphemeral {
 		return 0, nil
 	}
-	if te.dispatch == nil && isBurstEphemeral(te.burst) {
-		return 0, nil
-	}
 	if s := te.store(); s != nil {
 		return s.IncrementSessionTurnCount(context.Background(), threadID)
 	}
@@ -359,7 +356,7 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 		triggerType: resolveBurstTriggerType(burst[0]),
 		execStart:   time.Now().UTC(),
 		wakeIdx:     -1,
-		isEphemeral: isBurstEphemeral(burst),
+		isEphemeral: false,
 		stopTyping:  func() {},
 		turnCtx:     turnCtx,
 		turnCancel:  turnCancel,
@@ -601,8 +598,8 @@ func (te *turnExecution) resolveTurnPolicy() bool {
 	return true
 }
 
-func shouldEvaluateAmbientWake(mode string, isThread, isSilent, isHTTP bool) bool {
-	return strings.ToLower(mode) == "channel" && !isThread && !isSilent && !isHTTP
+func shouldEvaluateAmbientWake(mode string, isThread, isHTTP bool) bool {
+	return strings.ToLower(mode) == "channel" && !isThread && !isHTTP
 }
 
 func (te *turnExecution) resolveWakeHookOverride() string {
@@ -729,19 +726,17 @@ func (te *turnExecution) runChannelAmbientTriage() bool {
 }
 
 func (te *turnExecution) startTurnIndicators() {
-	if !extractBurstSilent(te.burst) {
-		deliveryTarget := te.deliveryTargetID()
-		te.statusUpdater = NewStatusUpdater(te.pool.getDiscordSession(), deliveryTarget, te.isThread)
-		if te.pool.cfg.TypingFunc != nil {
-			if stop := te.pool.cfg.TypingFunc(te.pool.getDiscordSession(), deliveryTarget); stop != nil {
-				te.stopTyping = stop
-			}
+	deliveryTarget := te.deliveryTargetID()
+	te.statusUpdater = NewStatusUpdater(te.pool.getDiscordSession(), deliveryTarget, te.isThread)
+	if te.pool.cfg.TypingFunc != nil {
+		if stop := te.pool.cfg.TypingFunc(te.pool.getDiscordSession(), deliveryTarget); stop != nil {
+			te.stopTyping = stop
 		}
 	}
 }
 
 func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
-	if shouldEvaluateAmbientWake(te.policy.Mode, te.isThread, extractBurstSilent(te.burst), isHTTPClientBurst(te.burst)) {
+	if shouldEvaluateAmbientWake(te.policy.Mode, te.isThread, isHTTPClientBurst(te.burst)) {
 		if te.runChannelAmbientTriage() {
 			return true
 		}

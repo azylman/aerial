@@ -520,7 +520,10 @@ func TestWorkerPool_LowEffortAndPrimary_ConcurrentExecutionSameThread(t *testing
 
 	cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir, d.LowEffortModel = tempData, "gemini-3.8-flash-low" })
 	pool := New(cfg, WorkerPoolConfig{
-		ProcessPool: primaryPool, LowEffortProcessPool: lowPool,
+		Pools: map[PoolKey]runner.AgentPool{
+			{Ephemeral: false, Effort: "high"}: primaryPool,
+			{Ephemeral: false, Effort: "low"}:  lowPool,
+		},
 		SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1,
 		OnMessageCompleted: func(msg db.Message, status string) {
 			if msg.ID == "msg-norm-concurrent" && status == db.StatusCompleted {
@@ -569,6 +572,7 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 	var spawnSeq int
 	var mu sync.Mutex
 	var capturedPrompts []string
+	doneCh := make(chan struct{}, 2)
 
 	lowSpawner := &mockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
@@ -595,6 +599,10 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 						capturedPrompts = append(capturedPrompts, string(buf[:n]))
 						mu.Unlock()
 						_, _ = outW.Write([]byte(fmt.Sprintf("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ephemeral ok\",\"conversation_id\":%q,\"usage\":{\"total_tokens\":5}}}\n", sessUUID)))
+						select {
+						case doneCh <- struct{}{}:
+						default:
+						}
 					}
 				}
 			}()
@@ -611,17 +619,11 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 	defer lowPool.Close()
 
 	cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir, d.LowEffortModel = tempData, "gemini-3.8-flash-low" })
-	doneCh := make(chan struct{}, 2)
 	pool := New(cfg, WorkerPoolConfig{
 		ProcessPool: primaryPool, LowEffortProcessPool: lowPool,
 		SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1,
 		HistoryFetcher: func(ctx context.Context, channelID string, beforeID string, limit int) ([]HistoryMessage, error) {
 			return []HistoryMessage{{ID: "hist-1", AuthorName: "test-user", Content: "prior chat history should not be injected", CreatedAt: time.Now().Add(-5 * time.Minute)}}, nil
-		},
-		OnMessageCompleted: func(msg db.Message, status string) {
-			if status == db.StatusCompleted {
-				doneCh <- struct{}{}
-			}
 		},
 	})
 	defer pool.Stop()
@@ -632,18 +634,18 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 	_ = store.RotateSessionID(ctx, threadID, primarySessUUID)
 	_ = store.SaveThreadSummary(ctx, threadID, "Cached summary that must not be injected", "hist-1")
 
-	msg1 := db.Message{ID: "msg-ephem-1", ThreadID: threadID, Content: "execute vanadis chunk 1", Effort: "low", Status: db.StatusPending, CreatedAt: time.Now()}
-	_ = store.InsertMessage(ctx, msg1)
-	pool.Enqueue(msg1)
+	d1 := db.Dispatch{ID: "msg-ephem-1", Source: "vanadis", Prompt: "execute vanadis chunk 1", Effort: "low", Status: db.StatusPending, CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	_ = store.InsertDispatch(ctx, d1)
+	pool.EnqueueDispatch(d1)
 	select {
 	case <-doneCh:
 	case <-time.After(5 * time.Second):
 		t.Fatalf("timeout waiting for ephemeral turn 1")
 	}
 
-	msg2 := db.Message{ID: "msg-ephem-2", ThreadID: threadID, Content: "execute vanadis chunk 2", Effort: "low", Status: db.StatusPending, CreatedAt: time.Now()}
-	_ = store.InsertMessage(ctx, msg2)
-	pool.Enqueue(msg2)
+	d2 := db.Dispatch{ID: "msg-ephem-2", Source: "vanadis", Prompt: "execute vanadis chunk 2", Effort: "low", Status: db.StatusPending, CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	_ = store.InsertDispatch(ctx, d2)
+	pool.EnqueueDispatch(d2)
 	select {
 	case <-doneCh:
 	case <-time.After(5 * time.Second):
@@ -682,6 +684,14 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 	}
 }
 
+type mockAcquireLeaseFailPool struct {
+	runner.AgentPool
+}
+
+func (m *mockAcquireLeaseFailPool) AcquireLease(ctx context.Context, targetKey string) (runner.SessionLease, error) {
+	return nil, errors.New("lease acquisition failed")
+}
+
 func TestWorker_EphemeralHighEffort_FailsBurst(t *testing.T) {
 	t.Parallel()
 	store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
@@ -700,7 +710,7 @@ func TestWorker_EphemeralHighEffort_FailsBurst(t *testing.T) {
 	cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
 	doneCh := make(chan string, 1)
 	pool := New(cfg, WorkerPoolConfig{
-		ProcessPool:    primaryPool,
+		ProcessPool:    &mockAcquireLeaseFailPool{AgentPool: primaryPool},
 		SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1,
 		OnMessageCompleted: func(msg db.Message, status string) {
 			doneCh <- status
@@ -712,10 +722,9 @@ func TestWorker_EphemeralHighEffort_FailsBurst(t *testing.T) {
 	ctx := context.Background()
 	_ = store.SaveSessionID(ctx, threadID, primarySessUUID)
 
-	trueVal := true
 	msg := db.Message{
-		ID: "msg-ephem-high-fail", ThreadID: threadID, Content: "execute invalid ephemeral high effort",
-		Effort: "high", Ephemeral: &trueVal, Status: db.StatusPending, CreatedAt: time.Now(),
+		ID: "msg-ephem-high-fail", ThreadID: threadID, Content: "execute turn with failing lease",
+		Effort: "high", Status: db.StatusPending, CreatedAt: time.Now(),
 	}
 	_ = store.InsertMessage(ctx, msg)
 	pool.Enqueue(msg)
@@ -739,7 +748,6 @@ func TestWorker_EphemeralHighEffort_FailsBurst(t *testing.T) {
 
 func TestWorker_StatefulLowAndMediumPools_ResumeAndPersistSessions(t *testing.T) {
 	t.Parallel()
-	falseVal := false
 	tests := []struct {
 		name   string
 		effort string
@@ -837,7 +845,7 @@ func TestWorker_StatefulLowAndMediumPools_ResumeAndPersistSessions(t *testing.T)
 
 			msg := db.Message{
 				ID: "msg-stateful-" + tc.effort, ThreadID: threadID, Content: "execute persistent " + tc.effort,
-				Effort: tc.effort, Ephemeral: &falseVal, Status: db.StatusPending, CreatedAt: time.Now(),
+				Effort: tc.effort, Status: db.StatusPending, CreatedAt: time.Now(),
 			}
 			_ = store.InsertMessage(ctx, msg)
 			pool.Enqueue(msg)
@@ -877,77 +885,54 @@ func TestWorker_ResolveExecutionPool_EphemeralRouting_TableDriven(t *testing.T) 
 	lowEphem := &runner.UnifiedProcessPool{}
 	medEphem := &runner.UnifiedProcessPool{}
 
-	trueVal := true
-	falseVal := false
-
 	tests := []struct {
 		name        string
-		effort      string
-		ephemeral   *bool
+		dispatch    *db.Dispatch
+		burst       []db.Message
 		wantPool    runner.AgentPool
 		wantPoolKey PoolKey
-		wantErr     bool
 	}{
 		{
-			name:        "default low effort routes to ephemeral low pool",
-			effort:      "low",
-			ephemeral:   nil,
+			name:        "dispatch with low effort routes to ephemeral low pool",
+			dispatch:    &db.Dispatch{Effort: "low"},
 			wantPool:    lowEphem,
 			wantPoolKey: PoolKey{Ephemeral: true, Effort: "low"},
 		},
 		{
-			name:        "explicit ephemeral true with low effort routes to ephemeral low pool",
-			effort:      "low",
-			ephemeral:   &trueVal,
-			wantPool:    lowEphem,
-			wantPoolKey: PoolKey{Ephemeral: true, Effort: "low"},
+			name:        "dispatch with medium effort routes to ephemeral medium pool",
+			dispatch:    &db.Dispatch{Effort: "medium"},
+			wantPool:    medEphem,
+			wantPoolKey: PoolKey{Ephemeral: true, Effort: "medium"},
 		},
 		{
-			name:        "explicit ephemeral false with low effort routes to stateful low pool",
-			effort:      "low",
-			ephemeral:   &falseVal,
+			name:        "stateful dispatch with low effort routes to stateful low pool",
+			dispatch:    &db.Dispatch{SessionID: "hb-sess-1", Effort: "low"},
 			wantPool:    lowStateful,
 			wantPoolKey: PoolKey{Ephemeral: false, Effort: "low"},
 		},
 		{
-			name:        "default medium effort routes to ephemeral medium pool",
-			effort:      "medium",
-			ephemeral:   nil,
-			wantPool:    medEphem,
-			wantPoolKey: PoolKey{Ephemeral: true, Effort: "medium"},
-		},
-		{
-			name:        "explicit ephemeral true with medium effort routes to ephemeral medium pool",
-			effort:      "medium",
-			ephemeral:   &trueVal,
-			wantPool:    medEphem,
-			wantPoolKey: PoolKey{Ephemeral: true, Effort: "medium"},
-		},
-		{
-			name:        "explicit ephemeral false with medium effort routes to stateful medium pool",
-			effort:      "medium",
-			ephemeral:   &falseVal,
+			name:        "stateful dispatch with medium effort routes to stateful medium pool",
+			dispatch:    &db.Dispatch{SessionID: "hb-sess-2", Effort: "medium"},
 			wantPool:    medStateful,
 			wantPoolKey: PoolKey{Ephemeral: false, Effort: "medium"},
 		},
 		{
-			name:        "default high effort routes to stateful high pool",
-			effort:      "high",
-			ephemeral:   nil,
+			name:        "message burst with low effort routes to stateful low pool",
+			burst:       []db.Message{{ID: "m1", Effort: "low"}},
+			wantPool:    lowStateful,
+			wantPoolKey: PoolKey{Ephemeral: false, Effort: "low"},
+		},
+		{
+			name:        "message burst with medium effort routes to stateful medium pool",
+			burst:       []db.Message{{ID: "m1", Effort: "medium"}},
+			wantPool:    medStateful,
+			wantPoolKey: PoolKey{Ephemeral: false, Effort: "medium"},
+		},
+		{
+			name:        "message burst with high effort routes to stateful high pool",
+			burst:       []db.Message{{ID: "m1", Effort: "high"}},
 			wantPool:    primaryPool,
 			wantPoolKey: PoolKey{Ephemeral: false, Effort: "high"},
-		},
-		{
-			name:      "explicit ephemeral true with high effort returns error",
-			effort:    "high",
-			ephemeral: &trueVal,
-			wantErr:   true,
-		},
-		{
-			name:      "explicit ephemeral true with empty effort returns error",
-			effort:    "",
-			ephemeral: &trueVal,
-			wantErr:   true,
 		},
 	}
 
@@ -966,21 +951,13 @@ func TestWorker_ResolveExecutionPool_EphemeralRouting_TableDriven(t *testing.T) 
 			te := &turnExecution{
 				pool:     wp,
 				threadID: "thread-ephem-test",
-				burst: []db.Message{
-					{
-						ID:        "msg-1",
-						Effort:    tc.effort,
-						Ephemeral: tc.ephemeral,
-					},
-				},
+				dispatch: tc.dispatch,
+				burst:    tc.burst,
 			}
 
 			activePool, poolKey, err := te.resolveExecutionPool()
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("resolveExecutionPool() err = %v, wantErr %v", err, tc.wantErr)
-			}
-			if tc.wantErr {
-				return
+			if err != nil {
+				t.Fatalf("resolveExecutionPool() unexpected error: %v", err)
 			}
 			if activePool != tc.wantPool {
 				t.Errorf("activePool = %v, want %v", activePool, tc.wantPool)
@@ -1055,7 +1032,6 @@ func TestWorker_EvaluateAmbientWake_HTTPAndSilent_TableDriven(t *testing.T) {
 	tests := []struct {
 		name          string
 		authorID      string
-		silent        bool
 		isThread      bool
 		mode          string
 		wantSkipClass bool
@@ -1063,7 +1039,6 @@ func TestWorker_EvaluateAmbientWake_HTTPAndSilent_TableDriven(t *testing.T) {
 		{
 			name:          "standard user message in channel mode is evaluated for ambient",
 			authorID:      "user-1",
-			silent:        false,
 			isThread:      false,
 			mode:          "channel",
 			wantSkipClass: false,
@@ -1071,15 +1046,6 @@ func TestWorker_EvaluateAmbientWake_HTTPAndSilent_TableDriven(t *testing.T) {
 		{
 			name:          "http-client author message skips ambient classifier",
 			authorID:      "http-client",
-			silent:        false,
-			isThread:      false,
-			mode:          "channel",
-			wantSkipClass: true,
-		},
-		{
-			name:          "silent message skips ambient classifier",
-			authorID:      "user-1",
-			silent:        true,
 			isThread:      false,
 			mode:          "channel",
 			wantSkipClass: true,
@@ -1087,7 +1053,6 @@ func TestWorker_EvaluateAmbientWake_HTTPAndSilent_TableDriven(t *testing.T) {
 		{
 			name:          "thread message skips channel ambient classifier",
 			authorID:      "user-1",
-			silent:        false,
 			isThread:      true,
 			mode:          "channel",
 			wantSkipClass: true,
@@ -1112,7 +1077,6 @@ func TestWorker_EvaluateAmbientWake_HTTPAndSilent_TableDriven(t *testing.T) {
 						ID:       "msg-ambient",
 						AuthorID: tc.authorID,
 						Content:  "ambient message text",
-						Silent:   tc.silent,
 					},
 				},
 			}

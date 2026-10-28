@@ -459,82 +459,6 @@ func TestEvaluateBurstStaleness(t *testing.T) {
 	}
 }
 
-func TestExtractBurstEphemeral_TableDriven(t *testing.T) {
-	t.Parallel()
-	trueVal := true
-	falseVal := false
-	tests := []struct {
-		name          string
-		burst         []db.Message
-		wantEphemeral bool
-		wantExplicit  bool
-	}{
-		{"empty burst", nil, false, false},
-		{"no ephemeral metadata", []db.Message{{ID: "m1"}}, false, false},
-		{"explicit false at head", []db.Message{{ID: "m1", Ephemeral: &falseVal}}, false, true},
-		{"explicit true at head", []db.Message{{ID: "m1", Ephemeral: &trueVal}}, true, true},
-		{"explicit true in second message", []db.Message{
-			{ID: "m1"},
-			{ID: "m2", Ephemeral: &trueVal},
-		}, true, true},
-		{"explicit false precedes true", []db.Message{
-			{ID: "m1", Ephemeral: &falseVal},
-			{ID: "m2", Ephemeral: &trueVal},
-		}, false, true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			gotEphem, gotExplicit := extractBurstEphemeral(tc.burst)
-			if gotEphem != tc.wantEphemeral || gotExplicit != tc.wantExplicit {
-				t.Errorf("extractBurstEphemeral() = (%v, %v), want (%v, %v)", gotEphem, gotExplicit, tc.wantEphemeral, tc.wantExplicit)
-			}
-		})
-	}
-}
-
-func TestFormatSingleDiscordPrompt_Silent_TableDriven(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name         string
-		silent       bool
-		wantContains string
-		wantExcludes string
-	}{
-		{
-			name:         "standard message delivers to discord",
-			silent:       false,
-			wantContains: "It will be delivered directly to Discord.",
-			wantExcludes: "This is a silent background turn",
-		},
-		{
-			name:         "silent message suppresses discord delivery",
-			silent:       true,
-			wantContains: "This is a silent background turn; your response will not be delivered to Discord.",
-			wantExcludes: "It will be delivered directly to Discord.",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			m := db.Message{
-				ID:        "msg-123",
-				ThreadID:  "thread-456",
-				Content:   "check cluster health",
-				Silent:    tc.silent,
-				CreatedAt: time.Now(),
-			}
-			prompt := FormatSingleDiscordPrompt(m)
-			if !strings.Contains(prompt, tc.wantContains) {
-				t.Errorf("prompt missing %q:\n%s", tc.wantContains, prompt)
-			}
-			if strings.Contains(prompt, tc.wantExcludes) {
-				t.Errorf("prompt unexpectedly contained %q:\n%s", tc.wantExcludes, prompt)
-			}
-		})
-	}
-}
-
 func TestResolvePoolKey_And_ResolveScopeKey_TableDriven(t *testing.T) {
 	t.Parallel()
 	keys := AllValidPoolKeys()
@@ -557,22 +481,22 @@ func TestResolvePoolKey_And_ResolveScopeKey_TableDriven(t *testing.T) {
 	emptyPool := New(nil, WorkerPoolConfig{})
 
 	tests := []struct {
-		name         string
-		ephemeral    *bool
-		effort       string
-		wantKey      PoolKey
-		wantErr      bool
-		wantScopeKey string
+		name            string
+		ephemeral       *bool
+		effort          string
+		wantKey         PoolKey
+		wantErr         bool
+		wantMsgScopeKey string
 	}{
 		{"default empty effort -> stateful high", nil, "", PoolKey{false, "high"}, false, "th-1"},
 		{"explicit high effort -> stateful high", nil, "HIGH", PoolKey{false, "high"}, false, "th-1"},
 		{"explicit ephemeral false + high -> stateful high", &falseVal, "high", PoolKey{false, "high"}, false, "th-1"},
 		{"explicit ephemeral false + medium -> stateful medium", &falseVal, "medium", PoolKey{false, "medium"}, false, "stateful_medium:th-1"},
 		{"explicit ephemeral false + low -> stateful low", &falseVal, "low", PoolKey{false, "low"}, false, "stateful_low:th-1"},
-		{"default medium effort -> ephemeral medium", nil, "medium", PoolKey{true, "medium"}, false, "medium_effort:th-1"},
-		{"explicit ephemeral true + medium -> ephemeral medium", &trueVal, "medium", PoolKey{true, "medium"}, false, "medium_effort:th-1"},
-		{"default low effort -> ephemeral low", nil, "low", PoolKey{true, "low"}, false, "low_effort:th-1"},
-		{"explicit ephemeral true + low -> ephemeral low", &trueVal, "low", PoolKey{true, "low"}, false, "low_effort:th-1"},
+		{"default medium effort -> ephemeral medium", nil, "medium", PoolKey{true, "medium"}, false, "stateful_medium:th-1"},
+		{"explicit ephemeral true + medium -> ephemeral medium", &trueVal, "medium", PoolKey{true, "medium"}, false, "stateful_medium:th-1"},
+		{"default low effort -> ephemeral low", nil, "low", PoolKey{true, "low"}, false, "stateful_low:th-1"},
+		{"explicit ephemeral true + low -> ephemeral low", &trueVal, "low", PoolKey{true, "low"}, false, "stateful_low:th-1"},
 		{"invalid ephemeral true + high -> error", &trueVal, "high", PoolKey{true, "high"}, true, "th-1"},
 		{"invalid ephemeral true + empty default high -> error", &trueVal, "", PoolKey{true, "high"}, true, "th-1"},
 	}
@@ -588,12 +512,11 @@ func TestResolvePoolKey_And_ResolveScopeKey_TableDriven(t *testing.T) {
 				t.Errorf("ResolvePoolKey() = %+v, want %+v", gotKey, tc.wantKey)
 			}
 			msg := db.Message{
-				ThreadID:  "th-1",
-				Effort:    tc.effort,
-				Ephemeral: tc.ephemeral,
+				ThreadID: "th-1",
+				Effort:   tc.effort,
 			}
-			if gotScope := fullPool.resolveScopeKey(msg); gotScope != tc.wantScopeKey {
-				t.Errorf("fullPool.resolveScopeKey() = %q, want %q", gotScope, tc.wantScopeKey)
+			if gotScope := fullPool.resolveScopeKey(msg); gotScope != tc.wantMsgScopeKey {
+				t.Errorf("fullPool.resolveScopeKey() = %q, want %q", gotScope, tc.wantMsgScopeKey)
 			}
 			if gotEmptyScope := emptyPool.resolveScopeKey(msg); gotEmptyScope != "th-1" {
 				t.Errorf("emptyPool.resolveScopeKey() = %q, want \"th-1\"", gotEmptyScope)

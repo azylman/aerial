@@ -37,8 +37,6 @@ type PromptRequest struct {
 	MessageID    string `json:"message_id,omitempty"`
 	Model        string `json:"model,omitempty"`
 	Effort       string `json:"effort,omitempty"`
-	Silent       bool   `json:"silent,omitempty"`
-	Ephemeral    *bool  `json:"ephemeral,omitempty"`
 	SkipIfActive bool   `json:"skip_if_active,omitempty"`
 }
 
@@ -107,84 +105,14 @@ func validatePromptSessionID(w http.ResponseWriter, sessionID string) bool {
 	return true
 }
 
-func resolvePromptSessionID(pool *queue.WorkerPool, channelID, sessionID, title, prompt string, silent bool) (string, string) {
+func resolvePromptSessionID(pool *queue.WorkerPool, channelID, sessionID, title, prompt string) (string, string) {
 	if sessionID != "" {
 		return channelID, sessionID
 	}
-	if !silent && pool != nil {
+	if pool != nil {
 		channelID = pool.ResolveTargetThread(channelID, strings.TrimSpace(title), prompt, time.Now().UTC())
 	}
 	return channelID, channelID
-}
-
-func bridgeSilentPromptToDispatch(w http.ResponseWriter, r *http.Request, store db.Store, pool *queue.WorkerPool, req PromptRequest, channelID, sessionID, effort, model, msgID string) {
-	if store == nil {
-		writeErr(w, http.StatusInternalServerError, "Database store not configured")
-		return
-	}
-
-	source := "webhook"
-	if strings.HasPrefix(sessionID, "heartbeat-") {
-		source = "heartbeat"
-	} else if strings.Contains(req.Prompt, "[VANADIS BUILD CHUNK EXECUTION]") {
-		source = "vanadis"
-	}
-	dispatchSessionID := ""
-	if !queue.IsNumericSnowflake(sessionID) && !strings.HasPrefix(sessionID, "discord-") {
-		dispatchSessionID = sessionID
-	}
-
-	if req.SkipIfActive {
-		active, err := store.HasActiveDispatchTurn(r.Context(), dispatchSessionID, msgID)
-		if err != nil {
-			log.Printf("[HTTP] Failed to check active turn for %s: %v", dispatchSessionID, err)
-			writeErr(w, http.StatusInternalServerError, "Failed to check active turn")
-			return
-		}
-		if active {
-			httpkit.WriteJSON(w, http.StatusOK, map[string]string{
-				"status":      "skipped_active",
-				"channel_id":  channelID,
-				"session_id":  dispatchSessionID,
-				"dispatch_id": msgID,
-			})
-			return
-		}
-	}
-
-	d := db.Dispatch{
-		ID:        msgID,
-		Source:    source,
-		SessionID: dispatchSessionID,
-		Prompt:    req.Prompt,
-		Summary:   db.CleanTaskSummary(req.Prompt),
-		Effort:    effort,
-		Model:     model,
-		Status:    db.StatusPending,
-		CreatedAt: time.Now().UTC(),
-		UpdatedAt: time.Now().UTC(),
-	}
-
-	insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer insertCancel()
-	if err := store.InsertDispatch(insertCtx, d); err != nil {
-		log.Printf("Failed to insert HTTP prompt dispatch %s to DB: %v", msgID, err)
-		writeErr(w, http.StatusInternalServerError, fmt.Sprintf("Failed to persist prompt dispatch: %v", err))
-		return
-	}
-
-	if pool != nil {
-		pool.EnqueueDispatch(d)
-	}
-
-	httpkit.WriteJSON(w, http.StatusAccepted, map[string]string{
-		"status":      "accepted",
-		"channel_id":  channelID,
-		"session_id":  sessionID,
-		"message_id":  msgID,
-		"dispatch_id": msgID,
-		"message":     "Prompt execution enqueued in background",
-	})
 }
 
 func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
@@ -210,10 +138,6 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 
 		model := strings.TrimSpace(req.Model)
 		effort := resolvePromptEffort(model, strings.TrimSpace(req.Effort))
-		if _, err := queue.ResolvePoolKey(req.Ephemeral, effort); err != nil {
-			writeErr(w, http.StatusBadRequest, "Invalid payload: "+err.Error())
-			return
-		}
 
 		sessionID := strings.TrimSpace(req.SessionID)
 		if !validatePromptSessionID(w, sessionID) {
@@ -235,16 +159,11 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		channelID, sessionID = resolvePromptSessionID(pool, channelID, sessionID, req.Title, req.Prompt, req.Silent)
+		channelID, sessionID = resolvePromptSessionID(pool, channelID, sessionID, req.Title, req.Prompt)
 
 		msgID := strings.TrimSpace(req.MessageID)
 		if msgID == "" {
 			msgID = uuid.New().String()
-		}
-
-		if req.Silent {
-			bridgeSilentPromptToDispatch(w, r, store, pool, req, channelID, sessionID, effort, model, msgID)
-			return
 		}
 
 		msg := db.Message{
@@ -259,9 +178,7 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			Status:     db.StatusPending,
 			Effort:     effort,
 			ChannelID:  channelID,
-			Ephemeral:  req.Ephemeral,
 			Model:      model,
-			Silent:     req.Silent,
 			CreatedAt:  time.Now().UTC(),
 			UpdatedAt:  time.Now().UTC(),
 		}

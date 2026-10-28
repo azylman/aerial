@@ -37,8 +37,9 @@ func resolveMessageEffort(m db.Message) string {
 
 func (p *WorkerPool) resolveScopeKey(m db.Message) string {
 	baseKey := db.DiscordSessionID(m.ThreadID)
-	k, err := ResolvePoolKey(m.Ephemeral, resolveMessageEffort(m))
-	if err == nil && p != nil && p.Pool(k) != nil {
+	falseVal := false
+	k, err := ResolvePoolKey(&falseVal, resolveMessageEffort(m))
+	if err == nil && p != nil && (p.Pool(k) != nil || p.Pool(PoolKey{Ephemeral: true, Effort: k.Effort}) != nil) {
 		switch k {
 		case PoolKey{Ephemeral: true, Effort: "low"}:
 			return "low_effort:" + baseKey
@@ -310,9 +311,6 @@ func FormatSingleDiscordPrompt(m db.Message, tzOpt ...string) string {
 	fmt.Fprintf(&sb, "- content: %s\n", sanitizer.SanitizePromptTags(m.Content))
 	ts := resolvePromptTimestamp(m.CreatedAt, tzOpt...)
 	closingInstruction := "It will be delivered directly to Discord. Keep responses proportional to the turn; for routine actions or things just discussed, confirm briefly without echoing tool IDs, exact timestamps, or context already in thread."
-	if m.Silent {
-		closingInstruction = "This is a silent background turn; your response will not be delivered to Discord."
-	}
 	fmt.Fprintf(&sb, "- timestamp: %s\n", ts.Format(time.RFC3339))
 	writeDiscordPromptSlices(&sb, m)
 	fmt.Fprintf(&sb, "\nOnly formulate and output your final response once all immediate work is complete. %s\n</USER_REQUEST>", closingInstruction)
@@ -360,15 +358,6 @@ func writeDiscordPromptSlices(sb *strings.Builder, m db.Message) {
 	}
 }
 
-func extractBurstEphemeral(burst []db.Message) (bool, bool) {
-	for _, m := range burst {
-		if m.Ephemeral != nil {
-			return *m.Ephemeral, true
-		}
-	}
-	return false, false
-}
-
 func extractBurstModel(burst []db.Message) string {
 	for _, m := range burst {
 		if model := strings.TrimSpace(m.Model); model != "" {
@@ -376,18 +365,6 @@ func extractBurstModel(burst []db.Message) string {
 		}
 	}
 	return ""
-}
-
-func extractBurstSilent(burst []db.Message) bool {
-	if len(burst) == 0 {
-		return false
-	}
-	for _, m := range burst {
-		if !m.Silent {
-			return false
-		}
-	}
-	return true
 }
 
 func resolveBurstEffort(burst []db.Message) string {
@@ -735,16 +712,8 @@ func wrapPromptTag(text, openTag, closeTag string) string {
 }
 
 func resolveBurstPoolKey(burst []db.Message) (PoolKey, error) {
-	var ephemPtr *bool
-	if isEphem, explicit := extractBurstEphemeral(burst); explicit {
-		ephemPtr = &isEphem
-	}
-	return ResolvePoolKey(ephemPtr, resolveBurstEffort(burst))
-}
-
-func isBurstEphemeral(burst []db.Message) bool {
-	k, err := resolveBurstPoolKey(burst)
-	return err != nil || k.Ephemeral
+	falseVal := false
+	return ResolvePoolKey(&falseVal, resolveBurstEffort(burst))
 }
 
 func resolveDispatchEffort(d db.Dispatch, isEphem bool) string {
@@ -799,6 +768,9 @@ func (te *turnExecution) resolveExecutionPool() (runner.AgentPool, PoolKey, erro
 	}
 	if pool := te.pool.Pool(k); pool != nil {
 		return pool, k, nil
+	}
+	if altKey := (PoolKey{Ephemeral: true, Effort: k.Effort}); te.pool.Pool(altKey) != nil {
+		return te.pool.Pool(altKey), k, nil
 	}
 	log.Printf("[Worker] Notice: pool for %+v is nil, falling back to primary processPool for thread %s", k, te.threadID)
 	return te.pool.Pool(PoolKey{Ephemeral: false, Effort: "high"}), k, nil

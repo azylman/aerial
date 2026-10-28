@@ -621,13 +621,17 @@ func TestWorker_DeliverFailureNotice_And_QuotaPause_Silent_TableDriven(t *testin
 					NotifierFunc: func(agyBin, apiKey, desc string) string { return "notice: " + desc },
 				},
 			}
+			var d *db.Dispatch
+			if tc.silent {
+				d = &db.Dispatch{ID: "d-silent", Source: "webhook"}
+			}
 			te := &turnExecution{
 				pool:     pool,
 				threadID: "1542423172400291873",
+				dispatch: d,
 				burst: []db.Message{
 					{
-						ID:     "msg-1",
-						Silent: tc.silent,
+						ID: "msg-1",
 					},
 				},
 			}
@@ -772,14 +776,19 @@ func TestWorker_GlobalQuotaLockout_SilentAndDeliveryTarget_TableDriven(t *testin
 				Content:   "execute prompt",
 				Status:    db.StatusProcessing,
 				ChannelID: tc.channelID,
-				Silent:    tc.silent,
 			}
 			_ = store.InsertMessage(context.Background(), msg)
+
+			var d *db.Dispatch
+			if tc.silent {
+				d = &db.Dispatch{ID: "d-silent", Source: "webhook"}
+			}
 
 			te := &turnExecution{
 				pool:        pool,
 				threadID:    tc.threadID,
 				triggerType: "http",
+				dispatch:    d,
 				burst:       []db.Message{msg},
 				execStart:   time.Now().UTC(),
 				turnPrompt:  "execute prompt",
@@ -849,14 +858,19 @@ func TestWorker_DeliverSuccessAndFinalize_CustomSessionTarget_TableDriven(t *tes
 				ThreadID:  tc.threadID,
 				Status:    db.StatusProcessing,
 				ChannelID: tc.channelID,
-				Silent:    tc.silent,
 			}
 			_ = store.InsertMessage(context.Background(), msg)
+
+			var d *db.Dispatch
+			if tc.silent {
+				d = &db.Dispatch{ID: "d-silent", Source: "webhook"}
+			}
 
 			te := &turnExecution{
 				pool:        pool,
 				threadID:    tc.threadID,
 				triggerType: "http",
+				dispatch:    d,
 				burst:       []db.Message{msg},
 				execStart:   time.Now().UTC(),
 				stopTyping:  func() {},

@@ -773,7 +773,7 @@ channels:
 	if dbMsg == nil {
 		t.Fatalf("Expected msg-incoming-100 to be inserted into DB by MessageCreate handler")
 	}
-	if dbMsg.AuthorName != "test-user" || !strings.Contains(dbMsg.Content, "deploy the stack") || dbMsg.Effort != "low" || dbMsg.Ephemeral == nil || *dbMsg.Ephemeral {
+	if dbMsg.AuthorName != "test-user" || !strings.Contains(dbMsg.Content, "deploy the stack") || dbMsg.Effort != "low" {
 		t.Errorf("Unexpected persisted message: %+v", dbMsg)
 	}
 
