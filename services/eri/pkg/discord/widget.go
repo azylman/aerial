@@ -3,6 +3,7 @@ package discord
 import (
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -34,10 +35,29 @@ type StatusWidgetRequest struct {
 	Chunks    []StatusWidgetChunk `json:"chunks"`
 }
 
-// DiscordWidgetSender defines the interface required by DeliverStatusWidget to send and edit Discord messages.
+// WidgetSinkMessageThreshold is the number of newer messages after a status widget
+// required before DeliverStatusWidget re-posts the widget at the bottom of the thread.
+const WidgetSinkMessageThreshold = 4
+
+// DiscordWidgetSender defines the interface required by DeliverStatusWidget to send, edit, query, and delete Discord messages.
 type DiscordWidgetSender interface {
 	ChannelMessageSendComplex(channelID string, data *discordgo.MessageSend, options ...discordgo.RequestOption) (*discordgo.Message, error)
 	ChannelMessageEditComplex(m *discordgo.MessageEdit, options ...discordgo.RequestOption) (*discordgo.Message, error)
+	ChannelMessages(channelID string, limit int, beforeID, afterID, aroundID string, options ...discordgo.RequestOption) ([]*discordgo.Message, error)
+	ChannelMessageDelete(channelID, messageID string, options ...discordgo.RequestOption) error
+}
+
+func shouldSinkWidget(s DiscordWidgetSender, channelID, messageID string) bool {
+	msgs, err := s.ChannelMessages(channelID, WidgetSinkMessageThreshold, "", messageID, "")
+	if err != nil || len(msgs) < WidgetSinkMessageThreshold {
+		return false
+	}
+	for _, m := range msgs {
+		if m != nil && m.ID != messageID && m.Flags&discordgo.MessageFlagsIsComponentsV2 != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // AccentColor returns the hex color integer for the given status string.
@@ -278,6 +298,19 @@ func DeliverStatusWidget(s DiscordWidgetSender, req StatusWidgetRequest, now tim
 
 	trimmedMsgID := strings.TrimSpace(req.MessageID)
 	if trimmedMsgID != "" {
+		if shouldSinkWidget(s, req.ChannelID, trimmedMsgID) {
+			send := &discordgo.MessageSend{
+				Flags:      discordgo.MessageFlagsIsComponentsV2 | discordgo.MessageFlagsSuppressNotifications,
+				Components: components,
+			}
+			if created, sendErr := s.ChannelMessageSendComplex(req.ChannelID, send); sendErr == nil && created != nil {
+				if delErr := s.ChannelMessageDelete(req.ChannelID, trimmedMsgID); delErr != nil && !delivery.IsMessageNotFoundError(delErr) {
+					log.Printf("[Widget] Warning: failed to delete old status widget message %s: %v", trimmedMsgID, delErr)
+				}
+				return created.ID, nil
+			}
+		}
+
 		edit := &discordgo.MessageEdit{
 			Channel:    req.ChannelID,
 			ID:         trimmedMsgID,
