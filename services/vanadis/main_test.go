@@ -928,7 +928,7 @@ func TestHTTPEndpoints(t *testing.T) {
 	} {
 		checkCode(http.MethodPost, "/builds", strings.NewReader(p), http.StatusBadRequest)
 	}
-	validPayload := `{"repo":"aerial","thread_id":"1555999","title":"Implement Feature X Build Title","objective":"Implement feature X","shared_context":"Targeting Nomad cluster","chunks":[{"title":"Part 1","instructions":"Do part 1","effort":"low"},{"id":"custom-chunk-2","title":"Part 2","instructions":"Do part 2","target_files":["a.go"],"target_symbols":["A"],"effort":"high","acceptance_criteria":["All green"]}]}`
+	validPayload := `{"repo":"aerial","thread_id":"stateful_medium:discord-1555999","title":"Implement Feature X Build Title","objective":"Implement feature X","shared_context":"Targeting Nomad cluster","chunks":[{"title":"Part 1","instructions":"Do part 1","effort":"low"},{"id":"custom-chunk-2","title":"Part 2","instructions":"Do part 2","target_files":["a.go"],"target_symbols":["A"],"effort":"high","acceptance_criteria":["All green"]}]}`
 	memStore.createErr = errors.New("create failed")
 	checkCode(http.MethodPost, "/builds", strings.NewReader(validPayload), http.StatusInternalServerError)
 	memStore.createErr = nil
@@ -949,7 +949,7 @@ func TestHTTPEndpoints(t *testing.T) {
 		t.Fatalf("unexpected create response: %+v", createResp)
 	}
 	storedBuild, storedChunks, _ := memStore.GetBuild(context.Background(), buildID)
-	if storedBuild.Title != "Implement Feature X Build Title" || storedBuild.SharedContext != "Targeting Nomad cluster" || len(storedChunks) != 2 || storedChunks[1].Effort != "medium" || len(storedChunks[1].TargetSymbols) != 1 || len(storedChunks[1].AcceptanceCriteria) != 1 {
+	if storedBuild.ThreadID != "1555999" || storedBuild.Title != "Implement Feature X Build Title" || storedBuild.SharedContext != "Targeting Nomad cluster" || len(storedChunks) != 2 || storedChunks[1].Effort != "medium" || len(storedChunks[1].TargetSymbols) != 1 || len(storedChunks[1].AcceptanceCriteria) != 1 {
 		t.Fatalf("stored build mismatch: build=%+v chunks=%+v", storedBuild, storedChunks)
 	}
 	for _, tc := range []struct {

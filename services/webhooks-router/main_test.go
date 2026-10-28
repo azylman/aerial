@@ -410,7 +410,11 @@ func (m *mockPRRegistry) RegisterPR(ctx context.Context, req PRRegisterRequest) 
 	if err := m.checkErr(m.registerErr); err != nil {
 		return "", err
 	}
-	return firstNonEmpty(m.registerTargetID, req.TargetID), nil
+	resolved := firstNonEmpty(m.registerTargetID, req.TargetID)
+	if m.resolveTargetID == "" {
+		m.resolveTargetID = resolved
+	}
+	return resolved, nil
 }
 
 func (m *mockPRRegistry) EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID, vanadisChunkID string) (string, error) {
@@ -2305,8 +2309,11 @@ func TestRouterServer_HandlePRRegister(t *testing.T) {
 	tests := []struct {
 		name           string
 		nilRegistry    bool
+		noExistingPR   bool
+		sysChanID      string
 		regErr         error
 		regTargetID    string
+		resolveTID     string
 		body           string
 		dispWidgetErr  error
 		wantStatus     int
@@ -2405,6 +2412,43 @@ func TestRouterServer_HandlePRRegister(t *testing.T) {
 			wantWidgetCall: true,
 		},
 		{
+			name:           "SuccessDiscordPrefixedTargetID",
+			body:           `{"repo":"azylman/aerial","pr_number":104,"branch":"feat/discord-prefix","head_sha":"sha111","target_id":"stateful_medium:discord-1555405874565091380"}`,
+			wantStatus:     http.StatusOK,
+			wantSubstr:     `"status":"registered"`,
+			wantRegistered: true,
+			wantTargetID:   "1555405874565091380",
+			wantWidgetCall: true,
+		},
+		{
+			name:           "SuccessHeadlessDispatchPreservesExistingTargetID",
+			body:           `{"repo":"azylman/aerial","pr_number":105,"branch":"feat/dispatch","head_sha":"sha222","target_id":"dispatch-8d23879c-1111"}`,
+			resolveTID:     "1555405874565091380",
+			wantStatus:     http.StatusOK,
+			wantSubstr:     `"status":"registered"`,
+			wantRegistered: true,
+			wantTargetID:   "1555405874565091380",
+			wantWidgetCall: true,
+		},
+		{
+			name:           "SuccessHeadlessHeartbeatFallsBackToSystemChannelID",
+			noExistingPR:   true,
+			sysChanID:      "discord-1542423172400291873",
+			body:           `{"repo":"azylman/aerial","pr_number":106,"branch":"feat/heartbeat","head_sha":"sha333","target_id":"heartbeat-daily-check"}`,
+			wantStatus:     http.StatusOK,
+			wantSubstr:     `"status":"registered"`,
+			wantRegistered: true,
+			wantTargetID:   "1542423172400291873",
+			wantWidgetCall: true,
+		},
+		{
+			name:         "HeadlessDispatchWithoutExistingTargetOrSystemChannelReturns400",
+			noExistingPR: true,
+			body:         `{"repo":"azylman/aerial","pr_number":107,"branch":"feat/headless-unresolvable","head_sha":"sha444","target_id":"stateful_low:dispatch-8d23879c"}`,
+			wantStatus:   http.StatusBadRequest,
+			wantSubstr:   "target_id must be a valid Discord snowflake (17-20 digits)",
+		},
+		{
 			name:           "SuccessEvenIfWidgetSyncFails",
 			body:           `{"repo":"azylman/aerial","pr_number":103,"branch":"feat/widget-fail","head_sha":"sha789","target_id":"1555405874565091380"}`,
 			dispWidgetErr:  errors.New("discord rate limited"),
@@ -2423,10 +2467,14 @@ func TestRouterServer_HandlePRRegister(t *testing.T) {
 			var reg PRRegistryUpdater
 			var mockReg *mockPRRegistry
 			if !tc.nilRegistry {
+				resolveTarget := firstNonEmpty(tc.resolveTID, tc.regTargetID, "1555405874565091380")
+				if tc.noExistingPR {
+					resolveTarget = ""
+				}
 				mockReg = &mockPRRegistry{
 					registerErr:      tc.regErr,
 					registerTargetID: tc.regTargetID,
-					resolveTargetID:  firstNonEmpty(tc.regTargetID, "1555405874565091380"),
+					resolveTargetID:  resolveTarget,
 					resolveBranch:    "feat/test",
 				}
 				reg = mockReg
@@ -2436,7 +2484,7 @@ func TestRouterServer_HandlePRRegister(t *testing.T) {
 				widgetErr: tc.dispWidgetErr,
 			}
 
-			srv := newTestRouter(Config{}, nil, reg, disp)
+			srv := newTestRouter(Config{SystemChannelID: tc.sysChanID}, nil, reg, disp)
 			routes := srv.Routes()
 
 			rec := doHTTPRequest(routes, http.MethodPost, "/internal/pr/register", strings.NewReader(tc.body), nil)

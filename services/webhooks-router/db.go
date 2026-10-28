@@ -299,7 +299,7 @@ func (r *PostgresPRRegistry) RegisterPR(ctx context.Context, req PRRegisterReque
 	if headSHA == "" {
 		return "", errors.New("head_sha cannot be empty")
 	}
-	targetID := strings.TrimSpace(req.TargetID)
+	targetID := NormalizeDiscordTargetID(req.TargetID)
 	title := strings.TrimSpace(req.Title)
 	chunkID := strings.TrimSpace(req.VanadisChunkID)
 	meta := strings.TrimSpace(req.Metadata)
@@ -312,8 +312,8 @@ func (r *PostgresPRRegistry) RegisterPR(ctx context.Context, req PRRegisterReque
 		if err != nil {
 			return "", err
 		}
-		if !IsValidDiscordSnowflake(targetID) && IsValidDiscordSnowflake(threadID) {
-			targetID = threadID
+		if normThread := NormalizeDiscordTargetID(threadID); !IsValidDiscordSnowflake(targetID) && IsValidDiscordSnowflake(normThread) {
+			targetID = normThread
 		}
 	}
 
@@ -379,12 +379,12 @@ func (r *PostgresPRRegistry) EnsurePRRegistered(ctx context.Context, repo string
 	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
 		return "", nil
 	}
-	targetID, vanadisChunkID = strings.TrimSpace(targetID), strings.TrimSpace(vanadisChunkID)
+	targetID, vanadisChunkID = NormalizeDiscordTargetID(targetID), strings.TrimSpace(vanadisChunkID)
 	if vanadisChunkID != "" {
 		threadID, err := r.attachVanadisChunkPR(ctx, repo, vanadisChunkID, prNumber)
 		if err == nil {
-			if !IsValidDiscordSnowflake(targetID) && IsValidDiscordSnowflake(threadID) {
-				targetID = threadID
+			if normThread := NormalizeDiscordTargetID(threadID); !IsValidDiscordSnowflake(targetID) && IsValidDiscordSnowflake(normThread) {
+				targetID = normThread
 			}
 		} else if !errors.Is(err, ErrVanadisChunkNotFound) {
 			return "", err

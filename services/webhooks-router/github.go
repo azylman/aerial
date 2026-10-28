@@ -267,7 +267,7 @@ func ParseAerialPRMetadata(body string) (string, string, bool) {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(rest[:endIdx])), &trailer); err != nil {
 		return "", "", false
 	}
-	targetID, chunkID := strings.TrimSpace(trailer.TargetID), strings.TrimSpace(trailer.VanadisChunkID)
+	targetID, chunkID := NormalizeDiscordTargetID(trailer.TargetID), strings.TrimSpace(trailer.VanadisChunkID)
 	if !IsValidDiscordSnowflake(targetID) {
 		targetID = ""
 	}
