@@ -438,22 +438,20 @@ func TestWorker_RotatedSession_TreatsTurnOneAsColdStart(t *testing.T) {
 	}
 }
 
-func TestWorker_BurstHelpers_SilentAndLowEffort(t *testing.T) {
+func TestWorker_BurstHelpers_LowEffort(t *testing.T) {
 	t.Parallel()
 	burstTests := []struct {
 		name       string
 		burst      []db.Message
 		wantModel  string
-		wantSilent bool
 		wantEffort string
 	}{
-		{name: "NilBurst", burst: nil, wantModel: "", wantSilent: false, wantEffort: "high"},
-		{name: "NormalBurst", burst: []db.Message{{ID: "m1", Effort: "high", Model: "gemini-3.1-pro"}, {ID: "m2", Silent: false}}, wantModel: "gemini-3.1-pro", wantSilent: false, wantEffort: "high"},
-		{name: "SilentFlashBurst", burst: []db.Message{{ID: "m1", Silent: true}, {ID: "m2", Silent: true, Model: "  gemini-4-flash  "}}, wantModel: "gemini-4-flash", wantSilent: true, wantEffort: "low"},
-		{name: "MixedSilentAndNormalBurst", burst: []db.Message{{ID: "m1", Silent: true}, {ID: "m2", Silent: false, Model: "  gemini-4-flash  "}}, wantModel: "gemini-4-flash", wantSilent: false, wantEffort: "low"},
-		{name: "LowEffortFieldBurst", burst: []db.Message{{ID: "m1", Effort: " LOW "}}, wantModel: "", wantSilent: false, wantEffort: "low"},
-		{name: "MediumEffortFieldBurst", burst: []db.Message{{ID: "m1", Effort: " MEDIUM "}}, wantModel: "", wantSilent: false, wantEffort: "medium"},
-		{name: "FlashMediumModelBurstNotLow", burst: []db.Message{{ID: "m1", Model: "gemini-3.8-flash-medium"}}, wantModel: "gemini-3.8-flash-medium", wantSilent: false, wantEffort: "medium"},
+		{name: "NilBurst", burst: nil, wantModel: "", wantEffort: "high"},
+		{name: "NormalBurst", burst: []db.Message{{ID: "m1", Effort: "high", Model: "gemini-3.1-pro"}, {ID: "m2"}}, wantModel: "gemini-3.1-pro", wantEffort: "high"},
+		{name: "FlashBurst", burst: []db.Message{{ID: "m1"}, {ID: "m2", Model: "  gemini-4-flash  "}}, wantModel: "gemini-4-flash", wantEffort: "low"},
+		{name: "LowEffortFieldBurst", burst: []db.Message{{ID: "m1", Effort: " LOW "}}, wantModel: "", wantEffort: "low"},
+		{name: "MediumEffortFieldBurst", burst: []db.Message{{ID: "m1", Effort: " MEDIUM "}}, wantModel: "", wantEffort: "medium"},
+		{name: "FlashMediumModelBurstNotLow", burst: []db.Message{{ID: "m1", Model: "gemini-3.8-flash-medium"}}, wantModel: "gemini-3.8-flash-medium", wantEffort: "medium"},
 	}
 	for _, tt := range burstTests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -461,69 +459,9 @@ func TestWorker_BurstHelpers_SilentAndLowEffort(t *testing.T) {
 			if got := extractBurstModel(tt.burst); got != tt.wantModel {
 				t.Errorf("extractBurstModel = %q, want %q", got, tt.wantModel)
 			}
-			if got := extractBurstSilent(tt.burst); got != tt.wantSilent {
-				t.Errorf("extractBurstSilent = %t, want %t", got, tt.wantSilent)
-			}
 			if got := resolveBurstEffort(tt.burst); got != tt.wantEffort {
 				t.Errorf("resolveBurstEffort = %q, want %q", got, tt.wantEffort)
 			}
 		})
-	}
-}
-
-func TestWorker_SilentBurst_Execution(t *testing.T) {
-	t.Parallel()
-	store := dbtest.NewFakeStore()
-	ctx := context.Background()
-	threadID, sessionID := "1542423172400291873", "a1111111-2222-3333-4444-555555555555"
-
-	var mu sync.Mutex
-	var deliveredMsgs []string
-	var typingCalls int
-	doneCh := make(chan string, 1)
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store, MaxAttempts: 1, BackoffBase: 1 * time.Millisecond, TimeoutMinutes: 1,
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			return mockJSONResponse(sessionID, "silent internal work completed"), "", 0, nil
-		},
-		DeliveryFunc: func(s *discordgo.Session, chID, text string) error {
-			mu.Lock()
-			deliveredMsgs = append(deliveredMsgs, text)
-			mu.Unlock()
-			return nil
-		},
-		TypingFunc: func(s *discordgo.Session, chID string) func() {
-			mu.Lock()
-			typingCalls++
-			mu.Unlock()
-			return func() {}
-		},
-		OnMessageCompleted: func(msg db.Message, status string) { doneCh <- status },
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	msg := db.Message{ID: "msg-silent-exec-1", ThreadID: threadID, Content: "Execute silent task", Status: db.StatusPending, Model: "gemini-4-flash", Silent: true}
-	_ = store.InsertMessage(ctx, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case status := <-doneCh:
-		if status != db.StatusCompleted {
-			t.Fatalf("expected StatusCompleted, got %s", status)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for silent message completion")
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	if typingCalls != 0 || len(deliveredMsgs) != 0 {
-		t.Errorf("expected 0 typing and delivery, got %d typing, %d delivered", typingCalls, len(deliveredMsgs))
-	}
-	storedMsg, err := store.GetMessage(ctx, msg.ID)
-	if err != nil || storedMsg == nil || storedMsg.Status != db.StatusCompleted {
-		t.Errorf("expected stored message StatusCompleted, got %v (err=%v)", storedMsg, err)
 	}
 }

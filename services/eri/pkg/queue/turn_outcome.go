@@ -161,7 +161,7 @@ func (te *turnExecution) deliverSuccessAndFinalize(resp *runner.AgyResponse, acc
 	cleanText, attachments := delivery.ExtractAndSanitizeMedia(resp.Response, baseDir)
 	attachments = delivery.AutoAttachNewMedia(baseDir, te.execStart, attachments)
 
-	isSilent := te.dispatch != nil || extractBurstSilent(te.burst)
+	isSilent := te.dispatch != nil
 	if !isSilent && strings.TrimSpace(cleanText) == "" && len(attachments) == 0 {
 		log.Printf("[Queue] Agent produced empty response for thread %s on attempt %d/%d; treating as failure", te.threadID, attempt, maxAttempts)
 		return false, "agent produced empty response"
@@ -233,7 +233,7 @@ func (te *turnExecution) handleDispatchSessionRotation() {
 }
 
 func (te *turnExecution) deliverQuotaNotice(pauseMsg string, logPrefix string) {
-	if te.dispatch != nil || te.pool == nil || te.pool.cfg.DeliveryFunc == nil || extractBurstSilent(te.burst) {
+	if te.dispatch != nil || te.pool == nil || te.pool.cfg.DeliveryFunc == nil {
 		return
 	}
 	if true {
@@ -463,7 +463,7 @@ func (te *turnExecution) cancelBurstOnShutdown(turnStatus, currentModel string, 
 }
 
 func (te *turnExecution) deliverFailureNotice(agyBin, apiKey, errDetail, stderr, descPrefix, logLabel string) {
-	if te.dispatch != nil || te.pool == nil || te.pool.cfg.DeliveryFunc == nil || extractBurstSilent(te.burst) {
+	if te.dispatch != nil || te.pool == nil || te.pool.cfg.DeliveryFunc == nil {
 		return
 	}
 	var notif string
