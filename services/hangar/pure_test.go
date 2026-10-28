@@ -1165,7 +1165,7 @@ func TestImageSourceRepo_TableDriven(t *testing.T) {
 		{"mirrormere core", "ghcr.io/azylman/mirrormere:latest", "azylman/mirrormere"},
 		{"mirrormere voice fingerprinter", "ghcr.io/azylman/mirrormere-voice-fingerprinter:latest", "azylman/mirrormere"},
 		{"sidecar banana", "ghcr.io/azylman/aerial-sidecar-banana:latest", "azylman/aerial-sidecars"},
-		{"orin voice sidecar", "ghcr.io/azylman/orin-voice:latest", "azylman/aerial-sidecars"},
+		{"voice sidecar", "ghcr.io/azylman/aerial-sidecar-voice-cuda:latest", "azylman/aerial-sidecars"},
 		{"third party go2rtc", "alexxit/go2rtc:1.9.8", ""},
 		{"third party redis", "redis:7-alpine", ""},
 		{"empty string", "", ""},
@@ -1533,7 +1533,7 @@ func TestResolveExpectedDeployJobs_TableDriven(t *testing.T) {
 
 	serviceMappings := []ServiceConfigMapping{
 		{RelPath: "services/haro/haro.yaml", NomadVar: "nomad/jobs/haro", VarKey: "CONFIG_YAML"},
-		{RelPath: "services/voice/voice.yaml", NomadVar: "nomad/jobs/orin-voice", VarKey: "CONFIG_YAML"},
+		{RelPath: "services/voice/voice.yaml", NomadVar: "nomad/jobs/voice", VarKey: "CONFIG_YAML"},
 	}
 
 	cases := []struct {
@@ -1578,7 +1578,7 @@ func TestResolveExpectedDeployJobs_TableDriven(t *testing.T) {
 			changedFiles:   []string{"config.yaml", "homepage/widgets.yaml", "services/voice/voice.yaml"},
 			nomadChanges:   []NomadFileChange{{Path: "jobs/hangar.nomad", Action: "apply", JobName: "hangar"}},
 			serviceConfigs: serviceMappings,
-			want:           []string{"eri", "homepage", "orin-voice", "hangar"},
+			want:           []string{"eri", "homepage", "voice", "hangar"},
 		},
 		{
 			name:           "container build changes across repoPath and candidateRepos with hangar sorted last",

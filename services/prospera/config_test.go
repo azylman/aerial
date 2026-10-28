@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -37,11 +40,148 @@ func TestNormalizeE164(t *testing.T) {
 	}
 }
 
-func TestLoadConfig(t *testing.T) {
-	t.Parallel()
+func TestResolveConfigPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	validLocal := filepath.Join(tmpDir, "local_valid.yaml")
+	_ = os.WriteFile(validLocal, []byte("port: '4019'\n"), 0o644)
+	emptyLocal := filepath.Join(tmpDir, "local_empty.yaml")
+	_ = os.WriteFile(emptyLocal, []byte(""), 0o644)
+	nonExistent := filepath.Join(tmpDir, "nonexistent.yaml")
+	fallbackFile := filepath.Join(tmpDir, "fallback.yaml")
+	_ = os.WriteFile(fallbackFile, []byte("port: '4019'\n"), 0o644)
+
+	fallback := "/config/prospera.yaml"
+	tests := []struct {
+		name         string
+		envVal       string
+		localPath    string
+		fallbackPath string
+		want         string
+	}{
+		{"env override takes precedence", "/custom/override.yaml", validLocal, fallback, "/custom/override.yaml"},
+		{"local config non-empty exists", "", validLocal, fallback, validLocal},
+		{"local config empty falls back to fallbackFile", "", emptyLocal, fallbackFile, fallbackFile},
+		{"local config missing falls back to fallbackFile", "", nonExistent, fallbackFile, fallbackFile},
+		{"fallback missing falls back to default", "", nonExistent, fallback, fallback},
+		{"fallback empty falls back to DefaultConfigPath", "", nonExistent, "", DefaultConfigPath},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CONFIG_PATH", tc.envVal)
+			oldLocal := localConfigPath
+			localConfigPath = tc.localPath
+			defer func() {
+				localConfigPath = oldLocal
+			}()
+
+			if got := ResolveConfigPath(tc.fallbackPath); got != tc.want {
+				t.Errorf("ResolveConfigPath(%q) = %q, want %q", tc.fallbackPath, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadConfigFile_TableDriven(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	validYAML := `
+port: "4019"
+brain_url: "http://eri.aerial"
+google_mcp_url: "http://google-mcp.aerial/mcp"
+coven_url: "http://coven.aerial"
+whisper_url: "http://voice.aerial"
+default_discord_channel: "prospera"
+public_webhook_base_url: "https://webhooks.example.com/"
+gemini_live_model: "gemini-3.8-live"
+gemini_fallback_model: "gemini-3.1-flash-live-preview"
+gemini_voice_name: "Kore"
+callback_window_minutes: 10080
+max_concurrent_calls: 2
+`
+	validPath := filepath.Join(tmpDir, "valid.yaml")
+	if err := os.WriteFile(validPath, []byte(validYAML), 0o644); err != nil {
+		t.Fatalf("failed to write valid.yaml: %v", err)
+	}
+
+	badYAML := `port: [unclosed`
+	badPath := filepath.Join(tmpDir, "bad.yaml")
+	if err := os.WriteFile(badPath, []byte(badYAML), 0o644); err != nil {
+		t.Fatalf("failed to write bad.yaml: %v", err)
+	}
+
+	missingPortYAML := strings.Replace(validYAML, `port: "4019"`, `port: ""`, 1)
+	missingPortPath := filepath.Join(tmpDir, "missing_port.yaml")
+	if err := os.WriteFile(missingPortPath, []byte(missingPortYAML), 0o644); err != nil {
+		t.Fatalf("failed to write missing_port.yaml: %v", err)
+	}
+
+	missingBrainYAML := strings.Replace(validYAML, `brain_url: "http://eri.aerial"`, `brain_url: ""`, 1)
+	missingBrainPath := filepath.Join(tmpDir, "missing_brain.yaml")
+	if err := os.WriteFile(missingBrainPath, []byte(missingBrainYAML), 0o644); err != nil {
+		t.Fatalf("failed to write missing_brain.yaml: %v", err)
+	}
+
+	missingGoogleMCPYAML := strings.Replace(validYAML, `google_mcp_url: "http://google-mcp.aerial/mcp"`, `google_mcp_url: ""`, 1)
+	missingGoogleMCPPath := filepath.Join(tmpDir, "missing_google.yaml")
+	if err := os.WriteFile(missingGoogleMCPPath, []byte(missingGoogleMCPYAML), 0o644); err != nil {
+		t.Fatalf("failed to write missing_google.yaml: %v", err)
+	}
+
+	missingCovenYAML := strings.Replace(validYAML, `coven_url: "http://coven.aerial"`, `coven_url: ""`, 1)
+	missingCovenPath := filepath.Join(tmpDir, "missing_coven.yaml")
+	if err := os.WriteFile(missingCovenPath, []byte(missingCovenYAML), 0o644); err != nil {
+		t.Fatalf("failed to write missing_coven.yaml: %v", err)
+	}
+
+	missingWhisperYAML := strings.Replace(validYAML, `whisper_url: "http://voice.aerial"`, `whisper_url: ""`, 1)
+	missingWhisperPath := filepath.Join(tmpDir, "missing_whisper.yaml")
+	if err := os.WriteFile(missingWhisperPath, []byte(missingWhisperYAML), 0o644); err != nil {
+		t.Fatalf("failed to write missing_whisper.yaml: %v", err)
+	}
+
+	missingChannelYAML := strings.Replace(validYAML, `default_discord_channel: "prospera"`, `default_discord_channel: ""`, 1)
+	missingChannelPath := filepath.Join(tmpDir, "missing_channel.yaml")
+	if err := os.WriteFile(missingChannelPath, []byte(missingChannelYAML), 0o644); err != nil {
+		t.Fatalf("failed to write missing_channel.yaml: %v", err)
+	}
+
+	missingLiveModelYAML := strings.Replace(validYAML, `gemini_live_model: "gemini-3.8-live"`, `gemini_live_model: ""`, 1)
+	missingLiveModelPath := filepath.Join(tmpDir, "missing_live_model.yaml")
+	if err := os.WriteFile(missingLiveModelPath, []byte(missingLiveModelYAML), 0o644); err != nil {
+		t.Fatalf("failed to write missing_live_model.yaml: %v", err)
+	}
+
+	missingFallbackModelYAML := strings.Replace(validYAML, `gemini_fallback_model: "gemini-3.1-flash-live-preview"`, `gemini_fallback_model: ""`, 1)
+	missingFallbackModelPath := filepath.Join(tmpDir, "missing_fallback_model.yaml")
+	if err := os.WriteFile(missingFallbackModelPath, []byte(missingFallbackModelYAML), 0o644); err != nil {
+		t.Fatalf("failed to write missing_fallback_model.yaml: %v", err)
+	}
+
+	missingVoiceNameYAML := strings.Replace(validYAML, `gemini_voice_name: "Kore"`, `gemini_voice_name: ""`, 1)
+	missingVoiceNamePath := filepath.Join(tmpDir, "missing_voice_name.yaml")
+	if err := os.WriteFile(missingVoiceNamePath, []byte(missingVoiceNameYAML), 0o644); err != nil {
+		t.Fatalf("failed to write missing_voice_name.yaml: %v", err)
+	}
+
+	badWindowYAML := strings.Replace(validYAML, `callback_window_minutes: 10080`, `callback_window_minutes: 0`, 1)
+	badWindowPath := filepath.Join(tmpDir, "bad_window.yaml")
+	if err := os.WriteFile(badWindowPath, []byte(badWindowYAML), 0o644); err != nil {
+		t.Fatalf("failed to write bad_window.yaml: %v", err)
+	}
+
+	badCallsYAML := strings.Replace(validYAML, `max_concurrent_calls: 2`, `max_concurrent_calls: 0`, 1)
+	badCallsPath := filepath.Join(tmpDir, "bad_calls.yaml")
+	if err := os.WriteFile(badCallsPath, []byte(badCallsYAML), 0o644); err != nil {
+		t.Fatalf("failed to write bad_calls.yaml: %v", err)
+	}
+
 	tests := []struct {
 		name                   string
+		path                   string
 		env                    map[string]string
+		nilEnv                 bool
+		callLoadConfig         bool
 		wantErr                bool
 		wantPort               string
 		wantDatabaseURL        string
@@ -64,141 +204,192 @@ func TestLoadConfig(t *testing.T) {
 		wantFirstAllowFrom     string
 	}{
 		{
-			name: "default minimal configuration",
+			name: "valid complete configuration",
+			path: validPath,
 			env: map[string]string{
-				"DATABASE_URL": "postgres://user:pass@localhost:5432/testdb",
+				"DATABASE_URL":       "postgres://user:pass@localhost:5432/testdb",
+				"GEMINI_API_KEY":     "key-123",
+				"TWILIO_ACCOUNT_SID": "AC123",
+				"TWILIO_AUTH_TOKEN":  "tok-123",
+				"TWILIO_FROM_NUMBER": "(510) 555-0100",
+				"ALLOW_FROM":         "+15105550101, +15105550102",
 			},
 			wantErr:                false,
 			wantPort:               "4019",
 			wantDatabaseURL:        "postgres://user:pass@localhost:5432/testdb",
+			wantTwilioAccountSID:   "AC123",
+			wantTwilioAuthToken:    "tok-123",
+			wantTwilioFromNumber:   "+15105550100",
+			wantPublicWebhookBase:  "https://webhooks.example.com",
+			wantGeminiAPIKey:       "key-123",
 			wantGeminiLiveModel:    "gemini-3.8-live",
 			wantGeminiFallback:     "gemini-3.1-flash-live-preview",
 			wantGeminiVoiceName:    "Kore",
 			wantBrainURL:           "http://eri.aerial",
 			wantGoogleMCPURL:       "http://google-mcp.aerial/mcp",
 			wantCovenURL:           "http://coven.aerial",
-			wantWhisperURL:         "http://orin-voice.aerial",
+			wantWhisperURL:         "http://voice.aerial",
 			wantDiscordChannel:     "prospera",
 			wantCallbackWindowMins: 10080,
 			wantMaxConcurrent:      2,
-			wantAllowFromLen:       0,
-		},
-		{
-			name: "custom complete configuration with gemini fallback key and allow_from",
-			env: map[string]string{
-				"PORT":                    "5050",
-				"DATABASE_URL":            "postgres://user:pass@db:5432/prospera",
-				"TWILIO_ACCOUNT_SID":      "AC1234567890abcdef",
-				"TWILIO_AUTH_TOKEN":       "auth_token_xyz",
-				"TWILIO_FROM_NUMBER":      "(510) 555-0100",
-				"PUBLIC_WEBHOOK_BASE_URL": "https://custom.hooks.example.com",
-				"GEMINI_HARNESS_API_KEY":  "harness_key_123",
-				"GEMINI_LIVE_MODEL":       "gemini-custom-live",
-				"GEMINI_FALLBACK_MODEL":   "gemini-custom-fallback",
-				"GEMINI_VOICE_NAME":       "Aoede",
-				"BRAIN_URL":               "http://eri.custom",
-				"GOOGLE_MCP_URL":          "http://google-mcp.custom/mcp",
-				"COVEN_URL":               "http://coven.custom",
-				"WHISPER_URL":             "http://whisper.custom",
-				"DEFAULT_DISCORD_CHANNEL": "voice-ops",
-				"CALLBACK_WINDOW_MINUTES": "1440",
-				"MAX_CONCURRENT_CALLS":    "5",
-				"ALLOW_FROM":              "(510) 555-0101, +15105550102",
-			},
-			wantErr:                false,
-			wantPort:               "5050",
-			wantDatabaseURL:        "postgres://user:pass@db:5432/prospera",
-			wantTwilioAccountSID:   "AC1234567890abcdef",
-			wantTwilioAuthToken:    "auth_token_xyz",
-			wantTwilioFromNumber:   "+15105550100",
-			wantPublicWebhookBase:  "https://custom.hooks.example.com",
-			wantGeminiAPIKey:       "harness_key_123",
-			wantGeminiLiveModel:    "gemini-custom-live",
-			wantGeminiFallback:     "gemini-custom-fallback",
-			wantGeminiVoiceName:    "Aoede",
-			wantBrainURL:           "http://eri.custom",
-			wantGoogleMCPURL:       "http://google-mcp.custom/mcp",
-			wantCovenURL:           "http://coven.custom",
-			wantWhisperURL:         "http://whisper.custom",
-			wantDiscordChannel:     "voice-ops",
-			wantCallbackWindowMins: 1440,
-			wantMaxConcurrent:      5,
 			wantAllowFromLen:       2,
 			wantFirstAllowFrom:     "+15105550101",
 		},
 		{
-			name: "primary gemini key takes precedence and discord_channel_id fallback",
+			name: "gemini harness fallback and allow_from with spaces",
+			path: validPath,
 			env: map[string]string{
 				"DATABASE_URL":           "postgres://user:pass@localhost:5432/testdb",
-				"GEMINI_API_KEY":         "primary_gemini_key",
-				"GEMINI_HARNESS_API_KEY": "fallback_key",
-				"DISCORD_CHANNEL_ID":     "channel-from-id",
+				"GEMINI_HARNESS_API_KEY": "harness-key-456",
+				"ALLOW_FROM":             " , +15105550199 , ",
 			},
-			wantErr:            false,
-			wantPort:           "4019",
-			wantGeminiAPIKey:   "primary_gemini_key",
-			wantDiscordChannel: "channel-from-id",
+			wantErr:              false,
+			wantPort:             "4019",
+			wantGeminiAPIKey:     "harness-key-456",
+			wantAllowFromLen:     1,
+			wantFirstAllowFrom:   "+15105550199",
+			wantTwilioFromNumber: "",
 		},
 		{
-			name: "missing database url",
-			env: map[string]string{
-				"PORT": "4019",
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid callback window integer",
-			env: map[string]string{
-				"DATABASE_URL":            "postgres://user:pass@localhost:5432/testdb",
-				"CALLBACK_WINDOW_MINUTES": "not-an-int",
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid max concurrent calls integer",
-			env: map[string]string{
-				"DATABASE_URL":         "postgres://user:pass@localhost:5432/testdb",
-				"MAX_CONCURRENT_CALLS": "xyz",
-			},
-			wantErr: true,
-		},
-		{
-			name: "invalid allow from phone number",
+			name:           "load config wrapper with env",
+			path:           validPath,
+			callLoadConfig: true,
 			env: map[string]string{
 				"DATABASE_URL": "postgres://user:pass@localhost:5432/testdb",
-				"ALLOW_FROM":   "invalid-phone",
+			},
+			wantErr:  false,
+			wantPort: "4019",
+		},
+		{
+			name:    "empty path error",
+			path:    "",
+			wantErr: true,
+		},
+		{
+			name:    "nonexistent file error",
+			path:    filepath.Join(tmpDir, "nonexistent.yaml"),
+			wantErr: true,
+		},
+		{
+			name:    "bad yaml syntax error",
+			path:    badPath,
+			wantErr: true,
+		},
+		{
+			name:    "missing port error",
+			path:    missingPortPath,
+			wantErr: true,
+		},
+		{
+			name:    "missing brain url error",
+			path:    missingBrainPath,
+			wantErr: true,
+		},
+		{
+			name:    "missing google mcp url error",
+			path:    missingGoogleMCPPath,
+			wantErr: true,
+		},
+		{
+			name:    "missing coven url error",
+			path:    missingCovenPath,
+			wantErr: true,
+		},
+		{
+			name:    "missing whisper url error",
+			path:    missingWhisperPath,
+			wantErr: true,
+		},
+		{
+			name:    "missing default discord channel error",
+			path:    missingChannelPath,
+			wantErr: true,
+		},
+		{
+			name:    "missing live model error",
+			path:    missingLiveModelPath,
+			wantErr: true,
+		},
+		{
+			name:    "missing fallback model error",
+			path:    missingFallbackModelPath,
+			wantErr: true,
+		},
+		{
+			name:    "missing voice name error",
+			path:    missingVoiceNamePath,
+			wantErr: true,
+		},
+		{
+			name:    "callback window <= 0 error",
+			path:    badWindowPath,
+			wantErr: true,
+		},
+		{
+			name:    "max concurrent calls <= 0 error",
+			path:    badCallsPath,
+			wantErr: true,
+		},
+		{
+			name:    "missing database url error",
+			path:    validPath,
+			env:     map[string]string{},
+			wantErr: true,
+		},
+		{
+			name: "invalid twilio from number error",
+			path: validPath,
+			env: map[string]string{
+				"DATABASE_URL":       "postgres://localhost/test",
+				"TWILIO_FROM_NUMBER": "not-a-number",
 			},
 			wantErr: true,
 		},
 		{
-			name: "invalid twilio from number",
+			name: "invalid allow from error",
+			path: validPath,
 			env: map[string]string{
-				"DATABASE_URL":       "postgres://user:pass@localhost:5432/testdb",
-				"TWILIO_FROM_NUMBER": "bad-phone",
+				"DATABASE_URL": "postgres://localhost/test",
+				"ALLOW_FROM":   "invalid",
 			},
 			wantErr: true,
-		},
-		{
-			name: "allow from with empty comma entries",
-			env: map[string]string{
-				"DATABASE_URL": "postgres://user:pass@localhost:5432/testdb",
-				"ALLOW_FROM":   " , +15105550199 ,  ",
-			},
-			wantErr:          false,
-			wantPort:         "4019",
-			wantAllowFromLen: 1,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			getenv := func(key string) string {
-				return tc.env[key]
+			var getenv func(string) string
+			if tc.callLoadConfig {
+				for k, v := range tc.env {
+					t.Setenv(k, v)
+				}
+				cfg, err := LoadConfig(tc.path)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("LoadConfig() error = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if tc.wantErr {
+					return
+				}
+				if cfg.Port != tc.wantPort {
+					t.Errorf("cfg.Port = %q, want %q", cfg.Port, tc.wantPort)
+				}
+				return
 			}
-			cfg, err := LoadConfig(getenv)
+
+			if tc.nilEnv {
+				getenv = nil
+			} else {
+				getenv = func(key string) string {
+					if tc.env == nil {
+						return ""
+					}
+					return tc.env[key]
+				}
+			}
+
+			cfg, err := LoadConfigFile(tc.path, getenv)
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("LoadConfig() error = %v, wantErr = %v", err, tc.wantErr)
+				t.Fatalf("LoadConfigFile() error = %v, wantErr = %v", err, tc.wantErr)
 			}
 			if tc.wantErr {
 				return
@@ -261,16 +452,5 @@ func TestLoadConfig(t *testing.T) {
 				t.Errorf("cfg.AllowFrom[0] = %q, want %q", cfg.AllowFrom[0], tc.wantFirstAllowFrom)
 			}
 		})
-	}
-}
-
-func TestLoadConfig_NilGetEnv(t *testing.T) {
-	t.Setenv("DATABASE_URL", "postgres://localhost/test")
-	cfg, err := LoadConfig(nil)
-	if err != nil {
-		t.Fatalf("LoadConfig(nil) error = %v", err)
-	}
-	if cfg.DatabaseURL != "postgres://localhost/test" {
-		t.Errorf("cfg.DatabaseURL = %q, want postgres://localhost/test", cfg.DatabaseURL)
 	}
 }

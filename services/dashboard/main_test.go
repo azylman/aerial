@@ -1219,3 +1219,70 @@ func TestCoverageFlushEndpoint(t *testing.T) {
 		t.Errorf("expected 500 on dashboard subpath error, got: %d", resp5.StatusCode)
 	}
 }
+
+func TestMain_Execution(t *testing.T) {
+	origLoad := loadConfigFn
+	origRun := runDashboardFn
+	origExit := exitFn
+	defer func() {
+		loadConfigFn = origLoad
+		runDashboardFn = origRun
+		exitFn = origExit
+	}()
+
+	tests := []struct {
+		name         string
+		loadErr      error
+		runErr       error
+		wantRunCall  bool
+		wantExitCall bool
+	}{
+		{
+			name:         "clean execution",
+			wantRunCall:  true,
+			wantExitCall: false,
+		},
+		{
+			name:         "config load error exits",
+			loadErr:      errors.New("mock config error"),
+			wantRunCall:  false,
+			wantExitCall: true,
+		},
+		{
+			name:         "run server error exits",
+			runErr:       errors.New("mock run error"),
+			wantRunCall:  true,
+			wantExitCall: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runCalled := false
+			exitCalled := false
+
+			loadConfigFn = func(_ string) (DashboardConfig, error) {
+				if tc.loadErr != nil {
+					return DashboardConfig{}, tc.loadErr
+				}
+				return DashboardConfig{Port: "8084"}, nil
+			}
+			runDashboardFn = func(_ context.Context, _ DashboardConfig) error {
+				runCalled = true
+				return tc.runErr
+			}
+			exitFn = func(string, ...interface{}) {
+				exitCalled = true
+			}
+
+			main()
+
+			if runCalled != tc.wantRunCall {
+				t.Errorf("runCalled = %v, want %v", runCalled, tc.wantRunCall)
+			}
+			if exitCalled != tc.wantExitCall {
+				t.Errorf("exitCalled = %v, want %v", exitCalled, tc.wantExitCall)
+			}
+		})
+	}
+}

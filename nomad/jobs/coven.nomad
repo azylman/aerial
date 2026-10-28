@@ -48,21 +48,10 @@ job "coven" {
         ]
       }
 
-      env {
-        BRAIN_URL         = "http://eri.aerial"
-        BRAIN_LLM_URL     = "http://eri.aerial/internal/llm"
-        CUSTOM_SKILLS_DIR = "/share/aerial-config/custom-skills"
-        RULES_DIR         = "/share/aerial-config/rules"
-      }
-
       template {
         data = <<EOH
 {{- if nomadVarExists "nomad/jobs/coven" -}}
 {{- with nomadVar "nomad/jobs/coven" -}}
-{{- if .CONFIG_YAML -}}{{- .CONFIG_YAML -}}{{- end -}}
-{{- end -}}
-{{- else if nomadVarExists "nomad/jobs/memory-mcp" -}}
-{{- with nomadVar "nomad/jobs/memory-mcp" -}}
 {{- if .CONFIG_YAML -}}{{- .CONFIG_YAML -}}{{- end -}}
 {{- end -}}
 {{- end -}}

@@ -178,7 +178,7 @@ nomad_addr: "http://nomad.cluster:4646"
 brain_internal_url: "http://brain.cluster:8088/internal/reload"
 service_configs:
   - rel_path: "services/voice/voice.yaml"
-    nomad_var: "nomad/jobs/orin-voice"
+    nomad_var: "nomad/jobs/voice"
     var_key: "CONFIG_YAML"`
 	tests := []struct {
 		name                     string

@@ -660,7 +660,13 @@ func TestConfig_LoadAndResolve(t *testing.T) {
 	validYamlPath := filepath.Join(tmpDir, "config.yaml")
 	validContent := `port: "4009"
 database_url: "postgres://u:p@localhost:5432/testdb"
+brain_url: "http://eri.aerial"
 brain_llm_url: "http://brain.local/internal/llm"
+brain_pr_register_url: "http://webhooks-router.aerial/internal/pr/register"
+custom_skills_dir: "/config/custom-skills"
+rules_dir: "/config/rules"
+config_repo_owner: "azylman"
+config_repo_name: "aerial-config"
 ollama:
   base_url: "http://ollama.local:11434"
   model: "bge-m3"
@@ -676,19 +682,22 @@ ollama:
 		t.Fatalf("failed to write bad yaml: %v", err)
 	}
 
+	noPortYamlPath := filepath.Join(tmpDir, "no_port.yaml")
+	_ = os.WriteFile(noPortYamlPath, []byte(strings.Replace(validContent, `port: "4009"`, `port: ""`, 1)), 0o644)
+
+	noDbYamlPath := filepath.Join(tmpDir, "no_db.yaml")
+	_ = os.WriteFile(noDbYamlPath, []byte(strings.Replace(validContent, `database_url: "postgres://u:p@localhost:5432/testdb"`, `database_url: ""`, 1)), 0o644)
+
 	tests := []struct {
-		name        string
-		path        string
-		dbURL       string
-		envPort     string
-		envDB       string
-		envPG       string
-		envBrainLLM string
-		envOllama   string
-		wantErr     bool
-		wantPort    string
-		wantDB      string
-		wantModel   string
+		name      string
+		path      string
+		dbURL     string
+		envDB     string
+		envPG     string
+		wantErr   bool
+		wantPort  string
+		wantDB    string
+		wantModel string
 	}{
 		{
 			name:      "ValidFromYAML",
@@ -698,58 +707,57 @@ ollama:
 			wantModel: "bge-m3",
 		},
 		{
-			name:        "EnvOverrides",
-			path:        validYamlPath,
-			envPort:     "4010",
-			envDB:       "postgres://envuser@localhost/envdb",
-			envBrainLLM: "http://custom-brain/llm",
-			envOllama:   "http://custom-ollama:11434",
-			wantPort:    "4010",
-			wantDB:      "postgres://envuser@localhost/envdb",
-			wantModel:   "bge-m3",
+			name:      "DatabaseURLEnvOverride",
+			path:      validYamlPath,
+			envDB:     "postgres://envuser@localhost/envdb",
+			wantPort:  "4009",
+			wantDB:    "postgres://envuser@localhost/envdb",
+			wantModel: "bge-m3",
 		},
 		{
-			name:     "MissingFileUsesDefaultsAndEnv",
-			path:     filepath.Join(tmpDir, "nonexistent.yaml"),
-			envPort:  "4011",
-			envPG:    "postgres://pguser@localhost/pgdb",
-			wantPort: "4011",
-			wantDB:   "postgres://pguser@localhost/pgdb",
+			name:      "DatabaseURLParamOverride",
+			path:      validYamlPath,
+			dbURL:     "postgres://paramuser@localhost/paramdb",
+			wantPort:  "4009",
+			wantDB:    "postgres://paramuser@localhost/paramdb",
+			wantModel: "bge-m3",
 		},
 		{
-			name:      "EmptyPathUsesDefaultPort",
-			path:      "",
-			envDB:     "postgres://localhost/test",
-			wantPort:  "4008",
-			wantDB:    "postgres://localhost/test",
-			wantModel: "all-minilm",
+			name:    "MissingPortFails",
+			path:    noPortYamlPath,
+			wantErr: true,
 		},
 		{
 			name:    "MissingDatabaseURLFails",
+			path:    noDbYamlPath,
+			wantErr: true,
+		},
+		{
+			name:    "EmptyPathFails",
+			path:    "",
+			wantErr: true,
+		},
+		{
+			name:    "MissingFileFails",
 			path:    filepath.Join(tmpDir, "nonexistent.yaml"),
 			wantErr: true,
 		},
 		{
 			name:    "BadYAMLFileFails",
 			path:    badYamlPath,
-			dbURL:   "postgres://localhost/db",
 			wantErr: true,
 		},
 		{
 			name:    "DirectoryPathReadError",
 			path:    tmpDir,
-			dbURL:   "postgres://localhost/db",
 			wantErr: true,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("PORT", tc.envPort)
 			t.Setenv("DATABASE_URL", tc.envDB)
 			t.Setenv("POSTGRES_URL", tc.envPG)
-			t.Setenv("BRAIN_LLM_URL", tc.envBrainLLM)
-			t.Setenv("OLLAMA_BASE_URL", tc.envOllama)
 
 			cfg, err := LoadConfigFile(tc.path, tc.dbURL)
 			if (err != nil) != tc.wantErr {
@@ -1832,7 +1840,21 @@ func TestMain_Execution(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	testCfg := filepath.Join(tmpDir, "config.yaml")
-	_ = os.WriteFile(testCfg, []byte("port: \"4008\"\ndatabase_url: \"postgres://u:p@localhost/db\"\n"), 0o644)
+	testCfgContent := `port: "4008"
+database_url: "postgres://u:p@localhost/db"
+brain_url: "http://eri.aerial"
+brain_llm_url: "http://eri.aerial/internal/llm"
+brain_pr_register_url: "http://webhooks-router.aerial/internal/pr/register"
+custom_skills_dir: "/config/custom-skills"
+rules_dir: "/config/rules"
+config_repo_owner: "azylman"
+config_repo_name: "aerial-config"
+ollama:
+  base_url: "http://ollama:11434"
+  model: "all-minilm"
+  num_ctx: 512
+`
+	_ = os.WriteFile(testCfg, []byte(testCfgContent), 0o644)
 
 	tests := []struct {
 		name         string
@@ -8147,12 +8169,19 @@ func TestConfig_LoadAndResolve_Chunk4Fields(t *testing.T) {
 	yamlPath := filepath.Join(tmpDir, "chunk4.yaml")
 	content := `port: "4008"
 database_url: "postgres://localhost/test"
+brain_url: "http://eri.aerial"
+brain_llm_url: "http://eri.aerial/internal/llm"
 custom_skills_dir: "/yaml/custom-skills"
+rules_dir: "/yaml/rules"
 github_pat: "pat-from-yaml"
 config_repo_owner: "yaml-owner"
 config_repo_name: "yaml-repo"
 brain_pr_register_url: "http://yaml-brain/internal/pr/register"
 system_channel_id: "1562837549255495693"
+ollama:
+  base_url: "http://ollama:11434"
+  model: "all-minilm"
+  num_ctx: 512
 `
 	if err := os.WriteFile(yamlPath, []byte(content), 0o644); err != nil {
 		t.Fatalf("failed to write yaml: %v", err)
@@ -8167,6 +8196,7 @@ system_channel_id: "1562837549255495693"
 		envRepo       string
 		envBrainReg   string
 		envChannelID  string
+		wantErr       bool
 		wantSkillsDir string
 		wantPAT       string
 		wantOwner     string
@@ -8185,7 +8215,7 @@ system_channel_id: "1562837549255495693"
 			wantChannelID: "1562837549255495693",
 		},
 		{
-			name:          "EnvOverridesYAML",
+			name:          "SecretsEnvOverridesYAML_NonSecretsIgnored",
 			path:          yamlPath,
 			envSkillsDir:  "/env/custom-skills",
 			envPAT:        "pat-from-env",
@@ -8193,11 +8223,11 @@ system_channel_id: "1562837549255495693"
 			envRepo:       "env-repo",
 			envBrainReg:   "http://env-brain/pr/reg",
 			envChannelID:  "1562837549255495694",
-			wantSkillsDir: "/env/custom-skills",
+			wantSkillsDir: "/yaml/custom-skills",
 			wantPAT:       "pat-from-env",
-			wantOwner:     "env-owner",
-			wantRepo:      "env-repo",
-			wantBrainReg:  "http://env-brain/pr/reg",
+			wantOwner:     "yaml-owner",
+			wantRepo:      "yaml-repo",
+			wantBrainReg:  "http://yaml-brain/internal/pr/register",
 			wantChannelID: "1562837549255495694",
 		},
 		{
@@ -8212,13 +8242,9 @@ system_channel_id: "1562837549255495693"
 			wantChannelID: "",
 		},
 		{
-			name:          "DefaultsWhenEmpty",
-			path:          "",
-			wantSkillsDir: "/config/custom-skills",
-			wantOwner:     "azylman",
-			wantRepo:      "aerial-config",
-			wantBrainReg:  "http://webhooks-router.aerial/internal/pr/register",
-			wantChannelID: "",
+			name:    "EmptyPathFails",
+			path:    "",
+			wantErr: true,
 		},
 	}
 
@@ -8233,8 +8259,11 @@ system_channel_id: "1562837549255495693"
 			t.Setenv("SYSTEM_CHANNEL_ID", tc.envChannelID)
 
 			cfg, err := LoadConfigFile(tc.path, "")
-			if err != nil {
-				t.Fatalf("LoadConfigFile() err = %v", err)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("LoadConfigFile() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				return
 			}
 			if cfg.CustomSkillsDir != tc.wantSkillsDir {
 				t.Errorf("CustomSkillsDir = %q, want %q", cfg.CustomSkillsDir, tc.wantSkillsDir)
@@ -8259,48 +8288,71 @@ system_channel_id: "1562837549255495693"
 }
 
 func TestConfig_BrainURLResolution(t *testing.T) {
+	tmpDir := t.TempDir()
+	baseContent := `port: "4008"
+database_url: "postgres://localhost/test"
+brain_url: "http://custom-eri:8000"
+brain_llm_url: "http://custom-proxy:9000/v1/llm"
+brain_pr_register_url: "http://webhooks-router.aerial/internal/pr/register"
+custom_skills_dir: "/config/custom-skills"
+rules_dir: "/config/rules"
+config_repo_owner: "azylman"
+config_repo_name: "aerial-config"
+ollama:
+  base_url: "http://ollama:11434"
+  model: "all-minilm"
+  num_ctx: 512
+`
+	validFile := filepath.Join(tmpDir, "valid.yaml")
+	_ = os.WriteFile(validFile, []byte(baseContent), 0o644)
+
+	noBrainFile := filepath.Join(tmpDir, "no_brain.yaml")
+	_ = os.WriteFile(noBrainFile, []byte(strings.Replace(baseContent, `brain_url: "http://custom-eri:8000"`, `brain_url: ""`, 1)), 0o644)
+
+	noLLMFile := filepath.Join(tmpDir, "no_llm.yaml")
+	_ = os.WriteFile(noLLMFile, []byte(strings.Replace(baseContent, `brain_llm_url: "http://custom-proxy:9000/v1/llm"`, `brain_llm_url: ""`, 1)), 0o644)
+
+	noPRRegFile := filepath.Join(tmpDir, "no_pr_reg.yaml")
+	_ = os.WriteFile(noPRRegFile, []byte(strings.Replace(baseContent, `brain_pr_register_url: "http://webhooks-router.aerial/internal/pr/register"`, `brain_pr_register_url: ""`, 1)), 0o644)
+
 	tests := []struct {
-		name           string
-		envBrainURL    string
-		envBrainLLMURL string
-		wantBrainURL   string
-		wantBrainLLM   string
+		name         string
+		path         string
+		wantErr      bool
+		wantBrainURL string
+		wantBrainLLM string
 	}{
 		{
-			name:         "DefaultWhenUnset",
-			wantBrainURL: DefaultBrainURL,
-			wantBrainLLM: DefaultBrainLLMURL,
+			name:         "ValidBrainURLs",
+			path:         validFile,
+			wantBrainURL: "http://custom-eri:8000",
+			wantBrainLLM: "http://custom-proxy:9000/v1/llm",
 		},
 		{
-			name:           "DeriveBrainURLFromLLMURL",
-			envBrainLLMURL: "http://my-eri:5000/internal/llm",
-			wantBrainURL:   "http://my-eri:5000",
-			wantBrainLLM:   "http://my-eri:5000/internal/llm",
+			name:    "MissingBrainURLFails",
+			path:    noBrainFile,
+			wantErr: true,
 		},
 		{
-			name:         "DeriveLLMURLFromBrainURL",
-			envBrainURL:  "http://my-eri:5000",
-			wantBrainURL: "http://my-eri:5000",
-			wantBrainLLM: "http://my-eri:5000/internal/llm",
+			name:    "MissingBrainLLMURLFails",
+			path:    noLLMFile,
+			wantErr: true,
 		},
 		{
-			name:           "BothCustomized",
-			envBrainURL:    "http://custom-eri:8000",
-			envBrainLLMURL: "http://custom-proxy:9000/v1/llm",
-			wantBrainURL:   "http://custom-eri:8000",
-			wantBrainLLM:   "http://custom-proxy:9000/v1/llm",
+			name:    "MissingBrainPRRegisterURLFails",
+			path:    noPRRegFile,
+			wantErr: true,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("DATABASE_URL", "postgres://localhost/test")
-			t.Setenv("BRAIN_URL", tc.envBrainURL)
-			t.Setenv("BRAIN_LLM_URL", tc.envBrainLLMURL)
-
-			cfg, err := LoadConfigFile("", "")
-			if err != nil {
-				t.Fatalf("LoadConfigFile() err = %v", err)
+			cfg, err := LoadConfigFile(tc.path, "")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("LoadConfigFile() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				return
 			}
 			if cfg.BrainURL != tc.wantBrainURL {
 				t.Errorf("BrainURL = %q, want %q", cfg.BrainURL, tc.wantBrainURL)
@@ -8314,15 +8366,31 @@ func TestConfig_BrainURLResolution(t *testing.T) {
 
 func TestLoadConfig_TableDriven(t *testing.T) {
 	tmpDir := t.TempDir()
+	validContent := `port: '4011'
+database_url: 'postgres://localhost/coven_test'
+brain_url: 'http://eri.aerial'
+brain_llm_url: 'http://eri.aerial/internal/llm'
+brain_pr_register_url: 'http://webhooks-router.aerial/internal/pr/register'
+custom_skills_dir: '/custom/skills'
+rules_dir: '/custom/rules'
+config_repo_owner: 'azylman'
+config_repo_name: 'aerial-config'
+ollama:
+  base_url: 'http://ollama:11434'
+  model: 'all-minilm'
+  num_ctx: 512
+`
 	validFile := filepath.Join(tmpDir, "config.yaml")
-	_ = os.WriteFile(validFile, []byte("port: '4011'\nrules_dir: '/custom/rules'\n"), 0o644)
+	_ = os.WriteFile(validFile, []byte(validContent), 0o644)
+
+	noDbContent := strings.Replace(validContent, "database_url: 'postgres://localhost/coven_test'", "database_url: ''", 1)
+	noDbFile := filepath.Join(tmpDir, "nodb.yaml")
+	_ = os.WriteFile(noDbFile, []byte(noDbContent), 0o644)
 
 	tests := []struct {
 		name         string
 		path         string
-		envPort      string
 		envDB        string
-		envRules     string
 		wantPort     string
 		wantRulesDir string
 		wantErr      bool
@@ -8330,44 +8398,42 @@ func TestLoadConfig_TableDriven(t *testing.T) {
 		{
 			name:         "valid file and env database url",
 			path:         validFile,
-			envPort:      "",
 			envDB:        "postgres://localhost/coven_test",
 			wantPort:     "4011",
 			wantRulesDir: "/custom/rules",
 			wantErr:      false,
 		},
 		{
-			name:         "default rules dir with env rules override",
-			path:         "",
-			envPort:      "4008",
-			envDB:        "postgres://localhost/coven_test",
-			envRules:     "/override/rules",
-			wantPort:     "4008",
-			wantRulesDir: "/override/rules",
-			wantErr:      false,
-		},
-		{
-			name:         "default rules dir without override",
-			path:         "",
-			envPort:      "",
-			envDB:        "postgres://localhost/coven_test",
-			wantPort:     "4008",
-			wantRulesDir: "/config/rules",
+			name:         "valid file with file database url",
+			path:         validFile,
+			envDB:        "",
+			wantPort:     "4011",
+			wantRulesDir: "/custom/rules",
 			wantErr:      false,
 		},
 		{
 			name:    "missing database url returns error",
-			path:    "",
+			path:    noDbFile,
 			envDB:   "",
+			wantErr: true,
+		},
+		{
+			name:    "empty path returns error",
+			path:    "",
+			envDB:   "postgres://localhost/coven_test",
+			wantErr: true,
+		},
+		{
+			name:    "nonexistent path returns error",
+			path:    filepath.Join(tmpDir, "nonexistent.yaml"),
+			envDB:   "postgres://localhost/coven_test",
 			wantErr: true,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("PORT", tc.envPort)
 			t.Setenv("DATABASE_URL", tc.envDB)
-			t.Setenv("RULES_DIR", tc.envRules)
 			cfg, err := LoadConfig(tc.path)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("LoadConfig() err = %v, wantErr = %v", err, tc.wantErr)

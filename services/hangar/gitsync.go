@@ -549,6 +549,8 @@ type ServiceConfigMapping struct {
 // synchronized into Nomad variables when not overridden by services/hangar/hangar.yaml.
 var DefaultManagedServiceConfigs = []ServiceConfigMapping{
 	{RelPath: "services/haro/haro.yaml", NomadVar: "nomad/jobs/haro", VarKey: "CONFIG_YAML"},
+	{RelPath: "services/coven/coven.yaml", NomadVar: "nomad/jobs/coven", VarKey: "CONFIG_YAML"},
+	{RelPath: "services/prospera/prospera.yaml", NomadVar: "nomad/jobs/prospera", VarKey: "CONFIG_YAML"},
 	{RelPath: "services/mcp/github-mcp.yaml", NomadVar: "nomad/jobs/github-mcp", VarKey: "CONFIG_YAML"},
 	{RelPath: "services/mcp/nomad-mcp.yaml", NomadVar: "nomad/jobs/nomad-mcp", VarKey: "CONFIG_YAML"},
 	{RelPath: "services/mcp/discord-mcp.yaml", NomadVar: "nomad/jobs/discord-mcp", VarKey: "CONFIG_YAML"},
@@ -557,7 +559,6 @@ var DefaultManagedServiceConfigs = []ServiceConfigMapping{
 	{RelPath: "services/webhooks-router/webhooks-router.yaml", NomadVar: "nomad/jobs/webhooks-router", VarKey: "CONFIG_YAML"},
 	{RelPath: "services/victoriametrics/scrape.yml", NomadVar: "nomad/jobs/victoriametrics", VarKey: "CONFIG_YAML"},
 	{RelPath: "services/dashboard/dashboard.yaml", NomadVar: "nomad/jobs/dashboard", VarKey: "CONFIG_YAML"},
-	{RelPath: "config.yaml", NomadVar: "nomad/jobs/dashboard", VarKey: "BRAIN_CONFIG_YAML"},
 }
 
 // GetServiceConfigMappings resolves the active service config mappings for a given configDir.

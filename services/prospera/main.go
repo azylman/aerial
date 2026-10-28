@@ -127,13 +127,15 @@ func RunApp(ctx context.Context, cfg *Config) error {
 }
 
 var (
+	configPath   = DefaultConfigPath
 	loadConfigFn = LoadConfig
 	runAppFn     = RunApp
 	exitFn       = log.Fatalf
 )
 
 func main() {
-	cfg, err := loadConfigFn(nil)
+	resolvedPath := ResolveConfigPath(configPath)
+	cfg, err := loadConfigFn(resolvedPath)
 	if err != nil {
 		exitFn("failed to load config: %v", err)
 		return

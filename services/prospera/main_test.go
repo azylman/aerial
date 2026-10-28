@@ -263,7 +263,7 @@ func TestRunApp_MainSignal(t *testing.T) {
 			exitFn = func(format string, v ...any) {
 				exited = true
 			}
-			loadConfigFn = func(_ func(string) string) (*Config, error) {
+			loadConfigFn = func(_ string) (*Config, error) {
 				if tc.loadErr != nil {
 					return nil, tc.loadErr
 				}

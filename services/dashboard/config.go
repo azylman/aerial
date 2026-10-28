@@ -1,14 +1,29 @@
 package main
 
 import (
-	"flag"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/azylman/aerial/pkg/httpkit"
 	"gopkg.in/yaml.v3"
 )
+
+// DefaultConfigPath is the canonical in-container configuration path.
+const DefaultConfigPath = "/config/dashboard.yaml"
+
+var localConfigPath = "/local/config.yaml"
+
+// ResolveConfigPath returns the config file path, checking CONFIG_PATH env,
+// then /local/config.yaml (if size > 0), falling back to fallbackPath.
+func ResolveConfigPath(fallbackPath string) string {
+	if fallbackPath != "" {
+		return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, fallbackPath)
+	}
+	return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, DefaultConfigPath, "dashboard.yaml", "config.yaml")
+}
 
 type QuickLaunchLink struct {
 	Name        string `json:"name" yaml:"name"`
@@ -66,10 +81,11 @@ type rawUserConfig struct {
 		VanadisURL       string            `yaml:"vanadis_url"`
 		HaroURL          string            `yaml:"haro_url"`
 	} `yaml:"dashboard"`
-	QuickLinks  []QuickLaunchLink `yaml:"quick_links"`
-	GitHubRepos []string          `yaml:"github_repos"`
-	VanadisURL  string            `yaml:"vanadis_url"`
-	HaroURL     string            `yaml:"haro_url"`
+	QuickLinks       []QuickLaunchLink `yaml:"quick_links"`
+	QuickLaunchLinks []QuickLaunchLink `yaml:"quick_launch_links"`
+	GitHubRepos      []string          `yaml:"github_repos"`
+	VanadisURL       string            `yaml:"vanadis_url"`
+	HaroURL          string            `yaml:"haro_url"`
 }
 
 // loadRawUserConfig parses and unmarshals rawUserConfig from the given path.
@@ -91,34 +107,6 @@ func loadRawUserConfig(configPath string) (rawUserConfig, bool) {
 		return rawUserConfig{}, false
 	}
 	return cfg, true
-}
-
-// loadDashboardVanadisURL parses the Vanadis upstream URL configured in config.yaml.
-func loadDashboardVanadisURL(configPath string) string {
-	cfg, ok := loadRawUserConfig(configPath)
-	if !ok {
-		return ""
-	}
-
-	val := strings.TrimSpace(cfg.Dashboard.VanadisURL)
-	if val == "" {
-		val = strings.TrimSpace(cfg.VanadisURL)
-	}
-	return val
-}
-
-// loadDashboardHaroURL parses the Haro upstream URL configured in config.yaml.
-func loadDashboardHaroURL(configPath string) string {
-	cfg, ok := loadRawUserConfig(configPath)
-	if !ok {
-		return ""
-	}
-
-	val := strings.TrimSpace(cfg.Dashboard.HaroURL)
-	if val == "" {
-		val = strings.TrimSpace(cfg.HaroURL)
-	}
-	return val
 }
 
 // loadDashboardRepos parses the list of GitHub repositories configured for status dashboard monitoring.
@@ -162,6 +150,9 @@ func loadQuickLaunchLinks(configPath string) []QuickLaunchLink {
 	custom := cfg.Dashboard.QuickLinks
 	if len(custom) == 0 {
 		custom = cfg.Dashboard.QuickLaunchLinks
+	}
+	if len(custom) == 0 {
+		custom = cfg.QuickLaunchLinks
 	}
 	if len(custom) == 0 {
 		custom = cfg.QuickLinks
@@ -214,95 +205,111 @@ type DashboardYAMLConfig struct {
 	HaroURL    string   `yaml:"haro_url"`
 }
 
-func loadDashboardYAMLFile(lookup func(string) string) DashboardYAMLConfig {
-	cfgFile := strings.TrimSpace(lookup("CONFIG_PATH"))
-	if cfgFile == "" && flag.Lookup("test.v") == nil {
-		if _, err := os.Stat("/config/config.yaml"); err == nil {
-			cfgFile = "/config/config.yaml"
-		} else if _, err := os.Stat("/share/aerial-config/services/dashboard/dashboard.yaml"); err == nil {
-			cfgFile = "/share/aerial-config/services/dashboard/dashboard.yaml"
+// LoadConfig loads configuration from path using os.Getenv.
+func LoadConfig(path string) (DashboardConfig, error) {
+	return LoadConfigFile(path, os.Getenv)
+}
+
+func parseDashboardRepos(rawRepos []string, fallbackRepo string) []string {
+	if len(rawRepos) == 0 && strings.TrimSpace(fallbackRepo) != "" {
+		rawRepos = []string{strings.TrimSpace(fallbackRepo)}
+	}
+	var repos []string
+	seen := make(map[string]bool)
+	for _, r := range rawRepos {
+		trimmed := strings.TrimSpace(r)
+		if trimmed != "" && !seen[trimmed] {
+			seen[trimmed] = true
+			repos = append(repos, trimmed)
 		}
+	}
+	return repos
+}
+
+// LoadConfigFile loads and strictly validates dashboard configuration from a YAML file.
+func LoadConfigFile(path string, lookup func(string) string) (DashboardConfig, error) {
+	if lookup == nil {
+		lookup = os.Getenv
+	}
+
+	cleanPath := strings.TrimSpace(path)
+	if cleanPath == "" {
+		return DashboardConfig{}, fmt.Errorf("config: path cannot be empty")
+	}
+
+	data, err := os.ReadFile(cleanPath)
+	if err != nil {
+		return DashboardConfig{}, fmt.Errorf("config: failed to read %s: %w", cleanPath, err)
 	}
 
 	var ycfg DashboardYAMLConfig
-	if cfgFile != "" {
-		if data, err := os.ReadFile(cfgFile); err == nil {
-			if err := yaml.Unmarshal(data, &ycfg); err != nil {
-				log.Printf("[dashboard] Warning: Failed to parse %s: %v", cfgFile, err)
-			}
-		}
-	}
-	return ycfg
-}
-
-func firstConfiguredValue(lookup func(string) string, envKeys []string, yamlFallbacks []string, defaultVal string) string {
-	for _, k := range envKeys {
-		if v := strings.TrimSpace(lookup(k)); v != "" {
-			return v
-		}
-	}
-	for _, v := range yamlFallbacks {
-		if v = strings.TrimSpace(v); v != "" {
-			return v
-		}
-	}
-	return defaultVal
-}
-
-// NewDashboardConfigFromLookup parses DashboardConfig using a key lookup function with YAML config file support.
-func NewDashboardConfigFromLookup(lookup func(string) string) DashboardConfig {
-	if lookup == nil {
-		lookup = func(string) string { return "" }
+	if err := yaml.Unmarshal(data, &ycfg); err != nil {
+		return DashboardConfig{}, fmt.Errorf("config: failed to parse YAML from %s: %w", cleanPath, err)
 	}
 
-	ycfg := loadDashboardYAMLFile(lookup)
+	port := strings.TrimSpace(ycfg.Port)
+	if port == "" {
+		return DashboardConfig{}, fmt.Errorf("config: port is required in %s", cleanPath)
+	}
+	brainURL := strings.TrimSpace(ycfg.BrainURL)
+	if brainURL == "" {
+		return DashboardConfig{}, fmt.Errorf("config: brain_url is required in %s", cleanPath)
+	}
+	memoryURL := strings.TrimSpace(ycfg.MemoryURL)
+	if memoryURL == "" {
+		return DashboardConfig{}, fmt.Errorf("config: memory_url is required in %s", cleanPath)
+	}
+	hangarURL := strings.TrimSpace(ycfg.HangarURL)
+	if hangarURL == "" {
+		hangarURL = strings.TrimSpace(ycfg.GitSyncURL)
+	}
+	if hangarURL == "" {
+		return DashboardConfig{}, fmt.Errorf("config: hangar_url is required in %s", cleanPath)
+	}
+	haroURL := strings.TrimSpace(ycfg.HaroURL)
+	if haroURL == "" {
+		return DashboardConfig{}, fmt.Errorf("config: haro_url is required in %s", cleanPath)
+	}
+	vanadisURL := strings.TrimSpace(ycfg.VanadisURL)
+	if vanadisURL == "" {
+		return DashboardConfig{}, fmt.Errorf("config: vanadis_url is required in %s", cleanPath)
+	}
 
-	brainURL := firstConfiguredValue(lookup, []string{"BRAIN_URL"}, []string{ycfg.BrainURL}, "http://brain:8080")
-	memoryURL := firstConfiguredValue(lookup, []string{"MEMORY_MCP_URL"}, []string{ycfg.MemoryURL}, "http://coven.aerial")
-	ghRepo, ghRepos := resolveDashboardGitHubRepos(lookup, ycfg.GHRepos, ycfg.GHRepo)
-	ghToken := firstConfiguredValue(lookup, []string{"GITHUB_PAT", "GITHUB_PERSONAL_ACCESS_TOKEN"}, nil, "")
-	port := firstConfiguredValue(lookup, []string{"PORT"}, []string{ycfg.Port}, "8080")
-	hangarURL := firstConfiguredValue(lookup, []string{"HANGAR_URL", "GITSYNC_URL"}, []string{ycfg.HangarURL, ycfg.GitSyncURL}, "http://hangar:8080")
-	configPath := firstConfiguredValue(lookup, []string{"AERIAL_CONFIG_PATH"}, []string{ycfg.ConfigPath}, "/share/aerial-config/config.yaml")
+	repos := parseDashboardRepos(ycfg.GHRepos, ycfg.GHRepo)
+	if len(repos) == 0 {
+		return DashboardConfig{}, fmt.Errorf("config: github_repos is required in %s", cleanPath)
+	}
+
+	ghToken := strings.TrimSpace(lookup("GITHUB_PAT"))
+	if ghToken == "" {
+		ghToken = strings.TrimSpace(lookup("GITHUB_PERSONAL_ACCESS_TOKEN"))
+	}
 
 	gitCommit := normalizeGitCommit(lookup("GIT_COMMIT"))
 	if gitCommit == "" {
-		gitCommit = "latest"
+		gitCommit = getGitCommit()
 	}
 
-	nomadAddr := strings.TrimSpace(lookup("NOMAD_ADDR"))
-	if nomadAddr == "" && ycfg.NomadAddr != "" {
-		nomadAddr = strings.TrimSpace(ycfg.NomadAddr)
-	}
-	if nomadAddr == "" && flag.Lookup("test.v") == nil {
-		nomadAddr = "http://127.0.0.1:4646"
+	cfgPath := strings.TrimSpace(ycfg.ConfigPath)
+	if cfgPath == "" {
+		cfgPath = cleanPath
 	}
 
-	vanadisURL := resolveDashboardVanadisURL(configPath, ycfg.VanadisURL)
-	haroURL := resolveDashboardHaroURL(lookup, configPath, ycfg.HaroURL)
+	nomadAddr := strings.TrimSpace(ycfg.NomadAddr)
 
 	return DashboardConfig{
 		Port:       port,
 		BrainURL:   brainURL,
 		MemoryURL:  memoryURL,
-		GHRepo:     ghRepo,
-		GHRepos:    ghRepos,
+		GHRepo:     repos[0],
+		GHRepos:    repos,
 		GHToken:    ghToken,
+		GitCommit:  gitCommit,
 		GitSyncURL: hangarURL,
 		HangarURL:  hangarURL,
-		ConfigPath: configPath,
-		GitCommit:  gitCommit,
+		ConfigPath: cfgPath,
 		NomadAddr:  nomadAddr,
 		VanadisURL: vanadisURL,
 		HaroURL:    haroURL,
-	}
-}
-
-// NewDashboardConfigFromEnv parses DashboardConfig from environment variables.
-func NewDashboardConfigFromEnv() DashboardConfig {
-	cfg := NewDashboardConfigFromLookup(os.Getenv)
-	if cfg.GitCommit == "latest" || cfg.GitCommit == "" {
-		cfg.GitCommit = getGitCommit()
-	}
-	return cfg
+	}, nil
 }

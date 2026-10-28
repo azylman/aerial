@@ -675,7 +675,7 @@ func TestClassify_SystemOne(t *testing.T) {
 		wantAlert     bool
 	}{
 		{"empty ClassifierURL", true, "", "", 0, "", 0, false, false, 0.0, "classifier_url is empty", false},
-		{"success with noul", false, "", "", 200, `{"model":"orin-laya","answers":{"should_wake":{"type":"noul","noul":0.88}}}`, 0, false, false, 0.88, "systemone", false},
+		{"success with noul", false, "", "", 200, `{"model":"laya-cuda","answers":{"should_wake":{"type":"noul","noul":0.88}}}`, 0, false, false, 0.88, "systemone", false},
 		{"confidence fallback", false, "", "", 200, `{"answers":{"should_wake":{"type":"noul","confidence":0.65}}}`, 0, false, false, 0.65, "systemone", false},
 		{"clamp below zero", false, "", "", 200, `{"answers":{"should_wake":{"confidence":-0.5}}}`, 0, false, false, 0.0, "systemone", false},
 		{"clamp above one", false, "", "", 200, `{"answers":{"should_wake":{"confidence":1.5}}}`, 0, false, false, 1.0, "systemone", false},
