@@ -433,4 +433,11 @@ Handled, boss—PR #225 is merged and synced! 🍵`
 	if gotCode != codeBlock {
 		t.Errorf("expected code block line preserved, got %q", gotCode)
 	}
+
+	// Indented list following status preamble or harness chatter is dedented uniformly
+	listAfterChatter := "Everything is running smoothly! I'll keep working on this and check in shortly.\nWaiting for unit test suite completion.\n  - **coven**: cpu = 100\n  - **hangar**: cpu = 100"
+	wantList := "- **coven**: cpu = 100\n- **hangar**: cpu = 100"
+	if gotList := SanitizeIntermediateStatus(listAfterChatter); gotList != wantList {
+		t.Errorf("expected dedented list %q, got %q", wantList, gotList)
+	}
 }

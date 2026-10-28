@@ -123,6 +123,44 @@ func TestSplitMessage(t *testing.T) {
 		{name: "IndentedClosingFenceExceedingChunkLimit", text: "```go\n" + strings.Repeat("x", 1989) + "\n    ```", limit: 2000, wantChunks: 1, wantFirst: "```go\n" + strings.Repeat("x", 1989) + "\n```", wantLast: "```go\n" + strings.Repeat("x", 1989) + "\n```", checkCode: true},
 		{name: "SingleLineInlineCodeFenceAtBoundary", text: strings.Repeat("A", 1990) + "\n```inline```\n" + strings.Repeat("B", 20), limit: 2000, wantChunks: 2, wantFirst: strings.Repeat("A", 1990), wantLast: "```inline```\n" + strings.Repeat("B", 20)},
 		{name: "FenceWithLongLanguageTagAtSmallLimit", text: "```javascript\nconsole.log(1)\n```", limit: 12, wantChunks: 2, checkCode: true},
+		{
+			name:       "NestedListKeepsParentHeaderWithSubbullets",
+			text:       strings.Repeat("A", 1930) + "\n- **Core Daemons**:\n  - **coven**: cpu = 100\n  - **hangar**: cpu = 100\n  - **agentsview**: cpu = 1000",
+			limit:      2000,
+			wantChunks: 2,
+			wantFirst:  strings.Repeat("A", 1930),
+			wantLast:   "- **Core Daemons**:\n  - **coven**: cpu = 100\n  - **hangar**: cpu = 100\n  - **agentsview**: cpu = 1000",
+		},
+		{
+			name:       "OversizedSublistKeepsFirstChildAndDedentsOrphanChunk",
+			text:       strings.Repeat("A", 35) + "\n- **Parent**:\n  1. " + strings.Repeat("B", 20) + "\n  2. " + strings.Repeat("C", 20) + "\n    - nested\n\n  3. " + strings.Repeat("D", 10),
+			limit:      60,
+			wantChunks: 3,
+			wantFirst:  strings.Repeat("A", 35),
+			wantLast:   "2. " + strings.Repeat("C", 20) + "\n  - nested\n\n3. " + strings.Repeat("D", 10),
+		},
+		{
+			name:       "DeepToShallowOrphanSublistRatchetsDedent",
+			text:       "  \n    * deep item\n  - shallow sibling\n    - child of sibling\nNormal line",
+			limit:      2000,
+			wantChunks: 1,
+			wantFirst:  "* deep item\n- shallow sibling\n  - child of sibling\nNormal line",
+		},
+		{
+			name:       "ThreeLevelNestedListExceedingLimitDoesNotOrphanParent",
+			text:       strings.Repeat("A", 35) + "\n- **Parent**:\n  - **Subparent**:\n    - **Grandchild**:" + strings.Repeat("x", 15),
+			limit:      60,
+			wantChunks: 3,
+			wantFirst:  strings.Repeat("A", 35),
+			wantLast:   "- **Grandchild**:" + strings.Repeat("x", 15),
+		},
+		{
+			name:       "OversizedSublistWhereEvenFirstChildExceedsLimit",
+			text:       strings.Repeat("A", 10) + "\n- **Parent**:\n  - " + strings.Repeat("B", 60),
+			limit:      30,
+			wantChunks: 3,
+			wantFirst:  strings.Repeat("A", 10) + "\n- **Parent**:",
+		},
 	}
 
 	for _, tc := range tests {

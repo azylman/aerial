@@ -30,12 +30,81 @@ func (st *messageSplitState) flush() {
 	if st.inCodeBlock {
 		st.current.WriteString("\n```")
 	}
-	chunkStr := strings.TrimRight(st.current.String(), "\r\n")
+	chunkStr := dedentLeadingListChunk(strings.TrimRight(st.current.String(), "\r\n"))
 	if strings.TrimSpace(chunkStr) != "" {
 		st.chunks = append(st.chunks, chunkStr)
 	}
 	st.current.Reset()
 	st.currentRunes = 0
+}
+
+func leadingIndent(s string) int {
+	return len(s) - len(strings.TrimLeft(s, " \t"))
+}
+
+func isListItem(trimmed string) bool {
+	for _, p := range []string{"- ", "* ", "+ ", "• "} {
+		if strings.HasPrefix(trimmed, p) {
+			return true
+		}
+	}
+	rest := strings.TrimLeft(trimmed, "0123456789")
+	return len(rest) < len(trimmed) && (strings.HasPrefix(rest, ". ") || strings.HasPrefix(rest, ") "))
+}
+
+func childListFitMargin(lines []string, i, lineLen, margin, limit int) int {
+	baseIndent := leadingIndent(lines[i])
+	if i > 0 && strings.TrimSpace(lines[i-1]) != "" && baseIndent > leadingIndent(lines[i-1]) {
+		return 0
+	}
+	if i+1 >= len(lines) || leadingIndent(lines[i+1]) <= baseIndent || !isListItem(strings.TrimSpace(lines[i+1])) {
+		return 0
+	}
+	firstChild, total := 1+len([]rune(lines[i+1])), 0
+	for j := i + 1; j < len(lines); j++ {
+		if t := strings.TrimSpace(lines[j]); t == "" || leadingIndent(lines[j]) <= baseIndent || strings.HasPrefix(t, "```") {
+			break
+		}
+		total += 1 + len([]rune(lines[j]))
+	}
+	if lineLen+total+margin <= limit {
+		return total
+	}
+	if lineLen+firstChild+margin <= limit {
+		return firstChild
+	}
+	return 0
+}
+
+func dedentLeadingListChunk(chunk string) string {
+	lines := strings.Split(chunk, "\n")
+	start := 0
+	for start < len(lines) && strings.TrimSpace(lines[start]) == "" {
+		start++
+	}
+	if start >= len(lines) {
+		return chunk
+	}
+	dedent := leadingIndent(lines[start])
+	if dedent == 0 || !isListItem(strings.TrimSpace(lines[start])) {
+		return chunk
+	}
+	for i := start; i < len(lines); i++ {
+		line := lines[i]
+		t := strings.TrimSpace(line)
+		if t == "" {
+			continue
+		}
+		indent := leadingIndent(line)
+		if indent == 0 || strings.HasPrefix(t, "```") {
+			break
+		}
+		if indent < dedent {
+			dedent = indent
+		}
+		lines[i] = line[dedent:]
+	}
+	return strings.Join(lines[start:], "\n")
 }
 
 func (st *messageSplitState) startNextChunk() {
@@ -144,6 +213,8 @@ func (st *messageSplitState) processLine(i int, line string, lines []string) {
 	fitMargin := margin
 	if willOpenFence && st.current.Len() > 0 && i+1 < len(lines) {
 		fitMargin += 1 + len([]rune(lines[i+1]))
+	} else if !st.inCodeBlock && !willCloseFence && st.current.Len() > 0 && trimmedLine != "" {
+		fitMargin += childListFitMargin(lines, i, lineLen, margin, st.limit)
 	}
 
 	if st.tryFitLine(line, lineLen, sepLen, fitMargin, willOpenFence, willCloseFence, fenceLang) {
@@ -176,7 +247,7 @@ func SplitMessage(text string, limit int) []string {
 	if limit <= 0 {
 		limit = MaxDiscordMessageLength
 	}
-	text = strings.TrimSpace(text)
+	text = strings.TrimSpace(dedentLeadingListChunk(strings.Trim(text, "\r\n")))
 	if text == "" {
 		return nil
 	}

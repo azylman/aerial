@@ -251,7 +251,7 @@ func stripLeadingStatusPhrases(s string) string {
 		for _, phrase := range intermediateStatusPhrases {
 			trimmedWorking := strings.TrimSpace(working)
 			if strings.HasPrefix(trimmedWorking, phrase) {
-				remainder := strings.TrimSpace(strings.TrimPrefix(trimmedWorking, phrase))
+				remainder := strings.TrimSpace(dedentLeadingListChunk(strings.Trim(strings.TrimPrefix(trimmedWorking, phrase), "\r\n")))
 				// Only strip if there is substantive remainder (not just punctuation or empty)
 				if isSubstantiveContent(remainder) {
 					working = remainder
@@ -294,7 +294,7 @@ func updateFenceState(trimmedLine, activeFence string, activeFenceLen int) (stri
 // SanitizeIntermediateStatus strips repetitive intermediate task status preambles
 // and harness wait lines when followed by substantive response content, and deduplicates consecutive identical lines.
 func SanitizeIntermediateStatus(s string) string {
-	trimmed := strings.TrimSpace(s)
+	trimmed := strings.TrimSpace(dedentLeadingListChunk(strings.Trim(s, "\r\n")))
 	if trimmed == "" {
 		return ""
 	}
@@ -331,7 +331,7 @@ func SanitizeIntermediateStatus(s string) string {
 		}
 	}
 
-	result := strings.TrimSpace(strings.Join(deduped, "\n"))
+	result := strings.TrimSpace(dedentLeadingListChunk(strings.Join(deduped, "\n")))
 	if result == "" && trimmed != "" {
 		return trimmed
 	}
