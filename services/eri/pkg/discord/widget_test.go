@@ -11,22 +11,59 @@ import (
 )
 
 type mockWidgetSender struct {
-	sendFunc func(channelID string, data *discordgo.MessageSend, options ...discordgo.RequestOption) (*discordgo.Message, error)
-	editFunc func(m *discordgo.MessageEdit, options ...discordgo.RequestOption) (*discordgo.Message, error)
+	sendFunc       func(channelID string, data *discordgo.MessageSend, options ...discordgo.RequestOption) (*discordgo.Message, error)
+	editFunc       func(m *discordgo.MessageEdit, options ...discordgo.RequestOption) (*discordgo.Message, error)
+	afterMsgs      []*discordgo.Message
+	messagesErr    error
+	sendReplyID    string
+	sendErr        error
+	editErr        error
+	deleteErr      error
+	sentPayloads   []*discordgo.MessageSend
+	editedPayloads []*discordgo.MessageEdit
+	deletedIDs     []string
+	queriedAfterID string
+	queriedLimit   int
 }
 
 func (m *mockWidgetSender) ChannelMessageSendComplex(channelID string, data *discordgo.MessageSend, options ...discordgo.RequestOption) (*discordgo.Message, error) {
+	m.sentPayloads = append(m.sentPayloads, data)
 	if m.sendFunc != nil {
 		return m.sendFunc(channelID, data, options...)
 	}
-	return &discordgo.Message{ID: "msg-default-send"}, nil
+	if m.sendErr != nil {
+		return nil, m.sendErr
+	}
+	id := m.sendReplyID
+	if id == "" {
+		id = "msg-default-send"
+	}
+	return &discordgo.Message{ID: id}, nil
 }
 
 func (m *mockWidgetSender) ChannelMessageEditComplex(medit *discordgo.MessageEdit, options ...discordgo.RequestOption) (*discordgo.Message, error) {
+	m.editedPayloads = append(m.editedPayloads, medit)
 	if m.editFunc != nil {
 		return m.editFunc(medit, options...)
 	}
+	if m.editErr != nil {
+		return nil, m.editErr
+	}
 	return &discordgo.Message{ID: medit.ID}, nil
+}
+
+func (m *mockWidgetSender) ChannelMessages(channelID string, limit int, beforeID, afterID, aroundID string, options ...discordgo.RequestOption) ([]*discordgo.Message, error) {
+	m.queriedAfterID = afterID
+	m.queriedLimit = limit
+	if m.messagesErr != nil {
+		return nil, m.messagesErr
+	}
+	return m.afterMsgs, nil
+}
+
+func (m *mockWidgetSender) ChannelMessageDelete(channelID, messageID string, options ...discordgo.RequestOption) error {
+	m.deletedIDs = append(m.deletedIDs, messageID)
+	return m.deleteErr
 }
 
 func TestAccentColor(t *testing.T) {
@@ -398,6 +435,65 @@ func TestDeliverStatusWidget_Edit404FallbackToSend(t *testing.T) {
 	}
 	if msgID != "new-fallback-msg" {
 		t.Fatalf("expected 'new-fallback-msg', got %q", msgID)
+	}
+}
+
+func TestDeliverStatusWidget_AutoSink(t *testing.T) {
+	t.Parallel()
+	threeMsgs := []*discordgo.Message{{ID: "m1"}, {ID: "m2"}, {ID: "m3"}}
+	fourMsgs := []*discordgo.Message{{ID: "m1"}, nil, {ID: "m2"}, {ID: "m3"}}
+	newerWidgetMsgs := []*discordgo.Message{{ID: "m1"}, {ID: "m2"}, {ID: "m3"}, {ID: "msg-newer-widget", Flags: discordgo.MessageFlagsIsComponentsV2}}
+	sunkFlags := discordgo.MessageFlagsIsComponentsV2 | discordgo.MessageFlagsSuppressNotifications
+
+	tests := []struct {
+		name          string
+		afterMsgs     []*discordgo.Message
+		messagesErr   error
+		sendReplyID   string
+		sendErr       error
+		deleteErr     error
+		wantMsgID     string
+		wantSentCount int
+		wantEditCount int
+		wantDeletedID string
+		wantSentFlags discordgo.MessageFlags
+	}{
+		{name: "fewer messages than threshold edits in place", afterMsgs: threeMsgs, wantMsgID: "msg-old-100", wantEditCount: 1},
+		{name: "channel messages error falls back to edit in place", messagesErr: errors.New("discord 502"), wantMsgID: "msg-old-100", wantEditCount: 1},
+		{name: "newer components v2 widget in after messages edits in place", afterMsgs: newerWidgetMsgs, wantMsgID: "msg-old-100", wantEditCount: 1},
+		{name: "buried by threshold regular messages sinks to bottom and deletes old", afterMsgs: fourMsgs, sendReplyID: "msg-sunk-999", deleteErr: errors.New("ignored delete failure"), wantMsgID: "msg-sunk-999", wantSentCount: 1, wantDeletedID: "msg-old-100", wantSentFlags: sunkFlags},
+		{name: "sink send error falls back to editing existing message in place", afterMsgs: fourMsgs, sendErr: errors.New("rate limit on send"), wantMsgID: "msg-old-100", wantSentCount: 1, wantEditCount: 1},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sender := &mockWidgetSender{afterMsgs: tc.afterMsgs, messagesErr: tc.messagesErr, sendReplyID: tc.sendReplyID, sendErr: tc.sendErr, deleteErr: tc.deleteErr}
+			req := StatusWidgetRequest{ChannelID: "chan-1", MessageID: "msg-old-100", ID: "build-1", Title: "Build 1", Status: "running"}
+			msgID, err := DeliverStatusWidget(sender, req, time.Now())
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if msgID != tc.wantMsgID {
+				t.Errorf("got msgID %q, want %q", msgID, tc.wantMsgID)
+			}
+			if sender.queriedAfterID != "msg-old-100" || sender.queriedLimit != 4 {
+				t.Errorf("got query afterID=%q limit=%d, want afterID=msg-old-100 limit=4", sender.queriedAfterID, sender.queriedLimit)
+			}
+			if len(sender.sentPayloads) != tc.wantSentCount || len(sender.editedPayloads) != tc.wantEditCount {
+				t.Errorf("got sends=%d edits=%d, want sends=%d edits=%d", len(sender.sentPayloads), len(sender.editedPayloads), tc.wantSentCount, tc.wantEditCount)
+			}
+			gotDeleted := ""
+			if len(sender.deletedIDs) > 0 {
+				gotDeleted = sender.deletedIDs[0]
+			}
+			if gotDeleted != tc.wantDeletedID {
+				t.Errorf("got deletedID %q, want %q", gotDeleted, tc.wantDeletedID)
+			}
+			if tc.wantSentFlags != 0 && (len(sender.sentPayloads) == 0 || sender.sentPayloads[0].Flags != tc.wantSentFlags) {
+				t.Errorf("got sent flags %v, want %v", sender.sentPayloads[0].Flags, tc.wantSentFlags)
+			}
+		})
 	}
 }
 
