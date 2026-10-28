@@ -104,6 +104,7 @@ type mockPRRegistry struct {
 
 	resolvePRNum            int
 	resolveBranch           string
+	resolveHeadSHA          string
 	resolveTargetID         string
 	resolveBySHATargetEmpty bool
 	resolveErr              error
@@ -327,7 +328,7 @@ func (m *mockPRRegistry) ResolvePRByNumber(ctx context.Context, repo string, prN
 	if err := m.checkErr(m.resolveErr); err != nil {
 		return "", "", "", "", err
 	}
-	return m.resolveTargetID, m.resolveBranch, "", "", nil
+	return m.resolveTargetID, m.resolveBranch, m.resolveHeadSHA, "", nil
 }
 
 func (m *mockPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisAdvancementResult, error) {
