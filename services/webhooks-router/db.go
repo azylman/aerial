@@ -312,7 +312,7 @@ func (r *PostgresPRRegistry) RegisterPR(ctx context.Context, req PRRegisterReque
 		if err != nil {
 			return "", err
 		}
-		if normThread := NormalizeDiscordTargetID(threadID); !IsValidDiscordSnowflake(targetID) && IsValidDiscordSnowflake(normThread) {
+		if normThread := NormalizeDiscordTargetID(threadID); IsValidDiscordSnowflake(normThread) {
 			targetID = normThread
 		}
 	}
@@ -383,7 +383,7 @@ func (r *PostgresPRRegistry) EnsurePRRegistered(ctx context.Context, repo string
 	if vanadisChunkID != "" {
 		threadID, err := r.attachVanadisChunkPR(ctx, repo, vanadisChunkID, prNumber)
 		if err == nil {
-			if normThread := NormalizeDiscordTargetID(threadID); !IsValidDiscordSnowflake(targetID) && IsValidDiscordSnowflake(normThread) {
+			if normThread := NormalizeDiscordTargetID(threadID); IsValidDiscordSnowflake(normThread) {
 				targetID = normThread
 			}
 		} else if !errors.Is(err, ErrVanadisChunkNotFound) {

@@ -169,11 +169,7 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if chunkID == "" {
-		if rawTargetID == "" {
-			httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id cannot be empty"})
-			return
-		}
-		if !IsValidDiscordSnowflake(req.TargetID) && IsHeadlessSessionKey(rawTargetID) {
+		if rawTargetID == "" || (!IsValidDiscordSnowflake(req.TargetID) && IsHeadlessSessionKey(rawTargetID)) {
 			req.TargetID = s.resolveHeadlessPRTargetID(r.Context(), req.Repo, req.PRNumber)
 		}
 		if !IsValidDiscordSnowflake(req.TargetID) {

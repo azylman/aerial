@@ -26,11 +26,11 @@ EOF
 
 resolve_thread_id() {
     if [ -n "${DISCORD_THREAD_ID:-}" ]; then
-        echo "${DISCORD_THREAD_ID}"
+        echo "${DISCORD_THREAD_ID#discord-}"
     elif [ -n "${DISCORD_CHANNEL_ID:-}" ]; then
-        echo "${DISCORD_CHANNEL_ID}"
-    elif [ -n "${AERIAL_TARGET_ID:-}" ]; then
-        echo "${AERIAL_TARGET_ID}"
+        echo "${DISCORD_CHANNEL_ID#discord-}"
+    elif [ -n "${AERIAL_TARGET_ID:-}" ] && [[ "${AERIAL_TARGET_ID}" != *:* ]] && [[ "${AERIAL_TARGET_ID}" != heartbeat-* ]] && [[ "${AERIAL_TARGET_ID}" != dispatch-* ]]; then
+        echo "${AERIAL_TARGET_ID#discord-}"
     else
         echo ""
     fi
