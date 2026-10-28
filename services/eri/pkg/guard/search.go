@@ -210,6 +210,37 @@ func inspectGitHubGetFileContents(raw json.RawMessage) *Decision {
 	return &Decision{Decision: DecisionAllow}
 }
 
+const maxVictoriaMetricsSeriesLimit = 100
+
+func hasConcreteMetricSelector(match string) bool {
+	if match == "" || strings.Contains(match, "__name__=~") || strings.Contains(match, "__name__!~") {
+		return false
+	}
+	if strings.HasPrefix(match, "{") {
+		return strings.Contains(match, "__name__=")
+	}
+	return true
+}
+
+func inspectVictoriaMetricsSeries(raw json.RawMessage) *Decision {
+	m := parseRawJSONMap(raw)
+	match := strings.TrimSpace(stringField(m, "match"))
+	if !hasConcreteMetricSelector(match) {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Unscoped victoriametrics series discovery detected: 'series' returns every label-value permutation and requires an exact metric name in 'match' (not empty, label-only '{...}', or '__name__=~' regexes). Use 'metrics' to discover metric names, or 'labels' / 'label_values' to inspect label dimensions.",
+		}
+	}
+	lim, ok := m["limit"].(float64)
+	if !ok || lim <= 0 || lim > maxVictoriaMetricsSeriesLimit {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "victoriametrics series requires an explicit 'limit' between 1 and 100 (e.g. \"limit\": 50) so result volume is bounded without silent truncation. Use 'labels' or 'label_values' for full dimension enumeration, or pass 'limit' <= 100 on 'series' to sample label combinations.",
+		}
+	}
+	return &Decision{Decision: DecisionAllow}
+}
+
 func inspectMCPToolCall(args ToolArgs) *Decision {
 	mcpTool := strings.ToLower(strings.Trim(strings.TrimSpace(args.ToolName), `"`))
 	switch mcpTool {
@@ -224,6 +255,8 @@ func inspectMCPToolCall(args ToolArgs) *Decision {
 		return inspectDiscordSearchMessages(args.Arguments)
 	case "get_file_contents":
 		return inspectGitHubGetFileContents(args.Arguments)
+	case "series":
+		return inspectVictoriaMetricsSeries(args.Arguments)
 	}
 	if mcpTool != "tool_index" && !strings.HasSuffix(mcpTool, "_tool_index") {
 		return &Decision{Decision: DecisionAllow}

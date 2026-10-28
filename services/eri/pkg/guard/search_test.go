@@ -179,6 +179,13 @@ func TestCheckSearch(t *testing.T) {
 		{"mcp github get_file_contents local mirrormere default branch denied", "call_mcp_tool", "get_file_contents", `{"owner":"azylman","repo":"mirrormere","path":"web/index.html"}`, true, ""},
 		{"mcp github get_file_contents aerial feature branch allowed and injects fields", "call_mcp_tool", "get_file_contents", `{"owner":"azylman","repo":"aerial","path":"services/eri","ref":"feat/branch"}`, false, `"fields":["name","type","path","size"]`},
 		{"mcp github get_file_contents external repo with fields preserved", "call_mcp_tool", "get_file_contents", `{"owner":"golang","repo":"go","path":"README.md","fields":["name","type"]}`, false, ""},
+		{"mcp victoriametrics series empty args denied", "call_mcp_tool", "series", `{}`, true, ""},
+		{"mcp victoriametrics series regex __name__=~ denied", "call_mcp_tool", "series", `{"match":"{__name__=~\"aerial_.*\"}","limit":50}`, true, ""},
+		{"mcp victoriametrics series label-only selector without __name__ denied", "call_mcp_tool", "series", `{"match":"{job=\"aerial-brain\"}","limit":50}`, true, ""},
+		{"mcp victoriametrics series concrete metric without limit denied", "call_mcp_tool", "series", `{"match":"aerial_brain_turns_total"}`, true, ""},
+		{"mcp victoriametrics series concrete metric with limit > 100 denied", "call_mcp_tool", "series", `{"match":"aerial_brain_turns_total","limit":250}`, true, ""},
+		{"mcp victoriametrics series concrete metric with limit <= 100 allowed", "call_mcp_tool", "series", `{"match":"aerial_brain_turns_total{status=\"success\"}","limit":50}`, false, ""},
+		{"mcp victoriametrics series exact __name__ selector with limit allowed", "call_mcp_tool", "series", `{"match":"{__name__=\"aerial_brain_turns_total\"}","limit":100}`, false, ""},
 	}
 
 	for _, tc := range tests {
