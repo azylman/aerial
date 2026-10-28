@@ -963,13 +963,102 @@ func rollbackFailedEdit(records []ToolInvocation, target string, stepIdx int) ([
 	return records, false
 }
 
-// RecordPostBatch rolls back batch-guard edit state when an edit tool execution fails.
+func isTerminalSubmitSingle(seg string) bool {
+	fields := unwrapCommandTokens(tokenizeQuoteAware(strings.TrimSpace(strings.TrimLeft(seg, "("))))
+	if len(fields) < 2 {
+		return false
+	}
+	switch filepath.Base(fields[0]) {
+	case "aerial-pr.sh":
+		for _, arg := range fields[1:] {
+			if arg == "submit" || arg == "override-roborev" || arg == "dispute-roborev" {
+				return true
+			}
+		}
+	case "aerial-build.sh":
+		for _, arg := range fields[1:] {
+			if arg == "enqueue" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isTerminalSubmitCommand(cmdLine string) bool {
+	for _, seg := range splitPipeline(cmdLine) {
+		if isTerminalSubmitSingle(seg) {
+			return true
+		}
+	}
+	return false
+}
+
+func parseProcStatPPIDAndPGRP(statContent string) (ppid, pgrp int, ok bool) {
+	idx := strings.LastIndexByte(statContent, ')')
+	if idx < 0 {
+		return 0, 0, false
+	}
+	fields := strings.Fields(statContent[idx+1:])
+	if len(fields) < 3 {
+		return 0, 0, false
+	}
+	ppidVal, err1 := strconv.Atoi(fields[1])
+	pgrpVal, err2 := strconv.Atoi(fields[2])
+	if err1 != nil || err2 != nil {
+		return 0, 0, false
+	}
+	return ppidVal, pgrpVal, true
+}
+
+func reapOrphanedChildProcessGroups(procDir string, parentPID, selfPID int, signalFn func(int, syscall.Signal) error) {
+	if parentPID <= 1 || signalFn == nil {
+		return
+	}
+	entries, err := os.ReadDir(procDir)
+	if err != nil {
+		return
+	}
+	for _, ent := range entries {
+		pid, convErr := strconv.Atoi(ent.Name())
+		if convErr != nil || pid <= 1 || pid == parentPID || pid == selfPID {
+			continue
+		}
+		data, readErr := os.ReadFile(filepath.Join(procDir, ent.Name(), "stat"))
+		if readErr != nil {
+			continue
+		}
+		if ppid, pgrp, ok := parseProcStatPPIDAndPGRP(string(data)); ok && ppid == parentPID && pgrp == pid {
+			if sigErr := signalFn(-pid, syscall.SIGKILL); sigErr != nil {
+				continue
+			}
+		}
+	}
+}
+
+func resolveProcDir(dir string) string {
+	if dir == DefaultBatchDir {
+		return "/proc"
+	}
+	return filepath.Join(dir, "proc")
+}
+
+func reapOrphanedParentChildren(procDir string) {
+	reapOrphanedChildProcessGroups(procDir, os.Getppid(), os.Getpid(), syscall.Kill)
+}
+
+// RecordPostBatch rolls back batch-guard edit state when an edit tool execution fails,
+// and reaps orphaned background command process groups after terminal PR or build submissions.
 func RecordPostBatch(payload Payload, args ToolArgs) *InvocationResponse {
 	return RecordPostBatchWithDir(payload, args, GetBatchDir(), time.Now())
 }
 
-// RecordPostBatchWithDir rolls back a failed edit invocation in the specified state directory.
+// RecordPostBatchWithDir rolls back a failed edit invocation in the specified state directory,
+// and reaps orphaned background command process groups on successful terminal submit commands.
 func RecordPostBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time) *InvocationResponse {
+	if strings.TrimSpace(payload.Error) == "" && normalizeToolName(payload.ToolCall.Name) == "run_command" && isTerminalSubmitCommand(args.CommandLine) {
+		reapOrphanedParentChildren(resolveProcDir(dir))
+	}
 	if cat, target := categorizeInvocation(payload.ToolCall.Name, args); strings.TrimSpace(payload.Error) != "" && cat == "edit" && target != "" {
 		safeID := sanitizeID(payload.ConversationID)
 		if err := withStateLock(dir, safeID, func() error {

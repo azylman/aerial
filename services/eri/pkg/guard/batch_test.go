@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -284,6 +285,7 @@ func TestCheckBatch(t *testing.T) {
 	}
 	_ = RecordPostBatchWithDir(Payload{ConversationID: "post-s", StepIdx: 99, Error: "failed", ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"}, invDir, now)
 	_ = RecordPostBatchWithDir(Payload{ConversationID: "post-s", StepIdx: 3, Error: "", ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"}, invDir, now)
+	_ = RecordPostBatchWithDir(Payload{ConversationID: "post-s", StepIdx: 4, Error: "", ToolCall: ToolCall{Name: "run_command"}}, ToolArgs{CommandLine: "scripts/aerial-pr.sh submit /data/scratch/x 'feat: test'"}, invDir, now)
 }
 
 func TestBatchHelpers(t *testing.T) {
@@ -487,5 +489,104 @@ func TestBatchHelpers(t *testing.T) {
 	afterFilter := filterOutCategory(list, "read")
 	if len(afterFilter) != 1 || afterFilter[0].Category != "edit" {
 		t.Fatalf("filterOutCategory failed: %+v", afterFilter)
+	}
+
+	submitTests := []struct {
+		cmd  string
+		want bool
+	}{
+		{"scripts/aerial-pr.sh submit /data/scratch/x 'feat: x'", true},
+		{"/share/aerial/scripts/aerial-pr.sh --repo aerial submit /data/scratch/x", true},
+		{"scripts/aerial-pr.sh override-roborev 123 'rebuttal'", true},
+		{"scripts/aerial-pr.sh dispute-roborev 123 'rebuttal'", true},
+		{"cd /share/aerial && scripts/aerial-build.sh enqueue /tmp/plan.json", true},
+		{"scripts/aerial-pr.sh init aerial", false},
+		{"scripts/aerial-build.sh validate /tmp/plan.json", false},
+		{"scripts/aerial-pr.sh", false},
+		{"echo hello", false},
+		{"", false},
+	}
+	for _, tc := range submitTests {
+		t.Run("submit_"+tc.cmd, func(t *testing.T) {
+			t.Parallel()
+			if got := isTerminalSubmitCommand(tc.cmd); got != tc.want {
+				t.Fatalf("isTerminalSubmitCommand(%q) = %v, want %v", tc.cmd, got, tc.want)
+			}
+		})
+	}
+
+	statTests := []struct {
+		name     string
+		stat     string
+		wantPPID int
+		wantPGRP int
+		wantOK   bool
+	}{
+		{"valid bash child", "1425 (bash) S 209 1425 1425 34816 1425 4194304", 209, 1425, true},
+		{"comm with parens", "1426 (my (cmd)) R 209 209 1 0", 209, 209, true},
+		{"missing closing paren", "1425 (bash S 209 1425", 0, 0, false},
+		{"too few fields", "1425 (bash) S 209", 0, 0, false},
+		{"non-numeric ppid", "1425 (bash) S abc 1425", 0, 0, false},
+		{"non-numeric pgrp", "1425 (bash) S 209 xyz", 0, 0, false},
+	}
+	for _, tc := range statTests {
+		t.Run("stat_"+tc.name, func(t *testing.T) {
+			t.Parallel()
+			ppid, pgrp, ok := parseProcStatPPIDAndPGRP(tc.stat)
+			if ok != tc.wantOK || ppid != tc.wantPPID || pgrp != tc.wantPGRP {
+				t.Fatalf("parseProcStatPPIDAndPGRP(%q) = (%d, %d, %v), want (%d, %d, %v)", tc.stat, ppid, pgrp, ok, tc.wantPPID, tc.wantPGRP, tc.wantOK)
+			}
+		})
+	}
+
+	if got := resolveProcDir(DefaultBatchDir); got != "/proc" {
+		t.Fatalf("resolveProcDir(DefaultBatchDir) = %q, want /proc", got)
+	}
+	if got := resolveProcDir("/tmp/custom"); got != "/tmp/custom/proc" {
+		t.Fatalf("resolveProcDir(/tmp/custom) = %q, want /tmp/custom/proc", got)
+	}
+
+	fakeProc := filepath.Join(t.TempDir(), "proc")
+	for _, entry := range []struct {
+		dir  string
+		stat string
+	}{
+		{"not-a-pid", ""},
+		{"1", "1 (init) S 0 1 1"},
+		{"209", "209 (agy) S 7 209 1"},
+		{"1500", "1500 (hook-guard) R 209 209 1"},
+		{"1425", "1425 (bash) S 209 1425 1425"},
+		{"1426", "1426 (bash) S 209 1426 1426"},
+		{"1427", "1427 (grep) R 1425 1425 1425"},
+		{"1499", "1499 (hook) S 209 209 1"},
+		{"1600", ""},
+	} {
+		dirPath := filepath.Join(fakeProc, entry.dir)
+		if err := os.MkdirAll(dirPath, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if entry.stat != "" {
+			if err := os.WriteFile(filepath.Join(dirPath, "stat"), []byte(entry.stat), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	var signaled []int
+	mockSig := func(pid int, sig syscall.Signal) error {
+		if sig == syscall.SIGKILL {
+			signaled = append(signaled, pid)
+		}
+		if pid == -1425 {
+			return syscall.ESRCH
+		}
+		return nil
+	}
+	reapOrphanedChildProcessGroups(fakeProc, 0, 1500, mockSig)
+	reapOrphanedChildProcessGroups(fakeProc, 209, 1500, nil)
+	reapOrphanedChildProcessGroups(filepath.Join(fakeProc, "nonexistent"), 209, 1500, mockSig)
+	reapOrphanedChildProcessGroups(fakeProc, 209, 1500, mockSig)
+	if len(signaled) != 2 || signaled[0] != -1425 || signaled[1] != -1426 {
+		t.Fatalf("signaled = %v, want [-1425 -1426]", signaled)
 	}
 }
