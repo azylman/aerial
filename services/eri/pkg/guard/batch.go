@@ -563,15 +563,6 @@ func removeTargetInvocations(records []ToolInvocation, category, target string) 
 	return kept
 }
 
-func recordsSinceLastCommand(records []ToolInvocation) []ToolInvocation {
-	for i := len(records) - 1; i >= 0; i-- {
-		if records[i].Category == "command" {
-			return records[i+1:]
-		}
-	}
-	return records
-}
-
 func filterOutCategory(records []ToolInvocation, category string) []ToolInvocation {
 	var kept []ToolInvocation
 	for _, r := range records {
@@ -822,20 +813,6 @@ func checkMicroReadViolation(category, target string, paginatedRead bool, priorR
 	return nil
 }
 
-func checkMicroEditViolation(category, target string, priorRecords []ToolInvocation, state *BatchState) *Decision {
-	if category != "edit" || target == "" {
-		return nil
-	}
-	if countTargetInvocations(recordsSinceLastCommand(priorRecords), "edit", target) >= 2 {
-		state.Records = removeTargetInvocations(state.Records, "edit", target)
-		return &Decision{
-			Decision: DecisionDeny,
-			Reason:   "Coarse-Grained Code Editing Invariant Violated: 3 consecutive micro-edits targeting the same file across turns. Formulate the complete target diff and apply it in a single comprehensive edit, or rewrite the file via write_to_file.",
-		}
-	}
-	return nil
-}
-
 func checkMicroCommandViolation(category string, priorRecords []ToolInvocation, state *BatchState) *Decision {
 	if category == "inspection" && hasConsecutiveSingleSteps(priorRecords, "inspection", 3) {
 		state.Records = filterOutCategory(state.Records, "inspection")
@@ -863,9 +840,6 @@ func evaluatePriorBatchViolations(category, target string, args ToolArgs, priorR
 	paginatedRead := category == "read" && target != "" && isPaginatedRead(priorRecords, target, args.StartLine, args.EndLine)
 
 	if dec := checkMicroReadViolation(category, target, paginatedRead, priorRecords, state); dec != nil {
-		return dec
-	}
-	if dec := checkMicroEditViolation(category, target, priorRecords, state); dec != nil {
 		return dec
 	}
 	if dec := checkMicroCommandViolation(category, priorRecords, state); dec != nil {
