@@ -172,7 +172,7 @@ func formatSearchResults(res transcript.SearchResult) string {
 			}
 			sb.WriteString(":\n")
 			if s.Summary != "" {
-				sb.WriteString(fmt.Sprintf("  *Summary:* %s\n", s.Summary))
+				sb.WriteString(fmt.Sprintf("  *Summary:* %s\n", transcript.CleanSessionSummary(s.Summary, transcript.DefaultSummaryMaxRunes)))
 			}
 			sb.WriteString("\n")
 		}
@@ -198,10 +198,7 @@ func formatSearchResults(res transcript.SearchResult) string {
 			ts := step.CreatedAt.Format("2006-01-02 15:04:05")
 			sb.WriteString(fmt.Sprintf("- **[%s]** Step #%d in %s (%s):\n", toolBadge, step.StepIndex, link, ts))
 			if step.Content != "" {
-				snippet := strings.TrimSpace(step.Content)
-				if len(snippet) > 300 {
-					snippet = snippet[:300] + "... [truncated]"
-				}
+				snippet := transcript.CleanSessionSummary(step.Content, 300)
 				// Format inline code block for multiline snippet
 				if strings.Contains(snippet, "\n") {
 					sb.WriteString(fmt.Sprintf("  ```\n  %s\n  ```\n", strings.ReplaceAll(snippet, "\n", "\n  ")))
@@ -237,8 +234,10 @@ func formatStepWindow(res transcript.StepWindowResult) string {
 
 	for _, step := range res.Steps {
 		marker := " "
+		maxRunes := 600
 		if step.StepIndex == res.CenterStep {
 			marker = "▶"
+			maxRunes = 2500
 		}
 		toolBadge := "STEP"
 		if step.ToolName != "" {
@@ -250,7 +249,7 @@ func formatStepWindow(res transcript.StepWindowResult) string {
 		ts := step.CreatedAt.Format("2006-01-02 15:04:05")
 		sb.WriteString(fmt.Sprintf("%s **[%s]** Step #%d (%s):\n", marker, toolBadge, step.StepIndex, ts))
 		if step.Content != "" {
-			content := strings.TrimSpace(step.Content)
+			content := transcript.CleanSessionSummary(step.Content, maxRunes)
 			if strings.Contains(content, "\n") {
 				sb.WriteString(fmt.Sprintf("  ```\n  %s\n  ```\n", strings.ReplaceAll(content, "\n", "\n  ")))
 			} else {

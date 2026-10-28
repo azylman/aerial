@@ -134,6 +134,29 @@ func TestClipContent(t *testing.T) {
 	}
 }
 
+func TestCleanSessionSummary(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		raw      string
+		maxRunes int
+		want     string
+	}{
+		{"strips memory metadata and request tags", "<USER_REQUEST>\n<retrieved_memory>\n- [id:1] fact\n</retrieved_memory>\n<USER_REQUEST>\nCheck the token metrics\nOnly formulate and output your final response once all immediate work is complete.\n</USER_REQUEST>\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\ntime\n</ADDITIONAL_METADATA>\n<USER_SETTINGS_CHANGE>\nmodel\n</USER_SETTINGS_CHANGE>", 0, "Check the token metrics"},
+		{"unclosed block uses last user request tag", "<CHANNEL_HISTORY>unclosed...\n<USER_REQUEST>\nInvestigate build queue\n</USER_REQUEST>", 100, "Investigate build queue"},
+		{"envelope-only content falls back to raw", "<USER_REQUEST></USER_REQUEST>", 100, "<USER_REQUEST></USER_REQUEST>"},
+		{"truncates at maxRunes with marker", "0123456789abcdef", 10, "0123456789... [truncated]"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := CleanSessionSummary(tc.raw, tc.maxRunes); got != tc.want {
+				t.Fatalf("CleanSessionSummary() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestIsSubstantiveStep(t *testing.T) {
 	t.Parallel()
 

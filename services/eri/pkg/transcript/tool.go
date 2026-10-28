@@ -108,6 +108,9 @@ func ExecuteTranscriptSearch(
 		if err != nil {
 			return SearchResult{}, fmt.Errorf("search session summaries: %w", err)
 		}
+		for i := range sessions {
+			sessions[i].Summary = CleanSessionSummary(sessions[i].Summary, DefaultSummaryMaxRunes)
+		}
 		result.Sessions = sessions
 	}
 

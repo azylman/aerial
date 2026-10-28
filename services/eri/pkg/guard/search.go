@@ -194,7 +194,7 @@ func inspectGitHubGetFileContents(raw json.RawMessage) *Decision {
 	ref := strings.TrimSpace(stringField(m, "ref"))
 	sha := strings.TrimSpace(stringField(m, "sha"))
 	isDefaultRef := ref == "" || ref == "main" || ref == "refs/heads/main" || ref == "HEAD"
-	if (owner == "" || owner == "azylman") && (repo == "aerial" || repo == "aerial-config") && isDefaultRef && sha == "" {
+	if (owner == "" || owner == "azylman") && (repo == "aerial" || repo == "aerial-config" || repo == "mirrormere") && isDefaultRef && sha == "" {
 		return &Decision{
 			Decision: DecisionDeny,
 			Reason:   "Remote github-mcp get_file_contents on azylman/" + repo + " (default branch) is prohibited because /share/" + repo + " is mounted locally and remote fetches dump unpaginated files into the context window. Use read_file (with StartLine/EndLine) or rg/find on /share/" + repo + " instead, or pass an explicit non-main 'ref'/'sha' when inspecting an unmerged remote commit.",

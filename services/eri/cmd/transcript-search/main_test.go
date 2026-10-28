@@ -378,6 +378,13 @@ func TestFormatStepWindow(t *testing.T) {
 					{
 						SessionID: "short",
 						StepIndex: 1,
+						Content:   strings.Repeat("x", 700),
+						CreatedAt: now,
+					},
+					{
+						SessionID: "short",
+						StepIndex: 2,
+						Content:   strings.Repeat("y", 700),
 						CreatedAt: now,
 					},
 				},
@@ -385,6 +392,8 @@ func TestFormatStepWindow(t *testing.T) {
 			wantSubstrs: []string{
 				"[short](conversation://short)",
 				"▶ **[STEP]** Step #1",
+				strings.Repeat("x", 700),
+				"... [truncated]",
 			},
 		},
 	}
