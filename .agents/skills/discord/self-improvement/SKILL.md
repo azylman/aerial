@@ -96,7 +96,7 @@ When `webhooks-router` wakes Brain on a CI check failure or `roborev` review fai
    /share/aerial/scripts/aerial-pr.sh init <repo> --branch <branch>
    cd <scratch_dir>
    ```
-3. Fix the root cause locally, run `./scripts/verify.sh --staged` and targeted package tests to confirm exit code 0, and push directly to the PR branch (`git push origin <branch>`). Native auto-merge remains armed and will merge once CI turns green.
+3. Fix the root cause locally, run `./scripts/verify.sh --staged` and targeted package tests to confirm exit code 0, and submit the updated PR branch via `/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> "fix(scope): summary"` (never run bare `git push`, which lacks ephemeral `GITHUB_PAT` auth headers). Native auto-merge remains armed and will merge once CI turns green.
 
 ### 3.2 Independent RoboRev Evaluation & Disagreement Protocol
 Distinguish deterministic CI checks (authoritative) from `roborev` AI reviews (advisory second opinion with read-only repo tools, lacking Discord thread intent, multi-chunk Vanadis build plans, and cross-repo context):
@@ -104,8 +104,8 @@ Distinguish deterministic CI checks (authoritative) from `roborev` AI reviews (a
   - *High Trust (Mechanical & Objective)*: Duplicate code blocks, dead code, repo invariant violations (closure fields in table tests, `time.Sleep`, imperative DDL), unquoted shell/JQ vars, unchecked errors, and concrete logic/concurrency bugs. Fix these locally and push.
   - *Verify First (Subjective Design & Unverified Caller Claims)*: Subjective `design` abstractions, multi-chunk Vanadis boundary claims, or unverified caller assumptions. Verify against the codebase before acting.
 - **Resolution Paths**:
-  - **True Positive**: Fix the defect in a scratch checkout, run `./scripts/verify.sh --staged`, and `git push origin <branch>`.
-  - **Context Gap**: Add a concise inline code comment explaining the non-obvious cross-file invariant and push. Update `.roborev.toml` (`review_guidelines`) only if the gap reflects a general, repo-wide architectural pattern (never narrow one-off exceptions).
+  - **True Positive**: Fix the defect in a scratch checkout (`aerial-pr.sh init <repo> --branch <branch>`), run `./scripts/verify.sh --staged`, and update the PR via `/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> "fix(scope): summary"`.
+  - **Context Gap**: Add a concise inline code comment explaining the non-obvious cross-file invariant and submit via `aerial-pr.sh submit <scratch_dir> "docs(scope): clarify invariant"`. Update `.roborev.toml` (`review_guidelines`) only if the gap reflects a general, repo-wide architectural pattern (never narrow one-off exceptions).
   - **False Positive / Architectural Disagreement**: Reject the suggestion and record a commit-SHA-bound technical rebuttal to pass the gate and clear the PR failure banner:
     ```bash
     /share/aerial/scripts/aerial-pr.sh --repo <repo> override-roborev <pr_num> '<technical_rebuttal>'

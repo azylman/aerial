@@ -265,6 +265,9 @@ init_scratch() {
     cd "$scratch_dir"
     if [ -z "$init_branch" ]; then
         git checkout -b "$branch_name" >/dev/null 2>&1
+    elif [ "$init_branch" != "$DEFAULT_BRANCH" ]; then
+        git config --add remote.origin.fetch "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+        git fetch --depth 20 origin "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}" >/dev/null 2>&1 || true
     fi
     git config user.name "Aerial"
     git config user.email "aerial@noreply.github.com"
@@ -387,7 +390,7 @@ push_scratch_branch() {
     fi
     git fetch origin "+refs/heads/${branch}:refs/remotes/origin/${branch}" >/dev/null 2>&1 || true
     local remote_sha
-    remote_sha=$(git rev-parse "refs/remotes/origin/${branch}" 2>/dev/null || echo "")
+    remote_sha=$(git rev-parse --verify -q "refs/remotes/origin/${branch}" 2>/dev/null || echo "")
     if { [ -n "$remote_sha" ] && git push --force-with-lease="refs/heads/${branch}:${remote_sha}" -u origin "$branch" >/dev/null 2>&1; } || \
        git push --force-with-lease -u origin "$branch" >/dev/null 2>&1; then
         PUSH_UPDATED_EXISTING=1
@@ -414,13 +417,13 @@ format_aerial_pr_trailer() {
 rebase_staged_changes() {
     local target_branch="${1:-$DEFAULT_BRANCH}"
     local msg="${2:-chore: temporary rebase commit}"
-    if ! git fetch origin "$target_branch" >/dev/null 2>&1; then
+    if ! git fetch origin "+refs/heads/${target_branch}:refs/remotes/origin/${target_branch}" >/dev/null 2>&1; then
         echo "⚠️ [aerial-pr] Warning: Could not fetch origin/${target_branch}; proceeding with current base." >&2
         return 0
     fi
     local head_sha upstream_sha
-    head_sha=$(git rev-parse HEAD 2>/dev/null || echo "")
-    upstream_sha=$(git rev-parse "origin/${target_branch}" 2>/dev/null || echo "")
+    head_sha=$(git rev-parse --verify -q HEAD 2>/dev/null || echo "")
+    upstream_sha=$(git rev-parse --verify -q "refs/remotes/origin/${target_branch}" 2>/dev/null || echo "")
     if [ -z "$upstream_sha" ] || [ "$head_sha" = "$upstream_sha" ]; then
         return 0
     fi
