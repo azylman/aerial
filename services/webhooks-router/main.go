@@ -632,6 +632,9 @@ func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, la
 		prompt += "\nChunk ID: " + opt.chunkID
 	}
 	if opt.silent {
+		if normTarget := NormalizeDiscordTargetID(targetID); IsValidDiscordSnowflake(normTarget) && !strings.Contains(prompt, "thread_id: "+normTarget) {
+			prompt += "\nthread_id: " + normTarget
+		}
 		req := DispatchRequest{
 			Source: "webhook",
 			Prompt: prompt,
