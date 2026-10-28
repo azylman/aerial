@@ -465,6 +465,12 @@ run_atlas_validate() {
     done
 }
 
+check_docker_compose() {
+    if [ -f "$REPO_ROOT/docker-compose.yml" ] && has_cmd docker && docker compose version >/dev/null 2>&1; then
+        (cd "$REPO_ROOT" && docker compose -f docker-compose.yml config --quiet)
+    fi
+}
+
 if [ "$MODE" = "staged" ]; then
     if has_cmd git; then
         git rm --cached -q PR_DESCRIPTION.md .pr_description.md 2>/dev/null || true
@@ -483,31 +489,37 @@ if [ "$MODE" = "staged" ]; then
     check_no_imperative_ddl
     check_code_health
 
-    if echo "$STAGED_FILES" | grep -q -E '^(\.golangci\.yml|scripts/verify\.sh)$'; then
-        for svc in $GO_SERVICES; do
-            run_golangci_lint "$svc"
-        done
+    if echo "$STAGED_FILES" | grep -q '^docker-compose\.yml$'; then
+        check_docker_compose
+    fi
+
+    lint_all_go=0
+    if echo "$STAGED_FILES" | grep -q -E '^(pkg/|\.golangci\.yml|scripts/verify\.sh)$'; then
+        lint_all_go=1
     fi
 
     # Check Go microservices
     for svc in $GO_SERVICES; do
+        svc_staged=0
         if echo "$STAGED_FILES" | grep -q "^$svc/"; then
+            svc_staged=1
+        fi
+        if [ "$svc_staged" -eq 1 ] || [ "$lint_all_go" -eq 1 ]; then
+            run_golangci_lint "$svc" "./..."
+            run_deadcode "$svc"
+        fi
+        if [ "$svc_staged" -eq 1 ]; then
             pkgs=$(echo "$STAGED_FILES" | grep "^$svc/.*\.go$" | sed "s|^$svc/||" | while read -r f; do dirname "$f"; done | sort -u)
-            if [ -n "$pkgs" ]; then
-                for p in $pkgs; do
-                    if [ ! -d "$svc/$p" ]; then
-                        continue
-                    fi
-                    if [ "$p" = "." ]; then
-                        run_golangci_lint "$svc" "."
-                        run_go_pkg_coverage "$svc" "."
-                    else
-                        run_golangci_lint "$svc" "./$p"
-                        run_go_pkg_coverage "$svc" "./$p"
-                    fi
-                done
-                run_deadcode "$svc"
-            fi
+            for p in $pkgs; do
+                if [ ! -d "$svc/$p" ]; then
+                    continue
+                fi
+                if [ "$p" = "." ]; then
+                    run_go_pkg_coverage "$svc" "."
+                else
+                    run_go_pkg_coverage "$svc" "./$p"
+                fi
+            done
         fi
     done
 
@@ -516,9 +528,12 @@ if [ "$MODE" = "staged" ]; then
         run_atlas_validate
     fi
 
-    # Check dashboard JS syntax
+    # Check dashboard JS syntax & frontend coverage gate
     if echo "$STAGED_FILES" | grep -q -E "^(services/)?dashboard/"; then
         run_node_syntax "services/dashboard/static/app.js"
+        if echo "$STAGED_FILES" | grep -q -E "^(services/)?dashboard/.*\.js$" && [ -f "$SCRIPT_DIR/check-coverage.sh" ]; then
+            sh "$SCRIPT_DIR/check-coverage.sh" --check --service dashboard
+        fi
     fi
 
     # Check docs service JS syntax
@@ -568,6 +583,7 @@ for svc in $GO_SERVICES; do
 done
 check_no_imperative_ddl
 check_code_health
+check_docker_compose
 run_atlas_validate
 
 echo "=== 2. Frontend & Script Syntax Checks ==="
