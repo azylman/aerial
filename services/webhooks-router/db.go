@@ -572,7 +572,7 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, 
 	selectQuery := `
 		SELECT id, target_id, pr_number, COALESCE(NULLIF(merge_sha, ''), head_sha), repo, COALESCE(metadata, '{}'::jsonb)
 		FROM pr_registry
-		WHERE status IN ('deploying', 'merged', 'synced') AND metadata->'jobs' ? $1
+		WHERE status IN ('deploying', 'merged', 'synced') AND metadata->'jobs' ? $1 AND metadata->'started_jobs' ? $1
 		ORDER BY updated_at DESC LIMIT 1 FOR UPDATE`
 
 	var id int64
