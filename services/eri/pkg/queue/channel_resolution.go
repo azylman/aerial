@@ -118,7 +118,10 @@ func resolveChannelSnapshot(s *discordgo.Session, channelID string) (ChannelSnap
 			if ch, ok := res.(*discordgo.Channel); ok && ch != nil {
 				CacheDiscordChannel(ch)
 				if s.State != nil {
-					_ = s.State.ChannelAdd(ch) //nolint:errcheck
+					if err := s.State.ChannelAdd(ch); err != nil {
+						// best effort state cache update
+						_ = err
+					}
 				}
 				return GetCachedChannel(channelID)
 			}
@@ -214,7 +217,10 @@ func fetchAndCacheBotMemberRoles(sess *discordgo.Session, guildID, botUserID str
 			m.GuildID = guildID
 		}
 		if m.User != nil {
-			_ = sess.State.MemberAdd(m) //nolint:errcheck
+			if err := sess.State.MemberAdd(m); err != nil {
+				// best effort state cache update
+				_ = err
+			}
 		}
 		return append([]string(nil), m.Roles...), nil
 	})

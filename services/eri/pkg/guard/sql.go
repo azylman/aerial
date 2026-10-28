@@ -76,7 +76,11 @@ func (c *livePgxConn) PrepareAndExplain(ctx context.Context, sqlStr string) ([]S
 	if err != nil {
 		return nil, nil, nil //nolint:nilerr
 	}
-	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck
+	defer func() {
+		if err := tx.Rollback(ctx); err != nil {
+			return
+		}
+	}()
 
 	sd, err := tx.Prepare(ctx, "", sqlStr)
 	if err != nil {
@@ -88,7 +92,9 @@ func (c *livePgxConn) PrepareAndExplain(ctx context.Context, sqlStr string) ([]S
 	}
 	var explainRaw []byte
 	if len(cols) > 0 {
-		_ = tx.QueryRow(ctx, "EXPLAIN (VERBOSE, FORMAT JSON) "+sqlStr).Scan(&explainRaw) //nolint:errcheck
+		if err := tx.QueryRow(ctx, "EXPLAIN (VERBOSE, FORMAT JSON) "+sqlStr).Scan(&explainRaw); err != nil {
+			explainRaw = nil
+		}
 	}
 	return cols, explainRaw, nil
 }
@@ -115,7 +121,9 @@ func (c *livePgxConn) QueryCatalog(ctx context.Context, sqlStr string, args ...a
 }
 
 func (c *livePgxConn) Close(ctx context.Context) {
-	_ = c.conn.Close(ctx) //nolint:errcheck
+	if err := c.conn.Close(ctx); err != nil {
+		return
+	}
 }
 
 // DefaultSQLDescriber returns a PostgreSQL describer backed by DATABASE_URL, or nil if unconfigured.

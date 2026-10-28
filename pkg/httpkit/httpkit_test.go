@@ -463,19 +463,87 @@ func TestResolveConfigPathWithLocal_TableDriven(t *testing.T) {
 	}
 }
 
+type failingWriter struct {
+	err error
+}
+
+func (f *failingWriter) Write([]byte) (int, error) {
+	return 0, f.err
+}
+
+func TestArchiveCoverageDir_TableDriven(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(tmpDir, "file1.txt"), []byte("sample-data"), 0o600)
+
+	subDirParent := t.TempDir()
+	_ = os.Mkdir(filepath.Join(subDirParent, "nested"), 0o700)
+
+	tests := []struct {
+		name       string
+		writer     io.Writer
+		dir        string
+		wantErrMsg string
+	}{
+		{
+			name:   "successful archive",
+			writer: io.Discard,
+			dir:    tmpDir,
+		},
+		{
+			name:       "nonexistent directory error",
+			writer:     io.Discard,
+			dir:        filepath.Join(tmpDir, "nonexistent"),
+			wantErrMsg: "no such file or directory",
+		},
+		{
+			name:       "unreadable subdirectory entry error",
+			writer:     io.Discard,
+			dir:        subDirParent,
+			wantErrMsg: "is a directory",
+		},
+		{
+			name:       "failing writer error",
+			writer:     &failingWriter{err: errors.New("write failure")},
+			dir:        tmpDir,
+			wantErrMsg: "write failure",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := archiveCoverageDir(tc.writer, tc.dir)
+			if tc.wantErrMsg == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErrMsg) {
+				t.Fatalf("expected error containing %q, got: %v", tc.wantErrMsg, err)
+			}
+		})
+	}
+}
+
 func TestHandleCoverageFlush_TableDriven(t *testing.T) {
 	// Not t.Parallel() because it mutates package variables WriteCountersDirFn/WriteMetaDirFn and TMPDIR
 	origCounters := WriteCountersDirFn
 	origMeta := WriteMetaDirFn
+	origArchive := archiveCoverageDir
 	defer func() {
 		WriteCountersDirFn = origCounters
 		WriteMetaDirFn = origMeta
+		archiveCoverageDir = origArchive
 	}()
 
 	tests := []struct {
 		name           string
 		invalidTmpDir  bool
 		writeDummyFile bool
+		archiveErr     error
 		metaErr        error
 		countersErr    error
 		wantStatus     int
@@ -506,6 +574,12 @@ func TestHandleCoverageFlush_TableDriven(t *testing.T) {
 			invalidTmpDir: true,
 			wantStatus:    http.StatusInternalServerError,
 		},
+		{
+			name:           "archive error returns 500",
+			archiveErr:     errors.New("tar archive failed"),
+			wantStatus:     http.StatusInternalServerError,
+			wantBodySubstr: "tar archive failed",
+		},
 	}
 
 	for _, tc := range tests {
@@ -522,6 +596,12 @@ func TestHandleCoverageFlush_TableDriven(t *testing.T) {
 			}
 			WriteCountersDirFn = func(string) error {
 				return tc.countersErr
+			}
+			archiveCoverageDir = func(w io.Writer, dir string) error {
+				if tc.archiveErr != nil {
+					return tc.archiveErr
+				}
+				return origArchive(w, dir)
 			}
 
 			handler := HandleCoverageFlush("test-svc")

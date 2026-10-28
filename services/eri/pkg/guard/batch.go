@@ -396,6 +396,18 @@ func isSameStep(rec ToolInvocation, currentStep int, currentTS int64) bool {
 	return diff <= 1
 }
 
+func removeBestEffort(path string) {
+	if err := os.Remove(path); err != nil {
+		return
+	}
+}
+
+func saveStateBestEffort(dir, safeID string, state BatchState) {
+	if err := saveState(dir, safeID, state); err != nil {
+		return
+	}
+}
+
 func withStateLock(dir, safeID string, fn func() error) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fn()
@@ -406,13 +418,19 @@ func withStateLock(dir, safeID string, fn func() error) error {
 	if err != nil {
 		return fn()
 	}
-	defer f.Close() //nolint:errcheck
+	defer func() {
+		if err := f.Close(); err != nil {
+			return
+		}
+	}()
 
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
 		return fn()
 	}
 	defer func() {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_UN); err != nil {
+			return
+		}
 	}()
 
 	return fn()
@@ -427,7 +445,7 @@ func loadState(dir, safeID string, now time.Time) BatchState {
 
 	var state BatchState
 	if err := json.Unmarshal(data, &state); err != nil {
-		_ = os.Remove(statePath) //nolint:errcheck
+		removeBestEffort(statePath)
 		return BatchState{}
 	}
 
@@ -475,7 +493,7 @@ func pruneStateFiles(dir string, now time.Time) {
 			continue
 		}
 		if info.ModTime().Before(cutoff) {
-			_ = os.Remove(filepath.Join(dir, name)) //nolint:errcheck
+			removeBestEffort(filepath.Join(dir, name))
 		}
 	}
 }
@@ -894,7 +912,7 @@ func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time
 
 		if dec := evaluatePriorBatchViolations(category, target, args, priorRecords, &state); dec != nil {
 			decision = dec
-			_ = saveState(dir, safeID, state) //nolint:errcheck
+			saveStateBestEffort(dir, safeID, state)
 			return nil
 		}
 
@@ -917,7 +935,7 @@ func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time
 			state.Records = state.Records[len(state.Records)-DefaultMaxRecords:]
 		}
 
-		_ = saveState(dir, safeID, state) //nolint:errcheck
+		saveStateBestEffort(dir, safeID, state)
 		opportunisticGC(dir, now)
 		decision = &Decision{Decision: DecisionAllow}
 		if normalizedTool == "run_command" {
@@ -943,11 +961,13 @@ func RecordPreInvocation(payload Payload) *InvocationResponse {
 func RecordPreInvocationWithDir(payload Payload, dir string, now time.Time) *InvocationResponse {
 	if payload.InvocationNum > 0 {
 		safeID := sanitizeID(payload.ConversationID)
-		_ = withStateLock(dir, safeID, func() error { //nolint:errcheck
+		if err := withStateLock(dir, safeID, func() error {
 			state := loadState(dir, safeID, now)
 			state.InvocationNum = payload.InvocationNum
 			return saveState(dir, safeID, state)
-		})
+		}); err != nil {
+			return &InvocationResponse{}
+		}
 	}
 	return &InvocationResponse{}
 }
@@ -978,14 +998,16 @@ func RecordPostBatch(payload Payload, args ToolArgs) *InvocationResponse {
 func RecordPostBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time) *InvocationResponse {
 	if cat, target := categorizeInvocation(payload.ToolCall.Name, args); strings.TrimSpace(payload.Error) != "" && cat == "edit" && target != "" {
 		safeID := sanitizeID(payload.ConversationID)
-		_ = withStateLock(dir, safeID, func() error { //nolint:errcheck
+		if err := withStateLock(dir, safeID, func() error {
 			state := loadState(dir, safeID, now)
 			if updated, removed := rollbackFailedEdit(state.Records, target, payload.StepIdx); removed {
 				state.Records = updated
 				return saveState(dir, safeID, state)
 			}
 			return nil
-		})
+		}); err != nil {
+			return &InvocationResponse{}
+		}
 	}
 	return &InvocationResponse{}
 }

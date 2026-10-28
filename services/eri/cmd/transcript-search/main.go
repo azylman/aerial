@@ -353,7 +353,11 @@ var newDirectStoreFn = func(pgURL string) (db.Store, func(), error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("postgres connect failed: %w", err)
 	}
-	return db.NewSQLStore(sqlDB), func() { _ = sqlDB.Close() }, nil //nolint:errcheck
+	return db.NewSQLStore(sqlDB), func() {
+		if err := sqlDB.Close(); err != nil {
+			return
+		}
+	}, nil
 }
 
 func executeSearchDirectDB(ctx context.Context, cfg CLIConfig) (transcript.SearchResult, error) {
@@ -523,7 +527,9 @@ func runMain(args []string, out, errOut io.Writer) int {
 	defer cancel()
 
 	if err := runCLI(ctx, args, out); err != nil {
-		_, _ = fmt.Fprintf(errOut, "Error: %v\n", err) //nolint:errcheck
+		if _, wErr := fmt.Fprintf(errOut, "Error: %v\n", err); wErr != nil {
+			return 1
+		}
 		return 1
 	}
 	return 0
