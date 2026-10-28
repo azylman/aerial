@@ -210,7 +210,12 @@ func inspectGitHubGetFileContents(raw json.RawMessage) *Decision {
 	return &Decision{Decision: DecisionAllow}
 }
 
-const maxVictoriaMetricsSeriesLimit = 100
+const (
+	maxVictoriaMetricsSeriesLimit = 100
+	maxGrepMatchLimit             = 20
+	maxRecursiveContextLines      = 3
+	maxGitLogPatchCommits         = 5
+)
 
 func hasConcreteMetricSelector(match string) bool {
 	if match == "" || strings.Contains(match, "__name__=~") || strings.Contains(match, "__name__!~") {
@@ -307,14 +312,17 @@ var binaryDirs = []string{
 }
 
 var grepValueFlags = map[string]bool{
-	"-A": true, "-B": true, "-C": true,
 	"-g": true, "--glob": true, "--iglob": true,
 	"-t": true, "--type": true, "-T": true, "--type-not": true,
 	"--include": true,
 }
 
-var grepMatchLimitLongFlags = map[string]bool{
-	"--max-count":           true,
+var grepContextFlags = map[string]bool{
+	"-A": true, "-B": true, "-C": true,
+	"--after-context": true, "--before-context": true, "--context": true,
+}
+
+var grepDiscoveryLongFlags = map[string]bool{
 	"--files-with-matches":  true,
 	"--files-without-match": true,
 	"--files":               true,
@@ -493,8 +501,14 @@ func CheckSearchWithSQL(toolName string, args ToolArgs, describer SQLDescriber) 
 
 func inspectSearchSegment(bin string, tokens []string, fromPipe bool) *Decision {
 	if bin == "git" {
-		if subTokens, ok := extractGitGrepTokens(tokens); ok {
+		subcmd, subTokens := extractGitSubcommand(tokens)
+		switch subcmd {
+		case "grep":
 			return inspectGrepCommand("git-grep", subTokens, fromPipe)
+		case "log":
+			return inspectGitLogCommand(subTokens)
+		case "show":
+			return inspectGitShowCommand(subTokens)
 		}
 		return nil
 	}
@@ -526,7 +540,7 @@ var gitGlobalValueFlags = map[string]bool{
 	"-C": true, "-c": true, "--git-dir": true, "--work-tree": true, "--namespace": true,
 }
 
-func extractGitGrepTokens(tokens []string) ([]string, bool) {
+func extractGitSubcommand(tokens []string) (string, []string) {
 	for i := 1; i < len(tokens); i++ {
 		t := tokens[i]
 		if strings.HasPrefix(t, "-") {
@@ -535,12 +549,99 @@ func extractGitGrepTokens(tokens []string) ([]string, bool) {
 			}
 			continue
 		}
-		if t == "grep" {
-			return tokens[i:], true
-		}
-		return nil, false
+		return t, tokens[i:]
 	}
-	return nil, false
+	return "", nil
+}
+
+func atoiOrZero(s string) int {
+	if n, err := strconv.Atoi(s); err == nil {
+		return n
+	}
+	return 0
+}
+
+func parseGitLogLimitFlag(t, nextToken string) (matched, consumeNext bool, count int) {
+	if t == "-n" || t == "--max-count" {
+		return true, nextToken != "", atoiOrZero(nextToken)
+	}
+	if strings.HasPrefix(t, "-n") && len(t) > 2 {
+		n, err := strconv.Atoi(t[2:])
+		return err == nil, false, n
+	}
+	if strings.HasPrefix(t, "--max-count=") {
+		return true, false, atoiOrZero(strings.TrimPrefix(t, "--max-count="))
+	}
+	if len(t) > 1 && t[0] == '-' && t[1] >= '0' && t[1] <= '9' {
+		n, err := strconv.Atoi(t[1:])
+		return err == nil, false, n
+	}
+	return false, false, 0
+}
+
+func inspectGitLogCommand(tokens []string) *Decision {
+	hasPatch := false
+	hasLimit := false
+	limitCount := 0
+	for i := 1; i < len(tokens); i++ {
+		t := tokens[i]
+		if t == "--" {
+			break
+		}
+		if t == "-p" || t == "--patch" || hasShortFlag(t, 'p') {
+			hasPatch = true
+		}
+		nextToken := ""
+		if i+1 < len(tokens) {
+			nextToken = tokens[i+1]
+		}
+		if matched, consume, n := parseGitLogLimitFlag(t, nextToken); matched {
+			hasLimit = true
+			limitCount = n
+			if consume {
+				i++
+			}
+		}
+	}
+	if hasPatch && (!hasLimit || limitCount <= 0 || limitCount > maxGitLogPatchCommits) {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Unbounded or excessive 'git log -p' / '--patch' detected. Bound patch history with '-n <N>' (N <= 5, e.g. 'git log -n 3 -p -- <path>') or use '--oneline' / '--stat' first to prevent context window bloat.",
+		}
+	}
+	return nil
+}
+
+var gitShowSafeFlags = map[string]bool{
+	"-s":            true,
+	"--no-patch":    true,
+	"--stat":        true,
+	"--numstat":     true,
+	"--shortstat":   true,
+	"--name-only":   true,
+	"--name-status": true,
+	"--oneline":     true,
+	"--quiet":       true,
+	"--help":        true,
+}
+
+func inspectGitShowCommand(tokens []string) *Decision {
+	for i := 1; i < len(tokens); i++ {
+		t := tokens[i]
+		if t == "--" && i+1 < len(tokens) {
+			return nil
+		}
+		if gitShowSafeFlags[t] || strings.HasPrefix(t, "--format=") || strings.HasPrefix(t, "--pretty=") {
+			return nil
+		}
+		if !strings.HasPrefix(t, "-") && strings.Contains(t, ":") {
+			return nil
+		}
+	}
+	return &Decision{
+		Decision: DecisionDeny,
+		Reason:   "Unscoped 'git show' patch dump detected. Pass '-s' / '--stat' / '--name-only' to inspect commit metadata first, or scope patch output to specific files via 'git show <commit> -- <path>'.",
+	}
 }
 
 func isGrepOrSearchBinary(bin string) bool {
@@ -567,16 +668,48 @@ func hasShortFlag(token string, flag rune) bool {
 	return false
 }
 
-func isGrepMatchLimitFlag(t string) (isLimit, takesArg bool) {
-	if grepMatchLimitLongFlags[t] || strings.HasPrefix(t, "--max-count=") {
-		return true, t == "--max-count"
+func isGrepDiscoveryFlag(t string) bool {
+	if grepDiscoveryLongFlags[t] {
+		return true
 	}
-	for _, f := range []rune{'m', 'l', 'L', 'c', 'q'} {
+	for _, f := range []rune{'l', 'L', 'c', 'q'} {
 		if hasShortFlag(t, f) {
-			return true, f == 'm' && strings.HasSuffix(t, "m")
+			return true
 		}
 	}
-	return false, false
+	return false
+}
+
+func parseGrepMatchCountFlag(t, nextToken string) (matched, consumeNext bool, count int) {
+	if t == "--max-count" {
+		return true, nextToken != "", atoiOrZero(nextToken)
+	}
+	if strings.HasPrefix(t, "--max-count=") {
+		return true, false, atoiOrZero(strings.TrimPrefix(t, "--max-count="))
+	}
+	if hasShortFlag(t, 'm') {
+		idx := strings.IndexRune(t[1:], 'm') + 1
+		rest := t[idx+1:]
+		if rest == "" {
+			return true, nextToken != "", atoiOrZero(nextToken)
+		}
+		return true, false, atoiOrZero(rest)
+	}
+	return false, false, 0
+}
+
+func parseGrepContextFlag(t, nextToken string) (matched, consumeNext bool, lines int) {
+	if grepContextFlags[t] {
+		return true, nextToken != "", atoiOrZero(nextToken)
+	}
+	if strings.HasPrefix(t, "--context=") || strings.HasPrefix(t, "--after-context=") || strings.HasPrefix(t, "--before-context=") {
+		_, val, _ := strings.Cut(t, "=")
+		return true, false, atoiOrZero(val)
+	}
+	if len(t) > 2 && t[0] == '-' && (t[1] == 'A' || t[1] == 'B' || t[1] == 'C') && t[2] >= '0' && t[2] <= '9' {
+		return true, false, atoiOrZero(t[2:])
+	}
+	return false, false, 0
 }
 
 var findValueFlags = map[string]bool{
@@ -705,14 +838,37 @@ func isStandardGrep(bin string) bool {
 	return bin == "grep" || bin == "egrep" || bin == "fgrep"
 }
 
+var broadSearchPaths = map[string]bool{
+	".":                      true,
+	"..":                     true,
+	"/share":                 true,
+	"/share/aerial":          true,
+	"/share/aerial/services": true,
+	"/share/aerial/pkg":      true,
+	"/share/aerial/mcp":      true,
+	"/share/aerial-config":   true,
+	"/share/mirrormere":      true,
+	"/share/aerial-sidecars": true,
+	"/data":                  true,
+}
+
 func hasBroadPathToken(pathTokens []string) bool {
 	for _, pt := range pathTokens {
-		switch filepath.Clean(pt) {
-		case ".", "..", "/share", "/share/aerial", "/data":
+		if broadSearchPaths[filepath.Clean(pt)] {
 			return true
 		}
 	}
 	return false
+}
+
+func countDirectoryTargets(pathTokens []string) int {
+	dirs := 0
+	for _, pt := range pathTokens {
+		if strings.HasSuffix(pt, "/") || filepath.Ext(filepath.Clean(pt)) == "" {
+			dirs++
+		}
+	}
+	return dirs
 }
 
 var grepNoPatternLongFlags = map[string]bool{
@@ -747,36 +903,49 @@ func isStandardGrepRecursive(bin, t string) bool {
 
 type grepScanFlags struct {
 	hasExcludeDir      bool
+	hasDiscoveryFlag   bool
 	hasMatchLimit      bool
+	maxMatchCount      int
+	maxContextLines    int
 	hasExplicitPattern bool
 	isRecursive        bool
 	pathTokens         []string
 }
 
-func (f *grepScanFlags) applyGrepFlag(bin, t string, hasNext bool) (consumeNext, handled bool) {
+func (f *grepScanFlags) applyGrepFlag(bin, t, nextToken string) (consumeNext bool) {
 	if matches, takesArg := isExcludeDirFlag(t); matches {
 		f.hasExcludeDir = true
-		return takesArg && hasNext, true
+		return takesArg && nextToken != ""
 	}
 	if isStandardGrepRecursive(bin, t) {
 		f.isRecursive = true
-		handled = true
 	}
-	if limit, takesArg := isGrepMatchLimitFlag(t); limit {
+	if isGrepDiscoveryFlag(t) {
+		f.hasDiscoveryFlag = true
 		f.hasMatchLimit = true
 		if grepNoPatternLongFlags[t] {
 			f.hasExplicitPattern = true
 		}
-		return takesArg && hasNext, true
+	}
+	if matched, takesArg, count := parseGrepMatchCountFlag(t, nextToken); matched {
+		f.hasMatchLimit = true
+		f.maxMatchCount = count
+		return takesArg
+	}
+	if matched, takesArg, lines := parseGrepContextFlag(t, nextToken); matched {
+		if lines > f.maxContextLines {
+			f.maxContextLines = lines
+		}
+		return takesArg
 	}
 	if grepPatternFlags[t] {
 		f.hasExplicitPattern = true
-		return hasNext, true
+		return nextToken != ""
 	}
-	if grepValueFlags[t] && hasNext {
-		return true, true
+	if grepValueFlags[t] {
+		return nextToken != ""
 	}
-	return false, handled
+	return false
 }
 
 func collectNonFlagTokens(tokens []string) []string {
@@ -797,8 +966,11 @@ func parseGrepTokens(bin string, tokens []string) grepScanFlags {
 	for i := 1; i < len(tokens); i++ {
 		t := tokens[i]
 		if strings.HasPrefix(t, "-") {
-			consumeNext, _ := flags.applyGrepFlag(bin, t, i+1 < len(tokens))
-			if consumeNext {
+			nextToken := ""
+			if i+1 < len(tokens) {
+				nextToken = tokens[i+1]
+			}
+			if flags.applyGrepFlag(bin, t, nextToken) {
 				i++
 			}
 			continue
@@ -817,6 +989,35 @@ func parseGrepTokens(bin string, tokens []string) grepScanFlags {
 	return flags
 }
 
+func isUnscopedRecursiveTarget(flags grepScanFlags) bool {
+	if !flags.isRecursive {
+		return false
+	}
+	return len(flags.pathTokens) == 0 || hasBroadPathToken(flags.pathTokens) || countDirectoryTargets(flags.pathTokens) > 1
+}
+
+func validateGrepLineLimits(flags grepScanFlags) *Decision {
+	if flags.maxMatchCount <= 0 || flags.maxMatchCount > maxGrepMatchLimit {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Excessive grep/rg match limit detected (-m / --max-count > 20). Since '-m' bounds matches per file rather than total output, use '-m <= 20' (or use '-l' / '-c' for broad discovery).",
+		}
+	}
+	if flags.isRecursive && flags.maxContextLines > maxRecursiveContextLines {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Excessive context lines (-C/-A/-B > 3) on recursive search detected. Large context windows multiplied across matching files cause context bloat; use -C <= 3 (or omit -C) to locate line numbers first, then use read_file with StartLine/EndLine.",
+		}
+	}
+	if isUnscopedRecursiveTarget(flags) {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   "Broad or multi-directory line search detected. Because '-m' limits matches per file rather than total output, searching repository roots (e.g. '.', '/share/aerial', '/share/aerial/services') or multiple directories at once requires discovery mode ('-l' / '--files-with-matches' or '-c' / '--count') first, or scoping the search to a single package/subdirectory.",
+		}
+	}
+	return nil
+}
+
 func inspectGrepCommand(bin string, tokens []string, fromPipe bool) *Decision {
 	flags := parseGrepTokens(bin, tokens)
 
@@ -826,6 +1027,10 @@ func inspectGrepCommand(bin string, tokens []string, fromPipe bool) *Decision {
 		}
 	}
 
+	if bin == "strings" || (fromPipe && len(flags.pathTokens) == 0) {
+		return nil
+	}
+
 	if flags.isRecursive && isStandardGrep(bin) && !flags.hasExcludeDir && hasBroadPathToken(flags.pathTokens) {
 		return &Decision{
 			Decision: DecisionDeny,
@@ -833,12 +1038,16 @@ func inspectGrepCommand(bin string, tokens []string, fromPipe bool) *Decision {
 		}
 	}
 
-	if flags.isRecursive && !(fromPipe && len(flags.pathTokens) == 0) && !flags.hasMatchLimit {
+	if !flags.hasMatchLimit && !flags.hasDiscoveryFlag {
 		return &Decision{
 			Decision: DecisionDeny,
-			Reason:   "Unbounded recursive text search detected. Bound output with '-m <N>' / '--max-count=<N>' (e.g. 'rg -n -m 20 <pattern> <path>'), '-l' ('--files-with-matches'), or '-c' ('--count') per the shell-filesystem-traversal skill to prevent context window bloat.",
+			Reason:   "Unbounded text search detected. Bound output with '-m <N>' / '--max-count=<N>' (N <= 20, e.g. 'rg -n -m 20 <pattern> <subdir>'), '-l' ('--files-with-matches'), or '-c' ('--count') per the shell-filesystem-traversal skill to prevent context window bloat.",
 		}
 	}
 
-	return nil
+	if flags.hasDiscoveryFlag {
+		return nil
+	}
+
+	return validateGrepLineLimits(flags)
 }
