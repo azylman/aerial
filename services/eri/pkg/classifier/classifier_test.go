@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
@@ -621,29 +622,12 @@ func TestClassifier_ProcessPools(t *testing.T) {
 }
 
 func TestBuildSystemOneState(t *testing.T) {
-	if got := BuildSystemOneState(nil, nil); got != "" {
-		t.Fatalf("expected empty string for nil messages, got %q", got)
-	}
-	if got := BuildSystemOneState([]db.Message{}, []db.Message{}); got != "" {
-		t.Fatalf("expected empty string for empty slice messages, got %q", got)
-	}
-
-	msg := db.Message{
+	msgMention := db.Message{
 		AuthorID: "123456", Content: "<@111> check <@&222>",
 		MentionUserIDs: []string{"111"}, MentionRoleIDs: []string{"222"}, Mentions: []string{"Alice", "Admins"}, ReplyingToAuthor: "bob",
 	}
-	state := BuildSystemOneState([]db.Message{msg}, nil)
-	if !strings.Contains(state, "123456 (replying to @bob): @Alice check @Admins") {
-		t.Fatalf("unexpected state formatting: %q", state)
-	}
 
-	longMsg := db.Message{AuthorName: "alice", Content: "START_OF_MESSAGE " + strings.Repeat("x", 600) + " END_OF_MESSAGE"}
-	longState := BuildSystemOneState([]db.Message{longMsg}, nil)
-	if len([]rune(longState)) != 500 || !strings.Contains(longState, "START_OF_MESSAGE") || !strings.Contains(longState, "END_OF_MESSAGE") || !strings.Contains(longState, " ... [snip] ... ") {
-		t.Fatalf("expected head, tail, and indicator capped at 500 runes: %q", longState)
-	}
-
-	historyMulti := []db.Message{
+	historySix := []db.Message{
 		{AuthorName: "user1", Content: strings.Repeat("1", 600)},
 		{AuthorName: "user2", Content: strings.Repeat("2", 600)},
 		{AuthorName: "user3", Content: strings.Repeat("3", 600)},
@@ -651,11 +635,109 @@ func TestBuildSystemOneState(t *testing.T) {
 		{AuthorName: "user5", Content: strings.Repeat("5", 600)},
 		{AuthorName: "user6", Content: strings.Repeat("6", 600)},
 	}
-	burstMulti := []db.Message{{AuthorName: "user7", Content: strings.Repeat("7", 600)}}
-	multiState := BuildSystemOneState(burstMulti, historyMulti)
-	if len([]rune(multiState)) > 3200 || strings.Contains(multiState, "user1:") ||
-		!strings.Contains(multiState, "user2:") || !strings.Contains(multiState, "user3:") || !strings.Contains(multiState, "user7:") {
-		t.Fatalf("unexpected tail-style multi-message state: %q", multiState)
+
+	burstEight := []db.Message{
+		{AuthorName: "target1", Content: strings.Repeat("a", 600)},
+		{AuthorName: "target2", Content: strings.Repeat("b", 600)},
+		{AuthorName: "target3", Content: strings.Repeat("c", 600)},
+		{AuthorName: "target4", Content: strings.Repeat("d", 600)},
+		{AuthorName: "target5", Content: strings.Repeat("e", 600)},
+		{AuthorName: "target6", Content: strings.Repeat("f", 600)},
+		{AuthorName: "target7", Content: strings.Repeat("g", 600)},
+		{AuthorName: "target8", Content: strings.Repeat("h", 600)},
+	}
+
+	tests := []struct {
+		name         string
+		targets      []db.Message
+		context      []db.Message
+		wantExact    string
+		wantPrefix   string
+		wantContains []string
+		wantExcluded []string
+		checkRuneCap int
+		checkLineLen int
+	}{
+		{
+			name:      "nil messages",
+			targets:   nil,
+			context:   nil,
+			wantExact: "",
+		},
+		{
+			name:      "empty slice messages",
+			targets:   []db.Message{},
+			context:   []db.Message{},
+			wantExact: "",
+		},
+		{
+			name:      "formatted target with mentions and reply",
+			targets:   []db.Message{msgMention},
+			context:   nil,
+			wantExact: "Target message:\n123456 (replying to @bob): @Alice check @Admins",
+		},
+		{
+			name:         "single long message capped at 500 runes",
+			targets:      []db.Message{{AuthorName: "alice", Content: "START_OF_MESSAGE " + strings.Repeat("x", 600) + " END_OF_MESSAGE"}},
+			context:      nil,
+			wantPrefix:   "Target message:\n",
+			wantContains: []string{"START_OF_MESSAGE", "END_OF_MESSAGE", " ... [snip] ... "},
+			checkLineLen: 500,
+		},
+		{
+			name:         "context capped at MaxSystemOneContextMessages and remaining budget",
+			targets:      []db.Message{{AuthorName: "user7", Content: strings.Repeat("7", 600)}},
+			context:      historySix,
+			wantPrefix:   "Recent context:\n",
+			wantContains: []string{"\n\nTarget message:\n", "user2:", "user3:", "user4:", "user5:", "user6:", "user7:"},
+			wantExcluded: []string{"user1:"},
+			checkRuneCap: MaxSystemOneStateRunes,
+		},
+		{
+			name:         "target burst capped within MaxSystemOneStateRunes tail style",
+			targets:      burstEight,
+			context:      nil,
+			wantPrefix:   "Target message:\n",
+			wantContains: []string{"target3:", "target4:", "target5:", "target6:", "target7:", "target8:"},
+			wantExcluded: []string{"target1:", "target2:"},
+			checkRuneCap: MaxSystemOneStateRunes,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := BuildSystemOneState(tc.targets, tc.context)
+			if tc.wantExact != "" || (len(tc.targets) == 0 && len(tc.context) == 0) {
+				if got != tc.wantExact {
+					t.Fatalf("BuildSystemOneState() = %q, want %q", got, tc.wantExact)
+				}
+				return
+			}
+			if tc.wantPrefix != "" && !strings.HasPrefix(got, tc.wantPrefix) {
+				t.Fatalf("BuildSystemOneState() missing prefix %q in: %q", tc.wantPrefix, got)
+			}
+			for _, sub := range tc.wantContains {
+				if !strings.Contains(got, sub) {
+					t.Fatalf("BuildSystemOneState() missing substring %q in: %q", sub, got)
+				}
+			}
+			for _, sub := range tc.wantExcluded {
+				if strings.Contains(got, sub) {
+					t.Fatalf("BuildSystemOneState() unexpectedly contains %q in: %q", sub, got)
+				}
+			}
+			if tc.checkRuneCap > 0 {
+				if runeCount := utf8.RuneCountInString(got); runeCount > tc.checkRuneCap {
+					t.Fatalf("BuildSystemOneState() runes = %d, exceeds cap %d", runeCount, tc.checkRuneCap)
+				}
+			}
+			if tc.checkLineLen > 0 && tc.wantPrefix != "" {
+				line := strings.TrimPrefix(got, tc.wantPrefix)
+				if runeCount := utf8.RuneCountInString(line); runeCount != tc.checkLineLen {
+					t.Fatalf("message line runes = %d, want %d: %q", runeCount, tc.checkLineLen, line)
+				}
+			}
+		})
 	}
 }
 
