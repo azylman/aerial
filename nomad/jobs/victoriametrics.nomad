@@ -97,40 +97,60 @@ scrape_configs:
     static_configs:
 {{- range nomadService "victoriametrics" }}
       - targets: ["{{ .Address }}:{{ .Port }}"]
+        labels:
+          instance: "victoriametrics"
 {{- else }}
       - targets: ["127.0.0.1:8428"]
+        labels:
+          instance: "victoriametrics"
 {{- end }}
 
   - job_name: "aerial-brain"
     static_configs:
 {{- range nomadService "eri" }}
       - targets: ["{{ .Address }}:{{ .Port }}"]
+        labels:
+          instance: "aerial-brain"
 {{- else }}
       - targets: ["127.0.0.1:8088"]
+        labels:
+          instance: "aerial-brain"
 {{- end }}
 
   - job_name: "aerial-hangar"
     static_configs:
 {{- range nomadService "hangar" }}
       - targets: ["{{ .Address }}:{{ .Port }}"]
+        labels:
+          instance: "aerial-hangar"
 {{- else }}
       - targets: ["127.0.0.1:8087"]
+        labels:
+          instance: "aerial-hangar"
 {{- end }}
 
   - job_name: "postgres"
     static_configs:
 {{- range nomadService "postgres-exporter" }}
       - targets: ["{{ .Address }}:{{ .Port }}"]
+        labels:
+          instance: "postgres"
 {{- else }}
       - targets: ["127.0.0.1:9187"]
+        labels:
+          instance: "postgres"
 {{- end }}
 
   - job_name: "webhooks-router"
     static_configs:
 {{- range nomadService "webhooks-router" }}
       - targets: ["{{ .Address }}:{{ .Port }}"]
+        labels:
+          instance: "webhooks-router"
 {{- else }}
       - targets: ["127.0.0.1:4020"]
+        labels:
+          instance: "webhooks-router"
 {{- end }}
 EOH
         destination   = "local/scrape.yml"
