@@ -259,7 +259,10 @@ func FormatMessage(m db.Message) string {
 }
 
 // DefaultAmbientWakePrompt is the canonical evaluation directive used by the ambient intent classifier.
-const DefaultAmbientWakePrompt = "determine whether the target message is intended for aerial, based on the recent channel context."
+const DefaultAmbientWakePrompt = "determine whether the author of the target message is speaking to aerial or asking aerial a question."
+
+// MaxSystemOneContextMessages is the maximum number of preceding context messages included in ModernBERT dialogue state.
+const MaxSystemOneContextMessages = 5
 
 // BuildPrompt constructs the classification prompt for a single target message.
 func BuildPrompt(target db.Message, recentContext []db.Message) string {
@@ -527,8 +530,38 @@ const ModernBERTTruncationIndicator = " ... [snip] ... "
 // for non-autoregressive encoder models like ModernBERT (Laya).
 // It strips XML tags and RFC3339 timestamps to avoid degrading attention weights,
 // while preserving speaker identity and replying-to relationships.
-// Each individual message is capped at MaxSystemOneMessageRunes using head+tail slicing,
-// and whole messages are accumulated backwards (tail-style) up to MaxSystemOneStateRunes.
+// fitMessagesTail accumulates formatted messages backwards (newest to oldest) up to budget runes.
+// It returns the kept messages in chronological order (oldest to newest).
+func fitMessagesTail(messages []string, budget int) []string {
+	var kept []string
+	currentRunes := 0
+
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		msgRunes := utf8.RuneCountInString(msg)
+		needed := msgRunes
+		if len(kept) > 0 {
+			needed += 1 // account for "\n" separator
+		}
+		if currentRunes+needed > budget {
+			break
+		}
+		kept = append(kept, msg)
+		currentRunes += needed
+	}
+
+	for i, j := 0, len(kept)-1; i < j; i, j = i+1, j-1 {
+		kept[i], kept[j] = kept[j], kept[i]
+	}
+	return kept
+}
+
+// BuildSystemOneState formats context and target burst into the dialogue state format
+// expected by ModernBERT / System-1 wake classifiers.
+// Each individual message is capped at MaxSystemOneMessageRunes using head+tail slicing.
+// Preceding context is capped at MaxSystemOneContextMessages and demarcated under "Recent context:\n",
+// while target burst messages are demarcated under "Target message:\n".
+// Both target messages and whole context messages are accumulated backwards (tail-style) up to rune budgets.
 func BuildSystemOneState(targetBurst []db.Message, recentContext []db.Message) string {
 	truncateMessage := func(s string) string {
 		r := []rune(s)
@@ -550,50 +583,58 @@ func BuildSystemOneState(targetBurst []db.Message, recentContext []db.Message) s
 		return fmt.Sprintf("%s%s: %s", author, replyTo, bodyText)
 	}
 
-	allMessages := make([]db.Message, 0, len(recentContext)+len(targetBurst))
-	allMessages = append(allMessages, recentContext...)
-	allMessages = append(allMessages, targetBurst...)
-	if len(allMessages) == 0 {
-		return ""
+	if len(recentContext) > MaxSystemOneContextMessages {
+		recentContext = recentContext[len(recentContext)-MaxSystemOneContextMessages:]
 	}
 
-	formatted := make([]string, 0, len(allMessages))
-	for _, m := range allMessages {
+	formattedContext := make([]string, 0, len(recentContext))
+	for _, m := range recentContext {
 		f := strings.TrimSpace(formatMessage(m))
 		if f != "" {
-			formatted = append(formatted, truncateMessage(f))
+			formattedContext = append(formattedContext, truncateMessage(f))
 		}
 	}
-	if len(formatted) == 0 {
+
+	formattedTargets := make([]string, 0, len(targetBurst))
+	for _, m := range targetBurst {
+		f := strings.TrimSpace(formatMessage(m))
+		if f != "" {
+			formattedTargets = append(formattedTargets, truncateMessage(f))
+		}
+	}
+
+	if len(formattedContext) == 0 && len(formattedTargets) == 0 {
 		return ""
 	}
 
-	// Preserve whole messages tail-style (from newest backwards to oldest).
-	// Each individual message is already capped at MaxSystemOneMessageRunes, so
-	// only full messages that fit within MaxSystemOneStateRunes are included.
-	var kept []string
-	currentRunes := 0
+	const targetHeader = "Target message:\n"
+	targetBudget := MaxSystemOneStateRunes - utf8.RuneCountInString(targetHeader)
+	keptTargets := fitMessagesTail(formattedTargets, targetBudget)
 
-	for i := len(formatted) - 1; i >= 0; i-- {
-		msg := formatted[i]
-		msgRunes := utf8.RuneCountInString(msg)
-		needed := msgRunes
-		if len(kept) > 0 {
-			needed += 1 // account for "\n" separator
-		}
-		if currentRunes+needed > MaxSystemOneStateRunes {
-			break
-		}
-		kept = append(kept, msg)
-		currentRunes += needed
+	targetBlock := ""
+	if len(keptTargets) > 0 {
+		targetBlock = targetHeader + strings.Join(keptTargets, "\n")
 	}
 
-	// Reverse kept to restore chronological order (oldest to newest)
-	for i, j := 0, len(kept)-1; i < j; i, j = i+1, j-1 {
-		kept[i], kept[j] = kept[j], kept[i]
+	if len(formattedContext) == 0 {
+		return targetBlock
 	}
 
-	return strings.Join(kept, "\n")
+	header := "Recent context:\n"
+	sep := "\n\n"
+	if targetBlock == "" {
+		sep = ""
+	}
+	contextBudget := MaxSystemOneStateRunes - utf8.RuneCountInString(targetBlock) - utf8.RuneCountInString(header) - utf8.RuneCountInString(sep)
+	keptContext := fitMessagesTail(formattedContext, contextBudget)
+
+	if len(keptContext) == 0 {
+		return targetBlock
+	}
+	if targetBlock == "" {
+		return header + strings.Join(keptContext, "\n")
+	}
+	return header + strings.Join(keptContext, "\n") + sep + targetBlock
 }
 
 func (c *Classifier) isSystemOne() bool {
