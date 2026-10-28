@@ -501,11 +501,25 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 				CompletedCount: 0,
 				Builds: []VanadisBuildDTO{
 					{
-						ID:         "build-101",
-						Tier:       2,
-						Title:      "Vanadis Feature",
-						Status:     "running",
-						QueueState: "running",
+						ID:            "build-101",
+						Tier:          2,
+						Title:         "Vanadis Feature",
+						SharedContext: "drawer-only-shared-context",
+						Status:        "running",
+						QueueState:    "running",
+						Chunks: []VanadisChunkDTO{
+							{
+								ID:                 "chunk-1",
+								BuildID:            "build-101",
+								ChunkIndex:         1,
+								Title:              "Chunk 1",
+								Instructions:       "drawer-only-instructions",
+								TargetFiles:        []string{"main.go"},
+								TargetSymbols:      []string{"Run"},
+								AcceptanceCriteria: []string{"pass"},
+								Status:             "completed",
+							},
+						},
 					},
 				},
 			})
@@ -516,17 +530,19 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"build": VanadisBuildDTO{
-						ID:     "build-101",
-						Title:  "Vanadis Feature",
-						Status: "running",
+						ID:            "build-101",
+						Title:         "Vanadis Feature",
+						SharedContext: "drawer-only-shared-context",
+						Status:        "running",
 					},
 					"chunks": []VanadisChunkDTO{
 						{
-							ID:         "chunk-1",
-							BuildID:    "build-101",
-							ChunkIndex: 1,
-							Title:      "Chunk 1",
-							Status:     "completed",
+							ID:           "chunk-1",
+							BuildID:      "build-101",
+							ChunkIndex:   1,
+							Title:        "Chunk 1",
+							Instructions: "drawer-only-instructions",
+							Status:       "completed",
 						},
 					},
 					"entry": VanadisBuildDTO{
@@ -556,22 +572,24 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 	offlineURL := "http://127.0.0.1:54321"
 
 	tests := []struct {
-		name           string
-		isDetail       bool
-		useMux         bool
-		vanadisURL     string
-		method         string
-		target         string
-		wantStatus     int
-		wantBodySubstr []string
+		name              string
+		isDetail          bool
+		useMux            bool
+		vanadisURL        string
+		method            string
+		target            string
+		wantStatus        int
+		wantBodySubstr    []string
+		wantBodyNotSubstr []string
 	}{
 		{
-			name:           "Builds_Success_WithQuery",
-			vanadisURL:     mockVanadis.URL,
-			method:         http.MethodGet,
-			target:         "/api/builds?limit=25&status=running&queue_state=running",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{"build-101", "Vanadis Feature"},
+			name:              "Builds_Success_WithQuery",
+			vanadisURL:        mockVanadis.URL,
+			method:            http.MethodGet,
+			target:            "/api/builds?limit=25&status=running&queue_state=running",
+			wantStatus:        http.StatusOK,
+			wantBodySubstr:    []string{"build-101", "Vanadis Feature", "chunk-1"},
+			wantBodyNotSubstr: []string{"drawer-only-shared-context", "drawer-only-instructions", "target_files", "target_symbols", "acceptance_criteria"},
 		},
 		{
 			name:           "Builds_DegradedFallback",
@@ -616,7 +634,7 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 			method:         http.MethodGet,
 			target:         "/api/builds/build-101",
 			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{"build-101", "chunk-1"},
+			wantBodySubstr: []string{"build-101", "chunk-1", "drawer-only-shared-context", "drawer-only-instructions"},
 		},
 		{
 			name:           "BuildDetail_Success_DashboardPrefix",
@@ -747,6 +765,11 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 			for _, sub := range tt.wantBodySubstr {
 				if !strings.Contains(bodyStr, sub) {
 					t.Errorf("expected body to contain %q, got: %s", sub, bodyStr)
+				}
+			}
+			for _, sub := range tt.wantBodyNotSubstr {
+				if strings.Contains(bodyStr, sub) {
+					t.Errorf("expected body NOT to contain %q, got: %s", sub, bodyStr)
 				}
 			}
 		})

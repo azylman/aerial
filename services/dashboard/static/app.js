@@ -2186,6 +2186,19 @@ function updateBuildsMetrics() {
     renderBuildsPills();
 }
 
+function renderBuildsSkeleton() {
+    const grid = document.getElementById('builds-grid');
+    if (grid) {
+        grid.innerHTML = Array(4).fill(0).map(() => `
+            <div class="fact-card-skeleton">
+                <div class="skeleton-box" style="width: 40%; height: 18px;"></div>
+                <div class="skeleton-box" style="width: 100%; height: 60px; margin: 12px 0;"></div>
+                <div class="skeleton-box" style="width: 50%; height: 14px;"></div>
+            </div>
+        `).join('');
+    }
+}
+
 function renderBuildQueueCards() {
     const grid = document.getElementById('builds-grid');
     if (!grid) return;
@@ -2522,7 +2535,7 @@ function openBuildDetailDrawer(buildId) {
         .then(data => {
             const build = data.build || data.entry || (cached ? cached.build : null) || { id: buildId };
             const chunks = Array.isArray(data.chunks) ? data.chunks : (build.chunks || []);
-            buildsState.cache[buildId] = { build, chunks };
+            buildsState.cache[buildId] = { build, chunks, hasDetail: true };
             if (buildsState.selectedBuildId === buildId) {
                 if (titleEl) titleEl.textContent = `BUILD // ${String(build.title || build.id).toUpperCase()}`;
                 renderBuildDetailContent(build, chunks);
@@ -2546,6 +2559,9 @@ async function fetchBuilds() {
     if (buildsState.isLoading) return;
     buildsState.isLoading = true;
     buildsState.error = null;
+    if (buildsState.builds.length === 0) {
+        renderBuildsSkeleton();
+    }
 
     const banner = document.getElementById('builds-reconnect-banner');
     try {
@@ -2567,10 +2583,8 @@ async function fetchBuilds() {
         if (typeof data.completed_count === 'number') buildsState.completedCount = data.completed_count;
 
         buildsState.builds.forEach(b => {
-            if (b && b.id) {
-                if (!buildsState.cache[b.id] || (Array.isArray(b.chunks) && b.chunks.length > 0)) {
-                    buildsState.cache[b.id] = { build: b, chunks: Array.isArray(b.chunks) ? b.chunks : [] };
-                }
+            if (b && b.id && (!buildsState.cache[b.id] || !buildsState.cache[b.id].hasDetail)) {
+                buildsState.cache[b.id] = { build: b, chunks: Array.isArray(b.chunks) ? b.chunks : [] };
             }
         });
 

@@ -1616,6 +1616,19 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
                     assert.ok(!match[1].includes('repeat('), `.builds-grid must not use multi-column repeat(), got: ${match[1].trim()}`);
                 }
             });
+
+            it('renders loading skeleton in index.html and renderBuildsSkeleton while preserving detail cache', () => {
+                const htmlCode = fs.readFileSync(path.join(__dirname, 'static', 'index.html'), 'utf8');
+                const gridIdx = htmlCode.indexOf('id="builds-grid"');
+                assert.ok(gridIdx !== -1, '#builds-grid must exist in index.html');
+                assert.ok(htmlCode.slice(gridIdx, gridIdx + 450).includes('fact-card-skeleton'), '#builds-grid should contain initial loading skeleton');
+                assert.equal(typeof sandbox.renderBuildsSkeleton, 'function', 'renderBuildsSkeleton must be defined');
+
+                const gridEl = { innerHTML: '' };
+                sandbox.document.getElementById = (id) => (id === 'builds-grid' ? gridEl : null);
+                sandbox.renderBuildsSkeleton();
+                assert.ok(gridEl.innerHTML.includes('fact-card-skeleton'));
+            });
         });
     });
 
