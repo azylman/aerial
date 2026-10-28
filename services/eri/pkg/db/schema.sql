@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS messages (
     effort TEXT NOT NULL DEFAULT '',
     error_message TEXT,
     response_text TEXT,
+    conversation_id TEXT NOT NULL DEFAULT '',
     schedule_run_id TEXT NOT NULL DEFAULT '',
     channel_id TEXT NOT NULL DEFAULT '',
     channel_name TEXT NOT NULL DEFAULT '',
@@ -46,15 +47,39 @@ CREATE INDEX IF NOT EXISTS idx_messages_admin_completed ON messages(status, is_a
 
 -- Sessions Table
 CREATE TABLE IF NOT EXISTS sessions (
-    thread_id TEXT PRIMARY KEY,
-    internal_session_id TEXT NOT NULL DEFAULT '',
-    previous_session_id TEXT NOT NULL DEFAULT '',
+    session_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL DEFAULT '',
+    previous_conversation_id TEXT NOT NULL DEFAULT '',
     turn_count INTEGER NOT NULL DEFAULT 0,
     summary TEXT NOT NULL DEFAULT '',
     last_summarized_message_id TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Dispatches Table
+CREATE TABLE IF NOT EXISTS dispatches (
+    id TEXT PRIMARY KEY,
+    row_id BIGSERIAL UNIQUE,
+    source TEXT NOT NULL DEFAULT '',
+    session_id TEXT NOT NULL DEFAULT '',
+    conversation_id TEXT NOT NULL DEFAULT '',
+    prompt TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    effort TEXT NOT NULL DEFAULT '',
+    model TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'PENDING',
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    restart_count INTEGER NOT NULL DEFAULT 0,
+    error_message TEXT,
+    response_text TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_dispatches_status_created_at ON dispatches(status, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_dispatches_session_status ON dispatches(session_id, status);
+CREATE INDEX IF NOT EXISTS idx_dispatches_session_row_id ON dispatches(session_id, row_id);
 
 -- Extraction Watermarks Table
 CREATE TABLE IF NOT EXISTS extraction_watermarks (

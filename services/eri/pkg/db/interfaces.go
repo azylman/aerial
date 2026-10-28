@@ -30,7 +30,7 @@ type SessionActivityStats struct {
 type MessageStore interface {
 	InsertMessage(ctx context.Context, msg Message) error
 	UpdateMessageStatus(ctx context.Context, id, status, errorMsg string) error
-	UpdateMessageCompleted(ctx context.Context, id, responseText string) error
+	UpdateMessageCompleted(ctx context.Context, id, responseText string, conversationID ...string) error
 	IncrementMessageRetry(ctx context.Context, id, errorMsg string) error
 	ResetMessageToPendingWithRestart(ctx context.Context, id, reason string) error
 	GetPendingOrProcessingMessages(ctx context.Context, limit int) ([]Message, error)
@@ -41,6 +41,21 @@ type MessageStore interface {
 	GetRecentThreadMessages(ctx context.Context, threadID string, limit int) ([]Message, error)
 	HasActiveThreadTurn(ctx context.Context, threadID string) (bool, error)
 	GetActiveTasks(ctx context.Context, filter ...TasksFilter) ([]ActiveTask, error)
+}
+
+// DispatchStore handles headless background dispatch execution.
+type DispatchStore interface {
+	InsertDispatch(ctx context.Context, d Dispatch) error
+	GetDispatch(ctx context.Context, id string) (*Dispatch, error)
+	ClaimPendingDispatch(ctx context.Context, id string) (bool, error)
+	UpdateDispatchStatus(ctx context.Context, id, status, errorMsg string) error
+	UpdateDispatchCompleted(ctx context.Context, id, responseText string, conversationID ...string) error
+	IncrementDispatchRetry(ctx context.Context, id, errorMsg string) error
+	ResetDispatchToPendingWithRestart(ctx context.Context, id, reason string) error
+	GetPendingOrProcessingDispatches(ctx context.Context, limit int) ([]Dispatch, error)
+	GetRecentSessionDispatches(ctx context.Context, sessionID string, limit int) ([]Dispatch, error)
+	HasActiveDispatchTurn(ctx context.Context, sessionID, id string) (bool, error)
+	CancelPendingDispatches(ctx context.Context, dispatchID, buildID, reason string) ([]string, error)
 }
 
 // SessionStore handles thread turn counts and session rotations.
@@ -104,6 +119,7 @@ type TranscriptStore interface {
 // Store unifies all repository capabilities under a single interface.
 type Store interface {
 	MessageStore
+	DispatchStore
 	SessionStore
 	TranscriptStore
 }

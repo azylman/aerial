@@ -670,17 +670,18 @@ func (p *WorkerPool) checkUnrotatedSessions(ctx context.Context, lastReportedTur
 
 // formatUnrotatedSessionLine formats an unrotated session entry for system alerts.
 func formatUnrotatedSessionLine(sess *discordgo.Session, s db.SessionInfo) string {
-	if !IsNumericSnowflake(s.ThreadID) {
+	rawThreadID := strings.TrimPrefix(s.ThreadID, "discord-")
+	if !IsNumericSnowflake(rawThreadID) {
 		return fmt.Sprintf("- Thread `%s`: **%d** turns (session: `%s`)", s.ThreadID, s.TurnCount, s.InternalSessionID)
 	}
-	effID, _, isThread, _ := ResolveChannelAndThread(sess, s.ThreadID)
+	effID, _, isThread, _ := ResolveChannelAndThread(sess, rawThreadID)
 	if isThread {
-		if effID != "" && effID != s.ThreadID {
-			return fmt.Sprintf("- Thread <#%s> (in <#%s>): **%d** turns (session: `%s`)", s.ThreadID, effID, s.TurnCount, s.InternalSessionID)
+		if effID != "" && effID != rawThreadID {
+			return fmt.Sprintf("- Thread <#%s> (in <#%s>): **%d** turns (session: `%s`)", rawThreadID, effID, s.TurnCount, s.InternalSessionID)
 		}
-		return fmt.Sprintf("- Thread <#%s>: **%d** turns (session: `%s`)", s.ThreadID, s.TurnCount, s.InternalSessionID)
+		return fmt.Sprintf("- Thread <#%s>: **%d** turns (session: `%s`)", rawThreadID, s.TurnCount, s.InternalSessionID)
 	}
-	return fmt.Sprintf("- Channel <#%s>: **%d** turns (session: `%s`)", s.ThreadID, s.TurnCount, s.InternalSessionID)
+	return fmt.Sprintf("- Channel <#%s>: **%d** turns (session: `%s`)", rawThreadID, s.TurnCount, s.InternalSessionID)
 }
 
 // StopWithTimeout initiates a bounded graceful drain of the worker pool.

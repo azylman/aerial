@@ -895,7 +895,7 @@ func (e *errQueueStore) UpdateMessageStatus(context.Context, string, string, str
 	return errors.New("errQueueStore: update message status error")
 }
 
-func (e *errQueueStore) UpdateMessageCompleted(context.Context, string, string) error {
+func (e *errQueueStore) UpdateMessageCompleted(context.Context, string, string, ...string) error {
 	return errors.New("errQueueStore: update message completed error")
 }
 
