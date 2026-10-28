@@ -184,80 +184,14 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 	}
 }
 
-type CancelPromptRequest struct {
-	MessageID string `json:"message_id,omitempty"`
-	BuildID   string `json:"build_id,omitempty"`
-	Reason    string `json:"reason,omitempty"`
-}
-
-func matchesCancelPrompt(m db.Message, msgID, buildID string) bool {
-	if m.Status != db.StatusPending {
-		return false
-	}
-	return (msgID != "" && m.ID == msgID) || (buildID != "" && strings.Contains(m.Content, "Build ID: "+buildID+"\n"))
-}
-
-func resolveCancelReason(reason, buildID, msgID string) string {
+func resolveCancelReason(reason, buildID, dispatchID string) string {
 	if reason = strings.TrimSpace(reason); reason != "" {
 		return reason
 	}
 	if buildID != "" {
 		return "cancelled vanadis build " + buildID
 	}
-	return "cancelled prompt " + msgID
-}
-
-func drainMatchingPendingPrompts(ctx context.Context, store db.Store, msgs []db.Message, msgID, buildID, reason string) []string {
-	cancelledIDs := make([]string, 0)
-	for _, m := range msgs {
-		if !matchesCancelPrompt(m, msgID, buildID) {
-			continue
-		}
-		if claimed, err := store.ClaimPendingMessage(ctx, m.ID); err != nil || !claimed {
-			continue
-		}
-		if err := store.UpdateMessageStatus(ctx, m.ID, db.StatusFailed, reason); err != nil {
-			log.Printf("[HTTP] Warning: failed to mark claimed prompt %s as cancelled: %v", m.ID, err)
-		}
-		cancelledIDs = append(cancelledIDs, m.ID)
-	}
-	return cancelledIDs
-}
-
-func handleCancelPrompt(store db.Store) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.Header().Set("Allow", "POST")
-			writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
-			return
-		}
-		if store == nil {
-			writeErr(w, http.StatusInternalServerError, "Database store not configured")
-			return
-		}
-		var req CancelPromptRequest
-		if !readPostJSON(w, r, &req) {
-			return
-		}
-		msgID, buildID := strings.TrimSpace(req.MessageID), strings.TrimSpace(req.BuildID)
-		if msgID == "" && buildID == "" {
-			writeErr(w, http.StatusBadRequest, "Invalid payload: 'message_id' or 'build_id' is required")
-			return
-		}
-		msgs, err := store.GetPendingOrProcessingMessages(r.Context(), 0)
-		if err != nil {
-			writeStoreErr(w, "pending messages", err)
-			return
-		}
-		reason := resolveCancelReason(req.Reason, buildID, msgID)
-		cancelledMsgs := drainMatchingPendingPrompts(r.Context(), store, msgs, msgID, buildID, reason)
-		cancelledDispatches, cancelErr := store.CancelPendingDispatches(r.Context(), msgID, buildID, reason)
-		if cancelErr != nil {
-			log.Printf("[handlers] Error cancelling pending dispatches: %v", cancelErr)
-		}
-		combined := append(cancelledMsgs, cancelledDispatches...)
-		httpkit.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "cancelled_count": len(combined), "cancelled_ids": combined})
-	}
+	return "cancelled dispatch " + dispatchID
 }
 
 type DispatchRequest struct {
@@ -1102,7 +1036,7 @@ func (rec *statusRecorder) Flush() {
 
 func normalizeRoute(path string) string {
 	switch {
-	case path == "/prompt", path == "/prompt/cancel", path == "/health", path == "/metrics", path == "/internal/llm":
+	case path == "/prompt", path == "/dispatch", path == "/dispatch/cancel", path == "/health", path == "/metrics", path == "/internal/llm":
 		return path
 	case path == "/voice/ask" || path == "/api/voice/ask":
 		return "/voice/ask"
@@ -1140,7 +1074,6 @@ func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, embedder 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
 	mux.HandleFunc("/prompt", handlePrompt(store, pool))
-	mux.HandleFunc("/prompt/cancel", handleCancelPrompt(store))
 	mux.HandleFunc("/dispatch", handleDispatch(store, pool))
 	mux.HandleFunc("/dispatch/cancel", handleCancelDispatch(store))
 	mux.HandleFunc("/discord/message", handleDirectMessage(pool))

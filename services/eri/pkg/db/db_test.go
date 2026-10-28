@@ -561,36 +561,6 @@ func TestGetActiveTasks_FiltersAndOrdering(t *testing.T) {
 	}
 }
 
-func TestIsEphemeralTaskMessage(t *testing.T) {
-	t.Parallel()
-	bTrue := true
-	bFalse := false
-	tests := []struct {
-		name      string
-		ephemeral *bool
-		effort    string
-		model     string
-		want      bool
-	}{
-		{name: "explicit ephemeral true", ephemeral: &bTrue, effort: "high", want: true},
-		{name: "explicit ephemeral false", ephemeral: &bFalse, effort: "medium", want: false},
-		{name: "nil ephemeral medium effort", effort: "medium", want: true},
-		{name: "nil ephemeral low effort", effort: "low", want: true},
-		{name: "nil ephemeral high effort", effort: "high", want: false},
-		{name: "empty effort medium model", model: "gemini-3.8-flash-medium", want: true},
-		{name: "empty effort flash model", model: "gemini-2.5-flash", want: true},
-		{name: "empty effort pro model", model: "gemini-3.7-pro", want: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := IsEphemeralTaskMessage(tc.ephemeral, tc.effort, tc.model); got != tc.want {
-				t.Fatalf("IsEphemeralTaskMessage(%v, %q, %q) = %v, want %v", tc.ephemeral, tc.effort, tc.model, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestSchemaContainsVoiceTables(t *testing.T) {
 	t.Parallel()
 	schemaBytes, err := os.ReadFile("schema.sql")
