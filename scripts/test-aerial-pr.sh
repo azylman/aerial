@@ -175,9 +175,9 @@ TARGET_PRECEDENCE_CHECK=$(bash -c "
     REPO_TEST_MODE=1
     source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
 
-    # Subtest 1: AERIAL_TARGET_ID wins
-    res1=\$(AERIAL_TARGET_ID=\"target_aerial\" DISCORD_THREAD_ID=\"target_thread\" DISCORD_CHANNEL_ID=\"target_channel\" resolve_target_id)
-    [ \"\$res1\" = \"target_aerial\" ] && echo \"target1:ok\" || echo \"target1:fail\"
+    # Subtest 1: AERIAL_TARGET_ID wins and strips discord- prefix
+    res1=\$(AERIAL_TARGET_ID=\"discord-target_aerial\" DISCORD_THREAD_ID=\"target_thread\" DISCORD_CHANNEL_ID=\"target_channel\" resolve_target_id)
+    [ \"\$res1\" = \"target_aerial\" ] && echo \"target1:ok\" || echo \"target1:fail:\$res1\"
 
     # Subtest 2: DISCORD_THREAD_ID wins when AERIAL_TARGET_ID is unset
     res2=\$(unset AERIAL_TARGET_ID; DISCORD_THREAD_ID=\"target_thread\" DISCORD_CHANNEL_ID=\"target_channel\" resolve_target_id)
@@ -187,13 +187,14 @@ TARGET_PRECEDENCE_CHECK=$(bash -c "
     res3=\$(unset AERIAL_TARGET_ID DISCORD_THREAD_ID; DISCORD_CHANNEL_ID=\"target_channel\" resolve_target_id)
     [ \"\$res3\" = \"target_channel\" ] && echo \"target3:ok\" || echo \"target3:fail\"
 
-    # Subtest 4: fallback to system dev channel
+    # Subtest 4: returns empty string when no Discord target context exists (delegating fallback to webhooks-router)
     res4=\$(unset AERIAL_TARGET_ID DISCORD_THREAD_ID DISCORD_CHANNEL_ID ANTIGRAVITY_APP_DATA_DIR ANTIGRAVITY_CONVERSATION_ID; resolve_target_id)
-    [ \"\$res4\" = \"1542423172400291873\" ] && echo \"target4:ok\" || echo \"target4:fail\"
+    [ -z \"\$res4\" ] && echo \"target4:ok\" || echo \"target4:fail:\$res4\"
 
-    # Subtest 5: InterchangeablePool worker key (discord:worker-0) is skipped in favor of DISCORD_THREAD_ID
+    # Subtest 5: InterchangeablePool worker key (discord:worker-0) and headless session keys (heartbeat-*, dispatch-*) are skipped
     res5=\$(AERIAL_TARGET_ID=\"discord:worker-0\" DISCORD_THREAD_ID=\"1559768078131269684\" resolve_target_id)
-    [ \"\$res5\" = \"1559768078131269684\" ] && echo \"target5:ok\" || echo \"target5:fail\"
+    res5b=\$(unset DISCORD_THREAD_ID DISCORD_CHANNEL_ID ANTIGRAVITY_APP_DATA_DIR ANTIGRAVITY_CONVERSATION_ID; AERIAL_TARGET_ID=\"heartbeat-abc-123\" resolve_target_id)
+    [ \"\$res5\" = \"1559768078131269684\" ] && [ -z \"\$res5b\" ] && echo \"target5:ok\" || echo \"target5:fail:\$res5:\$res5b\"
 
     # Subtest 6: InterchangeablePool worker key resolves thread_id from active transcript.jsonl when env thread/channel unset
     FAKE_APP_DIR=\"${TMP_TEST_DIR}/fake_app\"
@@ -202,11 +203,11 @@ TARGET_PRECEDENCE_CHECK=$(bash -c "
     res6=\$(unset DISCORD_THREAD_ID DISCORD_CHANNEL_ID; AERIAL_TARGET_ID=\"discord:worker-0\" ANTIGRAVITY_APP_DATA_DIR=\"\${FAKE_APP_DIR}\" ANTIGRAVITY_CONVERSATION_ID=\"conv-123\" resolve_target_id)
     [ \"\$res6\" = \"1559768078131269684\" ] && echo \"target6:ok\" || echo \"target6:fail:\$res6\"
 ")
-assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target1:ok' && echo true || echo false)" "Target precedence: AERIAL_TARGET_ID takes first priority"
+assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target1:ok' && echo true || echo false)" "Target precedence: AERIAL_TARGET_ID takes first priority and strips discord- prefix"
 assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target2:ok' && echo true || echo false)" "Target precedence: DISCORD_THREAD_ID takes second priority"
 assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target3:ok' && echo true || echo false)" "Target precedence: DISCORD_CHANNEL_ID takes third priority"
-assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target4:ok' && echo true || echo false)" "Target precedence: fallback to 1542423172400291873"
-assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target5:ok' && echo true || echo false)" "Target precedence: skips discord:worker-0 for DISCORD_THREAD_ID"
+assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target4:ok' && echo true || echo false)" "Target precedence: returns empty string when no Discord context exists"
+assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target5:ok' && echo true || echo false)" "Target precedence: skips worker and headless session keys"
 assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target6:ok' && echo true || echo false)" "Target precedence: resolves thread_id from transcript.jsonl when worker key set"
 
 # Case 9: --vanadis-chunk global flag parsing and AERIAL_VANADIS_CHUNK_ID env injection

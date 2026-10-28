@@ -275,10 +275,13 @@ init_scratch() {
 SCRATCH_DIR_CLEANUP=""
 
 resolve_target_id() {
-    if [ -n "${1:-}" ]; then echo "$1"; return; fi
-    if [ -n "${AERIAL_TARGET_ID:-}" ] && [[ "${AERIAL_TARGET_ID}" != *:* ]]; then echo "${AERIAL_TARGET_ID}"; return; fi
-    if [ -n "${DISCORD_THREAD_ID:-}" ]; then echo "${DISCORD_THREAD_ID}"; return; fi
-    if [ -n "${DISCORD_CHANNEL_ID:-}" ]; then echo "${DISCORD_CHANNEL_ID}"; return; fi
+    if [ -n "${1:-}" ]; then echo "${1#discord-}"; return; fi
+    if [ -n "${AERIAL_TARGET_ID:-}" ] && [[ "${AERIAL_TARGET_ID}" != *:* ]] && [[ "${AERIAL_TARGET_ID}" != heartbeat-* ]] && [[ "${AERIAL_TARGET_ID}" != dispatch-* ]]; then
+        echo "${AERIAL_TARGET_ID#discord-}"
+        return
+    fi
+    if [ -n "${DISCORD_THREAD_ID:-}" ]; then echo "${DISCORD_THREAD_ID#discord-}"; return; fi
+    if [ -n "${DISCORD_CHANNEL_ID:-}" ]; then echo "${DISCORD_CHANNEL_ID#discord-}"; return; fi
     local tfile="${ANTIGRAVITY_APP_DATA_DIR:-}/brain/${ANTIGRAVITY_CONVERSATION_ID:-}/.system_generated/logs/transcript.jsonl"
     if [ -f "$tfile" ]; then
         local tid
@@ -286,7 +289,7 @@ resolve_target_id() {
         [ -z "$tid" ] && tid=$(head -n 1 "$tfile" 2>/dev/null | grep -oE 'channel_id: [0-9]{17,20}' | head -n 1 | awk '{print $2}' || true)
         if [ -n "$tid" ]; then echo "$tid"; return; fi
     fi
-    echo "1542423172400291873"
+    echo ""
 }
 
 resolve_vanadis_chunk_id() {
@@ -358,7 +361,9 @@ register_pr_in_brain() {
             -d "$reg_payload" \
             "$brain_reg_url" 2>/dev/null || true)
         if [ -n "$reg_resp" ] && echo "$reg_resp" | jq -e '.status == "registered"' >/dev/null 2>&1; then
-            echo "🗄️ [aerial-pr] Registered PR #${pr_num} in PostgreSQL pr_registry (target: ${target_id})." >&2
+            local resolved_target
+            resolved_target=$(echo "$reg_resp" | jq -r '.target_id // empty' 2>/dev/null || true)
+            echo "🗄️ [aerial-pr] Registered PR #${pr_num} in PostgreSQL pr_registry (target: ${resolved_target:-${target_id:-headless}})." >&2
             return 0
         fi
         if [ "$attempt" -lt "$max_attempts" ]; then
