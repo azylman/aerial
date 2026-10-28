@@ -101,7 +101,8 @@ func (te *turnExecution) isBurstMessage(id string) bool {
 func (te *turnExecution) liveSessionIDForMessage(msgID string) (string, bool) {
 	te.activeSessionMu.Lock()
 	defer te.activeSessionMu.Unlock()
-	if !te.isBurstMessage(msgID) {
+	isMatch := te.isBurstMessage(msgID) || (te.dispatch != nil && te.dispatch.ID == msgID)
+	if !isMatch {
 		return "", false
 	}
 	if te.activeSessionID != "" {
@@ -266,7 +267,16 @@ func (te *turnExecution) resolveAttemptConfig(attempt int) attemptConfig {
 		cfg.mediumEffortModel = config.GetRuntimeConfig().MediumEffortModel
 	}
 
-	switch resolveBurstEffort(te.burst) {
+	effort := resolveBurstEffort(te.burst)
+	reqModel := extractBurstModel(te.burst)
+	if te.dispatch != nil {
+		effort = resolveDispatchEffort(*te.dispatch, te.isEphemeral)
+		if strings.TrimSpace(te.dispatch.Model) != "" {
+			reqModel = strings.TrimSpace(te.dispatch.Model)
+		}
+	}
+
+	switch effort {
 	case "medium":
 		if strings.TrimSpace(cfg.mediumEffortModel) != "" {
 			cfg.model = cfg.mediumEffortModel
@@ -276,7 +286,7 @@ func (te *turnExecution) resolveAttemptConfig(attempt int) attemptConfig {
 			cfg.model = cfg.lowEffortModel
 		}
 	}
-	if reqModel := extractBurstModel(te.burst); reqModel != "" {
+	if reqModel != "" {
 		cfg.model = reqModel
 	}
 	if overrideModel != "" {
@@ -309,8 +319,9 @@ func (te *turnExecution) probeCandidateSessionID(candidateID, stdout, stderr str
 	if candidateID != "" {
 		return candidateID
 	}
+	leaseKey := te.leaseKey()
 	if te.isEphemeral {
-		if s := daemonSessionID(te.activePool, te.threadID); s != "" {
+		if s := daemonSessionID(te.activePool, leaseKey); s != "" {
 			return s
 		}
 	}
@@ -323,11 +334,11 @@ func (te *turnExecution) probeCandidateSessionID(candidateID, stdout, stderr str
 	if s := te.extractVerifiedDiskSessionID(stdout, stderr); s != "" {
 		return s
 	}
-	if s := daemonSessionID(te.activePool, te.threadID); s != "" {
+	if s := daemonSessionID(te.activePool, leaseKey); s != "" {
 		return s
 	}
 	if primaryPool := te.pool.AgentPool(); primaryPool != nil && primaryPool != te.activePool {
-		return daemonSessionID(primaryPool, te.threadID)
+		return daemonSessionID(primaryPool, leaseKey)
 	}
 	return ""
 }
@@ -360,7 +371,11 @@ func (te *turnExecution) fetchTurnHistory(fetchCtx context.Context, limit int) [
 	var err error
 	var turnHistory []HistoryMessage
 	if te.pool.cfg.HistoryFetcher != nil {
-		turnHistory, err = te.pool.cfg.HistoryFetcher(fetchCtx, te.threadID, te.burst[0].ID, limit)
+		var beforeID string
+		if len(te.burst) > 0 {
+			beforeID = te.burst[0].ID
+		}
+		turnHistory, err = te.pool.cfg.HistoryFetcher(fetchCtx, te.threadID, beforeID, limit)
 	} else {
 		turnHistory, err = FetchRecentThreadHistory(fetchCtx, te.pool.getDiscordSession(), te.store(), te.threadID, limit)
 	}
@@ -545,4 +560,87 @@ func (te *turnExecution) buildColdStartLookback(snap ChannelSnapshot, isColdStar
 
 	lookbackMsgs := te.resolveColdStartLookbackMessages(isColdStart, isChannelMode, getTurnHistory)
 	return summary, lookbackMsgs
+}
+
+// DispatchPromptInput collects pre-fetched context components for deterministic dispatch prompt assembly.
+type DispatchPromptInput struct {
+	Dispatch          db.Dispatch
+	PreviousSessionID string
+	IsColdStart       bool
+	RecentDispatches  []db.Dispatch
+}
+
+func wrapDispatchDirective(prompt string) string {
+	trimmed := strings.TrimSpace(prompt)
+	if strings.HasPrefix(trimmed, "<SYSTEM_DIRECTIVE>") && strings.HasSuffix(trimmed, "</SYSTEM_DIRECTIVE>") {
+		return trimmed
+	}
+	return fmt.Sprintf("<SYSTEM_DIRECTIVE>\n%s\n\nOnly formulate and output your final response once all immediate work is complete. This is a headless dispatch turn; your response will not be delivered to Discord.\n</SYSTEM_DIRECTIVE>", trimmed)
+}
+
+// FormatDispatchHistory formats recent session dispatches into a <DISPATCH_HISTORY> block.
+func FormatDispatchHistory(sessionID string, dispatches []db.Dispatch) string {
+	if len(dispatches) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "<DISPATCH_HISTORY>\nRecent runs for session %s:\n", sessionID)
+	for _, d := range dispatches {
+		ts := d.CreatedAt
+		if ts.IsZero() {
+			ts = time.Now().UTC()
+		}
+		summary := strings.TrimSpace(d.Summary)
+		if summary == "" {
+			summary = db.CleanTaskSummary(d.Prompt)
+		}
+		if summary == "" {
+			summary = strings.TrimSpace(d.Prompt)
+		}
+		fmt.Fprintf(&sb, "- [%s] status=%s: %s\n", ts.UTC().Format(time.RFC3339), d.Status, summary)
+	}
+	sb.WriteString("</DISPATCH_HISTORY>")
+	return sb.String()
+}
+
+// AssembleDispatchPrompt deterministically composes the prompt for a headless background dispatch.
+func AssembleDispatchPrompt(input DispatchPromptInput) string {
+	basePrompt := wrapDispatchDirective(input.Dispatch.Prompt)
+	if len(input.RecentDispatches) > 0 && strings.TrimSpace(input.Dispatch.SessionID) != "" {
+		if hist := FormatDispatchHistory(input.Dispatch.SessionID, input.RecentDispatches); hist != "" {
+			basePrompt = prependPromptLayer(basePrompt, hist)
+		}
+	}
+	if input.IsColdStart && strings.TrimSpace(input.PreviousSessionID) != "" {
+		if prevBlock := FormatPreviousSession(input.PreviousSessionID); prevBlock != "" {
+			basePrompt = prependPromptLayer(basePrompt, prevBlock)
+		}
+	}
+	return strings.TrimSpace(basePrompt)
+}
+
+func (te *turnExecution) buildDispatchPrompt() string {
+	if te == nil || te.dispatch == nil {
+		return ""
+	}
+	d := *te.dispatch
+	var prevID string
+	var recent []db.Dispatch
+	if !te.isEphemeral && te.isCold && strings.TrimSpace(d.SessionID) != "" {
+		prevID = te.resolveColdStartPreviousSessionID(true)
+		if s := te.store(); s != nil {
+			rec, err := s.GetRecentSessionDispatches(te.poolCtx(), d.SessionID, 10)
+			if err != nil {
+				log.Printf("[WorkerPool] Warning getting recent session dispatches for %s: %v", d.SessionID, err)
+			} else {
+				recent = rec
+			}
+		}
+	}
+	return AssembleDispatchPrompt(DispatchPromptInput{
+		Dispatch:          d,
+		PreviousSessionID: prevID,
+		IsColdStart:       !te.isEphemeral && te.isCold,
+		RecentDispatches:  recent,
+	})
 }

@@ -117,6 +117,76 @@ func resolvePromptSessionID(pool *queue.WorkerPool, channelID, sessionID, title,
 	return channelID, channelID
 }
 
+func bridgeSilentPromptToDispatch(w http.ResponseWriter, r *http.Request, store db.Store, pool *queue.WorkerPool, req PromptRequest, channelID, sessionID, effort, model, msgID string) {
+	if store == nil {
+		writeErr(w, http.StatusInternalServerError, "Database store not configured")
+		return
+	}
+
+	source := "webhook"
+	if strings.HasPrefix(sessionID, "heartbeat-") {
+		source = "heartbeat"
+	} else if strings.Contains(req.Prompt, "[VANADIS BUILD CHUNK EXECUTION]") {
+		source = "vanadis"
+	}
+	dispatchSessionID := ""
+	if !queue.IsNumericSnowflake(sessionID) && !strings.HasPrefix(sessionID, "discord-") {
+		dispatchSessionID = sessionID
+	}
+
+	if req.SkipIfActive {
+		active, err := store.HasActiveDispatchTurn(r.Context(), dispatchSessionID, msgID)
+		if err != nil {
+			log.Printf("[HTTP] Failed to check active turn for %s: %v", dispatchSessionID, err)
+			writeErr(w, http.StatusInternalServerError, "Failed to check active turn")
+			return
+		}
+		if active {
+			httpkit.WriteJSON(w, http.StatusOK, map[string]string{
+				"status":      "skipped_active",
+				"channel_id":  channelID,
+				"session_id":  dispatchSessionID,
+				"dispatch_id": msgID,
+			})
+			return
+		}
+	}
+
+	d := db.Dispatch{
+		ID:        msgID,
+		Source:    source,
+		SessionID: dispatchSessionID,
+		Prompt:    req.Prompt,
+		Summary:   db.CleanTaskSummary(req.Prompt),
+		Effort:    effort,
+		Model:     model,
+		Status:    db.StatusPending,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+
+	insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer insertCancel()
+	if err := store.InsertDispatch(insertCtx, d); err != nil {
+		log.Printf("Failed to insert HTTP prompt dispatch %s to DB: %v", msgID, err)
+		writeErr(w, http.StatusInternalServerError, fmt.Sprintf("Failed to persist prompt dispatch: %v", err))
+		return
+	}
+
+	if pool != nil {
+		pool.EnqueueDispatch(d)
+	}
+
+	httpkit.WriteJSON(w, http.StatusAccepted, map[string]string{
+		"status":      "accepted",
+		"channel_id":  channelID,
+		"session_id":  sessionID,
+		"message_id":  msgID,
+		"dispatch_id": msgID,
+		"message":     "Prompt execution enqueued in background",
+	})
+}
+
 func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -170,6 +240,11 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 		msgID := strings.TrimSpace(req.MessageID)
 		if msgID == "" {
 			msgID = uuid.New().String()
+		}
+
+		if req.Silent {
+			bridgeSilentPromptToDispatch(w, r, store, pool, req, channelID, sessionID, effort, model, msgID)
+			return
 		}
 
 		msg := db.Message{
@@ -284,7 +359,165 @@ func handleCancelPrompt(store db.Store) http.HandlerFunc {
 			writeStoreErr(w, "pending messages", err)
 			return
 		}
-		cancelledIDs := drainMatchingPendingPrompts(r.Context(), store, msgs, msgID, buildID, resolveCancelReason(req.Reason, buildID, msgID))
+		reason := resolveCancelReason(req.Reason, buildID, msgID)
+		cancelledMsgs := drainMatchingPendingPrompts(r.Context(), store, msgs, msgID, buildID, reason)
+		cancelledDispatches, cancelErr := store.CancelPendingDispatches(r.Context(), msgID, buildID, reason)
+		if cancelErr != nil {
+			log.Printf("[handlers] Error cancelling pending dispatches: %v", cancelErr)
+		}
+		combined := append(cancelledMsgs, cancelledDispatches...)
+		httpkit.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "cancelled_count": len(combined), "cancelled_ids": combined})
+	}
+}
+
+type DispatchRequest struct {
+	ID           string `json:"id,omitempty"`
+	Source       string `json:"source"`
+	SessionID    string `json:"session_id,omitempty"`
+	Prompt       string `json:"prompt"`
+	Effort       string `json:"effort,omitempty"`
+	Model        string `json:"model,omitempty"`
+	SkipIfActive bool   `json:"skip_if_active,omitempty"`
+}
+
+func validateDispatchRequest(req DispatchRequest) error {
+	source := strings.ToLower(strings.TrimSpace(req.Source))
+	if source != "heartbeat" && source != "vanadis" && source != "webhook" {
+		return errors.New("Invalid payload: 'source' must be 'heartbeat', 'vanadis', or 'webhook'")
+	}
+	if strings.TrimSpace(req.Prompt) == "" {
+		return errors.New("Invalid payload: 'prompt' field is required and cannot be empty")
+	}
+	sessionID := strings.TrimSpace(req.SessionID)
+	if sessionID != "" {
+		if queue.IsNumericSnowflake(sessionID) || strings.HasPrefix(strings.ToLower(sessionID), "discord-") || !queue.IsValidThreadKey(sessionID) {
+			return errors.New("Invalid payload: 'session_id' cannot be a numeric snowflake, start with 'discord-', or contain invalid characters")
+		}
+	}
+	effort := strings.ToLower(strings.TrimSpace(req.Effort))
+	if effort != "" && effort != "low" && effort != "medium" && effort != "high" {
+		return errors.New("Invalid payload: 'effort' must be 'low', 'medium', or 'high'")
+	}
+	return nil
+}
+
+func handleDispatch(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req DispatchRequest
+		if !readPostJSON(w, r, &req) {
+			return
+		}
+
+		if err := validateDispatchRequest(req); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		sessionID := strings.TrimSpace(req.SessionID)
+		dispatchID := strings.TrimSpace(req.ID)
+		if dispatchID == "" {
+			dispatchID = uuid.New().String()
+		}
+
+		if req.SkipIfActive && store != nil {
+			active, err := store.HasActiveDispatchTurn(r.Context(), sessionID, dispatchID)
+			if err != nil {
+				log.Printf("[HTTP] Failed to check active turn for %s: %v", sessionID, err)
+				writeErr(w, http.StatusInternalServerError, "Failed to check active turn")
+				return
+			}
+			if active {
+				httpkit.WriteJSON(w, http.StatusOK, map[string]string{
+					"status":      "skipped_active",
+					"dispatch_id": dispatchID,
+					"session_id":  sessionID,
+				})
+				return
+			}
+		}
+
+		if store == nil {
+			writeErr(w, http.StatusInternalServerError, "Database store not configured")
+			return
+		}
+
+		d := db.Dispatch{
+			ID:        dispatchID,
+			Source:    strings.ToLower(strings.TrimSpace(req.Source)),
+			SessionID: sessionID,
+			Prompt:    req.Prompt,
+			Summary:   db.CleanTaskSummary(req.Prompt),
+			Effort:    strings.ToLower(strings.TrimSpace(req.Effort)),
+			Model:     strings.TrimSpace(req.Model),
+			Status:    db.StatusPending,
+			CreatedAt: time.Now().UTC(),
+			UpdatedAt: time.Now().UTC(),
+		}
+
+		insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := store.InsertDispatch(insertCtx, d); err != nil {
+			insertCancel()
+			log.Printf("Failed to insert dispatch %s to DB: %v", dispatchID, err)
+			writeErr(w, http.StatusInternalServerError, fmt.Sprintf("Failed to persist dispatch: %v", err))
+			return
+		}
+		insertCancel()
+
+		if pool != nil {
+			pool.EnqueueDispatch(d)
+		}
+
+		httpkit.WriteJSON(w, http.StatusAccepted, map[string]string{
+			"status":      "accepted",
+			"dispatch_id": dispatchID,
+			"message_id":  dispatchID,
+			"session_id":  sessionID,
+		})
+	}
+}
+
+type CancelDispatchRequest struct {
+	DispatchID string `json:"dispatch_id,omitempty"`
+	MessageID  string `json:"message_id,omitempty"`
+	BuildID    string `json:"build_id,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+}
+
+func handleCancelDispatch(store db.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", "POST")
+			writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
+			return
+		}
+		if store == nil {
+			writeErr(w, http.StatusInternalServerError, "Database store not configured")
+			return
+		}
+		var req CancelDispatchRequest
+		if !readPostJSON(w, r, &req) {
+			return
+		}
+		dispatchID := strings.TrimSpace(req.DispatchID)
+		if dispatchID == "" {
+			dispatchID = strings.TrimSpace(req.MessageID)
+		}
+		buildID := strings.TrimSpace(req.BuildID)
+		if dispatchID == "" && buildID == "" {
+			writeErr(w, http.StatusBadRequest, "Invalid payload: 'dispatch_id' (or 'message_id') or 'build_id' is required")
+			return
+		}
+		reason := resolveCancelReason(req.Reason, buildID, dispatchID)
+		cancelledIDs, err := store.CancelPendingDispatches(r.Context(), dispatchID, buildID, reason)
+		if err != nil {
+			writeStoreErr(w, "cancelling dispatches", err)
+			return
+		}
 		httpkit.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "cancelled_count": len(cancelledIDs), "cancelled_ids": cancelledIDs})
 	}
 }
@@ -1018,6 +1251,8 @@ func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, embedder 
 	mux.Handle("/metrics", metrics.Handler())
 	mux.HandleFunc("/prompt", handlePrompt(store, pool))
 	mux.HandleFunc("/prompt/cancel", handleCancelPrompt(store))
+	mux.HandleFunc("/dispatch", handleDispatch(store, pool))
+	mux.HandleFunc("/dispatch/cancel", handleCancelDispatch(store))
 	mux.HandleFunc("/discord/message", handleDirectMessage(pool))
 	mux.HandleFunc("/discord/widget", handleStatusWidget(pool))
 	mux.HandleFunc("/voice/ask", handleVoiceAsk(pool))

@@ -113,8 +113,13 @@ type WorkerPoolConfig struct {
 	CreateThreadFunc            func(channelID, title string) (string, error)
 }
 
+type queueItem struct {
+	msg      *db.Message
+	dispatch *db.Dispatch
+}
+
 type threadWorkerState struct {
-	ch              chan db.Message
+	ch              chan queueItem
 	activeEnqueuers int
 	inFlight        bool
 }
@@ -735,12 +740,25 @@ func (p *WorkerPool) StopWithTimeout(drainTimeout time.Duration) {
 	sweepCtx, sweepCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer sweepCancel()
 	if store := p.Store(); store != nil {
-		if msgs, err := store.GetPendingOrProcessingMessages(sweepCtx, 0); err == nil {
-			for _, m := range msgs {
-				if m.Status == db.StatusProcessing {
-					if err := store.UpdateMessageStatus(sweepCtx, m.ID, db.StatusPending, "deployment_drain"); err != nil {
-						log.Printf("[WorkerPool] Warning resetting message %s to pending: %v", m.ID, err)
-					}
+		p.sweepInterruptedProcessingEntries(sweepCtx, store)
+	}
+}
+
+func (p *WorkerPool) sweepInterruptedProcessingEntries(ctx context.Context, store db.Store) {
+	if msgs, err := store.GetPendingOrProcessingMessages(ctx, 0); err == nil {
+		for _, m := range msgs {
+			if m.Status == db.StatusProcessing {
+				if err := store.UpdateMessageStatus(ctx, m.ID, db.StatusPending, "deployment_drain"); err != nil {
+					log.Printf("[WorkerPool] Warning resetting message %s to pending: %v", m.ID, err)
+				}
+			}
+		}
+	}
+	if dispatches, err := store.GetPendingOrProcessingDispatches(ctx, 0); err == nil {
+		for _, d := range dispatches {
+			if d.Status == db.StatusProcessing {
+				if err := store.ResetDispatchToPendingWithRestart(ctx, d.ID, "deployment_drain"); err != nil {
+					log.Printf("[WorkerPool] Warning resetting dispatch %s to pending: %v", d.ID, err)
 				}
 			}
 		}
@@ -889,7 +907,8 @@ func (p *WorkerPool) ActiveTurnSessionID(msgID string) (string, bool) {
 }
 
 func isScopeKeyForThread(scopeKey, threadID string) bool {
-	return scopeKey == threadID || strings.HasSuffix(scopeKey, ":"+threadID)
+	norm := db.DiscordSessionID(threadID)
+	return scopeKey == threadID || scopeKey == norm || strings.HasSuffix(scopeKey, ":"+threadID) || strings.HasSuffix(scopeKey, ":"+norm)
 }
 
 func logInterruptWarning(op string, err error) {
@@ -922,6 +941,12 @@ func (p *WorkerPool) CloseThreadProcesses(threadID, reason string) {
 		if target != nil {
 			if d, ok := target.Get(threadID); ok && d != nil {
 				logInterruptWarning(reason, d.Close())
+			}
+			norm := db.DiscordSessionID(threadID)
+			if norm != threadID {
+				if d, ok := target.Get(norm); ok && d != nil {
+					logInterruptWarning(reason, d.Close())
+				}
 			}
 		}
 	}
@@ -971,15 +996,23 @@ func (p *WorkerPool) latchInterruptAndDrainLocked(threadID string, drainQueue bo
 			if !isScopeKeyForThread(scopeKey, threadID) || state == nil {
 				continue
 			}
+			var nonMsgItems []queueItem
 		drainCh:
 			for {
 				select {
-				case m := <-state.ch:
+				case item := <-state.ch:
+					if item.msg == nil {
+						nonMsgItems = append(nonMsgItems, item)
+						continue
+					}
 					metrics.QueueDepth.Dec()
-					drainedMsgs = append(drainedMsgs, m)
+					drainedMsgs = append(drainedMsgs, *item.msg)
 				default:
 					break drainCh
 				}
+			}
+			for _, nmi := range nonMsgItems {
+				state.ch <- nmi
 			}
 		}
 	}

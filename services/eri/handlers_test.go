@@ -91,6 +91,8 @@ func TestHandlePromptValidation(t *testing.T) {
 		{"ephemeral true with default high effort rejected", http.MethodPost, store, pool, strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873","ephemeral":true}`), http.StatusBadRequest, "ephemeral: true cannot be combined with high effort"},
 		{"nil store", http.MethodPost, nil, pool, strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873"}`), http.StatusInternalServerError, "Database store not configured"},
 		{"closed store", http.MethodPost, closedStore, pool, strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873"}`), http.StatusInternalServerError, "Failed to persist prompt message"},
+		{"nil store silent", http.MethodPost, nil, pool, strings.NewReader(`{"prompt":"hello silent","channel_id":"1542423172400291873","silent":true}`), http.StatusInternalServerError, "Database store not configured"},
+		{"closed store silent", http.MethodPost, closedStore, pool, strings.NewReader(`{"prompt":"hello silent","channel_id":"1542423172400291873","silent":true}`), http.StatusInternalServerError, "Failed to persist prompt dispatch"},
 		{"body close error", http.MethodPost, store, pool, &errReadCloser{reader: strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873"}`), closeErr: errors.New("close error")}, http.StatusAccepted, "channel_id"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -126,6 +128,8 @@ func TestHandlePromptValidation(t *testing.T) {
 		{"default effort", pool, `{"prompt":"Test valid prompt","channel_id":"1542423172400291873","message_id":"msg-123"}`, "msg-123", "1542423172400291873", "1542423172400291873", nil, "", "", false, "Test valid prompt"},
 		{"gemini-4-flash silent", pool, `{"prompt":"Execute chunk 1","channel_id":"1542423172400291873","message_id":"msg-silent-1","model":"gemini-4-flash","silent":true}`, "msg-silent-1", "1542423172400291873", "1542423172400291873", nil, "low", "gemini-4-flash", true, ""},
 		{"gemini-3.8-flash-medium", pool, `{"prompt":"Execute medium chunk","channel_id":"1542423172400291873","message_id":"msg-med-1","model":"gemini-3.8-flash-medium","silent":true}`, "msg-med-1", "1542423172400291873", "1542423172400291873", nil, "medium", "gemini-3.8-flash-medium", true, ""},
+		{"silent heartbeat source and session", pool, `{"prompt":"heartbeat check","channel_id":"1542423172400291873","session_id":"heartbeat-svc","message_id":"msg-hb-1","silent":true}`, "msg-hb-1", "heartbeat-svc", "1542423172400291873", nil, "", "", true, ""},
+		{"silent vanadis source and nil pool", nil, `{"prompt":"[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: b1","channel_id":"1542423172400291873","message_id":"msg-vanadis-1","silent":true}`, "msg-vanadis-1", "1542423172400291873", "1542423172400291873", nil, "", "", true, ""},
 		{"nil pool", nil, `{"prompt":"hello nil pool","channel_id":"1542423172400291873","message_id":"msg-nil-pool"}`, "msg-nil-pool", "1542423172400291873", "1542423172400291873", nil, "", "", false, "hello nil pool"},
 		{"auto-generated uuid when message_id omitted", pool, `{"prompt":"auto uuid prompt","channel_id":"1542423172400291873"}`, "", "", "", nil, "", "", false, "auto uuid prompt"},
 		{"custom session_id and explicit ephemeral false", pool, `{"prompt":"custom session prompt","channel_id":"1542423172400291873","session_id":"custom-session-123","ephemeral":false,"message_id":"msg-sess-false"}`, "msg-sess-false", "custom-session-123", "1542423172400291873", &falseVal, "", "", false, "custom session prompt"},
@@ -144,6 +148,19 @@ func TestHandlePromptValidation(t *testing.T) {
 				t.Errorf("response body missing channel_id %q: %s", tc.wantChannelID, w.Body.String())
 			}
 			if tc.msgID != "" {
+				if tc.wantSilent {
+					d, err := store.GetDispatch(context.Background(), tc.msgID)
+					if err != nil || d == nil {
+						t.Fatalf("failed to retrieve persisted dispatch %s: %v", tc.msgID, err)
+					}
+					if tc.wantEffort != "" && d.Effort != tc.wantEffort {
+						t.Errorf("effort=%q, want %q", d.Effort, tc.wantEffort)
+					}
+					if tc.wantModel != "" && d.Model != tc.wantModel {
+						t.Errorf("model=%q, want %q", d.Model, tc.wantModel)
+					}
+					return
+				}
 				msg, err := store.GetMessage(context.Background(), tc.msgID)
 				if err != nil || msg == nil {
 					t.Fatalf("failed to retrieve persisted message %s: %v", tc.msgID, err)
@@ -284,6 +301,113 @@ func TestHandleCancelPrompt(t *testing.T) {
 				if other, _ := tc.store.GetMessage(context.Background(), "msg-b10-c1"); other != nil && other.Status != db.StatusPending {
 					t.Fatalf("expected build-10 prompt to remain PENDING, got %q", other.Status)
 				}
+			}
+		})
+	}
+}
+
+func TestHandleDispatch(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		method     string
+		store      db.Store
+		body       string
+		wantStatus int
+		wantSubstr string
+		checkID    string
+	}{
+		{"method not allowed", http.MethodGet, dbtest.NewFakeStore(), "", http.StatusMethodNotAllowed, "Method not allowed", ""},
+		{"nil store", http.MethodPost, nil, `{"source":"heartbeat","prompt":"test"}`, http.StatusInternalServerError, "Database store not configured", ""},
+		{"invalid json", http.MethodPost, dbtest.NewFakeStore(), `{bad`, http.StatusBadRequest, "Invalid JSON payload", ""},
+		{"missing source", http.MethodPost, dbtest.NewFakeStore(), `{"prompt":"test"}`, http.StatusBadRequest, "'source' must be 'heartbeat', 'vanadis', or 'webhook'", ""},
+		{"invalid source", http.MethodPost, dbtest.NewFakeStore(), `{"source":"unknown","prompt":"test"}`, http.StatusBadRequest, "'source' must be 'heartbeat', 'vanadis', or 'webhook'", ""},
+		{"empty prompt", http.MethodPost, dbtest.NewFakeStore(), `{"source":"heartbeat","prompt":" "}`, http.StatusBadRequest, "'prompt' field is required", ""},
+		{"numeric session_id rejected", http.MethodPost, dbtest.NewFakeStore(), `{"source":"heartbeat","prompt":"test","session_id":"1234567890"}`, http.StatusBadRequest, "cannot be a numeric snowflake", ""},
+		{"discord prefix session_id rejected", http.MethodPost, dbtest.NewFakeStore(), `{"source":"heartbeat","prompt":"test","session_id":"discord-123"}`, http.StatusBadRequest, "cannot be a numeric snowflake", ""},
+		{"invalid chars session_id rejected", http.MethodPost, dbtest.NewFakeStore(), `{"source":"heartbeat","prompt":"test","session_id":"bad:session"}`, http.StatusBadRequest, "cannot be a numeric snowflake", ""},
+		{"invalid effort rejected", http.MethodPost, dbtest.NewFakeStore(), `{"source":"heartbeat","prompt":"test","effort":"ultra"}`, http.StatusBadRequest, "'effort' must be 'low', 'medium', or 'high'", ""},
+		{"valid stateful accepted", http.MethodPost, dbtest.NewFakeStore(), `{"id":"disp-1","source":"heartbeat","session_id":"heartbeat-1","prompt":"run check","effort":"low"}`, http.StatusAccepted, `"status":"accepted"`, "disp-1"},
+		{"valid ephemeral accepted", http.MethodPost, dbtest.NewFakeStore(), `{"id":"disp-2","source":"vanadis","prompt":"execute build"}`, http.StatusAccepted, `"status":"accepted"`, "disp-2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := runHTTP(handleDispatch(tc.store, nil), tc.method, "/dispatch", strings.NewReader(tc.body))
+			if w.Code != tc.wantStatus || !strings.Contains(w.Body.String(), tc.wantSubstr) {
+				t.Fatalf("got status=%d body=%q, want status=%d substr=%q", w.Code, w.Body.String(), tc.wantStatus, tc.wantSubstr)
+			}
+			if tc.checkID != "" && tc.store != nil {
+				d, err := tc.store.GetDispatch(context.Background(), tc.checkID)
+				if err != nil || d == nil {
+					t.Fatalf("failed to retrieve dispatch %s: %v", tc.checkID, err)
+				}
+			}
+		})
+	}
+}
+
+func TestHandleDispatch_SkipIfActive(t *testing.T) {
+	s := dbtest.NewFakeStore()
+	_ = s.InsertDispatch(context.Background(), db.Dispatch{
+		ID:        "active-disp-1",
+		Source:    "heartbeat",
+		SessionID: "heartbeat-test",
+		Prompt:    "ongoing run",
+		Status:    db.StatusProcessing,
+	})
+
+	for _, tc := range []struct {
+		name       string
+		body       string
+		wantStatus int
+		wantSubstr string
+	}{
+		{"skip active session", `{"source":"heartbeat","session_id":"heartbeat-test","prompt":"test","skip_if_active":true}`, http.StatusOK, `"status":"skipped_active"`},
+		{"do not skip when skip_if_active false", `{"source":"heartbeat","session_id":"heartbeat-test","prompt":"test","skip_if_active":false}`, http.StatusAccepted, `"status":"accepted"`},
+		{"do not skip different session", `{"source":"heartbeat","session_id":"heartbeat-other","prompt":"test","skip_if_active":true}`, http.StatusAccepted, `"status":"accepted"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := runHTTP(handleDispatch(s, nil), http.MethodPost, "/dispatch", strings.NewReader(tc.body))
+			if w.Code != tc.wantStatus || !strings.Contains(w.Body.String(), tc.wantSubstr) {
+				t.Fatalf("got status=%d body=%q, want status=%d substr=%q", w.Code, w.Body.String(), tc.wantStatus, tc.wantSubstr)
+			}
+		})
+	}
+}
+
+func TestHandleCancelDispatch(t *testing.T) {
+	seedStore := func() *dbtest.FakeStore {
+		s := dbtest.NewFakeStore()
+		ctx := context.Background()
+		for _, d := range []db.Dispatch{
+			{ID: "disp-b1-c1", Source: "vanadis", Prompt: "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: build-99\n", Status: db.StatusPending},
+			{ID: "disp-b1-c2", Source: "vanadis", Prompt: "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: build-99\n", Status: db.StatusPending},
+			{ID: "disp-active", Source: "vanadis", Prompt: "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: build-99\n", Status: db.StatusProcessing},
+			{ID: "disp-single", Source: "heartbeat", Prompt: "hourly pulse", Status: db.StatusPending},
+		} {
+			_ = s.InsertDispatch(ctx, d)
+		}
+		return s
+	}
+
+	for _, tc := range []struct {
+		name       string
+		method     string
+		store      db.Store
+		body       string
+		wantStatus int
+		wantSubstr string
+	}{
+		{"method not allowed", http.MethodGet, seedStore(), "", http.StatusMethodNotAllowed, "Method not allowed"},
+		{"nil store", http.MethodPost, nil, `{"build_id":"build-99"}`, http.StatusInternalServerError, "Database store not configured"},
+		{"invalid json", http.MethodPost, seedStore(), `{invalid`, http.StatusBadRequest, "Invalid JSON payload"},
+		{"missing ids", http.MethodPost, seedStore(), `{"reason":"no ids"}`, http.StatusBadRequest, "'dispatch_id' (or 'message_id') or 'build_id' is required"},
+		{"cancel by build_id", http.MethodPost, seedStore(), `{"build_id":"build-99"}`, http.StatusOK, `"cancelled_count":2`},
+		{"cancel by dispatch_id", http.MethodPost, seedStore(), `{"dispatch_id":"disp-single"}`, http.StatusOK, `"cancelled_ids":["disp-single"]`},
+		{"cancel by message_id alias", http.MethodPost, seedStore(), `{"message_id":"disp-single"}`, http.StatusOK, `"cancelled_ids":["disp-single"]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := runHTTP(handleCancelDispatch(tc.store), tc.method, "/dispatch/cancel", strings.NewReader(tc.body))
+			if w.Code != tc.wantStatus || !strings.Contains(w.Body.String(), tc.wantSubstr) {
+				t.Fatalf("got status=%d body=%q, want status=%d substr=%q", w.Code, w.Body.String(), tc.wantStatus, tc.wantSubstr)
 			}
 		})
 	}
@@ -1005,6 +1129,12 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/tasks", nil); w.Code != http.StatusOK {
 		t.Errorf("Expected 200 from /tasks, got %d", w.Code)
 	}
+	if w := runHTTP(mux.ServeHTTP, http.MethodPost, "/dispatch", strings.NewReader(`{"source":"heartbeat","prompt":"test"}`)); w.Code != http.StatusAccepted {
+		t.Errorf("Expected 202 from /dispatch, got %d", w.Code)
+	}
+	if w := runHTTP(mux.ServeHTTP, http.MethodPost, "/dispatch/cancel", strings.NewReader(`{"dispatch_id":"disp-1"}`)); w.Code != http.StatusOK {
+		t.Errorf("Expected 200 from /dispatch/cancel, got %d", w.Code)
+	}
 	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/transcripts", nil); w.Code != http.StatusNotFound {
 		t.Errorf("Expected 404 from deleted /transcripts, got %d", w.Code)
 	}
@@ -1333,4 +1463,32 @@ func TestHandleVoiceAsk_SSE(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestHandlePrompt_SilentSkipIfActive(t *testing.T) {
+	s := dbtest.NewFakeStore()
+	_ = s.InsertDispatch(context.Background(), db.Dispatch{
+		ID:        "active-disp-prompt",
+		Source:    "heartbeat",
+		SessionID: "heartbeat-prompt-test",
+		Prompt:    "ongoing run",
+		Status:    db.StatusProcessing,
+	})
+
+	for _, tc := range []struct {
+		name       string
+		body       string
+		wantStatus int
+		wantSubstr string
+	}{
+		{"skip active silent prompt", `{"prompt":"test","channel_id":"1542423172400291873","session_id":"heartbeat-prompt-test","silent":true,"skip_if_active":true}`, http.StatusOK, `"status":"skipped_active"`},
+		{"do not skip when skip_if_active false", `{"prompt":"test","channel_id":"1542423172400291873","session_id":"heartbeat-prompt-test","silent":true,"skip_if_active":false}`, http.StatusAccepted, `"status":"accepted"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := runHTTP(handlePrompt(s, nil), http.MethodPost, "/prompt", strings.NewReader(tc.body))
+			if w.Code != tc.wantStatus || !strings.Contains(w.Body.String(), tc.wantSubstr) {
+				t.Fatalf("got status=%d body=%q, want status=%d substr=%q", w.Code, w.Body.String(), tc.wantStatus, tc.wantSubstr)
+			}
+		})
+	}
 }
