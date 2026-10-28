@@ -223,6 +223,9 @@ func (st *transcriptScanState) recordStep(raw rawTranscriptStep) {
 
 	// Extract Step 0 prompt shortcut
 	trimmedContent := strings.TrimSpace(raw.Content)
+	if raw.Type == "USER_INPUT" || raw.Source == "USER_EXPLICIT" {
+		trimmedContent = CleanPromptEnvelope(trimmedContent)
+	}
 	if raw.StepIndex == 0 && (raw.Type == "USER_INPUT" || raw.Source == "USER_EXPLICIT") && st.step0Prompt == "" {
 		st.step0Prompt = trimmedContent
 	} else if raw.Type == "USER_INPUT" && st.step0Prompt == "" {
@@ -361,7 +364,7 @@ func generateSettledSummaryText(
 	}
 
 	if summaryText == "" {
-		summaryText = step0Prompt
+		summaryText = CleanSessionSummary(step0Prompt, DefaultSummaryMaxRunes)
 	}
 	if summaryText == "" {
 		summaryText = fmt.Sprintf("Session %s", sessionID)

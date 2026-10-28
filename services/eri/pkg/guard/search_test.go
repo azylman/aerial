@@ -176,6 +176,7 @@ func TestCheckSearch(t *testing.T) {
 		{"mcp github get_file_contents empty args allowed", "call_mcp_tool", "get_file_contents", ``, false, ""},
 		{"mcp github get_file_contents local aerial default branch denied", "call_mcp_tool", "get_file_contents", `{"owner":"azylman","repo":"aerial","path":"services/eri/main.go"}`, true, ""},
 		{"mcp github get_file_contents local aerial-config main ref denied", "call_mcp_tool", "get_file_contents", `{"owner":"azylman","repo":"aerial-config","path":"config.yaml","ref":"main"}`, true, ""},
+		{"mcp github get_file_contents local mirrormere default branch denied", "call_mcp_tool", "get_file_contents", `{"owner":"azylman","repo":"mirrormere","path":"web/index.html"}`, true, ""},
 		{"mcp github get_file_contents aerial feature branch allowed and injects fields", "call_mcp_tool", "get_file_contents", `{"owner":"azylman","repo":"aerial","path":"services/eri","ref":"feat/branch"}`, false, `"fields":["name","type","path","size"]`},
 		{"mcp github get_file_contents external repo with fields preserved", "call_mcp_tool", "get_file_contents", `{"owner":"golang","repo":"go","path":"README.md","fields":["name","type"]}`, false, ""},
 	}
