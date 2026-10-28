@@ -142,11 +142,7 @@ func (r *Router) resolveRuntimeStatus(ctx context.Context, channelID string) str
 	}
 	if pool := r.getPool(); pool != nil {
 		for _, procPool := range pool.StatefulProcessPools() {
-			d, ok := procPool.Get(db.DiscordSessionID(channelID))
-			if !ok {
-				d, ok = procPool.Get(channelID)
-			}
-			if ok && d != nil && d.InflightCount() > 0 {
+			if d, ok := procPool.Get(db.DiscordSessionID(channelID)); ok && d != nil && d.InflightCount() > 0 {
 				return fmt.Sprintf("`Active` (Turn in progress | %s elapsed)", formatRelativeDuration(time.Since(d.LastUsed())))
 			}
 		}

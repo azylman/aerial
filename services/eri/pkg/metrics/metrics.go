@@ -558,7 +558,7 @@ func SanitizeChannelLabel(channel string) string {
 		channel = strings.TrimSpace(channel[idx+1:])
 	}
 	channel = strings.TrimPrefix(channel, "#")
-	if channel == "" || strings.HasPrefix(channel, "ephemeral-") || (len(channel) >= 36 && isUUIDString(channel[len(channel)-36:])) {
+	if channel == "" || (len(channel) >= 36 && isUUIDString(channel[len(channel)-36:])) {
 		return "unknown"
 	}
 	// Check if channel is numeric snowflake

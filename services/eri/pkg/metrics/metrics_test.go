@@ -172,7 +172,7 @@ func TestSanitizeChannelLabel(t *testing.T) {
 		{"460f77b2-927a-4c58-920a-c1f4f6119c9d", "unknown"},
 		{"session-460f77b2-927a-4c58-920a-c1f4f6119c9d", "unknown"},
 		{"460f77b2-927a-4c58-920a-c1f4f6119c9z", "460f77b2-927a-4c58-920a-c1f4f6119c9z"},
-		{"ephemeral-custom-thread", "unknown"},
+		{"dispatch:vanadis", "vanadis"},
 		{"schedule", "schedule"},
 		{"http", "http"},
 		{"chan-token-test-1", "chan-token-test-1"},

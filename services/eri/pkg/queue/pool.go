@@ -939,14 +939,8 @@ func (p *WorkerPool) CloseThreadProcesses(threadID, reason string) {
 
 	for _, target := range append(p.StatefulProcessPools(), p.ProcessPool(), p.LowEffortProcessPool(), p.MediumEffortProcessPool()) {
 		if target != nil {
-			if d, ok := target.Get(threadID); ok && d != nil {
+			if d, ok := target.Get(db.DiscordSessionID(threadID)); ok && d != nil {
 				logInterruptWarning(reason, d.Close())
-			}
-			norm := db.DiscordSessionID(threadID)
-			if norm != threadID {
-				if d, ok := target.Get(norm); ok && d != nil {
-					logInterruptWarning(reason, d.Close())
-				}
 			}
 		}
 	}
