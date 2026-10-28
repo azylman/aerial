@@ -127,22 +127,6 @@ check_rule_file_sizes() {
 # Dynamically discover all Go modules in the monorepo
 GO_SERVICES=$(cd "$REPO_ROOT" && find . -maxdepth 3 -name "go.mod" ! -path "*/.*" ! -path "*/vendor/*" | sed 's|^\./||; s|/go\.mod$||' | sort | tr '\n' ' ' | sed 's/[[:space:]]*$//')
 
-run_go_vet() {
-    svc="$1"
-    if [ -d "$svc" ]; then
-        echo "   [go vet] Checking $svc..."
-        if has_cmd go; then
-            (cd "$svc" && go vet ./...)
-        elif has_docker; then
-            docker run --rm \
-                -v aerial-go-cache:/root/.cache/go-build \
-                -v aerial-go-pkg:/go/pkg/mod \
-                -v "$(pwd)/$svc:/app" -w /app \
-                golang:1.27.1 go vet ./...
-        fi
-    fi
-}
-
 run_golangci_lint() {
     svc="$1"
     targetPkg="${2:-./...}"
@@ -158,11 +142,8 @@ run_golangci_lint() {
                 -v "$REPO_ROOT:/workspace" -w "/workspace/$svc" \
                 golangci/golangci-lint:v2.14.0 \
                 golangci-lint run --path-prefix="$svc/" --config /workspace/.golangci.yml "$targetPkg"
-        elif has_cmd go; then
-            echo "   (golangci-lint not found, running go vet for $svc)"
-            (cd "$svc" && go vet "$targetPkg")
         else
-            echo "🚨 [Aerial Verify] Error: Neither golangci-lint, docker, nor go found in PATH." >&2
+            echo "🚨 [Aerial Verify] Error: Neither golangci-lint nor docker found in PATH." >&2
             exit 1
         fi
     fi
@@ -501,6 +482,12 @@ if [ "$MODE" = "staged" ]; then
     check_rule_file_sizes
     check_no_imperative_ddl
     check_code_health
+
+    if echo "$STAGED_FILES" | grep -q -E '^(\.golangci\.yml|scripts/verify\.sh)$'; then
+        for svc in $GO_SERVICES; do
+            run_golangci_lint "$svc"
+        done
+    fi
 
     # Check Go microservices
     for svc in $GO_SERVICES; do

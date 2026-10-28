@@ -211,7 +211,7 @@ func buildBaseline(absRoot string, targets []string) (Baseline, error) {
 		Functions: make(map[string]FuncMetrics),
 	}
 	for _, rel := range targets {
-		fm, fns, skipped, err := analyzeFile(filepath.Join(absRoot, rel))
+		fm, fns, skipped, _, err := analyzeFile(filepath.Join(absRoot, rel))
 		if err != nil {
 			return b, err
 		}
@@ -247,12 +247,15 @@ func outlierFuncMetrics(m FuncMetrics) (FuncMetrics, bool) {
 func checkTargets(absRoot string, targets []string, base Baseline) ([]string, error) {
 	var violations []string
 	for _, rel := range targets {
-		fm, fns, skipped, err := analyzeFile(filepath.Join(absRoot, rel))
+		fm, fns, skipped, nolintViolations, err := analyzeFile(filepath.Join(absRoot, rel))
 		if err != nil {
 			return nil, err
 		}
 		if skipped {
 			continue
+		}
+		for _, nv := range nolintViolations {
+			violations = append(violations, fmt.Sprintf("%s: %s", rel, nv))
 		}
 		fileLimit := max(maxFileLines, base.Files[rel].Lines)
 		if fm.Lines > fileLimit {
@@ -286,13 +289,13 @@ func checkFuncMetrics(rel string, fns map[string]FuncMetrics, baseFns map[string
 	return violations
 }
 
-func analyzeFile(fullPath string) (FileMetrics, map[string]FuncMetrics, bool, error) {
+func analyzeFile(fullPath string) (FileMetrics, map[string]FuncMetrics, bool, []string, error) {
 	src, err := os.ReadFile(fullPath)
 	if err != nil {
-		return FileMetrics{}, nil, false, err
+		return FileMetrics{}, nil, false, nil, err
 	}
 	if isGeneratedSource(src) {
-		return FileMetrics{}, nil, true, nil
+		return FileMetrics{}, nil, true, nil, nil
 	}
 	lines := bytes.Count(src, []byte("\n")) + 1
 	if len(src) > 0 && src[len(src)-1] == '\n' {
@@ -300,10 +303,12 @@ func analyzeFile(fullPath string) (FileMetrics, map[string]FuncMetrics, bool, er
 	}
 
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, fullPath, src, 0)
+	f, err := parser.ParseFile(fset, fullPath, src, parser.ParseComments)
 	if err != nil {
-		return FileMetrics{}, nil, false, err
+		return FileMetrics{}, nil, false, nil, err
 	}
+
+	nolintViolations := findBannedNolints(fset, f.Comments)
 
 	fns := make(map[string]FuncMetrics)
 	counts := make(map[string]int)
@@ -324,7 +329,55 @@ func analyzeFile(fullPath string) (FileMetrics, map[string]FuncMetrics, bool, er
 			Depth: calcDepth(fn.Body, 0),
 		}
 	}
-	return FileMetrics{Lines: lines}, fns, false, nil
+	return FileMetrics{Lines: lines}, fns, false, nolintViolations, nil
+}
+
+func findBannedNolints(fset *token.FileSet, comments []*ast.CommentGroup) []string {
+	var out []string
+	for _, cg := range comments {
+		for _, c := range cg.List {
+			if reason := checkNolintComment(c.Text); reason != "" {
+				out = append(out, fmt.Sprintf("line %d: %s (%s)", fset.Position(c.Pos()).Line, strings.TrimSpace(c.Text), reason))
+			}
+		}
+	}
+	return out
+}
+
+func checkNolintComment(raw string) string {
+	text := strings.TrimPrefix(raw, "//")
+	if strings.HasPrefix(raw, "/*") {
+		text = strings.TrimSuffix(strings.TrimPrefix(raw, "/*"), "*/")
+	}
+	text = strings.TrimSpace(text)
+	if !strings.HasPrefix(text, "nolint") {
+		return ""
+	}
+	rest := text[len("nolint"):]
+	if rest != "" && rest[0] != ':' && rest[0] != ' ' && rest[0] != '\t' && !strings.HasPrefix(rest, "//") {
+		return ""
+	}
+	rest = strings.TrimSpace(rest)
+	if !strings.HasPrefix(rest, ":") {
+		return "bare //nolint directive is prohibited; specify allowed linter or handle errors"
+	}
+	linterPart := strings.TrimSpace(rest[1:])
+	if idx := strings.Index(linterPart, "//"); idx >= 0 {
+		linterPart = linterPart[:idx]
+	}
+	if fields := strings.Fields(linterPart); len(fields) > 0 {
+		linterPart = fields[0]
+	}
+	if linterPart == "" {
+		return "empty //nolint: directive is prohibited"
+	}
+	for _, tok := range strings.Split(linterPart, ",") {
+		switch strings.TrimSpace(tok) {
+		case "errcheck", "all":
+			return fmt.Sprintf("//nolint:%s is prohibited; all errors must be checked", strings.TrimSpace(tok))
+		}
+	}
+	return ""
 }
 
 func isGeneratedSource(src []byte) bool {
