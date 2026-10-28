@@ -97,6 +97,8 @@ func resolveVanadisChunkWidgetStatus(chunkStatus, prDBStatus string) string {
 		return "deployed"
 	case "deploying":
 		return "deploying"
+	case "synced":
+		return "synced"
 	case "failed":
 		return "failed"
 	case "conflict":
@@ -571,6 +573,8 @@ func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncC
 			if (chunkStatus == "failed" || chunkStatus == "conflict") && widgetStatus != "completed" {
 				widgetStatus = "failed"
 			}
+		} else if chunkStatus == "merged" {
+			chunkStatus = "deployed"
 		}
 		wChunks[i] = StatusWidgetChunk{
 			Index:     c.ChunkIndex,

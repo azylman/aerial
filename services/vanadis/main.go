@@ -690,7 +690,19 @@ func (s *VanadisServer) syncBuildWidget(ctx context.Context, build VanadisBuild,
 	}
 	wChunks := make([]StatusWidgetChunk, len(chunks))
 	for i, c := range chunks {
-		wChunks[i] = StatusWidgetChunk{Index: c.ChunkIndex, Repo: c.Repo, Title: c.Title, Status: c.Status, PRNumber: c.PRNumber, StartedAt: c.StartedAt, UpdatedAt: c.UpdatedAt}
+		chunkStatus := normalizeWidgetStatus(c.Status)
+		if chunkStatus == "merged" {
+			chunkStatus = "deployed"
+		}
+		wChunks[i] = StatusWidgetChunk{
+			Index:     c.ChunkIndex,
+			Repo:      firstNonEmpty(c.Repo, "azylman/aerial"),
+			Title:     c.Title,
+			Status:    chunkStatus,
+			PRNumber:  c.PRNumber,
+			StartedAt: c.StartedAt,
+			UpdatedAt: c.UpdatedAt,
+		}
 	}
 	payload := StatusWidgetRequest{
 		ChannelID: build.ThreadID, MessageID: build.StatusMessageID, ID: build.ID, Tier: build.Tier,

@@ -64,13 +64,13 @@ func shouldSinkWidget(s DiscordWidgetSender, channelID, messageID string) bool {
 func AccentColor(status string) int {
 	norm := strings.ToLower(strings.TrimSpace(status))
 	switch norm {
-	case "completed", "merged", "deployed", "success", "green":
+	case "completed", "deployed", "success", "green":
 		return 0x10B981 // emerald
 	case "failed", "conflict", "closed", "error", "cancelled_error":
 		return 0xEF4444 // crimson
 	case "paused", "stalled", "cancelled":
 		return 0xF59E0B // amber
-	case "running", "coding", "deploying", "open", "pr_opened", "pending":
+	case "running", "coding", "deploying", "open", "pr_opened", "merged", "synced", "pending":
 		fallthrough
 	default:
 		return 0xA855F7 // purple
@@ -84,9 +84,13 @@ func statusBadge(status string) string {
 		return "🔨"
 	case "pr_opened", "open":
 		return "👀"
+	case "merged":
+		return "🔀"
+	case "synced":
+		return "🔄"
 	case "deploying":
 		return "🚀"
-	case "merged", "deployed", "completed", "success":
+	case "deployed", "completed", "success":
 		return "✅"
 	case "failed", "conflict", "error":
 		return "❌"
@@ -141,9 +145,9 @@ func formatChunkRuntimeSuffix(c StatusWidgetChunk) string {
 	}
 	norm := strings.ToLower(strings.TrimSpace(c.Status))
 	switch norm {
-	case "running", "coding", "pr_opened", "open", "deploying":
+	case "running", "coding", "pr_opened", "open", "merged", "synced", "deploying":
 		return fmt.Sprintf(" *(started <t:%d:R>)*", c.StartedAt.Unix())
-	case "merged", "deployed", "completed", "success", "failed", "conflict", "closed", "error", "cancelled":
+	case "deployed", "completed", "success", "failed", "conflict", "closed", "error", "cancelled":
 		if c.UpdatedAt.IsZero() {
 			return ""
 		}

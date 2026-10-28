@@ -540,10 +540,23 @@ func TestProcessGitHubEvent(t *testing.T) {
 			wantPR:  220, wantMergedCalls: 1, wantAdvanceCalls: 1,
 		},
 		{
+			name: "merged PR on mirrormere without expected deploy jobs for Vanadis PR advances and syncs deployed widget", event: "pull_request", delivery: "del-pr-mirrormere-no-expected",
+			payload: `{"action":"closed","number":221,"pull_request":{"number":221,"head":{"ref":"feat/ui-no-deploy","sha":"head221"},"merged":true,"merge_commit_sha":"merge221"},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
+			reg:     &mockPRRegistry{mergedTargetID: "1562162630997581946", hasExpectedRes: false, suppressVanadisRes: true},
+			disp:    &mockOutboundDispatcher{},
+			wantPR:  221, wantMergedCalls: 1, wantAdvanceCalls: 1,
+		},
+		{
 			name: "push to aerial-sidecars with expected deploy jobs advances Vanadis on landing", event: "push", delivery: "del-push-sidecars-expected",
 			payload: `{"ref":"refs/heads/main","after":"sidecarsha9","repository":{"full_name":"azylman/aerial-sidecars"},"head_commit":{"id":"sidecarsha9","message":"feat: merged sidecar (#320)"}}`,
 			reg:     &mockPRRegistry{resolvePRNum: 320, resolveBranch: "feat/sidecar", resolveTargetID: "target-sidecars", backfillTargetID: "target-sidecars", hasExpectedRes: true},
 			wantPR:  320, wantMergeSHA: "sidecarsha9", wantSource: "local_pr_registry", wantBackfillCalls: 1, wantAdvanceCalls: 1,
+		},
+		{
+			name: "push to aerial-sidecars without expected deploy jobs advances Vanadis on landing", event: "push", delivery: "del-push-sidecars-no-expected",
+			payload: `{"ref":"refs/heads/main","after":"sidecarsha10","repository":{"full_name":"azylman/aerial-sidecars"},"head_commit":{"id":"sidecarsha10","message":"feat: merged sidecar (#321)"}}`,
+			reg:     &mockPRRegistry{resolvePRNum: 321, resolveBranch: "feat/sidecar-nodeploy", resolveTargetID: "target-sidecars", backfillTargetID: "target-sidecars", hasExpectedRes: false, suppressVanadisRes: true},
+			wantPR:  321, wantMergeSHA: "sidecarsha10", wantSource: "local_pr_registry", wantBackfillCalls: 1, wantAdvanceCalls: 1,
 		},
 	}
 
