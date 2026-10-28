@@ -36,20 +36,21 @@ func resolveMessageEffort(m db.Message) string {
 }
 
 func (p *WorkerPool) resolveScopeKey(m db.Message) string {
+	baseKey := db.DiscordSessionID(m.ThreadID)
 	k, err := ResolvePoolKey(m.Ephemeral, resolveMessageEffort(m))
 	if err == nil && p != nil && p.Pool(k) != nil {
 		switch k {
 		case PoolKey{Ephemeral: true, Effort: "low"}:
-			return "low_effort:" + m.ThreadID
+			return "low_effort:" + baseKey
 		case PoolKey{Ephemeral: true, Effort: "medium"}:
-			return "medium_effort:" + m.ThreadID
+			return "medium_effort:" + baseKey
 		case PoolKey{Ephemeral: false, Effort: "low"}:
-			return "stateful_low:" + m.ThreadID
+			return "stateful_low:" + baseKey
 		case PoolKey{Ephemeral: false, Effort: "medium"}:
-			return "stateful_medium:" + m.ThreadID
+			return "stateful_medium:" + baseKey
 		}
 	}
-	return m.ThreadID
+	return baseKey
 }
 
 // EnqueueBurst atomically enqueues multiple messages for a thread into the queue.
@@ -74,21 +75,23 @@ func (p *WorkerPool) EnqueueBurst(msgs ...db.Message) {
 		scopeKey := p.resolveScopeKey(msg)
 		state, exists := p.threadChs[scopeKey]
 		if !exists {
-			state = &threadWorkerState{ch: make(chan db.Message, 100)}
+			state = &threadWorkerState{ch: make(chan queueItem, 100)}
 			p.threadChs[scopeKey] = state
 			p.wg.Add(1)
 			newWorkers = append(newWorkers, newWorker{scopeKey: scopeKey, state: state})
 		}
 
+		mCopy := msg
+		item := queueItem{msg: &mCopy}
 		select {
-		case state.ch <- msg:
+		case state.ch <- item:
 			metrics.QueueDepth.Inc()
 		default:
 			state.activeEnqueuers++
 			ch := state.ch
 			p.mu.Unlock()
 			select {
-			case ch <- msg:
+			case ch <- item:
 				metrics.QueueDepth.Inc()
 			case <-p.ctx.Done():
 				log.Printf("[WorkerPool] Context cancelled while enqueuing message %s", msg.ID)
@@ -100,6 +103,56 @@ func (p *WorkerPool) EnqueueBurst(msgs ...db.Message) {
 	p.mu.Unlock()
 
 	for _, nw := range newWorkers {
+		go p.runThreadWorker(nw.scopeKey, nw.state)
+	}
+}
+
+// EnqueueDispatch atomically enqueues a headless dispatch run into the queue.
+func (p *WorkerPool) EnqueueDispatch(d db.Dispatch) {
+	p.mu.Lock()
+	if p.stopped {
+		p.mu.Unlock()
+		log.Printf("[WorkerPool] Warning: attempted to enqueue dispatch %s to stopped pool", d.ID)
+		return
+	}
+	scopeKey := strings.TrimSpace(d.SessionID)
+	if scopeKey == "" {
+		scopeKey = "dispatch-" + d.ID
+	}
+	state, exists := p.threadChs[scopeKey]
+	type newWorker struct {
+		scopeKey string
+		state    *threadWorkerState
+	}
+	var nw *newWorker
+	if !exists {
+		state = &threadWorkerState{ch: make(chan queueItem, 100)}
+		p.threadChs[scopeKey] = state
+		p.wg.Add(1)
+		nw = &newWorker{scopeKey: scopeKey, state: state}
+	}
+
+	dCopy := d
+	item := queueItem{dispatch: &dCopy}
+	select {
+	case state.ch <- item:
+		metrics.QueueDepth.Inc()
+	default:
+		state.activeEnqueuers++
+		ch := state.ch
+		p.mu.Unlock()
+		select {
+		case ch <- item:
+			metrics.QueueDepth.Inc()
+		case <-p.ctx.Done():
+			log.Printf("[WorkerPool] Context cancelled while enqueuing dispatch %s", d.ID)
+		}
+		p.mu.Lock()
+		state.activeEnqueuers--
+	}
+	p.mu.Unlock()
+
+	if nw != nil {
 		go p.runThreadWorker(nw.scopeKey, nw.state)
 	}
 }
@@ -119,65 +172,106 @@ func (p *WorkerPool) runThreadWorker(scopeKey string, state *threadWorkerState) 
 	idleTimer := time.NewTimer(idleTimeout)
 	defer idleTimer.Stop()
 
+	var heldItem *queueItem
+
 	for {
-		select {
-		case <-p.ctx.Done():
-			return
-		case msg, ok := <-state.ch:
-			if !ok {
+		var item queueItem
+		if heldItem != nil {
+			item = *heldItem
+			heldItem = nil
+		} else {
+			select {
+			case <-p.ctx.Done():
 				return
-			}
-			if !idleTimer.Stop() {
-				select {
-				case <-idleTimer.C:
-				default:
+			case popped, ok := <-state.ch:
+				if !ok {
+					return
 				}
-			}
-			idleTimer.Reset(idleTimeout)
-
-			metrics.QueueDepth.Dec()
-			burst := []db.Message{msg}
-
-			p.mu.Lock()
-			state.inFlight = true
-		DrainLoop:
-			for len(burst) < 5 {
-				select {
-				case extra := <-state.ch:
-					metrics.QueueDepth.Dec()
-					burst = append(burst, extra)
-				default:
-					break DrainLoop
+				metrics.QueueDepth.Dec()
+				item = popped
+			case <-idleTimer.C:
+				p.mu.Lock()
+				if len(state.ch) == 0 && heldItem == nil && state.activeEnqueuers == 0 {
+					delete(p.threadChs, scopeKey)
+					p.scopeLocks.Delete(scopeKey)
+					p.mu.Unlock()
+					return
 				}
-			}
-			p.mu.Unlock()
-
-			p.processBurst(burst, scopeKey)
-
-			p.mu.Lock()
-			state.inFlight = false
-			p.mu.Unlock()
-
-			if !idleTimer.Stop() {
-				select {
-				case <-idleTimer.C:
-				default:
-				}
-			}
-			idleTimer.Reset(idleTimeout)
-
-		case <-idleTimer.C:
-			p.mu.Lock()
-			if len(state.ch) == 0 && state.activeEnqueuers == 0 {
-				delete(p.threadChs, scopeKey)
-				p.scopeLocks.Delete(scopeKey)
 				p.mu.Unlock()
-				return
+				idleTimer.Reset(idleTimeout)
+				continue
 			}
-			p.mu.Unlock()
-			idleTimer.Reset(idleTimeout)
+		}
+
+		if !idleTimer.Stop() {
+			select {
+			case <-idleTimer.C:
+			default:
+			}
+		}
+		idleTimer.Reset(idleTimeout)
+
+		if item.dispatch != nil {
+			p.executeWorkerDispatch(state, item.dispatch, scopeKey)
+		} else if item.msg != nil {
+			heldItem = p.executeWorkerBurst(state, *item.msg, scopeKey)
+		}
+
+		if !idleTimer.Stop() {
+			select {
+			case <-idleTimer.C:
+			default:
+			}
+		}
+		idleTimer.Reset(idleTimeout)
+	}
+}
+
+func (p *WorkerPool) executeWorkerDispatch(state *threadWorkerState, d *db.Dispatch, scopeKey string) {
+	p.mu.Lock()
+	state.inFlight = true
+	p.mu.Unlock()
+
+	p.processDispatch(*d, scopeKey)
+
+	p.mu.Lock()
+	state.inFlight = false
+	p.mu.Unlock()
+}
+
+func drainBurstMessages(state *threadWorkerState, initial db.Message) ([]db.Message, *queueItem) {
+	burst := []db.Message{initial}
+	for len(burst) < 5 {
+		select {
+		case extra := <-state.ch:
+			metrics.QueueDepth.Dec()
+			if extra.dispatch != nil {
+				extraCopy := extra
+				return burst, &extraCopy
+			}
+			if extra.msg != nil {
+				burst = append(burst, *extra.msg)
+			}
+		default:
+			return burst, nil
 		}
 	}
+	return burst, nil
+}
+
+func (p *WorkerPool) executeWorkerBurst(state *threadWorkerState, initial db.Message, scopeKey string) *queueItem {
+	p.mu.Lock()
+	state.inFlight = true
+	burst, heldItem := drainBurstMessages(state, initial)
+	p.mu.Unlock()
+
+	p.processBurst(burst, scopeKey)
+
+	p.mu.Lock()
+	state.inFlight = false
+	p.mu.Unlock()
+
+	return heldItem
 }
 
 // FormatSingleDiscordPrompt formats a single structured Discord message into the canonical <USER_REQUEST> prompt envelope JIT.
@@ -653,12 +747,50 @@ func isBurstEphemeral(burst []db.Message) bool {
 	return err != nil || k.Ephemeral
 }
 
-func (te *turnExecution) resolveExecutionPool() (runner.AgentPool, PoolKey, error) {
-	var burst []db.Message
-	if te != nil {
-		burst = te.burst
+func resolveDispatchEffort(d db.Dispatch, isEphem bool) string {
+	eff := strings.ToLower(strings.TrimSpace(d.Effort))
+	if eff == "" {
+		model := strings.ToLower(strings.TrimSpace(d.Model))
+		if strings.Contains(model, "medium") {
+			eff = "medium"
+		} else if strings.Contains(model, "flash") {
+			eff = "low"
+		} else if strings.Contains(model, "pro") {
+			eff = "high"
+		} else if isEphem {
+			eff = "medium"
+		} else {
+			eff = "low"
+		}
 	}
-	k, err := resolveBurstPoolKey(burst)
+	if isEphem && eff == "high" {
+		eff = "medium"
+	}
+	switch eff {
+	case "low", "medium", "high":
+		return eff
+	default:
+		if isEphem {
+			return "medium"
+		}
+		return "low"
+	}
+}
+
+func (te *turnExecution) resolveExecutionPool() (runner.AgentPool, PoolKey, error) {
+	var k PoolKey
+	var err error
+	if te != nil && te.dispatch != nil {
+		isEphem := strings.TrimSpace(te.dispatch.SessionID) == ""
+		eff := resolveDispatchEffort(*te.dispatch, isEphem)
+		k, err = ResolvePoolKey(&isEphem, eff)
+	} else {
+		var burst []db.Message
+		if te != nil {
+			burst = te.burst
+		}
+		k, err = resolveBurstPoolKey(burst)
+	}
 	if err != nil {
 		return nil, k, err
 	}

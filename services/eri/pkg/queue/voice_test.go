@@ -795,8 +795,9 @@ func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
 	p.processBurst(nil)
 	p.processBurst([]db.Message{})
 	p.cancel()
-	stF := &threadWorkerState{ch: make(chan db.Message, 1)}
-	stF.ch <- db.Message{ID: "m0"}
+	stF := &threadWorkerState{ch: make(chan queueItem, 1)}
+	msg0 := db.Message{ID: "m0"}
+	stF.ch <- queueItem{msg: &msg0}
 	p.threadChs["t-full"] = stF
 	p.EnqueueBurst(db.Message{ID: "m-blocked", ThreadID: "t-full"})
 	p.StopWithTimeout(10 * time.Millisecond)

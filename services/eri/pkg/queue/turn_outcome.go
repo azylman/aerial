@@ -20,6 +20,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/notifier"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
+	"github.com/azylman/aerial/services/eri/pkg/session"
 	"github.com/google/uuid"
 )
 
@@ -105,6 +106,9 @@ func (te *turnExecution) handleRetryBackoff(attempt, maxAttempts int, errDetail,
 	for _, m := range te.burst {
 		te.incrementMessageRetry(m.ID, errDetail)
 	}
+	if te.dispatch != nil {
+		te.incrementDispatchRetry(te.dispatch.ID, errDetail)
+	}
 	if attempt >= maxAttempts {
 		return false
 	}
@@ -157,23 +161,14 @@ func (te *turnExecution) deliverSuccessAndFinalize(resp *runner.AgyResponse, acc
 	cleanText, attachments := delivery.ExtractAndSanitizeMedia(resp.Response, baseDir)
 	attachments = delivery.AutoAttachNewMedia(baseDir, te.execStart, attachments)
 
-	isSilent := extractBurstSilent(te.burst)
+	isSilent := te.dispatch != nil || extractBurstSilent(te.burst)
 	if !isSilent && strings.TrimSpace(cleanText) == "" && len(attachments) == 0 {
 		log.Printf("[Queue] Agent produced empty response for thread %s on attempt %d/%d; treating as failure", te.threadID, attempt, maxAttempts)
 		return false, "agent produced empty response"
 	}
 
 	if !isSilent {
-		deliveryTarget := te.deliveryTargetID()
-		var deliveryErr error
-		if te.pool.cfg.DeliveryWithAttachmentsFunc != nil {
-			deliveryErr = te.pool.cfg.DeliveryWithAttachmentsFunc(te.pool.getDiscordSession(), deliveryTarget, cleanText, attachments)
-		} else if te.pool.cfg.DeliveryFunc != nil {
-			deliveryErr = te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), deliveryTarget, cleanText)
-		}
-		if deliveryErr != nil {
-			log.Printf("[WorkerPool] Failed to deliver response for thread %s: %v", te.threadID, deliveryErr)
-		}
+		te.deliverDiscordSuccess(cleanText, attachments)
 	}
 
 	resp.Usage.InputTokens += accumulatedUsage.InputTokens
@@ -183,6 +178,35 @@ func (te *turnExecution) deliverSuccessAndFinalize(resp *runner.AgyResponse, acc
 	resp.Usage.TotalTokens += accumulatedUsage.TotalTokens
 
 	metrics.RecordTurnCompleted("success", te.triggerType, currentModel, time.Since(te.execStart))
+	tokenChannel := te.resolveTokenChannel()
+	metrics.RecordTokens(currentModel, tokenChannel, resp.Usage.InputTokens, resp.Usage.OutputTokens, resp.Usage.ThinkingTokens, resp.Usage.CacheReadTokens, resp.Usage.TotalTokens)
+	te.turnStatus, te.turnResponseText, te.turnTokenUsage, te.turnDurationMs = "success", cleanText, resp.Usage, time.Since(te.execStart).Milliseconds()
+	te.finalizeBurstMessages(te.burst, db.StatusCompleted, cleanText, "completed", "", currentModel, true, true)
+
+	te.handleDispatchSessionRotation()
+
+	if te.dispatch != nil {
+		log.Printf("[WorkerPool] Dispatch %s (session: %s) completed successfully on attempt %d/%d", te.dispatch.ID, te.threadID, attempt, maxAttempts)
+	} else {
+		log.Printf("[WorkerPool] %d message(s) in thread %s completed successfully on attempt %d/%d", len(te.burst), te.threadID, attempt, maxAttempts)
+	}
+	return true, ""
+}
+
+func (te *turnExecution) deliverDiscordSuccess(cleanText string, attachments []*delivery.Attachment) {
+	deliveryTarget := te.deliveryTargetID()
+	var deliveryErr error
+	if te.pool.cfg.DeliveryWithAttachmentsFunc != nil {
+		deliveryErr = te.pool.cfg.DeliveryWithAttachmentsFunc(te.pool.getDiscordSession(), deliveryTarget, cleanText, attachments)
+	} else if te.pool.cfg.DeliveryFunc != nil {
+		deliveryErr = te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), deliveryTarget, cleanText)
+	}
+	if deliveryErr != nil {
+		log.Printf("[WorkerPool] Failed to deliver response for thread %s: %v", te.threadID, deliveryErr)
+	}
+}
+
+func (te *turnExecution) resolveTokenChannel() string {
 	tokenChannel := te.effectiveName
 	if tokenChannel == "" && len(te.burst) > 0 {
 		tokenChannel = te.burst[0].ChannelName
@@ -194,15 +218,25 @@ func (te *turnExecution) deliverSuccessAndFinalize(resp *runner.AgyResponse, acc
 			tokenChannel = te.threadID
 		}
 	}
-	metrics.RecordTokens(currentModel, tokenChannel, resp.Usage.InputTokens, resp.Usage.OutputTokens, resp.Usage.ThinkingTokens, resp.Usage.CacheReadTokens, resp.Usage.TotalTokens)
-	te.turnStatus, te.turnResponseText, te.turnTokenUsage, te.turnDurationMs = "success", cleanText, resp.Usage, time.Since(te.execStart).Milliseconds()
-	te.finalizeBurstMessages(te.burst, db.StatusCompleted, cleanText, "completed", "", currentModel, true, true)
-	log.Printf("[WorkerPool] %d message(s) in thread %s completed successfully on attempt %d/%d", len(te.burst), te.threadID, attempt, maxAttempts)
-	return true, ""
+	return tokenChannel
+}
+
+func (te *turnExecution) handleDispatchSessionRotation() {
+	if te.dispatch == nil || te.isEphemeral {
+		return
+	}
+	newTurns, err := te.incrementSessionTurnCount(te.threadID)
+	if err == nil && newTurns >= session.DefaultMaxSessionTurns {
+		log.Printf("[WorkerPool] Dispatch session %s reached %d turns >= max %d. Rotating session.", te.threadID, newTurns, session.DefaultMaxSessionTurns)
+		te.rotateSessionID(te.threadID, "")
+	}
 }
 
 func (te *turnExecution) deliverQuotaNotice(pauseMsg string, logPrefix string) {
-	if te.pool != nil && te.pool.cfg.DeliveryFunc != nil && !extractBurstSilent(te.burst) {
+	if te.dispatch != nil || te.pool == nil || te.pool.cfg.DeliveryFunc == nil || extractBurstSilent(te.burst) {
+		return
+	}
+	if true {
 		deliveryTarget := te.deliveryTargetID()
 		if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), deliveryTarget, pauseMsg); err != nil {
 			log.Printf("[WorkerPool] Failed to deliver %s for thread %s: %v", logPrefix, te.threadID, err)
@@ -217,6 +251,9 @@ func (te *turnExecution) handleQuotaPause(errDetail, stderr, currentModel, burst
 		if attempt < maxAttempts {
 			for _, m := range te.burst {
 				te.incrementMessageRetry(m.ID, errDetail)
+			}
+			if te.dispatch != nil {
+				te.incrementDispatchRetry(te.dispatch.ID, errDetail)
 			}
 			delay := calculateCapacityBackoff(attempt, resetDur)
 			if te.pool != nil && te.pool.cfg.RetryDelayOverride > 0 {
@@ -402,11 +439,19 @@ func (te *turnExecution) cancelBurstOnShutdown(turnStatus, currentModel string, 
 		runErr = "context cancelled during execution"
 	}
 	te.turnDurationMs = time.Since(te.execStart).Milliseconds()
+	if te.dispatch != nil {
+		if s := te.store(); s != nil {
+			if err := s.ResetDispatchToPendingWithRestart(context.Background(), te.dispatch.ID, "interrupted by graceful deployment"); err != nil {
+				log.Printf("[WorkerPool] Warning resetting dispatch %s to pending: %v", te.dispatch.ID, err)
+			}
+		}
+		return
+	}
 	te.finalizeBurstMessages(te.burst, db.StatusPending, "interrupted by graceful deployment", runStatus, runErr, currentModel, false, false)
 }
 
 func (te *turnExecution) deliverFailureNotice(agyBin, apiKey, errDetail, stderr, descPrefix, logLabel string) {
-	if te.pool == nil || te.pool.cfg.DeliveryFunc == nil || extractBurstSilent(te.burst) {
+	if te.dispatch != nil || te.pool == nil || te.pool.cfg.DeliveryFunc == nil || extractBurstSilent(te.burst) {
 		return
 	}
 	var notif string

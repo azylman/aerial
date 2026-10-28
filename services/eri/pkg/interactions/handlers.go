@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
+	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/bwmarrin/discordgo"
@@ -141,7 +142,11 @@ func (r *Router) resolveRuntimeStatus(ctx context.Context, channelID string) str
 	}
 	if pool := r.getPool(); pool != nil {
 		for _, procPool := range pool.StatefulProcessPools() {
-			if d, ok := procPool.Get(channelID); ok && d != nil && d.InflightCount() > 0 {
+			d, ok := procPool.Get(db.DiscordSessionID(channelID))
+			if !ok {
+				d, ok = procPool.Get(channelID)
+			}
+			if ok && d != nil && d.InflightCount() > 0 {
 				return fmt.Sprintf("`Active` (Turn in progress | %s elapsed)", formatRelativeDuration(time.Since(d.LastUsed())))
 			}
 		}

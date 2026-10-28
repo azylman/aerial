@@ -23,6 +23,7 @@ type turnExecution struct {
 	pool                                                                                        *WorkerPool
 	activePool                                                                                  runner.AgentPool
 	burst, trailingMsgs                                                                         []db.Message
+	dispatch                                                                                    *db.Dispatch
 	threadID, triggerType, activeSessionID, currentSessionID, previousSessionID, leaseSessionID string
 	effectiveID, effectiveName, threadName, turnPrompt, turnStatus, turnResponseText            string
 	turnError, injectedHookContext                                                              string
@@ -41,6 +42,16 @@ type turnExecution struct {
 	turnCtx                                                                                     context.Context
 	turnCancel                                                                                  context.CancelFunc
 	interrupted                                                                                 atomic.Bool
+}
+
+func (te *turnExecution) leaseKey() string {
+	if te == nil {
+		return ""
+	}
+	if te.dispatch != nil {
+		return te.threadID
+	}
+	return db.DiscordSessionID(te.threadID)
 }
 
 func (te *turnExecution) turnCtxValue() context.Context {
@@ -91,8 +102,36 @@ func (te *turnExecution) updateMessageStatus(id, status string, errorMsg ...stri
 
 func (te *turnExecution) updateMessageCompleted(id, responseText string) {
 	if s := te.store(); s != nil {
-		if err := s.UpdateMessageCompleted(context.Background(), id, responseText); err != nil {
+		if err := s.UpdateMessageCompleted(context.Background(), id, responseText, te.currentSessionID); err != nil {
 			log.Printf("[Worker] Warning updating message %s completed: %v", id, err)
+		}
+	}
+}
+
+func (te *turnExecution) updateDispatchCompleted(id, responseText string) {
+	if s := te.store(); s != nil {
+		if err := s.UpdateDispatchCompleted(context.Background(), id, responseText, te.currentSessionID); err != nil {
+			log.Printf("[Worker] Warning updating dispatch %s completed: %v", id, err)
+		}
+	}
+}
+
+func (te *turnExecution) updateDispatchStatus(id, status string, errorMsg ...string) {
+	errMsg := ""
+	if len(errorMsg) > 0 {
+		errMsg = errorMsg[0]
+	}
+	if s := te.store(); s != nil {
+		if err := s.UpdateDispatchStatus(context.Background(), id, status, errMsg); err != nil {
+			log.Printf("[Worker] Warning updating dispatch %s status to %s: %v", id, status, err)
+		}
+	}
+}
+
+func (te *turnExecution) incrementDispatchRetry(id, errorMsg string) {
+	if s := te.store(); s != nil {
+		if err := s.IncrementDispatchRetry(context.Background(), id, errorMsg); err != nil {
+			log.Printf("[Worker] Warning incrementing retry for dispatch %s: %v", id, err)
 		}
 	}
 }
@@ -129,6 +168,14 @@ func (te *turnExecution) rotateSessionID(threadID, newSessionID string) {
 
 //nolint:unparam
 func (te *turnExecution) finalizeBurstMessages(msgs []db.Message, msgStatus, msgOutput, runStatus, runErr, model string, notify, isResponse bool) {
+	if te != nil && te.dispatch != nil {
+		if isResponse {
+			te.updateDispatchCompleted(te.dispatch.ID, msgOutput)
+		} else {
+			te.updateDispatchStatus(te.dispatch.ID, msgStatus, msgOutput)
+		}
+		return
+	}
 	for _, m := range msgs {
 		if isResponse {
 			te.updateMessageCompleted(m.ID, msgOutput)
@@ -142,7 +189,10 @@ func (te *turnExecution) finalizeBurstMessages(msgs []db.Message, msgStatus, msg
 }
 
 func (te *turnExecution) incrementSessionTurnCount(threadID string) (int, error) {
-	if te == nil || te.isEphemeral || isBurstEphemeral(te.burst) {
+	if te == nil || te.isEphemeral {
+		return 0, nil
+	}
+	if te.dispatch == nil && isBurstEphemeral(te.burst) {
 		return 0, nil
 	}
 	if s := te.store(); s != nil {
@@ -253,7 +303,8 @@ func (te *turnExecution) acquirePoolAndLease() bool {
 
 	// 2. Acquire exclusive session lease before prompt construction
 	leaseCtx, leaseCancel := context.WithTimeout(te.turnCtxValue(), 65*time.Second)
-	lease, leaseErr := activePool.AcquireLease(leaseCtx, te.threadID)
+	leaseKey := te.leaseKey()
+	lease, leaseErr := activePool.AcquireLease(leaseCtx, leaseKey)
 	leaseCancel()
 	if leaseErr != nil || te.isInterrupted() {
 		if lease != nil {
@@ -358,6 +409,82 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 
 	te.turnAttempted = true
 	te.buildTurnPrompt()
+	te.executeWithRetries()
+}
+
+func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
+	if p.ctx.Err() != nil {
+		return
+	}
+
+	metrics.ActiveWorkers.Inc()
+	defer metrics.ActiveWorkers.Dec()
+
+	lockVal, _ := p.scopeLocks.LoadOrStore(scopeKey, &sync.Mutex{})
+	scopeLock, ok := lockVal.(*sync.Mutex)
+	if !ok {
+		scopeLock = &sync.Mutex{}
+		p.scopeLocks.Store(scopeKey, scopeLock)
+	}
+	scopeLock.Lock()
+	defer scopeLock.Unlock()
+
+	if p.cfg.Store == nil {
+		log.Printf("[WorkerPool] Store is nil, dropping dispatch %s", d.ID)
+		return
+	}
+	claimed, claimErr := p.cfg.Store.ClaimPendingDispatch(p.ctx, d.ID)
+	if claimErr != nil || !claimed {
+		if claimErr != nil {
+			log.Printf("[WorkerPool] Failed to claim dispatch %s: %v", d.ID, claimErr)
+		}
+		return
+	}
+
+	isEphem := strings.TrimSpace(d.SessionID) == ""
+	leaseKey := d.SessionID
+	if isEphem {
+		leaseKey = "dispatch-" + d.ID
+	}
+
+	turnCtx, turnCancel := context.WithCancel(p.ctx)
+	defer turnCancel()
+
+	te := &turnExecution{
+		pool:        p,
+		dispatch:    &d,
+		threadID:    leaseKey,
+		triggerType: "dispatch:" + d.Source,
+		execStart:   time.Now().UTC(),
+		wakeIdx:     -1,
+		isEphemeral: isEphem,
+		stopTyping:  func() {},
+		turnCtx:     turnCtx,
+		turnCancel:  turnCancel,
+	}
+
+	p.registerActiveTurn(scopeKey, te)
+	defer p.unregisterActiveTurn(scopeKey, te)
+
+	defer func() {
+		if r := recover(); r != nil {
+			te.handleBurstPanic(r)
+		}
+	}()
+
+	if !te.acquirePoolAndLease() {
+		return
+	}
+	defer func() {
+		if te.lease != nil {
+			if relErr := te.lease.Release(); relErr != nil {
+				log.Printf("[WorkerPool] Warning releasing lease for %s: %v", te.threadID, relErr)
+			}
+		}
+	}()
+
+	te.turnAttempted = true
+	te.turnPrompt = te.buildDispatchPrompt()
 	te.executeWithRetries()
 }
 
@@ -883,6 +1010,9 @@ func (te *turnExecution) handleWatchdogFailure(attempt, maxAttempts int, current
 	for _, m := range te.burst {
 		te.incrementMessageRetry(m.ID, errDetail)
 	}
+	if te.dispatch != nil {
+		te.incrementDispatchRetry(te.dispatch.ID, errDetail)
+	}
 	te.stopIndicators()
 
 	if te.pool.ctx.Err() != nil {
@@ -989,6 +1119,9 @@ func (te *turnExecution) handleNonTransientFailure(attempt, maxAttempts int, cur
 	for _, m := range te.burst {
 		te.incrementMessageRetry(m.ID, errDetail)
 	}
+	if te.dispatch != nil {
+		te.incrementDispatchRetry(te.dispatch.ID, errDetail)
+	}
 	te.failBurstWithStatus("failed", errDetail, currentModel)
 	log.Printf("[WorkerPool] %d message(s) in thread %s marked FAILED due to non-transient error (attempt %d/%d): %s", len(te.burst), te.threadID, attempt, maxAttempts, errDetail)
 }
@@ -1091,6 +1224,9 @@ func (te *turnExecution) executeWithRetries() {
 	currentModel := te.pool.GetRuntimeConfig()
 
 	initialRetryCount := maxBurstRetryCount(te.burst)
+	if te.dispatch != nil {
+		initialRetryCount = te.dispatch.RetryCount
+	}
 
 	attemptCfg := te.resolveAttemptConfig(0)
 	currentAgyBin := attemptCfg.agyBin
@@ -1111,6 +1247,9 @@ func (te *turnExecution) executeWithRetries() {
 		currentAgyBin = cfg.agyBin
 		currentAPIKey = cfg.apiKey
 		burstEffort := resolveBurstEffort(te.burst)
+		if te.dispatch != nil {
+			burstEffort = resolveDispatchEffort(*te.dispatch, te.isEphemeral)
+		}
 
 		if te.checkGlobalQuotaLockout(currentAPIKey, currentModel) {
 			return

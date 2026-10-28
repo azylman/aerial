@@ -3230,3 +3230,550 @@ func TestTurnExecution_FailureResetsActiveSessionID(t *testing.T) {
 		})
 	}
 }
+
+func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		source       string
+		sessionID    string
+		prompt       string
+		respJSON     string
+		wantStatus   string
+		wantRespText string
+	}{
+		{
+			name:         "ephemeral vanadis chunk",
+			source:       "vanadis",
+			sessionID:    "",
+			prompt:       "[VANADIS BUILD CHUNK EXECUTION] Chunk 2",
+			respJSON:     `{"conversation_id":"99999999-9999-9999-9999-999999999999","status":"SUCCESS","response":"chunk 2 passed"}`,
+			wantStatus:   db.StatusCompleted,
+			wantRespText: "chunk 2 passed",
+		},
+		{
+			name:         "stateful heartbeat run",
+			source:       "heartbeat",
+			sessionID:    "heartbeat-health",
+			prompt:       "run health heartbeat",
+			respJSON:     `{"conversation_id":"88888888-8888-8888-8888-888888888888","status":"SUCCESS","response":"all systems normal"}`,
+			wantStatus:   db.StatusCompleted,
+			wantRespText: "all systems normal",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := dbtest.NewFakeStore()
+			doneCh := make(chan struct{})
+			pool := NewWorkerPool(WorkerPoolConfig{
+				Store:          store,
+				TimeoutMinutes: 1,
+				DeliveryFunc: func(s *discordgo.Session, c, text string) error {
+					t.Errorf("unexpected Discord DeliveryFunc call for headless dispatch")
+					return nil
+				},
+				TypingFunc: func(s *discordgo.Session, c string) func() {
+					t.Errorf("unexpected Discord TypingFunc call for headless dispatch")
+					return func() {}
+				},
+				RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+					defer close(doneCh)
+					return tc.respJSON, "", 0, nil
+				},
+			})
+			defer pool.Stop()
+
+			disp := db.Dispatch{
+				ID:        uuid.New().String(),
+				Source:    tc.source,
+				SessionID: tc.sessionID,
+				Prompt:    tc.prompt,
+				Status:    db.StatusPending,
+				CreatedAt: time.Now().UTC(),
+				UpdatedAt: time.Now().UTC(),
+			}
+			_ = store.InsertDispatch(context.Background(), disp)
+			pool.EnqueueDispatch(disp)
+
+			select {
+			case <-doneCh:
+			case <-time.After(3 * time.Second):
+				t.Fatalf("timeout waiting for dispatch runner execution")
+			}
+
+			for range 50 {
+				d, err := store.GetDispatch(context.Background(), disp.ID)
+				if err == nil && d != nil && d.Status == tc.wantStatus {
+					if d.ResponseText != tc.wantRespText {
+						t.Fatalf("response text mismatch: got %q, want %q", d.ResponseText, tc.wantRespText)
+					}
+					return
+				}
+				time.Sleep(5 * time.Millisecond)
+			}
+			t.Fatalf("dispatch %s did not reach status %s", disp.ID, tc.wantStatus)
+		})
+	}
+}
+
+func TestDispatchExecution_ColdStartAndRotation(t *testing.T) {
+	t.Parallel()
+	store := dbtest.NewFakeStore()
+	ctx := context.Background()
+
+	_ = store.InsertDispatch(ctx, db.Dispatch{
+		ID:        "prev-run-1",
+		Source:    "heartbeat",
+		SessionID: "heartbeat-rot",
+		Prompt:    "initial check",
+		Summary:   "checked cluster status",
+		Status:    db.StatusCompleted,
+		CreatedAt: time.Now().UTC().Add(-10 * time.Minute),
+	})
+
+	var capturedPrompt string
+	var promptMu sync.Mutex
+	doneCh := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		Store:          store,
+		TimeoutMinutes: 1,
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			promptMu.Lock()
+			capturedPrompt = prompt
+			promptMu.Unlock()
+			defer close(doneCh)
+			return `{"conversation_id":"77777777-7777-7777-7777-777777777777","status":"SUCCESS","response":"done"}`, "", 0, nil
+		},
+	})
+	defer pool.Stop()
+
+	for i := 0; i < session.DefaultMaxSessionTurns-1; i++ {
+		_, _ = store.IncrementSessionTurnCount(ctx, "heartbeat-rot")
+	}
+
+	disp := db.Dispatch{
+		ID:        "disp-rot-test",
+		Source:    "heartbeat",
+		SessionID: "heartbeat-rot",
+		Prompt:    "hourly maintenance",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	_ = store.InsertDispatch(ctx, disp)
+	pool.EnqueueDispatch(disp)
+
+	select {
+	case <-doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timeout waiting for dispatch execution")
+	}
+
+	promptMu.Lock()
+	p := capturedPrompt
+	promptMu.Unlock()
+
+	if !strings.Contains(p, "<DISPATCH_HISTORY>") || !strings.Contains(p, "Recent runs for session heartbeat-rot:") {
+		t.Errorf("expected <DISPATCH_HISTORY> in cold-start dispatch prompt, got:\n%s", p)
+	}
+	if !strings.Contains(p, "<SYSTEM_DIRECTIVE>") || !strings.Contains(p, "This is a headless dispatch turn; your response will not be delivered to Discord.") {
+		t.Errorf("expected <SYSTEM_DIRECTIVE> in prompt, got:\n%s", p)
+	}
+
+	for range 50 {
+		count, _ := store.GetSessionTurnCount(ctx, "heartbeat-rot")
+		if count == 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("expected session turn count to be reset after rotation, but still > 0")
+}
+
+func TestDispatchExecution_ScopeLockIsolation(t *testing.T) {
+	t.Parallel()
+	store := dbtest.NewFakeStore()
+
+	dispatchRunning := make(chan struct{})
+	dispatchCanFinish := make(chan struct{})
+	messageFinished := make(chan struct{})
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		Store:          store,
+		TimeoutMinutes: 1,
+		DeliveryFunc: func(s *discordgo.Session, c, text string) error {
+			return nil
+		},
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			if strings.Contains(prompt, "headless-dispatch") {
+				close(dispatchRunning)
+				<-dispatchCanFinish
+				return `{"conversation_id":"66666666-6666-6666-6666-666666666666","status":"SUCCESS","response":"ok"}`, "", 0, nil
+			}
+			close(messageFinished)
+			return `{"conversation_id":"55555555-5555-5555-5555-555555555555","status":"SUCCESS","response":"reply"}`, "", 0, nil
+		},
+	})
+	defer pool.Stop()
+
+	disp := db.Dispatch{
+		ID:        "disp-iso-1",
+		Source:    "heartbeat",
+		SessionID: "heartbeat-scope",
+		Prompt:    "headless-dispatch running",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now().UTC(),
+	}
+	_ = store.InsertDispatch(context.Background(), disp)
+	pool.EnqueueDispatch(disp)
+
+	<-dispatchRunning
+
+	msg := db.Message{
+		ID:        "msg-iso-1",
+		ThreadID:  "1542423172400291873",
+		ChannelID: "1542423172400291873",
+		Content:   "concurrent discord turn",
+		Status:    db.StatusPending,
+		CreatedAt: time.Now().UTC(),
+	}
+	_ = store.InsertMessage(context.Background(), msg)
+	pool.Enqueue(msg)
+
+	select {
+	case <-messageFinished:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("discord message turn contended on dispatch scope lock")
+	}
+
+	close(dispatchCanFinish)
+}
+
+func TestRecoverInterrupted_Dispatches(t *testing.T) {
+	t.Parallel()
+	store := dbtest.NewFakeStore()
+	ctx := context.Background()
+
+	_ = store.InsertDispatch(ctx, db.Dispatch{
+		ID:        "disp-rec-pending",
+		Source:    "heartbeat",
+		SessionID: "heartbeat-rec-1",
+		Prompt:    "pending prompt",
+		Status:    db.StatusPending,
+	})
+	_ = store.InsertDispatch(ctx, db.Dispatch{
+		ID:        "disp-rec-processing",
+		Source:    "vanadis",
+		SessionID: "",
+		Prompt:    "processing prompt",
+		Status:    db.StatusProcessing,
+	})
+	_ = store.InsertDispatch(ctx, db.Dispatch{
+		ID:           "disp-rec-poison",
+		Source:       "webhook",
+		SessionID:    "webhook-poison",
+		Prompt:       "poison prompt",
+		Status:       db.StatusProcessing,
+		RestartCount: DefaultMaxRestarts + 1,
+	})
+
+	var recoveredIDs []string
+	var mu sync.Mutex
+	doneWg := sync.WaitGroup{}
+	doneWg.Add(2)
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		Store:          store,
+		TimeoutMinutes: 1,
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			mu.Lock()
+			if strings.Contains(prompt, "pending prompt") {
+				recoveredIDs = append(recoveredIDs, "disp-rec-pending")
+				doneWg.Done()
+			} else if strings.Contains(prompt, "processing prompt") {
+				recoveredIDs = append(recoveredIDs, "disp-rec-processing")
+				doneWg.Done()
+			}
+			mu.Unlock()
+			return `{"conversation_id":"44444444-4444-4444-4444-444444444444","status":"SUCCESS","response":"ok"}`, "", 0, nil
+		},
+	})
+	defer pool.Stop()
+
+	RecoverInterrupted(store, pool)
+
+	doneWg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(recoveredIDs) != 2 {
+		t.Fatalf("expected 2 recovered dispatches, got %d (%v)", len(recoveredIDs), recoveredIDs)
+	}
+
+	poisonDisp, err := store.GetDispatch(ctx, "disp-rec-poison")
+	if err != nil || poisonDisp == nil || poisonDisp.Status != db.StatusFailed {
+		t.Fatalf("expected poison pill dispatch to be marked FAILED, got %+v", poisonDisp)
+	}
+}
+
+func TestDispatchExecution_RetriesAndFailure(t *testing.T) {
+	t.Parallel()
+	store := dbtest.NewFakeStore()
+	ctx := context.Background()
+
+	disp := db.Dispatch{
+		ID:        "disp-fail-retry",
+		Source:    "heartbeat",
+		SessionID: "heartbeat-failing",
+		Prompt:    "fail this dispatch",
+		Status:    db.StatusPending,
+	}
+	_ = store.InsertDispatch(ctx, disp)
+
+	var attempts int32
+	pool := New(nil, WorkerPoolConfig{
+		Store:          store,
+		MaxAttempts:    2,
+		BackoffBase:    5 * time.Millisecond,
+		TimeoutMinutes: 1,
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			atomic.AddInt32(&attempts, 1)
+			return "", "fatal error", 1, errors.New("simulated dispatch execution error")
+		},
+	})
+	defer pool.Stop()
+
+	pool.EnqueueDispatch(disp)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		d, err := store.GetDispatch(ctx, disp.ID)
+		if err == nil && d != nil && d.Status == db.StatusFailed {
+			if d.RetryCount < 1 {
+				t.Fatalf("expected retry_count >= 1, got %d", d.RetryCount)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("dispatch %s did not reach FAILED status after retries", disp.ID)
+}
+
+func TestDispatchPromptAssembly_And_PoolEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		input      DispatchPromptInput
+		wantSubstr string
+	}{
+		{
+			name: "already wrapped directive",
+			input: DispatchPromptInput{
+				Dispatch: db.Dispatch{
+					Prompt: "<SYSTEM_DIRECTIVE>\nalready wrapped\n</SYSTEM_DIRECTIVE>",
+				},
+			},
+			wantSubstr: "already wrapped",
+		},
+		{
+			name: "cold start with previous session and recent dispatches",
+			input: DispatchPromptInput{
+				Dispatch: db.Dispatch{
+					Prompt:    "do check",
+					SessionID: "heartbeat-test",
+				},
+				PreviousSessionID: "prev-session-uuid",
+				IsColdStart:       true,
+				RecentDispatches: []db.Dispatch{
+					{ID: "d1", Status: "COMPLETED", Summary: "initial run"},
+					{ID: "d2", Status: "FAILED", Prompt: "clean task fallback"},
+				},
+			},
+			wantSubstr: "<DISPATCH_HISTORY>",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			res := AssembleDispatchPrompt(tc.input)
+			if !strings.Contains(res, tc.wantSubstr) {
+				t.Fatalf("expected %q to contain %q", res, tc.wantSubstr)
+			}
+		})
+	}
+
+	// Additional edge coverage:
+	if hist := FormatDispatchHistory("s", nil); hist != "" {
+		t.Errorf("expected empty string for nil dispatches, got %q", hist)
+	}
+	var nilTe *turnExecution
+	if prompt := nilTe.buildDispatchPrompt(); prompt != "" {
+		t.Errorf("expected empty string for nil turnExecution, got %q", prompt)
+	}
+
+	stoppedPool := New(nil, WorkerPoolConfig{})
+	stoppedPool.Stop()
+	// Enqueue to stopped pool should safely return warning
+	stoppedPool.EnqueueDispatch(db.Dispatch{ID: "disp-stopped"})
+
+	// Finalize interrupted turn on dispatch
+	store := dbtest.NewFakeStore()
+	ctx := context.Background()
+	interruptedDisp := db.Dispatch{ID: "disp-interrupted", Status: db.StatusProcessing}
+	_ = store.InsertDispatch(ctx, interruptedDisp)
+
+	teInterrupted := &turnExecution{
+		pool:     stoppedPool,
+		dispatch: &interruptedDisp,
+	}
+	stoppedPool.cfg.Store = store
+	teInterrupted.cancelBurstOnShutdown("pending", "test-model", false)
+
+	refreshed, _ := store.GetDispatch(ctx, interruptedDisp.ID)
+	if refreshed == nil || refreshed.Status != db.StatusPending {
+		t.Fatalf("expected interrupted dispatch to be reset to PENDING, got %+v", refreshed)
+	}
+	// Execution pool resolution nil guards
+	var nilTeExec *turnExecution
+	if p, k, err := nilTeExec.resolveExecutionPool(); p != nil || err != nil {
+		t.Errorf("expected nil pool and nil err for nil te, got %+v %v", k, err)
+	}
+	teWithoutPool := &turnExecution{dispatch: &db.Dispatch{SessionID: "s1"}}
+	if p, k, err := teWithoutPool.resolveExecutionPool(); p != nil || err != nil {
+		t.Errorf("expected nil pool and nil err for te without pool, got %+v %v", k, err)
+	}
+
+	// makeSessionCallbacks error branch coverage
+	closedStore := dbtest.NewFakeStore()
+	_ = closedStore.Close()
+	getRec, _ := makeSessionCallbacks(closedStore)
+	if _, err := getRec(ctx, "target"); err == nil {
+		t.Errorf("expected error from getRec on closed store")
+	}
+
+	// Coverage helpers: logInterruptWarning, getStreamingDaemon, pool accessors
+	logInterruptWarning("test-op", errors.New("simulated error"))
+	logInterruptWarning("test-op-nil", nil)
+	if d := getStreamingDaemon(nil, "thread-1"); d != nil {
+		t.Errorf("expected nil streaming daemon for nil pool")
+	}
+	if low := stoppedPool.LowEffortProcessPool(); low != nil {
+		t.Errorf("expected nil low effort pool")
+	}
+	if med := stoppedPool.MediumEffortProcessPool(); med != nil {
+		t.Errorf("expected nil medium effort pool")
+	}
+
+	mockUp := &runner.UnifiedProcessPool{}
+	poolWithCustomPools := &WorkerPool{
+		pools: map[PoolKey]runner.AgentPool{
+			{Ephemeral: false, Effort: "low"}:    mockUp,
+			{Ephemeral: false, Effort: "medium"}: mockUp,
+		},
+	}
+	if low := poolWithCustomPools.LowEffortProcessPool(); low != mockUp {
+		t.Errorf("expected mockUp for low effort pool")
+	}
+	if med := poolWithCustomPools.MediumEffortProcessPool(); med != mockUp {
+		t.Errorf("expected mockUp for medium effort pool")
+	}
+
+	getRecSuccess, setRecSuccess := makeSessionCallbacks(store)
+	if _, err := getRecSuccess(ctx, "session-test-key"); err != nil {
+		t.Errorf("unexpected error from getRecSuccess: %v", err)
+	}
+	if err := setRecSuccess(ctx, "session-test-key", "new-conv", "prev-conv"); err != nil {
+		t.Errorf("unexpected error from setRecSuccess: %v", err)
+	}
+
+	if s := daemonSessionID(nil, "thread-1"); s != "" {
+		t.Errorf("expected empty daemonSessionID for nil pool")
+	}
+	teExtract := &turnExecution{}
+	if s := teExtract.extractVerifiedDiskSessionID("", ""); s != "" {
+		t.Errorf("expected empty string for empty stdout/stderr")
+	}
+	if s := teExtract.extractVerifiedDiskSessionID("no session here", "no session"); s != "" {
+		t.Errorf("expected empty string when no session found")
+	}
+
+	// finalizeVoiceTurnOutcome coverage
+	sink := runner.NewBufferingTurnSink(runner.BufferingTurnSinkConfig{})
+	det := NewSentenceDetector()
+	var heardSentences []string
+	sentenceCb := func(s string) { heardSentences = append(heardSentences, s) }
+	voiceSuccess := runner.TurnOutcome{IsSuccess: true, Response: "Hello world. How are you?"}
+	respVoice, _, errVoice := finalizeVoiceTurnOutcome(ctx, voiceSuccess, nil, "v-sess", "gemini", time.Now(), sink, det, sentenceCb)
+	if errVoice != nil || respVoice != "Hello world. How are you?" || len(heardSentences) == 0 {
+		t.Errorf("unexpected finalizeVoiceTurnOutcome success result: %v %q %v", errVoice, respVoice, heardSentences)
+	}
+
+	cancelledCtx, cancelFn := context.WithCancel(ctx)
+	cancelFn()
+	voiceFail := runner.TurnOutcome{IsSuccess: false}
+	_, _, errCancelVoice := finalizeVoiceTurnOutcome(cancelledCtx, voiceFail, nil, "v-sess", "gemini", time.Now(), sink, det, sentenceCb)
+	if !errors.Is(errCancelVoice, context.Canceled) {
+		t.Errorf("expected context.Canceled, got %v", errCancelVoice)
+	}
+
+	// Closed store error logs for dispatch helpers
+	teClosed := &turnExecution{pool: stoppedPool}
+	stoppedPool.cfg.Store = closedStore
+	teClosed.updateDispatchCompleted("d-err", "resp")
+	teClosed.updateDispatchStatus("d-err", db.StatusFailed, "err")
+	teClosed.incrementDispatchRetry("d-err", "err")
+
+	// handleAttemptsExhausted on stopped pool
+	teClosed.handleAttemptsExhausted(2, "agy", "key", "exhausted", "stderr", "model")
+
+	teProbe := &turnExecution{currentSessionID: "sess-probe-1"}
+	if got := teProbe.probeCandidateSessionID("direct-candidate", "", ""); got != "direct-candidate" {
+		t.Errorf("expected direct-candidate, got %q", got)
+	}
+	if got := teProbe.probeCandidateSessionID("", "", ""); got != "sess-probe-1" {
+		t.Errorf("expected sess-probe-1, got %q", got)
+	}
+	teEmptyProbe := &turnExecution{}
+	if got := teEmptyProbe.probeCandidateSessionID("", "", ""); got != "" {
+		t.Errorf("expected empty string for empty probe, got %q", got)
+	}
+}
+
+func TestResolveDispatchEffort_Matrix(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		d       db.Dispatch
+		isEphem bool
+		wantEff string
+	}{
+		{"explicit valid low", db.Dispatch{Effort: "low"}, false, "low"},
+		{"explicit valid medium", db.Dispatch{Effort: "medium"}, false, "medium"},
+		{"explicit valid high", db.Dispatch{Effort: "high"}, false, "high"},
+		{"explicit high clamped on ephemeral", db.Dispatch{Effort: "high"}, true, "medium"},
+		{"infer from model flash", db.Dispatch{Model: "gemini-2.5-flash"}, false, "low"},
+		{"infer from model medium", db.Dispatch{Model: "gemini-3.8-flash-medium"}, false, "medium"},
+		{"infer from model pro", db.Dispatch{Model: "gemini-2.5-pro"}, false, "high"},
+		{"infer from model pro ephemeral clamped", db.Dispatch{Model: "gemini-2.5-pro"}, true, "medium"},
+		{"default ephemeral", db.Dispatch{}, true, "medium"},
+		{"default persistent", db.Dispatch{}, false, "low"},
+		{"invalid effort ephemeral", db.Dispatch{Effort: "extreme"}, true, "medium"},
+		{"invalid effort persistent", db.Dispatch{Effort: "extreme"}, false, "low"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := resolveDispatchEffort(tc.d, tc.isEphem)
+			if got != tc.wantEff {
+				t.Fatalf("got %q, want %q", got, tc.wantEff)
+			}
+		})
+	}
+}
