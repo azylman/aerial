@@ -102,7 +102,7 @@ func TestGuardProcess_EndToEnd(t *testing.T) {
 		{"non-intercepted view_file", "all", `{"toolCall": {"name": "view_file", "args": {"AbsolutePath": "/share/aerial/README.md"}}}`, false, 0, ""},
 		{"empty tool call", "all", `{"toolCall": {"name": "", "args": {}}}`, false, 0, ""},
 		{"search mode denies unconstrained find", "search", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "find / -name foo"}}}`, true, 0, ""},
-		{"search mode allows scoped grep", "search", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "grep -rn -m 20 --exclude-dir=.git foo ."}}}`, false, 0, ""},
+		{"search mode allows scoped grep", "search", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "grep -rn -m 20 --exclude-dir=.git foo services/eri"}}}`, false, 0, ""},
 		{"commit mode allows safe commit command", "commit", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git status"}}}`, false, 0, ""},
 		{"batch mode unscoped test denied", "batch", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "go test ./..."}}}`, true, 0, ""},
 		{"python3 -c escaped char outside quotes", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "python3 -c 'print(f\"{x[\\\"k\\\"]}\")' \\ && true", "WaitMsBeforeAsync": 10000}}}`, false, 0, `python3 -c 'print(f"{x["k"]}")' \ && true`},
