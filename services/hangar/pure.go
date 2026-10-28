@@ -1237,11 +1237,11 @@ func ImageSourceRepo(imageRef string) string {
 	if ref == "" {
 		return ""
 	}
-	if !strings.Contains(ref, "azylman/") && !strings.Contains(ref, "aerial") && !strings.Contains(ref, "mirrormere") && !strings.Contains(ref, "orin-voice") {
+	if !strings.Contains(ref, "azylman/") && !strings.Contains(ref, "aerial") && !strings.Contains(ref, "mirrormere") {
 		return ""
 	}
 	// Check sidecars first
-	if strings.Contains(ref, "aerial-sidecar-") || strings.Contains(ref, "orin-voice") {
+	if strings.Contains(ref, "aerial-sidecar-") {
 		return "azylman/aerial-sidecars"
 	}
 	// Check mirrormere

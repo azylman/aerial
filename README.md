@@ -36,7 +36,7 @@ Aerial separates generic platform orchestration from private homelab state using
 ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                  MULTIPLEXED INGRESS LAYER                                  │
 ├──────────────────────────────┬──────────────────────────────┬───────────────────────────────┤
-│ Real-time Voice (Kiosk/Orin) │ HTTP REST & Event Webhooks   │ Discord Gateway Funnel        │
+│ Real-time Voice (Kiosk/Calibarn) │ HTTP REST & Event Webhooks   │ Discord Gateway Funnel        │
 │ • Whisper ASR (GPU Accel)    │ • /prompt (Prompt Injection) │ • Realtime Gateway Events     │
 │ • Wyoming Protocol (:10300)  │ • /voice/ask (Voice Pipeline)│ • Laya System-1 Classifier    │
 │ • WebRTC & Audio Streaming   │ • /discord/message & Webhooks│ • Continuous Typing Pulses    │
@@ -58,7 +58,7 @@ Aerial separates generic platform orchestration from private homelab state using
 │                       HASHICORP NOMAD 3-NODE HETEROGENEOUS CLUSTER                          │
 ├──────────────────────────────┬──────────────────────────────┬───────────────────────────────┤
 │ Core Server (quiet-zero)     │ GPU Worker (calibarn)        │ Touch Kiosk (cockpit)         │
-│ • eri (Agent Execution Core) │ • orin-voice (Whisper GPU)   │ • kiosk-ear (ALSA / ear)      │
+│ • eri (Agent Execution Core) │ • voice (Whisper GPU)        │ • kiosk-ear (ALSA / ear)      │
 │ • haro, coven & vanadis      │ • Kokoro-82M TTS synthesis   │ • WebRTC stream & Chromium UI │
 │ • postgres (PG 18 + pgvector)│ • Wyoming protocol (:10300)  │ • Voice fingerprinter sidecar │
 │ • coredns (*.aerial, *.lan)  │ • Host volume whisper_cache  │ • Wake-word detection         │

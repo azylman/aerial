@@ -45,12 +45,6 @@ job "dashboard" {
         destination = "local/static"
       }
 
-      env {
-        CONFIG_PATH        = "/local/dashboard.yaml"
-        AERIAL_CONFIG_PATH = "/local/config.yaml"
-        NOMAD_ADDR         = "http://${attr.unique.network.ip-address}:4646"
-      }
-
       template {
         data = <<EOH
 {{- if nomadVarExists "nomad/jobs/dashboard" -}}
@@ -74,18 +68,6 @@ EOH
 {{- if nomadVarExists "nomad/jobs/dashboard" -}}
 {{- with nomadVar "nomad/jobs/dashboard" -}}
 {{- if .CONFIG_YAML -}}{{- .CONFIG_YAML -}}{{- end -}}
-{{- end -}}
-{{- end -}}
-EOH
-        destination = "local/dashboard.yaml"
-        change_mode = "restart"
-      }
-
-      template {
-        data = <<EOH
-{{- if nomadVarExists "nomad/jobs/dashboard" -}}
-{{- with nomadVar "nomad/jobs/dashboard" -}}
-{{- if .BRAIN_CONFIG_YAML -}}{{- .BRAIN_CONFIG_YAML -}}{{- end -}}
 {{- end -}}
 {{- end -}}
 EOH

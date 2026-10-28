@@ -41,15 +41,16 @@ job "prospera" {
         }
       }
 
-      env {
-        PORT                    = "4019"
-        BRAIN_URL               = "http://eri.aerial"
-        GOOGLE_MCP_URL          = "http://google-mcp.aerial/mcp"
-        COVEN_URL               = "http://coven.aerial"
-        WHISPER_URL             = "http://orin-voice.aerial"
-        DEFAULT_DISCORD_CHANNEL = "prospera"
-        PUBLIC_WEBHOOK_BASE_URL = "https://webhooks.zylman.com"
-        GEMINI_VOICE_NAME       = "Kore"
+      template {
+        data = <<EOH
+{{- if nomadVarExists "nomad/jobs/prospera" -}}
+{{- with nomadVar "nomad/jobs/prospera" -}}
+{{- if .CONFIG_YAML -}}{{- .CONFIG_YAML -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+EOH
+        destination = "local/config.yaml"
+        change_mode = "restart"
       }
 
       template {

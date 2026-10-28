@@ -4,9 +4,25 @@ import (
 	"fmt"
 	"os"
 	"regexp"
-	"strconv"
 	"strings"
+
+	"github.com/azylman/aerial/pkg/httpkit"
+	"gopkg.in/yaml.v3"
 )
+
+// DefaultConfigPath is the canonical in-container configuration path.
+const DefaultConfigPath = "/config/prospera.yaml"
+
+var localConfigPath = "/local/config.yaml"
+
+// ResolveConfigPath returns the config file path, checking CONFIG_PATH env,
+// then /local/config.yaml (if size > 0), falling back to fallbackPath.
+func ResolveConfigPath(fallbackPath string) string {
+	if fallbackPath != "" {
+		return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, fallbackPath)
+	}
+	return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, DefaultConfigPath, "config.yaml")
+}
 
 // Config encapsulates configuration settings for services/prospera.
 type Config struct {
@@ -28,6 +44,22 @@ type Config struct {
 	CallbackWindowMinutes int
 	MaxConcurrentCalls    int
 	AllowFrom             []string
+}
+
+// ProsperaYAMLConfig defines the declarative file schema for prospera.yaml.
+type ProsperaYAMLConfig struct {
+	Port                  string `yaml:"port"`
+	BrainURL              string `yaml:"brain_url"`
+	GoogleMCPURL          string `yaml:"google_mcp_url"`
+	CovenURL              string `yaml:"coven_url"`
+	WhisperURL            string `yaml:"whisper_url"`
+	DefaultDiscordChannel string `yaml:"default_discord_channel"`
+	PublicWebhookBaseURL  string `yaml:"public_webhook_base_url"`
+	GeminiLiveModel       string `yaml:"gemini_live_model"`
+	GeminiFallbackModel   string `yaml:"gemini_fallback_model"`
+	GeminiVoiceName       string `yaml:"gemini_voice_name"`
+	CallbackWindowMinutes int    `yaml:"callback_window_minutes"`
+	MaxConcurrentCalls    int    `yaml:"max_concurrent_calls"`
 }
 
 var e164Regex = regexp.MustCompile(`^\+[1-9][0-9]{1,14}$`)
@@ -64,18 +96,6 @@ func NormalizeE164(raw string) (string, error) {
 	return candidate, nil
 }
 
-func parsePositiveInt(val string, defaultVal int, name string) (int, error) {
-	trimmed := strings.TrimSpace(val)
-	if trimmed == "" {
-		return defaultVal, nil
-	}
-	n, err := strconv.Atoi(trimmed)
-	if err != nil || n <= 0 {
-		return 0, fmt.Errorf("config: invalid %s %q: must be positive integer", name, trimmed)
-	}
-	return n, nil
-}
-
 func parseFromNumber(raw string) (string, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
@@ -109,90 +129,115 @@ func parseAllowFrom(raw string) ([]string, error) {
 	return allowed, nil
 }
 
-// LoadConfig loads and validates configuration from environment variables.
-func LoadConfig(getenv func(string) string) (*Config, error) {
+// LoadConfig loads and strictly validates configuration from the file at path using os.Getenv.
+func LoadConfig(path string) (*Config, error) {
+	return LoadConfigFile(path, os.Getenv)
+}
+
+// LoadConfigFile loads and strictly validates configuration from the YAML file at path and secrets from getenv.
+func LoadConfigFile(path string, getenv func(string) string) (*Config, error) {
 	if getenv == nil {
 		getenv = os.Getenv
 	}
 
-	cfg := &Config{
-		Port:                  getenv("PORT"),
-		DatabaseURL:           strings.TrimSpace(getenv("DATABASE_URL")),
-		TwilioAccountSID:      strings.TrimSpace(getenv("TWILIO_ACCOUNT_SID")),
-		TwilioAuthToken:       strings.TrimSpace(getenv("TWILIO_AUTH_TOKEN")),
-		PublicWebhookBaseURL:  strings.TrimSpace(getenv("PUBLIC_WEBHOOK_BASE_URL")),
-		GeminiAPIKey:          strings.TrimSpace(getenv("GEMINI_API_KEY")),
-		GeminiLiveModel:       strings.TrimSpace(getenv("GEMINI_LIVE_MODEL")),
-		GeminiFallbackModel:   strings.TrimSpace(getenv("GEMINI_FALLBACK_MODEL")),
-		GeminiVoiceName:       strings.TrimSpace(getenv("GEMINI_VOICE_NAME")),
-		BrainURL:              strings.TrimSpace(getenv("BRAIN_URL")),
-		GoogleMCPURL:          strings.TrimSpace(getenv("GOOGLE_MCP_URL")),
-		CovenURL:              strings.TrimSpace(getenv("COVEN_URL")),
-		WhisperURL:            strings.TrimSpace(getenv("WHISPER_URL")),
-		DefaultDiscordChannel: strings.TrimSpace(getenv("DEFAULT_DISCORD_CHANNEL")),
+	cleanPath := strings.TrimSpace(path)
+	if cleanPath == "" {
+		return nil, fmt.Errorf("config: path cannot be empty")
 	}
 
-	if cfg.DatabaseURL == "" {
+	data, err := os.ReadFile(cleanPath)
+	if err != nil {
+		return nil, fmt.Errorf("config: failed to read %s: %w", cleanPath, err)
+	}
+
+	var ycfg ProsperaYAMLConfig
+	if err := yaml.Unmarshal(data, &ycfg); err != nil {
+		return nil, fmt.Errorf("config: failed to parse YAML from %s: %w", cleanPath, err)
+	}
+
+	port := strings.TrimSpace(ycfg.Port)
+	if port == "" {
+		return nil, fmt.Errorf("config: port is required in %s", cleanPath)
+	}
+	brainURL := strings.TrimSpace(ycfg.BrainURL)
+	if brainURL == "" {
+		return nil, fmt.Errorf("config: brain_url is required in %s", cleanPath)
+	}
+	googleMCPURL := strings.TrimSpace(ycfg.GoogleMCPURL)
+	if googleMCPURL == "" {
+		return nil, fmt.Errorf("config: google_mcp_url is required in %s", cleanPath)
+	}
+	covenURL := strings.TrimSpace(ycfg.CovenURL)
+	if covenURL == "" {
+		return nil, fmt.Errorf("config: coven_url is required in %s", cleanPath)
+	}
+	whisperURL := strings.TrimSpace(ycfg.WhisperURL)
+	if whisperURL == "" {
+		return nil, fmt.Errorf("config: whisper_url is required in %s", cleanPath)
+	}
+	defaultDiscordChannel := strings.TrimSpace(ycfg.DefaultDiscordChannel)
+	if defaultDiscordChannel == "" {
+		return nil, fmt.Errorf("config: default_discord_channel is required in %s", cleanPath)
+	}
+	geminiLiveModel := strings.TrimSpace(ycfg.GeminiLiveModel)
+	if geminiLiveModel == "" {
+		return nil, fmt.Errorf("config: gemini_live_model is required in %s", cleanPath)
+	}
+	geminiFallbackModel := strings.TrimSpace(ycfg.GeminiFallbackModel)
+	if geminiFallbackModel == "" {
+		return nil, fmt.Errorf("config: gemini_fallback_model is required in %s", cleanPath)
+	}
+	geminiVoiceName := strings.TrimSpace(ycfg.GeminiVoiceName)
+	if geminiVoiceName == "" {
+		return nil, fmt.Errorf("config: gemini_voice_name is required in %s", cleanPath)
+	}
+	if ycfg.CallbackWindowMinutes <= 0 {
+		return nil, fmt.Errorf("config: callback_window_minutes must be positive in %s", cleanPath)
+	}
+	if ycfg.MaxConcurrentCalls <= 0 {
+		return nil, fmt.Errorf("config: max_concurrent_calls must be positive in %s", cleanPath)
+	}
+
+	publicWebhookBaseURL := strings.TrimRight(strings.TrimSpace(ycfg.PublicWebhookBaseURL), "/")
+
+	dbURL := strings.TrimSpace(getenv("DATABASE_URL"))
+	if dbURL == "" {
 		return nil, fmt.Errorf("config: DATABASE_URL is required")
 	}
 
-	if cfg.Port == "" {
-		cfg.Port = "4019"
-	}
-	if cfg.GeminiAPIKey == "" {
-		cfg.GeminiAPIKey = strings.TrimSpace(getenv("GEMINI_HARNESS_API_KEY"))
-	}
-	if cfg.GeminiLiveModel == "" {
-		cfg.GeminiLiveModel = "gemini-3.8-live"
-	}
-	if cfg.GeminiFallbackModel == "" {
-		cfg.GeminiFallbackModel = "gemini-3.1-flash-live-preview"
-	}
-	if cfg.GeminiVoiceName == "" {
-		cfg.GeminiVoiceName = "Kore"
-	}
-	if cfg.BrainURL == "" {
-		cfg.BrainURL = "http://eri.aerial"
-	}
-	if cfg.GoogleMCPURL == "" {
-		cfg.GoogleMCPURL = "http://google-mcp.aerial/mcp"
-	}
-	if cfg.CovenURL == "" {
-		cfg.CovenURL = "http://coven.aerial"
-	}
-	if cfg.WhisperURL == "" {
-		cfg.WhisperURL = "http://orin-voice.aerial"
-	}
-	if cfg.DefaultDiscordChannel == "" {
-		cfg.DefaultDiscordChannel = strings.TrimSpace(getenv("DISCORD_CHANNEL_ID"))
-		if cfg.DefaultDiscordChannel == "" {
-			cfg.DefaultDiscordChannel = "prospera"
-		}
+	geminiKey := strings.TrimSpace(getenv("GEMINI_API_KEY"))
+	if geminiKey == "" {
+		geminiKey = strings.TrimSpace(getenv("GEMINI_HARNESS_API_KEY"))
 	}
 
 	fromNum, err := parseFromNumber(getenv("TWILIO_FROM_NUMBER"))
 	if err != nil {
 		return nil, err
 	}
-	cfg.TwilioFromNumber = fromNum
-
-	cbWindow, err := parsePositiveInt(getenv("CALLBACK_WINDOW_MINUTES"), 10080, "CALLBACK_WINDOW_MINUTES")
-	if err != nil {
-		return nil, err
-	}
-	cfg.CallbackWindowMinutes = cbWindow
-
-	maxConc, err := parsePositiveInt(getenv("MAX_CONCURRENT_CALLS"), 2, "MAX_CONCURRENT_CALLS")
-	if err != nil {
-		return nil, err
-	}
-	cfg.MaxConcurrentCalls = maxConc
 
 	allowList, err := parseAllowFrom(getenv("ALLOW_FROM"))
 	if err != nil {
 		return nil, err
 	}
-	cfg.AllowFrom = allowList
 
-	return cfg, nil
+	return &Config{
+		Port:                  port,
+		DatabaseURL:           dbURL,
+		TwilioAccountSID:      strings.TrimSpace(getenv("TWILIO_ACCOUNT_SID")),
+		TwilioAuthToken:       strings.TrimSpace(getenv("TWILIO_AUTH_TOKEN")),
+		TwilioFromNumber:      fromNum,
+		PublicWebhookBaseURL:  publicWebhookBaseURL,
+		GeminiAPIKey:          geminiKey,
+		GeminiLiveModel:       geminiLiveModel,
+		GeminiFallbackModel:   geminiFallbackModel,
+		GeminiVoiceName:       geminiVoiceName,
+		BrainURL:              brainURL,
+		GoogleMCPURL:          googleMCPURL,
+		CovenURL:              covenURL,
+		WhisperURL:            whisperURL,
+		DefaultDiscordChannel: defaultDiscordChannel,
+		CallbackWindowMinutes: ycfg.CallbackWindowMinutes,
+		MaxConcurrentCalls:    ycfg.MaxConcurrentCalls,
+		AllowFrom:             allowList,
+	}, nil
 }

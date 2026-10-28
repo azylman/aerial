@@ -703,16 +703,28 @@ func RunDashboardServer(ctx context.Context, cfg DashboardConfig) error {
 	}
 }
 
+var (
+	defaultConfigPath = DefaultConfigPath
+	loadConfigFn      = LoadConfig
+	runDashboardFn    = RunDashboardServer
+	exitFn            = log.Fatalf
+)
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
 
-	cfg := NewDashboardConfigFromEnv()
+	resolvedPath := ResolveConfigPath(defaultConfigPath)
+	cfg, err := loadConfigFn(resolvedPath)
+	if err != nil {
+		exitFn("failed to load config: %v", err)
+		return
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	if err := RunDashboardServer(ctx, cfg); err != nil {
-		log.Fatalf("dashboard failed: %v", err)
+	if err := runDashboardFn(ctx, cfg); err != nil {
+		exitFn("dashboard failed: %v", err)
 	}
 }

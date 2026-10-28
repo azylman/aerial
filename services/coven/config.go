@@ -11,7 +11,7 @@ import (
 )
 
 // DefaultConfigPath is the canonical in-container configuration path.
-const DefaultConfigPath = "/share/aerial-config/config.yaml"
+const DefaultConfigPath = "/config/coven.yaml"
 
 // DefaultPort is the fallback port when unspecified.
 const DefaultPort = "4008"
@@ -56,7 +56,7 @@ func ResolveConfigPath(fallbackPath string) string {
 	if fallbackPath != "" {
 		return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, fallbackPath)
 	}
-	return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, DefaultConfigPath, "/config/config.yaml", "config.yaml", "/data/config.yaml")
+	return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, DefaultConfigPath, "config.yaml")
 }
 
 // OllamaConfig defines Ollama embedding client settings.
@@ -108,82 +108,79 @@ func resolveFirstNonEmpty(values ...string) string {
 	return ""
 }
 
-func resolveBrainURLs(envURL, yamlURL, envLLM, yamlLLM string) (string, string) {
-	brainURL := resolveFirstNonEmpty(envURL, yamlURL)
-	brainLLMURL := resolveFirstNonEmpty(envLLM, yamlLLM)
-
-	if brainURL == "" {
-		if brainLLMURL != "" {
-			brainURL = strings.TrimSuffix(brainLLMURL, "/internal/llm")
-		} else {
-			brainURL = DefaultBrainURL
-		}
-	}
-	if brainLLMURL == "" {
-		brainLLMURL = strings.TrimRight(brainURL, "/") + "/internal/llm"
-	}
-	return brainURL, brainLLMURL
-}
-
-func resolveOllamaConfig(ycfg OllamaConfig) OllamaConfig {
-	baseURL := resolveFirstNonEmpty(os.Getenv("OLLAMA_BASE_URL"), ycfg.BaseURL, DefaultOllamaURL)
-	model := resolveFirstNonEmpty(os.Getenv("OLLAMA_MODEL"), ycfg.Model, DefaultOllamaModel)
-	queryPrefix := os.Getenv("OLLAMA_QUERY_PREFIX")
-	if queryPrefix == "" {
-		queryPrefix = ycfg.QueryPrefix
-	}
-	numCtx := ycfg.NumCtx
-	if numCtx <= 0 {
-		numCtx = DefaultOllamaNumCtx
-	}
-	return OllamaConfig{
-		BaseURL:     baseURL,
-		Model:       model,
-		QueryPrefix: queryPrefix,
-		NumCtx:      numCtx,
-	}
-}
-
 // LoadConfig loads configuration from path using DATABASE_URL from the environment.
 func LoadConfig(path string) (*Config, error) {
 	return LoadConfigFile(path, os.Getenv("DATABASE_URL"))
 }
 
-// LoadConfigFile loads and validates the config from path and environment variables.
-// The config file is optional: if path does not exist, defaults and environment variables are used.
+// LoadConfigFile loads and strictly validates configuration from a YAML file and secrets.
+// Fails fast if the file is missing, malformed, or required fields are absent.
 func LoadConfigFile(path string, dbURL string) (*Config, error) {
-	var ycfg MemoryYAMLConfig
-
 	cleanPath := strings.TrimSpace(path)
-	if cleanPath != "" {
-		data, err := os.ReadFile(cleanPath)
-		if err == nil {
-			if err := yaml.Unmarshal(data, &ycfg); err != nil {
-				return nil, fmt.Errorf("config: failed to parse YAML from %s: %w", cleanPath, err)
-			}
-		} else if !os.IsNotExist(err) {
-			return nil, fmt.Errorf("config: failed to read %s: %w", cleanPath, err)
-		}
+	if cleanPath == "" {
+		return nil, fmt.Errorf("config: path cannot be empty")
 	}
 
-	port := resolveFirstNonEmpty(os.Getenv("PORT"), ycfg.Port, DefaultPort)
+	data, err := os.ReadFile(cleanPath)
+	if err != nil {
+		return nil, fmt.Errorf("config: failed to read %s: %w", cleanPath, err)
+	}
+
+	var ycfg MemoryYAMLConfig
+	if err := yaml.Unmarshal(data, &ycfg); err != nil {
+		return nil, fmt.Errorf("config: failed to parse YAML from %s: %w", cleanPath, err)
+	}
+
+	port := strings.TrimSpace(ycfg.Port)
+	if port == "" {
+		return nil, fmt.Errorf("config: port is required in %s", cleanPath)
+	}
+	brainURL := strings.TrimSpace(ycfg.BrainURL)
+	if brainURL == "" {
+		return nil, fmt.Errorf("config: brain_url is required in %s", cleanPath)
+	}
+	brainLLMURL := strings.TrimSpace(ycfg.BrainLLMURL)
+	if brainLLMURL == "" {
+		return nil, fmt.Errorf("config: brain_llm_url is required in %s", cleanPath)
+	}
+	brainPRRegisterURL := strings.TrimSpace(ycfg.BrainPRRegisterURL)
+	if brainPRRegisterURL == "" {
+		return nil, fmt.Errorf("config: brain_pr_register_url is required in %s", cleanPath)
+	}
+	customSkillsDir := strings.TrimSpace(ycfg.CustomSkillsDir)
+	if customSkillsDir == "" {
+		return nil, fmt.Errorf("config: custom_skills_dir is required in %s", cleanPath)
+	}
+	rulesDir := strings.TrimSpace(ycfg.RulesDir)
+	if rulesDir == "" {
+		return nil, fmt.Errorf("config: rules_dir is required in %s", cleanPath)
+	}
+	configRepoOwner := strings.TrimSpace(ycfg.ConfigRepoOwner)
+	if configRepoOwner == "" {
+		return nil, fmt.Errorf("config: config_repo_owner is required in %s", cleanPath)
+	}
+	configRepoName := strings.TrimSpace(ycfg.ConfigRepoName)
+	if configRepoName == "" {
+		return nil, fmt.Errorf("config: config_repo_name is required in %s", cleanPath)
+	}
+	ollamaBaseURL := strings.TrimSpace(ycfg.Ollama.BaseURL)
+	if ollamaBaseURL == "" {
+		return nil, fmt.Errorf("config: ollama.base_url is required in %s", cleanPath)
+	}
+	ollamaModel := strings.TrimSpace(ycfg.Ollama.Model)
+	if ollamaModel == "" {
+		return nil, fmt.Errorf("config: ollama.model is required in %s", cleanPath)
+	}
+	if ycfg.Ollama.NumCtx <= 0 {
+		return nil, fmt.Errorf("config: ollama.num_ctx must be positive in %s", cleanPath)
+	}
+
 	databaseURL := resolveFirstNonEmpty(dbURL, os.Getenv("DATABASE_URL"), os.Getenv("POSTGRES_URL"), ycfg.DatabaseURL)
 	if databaseURL == "" {
 		return nil, fmt.Errorf("config: database connection string is required")
 	}
 
-	brainURL, brainLLMURL := resolveBrainURLs(
-		os.Getenv("BRAIN_URL"), ycfg.BrainURL,
-		os.Getenv("BRAIN_LLM_URL"), ycfg.BrainLLMURL,
-	)
-
-	customSkillsDir := resolveFirstNonEmpty(os.Getenv("CUSTOM_SKILLS_DIR"), ycfg.CustomSkillsDir, DefaultCustomSkillsDir)
-	rulesDir := resolveFirstNonEmpty(os.Getenv("RULES_DIR"), ycfg.RulesDir, DefaultRulesDir)
 	gitHubPAT := resolveFirstNonEmpty(os.Getenv("GITHUB_PAT"), ycfg.GitHubPAT)
-	configRepoOwner := resolveFirstNonEmpty(os.Getenv("CONFIG_REPO_OWNER"), ycfg.ConfigRepoOwner, DefaultConfigRepoOwner)
-	configRepoName := resolveFirstNonEmpty(os.Getenv("CONFIG_REPO_NAME"), ycfg.ConfigRepoName, DefaultConfigRepoName)
-	brainPRRegisterURL := resolveFirstNonEmpty(os.Getenv("BRAIN_PR_REGISTER_URL"), ycfg.BrainPRRegisterURL, DefaultBrainPRRegisterURL)
-
 	systemChannelID := resolveFirstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), ycfg.SystemChannelID)
 	if !systemChannelIDRegex.MatchString(systemChannelID) {
 		systemChannelID = ""
@@ -201,6 +198,11 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		ConfigRepoName:     configRepoName,
 		BrainPRRegisterURL: brainPRRegisterURL,
 		SystemChannelID:    systemChannelID,
-		Ollama:             resolveOllamaConfig(ycfg.Ollama),
+		Ollama: OllamaConfig{
+			BaseURL:     ollamaBaseURL,
+			Model:       ollamaModel,
+			QueryPrefix: ycfg.Ollama.QueryPrefix,
+			NumCtx:      ycfg.Ollama.NumCtx,
+		},
 	}, nil
 }

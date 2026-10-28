@@ -729,7 +729,7 @@ func TestResolveWorkflowRunImages(t *testing.T) {
 		TotalCount: 2,
 		Jobs: []GitHubWorkflowJobItem{
 			{ID: 10, Name: "Build & Push Sidecar Images to GHCR (banana)", Status: "completed", Conclusion: "success"},
-			{ID: 11, Name: "Build & Push Sidecar Images to GHCR (orin-voice)", Status: "completed", Conclusion: "success"},
+			{ID: 11, Name: "Build & Push Sidecar Images to GHCR (voice-cuda)", Status: "completed", Conclusion: "success"},
 		},
 	}
 	mockMirrormereJobs := GitHubWorkflowJobsResponse{
@@ -818,7 +818,7 @@ func TestResolveWorkflowRunImages(t *testing.T) {
 			runID: 54321,
 			want: []string{
 				"ghcr.io/azylman/aerial-sidecar-banana:latest",
-				"ghcr.io/azylman/orin-voice:latest",
+				"ghcr.io/azylman/aerial-sidecar-voice-cuda:latest",
 			},
 		},
 		{

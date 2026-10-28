@@ -142,7 +142,7 @@ func (env *pushEventTestEnv) setupCase(tc gitPushCase) {
 		_ = os.MkdirAll(filepath.Join(env.aerialConfigDir, "services", "voice"), 0o755)
 		_ = os.MkdirAll(filepath.Join(env.aerialConfigDir, "services", "hangar"), 0o755)
 		_ = os.WriteFile(filepath.Join(env.aerialConfigDir, "services", "voice", "voice.yaml"), []byte("model: small.en\n"), 0o644)
-		hangarContent := "service_configs:\n  - rel_path: \"services/voice/voice.yaml\"\n    nomad_var: \"nomad/jobs/orin-voice\"\n    var_key: \"CONFIG_YAML\"\n"
+		hangarContent := "service_configs:\n  - rel_path: \"services/voice/voice.yaml\"\n    nomad_var: \"nomad/jobs/voice\"\n    var_key: \"CONFIG_YAML\"\n"
 		_ = os.WriteFile(filepath.Join(env.aerialConfigDir, "services", "hangar", "hangar.yaml"), []byte(hangarContent), 0o644)
 	}
 	targetDir := env.aerialDir
@@ -427,7 +427,7 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) { // t.Run(
 			serviceFiles:     true,
 			req:              GitPushEventRequest{Repo: "azylman/aerial-config", Commit: "sha_curr", PRNumber: 301, TargetID: "1555422677936644147"},
 			wantCode:         http.StatusOK,
-			wantExpectedJobs: []string{"orin-voice"},
+			wantExpectedJobs: []string{"voice"},
 			wantEvents:       []string{"sync_success", "deploy_started"},
 		},
 		{

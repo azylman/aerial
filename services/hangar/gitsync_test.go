@@ -729,17 +729,17 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 				initialFiles: map[string]string{
 					"services/voice/voice.yaml":   "model: small.en\n",
 					"services/haro/haro.yaml":     "enabled: true\n",
-					"services/hangar/hangar.yaml": "service_configs:\n  - rel_path: \"services/voice/voice.yaml\"\n    nomad_var: \"nomad/jobs/orin-voice\"\n    var_key: \"CONFIG_YAML\"\n  - rel_path: \"services/haro/haro.yaml\"\n    nomad_var: \"nomad/jobs/haro\"\n    var_key: \"CONFIG_YAML\"\n",
+					"services/hangar/hangar.yaml": "service_configs:\n  - rel_path: \"services/voice/voice.yaml\"\n    nomad_var: \"nomad/jobs/voice\"\n    var_key: \"CONFIG_YAML\"\n  - rel_path: \"services/haro/haro.yaml\"\n    nomad_var: \"nomad/jobs/haro\"\n    var_key: \"CONFIG_YAML\"\n",
 				},
 				modifiedFiles: map[string]string{
 					"services/voice/voice.yaml": "model: distil-small.en\n",
 				},
-				cacheKey:         "nomad/jobs/orin-voice:CONFIG_YAML",
+				cacheKey:         "nomad/jobs/voice:CONFIG_YAML",
 				wantInitialCalls: 2,
 				untouchedCtx:     ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_untouched", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/hangar/hangar.yaml"}},
-				sameContentCtx:   ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_same", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/voice/voice.yaml"}, ExpectedJobs: []string{"orin-voice"}},
-				modifiedCtx:      ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_modified", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/voice/voice.yaml"}, ExpectedJobs: []string{"orin-voice"}},
-				wantJobName:      "orin-voice",
+				sameContentCtx:   ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_same", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/voice/voice.yaml"}, ExpectedJobs: []string{"voice"}},
+				modifiedCtx:      ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_modified", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/voice/voice.yaml"}, ExpectedJobs: []string{"voice"}},
+				wantJobName:      "voice",
 			},
 		}
 
@@ -849,7 +849,7 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 		t.Parallel()
 		var foundKernelMCP bool
 		for _, m := range DefaultManagedServiceConfigs {
-			if strings.Contains(m.NomadVar, "orin-voice") || strings.Contains(m.NomadVar, "mirrormere") {
+			if strings.Contains(m.NomadVar, "voice") || strings.Contains(m.NomadVar, "mirrormere") {
 				t.Errorf("expected DefaultManagedServiceConfigs to remain generic, found: %v", m)
 			}
 			if m.NomadVar == "nomad/jobs/kernel-mcp" {
