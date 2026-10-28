@@ -575,7 +575,7 @@ func formatChunkPromptWithShareRoot(build VanadisBuild, chunks []VanadisChunk, a
 			fmt.Fprintf(&sb, "   Run after init: `%s`\n", grepCmd)
 		}
 	}
-	fmt.Fprintf(&sb, "4. Submit via `/share/aerial/scripts/aerial-pr.sh submit \"$SCRATCH_DIR\" \"<commit_msg>\" --vanadis-chunk %s`\n5. Terminate turn immediately after submission.\n", active.ID)
+	fmt.Fprintf(&sb, "4. NEVER spawn or invoke subagents (`invoke_subagent`, `define_subagent`): Vanadis build chunks are already isolated leaf tasks—execute all file edits, tests, and verification directly in this turn.\n5. Submit via `/share/aerial/scripts/aerial-pr.sh submit \"$SCRATCH_DIR\" \"<commit_msg>\" --vanadis-chunk %s`\n6. Terminate turn immediately after submission.\n", active.ID)
 	return sb.String(), nil
 }
 
