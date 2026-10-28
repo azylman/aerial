@@ -854,6 +854,31 @@ func TestIsAllocationRestarting_TableDriven(t *testing.T) {
 			},
 			want: false,
 		},
+		{
+			name: "dormant poststop hook pending alongside running main task returns false",
+			taskStates: map[string]NomadTaskState{
+				"cleanup-locks":   {State: "dead", Events: []NomadTaskEvent{{Type: "Started"}, {Type: "Terminated", ExitCode: 0}}},
+				"kernel-browser":  {State: "running", Events: []NomadTaskEvent{{Type: "Task Setup"}, {Type: "Started"}}},
+				"persist-profile": {State: "pending", Restarts: 0, Events: []NomadTaskEvent{{Type: "Received"}}},
+			},
+			want: false,
+		},
+		{
+			name: "pending task with restarts alongside running sibling returns true",
+			taskStates: map[string]NomadTaskState{
+				"main":    {State: "running", Events: []NomadTaskEvent{{Type: "Started"}}},
+				"sidecar": {State: "pending", Restarts: 1, Events: []NomadTaskEvent{{Type: "Received"}, {Type: "Terminated", ExitCode: 1}}},
+			},
+			want: true,
+		},
+		{
+			name: "pending task with Task Setup event alongside running sibling returns true",
+			taskStates: map[string]NomadTaskState{
+				"main":    {State: "running", Events: []NomadTaskEvent{{Type: "Started"}}},
+				"sidecar": {State: "pending", Restarts: 0, Events: []NomadTaskEvent{{Type: "Received"}, {Type: "Task Setup"}}},
+			},
+			want: true,
+		},
 	}
 
 	for _, tt := range tests {
