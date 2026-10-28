@@ -28,7 +28,7 @@ job "eri" {
   datacenters = ["dc1"]
   type        = "service"
 
-  node_pool   = "default"
+  node_pool   = "calibarn"
 
   update {
     max_parallel      = 1
