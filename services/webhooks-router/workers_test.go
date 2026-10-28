@@ -172,6 +172,27 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 			maxRetries:   3,
 			wantErr:      true,
 		},
+		{
+			name:         "DispatchBackground success 200",
+			callType:     "dispatch_background",
+			statusCode:   http.StatusOK,
+			responseBody: `{"status":"accepted"}`,
+		},
+		{
+			name:         "DispatchBackground retry on 500 then success",
+			callType:     "dispatch_background",
+			failCount:    1,
+			maxRetries:   4,
+			responseBody: `{"status":"accepted"}`,
+		},
+		{
+			name:         "DispatchBackground 400 client error no retry",
+			callType:     "dispatch_background",
+			statusCode:   http.StatusBadRequest,
+			responseBody: `{"error":"bad request"}`,
+			maxRetries:   3,
+			wantErr:      true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -230,6 +251,8 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 				err = disp.DispatchPrompt(testCtx, PromptRequest{ChannelID: tc.snowflake, Prompt: "test prompt message"})
 			case "direct_message":
 				err = disp.DispatchDirectMessage(testCtx, DirectMessageRequest{ChannelID: tc.snowflake, Content: "test content"})
+			case "dispatch_background":
+				err = disp.DispatchBackground(testCtx, DispatchRequest{Source: "webhook", Prompt: "test dispatch", Effort: "medium"})
 			}
 
 			if (err != nil) != tc.wantErr {

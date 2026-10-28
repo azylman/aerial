@@ -1480,9 +1480,9 @@ func TestServer_HeartbeatSkipping_MockHTTPBrainServer(t *testing.T) {
 	db := setupTestDB(t)
 	ctx := context.Background()
 
-	var receivedReq PromptDispatchRequest
+	var receivedReq DispatchRequest
 	mockBrainServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/prompt" || r.Method != http.MethodPost {
+		if r.URL.Path != "/dispatch" || r.Method != http.MethodPost {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -1492,7 +1492,7 @@ func TestServer_HeartbeatSkipping_MockHTTPBrainServer(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"skipped_active","channel_id":"123456789012345678","session_id":"heartbeat-hb-skip-1"}`))
+		_, _ = w.Write([]byte(`{"status":"skipped_active","session_id":"heartbeat-hb-skip-1"}`))
 	}))
 	defer mockBrainServer.Close()
 

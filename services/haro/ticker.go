@@ -36,8 +36,25 @@ type PromptDispatchResponse struct {
 	MessageID string `json:"message_id,omitempty"`
 }
 
+type DispatchRequest struct {
+	ID           string `json:"id,omitempty"`
+	Source       string `json:"source"`
+	SessionID    string `json:"session_id,omitempty"`
+	Prompt       string `json:"prompt"`
+	Effort       string `json:"effort,omitempty"`
+	SkipIfActive bool   `json:"skip_if_active,omitempty"`
+}
+
+type DispatchResponse struct {
+	Status     string `json:"status"`
+	DispatchID string `json:"dispatch_id,omitempty"`
+	MessageID  string `json:"message_id,omitempty"`
+	SessionID  string `json:"session_id,omitempty"`
+}
+
 type PromptDispatcher interface {
 	DispatchPrompt(ctx context.Context, req PromptDispatchRequest) (PromptDispatchResponse, error)
+	Dispatch(ctx context.Context, req DispatchRequest) (DispatchResponse, error)
 }
 
 type HTTPPromptDispatcher struct {
@@ -105,6 +122,62 @@ func (d *HTTPPromptDispatcher) DispatchPrompt(ctx context.Context, req PromptDis
 	var dispatchResp PromptDispatchResponse
 	if err := json.Unmarshal(respBody, &dispatchResp); err != nil {
 		return PromptDispatchResponse{}, fmt.Errorf("failed to parse prompt dispatch response: %w", err)
+	}
+
+	return dispatchResp, nil
+}
+
+func (d *HTTPPromptDispatcher) Dispatch(ctx context.Context, req DispatchRequest) (DispatchResponse, error) {
+	if d == nil {
+		return DispatchResponse{}, fmt.Errorf("dispatcher is nil")
+	}
+	brainURL := strings.TrimRight(strings.TrimSpace(d.brainURL), "/")
+	if brainURL == "" {
+		brainURL = "http://eri.aerial"
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return DispatchResponse{}, fmt.Errorf("failed to marshal dispatch request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, brainURL+"/dispatch", bytes.NewReader(body))
+	if err != nil {
+		return DispatchResponse{}, fmt.Errorf("failed to create http request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	client := d.httpClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return DispatchResponse{}, fmt.Errorf("dispatch failed: %w", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return DispatchResponse{}, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var errResp struct {
+			Error string `json:"error"`
+		}
+		if jsonErr := json.Unmarshal(respBody, &errResp); jsonErr == nil && strings.TrimSpace(errResp.Error) != "" {
+			return DispatchResponse{}, fmt.Errorf("brain /dispatch error (%d): %s", resp.StatusCode, errResp.Error)
+		}
+		return DispatchResponse{}, fmt.Errorf("brain /dispatch returned HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var dispatchResp DispatchResponse
+	if err := json.Unmarshal(respBody, &dispatchResp); err != nil {
+		return DispatchResponse{}, fmt.Errorf("failed to parse dispatch response: %w", err)
 	}
 
 	return dispatchResp, nil
@@ -414,18 +487,15 @@ func (t *Ticker) processDueHeartbeat(ctx context.Context, hb HeartbeatSchedule, 
 	sessionKey := "heartbeat-" + hb.ID
 	runID := uuid.NewString()
 	wrappedPrompt := BuildHeartbeatPrompt(hb)
-	req := BrainPromptRequest{
-		Prompt:       wrappedPrompt,
-		ChannelID:    hb.TargetID,
+	req := DispatchRequest{
+		ID:           runID,
+		Source:       "heartbeat",
 		SessionID:    sessionKey,
-		Title:        hb.TitlePrefix,
-		MessageID:    runID,
+		Prompt:       wrappedPrompt,
 		Effort:       hb.Effort,
-		Silent:       true,
-		Ephemeral:    boolPtr(false),
 		SkipIfActive: true,
 	}
-	resp, dispatchErr := t.dispatcher.DispatchPrompt(ctx, req)
+	resp, dispatchErr := t.dispatcher.Dispatch(ctx, req)
 	if dispatchErr == nil && resp.Status == "skipped_active" {
 		slog.Info("Skipping heartbeat run: thread has an active turn in progress", "id", hb.ID, "target_id", hb.TargetID, "thread_id", sessionKey)
 		return
@@ -439,10 +509,7 @@ func (t *Ticker) processDueHeartbeat(ctx context.Context, hb HeartbeatSchedule, 
 		errMsg = dispatchErr.Error()
 		log.Printf("[Haro Ticker] Dispatch error for heartbeat %s: %v", hb.ID, dispatchErr)
 	}
-	msgID := resp.MessageID
-	if msgID == "" {
-		msgID = runID
-	}
+	msgID := firstNonEmpty(resp.DispatchID, resp.MessageID, runID)
 	run := ScheduleRun{
 		ID:           runID,
 		ScheduleID:   hb.ID,

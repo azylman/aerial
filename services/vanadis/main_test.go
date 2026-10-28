@@ -814,14 +814,14 @@ func TestExecuteChunkWorkerAndProcessExecuteChunk(t *testing.T) {
 	if NewVanadisServer(Config{}, nil, nil, nil).ProcessExecuteChunk(ctx, "b1", 0, false) == nil {
 		t.Fatal("expected error when store is nil")
 	}
-	var gotPrompts []BrainPromptRequest
+	var gotPrompts []BrainDispatchRequest
 	brainStatus := http.StatusAccepted
 	brainSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/prompt" || r.Method != http.MethodPost {
+		if r.URL.Path != "/dispatch" || r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		var req BrainPromptRequest
+		var req BrainDispatchRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		gotPrompts = append(gotPrompts, req)
 		w.WriteHeader(brainStatus)
@@ -858,7 +858,7 @@ func TestExecuteChunkWorkerAndProcessExecuteChunk(t *testing.T) {
 	if err := worker.Work(ctx, job); err != nil {
 		t.Fatalf("unexpected worker error: %v", err)
 	}
-	if len(gotPrompts) != 1 || !gotPrompts[0].Silent || gotPrompts[0].Effort != "medium" || gotPrompts[0].ChannelID != "thread-777" || !strings.Contains(gotPrompts[0].Prompt, "Chunk ID: c-1") {
+	if len(gotPrompts) != 1 || gotPrompts[0].Source != "vanadis" || gotPrompts[0].Effort != "medium" || !strings.Contains(gotPrompts[0].Prompt, "Chunk ID: c-1") {
 		t.Fatalf("unexpected dispatched prompts: %+v", gotPrompts)
 	}
 	brainStatus = http.StatusBadGateway
@@ -975,7 +975,7 @@ func TestHTTPEndpoints(t *testing.T) {
 	var cancelPromptBuildID, cancelWidgetStatus string
 	var cancelWidgetChunkStatuses []string
 	cancelBrainSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/prompt/cancel" {
+		if r.URL.Path == "/dispatch/cancel" {
 			var req map[string]string
 			_ = json.NewDecoder(r.Body).Decode(&req)
 			cancelPromptBuildID = req["build_id"]

@@ -76,10 +76,6 @@ func IsNumericSnowflake(id string) bool {
 	return true
 }
 
-func boolPtr(b bool) *bool {
-	return &b
-}
-
 var (
 	reVanadisBuild    = regexp.MustCompile(`^build-[a-z0-9-]+$`)
 	reVanadisChunk    = regexp.MustCompile(`^.+?-chunk-[0-9]+$`)

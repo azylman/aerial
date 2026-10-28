@@ -350,6 +350,113 @@ func TestHTTPPromptDispatcher(t *testing.T) {
 	}
 }
 
+func TestHTTPPromptDispatcher_Dispatch(t *testing.T) {
+	tests := []struct {
+		name           string
+		serverStatus   int
+		serverResponse string
+		req            DispatchRequest
+		closeServer    bool
+		nilDispatcher  bool
+		wantErr        bool
+		wantDispatchID string
+	}{
+		{
+			name:           "success accepted 202",
+			serverStatus:   http.StatusAccepted,
+			serverResponse: `{"status":"accepted","dispatch_id":"disp-1","message_id":"disp-1"}`,
+			req: DispatchRequest{
+				Source:       "heartbeat",
+				SessionID:    "heartbeat-hb-1",
+				Prompt:       "echo test",
+				Effort:       "low",
+				SkipIfActive: true,
+			},
+			wantDispatchID: "disp-1",
+		},
+		{
+			name:           "server returns error json 400",
+			serverStatus:   http.StatusBadRequest,
+			serverResponse: `{"error":"prompt cannot be empty"}`,
+			req: DispatchRequest{
+				Source: "heartbeat",
+			},
+			wantErr: true,
+		},
+		{
+			name:           "server returns non-json error 500",
+			serverStatus:   http.StatusInternalServerError,
+			serverResponse: `Internal Server Error`,
+			req: DispatchRequest{
+				Source: "heartbeat",
+				Prompt: "fail",
+			},
+			wantErr: true,
+		},
+		{
+			name:           "server returns invalid json on 200",
+			serverStatus:   http.StatusOK,
+			serverResponse: `not valid json`,
+			req: DispatchRequest{
+				Source: "heartbeat",
+				Prompt: "test invalid json",
+			},
+			wantErr: true,
+		},
+		{
+			name:        "closed server network error",
+			closeServer: true,
+			req: DispatchRequest{
+				Source: "heartbeat",
+				Prompt: "test closed",
+			},
+			wantErr: true,
+		},
+		{
+			name:          "nil dispatcher returns error",
+			nilDispatcher: true,
+			req:           DispatchRequest{Source: "heartbeat", Prompt: "test"},
+			wantErr:       true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Content-Type") != "application/json" {
+					t.Errorf("expected Content-Type application/json, got %q", r.Header.Get("Content-Type"))
+				}
+				if r.URL.Path != "/dispatch" {
+					t.Errorf("expected path /dispatch, got %q", r.URL.Path)
+				}
+				w.WriteHeader(tc.serverStatus)
+				_, _ = w.Write([]byte(tc.serverResponse))
+			}))
+			defer server.Close()
+
+			var dispatcher *HTTPPromptDispatcher
+			if tc.nilDispatcher {
+				dispatcher = nil
+			} else {
+				serverURL := server.URL + "/"
+				if tc.closeServer {
+					server.Close()
+				}
+				dispatcher = NewHTTPPromptDispatcher(serverURL)
+			}
+
+			ctx := context.Background()
+			resp, err := dispatcher.Dispatch(ctx, tc.req)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Dispatch() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr && resp.DispatchID != tc.wantDispatchID {
+				t.Errorf("resp.DispatchID = %q, want %q", resp.DispatchID, tc.wantDispatchID)
+			}
+		})
+	}
+}
+
 func TestDB_CronOperations(t *testing.T) {
 	db := setupTestDB(t)
 	ctx := context.Background()
@@ -585,6 +692,10 @@ type mockDispatcher struct {
 	dispatched []PromptDispatchRequest
 	response   PromptDispatchResponse
 	err        error
+
+	dispatchedRequests []DispatchRequest
+	dispatchResponse   DispatchResponse
+	dispatchErr        error
 }
 
 func (m *mockDispatcher) DispatchPrompt(ctx context.Context, req PromptDispatchRequest) (PromptDispatchResponse, error) {
@@ -592,11 +703,17 @@ func (m *mockDispatcher) DispatchPrompt(ctx context.Context, req PromptDispatchR
 	return m.response, m.err
 }
 
+func (m *mockDispatcher) Dispatch(ctx context.Context, req DispatchRequest) (DispatchResponse, error) {
+	m.dispatchedRequests = append(m.dispatchedRequests, req)
+	return m.dispatchResponse, m.dispatchErr
+}
+
 func TestTicker_EvaluateDueSchedules_Scenarios(t *testing.T) {
 	tests := []struct {
 		name              string
 		setupCron         *CronSchedule
 		setupOneShot      *OneShotSchedule
+		setupHeartbeat    *HeartbeatSchedule
 		dispatcherStatus  string
 		responseChannelID string
 		responseMessageID string
@@ -764,6 +881,79 @@ func TestTicker_EvaluateDueSchedules_Scenarios(t *testing.T) {
 			wantRunStatus:     "failed",
 			wantRunError:      "network timeout",
 		},
+		{
+			name: "due heartbeat dispatched successfully",
+			setupHeartbeat: &HeartbeatSchedule{
+				ID:          "hb-eval-1",
+				TargetID:    "123456789",
+				TitlePrefix: "Heartbeat Check",
+				CronExpr:    "0 12 * * *",
+				Prompt:      "System Heartbeat",
+				Timezone:    "UTC",
+				NextRunAt:   time.Date(2026, 10, 23, 11, 59, 0, 0, time.UTC),
+				Enabled:     true,
+				Effort:      "low",
+			},
+			dispatcherStatus:  "accepted",
+			responseMessageID: "disp-hb-1",
+			evaluateNowOffset: 0,
+			wantDispatched:    1,
+			wantRunStatus:     "completed",
+		},
+		{
+			name: "due heartbeat skipped when thread has active turn",
+			setupHeartbeat: &HeartbeatSchedule{
+				ID:          "hb-eval-skipped",
+				TargetID:    "123456789",
+				TitlePrefix: "Heartbeat Skip",
+				CronExpr:    "0 12 * * *",
+				Prompt:      "System Heartbeat",
+				Timezone:    "UTC",
+				NextRunAt:   time.Date(2026, 10, 23, 11, 59, 0, 0, time.UTC),
+				Enabled:     true,
+				Effort:      "low",
+			},
+			dispatcherStatus:  "skipped_active",
+			evaluateNowOffset: 0,
+			wantDispatched:    1,
+		},
+		{
+			name: "due heartbeat stale over 24h skips dispatch",
+			setupHeartbeat: &HeartbeatSchedule{
+				ID:          "hb-eval-stale",
+				TargetID:    "123456789",
+				TitlePrefix: "Stale Heartbeat",
+				CronExpr:    "0 12 * * *",
+				Prompt:      "Stale Check",
+				Timezone:    "UTC",
+				NextRunAt:   time.Date(2026, 10, 21, 10, 0, 0, 0, time.UTC), // >24h overdue
+				Enabled:     true,
+				Effort:      "low",
+			},
+			evaluateNowOffset: 0,
+			wantDispatched:    0,
+			wantRunStatus:     "failed",
+			wantRunError:      "stale heartbeat (>24h overdue)",
+		},
+		{
+			name: "due heartbeat dispatch error records failed run",
+			setupHeartbeat: &HeartbeatSchedule{
+				ID:          "hb-eval-err",
+				TargetID:    "123456789",
+				TitlePrefix: "Heartbeat Error",
+				CronExpr:    "0 12 * * *",
+				Prompt:      "Error Check",
+				Timezone:    "UTC",
+				NextRunAt:   time.Date(2026, 10, 23, 11, 59, 0, 0, time.UTC),
+				Enabled:     true,
+				Effort:      "low",
+			},
+			dispatcherErr:     fmt.Errorf("connection refused"),
+			evaluateNowOffset: 0,
+			wantDispatched:    1,
+			wantRunStatus:     "failed",
+			wantRunError:      "connection refused",
+		},
 	}
 
 	for _, tc := range tests {
@@ -785,6 +975,12 @@ func TestTicker_EvaluateDueSchedules_Scenarios(t *testing.T) {
 					t.Fatalf("InsertOneShotSchedule() err = %v", err)
 				}
 			}
+			if tc.setupHeartbeat != nil {
+				scheduleID = tc.setupHeartbeat.ID
+				if err := InsertHeartbeatSchedule(ctx, db, *tc.setupHeartbeat); err != nil {
+					t.Fatalf("InsertHeartbeatSchedule() err = %v", err)
+				}
+			}
 
 			mock := &mockDispatcher{
 				response: PromptDispatchResponse{
@@ -793,26 +989,34 @@ func TestTicker_EvaluateDueSchedules_Scenarios(t *testing.T) {
 					MessageID: tc.responseMessageID,
 				},
 				err: tc.dispatcherErr,
+				dispatchResponse: DispatchResponse{
+					Status:     tc.dispatcherStatus,
+					DispatchID: tc.responseMessageID,
+					MessageID:  tc.responseMessageID,
+				},
+				dispatchErr: tc.dispatcherErr,
 			}
 
 			ticker := NewTicker(db, mock, 30*time.Second)
 			ticker.EvaluateDueSchedules(ctx, now)
 
-			if len(mock.dispatched) != tc.wantDispatched {
-				t.Fatalf("dispatched count = %d, want %d", len(mock.dispatched), tc.wantDispatched)
+			totalDispatched := len(mock.dispatched) + len(mock.dispatchedRequests)
+			if totalDispatched != tc.wantDispatched {
+				t.Fatalf("dispatched count = %d, want %d", totalDispatched, tc.wantDispatched)
 			}
 
-			// Query schedule_runs
-			row := db.QueryRowContext(ctx, "SELECT status, error FROM schedule_runs WHERE schedule_id = ?", scheduleID)
-			var status, errMsg string
-			if err := row.Scan(&status, &errMsg); err != nil {
-				t.Fatalf("failed to query schedule_runs for %s: %v", scheduleID, err)
-			}
-			if status != tc.wantRunStatus {
-				t.Errorf("schedule_run status = %q, want %q", status, tc.wantRunStatus)
-			}
-			if tc.wantRunError != "" && !strings.Contains(errMsg, tc.wantRunError) {
-				t.Errorf("schedule_run error = %q, want substring %q", errMsg, tc.wantRunError)
+			if tc.wantRunStatus != "" {
+				row := db.QueryRowContext(ctx, "SELECT status, error FROM schedule_runs WHERE schedule_id = ?", scheduleID)
+				var status, errMsg string
+				if err := row.Scan(&status, &errMsg); err != nil {
+					t.Fatalf("failed to query schedule_runs for %s: %v", scheduleID, err)
+				}
+				if status != tc.wantRunStatus {
+					t.Errorf("schedule_run status = %q, want %q", status, tc.wantRunStatus)
+				}
+				if tc.wantRunError != "" && !strings.Contains(errMsg, tc.wantRunError) {
+					t.Errorf("schedule_run error = %q, want substring %q", errMsg, tc.wantRunError)
+				}
 			}
 		})
 	}
@@ -1464,18 +1668,20 @@ func TestTicker_EvaluateDueHeartbeats_Scenarios(t *testing.T) {
 				dispStatus = tc.dispatcherStatus
 			}
 			mock := &mockDispatcher{
-				response: PromptDispatchResponse{Status: dispStatus, MessageID: "msg-dispatched"},
-				err:      tc.dispatcherErr,
+				response:         PromptDispatchResponse{Status: dispStatus, MessageID: "msg-dispatched"},
+				err:              tc.dispatcherErr,
+				dispatchResponse: DispatchResponse{Status: dispStatus, DispatchID: "msg-dispatched", MessageID: "msg-dispatched"},
+				dispatchErr:      tc.dispatcherErr,
 			}
 			ticker := NewTicker(db, mock, 30*time.Second)
 
 			ticker.EvaluateDueSchedules(ctx, now)
 
 			if tc.wantDispatched {
-				if len(mock.dispatched) == 0 {
+				if len(mock.dispatchedRequests) == 0 {
 					t.Errorf("expected dispatcher to be called for %s", tc.hbID)
 				}
-				req := mock.dispatched[len(mock.dispatched)-1]
+				req := mock.dispatchedRequests[len(mock.dispatchedRequests)-1]
 				if !strings.Contains(req.Prompt, "Raw monitoring prompt for "+tc.hbID) {
 					t.Errorf("dispatcher prompt missing raw prompt:\n%s", req.Prompt)
 				}
@@ -1485,18 +1691,15 @@ func TestTicker_EvaluateDueHeartbeats_Scenarios(t *testing.T) {
 				if req.SessionID != "heartbeat-"+tc.hbID {
 					t.Errorf("req.SessionID = %q, want 'heartbeat-%s'", req.SessionID, tc.hbID)
 				}
-				if !req.Silent {
-					t.Errorf("expected req.Silent = true")
+				if req.Source != "heartbeat" {
+					t.Errorf("req.Source = %q, want 'heartbeat'", req.Source)
 				}
 				if !req.SkipIfActive {
 					t.Errorf("expected req.SkipIfActive = true")
 				}
-				if req.Ephemeral == nil || *req.Ephemeral != false {
-					t.Errorf("expected req.Ephemeral = boolPtr(false)")
-				}
 			} else {
-				if len(mock.dispatched) > 0 {
-					t.Errorf("dispatcher should NOT be called for %s, called %d times", tc.hbID, len(mock.dispatched))
+				if len(mock.dispatchedRequests) > 0 {
+					t.Errorf("dispatcher should NOT be called for %s, called %d times", tc.hbID, len(mock.dispatchedRequests))
 				}
 			}
 

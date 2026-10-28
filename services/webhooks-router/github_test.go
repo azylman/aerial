@@ -115,6 +115,7 @@ type ghEventCase struct {
 	wantEnsureCalls   int
 	wantGitPushes     int
 	wantPrompts       int
+	wantDispatches    int
 	wantDMs           int
 	wantPromptSubstr  string
 	wantDMSubstr      string
@@ -291,14 +292,14 @@ func TestProcessGitHubEvent(t *testing.T) {
 			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"roborev","head_sha":"robo525abcdef","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/525","output":{"title":"Review Failed","summary":"Found issues"},"pull_requests":[{"number":525,"head":{"ref":"feat/test","sha":"robo525abcdef"}}]}}`,
 			reg:               &mockPRRegistry{ciFailedTargetID: "1555405874565091380", ciFailedUpdated: true},
 			disp:              &mockOutboundDispatcher{},
-			wantCIFailedCalls: 1, wantDMs: 0, wantPrompts: 1, wantPromptSubstr: "Found SQL injection in query",
+			wantCIFailedCalls: 1, wantDMs: 0, wantDispatches: 1, wantPromptSubstr: "Found SQL injection in query",
 		},
 		{
 			name: "check_run failure for roborev produces critical evaluation and override prompt", event: "check_run", delivery: "del-cr-roborev-override",
 			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"roborev","head_sha":"robo525abcdef","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/525","output":{"title":"Review Failed","summary":"Found issues"},"pull_requests":[{"number":525,"head":{"ref":"feat/test","sha":"robo525abcdef"}}]}}`,
 			reg:               &mockPRRegistry{ciFailedTargetID: "1555405874565091380", ciFailedUpdated: true},
 			disp:              &mockOutboundDispatcher{},
-			wantCIFailedCalls: 1, wantDMs: 0, wantPrompts: 1, wantPromptSubstr: "override-roborev 525",
+			wantCIFailedCalls: 1, wantDMs: 0, wantDispatches: 1, wantPromptSubstr: "override-roborev 525",
 		},
 		{
 			name: "check_run success for roborev calls UpdatePRSync", event: "check_run", delivery: "del-cr-roborev-success",
@@ -333,7 +334,7 @@ func TestProcessGitHubEvent(t *testing.T) {
 			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Unit Tests","head_sha":"headsha789","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/123","output":{"title":"Failed"},"pull_requests":[{"number":530,"head":{"ref":"feat/test"}}]}}`,
 			reg:               &mockPRRegistry{ciFailedTargetID: "1555405874565091380", ciFailedUpdated: true},
 			disp:              &mockOutboundDispatcher{},
-			wantCIFailedCalls: 1, wantDMs: 0, wantPrompts: 1, wantPromptSubstr: "Please investigate and fix the failure by inspecting the failing logs",
+			wantCIFailedCalls: 1, wantDMs: 0, wantDispatches: 1, wantPromptSubstr: "Please investigate and fix the failure by inspecting the failing logs",
 		},
 		{
 			name: "check_run failure with ciFailCount exceeding cap suppresses prompt and dispatches cap DM", event: "check_run", delivery: "del-cr-cap",
@@ -347,7 +348,7 @@ func TestProcessGitHubEvent(t *testing.T) {
 			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Lint","head_sha":"headsha789","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/123","output":{"title":"Failed"},"pull_requests":[{"number":530,"head":{"ref":"feat/test"}}]}}`,
 			reg:               &mockPRRegistry{ciFailedTargetID: "1555405874565091380", ciFailedUpdated: true, ciFailCountErr: errors.New("db error")},
 			disp:              &mockOutboundDispatcher{},
-			wantCIFailedCalls: 1, wantDMs: 0, wantPrompts: 1, wantPromptSubstr: "Lint",
+			wantCIFailedCalls: 1, wantDMs: 0, wantDispatches: 1, wantPromptSubstr: "Lint",
 		},
 		{
 			name: "check_run timed_out with PR in payload transitions registry", event: "check_run", delivery: "del-cr-timeout",
@@ -442,7 +443,7 @@ func TestProcessGitHubEvent(t *testing.T) {
 			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Service Unit Tests","head_sha":"headsha789","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/123","output":{"title":"Build Failed","summary":"Compilation error in brain/main.go:42"},"pull_requests":[{"number":530,"head":{"ref":"feat/test"}}]}}`,
 			reg:               &mockPRRegistry{ciFailedTargetID: "1555405874565091380", ciFailedUpdated: true},
 			disp:              &mockOutboundDispatcher{},
-			wantCIFailedCalls: 1, wantDMs: 0, wantPrompts: 1, wantPromptSubstr: "Service Unit Tests",
+			wantCIFailedCalls: 1, wantDMs: 0, wantDispatches: 1, wantPromptSubstr: "Service Unit Tests",
 		},
 		{
 			name: "check_run failure duplicate does not trigger prompt", event: "check_run", delivery: "del-cr-dup-prompt",
@@ -463,14 +464,14 @@ func TestProcessGitHubEvent(t *testing.T) {
 			payload:    `{"action":"auto_merge_disabled","number":543,"pull_request":{"number":543,"head":{"ref":"feat/my-feature","sha":"head543"}},"repository":{"full_name":"azylman/aerial"}}`,
 			reg:        &mockPRRegistry{conflictTargetID: "1555405874565091380", conflictUpdated: true},
 			disp:       &mockOutboundDispatcher{},
-			wantAction: "auto_merge_disabled", wantPR: 543, wantConflictCalls: 1, wantDMs: 0, wantPrompts: 1, wantPromptSubstr: "Merge conflict detected on PR #543",
+			wantAction: "auto_merge_disabled", wantPR: 543, wantConflictCalls: 1, wantDMs: 0, wantDispatches: 1, wantPromptSubstr: "Merge conflict detected on PR #543",
 		},
 		{
 			name: "push to main triggers conflict check on open PRs", event: "push", delivery: "del-push-conflict",
 			payload:           `{"ref":"refs/heads/main","after":"maincommit123","repository":{"full_name":"azylman/aerial"}}`,
 			reg:               &mockPRRegistry{openPRs: []RegisteredPR{{PRNumber: 543, Branch: "feat/conflict-check", TargetID: "1555405874565091380", HeadSHA: "head543"}}, conflictTargetID: "1555405874565091380", conflictUpdated: true},
 			disp:              &mockOutboundDispatcher{},
-			wantConflictCalls: 1, wantGitPushes: 1, wantDMs: 0, wantPrompts: 1, wantPromptSubstr: "Merge conflict detected on PR #543",
+			wantConflictCalls: 1, wantGitPushes: 1, wantDMs: 0, wantDispatches: 1, wantPromptSubstr: "Merge conflict detected on PR #543",
 		},
 		{
 			name: "merged PR on azylman/mirrormere advances Vanadis chunk", event: "pull_request", delivery: "del-pr-mirrormere",
@@ -661,11 +662,20 @@ func TestProcessGitHubEvent(t *testing.T) {
 						t.Errorf("git push PRNumber = %d, want %d", gitPushes[0].PRNumber, tc.wantPR)
 					}
 				}
+				dispatches := tc.disp.DispatchCalls()
+				if len(dispatches) != tc.wantDispatches {
+					t.Errorf("dispatches = %d, want %d", len(dispatches), tc.wantDispatches)
+				}
+				if tc.wantPromptSubstr != "" && tc.wantDispatches > 0 {
+					if len(dispatches) == 0 || !strings.Contains(dispatches[len(dispatches)-1].Prompt, tc.wantPromptSubstr) {
+						t.Errorf("expected dispatch to contain %q, got %+v", tc.wantPromptSubstr, dispatches)
+					}
+				}
 				prompts := tc.disp.PromptCalls()
 				if len(prompts) != tc.wantPrompts {
 					t.Errorf("prompts = %d, want %d", len(prompts), tc.wantPrompts)
 				}
-				if tc.wantPromptSubstr != "" {
+				if tc.wantPromptSubstr != "" && tc.wantPrompts > 0 {
 					if len(prompts) == 0 || !strings.Contains(prompts[len(prompts)-1].Prompt, tc.wantPromptSubstr) {
 						t.Errorf("expected prompt to contain %q, got %+v", tc.wantPromptSubstr, prompts)
 					}
@@ -1028,6 +1038,7 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 		wantConflict   bool
 		wantConflictPR int
 		wantPrompts    int
+		wantDispatches int
 		wantPromptSubs []string
 		wantDMs        int
 		wantDMSubs     []string
@@ -1051,7 +1062,7 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 			wantConflict:   true,
 			wantConflictPR: 543,
 			wantDMs:        0,
-			wantPrompts:    1,
+			wantDispatches: 1,
 			wantPromptSubs: []string{"Merge conflict detected on PR #543"},
 		},
 		{
@@ -1071,7 +1082,7 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 			wantConflict:   true,
 			wantConflictPR: 545,
 			wantDMs:        0,
-			wantPrompts:    1,
+			wantDispatches: 1,
 		},
 		{
 			name:          "403 rate-limit error return",
@@ -1171,8 +1182,15 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 			if len(mockDisp.PromptCalls()) != tc.wantPrompts {
 				t.Errorf("got %d prompts, want %d", len(mockDisp.PromptCalls()), tc.wantPrompts)
 			}
+			if len(mockDisp.DispatchCalls()) != tc.wantDispatches {
+				t.Errorf("got %d dispatches, want %d", len(mockDisp.DispatchCalls()), tc.wantDispatches)
+			}
 			for _, sub := range tc.wantPromptSubs {
-				if len(mockDisp.PromptCalls()) == 0 || !strings.Contains(mockDisp.PromptCalls()[0].Prompt, sub) {
+				if tc.wantDispatches > 0 {
+					if len(mockDisp.DispatchCalls()) == 0 || !strings.Contains(mockDisp.DispatchCalls()[0].Prompt, sub) {
+						t.Errorf("expected dispatch prompt containing %q", sub)
+					}
+				} else if len(mockDisp.PromptCalls()) == 0 || !strings.Contains(mockDisp.PromptCalls()[0].Prompt, sub) {
 					t.Errorf("expected prompt containing %q", sub)
 				}
 			}

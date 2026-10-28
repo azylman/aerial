@@ -595,14 +595,17 @@ func (s *RouterServer) isValidAlertTarget(targetID string) bool {
 }
 
 func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, label, dmMsg, prompt string, vOpts ...vanadisPromptOpts) error {
-	if s.dispatcher == nil || !s.isValidAlertTarget(targetID) {
+	if s.dispatcher == nil {
 		return nil
 	}
 	var opt vanadisPromptOpts
 	if len(vOpts) > 0 {
 		opt = vOpts[0]
 	}
-	if !opt.silent && dmMsg != "" {
+	if !opt.silent && !s.isValidAlertTarget(targetID) {
+		return nil
+	}
+	if !opt.silent && dmMsg != "" && s.isValidAlertTarget(targetID) {
 		if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{ChannelID: targetID, Content: dmMsg}); err != nil {
 			log.Printf("[webhooks-router] [dispatcher] warning dispatching %s direct message: %v", label, err)
 		}
@@ -610,7 +613,19 @@ func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, la
 	if opt.chunkID != "" && !strings.Contains(prompt, "Chunk ID: "+opt.chunkID) {
 		prompt += "\nChunk ID: " + opt.chunkID
 	}
-	req := PromptRequest{ChannelID: targetID, Prompt: prompt, Effort: opt.effort, Silent: opt.silent}
+	if opt.silent {
+		req := DispatchRequest{
+			Source: "webhook",
+			Prompt: prompt,
+			Effort: firstNonEmpty(opt.effort, "medium"),
+		}
+		if err := s.dispatcher.DispatchBackground(ctx, req); err != nil {
+			log.Printf("[webhooks-router] [dispatcher] error dispatching %s background dispatch: %v", label, err)
+			return fmt.Errorf("dispatch %s background dispatch: %w", label, err)
+		}
+		return nil
+	}
+	req := PromptRequest{ChannelID: targetID, Prompt: prompt, Effort: opt.effort}
 	if err := s.dispatcher.DispatchPrompt(ctx, req); err != nil {
 		log.Printf("[webhooks-router] [dispatcher] error dispatching %s prompt: %v", label, err)
 		return fmt.Errorf("dispatch %s prompt: %w", label, err)

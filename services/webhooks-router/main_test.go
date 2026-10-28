@@ -442,10 +442,12 @@ type mockOutboundDispatcher struct {
 	gitPushCalls       []GitPushEventRequest
 	imageReadyCalls    []ImageReadyEventRequest
 	promptCalls        []PromptRequest
+	dispatchCalls      []DispatchRequest
 	directMessageCalls []DirectMessageRequest
 	gitPushErr         error
 	imageReadyErr      error
 	promptErr          error
+	dispatchErr        error
 	directMessageErr   error
 	widgetErr          error
 	widgetReturnMsgID  string
@@ -478,6 +480,13 @@ func (m *mockOutboundDispatcher) DispatchPrompt(ctx context.Context, req PromptR
 	return m.promptErr
 }
 
+func (m *mockOutboundDispatcher) DispatchBackground(ctx context.Context, req DispatchRequest) error {
+	m.mu.Lock()
+	m.dispatchCalls = append(m.dispatchCalls, req)
+	m.mu.Unlock()
+	return m.dispatchErr
+}
+
 func (m *mockOutboundDispatcher) DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error {
 	m.mu.Lock()
 	m.directMessageCalls = append(m.directMessageCalls, req)
@@ -501,6 +510,12 @@ func (m *mockOutboundDispatcher) PromptCalls() []PromptRequest {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]PromptRequest(nil), m.promptCalls...)
+}
+
+func (m *mockOutboundDispatcher) DispatchCalls() []DispatchRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]DispatchRequest(nil), m.dispatchCalls...)
 }
 
 func (m *mockOutboundDispatcher) DirectMessageCalls() []DirectMessageRequest {
@@ -679,6 +694,7 @@ func TestProcessHangarEvent(t *testing.T) {
 		wantDeployedJobs   []string
 		wantAdvanceCalls   int
 		wantPrompts        int
+		wantDispatches     int
 		wantDMs            int
 		wantDMSubstr       string
 		wantPromptSubs     []string
@@ -754,13 +770,13 @@ func TestProcessHangarEvent(t *testing.T) {
 			},
 		},
 		{
-			name:         "deploy_rollback valid snowflake",
-			evt:          mkHangarEvt("deploy_rollback", "webhooks-router", "azylman/aerial", "shafail", 529, "1555405874565091380", "rollback", strings.Repeat("error detail line\n", 50)),
-			reg:          &mockPRRegistry{deployFailedUpdated: true},
-			disp:         &mockOutboundDispatcher{},
-			wantPR:       529,
-			wantTargetID: "1555405874565091380",
-			wantPrompts:  1,
+			name:           "deploy_rollback valid snowflake",
+			evt:            mkHangarEvt("deploy_rollback", "webhooks-router", "azylman/aerial", "shafail", 529, "1555405874565091380", "rollback", strings.Repeat("error detail line\n", 50)),
+			reg:            &mockPRRegistry{deployFailedUpdated: true},
+			disp:           &mockOutboundDispatcher{},
+			wantPR:         529,
+			wantTargetID:   "1555405874565091380",
+			wantDispatches: 1,
 			wantPromptSubs: []string{
 				"Deployment failed and rolled back",
 				"Please investigate and fix",
@@ -768,13 +784,13 @@ func TestProcessHangarEvent(t *testing.T) {
 			},
 		},
 		{
-			name:         "deploy_failed valid snowflake",
-			evt:          mkHangarEvt("deploy_failed", "hangar", "azylman/aerial", "shabroken", 530, "1555405874565091380", "failed", "exit status 1"),
-			reg:          &mockPRRegistry{deployFailedUpdated: true},
-			disp:         &mockOutboundDispatcher{},
-			wantPR:       530,
-			wantTargetID: "1555405874565091380",
-			wantPrompts:  1,
+			name:           "deploy_failed valid snowflake",
+			evt:            mkHangarEvt("deploy_failed", "hangar", "azylman/aerial", "shabroken", 530, "1555405874565091380", "failed", "exit status 1"),
+			reg:            &mockPRRegistry{deployFailedUpdated: true},
+			disp:           &mockOutboundDispatcher{},
+			wantPR:         530,
+			wantTargetID:   "1555405874565091380",
+			wantDispatches: 1,
 			wantPromptSubs: []string{
 				"Deployment failed for job hangar",
 				"Please investigate and fix",
@@ -784,7 +800,7 @@ func TestProcessHangarEvent(t *testing.T) {
 			name:    "deploy_failed prompt error reverts state and returns error",
 			evt:     mkHangarEvt("deploy_failed", "eri", "azylman/aerial", "shabroken", 531, "1555405874565091380", "failed", "exit status 1"),
 			reg:     &mockPRRegistry{deployFailedUpdated: true},
-			disp:    &mockOutboundDispatcher{promptErr: errors.New("eri 502 bad gateway")},
+			disp:    &mockOutboundDispatcher{dispatchErr: errors.New("eri 502 bad gateway")},
 			wantErr: true,
 		},
 		{
@@ -795,7 +811,7 @@ func TestProcessHangarEvent(t *testing.T) {
 			disp:           &mockOutboundDispatcher{},
 			wantPR:         532,
 			wantTargetID:   "aerial-dev",
-			wantPrompts:    1,
+			wantDispatches: 1,
 			wantPromptSubs: []string{"Deployment failed and rolled back"},
 		},
 		{
@@ -854,13 +870,13 @@ func TestProcessHangarEvent(t *testing.T) {
 			},
 		},
 		{
-			name:         "sync_failed with PR number",
-			evt:          mkHangarEvt("sync_failed", "", "azylman/aerial", "merge542", 542, "1555405874565091380", "failed", "merge conflict in rules/foo.md"),
-			reg:          &mockPRRegistry{},
-			disp:         &mockOutboundDispatcher{},
-			wantPR:       542,
-			wantTargetID: "1555405874565091380",
-			wantPrompts:  1,
+			name:           "sync_failed with PR number",
+			evt:            mkHangarEvt("sync_failed", "", "azylman/aerial", "merge542", 542, "1555405874565091380", "failed", "merge conflict in rules/foo.md"),
+			reg:            &mockPRRegistry{},
+			disp:           &mockOutboundDispatcher{},
+			wantPR:         542,
+			wantTargetID:   "1555405874565091380",
+			wantDispatches: 1,
 			wantPromptSubs: []string{
 				"Git sync failed for repo azylman/aerial",
 				"merge conflict in rules/foo.md",
@@ -1096,13 +1112,26 @@ func TestProcessHangarEvent(t *testing.T) {
 						t.Errorf("DM = %v, want substr %q", dms, tc.wantDMSubstr)
 					}
 				}
+				dispatches := tc.disp.DispatchCalls()
+				if len(dispatches) != tc.wantDispatches {
+					t.Errorf("dispatches = %d, want %d", len(dispatches), tc.wantDispatches)
+				}
+				for _, sub := range tc.wantPromptSubs {
+					if tc.wantDispatches > 0 {
+						if len(dispatches) == 0 || !strings.Contains(dispatches[len(dispatches)-1].Prompt, sub) {
+							t.Errorf("dispatch = %v, want substr %q", dispatches, sub)
+						}
+					}
+				}
 				prompts := tc.disp.PromptCalls()
 				if len(prompts) != tc.wantPrompts {
 					t.Errorf("prompts = %d, want %d", len(prompts), tc.wantPrompts)
 				}
 				for _, sub := range tc.wantPromptSubs {
-					if len(prompts) == 0 || !strings.Contains(prompts[len(prompts)-1].Prompt, sub) {
-						t.Errorf("prompt = %v, want substr %q", prompts, sub)
+					if tc.wantPrompts > 0 {
+						if len(prompts) == 0 || !strings.Contains(prompts[len(prompts)-1].Prompt, sub) {
+							t.Errorf("prompt = %v, want substr %q", prompts, sub)
+						}
 					}
 				}
 			}
@@ -1417,18 +1446,18 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 	if err := srvPG.dispatchCIFailurePrompt(ctx, validSnowflake, "RoboRev Code Review", "azylman/aerial", "sha1", 42, "findings", "http://ci.test"); err != nil {
 		t.Errorf("dispatchCIFailurePrompt(roborev) with pgReg: %v", err)
 	}
-	pgPrompts := dispPG.PromptCalls()
-	if len(pgPrompts) < 3 {
-		t.Fatalf("expected at least 3 prompts from srvPG, got %d", len(pgPrompts))
+	pgDispatches := dispPG.DispatchCalls()
+	if len(pgDispatches) < 3 {
+		t.Fatalf("expected at least 3 dispatches from srvPG, got %d", len(pgDispatches))
 	}
-	if !strings.Contains(pgPrompts[0].Prompt, "Merge conflict detected on PR #42") || !pgPrompts[0].Silent || pgPrompts[0].Effort != "medium" {
-		t.Errorf("expected silent medium-effort conflict prompt for standalone PR, got %+v", pgPrompts[0])
+	if !strings.Contains(pgDispatches[0].Prompt, "Merge conflict detected on PR #42") || pgDispatches[0].Source != "webhook" || pgDispatches[0].Effort != "medium" {
+		t.Errorf("expected silent medium-effort conflict dispatch for standalone PR, got %+v", pgDispatches[0])
 	}
-	if !strings.Contains(pgPrompts[1].Prompt, "Please investigate and fix the failure by inspecting the failing logs") || !pgPrompts[1].Silent || pgPrompts[1].Effort != "medium" {
-		t.Errorf("expected silent medium-effort standard CI prompt, got %+v", pgPrompts[1])
+	if !strings.Contains(pgDispatches[1].Prompt, "Please investigate and fix the failure by inspecting the failing logs") || pgDispatches[1].Source != "webhook" || pgDispatches[1].Effort != "medium" {
+		t.Errorf("expected silent medium-effort standard CI dispatch, got %+v", pgDispatches[1])
 	}
-	if !strings.Contains(pgPrompts[2].Prompt, "override-roborev 42") || !pgPrompts[2].Silent || pgPrompts[2].Effort != "medium" {
-		t.Errorf("expected silent medium-effort roborev override prompt, got %+v", pgPrompts[2])
+	if !strings.Contains(pgDispatches[2].Prompt, "override-roborev 42") || pgDispatches[2].Source != "webhook" || pgDispatches[2].Effort != "medium" {
+		t.Errorf("expected silent medium-effort roborev override dispatch, got %+v", pgDispatches[2])
 	}
 
 	// dispatchAlertWithPrompt with DM error
@@ -1449,9 +1478,9 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 	if len(dispVanadis.DirectMessageCalls()) != 0 {
 		t.Errorf("expected 0 DMs for Vanadis auto-fix, got %d", len(dispVanadis.DirectMessageCalls()))
 	}
-	vPrompts := dispVanadis.PromptCalls()
-	if len(vPrompts) != 2 || !vPrompts[0].Silent || vPrompts[0].Effort != "medium" || !vPrompts[1].Silent || vPrompts[1].Effort != "medium" {
-		t.Errorf("expected 2 silent medium-effort prompts for Vanadis auto-fix, got %+v", vPrompts)
+	vDispatches := dispVanadis.DispatchCalls()
+	if len(vDispatches) != 2 || vDispatches[0].Source != "webhook" || vDispatches[0].Effort != "medium" || vDispatches[1].Source != "webhook" || vDispatches[1].Effort != "medium" {
+		t.Errorf("expected 2 silent medium-effort dispatches for Vanadis auto-fix, got %+v", vDispatches)
 	}
 
 	tsVanadis := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1472,9 +1501,9 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 	if err := srvVanadisPG.dispatchCIFailurePrompt(ctx, validSnowflake, "unit", "azylman/aerial", "sha1", 885, "err", "http://ci.test"); err != nil {
 		t.Errorf("dispatchCIFailurePrompt(vanadis pg): %v", err)
 	}
-	vpgPrompts := dispVanadisPG.PromptCalls()
-	if len(vpgPrompts) != 1 || !vpgPrompts[0].Silent || vpgPrompts[0].Effort != "low" || !strings.Contains(vpgPrompts[0].Prompt, "Chunk ID: chunk-885") {
-		t.Errorf("expected silent low-effort prompt with chunk-885, got %+v", vpgPrompts)
+	vpgDispatches := dispVanadisPG.DispatchCalls()
+	if len(vpgDispatches) != 1 || vpgDispatches[0].Source != "webhook" || vpgDispatches[0].Effort != "low" || !strings.Contains(vpgDispatches[0].Prompt, "Chunk ID: chunk-885") {
+		t.Errorf("expected silent low-effort dispatch with chunk-885, got %+v", vpgDispatches)
 	}
 }
 
