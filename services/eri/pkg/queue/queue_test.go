@@ -1438,12 +1438,14 @@ func TestProcessBurst_RecordsTokensTelemetry(t *testing.T) {
 		name         string
 		model        string
 		threadID     string
+		channelName  string
 		mockOutput   string
 		wantContains []string
 		wantExcludes string
 	}{
 		{name: "NamedChannel", model: "test-token-model", threadID: "chan-token-test-1", mockOutput: `{"conversation_id":"c1111111-1111-2222-3333-444444444444","status":"SUCCESS","response":"Done!","usage":{"input_tokens":150,"output_tokens":75,"thinking_tokens":30,"cache_read_tokens":10,"total_tokens":265}}`, wantContains: []string{`aerial_brain_tokens_total{channel="chan-token-test-1",model="test-token-model",type="total"} 265`, `aerial_brain_tokens_total{channel="chan-token-test-1",model="test-token-model",type="input"} 150`, `aerial_brain_tokens_total{channel="chan-token-test-1",model="test-token-model",type="output"} 75`, `aerial_brain_tokens_total{channel="chan-token-test-1",model="test-token-model",type="thinking"} 30`, `aerial_brain_tokens_total{channel="chan-token-test-1",model="test-token-model",type="cache_read"} 10`}},
 		{name: "SnowflakeChannelSanitized", model: "test-snowflake-model", threadID: "1534436119888793750", mockOutput: `{"conversation_id":"c2222222-1111-2222-3333-444444444444","status":"SUCCESS","response":"Done!","usage":{"input_tokens":100,"output_tokens":50,"thinking_tokens":20,"cache_read_tokens":5,"total_tokens":175}}`, wantContains: []string{`aerial_brain_tokens_total{channel="unknown",model="test-snowflake-model",type="total"} 175`}, wantExcludes: "1534436119888793750"},
+		{name: "BurstChannelNameFallback", model: "test-burst-chan-model", threadID: "low_effort:1534436119888793750", channelName: "#aerial-dev", mockOutput: `{"conversation_id":"c3333333-1111-2222-3333-444444444444","status":"SUCCESS","response":"Done!","usage":{"input_tokens":80,"output_tokens":20,"total_tokens":100}}`, wantContains: []string{`aerial_brain_tokens_total{channel="aerial-dev",model="test-burst-chan-model",type="total"} 100`}, wantExcludes: "low_effort:1534436119888793750"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1460,12 +1462,13 @@ func TestProcessBurst_RecordsTokensTelemetry(t *testing.T) {
 
 			t0 := time.Now().UTC()
 			msg := db.Message{
-				ID:        "msg-token-" + tc.name,
-				ThreadID:  tc.threadID,
-				Content:   "<@aerial> Question Token Test",
-				Status:    db.StatusPending,
-				CreatedAt: t0,
-				UpdatedAt: t0,
+				ID:          "msg-token-" + tc.name,
+				ThreadID:    tc.threadID,
+				ChannelName: tc.channelName,
+				Content:     "<@aerial> Question Token Test",
+				Status:      db.StatusPending,
+				CreatedAt:   t0,
+				UpdatedAt:   t0,
 			}
 			_ = insertMessage(store, msg)
 			pool.processBurst([]db.Message{msg})

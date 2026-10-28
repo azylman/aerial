@@ -126,14 +126,6 @@ var (
 		[]string{"reason"},
 	)
 
-	ActiveTasksGauge = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "aerial_brain_active_tasks",
-			Help: "Active background tasks per thread.",
-		},
-		[]string{"thread_id"},
-	)
-
 	DaemonMemoryBytes = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "aerial_brain_daemon_memory_bytes",
@@ -502,7 +494,6 @@ func init() {
 		DaemonsActive,
 		DaemonSpawnsTotal,
 		DaemonPrunesTotal,
-		ActiveTasksGauge,
 		DaemonMemoryBytes,
 		TaskTimeoutsTotal,
 		VoiceTTFRDurationSeconds,
@@ -543,12 +534,31 @@ func RecordTurnCompleted(status, triggerType, model string, duration time.Durati
 	TurnDurationSeconds.WithLabelValues(status, triggerType, model).Observe(duration.Seconds())
 }
 
+func isUUIDString(s string) bool {
+	if len(s) != 36 || s[8] != '-' || s[13] != '-' || s[18] != '-' || s[23] != '-' {
+		return false
+	}
+	for i := 0; i < 36; i++ {
+		if i == 8 || i == 13 || i == 18 || i == 23 {
+			continue
+		}
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
 // SanitizeChannelLabel ensures metric labels for channels never contain snowflake IDs,
 // raw UUIDs, empty strings, or high-cardinality values.
 func SanitizeChannelLabel(channel string) string {
 	channel = strings.TrimSpace(strings.ToLower(channel))
+	if idx := strings.LastIndex(channel, ":"); idx >= 0 {
+		channel = strings.TrimSpace(channel[idx+1:])
+	}
 	channel = strings.TrimPrefix(channel, "#")
-	if channel == "" {
+	if channel == "" || strings.HasPrefix(channel, "ephemeral-") || (len(channel) >= 36 && isUUIDString(channel[len(channel)-36:])) {
 		return "unknown"
 	}
 	// Check if channel is numeric snowflake

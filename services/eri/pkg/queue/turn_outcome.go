@@ -184,6 +184,9 @@ func (te *turnExecution) deliverSuccessAndFinalize(resp *runner.AgyResponse, acc
 
 	metrics.RecordTurnCompleted("success", te.triggerType, currentModel, time.Since(te.execStart))
 	tokenChannel := te.effectiveName
+	if tokenChannel == "" && len(te.burst) > 0 {
+		tokenChannel = te.burst[0].ChannelName
+	}
 	if tokenChannel == "" {
 		if te.triggerType == "schedule" || te.triggerType == "http" {
 			tokenChannel = te.triggerType
