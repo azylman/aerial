@@ -3,17 +3,22 @@ linters:
   enable:
     - bodyclose
     - copyloopvar
+    - errcheck
     - errchkjson
     - errname
     - errorlint
     - fatcontext
+    - govet
+    - ineffassign
     - nilerr
     - noctx
     - predeclared
     - sqlclosecheck
+    - staticcheck
     - tparallel
     - unconvert
     - unparam
+    - unused
     - wastedassign
   settings:
     errcheck:

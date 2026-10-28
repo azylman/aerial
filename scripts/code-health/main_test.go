@@ -195,6 +195,54 @@ func TestRun(t *testing.T) {
 			wantCode: 1,
 			wantErr:  "collect targets",
 		},
+		{
+			name: "banned nolint errcheck fails check",
+			files: map[string]string{
+				"pkg/errcheck.go": "package pkg\n\n//nolint:errcheck\nfunc Foo() {}\n",
+			},
+			wantCode: 1,
+			wantErr:  "//nolint:errcheck is prohibited",
+		},
+		{
+			name: "banned nolint all fails check",
+			files: map[string]string{
+				"pkg/all.go": "package pkg\n\n// nolint:all // ignore everything\nfunc Foo() {}\n",
+			},
+			wantCode: 1,
+			wantErr:  "//nolint:all is prohibited",
+		},
+		{
+			name: "banned bare nolint fails check",
+			files: map[string]string{
+				"pkg/bare.go": "package pkg\n\n//nolint\nfunc Foo() {}\n",
+			},
+			wantCode: 1,
+			wantErr:  "bare //nolint directive is prohibited",
+		},
+		{
+			name: "banned block comment nolint errcheck fails check",
+			files: map[string]string{
+				"pkg/block.go": "package pkg\n\n/*nolint:errcheck*/\nfunc Foo() {}\n",
+			},
+			wantCode: 1,
+			wantErr:  "//nolint:errcheck is prohibited",
+		},
+		{
+			name: "banned empty nolint colon directive fails check",
+			files: map[string]string{
+				"pkg/empty.go": "package pkg\n\n//nolint:\nfunc Foo() {}\n",
+			},
+			wantCode: 1,
+			wantErr:  "empty //nolint: directive is prohibited",
+		},
+		{
+			name: "valid nolint nilerr passes check",
+			files: map[string]string{
+				"pkg/valid.go": "package pkg\n\n//nolint:nilerr // expected nil\nfunc Foo() {}\n",
+			},
+			wantCode: 0,
+			wantOut:  "Checked 1 Go file(s)",
+		},
 	}
 
 	for _, tc := range tests {
