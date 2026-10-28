@@ -994,7 +994,7 @@ func TestHTTPEndpoints(t *testing.T) {
 	memStore.updateChunkErr = errors.New("simulated chunk cancel update err")
 	checkCode(http.MethodPost, "/builds/"+buildID+"/cancel", bytes.NewReader(nil), http.StatusOK)
 	memStore.updateChunkErr = nil
-	if cancelPromptBuildID != buildID || cancelWidgetStatus != "cancelled" || len(cancelWidgetChunkStatuses) != 2 || cancelWidgetChunkStatuses[0] != "merged" || cancelWidgetChunkStatuses[1] != "cancelled" {
+	if cancelPromptBuildID != buildID || cancelWidgetStatus != "cancelled" || len(cancelWidgetChunkStatuses) != 2 || cancelWidgetChunkStatuses[0] != "deployed" || cancelWidgetChunkStatuses[1] != "cancelled" {
 		t.Fatalf("unexpected cancel brain notifications: promptBuildID=%q widgetStatus=%q chunks=%v", cancelPromptBuildID, cancelWidgetStatus, cancelWidgetChunkStatuses)
 	}
 	_ = memStore.UpdateBuildStatus(context.Background(), buildID, "completed")
@@ -1156,10 +1156,15 @@ func TestSyncBuildWidget(t *testing.T) {
 	startedAt, updatedAt := time.Date(2026, 10, 16, 18, 0, 0, 0, time.UTC), time.Date(2026, 10, 16, 18, 3, 0, 0, time.UTC)
 	chunk := mkChunk("", "", 0, "Chunk 0", "", "", "running")
 	chunk.Repo, chunk.StartedAt, chunk.UpdatedAt = "aerial", startedAt, updatedAt
-	chunks := []VanadisChunk{chunk}
+	chunkMerged := mkChunk("", "", 1, "Chunk 1", "", "", "merged")
+	chunkMerged.Repo, chunkMerged.StartedAt, chunkMerged.UpdatedAt = "aerial", startedAt, updatedAt
+	chunks := []VanadisChunk{chunk, chunkMerged}
 	srv.syncBuildWidget(ctx, build, chunks, "test banner")
-	if postedReq.ID != "b1" || postedReq.Title != "Test Build Title" || postedReq.Banner != "test banner" || len(postedReq.Chunks) != 1 || !postedReq.Chunks[0].StartedAt.Equal(startedAt) || !postedReq.Chunks[0].UpdatedAt.Equal(updatedAt) {
+	if postedReq.ID != "b1" || postedReq.Title != "Test Build Title" || postedReq.Banner != "test banner" || len(postedReq.Chunks) != 2 || !postedReq.Chunks[0].StartedAt.Equal(startedAt) || !postedReq.Chunks[0].UpdatedAt.Equal(updatedAt) {
 		t.Errorf("Unexpected posted widget payload: %+v", postedReq)
+	}
+	if postedReq.Chunks[1].Status != "deployed" {
+		t.Errorf("Expected merged chunk status to be normalized to deployed on widget, got %q", postedReq.Chunks[1].Status)
 	}
 	if store.builds["b1"].StatusMessageID != "msg-new-widget-42" {
 		t.Errorf("Expected store status_message_id msg-new-widget-42, got %q", store.builds["b1"].StatusMessageID)

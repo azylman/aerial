@@ -832,28 +832,37 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 	case "deploy_rollback", "deploy_failed":
 		return &evt, s.handleHangarDeployFailedOrRollback(ctx, evt, prefix)
 	case "sync_success":
-		if evt.PRNumber > 0 {
-			if syncHasExpected {
-				s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "synced", "")
-			} else {
-				s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "deployed", "")
-			}
-			if err := s.advanceVanadisChunkOnSync(ctx, evt.Repo, evt.PRNumber, syncHasExpected); err != nil {
-				return &evt, err
-			}
-			if syncHasExpected {
-				if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber); err != nil {
-					log.Printf("[webhooks-router] [widget] warning syncing sync_success widget for %s#%d: %v", evt.Repo, evt.PRNumber, err)
-				}
-			} else if !s.isVanadisPR(ctx, evt.Repo, evt.PRNumber) {
-				return &evt, s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, firstNonEmpty(evt.JobName, "git-sync"), evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID)
-			}
-		}
-		return &evt, nil
+		return &evt, s.handleHangarSyncSuccess(ctx, evt, syncHasExpected)
 	case "sync_failed":
 		return &evt, s.handleHangarSyncFailed(ctx, evt, prefix)
 	}
 	return &evt, nil
+}
+
+func (s *RouterServer) handleHangarSyncSuccess(ctx context.Context, evt HangarDeployEvent, syncHasExpected bool) error {
+	if evt.PRNumber <= 0 {
+		return nil
+	}
+	if syncHasExpected {
+		s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "synced", "")
+	} else {
+		s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "deployed", "")
+	}
+	if err := s.advanceVanadisChunkOnSync(ctx, evt.Repo, evt.PRNumber, syncHasExpected); err != nil {
+		return err
+	}
+	if syncHasExpected {
+		if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber); err != nil {
+			log.Printf("[webhooks-router] [widget] warning syncing sync_success widget for %s#%d: %v", evt.Repo, evt.PRNumber, err)
+		}
+	} else if !s.isVanadisPR(ctx, evt.Repo, evt.PRNumber) {
+		return s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, firstNonEmpty(evt.JobName, "git-sync"), evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID)
+	} else {
+		if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber); err != nil {
+			log.Printf("[webhooks-router] [widget] warning syncing sync_success widget for %s#%d: %v", evt.Repo, evt.PRNumber, err)
+		}
+	}
+	return nil
 }
 
 func (s *RouterServer) dispatchDeploymentSuccessPrompt(ctx context.Context, targetID, jobName, repo, commitSHA string, prNum int, refID string) error {
