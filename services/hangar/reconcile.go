@@ -429,6 +429,12 @@ func (d *SyncDaemon) runNomadJobWithEvents(ctx context.Context, baseEvt HangarDe
 	baseEvt.Timestamp = time.Now().UTC()
 	d.DispatchDeployEvent(baseEvt)
 
+	if baseEvt.JobName == "db-migrate" {
+		if stopOut, stopErrBytes, stopErr := d.getNomadExecutor()(ctx, "job", "stop", "-purge", baseEvt.JobName); stopErr != nil {
+			log.Printf("[Hangar:Nomad] Notice: pre-run purge of %s: %s (%v)", baseEvt.JobName, SanitizeLog(strings.TrimSpace(string(append(stopOut, stopErrBytes...)))), stopErr)
+		}
+	}
+
 	var errBytes []byte
 	out, errBytes, err = d.getNomadExecutor()(ctx, runArgs...)
 	if err != nil {
