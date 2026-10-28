@@ -72,7 +72,6 @@ func TestAccentColor(t *testing.T) {
 		want   int
 	}{
 		{"completed", 0x10B981},
-		{"merged", 0x10B981},
 		{"deployed", 0x10B981},
 		{"failed", 0xEF4444},
 		{"conflict", 0xEF4444},
@@ -82,6 +81,8 @@ func TestAccentColor(t *testing.T) {
 		{"cancelled", 0xF59E0B},
 		{"running", 0xA855F7},
 		{"coding", 0xA855F7},
+		{"merged", 0xA855F7},
+		{"synced", 0xA855F7},
 		{"deploying", 0xA855F7},
 		{"open", 0xA855F7},
 		{"pr_opened", 0xA855F7},
@@ -106,10 +107,12 @@ func TestStatusBadge(t *testing.T) {
 		{"coding", "🔨"},
 		{"pr_opened", "👀"},
 		{"open", "👀"},
+		{"merged", "🔀"},
+		{"synced", "🔄"},
 		{"deploying", "🚀"},
-		{"merged", "✅"},
 		{"deployed", "✅"},
 		{"completed", "✅"},
+		{"success", "✅"},
 		{"failed", "❌"},
 		{"conflict", "❌"},
 		{"pending", "⏳"},
@@ -213,7 +216,7 @@ func TestBuildStatusWidgetComponents_VanadisBuild(t *testing.T) {
 		t.Fatalf("expected chunk 1 to be *discordgo.Section, got %T", container.Components[2])
 	}
 	c1Text := c1Sec.Components[0].(*discordgo.TextDisplay)
-	if c1Text.Content != "✅ **`aerial`**: Schema migration" {
+	if c1Text.Content != "🔀 **`aerial`**: Schema migration" {
 		t.Errorf("unexpected chunk 1 row text: %q", c1Text.Content)
 	}
 	btn, ok := c1Sec.Accessory.(*discordgo.Button)
@@ -267,13 +270,13 @@ func TestBuildStatusWidgetComponents_StandalonePR(t *testing.T) {
 	req := StatusWidgetRequest{
 		ChannelID: "1542423172400291873",
 		Title:     "Fix database connection pool",
-		Status:    "merged",
+		Status:    "deployed",
 		Chunks: []StatusWidgetChunk{
 			{
 				Index:    1,
 				Repo:     "azylman/aerial",
 				Title:    "Fix connection leak",
-				Status:   "merged",
+				Status:   "deployed",
 				PRNumber: 123,
 			},
 		},
@@ -600,7 +603,7 @@ func TestBuildStatusWidgetComponents_ChunkRuntimes(t *testing.T) {
 				Index:     0,
 				Repo:      "aerial",
 				Title:     "Completed chunk with duration",
-				Status:    "merged",
+				Status:    "deployed",
 				PRNumber:  748,
 				StartedAt: start,
 				UpdatedAt: completedAt,
@@ -625,7 +628,7 @@ func TestBuildStatusWidgetComponents_ChunkRuntimes(t *testing.T) {
 				Index:     3,
 				Repo:      "aerial",
 				Title:     "Completed chunk missing UpdatedAt",
-				Status:    "merged",
+				Status:    "deployed",
 				StartedAt: start,
 			},
 		},

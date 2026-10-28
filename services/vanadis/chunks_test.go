@@ -43,6 +43,7 @@ func TestHelpers_WidgetStatus(t *testing.T) {
 		{"failed", "deployed", "failed"},
 		{"pending", "deployed", "deployed"},
 		{"pending", "deploying", "deploying"},
+		{"pending", "synced", "synced"},
 		{"pending", "failed", "failed"},
 		{"pending", "conflict", "conflict"},
 		{"pending", "merged", "merged"},

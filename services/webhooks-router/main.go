@@ -346,7 +346,11 @@ func (s *RouterServer) setPRWidgetState(ctx context.Context, repo string, prNumb
 	defer cancel()
 	query := `
 		UPDATE pr_registry
-		SET status = CASE WHEN $3 != '' AND status NOT IN ('deployed', 'closed') THEN $3 ELSE status END,
+		SET status = CASE
+		        WHEN $3 = '' OR status IN ('deployed', 'closed') THEN status
+		        WHEN $3 = 'synced' AND status = 'deploying' THEN status
+		        ELSE $3
+		    END,
 		    metadata = CASE
 		        WHEN $4 != '' THEN jsonb_set(COALESCE(metadata, '{}'::jsonb), '{banner}', to_jsonb($4::text), true)
 		        ELSE COALESCE(metadata, '{}'::jsonb) - 'banner'
@@ -417,7 +421,7 @@ func (s *RouterServer) ProcessWidgetSync(ctx context.Context, args WidgetSyncArg
 }
 
 func (s *RouterServer) sweepOlderDeployedPRWidgets(qCtx context.Context, pgReg *PostgresPRRegistry, repo string, prNumber int) {
-	sweepQuery := `UPDATE pr_registry SET status = 'deployed', metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb) - 'banner', '{jobs}', '[]'::jsonb), updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number < $2 AND status IN ('merged', 'deploying', 'deploy_failed') RETURNING pr_number`
+	sweepQuery := `UPDATE pr_registry SET status = 'deployed', metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb) - 'banner', '{jobs}', '[]'::jsonb), updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number < $2 AND status IN ('merged', 'synced', 'deploying', 'deploy_failed') RETURNING pr_number`
 	rows, sErr := pgReg.pool.Query(qCtx, sweepQuery, repo, prNumber)
 	if sErr != nil || rows == nil {
 		return
@@ -829,11 +833,19 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 		return &evt, s.handleHangarDeployFailedOrRollback(ctx, evt, prefix)
 	case "sync_success":
 		if evt.PRNumber > 0 {
+			if syncHasExpected {
+				s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "synced", "")
+			} else {
+				s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "deployed", "")
+			}
 			if err := s.advanceVanadisChunkOnSync(ctx, evt.Repo, evt.PRNumber, syncHasExpected); err != nil {
 				return &evt, err
 			}
-			if !syncHasExpected && !s.isVanadisPR(ctx, evt.Repo, evt.PRNumber) {
-				s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "deployed", "")
+			if syncHasExpected {
+				if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber); err != nil {
+					log.Printf("[webhooks-router] [widget] warning syncing sync_success widget for %s#%d: %v", evt.Repo, evt.PRNumber, err)
+				}
+			} else if !s.isVanadisPR(ctx, evt.Repo, evt.PRNumber) {
 				return &evt, s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, firstNonEmpty(evt.JobName, "git-sync"), evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID)
 			}
 		}
