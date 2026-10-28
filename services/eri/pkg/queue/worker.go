@@ -516,6 +516,13 @@ func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 		return
 	}
 	defer func() {
+		if !te.isEphemeral && te.activePool != nil {
+			if evicter, ok := te.activePool.(interface{ EvictSession(string) error }); ok {
+				if err := evicter.EvictSession(te.leaseKey()); err != nil {
+					log.Printf("[WorkerPool] Warning evicting session for %s: %v", te.leaseKey(), err)
+				}
+			}
+		}
 		if te.lease != nil {
 			if relErr := te.lease.Release(); relErr != nil {
 				log.Printf("[WorkerPool] Warning releasing lease for %s: %v", te.threadID, relErr)
@@ -910,8 +917,10 @@ func (te *turnExecution) prepareAttemptPrompt(attempt int, promptToSend, lastErr
 	if promptToSend == "" {
 		promptToSend = te.turnPrompt
 	}
-	if attempt > 1 && promptToSend == te.turnPrompt {
-		if (runner.IsInactivityTimeout(lastErrDetail, lastStderr) || strings.Contains(lastErrDetail, "max duration exceeded") || strings.Contains(lastErrDetail, "print timeout") || strings.Contains(lastErrDetail, "empty response after")) && te.currentSessionID != "" && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(te.currentSessionID) {
+	if promptToSend == te.turnPrompt && te.currentSessionID != "" && te.pool != nil && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(te.currentSessionID) {
+		isTimeoutRetry := attempt > 1 && (runner.IsInactivityTimeout(lastErrDetail, lastStderr) || strings.Contains(lastErrDetail, "max duration exceeded") || strings.Contains(lastErrDetail, "print timeout") || strings.Contains(lastErrDetail, "empty response after") || strings.Contains(lastErrDetail, "context deadline exceeded"))
+		isRestartedDispatch := te.isDispatch() && te.dispatch.RestartCount > 0 && lastErrDetail == ""
+		if isTimeoutRetry || isRestartedDispatch {
 			return fmt.Sprintf(ContinuationPromptTemplate, te.turnPrompt)
 		}
 	}

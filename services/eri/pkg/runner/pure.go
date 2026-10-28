@@ -50,7 +50,7 @@ func filterVanadisChunkEnv(env []string) []string {
 // NormalizeEnvTargetID normalizes a daemon target key for the AERIAL_TARGET_ID
 // environment variable. It strips "discord-" (and optional pool prefixes like
 // "stateful_medium:discord-") for Discord targets, and returns "" for headless
-// or pooled worker keys ("heartbeat-*", "dispatch-*", "worker-*", or colon-scoped
+// or pooled worker keys ("heartbeat-*", "dispatch-*", "worker-*", "vanadis-*", or colon-scoped
 // pool keys like "discord:worker-0" and "ephemeral:worker-0").
 func NormalizeEnvTargetID(id string) string {
 	clean := strings.TrimSpace(id)
@@ -64,7 +64,7 @@ func NormalizeEnvTargetID(id string) string {
 		}
 		clean = suffix
 	}
-	if strings.HasPrefix(clean, "heartbeat-") || strings.HasPrefix(clean, "dispatch-") || strings.HasPrefix(clean, "worker-") {
+	if strings.HasPrefix(clean, "heartbeat-") || strings.HasPrefix(clean, "dispatch-") || strings.HasPrefix(clean, "worker-") || strings.HasPrefix(clean, "vanadis-") {
 		return ""
 	}
 	return strings.TrimSpace(strings.TrimPrefix(clean, "discord-"))

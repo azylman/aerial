@@ -1670,3 +1670,254 @@ func TestResolveBurstModel(t *testing.T) {
 		})
 	}
 }
+
+func TestTurnExecution_PrepareAttemptPrompt(t *testing.T) {
+	t.Parallel()
+	sessUUID := "44444444-4444-4444-4444-444444444444"
+	origPrompt := "Execute task"
+	contPrompt := fmt.Sprintf(ContinuationPromptTemplate, origPrompt)
+
+	tests := []struct {
+		name          string
+		attempt       int
+		promptToSend  string
+		lastErrDetail string
+		lastStderr    string
+		hasSessionID  bool
+		hasOnDiskSess bool
+		isDispatch    bool
+		restartCount  int
+		wantPrompt    string
+	}{
+		{
+			name:         "empty prompt defaults to turn prompt",
+			attempt:      1,
+			promptToSend: "",
+			wantPrompt:   origPrompt,
+		},
+		{
+			name:         "first attempt normal dispatch returns original prompt",
+			attempt:      1,
+			promptToSend: origPrompt,
+			isDispatch:   true,
+			wantPrompt:   origPrompt,
+		},
+		{
+			name:          "attempt 2 with context deadline exceeded and on-disk session returns continuation template",
+			attempt:       2,
+			promptToSend:  origPrompt,
+			lastErrDetail: "context deadline exceeded",
+			hasSessionID:  true,
+			hasOnDiskSess: true,
+			wantPrompt:    contPrompt,
+		},
+		{
+			name:          "restarted dispatch attempt 1 with on-disk session returns continuation template",
+			attempt:       1,
+			promptToSend:  origPrompt,
+			hasSessionID:  true,
+			hasOnDiskSess: true,
+			isDispatch:    true,
+			restartCount:  1,
+			wantPrompt:    contPrompt,
+		},
+		{
+			name:          "restarted dispatch attempt 1 without on-disk session returns original prompt",
+			attempt:       1,
+			promptToSend:  origPrompt,
+			hasSessionID:  true,
+			hasOnDiskSess: false,
+			isDispatch:    true,
+			restartCount:  1,
+			wantPrompt:    origPrompt,
+		},
+		{
+			name:         "custom prompt to send preserved without modification",
+			attempt:      1,
+			promptToSend: YieldTrapResumePrompt,
+			isDispatch:   true,
+			restartCount: 1,
+			wantPrompt:   YieldTrapResumePrompt,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tmpHome := t.TempDir()
+			tempData := t.TempDir()
+			mgr := session.New(tmpHome, tempData)
+			if tc.hasOnDiskSess {
+				sessDir, _ := ensureTestSessionDir(mgr, sessUUID)
+				_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0o755)
+				_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte("{\"step_index\":0}\n"), 0o644)
+			}
+
+			pool := &WorkerPool{sessionMgr: mgr}
+			te := &turnExecution{
+				pool:       pool,
+				turnPrompt: origPrompt,
+			}
+			if tc.hasSessionID {
+				te.currentSessionID = sessUUID
+			}
+			if tc.isDispatch {
+				te.dispatch = &db.Dispatch{
+					ID:           "disp-test-1",
+					RestartCount: tc.restartCount,
+				}
+			}
+
+			got := te.prepareAttemptPrompt(tc.attempt, tc.promptToSend, tc.lastErrDetail, tc.lastStderr)
+			if got != tc.wantPrompt {
+				t.Errorf("prepareAttemptPrompt() = %q, want %q", got, tc.wantPrompt)
+			}
+		})
+	}
+}
+
+func TestWorker_ProcessDispatch_StatefulEvictionAndRestartContinuation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                   string
+		sessionID              string
+		restartCount           int
+		hasExistingTranscript  bool
+		yieldTrap              bool
+		wantStatus             string
+		wantEvictedFromPool    bool
+		wantSessionInStore     bool
+		wantContinuationPrompt bool
+		wantYieldTrapPrompt    bool
+	}{
+		{
+			name:                   "stateful dispatch evicts active pool session while preserving conversation in store",
+			sessionID:              "vanadis-chunk-1",
+			restartCount:           0,
+			hasExistingTranscript:  false,
+			yieldTrap:              false,
+			wantStatus:             db.StatusCompleted,
+			wantEvictedFromPool:    true,
+			wantSessionInStore:     true,
+			wantContinuationPrompt: false,
+			wantYieldTrapPrompt:    false,
+		},
+		{
+			name:                   "restarted stateful dispatch sends continuation prompt and transitions to yield trap resume",
+			sessionID:              "vanadis-chunk-2",
+			restartCount:           1,
+			hasExistingTranscript:  true,
+			yieldTrap:              true,
+			wantStatus:             db.StatusCompleted,
+			wantEvictedFromPool:    true,
+			wantSessionInStore:     true,
+			wantContinuationPrompt: true,
+			wantYieldTrapPrompt:    true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := dbtest.NewFakeStore()
+			ctx := context.Background()
+			tmpHome := t.TempDir()
+			tempData := t.TempDir()
+			sessMgr := session.New(tmpHome, tempData)
+
+			sessUUID := "33333333-3333-3333-3333-333333333333"
+			if tc.hasExistingTranscript {
+				sessDir, _ := ensureTestSessionDir(sessMgr, sessUUID)
+				_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0o755)
+				_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte("{\"step_index\":0}\n"), 0o644)
+				_ = store.SaveSessionID(ctx, tc.sessionID, sessUUID)
+			}
+
+			var mu sync.Mutex
+			var promptsSeen []string
+			var invCount atomic.Int32
+			doneCh := make(chan struct{})
+
+			origPrompt := "[VANADIS BUILD CHUNK EXECUTION] Chunk execution test"
+
+			pool := NewWorkerPool(WorkerPoolConfig{
+				Store:          store,
+				SessionManager: sessMgr,
+				TimeoutMinutes: 1,
+				RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+					mu.Lock()
+					promptsSeen = append(promptsSeen, prompt)
+					mu.Unlock()
+
+					inv := invCount.Add(1)
+					if tc.yieldTrap && inv == 1 {
+						return `{"conversation_id":"` + sessUUID + `","status":"SUCCESS","response":"Waiting for task to complete"}`, "terminating 1 background task(s)", 0, nil
+					}
+					defer close(doneCh)
+					return `{"conversation_id":"` + sessUUID + `","status":"SUCCESS","response":"chunk executed successfully"}`, "", 0, nil
+				},
+			})
+			defer pool.Stop()
+
+			disp := db.Dispatch{
+				ID:           uuid.New().String(),
+				Source:       "vanadis",
+				SessionID:    tc.sessionID,
+				Prompt:       origPrompt,
+				RestartCount: tc.restartCount,
+				Status:       db.StatusPending,
+				CreatedAt:    time.Now().UTC(),
+				UpdatedAt:    time.Now().UTC(),
+			}
+			_ = store.InsertDispatch(ctx, disp)
+			pool.EnqueueDispatch(disp)
+
+			select {
+			case <-doneCh:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("timeout waiting for dispatch execution")
+			}
+
+			pool.Stop()
+
+			d, err := store.GetDispatch(ctx, disp.ID)
+			if err != nil || d == nil {
+				t.Fatalf("failed to fetch dispatch: %v", err)
+			}
+			if d.Status != tc.wantStatus {
+				t.Fatalf("dispatch status = %s, want %s", d.Status, tc.wantStatus)
+			}
+
+			if tc.wantSessionInStore {
+				gotSess, _ := store.GetSessionID(ctx, tc.sessionID)
+				if gotSess != sessUUID {
+					t.Errorf("store session ID = %q, want %q", gotSess, sessUUID)
+				}
+			}
+
+			if tc.wantEvictedFromPool {
+				if testPool, ok := pool.AgentPool().(*testRunnerAgentPool); ok {
+					if testPool.HasSession(tc.sessionID) {
+						t.Errorf("expected session %q to be evicted from active pool", tc.sessionID)
+					}
+				}
+			}
+
+			mu.Lock()
+			seen := append([]string(nil), promptsSeen...)
+			mu.Unlock()
+
+			if tc.wantContinuationPrompt {
+				if len(seen) == 0 || !strings.Contains(seen[0], "Your previous execution timed out or was interrupted while working") {
+					t.Errorf("first attempt prompt does not contain continuation template, got:\n%s", seen[0])
+				}
+			}
+
+			if tc.wantYieldTrapPrompt {
+				if len(seen) < 2 || seen[1] != YieldTrapResumePrompt {
+					t.Errorf("second attempt prompt = %q, want %q", seen[1], YieldTrapResumePrompt)
+				}
+			}
+		})
+	}
+}
