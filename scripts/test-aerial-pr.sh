@@ -838,11 +838,15 @@ EOF
         echo \"tree_cache_invalidated:fail:\$out3\"
     fi
 
-    # Test init_scratch --branch against local bare repo
+    # Test init_scratch --branch against local bare repo (including origin/main refspec + submit_scratch round-trip)
     git init -q --bare \"\$REMOTE_DIR\"
     git clone -q \"\$REMOTE_DIR\" \"\$SEED_DIR\"
     git -C \"\$SEED_DIR\" config user.name 'Tester'
     git -C \"\$SEED_DIR\" config user.email 'tester@example.com'
+    git -C \"\$SEED_DIR\" checkout -q -b main
+    echo 'base-content' > \"\$SEED_DIR/base.txt\"
+    git -C \"\$SEED_DIR\" add base.txt && git -C \"\$SEED_DIR\" commit -q -m 'base commit'
+    git -C \"\$SEED_DIR\" push -q -u origin main
     git -C \"\$SEED_DIR\" checkout -q -b feat/existing-ci-branch
     echo 'branch-content' > \"\$SEED_DIR/file.txt\"
     git -C \"\$SEED_DIR\" add file.txt && git -C \"\$SEED_DIR\" commit -q -m 'branch commit'
@@ -850,20 +854,49 @@ EOF
 
     export GITHUB_PAT='mock_pat'
     export AERIAL_REPO_URL_OVERRIDE=\"\$REMOTE_DIR\"
+    export AERIAL_PR_REGISTER_URL='http://mock-router/internal/pr/register'
     init_json=\$(init_scratch aerial --branch feat/existing-ci-branch)
     cloned_dir=\$(echo \"\$init_json\" | jq -r '.scratch_dir')
     cloned_branch=\$(echo \"\$init_json\" | jq -r '.branch')
     actual_head=\$(git -C \"\$cloned_dir\" rev-parse --abbrev-ref HEAD)
-    rm -rf \"\$cloned_dir\"
-    if [ \"\$cloned_branch\" = \"feat/existing-ci-branch\" ] && [ \"\$actual_head\" = \"feat/existing-ci-branch\" ]; then
+    origin_main_sha=\$(git -C \"\$cloned_dir\" rev-parse --verify -q refs/remotes/origin/main || echo '')
+    if [ \"\$cloned_branch\" = \"feat/existing-ci-branch\" ] && [ \"\$actual_head\" = \"feat/existing-ci-branch\" ] && [ -n \"\$origin_main_sha\" ]; then
         echo 'init_branch:ok'
     else
-        echo \"init_branch:fail:\$cloned_branch:\$actual_head\"
+        echo \"init_branch:fail:\$cloned_branch:\$actual_head:\$origin_main_sha\"
     fi
+
+    # Advance origin/main and submit a remediation fix directly from the init_scratch --branch checkout
+    echo 'main-v2' > \"\$SEED_DIR/main_v2.txt\"
+    git -C \"\$SEED_DIR\" checkout -q main
+    git -C \"\$SEED_DIR\" add main_v2.txt && git -C \"\$SEED_DIR\" commit -q -m 'main advance'
+    git -C \"\$SEED_DIR\" push -q origin main
+
+    echo 'branch-content-fixed' > \"\$cloned_dir/file.txt\"
+    remed_submit_out=\$(
+        curl() {
+            if [[ \"\$*\" == *'/pulls?state=open'* ]]; then
+                printf '[{\"number\":88,\"title\":\"feat: existing branch\",\"body\":\"Existing PR body\",\"html_url\":\"https://github.com/azylman/aerial/pull/88\",\"node_id\":\"PR_kwDO88\"}]'
+            elif [[ \"\$*\" == *'graphql'* ]]; then
+                printf '{\"data\":{\"enablePullRequestAutoMerge\":{\"pullRequest\":{\"autoMergeRequest\":{\"enabledAt\":\"now\"}}}}}'
+            elif [[ \"\$*\" == *'/internal/pr/register'* ]]; then
+                printf '{\"status\":\"registered\"}'
+            fi
+        }
+        export -f curl
+        submit_scratch \"\$cloned_dir\" 'fix: address roborev finding' 2>/dev/null
+    )
+    if echo \"\$remed_submit_out\" | jq -e '.status == \"submitted\" and .pr_number == 88' >/dev/null 2>&1 && [ ! -d \"\$cloned_dir\" ]; then
+        echo 'init_branch_submit:ok'
+    else
+        echo \"init_branch_submit:fail:\$remed_submit_out\"
+    fi
+    rm -rf \"\$cloned_dir\"
 ")
 assert_eq "true" "$(echo "$TREE_CACHE_AND_BRANCH_CHECK" | grep -q 'tree_cache_hit:ok' && echo true || echo false)" "run_preflight_verification skips duplicate verify.sh when .aerial-verified-tree matches"
 assert_eq "true" "$(echo "$TREE_CACHE_AND_BRANCH_CHECK" | grep -q 'tree_cache_invalidated:ok' && echo true || echo false)" "run_preflight_verification re-runs verify.sh when unstaged changes exist"
-assert_eq "true" "$(echo "$TREE_CACHE_AND_BRANCH_CHECK" | grep -q 'init_branch:ok' && echo true || echo false)" "init_scratch --branch clones and stays on existing PR branch"
+assert_eq "true" "$(echo "$TREE_CACHE_AND_BRANCH_CHECK" | grep -q 'init_branch:ok' && echo true || echo false)" "init_scratch --branch clones, tracks origin/main, and stays on existing PR branch"
+assert_eq "true" "$(echo "$TREE_CACHE_AND_BRANCH_CHECK" | grep -q 'init_branch_submit:ok' && echo true || echo false)" "submit_scratch rebases and updates PR cleanly from init_scratch --branch checkout"
 
 echo "--------------------------------------------------------"
 echo "Test results: $PASSED passed, $FAILED failed"
