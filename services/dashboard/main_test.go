@@ -1,6 +1,7 @@
 package main
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1034,6 +1035,23 @@ func TestDashboard_CloseWarnAndDisconnect(t *testing.T) {
 
 	mockWJSONErr := newMockErrWriter(errors.New("write failure"))
 	writeJSON(mockWJSONErr, reqActive, http.StatusOK, map[string]string{"status": "ok"})
+
+	reqGzip := httptest.NewRequest(http.MethodGet, "/api/builds", nil)
+	reqGzip.Header.Set("Accept-Encoding", "gzip, deflate")
+	rrGzip := httptest.NewRecorder()
+	writeJSON(rrGzip, reqGzip, http.StatusOK, map[string]string{"status": "ok"})
+	if ce := rrGzip.Header().Get("Content-Encoding"); ce != "gzip" {
+		t.Fatalf("expected Content-Encoding gzip, got %q", ce)
+	}
+	gzReader, gzErr := gzip.NewReader(rrGzip.Body)
+	if gzErr != nil {
+		t.Fatalf("failed to create gzip reader: %v", gzErr)
+	}
+	defer gzReader.Close()
+	unzipped, readErr := io.ReadAll(gzReader)
+	if readErr != nil || string(unzipped) != `{"status":"ok"}` {
+		t.Errorf("unexpected gzip body %q (err=%v)", string(unzipped), readErr)
+	}
 }
 
 func TestFetchNomadClusterState(t *testing.T) {

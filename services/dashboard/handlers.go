@@ -106,11 +106,11 @@ type VanadisChunkDTO struct {
 	ChunkIndex         int       `json:"chunk_index"`
 	Repo               string    `json:"repo,omitempty"`
 	Title              string    `json:"title"`
-	Instructions       string    `json:"instructions"`
-	TargetFiles        []string  `json:"target_files"`
-	TargetSymbols      []string  `json:"target_symbols"`
+	Instructions       string    `json:"instructions,omitempty"`
+	TargetFiles        []string  `json:"target_files,omitempty"`
+	TargetSymbols      []string  `json:"target_symbols,omitempty"`
 	Effort             string    `json:"effort,omitempty"`
-	AcceptanceCriteria []string  `json:"acceptance_criteria"`
+	AcceptanceCriteria []string  `json:"acceptance_criteria,omitempty"`
 	Status             string    `json:"status"`
 	PRNumber           int       `json:"pr_number,omitempty"`
 	StartedAt          time.Time `json:"started_at,omitempty"`
@@ -468,6 +468,15 @@ func buildsHandler(vanadisBaseURL string) http.HandlerFunc {
 
 		if data.Builds == nil {
 			data.Builds = []VanadisBuildDTO{}
+		}
+		for i := range data.Builds {
+			data.Builds[i].SharedContext = ""
+			for j := range data.Builds[i].Chunks {
+				data.Builds[i].Chunks[j].Instructions = ""
+				data.Builds[i].Chunks[j].TargetFiles = nil
+				data.Builds[i].Chunks[j].TargetSymbols = nil
+				data.Builds[i].Chunks[j].AcceptanceCriteria = nil
+			}
 		}
 
 		writeJSON(w, r, http.StatusOK, data)

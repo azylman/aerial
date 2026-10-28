@@ -2,6 +2,8 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -217,6 +219,15 @@ func writeJSON(w http.ResponseWriter, r *http.Request, status int, data interfac
 		log.Printf("[Dashboard:HTTP] Failed to marshal JSON response: %v", err)
 		http.Error(w, `{"error":"Internal error"}`, http.StatusInternalServerError)
 		return
+	}
+	w.Header().Set("Vary", "Accept-Encoding")
+	if r != nil && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		var buf bytes.Buffer
+		gz := gzip.NewWriter(&buf)
+		if _, err := gz.Write(b); err == nil && gz.Close() == nil {
+			w.Header().Set("Content-Encoding", "gzip")
+			b = buf.Bytes()
+		}
 	}
 	w.WriteHeader(status)
 	httpkit.WriteResponse(w, r, "dashboard", b)
