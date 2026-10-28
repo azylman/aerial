@@ -1364,3 +1364,309 @@ func TestWorkerPool_InterruptThread(t *testing.T) {
 		})
 	}
 }
+
+func TestTurnExecution_IsDispatch(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		te   *turnExecution
+		want bool
+	}{
+		{
+			name: "nil receiver",
+			te:   nil,
+			want: false,
+		},
+		{
+			name: "turn without dispatch",
+			te:   &turnExecution{threadID: "123"},
+			want: false,
+		},
+		{
+			name: "turn with dispatch",
+			te:   &turnExecution{threadID: "123", dispatch: &db.Dispatch{ID: "disp-1"}},
+			want: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.te.isDispatch(); got != tc.want {
+				t.Errorf("isDispatch() = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTurnExecution_LeaseKey(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		te   *turnExecution
+		want string
+	}{
+		{
+			name: "nil receiver",
+			te:   nil,
+			want: "",
+		},
+		{
+			name: "dispatch turn uses threadID as lease key",
+			te:   &turnExecution{threadID: "task-dispatch-1", dispatch: &db.Dispatch{ID: "disp-1"}},
+			want: "task-dispatch-1",
+		},
+		{
+			name: "discord turn uses discord prefix",
+			te:   &turnExecution{threadID: "123456789"},
+			want: "discord-123456789",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.te.leaseKey(); got != tc.want {
+				t.Errorf("leaseKey() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTurnExecution_InitialRetryCount(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		te   *turnExecution
+		want int
+	}{
+		{
+			name: "nil receiver",
+			te:   nil,
+			want: 0,
+		},
+		{
+			name: "dispatch turn uses dispatch retry count",
+			te:   &turnExecution{dispatch: &db.Dispatch{ID: "d1", RetryCount: 3}},
+			want: 3,
+		},
+		{
+			name: "burst turn uses max burst retry count",
+			te: &turnExecution{burst: []db.Message{
+				{ID: "m1", RetryCount: 1},
+				{ID: "m2", RetryCount: 4},
+				{ID: "m3", RetryCount: 2},
+			}},
+			want: 4,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.te.initialRetryCount(); got != tc.want {
+				t.Errorf("initialRetryCount() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTurnExecution_TurnEffortAndModel(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		te         *turnExecution
+		wantEffort string
+		wantModel  string
+	}{
+		{
+			name:       "nil receiver",
+			te:         nil,
+			wantEffort: "",
+			wantModel:  "",
+		},
+		{
+			name: "dispatch turn with explicit model and effort",
+			te: &turnExecution{
+				dispatch: &db.Dispatch{ID: "d1", Model: "gemini-custom", Effort: "high", SessionID: "sess-1"},
+			},
+			wantEffort: "high",
+			wantModel:  "gemini-custom",
+		},
+		{
+			name: "dispatch turn ephemeral defaults to medium effort",
+			te: &turnExecution{
+				isEphemeral: true,
+				dispatch:    &db.Dispatch{ID: "d2"},
+			},
+			wantEffort: "medium",
+			wantModel:  "",
+		},
+		{
+			name: "burst turn with effort and model in messages",
+			te: &turnExecution{
+				burst: []db.Message{
+					{ID: "m1", Model: "model-alpha", Effort: "medium"},
+				},
+			},
+			wantEffort: "medium",
+			wantModel:  "model-alpha",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gotEffort, gotModel := tc.te.turnEffortAndModel()
+			if gotEffort != tc.wantEffort || gotModel != tc.wantModel {
+				t.Errorf("turnEffortAndModel() = (%q, %q), want (%q, %q)", gotEffort, gotModel, tc.wantEffort, tc.wantModel)
+			}
+		})
+	}
+}
+
+func TestTurnExecution_OwnsTurnItem(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		te     *turnExecution
+		itemID string
+		want   bool
+	}{
+		{
+			name:   "nil receiver",
+			te:     nil,
+			itemID: "item-1",
+			want:   false,
+		},
+		{
+			name:   "dispatch matching id",
+			te:     &turnExecution{dispatch: &db.Dispatch{ID: "d-123"}},
+			itemID: "d-123",
+			want:   true,
+		},
+		{
+			name:   "dispatch mismatching id",
+			te:     &turnExecution{dispatch: &db.Dispatch{ID: "d-123"}},
+			itemID: "d-999",
+			want:   false,
+		},
+		{
+			name:   "burst message matching id",
+			te:     &turnExecution{burst: []db.Message{{ID: "m-100"}, {ID: "m-101"}}},
+			itemID: "m-101",
+			want:   true,
+		},
+		{
+			name:   "burst message mismatching id",
+			te:     &turnExecution{burst: []db.Message{{ID: "m-100"}}},
+			itemID: "m-200",
+			want:   false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.te.ownsTurnItem(tc.itemID); got != tc.want {
+				t.Errorf("ownsTurnItem(%q) = %t, want %t", tc.itemID, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTurnExecution_IncrementTurnRetries(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		isDispatch    bool
+		isNil         bool
+		wantDispRetry int
+		wantMsgRetry  int
+	}{
+		{
+			name:       "nil receiver",
+			isNil:      true,
+			isDispatch: false,
+		},
+		{
+			name:          "dispatch turn increments dispatch retry in store",
+			isDispatch:    true,
+			wantDispRetry: 1,
+		},
+		{
+			name:         "burst turn increments message retry in store",
+			isDispatch:   false,
+			wantMsgRetry: 1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.isNil {
+				var nilTE *turnExecution
+				nilTE.incrementTurnRetries("nil error")
+				return
+			}
+			store := dbtest.NewFakeStore()
+			ctx := context.Background()
+			pool := New(config.NewFromData(&config.ConfigData{}), WorkerPoolConfig{Store: store})
+			te := &turnExecution{pool: pool}
+			if tc.isDispatch {
+				d := db.Dispatch{ID: "d-retry-1", Status: db.StatusProcessing}
+				_ = store.InsertDispatch(ctx, d)
+				te.dispatch = &d
+			} else {
+				m := db.Message{ID: "m-retry-1", ThreadID: "t-1", Status: db.StatusProcessing}
+				_ = store.InsertMessage(ctx, m)
+				te.burst = []db.Message{m}
+			}
+			te.incrementTurnRetries("timeout error")
+			if tc.isDispatch {
+				gotD, _ := store.GetDispatch(ctx, "d-retry-1")
+				if gotD != nil && gotD.RetryCount != tc.wantDispRetry {
+					t.Errorf("dispatch retry count = %d, want %d", gotD.RetryCount, tc.wantDispRetry)
+				}
+			} else {
+				gotM, _ := store.GetMessage(ctx, "m-retry-1")
+				if gotM != nil && gotM.RetryCount != tc.wantMsgRetry {
+					t.Errorf("message retry count = %d, want %d", gotM.RetryCount, tc.wantMsgRetry)
+				}
+			}
+		})
+	}
+}
+
+func TestResolveBurstModel(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		burst []db.Message
+		want  string
+	}{
+		{
+			name:  "empty burst",
+			burst: nil,
+			want:  "",
+		},
+		{
+			name: "first message with model",
+			burst: []db.Message{
+				{ID: "1", Model: "gemini-pro"},
+				{ID: "2", Model: "gemini-flash"},
+			},
+			want: "gemini-pro",
+		},
+		{
+			name: "second message has model",
+			burst: []db.Message{
+				{ID: "1"},
+				{ID: "2", Model: " gemini-flash "},
+			},
+			want: "gemini-flash",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := resolveBurstModel(tc.burst); got != tc.want {
+				t.Errorf("resolveBurstModel() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
