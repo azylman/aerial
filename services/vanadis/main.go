@@ -287,6 +287,20 @@ func normalizeRepo(repo string) string {
 	return "azylman/" + repo
 }
 
+func isValidVanadisChunkID(id string) bool {
+	id = strings.TrimSpace(id)
+	if len(id) < 1 || len(id) > 120 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 func validateCreateBuildInputs(buildID, threadID, objective string, chunks []VanadisChunk) error {
 	if buildID == "" || threadID == "" || objective == "" {
 		return errors.New("build id, thread_id, and objective cannot be empty")
@@ -294,6 +308,9 @@ func validateCreateBuildInputs(buildID, threadID, objective string, chunks []Van
 	for i, c := range chunks {
 		if strings.TrimSpace(c.ID) == "" || strings.TrimSpace(c.Title) == "" || strings.TrimSpace(c.Instructions) == "" {
 			return fmt.Errorf("chunk[%d] id, title, and instructions cannot be empty", i)
+		}
+		if !isValidVanadisChunkID(strings.TrimSpace(c.ID)) {
+			return fmt.Errorf("chunks[%d].id must be 1..120 characters of [a-zA-Z0-9_-]", i)
 		}
 		if cb := strings.TrimSpace(c.BuildID); cb != "" && cb != buildID {
 			return fmt.Errorf("chunk[%d] build_id %q does not match build id %q", i, cb, buildID)
@@ -600,10 +617,11 @@ func (w *ExecuteChunkWorker) Work(ctx context.Context, job *river.Job[ExecuteChu
 
 // BrainDispatchRequest represents the JSON payload dispatched to Brain's POST /dispatch endpoint.
 type BrainDispatchRequest struct {
-	ID     string `json:"id,omitempty"`
-	Source string `json:"source"`
-	Prompt string `json:"prompt"`
-	Effort string `json:"effort,omitempty"`
+	ID        string `json:"id,omitempty"`
+	Source    string `json:"source"`
+	SessionID string `json:"session_id,omitempty"`
+	Prompt    string `json:"prompt"`
+	Effort    string `json:"effort,omitempty"`
 }
 
 // StatusWidgetChunk represents a chunk in a Vanadis build or a PR task for widget rendering.
@@ -779,9 +797,10 @@ func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string,
 		return fmt.Errorf("format chunk prompt: %w", err)
 	}
 	reqPayload := BrainDispatchRequest{
-		Source: "vanadis",
-		Prompt: prompt,
-		Effort: capChunkEffort(chunk.Effort),
+		Source:    "vanadis",
+		SessionID: "vanadis-" + strings.TrimSpace(chunk.ID),
+		Prompt:    prompt,
+		Effort:    capChunkEffort(chunk.Effort),
 	}
 	if err := s.dispatchBrainDispatch(ctx, reqPayload); err != nil {
 		if isFinalAttempt {
@@ -906,6 +925,31 @@ func (s *VanadisServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+func parseCreateBuildChunks(buildID, repo string, now time.Time, rawChunks []CreateChunkInput) ([]VanadisChunk, error) {
+	chunks := make([]VanadisChunk, len(rawChunks))
+	for i, c := range rawChunks {
+		title, instructions := strings.TrimSpace(c.Title), strings.TrimSpace(c.Instructions)
+		if title == "" || instructions == "" {
+			return nil, fmt.Errorf("chunk[%d] title and instructions are required", i)
+		}
+		chunkID := firstNonEmpty(strings.TrimSpace(c.ID), fmt.Sprintf("%s-chunk-%d", buildID, i+1))
+		if !isValidVanadisChunkID(chunkID) {
+			return nil, fmt.Errorf("chunks[%d].id must be 1..120 characters of [a-zA-Z0-9_-]", i)
+		}
+		effort, err := normalizeChunkEffort(c.Effort)
+		if err != nil {
+			return nil, fmt.Errorf("chunk[%d] invalid effort: %w", i, err)
+		}
+		chunks[i] = VanadisChunk{
+			ID: chunkID, BuildID: buildID, ChunkIndex: i,
+			Repo: firstNonEmpty(normalizeRepo(c.Repo), repo), Title: title, Instructions: instructions,
+			TargetFiles: nonNilSlice(c.TargetFiles), TargetSymbols: nonNilSlice(c.TargetSymbols), Effort: effort,
+			AcceptanceCriteria: nonNilSlice(c.AcceptanceCriteria), Status: "pending", CreatedAt: now, UpdatedAt: now,
+		}
+	}
+	return chunks, nil
+}
+
 func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request) {
 	if s.store == nil {
 		writeErr(w, http.StatusInternalServerError, "vanadis store not configured")
@@ -950,24 +994,10 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 		ID: buildID, ThreadID: threadID, Tier: tier, Title: firstNonEmpty(strings.TrimSpace(req.Title), objective),
 		Objective: objective, SharedContext: strings.TrimSpace(req.SharedContext), Status: "running", CreatedAt: now, UpdatedAt: now,
 	}
-	chunks := make([]VanadisChunk, len(req.Chunks))
-	for i, c := range req.Chunks {
-		title, instructions := strings.TrimSpace(c.Title), strings.TrimSpace(c.Instructions)
-		if title == "" || instructions == "" {
-			writeErr(w, http.StatusBadRequest, fmt.Sprintf("chunk[%d] title and instructions are required", i))
-			return
-		}
-		effort, err := normalizeChunkEffort(c.Effort)
-		if err != nil {
-			writeErr(w, http.StatusBadRequest, fmt.Sprintf("chunk[%d] invalid effort: %v", i, err))
-			return
-		}
-		chunks[i] = VanadisChunk{
-			ID: firstNonEmpty(strings.TrimSpace(c.ID), fmt.Sprintf("%s-chunk-%d", buildID, i+1)), BuildID: buildID, ChunkIndex: i,
-			Repo: firstNonEmpty(normalizeRepo(c.Repo), repo), Title: title, Instructions: instructions,
-			TargetFiles: nonNilSlice(c.TargetFiles), TargetSymbols: nonNilSlice(c.TargetSymbols), Effort: effort,
-			AcceptanceCriteria: nonNilSlice(c.AcceptanceCriteria), Status: "pending", CreatedAt: now, UpdatedAt: now,
-		}
+	chunks, err := parseCreateBuildChunks(buildID, repo, now, req.Chunks)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	if err := s.store.CreateBuild(r.Context(), build, chunks); err != nil {
 		writeErr(w, http.StatusInternalServerError, fmt.Sprintf("failed to create build: %v", err))

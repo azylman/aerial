@@ -612,6 +612,20 @@ func (s *RouterServer) isValidAlertTarget(targetID string) bool {
 	return sys != "" && clean == sys && IsValidDiscordChannel(clean)
 }
 
+func isValidVanadisChunkID(id string) bool {
+	id = strings.TrimSpace(id)
+	if len(id) < 1 || len(id) > 120 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, label, dmMsg, prompt string, vOpts ...vanadisPromptOpts) error {
 	if s.dispatcher == nil {
 		return nil
@@ -639,6 +653,9 @@ func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, la
 			Source: "webhook",
 			Prompt: prompt,
 			Effort: firstNonEmpty(opt.effort, "medium"),
+		}
+		if cID := strings.TrimSpace(opt.chunkID); isValidVanadisChunkID(cID) {
+			req.SessionID = "vanadis-" + cID
 		}
 		if err := s.dispatcher.DispatchBackground(ctx, req); err != nil {
 			log.Printf("[webhooks-router] [dispatcher] error dispatching %s background dispatch: %v", label, err)
