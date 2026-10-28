@@ -817,3 +817,56 @@ func TestWorker_DeliverSuccessAndFinalize_CustomSessionTarget_TableDriven(t *tes
 		})
 	}
 }
+
+func TestTurnExecution_IsQuotaRetry(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		te   *turnExecution
+		want bool
+	}{
+		{
+			name: "burst message has quota retry prefix",
+			te: &turnExecution{
+				burst: []db.Message{{Content: "[QUOTA_RETRY] please continue"}},
+			},
+			want: true,
+		},
+		{
+			name: "burst message without quota retry",
+			te: &turnExecution{
+				burst: []db.Message{{Content: "normal message"}},
+			},
+			want: false,
+		},
+		{
+			name: "dispatch prompt has quota retry",
+			te: &turnExecution{
+				dispatch: &db.Dispatch{Prompt: "[QUOTA_RETRY] background retry"},
+			},
+			want: true,
+		},
+		{
+			name: "dispatch prompt without quota retry",
+			te: &turnExecution{
+				dispatch: &db.Dispatch{Prompt: "normal background task"},
+			},
+			want: false,
+		},
+		{
+			name: "turnPrompt has quota retry with no burst or dispatch",
+			te: &turnExecution{
+				turnPrompt: "[QUOTA_RETRY] fallback prompt",
+			},
+			want: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.te.isQuotaRetry(); got != tc.want {
+				t.Errorf("isQuotaRetry() = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}

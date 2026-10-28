@@ -103,12 +103,7 @@ func isRateLimitError(errDetail string, extraStrs ...string) bool {
 }
 
 func (te *turnExecution) handleRetryBackoff(attempt, maxAttempts int, errDetail, currentModel string) (shutdown bool) {
-	for _, m := range te.burst {
-		te.incrementMessageRetry(m.ID, errDetail)
-	}
-	if te.dispatch != nil {
-		te.incrementDispatchRetry(te.dispatch.ID, errDetail)
-	}
+	te.incrementTurnRetries(errDetail)
 	if attempt >= maxAttempts {
 		return false
 	}
@@ -161,7 +156,7 @@ func (te *turnExecution) deliverSuccessAndFinalize(resp *runner.AgyResponse, acc
 	cleanText, attachments := delivery.ExtractAndSanitizeMedia(resp.Response, baseDir)
 	attachments = delivery.AutoAttachNewMedia(baseDir, te.execStart, attachments)
 
-	isSilent := te.dispatch != nil
+	isSilent := te.isDispatch()
 	if !isSilent && strings.TrimSpace(cleanText) == "" && len(attachments) == 0 {
 		log.Printf("[Queue] Agent produced empty response for thread %s on attempt %d/%d; treating as failure", te.threadID, attempt, maxAttempts)
 		return false, "agent produced empty response"
@@ -185,7 +180,7 @@ func (te *turnExecution) deliverSuccessAndFinalize(resp *runner.AgyResponse, acc
 
 	te.handleDispatchSessionRotation()
 
-	if te.dispatch != nil {
+	if te.isDispatch() {
 		log.Printf("[WorkerPool] Dispatch %s (session: %s) completed successfully on attempt %d/%d", te.dispatch.ID, te.threadID, attempt, maxAttempts)
 	} else {
 		log.Printf("[WorkerPool] %d message(s) in thread %s completed successfully on attempt %d/%d", len(te.burst), te.threadID, attempt, maxAttempts)
@@ -222,7 +217,7 @@ func (te *turnExecution) resolveTokenChannel() string {
 }
 
 func (te *turnExecution) handleDispatchSessionRotation() {
-	if te.dispatch == nil || te.isEphemeral {
+	if !te.isDispatch() || te.isEphemeral {
 		return
 	}
 	newTurns, err := te.incrementSessionTurnCount(te.threadID)
@@ -233,7 +228,7 @@ func (te *turnExecution) handleDispatchSessionRotation() {
 }
 
 func (te *turnExecution) deliverQuotaNotice(pauseMsg string, logPrefix string) {
-	if te.dispatch != nil || te.pool == nil || te.pool.cfg.DeliveryFunc == nil {
+	if te.isDispatch() || te.pool == nil || te.pool.cfg.DeliveryFunc == nil {
 		return
 	}
 	deliveryTarget := te.threadID
@@ -246,7 +241,7 @@ func (te *turnExecution) isQuotaRetry() bool {
 	if len(te.burst) > 0 {
 		return strings.HasPrefix(te.burst[0].Content, "[QUOTA_RETRY]") || strings.Contains(te.turnPrompt, "[QUOTA_RETRY]")
 	}
-	if te.dispatch != nil {
+	if te.isDispatch() {
 		return strings.Contains(te.turnPrompt, "[QUOTA_RETRY]") || strings.Contains(te.dispatch.Prompt, "[QUOTA_RETRY]")
 	}
 	return strings.Contains(te.turnPrompt, "[QUOTA_RETRY]")
@@ -257,12 +252,7 @@ func (te *turnExecution) handleQuotaPause(errDetail, stderr, currentModel, burst
 	if runner.IsCapacityBlip(errDetail, stderr) || resetDur <= 5*time.Second {
 		log.Printf("[WorkerPool] Capacity blip detected for thread %s on attempt %d/%d (reset=%v): %s.", te.threadID, attempt, maxAttempts, resetDur, errDetail)
 		if attempt < maxAttempts {
-			for _, m := range te.burst {
-				te.incrementMessageRetry(m.ID, errDetail)
-			}
-			if te.dispatch != nil {
-				te.incrementDispatchRetry(te.dispatch.ID, errDetail)
-			}
+			te.incrementTurnRetries(errDetail)
 			delay := calculateCapacityBackoff(attempt, resetDur)
 			if te.pool != nil && te.pool.cfg.RetryDelayOverride > 0 {
 				delay = te.pool.cfg.RetryDelayOverride
@@ -304,7 +294,7 @@ func (te *turnExecution) handleQuotaPause(errDetail, stderr, currentModel, burst
 		te.pool.quotaLockedUntil.Store(runAt.Unix())
 	}
 	var scheduled bool
-	if !isAlreadyRetry && te.dispatch == nil {
+	if !isAlreadyRetry && !te.isDispatch() {
 		oneShotID := uuid.New().String()
 		oneShot := oneShotScheduleRequest{
 			ID:       oneShotID,
@@ -449,7 +439,7 @@ func (te *turnExecution) cancelBurstOnShutdown(turnStatus, currentModel string, 
 		runErr = "context cancelled during execution"
 	}
 	te.turnDurationMs = time.Since(te.execStart).Milliseconds()
-	if te.dispatch != nil {
+	if te.isDispatch() {
 		if s := te.store(); s != nil {
 			if err := s.ResetDispatchToPendingWithRestart(context.Background(), te.dispatch.ID, "interrupted by graceful deployment"); err != nil {
 				log.Printf("[WorkerPool] Warning resetting dispatch %s to pending: %v", te.dispatch.ID, err)
@@ -461,7 +451,7 @@ func (te *turnExecution) cancelBurstOnShutdown(turnStatus, currentModel string, 
 }
 
 func (te *turnExecution) deliverFailureNotice(agyBin, apiKey, errDetail, stderr, descPrefix, logLabel string) {
-	if te.dispatch != nil || te.pool == nil || te.pool.cfg.DeliveryFunc == nil {
+	if te.isDispatch() || te.pool == nil || te.pool.cfg.DeliveryFunc == nil {
 		return
 	}
 	var notif string

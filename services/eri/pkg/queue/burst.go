@@ -358,6 +358,10 @@ func writeDiscordPromptSlices(sb *strings.Builder, m db.Message) {
 	}
 }
 
+func resolveBurstModel(burst []db.Message) string {
+	return extractBurstModel(burst)
+}
+
 func extractBurstModel(burst []db.Message) string {
 	for _, m := range burst {
 		if model := strings.TrimSpace(m.Model); model != "" {
@@ -749,15 +753,12 @@ func resolveDispatchEffort(d db.Dispatch, isEphem bool) string {
 func (te *turnExecution) resolveExecutionPool() (runner.AgentPool, PoolKey, error) {
 	var k PoolKey
 	var err error
-	if te != nil && te.dispatch != nil {
-		isEphem := strings.TrimSpace(te.dispatch.SessionID) == ""
-		eff := resolveDispatchEffort(*te.dispatch, isEphem)
+	if te != nil {
+		isEphem := te.isDispatch() && (te.isEphemeral || strings.TrimSpace(te.dispatch.SessionID) == "")
+		eff, _ := te.turnEffortAndModel()
 		k, err = ResolvePoolKey(&isEphem, eff)
 	} else {
 		var burst []db.Message
-		if te != nil {
-			burst = te.burst
-		}
 		k, err = resolveBurstPoolKey(burst)
 	}
 	if err != nil {

@@ -44,14 +44,59 @@ type turnExecution struct {
 	interrupted                                                                                 atomic.Bool
 }
 
+func (te *turnExecution) isDispatch() bool {
+	return te != nil && te.dispatch != nil
+}
+
 func (te *turnExecution) leaseKey() string {
 	if te == nil {
 		return ""
 	}
-	if te.dispatch != nil {
+	if te.isDispatch() {
 		return te.threadID
 	}
 	return db.DiscordSessionID(te.threadID)
+}
+
+func (te *turnExecution) incrementTurnRetries(errDetail string) {
+	if te == nil {
+		return
+	}
+	if te.isDispatch() {
+		te.incrementDispatchRetry(te.dispatch.ID, errDetail)
+		return
+	}
+	for _, m := range te.burst {
+		te.incrementMessageRetry(m.ID, errDetail)
+	}
+}
+
+func (te *turnExecution) initialRetryCount() int {
+	if te == nil {
+		return 0
+	}
+	if te.isDispatch() {
+		return te.dispatch.RetryCount
+	}
+	return maxBurstRetryCount(te.burst)
+}
+
+func (te *turnExecution) turnEffortAndModel() (string, string) {
+	if te == nil {
+		return "", ""
+	}
+	if te.isDispatch() {
+		isEphem := te.isEphemeral || strings.TrimSpace(te.dispatch.SessionID) == ""
+		return resolveDispatchEffort(*te.dispatch, isEphem), strings.TrimSpace(te.dispatch.Model)
+	}
+	return resolveBurstEffort(te.burst), resolveBurstModel(te.burst)
+}
+
+func (te *turnExecution) ownsTurnItem(id string) bool {
+	if te == nil {
+		return false
+	}
+	return te.isBurstMessage(id) || (te.isDispatch() && te.dispatch.ID == id)
 }
 
 func (te *turnExecution) turnCtxValue() context.Context {
@@ -168,7 +213,7 @@ func (te *turnExecution) rotateSessionID(threadID, newSessionID string) {
 
 //nolint:unparam
 func (te *turnExecution) finalizeBurstMessages(msgs []db.Message, msgStatus, msgOutput, runStatus, runErr, model string, notify, isResponse bool) {
-	if te != nil && te.dispatch != nil {
+	if te.isDispatch() {
 		if isResponse {
 			te.updateDispatchCompleted(te.dispatch.ID, msgOutput)
 		} else {
@@ -981,12 +1026,7 @@ func (te *turnExecution) handleWatchdogFailure(attempt, maxAttempts int, current
 		return true
 	}
 
-	for _, m := range te.burst {
-		te.incrementMessageRetry(m.ID, errDetail)
-	}
-	if te.dispatch != nil {
-		te.incrementDispatchRetry(te.dispatch.ID, errDetail)
-	}
+	te.incrementTurnRetries(errDetail)
 	te.stopIndicators()
 
 	if te.pool.ctx.Err() != nil {
@@ -1091,12 +1131,7 @@ func (te *turnExecution) handleNonTransientFailure(attempt, maxAttempts int, cur
 	}
 	metrics.RecordTurnCompleted("failed", te.triggerType, currentModel, time.Since(te.execStart))
 	te.deliverFailureNotice(currentAgyBin, currentAPIKey, errDetail, stderr, "execution failed with non-transient error", "non-transient failure notice")
-	for _, m := range te.burst {
-		te.incrementMessageRetry(m.ID, errDetail)
-	}
-	if te.dispatch != nil {
-		te.incrementDispatchRetry(te.dispatch.ID, errDetail)
-	}
+	te.incrementTurnRetries(errDetail)
 	te.failBurstWithStatus("failed", errDetail, currentModel)
 	log.Printf("[WorkerPool] %d message(s) in thread %s marked FAILED due to non-transient error (attempt %d/%d): %s", len(te.burst), te.threadID, attempt, maxAttempts, errDetail)
 }
@@ -1198,10 +1233,7 @@ func (te *turnExecution) executeWithRetries() {
 	lastStderr := ""
 	currentModel := te.pool.GetRuntimeConfig()
 
-	initialRetryCount := maxBurstRetryCount(te.burst)
-	if te.dispatch != nil {
-		initialRetryCount = te.dispatch.RetryCount
-	}
+	initialRetryCount := te.initialRetryCount()
 
 	attemptCfg := te.resolveAttemptConfig(0)
 	currentAgyBin := attemptCfg.agyBin
@@ -1221,10 +1253,7 @@ func (te *turnExecution) executeWithRetries() {
 		currentTimeout := cfg.timeoutMinutes
 		currentAgyBin = cfg.agyBin
 		currentAPIKey = cfg.apiKey
-		burstEffort := resolveBurstEffort(te.burst)
-		if te.dispatch != nil {
-			burstEffort = resolveDispatchEffort(*te.dispatch, te.isEphemeral)
-		}
+		burstEffort, _ := te.turnEffortAndModel()
 
 		if te.checkGlobalQuotaLockout(currentAPIKey, currentModel) {
 			return

@@ -101,8 +101,7 @@ func (te *turnExecution) isBurstMessage(id string) bool {
 func (te *turnExecution) liveSessionIDForMessage(msgID string) (string, bool) {
 	te.activeSessionMu.Lock()
 	defer te.activeSessionMu.Unlock()
-	isMatch := te.isBurstMessage(msgID) || (te.dispatch != nil && te.dispatch.ID == msgID)
-	if !isMatch {
+	if !te.ownsTurnItem(msgID) {
 		return "", false
 	}
 	if te.activeSessionID != "" {
@@ -260,14 +259,7 @@ func (te *turnExecution) resolveAttemptConfig(attempt int) attemptConfig {
 		cfg.mediumEffortModel = config.GetRuntimeConfig().MediumEffortModel
 	}
 
-	effort := resolveBurstEffort(te.burst)
-	reqModel := extractBurstModel(te.burst)
-	if te.dispatch != nil {
-		effort = resolveDispatchEffort(*te.dispatch, te.isEphemeral)
-		if strings.TrimSpace(te.dispatch.Model) != "" {
-			reqModel = strings.TrimSpace(te.dispatch.Model)
-		}
-	}
+	effort, reqModel := te.turnEffortAndModel()
 
 	switch effort {
 	case "medium":
