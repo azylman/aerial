@@ -183,7 +183,9 @@ func (c *CDPClient) handleDisconnect(conn *websocket.Conn, err error) {
 		}
 	}
 	c.stateMu.Unlock()
-	_ = conn.Close() //nolint:errcheck
+	if cErr := conn.Close(); cErr != nil {
+		return
+	}
 }
 
 // EnsureConnection verifies or establishes the active CDP connection.
@@ -388,7 +390,7 @@ func (c *CDPClient) DispatchTrustedClick(ctx context.Context, x, y int) error {
 		return fmt.Errorf("mousePressed: %w", err)
 	}
 
-	_ = c.WaitSettle(ctx) //nolint:errcheck
+	c.waitSettleBestEffort(ctx)
 
 	if _, err := c.SendCDP(ctx, "Input.dispatchMouseEvent", map[string]any{
 		"type":       "mouseReleased",
@@ -450,7 +452,7 @@ func (c *CDPClient) Navigate(ctx context.Context, destURL string) error {
 	sameHost := host != "" && c.lastNavHost == host
 	c.stateMu.Unlock()
 	if sameHost {
-		_ = c.WaitSettle(ctx) //nolint:errcheck
+		c.waitSettleBestEffort(ctx)
 	}
 
 	if _, err := c.SendCDP(ctx, "Page.navigate", map[string]any{
@@ -467,6 +469,12 @@ func (c *CDPClient) Navigate(ctx context.Context, destURL string) error {
 }
 
 // WaitSettle waits for SettleDelay without using arbitrary sleeps.
+func (c *CDPClient) waitSettleBestEffort(ctx context.Context) {
+	if err := c.WaitSettle(ctx); err != nil {
+		return
+	}
+}
+
 func (c *CDPClient) WaitSettle(ctx context.Context) error {
 	delay := c.cfg.SettleDelay
 	if delay <= 0 {

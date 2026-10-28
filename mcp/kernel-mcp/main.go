@@ -68,6 +68,14 @@ type ToolCallResult struct {
 }
 
 // Server holds server dependencies and handlers.
+func unmarshalOptional(raw []byte, dst any) {
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, dst); err != nil {
+			return
+		}
+	}
+}
+
 type Server struct {
 	cfg    *Config
 	client *CDPClient
@@ -252,7 +260,7 @@ func (s *Server) toolBrowserGetContent(ctx context.Context, argsRaw json.RawMess
 		MaxLength int    `json:"maxLength"`
 		MaxChars  int    `json:"max_chars"`
 	}
-	_ = json.Unmarshal(argsRaw, &args) //nolint:errcheck
+	unmarshalOptional(argsRaw, &args)
 	limit := args.MaxLength
 	if limit <= 0 {
 		limit = args.MaxChars
@@ -272,7 +280,7 @@ func (s *Server) toolBrowserGetContent(ctx context.Context, argsRaw json.RawMess
 		URL   string `json:"url"`
 		Text  string `json:"text"`
 	}
-	_ = json.Unmarshal(raw, &res) //nolint:errcheck
+	unmarshalOptional(raw, &res)
 	truncatedText, _ := TruncateContent(res.Text, limit)
 	res.Text = truncatedText
 
@@ -347,7 +355,10 @@ func (s *Server) toolBrowserType(ctx context.Context, argsRaw json.RawMessage) (
 	}
 
 	if fr.HasRect {
-		_ = s.client.DispatchTrustedClick(ctx, fr.X, fr.Y) //nolint:errcheck
+		if err := s.client.DispatchTrustedClick(ctx, fr.X, fr.Y); err != nil {
+			// best effort trusted click
+			_ = err
+		}
 	}
 
 	if err := s.client.InsertText(ctx, args.Text); err != nil {
@@ -355,7 +366,10 @@ func (s *Server) toolBrowserType(ctx context.Context, argsRaw json.RawMessage) (
 	}
 
 	dispatchScript := BuildDispatchInputEventsScript(args.Selector)
-	_, _ = s.client.EvaluateJS(ctx, dispatchScript, true, true) //nolint:errcheck
+	if _, err := s.client.EvaluateJS(ctx, dispatchScript, true, true); err != nil {
+		// best effort event dispatch
+		_ = err
+	}
 
 	out, err := json.Marshal(map[string]any{
 		"typed":   true,
@@ -371,7 +385,7 @@ func (s *Server) toolBrowserScreenshot(ctx context.Context, argsRaw json.RawMess
 	var args struct {
 		Format string `json:"format"`
 	}
-	_ = json.Unmarshal(argsRaw, &args) //nolint:errcheck
+	unmarshalOptional(argsRaw, &args)
 	format := strings.ToLower(strings.TrimSpace(args.Format))
 	if format == "" {
 		format = "png"
@@ -470,11 +484,14 @@ func (s *Server) toolAmazonAddToCart(ctx context.Context, argsRaw json.RawMessag
 		}
 	}
 
-	_ = s.client.WaitSettle(ctx) //nolint:errcheck
+	s.client.waitSettleBestEffort(ctx)
 
-	countRaw, _ := s.client.EvaluateJS(ctx, BuildAmazonCartCountScript(), true, true) //nolint:errcheck
+	countRaw, err := s.client.EvaluateJS(ctx, BuildAmazonCartCountScript(), true, true)
+	if err != nil {
+		countRaw = nil
+	}
 	var cartCount string
-	_ = json.Unmarshal(countRaw, &cartCount) //nolint:errcheck
+	unmarshalOptional(countRaw, &cartCount)
 
 	out, err := json.Marshal(map[string]any{
 		"added":        true,
@@ -527,7 +544,11 @@ func NewHTTPMux(srv *Server) *http.ServeMux {
 
 func runServer(ctx context.Context, cfg *Config) error {
 	client := NewCDPClient(cfg)
-	defer client.Close() //nolint:errcheck
+	defer func() {
+		if err := client.Close(); err != nil {
+			return
+		}
+	}()
 
 	srv := NewServer(cfg, client)
 	mux := NewHTTPMux(srv)

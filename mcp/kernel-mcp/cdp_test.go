@@ -21,6 +21,7 @@ var testUpgrader = websocket.Upgrader{
 
 type fakeCDPOptions struct {
 	failList         bool
+	corruptList      bool
 	emptyTargets     bool
 	includeChrome    bool
 	onlyChrome       bool
@@ -59,6 +60,10 @@ func startFakeCDPServer(t *testing.T, opts fakeCDPOptions) (*fakeCDPServer, *Con
 		if r.URL.Path == "/json/list" {
 			if opts.failList {
 				http.Error(w, "server error", http.StatusInternalServerError)
+				return
+			}
+			if opts.corruptList {
+				w.Write([]byte("not valid json"))
 				return
 			}
 			if opts.emptyTargets {
@@ -349,6 +354,12 @@ func TestCDPClient_EnsureConnectionTable(t *testing.T) {
 			errSubstr: "no open page target found",
 		},
 		{
+			name:      "corrupt targets returns error",
+			opts:      fakeCDPOptions{corruptList: true},
+			wantErr:   true,
+			errSubstr: "parse cdp target response",
+		},
+		{
 			name:      "stealth Page.enable failure",
 			opts:      fakeCDPOptions{failPageEnable: true},
 			wantErr:   true,
@@ -581,6 +592,7 @@ func TestCDPClient_ErrorAndDisconnectTable(t *testing.T) {
 				cancelCtx, cancelFn := context.WithCancel(context.Background())
 				cancelFn()
 				client.cfg.SettleDelay = 500 * time.Millisecond
+				client.waitSettleBestEffort(cancelCtx)
 				err := client.WaitSettle(cancelCtx)
 				if tc.wantErr && (err == nil || !strings.Contains(err.Error(), tc.errSubstr)) {
 					t.Fatalf("WaitSettle error = %v, want substring %q", err, tc.errSubstr)

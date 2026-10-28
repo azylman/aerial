@@ -21,6 +21,26 @@ var (
 	WriteMetaDirFn     = coverage.WriteMetaDir
 )
 
+var archiveCoverageDir = func(w io.Writer, dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	tw := tar.NewWriter(w)
+	for _, e := range entries {
+		data, rErr := os.ReadFile(filepath.Join(dir, e.Name()))
+		if rErr != nil {
+			return rErr
+		}
+		hErr := tw.WriteHeader(&tar.Header{Name: e.Name(), Mode: 0o600, Size: int64(len(data))})
+		_, wErr := tw.Write(data)
+		if err := errors.Join(hErr, wErr); err != nil {
+			return err
+		}
+	}
+	return tw.Close()
+}
+
 // HandleCoverageFlush returns an HTTP handler for /debug/coverage/flush that writes
 // runtime coverage metadata and counters to an ephemeral directory and streams them
 // back as an application/x-tar archive.
@@ -32,7 +52,11 @@ func HandleCoverageFlush(service string) http.HandlerFunc {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		defer func() { _ = os.RemoveAll(tmpDir) }() //nolint:errcheck
+		defer func() {
+			if err := os.RemoveAll(tmpDir); err != nil {
+				log.Printf("[%s] coverage flush cleanup error: %v", service, err)
+			}
+		}()
 
 		if WriteMetaDirFn != nil {
 			if err := WriteMetaDirFn(tmpDir); err != nil {
@@ -47,20 +71,12 @@ func HandleCoverageFlush(service string) http.HandlerFunc {
 			}
 		}
 
-		entries, _ := os.ReadDir(tmpDir) //nolint:errcheck
 		var buf bytes.Buffer
-		tw := tar.NewWriter(&buf)
-		for _, entry := range entries {
-			if data, readErr := os.ReadFile(filepath.Join(tmpDir, entry.Name())); readErr == nil {
-				_ = tw.WriteHeader(&tar.Header{ //nolint:errcheck
-					Name: entry.Name(),
-					Mode: 0o600,
-					Size: int64(len(data)),
-				})
-				_, _ = tw.Write(data) //nolint:errcheck
-			}
+		if err := archiveCoverageDir(&buf, tmpDir); err != nil {
+			log.Printf("[%s] coverage archive error: %v", service, err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
 		}
-		CloseWarn(tw, "coverage tar writer")
 
 		w.Header().Set("Content-Type", "application/x-tar")
 		w.WriteHeader(http.StatusOK)

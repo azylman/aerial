@@ -306,12 +306,18 @@ func (s *PGStore) insertCallTx(ctx context.Context, tx *sql.Tx, call VoiceCall) 
 }
 
 // CreateOutboundCall inserts a new outbound call record enforcing concurrency and duplicate destination limits.
+func rollbackTx(tx *sql.Tx) {
+	if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+		return
+	}
+}
+
 func (s *PGStore) CreateOutboundCall(ctx context.Context, call VoiceCall, maxConcurrent int) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("store: begin tx: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }() //nolint:errcheck
+	defer rollbackTx(tx)
 
 	var activeCount int
 	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM voice_calls WHERE ended_at IS NULL").Scan(&activeCount); err != nil {
@@ -345,7 +351,7 @@ func (s *PGStore) CreateInboundCall(ctx context.Context, call VoiceCall) error {
 	if err != nil {
 		return fmt.Errorf("store: begin tx: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }() //nolint:errcheck
+	defer rollbackTx(tx)
 
 	if err := s.insertCallTx(ctx, tx, call); err != nil {
 		return err
@@ -490,7 +496,7 @@ func (s *PGStore) AppendTranscriptTurn(ctx context.Context, callID string, turn 
 	if err != nil {
 		return fmt.Errorf("store: begin tx: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }() //nolint:errcheck
+	defer rollbackTx(tx)
 
 	query := "SELECT transcript FROM voice_calls WHERE call_id = $1"
 	if !s.isSQLite {
@@ -551,7 +557,7 @@ func (s *PGStore) AppendOwnerInstruction(ctx context.Context, callID string, ins
 	if err != nil {
 		return fmt.Errorf("store: begin tx: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }() //nolint:errcheck
+	defer rollbackTx(tx)
 
 	query := "SELECT owner_instructions FROM voice_calls WHERE call_id = $1"
 	if !s.isSQLite {

@@ -9,6 +9,35 @@ import (
 	"time"
 )
 
+func TestUnmarshalOptional(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		input       []byte
+		initialVal  string
+		expectedVal string
+	}{
+		{"valid json", []byte(`{"val":"ok"}`), "", "ok"},
+		{"invalid json keeps destination", []byte(`invalid json`), "untouched", "untouched"},
+		{"nil data keeps destination", nil, "untouched", "untouched"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var dest struct {
+				Val string `json:"val"`
+			}
+			dest.Val = tc.initialVal
+			unmarshalOptional(tc.input, &dest)
+			if dest.Val != tc.expectedVal {
+				t.Fatalf("expected val %q, got %q", tc.expectedVal, dest.Val)
+			}
+		})
+	}
+}
+
 func TestSanitizePII(t *testing.T) {
 	t.Parallel()
 
@@ -29,6 +58,7 @@ func TestSanitizePII(t *testing.T) {
 		{"17 digits unchanged", "12345678901234567", "12345678901234567"},
 		{"embedded in sentence", "Card 4111-2222-3333-4444 was charged $50", "Card [REDACTED_CARD] was charged $50"},
 		{"dash format with invalid length", "12-34-56", "12-34-56"},
+		{"digits with symbols outside range", "123-456-789-012 ", "123-456-789-012 "},
 	}
 
 	for _, tc := range tests {

@@ -2,12 +2,12 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -254,7 +254,7 @@ func ResolveCDPHost(ctx context.Context, host string) string {
 
 // BuildGetContentScript builds a JS expression to clone target element or body, remove scripts/styles, and return { title, url, text }.
 func BuildGetContentScript(selector string) string {
-	selJSON, _ := json.Marshal(selector) //nolint:errcheck,errchkjson
+	selJSON := strconv.Quote(selector)
 	return fmt.Sprintf(`(() => {
   const sel = %s;
   const el = (sel ? document.querySelector(sel) : document.body) || document.body;
@@ -269,7 +269,7 @@ func BuildGetContentScript(selector string) string {
     url: window.location.href || "",
     text: (clone.innerText || clone.textContent || "").trim()
   };
-})()`, string(selJSON))
+})()`, selJSON)
 }
 
 // ClickResult is the evaluated structure returned by BuildClickScript.
@@ -286,7 +286,7 @@ type ClickResult struct {
 
 // BuildClickScript builds a JS expression to scroll the selector into view and return geometry.
 func BuildClickScript(selector string) string {
-	selJSON, _ := json.Marshal(selector) //nolint:errcheck,errchkjson
+	selJSON := strconv.Quote(selector)
 	return fmt.Sprintf(`(() => {
   const el = document.querySelector(%s);
   if (!el) return { found: false, tag: "", text: "", hasRect: false, x: 0, y: 0, width: 0, height: 0 };
@@ -310,7 +310,7 @@ func BuildClickScript(selector string) string {
     width: width,
     height: height
   };
-})()`, string(selJSON))
+})()`, selJSON)
 }
 
 // FocusResult is the evaluated structure returned by BuildFocusAndClearScript.
@@ -323,7 +323,7 @@ type FocusResult struct {
 
 // BuildFocusAndClearScript builds a JS expression to focus and optionally clear an input.
 func BuildFocusAndClearScript(selector string, shouldClear bool) string {
-	selJSON, _ := json.Marshal(selector) //nolint:errcheck,errchkjson
+	selJSON := strconv.Quote(selector)
 	return fmt.Sprintf(`(() => {
   const el = document.querySelector(%s);
   if (!el) return { found: false, hasRect: false, x: 0, y: 0 };
@@ -337,19 +337,19 @@ func BuildFocusAndClearScript(selector string, shouldClear bool) string {
   const x = hasRect ? Math.round(rect.left + rect.width / 2) : 0;
   const y = hasRect ? Math.round(rect.top + rect.height / 2) : 0;
   return { found: true, hasRect: hasRect, x: x, y: y };
-})()`, string(selJSON), shouldClear)
+})()`, selJSON, shouldClear)
 }
 
 // BuildDispatchInputEventsScript builds a JS expression to trigger bubbling input and change events.
 func BuildDispatchInputEventsScript(selector string) string {
-	selJSON, _ := json.Marshal(selector) //nolint:errcheck,errchkjson
+	selJSON := strconv.Quote(selector)
 	return fmt.Sprintf(`(() => {
   const el = document.querySelector(%s);
   if (el) {
     el.dispatchEvent(new Event("input", { bubbles: true }));
     el.dispatchEvent(new Event("change", { bubbles: true }));
   }
-})()`, string(selJSON))
+})()`, selJSON)
 }
 
 // BuildAmazonSearchScript builds a JS expression extracting up to maxResults search results.

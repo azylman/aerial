@@ -824,6 +824,14 @@ func TestRunServer_Execution(t *testing.T) {
 	if err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, context.Canceled) {
 		t.Fatalf("runServer() error: %v", err)
 	}
+
+	// Test bad port error return
+	badCfg := *cfg
+	badCfg.Port = "-1"
+	err = runServer(context.Background(), &badCfg)
+	if err == nil {
+		t.Fatalf("expected error for invalid port")
+	}
 }
 
 func TestMain_Execution_TableDriven(t *testing.T) {

@@ -105,7 +105,9 @@ func RunCLI(args []string, r io.Reader, w io.Writer) int {
 		if guard.IsInvocationMode(string(cfg.Mode)) {
 			out = `{}`
 		}
-		_, _ = fmt.Fprintln(w, out) //nolint:errcheck
+		if _, wErr := fmt.Fprintln(w, out); wErr != nil {
+			return 1
+		}
 		return 1
 	}
 	return 0
