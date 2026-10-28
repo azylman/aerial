@@ -513,12 +513,11 @@ func (c *Classifier) classifyWithPrompt(ctx context.Context, prompt string) Clas
 
 // MaxSystemOneMessageRunes is the maximum number of runes preserved in any single message within ModernBERT dialogue state.
 // Messages exceeding this length have their center snipped to preserve both the opener (head) and the final ask (tail).
-const MaxSystemOneMessageRunes = 350
+const MaxSystemOneMessageRunes = 500
 
 // MaxSystemOneStateRunes is the maximum number of runes preserved across all formatted messages in ModernBERT dialogue state.
-// Capped at 1800 runes (~430-465 tokens) to fit comfortably under ModernBERT's 512-token context limit
-// while preserving 8-10 recent dialogue turns at ~315ms P50 on CPU P-cores.
-const MaxSystemOneStateRunes = 1800
+// Capped at 3200 runes (~750-800 state tokens + ~154 instruction tokens) to fit cleanly within Laya's 1024-token ONNX GPU context window.
+const MaxSystemOneStateRunes = 3200
 
 // ModernBERTTruncationIndicator is inserted into the middle of a message when it exceeds MaxSystemOneMessageRunes,
 // preserving both the conversational opener/speaker context (head) and the final punchline/ask (tail).
