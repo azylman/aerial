@@ -142,6 +142,8 @@ func TestProcessGitHubEvent(t *testing.T) {
 			_, _ = w.Write([]byte(`{"number": 543, "mergeable": false, "mergeable_state": "dirty"}`))
 		case strings.Contains(r.URL.Path, "/issues/525/comments"):
 			_, _ = w.Write([]byte(`[{"id": 0, "body": "Non-roborev comment"}, {"id": 1, "body": "## roborev: Review Complete (` + "`old0000`" + `)\nOld bug"}, {"id": 2, "body": "## roborev: Combined Review (` + "`robo525`" + `)\nFound SQL injection in query"}]`))
+		case strings.Contains(r.URL.Path, "/actions/runs/800/jobs"):
+			_, _ = w.Write([]byte(`{"total_count":1,"jobs":[{"id":1,"name":"Verify Codebase","status":"completed","conclusion":"success"}]}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -474,16 +476,24 @@ func TestProcessGitHubEvent(t *testing.T) {
 			wantConflictCalls: 1, wantGitPushes: 1, wantDMs: 0, wantDispatches: 1, wantPromptSubstr: "Merge conflict detected on PR #543",
 		},
 		{
-			name: "merged PR on azylman/mirrormere advances Vanadis chunk", event: "pull_request", delivery: "del-pr-mirrormere",
+			name: "merged PR on azylman/mirrormere updates merged status without premature git-merge prompt", event: "pull_request", delivery: "del-pr-mirrormere",
 			payload: `{"action":"closed","number":210,"pull_request":{"number":210,"head":{"ref":"feat/ui","sha":"head210"},"merged":true,"merge_commit_sha":"merge210"},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
 			reg:     &mockPRRegistry{mergedTargetID: "1562162630997581946"},
 			disp:    &mockOutboundDispatcher{},
-			wantPR:  210, wantMergedCalls: 1, wantAdvanceCalls: 1, wantPrompts: 1, wantPromptSubstr: "Continuous Delivery deployment completed for job git-merge on azylman/mirrormere",
+			wantPR:  210, wantMergedCalls: 1, wantAdvanceCalls: 0, wantPrompts: 0,
 		},
 		{
-			name: "merged PR advance error", event: "pull_request", delivery: "del-pr-mirrormere-err",
-			payload: `{"action":"closed","number":211,"pull_request":{"number":211,"head":{"ref":"feat/ui2","sha":"head211"},"merged":true,"merge_commit_sha":"merge211"},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
-			reg:     &mockPRRegistry{advanceVanadisErr: errors.New("simulated advance error")},
+			name: "workflow_run on main without built images advances Vanadis and dispatches git-merge prompt", event: "workflow_run", delivery: "del-wf-main-merge",
+			payload: `{"action":"completed","workflow_run":{"id":800,"name":"Continuous Delivery","head_sha":"merge210","head_branch":"main","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/mirrormere"}}`,
+			reg:     &mockPRRegistry{resolvePRNum: 210, resolveBranch: "feat/ui", resolveTargetID: "1562162630997581946"},
+			disp:    &mockOutboundDispatcher{},
+			wantPR:  210, wantAdvanceCalls: 1, wantPrompts: 1, wantPromptSubstr: "Continuous Delivery deployment completed for job git-merge on azylman/mirrormere",
+		},
+		{
+			name: "workflow_run on main advance Vanadis error propagates", event: "workflow_run", delivery: "del-wf-main-err",
+			payload: `{"action":"completed","workflow_run":{"id":800,"name":"Continuous Delivery","head_sha":"merge211","head_branch":"main","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/mirrormere"}}`,
+			reg:     &mockPRRegistry{resolvePRNum: 211, resolveBranch: "feat/ui2", resolveTargetID: "1562162630997581946", advanceVanadisErr: errors.New("simulated advance error")},
+			disp:    &mockOutboundDispatcher{},
 			wantErr: true,
 		},
 		{
@@ -493,16 +503,10 @@ func TestProcessGitHubEvent(t *testing.T) {
 			wantPR:  212, wantClosedCalls: 1, wantFailVanadis: 1,
 		},
 		{
-			name: "push to azylman/aerial-sidecars advances Vanadis chunk", event: "push", delivery: "del-push-sidecars",
+			name: "push to azylman/aerial-sidecars backfills merge_sha without premature Vanadis advance", event: "push", delivery: "del-push-sidecars",
 			payload: `{"ref":"refs/heads/main","after":"sidecarsha1","repository":{"full_name":"azylman/aerial-sidecars"},"head_commit":{"id":"sidecarsha1","message":"feat: merged sidecar (#310)"}}`,
 			reg:     &mockPRRegistry{resolvePRNum: 310, resolveBranch: "feat/sidecar", resolveTargetID: "target-sidecars", backfillTargetID: "target-sidecars"},
-			wantPR:  310, wantMergeSHA: "sidecarsha1", wantSource: "local_pr_registry", wantBackfillCalls: 1, wantAdvanceCalls: 1,
-		},
-		{
-			name: "push advance error", event: "push", delivery: "del-push-sidecars-err",
-			payload: `{"ref":"refs/heads/main","after":"sidecarsha2","repository":{"full_name":"azylman/aerial-sidecars"},"head_commit":{"id":"sidecarsha2","message":"feat: merged sidecar 2 (#311)"}}`,
-			reg:     &mockPRRegistry{resolvePRNum: 311, resolveBranch: "feat/sidecar2", resolveTargetID: "target-sidecars-2", advanceVanadisErr: errors.New("simulated push advance error")},
-			wantErr: true,
+			wantPR:  310, wantMergeSHA: "sidecarsha1", wantSource: "local_pr_registry", wantBackfillCalls: 1, wantAdvanceCalls: 0,
 		},
 		{
 			name: "pull_request closed merged UpdatePRMerged error", event: "pull_request", delivery: "del-pr-merged-err",
@@ -533,30 +537,18 @@ func TestProcessGitHubEvent(t *testing.T) {
 			reg:     &mockPRRegistry{ensureErr: errors.New("ensure db error")}, wantErr: true,
 		},
 		{
-			name: "merged PR on mirrormere with expected deploy jobs advances Vanadis while suppressing merged widget", event: "pull_request", delivery: "del-pr-mirrormere-expected",
-			payload: `{"action":"closed","number":220,"pull_request":{"number":220,"head":{"ref":"feat/ui-deploy","sha":"head220"},"merged":true,"merge_commit_sha":"merge220"},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
-			reg:     &mockPRRegistry{mergedTargetID: "1562162630997581946", hasExpectedRes: true},
+			name: "workflow_run on main with expected deploy jobs defers Vanadis and prompt until deploy_success", event: "workflow_run", delivery: "del-wf-mirrormere-expected",
+			payload: `{"action":"completed","workflow_run":{"id":800,"name":"Continuous Delivery","head_sha":"merge220","head_branch":"main","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/mirrormere"}}`,
+			reg:     &mockPRRegistry{resolvePRNum: 220, resolveBranch: "feat/ui-deploy", resolveTargetID: "1562162630997581946", hasExpectedRes: true},
 			disp:    &mockOutboundDispatcher{},
-			wantPR:  220, wantMergedCalls: 1, wantAdvanceCalls: 1,
+			wantPR:  220, wantAdvanceCalls: 0, wantPrompts: 0,
 		},
 		{
-			name: "merged PR on mirrormere without expected deploy jobs for Vanadis PR advances and syncs deployed widget", event: "pull_request", delivery: "del-pr-mirrormere-no-expected",
-			payload: `{"action":"closed","number":221,"pull_request":{"number":221,"head":{"ref":"feat/ui-no-deploy","sha":"head221"},"merged":true,"merge_commit_sha":"merge221"},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
-			reg:     &mockPRRegistry{mergedTargetID: "1562162630997581946", hasExpectedRes: false, suppressVanadisRes: true},
+			name: "workflow_run on main without expected deploy jobs for Vanadis PR advances and syncs deployed widget", event: "workflow_run", delivery: "del-wf-mirrormere-no-expected",
+			payload: `{"action":"completed","workflow_run":{"id":800,"name":"Continuous Delivery","head_sha":"merge221","head_branch":"main","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/mirrormere"}}`,
+			reg:     &mockPRRegistry{resolvePRNum: 221, resolveBranch: "feat/ui-no-deploy", resolveTargetID: "1562162630997581946", hasExpectedRes: false, suppressVanadisRes: true},
 			disp:    &mockOutboundDispatcher{},
-			wantPR:  221, wantMergedCalls: 1, wantAdvanceCalls: 1,
-		},
-		{
-			name: "push to aerial-sidecars with expected deploy jobs advances Vanadis on landing", event: "push", delivery: "del-push-sidecars-expected",
-			payload: `{"ref":"refs/heads/main","after":"sidecarsha9","repository":{"full_name":"azylman/aerial-sidecars"},"head_commit":{"id":"sidecarsha9","message":"feat: merged sidecar (#320)"}}`,
-			reg:     &mockPRRegistry{resolvePRNum: 320, resolveBranch: "feat/sidecar", resolveTargetID: "target-sidecars", backfillTargetID: "target-sidecars", hasExpectedRes: true},
-			wantPR:  320, wantMergeSHA: "sidecarsha9", wantSource: "local_pr_registry", wantBackfillCalls: 1, wantAdvanceCalls: 1,
-		},
-		{
-			name: "push to aerial-sidecars without expected deploy jobs advances Vanadis on landing", event: "push", delivery: "del-push-sidecars-no-expected",
-			payload: `{"ref":"refs/heads/main","after":"sidecarsha10","repository":{"full_name":"azylman/aerial-sidecars"},"head_commit":{"id":"sidecarsha10","message":"feat: merged sidecar (#321)"}}`,
-			reg:     &mockPRRegistry{resolvePRNum: 321, resolveBranch: "feat/sidecar-nodeploy", resolveTargetID: "target-sidecars", backfillTargetID: "target-sidecars", hasExpectedRes: false, suppressVanadisRes: true},
-			wantPR:  321, wantMergeSHA: "sidecarsha10", wantSource: "local_pr_registry", wantBackfillCalls: 1, wantAdvanceCalls: 1,
+			wantPR:  221, wantAdvanceCalls: 1, wantPrompts: 0,
 		},
 	}
 
@@ -881,6 +873,9 @@ func TestDispatchWorkflowRunImages(t *testing.T) {
 		gitPushErr      error
 		imageReadyErr   error
 		deployingErr    error
+		hasExpectedErr  error
+		suppressVanadis bool
+		widgetErr       error
 		wantImageCalls  int
 		wantDeployCalls int
 		wantErr         bool
@@ -909,6 +904,26 @@ func TestDispatchWorkflowRunImages(t *testing.T) {
 			jobsStatus: http.StatusOK,
 			jobsBody:   `{"jobs":[]}`,
 			wantErr:    false,
+		},
+		{
+			name:            "0 resolved images with hasExpectedErr and Vanadis widget sync warning",
+			headBranch:      "main",
+			conclusion:      "success",
+			jobsStatus:      http.StatusOK,
+			jobsBody:        `{"jobs":[]}`,
+			hasExpectedErr:  errors.New("expected err"),
+			suppressVanadis: true,
+			widgetErr:       errors.New("widget sync err"),
+			wantErr:         false,
+		},
+		{
+			name:           "resolved image with 0 matched Nomad jobs completes no-deploy workflow run",
+			headBranch:     "main",
+			conclusion:     "success",
+			jobsStatus:     http.StatusOK,
+			jobsBody:       `{"jobs":[{"name":"Build & Push Images to GHCR (unmanaged)","status":"completed","conclusion":"success"}]}`,
+			wantImageCalls: 1,
+			wantErr:        false,
 		},
 		{
 			name:           "imageReadyErr dispatch failure returns error",
@@ -997,13 +1012,18 @@ func TestDispatchWorkflowRunImages(t *testing.T) {
 				disp = &mockOutboundDispatcher{
 					gitPushErr:    tc.gitPushErr,
 					imageReadyErr: tc.imageReadyErr,
+					widgetErr:     tc.widgetErr,
 					matchedJobs: map[string][]string{
 						"ghcr.io/azylman/aerial-brain:latest": {"brain"},
 					},
 				}
 			}
 			reg := &mockPRRegistry{
-				deployingErr: tc.deployingErr,
+				deployingErr:       tc.deployingErr,
+				hasExpectedErr:     tc.hasExpectedErr,
+				suppressVanadisRes: tc.suppressVanadis,
+				resolveTargetID:    "1555405874565091380",
+				resolveBranch:      "feat/test",
 			}
 			srv := NewRouterServer(Config{GitHubAPIURL: ts.URL}, ts.Client())
 			if disp != nil {

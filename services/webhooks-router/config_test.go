@@ -415,27 +415,6 @@ func TestStringAndRepoHelpers(t *testing.T) {
 		})
 	}
 
-	hangarSyncedTests := []struct {
-		name, repo string
-		want       bool
-	}{
-		{name: "isHangarSyncedRepo aerial bare", repo: "aerial", want: true},
-		{name: "isHangarSyncedRepo aerial qualified", repo: "azylman/aerial", want: true},
-		{name: "isHangarSyncedRepo aerial config qualified", repo: "azylman/aerial-config", want: true},
-		{name: "isHangarSyncedRepo uppercase aerial-config", repo: "AZYLMAN/AERIAL-CONFIG", want: true},
-		{name: "isHangarSyncedRepo mirrormere", repo: "mirrormere", want: false},
-		{name: "isHangarSyncedRepo other", repo: "otherorg/custom", want: false},
-		{name: "isHangarSyncedRepo empty", repo: "", want: false},
-	}
-	for _, tc := range hangarSyncedTests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := isHangarSyncedRepo(tc.repo); got != tc.want {
-				t.Errorf("isHangarSyncedRepo(%q) = %v, want %v", tc.repo, got, tc.want)
-			}
-		})
-	}
-
 	if got := readBodyString(errReader{}); got != "" {
 		t.Errorf("readBodyString(errReader) = %q, want empty", got)
 	}

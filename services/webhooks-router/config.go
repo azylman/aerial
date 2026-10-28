@@ -248,11 +248,6 @@ func normalizeWidgetStatus(dbStatus string) string {
 	}
 }
 
-func isHangarSyncedRepo(repo string) bool {
-	norm := strings.ToLower(normalizeRepo(repo))
-	return norm == "azylman/aerial" || norm == "azylman/aerial-config"
-}
-
 func formatVanadisBuildCompletedPrompt(res *VanadisAdvancementResult) string {
 	if res == nil {
 		return ""

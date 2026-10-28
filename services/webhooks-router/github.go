@@ -164,6 +164,30 @@ func (s *RouterServer) dispatchGitPush(ctx context.Context, repo, ref, commit, t
 	return nil
 }
 
+func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, headSHA, targetID string, prNum int) error {
+	if s.registry == nil || prNum <= 0 {
+		return nil
+	}
+	hasExpected, err := s.registry.HasExpectedDeployJobs(ctx, repo, prNum)
+	if err != nil {
+		log.Printf("[webhooks-router] [registry] warning checking expected deploy jobs for %s#%d on workflow_run: %v", repo, prNum, err)
+	}
+	if hasExpected {
+		return nil
+	}
+	s.setPRWidgetState(ctx, repo, prNum, "deployed", "")
+	if err := s.advanceVanadisChunk(ctx, repo, prNum); err != nil {
+		return err
+	}
+	if !s.isVanadisPR(ctx, repo, prNum) {
+		return s.dispatchDeploymentSuccessPrompt(ctx, targetID, "git-merge", repo, headSHA, prNum, "")
+	}
+	if err := s.SyncPRWidget(ctx, repo, prNum); err != nil {
+		log.Printf("[webhooks-router] [widget] warning syncing workflow_run widget for %s#%d: %v", repo, prNum, err)
+	}
+	return nil
+}
+
 func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo string, runID int64, headBranch, conclusion, headSHA, targetID string, prNum int) error {
 	if s.dispatcher == nil || conclusion != "success" || !(headBranch == "main" || strings.HasPrefix(headBranch, "refs/heads/main")) {
 		return nil
@@ -174,7 +198,7 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 		return fmt.Errorf("resolve workflow run images: %w", err)
 	}
 	if len(images) == 0 {
-		return nil
+		return s.completeNoDeployWorkflowRun(ctx, repo, headSHA, targetID, prNum)
 	}
 
 	var wg sync.WaitGroup
@@ -208,7 +232,8 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 	wg.Wait()
 	close(errCh)
 
-	if allMatchedJobs := dedupeTrimmedStrings(rawJobs); len(allMatchedJobs) > 0 && s.registry != nil && prNum > 0 {
+	allMatchedJobs := dedupeTrimmedStrings(rawJobs)
+	if len(allMatchedJobs) > 0 && s.registry != nil && prNum > 0 {
 		if _, err := s.registry.TransitionDeploying(ctx, repo, prNum, allMatchedJobs); err != nil {
 			log.Printf("[webhooks-router] [dispatcher] error transitioning pr %s#%d to deploying: %v", repo, prNum, err)
 			return fmt.Errorf("transition pr deploying: %w", err)
@@ -219,6 +244,9 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 		if err != nil {
 			return err
 		}
+	}
+	if len(allMatchedJobs) == 0 {
+		return s.completeNoDeployWorkflowRun(ctx, repo, headSHA, targetID, prNum)
 	}
 	return nil
 }
@@ -604,40 +632,21 @@ func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGi
 			return err
 		}
 		res.TargetID = firstNonEmpty(res.TargetID, targetID)
-		hasExpected, err := s.registry.HasExpectedDeployJobs(ctx, res.Repo, res.PRNumber)
-		if err != nil {
-			log.Printf("[webhooks-router] [registry] warning checking expected deploy jobs for %s#%d: %v", res.Repo, res.PRNumber, err)
-		}
-		if isHangarSyncedRepo(res.Repo) {
-			if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
-				log.Printf("[webhooks-router] [widget] warning syncing pr_merged widget for %s#%d: %v", res.Repo, res.PRNumber, err)
-			}
-			return nil
-		}
-		if !hasExpected {
-			s.setPRWidgetState(ctx, res.Repo, res.PRNumber, "deployed", "")
-		}
-		if err := s.advanceVanadisChunk(ctx, res.Repo, res.PRNumber); err != nil {
-			return err
-		}
-		if !hasExpected && !s.isVanadisPR(ctx, res.Repo, res.PRNumber) {
-			return s.dispatchDeploymentSuccessPrompt(ctx, res.TargetID, "git-merge", res.Repo, res.MergeSHA, res.PRNumber, "")
-		}
 		if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
-			log.Printf("[webhooks-router] [widget] warning syncing pr_closed widget for %s#%d: %v", res.Repo, res.PRNumber, err)
+			log.Printf("[webhooks-router] [widget] warning syncing pr_merged widget for %s#%d: %v", res.Repo, res.PRNumber, err)
 		}
-	} else {
-		targetID, err := s.registry.UpdatePRClosedUnmerged(ctx, res.Repo, res.PRNumber)
-		if err != nil {
-			return err
-		}
-		res.TargetID = firstNonEmpty(res.TargetID, targetID)
-		if err := s.failVanadisChunk(ctx, res.Repo, res.PRNumber, "pr_closed_unmerged"); err != nil {
-			log.Printf("[webhooks-router] [vanadis] warning failing vanadis chunk for closed unmerged PR %s#%d: %v", res.Repo, res.PRNumber, err)
-		}
-		if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
-			log.Printf("[webhooks-router] [widget] warning syncing pr_closed widget for %s#%d: %v", res.Repo, res.PRNumber, err)
-		}
+		return nil
+	}
+	targetID, err := s.registry.UpdatePRClosedUnmerged(ctx, res.Repo, res.PRNumber)
+	if err != nil {
+		return err
+	}
+	res.TargetID = firstNonEmpty(res.TargetID, targetID)
+	if err := s.failVanadisChunk(ctx, res.Repo, res.PRNumber, "pr_closed_unmerged"); err != nil {
+		log.Printf("[webhooks-router] [vanadis] warning failing vanadis chunk for closed unmerged PR %s#%d: %v", res.Repo, res.PRNumber, err)
+	}
+	if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
+		log.Printf("[webhooks-router] [widget] warning syncing pr_closed widget for %s#%d: %v", res.Repo, res.PRNumber, err)
 	}
 	return nil
 }
@@ -850,20 +859,6 @@ func (s *RouterServer) processGitHubPushEvent(ctx context.Context, body []byte, 
 
 	if err := s.dispatchGitPush(ctx, res.Repo, p.Ref, res.HeadSHA, res.TargetID, res.PRNumber); err != nil {
 		return nil, err
-	}
-	if res.PRNumber > 0 && !isHangarSyncedRepo(res.Repo) {
-		if s.registry != nil {
-			hasExpected, err := s.registry.HasExpectedDeployJobs(ctx, res.Repo, res.PRNumber)
-			if err != nil {
-				log.Printf("[webhooks-router] [registry] warning checking expected deploy jobs for %s#%d on push: %v", res.Repo, res.PRNumber, err)
-			}
-			if !hasExpected && s.isVanadisPR(ctx, res.Repo, res.PRNumber) {
-				s.setPRWidgetState(ctx, res.Repo, res.PRNumber, "deployed", "")
-			}
-		}
-		if err := s.advanceVanadisChunk(ctx, res.Repo, res.PRNumber); err != nil {
-			return nil, err
-		}
 	}
 	if err := s.waitConflictCheckDelay(ctx); err != nil {
 		return nil, err
