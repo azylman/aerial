@@ -740,12 +740,24 @@ func isFindValueFlag(t string) bool {
 	return findValueFlags[t]
 }
 
+const runtimeDirDenyReason = "Searching internal runtime state (/data/runtimes) with grep/rg/find is prohibited because it scans multi-GB session transcripts. Search source repositories under /share/aerial or /share/aerial-config, or use the 'transcript-search' CLI for historical transcripts."
+
+func isRuntimeStateDir(clean string) bool {
+	return clean == "/data/runtimes" || strings.HasPrefix(clean, "/data/runtimes/")
+}
+
 func validateFindPathToken(t, cwd string) *Decision {
 	clean := filepath.Clean(t)
 	if clean == "/" || clean == "/proc" || clean == "/sys" || clean == "/dev" || clean == "/root" {
 		return &Decision{
 			Decision: DecisionDeny,
 			Reason:   "Unconstrained root search detected. Avoid searching the root filesystem ('/') or system directories directly. Scope searches to specific package or workspace directories.",
+		}
+	}
+	if isRuntimeStateDir(clean) {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   runtimeDirDenyReason,
 		}
 	}
 
@@ -809,6 +821,12 @@ func validateGrepPathToken(pt string) *Decision {
 		return &Decision{
 			Decision: DecisionDeny,
 			Reason:   "Unconstrained root search detected. Avoid searching the root filesystem ('/') or system directories directly. Scope searches to specific package or workspace directories.",
+		}
+	}
+	if isRuntimeStateDir(clean) {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   runtimeDirDenyReason,
 		}
 	}
 	if clean == ".git" || strings.HasPrefix(clean, ".git/") || clean == "node_modules" || strings.HasPrefix(clean, "node_modules/") {

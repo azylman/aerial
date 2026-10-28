@@ -95,9 +95,13 @@ func TestCheckSearch(t *testing.T) {
 		{"find --version allowed", "run_command", "find --version", "", false, ""},
 		{"find targeting .git denied", "run_command", "find .git -maxdepth 1", "", true, ""},
 		{"find targeting node_modules denied", "run_command", "find node_modules -maxdepth 1", "", true, ""},
+		{"find targeting /data/runtimes denied", "run_command", "find /data/runtimes -maxdepth 2 -name '*.jsonl'", "", true, ""},
+		{"find targeting /data/runtimes subdir denied", "run_command", "find /data/runtimes/discord -maxdepth 2", "", true, ""},
 
 		// Grep commands
 		{"grep -r targeting root denied", "run_command", "grep -r 'pattern' /", "", true, ""},
+		{"grep -rn targeting /data/runtimes denied", "run_command", "grep -rn -m 10 'RFC1918' /data/runtimes/", "", true, ""},
+		{"rg targeting /data/runtimes/discord denied", "run_command", "rg -m 10 'pattern' /data/runtimes/discord", "", true, ""},
 		{"grep -r targeting /proc denied", "run_command", "grep -r 'pattern' /proc", "", true, ""},
 		{"rg targeting root denied", "run_command", "rg 'pattern' /", "", true, ""},
 		{"grep targeting .git denied", "run_command", "grep -r 'pattern' .git", "", true, ""},
