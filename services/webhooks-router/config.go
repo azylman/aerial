@@ -191,14 +191,18 @@ func NormalizeDiscordTargetID(id string) string {
 	return strings.TrimSpace(strings.TrimPrefix(clean, "discord-"))
 }
 
-// IsHeadlessSessionKey returns true if id is a Model 2 headless dispatch or heartbeat session key
-// (e.g. "dispatch-<uuid>", "heartbeat-<id>", or pool-scoped "*:dispatch-<uuid>").
+// IsHeadlessSessionKey returns true if id is a Model 2 headless dispatch, heartbeat,
+// or pooled worker session key (e.g. "dispatch-<uuid>", "heartbeat-<id>", "discord:worker-0",
+// "discord:medium-worker-0", or "ephemeral:worker-0").
 func IsHeadlessSessionKey(id string) bool {
 	clean := strings.TrimSpace(id)
 	if idx := strings.LastIndex(clean, ":"); idx >= 0 {
 		clean = strings.TrimSpace(clean[idx+1:])
 	}
-	return strings.HasPrefix(clean, "dispatch-") || strings.HasPrefix(clean, "heartbeat-")
+	return strings.HasPrefix(clean, "dispatch-") ||
+		strings.HasPrefix(clean, "heartbeat-") ||
+		strings.HasPrefix(clean, "worker-") ||
+		strings.Contains(clean, "-worker-")
 }
 
 func IsValidDiscordSnowflake(id string) bool {

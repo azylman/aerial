@@ -44,7 +44,30 @@ func filterHomeEnv(env []string) []string {
 }
 
 func filterVanadisChunkEnv(env []string) []string {
-	return filterEnvKeys(env, "AERIAL_VANADIS_CHUNK_ID", "VANADIS_CHUNK_ID")
+	return filterEnvKeys(env, "AERIAL_VANADIS_CHUNK_ID", "VANADIS_CHUNK_ID", "AERIAL_TARGET_ID")
+}
+
+// NormalizeEnvTargetID normalizes a daemon target key for the AERIAL_TARGET_ID
+// environment variable. It strips "discord-" (and optional pool prefixes like
+// "stateful_medium:discord-") for Discord targets, and returns "" for headless
+// or pooled worker keys ("heartbeat-*", "dispatch-*", "worker-*", or colon-scoped
+// pool keys like "discord:worker-0" and "ephemeral:worker-0").
+func NormalizeEnvTargetID(id string) string {
+	clean := strings.TrimSpace(id)
+	if clean == "" {
+		return ""
+	}
+	if idx := strings.LastIndex(clean, ":"); idx >= 0 {
+		suffix := strings.TrimSpace(clean[idx+1:])
+		if !strings.HasPrefix(suffix, "discord-") {
+			return ""
+		}
+		clean = suffix
+	}
+	if strings.HasPrefix(clean, "heartbeat-") || strings.HasPrefix(clean, "dispatch-") || strings.HasPrefix(clean, "worker-") {
+		return ""
+	}
+	return strings.TrimSpace(strings.TrimPrefix(clean, "discord-"))
 }
 
 // BuildAgyEnv constructs the process environment slice for agy execution.
@@ -68,7 +91,7 @@ func BuildAgyEnv(input AgyEnvInput) []string {
 	if k := strings.TrimSpace(input.APIKey); k != "" {
 		cmdEnv = append(cmdEnv, "GEMINI_API_KEY="+k, "ANTIGRAVITY_API_KEY="+k, "GOOGLE_GENAI_API_KEY="+k)
 	}
-	if t := strings.TrimSpace(input.TargetID); t != "" {
+	if t := NormalizeEnvTargetID(input.TargetID); t != "" {
 		cmdEnv = append(cmdEnv, "AERIAL_TARGET_ID="+t)
 	}
 	if tz := strings.TrimSpace(input.Timezone); tz != "" {

@@ -275,13 +275,10 @@ init_scratch() {
 SCRATCH_DIR_CLEANUP=""
 
 resolve_target_id() {
-    if [ -n "${1:-}" ]; then echo "${1#discord-}"; return; fi
-    if [ -n "${AERIAL_TARGET_ID:-}" ] && [[ "${AERIAL_TARGET_ID}" != *:* ]] && [[ "${AERIAL_TARGET_ID}" != heartbeat-* ]] && [[ "${AERIAL_TARGET_ID}" != dispatch-* ]]; then
-        echo "${AERIAL_TARGET_ID#discord-}"
-        return
-    fi
-    if [ -n "${DISCORD_THREAD_ID:-}" ]; then echo "${DISCORD_THREAD_ID#discord-}"; return; fi
-    if [ -n "${DISCORD_CHANNEL_ID:-}" ]; then echo "${DISCORD_CHANNEL_ID#discord-}"; return; fi
+    if [ -n "${1:-}" ]; then echo "$1"; return; fi
+    if [ -n "${AERIAL_TARGET_ID:-}" ]; then echo "${AERIAL_TARGET_ID}"; return; fi
+    if [ -n "${DISCORD_THREAD_ID:-}" ]; then echo "${DISCORD_THREAD_ID}"; return; fi
+    if [ -n "${DISCORD_CHANNEL_ID:-}" ]; then echo "${DISCORD_CHANNEL_ID}"; return; fi
     local tfile="${ANTIGRAVITY_APP_DATA_DIR:-}/brain/${ANTIGRAVITY_CONVERSATION_ID:-}/.system_generated/logs/transcript.jsonl"
     if [ -f "$tfile" ]; then
         local tid

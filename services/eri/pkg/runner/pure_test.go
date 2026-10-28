@@ -66,6 +66,31 @@ func TestBuildAgyEnv(t *testing.T) {
 			[]string{"CUSTOM_BASE=1", "OTHER_ENV=kept", "MALFORMED_NO_EQUALS"},
 			[]string{"ambient-key", "ambient2", "AERIAL_VANADIS_CHUNK_ID=stale-chunk", "VANADIS_CHUNK_ID=stale-legacy-chunk"},
 		},
+		{
+			AgyEnvInput{TargetID: "discord-1564872824148205579"},
+			[]string{"AERIAL_TARGET_ID=1564872824148205579"},
+			[]string{"AERIAL_TARGET_ID=discord-"},
+		},
+		{
+			AgyEnvInput{TargetID: "stateful_medium:discord-1564872824148205579"},
+			[]string{"AERIAL_TARGET_ID=1564872824148205579"},
+			[]string{"stateful_medium"},
+		},
+		{
+			AgyEnvInput{BaseEnv: []string{"AERIAL_TARGET_ID=stale-target"}, TargetID: "heartbeat-daily-check"},
+			[]string{"GIT_TERMINAL_PROMPT=0"},
+			[]string{"AERIAL_TARGET_ID="},
+		},
+		{
+			AgyEnvInput{BaseEnv: []string{"AERIAL_TARGET_ID=stale-target"}, TargetID: "dispatch-abc-123"},
+			[]string{"GIT_TERMINAL_PROMPT=0"},
+			[]string{"AERIAL_TARGET_ID="},
+		},
+		{
+			AgyEnvInput{BaseEnv: []string{"AERIAL_TARGET_ID=stale-target"}, TargetID: "discord:medium-worker-0"},
+			[]string{"GIT_TERMINAL_PROMPT=0"},
+			[]string{"AERIAL_TARGET_ID="},
+		},
 	} {
 		assertContainsAndOmits(t, strings.Join(BuildAgyEnv(tc.input), "\n"), tc.contains, tc.notContains, tc.input)
 	}
