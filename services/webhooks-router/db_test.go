@@ -292,7 +292,7 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 		{name: "AtomicTransitionDeployedByJob remaining jobs update success", op: "AtomicTransitionDeployedByJob", jobName: "cadvisor", metaJSON: `{"jobs":["cadvisor","node-exporter"]}`, wantUpdated: false},
 		{name: "AtomicTransitionDeployedByJob remaining jobs update exec error", op: "AtomicTransitionDeployedByJob", jobName: "cadvisor", metaJSON: `{"jobs":["cadvisor","node-exporter"]}`, mockExecErr: errors.New("exec err"), wantErr: true},
 		{name: "AtomicTransitionDeployedByJob remaining jobs update commit error", op: "AtomicTransitionDeployedByJob", jobName: "cadvisor", metaJSON: `{"jobs":["cadvisor","node-exporter"]}`, mockCommitErr: errors.New("commit err"), wantErr: true},
-		{name: "AtomicTransitionDeployedByJob final job deployed RowsAffected 1", op: "AtomicTransitionDeployedByJob", jobName: "node-exporter", repo: "azylman/aerial", metaJSON: `{"jobs":["node-exporter"]}`, targetIDReturn: "1555405874565091380", wantPRNum: 42, mergeSHAReturn: "merge123", rowsAffected: 1, wantUpdated: true, wantTarget: "1555405874565091380"},
+		{name: "AtomicTransitionDeployedByJob final job deployed RowsAffected 1", op: "AtomicTransitionDeployedByJob", jobName: "node-exporter", repo: "azylman/aerial", metaJSON: `{"jobs":["node-exporter"],"started_jobs":["node-exporter"]}`, targetIDReturn: "1555405874565091380", wantPRNum: 42, mergeSHAReturn: "merge123", rowsAffected: 1, wantUpdated: true, wantTarget: "1555405874565091380", wantSQLSubstr: "metadata->'jobs' ? $1 AND metadata->'started_jobs' ? $1"},
 		{name: "AtomicTransitionDeployedByJob final job deployed RowsAffected 0", op: "AtomicTransitionDeployedByJob", jobName: "node-exporter", metaJSON: `{"jobs":["node-exporter"]}`, rowsAffected: 0, wantUpdated: false},
 		{name: "AtomicTransitionDeployedByJob final job exec error", op: "AtomicTransitionDeployedByJob", jobName: "node-exporter", metaJSON: `{"jobs":["node-exporter"]}`, mockExecErr: errors.New("exec err"), wantErr: true},
 		{name: "AtomicTransitionDeployedByJob final job commit error", op: "AtomicTransitionDeployedByJob", jobName: "node-exporter", metaJSON: `{"jobs":["node-exporter"]}`, rowsAffected: 1, mockCommitErr: errors.New("commit err"), wantErr: true},
@@ -427,6 +427,7 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 						return &mockVanadisPgxTx{
 							commitErr: tc.mockCommitErr,
 							execFn: func(txCtx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+								gotExecSQL = sql
 								if tc.mockExecErr != nil {
 									return pgconn.CommandTag{}, tc.mockExecErr
 								}
@@ -437,6 +438,7 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 								return pgconn.NewCommandTag(fmt.Sprintf("UPDATE %d", rowsAff)), nil
 							},
 							queryRowFn: func(txCtx context.Context, sql string, args ...any) pgx.Row {
+								gotSQL = sql
 								return mockVanadisPgxRow{scanFn: func(dest ...any) error {
 									if tc.mockSelectErr != nil {
 										return tc.mockSelectErr
