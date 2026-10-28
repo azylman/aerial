@@ -74,7 +74,7 @@ job "eri" {
         image        = "ghcr.io/azylman/aerial-eri:${var.image_tag}"
         init         = true
         ports        = ["http"]
-        shm_size     = 536870912
+        shm_size     = 1073741824
         healthchecks {
           disable = true
         }
@@ -198,9 +198,9 @@ EOH
       }
 
       resources {
-        cpu        = 2000
-        memory     = 4096
-        memory_max = 6144
+        cpu        = 8000
+        memory     = 8192
+        memory_max = 16384
       }
     }
   }
