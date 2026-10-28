@@ -2477,6 +2477,16 @@ func TestRouterServer_HandlePRRegister(t *testing.T) {
 			wantWidgetCall: true,
 		},
 		{
+			name:           "SuccessPooledWorkerKeyPreservesExistingTargetID",
+			body:           `{"repo":"azylman/aerial","pr_number":108,"branch":"feat/worker-remediate","head_sha":"sha555","target_id":"discord:medium-worker-0"}`,
+			resolveTID:     "1555405874565091380",
+			wantStatus:     http.StatusOK,
+			wantSubstr:     `"status":"registered"`,
+			wantRegistered: true,
+			wantTargetID:   "1555405874565091380",
+			wantWidgetCall: true,
+		},
+		{
 			name:         "HeadlessDispatchWithoutExistingTargetOrSystemChannelReturns400",
 			noExistingPR: true,
 			body:         `{"repo":"azylman/aerial","pr_number":107,"branch":"feat/headless-unresolvable","head_sha":"sha444","target_id":"stateful_low:dispatch-8d23879c"}`,

@@ -175,8 +175,8 @@ TARGET_PRECEDENCE_CHECK=$(bash -c "
     REPO_TEST_MODE=1
     source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
 
-    # Subtest 1: AERIAL_TARGET_ID wins and strips discord- prefix
-    res1=\$(AERIAL_TARGET_ID=\"discord-target_aerial\" DISCORD_THREAD_ID=\"target_thread\" DISCORD_CHANNEL_ID=\"target_channel\" resolve_target_id)
+    # Subtest 1: AERIAL_TARGET_ID wins and passes through unmodified
+    res1=\$(AERIAL_TARGET_ID=\"target_aerial\" DISCORD_THREAD_ID=\"target_thread\" DISCORD_CHANNEL_ID=\"target_channel\" resolve_target_id)
     [ \"\$res1\" = \"target_aerial\" ] && echo \"target1:ok\" || echo \"target1:fail:\$res1\"
 
     # Subtest 2: DISCORD_THREAD_ID wins when AERIAL_TARGET_ID is unset
@@ -191,24 +191,23 @@ TARGET_PRECEDENCE_CHECK=$(bash -c "
     res4=\$(unset AERIAL_TARGET_ID DISCORD_THREAD_ID DISCORD_CHANNEL_ID ANTIGRAVITY_APP_DATA_DIR ANTIGRAVITY_CONVERSATION_ID; resolve_target_id)
     [ -z \"\$res4\" ] && echo \"target4:ok\" || echo \"target4:fail:\$res4\"
 
-    # Subtest 5: InterchangeablePool worker key (discord:worker-0) and headless session keys (heartbeat-*, dispatch-*) are skipped
-    res5=\$(AERIAL_TARGET_ID=\"discord:worker-0\" DISCORD_THREAD_ID=\"1559768078131269684\" resolve_target_id)
-    res5b=\$(unset DISCORD_THREAD_ID DISCORD_CHANNEL_ID ANTIGRAVITY_APP_DATA_DIR ANTIGRAVITY_CONVERSATION_ID; AERIAL_TARGET_ID=\"heartbeat-abc-123\" resolve_target_id)
-    [ \"\$res5\" = \"1559768078131269684\" ] && [ -z \"\$res5b\" ] && echo \"target5:ok\" || echo \"target5:fail:\$res5:\$res5b\"
+    # Subtest 5: Explicit argument takes top priority when passed to resolve_target_id
+    res5=\$(AERIAL_TARGET_ID=\"target_aerial\" resolve_target_id \"1559768078131269684\")
+    [ \"\$res5\" = \"1559768078131269684\" ] && echo \"target5:ok\" || echo \"target5:fail:\$res5\"
 
-    # Subtest 6: InterchangeablePool worker key resolves thread_id from active transcript.jsonl when env thread/channel unset
+    # Subtest 6: Resolves thread_id from active transcript.jsonl when env target/thread/channel are unset
     FAKE_APP_DIR=\"${TMP_TEST_DIR}/fake_app\"
     mkdir -p \"\${FAKE_APP_DIR}/brain/conv-123/.system_generated/logs\"
     echo '{\"content\":\"- channel_id: 1542423172400291873\\n- thread_id: 1559768078131269684\"}' > \"\${FAKE_APP_DIR}/brain/conv-123/.system_generated/logs/transcript.jsonl\"
-    res6=\$(unset DISCORD_THREAD_ID DISCORD_CHANNEL_ID; AERIAL_TARGET_ID=\"discord:worker-0\" ANTIGRAVITY_APP_DATA_DIR=\"\${FAKE_APP_DIR}\" ANTIGRAVITY_CONVERSATION_ID=\"conv-123\" resolve_target_id)
+    res6=\$(unset AERIAL_TARGET_ID DISCORD_THREAD_ID DISCORD_CHANNEL_ID; ANTIGRAVITY_APP_DATA_DIR=\"\${FAKE_APP_DIR}\" ANTIGRAVITY_CONVERSATION_ID=\"conv-123\" resolve_target_id)
     [ \"\$res6\" = \"1559768078131269684\" ] && echo \"target6:ok\" || echo \"target6:fail:\$res6\"
 ")
-assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target1:ok' && echo true || echo false)" "Target precedence: AERIAL_TARGET_ID takes first priority and strips discord- prefix"
+assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target1:ok' && echo true || echo false)" "Target precedence: AERIAL_TARGET_ID takes first priority"
 assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target2:ok' && echo true || echo false)" "Target precedence: DISCORD_THREAD_ID takes second priority"
 assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target3:ok' && echo true || echo false)" "Target precedence: DISCORD_CHANNEL_ID takes third priority"
 assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target4:ok' && echo true || echo false)" "Target precedence: returns empty string when no Discord context exists"
-assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target5:ok' && echo true || echo false)" "Target precedence: skips worker and headless session keys"
-assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target6:ok' && echo true || echo false)" "Target precedence: resolves thread_id from transcript.jsonl when worker key set"
+assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target5:ok' && echo true || echo false)" "Target precedence: explicit argument takes top priority"
+assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target6:ok' && echo true || echo false)" "Target precedence: resolves thread_id from transcript.jsonl when env vars unset"
 
 # Case 9: --vanadis-chunk global flag parsing and AERIAL_VANADIS_CHUNK_ID env injection
 VANADIS_FLAG_CHECK=$(bash -c "
