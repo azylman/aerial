@@ -1259,7 +1259,7 @@ func TestPopulateDiscordMessageFields(t *testing.T) {
 	m := &discordgo.Message{
 		ID: "msg-1", ChannelID: "chan-1", GuildID: "guild-1", Content: "test content",
 		Author:            &discordgo.User{ID: "user-1", Username: "testuser\n", GlobalName: "Test User\r", Bot: false},
-		ReferencedMessage: &discordgo.Message{Author: &discordgo.User{Username: "bob"}, Content: "hello ref"},
+		ReferencedMessage: &discordgo.Message{Author: &discordgo.User{Username: "bob"}, Content: "hello ref", Attachments: []*discordgo.MessageAttachment{{URL: "https://example.com/ref.png"}}},
 		Mentions:          []*discordgo.User{nil, {ID: "u-mention-1", Username: "alice\n"}},
 		MentionRoles:      []string{"role-mod", "role-unknown"},
 		Attachments:       []*discordgo.MessageAttachment{nil, {URL: "https://example.com/att.png"}, {URL: ""}},
@@ -1273,7 +1273,7 @@ func TestPopulateDiscordMessageFields(t *testing.T) {
 	if msg.AuthorGlobalName != "Test User\r" {
 		t.Errorf("author name mismatch: %+v", msg)
 	}
-	if msg.ReplyingToAuthor != "@bob" || msg.ReplyingToContent != "hello ref" {
+	if msg.ReplyingToAuthor != "@bob" || msg.ReplyingToContent != "hello ref [attachments: https://example.com/ref.png]" {
 		t.Errorf("replyingTo mismatch: %s / %s", msg.ReplyingToAuthor, msg.ReplyingToContent)
 	}
 	if len(msg.MentionUserIDs) != 1 || msg.MentionUserIDs[0] != "u-mention-1" {
