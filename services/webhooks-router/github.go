@@ -625,6 +625,9 @@ func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGi
 			return err
 		}
 		res.TargetID = firstNonEmpty(res.TargetID, targetID)
+		if err := s.advanceNonFinalVanadisChunk(ctx, res.Repo, res.PRNumber); err != nil {
+			return err
+		}
 		if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
 			log.Printf("[webhooks-router] [widget] warning syncing pr_merged widget for %s#%d: %v", res.Repo, res.PRNumber, err)
 		}
@@ -812,6 +815,9 @@ func (s *RouterServer) resolveAndBackfillPushPR(ctx context.Context, res *Resolv
 			return err
 		}
 		res.TargetID = firstNonEmpty(res.TargetID, targetID)
+		if err := s.advanceNonFinalVanadisChunk(ctx, res.Repo, res.PRNumber); err != nil {
+			return err
+		}
 	}
 	return nil
 }
