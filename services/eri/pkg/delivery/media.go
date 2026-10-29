@@ -133,12 +133,17 @@ func ExtractAndSanitizeMedia(text string, baseDir string) (string, []*Attachment
 	return cleanedText, attachments
 }
 
-var validImageExts = map[string]bool{
+var validMediaExts = map[string]bool{
 	".png":  true,
 	".jpg":  true,
 	".jpeg": true,
 	".gif":  true,
 	".webp": true,
+	".mp3":  true,
+	".wav":  true,
+	".ogg":  true,
+	".m4a":  true,
+	".flac": true,
 }
 
 func tryAutoAttachEntry(dir string, entry os.DirEntry, baseDir string, cutoff time.Time, existingCanonical map[string]bool) *Attachment {
@@ -147,7 +152,7 @@ func tryAutoAttachEntry(dir string, entry os.DirEntry, baseDir string, cutoff ti
 	}
 
 	ext := strings.ToLower(filepath.Ext(entry.Name()))
-	if !validImageExts[ext] {
+	if !validMediaExts[ext] {
 		return nil
 	}
 
@@ -417,6 +422,10 @@ func resolveSandboxedImagePath(rawPath, baseDir string) (string, error) {
 	return canonicalPath, nil
 }
 
+func isAllowedMIMEType(mimeType string) bool {
+	return strings.HasPrefix(mimeType, "image/") || strings.HasPrefix(mimeType, "audio/")
+}
+
 func detectImageMIMEType(f *os.File, canonicalPath string) (string, error) {
 	header := make([]byte, 512)
 	n, err := f.Read(header)
@@ -424,7 +433,7 @@ func detectImageMIMEType(f *os.File, canonicalPath string) (string, error) {
 		return "", fmt.Errorf("failed to read file header: %w", err)
 	}
 	mimeType := http.DetectContentType(header[:n])
-	if !strings.HasPrefix(mimeType, "image/") {
+	if !isAllowedMIMEType(mimeType) {
 		if mimeType == "application/octet-stream" {
 			ext := strings.ToLower(filepath.Ext(canonicalPath))
 			switch ext {
@@ -436,11 +445,21 @@ func detectImageMIMEType(f *os.File, canonicalPath string) (string, error) {
 				mimeType = "image/gif"
 			case ".webp":
 				mimeType = "image/webp"
+			case ".mp3":
+				mimeType = "audio/mpeg"
+			case ".wav":
+				mimeType = "audio/wav"
+			case ".ogg":
+				mimeType = "audio/ogg"
+			case ".m4a":
+				mimeType = "audio/mp4"
+			case ".flac":
+				mimeType = "audio/flac"
 			}
 		}
 	}
-	if !strings.HasPrefix(mimeType, "image/") {
-		return "", fmt.Errorf("unsupported MIME type %q: only image/* allowed", mimeType)
+	if !isAllowedMIMEType(mimeType) {
+		return "", fmt.Errorf("unsupported MIME type %q: only image/* and audio/* allowed", mimeType)
 	}
 	return mimeType, nil
 }

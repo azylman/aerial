@@ -303,8 +303,9 @@ func TestResolveAndValidateLocalImage_MIMETypesAndEdges(t *testing.T) {
 		t.Error("expected error for directory")
 	}
 
-	// Octet stream extensions (.png, .jpg, .gif, .webp)
-	for _, ext := range []string{".png", ".jpg", ".jpeg", ".gif", ".webp"} {
+	// Octet stream extensions (.png, .jpg, .gif, .webp, .mp3, .wav, .ogg, .m4a, .flac)
+	imageExts := []string{".png", ".jpg", ".jpeg", ".gif", ".webp"}
+	for _, ext := range imageExts {
 		f := filepath.Join(tmpDir, "sample"+ext)
 		_ = os.WriteFile(f, []byte{0x00, 0x01, 0x02, 0x03, 0x04}, 0o644)
 		att, err := ResolveAndValidateLocalImage(f, tmpDir)
@@ -313,6 +314,25 @@ func TestResolveAndValidateLocalImage_MIMETypesAndEdges(t *testing.T) {
 		}
 		if att == nil || !strings.HasPrefix(att.ContentType, "image/") {
 			t.Errorf("expected image/ contentType for %s, got %+v", ext, att)
+		}
+	}
+
+	audioExts := map[string]string{
+		".mp3":  "audio/mpeg",
+		".wav":  "audio/wav",
+		".ogg":  "audio/ogg",
+		".m4a":  "audio/mp4",
+		".flac": "audio/flac",
+	}
+	for ext, wantMIME := range audioExts {
+		f := filepath.Join(tmpDir, "sample"+ext)
+		_ = os.WriteFile(f, []byte{0x00, 0x01, 0x02, 0x03, 0x04}, 0o644)
+		att, err := ResolveAndValidateLocalImage(f, tmpDir)
+		if err != nil {
+			t.Errorf("unexpected error for %s: %v", ext, err)
+		}
+		if att == nil || att.ContentType != wantMIME {
+			t.Errorf("expected %s contentType for %s, got %+v", wantMIME, ext, att)
 		}
 	}
 
