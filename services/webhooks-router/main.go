@@ -967,6 +967,9 @@ func (s *RouterServer) dispatchConflictPrompt(ctx context.Context, targetID, rep
 
 // runServer runs the HTTP server with graceful shutdown and optional ready callback.
 func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	server := NewRouterServer(cfg, nil)
 	server.SetDispatcher(NewDefaultOutboundDispatcher(cfg.HangarURL, cfg.BrainURL, nil))
 

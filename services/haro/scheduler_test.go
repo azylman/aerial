@@ -24,6 +24,9 @@ func setupTestDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("setupTestDB OpenDB() failed: %v", err)
 	}
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
 	schema := `
 	CREATE TABLE IF NOT EXISTS schedule_runs (
 		id TEXT PRIMARY KEY,
@@ -47,9 +50,6 @@ func setupTestDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec(schema); err != nil {
 		t.Fatalf("setupTestDB failed to create schedule_runs: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = db.Close()
-	})
 	return db
 }
 

@@ -149,6 +149,7 @@ func setupTestServer(t *testing.T) (*Server, *httptest.Server) {
 	if err != nil {
 		t.Fatalf("OpenDB failed: %v", err)
 	}
+	t.Cleanup(func() { _ = db.Close() })
 	setupTestPostgresTables(t, db)
 	server := NewServer(NewToolHandler(cfg, db))
 	return server, httptest.NewServer(server.Routes())

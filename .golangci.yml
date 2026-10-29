@@ -2,15 +2,18 @@ version: "2"
 linters:
   enable:
     - bodyclose
+    - containedctx
     - copyloopvar
     - errcheck
     - errchkjson
     - errname
     - errorlint
     - fatcontext
+    - gocritic
     - govet
     - ineffassign
     - nilerr
+    - nilnil
     - noctx
     - predeclared
     - sqlclosecheck
@@ -21,6 +24,11 @@ linters:
     - unused
     - wastedassign
   settings:
+    gocritic:
+      disable-all: true
+      enabled-checks:
+        - evalOrder
+        - sloppyReassign
     errcheck:
       check-type-assertions: true
       check-blank: true
@@ -44,15 +52,23 @@ linters:
     generated: lax
     rules:
       - linters:
+          - containedctx
           - errcheck
           - errchkjson
           - ineffassign
+          - nilnil
           - noctx
           - staticcheck
           - unparam
           - unused
           - wastedassign
         path: _test\.go
+      - linters:
+          - containedctx
+        path: services/eri/pkg/(queue/(pool|worker)|runner/(interchangeable_pool|streaming_daemon|unified_pool))\.go
+      - linters:
+          - nilnil
+        path: (services/eri/pkg/db/(dispatches|messages)|services/prospera/store)\.go
     paths:
       - third_party$
       - builtin$

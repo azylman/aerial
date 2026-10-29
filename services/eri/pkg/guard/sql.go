@@ -170,7 +170,7 @@ func (d *pgxDescriber) closeConn(ctx context.Context) {
 func (d *pgxDescriber) Describe(ctx context.Context, sqlStr string) (*SQLStatementInfo, error) {
 	conn, err := d.ensureConn(ctx)
 	if err != nil {
-		return nil, nil //nolint:nilerr
+		return nil, nil //nolint:nilerr,nilnil
 	}
 	cols, explainRaw, err := conn.PrepareAndExplain(ctx, sqlStr)
 	if err != nil {
