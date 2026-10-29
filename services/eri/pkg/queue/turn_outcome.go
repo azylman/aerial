@@ -107,10 +107,14 @@ func (te *turnExecution) handleRetryBackoff(attempt, maxAttempts int, errDetail,
 	if attempt >= maxAttempts {
 		return false
 	}
-	if te.statusUpdater != nil {
-		te.statusUpdater.Reset()
-	}
 	backoff := time.Duration(attempt) * te.pool.cfg.BackoffBase
+	if te.statusUpdater != nil {
+		if isRateLimitError(errDetail) {
+			te.statusUpdater.SetCapacityBackoff(backoff)
+		} else {
+			te.statusUpdater.Reset()
+		}
+	}
 	select {
 	case <-time.After(backoff):
 		return false
@@ -256,6 +260,9 @@ func (te *turnExecution) handleQuotaPause(errDetail, stderr, currentModel, burst
 			delay := calculateCapacityBackoff(attempt, resetDur)
 			if te.pool != nil && te.pool.cfg.RetryDelayOverride > 0 {
 				delay = te.pool.cfg.RetryDelayOverride
+			}
+			if te.statusUpdater != nil {
+				te.statusUpdater.SetCapacityBackoff(delay)
 			}
 			cancelChan := te.turnDone()
 			select {
