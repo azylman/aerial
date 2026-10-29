@@ -232,13 +232,13 @@ func TestBuildStatusWidgetComponents_VanadisBuild(t *testing.T) {
 		t.Fatalf("expected chunk 2 to be *discordgo.Section, got %T", container.Components[3])
 	}
 	c2Text := c2Sec.Components[0].(*discordgo.TextDisplay)
-	if c2Text.Content != "🚀 **`aerial`**: Silent prompt\nRunning deployment checks..." {
+	if c2Text.Content != "🚀 **`aerial`**: Silent prompt\n-# ↳ Running deployment checks..." {
 		t.Errorf("unexpected chunk 2 row text: %q", c2Text.Content)
 	}
 
 	// Chunk 3 has no PRNumber, so it's a TextDisplay with ActiveStep
 	c3Text, ok := container.Components[4].(*discordgo.TextDisplay)
-	if !ok || c3Text.Content != "🔨 **`aerial`**: Stateless widget endpoint\nCompiling binary" {
+	if !ok || c3Text.Content != "🔨 **`aerial`**: Stateless widget endpoint\n-# ↳ Compiling binary" {
 		t.Errorf("unexpected chunk 3 component: %+v", container.Components[4])
 	}
 
