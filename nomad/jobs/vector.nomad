@@ -93,6 +93,10 @@ transforms:
         if contains(to_string(.message), "error initializing inotify watches") {
           abort
         }
+        # Drop benign Go -cover exit notice when coverage is collected via HTTP /debug/coverage/flush
+        if contains(to_string(.message), "GOCOVERDIR not set, no coverage data emitted") {
+          abort
+        }
       }
 
       # 2. Normalize container and service names
