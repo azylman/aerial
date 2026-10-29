@@ -68,6 +68,7 @@ type StatusUpdater struct {
 	dirty                bool
 	disabled             bool
 	enabled              bool
+	syncDelete           bool
 	tickerInterval       time.Duration
 	debounceDelay        time.Duration
 	toolLatchDuration    time.Duration
@@ -87,6 +88,42 @@ type StatusUpdater struct {
 
 // StatusUpdaterOption configures a StatusUpdater instance.
 type StatusUpdaterOption func(*StatusUpdater)
+
+// WithSyncDelete configures StatusUpdater to delete status messages synchronously.
+func WithSyncDelete() StatusUpdaterOption {
+	return func(u *StatusUpdater) {
+		u.syncDelete = true
+	}
+}
+
+// NewChunkStepStatusUpdater creates a StatusUpdater multiplexed onto a Vanadis build chunk active step.
+func NewChunkStepStatusUpdater(chunkID string, flushFn func(step string) error, opts ...StatusUpdaterOption) *StatusUpdater {
+	trimmedID := strings.TrimSpace(chunkID)
+	enabled := trimmedID != "" && flushFn != nil
+	allOpts := make([]StatusUpdaterOption, 0, len(opts)+2)
+	allOpts = append(allOpts, WithSyncDelete(), func(u *StatusUpdater) {
+		u.sendFunc = func(channelID, text string) (string, error) {
+			if flushFn == nil {
+				return trimmedID, nil
+			}
+			return trimmedID, flushFn(text)
+		}
+		u.editFunc = func(channelID, messageID, text string) error {
+			if flushFn == nil {
+				return nil
+			}
+			return flushFn(text)
+		}
+		u.deleteFunc = func(channelID, messageID string) error {
+			if flushFn == nil {
+				return nil
+			}
+			return flushFn("")
+		}
+	})
+	allOpts = append(allOpts, opts...)
+	return NewStatusUpdater(nil, trimmedID, enabled, allOpts...)
+}
 
 // NewStatusUpdater constructs a thread status updater.
 func NewStatusUpdater(s *discordgo.Session, threadID string, enabled bool, opts ...StatusUpdaterOption) *StatusUpdater {
@@ -343,11 +380,17 @@ func (u *StatusUpdater) resetState(deleteRemote, disable bool, warnSuffix string
 	u.mu.Unlock()
 
 	if deleteRemote && msgID != "" {
-		go func(threadID, messageID string) {
-			if err := u.deleteFunc(threadID, messageID); err != nil && !delivery.IsMessageNotFoundError(err) {
+		if u.syncDelete {
+			if err := u.deleteFunc(u.threadID, msgID); err != nil && !delivery.IsMessageNotFoundError(err) {
 				log.Printf("[StatusUpdater] Warning deleting status message%s: %v", warnSuffix, err)
 			}
-		}(u.threadID, msgID)
+		} else {
+			go func(threadID, messageID string) {
+				if err := u.deleteFunc(threadID, messageID); err != nil && !delivery.IsMessageNotFoundError(err) {
+					log.Printf("[StatusUpdater] Warning deleting status message%s: %v", warnSuffix, err)
+				}
+			}(u.threadID, msgID)
+		}
 	}
 }
 
