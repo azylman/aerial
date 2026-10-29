@@ -3059,6 +3059,7 @@ func TestWorkerPool_ChunkStepStreaming(t *testing.T) {
 				assignedTurn = "t-actual"
 			}
 			p.StartChunkStepTurn(tc.chunkID, "build-"+tc.chunkID, 0, assignedTurn)
+			p.ensureChunkWidgetHydrated("Prompt for "+tc.chunkID, tc.chunkID, "build-"+tc.chunkID)
 			err := p.FlushChunkActiveStep(tc.chunkID, tc.turnID, tc.stepText)
 			if (err != nil) != tc.expectFlushErr {
 				t.Fatalf("FlushChunkActiveStep err = %v, expectFlushErr = %v", err, tc.expectFlushErr)
@@ -3087,6 +3088,8 @@ func TestExtractVanadisDispatchInfo(t *testing.T) {
 		wantChunkID string
 		wantBuildID string
 		wantIdx     int
+		wantPayload string
+		wantSyncOK  bool
 	}{
 		{
 			name:        "vanadis session ID with build and active chunk header",
@@ -3094,6 +3097,8 @@ func TestExtractVanadisDispatchInfo(t *testing.T) {
 			wantChunkID: "chunk-42",
 			wantBuildID: "build-99",
 			wantIdx:     1,
+			wantPayload: `{"build_id":"build-99"}`,
+			wantSyncOK:  true,
 		},
 		{
 			name:        "vanadis chunk ID from prompt when session ID is thread",
@@ -3101,6 +3106,17 @@ func TestExtractVanadisDispatchInfo(t *testing.T) {
 			wantChunkID: "chunk-7",
 			wantBuildID: "build-77",
 			wantIdx:     -1,
+			wantPayload: `{"build_id":"build-77"}`,
+			wantSyncOK:  true,
+		},
+		{
+			name:        "vanadis chunk PR CI failure infers build ID and extracts PR sync payload",
+			dispatch:    db.Dispatch{SessionID: "vanadis-build-123-chunk-3", Prompt: "❌ **GitHub Check Failed (`build`)** on azylman/mirrormere (commit: abc1234, PR #733, branch: `feat/test`).\n\nChunk ID: build-123-chunk-3"},
+			wantChunkID: "build-123-chunk-3",
+			wantBuildID: "build-123",
+			wantIdx:     -1,
+			wantPayload: `{"repo":"azylman/mirrormere","pr_number":733}`,
+			wantSyncOK:  true,
 		},
 		{
 			name:        "standalone PR CI failure remediation prompt",
@@ -3108,6 +3124,8 @@ func TestExtractVanadisDispatchInfo(t *testing.T) {
 			wantChunkID: "pr-azylman/aerial-1250",
 			wantBuildID: "pr-azylman/aerial-1250",
 			wantIdx:     0,
+			wantPayload: `{"repo":"azylman/aerial","pr_number":1250}`,
+			wantSyncOK:  true,
 		},
 		{
 			name:        "standalone PR merge conflict remediation prompt",
@@ -3115,6 +3133,8 @@ func TestExtractVanadisDispatchInfo(t *testing.T) {
 			wantChunkID: "pr-azylman/aerial-1250",
 			wantBuildID: "pr-azylman/aerial-1250",
 			wantIdx:     0,
+			wantPayload: `{"repo":"azylman/aerial","pr_number":1250}`,
+			wantSyncOK:  true,
 		},
 		{
 			name:        "standalone PR Nomad deployment failure remediation prompt",
@@ -3122,6 +3142,8 @@ func TestExtractVanadisDispatchInfo(t *testing.T) {
 			wantChunkID: "pr-azylman/aerial-1250",
 			wantBuildID: "pr-azylman/aerial-1250",
 			wantIdx:     0,
+			wantPayload: `{"repo":"azylman/aerial","pr_number":1250}`,
+			wantSyncOK:  true,
 		},
 		{
 			name:        "standalone PR Hangar sync failure remediation prompt",
@@ -3129,6 +3151,8 @@ func TestExtractVanadisDispatchInfo(t *testing.T) {
 			wantChunkID: "pr-azylman/aerial-1250",
 			wantBuildID: "pr-azylman/aerial-1250",
 			wantIdx:     0,
+			wantPayload: `{"repo":"azylman/aerial","pr_number":1250}`,
+			wantSyncOK:  true,
 		},
 		{
 			name:        "unrelated dispatch returns empty",
@@ -3136,6 +3160,8 @@ func TestExtractVanadisDispatchInfo(t *testing.T) {
 			wantChunkID: "",
 			wantBuildID: "",
 			wantIdx:     -1,
+			wantPayload: "",
+			wantSyncOK:  false,
 		},
 	}
 
@@ -3146,6 +3172,11 @@ func TestExtractVanadisDispatchInfo(t *testing.T) {
 			if chunkID != tc.wantChunkID || buildID != tc.wantBuildID || idx != tc.wantIdx {
 				t.Fatalf("extractVanadisDispatchInfo() = (%q, %q, %d), want (%q, %q, %d)",
 					chunkID, buildID, idx, tc.wantChunkID, tc.wantBuildID, tc.wantIdx)
+			}
+			payload, ok := extractDispatchWidgetSyncPayload(tc.dispatch.Prompt, buildID)
+			if ok != tc.wantSyncOK || payload != tc.wantPayload {
+				t.Fatalf("extractDispatchWidgetSyncPayload() = (%q, %v), want (%q, %v)",
+					payload, ok, tc.wantPayload, tc.wantSyncOK)
 			}
 		})
 	}
@@ -3843,15 +3874,21 @@ func TestTurnExecution_FailureResetsActiveSessionID(t *testing.T) {
 func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name         string
-		source       string
-		sessionID    string
-		prompt       string
-		respJSON     string
-		wantStatus   string
-		wantRespText string
-		seedWidget   bool
-		emitStep     bool
+		name               string
+		source             string
+		sessionID          string
+		prompt             string
+		respJSON           string
+		wantStatus         string
+		wantRespText       string
+		seedWidget         bool
+		coldWidgetSync     bool
+		seedOutdatedWidget bool
+		syncConnErr        bool
+		syncBadURL         bool
+		emitStep           bool
+		wantSyncedRepo     string
+		wantSyncedPRNumber int
 	}{
 		{
 			name:         "ephemeral vanadis chunk",
@@ -3882,6 +3919,31 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 			seedWidget:   true,
 			emitStep:     true,
 		},
+		{
+			name:               "cold widget cache on PR CI remediation lazily syncs widget and streams steps",
+			source:             "webhook",
+			sessionID:          "vanadis-build-streaming-live-chunk-1",
+			prompt:             "❌ **GitHub Check Failed (`build`)** on azylman/mirrormere (commit: abc1234, PR #733, branch: `feat/test`).\n\nChunk ID: build-streaming-live-chunk-1",
+			respJSON:           `{"conversation_id":"77777777-7777-7777-7777-777777777777","status":"SUCCESS","response":"remediated"}`,
+			wantStatus:         db.StatusCompleted,
+			wantRespText:       "remediated",
+			coldWidgetSync:     true,
+			seedOutdatedWidget: true,
+			emitStep:           true,
+			wantSyncedRepo:     "azylman/mirrormere",
+			wantSyncedPRNumber: 733,
+		},
+		{
+			name:         "cold widget cache handles unreachable router and invalid URL gracefully",
+			source:       "vanadis",
+			sessionID:    "vanadis-chunk-step-err",
+			prompt:       "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: build-err\nChunk ID: chunk-step-err",
+			respJSON:     `{"conversation_id":"77777777-7777-7777-7777-777777777777","status":"SUCCESS","response":"done"}`,
+			wantStatus:   db.StatusCompleted,
+			wantRespText: "done",
+			syncConnErr:  true,
+			syncBadURL:   true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -3892,9 +3954,47 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 			var deliveredWidgetsMu sync.Mutex
 			var deliveredWidgets []discord.StatusWidgetRequest
 			widgetDeliveredCh := make(chan struct{}, 8)
-			pool := NewWorkerPool(WorkerPoolConfig{
-				Store:          store,
-				TimeoutMinutes: 1,
+			var syncedPayload struct {
+				Repo     string `json:"repo"`
+				PRNumber int    `json:"pr_number"`
+			}
+			var pool *WorkerPool
+
+			var routerSrv *httptest.Server
+			if tc.coldWidgetSync || tc.syncConnErr {
+				routerSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					_ = json.NewDecoder(r.Body).Decode(&syncedPayload)
+					_, _ = pool.DeliverStatusWidget(discord.StatusWidgetRequest{
+						ChannelID: "chan-build",
+						ID:        "build-streaming-live",
+						MessageID: "widget-msg-seed",
+						Status:    "running",
+						Chunks: []discord.StatusWidgetChunk{
+							{ID: "build-streaming-live-chunk-1", Index: 0, Title: "Step Streaming", Status: "failed", PRNumber: 733},
+						},
+					})
+					select {
+					case <-widgetDeliveredCh:
+					default:
+					}
+					w.WriteHeader(http.StatusAccepted)
+				}))
+				if tc.syncConnErr {
+					routerSrv.Close()
+				} else {
+					defer routerSrv.Close()
+				}
+			}
+
+			var routerURL string
+			if routerSrv != nil {
+				routerURL = routerSrv.URL
+			}
+
+			pool = NewWorkerPool(WorkerPoolConfig{
+				Store:             store,
+				TimeoutMinutes:    1,
+				WebhooksRouterURL: routerURL,
 				DeliveryFunc: func(s *discordgo.Session, c, text string) error {
 					t.Errorf("unexpected Discord DeliveryFunc call for headless dispatch")
 					return nil
@@ -3936,13 +4036,29 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 			})
 			defer pool.Stop()
 
-			if tc.seedWidget {
+			if tc.syncBadURL {
+				pBad := &WorkerPool{cfg: WorkerPoolConfig{WebhooksRouterURL: "://bad-url"}}
+				pBad.ensureChunkWidgetHydrated("Build ID: b1", "c1", "b1")
+				pDef := &WorkerPool{}
+				pDef.SetDiscordSession(&discordgo.Session{})
+				if got := pDef.resolveWebhooksRouterURL(); got != "http://webhooks-router.aerial" {
+					t.Fatalf("resolveWebhooksRouterURL() = %q, want http://webhooks-router.aerial", got)
+				}
+			}
+
+			if tc.seedWidget || tc.seedOutdatedWidget {
+				seedStatus := "running"
+				seedChunkID := "chunk-step-live"
+				if tc.seedOutdatedWidget {
+					seedStatus = "pr_opened"
+					seedChunkID = "build-streaming-live-chunk-1"
+				}
 				_, _ = pool.DeliverStatusWidget(discord.StatusWidgetRequest{
 					ChannelID: "chan-build",
 					ID:        "build-streaming-live",
 					Status:    "running",
 					Chunks: []discord.StatusWidgetChunk{
-						{ID: "chunk-step-live", Index: 0, Title: "Step Streaming", Status: "running"},
+						{ID: seedChunkID, Index: 0, Title: "Step Streaming", Status: seedStatus},
 					},
 				})
 				// Drain the notification from the seed delivery so that RunnerWithOptionsFunc waits for the active step update.
@@ -3981,6 +4097,12 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 			}
 			if d.ResponseText != tc.wantRespText {
 				t.Fatalf("response text mismatch: got %q, want %q", d.ResponseText, tc.wantRespText)
+			}
+
+			if tc.wantSyncedRepo != "" {
+				if syncedPayload.Repo != tc.wantSyncedRepo || syncedPayload.PRNumber != tc.wantSyncedPRNumber {
+					t.Fatalf("syncedPayload = %+v, want repo=%q pr=%d", syncedPayload, tc.wantSyncedRepo, tc.wantSyncedPRNumber)
+				}
 			}
 
 			if tc.emitStep {

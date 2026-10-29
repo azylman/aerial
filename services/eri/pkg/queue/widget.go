@@ -1,8 +1,10 @@
 package queue
 
 import (
+	"context"
 	"errors"
 	"log"
+	"net/http"
 	"strings"
 	"time"
 
@@ -10,6 +12,57 @@ import (
 
 	"github.com/azylman/aerial/services/eri/pkg/discord"
 )
+
+func (p *WorkerPool) hasWarmChunkWidget(chunkID string) bool {
+	p.widgetMu.Lock()
+	defer p.widgetMu.Unlock()
+
+	buildID := p.chunkToBuildID[chunkID]
+	req, ok := p.widgetsByID[buildID]
+	if !ok || req.MessageID == "" {
+		return false
+	}
+	for _, c := range req.Chunks {
+		if c.ID == chunkID && isWidgetChunkInProgress(c.Status) {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *WorkerPool) resolveWebhooksRouterURL() string {
+	if u := strings.TrimSpace(p.cfg.WebhooksRouterURL); u != "" {
+		return strings.TrimRight(u, "/")
+	}
+	if p.DiscordSession() != nil {
+		return "http://webhooks-router.aerial"
+	}
+	return ""
+}
+
+func (p *WorkerPool) ensureChunkWidgetHydrated(prompt, chunkID, buildID string) {
+	if p.hasWarmChunkWidget(chunkID) {
+		return
+	}
+	routerURL := p.resolveWebhooksRouterURL()
+	bodyJSON, ok := extractDispatchWidgetSyncPayload(prompt, buildID)
+	if routerURL == "" || !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, routerURL+"/internal/widget/sync", strings.NewReader(bodyJSON))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("[WorkerPool] Warning syncing cold widget cache for chunk %s: %v", chunkID, err)
+		return
+	}
+	_ = resp.Body.Close()
+}
 
 func (p *WorkerPool) ensureWidgetMapsLocked() {
 	if p.widgetsByID == nil {

@@ -535,6 +535,7 @@ func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 	chunkID, buildID, chunkIdx := extractVanadisDispatchInfo(d)
 	if chunkID != "" {
 		p.StartChunkStepTurn(chunkID, buildID, chunkIdx, d.ID)
+		p.ensureChunkWidgetHydrated(d.Prompt, chunkID, buildID)
 		defer p.FinishChunkStepTurn(chunkID, d.ID)
 		te.statusUpdater = NewChunkStepStatusUpdater(chunkID, func(step string) error {
 			return p.FlushChunkActiveStep(chunkID, d.ID, step)
@@ -557,6 +558,29 @@ var (
 	standalonePRRemediationRegex  = regexp.MustCompile(`PR #(\d+)\s+on\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)|(?:on|for repo)\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\s+\((?:commit: [^,]+,\s*)?PR #(\d+)`)
 )
 
+func extractPRRemediationTarget(prompt string) (repo string, prNum int, ok bool) {
+	m := standalonePRRemediationRegex.FindStringSubmatch(prompt)
+	if len(m) < 5 {
+		return "", 0, false
+	}
+	prNumStr, repo := m[1], m[2]
+	if prNumStr == "" {
+		repo, prNumStr = m[3], m[4]
+	}
+	prNum, err := strconv.Atoi(prNumStr)
+	return repo, prNum, err == nil && prNum > 0
+}
+
+func extractDispatchWidgetSyncPayload(prompt, buildID string) (string, bool) {
+	if repo, prNum, ok := extractPRRemediationTarget(prompt); ok {
+		return fmt.Sprintf(`{"repo":%q,"pr_number":%d}`, repo, prNum), true
+	}
+	if buildID != "" && !strings.HasPrefix(buildID, "pr-") {
+		return fmt.Sprintf(`{"build_id":%q}`, buildID), true
+	}
+	return "", false
+}
+
 func extractVanadisDispatchInfo(d db.Dispatch) (chunkID, buildID string, chunkIdx int) {
 	chunkIdx = -1
 	if strings.HasPrefix(d.SessionID, "vanadis-") {
@@ -575,13 +599,14 @@ func extractVanadisDispatchInfo(d db.Dispatch) (chunkID, buildID string, chunkId
 			chunkIdx = idx - 1
 		}
 	}
+	if buildID == "" && strings.HasPrefix(chunkID, "build-") {
+		if idx := strings.LastIndex(chunkID, "-chunk-"); idx > 0 {
+			buildID = chunkID[:idx]
+		}
+	}
 	if chunkID == "" {
-		if m := standalonePRRemediationRegex.FindStringSubmatch(d.Prompt); len(m) >= 5 {
-			prNum, repo := m[1], m[2]
-			if prNum == "" {
-				repo, prNum = m[3], m[4]
-			}
-			prID := fmt.Sprintf("pr-%s-%s", repo, prNum)
+		if repo, prNum, ok := extractPRRemediationTarget(d.Prompt); ok {
+			prID := fmt.Sprintf("pr-%s-%d", repo, prNum)
 			return prID, prID, 0
 		}
 	}
