@@ -13,20 +13,18 @@ import (
 	"time"
 )
 
-func TestNewClientAndAccessors_TableDriven(t *testing.T) {
+func TestNewDynamicClient_TableDriven(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name        string
 		cfg         Config
-		useDynamic  bool
 		nilCfgFn    bool
 		wantBaseURL string
 	}{
 		{
 			name:        "static default values",
 			cfg:         Config{},
-			useDynamic:  false,
 			wantBaseURL: DefaultBaseURL,
 		},
 		{
@@ -36,12 +34,10 @@ func TestNewClientAndAccessors_TableDriven(t *testing.T) {
 				Model:   "nomic-embed-text",
 				NumCtx:  1024,
 			},
-			useDynamic:  false,
 			wantBaseURL: "http://custom-ollama:11434",
 		},
 		{
 			name:        "dynamic with nil func",
-			useDynamic:  true,
 			nilCfgFn:    true,
 			wantBaseURL: DefaultBaseURL,
 		},
@@ -50,7 +46,6 @@ func TestNewClientAndAccessors_TableDriven(t *testing.T) {
 			cfg: Config{
 				BaseURL: "http://dynamic-host:11434",
 			},
-			useDynamic:  true,
 			nilCfgFn:    false,
 			wantBaseURL: "http://dynamic-host:11434",
 		},
@@ -61,14 +56,10 @@ func TestNewClientAndAccessors_TableDriven(t *testing.T) {
 			t.Parallel()
 
 			var client *Client
-			if tc.useDynamic {
-				if tc.nilCfgFn {
-					client = NewDynamicClient(nil)
-				} else {
-					client = NewDynamicClient(func() Config { return tc.cfg })
-				}
+			if tc.nilCfgFn {
+				client = NewDynamicClient(nil)
 			} else {
-				client = NewClient(tc.cfg)
+				client = NewDynamicClient(func() Config { return tc.cfg })
 			}
 
 			if got := client.BaseURL(); got != tc.wantBaseURL {
@@ -77,13 +68,13 @@ func TestNewClientAndAccessors_TableDriven(t *testing.T) {
 
 			customHC := &http.Client{Timeout: 10 * time.Second}
 			client.SetHTTPClient(customHC)
-			if client.HTTPClient() != customHC {
-				t.Errorf("HTTPClient() did not return configured client")
+			if client.httpClient != customHC {
+				t.Errorf("httpClient did not return configured client")
 			}
 
 			client.SetRetryDelay(5 * time.Millisecond)
-			if client.RetryDelay() != 5*time.Millisecond {
-				t.Errorf("RetryDelay() = %v, want 5ms", client.RetryDelay())
+			if client.retryDelay != 5*time.Millisecond {
+				t.Errorf("retryDelay = %v, want 5ms", client.retryDelay)
 			}
 		})
 	}
@@ -268,9 +259,11 @@ func TestGenerateEmbedding_TableDriven(t *testing.T) {
 			}))
 			defer server.Close()
 
-			client := NewClient(Config{
-				BaseURL:     server.URL,
-				QueryPrefix: tc.queryPrefix,
+			client := NewDynamicClient(func() Config {
+				return Config{
+					BaseURL:     server.URL,
+					QueryPrefix: tc.queryPrefix,
+				}
 			})
 			if !tc.nilHttpClient {
 				client.SetHTTPClient(server.Client())
@@ -321,8 +314,10 @@ func TestGenerateEmbedding_NetworkError_TableDriven(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			client := NewClient(Config{
-				BaseURL: tc.baseURL,
+			client := NewDynamicClient(func() Config {
+				return Config{
+					BaseURL: tc.baseURL,
+				}
 			})
 			client.SetRetryDelay(0)
 

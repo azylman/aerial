@@ -67,12 +67,6 @@ func NewOllamaClient(cfg *OllamaConfig) *Client {
 	return c
 }
 
-type embeddingRequest struct {
-	Model   string         `json:"model"`
-	Prompt  string         `json:"prompt"`
-	Options map[string]any `json:"options,omitempty"`
-}
-
 // GenerateEmbedding generates an embedding vector for the provided text.
 // If isQuery is true and queryPrefix is configured, prepends the query prefix to the prompt.
 func (c *Client) GenerateEmbedding(ctx context.Context, text string, isQuery bool, maxRetries int) ([]float32, error) {

@@ -785,10 +785,6 @@ function parseFactReinforceCount(val) {
     return Math.max(1, Math.floor(num));
 }
 
-function parseFactImportance(val) {
-    return parseFactReinforceCount(val);
-}
-
 function compareFactsImportanceDesc(a, b) {
     const countA = parseFactReinforceCount(a ? (a.reinforce_count !== undefined ? a.reinforce_count : a.importance) : null);
     const countB = parseFactReinforceCount(b ? (b.reinforce_count !== undefined ? b.reinforce_count : b.importance) : null);

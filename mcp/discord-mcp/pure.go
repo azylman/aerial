@@ -54,11 +54,6 @@ type JSONRPCError struct {
 	Data    interface{} `json:"data,omitempty"`
 }
 
-// ToolsListResult represents the result payload of a tools/list request.
-type ToolsListResult struct {
-	Tools []ToolItem `json:"tools"`
-}
-
 // ToolItem represents an individual MCP tool in tools/list.
 type ToolItem struct {
 	Name        string          `json:"name"`

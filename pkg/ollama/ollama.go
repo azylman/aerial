@@ -30,12 +30,6 @@ type Client struct {
 	retryDelay time.Duration
 }
 
-func NewClient(cfg Config) *Client {
-	return NewDynamicClient(func() Config {
-		return cfg
-	})
-}
-
 func NewDynamicClient(cfgFn func() Config) *Client {
 	if cfgFn == nil {
 		cfgFn = func() Config {
@@ -57,14 +51,6 @@ func (c *Client) SetHTTPClient(hc *http.Client) {
 
 func (c *Client) SetRetryDelay(d time.Duration) {
 	c.retryDelay = d
-}
-
-func (c *Client) HTTPClient() *http.Client {
-	return c.httpClient
-}
-
-func (c *Client) RetryDelay() time.Duration {
-	return c.retryDelay
 }
 
 func (c *Client) config() Config {

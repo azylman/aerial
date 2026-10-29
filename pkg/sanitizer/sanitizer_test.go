@@ -307,6 +307,13 @@ func TestSanitizeAuthor_TableDriven(t *testing.T) {
 	}
 }
 
+func resetSensitiveTokens() {
+	sensitiveTokensMu.Lock()
+	defer sensitiveTokensMu.Unlock()
+	empty := make([]string, 0)
+	sensitiveTokensPtr.Store(&empty)
+}
+
 func TestRegisterSensitiveTokens_TableDriven(t *testing.T) {
 	// Not t.Parallel() because it mutates global sensitive tokens state
 	tests := []struct {
@@ -331,8 +338,8 @@ func TestRegisterSensitiveTokens_TableDriven(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ResetSensitiveTokens()
-			defer ResetSensitiveTokens()
+			resetSensitiveTokens()
+			defer resetSensitiveTokens()
 
 			RegisterSensitiveTokens(tc.tokens...)
 			got := SanitizeString(tc.input)

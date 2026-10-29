@@ -68,7 +68,6 @@ const {
     renderGitSyncBadge,
     renderQuickLaunchDock,
     parseFactReinforceCount,
-    parseFactImportance,
     compareFactsImportanceDesc,
     renderDeployments,
     TABS,
@@ -661,7 +660,6 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
                 assert.equal(parseFactReinforceCount(5), 5);
                 assert.equal(parseFactReinforceCount('3'), 3);
                 assert.equal(parseFactReinforceCount(2.9), 2);
-                assert.equal(parseFactImportance(4), 4);
             });
 
             it('returns 1 for values <= 1, zero, or negative numbers', () => {
