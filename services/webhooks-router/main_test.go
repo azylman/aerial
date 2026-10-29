@@ -2573,3 +2573,247 @@ func TestRouterServer_HandlePRRegister(t *testing.T) {
 		})
 	}
 }
+
+func TestSyncBuildWidget_Unit(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	tests := []struct {
+		name          string
+		useNilServer  bool
+		useMockReg    bool
+		useInserter   bool
+		inserterErr   error
+		buildID       string
+		banner        string
+		vanadisStatus int
+		wantErr       bool
+		wantQueued    int
+	}{
+		{
+			name:         "nil server returns clean nil",
+			useNilServer: true,
+			buildID:      "build-123",
+		},
+		{
+			name:    "empty buildID returns clean nil",
+			buildID: "",
+		},
+		{
+			name:        "riverClient configured queues WidgetSyncArgs without inline HTTP dispatch",
+			useMockReg:  true,
+			useInserter: true,
+			buildID:     "build-101",
+			banner:      "Build running",
+			wantQueued:  1,
+		},
+		{
+			name:        "riverClient insert error returns error",
+			useMockReg:  true,
+			useInserter: true,
+			inserterErr: errors.New("db insert failure"),
+			buildID:     "build-101",
+			wantErr:     true,
+		},
+		{
+			name:       "non-Postgres registry fallback returns clean nil",
+			useMockReg: true,
+			buildID:    "build-102",
+			wantErr:    false,
+		},
+		{
+			name:          "Postgres registry calls vanadis build widget sync successfully",
+			buildID:       "build-103",
+			banner:        "Chunk 1 running",
+			vanadisStatus: http.StatusOK,
+			wantErr:       false,
+		},
+		{
+			name:          "Postgres registry returns error when vanadis fails",
+			buildID:       "build-104",
+			vanadisStatus: http.StatusInternalServerError,
+			wantErr:       true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if tc.useNilServer {
+				var nilSrv *RouterServer
+				if err := nilSrv.SyncBuildWidget(ctx, tc.buildID, tc.banner); err != nil {
+					t.Fatalf("SyncBuildWidget nil server err = %v, want nil", err)
+				}
+				return
+			}
+
+			tsVanadis := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/chunks/sync-pr-widget" {
+					http.NotFound(w, r)
+					return
+				}
+				if tc.vanadisStatus != 0 && tc.vanadisStatus != http.StatusOK {
+					w.WriteHeader(tc.vanadisStatus)
+					_, _ = w.Write([]byte(`{"error":"vanadis build error"}`))
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"matched": true, "build_id": tc.buildID})
+			}))
+			t.Cleanup(tsVanadis.Close)
+
+			mockDisp := &mockOutboundDispatcher{}
+			var reg PRRegistryUpdater
+			if tc.useMockReg {
+				reg = &mockPRRegistry{resolveBranch: "feat/mock"}
+			} else {
+				pool := &mockVanadisPgxPool{}
+				reg = NewPostgresPRRegistry(pool, WithVanadisClient(tsVanadis.URL, tsVanadis.Client()))
+			}
+
+			srv := newTestRouter(Config{VanadisURL: tsVanadis.URL}, tsVanadis.Client(), reg, mockDisp)
+			var inserter *mockRiverInserter
+			if tc.useInserter {
+				inserter = &mockRiverInserter{err: tc.inserterErr}
+				srv.SetRiverClient(inserter)
+			}
+
+			err := srv.SyncBuildWidget(ctx, tc.buildID, tc.banner)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("SyncBuildWidget err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantQueued > 0 {
+				if inserter == nil || len(inserter.insertedWidgetSyncJobs) != tc.wantQueued {
+					t.Fatalf("expected %d queued widget sync jobs, got %+v", tc.wantQueued, inserter)
+				}
+				lastJob := inserter.insertedWidgetSyncJobs[len(inserter.insertedWidgetSyncJobs)-1]
+				if lastJob.BuildID != tc.buildID || lastJob.Banner != tc.banner {
+					t.Errorf("queued job mismatch: got %+v, want BuildID=%q Banner=%q", lastJob, tc.buildID, tc.banner)
+				}
+			}
+		})
+	}
+}
+
+func TestRouterServer_HandleInternalWidgetSync(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		body          string
+		useInserter   bool
+		inserterErr   error
+		vanadisStatus int
+		wantStatus    int
+		wantSubstr    string
+		wantQueued    int
+	}{
+		{
+			name:       "InvalidJSON",
+			body:       `{not-valid-json`,
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "invalid json payload",
+		},
+		{
+			name:       "MissingAllFieldsReturns400",
+			body:       `{}`,
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "build_id or repo and pr_number are required",
+		},
+		{
+			name:       "EmptyBuildIDAndEmptyRepoReturns400",
+			body:       `{"build_id":"","repo":"","pr_number":0}`,
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "build_id or repo and pr_number are required",
+		},
+		{
+			name:       "RepoWithoutPRNumberReturns400",
+			body:       `{"repo":"azylman/aerial","pr_number":0}`,
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "build_id or repo and pr_number are required",
+		},
+		{
+			name:        "ValidBuildIDWithRiver",
+			body:        `{"build_id":"build-777","banner":"Building chunk 0"}`,
+			useInserter: true,
+			wantStatus:  http.StatusAccepted,
+			wantSubstr:  `"status":"accepted"`,
+			wantQueued:  1,
+		},
+		{
+			name:        "ValidRepoAndPRNumberWithRiver",
+			body:        `{"repo":"azylman/aerial","pr_number":202}`,
+			useInserter: true,
+			wantStatus:  http.StatusAccepted,
+			wantSubstr:  `"status":"accepted"`,
+			wantQueued:  1,
+		},
+		{
+			name:        "RiverInsertErrorOnBuildIDReturns500",
+			body:        `{"build_id":"build-888"}`,
+			useInserter: true,
+			inserterErr: errors.New("river pool full"),
+			wantStatus:  http.StatusInternalServerError,
+			wantSubstr:  "failed to sync build widget",
+		},
+		{
+			name:        "RiverInsertErrorOnPRReturns500",
+			body:        `{"repo":"azylman/aerial","pr_number":203}`,
+			useInserter: true,
+			inserterErr: errors.New("river pool full"),
+			wantStatus:  http.StatusInternalServerError,
+			wantSubstr:  "failed to sync pr widget",
+		},
+		{
+			name:          "ValidBuildIDDirectWithoutRiver",
+			body:          `{"build_id":"build-999","banner":"Direct sync"}`,
+			vanadisStatus: http.StatusOK,
+			wantStatus:    http.StatusAccepted,
+			wantSubstr:    `"build_id":"build-999"`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tsVanadis := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/chunks/sync-pr-widget" {
+					http.NotFound(w, r)
+					return
+				}
+				if tc.vanadisStatus != 0 && tc.vanadisStatus != http.StatusOK {
+					w.WriteHeader(tc.vanadisStatus)
+					_, _ = w.Write([]byte(`{"error":"vanadis error"}`))
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"matched": true, "build_id": "build-999"})
+			}))
+			t.Cleanup(tsVanadis.Close)
+
+			pool := &mockVanadisPgxPool{}
+			reg := NewPostgresPRRegistry(pool, WithVanadisClient(tsVanadis.URL, tsVanadis.Client()))
+			disp := &mockOutboundDispatcher{}
+
+			srv := newTestRouter(Config{VanadisURL: tsVanadis.URL}, tsVanadis.Client(), reg, disp)
+			var inserter *mockRiverInserter
+			if tc.useInserter {
+				inserter = &mockRiverInserter{err: tc.inserterErr}
+				srv.SetRiverClient(inserter)
+			}
+
+			routes := srv.Routes()
+			rec := doHTTPRequest(routes, http.MethodPost, "/internal/widget/sync", strings.NewReader(tc.body), nil)
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if tc.wantSubstr != "" && !strings.Contains(rec.Body.String(), tc.wantSubstr) {
+				t.Errorf("body = %q, want substr %q", rec.Body.String(), tc.wantSubstr)
+			}
+			if tc.wantQueued > 0 && (inserter == nil || len(inserter.insertedWidgetSyncJobs) != tc.wantQueued) {
+				t.Errorf("expected %d queued jobs, got %+v", tc.wantQueued, inserter)
+			}
+		})
+	}
+}

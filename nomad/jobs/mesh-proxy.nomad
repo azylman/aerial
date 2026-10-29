@@ -57,7 +57,19 @@ EOH
       template {
         data = <<EOH
 # Dynamic Nomad service upstreams rendered by Nomad template
+{{- $hasHomepage := false -}}
+{{- $hasDashboard := false -}}
+{{- $hasDocs := false -}}
+{{- $hasAgentsview := false -}}
+{{- $hasGrafana := false -}}
+{{- $hasOpenobserve := false -}}
 {{ range nomadServices }}
+{{- if eq .Name "homepage" }}{{ $hasHomepage = true }}{{ end -}}
+{{- if eq .Name "dashboard" }}{{ $hasDashboard = true }}{{ end -}}
+{{- if eq .Name "docs" }}{{ $hasDocs = true }}{{ end -}}
+{{- if eq .Name "agentsview" }}{{ $hasAgentsview = true }}{{ end -}}
+{{- if eq .Name "grafana" }}{{ $hasGrafana = true }}{{ end -}}
+{{- if eq .Name "openobserve" }}{{ $hasOpenobserve = true }}{{ end -}}
 {{ if ne .Name "mesh-proxy" }}
 upstream {{ .Name }} {
 {{ range nomadService .Name }}
@@ -68,6 +80,42 @@ upstream {{ .Name }} {
     keepalive 16;
 }
 {{ end }}
+{{ end }}
+{{ if not $hasHomepage }}
+upstream homepage {
+    server 127.0.0.1:65535 down;
+    keepalive 16;
+}
+{{ end }}
+{{ if not $hasDashboard }}
+upstream dashboard {
+    server 127.0.0.1:65535 down;
+    keepalive 16;
+}
+{{ end }}
+{{ if not $hasDocs }}
+upstream docs {
+    server 127.0.0.1:65535 down;
+    keepalive 16;
+}
+{{ end }}
+{{ if not $hasAgentsview }}
+upstream agentsview {
+    server 127.0.0.1:65535 down;
+    keepalive 16;
+}
+{{ end }}
+{{ if not $hasGrafana }}
+upstream grafana {
+    server 127.0.0.1:65535 down;
+    keepalive 16;
+}
+{{ end }}
+{{ if not $hasOpenobserve }}
+upstream openobserve {
+    server 127.0.0.1:65535 down;
+    keepalive 16;
+}
 {{ end }}
 EOH
         destination   = "local/upstreams.conf"
