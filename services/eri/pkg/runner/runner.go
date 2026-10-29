@@ -110,6 +110,7 @@ type TokenUsage = AgyUsage
 type StepToolInfo struct {
 	Name       string             `json:"name,omitempty"`
 	Parameters StepToolParameters `json:"parameters,omitempty"`
+	Detail     string             `json:"detail,omitempty"`
 }
 
 type StepToolParameters struct {
@@ -130,6 +131,7 @@ type StepUpdateEvent struct {
 	ConversationID string        `json:"conversation_id,omitempty"`
 	StepIndex      int           `json:"step_index,omitempty"`
 	ToolInfo       *StepToolInfo `json:"tool_info,omitempty"`
+	ToolDetail     string        `json:"tool_detail,omitempty"`
 	TextDelta      string        `json:"text_delta,omitempty"`
 	Delta          string        `json:"delta,omitempty"`
 	Content        string        `json:"content,omitempty"`
@@ -168,6 +170,20 @@ func (e *StepUpdateEvent) ResolvedCommandLine() string {
 
 func (e *StepUpdateEvent) ResolvedCommandName() string {
 	return ExtractCommandName(e.ResolvedCommandLine())
+}
+
+// ResolvedToolDetail returns the pre-extracted tool detail if present, or falls back to resolving the command name.
+func (e *StepUpdateEvent) ResolvedToolDetail() string {
+	if e == nil {
+		return ""
+	}
+	if e.ToolDetail != "" {
+		return e.ToolDetail
+	}
+	if e.ToolInfo != nil && e.ToolInfo.Detail != "" {
+		return e.ToolInfo.Detail
+	}
+	return e.ResolvedCommandName()
 }
 
 func isShellOperatorToken(tok string) bool {

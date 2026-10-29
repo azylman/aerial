@@ -203,29 +203,32 @@ func TestExtractCommandName(t *testing.T) {
 
 func TestStepUpdateEvent_Resolvers(t *testing.T) {
 	for _, tc := range []struct {
-		name        string
-		ev          *StepUpdateEvent
-		wantType    string
-		wantTool    string
-		wantCmdName string
+		name           string
+		ev             *StepUpdateEvent
+		wantType       string
+		wantTool       string
+		wantCmdName    string
+		wantToolDetail string
 	}{
 		{name: "Nil Event"},
 		{name: "StepType and ToolName", ev: &StepUpdateEvent{StepType: "tool", ToolName: "view_file", State: "ACTIVE"}, wantType: "tool", wantTool: "view_file"},
 		{name: "Type and Name", ev: &StepUpdateEvent{Type: "tool_call", Name: "run_command", State: "ACTIVE"}, wantType: "tool_call", wantTool: "run_command"},
 		{name: "Priority: StepType and ToolName override Type and Name", ev: &StepUpdateEvent{StepType: "tool", Type: "other", ToolName: "grep_search", Name: "fallback"}, wantType: "tool", wantTool: "grep_search"},
 		{name: "Tool Without ToolInfo", ev: &StepUpdateEvent{ToolName: "run_command"}, wantTool: "run_command"},
-		{name: "CommandLine Parameter", ev: &StepUpdateEvent{ToolName: "run_command", ToolInfo: &StepToolInfo{Name: "run_command", Parameters: StepToolParameters{CommandLine: "git commit -m 'test'"}}}, wantTool: "run_command", wantCmdName: "git"},
-		{name: "CommandLineSnake Parameter", ev: &StepUpdateEvent{ToolName: "run_command", ToolInfo: &StepToolInfo{Name: "run_command", Parameters: StepToolParameters{CommandLineSnake: "docker ps -a"}}}, wantTool: "run_command", wantCmdName: "docker"},
-		{name: "Command Parameter", ev: &StepUpdateEvent{ToolName: "run_command", ToolInfo: &StepToolInfo{Name: "run_command", Parameters: StepToolParameters{Command: "npm test"}}}, wantTool: "run_command", wantCmdName: "npm"},
-		{name: "Cmd Parameter", ev: &StepUpdateEvent{ToolName: "run_command", ToolInfo: &StepToolInfo{Name: "run_command", Parameters: StepToolParameters{Cmd: "go test ./..."}}}, wantTool: "run_command", wantCmdName: "go"},
+		{name: "CommandLine Parameter", ev: &StepUpdateEvent{ToolName: "run_command", ToolInfo: &StepToolInfo{Name: "run_command", Parameters: StepToolParameters{CommandLine: "git commit -m 'test'"}}}, wantTool: "run_command", wantCmdName: "git", wantToolDetail: "git"},
+		{name: "CommandLineSnake Parameter", ev: &StepUpdateEvent{ToolName: "run_command", ToolInfo: &StepToolInfo{Name: "run_command", Parameters: StepToolParameters{CommandLineSnake: "docker ps -a"}}}, wantTool: "run_command", wantCmdName: "docker", wantToolDetail: "docker"},
+		{name: "Command Parameter", ev: &StepUpdateEvent{ToolName: "run_command", ToolInfo: &StepToolInfo{Name: "run_command", Parameters: StepToolParameters{Command: "npm test"}}}, wantTool: "run_command", wantCmdName: "npm", wantToolDetail: "npm"},
+		{name: "Cmd Parameter", ev: &StepUpdateEvent{ToolName: "run_command", ToolInfo: &StepToolInfo{Name: "run_command", Parameters: StepToolParameters{Cmd: "go test ./..."}}}, wantTool: "run_command", wantCmdName: "go", wantToolDetail: "go"},
 		{name: "Empty Tool Parameters", ev: &StepUpdateEvent{ToolName: "run_command", ToolInfo: &StepToolInfo{Name: "run_command", Parameters: StepToolParameters{}}}, wantTool: "run_command"},
 		{name: "Unparseable Command Line", ev: &StepUpdateEvent{ToolName: "run_command", ToolInfo: &StepToolInfo{Name: "run_command", Parameters: StepToolParameters{CommandLine: "echo \"unclosed quote"}}}, wantTool: "run_command"},
 		{name: "Non-Zero Exit Tool Step", ev: &StepUpdateEvent{StepType: "tool", Status: "FAILED", ToolName: "run_command"}, wantType: "tool", wantTool: "run_command"},
 		{name: "Unknown Event Type Defaults Gracefully", ev: &StepUpdateEvent{Type: "CUSTOM_UNKNOWN"}, wantType: "custom_unknown"},
+		{name: "Explicit ToolDetail preserves multi-word and punctuation", ev: &StepUpdateEvent{ToolName: "invoke_subagent", ToolDetail: "Codebase Researcher"}, wantTool: "invoke_subagent", wantToolDetail: "Codebase Researcher"},
+		{name: "StepToolInfo Detail takes precedence over CommandLine", ev: &StepUpdateEvent{ToolName: "run_command", ToolInfo: &StepToolInfo{Detail: "Build Go Binary", Parameters: StepToolParameters{CommandLine: "go build ./..."}}}, wantTool: "run_command", wantCmdName: "go", wantToolDetail: "Build Go Binary"},
 	} {
 		if tc.ev == nil {
 			var nilEv *StepUpdateEvent
-			if nilEv.ResolvedType() != "" || nilEv.ResolvedToolName() != "" || nilEv.ResolvedCommandName() != "" || nilEv.ResolvedCommandLine() != "" {
+			if nilEv.ResolvedType() != "" || nilEv.ResolvedToolName() != "" || nilEv.ResolvedCommandName() != "" || nilEv.ResolvedCommandLine() != "" || nilEv.ResolvedToolDetail() != "" {
 				t.Errorf("%s: nil event returned non-empty string", tc.name)
 			}
 			continue
@@ -234,6 +237,7 @@ func TestStepUpdateEvent_Resolvers(t *testing.T) {
 			{tc.ev.ResolvedType(), tc.wantType, "Type"},
 			{tc.ev.ResolvedToolName(), tc.wantTool, "ToolName"},
 			{tc.ev.ResolvedCommandName(), tc.wantCmdName, "CommandName"},
+			{tc.ev.ResolvedToolDetail(), tc.wantToolDetail, "ToolDetail"},
 		} {
 			if check.got != check.want {
 				t.Errorf("%s: %s = %q, want %q", tc.name, check.field, check.got, check.want)
