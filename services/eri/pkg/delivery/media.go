@@ -133,12 +133,17 @@ func ExtractAndSanitizeMedia(text string, baseDir string) (string, []*Attachment
 	return cleanedText, attachments
 }
 
-var validImageExts = map[string]bool{
+var validMediaExts = map[string]bool{
 	".png":  true,
 	".jpg":  true,
 	".jpeg": true,
 	".gif":  true,
 	".webp": true,
+	".wav":  true,
+	".mp3":  true,
+	".ogg":  true,
+	".m4a":  true,
+	".flac": true,
 }
 
 func tryAutoAttachEntry(dir string, entry os.DirEntry, baseDir string, cutoff time.Time, existingCanonical map[string]bool) *Attachment {
@@ -147,7 +152,7 @@ func tryAutoAttachEntry(dir string, entry os.DirEntry, baseDir string, cutoff ti
 	}
 
 	ext := strings.ToLower(filepath.Ext(entry.Name()))
-	if !validImageExts[ext] {
+	if !validMediaExts[ext] {
 		return nil
 	}
 
@@ -417,30 +422,49 @@ func resolveSandboxedImagePath(rawPath, baseDir string) (string, error) {
 	return canonicalPath, nil
 }
 
-func detectImageMIMEType(f *os.File, canonicalPath string) (string, error) {
+var extMIMEMap = map[string]string{
+	".png":  "image/png",
+	".jpg":  "image/jpeg",
+	".jpeg": "image/jpeg",
+	".gif":  "image/gif",
+	".webp": "image/webp",
+	".wav":  "audio/wav",
+	".mp3":  "audio/mpeg",
+	".ogg":  "audio/ogg",
+	".m4a":  "audio/mp4",
+	".flac": "audio/flac",
+}
+
+func detectMediaMIMEType(f *os.File, canonicalPath string) (string, error) {
 	header := make([]byte, 512)
 	n, err := f.Read(header)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return "", fmt.Errorf("failed to read file header: %w", err)
 	}
 	mimeType := http.DetectContentType(header[:n])
-	if !strings.HasPrefix(mimeType, "image/") {
+	ext := strings.ToLower(filepath.Ext(canonicalPath))
+
+	if !strings.HasPrefix(mimeType, "image/") && !strings.HasPrefix(mimeType, "audio/") {
 		if mimeType == "application/octet-stream" {
-			ext := strings.ToLower(filepath.Ext(canonicalPath))
-			switch ext {
-			case ".png":
-				mimeType = "image/png"
-			case ".jpg", ".jpeg":
-				mimeType = "image/jpeg"
-			case ".gif":
-				mimeType = "image/gif"
-			case ".webp":
-				mimeType = "image/webp"
+			if mapped, ok := extMIMEMap[ext]; ok {
+				mimeType = mapped
 			}
+		} else if mimeType == "application/ogg" && ext == ".ogg" {
+			// http.DetectContentType sniffs standard Ogg headers (OggS) as application/ogg
+			mimeType = "audio/ogg"
+		} else if mimeType == "video/mp4" && ext == ".m4a" {
+			// http.DetectContentType sniffs MP4/M4A ftyp containers as video/mp4
+			mimeType = "audio/mp4"
+		}
+	} else if strings.HasPrefix(mimeType, "audio/") {
+		// Normalize wav audio types (http.DetectContentType often yields audio/wave)
+		if ext == ".wav" && (mimeType == "audio/wave" || mimeType == "audio/x-wav") {
+			mimeType = "audio/wav"
 		}
 	}
-	if !strings.HasPrefix(mimeType, "image/") {
-		return "", fmt.Errorf("unsupported MIME type %q: only image/* allowed", mimeType)
+
+	if !strings.HasPrefix(mimeType, "image/") && !strings.HasPrefix(mimeType, "audio/") {
+		return "", fmt.Errorf("unsupported MIME type %q: only image/* and audio/* allowed", mimeType)
 	}
 	return mimeType, nil
 }
@@ -478,7 +502,7 @@ func ResolveAndValidateLocalImage(rawPath string, baseDir string) (*Attachment, 
 	}
 
 	// 6. Sniff MIME type using first 512 bytes
-	mimeType, err := detectImageMIMEType(f, canonicalPath)
+	mimeType, err := detectMediaMIMEType(f, canonicalPath)
 	if err != nil {
 		return nil, err
 	}
