@@ -590,6 +590,13 @@ func (s *RouterServer) isFinalVanadisChunk(ctx context.Context, repo string, prN
 	return finalChunk
 }
 
+func (s *RouterServer) advanceNonFinalVanadisChunk(ctx context.Context, repo string, prNumber int) error {
+	if s.isFinalVanadisChunk(ctx, repo, prNumber) {
+		return nil
+	}
+	return s.advanceVanadisChunk(ctx, repo, prNumber)
+}
+
 func (s *RouterServer) advanceVanadisChunkOnSync(ctx context.Context, repo string, prNumber int, syncHasExpected bool) error {
 	if s.registry == nil || prNumber <= 0 {
 		return nil
