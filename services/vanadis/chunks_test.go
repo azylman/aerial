@@ -60,6 +60,30 @@ func TestHelpers_WidgetStatus(t *testing.T) {
 		})
 	}
 
+	streamingTests := []struct {
+		in   string
+		want bool
+	}{
+		{"open", true},
+		{"pr_opened", true},
+		{"merged", true},
+		{"synced", true},
+		{"deploying", true},
+		{"deployed", false},
+		{"failed", false},
+		{"pending", false},
+		{"running", false},
+		{"", false},
+		{"  OPEN  ", true},
+	}
+	for _, tc := range streamingTests {
+		t.Run("streaming_"+tc.in, func(t *testing.T) {
+			if got := isVanadisChunkStreamingPhase(tc.in); got != tc.want {
+				t.Errorf("isVanadisChunkStreamingPhase(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+
 	syncWidgetTests := []struct {
 		name           string
 		build          VanadisBuild
@@ -182,6 +206,98 @@ func TestHelpers_WidgetStatus(t *testing.T) {
 			},
 			wantStatus:     "running",
 			wantSkipSink:   false,
+			wantActiveStep: "",
+		},
+		{
+			name: "preserves active step and sets skipsink when chunk is merged",
+			build: VanadisBuild{
+				ID:              "build-merged",
+				Status:          "running",
+				StatusMessageID: "msg-merged",
+				Title:           "Test Build Merged",
+			},
+			chunks: []VanadisChunk{
+				{ID: "c-merged", ChunkIndex: 0, PRNumber: 106, Status: "open"},
+			},
+			req: SyncChunkPRWidgetRequest{
+				BuildID:    "build-merged",
+				Repo:       "azylman/aerial",
+				PRNumber:   106,
+				PRStatus:   "merged",
+				ActiveStep: "Building container images (1/2 completed)",
+				PRFound:    true,
+			},
+			wantStatus:     "running",
+			wantSkipSink:   true,
+			wantActiveStep: "Building container images (1/2 completed)",
+		},
+		{
+			name: "preserves active step and sets skipsink when chunk is synced",
+			build: VanadisBuild{
+				ID:              "build-synced",
+				Status:          "running",
+				StatusMessageID: "msg-synced",
+				Title:           "Test Build Synced",
+			},
+			chunks: []VanadisChunk{
+				{ID: "c-synced", ChunkIndex: 0, PRNumber: 107, Status: "merged"},
+			},
+			req: SyncChunkPRWidgetRequest{
+				BuildID:    "build-synced",
+				Repo:       "azylman/aerial",
+				PRNumber:   107,
+				PRStatus:   "synced",
+				ActiveStep: "Building container images (2/2 completed)",
+				PRFound:    true,
+			},
+			wantStatus:     "running",
+			wantSkipSink:   true,
+			wantActiveStep: "Building container images (2/2 completed)",
+		},
+		{
+			name: "preserves active step and sets skipsink when chunk is deploying",
+			build: VanadisBuild{
+				ID:              "build-deploying",
+				Status:          "running",
+				StatusMessageID: "msg-deploying",
+				Title:           "Test Build Deploying",
+			},
+			chunks: []VanadisChunk{
+				{ID: "c-deploying", ChunkIndex: 0, PRNumber: 108, Status: "synced"},
+			},
+			req: SyncChunkPRWidgetRequest{
+				BuildID:    "build-deploying",
+				Repo:       "azylman/aerial",
+				PRNumber:   108,
+				PRStatus:   "deploying",
+				ActiveStep: "`eri`: 🔄 starting",
+				PRFound:    true,
+			},
+			wantStatus:     "running",
+			wantSkipSink:   true,
+			wantActiveStep: "`eri`: 🔄 starting",
+		},
+		{
+			name: "clears active step on deployed chunk",
+			build: VanadisBuild{
+				ID:              "build-deployed",
+				Status:          "running",
+				StatusMessageID: "msg-deployed",
+				Title:           "Test Build Deployed",
+			},
+			chunks: []VanadisChunk{
+				{ID: "c-deployed", ChunkIndex: 0, PRNumber: 109, Status: "deploying"},
+			},
+			req: SyncChunkPRWidgetRequest{
+				BuildID:    "build-deployed",
+				Repo:       "azylman/aerial",
+				PRNumber:   109,
+				PRStatus:   "deployed",
+				ActiveStep: "All jobs healthy",
+				PRFound:    true,
+			},
+			wantStatus:     "running",
+			wantSkipSink:   true,
 			wantActiveStep: "",
 		},
 	}

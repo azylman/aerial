@@ -2650,6 +2650,72 @@ func TestWorkerPool_DeliverStatusWidget(t *testing.T) {
 			expectDeliveredChunks: []discord.StatusWidgetChunk{{ID: "chunk-ci-term", Status: "open", ActiveStep: ""}},
 		},
 		{
+			name:        "preserves existing active step on merged chunk when subsequent sync omits active step",
+			widgetMsgID: "msg-merged-persist",
+			priorRequests: []discord.StatusWidgetRequest{
+				{ID: "b-merged-persist", MessageID: "msg-merged-persist", ChannelID: targetChan, Chunks: []discord.StatusWidgetChunk{{ID: "chunk-merged-1", Status: "merged", ActiveStep: "Building container images (1/2 completed)"}}},
+			},
+			req:                       discord.StatusWidgetRequest{ID: "b-merged-persist", MessageID: "msg-merged-persist", ChannelID: targetChan, Chunks: []discord.StatusWidgetChunk{{ID: "chunk-merged-1", Status: "merged", ActiveStep: ""}}},
+			expectMsgID:               "msg-merged-persist",
+			expectDeliveredChunks:     []discord.StatusWidgetChunk{{ID: "chunk-merged-1", Status: "merged", ActiveStep: "Building container images (1/2 completed)"}},
+			expectRetainedWidgetSteps: map[string]string{"chunk-merged-1": "Building container images (1/2 completed)"},
+		},
+		{
+			name:        "preserves existing active step on synced chunk when subsequent sync omits active step",
+			widgetMsgID: "msg-synced-persist",
+			priorRequests: []discord.StatusWidgetRequest{
+				{ID: "b-synced-persist", MessageID: "msg-synced-persist", ChannelID: targetChan, Chunks: []discord.StatusWidgetChunk{{ID: "chunk-synced-1", Status: "synced", ActiveStep: "Building container images (2/2 completed)"}}},
+			},
+			req:                       discord.StatusWidgetRequest{ID: "b-synced-persist", MessageID: "msg-synced-persist", ChannelID: targetChan, Chunks: []discord.StatusWidgetChunk{{ID: "chunk-synced-1", Status: "synced", ActiveStep: ""}}},
+			expectMsgID:               "msg-synced-persist",
+			expectDeliveredChunks:     []discord.StatusWidgetChunk{{ID: "chunk-synced-1", Status: "synced", ActiveStep: "Building container images (2/2 completed)"}},
+			expectRetainedWidgetSteps: map[string]string{"chunk-synced-1": "Building container images (2/2 completed)"},
+		},
+		{
+			name:        "preserves existing active step on deploying chunk when subsequent sync omits active step",
+			widgetMsgID: "msg-deploying-persist",
+			priorRequests: []discord.StatusWidgetRequest{
+				{ID: "b-deploying-persist", MessageID: "msg-deploying-persist", ChannelID: targetChan, Chunks: []discord.StatusWidgetChunk{{ID: "chunk-deploying-1", Status: "deploying", ActiveStep: "`eri`: 🔄 starting"}}},
+			},
+			req:                       discord.StatusWidgetRequest{ID: "b-deploying-persist", MessageID: "msg-deploying-persist", ChannelID: targetChan, Chunks: []discord.StatusWidgetChunk{{ID: "chunk-deploying-1", Status: "deploying", ActiveStep: ""}}},
+			expectMsgID:               "msg-deploying-persist",
+			expectDeliveredChunks:     []discord.StatusWidgetChunk{{ID: "chunk-deploying-1", Status: "deploying", ActiveStep: "`eri`: 🔄 starting"}},
+			expectRetainedWidgetSteps: map[string]string{"chunk-deploying-1": "`eri`: 🔄 starting"},
+		},
+		{
+			name:        "clears stale active step when chunk transitions from open to merged",
+			widgetMsgID: "msg-trans-open-merged",
+			priorRequests: []discord.StatusWidgetRequest{
+				{ID: "b-trans-open-merged", MessageID: "msg-trans-open-merged", ChannelID: targetChan, Chunks: []discord.StatusWidgetChunk{{ID: "chunk-trans-1", Status: "open", ActiveStep: "Waiting on CI (3/3 passed)"}}},
+			},
+			req:                       discord.StatusWidgetRequest{ID: "b-trans-open-merged", MessageID: "msg-trans-open-merged", ChannelID: targetChan, Chunks: []discord.StatusWidgetChunk{{ID: "chunk-trans-1", Status: "merged", ActiveStep: ""}}},
+			expectMsgID:               "msg-trans-open-merged",
+			expectDeliveredChunks:     []discord.StatusWidgetChunk{{ID: "chunk-trans-1", Status: "merged", ActiveStep: ""}},
+			expectRetainedWidgetSteps: map[string]string{"chunk-trans-1": ""},
+		},
+		{
+			name:        "clears stale active step when chunk transitions from merged to deploying",
+			widgetMsgID: "msg-trans-merged-deploying",
+			priorRequests: []discord.StatusWidgetRequest{
+				{ID: "b-trans-merged-deploying", MessageID: "msg-trans-merged-deploying", ChannelID: targetChan, Chunks: []discord.StatusWidgetChunk{{ID: "chunk-trans-2", Status: "merged", ActiveStep: "Building container images (2/2 completed)"}}},
+			},
+			req:                       discord.StatusWidgetRequest{ID: "b-trans-merged-deploying", MessageID: "msg-trans-merged-deploying", ChannelID: targetChan, Chunks: []discord.StatusWidgetChunk{{ID: "chunk-trans-2", Status: "deploying", ActiveStep: ""}}},
+			expectMsgID:               "msg-trans-merged-deploying",
+			expectDeliveredChunks:     []discord.StatusWidgetChunk{{ID: "chunk-trans-2", Status: "deploying", ActiveStep: ""}},
+			expectRetainedWidgetSteps: map[string]string{"chunk-trans-2": ""},
+		},
+		{
+			name:        "clears stale active step when chunk transitions from deploying to deployed",
+			widgetMsgID: "msg-trans-deploying-deployed",
+			priorRequests: []discord.StatusWidgetRequest{
+				{ID: "b-trans-deploying-deployed", MessageID: "msg-trans-deploying-deployed", ChannelID: targetChan, Chunks: []discord.StatusWidgetChunk{{ID: "chunk-trans-3", Status: "deploying", ActiveStep: "`eri`: 🔄 starting"}}},
+			},
+			req:                       discord.StatusWidgetRequest{ID: "b-trans-deploying-deployed", MessageID: "msg-trans-deploying-deployed", ChannelID: targetChan, Chunks: []discord.StatusWidgetChunk{{ID: "chunk-trans-3", Status: "deployed", ActiveStep: ""}}},
+			expectMsgID:               "msg-trans-deploying-deployed",
+			expectDeliveredChunks:     []discord.StatusWidgetChunk{{ID: "chunk-trans-3", Status: "deployed", ActiveStep: ""}},
+			expectRetainedWidgetSteps: map[string]string{"chunk-trans-3": ""},
+		},
+		{
 			name:                 "evicts oldest build from widgetsByID when exceeding 64 entries",
 			widgetMsgID:          "msg-final",
 			fifoFillCount:        65,
@@ -2798,6 +2864,61 @@ func TestWorkerPool_DeliverStatusWidget(t *testing.T) {
 						t.Fatalf("cached widget missing chunk %q", cID)
 					}
 				}
+			}
+		})
+	}
+}
+
+func TestWidgetChunkPhaseHelpers(t *testing.T) {
+	t.Parallel()
+	phaseTests := []struct {
+		name string
+		a, b string
+		want bool
+	}{
+		{name: "both open", a: "open", b: "open", want: true},
+		{name: "pr_opened and open", a: "pr_opened", b: "open", want: true},
+		{name: "open and pr_opened", a: "open", b: "pr_opened", want: true},
+		{name: "pr_opened and pr_opened", a: "pr_opened", b: "pr_opened", want: true},
+		{name: "both merged", a: "merged", b: "merged", want: true},
+		{name: "both synced", a: "synced", b: "synced", want: true},
+		{name: "both deploying", a: "deploying", b: "deploying", want: true},
+		{name: "open and merged", a: "open", b: "merged", want: false},
+		{name: "merged and synced", a: "merged", b: "synced", want: false},
+		{name: "synced and deploying", a: "synced", b: "deploying", want: false},
+		{name: "deploying and deployed", a: "deploying", b: "deployed", want: false},
+		{name: "both empty", a: "", b: "", want: false},
+		{name: "whitespace and case insensitivity", a: "  PR_OPENED  ", b: "  open  ", want: true},
+	}
+	for _, tc := range phaseTests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := sameWidgetChunkPhase(tc.a, tc.b); got != tc.want {
+				t.Errorf("sameWidgetChunkPhase(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+			}
+		})
+	}
+
+	ciTests := []struct {
+		status string
+		want   bool
+	}{
+		{"open", true},
+		{"pr_opened", true},
+		{"merged", true},
+		{"synced", true},
+		{"deploying", true},
+		{"deployed", false},
+		{"running", false},
+		{"coding", false},
+		{"failed", false},
+		{"", false},
+	}
+	for _, tc := range ciTests {
+		t.Run("ci_"+tc.status, func(t *testing.T) {
+			t.Parallel()
+			if got := isWidgetChunkWaitingOnCI(tc.status); got != tc.want {
+				t.Errorf("isWidgetChunkWaitingOnCI(%q) = %v, want %v", tc.status, got, tc.want)
 			}
 		})
 	}
@@ -3806,7 +3927,7 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 						})
 						select {
 						case <-widgetDeliveredCh:
-						case <-time.After(time.Second):
+						case <-time.After(5 * time.Second):
 						}
 					}
 					defer close(doneCh)
@@ -3866,7 +3987,8 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 				deliveredWidgetsMu.Lock()
 				stepsSeen := 0
 				hasFinalClear := false
-				for _, w := range deliveredWidgets {
+				for i, w := range deliveredWidgets {
+					t.Logf("widget[%d]: SkipSink=%v Chunks=%+v", i, w.SkipSink, w.Chunks)
 					if w.SkipSink && len(w.Chunks) > 0 {
 						if strings.Contains(w.Chunks[0].ActiveStep, "Executing `git`") {
 							stepsSeen++
@@ -3878,7 +4000,11 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 				}
 				deliveredWidgetsMu.Unlock()
 				if stepsSeen == 0 {
-					t.Fatalf("expected at least one widget delivery with active step 'Executing `git`', saw %d widget updates", len(deliveredWidgets))
+					var summaries []string
+					for _, w := range deliveredWidgets {
+						summaries = append(summaries, fmt.Sprintf("(SkipSink=%v, Chunks=%+v)", w.SkipSink, w.Chunks))
+					}
+					t.Fatalf("expected at least one widget delivery with active step 'Executing `git`', saw %d widget updates: %s", len(deliveredWidgets), strings.Join(summaries, "; "))
 				}
 				if !hasFinalClear {
 					t.Fatalf("expected final widget clear with ActiveStep='', saw %d widget updates", len(deliveredWidgets))

@@ -166,7 +166,7 @@ func TestBuildStatusWidgetComponents_VanadisBuild(t *testing.T) {
 				Repo:          "aerial",
 				Title:         "Silent prompt",
 				Status:        "deploying",
-				ActiveStep:    "   Running deployment checks...   ",
+				ActiveStep:    "-# ↳ `aerial`: ⏳ building image\n\n↳ `webhooks-router`: 🔄 starting\n",
 				PRNumber:      736,
 				DeployingJobs: []string{"aerial-brain", "webhooks-router"},
 			},
@@ -232,7 +232,7 @@ func TestBuildStatusWidgetComponents_VanadisBuild(t *testing.T) {
 		t.Fatalf("expected chunk 2 to be *discordgo.Section, got %T", container.Components[3])
 	}
 	c2Text := c2Sec.Components[0].(*discordgo.TextDisplay)
-	if c2Text.Content != "🚀 **`aerial`**: Silent prompt\n-# ↳ Running deployment checks..." {
+	if c2Text.Content != "🚀 **`aerial`**: Silent prompt\n-# ↳ `aerial`: ⏳ building image\n-# ↳ `webhooks-router`: 🔄 starting" {
 		t.Errorf("unexpected chunk 2 row text: %q", c2Text.Content)
 	}
 
@@ -265,6 +265,53 @@ func TestBuildStatusWidgetComponents_VanadisBuild(t *testing.T) {
 	fallbackChunk := emptyContainer.Components[1].(*discordgo.TextDisplay)
 	if fallbackChunk.Content != "⏳ **`aerial`**: Fallback repo chunk" {
 		t.Errorf("expected fallback chunk '⏳ **`aerial`**: Fallback repo chunk', got %q", fallbackChunk.Content)
+	}
+}
+
+func TestFormatChunkActiveStepLines(t *testing.T) {
+	tests := []struct {
+		name       string
+		activeStep string
+		want       string
+	}{
+		{
+			name:       "empty string",
+			activeStep: "",
+			want:       "",
+		},
+		{
+			name:       "whitespace only",
+			activeStep: "   \n\t  \n  ",
+			want:       "",
+		},
+		{
+			name:       "single line clean",
+			activeStep: "Running deployment checks...",
+			want:       "\n-# ↳ Running deployment checks...",
+		},
+		{
+			name:       "single line with redundant prefixes and spaces",
+			activeStep: "  -#   ↳   Running deployment checks...  ",
+			want:       "\n-# ↳ Running deployment checks...",
+		},
+		{
+			name:       "multi-line with empty lines and mixed prefixes",
+			activeStep: "-# ↳ `aerial`: ⏳ building image\n\n   \n↳ `webhooks-router`: 🔄 starting\n",
+			want:       "\n-# ↳ `aerial`: ⏳ building image\n-# ↳ `webhooks-router`: 🔄 starting",
+		},
+		{
+			name:       "only prefixes and empty lines",
+			activeStep: "-# \n↳\n -# ↳  ",
+			want:       "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatChunkActiveStepLines(tc.activeStep); got != tc.want {
+				t.Errorf("formatChunkActiveStepLines(%q) = %q, want %q", tc.activeStep, got, tc.want)
+			}
+		})
 	}
 }
 

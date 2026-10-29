@@ -215,6 +215,35 @@ func collapseCompletedWidgetChunks(chunks []StatusWidgetChunk) ([]StatusWidgetCh
 	return chunks, ""
 }
 
+func formatChunkActiveStepLines(activeStep string) string {
+	trimmed := strings.TrimSpace(activeStep)
+	if trimmed == "" {
+		return ""
+	}
+	lines := strings.Split(trimmed, "\n")
+	var b strings.Builder
+	for _, rawLine := range lines {
+		line := strings.TrimSpace(rawLine)
+		for {
+			if strings.HasPrefix(line, "-#") {
+				line = strings.TrimSpace(strings.TrimPrefix(line, "-#"))
+				continue
+			}
+			if strings.HasPrefix(line, "↳") {
+				line = strings.TrimSpace(strings.TrimPrefix(line, "↳"))
+				continue
+			}
+			break
+		}
+		if line == "" {
+			continue
+		}
+		b.WriteString("\n-# ↳ ")
+		b.WriteString(line)
+	}
+	return b.String()
+}
+
 func buildWidgetChunkComponent(c StatusWidgetChunk) discordgo.MessageComponent {
 	badge := statusBadge(c.Status)
 	fullRepo, shortRepo := NormalizeRepo(c.Repo)
@@ -224,9 +253,7 @@ func buildWidgetChunkComponent(c StatusWidgetChunk) discordgo.MessageComponent {
 	}
 
 	rowText := fmt.Sprintf("%s **`%s`**: %s%s", badge, repoTag, strings.TrimSpace(c.Title), formatChunkRuntimeSuffix(c))
-	if step := strings.TrimSpace(c.ActiveStep); step != "" {
-		rowText += "\n-# ↳ " + step
-	}
+	rowText += formatChunkActiveStepLines(c.ActiveStep)
 
 	if c.PRNumber > 0 && fullRepo != "" {
 		prURL := fmt.Sprintf("https://github.com/%s/pull/%d", fullRepo, c.PRNumber)
