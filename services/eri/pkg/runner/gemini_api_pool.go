@@ -785,8 +785,8 @@ func propagateThoughtSignature(pendingParts []geminiPart) {
 }
 
 func (s *GeminiAPISession) executeSingleToolCall(ctx context.Context, dispatcher MCPDispatcher, fc *geminiFunctionCall, turn *TurnContext) geminiPart {
-	argsDesc := ""
-	if len(fc.Args) > 0 {
+	argsDesc := ExtractToolDetail(fc.Name, fc.Args, "")
+	if argsDesc == "" && len(fc.Args) > 0 {
 		if b, bErr := json.Marshal(fc.Args); bErr == nil {
 			argsDesc = string(b)
 		}

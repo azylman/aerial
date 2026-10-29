@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -494,6 +495,60 @@ func extractFirstToolCallEntry(su map[string]any, currentToolName string, curren
 	return toolName, toolParams, cmdName
 }
 
+// ExtractToolDetail extracts the primary target or summary detail from a tool's parameters.
+func ExtractToolDetail(toolName string, params map[string]any, fallbackCmd string) string {
+	if len(params) == 0 {
+		return fallbackCmd
+	}
+	clean := strings.ToLower(strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(toolName), "mcp_"), "call_mcp_tool_"))
+	switch clean {
+	case "edit_file", "write_file", "read_file", "view_file", "replace_file_content":
+		if p := extractFirstString(params, "Path", "path", "filePath", "file_path", "target_file", "AbsolutePath", "Target", "target"); p != "" {
+			return filepath.Base(p)
+		}
+	case "run_command", "execute_command", "bash", "sh":
+		if ts := extractFirstString(params, "toolSummary", "tool_summary", "summary"); ts != "" {
+			return ts
+		}
+		if cl := extractFirstString(params, "CommandLine", "command", "cmd"); cl != "" {
+			if cmd := ExtractCommandName(cl); cmd != "" {
+				return cmd
+			}
+			return fallbackCmd
+		}
+	case "call_mcp_tool":
+		if tn := extractFirstString(params, "ToolName", "tool_name", "tool"); tn != "" {
+			return tn
+		}
+	case "grep_search", "find_by_name", "search_web", "web_search":
+		if q := extractFirstString(params, "Query", "query", "Pattern", "pattern"); q != "" {
+			return q
+		}
+	case "invoke_subagent", "define_subagent":
+		if r := extractFirstString(params, "Role", "role", "TypeName", "type_name", "Name", "name"); r != "" {
+			return r
+		}
+	case "manage_task":
+		if a := extractFirstString(params, "Action", "action"); a != "" {
+			return a
+		}
+	}
+
+	if ts := extractFirstString(params, "toolSummary", "tool_summary"); ts != "" {
+		return ts
+	}
+	if p := extractFirstString(params, "Path", "path", "filePath", "file_path"); p != "" {
+		return filepath.Base(p)
+	}
+	if cl := extractFirstString(params, "CommandLine", "command", "cmd"); cl != "" {
+		if cmd := ExtractCommandName(cl); cmd != "" {
+			return cmd
+		}
+		return fallbackCmd
+	}
+	return fallbackCmd
+}
+
 func applyStepUpdateSubmap(f *stepUpdateFields, su map[string]any) {
 	f.su = su
 	state := strings.ToUpper(extractFirstString(su, "state", "status"))
@@ -513,6 +568,9 @@ func applyStepUpdateSubmap(f *stepUpdateFields, su map[string]any) {
 	f.toolParams = params
 	if cmd != "" {
 		f.cmdName = cmd
+	}
+	if detail := ExtractToolDetail(f.toolName, f.toolParams, f.cmdName); detail != "" {
+		f.cmdName = detail
 	}
 	switch state {
 	case "DONE":
@@ -542,6 +600,9 @@ func parseStepUpdateEvent(raw map[string]any) stepUpdateFields {
 	}
 	if !f.hasStepIdx {
 		f.stepIdx, f.hasStepIdx = extractStepIndex(raw)
+	}
+	if f.cmdName == "" && len(f.toolParams) > 0 {
+		f.cmdName = ExtractToolDetail(f.toolName, f.toolParams, "")
 	}
 	return f
 }
@@ -690,7 +751,14 @@ func (d *StreamingDaemon) handleStepUpdateEvent(activeTurn *TurnContext, raw map
 	}
 
 	if isNewToolStart && (canonicalTool != "" || f.cmdName != "") {
-		activeTurn.Sink.OnToolCall(canonicalTool, f.cmdName)
+		toolForSink := canonicalTool
+		cmdForSink := f.cmdName
+		if f.toolName == "call_mcp_tool" {
+			toolForSink = "call_mcp_tool"
+		} else if canonicalTool == cmdForSink {
+			cmdForSink = ""
+		}
+		activeTurn.Sink.OnToolCall(toolForSink, cmdForSink)
 	}
 	if hasSkill {
 		activeTurn.Sink.OnSkillActivated(activatedSkill, "discord")
