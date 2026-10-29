@@ -247,11 +247,110 @@ func loadTargetFiles(shareRoot, repo string, targetFiles []string) []targetFileI
 	return files
 }
 
+func expandTargetFilesWithTests(targetFiles []string) []string {
+	seen := make(map[string]bool, len(targetFiles))
+	for _, tf := range targetFiles {
+		rel := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(tf), "./"), "/")
+		if rel != "" {
+			seen[rel] = true
+		}
+	}
+	expanded := make([]string, 0, len(targetFiles)*2)
+	for _, tf := range targetFiles {
+		expanded = append(expanded, tf)
+		rel := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(tf), "./"), "/")
+		if strings.HasSuffix(rel, ".go") && !strings.HasSuffix(rel, "_test.go") {
+			testRel := strings.TrimSuffix(rel, ".go") + "_test.go"
+			if !seen[testRel] {
+				seen[testRel] = true
+				expanded = append(expanded, testRel)
+			}
+		}
+	}
+	return expanded
+}
+
+type testFuncBlock struct {
+	name  string
+	start int
+	end   int
+	lines []string
+}
+
+func parseTopLevelTestFuncName(line string) string {
+	if !strings.HasPrefix(line, "func Test") {
+		return ""
+	}
+	rest := line[len("func "):]
+	end := 0
+	for end < len(rest) && isIdentByte(rest[end]) {
+		end++
+	}
+	if end > len("Test") && end < len(rest) && (rest[end] == '(' || rest[end] == '[') {
+		return rest[:end]
+	}
+	return ""
+}
+
+func collectTestFuncBlocks(lines []string) []testFuncBlock {
+	var blocks []testFuncBlock
+	for idx, line := range lines {
+		name := parseTopLevelTestFuncName(line)
+		if name == "" {
+			continue
+		}
+		end := scanBlockEnd(lines, idx)
+		blocks = append(blocks, testFuncBlock{
+			name:  name,
+			start: idx + 1,
+			end:   end,
+			lines: lines[idx:end],
+		})
+	}
+	return blocks
+}
+
+func testNameMatchesSymbol(tf testFuncBlock, sym string) bool {
+	lowerName, lowerSym := strings.ToLower(tf.name), strings.ToLower(sym)
+	if lowerName == "test"+lowerSym || strings.HasPrefix(lowerName, "test"+lowerSym+"_") {
+		return true
+	}
+	_, _, inBody := findFallbackSymbolLine(tf.lines, sym)
+	return strings.Contains(lowerName, lowerSym) && inBody
+}
+
+func matchTestBlocksForSymbol(blocks []testFuncBlock, sym string) []testFuncBlock {
+	var matched []testFuncBlock
+	for _, tf := range blocks {
+		if testNameMatchesSymbol(tf, sym) {
+			matched = append(matched, tf)
+		}
+	}
+	if len(matched) > 0 {
+		return matched
+	}
+	for _, tf := range blocks {
+		if _, _, ok := findFallbackSymbolLine(tf.lines, sym); ok {
+			matched = append(matched, tf)
+		}
+	}
+	return matched
+}
+
+func appendUniqueSpan(spans []targetSymSpan, cand targetSymSpan) []targetSymSpan {
+	for _, existing := range spans {
+		if existing.sym == cand.sym && existing.start == cand.start {
+			return spans
+		}
+	}
+	return append(spans, cand)
+}
+
 func runSymbolPass1(cleanSymbols []string, files []targetFileInfo, fileSpans map[string][]targetSymSpan, resolved map[string]bool) {
 	for _, sym := range cleanSymbols {
 		for _, f := range files {
 			if start, end, ok := findTopLevelSymbolSpan(f.lines, sym); ok {
-				fileSpans[f.relFile] = append(fileSpans[f.relFile], targetSymSpan{sym: sym, start: start, end: end})
+				fileSpans[f.relFile] = appendUniqueSpan(fileSpans[f.relFile], targetSymSpan{sym: sym, start: start, end: end})
 				resolved[sym] = true
 			}
 		}
@@ -265,7 +364,19 @@ func runSymbolPass2(cleanSymbols []string, files []targetFileInfo, fileSpans map
 		}
 		for _, f := range files {
 			if start, end, ok := findFallbackSymbolLine(f.lines, sym); ok {
-				fileSpans[f.relFile] = append(fileSpans[f.relFile], targetSymSpan{sym: sym, start: start, end: end})
+				fileSpans[f.relFile] = appendUniqueSpan(fileSpans[f.relFile], targetSymSpan{sym: sym, start: start, end: end})
+				resolved[sym] = true
+			}
+		}
+	}
+}
+
+func runTestSymbolPass(cleanSymbols []string, testFiles []targetFileInfo, fileSpans map[string][]targetSymSpan, resolved map[string]bool) {
+	for _, f := range testFiles {
+		blocks := collectTestFuncBlocks(f.lines)
+		for _, sym := range cleanSymbols {
+			for _, tf := range matchTestBlocksForSymbol(blocks, sym) {
+				fileSpans[f.relFile] = appendUniqueSpan(fileSpans[f.relFile], targetSymSpan{sym: tf.name, start: tf.start, end: tf.end})
 				resolved[sym] = true
 			}
 		}
@@ -276,7 +387,7 @@ func resolveSingleFileSpans(cleanSymbols []string, f targetFileInfo, fileSpans m
 	content := strings.Join(f.lines, "\n")
 	for _, sym := range cleanSymbols {
 		if start, end, ok := FindSymbolSpan(content, sym); ok {
-			fileSpans[f.relFile] = append(fileSpans[f.relFile], targetSymSpan{sym: sym, start: start, end: end})
+			fileSpans[f.relFile] = appendUniqueSpan(fileSpans[f.relFile], targetSymSpan{sym: sym, start: start, end: end})
 			resolved[sym] = true
 		}
 	}
@@ -306,11 +417,6 @@ func formatSpanLines(targetFiles []string, fileSpans map[string][]targetSymSpan)
 
 // ResolveSymbolSpans resolves deterministic StartLine-EndLine spans across targetFiles under shareRoot/repo.
 func ResolveSymbolSpans(shareRoot, repo string, targetFiles, targetSymbols []string) ([]string, bool) {
-	files := loadTargetFiles(shareRoot, repo, targetFiles)
-	if len(files) == 0 {
-		return nil, false
-	}
-
 	var cleanSymbols []string
 	seenSyms := make(map[string]bool)
 	for _, s := range targetSymbols {
@@ -321,6 +427,7 @@ func ResolveSymbolSpans(shareRoot, repo string, targetFiles, targetSymbols []str
 		}
 	}
 	if len(cleanSymbols) == 0 {
+		files := loadTargetFiles(shareRoot, repo, targetFiles)
 		spanLines := make([]string, 0, len(files))
 		for _, f := range files {
 			spanLines = append(spanLines, fmt.Sprintf("- %s (L1-L%d)", f.relFile, len(f.lines)))
@@ -328,16 +435,33 @@ func ResolveSymbolSpans(shareRoot, repo string, targetFiles, targetSymbols []str
 		return spanLines, len(spanLines) > 0
 	}
 
+	expandedFiles := expandTargetFilesWithTests(targetFiles)
+	files := loadTargetFiles(shareRoot, repo, expandedFiles)
+	if len(files) == 0 {
+		return nil, false
+	}
+
+	var nonTestFiles, testFiles []targetFileInfo
+	for _, f := range files {
+		if strings.HasSuffix(f.relFile, "_test.go") {
+			testFiles = append(testFiles, f)
+		} else {
+			nonTestFiles = append(nonTestFiles, f)
+		}
+	}
+
 	fileSpans := make(map[string][]targetSymSpan)
 	resolved := make(map[string]bool)
 
-	if len(files) == 1 {
+	if len(files) == 1 && len(testFiles) == 0 {
 		resolveSingleFileSpans(cleanSymbols, files[0], fileSpans, resolved)
 	} else {
 		runSymbolPass1(cleanSymbols, files, fileSpans, resolved)
-		runSymbolPass2(cleanSymbols, files, fileSpans, resolved)
+		runSymbolPass2(cleanSymbols, nonTestFiles, fileSpans, resolved)
+		runTestSymbolPass(cleanSymbols, testFiles, fileSpans, resolved)
+		runSymbolPass2(cleanSymbols, testFiles, fileSpans, resolved)
 	}
 
-	spanLines := formatSpanLines(targetFiles, fileSpans)
+	spanLines := formatSpanLines(expandedFiles, fileSpans)
 	return spanLines, len(resolved) == len(cleanSymbols)
 }
