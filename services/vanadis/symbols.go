@@ -269,21 +269,22 @@ func appendSiblingTestFiles(repoDir, rel string, seen map[string]bool, expanded 
 func expandTargetFilesWithTests(shareRoot, repo string, targetFiles []string) []string {
 	repoDir := filepath.Join(strings.TrimSpace(shareRoot), cleanRepoDirName(repo))
 	seen := make(map[string]bool, len(targetFiles))
+	dirHasExplicitTest := make(map[string]bool, len(targetFiles))
 	for _, tf := range targetFiles {
 		rel := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(tf), "./"), "/")
 		if rel != "" {
 			seen[rel] = true
+			if strings.HasSuffix(rel, "_test.go") {
+				dirHasExplicitTest[filepath.Dir(rel)] = true
+			}
 		}
 	}
 	expanded := make([]string, 0, len(targetFiles)*2)
 	for _, tf := range targetFiles {
 		expanded = append(expanded, tf)
 		rel := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(tf), "./"), "/")
-		if strings.HasSuffix(rel, ".go") && !strings.HasSuffix(rel, "_test.go") {
+		if strings.HasSuffix(rel, ".go") && !strings.HasSuffix(rel, "_test.go") && !dirHasExplicitTest[filepath.Dir(rel)] {
 			testRel := strings.TrimSuffix(rel, ".go") + "_test.go"
-			if seen[testRel] {
-				continue
-			}
 			if _, err := os.Stat(filepath.Join(repoDir, testRel)); err == nil {
 				seen[testRel] = true
 				expanded = append(expanded, testRel)

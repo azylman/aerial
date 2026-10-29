@@ -320,6 +320,14 @@ func TestResolveSymbolSpans(t *testing.T) {
 			wantAllResolved: true,
 		},
 		{
+			name:            "explicit test file in same dir suppresses wildcard sibling test scan",
+			repo:            "azylman/aerial",
+			targetFiles:     []string{"pkg/foo.go", "pkg/bar_test.go"},
+			targetSymbols:   []string{"Foo", "OnlyInBody"},
+			wantLines:       []string{"- pkg/foo.go: Foo (L3-L5)"},
+			wantAllResolved: false,
+		},
+		{
 			name:            "non existent file",
 			repo:            "azylman/aerial",
 			targetFiles:     []string{"missing/missing.go"},
