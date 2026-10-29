@@ -927,6 +927,27 @@ func TestExtractToolDetail(t *testing.T) {
 			fallbackCmd: "fallback-value",
 			want:        "fallback-value",
 		},
+		{
+			name:        "run_command rejects unsanitized subshell command without leaking fallback",
+			toolName:    "run_command",
+			params:      map[string]any{"CommandLine": "(cd dir && make)"},
+			fallbackCmd: "(cd dir && make)",
+			want:        "",
+		},
+		{
+			name:        "run_command rejects env-only command without leaking fallback",
+			toolName:    "run_command",
+			params:      map[string]any{"CommandLine": "SECRET_KEY=12345"},
+			fallbackCmd: "SECRET_KEY=12345",
+			want:        "",
+		},
+		{
+			name:        "generic tool rejects unsanitized command without leaking fallback",
+			toolName:    "custom_runner",
+			params:      map[string]any{"CommandLine": "(cd dir && make)"},
+			fallbackCmd: "(cd dir && make)",
+			want:        "",
+		},
 	}
 
 	for _, tc := range tests {
@@ -937,6 +958,30 @@ func TestExtractToolDetail(t *testing.T) {
 				t.Errorf("ExtractToolDetail(%q, %v, %q) = %q, want %q", tc.toolName, tc.params, tc.fallbackCmd, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestStreamingDaemon_UnsanitizedCommandLineDoesNotLeak(t *testing.T) {
+	h := startTestStreamingDaemon(t, cfgForSession("00000000-0000-0000-0000-000000000203"), "", true)
+	sink := newMockTurnSink()
+	turn := &TurnContext{TurnID: "turn-leak-check", Prompt: "run unsanitized command", Sink: sink, CreatedAt: time.Now()}
+	if err := h.daemon.Send(turn.Prompt, turn); err != nil {
+		t.Fatalf("send failed: %v", err)
+	}
+
+	events := `{"event":"step_update","step_update":{"state":"RUNNING","type":"tool_call","step_index":1,"tool_name":"run_command","tool_info":{"parameters":{"CommandLine":"(cd /secret && cat token.txt)"}}}}` + "\n" +
+		`{"event":"step_update","step_update":{"state":"DONE","type":"tool_call","step_index":1,"tool_name":"run_command"}}` + "\n" +
+		`{"event":"result","result":{"status":"SUCCESS","response":"done"}}` + "\n"
+	_, _ = h.outW.Write([]byte(events))
+
+	waitAndAssertSinkResult(t, "UnsanitizedCommandNoLeak", sink, "done", "", "")
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.toolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d: %+v", len(sink.toolCalls), sink.toolCalls)
+	}
+	if sink.toolCalls[0] != "run_command:" {
+		t.Errorf("expected tool call to be sanitized to 'run_command:', got %q", sink.toolCalls[0])
 	}
 }
 

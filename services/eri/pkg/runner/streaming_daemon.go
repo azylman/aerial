@@ -462,23 +462,18 @@ type stepUpdateFields struct {
 	toolEndStatus string
 }
 
-func extractToolInfoParams(su map[string]any) (map[string]any, string) {
+func extractToolInfoParams(su map[string]any) map[string]any {
 	if info, ok := su["tool_info"].(map[string]any); ok {
 		if params, ok := info["parameters"].(map[string]any); ok {
-			var cmdName string
-			if cl := extractFirstString(params, "CommandLine"); cl != "" {
-				cmdName = cl
-			}
-			return params, cmdName
+			return params
 		}
 	}
-	return nil, ""
+	return nil
 }
 
-func extractFirstToolCallEntry(su map[string]any, currentToolName string, currentParams map[string]any) (string, map[string]any, string) {
+func extractFirstToolCallEntry(su map[string]any, currentToolName string, currentParams map[string]any) (string, map[string]any) {
 	toolName := currentToolName
 	toolParams := currentParams
-	var cmdName string
 	if tcs, ok := su["tool_calls"].([]any); ok && len(tcs) > 0 {
 		if firstTc, ok := tcs[0].(map[string]any); ok {
 			if n := extractFirstString(firstTc, "name"); n != "" && toolName == "" {
@@ -486,13 +481,10 @@ func extractFirstToolCallEntry(su map[string]any, currentToolName string, curren
 			}
 			if args, ok := firstTc["args"].(map[string]any); ok && toolParams == nil {
 				toolParams = args
-				if cl := extractFirstString(args, "CommandLine"); cl != "" {
-					cmdName = cl
-				}
 			}
 		}
 	}
-	return toolName, toolParams, cmdName
+	return toolName, toolParams
 }
 
 // ExtractToolDetail extracts the primary target or summary detail from a tool's parameters.
@@ -514,7 +506,7 @@ func ExtractToolDetail(toolName string, params map[string]any, fallbackCmd strin
 			if cmd := ExtractCommandName(cl); cmd != "" {
 				return cmd
 			}
-			return fallbackCmd
+			return ""
 		}
 	case "call_mcp_tool":
 		if tn := extractFirstString(params, "ToolName", "tool_name", "tool"); tn != "" {
@@ -544,7 +536,7 @@ func ExtractToolDetail(toolName string, params map[string]any, fallbackCmd strin
 		if cmd := ExtractCommandName(cl); cmd != "" {
 			return cmd
 		}
-		return fallbackCmd
+		return ""
 	}
 	return fallbackCmd
 }
@@ -557,21 +549,11 @@ func applyStepUpdateSubmap(f *stepUpdateFields, su map[string]any) {
 	if tn := extractFirstString(su, "tool_name"); tn != "" {
 		f.toolName = tn
 	}
-	if params, cmd := extractToolInfoParams(su); params != nil {
+	if params := extractToolInfoParams(su); params != nil {
 		f.toolParams = params
-		if cmd != "" {
-			f.cmdName = cmd
-		}
 	}
-	tn, params, cmd := extractFirstToolCallEntry(su, f.toolName, f.toolParams)
-	f.toolName = tn
-	f.toolParams = params
-	if cmd != "" {
-		f.cmdName = cmd
-	}
-	if detail := ExtractToolDetail(f.toolName, f.toolParams, f.cmdName); detail != "" {
-		f.cmdName = detail
-	}
+	f.toolName, f.toolParams = extractFirstToolCallEntry(su, f.toolName, f.toolParams)
+	f.cmdName = ExtractToolDetail(f.toolName, f.toolParams, f.cmdName)
 	switch state {
 	case "DONE":
 		f.toolEndStatus = "ok"
