@@ -35,6 +35,15 @@ func isWidgetChunkInProgress(status string) bool {
 	}
 }
 
+func isWidgetChunkWaitingOnCI(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "open", "pr_opened":
+		return true
+	default:
+		return false
+	}
+}
+
 func cloneStatusWidgetRequest(req discord.StatusWidgetRequest, stripSteps bool) discord.StatusWidgetRequest {
 	clone := req
 	if len(req.Chunks) > 0 {
@@ -43,7 +52,7 @@ func cloneStatusWidgetRequest(req discord.StatusWidgetRequest, stripSteps bool) 
 			if len(c.DeployingJobs) > 0 {
 				c.DeployingJobs = append([]string(nil), c.DeployingJobs...)
 			}
-			if stripSteps {
+			if stripSteps && !isWidgetChunkWaitingOnCI(c.Status) {
 				c.ActiveStep = ""
 			}
 			clone.Chunks[i] = c
@@ -72,29 +81,52 @@ func (p *WorkerPool) applyChannelPolicyRedirect(sess *discordgo.Session, req *di
 	}
 }
 
+func (p *WorkerPool) clearChunkStepStateLocked(chunkID string) {
+	if chunkID != "" {
+		delete(p.activeChunkSteps, chunkID)
+		delete(p.activeChunkTurns, chunkID)
+	}
+}
+
+func (p *WorkerPool) syncSingleWidgetChunkLocked(c *discord.StatusWidgetChunk, existing *discord.StatusWidgetRequest, idx int, buildID string, isSinglePR, isTerminalBuild bool) {
+	if c.ID == "" && existing != nil && idx < len(existing.Chunks) && existing.Chunks[idx].ID != "" {
+		c.ID = existing.Chunks[idx].ID
+	}
+	if c.ID == "" && isSinglePR {
+		c.ID = buildID
+	}
+	if c.ID != "" {
+		p.chunkToBuildID[c.ID] = buildID
+	}
+	if isTerminalBuild {
+		p.clearChunkStepStateLocked(c.ID)
+		c.ActiveStep = ""
+		return
+	}
+	if isWidgetChunkWaitingOnCI(c.Status) {
+		p.clearChunkStepStateLocked(c.ID)
+		c.ActiveStep = strings.TrimSpace(c.ActiveStep)
+		if c.ActiveStep == "" && existing != nil && idx < len(existing.Chunks) && isWidgetChunkWaitingOnCI(existing.Chunks[idx].Status) {
+			c.ActiveStep = existing.Chunks[idx].ActiveStep
+		}
+		return
+	}
+	if !isWidgetChunkInProgress(c.Status) {
+		p.clearChunkStepStateLocked(c.ID)
+		c.ActiveStep = ""
+		return
+	}
+	if c.ID != "" {
+		if step, ok := p.activeChunkSteps[c.ID]; ok && step != "" {
+			c.ActiveStep = step
+		}
+	}
+}
+
 func (p *WorkerPool) syncWidgetChunkStatesLocked(req *discord.StatusWidgetRequest, existing *discord.StatusWidgetRequest, isTerminalBuild bool) {
+	isSinglePR := len(req.Chunks) == 1 && strings.HasPrefix(req.ID, "pr-")
 	for i := range req.Chunks {
-		c := &req.Chunks[i]
-		if c.ID == "" && existing != nil && i < len(existing.Chunks) && existing.Chunks[i].ID != "" {
-			c.ID = existing.Chunks[i].ID
-		}
-		if c.ID == "" && len(req.Chunks) == 1 && strings.HasPrefix(req.ID, "pr-") {
-			c.ID = req.ID
-		}
-		if c.ID != "" {
-			p.chunkToBuildID[c.ID] = req.ID
-		}
-		if isTerminalBuild || !isWidgetChunkInProgress(c.Status) {
-			if c.ID != "" {
-				delete(p.activeChunkSteps, c.ID)
-				delete(p.activeChunkTurns, c.ID)
-			}
-			c.ActiveStep = ""
-		} else if c.ID != "" {
-			if step, ok := p.activeChunkSteps[c.ID]; ok && step != "" {
-				c.ActiveStep = step
-			}
-		}
+		p.syncSingleWidgetChunkLocked(&req.Chunks[i], existing, i, req.ID, isSinglePR, isTerminalBuild)
 	}
 }
 

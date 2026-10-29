@@ -59,6 +59,146 @@ func TestHelpers_WidgetStatus(t *testing.T) {
 			}
 		})
 	}
+
+	syncWidgetTests := []struct {
+		name           string
+		build          VanadisBuild
+		chunks         []VanadisChunk
+		req            SyncChunkPRWidgetRequest
+		wantStatus     string
+		wantSkipSink   bool
+		wantActiveStep string
+	}{
+		{
+			name: "preserves active step and sets skipsink when chunk is open and build running with message",
+			build: VanadisBuild{
+				ID:              "build-1",
+				Status:          "running",
+				StatusMessageID: "msg-123",
+				Title:           "Test Build",
+			},
+			chunks: []VanadisChunk{
+				{ID: "c1", ChunkIndex: 0, PRNumber: 101, Status: "open"},
+			},
+			req: SyncChunkPRWidgetRequest{
+				BuildID:    "build-1",
+				Repo:       "azylman/aerial",
+				PRNumber:   101,
+				PRStatus:   "open",
+				ActiveStep: "Waiting on CI (2/5 passed)",
+				PRFound:    true,
+			},
+			wantStatus:     "running",
+			wantSkipSink:   true,
+			wantActiveStep: "Waiting on CI (2/5 passed)",
+		},
+		{
+			name: "sets active step on pr_opened chunk",
+			build: VanadisBuild{
+				ID:              "build-2",
+				Status:          "running",
+				StatusMessageID: "msg-456",
+				Title:           "Test Build 2",
+			},
+			chunks: []VanadisChunk{
+				{ID: "c2", ChunkIndex: 0, PRNumber: 102, Status: "pr_opened"},
+			},
+			req: SyncChunkPRWidgetRequest{
+				BuildID:    "build-2",
+				Repo:       "azylman/aerial",
+				PRNumber:   102,
+				PRStatus:   "open",
+				ActiveStep: "Waiting on CI (3/3 passed)",
+				PRFound:    true,
+			},
+			wantStatus:     "running",
+			wantSkipSink:   true,
+			wantActiveStep: "Waiting on CI (3/3 passed)",
+		},
+		{
+			name: "omits skipsink when build status message ID is empty",
+			build: VanadisBuild{
+				ID:              "build-3",
+				Status:          "running",
+				StatusMessageID: "",
+				Title:           "Test Build 3",
+			},
+			chunks: []VanadisChunk{
+				{ID: "c3", ChunkIndex: 0, PRNumber: 103, Status: "open"},
+			},
+			req: SyncChunkPRWidgetRequest{
+				BuildID:    "build-3",
+				Repo:       "azylman/aerial",
+				PRNumber:   103,
+				PRStatus:   "open",
+				ActiveStep: "Waiting on CI (1/2 passed)",
+				PRFound:    true,
+			},
+			wantStatus:     "running",
+			wantSkipSink:   false,
+			wantActiveStep: "Waiting on CI (1/2 passed)",
+		},
+		{
+			name: "omits skipsink and active step when pr status is failed",
+			build: VanadisBuild{
+				ID:              "build-4",
+				Status:          "running",
+				StatusMessageID: "msg-789",
+				Title:           "Test Build 4",
+			},
+			chunks: []VanadisChunk{
+				{ID: "c4", ChunkIndex: 0, PRNumber: 104, Status: "pr_opened"},
+			},
+			req: SyncChunkPRWidgetRequest{
+				BuildID:    "build-4",
+				Repo:       "azylman/aerial",
+				PRNumber:   104,
+				PRStatus:   "failed",
+				ActiveStep: "Waiting on CI (0/2 passed)",
+				PRFound:    true,
+			},
+			wantStatus:     "failed",
+			wantSkipSink:   false,
+			wantActiveStep: "",
+		},
+		{
+			name: "omits skipsink when active step is whitespace",
+			build: VanadisBuild{
+				ID:              "build-5",
+				Status:          "running",
+				StatusMessageID: "msg-999",
+				Title:           "Test Build 5",
+			},
+			chunks: []VanadisChunk{
+				{ID: "c5", ChunkIndex: 0, PRNumber: 105, Status: "open"},
+			},
+			req: SyncChunkPRWidgetRequest{
+				BuildID:    "build-5",
+				Repo:       "azylman/aerial",
+				PRNumber:   105,
+				PRStatus:   "open",
+				ActiveStep: "   ",
+				PRFound:    true,
+			},
+			wantStatus:     "running",
+			wantSkipSink:   false,
+			wantActiveStep: "",
+		},
+	}
+	for _, tc := range syncWidgetTests {
+		t.Run("sync_widget_"+tc.name, func(t *testing.T) {
+			got := buildSyncWidgetRequest(tc.build, tc.chunks, tc.req)
+			if got.Status != tc.wantStatus {
+				t.Errorf("buildSyncWidgetRequest Status = %q, want %q", got.Status, tc.wantStatus)
+			}
+			if got.SkipSink != tc.wantSkipSink {
+				t.Errorf("buildSyncWidgetRequest SkipSink = %v, want %v", got.SkipSink, tc.wantSkipSink)
+			}
+			if len(got.Chunks) > 0 && got.Chunks[0].ActiveStep != tc.wantActiveStep {
+				t.Errorf("buildSyncWidgetRequest Chunk[0].ActiveStep = %q, want %q", got.Chunks[0].ActiveStep, tc.wantActiveStep)
+			}
+		})
+	}
 }
 
 func setupTestStoreWithBuild() (*memoryVanadisStore, string, []string) {
@@ -608,6 +748,23 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 		b, _, _ := sWidget.GetBuild(context.Background(), bWidgetID)
 		if b.StatusMessageID != "msg-new-widget-1" {
 			t.Errorf("expected status_message_id updated to msg-new-widget-1, got %q", b.StatusMessageID)
+		}
+
+		// ActiveStep and SkipSink propagation on open PR sync
+		ciPayload := `{"repo":"aerial","pr_number":301,"pr_status":"open","active_step":"Waiting on CI (2/4 passed)","pr_found":true}`
+		recCI := httptest.NewRecorder()
+		muxWidget.ServeHTTP(recCI, httptest.NewRequest(http.MethodPost, "/chunks/sync-pr-widget", strings.NewReader(ciPayload)))
+		if recCI.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for CI sync, got %d: %s", recCI.Code, recCI.Body.String())
+		}
+		if len(widgetDispatched) > 0 {
+			last := widgetDispatched[len(widgetDispatched)-1]
+			if !last.SkipSink {
+				t.Errorf("expected SkipSink to be true on active_step update with existing message_id")
+			}
+			if len(last.Chunks) == 0 || last.Chunks[0].ActiveStep != "Waiting on CI (2/4 passed)" {
+				t.Errorf("expected chunk ActiveStep to be %q, got %+v", "Waiting on CI (2/4 passed)", last.Chunks)
+			}
 		}
 
 		// Build ID direct sync
