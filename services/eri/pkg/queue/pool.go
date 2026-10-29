@@ -764,7 +764,7 @@ func (p *WorkerPool) sweepInterruptedProcessingEntries(ctx context.Context, stor
 	if dispatches, err := store.GetPendingOrProcessingDispatches(ctx, 0); err == nil {
 		for _, d := range dispatches {
 			if d.Status == db.StatusProcessing {
-				if err := store.ResetDispatchToPendingWithRestart(ctx, d.ID, "deployment_drain"); err != nil {
+				if err := store.UpdateDispatchStatus(ctx, d.ID, db.StatusPending, "deployment_drain"); err != nil {
 					log.Printf("[WorkerPool] Warning resetting dispatch %s to pending: %v", d.ID, err)
 				}
 			}

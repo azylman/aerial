@@ -1688,6 +1688,8 @@ func TestTurnExecution_PrepareAttemptPrompt(t *testing.T) {
 		hasOnDiskSess bool
 		isDispatch    bool
 		restartCount  int
+		errorMessage  string
+		burst         []db.Message
 		wantPrompt    string
 	}{
 		{
@@ -1720,6 +1722,37 @@ func TestTurnExecution_PrepareAttemptPrompt(t *testing.T) {
 			hasOnDiskSess: true,
 			isDispatch:    true,
 			restartCount:  1,
+			wantPrompt:    contPrompt,
+		},
+		{
+			name:          "deployment-drained dispatch attempt 1 with on-disk session returns continuation template",
+			attempt:       1,
+			promptToSend:  origPrompt,
+			hasSessionID:  true,
+			hasOnDiskSess: true,
+			isDispatch:    true,
+			restartCount:  0,
+			errorMessage:  "interrupted by graceful deployment",
+			wantPrompt:    contPrompt,
+		},
+		{
+			name:          "deployment-drained discord burst attempt 1 with on-disk session returns continuation template",
+			attempt:       1,
+			promptToSend:  origPrompt,
+			hasSessionID:  true,
+			hasOnDiskSess: true,
+			isDispatch:    false,
+			burst:         []db.Message{{ID: "m1", ErrorMessage: "interrupted by graceful deployment"}},
+			wantPrompt:    contPrompt,
+		},
+		{
+			name:          "restarted discord burst attempt 1 with on-disk session returns continuation template",
+			attempt:       1,
+			promptToSend:  origPrompt,
+			hasSessionID:  true,
+			hasOnDiskSess: true,
+			isDispatch:    false,
+			burst:         []db.Message{{ID: "m1", RestartCount: 1}},
 			wantPrompt:    contPrompt,
 		},
 		{
@@ -1758,6 +1791,7 @@ func TestTurnExecution_PrepareAttemptPrompt(t *testing.T) {
 			te := &turnExecution{
 				pool:       pool,
 				turnPrompt: origPrompt,
+				burst:      tc.burst,
 			}
 			if tc.hasSessionID {
 				te.currentSessionID = sessUUID
@@ -1766,6 +1800,7 @@ func TestTurnExecution_PrepareAttemptPrompt(t *testing.T) {
 				te.dispatch = &db.Dispatch{
 					ID:           "disp-test-1",
 					RestartCount: tc.restartCount,
+					ErrorMessage: tc.errorMessage,
 				}
 			}
 
