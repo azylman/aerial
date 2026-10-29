@@ -121,6 +121,28 @@ func (s *RouterServer) handleDirtyPRConflict(ctx context.Context, repo string, p
 	}
 }
 
+func (s *RouterServer) updatePRBranch(ctx context.Context, repo string, prNumber int) error {
+	apiURL := firstNonEmpty(s.cfg.GitHubAPIURL, "https://api.github.com")
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, fmt.Sprintf("%s/repos/%s/pulls/%d/update-branch", apiURL, normalizeRepo(repo), prNumber), strings.NewReader(`{}`))
+	if err != nil {
+		return fmt.Errorf("create update-branch request: %w", err)
+	}
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	req.Header.Set("Content-Type", "application/json")
+	if s.cfg.GitHubToken != "" {
+		req.Header.Set("Authorization", "token "+s.cfg.GitHubToken)
+	}
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("update-branch request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("update-branch returned status %d", resp.StatusCode)
+	}
+	return nil
+}
+
 func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) error {
 	if s.registry == nil {
 		return nil
@@ -129,6 +151,7 @@ func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) er
 	if err != nil {
 		return fmt.Errorf("list open prs: %w", err)
 	}
+	updatedBehind := false
 	for _, pr := range openPRs {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -142,6 +165,11 @@ func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) er
 		}
 		if (details.Mergeable != nil && !*details.Mergeable) || details.MergeableState == "dirty" {
 			s.handleDirtyPRConflict(ctx, repo, pr)
+		} else if !updatedBehind && details.MergeableState == "behind" {
+			updatedBehind = true
+			if err := s.updatePRBranch(ctx, repo, pr.PRNumber); err != nil {
+				log.Printf("[webhooks-router] [github] warning updating behind PR #%d branch: %v", pr.PRNumber, err)
+			}
 		}
 	}
 	return nil

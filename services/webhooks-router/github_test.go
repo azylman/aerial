@@ -1075,6 +1075,7 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 		wantPromptSubs []string
 		wantDMs        int
 		wantDMSubs     []string
+		wantUpdatedPRs []string
 	}{
 		{
 			name:           "nil registry is clean no-op",
@@ -1103,6 +1104,31 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 			openPRs:     []RegisteredPR{{PRNumber: 544, Branch: "feat/clean", TargetID: "1555405874565091380", HeadSHA: "head544"}},
 			prNumber:    544,
 			prResponses: []string{`{"number":544,"mergeable":true,"mergeable_state":"clean"}`},
+		},
+		{
+			name: "behind PRs update only oldest behind PR in FIFO order",
+			openPRs: []RegisteredPR{
+				{PRNumber: 550, Branch: "feat/behind-1", TargetID: "1555405874565091380", HeadSHA: "head550"},
+				{PRNumber: 551, Branch: "feat/behind-2", TargetID: "1555405874565091380", HeadSHA: "head551"},
+			},
+			prResponses: []string{
+				`{"number":550,"mergeable":true,"mergeable_state":"behind"}`,
+				`{"message":"Updating pull request branch."}`,
+				`{"number":551,"mergeable":true,"mergeable_state":"behind"}`,
+			},
+			prStatusCodes:  []int{http.StatusOK, http.StatusAccepted, http.StatusOK},
+			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/550/update-branch"},
+		},
+		{
+			name:     "behind PR update-branch non-202 logs warning without failing conflict check",
+			openPRs:  []RegisteredPR{{PRNumber: 552, Branch: "feat/behind-err", TargetID: "1555405874565091380", HeadSHA: "head552"}},
+			prNumber: 552,
+			prResponses: []string{
+				`{"number":552,"mergeable":true,"mergeable_state":"behind"}`,
+				`{"message":"Validation Failed"}`,
+			},
+			prStatusCodes:  []int{http.StatusOK, http.StatusUnprocessableEntity},
+			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/552/update-branch"},
 		},
 		{
 			name:     "retry null or unknown mergeable state",
@@ -1156,7 +1182,14 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var reqCount atomic.Int32
+			var mu sync.Mutex
+			var putPaths []string
 			apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodPut {
+					mu.Lock()
+					putPaths = append(putPaths, r.URL.Path)
+					mu.Unlock()
+				}
 				idx := int(reqCount.Add(1)) - 1
 				code := http.StatusOK
 				if idx < len(tc.prStatusCodes) && tc.prStatusCodes[idx] != 0 {
@@ -1185,7 +1218,7 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 				}
 			}
 			mockDisp := &mockOutboundDispatcher{}
-			srv := newTestRouter(Config{GitHubAPIURL: apiServer.URL}, nil, mockReg, mockDisp)
+			srv := newTestRouter(Config{GitHubAPIURL: apiServer.URL, GitHubToken: "test-token"}, nil, mockReg, mockDisp)
 			srv.SetConflictCheckDelay(1 * time.Millisecond)
 
 			err := srv.checkOpenPRConflicts(ctx, "azylman/aerial")
@@ -1194,6 +1227,17 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 			}
 			if tc.wantErrSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr)) {
 				t.Errorf("err = %v, want substr %q", err, tc.wantErrSubstr)
+			}
+			mu.Lock()
+			gotUpdated := append([]string(nil), putPaths...)
+			mu.Unlock()
+			if len(gotUpdated) != len(tc.wantUpdatedPRs) {
+				t.Fatalf("got updated PR paths %v, want %v", gotUpdated, tc.wantUpdatedPRs)
+			}
+			for i := range tc.wantUpdatedPRs {
+				if gotUpdated[i] != tc.wantUpdatedPRs[i] {
+					t.Errorf("updated PR path[%d] = %q, want %q", i, gotUpdated[i], tc.wantUpdatedPRs[i])
+				}
 			}
 			if mReg, ok := mockReg.(*mockPRRegistry); ok && mReg != nil {
 				if tc.wantConflict {
