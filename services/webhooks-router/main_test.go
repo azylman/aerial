@@ -32,6 +32,7 @@ type mockRiverInserter struct {
 	insertedCrashAlertJobs []NomadCrashAlertArgs
 	insertedWidgetSyncJobs []WidgetSyncArgs
 	insertedEventJobs      []EventTriggerWebhookArgs
+	insertedConflictJobs   []MergeConflictArgs
 	insertedOpts           []*river.InsertOpts
 	skipDuplicate          bool
 	err                    error
@@ -57,6 +58,8 @@ func (m *mockRiverInserter) Insert(ctx context.Context, args river.JobArgs, opts
 		m.insertedWidgetSyncJobs = append(m.insertedWidgetSyncJobs, a)
 	case EventTriggerWebhookArgs:
 		m.insertedEventJobs = append(m.insertedEventJobs, a)
+	case MergeConflictArgs:
+		m.insertedConflictJobs = append(m.insertedConflictJobs, a)
 	}
 	return &rivertype.JobInsertResult{
 		Job:                      &rivertype.JobRow{ID: 1},

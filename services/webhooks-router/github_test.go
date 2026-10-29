@@ -14,9 +14,6 @@ import (
 	"time"
 )
 
-// SetConflictCheckDelay configures the delay before checking merge conflicts on push to main.
-func (s *RouterServer) SetConflictCheckDelay(d time.Duration) { s.conflictCheckDelay = d }
-
 // --- 3. GitHub Webhook HTTP Handler & Event Processing ---
 
 func TestHandleGitHubWebhook(t *testing.T) {
@@ -138,8 +135,9 @@ func TestProcessGitHubEvent(t *testing.T) {
 			_, _ = w.Write([]byte(`[{"number": 999, "state": "closed", "head": {"ref": "feat/squash", "sha": "squash123"}}]`))
 		case strings.Contains(r.URL.Path, "/commits/pushsha999/pulls"):
 			_, _ = w.Write([]byte(`[{"number": 522, "state": "closed"}]`))
-		case strings.Contains(r.URL.Path, "/pulls/543"):
-			_, _ = w.Write([]byte(`{"number": 543, "mergeable": false, "mergeable_state": "dirty"}`))
+		case strings.Contains(r.URL.Path, "/pulls/543/update-branch"):
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = w.Write([]byte(`{"message": "merge conflict between base and head"}`))
 		case strings.Contains(r.URL.Path, "/issues/525/comments"):
 			_, _ = w.Write([]byte(`[{"id": 0, "body": "Non-roborev comment"}, {"id": 1, "body": "## roborev: Review Complete (` + "`old0000`" + `)\nOld bug"}, {"id": 2, "body": "## roborev: Combined Review (` + "`robo525`" + `)\nFound SQL injection in query"}]`))
 		case strings.Contains(r.URL.Path, "/actions/runs/800/jobs"):
@@ -568,7 +566,6 @@ func TestProcessGitHubEvent(t *testing.T) {
 				disp = tc.disp
 			}
 			srv := newTestRouter(Config{GitHubAPIURL: mockServer.URL}, mockServer.Client(), reg, disp, inserters...)
-			srv.SetConflictCheckDelay(1 * time.Millisecond)
 			srv.onProcessed = func(string, string) {}
 
 			res, err := srv.ProcessGitHubEvent(ctx, tc.event, tc.delivery, []byte(tc.payload))
@@ -1058,24 +1055,25 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name           string
-		useNilRegistry bool
-		listOpenPRsErr error
-		conflictErr    error
-		openPRs        []RegisteredPR
-		prNumber       int
-		prResponses    []string
-		prStatusCodes  []int
-		wantErr        bool
-		wantErrSubstr  string
-		wantConflict   bool
-		wantConflictPR int
-		wantPrompts    int
-		wantDispatches int
-		wantPromptSubs []string
-		wantDMs        int
-		wantDMSubs     []string
-		wantUpdatedPRs []string
+		name               string
+		useNilRegistry     bool
+		useRiver           bool
+		riverErr           error
+		listOpenPRsErr     error
+		conflictErr        error
+		openPRs            []RegisteredPR
+		prResponses        []string
+		prStatusCodes      []int
+		wantErr            bool
+		wantErrSubstr      string
+		wantConflict       bool
+		wantConflictPR     int
+		wantConflictQueued int
+		wantPrompts        int
+		wantDispatches     int
+		wantPromptSubs     []string
+		wantDMs            int
+		wantUpdatedPRs     []string
 	}{
 		{
 			name:           "nil registry is clean no-op",
@@ -1089,92 +1087,103 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 			wantErrSubstr:  "list open prs",
 		},
 		{
-			name:           "conflict detected transitions and dispatches DM and prompt",
+			name:           "422 merge conflict transitions and dispatches via background /dispatch without DM",
 			openPRs:        []RegisteredPR{{PRNumber: 543, Branch: "feat/my-feature", TargetID: "1555405874565091380", HeadSHA: "head543"}},
-			prNumber:       543,
-			prResponses:    []string{`{"number":543,"mergeable":false,"mergeable_state":"dirty"}`},
+			prStatusCodes:  []int{http.StatusUnprocessableEntity},
+			prResponses:    []string{`{"message":"merge conflict between base and head"}`},
 			wantConflict:   true,
 			wantConflictPR: 543,
 			wantDMs:        0,
 			wantDispatches: 1,
 			wantPromptSubs: []string{"Merge conflict detected on PR #543"},
+			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/543/update-branch"},
 		},
 		{
-			name:        "clean PR no action taken",
-			openPRs:     []RegisteredPR{{PRNumber: 544, Branch: "feat/clean", TargetID: "1555405874565091380", HeadSHA: "head544"}},
-			prNumber:    544,
-			prResponses: []string{`{"number":544,"mergeable":true,"mergeable_state":"clean"}`},
+			name:               "409 conflict with river client enqueues MergeConflictArgs on merge_conflict queue",
+			useRiver:           true,
+			openPRs:            []RegisteredPR{{PRNumber: 543, Branch: "feat/my-feature", TargetID: "1555405874565091380", HeadSHA: "head543"}},
+			prStatusCodes:      []int{http.StatusConflict},
+			prResponses:        []string{`{"message":"Merge conflict"}`},
+			wantConflict:       true,
+			wantConflictPR:     543,
+			wantConflictQueued: 1,
+			wantDMs:            0,
+			wantDispatches:     0,
+			wantUpdatedPRs:     []string{"/repos/azylman/aerial/pulls/543/update-branch"},
 		},
 		{
-			name: "behind PRs update only oldest behind PR in FIFO order",
+			name:           "river insert error on conflict logs warning without failing check",
+			useRiver:       true,
+			riverErr:       errors.New("river insert failed"),
+			openPRs:        []RegisteredPR{{PRNumber: 543, Branch: "feat/my-feature", TargetID: "1555405874565091380", HeadSHA: "head543"}},
+			prStatusCodes:  []int{http.StatusConflict},
+			prResponses:    []string{`{"message":"Merge conflict"}`},
+			wantConflict:   true,
+			wantConflictPR: 543,
+			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/543/update-branch"},
+		},
+		{
+			name: "open PRs update only oldest clean PR in FIFO order",
 			openPRs: []RegisteredPR{
 				{PRNumber: 550, Branch: "feat/behind-1", TargetID: "1555405874565091380", HeadSHA: "head550"},
 				{PRNumber: 551, Branch: "feat/behind-2", TargetID: "1555405874565091380", HeadSHA: "head551"},
 			},
-			prResponses: []string{
-				`{"number":550,"mergeable":true,"mergeable_state":"behind"}`,
-				`{"message":"Updating pull request branch."}`,
-				`{"number":551,"mergeable":true,"mergeable_state":"behind"}`,
-			},
-			prStatusCodes:  []int{http.StatusOK, http.StatusAccepted, http.StatusOK},
+			prResponses:    []string{`{"message":"Updating pull request branch."}`},
+			prStatusCodes:  []int{http.StatusAccepted},
 			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/550/update-branch"},
 		},
 		{
-			name:     "behind PR update-branch non-202 logs warning without failing conflict check",
-			openPRs:  []RegisteredPR{{PRNumber: 552, Branch: "feat/behind-err", TargetID: "1555405874565091380", HeadSHA: "head552"}},
-			prNumber: 552,
-			prResponses: []string{
-				`{"number":552,"mergeable":true,"mergeable_state":"behind"}`,
-				`{"message":"Validation Failed"}`,
+			name: "conflicted oldest PR transitions to conflict and advances to update next clean PR",
+			openPRs: []RegisteredPR{
+				{PRNumber: 545, Branch: "feat/conflicted-1", TargetID: "1555405874565091380", HeadSHA: "head545"},
+				{PRNumber: 546, Branch: "feat/clean-2", TargetID: "1555405874565091380", HeadSHA: "head546"},
 			},
-			prStatusCodes:  []int{http.StatusOK, http.StatusUnprocessableEntity},
-			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/552/update-branch"},
-		},
-		{
-			name:     "retry null or unknown mergeable state",
-			openPRs:  []RegisteredPR{{PRNumber: 545, Branch: "feat/retry", TargetID: "1555405874565091380", HeadSHA: "head545"}},
-			prNumber: 545,
 			prResponses: []string{
-				`{"number":545,"mergeable":null,"mergeable_state":"unknown"}`,
-				`{"number":545,"mergeable":false,"mergeable_state":"dirty"}`,
+				`{"message":"merge conflict between base and head"}`,
+				`{"message":"Updating pull request branch."}`,
 			},
+			prStatusCodes:  []int{http.StatusUnprocessableEntity, http.StatusAccepted},
 			wantConflict:   true,
 			wantConflictPR: 545,
 			wantDMs:        0,
 			wantDispatches: 1,
+			wantUpdatedPRs: []string{
+				"/repos/azylman/aerial/pulls/545/update-branch",
+				"/repos/azylman/aerial/pulls/546/update-branch",
+			},
 		},
 		{
-			name:          "403 rate-limit error return",
-			openPRs:       []RegisteredPR{{PRNumber: 546, Branch: "feat/rate-limit", TargetID: "1555405874565091380", HeadSHA: "head546"}},
-			prNumber:      546,
-			prStatusCodes: []int{http.StatusForbidden},
-			prResponses:   []string{`{"message":"API rate limit exceeded"}`},
-			wantErr:       true,
-			wantErrSubstr: "rate limit",
+			name:           "non-conflict 422 logs warning and skips without marking conflict",
+			openPRs:        []RegisteredPR{{PRNumber: 552, Branch: "feat/behind-err", TargetID: "1555405874565091380", HeadSHA: "head552"}},
+			prResponses:    []string{`{"message":"Validation Failed"}`},
+			prStatusCodes:  []int{http.StatusUnprocessableEntity},
+			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/552/update-branch"},
 		},
 		{
-			name:          "non-403 fetch error skip PR and return nil",
-			openPRs:       []RegisteredPR{{PRNumber: 547, Branch: "feat/not-found", TargetID: "1555405874565091380", HeadSHA: "head547"}},
-			prNumber:      547,
-			prStatusCodes: []int{http.StatusNotFound},
-			prResponses:   []string{`{"message":"Not Found"}`},
-			wantErr:       false,
+			name:           "403 rate-limit error returns error",
+			openPRs:        []RegisteredPR{{PRNumber: 546, Branch: "feat/rate-limit", TargetID: "1555405874565091380", HeadSHA: "head546"}},
+			prStatusCodes:  []int{http.StatusForbidden},
+			prResponses:    []string{`{"message":"API rate limit exceeded"}`},
+			wantErr:        true,
+			wantErrSubstr:  "rate limit",
+			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/546/update-branch"},
 		},
 		{
-			name:          "500 fetch error skip PR and return nil",
-			openPRs:       []RegisteredPR{{PRNumber: 548, Branch: "feat/fetch-500", TargetID: "1555405874565091380", HeadSHA: "head548"}},
-			prNumber:      548,
-			prStatusCodes: []int{http.StatusInternalServerError},
-			prResponses:   []string{`{"message":"Internal Server Error"}`},
-			wantErr:       false,
+			name:           "non-403 error skips PR and returns nil",
+			openPRs:        []RegisteredPR{{PRNumber: 547, Branch: "feat/not-found", TargetID: "1555405874565091380", HeadSHA: "head547"}},
+			prStatusCodes:  []int{http.StatusNotFound},
+			prResponses:    []string{`{"message":"Not Found"}`},
+			wantErr:        false,
+			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/547/update-branch"},
 		},
 		{
-			name:        "conflict transition error logged cleanly without returning error",
-			openPRs:     []RegisteredPR{{PRNumber: 549, Branch: "feat/trans-err", TargetID: "1555405874565091380", HeadSHA: "head549"}},
-			prNumber:    549,
-			prResponses: []string{`{"number":549,"mergeable":false,"mergeable_state":"dirty"}`},
-			conflictErr: errors.New("conflict transition err"),
-			wantErr:     false,
+			name:           "conflict transition error logged cleanly without returning error",
+			openPRs:        []RegisteredPR{{PRNumber: 549, Branch: "feat/trans-err", TargetID: "1555405874565091380", HeadSHA: "head549"}},
+			prStatusCodes:  []int{http.StatusUnprocessableEntity},
+			prResponses:    []string{`{"message":"merge conflict between base and head"}`},
+			conflictErr:    errors.New("conflict transition err"),
+			wantErr:        false,
+			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/549/update-branch"},
 		},
 	}
 
@@ -1218,8 +1227,13 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 				}
 			}
 			mockDisp := &mockOutboundDispatcher{}
-			srv := newTestRouter(Config{GitHubAPIURL: apiServer.URL, GitHubToken: "test-token"}, nil, mockReg, mockDisp)
-			srv.SetConflictCheckDelay(1 * time.Millisecond)
+			var inserters []RiverInserter
+			var mockRiver *mockRiverInserter
+			if tc.useRiver {
+				mockRiver = &mockRiverInserter{err: tc.riverErr}
+				inserters = append(inserters, mockRiver)
+			}
+			srv := newTestRouter(Config{GitHubAPIURL: apiServer.URL, GitHubToken: "test-token"}, nil, mockReg, mockDisp, inserters...)
 
 			err := srv.checkOpenPRConflicts(ctx, "azylman/aerial")
 			if (err != nil) != tc.wantErr {
@@ -1248,13 +1262,11 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 					t.Errorf("unexpected conflictCalls: %+v", mReg.conflictCalls)
 				}
 			}
+			if mockRiver != nil && len(mockRiver.insertedConflictJobs) != tc.wantConflictQueued {
+				t.Errorf("insertedConflictJobs = %d, want %d", len(mockRiver.insertedConflictJobs), tc.wantConflictQueued)
+			}
 			if len(mockDisp.DirectMessageCalls()) != tc.wantDMs {
 				t.Errorf("got %d DMs, want %d", len(mockDisp.DirectMessageCalls()), tc.wantDMs)
-			}
-			for _, sub := range tc.wantDMSubs {
-				if len(mockDisp.DirectMessageCalls()) == 0 || !strings.Contains(mockDisp.DirectMessageCalls()[0].Content, sub) {
-					t.Errorf("expected DM containing %q", sub)
-				}
 			}
 			if len(mockDisp.PromptCalls()) != tc.wantPrompts {
 				t.Errorf("got %d prompts, want %d", len(mockDisp.PromptCalls()), tc.wantPrompts)
@@ -1272,11 +1284,6 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 				}
 			}
 		})
-	}
-
-	srv := NewRouterServer(Config{}, nil)
-	if _, err := srv.fetchPRDetails(ctx, "", 0); err == nil {
-		t.Error("fetchPRDetails('', 0) expected error, got nil")
 	}
 }
 

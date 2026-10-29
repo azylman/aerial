@@ -245,6 +245,45 @@ func (w *EventTriggerWebhookWorker) Work(ctx context.Context, job *river.Job[Eve
 	return nil
 }
 
+// QueueMergeConflict is the dedicated River queue for PR merge conflict remediation dispatches.
+const QueueMergeConflict = "merge_conflict"
+
+// MergeConflictArgs contains payload data for durable background processing of PR merge conflicts.
+type MergeConflictArgs struct {
+	Repo     string `json:"repo" river:"unique"`
+	PRNumber int    `json:"pr_number" river:"unique"`
+	Branch   string `json:"branch"`
+	HeadSHA  string `json:"head_sha"`
+	TargetID string `json:"target_id"`
+}
+
+func (MergeConflictArgs) Kind() string { return "merge_conflict" }
+func (MergeConflictArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{
+		Queue:       QueueMergeConflict,
+		MaxAttempts: 5,
+		UniqueOpts:  river.UniqueOpts{ByArgs: true, ByPeriod: 15 * time.Minute},
+	}
+}
+
+// MergeConflictWorker processes PR merge conflict remediation dispatches from River.
+type MergeConflictWorker struct {
+	river.WorkerDefaults[MergeConflictArgs]
+	server *RouterServer
+}
+
+func (w *MergeConflictWorker) Work(ctx context.Context, job *river.Job[MergeConflictArgs]) error {
+	if w.server == nil {
+		return errors.New("router server not configured on worker")
+	}
+	log.Printf("[webhooks-router] [river] processing merge conflict job id=%d repo=%s pr=%d", job.ID, job.Args.Repo, job.Args.PRNumber)
+	if err := w.server.ProcessMergeConflict(ctx, job.Args); err != nil {
+		log.Printf("[webhooks-router] [river] error processing merge conflict job id=%d: %v", job.ID, err)
+		return err
+	}
+	return nil
+}
+
 // StatusWidgetChunk represents a chunk in a Vanadis build or a PR task.
 // Note: eri's BuildStatusWidgetComponents (services/eri/pkg/discord/widget.go) renders
 // chunk status badges, repo tags, titles, PR links, and runtime durations only; it does

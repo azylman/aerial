@@ -379,6 +379,9 @@ func TestRiverWorkers(t *testing.T) {
 		{name: "EventTriggerWebhookWorker valid job", workerType: "event_trigger"},
 		{name: "EventTriggerWebhookWorker nil server error", workerType: "event_trigger", nilServer: true, wantErr: true},
 		{name: "EventTriggerWebhookWorker downstream fire error", workerType: "event_trigger", downstreamErr: true, wantErr: true},
+		{name: "MergeConflictWorker valid job", workerType: "merge_conflict"},
+		{name: "MergeConflictWorker nil server error", workerType: "merge_conflict", nilServer: true, wantErr: true},
+		{name: "MergeConflictWorker downstream dispatch error", workerType: "merge_conflict", downstreamErr: true, wantErr: true},
 	}
 
 	for _, tc := range tests {
@@ -397,6 +400,7 @@ func TestRiverWorkers(t *testing.T) {
 			if tc.downstreamErr {
 				mockDisp.promptErr = errors.New("503 downstream failure")
 				mockDisp.widgetErr = errors.New("503 downstream failure")
+				mockDisp.dispatchErr = errors.New("503 downstream failure")
 				if tc.workerType == "event_trigger" {
 					mockReg.claimTriggersErr = errors.New("502 haro fire failure")
 				}
@@ -498,6 +502,22 @@ func TestRiverWorkers(t *testing.T) {
 					},
 				}
 				err = w.Work(ctx, job)
+			case "merge_conflict":
+				w := &MergeConflictWorker{server: srv}
+				if tc.nilServer {
+					w.server = nil
+				}
+				job := &river.Job[MergeConflictArgs]{
+					JobRow: &rivertype.JobRow{ID: 701},
+					Args: MergeConflictArgs{
+						Repo:     "azylman/aerial",
+						PRNumber: 543,
+						Branch:   "feat/conflict",
+						HeadSHA:  "head543",
+						TargetID: "1555405874565091380",
+					},
+				}
+				err = w.Work(ctx, job)
 			}
 
 			if (err != nil) != tc.wantErr {
@@ -555,6 +575,15 @@ func TestRiverJobArgsAndUniqueOpts(t *testing.T) {
 			name:         "EventTriggerWebhookArgs",
 			args:         EventTriggerWebhookArgs{Source: "custom_source", Targets: []string{"device.alpha"}, EventType: "ready"},
 			wantKind:     "event_trigger_webhook",
+			wantAttempts: 5,
+		},
+		{
+			name:         "MergeConflictArgs",
+			args:         MergeConflictArgs{Repo: "azylman/aerial", PRNumber: 543},
+			wantKind:     "merge_conflict",
+			wantQueue:    QueueMergeConflict,
+			wantByArgs:   true,
+			wantByPeriod: 15 * time.Minute,
 			wantAttempts: 5,
 		},
 	}

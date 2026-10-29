@@ -34,7 +34,6 @@ type RouterServer struct {
 	registry             PRRegistryUpdater
 	dispatcher           OutboundDispatcher
 	onProcessed          func(event, delivery string)
-	conflictCheckDelay   time.Duration
 	nonRoboRevFailedSHAs sync.Map
 }
 
@@ -44,9 +43,8 @@ func NewRouterServer(cfg Config, client *http.Client, riverClient ...RiverInsert
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
 	s := &RouterServer{
-		cfg:                cfg,
-		httpClient:         client,
-		conflictCheckDelay: 2 * time.Second,
+		cfg:        cfg,
+		httpClient: client,
 	}
 	if len(riverClient) > 0 {
 		s.riverClient = riverClient[0]
@@ -920,20 +918,44 @@ func (s *RouterServer) dispatchDeploymentSuccessPrompt(ctx context.Context, targ
 	return s.dispatchAlertWithPrompt(ctx, targetID, "deploy_success", "", strings.Join(lines, "\n"))
 }
 
+func (s *RouterServer) enqueueMergeConflict(ctx context.Context, args MergeConflictArgs) error {
+	if s == nil {
+		return nil
+	}
+	args.Repo = normalizeRepo(args.Repo)
+	if s.riverClient != nil {
+		if err := s.insertRiverJob(ctx, args); err != nil {
+			log.Printf("[webhooks-router] [github] error enqueuing merge conflict into river: %v", err)
+			return fmt.Errorf("enqueue merge conflict: %w", err)
+		}
+		return nil
+	}
+	return s.ProcessMergeConflict(ctx, args)
+}
+
+func (s *RouterServer) ProcessMergeConflict(ctx context.Context, args MergeConflictArgs) error {
+	if s == nil {
+		return nil
+	}
+	return s.dispatchConflictPrompt(ctx, args.TargetID, args.Repo, args.Branch, args.HeadSHA, args.PRNumber)
+}
+
 func (s *RouterServer) dispatchConflictPrompt(ctx context.Context, targetID, repo, branch, headSHA string, prNum int) error {
-	dmMsg := fmt.Sprintf("⛔ %sMerge conflict detected. Following up...", formatDirectMessagePrefix(prNum, repo))
-	if prNum > 0 {
-		if s.registry != nil {
-			if _, isPg := s.registry.(*PostgresPRRegistry); isPg {
-				s.setPRWidgetState(ctx, repo, prNum, "conflict", "Merge conflict detected")
-				if err := s.SyncPRWidget(ctx, repo, prNum); err == nil {
-					dmMsg = ""
-				}
+	if prNum > 0 && s.registry != nil {
+		if _, isPg := s.registry.(*PostgresPRRegistry); isPg {
+			s.setPRWidgetState(ctx, repo, prNum, "conflict", "Merge conflict detected")
+			if err := s.SyncPRWidget(ctx, repo, prNum); err != nil {
+				log.Printf("[webhooks-router] [widget] warning syncing conflict widget: %v", err)
 			}
 		}
 	}
 	prompt := fmt.Sprintf("Merge conflict detected on PR #%d on %s (branch: %s, head: %s). Please checkout the branch, merge origin/main to resolve conflicts, verify locally, and push to update the PR.", prNum, repo, branch, headSHA)
-	return s.dispatchAlertWithPrompt(ctx, targetID, "conflict", dmMsg, prompt, s.vanadisPromptOpts(ctx, repo, prNum))
+	opts := s.vanadisPromptOpts(ctx, repo, prNum)
+	opts.silent = true
+	if opts.effort == "" {
+		opts.effort = "medium"
+	}
+	return s.dispatchAlertWithPrompt(ctx, targetID, "conflict", "", prompt, opts)
 }
 
 // runServer runs the HTTP server with graceful shutdown and optional ready callback.
@@ -973,10 +995,12 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 		river.AddWorker(workers, &NomadCrashAlertWorker{server: server})
 		river.AddWorker(workers, &WidgetSyncWorker{server: server})
 		river.AddWorker(workers, &EventTriggerWebhookWorker{server: server})
+		river.AddWorker(workers, &MergeConflictWorker{server: server})
 
 		rc, err := river.NewClient(riverpgxv5.New(dbPool), &river.Config{
 			Queues: map[string]river.QueueConfig{
 				river.QueueDefault: {MaxWorkers: 10},
+				QueueMergeConflict: {MaxWorkers: 2},
 			},
 			Workers:             workers,
 			SkipUnknownJobCheck: true,
