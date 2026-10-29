@@ -382,6 +382,36 @@ func TestCheckAndReconcileNomadImages_TableDriven(t *testing.T) {
 				if err := env.daemon.CheckAndReconcileNomadImages(ctx); err != nil {
 					t.Fatalf("poll with restart fail returned error: %v", err)
 				}
+				var evts []HangarDeployEvent
+				for i := 0; i < 2; i++ {
+					select {
+					case evt := <-env.evtCh:
+						evts = append(evts, evt)
+					case <-time.After(2 * time.Second):
+						t.Fatalf("timed out waiting for deploy events (got %d)", len(evts))
+					}
+				}
+				var hasStarted, hasFailed bool
+				for _, evt := range evts {
+					if evt.Event == "deploy_started" && evt.Digest == tc.thirdDigest {
+						hasStarted = true
+					}
+					if evt.Event == "deploy_failed" && evt.Status == "failed" && evt.Digest == tc.thirdDigest {
+						hasFailed = true
+					}
+				}
+				if !hasStarted {
+					t.Errorf("expected deploy_started event for %s with digest %s, got %+v", tc.wantRestartJob, tc.thirdDigest, evts)
+				}
+				if !hasFailed {
+					t.Errorf("expected deploy_failed event for %s with digest %s, got %+v", tc.wantRestartJob, tc.thirdDigest, evts)
+				}
+				env.daemon.nomadDigestsMu.RLock()
+				retainedDigest := env.daemon.nomadKnownDigests["svc:ghcr.io/test/img1:latest"]
+				env.daemon.nomadDigestsMu.RUnlock()
+				if retainedDigest != tc.secondDigest {
+					t.Errorf("expected retained digest %s, got %s", tc.secondDigest, retainedDigest)
+				}
 			}
 		})
 	}

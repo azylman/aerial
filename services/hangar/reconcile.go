@@ -555,9 +555,6 @@ func (d *SyncDaemon) checkSingleJobImageDigest(pollCtx context.Context, repo, jo
 	}
 
 	log.Printf("[Hangar:NomadImagePoll] New image digest %s detected for Nomad job %s (image %s, previous %s). Rescheduling allocation.", remoteDigest, jobName, imgRef, lastDigest)
-	d.nomadDigestsMu.Lock()
-	d.nomadKnownDigests[key] = remoteDigest
-	d.nomadDigestsMu.Unlock()
 
 	headSHA := d.resolvePolledImageCommitSHA(pollCtx, repo, imgRef)
 
@@ -585,7 +582,25 @@ func (d *SyncDaemon) checkSingleJobImageDigest(pollCtx context.Context, repo, jo
 	out, errBytes, runErr := d.getNomadExecutor()(pollCtx, "job", "restart", "-yes", "-reschedule", "-on-error=fail", jobName)
 	if runErr != nil {
 		log.Printf("[Hangar:NomadImagePoll] Warning: nomad job restart failed for %s: %s (%v)", jobName, SanitizeLog(strings.TrimSpace(string(append(out, errBytes...)))), runErr)
+		details := SanitizeLog(strings.TrimSpace(string(append(out, errBytes...))))
+		if details == "" {
+			details = SanitizeLog(runErr.Error())
+		}
+		d.DispatchDeployEvent(HangarDeployEvent{
+			Event:     "deploy_failed",
+			JobName:   jobName,
+			Repo:      repoName,
+			CommitSHA: headSHA,
+			Image:     imgRef,
+			Digest:    remoteDigest,
+			Status:    "failed",
+			Details:   details,
+			Timestamp: time.Now().UTC(),
+		})
 	} else {
+		d.nomadDigestsMu.Lock()
+		d.nomadKnownDigests[key] = remoteDigest
+		d.nomadDigestsMu.Unlock()
 		log.Printf("[Hangar:NomadImagePoll] Successfully triggered reschedule restart for Nomad job %s", jobName)
 	}
 }
@@ -641,10 +656,8 @@ func (d *SyncDaemon) executeDebouncedReconcileCycle(ctx context.Context) {
 	}
 
 	// Phase 1: Teardowns for any deleted Nomad jobs (releases ports)
-	d.pendingNomadMu.Lock()
-	pendingNomad := append([]NomadChangeEvent(nil), d.pendingNomadChanges...)
-	d.pendingNomadMu.Unlock()
-	d.ExecuteNomadTeardowns(ctx, pendingNomad)
+	pendingDeletes := d.drainPendingNomadDeletes()
+	d.ExecuteNomadTeardowns(ctx, pendingDeletes)
 
 	// Phase 2: Check for Nomad server daemon config changes
 	if d.consumePendingNomadServerRestart() {
@@ -667,12 +680,16 @@ func (d *SyncDaemon) executeDebouncedReconcileCycle(ctx context.Context) {
 
 // StartReconcilerLoop runs the background debounced worker goroutine.
 func (d *SyncDaemon) StartReconcilerLoop(ctx context.Context) {
+	d.mu.Lock()
 	if d.reconcileCh == nil {
 		d.reconcileCh = make(chan struct{}, 1)
 	}
+	reconcileCh := d.reconcileCh
+	d.mu.Unlock()
 
 	go func() {
 		var debounceTimer *time.Timer
+		var timerCh <-chan time.Time
 
 		for {
 			select {
@@ -681,13 +698,11 @@ func (d *SyncDaemon) StartReconcilerLoop(ctx context.Context) {
 					debounceTimer.Stop()
 				}
 				return
-			case <-d.reconcileCh:
-				if debounceTimer != nil {
-					debounceTimer.Stop()
-				}
-				debounceTimer = time.AfterFunc(reconcilerDebounceDuration, func() {
-					d.executeDebouncedReconcileCycle(ctx)
-				})
+			case <-reconcileCh:
+				debounceTimer, timerCh = resetDebounceTimer(debounceTimer, reconcilerDebounceDuration)
+			case <-timerCh:
+				timerCh = nil
+				d.executeDebouncedReconcileCycle(ctx)
 			}
 		}
 	}()
