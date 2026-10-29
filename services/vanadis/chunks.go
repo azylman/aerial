@@ -72,12 +72,13 @@ type ChunkPRRequest struct {
 
 // SyncChunkPRWidgetRequest represents the payload for POST /chunks/sync-pr-widget.
 type SyncChunkPRWidgetRequest struct {
-	BuildID  string `json:"build_id,omitempty"`
-	Repo     string `json:"repo"`
-	PRNumber int    `json:"pr_number"`
-	PRStatus string `json:"pr_status"`
-	PRBanner string `json:"pr_banner"`
-	PRFound  bool   `json:"pr_found"`
+	BuildID    string `json:"build_id,omitempty"`
+	Repo       string `json:"repo"`
+	PRNumber   int    `json:"pr_number"`
+	PRStatus   string `json:"pr_status"`
+	PRBanner   string `json:"pr_banner"`
+	ActiveStep string `json:"active_step,omitempty"`
+	PRFound    bool   `json:"pr_found"`
 }
 
 func normalizeWidgetStatus(dbStatus string) string {
@@ -591,10 +592,14 @@ func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncC
 	for i, c := range chunks {
 		chunkRepo := firstNonEmpty(c.Repo, "azylman/aerial")
 		chunkStatus := normalizeWidgetStatus(c.Status)
+		var activeStep string
 		if req.PRNumber > 0 && c.PRNumber == req.PRNumber && req.PRFound {
 			chunkStatus = resolveVanadisChunkWidgetStatus(c.Status, req.PRStatus)
 			if (chunkStatus == "failed" || chunkStatus == "conflict") && widgetStatus != "completed" {
 				widgetStatus = "failed"
+			}
+			if chunkStatus == "open" || chunkStatus == "pr_opened" {
+				activeStep = strings.TrimSpace(req.ActiveStep)
 			}
 		} else if chunkStatus == "merged" {
 			chunkStatus = "deployed"
@@ -605,6 +610,7 @@ func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncC
 			Repo:        chunkRepo,
 			Title:       c.Title,
 			Status:      chunkStatus,
+			ActiveStep:  activeStep,
 			PRNumber:    c.PRNumber,
 			StartedAt:   c.StartedAt,
 			CompletedAt: c.CompletedAt,
@@ -625,6 +631,7 @@ func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncC
 		Title:     firstNonEmpty(strings.TrimSpace(build.Title), build.Objective),
 		Status:    widgetStatus,
 		Banner:    widgetBanner,
+		SkipSink:  build.StatusMessageID != "" && strings.TrimSpace(req.ActiveStep) != "" && widgetStatus == "running",
 		Chunks:    wChunks,
 	}
 }

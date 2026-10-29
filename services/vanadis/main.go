@@ -652,6 +652,7 @@ type StatusWidgetChunk struct {
 	Repo          string    `json:"repo"`
 	Title         string    `json:"title"`
 	Status        string    `json:"status"`
+	ActiveStep    string    `json:"active_step,omitempty"`
 	PRNumber      int       `json:"pr_number,omitempty"`
 	DeployingJobs []string  `json:"deploying_jobs,omitempty"`
 	StartedAt     time.Time `json:"started_at,omitempty"`
@@ -668,6 +669,7 @@ type StatusWidgetRequest struct {
 	Title     string              `json:"title"`
 	Status    string              `json:"status"`
 	Banner    string              `json:"banner,omitempty"`
+	SkipSink  bool                `json:"skip_sink,omitempty"`
 	Chunks    []StatusWidgetChunk `json:"chunks"`
 }
 

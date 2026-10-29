@@ -2541,6 +2541,8 @@ func TestWorkerPool_DeliverStatusWidget(t *testing.T) {
 		expectEvictedBuildID                              string
 		deliveryFuncErr                                   error
 		useAppConfigPolicy                                bool
+		expectDisownedChunkIDs                            []string
+		expectRetainedWidgetSteps                         map[string]string
 	}{
 		{name: "nil pool returns error", nilPool: true, expectErrContains: "worker pool is nil"},
 		{name: "nil session returns error", nilSession: true, req: discord.StatusWidgetRequest{ChannelID: "chan-1"}, expectErrContains: "discord session is not connected"},
@@ -2615,6 +2617,37 @@ func TestWorkerPool_DeliverStatusWidget(t *testing.T) {
 			req:                   discord.StatusWidgetRequest{ID: "b-term", MessageID: "msg-term", ChannelID: targetChan, Status: "completed", Chunks: []discord.StatusWidgetChunk{{ID: "chunk-term", Status: "running"}}},
 			expectMsgID:           "msg-term",
 			expectDeliveredChunks: []discord.StatusWidgetChunk{{ID: "chunk-term", Status: "running", ActiveStep: ""}},
+		},
+		{
+			name:                      "preserves active step on open chunk and disowns prior coding turn steps",
+			widgetMsgID:               "msg-open-ci",
+			priorSteps:                map[string]string{"chunk-open-ci": "⚡ Executing `git commit`..."},
+			req:                       discord.StatusWidgetRequest{ID: "b-open-ci", MessageID: "msg-open-ci", ChannelID: targetChan, Chunks: []discord.StatusWidgetChunk{{ID: "chunk-open-ci", Status: "open", ActiveStep: "Waiting on CI (1/3 passed)"}}},
+			expectMsgID:               "msg-open-ci",
+			expectDeliveredChunks:     []discord.StatusWidgetChunk{{ID: "chunk-open-ci", Status: "open", ActiveStep: "Waiting on CI (1/3 passed)"}},
+			expectDisownedChunkIDs:    []string{"chunk-open-ci"},
+			expectRetainedWidgetSteps: map[string]string{"chunk-open-ci": "Waiting on CI (1/3 passed)"},
+		},
+		{
+			name:        "preserves existing active step on pr_opened chunk when subsequent sync omits active step",
+			widgetMsgID: "msg-ci-persist",
+			priorRequests: []discord.StatusWidgetRequest{
+				{ID: "b-ci-persist", MessageID: "msg-ci-persist", ChannelID: targetChan, Chunks: []discord.StatusWidgetChunk{{ID: "chunk-ci-1", Status: "pr_opened", ActiveStep: "Waiting on CI (2/4 passed)"}}},
+			},
+			req:                       discord.StatusWidgetRequest{ID: "b-ci-persist", MessageID: "msg-ci-persist", ChannelID: targetChan, Chunks: []discord.StatusWidgetChunk{{ID: "chunk-ci-1", Status: "pr_opened", ActiveStep: ""}}},
+			expectMsgID:               "msg-ci-persist",
+			expectDeliveredChunks:     []discord.StatusWidgetChunk{{ID: "chunk-ci-1", Status: "pr_opened", ActiveStep: "Waiting on CI (2/4 passed)"}},
+			expectRetainedWidgetSteps: map[string]string{"chunk-ci-1": "Waiting on CI (2/4 passed)"},
+		},
+		{
+			name:        "clears active step on open chunk when build is terminal",
+			widgetMsgID: "msg-ci-term",
+			priorRequests: []discord.StatusWidgetRequest{
+				{ID: "b-ci-term", MessageID: "msg-ci-term", ChannelID: targetChan, Chunks: []discord.StatusWidgetChunk{{ID: "chunk-ci-term", Status: "open", ActiveStep: "Waiting on CI (3/3 passed)"}}},
+			},
+			req:                   discord.StatusWidgetRequest{ID: "b-ci-term", MessageID: "msg-ci-term", ChannelID: targetChan, Status: "completed", Chunks: []discord.StatusWidgetChunk{{ID: "chunk-ci-term", Status: "open", ActiveStep: "Waiting on CI (3/3 passed)"}}},
+			expectMsgID:           "msg-ci-term",
+			expectDeliveredChunks: []discord.StatusWidgetChunk{{ID: "chunk-ci-term", Status: "open", ActiveStep: ""}},
 		},
 		{
 			name:                 "evicts oldest build from widgetsByID when exceeding 64 entries",
@@ -2729,6 +2762,41 @@ func TestWorkerPool_DeliverStatusWidget(t *testing.T) {
 				p.widgetMu.Unlock()
 				if exists {
 					t.Fatalf("expected build %q to be evicted from widgetsByID", tc.expectEvictedBuildID)
+				}
+			}
+			if len(tc.expectDisownedChunkIDs) > 0 {
+				p.widgetMu.Lock()
+				for _, cID := range tc.expectDisownedChunkIDs {
+					if turn, ok := p.activeChunkTurns[cID]; ok {
+						t.Fatalf("expected chunk %q to be disowned from activeChunkTurns, found turn %q", cID, turn)
+					}
+					if step, ok := p.activeChunkSteps[cID]; ok {
+						t.Fatalf("expected chunk %q to have step deleted from activeChunkSteps, found step %q", cID, step)
+					}
+				}
+				p.widgetMu.Unlock()
+			}
+			if len(tc.expectRetainedWidgetSteps) > 0 {
+				p.widgetMu.Lock()
+				cachedWidget, hasWidget := p.widgetsByID[tc.req.ID]
+				p.widgetMu.Unlock()
+				if !hasWidget {
+					t.Fatalf("expected widget %q in cache", tc.req.ID)
+				}
+				for cID, wantStep := range tc.expectRetainedWidgetSteps {
+					found := false
+					for _, c := range cachedWidget.Chunks {
+						if c.ID == cID {
+							found = true
+							if c.ActiveStep != wantStep {
+								t.Fatalf("cached widget chunk %q ActiveStep = %q, want %q", cID, c.ActiveStep, wantStep)
+							}
+							break
+						}
+					}
+					if !found {
+						t.Fatalf("cached widget missing chunk %q", cID)
+					}
 				}
 			}
 		})
