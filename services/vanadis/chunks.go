@@ -584,6 +584,7 @@ func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncC
 			chunkStatus = "deployed"
 		}
 		wChunks[i] = StatusWidgetChunk{
+			ID:          c.ID,
 			Index:       c.ChunkIndex,
 			Repo:        chunkRepo,
 			Title:       c.Title,

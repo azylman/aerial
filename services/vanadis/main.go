@@ -644,6 +644,7 @@ type BrainDispatchRequest struct {
 
 // StatusWidgetChunk represents a chunk in a Vanadis build or a PR task for widget rendering.
 type StatusWidgetChunk struct {
+	ID            string    `json:"id,omitempty"`
 	Index         int       `json:"index"`
 	Repo          string    `json:"repo"`
 	Title         string    `json:"title"`
@@ -732,6 +733,7 @@ func (s *VanadisServer) syncBuildWidget(ctx context.Context, build VanadisBuild,
 			chunkStatus = "deployed"
 		}
 		wChunks[i] = StatusWidgetChunk{
+			ID:          c.ID,
 			Index:       c.ChunkIndex,
 			Repo:        firstNonEmpty(c.Repo, "azylman/aerial"),
 			Title:       c.Title,

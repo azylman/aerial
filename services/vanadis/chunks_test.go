@@ -602,6 +602,9 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 		if res["matched"] != true || res["build_id"] != bWidgetID {
 			t.Errorf("unexpected sync widget response: %+v", res)
 		}
+		if len(widgetDispatched) == 0 || len(widgetDispatched[len(widgetDispatched)-1].Chunks) == 0 || widgetDispatched[len(widgetDispatched)-1].Chunks[0].ID != cWidgetIDs[0] {
+			t.Errorf("expected dispatched widget to have chunk ID %q, got %+v", cWidgetIDs[0], widgetDispatched)
+		}
 		b, _, _ := sWidget.GetBuild(context.Background(), bWidgetID)
 		if b.StatusMessageID != "msg-new-widget-1" {
 			t.Errorf("expected status_message_id updated to msg-new-widget-1, got %q", b.StatusMessageID)

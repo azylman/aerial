@@ -1178,14 +1178,17 @@ func TestSyncBuildWidget(t *testing.T) {
 	}
 	build := mkBuild("b1", "1555405874565091380", "Test Build Title", "Test Obj", "running")
 	startedAt, updatedAt := time.Date(2026, 10, 16, 18, 0, 0, 0, time.UTC), time.Date(2026, 10, 16, 18, 3, 0, 0, time.UTC)
-	chunk := mkChunk("", "", 0, "Chunk 0", "", "", "running")
+	chunk := mkChunk("chunk-0-id", "", 0, "Chunk 0", "", "", "running")
 	chunk.Repo, chunk.StartedAt, chunk.UpdatedAt = "aerial", startedAt, updatedAt
-	chunkMerged := mkChunk("", "", 1, "Chunk 1", "", "", "merged")
+	chunkMerged := mkChunk("chunk-1-id", "", 1, "Chunk 1", "", "", "merged")
 	chunkMerged.Repo, chunkMerged.StartedAt, chunkMerged.UpdatedAt = "aerial", startedAt, updatedAt
 	chunks := []VanadisChunk{chunk, chunkMerged}
 	srv.syncBuildWidget(ctx, build, chunks, "test banner")
 	if postedReq.ID != "b1" || postedReq.Title != "Test Build Title" || postedReq.Banner != "test banner" || len(postedReq.Chunks) != 2 || !postedReq.Chunks[0].StartedAt.Equal(startedAt) || !postedReq.Chunks[0].UpdatedAt.Equal(updatedAt) {
 		t.Errorf("Unexpected posted widget payload: %+v", postedReq)
+	}
+	if postedReq.Chunks[0].ID != "chunk-0-id" || postedReq.Chunks[1].ID != "chunk-1-id" {
+		t.Errorf("Expected chunk IDs to be populated on widget chunks, got chunk 0 ID %q, chunk 1 ID %q", postedReq.Chunks[0].ID, postedReq.Chunks[1].ID)
 	}
 	if postedReq.Chunks[1].Status != "deployed" {
 		t.Errorf("Expected merged chunk status to be normalized to deployed on widget, got %q", postedReq.Chunks[1].Status)
