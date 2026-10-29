@@ -4497,6 +4497,8 @@ func TestProcessThreadFacts_ContextAndCoreference(t *testing.T) {
 		withTrajectory      bool
 		withReinforceIDs    bool
 		wantReinforcedID    int64
+		ollamaErr           error
+		wantWatermark       bool
 		wantErr             bool
 	}{
 		{
@@ -4518,12 +4520,14 @@ func TestProcessThreadFacts_ContextAndCoreference(t *testing.T) {
 			name:           "PriorSummaryAndTurnsInjected",
 			withSummary:    true,
 			withPriorTurns: true,
+			wantWatermark:  true,
 			wantErr:        false,
 		},
 		{
-			name:        "ContextQueryErrorIgnoredAndContinues",
-			storeFailOp: "GetThreadContextBeforeWatermark",
-			wantErr:     false,
+			name:          "ContextQueryErrorIgnoredAndContinues",
+			storeFailOp:   "GetThreadContextBeforeWatermark",
+			wantWatermark: true,
+			wantErr:       false,
 		},
 		{
 			name:    "LLMErrorFails",
@@ -4539,29 +4543,46 @@ func TestProcessThreadFacts_ContextAndCoreference(t *testing.T) {
 			name:                "ManyCandidatesCappedAt5",
 			manyCandidates:      true,
 			wantCandidateCapped: true,
+			wantWatermark:       true,
 			wantErr:             false,
 		},
 		{
 			name:           "TrajectoryRetrievedFactsAndToolCallsInjected",
 			withTrajectory: true,
+			wantWatermark:  true,
 			wantErr:        false,
 		},
 		{
 			name:             "TrajectoryReinforcesFactIDs",
 			withReinforceIDs: true,
 			wantReinforcedID: 42,
+			wantWatermark:    true,
 			wantErr:          false,
 		},
 		{
 			name:             "TrajectoryReinforceStoreErrorLoggedGracefully",
 			withReinforceIDs: true,
 			storeFailOp:      "ReinforceFact",
+			wantWatermark:    true,
 			wantErr:          false,
 		},
 		{
-			name:        "TrajectoryQueryErrorIgnoredAndContinues",
-			storeFailOp: "GetThreadTrajectoryContext",
-			wantErr:     false,
+			name:          "TrajectoryQueryErrorIgnoredAndContinues",
+			storeFailOp:   "GetThreadTrajectoryContext",
+			wantWatermark: true,
+			wantErr:       false,
+		},
+		{
+			name:          "CandidateFactInsertStoreErrorSkipsWatermark",
+			storeFailOp:   "InsertFact",
+			wantWatermark: false,
+			wantErr:       false,
+		},
+		{
+			name:          "CandidateFactEmbeddingErrorSkipsWatermark",
+			ollamaErr:     errors.New("embed fail"),
+			wantWatermark: false,
+			wantErr:       false,
 		},
 	}
 
@@ -4605,7 +4626,7 @@ func TestProcessThreadFacts_ContextAndCoreference(t *testing.T) {
 			if tc.manyCandidates {
 				client = &sequenceOllamaClient{}
 			} else {
-				client = &MockOllamaClient{embedding: baseEmb}
+				client = &MockOllamaClient{embedding: baseEmb, err: tc.ollamaErr}
 			}
 
 			var capturedPrompt string
@@ -4661,6 +4682,15 @@ func TestProcessThreadFacts_ContextAndCoreference(t *testing.T) {
 				// 5 candidates should be inserted, not 7
 				if len(mem.facts) != 5 {
 					t.Errorf("len(mem.facts) = %d, want 5 (capped)", len(mem.facts))
+				}
+			}
+			if tc.wantWatermark && mem != nil {
+				if mem.watermarks["th-test"] != 10 {
+					t.Errorf("watermark = %d, want 10", mem.watermarks["th-test"])
+				}
+			} else if !tc.wantWatermark && mem != nil {
+				if wm, ok := mem.watermarks["th-test"]; ok && wm != 0 {
+					t.Errorf("watermark unexpectedly advanced to %d, want not advanced", wm)
 				}
 			}
 		})
@@ -6188,6 +6218,7 @@ func TestProcessThreadFacts_ProceduralCandidates(t *testing.T) {
 		wantCandidateCount   int
 		wantPromptContains   string
 		wantEmbeddedText     string
+		wantWatermark        bool
 		wantErr              bool
 	}{
 		{
@@ -6206,6 +6237,7 @@ func TestProcessThreadFacts_ProceduralCandidates(t *testing.T) {
 			}`,
 			wantCandidateCount: 1,
 			wantEmbeddedText:   "Steps: check sensor; call ha_write_tool\nAvoid: avoid loop",
+			wantWatermark:      true,
 		},
 		{
 			name: "RejectCandidateAdmissionEmptyTrigger",
@@ -6219,6 +6251,7 @@ func TestProcessThreadFacts_ProceduralCandidates(t *testing.T) {
 				]
 			}`,
 			wantCandidateCount: 0,
+			wantWatermark:      true,
 		},
 		{
 			name: "RejectCandidateAdmissionEphemeralTelemetry",
@@ -6232,6 +6265,7 @@ func TestProcessThreadFacts_ProceduralCandidates(t *testing.T) {
 				]
 			}`,
 			wantCandidateCount: 0,
+			wantWatermark:      true,
 		},
 		{
 			name: "SkipNearDuplicateSameLoadedSkill",
@@ -6252,6 +6286,7 @@ func TestProcessThreadFacts_ProceduralCandidates(t *testing.T) {
 				]
 			}`,
 			wantCandidateCount: 1,
+			wantWatermark:      true,
 		},
 		{
 			name: "DifferentLoadedSkillAdmitted",
@@ -6272,6 +6307,7 @@ func TestProcessThreadFacts_ProceduralCandidates(t *testing.T) {
 				]
 			}`,
 			wantCandidateCount: 2,
+			wantWatermark:      true,
 		},
 		{
 			name: "CapAtThreeCandidates",
@@ -6286,6 +6322,7 @@ func TestProcessThreadFacts_ProceduralCandidates(t *testing.T) {
 				]
 			}`,
 			wantCandidateCount: 3,
+			wantWatermark:      true,
 		},
 		{
 			name:      "EmbeddingFailureContinues",
@@ -6297,6 +6334,7 @@ func TestProcessThreadFacts_ProceduralCandidates(t *testing.T) {
 				]
 			}`,
 			wantCandidateCount: 0,
+			wantWatermark:      false,
 		},
 		{
 			name:         "StoreGetPendingErrorContinues",
@@ -6309,6 +6347,7 @@ func TestProcessThreadFacts_ProceduralCandidates(t *testing.T) {
 				]
 			}`,
 			wantCandidateCount: 1,
+			wantWatermark:      false,
 		},
 		{
 			name:         "StoreInsertErrorContinues",
@@ -6321,6 +6360,7 @@ func TestProcessThreadFacts_ProceduralCandidates(t *testing.T) {
 				]
 			}`,
 			wantCandidateCount: 0,
+			wantWatermark:      false,
 		},
 		{
 			name: "LoadedSkillsInPrompt",
@@ -6330,6 +6370,7 @@ func TestProcessThreadFacts_ProceduralCandidates(t *testing.T) {
 			llmResp:            `{"facts": []}`,
 			wantPromptContains: "LOADED SKILLS IN TURN:\n- ha-operations",
 			wantCandidateCount: 0,
+			wantWatermark:      true,
 		},
 	}
 
@@ -6372,6 +6413,15 @@ func TestProcessThreadFacts_ProceduralCandidates(t *testing.T) {
 			}
 			if tc.wantEmbeddedText != "" && client.lastText != tc.wantEmbeddedText {
 				t.Errorf("embedded text = %q, want %q", client.lastText, tc.wantEmbeddedText)
+			}
+			if tc.wantWatermark {
+				if mem.watermarks["th-proc"] != 1 {
+					t.Errorf("watermark = %d, want 1", mem.watermarks["th-proc"])
+				}
+			} else {
+				if wm, ok := mem.watermarks["th-proc"]; ok && wm != 0 {
+					t.Errorf("watermark unexpectedly advanced to %d, want not advanced", wm)
+				}
 			}
 		})
 	}

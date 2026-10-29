@@ -87,7 +87,10 @@ func TestReconcilerAndPeriodicLoops_TableDriven(t *testing.T) {
 			t.Fatal("timed out waiting for nomad executor signal on first trigger")
 		}
 
-		d.SetLastReconcile(time.Now())
+		d.recordPendingNomadChanges(tempDir, []NomadFileChange{
+			{JobName: "deljob2", Action: "delete"},
+		})
+		d.SetLastReconcile(time.Now().Add(-reconcilerMinCooldown))
 		_ = d.TriggerReconcile(context.Background(), true)
 		select {
 		case <-nomadExecuted:
