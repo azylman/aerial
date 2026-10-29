@@ -198,6 +198,7 @@ for svc in $ALL_GO_SERVICES; do
                 ${PATH:+PATH="$PATH"} \
                 ${HOME:+HOME="$HOME"} \
                 ${GOROOT:+GOROOT="$GOROOT"} \
+                ${GOTOOLCHAIN:+GOTOOLCHAIN="$GOTOOLCHAIN"} \
                 ${GOPATH:+GOPATH="$GOPATH"} \
                 ${GOCACHE:+GOCACHE="$GOCACHE"} \
                 ${GOMODCACHE:+GOMODCACHE="$GOMODCACHE"} \

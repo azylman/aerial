@@ -546,8 +546,36 @@ func TestDB_OperationsAndErrors(t *testing.T) {
 			if err := ValidateLiveEventTarget(tc.ctx, tc.db, "vanadis_build", "b1"); err == nil {
 				t.Errorf("%s: expected err ValidateLiveEventTarget", tc.name)
 			}
+			if _, err := CheckEventTriggers(tc.ctx, tc.db, "hangar", []string{"aerial"}, "sync_success"); err == nil {
+				t.Errorf("%s: expected err CheckEventTriggers", tc.name)
+			}
+			if _, err := ClaimEventTriggers(tc.ctx, tc.db, "hangar", []string{"aerial"}, "sync_success"); err == nil {
+				t.Errorf("%s: expected err ClaimEventTriggers", tc.name)
+			}
+			if _, err := HandleListEventWatches(tc.ctx, tc.db, nil); err == nil {
+				t.Errorf("%s: expected err HandleListEventWatches", tc.name)
+			}
+			if _, err := HandleCancelEventWatch(tc.ctx, tc.db, map[string]any{"watch_id": "w1"}); err == nil {
+				t.Errorf("%s: expected err HandleCancelEventWatch", tc.name)
+			}
+			if _, err := HandleScheduleHeartbeat(tc.ctx, tc.db, "UTC", map[string]any{"channel_id": "123456789012345678", "cron_expr": "0 0 * * *", "prompt": "p"}); err == nil {
+				t.Errorf("%s: expected err HandleScheduleHeartbeat", tc.name)
+			}
+			if _, err := HandleWatchEvent(tc.ctx, tc.db, map[string]any{"channel_id": "123456789012345678", "source": "hangar", "target": "aerial", "event_type": "sync_success", "prompt": "p"}); err == nil {
+				t.Errorf("%s: expected err HandleWatchEvent", tc.name)
+			}
 		})
 	}
+	if firstNonEmpty("", "   ") != "" {
+		t.Error("expected empty string from firstNonEmpty")
+	}
+	if matched, err := CheckEventTriggers(ctx, db, "", nil, ""); err != nil || matched {
+		t.Errorf("expected false, nil for empty CheckEventTriggers, got %v, %v", matched, err)
+	}
+	if claimed, err := ClaimEventTriggers(ctx, db, "", nil, ""); err != nil || len(claimed) != 0 {
+		t.Errorf("expected empty, nil for empty ClaimEventTriggers, got %v, %v", claimed, err)
+	}
+	_ = NewToolHandler(&Config{VanadisURL: "http://vanadis.aerial", Timezone: "UTC"}, db)
 }
 
 func TestCoverageFlushEndpoint(t *testing.T) {

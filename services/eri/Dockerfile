@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # --- Build stage --------------------------------------------------------
-FROM golang:1.27.1-bookworm AS builder
+FROM golang:1.27.3-bookworm AS builder
 
 WORKDIR /src
 
@@ -31,7 +31,7 @@ RUN rm -rf /usr/local/go/test /usr/local/go/doc /usr/local/go/api
 FROM alpine:3.24 AS superpowers
 
 RUN mkdir -p /tmp/superpowers /opt/skills /opt/superpowers && \
-    wget -qO- https://github.com/obra/superpowers/archive/refs/tags/v7.0.0.tar.gz | tar -xz --strip-components=1 -C /tmp/superpowers && \
+    wget -qO- https://github.com/obra/superpowers/archive/refs/tags/v7.0.1.tar.gz | tar -xz --strip-components=1 -C /tmp/superpowers && \
     for skill in \
         systematic-debugging \
         test-driven-development \
@@ -85,8 +85,8 @@ ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
 RUN curl -fsSL --compressed https://antigravity.google/cli/install.sh | bash -s -- -d /usr/local/bin
 
 # Install Stripe Link CLI (@stripe/link-cli v0.29.0) standalone binary
-RUN curl -fsSL https://github.com/stripe/link-cli/releases/download/%40stripe/link-cli%400.29.0/link-cli-linux-x64 -o /usr/local/bin/link-cli && \
-    echo "494782d20120140683742879221a564c6b20780f88958c6aa2c428e7fc6908ff  /usr/local/bin/link-cli" | sha256sum -c - && \
+RUN curl -fsSL https://github.com/stripe/link-cli/releases/download/%40stripe/link-cli%401.0.0/link-cli-linux-x64 -o /usr/local/bin/link-cli && \
+    echo "40fa5fbade72cc9fde4014312fa5b7a3eeb6b7b151e0a97539991100f3e9943f  /usr/local/bin/link-cli" | sha256sum -c - && \
     chmod 0755 /usr/local/bin/link-cli
 ENV LINK_AUTH_FILE="/data/runtimes/discord/.config/link-cli-nodejs/config.json"
 

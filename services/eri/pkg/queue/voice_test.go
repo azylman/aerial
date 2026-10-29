@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
@@ -683,6 +684,26 @@ func TestSummarizeAndHistoryHelpers(t *testing.T) {
 	teNil := &turnExecution{pool: &WorkerPool{}}
 	_, _ = teNil.resolveWebhookDispatcher()
 	_ = teNil.resolveTurnPolicy()
+	_, _, _, _ = teNil.executeLeaseAttempt("test-model", "prompt", 1)
+	teSumClassifier := &turnExecution{
+		pool: &WorkerPool{
+			cfg: WorkerPoolConfig{
+				LowEffortModel: "flash-low",
+				Classifier: &classifier.Classifier{
+					LLMFunc: func(ctx context.Context, model, prompt string) (string, error) { return "ok", nil },
+				},
+				AmbientResolver: func(ctx context.Context, cfg *config.AmbientContextConfig) (string, error) { return "   ", nil },
+			},
+		},
+		policy: config.ChannelPolicy{AmbientContext: &config.AmbientContextConfig{}},
+	}
+	_, _ = teSumClassifier.resolveSummarizerLLMAndModel()
+	_ = teSumClassifier.resolveAmbientPromptContext()
+	_ = teSumClassifier.fetchTurnHistory(context.Background(), 5)
+	teSnowflakeHist := &turnExecution{threadID: "123456789012345678", pool: &WorkerPool{cfg: WorkerPoolConfig{DiscordSession: dgHist, Store: fake}}}
+	_ = teSnowflakeHist.fetchTurnHistory(context.Background(), 5)
+	_, _ = teSnowflakeHist.getRecentThreadMessages("123456789012345678", 5)
+	_ = convertDiscordMessageToDBMessage(&discordgo.Message{ID: "non-num", WebhookID: "wh-1"}, "t-1")
 	teTrail := &turnExecution{
 		pool:          &WorkerPool{cfg: WorkerPoolConfig{Store: fake, OnMessageCompleted: func(db.Message, string) {}}},
 		isQuotaPaused: true, trailingMsgs: []db.Message{{ID: "m-tr1", Content: "tr1"}, {ID: "m-tr2", Content: "tr2"}},
@@ -690,13 +711,26 @@ func TestSummarizeAndHistoryHelpers(t *testing.T) {
 	}
 	teTrail.handleTrailing()
 	teSess := &turnExecution{threadID: "t-pers", pool: &WorkerPool{cfg: WorkerPoolConfig{Store: fake}}}
+	_ = teSess.probeCandidateSessionID("", "", "")
+	teSess.currentSessionID = "sess-cur"
+	_ = teSess.probeCandidateSessionID("", "", "")
 	_ = teSess.resolveAndPersistSessionID("sess-1", "", "", true)
 	_ = teSess.resolveAndPersistSessionID("sess-1", "", "", false)
 	teSess.isEphemeral = true
 	_ = teSess.resolveAndPersistSessionID("sess-2", "", "", true)
-	teFail := &turnExecution{threadID: "t-fail", pool: &WorkerPool{cfg: WorkerPoolConfig{NotifierFunc: func(b, k, d string) string { return d }, DeliveryFunc: func(s *discordgo.Session, c, txt string) error { return errors.New("err") }}}}
+	teFail := &turnExecution{threadID: "t-fail", pool: &WorkerPool{cfg: WorkerPoolConfig{HaroURL: "://bad-url", NotifierFunc: func(b, k, d string) string { return d }, DeliveryFunc: func(s *discordgo.Session, c, txt string) error { return errors.New("err") }}}}
 	teFail.deliverFailureNotice("bin", "key", "err "+strings.Repeat("x", 400), "rate limit 429", "prefix: ", "lbl")
 	teFail.deliverFailureNotice("bin", "key", "simple", "", "", "lbl")
+	_, _ = teFail.deliverSuccessAndFinalize(&runner.AgyResponse{Response: "   "}, runner.TokenUsage{}, "m", 1, 1)
+	teFail.deliverDiscordSuccess("hello", nil)
+	_ = teFail.createOneShotSchedule(oneShotScheduleRequest{ID: "os-bad", ThreadID: "t-fail", Prompt: "p", RunAt: now})
+	haroErrSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusInternalServerError) }))
+	t.Cleanup(haroErrSrv.Close)
+	teFail.pool.cfg.HaroURL = haroErrSrv.URL
+	_ = teFail.createOneShotSchedule(oneShotScheduleRequest{ID: "os-500", ThreadID: "t-fail", Prompt: "p", RunAt: now})
+	drainState := &threadWorkerState{ch: make(chan queueItem, 2)}
+	drainState.ch <- queueItem{dispatch: &db.Dispatch{ID: "d-held"}}
+	_, _ = drainBurstMessages(drainState, db.Message{ID: "m-init"})
 }
 
 func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {

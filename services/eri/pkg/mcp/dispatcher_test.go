@@ -340,6 +340,9 @@ func TestParseJSONRPCBodyAndHelpers(t *testing.T) {
 			}
 		})
 	}
+	if got := extractMCPSessionID(http.Header{"mcp-session-id": {"sess-non-canonical"}}); got != "sess-non-canonical" {
+		t.Fatalf("extractMCPSessionID() = %q, want sess-non-canonical", got)
+	}
 }
 
 func TestEnsureSession(t *testing.T) {

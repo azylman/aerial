@@ -309,6 +309,24 @@ func startMainFakeCDPServer(t *testing.T) (*httptest.Server, *Config) {
 							continue
 						}
 						result = map[string]any{}
+					case "Input.insertText":
+						var ip struct {
+							Text string `json:"text"`
+						}
+						_ = json.Unmarshal(req.Params, &ip)
+						if ip.Text == "fail-insert" {
+							wsMu.Lock()
+							_ = ws.WriteJSON(map[string]any{
+								"id": req.ID,
+								"error": map[string]any{
+									"code":    -32000,
+									"message": "Insert text failed",
+								},
+							})
+							wsMu.Unlock()
+							continue
+						}
+						result = map[string]any{}
 					default:
 						result = map[string]any{}
 					}
@@ -636,6 +654,13 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 			toolName:   "browser_type",
 			args:       `{"selector":"fail-eval","text":"hello"}`,
 			wantSubstr: "Focus evaluation failed",
+			wantError:  true,
+		},
+		{
+			name:       "browser_type insertText failure",
+			toolName:   "browser_type",
+			args:       `{"selector":"input#query","text":"fail-insert"}`,
+			wantSubstr: "Input.insertText failed",
 			wantError:  true,
 		},
 		{

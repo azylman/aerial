@@ -1,7 +1,11 @@
 package queue
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -115,17 +119,21 @@ func TestIsValidThreadKey_TableDriven(t *testing.T) {
 
 func TestResolveTargetThread_TableDriven(t *testing.T) {
 	tests := []struct {
-		name          string
-		isNilPool     bool
-		channelID     string
-		title         string
-		prompt        string
-		cachedChannel *discordgo.Channel
-		policyMode    string
-		hasHook       bool
-		hookThreadID  string
-		hookErr       error
-		expected      string
+		name            string
+		isNilPool       bool
+		channelID       string
+		title           string
+		prompt          string
+		cachedChannel   *discordgo.Channel
+		policyMode      string
+		omitPolicyFn    bool
+		hasHook         bool
+		hookThreadID    string
+		hookErr         error
+		withDiscordSess bool
+		discordThreadID string
+		discordErr      error
+		expected        string
 	}{
 		{
 			name:      "nil pool returns channelID",
@@ -201,6 +209,32 @@ func TestResolveTargetThread_TableDriven(t *testing.T) {
 			hookThreadID: "",
 			expected:     "44332211",
 		},
+		{
+			name:      "default policy resolver and discord session thread start success",
+			channelID: "44332211",
+			cachedChannel: &discordgo.Channel{
+				ID:   "44332211",
+				Type: discordgo.ChannelTypeGuildText,
+				Name: "alerts",
+			},
+			omitPolicyFn:    true,
+			withDiscordSess: true,
+			discordThreadID: "88990011",
+			expected:        "88990011",
+		},
+		{
+			name:      "discord session thread start error falls back to channelID",
+			channelID: "44332211",
+			cachedChannel: &discordgo.Channel{
+				ID:   "44332211",
+				Type: discordgo.ChannelTypeGuildText,
+				Name: "alerts",
+			},
+			policyMode:      "threads",
+			withDiscordSess: true,
+			discordErr:      errors.New("thread start failed"),
+			expected:        "44332211",
+		},
 	}
 
 	for _, tc := range tests {
@@ -210,12 +244,23 @@ func TestResolveTargetThread_TableDriven(t *testing.T) {
 			}
 			var pool *WorkerPool
 			if !tc.isNilPool {
-				pool = &WorkerPool{
-					cfg: WorkerPoolConfig{
-						ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-							return config.ChannelPolicy{Mode: tc.policyMode}
-						},
-					},
+				pool = &WorkerPool{}
+				if !tc.omitPolicyFn {
+					pool.cfg.ResolveChannelPolicy = func(channelID, channelName string) config.ChannelPolicy {
+						return config.ChannelPolicy{Mode: tc.policyMode}
+					}
+				}
+				if tc.withDiscordSess {
+					dg, _ := discordgo.New("Bot test-token")
+					tid, derr := tc.discordThreadID, tc.discordErr
+					dg.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+						if derr != nil {
+							return nil, derr
+						}
+						b, _ := json.Marshal(&discordgo.Channel{ID: tid, Type: discordgo.ChannelTypeGuildPublicThread, Name: "auto-thread"})
+						return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}, nil
+					})
+					pool.cfg.DiscordSession = dg
 				}
 				if tc.hasHook {
 					pool.SetCreateThreadFunc(func(cID, title string) (string, error) {

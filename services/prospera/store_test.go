@@ -774,4 +774,36 @@ func TestPGStore_MissingCallErrorsAndFullFields(t *testing.T) {
 	if err := store.UpdateCallState(ctx, missingID, "completed", "", ""); !errors.Is(err, ErrCallNotFound) {
 		t.Fatalf("UpdateCallState missing call: %v, want ErrCallNotFound", err)
 	}
+
+	if err := store.CreateInboundCall(ctx, callFull); err == nil {
+		t.Fatal("expected error inserting duplicate CallID in CreateInboundCall")
+	}
+	callFullDupOut := callFull
+	callFullDupOut.ToNumber = "+15105550998"
+	if err := store.CreateOutboundCall(ctx, callFullDupOut, 5); err == nil {
+		t.Fatal("expected error inserting duplicate CallID in CreateOutboundCall")
+	}
+
+	_, _ = store.db.Exec("UPDATE voice_calls SET transcript = '{bad', owner_instructions = '{bad', brief = '{bad' WHERE call_id = ?", callFull.CallID)
+	if err := store.AppendTranscriptTurn(ctx, callFull.CallID, TranscriptTurn{Role: "user", Text: "hi"}); err == nil {
+		t.Fatal("expected unmarshal error in AppendTranscriptTurn")
+	}
+	if err := store.AppendOwnerInstruction(ctx, callFull.CallID, OwnerInstruction{Instruction: "hi"}); err == nil {
+		t.Fatal("expected unmarshal error in AppendOwnerInstruction")
+	}
+	if _, err := store.ListCalls(ctx, 10); err == nil {
+		t.Fatal("expected unmarshal error in ListCalls")
+	}
+
+	_, _ = store.SaveVoiceMessage(ctx, VoiceMessage{MessageSID: "SM_BAD_JSON", Direction: "inbound", FromNumber: "+1", ToNumber: "+2", Body: "b"})
+	_, _ = store.db.Exec("UPDATE voice_messages SET media_urls = 'null' WHERE message_sid = 'SM_BAD_JSON'")
+	_, _ = store.ListVoiceMessages(ctx, 10)
+	_, _ = store.db.Exec("UPDATE voice_messages SET media_urls = '{bad' WHERE message_sid = 'SM_BAD_JSON'")
+	if _, err := store.ListVoiceMessages(ctx, 10); err == nil {
+		t.Fatal("expected unmarshal error in ListVoiceMessages")
+	}
+
+	store.isSQLite = false
+	_ = store.AppendTranscriptTurn(ctx, callFull.CallID, TranscriptTurn{Role: "user", Text: "hi"})
+	_ = store.AppendOwnerInstruction(ctx, callFull.CallID, OwnerInstruction{Instruction: "hi"})
 }
