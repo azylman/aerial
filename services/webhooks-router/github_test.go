@@ -81,41 +81,43 @@ func TestHandleGitHubWebhook(t *testing.T) {
 }
 
 type ghEventCase struct {
-	name              string
-	event             string
-	delivery          string
-	payload           string
-	reg               *mockPRRegistry
-	disp              *mockOutboundDispatcher
-	river             *mockRiverInserter
-	spyNoGitHubHit    bool
-	wantErr           bool
-	wantRepo          string
-	wantAction        string
-	wantPR            int
-	wantBranch        string
-	wantHeadSHA       string
-	wantMergeSHA      string
-	wantTargetID      string
-	wantSource        string
-	wantConclusion    string
-	wantSender        string
-	wantMergedCalls   int
-	wantClosedCalls   int
-	wantSyncCalls     int
-	wantCIFailedCalls int
-	wantCIFailedSHAs  int
-	wantBackfillCalls int
-	wantConflictCalls int
-	wantAdvanceCalls  int
-	wantFailVanadis   int
-	wantEnsureCalls   int
-	wantGitPushes     int
-	wantPrompts       int
-	wantDispatches    int
-	wantDMs           int
-	wantPromptSubstr  string
-	wantDMSubstr      string
+	name                 string
+	event                string
+	delivery             string
+	payload              string
+	reg                  *mockPRRegistry
+	disp                 *mockOutboundDispatcher
+	river                *mockRiverInserter
+	spyNoGitHubHit       bool
+	wantErr              bool
+	wantRepo             string
+	wantAction           string
+	wantPR               int
+	wantBranch           string
+	wantHeadSHA          string
+	wantMergeSHA         string
+	wantTargetID         string
+	wantSource           string
+	wantConclusion       string
+	wantSender           string
+	wantMergedCalls      int
+	wantClosedCalls      int
+	wantSyncCalls        int
+	wantCIFailedCalls    int
+	wantCIFailedSHAs     int
+	wantBackfillCalls    int
+	wantConflictCalls    int
+	wantAdvanceCalls     int
+	wantFailVanadis      int
+	wantEnsureCalls      int
+	wantGitPushes        int
+	wantPrompts          int
+	wantDispatches       int
+	wantDMs              int
+	wantPromptSubstr     string
+	wantDMSubstr         string
+	wantRecordCheckCalls int
+	wantRecordCheckState string
 }
 
 func TestProcessGitHubEvent(t *testing.T) {
@@ -201,6 +203,37 @@ func TestProcessGitHubEvent(t *testing.T) {
 			payload: `{"action":"completed","check_run":{"id":994,"name":"Test","head_sha":"headsha994","status":"completed","conclusion":"failure","pull_requests":[]},"repository":{"full_name":"azylman/aerial"}}`,
 			reg:     &mockPRRegistry{ciFailedBySHAErr: errors.New("sha err")},
 			wantErr: true,
+		},
+		{
+			name: "check_run completed success records passed check status and syncs widget", event: "check_run", delivery: "del-cr-ci-passed",
+			payload: `{"action":"completed","check_run":{"name":"Unit Tests","head_sha":"headsha111","status":"completed","conclusion":"success","pull_requests":[{"number":515,"head":{"ref":"feat/awesome","sha":"headsha111"}}]},"repository":{"full_name":"azylman/aerial"}}`,
+			reg:     &mockPRRegistry{recordCheckUpdated: true, resolveTargetID: "1555405874565091380", resolveBranch: "feat/awesome"},
+			disp:    &mockOutboundDispatcher{},
+			wantPR:  515, wantRecordCheckCalls: 1, wantRecordCheckState: "passed",
+		},
+		{
+			name: "check_run in_progress records pending check status", event: "check_run", delivery: "del-cr-ci-pending",
+			payload: `{"action":"in_progress","check_run":{"name":"Unit Tests","head_sha":"headsha111","status":"in_progress","pull_requests":[{"number":515,"head":{"ref":"feat/awesome","sha":"headsha111"}}]},"repository":{"full_name":"azylman/aerial"}}`,
+			reg:     &mockPRRegistry{recordCheckUpdated: false},
+			wantPR:  515, wantRecordCheckCalls: 1, wantRecordCheckState: "pending",
+		},
+		{
+			name: "check_run failure does not record check status", event: "check_run", delivery: "del-cr-ci-failed-norecord",
+			payload: `{"action":"completed","check_run":{"name":"Unit Tests","head_sha":"headsha111","status":"completed","conclusion":"failure","pull_requests":[{"number":515,"head":{"ref":"feat/awesome","sha":"headsha111"}}]},"repository":{"full_name":"azylman/aerial"}}`,
+			reg:     &mockPRRegistry{ciFailedTargetID: "1555405874565091380", ciFailedUpdated: false},
+			wantPR:  515, wantCIFailedCalls: 1, wantRecordCheckCalls: 0,
+		},
+		{
+			name: "check_run Container Builds Gate aggregator does not record check status", event: "check_run", delivery: "del-cr-gate-norecord",
+			payload: `{"action":"completed","check_run":{"name":"Container Builds Gate","head_sha":"headsha111","status":"completed","conclusion":"success","pull_requests":[{"number":515,"head":{"ref":"feat/awesome","sha":"headsha111"}}]},"repository":{"full_name":"azylman/aerial"}}`,
+			reg:     &mockPRRegistry{},
+			wantPR:  515, wantRecordCheckCalls: 0,
+		},
+		{
+			name: "check_run record check status error logs warning cleanly", event: "check_run", delivery: "del-cr-record-err",
+			payload: `{"action":"completed","check_run":{"name":"Lint","head_sha":"headsha111","status":"completed","conclusion":"success","pull_requests":[{"number":515,"head":{"ref":"feat/awesome","sha":"headsha111"}}]},"repository":{"full_name":"azylman/aerial"}}`,
+			reg:     &mockPRRegistry{recordCheckErr: errors.New("db record failure")},
+			wantPR:  515, wantRecordCheckCalls: 1, wantRecordCheckState: "passed",
 		},
 		{
 			name: "workflow_run with PR array", event: "workflow_run", delivery: "del-wf-1",
@@ -303,31 +336,37 @@ func TestProcessGitHubEvent(t *testing.T) {
 		},
 		{
 			name: "check_run success for roborev calls UpdatePRSync", event: "check_run", delivery: "del-cr-roborev-success",
-			payload:        `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"roborev","head_sha":"robo525abcdef","status":"completed","conclusion":"success","html_url":"https://github.com/azylman/aerial/actions/runs/525","output":{"title":"Review Succeeded","summary":"All clean"},"pull_requests":[{"number":525,"head":{"ref":"feat/test","sha":"robo525abcdef"}}]}}`,
-			reg:            &mockPRRegistry{syncTargetID: "1555405874565091380"},
-			wantPR:         525,
-			wantHeadSHA:    "robo525abcdef",
-			wantTargetID:   "1555405874565091380",
-			wantSyncCalls:  1,
-			wantConclusion: "success",
+			payload:              `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"roborev","head_sha":"robo525abcdef","status":"completed","conclusion":"success","html_url":"https://github.com/azylman/aerial/actions/runs/525","output":{"title":"Review Succeeded","summary":"All clean"},"pull_requests":[{"number":525,"head":{"ref":"feat/test","sha":"robo525abcdef"}}]}}`,
+			reg:                  &mockPRRegistry{syncTargetID: "1555405874565091380"},
+			wantPR:               525,
+			wantHeadSHA:          "robo525abcdef",
+			wantTargetID:         "1555405874565091380",
+			wantSyncCalls:        1,
+			wantConclusion:       "success",
+			wantRecordCheckCalls: 1,
+			wantRecordCheckState: "passed",
 		},
 		{
 			name: "check_run success for Check RoboRev Bootstrap State ignores UpdatePRSync", event: "check_run", delivery: "del-cr-roborev-bootstrap-success",
-			payload:        `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Check RoboRev Bootstrap State","head_sha":"robo525abcdef","status":"completed","conclusion":"success","html_url":"https://github.com/azylman/aerial/actions/runs/525","output":{"title":"Bootstrap OK","summary":"All clean"},"pull_requests":[{"number":525,"head":{"ref":"feat/test","sha":"robo525abcdef"}}]}}`,
-			reg:            &mockPRRegistry{syncTargetID: "1555405874565091380"},
-			wantPR:         525,
-			wantHeadSHA:    "robo525abcdef",
-			wantSyncCalls:  0,
-			wantConclusion: "success",
+			payload:              `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Check RoboRev Bootstrap State","head_sha":"robo525abcdef","status":"completed","conclusion":"success","html_url":"https://github.com/azylman/aerial/actions/runs/525","output":{"title":"Bootstrap OK","summary":"All clean"},"pull_requests":[{"number":525,"head":{"ref":"feat/test","sha":"robo525abcdef"}}]}}`,
+			reg:                  &mockPRRegistry{syncTargetID: "1555405874565091380"},
+			wantPR:               525,
+			wantHeadSHA:          "robo525abcdef",
+			wantSyncCalls:        0,
+			wantConclusion:       "success",
+			wantRecordCheckCalls: 1,
+			wantRecordCheckState: "passed",
 		},
 		{
 			name: "check_run success for roborev without prior roborev failure ignores UpdatePRSync", event: "check_run", delivery: "del-cr-roborev-firstpass-success",
-			payload:        `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"roborev","head_sha":"headsha789","status":"completed","conclusion":"success","html_url":"https://github.com/azylman/aerial/actions/runs/530","output":{"title":"Review Succeeded","summary":"All clean"},"pull_requests":[{"number":530,"head":{"ref":"feat/test","sha":"headsha789"}}]}}`,
-			reg:            &mockPRRegistry{syncTargetID: "1555405874565091380"},
-			wantPR:         530,
-			wantHeadSHA:    "headsha789",
-			wantSyncCalls:  0,
-			wantConclusion: "success",
+			payload:              `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"roborev","head_sha":"headsha789","status":"completed","conclusion":"success","html_url":"https://github.com/azylman/aerial/actions/runs/530","output":{"title":"Review Succeeded","summary":"All clean"},"pull_requests":[{"number":530,"head":{"ref":"feat/test","sha":"headsha789"}}]}}`,
+			reg:                  &mockPRRegistry{syncTargetID: "1555405874565091380"},
+			wantPR:               530,
+			wantHeadSHA:          "headsha789",
+			wantSyncCalls:        0,
+			wantConclusion:       "success",
+			wantRecordCheckCalls: 1,
+			wantRecordCheckState: "passed",
 		},
 		{
 			name: "check_run failure for standard CI check produces standard fix prompt", event: "check_run", delivery: "del-cr-standard-ci-fail",
@@ -408,9 +447,14 @@ func TestProcessGitHubEvent(t *testing.T) {
 		},
 		{
 			name: "check_run local PR resolution priority avoids GitHub API", event: "check_run", delivery: "del-cr-local",
-			payload:        `{"action":"completed","check_run":{"name":"Integration Tests","head_sha":"localsha123","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/aerial"}}`,
-			reg:            &mockPRRegistry{resolvePRNum: 530, resolveBranch: "feat/local-resolved", resolveTargetID: "thread-local-530"},
-			spyNoGitHubHit: true, wantPR: 530, wantTargetID: "thread-local-530", wantSource: "local_pr_registry",
+			payload:              `{"action":"completed","check_run":{"name":"Integration Tests","head_sha":"localsha123","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/aerial"}}`,
+			reg:                  &mockPRRegistry{resolvePRNum: 530, resolveBranch: "feat/local-resolved", resolveTargetID: "thread-local-530"},
+			spyNoGitHubHit:       true,
+			wantPR:               530,
+			wantTargetID:         "thread-local-530",
+			wantSource:           "local_pr_registry",
+			wantRecordCheckCalls: 1,
+			wantRecordCheckState: "passed",
 		},
 		{
 			name: "workflow_run local PR resolution priority avoids GitHub API", event: "workflow_run", delivery: "del-wf-local",
@@ -675,6 +719,14 @@ func TestProcessGitHubEvent(t *testing.T) {
 				}
 				if len(tc.reg.ensureCalls) != tc.wantEnsureCalls {
 					t.Errorf("ensureCalls = %d, want %d", len(tc.reg.ensureCalls), tc.wantEnsureCalls)
+				}
+				if len(tc.reg.recordCheckCalls) != tc.wantRecordCheckCalls {
+					t.Errorf("recordCheckCalls = %d, want %d", len(tc.reg.recordCheckCalls), tc.wantRecordCheckCalls)
+				}
+				if tc.wantRecordCheckState != "" && len(tc.reg.recordCheckCalls) > 0 {
+					if tc.reg.recordCheckCalls[0].checkState != tc.wantRecordCheckState {
+						t.Errorf("recordCheckCalls checkState = %q, want %q", tc.reg.recordCheckCalls[0].checkState, tc.wantRecordCheckState)
+					}
 				}
 			}
 			if tc.disp != nil {
@@ -1506,6 +1558,72 @@ func TestParseAerialPRMetadata(t *testing.T) {
 			gotTarget, gotChunk, gotOK := ParseAerialPRMetadata(tc.body)
 			if gotOK != tc.wantOK || gotTarget != tc.wantTarget || gotChunk != tc.wantChunk {
 				t.Fatalf("ParseAerialPRMetadata() = (%q, %q, %v), want (%q, %q, %v)", gotTarget, gotChunk, gotOK, tc.wantTarget, tc.wantChunk, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestClassifyCheckState_Unit(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		status     string
+		conclusion string
+		want       string
+	}{
+		{name: "completed success", status: "completed", conclusion: "success", want: "passed"},
+		{name: "completed neutral", status: "completed", conclusion: "neutral", want: "passed"},
+		{name: "completed skipped", status: "completed", conclusion: "skipped", want: "passed"},
+		{name: "completed failure", status: "completed", conclusion: "failure", want: "failed"},
+		{name: "completed timed_out", status: "completed", conclusion: "timed_out", want: "failed"},
+		{name: "completed cancelled", status: "completed", conclusion: "cancelled", want: "failed"},
+		{name: "completed action_required", status: "completed", conclusion: "action_required", want: "failed"},
+		{name: "completed unknown conclusion", status: "completed", conclusion: "stale", want: ""},
+		{name: "queued", status: "queued", want: "pending"},
+		{name: "in_progress", status: "in_progress", want: "pending"},
+		{name: "waiting", status: "waiting", want: "pending"},
+		{name: "requested", status: "requested", want: "pending"},
+		{name: "pending", status: "pending", want: "pending"},
+		{name: "other non-completed", status: "custom_status", want: "pending"},
+		{name: "empty status", status: "", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := classifyCheckState(tc.status, tc.conclusion)
+			if got != tc.want {
+				t.Fatalf("classifyCheckState(%q, %q) = %q, want %q", tc.status, tc.conclusion, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFormatCIChecksActiveStep_Unit(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		prStatus     string
+		ciChecksJSON string
+		want         string
+	}{
+		{name: "non-open status merged", prStatus: "merged", ciChecksJSON: `{"lint":"passed"}`, want: ""},
+		{name: "non-open status closed", prStatus: "closed", ciChecksJSON: `{"lint":"passed"}`, want: ""},
+		{name: "non-open status ci_failed", prStatus: "ci_failed", ciChecksJSON: `{"lint":"passed"}`, want: ""},
+		{name: "empty ciChecksJSON", prStatus: "open", ciChecksJSON: "", want: ""},
+		{name: "empty JSON object", prStatus: "open", ciChecksJSON: "{}", want: ""},
+		{name: "invalid JSON", prStatus: "open", ciChecksJSON: "not-json", want: ""},
+		{name: "single check passed", prStatus: "open", ciChecksJSON: `{"test":"passed"}`, want: "Waiting on CI (1/1 passed)"},
+		{name: "multiple checks all passed", prStatus: "open", ciChecksJSON: `{"lint":"passed","unit":"passed","integration":"passed"}`, want: "Waiting on CI (3/3 passed)"},
+		{name: "mixed passed and pending", prStatus: "open", ciChecksJSON: `{"lint":"passed","build":"pending","unit":"passed"}`, want: "Waiting on CI (2/3 passed)"},
+		{name: "all pending", prStatus: "open", ciChecksJSON: `{"lint":"pending","unit":"pending"}`, want: "Waiting on CI (0/2 passed)"},
+		{name: "any check failed returns empty", prStatus: "open", ciChecksJSON: `{"lint":"passed","unit":"failed"}`, want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := formatCIChecksActiveStep(tc.prStatus, tc.ciChecksJSON)
+			if got != tc.want {
+				t.Fatalf("formatCIChecksActiveStep(%q, %q) = %q, want %q", tc.prStatus, tc.ciChecksJSON, got, tc.want)
 			}
 		})
 	}
