@@ -1,6 +1,6 @@
 module github.com/azylman/aerial/mcp/discord-mcp
 
-go 1.27.1
+go 1.27.3
 
 require (
 	github.com/azylman/aerial/pkg v0.0.0

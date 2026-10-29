@@ -1,6 +1,6 @@
 module github.com/azylman/aerial/services/prospera
 
-go 1.27.1
+go 1.27.3
 
 replace github.com/azylman/aerial/pkg => ../../pkg
 
