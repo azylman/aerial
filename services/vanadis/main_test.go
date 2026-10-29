@@ -75,13 +75,13 @@ func (r *mockRows) Scan(dest ...any) error {
 		fillBuildDest(r.builds[r.idx-1], dest)
 		return nil
 	}
-	if len(dest) == 8 && len(r.items) > 0 {
+	if len(dest) == 9 && len(r.items) > 0 {
 		c := r.items[r.idx-1]
-		*dest[0].(*string), *dest[1].(*int), *dest[2].(*string), *dest[3].(*string), *dest[4].(*string), *dest[5].(*int), *dest[6].(*sql.NullTime), *dest[7].(*time.Time) = c.ID, c.ChunkIndex, c.Repo, c.Title, c.Status, c.PRNumber, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, c.UpdatedAt
+		*dest[0].(*string), *dest[1].(*int), *dest[2].(*string), *dest[3].(*string), *dest[4].(*string), *dest[5].(*int), *dest[6].(*sql.NullTime), *dest[7].(*sql.NullTime), *dest[8].(*time.Time) = c.ID, c.ChunkIndex, c.Repo, c.Title, c.Status, c.PRNumber, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.UpdatedAt
 		return nil
 	}
 	c := r.items[r.idx-1]
-	*dest[0].(*string), *dest[1].(*string), *dest[2].(*int), *dest[3].(*string), *dest[4].(*string), *dest[5].(*string), *dest[6].(*[]string), *dest[7].(*[]string), *dest[8].(*string), *dest[9].(*[]string), *dest[10].(*string), *dest[11].(*int), *dest[12].(*sql.NullTime), *dest[13].(*time.Time), *dest[14].(*time.Time) = c.ID, c.BuildID, c.ChunkIndex, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, c.CreatedAt, c.UpdatedAt
+	*dest[0].(*string), *dest[1].(*string), *dest[2].(*int), *dest[3].(*string), *dest[4].(*string), *dest[5].(*string), *dest[6].(*[]string), *dest[7].(*[]string), *dest[8].(*string), *dest[9].(*[]string), *dest[10].(*string), *dest[11].(*int), *dest[12].(*sql.NullTime), *dest[13].(*sql.NullTime), *dest[14].(*time.Time), *dest[15].(*time.Time) = c.ID, c.BuildID, c.ChunkIndex, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.CreatedAt, c.UpdatedAt
 	return nil
 }
 
@@ -218,6 +218,13 @@ func (m *memoryVanadisStore) UpdateChunkStatus(_ context.Context, chunkID, statu
 				if (status == "running" || status == "coding") && list[i].StartedAt.IsZero() {
 					list[i].StartedAt = time.Now().UTC()
 				}
+				if isTerminalChunkStatus(status) {
+					if list[i].CompletedAt.IsZero() {
+						list[i].CompletedAt = time.Now().UTC()
+					}
+				} else {
+					list[i].CompletedAt = time.Time{}
+				}
 				list[i].UpdatedAt = time.Now().UTC()
 				m.chunks[bID] = list
 				return nil
@@ -351,20 +358,25 @@ func (m *memoryVanadisStore) AdvanceChunkByPR(_ context.Context, repo string, pr
 				}
 				wasMerged := list[i].Status == "merged"
 				list[i].Status = "merged"
-				list[i].UpdatedAt = time.Now().UTC()
+				now := time.Now().UTC()
+				if list[i].CompletedAt.IsZero() {
+					list[i].CompletedAt = now
+				}
+				list[i].UpdatedAt = now
 				m.chunks[bID] = list
 
 				var summaries []VanadisChunkSummary
 				for _, c := range list {
 					summaries = append(summaries, VanadisChunkSummary{
-						ID:         c.ID,
-						ChunkIndex: c.ChunkIndex,
-						Repo:       c.Repo,
-						Title:      c.Title,
-						Status:     c.Status,
-						PRNumber:   c.PRNumber,
-						StartedAt:  c.StartedAt,
-						UpdatedAt:  c.UpdatedAt,
+						ID:          c.ID,
+						ChunkIndex:  c.ChunkIndex,
+						Repo:        c.Repo,
+						Title:       c.Title,
+						Status:      c.Status,
+						PRNumber:    c.PRNumber,
+						StartedAt:   c.StartedAt,
+						CompletedAt: c.CompletedAt,
+						UpdatedAt:   c.UpdatedAt,
 					})
 				}
 
@@ -435,7 +447,11 @@ func (m *memoryVanadisStore) FailChunkByPR(_ context.Context, repo string, prNum
 		for i := range list {
 			if list[i].Repo == repo && list[i].PRNumber == prNumber && list[i].Status != "merged" && list[i].Status != "failed" {
 				list[i].Status = "failed"
-				list[i].UpdatedAt = time.Now().UTC()
+				now := time.Now().UTC()
+				if list[i].CompletedAt.IsZero() {
+					list[i].CompletedAt = now
+				}
+				list[i].UpdatedAt = now
 				m.chunks[bID] = list
 				b := m.builds[bID]
 				if b.Status == "running" {
@@ -600,9 +616,11 @@ func TestPostgresVanadisStore(t *testing.T) {
 		}
 	}
 	explicitStart := time.Date(2026, 10, 16, 18, 0, 0, 0, time.UTC)
+	explicitComplete := time.Date(2026, 10, 16, 18, 15, 0, 0, time.UTC)
 	cStart := mkChunk("c-2", "", 1, "T2", "I2", "", "")
 	cStart.StartedAt = explicitStart
-	createChunks := []VanadisChunk{validChunks[0], cStart, mkChunk("c-3", "", 2, "T3", "I3", "", "running")}
+	cStart.CompletedAt = explicitComplete
+	createChunks := []VanadisChunk{validChunks[0], cStart, mkChunk("c-3", "", 2, "T3", "I3", "", "running"), mkChunk("c-4", "", 3, "T4", "I4", "", "merged")}
 	if err := store.CreateBuild(ctx, validBuild, createChunks); err != nil {
 		t.Fatalf("CreateBuild failed: %v", err)
 	}
@@ -655,6 +673,7 @@ func TestPostgresVanadisStore(t *testing.T) {
 	}
 	cGet0 := mkChunk("c-1", "b-1", 0, "T1", "I1", "", "")
 	cGet0.StartedAt = explicitStart
+	cGet0.CompletedAt = explicitComplete
 	okGetStore := newMockStore(mockDB{
 		queryRowFn: func(context.Context, string, ...any) pgx.Row { return &mockRow{b: popBuild} },
 		queryFn: func(context.Context, string, ...any) (pgx.Rows, error) {
@@ -662,7 +681,7 @@ func TestPostgresVanadisStore(t *testing.T) {
 		},
 	})
 	gotB, gotC, err := okGetStore.GetBuild(ctx, "b-1")
-	if err != nil || gotB.ID != "b-1" || gotB.Title != "Build Title" || len(gotC) != 2 || gotC[0].Effort != "medium" || gotC[1].Effort != "low" || !gotC[0].StartedAt.Equal(explicitStart) || !gotC[1].StartedAt.IsZero() {
+	if err != nil || gotB.ID != "b-1" || gotB.Title != "Build Title" || len(gotC) != 2 || gotC[0].Effort != "medium" || gotC[1].Effort != "low" || !gotC[0].StartedAt.Equal(explicitStart) || !gotC[0].CompletedAt.Equal(explicitComplete) || !gotC[1].StartedAt.IsZero() || !gotC[1].CompletedAt.IsZero() {
 		t.Fatalf("unexpected GetBuild result: b=%+v c=%+v err=%v", gotB, gotC, err)
 	}
 	for _, err := range []error{store.UpdateChunkStatus(ctx, "", "running"), store.UpdateChunkStatus(ctx, "c-1", ""), store.UpdateBuildStatus(ctx, "", "completed"), store.UpdateBuildStatus(ctx, "b-1", ""), store.UpdateBuildStatusMessageID(ctx, "", "msg-1")} {

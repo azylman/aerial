@@ -388,6 +388,7 @@ CREATE TABLE IF NOT EXISTS vanadis_chunks (
     status TEXT NOT NULL DEFAULT 'pending',
     pr_number INTEGER,
     started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_vanadis_chunks_build_index UNIQUE (build_id, chunk_index)

@@ -40,14 +40,15 @@ type DeployingPR struct {
 
 // VanadisChunkSummary holds condensed status metadata for a single chunk in a Vanadis build.
 type VanadisChunkSummary struct {
-	ID         string    `json:"id"`
-	ChunkIndex int       `json:"chunk_index"`
-	Repo       string    `json:"repo,omitempty"`
-	Title      string    `json:"title"`
-	Status     string    `json:"status"`
-	PRNumber   int       `json:"pr_number,omitempty"`
-	StartedAt  time.Time `json:"started_at,omitempty"`
-	UpdatedAt  time.Time `json:"updated_at,omitempty"`
+	ID          string    `json:"id"`
+	ChunkIndex  int       `json:"chunk_index"`
+	Repo        string    `json:"repo,omitempty"`
+	Title       string    `json:"title"`
+	Status      string    `json:"status"`
+	PRNumber    int       `json:"pr_number,omitempty"`
+	StartedAt   time.Time `json:"started_at,omitempty"`
+	CompletedAt time.Time `json:"completed_at,omitempty"`
+	UpdatedAt   time.Time `json:"updated_at,omitempty"`
 }
 
 // VanadisAdvancementResult describes the outcome of advancing a Vanadis build chunk upon PR merge.

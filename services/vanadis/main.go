@@ -190,6 +190,7 @@ type VanadisChunk struct {
 	Status             string    `json:"status"`
 	PRNumber           int       `json:"pr_number,omitempty"`
 	StartedAt          time.Time `json:"started_at,omitempty"`
+	CompletedAt        time.Time `json:"completed_at,omitempty"`
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
 }
@@ -322,14 +323,23 @@ func validateCreateBuildInputs(buildID, threadID, objective string, chunks []Van
 	return nil
 }
 
+func isTerminalChunkStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "merged", "completed", "failed", "cancelled":
+		return true
+	default:
+		return false
+	}
+}
+
 func execInsertVanadisChunk(ctx context.Context, tx pgx.Tx, buildID string, c VanadisChunk) error {
-	const cQ = `INSERT INTO vanadis_chunks (id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, pr_number, started_at, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);`
+	const cQ = `INSERT INTO vanadis_chunks (id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, pr_number, started_at, completed_at, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);`
 	cStatus := firstNonEmpty(strings.TrimSpace(c.Status), "pending")
 	cEffort, err := normalizeChunkEffort(c.Effort)
 	if err != nil {
 		return fmt.Errorf("chunk %s: %w", c.ID, err)
 	}
-	var prNum, startedAt any
+	var prNum, startedAt, completedAt any
 	if c.PRNumber > 0 {
 		prNum = c.PRNumber
 	}
@@ -338,7 +348,12 @@ func execInsertVanadisChunk(ctx context.Context, tx pgx.Tx, buildID string, c Va
 	} else if cStatus == "running" || cStatus == "coding" {
 		startedAt = time.Now().UTC()
 	}
-	if _, err := tx.Exec(ctx, cQ, strings.TrimSpace(c.ID), buildID, c.ChunkIndex, firstNonEmpty(normalizeRepo(c.Repo), "azylman/aerial"), strings.TrimSpace(c.Title), strings.TrimSpace(c.Instructions), nonNilSlice(c.TargetFiles), nonNilSlice(c.TargetSymbols), cEffort, nonNilSlice(c.AcceptanceCriteria), cStatus, prNum, startedAt); err != nil {
+	if !c.CompletedAt.IsZero() {
+		completedAt = c.CompletedAt
+	} else if isTerminalChunkStatus(cStatus) {
+		completedAt = time.Now().UTC()
+	}
+	if _, err := tx.Exec(ctx, cQ, strings.TrimSpace(c.ID), buildID, c.ChunkIndex, firstNonEmpty(normalizeRepo(c.Repo), "azylman/aerial"), strings.TrimSpace(c.Title), strings.TrimSpace(c.Instructions), nonNilSlice(c.TargetFiles), nonNilSlice(c.TargetSymbols), cEffort, nonNilSlice(c.AcceptanceCriteria), cStatus, prNum, startedAt, completedAt); err != nil {
 		return fmt.Errorf("failed to insert vanadis chunk %s: %w", c.ID, err)
 	}
 	return nil
@@ -395,7 +410,7 @@ func (s *PostgresVanadisStore) GetBuild(ctx context.Context, buildID string) (*V
 		}
 		return nil, nil, fmt.Errorf("query build %s: %w", buildID, err)
 	}
-	const chunksQuery = `SELECT id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), started_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC;`
+	const chunksQuery = `SELECT id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC;`
 	rows, err := s.db.Query(ctx, chunksQuery, buildID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("query chunks for build %s: %w", buildID, err)
@@ -412,12 +427,15 @@ func scanChunks(rows pgx.Rows) ([]VanadisChunk, error) {
 	chunks := make([]VanadisChunk, 0)
 	for rows.Next() {
 		var c VanadisChunk
-		var startedAt sql.NullTime
-		if err := rows.Scan(&c.ID, &c.BuildID, &c.ChunkIndex, &c.Repo, &c.Title, &c.Instructions, &c.TargetFiles, &c.TargetSymbols, &c.Effort, &c.AcceptanceCriteria, &c.Status, &c.PRNumber, &startedAt, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		var startedAt, completedAt sql.NullTime
+		if err := rows.Scan(&c.ID, &c.BuildID, &c.ChunkIndex, &c.Repo, &c.Title, &c.Instructions, &c.TargetFiles, &c.TargetSymbols, &c.Effort, &c.AcceptanceCriteria, &c.Status, &c.PRNumber, &startedAt, &completedAt, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("failed to scan vanadis chunk: %w", err)
 		}
 		if startedAt.Valid {
 			c.StartedAt = startedAt.Time
+		}
+		if completedAt.Valid {
+			c.CompletedAt = completedAt.Time
 		}
 		c.TargetFiles, c.TargetSymbols, c.AcceptanceCriteria = nonNilSlice(c.TargetFiles), nonNilSlice(c.TargetSymbols), nonNilSlice(c.AcceptanceCriteria)
 		c.Effort = capChunkEffort(c.Effort)
@@ -459,7 +477,7 @@ func (s *PostgresVanadisStore) ListBuilds(ctx context.Context, limit int) ([]Van
 	if len(builds) == 0 {
 		return []VanadisBuildEntry{}, nil
 	}
-	const chunksQuery = `SELECT id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), started_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = ANY($1) ORDER BY build_id, chunk_index ASC;`
+	const chunksQuery = `SELECT id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = ANY($1) ORDER BY build_id, chunk_index ASC;`
 	cRows, err := s.db.Query(ctx, chunksQuery, buildIDs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query vanadis chunks: %w", err)
@@ -504,7 +522,7 @@ func (s *PostgresVanadisStore) execUpdateByID(ctx context.Context, idLabel, id, 
 
 // UpdateChunkStatus updates the lifecycle status of a VanadisChunk.
 func (s *PostgresVanadisStore) UpdateChunkStatus(ctx context.Context, chunkID, status string) error {
-	return s.execUpdateByID(ctx, "chunk id", chunkID, "status", status, false, `UPDATE vanadis_chunks SET status = $1, started_at = CASE WHEN $1 IN ('running', 'coding') THEN COALESCE(started_at, CURRENT_TIMESTAMP) ELSE started_at END, updated_at = CURRENT_TIMESTAMP WHERE id = $2;`, "failed to update vanadis chunk status", ErrChunkNotFound)
+	return s.execUpdateByID(ctx, "chunk id", chunkID, "status", status, false, `UPDATE vanadis_chunks SET status = $1, started_at = CASE WHEN $1 IN ('running', 'coding') THEN COALESCE(started_at, CURRENT_TIMESTAMP) ELSE started_at END, completed_at = CASE WHEN $1 IN ('merged', 'completed', 'failed', 'cancelled') THEN COALESCE(completed_at, CURRENT_TIMESTAMP) ELSE NULL END, updated_at = CURRENT_TIMESTAMP WHERE id = $2;`, "failed to update vanadis chunk status", ErrChunkNotFound)
 }
 
 // UpdateBuildStatus updates the lifecycle status of a VanadisBuild.
@@ -633,6 +651,7 @@ type StatusWidgetChunk struct {
 	PRNumber      int       `json:"pr_number,omitempty"`
 	DeployingJobs []string  `json:"deploying_jobs,omitempty"`
 	StartedAt     time.Time `json:"started_at,omitempty"`
+	CompletedAt   time.Time `json:"completed_at,omitempty"`
 	UpdatedAt     time.Time `json:"updated_at,omitempty"`
 }
 
@@ -713,13 +732,14 @@ func (s *VanadisServer) syncBuildWidget(ctx context.Context, build VanadisBuild,
 			chunkStatus = "deployed"
 		}
 		wChunks[i] = StatusWidgetChunk{
-			Index:     c.ChunkIndex,
-			Repo:      firstNonEmpty(c.Repo, "azylman/aerial"),
-			Title:     c.Title,
-			Status:    chunkStatus,
-			PRNumber:  c.PRNumber,
-			StartedAt: c.StartedAt,
-			UpdatedAt: c.UpdatedAt,
+			Index:       c.ChunkIndex,
+			Repo:        firstNonEmpty(c.Repo, "azylman/aerial"),
+			Title:       c.Title,
+			Status:      chunkStatus,
+			PRNumber:    c.PRNumber,
+			StartedAt:   c.StartedAt,
+			CompletedAt: c.CompletedAt,
+			UpdatedAt:   c.UpdatedAt,
 		}
 	}
 	payload := StatusWidgetRequest{
@@ -810,7 +830,8 @@ func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string,
 			if bErr := s.store.UpdateBuildStatus(ctx, build.ID, "failed"); bErr != nil {
 				log.Printf("[vanadis] failed marking build %s failed on final attempt: %v", build.ID, bErr)
 			}
-			build.Status, chunks[activeIdx].Status, chunks[activeIdx].UpdatedAt = "failed", "failed", time.Now().UTC()
+			failedNow := time.Now().UTC()
+			build.Status, chunks[activeIdx].Status, chunks[activeIdx].CompletedAt, chunks[activeIdx].UpdatedAt = "failed", "failed", failedNow, failedNow
 			s.syncBuildWidget(ctx, *build, chunks, fmt.Sprintf("⚠️ Chunk %d execution failed: %v", chunkIndex+1, err))
 		}
 		return err
@@ -1041,6 +1062,7 @@ func (s *VanadisServer) cancelBuildChunksAndPrompts(ctx context.Context, buildID
 			}
 		}
 		existingChunks[i].Status = "cancelled"
+		existingChunks[i].CompletedAt = now
 		existingChunks[i].UpdatedAt = now
 	}
 	if _, err := s.postBrainJSON(ctx, "/dispatch/cancel", map[string]string{"build_id": buildID}, 4<<10); err != nil {

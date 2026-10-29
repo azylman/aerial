@@ -1199,12 +1199,13 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
 
                 const sameDayStart = new Date(2026, 9, 17, 8, 0, 5).toISOString();
                 const sameDayEnd = new Date(2026, 9, 17, 14, 15, 35).toISOString();
+                const laterSunkUpdate = new Date(2026, 9, 17, 18, 45, 0).toISOString();
                 const completedBuild = {
                     status: 'completed',
                     created_at: sameDayStart,
-                    updated_at: sameDayEnd,
+                    updated_at: laterSunkUpdate,
                     chunks: [
-                        { id: 'c1', status: 'merged', started_at: sameDayStart, updated_at: sameDayEnd }
+                        { id: 'c1', status: 'merged', started_at: sameDayStart, completed_at: sameDayEnd, updated_at: laterSunkUpdate }
                     ]
                 };
                 const compTiming = getBuildTimingInfo(completedBuild);

@@ -600,13 +600,14 @@ func TestBuildStatusWidgetComponents_ChunkRuntimes(t *testing.T) {
 		Status:    "running",
 		Chunks: []StatusWidgetChunk{
 			{
-				Index:     0,
-				Repo:      "aerial",
-				Title:     "Completed chunk with duration",
-				Status:    "deployed",
-				PRNumber:  748,
-				StartedAt: start,
-				UpdatedAt: completedAt,
+				Index:       0,
+				Repo:        "aerial",
+				Title:       "Completed chunk with duration",
+				Status:      "deployed",
+				PRNumber:    748,
+				StartedAt:   start,
+				CompletedAt: completedAt,
+				UpdatedAt:   completedAt.Add(10 * time.Minute),
 			},
 			{
 				Index:     1,

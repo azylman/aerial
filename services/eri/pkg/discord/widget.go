@@ -20,6 +20,7 @@ type StatusWidgetChunk struct {
 	PRNumber      int       `json:"pr_number,omitempty"`
 	DeployingJobs []string  `json:"deploying_jobs,omitempty"`
 	StartedAt     time.Time `json:"started_at,omitempty"`
+	CompletedAt   time.Time `json:"completed_at,omitempty"`
 	UpdatedAt     time.Time `json:"updated_at,omitempty"`
 }
 
@@ -148,10 +149,14 @@ func formatChunkRuntimeSuffix(c StatusWidgetChunk) string {
 	case "running", "coding", "pr_opened", "open", "merged", "synced", "deploying":
 		return fmt.Sprintf(" *(started <t:%d:R>)*", c.StartedAt.Unix())
 	case "deployed", "completed", "success", "failed", "conflict", "closed", "error", "cancelled":
-		if c.UpdatedAt.IsZero() {
+		end := c.CompletedAt
+		if end.IsZero() {
+			end = c.UpdatedAt
+		}
+		if end.IsZero() {
 			return ""
 		}
-		return fmt.Sprintf(" *(%s)*", FormatChunkDuration(c.UpdatedAt.Sub(c.StartedAt)))
+		return fmt.Sprintf(" *(%s)*", FormatChunkDuration(end.Sub(c.StartedAt)))
 	default:
 		return ""
 	}

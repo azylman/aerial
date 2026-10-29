@@ -2064,12 +2064,28 @@ function getBuildTimingInfo(build, nowMs) {
 
     let endMs = null;
     if (qState === 'completed') {
-        endMs = parseValidTimestampMs(build.completed_at) || parseValidTimestampMs(build.ended_at) || parseValidTimestampMs(build.updated_at);
+        endMs = parseValidTimestampMs(build.completed_at) || parseValidTimestampMs(build.ended_at);
+        let maxChunkCompletedMs = null;
+        let maxChunkUpdatedMs = null;
         if (chunks.length > 0) {
             for (const c of chunks) {
+                const cComp = c && parseValidTimestampMs(c.completed_at);
+                if (cComp && (!maxChunkCompletedMs || cComp > maxChunkCompletedMs)) {
+                    maxChunkCompletedMs = cComp;
+                }
                 const cUpd = c && parseValidTimestampMs(c.updated_at);
-                if (cUpd && (!endMs || cUpd > endMs)) {
-                    endMs = cUpd;
+                if (cUpd && (!maxChunkUpdatedMs || cUpd > maxChunkUpdatedMs)) {
+                    maxChunkUpdatedMs = cUpd;
+                }
+            }
+        }
+        if (!endMs) {
+            if (maxChunkCompletedMs) {
+                endMs = maxChunkCompletedMs;
+            } else {
+                endMs = parseValidTimestampMs(build.updated_at);
+                if (maxChunkUpdatedMs && (!endMs || maxChunkUpdatedMs > endMs)) {
+                    endMs = maxChunkUpdatedMs;
                 }
             }
         }
