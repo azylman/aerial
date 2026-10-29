@@ -55,6 +55,7 @@ type ChannelPolicy struct {
 	WakeMode             string                `yaml:"wake_mode,omitempty" json:"wake_mode,omitempty"`
 	IgnoreBots           *bool                 `yaml:"ignore_bots,omitempty" json:"ignore_bots,omitempty"`
 	AmbientWakeThreshold *float64              `yaml:"ambient_wake_threshold,omitempty" json:"ambient_wake_threshold,omitempty"`
+	BlockBuildCards      bool                  `yaml:"block_build_cards,omitempty" json:"block_build_cards,omitempty"`
 	Hooks                ChannelHooksConfig    `yaml:"hooks,omitempty" json:"hooks,omitempty"`
 	AmbientContext       *AmbientContextConfig `yaml:"ambient_context,omitempty" json:"ambient_context,omitempty"`
 }
