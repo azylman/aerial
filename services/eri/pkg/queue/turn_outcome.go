@@ -441,7 +441,7 @@ func (te *turnExecution) cancelBurstOnShutdown(turnStatus, currentModel string, 
 	te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 	if te.isDispatch() {
 		if s := te.store(); s != nil {
-			if err := s.ResetDispatchToPendingWithRestart(context.Background(), te.dispatch.ID, "interrupted by graceful deployment"); err != nil {
+			if err := s.UpdateDispatchStatus(context.Background(), te.dispatch.ID, db.StatusPending, "interrupted by graceful deployment"); err != nil {
 				log.Printf("[WorkerPool] Warning resetting dispatch %s to pending: %v", te.dispatch.ID, err)
 			}
 		}

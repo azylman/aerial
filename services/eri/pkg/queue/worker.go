@@ -609,7 +609,7 @@ func (te *turnExecution) claimAndFilterStale() bool {
 		if m.CreatedAt.After(latestMsg.CreatedAt) {
 			latestMsg = m
 		}
-		if m.RetryCount > 0 || m.RestartCount > 0 || m.ErrorMessage == "deployment_drain" {
+		if m.RetryCount > 0 || m.RestartCount > 0 || isDeploymentDrained(m.ErrorMessage) {
 			hasRecovered = true
 		}
 	}
@@ -955,14 +955,31 @@ func (te *turnExecution) checkGlobalQuotaLockout(currentAPIKey, currentModel str
 	return true
 }
 
+func (te *turnExecution) isRestartedOrDrainedTurn(lastErrDetail string) bool {
+	if lastErrDetail != "" {
+		return false
+	}
+	if te.isDispatch() {
+		if te.dispatch == nil {
+			return false
+		}
+		return te.dispatch.RestartCount > 0 || isDeploymentDrained(te.dispatch.ErrorMessage)
+	}
+	for _, m := range te.burst {
+		if m.RestartCount > 0 || isDeploymentDrained(m.ErrorMessage) {
+			return true
+		}
+	}
+	return false
+}
+
 func (te *turnExecution) prepareAttemptPrompt(attempt int, promptToSend, lastErrDetail, lastStderr string) string {
 	if promptToSend == "" {
 		promptToSend = te.turnPrompt
 	}
 	if promptToSend == te.turnPrompt && te.currentSessionID != "" && te.pool != nil && te.pool.sessionMgr != nil && te.pool.sessionMgr.SessionExistsOnDisk(te.currentSessionID) {
 		isTimeoutRetry := attempt > 1 && (runner.IsInactivityTimeout(lastErrDetail, lastStderr) || strings.Contains(lastErrDetail, "max duration exceeded") || strings.Contains(lastErrDetail, "print timeout") || strings.Contains(lastErrDetail, "empty response after") || strings.Contains(lastErrDetail, "context deadline exceeded"))
-		isRestartedDispatch := te.isDispatch() && te.dispatch.RestartCount > 0 && lastErrDetail == ""
-		if isTimeoutRetry || isRestartedDispatch {
+		if isTimeoutRetry || te.isRestartedOrDrainedTurn(lastErrDetail) {
 			return fmt.Sprintf(ContinuationPromptTemplate, te.turnPrompt)
 		}
 	}
