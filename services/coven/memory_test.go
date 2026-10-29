@@ -2052,6 +2052,7 @@ func TestSQLStore_ConstructorsAndSetters(t *testing.T) {
 		{
 			name:         "CustomURL",
 			initialURL:   "http://my-eri:5000/",
+			client:       &http.Client{Timeout: 5 * time.Second},
 			wantBrainURL: "http://my-eri:5000",
 		},
 		{
@@ -2074,7 +2075,6 @@ func TestSQLStore_ConstructorsAndSetters(t *testing.T) {
 			if tc.setURL != "" {
 				store.SetBrainURL(tc.setURL)
 			}
-			store.SetHTTPClient(tc.client)
 			if got := store.getBrainURL(); got != tc.wantBrainURL {
 				t.Errorf("getBrainURL() = %q, want %q", got, tc.wantBrainURL)
 			}
