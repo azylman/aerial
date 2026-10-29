@@ -212,7 +212,6 @@ func inspectGitHubGetFileContents(raw json.RawMessage) *Decision {
 
 const (
 	maxVictoriaMetricsSeriesLimit = 100
-	maxGrepMatchLimit             = 20
 	maxRecursiveContextLines      = 3
 	maxGitLogPatchCommits         = 5
 )
@@ -680,22 +679,15 @@ func isGrepDiscoveryFlag(t string) bool {
 	return false
 }
 
-func parseGrepMatchCountFlag(t, nextToken string) (matched, consumeNext bool, count int) {
+func consumesGrepMatchCountArg(t, nextToken string) bool {
 	if t == "--max-count" {
-		return true, nextToken != "", atoiOrZero(nextToken)
-	}
-	if strings.HasPrefix(t, "--max-count=") {
-		return true, false, atoiOrZero(strings.TrimPrefix(t, "--max-count="))
+		return nextToken != ""
 	}
 	if hasShortFlag(t, 'm') {
 		idx := strings.IndexRune(t[1:], 'm') + 1
-		rest := t[idx+1:]
-		if rest == "" {
-			return true, nextToken != "", atoiOrZero(nextToken)
-		}
-		return true, false, atoiOrZero(rest)
+		return t[idx+1:] == "" && nextToken != ""
 	}
-	return false, false, 0
+	return false
 }
 
 func parseGrepContextFlag(t, nextToken string) (matched, consumeNext bool, lines int) {
@@ -859,6 +851,9 @@ func isStandardGrep(bin string) bool {
 var broadSearchPaths = map[string]bool{
 	".":                      true,
 	"..":                     true,
+	"services":               true,
+	"pkg":                    true,
+	"mcp":                    true,
 	"/share":                 true,
 	"/share/aerial":          true,
 	"/share/aerial/services": true,
@@ -922,8 +917,6 @@ func isStandardGrepRecursive(bin, t string) bool {
 type grepScanFlags struct {
 	hasExcludeDir      bool
 	hasDiscoveryFlag   bool
-	hasMatchLimit      bool
-	maxMatchCount      int
 	maxContextLines    int
 	hasExplicitPattern bool
 	isRecursive        bool
@@ -940,15 +933,12 @@ func (f *grepScanFlags) applyGrepFlag(bin, t, nextToken string) (consumeNext boo
 	}
 	if isGrepDiscoveryFlag(t) {
 		f.hasDiscoveryFlag = true
-		f.hasMatchLimit = true
 		if grepNoPatternLongFlags[t] {
 			f.hasExplicitPattern = true
 		}
 	}
-	if matched, takesArg, count := parseGrepMatchCountFlag(t, nextToken); matched {
-		f.hasMatchLimit = true
-		f.maxMatchCount = count
-		return takesArg
+	if consumesGrepMatchCountArg(t, nextToken) {
+		return true
 	}
 	if matched, takesArg, lines := parseGrepContextFlag(t, nextToken); matched {
 		if lines > f.maxContextLines {
@@ -1015,12 +1005,6 @@ func isUnscopedRecursiveTarget(flags grepScanFlags) bool {
 }
 
 func validateGrepLineLimits(flags grepScanFlags) *Decision {
-	if flags.maxMatchCount <= 0 || flags.maxMatchCount > maxGrepMatchLimit {
-		return &Decision{
-			Decision: DecisionDeny,
-			Reason:   "Excessive grep/rg match limit detected (-m / --max-count > 20). Since '-m' bounds matches per file rather than total output, use '-m <= 20' (or use '-l' / '-c' for broad discovery).",
-		}
-	}
 	if flags.isRecursive && flags.maxContextLines > maxRecursiveContextLines {
 		return &Decision{
 			Decision: DecisionDeny,
@@ -1030,7 +1014,7 @@ func validateGrepLineLimits(flags grepScanFlags) *Decision {
 	if isUnscopedRecursiveTarget(flags) {
 		return &Decision{
 			Decision: DecisionDeny,
-			Reason:   "Broad or multi-directory line search detected. Because '-m' limits matches per file rather than total output, searching repository roots (e.g. '.', '/share/aerial', '/share/aerial/services') or multiple directories at once requires discovery mode ('-l' / '--files-with-matches' or '-c' / '--count') first, or scoping the search to a single package/subdirectory.",
+			Reason:   "Broad or multi-directory line search detected. Searching repository roots (e.g. '.', '/share/aerial', '/share/aerial/services') or multiple directories at once requires discovery mode ('-l' / '--files-with-matches' or '-c' / '--count') first, or scoping the search to a single package/subdirectory.",
 		}
 	}
 	return nil
@@ -1049,17 +1033,10 @@ func inspectGrepCommand(bin string, tokens []string, fromPipe bool) *Decision {
 		return nil
 	}
 
-	if flags.isRecursive && isStandardGrep(bin) && !flags.hasExcludeDir && hasBroadPathToken(flags.pathTokens) {
+	if flags.isRecursive && isStandardGrep(bin) && !flags.hasExcludeDir {
 		return &Decision{
 			Decision: DecisionDeny,
 			Reason:   "Recursive grep without directory exclusions detected. Add '--exclude-dir=.git' (or use ripgrep/rg, which excludes .git by default) to prevent scanning raw git packfiles and binary objects.",
-		}
-	}
-
-	if !flags.hasMatchLimit && !flags.hasDiscoveryFlag {
-		return &Decision{
-			Decision: DecisionDeny,
-			Reason:   "Unbounded text search detected. Bound output with '-m <N>' / '--max-count=<N>' (N <= 20, e.g. 'rg -n -m 20 <pattern> <subdir>'), '-l' ('--files-with-matches'), or '-c' ('--count') per the shell-filesystem-traversal skill to prevent context window bloat.",
 		}
 	}
 
