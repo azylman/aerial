@@ -72,6 +72,7 @@ type ChunkPRRequest struct {
 
 // SyncChunkPRWidgetRequest represents the payload for POST /chunks/sync-pr-widget.
 type SyncChunkPRWidgetRequest struct {
+	BuildID  string `json:"build_id,omitempty"`
 	Repo     string `json:"repo"`
 	PRNumber int    `json:"pr_number"`
 	PRStatus string `json:"pr_status"`
@@ -286,6 +287,21 @@ func queryAndAdvanceChunks(ctx context.Context, tx pgx.Tx, buildID, chunkID, cSt
 
 	nextChunkIdx := computeNextChunkIndex(allChunks, chunkIdx)
 	if nextChunkIdx >= 0 {
+		const updateNextChunkQuery = `UPDATE vanadis_chunks SET status = 'running', started_at = COALESCE(started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE build_id = $1 AND chunk_index = $2 AND status = 'pending'`
+		if _, err := tx.Exec(ctx, updateNextChunkQuery, buildID, nextChunkIdx); err != nil {
+			return nil, fmt.Errorf("update next vanadis chunk running: %w", err)
+		}
+		now := time.Now().UTC()
+		for i := range allChunks {
+			if allChunks[i].ChunkIndex == nextChunkIdx && allChunks[i].Status == "pending" {
+				allChunks[i].Status = "running"
+				if allChunks[i].StartedAt.IsZero() {
+					allChunks[i].StartedAt = now
+				}
+				allChunks[i].UpdatedAt = now
+				break
+			}
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return nil, fmt.Errorf("commit vanadis chunk advance tx: %w", err)
 		}
@@ -575,7 +591,7 @@ func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncC
 	for i, c := range chunks {
 		chunkRepo := firstNonEmpty(c.Repo, "azylman/aerial")
 		chunkStatus := normalizeWidgetStatus(c.Status)
-		if c.PRNumber == req.PRNumber && req.PRFound {
+		if req.PRNumber > 0 && c.PRNumber == req.PRNumber && req.PRFound {
 			chunkStatus = resolveVanadisChunkWidgetStatus(c.Status, req.PRStatus)
 			if (chunkStatus == "failed" || chunkStatus == "conflict") && widgetStatus != "completed" {
 				widgetStatus = "failed"
@@ -598,6 +614,8 @@ func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncC
 	widgetBanner := ""
 	if (widgetStatus == "failed" || widgetStatus == "conflict") && req.PRFound {
 		widgetBanner = req.PRBanner
+	} else if req.PRNumber == 0 && strings.TrimSpace(req.PRBanner) != "" {
+		widgetBanner = strings.TrimSpace(req.PRBanner)
 	}
 	return StatusWidgetRequest{
 		ChannelID: build.ThreadID,
@@ -646,7 +664,26 @@ func (s *VanadisServer) handleSyncPRWidget(w http.ResponseWriter, r *http.Reques
 		writeErr(w, http.StatusBadRequest, "invalid json payload")
 		return
 	}
+	req.BuildID = strings.TrimSpace(req.BuildID)
 	req.Repo = strings.TrimSpace(req.Repo)
+	if req.BuildID != "" {
+		build, chunks, err := s.store.GetBuild(r.Context(), req.BuildID)
+		if errors.Is(err, ErrBuildNotFound) {
+			httpkit.WriteJSON(w, http.StatusOK, map[string]any{"matched": false})
+			return
+		}
+		if err != nil {
+			writeStoreErr(w, err)
+			return
+		}
+		widgetReq := buildSyncWidgetRequest(*build, chunks, req)
+		if err := s.dispatchAndPersistWidget(r.Context(), build.ID, build.StatusMessageID, widgetReq); err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		httpkit.WriteJSON(w, http.StatusOK, map[string]any{"matched": true, "build_id": build.ID})
+		return
+	}
 	if req.Repo == "" || req.PRNumber <= 0 {
 		writeErr(w, http.StatusBadRequest, "repo and valid pr_number are required")
 		return

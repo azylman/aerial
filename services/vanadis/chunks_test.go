@@ -610,6 +610,47 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 			t.Errorf("expected status_message_id updated to msg-new-widget-1, got %q", b.StatusMessageID)
 		}
 
+		// Build ID direct sync
+		buildPayload := fmt.Sprintf(`{"build_id":"%s","pr_banner":"Custom banner test"}`, bWidgetID)
+		recBuild := httptest.NewRecorder()
+		muxWidget.ServeHTTP(recBuild, httptest.NewRequest(http.MethodPost, "/chunks/sync-pr-widget", strings.NewReader(buildPayload)))
+		if recBuild.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for build_id sync, got %d: %s", recBuild.Code, recBuild.Body.String())
+		}
+		var buildRes map[string]any
+		_ = json.Unmarshal(recBuild.Body.Bytes(), &buildRes)
+		if buildRes["matched"] != true || buildRes["build_id"] != bWidgetID {
+			t.Errorf("unexpected build_id sync response: %+v", buildRes)
+		}
+		if len(widgetDispatched) > 0 {
+			last := widgetDispatched[len(widgetDispatched)-1]
+			if last.Banner != "Custom banner test" || last.ID != bWidgetID {
+				t.Errorf("expected widget banner %q and ID %q, got banner=%q ID=%q", "Custom banner test", bWidgetID, last.Banner, last.ID)
+			}
+		}
+
+		// Build ID direct sync: unmatched ErrBuildNotFound
+		unmatchedBuildPayload := `{"build_id":"nonexistent-build-id"}`
+		recUnmatchedBuild := httptest.NewRecorder()
+		muxWidget.ServeHTTP(recUnmatchedBuild, httptest.NewRequest(http.MethodPost, "/chunks/sync-pr-widget", strings.NewReader(unmatchedBuildPayload)))
+		if recUnmatchedBuild.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for nonexistent build_id, got %d", recUnmatchedBuild.Code)
+		}
+		var unRes map[string]any
+		_ = json.Unmarshal(recUnmatchedBuild.Body.Bytes(), &unRes)
+		if unRes["matched"] != false {
+			t.Errorf("expected matched=false for nonexistent build, got %+v", unRes)
+		}
+
+		// Build ID direct sync: store error
+		sWidget.getErr = errors.New("simulated store error")
+		recBuildStoreErr := httptest.NewRecorder()
+		muxWidget.ServeHTTP(recBuildStoreErr, httptest.NewRequest(http.MethodPost, "/chunks/sync-pr-widget", strings.NewReader(buildPayload)))
+		if recBuildStoreErr.Code != http.StatusInternalServerError {
+			t.Errorf("expected 500 on store error for build_id sync, got %d", recBuildStoreErr.Code)
+		}
+		sWidget.getErr = nil
+
 		// Conflict banner override
 		conflictPayload := `{"repo":"aerial","pr_number":301,"pr_status":"conflict","pr_banner":"Merge conflict detected","pr_found":true}`
 		recConflict := httptest.NewRecorder()
@@ -1099,6 +1140,45 @@ func TestPostgresVanadisStore_ChunkMethods(t *testing.T) {
 		})
 		if _, err := sIterErr.AdvanceChunkByPR(ctx, "aerial", 101); err == nil {
 			t.Error("expected error on chunks iter error")
+		}
+
+		// Update next chunk error
+		sUpdateNextErr := newMockStore(mockDB{
+			beginFn: func(context.Context) (pgx.Tx, error) {
+				return &mockTx{
+					queryRowFn: func(context.Context, string, ...any) pgx.Row {
+						return &genericMockRow{scanFn: func(dest ...any) error {
+							*dest[0].(*string) = "c1"
+							*dest[1].(*string) = "b1"
+							*dest[2].(*int) = 0
+							*dest[3].(*string) = "Chunk 1"
+							*dest[4].(*string) = "pr_opened"
+							*dest[5].(*string) = "thread-1"
+							*dest[6].(*int) = 2
+							*dest[7].(*string) = "Build 1"
+							*dest[8].(*string) = "Objective 1"
+							*dest[9].(*string) = "running"
+							*dest[10].(*string) = "msg-1"
+							return nil
+						}}
+					},
+					queryFn: func(context.Context, string, ...any) (pgx.Rows, error) {
+						return &mockRows{items: []VanadisChunk{
+							{ID: "c1", ChunkIndex: 0, Status: "merged", StartedAt: time.Now()},
+							{ID: "c2", ChunkIndex: 1, Status: "pending"},
+						}}, nil
+					},
+					execFn: func(_ context.Context, sql string, _ ...any) (pgconn.CommandTag, error) {
+						if strings.Contains(sql, "UPDATE vanadis_chunks") && strings.Contains(sql, "status = 'running'") {
+							return pgconn.CommandTag{}, errors.New("update next chunk err")
+						}
+						return pgconn.NewCommandTag("UPDATE 1"), nil
+					},
+				}, nil
+			},
+		})
+		if _, err := sUpdateNextErr.AdvanceChunkByPR(ctx, "aerial", 101); err == nil {
+			t.Error("expected error on update next chunk error")
 		}
 
 		// Commit error with next chunk
