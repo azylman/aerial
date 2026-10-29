@@ -27,7 +27,7 @@ Global Aerial Stack & Cluster Invariants (applies across all repositories):
 1. Security & Secrets: Zero plaintext tokens, API keys, passwords, or GitHub PATs in code, configs, logs, or git configs. Zero imperative SQL DDL (ALTER TABLE, DROP TABLE) in application code (must use declarative schema.sql + Atlas migrations). Prevent command injection, SSRF, XSS, and path traversal on untrusted inputs.
 2. Concurrency & Reliability: Zero data races, unclosed HTTP response bodies, or leaked goroutines/tickers/timers. Zero arbitrary time.Sleep calls in tests or production plumbing.
 3. Architecture & Testing: Functional Core / Imperative Shell. Go unit tests must use homogeneous table-driven loops without closure fields on table structs (run, check, setup, runnerFn, opts, etc.) or catch-all Test*Coverage* names.
-4. Internal Cluster & Runtime Coverage Topology: All services run inside a private HashiCorp Nomad cluster (*.aerial, *.lan, aerial-postgres, aerial-hangar, aerial-brain, vanadis) behind authenticated path-scoped gateways that never expose /debug/*. Outbound internal Nomad DNS names are trusted private mesh endpoints, not public internet URLs. Compiling Go binaries directly with -cover -covermode=atomic in Dockerfiles and unconditionally registering GET/POST /debug/coverage/flush (calling coverage.WriteMetaDir and coverage.WriteCountersDir into an ephemeral os.MkdirTemp directory and streaming an application/x-tar archive) are intentional cluster-wide invariants. Do NOT flag /debug/coverage/flush, WriteMetaDir, WriteCountersDir, or -cover in Dockerfiles as security, DoS, or disk-I/O findings. In services/roborev-runner/entrypoint.sh, retaining GITHUB_PAT for ./run.sh while stripping GITHUB_PAT/GH_TOKEN/GITHUB_TOKEN inside the /usr/local/bin/roborev wrapper is intentional so allowlisted fork PRs can post review comments via gh pr comment without exposing tokens to agy review subprocesses.
+4. Internal Cluster & Runtime Coverage Topology: All services run inside a private HashiCorp Nomad cluster (*.aerial, *.lan, aerial-postgres, aerial-hangar, aerial-brain, vanadis) behind authenticated path-scoped gateways that never expose /debug/*. Outbound internal Nomad DNS names are trusted private mesh endpoints, not public internet URLs. Compiling Go binaries directly with -cover -covermode=atomic in Dockerfiles and unconditionally registering GET/POST /debug/coverage/flush (calling coverage.WriteMetaDir and coverage.WriteCountersDir into an ephemeral os.MkdirTemp directory and streaming an application/x-tar archive) are intentional cluster-wide invariants. Do NOT flag /debug/coverage/flush, WriteMetaDir, WriteCountersDir, or -cover in Dockerfiles as security, DoS, or disk-I/O findings. In services/github-runner/entrypoint.sh and nomad/jobs/github-runner.nomad, retaining GITHUB_PAT for ./run.sh in roborev-runners while stripping GITHUB_PAT/GH_TOKEN/GITHUB_TOKEN inside the /usr/local/bin/roborev wrapper is intentional so allowlisted fork PRs can post review comments via gh pr comment without exposing tokens to agy review subprocesses. Mounting /var/run/docker.sock and aerial-ci-cache:/cache in group "ci-runners" (while group "roborev-runners" has no docker.sock and ci-runners strip GITHUB_PAT via env -u GITHUB_PAT ./run.sh) is an intentional cluster invariant.
 """
 EOF
 chmod 0600 /root/.roborev/config.toml
@@ -219,8 +219,25 @@ mint_runner_token() {
 }
 
 TARGET_REPO="${TARGET_REPO:-azylman/aerial}"
-RUNNER_NAME="${RUNNER_NAME:-roborev-runner-$(hostname)}"
+RUNNER_NAME="${RUNNER_NAME:-github-runner-$(hostname)}"
 RUNNER_LABELS="${RUNNER_LABELS:-self-hosted,roborev}"
+
+echo "${PATH}" > /actions-runner/.path
+
+if [ -d "/cache" ]; then
+  mkdir -p /cache/go-build /cache/go-mod /cache/pip "/cache/golangci-lint-${RUNNER_NAME}"
+  export GOCACHE="/cache/go-build"
+  export GOMODCACHE="/cache/go-mod"
+  export PIP_CACHE_DIR="/cache/pip"
+  export GOLANGCI_LINT_CACHE="/cache/golangci-lint-${RUNNER_NAME}"
+
+  cat >> /actions-runner/.env <<EOF
+GOCACHE=/cache/go-build
+GOMODCACHE=/cache/go-mod
+PIP_CACHE_DIR=/cache/pip
+GOLANGCI_LINT_CACHE=/cache/golangci-lint-${RUNNER_NAME}
+EOF
+fi
 
 echo "Minting runner registration token for ${TARGET_REPO}..."
 REG_TOKEN=$(mint_runner_token "registration-token")
@@ -253,6 +270,10 @@ cleanup() {
 trap cleanup SIGTERM SIGINT
 
 echo "Starting runner..."
-./run.sh &
+if [[ ",${RUNNER_LABELS}," == *",ci,"* ]]; then
+  env -u GITHUB_PAT ./run.sh &
+else
+  ./run.sh &
+fi
 RUNNER_PID=$!
 wait "${RUNNER_PID}"

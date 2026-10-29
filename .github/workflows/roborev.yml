@@ -26,7 +26,7 @@ jobs:
       - name: Check if .roborev.toml exists on main
         id: check
         run: |
-          if git cat-file -e origin/main:.roborev.toml 2>/dev/null && git cat-file -e origin/main:nomad/jobs/roborev-runner.nomad 2>/dev/null; then
+          if git cat-file -e origin/main:.roborev.toml 2>/dev/null && (git cat-file -e origin/main:nomad/jobs/github-runner.nomad 2>/dev/null || git cat-file -e origin/main:nomad/jobs/roborev-runner.nomad 2>/dev/null); then
             echo "bootstrapped=true" >> "$GITHUB_OUTPUT"
           else
             echo "bootstrapped=false" >> "$GITHUB_OUTPUT"

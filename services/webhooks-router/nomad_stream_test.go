@@ -342,9 +342,9 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 		},
 		{
 			name:            "running allocation with pending non-poststop sibling task verified via job API ignored",
-			streamLines:     []string{`{"Index":2065,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":{"Allocation":{"ID":"alloc-multi-1","JobID":"roborev-runner","DesiredStatus":"run","ClientStatus":"running","TaskStates":{"runner-1":{"State":"running","Failed":false,"Events":[{"Type":"Started"}]},"runner-2":{"State":"pending","Failed":false,"Restarts":0,"Events":[{"Type":"Received"}]}}}}}]}`},
-			allocationsJSON: `[{"ID":"alloc-multi-1","JobID":"roborev-runner","DesiredStatus":"run","ClientStatus":"running","JobVersion":1}]`,
-			jobSpecJSON:     `{"ID":"roborev-runner","Type":"service","Status":"running","Version":1,"Stop":false,"TaskGroups":[{"Name":"runners","Tasks":[{"Name":"runner-1"},{"Name":"runner-2"}]}]}`,
+			streamLines:     []string{`{"Index":2065,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":{"Allocation":{"ID":"alloc-multi-1","JobID":"github-runner","DesiredStatus":"run","ClientStatus":"running","TaskStates":{"runner-1":{"State":"running","Failed":false,"Events":[{"Type":"Started"}]},"runner-2":{"State":"pending","Failed":false,"Restarts":0,"Events":[{"Type":"Received"}]}}}}}]}`},
+			allocationsJSON: `[{"ID":"alloc-multi-1","JobID":"github-runner","DesiredStatus":"run","ClientStatus":"running","JobVersion":1}]`,
+			jobSpecJSON:     `{"ID":"github-runner","Type":"service","Status":"running","Version":1,"Stop":false,"TaskGroups":[{"Name":"runners","Tasks":[{"Name":"runner-1"},{"Name":"runner-2"}]}]}`,
 			reg:             mkDeployedReg(validThread, 462, validSHA, validRepo, true),
 		},
 	}

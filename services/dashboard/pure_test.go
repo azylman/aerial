@@ -497,7 +497,7 @@ func TestExtractServiceNameFromJobName_TableDriven(t *testing.T) {
 		{name: "haro service", jobName: "haro CI", expected: "haro"},
 		{name: "coven service", jobName: "Build & Push coven", expected: "coven"},
 		{name: "vanadis service", jobName: "Build & Push vanadis", expected: "vanadis"},
-		{name: "roborev-runner service", jobName: "roborev-runner CI", expected: "roborev-runner"},
+		{name: "github-runner service", jobName: "github-runner CI", expected: "github-runner"},
 		{name: "eri service build & push", jobName: "Build & Push eri", expected: "eri"},
 		{name: "eri service build parentheses", jobName: "build (eri)", expected: "eri"},
 		{name: "discord mcp", jobName: "discord-mcp Tests", expected: "discord-mcp"},

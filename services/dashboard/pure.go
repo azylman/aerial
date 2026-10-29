@@ -386,7 +386,7 @@ func ExtractServiceNameFromJobName(jobName string) string {
 		"haro",
 		"coven",
 		"vanadis",
-		"roborev-runner",
+		"github-runner",
 		"discord-mcp",
 		"kernel-mcp",
 		"github-mcp",
