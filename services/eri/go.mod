@@ -9,6 +9,7 @@ require (
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/pgvector/pgvector-go v0.4.1
 	github.com/prometheus/client_golang v1.24.1
+	go.uber.org/goleak v1.3.0
 	golang.org/x/sync v0.22.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.46.1

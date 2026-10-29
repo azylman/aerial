@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net"
@@ -701,6 +702,11 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 			}
 		}()
 		store = db.NewSQLStore(database)
+		defer func() {
+			if closer, ok := store.(io.Closer); ok {
+				_ = closer.Close()
+			}
+		}()
 	}
 
 	config.RegisterConfigTokens(cfg)

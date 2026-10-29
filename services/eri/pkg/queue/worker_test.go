@@ -1082,6 +1082,7 @@ func TestWorker_EvaluateAmbientWake_HTTPAndSilent_TableDriven(t *testing.T) {
 			}
 
 			_ = te.evaluateAmbientWake()
+			defer te.stopIndicators()
 			if tc.wantSkipClass {
 				if te.wakeInfos != nil {
 					t.Errorf("expected ambient wake to be skipped, but wakeInfos was populated: %v", te.wakeInfos)

@@ -788,6 +788,7 @@ func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
 	_ = recStore.InsertMessage(ctx, db.Message{ID: "m-rec-stale", ThreadID: "t-rec-stale", AuthorID: "u1", Status: db.StatusPending, CreatedAt: time.Now().UTC().Add(-2 * time.Hour)})
 	_ = recStore.InsertMessage(ctx, db.Message{ID: "m-rec-poison", ThreadID: "t-rec-poison", AuthorID: "u1", Content: "poison content with a rather long snippet that exceeds sixty characters easily", Status: db.StatusProcessing, RetryCount: 5})
 	pRec := New(nil, WorkerPoolConfig{Store: recStore, NotifierFunc: func(b, k, d string) string { return "poison alert" }, DeliveryFunc: func(s *discordgo.Session, c, txt string) error { return nil }})
+	t.Cleanup(pRec.Stop)
 	RecoverInterrupted(recStore, pRec)
 
 	p := New(nil, WorkerPoolConfig{Store: fake})
@@ -867,6 +868,7 @@ func TestStatusUpdater_GuardrailsAndRESTTransport(t *testing.T) {
 	uStep.HandleStep(&runner.StepUpdateEvent{StepType: "agent_response"})
 
 	uREST := NewStatusUpdater(s, "thread-rest-123", true)
+	t.Cleanup(uREST.Stop)
 	msgID, err := uREST.sendFunc("thread-rest-123", "hello")
 	if err != nil || msgID != "msg-created-123" {
 		t.Errorf("sendFunc() = (%q, %v), want msg-created-123", msgID, err)
@@ -879,6 +881,7 @@ func TestStatusUpdater_GuardrailsAndRESTTransport(t *testing.T) {
 	}
 
 	up404 := NewStatusUpdater(nil, "thread-404", true)
+	t.Cleanup(up404.Stop)
 	up404.turnStart = time.Now().Add(10 * time.Second)
 	_ = up404.currentStatusText()
 	up404.phase, up404.dirty, up404.lastDelivered, up404.statusMessageID = "thinking", true, "old text", "msg-edit-404"

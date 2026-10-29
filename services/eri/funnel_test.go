@@ -110,6 +110,10 @@ func newMockDiscordSession(t *testing.T, rt roundTripperFunc, stateChannels ...*
 	}
 	if rt != nil {
 		s.Client = &http.Client{Transport: rt}
+	} else {
+		s.Client = &http.Client{Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return jsonHTTPResponse(http.StatusNotFound, `{"message":"not found"}`), nil
+		})}
 	}
 	return s
 }
@@ -184,7 +188,7 @@ channels:
 
 	// Default funcs verification
 	_ = discordSessionOpener(&discordgo.Session{})
-	_, _ = funnelMemberFetcher(&discordgo.Session{}, "g1", "u1")
+	_, _ = funnelMemberFetcher(s, "g1", "u1")
 
 	// ResolveGuildID extended edge cases
 	if id := resolveGuildID(nil, nil); id != "" {

@@ -252,7 +252,7 @@ func TestInterchangeablePool_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	mockSlow := createTestSpawner(func(string) {
 		cancel()
-		select {}
+		<-t.Context().Done()
 	})
 	poolSlow, _ := newTestInterchangeablePool(t, 1, "", "", mockSlow)
 	lSlow, _ := poolSlow.AcquireLease(ctx, "c-cancel")
