@@ -318,7 +318,7 @@ func TestCompleteCIFailureTransition(t *testing.T) {
 			checkURL:      "http://example.com",
 			ciFailCount:   1,
 			expectPrompt:  true,
-			wantSubPrompt: []string{"roborev defect detected"},
+			wantSubPrompt: []string{"roborev defect detected", "/share/aerial/scripts/aerial-pr.sh init aerial --branch <branch>", "/share/aerial/scripts/aerial-pr.sh submit <scratch_dir>"},
 		},
 		{
 			name: "job logs fetched on short details and branch resolved via registry",
@@ -335,7 +335,7 @@ func TestCompleteCIFailureTransition(t *testing.T) {
 			ciFailCount:   1,
 			regBranch:     "refs/heads/feature-tail-logs",
 			expectPrompt:  true,
-			wantSubPrompt: []string{"fetched job failure log", "Branch: feature-tail-logs", "Check URL: https://github.com/azylman/aerial/actions/runs/123/job/555"},
+			wantSubPrompt: []string{"fetched job failure log", "Branch: feature-tail-logs", "Check URL: https://github.com/azylman/aerial/actions/runs/123/job/555", "/share/aerial/scripts/aerial-pr.sh init aerial --branch feature-tail-logs", "/share/aerial/scripts/aerial-pr.sh submit <scratch_dir>"},
 		},
 		{
 			name: "remediation cap reached pauses fix loop",

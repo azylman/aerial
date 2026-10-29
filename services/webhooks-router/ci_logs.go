@@ -209,8 +209,9 @@ func (s *RouterServer) dispatchCIFailurePrompt(ctx context.Context, targetID, ch
 		}
 	}
 	var extraParts []string
+	var cleanBranch string
 	if len(branchOpt) > 0 {
-		if cleanBranch := strings.TrimPrefix(strings.TrimSpace(branchOpt[0]), "refs/heads/"); cleanBranch != "" {
+		if cleanBranch = strings.TrimPrefix(strings.TrimSpace(branchOpt[0]), "refs/heads/"); cleanBranch != "" {
 			extraParts = append(extraParts, "Branch: "+cleanBranch)
 		}
 	}
@@ -219,9 +220,13 @@ func (s *RouterServer) dispatchCIFailurePrompt(ctx context.Context, targetID, ch
 	}
 	extraLine := strings.Join(extraParts, "\n")
 
-	directive := "Please investigate and fix the failure by inspecting the failing logs, diagnosing the issue, verifying with local checks, and pushing a fix."
+	shortRepo := firstNonEmpty(cleanRepoName(repo), "aerial")
+	branchArg := firstNonEmpty(cleanBranch, "<branch>")
+	checkoutAndSubmit := fmt.Sprintf("Check out the existing PR branch via '/share/aerial/scripts/aerial-pr.sh init %s --branch %s' and push updates via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> \"<commit_msg>\"' (PR_DESCRIPTION.md is not required when updating an existing PR; never run bare 'git push').", shortRepo, branchArg)
+
+	directive := "Please investigate and fix the failure by inspecting the failing logs, diagnosing the issue, verifying with local checks, and pushing a fix. " + checkoutAndSubmit
 	if isRoboRevCheck(checkName) {
-		directive = fmt.Sprintf("Please critically evaluate each RoboRev finding against codebase reality and architectural intent (RoboRev has read-only repo tools but lacks thread/build/cross-repo context: treat purely mechanical and objective findings like duplicate code, dead code, invariant violations, or concrete bugs/security issues as high-trust, while verifying subjective design suggestions or unverified caller assumptions before acting). Fix verified issues, add concise inline comments for non-obvious invariants (and consider adding general architectural principles to .roborev.toml only when a gap reflects a broad repo-wide pattern rather than a one-off fix), or—if the remaining findings are false positives or conflict with architectural invariants—run '/share/aerial/scripts/aerial-pr.sh --repo %s override-roborev %d '<technical_rebuttal>' to record your rebuttal on the PR and pass the gate.", firstNonEmpty(cleanRepoName(repo), "aerial"), prNum)
+		directive = fmt.Sprintf("Please critically evaluate each RoboRev finding against codebase reality and architectural intent (RoboRev has read-only repo tools but lacks thread/build/cross-repo context: treat purely mechanical and objective findings like duplicate code, dead code, invariant violations, or concrete bugs/security issues as high-trust, while verifying subjective design suggestions or unverified caller assumptions before acting). Fix verified issues, add concise inline comments for non-obvious invariants (and consider adding general architectural principles to .roborev.toml only when a gap reflects a broad repo-wide pattern rather than a one-off fix), or—if the remaining findings are false positives or conflict with architectural invariants—run '/share/aerial/scripts/aerial-pr.sh --repo %s override-roborev %d '<technical_rebuttal>' to record your rebuttal on the PR and pass the gate. %s", shortRepo, prNum, checkoutAndSubmit)
 	}
 	prompt := formatErrorDetailsBlock(
 		fmt.Sprintf("CI check %q failed for PR #%d on %s (head commit: %s).", checkName, prNum, repo, headSHA),
