@@ -289,13 +289,14 @@ func (w *MergeConflictWorker) Work(ctx context.Context, job *river.Job[MergeConf
 // chunk status badges, repo tags, titles, PR links, and runtime durations only; it does
 // not display per-job deploying_jobs lists.
 type StatusWidgetChunk struct {
-	Index     int       `json:"index"`
-	Repo      string    `json:"repo"`
-	Title     string    `json:"title"`
-	Status    string    `json:"status"`
-	PRNumber  int       `json:"pr_number,omitempty"`
-	StartedAt time.Time `json:"started_at,omitempty"`
-	UpdatedAt time.Time `json:"updated_at,omitempty"`
+	Index       int       `json:"index"`
+	Repo        string    `json:"repo"`
+	Title       string    `json:"title"`
+	Status      string    `json:"status"`
+	PRNumber    int       `json:"pr_number,omitempty"`
+	StartedAt   time.Time `json:"started_at,omitempty"`
+	CompletedAt time.Time `json:"completed_at,omitempty"`
+	UpdatedAt   time.Time `json:"updated_at,omitempty"`
 }
 
 // StatusWidgetRequest represents a request to deliver or update a Discord status tracker widget.

@@ -19,14 +19,15 @@ import (
 
 // VanadisChunkSummary captures a lightweight view of a chunk for advancement outputs.
 type VanadisChunkSummary struct {
-	ID         string    `json:"id"`
-	ChunkIndex int       `json:"chunk_index"`
-	Repo       string    `json:"repo,omitempty"`
-	Title      string    `json:"title"`
-	Status     string    `json:"status"`
-	PRNumber   int       `json:"pr_number,omitempty"`
-	StartedAt  time.Time `json:"started_at,omitempty"`
-	UpdatedAt  time.Time `json:"updated_at,omitempty"`
+	ID          string    `json:"id"`
+	ChunkIndex  int       `json:"chunk_index"`
+	Repo        string    `json:"repo,omitempty"`
+	Title       string    `json:"title"`
+	Status      string    `json:"status"`
+	PRNumber    int       `json:"pr_number,omitempty"`
+	StartedAt   time.Time `json:"started_at,omitempty"`
+	CompletedAt time.Time `json:"completed_at,omitempty"`
+	UpdatedAt   time.Time `json:"updated_at,omitempty"`
 }
 
 // VanadisAdvancementResult represents the outcome of advancing a chunk via PR merge.
@@ -124,7 +125,7 @@ func (s *PostgresVanadisStore) GetChunk(ctx context.Context, chunkID string) (*V
 	if chunkID == "" {
 		return nil, nil, errors.New("chunk id cannot be empty")
 	}
-	const chunkQuery = `SELECT id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), started_at, created_at, updated_at FROM vanadis_chunks WHERE id = $1;`
+	const chunkQuery = `SELECT id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE id = $1;`
 	rows, err := s.db.Query(ctx, chunkQuery, chunkID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("query chunk %s: %w", chunkID, err)
@@ -242,15 +243,21 @@ func scanVanadisChunkSummaries(rows pgx.Rows, mergedChunkID string) ([]VanadisCh
 	var allChunks []VanadisChunkSummary
 	for rows.Next() {
 		var cs VanadisChunkSummary
-		var startedAt sql.NullTime
-		if scanErr := rows.Scan(&cs.ID, &cs.ChunkIndex, &cs.Repo, &cs.Title, &cs.Status, &cs.PRNumber, &startedAt, &cs.UpdatedAt); scanErr != nil {
+		var startedAt, completedAt sql.NullTime
+		if scanErr := rows.Scan(&cs.ID, &cs.ChunkIndex, &cs.Repo, &cs.Title, &cs.Status, &cs.PRNumber, &startedAt, &completedAt, &cs.UpdatedAt); scanErr != nil {
 			return nil, fmt.Errorf("scan vanadis chunk summary: %w", scanErr)
 		}
 		if startedAt.Valid {
 			cs.StartedAt = startedAt.Time
 		}
+		if completedAt.Valid {
+			cs.CompletedAt = completedAt.Time
+		}
 		if cs.ID == mergedChunkID {
 			cs.Status = "merged"
+			if cs.CompletedAt.IsZero() {
+				cs.CompletedAt = time.Now().UTC()
+			}
 		}
 		allChunks = append(allChunks, cs)
 	}
@@ -265,7 +272,7 @@ func isTerminalBuildStatus(status string) bool {
 }
 
 func queryAndAdvanceChunks(ctx context.Context, tx pgx.Tx, buildID, chunkID, cStatus string, chunkIdx int, res *VanadisAdvancementResult) (*VanadisAdvancementResult, error) {
-	const chunksQuery = `SELECT id, chunk_index, repo, title, status, COALESCE(pr_number, 0), started_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC FOR UPDATE`
+	const chunksQuery = `SELECT id, chunk_index, repo, title, status, COALESCE(pr_number, 0), started_at, completed_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC FOR UPDATE`
 	rows, err := tx.Query(ctx, chunksQuery, buildID)
 	if err != nil {
 		return nil, fmt.Errorf("query vanadis build chunks for advance: %w", err)
@@ -363,7 +370,7 @@ func (s *PostgresVanadisStore) AdvanceChunkByPR(ctx context.Context, repo string
 	}
 
 	if cStatus != "merged" {
-		const updateChunkQuery = `UPDATE vanadis_chunks SET status = 'merged', updated_at = CURRENT_TIMESTAMP WHERE id = $1`
+		const updateChunkQuery = `UPDATE vanadis_chunks SET status = 'merged', completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE id = $1`
 		if _, err := tx.Exec(ctx, updateChunkQuery, chunkID); err != nil {
 			return nil, fmt.Errorf("update vanadis chunk merged: %w", err)
 		}
@@ -383,7 +390,7 @@ func (s *PostgresVanadisStore) FailChunkByPR(ctx context.Context, repo string, p
 	}
 	const query = `
 		UPDATE vanadis_chunks c
-		SET status = 'failed', updated_at = CURRENT_TIMESTAMP
+		SET status = 'failed', completed_at = COALESCE(c.completed_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
 		FROM vanadis_builds b
 		WHERE c.build_id = b.id AND c.repo = $1 AND c.pr_number = $2 AND c.status NOT IN ('merged', 'failed')
 		RETURNING c.build_id, c.id;`
@@ -577,13 +584,14 @@ func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncC
 			chunkStatus = "deployed"
 		}
 		wChunks[i] = StatusWidgetChunk{
-			Index:     c.ChunkIndex,
-			Repo:      chunkRepo,
-			Title:     c.Title,
-			Status:    chunkStatus,
-			PRNumber:  c.PRNumber,
-			StartedAt: c.StartedAt,
-			UpdatedAt: c.UpdatedAt,
+			Index:       c.ChunkIndex,
+			Repo:        chunkRepo,
+			Title:       c.Title,
+			Status:      chunkStatus,
+			PRNumber:    c.PRNumber,
+			StartedAt:   c.StartedAt,
+			CompletedAt: c.CompletedAt,
+			UpdatedAt:   c.UpdatedAt,
 		}
 	}
 	widgetBanner := ""
