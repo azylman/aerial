@@ -209,7 +209,7 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 		{name: "UpdatePRClosedUnmerged db error", op: "UpdatePRClosedUnmerged", repo: "azylman/aerial", prNumber: 42, mockSelectErr: errors.New("db error"), wantErr: true},
 
 		// UpdatePRSync
-		{name: "UpdatePRSync success", op: "UpdatePRSync", repo: "azylman/aerial", prNumber: 42, sha: "head123", targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantSQLSubstr: "COALESCE(merge_sha, '') = '' AND status NOT IN ('merged', 'synced', 'closed', 'deploying', 'deployed', 'deploy_failed')"},
+		{name: "UpdatePRSync success", op: "UpdatePRSync", repo: "azylman/aerial", prNumber: 42, sha: "head123", targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantSQLSubstr: "(COALESCE(metadata, '{}'::jsonb) - 'banner') - 'ci_checks'"},
 		{name: "UpdatePRSync not found", op: "UpdatePRSync", repo: "azylman/aerial", prNumber: 42, sha: "head123", mockSelectErr: pgx.ErrNoRows, wantTarget: ""},
 		{name: "UpdatePRSync db error", op: "UpdatePRSync", repo: "azylman/aerial", prNumber: 42, sha: "head123", mockSelectErr: errors.New("db error"), wantErr: true},
 
@@ -225,6 +225,18 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 		{name: "IncrementCIFailCount nil pool guard", op: "IncrementCIFailCount", nilPool: true, repo: "azylman/aerial", prNumber: 42},
 		{name: "IncrementCIFailCount empty repo guard", op: "IncrementCIFailCount", repo: "", prNumber: 42},
 		{name: "IncrementCIFailCount prNumber zero guard", op: "IncrementCIFailCount", repo: "azylman/aerial", prNumber: 0},
+
+		// RecordPRCheckStatus
+		{name: "RecordPRCheckStatus success", op: "RecordPRCheckStatus", repo: "azylman/aerial", prNumber: 42, sha: "head123", jobName: "Verify Codebase", targetID: "passed", wantUpdated: true, wantSQLSubstr: "ci_checks"},
+		{name: "RecordPRCheckStatus distinct unchanged (not found)", op: "RecordPRCheckStatus", repo: "azylman/aerial", prNumber: 42, sha: "head123", jobName: "Verify Codebase", targetID: "passed", mockSelectErr: pgx.ErrNoRows, wantUpdated: false},
+		{name: "RecordPRCheckStatus db error", op: "RecordPRCheckStatus", repo: "azylman/aerial", prNumber: 42, sha: "head123", jobName: "Verify Codebase", targetID: "passed", mockSelectErr: errors.New("db error"), wantErr: true},
+		{name: "RecordPRCheckStatus nil pool guard", op: "RecordPRCheckStatus", nilPool: true, repo: "azylman/aerial", prNumber: 42, sha: "head123", jobName: "Verify Codebase", targetID: "passed"},
+		{name: "RecordPRCheckStatus empty repo guard", op: "RecordPRCheckStatus", repo: "", prNumber: 42, sha: "head123", jobName: "Verify Codebase", targetID: "passed"},
+		{name: "RecordPRCheckStatus prNumber zero guard", op: "RecordPRCheckStatus", repo: "azylman/aerial", prNumber: 0, sha: "head123", jobName: "Verify Codebase", targetID: "passed"},
+		{name: "RecordPRCheckStatus empty headSHA guard", op: "RecordPRCheckStatus", repo: "azylman/aerial", prNumber: 42, sha: "", jobName: "Verify Codebase", targetID: "passed"},
+		{name: "RecordPRCheckStatus zero headSHA guard", op: "RecordPRCheckStatus", repo: "azylman/aerial", prNumber: 42, sha: "0000000000000000000000000000000000000000", jobName: "Verify Codebase", targetID: "passed"},
+		{name: "RecordPRCheckStatus empty checkName guard", op: "RecordPRCheckStatus", repo: "azylman/aerial", prNumber: 42, sha: "head123", jobName: "", targetID: "passed"},
+		{name: "RecordPRCheckStatus empty checkState guard", op: "RecordPRCheckStatus", repo: "azylman/aerial", prNumber: 42, sha: "head123", jobName: "Verify Codebase", targetID: ""},
 
 		// AtomicTransitionCIFailed
 		{name: "AtomicTransitionCIFailed success", op: "AtomicTransitionCIFailed", repo: "azylman/aerial", prNumber: 42, targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantUpdated: true, wantSQLSubstr: "COALESCE(merge_sha, '') = '' AND status NOT IN ('ci_failed', 'merged', 'synced', 'closed', 'deploying', 'deployed', 'deploy_failed')"},
@@ -569,6 +581,14 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 				}
 				if gotCount != tc.wantPRNum {
 					t.Errorf("gotCount = %d, want %d", gotCount, tc.wantPRNum)
+				}
+			case "RecordPRCheckStatus":
+				updated, err := reg.RecordPRCheckStatus(ctx, tc.repo, tc.prNumber, tc.sha, tc.jobName, tc.targetID)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("RecordPRCheckStatus err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if updated != tc.wantUpdated {
+					t.Errorf("updated = %v, want %v", updated, tc.wantUpdated)
 				}
 			case "AtomicTransitionCIFailed":
 				gotTarget, updated, err := reg.AtomicTransitionCIFailed(ctx, tc.repo, tc.prNumber)

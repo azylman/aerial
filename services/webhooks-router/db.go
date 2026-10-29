@@ -110,6 +110,7 @@ type PRRegistryUpdater interface {
 	FailVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (bool, error)
 	FailVanadisChunkDetailsByPR(ctx context.Context, repo string, prNumber int) (buildID, chunkID string, failed bool, err error)
 	IncrementCIFailCount(ctx context.Context, repo string, prNumber int) (int, error)
+	RecordPRCheckStatus(ctx context.Context, repo string, prNumber int, headSHA, checkName, checkState string) (bool, error)
 	EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID, vanadisChunkID string) (string, error)
 	RecordExpectedJobs(ctx context.Context, repo string, prNumber int, jobs []string) (bool, error)
 	HasExpectedDeployJobs(ctx context.Context, repo string, prNumber int) (bool, error)
@@ -238,7 +239,7 @@ func (r *PostgresPRRegistry) UpdatePRClosedUnmerged(ctx context.Context, repo st
 }
 
 func (r *PostgresPRRegistry) UpdatePRSync(ctx context.Context, repo string, prNumber int, headSHA string) (string, error) {
-	query := `UPDATE pr_registry SET head_sha = $3, status = 'open', metadata = COALESCE(metadata, '{}'::jsonb) - 'banner', updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 AND COALESCE(merge_sha, '') = '' AND status NOT IN ('merged', 'synced', 'closed', 'deploying', 'deployed', 'deploy_failed') AND (head_sha IS DISTINCT FROM $3 OR status IN ('ci_failed', 'conflict')) RETURNING target_id;`
+	query := `UPDATE pr_registry SET head_sha = $3, status = 'open', metadata = CASE WHEN head_sha IS DISTINCT FROM $3 THEN (COALESCE(metadata, '{}'::jsonb) - 'banner') - 'ci_checks' ELSE COALESCE(metadata, '{}'::jsonb) - 'banner' END, updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 AND COALESCE(merge_sha, '') = '' AND status NOT IN ('merged', 'synced', 'closed', 'deploying', 'deployed', 'deploy_failed') AND (head_sha IS DISTINCT FROM $3 OR status IN ('ci_failed', 'conflict')) RETURNING target_id;`
 	return r.execReturningTargetID(ctx, repo, prNumber, "update pr sync", query, strings.TrimSpace(headSHA))
 }
 
@@ -279,6 +280,41 @@ func (r *PostgresPRRegistry) IncrementCIFailCount(ctx context.Context, repo stri
 		return 0, err
 	}
 	return count, nil
+}
+
+func (r *PostgresPRRegistry) RecordPRCheckStatus(ctx context.Context, repo string, prNumber int, headSHA, checkName, checkState string) (bool, error) {
+	repo = normalizeRepo(repo)
+	headSHA = strings.TrimSpace(headSHA)
+	checkName = strings.TrimSpace(checkName)
+	checkState = strings.TrimSpace(checkState)
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 || headSHA == "" || isZeroSHA(headSHA) || checkName == "" || checkState == "" {
+		return false, nil
+	}
+	query := `
+		UPDATE pr_registry
+		SET metadata = jsonb_set(
+			CASE
+				WHEN jsonb_typeof(COALESCE(metadata, '{}'::jsonb)->'ci_checks') = 'object'
+				THEN COALESCE(metadata, '{}'::jsonb)
+				ELSE jsonb_set(COALESCE(metadata, '{}'::jsonb), '{ci_checks}', '{}'::jsonb, true)
+			END,
+			ARRAY['ci_checks', $4],
+			to_jsonb($5::text),
+			true
+		),
+		updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $1
+		  AND pr_number = $2
+		  AND head_sha = $3
+		  AND status = 'open'
+		  AND COALESCE(metadata->'ci_checks'->>$4, '') IS DISTINCT FROM $5
+		RETURNING TRUE;`
+	var updated bool
+	found, err := r.queryRowScan(ctx, "record pr check status", query, []any{&updated}, repo, prNumber, headSHA, checkName, checkState)
+	if err != nil || !found {
+		return false, err
+	}
+	return updated, nil
 }
 
 func (r *PostgresPRRegistry) RegisterPR(ctx context.Context, req PRRegisterRequest) (string, error) {

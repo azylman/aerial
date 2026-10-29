@@ -545,6 +545,64 @@ func isGateAggregatorCheck(checkName string) bool {
 	return strings.EqualFold(strings.TrimSpace(checkName), "Container Builds Gate")
 }
 
+func classifyCheckState(status, conclusion string) string {
+	s := strings.ToLower(strings.TrimSpace(status))
+	c := strings.ToLower(strings.TrimSpace(conclusion))
+	if s == "completed" {
+		switch c {
+		case "success", "neutral", "skipped":
+			return "passed"
+		case "failure", "timed_out", "cancelled", "action_required":
+			return "failed"
+		default:
+			return ""
+		}
+	}
+	switch s {
+	case "queued", "in_progress", "waiting", "requested", "pending":
+		return "pending"
+	default:
+		if s != "" {
+			return "pending"
+		}
+		return ""
+	}
+}
+
+func formatCIChecksActiveStep(prStatus, ciChecksJSON string) string {
+	if !strings.EqualFold(strings.TrimSpace(prStatus), "open") {
+		return ""
+	}
+	trimmedJSON := strings.TrimSpace(ciChecksJSON)
+	if trimmedJSON == "" || trimmedJSON == "{}" {
+		return ""
+	}
+	var checks map[string]string
+	if err := json.Unmarshal([]byte(trimmedJSON), &checks); err != nil || len(checks) == 0 {
+		return ""
+	}
+	var total, passed, failed int
+	for _, state := range checks {
+		s := strings.ToLower(strings.TrimSpace(state))
+		switch s {
+		case "passed":
+			passed++
+			total++
+		case "failed":
+			failed++
+			total++
+		default:
+			if s != "" {
+				total++
+			}
+		}
+	}
+	if failed > 0 || total == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Waiting on CI (%d/%d passed)", passed, total)
+}
+
 func prCheckKey(repo string, prNumber int) string {
 	return fmt.Sprintf("%s#%d", normalizeRepo(repo), prNumber)
 }
@@ -738,6 +796,26 @@ func (s *RouterServer) processGitHubPullRequestEvent(ctx context.Context, delive
 	return res, nil
 }
 
+func (s *RouterServer) recordCheckRunStatus(ctx context.Context, res *ResolvedGitHubEvent) {
+	if s.registry == nil || res.PRNumber <= 0 || res.HeadSHA == "" || isGateAggregatorCheck(res.CheckName) {
+		return
+	}
+	checkState := classifyCheckState(res.Status, res.Conclusion)
+	if checkState == "" || checkState == "failed" {
+		return
+	}
+	updated, err := s.registry.RecordPRCheckStatus(ctx, res.Repo, res.PRNumber, res.HeadSHA, res.CheckName, checkState)
+	if err != nil {
+		log.Printf("[webhooks-router] [registry] warning recording check status for %s#%d check %q: %v", res.Repo, res.PRNumber, res.CheckName, err)
+		return
+	}
+	if updated {
+		if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
+			log.Printf("[webhooks-router] [widget] warning syncing pr widget for %s#%d: %v", res.Repo, res.PRNumber, err)
+		}
+	}
+}
+
 func (s *RouterServer) processGitHubCheckRunEvent(ctx context.Context, delivery string, body []byte, res *ResolvedGitHubEvent) (*ResolvedGitHubEvent, error) {
 	var p GitHubCheckRunPayload
 	if err := json.Unmarshal(body, &p); err != nil {
@@ -765,6 +843,8 @@ func (s *RouterServer) processGitHubCheckRunEvent(ctx context.Context, delivery 
 			}
 		}
 	}
+
+	s.recordCheckRunStatus(ctx, res)
 
 	details := firstNonEmpty(strings.TrimSpace(p.CheckRun.Output.Text), strings.TrimSpace(p.CheckRun.Output.Summary), strings.TrimSpace(p.CheckRun.Output.Title))
 	checkURL := firstNonEmpty(strings.TrimSpace(p.CheckRun.HTMLURL), strings.TrimSpace(p.CheckRun.DetailsURL))

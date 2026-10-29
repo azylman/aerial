@@ -302,6 +302,7 @@ type StatusWidgetChunk struct {
 	StartedAt   time.Time `json:"started_at,omitempty"`
 	CompletedAt time.Time `json:"completed_at,omitempty"`
 	UpdatedAt   time.Time `json:"updated_at,omitempty"`
+	ActiveStep  string    `json:"active_step,omitempty"`
 }
 
 // StatusWidgetRequest represents a request to deliver or update a Discord status tracker widget.
@@ -314,6 +315,7 @@ type StatusWidgetRequest struct {
 	Status    string              `json:"status"`
 	Banner    string              `json:"banner,omitempty"`
 	Chunks    []StatusWidgetChunk `json:"chunks"`
+	SkipSink  bool                `json:"skip_sink,omitempty"`
 }
 
 type GitPushEventRequest struct {

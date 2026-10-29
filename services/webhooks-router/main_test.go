@@ -185,6 +185,10 @@ type mockPRRegistry struct {
 	ciFailCount    int
 	ciFailCountErr error
 
+	recordCheckCalls   []recordCheckStatusCall
+	recordCheckUpdated bool
+	recordCheckErr     error
+
 	registerCalls    []PRRegisterRequest
 	registerTargetID string
 	registerErr      error
@@ -404,6 +408,31 @@ func (m *mockPRRegistry) FireEventTriggers(ctx context.Context, source string, t
 
 func (m *mockPRRegistry) IncrementCIFailCount(ctx context.Context, repo string, prNumber int) (int, error) {
 	return m.ciFailCount, m.checkErr(m.ciFailCountErr)
+}
+
+type recordCheckStatusCall struct {
+	repo       string
+	prNumber   int
+	headSHA    string
+	checkName  string
+	checkState string
+}
+
+func (m *mockPRRegistry) RecordPRCheckStatus(ctx context.Context, repo string, prNumber int, headSHA, checkName, checkState string) (bool, error) {
+	if m.err != nil {
+		return false, m.err
+	}
+	m.recordCheckCalls = append(m.recordCheckCalls, recordCheckStatusCall{
+		repo:       repo,
+		prNumber:   prNumber,
+		headSHA:    headSHA,
+		checkName:  checkName,
+		checkState: checkState,
+	})
+	if m.recordCheckErr != nil {
+		return false, m.recordCheckErr
+	}
+	return m.recordCheckUpdated, nil
 }
 
 func (m *mockPRRegistry) RegisterPR(ctx context.Context, req PRRegisterRequest) (string, error) {
@@ -1982,33 +2011,37 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 	chunk0Update := chunk0Start.Add(5 * time.Minute)
 
 	tests := []struct {
-		name           string
-		useNilServer   bool
-		useMockReg     bool
-		useInserter    bool
-		inserterErr    error
-		mockTargetID   string
-		mockBranch     string
-		prDBStatus     string
-		prDBBanner     string
-		buildDBStatus  string
-		chunk1DBStatus string
-		repo           string
-		prNumber       int
-		olderPRs       []int
-		vanadisMatch   bool
-		dispErr        error
-		queryErr       error
-		prQueryErr     error
-		execErr        error
-		wantErr        bool
-		wantDispatched bool
-		wantQueued     int
-		wantWidgetID   string
-		wantStatus     string
-		wantBanner     string
-		wantChannel    string
-		wantChunks     int
+		name            string
+		useNilServer    bool
+		useMockReg      bool
+		useInserter     bool
+		inserterErr     error
+		mockTargetID    string
+		mockBranch      string
+		prDBStatus      string
+		prDBBanner      string
+		prDBCIChecks    string
+		buildDBStatus   string
+		chunk1DBStatus  string
+		repo            string
+		prNumber        int
+		olderPRs        []int
+		vanadisMatch    bool
+		dispErr         error
+		queryErr        error
+		prQueryErr      error
+		execErr         error
+		wantErr         bool
+		wantDispatched  bool
+		wantQueued      int
+		wantWidgetID    string
+		wantStatus      string
+		wantBanner      string
+		wantActiveStep  string
+		wantSkipSink    bool
+		wantVanadisStep string
+		wantChannel     string
+		wantChunks      int
 	}{
 		{
 			name:         "nil server returns clean nil",
@@ -2164,6 +2197,60 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 			queryErr:     errors.New("query chunks error"),
 			wantErr:      true,
 		},
+		{
+			name:           "Postgres standalone PR open with pending and passed CI checks sets active step and skip sink",
+			repo:           "azylman/aerial",
+			prNumber:       101,
+			prDBStatus:     "open",
+			prDBCIChecks:   `{"test": "passed", "lint": "pending"}`,
+			wantDispatched: true,
+			wantWidgetID:   "pr-azylman/aerial-101",
+			wantStatus:     "open",
+			wantActiveStep: "Waiting on CI (1/2 passed)",
+			wantSkipSink:   true,
+			wantChannel:    "1555405874565091380",
+			wantChunks:     1,
+		},
+		{
+			name:           "Postgres standalone PR open with all passed CI checks sets active step and skip sink",
+			repo:           "azylman/aerial",
+			prNumber:       101,
+			prDBStatus:     "open",
+			prDBCIChecks:   `{"test": "passed", "lint": "passed"}`,
+			wantDispatched: true,
+			wantWidgetID:   "pr-azylman/aerial-101",
+			wantStatus:     "open",
+			wantActiveStep: "Waiting on CI (2/2 passed)",
+			wantSkipSink:   true,
+			wantChannel:    "1555405874565091380",
+			wantChunks:     1,
+		},
+		{
+			name:           "Postgres standalone PR ci_failed clears active step and disables skip sink",
+			repo:           "azylman/aerial",
+			prNumber:       101,
+			prDBStatus:     "ci_failed",
+			prDBBanner:     "CI failed",
+			prDBCIChecks:   `{"test": "failed", "lint": "passed"}`,
+			wantDispatched: true,
+			wantWidgetID:   "pr-azylman/aerial-101",
+			wantStatus:     "failed",
+			wantBanner:     "CI failed",
+			wantActiveStep: "",
+			wantSkipSink:   false,
+			wantChannel:    "1555405874565091380",
+			wantChunks:     1,
+		},
+		{
+			name:            "Postgres Vanadis chunk match passes active step to vanadis",
+			repo:            "azylman/aerial",
+			prNumber:        102,
+			prDBStatus:      "open",
+			prDBCIChecks:    `{"build": "passed", "test": "pending"}`,
+			vanadisMatch:    true,
+			wantVanadisStep: "Waiting on CI (1/2 passed)",
+			wantDispatched:  false,
+		},
 	}
 
 	for _, tc := range tests {
@@ -2267,6 +2354,13 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 							if len(dest) > 6 {
 								*dest[6].(*string) = tc.prDBBanner
 							}
+							if len(dest) > 7 {
+								ciChecks := tc.prDBCIChecks
+								if ciChecks == "" {
+									ciChecks = "{}"
+								}
+								*dest[7].(*string) = ciChecks
+							}
 							return nil
 						}}
 					}
@@ -2291,6 +2385,7 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 				},
 			}
 
+			var receivedVanadisActiveStep string
 			tsVanadis := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path != "/chunks/sync-pr-widget" {
 					http.NotFound(w, r)
@@ -2302,10 +2397,12 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 					return
 				}
 				var req struct {
-					Repo     string `json:"repo"`
-					PRNumber int    `json:"pr_number"`
+					Repo       string `json:"repo"`
+					PRNumber   int    `json:"pr_number"`
+					ActiveStep string `json:"active_step"`
 				}
 				_ = json.NewDecoder(r.Body).Decode(&req)
+				receivedVanadisActiveStep = req.ActiveStep
 				if tc.vanadisMatch && req.PRNumber == tc.prNumber {
 					_ = json.NewEncoder(w).Encode(map[string]any{"matched": true, "build_id": "build-abc"})
 					return
@@ -2331,6 +2428,15 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 				if last.ID != tc.wantWidgetID || last.Status != tc.wantStatus || last.Banner != tc.wantBanner || len(last.Chunks) != tc.wantChunks {
 					t.Errorf("unexpected widget request: %+v, want ID=%q Status=%q Banner=%q Chunks=%d", last, tc.wantWidgetID, tc.wantStatus, tc.wantBanner, tc.wantChunks)
 				}
+				if len(last.Chunks) > 0 && last.Chunks[0].ActiveStep != tc.wantActiveStep {
+					t.Errorf("got chunk[0].ActiveStep = %q, want %q", last.Chunks[0].ActiveStep, tc.wantActiveStep)
+				}
+				if last.SkipSink != tc.wantSkipSink {
+					t.Errorf("got last.SkipSink = %v, want %v", last.SkipSink, tc.wantSkipSink)
+				}
+			}
+			if tc.wantVanadisStep != "" && receivedVanadisActiveStep != tc.wantVanadisStep {
+				t.Errorf("got receivedVanadisActiveStep = %q, want %q", receivedVanadisActiveStep, tc.wantVanadisStep)
 			}
 		})
 	}
