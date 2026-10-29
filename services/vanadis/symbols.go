@@ -247,7 +247,27 @@ func loadTargetFiles(shareRoot, repo string, targetFiles []string) []targetFileI
 	return files
 }
 
-func expandTargetFilesWithTests(targetFiles []string) []string {
+func appendSiblingTestFiles(repoDir, rel string, seen map[string]bool, expanded []string) []string {
+	dirRel := filepath.Dir(rel)
+	entries, err := os.ReadDir(filepath.Join(repoDir, dirRel))
+	if err != nil {
+		return expanded
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), "_test.go") {
+			continue
+		}
+		candRel := filepath.ToSlash(filepath.Join(dirRel, entry.Name()))
+		if !seen[candRel] {
+			seen[candRel] = true
+			expanded = append(expanded, candRel)
+		}
+	}
+	return expanded
+}
+
+func expandTargetFilesWithTests(shareRoot, repo string, targetFiles []string) []string {
+	repoDir := filepath.Join(strings.TrimSpace(shareRoot), cleanRepoDirName(repo))
 	seen := make(map[string]bool, len(targetFiles))
 	for _, tf := range targetFiles {
 		rel := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(tf), "./"), "/")
@@ -261,9 +281,14 @@ func expandTargetFilesWithTests(targetFiles []string) []string {
 		rel := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(tf), "./"), "/")
 		if strings.HasSuffix(rel, ".go") && !strings.HasSuffix(rel, "_test.go") {
 			testRel := strings.TrimSuffix(rel, ".go") + "_test.go"
-			if !seen[testRel] {
+			if seen[testRel] {
+				continue
+			}
+			if _, err := os.Stat(filepath.Join(repoDir, testRel)); err == nil {
 				seen[testRel] = true
 				expanded = append(expanded, testRel)
+			} else {
+				expanded = appendSiblingTestFiles(repoDir, rel, seen, expanded)
 			}
 		}
 	}
@@ -271,10 +296,11 @@ func expandTargetFilesWithTests(targetFiles []string) []string {
 }
 
 type testFuncBlock struct {
-	name  string
-	start int
-	end   int
-	lines []string
+	relFile string
+	name    string
+	start   int
+	end     int
+	lines   []string
 }
 
 func parseTopLevelTestFuncName(line string) string {
@@ -292,7 +318,7 @@ func parseTopLevelTestFuncName(line string) string {
 	return ""
 }
 
-func collectTestFuncBlocks(lines []string) []testFuncBlock {
+func collectTestFuncBlocks(relFile string, lines []string) []testFuncBlock {
 	var blocks []testFuncBlock
 	for idx, line := range lines {
 		name := parseTopLevelTestFuncName(line)
@@ -301,10 +327,11 @@ func collectTestFuncBlocks(lines []string) []testFuncBlock {
 		}
 		end := scanBlockEnd(lines, idx)
 		blocks = append(blocks, testFuncBlock{
-			name:  name,
-			start: idx + 1,
-			end:   end,
-			lines: lines[idx:end],
+			relFile: relFile,
+			name:    name,
+			start:   idx + 1,
+			end:     end,
+			lines:   lines[idx:end],
 		})
 	}
 	return blocks
@@ -372,13 +399,14 @@ func runSymbolPass2(cleanSymbols []string, files []targetFileInfo, fileSpans map
 }
 
 func runTestSymbolPass(cleanSymbols []string, testFiles []targetFileInfo, fileSpans map[string][]targetSymSpan, resolved map[string]bool) {
+	var allBlocks []testFuncBlock
 	for _, f := range testFiles {
-		blocks := collectTestFuncBlocks(f.lines)
-		for _, sym := range cleanSymbols {
-			for _, tf := range matchTestBlocksForSymbol(blocks, sym) {
-				fileSpans[f.relFile] = appendUniqueSpan(fileSpans[f.relFile], targetSymSpan{sym: tf.name, start: tf.start, end: tf.end})
-				resolved[sym] = true
-			}
+		allBlocks = append(allBlocks, collectTestFuncBlocks(f.relFile, f.lines)...)
+	}
+	for _, sym := range cleanSymbols {
+		for _, tf := range matchTestBlocksForSymbol(allBlocks, sym) {
+			fileSpans[tf.relFile] = appendUniqueSpan(fileSpans[tf.relFile], targetSymSpan{sym: tf.name, start: tf.start, end: tf.end})
+			resolved[sym] = true
 		}
 	}
 }
@@ -435,7 +463,7 @@ func ResolveSymbolSpans(shareRoot, repo string, targetFiles, targetSymbols []str
 		return spanLines, len(spanLines) > 0
 	}
 
-	expandedFiles := expandTargetFilesWithTests(targetFiles)
+	expandedFiles := expandTargetFilesWithTests(shareRoot, repo, targetFiles)
 	files := loadTargetFiles(shareRoot, repo, expandedFiles)
 	if len(files) == 0 {
 		return nil, false

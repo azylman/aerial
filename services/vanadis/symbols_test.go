@@ -312,9 +312,17 @@ func TestResolveSymbolSpans(t *testing.T) {
 			wantAllResolved: true,
 		},
 		{
+			name:            "sibling package test file auto-discovered when stem test file is absent",
+			repo:            "azylman/aerial",
+			targetFiles:     []string{"pkg/foo.go"},
+			targetSymbols:   []string{"Foo", "OnlyInBody"},
+			wantLines:       []string{"- pkg/foo.go: Foo (L3-L5)", "- pkg/baz_test.go: TestOtherBodyOnly (L16-L18)"},
+			wantAllResolved: true,
+		},
+		{
 			name:            "non existent file",
 			repo:            "azylman/aerial",
-			targetFiles:     []string{"pkg/missing.go"},
+			targetFiles:     []string{"missing/missing.go"},
 			targetSymbols:   []string{"Foo"},
 			wantLines:       nil,
 			wantAllResolved: false,
