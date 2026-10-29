@@ -125,8 +125,15 @@ func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) er
 		}
 		conflict, err := s.updatePRBranch(ctx, repo, pr.PRNumber)
 		if err != nil {
-			if strings.Contains(err.Error(), "403") || strings.Contains(strings.ToLower(err.Error()), "rate limit") {
+			errLower := strings.ToLower(err.Error())
+			if strings.Contains(err.Error(), "403") || strings.Contains(errLower, "rate limit") {
 				return err
+			}
+			if strings.Contains(errLower, "head ref does not exist") {
+				if _, closeErr := s.registry.UpdatePRClosedUnmerged(ctx, repo, pr.PRNumber); closeErr != nil {
+					log.Printf("[webhooks-router] [registry] warning closing stale PR #%d with missing head ref: %v", pr.PRNumber, closeErr)
+				}
+				continue
 			}
 			log.Printf("[webhooks-router] [github] warning updating open PR #%d branch: %v", pr.PRNumber, err)
 			continue
