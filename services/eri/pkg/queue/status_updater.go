@@ -3,6 +3,7 @@ package queue
 import (
 	"fmt"
 	"log"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -20,24 +21,71 @@ const (
 	MaxStatusTextLength            = 100
 )
 
+// resolveToolVerb returns the natural language action verb for a tool category.
+func resolveToolVerb(toolName string) string {
+	lower := strings.ToLower(strings.TrimSpace(toolName))
+	cleanLower := strings.TrimPrefix(strings.TrimPrefix(lower, "mcp_"), "call_mcp_tool_")
+	switch {
+	case cleanLower == "edit_file" || cleanLower == "replace_file_content":
+		return "Editing"
+	case cleanLower == "write_file":
+		return "Writing"
+	case cleanLower == "read_file" || cleanLower == "view_file":
+		return "Reading"
+	case cleanLower == "run_command" || cleanLower == "execute_command" || cleanLower == "bash" || cleanLower == "sh":
+		return "Executing"
+	case strings.HasPrefix(lower, "call_mcp_tool") || cleanLower == "call_mcp_tool":
+		return "Calling"
+	case cleanLower == "grep_search" || cleanLower == "find_by_name" || cleanLower == "search_web" || cleanLower == "web_search":
+		return "Searching"
+	case cleanLower == "invoke_subagent" || cleanLower == "define_subagent":
+		return "Spawning"
+	default:
+		return "Executing"
+	}
+}
+
+// isFileTool returns true if the tool operates on a file path.
+func isFileTool(cleanLower string) bool {
+	switch cleanLower {
+	case "edit_file", "write_file", "read_file", "view_file", "replace_file_content":
+		return true
+	default:
+		return false
+	}
+}
+
 // FormatToolStatus dynamically formats an active tool status badge.
 func FormatToolStatus(toolName, commandName string, elapsed time.Duration) string {
+	rawLower := strings.ToLower(strings.TrimSpace(toolName))
+	verb := resolveToolVerb(toolName)
 	clean := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(toolName), "mcp_"), "call_mcp_tool_")
-	if clean == "" {
+	cleanLower := strings.ToLower(clean)
+	if cleanLower == "" {
+		cleanLower = "tool"
 		clean = "tool"
 	}
 	sec := max(elapsed.Seconds(), 0.1)
 
+	cmd := strings.TrimSpace(commandName)
+	if isFileTool(cleanLower) && cmd != "" {
+		cmd = filepath.Base(cmd)
+	}
+	if strings.HasPrefix(rawLower, "call_mcp_tool_") && cmd == "" && cleanLower != "call_mcp_tool" {
+		cmd = clean
+	}
+	if len([]rune(cmd)) > 28 {
+		cmd = string([]rune(cmd)[:28])
+	}
+
 	var text string
-	if clean == "run_command" || clean == "execute_command" || clean == "bash" || clean == "sh" || commandName != "" {
-		cmd := strings.TrimSpace(commandName)
+	if verb == "Executing" && (cleanLower == "run_command" || cleanLower == "execute_command" || cleanLower == "bash" || cleanLower == "sh") {
 		if cmd == "" {
 			cmd = "command"
 		}
-		if len([]rune(cmd)) > 24 {
-			cmd = string([]rune(cmd)[:24])
-		}
 		text = fmt.Sprintf("⚡ Executing `%s`... (%.1fs)", cmd, sec)
+	} else if cmd != "" {
+		text = fmt.Sprintf("⚡ %s `%s`... (%.1fs)", verb, cmd, sec)
 	} else {
 		text = fmt.Sprintf("⚡ Running `%s`... (%.1fs)", clean, sec)
 	}
@@ -187,14 +235,14 @@ func (u *StatusUpdater) HandleStep(ev *runner.StepUpdateEvent) {
 	case typ == "tool_call" || typ == "tool":
 		toolName := ev.ResolvedToolName()
 		if ev.State == "DONE" || ev.State == "ERROR" {
-			if u.activeTool == toolName || toolName == "" {
+			if u.activeTool == toolName || toolName == "" || u.activeCommand == toolName || u.activeTool == "call_mcp_tool" || toolName == "call_mcp_tool" {
 				if u.activeTool != "" {
 					u.lastCompletedTool, u.lastCompletedCommand, u.lastCompletedAt, u.lastCompletedElapsed = u.activeTool, u.activeCommand, time.Now(), time.Since(u.toolStart)
 				}
 				u.activeTool, u.activeCommand, u.phase, u.dirty = "", "", "thinking", true
 			}
 		} else {
-			u.activeTool, u.activeCommand, u.toolStart, u.lastCompletedTool, u.lastCompletedCommand, u.phase, u.dirty, shouldTriggerFlush = toolName, ev.ResolvedCommandName(), time.Now(), "", "", "tool", true, true
+			u.activeTool, u.activeCommand, u.toolStart, u.lastCompletedTool, u.lastCompletedCommand, u.phase, u.dirty, shouldTriggerFlush = toolName, ev.ResolvedToolDetail(), time.Now(), "", "", "tool", true, true
 		}
 	case typ == "agent_response" || typ == "text_delta":
 		u.activeCommand = ""

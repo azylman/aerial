@@ -33,13 +33,23 @@ func TestFormatToolStatus(t *testing.T) {
 	}{
 		{"view_file", "", 1200 * time.Millisecond, "⚡ Running `view_file`... (1.2s)"},
 		{"mcp_docker_list_containers", "", 2500 * time.Millisecond, "⚡ Running `docker_list_containers`... (2.5s)"},
-		{"call_mcp_tool_github_create_pr", "", 3100 * time.Millisecond, "⚡ Running `github_create_pr`... (3.1s)"},
+		{"call_mcp_tool_github_create_pr", "", 3100 * time.Millisecond, "⚡ Calling `github_create_pr`... (3.1s)"},
+		{"call_mcp_tool_get_me", "get_me", 500 * time.Millisecond, "⚡ Calling `get_me`... (0.5s)"},
 		{"", "", 500 * time.Millisecond, "⚡ Running `tool`... (0.5s)"},
 		{"run_command", "git", 1200 * time.Millisecond, "⚡ Executing `git`... (1.2s)"},
 		{"run_command", "docker-compose", 2500 * time.Millisecond, "⚡ Executing `docker-compose`... (2.5s)"},
 		{"run_command", "verify.sh", 800 * time.Millisecond, "⚡ Executing `verify.sh`... (0.8s)"},
 		{"run_command", "", 500 * time.Millisecond, "⚡ Executing `command`... (0.5s)"},
 		{"mcp_run_command", "go", 1500 * time.Millisecond, "⚡ Executing `go`... (1.5s)"},
+		{"edit_file", "main.go", 1200 * time.Millisecond, "⚡ Editing `main.go`... (1.2s)"},
+		{"edit_file", "/path/to/server.go", 1200 * time.Millisecond, "⚡ Editing `server.go`... (1.2s)"},
+		{"replace_file_content", "config.yaml", 900 * time.Millisecond, "⚡ Editing `config.yaml`... (0.9s)"},
+		{"write_file", "main.go", 1200 * time.Millisecond, "⚡ Writing `main.go`... (1.2s)"},
+		{"read_file", "README.md", 700 * time.Millisecond, "⚡ Reading `README.md`... (0.7s)"},
+		{"view_file", "schema.sql", 1200 * time.Millisecond, "⚡ Reading `schema.sql`... (1.2s)"},
+		{"call_mcp_tool", "discord_search_messages", 2000 * time.Millisecond, "⚡ Calling `discord_search_messages`... (2.0s)"},
+		{"grep_search", "status_message_id", 1500 * time.Millisecond, "⚡ Searching `status_message_id`... (1.5s)"},
+		{"invoke_subagent", "Codebase Researcher", 2200 * time.Millisecond, "⚡ Spawning `Codebase Researcher`... (2.2s)"},
 	}
 	for _, tt := range tests {
 		if got := FormatToolStatus(tt.toolName, tt.commandName, tt.elapsed); got != tt.expected {
@@ -221,6 +231,19 @@ func TestStatusUpdater_ToolLifecycleAndFlushes(t *testing.T) {
 			name: "FastToolLatchAndRecovery", interval: time.Hour, latch: 500 * time.Millisecond,
 			steps:       []*runner.StepUpdateEvent{{StepType: "tool", ToolName: "view_file", State: "ACTIVE"}, {StepType: "tool", ToolName: "view_file", State: "DONE"}},
 			wantSendSub: "view_file", wantLatched: "view_file", simulateLatch: true, wantUnlatched: "Thinking",
+		},
+		{
+			name: "MultiWordToolDetailPreserved", interval: time.Hour,
+			steps:       []*runner.StepUpdateEvent{{StepType: "tool_call", ToolName: "invoke_subagent", State: "ACTIVE", ToolDetail: "Codebase Researcher"}},
+			wantSendSub: "Spawning `Codebase Researcher`",
+		},
+		{
+			name: "MCPToolCompletionWithUnwrappedName", interval: time.Hour, latch: 500 * time.Millisecond,
+			steps: []*runner.StepUpdateEvent{
+				{StepType: "tool_call", ToolName: "call_mcp_tool", State: "ACTIVE", ToolDetail: "get_me"},
+				{StepType: "tool_call", ToolName: "get_me", State: "DONE"},
+			},
+			wantSendSub: "Calling `get_me`", wantLatched: "Calling `get_me`", simulateLatch: true, wantUnlatched: "Thinking",
 		},
 	}
 

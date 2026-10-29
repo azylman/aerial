@@ -855,10 +855,88 @@ func TestStreamingDaemon_ToolAndSkillLifecycleEvents(t *testing.T) {
 	if len(sink.activatedSkills) != 1 || sink.activatedSkills[0] != "home-assistant:discord" {
 		t.Errorf("unexpected skill activation: %+v", sink.activatedSkills)
 	}
-	for i, tc := range []string{"run_command:echo hello", "get_me:", "view_file:", "invoke_subagent:", "custom_step_tool:", "manage_task:"} {
+	for i, tc := range []string{"run_command:echo", "call_mcp_tool:get_me", "view_file:SKILL.md", "invoke_subagent:Researcher", "custom_step_tool:", "manage_task:"} {
 		if len(sink.toolCalls) <= i || sink.toolCalls[i] != tc {
 			t.Errorf("expected tool call %d to be %q, got %v", i, tc, sink.toolCalls)
 		}
+	}
+}
+
+func TestExtractToolDetail(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		toolName    string
+		params      map[string]any
+		fallbackCmd string
+		want        string
+	}{
+		{
+			name:     "edit_file extracts path basename",
+			toolName: "edit_file",
+			params:   map[string]any{"Path": "/path/to/main.go"},
+			want:     "main.go",
+		},
+		{
+			name:     "write_file extracts target_file",
+			toolName: "write_file",
+			params:   map[string]any{"target_file": "server.ts"},
+			want:     "server.ts",
+		},
+		{
+			name:     "run_command prefers toolSummary",
+			toolName: "run_command",
+			params:   map[string]any{"toolSummary": "Build Go Binary", "CommandLine": "go build ./..."},
+			want:     "Build Go Binary",
+		},
+		{
+			name:     "run_command falls back to sanitized command from CommandLine",
+			toolName: "run_command",
+			params:   map[string]any{"CommandLine": "echo 'first line'\necho 'second line'"},
+			want:     "echo",
+		},
+		{
+			name:     "run_command sanitizes command with environment variables and flags",
+			toolName: "run_command",
+			params:   map[string]any{"CommandLine": "FOO=bar ./deploy.sh --prod"},
+			want:     "deploy.sh",
+		},
+		{
+			name:     "call_mcp_tool extracts ToolName",
+			toolName: "call_mcp_tool",
+			params:   map[string]any{"ToolName": "ha_get_overview"},
+			want:     "ha_get_overview",
+		},
+		{
+			name:     "grep_search extracts query",
+			toolName: "grep_search",
+			params:   map[string]any{"query": "ExtractToolDetail"},
+			want:     "ExtractToolDetail",
+		},
+		{
+			name:     "invoke_subagent extracts role",
+			toolName: "invoke_subagent",
+			params:   map[string]any{"Role": "Research Analyst"},
+			want:     "Research Analyst",
+		},
+		{
+			name:        "fallbackCmd used when params empty",
+			toolName:    "unknown_tool",
+			params:      nil,
+			fallbackCmd: "fallback-value",
+			want:        "fallback-value",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ExtractToolDetail(tc.toolName, tc.params, tc.fallbackCmd)
+			if got != tc.want {
+				t.Errorf("ExtractToolDetail(%q, %v, %q) = %q, want %q", tc.toolName, tc.params, tc.fallbackCmd, got, tc.want)
+			}
+		})
 	}
 }
 
