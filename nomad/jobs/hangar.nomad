@@ -3,11 +3,16 @@ variable "image_tag" {
   default = "latest"
 }
 
+variable "node_pool" {
+  type    = string
+  default = "calibarn"
+}
+
 job "hangar" {
   datacenters = ["dc1"]
   type        = "service"
 
-  node_pool   = "calibarn"
+  node_pool   = var.node_pool
 
   update {
     max_parallel      = 1
@@ -53,11 +58,19 @@ job "hangar" {
       }
 
       env {
-        CONFIG_PATH         = "/share/aerial-config/services/hangar/hangar.yaml"
-        NOMAD_ADDR          = "http://${attr.unique.network.ip-address}:4646"
-        BRAIN_INTERNAL_URL  = "http://eri.aerial/internal/reload"
-        WEBHOOKS_ROUTER_URL = "http://webhooks-router.aerial"
-        PORT                = "8087"
+        CONFIG_PATH = "/local/hangar.yaml"
+      }
+
+      template {
+        data = <<EOH
+{{- if nomadVarExists "nomad/jobs/hangar" -}}
+{{- with nomadVar "nomad/jobs/hangar" -}}
+{{- if .CONFIG_YAML -}}{{- .CONFIG_YAML -}}{{- end -}}
+{{- end -}}
+{{- end -}}
+EOH
+        destination = "local/hangar.yaml"
+        change_mode = "restart"
       }
 
       template {

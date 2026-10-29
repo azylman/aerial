@@ -189,9 +189,8 @@ type SyncDaemon struct {
 	triggerFn       func() ([]RepoSyncResult, error)
 	reconcileFn     func(ctx context.Context) error
 
-	brainInternalURL string
-	extraSecrets     []string
-	gitExecutor      GitExecutor
+	extraSecrets []string
+	gitExecutor  GitExecutor
 
 	// Nomad Orchestration
 	nomadAddr           string
@@ -357,7 +356,6 @@ type DaemonConfig struct {
 	DiscordToken      string
 	DiscordChannel    string
 	DiscordWebhookURL string
-	BrainInternalURL  string
 	ExtraSecrets      []string
 	GitExecutor       GitExecutor
 	NomadExecutor     NomadExecutor
@@ -384,10 +382,9 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 	if cfg.Interval <= 0 {
 		cfg.Interval = 60 * time.Second
 	}
-	cfg.ComposeDir = firstNonEmpty(cfg.ComposeDir, "/share/aerial")
-	cfg.ConfigDir = firstNonEmpty(cfg.ConfigDir, "/share/aerial-config")
-	cfg.BrainInternalURL = firstNonEmpty(cfg.BrainInternalURL, "http://brain:8080/internal/reload")
-	webhooksRouterURL := firstNonEmpty(cfg.WebhooksRouterURL, os.Getenv("WEBHOOKS_ROUTER_URL"), "http://127.0.0.1:4020")
+	cfg.ComposeDir = firstNonEmpty(cfg.ComposeDir, ResolveRepoPath("aerial", cfg.Repos), "/share/aerial")
+	cfg.ConfigDir = firstNonEmpty(cfg.ConfigDir, ResolveRepoPath("aerial-config", cfg.Repos), "/share/aerial-config")
+	webhooksRouterURL := firstNonEmpty(cfg.WebhooksRouterURL, "http://127.0.0.1:4020")
 	extraSecrets := append([]string(nil), cfg.ExtraSecrets...)
 	if s := strings.TrimSpace(cfg.DiscordToken); s != "" {
 		extraSecrets = append(extraSecrets, s)
@@ -403,7 +400,6 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 		pat:                  cfg.PAT,
 		composeDir:           cfg.ComposeDir,
 		configDir:            cfg.ConfigDir,
-		brainInternalURL:     cfg.BrainInternalURL,
 		extraSecrets:         extraSecrets,
 		gitExecutor:          cfg.GitExecutor,
 		nomadExecutor:        cfg.NomadExecutor,
@@ -661,14 +657,21 @@ func RunDaemon(ctx context.Context, cfg DaemonConfig) error {
 	}
 }
 
+// RepoConfig defines a git repository path on disk and its remote URL for services/hangar/hangar.yaml.
+type RepoConfig struct {
+	Path string `yaml:"path"`
+	URL  string `yaml:"url"`
+}
+
 // HangarYAMLConfig defines the declarative file schema for services/hangar/hangar.yaml.
 type HangarYAMLConfig struct {
-	Port             string                 `yaml:"port"`
-	SyncInterval     string                 `yaml:"sync_interval"`
-	SyncRepos        []string               `yaml:"sync_repos"`
-	NomadAddr        string                 `yaml:"nomad_addr"`
-	BrainInternalURL string                 `yaml:"brain_internal_url"`
-	ServiceConfigs   []ServiceConfigMapping `yaml:"service_configs"`
+	Port              string                 `yaml:"port"`
+	SyncInterval      string                 `yaml:"sync_interval"`
+	NomadAddr         string                 `yaml:"nomad_addr"`
+	WebhooksRouterURL string                 `yaml:"webhooks_router_url"`
+	Repos             []RepoConfig           `yaml:"repos"`
+	SyncRepos         []string               `yaml:"sync_repos"`
+	ServiceConfigs    []ServiceConfigMapping `yaml:"service_configs"`
 }
 
 // NewConfigFromLookup extracts DaemonConfig using a provided lookup function.
@@ -688,50 +691,48 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 		}
 	}
 
-	port := firstNonEmpty(lookup("PORT"), fileCfg.Port, "8087")
+	port := firstNonEmpty(strings.TrimSpace(fileCfg.Port), "8087")
 
-	var rawRepoList []string
-	if rawRepos := lookup("SYNC_REPOS"); rawRepos != "" {
-		rawRepoList = strings.Split(rawRepos, ",")
-	} else if len(fileCfg.SyncRepos) > 0 {
-		rawRepoList = fileCfg.SyncRepos
+	interval := 60 * time.Second
+	if d, err := time.ParseDuration(strings.TrimSpace(fileCfg.SyncInterval)); err == nil && d > 0 {
+		interval = d
 	}
+
+	repoUrls := make(map[string]string)
 	var repos []string
-	for _, r := range rawRepoList {
-		if r = strings.TrimSpace(r); r != "" {
-			repos = append(repos, r)
+	for _, rc := range fileCfg.Repos {
+		p := strings.TrimSpace(rc.Path)
+		u := strings.TrimSpace(rc.URL)
+		if p != "" {
+			repos = append(repos, p)
+			if u != "" {
+				repoUrls[p] = u
+			}
+		}
+	}
+	if len(repos) == 0 {
+		for _, r := range fileCfg.SyncRepos {
+			if r = strings.TrimSpace(r); r != "" {
+				repos = append(repos, r)
+			}
 		}
 	}
 	if len(repos) == 0 {
 		repos = []string{"/share/aerial-config", "/share/aerial", "/share/mirrormere"}
 	}
 
-	intervalStr := firstNonEmpty(lookup("SYNC_INTERVAL"), fileCfg.SyncInterval)
-	interval := 60 * time.Second
-	if intervalStr != "" {
-		if d, err := time.ParseDuration(intervalStr); err == nil && d > 0 {
-			interval = d
-		}
-	}
+	composeDir := firstNonEmpty(ResolveRepoPath("aerial", repos), "/share/aerial")
+	configDir := firstNonEmpty(ResolveRepoPath("aerial-config", repos), "/share/aerial-config")
+
+	nomadAddr := firstNonEmpty(strings.TrimSpace(fileCfg.NomadAddr), "http://host.docker.internal:4646")
+	webhooksRouterURL := firstNonEmpty(strings.TrimSpace(fileCfg.WebhooksRouterURL), "http://127.0.0.1:4020")
 
 	pat := lookup("GITHUB_PAT")
-	configRepoURL := firstNonEmpty(lookup("AERIAL_CONFIG_REPO_URL"), "https://github.com/azylman/aerial-config.git")
-	composeDir := firstNonEmpty(lookup("AERIAL_INTERNAL_PROJECT_DIR"), lookup("AERIAL_PROJECT_DIR"), "/share/aerial")
-	configDir := firstNonEmpty(lookup("AERIAL_INTERNAL_CONFIG_DIR"), lookup("AERIAL_CONFIG_DIR"), "/share/aerial-config")
-
-	mirrormereDir := filepath.Join(filepath.Dir(composeDir), "mirrormere")
-
-	repoUrls := map[string]string{
-		configDir:     configRepoURL,
-		composeDir:    "https://github.com/azylman/aerial.git",
-		mirrormereDir: "https://github.com/azylman/mirrormere.git",
-	}
-
+	nomadToken := lookup("NOMAD_TOKEN")
 	discordToken := firstNonEmpty(lookup("DISCORD_BOT_TOKEN"), lookup("DISCORD_TOKEN"))
 	discordChannel := lookup("DISCORD_CHANNEL")
 	discordWebhookURL := lookup("DISCORD_WEBHOOK_URL")
 
-	brainInternalURL := firstNonEmpty(lookup("BRAIN_INTERNAL_URL"), fileCfg.BrainInternalURL, "http://brain:8088/internal/reload")
 	extraSecretCandidates := []string{
 		lookup("POSTGRES_PASSWORD"),
 		lookup("HA_TOKEN"),
@@ -751,10 +752,6 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 		}
 	}
 
-	nomadAddr := firstNonEmpty(lookup("NOMAD_ADDR"), fileCfg.NomadAddr, "http://host.docker.internal:4646")
-	nomadToken := lookup("NOMAD_TOKEN")
-
-	webhooksRouterURL := firstNonEmpty(lookup("WEBHOOKS_ROUTER_URL"), "http://127.0.0.1:4020")
 	var serviceConfigs []ServiceConfigMapping
 	if len(fileCfg.ServiceConfigs) > 0 {
 		serviceConfigs = fileCfg.ServiceConfigs
@@ -771,7 +768,6 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 		DiscordToken:      discordToken,
 		DiscordChannel:    discordChannel,
 		DiscordWebhookURL: discordWebhookURL,
-		BrainInternalURL:  brainInternalURL,
 		ExtraSecrets:      extraSecrets,
 		NomadAddr:         nomadAddr,
 		NomadToken:        nomadToken,
@@ -784,7 +780,12 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 func NewConfigFromEnv() DaemonConfig {
 	return NewConfigFromLookup(func(k string) string {
 		v := os.Getenv(k)
-		if k == "CONFIG_PATH" && v == "" {
+		if k == "CONFIG_PATH" {
+			if v != "" {
+				if data, err := os.ReadFile(v); err == nil && len(bytes.TrimSpace(data)) > 0 {
+					return v
+				}
+			}
 			defaultPath := "/share/aerial-config/services/hangar/hangar.yaml"
 			if _, err := os.Stat(defaultPath); err == nil {
 				return defaultPath

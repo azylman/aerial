@@ -171,73 +171,145 @@ func TestNewConfigFromLookup_TableDriven(t *testing.T) {
 		t.Errorf("NewConfigFromLookup(nil) Port = %q, want 8087", cfg.Port)
 	}
 
-	baseYAML := `port: "8087"
-sync_interval: "45s"
-sync_repos: ["/repo/a", "/repo/b"]
-nomad_addr: "http://nomad.cluster:4646"
-brain_internal_url: "http://brain.cluster:8088/internal/reload"
+	structuredYAML := `port: "9090"
+sync_interval: "30s"
+nomad_addr: "http://nomad.test:4646"
+webhooks_router_url: "http://webhooks.test:4020"
+repos:
+  - path: "/custom/aerial-config"
+    url: "https://github.com/custom/aerial-config.git"
+  - path: "/custom/aerial"
+    url: "https://github.com/custom/aerial.git"
+  - path: "/custom/mirrormere"
+    url: "https://github.com/custom/mirrormere.git"
 service_configs:
   - rel_path: "services/voice/voice.yaml"
     nomad_var: "nomad/jobs/voice"
     var_key: "CONFIG_YAML"`
+
+	syncReposYAML := `port: "8087"
+sync_interval: "45s"
+sync_repos: ["/custom/aerial-config", "/custom/aerial"]
+nomad_addr: "http://nomad.cluster:4646"
+webhooks_router_url: "http://127.0.0.1:4020"`
+
 	tests := []struct {
 		name                     string
 		yamlContent              string
 		env                      map[string]string
 		wantPort                 string
 		wantRepos                []string
+		wantRepoURLs             map[string]string
 		wantInterval             time.Duration
 		wantPAT                  string
+		wantNomadToken           string
 		wantComposeDir           string
 		wantConfigDir            string
 		wantDiscordToken         string
 		wantDiscordChannel       string
 		wantDiscordWebhook       string
 		wantNomadAddr            string
-		wantBrainURL             string
+		wantWebhooksRouterURL    string
 		wantExtraSecretsLen      int
 		checkExtraSecrets        bool
-		checkRepoURLs            bool
 		wantServiceConfigRelPath string
 	}{
 		{
-			name: "custom environment lookup with extra secrets",
-			env: map[string]string{
-				"PORT": "9090", "SYNC_REPOS": "/path/a, /path/b", "SYNC_INTERVAL": "30s",
-				"GITHUB_PAT": "my_secret_pat", "AERIAL_CONFIG_REPO_URL": "https://github.com/custom/config.git",
-				"AERIAL_PROJECT_DIR": "/custom/aerial", "AERIAL_CONFIG_DIR": "/custom/config",
-				"DISCORD_BOT_TOKEN": "bot_token", "DISCORD_CHANNEL": "custom-channel",
-				"DISCORD_WEBHOOK_URL": "https://discord.com/api/webhooks/123/abc",
-				"BRAIN_INTERNAL_URL":  "http://brain:9999/reload",
-				"POSTGRES_PASSWORD":   "pg_pass", "HA_TOKEN": "ha_tok", "GEMINI_API_KEY": "gem_key",
+			name:        "structured repos and daemon endpoints in YAML",
+			yamlContent: structuredYAML,
+			wantPort:    "9090",
+			wantRepos:   []string{"/custom/aerial-config", "/custom/aerial", "/custom/mirrormere"},
+			wantRepoURLs: map[string]string{
+				"/custom/aerial-config": "https://github.com/custom/aerial-config.git",
+				"/custom/aerial":        "https://github.com/custom/aerial.git",
+				"/custom/mirrormere":    "https://github.com/custom/mirrormere.git",
 			},
-			wantPort: "9090", wantRepos: []string{"/path/a", "/path/b"}, wantInterval: 30 * time.Second,
-			wantPAT: "my_secret_pat", wantComposeDir: "/custom/aerial", wantConfigDir: "/custom/config",
-			wantDiscordToken: "bot_token", wantDiscordChannel: "custom-channel",
-			wantDiscordWebhook: "https://discord.com/api/webhooks/123/abc", wantBrainURL: "http://brain:9999/reload",
-			wantExtraSecretsLen: 4, checkExtraSecrets: true,
-		},
-		{
-			name: "empty lookup defaults", env: map[string]string{},
-			wantPort: "8087", wantInterval: 60 * time.Second, wantComposeDir: "/share/aerial",
-			wantConfigDir: "/share/aerial-config", wantBrainURL: "http://brain:8088/internal/reload",
-			wantRepos:           []string{"/share/aerial-config", "/share/aerial", "/share/mirrormere"},
-			wantExtraSecretsLen: 0, checkExtraSecrets: true, checkRepoURLs: true,
-		},
-		{
-			name: "CONFIG_PATH YAML loading and service configs", yamlContent: baseYAML,
-			wantPort: "8087", wantInterval: 45 * time.Second, wantRepos: []string{"/repo/a", "/repo/b"},
-			wantNomadAddr: "http://nomad.cluster:4646", wantBrainURL: "http://brain.cluster:8088/internal/reload",
+			wantInterval:             30 * time.Second,
+			wantComposeDir:           "/custom/aerial",
+			wantConfigDir:            "/custom/aerial-config",
+			wantNomadAddr:            "http://nomad.test:4646",
+			wantWebhooksRouterURL:    "http://webhooks.test:4020",
 			wantServiceConfigRelPath: "services/voice/voice.yaml",
 		},
 		{
-			name: "env overrides take precedence over CONFIG_PATH YAML", yamlContent: baseYAML,
+			name: "secret env lookups with GITHUB_PAT, NOMAD_TOKEN, DISCORD tokens, and extraSecrets",
 			env: map[string]string{
-				"PORT": "9999", "SYNC_INTERVAL": "10s", "SYNC_REPOS": "/override/repo",
-				"NOMAD_ADDR": "http://override.nomad:4646", "BRAIN_INTERNAL_URL": "http://override.brain:8088/reload",
+				"GITHUB_PAT":             "my_secret_pat",
+				"NOMAD_TOKEN":            "my_nomad_tok",
+				"DISCORD_BOT_TOKEN":      "bot_token",
+				"DISCORD_CHANNEL":        "custom-channel",
+				"DISCORD_WEBHOOK_URL":    "https://discord.com/api/webhooks/123/abc",
+				"POSTGRES_PASSWORD":      "pg_pass",
+				"HA_TOKEN":               "ha_tok",
+				"GEMINI_HARNESS_API_KEY": "harness_key",
+				"AERIAL_GEMINI_API_KEY":  "aerial_gemini_key",
+				"GEMINI_API_KEY":         "gem_key",
 			},
-			wantPort: "9999", wantInterval: 10 * time.Second, wantRepos: []string{"/override/repo"},
-			wantNomadAddr: "http://override.nomad:4646", wantBrainURL: "http://override.brain:8088/reload",
+			wantPort:            "8087",
+			wantInterval:        60 * time.Second,
+			wantRepos:           []string{"/share/aerial-config", "/share/aerial", "/share/mirrormere"},
+			wantComposeDir:      "/share/aerial",
+			wantConfigDir:       "/share/aerial-config",
+			wantPAT:             "my_secret_pat",
+			wantNomadToken:      "my_nomad_tok",
+			wantDiscordToken:    "bot_token",
+			wantDiscordChannel:  "custom-channel",
+			wantDiscordWebhook:  "https://discord.com/api/webhooks/123/abc",
+			wantExtraSecretsLen: 7,
+			checkExtraSecrets:   true,
+		},
+		{
+			name:                  "sync_repos fallback when repos is empty",
+			yamlContent:           syncReposYAML,
+			wantPort:              "8087",
+			wantInterval:          45 * time.Second,
+			wantRepos:             []string{"/custom/aerial-config", "/custom/aerial"},
+			wantComposeDir:        "/custom/aerial",
+			wantConfigDir:         "/custom/aerial-config",
+			wantNomadAddr:         "http://nomad.cluster:4646",
+			wantWebhooksRouterURL: "http://127.0.0.1:4020",
+		},
+		{
+			name:                  "empty lookup defaults",
+			env:                   map[string]string{},
+			wantPort:              "8087",
+			wantInterval:          60 * time.Second,
+			wantRepos:             []string{"/share/aerial-config", "/share/aerial", "/share/mirrormere"},
+			wantComposeDir:        "/share/aerial",
+			wantConfigDir:         "/share/aerial-config",
+			wantNomadAddr:         "http://host.docker.internal:4646",
+			wantWebhooksRouterURL: "http://127.0.0.1:4020",
+			wantExtraSecretsLen:   0,
+			checkExtraSecrets:     true,
+		},
+		{
+			name:                  "invalid YAML warning fallback to defaults",
+			yamlContent:           "invalid: [unclosed yaml",
+			wantPort:              "8087",
+			wantInterval:          60 * time.Second,
+			wantRepos:             []string{"/share/aerial-config", "/share/aerial", "/share/mirrormere"},
+			wantComposeDir:        "/share/aerial",
+			wantConfigDir:         "/share/aerial-config",
+			wantNomadAddr:         "http://host.docker.internal:4646",
+			wantWebhooksRouterURL: "http://127.0.0.1:4020",
+		},
+		{
+			name:        "non-secret env vars are ignored in favor of YAML",
+			yamlContent: structuredYAML,
+			env: map[string]string{
+				"PORT":                "9999",
+				"SYNC_INTERVAL":       "10s",
+				"SYNC_REPOS":          "/ignored/repo",
+				"NOMAD_ADDR":          "http://ignored.nomad:4646",
+				"WEBHOOKS_ROUTER_URL": "http://ignored.router:4020",
+			},
+			wantPort:              "9090",
+			wantInterval:          30 * time.Second,
+			wantRepos:             []string{"/custom/aerial-config", "/custom/aerial", "/custom/mirrormere"},
+			wantComposeDir:        "/custom/aerial",
+			wantConfigDir:         "/custom/aerial-config",
+			wantNomadAddr:         "http://nomad.test:4646",
+			wantWebhooksRouterURL: "http://webhooks.test:4020",
 		},
 	}
 
@@ -269,11 +341,21 @@ service_configs:
 					}
 				}
 			}
+			if len(tt.wantRepoURLs) > 0 {
+				for k, wantURL := range tt.wantRepoURLs {
+					if gotURL := cfg.RepoURLs[k]; gotURL != wantURL {
+						t.Errorf("RepoURLs[%q] = %q, want %q", k, gotURL, wantURL)
+					}
+				}
+			}
 			if tt.wantInterval != 0 && cfg.Interval != tt.wantInterval {
 				t.Errorf("Interval = %v, want %v", cfg.Interval, tt.wantInterval)
 			}
 			if tt.wantPAT != "" && cfg.PAT != tt.wantPAT {
 				t.Errorf("PAT = %q, want %q", cfg.PAT, tt.wantPAT)
+			}
+			if tt.wantNomadToken != "" && cfg.NomadToken != tt.wantNomadToken {
+				t.Errorf("NomadToken = %q, want %q", cfg.NomadToken, tt.wantNomadToken)
 			}
 			if tt.wantComposeDir != "" && cfg.ComposeDir != tt.wantComposeDir {
 				t.Errorf("ComposeDir = %q, want %q", cfg.ComposeDir, tt.wantComposeDir)
@@ -293,8 +375,8 @@ service_configs:
 			if tt.wantNomadAddr != "" && cfg.NomadAddr != tt.wantNomadAddr {
 				t.Errorf("NomadAddr = %q, want %q", cfg.NomadAddr, tt.wantNomadAddr)
 			}
-			if tt.wantBrainURL != "" && cfg.BrainInternalURL != tt.wantBrainURL {
-				t.Errorf("BrainInternalURL = %q, want %q", cfg.BrainInternalURL, tt.wantBrainURL)
+			if tt.wantWebhooksRouterURL != "" && cfg.WebhooksRouterURL != tt.wantWebhooksRouterURL {
+				t.Errorf("WebhooksRouterURL = %q, want %q", cfg.WebhooksRouterURL, tt.wantWebhooksRouterURL)
 			}
 			if tt.checkExtraSecrets && len(cfg.ExtraSecrets) != tt.wantExtraSecretsLen {
 				t.Errorf("len(ExtraSecrets) = %d, want %d (%v)", len(cfg.ExtraSecrets), tt.wantExtraSecretsLen, cfg.ExtraSecrets)
@@ -303,9 +385,6 @@ service_configs:
 				if len(cfg.ServiceConfigs) != 1 || cfg.ServiceConfigs[0].RelPath != tt.wantServiceConfigRelPath {
 					t.Errorf("ServiceConfigs = %v, want RelPath %q", cfg.ServiceConfigs, tt.wantServiceConfigRelPath)
 				}
-			}
-			if tt.checkRepoURLs && (cfg.RepoURLs[cfg.ComposeDir] != "https://github.com/azylman/aerial.git" || cfg.RepoURLs[filepath.Join(filepath.Dir(cfg.ComposeDir), "mirrormere")] != "https://github.com/azylman/mirrormere.git") {
-				t.Errorf("RepoURLs missing compose/mirrormere: %v", cfg.RepoURLs)
 			}
 		})
 	}

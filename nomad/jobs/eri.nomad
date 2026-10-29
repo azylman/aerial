@@ -24,11 +24,16 @@ variable "extra_env_template" {
   default = ""
 }
 
+variable "node_pool" {
+  type    = string
+  default = "calibarn"
+}
+
 job "eri" {
   datacenters = ["dc1"]
   type        = "service"
 
-  node_pool   = "calibarn"
+  node_pool   = var.node_pool
 
   update {
     max_parallel      = 1
@@ -121,16 +126,6 @@ EOH
 
       template {
         data = <<EOH
-{{ if nomadVarExists "nomad/jobs/brain" }}
-{{ with nomadVar "nomad/jobs/brain" }}
-{{ if .AERIAL_CONFIG_REPO_URL }}AERIAL_CONFIG_REPO_URL="{{ .AERIAL_CONFIG_REPO_URL }}"{{ end }}
-{{ end }}
-{{ end }}
-{{ if nomadVarExists "nomad/jobs/eri" }}
-{{ with nomadVar "nomad/jobs/eri" }}
-{{ if .AERIAL_CONFIG_REPO_URL }}AERIAL_CONFIG_REPO_URL="{{ .AERIAL_CONFIG_REPO_URL }}"{{ end }}
-{{ end }}
-{{ end }}
 {{ if nomadVarExists "nomad/jobs/shared" }}
 {{ with nomadVar "nomad/jobs/shared" }}
 {{ if .DISCORD_BOT_TOKEN }}DISCORD_BOT_TOKEN="{{ .DISCORD_BOT_TOKEN }}"

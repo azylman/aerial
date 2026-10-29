@@ -3,10 +3,15 @@ variable "image_tag" {
   default = "latest"
 }
 
+variable "node_pool" {
+  type    = string
+  default = "calibarn"
+}
+
 job "roborev-runner" {
   datacenters = ["dc1"]
   type        = "service"
-  node_pool   = "calibarn"
+  node_pool   = var.node_pool
 
   update {
     max_parallel      = 1

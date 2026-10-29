@@ -399,11 +399,11 @@ func (d *SyncDaemon) syncAllConfigsToNomad(ctx context.Context, logPrefix, confi
 	if err := d.SyncHomepageConfigToNomad(ctx, configDir, syncCtx...); err != nil {
 		log.Printf("%s Notice: SyncHomepageConfigToNomad: %v", logPrefix, err)
 	}
-	if err := d.SyncServiceConfigsToNomad(ctx, configDir, syncCtx...); err != nil {
-		log.Printf("%s Notice: SyncServiceConfigsToNomad: %v", logPrefix, err)
-	}
 	if err := d.SyncAssetBundlesToNomad(ctx, configDir, syncCtx...); err != nil {
 		log.Printf("%s Notice: SyncAssetBundlesToNomad: %v", logPrefix, err)
+	}
+	if err := d.SyncServiceConfigsToNomad(ctx, configDir, syncCtx...); err != nil {
+		log.Printf("%s Notice: SyncServiceConfigsToNomad: %v", logPrefix, err)
 	}
 }
 
@@ -599,6 +599,9 @@ func (d *SyncDaemon) SyncServiceConfigsToNomad(ctx context.Context, configDir st
 		}
 		grouped[m.NomadVar] = append(grouped[m.NomadVar], m)
 	}
+	sort.SliceStable(order, func(i, j int) bool {
+		return order[i] != "nomad/jobs/hangar" && order[j] == "nomad/jobs/hangar"
+	})
 
 	diffGated := len(syncCtx) > 0 && syncCtx[0].DiffGated
 	var changedFiles []string
