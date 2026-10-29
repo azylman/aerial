@@ -167,7 +167,9 @@ func TestMockSpawnersAndProcessHandle(t *testing.T) {
 		_ = handle.Kill()
 	}
 	sp := NewMockSpawner()
-	_, _, _, _, _ = sp.Spawn(context.Background(), DaemonConfig{Model: "test-model-1"})
+	in2, out2, errR2, handle2, _ := sp.Spawn(context.Background(), DaemonConfig{Model: "test-model-1"})
+	closeQuietlyAll(in2, out2, errR2)
+	_ = handle2.Kill()
 	if sp.LastSpawnCfg().Model != "test-model-1" {
 		t.Errorf("expected test-model-1, got %s", sp.LastSpawnCfg().Model)
 	}

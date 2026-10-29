@@ -66,6 +66,7 @@ func TestHandlePromptValidation(t *testing.T) {
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
 	})
+	defer prosperaPromptPool.Stop()
 
 	for _, tc := range []struct {
 		name       string
@@ -104,6 +105,7 @@ func TestHandlePromptValidation(t *testing.T) {
 			return "1542999999999999999", nil
 		},
 	})
+	defer threadPool.Stop()
 
 	for _, tc := range []struct {
 		name          string

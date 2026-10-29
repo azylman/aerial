@@ -1993,6 +1993,7 @@ func runPreTurnHookBurst(t *testing.T, hookResps []*PreTurnResponse, hookErr err
 			}}
 		},
 	})
+	defer pool.Stop()
 	now := time.Now().UTC()
 	msg := db.Message{ID: "msg-preturn-test", ThreadID: "chan-preturn", AuthorName: "user-alpha", Content: "test prompt for pre-turn", Status: db.StatusPending, RetryCount: initialRetry, CreatedAt: now}
 	_ = insertMessage(store, msg)

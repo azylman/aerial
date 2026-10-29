@@ -233,7 +233,7 @@ func TestResolveChannelByNameOrID(t *testing.T) {
 	}
 
 	// 2. Empty string
-	sess, _ := discordgo.New("Bot dummy-token")
+	sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) { return mockJSONResponse(http.StatusOK, `[]`) })
 	if _, err := ResolveChannelByNameOrID(sess, ""); err == nil {
 		t.Error("Expected error for empty channel name, got nil")
 	}
@@ -287,7 +287,7 @@ func TestSendSystemAlert(t *testing.T) {
 		t.Error("Expected error for nil session, got nil")
 	}
 
-	sess, _ := discordgo.New("Bot dummy-token")
+	sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) { return mockJSONResponse(http.StatusOK, `[]`) })
 	// Channel not found
 	if err := SendSystemAlert(sess, "missing-chan", "Title", "Body"); err == nil {
 		t.Error("Expected error for missing channel, got nil")
