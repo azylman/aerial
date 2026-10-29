@@ -1348,6 +1348,7 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 		targetID            string
 		suppressVanadis     bool
 		suppressVanadisErr  error
+		finalVanadis        bool
 		advanceVanadisRes   *VanadisAdvancementResult
 		wantTargetID        string
 		wantErr             bool
@@ -1419,6 +1420,20 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 			wantWidgets:    1,
 		},
 		{
+			name:                "dispatchDeploymentSuccessPrompt final Vanadis chunk already advanced on merge syncs widget",
+			isDeploymentSuccess: true,
+			targetID:            validSnowflake,
+			suppressVanadis:     true,
+			finalVanadis:        true,
+			advanceVanadisRes: &VanadisAdvancementResult{
+				Matched:  true,
+				Advanced: false,
+			},
+			wantPrompts: 0,
+			wantDMs:     0,
+			wantWidgets: 1,
+		},
+		{
 			name:                "dispatchDeploymentSuccessPrompt Vanadis wake suppression DB error fallback",
 			isDeploymentSuccess: true,
 			targetID:            validSnowflake,
@@ -1438,6 +1453,7 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 					resolveTargetID:    tc.targetID,
 					suppressVanadisRes: tc.suppressVanadis,
 					suppressVanadisErr: tc.suppressVanadisErr,
+					finalVanadisRes:    tc.finalVanadis,
 					advanceVanadisRes:  tc.advanceVanadisRes,
 				}
 			}
@@ -1909,10 +1925,11 @@ func TestAdvanceVanadisChunk(t *testing.T) {
 			wantErr:    false,
 		},
 		{
-			name:       "matched but already advanced result returns nil",
-			prNumber:   10,
-			advanceRes: &VanadisAdvancementResult{Matched: true, Advanced: false},
-			wantErr:    false,
+			name:          "matched but already advanced result syncs widget and returns nil",
+			prNumber:      10,
+			advanceRes:    &VanadisAdvancementResult{Matched: true, Advanced: false},
+			dispWidgetErr: errors.New("transient widget error"),
+			wantErr:       false,
 		},
 		{
 			name:       "registry error returns error",
