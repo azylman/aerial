@@ -124,6 +124,76 @@ func TestStatusUpdater_DebounceAndFastTurn(t *testing.T) {
 	if hDebounce.sends.Load() != 0 || hDebounce.deletes.Load() != 0 {
 		t.Errorf("expected 0 sends/deletes, got sends=%d deletes=%d", hDebounce.sends.Load(), hDebounce.deletes.Load())
 	}
+
+	hSync := newStatusUpdaterHarness()
+	uSync := NewStatusUpdater(nil, "thread-sync", true, hSync.options(WithSyncDelete(), WithStatusDebounce(0), WithStatusInterval(2*time.Millisecond))...)
+	uSync.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
+	select {
+	case <-hSync.sendDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for sync ticker send")
+	}
+	uSync.Stop()
+	uSync.DeleteStatusMessage()
+	if hSync.deletes.Load() != 1 {
+		t.Fatalf("expected synchronous delete count 1, got %d", hSync.deletes.Load())
+	}
+
+	chunkFlushed := make(chan string, 4)
+	chunkDeleted := make(chan struct{}, 1)
+	flushFn := func(step string) error {
+		if step == "" {
+			select {
+			case chunkDeleted <- struct{}{}:
+			default:
+			}
+		} else {
+			select {
+			case chunkFlushed <- step:
+			default:
+			}
+		}
+		return nil
+	}
+	uChunk := NewChunkStepStatusUpdater("chunk-test-1", flushFn, WithStatusDebounce(0), WithStatusInterval(2*time.Millisecond))
+	uChunk.HandleStep(&runner.StepUpdateEvent{
+		StepType: "tool", ToolName: "run_command", State: "ACTIVE",
+		ToolInfo: &runner.StepToolInfo{Parameters: runner.StepToolParameters{CommandLine: "go test ./..."}},
+	})
+	select {
+	case step := <-chunkFlushed:
+		if !strings.Contains(step, "Executing `go`") {
+			t.Fatalf("expected active step to contain 'Executing `go`', got %q", step)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for chunk step flush")
+	}
+	uChunk.Stop()
+	uChunk.DeleteStatusMessage()
+	select {
+	case <-chunkDeleted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for chunk step delete")
+	}
+
+	uNil := NewChunkStepStatusUpdater("chunk-nil-fn", nil, WithStatusDebounce(0), WithStatusInterval(time.Hour))
+	uNil.HandleStep(&runner.StepUpdateEvent{
+		StepType: "tool", ToolName: "read_file", State: "ACTIVE",
+		ToolInfo: &runner.StepToolInfo{Parameters: runner.StepToolParameters{CommandLine: "read"}},
+	})
+	uNil.flush()
+	uNil.Stop()
+	uNil.DeleteStatusMessage()
+
+	errFlush := errors.New("flush failed")
+	uErr := NewChunkStepStatusUpdater("chunk-err-fn", func(string) error { return errFlush }, WithStatusDebounce(0), WithStatusInterval(time.Hour))
+	uErr.HandleStep(&runner.StepUpdateEvent{
+		StepType: "tool", ToolName: "read_file", State: "ACTIVE",
+		ToolInfo: &runner.StepToolInfo{Parameters: runner.StepToolParameters{CommandLine: "read"}},
+	})
+	uErr.flush()
+	uErr.Stop()
+	uErr.DeleteStatusMessage()
 }
 
 func TestStatusUpdater_ToolLifecycleAndFlushes(t *testing.T) {

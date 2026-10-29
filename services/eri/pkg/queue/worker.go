@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -530,9 +532,49 @@ func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 		}
 	}()
 
+	chunkID, buildID, chunkIdx := extractVanadisDispatchInfo(d)
+	if chunkID != "" {
+		p.StartChunkStepTurn(chunkID, buildID, chunkIdx, d.ID)
+		defer p.FinishChunkStepTurn(chunkID, d.ID)
+		te.statusUpdater = NewChunkStepStatusUpdater(chunkID, func(step string) error {
+			return p.FlushChunkActiveStep(chunkID, d.ID, step)
+		})
+		defer func() {
+			te.statusUpdater.Stop()
+			te.statusUpdater.DeleteStatusMessage()
+		}()
+	}
+
 	te.turnAttempted = true
 	te.turnPrompt = te.buildDispatchPrompt()
 	te.executeWithRetries()
+}
+
+var (
+	vanadisChunkIDPromptRegex     = regexp.MustCompile(`(?m)^Chunk ID:\s*(\S+)`)
+	vanadisBuildIDPromptRegex     = regexp.MustCompile(`(?m)^Build ID:\s*(\S+)`)
+	vanadisActiveChunkHeaderRegex = regexp.MustCompile(`(?i)===\s*Active Chunk\s*\(Chunk\s+(\d+)\s+of\s+\d+\)\s*===`)
+)
+
+func extractVanadisDispatchInfo(d db.Dispatch) (chunkID, buildID string, chunkIdx int) {
+	chunkIdx = -1
+	if strings.HasPrefix(d.SessionID, "vanadis-") {
+		chunkID = strings.TrimSpace(strings.TrimPrefix(d.SessionID, "vanadis-"))
+	}
+	if chunkID == "" {
+		if m := vanadisChunkIDPromptRegex.FindStringSubmatch(d.Prompt); len(m) >= 2 {
+			chunkID = strings.TrimSpace(m[1])
+		}
+	}
+	if m := vanadisBuildIDPromptRegex.FindStringSubmatch(d.Prompt); len(m) >= 2 {
+		buildID = strings.TrimSpace(m[1])
+	}
+	if m := vanadisActiveChunkHeaderRegex.FindStringSubmatch(d.Prompt); len(m) >= 2 {
+		if idx, err := strconv.Atoi(m[1]); err == nil && idx >= 1 {
+			chunkIdx = idx - 1
+		}
+	}
+	return chunkID, buildID, chunkIdx
 }
 
 func (te *turnExecution) claimAndFilterStale() bool {

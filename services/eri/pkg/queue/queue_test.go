@@ -2533,14 +2533,88 @@ func TestWorkerPool_DeliverStatusWidget(t *testing.T) {
 		cachedChannel                                     *discordgo.Channel
 		expectDeliveredChannelID                          string
 		useMockSession                                    bool
+		priorRequests                                     []discord.StatusWidgetRequest
+		priorSteps                                        map[string]string
+		expectDeliveredChunks                             []discord.StatusWidgetChunk
+		fifoFillCount                                     int
+		expectEvictedBuildID                              string
+		deliveryFuncErr                                   error
+		useAppConfigPolicy                                bool
 	}{
 		{name: "nil pool returns error", nilPool: true, expectErrContains: "worker pool is nil"},
 		{name: "nil session returns error", nilSession: true, req: discord.StatusWidgetRequest{ChannelID: "chan-1"}, expectErrContains: "discord session is not connected"},
+		{
+			name:              "delivery func returns error",
+			req:               discord.StatusWidgetRequest{ID: "b-err", ChannelID: targetChan},
+			deliveryFuncErr:   errors.New("simulated delivery error"),
+			expectErrContains: "simulated delivery error",
+		},
+		{
+			name:                     "uses appConfig for channel policy when ResolveChannelPolicy is nil",
+			widgetMsgID:              "msg-appcfg",
+			req:                      discord.StatusWidgetRequest{ChannelID: targetChan, Chunks: []discord.StatusWidgetChunk{{ID: "c-deploy", Status: "running", DeployingJobs: []string{"eri"}}}},
+			useAppConfigPolicy:       true,
+			blockBuildCards:          true,
+			systemChannel:            sysChanSnowflake,
+			expectMsgID:              "msg-appcfg",
+			expectDeliveredChannelID: sysChanSnowflake,
+		},
 		{name: "injected WidgetDeliveryFunc is invoked without redirection", widgetMsgID: "widget-msg-123", req: discord.StatusWidgetRequest{ChannelID: targetChan}, expectMsgID: "widget-msg-123", expectDeliveredChannelID: targetChan},
 		{name: "block_build_cards redirects target channel to system channel snowflake", widgetMsgID: "widget-msg-456", req: discord.StatusWidgetRequest{ChannelID: targetChan}, blockBuildCards: true, systemChannel: sysChanSnowflake, expectMsgID: "widget-msg-456", expectDeliveredChannelID: sysChanSnowflake},
 		{name: "block_build_cards redirects thread to system channel via parent policy", widgetMsgID: "widget-msg-789", req: discord.StatusWidgetRequest{ChannelID: threadSnowflake}, parentBlockBuildCards: true, systemChannel: sysChanSnowflake, cachedChannel: &discordgo.Channel{ID: threadSnowflake, Type: discordgo.ChannelTypeGuildPublicThread, ParentID: parentChan, Name: "build-thread"}, expectMsgID: "widget-msg-789", expectDeliveredChannelID: sysChanSnowflake},
 		{name: "block_build_cards resolves channel name system_channel via discord session", widgetMsgID: "widget-msg-321", req: discord.StatusWidgetRequest{ChannelID: targetChan}, blockBuildCards: true, systemChannel: "aerial-dev", useMockSession: true, expectMsgID: "widget-msg-321", expectDeliveredChannelID: sysChanSnowflake},
 		{name: "block_build_cards unresolvable system channel falls back to target channel", widgetMsgID: "widget-msg-101", req: discord.StatusWidgetRequest{ChannelID: targetChan}, blockBuildCards: true, systemChannel: "nonexistent-channel", expectMsgID: "widget-msg-101", expectDeliveredChannelID: targetChan},
+		{
+			name:        "inherits existing message ID when req message ID is empty",
+			widgetMsgID: "msg-inherit-999",
+			priorRequests: []discord.StatusWidgetRequest{
+				{ID: "b-inherit", MessageID: "msg-inherit-999", ChannelID: targetChan},
+			},
+			req:         discord.StatusWidgetRequest{ID: "b-inherit", ChannelID: targetChan},
+			expectMsgID: "msg-inherit-999",
+		},
+		{
+			name:        "preserves existing chunk IDs when req chunk ID is empty",
+			widgetMsgID: "msg-pres",
+			priorRequests: []discord.StatusWidgetRequest{
+				{ID: "b-preserve", MessageID: "msg-pres", ChannelID: targetChan, Chunks: []discord.StatusWidgetChunk{{ID: "chunk-preserved", Status: "running"}}},
+			},
+			req:                   discord.StatusWidgetRequest{ID: "b-preserve", ChannelID: targetChan, Chunks: []discord.StatusWidgetChunk{{ID: "", Status: "running"}}},
+			expectMsgID:           "msg-pres",
+			expectDeliveredChunks: []discord.StatusWidgetChunk{{ID: "chunk-preserved", Status: "running"}},
+		},
+		{
+			name:                  "overlays active chunk step onto running chunk",
+			widgetMsgID:           "msg-overlay",
+			priorSteps:            map[string]string{"chunk-overlay": "⚡ Running `view_file`... (1.2s)"},
+			req:                   discord.StatusWidgetRequest{ID: "b-overlay", MessageID: "msg-overlay", ChannelID: targetChan, Chunks: []discord.StatusWidgetChunk{{ID: "chunk-overlay", Status: "running"}}},
+			expectMsgID:           "msg-overlay",
+			expectDeliveredChunks: []discord.StatusWidgetChunk{{ID: "chunk-overlay", Status: "running", ActiveStep: "⚡ Running `view_file`... (1.2s)"}},
+		},
+		{
+			name:                  "clears active step on non-in-progress chunk",
+			widgetMsgID:           "msg-done",
+			priorSteps:            map[string]string{"chunk-done": "⚡ Running `view_file`... (1.2s)"},
+			req:                   discord.StatusWidgetRequest{ID: "b-done", MessageID: "msg-done", ChannelID: targetChan, Chunks: []discord.StatusWidgetChunk{{ID: "chunk-done", Status: "pr_opened"}}},
+			expectMsgID:           "msg-done",
+			expectDeliveredChunks: []discord.StatusWidgetChunk{{ID: "chunk-done", Status: "pr_opened", ActiveStep: ""}},
+		},
+		{
+			name:                  "clears active steps on completed build status",
+			widgetMsgID:           "msg-term",
+			priorSteps:            map[string]string{"chunk-term": "⚡ Running `view_file`... (1.2s)"},
+			req:                   discord.StatusWidgetRequest{ID: "b-term", MessageID: "msg-term", ChannelID: targetChan, Status: "completed", Chunks: []discord.StatusWidgetChunk{{ID: "chunk-term", Status: "running"}}},
+			expectMsgID:           "msg-term",
+			expectDeliveredChunks: []discord.StatusWidgetChunk{{ID: "chunk-term", Status: "running", ActiveStep: ""}},
+		},
+		{
+			name:                 "evicts oldest build from widgetsByID when exceeding 64 entries",
+			widgetMsgID:          "msg-final",
+			fifoFillCount:        65,
+			req:                  discord.StatusWidgetRequest{ID: "b-final", MessageID: "msg-final", ChannelID: targetChan},
+			expectMsgID:          "msg-final",
+			expectEvictedBuildID: "fifo-build-0",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2559,35 +2633,229 @@ func TestWorkerPool_DeliverStatusWidget(t *testing.T) {
 				return
 			}
 			var deliveredChanID string
-			p := &WorkerPool{
-				cfg: WorkerPoolConfig{
-					ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-						if tc.blockBuildCards && (channelID == targetChan || channelName == targetChan) {
-							return config.ChannelPolicy{BlockBuildCards: true}
-						}
-						if tc.parentBlockBuildCards && (channelID == parentChan || channelName == parentChan) {
-							return config.ChannelPolicy{BlockBuildCards: true}
-						}
-						return config.ChannelPolicy{}
-					},
-				},
+			var deliveredReq discord.StatusWidgetRequest
+			p := &WorkerPool{}
+			if !tc.useAppConfigPolicy {
+				p.cfg.ResolveChannelPolicy = func(channelID, channelName string) config.ChannelPolicy {
+					if tc.blockBuildCards && (channelID == targetChan || channelName == targetChan) {
+						return config.ChannelPolicy{BlockBuildCards: true}
+					}
+					if tc.parentBlockBuildCards && (channelID == parentChan || channelName == parentChan) {
+						return config.ChannelPolicy{BlockBuildCards: true}
+					}
+					return config.ChannelPolicy{}
+				}
 			}
 			if tc.useMockSession {
 				p.SetDiscordSession(mockSess)
 			}
-			if tc.systemChannel != "" {
+			if tc.useAppConfigPolicy {
+				p.appCfg = config.NewFromData(&config.ConfigData{
+					SystemChannel: tc.systemChannel,
+					Channels: map[string]config.ChannelPolicy{
+						targetChan: {BlockBuildCards: tc.blockBuildCards},
+					},
+				})
+			} else if tc.systemChannel != "" {
 				p.appCfg = config.NewFromData(&config.ConfigData{SystemChannel: tc.systemChannel})
 			}
 			p.SetWidgetDeliveryFunc(func(req discord.StatusWidgetRequest) (string, error) {
+				if tc.deliveryFuncErr != nil {
+					return "", tc.deliveryFuncErr
+				}
 				deliveredChanID = req.ChannelID
+				deliveredReq = req
 				return tc.widgetMsgID, nil
 			})
+			for _, pr := range tc.priorRequests {
+				if _, err := p.DeliverStatusWidget(pr); err != nil {
+					t.Fatalf("setup prior request failed: %v", err)
+				}
+			}
+			for i := 0; i < tc.fifoFillCount; i++ {
+				fillReq := discord.StatusWidgetRequest{
+					ID:        fmt.Sprintf("fifo-build-%d", i),
+					ChannelID: targetChan,
+					MessageID: fmt.Sprintf("fifo-msg-%d", i),
+					Chunks:    []discord.StatusWidgetChunk{{ID: fmt.Sprintf("fifo-chunk-%d", i), Status: "running"}},
+				}
+				if _, err := p.DeliverStatusWidget(fillReq); err != nil {
+					t.Fatalf("fifo fill failed: %v", err)
+				}
+			}
+			for cID, step := range tc.priorSteps {
+				p.StartChunkStepTurn(cID, tc.req.ID, -1, "test-turn")
+				p.widgetMu.Lock()
+				p.activeChunkSteps[cID] = step
+				p.widgetMu.Unlock()
+			}
 			msgID, err := p.DeliverStatusWidget(tc.req)
+			if tc.expectErrContains != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.expectErrContains) {
+					t.Fatalf("expected error containing %q, got %v", tc.expectErrContains, err)
+				}
+				return
+			}
 			if err != nil || msgID != tc.expectMsgID {
 				t.Fatalf("unexpected delivery: err=%v msgID=%q", err, msgID)
 			}
 			if tc.expectDeliveredChannelID != "" && deliveredChanID != tc.expectDeliveredChannelID {
 				t.Fatalf("delivered ChannelID = %q, want %q", deliveredChanID, tc.expectDeliveredChannelID)
+			}
+			if len(tc.expectDeliveredChunks) > 0 {
+				if len(deliveredReq.Chunks) != len(tc.expectDeliveredChunks) {
+					t.Fatalf("delivered chunks length mismatch: got %d, want %d", len(deliveredReq.Chunks), len(tc.expectDeliveredChunks))
+				}
+				for i, exp := range tc.expectDeliveredChunks {
+					got := deliveredReq.Chunks[i]
+					if got.ID != exp.ID || got.Status != exp.Status || got.ActiveStep != exp.ActiveStep {
+						t.Fatalf("chunk[%d] mismatch: got (ID=%q, Status=%q, ActiveStep=%q), want (ID=%q, Status=%q, ActiveStep=%q)",
+							i, got.ID, got.Status, got.ActiveStep, exp.ID, exp.Status, exp.ActiveStep)
+					}
+				}
+			}
+			if tc.expectEvictedBuildID != "" {
+				p.widgetMu.Lock()
+				_, exists := p.widgetsByID[tc.expectEvictedBuildID]
+				p.widgetMu.Unlock()
+				if exists {
+					t.Fatalf("expected build %q to be evicted from widgetsByID", tc.expectEvictedBuildID)
+				}
+			}
+		})
+	}
+}
+
+func TestWorkerPool_ChunkStepStreaming(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                  string
+		nilPool               bool
+		noSession             bool
+		chunkID, turnID       string
+		stepText              string
+		seedWidget            bool
+		chunkStatus           string
+		mismatchedTurn        bool
+		expectFlushErr        bool
+		expectFlushDelivered  bool
+		expectFinishDelivered bool
+	}{
+		{
+			name:           "nil pool returns error on flush",
+			nilPool:        true,
+			chunkID:        "c1",
+			turnID:         "t1",
+			stepText:       "step 1",
+			expectFlushErr: true,
+		},
+		{
+			name:           "nil session returns error on flush",
+			noSession:      true,
+			chunkID:        "c-nosess",
+			turnID:         "t-nosess",
+			stepText:       "step 1",
+			seedWidget:     true,
+			chunkStatus:    "running",
+			expectFlushErr: true,
+		},
+		{
+			name:     "empty chunkID or turnID is no-op",
+			chunkID:  "",
+			turnID:   "",
+			stepText: "step 1",
+		},
+		{
+			name:           "mismatched turn ID is rejected",
+			chunkID:        "c-mismatch",
+			turnID:         "t-wrong",
+			stepText:       "step 1",
+			seedWidget:     true,
+			chunkStatus:    "running",
+			mismatchedTurn: true,
+		},
+		{
+			name:        "chunk not in progress skips flush",
+			chunkID:     "c-pr-open",
+			turnID:      "t-open",
+			stepText:    "step 1",
+			seedWidget:  true,
+			chunkStatus: "pr_opened",
+		},
+		{
+			name:                  "running chunk flushes and finishes cleanly",
+			chunkID:               "c-run",
+			turnID:                "t-run",
+			stepText:              "⚡ Executing `git status`...",
+			seedWidget:            true,
+			chunkStatus:           "running",
+			expectFlushDelivered:  true,
+			expectFinishDelivered: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.nilPool {
+				var p *WorkerPool
+				if err := p.FlushChunkActiveStep(tc.chunkID, tc.turnID, tc.stepText); err == nil {
+					t.Fatalf("expected error from nil pool FlushChunkActiveStep")
+				}
+				p.StartChunkStepTurn(tc.chunkID, "b1", 0, tc.turnID)
+				p.FinishChunkStepTurn(tc.chunkID, tc.turnID)
+				return
+			}
+			var deliveredMu sync.Mutex
+			var deliveredReqs []discord.StatusWidgetRequest
+			p := &WorkerPool{}
+			if !tc.noSession {
+				p.SetWidgetDeliveryFunc(func(req discord.StatusWidgetRequest) (string, error) {
+					deliveredMu.Lock()
+					deliveredReqs = append(deliveredReqs, req)
+					deliveredMu.Unlock()
+					if req.MessageID != "" {
+						return req.MessageID, nil
+					}
+					return "msg-delivered", nil
+				})
+			}
+			if tc.seedWidget {
+				p.widgetMu.Lock()
+				p.ensureWidgetMapsLocked()
+				p.widgetsByID["build-"+tc.chunkID] = discord.StatusWidgetRequest{
+					ID:        "build-" + tc.chunkID,
+					ChannelID: "chan-1",
+					MessageID: "msg-" + tc.chunkID,
+					Status:    "running",
+					Chunks: []discord.StatusWidgetChunk{
+						{ID: "", Status: tc.chunkStatus},
+						{ID: "c-sibling", Status: "running"},
+					},
+				}
+				p.activeChunkSteps["c-sibling"] = "sibling step"
+				p.widgetMu.Unlock()
+			}
+			assignedTurn := tc.turnID
+			if tc.mismatchedTurn {
+				assignedTurn = "t-actual"
+			}
+			p.StartChunkStepTurn(tc.chunkID, "build-"+tc.chunkID, 0, assignedTurn)
+			err := p.FlushChunkActiveStep(tc.chunkID, tc.turnID, tc.stepText)
+			if (err != nil) != tc.expectFlushErr {
+				t.Fatalf("FlushChunkActiveStep err = %v, expectFlushErr = %v", err, tc.expectFlushErr)
+			}
+			p.FinishChunkStepTurn(tc.chunkID, tc.turnID)
+
+			deliveredMu.Lock()
+			count := len(deliveredReqs)
+			deliveredMu.Unlock()
+
+			if tc.expectFlushDelivered && count == 0 {
+				t.Fatalf("expected at least 1 delivered request")
+			}
+			if tc.expectFinishDelivered && count < 2 {
+				t.Fatalf("expected at least 2 delivered requests (flush + finish), got %d", count)
 			}
 		})
 	}
@@ -3292,6 +3560,8 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 		respJSON     string
 		wantStatus   string
 		wantRespText string
+		seedWidget   bool
+		emitStep     bool
 	}{
 		{
 			name:         "ephemeral vanadis chunk",
@@ -3311,6 +3581,17 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 			wantStatus:   db.StatusCompleted,
 			wantRespText: "all systems normal",
 		},
+		{
+			name:         "vanadis chunk step streaming to build card widget",
+			source:       "vanadis",
+			sessionID:    "vanadis-chunk-step-live",
+			prompt:       "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: build-streaming-live\nChunk ID: chunk-step-live\n=== Active Chunk (Chunk 1 of 1) ===\nImplement step streaming",
+			respJSON:     `{"conversation_id":"77777777-7777-7777-7777-777777777777","status":"SUCCESS","response":"step streaming succeeded"}`,
+			wantStatus:   db.StatusCompleted,
+			wantRespText: "step streaming succeeded",
+			seedWidget:   true,
+			emitStep:     true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -3318,6 +3599,9 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 			t.Parallel()
 			store := dbtest.NewFakeStore()
 			doneCh := make(chan struct{})
+			var deliveredWidgetsMu sync.Mutex
+			var deliveredWidgets []discord.StatusWidgetRequest
+			widgetDeliveredCh := make(chan struct{}, 8)
 			pool := NewWorkerPool(WorkerPoolConfig{
 				Store:          store,
 				TimeoutMinutes: 1,
@@ -3329,12 +3613,49 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 					t.Errorf("unexpected Discord TypingFunc call for headless dispatch")
 					return func() {}
 				},
+				WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) {
+					deliveredWidgetsMu.Lock()
+					deliveredWidgets = append(deliveredWidgets, req)
+					deliveredWidgetsMu.Unlock()
+					select {
+					case widgetDeliveredCh <- struct{}{}:
+					default:
+					}
+					if req.MessageID != "" {
+						return req.MessageID, nil
+					}
+					return "widget-msg-seed", nil
+				},
 				RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+					if tc.emitStep && opts.StepUpdateHandler != nil {
+						opts.StepUpdateHandler(&runner.StepUpdateEvent{
+							Type:     "tool_call",
+							ToolName: "run_command",
+							ToolInfo: &runner.StepToolInfo{
+								Parameters: runner.StepToolParameters{CommandLine: "git status"},
+							},
+						})
+						select {
+						case <-widgetDeliveredCh:
+						case <-time.After(time.Second):
+						}
+					}
 					defer close(doneCh)
 					return tc.respJSON, "", 0, nil
 				},
 			})
 			defer pool.Stop()
+
+			if tc.seedWidget {
+				_, _ = pool.DeliverStatusWidget(discord.StatusWidgetRequest{
+					ChannelID: "chan-build",
+					ID:        "build-streaming-live",
+					Status:    "running",
+					Chunks: []discord.StatusWidgetChunk{
+						{ID: "chunk-step-live", Index: 0, Title: "Step Streaming", Status: "running"},
+					},
+				})
+			}
 
 			disp := db.Dispatch{
 				ID:        uuid.New().String(),
@@ -3365,6 +3686,29 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 			}
 			if d.ResponseText != tc.wantRespText {
 				t.Fatalf("response text mismatch: got %q, want %q", d.ResponseText, tc.wantRespText)
+			}
+
+			if tc.emitStep {
+				deliveredWidgetsMu.Lock()
+				stepsSeen := 0
+				hasFinalClear := false
+				for _, w := range deliveredWidgets {
+					if w.SkipSink && len(w.Chunks) > 0 {
+						if strings.Contains(w.Chunks[0].ActiveStep, "Executing `git`") {
+							stepsSeen++
+						}
+						if w.Chunks[0].ActiveStep == "" {
+							hasFinalClear = true
+						}
+					}
+				}
+				deliveredWidgetsMu.Unlock()
+				if stepsSeen == 0 {
+					t.Fatalf("expected at least one widget delivery with active step 'Executing `git`', saw %d widget updates", len(deliveredWidgets))
+				}
+				if !hasFinalClear {
+					t.Fatalf("expected final widget clear with ActiveStep='', saw %d widget updates", len(deliveredWidgets))
+				}
 			}
 		})
 	}

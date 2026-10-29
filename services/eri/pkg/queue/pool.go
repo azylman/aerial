@@ -143,6 +143,13 @@ type WorkerPool struct {
 	pools             map[PoolKey]runner.AgentPool
 	voiceProcessPool  runner.AgentPool
 	createThreadFn    func(channelID, title string) (string, error)
+	widgetDeliveryMu  sync.Mutex
+	widgetMu          sync.Mutex
+	widgetsByID       map[string]discord.StatusWidgetRequest
+	widgetOrder       []string
+	chunkToBuildID    map[string]string
+	activeChunkSteps  map[string]string
+	activeChunkTurns  map[string]string
 }
 
 // SummaryGroup returns the singleflight.Group coordinating thread summarizations for this pool instance.
@@ -429,6 +436,10 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		sessionMgr: cfg.SessionManager, threadChs: make(map[string]*threadWorkerState),
 		activeTurns: make(map[string]*turnExecution), ctx: ctx, cancel: cancel,
 		webhookDispatcher: cfg.WebhookDispatcher, createThreadFn: cfg.CreateThreadFunc,
+		widgetsByID:      make(map[string]discord.StatusWidgetRequest),
+		chunkToBuildID:   make(map[string]string),
+		activeChunkSteps: make(map[string]string),
+		activeChunkTurns: make(map[string]string),
 	}
 
 	if p.cfg.HistoryFetcher == nil {
@@ -557,35 +568,6 @@ func (p *WorkerPool) resolveChannelPolicy(channelID, channelName string) config.
 		return p.appCfg.ResolveChannelPolicy(channelID, channelName)
 	}
 	return config.ActiveConfig().ResolveChannelPolicy(channelID, channelName)
-}
-
-func (p *WorkerPool) DeliverStatusWidget(req discord.StatusWidgetRequest) (string, error) {
-	if p == nil {
-		return "", errors.New("worker pool is nil")
-	}
-	sess := p.DiscordSession()
-	effID, effName, _, _ := ResolveChannelAndThread(sess, req.ChannelID)
-	policy := p.resolveChannelPolicy(effID, effName)
-	if !policy.BlockBuildCards && req.ChannelID != effID && req.ChannelID != "" {
-		if targetPolicy := p.resolveChannelPolicy(req.ChannelID, ""); targetPolicy.BlockBuildCards {
-			policy.BlockBuildCards = true
-		}
-	}
-	if policy.BlockBuildCards {
-		sysChan := p.systemChannel()
-		if sysChan != "" {
-			if sysChanID, err := p.ResolveChannelID(sysChan); err == nil && sysChanID != "" && IsNumericSnowflake(sysChanID) {
-				req.ChannelID = sysChanID
-			}
-		}
-	}
-	if p.cfg.WidgetDeliveryFunc != nil {
-		return p.cfg.WidgetDeliveryFunc(req)
-	}
-	if sess == nil {
-		return "", errors.New("discord session is not connected")
-	}
-	return discord.DeliverStatusWidget(sess, req, time.Now())
 }
 
 // WebhookDispatcher returns the assigned webhook dispatcher.
