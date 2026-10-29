@@ -225,7 +225,7 @@ func buildWidgetChunkComponent(c StatusWidgetChunk) discordgo.MessageComponent {
 
 	rowText := fmt.Sprintf("%s **`%s`**: %s%s", badge, repoTag, strings.TrimSpace(c.Title), formatChunkRuntimeSuffix(c))
 	if step := strings.TrimSpace(c.ActiveStep); step != "" {
-		rowText += "\n" + step
+		rowText += "\n-# ↳ " + step
 	}
 
 	if c.PRNumber > 0 && fullRepo != "" {
