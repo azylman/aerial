@@ -37,11 +37,23 @@ func isWidgetChunkInProgress(status string) bool {
 
 func isWidgetChunkWaitingOnCI(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "open", "pr_opened":
+	case "open", "pr_opened", "merged", "synced", "deploying":
 		return true
 	default:
 		return false
 	}
+}
+
+func sameWidgetChunkPhase(a, b string) bool {
+	normA := strings.ToLower(strings.TrimSpace(a))
+	if normA == "pr_opened" {
+		normA = "open"
+	}
+	normB := strings.ToLower(strings.TrimSpace(b))
+	if normB == "pr_opened" {
+		normB = "open"
+	}
+	return normA != "" && normA == normB
 }
 
 func cloneStatusWidgetRequest(req discord.StatusWidgetRequest, stripSteps bool) discord.StatusWidgetRequest {
@@ -106,7 +118,7 @@ func (p *WorkerPool) syncSingleWidgetChunkLocked(c *discord.StatusWidgetChunk, e
 	if isWidgetChunkWaitingOnCI(c.Status) {
 		p.clearChunkStepStateLocked(c.ID)
 		c.ActiveStep = strings.TrimSpace(c.ActiveStep)
-		if c.ActiveStep == "" && existing != nil && idx < len(existing.Chunks) && isWidgetChunkWaitingOnCI(existing.Chunks[idx].Status) {
+		if c.ActiveStep == "" && existing != nil && idx < len(existing.Chunks) && sameWidgetChunkPhase(existing.Chunks[idx].Status, c.Status) {
 			c.ActiveStep = existing.Chunks[idx].ActiveStep
 		}
 		return

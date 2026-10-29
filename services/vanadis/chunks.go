@@ -586,6 +586,15 @@ func (s *VanadisServer) handleFailChunkPR(w http.ResponseWriter, r *http.Request
 	})
 }
 
+func isVanadisChunkStreamingPhase(chunkStatus string) bool {
+	switch strings.ToLower(strings.TrimSpace(chunkStatus)) {
+	case "open", "pr_opened", "merged", "synced", "deploying":
+		return true
+	default:
+		return false
+	}
+}
+
 func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncChunkPRWidgetRequest) StatusWidgetRequest {
 	widgetStatus := firstNonEmpty(normalizeWidgetStatus(build.Status), "running")
 	wChunks := make([]StatusWidgetChunk, len(chunks))
@@ -598,7 +607,7 @@ func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncC
 			if (chunkStatus == "failed" || chunkStatus == "conflict") && widgetStatus != "completed" {
 				widgetStatus = "failed"
 			}
-			if chunkStatus == "open" || chunkStatus == "pr_opened" {
+			if isVanadisChunkStreamingPhase(chunkStatus) {
 				activeStep = strings.TrimSpace(req.ActiveStep)
 			}
 		} else if chunkStatus == "merged" {
