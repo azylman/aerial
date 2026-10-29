@@ -13,30 +13,9 @@ permissions:
   pull-requests: write
 
 jobs:
-  check-bootstrap:
-    name: Check RoboRev Bootstrap State
-    runs-on: [self-hosted, ci]
-    outputs:
-      bootstrapped: ${{ steps.check.outputs.bootstrapped }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Check if .roborev.toml exists on main
-        id: check
-        run: |
-          if git cat-file -e origin/main:.roborev.toml 2>/dev/null && (git cat-file -e origin/main:nomad/jobs/github-runner.nomad 2>/dev/null || git cat-file -e origin/main:nomad/jobs/roborev-runner.nomad 2>/dev/null); then
-            echo "bootstrapped=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "bootstrapped=false" >> "$GITHUB_OUTPUT"
-          fi
-
   roborev:
     name: roborev
-    needs: check-bootstrap
     if: >
-      needs.check-bootstrap.outputs.bootstrapped == 'true' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.actor == 'azylman'
     runs-on: [self-hosted, roborev]
@@ -56,6 +35,10 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -o pipefail
+          if ! git cat-file -e origin/main:.roborev.toml 2>/dev/null || ! (git cat-file -e origin/main:nomad/jobs/github-runner.nomad 2>/dev/null || git cat-file -e origin/main:nomad/jobs/roborev-runner.nomad 2>/dev/null); then
+            echo "RoboRev not bootstrapped on main; skipping."
+            exit 0
+          fi
           SHORT_SHA="${HEAD_SHA:0:7}"
           if [ -n "${PR_NUMBER:-}" ] && [ -n "${HEAD_SHA:-}" ]; then
             OVERRIDE_COMMENT=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100" \

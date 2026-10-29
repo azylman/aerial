@@ -291,8 +291,8 @@ EOH
       }
 
       resources {
-        cpu        = 2000
-        memory     = 3072
+        cpu        = 500
+        memory     = 512
         memory_max = 6144
       }
     }
@@ -338,13 +338,201 @@ EOH
       }
 
       resources {
-        cpu        = 2000
-        memory     = 3072
+        cpu        = 500
+        memory     = 512
         memory_max = 6144
       }
     }
 
-    task "ci-runner-aerial-config" {
+    task "ci-runner-aerial-3" {
+      driver = "docker"
+      user   = "0:0"
+
+      kill_timeout = "30s"
+
+      config {
+        image              = "ghcr.io/azylman/aerial-github-runner:${var.image_tag}"
+        dns_servers        = ["${attr.unique.network.ip-address}"]
+        dns_search_domains = ["aerial"]
+        volumes            = ["/var/run/docker.sock:/var/run/docker.sock"]
+        mounts = [
+          {
+            type     = "volume"
+            target   = "/cache"
+            source   = "aerial-ci-cache"
+            readonly = false
+          }
+        ]
+      }
+
+      env {
+        TARGET_REPO   = "azylman/aerial"
+        RUNNER_NAME   = "aerial-ci-aerial-3"
+        RUNNER_LABELS = "self-hosted,ci"
+      }
+
+      template {
+        data = <<EOH
+{{ if nomadVarExists "nomad/jobs/shared" }}
+{{ with nomadVar "nomad/jobs/shared" }}
+{{ if .GITHUB_PAT }}GITHUB_PAT="{{ .GITHUB_PAT }}"{{ end }}
+{{ end }}
+{{ end }}
+EOH
+        destination = "secrets/runner.env"
+        env         = true
+        change_mode = "restart"
+      }
+
+      resources {
+        cpu        = 500
+        memory     = 512
+        memory_max = 6144
+      }
+    }
+
+    task "ci-runner-aerial-4" {
+      driver = "docker"
+      user   = "0:0"
+
+      kill_timeout = "30s"
+
+      config {
+        image              = "ghcr.io/azylman/aerial-github-runner:${var.image_tag}"
+        dns_servers        = ["${attr.unique.network.ip-address}"]
+        dns_search_domains = ["aerial"]
+        volumes            = ["/var/run/docker.sock:/var/run/docker.sock"]
+        mounts = [
+          {
+            type     = "volume"
+            target   = "/cache"
+            source   = "aerial-ci-cache"
+            readonly = false
+          }
+        ]
+      }
+
+      env {
+        TARGET_REPO   = "azylman/aerial"
+        RUNNER_NAME   = "aerial-ci-aerial-4"
+        RUNNER_LABELS = "self-hosted,ci"
+      }
+
+      template {
+        data = <<EOH
+{{ if nomadVarExists "nomad/jobs/shared" }}
+{{ with nomadVar "nomad/jobs/shared" }}
+{{ if .GITHUB_PAT }}GITHUB_PAT="{{ .GITHUB_PAT }}"{{ end }}
+{{ end }}
+{{ end }}
+EOH
+        destination = "secrets/runner.env"
+        env         = true
+        change_mode = "restart"
+      }
+
+      resources {
+        cpu        = 500
+        memory     = 512
+        memory_max = 6144
+      }
+    }
+
+    task "ci-runner-aerial-5" {
+      driver = "docker"
+      user   = "0:0"
+
+      kill_timeout = "30s"
+
+      config {
+        image              = "ghcr.io/azylman/aerial-github-runner:${var.image_tag}"
+        dns_servers        = ["${attr.unique.network.ip-address}"]
+        dns_search_domains = ["aerial"]
+        volumes            = ["/var/run/docker.sock:/var/run/docker.sock"]
+        mounts = [
+          {
+            type     = "volume"
+            target   = "/cache"
+            source   = "aerial-ci-cache"
+            readonly = false
+          }
+        ]
+      }
+
+      env {
+        TARGET_REPO   = "azylman/aerial"
+        RUNNER_NAME   = "aerial-ci-aerial-5"
+        RUNNER_LABELS = "self-hosted,ci"
+      }
+
+      template {
+        data = <<EOH
+{{ if nomadVarExists "nomad/jobs/shared" }}
+{{ with nomadVar "nomad/jobs/shared" }}
+{{ if .GITHUB_PAT }}GITHUB_PAT="{{ .GITHUB_PAT }}"{{ end }}
+{{ end }}
+{{ end }}
+EOH
+        destination = "secrets/runner.env"
+        env         = true
+        change_mode = "restart"
+      }
+
+      resources {
+        cpu        = 500
+        memory     = 512
+        memory_max = 6144
+      }
+    }
+
+    task "ci-runner-aerial-6" {
+      driver = "docker"
+      user   = "0:0"
+
+      kill_timeout = "30s"
+
+      config {
+        image              = "ghcr.io/azylman/aerial-github-runner:${var.image_tag}"
+        dns_servers        = ["${attr.unique.network.ip-address}"]
+        dns_search_domains = ["aerial"]
+        volumes            = ["/var/run/docker.sock:/var/run/docker.sock"]
+        mounts = [
+          {
+            type     = "volume"
+            target   = "/cache"
+            source   = "aerial-ci-cache"
+            readonly = false
+          }
+        ]
+      }
+
+      env {
+        TARGET_REPO   = "azylman/aerial"
+        RUNNER_NAME   = "aerial-ci-aerial-6"
+        RUNNER_LABELS = "self-hosted,ci"
+      }
+
+      template {
+        data = <<EOH
+{{ if nomadVarExists "nomad/jobs/shared" }}
+{{ with nomadVar "nomad/jobs/shared" }}
+{{ if .GITHUB_PAT }}GITHUB_PAT="{{ .GITHUB_PAT }}"{{ end }}
+{{ end }}
+{{ end }}
+EOH
+        destination = "secrets/runner.env"
+        env         = true
+        change_mode = "restart"
+      }
+
+      resources {
+        cpu        = 500
+        memory     = 512
+        memory_max = 6144
+      }
+    }
+
+    task "ci-runner-aerial-config-1" {
       driver = "docker"
       user   = "0:0"
 
@@ -367,7 +555,7 @@ EOH
 
       env {
         TARGET_REPO   = "azylman/aerial-config"
-        RUNNER_NAME   = "aerial-ci-aerial-config"
+        RUNNER_NAME   = "aerial-ci-aerial-config-1"
         RUNNER_LABELS = "self-hosted,ci"
       }
 
@@ -385,13 +573,60 @@ EOH
       }
 
       resources {
-        cpu        = 2000
-        memory     = 3072
+        cpu        = 500
+        memory     = 512
         memory_max = 6144
       }
     }
 
-    task "ci-runner-mirrormere" {
+    task "ci-runner-aerial-config-2" {
+      driver = "docker"
+      user   = "0:0"
+
+      kill_timeout = "30s"
+
+      config {
+        image              = "ghcr.io/azylman/aerial-github-runner:${var.image_tag}"
+        dns_servers        = ["${attr.unique.network.ip-address}"]
+        dns_search_domains = ["aerial"]
+        volumes            = ["/var/run/docker.sock:/var/run/docker.sock"]
+        mounts = [
+          {
+            type     = "volume"
+            target   = "/cache"
+            source   = "aerial-ci-cache"
+            readonly = false
+          }
+        ]
+      }
+
+      env {
+        TARGET_REPO   = "azylman/aerial-config"
+        RUNNER_NAME   = "aerial-ci-aerial-config-2"
+        RUNNER_LABELS = "self-hosted,ci"
+      }
+
+      template {
+        data = <<EOH
+{{ if nomadVarExists "nomad/jobs/shared" }}
+{{ with nomadVar "nomad/jobs/shared" }}
+{{ if .GITHUB_PAT }}GITHUB_PAT="{{ .GITHUB_PAT }}"{{ end }}
+{{ end }}
+{{ end }}
+EOH
+        destination = "secrets/runner.env"
+        env         = true
+        change_mode = "restart"
+      }
+
+      resources {
+        cpu        = 500
+        memory     = 512
+        memory_max = 6144
+      }
+    }
+
+    task "ci-runner-mirrormere-1" {
       driver = "docker"
       user   = "0:0"
 
@@ -414,7 +649,7 @@ EOH
 
       env {
         TARGET_REPO   = "azylman/mirrormere"
-        RUNNER_NAME   = "aerial-ci-mirrormere"
+        RUNNER_NAME   = "aerial-ci-mirrormere-1"
         RUNNER_LABELS = "self-hosted,ci"
       }
 
@@ -432,13 +667,154 @@ EOH
       }
 
       resources {
-        cpu        = 2000
-        memory     = 3072
+        cpu        = 500
+        memory     = 512
         memory_max = 6144
       }
     }
 
-    task "ci-runner-aerial-sidecars" {
+    task "ci-runner-mirrormere-2" {
+      driver = "docker"
+      user   = "0:0"
+
+      kill_timeout = "30s"
+
+      config {
+        image              = "ghcr.io/azylman/aerial-github-runner:${var.image_tag}"
+        dns_servers        = ["${attr.unique.network.ip-address}"]
+        dns_search_domains = ["aerial"]
+        volumes            = ["/var/run/docker.sock:/var/run/docker.sock"]
+        mounts = [
+          {
+            type     = "volume"
+            target   = "/cache"
+            source   = "aerial-ci-cache"
+            readonly = false
+          }
+        ]
+      }
+
+      env {
+        TARGET_REPO   = "azylman/mirrormere"
+        RUNNER_NAME   = "aerial-ci-mirrormere-2"
+        RUNNER_LABELS = "self-hosted,ci"
+      }
+
+      template {
+        data = <<EOH
+{{ if nomadVarExists "nomad/jobs/shared" }}
+{{ with nomadVar "nomad/jobs/shared" }}
+{{ if .GITHUB_PAT }}GITHUB_PAT="{{ .GITHUB_PAT }}"{{ end }}
+{{ end }}
+{{ end }}
+EOH
+        destination = "secrets/runner.env"
+        env         = true
+        change_mode = "restart"
+      }
+
+      resources {
+        cpu        = 500
+        memory     = 512
+        memory_max = 6144
+      }
+    }
+
+    task "ci-runner-mirrormere-3" {
+      driver = "docker"
+      user   = "0:0"
+
+      kill_timeout = "30s"
+
+      config {
+        image              = "ghcr.io/azylman/aerial-github-runner:${var.image_tag}"
+        dns_servers        = ["${attr.unique.network.ip-address}"]
+        dns_search_domains = ["aerial"]
+        volumes            = ["/var/run/docker.sock:/var/run/docker.sock"]
+        mounts = [
+          {
+            type     = "volume"
+            target   = "/cache"
+            source   = "aerial-ci-cache"
+            readonly = false
+          }
+        ]
+      }
+
+      env {
+        TARGET_REPO   = "azylman/mirrormere"
+        RUNNER_NAME   = "aerial-ci-mirrormere-3"
+        RUNNER_LABELS = "self-hosted,ci"
+      }
+
+      template {
+        data = <<EOH
+{{ if nomadVarExists "nomad/jobs/shared" }}
+{{ with nomadVar "nomad/jobs/shared" }}
+{{ if .GITHUB_PAT }}GITHUB_PAT="{{ .GITHUB_PAT }}"{{ end }}
+{{ end }}
+{{ end }}
+EOH
+        destination = "secrets/runner.env"
+        env         = true
+        change_mode = "restart"
+      }
+
+      resources {
+        cpu        = 500
+        memory     = 512
+        memory_max = 6144
+      }
+    }
+
+    task "ci-runner-mirrormere-4" {
+      driver = "docker"
+      user   = "0:0"
+
+      kill_timeout = "30s"
+
+      config {
+        image              = "ghcr.io/azylman/aerial-github-runner:${var.image_tag}"
+        dns_servers        = ["${attr.unique.network.ip-address}"]
+        dns_search_domains = ["aerial"]
+        volumes            = ["/var/run/docker.sock:/var/run/docker.sock"]
+        mounts = [
+          {
+            type     = "volume"
+            target   = "/cache"
+            source   = "aerial-ci-cache"
+            readonly = false
+          }
+        ]
+      }
+
+      env {
+        TARGET_REPO   = "azylman/mirrormere"
+        RUNNER_NAME   = "aerial-ci-mirrormere-4"
+        RUNNER_LABELS = "self-hosted,ci"
+      }
+
+      template {
+        data = <<EOH
+{{ if nomadVarExists "nomad/jobs/shared" }}
+{{ with nomadVar "nomad/jobs/shared" }}
+{{ if .GITHUB_PAT }}GITHUB_PAT="{{ .GITHUB_PAT }}"{{ end }}
+{{ end }}
+{{ end }}
+EOH
+        destination = "secrets/runner.env"
+        env         = true
+        change_mode = "restart"
+      }
+
+      resources {
+        cpu        = 500
+        memory     = 512
+        memory_max = 6144
+      }
+    }
+
+    task "ci-runner-aerial-sidecars-1" {
       driver = "docker"
       user   = "0:0"
 
@@ -461,7 +837,7 @@ EOH
 
       env {
         TARGET_REPO   = "azylman/aerial-sidecars"
-        RUNNER_NAME   = "aerial-ci-aerial-sidecars"
+        RUNNER_NAME   = "aerial-ci-aerial-sidecars-1"
         RUNNER_LABELS = "self-hosted,ci"
       }
 
@@ -479,8 +855,196 @@ EOH
       }
 
       resources {
-        cpu        = 2000
-        memory     = 3072
+        cpu        = 500
+        memory     = 512
+        memory_max = 6144
+      }
+    }
+
+    task "ci-runner-aerial-sidecars-2" {
+      driver = "docker"
+      user   = "0:0"
+
+      kill_timeout = "30s"
+
+      config {
+        image              = "ghcr.io/azylman/aerial-github-runner:${var.image_tag}"
+        dns_servers        = ["${attr.unique.network.ip-address}"]
+        dns_search_domains = ["aerial"]
+        volumes            = ["/var/run/docker.sock:/var/run/docker.sock"]
+        mounts = [
+          {
+            type     = "volume"
+            target   = "/cache"
+            source   = "aerial-ci-cache"
+            readonly = false
+          }
+        ]
+      }
+
+      env {
+        TARGET_REPO   = "azylman/aerial-sidecars"
+        RUNNER_NAME   = "aerial-ci-aerial-sidecars-2"
+        RUNNER_LABELS = "self-hosted,ci"
+      }
+
+      template {
+        data = <<EOH
+{{ if nomadVarExists "nomad/jobs/shared" }}
+{{ with nomadVar "nomad/jobs/shared" }}
+{{ if .GITHUB_PAT }}GITHUB_PAT="{{ .GITHUB_PAT }}"{{ end }}
+{{ end }}
+{{ end }}
+EOH
+        destination = "secrets/runner.env"
+        env         = true
+        change_mode = "restart"
+      }
+
+      resources {
+        cpu        = 500
+        memory     = 512
+        memory_max = 6144
+      }
+    }
+
+    task "ci-runner-aerial-sidecars-3" {
+      driver = "docker"
+      user   = "0:0"
+
+      kill_timeout = "30s"
+
+      config {
+        image              = "ghcr.io/azylman/aerial-github-runner:${var.image_tag}"
+        dns_servers        = ["${attr.unique.network.ip-address}"]
+        dns_search_domains = ["aerial"]
+        volumes            = ["/var/run/docker.sock:/var/run/docker.sock"]
+        mounts = [
+          {
+            type     = "volume"
+            target   = "/cache"
+            source   = "aerial-ci-cache"
+            readonly = false
+          }
+        ]
+      }
+
+      env {
+        TARGET_REPO   = "azylman/aerial-sidecars"
+        RUNNER_NAME   = "aerial-ci-aerial-sidecars-3"
+        RUNNER_LABELS = "self-hosted,ci"
+      }
+
+      template {
+        data = <<EOH
+{{ if nomadVarExists "nomad/jobs/shared" }}
+{{ with nomadVar "nomad/jobs/shared" }}
+{{ if .GITHUB_PAT }}GITHUB_PAT="{{ .GITHUB_PAT }}"{{ end }}
+{{ end }}
+{{ end }}
+EOH
+        destination = "secrets/runner.env"
+        env         = true
+        change_mode = "restart"
+      }
+
+      resources {
+        cpu        = 500
+        memory     = 512
+        memory_max = 6144
+      }
+    }
+
+    task "ci-runner-aerial-sidecars-4" {
+      driver = "docker"
+      user   = "0:0"
+
+      kill_timeout = "30s"
+
+      config {
+        image              = "ghcr.io/azylman/aerial-github-runner:${var.image_tag}"
+        dns_servers        = ["${attr.unique.network.ip-address}"]
+        dns_search_domains = ["aerial"]
+        volumes            = ["/var/run/docker.sock:/var/run/docker.sock"]
+        mounts = [
+          {
+            type     = "volume"
+            target   = "/cache"
+            source   = "aerial-ci-cache"
+            readonly = false
+          }
+        ]
+      }
+
+      env {
+        TARGET_REPO   = "azylman/aerial-sidecars"
+        RUNNER_NAME   = "aerial-ci-aerial-sidecars-4"
+        RUNNER_LABELS = "self-hosted,ci"
+      }
+
+      template {
+        data = <<EOH
+{{ if nomadVarExists "nomad/jobs/shared" }}
+{{ with nomadVar "nomad/jobs/shared" }}
+{{ if .GITHUB_PAT }}GITHUB_PAT="{{ .GITHUB_PAT }}"{{ end }}
+{{ end }}
+{{ end }}
+EOH
+        destination = "secrets/runner.env"
+        env         = true
+        change_mode = "restart"
+      }
+
+      resources {
+        cpu        = 500
+        memory     = 512
+        memory_max = 6144
+      }
+    }
+
+    task "ci-runner-aerial-sidecars-5" {
+      driver = "docker"
+      user   = "0:0"
+
+      kill_timeout = "30s"
+
+      config {
+        image              = "ghcr.io/azylman/aerial-github-runner:${var.image_tag}"
+        dns_servers        = ["${attr.unique.network.ip-address}"]
+        dns_search_domains = ["aerial"]
+        volumes            = ["/var/run/docker.sock:/var/run/docker.sock"]
+        mounts = [
+          {
+            type     = "volume"
+            target   = "/cache"
+            source   = "aerial-ci-cache"
+            readonly = false
+          }
+        ]
+      }
+
+      env {
+        TARGET_REPO   = "azylman/aerial-sidecars"
+        RUNNER_NAME   = "aerial-ci-aerial-sidecars-5"
+        RUNNER_LABELS = "self-hosted,ci"
+      }
+
+      template {
+        data = <<EOH
+{{ if nomadVarExists "nomad/jobs/shared" }}
+{{ with nomadVar "nomad/jobs/shared" }}
+{{ if .GITHUB_PAT }}GITHUB_PAT="{{ .GITHUB_PAT }}"{{ end }}
+{{ end }}
+{{ end }}
+EOH
+        destination = "secrets/runner.env"
+        env         = true
+        change_mode = "restart"
+      }
+
+      resources {
+        cpu        = 500
+        memory     = 512
         memory_max = 6144
       }
     }
