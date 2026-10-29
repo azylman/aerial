@@ -878,6 +878,7 @@ func TestStatusUpdater_GuardrailsAndRESTTransport(t *testing.T) {
 
 	var nilSu *StatusUpdater
 	nilSu.MarkTurnStarted()
+	nilSu.SetCapacityBackoff(5 * time.Second)
 	nilSu.Stop()
 	nilSu.Reset()
 	nilSu.DeleteStatusMessage()
@@ -885,6 +886,7 @@ func TestStatusUpdater_GuardrailsAndRESTTransport(t *testing.T) {
 
 	uDis := NewStatusUpdater(nil, "thread-dis", false)
 	uDis.Start()
+	uDis.SetCapacityBackoff(5 * time.Second)
 	uDis.triggerFlush()
 	uEn := NewStatusUpdater(nil, "thread-en", true, WithStatusInterval(50*time.Millisecond))
 	uEn.Start()
@@ -894,7 +896,16 @@ func TestStatusUpdater_GuardrailsAndRESTTransport(t *testing.T) {
 	uStep.Stop()
 	uStep.disabled = true
 	uStep.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
+	uStep.SetCapacityBackoff(5 * time.Second)
 	uStep.disabled = false
+	uStep.SetCapacityBackoff(15 * time.Second)
+	if got := uStep.currentStatusText(); !strings.Contains(got, "Waiting on model capacity") {
+		t.Errorf("expected capacity backoff text, got %q", got)
+	}
+	uStep.MarkTurnStarted()
+	if uStep.phase != "" {
+		t.Errorf("expected MarkTurnStarted to reset backoff phase, got %q", uStep.phase)
+	}
 	uStep.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
 	uStep.HandleStep(&runner.StepUpdateEvent{StepType: "tool_call", ToolName: "view_file", State: "ACTIVE", ToolInfo: &runner.StepToolInfo{Parameters: runner.StepToolParameters{CommandLine: "ls"}}})
 	uStep.HandleStep(&runner.StepUpdateEvent{StepType: "tool_call", ToolName: "other_tool", State: "DONE"})

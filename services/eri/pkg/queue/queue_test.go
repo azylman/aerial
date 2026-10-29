@@ -4007,9 +4007,11 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 					deliveredWidgetsMu.Lock()
 					deliveredWidgets = append(deliveredWidgets, req)
 					deliveredWidgetsMu.Unlock()
-					select {
-					case widgetDeliveredCh <- struct{}{}:
-					default:
+					if req.SkipSink && len(req.Chunks) > 0 && strings.Contains(req.Chunks[0].ActiveStep, "Executing") {
+						select {
+						case widgetDeliveredCh <- struct{}{}:
+						default:
+						}
 					}
 					if req.MessageID != "" {
 						return req.MessageID, nil
