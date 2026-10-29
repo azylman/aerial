@@ -11,7 +11,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
 )
@@ -20,13 +19,6 @@ import (
 type GitHubIssueComment struct {
 	ID   int64  `json:"id"`
 	Body string `json:"body"`
-}
-
-// GitHubPRDetails encapsulates mergeability information returned by GitHub's Pull Request API.
-type GitHubPRDetails struct {
-	Number         int    `json:"number"`
-	Mergeable      *bool  `json:"mergeable"`
-	MergeableState string `json:"mergeable_state"`
 }
 
 func (s *RouterServer) getGitHubJSON(ctx context.Context, path string, maxBytes int64, out any) error {
@@ -62,48 +54,6 @@ func (s *RouterServer) getGitHubJSON(ctx context.Context, path string, maxBytes 
 	return nil
 }
 
-func (s *RouterServer) fetchPRDetails(ctx context.Context, repo string, prNumber int) (*GitHubPRDetails, error) {
-	repo = normalizeRepo(repo)
-	if repo == "" || prNumber <= 0 {
-		return nil, fmt.Errorf("invalid repo or prNumber for pr details")
-	}
-	var details GitHubPRDetails
-	if err := s.getGitHubJSON(ctx, fmt.Sprintf("/repos/%s/pulls/%d", repo, prNumber), 1<<20, &details); err != nil {
-		return nil, err
-	}
-	return &details, nil
-}
-
-func (s *RouterServer) pollPRMergeability(ctx context.Context, repo string, prNumber int) (*GitHubPRDetails, error) {
-	var details *GitHubPRDetails
-	for attempt := 0; attempt < 3; attempt++ {
-		if attempt > 0 {
-			delay := s.conflictCheckDelay
-			if delay <= 0 {
-				delay = 200 * time.Millisecond
-			}
-			select {
-			case <-time.After(delay):
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			}
-		}
-		det, fetchErr := s.fetchPRDetails(ctx, repo, prNumber)
-		if fetchErr != nil {
-			log.Printf("[webhooks-router] [github] error fetching PR #%d details for conflict check: %v", prNumber, fetchErr)
-			if strings.Contains(fetchErr.Error(), "403") || strings.Contains(strings.ToLower(fetchErr.Error()), "rate limit") {
-				return nil, fetchErr
-			}
-			break
-		}
-		details = det
-		if details.Mergeable != nil || (details.MergeableState != "" && details.MergeableState != "unknown") {
-			break
-		}
-	}
-	return details, nil
-}
-
 func (s *RouterServer) handleDirtyPRConflict(ctx context.Context, repo string, pr RegisteredPR) {
 	if pr.HeadSHA != "" {
 		s.nonRoboRevFailedSHAs.Store(prCheckKey(repo, pr.PRNumber), strings.TrimSpace(pr.HeadSHA))
@@ -115,17 +65,23 @@ func (s *RouterServer) handleDirtyPRConflict(ctx context.Context, repo string, p
 	}
 	if updated {
 		targetID = firstNonEmpty(targetID, pr.TargetID)
-		if err := s.dispatchConflictPrompt(ctx, targetID, repo, pr.Branch, pr.HeadSHA, pr.PRNumber); err != nil {
-			log.Printf("[webhooks-router] [registry] error dispatching conflict prompt for PR #%d: %v", pr.PRNumber, err)
+		if err := s.enqueueMergeConflict(ctx, MergeConflictArgs{
+			Repo:     repo,
+			PRNumber: pr.PRNumber,
+			Branch:   pr.Branch,
+			HeadSHA:  pr.HeadSHA,
+			TargetID: targetID,
+		}); err != nil {
+			log.Printf("[webhooks-router] [registry] error enqueuing conflict job for PR #%d: %v", pr.PRNumber, err)
 		}
 	}
 }
 
-func (s *RouterServer) updatePRBranch(ctx context.Context, repo string, prNumber int) error {
+func (s *RouterServer) updatePRBranch(ctx context.Context, repo string, prNumber int) (bool, error) {
 	apiURL := firstNonEmpty(s.cfg.GitHubAPIURL, "https://api.github.com")
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, fmt.Sprintf("%s/repos/%s/pulls/%d/update-branch", apiURL, normalizeRepo(repo), prNumber), strings.NewReader(`{}`))
 	if err != nil {
-		return fmt.Errorf("create update-branch request: %w", err)
+		return false, fmt.Errorf("create update-branch request: %w", err)
 	}
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 	req.Header.Set("Content-Type", "application/json")
@@ -134,13 +90,25 @@ func (s *RouterServer) updatePRBranch(ctx context.Context, repo string, prNumber
 	}
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("update-branch request failed: %w", err)
+		return false, fmt.Errorf("update-branch request failed: %w", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("update-branch returned status %d", resp.StatusCode)
+	if resp.StatusCode == http.StatusAccepted || resp.StatusCode == http.StatusOK {
+		return false, nil
 	}
-	return nil
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if readErr != nil {
+		body = nil
+	}
+	bodyLower := strings.ToLower(string(body))
+	if resp.StatusCode == http.StatusForbidden {
+		remaining := resp.Header.Get("X-RateLimit-Remaining")
+		return false, fmt.Errorf("github api rate limit or forbidden (remaining: %s)", remaining)
+	}
+	if resp.StatusCode == http.StatusConflict || (resp.StatusCode == http.StatusUnprocessableEntity && strings.Contains(bodyLower, "conflict")) {
+		return true, nil
+	}
+	return false, fmt.Errorf("update-branch returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 }
 
 func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) error {
@@ -151,26 +119,23 @@ func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) er
 	if err != nil {
 		return fmt.Errorf("list open prs: %w", err)
 	}
-	updatedBehind := false
 	for _, pr := range openPRs {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		details, err := s.pollPRMergeability(ctx, repo, pr.PRNumber)
+		conflict, err := s.updatePRBranch(ctx, repo, pr.PRNumber)
 		if err != nil {
-			return err
-		}
-		if details == nil {
+			if strings.Contains(err.Error(), "403") || strings.Contains(strings.ToLower(err.Error()), "rate limit") {
+				return err
+			}
+			log.Printf("[webhooks-router] [github] warning updating open PR #%d branch: %v", pr.PRNumber, err)
 			continue
 		}
-		if (details.Mergeable != nil && !*details.Mergeable) || details.MergeableState == "dirty" {
+		if conflict {
 			s.handleDirtyPRConflict(ctx, repo, pr)
-		} else if !updatedBehind && details.MergeableState == "behind" {
-			updatedBehind = true
-			if err := s.updatePRBranch(ctx, repo, pr.PRNumber); err != nil {
-				log.Printf("[webhooks-router] [github] warning updating behind PR #%d branch: %v", pr.PRNumber, err)
-			}
+			continue
 		}
+		break
 	}
 	return nil
 }
@@ -689,7 +654,13 @@ func (s *RouterServer) handlePRAutoMergeDisabledAction(ctx context.Context, res 
 	}
 	res.TargetID = firstNonEmpty(res.TargetID, targetID)
 	if updated {
-		if err := s.dispatchConflictPrompt(ctx, res.TargetID, res.Repo, res.Branch, res.HeadSHA, res.PRNumber); err != nil {
+		if err := s.enqueueMergeConflict(ctx, MergeConflictArgs{
+			Repo:     res.Repo,
+			PRNumber: res.PRNumber,
+			Branch:   res.Branch,
+			HeadSHA:  res.HeadSHA,
+			TargetID: res.TargetID,
+		}); err != nil {
 			return err
 		}
 	}
@@ -845,17 +816,6 @@ func (s *RouterServer) resolveAndBackfillPushPR(ctx context.Context, res *Resolv
 	return nil
 }
 
-func (s *RouterServer) waitConflictCheckDelay(ctx context.Context) error {
-	if s.conflictCheckDelay > 0 {
-		select {
-		case <-time.After(s.conflictCheckDelay):
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	return nil
-}
-
 func (s *RouterServer) processGitHubPushEvent(ctx context.Context, body []byte, res *ResolvedGitHubEvent) (*ResolvedGitHubEvent, error) {
 	var p GitHubPushPayload
 	if err := json.Unmarshal(body, &p); err != nil {
@@ -886,9 +846,6 @@ func (s *RouterServer) processGitHubPushEvent(ctx context.Context, body []byte, 
 	}
 
 	if err := s.dispatchGitPush(ctx, res.Repo, p.Ref, res.HeadSHA, res.TargetID, res.PRNumber); err != nil {
-		return nil, err
-	}
-	if err := s.waitConflictCheckDelay(ctx); err != nil {
 		return nil, err
 	}
 	if err := s.checkOpenPRConflicts(ctx, res.Repo); err != nil {
