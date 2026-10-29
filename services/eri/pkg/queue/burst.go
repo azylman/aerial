@@ -676,7 +676,7 @@ func EvaluateBurstStaleness(burst []db.Message, stalenessTTL time.Duration, isCo
 
 	hasRecovered := false
 	for _, m := range burst {
-		if m.RetryCount > 0 || m.RestartCount > 0 || m.ErrorMessage == "deployment_drain" {
+		if m.RetryCount > 0 || m.RestartCount > 0 || isDeploymentDrained(m.ErrorMessage) {
 			hasRecovered = true
 			break
 		}

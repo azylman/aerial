@@ -202,6 +202,7 @@ func TestRecoverInterrupted(t *testing.T) {
 		{name: "FIFORecoveryAndScheduleRuns", seedMessages: []db.Message{{ID: "m1", ThreadID: "th-same", Status: db.StatusPending, CreatedAt: now.Add(-10 * time.Minute)}, {ID: "m2", ThreadID: "th-same", Status: db.StatusProcessing, CreatedAt: now.Add(-5 * time.Minute), UpdatedAt: now.Add(-2 * time.Minute)}, {ID: "m3", ThreadID: "th-same", Status: db.StatusCompleted, CreatedAt: now.Add(-15 * time.Minute)}}, wantCompletedIDs: []string{"m1", "m2"}},
 		{name: "PoisonPill_RetryAndRestartLimits", seedMessages: []db.Message{{ID: "m-retry-poison", ThreadID: "th-p1", AuthorID: "user-1", Content: "retry crash", Status: db.StatusProcessing, RetryCount: 3, CreatedAt: now.Add(-10 * time.Minute)}, {ID: "m-hard-restart", ThreadID: "th-p2", AuthorID: "http-client", Content: strings.Repeat("x", 80), Status: db.StatusProcessing, RestartCount: 5, CreatedAt: now.Add(-10 * time.Minute)}, {ID: "m-instant-crash", ThreadID: "th-p3", AuthorID: "user-2", Content: "instant crash", Status: db.StatusProcessing, RestartCount: 3, CreatedAt: now.Add(-10 * time.Minute), UpdatedAt: now.Add(-5 * time.Second)}, {ID: "m-long-running", ThreadID: "th-ok", AuthorID: "user-3", Content: "long task", Status: db.StatusProcessing, RestartCount: 3, CreatedAt: now.Add(-20 * time.Minute), UpdatedAt: now.Add(-40 * time.Second)}}, withSess: true, appCfg: config.NewFromData(&config.ConfigData{AgyBin: "agy-custom", APIKey: "key-custom"}), wantCompletedIDs: []string{"m-long-running"}, wantMsgStatuses: map[string]string{"m-retry-poison": db.StatusFailed, "m-hard-restart": db.StatusFailed, "m-instant-crash": db.StatusFailed}, wantMinDeliveries: 2},
 		{name: "Staleness_TTLAndSuperseded", seedMessages: []db.Message{{ID: "m-stale-pending", ThreadID: "th-stale", AuthorID: "user-1", Status: db.StatusPending, CreatedAt: now.Add(-40 * time.Minute)}, {ID: "m-superseded", ThreadID: "th-super", AuthorID: "user-2", Status: db.StatusPending, CreatedAt: now.Add(-20 * time.Minute)}, {ID: "m-http-retained", ThreadID: "th-super", AuthorID: "http-client", Status: db.StatusPending, CreatedAt: now.Add(-45 * time.Minute)}}, seedCompletedMsg: &db.Message{ID: "m-newer-completed", ThreadID: "th-super", Status: db.StatusCompleted, CreatedAt: now.Add(-10 * time.Minute)}, wantCompletedIDs: []string{"m-http-retained"}, wantMsgStatuses: map[string]string{"m-stale-pending": db.StatusCompleted, "m-superseded": db.StatusCompleted, "m-http-retained": db.StatusCompleted}},
+		{name: "Staleness_GracefulDeploymentDrainedRetained", seedMessages: []db.Message{{ID: "m-graceful-drain", ThreadID: "th-drain", AuthorID: "user-3", Status: db.StatusPending, CreatedAt: now.Add(-40 * time.Minute), ErrorMessage: "interrupted by graceful deployment"}, {ID: "m-stale-pending", ThreadID: "th-stale", AuthorID: "user-1", Status: db.StatusPending, CreatedAt: now.Add(-40 * time.Minute)}}, wantCompletedIDs: []string{"m-graceful-drain"}, wantMsgStatuses: map[string]string{"m-graceful-drain": db.StatusCompleted, "m-stale-pending": db.StatusCompleted}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -4124,6 +4125,12 @@ func TestCancelBurstOnShutdown_Dispatch(t *testing.T) {
 			}
 			if refreshed.Status != tc.wantStatus {
 				t.Fatalf("expected interrupted dispatch to be reset to %s, got %+v", tc.wantStatus, refreshed)
+			}
+			if refreshed.RestartCount != 0 {
+				t.Fatalf("expected restart count to remain 0, got %d", refreshed.RestartCount)
+			}
+			if refreshed.ErrorMessage != "interrupted by graceful deployment" {
+				t.Fatalf("expected error message to be %q, got %q", "interrupted by graceful deployment", refreshed.ErrorMessage)
 			}
 		})
 	}
