@@ -1090,6 +1090,8 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 		openPRs            []RegisteredPR
 		prResponses        []string
 		prStatusCodes      []int
+		closedErr          error
+		wantClosedPRs      []int
 		wantErr            bool
 		wantErrSubstr      string
 		wantConflict       bool
@@ -1211,6 +1213,32 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 			wantErr:        false,
 			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/549/update-branch"},
 		},
+		{
+			name: "422 head ref does not exist closes stale PR and advances to next clean PR",
+			openPRs: []RegisteredPR{
+				{PRNumber: 512, Branch: "feat/stale-branch", TargetID: "1555405874565091380", HeadSHA: "head512"},
+				{PRNumber: 550, Branch: "feat/clean-branch", TargetID: "1555405874565091380", HeadSHA: "head550"},
+			},
+			prResponses: []string{
+				`{"message":"head ref does not exist"}`,
+				`{"message":"Updating pull request branch."}`,
+			},
+			prStatusCodes: []int{http.StatusUnprocessableEntity, http.StatusAccepted},
+			wantClosedPRs: []int{512},
+			wantUpdatedPRs: []string{
+				"/repos/azylman/aerial/pulls/512/update-branch",
+				"/repos/azylman/aerial/pulls/550/update-branch",
+			},
+		},
+		{
+			name:           "422 head ref does not exist logs close error cleanly without failing check",
+			openPRs:        []RegisteredPR{{PRNumber: 512, Branch: "feat/stale-branch", TargetID: "1555405874565091380", HeadSHA: "head512"}},
+			prStatusCodes:  []int{http.StatusUnprocessableEntity},
+			prResponses:    []string{`{"message":"head ref does not exist"}`},
+			closedErr:      errors.New("close db err"),
+			wantClosedPRs:  nil,
+			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/512/update-branch"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -1250,6 +1278,7 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 					conflictErr:      tc.conflictErr,
 					conflictTargetID: "1555405874565091380",
 					conflictUpdated:  true,
+					closedErr:        tc.closedErr,
 				}
 			}
 			mockDisp := &mockOutboundDispatcher{}
@@ -1286,6 +1315,15 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 					}
 				} else if len(mReg.conflictCalls) != 0 {
 					t.Errorf("unexpected conflictCalls: %+v", mReg.conflictCalls)
+				}
+				if len(mReg.closedUnmergedCalls) != len(tc.wantClosedPRs) {
+					t.Errorf("closedUnmergedCalls count = %d, want %d", len(mReg.closedUnmergedCalls), len(tc.wantClosedPRs))
+				} else {
+					for i, wantPR := range tc.wantClosedPRs {
+						if mReg.closedUnmergedCalls[i].prNumber != wantPR {
+							t.Errorf("closedUnmergedCalls[%d] = %d, want %d", i, mReg.closedUnmergedCalls[i].prNumber, wantPR)
+						}
+					}
 				}
 			}
 			if mockRiver != nil && len(mockRiver.insertedConflictJobs) != tc.wantConflictQueued {
