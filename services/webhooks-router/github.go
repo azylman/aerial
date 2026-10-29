@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 
@@ -237,6 +238,9 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 		if _, err := s.registry.TransitionDeploying(ctx, repo, prNum, allMatchedJobs); err != nil {
 			log.Printf("[webhooks-router] [dispatcher] error transitioning pr %s#%d to deploying: %v", repo, prNum, err)
 			return fmt.Errorf("transition pr deploying: %w", err)
+		}
+		if err := s.SyncPRWidget(ctx, repo, prNum); err != nil {
+			log.Printf("[webhooks-router] [widget] warning syncing workflow_run deploying widget for %s#%d: %v", repo, prNum, err)
 		}
 	}
 
@@ -601,6 +605,192 @@ func formatCIChecksActiveStep(prStatus, ciChecksJSON string) string {
 		return ""
 	}
 	return fmt.Sprintf("Waiting on CI (%d/%d passed)", passed, total)
+}
+
+func extractStringMapFromMetadata(meta map[string]interface{}, key string) map[string]string {
+	if meta == nil {
+		return nil
+	}
+	rawVal, ok := meta[key]
+	if !ok || rawVal == nil {
+		return nil
+	}
+	out := make(map[string]string)
+	switch m := rawVal.(type) {
+	case map[string]interface{}:
+		for k, v := range m {
+			cleanKey := strings.ToLower(strings.TrimSpace(k))
+			if cleanKey == "" {
+				continue
+			}
+			if s, ok := v.(string); ok {
+				out[cleanKey] = strings.TrimSpace(s)
+			}
+		}
+	case map[string]string:
+		for k, v := range m {
+			cleanKey := strings.ToLower(strings.TrimSpace(k))
+			if cleanKey == "" {
+				continue
+			}
+			out[cleanKey] = strings.TrimSpace(v)
+		}
+	}
+	return out
+}
+
+func extractChecksFromJSONOrMetadata(ciChecksJSON string, meta map[string]interface{}) map[string]string {
+	var checks map[string]string
+	if trimmedChecks := strings.TrimSpace(ciChecksJSON); trimmedChecks != "" && trimmedChecks != "{}" {
+		if err := json.Unmarshal([]byte(trimmedChecks), &checks); err != nil {
+			checks = nil
+		}
+	}
+	if len(checks) == 0 && meta != nil {
+		if rawChecks, ok := meta["ci_checks"]; ok && rawChecks != nil {
+			switch c := rawChecks.(type) {
+			case map[string]interface{}:
+				checks = make(map[string]string, len(c))
+				for k, v := range c {
+					if s, ok := v.(string); ok {
+						checks[k] = s
+					}
+				}
+			case map[string]string:
+				checks = c
+			}
+		}
+	}
+	return checks
+}
+
+func analyzeBuildChecks(checks map[string]string) (checkJobs []string, passedBuildJobs map[string]bool, total, passed, failed int) {
+	matchedServices := make(map[string]struct{})
+	passedBuildJobs = make(map[string]bool)
+
+	for checkName, state := range checks {
+		s := strings.ToLower(strings.TrimSpace(state))
+		switch s {
+		case "passed":
+			passed++
+			total++
+		case "failed":
+			failed++
+			total++
+		default:
+			if s != "" {
+				total++
+			}
+		}
+
+		m := buildJobRegex.FindStringSubmatch(checkName)
+		if len(m) >= 2 {
+			svc := strings.TrimSpace(m[1])
+			if strings.EqualFold(svc, "proxy") {
+				svc = "mesh-proxy"
+			}
+			if svc != "" {
+				matchedServices[svc] = struct{}{}
+				if s == "passed" {
+					passedBuildJobs[strings.ToLower(svc)] = true
+				}
+			}
+		}
+	}
+
+	if len(matchedServices) > 0 {
+		for svc := range matchedServices {
+			checkJobs = append(checkJobs, svc)
+		}
+		sort.Strings(checkJobs)
+		checkJobs = dedupeTrimmedStrings(checkJobs)
+	}
+	return checkJobs, passedBuildJobs, total, passed, failed
+}
+
+func resolveRolloutCandidateJobs(meta map[string]interface{}, checkJobs []string) []string {
+	jobs := extractJobsFromMetadata(meta)
+	startedJobs := extractStringSliceFromMetadata(meta, "started_jobs")
+	deployedJobs := extractStringSliceFromMetadata(meta, "deployed_jobs")
+
+	combined := append(append(append([]string(nil), jobs...), startedJobs...), deployedJobs...)
+	if candidateJobs := dedupeTrimmedStrings(combined); len(candidateJobs) > 0 {
+		sort.Strings(candidateJobs)
+		return candidateJobs
+	}
+	return checkJobs
+}
+
+func formatSingleJobRolloutState(job, cleanStatus string, deployedSet, startedSet map[string]bool, jobStates map[string]string, passedBuildJobs map[string]bool, hasStartedJobs bool) string {
+	jKey := strings.ToLower(strings.TrimSpace(job))
+	switch {
+	case deployedSet[jKey]:
+		return fmt.Sprintf("`%s`: ✅ healthy", job)
+	case startedSet[jKey] && strings.EqualFold(jobStates[jKey], "verifying_health"):
+		return fmt.Sprintf("`%s`: 🔄 verifying health", job)
+	case startedSet[jKey]:
+		return fmt.Sprintf("`%s`: 🔄 starting", job)
+	case (!hasStartedJobs && cleanStatus == "deploying") || passedBuildJobs[jKey]:
+		return fmt.Sprintf("`%s`: 🔄 starting", job)
+	default:
+		return fmt.Sprintf("`%s`: ⏳ building image", job)
+	}
+}
+
+func formatPerJobRolloutStatus(allJobs []string, cleanStatus string, startedJobs, deployedJobs []string, jobStates map[string]string, passedBuildJobs map[string]bool) string {
+	deployedSet := make(map[string]bool, len(deployedJobs))
+	for _, j := range deployedJobs {
+		deployedSet[strings.ToLower(strings.TrimSpace(j))] = true
+	}
+	startedSet := make(map[string]bool, len(startedJobs))
+	for _, j := range startedJobs {
+		startedSet[strings.ToLower(strings.TrimSpace(j))] = true
+	}
+	hasStartedJobs := len(startedJobs) > 0
+
+	lines := make([]string, 0, len(allJobs))
+	for _, j := range allJobs {
+		lines = append(lines, formatSingleJobRolloutState(j, cleanStatus, deployedSet, startedSet, jobStates, passedBuildJobs, hasStartedJobs))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatPRWidgetActiveStep(prStatus, ciChecksJSON, metadataJSON string) string {
+	cleanStatus := strings.ToLower(strings.TrimSpace(prStatus))
+	if cleanStatus == "open" {
+		return formatCIChecksActiveStep(prStatus, ciChecksJSON)
+	}
+	if cleanStatus != "merged" && cleanStatus != "synced" && cleanStatus != "deploying" {
+		return ""
+	}
+
+	var meta map[string]interface{}
+	if trimmedMeta := strings.TrimSpace(metadataJSON); trimmedMeta != "" && trimmedMeta != "{}" {
+		if err := json.Unmarshal([]byte(trimmedMeta), &meta); err != nil {
+			meta = nil
+		}
+	}
+
+	checks := extractChecksFromJSONOrMetadata(ciChecksJSON, meta)
+	checkJobs, passedBuildJobs, total, passed, failed := analyzeBuildChecks(checks)
+
+	if failed > 0 {
+		return ""
+	}
+
+	allJobs := resolveRolloutCandidateJobs(meta, checkJobs)
+	if len(allJobs) > 0 {
+		startedJobs := extractStringSliceFromMetadata(meta, "started_jobs")
+		deployedJobs := extractStringSliceFromMetadata(meta, "deployed_jobs")
+		jobStates := extractStringMapFromMetadata(meta, "job_states")
+		return formatPerJobRolloutStatus(allJobs, cleanStatus, startedJobs, deployedJobs, jobStates, passedBuildJobs)
+	}
+
+	if (cleanStatus == "merged" || cleanStatus == "synced") && total > 0 && failed == 0 {
+		return fmt.Sprintf("Building container images (%d/%d completed)", passed, total)
+	}
+
+	return ""
 }
 
 func prCheckKey(repo string, prNumber int) string {

@@ -114,6 +114,7 @@ type PRRegistryUpdater interface {
 	EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID, vanadisChunkID string) (string, error)
 	RecordExpectedJobs(ctx context.Context, repo string, prNumber int, jobs []string) (bool, error)
 	HasExpectedDeployJobs(ctx context.Context, repo string, prNumber int) (bool, error)
+	RecordPRJobState(ctx context.Context, jobName, jobState string) (repo string, prNumber int, updated bool, err error)
 	CheckEventTriggers(ctx context.Context, source string, targets []string, eventType string) (bool, error)
 	FireEventTriggers(ctx context.Context, source string, targets []string, eventType, contextHeader string) ([]ClaimedEventTrigger, error)
 }
@@ -229,7 +230,7 @@ func (r *PostgresPRRegistry) execAtomicTransition(ctx context.Context, repo stri
 }
 
 func (r *PostgresPRRegistry) UpdatePRMerged(ctx context.Context, repo string, prNumber int, mergeSHA string) (string, error) {
-	query := `UPDATE pr_registry SET status = CASE WHEN status IN ('synced', 'deploying', 'deployed', 'deploy_failed') THEN status ELSE 'merged' END, merge_sha = CASE WHEN $3 != '' THEN $3 ELSE merge_sha END, metadata = CASE WHEN status = 'deploy_failed' THEN COALESCE(metadata, '{}'::jsonb) ELSE COALESCE(metadata, '{}'::jsonb) - 'banner' END, updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 RETURNING target_id;`
+	query := `UPDATE pr_registry SET status = CASE WHEN status IN ('synced', 'deploying', 'deployed', 'deploy_failed') THEN status ELSE 'merged' END, merge_sha = CASE WHEN $3 != '' THEN $3 ELSE merge_sha END, metadata = CASE WHEN status = 'deploy_failed' THEN COALESCE(metadata, '{}'::jsonb) WHEN status IN ('merged', 'synced', 'deploying', 'deployed') THEN COALESCE(metadata, '{}'::jsonb) - 'banner' ELSE (COALESCE(metadata, '{}'::jsonb) - 'banner') - 'ci_checks' END, updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 RETURNING target_id;`
 	return r.execReturningTargetID(ctx, repo, prNumber, "update pr merged", query, strings.TrimSpace(mergeSHA))
 }
 
@@ -244,7 +245,7 @@ func (r *PostgresPRRegistry) UpdatePRSync(ctx context.Context, repo string, prNu
 }
 
 func (r *PostgresPRRegistry) BackfillPushMergeSHA(ctx context.Context, repo string, prNumber int, mergeSHA string) (string, error) {
-	query := `UPDATE pr_registry SET merge_sha = $3, status = CASE WHEN status IN ('synced', 'deploying', 'deployed', 'deploy_failed') THEN status ELSE 'merged' END, metadata = CASE WHEN status = 'deploy_failed' THEN COALESCE(metadata, '{}'::jsonb) ELSE COALESCE(metadata, '{}'::jsonb) - 'banner' END, updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 RETURNING target_id;`
+	query := `UPDATE pr_registry SET merge_sha = $3, status = CASE WHEN status IN ('synced', 'deploying', 'deployed', 'deploy_failed') THEN status ELSE 'merged' END, metadata = CASE WHEN status = 'deploy_failed' THEN COALESCE(metadata, '{}'::jsonb) WHEN status IN ('merged', 'synced', 'deploying', 'deployed') THEN COALESCE(metadata, '{}'::jsonb) - 'banner' ELSE (COALESCE(metadata, '{}'::jsonb) - 'banner') - 'ci_checks' END, updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 RETURNING target_id;`
 	return r.execReturningTargetID(ctx, repo, prNumber, "backfill push merge_sha", query, strings.TrimSpace(mergeSHA))
 }
 
@@ -305,8 +306,7 @@ func (r *PostgresPRRegistry) RecordPRCheckStatus(ctx context.Context, repo strin
 		updated_at = CURRENT_TIMESTAMP
 		WHERE repo = $1
 		  AND pr_number = $2
-		  AND head_sha = $3
-		  AND status = 'open'
+		  AND ((status = 'open' AND head_sha = $3) OR (status IN ('merged', 'synced') AND merge_sha = $3))
 		  AND COALESCE(metadata->'ci_checks'->>$4, '') IS DISTINCT FROM $5
 		RETURNING TRUE;`
 	var updated bool
@@ -588,6 +588,47 @@ func (r *PostgresPRRegistry) HasExpectedDeployJobs(ctx context.Context, repo str
 	return hasExpected, nil
 }
 
+func (r *PostgresPRRegistry) RecordPRJobState(ctx context.Context, jobName, jobState string) (string, int, bool, error) {
+	jobName = strings.TrimSpace(jobName)
+	jobState = strings.TrimSpace(jobState)
+	if r == nil || r.pool == nil || jobName == "" || jobState == "" {
+		return "", 0, false, nil
+	}
+	query := `
+		WITH target AS (
+			SELECT id
+			FROM pr_registry
+			WHERE status = 'deploying'
+			  AND metadata->'jobs' ? $1
+			  AND metadata->'started_jobs' ? $1
+			  AND COALESCE(metadata->'job_states'->>$1, '') IS DISTINCT FROM $2
+			ORDER BY updated_at DESC
+			LIMIT 1
+		)
+		UPDATE pr_registry
+		SET metadata = jsonb_set(
+			CASE
+				WHEN jsonb_typeof(COALESCE(metadata, '{}'::jsonb)->'job_states') = 'object'
+				THEN COALESCE(metadata, '{}'::jsonb)
+				ELSE jsonb_set(COALESCE(metadata, '{}'::jsonb), '{job_states}', '{}'::jsonb, true)
+			END,
+			ARRAY['job_states', $1],
+			to_jsonb($2::text),
+			true
+		),
+		updated_at = CURRENT_TIMESTAMP
+		FROM target
+		WHERE pr_registry.id = target.id
+		RETURNING pr_registry.repo, pr_registry.pr_number;`
+	var repoOut string
+	var prNum int
+	found, err := r.queryRowScan(ctx, "record pr job state", query, []any{&repoOut, &prNum}, jobName, jobState)
+	if err != nil || !found {
+		return "", 0, false, err
+	}
+	return repoOut, prNum, true, nil
+}
+
 func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, jobName string) (string, int, string, string, bool, error) {
 	jobName = strings.TrimSpace(jobName)
 	if jobName == "" {
@@ -647,7 +688,7 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, 
 		if err := tx.Commit(qCtx); err != nil {
 			return "", 0, "", "", false, fmt.Errorf("commit remaining jobs tx: %w", err)
 		}
-		return "", 0, "", "", false, nil
+		return targetID, prNum, mergeSHA, repoOut, false, nil
 	}
 
 	updateQuery := `UPDATE pr_registry SET status = 'deployed', metadata = jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb) - 'banner', '{jobs}', '[]'::jsonb), '{deployed_jobs}', to_jsonb($1::text[])), updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND status IN ('deploying', 'merged', 'synced')`

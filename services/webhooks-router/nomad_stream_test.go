@@ -452,12 +452,13 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 
 func TestProcessNomadEvent_TableDriven(t *testing.T) {
 	tests := []struct {
-		name      string
-		topic     string
-		eventType string
-		payload   string
-		reg       *mockPRRegistry
-		wantErr   bool
+		name        string
+		topic       string
+		eventType   string
+		payload     string
+		reg         *mockPRRegistry
+		wantErr     bool
+		wantWidgets int
 	}{
 		{name: "PlanResult dropped", topic: "Allocation", eventType: "PlanResult", payload: `{"Allocation":{"ID":"alloc-1","JobID":"github-mcp","ClientStatus":"failed"}}`},
 		{name: "blocked evaluation returns nil", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"ID":"eval-blocked-direct","JobID":"hangar","Status":"blocked","StatusDescription":"created to place remaining allocations"}}`},
@@ -476,6 +477,19 @@ func TestProcessNomadEvent_TableDriven(t *testing.T) {
 		{name: "deployment success dispatches success", topic: "Deployment", eventType: "DeploymentStatusUpdate", payload: `{"Deployment":{"ID":"dep-succ-direct","JobID":"brain","Status":"successful"}}`, reg: mkDeployedReg("target-1", 100, "sha1", "repo", true)},
 		{name: "deployment failed dispatches failure", topic: "Deployment", eventType: "DeploymentStatusUpdate", payload: `{"Deployment":{"ID":"dep-fail-direct","JobID":"brain","Status":"failed","StatusDescription":"oom"}}`, reg: mkDeployFailedReg("target-1", 100, "sha1", "repo", true)},
 		{name: "allocation running dispatches success", topic: "Allocation", eventType: "AllocationUpdated", payload: `{"Allocation":{"ID":"alloc-run-direct","JobID":"brain","DesiredStatus":"run","ClientStatus":"running"}}`, reg: mkDeployedReg("target-1", 100, "sha1", "repo", true)},
+		{
+			name:      "allocation running updates job progress and syncs widget",
+			topic:     "Allocation",
+			eventType: "AllocationUpdated",
+			payload:   `{"Allocation":{"ID":"alloc-run-prog","JobID":"brain","DesiredStatus":"run","ClientStatus":"running"}}`,
+			reg: &mockPRRegistry{
+				recordJobStateUpdated: true,
+				recordJobStatePRNum:   42,
+				recordJobStateRepo:    "azylman/aerial",
+				resolveTargetID:       "1555405874565091380",
+			},
+			wantWidgets: 1,
+		},
 		{name: "allocation failed dispatches failure", topic: "Allocation", eventType: "AllocationUpdated", payload: `{"Allocation":{"ID":"alloc-fail-direct","JobID":"brain","DesiredStatus":"stop","ClientStatus":"failed"}}`, reg: mkDeployFailedReg("target-1", 100, "sha1", "repo", true)},
 		{name: "evaluation complete dispatches success", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"ID":"eval-comp-direct","JobID":"brain","Status":"complete","DeploymentID":""}}`, reg: mkDeployedReg("target-1", 100, "sha1", "repo", true)},
 		{name: "evaluation failed dispatches failure", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"ID":"eval-fail-direct","JobID":"brain","Status":"failed","StatusDescription":"timed out","DeploymentID":""}}`, reg: mkDeployFailedReg("target-1", 100, "sha1", "repo", true)},
@@ -498,6 +512,9 @@ func TestProcessNomadEvent_TableDriven(t *testing.T) {
 			err := srv.ProcessNomadEvent(context.Background(), tt.topic, tt.eventType, json.RawMessage(tt.payload))
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("ProcessNomadEvent() err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantWidgets > 0 && len(mockDisp.WidgetCalls()) != tt.wantWidgets {
+				t.Errorf("got %d widget calls, want %d", len(mockDisp.WidgetCalls()), tt.wantWidgets)
 			}
 		})
 	}
@@ -1267,11 +1284,13 @@ func TestRouterServer_HandleNomadJobSuccess_TableDriven(t *testing.T) {
 		ref            string
 		wantErr        bool
 		wantDispatches int
+		wantWidgets    int
 	}{
 		{name: "empty job is no-op", reg: &mockPRRegistry{}, job: ""},
 		{name: "nil registry is no-op", reg: nil, job: "brain"},
 		{name: "registry error returned", reg: &mockPRRegistry{err: errors.New("reg fail")}, job: "brain", wantErr: true},
 		{name: "untracked job updated false is no-op", reg: &mockPRRegistry{deployedUpdated: false}, job: "brain"},
+		{name: "intermediate job success updated false syncs widget", reg: mkDeployedReg("target-1", 10, "sha", "repo", false), disp: &mockOutboundDispatcher{}, job: "brain", ref: "dep-1", wantWidgets: 1},
 		{name: "successful transition dispatches prompt", reg: mkDeployedReg("target-1", 10, "sha", "repo", true), disp: &mockOutboundDispatcher{}, job: "brain", ref: "dep-1", wantDispatches: 1},
 	}
 	for _, tc := range tests {
@@ -1282,6 +1301,12 @@ func TestRouterServer_HandleNomadJobSuccess_TableDriven(t *testing.T) {
 			err := srv.HandleNomadJobSuccess(context.Background(), tc.job, tc.ref)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("HandleNomadJobSuccess() err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.disp != nil && tc.wantWidgets > 0 {
+				mockDisp := tc.disp.(*mockOutboundDispatcher)
+				if len(mockDisp.WidgetCalls()) != tc.wantWidgets {
+					t.Errorf("got %d widget calls, want %d", len(mockDisp.WidgetCalls()), tc.wantWidgets)
+				}
 			}
 		})
 	}
