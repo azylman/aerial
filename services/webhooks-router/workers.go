@@ -185,18 +185,23 @@ func (w *NomadCrashAlertWorker) Work(ctx context.Context, job *river.Job[NomadCr
 	return nil
 }
 
-// WidgetSyncArgs contains payload data for durable background processing of Discord PR widget updates.
+// QueueWidgetSync is the dedicated River queue for Discord widget sync jobs.
+const QueueWidgetSync = "widget_sync"
+
+// WidgetSyncArgs contains payload data for durable background processing of Discord PR and build widget updates.
 type WidgetSyncArgs struct {
-	Repo     string `json:"repo"`
-	PRNumber int    `json:"pr_number"`
+	Repo     string `json:"repo,omitempty"`
+	PRNumber int    `json:"pr_number,omitempty"`
+	BuildID  string `json:"build_id,omitempty"`
+	Banner   string `json:"banner,omitempty"`
 }
 
 func (WidgetSyncArgs) Kind() string { return "widget_sync" }
 func (WidgetSyncArgs) InsertOpts() river.InsertOpts {
-	return river.InsertOpts{MaxAttempts: 5}
+	return river.InsertOpts{Queue: QueueWidgetSync, MaxAttempts: 5}
 }
 
-// WidgetSyncWorker processes Discord PR status widget updates from River.
+// WidgetSyncWorker processes Discord PR and build status widget updates from River.
 type WidgetSyncWorker struct {
 	river.WorkerDefaults[WidgetSyncArgs]
 	server *RouterServer
@@ -206,7 +211,7 @@ func (w *WidgetSyncWorker) Work(ctx context.Context, job *river.Job[WidgetSyncAr
 	if w.server == nil {
 		return errors.New("router server not configured on worker")
 	}
-	log.Printf("[webhooks-router] [river] processing widget sync job id=%d repo=%s pr=%d", job.ID, job.Args.Repo, job.Args.PRNumber)
+	log.Printf("[webhooks-router] [river] processing widget sync job id=%d repo=%s pr=%d build_id=%s", job.ID, job.Args.Repo, job.Args.PRNumber, job.Args.BuildID)
 	if err := w.server.ProcessWidgetSync(ctx, job.Args); err != nil {
 		log.Printf("[webhooks-router] [river] error processing widget sync job id=%d: %v", job.ID, err)
 		return err

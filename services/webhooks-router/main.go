@@ -103,6 +103,7 @@ func (s *RouterServer) Routes() http.Handler {
 	mux.HandleFunc("GET /health", s.handleHealthz)
 	mux.Handle("GET /metrics", promhttp.Handler())
 	mux.HandleFunc("POST /internal/pr/register", s.handlePRRegister)
+	mux.HandleFunc("POST /internal/widget/sync", s.handleInternalWidgetSync)
 	mux.HandleFunc("POST /webhooks/infisical", s.handleInfisicalWebhook)
 	mux.HandleFunc("POST /webhooks/generic", s.handleGenericWebhook)
 	mux.HandleFunc("POST /api/webhooks/github", s.handleGitHubWebhook)
@@ -191,7 +192,7 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if err := s.ProcessWidgetSync(r.Context(), WidgetSyncArgs{Repo: req.Repo, PRNumber: req.PRNumber}); err != nil {
+	if err := s.SyncPRWidget(r.Context(), req.Repo, req.PRNumber); err != nil {
 		log.Printf("[webhooks-router] failed to sync initial PR widget for %s#%d: %v", req.Repo, req.PRNumber, err)
 	}
 
@@ -201,6 +202,40 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 		"pr_number": req.PRNumber,
 		"target_id": targetID,
 	})
+}
+
+func (s *RouterServer) handleInternalWidgetSync(w http.ResponseWriter, r *http.Request) {
+	var req WidgetSyncArgs
+	if !readWebhookJSON(w, r, 1<<20, false, &req) {
+		return
+	}
+	if buildID := strings.TrimSpace(req.BuildID); buildID != "" {
+		if err := s.SyncBuildWidget(r.Context(), buildID, req.Banner); err != nil {
+			log.Printf("[webhooks-router] [widget] failed to sync build widget for %s: %v", buildID, err)
+			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to sync build widget"})
+			return
+		}
+		httpkit.WriteJSON(w, http.StatusAccepted, map[string]any{
+			"status":   "accepted",
+			"build_id": buildID,
+		})
+		return
+	}
+	if repo := strings.TrimSpace(req.Repo); repo != "" && req.PRNumber > 0 {
+		normRepo := normalizeRepo(repo)
+		if err := s.SyncPRWidget(r.Context(), normRepo, req.PRNumber); err != nil {
+			log.Printf("[webhooks-router] [widget] failed to sync pr widget for %s#%d: %v", normRepo, req.PRNumber, err)
+			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to sync pr widget"})
+			return
+		}
+		httpkit.WriteJSON(w, http.StatusAccepted, map[string]any{
+			"status":    "accepted",
+			"repo":      normRepo,
+			"pr_number": req.PRNumber,
+		})
+		return
+	}
+	httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "build_id or repo and pr_number are required"})
 }
 
 func (s *RouterServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -374,10 +409,43 @@ func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber i
 	return s.ProcessWidgetSync(ctx, args)
 }
 
+func (s *RouterServer) SyncBuildWidget(ctx context.Context, buildID, banner string) error {
+	buildID = strings.TrimSpace(buildID)
+	banner = strings.TrimSpace(banner)
+	if s == nil || s.dispatcher == nil || s.registry == nil || buildID == "" {
+		return nil
+	}
+	args := WidgetSyncArgs{
+		BuildID: buildID,
+		Banner:  banner,
+	}
+	if s.riverClient != nil {
+		if err := s.insertRiverJob(ctx, args); err != nil {
+			log.Printf("[webhooks-router] [widget] error enqueuing build widget sync into river: %v", err)
+			return fmt.Errorf("enqueue build widget sync: %w", err)
+		}
+		return nil
+	}
+	return s.ProcessWidgetSync(ctx, args)
+}
+
 func (s *RouterServer) ProcessWidgetSync(ctx context.Context, args WidgetSyncArgs) error {
+	if s == nil || s.dispatcher == nil || s.registry == nil {
+		return nil
+	}
+	if buildID := strings.TrimSpace(args.BuildID); buildID != "" {
+		pgReg, ok := s.registry.(*PostgresPRRegistry)
+		if !ok || pgReg == nil {
+			return nil
+		}
+		qCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		return s.syncVanadisBuildWidget(qCtx, pgReg, buildID, strings.TrimSpace(args.Banner))
+	}
+
 	repo := normalizeRepo(args.Repo)
 	prNumber := args.PRNumber
-	if s == nil || s.dispatcher == nil || s.registry == nil || repo == "" || prNumber <= 0 {
+	if repo == "" || prNumber <= 0 {
 		return nil
 	}
 	qCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -435,15 +503,9 @@ func (s *RouterServer) sweepOlderDeployedPRWidgets(qCtx context.Context, pgReg *
 	}
 }
 
-func (s *RouterServer) syncVanadisChunkPRWidget(qCtx context.Context, pgReg *PostgresPRRegistry, repo string, prNumber int, prStatus, prBanner string, prFound bool) (bool, error) {
+func (s *RouterServer) postVanadisSyncWidget(qCtx context.Context, pgReg *PostgresPRRegistry, payload map[string]any) (bool, error) {
 	client, vURL := pgReg.getVanadisClient()
-	bodyBytes, err := json.Marshal(map[string]any{
-		"repo":      repo,
-		"pr_number": prNumber,
-		"pr_status": prStatus,
-		"pr_banner": prBanner,
-		"pr_found":  prFound,
-	})
+	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
 		return false, fmt.Errorf("marshal sync chunk widget request: %w", err)
 	}
@@ -472,6 +534,24 @@ func (s *RouterServer) syncVanadisChunkPRWidget(qCtx context.Context, pgReg *Pos
 		return false, fmt.Errorf("decode sync chunk widget response: %w", err)
 	}
 	return syncRes.Matched, nil
+}
+
+func (s *RouterServer) syncVanadisChunkPRWidget(qCtx context.Context, pgReg *PostgresPRRegistry, repo string, prNumber int, prStatus, prBanner string, prFound bool) (bool, error) {
+	return s.postVanadisSyncWidget(qCtx, pgReg, map[string]any{
+		"repo":      repo,
+		"pr_number": prNumber,
+		"pr_status": prStatus,
+		"pr_banner": prBanner,
+		"pr_found":  prFound,
+	})
+}
+
+func (s *RouterServer) syncVanadisBuildWidget(qCtx context.Context, pgReg *PostgresPRRegistry, buildID, banner string) error {
+	_, err := s.postVanadisSyncWidget(qCtx, pgReg, map[string]any{
+		"build_id":  buildID,
+		"pr_banner": banner,
+	})
+	return err
 }
 
 func (s *RouterServer) syncSinglePRWidget(qCtx context.Context, pgReg *PostgresPRRegistry, repo string, prNumber int, allowSweep bool) error {
@@ -1013,6 +1093,7 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 			Queues: map[string]river.QueueConfig{
 				river.QueueDefault: {MaxWorkers: 10},
 				QueueMergeConflict: {MaxWorkers: 2},
+				QueueWidgetSync:    {MaxWorkers: 1},
 			},
 			Workers:             workers,
 			SkipUnknownJobCheck: true,

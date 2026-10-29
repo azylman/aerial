@@ -569,6 +569,7 @@ func TestRiverJobArgsAndUniqueOpts(t *testing.T) {
 			name:         "WidgetSyncArgs",
 			args:         WidgetSyncArgs{Repo: "azylman/aerial", PRNumber: 101},
 			wantKind:     "widget_sync",
+			wantQueue:    QueueWidgetSync,
 			wantAttempts: 5,
 		},
 		{
