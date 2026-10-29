@@ -180,29 +180,19 @@ jobs:
             sh scripts/check-coverage.sh --check --summary
           else
             RAN_ANY=0
+            FAILED_ANY=0
             for svc in $GO_MODULES; do
               if ! echo "$CHANGED_FILES" | grep -q "^${svc}/"; then
                 continue
               fi
               RAN_ANY=1
-              sh scripts/check-coverage.sh --check --summary --service "$svc"
+              sh scripts/check-coverage.sh --check --summary --service "$svc" || FAILED_ANY=1
             done
             if [ "$RAN_ANY" -eq 0 ]; then
               echo "No Go module or frontend changes detected; skipping unit test coverage run."
             fi
+            [ "$FAILED_ANY" -eq 0 ]
           fi
-
-      - name: Test Webhooks Router
-        if: needs.changes.outputs.webhooks-router == 'true'
-        run: |
-          cd services/webhooks-router
-          go test -v -race ./...
-
-      - name: Test Vanadis
-        if: needs.changes.outputs.vanadis == 'true'
-        run: |
-          cd services/vanadis
-          go test -v -race ./...
 
   lint:
     name: Lint Microservices & Frontend
@@ -259,7 +249,7 @@ jobs:
           docker compose -f docker-compose.yml config --quiet
 
           # 5. Ratcheted Code Health Gate & Scanner Unit Tests
-          (cd scripts/code-health && go test -v ./... && go run . -root ../.. -baseline ../../.code-health-baseline.json)
+          (cd scripts/code-health && go test -v -race ./... && go run . -root ../.. -baseline ../../.code-health-baseline.json)
 
       - name: Install golangci-lint
         run: |

@@ -423,7 +423,10 @@ func handleDiscordReady(ctx context.Context, s *discordgo.Session, r *discordgo.
 		if r.User != nil {
 			botUserID = r.User.ID
 		}
-		for _, g := range s.State.Guilds {
+		s.State.RLock()
+		guilds := append([]*discordgo.Guild(nil), s.State.Guilds...)
+		s.State.RUnlock()
+		for _, g := range guilds {
 			cacheGuildChannelsAndRegisterCommands(s, g, botUserID)
 		}
 	}
@@ -733,7 +736,9 @@ func tryAcquireCatchUpSweepLock() bool {
 func resolveCatchUpGuilds(s *discordgo.Session) []*discordgo.Guild {
 	var guilds []*discordgo.Guild
 	if s.State != nil {
-		guilds = s.State.Guilds
+		s.State.RLock()
+		guilds = append(guilds, s.State.Guilds...)
+		s.State.RUnlock()
 	}
 	if len(guilds) == 0 && s.Token != "" {
 		if userGuilds, err := s.UserGuilds(100, "", "", false); err == nil {
