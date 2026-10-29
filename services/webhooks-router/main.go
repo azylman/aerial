@@ -956,7 +956,9 @@ func (s *RouterServer) dispatchConflictPrompt(ctx context.Context, targetID, rep
 			}
 		}
 	}
-	prompt := fmt.Sprintf("Merge conflict detected on PR #%d on %s (branch: %s, head: %s). Please checkout the branch, merge origin/main to resolve conflicts, verify locally, and push to update the PR.", prNum, repo, branch, headSHA)
+	shortRepo := firstNonEmpty(cleanRepoName(repo), "aerial")
+	cleanBranch := firstNonEmpty(strings.TrimPrefix(strings.TrimSpace(branch), "refs/heads/"), "<branch>")
+	prompt := fmt.Sprintf("Merge conflict detected on PR #%d on %s (branch: %s, head: %s). Please check out the branch via '/share/aerial/scripts/aerial-pr.sh init %s --branch %s', merge origin/main to resolve conflicts, verify locally, and push to update the PR via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> \"<commit_msg>\"' (PR_DESCRIPTION.md is not required when updating an existing PR; never run bare 'git push').", prNum, repo, branch, headSHA, shortRepo, cleanBranch)
 	opts := s.vanadisPromptOpts(ctx, repo, prNum)
 	opts.silent = true
 	if opts.effort == "" {
