@@ -22,12 +22,12 @@ const (
 	DefaultMaxRecords = 30
 	// DefaultPruneAge is the maximum age before state files are purged by opportunistic GC.
 	DefaultPruneAge = 1 * time.Hour
-	// DefaultMinPaginatedReadLines is the default minimum line span for a prior read to qualify as multi-page pagination.
-	DefaultMinPaginatedReadLines = 150
-	// DefaultMaxMicroReads is the default number of allowed non-paginated read steps on the same file before blocking.
-	DefaultMaxMicroReads = 3
-	// DefaultMaxSequentialReads is the default number of allowed consecutive single-file read turns before requiring parallel batching.
-	DefaultMaxSequentialReads = 3
+	// DefaultMinAnchorReadLines is the minimum line span for a bounded read_file call so edit_file anchors are complete.
+	DefaultMinAnchorReadLines = 120
+	// DefaultPageReadLines is the full-page line window used when promoting contiguous or repeat reads on the same file.
+	DefaultPageReadLines = 800
+	// DefaultContiguousGapLines is the maximum line gap between two reads on the same file to treat them as contiguous creeping.
+	DefaultContiguousGapLines = 50
 )
 
 var (
@@ -41,8 +41,6 @@ var (
 	gitStatusFormatFlags = map[string]bool{"--short": true, "--porcelain": true, "--long": true, "--help": true, "-h": true, "-v": true, "--verbose": true}
 	gitDiffSummaryFlags  = map[string]bool{"--stat": true, "--shortstat": true, "--numstat": true, "--summary": true, "--name-only": true, "--name-status": true, "--dirstat": true, "--check": true, "--quiet": true, "--exit-code": true, "-s": true, "--no-patch": true, "-h": true, "--help": true}
 	gitDiffValFlags      = map[string]bool{"-U": true, "--unified": true, "-O": true, "-S": true, "-G": true, "--diff-filter": true, "--inter-hunk-context": true}
-	singleInspectionBins = map[string]bool{"cat": true, "head": true, "tail": true, "nl": true, "wc": true, "ls": true, "find": true, "which": true, "file": true, "stat": true, "echo": true, "awk": true}
-	fileSlicePipeBins    = map[string]bool{"cat": true, "nl": true, "head": true, "tail": true, "awk": true}
 	scratchVarPrefixes   = []struct {
 		prefix string
 		envKey string
@@ -65,16 +63,8 @@ func envPositiveInt(fallback int, keys ...string) int {
 	return fallback
 }
 
-func minPaginatedReadLines() int {
-	return envPositiveInt(DefaultMinPaginatedReadLines, "AERIAL_BATCH_MIN_PAGINATED_LINES")
-}
-
-func maxMicroReads() int {
-	return envPositiveInt(DefaultMaxMicroReads, "AERIAL_BATCH_MAX_MICRO_READS")
-}
-
-func maxSequentialReads() int {
-	return envPositiveInt(DefaultMaxSequentialReads, "AERIAL_BATCH_MAX_SEQUENTIAL_READS", "AERIAL_BATCH_MAX_SINGLE_READ_STEPS")
+func minAnchorReadLines() int {
+	return envPositiveInt(DefaultMinAnchorReadLines, "AERIAL_BATCH_MIN_ANCHOR_LINES", "AERIAL_BATCH_MIN_PAGINATED_LINES")
 }
 
 // GetBatchDir returns the active directory for batch guard state persistence.
@@ -243,55 +233,6 @@ func isUnbatchedGitMutation(cmd string) bool {
 	return false
 }
 
-func isSedInPlace(tokens []string) bool {
-	for _, t := range tokens[1:] {
-		if t == "--" {
-			break
-		}
-		if t == "--in-place" || strings.HasPrefix(t, "--in-place=") || strings.HasPrefix(t, "-i") || hasShortFlag(t, 'i') {
-			return true
-		}
-	}
-	return false
-}
-
-func isStageInSet(tokens []string, allowed map[string]bool) bool {
-	if len(tokens) == 0 {
-		return false
-	}
-	bin := filepath.Base(tokens[0])
-	if bin == "sed" {
-		return !isSedInPlace(tokens)
-	}
-	return allowed[bin]
-}
-
-func isSingleInspection(cmd string) bool {
-	trimmed := strings.TrimSpace(cmd)
-	if trimmed == "" {
-		return false
-	}
-
-	cmds, ops := splitPipelineSegments(trimmed)
-	if len(cmds) == 0 {
-		return false
-	}
-	if len(cmds) == 1 {
-		return isStageInSet(tokenizeQuoteAware(cmds[0]), singleInspectionBins)
-	}
-	for i := 1; i < len(ops); i++ {
-		if ops[i] != '|' {
-			return false
-		}
-	}
-	for _, stage := range cmds {
-		if !isStageInSet(tokenizeQuoteAware(stage), fileSlicePipeBins) {
-			return false
-		}
-	}
-	return true
-}
-
 func expandScratchEnvPrefix(p string) string {
 	for _, sv := range scratchVarPrefixes {
 		if p == sv.prefix || strings.HasPrefix(p, sv.prefix+"/") {
@@ -357,9 +298,6 @@ func categorizeInvocation(toolName string, args ToolArgs) (category, target stri
 		}
 		if isUnbatchedGitMutation(cmd) {
 			return "git_mutation", cmd
-		}
-		if isSingleInspection(cmd) {
-			return "inspection", cmd
 		}
 		return "command", cmd
 	default:
@@ -510,47 +448,21 @@ func opportunisticGC(dir string, now time.Time) {
 	pruneStateFiles(dir, now)
 }
 
-func countTargetInvocations(records []ToolInvocation, category, target string) int {
-	count := 0
-	for _, step := range groupSteps(records) {
-		for _, r := range step {
-			if r.Category == category && r.Target == target {
-				count++
-				break
-			}
-		}
-	}
-	return count
-}
-
-func isPaginatedRead(priorRecords []ToolInvocation, target string, startLine, endLine int) bool {
-	if startLine <= 0 || endLine < startLine {
-		return false
-	}
-	minLines := minPaginatedReadLines()
-	hasPrior := false
-	for _, r := range readsSinceLastTargetEdit(priorRecords, target) {
-		if r.Category != "read" || r.Target != target {
-			continue
-		}
-		hasPrior = true
-		if r.EndLine-r.StartLine+1 < minLines {
-			return false
-		}
-		if startLine <= r.EndLine && endLine >= r.StartLine {
-			return false
-		}
-	}
-	return hasPrior
-}
-
 func readsSinceLastTargetEdit(records []ToolInvocation, target string) []ToolInvocation {
+	startIdx := 0
 	for i := len(records) - 1; i >= 0; i-- {
 		if records[i].Category == "edit" && records[i].Target == target {
-			return records[i+1:]
+			startIdx = i + 1
+			break
 		}
 	}
-	return records
+	var reads []ToolInvocation
+	for _, r := range records[startIdx:] {
+		if r.Category == "read" && r.Target == target && r.StartLine > 0 && r.EndLine >= r.StartLine {
+			reads = append(reads, r)
+		}
+	}
+	return reads
 }
 
 func removeTargetInvocations(records []ToolInvocation, category, target string) []ToolInvocation {
@@ -563,65 +475,72 @@ func removeTargetInvocations(records []ToolInvocation, category, target string) 
 	return kept
 }
 
-func filterOutCategory(records []ToolInvocation, category string) []ToolInvocation {
-	var kept []ToolInvocation
-	for _, r := range records {
-		if r.Category != category {
-			kept = append(kept, r)
+func findTouchingPriorRead(priorReads []ToolInvocation, start, end int) *ToolInvocation {
+	for i := len(priorReads) - 1; i >= 0; i-- {
+		r := priorReads[i]
+		if start <= r.EndLine+DefaultContiguousGapLines && end >= r.StartLine-DefaultContiguousGapLines {
+			return &r
 		}
 	}
-	return kept
+	return nil
 }
 
-func hasConsecutiveSingleSteps(records []ToolInvocation, category string, required int) bool {
-	steps := groupSteps(records)
-	if len(steps) < required {
-		return false
-	}
-	for i := len(steps) - required; i < len(steps); i++ {
-		if len(steps[i]) != 1 || steps[i][0].Category != category {
-			return false
+func promotePageRange(start, end int, touching *ToolInvocation) (int, int) {
+	if touching != nil {
+		if start >= touching.StartLine {
+			newStart := touching.StartLine
+			if newStart+DefaultPageReadLines-1 < end {
+				newStart = start
+			}
+			return newStart, newStart + DefaultPageReadLines - 1
 		}
+		uEnd := max(end, touching.EndLine)
+		newStart := max(1, uEnd-DefaultPageReadLines+1)
+		if newStart > start {
+			newStart = start
+		}
+		return newStart, newStart + DefaultPageReadLines - 1
 	}
-	return true
+	span := end - start + 1
+	pad := (DefaultPageReadLines - span + 1) / 2
+	newStart := max(1, start-pad)
+	return newStart, newStart + DefaultPageReadLines - 1
 }
 
-func groupSteps(records []ToolInvocation) [][]ToolInvocation {
-	if len(records) == 0 {
-		return nil
+func shapeReadFileRange(target string, startLine, endLine int, priorRecords []ToolInvocation) (effStart, effEnd int, overwritten bool) {
+	if target == "" {
+		return startLine, endLine, false
 	}
-	var steps [][]ToolInvocation
-	var current []ToolInvocation
-	currentStep := -1
-	var currentTS int64 = -1
-
-	for _, r := range records {
-		if len(current) == 0 {
-			current = append(current, r)
-			currentStep = r.StepIdx
-			currentTS = r.Timestamp
-			continue
-		}
-
-		diff := r.Timestamp - currentTS
-		if diff < 0 {
-			diff = -diff
-		}
-		same := ((currentStep > 0 && r.StepIdx > 0 && r.StepIdx == currentStep) || (diff <= 1)) && (current[0].Turn == 0 || r.Turn == 0) || (current[0].Turn > 0 && r.Turn == current[0].Turn)
-
-		if same {
-			current = append(current, r)
-		} else {
-			steps = append(steps, current)
-			current = []ToolInvocation{r}
-			currentStep = r.StepIdx
-			currentTS = r.Timestamp
-		}
+	if startLine <= 0 && endLine <= 0 {
+		return 1, DefaultPageReadLines, false
 	}
-	if len(current) > 0 {
-		steps = append(steps, current)
+	if startLine > 0 && endLine <= 0 {
+		return startLine, startLine + DefaultPageReadLines - 1, false
 	}
-	return steps
+	if startLine > 0 && endLine < startLine {
+		return startLine, endLine, false
+	}
+	start := max(1, startLine)
+	end := endLine
+	span := end - start + 1
+	if span >= DefaultPageReadLines {
+		return start, end, start != startLine
+	}
+
+	priorReads := readsSinceLastTargetEdit(priorRecords, target)
+	if touching := findTouchingPriorRead(priorReads, start, end); touching != nil || len(priorReads) >= 2 {
+		newStart, newEnd := promotePageRange(start, end, touching)
+		return newStart, newEnd, newStart != startLine || newEnd != endLine
+	}
+
+	minAnchor := minAnchorReadLines()
+	if span < minAnchor {
+		pad := (minAnchor - span + 1) / 2
+		newStart := max(1, start-pad)
+		newEnd := newStart + minAnchor - 1
+		return newStart, newEnd, newStart != startLine || newEnd != endLine
+	}
+	return start, end, start != startLine
 }
 
 // CheckBatch evaluates tool batching and thrash invariants using the active state directory and system time.
@@ -798,59 +717,6 @@ func checkStatelessBatchRules(normalizedTool string, args ToolArgs) *Decision {
 	return nil
 }
 
-func checkMicroReadViolation(category, target string, paginatedRead bool, priorRecords []ToolInvocation, state *BatchState) *Decision {
-	if category != "read" || target == "" || paginatedRead {
-		return nil
-	}
-	maxReads := maxMicroReads()
-	if countTargetInvocations(readsSinceLastTargetEdit(priorRecords, target), "read", target) >= maxReads {
-		state.Records = removeTargetInvocations(state.Records, "read", target)
-		return &Decision{
-			Decision: DecisionDeny,
-			Reason:   fmt.Sprintf("Iterative micro-read thrashing detected: %d sequential reads targeting the same file across turns. Consolidate reads into larger ranges (>= %d lines) or batch parallel reads in a single turn instead of small slices.", maxReads+1, minPaginatedReadLines()),
-		}
-	}
-	return nil
-}
-
-func checkMicroCommandViolation(category string, priorRecords []ToolInvocation, state *BatchState) *Decision {
-	if category == "inspection" && hasConsecutiveSingleSteps(priorRecords, "inspection", 3) {
-		state.Records = filterOutCategory(state.Records, "inspection")
-		return &Decision{
-			Decision: DecisionDeny,
-			Reason:   "Micro-command thrashing detected: 4 consecutive single inspection commands across turns. Combine commands into compound one-liners (e.g. with && or ;) or execute an ephemeral scratch script in brain/<id>/scratch/ to collect diagnostics.",
-		}
-	}
-	return nil
-}
-
-func checkSequentialReadViolation(category string, paginatedRead bool, priorRecords []ToolInvocation, state *BatchState) *Decision {
-	maxSeq := maxSequentialReads()
-	if category == "read" && !paginatedRead && hasConsecutiveSingleSteps(priorRecords, "read", maxSeq) {
-		state.Records = filterOutCategory(state.Records, "read")
-		return &Decision{
-			Decision: DecisionDeny,
-			Reason:   fmt.Sprintf("Parallel Tool Batching Invariant Violated: %d consecutive sequential single-file reads detected across turns. ALWAYS emit view_file, grep_search, and read tool calls in parallel within a single turn when inspecting multiple files.", maxSeq+1),
-		}
-	}
-	return nil
-}
-
-func evaluatePriorBatchViolations(category, target string, args ToolArgs, priorRecords []ToolInvocation, state *BatchState) *Decision {
-	paginatedRead := category == "read" && target != "" && isPaginatedRead(priorRecords, target, args.StartLine, args.EndLine)
-
-	if dec := checkMicroReadViolation(category, target, paginatedRead, priorRecords, state); dec != nil {
-		return dec
-	}
-	if dec := checkMicroCommandViolation(category, priorRecords, state); dec != nil {
-		return dec
-	}
-	if dec := checkSequentialReadViolation(category, paginatedRead, priorRecords, state); dec != nil {
-		return dec
-	}
-	return nil
-}
-
 func resolvePriorRecords(state *BatchState, payload Payload, ts int64) (int, []ToolInvocation) {
 	if payload.InvocationNum > 0 {
 		state.InvocationNum = payload.InvocationNum
@@ -884,10 +750,10 @@ func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time
 		ts := now.Unix()
 		invNum, priorRecords := resolvePriorRecords(&state, payload, ts)
 
-		if dec := evaluatePriorBatchViolations(category, target, args, priorRecords, &state); dec != nil {
-			decision = dec
-			saveStateBestEffort(dir, safeID, state)
-			return nil
+		effStart, effEnd := args.StartLine, args.EndLine
+		var readOverwritten bool
+		if category == "read" {
+			effStart, effEnd, readOverwritten = shapeReadFileRange(target, args.StartLine, args.EndLine, priorRecords)
 		}
 
 		// Allowed: invalidate prior reads on edit and record invocation
@@ -901,8 +767,8 @@ func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time
 			ToolName:  payload.ToolCall.Name,
 			Target:    target,
 			Category:  category,
-			StartLine: args.StartLine,
-			EndLine:   args.EndLine,
+			StartLine: effStart,
+			EndLine:   effEnd,
 		}
 		state.Records = append(state.Records, inv)
 		if len(state.Records) > DefaultMaxRecords {
@@ -912,7 +778,9 @@ func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time
 		saveStateBestEffort(dir, safeID, state)
 		opportunisticGC(dir, now)
 		decision = &Decision{Decision: DecisionAllow}
-		if normalizedTool == "run_command" {
+		if readOverwritten {
+			decision.Overwrite = map[string]any{"StartLine": effStart, "EndLine": effEnd}
+		} else if normalizedTool == "run_command" {
 			if rewritten := shapeGitStatus(stripGoTestVerbose(args.CommandLine)); rewritten != args.CommandLine {
 				decision.Overwrite = map[string]any{"CommandLine": rewritten}
 			}

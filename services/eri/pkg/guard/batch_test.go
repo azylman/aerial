@@ -27,69 +27,75 @@ func TestCheckBatch(t *testing.T) {
 	turns := func(ts ...[]batchHookInput) [][]batchHookInput { return ts }
 
 	stepTests := []struct {
-		name             string
-		steps            [][]batchHookInput
-		wantLastDecision DecisionType
-		wantReasonSubstr string
-		wantOverwriteCmd string
+		name               string
+		steps              [][]batchHookInput
+		wantLastDecision   DecisionType
+		wantReasonSubstr   string
+		wantOverwriteCmd   string
+		wantOverwriteStart int
+		wantOverwriteEnd   int
 	}{
-		{"unscoped go test", turns(turn(batchHookInput{tool: "run_command", cmd: "go test ./..."})), DecisionDeny, "Unscoped test sweep", ""},
-		{"unscoped test brain/...", turns(turn(batchHookInput{tool: "run_command", cmd: "go test brain/..."})), DecisionDeny, "Unscoped test sweep", ""},
-		{"unscoped test services/eri/...", turns(turn(batchHookInput{tool: "run_command", cmd: "go test services/eri/..."})), DecisionDeny, "Unscoped test sweep", ""},
-		{"unscoped pytest", turns(turn(batchHookInput{tool: "run_command", cmd: "pytest"})), DecisionDeny, "Unscoped test sweep", ""},
-		{"unscoped verify.sh", turns(turn(batchHookInput{tool: "run_command", cmd: "./scripts/verify.sh"})), DecisionDeny, "Unscoped test sweep", ""},
-		{"scoped test allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "go test ./pkg/guard"})), DecisionAllow, "", ""},
-		{"verbose test stripped and allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "go test -v ./pkg/guard"})), DecisionAllow, "", "go test ./pkg/guard"},
-		{"verbose test with run stripped and allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "go test -v -run TestCheckBatch ./pkg/guard"})), DecisionAllow, "", "go test -run TestCheckBatch ./pkg/guard"},
-		{"compound unscoped test denied", turns(turn(batchHookInput{tool: "run_command", cmd: "cd /tmp && go test ./..."})), DecisionDeny, "Unscoped test sweep", ""},
-		{"scoped verify staged", turns(turn(batchHookInput{tool: "run_command", cmd: "./scripts/verify.sh --staged"})), DecisionAllow, "", ""},
-		{"verify help allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "./scripts/verify.sh --help"})), DecisionAllow, "", ""},
-		{"empty command in batch allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "   "})), DecisionAllow, "", ""},
-		{"unbatched git add", turns(turn(batchHookInput{tool: "run_command", cmd: "git add main.go"})), DecisionDeny, "Unbatched git lifecycle", ""},
-		{"unbatched git commit", turns(turn(batchHookInput{tool: "run_command", cmd: "git commit -m 'fix'"})), DecisionDeny, "Unbatched git lifecycle", ""},
-		{"bare git status rewritten to -sb", turns(turn(batchHookInput{tool: "run_command", cmd: "git status"})), DecisionAllow, "", "git status -sb"},
-		{"git -C status rewritten to -sb", turns(turn(batchHookInput{tool: "run_command", cmd: "git -C /tmp/repo status pkg/guard"})), DecisionAllow, "", "git -C /tmp/repo status -sb pkg/guard"},
-		{"subshell git status rewritten to -sb", turns(turn(batchHookInput{tool: "run_command", cmd: "(cd /tmp/repo && git status)"})), DecisionAllow, "", "(cd /tmp/repo && git status -sb)"},
-		{"git status -s unchanged", turns(turn(batchHookInput{tool: "run_command", cmd: "git status -s"})), DecisionAllow, "", ""},
-		{"git status --porcelain unchanged", turns(turn(batchHookInput{tool: "run_command", cmd: "git status --porcelain"})), DecisionAllow, "", ""},
-		{"unbounded git log denied", turns(turn(batchHookInput{tool: "run_command", cmd: "git log"})), DecisionDeny, "Unbounded git log detected", ""},
-		{"unbounded git log --oneline denied", turns(turn(batchHookInput{tool: "run_command", cmd: "git log --oneline"})), DecisionDeny, "Unbounded git log detected", ""},
-		{"bounded git log -n 5 allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "git log -n 5 --oneline"})), DecisionAllow, "", ""},
-		{"bounded git log -n5 allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "git log -n5"})), DecisionAllow, "", ""},
-		{"bounded git log -3 allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "git log -3"})), DecisionAllow, "", ""},
-		{"unscoped bare git diff denied", turns(turn(batchHookInput{tool: "run_command", cmd: "git diff"})), DecisionDeny, "Unscoped full-patch git diff detected", ""},
-		{"unscoped git diff --cached denied", turns(turn(batchHookInput{tool: "run_command", cmd: "git diff --cached"})), DecisionDeny, "Unscoped full-patch git diff detected", ""},
-		{"unscoped git diff HEAD denied", turns(turn(batchHookInput{tool: "run_command", cmd: "git diff HEAD"})), DecisionDeny, "Unscoped full-patch git diff detected", ""},
-		{"unscoped git diff origin/main denied", turns(turn(batchHookInput{tool: "run_command", cmd: "git --no-pager diff origin/main"})), DecisionDeny, "Unscoped full-patch git diff detected", ""},
-		{"unscoped git diff dot denied", turns(turn(batchHookInput{tool: "run_command", cmd: "git diff -- ."})), DecisionDeny, "Unscoped full-patch git diff detected", ""},
-		{"git version flag without subcommand allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "git --version"})), DecisionAllow, "", ""},
-		{"git diff --stat allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "git diff --stat"})), DecisionAllow, "", ""},
-		{"git diff --name-only allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "git diff --cached --name-only"})), DecisionAllow, "", ""},
-		{"git diff scoped with dash-dash allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "git diff HEAD -- services/eri/pkg/guard/batch.go"})), DecisionAllow, "", ""},
-		{"git diff scoped with file path allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "git diff -U 3 services/eri/pkg/guard/batch.go"})), DecisionAllow, "", ""},
-		{"read_file on transcript.jsonl denied", turns(turn(batchHookInput{tool: "read_file", path: "/data/runtimes/discord/.gemini/antigravity-cli/brain/361f6998/.system_generated/logs/transcript.jsonl"})), DecisionDeny, "transcript-search", ""},
-		{"view_file on transcript_full.jsonl denied", turns(turn(batchHookInput{tool: "view_file", path: ".system_generated/logs/transcript_full.jsonl"})), DecisionDeny, "transcript-search", ""},
-		{"docker exec go test -v stripped and allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "docker exec -i eri go test -v ./pkg/guard"})), DecisionAllow, "", "docker exec -i eri go test ./pkg/guard"},
-		{"docker exec unscoped go test denied", turns(turn(batchHookInput{tool: "run_command", cmd: "docker exec eri go test ./..."})), DecisionDeny, "Unscoped test sweep", ""},
-		{"micro inspection thrashing", turns(turn(batchHookInput{tool: "run_command", cmd: "cat a.txt"}), turn(batchHookInput{tool: "run_command", cmd: "head b.txt"}), turn(batchHookInput{tool: "run_command", cmd: "tail c.txt"}), turn(batchHookInput{tool: "run_command", cmd: "which d.txt"})), DecisionDeny, "Micro-command thrashing detected", ""},
-		{"shell file-slice pipe thrashing", turns(turn(batchHookInput{tool: "run_command", cmd: "nl -ba a.go | sed -n '1,50p'"}), turn(batchHookInput{tool: "run_command", cmd: "sed -n '51,100p;101q' a.go"}), turn(batchHookInput{tool: "run_command", cmd: "head -n 150 a.go | tail -n 50"}), turn(batchHookInput{tool: "run_command", cmd: "awk 'NR>=151 && NR<=200' a.go"})), DecisionDeny, "Micro-command thrashing detected", ""},
-		{"three micro reads same file allowed", turns(turn(batchHookInput{tool: "view_file", path: "/tmp/foo.go"}), turn(batchHookInput{tool: "view_file", path: "/tmp/foo.go"}), turn(batchHookInput{tool: "view_file", path: "/tmp/foo.go"})), DecisionAllow, "", ""},
-		{"micro read thrashing same file on 4th", turns(turn(batchHookInput{tool: "view_file", path: "/tmp/foo.go"}), turn(batchHookInput{tool: "view_file", path: "/tmp/foo.go"}), turn(batchHookInput{tool: "view_file", path: "/tmp/foo.go"}), turn(batchHookInput{tool: "view_file", path: "/tmp/foo.go"})), DecisionDeny, "Iterative micro-read thrashing", ""},
-		{"micro read_file thrashing same file on 4th", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go"})), DecisionDeny, "Iterative micro-read thrashing", ""},
-		{"micro read thrashing across share and scratch dir", turns(turn(batchHookInput{tool: "read_file", path: "/share/aerial/pkg/foo.go"}), turn(batchHookInput{tool: "read_file", path: "/data/scratch/aerial-code-scratch.abc123/pkg/foo.go"}), turn(batchHookInput{tool: "read_file", path: "$SCRATCHDIR/pkg/foo.go"}), turn(batchHookInput{tool: "read_file", path: "${SCRATCH_DIR}/pkg/foo.go"})), DecisionDeny, "Iterative micro-read thrashing", ""},
-		{"edit invalidates prior reads on same file", turns(turn(batchHookInput{tool: "read_file", path: "/share/aerial/pkg/foo.go"}), turn(batchHookInput{tool: "read_file", path: "/share/aerial/pkg/foo.go"}), turn(batchHookInput{tool: "read_file", path: "/share/aerial/pkg/foo.go"}), turn(batchHookInput{tool: "edit_file", path: "/data/scratch/aerial-code-scratch.abc123/pkg/foo.go"}), turn(batchHookInput{tool: "read_file", path: "/data/scratch/aerial-code-scratch.abc123/pkg/foo.go"}), turn(batchHookInput{tool: "read_file", path: "$SCRATCHDIR/pkg/foo.go"}), turn(batchHookInput{tool: "read_file", path: "/share/aerial/pkg/foo.go"})), DecisionAllow, "", ""},
-		{"three sequential single file reads allowed", turns(turn(batchHookInput{tool: "view_file", path: "/tmp/a.go"}), turn(batchHookInput{tool: "view_file", path: "/tmp/b.go"}), turn(batchHookInput{tool: "view_file", path: "/tmp/c.go"})), DecisionAllow, "", ""},
-		{"sequential single file reads denied on 4th", turns(turn(batchHookInput{tool: "view_file", path: "/tmp/a.go"}), turn(batchHookInput{tool: "view_file", path: "/tmp/b.go"}), turn(batchHookInput{tool: "view_file", path: "/tmp/c.go"}), turn(batchHookInput{tool: "view_file", path: "/tmp/d.go"})), DecisionDeny, "Parallel Tool Batching Invariant Violated", ""},
-		{"sequential single read_file calls denied on 4th", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/a.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/b.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/c.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/d.go"})), DecisionDeny, "Parallel Tool Batching Invariant Violated", ""},
-		{"parallel reads allowed", turns(turn(batchHookInput{tool: "view_file", path: "/tmp/a.go"}, batchHookInput{tool: "view_file", path: "/tmp/b.go"}, batchHookInput{tool: "view_file", path: "/tmp/c.go"})), DecisionAllow, "", ""},
-		{"multiple replace_file_content edits allowed", turns(turn(batchHookInput{tool: "replace_file_content", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "replace_file_content", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "replace_file_content", path: "/tmp/mod.go"})), DecisionAllow, "", ""},
-		{"multiple edit_file and write_file calls allowed", turns(turn(batchHookInput{tool: "edit_file", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "write_file", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "edit_file", path: "/tmp/mod.go"})), DecisionAllow, "", ""},
-		{"post-test edit after go test allowed", turns(turn(batchHookInput{tool: "write_file", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "run_command", cmd: "go test ./pkg/guard"}), turn(batchHookInput{tool: "edit_file", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "edit_file", path: "/tmp/mod.go"})), DecisionAllow, "", ""},
-		{"read different file allowed", turns(turn(batchHookInput{tool: "view_file", path: "/tmp/foo.go"}, batchHookInput{tool: "view_file", path: "/tmp/extra1.go"}), turn(batchHookInput{tool: "view_file", path: "/tmp/foo.go"}, batchHookInput{tool: "view_file", path: "/tmp/extra2.go"}), turn(batchHookInput{tool: "view_file", path: "/tmp/other.go"}, batchHookInput{tool: "view_file", path: "/tmp/extra1.go"})), DecisionAllow, "", ""},
-		{"parallel same-file reads in turn 1 plus turn 2 read allowed", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/big.go", start: 10, end: 60}, batchHookInput{tool: "read_file", path: "/tmp/big.go", start: 800, end: 860}), turn(batchHookInput{tool: "read_file", path: "/tmp/big.go", start: 861, end: 950})), DecisionAllow, "", ""},
-		{"non-overlapping 150-line paginated read_file allowed across 4 turns", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 1, end: 150}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 151, end: 300}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 301, end: 450}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 451, end: 600})), DecisionAllow, "", ""},
-		{"overlapping paginated read_file denied on 4th", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 1, end: 500}, batchHookInput{tool: "read_file", path: "/tmp/o1.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 501, end: 1000}, batchHookInput{tool: "read_file", path: "/tmp/o2.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 400, end: 900}, batchHookInput{tool: "read_file", path: "/tmp/o3.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 450, end: 950})), DecisionDeny, "Iterative micro-read thrashing", ""},
-		{"small non-overlapping micro-reads denied on 4th", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 1, end: 50}, batchHookInput{tool: "read_file", path: "/tmp/o1.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 51, end: 100}, batchHookInput{tool: "read_file", path: "/tmp/o2.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 101, end: 150}, batchHookInput{tool: "read_file", path: "/tmp/o3.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/huge.go", start: 151, end: 200})), DecisionDeny, "Iterative micro-read thrashing", ""},
+		{"unscoped go test", turns(turn(batchHookInput{tool: "run_command", cmd: "go test ./..."})), DecisionDeny, "Unscoped test sweep", "", 0, 0},
+		{"unscoped test brain/...", turns(turn(batchHookInput{tool: "run_command", cmd: "go test brain/..."})), DecisionDeny, "Unscoped test sweep", "", 0, 0},
+		{"unscoped test services/eri/...", turns(turn(batchHookInput{tool: "run_command", cmd: "go test services/eri/..."})), DecisionDeny, "Unscoped test sweep", "", 0, 0},
+		{"unscoped pytest", turns(turn(batchHookInput{tool: "run_command", cmd: "pytest"})), DecisionDeny, "Unscoped test sweep", "", 0, 0},
+		{"unscoped verify.sh", turns(turn(batchHookInput{tool: "run_command", cmd: "./scripts/verify.sh"})), DecisionDeny, "Unscoped test sweep", "", 0, 0},
+		{"scoped test allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "go test ./pkg/guard"})), DecisionAllow, "", "", 0, 0},
+		{"verbose test stripped and allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "go test -v ./pkg/guard"})), DecisionAllow, "", "go test ./pkg/guard", 0, 0},
+		{"verbose test with run stripped and allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "go test -v -run TestCheckBatch ./pkg/guard"})), DecisionAllow, "", "go test -run TestCheckBatch ./pkg/guard", 0, 0},
+		{"compound unscoped test denied", turns(turn(batchHookInput{tool: "run_command", cmd: "cd /tmp && go test ./..."})), DecisionDeny, "Unscoped test sweep", "", 0, 0},
+		{"scoped verify staged", turns(turn(batchHookInput{tool: "run_command", cmd: "./scripts/verify.sh --staged"})), DecisionAllow, "", "", 0, 0},
+		{"verify help allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "./scripts/verify.sh --help"})), DecisionAllow, "", "", 0, 0},
+		{"empty command in batch allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "   "})), DecisionAllow, "", "", 0, 0},
+		{"unbatched git add", turns(turn(batchHookInput{tool: "run_command", cmd: "git add main.go"})), DecisionDeny, "Unbatched git lifecycle", "", 0, 0},
+		{"unbatched git commit", turns(turn(batchHookInput{tool: "run_command", cmd: "git commit -m 'fix'"})), DecisionDeny, "Unbatched git lifecycle", "", 0, 0},
+		{"bare git status rewritten to -sb", turns(turn(batchHookInput{tool: "run_command", cmd: "git status"})), DecisionAllow, "", "git status -sb", 0, 0},
+		{"git -C status rewritten to -sb", turns(turn(batchHookInput{tool: "run_command", cmd: "git -C /tmp/repo status pkg/guard"})), DecisionAllow, "", "git -C /tmp/repo status -sb pkg/guard", 0, 0},
+		{"subshell git status rewritten to -sb", turns(turn(batchHookInput{tool: "run_command", cmd: "(cd /tmp/repo && git status)"})), DecisionAllow, "", "(cd /tmp/repo && git status -sb)", 0, 0},
+		{"git status -s unchanged", turns(turn(batchHookInput{tool: "run_command", cmd: "git status -s"})), DecisionAllow, "", "", 0, 0},
+		{"git status --porcelain unchanged", turns(turn(batchHookInput{tool: "run_command", cmd: "git status --porcelain"})), DecisionAllow, "", "", 0, 0},
+		{"unbounded git log denied", turns(turn(batchHookInput{tool: "run_command", cmd: "git log"})), DecisionDeny, "Unbounded git log detected", "", 0, 0},
+		{"unbounded git log --oneline denied", turns(turn(batchHookInput{tool: "run_command", cmd: "git log --oneline"})), DecisionDeny, "Unbounded git log detected", "", 0, 0},
+		{"bounded git log -n 5 allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "git log -n 5 --oneline"})), DecisionAllow, "", "", 0, 0},
+		{"bounded git log -n5 allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "git log -n5"})), DecisionAllow, "", "", 0, 0},
+		{"bounded git log -3 allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "git log -3"})), DecisionAllow, "", "", 0, 0},
+		{"unscoped bare git diff denied", turns(turn(batchHookInput{tool: "run_command", cmd: "git diff"})), DecisionDeny, "Unscoped full-patch git diff detected", "", 0, 0},
+		{"unscoped git diff --cached denied", turns(turn(batchHookInput{tool: "run_command", cmd: "git diff --cached"})), DecisionDeny, "Unscoped full-patch git diff detected", "", 0, 0},
+		{"unscoped git diff HEAD denied", turns(turn(batchHookInput{tool: "run_command", cmd: "git diff HEAD"})), DecisionDeny, "Unscoped full-patch git diff detected", "", 0, 0},
+		{"unscoped git diff origin/main denied", turns(turn(batchHookInput{tool: "run_command", cmd: "git --no-pager diff origin/main"})), DecisionDeny, "Unscoped full-patch git diff detected", "", 0, 0},
+		{"unscoped git diff dot denied", turns(turn(batchHookInput{tool: "run_command", cmd: "git diff -- ."})), DecisionDeny, "Unscoped full-patch git diff detected", "", 0, 0},
+		{"git version flag without subcommand allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "git --version"})), DecisionAllow, "", "", 0, 0},
+		{"git diff --stat allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "git diff --stat"})), DecisionAllow, "", "", 0, 0},
+		{"git diff --name-only allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "git diff --cached --name-only"})), DecisionAllow, "", "", 0, 0},
+		{"git diff scoped with dash-dash allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "git diff HEAD -- services/eri/pkg/guard/batch.go"})), DecisionAllow, "", "", 0, 0},
+		{"git diff scoped with file path allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "git diff -U 3 services/eri/pkg/guard/batch.go"})), DecisionAllow, "", "", 0, 0},
+		{"read_file on transcript.jsonl denied", turns(turn(batchHookInput{tool: "read_file", path: "/data/runtimes/discord/.gemini/antigravity-cli/brain/361f6998/.system_generated/logs/transcript.jsonl"})), DecisionDeny, "transcript-search", "", 0, 0},
+		{"view_file on transcript_full.jsonl denied", turns(turn(batchHookInput{tool: "view_file", path: ".system_generated/logs/transcript_full.jsonl"})), DecisionDeny, "transcript-search", "", 0, 0},
+		{"docker exec go test -v stripped and allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "docker exec -i eri go test -v ./pkg/guard"})), DecisionAllow, "", "docker exec -i eri go test ./pkg/guard", 0, 0},
+		{"docker exec unscoped go test denied", turns(turn(batchHookInput{tool: "run_command", cmd: "docker exec eri go test ./..."})), DecisionDeny, "Unscoped test sweep", "", 0, 0},
+		{"sequential inspection commands allowed", turns(turn(batchHookInput{tool: "run_command", cmd: "cat a.txt"}), turn(batchHookInput{tool: "run_command", cmd: "head b.txt"}), turn(batchHookInput{tool: "run_command", cmd: "tail c.txt"}), turn(batchHookInput{tool: "run_command", cmd: "which d.txt"})), DecisionAllow, "", "", 0, 0},
+		{"unbounded read_file allowed without overwrite", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go"})), DecisionAllow, "", "", 0, 0},
+		{"open-ended StartLine read_file allowed without overwrite", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go", start: 801})), DecisionAllow, "", "", 0, 0},
+		{"inverted read_file range allowed without overwrite", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go", start: 100, end: 50})), DecisionAllow, "", "", 0, 0},
+		{"empty path read_file allowed without overwrite", turns(turn(batchHookInput{tool: "read_file", path: "", start: 10, end: 20})), DecisionAllow, "", "", 0, 0},
+		{"full-page 800-line read_file allowed without overwrite", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go", start: 1, end: 800})), DecisionAllow, "", "", 0, 0},
+		{"120-line anchor read_file allowed without overwrite", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go", start: 101, end: 220})), DecisionAllow, "", "", 0, 0},
+		{"tight read_file padded to 120-line anchor window", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go", start: 100, end: 130})), DecisionAllow, "", "", 55, 174},
+		{"tight read_file near top clamped to line 1", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go", start: 5, end: 25})), DecisionAllow, "", "", 1, 120},
+		{"second disjoint read_file padded to 120-line anchor window", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go", start: 100, end: 130}), turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go", start: 900, end: 930})), DecisionAllow, "", "", 855, 974},
+		{"contiguous forward read promoted to 800-line page", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go", start: 440, end: 560}), turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go", start: 561, end: 620})), DecisionAllow, "", "", 440, 1239},
+		{"contiguous forward read after full page 1 promoted to page 2", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go", start: 1, end: 800}), turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go", start: 801, end: 860})), DecisionAllow, "", "", 801, 1600},
+		{"contiguous backward read promoted to 800-line page clamped to 1", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go", start: 600, end: 750}), turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go", start: 450, end: 600})), DecisionAllow, "", "", 1, 800},
+		{"contiguous backward read at high lines promoted to 800-line page", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go", start: 1500, end: 1650}), turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go", start: 1400, end: 1499})), DecisionAllow, "", "", 851, 1650},
+		{"contiguous backward read exceeding 800-line union anchored at start", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go", start: 1000, end: 1750}), turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go", start: 900, end: 999})), DecisionAllow, "", "", 900, 1699},
+		{"third disjoint read on same file promoted to centered 800-line page", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go", start: 100, end: 220}), turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go", start: 500, end: 620}), turn(batchHookInput{tool: "read_file", path: "/tmp/foo.go", start: 1000, end: 1040})), DecisionAllow, "", "", 620, 1419},
+		{"cross-path share and scratch reads normalized and promoted", turns(turn(batchHookInput{tool: "read_file", path: "/share/aerial/pkg/foo.go", start: 100, end: 220}), turn(batchHookInput{tool: "read_file", path: "/data/scratch/aerial-code-scratch.abc123/pkg/foo.go", start: 221, end: 300})), DecisionAllow, "", "", 100, 899},
+		{"edit invalidates prior reads on same file", turns(turn(batchHookInput{tool: "read_file", path: "/share/aerial/pkg/foo.go", start: 100, end: 220}), turn(batchHookInput{tool: "read_file", path: "/share/aerial/pkg/foo.go", start: 500, end: 620}), turn(batchHookInput{tool: "edit_file", path: "/data/scratch/aerial-code-scratch.abc123/pkg/foo.go"}), turn(batchHookInput{tool: "read_file", path: "/data/scratch/aerial-code-scratch.abc123/pkg/foo.go", start: 1000, end: 1030})), DecisionAllow, "", "", 955, 1074},
+		{"sequential single file reads across 4 files allowed", turns(turn(batchHookInput{tool: "read_file", path: "/tmp/a.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/b.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/c.go"}), turn(batchHookInput{tool: "read_file", path: "/tmp/d.go"})), DecisionAllow, "", "", 0, 0},
+		{"parallel reads allowed", turns(turn(batchHookInput{tool: "view_file", path: "/tmp/a.go"}, batchHookInput{tool: "view_file", path: "/tmp/b.go"}, batchHookInput{tool: "view_file", path: "/tmp/c.go"})), DecisionAllow, "", "", 0, 0},
+		{"multiple replace_file_content edits allowed", turns(turn(batchHookInput{tool: "replace_file_content", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "replace_file_content", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "replace_file_content", path: "/tmp/mod.go"})), DecisionAllow, "", "", 0, 0},
+		{"multiple edit_file and write_file calls allowed", turns(turn(batchHookInput{tool: "edit_file", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "write_file", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "edit_file", path: "/tmp/mod.go"})), DecisionAllow, "", "", 0, 0},
+		{"post-test edit after go test allowed", turns(turn(batchHookInput{tool: "write_file", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "run_command", cmd: "go test ./pkg/guard"}), turn(batchHookInput{tool: "edit_file", path: "/tmp/mod.go"}), turn(batchHookInput{tool: "edit_file", path: "/tmp/mod.go"})), DecisionAllow, "", "", 0, 0},
 	}
 
 	for _, tc := range stepTests {
@@ -133,6 +139,11 @@ func TestCheckBatch(t *testing.T) {
 			gotOverwrite, _ := lastDec.Overwrite["CommandLine"].(string)
 			if gotOverwrite != tc.wantOverwriteCmd {
 				t.Fatalf("Overwrite[CommandLine] = %q, want %q", gotOverwrite, tc.wantOverwriteCmd)
+			}
+			gotStart, _ := lastDec.Overwrite["StartLine"].(int)
+			gotEnd, _ := lastDec.Overwrite["EndLine"].(int)
+			if gotStart != tc.wantOverwriteStart || gotEnd != tc.wantOverwriteEnd {
+				t.Fatalf("Overwrite[StartLine,EndLine] = (%d, %d), want (%d, %d)", gotStart, gotEnd, tc.wantOverwriteStart, tc.wantOverwriteEnd)
 			}
 		})
 	}
@@ -211,18 +222,10 @@ func TestCheckBatch(t *testing.T) {
 	}
 
 	// Tunable environment variable overrides and SCRATCH_DIR resolution
-	t.Setenv("AERIAL_BATCH_MIN_PAGINATED_LINES", "80")
-	t.Setenv("AERIAL_BATCH_MAX_MICRO_READS", "2")
-	t.Setenv("AERIAL_BATCH_MAX_SEQUENTIAL_READS", "2")
+	t.Setenv("AERIAL_BATCH_MIN_ANCHOR_LINES", "80")
 	t.Setenv("SCRATCH_DIR", "/tmp/custom-worktree")
-	if got := minPaginatedReadLines(); got != 80 {
-		t.Fatalf("minPaginatedReadLines() = %d, want 80", got)
-	}
-	if got := maxMicroReads(); got != 2 {
-		t.Fatalf("maxMicroReads() = %d, want 2", got)
-	}
-	if got := maxSequentialReads(); got != 2 {
-		t.Fatalf("maxSequentialReads() = %d, want 2", got)
+	if got := minAnchorReadLines(); got != 80 {
+		t.Fatalf("minAnchorReadLines() = %d, want 80", got)
 	}
 	if got := normalizeBatchTarget("/tmp/custom-worktree/pkg/a.go"); got != "/share/aerial/pkg/a.go" {
 		t.Fatalf("normalizeBatchTarget(custom-worktree) = %q, want /share/aerial/pkg/a.go", got)
@@ -230,9 +233,9 @@ func TestCheckBatch(t *testing.T) {
 	if got := normalizeBatchTarget("$SCRATCH_DIR/pkg/a.go"); got != "/share/aerial/pkg/a.go" {
 		t.Fatalf("normalizeBatchTarget($SCRATCH_DIR) = %q, want /share/aerial/pkg/a.go", got)
 	}
-	t.Setenv("AERIAL_BATCH_MIN_PAGINATED_LINES", "invalid")
-	if got := minPaginatedReadLines(); got != DefaultMinPaginatedReadLines {
-		t.Fatalf("minPaginatedReadLines() fallback = %d, want %d", got, DefaultMinPaginatedReadLines)
+	t.Setenv("AERIAL_BATCH_MIN_ANCHOR_LINES", "invalid")
+	if got := minAnchorReadLines(); got != DefaultMinAnchorReadLines {
+		t.Fatalf("minAnchorReadLines() fallback = %d, want %d", got, DefaultMinAnchorReadLines)
 	}
 
 	// Prune state files and opportunistic GC
@@ -368,39 +371,6 @@ func TestBatchHelpers(t *testing.T) {
 		})
 	}
 
-	singleInspectionTests := []struct {
-		cmd  string
-		want bool
-	}{
-		{"cat file.go", true},
-		{"head -n 10 file.go", true},
-		{"tail file.go", true},
-		{"which agy", true},
-		{"stat file.go", true},
-		{"file binary", true},
-		{"echo hello", true},
-		{"nl -ba file.go", true},
-		{"wc -l file.go", true},
-		{"sed -n '10,50p;51q' file.go", true},
-		{"awk 'NR>=10 && NR<=50' file.go", true},
-		{"nl -ba file.go | sed -n '10,50p'", true},
-		{"head -n 100 file.go | tail -n 20", true},
-		{"sed -i 's/a/b/g' file.go", false},
-		{"sed -- -i file.go", true},
-		{"cat a.txt && cat b.txt", false},
-		{"cat a.txt | grep foo", false},
-		{"", false},
-		{"   ", false},
-	}
-	for _, tc := range singleInspectionTests {
-		t.Run("inspection_"+tc.cmd, func(t *testing.T) {
-			t.Parallel()
-			if got := isSingleInspection(tc.cmd); got != tc.want {
-				t.Fatalf("isSingleInspection(%q) = %v, want %v", tc.cmd, got, tc.want)
-			}
-		})
-	}
-
 	categoryTests := []struct {
 		name    string
 		tool    string
@@ -416,10 +386,10 @@ func TestBatchHelpers(t *testing.T) {
 		{"write to file", "write_to_file", ToolArgs{TargetFile: "/tmp/a.go"}, "edit", "/tmp/a.go"},
 		{"unscoped test cmd", "run_command", ToolArgs{CommandLine: "go test ./..."}, "unscoped_test", "go test ./..."},
 		{"git mutation cmd", "run_command", ToolArgs{CommandLine: "git commit -m 'a'"}, "git_mutation", "git commit -m 'a'"},
-		{"inspection cmd", "run_command", ToolArgs{CommandLine: "cat a.txt"}, "inspection", "cat a.txt"},
+		{"inspection cmd", "run_command", ToolArgs{CommandLine: "cat a.txt"}, "command", "cat a.txt"},
 		{"generic cmd", "run_command", ToolArgs{CommandLine: "make build"}, "command", "make build"},
 		{"other tool", "custom_mcp_tool", ToolArgs{}, "other", "custom_mcp_tool"},
-		{"default_api prefix", "default_api:run_command", ToolArgs{CommandLine: "cat a.txt"}, "inspection", "cat a.txt"},
+		{"default_api prefix", "default_api:run_command", ToolArgs{CommandLine: "cat a.txt"}, "command", "cat a.txt"},
 	}
 	for _, tc := range categoryTests {
 		t.Run("category_"+tc.name, func(t *testing.T) {
@@ -459,36 +429,16 @@ func TestBatchHelpers(t *testing.T) {
 		t.Fatalf("expected false for diff > 1s")
 	}
 
-	if steps := groupSteps(nil); steps != nil {
-		t.Fatalf("expected nil for empty records")
-	}
-	invs := []ToolInvocation{
-		{Timestamp: 100, StepIdx: 0},
-		{Timestamp: 99, StepIdx: 0},
-		{Timestamp: 50, StepIdx: 0},
-	}
-	steps := groupSteps(invs)
-	if len(steps) != 2 {
-		t.Fatalf("expected 2 groups, got %d", len(steps))
-	}
-
-	// Filtering and counting helpers
+	// Filtering helpers
 	list := []ToolInvocation{
-		{Category: "read", Target: "a.go", StepIdx: 1, Timestamp: 100},
-		{Category: "read", Target: "a.go", StepIdx: 2, Timestamp: 200},
-		{Category: "read", Target: "b.go", StepIdx: 3, Timestamp: 300},
+		{Category: "read", Target: "a.go", StepIdx: 1, Timestamp: 100, StartLine: 1, EndLine: 120},
+		{Category: "read", Target: "a.go", StepIdx: 2, Timestamp: 200, StartLine: 121, EndLine: 240},
+		{Category: "read", Target: "b.go", StepIdx: 3, Timestamp: 300, StartLine: 1, EndLine: 120},
 		{Category: "edit", Target: "a.go", StepIdx: 4, Timestamp: 400},
-	}
-	if count := countTargetInvocations(list, "read", "a.go"); count != 2 {
-		t.Fatalf("countTargetInvocations = %d, want 2", count)
 	}
 	afterRemove := removeTargetInvocations(list, "read", "a.go")
 	if len(afterRemove) != 2 || afterRemove[0].Target != "b.go" || afterRemove[1].Category != "edit" {
 		t.Fatalf("removeTargetInvocations failed: %+v", afterRemove)
-	}
-	afterFilter := filterOutCategory(list, "read")
-	if len(afterFilter) != 1 || afterFilter[0].Category != "edit" {
-		t.Fatalf("filterOutCategory failed: %+v", afterFilter)
 	}
 
 	submitTests := []struct {
