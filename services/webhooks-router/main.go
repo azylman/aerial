@@ -785,7 +785,13 @@ func (s *RouterServer) advanceVanadisChunk(ctx context.Context, repo string, prN
 	if err != nil {
 		return err
 	}
-	if res == nil || !res.Matched || !res.Advanced {
+	if res == nil || !res.Matched {
+		return nil
+	}
+	if !res.Advanced {
+		if err := s.SyncPRWidget(ctx, repo, prNumber); err != nil {
+			log.Printf("[webhooks-router] [vanadis] warning syncing already-advanced chunk widget for %s#%d: %v", repo, prNumber, err)
+		}
 		return nil
 	}
 	s.evaluateVanadisAdvancementTriggers(ctx, repo, prNumber, res)
