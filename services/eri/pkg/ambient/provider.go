@@ -25,9 +25,6 @@ type MCPInvoker interface {
 	Execute(ctx context.Context, name string, args map[string]interface{}) (string, error)
 }
 
-// ProviderConfig wraps config.AmbientContextConfig.
-type ProviderConfig = config.AmbientContextConfig
-
 // Provider fetches tool data and renders ambient context using Go templates.
 type Provider struct {
 	cfg           config.AmbientContextConfig

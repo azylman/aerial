@@ -3655,6 +3655,11 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 						{ID: "chunk-step-live", Index: 0, Title: "Step Streaming", Status: "running"},
 					},
 				})
+				// Drain the notification from the seed delivery so that RunnerWithOptionsFunc waits for the active step update.
+				select {
+				case <-widgetDeliveredCh:
+				default:
+				}
 			}
 
 			disp := db.Dispatch{

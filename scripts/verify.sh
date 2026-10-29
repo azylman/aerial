@@ -216,6 +216,16 @@ run_deadcode() {
                 exit 1
             fi
         fi
+        dead_test=$(cd "$svc" && "$DEADCODE_BIN" -test ./... 2>&1) || {
+            echo "🚨 [Aerial Verify] Error: deadcode (-test) execution failed on $svc:" >&2
+            echo "$dead_test" >&2
+            exit 1
+        }
+        if [ -n "$dead_test" ]; then
+            echo "🚨 [Aerial Verify] [FAIL] deadcode -test found unreachable functions in $svc:" >&2
+            echo "$dead_test" | sed 's/^/   • /' >&2
+            exit 1
+        fi
     fi
 }
 

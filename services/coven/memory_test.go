@@ -1088,7 +1088,9 @@ func TestOllamaClient_GenerateEmbedding(t *testing.T) {
 			attempt := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if tc.expectPrompt != "" {
-					var req embeddingRequest
+					var req struct {
+						Prompt string `json:"prompt"`
+					}
 					_ = json.NewDecoder(r.Body).Decode(&req)
 					if req.Prompt != tc.expectPrompt {
 						t.Errorf("req.Prompt = %q, want %q", req.Prompt, tc.expectPrompt)

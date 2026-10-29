@@ -1679,9 +1679,6 @@ func TestRegisterConfigTokens(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			sanitizer.ResetSensitiveTokens()
-			defer sanitizer.ResetSensitiveTokens()
-
 			RegisterConfigTokens(tc.cfg)
 
 			got := sanitizer.SanitizeString(tc.input)

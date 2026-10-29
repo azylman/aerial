@@ -63,14 +63,6 @@ func getSensitiveTokens() []string {
 	return *p
 }
 
-// ResetSensitiveTokens clears all registered sensitive tokens (primarily for test isolation).
-func ResetSensitiveTokens() {
-	sensitiveTokensMu.Lock()
-	defer sensitiveTokensMu.Unlock()
-	empty := make([]string, 0)
-	sensitiveTokensPtr.Store(&empty)
-}
-
 // RegisterSensitiveTokens safely registers secret strings into the global redaction pool.
 // Uses a copy-on-write atomic swap so reads remain completely lock-free.
 func RegisterSensitiveTokens(tokens ...string) {
