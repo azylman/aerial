@@ -15,7 +15,7 @@ permissions:
 jobs:
   check-bootstrap:
     name: Check RoboRev Bootstrap State
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, ci]
     outputs:
       bootstrapped: ${{ steps.check.outputs.bootstrapped }}
     steps:
