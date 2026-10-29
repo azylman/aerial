@@ -792,6 +792,7 @@ func TestFormatChunkPrompt(t *testing.T) {
 		"[Chunk 1/3] Task 1: Schema (azylman/aerial, PR #101)", "=== Active Chunk (Chunk 2 of 3) ===", "Repository: azylman/aerial",
 		"Target Files: vanadis/main.go, vanadis/main_test.go", "Target Symbols: VanadisServer, FormatChunkPrompt",
 		"- [Chunk 3/3] Task 3: Webhook Advancement (azylman/aerial)", "optimizing all design and implementation choices for the `Build Objective`",
+		"./scripts/check-coverage.sh --service <svc> --check --gaps",
 		"Run after init: `grep -n -E \"VanadisServer|FormatChunkPrompt\" \"$SCRATCH_DIR/vanadis/main.go\" \"$SCRATCH_DIR/vanadis/main_test.go\"`",
 		"4. NEVER spawn or invoke subagents (`invoke_subagent`, `define_subagent`): Vanadis build chunks are already isolated leaf tasks—execute all file edits, tests, and verification directly in this turn.",
 		"5. Submit via `/share/aerial/scripts/aerial-pr.sh submit \"$SCRATCH_DIR\" \"<commit_msg>\" --vanadis-chunk build-999-chunk-2`",
