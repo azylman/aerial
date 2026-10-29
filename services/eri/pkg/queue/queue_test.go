@@ -2508,18 +2508,46 @@ func TestWorkerPool_DeliverDirect(t *testing.T) {
 
 func TestWorkerPool_DeliverStatusWidget(t *testing.T) {
 	t.Parallel()
+	const (
+		sysChanSnowflake = "1564150557705248879"
+		targetChan       = "target-chan-1"
+		threadSnowflake  = "1564150557705248880"
+		parentChan       = "parent-chan-1"
+	)
+	mockSess, _ := discordgo.New("Bot fake-token")
+	mockSess.State = discordgo.NewState()
+	mockSess.State.GuildAdd(&discordgo.Guild{
+		ID: "guild-1",
+		Channels: []*discordgo.Channel{
+			{ID: sysChanSnowflake, Name: "aerial-dev"},
+		},
+	})
+
 	tests := []struct {
 		name, widgetMsgID, expectErrContains, expectMsgID string
 		nilPool, nilSession                               bool
 		req                                               discord.StatusWidgetRequest
+		blockBuildCards                                   bool
+		parentBlockBuildCards                             bool
+		systemChannel                                     string
+		cachedChannel                                     *discordgo.Channel
+		expectDeliveredChannelID                          string
+		useMockSession                                    bool
 	}{
 		{name: "nil pool returns error", nilPool: true, expectErrContains: "worker pool is nil"},
 		{name: "nil session returns error", nilSession: true, req: discord.StatusWidgetRequest{ChannelID: "chan-1"}, expectErrContains: "discord session is not connected"},
-		{name: "injected WidgetDeliveryFunc is invoked", widgetMsgID: "widget-msg-123", req: discord.StatusWidgetRequest{ChannelID: "chan-1"}, expectMsgID: "widget-msg-123"},
+		{name: "injected WidgetDeliveryFunc is invoked without redirection", widgetMsgID: "widget-msg-123", req: discord.StatusWidgetRequest{ChannelID: targetChan}, expectMsgID: "widget-msg-123", expectDeliveredChannelID: targetChan},
+		{name: "block_build_cards redirects target channel to system channel snowflake", widgetMsgID: "widget-msg-456", req: discord.StatusWidgetRequest{ChannelID: targetChan}, blockBuildCards: true, systemChannel: sysChanSnowflake, expectMsgID: "widget-msg-456", expectDeliveredChannelID: sysChanSnowflake},
+		{name: "block_build_cards redirects thread to system channel via parent policy", widgetMsgID: "widget-msg-789", req: discord.StatusWidgetRequest{ChannelID: threadSnowflake}, parentBlockBuildCards: true, systemChannel: sysChanSnowflake, cachedChannel: &discordgo.Channel{ID: threadSnowflake, Type: discordgo.ChannelTypeGuildPublicThread, ParentID: parentChan, Name: "build-thread"}, expectMsgID: "widget-msg-789", expectDeliveredChannelID: sysChanSnowflake},
+		{name: "block_build_cards resolves channel name system_channel via discord session", widgetMsgID: "widget-msg-321", req: discord.StatusWidgetRequest{ChannelID: targetChan}, blockBuildCards: true, systemChannel: "aerial-dev", useMockSession: true, expectMsgID: "widget-msg-321", expectDeliveredChannelID: sysChanSnowflake},
+		{name: "block_build_cards unresolvable system channel falls back to target channel", widgetMsgID: "widget-msg-101", req: discord.StatusWidgetRequest{ChannelID: targetChan}, blockBuildCards: true, systemChannel: "nonexistent-channel", expectMsgID: "widget-msg-101", expectDeliveredChannelID: targetChan},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			if tc.cachedChannel != nil {
+				CacheDiscordChannel(tc.cachedChannel)
+			}
 			if tc.nilPool || tc.nilSession {
 				var p *WorkerPool
 				if !tc.nilPool {
@@ -2530,10 +2558,36 @@ func TestWorkerPool_DeliverStatusWidget(t *testing.T) {
 				}
 				return
 			}
-			p := &WorkerPool{}
-			p.SetWidgetDeliveryFunc(func(req discord.StatusWidgetRequest) (string, error) { return tc.widgetMsgID, nil })
-			if msgID, err := p.DeliverStatusWidget(tc.req); err != nil || msgID != tc.expectMsgID {
+			var deliveredChanID string
+			p := &WorkerPool{
+				cfg: WorkerPoolConfig{
+					ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+						if tc.blockBuildCards && (channelID == targetChan || channelName == targetChan) {
+							return config.ChannelPolicy{BlockBuildCards: true}
+						}
+						if tc.parentBlockBuildCards && (channelID == parentChan || channelName == parentChan) {
+							return config.ChannelPolicy{BlockBuildCards: true}
+						}
+						return config.ChannelPolicy{}
+					},
+				},
+			}
+			if tc.useMockSession {
+				p.SetDiscordSession(mockSess)
+			}
+			if tc.systemChannel != "" {
+				p.appCfg = config.NewFromData(&config.ConfigData{SystemChannel: tc.systemChannel})
+			}
+			p.SetWidgetDeliveryFunc(func(req discord.StatusWidgetRequest) (string, error) {
+				deliveredChanID = req.ChannelID
+				return tc.widgetMsgID, nil
+			})
+			msgID, err := p.DeliverStatusWidget(tc.req)
+			if err != nil || msgID != tc.expectMsgID {
 				t.Fatalf("unexpected delivery: err=%v msgID=%q", err, msgID)
+			}
+			if tc.expectDeliveredChannelID != "" && deliveredChanID != tc.expectDeliveredChannelID {
+				t.Fatalf("delivered ChannelID = %q, want %q", deliveredChanID, tc.expectDeliveredChannelID)
 			}
 		})
 	}

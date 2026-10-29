@@ -198,33 +198,53 @@ func IsAdmin(adminUsers []string, identifiers ...string) bool {
 	return false
 }
 
-func ResolveChannelPolicy(channels map[string]ChannelPolicy, channelID, channelName string) ChannelPolicy {
+func resolveDefaultChannelPolicy(channels map[string]ChannelPolicy) ChannelPolicy {
 	def, hasDef := getChannelPolicyRaw(channels, "default")
 	if !hasDef {
 		defaultIgnoreBots := true
-		def = ChannelPolicy{
+		return ChannelPolicy{
 			Mode:       "threads",
 			IgnoreBots: &defaultIgnoreBots,
 		}
-	} else {
-		if def.Mode == "" {
-			def.Mode = "threads"
-		}
 	}
+	if def.Mode == "" {
+		def.Mode = "threads"
+	}
+	return def
+}
 
-	var matched ChannelPolicy
-	var found bool
-
+func matchChannelPolicy(channels map[string]ChannelPolicy, channelID, channelName string) (ChannelPolicy, bool) {
 	if normID := strings.TrimSpace(channelID); normID != "" {
-		matched, found = getChannelPolicyRaw(channels, normID)
-	}
-
-	if !found {
-		if normName := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(channelName)), "#"); normName != "" {
-			matched, found = getChannelPolicyRaw(channels, normName)
+		if matched, found := getChannelPolicyRaw(channels, normID); found {
+			return matched, true
 		}
 	}
+	if normName := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(channelName)), "#"); normName != "" {
+		return getChannelPolicyRaw(channels, normName)
+	}
+	return ChannelPolicy{}, false
+}
 
+func inheritHooks(res, def ChannelHooksConfig) ChannelHooksConfig {
+	out := res
+	if out.OnWake == nil {
+		out.OnWake = def.OnWake
+	}
+	if out.PreTurn == nil {
+		out.PreTurn = def.PreTurn
+	}
+	if out.PostTurn == nil {
+		out.PostTurn = def.PostTurn
+	}
+	out.OnWake = clonePtr(out.OnWake)
+	out.PreTurn = clonePtr(out.PreTurn)
+	out.PostTurn = clonePtr(out.PostTurn)
+	return out
+}
+
+func ResolveChannelPolicy(channels map[string]ChannelPolicy, channelID, channelName string) ChannelPolicy {
+	def := resolveDefaultChannelPolicy(channels)
+	matched, found := matchChannelPolicy(channels, channelID, channelName)
 	if !found {
 		return cloneChannelPolicy(def)
 	}
@@ -242,6 +262,9 @@ func ResolveChannelPolicy(channels map[string]ChannelPolicy, channelID, channelN
 	if res.Effort == "" && def.Effort != "" {
 		res.Effort = def.Effort
 	}
+	if !res.BlockBuildCards {
+		res.BlockBuildCards = def.BlockBuildCards
+	}
 	if res.IgnoreBots == nil {
 		res.IgnoreBots = clonePtr(def.IgnoreBots)
 	} else {
@@ -252,18 +275,7 @@ func ResolveChannelPolicy(channels map[string]ChannelPolicy, channelID, channelN
 	} else {
 		res.AmbientWakeThreshold = clonePtr(res.AmbientWakeThreshold)
 	}
-	if res.Hooks.OnWake == nil {
-		res.Hooks.OnWake = def.Hooks.OnWake
-	}
-	if res.Hooks.PreTurn == nil {
-		res.Hooks.PreTurn = def.Hooks.PreTurn
-	}
-	if res.Hooks.PostTurn == nil {
-		res.Hooks.PostTurn = def.Hooks.PostTurn
-	}
-	res.Hooks.OnWake = clonePtr(res.Hooks.OnWake)
-	res.Hooks.PreTurn = clonePtr(res.Hooks.PreTurn)
-	res.Hooks.PostTurn = clonePtr(res.Hooks.PostTurn)
+	res.Hooks = inheritHooks(res.Hooks, def.Hooks)
 	if res.AmbientContext != nil {
 		res.AmbientContext = cloneAmbientContextConfig(res.AmbientContext)
 	} else if def.AmbientContext != nil {

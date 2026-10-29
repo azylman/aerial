@@ -549,14 +549,39 @@ func (p *WorkerPool) DeliverDirectWithAttachments(channelID, text string, attach
 	return delivery.SendMessageWithAttachments(p.DiscordSession(), channelID, text, attachments)
 }
 
+func (p *WorkerPool) resolveChannelPolicy(channelID, channelName string) config.ChannelPolicy {
+	if p.cfg.ResolveChannelPolicy != nil {
+		return p.cfg.ResolveChannelPolicy(channelID, channelName)
+	}
+	if p.appCfg != nil {
+		return p.appCfg.ResolveChannelPolicy(channelID, channelName)
+	}
+	return config.ActiveConfig().ResolveChannelPolicy(channelID, channelName)
+}
+
 func (p *WorkerPool) DeliverStatusWidget(req discord.StatusWidgetRequest) (string, error) {
 	if p == nil {
 		return "", errors.New("worker pool is nil")
 	}
+	sess := p.DiscordSession()
+	effID, effName, _, _ := ResolveChannelAndThread(sess, req.ChannelID)
+	policy := p.resolveChannelPolicy(effID, effName)
+	if !policy.BlockBuildCards && req.ChannelID != effID && req.ChannelID != "" {
+		if targetPolicy := p.resolveChannelPolicy(req.ChannelID, ""); targetPolicy.BlockBuildCards {
+			policy.BlockBuildCards = true
+		}
+	}
+	if policy.BlockBuildCards {
+		sysChan := p.systemChannel()
+		if sysChan != "" {
+			if sysChanID, err := p.ResolveChannelID(sysChan); err == nil && sysChanID != "" && IsNumericSnowflake(sysChanID) {
+				req.ChannelID = sysChanID
+			}
+		}
+	}
 	if p.cfg.WidgetDeliveryFunc != nil {
 		return p.cfg.WidgetDeliveryFunc(req)
 	}
-	sess := p.DiscordSession()
 	if sess == nil {
 		return "", errors.New("discord session is not connected")
 	}
