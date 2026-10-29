@@ -596,8 +596,14 @@ func (s *RouterServer) processNomadAllocationEvent(ctx context.Context, rawPaylo
 	if s.isAllocationRestartingForJob(ctx, alloc.JobID, alloc.TaskStates) {
 		return nil
 	}
-	if alloc.DesiredStatus == "run" && (alloc.ClientStatus == "running" || (alloc.ClientStatus == "complete" && !hasFailedTaskState(alloc.TaskStates))) && s.isNomadJobHealthy(ctx, alloc.JobID) {
-		return s.HandleNomadJobSuccess(ctx, alloc.JobID, alloc.ID)
+	if alloc.DesiredStatus == "run" && (alloc.ClientStatus == "running" || (alloc.ClientStatus == "complete" && !hasFailedTaskState(alloc.TaskStates))) {
+		if s.isNomadJobHealthy(ctx, alloc.JobID) {
+			return s.HandleNomadJobSuccess(ctx, alloc.JobID, alloc.ID)
+		}
+		if alloc.ClientStatus == "running" {
+			s.recordNomadJobProgress(ctx, alloc.JobID, "verifying_health")
+		}
+		return nil
 	}
 	return nil
 }
@@ -707,6 +713,24 @@ func (s *RouterServer) HandleNomadJobFailure(ctx context.Context, jobID, refID, 
 	return nil
 }
 
+func (s *RouterServer) recordNomadJobProgress(ctx context.Context, jobID, state string) {
+	cleanJob := strings.TrimSpace(jobID)
+	cleanState := strings.TrimSpace(state)
+	if s == nil || s.registry == nil || cleanJob == "" || cleanState == "" {
+		return
+	}
+	repo, prNumber, updated, err := s.registry.RecordPRJobState(ctx, cleanJob, cleanState)
+	if err != nil {
+		log.Printf("[webhooks-router] [nomad] warning recording job progress for %s (state: %s): %v", cleanJob, cleanState, err)
+		return
+	}
+	if updated && prNumber > 0 && repo != "" {
+		if err := s.SyncPRWidget(ctx, repo, prNumber); err != nil {
+			log.Printf("[webhooks-router] [widget] warning syncing nomad job progress widget for %s#%d (job: %s, state: %s): %v", repo, prNumber, cleanJob, cleanState, err)
+		}
+	}
+}
+
 // HandleNomadJobSuccess processes a confirmed successful deployment or running allocation for a Nomad job.
 func (s *RouterServer) HandleNomadJobSuccess(ctx context.Context, jobID, refID string) error {
 	cleanJob := strings.TrimSpace(jobID)
@@ -723,6 +747,11 @@ func (s *RouterServer) HandleNomadJobSuccess(ctx context.Context, jobID, refID s
 		return err
 	}
 	if !updated {
+		if prNumber > 0 && repo != "" {
+			if err := s.SyncPRWidget(ctx, repo, prNumber); err != nil {
+				log.Printf("[webhooks-router] [widget] warning syncing nomad intermediate deploy widget for %s#%d (job: %s): %v", repo, prNumber, cleanJob, err)
+			}
+		}
 		return nil
 	}
 	log.Printf("[webhooks-router] [nomad] deployment confirmed for %s#%d (job: %s, commit: %s, target: %s, ref: %s)",

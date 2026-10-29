@@ -204,6 +204,12 @@ type mockPRRegistry struct {
 	hasExpectedRes      bool
 	hasExpectedErr      error
 
+	recordJobStateCalls   []recordJobStateCall
+	recordJobStateRepo    string
+	recordJobStatePRNum   int
+	recordJobStateUpdated bool
+	recordJobStateErr     error
+
 	err error
 }
 
@@ -474,6 +480,25 @@ func (m *mockPRRegistry) HasExpectedDeployJobs(ctx context.Context, repo string,
 	return m.hasExpectedRes, nil
 }
 
+type recordJobStateCall struct {
+	jobName  string
+	jobState string
+}
+
+func (m *mockPRRegistry) RecordPRJobState(ctx context.Context, jobName, jobState string) (string, int, bool, error) {
+	if m.err != nil {
+		return "", 0, false, m.err
+	}
+	m.recordJobStateCalls = append(m.recordJobStateCalls, recordJobStateCall{
+		jobName:  jobName,
+		jobState: jobState,
+	})
+	if m.recordJobStateErr != nil {
+		return "", 0, false, m.recordJobStateErr
+	}
+	return m.recordJobStateRepo, m.recordJobStatePRNum, m.recordJobStateUpdated, nil
+}
+
 type mockOutboundDispatcher struct {
 	mu                 sync.Mutex
 	gitPushCalls       []GitPushEventRequest
@@ -605,7 +630,7 @@ func mkHangarEvt(event, job, repo, sha string, pr int, targetID, status, details
 }
 
 func mkDeployedReg(targetID string, pr int, sha, repo string, updated bool) *mockPRRegistry {
-	return &mockPRRegistry{deployedTargetID: targetID, deployedPRNum: pr, deployedMergeSHA: sha, deployedRepo: repo, deployedUpdated: updated}
+	return &mockPRRegistry{resolveTargetID: targetID, deployedTargetID: targetID, deployedPRNum: pr, deployedMergeSHA: sha, deployedRepo: repo, deployedUpdated: updated}
 }
 
 func mkDeployFailedReg(targetID string, pr int, sha, repo string, updated bool) *mockPRRegistry {
@@ -2021,6 +2046,7 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 		prDBStatus      string
 		prDBBanner      string
 		prDBCIChecks    string
+		prDBMetadata    string
 		buildDBStatus   string
 		chunk1DBStatus  string
 		repo            string
@@ -2251,6 +2277,48 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 			wantVanadisStep: "Waiting on CI (1/2 passed)",
 			wantDispatched:  false,
 		},
+		{
+			name:           "Postgres standalone PR merged status with candidate jobs sets per-job active step and skip sink",
+			repo:           "azylman/aerial",
+			prNumber:       101,
+			prDBStatus:     "merged",
+			prDBMetadata:   `{"jobs": ["eri", "haro"]}`,
+			wantDispatched: true,
+			wantWidgetID:   "pr-azylman/aerial-101",
+			wantStatus:     "merged",
+			wantActiveStep: "`eri`: ⏳ building image\n`haro`: ⏳ building image",
+			wantSkipSink:   true,
+			wantChannel:    "1555405874565091380",
+			wantChunks:     1,
+		},
+		{
+			name:           "Postgres standalone PR synced status with deployed jobs and ci_checks sets active step and skip sink",
+			repo:           "azylman/aerial",
+			prNumber:       101,
+			prDBStatus:     "synced",
+			prDBMetadata:   `{"jobs": ["eri", "haro"], "deployed_jobs": ["eri"]}`,
+			wantDispatched: true,
+			wantWidgetID:   "pr-azylman/aerial-101",
+			wantStatus:     "synced",
+			wantActiveStep: "`eri`: ✅ healthy\n`haro`: ⏳ building image",
+			wantSkipSink:   true,
+			wantChannel:    "1555405874565091380",
+			wantChunks:     1,
+		},
+		{
+			name:           "Postgres standalone PR deploying status with started and deployed jobs sets active step and skip sink",
+			repo:           "azylman/aerial",
+			prNumber:       101,
+			prDBStatus:     "deploying",
+			prDBMetadata:   `{"jobs": ["coven", "eri", "haro"], "started_jobs": ["haro"], "job_states": {"haro": "verifying_health"}, "deployed_jobs": ["eri"]}`,
+			wantDispatched: true,
+			wantWidgetID:   "pr-azylman/aerial-101",
+			wantStatus:     "deploying",
+			wantActiveStep: "`coven`: ⏳ building image\n`eri`: ✅ healthy\n`haro`: 🔄 verifying health",
+			wantSkipSink:   true,
+			wantChannel:    "1555405874565091380",
+			wantChunks:     1,
+		},
 	}
 
 	for _, tc := range tests {
@@ -2360,6 +2428,13 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 									ciChecks = "{}"
 								}
 								*dest[7].(*string) = ciChecks
+							}
+							if len(dest) > 8 {
+								meta := tc.prDBMetadata
+								if meta == "" {
+									meta = "{}"
+								}
+								*dest[8].(*string) = meta
 							}
 							return nil
 						}}

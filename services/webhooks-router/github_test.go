@@ -953,6 +953,7 @@ func TestDispatchWorkflowRunImages(t *testing.T) {
 		widgetErr       error
 		wantImageCalls  int
 		wantDeployCalls int
+		wantWidgetCalls int
 		wantErr         bool
 	}{
 		{
@@ -963,6 +964,18 @@ func TestDispatchWorkflowRunImages(t *testing.T) {
 			jobsBody:        `{"jobs":[{"name":"Build & Push Images to GHCR (brain)","status":"completed","conclusion":"success"}]}`,
 			wantImageCalls:  1,
 			wantDeployCalls: 1,
+			wantWidgetCalls: 1,
+		},
+		{
+			name:            "main success with matched jobs widget sync warning still succeeds",
+			headBranch:      "main",
+			conclusion:      "success",
+			jobsStatus:      http.StatusOK,
+			jobsBody:        `{"jobs":[{"name":"Build & Push Images to GHCR (brain)","status":"completed","conclusion":"success"}]}`,
+			widgetErr:       errors.New("transient widget error"),
+			wantImageCalls:  1,
+			wantDeployCalls: 1,
+			wantWidgetCalls: 1,
 		},
 		{
 			name:       "jobs API 500 error",
@@ -1121,6 +1134,9 @@ func TestDispatchWorkflowRunImages(t *testing.T) {
 			}
 			if len(reg.deployingCalls) != tc.wantDeployCalls {
 				t.Errorf("deployingCalls = %d, want %d", len(reg.deployingCalls), tc.wantDeployCalls)
+			}
+			if disp != nil && tc.wantWidgetCalls > 0 && len(disp.WidgetCalls()) != tc.wantWidgetCalls {
+				t.Errorf("widgetCalls = %d, want %d", len(disp.WidgetCalls()), tc.wantWidgetCalls)
 			}
 		})
 	}
@@ -1604,27 +1620,118 @@ func TestFormatCIChecksActiveStep_Unit(t *testing.T) {
 		name         string
 		prStatus     string
 		ciChecksJSON string
+		metadataJSON string
+		wantLegacy   string
 		want         string
 	}{
-		{name: "non-open status merged", prStatus: "merged", ciChecksJSON: `{"lint":"passed"}`, want: ""},
-		{name: "non-open status closed", prStatus: "closed", ciChecksJSON: `{"lint":"passed"}`, want: ""},
-		{name: "non-open status ci_failed", prStatus: "ci_failed", ciChecksJSON: `{"lint":"passed"}`, want: ""},
-		{name: "empty ciChecksJSON", prStatus: "open", ciChecksJSON: "", want: ""},
-		{name: "empty JSON object", prStatus: "open", ciChecksJSON: "{}", want: ""},
-		{name: "invalid JSON", prStatus: "open", ciChecksJSON: "not-json", want: ""},
-		{name: "single check passed", prStatus: "open", ciChecksJSON: `{"test":"passed"}`, want: "Waiting on CI (1/1 passed)"},
-		{name: "multiple checks all passed", prStatus: "open", ciChecksJSON: `{"lint":"passed","unit":"passed","integration":"passed"}`, want: "Waiting on CI (3/3 passed)"},
-		{name: "mixed passed and pending", prStatus: "open", ciChecksJSON: `{"lint":"passed","build":"pending","unit":"passed"}`, want: "Waiting on CI (2/3 passed)"},
-		{name: "all pending", prStatus: "open", ciChecksJSON: `{"lint":"pending","unit":"pending"}`, want: "Waiting on CI (0/2 passed)"},
-		{name: "any check failed returns empty", prStatus: "open", ciChecksJSON: `{"lint":"passed","unit":"failed"}`, want: ""},
+		{name: "non-open status merged legacy empty", prStatus: "merged", ciChecksJSON: `{"lint":"passed"}`, wantLegacy: "", want: "Building container images (1/1 completed)"},
+		{name: "non-open status closed", prStatus: "closed", ciChecksJSON: `{"lint":"passed"}`, wantLegacy: "", want: ""},
+		{name: "non-open status ci_failed", prStatus: "ci_failed", ciChecksJSON: `{"lint":"passed"}`, wantLegacy: "", want: ""},
+		{name: "empty ciChecksJSON", prStatus: "open", ciChecksJSON: "", wantLegacy: "", want: ""},
+		{name: "empty JSON object", prStatus: "open", ciChecksJSON: "{}", wantLegacy: "", want: ""},
+		{name: "invalid JSON", prStatus: "open", ciChecksJSON: "not-json", wantLegacy: "", want: ""},
+		{name: "single check passed", prStatus: "open", ciChecksJSON: `{"test":"passed"}`, wantLegacy: "Waiting on CI (1/1 passed)", want: "Waiting on CI (1/1 passed)"},
+		{name: "multiple checks all passed", prStatus: "open", ciChecksJSON: `{"lint":"passed","unit":"passed","integration":"passed"}`, wantLegacy: "Waiting on CI (3/3 passed)", want: "Waiting on CI (3/3 passed)"},
+		{name: "mixed passed and pending", prStatus: "open", ciChecksJSON: `{"lint":"passed","build":"pending","unit":"passed"}`, wantLegacy: "Waiting on CI (2/3 passed)", want: "Waiting on CI (2/3 passed)"},
+		{name: "all pending", prStatus: "open", ciChecksJSON: `{"lint":"pending","unit":"pending"}`, wantLegacy: "Waiting on CI (0/2 passed)", want: "Waiting on CI (0/2 passed)"},
+		{name: "any check failed returns empty", prStatus: "open", ciChecksJSON: `{"lint":"passed","unit":"failed"}`, wantLegacy: "", want: ""},
+
+		// Post-merge tests for formatPRWidgetActiveStep
+		{
+			name:         "merged with candidate jobs and started verifying_health",
+			prStatus:     "merged",
+			metadataJSON: `{"jobs":["eri","haro"],"started_jobs":["eri"],"deployed_jobs":[],"job_states":{"eri":"verifying_health"}}`,
+			want:         "`eri`: 🔄 verifying health\n`haro`: ⏳ building image",
+		},
+		{
+			name:         "synced with deployed job and starting job",
+			prStatus:     "synced",
+			metadataJSON: `{"jobs":["coven","eri"],"started_jobs":["eri"],"deployed_jobs":["coven"]}`,
+			want:         "`coven`: ✅ healthy\n`eri`: 🔄 starting",
+		},
+		{
+			name:         "deploying status with empty started_jobs defaults candidate jobs to starting",
+			prStatus:     "deploying",
+			metadataJSON: `{"jobs":["eri","haro"]}`,
+			want:         "`eri`: 🔄 starting\n`haro`: 🔄 starting",
+		},
+		{
+			name:         "merged with buildJobRegex service matches in ci_checks and proxy normalization",
+			prStatus:     "merged",
+			ciChecksJSON: `{"Build & Push Images (proxy)":"passed","Build & Push Images (eri)":"in_progress"}`,
+			want:         "`eri`: ⏳ building image\n`mesh-proxy`: 🔄 starting",
+		},
+		{
+			name:         "merged with non-matching ci_checks falls back to container images count",
+			prStatus:     "merged",
+			ciChecksJSON: `{"Docker Build":"passed","Test Gate":"passed"}`,
+			want:         "Building container images (2/2 completed)",
+		},
+		{
+			name:         "merged with failed check returns empty",
+			prStatus:     "merged",
+			ciChecksJSON: `{"Docker Build":"failed","Test Gate":"passed"}`,
+			metadataJSON: `{"jobs":["eri"]}`,
+			want:         "",
+		},
+		{
+			name:         "merged fallback to meta ci_checks when ciChecksJSON is empty",
+			prStatus:     "merged",
+			metadataJSON: `{"ci_checks":{"Docker Build":"passed"}}`,
+			want:         "Building container images (1/1 completed)",
+		},
+		{
+			name:     "unsupported status returns empty",
+			prStatus: "deployed",
+			want:     "",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := formatCIChecksActiveStep(tc.prStatus, tc.ciChecksJSON)
+			gotLegacy := formatCIChecksActiveStep(tc.prStatus, tc.ciChecksJSON)
+			if tc.metadataJSON == "" && tc.prStatus == "open" {
+				if gotLegacy != tc.wantLegacy {
+					t.Fatalf("formatCIChecksActiveStep(%q, %q) = %q, want %q", tc.prStatus, tc.ciChecksJSON, gotLegacy, tc.wantLegacy)
+				}
+			}
+			got := formatPRWidgetActiveStep(tc.prStatus, tc.ciChecksJSON, tc.metadataJSON)
 			if got != tc.want {
-				t.Fatalf("formatCIChecksActiveStep(%q, %q) = %q, want %q", tc.prStatus, tc.ciChecksJSON, got, tc.want)
+				t.Fatalf("formatPRWidgetActiveStep(%q, %q, %q) = %q, want %q", tc.prStatus, tc.ciChecksJSON, tc.metadataJSON, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestExtractStringMapFromMetadata_Unit(t *testing.T) {
+	t.Parallel()
+
+	if res := extractStringMapFromMetadata(nil, "key"); res != nil {
+		t.Errorf("expected nil for nil meta, got %v", res)
+	}
+	if res := extractStringMapFromMetadata(map[string]interface{}{}, "key"); res != nil {
+		t.Errorf("expected nil for missing key, got %v", res)
+	}
+
+	metaObj := map[string]interface{}{
+		"job_states": map[string]interface{}{
+			" ERI ": "verifying_health",
+			"":      "invalid",
+			"HARO":  "starting",
+		},
+	}
+	gotObj := extractStringMapFromMetadata(metaObj, "job_states")
+	if gotObj["eri"] != "verifying_health" || gotObj["haro"] != "starting" {
+		t.Errorf("unexpected map from interface: %+v", gotObj)
+	}
+
+	metaStr := map[string]interface{}{
+		"job_states": map[string]string{
+			" CADVISOR ": " healthy ",
+		},
+	}
+	gotStr := extractStringMapFromMetadata(metaStr, "job_states")
+	if gotStr["cadvisor"] != "healthy" {
+		t.Errorf("unexpected map from string map: %+v", gotStr)
 	}
 }
