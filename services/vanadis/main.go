@@ -44,16 +44,18 @@ var (
 
 // Config holds runtime configuration for the Vanadis orchestrator service.
 type Config struct {
-	Port        string
-	PostgresURL string
-	BrainURL    string
+	Port              string
+	PostgresURL       string
+	BrainURL          string
+	WebhooksRouterURL string
 }
 
 // VanadisYAMLConfig defines the declarative file schema for /config/vanadis.yaml.
 type VanadisYAMLConfig struct {
-	Port        string `yaml:"port"`
-	PostgresURL string `yaml:"postgres_url"`
-	BrainURL    string `yaml:"brain_url"`
+	Port              string `yaml:"port"`
+	PostgresURL       string `yaml:"postgres_url"`
+	BrainURL          string `yaml:"brain_url"`
+	WebhooksRouterURL string `yaml:"webhooks_router_url"`
 }
 
 var (
@@ -111,9 +113,10 @@ func LoadConfig(configPath string) Config {
 		pgURL = fmt.Sprintf("postgres://aerial:aerial_secure_pass@%s:5432/aerial?sslmode=disable", host)
 	}
 	return Config{
-		Port:        firstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4025"),
-		PostgresURL: pgURL,
-		BrainURL:    strings.TrimRight(firstNonEmpty(os.Getenv("BRAIN_INTERNAL_URL"), os.Getenv("BRAIN_URL"), fileCfg.BrainURL, "http://127.0.0.1:8088"), "/"),
+		Port:              firstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4025"),
+		PostgresURL:       pgURL,
+		BrainURL:          strings.TrimRight(firstNonEmpty(os.Getenv("BRAIN_INTERNAL_URL"), os.Getenv("BRAIN_URL"), fileCfg.BrainURL, "http://127.0.0.1:8088"), "/"),
+		WebhooksRouterURL: strings.TrimRight(firstNonEmpty(os.Getenv("WEBHOOKS_ROUTER_URL"), fileCfg.WebhooksRouterURL, "http://webhooks-router.aerial"), "/"),
 	}
 }
 
@@ -722,44 +725,39 @@ func (s *VanadisServer) postBrainJSON(ctx context.Context, path string, payload 
 	return io.ReadAll(resp.Body)
 }
 
-func (s *VanadisServer) syncBuildWidget(ctx context.Context, build VanadisBuild, chunks []VanadisChunk, banner string) {
+func (s *VanadisServer) syncBuildWidget(ctx context.Context, buildID, banner string) {
 	if s == nil || s.httpClient == nil {
 		return
 	}
-	wChunks := make([]StatusWidgetChunk, len(chunks))
-	for i, c := range chunks {
-		chunkStatus := normalizeWidgetStatus(c.Status)
-		if chunkStatus == "merged" {
-			chunkStatus = "deployed"
-		}
-		wChunks[i] = StatusWidgetChunk{
-			ID:          c.ID,
-			Index:       c.ChunkIndex,
-			Repo:        firstNonEmpty(c.Repo, "azylman/aerial"),
-			Title:       c.Title,
-			Status:      chunkStatus,
-			PRNumber:    c.PRNumber,
-			StartedAt:   c.StartedAt,
-			CompletedAt: c.CompletedAt,
-			UpdatedAt:   c.UpdatedAt,
-		}
-	}
-	payload := StatusWidgetRequest{
-		ChannelID: build.ThreadID, MessageID: build.StatusMessageID, ID: build.ID, Tier: build.Tier,
-		Title: firstNonEmpty(strings.TrimSpace(build.Title), build.Objective), Status: build.Status, Banner: banner, Chunks: wChunks,
-	}
-	respBody, err := s.postBrainJSON(ctx, "/discord/widget", payload, 4<<10)
-	if err != nil {
-		log.Printf("[vanadis] warning: post discord widget failed for build %s: %v", build.ID, err)
+	cleanBuildID := strings.TrimSpace(buildID)
+	if cleanBuildID == "" {
 		return
 	}
-	var res struct {
-		MessageID string `json:"message_id"`
+	cleanBanner := strings.TrimSpace(banner)
+	payload := map[string]string{
+		"build_id": cleanBuildID,
+		"banner":   cleanBanner,
 	}
-	if err := json.Unmarshal(respBody, &res); err == nil && res.MessageID != "" && res.MessageID != build.StatusMessageID && s.store != nil {
-		if err := s.store.UpdateBuildStatusMessageID(ctx, build.ID, res.MessageID); err != nil {
-			log.Printf("[vanadis] warning: failed to persist status_message_id for build %s: %v", build.ID, err)
-		}
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("[vanadis] warning: marshal widget sync payload failed for build %s: %v", cleanBuildID, err)
+		return
+	}
+	routerURL := strings.TrimRight(firstNonEmpty(s.cfg.WebhooksRouterURL, "http://127.0.0.1:4020"), "/")
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, routerURL+"/internal/widget/sync", bytes.NewReader(bodyBytes))
+	if err != nil {
+		log.Printf("[vanadis] warning: create widget sync request failed for build %s: %v", cleanBuildID, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		log.Printf("[vanadis] warning: post widget sync failed for build %s: %v", cleanBuildID, err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Printf("[vanadis] warning: widget sync for build %s returned status %d", cleanBuildID, resp.StatusCode)
 	}
 }
 
@@ -813,7 +811,6 @@ func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string,
 		chunks[activeIdx].StartedAt = now
 	}
 	chunks[activeIdx].UpdatedAt = now
-	s.syncBuildWidget(ctx, *build, chunks, "")
 	prompt, err := FormatChunkPrompt(*build, chunks, activeIdx)
 	if err != nil {
 		return fmt.Errorf("format chunk prompt: %w", err)
@@ -832,9 +829,8 @@ func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string,
 			if bErr := s.store.UpdateBuildStatus(ctx, build.ID, "failed"); bErr != nil {
 				log.Printf("[vanadis] failed marking build %s failed on final attempt: %v", build.ID, bErr)
 			}
-			failedNow := time.Now().UTC()
-			build.Status, chunks[activeIdx].Status, chunks[activeIdx].CompletedAt, chunks[activeIdx].UpdatedAt = "failed", "failed", failedNow, failedNow
-			s.syncBuildWidget(ctx, *build, chunks, fmt.Sprintf("⚠️ Chunk %d execution failed: %v", chunkIndex+1, err))
+			attempt := 1
+			s.syncBuildWidget(ctx, build.ID, fmt.Sprintf("Chunk %d/%d (%s) failed to dispatch to Brain after %d attempts: %v", chunk.ChunkIndex+1, len(chunks), chunk.Title, attempt, err))
 		}
 		return err
 	}
@@ -963,11 +959,17 @@ func parseCreateBuildChunks(buildID, repo string, now time.Time, rawChunks []Cre
 		if err != nil {
 			return nil, fmt.Errorf("chunk[%d] invalid effort: %w", i, err)
 		}
+		status := "pending"
+		var startedAt time.Time
+		if i == 0 {
+			status = "running"
+			startedAt = now
+		}
 		chunks[i] = VanadisChunk{
 			ID: chunkID, BuildID: buildID, ChunkIndex: i,
 			Repo: firstNonEmpty(normalizeRepo(c.Repo), repo), Title: title, Instructions: instructions,
 			TargetFiles: nonNilSlice(c.TargetFiles), TargetSymbols: nonNilSlice(c.TargetSymbols), Effort: effort,
-			AcceptanceCriteria: nonNilSlice(c.AcceptanceCriteria), Status: "pending", CreatedAt: now, UpdatedAt: now,
+			AcceptanceCriteria: nonNilSlice(c.AcceptanceCriteria), Status: status, StartedAt: startedAt, CreatedAt: now, UpdatedAt: now,
 		}
 	}
 	return chunks, nil
@@ -1026,10 +1028,7 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusInternalServerError, fmt.Sprintf("failed to create build: %v", err))
 		return
 	}
-	s.syncBuildWidget(r.Context(), build, chunks, "")
-	if updatedBuild, _, gErr := s.store.GetBuild(r.Context(), buildID); gErr == nil && updatedBuild != nil {
-		build.StatusMessageID = updatedBuild.StatusMessageID
-	}
+	s.syncBuildWidget(r.Context(), build.ID, "")
 	if err := s.insertRiverJob(r.Context(), ExecuteChunkArgs{BuildID: buildID, ChunkIndex: 0}); err != nil {
 		if statusErr := s.store.UpdateBuildStatus(r.Context(), buildID, "failed"); statusErr != nil {
 			log.Printf("[vanadis] warning marking build %s failed after enqueue error: %v", buildID, statusErr)
@@ -1072,7 +1071,7 @@ func (s *VanadisServer) cancelBuildChunksAndPrompts(ctx context.Context, buildID
 	}
 	if existing != nil {
 		existing.Status = "cancelled"
-		s.syncBuildWidget(ctx, *existing, existingChunks, "")
+		s.syncBuildWidget(ctx, buildID, "")
 	}
 }
 

@@ -396,6 +396,31 @@ func (m *memoryVanadisStore) AdvanceChunkByPR(_ context.Context, repo string, pr
 				}
 
 				if nextChunkIdx >= 0 {
+					for ci := range list {
+						if list[ci].ChunkIndex == nextChunkIdx && list[ci].Status == "pending" {
+							list[ci].Status = "running"
+							if list[ci].StartedAt.IsZero() {
+								list[ci].StartedAt = now
+							}
+							list[ci].UpdatedAt = now
+							m.chunks[bID] = list
+							break
+						}
+					}
+					var updatedSummaries []VanadisChunkSummary
+					for _, c := range m.chunks[bID] {
+						updatedSummaries = append(updatedSummaries, VanadisChunkSummary{
+							ID:          c.ID,
+							ChunkIndex:  c.ChunkIndex,
+							Repo:        c.Repo,
+							Title:       c.Title,
+							Status:      c.Status,
+							PRNumber:    c.PRNumber,
+							StartedAt:   c.StartedAt,
+							CompletedAt: c.CompletedAt,
+							UpdatedAt:   c.UpdatedAt,
+						})
+					}
 					return &VanadisAdvancementResult{
 						Matched:          true,
 						Advanced:         !wasMerged,
@@ -410,7 +435,7 @@ func (m *memoryVanadisStore) AdvanceChunkByPR(_ context.Context, repo string, pr
 						MergedChunkTitle: list[i].Title,
 						NextChunkIndex:   nextChunkIdx,
 						BuildCompleted:   false,
-						Chunks:           summaries,
+						Chunks:           updatedSummaries,
 					}, nil
 				}
 
@@ -512,7 +537,7 @@ func TestLoadConfigAndEnv(t *testing.T) {
 	defer func() {
 		vanadisFallbackConfigPath, lookupHostFn = origFallback, origLookup
 	}()
-	for _, k := range []string{"PORT", "POSTGRES_URL", "DATABASE_URL", "BRAIN_INTERNAL_URL", "BRAIN_URL", "CONFIG_PATH"} {
+	for _, k := range []string{"PORT", "POSTGRES_URL", "DATABASE_URL", "BRAIN_INTERNAL_URL", "BRAIN_URL", "WEBHOOKS_ROUTER_URL", "CONFIG_PATH"} {
 		t.Setenv(k, "")
 	}
 	tmpDir := t.TempDir()
@@ -535,15 +560,15 @@ func TestLoadConfigAndEnv(t *testing.T) {
 			if !strings.Contains(cfg.PostgresURL, tc.wantHost) {
 				t.Fatalf("expected postgres URL to contain %s, got %s", tc.wantHost, cfg.PostgresURL)
 			}
-			if tc.name == "DNSFallback_AerialPostgres" && (cfg.Port != "4025" || cfg.BrainURL != "http://127.0.0.1:8088") {
+			if tc.name == "DNSFallback_AerialPostgres" && (cfg.Port != "4025" || cfg.BrainURL != "http://127.0.0.1:8088" || cfg.WebhooksRouterURL != "http://webhooks-router.aerial") {
 				t.Fatalf("unexpected defaults: %+v", cfg)
 			}
 		})
 	}
 	yamlPath := filepath.Join(tmpDir, "vanadis.yaml")
-	_ = os.WriteFile(yamlPath, []byte("port: \"4099\"\npostgres_url: \"postgres://u:p@db:5432/vanadis\"\nbrain_url: \"http://eri.aerial:8088/\"\n"), 0o600)
+	_ = os.WriteFile(yamlPath, []byte("port: \"4099\"\npostgres_url: \"postgres://u:p@db:5432/vanadis\"\nbrain_url: \"http://eri.aerial:8088/\"\nwebhooks_router_url: \"http://router.aerial:4020/\"\n"), 0o600)
 	vanadisFallbackConfigPath = yamlPath
-	if cfg := LoadConfig(filepath.Join(tmpDir, "missing.yaml")); cfg.Port != "4099" || cfg.PostgresURL != "postgres://u:p@db:5432/vanadis" || cfg.BrainURL != "http://eri.aerial:8088" {
+	if cfg := LoadConfig(filepath.Join(tmpDir, "missing.yaml")); cfg.Port != "4099" || cfg.PostgresURL != "postgres://u:p@db:5432/vanadis" || cfg.BrainURL != "http://eri.aerial:8088" || cfg.WebhooksRouterURL != "http://router.aerial:4020" {
 		t.Fatalf("unexpected yaml config: %+v", cfg)
 	}
 	badPath := filepath.Join(tmpDir, "bad.yaml")
@@ -552,7 +577,8 @@ func TestLoadConfigAndEnv(t *testing.T) {
 	t.Setenv("PORT", "4030")
 	t.Setenv("POSTGRES_URL", "postgres://env:5432/db")
 	t.Setenv("BRAIN_INTERNAL_URL", "http://internal-brain:8088/")
-	if envCfg := LoadConfigFromEnv(); envCfg.Port != "4030" || envCfg.PostgresURL != "postgres://env:5432/db" || envCfg.BrainURL != "http://internal-brain:8088" {
+	t.Setenv("WEBHOOKS_ROUTER_URL", "http://env-router:4020/")
+	if envCfg := LoadConfigFromEnv(); envCfg.Port != "4030" || envCfg.PostgresURL != "postgres://env:5432/db" || envCfg.BrainURL != "http://internal-brain:8088" || envCfg.WebhooksRouterURL != "http://env-router:4020" {
 		t.Fatalf("unexpected env override config: %+v", envCfg)
 	}
 }
@@ -997,30 +1023,35 @@ func TestHTTPEndpoints(t *testing.T) {
 	memStore.updateBuildErr = errors.New("cancel db err")
 	checkCode(http.MethodPost, "/builds/"+buildID+"/cancel", nil, http.StatusInternalServerError)
 	memStore.updateBuildErr = nil
-	var cancelPromptBuildID, cancelWidgetStatus string
-	var cancelWidgetChunkStatuses []string
+	var cancelPromptBuildID, cancelWidgetSyncBuildID, cancelWidgetSyncBanner string
 	cancelBrainSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/dispatch/cancel" {
+		switch r.URL.Path {
+		case "/dispatch/cancel":
 			var req map[string]string
 			_ = json.NewDecoder(r.Body).Decode(&req)
 			cancelPromptBuildID = req["build_id"]
 			httpkit.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "cancelled_count": 1})
 			return
+		case "/internal/widget/sync":
+			var req map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			cancelWidgetSyncBuildID = req["build_id"]
+			cancelWidgetSyncBanner = req["banner"]
+			httpkit.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+			return
 		}
-		var req StatusWidgetRequest
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		cancelWidgetStatus, cancelWidgetChunkStatuses = req.Status, []string{req.Chunks[0].Status, req.Chunks[1].Status}
-		httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok", "message_id": "msg-cancel-widget"})
 	}))
 	defer cancelBrainSrv.Close()
 	srv.cfg.BrainURL = cancelBrainSrv.URL
+	srv.cfg.WebhooksRouterURL = cancelBrainSrv.URL
+	srv.httpClient = cancelBrainSrv.Client()
 	_ = memStore.UpdateChunkStatus(context.Background(), buildID+"-chunk-1", "merged")
 	_ = memStore.UpdateChunkStatus(context.Background(), "custom-chunk-2", "running")
 	memStore.updateChunkErr = errors.New("simulated chunk cancel update err")
 	checkCode(http.MethodPost, "/builds/"+buildID+"/cancel", bytes.NewReader(nil), http.StatusOK)
 	memStore.updateChunkErr = nil
-	if cancelPromptBuildID != buildID || cancelWidgetStatus != "cancelled" || len(cancelWidgetChunkStatuses) != 2 || cancelWidgetChunkStatuses[0] != "deployed" || cancelWidgetChunkStatuses[1] != "cancelled" {
-		t.Fatalf("unexpected cancel brain notifications: promptBuildID=%q widgetStatus=%q chunks=%v", cancelPromptBuildID, cancelWidgetStatus, cancelWidgetChunkStatuses)
+	if cancelPromptBuildID != buildID || cancelWidgetSyncBuildID != buildID || cancelWidgetSyncBanner != "" {
+		t.Fatalf("unexpected cancel notifications: promptBuildID=%q widgetSyncBuildID=%q banner=%q", cancelPromptBuildID, cancelWidgetSyncBuildID, cancelWidgetSyncBanner)
 	}
 	_ = memStore.UpdateBuildStatus(context.Background(), buildID, "completed")
 	checkCode(http.MethodPost, "/builds/"+buildID+"/cancel", bytes.NewReader(nil), http.StatusConflict)
@@ -1156,54 +1187,62 @@ func TestInitPostgresAndRiverAndRunServer(t *testing.T) {
 func TestSyncBuildWidget(t *testing.T) {
 	ctx := context.Background()
 	var nilSrv *VanadisServer
-	nilSrv.syncBuildWidget(ctx, VanadisBuild{}, nil, "")
+	nilSrv.syncBuildWidget(ctx, "b1", "")
 	store := newMemoryVanadisStore()
 	store.builds["b1"] = mkBuild("b1", "1555405874565091380", "", "", "")
-	var postedReq StatusWidgetRequest
+	var postedReq map[string]string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/discord/widget" {
+		if r.URL.Path != "/internal/widget/sync" {
 			http.NotFound(w, r)
 			return
 		}
 		_ = json.NewDecoder(r.Body).Decode(&postedReq)
 		_ = json.NewEncoder(w).Encode(map[string]string{
-			"status":     "delivered",
-			"message_id": "msg-new-widget-42",
+			"status": "delivered",
 		})
 	}))
 	defer ts.Close()
 	srv := &VanadisServer{
-		cfg:        Config{BrainURL: ts.URL},
+		cfg:        Config{WebhooksRouterURL: ts.URL},
 		httpClient: ts.Client(),
 		store:      store,
 	}
-	build := mkBuild("b1", "1555405874565091380", "Test Build Title", "Test Obj", "running")
-	startedAt, updatedAt := time.Date(2026, 10, 16, 18, 0, 0, 0, time.UTC), time.Date(2026, 10, 16, 18, 3, 0, 0, time.UTC)
-	chunk := mkChunk("chunk-0-id", "", 0, "Chunk 0", "", "", "running")
-	chunk.Repo, chunk.StartedAt, chunk.UpdatedAt = "aerial", startedAt, updatedAt
-	chunkMerged := mkChunk("chunk-1-id", "", 1, "Chunk 1", "", "", "merged")
-	chunkMerged.Repo, chunkMerged.StartedAt, chunkMerged.UpdatedAt = "aerial", startedAt, updatedAt
-	chunks := []VanadisChunk{chunk, chunkMerged}
-	srv.syncBuildWidget(ctx, build, chunks, "test banner")
-	if postedReq.ID != "b1" || postedReq.Title != "Test Build Title" || postedReq.Banner != "test banner" || len(postedReq.Chunks) != 2 || !postedReq.Chunks[0].StartedAt.Equal(startedAt) || !postedReq.Chunks[0].UpdatedAt.Equal(updatedAt) {
+	srv.syncBuildWidget(ctx, "b1", "test banner")
+	if postedReq["build_id"] != "b1" || postedReq["banner"] != "test banner" {
 		t.Errorf("Unexpected posted widget payload: %+v", postedReq)
 	}
-	if postedReq.Chunks[0].ID != "chunk-0-id" || postedReq.Chunks[1].ID != "chunk-1-id" {
-		t.Errorf("Expected chunk IDs to be populated on widget chunks, got chunk 0 ID %q, chunk 1 ID %q", postedReq.Chunks[0].ID, postedReq.Chunks[1].ID)
+
+	// Empty build ID early return
+	postedReq = nil
+	srv.syncBuildWidget(ctx, "   ", "banner")
+	if postedReq != nil {
+		t.Errorf("Expected nil postedReq for empty buildID, got %+v", postedReq)
 	}
-	if postedReq.Chunks[1].Status != "deployed" {
-		t.Errorf("Expected merged chunk status to be normalized to deployed on widget, got %q", postedReq.Chunks[1].Status)
-	}
-	if store.builds["b1"].StatusMessageID != "msg-new-widget-42" {
-		t.Errorf("Expected store status_message_id msg-new-widget-42, got %q", store.builds["b1"].StatusMessageID)
-	}
-	tsBadJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("{invalid-json"))
+
+	// Nil httpClient early return
+	nilClientSrv := &VanadisServer{cfg: Config{WebhooksRouterURL: ts.URL}}
+	nilClientSrv.syncBuildWidget(ctx, "b1", "")
+
+	// 500 error response status
+	tsErr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
 	}))
-	defer tsBadJSON.Close()
-	NewVanadisServer(Config{BrainURL: tsBadJSON.URL}, store, nil, tsBadJSON.Client()).syncBuildWidget(ctx, build, chunks, "")
-	store.updateBuildErr = errors.New("simulated store failure")
-	srv.syncBuildWidget(ctx, build, chunks, "")
+	defer tsErr.Close()
+	srvErr := &VanadisServer{
+		cfg:        Config{WebhooksRouterURL: tsErr.URL},
+		httpClient: tsErr.Client(),
+	}
+	srvErr.syncBuildWidget(ctx, "b1", "")
+
+	// Bad URL request creation error (e.g. invalid control char in URL or closed server)
+	tsClosed := httptest.NewServer(http.NotFoundHandler())
+	closedURL := tsClosed.URL
+	tsClosed.Close()
+	srvClosed := &VanadisServer{
+		cfg:        Config{WebhooksRouterURL: closedURL},
+		httpClient: ts.Client(),
+	}
+	srvClosed.syncBuildWidget(ctx, "b1", "")
 }
 
 func TestClassifyAndSummarizeBuildEntry(t *testing.T) {
