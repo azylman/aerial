@@ -303,16 +303,16 @@ func TestResolveAndValidateLocalImage_MIMETypesAndEdges(t *testing.T) {
 		t.Error("expected error for directory")
 	}
 
-	// Octet stream extensions (.png, .jpg, .gif, .webp)
-	for _, ext := range []string{".png", ".jpg", ".jpeg", ".gif", ".webp"} {
+	// Octet stream extensions (.png, .jpg, .gif, .webp, audio files)
+	for _, ext := range []string{".png", ".jpg", ".jpeg", ".gif", ".webp", ".wav", ".mp3", ".ogg", ".m4a", ".flac"} {
 		f := filepath.Join(tmpDir, "sample"+ext)
 		_ = os.WriteFile(f, []byte{0x00, 0x01, 0x02, 0x03, 0x04}, 0o644)
 		att, err := ResolveAndValidateLocalImage(f, tmpDir)
 		if err != nil {
 			t.Errorf("unexpected error for %s: %v", ext, err)
 		}
-		if att == nil || !strings.HasPrefix(att.ContentType, "image/") {
-			t.Errorf("expected image/ contentType for %s, got %+v", ext, att)
+		if att == nil || (!strings.HasPrefix(att.ContentType, "image/") && !strings.HasPrefix(att.ContentType, "audio/")) {
+			t.Errorf("expected image/ or audio/ contentType for %s, got %+v", ext, att)
 		}
 	}
 
@@ -334,6 +334,93 @@ func TestResolveAndValidateLocalImage_MIMETypesAndEdges(t *testing.T) {
 
 	// Relative path without baseDir
 	_, _ = ResolveAndValidateLocalImage("relative/path.png", "")
+}
+
+func TestResolveAndValidateLocalImage_AudioAndHeaderSniffing(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		filename   string
+		headerData []byte
+		wantMIME   string
+		wantErr    bool
+	}{
+		{
+			name:       "valid ogg with OggS header",
+			filename:   "audio.ogg",
+			headerData: []byte("OggS\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00"),
+			wantMIME:   "audio/ogg",
+			wantErr:    false,
+		},
+		{
+			name:       "valid m4a with ftyp box",
+			filename:   "audio.m4a",
+			headerData: []byte("\x00\x00\x00\x1cftypM4A \x00\x00\x02\x00isomiso2mp41"),
+			wantMIME:   "audio/mp4",
+			wantErr:    false,
+		},
+		{
+			name:       "valid wav with RIFF WAVE header",
+			filename:   "audio.wav",
+			headerData: []byte("RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x02\x00"),
+			wantMIME:   "audio/wav",
+			wantErr:    false,
+		},
+		{
+			name:       "valid flac with fLaC header",
+			filename:   "audio.flac",
+			headerData: []byte("fLaC\x00\x00\x00\x22\x10\x00\x10\x00"),
+			wantMIME:   "audio/flac",
+			wantErr:    false,
+		},
+		{
+			name:       "valid mp3 with ID3 header",
+			filename:   "audio.mp3",
+			headerData: []byte("ID3\x03\x00\x00\x00\x00\x00\x20"),
+			wantMIME:   "audio/mpeg",
+			wantErr:    false,
+		},
+		{
+			name:       "plaintext masquerading as ogg rejected",
+			filename:   "fake.ogg",
+			headerData: []byte("Hello, this is just plain text content masquerading as ogg audio file."),
+			wantMIME:   "",
+			wantErr:    true,
+		},
+		{
+			name:       "plaintext masquerading as m4a rejected",
+			filename:   "fake.m4a",
+			headerData: []byte("This is plain text not m4a."),
+			wantMIME:   "",
+			wantErr:    true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tmpDir := t.TempDir()
+			filePath := filepath.Join(tmpDir, tc.filename)
+			if err := os.WriteFile(filePath, tc.headerData, 0o600); err != nil {
+				t.Fatalf("failed to write test file: %v", err)
+			}
+
+			att, err := ResolveAndValidateLocalImage(filePath, tmpDir)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if att.ContentType != tc.wantMIME {
+				t.Errorf("got ContentType %q, want %q", att.ContentType, tc.wantMIME)
+			}
+		})
+	}
 }
 
 func TestAutoAttachNewMedia_EdgeCases(t *testing.T) {
