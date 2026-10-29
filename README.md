@@ -410,21 +410,26 @@ cd aerial
 ```
 
 ### Step 3: Configure Infisical Secrets & Nomad Variables
-Secrets and credentials are managed through Infisical and synced automatically to Nomad variables (`nomad/jobs/shared` and `nomad/jobs/eri`):
+Secrets and credentials can be managed through Infisical and synced automatically to Nomad variables, or initialized directly via Nomad CLI when cold-booting a cluster:
 ```bash
-# Example secrets managed in Infisical:
-# DISCORD_BOT_TOKEN=...
-# GITHUB_PAT=...
-# AERIAL_CONFIG_REPO_URL=https://github.com/your-username/my-aerial-config.git
+# Set shared credentials and tokens:
+nomad var put nomad/jobs/shared \
+  DISCORD_BOT_TOKEN="your-discord-bot-token" \
+  GITHUB_PAT="your-github-pat" \
+  POSTGRES_PASSWORD="securepassword"
+
+# Cold-boot initial configuration for eri and hangar:
+nomad var put nomad/jobs/eri CONFIG_YAML=@/path/to/my-aerial-config/config.yaml
+nomad var put nomad/jobs/hangar CONFIG_YAML=@/path/to/my-aerial-config/services/hangar/hangar.yaml
 ```
 
 ### Step 4: Deploy Nomad Stack
-Core jobs are defined in `nomad/jobs/*.nomad` and deployed via Nomad:
+Core jobs are defined in `nomad/jobs/*.nomad` and deployed via Nomad. If deploying onto a single-node or generic cluster without a dedicated `calibarn` node pool, pass `-var="node_pool=default"` to target the default node pool:
 ```bash
 # Run database migrations batch job:
 nomad job run nomad/jobs/db-migrate.nomad
 
-# Run core services:
+# Run core services (pass -var="node_pool=default" if not using a dedicated calibarn pool):
 nomad job run nomad/jobs/coredns.nomad
 nomad job run nomad/jobs/postgres.nomad
 nomad job run nomad/jobs/eri.nomad
