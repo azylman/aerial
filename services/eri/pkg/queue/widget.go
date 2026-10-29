@@ -27,8 +27,12 @@ func (p *WorkerPool) ensureWidgetMapsLocked() {
 }
 
 func isWidgetChunkInProgress(status string) bool {
-	norm := strings.ToLower(strings.TrimSpace(status))
-	return norm == "running" || norm == "coding" || norm == "in_progress"
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "running", "coding", "in_progress", "failed", "ci_failed", "deploy_failed", "conflict":
+		return true
+	default:
+		return false
+	}
 }
 
 func cloneStatusWidgetRequest(req discord.StatusWidgetRequest, stripSteps bool) discord.StatusWidgetRequest {
@@ -73,6 +77,9 @@ func (p *WorkerPool) syncWidgetChunkStatesLocked(req *discord.StatusWidgetReques
 		c := &req.Chunks[i]
 		if c.ID == "" && existing != nil && i < len(existing.Chunks) && existing.Chunks[i].ID != "" {
 			c.ID = existing.Chunks[i].ID
+		}
+		if c.ID == "" && len(req.Chunks) == 1 && strings.HasPrefix(req.ID, "pr-") {
+			c.ID = req.ID
 		}
 		if c.ID != "" {
 			p.chunkToBuildID[c.ID] = req.ID

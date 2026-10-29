@@ -2593,6 +2593,14 @@ func TestWorkerPool_DeliverStatusWidget(t *testing.T) {
 			expectDeliveredChunks: []discord.StatusWidgetChunk{{ID: "chunk-overlay", Status: "running", ActiveStep: "⚡ Running `view_file`... (1.2s)"}},
 		},
 		{
+			name:                  "defaults standalone pr widget chunk ID to widget ID and overlays active step on failed status",
+			widgetMsgID:           "msg-pr-rem",
+			priorSteps:            map[string]string{"pr-azylman/aerial-1250": "⚡ Executing `verify.sh`... (2.1s)"},
+			req:                   discord.StatusWidgetRequest{ID: "pr-azylman/aerial-1250", MessageID: "msg-pr-rem", ChannelID: targetChan, Status: "failed", Chunks: []discord.StatusWidgetChunk{{Status: "failed", PRNumber: 1250}}},
+			expectMsgID:           "msg-pr-rem",
+			expectDeliveredChunks: []discord.StatusWidgetChunk{{ID: "pr-azylman/aerial-1250", Status: "failed", PRNumber: 1250, ActiveStep: "⚡ Executing `verify.sh`... (2.1s)"}},
+		},
+		{
 			name:                  "clears active step on non-in-progress chunk",
 			widgetMsgID:           "msg-done",
 			priorSteps:            map[string]string{"chunk-done": "⚡ Running `view_file`... (1.2s)"},
@@ -2793,6 +2801,26 @@ func TestWorkerPool_ChunkStepStreaming(t *testing.T) {
 			expectFlushDelivered:  true,
 			expectFinishDelivered: true,
 		},
+		{
+			name:                  "failed chunk during CI remediation flushes and finishes cleanly",
+			chunkID:               "c-failed",
+			turnID:                "t-failed",
+			stepText:              "⚡ Executing `go test ./...`...",
+			seedWidget:            true,
+			chunkStatus:           "failed",
+			expectFlushDelivered:  true,
+			expectFinishDelivered: true,
+		},
+		{
+			name:                  "conflict chunk during rebase remediation flushes and finishes cleanly",
+			chunkID:               "c-conflict",
+			turnID:                "t-conflict",
+			stepText:              "⚡ Executing `git rebase origin/main`...",
+			seedWidget:            true,
+			chunkStatus:           "conflict",
+			expectFlushDelivered:  true,
+			expectFinishDelivered: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -2857,6 +2885,78 @@ func TestWorkerPool_ChunkStepStreaming(t *testing.T) {
 			}
 			if tc.expectFinishDelivered && count < 2 {
 				t.Fatalf("expected at least 2 delivered requests (flush + finish), got %d", count)
+			}
+		})
+	}
+}
+
+func TestExtractVanadisDispatchInfo(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		dispatch    db.Dispatch
+		wantChunkID string
+		wantBuildID string
+		wantIdx     int
+	}{
+		{
+			name:        "vanadis session ID with build and active chunk header",
+			dispatch:    db.Dispatch{SessionID: "vanadis-chunk-42", Prompt: "Build ID: build-99\n=== Active Chunk (Chunk 2 of 3) ===\nChunk ID: chunk-42"},
+			wantChunkID: "chunk-42",
+			wantBuildID: "build-99",
+			wantIdx:     1,
+		},
+		{
+			name:        "vanadis chunk ID from prompt when session ID is thread",
+			dispatch:    db.Dispatch{SessionID: "thread-1", Prompt: "CI failure\nBuild ID: build-77\nChunk ID: chunk-7"},
+			wantChunkID: "chunk-7",
+			wantBuildID: "build-77",
+			wantIdx:     -1,
+		},
+		{
+			name:        "standalone PR CI failure remediation prompt",
+			dispatch:    db.Dispatch{SessionID: "thread-1", Prompt: "❌ **GitHub Check Failed (`lint`)** on azylman/aerial (commit: abc1234, PR #1250, branch: `feat/test`)."},
+			wantChunkID: "pr-azylman/aerial-1250",
+			wantBuildID: "pr-azylman/aerial-1250",
+			wantIdx:     0,
+		},
+		{
+			name:        "standalone PR merge conflict remediation prompt",
+			dispatch:    db.Dispatch{SessionID: "thread-1", Prompt: "⚠️ **Merge Conflict Detected** on PR #1250 on azylman/aerial (branch: `feat/test`)."},
+			wantChunkID: "pr-azylman/aerial-1250",
+			wantBuildID: "pr-azylman/aerial-1250",
+			wantIdx:     0,
+		},
+		{
+			name:        "standalone PR Nomad deployment failure remediation prompt",
+			dispatch:    db.Dispatch{SessionID: "thread-1", Prompt: "🚨 **Nomad Deployment Failure (`eri`)** on azylman/aerial (PR #1250, branch: `main`)."},
+			wantChunkID: "pr-azylman/aerial-1250",
+			wantBuildID: "pr-azylman/aerial-1250",
+			wantIdx:     0,
+		},
+		{
+			name:        "standalone PR Hangar sync failure remediation prompt",
+			dispatch:    db.Dispatch{SessionID: "thread-1", Prompt: "🚨 **Hangar GitOps Sync Failure** for repo azylman/aerial (PR #1250, branch: `main`)."},
+			wantChunkID: "pr-azylman/aerial-1250",
+			wantBuildID: "pr-azylman/aerial-1250",
+			wantIdx:     0,
+		},
+		{
+			name:        "unrelated dispatch returns empty",
+			dispatch:    db.Dispatch{SessionID: "thread-1", Prompt: "Run daily summary"},
+			wantChunkID: "",
+			wantBuildID: "",
+			wantIdx:     -1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			chunkID, buildID, idx := extractVanadisDispatchInfo(tc.dispatch)
+			if chunkID != tc.wantChunkID || buildID != tc.wantBuildID || idx != tc.wantIdx {
+				t.Fatalf("extractVanadisDispatchInfo() = (%q, %q, %d), want (%q, %q, %d)",
+					chunkID, buildID, idx, tc.wantChunkID, tc.wantBuildID, tc.wantIdx)
 			}
 		})
 	}

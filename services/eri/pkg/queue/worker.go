@@ -554,6 +554,7 @@ var (
 	vanadisChunkIDPromptRegex     = regexp.MustCompile(`(?m)^Chunk ID:\s*(\S+)`)
 	vanadisBuildIDPromptRegex     = regexp.MustCompile(`(?m)^Build ID:\s*(\S+)`)
 	vanadisActiveChunkHeaderRegex = regexp.MustCompile(`(?i)===\s*Active Chunk\s*\(Chunk\s+(\d+)\s+of\s+\d+\)\s*===`)
+	standalonePRRemediationRegex  = regexp.MustCompile(`PR #(\d+)\s+on\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)|(?:on|for repo)\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\s+\((?:commit: [^,]+,\s*)?PR #(\d+)`)
 )
 
 func extractVanadisDispatchInfo(d db.Dispatch) (chunkID, buildID string, chunkIdx int) {
@@ -572,6 +573,16 @@ func extractVanadisDispatchInfo(d db.Dispatch) (chunkID, buildID string, chunkId
 	if m := vanadisActiveChunkHeaderRegex.FindStringSubmatch(d.Prompt); len(m) >= 2 {
 		if idx, err := strconv.Atoi(m[1]); err == nil && idx >= 1 {
 			chunkIdx = idx - 1
+		}
+	}
+	if chunkID == "" {
+		if m := standalonePRRemediationRegex.FindStringSubmatch(d.Prompt); len(m) >= 5 {
+			prNum, repo := m[1], m[2]
+			if prNum == "" {
+				repo, prNum = m[3], m[4]
+			}
+			prID := fmt.Sprintf("pr-%s-%s", repo, prNum)
+			return prID, prID, 0
 		}
 	}
 	return chunkID, buildID, chunkIdx
