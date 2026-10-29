@@ -36,7 +36,6 @@ var (
 	pytestRegex          = regexp.MustCompile(`^(python[0-9.]*\s+-m\s+)?pytest(\s+(-v|-q|-s|-x|--tb=\S+))*\s*$`)
 	goTestValFlags       = map[string]bool{"-C": true, "-timeout": true, "-tags": true, "-coverprofile": true, "-cpu": true, "-count": true, "-o": true, "-run": true, "-test.run": true}
 	goTestVerbose        = map[string]bool{"-v": true, "-test.v": true, "-v=true": true, "-test.v=true": true, "--v": true, "--test.v": true, "--v=true": true, "--test.v=true": true}
-	goTestRaceFlags      = map[string]bool{"-race": true, "-test.race": true, "-race=true": true, "-test.race=true": true, "--race": true, "--test.race": true, "--race=true": true, "--test.race=true": true}
 	rootSharedPkgs       = map[string]bool{"httpkit": true, "ollama": true, "pgutil": true, "sanitizer": true}
 	unscopedTargets      = map[string]bool{"./...": true, "brain/...": true, "services/eri/...": true, "...": true}
 	gitGlobalValFlags    = map[string]bool{"-C": true, "-c": true, "--git-dir": true, "--work-tree": true, "--namespace": true, "--super-prefix": true, "--config-env": true}
@@ -222,15 +221,6 @@ func splitSubmoduleTestTarget(pkgArg string) (modDir, relPkg string, ok bool) {
 	return "", "", false
 }
 
-func hasExplicitCGOEnabled(envTokens []locatedToken) bool {
-	for _, tok := range envTokens {
-		if strings.TrimLeft(tok.value, "(") == "CGO_ENABLED=1" {
-			return true
-		}
-	}
-	return false
-}
-
 func trimLeadingSpaceOffset(cmdLine string, offset int) int {
 	for offset > 0 && (cmdLine[offset-1] == ' ' || cmdLine[offset-1] == '\t') {
 		offset--
@@ -252,7 +242,6 @@ func filterGoTestSpans(raw []byteSpan, insertPos int, commonMod string, allowPkg
 }
 
 func collectGoTestSegmentSpans(cmdLine string, tokens []locatedToken, idx int) []byteSpan {
-	stripRace := !hasExplicitCGOEnabled(tokens[:idx])
 	var raw []byteSpan
 	var commonMod string
 	canRewriteMod := true
@@ -272,7 +261,7 @@ func collectGoTestSegmentSpans(cmdLine string, tokens []locatedToken, idx int) [
 			continue
 		}
 		end := tok.endOffset - (len(tok.value) - len(cleanVal))
-		if goTestVerbose[cleanVal] || (stripRace && goTestRaceFlags[cleanVal]) {
+		if goTestVerbose[cleanVal] {
 			raw = append(raw, byteSpan{start: trimLeadingSpaceOffset(cmdLine, tok.startOffset), end: end})
 			continue
 		}
