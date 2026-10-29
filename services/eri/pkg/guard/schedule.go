@@ -71,7 +71,7 @@ func checkScheduleRunCommand(args ToolArgs) *Decision {
 	}
 
 	var overwrite map[string]any
-	if rewritten := rewritePythonInlineQuotes(args.CommandLine); rewritten != args.CommandLine {
+	if rewritten := stripGoTestVerbose(rewritePythonInlineQuotes(args.CommandLine)); rewritten != args.CommandLine {
 		overwrite = map[string]any{"CommandLine": rewritten}
 	}
 	if !args.IsDaemonBool() && args.WaitMs() != MaxSyncWaitMs {

@@ -34,8 +34,10 @@ var (
 	gcMu                 sync.Mutex
 	lastGCTime           time.Time
 	pytestRegex          = regexp.MustCompile(`^(python[0-9.]*\s+-m\s+)?pytest(\s+(-v|-q|-s|-x|--tb=\S+))*\s*$`)
-	goTestValFlags       = map[string]bool{"-timeout": true, "-tags": true, "-coverprofile": true, "-cpu": true, "-count": true, "-o": true, "-run": true, "-test.run": true}
+	goTestValFlags       = map[string]bool{"-C": true, "-timeout": true, "-tags": true, "-coverprofile": true, "-cpu": true, "-count": true, "-o": true, "-run": true, "-test.run": true}
 	goTestVerbose        = map[string]bool{"-v": true, "-test.v": true, "-v=true": true, "-test.v=true": true, "--v": true, "--test.v": true, "--v=true": true, "--test.v=true": true}
+	goTestRaceFlags      = map[string]bool{"-race": true, "-test.race": true, "-race=true": true, "-test.race=true": true, "--race": true, "--test.race": true, "--race=true": true, "--test.race=true": true}
+	rootSharedPkgs       = map[string]bool{"httpkit": true, "ollama": true, "pgutil": true, "sanitizer": true}
 	unscopedTargets      = map[string]bool{"./...": true, "brain/...": true, "services/eri/...": true, "...": true}
 	gitGlobalValFlags    = map[string]bool{"-C": true, "-c": true, "--git-dir": true, "--work-tree": true, "--namespace": true, "--super-prefix": true, "--config-env": true}
 	gitStatusFormatFlags = map[string]bool{"--short": true, "--porcelain": true, "--long": true, "--help": true, "-h": true, "-v": true, "--verbose": true}
@@ -146,12 +148,16 @@ func isUnscopedVerify(args []string) bool {
 
 func isUnscopedGoTest(args []string) bool {
 	var pkgArgs []string
+	var chdirMod string
 	for i := 0; i < len(args); i++ {
 		f := strings.TrimRight(args[i], ")")
 		if f == "" {
 			continue
 		}
 		if strings.HasPrefix(f, "-") {
+			if f == "-C" && i+1 < len(args) {
+				chdirMod = strings.TrimPrefix(strings.TrimRight(args[i+1], ")"), "./")
+			}
 			if goTestValFlags[f] {
 				i++
 			}
@@ -162,7 +168,11 @@ func isUnscopedGoTest(args []string) bool {
 	if len(pkgArgs) == 0 {
 		return true
 	}
+	isScopedSubmodule := chdirMod != "" && chdirMod != "." && chdirMod != "services/eri"
 	for _, arg := range pkgArgs {
+		if arg == "./..." && isScopedSubmodule {
+			continue
+		}
 		if unscopedTargets[arg] {
 			return true
 		}
@@ -173,6 +183,113 @@ func isUnscopedGoTest(args []string) bool {
 type byteSpan struct {
 	start int
 	end   int
+	repl  string
+	isPkg bool
+}
+
+func formatSubmoduleRelPkg(rest string) string {
+	if rest == "" {
+		return "."
+	}
+	return "./" + rest
+}
+
+func splitSubmoduleTestTarget(pkgArg string) (modDir, relPkg string, ok bool) {
+	trimmed := strings.TrimPrefix(pkgArg, "./")
+	if trimmed == "services/eri" || trimmed == "services/eri/..." {
+		return "", "", false
+	}
+	if trimmed == "scripts/code-health" || strings.HasPrefix(trimmed, "scripts/code-health/") {
+		rest := strings.TrimPrefix(strings.TrimPrefix(trimmed, "scripts/code-health"), "/")
+		return "scripts/code-health", formatSubmoduleRelPkg(rest), true
+	}
+	parts := strings.SplitN(trimmed, "/", 3)
+	if len(parts) < 2 || parts[1] == "" || parts[1] == "..." {
+		return "", "", false
+	}
+	switch parts[0] {
+	case "services", "mcp":
+		rest := ""
+		if len(parts) == 3 {
+			rest = parts[2]
+		}
+		return parts[0] + "/" + parts[1], formatSubmoduleRelPkg(rest), true
+	case "pkg":
+		if rootSharedPkgs[parts[1]] {
+			return "pkg", "./" + strings.TrimPrefix(trimmed, "pkg/"), true
+		}
+	}
+	return "", "", false
+}
+
+func hasExplicitCGOEnabled(envTokens []locatedToken) bool {
+	for _, tok := range envTokens {
+		if strings.TrimLeft(tok.value, "(") == "CGO_ENABLED=1" {
+			return true
+		}
+	}
+	return false
+}
+
+func trimLeadingSpaceOffset(cmdLine string, offset int) int {
+	for offset > 0 && (cmdLine[offset-1] == ' ' || cmdLine[offset-1] == '\t') {
+		offset--
+	}
+	return offset
+}
+
+func filterGoTestSpans(raw []byteSpan, insertPos int, commonMod string, allowPkgRewrite bool) []byteSpan {
+	var spans []byteSpan
+	if allowPkgRewrite {
+		spans = append(spans, byteSpan{start: insertPos, end: insertPos, repl: " -C " + commonMod})
+	}
+	for _, sp := range raw {
+		if !sp.isPkg || allowPkgRewrite {
+			spans = append(spans, sp)
+		}
+	}
+	return spans
+}
+
+func collectGoTestSegmentSpans(cmdLine string, tokens []locatedToken, idx int) []byteSpan {
+	stripRace := !hasExplicitCGOEnabled(tokens[:idx])
+	var raw []byteSpan
+	var commonMod string
+	canRewriteMod := true
+	hasPkgEdit := false
+
+	for i := idx + 2; i < len(tokens); i++ {
+		tok := tokens[i]
+		cleanVal := strings.TrimRight(tok.value, ")")
+		if cleanVal == "--" || cleanVal == "-args" {
+			break
+		}
+		if cleanVal == "-C" || strings.HasPrefix(cleanVal, "-C=") {
+			canRewriteMod = false
+		}
+		if goTestValFlags[cleanVal] {
+			i++
+			continue
+		}
+		end := tok.endOffset - (len(tok.value) - len(cleanVal))
+		if goTestVerbose[cleanVal] || (stripRace && goTestRaceFlags[cleanVal]) {
+			raw = append(raw, byteSpan{start: trimLeadingSpaceOffset(cmdLine, tok.startOffset), end: end})
+			continue
+		}
+		if strings.HasPrefix(cleanVal, "-") {
+			continue
+		}
+		modDir, relPkg, ok := splitSubmoduleTestTarget(cleanVal)
+		if !ok || (commonMod != "" && commonMod != modDir) {
+			canRewriteMod = false
+			continue
+		}
+		commonMod = modDir
+		hasPkgEdit = true
+		raw = append(raw, byteSpan{start: tok.startOffset, end: end, repl: relPkg, isPkg: true})
+	}
+
+	return filterGoTestSpans(raw, tokens[idx+1].endOffset, commonMod, canRewriteMod && commonMod != "" && hasPkgEdit)
 }
 
 func stripGoTestVerbose(cmdLine string) string {
@@ -183,30 +300,12 @@ func stripGoTestVerbose(cmdLine string) string {
 		if idx+1 >= len(tokens) || filepath.Base(strings.TrimLeft(tokens[idx].value, "(")) != "go" || tokens[idx+1].value != "test" {
 			continue
 		}
-		for i := idx + 2; i < len(tokens); i++ {
-			tok := tokens[i]
-			cleanVal := strings.TrimRight(tok.value, ")")
-			if cleanVal == "--" || cleanVal == "-args" {
-				break
-			}
-			if goTestValFlags[cleanVal] {
-				i++
-				continue
-			}
-			if goTestVerbose[cleanVal] {
-				start := tok.startOffset
-				for start > 0 && (cmdLine[start-1] == ' ' || cmdLine[start-1] == '\t') {
-					start--
-				}
-				end := tok.endOffset - (len(tok.value) - len(cleanVal))
-				spans = append(spans, byteSpan{start: start, end: end})
-			}
-		}
+		spans = append(spans, collectGoTestSegmentSpans(cmdLine, tokens, idx)...)
 	}
 	rewritten := cmdLine
 	for i := len(spans) - 1; i >= 0; i-- {
 		sp := spans[i]
-		rewritten = rewritten[:sp.start] + rewritten[sp.end:]
+		rewritten = rewritten[:sp.start] + sp.repl + rewritten[sp.end:]
 	}
 	return rewritten
 }
