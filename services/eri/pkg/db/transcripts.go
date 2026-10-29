@@ -84,7 +84,7 @@ func scanTranscriptSteps(rows *sql.Rows) ([]TranscriptStep, error) {
 
 func (s *SQLStore) GetSessionSyncStates(ctx context.Context) (results map[string]SessionSyncState, err error) {
 	defer recordTranscriptQuery("get_session_sync_states", time.Now(), &err)
-	if err = s.checkDB(); err != nil {
+	if err := s.checkDB(); err != nil {
 		return nil, err
 	}
 	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
@@ -121,7 +121,7 @@ func (s *SQLStore) GetSessionSyncStates(ctx context.Context) (results map[string
 
 func (s *SQLStore) UpsertSessionSummary(ctx context.Context, summary SessionSummary) (err error) {
 	defer recordTranscriptQuery("upsert_session_summary", time.Now(), &err)
-	if err = s.checkDB(); err != nil {
+	if err := s.checkDB(); err != nil {
 		return err
 	}
 	if strings.TrimSpace(summary.SessionID) == "" {
@@ -163,7 +163,7 @@ func (s *SQLStore) UpsertSessionSummary(ctx context.Context, summary SessionSumm
 
 func (s *SQLStore) BatchInsertTranscriptSteps(ctx context.Context, steps []TranscriptStep) (err error) {
 	defer recordTranscriptQuery("batch_insert_transcript_steps", time.Now(), &err)
-	if err = s.checkDB(); err != nil {
+	if err := s.checkDB(); err != nil {
 		return err
 	}
 	if len(steps) == 0 {
@@ -215,7 +215,7 @@ func (s *SQLStore) BatchInsertTranscriptSteps(ctx context.Context, steps []Trans
 
 func (s *SQLStore) SearchSessionSummaries(ctx context.Context, embedding []float32, queryText string, limit int, minScore float64) (results []SessionSummary, err error) {
 	defer recordTranscriptQuery("search_session_summaries", time.Now(), &err)
-	if err = s.checkDB(); err != nil {
+	if err := s.checkDB(); err != nil {
 		return nil, err
 	}
 	hasEmbedding, queryText := len(embedding) == ExpectedEmbeddingDim, strings.TrimSpace(queryText)
@@ -348,7 +348,7 @@ func buildSearchTranscriptStepsQuery(queryText, sessionFilter, toolFilter string
 
 func (s *SQLStore) SearchTranscriptSteps(ctx context.Context, queryText, sessionFilter, toolFilter string, limit int, since ...time.Time) (results []TranscriptStep, err error) {
 	defer recordTranscriptQuery("search_transcript_steps", time.Now(), &err)
-	if err = s.checkDB(); err != nil {
+	if err := s.checkDB(); err != nil {
 		return nil, err
 	}
 	queryText, sessionFilter, toolFilter = strings.TrimSpace(queryText), strings.TrimSpace(sessionFilter), strings.TrimSpace(toolFilter)
@@ -376,7 +376,7 @@ func (s *SQLStore) SearchTranscriptSteps(ctx context.Context, queryText, session
 
 func (s *SQLStore) GetTranscriptStepRange(ctx context.Context, sessionID string, startStep, endStep int) (results []TranscriptStep, err error) {
 	defer recordTranscriptQuery("get_transcript_step_range", time.Now(), &err)
-	if err = s.checkDB(); err != nil {
+	if err := s.checkDB(); err != nil {
 		return nil, err
 	}
 	sessionID = strings.TrimSpace(sessionID)

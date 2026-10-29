@@ -639,6 +639,9 @@ func SetupDashboardMux(cfg DashboardConfig, assetReg *AssetRegistry) http.Handle
 
 // RunDashboardServer starts the GitHub poller, creates the asset registry, and listens on the configured port.
 func RunDashboardServer(ctx context.Context, cfg DashboardConfig) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	staticDir := resolveStaticDir()
 
 	gitCommit := cfg.GitCommit

@@ -1815,7 +1815,8 @@ func runWakeHookEval(t *testing.T, hookResp *WakeResponse, hookErr error, timeou
 		pool: pool, burst: msgs, threadID: msgs[0].ThreadID, effectiveID: effID, triggerType: "message", execStart: now,
 		policy: config.ChannelPolicy{Mode: "channel", WakeMode: "classifier", AmbientWakeThreshold: ptrFloat(0.80), Hooks: config.ChannelHooksConfig{OnWake: &config.WebhookEndpoint{URL: "http://sidecar.local/wake", TimeoutMs: 1000, OnTimeoutAction: timeoutAction}}},
 	}
-	return te.evaluateAmbientWake(), hookCalled, classifierCalled, te, store, capturedReq
+	shouldExit := te.evaluateAmbientWake()
+	return shouldExit, hookCalled, classifierCalled, te, store, capturedReq
 }
 
 func TestOnWakeHook_Lifecycle(t *testing.T) {

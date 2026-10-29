@@ -5,6 +5,7 @@ go 1.27.1
 require (
 	github.com/azylman/aerial/pkg v0.0.0
 	github.com/prometheus/client_golang v1.21.0
+	go.uber.org/goleak v1.3.0
 	golang.org/x/sync v0.11.0
 	gopkg.in/yaml.v3 v3.0.1
 )
