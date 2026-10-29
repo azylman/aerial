@@ -35,6 +35,8 @@ func TestWorkerPool_CapacityBlipMatrix(t *testing.T) {
 		checkGlobalLockZero, checkNoSchedules                                   bool
 	}{
 		{name: "LocalRetry_Success", maxAttempts: 2, runnerErr: "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.", wantAttempts: 2, wantFinalStatus: db.StatusCompleted, wantDeliveryContains: "Recovered on attempt 2!", checkGlobalLockZero: true},
+		{name: "RateLimit503_RetryBackoff_Success", maxAttempts: 2, runnerErr: "503 Service Unavailable: high demand on model", wantAttempts: 2, wantFinalStatus: db.StatusCompleted, wantDeliveryContains: "Recovered on attempt 2!", checkGlobalLockZero: true},
+		{name: "GenericTransient_RetryBackoff_Success", maxAttempts: 2, runnerErr: "transient connection reset", wantAttempts: 2, wantFinalStatus: db.StatusCompleted, wantDeliveryContains: "Recovered on attempt 2!", checkGlobalLockZero: true},
 		{name: "Exhaustion_LocalFailure", maxAttempts: 1, runnerErr: "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.", wantAttempts: 1, wantFinalStatus: db.StatusFailed, wantErrContains: "[CAPACITY_EXHAUSTED", wantDeliveryContains: "capacity", checkGlobalLockZero: true, checkNoSchedules: true},
 		{name: "WithoutCountdown_Fallback70s", maxAttempts: 1, runnerErr: "API error: RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model.", wantAttempts: 1, wantFinalStatus: db.StatusFailed, wantErrContains: "[CAPACITY_EXHAUSTED", wantDeliveryContains: "capacity", checkGlobalLockZero: true, checkNoSchedules: true},
 		{name: "GlobalQuotaLockout_PreCheckFailFast", maxAttempts: 2, presetGlobalLockSec: 300, wantAttempts: 0, wantFinalStatus: db.StatusFailed, wantErrContains: "global quota pause active", wantDeliveryContains: "quota", deliveryErr: errors.New("discord delivery error"), checkNoSchedules: true},
@@ -84,6 +86,7 @@ func TestWorkerPool_CapacityBlipMatrix(t *testing.T) {
 			}
 
 			threadID, msgID := "thread-"+strings.ToLower(tt.name), "msg-"+strings.ToLower(tt.name)
+			CacheDiscordChannel(&discordgo.Channel{ID: threadID, Type: discordgo.ChannelTypeGuildPublicThread, Name: threadID})
 			msg := db.Message{ID: msgID, ThreadID: threadID, Content: "hello " + tt.name}
 			_ = insertMessage(store, msg)
 			pool.Enqueue(msg)

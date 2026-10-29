@@ -56,6 +56,21 @@ func TestFormatToolStatus(t *testing.T) {
 			t.Errorf("FormatToolStatus(%q, %q, %v) = %q, want %q", tt.toolName, tt.commandName, tt.elapsed, got, tt.expected)
 		}
 	}
+
+	backoffTests := []struct {
+		rem  time.Duration
+		want string
+	}{
+		{30 * time.Second, "Waiting on model capacity (retrying in 30s)..."},
+		{1500 * time.Millisecond, "Waiting on model capacity (retrying in 2s)..."},
+		{0, "Waiting on model capacity (retrying in 1s)..."},
+		{-5 * time.Second, "Waiting on model capacity (retrying in 1s)..."},
+	}
+	for _, bt := range backoffTests {
+		if got := FormatCapacityBackoffStatus(bt.rem); got != bt.want {
+			t.Errorf("FormatCapacityBackoffStatus(%v) = %q, want %q", bt.rem, got, bt.want)
+		}
+	}
 }
 
 type statusUpdaterHarness struct {
@@ -177,6 +192,16 @@ func TestStatusUpdater_DebounceAndFastTurn(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for chunk step flush")
+	}
+	uChunk.SetCapacityBackoff(30 * time.Second)
+	uChunk.flush()
+	select {
+	case step := <-chunkFlushed:
+		if !strings.Contains(step, "Waiting on model capacity (retrying in") {
+			t.Fatalf("expected capacity backoff step, got %q", step)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for chunk backoff flush")
 	}
 	uChunk.Stop()
 	uChunk.DeleteStatusMessage()

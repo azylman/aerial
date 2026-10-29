@@ -368,7 +368,9 @@ func (s *testRunnerAgentSession) setSessionID(id string) {
 func (s *testRunnerAgentSession) Send(prompt string, turn *runner.TurnContext) error {
 	if turn != nil && turn.Sink != nil {
 		turn.Sink.OnTurnStarted()
-		turn.Sink.OnToolCall("processing", "")
+		if !strings.Contains(prompt, "Chunk ID:") {
+			turn.Sink.OnToolCall("processing", "")
+		}
 	}
 	timeout := s.pool.cfg.TimeoutMinutes
 	if timeout <= 0 {

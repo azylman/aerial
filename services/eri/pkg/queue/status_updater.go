@@ -3,6 +3,7 @@ package queue
 import (
 	"fmt"
 	"log"
+	"math"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -96,6 +97,12 @@ func FormatToolStatus(toolName, commandName string, elapsed time.Duration) strin
 	return text
 }
 
+// FormatCapacityBackoffStatus formats a capacity/rate-limit backoff countdown status string.
+func FormatCapacityBackoffStatus(remaining time.Duration) string {
+	secs := max(int(math.Ceil(remaining.Seconds())), 1)
+	return fmt.Sprintf("Waiting on model capacity (retrying in %ds)...", secs)
+}
+
 // StatusUpdater manages real-time intermediate progress updates in Discord thread mode.
 type StatusUpdater struct {
 	mu                   sync.Mutex
@@ -108,9 +115,10 @@ type StatusUpdater struct {
 	lastCompletedCommand string
 	lastCompletedAt      time.Time
 	lastCompletedElapsed time.Duration
-	phase                string // "thinking", "tool", "responding"
+	phase                string // "thinking", "tool", "responding", "backoff"
 	toolStart            time.Time
 	turnStart            time.Time
+	backoffUntil         time.Time
 	lastEditAt           time.Time
 	inFlightREST         bool
 	dirty                bool
@@ -256,6 +264,21 @@ func (u *StatusUpdater) HandleStep(ev *runner.StepUpdateEvent) {
 	}
 }
 
+// SetCapacityBackoff switches the updater to a capacity backoff countdown and triggers a flush.
+func (u *StatusUpdater) SetCapacityBackoff(delay time.Duration) {
+	if u == nil || !u.enabled {
+		return
+	}
+	u.mu.Lock()
+	if u.disabled {
+		u.mu.Unlock()
+		return
+	}
+	u.phase, u.activeTool, u.activeCommand, u.lastCompletedTool, u.lastCompletedCommand, u.backoffUntil, u.dirty = "backoff", "", "", "", "", time.Now().Add(delay), true
+	u.mu.Unlock()
+	u.triggerFlush()
+}
+
 // MarkTurnStarted sets the turn start timestamp to when the runner actually begins execution.
 func (u *StatusUpdater) MarkTurnStarted() {
 	if u == nil {
@@ -263,6 +286,9 @@ func (u *StatusUpdater) MarkTurnStarted() {
 	}
 	u.mu.Lock()
 	u.turnStart = time.Now()
+	if u.phase == "backoff" {
+		u.phase, u.backoffUntil, u.dirty = "", time.Time{}, true
+	}
 	u.mu.Unlock()
 }
 
@@ -298,6 +324,8 @@ func (u *StatusUpdater) Start() {
 
 func (u *StatusUpdater) currentStatusText() string {
 	switch u.phase {
+	case "backoff":
+		return FormatCapacityBackoffStatus(time.Until(u.backoffUntil))
 	case "tool":
 		if u.activeTool != "" {
 			return FormatToolStatus(u.activeTool, u.activeCommand, time.Since(u.toolStart))
@@ -330,11 +358,12 @@ func (u *StatusUpdater) prepareFlushPayloadLocked() (string, string, bool) {
 		return "", "", false
 	}
 	hasToolActivity := u.hasToolActivityLocked()
-	hasActivePhase := hasToolActivity || u.phase == "thinking" || u.phase == "responding"
+	isBackoff := u.phase == "backoff"
+	hasActivePhase := hasToolActivity || isBackoff || u.phase == "thinking" || u.phase == "responding"
 	if !u.dirty && (u.statusMessageID == "" || !hasActivePhase) {
 		return "", "", false
 	}
-	if u.statusMessageID == "" && !hasToolActivity && time.Since(u.turnStart) < u.debounceDelay {
+	if u.statusMessageID == "" && !hasToolActivity && !isBackoff && time.Since(u.turnStart) < u.debounceDelay {
 		return "", "", false
 	}
 	text := u.currentStatusText()
@@ -423,7 +452,7 @@ func (u *StatusUpdater) resetState(deleteRemote, disable bool, warnSuffix string
 	if disable {
 		u.disabled = true
 	} else {
-		u.phase, u.dirty, u.lastDelivered, u.turnStart = "", false, "", time.Now()
+		u.phase, u.dirty, u.lastDelivered, u.turnStart, u.backoffUntil = "", false, "", time.Now(), time.Time{}
 	}
 	u.mu.Unlock()
 
