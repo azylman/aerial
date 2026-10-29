@@ -278,8 +278,22 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v7
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+      - name: Set up Persistent Local Buildx Builder
+        run: |
+          mkdir -p /cache/buildx-config /root/.docker/buildx/instances
+          flock /cache/buildx.lock bash -c '
+            if [ ! -f /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
+              docker run --privileged --rm tonistiigi/binfmt:latest --install arm64
+            fi
+            export BUILDX_CONFIG=/cache/buildx-config
+            if ! docker buildx inspect --bootstrap calibarn-buildkit >/dev/null 2>&1; then
+              docker buildx rm -f calibarn-buildkit >/dev/null 2>&1 || true
+              docker rm -f buildx_buildkit_calibarn-buildkit0 >/dev/null 2>&1 || true
+              docker buildx create --name calibarn-buildkit --driver docker-container --driver-opt network=host --use --bootstrap
+            fi
+            cp -f /cache/buildx-config/instances/calibarn-buildkit /root/.docker/buildx/instances/calibarn-buildkit
+          '
+          docker buildx use calibarn-buildkit
 
       - name: Lowercase Repository Owner
         id: repo_owner
@@ -307,8 +321,6 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             aerial.commit_sha=${{ github.sha }}
             aerial.service=${{ matrix.service }}
-          cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
   build-gate:
     name: Container Builds Gate
@@ -366,9 +378,6 @@ jobs:
       contents: read
       packages: write
     steps:
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Lowercase Repository Owner
         id: repo_owner
         run: echo "owner=${OWNER,,}" >> $GITHUB_OUTPUT
