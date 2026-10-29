@@ -78,11 +78,3 @@ type embeddingRequest struct {
 func (c *Client) GenerateEmbedding(ctx context.Context, text string, isQuery bool, maxRetries int) ([]float32, error) {
 	return c.Client.GenerateEmbedding(ctx, text, isQuery, maxRetries)
 }
-
-// BaseURL returns the configured base URL.
-func (c *Client) BaseURL() string {
-	if c.baseURL != "" {
-		return c.baseURL
-	}
-	return c.Client.BaseURL()
-}
