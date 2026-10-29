@@ -171,6 +171,10 @@ if [ -z "$cgo_val" ]; then
         cgo_val=0
     fi
 fi
+race_flag=""
+if [ "$cgo_val" = "1" ]; then
+    race_flag="-race"
+fi
 
 PARALLEL_JOBS="${PARALLEL_JOBS:-${AERIAL_COVERAGE_JOBS:-6}}"
 
@@ -220,7 +224,7 @@ for svc in $ALL_GO_SERVICES; do
                 LC_ALL="${LC_ALL:-en_US.UTF-8}" \
                 GIT_TERMINAL_PROMPT=0 \
                 CGO_ENABLED="$cgo_val" \
-                go test -timeout ${AERIAL_TEST_TIMEOUT:-180s} -coverprofile="$prof_file" "$pkg" >"$log_file" 2>&1); then
+                go test ${race_flag:+"$race_flag"} -timeout ${AERIAL_TEST_TIMEOUT:-180s} -coverprofile="$prof_file" "$pkg" >"$log_file" 2>&1); then
                 echo "PASS" > "$status_file"
             else
                 echo "FAIL" > "$status_file"
@@ -519,6 +523,16 @@ fi
 # Exit status handling
 if [ "$CHECK_MODE" -eq 1 ]; then
     if [ -n "$VIOLATIONS" ]; then
+        for status_f in "${PROF_DIR}"/*.status; do
+            [ -f "$status_f" ] || continue
+            if [ "$(cat "$status_f" 2>/dev/null)" = "FAIL" ]; then
+                log_f="${status_f%.status}.log"
+                if [ -f "$log_f" ]; then
+                    echo "${RED}--- Failure Digest (${log_f##*/}) ---${NC}" >&2
+                    grep -E "(WARNING: DATA RACE|--- FAIL:|FAIL[[:space:]]+github\.com|\.go:[0-9]+)" "$log_f" | tail -n 40 >&2 || tail -n 25 "$log_f" >&2
+                fi
+            fi
+        done
         echo "${RED}🚨 [Aerial Coverage] Coverage threshold check failed with the following violations:${NC}" >&2
         echo "$VIOLATIONS" | while read -r line; do
             echo "   • $line" >&2

@@ -968,7 +968,9 @@ func (l *unifiedSessionLease) evaluateEmptyResponseOutcome(ctx context.Context, 
 		}
 	}
 	if isQuota {
+		l.mu.Lock()
 		l.cancelRotation = true
+		l.mu.Unlock()
 	} else if d != nil {
 		d.MarkDirty()
 	}
@@ -978,16 +980,20 @@ func (l *unifiedSessionLease) Execute(ctx context.Context, turn *TurnContext) (*
 	if turn == nil {
 		return nil, errors.New("turn context cannot be nil")
 	}
+	l.mu.Lock()
 	l.cancelRotation = false
-	if turn.Ctx == nil {
-		turn.Ctx = ctx
+	l.mu.Unlock()
+
+	turnCopy := *turn
+	if turnCopy.Ctx == nil {
+		turnCopy.Ctx = ctx
 	}
 
 	handleErr := func(err error) {
+		l.mu.Lock()
 		l.cancelRotation = true
-		l.mu.RLock()
 		d := l.daemon
-		l.mu.RUnlock()
+		l.mu.Unlock()
 		if !IsQuotaPause(err.Error(), "") && !IsCapacityBlip(err.Error(), "") && d != nil {
 			d.MarkDirty()
 		}
@@ -1000,8 +1006,7 @@ func (l *unifiedSessionLease) Execute(ctx context.Context, turn *TurnContext) (*
 
 	bufSink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
 	origSink := turn.Sink
-	turn.Sink = &leaseTurnSinkWrapper{inner: origSink, buf: bufSink}
-	defer func() { turn.Sink = origSink }()
+	turnCopy.Sink = &leaseTurnSinkWrapper{inner: origSink, buf: bufSink}
 
 	if err := l.ensureActiveDaemon(ctx); err != nil {
 		handleErr(err)
@@ -1011,7 +1016,7 @@ func (l *unifiedSessionLease) Execute(ctx context.Context, turn *TurnContext) (*
 	l.mu.RLock()
 	d := l.daemon
 	l.mu.RUnlock()
-	if err := d.Send(compileLeasePrompt(turn, l.isCold, l.prevSessID), turn); err != nil {
+	if err := d.Send(compileLeasePrompt(&turnCopy, l.isCold, l.prevSessID), &turnCopy); err != nil {
 		handleErr(err)
 		return nil, err
 	}
@@ -1029,7 +1034,7 @@ func (l *unifiedSessionLease) Execute(ctx context.Context, turn *TurnContext) (*
 		handleErr(waitErr)
 		return nil, waitErr
 	}
-	l.evaluateEmptyResponseOutcome(ctx, turn, res)
+	l.evaluateEmptyResponseOutcome(ctx, &turnCopy, res)
 	l.turnCount++
 	l.isCold = false
 	return res, nil

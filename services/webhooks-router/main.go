@@ -555,11 +555,30 @@ func (s *RouterServer) syncVanadisBuildWidget(qCtx context.Context, pgReg *Postg
 	return err
 }
 
+func shouldSkipWidgetSink(msgID, activeStep, status string) bool {
+	if msgID == "" || activeStep == "" {
+		return false
+	}
+	switch status {
+	case "open", "merged", "synced", "deploying":
+		return true
+	default:
+		return false
+	}
+}
+
+func prWidgetBanner(status, banner string) string {
+	if status == "failed" || status == "conflict" {
+		return banner
+	}
+	return ""
+}
+
 func (s *RouterServer) syncSinglePRWidget(qCtx context.Context, pgReg *PostgresPRRegistry, repo string, prNumber int, allowSweep bool) error {
-	prQuery := `SELECT target_id, title, status, status_message_id, created_at, updated_at, COALESCE(metadata->>'banner', ''), COALESCE((metadata->'ci_checks')::text, '{}') FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1`
-	var targetID, title, prStatus, prMsgID, prBanner, ciChecksJSON string
+	prQuery := `SELECT target_id, title, status, status_message_id, created_at, updated_at, COALESCE(metadata->>'banner', ''), COALESCE((metadata->'ci_checks')::text, '{}'), COALESCE(metadata::text, '{}') FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1`
+	var targetID, title, prStatus, prMsgID, prBanner, ciChecksJSON, metadataJSON string
 	var prCreatedAt, prUpdatedAt time.Time
-	prErr := pgReg.pool.QueryRow(qCtx, prQuery, repo, prNumber).Scan(&targetID, &title, &prStatus, &prMsgID, &prCreatedAt, &prUpdatedAt, &prBanner, &ciChecksJSON)
+	prErr := pgReg.pool.QueryRow(qCtx, prQuery, repo, prNumber).Scan(&targetID, &title, &prStatus, &prMsgID, &prCreatedAt, &prUpdatedAt, &prBanner, &ciChecksJSON, &metadataJSON)
 	if prErr != nil && !errors.Is(prErr, pgx.ErrNoRows) {
 		return fmt.Errorf("sync pr widget query pr: %w", prErr)
 	}
@@ -569,7 +588,7 @@ func (s *RouterServer) syncSinglePRWidget(qCtx context.Context, pgReg *PostgresP
 		s.sweepOlderDeployedPRWidgets(qCtx, pgReg, repo, prNumber)
 	}
 
-	activeStep := formatCIChecksActiveStep(prStatus, ciChecksJSON)
+	activeStep := formatPRWidgetActiveStep(prStatus, ciChecksJSON, metadataJSON)
 
 	// 1. Ask vanadis to sync widget if this PR belongs to a vanadis chunk
 	matched, err := s.syncVanadisChunkPRWidget(qCtx, pgReg, repo, prNumber, prStatus, prBanner, activeStep, prFound)
@@ -586,10 +605,7 @@ func (s *RouterServer) syncSinglePRWidget(qCtx context.Context, pgReg *PostgresP
 	}
 
 	finalStatus := firstNonEmpty(normalizeWidgetStatus(prStatus), "open")
-	widgetBanner := ""
-	if finalStatus == "failed" || finalStatus == "conflict" {
-		widgetBanner = prBanner
-	}
+	widgetBanner := prWidgetBanner(finalStatus, prBanner)
 	widgetTitle := firstNonEmpty(title, fmt.Sprintf("PR #%d", prNumber))
 
 	widgetReq := StatusWidgetRequest{
@@ -599,7 +615,7 @@ func (s *RouterServer) syncSinglePRWidget(qCtx context.Context, pgReg *PostgresP
 		Title:     widgetTitle,
 		Status:    finalStatus,
 		Banner:    widgetBanner,
-		SkipSink:  prMsgID != "" && activeStep != "" && finalStatus == "open",
+		SkipSink:  shouldSkipWidgetSink(prMsgID, activeStep, finalStatus),
 		Chunks: []StatusWidgetChunk{
 			{
 				Index:      0,
