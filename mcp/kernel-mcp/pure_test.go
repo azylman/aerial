@@ -528,6 +528,15 @@ settle_delay: "250ms"
 			wantDelay:   10 * time.Millisecond,
 			wantErr:     false,
 		},
+		{
+			name:        "nonexistent YAML file returns default config",
+			path:        filepath.Join(tmpDir, "does-not-exist.yaml"),
+			wantPort:    "4018",
+			wantHost:    "browser.aerial",
+			wantCDPPort: "9222",
+			wantDelay:   500 * time.Millisecond,
+			wantErr:     false,
+		},
 	}
 
 	for _, tc := range tests {

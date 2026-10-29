@@ -18,7 +18,7 @@ RUN npm prune --omit=dev --ignore-scripts
 # -----------------------------------------------------------------------------
 # Stage 2: Build Go proxy wrapper binary
 # -----------------------------------------------------------------------------
-FROM golang:1.27.1-alpine AS go-build
+FROM golang:1.27.3-alpine AS go-build
 WORKDIR /src
 COPY pkg/go.mod pkg/go.sum* ./pkg/
 COPY mcp/discord-mcp/go.mod mcp/discord-mcp/go.sum* ./mcp/discord-mcp/

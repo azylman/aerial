@@ -81,7 +81,7 @@ job "infisical" {
       config {
         dns_servers        = ["127.0.0.1"]
         dns_search_domains = ["aerial"]
-        image        = "infisical/infisical:v0.166.8"
+        image        = "infisical/infisical:v0.167.4"
         network_mode = "host"
         healthchecks {
           disable = true

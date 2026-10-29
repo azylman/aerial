@@ -821,6 +821,12 @@ func TestResolveConfigPath(t *testing.T) {
 			fallback:  "/default/path.yaml",
 			want:      "/default/path.yaml",
 		},
+		{
+			name:      "EmptyFallbackUsesDefaultConfigPath",
+			localPath: missingLocal,
+			fallback:  "",
+			want:      DefaultConfigPath,
+		},
 	}
 
 	for _, tc := range tests {
@@ -2069,13 +2075,21 @@ func TestSQLStore_ConstructorsAndSetters(t *testing.T) {
 			setURL:       "   ",
 			wantBrainURL: DefaultBrainURL,
 		},
+		{
+			name:         "NilStoreFallback",
+			initialURL:   DefaultBrainURL,
+			wantBrainURL: DefaultBrainURL,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			store := NewSQLStoreWithBrainURL(dbMem, tc.initialURL, tc.client)
-			if tc.setURL != "" {
-				store.SetBrainURL(tc.setURL)
+			var store *SQLStore
+			if tc.name != "NilStoreFallback" {
+				store = NewSQLStoreWithBrainURL(dbMem, tc.initialURL, tc.client)
+				if tc.setURL != "" {
+					store.SetBrainURL(tc.setURL)
+				}
 			}
 			if got := store.getBrainURL(); got != tc.wantBrainURL {
 				t.Errorf("getBrainURL() = %q, want %q", got, tc.wantBrainURL)
@@ -8439,6 +8453,12 @@ ollama:
 	noDbFile := filepath.Join(tmpDir, "nodb.yaml")
 	_ = os.WriteFile(noDbFile, []byte(noDbContent), 0o644)
 
+	mkMissingFieldFile := func(target string, replacement string, filename string) string {
+		p := filepath.Join(tmpDir, filename)
+		_ = os.WriteFile(p, []byte(strings.Replace(validContent, target, replacement, 1)), 0o644)
+		return p
+	}
+
 	tests := []struct {
 		name         string
 		path         string
@@ -8479,6 +8499,41 @@ ollama:
 			name:    "nonexistent path returns error",
 			path:    filepath.Join(tmpDir, "nonexistent.yaml"),
 			envDB:   "postgres://localhost/coven_test",
+			wantErr: true,
+		},
+		{
+			name:    "missing custom_skills_dir returns error",
+			path:    mkMissingFieldFile("custom_skills_dir: '/custom/skills'", "custom_skills_dir: ''", "no_skills.yaml"),
+			wantErr: true,
+		},
+		{
+			name:    "missing rules_dir returns error",
+			path:    mkMissingFieldFile("rules_dir: '/custom/rules'", "rules_dir: ''", "no_rules.yaml"),
+			wantErr: true,
+		},
+		{
+			name:    "missing config_repo_owner returns error",
+			path:    mkMissingFieldFile("config_repo_owner: 'azylman'", "config_repo_owner: ''", "no_owner.yaml"),
+			wantErr: true,
+		},
+		{
+			name:    "missing config_repo_name returns error",
+			path:    mkMissingFieldFile("config_repo_name: 'aerial-config'", "config_repo_name: ''", "no_name.yaml"),
+			wantErr: true,
+		},
+		{
+			name:    "missing ollama base_url returns error",
+			path:    mkMissingFieldFile("base_url: 'http://ollama:11434'", "base_url: ''", "no_ollama_url.yaml"),
+			wantErr: true,
+		},
+		{
+			name:    "missing ollama model returns error",
+			path:    mkMissingFieldFile("model: 'all-minilm'", "model: ''", "no_ollama_model.yaml"),
+			wantErr: true,
+		},
+		{
+			name:    "zero ollama num_ctx returns error",
+			path:    mkMissingFieldFile("num_ctx: 512", "num_ctx: 0", "zero_num_ctx.yaml"),
 			wantErr: true,
 		},
 	}

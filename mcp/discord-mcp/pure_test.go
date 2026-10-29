@@ -364,14 +364,16 @@ func TestResolveConfigPath_TableDriven(t *testing.T) {
 	fallback := "/config/config.yaml"
 	tests := []struct {
 		name      string
+		fallback  string
 		envVal    string
 		localPath string
 		want      string
 	}{
-		{"CONFIG_PATH env precedence", "/custom/override/config.yaml", localFile, "/custom/override/config.yaml"},
-		{"local config non-zero size", "", localFile, localFile},
-		{"local config zero size falls back", "", emptyFile, fallback},
-		{"local config nonexistent falls back", "", filepath.Join(tmpDir, "nonexistent.yaml"), fallback},
+		{"CONFIG_PATH env precedence", fallback, "/custom/override/config.yaml", localFile, "/custom/override/config.yaml"},
+		{"local config non-zero size", fallback, "", localFile, localFile},
+		{"local config zero size falls back", fallback, "", emptyFile, fallback},
+		{"local config nonexistent falls back", fallback, "", filepath.Join(tmpDir, "nonexistent.yaml"), fallback},
+		{"empty fallback invokes multi-path fallback", "", "", emptyFile, "/share/aerial-config/config.yaml"},
 	}
 
 	for _, tc := range tests {
@@ -381,7 +383,7 @@ func TestResolveConfigPath_TableDriven(t *testing.T) {
 			localConfigPath = tc.localPath
 			t.Cleanup(func() { localConfigPath = oldLocal })
 
-			if got := ResolveConfigPath(fallback); got != tc.want {
+			if got := ResolveConfigPath(tc.fallback); got != tc.want {
 				t.Errorf("ResolveConfigPath got %s, want %s", got, tc.want)
 			}
 		})
@@ -411,6 +413,8 @@ func TestExtractSearchOffset_TableDriven(t *testing.T) {
 
 func TestShapeSearchMessagesResponse_TableDriven(t *testing.T) {
 	nestedHitResp := `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"total_results\":46,\"messages\":[[{\"id\":\"m0\",\"content\":\"ctx\",\"hit\":false,\"author\":{\"username\":\"bot\"}},{\"id\":\"m1\",\"timestamp\":\"2026-10-26T00:00:00Z\",\"channel_id\":\"c1\",\"content\":\"hello\",\"hit\":true,\"author\":{\"id\":\"u1\",\"username\":\"user123\",\"global_name\":\"DisplayUser\"}}], [{\"id\":\"m2\",\"timestamp\":\"2026-10-26T00:01:00Z\",\"channel_id\":\"c1\",\"content\":\"world\",\"author\":{\"id\":\"u2\",\"username\":\"same\",\"global_name\":\"same\"}}], {\"id\":\"m3\",\"timestamp\":\"2026-10-26T00:02:00Z\",\"channel_id\":\"c1\",\"content\":\"flat\",\"author\":{\"id\":\"u3\",\"global_name\":\"OnlyGlobal\"}}],\"threads\":[{\"id\":\"t1\"}]}"}]}}`
+	nestedNoHitsResp := `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"total_results\":1,\"messages\":[[{\"id\":\"m0\",\"content\":\"no-hit-group\",\"hit\":false}]]}"}]}}`
+	mixedEntriesResp := `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"total_results\":2,\"messages\":[\" \", \"[bad\", \"{bad\", {\"id\":\"m4\",\"content\":\"valid\"}]}"}]}}`
 	lastPageResp := `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"total_results\":0,\"messages\":[[{\"id\":\"m1\",\"content\":\"only\"}]]}"}]}}`
 
 	tests := []struct {
@@ -422,6 +426,8 @@ func TestShapeSearchMessagesResponse_TableDriven(t *testing.T) {
 		wantErr    bool
 	}{
 		{"nested hit group + flat + global_name formatting", nestedHitResp, 0, `\"has_more\":true`, "threads", false},
+		{"nested group with no hits falls back to full group", nestedNoHitsResp, 0, `no-hit-group`, "", false},
+		{"malformed and whitespace message entries safely ignored", mixedEntriesResp, 0, `valid`, "", false},
 		{"author formatted with global_name and username", nestedHitResp, 0, `DisplayUser (user123)`, "ctx", false},
 		{"last page has_more false and negative offset clamped", lastPageResp, -1, `\"has_more\":false`, "", false},
 		{"non-search text payload left unchanged", `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"other\":1}"}]}}`, 0, `\"other\"`, "", false},

@@ -28,7 +28,7 @@ job "grafana" {
       config {
         dns_servers        = ["${attr.unique.network.ip-address}"]
         dns_search_domains = ["aerial"]
-        image        = "grafana/grafana:13.2.4"
+        image        = "grafana/grafana:13.3.0"
         ports        = ["http"]
         healthchecks {
           disable = true

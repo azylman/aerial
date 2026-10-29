@@ -48,6 +48,7 @@ type mockTwilioClient struct {
 	hungUpCallSIDs []string
 	createdCalls   []CreateCallRequest
 	smsList        []string
+	hangupErr      error
 }
 
 func (m *mockTwilioClient) CreateCall(ctx context.Context, req CreateCallRequest) (string, error) {
@@ -61,7 +62,7 @@ func (m *mockTwilioClient) HangupCall(ctx context.Context, providerCallSID strin
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.hungUpCallSIDs = append(m.hungUpCallSIDs, providerCallSID)
-	return nil
+	return m.hangupErr
 }
 
 func (m *mockTwilioClient) IsCallActive(ctx context.Context, providerCallSID string) (bool, error) {
@@ -515,6 +516,11 @@ func TestMediaStream_CornerCases(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("HandleMediaWebSocket with bad token status = %d, want 401", rec.Code)
 	}
+
+	validTok, _ := tokenMgr.Issue("call-non-ws", 10*time.Second)
+	recNonWS := httptest.NewRecorder()
+	reqNonWS := httptest.NewRequest(http.MethodGet, "/twilio/media-stream?token="+validTok, nil)
+	sessionMgr.HandleMediaWebSocket(recNonWS, reqNonWS)
 
 	sess := NewMediaStreamSession(MediaStreamSessionConfig{
 		CallID: "call-accessors",
@@ -1444,4 +1450,20 @@ func TestMediaStreamSession_RecordingWAVAndManager(t *testing.T) {
 	if len(capSess.recordedPCM) != maxRecordingSamples {
 		t.Fatalf("len(recordedPCM) = %d, want %d", len(capSess.recordedPCM), maxRecordingSamples)
 	}
+
+	overlapSess := NewMediaStreamSession(MediaStreamSessionConfig{
+		CallID:       "call-overlap-missing",
+		Store:        setUpTestStore(t),
+		TwilioClient: &mockTwilioClient{hangupErr: errors.New("hangup failed")},
+	})
+	overlapSess.SetProviderCallSID("CA_err_1")
+	overlapSess.mu.Lock()
+	overlapSess.inCursor = 0
+	overlapSess.outCursor = 0
+	overlapSess.recordedPCM = []int16{100, 200}
+	overlapSess.mu.Unlock()
+	overlapSess.recordOutboundUlaw(PCM16ToMuLaw([]int16{50}))
+	overlapSess.handleTwilioHangupMark(context.Background())
+	overlapSess.amd.OnAMDWebhook("human")
+	overlapSess.handleInboundTwilioMedia(base64.StdEncoding.EncodeToString(make([]byte, 160)))
 }

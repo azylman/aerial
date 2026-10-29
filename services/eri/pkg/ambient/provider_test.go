@@ -698,6 +698,10 @@ func TestProvider_Prime(t *testing.T) {
 	if err := p.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime failed: %v", err)
 	}
+	// Second Prime while cache is still fresh hits fast-path inside fetchAndRender
+	if err := p.Prime(context.Background()); err != nil {
+		t.Fatalf("second Prime failed: %v", err)
+	}
 	if inv.CallCount() != 1 {
 		t.Fatalf("expected 1 call after Prime, got %d", inv.CallCount())
 	}

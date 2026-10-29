@@ -135,12 +135,12 @@ run_golangci_lint() {
             echo "   [golangci-lint] Linting $svc ($targetPkg)..."
         fi
         if has_cmd golangci-lint; then
-            export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.27.1}"
+            export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.27.3}"
             (cd "$svc" && golangci-lint run --allow-parallel-runners --path-prefix="$svc/" --config "$REPO_ROOT/.golangci.yml" "$targetPkg")
         elif has_docker; then
             docker run --rm \
                 -v "$REPO_ROOT:/workspace" -w "/workspace/$svc" \
-                golangci/golangci-lint:v2.14.0 \
+                golangci/golangci-lint:v2.15.0 \
                 golangci-lint run --path-prefix="$svc/" --config /workspace/.golangci.yml "$targetPkg"
         else
             echo "🚨 [Aerial Verify] Error: Neither golangci-lint nor docker found in PATH." >&2
@@ -170,7 +170,7 @@ ensure_deadcode() {
             return 0
         fi
         echo "   [deadcode] Installing deadcode via go install..."
-        go install golang.org/x/tools/cmd/deadcode@v0.51.0
+        go install golang.org/x/tools/cmd/deadcode@v0.52.0
         if [ -n "$gopath" ] && [ -x "$gopath/bin/deadcode" ]; then
             DEADCODE_BIN="$gopath/bin/deadcode"
             return 0
@@ -274,7 +274,7 @@ run_go_test() {
                 -v aerial-go-pkg:/go/pkg/mod \
                 -v "$(pwd)/$svc:/app" -w /app \
                 -e CGO_ENABLED=1 \
-                golang:1.27.1 env -i \
+                golang:1.27.3 env -i \
                 PATH="/go/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
                 HOME="/root" \
                 GOPATH="/go" \

@@ -30,6 +30,7 @@ type fakeCDPOptions struct {
 	failPageEnable   bool
 	failUserAgent    bool
 	failAddScript    bool
+	failStealthEval  bool
 	failMouseMoved   bool
 	failMousePress   bool
 	failMouseRelease bool
@@ -244,6 +245,18 @@ func startFakeCDPServer(t *testing.T, opts fakeCDPOptions) (*fakeCDPServer, *Con
 					case "Page.addScriptToEvaluateOnNewDocument":
 						result = map[string]any{"identifier": "1"}
 					case "Runtime.evaluate":
+						if opts.failStealthEval {
+							wsMu.Lock()
+							_ = ws.WriteJSON(map[string]any{
+								"id": req.ID,
+								"error": map[string]any{
+									"code":    -32000,
+									"message": "stealth eval failed",
+								},
+							})
+							wsMu.Unlock()
+							continue
+						}
 						if opts.evalException != "" {
 							result = map[string]any{
 								"result": map[string]any{"type": "undefined"},
@@ -376,6 +389,12 @@ func TestCDPClient_EnsureConnectionTable(t *testing.T) {
 			opts:      fakeCDPOptions{failAddScript: true},
 			wantErr:   true,
 			errSubstr: "Page.addScriptToEvaluateOnNewDocument",
+		},
+		{
+			name:      "stealth Runtime.evaluate failure",
+			opts:      fakeCDPOptions{failStealthEval: true},
+			wantErr:   true,
+			errSubstr: "Runtime.evaluate stealth script",
 		},
 	}
 
@@ -564,6 +583,19 @@ func TestCDPClient_ErrorAndDisconnectTable(t *testing.T) {
 			wantErr:   true,
 			errSubstr: "context canceled",
 		},
+		{
+			name:      "send cdp with closed connection write error",
+			action:    "send-cdp-write-err",
+			wantErr:   true,
+			errSubstr: "write cdp payload",
+		},
+		{
+			name:      "send cdp with late context cancellation",
+			opts:      fakeCDPOptions{withholdMethod: "Test.withheld"},
+			action:    "send-cdp-late-cancel",
+			wantErr:   true,
+			errSubstr: "context canceled",
+		},
 	}
 
 	for _, tc := range tests {
@@ -620,6 +652,27 @@ func TestCDPClient_ErrorAndDisconnectTable(t *testing.T) {
 				cancelCtx, cancelFn := context.WithCancel(context.Background())
 				cancelFn()
 				_, err := client.sendCDPDirect(cancelCtx, client.activeConn, "Test.withheld", nil, "")
+				if tc.wantErr && (err == nil || !strings.Contains(err.Error(), tc.errSubstr)) {
+					t.Fatalf("sendCDPDirect error = %v, want substring %q", err, tc.errSubstr)
+				}
+			case "send-cdp-write-err":
+				_ = client.EnsureConnection(ctx)
+				client.stateMu.Lock()
+				conn := client.activeConn
+				client.stateMu.Unlock()
+				if conn != nil {
+					_ = conn.UnderlyingConn().Close()
+				}
+				_, err := client.sendCDPDirect(ctx, conn, "Page.enable", nil, "")
+				if tc.wantErr && (err == nil || !strings.Contains(err.Error(), tc.errSubstr)) {
+					t.Fatalf("sendCDPDirect error = %v, want substring %q", err, tc.errSubstr)
+				}
+			case "send-cdp-late-cancel":
+				_ = client.EnsureConnection(ctx)
+				lateCtx, lateCancel := context.WithCancel(context.Background())
+				defer lateCancel()
+				time.AfterFunc(20*time.Millisecond, lateCancel)
+				_, err := client.sendCDPDirect(lateCtx, client.activeConn, "Test.withheld", nil, "")
 				if tc.wantErr && (err == nil || !strings.Contains(err.Error(), tc.errSubstr)) {
 					t.Fatalf("sendCDPDirect error = %v, want substring %q", err, tc.errSubstr)
 				}
