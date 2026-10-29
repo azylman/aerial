@@ -13,10 +13,12 @@ import (
 
 // StatusWidgetChunk represents a chunk in a Vanadis build or a PR task.
 type StatusWidgetChunk struct {
+	ID            string    `json:"id,omitempty"`
 	Index         int       `json:"index"`
 	Repo          string    `json:"repo"`
 	Title         string    `json:"title"`
 	Status        string    `json:"status"`
+	ActiveStep    string    `json:"active_step,omitempty"`
 	PRNumber      int       `json:"pr_number,omitempty"`
 	DeployingJobs []string  `json:"deploying_jobs,omitempty"`
 	StartedAt     time.Time `json:"started_at,omitempty"`
@@ -33,6 +35,7 @@ type StatusWidgetRequest struct {
 	Title     string              `json:"title"`
 	Status    string              `json:"status"`
 	Banner    string              `json:"banner,omitempty"`
+	SkipSink  bool                `json:"skip_sink,omitempty"`
 	Chunks    []StatusWidgetChunk `json:"chunks"`
 }
 
@@ -221,6 +224,9 @@ func buildWidgetChunkComponent(c StatusWidgetChunk) discordgo.MessageComponent {
 	}
 
 	rowText := fmt.Sprintf("%s **`%s`**: %s%s", badge, repoTag, strings.TrimSpace(c.Title), formatChunkRuntimeSuffix(c))
+	if step := strings.TrimSpace(c.ActiveStep); step != "" {
+		rowText += "\n" + step
+	}
 
 	if c.PRNumber > 0 && fullRepo != "" {
 		prURL := fmt.Sprintf("https://github.com/%s/pull/%d", fullRepo, c.PRNumber)
@@ -307,7 +313,7 @@ func DeliverStatusWidget(s DiscordWidgetSender, req StatusWidgetRequest, now tim
 
 	trimmedMsgID := strings.TrimSpace(req.MessageID)
 	if trimmedMsgID != "" {
-		if shouldSinkWidget(s, req.ChannelID, trimmedMsgID) {
+		if !req.SkipSink && shouldSinkWidget(s, req.ChannelID, trimmedMsgID) {
 			send := &discordgo.MessageSend{
 				Flags:      discordgo.MessageFlagsIsComponentsV2 | discordgo.MessageFlagsSuppressNotifications,
 				Components: components,

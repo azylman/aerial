@@ -166,14 +166,16 @@ func TestBuildStatusWidgetComponents_VanadisBuild(t *testing.T) {
 				Repo:          "aerial",
 				Title:         "Silent prompt",
 				Status:        "deploying",
+				ActiveStep:    "   Running deployment checks...   ",
 				PRNumber:      736,
 				DeployingJobs: []string{"aerial-brain", "webhooks-router"},
 			},
 			{
-				Index:  3,
-				Repo:   "aerial",
-				Title:  "Stateless widget endpoint",
-				Status: "coding",
+				Index:      3,
+				Repo:       "aerial",
+				Title:      "Stateless widget endpoint",
+				Status:     "coding",
+				ActiveStep: "Compiling binary",
 			},
 		},
 	}
@@ -224,19 +226,19 @@ func TestBuildStatusWidgetComponents_VanadisBuild(t *testing.T) {
 		t.Errorf("unexpected button accessory: %+v", c1Sec.Accessory)
 	}
 
-	// Chunk 2 has PRNumber > 0, no DeployingJobs rendered in row
+	// Chunk 2 has PRNumber > 0, no DeployingJobs rendered in row, but has ActiveStep
 	c2Sec, ok := container.Components[3].(*discordgo.Section)
 	if !ok {
 		t.Fatalf("expected chunk 2 to be *discordgo.Section, got %T", container.Components[3])
 	}
 	c2Text := c2Sec.Components[0].(*discordgo.TextDisplay)
-	if c2Text.Content != "🚀 **`aerial`**: Silent prompt" {
+	if c2Text.Content != "🚀 **`aerial`**: Silent prompt\nRunning deployment checks..." {
 		t.Errorf("unexpected chunk 2 row text: %q", c2Text.Content)
 	}
 
-	// Chunk 3 has no PRNumber, so it's a TextDisplay
+	// Chunk 3 has no PRNumber, so it's a TextDisplay with ActiveStep
 	c3Text, ok := container.Components[4].(*discordgo.TextDisplay)
-	if !ok || c3Text.Content != "🔨 **`aerial`**: Stateless widget endpoint" {
+	if !ok || c3Text.Content != "🔨 **`aerial`**: Stateless widget endpoint\nCompiling binary" {
 		t.Errorf("unexpected chunk 3 component: %+v", container.Components[4])
 	}
 
@@ -450,6 +452,7 @@ func TestDeliverStatusWidget_AutoSink(t *testing.T) {
 
 	tests := []struct {
 		name          string
+		skipSink      bool
 		afterMsgs     []*discordgo.Message
 		messagesErr   error
 		sendReplyID   string
@@ -460,19 +463,21 @@ func TestDeliverStatusWidget_AutoSink(t *testing.T) {
 		wantEditCount int
 		wantDeletedID string
 		wantSentFlags discordgo.MessageFlags
+		wantQueried   bool
 	}{
-		{name: "fewer messages than threshold edits in place", afterMsgs: threeMsgs, wantMsgID: "msg-old-100", wantEditCount: 1},
-		{name: "channel messages error falls back to edit in place", messagesErr: errors.New("discord 502"), wantMsgID: "msg-old-100", wantEditCount: 1},
-		{name: "newer components v2 widget in after messages edits in place", afterMsgs: newerWidgetMsgs, wantMsgID: "msg-old-100", wantEditCount: 1},
-		{name: "buried by threshold regular messages sinks to bottom and deletes old", afterMsgs: fourMsgs, sendReplyID: "msg-sunk-999", deleteErr: errors.New("ignored delete failure"), wantMsgID: "msg-sunk-999", wantSentCount: 1, wantDeletedID: "msg-old-100", wantSentFlags: sunkFlags},
-		{name: "sink send error falls back to editing existing message in place", afterMsgs: fourMsgs, sendErr: errors.New("rate limit on send"), wantMsgID: "msg-old-100", wantSentCount: 1, wantEditCount: 1},
+		{name: "fewer messages than threshold edits in place", afterMsgs: threeMsgs, wantMsgID: "msg-old-100", wantEditCount: 1, wantQueried: true},
+		{name: "channel messages error falls back to edit in place", messagesErr: errors.New("discord 502"), wantMsgID: "msg-old-100", wantEditCount: 1, wantQueried: true},
+		{name: "newer components v2 widget in after messages edits in place", afterMsgs: newerWidgetMsgs, wantMsgID: "msg-old-100", wantEditCount: 1, wantQueried: true},
+		{name: "buried by threshold regular messages sinks to bottom and deletes old", afterMsgs: fourMsgs, sendReplyID: "msg-sunk-999", deleteErr: errors.New("ignored delete failure"), wantMsgID: "msg-sunk-999", wantSentCount: 1, wantDeletedID: "msg-old-100", wantSentFlags: sunkFlags, wantQueried: true},
+		{name: "sink send error falls back to editing existing message in place", afterMsgs: fourMsgs, sendErr: errors.New("rate limit on send"), wantMsgID: "msg-old-100", wantSentCount: 1, wantEditCount: 1, wantQueried: true},
+		{name: "skip sink bypasses auto sinking even when buried", skipSink: true, afterMsgs: fourMsgs, wantMsgID: "msg-old-100", wantEditCount: 1, wantQueried: false},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			sender := &mockWidgetSender{afterMsgs: tc.afterMsgs, messagesErr: tc.messagesErr, sendReplyID: tc.sendReplyID, sendErr: tc.sendErr, deleteErr: tc.deleteErr}
-			req := StatusWidgetRequest{ChannelID: "chan-1", MessageID: "msg-old-100", ID: "build-1", Title: "Build 1", Status: "running"}
+			req := StatusWidgetRequest{ChannelID: "chan-1", MessageID: "msg-old-100", ID: "build-1", Title: "Build 1", Status: "running", SkipSink: tc.skipSink}
 			msgID, err := DeliverStatusWidget(sender, req, time.Now())
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
@@ -480,8 +485,14 @@ func TestDeliverStatusWidget_AutoSink(t *testing.T) {
 			if msgID != tc.wantMsgID {
 				t.Errorf("got msgID %q, want %q", msgID, tc.wantMsgID)
 			}
-			if sender.queriedAfterID != "msg-old-100" || sender.queriedLimit != 4 {
-				t.Errorf("got query afterID=%q limit=%d, want afterID=msg-old-100 limit=4", sender.queriedAfterID, sender.queriedLimit)
+			if tc.wantQueried {
+				if sender.queriedAfterID != "msg-old-100" || sender.queriedLimit != 4 {
+					t.Errorf("got query afterID=%q limit=%d, want afterID=msg-old-100 limit=4", sender.queriedAfterID, sender.queriedLimit)
+				}
+			} else {
+				if sender.queriedAfterID != "" || sender.queriedLimit != 0 {
+					t.Errorf("expected no message queries when skipSink=true, got afterID=%q limit=%d", sender.queriedAfterID, sender.queriedLimit)
+				}
 			}
 			if len(sender.sentPayloads) != tc.wantSentCount || len(sender.editedPayloads) != tc.wantEditCount {
 				t.Errorf("got sends=%d edits=%d, want sends=%d edits=%d", len(sender.sentPayloads), len(sender.editedPayloads), tc.wantSentCount, tc.wantEditCount)
