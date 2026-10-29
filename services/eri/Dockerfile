@@ -65,6 +65,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     openssh-client \
     postgresql-client \
+    gcc \
+    libc6-dev \
     libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 

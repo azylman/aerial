@@ -241,6 +241,10 @@ run_go_test() {
                 cgo_val=0
             fi
         fi
+        race_flag=""
+        if [ "$cgo_val" = "1" ]; then
+            race_flag="-race"
+        fi
         if has_cmd go; then
             (cd "$svc" && env -i \
                 ${PATH:+PATH="$PATH"} \
@@ -267,7 +271,7 @@ run_go_test() {
                 LC_ALL="${LC_ALL:-en_US.UTF-8}" \
                 GIT_TERMINAL_PROMPT=0 \
                 CGO_ENABLED="$cgo_val" \
-                go test ./...)
+                go test ${race_flag:+"$race_flag"} ./...)
         elif has_docker; then
             docker run --rm \
                 -v aerial-go-cache:/root/.cache/go-build \
@@ -282,7 +286,7 @@ run_go_test() {
                 CGO_ENABLED=1 \
                 LANG="en_US.UTF-8" \
                 LC_ALL="en_US.UTF-8" \
-                go test ./...
+                go test -race ./...
         else
             echo "🚨 [Aerial Verify] Error: Neither go nor docker found in PATH." >&2
             exit 1
@@ -301,6 +305,10 @@ run_go_pkg_coverage() {
             else
                 cgo_val=0
             fi
+        fi
+        race_flag=""
+        if [ "$cgo_val" = "1" ]; then
+            race_flag="-race"
         fi
         prof_file=$(mktemp /tmp/aerial-staged-cov.XXXXXX)
         if ! (cd "$svc" && env -i \
@@ -328,7 +336,7 @@ run_go_pkg_coverage() {
             LC_ALL="${LC_ALL:-en_US.UTF-8}" \
             GIT_TERMINAL_PROMPT=0 \
             CGO_ENABLED="$cgo_val" \
-            go test -timeout "${AERIAL_TEST_TIMEOUT:-180s}" -coverprofile="$prof_file" "$targetPkg"); then
+            go test ${race_flag:+"$race_flag"} -timeout "${AERIAL_TEST_TIMEOUT:-180s}" -coverprofile="$prof_file" "$targetPkg"); then
             rm -f "$prof_file"
             exit 1
         fi

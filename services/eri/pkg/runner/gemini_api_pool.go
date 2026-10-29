@@ -1032,16 +1032,17 @@ func (l *geminiSessionLease) Execute(ctx context.Context, turn *TurnContext) (*T
 		return nil, errors.New("turn context cannot be nil")
 	}
 	l.cancelRotation = false
-	if turn.Ctx == nil {
-		turn.Ctx = ctx
+
+	turnCopy := *turn
+	if turnCopy.Ctx == nil {
+		turnCopy.Ctx = ctx
 	}
-	compiledPrompt := compileLeasePrompt(turn, l.isCold, l.prevSessID)
+	compiledPrompt := compileLeasePrompt(&turnCopy, l.isCold, l.prevSessID)
 	bufSink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
 	origSink := turn.Sink
-	turn.Sink = &leaseTurnSinkWrapper{inner: origSink, buf: bufSink}
-	defer func() { turn.Sink = origSink }()
+	turnCopy.Sink = &leaseTurnSinkWrapper{inner: origSink, buf: bufSink}
 
-	if err := l.session.Send(compiledPrompt, turn); err != nil {
+	if err := l.session.Send(compiledPrompt, &turnCopy); err != nil {
 		if IsQuotaPause(err.Error(), "") || IsCapacityBlip(err.Error(), "") {
 			l.cancelRotation = true
 		}

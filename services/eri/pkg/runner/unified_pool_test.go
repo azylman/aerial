@@ -1075,6 +1075,8 @@ func TestUnifiedProcessPool_AcquireLease_Suite(t *testing.T) {
 		{name: "RotatesWhenResponseSubstantiveDespiteStderrThrottle", maxTurns: 1, respPayload: "Task completed successfully and verified.", respErr: "API error (attempt 1): RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.", respStatus: "DONE", expectRotated: true, expectSubstantive: "Task completed successfully and verified."},
 		{name: "ClearsCancelRotationOnSuccessfulRetry", maxTurns: 1, twoAttemptsThrottle: true, expectRotated: true, expectSubstantive: "Retry succeeded with substantive output."},
 		{name: "ConversationalRateLimitTextDoesNotCancelRotation", maxTurns: 1, respPayload: "I hit an external rate limit reached earlier, but I cached the result.", respStatus: "DONE", expectRotated: true, expectSubstantive: "rate limit reached"},
+		{name: "EmptyResponse_NonQuota_MarksDirty", maxTurns: 1, respPayload: "", respStatus: "DONE", expectRotated: true},
+		{name: "EmptyResponse_Quota_CancelsRotation", maxTurns: 1, respPayload: "", respErr: "RESOURCE_EXHAUSTED: quota exceeded. Resets in 30s.", respStatus: "DONE", expectRotated: false},
 		{name: "Validation_NilPool", validationNilPool: true, expectAcquireErr: true},
 		{name: "Validation_EmptyTarget", validationEmptyTarget: true, expectAcquireErr: true},
 		{name: "PropagatesInitialTurnCountAndRotates", existingTurnCount: DefaultMaxSessionTurns - 1, respPayload: "ok", expectRotated: true, expectTurnCount: DefaultMaxSessionTurns},

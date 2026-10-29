@@ -686,6 +686,7 @@ func (d *SyncDaemon) StartReconcilerLoop(ctx context.Context) {
 	}
 	reconcileCh := d.reconcileCh
 	d.mu.Unlock()
+	debounceDuration := reconcilerDebounceDuration
 
 	go func() {
 		var debounceTimer *time.Timer
@@ -699,7 +700,7 @@ func (d *SyncDaemon) StartReconcilerLoop(ctx context.Context) {
 				}
 				return
 			case <-reconcileCh:
-				debounceTimer, timerCh = resetDebounceTimer(debounceTimer, reconcilerDebounceDuration)
+				debounceTimer, timerCh = resetDebounceTimer(debounceTimer, debounceDuration)
 			case <-timerCh:
 				timerCh = nil
 				d.executeDebouncedReconcileCycle(ctx)
