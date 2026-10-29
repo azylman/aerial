@@ -123,6 +123,7 @@ type mockPRRegistry struct {
 	listOpenPRsCalls []string
 	openPRs          []RegisteredPR
 	listOpenPRsErr   error
+	closedErr        error
 
 	conflictCalls    []prCall
 	conflictTargetID string
@@ -284,8 +285,8 @@ func (m *mockPRRegistry) UpdatePRSync(ctx context.Context, repo string, prNumber
 }
 
 func (m *mockPRRegistry) UpdatePRClosedUnmerged(ctx context.Context, repo string, prNumber int) (string, error) {
-	if m.err != nil {
-		return "", m.err
+	if err := m.checkErr(m.closedErr); err != nil {
+		return "", err
 	}
 	m.closedUnmergedCalls = append(m.closedUnmergedCalls, prCall{repo: repo, prNumber: prNumber})
 	return m.closedTargetID, nil

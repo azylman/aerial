@@ -392,11 +392,7 @@ func (s *testRunnerAgentSession) Send(prompt string, turn *runner.TurnContext) e
 	if turn != nil && turn.Sink != nil {
 		watchdogOpts.StepUpdateHandler = func(event *runner.StepUpdateEvent) {
 			if event != nil && event.Type == "tool_call" {
-				cmd := ""
-				if event.ToolInfo != nil {
-					cmd = event.ToolInfo.Parameters.CommandLine
-				}
-				turn.Sink.OnToolCall(event.ToolName, cmd)
+				turn.Sink.OnToolCall(event.ToolName, event.ResolvedToolDetail())
 			}
 		}
 	}

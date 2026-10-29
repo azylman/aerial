@@ -361,7 +361,11 @@ func newDiscordTurnSink(statusUpdater *StatusUpdater) *runner.BufferingTurnSink 
 			if statusUpdater != nil && (toolName != "" || commandName != "") {
 				statusUpdater.HandleStep(&runner.StepUpdateEvent{
 					Event: "step_update", State: "RUNNING", Type: "tool_call", ToolName: toolName,
-					ToolInfo: &runner.StepToolInfo{Parameters: runner.StepToolParameters{CommandLine: commandName}},
+					ToolDetail: commandName,
+					ToolInfo: &runner.StepToolInfo{
+						Detail:     commandName,
+						Parameters: runner.StepToolParameters{CommandLine: commandName},
+					},
 				})
 			}
 		},

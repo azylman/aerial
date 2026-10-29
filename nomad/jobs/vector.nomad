@@ -293,27 +293,6 @@ transforms:
             .attributes.pid = parsed.pid
             .attributes.severity = parsed.severity
           }
-        } else if .service == "anomaly-detector" {
-          parsed, err = parse_regex(.message, r'^(?P<py_timestamp>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:,\d+)?)\s+\[(?P<severity>[A-Z]+)\]\s+(?:(?P<logger>[^:]+):\s+)?(?P<msg>.*)$')
-          if err == null {
-            .message = parsed.msg
-            sev = string!(parsed.severity)
-            if sev == "ERROR" || sev == "CRITICAL" {
-              .level = "error"
-            } else if sev == "WARNING" || sev == "WARN" {
-              .level = "warn"
-            } else if starts_with(sev, "DEBUG") {
-              .level = "debug"
-            } else {
-              .level = "info"
-            }
-            if !exists(.attributes) {
-              .attributes = {}
-            }
-            if exists(parsed.logger) {
-              .attributes.logger = parsed.logger
-            }
-          }
         } else if .service == "openobserve" {
           parsed, err = parse_regex(.message, r'^(?P<oo_timestamp>\S+)\s+(?P<severity>[A-Z]+)\s+(?P<target>\S+):\s+(?P<msg>.*)$')
           if err == null {
@@ -419,6 +398,30 @@ transforms:
               } else {
                 .attributes = merge!(.attributes, kv)
               }
+            }
+          }
+        }
+
+        # Python timestamped bracketed severity parser (e.g. anomaly-detector, ear, remote)
+        if !exists(.level) {
+          parsed, err = parse_regex(.message, r'^(?P<py_timestamp>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:,\d+)?)\s+\[(?P<severity>[A-Z]+)\]\s+(?:(?P<logger>[^:]+):\s+)?(?P<msg>.*)$')
+          if err == null {
+            .message = parsed.msg
+            sev = string!(parsed.severity)
+            if sev == "ERROR" || sev == "CRITICAL" {
+              .level = "error"
+            } else if sev == "WARNING" || sev == "WARN" {
+              .level = "warn"
+            } else if starts_with(sev, "DEBUG") {
+              .level = "debug"
+            } else {
+              .level = "info"
+            }
+            if !exists(.attributes) {
+              .attributes = {}
+            }
+            if exists(parsed.logger) {
+              .attributes.logger = parsed.logger
             }
           }
         }
