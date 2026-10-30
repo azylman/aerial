@@ -768,6 +768,58 @@ func TestWorkerPoolShutdown_PreservationMatrix(t *testing.T) {
 	}
 }
 
+func TestWorkerPool_SweepInterruptedProcessingEntries_Isolation(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	// Insert messages
+	claimedMsg := db.Message{ID: "msg-claimed", ThreadID: "th-1", Status: db.StatusProcessing, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	siblingMsg := db.Message{ID: "msg-sibling", ThreadID: "th-2", Status: db.StatusProcessing, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	if err := insertMessage(store, claimedMsg); err != nil {
+		t.Fatalf("insert claimedMsg: %v", err)
+	}
+	if err := insertMessage(store, siblingMsg); err != nil {
+		t.Fatalf("insert siblingMsg: %v", err)
+	}
+
+	// Insert dispatches
+	claimedDisp := db.Dispatch{ID: "disp-claimed", Prompt: "p1", Status: db.StatusProcessing, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	siblingDisp := db.Dispatch{ID: "disp-sibling", Prompt: "p2", Status: db.StatusProcessing, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	if err := store.InsertDispatch(ctx, claimedDisp); err != nil {
+		t.Fatalf("insert claimedDisp: %v", err)
+	}
+	if err := store.InsertDispatch(ctx, siblingDisp); err != nil {
+		t.Fatalf("insert siblingDisp: %v", err)
+	}
+
+	pool := NewWorkerPool(WorkerPoolConfig{Store: store})
+	pool.claimedMessages.Store(claimedMsg.ID, struct{}{})
+	pool.claimedDispatches.Store(claimedDisp.ID, struct{}{})
+
+	pool.sweepInterruptedProcessingEntries(ctx, store)
+
+	// Verify messages
+	gotClaimedMsg, err := getMessage(store, claimedMsg.ID)
+	if err != nil || gotClaimedMsg.Status != db.StatusPending {
+		t.Errorf("claimedMsg status = %v, want %v", gotClaimedMsg.Status, db.StatusPending)
+	}
+	gotSiblingMsg, err := getMessage(store, siblingMsg.ID)
+	if err != nil || gotSiblingMsg.Status != db.StatusProcessing {
+		t.Errorf("siblingMsg status = %v, want %v", gotSiblingMsg.Status, db.StatusProcessing)
+	}
+
+	// Verify dispatches
+	gotClaimedDisp, err := store.GetDispatch(ctx, claimedDisp.ID)
+	if err != nil || gotClaimedDisp.Status != db.StatusPending {
+		t.Errorf("claimedDisp status = %v, want %v", gotClaimedDisp.Status, db.StatusPending)
+	}
+	gotSiblingDisp, err := store.GetDispatch(ctx, siblingDisp.ID)
+	if err != nil || gotSiblingDisp.Status != db.StatusProcessing {
+		t.Errorf("siblingDisp status = %v, want %v", gotSiblingDisp.Status, db.StatusProcessing)
+	}
+}
+
 func TestQueue_WatchdogAndRecoveryMatrix(t *testing.T) {
 	t.Parallel()
 

@@ -15,12 +15,15 @@ type Router struct {
 	deps           InteractionDeps
 	configCommitMu sync.Mutex
 	bgWg           sync.WaitGroup
+	seenMu         sync.Mutex
+	seenIDs        map[string]struct{}
 }
 
 // NewRouter creates a new interaction Router with injected dependencies.
 func NewRouter(deps InteractionDeps) *Router {
 	return &Router{
-		deps: deps,
+		deps:    deps,
+		seenIDs: make(map[string]struct{}),
 	}
 }
 
@@ -42,45 +45,30 @@ func (r *Router) getPool() *queue.WorkerPool {
 	return r.deps.Pool
 }
 
-// Handle processes incoming interaction events, enforces admin permissions, and dispatches to handlers.
-func (r *Router) Handle(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if s == nil || s.Ratelimiter == nil || i == nil || i.Interaction == nil {
-		return
+func (r *Router) claimInteraction(id string) bool {
+	r.seenMu.Lock()
+	defer r.seenMu.Unlock()
+	if r.seenIDs == nil || len(r.seenIDs) >= 2048 {
+		r.seenIDs = make(map[string]struct{})
 	}
-	if i.Type != discordgo.InteractionApplicationCommand {
-		return
+	if _, seen := r.seenIDs[id]; seen {
+		return false
 	}
+	r.seenIDs[id] = struct{}{}
+	return true
+}
 
-	var user *discordgo.User
+func extractCallerUser(i *discordgo.InteractionCreate) *discordgo.User {
+	if i == nil {
+		return nil
+	}
 	if i.Member != nil && i.Member.User != nil {
-		user = i.Member.User
-	} else if i.User != nil {
-		user = i.User
+		return i.Member.User
 	}
-	if user == nil {
-		log.Printf("[Interactions] Could not identify caller user for interaction %s", i.ID)
-		return
-	}
+	return i.User
+}
 
-	isAdmin := false
-	if cfg := r.getConfig(); cfg != nil {
-		isAdmin = cfg.IsAdmin(user.ID, user.Username, user.GlobalName)
-	}
-
-	if !isAdmin {
-		if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: "⛔ Unauthorized: Slash commands require administrator privileges.",
-				Flags:   discordgo.MessageFlagsEphemeral,
-			},
-		}); err != nil {
-			log.Printf("[Interactions] Failed to respond unauthorized: %v", err)
-		}
-		return
-	}
-
-	data := i.ApplicationCommandData()
+func (r *Router) dispatchCommand(s *discordgo.Session, i *discordgo.InteractionCreate, data discordgo.ApplicationCommandInteractionData) {
 	switch data.Name {
 	case "status":
 		r.handleStatus(s, i)
@@ -105,4 +93,45 @@ func (r *Router) Handle(s *discordgo.Session, i *discordgo.InteractionCreate) {
 			log.Printf("[Interactions] Failed to respond unrecognized command: %v", err)
 		}
 	}
+}
+
+// Handle processes incoming interaction events, enforces admin permissions, and dispatches to handlers.
+func (r *Router) Handle(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if s == nil || s.Ratelimiter == nil || i == nil || i.Interaction == nil || i.ID == "" {
+		return
+	}
+
+	if !r.claimInteraction(i.ID) {
+		return
+	}
+
+	if i.Type != discordgo.InteractionApplicationCommand {
+		return
+	}
+
+	user := extractCallerUser(i)
+	if user == nil {
+		log.Printf("[Interactions] Could not identify caller user for interaction %s", i.ID)
+		return
+	}
+
+	isAdmin := false
+	if cfg := r.getConfig(); cfg != nil {
+		isAdmin = cfg.IsAdmin(user.ID, user.Username, user.GlobalName)
+	}
+
+	if !isAdmin {
+		if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "⛔ Unauthorized: Slash commands require administrator privileges.",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		}); err != nil {
+			log.Printf("[Interactions] Failed to respond unauthorized: %v", err)
+		}
+		return
+	}
+
+	r.dispatchCommand(s, i, i.ApplicationCommandData())
 }

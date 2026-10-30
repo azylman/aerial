@@ -21,6 +21,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
 	"github.com/azylman/aerial/services/eri/pkg/discord"
+	"github.com/azylman/aerial/services/eri/pkg/interactions"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
@@ -1018,6 +1019,95 @@ func handleTasks(store db.Store, poolOpt ...*queue.WorkerPool) http.HandlerFunc 
 	}
 }
 
+func handleInternalDiscordMessage(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
+			return
+		}
+		var req DiscordMessageIngressRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeErr(w, http.StatusBadRequest, "Invalid payload: "+err.Error())
+			return
+		}
+		if req.Message == nil || req.Message.ID == "" || req.Message.Author == nil {
+			writeErr(w, http.StatusBadRequest, "Invalid payload: message, id, and author are required")
+			return
+		}
+
+		var s *discordgo.Session
+		if pool != nil {
+			s = pool.DiscordSession()
+		}
+		status, err := processFunnelMessageIngress(r.Context(), s, store, pool, req.Message, req.BotUserID, req.RoleNames)
+		if err != nil {
+			log.Printf("[Internal Ingress] Error processing message %s: %v", req.Message.ID, err)
+			writeErr(w, http.StatusInternalServerError, "Failed to process message: "+err.Error())
+			return
+		}
+		httpkit.WriteJSON(w, http.StatusOK, map[string]string{
+			"status":     status,
+			"message_id": req.Message.ID,
+		})
+	}
+}
+
+func handleInternalDiscordInteraction(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "Failed to read request body")
+			return
+		}
+		var interaction discordgo.Interaction
+		if err := json.Unmarshal(body, &interaction); err == nil && interaction.ID != "" {
+			// Successfully unmarshaled direct interaction
+		} else {
+			var env struct {
+				Interaction *discordgo.Interaction `json:"interaction"`
+			}
+			if err := json.Unmarshal(body, &env); err == nil && env.Interaction != nil {
+				interaction = *env.Interaction
+			}
+		}
+		if interaction.ID == "" {
+			writeErr(w, http.StatusBadRequest, "Invalid payload: interaction id is required")
+			return
+		}
+
+		var dgSession *discordgo.Session
+		if pool != nil {
+			dgSession = pool.DiscordSession()
+		}
+		if dgSession == nil {
+			var sessErr error
+			dgSession, sessErr = discordgo.New("Bot dummy")
+			if sessErr != nil {
+				log.Printf("[Internal Ingress] Warning creating fallback discordgo session: %v", sessErr)
+			}
+		}
+
+		ic := &discordgo.InteractionCreate{Interaction: &interaction}
+		router := activeInteractionRouter.Load()
+		if router == nil {
+			router = interactions.NewRouter(interactions.InteractionDeps{
+				Store: store, Pool: pool, PoolProvider: funnelPool.Load,
+				Config: currentFunnelConfig(), ConfigProvider: currentFunnelConfig, HaroURL: os.Getenv("HARO_URL"),
+			})
+			activeInteractionRouter.Store(router)
+		}
+		router.Handle(dgSession, ic)
+
+		httpkit.WriteJSON(w, http.StatusOK, map[string]string{
+			"status": "ok",
+		})
+	}
+}
+
 type statusRecorder struct {
 	http.ResponseWriter
 	statusCode int
@@ -1036,7 +1126,8 @@ func (rec *statusRecorder) Flush() {
 
 func normalizeRoute(path string) string {
 	switch {
-	case path == "/prompt", path == "/dispatch", path == "/dispatch/cancel", path == "/health", path == "/metrics", path == "/internal/llm":
+	case path == "/prompt", path == "/dispatch", path == "/dispatch/cancel", path == "/health", path == "/metrics", path == "/internal/llm",
+		path == "/internal/discord/message", path == "/internal/discord/interaction":
 		return path
 	case path == "/voice/ask" || path == "/api/voice/ask":
 		return "/voice/ask"
@@ -1078,6 +1169,8 @@ func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, embedder 
 	mux.HandleFunc("/dispatch/cancel", handleCancelDispatch(store))
 	mux.HandleFunc("/discord/message", handleDirectMessage(pool))
 	mux.HandleFunc("/discord/widget", handleStatusWidget(pool))
+	mux.HandleFunc("/internal/discord/message", handleInternalDiscordMessage(store, pool))
+	mux.HandleFunc("/internal/discord/interaction", handleInternalDiscordInteraction(store, pool))
 	mux.HandleFunc("/voice/ask", handleVoiceAsk(pool))
 	mux.HandleFunc("/api/voice/ask", handleVoiceAsk(pool))
 	mux.HandleFunc("/transcripts/search", handleTranscriptSearch(store, embedder))

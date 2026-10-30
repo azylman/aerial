@@ -216,6 +216,9 @@ func (te *turnExecution) rotateSessionID(threadID, newSessionID string) {
 //nolint:unparam
 func (te *turnExecution) finalizeBurstMessages(msgs []db.Message, msgStatus, msgOutput, runStatus, runErr, model string, notify, isResponse bool) {
 	if te.isDispatch() {
+		if te.pool != nil && te.dispatch != nil {
+			te.pool.claimedDispatches.Delete(te.dispatch.ID)
+		}
 		if isResponse {
 			te.updateDispatchCompleted(te.dispatch.ID, msgOutput)
 		} else {
@@ -224,6 +227,9 @@ func (te *turnExecution) finalizeBurstMessages(msgs []db.Message, msgStatus, msg
 		return
 	}
 	for _, m := range msgs {
+		if te.pool != nil {
+			te.pool.claimedMessages.Delete(m.ID)
+		}
 		if isResponse {
 			te.updateMessageCompleted(m.ID, msgOutput)
 		} else {
@@ -482,6 +488,7 @@ func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 		}
 		return
 	}
+	p.claimedDispatches.Store(d.ID, struct{}{})
 
 	isEphem := strings.TrimSpace(d.SessionID) == ""
 	leaseKey := d.SessionID
@@ -613,7 +620,7 @@ func extractVanadisDispatchInfo(d db.Dispatch) (chunkID, buildID string, chunkId
 	return chunkID, buildID, chunkIdx
 }
 
-func (te *turnExecution) claimAndFilterStale() bool {
+func (te *turnExecution) claimPendingBurst() []db.Message {
 	var claimedBurst []db.Message
 	for _, m := range te.burst {
 		claimed, claimErr := te.pool.cfg.Store.ClaimPendingMessage(te.pool.ctx, m.ID)
@@ -625,8 +632,16 @@ func (te *turnExecution) claimAndFilterStale() bool {
 			log.Printf("[WorkerPool] Skipping message %s: already claimed or completed", m.ID)
 			continue
 		}
+		if te.pool != nil {
+			te.pool.claimedMessages.Store(m.ID, struct{}{})
+		}
 		claimedBurst = append(claimedBurst, m)
 	}
+	return claimedBurst
+}
+
+func (te *turnExecution) claimAndFilterStale() bool {
+	claimedBurst := te.claimPendingBurst()
 	if len(claimedBurst) == 0 {
 		return false
 	}
@@ -791,10 +806,18 @@ func (te *turnExecution) handleAllAmbientPlan() bool {
 		metrics.RecordTurnCompleted("cancelled", te.triggerType, "classifier", time.Since(te.execStart))
 		for _, m := range te.burst {
 			te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
+			if te.pool != nil {
+				te.pool.claimedMessages.Delete(m.ID)
+			}
 		}
 		return true
 	}
 	te.markAmbientBurst()
+	if te.pool != nil {
+		for _, m := range te.burst {
+			te.pool.claimedMessages.Delete(m.ID)
+		}
+	}
 	return true
 }
 
