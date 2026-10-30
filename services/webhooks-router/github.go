@@ -396,6 +396,20 @@ func hasExecutedBuildStep(steps []GitHubWorkflowJobStep) bool {
 	return !hasPushStep
 }
 
+// hasSkippedImagePromotionJob returns true if any job whose name contains both "promote" and "latest"
+// has completed with a conclusion other than "success" (e.g. skipped or failed).
+func hasSkippedImagePromotionJob(jobs []GitHubWorkflowJobItem) bool {
+	for _, job := range jobs {
+		nameLower := strings.ToLower(job.Name)
+		if strings.Contains(nameLower, "promote") && strings.Contains(nameLower, "latest") {
+			if job.Status == "completed" && job.Conclusion != "success" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 type GitHubWorkflowJobsResponse struct {
 	TotalCount int                     `json:"total_count"`
 	Jobs       []GitHubWorkflowJobItem `json:"jobs"`
@@ -1196,6 +1210,10 @@ func (s *RouterServer) resolveWorkflowRunImages(ctx context.Context, repo string
 	var jobsResp GitHubWorkflowJobsResponse
 	if err := s.getGitHubJSON(ctx, fmt.Sprintf("/repos/%s/actions/runs/%d/jobs?per_page=100", repo, runID), 5<<20, &jobsResp); err != nil {
 		return nil, err
+	}
+
+	if hasSkippedImagePromotionJob(jobsResp.Jobs) {
+		return nil, nil
 	}
 
 	owner := "azylman"

@@ -286,6 +286,18 @@ func ImageMatches(query, target string) bool {
 	return baseQ == baseT
 }
 
+// ReplaceImageTag returns imageRef with its tag replaced by tag.
+// If either imageRef or tag is empty after trimming, the trimmed imageRef is returned unchanged.
+// It strips any existing tag or @sha256:... digest via stripImageTag and returns stripImageTag(ref) + ":" + t.
+func ReplaceImageTag(imageRef, tag string) string {
+	ref := strings.TrimSpace(imageRef)
+	t := strings.TrimSpace(tag)
+	if ref == "" || t == "" {
+		return ref
+	}
+	return stripImageTag(ref) + ":" + t
+}
+
 func stripImageTag(img string) string {
 	if idx := strings.Index(img, "@"); idx != -1 {
 		img = img[:idx]

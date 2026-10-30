@@ -16,7 +16,8 @@ job "coven" {
 
   update {
     max_parallel      = 1
-    canary            = 0
+    canary            = 1
+    auto_promote      = true
     min_healthy_time  = "5s"
     healthy_deadline  = "1m"
     progress_deadline = "2m"

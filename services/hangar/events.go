@@ -504,6 +504,16 @@ func (d *SyncDaemon) applyImageReadyToJob(ctx context.Context, job MatchedNomadJ
 
 	jobSpec := string(content)
 
+	if HasNomadJobVariable(jobSpec, "image_tag") && strings.TrimSpace(req.CommitSHA) != "" {
+		commitImgRef := ReplaceImageTag(imgRef, req.CommitSHA)
+		commitDigest, dgstErr := d.GetRemoteImageDigest(ctx, commitImgRef)
+		if dgstErr != nil || commitDigest == "" {
+			log.Printf("[Hangar:ImageReady] Commit image %s not ready in registry for job %s: %v", commitImgRef, job.JobName, dgstErr)
+			return fmt.Errorf("%s: commit image %s not ready in registry: %w", job.JobName, commitImgRef, dgstErr)
+		}
+		digest = commitDigest
+	}
+
 	if errVal := d.ValidateNomadJob(ctx, job.JobPath); errVal != nil {
 		log.Printf("[Hangar:ImageReady] Validation failed for job %s (%s): %v", job.JobName, job.JobPath, errVal)
 		return fmt.Errorf("%s validation failed: %w", job.JobName, errVal)
