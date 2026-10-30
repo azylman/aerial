@@ -160,25 +160,52 @@ func ExtractMCPToolInfo(toolName string, params map[string]any) (string, string)
 	return toolName, "native"
 }
 
-// ExtractSkillFromTarget extracts a skill name from a file path or command string referencing SKILL.md.
+func isSkillNameChar(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_'
+}
+
+func isReservedSkillDir(name string) bool {
+	switch name {
+	case "skills", "custom-skills", "common", "discord", "voice", "ephemeral", "builtin":
+		return true
+	default:
+		return false
+	}
+}
+
+func isValidSkillName(name string) bool {
+	if len(name) == 0 || len(name) > 64 || isReservedSkillDir(name) || name[0] == '-' || name[0] == '_' || name[len(name)-1] == '-' || name[len(name)-1] == '_' {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		if !isSkillNameChar(name[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// ExtractSkillFromTarget extracts a skill name from a file path or command string referencing <skill>/SKILL.md.
 func ExtractSkillFromTarget(target string) (string, bool) {
-	trimmed := strings.TrimSpace(target)
-	idx := strings.Index(trimmed, "SKILL.md")
-	if idx == -1 {
-		return "", false
+	const marker = "SKILL.md"
+	s := strings.ReplaceAll(strings.TrimSpace(target), `\"`, `"`)
+	for {
+		idx := strings.Index(s, marker)
+		if idx == -1 {
+			return "", false
+		}
+		afterIdx := idx + len(marker)
+		validAfter := afterIdx == len(s) || (!isSkillNameChar(s[afterIdx]) && s[afterIdx] != '.' && s[afterIdx] != '/' && s[afterIdx] != '\\')
+		if idx > 0 && (s[idx-1] == '/' || s[idx-1] == '\\') && validAfter {
+			prefix := s[:idx-1]
+			segStart := strings.LastIndexAny(prefix, "/\\ \t\n\r\"'`=:")
+			skill := strings.TrimSuffix(prefix[segStart+1:], ".tmp")
+			if isValidSkillName(skill) {
+				return skill, true
+			}
+		}
+		s = s[afterIdx:]
 	}
-	prefix := strings.TrimRight(trimmed[:idx], "/\\ \t\"'`")
-	if prefix == "" {
-		return "", false
-	}
-	skill := prefix
-	if lastSlash := strings.LastIndexAny(prefix, "/\\"); lastSlash != -1 {
-		skill = prefix[lastSlash+1:]
-	}
-	if skill = strings.Trim(skill, "\"'` "); skill != "" && skill != "skills" && skill != "custom-skills" {
-		return skill, true
-	}
-	return "", false
 }
 
 func appendSection(p, tag, content string) string {

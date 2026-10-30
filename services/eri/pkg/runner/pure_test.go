@@ -179,6 +179,19 @@ func TestExtractSkillFromTarget(t *testing.T) {
 		{"/share/aerial-config/custom-skills/ha-operations/SKILL.md", "ha-operations", true},
 		{"file:///data/runtimes/discord/.gemini/config/skills/culinary-recipes/SKILL.md", "culinary-recipes", true},
 		{"cat /root/.gemini/config/skills/antigravity-guide/SKILL.md | grep title", "antigravity-guide", true},
+		{"/data/runtimes/discord/.gemini/config/skills/create-payment-credential.tmp/SKILL.md", "create-payment-credential", true},
+		{"/data/runtimes/discord/.gemini/antigravity-cli/builtin/skills/antigravity_guide/SKILL.md", "antigravity_guide", true},
+		{`"/data/runtimes/discord/.gemini/config/skills/systematic-debugging/SKILL.md"`, "systematic-debugging", true},
+		{`"\"/data/runtimes/discord/.gemini/config/skills/systematic-debugging/SKILL.md\""`, "systematic-debugging", true},
+		{`find /share/aerial -maxdepth 5 -name "SKILL.md"`, "", false},
+		{"find . -name SKILL.md", "", false},
+		{`find /share -path "*/SKILL.md"`, "", false},
+		{"/share/aerial/.agents/skills/discord/SKILL.md", "", false},
+		{"/share/aerial/.agents/skills/common/SKILL.md", "", false},
+		{"/share/aerial/.agents/skills/-bad-skill/SKILL.md", "", false},
+		{"/share/aerial/.agents/skills/BadUpper/SKILL.md", "", false},
+		{"/share/aerial/.agents/skills/foo/SKILL.md.bak", "", false},
+		{"test -f SKILL.md && cat /share/aerial-config/custom-skills/ha-operations/SKILL.md", "ha-operations", true},
 	} {
 		if got, ok := ExtractSkillFromTarget(tc.target); got != tc.want || ok != tc.wantOk {
 			t.Errorf("ExtractSkillFromTarget(%q) = (%q, %v), want (%q, %v)", tc.target, got, ok, tc.want, tc.wantOk)
