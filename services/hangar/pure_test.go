@@ -1070,6 +1070,36 @@ func TestImageMatches_TableDriven(t *testing.T) {
 	}
 }
 
+func TestReplaceImageTag_TableDriven(t *testing.T) {
+	tests := []struct {
+		name     string
+		imageRef string
+		tag      string
+		expected string
+	}{
+		{"replace latest tag", "ghcr.io/azylman/aerial-brain:latest", "sha123", "ghcr.io/azylman/aerial-brain:sha123"},
+		{"replace sha256 digest", "ghcr.io/azylman/aerial-brain@sha256:12345", "v2", "ghcr.io/azylman/aerial-brain:v2"},
+		{"untagged ref", "ghcr.io/azylman/aerial-brain", "v1.0.0", "ghcr.io/azylman/aerial-brain:v1.0.0"},
+		{"registry port ref with tag", "localhost:5000/app:v1", "v2", "localhost:5000/app:v2"},
+		{"registry port ref untagged", "localhost:5000/app", "v2", "localhost:5000/app:v2"},
+		{"empty imageRef", "", "v1", ""},
+		{"whitespace imageRef", "   ", "v1", ""},
+		{"empty tag", "ghcr.io/azylman/aerial-brain:latest", "", "ghcr.io/azylman/aerial-brain:latest"},
+		{"whitespace tag", "ghcr.io/azylman/aerial-brain:latest", "   ", "ghcr.io/azylman/aerial-brain:latest"},
+		{"both empty", "", "", ""},
+		{"trimmed inputs", "  ghcr.io/azylman/aerial-brain:latest  ", "  sha999  ", "ghcr.io/azylman/aerial-brain:sha999"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ReplaceImageTag(tt.imageRef, tt.tag)
+			if got != tt.expected {
+				t.Errorf("ReplaceImageTag(%q, %q) = %q, want %q", tt.imageRef, tt.tag, got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestIsSafeJobPath_TableDriven(t *testing.T) {
 	baseDir := "/share/aerial-config/jobs"
 	tests := []struct {

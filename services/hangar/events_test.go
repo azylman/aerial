@@ -887,6 +887,20 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) { // t.Run(
 			wantRunArg: "job run -detach -var=image_tag=sha12345 ",
 		},
 		{
+			name:             "unpushed commit SHA fails registry preflight",
+			jobFile:          "router.nomad",
+			jobHCL:           routerHCL,
+			registryNotFound: true,
+			req: ImageReadyEventRequest{
+				Image:     "ghcr.io/azylman/aerial-webhooks-router:latest",
+				CommitSHA: "unpushed_sha_44d3d1f",
+				Repo:      "azylman/aerial",
+			},
+			wantCode:   http.StatusInternalServerError,
+			wantStatus: "error",
+			wantRuns:   0,
+		},
+		{
 			name:    "digest fallback variable injection",
 			jobFile: "router.nomad",
 			jobHCL:  routerHCL,

@@ -825,6 +825,13 @@ func TestResolveWorkflowRunImages(t *testing.T) {
 			},
 		},
 	}
+	mockSkippedPromotionJobs := GitHubWorkflowJobsResponse{
+		TotalCount: 2,
+		Jobs: []GitHubWorkflowJobItem{
+			{ID: 201, Name: "Build & Push Images to GHCR (eri)", Status: "completed", Conclusion: "success"},
+			{ID: 202, Name: "Promote Images to :latest", Status: "completed", Conclusion: "skipped"},
+		},
+	}
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -837,6 +844,8 @@ func TestResolveWorkflowRunImages(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(mockMirrormereJobs)
 		case strings.Contains(r.URL.Path, "/actions/runs/77777/jobs"):
 			_ = json.NewEncoder(w).Encode(mockSkippedStepJobs)
+		case strings.Contains(r.URL.Path, "/actions/runs/88888/jobs"):
+			_ = json.NewEncoder(w).Encode(mockSkippedPromotionJobs)
 		case strings.Contains(r.URL.Path, "/actions/runs/403/jobs"):
 			w.Header().Set("X-RateLimit-Remaining", "0")
 			w.WriteHeader(http.StatusForbidden)
@@ -902,6 +911,12 @@ func TestResolveWorkflowRunImages(t *testing.T) {
 			repo:  "azylman/mirrormere",
 			runID: 77777,
 			want:  []string{"ghcr.io/azylman/mirrormere-cast-watcher:latest"},
+		},
+		{
+			name:  "skipped image promotion returns nil",
+			repo:  "azylman/aerial",
+			runID: 88888,
+			want:  nil,
 		},
 		{name: "empty repo", repo: "", runID: 12345, wantErr: true},
 		{name: "zero runID", repo: "aerial", runID: 0, wantErr: true},
