@@ -302,20 +302,58 @@ jobs:
           OWNER: ${{ github.repository_owner }}
 
       - name: Log in to GitHub Container Registry
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Resolve Git Tree SHA
+        id: tree_check
+        env:
+          OWNER: ${{ steps.repo_owner.outputs.owner }}
+          IMAGE_NAME: ${{ matrix.image_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          FORCE_ALL: ${{ inputs.force_all }}
+        run: |
+          set -euo pipefail
+          TREE_SHA=$(git rev-parse HEAD^{tree})
+          echo "tree_sha=${TREE_SHA}" >> "$GITHUB_OUTPUT"
+          if { [ "$EVENT_NAME" = "push" ] || [ "$EVENT_NAME" = "workflow_dispatch" ]; } && [ "$REF" = "refs/heads/main" ] && [ "$FORCE_ALL" != "true" ]; then
+            if docker buildx imagetools inspect "ghcr.io/${OWNER}/${IMAGE_NAME}:tree-${TREE_SHA}" >/dev/null 2>&1; then
+              echo "exists=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          echo "exists=false" >> "$GITHUB_OUTPUT"
+
+      - name: Push Image from PR Tree Cache (${{ matrix.service }})
+        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && steps.tree_check.outputs.exists == 'true'
+        env:
+          OWNER: ${{ steps.repo_owner.outputs.owner }}
+          IMAGE_NAME: ${{ matrix.image_name }}
+          SHA: ${{ github.sha }}
+          TREE_SHA: ${{ steps.tree_check.outputs.tree_sha }}
+        run: |
+          set -euo pipefail
+          SRC="ghcr.io/${OWNER}/${IMAGE_NAME}:tree-${TREE_SHA}"
+          docker buildx imagetools create \
+            --tag "ghcr.io/${OWNER}/${IMAGE_NAME}:${SHA}" \
+            --annotation "index:org.opencontainers.image.revision=${SHA}" \
+            "$SRC"
+
       - name: Build and Push ${{ matrix.service }}
+        if: steps.tree_check.outputs.exists != 'true'
         uses: docker/build-push-action@v7
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ghcr.io/${{ steps.repo_owner.outputs.owner }}/${{ matrix.image_name }}:${{ github.sha }}
+          push: ${{ ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+          tags: |
+            ghcr.io/${{ steps.repo_owner.outputs.owner }}/${{ matrix.image_name }}:tree-${{ steps.tree_check.outputs.tree_sha }}
+            ${{ github.event_name != 'pull_request' && format('ghcr.io/{0}/{1}:{2}', steps.repo_owner.outputs.owner, matrix.image_name, github.sha) || '' }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
@@ -399,10 +437,23 @@ jobs:
         run: |
           set -euo pipefail
           # Promote non-eri dependencies before eri to prevent RPC skew on Watchtower restart
-          echo "$MATRIX_JSON" | jq -c 'sort_by(.service == "eri") | .[]' | while read -r entry; do
-            IMG=$(echo "$entry" | jq -r '.image_name')
-            SRC="ghcr.io/${OWNER}/${IMG}:${SHA}"
-            DST="ghcr.io/${OWNER}/${IMG}:latest"
-            echo "Promoting manifest ${SRC} -> ${DST}"
-            docker buildx imagetools create --tag "${DST}" "${SRC}"
+          pids=""
+          for IMG in $(echo "$MATRIX_JSON" | jq -r '.[] | select(.service != "eri") | .image_name'); do
+            echo "Promoting non-eri manifest ghcr.io/${OWNER}/${IMG}:${SHA} -> ghcr.io/${OWNER}/${IMG}:latest"
+            docker buildx imagetools create \
+              --tag "ghcr.io/${OWNER}/${IMG}:latest" \
+              --annotation "index:org.opencontainers.image.revision=${SHA}" \
+              "ghcr.io/${OWNER}/${IMG}:${SHA}" &
+            pids="$pids $!"
           done
+          for pid in $pids; do
+            wait "$pid" || exit 1
+          done
+
+          if echo "$MATRIX_JSON" | jq -e '.[] | select(.service == "eri")' >/dev/null; then
+            echo "Promoting eri manifest ghcr.io/${OWNER}/aerial-eri:${SHA} -> ghcr.io/${OWNER}/aerial-eri:latest"
+            docker buildx imagetools create \
+              --tag "ghcr.io/${OWNER}/aerial-eri:latest" \
+              --annotation "index:org.opencontainers.image.revision=${SHA}" \
+              "ghcr.io/${OWNER}/aerial-eri:${SHA}"
+          fi

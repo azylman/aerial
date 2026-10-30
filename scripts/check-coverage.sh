@@ -178,6 +178,9 @@ fi
 
 PARALLEL_JOBS="${PARALLEL_JOBS:-${AERIAL_COVERAGE_JOBS:-6}}"
 
+SVC_PKG_FILE="${PROF_DIR}/svc_pkgs.txt"
+: > "$SVC_PKG_FILE"
+
 for svc in $ALL_GO_SERVICES; do
     if [ ! -d "$svc" ]; then
         continue
@@ -189,181 +192,187 @@ for svc in $ALL_GO_SERVICES; do
         continue
     fi
 
-    # Phase 1: Run coverage collection for all packages in parallel batches
-    job_count=0
     for pkg in $pkgs; do
-        safe_pkg=$(echo "$pkg" | tr '/.' '__')
-        prof_file="${PROF_DIR}/${safe_pkg}.out"
-        log_file="${PROF_DIR}/${safe_pkg}.log"
-        status_file="${PROF_DIR}/${safe_pkg}.status"
-
-        (
-            if (cd "$svc" && env -i \
-                ${PATH:+PATH="$PATH"} \
-                ${HOME:+HOME="$HOME"} \
-                ${GOROOT:+GOROOT="$GOROOT"} \
-                ${GOTOOLCHAIN:+GOTOOLCHAIN="$GOTOOLCHAIN"} \
-                ${GOPATH:+GOPATH="$GOPATH"} \
-                ${GOCACHE:+GOCACHE="$GOCACHE"} \
-                ${GOMODCACHE:+GOMODCACHE="$GOMODCACHE"} \
-                ${GOLANGCI_LINT_CACHE:+GOLANGCI_LINT_CACHE="$GOLANGCI_LINT_CACHE"} \
-                ${TMPDIR:+TMPDIR="$TMPDIR"} \
-                ${SystemRoot:+SystemRoot="$SystemRoot"} \
-                ${SYSTEMROOT:+SYSTEMROOT="$SYSTEMROOT"} \
-                ${USERPROFILE:+USERPROFILE="$USERPROFILE"} \
-                ${HOMEDRIVE:+HOMEDRIVE="$HOMEDRIVE"} \
-                ${HOMEPATH:+HOMEPATH="$HOMEPATH"} \
-                ${TMP:+TMP="$TMP"} \
-                ${TEMP:+TEMP="$TEMP"} \
-                ${LOCALAPPDATA:+LOCALAPPDATA="$LOCALAPPDATA"} \
-                ${APPDATA:+APPDATA="$APPDATA"} \
-                ${COMSPEC:+COMSPEC="$COMSPEC"} \
-                ${PATHEXT:+PATHEXT="$PATHEXT"} \
-                MSYS_NO_PATHCONV=1 \
-                LANG="${LANG:-en_US.UTF-8}" \
-                LC_ALL="${LC_ALL:-en_US.UTF-8}" \
-                GIT_TERMINAL_PROMPT=0 \
-                CGO_ENABLED="$cgo_val" \
-                go test ${race_flag:+"$race_flag"} -timeout ${AERIAL_TEST_TIMEOUT:-180s} -coverprofile="$prof_file" "$pkg" >"$log_file" 2>&1); then
-                echo "PASS" > "$status_file"
-            else
-                echo "FAIL" > "$status_file"
-            fi
-        ) &
-
-        job_count=$((job_count + 1))
-        if [ "$job_count" -ge "$PARALLEL_JOBS" ]; then
-            wait
-            job_count=0
-        fi
-    done
-    wait
-
-    # Phase 2: Process results, print logs in order, and record violations
-    for pkg in $pkgs; do
-        safe_pkg=$(echo "$pkg" | tr '/.' '__')
-        prof_file="${PROF_DIR}/${safe_pkg}.out"
-        log_file="${PROF_DIR}/${safe_pkg}.log"
-        status_file="${PROF_DIR}/${safe_pkg}.status"
-
-        if [ ! -f "$status_file" ] || [ "$(cat "$status_file" 2>/dev/null)" = "FAIL" ]; then
-            if [ -f "$log_file" ]; then
-                cat "$log_file"
-            fi
-            record_violation "Package $pkg tests failed during coverage collection"
-        fi
-
-        pkg_tot=0
-        pkg_cov=0
-        if [ -f "$prof_file" ]; then
-            # Parse coverage.out with awk
-            counts=$(awk '
-                BEGIN { tot=0; cov=0 }
-                /^mode:/ { next }
-                NF >= 3 {
-                    stmts = $(NF-1) + 0
-                    count = $NF + 0
-                    tot += stmts
-                    if (count > 0) cov += stmts
-                }
-                END { printf("%d %d\n", tot, cov) }
-            ' "$prof_file")
-
-            pkg_tot=$(echo "$counts" | awk '{print $1}')
-            pkg_cov=$(echo "$counts" | awk '{print $2}')
-        fi
-
-        thresh=$(get_pkg_threshold "$pkg")
-        pct_val="-1"
-        status="PASS"
-
-        if [ "$pkg_tot" -gt 0 ]; then
-            pct_val=$(awk "BEGIN { printf \"%.1f\", ($pkg_cov / $pkg_tot) * 100.0 }")
-            TOTAL_GO_STMTS=$((TOTAL_GO_STMTS + pkg_tot))
-            COVERED_GO_STMTS=$((COVERED_GO_STMTS + pkg_cov))
-
-            # Check threshold violation if a floor is defined
-            is_violation=$(awk "BEGIN { print ($pct_val < $thresh) ? 1 : 0 }")
-            if [ "$is_violation" -eq 1 ]; then
-                status="FAIL"
-                record_violation "Package $pkg coverage ($pct_val%) is below required floor (${thresh}%)"
-            fi
-
-            if [ "$is_violation" -eq 1 ] || [ "$GAPS_MODE" -eq 1 ]; then
-                needed=$(awk "BEGIN { req = int(($pkg_tot * $thresh + 99) / 100); diff = req - $pkg_cov; print (diff > 0) ? diff : 0 }")
-                if [ "$is_violation" -eq 1 ] || [ "$needed" -gt 0 ]; then
-                    echo "   🔍 [Coverage Audit] $pkg: $pkg_cov / $pkg_tot stmts ($pct_val%). Deficit: $needed stmts to reach ${thresh}%."
-                    if [ -f "$prof_file" ] && command -v go >/dev/null 2>&1; then
-                        echo "      Top uncovered functions in $pkg:"
-                        (cd "$svc" && go tool cover -func="$prof_file" 2>/dev/null | awk '$1 !~ /^total:/ && $NF != "100.0%"' | sort -k3 -n | head -n 5 | sed 's/^/      • /') || true
-                    fi
-                    if [ -f "$prof_file" ]; then
-                        awk '
-                            !/^mode:/ && $(NF-1)+0 > 0 && $NF+0 == 0 {
-                                col_idx = match($1, /:[0-9]+\.[0-9]+,[0-9]+\.[0-9]+$/)
-                                if (col_idx > 0) {
-                                    path = substr($1, 1, col_idx - 1)
-                                    sub(/.*[\/\\]/, "", path)
-                                    range_str = substr($1, col_idx + 1)
-                                    split(range_str, b, ",")
-                                    split(b[1], s, ".")
-                                    split(b[2], e, ".")
-                                    print path ":" (s[1]+0) ":" (e[1]+0)
-                                }
-                            }
-                        ' "$prof_file" | sort -t: -k1,1 -k2,2n -k3,3n | awk -F: -v pkg="$pkg" '
-                            function flush_range() {
-                                if (cur_file != "") {
-                                    rng = sprintf("L%d-L%d", prev_start, prev_end)
-                                    if (file_ranges[cur_file] == "") {
-                                        file_ranges[cur_file] = rng
-                                    } else {
-                                        file_ranges[cur_file] = file_ranges[cur_file] ", " rng
-                                    }
-                                }
-                            }
-                            {
-                                f = $1; s = $2 + 0; e = $3 + 0
-                                if (f != cur_file) {
-                                    flush_range()
-                                    cur_file = f
-                                    prev_start = s
-                                    prev_end = e
-                                    if (!seen[f]++) {
-                                        files[++file_count] = f
-                                    }
-                                } else {
-                                    if (s <= prev_end + 1) {
-                                        if (e > prev_end) prev_end = e
-                                    } else {
-                                        flush_range()
-                                        prev_start = s
-                                        prev_end = e
-                                    }
-                                }
-                            }
-                            END {
-                                flush_range()
-                                if (file_count > 0) {
-                                    printf("      Uncovered line ranges in %s:\n", pkg)
-                                    limit = (file_count > 10) ? 10 : file_count
-                                    for (i = 1; i <= limit; i++) {
-                                        fn = files[i]
-                                        printf("      • %s: %s\n", fn, file_ranges[fn])
-                                    }
-                                }
-                            }
-                        '
-                    fi
-                fi
-            fi
-        else
-            status="N/A"
-        fi
-
-        echo "${svc}|${pkg}|${pkg_tot}|${pkg_cov}|${pct_val}|${thresh}|${status}" >> "$PKG_DATA_FILE"
+        echo "${svc}|${pkg}" >> "$SVC_PKG_FILE"
     done
 done
+
+# Phase 1: Run coverage collection for all packages in parallel batches
+job_count=0
+while IFS='|' read -r svc pkg; do
+    [ -n "$svc" ] && [ -n "$pkg" ] || continue
+    safe_pkg=$(echo "${svc}_${pkg}" | tr '/.' '__')
+    prof_file="${PROF_DIR}/${safe_pkg}.out"
+    log_file="${PROF_DIR}/${safe_pkg}.log"
+    status_file="${PROF_DIR}/${safe_pkg}.status"
+
+    (
+        if (cd "$svc" && env -i \
+            ${PATH:+PATH="$PATH"} \
+            ${HOME:+HOME="$HOME"} \
+            ${GOROOT:+GOROOT="$GOROOT"} \
+            ${GOTOOLCHAIN:+GOTOOLCHAIN="$GOTOOLCHAIN"} \
+            ${GOPATH:+GOPATH="$GOPATH"} \
+            ${GOCACHE:+GOCACHE="$GOCACHE"} \
+            ${GOMODCACHE:+GOMODCACHE="$GOMODCACHE"} \
+            ${GOLANGCI_LINT_CACHE:+GOLANGCI_LINT_CACHE="$GOLANGCI_LINT_CACHE"} \
+            ${TMPDIR:+TMPDIR="$TMPDIR"} \
+            ${SystemRoot:+SystemRoot="$SystemRoot"} \
+            ${SYSTEMROOT:+SYSTEMROOT="$SYSTEMROOT"} \
+            ${USERPROFILE:+USERPROFILE="$USERPROFILE"} \
+            ${HOMEDRIVE:+HOMEDRIVE="$HOMEDRIVE"} \
+            ${HOMEPATH:+HOMEPATH="$HOMEPATH"} \
+            ${TMP:+TMP="$TMP"} \
+            ${TEMP:+TEMP="$TEMP"} \
+            ${LOCALAPPDATA:+LOCALAPPDATA="$LOCALAPPDATA"} \
+            ${APPDATA:+APPDATA="$APPDATA"} \
+            ${COMSPEC:+COMSPEC="$COMSPEC"} \
+            ${PATHEXT:+PATHEXT="$PATHEXT"} \
+            MSYS_NO_PATHCONV=1 \
+            LANG="${LANG:-en_US.UTF-8}" \
+            LC_ALL="${LC_ALL:-en_US.UTF-8}" \
+            GIT_TERMINAL_PROMPT=0 \
+            CGO_ENABLED="$cgo_val" \
+            go test ${race_flag:+"$race_flag"} -timeout ${AERIAL_TEST_TIMEOUT:-180s} -coverprofile="$prof_file" "$pkg" >"$log_file" 2>&1); then
+            echo "PASS" > "$status_file"
+        else
+            echo "FAIL" > "$status_file"
+        fi
+    ) &
+
+    job_count=$((job_count + 1))
+    if [ "$job_count" -ge "$PARALLEL_JOBS" ]; then
+        wait
+        job_count=0
+    fi
+done < "$SVC_PKG_FILE"
+wait
+
+# Phase 2: Process results, print logs in order, and record violations
+while IFS='|' read -r svc pkg; do
+    [ -n "$svc" ] && [ -n "$pkg" ] || continue
+    safe_pkg=$(echo "${svc}_${pkg}" | tr '/.' '__')
+    prof_file="${PROF_DIR}/${safe_pkg}.out"
+    log_file="${PROF_DIR}/${safe_pkg}.log"
+    status_file="${PROF_DIR}/${safe_pkg}.status"
+
+    if [ ! -f "$status_file" ] || [ "$(cat "$status_file" 2>/dev/null)" = "FAIL" ]; then
+        if [ -f "$log_file" ]; then
+            cat "$log_file"
+        fi
+        record_violation "Package $pkg tests failed during coverage collection"
+    fi
+
+    pkg_tot=0
+    pkg_cov=0
+    if [ -f "$prof_file" ]; then
+        # Parse coverage.out with awk
+        counts=$(awk '
+            BEGIN { tot=0; cov=0 }
+            /^mode:/ { next }
+            NF >= 3 {
+                stmts = $(NF-1) + 0
+                count = $NF + 0
+                tot += stmts
+                if (count > 0) cov += stmts
+            }
+            END { printf("%d %d\n", tot, cov) }
+        ' "$prof_file")
+
+        pkg_tot=$(echo "$counts" | awk '{print $1}')
+        pkg_cov=$(echo "$counts" | awk '{print $2}')
+    fi
+
+    thresh=$(get_pkg_threshold "$pkg")
+    pct_val="-1"
+    status="PASS"
+
+    if [ "$pkg_tot" -gt 0 ]; then
+        pct_val=$(awk "BEGIN { printf \"%.1f\", ($pkg_cov / $pkg_tot) * 100.0 }")
+        TOTAL_GO_STMTS=$((TOTAL_GO_STMTS + pkg_tot))
+        COVERED_GO_STMTS=$((COVERED_GO_STMTS + pkg_cov))
+
+        # Check threshold violation if a floor is defined
+        is_violation=$(awk "BEGIN { print ($pct_val < $thresh) ? 1 : 0 }")
+        if [ "$is_violation" -eq 1 ]; then
+            status="FAIL"
+            record_violation "Package $pkg coverage ($pct_val%) is below required floor (${thresh}%)"
+        fi
+
+        if [ "$is_violation" -eq 1 ] || [ "$GAPS_MODE" -eq 1 ]; then
+            needed=$(awk "BEGIN { req = int(($pkg_tot * $thresh + 99) / 100); diff = req - $pkg_cov; print (diff > 0) ? diff : 0 }")
+            if [ "$is_violation" -eq 1 ] || [ "$needed" -gt 0 ]; then
+                echo "   🔍 [Coverage Audit] $pkg: $pkg_cov / $pkg_tot stmts ($pct_val%). Deficit: $needed stmts to reach ${thresh}%."
+                if [ -f "$prof_file" ] && command -v go >/dev/null 2>&1; then
+                    echo "      Top uncovered functions in $pkg:"
+                    (cd "$svc" && go tool cover -func="$prof_file" 2>/dev/null | awk '$1 !~ /^total:/ && $NF != "100.0%"' | sort -k3 -n | head -n 5 | sed 's/^/      • /') || true
+                fi
+                if [ -f "$prof_file" ]; then
+                    awk '
+                        !/^mode:/ && $(NF-1)+0 > 0 && $NF+0 == 0 {
+                            col_idx = match($1, /:[0-9]+\.[0-9]+,[0-9]+\.[0-9]+$/)
+                            if (col_idx > 0) {
+                                path = substr($1, 1, col_idx - 1)
+                                sub(/.*[\/\\]/, "", path)
+                                range_str = substr($1, col_idx + 1)
+                                split(range_str, b, ",")
+                                split(b[1], s, ".")
+                                split(b[2], e, ".")
+                                print path ":" (s[1]+0) ":" (e[1]+0)
+                            }
+                        }
+                    ' "$prof_file" | sort -t: -k1,1 -k2,2n -k3,3n | awk -F: -v pkg="$pkg" '
+                        function flush_range() {
+                            if (cur_file != "") {
+                                rng = sprintf("L%d-L%d", prev_start, prev_end)
+                                if (file_ranges[cur_file] == "") {
+                                    file_ranges[cur_file] = rng
+                                } else {
+                                    file_ranges[cur_file] = file_ranges[cur_file] ", " rng
+                                }
+                            }
+                        }
+                        {
+                            f = $1; s = $2 + 0; e = $3 + 0
+                            if (f != cur_file) {
+                                flush_range()
+                                cur_file = f
+                                prev_start = s
+                                prev_end = e
+                                if (!seen[f]++) {
+                                    files[++file_count] = f
+                                }
+                            } else {
+                                if (s <= prev_end + 1) {
+                                    if (e > prev_end) prev_end = e
+                                } else {
+                                    flush_range()
+                                    prev_start = s
+                                    prev_end = e
+                                }
+                            }
+                        }
+                        END {
+                            flush_range()
+                            if (file_count > 0) {
+                                printf("      Uncovered line ranges in %s:\n", pkg)
+                                limit = (file_count > 10) ? 10 : file_count
+                                for (i = 1; i <= limit; i++) {
+                                    fn = files[i]
+                                    printf("      • %s: %s\n", fn, file_ranges[fn])
+                                }
+                            }
+                        }
+                    '
+                fi
+            fi
+        fi
+    else
+        status="N/A"
+    fi
+
+    echo "${svc}|${pkg}|${pkg_tot}|${pkg_cov}|${pct_val}|${thresh}|${status}" >> "$PKG_DATA_FILE"
+done < "$SVC_PKG_FILE"
 
 # Calculate Global Go Coverage
 GLOBAL_GO_PCT="0.0"
