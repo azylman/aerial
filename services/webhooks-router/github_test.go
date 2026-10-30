@@ -80,11 +80,18 @@ func TestHandleGitHubWebhook(t *testing.T) {
 	}
 }
 
+type ghPriorEvent struct {
+	event    string
+	delivery string
+	payload  string
+}
+
 type ghEventCase struct {
 	name                 string
 	event                string
 	delivery             string
 	payload              string
+	priorEvent           *ghPriorEvent
 	reg                  *mockPRRegistry
 	disp                 *mockOutboundDispatcher
 	river                *mockRiverInserter
@@ -315,6 +322,18 @@ func TestProcessGitHubEvent(t *testing.T) {
 			wantPR:  518, wantCIFailedCalls: 0,
 		},
 		{
+			name: "check_run failure for Sidecar Builds Gate is ignored", event: "check_run", delivery: "del-cr-sidecar-gate-ignore",
+			payload: `{"action":"completed","check_run":{"name":"Sidecar Builds Gate","head_sha":"checkhead444","status":"completed","conclusion":"failure","pull_requests":[{"number":518,"head":{"ref":"feat/test","sha":"checkhead444"}}]},"repository":{"full_name":"azylman/aerial-sidecars"}}`,
+			reg:     &mockPRRegistry{ciFailedTargetID: "target-111", ciFailedUpdated: true},
+			wantPR:  518, wantCIFailedCalls: 0,
+		},
+		{
+			name: "check_run failure for Configuration Gate is ignored", event: "check_run", delivery: "del-cr-config-gate-ignore",
+			payload: `{"action":"completed","check_run":{"name":"Configuration Gate","head_sha":"checkhead444","status":"completed","conclusion":"failure","pull_requests":[{"number":518,"head":{"ref":"feat/test","sha":"checkhead444"}}]},"repository":{"full_name":"azylman/aerial-config"}}`,
+			reg:     &mockPRRegistry{ciFailedTargetID: "target-111", ciFailedUpdated: true},
+			wantPR:  518, wantCIFailedCalls: 0,
+		},
+		{
 			name: "check_run failure for superseded commit SHA is ignored", event: "check_run", delivery: "del-cr-stale-sha",
 			payload: `{"action":"completed","check_run":{"name":"Run Service Unit Tests","head_sha":"stalehead111","status":"completed","conclusion":"failure","pull_requests":[{"number":518,"head":{"ref":"feat/test","sha":"stalehead111"}}]},"repository":{"full_name":"azylman/aerial"}}`,
 			reg:     &mockPRRegistry{resolveHeadSHA: "newerhead999", ciFailedTargetID: "target-111", ciFailedUpdated: true},
@@ -345,6 +364,24 @@ func TestProcessGitHubEvent(t *testing.T) {
 			wantConclusion:       "success",
 			wantRecordCheckCalls: 1,
 			wantRecordCheckState: "passed",
+		},
+		{
+			name: "check_run success for roborev recovers after workflow_run failure", event: "check_run", delivery: "del-cr-roborev-recover",
+			priorEvent: &ghPriorEvent{
+				event:    "workflow_run",
+				delivery: "del-wf-cd-fail",
+				payload:  `{"action":"completed","workflow_run":{"id":525,"name":"Continuous Delivery","head_sha":"robo525abcdef","head_branch":"feat/test","status":"completed","conclusion":"failure","pull_requests":[{"number":525,"head":{"ref":"feat/test","sha":"robo525abcdef"}}]},"repository":{"full_name":"azylman/aerial"}}`,
+			},
+			payload:              `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"roborev","head_sha":"robo525abcdef","status":"completed","conclusion":"success","html_url":"https://github.com/azylman/aerial/actions/runs/525","output":{"title":"Review Succeeded","summary":"All clean"},"pull_requests":[{"number":525,"head":{"ref":"feat/test","sha":"robo525abcdef"}}]}}`,
+			reg:                  &mockPRRegistry{syncTargetID: "1555405874565091380", ciFailedTargetID: "1555405874565091380", ciFailedUpdated: false},
+			wantPR:               525,
+			wantHeadSHA:          "robo525abcdef",
+			wantTargetID:         "1555405874565091380",
+			wantSyncCalls:        1,
+			wantConclusion:       "success",
+			wantRecordCheckCalls: 1,
+			wantRecordCheckState: "passed",
+			wantCIFailedCalls:    1,
 		},
 		{
 			name: "check_run success for Check RoboRev Bootstrap State ignores UpdatePRSync", event: "check_run", delivery: "del-cr-roborev-bootstrap-success",
@@ -643,6 +680,12 @@ func TestProcessGitHubEvent(t *testing.T) {
 			}
 			srv := newTestRouter(Config{GitHubAPIURL: mockServer.URL}, mockServer.Client(), reg, disp, inserters...)
 			srv.onProcessed = func(string, string) {}
+
+			if tc.priorEvent != nil {
+				if _, err := srv.ProcessGitHubEvent(ctx, tc.priorEvent.event, tc.priorEvent.delivery, []byte(tc.priorEvent.payload)); err != nil {
+					t.Fatalf("priorEvent failed: %v", err)
+				}
+			}
 
 			res, err := srv.ProcessGitHubEvent(ctx, tc.event, tc.delivery, []byte(tc.payload))
 			if (err != nil) != tc.wantErr {

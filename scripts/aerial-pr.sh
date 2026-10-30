@@ -1045,7 +1045,11 @@ EOF
         exit 1
     fi
 
-    run_id=$(echo "$runs_resp" | jq -r '[.workflow_runs[]? | select(.name == "RoboRev Code Review" or (.path // "" | endswith("roborev.yml"))) | .id] | first // empty')
+    run_id=$(echo "$runs_resp" | jq -r '
+        ([.workflow_runs[]? | select(.name == "RoboRev Code Review" or (.path // "" | endswith("roborev.yml"))) | .id] | first) //
+        ([.workflow_runs[]? | select(.name == "Continuous Delivery" or .name == "Validate Configuration" or (.path // "" | (endswith("docker-publish.yml") or endswith("ci.yml") or endswith("validate.yml")))) | .id] | first) //
+        empty
+    ')
     if [ -z "$run_id" ]; then
         echo "ERROR: No RoboRev workflow run found for commit ${short_sha} on PR #${pr_num}." >&2
         exit 1

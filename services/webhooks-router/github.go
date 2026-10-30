@@ -560,7 +560,10 @@ func isRoboRevCheck(checkName string) bool {
 }
 
 func isGateAggregatorCheck(checkName string) bool {
-	return strings.EqualFold(strings.TrimSpace(checkName), "Container Builds Gate")
+	trimmed := strings.TrimSpace(checkName)
+	return strings.EqualFold(trimmed, "Container Builds Gate") ||
+		strings.EqualFold(trimmed, "Sidecar Builds Gate") ||
+		strings.EqualFold(trimmed, "Configuration Gate")
 }
 
 func classifyCheckState(status, conclusion string) string {
@@ -842,7 +845,7 @@ func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *Resol
 	if s.isStaleOrIgnoredCIFailure(ctx, res) {
 		return nil
 	}
-	if res.PRNumber > 0 && res.HeadSHA != "" && !isRoboRevCheck(res.CheckName) {
+	if res.Event == "check_run" && res.PRNumber > 0 && res.HeadSHA != "" && !isRoboRevCheck(res.CheckName) {
 		s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
 	}
 	if res.PRNumber > 0 {
@@ -864,7 +867,7 @@ func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *Resol
 		res.TargetID = firstNonEmpty(res.TargetID, targetID)
 		if prNum > 0 && res.PRNumber == 0 {
 			res.PRNumber = prNum
-			if !isRoboRevCheck(res.CheckName) {
+			if res.Event == "check_run" && !isRoboRevCheck(res.CheckName) {
 				s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
 			}
 		}

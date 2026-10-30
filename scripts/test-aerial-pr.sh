@@ -585,6 +585,36 @@ ROBOREV_OVERRIDE_CHECK=$(
     else
         echo "flags_test:fail:$out9"
     fi
+
+    # Subtest 10: Resolving Continuous Delivery (docker-publish.yml) workflow run when standalone roborev.yml is absent
+    curl() {
+        local url=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                https://*) url="$1"; shift ;;
+                *) shift ;;
+            esac
+        done
+        if [[ "$url" =~ /pulls/42 ]]; then
+            echo '{"state":"open","head":{"sha":"3344556677889900aabbccddeeff001122334455"},"html_url":"https://github.com/azylman/aerial/pull/42"}'
+            echo '200'
+        elif [[ "$url" =~ /issues/42/comments ]]; then
+            echo '{"id":505}'
+            echo '201'
+        elif [[ "$url" =~ /actions/runs\? ]]; then
+            echo '{"workflow_runs":[{"id":112233,"name":"Continuous Delivery","path":".github/workflows/docker-publish.yml"}]}'
+            echo '200'
+        elif [[ "$url" =~ /actions/runs/112233/rerun-failed-jobs ]]; then
+            echo '{"status":"queued"}'
+            echo '201'
+        fi
+    }
+    out10=$(override_roborev --repo aerial 42 "Testing unified workflow resolution")
+    if echo "$out10" | jq -e '.status == "overridden" and .run_id == 112233' >/dev/null 2>&1; then
+        echo "unified_wf:ok"
+    else
+        echo "unified_wf:fail:$out10"
+    fi
 )
 assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'val1:ok' && echo true || echo false)" "override_roborev validates missing PR number"
 assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'val1b:ok' && echo true || echo false)" "override_roborev validates non-numeric PR number"
@@ -597,6 +627,7 @@ assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'missing_run:ok' &&
 assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'happy_path:ok' && echo true || echo false)" "override_roborev posts comment, triggers rerun-failed-jobs, and outputs json"
 assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'fallback_rerun:ok' && echo true || echo false)" "override_roborev falls back to full workflow rerun when rerun-failed-jobs returns 4xx"
 assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'flags_test:ok' && echo true || echo false)" "override_roborev supports -f reason file"
+assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'unified_wf:ok' && echo true || echo false)" "override_roborev resolves Continuous Delivery workflow run when roborev.yml is absent"
 
 CLI_DISPATCH_CHECK=$(bash -c "
     \"${AERIAL_PR}\" override-roborev 2>&1 || true

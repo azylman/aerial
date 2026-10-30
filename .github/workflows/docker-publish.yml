@@ -360,52 +360,96 @@ jobs:
             aerial.commit_sha=${{ github.sha }}
             aerial.service=${{ matrix.service }}
 
-  build-gate:
-    name: Container Builds Gate
-    needs: [changes, test, lint, build-and-push]
-    if: always()
-    runs-on: [self-hosted, ci]
+  roborev:
+    name: roborev
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor == 'azylman'
+    runs-on: [self-hosted, roborev]
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
-      - name: Verify Container Builds
+      - name: Checkout PR Branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run Independent RoboRev Review Gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          CHANGES_RES="${{ needs.changes.result }}"
-          TEST_RES="${{ needs.test.result }}"
-          LINT_RES="${{ needs.lint.result }}"
-          BUILD_RES="${{ needs.build-and-push.result }}"
-          HAS_BUILDS="${{ needs.changes.outputs.has_builds }}"
-
-          echo "Changes status: $CHANGES_RES"
-          echo "Test status: $TEST_RES"
-          echo "Lint status: $LINT_RES"
-          echo "Has builds: $HAS_BUILDS"
-          echo "Builds status: $BUILD_RES"
-
-          if [ "$CHANGES_RES" != "success" ]; then
-            echo "::error::Changes detection failed"
-            exit 1
-          fi
-
-          if [ "$TEST_RES" != "success" ] && { [ "${{ github.event_name }}" != "push" ] || [ "$TEST_RES" != "skipped" ]; }; then
-            echo "::error::Unit tests failed"
-            exit 1
-          fi
-
-          if [ "$LINT_RES" != "success" ] && { [ "${{ github.event_name }}" != "push" ] || [ "$LINT_RES" != "skipped" ]; }; then
-            echo "::error::Linting failed"
-            exit 1
-          fi
-
-          if [ "$HAS_BUILDS" = "false" ]; then
-            echo "No container builds required for this change. Gate passed."
+          set -o pipefail
+          if ! git cat-file -e origin/main:.roborev.toml 2>/dev/null || ! (git cat-file -e origin/main:nomad/jobs/github-runner.nomad 2>/dev/null || git cat-file -e origin/main:nomad/jobs/roborev-runner.nomad 2>/dev/null); then
+            echo "RoboRev not bootstrapped on main; skipping."
             exit 0
           fi
-
-          if [ "$BUILD_RES" != "success" ]; then
-            echo "::error::One or more container builds failed or were cancelled"
+          SHORT_SHA="${HEAD_SHA:0:7}"
+          if [ -n "${PR_NUMBER:-}" ] && [ -n "${HEAD_SHA:-}" ]; then
+            OVERRIDE_COMMENT=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100" \
+              --jq "[.[] | select(.user.login == \"azylman\" and (.body | contains(\"## roborev-override\")) and ((.body | contains(\"${HEAD_SHA}\")) or (.body | contains(\"${SHORT_SHA}\"))))] | last | .body // empty" 2>/dev/null || true)
+            if [ -n "${OVERRIDE_COMMENT}" ]; then
+              echo "${OVERRIDE_COMMENT}" >> "$GITHUB_STEP_SUMMARY"
+              echo "RoboRev gate overridden for commit ${SHORT_SHA} via verified technical rebuttal."
+              exit 0
+            fi
+          fi
+          roborev ci review \
+            --agent gemini \
+            --min-severity medium \
+            --reasoning thorough | tee /tmp/roborev-review.md
+          cat /tmp/roborev-review.md >> "$GITHUB_STEP_SUMMARY"
+          if grep -q "Synthesis unavailable" /tmp/roborev-review.md; then
+            echo "::error::RoboRev synthesis failed or fell back to raw output; failing closed."
             exit 1
           fi
+          if grep -Eq '^## roborev: Review Passed|^No issues found\.$|^No findings at or above [a-z]+ severity\.$|roborev: no changes to review' /tmp/roborev-review.md; then
+            echo "RoboRev gate passed."
+            exit 0
+          fi
+          if [ -n "${PR_NUMBER:-}" ]; then
+            gh pr comment "${PR_NUMBER}" --body-file /tmp/roborev-review.md || true
+          fi
+          echo "::error::RoboRev reported actionable findings (>= medium severity)."
+          exit 1
 
-          echo "All required container builds passed successfully."
+  build-gate:
+    name: Container Builds Gate
+    needs: [changes, test, lint, roborev, build-and-push]
+    if: always()
+    runs-on: [self-hosted, ci]
+    env:
+      NEEDS_JSON: ${{ toJSON(needs) }}
+      EVENT_NAME: ${{ github.event_name }}
+      HAS_BUILDS: ${{ needs.changes.outputs.has_builds }}
+    steps:
+      - name: Verify All Upstream Jobs & Container Builds
+        run: |
+          set -euo pipefail
+          echo "$NEEDS_JSON" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          FAILED=$(echo "$NEEDS_JSON" | jq -r '[to_entries[] | select(.value.result != "success" and .value.result != "skipped") | "\(.key)=\(.value.result)"] | join(", ")')
+          if [ -n "$FAILED" ]; then
+            echo "::error::Upstream job(s) failed or were cancelled: $FAILED"
+            exit 1
+          fi
+          UNEXPECTED_SKIP=$(echo "$NEEDS_JSON" | jq -r --arg event "$EVENT_NAME" --arg has_builds "${HAS_BUILDS:-false}" '
+            [to_entries[] | select(
+              .value.result == "skipped" and (
+                .key == "changes" or
+                .key == "validate" or
+                ((.key == "build-and-push" or .key == "docker") and $has_builds == "true") or
+                (.key != "build-and-push" and .key != "docker" and $event == "pull_request")
+              )
+            ) | .key] | join(", ")
+          ')
+          if [ -n "$UNEXPECTED_SKIP" ]; then
+            echo "::error::Required upstream job(s) were unexpectedly skipped: $UNEXPECTED_SKIP"
+            exit 1
+          fi
+          echo "All required checks and builds passed."
 
   promote-release:
     name: Promote Images to :latest
