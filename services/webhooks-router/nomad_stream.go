@@ -467,7 +467,7 @@ func evaluationEventIdempotencyKey(raw json.RawMessage) (string, bool) {
 		return "", false
 	}
 	if strings.EqualFold(eval.Status, "blocked") {
-		if !hasNonTransientPlacementFailure(eval.FailedTGAllocs, eval.QueuedAllocations) {
+		if eval.DeploymentID != "" || !hasNonTransientPlacementFailure(eval.FailedTGAllocs, eval.QueuedAllocations) {
 			return "", false
 		}
 		return fmt.Sprintf("nomad:evaluation:%s:%s:blocked", eval.JobID, eval.ID), true
@@ -615,7 +615,7 @@ func (s *RouterServer) processNomadEvaluationEvent(ctx context.Context, rawPaylo
 	}
 	eval := evalPayload.Evaluation
 	if strings.EqualFold(eval.Status, "blocked") {
-		if !hasNonTransientPlacementFailure(eval.FailedTGAllocs, eval.QueuedAllocations) || s.isNomadEvalResolved(ctx, eval.ID) || s.isNomadJobHealthy(ctx, eval.JobID) {
+		if eval.DeploymentID != "" || !hasNonTransientPlacementFailure(eval.FailedTGAllocs, eval.QueuedAllocations) || s.isNomadEvalResolved(ctx, eval.ID) || s.isNomadJobHealthy(ctx, eval.JobID) {
 			return nil
 		}
 		return s.HandleNomadJobFailure(ctx, eval.JobID, eval.ID, eval.Status, formatFailedTGAllocs(eval.StatusDescription, eval.FailedTGAllocs))
