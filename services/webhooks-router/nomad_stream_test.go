@@ -277,6 +277,12 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 			reg:         &mockPRRegistry{deployFailedJobUpdated: true},
 		},
 		{
+			name:         "evaluation blocked with deployment ID and non-transient exhaustion ignored",
+			streamLines:  []string{`{"Index":2054,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"ID":"47bc9ad3-f6f2-927b-098d-236d45a10f04","JobID":"vanadis","Status":"blocked","StatusDescription":"created to place remaining allocations","DeploymentID":"618eee0a-977d-b048-96e0-bc600031808d","FailedTGAllocs":{"vanadis":{"NodesExhausted":1,"DimensionExhausted":{"cpu":1}}},"QueuedAllocations":{"vanadis":0}}}}]}`},
+			evalSpecJSON: `{"ID":"47bc9ad3-f6f2-927b-098d-236d45a10f04","Status":"blocked"}`,
+			reg:          &mockPRRegistry{deployFailedJobUpdated: true},
+		},
+		{
 			name:             "allocation restart exhaustion triggers tracked PR failure",
 			streamLines:      []string{`{"Index":2050,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":{"Allocation":{"ID":"alloc-exhausted-1","JobID":"infisical","DesiredStatus":"run","ClientStatus":"running","TaskStates":{"server":{"State":"pending","Events":[{"Type":"Terminated","ExitCode":1,"Message":"Docker container exited with non-zero exit code: 1"},{"Type":"Restarting","RestartReason":"Exceeded allowed attempts, applying a delay"}]}}}}}]}`},
 			deploymentsJSON:  `[{"ID":"dep-old-1","Status":"successful","StatusDescription":"Deployment completed successfully","JobVersion":5,"CreateIndex":100}]`,
@@ -462,6 +468,7 @@ func TestProcessNomadEvent_TableDriven(t *testing.T) {
 	}{
 		{name: "PlanResult dropped", topic: "Allocation", eventType: "PlanResult", payload: `{"Allocation":{"ID":"alloc-1","JobID":"github-mcp","ClientStatus":"failed"}}`},
 		{name: "blocked evaluation returns nil", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"ID":"eval-blocked-direct","JobID":"hangar","Status":"blocked","StatusDescription":"created to place remaining allocations"}}`},
+		{name: "blocked evaluation with deployment ID returns nil", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"ID":"eval-blocked-dep","JobID":"vanadis","Status":"blocked","StatusDescription":"created to place remaining allocations","DeploymentID":"dep-123","FailedTGAllocs":{"vanadis":{"DimensionExhausted":{"cpu":1}}},"QueuedAllocations":{"vanadis":0}}}`},
 		{name: "blocked evaluation with FailedTGAllocs returns nil", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"ID":"eval-blocked-direct","JobID":"webhooks-router","Status":"blocked","StatusDescription":"created to place remaining allocations","FailedTGAllocs":{"webhooks-router":{"NodesExhausted":1,"DimensionExhausted":{"network: port collision":1}}},"QueuedAllocations":{"webhooks-router":0}}}`},
 		{name: "blocked evaluation with non-transient placement failure dispatches failure", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"ID":"eval-blocked-nontransient","JobID":"coven","Status":"blocked","StatusDescription":"created to place remaining allocations","FailedTGAllocs":{"coven":{"ConstraintFiltered":{"missing drivers":1}}},"QueuedAllocations":{"coven":0}}}`, reg: mkDeployFailedReg("target-1", 100, "sha1", "repo", true)},
 		{name: "allocation complete with failed task state ignored", topic: "Allocation", eventType: "AllocationUpdated", payload: `{"Allocation":{"ID":"alloc-comp-failed","JobID":"db-migrate","DesiredStatus":"run","ClientStatus":"complete","TaskStates":{"migrate":{"State":"dead","Failed":true}}}}`},
