@@ -493,8 +493,9 @@ func TestDeliverStatusWidget_Edit404FallbackToSend(t *testing.T) {
 func TestDeliverStatusWidget_AutoSink(t *testing.T) {
 	t.Parallel()
 	threeMsgs := []*discordgo.Message{{ID: "m1"}, {ID: "m2"}, {ID: "m3"}}
-	fourMsgs := []*discordgo.Message{{ID: "m1"}, nil, {ID: "m2"}, {ID: "m3"}}
+	fourMsgs := []*discordgo.Message{{ID: "m1"}, nil, {ID: "m2"}, {ID: "m3"}, {ID: "m4"}}
 	newerWidgetMsgs := []*discordgo.Message{{ID: "m1"}, {ID: "m2"}, {ID: "m3"}, {ID: "msg-newer-widget", Flags: discordgo.MessageFlagsIsComponentsV2}}
+	widgetThenFourMsgs := []*discordgo.Message{{ID: "msg-newer-widget", Flags: discordgo.MessageFlagsIsComponentsV2}, {ID: "m1"}, {ID: "m2"}, {ID: "m3"}, {ID: "m4"}}
 	sunkFlags := discordgo.MessageFlagsIsComponentsV2 | discordgo.MessageFlagsSuppressNotifications
 
 	tests := []struct {
@@ -514,7 +515,8 @@ func TestDeliverStatusWidget_AutoSink(t *testing.T) {
 	}{
 		{name: "fewer messages than threshold edits in place", afterMsgs: threeMsgs, wantMsgID: "msg-old-100", wantEditCount: 1, wantQueried: true},
 		{name: "channel messages error falls back to edit in place", messagesErr: errors.New("discord 502"), wantMsgID: "msg-old-100", wantEditCount: 1, wantQueried: true},
-		{name: "newer components v2 widget in after messages edits in place", afterMsgs: newerWidgetMsgs, wantMsgID: "msg-old-100", wantEditCount: 1, wantQueried: true},
+		{name: "newer components v2 widget with fewer than threshold regular messages edits in place", afterMsgs: newerWidgetMsgs, wantMsgID: "msg-old-100", wantEditCount: 1, wantQueried: true},
+		{name: "adjacent components v2 widget followed by threshold regular messages sinks to bottom", afterMsgs: widgetThenFourMsgs, sendReplyID: "msg-sunk-888", wantMsgID: "msg-sunk-888", wantSentCount: 1, wantDeletedID: "msg-old-100", wantSentFlags: sunkFlags, wantQueried: true},
 		{name: "buried by threshold regular messages sinks to bottom and deletes old", afterMsgs: fourMsgs, sendReplyID: "msg-sunk-999", deleteErr: errors.New("ignored delete failure"), wantMsgID: "msg-sunk-999", wantSentCount: 1, wantDeletedID: "msg-old-100", wantSentFlags: sunkFlags, wantQueried: true},
 		{name: "sink send error falls back to editing existing message in place", afterMsgs: fourMsgs, sendErr: errors.New("rate limit on send"), wantMsgID: "msg-old-100", wantSentCount: 1, wantEditCount: 1, wantQueried: true},
 		{name: "skip sink bypasses auto sinking even when buried", skipSink: true, afterMsgs: fourMsgs, wantMsgID: "msg-old-100", wantEditCount: 1, wantQueried: false},
@@ -533,8 +535,8 @@ func TestDeliverStatusWidget_AutoSink(t *testing.T) {
 				t.Errorf("got msgID %q, want %q", msgID, tc.wantMsgID)
 			}
 			if tc.wantQueried {
-				if sender.queriedAfterID != "msg-old-100" || sender.queriedLimit != 4 {
-					t.Errorf("got query afterID=%q limit=%d, want afterID=msg-old-100 limit=4", sender.queriedAfterID, sender.queriedLimit)
+				if sender.queriedAfterID != "msg-old-100" || sender.queriedLimit != WidgetSinkQueryLimit {
+					t.Errorf("got query afterID=%q limit=%d, want afterID=msg-old-100 limit=%d", sender.queriedAfterID, sender.queriedLimit, WidgetSinkQueryLimit)
 				}
 			} else {
 				if sender.queriedAfterID != "" || sender.queriedLimit != 0 {
