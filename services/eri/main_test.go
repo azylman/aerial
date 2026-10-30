@@ -971,3 +971,23 @@ func TestPrewarmProcessPoolsSequentially(t *testing.T) {
 		}
 	})
 }
+
+type mockErrClosingPool struct {
+	runner.AgentPool
+}
+
+func (m *mockErrClosingPool) Close() error {
+	return errors.New("mock pool close error")
+}
+
+func TestCloseAllBrainPools_Error(t *testing.T) {
+	closeAllBrainPools([]runner.AgentPool{&mockErrClosingPool{}})
+}
+
+func TestNewAmbientContextResolver_NilConfig(t *testing.T) {
+	resolver := newAmbientContextResolver(nil)
+	res, err := resolver(context.Background(), nil)
+	if err != nil || res != "" {
+		t.Errorf("expected empty string and nil error for nil ambCfg, got %q, %v", res, err)
+	}
+}

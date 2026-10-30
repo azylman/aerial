@@ -88,9 +88,6 @@ func TestQueueLifecycleAndRetryMatrix(t *testing.T) {
 		{name: "PromptPreservedWithoutMemoryInjection", messages: []db.Message{{ID: "msg-mem-1", ThreadID: "thread-mem-1", AuthorID: "user-1", Content: "What port does the server run on?"}}, runnerSteps: []mockRunnerStep{{response: "Response text"}}, wantStatus: db.StatusCompleted, wantPromptContains: []string{"What port does the server run on?"}, wantPromptExcludes: []string{"<retrieved_memory>"}, wantDBContent: "What port does the server run on?"},
 		{name: "EmptyResponseFailure", messages: []db.Message{{ID: "msg-empty-resp-1", ThreadID: "thread-empty-resp", AuthorID: "user-1", Content: "Empty response prompt"}}, runnerSteps: []mockRunnerStep{{response: ""}}, wantStatus: db.StatusFailed},
 		{name: "BurstCoalescing", enqueueAsBurst: true, messages: []db.Message{{ID: "m-b-1", ThreadID: "thread-burst", AuthorName: "Alice", Content: "Hello from Alice", CreatedAt: t0}, {ID: "m-b-2", ThreadID: "thread-burst", AuthorName: "Bob", Content: "Hello from Bob", CreatedAt: t0.Add(3 * time.Second)}, {ID: "m-b-3", ThreadID: "thread-burst", AuthorName: "Charlie", Content: "Hello from Charlie", CreatedAt: t0.Add(6 * time.Second)}}, runnerSteps: []mockRunnerStep{{response: "Coalesced reply from agent"}}, wantStatus: db.StatusCompleted, wantDeliveredTexts: []string{"Coalesced reply from agent"}, wantPromptContains: []string{"<USER_REQUEST>", "[Multiple messages received in channel]", "--- Message 1 (by @Alice", "Hello from Alice", "--- Message 2 (by @Bob", "Hello from Bob", "--- Message 3 (by @Charlie", "Hello from Charlie"}},
-		{name: "Staleness_WithinDefault30mTTL", messageAge: 10 * time.Minute, messages: []db.Message{{ID: "msg-stale-1", ThreadID: "thread-stale-1", AuthorID: "user-1", Content: "Staleness test prompt"}}, runnerSteps: []mockRunnerStep{{response: "OK"}}, wantRunnerCalls: 1, checkRunnerCalls: true, wantStatus: db.StatusCompleted},
-		{name: "Staleness_ExceedsDefault30mTTL", messageAge: 31 * time.Minute, messages: []db.Message{{ID: "msg-stale-2", ThreadID: "thread-stale-2", AuthorID: "user-1", Content: "Staleness test prompt"}}, runnerSteps: []mockRunnerStep{{response: "OK"}}, wantRunnerCalls: 0, checkRunnerCalls: true, wantStatus: db.StatusCompleted, wantResponseText: "[EXPIRED_STALE]"},
-		{name: "Staleness_ExceedsCustom10mTTL", stalenessTTL: 10 * time.Minute, messageAge: 12 * time.Minute, messages: []db.Message{{ID: "msg-stale-3", ThreadID: "thread-stale-3", AuthorID: "user-1", Content: "Staleness test prompt"}}, runnerSteps: []mockRunnerStep{{response: "OK"}}, wantRunnerCalls: 0, checkRunnerCalls: true, wantStatus: db.StatusCompleted, wantResponseText: "[EXPIRED_STALE]"},
 		{name: "SkipDiscord_AllSourcesDelivered", messages: []db.Message{{ID: "msg-sched-1", ThreadID: "thread-scheduled-1", GuildID: "scheduled", AuthorID: "scheduler", AuthorName: "Scheduler", Content: "Scheduled routine prompt"}, {ID: "msg-http-1", ThreadID: "thread-http-1", AuthorID: "http-client", AuthorName: "HTTP Client", Content: "HTTP prompt"}, {ID: "msg-user-1", ThreadID: "thread-user-1", GuildID: "guild-100", AuthorID: "user-999", AuthorName: "Alice", Content: "User prompt"}}, runnerSteps: []mockRunnerStep{{response: "AI reply"}}, wantStatus: db.StatusCompleted, wantDeliveredChannels: []string{"thread-scheduled-1", "thread-http-1", "thread-user-1"}},
 		{name: "TurnCountSessionPreservation", useSessionMgr: true, initialSessionID: "sess-channel-init-123", seedTurnCount: 8, policyMode: "channel", sequentialTurns: true, messages: []db.Message{{ID: "m-rot-1", ThreadID: "channel-rotation-test", Content: "<@aerial> Turn 9"}, {ID: "m-rot-2", ThreadID: "channel-rotation-test", Content: "<@aerial> Turn 10"}, {ID: "m-rot-3", ThreadID: "channel-rotation-test", Content: "<@aerial> Turn 11"}}, runnerSteps: []mockRunnerStep{{response: "OK response", writeTranscript: true}}, wantSavedSession: "sess-channel-init-123", wantTurnCount: 11, checkTurnCount: true, wantStatus: db.StatusCompleted},
 		{name: "IdleTimeout_ChannelSession", useSessionMgr: true, initialSessionID: "sess-channel-old-999", seedTurnCount: 1, seedIdleAge: 25 * time.Hour, policyMode: "channel", sequentialTurns: true, messages: []db.Message{{ID: "m-idle-1", ThreadID: "channel-rotation-test", Content: "<@aerial> wake up"}, {ID: "m-idle-2", ThreadID: "channel-rotation-test", Content: "<@aerial> follow up"}}, runnerSteps: []mockRunnerStep{{response: "OK response", writeTranscript: true}}, wantPassedSessions: []string{"sess-channel-old-999", "sess-channel-old-999"}, wantSavedSession: "sess-channel-old-999", wantTurnCount: 3, checkTurnCount: true, wantStatus: db.StatusCompleted},
@@ -194,15 +191,12 @@ func TestRecoverInterrupted(t *testing.T) {
 		appCfg            *config.Config
 		withSess          bool
 		maxAttempts       int
-		stalenessTTL      time.Duration
 		wantCompletedIDs  []string
 		wantMsgStatuses   map[string]string
 		wantMinDeliveries int
 	}{
 		{name: "FIFORecoveryAndScheduleRuns", seedMessages: []db.Message{{ID: "m1", ThreadID: "th-same", Status: db.StatusPending, CreatedAt: now.Add(-10 * time.Minute)}, {ID: "m2", ThreadID: "th-same", Status: db.StatusProcessing, CreatedAt: now.Add(-5 * time.Minute), UpdatedAt: now.Add(-2 * time.Minute)}, {ID: "m3", ThreadID: "th-same", Status: db.StatusCompleted, CreatedAt: now.Add(-15 * time.Minute)}}, wantCompletedIDs: []string{"m1", "m2"}},
 		{name: "PoisonPill_RetryAndRestartLimits", seedMessages: []db.Message{{ID: "m-retry-poison", ThreadID: "th-p1", AuthorID: "user-1", Content: "retry crash", Status: db.StatusProcessing, RetryCount: 3, CreatedAt: now.Add(-10 * time.Minute)}, {ID: "m-hard-restart", ThreadID: "th-p2", AuthorID: "http-client", Content: strings.Repeat("x", 80), Status: db.StatusProcessing, RestartCount: 5, CreatedAt: now.Add(-10 * time.Minute)}, {ID: "m-instant-crash", ThreadID: "th-p3", AuthorID: "user-2", Content: "instant crash", Status: db.StatusProcessing, RestartCount: 3, CreatedAt: now.Add(-10 * time.Minute), UpdatedAt: now.Add(-5 * time.Second)}, {ID: "m-long-running", ThreadID: "th-ok", AuthorID: "user-3", Content: "long task", Status: db.StatusProcessing, RestartCount: 3, CreatedAt: now.Add(-20 * time.Minute), UpdatedAt: now.Add(-40 * time.Second)}}, withSess: true, appCfg: config.NewFromData(&config.ConfigData{AgyBin: "agy-custom", APIKey: "key-custom"}), wantCompletedIDs: []string{"m-long-running"}, wantMsgStatuses: map[string]string{"m-retry-poison": db.StatusFailed, "m-hard-restart": db.StatusFailed, "m-instant-crash": db.StatusFailed}, wantMinDeliveries: 2},
-		{name: "Staleness_TTLAndSuperseded", seedMessages: []db.Message{{ID: "m-stale-pending", ThreadID: "th-stale", AuthorID: "user-1", Status: db.StatusPending, CreatedAt: now.Add(-40 * time.Minute)}, {ID: "m-superseded", ThreadID: "th-super", AuthorID: "user-2", Status: db.StatusPending, CreatedAt: now.Add(-20 * time.Minute)}, {ID: "m-http-retained", ThreadID: "th-super", AuthorID: "http-client", Status: db.StatusPending, CreatedAt: now.Add(-45 * time.Minute)}}, seedCompletedMsg: &db.Message{ID: "m-newer-completed", ThreadID: "th-super", Status: db.StatusCompleted, CreatedAt: now.Add(-10 * time.Minute)}, wantCompletedIDs: []string{"m-http-retained"}, wantMsgStatuses: map[string]string{"m-stale-pending": db.StatusCompleted, "m-superseded": db.StatusCompleted, "m-http-retained": db.StatusCompleted}},
-		{name: "Staleness_GracefulDeploymentDrainedRetained", seedMessages: []db.Message{{ID: "m-graceful-drain", ThreadID: "th-drain", AuthorID: "user-3", Status: db.StatusPending, CreatedAt: now.Add(-40 * time.Minute), ErrorMessage: "interrupted by graceful deployment"}, {ID: "m-stale-pending", ThreadID: "th-stale", AuthorID: "user-1", Status: db.StatusPending, CreatedAt: now.Add(-40 * time.Minute)}}, wantCompletedIDs: []string{"m-graceful-drain"}, wantMsgStatuses: map[string]string{"m-graceful-drain": db.StatusCompleted, "m-stale-pending": db.StatusCompleted}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -227,7 +221,7 @@ func TestRecoverInterrupted(t *testing.T) {
 			}
 
 			pool := New(tc.appCfg, WorkerPoolConfig{
-				Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: maxAttempts, StalenessTTL: tc.stalenessTTL,
+				Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: maxAttempts,
 				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 					return mockJSONResponse("e1111111-2222-3333-4444-555555555555", "OK"), "", 0, nil
 				},
@@ -1282,159 +1276,6 @@ func TestProcessBurst_ErrorClassificationMatrix(t *testing.T) {
 			}
 			if tt.prohibitUnavailable && strings.Contains(deliveredText, "temporarily unavailable") {
 				t.Errorf("unexpected unavailable message: %s", deliveredText)
-			}
-		})
-	}
-}
-
-func TestGetSessionLastActivity_Suite(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name, threadID, sessionID                                             string
-		seedSession, passSessMgr, closeStore, wantCold, wantZeroTime, wantErr bool
-		sessionTurnCount                                                      int
-		sessionAge, msgAge, diskLogAge, wantAge                               time.Duration
-		msgResponses                                                          []string
-	}{
-		{name: "ColdThread_ZeroTime", threadID: "thread-act-cold", passSessMgr: true, wantCold: true, wantZeroTime: true},
-		{name: "SessionUpdatedAtOnly", threadID: "thread-act-sess", sessionID: "sess-act-uuid-1", seedSession: true, sessionTurnCount: 1, sessionAge: 20 * time.Minute, passSessMgr: true, wantCold: false, wantAge: 20 * time.Minute},
-		{name: "CompletedMessageNewerThanSession", threadID: "thread-act-msg", sessionID: "sess-act-uuid-2", seedSession: true, sessionTurnCount: 1, sessionAge: 20 * time.Minute, msgResponses: []string{"some answer"}, msgAge: 10 * time.Minute, passSessMgr: true, wantCold: false, wantAge: 10 * time.Minute},
-		{name: "DiskLogNewerThanDB", threadID: "thread-act-disk", sessionID: "sess-act-uuid-3", seedSession: true, sessionTurnCount: 1, sessionAge: 20 * time.Minute, msgResponses: []string{"some answer"}, msgAge: 10 * time.Minute, diskLogAge: 2 * time.Minute, passSessMgr: true, wantCold: false, wantAge: 2 * time.Minute},
-		{name: "RotatedSessionNotNew", threadID: "thread-rotated-1", seedSession: true, sessionAge: 15 * time.Minute, msgResponses: []string{"previous answer"}, msgAge: 4 * time.Minute, wantCold: false, wantAge: 4 * time.Minute},
-		{name: "IgnoresExpiredStaleSentinel", threadID: "thread-stale-sentinel", msgResponses: []string{"[EXPIRED_STALE]", "[AMBIENT: IGNORED]"}, wantCold: true, wantZeroTime: true},
-		{name: "FailOpenOnDBError", threadID: "thread-closed", closeStore: true, wantCold: false, wantZeroTime: true, wantErr: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			store, tmpDir := setupTestStore(t), t.TempDir()
-			sessMgr, now := session.New(tmpDir, ""), time.Now().UTC().Truncate(time.Second)
-
-			if tc.seedSession {
-				tSess := now.Add(-tc.sessionAge)
-				store.SetSessionInfo(db.SessionInfo{ThreadID: tc.threadID, InternalSessionID: tc.sessionID, TurnCount: tc.sessionTurnCount, CreatedAt: tSess, UpdatedAt: tSess})
-			}
-			for i, resp := range tc.msgResponses {
-				tMsg := now.Add(-tc.msgAge)
-				_ = insertMessage(store, db.Message{ID: fmt.Sprintf("msg-%d", i), ThreadID: tc.threadID, Status: db.StatusCompleted, ResponseText: resp, CreatedAt: tMsg, UpdatedAt: tMsg})
-			}
-			if tc.diskLogAge > 0 {
-				tasksDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", tc.sessionID, ".system_generated", "tasks")
-				_ = os.MkdirAll(tasksDir, 0o755)
-				tDisk := now.Add(-tc.diskLogAge)
-				taskLog := filepath.Join(tasksDir, "task-1.log")
-				_ = os.WriteFile(taskLog, []byte("build output\n"), 0o644)
-				_ = os.Chtimes(taskLog, tDisk, tDisk)
-			}
-			if tc.closeStore {
-				_ = store.Close()
-			}
-
-			var act time.Time
-			var isCold bool
-			var err error
-			if tc.passSessMgr {
-				act, isCold, err = GetSessionLastActivity(store, tc.threadID, sessMgr)
-			} else {
-				act, isCold, err = GetSessionLastActivity(store, tc.threadID)
-			}
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if isCold != tc.wantCold {
-				t.Errorf("isCold = %v, want %v", isCold, tc.wantCold)
-			}
-			if tc.wantZeroTime && !act.IsZero() {
-				t.Errorf("expected zero time, got %v", act)
-			}
-			if tc.wantAge > 0 && !act.Equal(now.Add(-tc.wantAge)) {
-				t.Errorf("act = %v, want %v", act, now.Add(-tc.wantAge))
-			}
-		})
-	}
-}
-
-func TestProcessBurst_StalenessMatrix(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name, threadID, sessionID, expectStatus     string
-		msgAge, diskLogAge, dbMsgAge, sessionAge    time.Duration
-		retryCount, restartCount, expectRunnerCalls int
-		expectExpiredStale, prohibitExpiredStale    bool
-	}{
-		{name: "ExistingSessionRecentDiskActivity_Retained", threadID: "thread-burst-disk-active", sessionID: "sess-burst-disk-active", msgAge: 35 * time.Minute, diskLogAge: 5 * time.Minute, expectRunnerCalls: 1, expectStatus: db.StatusCompleted, prohibitExpiredStale: true},
-		{name: "ExistingSessionRecentDBActivity_Retained", threadID: "thread-burst-db-active", msgAge: 35 * time.Minute, dbMsgAge: 5 * time.Minute, expectRunnerCalls: 1},
-		{name: "ExistingSessionInactive_Dropped", threadID: "thread-burst-inactive", sessionID: "sess-burst-inactive", msgAge: 35 * time.Minute, sessionAge: 45 * time.Minute, dbMsgAge: 45 * time.Minute, expectRunnerCalls: 0, expectExpiredStale: true},
-		{name: "NewSession_Dropped", threadID: "thread-new-drop", msgAge: 31 * time.Minute, expectRunnerCalls: 0, expectExpiredStale: true},
-		{name: "HardCeiling_Dropped", threadID: "thread-hard-ceiling", sessionID: "sess-ceiling", msgAge: 130 * time.Minute, sessionAge: 1 * time.Second, dbMsgAge: 1 * time.Second, expectRunnerCalls: 0, expectExpiredStale: true},
-		{name: "RecoveredMessage_Retained", threadID: "thread-recovered-msg", sessionID: "sess-rec", msgAge: 45 * time.Minute, retryCount: 1, expectRunnerCalls: 1, prohibitExpiredStale: true},
-		{name: "RestartedMessage_Retained", threadID: "thread-restarted-staleness", sessionID: "d2222222-2222-3333-4444-555555555555", msgAge: 45 * time.Minute, restartCount: 1, expectRunnerCalls: 1, prohibitExpiredStale: true},
-		{name: "RestartedMessage_HardCeiling_Dropped", threadID: "thread-restarted-hard-ceiling", msgAge: 130 * time.Minute, restartCount: 2, expectRunnerCalls: 0, expectExpiredStale: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			store, tmpDir := setupTestStore(t), t.TempDir()
-			now := time.Now().UTC()
-			if tt.diskLogAge > 0 {
-				_ = saveSessionID(store, tt.threadID, tt.sessionID)
-				tasksDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", tt.sessionID, ".system_generated", "tasks")
-				_ = os.MkdirAll(tasksDir, 0o755)
-				tDisk := now.Add(-tt.diskLogAge)
-				taskLog := filepath.Join(tasksDir, "task-1.log")
-				_ = os.WriteFile(taskLog, []byte("running build"), 0o644)
-				_ = os.Chtimes(taskLog, tDisk, tDisk)
-			}
-			if tt.sessionAge > 0 {
-				store.SetSessionInfo(db.SessionInfo{ThreadID: tt.threadID, InternalSessionID: tt.sessionID, TurnCount: 1, UpdatedAt: now.Add(-tt.sessionAge)})
-			}
-			if tt.dbMsgAge > 0 {
-				tPrev := now.Add(-tt.dbMsgAge)
-				_ = insertMessage(store, db.Message{ID: "msg-prev-" + tt.name, ThreadID: tt.threadID, Status: db.StatusCompleted, ResponseText: "earlier turn", CreatedAt: tPrev, UpdatedAt: tPrev})
-			}
-
-			var runnerCalls int
-			var mu sync.Mutex
-			doneCh := make(chan struct{})
-			sessIDToReturn := tt.sessionID
-			if sessIDToReturn == "" {
-				sessIDToReturn = "sess-fallback"
-			}
-
-			pool := NewWorkerPool(WorkerPoolConfig{
-				SessionManager: session.New(tmpDir, ""), Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 3,
-				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-					mu.Lock()
-					runnerCalls++
-					mu.Unlock()
-					return mockJSONResponse(sessIDToReturn, "executed"), "", 0, nil
-				},
-				DeliveryFunc: noopDelivery, TypingFunc: noopTyping,
-				OnMessageCompleted: func(msg db.Message, finalStatus string) { close(doneCh) },
-			})
-			pool.Start()
-			defer pool.Stop()
-
-			msg := db.Message{ID: "msg-" + tt.name, ThreadID: tt.threadID, AuthorID: "user-1", Content: "prompt " + tt.name, Status: db.StatusPending, RetryCount: tt.retryCount, RestartCount: tt.restartCount, CreatedAt: now.Add(-tt.msgAge)}
-			_ = insertMessage(store, msg)
-			pool.Enqueue(msg)
-			waitForCompletion(t, doneCh, 3*time.Second, tt.name)
-
-			mu.Lock()
-			calls := runnerCalls
-			mu.Unlock()
-			if calls != tt.expectRunnerCalls {
-				t.Errorf("runnerCalls = %d, want %d", calls, tt.expectRunnerCalls)
-			}
-			dbMsg, _ := getMessage(store, msg.ID)
-			if tt.expectStatus != "" && dbMsg.Status != tt.expectStatus {
-				t.Errorf("status = %s, want %s", dbMsg.Status, tt.expectStatus)
-			}
-			if tt.expectExpiredStale && dbMsg.ResponseText != "[EXPIRED_STALE]" {
-				t.Errorf("Expected [EXPIRED_STALE], got %s", dbMsg.ResponseText)
-			}
-			if tt.prohibitExpiredStale && dbMsg.ResponseText == "[EXPIRED_STALE]" {
-				t.Errorf("Expected response NOT to be [EXPIRED_STALE]")
 			}
 		})
 	}

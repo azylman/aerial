@@ -413,50 +413,6 @@ func TestAssembleTurnPrompt(t *testing.T) {
 	}
 }
 
-func TestEvaluateBurstStaleness(t *testing.T) {
-	t.Parallel()
-	baseTime := time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)
-	ttl := 30 * time.Minute
-
-	tests := []struct {
-		name                 string
-		burst                []db.Message
-		ttl                  time.Duration
-		isCold               bool
-		lastActivity, now    time.Time
-		expectedStale        bool
-		expectedReasonSubstr string
-	}{
-		{"Empty burst returns not stale", nil, 0, false, time.Time{}, time.Time{}, false, ""},
-		{"Zero timestamp message is retained safely", []db.Message{{ID: "m1"}}, 0, false, time.Time{}, time.Time{}, false, "zero_timestamp_retained"},
-		{"Message exceeding MaxMessageAbsoluteAge is dropped", []db.Message{{ID: "m1", CreatedAt: baseTime, RetryCount: 5, RestartCount: 2}}, ttl, false, baseTime.Add(2*time.Hour + 5*time.Minute), baseTime.Add(2*time.Hour + 10*time.Minute), true, "hard absolute age cap"},
-		{"Fresh message under TTL is not stale", []db.Message{{ID: "m1", CreatedAt: baseTime}}, ttl, true, time.Time{}, baseTime.Add(10 * time.Minute), false, ""},
-		{"Message older than TTL in new thread is dropped", []db.Message{{ID: "m1", CreatedAt: baseTime}}, ttl, true, time.Time{}, baseTime.Add(35 * time.Minute), true, "new thread and message age"},
-		{"Message older than TTL in existing thread with recent session is retained", []db.Message{{ID: "m1", CreatedAt: baseTime}}, ttl, false, baseTime.Add(30 * time.Minute), baseTime.Add(35 * time.Minute), false, "recent activity"},
-		{"Message older than TTL in existing thread with inactive session is dropped", []db.Message{{ID: "m1", CreatedAt: baseTime}}, ttl, false, baseTime.Add(2 * time.Minute), baseTime.Add(35 * time.Minute), true, "existing session inactive"},
-		{"Recovered message (RetryCount > 0) older than TTL is retained", []db.Message{{ID: "m1", CreatedAt: baseTime, RetryCount: 1}}, ttl, true, time.Time{}, baseTime.Add(40 * time.Minute), false, ""},
-		{"Recovered message (RestartCount > 0) older than TTL is retained", []db.Message{{ID: "m1", CreatedAt: baseTime, RestartCount: 1}}, ttl, true, time.Time{}, baseTime.Add(40 * time.Minute), false, ""},
-		{"Deployment-drained message older than TTL is retained", []db.Message{{ID: "m1", CreatedAt: baseTime, ErrorMessage: "deployment_drain"}}, ttl, true, time.Time{}, baseTime.Add(40 * time.Minute), false, ""},
-		{"Graceful deployment interrupted message older than TTL is retained", []db.Message{{ID: "m1", CreatedAt: baseTime, ErrorMessage: "interrupted by graceful deployment"}}, ttl, true, time.Time{}, baseTime.Add(40 * time.Minute), false, ""},
-		{"HTTP client message is never stale even beyond hard cap", []db.Message{{ID: "m-http", AuthorID: "http-client", CreatedAt: baseTime}}, ttl, true, time.Time{}, baseTime.Add(3 * time.Hour), false, ""},
-		{"Burst atomicity: if any message recovered, whole burst retained", []db.Message{{ID: "m1", CreatedAt: baseTime}, {ID: "m2", CreatedAt: baseTime.Add(time.Second), RetryCount: 1}}, ttl, true, time.Time{}, baseTime.Add(45 * time.Minute), false, ""},
-		{"Multi-message burst evaluates against newest message timestamp", []db.Message{{ID: "m1", CreatedAt: baseTime}, {ID: "m2", CreatedAt: baseTime.Add(20 * time.Minute)}}, ttl, true, time.Time{}, baseTime.Add(35 * time.Minute), false, ""},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			stale, reason := EvaluateBurstStaleness(tc.burst, tc.ttl, tc.isCold, tc.lastActivity, tc.now)
-			if stale != tc.expectedStale {
-				t.Errorf("expected stale=%t, got %t (reason: %s)", tc.expectedStale, stale, reason)
-			}
-			if tc.expectedReasonSubstr != "" && !strings.Contains(reason, tc.expectedReasonSubstr) {
-				t.Errorf("expected reason to contain %q, got %q", tc.expectedReasonSubstr, reason)
-			}
-		})
-	}
-}
-
 func TestResolvePoolKey_And_ResolveScopeKey_TableDriven(t *testing.T) {
 	t.Parallel()
 	keys := AllValidPoolKeys()

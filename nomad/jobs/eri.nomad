@@ -37,7 +37,8 @@ job "eri" {
 
   update {
     max_parallel      = 1
-    canary            = 0
+    canary            = 1
+    auto_promote      = true
     min_healthy_time  = "10s"
     healthy_deadline  = "3m"
     progress_deadline = "5m"
@@ -190,6 +191,21 @@ EOH
         name     = "eri"
         port     = "http"
         provider = "nomad"
+
+        check {
+          name     = "eri-health"
+          type     = "http"
+          port     = "http"
+          path     = "/health"
+          interval = "15s"
+          timeout  = "5s"
+
+          check_restart {
+            limit           = 3
+            grace           = "60s"
+            ignore_warnings = false
+          }
+        }
       }
 
       resources {

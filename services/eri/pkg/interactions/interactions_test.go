@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -793,53 +792,6 @@ func TestRouter_HandleSync(t *testing.T) {
 				t.Errorf("expected method %s, got %s", tc.wantMethod, reqs[0].Method)
 			}
 			_ = cmds
-		})
-	}
-}
-
-func TestRouter_InteractionDeduplication(t *testing.T) {
-	tests := []struct {
-		name         string
-		firstID      string
-		secondID     string
-		prefillCount int
-		wantRequests int
-	}{
-		{
-			name:         "DuplicateIDDropped",
-			firstID:      "cmd-dedupe-1",
-			secondID:     "cmd-dedupe-1",
-			wantRequests: 1,
-		},
-		{
-			name:         "DistinctIDsDispatched",
-			firstID:      "cmd-distinct-1",
-			secondID:     "cmd-distinct-2",
-			wantRequests: 2,
-		},
-		{
-			name:         "CapAt2048ClearsCache",
-			firstID:      "cmd-cap-1",
-			secondID:     "cmd-cap-1",
-			prefillCount: 2048,
-			wantRequests: 2,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			router, _, transport, session := setupTestRouter("admin-123", 0)
-
-			router.Handle(session, mkCmd(tc.firstID, "chan-1", "admin-123", "nonexistent_cmd"))
-			for i := 0; i < tc.prefillCount; i++ {
-				router.seenIDs[fmt.Sprintf("prefill-%d", i)] = struct{}{}
-			}
-			router.Handle(session, mkCmd(tc.secondID, "chan-1", "admin-123", "nonexistent_cmd"))
-
-			reqs := transport.Requests()
-			if len(reqs) != tc.wantRequests {
-				t.Fatalf("expected %d requests, got %d", tc.wantRequests, len(reqs))
-			}
 		})
 	}
 }

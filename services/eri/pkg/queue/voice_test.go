@@ -549,40 +549,6 @@ func TestWorkerPool_ExecuteVoiceTurn_MockVoiceProcessPool(t *testing.T) {
 	}
 }
 
-func TestGetSessionLastActivity(t *testing.T) {
-	t.Parallel()
-	fake := setupTestStore(t)
-	_ = insertMessage(fake, db.Message{ID: "m-last-act", ThreadID: "t-last-act", AuthorID: "u1", Status: db.StatusCompleted, CreatedAt: time.Now().UTC()})
-	closedStore := setupTestStore(t)
-	_ = closedStore.Close()
-
-	tests := []struct {
-		name           string
-		store          db.Store
-		threadID       string
-		wantNonZeroTS  bool
-		wantIncomplete bool
-		wantErr        bool
-	}{
-		{name: "nil_store_non_empty_thread", store: nil, threadID: "thread-1", wantIncomplete: true},
-		{name: "nil_store_empty_thread", store: nil, threadID: "", wantIncomplete: true},
-		{name: "closed_store_error", store: closedStore, threadID: "thread-1", wantErr: true},
-		{name: "completed_message_found", store: fake, threadID: "t-last-act", wantNonZeroTS: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			ts, hasIncomplete, err := GetSessionLastActivity(tc.store, tc.threadID)
-			if (err != nil) != tc.wantErr {
-				t.Errorf("GetSessionLastActivity() err = %v, wantErr=%v", err, tc.wantErr)
-			}
-			if (!ts.IsZero()) != tc.wantNonZeroTS || hasIncomplete != tc.wantIncomplete {
-				t.Errorf("GetSessionLastActivity() = (%v, %v), wantNonZero=%v wantIncomplete=%v", ts, hasIncomplete, tc.wantNonZeroTS, tc.wantIncomplete)
-			}
-		})
-	}
-}
-
 func TestTurnExecution_StoreDelegates(t *testing.T) {
 	t.Parallel()
 	fake := setupTestStore(t)
@@ -1012,7 +978,6 @@ func TestWorkerPool_ProcessBurstEdgeCases(t *testing.T) {
 	}{
 		{name: "claim_error_aborts_burst", msg: db.Message{ID: "m-err-claim", ThreadID: "t-claim", Status: db.StatusPending, CreatedAt: now}, claimErr: errors.New("db lock error")},
 		{name: "unclaimed_message_skipped", msg: db.Message{ID: "m-unclaimed", ThreadID: "t-unclaimed", Status: db.StatusPending, CreatedAt: now}, unclaimed: true},
-		{name: "stale_schedule_run_expired", msg: db.Message{ID: "msg-stale-burst-1", ThreadID: "thread-stale-burst", AuthorID: "user-1", Content: "old prompt", Status: db.StatusPending, CreatedAt: now.Add(-2 * time.Hour)}, wantMsgStatus: db.StatusCompleted},
 		{name: "ignored_channel_completes_schedule_run", msg: db.Message{ID: "m-ign-extra", ThreadID: "t-ign-extra", AuthorID: "u1", Content: "ignored prompt", Status: db.StatusPending, CreatedAt: now}, policy: &config.ChannelPolicy{Mode: "ignore"}, wantMsgStatus: db.StatusCompleted},
 		{name: "bad_json_output_fails_after_attempt", msg: db.Message{ID: "m-badparse", ThreadID: "t-badparse", AuthorID: "u1", Content: "hello", Status: db.StatusPending, CreatedAt: now}, runnerOut: "definitely not json", wantMsgStatus: db.StatusFailed},
 		{name: "rate_limit_fails_schedule_run", msg: db.Message{ID: "m-rate-1", ThreadID: "t-rate", AuthorID: "u1", Content: "query", Status: db.StatusPending, CreatedAt: now}, runnerErrOut: "Resource has been exhausted: rate limit exceeded 429", runnerCode: 1, runnerErr: errors.New("exit 1"), wantMsgStatus: db.StatusFailed},

@@ -10,65 +10,8 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
-	"github.com/azylman/aerial/services/eri/pkg/session"
 	"github.com/bwmarrin/discordgo"
 )
-
-// GetSessionLastActivity queries the database and on-disk session logs to determine the most
-// recent activity for a thread's session.
-//
-// It inspects:
-// 1. The `sessions` table (internal_session_id, turn_count, updated_at).
-// 2. The `messages` table for genuine completed turns (filtering out [EXPIRED_STALE], [AMBIENT, [IGNORED).
-// 3. On-disk logs and task outputs via session.GetSessionLastActivity(internal_session_id).
-//
-// A thread is considered cold/new (isColdThread: true) only if completedCount == 0, turnCount == 0,
-// and diskActivity.IsZero(). Rotated sessions with turn_count == 0 or empty internal_session_id
-// but with prior completed messages are recognized as existing sessions.
-// If database queries fail, the error is returned to allow fail-open semantics.
-func GetSessionLastActivity(store db.Store, threadID string, mgr ...*session.Manager) (time.Time, bool, error) {
-	if store == nil || strings.TrimSpace(threadID) == "" {
-		return time.Time{}, true, nil
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	stats, err := store.GetSessionActivityStats(ctx, threadID)
-	if err != nil {
-		return time.Time{}, false, fmt.Errorf("querying session activity for thread %s: %w", threadID, err)
-	}
-
-	if stats == nil {
-		return time.Time{}, true, nil
-	}
-
-	var diskActivity time.Time
-	if strings.TrimSpace(stats.InternalSessionID) != "" {
-		if len(mgr) > 0 && mgr[0] != nil {
-			var actErr error
-			diskActivity, actErr = mgr[0].GetSessionLastActivity(stats.InternalSessionID)
-			if actErr != nil {
-				log.Printf("[Worker] Warning getting session last activity for %s: %v", stats.InternalSessionID, actErr)
-			}
-		}
-	}
-
-	// A thread is cold only if it has zero completed messages, zero turns, and no disk activity.
-	if stats.CompletedTurns == 0 && stats.TurnCount == 0 && diskActivity.IsZero() {
-		return time.Time{}, true, nil
-	}
-
-	latestActivity := stats.SessionUpdatedAt
-	if stats.LastMessageAt.After(latestActivity) {
-		latestActivity = stats.LastMessageAt
-	}
-	if diskActivity.After(latestActivity) {
-		latestActivity = diskActivity
-	}
-
-	return latestActivity, false, nil
-}
 
 func (te *turnExecution) getThreadSummary(threadID string) (string, string) {
 	if s := te.store(); s != nil {

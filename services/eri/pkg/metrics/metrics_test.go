@@ -20,8 +20,6 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 	RecordRunnerError("transient", "gemini-2.5-pro")
 	RecordDelivery("success", 120*time.Millisecond)
 	RecordMessageChunked()
-	RecordGatewayLatency(45 * time.Millisecond)
-	RecordGatewayReconnect()
 	RecordThreadCreated("created")
 	RecordThreadTitleDuration("success", "gemini-2.5-flash", 150*time.Millisecond)
 	RecordEmbedding("nomic-embed-text", "query", "success", 30*time.Millisecond)
@@ -78,8 +76,6 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 		"aerial_brain_classifier_confidence_score",
 		"aerial_brain_discord_events_total",
 		"aerial_brain_discord_messages_processed_total",
-		"aerial_brain_discord_gateway_latency_seconds",
-		"aerial_brain_discord_gateway_reconnects_total",
 		"aerial_brain_discord_typing_sessions_active",
 		"aerial_brain_discord_threads_created_total",
 		"aerial_brain_discord_deliveries_total",
@@ -122,8 +118,6 @@ func TestMetricsDefaultFallbackBranches(t *testing.T) {
 	RecordRunnerError("", "")
 	RecordClassifierRun("", "", 10*time.Millisecond, -1.0, "")
 	RecordDelivery("", 10*time.Millisecond)
-	RecordGatewayLatency(0)
-	RecordGatewayLatency(-5 * time.Millisecond)
 	RecordThreadCreated("")
 	RecordThreadTitleDuration("", "", 10*time.Millisecond)
 	RecordEmbedding("", "", "", 10*time.Millisecond)
