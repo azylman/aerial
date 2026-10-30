@@ -561,7 +561,8 @@ func isRoboRevCheck(checkName string) bool {
 
 func isGateAggregatorCheck(checkName string) bool {
 	trimmed := strings.TrimSpace(checkName)
-	return strings.EqualFold(trimmed, "Container Builds Gate") ||
+	return strings.EqualFold(trimmed, "CI Gate") ||
+		strings.EqualFold(trimmed, "Container Builds Gate") ||
 		strings.EqualFold(trimmed, "Sidecar Builds Gate") ||
 		strings.EqualFold(trimmed, "Configuration Gate")
 }

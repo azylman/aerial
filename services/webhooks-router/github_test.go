@@ -316,6 +316,12 @@ func TestProcessGitHubEvent(t *testing.T) {
 			wantPR:  518, wantCIFailedCalls: 1,
 		},
 		{
+			name: "check_run failure for CI Gate is ignored", event: "check_run", delivery: "del-cr-ci-gate-ignore",
+			payload: `{"action":"completed","check_run":{"name":"CI Gate","head_sha":"checkhead444","status":"completed","conclusion":"failure","pull_requests":[{"number":518,"head":{"ref":"feat/test","sha":"checkhead444"}}]},"repository":{"full_name":"azylman/aerial"}}`,
+			reg:     &mockPRRegistry{ciFailedTargetID: "target-111", ciFailedUpdated: true},
+			wantPR:  518, wantCIFailedCalls: 0,
+		},
+		{
 			name: "check_run failure for Container Builds Gate is ignored", event: "check_run", delivery: "del-cr-gate-ignore",
 			payload: `{"action":"completed","check_run":{"name":"Container Builds Gate","head_sha":"checkhead444","status":"completed","conclusion":"failure","pull_requests":[{"number":518,"head":{"ref":"feat/test","sha":"checkhead444"}}]},"repository":{"full_name":"azylman/aerial"}}`,
 			reg:     &mockPRRegistry{ciFailedTargetID: "target-111", ciFailedUpdated: true},
