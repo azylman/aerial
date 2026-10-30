@@ -39,9 +39,13 @@ type StatusWidgetRequest struct {
 	Chunks    []StatusWidgetChunk `json:"chunks"`
 }
 
-// WidgetSinkMessageThreshold is the number of newer messages after a status widget
+// WidgetSinkMessageThreshold is the number of newer non-widget messages after a status widget
 // required before DeliverStatusWidget re-posts the widget at the bottom of the thread.
 const WidgetSinkMessageThreshold = 4
+
+// WidgetSinkQueryLimit is the maximum number of messages fetched after a status widget
+// when counting non-widget messages toward WidgetSinkMessageThreshold.
+const WidgetSinkQueryLimit = 20
 
 // DiscordWidgetSender defines the interface required by DeliverStatusWidget to send, edit, query, and delete Discord messages.
 type DiscordWidgetSender interface {
@@ -52,16 +56,20 @@ type DiscordWidgetSender interface {
 }
 
 func shouldSinkWidget(s DiscordWidgetSender, channelID, messageID string) bool {
-	msgs, err := s.ChannelMessages(channelID, WidgetSinkMessageThreshold, "", messageID, "")
-	if err != nil || len(msgs) < WidgetSinkMessageThreshold {
+	msgs, err := s.ChannelMessages(channelID, WidgetSinkQueryLimit, "", messageID, "")
+	if err != nil {
 		return false
 	}
+	nonWidgetCount := 0
 	for _, m := range msgs {
-		if m != nil && m.ID != messageID && m.Flags&discordgo.MessageFlagsIsComponentsV2 != 0 {
-			return false
+		if m != nil && m.ID != messageID && m.Flags&discordgo.MessageFlagsIsComponentsV2 == 0 {
+			nonWidgetCount++
+			if nonWidgetCount >= WidgetSinkMessageThreshold {
+				return true
+			}
 		}
 	}
-	return true
+	return false
 }
 
 // AccentColor returns the hex color integer for the given status string.

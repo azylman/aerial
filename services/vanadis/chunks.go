@@ -640,7 +640,6 @@ func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncC
 		Title:     firstNonEmpty(strings.TrimSpace(build.Title), build.Objective),
 		Status:    widgetStatus,
 		Banner:    widgetBanner,
-		SkipSink:  build.StatusMessageID != "" && strings.TrimSpace(req.ActiveStep) != "" && widgetStatus == "running",
 		Chunks:    wChunks,
 	}
 }

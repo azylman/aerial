@@ -94,7 +94,7 @@ func TestHelpers_WidgetStatus(t *testing.T) {
 		wantActiveStep string
 	}{
 		{
-			name: "preserves active step and sets skipsink when chunk is open and build running with message",
+			name: "preserves active step and allows sink when chunk is open and build running with message",
 			build: VanadisBuild{
 				ID:              "build-1",
 				Status:          "running",
@@ -113,7 +113,7 @@ func TestHelpers_WidgetStatus(t *testing.T) {
 				PRFound:    true,
 			},
 			wantStatus:     "running",
-			wantSkipSink:   true,
+			wantSkipSink:   false,
 			wantActiveStep: "Waiting on CI (2/5 passed)",
 		},
 		{
@@ -136,7 +136,7 @@ func TestHelpers_WidgetStatus(t *testing.T) {
 				PRFound:    true,
 			},
 			wantStatus:     "running",
-			wantSkipSink:   true,
+			wantSkipSink:   false,
 			wantActiveStep: "Waiting on CI (3/3 passed)",
 		},
 		{
@@ -209,7 +209,7 @@ func TestHelpers_WidgetStatus(t *testing.T) {
 			wantActiveStep: "",
 		},
 		{
-			name: "preserves active step and sets skipsink when chunk is merged",
+			name: "preserves active step and allows sink when chunk is merged",
 			build: VanadisBuild{
 				ID:              "build-merged",
 				Status:          "running",
@@ -228,11 +228,11 @@ func TestHelpers_WidgetStatus(t *testing.T) {
 				PRFound:    true,
 			},
 			wantStatus:     "running",
-			wantSkipSink:   true,
+			wantSkipSink:   false,
 			wantActiveStep: "Building container images (1/2 completed)",
 		},
 		{
-			name: "preserves active step and sets skipsink when chunk is synced",
+			name: "preserves active step and allows sink when chunk is synced",
 			build: VanadisBuild{
 				ID:              "build-synced",
 				Status:          "running",
@@ -251,11 +251,11 @@ func TestHelpers_WidgetStatus(t *testing.T) {
 				PRFound:    true,
 			},
 			wantStatus:     "running",
-			wantSkipSink:   true,
+			wantSkipSink:   false,
 			wantActiveStep: "Building container images (2/2 completed)",
 		},
 		{
-			name: "preserves active step and sets skipsink when chunk is deploying",
+			name: "preserves active step and allows sink when chunk is deploying",
 			build: VanadisBuild{
 				ID:              "build-deploying",
 				Status:          "running",
@@ -274,7 +274,7 @@ func TestHelpers_WidgetStatus(t *testing.T) {
 				PRFound:    true,
 			},
 			wantStatus:     "running",
-			wantSkipSink:   true,
+			wantSkipSink:   false,
 			wantActiveStep: "`eri`: 🔄 starting",
 		},
 		{
@@ -297,7 +297,7 @@ func TestHelpers_WidgetStatus(t *testing.T) {
 				PRFound:    true,
 			},
 			wantStatus:     "running",
-			wantSkipSink:   true,
+			wantSkipSink:   false,
 			wantActiveStep: "",
 		},
 	}
@@ -875,8 +875,8 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 		}
 		if len(widgetDispatched) > 0 {
 			last := widgetDispatched[len(widgetDispatched)-1]
-			if !last.SkipSink {
-				t.Errorf("expected SkipSink to be true on active_step update with existing message_id")
+			if last.SkipSink {
+				t.Errorf("expected SkipSink to be false on sync-pr-widget so buried cards can sink")
 			}
 			if len(last.Chunks) == 0 || last.Chunks[0].ActiveStep != "Waiting on CI (2/4 passed)" {
 				t.Errorf("expected chunk ActiveStep to be %q, got %+v", "Waiting on CI (2/4 passed)", last.Chunks)
