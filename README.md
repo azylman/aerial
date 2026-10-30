@@ -12,7 +12,7 @@ Aerial is built from the ground up around end-to-end configurability across both
 
 Built in **Go (1.27)** and orchestrated as a resilient bare-metal homelab mesh:
 
-- **Cluster Orchestration**: **HashiCorp Nomad** — Heterogeneous bare-metal cluster managing distributed daemons, batch tasks, and GPU workloads.
+- **Cluster Orchestration**: **HashiCorp Nomad** — Heterogeneous bare-metal cluster managing distributed daemons, batch tasks, GPU workloads, and zero-downtime blue/green deploys.
 - **Service Discovery & Routing**: **CoreDNS** (internal mesh DNS) + **Nginx** (reverse proxy & edge ingress).
 - **Persistence & Vector Memory**: **PostgreSQL 18 + pgvector** — Multi-turn conversation state, strict 1-to-1 single-service table ownership, and hybrid RRF semantic memory (`coven`).
 - **Schema Migrations**: **Ariga Atlas** — Declarative schema migrations, automated diffing, and checksum validation via Nomad batch jobs.
