@@ -203,20 +203,6 @@ var (
 		[]string{"is_ambient", "decision"},
 	)
 
-	DiscordGatewayLatencySeconds = prometheus.NewGauge(
-		prometheus.GaugeOpts{
-			Name: "aerial_brain_discord_gateway_latency_seconds",
-			Help: "Current Discord Gateway heartbeat ping latency in seconds.",
-		},
-	)
-
-	DiscordGatewayReconnectsTotal = prometheus.NewCounter(
-		prometheus.CounterOpts{
-			Name: "aerial_brain_discord_gateway_reconnects_total",
-			Help: "Total Discord Gateway disconnection and reconnection events.",
-		},
-	)
-
 	DiscordTypingSessionsActive = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "aerial_brain_discord_typing_sessions_active",
@@ -466,8 +452,6 @@ func init() {
 		ThreadTitleDurationSeconds,
 		DiscordEventsTotal,
 		DiscordMessagesProcessedTotal,
-		DiscordGatewayLatencySeconds,
-		DiscordGatewayReconnectsTotal,
 		DiscordTypingSessionsActive,
 		DiscordThreadsCreatedTotal,
 		DiscordDeliveriesTotal,
@@ -682,18 +666,6 @@ func RecordDelivery(status string, duration time.Duration) {
 // RecordMessageChunked increments the counter when a response exceeds single-message length.
 func RecordMessageChunked() {
 	DiscordMessagesChunkedTotal.Inc()
-}
-
-// RecordGatewayLatency sets the current Discord Gateway heartbeat latency gauge.
-func RecordGatewayLatency(latency time.Duration) {
-	if latency > 0 {
-		DiscordGatewayLatencySeconds.Set(latency.Seconds())
-	}
-}
-
-// RecordGatewayReconnect increments the gateway reconnect counter.
-func RecordGatewayReconnect() {
-	DiscordGatewayReconnectsTotal.Inc()
 }
 
 // RecordThreadCreated records thread creation outcomes.

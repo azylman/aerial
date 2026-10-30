@@ -635,66 +635,6 @@ func isDiscordMessage(m db.Message) bool {
 	return m.AuthorID != "http-client"
 }
 
-func isDiscordBurst(burst []db.Message) bool {
-	for _, m := range burst {
-		if !isDiscordMessage(m) {
-			return false
-		}
-	}
-	return len(burst) > 0
-}
-
-// EvaluateBurstStaleness evaluates staleness atomically across an entire message burst.
-func EvaluateBurstStaleness(burst []db.Message, stalenessTTL time.Duration, isColdThread bool, lastSessionActivity, now time.Time) (bool, string) {
-	if !isDiscordBurst(burst) {
-		return false, ""
-	}
-	if now.IsZero() {
-		now = time.Now().UTC()
-	}
-	if stalenessTTL <= 0 {
-		stalenessTTL = 30 * time.Minute
-	}
-
-	latestMsg := burst[0]
-	for _, m := range burst[1:] {
-		if m.CreatedAt.After(latestMsg.CreatedAt) {
-			latestMsg = m
-		}
-	}
-	if latestMsg.CreatedAt.IsZero() {
-		return false, "zero_timestamp_retained"
-	}
-
-	var msgAge time.Duration
-	if now.After(latestMsg.CreatedAt) {
-		msgAge = now.Sub(latestMsg.CreatedAt)
-	}
-	if msgAge > MaxMessageAbsoluteAge {
-		return true, fmt.Sprintf("exceeded hard absolute age cap %v: msg age %v", MaxMessageAbsoluteAge, msgAge)
-	}
-
-	hasRecovered := false
-	for _, m := range burst {
-		if m.RetryCount > 0 || m.RestartCount > 0 || isDeploymentDrained(m.ErrorMessage) {
-			hasRecovered = true
-			break
-		}
-	}
-	if !hasRecovered && msgAge > stalenessTTL {
-		if isColdThread {
-			return true, fmt.Sprintf("new thread and message age %v > TTL %v", msgAge, stalenessTTL)
-		}
-		if !lastSessionActivity.IsZero() {
-			if now.Sub(lastSessionActivity) > stalenessTTL {
-				return true, fmt.Sprintf("existing session inactive for %v > TTL %v", now.Sub(lastSessionActivity), stalenessTTL)
-			}
-			return false, fmt.Sprintf("existing session had recent activity %v ago <= TTL", now.Sub(lastSessionActivity))
-		}
-	}
-	return false, ""
-}
-
 func sanitizePromptHeaderField(s string) string {
 	clean := strings.ReplaceAll(strings.ReplaceAll(s, "\n", " "), "\r", "")
 	return strings.TrimSpace(sanitizer.SanitizePromptTags(clean))

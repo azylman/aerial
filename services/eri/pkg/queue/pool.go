@@ -34,7 +34,6 @@ const (
 	DefaultMaxSessionIdleTime   = 24 * time.Hour
 	DefaultTimeoutMinutes       = 60
 	DefaultMaxRestarts          = 3
-	MaxMessageAbsoluteAge       = 2 * time.Hour
 	ContinuationPromptTemplate  = "Your previous execution timed out or was interrupted while working. Please inspect where you left off in the conversation transcript and continue the task to completion.\n\nOriginal user request:\n%s"
 	MaxYieldTrapAutoResumes     = 2
 	YieldTrapResumePrompt       = "[SYSTEM NOTICE]: Your previous turn yielded prematurely while background task(s) were still running, causing the runtime to terminate them. Inspect current status (check git status, PR state, or process logs) and continue your workflow to completion. Do NOT end the turn with waiting text."
@@ -82,17 +81,17 @@ func ResolvePoolKey(ephemeral *bool, effort string) (PoolKey, error) {
 }
 
 type WorkerPoolConfig struct {
-	Store                                                                                         db.Store
-	DiscordSession                                                                                *discordgo.Session
-	AgyBin, APIKey, Model, LowEffortModel, MediumEffortModel, SystemPrompt                        string
-	TimeoutMinutes, MaxAttempts                                                                   int
-	BackoffBase, StalenessTTL, IdleTimeout, DrainTimeout, RetryDelayOverride, MaintenanceInterval time.Duration
-	SessionManager                                                                                *session.Manager
-	Pools                                                                                         map[PoolKey]runner.AgentPool
-	ProcessPool, LowEffortProcessPool, MediumEffortProcessPool, VoiceProcessPool                  runner.AgentPool
-	Classifier                                                                                    *classifier.Classifier
-	HaroURL                                                                                       string
-	WebhooksRouterURL                                                                             string
+	Store                                                                           db.Store
+	DiscordSession                                                                  *discordgo.Session
+	AgyBin, APIKey, Model, LowEffortModel, MediumEffortModel, SystemPrompt          string
+	TimeoutMinutes, MaxAttempts                                                     int
+	BackoffBase, IdleTimeout, DrainTimeout, RetryDelayOverride, MaintenanceInterval time.Duration
+	SessionManager                                                                  *session.Manager
+	Pools                                                                           map[PoolKey]runner.AgentPool
+	ProcessPool, LowEffortProcessPool, MediumEffortProcessPool, VoiceProcessPool    runner.AgentPool
+	Classifier                                                                      *classifier.Classifier
+	HaroURL                                                                         string
+	WebhooksRouterURL                                                               string
 
 	// Optional hooks for testing/custom overrides
 	RunnerFunc                  func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
@@ -308,9 +307,6 @@ func applyWorkerPoolTimingDefaults(cfg *WorkerPoolConfig) {
 	}
 	if cfg.BackoffBase <= 0 {
 		cfg.BackoffBase = 3 * time.Second
-	}
-	if cfg.StalenessTTL <= 0 {
-		cfg.StalenessTTL = 30 * time.Minute
 	}
 	if cfg.DrainTimeout <= 0 {
 		cfg.DrainTimeout = 10 * time.Second

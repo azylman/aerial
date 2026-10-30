@@ -15,15 +15,12 @@ type Router struct {
 	deps           InteractionDeps
 	configCommitMu sync.Mutex
 	bgWg           sync.WaitGroup
-	seenMu         sync.Mutex
-	seenIDs        map[string]struct{}
 }
 
 // NewRouter creates a new interaction Router with injected dependencies.
 func NewRouter(deps InteractionDeps) *Router {
 	return &Router{
-		deps:    deps,
-		seenIDs: make(map[string]struct{}),
+		deps: deps,
 	}
 }
 
@@ -43,19 +40,6 @@ func (r *Router) getPool() *queue.WorkerPool {
 		}
 	}
 	return r.deps.Pool
-}
-
-func (r *Router) claimInteraction(id string) bool {
-	r.seenMu.Lock()
-	defer r.seenMu.Unlock()
-	if r.seenIDs == nil || len(r.seenIDs) >= 2048 {
-		r.seenIDs = make(map[string]struct{})
-	}
-	if _, seen := r.seenIDs[id]; seen {
-		return false
-	}
-	r.seenIDs[id] = struct{}{}
-	return true
 }
 
 func extractCallerUser(i *discordgo.InteractionCreate) *discordgo.User {
@@ -98,10 +82,6 @@ func (r *Router) dispatchCommand(s *discordgo.Session, i *discordgo.InteractionC
 // Handle processes incoming interaction events, enforces admin permissions, and dispatches to handlers.
 func (r *Router) Handle(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	if s == nil || s.Ratelimiter == nil || i == nil || i.Interaction == nil || i.ID == "" {
-		return
-	}
-
-	if !r.claimInteraction(i.ID) {
 		return
 	}
 

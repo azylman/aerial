@@ -265,7 +265,7 @@ type workerTestCase struct {
 	name, initialSessionID, policyMode, notifierReply, wantStatus, wantSavedSession, wantErrorContains, wantDBContent, wantResponseText       string
 	useSessionMgr, enqueueAsBurst, sequentialTurns, checkRunnerCalls, checkTurnCount, checkDeliveryCalls                                      bool
 	seedTurnCount, maxAttempts, concurrentEnqueueCount, wantDefaultTimeout, wantRunnerCalls, wantRetryCount, wantTurnCount, wantDeliveryCalls int
-	seedIdleAge, idleTimeout, stalenessTTL, messageAge                                                                                        time.Duration
+	seedIdleAge, idleTimeout                                                                                                                  time.Duration
 	seedTranscriptFiles                                                                                                                       map[string]string
 	seedPNGImage                                                                                                                              image.Image
 	seedPNGLevel                                                                                                                              png.CompressionLevel
@@ -362,7 +362,7 @@ func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 
 	cfg := WorkerPoolConfig{
 		Store: store, SessionManager: sessMgr, TimeoutMinutes: 1, IdleTimeout: tc.idleTimeout,
-		BackoffBase: 5 * time.Millisecond, MaxAttempts: maxAttempts, StalenessTTL: tc.stalenessTTL,
+		BackoffBase: 5 * time.Millisecond, MaxAttempts: maxAttempts,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			mu.Lock()
 			idx := runnerCalls
@@ -441,11 +441,7 @@ func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 			m.Status = db.StatusPending
 		}
 		if m.CreatedAt.IsZero() {
-			if tc.messageAge > 0 {
-				m.CreatedAt = time.Now().UTC().Add(-tc.messageAge)
-			} else {
-				m.CreatedAt = time.Now().UTC()
-			}
+			m.CreatedAt = time.Now().UTC()
 		}
 		msgs[i] = m
 		if err := insertMessage(store, m); err != nil {

@@ -71,20 +71,6 @@ func IsThreadAlreadyExistsError(err error) bool {
 	return strings.Contains(errStr, "160004") || strings.Contains(errStr, "already been created")
 }
 
-// IsMessageableChannel returns true if the given channel type can receive chat messages.
-func IsMessageableChannel(chType discordgo.ChannelType) bool {
-	switch chType {
-	case discordgo.ChannelTypeGuildText,
-		discordgo.ChannelTypeGuildNews,
-		discordgo.ChannelTypeGuildNewsThread,
-		discordgo.ChannelTypeGuildPublicThread,
-		discordgo.ChannelTypeGuildPrivateThread:
-		return true
-	default:
-		return false
-	}
-}
-
 // ResolveGuildID resolves the Discord Guild ID using strict precedence: message -> cached -> channel.
 func ResolveGuildID(msgGuildID, cachedGuildID, channelGuildID string) string {
 	if msgGuildID != "" {

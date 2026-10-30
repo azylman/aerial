@@ -649,50 +649,6 @@ func (te *turnExecution) claimAndFilterStale() bool {
 	te.burst = claimedBurst
 	te.activeSessionMu.Unlock()
 
-	stalenessTTL := te.pool.cfg.StalenessTTL
-	if stalenessTTL <= 0 {
-		stalenessTTL = 30 * time.Minute
-	}
-
-	latestMsg := te.burst[0]
-	hasRecovered := false
-	for _, m := range te.burst {
-		if m.CreatedAt.After(latestMsg.CreatedAt) {
-			latestMsg = m
-		}
-		if m.RetryCount > 0 || m.RestartCount > 0 || isDeploymentDrained(m.ErrorMessage) {
-			hasRecovered = true
-		}
-	}
-
-	var lastActivity time.Time
-	var isColdThread bool
-	now := time.Now().UTC()
-	msgAge := time.Duration(0)
-	if !latestMsg.CreatedAt.IsZero() && now.After(latestMsg.CreatedAt) {
-		msgAge = now.Sub(latestMsg.CreatedAt)
-	}
-
-	if isDiscordBurst(te.burst) && msgAge > stalenessTTL && !hasRecovered {
-		var err error
-		lastActivity, isColdThread, err = GetSessionLastActivity(te.store(), te.threadID, te.pool.sessionMgr)
-		if err != nil {
-			log.Printf("[WorkerPool] Warning: failed to query session last activity for thread %s: %v. Retaining message(s) (fail-open).", te.threadID, err)
-		}
-	}
-
-	isStale, reason := EvaluateBurstStaleness(te.burst, stalenessTTL, isColdThread, lastActivity, now)
-	if isStale {
-		log.Printf("[WorkerPool] Dropping stale message(s) in thread %s (%s). Marked [EXPIRED_STALE].", te.threadID, reason)
-		metrics.RecordTurnCompleted("stale", te.triggerType, "none", time.Since(latestMsg.CreatedAt))
-		te.finalizeBurstMessages(te.burst, db.StatusCompleted, "[EXPIRED_STALE]", "completed", "[EXPIRED_STALE]", "", true, true)
-		return false
-	}
-	if reason != "" && strings.Contains(reason, "recent activity") {
-		log.Printf("[WorkerPool] Retaining message in thread %s (msg age %v > TTL %v) because session had recent activity %v ago <= TTL.",
-			te.threadID, msgAge, stalenessTTL, now.Sub(lastActivity))
-	}
-
 	te.execStart = time.Now().UTC()
 	return true
 }
@@ -1012,6 +968,10 @@ func (te *turnExecution) checkGlobalQuotaLockout(currentAPIKey, currentModel str
 	te.deliverQuotaNotice(pauseMsg, "quota pause message")
 	te.failBurstWithStatus("failed", reason, currentModel)
 	return true
+}
+
+func isDeploymentDrained(errorMsg string) bool {
+	return errorMsg == "deployment_drain" || errorMsg == "interrupted by graceful deployment"
 }
 
 func (te *turnExecution) isRestartedOrDrainedTurn(lastErrDetail string) bool {

@@ -69,35 +69,6 @@ func TestIsThreadAlreadyExistsError_TableDriven(t *testing.T) {
 	}
 }
 
-func TestIsMessageableChannel_TableDriven(t *testing.T) {
-	tests := []struct {
-		chType discordgo.ChannelType
-		want   bool
-	}{
-		{discordgo.ChannelTypeGuildText, true},
-		{discordgo.ChannelTypeGuildNews, true},
-		{discordgo.ChannelTypeGuildNewsThread, true},
-		{discordgo.ChannelTypeGuildPublicThread, true},
-		{discordgo.ChannelTypeGuildPrivateThread, true},
-		{discordgo.ChannelTypeGuildVoice, false},
-		{discordgo.ChannelTypeGuildCategory, false},
-		{discordgo.ChannelTypeGuildStore, false},
-		{discordgo.ChannelTypeGuildStageVoice, false},
-		{discordgo.ChannelTypeGuildForum, false},
-		{discordgo.ChannelTypeDM, false},
-		{discordgo.ChannelTypeGroupDM, false},
-		{discordgo.ChannelType(9999), false},
-	}
-
-	for _, tt := range tests {
-		t.Run(fmt.Sprintf("type=%d", tt.chType), func(t *testing.T) {
-			if got := IsMessageableChannel(tt.chType); got != tt.want {
-				t.Errorf("IsMessageableChannel(%d) = %v, want %v", tt.chType, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestResolveGuildID_TableDriven(t *testing.T) {
 	tests := []struct {
 		name      string
