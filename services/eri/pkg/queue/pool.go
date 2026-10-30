@@ -151,6 +151,8 @@ type WorkerPool struct {
 	chunkToBuildID    map[string]string
 	activeChunkSteps  map[string]string
 	activeChunkTurns  map[string]string
+	claimedMessages   sync.Map
+	claimedDispatches sync.Map
 }
 
 // SummaryGroup returns the singleflight.Group coordinating thread summarizations for this pool instance.
@@ -756,8 +758,10 @@ func (p *WorkerPool) sweepInterruptedProcessingEntries(ctx context.Context, stor
 	if msgs, err := store.GetPendingOrProcessingMessages(ctx, 0); err == nil {
 		for _, m := range msgs {
 			if m.Status == db.StatusProcessing {
-				if err := store.UpdateMessageStatus(ctx, m.ID, db.StatusPending, "deployment_drain"); err != nil {
-					log.Printf("[WorkerPool] Warning resetting message %s to pending: %v", m.ID, err)
+				if _, ok := p.claimedMessages.Load(m.ID); ok {
+					if err := store.UpdateMessageStatus(ctx, m.ID, db.StatusPending, "deployment_drain"); err != nil {
+						log.Printf("[WorkerPool] Warning resetting message %s to pending: %v", m.ID, err)
+					}
 				}
 			}
 		}
@@ -765,8 +769,10 @@ func (p *WorkerPool) sweepInterruptedProcessingEntries(ctx context.Context, stor
 	if dispatches, err := store.GetPendingOrProcessingDispatches(ctx, 0); err == nil {
 		for _, d := range dispatches {
 			if d.Status == db.StatusProcessing {
-				if err := store.UpdateDispatchStatus(ctx, d.ID, db.StatusPending, "deployment_drain"); err != nil {
-					log.Printf("[WorkerPool] Warning resetting dispatch %s to pending: %v", d.ID, err)
+				if _, ok := p.claimedDispatches.Load(d.ID); ok {
+					if err := store.UpdateDispatchStatus(ctx, d.ID, db.StatusPending, "deployment_drain"); err != nil {
+						log.Printf("[WorkerPool] Warning resetting dispatch %s to pending: %v", d.ID, err)
+					}
 				}
 			}
 		}

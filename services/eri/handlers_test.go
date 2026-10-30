@@ -119,6 +119,9 @@ func TestHandlePromptValidation(t *testing.T) {
 		wantContent   string
 	}{
 		{"default effort", pool, `{"prompt":"Test valid prompt","channel_id":"1542423172400291873","message_id":"msg-123"}`, "msg-123", "1542423172400291873", "1542423172400291873", "", "", "Test valid prompt"},
+		{"explicit effort", pool, `{"prompt":"Test explicit effort","channel_id":"1542423172400291873","effort":"high","message_id":"msg-effort-high"}`, "msg-effort-high", "1542423172400291873", "1542423172400291873", "high", "", "Test explicit effort"},
+		{"inferred medium effort", pool, `{"prompt":"Test medium effort","channel_id":"1542423172400291873","model":"model-medium","message_id":"msg-effort-med"}`, "msg-effort-med", "1542423172400291873", "1542423172400291873", "medium", "model-medium", "Test medium effort"},
+		{"inferred low effort", pool, `{"prompt":"Test low effort","channel_id":"1542423172400291873","model":"model-flash","message_id":"msg-effort-flash"}`, "msg-effort-flash", "1542423172400291873", "1542423172400291873", "low", "model-flash", "Test low effort"},
 		{"nil pool", nil, `{"prompt":"hello nil pool","channel_id":"1542423172400291873","message_id":"msg-nil-pool"}`, "msg-nil-pool", "1542423172400291873", "1542423172400291873", "", "", "hello nil pool"},
 		{"auto-generated uuid when message_id omitted", pool, `{"prompt":"auto uuid prompt","channel_id":"1542423172400291873"}`, "", "", "", "", "", "auto uuid prompt"},
 		{"resolve target thread", threadPool, `{"prompt":"create thread prompt","channel_id":"1542423172400291873","title":"Heartbeat Alert","message_id":"msg-thread-create"}`, "msg-thread-create", "1542999999999999999", "1542999999999999999", "", "", "create thread prompt"},
@@ -878,6 +881,8 @@ func TestNormalizeRoute(t *testing.T) {
 		{"/tasks", "/tasks"},
 		{"/tasks/456", "/tasks"},
 		{"/internal/llm", "/internal/llm"},
+		{"/internal/discord/message", "/internal/discord/message"},
+		{"/internal/discord/interaction", "/internal/discord/interaction"},
 		{"/schedules", "unmatched"},
 		{"/schedules/runs", "unmatched"},
 		{"/transcripts", "unmatched"},
@@ -1382,4 +1387,199 @@ func TestHandleVoiceAsk_SSE(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestHandleInternalDiscordMessage(t *testing.T) {
+	setupTestConfig(t, `
+model: "gemini-2.5-flash"
+channels:
+  default:
+    mode: "threads"
+`)
+
+	tests := []struct {
+		name       string
+		method     string
+		body       string
+		closedDB   bool
+		wantStatus int
+		wantSubstr string
+	}{
+		{
+			name:       "ValidTargetedMessage",
+			method:     http.MethodPost,
+			body:       `{"bot_user_id":"bot-1","message":{"id":"123456789012345678","channel_id":"ch-1","author":{"id":"u-1","username":"alex"},"content":"hey aerial"}}`,
+			wantStatus: http.StatusOK,
+			wantSubstr: `"enqueued"`,
+		},
+		{
+			name:       "MissingMessageID",
+			method:     http.MethodPost,
+			body:       `{"message":{}}`,
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "Invalid payload",
+		},
+		{
+			name:       "MissingMessage",
+			method:     http.MethodPost,
+			body:       `{"bot_user_id":"bot-1"}`,
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "Invalid payload",
+		},
+		{
+			name:       "MissingAuthor",
+			method:     http.MethodPost,
+			body:       `{"message":{"id":"123456789012345678"}}`,
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "Invalid payload",
+		},
+		{
+			name:       "MethodNotAllowed",
+			method:     http.MethodGet,
+			body:       "",
+			wantStatus: http.StatusMethodNotAllowed,
+			wantSubstr: "Method not allowed",
+		},
+		{
+			name:       "MalformedJSON",
+			method:     http.MethodPost,
+			body:       `{"message":`,
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "Invalid payload",
+		},
+		{
+			name:       "SelfMessageIgnored",
+			method:     http.MethodPost,
+			body:       `{"bot_user_id":"bot-1","message":{"id":"msg-self-1","channel_id":"ch-1","author":{"id":"bot-1","username":"aerial"},"content":"hello"}}`,
+			wantStatus: http.StatusOK,
+			wantSubstr: `"ignored_self"`,
+		},
+		{
+			name:       "UntargetedMessageIgnored",
+			method:     http.MethodPost,
+			body:       `{"bot_user_id":"bot-1","message":{"id":"msg-untargeted-1","channel_id":"ch-1","guild_id":"g-1","author":{"id":"u-2","username":"bob"},"content":"random chatter"}}`,
+			wantStatus: http.StatusOK,
+			wantSubstr: `"ignored"`,
+		},
+		{
+			name:       "DatabaseErrorReturns500",
+			method:     http.MethodPost,
+			body:       `{"bot_user_id":"bot-1","message":{"id":"msg-db-err-1","channel_id":"ch-1","author":{"id":"u-1","username":"alex"},"content":"hey aerial"}}`,
+			closedDB:   true,
+			wantStatus: http.StatusInternalServerError,
+			wantSubstr: "Failed to process message",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := dbtest.NewFakeStore()
+			if tc.closedDB {
+				_ = store.Close()
+			}
+			pool := newTestWorkerPool(store)
+			handler := handleInternalDiscordMessage(store, pool)
+
+			req := httptest.NewRequest(tc.method, "/internal/discord/message", strings.NewReader(tc.body))
+			rec := httptest.NewRecorder()
+			handler(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if tc.wantSubstr != "" && !strings.Contains(rec.Body.String(), tc.wantSubstr) {
+				t.Errorf("body %q does not contain wantSubstr %q", rec.Body.String(), tc.wantSubstr)
+			}
+		})
+	}
+}
+
+func TestHandleInternalDiscordInteraction(t *testing.T) {
+	tests := []struct {
+		name           string
+		method         string
+		body           string
+		readErr        bool
+		hasPoolSession bool
+		wantStatus     int
+		wantSubstr     string
+	}{
+		{
+			name:       "ValidDirectInteraction",
+			method:     http.MethodPost,
+			body:       `{"id":"int-1","type":2,"data":{"name":"status"}}`,
+			wantStatus: http.StatusOK,
+			wantSubstr: `"ok"`,
+		},
+		{
+			name:       "ValidWrappedInteraction",
+			method:     http.MethodPost,
+			body:       `{"interaction":{"id":"int-2","type":2,"data":{"name":"status"}}}`,
+			wantStatus: http.StatusOK,
+			wantSubstr: `"ok"`,
+		},
+		{
+			name:           "WithPoolSession",
+			method:         http.MethodPost,
+			body:           `{"id":"int-3","type":2,"data":{"name":"status"}}`,
+			hasPoolSession: true,
+			wantStatus:     http.StatusOK,
+			wantSubstr:     `"ok"`,
+		},
+		{
+			name:       "BodyReadError",
+			method:     http.MethodPost,
+			readErr:    true,
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "Failed to read request body",
+		},
+		{
+			name:       "MethodNotAllowed",
+			method:     http.MethodGet,
+			body:       "",
+			wantStatus: http.StatusMethodNotAllowed,
+			wantSubstr: "Method not allowed",
+		},
+		{
+			name:       "MalformedJSON",
+			method:     http.MethodPost,
+			body:       `{"id":`,
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "Invalid payload",
+		},
+		{
+			name:       "MissingInteractionID",
+			method:     http.MethodPost,
+			body:       `{"type":2}`,
+			wantStatus: http.StatusBadRequest,
+			wantSubstr: "Invalid payload",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := dbtest.NewFakeStore()
+			pool := newTestWorkerPool(store)
+			if tc.hasPoolSession {
+				sess, _ := discordgo.New("Bot fake-token")
+				pool.SetDiscordSession(sess)
+			}
+			handler := handleInternalDiscordInteraction(store, pool)
+
+			var r io.Reader = strings.NewReader(tc.body)
+			if tc.readErr {
+				r = &errReadCloser{readErr: errors.New("simulated body read error")}
+			}
+			req := httptest.NewRequest(tc.method, "/internal/discord/interaction", r)
+			rec := httptest.NewRecorder()
+			handler(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if tc.wantSubstr != "" && !strings.Contains(rec.Body.String(), tc.wantSubstr) {
+				t.Errorf("body %q does not contain wantSubstr %q", rec.Body.String(), tc.wantSubstr)
+			}
+		})
+	}
 }

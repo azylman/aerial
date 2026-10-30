@@ -35,6 +35,49 @@ var (
 	}
 )
 
+type DiscordMessageIngressRequest struct {
+	BotUserID string             `json:"bot_user_id,omitempty"`
+	RoleNames map[string]string  `json:"role_names,omitempty"`
+	Message   *discordgo.Message `json:"message"`
+}
+
+var (
+	seenFunnelMu       sync.Mutex
+	seenFunnelMessages = make(map[string]struct{})
+)
+
+const maxSeenFunnelMessages = 4096
+
+func claimFunnelMessageIngress(msgID string) bool {
+	if msgID == "" {
+		return false
+	}
+	seenFunnelMu.Lock()
+	defer seenFunnelMu.Unlock()
+	if seenFunnelMessages == nil {
+		seenFunnelMessages = make(map[string]struct{})
+	}
+	if len(seenFunnelMessages) >= maxSeenFunnelMessages {
+		seenFunnelMessages = make(map[string]struct{})
+	}
+	if _, exists := seenFunnelMessages[msgID]; exists {
+		return false
+	}
+	seenFunnelMessages[msgID] = struct{}{}
+	return true
+}
+
+func releaseFunnelMessageIngress(msgID string) {
+	if msgID == "" {
+		return
+	}
+	seenFunnelMu.Lock()
+	defer seenFunnelMu.Unlock()
+	if seenFunnelMessages != nil {
+		delete(seenFunnelMessages, msgID)
+	}
+}
+
 func syncBotMemberRoles(ctx context.Context, s *discordgo.Session, guildID, botID string) {
 	if s == nil || s.State == nil || guildID == "" || botID == "" || (ctx != nil && ctx.Err() != nil) {
 		return
@@ -250,11 +293,35 @@ func getOrCreateThreadID(s *discordgo.Session, m *discordgo.Message, allowSummar
 	return thread.ID, true
 }
 
+func replaceMentionRoles(content string, s *discordgo.Session, guildID string, mentionRoles []string, extras map[string]string) string {
+	for _, roleID := range mentionRoles {
+		roleName := ""
+		if s != nil && s.State != nil && guildID != "" {
+			if r, err := s.State.Role(guildID, roleID); err == nil && r != nil && r.Name != "" {
+				roleName = r.Name
+			}
+		}
+		if roleName == "" && extras != nil {
+			if name, ok := extras[roleID]; ok && name != "" {
+				roleName = name
+			}
+		}
+		if roleName != "" {
+			content = strings.ReplaceAll(content, "<@&"+roleID+">", "@"+roleName)
+		}
+	}
+	return content
+}
+
 // resolveMessageContent resolves Discord mention snowflakes (<@ID>, <@!ID>, <@&ID>, <#ID>)
 // to human-readable names using cached session state and incoming payload mentions.
-func resolveMessageContent(s *discordgo.Session, m *discordgo.Message) string {
+func resolveMessageContent(s *discordgo.Session, m *discordgo.Message, extraRoleNames ...map[string]string) string {
 	if m == nil {
 		return ""
+	}
+	var extras map[string]string
+	if len(extraRoleNames) > 0 {
+		extras = extraRoleNames[0]
 	}
 	content := m.Content
 	if s != nil {
@@ -263,42 +330,52 @@ func resolveMessageContent(s *discordgo.Session, m *discordgo.Message) string {
 		} else if fallback := m.ContentWithMentionsReplaced(); fallback != "" {
 			content = fallback
 		}
-		if s.State != nil && m.GuildID != "" && len(m.MentionRoles) > 0 {
-			for _, roleID := range m.MentionRoles {
-				if r, err := s.State.Role(m.GuildID, roleID); err == nil && r != nil && r.Name != "" {
-					content = strings.ReplaceAll(content, "<@&"+roleID+">", "@"+r.Name)
-				}
-			}
-		}
-		return content
+	} else if resolved := m.ContentWithMentionsReplaced(); resolved != "" {
+		content = resolved
 	}
-	if resolved := m.ContentWithMentionsReplaced(); resolved != "" {
-		return resolved
+	if len(m.MentionRoles) > 0 {
+		content = replaceMentionRoles(content, s, m.GuildID, m.MentionRoles, extras)
 	}
-	return m.Content
+	return content
 }
 
-func resolveMentionRoleNames(s *discordgo.Session, m *discordgo.Message) map[string]string {
+func resolveMentionRoleNames(s *discordgo.Session, m *discordgo.Message, extraRoleNames ...map[string]string) map[string]string {
 	roleNames := make(map[string]string)
-	if s != nil && s.State != nil && m.GuildID != "" {
-		for _, roleID := range m.MentionRoles {
+	if m == nil {
+		return roleNames
+	}
+	var extras map[string]string
+	if len(extraRoleNames) > 0 {
+		extras = extraRoleNames[0]
+	}
+	for _, roleID := range m.MentionRoles {
+		if s != nil && s.State != nil && m.GuildID != "" {
 			if r, err := s.State.Role(m.GuildID, roleID); err == nil && r != nil && r.Name != "" {
 				roleNames[roleID] = r.Name
+				continue
+			}
+		}
+		if extras != nil {
+			if name, ok := extras[roleID]; ok && name != "" {
+				roleNames[roleID] = name
 			}
 		}
 	}
 	return roleNames
 }
 
-func resolveReplyContext(s *discordgo.Session, m *discordgo.Message) (replyingToAuthor, replyingToContent string) {
+func resolveReplyContext(s *discordgo.Session, m *discordgo.Message, extraRoleNames ...map[string]string) (replyingToAuthor, replyingToContent string) {
 	if m == nil || m.ReferencedMessage == nil {
 		return "", ""
+	}
+	if m.ReferencedMessage.GuildID == "" && m.GuildID != "" {
+		m.ReferencedMessage.GuildID = m.GuildID
 	}
 	replyingToAuthor = "Unknown"
 	if m.ReferencedMessage.Author != nil {
 		replyingToAuthor = "@" + strings.ReplaceAll(strings.ReplaceAll(m.ReferencedMessage.Author.Username, "\n", " "), "\r", "")
 	}
-	replyingToContent = resolveMessageContent(s, m.ReferencedMessage)
+	replyingToContent = resolveMessageContent(s, m.ReferencedMessage, extraRoleNames...)
 	if len(m.ReferencedMessage.Attachments) > 0 {
 		var refAtts []string
 		for _, a := range m.ReferencedMessage.Attachments {
@@ -350,11 +427,14 @@ func resolveAttachments(m *discordgo.Message) []string {
 }
 
 // populateDiscordMessageFields populates structured Discord fields onto a db.Message.
-func populateDiscordMessageFields(s *discordgo.Session, m *discordgo.Message, msg *db.Message) {
+func populateDiscordMessageFields(s *discordgo.Session, m *discordgo.Message, msg *db.Message, extraRoleNames ...map[string]string) {
 	if m == nil || msg == nil {
 		return
 	}
-	roleNames := resolveMentionRoleNames(s, m)
+	if m.ReferencedMessage != nil && m.ReferencedMessage.GuildID == "" && m.GuildID != "" {
+		m.ReferencedMessage.GuildID = m.GuildID
+	}
+	roleNames := resolveMentionRoleNames(s, m, extraRoleNames...)
 	var adminUsers []string
 	if cfg := currentFunnelConfig(); cfg != nil {
 		adminUsers = cfg.Current().AdminUsers
@@ -364,7 +444,7 @@ func populateDiscordMessageFields(s *discordgo.Session, m *discordgo.Message, ms
 		msg.AuthorGlobalName, msg.AuthorBot = m.Author.GlobalName, m.Author.Bot
 	}
 
-	msg.ReplyingToAuthor, msg.ReplyingToContent = resolveReplyContext(s, m)
+	msg.ReplyingToAuthor, msg.ReplyingToContent = resolveReplyContext(s, m, extraRoleNames...)
 	msg.Mentions, msg.MentionUserIDs, msg.MentionRoleIDs = resolveMentionsAndRoles(m, roleNames)
 	msg.Attachments = resolveAttachments(m)
 
@@ -471,10 +551,13 @@ func handleGuildMemberUpdate(s *discordgo.Session, m *discordgo.GuildMemberUpdat
 	}
 }
 
-func buildAndInsertFunnelMessage(ctx context.Context, s *discordgo.Session, store db.Store, m *discordgo.Message, targetThreadID string, createdAt time.Time) (db.Message, error) {
+func buildAndInsertFunnelMessage(ctx context.Context, s *discordgo.Session, store db.Store, m *discordgo.Message, targetThreadID string, createdAt time.Time, extraRoleNames ...map[string]string) (db.Message, error) {
 	resolvedGuildID := resolveGuildID(s, m)
 	if m != nil {
 		m.GuildID = resolvedGuildID
+		if m.ReferencedMessage != nil && m.ReferencedMessage.GuildID == "" {
+			m.ReferencedMessage.GuildID = resolvedGuildID
+		}
 	}
 	authorID, authorName, rawContent, msgID, effort := "", "Discord User", "", "", ""
 	if m != nil {
@@ -483,7 +566,7 @@ func buildAndInsertFunnelMessage(ctx context.Context, s *discordgo.Session, stor
 			authorID = m.Author.ID
 			authorName = m.Author.Username
 		}
-		rawContent = resolveMessageContent(s, m)
+		rawContent = resolveMessageContent(s, m, extraRoleNames...)
 		policy, _ := resolveEffectiveChannelPolicy(s, m.ChannelID)
 		effort = policy.GetEffort()
 	}
@@ -499,11 +582,87 @@ func buildAndInsertFunnelMessage(ctx context.Context, s *discordgo.Session, stor
 		CreatedAt:  createdAt,
 		UpdatedAt:  time.Now().UTC(),
 	}
-	populateDiscordMessageFields(s, m, &msg)
-	if err := store.InsertMessage(ctx, msg); err != nil {
-		return msg, err
+	populateDiscordMessageFields(s, m, &msg, extraRoleNames...)
+	if store != nil {
+		if err := store.InsertMessage(ctx, msg); err != nil {
+			return msg, err
+		}
 	}
 	return msg, nil
+}
+
+func seedSessionStateForIngress(s *discordgo.Session, botUserID string, m *discordgo.Message) {
+	if botUserID == "" || s == nil || s.State == nil {
+		return
+	}
+	s.State.Lock()
+	if s.State.User == nil {
+		s.State.User = &discordgo.User{ID: botUserID, Username: "Aerial"}
+	}
+	s.State.Unlock()
+	if m != nil && m.GuildID != "" {
+		if _, err := s.State.Guild(m.GuildID); err != nil {
+			if addErr := s.State.GuildAdd(&discordgo.Guild{ID: m.GuildID}); addErr != nil {
+				log.Printf("[Internal Ingress] Warning: failed to add guild %s to state: %v", m.GuildID, addErr)
+			}
+		}
+	}
+}
+
+func isSelfOrNilMessage(s *discordgo.Session, m *discordgo.Message, botUserID string) bool {
+	if m == nil || m.Author == nil || (botUserID != "" && m.Author.ID == botUserID) {
+		return true
+	}
+	if s != nil && s.State != nil {
+		s.State.RLock()
+		u := s.State.User
+		s.State.RUnlock()
+		if u != nil && m.Author.ID == u.ID {
+			return true
+		}
+	}
+	return false
+}
+
+func processFunnelMessageIngress(ctx context.Context, s *discordgo.Session, store db.Store, pool *queue.WorkerPool, m *discordgo.Message, botUserID string, extraRoleNames map[string]string) (string, error) {
+	seedSessionStateForIngress(s, botUserID, m)
+
+	if isSelfOrNilMessage(s, m, botUserID) {
+		return "ignored_self", nil
+	}
+
+	if !isFunnelBotTargeted(s, &discordgo.MessageCreate{Message: m}) {
+		metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "ignored").Inc()
+		return "ignored", nil
+	}
+
+	if !claimFunnelMessageIngress(m.ID) {
+		return "duplicate", nil
+	}
+
+	if store != nil {
+		exists, err := store.MessageExists(ctx, m.ID)
+		if err != nil {
+			releaseFunnelMessageIngress(m.ID)
+			return "", err
+		}
+		if exists {
+			return "duplicate", nil
+		}
+	}
+
+	targetThreadID, _ := getOrCreateThreadID(s, m)
+	msg, err := buildAndInsertFunnelMessage(ctx, s, store, m, targetThreadID, m.Timestamp, extraRoleNames)
+	if err != nil {
+		releaseFunnelMessageIngress(m.ID)
+		return "", err
+	}
+
+	metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "enqueued").Inc()
+	if pool != nil {
+		pool.Enqueue(msg)
+	}
+	return "enqueued", nil
 }
 
 func handleFunnelCacheEvent(evt string, ch *discordgo.Channel, del bool) {
@@ -567,31 +726,24 @@ func registerFunnelChannelCacheHandlers(dg *discordgo.Session) {
 }
 
 func handleFunnelMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate, store db.Store, pool *queue.WorkerPool) {
-	if m == nil || m.Author == nil || (s != nil && s.State != nil && s.State.User != nil && m.Author.ID == s.State.User.ID) {
+	if m == nil || m.Author == nil {
 		return
 	}
 	metrics.DiscordEventsTotal.WithLabelValues("message_create").Inc()
 
 	go func() {
-		if !isFunnelBotTargeted(s, m) {
-			metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "ignored").Inc()
-			log.Printf("Discord funnel ignoring message %s from %s: no trigger matched", m.ID, m.Author.Username)
-			return
+		botUserID := ""
+		if s != nil && s.State != nil {
+			s.State.RLock()
+			if s.State.User != nil {
+				botUserID = s.State.User.ID
+			}
+			s.State.RUnlock()
 		}
-
-		targetThreadID, isThread := getOrCreateThreadID(s, m.Message)
-		insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		msg, err := buildAndInsertFunnelMessage(insertCtx, s, store, m.Message, targetThreadID, m.Timestamp)
-		insertCancel()
-		if err != nil {
-			log.Printf("Failed to insert message %s: %v", m.ID, err)
-			return
-		}
-
-		metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "enqueued").Inc()
-		log.Printf("Discord funnel enqueued message %s from %s (thread: %s, is_thread: %t)", m.ID, msg.AuthorName, targetThreadID, isThread)
-		if pool != nil {
-			pool.Enqueue(msg)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := processFunnelMessageIngress(ctx, s, store, pool, m.Message, botUserID, nil); err != nil {
+			log.Printf("Failed to process message %s: %v", m.ID, err)
 		}
 	}()
 }
@@ -820,6 +972,11 @@ func processCatchUpChannelMessages(sweepCtx context.Context, store db.Store, poo
 			continue
 		}
 
+		if !claimFunnelMessageIngress(m.ID) {
+			skipped++
+			continue
+		}
+
 		exists, err := store.MessageExists(sweepCtx, m.ID)
 		if err != nil {
 			log.Printf("[Startup Recovery] Warning checking message existence for %s: %v", m.ID, err)
@@ -840,6 +997,7 @@ func processCatchUpChannelMessages(sweepCtx context.Context, store db.Store, poo
 
 		msg, err := buildAndInsertFunnelMessage(sweepCtx, s, store, m, targetThreadID, msgTime)
 		if err != nil {
+			releaseFunnelMessageIngress(m.ID)
 			log.Printf("[CatchUpSweep] Failed to insert missed message %s: %v", m.ID, err)
 			continue
 		}

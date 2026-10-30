@@ -456,6 +456,9 @@ func (te *turnExecution) cancelBurstOnShutdown(turnStatus, currentModel string, 
 				log.Printf("[WorkerPool] Warning resetting dispatch %s to pending: %v", te.dispatch.ID, err)
 			}
 		}
+		if te.pool != nil && te.dispatch != nil {
+			te.pool.claimedDispatches.Delete(te.dispatch.ID)
+		}
 		return
 	}
 	te.finalizeBurstMessages(te.burst, db.StatusPending, "interrupted by graceful deployment", runStatus, runErr, currentModel, false, false)

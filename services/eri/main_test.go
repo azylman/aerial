@@ -251,6 +251,16 @@ func TestDefaultPaths(t *testing.T) {
 	if dir := DefaultDataDir(); dir == "" {
 		t.Errorf("expected non-empty data dir, got empty")
 	}
+
+	// 5. resolveBrainModelDefaults tests
+	lowD, medD := resolveBrainModelDefaults(&config.ConfigData{})
+	if lowD != "gemini-3.8-flash-low" || medD != "gemini-3.8-flash-medium" {
+		t.Errorf("expected default models, got %s, %s", lowD, medD)
+	}
+	lowC, medC := resolveBrainModelDefaults(&config.ConfigData{LowEffortModel: "custom-low", MediumEffortModel: "custom-med"})
+	if lowC != "custom-low" || medC != "custom-med" {
+		t.Errorf("expected custom models, got %s, %s", lowC, medC)
+	}
 }
 
 func runBrainAppUntilReady(t *testing.T, cfg *config.Config, opts ...BrainAppOption) (string, context.CancelFunc, func() error) {

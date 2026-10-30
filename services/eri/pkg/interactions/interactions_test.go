@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -308,6 +309,7 @@ func TestRouter_AuthAndDispatch(t *testing.T) {
 		{"BareSessionNoRatelimiter", mkCmd("5", "chan-1", "admin-123", "status"), false, true, 0, false, "", 0},
 		{"NilInteraction", nil, false, false, 0, false, "", 0},
 		{"NilInnerInteraction", &discordgo.InteractionCreate{}, false, false, 0, false, "", 0},
+		{"EmptyInteractionID", &discordgo.InteractionCreate{Interaction: &discordgo.Interaction{ID: "", Type: discordgo.InteractionApplicationCommand}}, false, false, 0, false, "", 0},
 		{"NonApplicationCommandType", &discordgo.InteractionCreate{Interaction: &discordgo.Interaction{ID: "6", Type: discordgo.InteractionMessageComponent}}, false, false, 0, false, "", 0},
 		{"NilUserAndMember", &discordgo.InteractionCreate{Interaction: &discordgo.Interaction{ID: "7", Type: discordgo.InteractionApplicationCommand, Token: "tok-7", Data: discordgo.ApplicationCommandInteractionData{Name: "status"}}}, false, false, 0, false, "", 0},
 		{"DynamicConfigAndPoolProviders", mkCmd("8", "chan-1", "admin-123", "nonexistent_cmd"), false, false, 0, true, "Unrecognized command", 1},
@@ -791,6 +793,53 @@ func TestRouter_HandleSync(t *testing.T) {
 				t.Errorf("expected method %s, got %s", tc.wantMethod, reqs[0].Method)
 			}
 			_ = cmds
+		})
+	}
+}
+
+func TestRouter_InteractionDeduplication(t *testing.T) {
+	tests := []struct {
+		name         string
+		firstID      string
+		secondID     string
+		prefillCount int
+		wantRequests int
+	}{
+		{
+			name:         "DuplicateIDDropped",
+			firstID:      "cmd-dedupe-1",
+			secondID:     "cmd-dedupe-1",
+			wantRequests: 1,
+		},
+		{
+			name:         "DistinctIDsDispatched",
+			firstID:      "cmd-distinct-1",
+			secondID:     "cmd-distinct-2",
+			wantRequests: 2,
+		},
+		{
+			name:         "CapAt2048ClearsCache",
+			firstID:      "cmd-cap-1",
+			secondID:     "cmd-cap-1",
+			prefillCount: 2048,
+			wantRequests: 2,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			router, _, transport, session := setupTestRouter("admin-123", 0)
+
+			router.Handle(session, mkCmd(tc.firstID, "chan-1", "admin-123", "nonexistent_cmd"))
+			for i := 0; i < tc.prefillCount; i++ {
+				router.seenIDs[fmt.Sprintf("prefill-%d", i)] = struct{}{}
+			}
+			router.Handle(session, mkCmd(tc.secondID, "chan-1", "admin-123", "nonexistent_cmd"))
+
+			reqs := transport.Requests()
+			if len(reqs) != tc.wantRequests {
+				t.Fatalf("expected %d requests, got %d", tc.wantRequests, len(reqs))
+			}
 		})
 	}
 }

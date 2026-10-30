@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -212,6 +213,22 @@ channels:
 	}
 	if id := resolveGuildID(s, &discordgo.Message{ChannelID: "unknown-chan"}); id != "" {
 		t.Errorf("Expected empty string for unknown channel, got %q", id)
+	}
+
+	seedSessionStateForIngress(nil, "", nil)
+	seedSessionStateForIngress(s, "", nil)
+	if !isSelfOrNilMessage(nil, nil, "") {
+		t.Errorf("expected isSelfOrNilMessage to return true for nil message")
+	}
+	seedSessionStateForIngress(s, "bot-exists", nil) // m == nil
+	_ = s.State.GuildAdd(&discordgo.Guild{ID: "guild-already-present"})
+	seedSessionStateForIngress(s, "bot-exists", &discordgo.Message{GuildID: "guild-already-present"})
+	seedSessionStateForIngress(s, "bot-exists", &discordgo.Message{GuildID: "guild-new-to-add"})
+
+	sEmptyUser := &discordgo.Session{StateEnabled: true, State: discordgo.NewState()}
+	seedSessionStateForIngress(sEmptyUser, "bot-new-id", nil)
+	if sEmptyUser.State.User == nil || sEmptyUser.State.User.ID != "bot-new-id" {
+		t.Errorf("expected sEmptyUser.State.User to be seeded")
 	}
 }
 
@@ -1270,7 +1287,7 @@ func TestPopulateDiscordMessageFields(t *testing.T) {
 	}
 
 	var msg db.Message
-	populateDiscordMessageFields(s, m, &msg)
+	populateDiscordMessageFields(s, m, &msg, map[string]string{"role-unknown": "CustomRole"})
 	if msg.ChannelID != "chan-1" {
 		t.Errorf("channel ID mismatch: %+v", msg)
 	}
@@ -1280,11 +1297,24 @@ func TestPopulateDiscordMessageFields(t *testing.T) {
 	if msg.ReplyingToAuthor != "@bob" || msg.ReplyingToContent != "hello ref [attachments: https://example.com/ref.png]" {
 		t.Errorf("replyingTo mismatch: %s / %s", msg.ReplyingToAuthor, msg.ReplyingToContent)
 	}
+	if m.ReferencedMessage.GuildID != "guild-1" {
+		t.Errorf("referenced message guild ID not copied: %q", m.ReferencedMessage.GuildID)
+	}
 	if len(msg.MentionUserIDs) != 1 || msg.MentionUserIDs[0] != "u-mention-1" {
 		t.Errorf("mentionUserIDs mismatch: %v", msg.MentionUserIDs)
 	}
 	if len(msg.MentionRoleIDs) != 2 || msg.MentionRoleIDs[0] != "role-mod" {
 		t.Errorf("mentionRoleIDs mismatch: %v", msg.MentionRoleIDs)
+	}
+	foundCustom := false
+	for _, mention := range msg.Mentions {
+		if mention == "CustomRole" {
+			foundCustom = true
+			break
+		}
+	}
+	if !foundCustom {
+		t.Errorf("expected CustomRole in mentions, got: %v", msg.Mentions)
 	}
 	if len(msg.Attachments) != 1 || msg.Attachments[0] != "https://example.com/att.png" {
 		t.Errorf("attachments mismatch: %v", msg.Attachments)
@@ -1350,5 +1380,206 @@ func TestResolveMessageContent(t *testing.T) {
 	}
 	if got := resolveMessageContent(s, mRoleNotFound); got != "Pinging <@&role-999>" {
 		t.Errorf("expected original content when role not found, got %q", got)
+	}
+
+	mRoleExtra := &discordgo.Message{
+		ChannelID: "chan-1", GuildID: "guild-1", Content: "Pinging <@&role-extra>",
+		MentionRoles: []string{"role-extra"},
+	}
+	if got := resolveMessageContent(nil, mRoleExtra, map[string]string{"role-extra": "ExtraRole"}); got != "Pinging @ExtraRole" {
+		t.Errorf("expected Pinging @ExtraRole, got %q", got)
+	}
+}
+
+func TestClaimFunnelMessageIngress_DeduplicationAndCap(t *testing.T) {
+	seenFunnelMu.Lock()
+	seenFunnelMessages = make(map[string]struct{})
+	seenFunnelMu.Unlock()
+
+	if !claimFunnelMessageIngress("msg-claim-1") {
+		t.Fatalf("expected claimFunnelMessageIngress(msg-claim-1) to succeed")
+	}
+	if claimFunnelMessageIngress("msg-claim-1") {
+		t.Fatalf("expected duplicate claimFunnelMessageIngress(msg-claim-1) to fail")
+	}
+	releaseFunnelMessageIngress("msg-claim-1")
+	if !claimFunnelMessageIngress("msg-claim-1") {
+		t.Fatalf("expected claimFunnelMessageIngress(msg-claim-1) to succeed after release")
+	}
+
+	seenFunnelMu.Lock()
+	for i := 0; i < 4096; i++ {
+		seenFunnelMessages[fmt.Sprintf("cap-%d", i)] = struct{}{}
+	}
+	seenFunnelMu.Unlock()
+
+	if !claimFunnelMessageIngress("msg-after-cap") {
+		t.Fatalf("expected claimFunnelMessageIngress to succeed after cap clearing")
+	}
+
+	seenFunnelMu.Lock()
+	cacheLen := len(seenFunnelMessages)
+	seenFunnelMu.Unlock()
+	if cacheLen != 1 {
+		t.Fatalf("expected seenFunnelMessages len to be 1 after cap reset, got %d", cacheLen)
+	}
+}
+
+func TestProcessFunnelMessageIngress_Scenarios(t *testing.T) {
+	setupTestConfig(t, `
+model: "gemini-2.5-flash"
+channels:
+  default:
+    mode: "channel"
+  chan-ignored:
+    mode: "ignore"
+`)
+
+	tests := []struct {
+		name         string
+		botUserID    string
+		sessionUser  string
+		authorID     string
+		channelID    string
+		guildID      string
+		msgID        string
+		preClaimMsg  bool
+		preInsertMsg bool
+		errStore     bool
+		wantResult   string
+		wantErr      bool
+		wantEnqueued bool
+	}{
+		{
+			name:       "IgnoredSelfPayloadBotUser",
+			botUserID:  "bot-123",
+			authorID:   "bot-123",
+			channelID:  "chan-main",
+			msgID:      "msg-self-arg",
+			wantResult: "ignored_self",
+		},
+		{
+			name:        "IgnoredSelfSessionUser",
+			sessionUser: "session-bot-99",
+			authorID:    "session-bot-99",
+			channelID:   "chan-main",
+			msgID:       "msg-self-sess",
+			wantResult:  "ignored_self",
+		},
+		{
+			name:       "IgnoredByPolicy",
+			channelID:  "chan-ignored",
+			authorID:   "user-normal",
+			msgID:      "msg-policy-ign",
+			wantResult: "ignored",
+		},
+		{
+			name:        "DuplicateInMemory",
+			channelID:   "chan-main",
+			authorID:    "user-normal",
+			msgID:       "msg-dup-mem",
+			preClaimMsg: true,
+			wantResult:  "duplicate",
+		},
+		{
+			name:         "DuplicateInStore",
+			channelID:    "chan-main",
+			authorID:     "user-normal",
+			msgID:        "msg-dup-store",
+			preInsertMsg: true,
+			wantResult:   "duplicate",
+		},
+		{
+			name:       "StoreErrorReleasesClaim",
+			channelID:  "chan-main",
+			authorID:   "user-normal",
+			msgID:      "msg-store-err",
+			errStore:   true,
+			wantResult: "",
+			wantErr:    true,
+		},
+		{
+			name:         "SuccessfulEnqueue",
+			channelID:    "chan-main",
+			authorID:     "user-normal",
+			msgID:        "msg-ok-enq",
+			wantResult:   "enqueued",
+			wantEnqueued: true,
+		},
+		{
+			name:         "SeedSessionStateWithGuild",
+			botUserID:    "bot-seed",
+			authorID:     "user-normal",
+			channelID:    "chan-main",
+			guildID:      "g-seed-new",
+			msgID:        "msg-seed-ok",
+			wantResult:   "enqueued",
+			wantEnqueued: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			seenFunnelMu.Lock()
+			seenFunnelMessages = make(map[string]struct{})
+			seenFunnelMu.Unlock()
+
+			var store db.Store
+			fakeStore := dbtest.NewFakeStore()
+			if tc.errStore {
+				store = &errExistsStore{Store: fakeStore}
+			} else {
+				store = fakeStore
+			}
+
+			if tc.preInsertMsg {
+				_ = store.InsertMessage(context.Background(), db.Message{
+					ID:        tc.msgID,
+					ChannelID: tc.channelID,
+					Status:    db.StatusPending,
+					CreatedAt: time.Now().UTC(),
+					UpdatedAt: time.Now().UTC(),
+				})
+			}
+
+			if tc.preClaimMsg {
+				claimFunnelMessageIngress(tc.msgID)
+			}
+
+			s := newMockDiscordSession(t, nil)
+			if tc.sessionUser != "" {
+				s.State.User = &discordgo.User{ID: tc.sessionUser, Username: "AerialBot"}
+			}
+
+			pool := newTestWorkerPool(store)
+			m := &discordgo.Message{
+				ID:        tc.msgID,
+				ChannelID: tc.channelID,
+				GuildID:   tc.guildID,
+				Content:   "Hello Aerial",
+				Author:    &discordgo.User{ID: tc.authorID, Username: "testuser"},
+				Timestamp: time.Now().UTC(),
+			}
+
+			res, err := processFunnelMessageIngress(context.Background(), s, store, pool, m, tc.botUserID, nil)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("processFunnelMessageIngress error = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if res != tc.wantResult {
+				t.Fatalf("processFunnelMessageIngress result = %q, want %q", res, tc.wantResult)
+			}
+
+			if tc.errStore {
+				if !claimFunnelMessageIngress(tc.msgID) {
+					t.Errorf("expected claim to be released after store error")
+				}
+			}
+			if tc.wantEnqueued {
+				dbMsg, err := store.GetMessage(context.Background(), tc.msgID)
+				if err != nil || dbMsg == nil {
+					t.Fatalf("expected message %s to be persisted in store", tc.msgID)
+				}
+			}
+		})
 	}
 }
