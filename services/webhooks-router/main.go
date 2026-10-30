@@ -1074,6 +1074,65 @@ func (s *RouterServer) dispatchConflictPrompt(ctx context.Context, targetID, rep
 	return s.dispatchAlertWithPrompt(ctx, targetID, "conflict", "", prompt, opts)
 }
 
+func setupRiverWorkerPool(ctx context.Context, server *RouterServer, cfg Config) (*pgxpool.Pool, *river.Client[pgx.Tx], error) {
+	if cfg.PostgresURL == "" {
+		return nil, nil, nil
+	}
+	poolConfig, err := pgxpool.ParseConfig(cfg.PostgresURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("parse postgres url: %w", err)
+	}
+	poolConfig.MaxConns = 10
+	poolConfig.MinConns = 2
+	if poolConfig.ConnConfig.RuntimeParams == nil {
+		poolConfig.ConnConfig.RuntimeParams = make(map[string]string)
+	}
+	if _, ok := poolConfig.ConnConfig.RuntimeParams["search_path"]; !ok {
+		poolConfig.ConnConfig.RuntimeParams["search_path"] = "sidecars, public"
+	}
+
+	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create pgxpool: %w", err)
+	}
+	server.SetRegistry(NewPostgresPRRegistry(pool, WithVanadisClient(cfg.VanadisURL, server.httpClient), WithHaroClient(cfg.HaroURL, server.httpClient)))
+
+	workers := river.NewWorkers()
+	river.AddWorker(workers, &GitHubWebhookWorker{server: server})
+	river.AddWorker(workers, &HangarWebhookWorker{server: server})
+	river.AddWorker(workers, &NomadEventWorker{server: server})
+	river.AddWorker(workers, &NomadCrashAlertWorker{server: server})
+	river.AddWorker(workers, &WidgetSyncWorker{server: server})
+	river.AddWorker(workers, &EventTriggerWebhookWorker{server: server})
+	river.AddWorker(workers, &MergeConflictWorker{server: server})
+	river.AddWorker(workers, &DiscordIngressWorker{server: server})
+	river.AddWorker(workers, &DiscordInteractionWorker{server: server})
+
+	rc, err := river.NewClient(riverpgxv5.New(pool), &river.Config{
+		Queues: map[string]river.QueueConfig{
+			river.QueueDefault:      {MaxWorkers: 10},
+			QueueMergeConflict:      {MaxWorkers: 2},
+			QueueWidgetSync:         {MaxWorkers: 1},
+			QueueDiscordIngress:     {MaxWorkers: 1},
+			QueueDiscordInteraction: {MaxWorkers: 4},
+		},
+		Workers:             workers,
+		SkipUnknownJobCheck: true,
+	})
+	if err != nil {
+		pool.Close()
+		return nil, nil, fmt.Errorf("create river client: %w", err)
+	}
+	server.SetRiverClient(rc)
+
+	if err := rc.Start(ctx); err != nil {
+		pool.Close()
+		return nil, nil, fmt.Errorf("start river client: %w", err)
+	}
+	log.Println("[webhooks-router] River worker pool started successfully")
+	return pool, rc, nil
+}
+
 // runServer runs the HTTP server with graceful shutdown and optional ready callback.
 func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error {
 	ctx, cancel := context.WithCancel(ctx)
@@ -1082,59 +1141,12 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 	server := NewRouterServer(cfg, nil)
 	server.SetDispatcher(NewDefaultOutboundDispatcher(cfg.HangarURL, cfg.BrainURL, nil))
 
-	var riverClient *river.Client[pgx.Tx]
-	var dbPool *pgxpool.Pool
-
-	if cfg.PostgresURL != "" {
-		poolConfig, err := pgxpool.ParseConfig(cfg.PostgresURL)
-		if err != nil {
-			return fmt.Errorf("parse postgres url: %w", err)
-		}
-		poolConfig.MaxConns = 10
-		poolConfig.MinConns = 2
-		if poolConfig.ConnConfig.RuntimeParams == nil {
-			poolConfig.ConnConfig.RuntimeParams = make(map[string]string)
-		}
-		if _, ok := poolConfig.ConnConfig.RuntimeParams["search_path"]; !ok {
-			poolConfig.ConnConfig.RuntimeParams["search_path"] = "sidecars, public"
-		}
-
-		pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
-		if err != nil {
-			return fmt.Errorf("create pgxpool: %w", err)
-		}
-		defer pool.Close()
-		dbPool = pool
-		server.SetRegistry(NewPostgresPRRegistry(dbPool, WithVanadisClient(cfg.VanadisURL, server.httpClient), WithHaroClient(cfg.HaroURL, server.httpClient)))
-
-		workers := river.NewWorkers()
-		river.AddWorker(workers, &GitHubWebhookWorker{server: server})
-		river.AddWorker(workers, &HangarWebhookWorker{server: server})
-		river.AddWorker(workers, &NomadEventWorker{server: server})
-		river.AddWorker(workers, &NomadCrashAlertWorker{server: server})
-		river.AddWorker(workers, &WidgetSyncWorker{server: server})
-		river.AddWorker(workers, &EventTriggerWebhookWorker{server: server})
-		river.AddWorker(workers, &MergeConflictWorker{server: server})
-
-		rc, err := river.NewClient(riverpgxv5.New(dbPool), &river.Config{
-			Queues: map[string]river.QueueConfig{
-				river.QueueDefault: {MaxWorkers: 10},
-				QueueMergeConflict: {MaxWorkers: 2},
-				QueueWidgetSync:    {MaxWorkers: 1},
-			},
-			Workers:             workers,
-			SkipUnknownJobCheck: true,
-		})
-		if err != nil {
-			return fmt.Errorf("create river client: %w", err)
-		}
-		riverClient = rc
-		server.SetRiverClient(riverClient)
-
-		if err := riverClient.Start(ctx); err != nil {
-			return fmt.Errorf("start river client: %w", err)
-		}
-		log.Println("[webhooks-router] River worker pool started successfully")
+	dbPool, riverClient, err := setupRiverWorkerPool(ctx, server, cfg)
+	if err != nil {
+		return err
+	}
+	if dbPool != nil {
+		defer dbPool.Close()
 	}
 
 	// Initialize and launch Nomad Event Stream subscriber
@@ -1149,6 +1161,17 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 			log.Printf("[webhooks-router] [sweep] startup active deployment reconciliation error: %v", sweepErr)
 		}
 	}()
+
+	// Initialize and launch Discord Gateway consumer
+	stopDiscord, err := startDiscordGateway(ctx, server, cfg.DiscordToken)
+	if err != nil {
+		return fmt.Errorf("start discord gateway: %w", err)
+	}
+	var stopDiscordOnce sync.Once
+	safeStopDiscord := func() {
+		stopDiscordOnce.Do(stopDiscord)
+	}
+	defer safeStopDiscord()
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", ":"+cfg.Port)
@@ -1191,6 +1214,8 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 	if shutErr := httpServer.Shutdown(shutdownCtx); shutErr != nil && !errors.Is(shutErr, http.ErrServerClosed) {
 		log.Printf("[webhooks-router] HTTP shutdown error: %v", shutErr)
 	}
+
+	safeStopDiscord()
 
 	if riverClient != nil {
 		if stopErr := riverClient.Stop(shutdownCtx); stopErr != nil && !errors.Is(stopErr, context.Canceled) {

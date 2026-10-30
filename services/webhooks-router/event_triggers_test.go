@@ -350,6 +350,82 @@ func TestHandleEventsWebhook(t *testing.T) {
 	}
 }
 
+func TestProcessEventTriggerWebhook(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		nilServer   bool
+		nilRegistry bool
+		fireErr     bool
+		args        EventTriggerWebhookArgs
+		wantFired   int
+		wantErr     bool
+	}{
+		{
+			name:      "nil server returns nil",
+			nilServer: true,
+			args:      EventTriggerWebhookArgs{Source: "github", Targets: []string{"azylman/aerial"}, EventType: "ci_passed"},
+			wantErr:   false,
+		},
+		{
+			name:        "nil registry returns nil",
+			nilRegistry: true,
+			args:        EventTriggerWebhookArgs{Source: "github", Targets: []string{"azylman/aerial"}, EventType: "ci_passed"},
+			wantErr:     false,
+		},
+		{
+			name: "empty source returns nil",
+			args: EventTriggerWebhookArgs{Source: "  ", Targets: []string{"azylman/aerial"}, EventType: "ci_passed"},
+		},
+		{
+			name: "empty event type returns nil",
+			args: EventTriggerWebhookArgs{Source: "github", Targets: []string{"azylman/aerial"}, EventType: "  "},
+		},
+		{
+			name: "empty targets returns nil",
+			args: EventTriggerWebhookArgs{Source: "github", Targets: []string{"   ", ""}, EventType: "ci_passed"},
+		},
+		{
+			name:      "successful fire returns nil and triggers haro",
+			args:      EventTriggerWebhookArgs{Source: "github", Targets: []string{"azylman/aerial", "azylman/aerial"}, EventType: "ci_passed", ContextHeader: "CI passed"},
+			wantFired: 1,
+		},
+		{
+			name:      "haro fire error propagated",
+			fireErr:   true,
+			args:      EventTriggerWebhookArgs{Source: "github", Targets: []string{"azylman/aerial"}, EventType: "ci_passed"},
+			wantFired: 1,
+			wantErr:   true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mockReg := &mockPRRegistry{}
+			if tc.fireErr {
+				mockReg.claimTriggersErr = errors.New("simulated fire error")
+			}
+			var srv *RouterServer
+			if !tc.nilServer {
+				srv = NewRouterServer(Config{}, nil)
+				if !tc.nilRegistry {
+					srv.SetRegistry(mockReg)
+				}
+			}
+
+			err := srv.ProcessEventTriggerWebhook(context.Background(), tc.args)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ProcessEventTriggerWebhook() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if len(mockReg.claimTriggersCalls) != tc.wantFired {
+				t.Fatalf("got %d fire calls, want %d", len(mockReg.claimTriggersCalls), tc.wantFired)
+			}
+		})
+	}
+}
+
 func TestFireEventTriggers(t *testing.T) {
 	t.Parallel()
 

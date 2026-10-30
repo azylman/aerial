@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bwmarrin/discordgo"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/rivertype"
@@ -289,6 +290,127 @@ func (w *MergeConflictWorker) Work(ctx context.Context, job *river.Job[MergeConf
 	return nil
 }
 
+// QueueDiscordIngress is the dedicated River queue for single-consumer sequential Discord message ingress.
+const QueueDiscordIngress = "discord_ingress"
+
+// QueueDiscordInteraction is the dedicated River queue for Discord application command interaction dispatch.
+const QueueDiscordInteraction = "discord_interaction"
+
+// DiscordMessageIngressRequest represents the payload delivered to Eri for message ingress.
+type DiscordMessageIngressRequest struct {
+	BotUserID string             `json:"bot_user_id,omitempty"`
+	RoleNames map[string]string  `json:"role_names,omitempty"`
+	Message   *discordgo.Message `json:"message"`
+}
+
+// DiscordIngressArgs contains payload data for River queueing of Discord message ingress events.
+type DiscordIngressArgs struct {
+	MessageID string             `json:"message_id" river:"unique"`
+	BotUserID string             `json:"bot_user_id,omitempty"`
+	RoleNames map[string]string  `json:"role_names,omitempty"`
+	Message   *discordgo.Message `json:"message"`
+}
+
+func (DiscordIngressArgs) Kind() string { return "discord_ingress" }
+func (DiscordIngressArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{
+		Queue:       QueueDiscordIngress,
+		MaxAttempts: 30,
+		UniqueOpts: river.UniqueOpts{
+			ByArgs:   true,
+			ByPeriod: 30 * time.Minute,
+		},
+	}
+}
+
+// DiscordIngressWorker processes Discord message ingress events with single-consumer head-of-line backpressure.
+type DiscordIngressWorker struct {
+	river.WorkerDefaults[DiscordIngressArgs]
+	server     *RouterServer
+	retryDelay time.Duration
+	maxAge     time.Duration
+}
+
+func (w *DiscordIngressWorker) Timeout(*river.Job[DiscordIngressArgs]) time.Duration {
+	return 30 * time.Minute
+}
+
+func (w *DiscordIngressWorker) NextRetry(*river.Job[DiscordIngressArgs]) time.Time {
+	return time.Now().Add(5 * time.Second)
+}
+
+func (w *DiscordIngressWorker) Work(ctx context.Context, job *river.Job[DiscordIngressArgs]) error {
+	if w.server == nil {
+		return errors.New("router server not configured on worker")
+	}
+	delay := w.retryDelay
+	if delay <= 0 {
+		delay = 2 * time.Second
+	} else if delay > 5*time.Second {
+		delay = 5 * time.Second
+	}
+	maxAge := w.maxAge
+	if maxAge <= 0 {
+		maxAge = 30 * time.Minute
+	}
+
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		err := w.server.ProcessDiscordIngress(ctx, job.Args)
+		if err == nil {
+			return nil
+		}
+		if is4xxClientError(err) {
+			return river.JobCancel(err)
+		}
+		if !job.CreatedAt.IsZero() && time.Since(job.CreatedAt) >= maxAge {
+			return river.JobCancel(fmt.Errorf("discord message %s exceeded 30m TTL: %w", job.Args.MessageID, err))
+		}
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// DiscordInteractionArgs contains payload data for River queueing of Discord interaction events.
+type DiscordInteractionArgs struct {
+	InteractionID string                 `json:"interaction_id" river:"unique"`
+	Interaction   *discordgo.Interaction `json:"interaction"`
+}
+
+func (DiscordInteractionArgs) Kind() string { return "discord_interaction" }
+func (DiscordInteractionArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{
+		Queue:       QueueDiscordInteraction,
+		MaxAttempts: 1,
+		UniqueOpts: river.UniqueOpts{
+			ByArgs:   true,
+			ByPeriod: 15 * time.Minute,
+		},
+	}
+}
+
+// DiscordInteractionWorker processes Discord interactions asynchronously from River.
+type DiscordInteractionWorker struct {
+	river.WorkerDefaults[DiscordInteractionArgs]
+	server *RouterServer
+}
+
+func (w *DiscordInteractionWorker) Timeout(*river.Job[DiscordInteractionArgs]) time.Duration {
+	return 5 * time.Second
+}
+
+func (w *DiscordInteractionWorker) Work(ctx context.Context, job *river.Job[DiscordInteractionArgs]) error {
+	if w.server == nil {
+		return errors.New("router server not configured on worker")
+	}
+	return w.server.ProcessDiscordInteraction(ctx, job.Args)
+}
+
 // StatusWidgetChunk represents a chunk in a Vanadis build or a PR task.
 // Note: eri's BuildStatusWidgetComponents (services/eri/pkg/discord/widget.go) renders
 // chunk status badges, repo tags, titles, PR links, and runtime durations only; it does
@@ -367,30 +489,40 @@ type OutboundDispatcher interface {
 	DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error
 	DispatchWidget(ctx context.Context, payload StatusWidgetRequest) (string, error)
 	DispatchBackground(ctx context.Context, req DispatchRequest) error
+	DispatchDiscordMessage(ctx context.Context, req DiscordMessageIngressRequest) error
+	DispatchDiscordInteraction(ctx context.Context, interaction *discordgo.Interaction) error
 }
 
 type DefaultOutboundDispatcher struct {
-	hangarURL     string
-	brainURL      string
-	httpClient    *http.Client
-	gitPushClient *http.Client
-	retryDelay    time.Duration
-	maxAttempts   int
+	hangarURL                string
+	brainURL                 string
+	httpClient               *http.Client
+	gitPushClient            *http.Client
+	discordMsgClient         *http.Client
+	discordInteractionClient *http.Client
+	retryDelay               time.Duration
+	maxAttempts              int
 }
 
 func NewDefaultOutboundDispatcher(hangarURL, brainURL string, client *http.Client) *DefaultOutboundDispatcher {
 	gitPushClient := client
+	discordMsgClient := client
+	discordInteractionClient := client
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
 		gitPushClient = &http.Client{Timeout: 65 * time.Second}
+		discordMsgClient = &http.Client{Timeout: 20 * time.Second}
+		discordInteractionClient = &http.Client{Timeout: 2500 * time.Millisecond}
 	}
 	return &DefaultOutboundDispatcher{
-		hangarURL:     strings.TrimRight(hangarURL, "/"),
-		brainURL:      strings.TrimRight(brainURL, "/"),
-		httpClient:    client,
-		gitPushClient: gitPushClient,
-		retryDelay:    1500 * time.Millisecond,
-		maxAttempts:   6,
+		hangarURL:                strings.TrimRight(hangarURL, "/"),
+		brainURL:                 strings.TrimRight(brainURL, "/"),
+		httpClient:               client,
+		gitPushClient:            gitPushClient,
+		discordMsgClient:         discordMsgClient,
+		discordInteractionClient: discordInteractionClient,
+		retryDelay:               1500 * time.Millisecond,
+		maxAttempts:              6,
 	}
 }
 
@@ -564,6 +696,76 @@ func (d *DefaultOutboundDispatcher) DispatchWidget(ctx context.Context, payload 
 		return "", fmt.Errorf("decode widget response: %w", err)
 	}
 	return res.MessageID, nil
+}
+
+func (d *DefaultOutboundDispatcher) DispatchDiscordMessage(ctx context.Context, req DiscordMessageIngressRequest) error {
+	bodyBytes, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("marshal discord message ingress request: %w", err)
+	}
+	endpoint := d.brainURL + "/internal/discord/message"
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return fmt.Errorf("create discord message ingress request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	httpClient := d.discordMsgClient
+	if httpClient == nil {
+		httpClient = d.httpClient
+	}
+	resp, err := httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("discord message ingress request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return fmt.Errorf("read discord message ingress response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("discord ingress returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+func (d *DefaultOutboundDispatcher) DispatchDiscordInteraction(ctx context.Context, interaction *discordgo.Interaction) error {
+	bodyBytes, err := json.Marshal(interaction)
+	if err != nil {
+		return fmt.Errorf("marshal discord interaction request: %w", err)
+	}
+	endpoint := d.brainURL + "/internal/discord/interaction"
+	ctx, cancel := context.WithTimeout(ctx, 2500*time.Millisecond)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return fmt.Errorf("create discord interaction request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	httpClient := d.discordInteractionClient
+	if httpClient == nil {
+		httpClient = d.httpClient
+	}
+	resp, err := httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("discord interaction request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil {
+		return fmt.Errorf("read discord interaction response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("discord interaction returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
 }
 
 type hangarJSONResponse struct {
