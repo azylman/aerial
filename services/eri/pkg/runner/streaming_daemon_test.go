@@ -823,20 +823,29 @@ func TestStreamingDaemon_ToolAndSkillLifecycleEvents(t *testing.T) {
 		`{"event":"step_update","step_update":{"state":"DONE","type":"tool_call","step_index":2,"tool_name":"call_mcp_tool"}}` + "\n" +
 		`{"event":"step_update","step_update":{"state":"RUNNING","type":"tool_call","step_index":3,"tool_name":"view_file","tool_info":{"parameters":{"AbsolutePath":"/share/aerial-config/custom-skills/home-assistant/SKILL.md"}}}}` + "\n" +
 		`{"event":"step_update","step_update":{"state":"DONE","type":"tool_call","step_index":3,"tool_name":"view_file"}}` + "\n" +
-		`{"event":"step_update","step_update":{"state":"ACTIVE","step_type":"tool","step_index":4,"tool_name":"invoke_subagent","tool_info":{"parameters":{"Role":"Researcher"}}}}` + "\n" +
+		`{"event":"step_update","step_update":{"state":"RUNNING","type":"tool_call","step_index":4,"tool_name":"invoke_subagent","tool_info":{"parameters":{"Role":"Researcher"}}}}` + "\n" +
 		`{"event":"step_update","step_update":{"state":"DONE","step_type":"subagent","step_index":4,"tool_name":"invoke_subagent"}}` + "\n" +
 		`{"event":"step_update","step_update":{"state":"ACTIVE","step_type":"tool","step_index":5,"tool_name":"custom_step_tool","tool_info":{"parameters":{}}}}` + "\n" +
 		`{"event":"step_update","step_update":{"state":"ERROR","step_type":"generic","step_index":5,"tool_name":"custom_step_tool"}}` + "\n" +
-		`{"event":"step_update","step_update":{"state":"RUNNING","type":"tool_call","step_index":6,"tool_name":"manage_task","tool_info":{"parameters":{}}}}` + "\n" +
-		`{"event":"step_update","step_update":{"state":"DONE","step_type":"agent_response","step_index":7}}` + "\n" +
+		`{"event":"step_update","step_update":{"state":"RUNNING","type":"tool_call","step_index":6,"tool_name":"read_file","tool_info":{"parameters":{"Path":"/data/runtimes/discord/.gemini/config/skills/incident-triage/SKILL.md"}}}}` + "\n" +
+		`{"event":"step_update","step_update":{"state":"RUNNING","type":"tool_call","step_index":6,"tool_name":"read_file","tool_info":{"parameters":{"Path":"/data/runtimes/discord/.gemini/config/skills/incident-triage/SKILL.md"}}}}` + "\n" +
+		`{"event":"step_update","step_update":{"state":"DONE","type":"tool_call","step_index":6,"tool_name":"read_file"}}` + "\n" +
+		`{"event":"step_update","step_update":{"state":"RUNNING","type":"tool_call","step_index":7,"tool_name":"run_command","tool_info":{"parameters":{"CommandLine":"cat /share/aerial/.agents/skills/discord/self-improvement/SKILL.md","toolSummary":"Read skill"}}}}` + "\n" +
+		`{"event":"step_update","step_update":{"state":"DONE","type":"tool_call","step_index":7,"tool_name":"run_command"}}` + "\n" +
+		`{"event":"step_update","step_update":{"state":"RUNNING","type":"tool_call","step_index":8,"tool_name":"run_command","tool_info":{"parameters":{"CommandLine":"rg -n foo /share/aerial/.agents/skills/discord/self-improvement/SKILL.md","toolSummary":"Search skill"}}}}` + "\n" +
+		`{"event":"step_update","step_update":{"state":"DONE","type":"tool_call","step_index":8,"tool_name":"run_command"}}` + "\n" +
+		`{"event":"step_update","step_update":{"state":"RUNNING","type":"tool_call","step_index":9,"tool_name":"edit_file","tool_info":{"parameters":{"Path":"/share/aerial/.agents/skills/discord/self-improvement/SKILL.md"}}}}` + "\n" +
+		`{"event":"step_update","step_update":{"state":"DONE","type":"tool_call","step_index":9,"tool_name":"edit_file"}}` + "\n" +
+		`{"event":"step_update","step_update":{"state":"RUNNING","type":"tool_call","step_index":10,"tool_name":"manage_task","tool_info":{"parameters":{}}}}` + "\n" +
+		`{"event":"step_update","step_update":{"state":"DONE","step_type":"agent_response","step_index":11}}` + "\n" +
 		`{"event":"result","result":{"status":"SUCCESS","response":"done"}}` + "\n"
 	_, _ = h.outW.Write([]byte(events))
 
 	waitAndAssertSinkResult(t, "ToolEvents", sink, "done", "", "")
 	sink.mu.Lock()
 	defer sink.mu.Unlock()
-	if len(sink.completedToolDetails) != 6 {
-		t.Fatalf("expected 6 completed tool records, got %d: %+v", len(sink.completedToolDetails), sink.completedToolDetails)
+	if len(sink.completedToolDetails) != 10 {
+		t.Fatalf("expected 10 completed tool records, got %d: %+v", len(sink.completedToolDetails), sink.completedToolDetails)
 	}
 	expectedDetails := []mockCompletedTool{
 		{ToolName: "run_command", MCPServer: "native", Status: "ok"},
@@ -844,6 +853,10 @@ func TestStreamingDaemon_ToolAndSkillLifecycleEvents(t *testing.T) {
 		{ToolName: "view_file", MCPServer: "native", Status: "ok"},
 		{ToolName: "invoke_subagent", MCPServer: "native", Status: "ok"},
 		{ToolName: "custom_step_tool", MCPServer: "native", Status: "error"},
+		{ToolName: "read_file", MCPServer: "native", Status: "ok"},
+		{ToolName: "run_command", MCPServer: "native", Status: "ok"},
+		{ToolName: "run_command", MCPServer: "native", Status: "ok"},
+		{ToolName: "edit_file", MCPServer: "native", Status: "ok"},
 		{ToolName: "manage_task", MCPServer: "native", Status: "aborted"},
 	}
 	for i, exp := range expectedDetails {
@@ -852,10 +865,11 @@ func TestStreamingDaemon_ToolAndSkillLifecycleEvents(t *testing.T) {
 			t.Errorf("record %d: got %+v, want %+v", i, c, exp)
 		}
 	}
-	if len(sink.activatedSkills) != 1 || sink.activatedSkills[0] != "home-assistant:discord" {
-		t.Errorf("unexpected skill activation: %+v", sink.activatedSkills)
+	wantSkills := []string{"home-assistant:discord", "incident-triage:discord", "self-improvement:discord"}
+	if len(sink.activatedSkills) != len(wantSkills) || strings.Join(sink.activatedSkills, ",") != strings.Join(wantSkills, ",") {
+		t.Errorf("unexpected skill activations: got %+v, want %+v", sink.activatedSkills, wantSkills)
 	}
-	for i, tc := range []string{"run_command:echo", "call_mcp_tool:get_me", "view_file:SKILL.md", "invoke_subagent:Researcher", "custom_step_tool:", "manage_task:"} {
+	for i, tc := range []string{"run_command:echo", "call_mcp_tool:get_me", "view_file:SKILL.md", "invoke_subagent:Researcher", "custom_step_tool:", "read_file:SKILL.md", "run_command:Read skill", "run_command:Search skill", "edit_file:SKILL.md", "manage_task:"} {
 		if len(sink.toolCalls) <= i || sink.toolCalls[i] != tc {
 			t.Errorf("expected tool call %d to be %q, got %v", i, tc, sink.toolCalls)
 		}

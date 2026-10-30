@@ -603,18 +603,34 @@ func (d *StreamingDaemon) notifyStepBoundary(activeTurn *TurnContext, stepIdx in
 	}
 }
 
-func extractActivatedSkill(toolParams map[string]any, cmdName string) (string, bool) {
-	if toolParams != nil {
-		if path, ok := toolParams["AbsolutePath"].(string); ok && path != "" {
-			if skill, ok := ExtractSkillFromTarget(path); ok {
-				return skill, true
-			}
+func isShellReadCommand(cmd string) bool {
+	switch cmd {
+	case "cat", "head", "tail", "sed", "less", "more", "bat":
+		return true
+	default:
+		return false
+	}
+}
+
+func extractActivatedSkill(toolName string, toolParams map[string]any, cmdName string) (string, bool) {
+	clean := strings.ToLower(strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(toolName), "mcp_"), "call_mcp_tool_"))
+	switch clean {
+	case "edit_file", "write_file", "replace_file_content", "multi_replace_file_content", "delete_file", "grep_search", "find_by_name", "call_mcp_tool":
+		return "", false
+	case "run_command", "execute_command", "bash", "sh":
+		cl := extractFirstString(toolParams, "CommandLine", "command_line", "command", "cmd")
+		if isShellReadCommand(ExtractCommandName(cl)) {
+			return ExtractSkillFromTarget(cl)
+		}
+		return "", false
+	}
+	if p := extractFirstString(toolParams, "Path", "path", "filePath", "file_path", "target_file", "AbsolutePath", "Target", "target"); p != "" {
+		if skill, ok := ExtractSkillFromTarget(p); ok {
+			return skill, true
 		}
 	}
 	if cmdName != "" {
-		if skill, ok := ExtractSkillFromTarget(cmdName); ok {
-			return skill, true
-		}
+		return ExtractSkillFromTarget(cmdName)
 	}
 	return "", false
 }
@@ -726,7 +742,7 @@ func (d *StreamingDaemon) handleStepUpdateEvent(activeTurn *TurnContext, raw map
 	if f.isToolStart {
 		var mcpServer string
 		canonicalTool, mcpServer = ExtractMCPToolInfo(f.toolName, f.toolParams)
-		activatedSkill, hasSkill = extractActivatedSkill(f.toolParams, f.cmdName)
+		activatedSkill, hasSkill = extractActivatedSkill(f.toolName, f.toolParams, f.cmdName)
 		isNewToolStart = d.recordToolStart(f.stepIdx, f.hasStepIdx, canonicalTool, mcpServer)
 	} else if f.isToolEnd || (f.hasStepIdx && f.toolEndStatus != "") {
 		completedRecord, hasCompletedRecord, isToolEnd = d.recordToolEnd(f)
@@ -742,7 +758,7 @@ func (d *StreamingDaemon) handleStepUpdateEvent(activeTurn *TurnContext, raw map
 		}
 		activeTurn.Sink.OnToolCall(toolForSink, cmdForSink)
 	}
-	if hasSkill {
+	if isNewToolStart && hasSkill {
 		activeTurn.Sink.OnSkillActivated(activatedSkill, "discord")
 	}
 	if isToolEnd && hasCompletedRecord {
