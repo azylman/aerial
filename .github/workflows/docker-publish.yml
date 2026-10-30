@@ -314,7 +314,7 @@ jobs:
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
-          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ghcr.io/${{ steps.repo_owner.outputs.owner }}/${{ matrix.image_name }}:${{ github.sha }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
@@ -372,7 +372,7 @@ jobs:
   promote-release:
     name: Promote Images to :latest
     needs: [changes, build-and-push, build-gate]
-    if: always() && !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.has_builds == 'true' && needs.build-gate.result == 'success'
+    if: always() && !cancelled() && github.event_name != 'pull_request' && needs.changes.outputs.has_builds == 'true' && needs.build-gate.result == 'success'
     runs-on: [self-hosted, ci]
     permissions:
       contents: read
