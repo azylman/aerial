@@ -511,6 +511,12 @@ func TestProcessGitHubEvent(t *testing.T) {
 			wantAction: "auto_merge_disabled", wantPR: 543, wantConflictCalls: 1, wantDMs: 0, wantDispatches: 1, wantPromptSubstr: "Merge conflict detected on PR #543",
 		},
 		{
+			name: "pull_request auto_merge_disabled error propagating", event: "pull_request", delivery: "del-amd-err",
+			payload: `{"action":"auto_merge_disabled","number":543,"pull_request":{"number":543,"head":{"ref":"feat/my-feature","sha":"head543"}},"repository":{"full_name":"azylman/aerial"}}`,
+			reg:     &mockPRRegistry{conflictErr: errors.New("simulated conflict transition error")},
+			wantErr: true,
+		},
+		{
 			name: "push to main triggers conflict check on open PRs", event: "push", delivery: "del-push-conflict",
 			payload:           `{"ref":"refs/heads/main","after":"maincommit123","repository":{"full_name":"azylman/aerial"}}`,
 			reg:               &mockPRRegistry{openPRs: []RegisteredPR{{PRNumber: 543, Branch: "feat/conflict-check", TargetID: "1555405874565091380", HeadSHA: "head543"}}, conflictTargetID: "1555405874565091380", conflictUpdated: true},

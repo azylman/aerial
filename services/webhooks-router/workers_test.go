@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bwmarrin/discordgo"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/rivertype"
 )
@@ -36,6 +37,7 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 		failCount          int
 		maxRetries         int
 		cancelDuringRetry  bool
+		nilSubClient       bool
 		wantErr            bool
 		wantSubstr         string
 		wantMatchedJobs    int
@@ -193,6 +195,78 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 			maxRetries:   3,
 			wantErr:      true,
 		},
+		{
+			name:         "DispatchDiscordMessage success 200",
+			callType:     "discord_message",
+			statusCode:   http.StatusOK,
+			responseBody: `{"status":"processed","message_id":"12345"}`,
+		},
+		{
+			name:         "DispatchDiscordMessage 400 client error",
+			callType:     "discord_message",
+			statusCode:   http.StatusBadRequest,
+			responseBody: `{"error":"invalid payload"}`,
+			wantErr:      true,
+			wantSubstr:   "status 400",
+		},
+		{
+			name:         "DispatchDiscordMessage 500 server error",
+			callType:     "discord_message",
+			statusCode:   http.StatusInternalServerError,
+			responseBody: `{"error":"internal error"}`,
+			wantErr:      true,
+			wantSubstr:   "status 500",
+		},
+		{
+			name:         "DispatchDiscordInteraction success 200",
+			callType:     "discord_interaction",
+			statusCode:   http.StatusOK,
+			responseBody: `{"status":"ok"}`,
+		},
+		{
+			name:         "DispatchDiscordInteraction 400 client error",
+			callType:     "discord_interaction",
+			statusCode:   http.StatusBadRequest,
+			responseBody: `{"error":"invalid payload"}`,
+			wantErr:      true,
+			wantSubstr:   "status 400",
+		},
+		{
+			name:         "DispatchDiscordInteraction 500 server error",
+			callType:     "discord_interaction",
+			statusCode:   http.StatusInternalServerError,
+			responseBody: `{"error":"internal error"}`,
+			wantErr:      true,
+			wantSubstr:   "status 500",
+		},
+		{
+			name:              "DispatchDiscordMessage context cancellation",
+			callType:          "discord_message",
+			cancelDuringRetry: true,
+			failCount:         5,
+			wantErr:           true,
+		},
+		{
+			name:              "DispatchDiscordInteraction context cancellation",
+			callType:          "discord_interaction",
+			cancelDuringRetry: true,
+			failCount:         5,
+			wantErr:           true,
+		},
+		{
+			name:         "DispatchDiscordMessage nil discordMsgClient uses httpClient",
+			callType:     "discord_message",
+			statusCode:   http.StatusOK,
+			responseBody: `{"status":"processed","message_id":"12345"}`,
+			nilSubClient: true,
+		},
+		{
+			name:         "DispatchDiscordInteraction nil discordInteractionClient uses httpClient",
+			callType:     "discord_interaction",
+			statusCode:   http.StatusOK,
+			responseBody: `{"status":"ok"}`,
+			nilSubClient: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -220,6 +294,10 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 			defer ts.Close()
 
 			disp := NewDefaultOutboundDispatcher(ts.URL, ts.URL, nil)
+			if tc.nilSubClient {
+				disp.discordMsgClient = nil
+				disp.discordInteractionClient = nil
+			}
 			delay := 1 * time.Millisecond
 			if tc.cancelDuringRetry {
 				delay = 30 * time.Millisecond
@@ -253,6 +331,17 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 				err = disp.DispatchDirectMessage(testCtx, DirectMessageRequest{ChannelID: tc.snowflake, Content: "test content"})
 			case "dispatch_background":
 				err = disp.DispatchBackground(testCtx, DispatchRequest{Source: "webhook", Prompt: "test dispatch", Effort: "medium"})
+			case "discord_message":
+				err = disp.DispatchDiscordMessage(testCtx, DiscordMessageIngressRequest{
+					BotUserID: "bot-1",
+					RoleNames: map[string]string{"role-1": "admin"},
+					Message:   &discordgo.Message{ID: "msg-123", Content: "hello"},
+				})
+			case "discord_interaction":
+				err = disp.DispatchDiscordInteraction(testCtx, &discordgo.Interaction{
+					ID:   "inter-123",
+					Type: discordgo.InteractionApplicationCommand,
+				})
 			}
 
 			if (err != nil) != tc.wantErr {
@@ -382,6 +471,17 @@ func TestRiverWorkers(t *testing.T) {
 		{name: "MergeConflictWorker valid job", workerType: "merge_conflict"},
 		{name: "MergeConflictWorker nil server error", workerType: "merge_conflict", nilServer: true, wantErr: true},
 		{name: "MergeConflictWorker downstream dispatch error", workerType: "merge_conflict", downstreamErr: true, wantErr: true},
+		{name: "DiscordIngressWorker valid job", workerType: "discord_ingress"},
+		{name: "DiscordIngressWorker nil server error", workerType: "discord_ingress", nilServer: true, wantErr: true},
+		{name: "DiscordIngressWorker 4xx cancel", workerType: "discord_ingress_4xx", wantErr: true},
+		{name: "DiscordIngressWorker retry then success", workerType: "discord_ingress_retry"},
+		{name: "DiscordIngressWorker 30m TTL cancel", workerType: "discord_ingress_ttl", wantErr: true},
+		{name: "DiscordIngressWorker zero retryDelay", workerType: "discord_ingress_zero_delay", wantErr: true},
+		{name: "DiscordIngressWorker large retryDelay", workerType: "discord_ingress_large_delay", wantErr: true},
+		{name: "DiscordIngressWorker context cancelled", workerType: "discord_ingress_ctx_cancel", wantErr: true},
+		{name: "DiscordInteractionWorker valid job", workerType: "discord_interaction"},
+		{name: "DiscordInteractionWorker nil server error", workerType: "discord_interaction", nilServer: true, wantErr: true},
+		{name: "DiscordInteractionWorker downstream error", workerType: "discord_interaction", downstreamErr: true, wantErr: true},
 	}
 
 	for _, tc := range tests {
@@ -518,6 +618,58 @@ func TestRiverWorkers(t *testing.T) {
 					},
 				}
 				err = w.Work(ctx, job)
+			case "discord_ingress", "discord_ingress_4xx", "discord_ingress_retry", "discord_ingress_ttl", "discord_ingress_zero_delay", "discord_ingress_large_delay", "discord_ingress_ctx_cancel":
+				w := &DiscordIngressWorker{server: srv, retryDelay: 1 * time.Millisecond}
+				if tc.workerType == "discord_ingress_zero_delay" {
+					w.retryDelay = 0
+				} else if tc.workerType == "discord_ingress_large_delay" {
+					w.retryDelay = 10 * time.Second
+				}
+				if tc.nilServer {
+					w.server = nil
+				}
+				job := &river.Job[DiscordIngressArgs]{
+					JobRow: &rivertype.JobRow{
+						ID:        801,
+						CreatedAt: time.Now(),
+					},
+					Args: DiscordIngressArgs{
+						MessageID: "msg-worker-1",
+						BotUserID: "bot-1",
+						Message:   &discordgo.Message{ID: "msg-worker-1", Content: "ping"},
+					},
+				}
+				workCtx := ctx
+				if tc.workerType == "discord_ingress_4xx" || tc.workerType == "discord_ingress_zero_delay" || tc.workerType == "discord_ingress_large_delay" {
+					mockDisp.discordMessageErr = errors.New("status 400 bad request")
+				} else if tc.workerType == "discord_ingress_retry" {
+					mockDisp.discordMessageFailCount = 1
+					mockDisp.discordMessageErr = errors.New("status 503 unavailable")
+				} else if tc.workerType == "discord_ingress_ttl" {
+					job.CreatedAt = time.Now().Add(-31 * time.Minute)
+					mockDisp.discordMessageErr = errors.New("status 500 error")
+				} else if tc.workerType == "discord_ingress_ctx_cancel" {
+					cancCtx, cancel := context.WithCancel(ctx)
+					cancel()
+					workCtx = cancCtx
+				}
+				err = w.Work(workCtx, job)
+			case "discord_interaction":
+				w := &DiscordInteractionWorker{server: srv}
+				if tc.nilServer {
+					w.server = nil
+				}
+				job := &river.Job[DiscordInteractionArgs]{
+					JobRow: &rivertype.JobRow{ID: 901},
+					Args: DiscordInteractionArgs{
+						InteractionID: "inter-worker-1",
+						Interaction:   &discordgo.Interaction{ID: "inter-worker-1", Type: discordgo.InteractionApplicationCommand},
+					},
+				}
+				if tc.downstreamErr {
+					mockDisp.discordInteractionErr = errors.New("500 dispatch interaction error")
+				}
+				err = w.Work(ctx, job)
 			}
 
 			if (err != nil) != tc.wantErr {
@@ -587,6 +739,24 @@ func TestRiverJobArgsAndUniqueOpts(t *testing.T) {
 			wantByPeriod: 15 * time.Minute,
 			wantAttempts: 5,
 		},
+		{
+			name:         "DiscordIngressArgs",
+			args:         DiscordIngressArgs{MessageID: "msg-test-1"},
+			wantKind:     "discord_ingress",
+			wantQueue:    QueueDiscordIngress,
+			wantByArgs:   true,
+			wantByPeriod: 30 * time.Minute,
+			wantAttempts: 30,
+		},
+		{
+			name:         "DiscordInteractionArgs",
+			args:         DiscordInteractionArgs{InteractionID: "inter-test-1"},
+			wantKind:     "discord_interaction",
+			wantQueue:    QueueDiscordInteraction,
+			wantByArgs:   true,
+			wantByPeriod: 15 * time.Minute,
+			wantAttempts: 1,
+		},
 	}
 
 	for _, tc := range tests {
@@ -613,5 +783,44 @@ func TestRiverJobArgsAndUniqueOpts(t *testing.T) {
 				t.Errorf("MaxAttempts = %d, want %d", opts.MaxAttempts, tc.wantAttempts)
 			}
 		})
+	}
+}
+
+func TestDiscordWorkerTimeouts(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		timeout     time.Duration
+		wantTimeout time.Duration
+	}{
+		{
+			name:        "DiscordIngressWorker timeout",
+			timeout:     (&DiscordIngressWorker{}).Timeout(nil),
+			wantTimeout: 30 * time.Minute,
+		},
+		{
+			name:        "DiscordInteractionWorker timeout",
+			timeout:     (&DiscordInteractionWorker{}).Timeout(nil),
+			wantTimeout: 5 * time.Second,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.timeout != tc.wantTimeout {
+				t.Errorf("Timeout() = %v, want %v", tc.timeout, tc.wantTimeout)
+			}
+		})
+	}
+}
+
+func TestDiscordIngressWorker_NextRetry(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	nextRetry := (&DiscordIngressWorker{}).NextRetry(nil)
+	if nextRetry.Before(now.Add(4*time.Second)) || nextRetry.After(now.Add(6*time.Second)) {
+		t.Errorf("NextRetry() = %v, want ~5s in future", nextRetry)
 	}
 }

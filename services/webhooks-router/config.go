@@ -32,6 +32,7 @@ type Config struct {
 	VanadisURL            string
 	HaroURL               string
 	SystemChannelID       string
+	DiscordToken          string
 }
 
 // RouterYAMLConfig defines the declarative file schema for services/webhooks-router/webhooks-router.yaml.
@@ -113,6 +114,7 @@ func LoadConfig(configPath string) Config {
 		VanadisURL:            strings.TrimRight(firstNonEmpty(os.Getenv("VANADIS_URL"), fileCfg.VanadisURL, "http://vanadis.aerial"), "/"),
 		HaroURL:               strings.TrimRight(firstNonEmpty(os.Getenv("HARO_URL"), fileCfg.HaroURL, "http://haro.aerial"), "/"),
 		SystemChannelID:       strings.TrimSpace(firstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), os.Getenv("DISCORD_CHANNEL_ID"), sysChan)),
+		DiscordToken:          firstNonEmpty(os.Getenv("DISCORD_BOT_TOKEN"), os.Getenv("DISCORD_TOKEN")),
 	}
 }
 

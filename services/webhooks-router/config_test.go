@@ -24,6 +24,7 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 		wantGHURL     string
 		wantPGURL     string
 		wantSysChan   string
+		wantDiscTok   string
 	}{
 		{
 			name: "primary infisical and nomad envs",
@@ -101,6 +102,16 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 			env:         map[string]string{"DISCORD_CHANNEL_ID": "987654321098765432"},
 			wantSysChan: "987654321098765432",
 		},
+		{
+			name:        "discord bot token primary env",
+			env:         map[string]string{"DISCORD_BOT_TOKEN": "bot-secret-token-123"},
+			wantDiscTok: "bot-secret-token-123",
+		},
+		{
+			name:        "discord token fallback env",
+			env:         map[string]string{"DISCORD_TOKEN": "fallback-token-456"},
+			wantDiscTok: "fallback-token-456",
+		},
 	}
 
 	keysToClear := []string{
@@ -111,6 +122,7 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 		"NOMAD_TOKEN", "GITHUB_PAT", "GITHUB_TOKEN", "GITHUB_API_URL",
 		"POSTGRES_URL", "DATABASE_URL", "HANGAR_URL", "BRAIN_INTERNAL_URL",
 		"BRAIN_URL", "SYSTEM_CHANNEL_ID", "DISCORD_CHANNEL_ID", "CONFIG_PATH",
+		"DISCORD_BOT_TOKEN", "DISCORD_TOKEN",
 	}
 
 	for _, tc := range tests {
@@ -135,6 +147,7 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 				{cfg.GitHubAPIURL, tc.wantGHURL, "GitHubAPIURL"},
 				{cfg.PostgresURL, tc.wantPGURL, "PostgresURL"},
 				{cfg.SystemChannelID, tc.wantSysChan, "SystemChannelID"},
+				{cfg.DiscordToken, tc.wantDiscTok, "DiscordToken"},
 			} {
 				if check.want != "" && check.got != check.want {
 					t.Errorf("%s = %q, want %q", check.field, check.got, check.want)

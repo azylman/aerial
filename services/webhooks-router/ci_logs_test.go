@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -384,6 +385,204 @@ func TestCompleteCIFailureTransition(t *testing.T) {
 				if len(dispatcher.dispatchCalls) > 0 {
 					t.Fatalf("unexpected dispatchCall: %v", dispatcher.dispatchCalls)
 				}
+			}
+		})
+	}
+}
+
+func TestNotifyRemediationCap(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		nilRegistry   bool
+		nilDispatcher bool
+		nilEvent      bool
+		failChunkErr  error
+		failChunkRes  bool
+		dmErr         error
+		targetID      string
+		prNum         int
+		wantDMCount   int
+		wantChunkFail int
+	}{
+		{
+			name:          "standard cap reached with snowflake target dispatches dm and fails chunk",
+			targetID:      "1555405874565091380",
+			prNum:         10,
+			failChunkRes:  true,
+			wantDMCount:   1,
+			wantChunkFail: 1,
+		},
+		{
+			name:          "chunk failure error logged without preventing dm dispatch",
+			targetID:      "1555405874565091380",
+			prNum:         10,
+			failChunkErr:  errors.New("db error failing chunk"),
+			wantDMCount:   1,
+			wantChunkFail: 1,
+		},
+		{
+			name:          "direct message error handled cleanly",
+			targetID:      "1555405874565091380",
+			prNum:         10,
+			dmErr:         errors.New("discord network error"),
+			wantDMCount:   1,
+			wantChunkFail: 1,
+		},
+		{
+			name:          "non snowflake target skips direct message",
+			targetID:      "invalid-target",
+			prNum:         10,
+			wantDMCount:   0,
+			wantChunkFail: 1,
+		},
+		{
+			name:          "nil dispatcher skips direct message safely",
+			nilDispatcher: true,
+			targetID:      "1555405874565091380",
+			prNum:         10,
+			wantDMCount:   0,
+			wantChunkFail: 1,
+		},
+		{
+			name:          "nil registry skips chunk failure safely",
+			nilRegistry:   true,
+			targetID:      "1555405874565091380",
+			prNum:         10,
+			wantDMCount:   1,
+			wantChunkFail: 0,
+		},
+		{
+			name:        "nil event handled safely without panic",
+			nilEvent:    true,
+			wantDMCount: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			disp := &mockOutboundDispatcher{
+				directMessageErr: tc.dmErr,
+			}
+			reg := &mockPRRegistry{
+				failVanadisErr:     tc.failChunkErr,
+				failVanadisRes:     tc.failChunkRes,
+				failVanadisBuildID: "build-cap-1",
+				failVanadisChunkID: "chunk-cap-1",
+			}
+			server := NewRouterServer(Config{}, nil)
+			if !tc.nilRegistry {
+				server.SetRegistry(reg)
+			}
+			if !tc.nilDispatcher {
+				server.SetDispatcher(disp)
+			}
+
+			var res *ResolvedGitHubEvent
+			if !tc.nilEvent {
+				res = &ResolvedGitHubEvent{
+					Repo:      "azylman/aerial",
+					PRNumber:  tc.prNum,
+					CheckName: "CI / test",
+					TargetID:  tc.targetID,
+				}
+			}
+
+			server.notifyRemediationCap(context.Background(), res, maxCIRemediationAttempts+1)
+
+			if len(disp.DirectMessageCalls()) != tc.wantDMCount {
+				t.Fatalf("DirectMessageCalls() = %d, want %d", len(disp.DirectMessageCalls()), tc.wantDMCount)
+			}
+			if !tc.nilRegistry && len(reg.failVanadisCalls) != tc.wantChunkFail {
+				t.Fatalf("failVanadisCalls = %d, want %d", len(reg.failVanadisCalls), tc.wantChunkFail)
+			}
+		})
+	}
+}
+
+func TestPopulateMissingBranch(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		nilRegistry bool
+		nilEvent    bool
+		prNum       int
+		initBranch  string
+		regBranch   string
+		resolveErr  error
+		wantBranch  string
+	}{
+		{
+			name:       "nil event does not panic",
+			nilEvent:   true,
+			wantBranch: "",
+		},
+		{
+			name:        "nil registry is no-op",
+			nilRegistry: true,
+			prNum:       10,
+			wantBranch:  "",
+		},
+		{
+			name:       "zero pr number is no-op",
+			prNum:      0,
+			wantBranch: "",
+		},
+		{
+			name:       "already populated branch is preserved",
+			prNum:      10,
+			initBranch: "feat/existing",
+			regBranch:  "feat/from-reg",
+			wantBranch: "feat/existing",
+		},
+		{
+			name:       "registry error preserves empty branch",
+			prNum:      10,
+			resolveErr: errors.New("db error"),
+			wantBranch: "",
+		},
+		{
+			name:       "registry empty branch leaves branch empty",
+			prNum:      10,
+			regBranch:  "",
+			wantBranch: "",
+		},
+		{
+			name:       "successful branch populated",
+			prNum:      10,
+			regBranch:  "feat/new-branch",
+			wantBranch: "feat/new-branch",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reg := &mockPRRegistry{
+				resolveBranch: tc.regBranch,
+				resolveErr:    tc.resolveErr,
+			}
+			server := NewRouterServer(Config{}, nil)
+			if !tc.nilRegistry {
+				server.SetRegistry(reg)
+			}
+
+			var res *ResolvedGitHubEvent
+			if !tc.nilEvent {
+				res = &ResolvedGitHubEvent{
+					Repo:     "azylman/aerial",
+					PRNumber: tc.prNum,
+					Branch:   tc.initBranch,
+				}
+			}
+
+			server.populateMissingBranch(context.Background(), res)
+
+			if !tc.nilEvent && res.Branch != tc.wantBranch {
+				t.Fatalf("res.Branch = %q, want %q", res.Branch, tc.wantBranch)
 			}
 		})
 	}

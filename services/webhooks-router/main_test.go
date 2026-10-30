@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/bwmarrin/discordgo"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -33,6 +34,8 @@ type mockRiverInserter struct {
 	insertedWidgetSyncJobs []WidgetSyncArgs
 	insertedEventJobs      []EventTriggerWebhookArgs
 	insertedConflictJobs   []MergeConflictArgs
+	insertedDiscordJobs    []DiscordIngressArgs
+	insertedInteractJobs   []DiscordInteractionArgs
 	insertedOpts           []*river.InsertOpts
 	skipDuplicate          bool
 	err                    error
@@ -60,6 +63,10 @@ func (m *mockRiverInserter) Insert(ctx context.Context, args river.JobArgs, opts
 		m.insertedEventJobs = append(m.insertedEventJobs, a)
 	case MergeConflictArgs:
 		m.insertedConflictJobs = append(m.insertedConflictJobs, a)
+	case DiscordIngressArgs:
+		m.insertedDiscordJobs = append(m.insertedDiscordJobs, a)
+	case DiscordInteractionArgs:
+		m.insertedInteractJobs = append(m.insertedInteractJobs, a)
 	}
 	return &rivertype.JobInsertResult{
 		Job:                      &rivertype.JobRow{ID: 1},
@@ -500,21 +507,27 @@ func (m *mockPRRegistry) RecordPRJobState(ctx context.Context, jobName, jobState
 }
 
 type mockOutboundDispatcher struct {
-	mu                 sync.Mutex
-	gitPushCalls       []GitPushEventRequest
-	imageReadyCalls    []ImageReadyEventRequest
-	promptCalls        []PromptRequest
-	dispatchCalls      []DispatchRequest
-	directMessageCalls []DirectMessageRequest
-	gitPushErr         error
-	imageReadyErr      error
-	promptErr          error
-	dispatchErr        error
-	directMessageErr   error
-	widgetErr          error
-	widgetReturnMsgID  string
-	widgetCalls        []StatusWidgetRequest
-	matchedJobs        map[string][]string
+	mu                      sync.Mutex
+	gitPushCalls            []GitPushEventRequest
+	imageReadyCalls         []ImageReadyEventRequest
+	promptCalls             []PromptRequest
+	dispatchCalls           []DispatchRequest
+	directMessageCalls      []DirectMessageRequest
+	discordMessageCalls     []DiscordMessageIngressRequest
+	discordInteractionCalls []*discordgo.Interaction
+	gitPushErr              error
+	imageReadyErr           error
+	promptErr               error
+	dispatchErr             error
+	directMessageErr        error
+	discordMessageErr       error
+	discordMessageFailCount int
+	discordMessageAttempts  int
+	discordInteractionErr   error
+	widgetErr               error
+	widgetReturnMsgID       string
+	widgetCalls             []StatusWidgetRequest
+	matchedJobs             map[string][]string
 }
 
 func (m *mockOutboundDispatcher) DispatchGitPush(ctx context.Context, req GitPushEventRequest) error {
@@ -599,6 +612,46 @@ func (m *mockOutboundDispatcher) WidgetCalls() []StatusWidgetRequest {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]StatusWidgetRequest(nil), m.widgetCalls...)
+}
+
+func (m *mockOutboundDispatcher) DispatchDiscordMessage(ctx context.Context, req DiscordMessageIngressRequest) error {
+	m.mu.Lock()
+	m.discordMessageCalls = append(m.discordMessageCalls, req)
+	m.discordMessageAttempts++
+	if m.discordMessageFailCount > 0 {
+		if m.discordMessageAttempts <= m.discordMessageFailCount {
+			err := m.discordMessageErr
+			if err == nil {
+				err = errors.New("transient error")
+			}
+			m.mu.Unlock()
+			return err
+		}
+		m.mu.Unlock()
+		return nil
+	}
+	err := m.discordMessageErr
+	m.mu.Unlock()
+	return err
+}
+
+func (m *mockOutboundDispatcher) DispatchDiscordInteraction(ctx context.Context, interaction *discordgo.Interaction) error {
+	m.mu.Lock()
+	m.discordInteractionCalls = append(m.discordInteractionCalls, interaction)
+	m.mu.Unlock()
+	return m.discordInteractionErr
+}
+
+func (m *mockOutboundDispatcher) DiscordMessageCalls() []DiscordMessageIngressRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]DiscordMessageIngressRequest(nil), m.discordMessageCalls...)
+}
+
+func (m *mockOutboundDispatcher) DiscordInteractionCalls() []*discordgo.Interaction {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]*discordgo.Interaction(nil), m.discordInteractionCalls...)
 }
 
 func newTestRouter(cfg Config, client *http.Client, reg PRRegistryUpdater, disp OutboundDispatcher, riverInserter ...RiverInserter) *RouterServer {
@@ -3012,6 +3065,198 @@ func TestRouterServer_HandleInternalWidgetSync(t *testing.T) {
 			}
 			if tc.wantQueued > 0 && (inserter == nil || len(inserter.insertedWidgetSyncJobs) != tc.wantQueued) {
 				t.Errorf("expected %d queued jobs, got %+v", tc.wantQueued, inserter)
+			}
+		})
+	}
+}
+
+func TestProcessMergeConflict_Table(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	tests := []struct {
+		name          string
+		nilServer     bool
+		isEnqueue     bool
+		hasRiver      bool
+		hasDispatcher bool
+		args          MergeConflictArgs
+		wantEnqueued  int
+		wantPrompts   int
+	}{
+		{
+			name:      "ProcessMergeConflict nil server",
+			nilServer: true,
+		},
+		{
+			name:      "enqueueMergeConflict nil server",
+			nilServer: true,
+			isEnqueue: true,
+		},
+		{
+			name:          "ProcessMergeConflict valid dispatch",
+			hasDispatcher: true,
+			args: MergeConflictArgs{
+				Repo:     "azylman/aerial",
+				Branch:   "feat/conflict",
+				HeadSHA:  "sha-conflict-1",
+				PRNumber: 543,
+				TargetID: "1555405874565091380",
+			},
+			wantPrompts: 1,
+		},
+		{
+			name:      "enqueueMergeConflict with river client enqueues",
+			isEnqueue: true,
+			hasRiver:  true,
+			args: MergeConflictArgs{
+				Repo:     "aerial",
+				Branch:   "feat/conflict",
+				HeadSHA:  "sha-conflict-2",
+				PRNumber: 544,
+				TargetID: "1555405874565091380",
+			},
+			wantEnqueued: 1,
+		},
+		{
+			name:          "enqueueMergeConflict without river client dispatches directly",
+			isEnqueue:     true,
+			hasDispatcher: true,
+			args: MergeConflictArgs{
+				Repo:     "azylman/aerial",
+				Branch:   "feat/conflict",
+				HeadSHA:  "sha-conflict-3",
+				PRNumber: 545,
+				TargetID: "1555405874565091380",
+			},
+			wantPrompts: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			disp := &mockOutboundDispatcher{}
+			river := &mockRiverInserter{}
+			var srv *RouterServer
+			if !tc.nilServer {
+				srv = newTestRouter(Config{}, nil, nil, disp)
+				if tc.hasRiver {
+					srv.SetRiverClient(river)
+				}
+			}
+
+			var err error
+			if tc.isEnqueue {
+				err = srv.enqueueMergeConflict(ctx, tc.args)
+			} else {
+				err = srv.ProcessMergeConflict(ctx, tc.args)
+			}
+
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
+			}
+			if tc.hasRiver {
+				if len(river.insertedConflictJobs) != tc.wantEnqueued {
+					t.Errorf("insertedConflictJobs = %d, want %d", len(river.insertedConflictJobs), tc.wantEnqueued)
+				}
+			}
+			if tc.hasDispatcher {
+				if len(disp.DispatchCalls()) != tc.wantPrompts {
+					t.Errorf("DispatchCalls = %d, want %d", len(disp.DispatchCalls()), tc.wantPrompts)
+				}
+			}
+		})
+	}
+}
+
+func TestRecordNomadJobProgress_Cases(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	tests := []struct {
+		name   string
+		server *RouterServer
+		jobID  string
+		state  string
+	}{
+		{
+			name:   "nil server",
+			server: nil,
+			jobID:  "job-1",
+			state:  "running",
+		},
+		{
+			name:   "empty jobID",
+			server: newTestRouter(Config{}, nil, &mockPRRegistry{}, nil),
+			jobID:  "",
+			state:  "running",
+		},
+		{
+			name:   "registry error",
+			server: newTestRouter(Config{}, nil, &mockPRRegistry{recordJobStateErr: errors.New("db err")}, nil),
+			jobID:  "job-1",
+			state:  "running",
+		},
+		{
+			name: "updated with pr and repo",
+			server: newTestRouter(Config{}, nil, &mockPRRegistry{
+				recordJobStateRepo:    "azylman/aerial",
+				recordJobStatePRNum:   123,
+				recordJobStateUpdated: true,
+			}, nil),
+			jobID: "job-1",
+			state: "running",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tc.server.recordNomadJobProgress(ctx, tc.jobID, tc.state)
+		})
+	}
+}
+
+func TestSetupRiverWorkerPool(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	tests := []struct {
+		name        string
+		postgresURL string
+		wantErr     bool
+		wantNilPool bool
+	}{
+		{
+			name:        "empty postgres URL returns nil pool without error",
+			postgresURL: "",
+			wantNilPool: true,
+		},
+		{
+			name:        "invalid postgres URL returns error",
+			postgresURL: "postgres://%gh:invalid",
+			wantErr:     true,
+			wantNilPool: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := NewRouterServer(Config{}, nil)
+			pool, rc, err := setupRiverWorkerPool(ctx, srv, Config{PostgresURL: tc.postgresURL})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("setupRiverWorkerPool() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantNilPool && pool != nil {
+				t.Errorf("expected nil pool, got %v", pool)
+			}
+			if pool != nil {
+				defer pool.Close()
+			}
+			if rc != nil {
+				defer rc.Stop(context.Background())
 			}
 		})
 	}
