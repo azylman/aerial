@@ -263,7 +263,7 @@ func (sub *NomadStreamSubscriber) Start(ctx context.Context) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				log.Printf("[webhooks-router] [nomad-stream] PANIC recovered in stream worker: %v", r)
+				log.Printf("[synapse] [nomad-stream] PANIC recovered in stream worker: %v", r)
 			}
 		}()
 
@@ -284,7 +284,7 @@ func (sub *NomadStreamSubscriber) Start(ctx context.Context) {
 			start := time.Now()
 			err := sub.consumeStream(ctx)
 			if err != nil && !errors.Is(err, context.Canceled) {
-				log.Printf("[webhooks-router] [nomad-stream] stream disconnected: %v; reconnecting in %v", err, delay)
+				log.Printf("[synapse] [nomad-stream] stream disconnected: %v; reconnecting in %v", err, delay)
 			}
 
 			// Reset backoff delay if connection was established and lasted more than 5s, or closed without error
@@ -343,10 +343,10 @@ func (sub *NomadStreamSubscriber) consumeStream(ctx context.Context) error {
 		// Detect Raft Index out-of-bounds error (Nomad GC'd historical index)
 		body, err := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		if err != nil {
-			log.Printf("[webhooks-router] [nomad-stream] error reading response body: %v", err)
+			log.Printf("[synapse] [nomad-stream] error reading response body: %v", err)
 		}
 		if strings.Contains(strings.ToLower(string(body)), "index") || strings.Contains(strings.ToLower(string(body)), "bounds") {
-			log.Printf("[webhooks-router] [nomad-stream] Nomad index %d is out of bounds; resetting to current index", idx)
+			log.Printf("[synapse] [nomad-stream] Nomad index %d is out of bounds; resetting to current index", idx)
 			sub.mu.Lock()
 			sub.lastIndex = 0
 			sub.mu.Unlock()
@@ -552,14 +552,14 @@ func (sub *NomadStreamSubscriber) handleNomadEvent(ctx context.Context, event No
 			Payload:        event.Payload,
 		}
 		if err := sub.server.insertRiverJob(ctx, args); err != nil {
-			log.Printf("[webhooks-router] [nomad-stream] error inserting nomad event into river: %v", err)
+			log.Printf("[synapse] [nomad-stream] error inserting nomad event into river: %v", err)
 		}
 		return
 	}
 
 	if sub.server != nil {
 		if err := sub.server.ProcessNomadEvent(ctx, event.Topic, event.Type, event.Payload); err != nil {
-			log.Printf("[webhooks-router] [nomad-stream] error processing nomad event directly: %v", err)
+			log.Printf("[synapse] [nomad-stream] error processing nomad event directly: %v", err)
 		}
 	}
 }
@@ -682,7 +682,7 @@ func (s *RouterServer) HandleNomadJobFailure(ctx context.Context, jobID, refID, 
 
 	targetID, prNumber, mergeSHA, repo, updated, err := s.registry.AtomicTransitionDeployFailedByJob(ctx, cleanJob)
 	if err != nil {
-		log.Printf("[webhooks-router] [nomad] error transitioning job %s to deploy_failed: %v", cleanJob, err)
+		log.Printf("[synapse] [nomad] error transitioning job %s to deploy_failed: %v", cleanJob, err)
 		return err
 	}
 	if !updated {
@@ -693,13 +693,13 @@ func (s *RouterServer) HandleNomadJobFailure(ctx context.Context, jobID, refID, 
 	}
 	targetID = firstNonEmpty(targetID, s.cfg.SystemChannelID)
 
-	log.Printf("[webhooks-router] [nomad] deployment failure confirmed for %s#%d (job: %s, commit: %s, target: %s, ref: %s, status: %s)",
+	log.Printf("[synapse] [nomad] deployment failure confirmed for %s#%d (job: %s, commit: %s, target: %s, ref: %s, status: %s)",
 		repo, prNumber, cleanJob, mergeSHA, targetID, refID, status)
 
 	if prNumber > 0 {
 		s.setPRWidgetState(ctx, repo, prNumber, "deploy_failed", fmt.Sprintf("Nomad deployment failed for %s", cleanJob))
 		if err := s.SyncPRWidget(ctx, repo, prNumber); err != nil {
-			log.Printf("[webhooks-router] [widget] warning syncing nomad deploy_failed widget: %v", err)
+			log.Printf("[synapse] [widget] warning syncing nomad deploy_failed widget: %v", err)
 		}
 	}
 	prompt := formatErrorDetailsBlock(
@@ -721,12 +721,12 @@ func (s *RouterServer) recordNomadJobProgress(ctx context.Context, jobID, state 
 	}
 	repo, prNumber, updated, err := s.registry.RecordPRJobState(ctx, cleanJob, cleanState)
 	if err != nil {
-		log.Printf("[webhooks-router] [nomad] warning recording job progress for %s (state: %s): %v", cleanJob, cleanState, err)
+		log.Printf("[synapse] [nomad] warning recording job progress for %s (state: %s): %v", cleanJob, cleanState, err)
 		return
 	}
 	if updated && prNumber > 0 && repo != "" {
 		if err := s.SyncPRWidget(ctx, repo, prNumber); err != nil {
-			log.Printf("[webhooks-router] [widget] warning syncing nomad job progress widget for %s#%d (job: %s, state: %s): %v", repo, prNumber, cleanJob, cleanState, err)
+			log.Printf("[synapse] [widget] warning syncing nomad job progress widget for %s#%d (job: %s, state: %s): %v", repo, prNumber, cleanJob, cleanState, err)
 		}
 	}
 }
@@ -743,18 +743,18 @@ func (s *RouterServer) HandleNomadJobSuccess(ctx context.Context, jobID, refID s
 	}
 	targetID, prNumber, mergeSHA, repo, updated, err := s.registry.AtomicTransitionDeployedByJob(ctx, cleanJob)
 	if err != nil {
-		log.Printf("[webhooks-router] [nomad] error transitioning job %s to deployed: %v", cleanJob, err)
+		log.Printf("[synapse] [nomad] error transitioning job %s to deployed: %v", cleanJob, err)
 		return err
 	}
 	if !updated {
 		if prNumber > 0 && repo != "" {
 			if err := s.SyncPRWidget(ctx, repo, prNumber); err != nil {
-				log.Printf("[webhooks-router] [widget] warning syncing nomad intermediate deploy widget for %s#%d (job: %s): %v", repo, prNumber, cleanJob, err)
+				log.Printf("[synapse] [widget] warning syncing nomad intermediate deploy widget for %s#%d (job: %s): %v", repo, prNumber, cleanJob, err)
 			}
 		}
 		return nil
 	}
-	log.Printf("[webhooks-router] [nomad] deployment confirmed for %s#%d (job: %s, commit: %s, target: %s, ref: %s)",
+	log.Printf("[synapse] [nomad] deployment confirmed for %s#%d (job: %s, commit: %s, target: %s, ref: %s)",
 		repo, prNumber, cleanJob, mergeSHA, targetID, refID)
 	return s.dispatchDeploymentSuccessPrompt(ctx, targetID, cleanJob, repo, mergeSHA, prNumber, refID)
 }
@@ -771,12 +771,12 @@ func (s *RouterServer) ReconcileActiveDeployments(ctx context.Context) error {
 	if len(pending) == 0 {
 		return nil
 	}
-	log.Printf("[webhooks-router] [sweep] found %d active deployment(s) in pr_registry, reconciling with Nomad...", len(pending))
+	log.Printf("[synapse] [sweep] found %d active deployment(s) in pr_registry, reconciling with Nomad...", len(pending))
 	for _, p := range pending {
 		for _, job := range extractStartedJobsFromMetadata(p.Metadata) {
 			if s.isNomadJobHealthy(ctx, job) {
 				if err := s.HandleNomadJobSuccess(ctx, job, "startup-sweep"); err != nil {
-					log.Printf("[webhooks-router] [sweep] error handling nomad job success for %s: %v", job, err)
+					log.Printf("[synapse] [sweep] error handling nomad job success for %s: %v", job, err)
 				}
 			}
 		}
@@ -1175,7 +1175,7 @@ func (s *RouterServer) HandleUnmanagedJobCrash(ctx context.Context, jobID, alloc
 	}
 	if s.riverClient != nil {
 		if err := s.insertRiverJob(ctx, args); err != nil {
-			log.Printf("[webhooks-router] [nomad] error enqueuing crash alert into river: %v", err)
+			log.Printf("[synapse] [nomad] error enqueuing crash alert into river: %v", err)
 			return fmt.Errorf("enqueue crash alert: %w", err)
 		}
 		return nil
@@ -1197,7 +1197,7 @@ func (s *RouterServer) ProcessCrashAlert(ctx context.Context, args NomadCrashAle
 		if is4xxClientError(err) {
 			return nil
 		}
-		log.Printf("[webhooks-router] [crash-alert] warning dispatching direct message: %v", err)
+		log.Printf("[synapse] [crash-alert] warning dispatching direct message: %v", err)
 	}
 	prompt := formatErrorDetailsBlock(
 		fmt.Sprintf("Nomad job `%s` failed or crashed unexpectedly (status: %s, allocation ID: %s).", args.JobID, args.Status, args.AllocID),

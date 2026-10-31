@@ -1,7 +1,7 @@
 .PHONY: all test lint tidy build help
 .DEFAULT_GOAL := help
 
-SERVICES := services/eri services/haro mcp/discord-mcp mcp/kernel-mcp services/dashboard services/coven services/hangar services/vanadis services/webhooks-router
+SERVICES := services/eri services/haro mcp/discord-mcp mcp/kernel-mcp services/dashboard services/coven services/hangar services/vanadis services/synapse
 
 help: ## Display available targets
 	@echo "Aerial Monorepo Development Commands:"

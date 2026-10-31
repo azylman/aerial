@@ -588,6 +588,7 @@ func serviceBuildDependsOnPkg(svc string) bool {
 		"dashboard",
 		"hangar",
 		"webhooks-router",
+		"synapse",
 		"vanadis",
 		"prospera":
 		return true

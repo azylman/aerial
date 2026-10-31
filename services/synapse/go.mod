@@ -1,4 +1,4 @@
-module github.com/azylman/aerial/services/webhooks-router
+module github.com/azylman/aerial/services/synapse
 
 go 1.27.3
 

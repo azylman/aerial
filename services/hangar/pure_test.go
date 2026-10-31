@@ -879,6 +879,7 @@ job "raw-exec-job" {
 
 func TestJobHasContainerBuildChanges_TableDriven(t *testing.T) {
 	specVanadis := `job "vanadis" { task "vanadis" { config { image = "ghcr.io/azylman/aerial-vanadis:${var.image_tag}" } } }`
+	specSynapse := `job "synapse" { task "synapse" { config { image = "ghcr.io/azylman/aerial-synapse:${var.image_tag}" } } }`
 	specProspera := `job "prospera" { task "prospera" { config { image = "ghcr.io/azylman/aerial-prospera:${var.image_tag}" } } }`
 	specDocs := `job "docs" { task "docs" { config { image = "ghcr.io/azylman/aerial-docs:${var.image_tag}" } } }`
 	specMCP := `job "discord-mcp" { task "mcp" { config { image = "ghcr.io/azylman/aerial-discord-mcp:${var.image_tag}" } } }`
@@ -891,6 +892,7 @@ func TestJobHasContainerBuildChanges_TableDriven(t *testing.T) {
 		want    bool
 	}{
 		{"matching services dir", specVanadis, []string{"services/vanadis/main.go"}, true},
+		{"matching synapse service dir", specSynapse, []string{"services/synapse/main.go"}, true},
 		{"matching prospera service dir", specProspera, []string{"services/prospera/main.go"}, true},
 		{"matching legacy root dir", specVanadis, []string{"vanadis/Dockerfile"}, false},
 		{"matching mcp dir", specMCP, []string{"mcp/discord-mcp/main.go"}, true},
@@ -898,6 +900,7 @@ func TestJobHasContainerBuildChanges_TableDriven(t *testing.T) {
 		{"matching docs-service alias", specDocs, []string{"services/docs-service/Dockerfile"}, true},
 		{"matching root Dockerfile", specVanadis, []string{"Dockerfile"}, true},
 		{"matching pkg dir", specVanadis, []string{"pkg/httpkit/httpkit.go"}, true},
+		{"matching pkg dir on synapse", specSynapse, []string{"pkg/httpkit/httpkit.go"}, true},
 		{"matching pkg dir on prospera", specProspera, []string{"pkg/httpkit/httpkit.go"}, true},
 		{"matching pkg dir on mcp go service", specMCP, []string{"pkg/ollama/client.go"}, true},
 		{"matching pkg dir on kernel-mcp", `job "kernel-mcp" { task "kernel-mcp" { config { image = "ghcr.io/azylman/aerial-kernel-mcp:${var.image_tag}" } } }`, []string{"pkg/httpkit/httpkit.go"}, true},
@@ -1190,6 +1193,7 @@ func TestImageSourceRepo_TableDriven(t *testing.T) {
 		expected string
 	}{
 		{"core aerial webhooks-router", "ghcr.io/azylman/aerial-webhooks-router:latest", "azylman/aerial"},
+		{"core aerial synapse", "ghcr.io/azylman/aerial-synapse:latest", "azylman/aerial"},
 		{"core aerial infisical-mcp", "ghcr.io/azylman/aerial-infisical-mcp:latest", "azylman/aerial"},
 		{"core aerial brain", "ghcr.io/azylman/aerial-brain:latest", "azylman/aerial"},
 		{"mirrormere core", "ghcr.io/azylman/mirrormere:latest", "azylman/mirrormere"},

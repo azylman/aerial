@@ -89,13 +89,13 @@ func runBackgroundSync(name string, fn func(ctx context.Context) error) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				log.Printf("[webhooks-router] PANIC recovered in %s: %v", name, r)
+				log.Printf("[synapse] PANIC recovered in %s: %v", name, r)
 			}
 		}()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := fn(ctx); err != nil {
-			log.Printf("[webhooks-router] Background %s failed: %v", name, err)
+			log.Printf("[synapse] Background %s failed: %v", name, err)
 		}
 	}()
 }
@@ -116,7 +116,7 @@ func (s *RouterServer) Routes() http.Handler {
 	mux.HandleFunc("POST /webhooks/hangar", s.handleHangarWebhook)
 	mux.HandleFunc("POST /api/webhooks/events", s.handleEventsWebhook)
 	mux.HandleFunc("POST /webhooks/events", s.handleEventsWebhook)
-	coverageFlush := httpkit.HandleCoverageFlush("webhooks-router")
+	coverageFlush := httpkit.HandleCoverageFlush("synapse")
 	mux.HandleFunc("POST /debug/coverage/flush", coverageFlush)
 	mux.HandleFunc("GET /debug/coverage/flush", coverageFlush)
 	return mux
@@ -125,7 +125,7 @@ func (s *RouterServer) Routes() http.Handler {
 func (s *RouterServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if s != nil && s.queueStats != nil {
 		if err := collectRiverQueueMetrics(r.Context(), s.queueStats); err != nil {
-			log.Printf("[webhooks-router] [metrics] error collecting river queue metrics: %v", err)
+			log.Printf("[synapse] [metrics] error collecting river queue metrics: %v", err)
 		}
 	}
 	if s != nil && s.gatewayLatencyFn != nil {
@@ -203,13 +203,13 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 			httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id must be a valid Discord snowflake (17-20 digits)"})
 			return
 		}
-		log.Printf("[webhooks-router] Failed to register PR #%d (%s): %v", req.PRNumber, req.Repo, err)
+		log.Printf("[synapse] Failed to register PR #%d (%s): %v", req.PRNumber, req.Repo, err)
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "Failed to register PR"})
 		return
 	}
 
 	if err := s.SyncPRWidget(r.Context(), req.Repo, req.PRNumber); err != nil {
-		log.Printf("[webhooks-router] failed to sync initial PR widget for %s#%d: %v", req.Repo, req.PRNumber, err)
+		log.Printf("[synapse] failed to sync initial PR widget for %s#%d: %v", req.Repo, req.PRNumber, err)
 	}
 
 	httpkit.WriteJSON(w, http.StatusOK, map[string]interface{}{
@@ -227,7 +227,7 @@ func (s *RouterServer) handleInternalWidgetSync(w http.ResponseWriter, r *http.R
 	}
 	if buildID := strings.TrimSpace(req.BuildID); buildID != "" {
 		if err := s.SyncBuildWidget(r.Context(), buildID, req.Banner); err != nil {
-			log.Printf("[webhooks-router] [widget] failed to sync build widget for %s: %v", buildID, err)
+			log.Printf("[synapse] [widget] failed to sync build widget for %s: %v", buildID, err)
 			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to sync build widget"})
 			return
 		}
@@ -240,7 +240,7 @@ func (s *RouterServer) handleInternalWidgetSync(w http.ResponseWriter, r *http.R
 	if repo := strings.TrimSpace(req.Repo); repo != "" && req.PRNumber > 0 {
 		normRepo := normalizeRepo(repo)
 		if err := s.SyncPRWidget(r.Context(), normRepo, req.PRNumber); err != nil {
-			log.Printf("[webhooks-router] [widget] failed to sync pr widget for %s#%d: %v", normRepo, req.PRNumber, err)
+			log.Printf("[synapse] [widget] failed to sync pr widget for %s#%d: %v", normRepo, req.PRNumber, err)
 			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to sync pr widget"})
 			return
 		}
@@ -257,7 +257,7 @@ func (s *RouterServer) handleInternalWidgetSync(w http.ResponseWriter, r *http.R
 func (s *RouterServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	httpkit.WriteJSON(w, http.StatusOK, map[string]interface{}{
 		"status":  "ok",
-		"service": "webhooks-router",
+		"service": "synapse",
 		"time":    time.Now().UTC().Format(time.RFC3339),
 	})
 }
@@ -304,7 +304,7 @@ func (s *RouterServer) handleHangarWebhook(w http.ResponseWriter, r *http.Reques
 			idempotencyKey = fmt.Sprintf("%s:%s:%s:%s", evt.Event, evt.Repo, evt.JobName, evt.CommitSHA)
 		}
 		if err := s.insertRiverJob(r.Context(), HangarWebhookArgs{IdempotencyKey: idempotencyKey, Event: evt}); err != nil {
-			log.Printf("[webhooks-router] [hangar] ERROR: failed to insert job into river: %v", err)
+			log.Printf("[synapse] [hangar] ERROR: failed to insert job into river: %v", err)
 			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist webhook"})
 			return
 		}
@@ -318,7 +318,7 @@ func (s *RouterServer) handleHangarWebhook(w http.ResponseWriter, r *http.Reques
 
 	processed, err := s.ProcessHangarEvent(r.Context(), evt)
 	if err != nil {
-		log.Printf("[webhooks-router] [hangar] error processing hangar event: %v", err)
+		log.Printf("[synapse] [hangar] error processing hangar event: %v", err)
 	}
 	httpkit.WriteJSON(w, http.StatusOK, map[string]interface{}{
 		"status":    "accepted",
@@ -340,7 +340,7 @@ func (s *RouterServer) ResolveSHA(ctx context.Context, repo, sha string) (int, s
 	if s.registry != nil {
 		prNum, branch, targetID, err := s.registry.ResolvePRBySHA(ctx, repo, sha)
 		if err != nil {
-			log.Printf("[webhooks-router] [registry] failed resolving PR by SHA %s locally: %v", sha, err)
+			log.Printf("[synapse] [registry] failed resolving PR by SHA %s locally: %v", sha, err)
 		} else if prNum > 0 {
 			if targetID == "" {
 				if tID, _, _, _, errNum := s.registry.ResolvePRByNumber(ctx, repo, prNum); errNum == nil && tID != "" {
@@ -362,7 +362,7 @@ func (s *RouterServer) ResolveSHA(ctx context.Context, repo, sha string) (int, s
 			targetID = tID
 		}
 		if backfillTID, err := s.registry.BackfillPushMergeSHA(ctx, repo, prNum, sha); err != nil {
-			log.Printf("[webhooks-router] [registry] failed backfilling merge_sha %s for PR %s#%d: %v", sha, repo, prNum, err)
+			log.Printf("[synapse] [registry] failed backfilling merge_sha %s for PR %s#%d: %v", sha, repo, prNum, err)
 		} else if targetID == "" && backfillTID != "" {
 			targetID = backfillTID
 		}
@@ -403,7 +403,7 @@ func (s *RouterServer) setPRWidgetState(ctx context.Context, repo string, prNumb
 		    updated_at = CURRENT_TIMESTAMP
 		WHERE repo = $1 AND pr_number = $2`
 	if _, err := pgReg.pool.Exec(qCtx, query, normalizeRepo(repo), prNumber, strings.TrimSpace(status), strings.TrimSpace(banner)); err != nil {
-		log.Printf("[webhooks-router] [widget] warning updating pr widget state for %s#%d: %v", repo, prNumber, err)
+		log.Printf("[synapse] [widget] warning updating pr widget state for %s#%d: %v", repo, prNumber, err)
 	}
 }
 
@@ -417,7 +417,7 @@ func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber i
 	}
 	if s.riverClient != nil {
 		if err := s.insertRiverJob(ctx, args); err != nil {
-			log.Printf("[webhooks-router] [widget] error enqueuing widget sync into river: %v", err)
+			log.Printf("[synapse] [widget] error enqueuing widget sync into river: %v", err)
 			return fmt.Errorf("enqueue widget sync: %w", err)
 		}
 		return nil
@@ -437,7 +437,7 @@ func (s *RouterServer) SyncBuildWidget(ctx context.Context, buildID, banner stri
 	}
 	if s.riverClient != nil {
 		if err := s.insertRiverJob(ctx, args); err != nil {
-			log.Printf("[webhooks-router] [widget] error enqueuing build widget sync into river: %v", err)
+			log.Printf("[synapse] [widget] error enqueuing build widget sync into river: %v", err)
 			return fmt.Errorf("enqueue build widget sync: %w", err)
 		}
 		return nil
@@ -471,7 +471,7 @@ func (s *RouterServer) ProcessWidgetSync(ctx context.Context, args WidgetSyncArg
 	if !ok || pgReg == nil || pgReg.pool == nil {
 		targetID, branch, _, _, err := s.registry.ResolvePRByNumber(qCtx, repo, prNumber)
 		if err != nil {
-			log.Printf("[webhooks-router] [widget] resolve pr error: %v", err)
+			log.Printf("[synapse] [widget] resolve pr error: %v", err)
 		}
 		if targetID == "" {
 			return nil
@@ -514,7 +514,7 @@ func (s *RouterServer) sweepOlderDeployedPRWidgets(qCtx context.Context, pgReg *
 	rows.Close()
 	for _, oldPR := range olderPRs {
 		if wErr := s.syncSinglePRWidget(qCtx, pgReg, repo, oldPR, false); wErr != nil {
-			log.Printf("[webhooks-router] [widget] warning syncing older deployed PR %s#%d: %v", repo, oldPR, wErr)
+			log.Printf("[synapse] [widget] warning syncing older deployed PR %s#%d: %v", repo, oldPR, wErr)
 		}
 	}
 }
@@ -653,7 +653,7 @@ func (s *RouterServer) syncSinglePRWidget(qCtx context.Context, pgReg *PostgresP
 	if newMsgID != "" && newMsgID != prMsgID {
 		updatePRMsgQuery := `UPDATE pr_registry SET status_message_id = $1, updated_at = CURRENT_TIMESTAMP WHERE repo = $2 AND pr_number = $3`
 		if _, execErr := pgReg.pool.Exec(qCtx, updatePRMsgQuery, newMsgID, repo, prNumber); execErr != nil {
-			log.Printf("[webhooks-router] [widget] warning updating pr status_message_id: %v", execErr)
+			log.Printf("[synapse] [widget] warning updating pr status_message_id: %v", execErr)
 		}
 	}
 	return nil
@@ -689,7 +689,7 @@ func (s *RouterServer) isVanadisPR(ctx context.Context, repo string, prNum int) 
 	}
 	suppressed, err := s.registry.ShouldSuppressVanadisDeployWake(ctx, repo, prNum)
 	if err != nil {
-		log.Printf("[webhooks-router] [vanadis] warning checking Vanadis deploy suppression for %s#%d: %v", repo, prNum, err)
+		log.Printf("[synapse] [vanadis] warning checking Vanadis deploy suppression for %s#%d: %v", repo, prNum, err)
 		return false
 	}
 	return suppressed
@@ -701,7 +701,7 @@ func (s *RouterServer) isFinalVanadisChunk(ctx context.Context, repo string, prN
 	}
 	finalChunk, err := s.registry.IsFinalVanadisChunk(ctx, repo, prNum)
 	if err != nil {
-		log.Printf("[webhooks-router] [vanadis] warning checking Vanadis final chunk status for %s#%d: %v", repo, prNum, err)
+		log.Printf("[synapse] [vanadis] warning checking Vanadis final chunk status for %s#%d: %v", repo, prNum, err)
 		return false
 	}
 	return finalChunk
@@ -719,7 +719,7 @@ func (s *RouterServer) advanceVanadisChunkOnSync(ctx context.Context, repo strin
 		return nil
 	}
 	if syncHasExpected && s.isFinalVanadisChunk(ctx, repo, prNumber) {
-		log.Printf("[webhooks-router] [vanadis] deferring final chunk advancement on sync_success for %s#%d until deploy_success", repo, prNumber)
+		log.Printf("[synapse] [vanadis] deferring final chunk advancement on sync_success for %s#%d until deploy_success", repo, prNumber)
 		return nil
 	}
 	return s.advanceVanadisChunk(ctx, repo, prNumber)
@@ -761,7 +761,7 @@ func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, la
 	}
 	if !opt.silent && dmMsg != "" && s.isValidAlertTarget(targetID) {
 		if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{ChannelID: targetID, Content: dmMsg}); err != nil {
-			log.Printf("[webhooks-router] [dispatcher] warning dispatching %s direct message: %v", label, err)
+			log.Printf("[synapse] [dispatcher] warning dispatching %s direct message: %v", label, err)
 		}
 	}
 	if opt.chunkID != "" && !strings.Contains(prompt, "Chunk ID: "+opt.chunkID) {
@@ -780,14 +780,14 @@ func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, la
 			req.SessionID = "vanadis-" + cID
 		}
 		if err := s.dispatcher.DispatchBackground(ctx, req); err != nil {
-			log.Printf("[webhooks-router] [dispatcher] error dispatching %s background dispatch: %v", label, err)
+			log.Printf("[synapse] [dispatcher] error dispatching %s background dispatch: %v", label, err)
 			return fmt.Errorf("dispatch %s background dispatch: %w", label, err)
 		}
 		return nil
 	}
 	req := PromptRequest{ChannelID: targetID, Prompt: prompt, Effort: opt.effort}
 	if err := s.dispatcher.DispatchPrompt(ctx, req); err != nil {
-		log.Printf("[webhooks-router] [dispatcher] error dispatching %s prompt: %v", label, err)
+		log.Printf("[synapse] [dispatcher] error dispatching %s prompt: %v", label, err)
 		return fmt.Errorf("dispatch %s prompt: %w", label, err)
 	}
 	return nil
@@ -806,20 +806,20 @@ func (s *RouterServer) advanceVanadisChunk(ctx context.Context, repo string, prN
 	}
 	if !res.Advanced {
 		if err := s.SyncPRWidget(ctx, repo, prNumber); err != nil {
-			log.Printf("[webhooks-router] [vanadis] warning syncing already-advanced chunk widget for %s#%d: %v", repo, prNumber, err)
+			log.Printf("[synapse] [vanadis] warning syncing already-advanced chunk widget for %s#%d: %v", repo, prNumber, err)
 		}
 		return nil
 	}
 	s.evaluateVanadisAdvancementTriggers(ctx, repo, prNumber, res)
 	if !res.BuildCompleted && res.NextChunkIndex >= 0 {
 		if err := s.SyncPRWidget(ctx, repo, prNumber); err != nil {
-			log.Printf("[webhooks-router] [vanadis] warning syncing chunk advancement widget for build %s: %v", res.BuildID, err)
+			log.Printf("[synapse] [vanadis] warning syncing chunk advancement widget for build %s: %v", res.BuildID, err)
 		}
 		return nil
 	}
 	if res.BuildCompleted {
 		if err := s.SyncPRWidget(ctx, repo, prNumber); err != nil {
-			log.Printf("[webhooks-router] [vanadis] warning syncing build completed widget for build %s: %v", res.BuildID, err)
+			log.Printf("[synapse] [vanadis] warning syncing build completed widget for build %s: %v", res.BuildID, err)
 		}
 		prompt := formatVanadisBuildCompletedPrompt(res)
 		return s.dispatchAlertWithPrompt(ctx, res.ThreadID, "vanadis_build_completed", "", prompt)
@@ -830,14 +830,14 @@ func (s *RouterServer) advanceVanadisChunk(ctx context.Context, repo string, prN
 func (s *RouterServer) enrichHangarEventPRAndTarget(ctx context.Context, evt *HangarDeployEvent) {
 	if evt.CommitSHA != "" && evt.PRNumber == 0 {
 		if prNum, targetID, _, err := s.ResolveSHA(ctx, evt.Repo, evt.CommitSHA); err != nil {
-			log.Printf("[webhooks-router] [hangar] failed resolving SHA %s: %v", evt.CommitSHA, err)
+			log.Printf("[synapse] [hangar] failed resolving SHA %s: %v", evt.CommitSHA, err)
 		} else if prNum > 0 {
 			evt.PRNumber = prNum
 			evt.TargetID = firstNonEmpty(evt.TargetID, targetID)
 		}
 	} else if evt.PRNumber > 0 && evt.TargetID == "" {
 		if targetID, err := s.ResolveThreadForPR(ctx, evt.Repo, evt.PRNumber); err != nil {
-			log.Printf("[webhooks-router] [hangar] failed resolving thread for PR %s#%d: %v", evt.Repo, evt.PRNumber, err)
+			log.Printf("[synapse] [hangar] failed resolving thread for PR %s#%d: %v", evt.Repo, evt.PRNumber, err)
 		} else if targetID != "" {
 			evt.TargetID = targetID
 		}
@@ -853,17 +853,17 @@ func (s *RouterServer) handleHangarDeployStartedRegistry(ctx context.Context, ev
 	}
 	if len(evt.ExpectedJobs) > 0 {
 		if _, err := s.registry.RecordExpectedJobs(ctx, evt.Repo, evt.PRNumber, evt.ExpectedJobs); err != nil {
-			log.Printf("[webhooks-router] [registry] warning recording expected jobs on deploy_started for %s#%d: %v", evt.Repo, evt.PRNumber, err)
+			log.Printf("[synapse] [registry] warning recording expected jobs on deploy_started for %s#%d: %v", evt.Repo, evt.PRNumber, err)
 		}
 	}
 	if tID, err := s.registry.TransitionDeploying(ctx, evt.Repo, evt.PRNumber, []string{evt.JobName}); err != nil {
-		log.Printf("[webhooks-router] [registry] warning transitioning pr %s#%d to deploying for job %s: %v", evt.Repo, evt.PRNumber, evt.JobName, err)
+		log.Printf("[synapse] [registry] warning transitioning pr %s#%d to deploying for job %s: %v", evt.Repo, evt.PRNumber, evt.JobName, err)
 	} else if tID == "" {
-		log.Printf("[webhooks-router] [hangar] skipping deploy_started for %s on %s#%d (job already deployed or PR inactive)", evt.JobName, evt.Repo, evt.PRNumber)
+		log.Printf("[synapse] [hangar] skipping deploy_started for %s on %s#%d (job already deployed or PR inactive)", evt.JobName, evt.Repo, evt.PRNumber)
 		return true
 	} else if s.isNomadBatchTemplateHealthy(ctx, evt.JobName) {
 		if err := s.HandleNomadJobSuccess(ctx, evt.JobName, firstNonEmpty(evt.DeploymentID, "batch-registered")); err != nil {
-			log.Printf("[webhooks-router] [hangar] warning handling batch job success for %s: %v", evt.JobName, err)
+			log.Printf("[synapse] [hangar] warning handling batch job success for %s: %v", evt.JobName, err)
 		}
 		return true
 	}
@@ -877,7 +877,7 @@ func (s *RouterServer) recordHangarSyncExpectedJobs(ctx context.Context, evt Han
 	syncHasExpected := len(dedupeTrimmedStrings(evt.ExpectedJobs)) > 0
 	if s.registry != nil {
 		if regHasExpected, err := s.registry.RecordExpectedJobs(ctx, evt.Repo, evt.PRNumber, evt.ExpectedJobs); err != nil {
-			log.Printf("[webhooks-router] [registry] warning recording expected jobs on sync_success for %s#%d: %v", evt.Repo, evt.PRNumber, err)
+			log.Printf("[synapse] [registry] warning recording expected jobs on sync_success for %s#%d: %v", evt.Repo, evt.PRNumber, err)
 		} else {
 			syncHasExpected = syncHasExpected || regHasExpected
 		}
@@ -940,7 +940,7 @@ func (s *RouterServer) handleHangarSyncFailed(ctx context.Context, evt HangarDep
 func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployEvent) (*HangarDeployEvent, error) {
 	s.enrichHangarEventPRAndTarget(ctx, &evt)
 
-	log.Printf("[webhooks-router] [hangar] [deploy] event=%s job=%s repo=%s pr=%d commit=%s status=%s target_id=%s deployment_id=%s details=%q",
+	log.Printf("[synapse] [hangar] [deploy] event=%s job=%s repo=%s pr=%d commit=%s status=%s target_id=%s deployment_id=%s details=%q",
 		evt.Event, evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA, evt.Status, evt.TargetID, evt.DeploymentID, evt.Details)
 
 	s.evaluateHangarEventTriggers(ctx, evt)
@@ -963,7 +963,7 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 	case "deploy_started":
 		if evt.PRNumber > 0 {
 			if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber); err != nil {
-				log.Printf("[webhooks-router] [widget] warning syncing deploy_started widget: %v", err)
+				log.Printf("[synapse] [widget] warning syncing deploy_started widget: %v", err)
 				return &evt, err
 			}
 		}
@@ -997,13 +997,13 @@ func (s *RouterServer) handleHangarSyncSuccess(ctx context.Context, evt HangarDe
 	}
 	if syncHasExpected {
 		if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber); err != nil {
-			log.Printf("[webhooks-router] [widget] warning syncing sync_success widget for %s#%d: %v", evt.Repo, evt.PRNumber, err)
+			log.Printf("[synapse] [widget] warning syncing sync_success widget for %s#%d: %v", evt.Repo, evt.PRNumber, err)
 		}
 	} else if !s.isVanadisPR(ctx, evt.Repo, evt.PRNumber) {
 		return s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, firstNonEmpty(evt.JobName, "git-sync"), evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID)
 	} else {
 		if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber); err != nil {
-			log.Printf("[webhooks-router] [widget] warning syncing sync_success widget for %s#%d: %v", evt.Repo, evt.PRNumber, err)
+			log.Printf("[synapse] [widget] warning syncing sync_success widget for %s#%d: %v", evt.Repo, evt.PRNumber, err)
 		}
 	}
 	return nil
@@ -1016,18 +1016,18 @@ func (s *RouterServer) dispatchDeploymentSuccessPrompt(ctx context.Context, targ
 
 	vanadisPR := s.isVanadisPR(ctx, repo, prNum)
 	if vanadisPR && s.isFinalVanadisChunk(ctx, repo, prNum) {
-		log.Printf("[webhooks-router] [vanadis] suppressing deploy_success /prompt wake and advancing final chunk for %s#%d (job=%s)", repo, prNum, jobName)
+		log.Printf("[synapse] [vanadis] suppressing deploy_success /prompt wake and advancing final chunk for %s#%d (job=%s)", repo, prNum, jobName)
 		return s.advanceVanadisChunk(ctx, repo, prNum)
 	}
 
 	if prNum > 0 {
 		if err := s.SyncPRWidget(ctx, repo, prNum); err != nil {
-			log.Printf("[webhooks-router] [widget] warning syncing deploy_success widget: %v", err)
+			log.Printf("[synapse] [widget] warning syncing deploy_success widget: %v", err)
 		}
 	}
 
 	if vanadisPR {
-		log.Printf("[webhooks-router] [vanadis] suppressing mid-run deploy_success /prompt wake for %s#%d (job=%s)", repo, prNum, jobName)
+		log.Printf("[synapse] [vanadis] suppressing mid-run deploy_success /prompt wake for %s#%d (job=%s)", repo, prNum, jobName)
 		return nil
 	}
 
@@ -1055,7 +1055,7 @@ func (s *RouterServer) enqueueMergeConflict(ctx context.Context, args MergeConfl
 	args.Repo = normalizeRepo(args.Repo)
 	if s.riverClient != nil {
 		if err := s.insertRiverJob(ctx, args); err != nil {
-			log.Printf("[webhooks-router] [github] error enqueuing merge conflict into river: %v", err)
+			log.Printf("[synapse] [github] error enqueuing merge conflict into river: %v", err)
 			return fmt.Errorf("enqueue merge conflict: %w", err)
 		}
 		return nil
@@ -1075,7 +1075,7 @@ func (s *RouterServer) dispatchConflictPrompt(ctx context.Context, targetID, rep
 		if _, isPg := s.registry.(*PostgresPRRegistry); isPg {
 			s.setPRWidgetState(ctx, repo, prNum, "conflict", "Merge conflict detected")
 			if err := s.SyncPRWidget(ctx, repo, prNum); err != nil {
-				log.Printf("[webhooks-router] [widget] warning syncing conflict widget: %v", err)
+				log.Printf("[synapse] [widget] warning syncing conflict widget: %v", err)
 			}
 		}
 	}
@@ -1146,7 +1146,7 @@ func setupRiverWorkerPool(ctx context.Context, server *RouterServer, cfg Config)
 		pool.Close()
 		return nil, nil, fmt.Errorf("start river client: %w", err)
 	}
-	log.Println("[webhooks-router] River worker pool started successfully")
+	log.Println("[synapse] River worker pool started successfully")
 	return pool, rc, nil
 }
 
@@ -1175,7 +1175,7 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 		sweepCtx, sweepCancel := context.WithTimeout(ctx, 15*time.Second)
 		defer sweepCancel()
 		if sweepErr := server.ReconcileActiveDeployments(sweepCtx); sweepErr != nil {
-			log.Printf("[webhooks-router] [sweep] startup active deployment reconciliation error: %v", sweepErr)
+			log.Printf("[synapse] [sweep] startup active deployment reconciliation error: %v", sweepErr)
 		}
 	}()
 
@@ -1209,7 +1209,7 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 
 	errChan := make(chan error, 1)
 	go func() {
-		log.Printf("[webhooks-router] Server listening on %s (Infisical: %s, Nomad: %s, TargetVariable: %s)",
+		log.Printf("[synapse] Server listening on %s (Infisical: %s, Nomad: %s, TargetVariable: %s)",
 			ln.Addr().String(), cfg.InfisicalURL, cfg.NomadAddr, TargetNomadVariable)
 		if err := httpServer.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errChan <- err
@@ -1224,23 +1224,23 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 		runErr = err
 	}
 
-	log.Println("[webhooks-router] Shutting down gracefully...")
+	log.Println("[synapse] Shutting down gracefully...")
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 
 	if shutErr := httpServer.Shutdown(shutdownCtx); shutErr != nil && !errors.Is(shutErr, http.ErrServerClosed) {
-		log.Printf("[webhooks-router] HTTP shutdown error: %v", shutErr)
+		log.Printf("[synapse] HTTP shutdown error: %v", shutErr)
 	}
 
 	safeStopDiscord()
 
 	if riverClient != nil {
 		if stopErr := riverClient.Stop(shutdownCtx); stopErr != nil && !errors.Is(stopErr, context.Canceled) {
-			log.Printf("[webhooks-router] River client stop error: %v", stopErr)
+			log.Printf("[synapse] River client stop error: %v", stopErr)
 		}
 	}
 
-	log.Println("[webhooks-router] Server stopped")
+	log.Println("[synapse] Server stopped")
 	return runErr
 }
 
@@ -1256,6 +1256,6 @@ func main() {
 	defer cancel()
 
 	if err := runApp(ctx, cfg); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatalf("[webhooks-router] Error: %v", err)
+		log.Fatalf("[synapse] Error: %v", err)
 	}
 }

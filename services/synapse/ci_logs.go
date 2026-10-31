@@ -178,7 +178,7 @@ func (s *RouterServer) fetchLatestRoboRevComment(ctx context.Context, repo strin
 	var comments []GitHubIssueComment
 	path := fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=100", repo, prNumber)
 	if err := s.getGitHubJSON(ctx, path, 2<<20, &comments); err != nil {
-		log.Printf("[webhooks-router] [github] warning fetching roborev comments for %s#%d: %v", repo, prNumber, err)
+		log.Printf("[synapse] [github] warning fetching roborev comments for %s#%d: %v", repo, prNumber, err)
 		return ""
 	}
 	shortSHA := strings.TrimSpace(headSHA)
@@ -204,7 +204,7 @@ func (s *RouterServer) dispatchCIFailurePrompt(ctx context.Context, targetID, ch
 			banner := fmt.Sprintf("CI check %q failed", checkName)
 			s.setPRWidgetState(ctx, repo, prNum, "", banner)
 			if err := s.SyncPRWidget(ctx, repo, prNum); err != nil {
-				log.Printf("[webhooks-router] [widget] warning syncing ci_failed widget: %v", err)
+				log.Printf("[synapse] [widget] warning syncing ci_failed widget: %v", err)
 			}
 		}
 	}
@@ -283,7 +283,7 @@ func (s *RouterServer) checkRemediationCapReached(ctx context.Context, res *Reso
 	}
 	failCount, fcErr := s.registry.IncrementCIFailCount(ctx, res.Repo, res.PRNumber)
 	if fcErr != nil {
-		log.Printf("[webhooks-router] [registry] warning incrementing ci_fail_count for %s#%d: %v", res.Repo, res.PRNumber, fcErr)
+		log.Printf("[synapse] [registry] warning incrementing ci_fail_count for %s#%d: %v", res.Repo, res.PRNumber, fcErr)
 	}
 	if failCount <= maxCIRemediationAttempts {
 		return false
@@ -298,13 +298,13 @@ func (s *RouterServer) notifyRemediationCap(ctx context.Context, res *ResolvedGi
 	}
 	if s.registry != nil && res.PRNumber > 0 {
 		if err := s.failVanadisChunk(ctx, res.Repo, res.PRNumber, "ci_remediation_cap_reached"); err != nil {
-			log.Printf("[webhooks-router] [vanadis] warning failing vanadis chunk on remediation cap for %s#%d: %v", res.Repo, res.PRNumber, err)
+			log.Printf("[synapse] [vanadis] warning failing vanadis chunk on remediation cap for %s#%d: %v", res.Repo, res.PRNumber, err)
 		}
 	}
 	banner := fmt.Sprintf("CI remediation cap (%d/%d) reached — awaiting human review", maxCIRemediationAttempts, maxCIRemediationAttempts)
 	s.setPRWidgetState(ctx, res.Repo, res.PRNumber, "", banner)
 	if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
-		log.Printf("[webhooks-router] [widget] sync pr widget error: %v", err)
+		log.Printf("[synapse] [widget] sync pr widget error: %v", err)
 	}
 	if s.dispatcher == nil || !IsValidDiscordSnowflake(res.TargetID) {
 		return
@@ -314,6 +314,6 @@ func (s *RouterServer) notifyRemediationCap(ctx context.Context, res *ResolvedGi
 		ChannelID: res.TargetID,
 		Content:   msg,
 	}); err != nil {
-		log.Printf("[webhooks-router] [dispatcher] error dispatching cap direct message: %v", err)
+		log.Printf("[synapse] [dispatcher] error dispatching cap direct message: %v", err)
 	}
 }

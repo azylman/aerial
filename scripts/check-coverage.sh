@@ -121,6 +121,7 @@ if [ -n "$TARGET_SERVICE" ]; then
         scheduler-mcp) TARGET_SERVICE="services/haro" ;;
         memory-mcp) TARGET_SERVICE="services/coven" ;;
         brain) TARGET_SERVICE="services/eri" ;;
+        webhooks-router) TARGET_SERVICE="services/synapse" ;;
         *)
             for svc in $DISCOVERED_GO_SERVICES; do
                 if [ "$svc" = "$TARGET_SERVICE" ] || [ "${svc##*/}" = "$TARGET_SERVICE" ]; then

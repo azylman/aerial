@@ -333,7 +333,7 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 			case "git_push":
 				err = disp.DispatchGitPush(testCtx, GitPushEventRequest{Ref: "refs/heads/main", Commit: "testcommit123"})
 			case "image_ready":
-				jobs, e := disp.DispatchImageReady(testCtx, ImageReadyEventRequest{Image: "ghcr.io/azylman/aerial-webhooks-router:latest", Digest: "sha256:abcd"})
+				jobs, e := disp.DispatchImageReady(testCtx, ImageReadyEventRequest{Image: "ghcr.io/azylman/aerial-synapse:latest", Digest: "sha256:abcd"})
 				err = e
 				if tc.wantMatchedJobs > 0 && len(jobs) != tc.wantMatchedJobs {
 					t.Errorf("got %d matched jobs, want %d", len(jobs), tc.wantMatchedJobs)

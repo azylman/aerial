@@ -139,13 +139,13 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 		},
 		{
 			name:             "allocation running",
-			streamLines:      []string{`{"Index":1002,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":{"Allocation":{"ID":"alloc-999","JobID":"webhooks-router","DesiredStatus":"run","ClientStatus":"running"}}}]}`},
+			streamLines:      []string{`{"Index":1002,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":{"Allocation":{"ID":"alloc-999","JobID":"synapse","DesiredStatus":"run","ClientStatus":"running"}}}]}`},
 			deploymentsJSON:  defaultHealthyDeploys,
 			allocationsJSON:  defaultHealthyAllocs,
 			reg:              mkDeployedReg(validThread, 552, validSHA, validRepo, true),
-			wantDeployedJobs: []string{"webhooks-router"},
+			wantDeployedJobs: []string{"synapse"},
 			wantPrompts:      1,
-			wantPromptSubstr: []string{"Continuous Delivery deployment completed for job webhooks-router", "Directive: Confirm the deployment and suggest logical next steps, follow-up verification, or related tasks concisely."},
+			wantPromptSubstr: []string{"Continuous Delivery deployment completed for job synapse", "Directive: Confirm the deployment and suggest logical next steps, follow-up verification, or related tasks concisely."},
 		},
 		{
 			name:             "deployment failure dispatches DM and remediation prompt",
@@ -273,7 +273,7 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 		},
 		{
 			name:        "evaluation blocked with FailedTGAllocs ignored",
-			streamLines: []string{`{"Index":2053,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"ID":"bda9b66d-3cef-17a0-fce1-4faec0f3a52d","JobID":"webhooks-router","Status":"blocked","StatusDescription":"created to place remaining allocations","DeploymentID":"5622959a-4da3-fb28-09c7-5f6909503687","FailedTGAllocs":{"webhooks-router":{"NodesExhausted":1,"DimensionExhausted":{"network: port collision":1}}},"QueuedAllocations":{"webhooks-router":0}}}}]}`},
+			streamLines: []string{`{"Index":2053,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"ID":"bda9b66d-3cef-17a0-fce1-4faec0f3a52d","JobID":"synapse","Status":"blocked","StatusDescription":"created to place remaining allocations","DeploymentID":"5622959a-4da3-fb28-09c7-5f6909503687","FailedTGAllocs":{"synapse":{"NodesExhausted":1,"DimensionExhausted":{"network: port collision":1}}},"QueuedAllocations":{"synapse":0}}}}]}`},
 			reg:         &mockPRRegistry{deployFailedJobUpdated: true},
 		},
 		{
@@ -469,11 +469,11 @@ func TestProcessNomadEvent_TableDriven(t *testing.T) {
 		{name: "PlanResult dropped", topic: "Allocation", eventType: "PlanResult", payload: `{"Allocation":{"ID":"alloc-1","JobID":"github-mcp","ClientStatus":"failed"}}`},
 		{name: "blocked evaluation returns nil", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"ID":"eval-blocked-direct","JobID":"hangar","Status":"blocked","StatusDescription":"created to place remaining allocations"}}`},
 		{name: "blocked evaluation with deployment ID returns nil", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"ID":"eval-blocked-dep","JobID":"vanadis","Status":"blocked","StatusDescription":"created to place remaining allocations","DeploymentID":"dep-123","FailedTGAllocs":{"vanadis":{"DimensionExhausted":{"cpu":1}}},"QueuedAllocations":{"vanadis":0}}}`},
-		{name: "blocked evaluation with FailedTGAllocs returns nil", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"ID":"eval-blocked-direct","JobID":"webhooks-router","Status":"blocked","StatusDescription":"created to place remaining allocations","FailedTGAllocs":{"webhooks-router":{"NodesExhausted":1,"DimensionExhausted":{"network: port collision":1}}},"QueuedAllocations":{"webhooks-router":0}}}`},
+		{name: "blocked evaluation with FailedTGAllocs returns nil", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"ID":"eval-blocked-direct","JobID":"synapse","Status":"blocked","StatusDescription":"created to place remaining allocations","FailedTGAllocs":{"synapse":{"NodesExhausted":1,"DimensionExhausted":{"network: port collision":1}}},"QueuedAllocations":{"synapse":0}}}`},
 		{name: "blocked evaluation with non-transient placement failure dispatches failure", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"ID":"eval-blocked-nontransient","JobID":"coven","Status":"blocked","StatusDescription":"created to place remaining allocations","FailedTGAllocs":{"coven":{"ConstraintFiltered":{"missing drivers":1}}},"QueuedAllocations":{"coven":0}}}`, reg: mkDeployFailedReg("target-1", 100, "sha1", "repo", true)},
 		{name: "allocation complete with failed task state ignored", topic: "Allocation", eventType: "AllocationUpdated", payload: `{"Allocation":{"ID":"alloc-comp-failed","JobID":"db-migrate","DesiredStatus":"run","ClientStatus":"complete","TaskStates":{"migrate":{"State":"dead","Failed":true}}}}`},
-		{name: "blocked evaluation with queued failed allocs returns nil", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"BlockedEval":"b-1","JobID":"webhooks-router","FailedTGAllocs":{"tg":1},"QueuedAllocations":{"tg":1}}}`},
-		{name: "evaluation with all failed groups queued returns nil", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"JobID":"webhooks-router","FailedTGAllocs":{"tg":1},"QueuedAllocations":{"tg":1}}}`},
+		{name: "blocked evaluation with queued failed allocs returns nil", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"BlockedEval":"b-1","JobID":"synapse","FailedTGAllocs":{"tg":1},"QueuedAllocations":{"tg":1}}}`},
+		{name: "evaluation with all failed groups queued returns nil", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"JobID":"synapse","FailedTGAllocs":{"tg":1},"QueuedAllocations":{"tg":1}}}`},
 		{name: "evaluation with unqueued failed group and empty desc dispatches failure", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"ID":"eval-fail-unqueued","JobID":"brain","StatusDescription":"","FailedTGAllocs":{"tg":1},"QueuedAllocations":{"tg":0}}}`, reg: mkDeployFailedReg("target-1", 100, "sha1", "repo", true)},
 		{name: "evaluation with empty job ID returns nil", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"JobID":"","Status":"complete"}}`},
 		{name: "evaluation with unknown status returns nil", topic: "Evaluation", eventType: "EvaluationUpdated", payload: `{"Evaluation":{"JobID":"job1","Status":"unknown"}}`},
@@ -545,12 +545,12 @@ func TestRouterServer_ReconcileActiveDeployments_StartupSweep(t *testing.T) {
 			reg: func() PRRegistryUpdater {
 				r := mkDeployedReg("1555405874565091380", 552, "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092", "azylman/aerial", true)
 				r.listDeployingPRs = []DeployingPR{
-					{ID: 101, Repo: "azylman/aerial", PRNumber: 552, MergeSHA: "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092", TargetID: "1555405874565091380", Metadata: map[string]interface{}{"jobs": []interface{}{"webhooks-router"}}},
+					{ID: 101, Repo: "azylman/aerial", PRNumber: 552, MergeSHA: "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092", TargetID: "1555405874565091380", Metadata: map[string]interface{}{"jobs": []interface{}{"synapse"}}},
 				}
 				return r
 			}(),
-			allocsJSON:       `[{"ID":"alloc-old","JobID":"webhooks-router","DesiredStatus":"stop","ClientStatus":"complete"},{"ID":"alloc-new","JobID":"webhooks-router","DesiredStatus":"run","ClientStatus":"running"}]`,
-			wantDeployedJobs: []string{"webhooks-router"},
+			allocsJSON:       `[{"ID":"alloc-old","JobID":"synapse","DesiredStatus":"stop","ClientStatus":"complete"},{"ID":"alloc-new","JobID":"synapse","DesiredStatus":"run","ClientStatus":"running"}]`,
+			wantDeployedJobs: []string{"synapse"},
 		},
 		{
 			name: "startup sweep with started_jobs skips unstarted sibling job",
@@ -559,13 +559,13 @@ func TestRouterServer_ReconcileActiveDeployments_StartupSweep(t *testing.T) {
 				r.listDeployingPRs = []DeployingPR{
 					{
 						ID: 102, Repo: "azylman/aerial", PRNumber: 971, MergeSHA: "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092", TargetID: "1555405874565091380",
-						Metadata: map[string]interface{}{"jobs": []interface{}{"coven", "webhooks-router"}, "started_jobs": []interface{}{"webhooks-router"}},
+						Metadata: map[string]interface{}{"jobs": []interface{}{"coven", "synapse"}, "started_jobs": []interface{}{"synapse"}},
 					},
 				}
 				return r
 			}(),
-			allocsJSON:       `[{"ID":"alloc-new","JobID":"webhooks-router","DesiredStatus":"run","ClientStatus":"running"}]`,
-			wantDeployedJobs: []string{"webhooks-router"},
+			allocsJSON:       `[{"ID":"alloc-new","JobID":"synapse","DesiredStatus":"run","ClientStatus":"running"}]`,
+			wantDeployedJobs: []string{"synapse"},
 		},
 		{name: "nil registry returns nil", reg: nil},
 		{name: "registry list error returns error", reg: &mockPRRegistry{err: errors.New("db error")}, wantErr: true},
@@ -756,7 +756,7 @@ func TestNomadStreamSubscriber_RiverQueue(t *testing.T) {
 				`{"Index":2001,"Events":[{"Topic":"Deployment","Type":"DeploymentStatusUpdate","Payload":{"Deployment":{"ID":"dep-dup-1","JobID":"brain","Status":"successful"}}}]}`,
 			},
 			skipDuplicate:    true,
-			wantMetricSubstr: `webhooks_router_unique_skipped_total{kind="nomad_event"}`,
+			wantMetricSubstr: `synapse_unique_skipped_total{kind="nomad_event"}`,
 		},
 		{
 			name: "river insert error logs and continues",
@@ -1174,7 +1174,7 @@ func TestNomadUnmanagedJobCrashAndDelegation(t *testing.T) {
 		wantErr          bool
 	}{
 		{name: "HandleUnmanagedJobCrash enqueues River job", jobID: "openobserve", allocID: "alloc-1", status: "failed", desc: "OOMKilled", wantCrashJobs: 1},
-		{name: "HandleUnmanagedJobCrash duplicate metric", skipDuplicate: true, jobID: "openobserve", allocID: "alloc-2", status: "failed", desc: "OOMKilled", wantCrashJobs: 1, wantMetricSubstr: `webhooks_router_unique_skipped_total{kind="nomad_crash_alert"}`},
+		{name: "HandleUnmanagedJobCrash duplicate metric", skipDuplicate: true, jobID: "openobserve", allocID: "alloc-2", status: "failed", desc: "OOMKilled", wantCrashJobs: 1, wantMetricSubstr: `synapse_unique_skipped_total{kind="nomad_crash_alert"}`},
 		{name: "HandleUnmanagedJobCrash river error", riverErr: errors.New("db error"), jobID: "openobserve", allocID: "alloc-err", status: "failed", desc: "crash", wantErr: true},
 		{name: "HandleUnmanagedJobCrash direct execution without River", noRiver: true, jobID: "openobserve", allocID: "alloc-3", status: "failed", desc: "signal: killed", wantDMs: 1, wantPrompts: 1},
 		{name: "HandleUnmanagedJobCrash direct execution dm error logs and continues", noRiver: true, jobID: "openobserve", allocID: "alloc-4", status: "failed", desc: "crash", dmErr: errors.New("dm fail"), wantDMs: 1, wantPrompts: 1},

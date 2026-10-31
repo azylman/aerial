@@ -724,7 +724,7 @@ func TestHandleHangarWebhook(t *testing.T) {
 		{name: "river accepts on api path", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_success","job_name":"brain","repo":"azylman/aerial","pr_number":558,"target_id":"1555405874565091380","status":"success","details":"Deployment healthy"}`), river: &mockRiverInserter{}, wantStatus: http.StatusAccepted, wantJobName: "brain", wantRiverJobs: 1},
 		{name: "river accepts on legacy path", path: "/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_success","job_name":"brain","repo":"azylman/aerial","pr_number":558,"target_id":"1555405874565091380","status":"success","details":"Deployment healthy"}`), river: &mockRiverInserter{}, wantStatus: http.StatusAccepted, wantJobName: "brain", wantRiverJobs: 1},
 		{name: "river insertion error", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_success","job_name":"brain","repo":"azylman/aerial","pr_number":558,"target_id":"1555405874565091380","status":"success","details":"Deployment healthy"}`), river: &mockRiverInserter{err: errors.New("simulated river insert error")}, wantStatus: http.StatusInternalServerError},
-		{name: "river duplicate skipped increments metric", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_success","job_name":"brain","commit_sha":"abc1234"}`), river: &mockRiverInserter{skipDuplicate: true}, wantStatus: http.StatusAccepted, wantMetricSubstr: `webhooks_router_unique_skipped_total{kind="hangar_webhook"}`},
+		{name: "river duplicate skipped increments metric", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_success","job_name":"brain","commit_sha":"abc1234"}`), river: &mockRiverInserter{skipDuplicate: true}, wantStatus: http.StatusAccepted, wantMetricSubstr: `synapse_unique_skipped_total{kind="hangar_webhook"}`},
 	}
 
 	for _, tc := range tests {
@@ -1778,7 +1778,7 @@ func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
 			method:       http.MethodGet,
 			path:         "/healthz",
 			wantCode:     http.StatusOK,
-			wantBodySubs: []string{`"status":"ok"`, `"service":"webhooks-router"`},
+			wantBodySubs: []string{`"status":"ok"`, `"service":"synapse"`},
 		},
 		{
 			name:     "/metrics returns 200 and prometheus metrics with queue stats and gateway latency",
@@ -1786,11 +1786,11 @@ func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
 			path:     "/metrics",
 			wantCode: http.StatusOK,
 			wantBodySubs: []string{
-				"webhooks_router_unique_skipped_total",
+				"synapse_unique_skipped_total",
 				`kind="test_kind_metric"`,
-				"webhooks_router_queue_depth",
-				"webhooks_router_queue_oldest_age_seconds",
-				"webhooks_router_discord_gateway_latency_seconds 0.042",
+				"synapse_queue_depth",
+				"synapse_queue_oldest_age_seconds",
+				"synapse_discord_gateway_latency_seconds 0.042",
 			},
 		},
 		{
@@ -1799,7 +1799,7 @@ func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
 			path:          "/metrics",
 			queueStatsErr: true,
 			wantCode:      http.StatusOK,
-			wantBodySubs:  []string{"webhooks_router_discord_gateway_latency_seconds 0.042"},
+			wantBodySubs:  []string{"synapse_discord_gateway_latency_seconds 0.042"},
 		},
 		{
 			name:     "/debug/coverage/flush calls flush and returns 200",

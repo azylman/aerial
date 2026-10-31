@@ -38,7 +38,7 @@ jobs:
       docs: ${{ steps.filter.outputs.docs }}
       proxy: ${{ steps.filter.outputs.proxy }}
       hangar: ${{ steps.filter.outputs.hangar }}
-      webhooks-router: ${{ steps.filter.outputs.webhooks-router }}
+      synapse: ${{ steps.filter.outputs.synapse }}
       vanadis: ${{ steps.filter.outputs.vanadis }}
       prospera: ${{ steps.filter.outputs.prospera }}
       github-runner: ${{ steps.filter.outputs.github-runner }}
@@ -83,8 +83,8 @@ jobs:
             hangar:
               - 'services/hangar/**'
               - 'pkg/**'
-            webhooks-router:
-              - 'services/webhooks-router/**'
+            synapse:
+              - 'services/synapse/**'
               - 'pkg/**'
             vanadis:
               - 'services/vanadis/**'
@@ -112,7 +112,7 @@ jobs:
               docs: "${{ steps.filter.outputs.docs }}",
               proxy: "${{ steps.filter.outputs.proxy }}",
               hangar: "${{ steps.filter.outputs.hangar }}",
-              "webhooks-router": "${{ steps.filter.outputs.webhooks-router }}",
+              synapse: "${{ steps.filter.outputs.synapse }}",
               vanadis: "${{ steps.filter.outputs.vanadis }}",
               prospera: "${{ steps.filter.outputs.prospera }}",
               "github-runner": "${{ steps.filter.outputs.github-runner }}"
@@ -131,7 +131,7 @@ jobs:
               { service: "docs", context: "./services/docs-service", file: "./services/docs-service/Dockerfile", image_name: "aerial-docs" },
               { service: "proxy", context: "./services/proxy", file: "./services/proxy/Dockerfile", image_name: "aerial-proxy" },
               { service: "hangar", context: ".", file: "./services/hangar/Dockerfile", image_name: "aerial-hangar" },
-              { service: "webhooks-router", context: ".", file: "./services/webhooks-router/Dockerfile", image_name: "aerial-webhooks-router" },
+              { service: "synapse", context: ".", file: "./services/synapse/Dockerfile", image_name: "aerial-synapse" },
               { service: "vanadis", context: ".", file: "./services/vanadis/Dockerfile", image_name: "aerial-vanadis" },
               { service: "prospera", context: ".", file: "./services/prospera/Dockerfile", image_name: "aerial-prospera" },
               { service: "github-runner", context: ".", file: "./services/github-runner/Dockerfile", image_name: "aerial-github-runner" }
@@ -281,18 +281,29 @@ jobs:
       - name: Set up Persistent Local Buildx Builder
         run: |
           mkdir -p /cache/buildx-config /root/.docker/buildx/instances
-          flock /cache/buildx.lock bash -c '
+          (
+            flock 200
             if [ ! -f /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
               docker run --privileged --rm tonistiigi/binfmt:latest --install arm64
             fi
             export BUILDX_CONFIG=/cache/buildx-config
-            if ! docker buildx inspect --bootstrap calibarn-buildkit >/dev/null 2>&1; then
+            echo '[registry."docker.io"]' > /cache/buildkitd.toml.new
+            echo '  mirrors = ["mirror.gcr.io"]' >> /cache/buildkitd.toml.new
+            RECREATE=0
+            if ! cmp -s /cache/buildkitd.toml.new /cache/buildkitd.toml 2>/dev/null; then
+              mv -f /cache/buildkitd.toml.new /cache/buildkitd.toml
+              RECREATE=1
+            else
+              rm -f /cache/buildkitd.toml.new
+            fi
+            if ! docker buildx inspect --bootstrap calibarn-buildkit >/dev/null 2>&1 || [ "$RECREATE" -eq 1 ] || [ ! -f /cache/.buildkitd-mirrored ]; then
               docker buildx rm -f calibarn-buildkit >/dev/null 2>&1 || true
               docker rm -f buildx_buildkit_calibarn-buildkit0 >/dev/null 2>&1 || true
-              docker buildx create --name calibarn-buildkit --driver docker-container --driver-opt network=host --use --bootstrap
+              docker buildx create --name calibarn-buildkit --driver docker-container --driver-opt network=host --config /cache/buildkitd.toml --use --bootstrap
+              touch /cache/.buildkitd-mirrored
             fi
             cp -f /cache/buildx-config/instances/calibarn-buildkit /root/.docker/buildx/instances/calibarn-buildkit
-          '
+          ) 200>/cache/buildx.lock
           docker buildx use calibarn-buildkit
 
       - name: Lowercase Repository Owner

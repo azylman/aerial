@@ -220,7 +220,7 @@ func (s *RouterServer) putNomadVariable(ctx context.Context, items map[string]st
 
 // SyncSecrets coordinates fetching secrets from Infisical and synchronizing directly to Nomad.
 func (s *RouterServer) SyncSecrets(ctx context.Context, workspaceID, envName string) error {
-	log.Printf("[webhooks-router] Initiating secret sync to %s (env: %s)", TargetNomadVariable, envName)
+	log.Printf("[synapse] Initiating secret sync to %s (env: %s)", TargetNomadVariable, envName)
 	token, err := s.getInfisicalToken(ctx)
 	if err != nil {
 		return err
@@ -232,6 +232,6 @@ func (s *RouterServer) SyncSecrets(ctx context.Context, workspaceID, envName str
 	if err := s.putNomadVariable(ctx, newItems); err != nil {
 		return err
 	}
-	log.Printf("[webhooks-router] Successfully synchronized %d secrets to %s", len(newItems), TargetNomadVariable)
+	log.Printf("[synapse] Successfully synchronized %d secrets to %s", len(newItems), TargetNomadVariable)
 	return nil
 }

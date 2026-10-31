@@ -178,7 +178,7 @@ func (s *RouterServer) fireEventTriggers(ctx context.Context, source string, tar
 		return
 	}
 	if _, err := s.registry.FireEventTriggers(ctx, source, cleanTargets, eventType, contextHeader); err != nil {
-		log.Printf("[webhooks-router] [event-triggers] error firing triggers for %s %v %s: %v", source, cleanTargets, eventType, err)
+		log.Printf("[synapse] [event-triggers] error firing triggers for %s %v %s: %v", source, cleanTargets, eventType, err)
 	}
 }
 
@@ -215,7 +215,7 @@ func (s *RouterServer) handleEventsWebhook(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		if checkErr != nil {
-			log.Printf("[webhooks-router] [events] warning: haro pre-check failed for %s %v %s (failing open to river): %v", source, targets, eventType, checkErr)
+			log.Printf("[synapse] [events] warning: haro pre-check failed for %s %v %s (failing open to river): %v", source, targets, eventType, checkErr)
 		}
 	}
 
@@ -227,7 +227,7 @@ func (s *RouterServer) handleEventsWebhook(w http.ResponseWriter, r *http.Reques
 	}
 	if s.riverClient != nil {
 		if err := s.insertRiverJob(r.Context(), jobArgs); err != nil {
-			log.Printf("[webhooks-router] [events] ERROR: failed to insert event job into river: %v", err)
+			log.Printf("[synapse] [events] ERROR: failed to insert event job into river: %v", err)
 			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist webhook"})
 			return
 		}

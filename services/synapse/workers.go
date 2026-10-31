@@ -24,7 +24,7 @@ var (
 	// UniqueSkippedTotal records the total number of River jobs dropped due to unique constraint debouncing.
 	UniqueSkippedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "webhooks_router_unique_skipped_total",
+			Name: "synapse_unique_skipped_total",
 			Help: "Total number of River jobs skipped as duplicates due to unique constraints.",
 		},
 		[]string{"kind"},
@@ -32,7 +32,7 @@ var (
 
 	JobsEnqueuedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "webhooks_router_jobs_enqueued_total",
+			Name: "synapse_jobs_enqueued_total",
 			Help: "Total number of River jobs enqueued, skipped as duplicate, or failed on enqueue.",
 		},
 		[]string{"queue", "kind", "status"},
@@ -40,7 +40,7 @@ var (
 
 	JobsProcessedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "webhooks_router_jobs_processed_total",
+			Name: "synapse_jobs_processed_total",
 			Help: "Total number of River jobs processed by worker execution status.",
 		},
 		[]string{"queue", "kind", "status"},
@@ -48,7 +48,7 @@ var (
 
 	JobDurationSeconds = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:    "webhooks_router_job_duration_seconds",
+			Name:    "synapse_job_duration_seconds",
 			Help:    "Execution duration of River jobs in seconds.",
 			Buckets: prometheus.DefBuckets,
 		},
@@ -57,7 +57,7 @@ var (
 
 	JobRetriesTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "webhooks_router_job_retries_total",
+			Name: "synapse_job_retries_total",
 			Help: "Total number of River job retry attempts by reason.",
 		},
 		[]string{"queue", "kind", "reason"},
@@ -65,7 +65,7 @@ var (
 
 	JobsDroppedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "webhooks_router_jobs_dropped_total",
+			Name: "synapse_jobs_dropped_total",
 			Help: "Total number of River jobs dropped or cancelled by reason.",
 		},
 		[]string{"queue", "kind", "reason"},
@@ -73,7 +73,7 @@ var (
 
 	QueueDepth = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "webhooks_router_queue_depth",
+			Name: "synapse_queue_depth",
 			Help: "Current depth of River queues partitioned by state.",
 		},
 		[]string{"queue", "state"},
@@ -81,7 +81,7 @@ var (
 
 	QueueOldestAgeSeconds = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "webhooks_router_queue_oldest_age_seconds",
+			Name: "synapse_queue_oldest_age_seconds",
 			Help: "Oldest pending job age in seconds across available, retryable, and scheduled states.",
 		},
 		[]string{"queue"},
@@ -89,7 +89,7 @@ var (
 
 	DiscordGatewayLatencySeconds = prometheus.NewGauge(
 		prometheus.GaugeOpts{
-			Name: "webhooks_router_discord_gateway_latency_seconds",
+			Name: "synapse_discord_gateway_latency_seconds",
 			Help: "Heartbeat latency of the Discord Gateway connection in seconds.",
 		},
 	)
@@ -344,9 +344,9 @@ func (w *GitHubWebhookWorker) Work(ctx context.Context, job *river.Job[GitHubWeb
 		if job != nil && job.JobRow != nil {
 			jobID = job.ID
 		}
-		log.Printf("[webhooks-router] [river] processing github job id=%d event=%s delivery=%s", jobID, job.Args.Event, job.Args.Delivery)
+		log.Printf("[synapse] [river] processing github job id=%d event=%s delivery=%s", jobID, job.Args.Event, job.Args.Delivery)
 		if _, err := w.server.ProcessGitHubEvent(ctx, job.Args.Event, job.Args.Delivery, job.Args.Body); err != nil {
-			log.Printf("[webhooks-router] [river] error processing github job id=%d event=%s delivery=%s: %v", jobID, job.Args.Event, job.Args.Delivery, err)
+			log.Printf("[synapse] [river] error processing github job id=%d event=%s delivery=%s: %v", jobID, job.Args.Event, job.Args.Delivery, err)
 			return err
 		}
 		return nil
@@ -377,9 +377,9 @@ func (w *HangarWebhookWorker) Work(ctx context.Context, job *river.Job[HangarWeb
 		if job != nil && job.JobRow != nil {
 			jobID = job.ID
 		}
-		log.Printf("[webhooks-router] [river] processing hangar job id=%d event=%s job_name=%s", jobID, job.Args.Event.Event, job.Args.Event.JobName)
+		log.Printf("[synapse] [river] processing hangar job id=%d event=%s job_name=%s", jobID, job.Args.Event.Event, job.Args.Event.JobName)
 		if _, err := w.server.ProcessHangarEvent(ctx, job.Args.Event); err != nil {
-			log.Printf("[webhooks-router] [river] error processing hangar job id=%d: %v", jobID, err)
+			log.Printf("[synapse] [river] error processing hangar job id=%d: %v", jobID, err)
 			return err
 		}
 		return nil
@@ -413,9 +413,9 @@ func (w *NomadEventWorker) Work(ctx context.Context, job *river.Job[NomadEventAr
 		if job != nil && job.JobRow != nil {
 			jobID = job.ID
 		}
-		log.Printf("[webhooks-router] [river] processing nomad job id=%d topic=%s type=%s", jobID, job.Args.Topic, job.Args.Type)
+		log.Printf("[synapse] [river] processing nomad job id=%d topic=%s type=%s", jobID, job.Args.Topic, job.Args.Type)
 		if err := w.server.ProcessNomadEvent(ctx, job.Args.Topic, job.Args.Type, job.Args.Payload); err != nil {
-			log.Printf("[webhooks-router] [river] error processing nomad job id=%d: %v", jobID, err)
+			log.Printf("[synapse] [river] error processing nomad job id=%d: %v", jobID, err)
 			return err
 		}
 		return nil
@@ -448,9 +448,9 @@ func (w *NomadCrashAlertWorker) Work(ctx context.Context, job *river.Job[NomadCr
 		if job != nil && job.JobRow != nil {
 			jobID = job.ID
 		}
-		log.Printf("[webhooks-router] [river] processing nomad crash alert job id=%d job_id=%s alloc_id=%s", jobID, job.Args.JobID, job.Args.AllocID)
+		log.Printf("[synapse] [river] processing nomad crash alert job id=%d job_id=%s alloc_id=%s", jobID, job.Args.JobID, job.Args.AllocID)
 		if err := w.server.ProcessCrashAlert(ctx, job.Args); err != nil {
-			log.Printf("[webhooks-router] [river] error processing nomad crash alert job id=%d: %v", jobID, err)
+			log.Printf("[synapse] [river] error processing nomad crash alert job id=%d: %v", jobID, err)
 			return err
 		}
 		return nil
@@ -488,9 +488,9 @@ func (w *WidgetSyncWorker) Work(ctx context.Context, job *river.Job[WidgetSyncAr
 		if job != nil && job.JobRow != nil {
 			jobID = job.ID
 		}
-		log.Printf("[webhooks-router] [river] processing widget sync job id=%d repo=%s pr=%d build_id=%s", jobID, job.Args.Repo, job.Args.PRNumber, job.Args.BuildID)
+		log.Printf("[synapse] [river] processing widget sync job id=%d repo=%s pr=%d build_id=%s", jobID, job.Args.Repo, job.Args.PRNumber, job.Args.BuildID)
 		if err := w.server.ProcessWidgetSync(ctx, job.Args); err != nil {
-			log.Printf("[webhooks-router] [river] error processing widget sync job id=%d: %v", jobID, err)
+			log.Printf("[synapse] [river] error processing widget sync job id=%d: %v", jobID, err)
 			return err
 		}
 		return nil
@@ -525,9 +525,9 @@ func (w *EventTriggerWebhookWorker) Work(ctx context.Context, job *river.Job[Eve
 		if job != nil && job.JobRow != nil {
 			jobID = job.ID
 		}
-		log.Printf("[webhooks-router] [river] processing event trigger job id=%d source=%s event_type=%s targets=%v", jobID, job.Args.Source, job.Args.EventType, job.Args.Targets)
+		log.Printf("[synapse] [river] processing event trigger job id=%d source=%s event_type=%s targets=%v", jobID, job.Args.Source, job.Args.EventType, job.Args.Targets)
 		if err := w.server.ProcessEventTriggerWebhook(ctx, job.Args); err != nil {
-			log.Printf("[webhooks-router] [river] error processing event trigger job id=%d: %v", jobID, err)
+			log.Printf("[synapse] [river] error processing event trigger job id=%d: %v", jobID, err)
 			return err
 		}
 		return nil
@@ -570,9 +570,9 @@ func (w *MergeConflictWorker) Work(ctx context.Context, job *river.Job[MergeConf
 		if job != nil && job.JobRow != nil {
 			jobID = job.ID
 		}
-		log.Printf("[webhooks-router] [river] processing merge conflict job id=%d repo=%s pr=%d", jobID, job.Args.Repo, job.Args.PRNumber)
+		log.Printf("[synapse] [river] processing merge conflict job id=%d repo=%s pr=%d", jobID, job.Args.Repo, job.Args.PRNumber)
 		if err := w.server.ProcessMergeConflict(ctx, job.Args); err != nil {
-			log.Printf("[webhooks-router] [river] error processing merge conflict job id=%d: %v", jobID, err)
+			log.Printf("[synapse] [river] error processing merge conflict job id=%d: %v", jobID, err)
 			return err
 		}
 		return nil
@@ -846,7 +846,7 @@ func (d *DefaultOutboundDispatcher) postHangar(ctx context.Context, endpointPath
 	if resp.StatusCode == http.StatusNotFound {
 		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		if readErr == nil && isHangarUnmanagedError(respBody) {
-			log.Printf("[webhooks-router] [dispatcher] hangar confirmed %s (skipping): %s", targetDesc, string(respBody))
+			log.Printf("[synapse] [dispatcher] hangar confirmed %s (skipping): %s", targetDesc, string(respBody))
 			return nil, true, nil
 		}
 		return nil, false, fmt.Errorf("hangar %s returned 404: %s", opName, string(respBody))
@@ -873,7 +873,7 @@ func (d *DefaultOutboundDispatcher) DispatchImageReady(ctx context.Context, req 
 	}
 	var res ImageReadyEventResponse
 	if err := json.Unmarshal(respBody, &res); err != nil {
-		log.Printf("[webhooks-router] [dispatcher] warning decoding image ready response for %s: %v", req.Image, err)
+		log.Printf("[synapse] [dispatcher] warning decoding image ready response for %s: %v", req.Image, err)
 		return nil, nil
 	}
 	return res.MatchedJobs, nil
