@@ -1222,6 +1222,7 @@ func handleInternalDiscordInteraction(store db.Store, pool *queue.WorkerPool) ht
 
 type statusRecorder struct {
 	http.ResponseWriter
+
 	statusCode int
 }
 

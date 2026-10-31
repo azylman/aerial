@@ -212,7 +212,7 @@ func (p *Provisioner) atomicSwapRulesDir(rules []ruleSourceFile, targetDir strin
 	}
 
 	randSuffix := uuid.New().String()[:8]
-	stagingDir := filepath.Join(parentDir, fmt.Sprintf(".rules.tmp.%s", randSuffix))
+	stagingDir := filepath.Join(parentDir, ".rules.tmp."+randSuffix)
 	if err := os.MkdirAll(stagingDir, 0o755); err != nil {
 		return err
 	}
@@ -235,7 +235,7 @@ func (p *Provisioner) atomicSwapRulesDir(rules []ruleSourceFile, targetDir strin
 	}
 
 	// Atomic directory swap
-	backupDir := filepath.Join(parentDir, fmt.Sprintf(".rules.backup.%s", randSuffix))
+	backupDir := filepath.Join(parentDir, ".rules.backup."+randSuffix)
 	hasActive := false
 	if fi, statErr := os.Stat(targetDir); statErr == nil {
 		if !fi.IsDir() {

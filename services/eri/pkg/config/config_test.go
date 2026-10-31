@@ -1059,22 +1059,22 @@ func TestConfig_AccessorsAndConcurrency(t *testing.T) {
 		Channels: map[string]ChannelPolicy{"default": {Mode: "threads"}},
 	})
 	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for j := 0; j < 50; j++ {
+			for range 50 {
 				cur := raceCfg.Current()
 				_ = cur.Model
 				_ = cur.Channels["default"].Mode
 			}
 		}()
 	}
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			for j := 0; j < 25; j++ {
+			for j := range 25 {
 				raceCfg.update(&ConfigData{
 					Model:    fmt.Sprintf("m-%d-%d", idx, j),
 					Channels: map[string]ChannelPolicy{"default": {Mode: "threads"}},

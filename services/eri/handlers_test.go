@@ -759,7 +759,7 @@ func TestHandleTasks(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -956,6 +956,7 @@ func TestMetricsMiddleware(t *testing.T) {
 
 type mockFlusherRecorder struct {
 	*httptest.ResponseRecorder
+
 	flushed bool
 }
 
@@ -1029,8 +1030,8 @@ func TestHandleInternalLLM_And_MemoryRetriever(t *testing.T) {
 	})
 	nilLLM := handleInternalLLM(nil)
 
-	var manyAtts []string
-	for i := 0; i < 11; i++ {
+	manyAtts := make([]string, 0, 11)
+	for i := range 11 {
 		manyAtts = append(manyAtts, fmt.Sprintf(`{"url":"%s/file.txt","filename":"file%d.txt"}`, attSrv.URL, i))
 	}
 	tooManyAttsJSON := fmt.Sprintf(`{"prompt":"inspect","attachments":[%s]}`, strings.Join(manyAtts, ","))

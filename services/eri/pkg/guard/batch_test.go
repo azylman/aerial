@@ -163,7 +163,7 @@ func TestCheckBatch(t *testing.T) {
 	// Concurrency test: 10 concurrent goroutines calling CheckBatchWithDir
 	var wg sync.WaitGroup
 	concurrentSession := "concurrent-session"
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
@@ -183,7 +183,7 @@ func TestCheckBatch(t *testing.T) {
 	// Max records truncation (DefaultMaxRecords = 30)
 	truncDir := t.TempDir()
 	truncSession := "trunc-session"
-	for i := 0; i < 35; i++ {
+	for i := range 35 {
 		p := Payload{
 			ConversationID: truncSession,
 			StepIdx:        i + 1,
@@ -272,7 +272,7 @@ func TestCheckBatch(t *testing.T) {
 	invDir := t.TempDir()
 	t.Setenv("AERIAL_BATCH_GUARD_DIR", invDir)
 	_ = RecordPreInvocation(Payload{ConversationID: "inv-s", InvocationNum: 1})
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		if d := CheckBatchWithDir(Payload{ConversationID: "inv-s", StepIdx: 10 + i, ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/same_turn.go"}, invDir, now.Add(time.Duration(i*3)*time.Second)); d.Decision != DecisionAllow {
 			t.Fatalf("parallel edit %d in same invocationNum=1 should be allowed, got: %+v", i, d)
 		}

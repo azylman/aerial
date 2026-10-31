@@ -783,7 +783,7 @@ func TestSyncRules(t *testing.T) {
 			if tc.concurrent {
 				var wg sync.WaitGroup
 				errCh := make(chan error, 5)
-				for i := 0; i < 5; i++ {
+				for i := range 5 {
 					wg.Add(1)
 					go func(idx int) {
 						defer wg.Done()

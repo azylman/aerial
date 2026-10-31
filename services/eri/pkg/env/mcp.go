@@ -123,6 +123,7 @@ func selectTargetServers(cur *config.ConfigData, target RuleTarget) []map[string
 		if cur.McpServers.Voice != nil {
 			targetServers = append(targetServers, cur.McpServers.Voice)
 		}
+	case TargetEphemeral:
 	}
 	return targetServers
 }

@@ -177,7 +177,7 @@ func buildWidgetHeaderText(req StatusWidgetRequest) string {
 	isBuild := strings.HasPrefix(req.ID, "build-") || len(req.Chunks) > 1 || req.Tier > 0
 	if isBuild {
 		if trimmedTitle := strings.TrimSpace(req.Title); trimmedTitle != "" {
-			return fmt.Sprintf("### 🛠️ %s", trimmedTitle)
+			return "### 🛠️ " + trimmedTitle
 		}
 		return "### 🛠️ Vanadis Build"
 	}

@@ -423,10 +423,10 @@ func TestFakeStoreSessionOperations(t *testing.T) {
 
 	_ = s.SaveSessionID(ctx, "ext-1", "int-1")
 
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		_, _ = s.IncrementSessionTurnCount(ctx, "th-unrotated")
 	}
-	for i := 0; i < 12; i++ {
+	for range 12 {
 		_, _ = s.IncrementSessionTurnCount(ctx, "th-unrotated-2")
 	}
 	s.SetSessionUpdatedAt("th-unrotated", time.Now().UTC().Add(-2*time.Hour))

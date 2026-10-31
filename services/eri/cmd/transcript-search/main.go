@@ -159,7 +159,7 @@ func formatSearchSessions(sb *strings.Builder, sessions []db.SessionSummary) {
 			shortID = shortID[:8] + "..."
 		}
 		link := fmt.Sprintf("[%s](conversation://%s)", shortID, convID)
-		sb.WriteString(fmt.Sprintf("- Session %s", link))
+		sb.WriteString("- Session " + link)
 		if s.ThreadID != "" {
 			sb.WriteString(fmt.Sprintf(" (Thread: `%s`)", s.ThreadID))
 		}

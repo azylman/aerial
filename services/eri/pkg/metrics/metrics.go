@@ -529,7 +529,7 @@ func isUUIDString(s string) bool {
 	if len(s) != 36 || s[8] != '-' || s[13] != '-' || s[18] != '-' || s[23] != '-' {
 		return false
 	}
-	for i := 0; i < 36; i++ {
+	for i := range 36 {
 		if i == 8 || i == 13 || i == 18 || i == 23 {
 			continue
 		}
@@ -554,7 +554,7 @@ func SanitizeChannelLabel(channel string) string {
 	}
 	// Check if channel is numeric snowflake
 	isNumeric := true
-	for i := 0; i < len(channel); i++ {
+	for i := range len(channel) {
 		if channel[i] < '0' || channel[i] > '9' {
 			isNumeric = false
 			break

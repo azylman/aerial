@@ -610,7 +610,7 @@ func TestSessionStorageAndRotationMetrics(t *testing.T) {
 					var content string
 					if tc.stepCount > 0 {
 						var sb strings.Builder
-						for i := 0; i < tc.stepCount; i++ {
+						for i := range tc.stepCount {
 							typ := "PLANNER_RESPONSE"
 							source := "MODEL"
 							if i < tc.turnCount {

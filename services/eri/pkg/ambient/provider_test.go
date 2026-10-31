@@ -327,7 +327,7 @@ func TestProvider_SingleflightDeduplication(t *testing.T) {
 	results := make([]string, concurrentCallers)
 	errorsList := make([]error, concurrentCallers)
 
-	for i := 0; i < concurrentCallers; i++ {
+	for i := range concurrentCallers {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
@@ -805,7 +805,7 @@ func TestProvider_StaleWhileRevalidate(t *testing.T) {
 		t.Fatal("timed out waiting for background refresh")
 	}
 
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		time.Sleep(10 * time.Millisecond)
 		p.mu.RLock()
 		cached := p.cache
@@ -958,7 +958,7 @@ func TestProvider_AtomicCAS_PreventsConcurrentRefresh(t *testing.T) {
 	var wg sync.WaitGroup
 	results := make([]string, concurrent)
 
-	for i := 0; i < concurrent; i++ {
+	for i := range concurrent {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
