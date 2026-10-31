@@ -2,11 +2,13 @@ package delivery
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -20,6 +22,26 @@ const (
 	MaxAttachmentsPerMessage = 10
 	MaxAttachmentSizeBytes   = 8 * 1024 * 1024 // 8 MB
 )
+
+var (
+	internalMediaHTTPClient = &http.Client{Timeout: 5 * time.Second}
+	allowedInternalHosts    = map[string]bool{}
+)
+
+func isInternalAerialHTTPURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return false
+	}
+	return strings.HasSuffix(host, ".aerial") || allowedInternalHosts[host]
+}
 
 // AllowedAttachmentRoots defines the whitelisted root directories for local file attachments.
 var AllowedAttachmentRoots = []string{
@@ -52,6 +74,59 @@ func (a *Attachment) ToDiscordFile() *discordgo.File {
 }
 
 var mdImageRegex = regexp.MustCompile(`!\[([^\]]*)\]\(([^)]+)\)`)
+
+func formatUnavailableFallback(altText, baseName string) string {
+	if altText != "" {
+		return fmt.Sprintf("*(Image attachment unavailable: %s - %s)*", altText, baseName)
+	}
+	return fmt.Sprintf("*(Image attachment unavailable: %s)*", baseName)
+}
+
+func sanitizeImageURLFallbackBaseName(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "image.jpg"
+	}
+	b := filepath.Base(u.Path)
+	if b == "" || b == "." || b == "/" {
+		return "image.jpg"
+	}
+	return b
+}
+
+func processInternalImageMatch(rawPath, altText string, attachments *[]*Attachment) string {
+	if len(*attachments) >= MaxAttachmentsPerMessage {
+		return ""
+	}
+	att, err := ResolveAndFetchInternalImage(rawPath)
+	if err != nil {
+		return formatUnavailableFallback(altText, sanitizeImageURLFallbackBaseName(rawPath))
+	}
+	*attachments = append(*attachments, att)
+	if altText != "" {
+		return fmt.Sprintf("**%s**", altText)
+	}
+	return ""
+}
+
+func processLocalImageMatch(rawPath, baseDir, altText string, attachments *[]*Attachment) string {
+	if len(*attachments) >= MaxAttachmentsPerMessage {
+		return ""
+	}
+	att, err := ResolveAndValidateLocalImage(rawPath, baseDir)
+	if err != nil {
+		baseName := filepath.Base(rawPath)
+		if baseName == "" || baseName == "." {
+			baseName = "image"
+		}
+		return formatUnavailableFallback(altText, baseName)
+	}
+	*attachments = append(*attachments, att)
+	if altText != "" {
+		return fmt.Sprintf("**%s**", altText)
+	}
+	return ""
+}
 
 // ExtractAndSanitizeMedia parses markdown image references, resolves and validates local files,
 // extracts valid attachments up to MaxAttachmentsPerMessage, and returns sanitized text and attachments.
@@ -94,32 +169,21 @@ func ExtractAndSanitizeMedia(text string, baseDir string) (string, []*Attachment
 			altText := strings.TrimSpace(sub[1])
 			rawPath := strings.TrimSpace(sub[2])
 
-			// Remote URLs: leave untouched for Discord client unfurling
+			// Remote URLs: check if internal .aerial URL to attach, otherwise leave untouched for Discord client unfurling
 			if strings.HasPrefix(rawPath, "http://") || strings.HasPrefix(rawPath, "https://") {
-				return match
+				if !isInternalAerialHTTPURL(rawPath) {
+					return match
+				}
+				if len(attachments) >= MaxAttachmentsPerMessage {
+					return match
+				}
+				return processInternalImageMatch(rawPath, altText, &attachments)
 			}
 
 			if len(attachments) >= MaxAttachmentsPerMessage {
 				return match
 			}
-
-			att, err := ResolveAndValidateLocalImage(rawPath, baseDir)
-			if err != nil {
-				baseName := filepath.Base(rawPath)
-				if baseName == "" || baseName == "." {
-					baseName = "image"
-				}
-				if altText != "" {
-					return fmt.Sprintf("*(Image attachment unavailable: %s - %s)*", altText, baseName)
-				}
-				return fmt.Sprintf("*(Image attachment unavailable: %s)*", baseName)
-			}
-
-			attachments = append(attachments, att)
-			if altText != "" {
-				return fmt.Sprintf("**%s**", altText)
-			}
-			return ""
+			return processLocalImageMatch(rawPath, baseDir, altText, &attachments)
 		})
 
 		processedLines = append(processedLines, newLine)
@@ -435,14 +499,9 @@ var extMIMEMap = map[string]string{
 	".flac": "audio/flac",
 }
 
-func detectMediaMIMEType(f *os.File, canonicalPath string) (string, error) {
-	header := make([]byte, 512)
-	n, err := f.Read(header)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return "", fmt.Errorf("failed to read file header: %w", err)
-	}
-	mimeType := http.DetectContentType(header[:n])
-	ext := strings.ToLower(filepath.Ext(canonicalPath))
+func detectMediaMIMETypeBytes(data []byte, ext string) (string, error) {
+	mimeType := http.DetectContentType(data)
+	ext = strings.ToLower(ext)
 
 	if !strings.HasPrefix(mimeType, "image/") && !strings.HasPrefix(mimeType, "audio/") {
 		if mimeType == "application/octet-stream" {
@@ -467,6 +526,77 @@ func detectMediaMIMEType(f *os.File, canonicalPath string) (string, error) {
 		return "", fmt.Errorf("unsupported MIME type %q: only image/* and audio/* allowed", mimeType)
 	}
 	return mimeType, nil
+}
+
+func detectMediaMIMEType(f *os.File, canonicalPath string) (string, error) {
+	header := make([]byte, 512)
+	n, err := f.Read(header)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", fmt.Errorf("failed to read file header: %w", err)
+	}
+	return detectMediaMIMETypeBytes(header[:n], filepath.Ext(canonicalPath))
+}
+
+// ResolveAndFetchInternalImage fetches and validates an image from an internal .aerial endpoint.
+func ResolveAndFetchInternalImage(rawURL string) (*Attachment, error) {
+	if !isInternalAerialHTTPURL(rawURL) {
+		return nil, fmt.Errorf("url %q is not an allowed internal .aerial endpoint", rawURL)
+	}
+
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid url: %w", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create http request: %w", err)
+	}
+
+	resp, err := internalMediaHTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch internal media: %w", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected http status %d", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, MaxAttachmentSizeBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	if len(data) == 0 {
+		return nil, fmt.Errorf("response body is empty (0 bytes)")
+	}
+	if int64(len(data)) > MaxAttachmentSizeBytes {
+		return nil, fmt.Errorf("response size %d exceeds limit of %d bytes", len(data), MaxAttachmentSizeBytes)
+	}
+
+	baseName := filepath.Base(u.Path)
+	ext := filepath.Ext(u.Path)
+	if ext == "" || baseName == "" || baseName == "." || baseName == "/" {
+		baseName = "image.jpg"
+		ext = ".jpg"
+	}
+
+	mimeType, err := detectMediaMIMETypeBytes(data, ext)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Attachment{
+		Filename:    baseName,
+		ContentType: mimeType,
+		Data:        data,
+	}, nil
 }
 
 // ResolveAndValidateLocalImage validates path sandboxing, symlinks, file type, size, and MIME header.

@@ -6,6 +6,9 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -494,6 +497,193 @@ func TestExtractAndSanitizeMedia_EdgePaths(t *testing.T) {
 	out2, _ := ExtractAndSanitizeMedia("Here is: ![](/does/not/exist.png)", tmpDir)
 	if !strings.Contains(out2, "*(Image attachment unavailable: exist.png)*") {
 		t.Errorf("expected fallback without alt text, got %s", out2)
+	}
+}
+
+func TestExtractAndSanitizeMedia_InternalAerialImages(t *testing.T) {
+	// Generate valid test PNG data
+	img := image.NewRGBA(image.Rect(0, 0, 5, 5))
+	var pngBuf bytes.Buffer
+	if err := png.Encode(&pngBuf, img); err != nil {
+		t.Fatalf("failed to encode png: %v", err)
+	}
+	validPNGData := pngBuf.Bytes()
+
+	// Setup mock internal server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/media/storyboard.png":
+			w.Header().Set("Content-Type", "image/png")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(validPNGData)
+		case "/media/noext":
+			w.Header().Set("Content-Type", "image/png")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(validPNGData)
+		case "/media/notfound.png":
+			http.NotFound(w, r)
+		case "/media/error.png":
+			w.WriteHeader(http.StatusInternalServerError)
+		case "/media/empty.png":
+			w.WriteHeader(http.StatusOK)
+		case "/media/oversized.png":
+			w.WriteHeader(http.StatusOK)
+			chunk := make([]byte, 1024*1024)
+			for i := 0; i < 9; i++ {
+				_, _ = w.Write(chunk)
+			}
+		case "/media/corrupt.png":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("not a valid image or audio format"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("failed to parse server url: %v", err)
+	}
+
+	// Register test server host in allowedInternalHosts
+	serverHost := strings.ToLower(serverURL.Hostname())
+	allowedInternalHosts[serverHost] = true
+	defer delete(allowedInternalHosts, serverHost)
+
+	tests := []struct {
+		name               string
+		input              string
+		wantAttachments    int
+		wantAttachmentName string
+		wantContentType    string
+		wantTextContain    string
+		wantTextNotContain string
+	}{
+		{
+			name:               "valid internal image attached and replaced with alt text",
+			input:              fmt.Sprintf("Episode ready:\n![Garage Storyboard](%s/media/storyboard.png)", server.URL),
+			wantAttachments:    1,
+			wantAttachmentName: "storyboard.png",
+			wantContentType:    "image/png",
+			wantTextContain:    "**Garage Storyboard**",
+			wantTextNotContain: server.URL,
+		},
+		{
+			name:               "valid internal image without extension defaults to image.jpg",
+			input:              fmt.Sprintf("Episode ready:\n![Snapshot](%s/media/noext)", server.URL),
+			wantAttachments:    1,
+			wantAttachmentName: "image.jpg",
+			wantContentType:    "image/png",
+			wantTextContain:    "**Snapshot**",
+			wantTextNotContain: server.URL,
+		},
+		{
+			name:               "404 internal image fallback indicator",
+			input:              fmt.Sprintf("Check this:\n![Missing](%s/media/notfound.png)", server.URL),
+			wantAttachments:    0,
+			wantTextContain:    "*(Image attachment unavailable: Missing - notfound.png)*",
+			wantTextNotContain: server.URL,
+		},
+		{
+			name:               "500 internal image fallback indicator",
+			input:              fmt.Sprintf("Check this:\n![Broken](%s/media/error.png)", server.URL),
+			wantAttachments:    0,
+			wantTextContain:    "*(Image attachment unavailable: Broken - error.png)*",
+			wantTextNotContain: server.URL,
+		},
+		{
+			name:               "empty internal image fallback indicator",
+			input:              fmt.Sprintf("Check this:\n![Empty](%s/media/empty.png)", server.URL),
+			wantAttachments:    0,
+			wantTextContain:    "*(Image attachment unavailable: Empty - empty.png)*",
+			wantTextNotContain: server.URL,
+		},
+		{
+			name:               "oversized internal image fallback indicator",
+			input:              fmt.Sprintf("Check this:\n![Big](%s/media/oversized.png)", server.URL),
+			wantAttachments:    0,
+			wantTextContain:    "*(Image attachment unavailable: Big - oversized.png)*",
+			wantTextNotContain: server.URL,
+		},
+		{
+			name:               "corrupt non-image internal payload fallback indicator",
+			input:              fmt.Sprintf("Check this:\n![Corrupt](%s/media/corrupt.png)", server.URL),
+			wantAttachments:    0,
+			wantTextContain:    "*(Image attachment unavailable: Corrupt - corrupt.png)*",
+			wantTextNotContain: server.URL,
+		},
+		{
+			name:               "external public url is untouched for discord unfurling",
+			input:              "Here is an external diagram:\n![External Diagram](https://example.com/remote.png)",
+			wantAttachments:    0,
+			wantTextContain:    "![External Diagram](https://example.com/remote.png)",
+			wantTextNotContain: "**External Diagram**",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cleanText, attachments := ExtractAndSanitizeMedia(tc.input, "")
+			if len(attachments) != tc.wantAttachments {
+				t.Fatalf("expected %d attachments, got %d", tc.wantAttachments, len(attachments))
+			}
+			if tc.wantAttachments > 0 {
+				if attachments[0].Filename != tc.wantAttachmentName {
+					t.Errorf("expected attachment name %q, got %q", tc.wantAttachmentName, attachments[0].Filename)
+				}
+				if attachments[0].ContentType != tc.wantContentType {
+					t.Errorf("expected content type %q, got %q", tc.wantContentType, attachments[0].ContentType)
+				}
+			}
+			if tc.wantTextContain != "" && !strings.Contains(cleanText, tc.wantTextContain) {
+				t.Errorf("expected cleanText to contain %q, got %q", tc.wantTextContain, cleanText)
+			}
+			if tc.wantTextNotContain != "" && strings.Contains(cleanText, tc.wantTextNotContain) {
+				t.Errorf("expected cleanText to not contain %q, got %q", tc.wantTextNotContain, cleanText)
+			}
+		})
+	}
+}
+
+func TestResolveAndFetchInternalImage_Validation(t *testing.T) {
+	tests := []struct {
+		name    string
+		rawURL  string
+		wantErr bool
+	}{
+		{
+			name:    "disallowed non-internal domain",
+			rawURL:  "https://example.com/pic.png",
+			wantErr: true,
+		},
+		{
+			name:    "invalid url format",
+			rawURL:  "://invalid-url",
+			wantErr: true,
+		},
+		{
+			name:    "unsupported scheme file",
+			rawURL:  "file:///vision.aerial/media/test.png",
+			wantErr: true,
+		},
+		{
+			name:    "internal .aerial host with connection refused",
+			rawURL:  "http://vision.aerial:59999/nonexistent.jpg",
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ResolveAndFetchInternalImage(tc.rawURL)
+			if tc.wantErr && err == nil {
+				t.Errorf("expected error for %s, got nil", tc.rawURL)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("unexpected error for %s: %v", tc.rawURL, err)
+			}
+		})
 	}
 }
 
