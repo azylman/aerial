@@ -2,6 +2,7 @@ package queue
 
 import (
 	"fmt"
+	"log"
 	"slices"
 	"sort"
 	"strings"
@@ -96,6 +97,27 @@ func IsNumericSnowflake(id string) bool {
 	return true
 }
 
+func fetchAndCacheRESTChannel(s *discordgo.Session, channelID string) (ChannelSnapshot, bool) {
+	if s.Token == "" || !IsNumericSnowflake(channelID) {
+		return ChannelSnapshot{}, false
+	}
+	res, err, _ := restSingleFlight.Do(channelID, func() (interface{}, error) { return s.Channel(channelID) })
+	if err != nil {
+		return ChannelSnapshot{}, false
+	}
+	ch, ok := res.(*discordgo.Channel)
+	if !ok || ch == nil {
+		return ChannelSnapshot{}, false
+	}
+	CacheDiscordChannel(ch)
+	if s.State != nil {
+		if err := s.State.ChannelAdd(ch); err != nil {
+			log.Printf("[Queue] Notice: channel state cache update: %v", err)
+		}
+	}
+	return GetCachedChannel(channelID)
+}
+
 func resolveChannelSnapshot(s *discordgo.Session, channelID string) (ChannelSnapshot, bool) {
 	if channelID == "" {
 		return ChannelSnapshot{}, false
@@ -112,22 +134,7 @@ func resolveChannelSnapshot(s *discordgo.Session, channelID string) (ChannelSnap
 			return GetCachedChannel(channelID)
 		}
 	}
-	if s.Token != "" && IsNumericSnowflake(channelID) {
-		res, err, _ := restSingleFlight.Do(channelID, func() (interface{}, error) { return s.Channel(channelID) })
-		if err == nil {
-			if ch, ok := res.(*discordgo.Channel); ok && ch != nil {
-				CacheDiscordChannel(ch)
-				if s.State != nil {
-					if err := s.State.ChannelAdd(ch); err != nil {
-						// best effort state cache update
-						_ = err
-					}
-				}
-				return GetCachedChannel(channelID)
-			}
-		}
-	}
-	return ChannelSnapshot{}, false
+	return fetchAndCacheRESTChannel(s, channelID)
 }
 
 // ResolveChannelAndThread resolves a Discord channel or thread to its effective channel ID,

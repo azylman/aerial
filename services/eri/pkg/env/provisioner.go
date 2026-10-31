@@ -134,6 +134,22 @@ func (p *Provisioner) provisionOAuthState(configDir string) error {
 	return nil
 }
 
+func (p *Provisioner) applyOAuthSettings(settings map[string]interface{}, configDir, settingsPath string) error {
+	// OAuth / ADC mode: modelProvider must NOT be set to "gemini"
+	if mp, exists := settings["modelProvider"]; exists {
+		log.Printf("Purging modelProvider=%v from %s (OAuth/ADC mode requires omitting modelProvider)", mp, settingsPath)
+		delete(settings, "modelProvider")
+	}
+	delete(settings, "apiKey")
+	if _, exists := settings["useG1Credits"]; !exists {
+		settings["useG1Credits"] = true
+	}
+	if _, exists := settings["trustedWorkspaces"]; !exists {
+		settings["trustedWorkspaces"] = []string{"/app"}
+	}
+	return p.provisionOAuthState(configDir)
+}
+
 // SyncSettings writes ~/.gemini/antigravity-cli/settings.json matching the authentication mode.
 func (p *Provisioner) SyncSettings(apiKey, model string) error {
 	if p == nil || p.homeDir == "" {
@@ -155,19 +171,7 @@ func (p *Provisioner) SyncSettings(apiKey, model string) error {
 	}
 
 	if apiKey == "" {
-		// OAuth / ADC mode: modelProvider must NOT be set to "gemini"
-		if mp, exists := settings["modelProvider"]; exists {
-			log.Printf("Purging modelProvider=%v from %s (OAuth/ADC mode requires omitting modelProvider)", mp, settingsPath)
-			delete(settings, "modelProvider")
-		}
-		delete(settings, "apiKey")
-		if _, exists := settings["useG1Credits"]; !exists {
-			settings["useG1Credits"] = true
-		}
-		if _, exists := settings["trustedWorkspaces"]; !exists {
-			settings["trustedWorkspaces"] = []string{"/app"}
-		}
-		if err := p.provisionOAuthState(configDir); err != nil {
+		if err := p.applyOAuthSettings(settings, configDir, settingsPath); err != nil {
 			return err
 		}
 	} else {

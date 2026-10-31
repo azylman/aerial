@@ -424,18 +424,26 @@ func IsCapacityBlip(errDetail, stderr string) bool {
 	return exact && dur <= 5*time.Second
 }
 
+func parseMatchedResetDuration(matchText string) (time.Duration, bool) {
+	raw := reWhitespace.ReplaceAllString(quotaUnitReplacer.Replace(strings.ToLower(strings.TrimSpace(matchText))), "")
+	d, err := time.ParseDuration(strings.Trim(raw, ".\"')[] "))
+	if err != nil {
+		return 0, false
+	}
+	if d < 0 {
+		return 0, true
+	}
+	if d > 24*time.Hour {
+		return 24 * time.Hour, true
+	}
+	return d, true
+}
+
 func ExtractQuotaResetDuration(errDetail, stderr string) (time.Duration, bool) {
 	combined := strings.ToLower(errDetail + "\n" + stderr)
 	match := reQuotaResetIn.FindStringSubmatch(errDetail + "\n" + stderr)
 	if len(match) > 1 {
-		raw := reWhitespace.ReplaceAllString(quotaUnitReplacer.Replace(strings.ToLower(strings.TrimSpace(match[1]))), "")
-		if d, err := time.ParseDuration(strings.Trim(raw, ".\"')[] ")); err == nil {
-			if d < 0 {
-				return 0, true
-			}
-			if d > 24*time.Hour {
-				return 24 * time.Hour, true
-			}
+		if d, ok := parseMatchedResetDuration(match[1]); ok {
 			return d, true
 		}
 	}

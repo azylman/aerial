@@ -328,6 +328,48 @@ func NormalizeScopeName(scopeName string) string {
 	return NormalizeChannelName(scopeName)
 }
 
+func readScopeInstructionsFile(cleanDir, cand, normName string) (string, bool) {
+	targetPath := filepath.Join(cleanDir, cand+".md")
+	cleanTarget := filepath.Clean(targetPath)
+	if !strings.HasPrefix(cleanTarget, cleanDir+string(filepath.Separator)) {
+		return "", false
+	}
+	info, err := os.Stat(cleanTarget)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", false
+	}
+	f, err := os.Open(cleanTarget)
+	if err != nil {
+		return "", false
+	}
+	data, err := io.ReadAll(io.LimitReader(f, 64*1024))
+	if closeErr := f.Close(); closeErr != nil {
+		log.Printf("[Config] Warning closing instructions file %s: %v", cleanTarget, closeErr)
+	}
+	if err != nil {
+		return "", false
+	}
+	trimmed := strings.TrimSpace(string(data))
+	if len(trimmed) > 0 {
+		// Defensively escape any closing delimiter tags to prevent breakout
+		sanitized := reChannelInstructionsTag.ReplaceAllString(trimmed, "<\\/CHANNEL_INSTRUCTIONS>")
+		sanitized = reScopeInstructionsTag.ReplaceAllString(sanitized, "<\\/SCOPE_INSTRUCTIONS>")
+		instructionsCacheMu.Lock()
+		instructionsCache[normName] = sanitized
+		instructionsCacheMu.Unlock()
+		return sanitized, true
+	}
+
+	instructionsCacheMu.RLock()
+	cached, hasCached := instructionsCache[normName]
+	instructionsCacheMu.RUnlock()
+	if hasCached && cached != "" {
+		log.Printf("[Config] Active file is empty (possible GitSync torn read), using cached instructions for %q", normName)
+		return cached, true
+	}
+	return "", false
+}
+
 // LoadScopeInstructions loads per-scope (channel, node, kiosk) instructions from convention-based markdown files.
 // It normalizes the scope name, searches ScopeInstructionsDirs with path confinement,
 // enforces regular file checks, caps reading at 64KB, and sanitizes instructions closing tags.
@@ -357,43 +399,8 @@ func LoadScopeInstructions(scopeName string) string {
 
 	for _, cleanDir := range searchDirs {
 		for _, cand := range candidateNames {
-			targetPath := filepath.Join(cleanDir, cand+".md")
-			cleanTarget := filepath.Clean(targetPath)
-			if !strings.HasPrefix(cleanTarget, cleanDir+string(filepath.Separator)) {
-				continue
-			}
-			info, err := os.Stat(cleanTarget)
-			if err != nil || !info.Mode().IsRegular() {
-				continue
-			}
-			f, err := os.Open(cleanTarget)
-			if err != nil {
-				continue
-			}
-			data, err := io.ReadAll(io.LimitReader(f, 64*1024))
-			if closeErr := f.Close(); closeErr != nil {
-				log.Printf("[Config] Warning closing instructions file %s: %v", cleanTarget, closeErr)
-			}
-			if err != nil {
-				continue
-			}
-			trimmed := strings.TrimSpace(string(data))
-			if len(trimmed) > 0 {
-				// Defensively escape any closing delimiter tags to prevent breakout
-				sanitized := reChannelInstructionsTag.ReplaceAllString(trimmed, "<\\/CHANNEL_INSTRUCTIONS>")
-				sanitized = reScopeInstructionsTag.ReplaceAllString(sanitized, "<\\/SCOPE_INSTRUCTIONS>")
-				instructionsCacheMu.Lock()
-				instructionsCache[normName] = sanitized
-				instructionsCacheMu.Unlock()
-				return sanitized
-			}
-
-			instructionsCacheMu.RLock()
-			cached, hasCached := instructionsCache[normName]
-			instructionsCacheMu.RUnlock()
-			if hasCached && cached != "" {
-				log.Printf("[Config] Active file is empty (possible GitSync torn read), using cached instructions for %q", normName)
-				return cached
+			if content, ok := readScopeInstructionsFile(cleanDir, cand, normName); ok {
+				return content
 			}
 		}
 	}

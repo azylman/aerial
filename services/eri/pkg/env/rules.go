@@ -284,18 +284,22 @@ func (p *Provisioner) syncRulesToDir(rules []ruleSourceFile, geminiDir string) e
 }
 
 func (p *Provisioner) linkOrCopyAsset(src, dst string) {
-	if _, err := os.Stat(src); err == nil {
-		if rErr := os.Remove(dst); rErr != nil && !os.IsNotExist(rErr) {
-			log.Printf("[Env] Warning: failed to remove %s before link: %v", dst, rErr)
-		}
-		if sErr := symlinkRuntimeAsset(src, dst); sErr != nil {
-			data, rErr := os.ReadFile(src)
-			if rErr != nil {
-				log.Printf("[Env] Warning: failed to read %s for runtime copy: %v", src, rErr)
-			} else if wErr := p.writeAtomic(dst, string(data)); wErr != nil {
-				log.Printf("[Env] Warning: failed to copy %s to runtime: %v", src, wErr)
-			}
-		}
+	if _, err := os.Stat(src); err != nil {
+		return
+	}
+	if rErr := os.Remove(dst); rErr != nil && !os.IsNotExist(rErr) {
+		log.Printf("[Env] Warning: failed to remove %s before link: %v", dst, rErr)
+	}
+	if sErr := symlinkRuntimeAsset(src, dst); sErr == nil {
+		return
+	}
+	data, rErr := os.ReadFile(src)
+	if rErr != nil {
+		log.Printf("[Env] Warning: failed to read %s for runtime copy: %v", src, rErr)
+		return
+	}
+	if wErr := p.writeAtomic(dst, string(data)); wErr != nil {
+		log.Printf("[Env] Warning: failed to copy %s to runtime: %v", src, wErr)
 	}
 }
 

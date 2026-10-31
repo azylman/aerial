@@ -175,30 +175,33 @@ func reconcileTargetSkills(targetDir string, allowedSkills map[string]string) in
 		tmpDest := destPath + ".tmp"
 		ignore(removeSkill(tmpDest))
 
-		if err := symlinkSkill(srcPath, tmpDest); err != nil {
-			// Fallback: remove dest and symlink directly
-			ignore(removeSkill(destPath))
-			if err := symlinkSkill(srcPath, destPath); err != nil {
-				log.Printf("[Skills] Warning: failed to symlink skill %s -> %s: %v", srcPath, destPath, err)
-			} else {
-				installedCount++
-			}
-		} else {
-			if err := renameSkill(tmpDest, destPath); err != nil {
-				ignore(removeSkill(destPath))
-				if err := renameSkill(tmpDest, destPath); err != nil {
-					log.Printf("[Skills] Warning renaming %s -> %s: %v", tmpDest, destPath, err)
-				} else {
-					installedCount++
-				}
-			} else {
-				installedCount++
-			}
+		if linkSkillTarget(srcPath, destPath, tmpDest) {
+			installedCount++
 		}
 	}
 
 	sweepOrphanedSymlinks([]string{targetDir})
 	return installedCount
+}
+
+func linkSkillTarget(srcPath, destPath, tmpDest string) bool {
+	if err := symlinkSkill(srcPath, tmpDest); err != nil {
+		ignore(removeSkill(destPath))
+		if err := symlinkSkill(srcPath, destPath); err != nil {
+			log.Printf("[Skills] Warning: failed to symlink skill %s -> %s: %v", srcPath, destPath, err)
+			return false
+		}
+		return true
+	}
+
+	if err := renameSkill(tmpDest, destPath); err != nil {
+		ignore(removeSkill(destPath))
+		if err := renameSkill(tmpDest, destPath); err != nil {
+			log.Printf("[Skills] Warning renaming %s -> %s: %v", tmpDest, destPath, err)
+			return false
+		}
+	}
+	return true
 }
 
 func sweepOrphanedSymlinks(targetSkillDirs []string) {

@@ -205,6 +205,27 @@ func ExtractReplyingToAuthor(m db.Message) string {
 	return ""
 }
 
+func replaceMentionsInBody(bodyText string, m db.Message) string {
+	if len(m.Mentions) == 0 {
+		return bodyText
+	}
+	for i, uID := range m.MentionUserIDs {
+		if i < len(m.Mentions) && uID != "" && m.Mentions[i] != "" {
+			name := m.Mentions[i]
+			bodyText = strings.ReplaceAll(bodyText, "<@"+uID+">", "@"+name)
+			bodyText = strings.ReplaceAll(bodyText, "<@!"+uID+">", "@"+name)
+		}
+	}
+	userCount := len(m.MentionUserIDs)
+	for i, rID := range m.MentionRoleIDs {
+		roleIdx := userCount + i
+		if roleIdx < len(m.Mentions) && rID != "" && m.Mentions[roleIdx] != "" {
+			bodyText = strings.ReplaceAll(bodyText, "<@&"+rID+">", "@"+m.Mentions[roleIdx])
+		}
+	}
+	return bodyText
+}
+
 func resolveMessageParts(m db.Message) (author, replyTo, bodyText string) {
 	author = SanitizeAuthor(m.AuthorName)
 	if author == "" {
@@ -225,29 +246,7 @@ func resolveMessageParts(m db.Message) (author, replyTo, bodyText string) {
 	}
 
 	bodyText = SanitizeContent(m.BodyText())
-	if len(m.MentionUserIDs) > 0 && len(m.Mentions) > 0 {
-		for i, uID := range m.MentionUserIDs {
-			if i < len(m.Mentions) && uID != "" {
-				name := m.Mentions[i]
-				if name != "" {
-					bodyText = strings.ReplaceAll(bodyText, "<@"+uID+">", "@"+name)
-					bodyText = strings.ReplaceAll(bodyText, "<@!"+uID+">", "@"+name)
-				}
-			}
-		}
-	}
-	if len(m.MentionRoleIDs) > 0 && len(m.Mentions) > 0 {
-		userCount := len(m.MentionUserIDs)
-		for i, rID := range m.MentionRoleIDs {
-			roleIdx := userCount + i
-			if roleIdx < len(m.Mentions) && rID != "" {
-				name := m.Mentions[roleIdx]
-				if name != "" {
-					bodyText = strings.ReplaceAll(bodyText, "<@&"+rID+">", "@"+name)
-				}
-			}
-		}
-	}
+	bodyText = replaceMentionsInBody(bodyText, m)
 	return author, replyTo, bodyText
 }
 
@@ -423,25 +422,26 @@ func (c *Classifier) resolveTitleModel() string {
 	if c.cfg != nil {
 		cur = c.cfg.Current()
 	}
-	if cur != nil {
-		if cur.ThreadTitleModel != "" {
-			return cur.ThreadTitleModel
+	if cur == nil {
+		return c.fallbackModel(cur)
+	}
+	if cur.ThreadTitleModel != "" {
+		return cur.ThreadTitleModel
+	}
+	if cur.ThreadTitleURL != "" {
+		if c.Model != "" && c.Model != DefaultAGYClassifierModel {
+			return c.Model
 		}
-		if cur.ThreadTitleURL != "" {
-			if c.Model != "" && c.Model != DefaultAGYClassifierModel {
-				return c.Model
-			}
-			return DefaultAGYClassifierModel
+		return DefaultAGYClassifierModel
+	}
+	if cur.ClassifierURL != "" && !strings.EqualFold(cur.ClassifierProtocol, "systemone") {
+		if cur.ClassifierModel != "" {
+			return cur.ClassifierModel
 		}
-		if cur.ClassifierURL != "" && !strings.EqualFold(cur.ClassifierProtocol, "systemone") {
-			if cur.ClassifierModel != "" {
-				return cur.ClassifierModel
-			}
-			if c.Model != "" && c.Model != DefaultAGYClassifierModel {
-				return c.Model
-			}
-			return DefaultAGYClassifierModel
+		if c.Model != "" && c.Model != DefaultAGYClassifierModel {
+			return c.Model
 		}
+		return DefaultAGYClassifierModel
 	}
 	return c.fallbackModel(cur)
 }

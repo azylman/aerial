@@ -332,6 +332,57 @@ func BuildStatusWidgetComponents(req StatusWidgetRequest, now time.Time) ([]disc
 	return []discordgo.MessageComponent{container}, nil
 }
 
+func trySinkStatusWidget(s DiscordWidgetSender, channelID, trimmedMsgID string, components []discordgo.MessageComponent) (string, bool) {
+	send := &discordgo.MessageSend{
+		Flags:      discordgo.MessageFlagsIsComponentsV2 | discordgo.MessageFlagsSuppressNotifications,
+		Components: components,
+	}
+	created, sendErr := s.ChannelMessageSendComplex(channelID, send)
+	if sendErr != nil || created == nil {
+		return "", false
+	}
+	if delErr := s.ChannelMessageDelete(channelID, trimmedMsgID); delErr != nil && !delivery.IsMessageNotFoundError(delErr) {
+		log.Printf("[Widget] Warning: failed to delete old status widget message %s: %v", trimmedMsgID, delErr)
+	}
+	return created.ID, true
+}
+
+func updateExistingStatusWidget(s DiscordWidgetSender, req StatusWidgetRequest, trimmedMsgID string, components []discordgo.MessageComponent) (string, error) {
+	if !req.SkipSink && shouldSinkWidget(s, req.ChannelID, trimmedMsgID) {
+		if id, ok := trySinkStatusWidget(s, req.ChannelID, trimmedMsgID, components); ok {
+			return id, nil
+		}
+	}
+
+	edit := &discordgo.MessageEdit{
+		Channel:    req.ChannelID,
+		ID:         trimmedMsgID,
+		Content:    nil,
+		Embeds:     nil,
+		Flags:      discordgo.MessageFlagsIsComponentsV2,
+		Components: &components,
+	}
+	msg, editErr := s.ChannelMessageEditComplex(edit)
+	if editErr == nil && msg != nil {
+		return msg.ID, nil
+	}
+
+	// Check if error is 404 / Unknown Message (code 10008)
+	if delivery.IsMessageNotFoundError(editErr) {
+		send := &discordgo.MessageSend{
+			Flags:      discordgo.MessageFlagsIsComponentsV2,
+			Components: components,
+		}
+		created, sendErr := s.ChannelMessageSendComplex(req.ChannelID, send)
+		if sendErr != nil {
+			return "", fmt.Errorf("failed to send new status widget message after 404 edit: %w", sendErr)
+		}
+		return created.ID, nil
+	}
+
+	return "", fmt.Errorf("failed to edit status widget message %s: %w", trimmedMsgID, editErr)
+}
+
 // DeliverStatusWidget delivers or updates a status widget via Discord Components V2.
 func DeliverStatusWidget(s DiscordWidgetSender, req StatusWidgetRequest, now time.Time) (string, error) {
 	if s == nil {
@@ -348,47 +399,7 @@ func DeliverStatusWidget(s DiscordWidgetSender, req StatusWidgetRequest, now tim
 
 	trimmedMsgID := strings.TrimSpace(req.MessageID)
 	if trimmedMsgID != "" {
-		if !req.SkipSink && shouldSinkWidget(s, req.ChannelID, trimmedMsgID) {
-			send := &discordgo.MessageSend{
-				Flags:      discordgo.MessageFlagsIsComponentsV2 | discordgo.MessageFlagsSuppressNotifications,
-				Components: components,
-			}
-			if created, sendErr := s.ChannelMessageSendComplex(req.ChannelID, send); sendErr == nil && created != nil {
-				if delErr := s.ChannelMessageDelete(req.ChannelID, trimmedMsgID); delErr != nil && !delivery.IsMessageNotFoundError(delErr) {
-					log.Printf("[Widget] Warning: failed to delete old status widget message %s: %v", trimmedMsgID, delErr)
-				}
-				return created.ID, nil
-			}
-		}
-
-		edit := &discordgo.MessageEdit{
-			Channel:    req.ChannelID,
-			ID:         trimmedMsgID,
-			Content:    nil,
-			Embeds:     nil,
-			Flags:      discordgo.MessageFlagsIsComponentsV2,
-			Components: &components,
-		}
-		msg, editErr := s.ChannelMessageEditComplex(edit)
-		if editErr == nil && msg != nil {
-			return msg.ID, nil
-		}
-
-		// Check if error is 404 / Unknown Message (code 10008)
-		if delivery.IsMessageNotFoundError(editErr) {
-			// Fall back to sending a new message
-			send := &discordgo.MessageSend{
-				Flags:      discordgo.MessageFlagsIsComponentsV2,
-				Components: components,
-			}
-			created, sendErr := s.ChannelMessageSendComplex(req.ChannelID, send)
-			if sendErr != nil {
-				return "", fmt.Errorf("failed to send new status widget message after 404 edit: %w", sendErr)
-			}
-			return created.ID, nil
-		}
-
-		return "", fmt.Errorf("failed to edit status widget message %s: %w", trimmedMsgID, editErr)
+		return updateExistingStatusWidget(s, req, trimmedMsgID, components)
 	}
 
 	// New message

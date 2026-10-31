@@ -4,15 +4,20 @@ linters:
     - bodyclose
     - containedctx
     - copyloopvar
+    - cyclop
     - dupl
     - errcheck
     - errchkjson
     - errname
     - errorlint
     - fatcontext
+    - funlen
+    - gocognit
     - gocritic
+    - gocyclo
     - govet
     - ineffassign
+    - nestif
     - nilerr
     - nilnil
     - noctx
@@ -25,13 +30,12 @@ linters:
     - unused
     - wastedassign
   settings:
+    cyclop:
+      max-complexity: 20
+      package-average: 10.0
+      skip-tests: true
     dupl:
       threshold: 100
-    gocritic:
-      disable-all: true
-      enabled-checks:
-        - evalOrder
-        - sloppyReassign
     errcheck:
       check-type-assertions: true
       check-blank: true
@@ -48,6 +52,21 @@ linters:
         - (*database/sql.Rows).Close
         - (io.Closer).Close
         - (io.ReadCloser).Close
+    funlen:
+      lines: 150
+      statements: -1
+      ignore-comments: true
+    gocognit:
+      min-complexity: 30
+    gocritic:
+      disable-all: true
+      enabled-checks:
+        - evalOrder
+        - sloppyReassign
+    gocyclo:
+      min-complexity: 20
+    nestif:
+      min-complexity: 5
     staticcheck:
       checks:
         - "SA*"
@@ -56,10 +75,15 @@ linters:
     rules:
       - linters:
           - containedctx
+          - cyclop
           - dupl
           - errcheck
           - errchkjson
+          - funlen
+          - gocognit
+          - gocyclo
           - ineffassign
+          - nestif
           - nilnil
           - noctx
           - staticcheck

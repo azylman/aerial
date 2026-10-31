@@ -171,7 +171,7 @@ func TestRun(t *testing.T) {
 				"pkg/complex.go": complexAndDeepSource,
 			},
 			wantCode: 1,
-			wantErr:  "4 ratchet violation(s) detected",
+			wantErr:  "2 ratchet violation(s) detected",
 		},
 		{
 			name: "grandfathered baseline allows exact match and blocks growth",
@@ -268,6 +268,14 @@ func TestRun(t *testing.T) {
 			},
 			wantCode: 1,
 			wantErr:  "//nolint:dupl is prohibited",
+		},
+		{
+			name: "banned nolint gocyclo and funlen directives return error",
+			files: map[string]string{
+				"pkg/cyclo.go": "package pkg\n\n//nolint:gocyclo\nfunc f1() {}\n\n//nolint:funlen\nfunc f2() {}\n",
+			},
+			wantCode: 1,
+			wantErr:  "//nolint:gocyclo is prohibited",
 		},
 		{
 			name: "allowed nolint directives and normal comments pass cleanly",

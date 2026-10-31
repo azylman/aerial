@@ -373,6 +373,48 @@ func generateSettledSummaryText(
 	return summaryText
 }
 
+func buildSettledSummaryRecord(
+	ctx context.Context,
+	sessionID string,
+	mtime time.Time,
+	isSettled bool,
+	st transcriptScanState,
+	watermark int,
+	embedder EmbedderFunc,
+	llmFunc LLMClientFunc,
+) db.SessionSummary {
+	summaryText := generateSettledSummaryText(ctx, sessionID, isSettled, st.dialogueLines, st.step0Prompt, llmFunc)
+
+	var emb []float32
+	if embedder != nil {
+		if e, err := embedder(ctx, summaryText); err == nil && len(e) == db.ExpectedEmbeddingDim {
+			emb = e
+		}
+	}
+
+	firstStepTime := st.firstStepTime
+	if firstStepTime.IsZero() {
+		firstStepTime = mtime
+	}
+
+	lastIndexedStepToSave := st.maxStepIndex
+	if watermark == -1 && st.maxStepIndex == -1 {
+		lastIndexedStepToSave = -2
+	}
+
+	return db.SessionSummary{
+		SessionID:            sessionID,
+		Summary:              summaryText,
+		Embedding:            emb,
+		LastIndexedStep:      lastIndexedStepToSave,
+		LastMtime:            mtime,
+		SummaryStepWatermark: st.maxStepIndex,
+		IsSettled:            isSettled,
+		CreatedAt:            firstStepTime,
+		UpdatedAt:            time.Now().UTC(),
+	}
+}
+
 func buildSessionSummaryRecord(
 	ctx context.Context,
 	sessionID string,
@@ -386,44 +428,10 @@ func buildSessionSummaryRecord(
 	opts SyncOptions,
 ) (db.SessionSummary, bool, bool) {
 	isSettled := time.Since(mtime) > opts.IdleThreshold
-	shouldSummarize := false
-	if !exists {
-		shouldSummarize = true
-	} else if isSettled && (!state.IsSettled || (st.maxStepIndex >= 0 && st.maxStepIndex-state.LastIndexedStep > 10)) {
-		shouldSummarize = true
-	}
+	shouldSummarize := !exists || (isSettled && (!state.IsSettled || (st.maxStepIndex >= 0 && st.maxStepIndex-state.LastIndexedStep > 10)))
 
 	if shouldSummarize {
-		summaryText := generateSettledSummaryText(ctx, sessionID, isSettled, st.dialogueLines, st.step0Prompt, llmFunc)
-
-		var emb []float32
-		if embedder != nil {
-			if e, err := embedder(ctx, summaryText); err == nil && len(e) == db.ExpectedEmbeddingDim {
-				emb = e
-			}
-		}
-
-		firstStepTime := st.firstStepTime
-		if firstStepTime.IsZero() {
-			firstStepTime = mtime
-		}
-
-		lastIndexedStepToSave := st.maxStepIndex
-		if watermark == -1 && st.maxStepIndex == -1 {
-			lastIndexedStepToSave = -2
-		}
-
-		summaryRecord := db.SessionSummary{
-			SessionID:            sessionID,
-			Summary:              summaryText,
-			Embedding:            emb,
-			LastIndexedStep:      lastIndexedStepToSave,
-			LastMtime:            mtime,
-			SummaryStepWatermark: st.maxStepIndex,
-			IsSettled:            isSettled,
-			CreatedAt:            firstStepTime,
-			UpdatedAt:            time.Now().UTC(),
-		}
+		summaryRecord := buildSettledSummaryRecord(ctx, sessionID, mtime, isSettled, st, watermark, embedder, llmFunc)
 		return summaryRecord, true, true
 	}
 
@@ -439,6 +447,33 @@ func buildSessionSummaryRecord(
 	}
 
 	return db.SessionSummary{}, false, false
+}
+
+func insertTranscriptSteps(
+	ctx context.Context,
+	store db.TranscriptStore,
+	sessionID string,
+	stepsToInsert []db.TranscriptStep,
+	hasSummaryRecord bool,
+	summaryRecord db.SessionSummary,
+	watermark int,
+	stats *SyncStats,
+) {
+	if len(stepsToInsert) == 0 {
+		return
+	}
+	if err := store.BatchInsertTranscriptSteps(ctx, stepsToInsert); err != nil {
+		stats.Errors++
+		log.Printf("[Transcript] BatchInsertTranscriptSteps error for session %s: %v", sessionID, err)
+		if hasSummaryRecord {
+			summaryRecord.LastIndexedStep = watermark
+			if revertErr := store.UpsertSessionSummary(ctx, summaryRecord); revertErr != nil {
+				log.Printf("[Transcript] Failed to revert session summary watermark for session %s: %v", sessionID, revertErr)
+			}
+		}
+		return
+	}
+	stats.StepsInserted += len(stepsToInsert)
 }
 
 func syncSingleSession(
@@ -476,20 +511,7 @@ func syncSingleSession(
 	}
 
 	// 2. Batch insert child transcript steps now that parent session summary is guaranteed to exist.
-	if len(stepsToInsert) > 0 {
-		if err := store.BatchInsertTranscriptSteps(ctx, stepsToInsert); err != nil {
-			stats.Errors++
-			log.Printf("[Transcript] BatchInsertTranscriptSteps error for session %s: %v", sessionID, err)
-			if hasSummaryRecord {
-				summaryRecord.LastIndexedStep = watermark
-				if revertErr := store.UpsertSessionSummary(ctx, summaryRecord); revertErr != nil {
-					log.Printf("[Transcript] Failed to revert session summary watermark for session %s: %v", sessionID, revertErr)
-				}
-			}
-		} else {
-			stats.StepsInserted += len(stepsToInsert)
-		}
-	}
+	insertTranscriptSteps(ctx, store, sessionID, stepsToInsert, hasSummaryRecord, summaryRecord, watermark, stats)
 
 	return nil
 }

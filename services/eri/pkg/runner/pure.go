@@ -124,29 +124,36 @@ func CleanUnescapedString(s string) string {
 	return s
 }
 
+func extractCallMCPToolInfo(params map[string]any) (string, string) {
+	if params == nil {
+		return "call_mcp_tool", "unknown"
+	}
+	var sName, tName string
+	if s, ok := params["ServerName"].(string); ok {
+		sName = CleanUnescapedString(s)
+	}
+	if t, ok := params["ToolName"].(string); ok {
+		tName = CleanUnescapedString(t)
+	}
+	if tName != "" && sName != "" {
+		return tName, sName
+	}
+	if tName != "" {
+		return tName, "unknown"
+	}
+	if sName != "" {
+		return "call_mcp_tool", sName
+	}
+	return "call_mcp_tool", "unknown"
+}
+
 // ExtractMCPToolInfo extracts the canonical tool name and MCP server namespace.
 func ExtractMCPToolInfo(toolName string, params map[string]any) (string, string) {
 	if toolName = strings.TrimSpace(toolName); toolName == "" {
 		return "unknown", "native"
 	}
 	if toolName == "call_mcp_tool" {
-		if params != nil {
-			var sName, tName string
-			if s, ok := params["ServerName"].(string); ok {
-				sName = CleanUnescapedString(s)
-			}
-			if t, ok := params["ToolName"].(string); ok {
-				tName = CleanUnescapedString(t)
-			}
-			if tName != "" && sName != "" {
-				return tName, sName
-			} else if tName != "" {
-				return tName, "unknown"
-			} else if sName != "" {
-				return "call_mcp_tool", sName
-			}
-		}
-		return "call_mcp_tool", "unknown"
+		return extractCallMCPToolInfo(params)
 	}
 	if strings.HasPrefix(toolName, "mcp_") {
 		parts := strings.SplitN(toolName[4:], "_", 2)

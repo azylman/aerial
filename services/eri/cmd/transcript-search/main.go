@@ -150,64 +150,70 @@ func parseCLIArgs(args []string) (CLIConfig, error) {
 	return cfg, nil
 }
 
+func formatSearchSessions(sb *strings.Builder, sessions []db.SessionSummary) {
+	sb.WriteString(fmt.Sprintf("### 📄 Session Summaries (%d matches)\n", len(sessions)))
+	for _, s := range sessions {
+		convID := s.SessionID
+		shortID := convID
+		if len(shortID) > 8 {
+			shortID = shortID[:8] + "..."
+		}
+		link := fmt.Sprintf("[%s](conversation://%s)", shortID, convID)
+		sb.WriteString(fmt.Sprintf("- Session %s", link))
+		if s.ThreadID != "" {
+			sb.WriteString(fmt.Sprintf(" (Thread: `%s`)", s.ThreadID))
+		}
+		sb.WriteString(":\n")
+		if s.Summary != "" {
+			sb.WriteString(fmt.Sprintf("  *Summary:* %s\n", transcript.CleanSessionSummary(s.Summary, transcript.DefaultSummaryMaxRunes)))
+		}
+		sb.WriteString("\n")
+	}
+}
+
+func formatSearchSteps(sb *strings.Builder, steps []db.TranscriptStep) {
+	sb.WriteString(fmt.Sprintf("### 💬 Transcript Execution Steps (%d matches)\n", len(steps)))
+	for _, step := range steps {
+		convID := step.SessionID
+		shortID := convID
+		if len(shortID) > 8 {
+			shortID = shortID[:8] + "..."
+		}
+		link := fmt.Sprintf("[%s](conversation://%s)", shortID, convID)
+		toolBadge := "STEP"
+		if step.ToolName != "" {
+			toolBadge = step.ToolName
+		} else if step.StepType != "" {
+			toolBadge = step.StepType
+		}
+
+		ts := step.CreatedAt.Format("2006-01-02 15:04:05")
+		sb.WriteString(fmt.Sprintf("- **[%s]** Step #%d in %s (%s):\n", toolBadge, step.StepIndex, link, ts))
+		if step.Content != "" {
+			snippet := transcript.CleanSessionSummary(step.Content, 300)
+			if strings.Contains(snippet, "\n") {
+				sb.WriteString(fmt.Sprintf("  ```\n  %s\n  ```\n", strings.ReplaceAll(snippet, "\n", "\n  ")))
+			} else {
+				sb.WriteString(fmt.Sprintf("  *Content:* %s\n", snippet))
+			}
+		}
+		sb.WriteString("\n")
+	}
+}
+
 func formatSearchResults(res transcript.SearchResult) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("🔍 Search Results for: `%s` (mode: %s)\n\n", res.Query, res.Mode))
 
 	hasMatches := false
-
 	if len(res.Sessions) > 0 {
 		hasMatches = true
-		sb.WriteString(fmt.Sprintf("### 📄 Session Summaries (%d matches)\n", len(res.Sessions)))
-		for _, s := range res.Sessions {
-			convID := s.SessionID
-			shortID := convID
-			if len(shortID) > 8 {
-				shortID = shortID[:8] + "..."
-			}
-			link := fmt.Sprintf("[%s](conversation://%s)", shortID, convID)
-			sb.WriteString(fmt.Sprintf("- Session %s", link))
-			if s.ThreadID != "" {
-				sb.WriteString(fmt.Sprintf(" (Thread: `%s`)", s.ThreadID))
-			}
-			sb.WriteString(":\n")
-			if s.Summary != "" {
-				sb.WriteString(fmt.Sprintf("  *Summary:* %s\n", transcript.CleanSessionSummary(s.Summary, transcript.DefaultSummaryMaxRunes)))
-			}
-			sb.WriteString("\n")
-		}
+		formatSearchSessions(&sb, res.Sessions)
 	}
 
 	if len(res.Steps) > 0 {
 		hasMatches = true
-		sb.WriteString(fmt.Sprintf("### 💬 Transcript Execution Steps (%d matches)\n", len(res.Steps)))
-		for _, step := range res.Steps {
-			convID := step.SessionID
-			shortID := convID
-			if len(shortID) > 8 {
-				shortID = shortID[:8] + "..."
-			}
-			link := fmt.Sprintf("[%s](conversation://%s)", shortID, convID)
-			toolBadge := "STEP"
-			if step.ToolName != "" {
-				toolBadge = step.ToolName
-			} else if step.StepType != "" {
-				toolBadge = step.StepType
-			}
-
-			ts := step.CreatedAt.Format("2006-01-02 15:04:05")
-			sb.WriteString(fmt.Sprintf("- **[%s]** Step #%d in %s (%s):\n", toolBadge, step.StepIndex, link, ts))
-			if step.Content != "" {
-				snippet := transcript.CleanSessionSummary(step.Content, 300)
-				// Format inline code block for multiline snippet
-				if strings.Contains(snippet, "\n") {
-					sb.WriteString(fmt.Sprintf("  ```\n  %s\n  ```\n", strings.ReplaceAll(snippet, "\n", "\n  ")))
-				} else {
-					sb.WriteString(fmt.Sprintf("  *Content:* %s\n", snippet))
-				}
-			}
-			sb.WriteString("\n")
-		}
+		formatSearchSteps(&sb, res.Steps)
 	}
 
 	if !hasMatches {
@@ -400,29 +406,50 @@ func runStatsCLI(ctx context.Context, cfg CLIConfig, out io.Writer) error {
 	return writeCLIOutput(out, cfg.JSON, stats, formatted)
 }
 
-func runGetCLI(ctx context.Context, cfg CLIConfig, out io.Writer) error {
-	var res transcript.StepWindowResult
-	if !cfg.DirectDB {
-		httpRes, httpErr := executeGetHTTP(ctx, cfg)
-		if httpErr == nil {
-			res = httpRes
-		} else {
-			// Fallback to direct DB if HTTP daemon is down or unreachable
-			dbRes, dbErr := executeGetDirectDB(ctx, cfg)
-			if dbErr != nil {
-				return fmt.Errorf("get failed via HTTP (%w) and direct DB (%w)", httpErr, dbErr)
-			}
-			res = dbRes
-		}
-	} else {
+func resolveGetResult(ctx context.Context, cfg CLIConfig) (transcript.StepWindowResult, error) {
+	if cfg.DirectDB {
 		dbRes, dbErr := executeGetDirectDB(ctx, cfg)
 		if dbErr != nil {
-			return fmt.Errorf("direct DB get failed: %w", dbErr)
+			return transcript.StepWindowResult{}, fmt.Errorf("direct DB get failed: %w", dbErr)
 		}
-		res = dbRes
+		return dbRes, nil
 	}
+	httpRes, httpErr := executeGetHTTP(ctx, cfg)
+	if httpErr == nil {
+		return httpRes, nil
+	}
+	dbRes, dbErr := executeGetDirectDB(ctx, cfg)
+	if dbErr != nil {
+		return transcript.StepWindowResult{}, fmt.Errorf("get failed via HTTP (%w) and direct DB (%w)", httpErr, dbErr)
+	}
+	return dbRes, nil
+}
 
+func runGetCLI(ctx context.Context, cfg CLIConfig, out io.Writer) error {
+	res, err := resolveGetResult(ctx, cfg)
+	if err != nil {
+		return err
+	}
 	return writeCLIOutput(out, cfg.JSON, res, formatStepWindow(res))
+}
+
+func resolveSearchResult(ctx context.Context, cfg CLIConfig) (transcript.SearchResult, error) {
+	if cfg.DirectDB {
+		dbRes, dbErr := executeSearchDirectDB(ctx, cfg)
+		if dbErr != nil {
+			return transcript.SearchResult{}, fmt.Errorf("direct DB search failed: %w", dbErr)
+		}
+		return dbRes, nil
+	}
+	httpRes, httpErr := executeSearchHTTP(ctx, cfg)
+	if httpErr == nil {
+		return httpRes, nil
+	}
+	dbRes, dbErr := executeSearchDirectDB(ctx, cfg)
+	if dbErr != nil {
+		return transcript.SearchResult{}, fmt.Errorf("search failed via HTTP (%w) and direct DB (%w)", httpErr, dbErr)
+	}
+	return dbRes, nil
 }
 
 func runSearchCLI(ctx context.Context, cfg CLIConfig, out io.Writer) error {
@@ -430,27 +457,10 @@ func runSearchCLI(ctx context.Context, cfg CLIConfig, out io.Writer) error {
 		return fmt.Errorf("search query cannot be empty (usage: transcript-search search <query>)")
 	}
 
-	var res transcript.SearchResult
-	if !cfg.DirectDB {
-		httpRes, httpErr := executeSearchHTTP(ctx, cfg)
-		if httpErr == nil {
-			res = httpRes
-		} else {
-			// Fallback to direct DB if HTTP daemon is down or unreachable
-			dbRes, dbErr := executeSearchDirectDB(ctx, cfg)
-			if dbErr != nil {
-				return fmt.Errorf("search failed via HTTP (%w) and direct DB (%w)", httpErr, dbErr)
-			}
-			res = dbRes
-		}
-	} else {
-		dbRes, dbErr := executeSearchDirectDB(ctx, cfg)
-		if dbErr != nil {
-			return fmt.Errorf("direct DB search failed: %w", dbErr)
-		}
-		res = dbRes
+	res, err := resolveSearchResult(ctx, cfg)
+	if err != nil {
+		return err
 	}
-
 	return writeCLIOutput(out, cfg.JSON, res, formatSearchResults(res))
 }
 

@@ -472,17 +472,21 @@ func extractToolInfoParams(su map[string]any) map[string]any {
 }
 
 func extractFirstToolCallEntry(su map[string]any, currentToolName string, currentParams map[string]any) (string, map[string]any) {
+	tcs, ok := su["tool_calls"].([]any)
+	if !ok || len(tcs) == 0 {
+		return currentToolName, currentParams
+	}
+	firstTc, ok := tcs[0].(map[string]any)
+	if !ok {
+		return currentToolName, currentParams
+	}
 	toolName := currentToolName
+	if n := extractFirstString(firstTc, "name"); n != "" && toolName == "" {
+		toolName = n
+	}
 	toolParams := currentParams
-	if tcs, ok := su["tool_calls"].([]any); ok && len(tcs) > 0 {
-		if firstTc, ok := tcs[0].(map[string]any); ok {
-			if n := extractFirstString(firstTc, "name"); n != "" && toolName == "" {
-				toolName = n
-			}
-			if args, ok := firstTc["args"].(map[string]any); ok && toolParams == nil {
-				toolParams = args
-			}
-		}
+	if args, ok := firstTc["args"].(map[string]any); ok && toolParams == nil {
+		toolParams = args
 	}
 	return toolName, toolParams
 }
@@ -663,28 +667,37 @@ func (d *StreamingDaemon) recordToolStart(stepIdx int, hasStepIdx bool, canonica
 	return isNewToolStart
 }
 
+func matchFallbackInFlightTool(tools map[int]inFlightToolCall, toolName string, params map[string]any) (int, inFlightToolCall, bool) {
+	cTool, _ := ExtractMCPToolInfo(toolName, params)
+	for idx, rec := range tools {
+		if rec.toolName == toolName || rec.toolName == cTool || toolName == "call_mcp_tool" || len(tools) == 1 {
+			return idx, rec, true
+		}
+	}
+	return 0, inFlightToolCall{}, false
+}
+
 func (d *StreamingDaemon) recordToolEnd(f stepUpdateFields) (inFlightToolCall, bool, bool) {
+	d.inflightMu.Lock()
+	defer d.inflightMu.Unlock()
+	if d.inFlightTools == nil {
+		return inFlightToolCall{}, false, f.isToolEnd
+	}
+
 	var completedRecord inFlightToolCall
 	var hasCompletedRecord bool
 	isToolEnd := f.isToolEnd
-	d.inflightMu.Lock()
-	defer d.inflightMu.Unlock()
-	if d.inFlightTools != nil {
-		if f.hasStepIdx {
-			if rec, exists := d.inFlightTools[f.stepIdx]; exists {
-				completedRecord, hasCompletedRecord, isToolEnd = rec, true, true
-				delete(d.inFlightTools, f.stepIdx)
-			}
+
+	if f.hasStepIdx {
+		if rec, exists := d.inFlightTools[f.stepIdx]; exists {
+			completedRecord, hasCompletedRecord, isToolEnd = rec, true, true
+			delete(d.inFlightTools, f.stepIdx)
 		}
-		if isToolEnd && !hasCompletedRecord && len(d.inFlightTools) > 0 {
-			cTool, _ := ExtractMCPToolInfo(f.toolName, f.toolParams)
-			for idx, rec := range d.inFlightTools {
-				if rec.toolName == f.toolName || rec.toolName == cTool || f.toolName == "call_mcp_tool" || len(d.inFlightTools) == 1 {
-					completedRecord, hasCompletedRecord = rec, true
-					delete(d.inFlightTools, idx)
-					break
-				}
-			}
+	}
+	if isToolEnd && !hasCompletedRecord && len(d.inFlightTools) > 0 {
+		if idx, rec, ok := matchFallbackInFlightTool(d.inFlightTools, f.toolName, f.toolParams); ok {
+			completedRecord, hasCompletedRecord = rec, true
+			delete(d.inFlightTools, idx)
 		}
 	}
 	return completedRecord, hasCompletedRecord, isToolEnd
@@ -811,6 +824,25 @@ func (d *StreamingDaemon) tryRescueTurnOnResult(activeTurn *TurnContext, raw map
 	return true
 }
 
+func (d *StreamingDaemon) handleResultError(activeTurn *TurnContext, respStr, status, errMsg, currentModel string) bool {
+	if !strings.EqualFold(status, "ERROR") {
+		return false
+	}
+	if strings.TrimSpace(respStr) == "" || strings.HasPrefix(respStr, "[Tool Call Requested]:") {
+		recordStreamErrorMetric(errMsg, currentModel, true)
+		if errMsg == "" {
+			errMsg = "daemon execution failed"
+		}
+		activeTurn.Sink.OnError(errors.New(errMsg))
+		return true
+	}
+	if errMsg != "" {
+		log.Printf("[StreamingDaemon] Notice: daemon reported error with substantive response: %s", errMsg)
+		recordStreamErrorMetric(errMsg, currentModel, false)
+	}
+	return false
+}
+
 func (d *StreamingDaemon) deliverResultToSink(activeTurn *TurnContext, raw map[string]any) {
 	currentModel := d.cfg.Model
 	if activeTurn != nil && strings.TrimSpace(activeTurn.Model) != "" {
@@ -827,19 +859,8 @@ func (d *StreamingDaemon) deliverResultToSink(activeTurn *TurnContext, raw map[s
 		if d.tryRescueTurnOnResult(activeTurn, raw, errMsg, currentModel) {
 			return
 		}
-		if strings.EqualFold(status, "ERROR") {
-			if strings.TrimSpace(respStr) == "" || strings.HasPrefix(respStr, "[Tool Call Requested]:") {
-				recordStreamErrorMetric(errMsg, currentModel, true)
-				if errMsg == "" {
-					errMsg = "daemon execution failed"
-				}
-				activeTurn.Sink.OnError(errors.New(errMsg))
-				return
-			}
-			if errMsg != "" {
-				log.Printf("[StreamingDaemon] Notice: daemon reported error with substantive response: %s", errMsg)
-				recordStreamErrorMetric(errMsg, currentModel, false)
-			}
+		if d.handleResultError(activeTurn, respStr, status, errMsg, currentModel) {
+			return
 		}
 	}
 

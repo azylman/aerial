@@ -437,37 +437,12 @@ func (r *Router) trackDeployProgress(s *discordgo.Session, interaction *discordg
 		log.Printf("[Interactions] Failed to edit initial deploy progress: %v", err)
 	}
 
-	// Execute GitOps update if provided
-	if r.deps.GitOpsChannelUpdater != nil {
-		mutateFn := func(p *config.ChannelPolicy) {
-			if key == "mode" {
-				p.Mode = val
-			} else if key == "ignore_bots" {
-				b := (val == "true")
-				p.IgnoreBots = &b
-			}
+	if err := r.applyChannelPolicyUpdate(pollerCtx, channelID, key, val); err != nil {
+		errMsg := fmt.Sprintf("🚨 Failed to apply GitOps update for <#%s>: %v", channelID, err)
+		if _, editErr := s.InteractionResponseEdit(interaction, &discordgo.WebhookEdit{Content: &errMsg}); editErr != nil {
+			log.Printf("[Interactions] Failed to edit deploy progress error: %v", editErr)
 		}
-		_, err := r.deps.GitOpsChannelUpdater(pollerCtx, channelID, mutateFn)
-		if err != nil {
-			errMsg := fmt.Sprintf("🚨 Failed to apply GitOps update for <#%s>: %v", channelID, err)
-			if _, editErr := s.InteractionResponseEdit(interaction, &discordgo.WebhookEdit{Content: &errMsg}); editErr != nil {
-				log.Printf("[Interactions] Failed to edit deploy progress error: %v", editErr)
-			}
-			return
-		}
-	} else if cfg := r.getConfig(); cfg != nil {
-		// In-memory update when running without external GitOps provider
-		cur := cfg.Current()
-		if cur != nil && cur.Channels != nil {
-			pol := cur.Channels[channelID]
-			if key == "mode" {
-				pol.Mode = val
-			} else if key == "ignore_bots" {
-				b := (val == "true")
-				pol.IgnoreBots = &b
-			}
-			cur.Channels[channelID] = pol
-		}
+		return
 	}
 
 	// 5-stage progress simulation with 3-5s throttling
@@ -495,4 +470,36 @@ func (r *Router) trackDeployProgress(s *discordgo.Session, interaction *discordg
 			}
 		}
 	}
+}
+
+func (r *Router) applyChannelPolicyUpdate(ctx context.Context, channelID, key, val string) error {
+	if r.deps.GitOpsChannelUpdater != nil {
+		mutateFn := func(p *config.ChannelPolicy) {
+			if key == "mode" {
+				p.Mode = val
+			} else if key == "ignore_bots" {
+				b := (val == "true")
+				p.IgnoreBots = &b
+			}
+		}
+		_, err := r.deps.GitOpsChannelUpdater(ctx, channelID, mutateFn)
+		return err
+	}
+
+	cfg := r.getConfig()
+	if cfg == nil {
+		return nil
+	}
+	cur := cfg.Current()
+	if cur != nil && cur.Channels != nil {
+		pol := cur.Channels[channelID]
+		if key == "mode" {
+			pol.Mode = val
+		} else if key == "ignore_bots" {
+			b := (val == "true")
+			pol.IgnoreBots = &b
+		}
+		cur.Channels[channelID] = pol
+	}
+	return nil
 }
