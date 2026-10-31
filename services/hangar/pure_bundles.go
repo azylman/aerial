@@ -414,29 +414,28 @@ func computeArcPath(prefixKey, rel string) string {
 	return arcPath
 }
 
-func checkFileMatchesSources(absFile, cleanF string, bundle AssetBundleConfig) bool {
+func checkFileMatchesSources(repoPath, cleanF string, bundle AssetBundleConfig) bool {
 	for prefixKey, srcDir := range bundle.Sources {
 		cleanSrc := filepath.Clean(srcDir)
 		var rel string
 		var isUnder bool
-		if filepath.IsAbs(cleanSrc) {
-			relToSrc, err := filepath.Rel(cleanSrc, absFile)
-			if err == nil && !strings.HasPrefix(relToSrc, "..") {
-				rel = relToSrc
-				isUnder = true
+		if filepath.IsAbs(cleanSrc) && strings.TrimSpace(repoPath) != "" {
+			absFile := filepath.Clean(filepath.Join(filepath.Clean(repoPath), filepath.FromSlash(cleanF)))
+			if relToSrc, err := filepath.Rel(cleanSrc, absFile); err == nil && !strings.HasPrefix(relToSrc, "..") {
+				rel, isUnder = relToSrc, true
 			}
-		} else {
-			cleanSrcSlash := cleanChangedFilePath(cleanSrc)
-			if cleanF == cleanSrcSlash || strings.HasPrefix(cleanF, cleanSrcSlash+"/") {
-				rel = strings.TrimPrefix(strings.TrimPrefix(cleanF, cleanSrcSlash), "/")
-				isUnder = true
+		} else if filepath.IsAbs(cleanSrc) {
+			parts := strings.Split(filepath.ToSlash(cleanSrc), "/")
+			for i := 1; i < len(parts); i++ {
+				if cand := strings.Join(parts[i:], "/"); cleanF == cand || strings.HasPrefix(cleanF, cand+"/") {
+					rel, isUnder = strings.TrimPrefix(strings.TrimPrefix(cleanF, cand), "/"), true
+					break
+				}
 			}
+		} else if cleanSrcRel := strings.TrimPrefix(cleanChangedFilePath(cleanSrc), "./"); cleanSrcRel != "" && cleanSrcRel != "." && (cleanF == cleanSrcRel || strings.HasPrefix(cleanF, cleanSrcRel+"/")) {
+			rel, isUnder = strings.TrimPrefix(strings.TrimPrefix(cleanF, cleanSrcRel), "/"), true
 		}
-		if !isUnder {
-			continue
-		}
-		arcPath := computeArcPath(prefixKey, rel)
-		if !isPathExcluded(cleanF, rel, arcPath, bundle.Excludes) {
+		if isUnder && !isPathExcluded(cleanF, rel, computeArcPath(prefixKey, rel), bundle.Excludes) {
 			return true
 		}
 	}
@@ -445,85 +444,12 @@ func checkFileMatchesSources(absFile, cleanF string, bundle AssetBundleConfig) b
 
 // AssetBundleMatchesRepoChanges checks if a git push in repoPath affects an AssetBundleConfig.
 func AssetBundleMatchesRepoChanges(bundle AssetBundleConfig, repoPath string, changedFiles []string) bool {
-	cleanRepo := filepath.Clean(repoPath)
 	for _, f := range changedFiles {
 		cleanF := cleanChangedFilePath(f)
 		if cleanF == "" || cleanF == "." {
 			continue
 		}
-		if bundleJobMatches(bundle, cleanF) {
-			return true
-		}
-		absFile := filepath.Clean(filepath.Join(cleanRepo, filepath.FromSlash(cleanF)))
-		if checkFileMatchesSources(absFile, cleanF, bundle) {
-			return true
-		}
-	}
-	return false
-}
-
-// AssetBundleChangedInList evaluates whether any changed file affects the specified asset bundle.
-func AssetBundleChangedInList(bundle string, changedFiles []string, configured ...[]AssetBundleConfig) bool {
-	b := strings.Trim(strings.TrimSuffix(strings.ToLower(strings.TrimSpace(bundle)), ".tar.gz"), "/")
-	var bundles []AssetBundleConfig
-	if len(configured) > 0 {
-		bundles = configured[0]
-	}
-	for _, cfg := range bundles {
-		if strings.EqualFold(cfg.Name, b) {
-			return matchAssetBundleFiles(cfg, changedFiles)
-		}
-	}
-	return false
-}
-
-func checkRelMatchesSources(cleanF string, bundle AssetBundleConfig) bool {
-	for prefixKey, srcDir := range bundle.Sources {
-		var rel string
-		var isUnder bool
-		if filepath.IsAbs(srcDir) {
-			cleanSrc := filepath.ToSlash(filepath.Clean(srcDir))
-			parts := strings.Split(cleanSrc, "/")
-			for i := 1; i < len(parts); i++ {
-				candidate := strings.Join(parts[i:], "/")
-				if cleanF == candidate || strings.HasPrefix(cleanF, candidate+"/") {
-					rel = strings.TrimPrefix(strings.TrimPrefix(cleanF, candidate), "/")
-					isUnder = true
-					break
-				}
-			}
-		} else {
-			cleanSrc := cleanChangedFilePath(srcDir)
-			cleanSrcRel := strings.TrimPrefix(cleanSrc, "./")
-			if cleanSrcRel == "." {
-				cleanSrcRel = ""
-			}
-			if cleanSrcRel != "" && (cleanF == cleanSrcRel || strings.HasPrefix(cleanF, cleanSrcRel+"/")) {
-				rel = strings.TrimPrefix(strings.TrimPrefix(cleanF, cleanSrcRel), "/")
-				isUnder = true
-			}
-		}
-		if !isUnder {
-			continue
-		}
-		arcPath := computeArcPath(prefixKey, rel)
-		if !isPathExcluded(cleanF, rel, arcPath, bundle.Excludes) {
-			return true
-		}
-	}
-	return false
-}
-
-func matchAssetBundleFiles(bundle AssetBundleConfig, changedFiles []string) bool {
-	for _, f := range changedFiles {
-		cleanF := cleanChangedFilePath(f)
-		if cleanF == "" || cleanF == "." {
-			continue
-		}
-		if bundleJobMatches(bundle, cleanF) {
-			return true
-		}
-		if checkRelMatchesSources(cleanF, bundle) {
+		if bundleJobMatches(bundle, cleanF) || checkFileMatchesSources(repoPath, cleanF, bundle) {
 			return true
 		}
 	}
@@ -714,10 +640,22 @@ func SortMatchedJobsHangarLast(matches []MatchedNomadJob) {
 	})
 }
 
-func resolveAerialConfigExpectedJobs(changedFiles []string, serviceConfigs []ServiceConfigMapping, add func(string)) {
-	if fileInChangedList("config.yaml", changedFiles) {
-		add("eri")
+func homepageInChangedList(changed []string) bool {
+	targetClean := "services/homepage/homepage.yaml"
+	for _, f := range changed {
+		clean := filepath.Clean(filepath.ToSlash(f))
+		clean = strings.TrimPrefix(clean, "/")
+		if clean == targetClean || clean == "homepage" || strings.HasPrefix(clean, "homepage/") {
+			return true
+		}
 	}
+	return false
+}
+
+// Invariant: homepage changes in aerial-config include both services/homepage/homepage.yaml (serviceConfig)
+// and user-customized widgets/settings in homepage/ (asset bundle). Both must resolve to "homepage"
+// in ExpectedJobs so Synapse expects the deployment when either config or widgets change.
+func resolveAerialConfigExpectedJobs(changedFiles []string, serviceConfigs []ServiceConfigMapping, add func(string)) {
 	if homepageInChangedList(changedFiles) {
 		add("homepage")
 	}

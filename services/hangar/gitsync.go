@@ -389,17 +389,11 @@ func (d *SyncDaemon) computeBundleHash(bundle, configDir string) string {
 }
 
 func (d *SyncDaemon) syncAllConfigsToNomad(ctx context.Context, logPrefix, configDir string, syncCtx ...ConfigSyncContext) {
-	if err := d.SyncBrainConfigToNomad(ctx, configDir, syncCtx...); err != nil {
-		log.Printf("%s Notice: SyncBrainConfigToNomad: %v", logPrefix, err)
-	}
-	if err := d.SyncHomepageConfigToNomad(ctx, configDir, syncCtx...); err != nil {
-		log.Printf("%s Notice: SyncHomepageConfigToNomad: %v", logPrefix, err)
+	if err := d.SyncServiceConfigsToNomad(ctx, configDir, syncCtx...); err != nil {
+		log.Printf("%s Notice: SyncServiceConfigsToNomad: %v", logPrefix, err)
 	}
 	if err := d.SyncAssetBundlesToNomad(ctx, configDir, syncCtx...); err != nil {
 		log.Printf("%s Notice: SyncAssetBundlesToNomad: %v", logPrefix, err)
-	}
-	if err := d.SyncServiceConfigsToNomad(ctx, configDir, syncCtx...); err != nil {
-		log.Printf("%s Notice: SyncServiceConfigsToNomad: %v", logPrefix, err)
 	}
 }
 
@@ -417,120 +411,25 @@ func readAndValidateYAML(filePath, label string, out any) ([]byte, error) {
 		if err := yaml.Unmarshal(raw, out); err != nil {
 			return nil, fmt.Errorf("invalid YAML syntax in %s: %w", filePath, err)
 		}
+		if filepath.Base(filePath) == "config.yaml" {
+			var ch struct {
+				Channels map[string]any `yaml:"channels"`
+			}
+			if yaml.Unmarshal(raw, &ch) == nil && ch.Channels != nil {
+				hasDefault := false
+				for k := range ch.Channels {
+					if strings.TrimPrefix(strings.ToLower(strings.TrimSpace(k)), "#") == "default" {
+						hasDefault = true
+						break
+					}
+				}
+				if !hasDefault {
+					return nil, fmt.Errorf("semantic validation error in %s: channels.default is required", filePath)
+				}
+			}
+		}
 	}
 	return raw, nil
-}
-
-// SyncBrainConfigToNomad validates config.yaml and writes it to Nomad variable nomad/jobs/eri (CONFIG_YAML).
-func (d *SyncDaemon) SyncBrainConfigToNomad(ctx context.Context, configDir string, syncCtx ...ConfigSyncContext) error {
-	configPath := filepath.Join(configDir, "config.yaml")
-	var parsed struct {
-		Channels map[string]interface{} `yaml:"channels"`
-	}
-	raw, err := readAndValidateYAML(configPath, "brain config", &parsed)
-	if err != nil {
-		return err
-	}
-	if raw == nil {
-		return nil
-	}
-
-	if parsed.Channels != nil {
-		hasDefault := false
-		for k := range parsed.Channels {
-			if strings.TrimPrefix(strings.ToLower(strings.TrimSpace(k)), "#") == "default" {
-				hasDefault = true
-				break
-			}
-		}
-		if !hasDefault {
-			return fmt.Errorf("semantic validation error in %s: channels.default is required", configPath)
-		}
-	}
-
-	h := sha256.Sum256(raw)
-	configHash := hex.EncodeToString(h[:])
-
-	diffGated := len(syncCtx) > 0 && syncCtx[0].DiffGated
-	isChangedInGit := !diffGated || fileInChangedList("config.yaml", syncCtx[0].ChangedFiles)
-
-	pushed, err := d.pushNomadConfigVar(ctx, "nomad/jobs/eri:CONFIG_YAML", "nomad/jobs/eri", "eri", configHash, isChangedInGit, []string{"CONFIG_YAML=@" + configPath}, syncCtx)
-	if err != nil {
-		return err
-	}
-	if pushed {
-		log.Printf("[Hangar:Nomad] Successfully pushed CONFIG_YAML to nomad/jobs/eri")
-	}
-	return nil
-}
-
-// SyncHomepageConfigToNomad validates homepage.yaml, computes a deterministic hash of all homepage configs,
-// and writes HOMEPAGE_YAML and CONFIG_HASH to Nomad variable nomad/jobs/homepage.
-func (d *SyncDaemon) SyncHomepageConfigToNomad(ctx context.Context, configDir string, syncCtx ...ConfigSyncContext) error {
-	homepageConfigPath := filepath.Join(configDir, "services", "homepage", "homepage.yaml")
-	var parsed map[string]interface{}
-	raw, err := readAndValidateYAML(homepageConfigPath, "homepage config", &parsed)
-	if err != nil {
-		return err
-	}
-
-	h := sha256.New()
-	if len(raw) > 0 {
-		h.Write([]byte("homepage.yaml:"))
-		h.Write(raw)
-		h.Write([]byte("\n"))
-	}
-
-	userHomepageDir := filepath.Join(configDir, "homepage")
-	if entries, readDirErr := os.ReadDir(userHomepageDir); readDirErr == nil {
-		var files []string
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			name := e.Name()
-			if strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".tmp") {
-				continue
-			}
-			files = append(files, name)
-		}
-		sort.Strings(files)
-		for _, f := range files {
-			fPath := filepath.Join(userHomepageDir, f)
-			if fContent, fErr := os.ReadFile(fPath); fErr == nil {
-				h.Write([]byte(f + ":"))
-				h.Write(fContent)
-				h.Write([]byte("\n"))
-			}
-		}
-	}
-
-	assetHash := d.computeBundleHash("homepage", configDir)
-	if assetHash != "" {
-		h.Write([]byte("assetHash:" + assetHash + "\n"))
-	}
-
-	configHash := hex.EncodeToString(h.Sum(nil))
-
-	diffGated := len(syncCtx) > 0 && syncCtx[0].DiffGated
-	isChangedInGit := !diffGated || homepageInChangedList(syncCtx[0].ChangedFiles) || AssetBundleChangedInList("homepage", syncCtx[0].ChangedFiles, d.GetAssetBundleConfigs(configDir))
-
-	varArgs := []string{"CONFIG_HASH=" + configHash}
-	if len(raw) > 0 {
-		varArgs = append(varArgs, "HOMEPAGE_YAML=@"+homepageConfigPath)
-	}
-	if assetHash != "" {
-		varArgs = append(varArgs, "ASSET_HASH="+assetHash)
-	}
-
-	pushed, err := d.pushNomadConfigVar(ctx, "nomad/jobs/homepage", "nomad/jobs/homepage", "homepage", configHash, isChangedInGit, varArgs, syncCtx)
-	if err != nil {
-		return err
-	}
-	if pushed {
-		log.Printf("[Hangar:Nomad] Successfully pushed homepage config to nomad/jobs/homepage (hash=%s)", configHash[:12])
-	}
-	return nil
 }
 
 // ServiceConfigMapping defines the declarative mapping between a repository configuration file
@@ -591,9 +490,6 @@ func (d *SyncDaemon) SyncServiceConfigsToNomad(ctx context.Context, configDir st
 	var order []string
 	grouped := make(map[string][]ServiceConfigMapping)
 	for _, m := range mappings {
-		if m.NomadVar == "nomad/jobs/eri" || m.NomadVar == "nomad/jobs/homepage" {
-			continue
-		}
 		if _, ok := grouped[m.NomadVar]; !ok {
 			order = append(order, m.NomadVar)
 		}
@@ -650,6 +546,15 @@ func (d *SyncDaemon) SyncServiceConfigsToNomad(ctx context.Context, configDir st
 		} else {
 			configHash = hex.EncodeToString(h.Sum(nil))
 		}
+		// Invariant: nomad/jobs/homepage.nomad interpolates CONFIG_HASH inside its
+		// local/homepage.yaml template (which has change_mode = "restart").
+		// ASSET_HASH only drives a change_mode = "script" template. Writing CONFIG_HASH
+		// ensures Nomad restarts the homepage allocation when either homepage config
+		// or homepage asset bundle changes, enabling Synapse to track deployment lifecycle.
+		if nomadVar == "nomad/jobs/homepage" {
+			varKeys = append(varKeys, "CONFIG_HASH")
+			varArgs = append(varArgs, "CONFIG_HASH="+configHash)
+		}
 		cacheKey := nomadVar + ":" + strings.Join(varKeys, "+")
 		isChangedInGit := isServiceConfigChangedInGit(nomadVar, diffGated, checkPaths, changedFiles, d.GetAssetBundleConfigs(configDir))
 		pushed, err := d.pushNomadConfigVar(ctx, cacheKey, nomadVar, jobName, configHash, isChangedInGit, varArgs, syncCtx)
@@ -663,8 +568,7 @@ func (d *SyncDaemon) SyncServiceConfigsToNomad(ctx context.Context, configDir st
 	return nil
 }
 
-// SyncAssetBundlesToNomad computes asset bundle hashes and synchronizes ASSET_HASH to Nomad variables
-// for docs, grafana, dashboard (on static changes), and mirrormere-core without emitting deploy_started events.
+// SyncAssetBundlesToNomad computes asset bundle hashes and synchronizes ASSET_HASH to Nomad variables.
 func (d *SyncDaemon) SyncAssetBundlesToNomad(ctx context.Context, configDir string, syncCtx ...ConfigSyncContext) error {
 	diffGated := len(syncCtx) > 0 && syncCtx[0].DiffGated
 	var changedFiles []string
@@ -672,86 +576,44 @@ func (d *SyncDaemon) SyncAssetBundlesToNomad(ctx context.Context, configDir stri
 		changedFiles = syncCtx[0].ChangedFiles
 	}
 
-	var firstErr error
-	recordErr := func(err error) {
-		if err != nil && firstErr == nil {
-			firstErr = err
-		}
+	mappedVars := make(map[string]bool)
+	for _, m := range d.GetServiceConfigMappings(configDir) {
+		mappedVars[m.NomadVar] = true
 	}
 
-	bundles := d.GetAssetBundleConfigs(configDir)
-	for _, bundle := range bundles {
-		if bundle.NomadVar == "" || bundle.NomadVar == "nomad/jobs/homepage" {
+	var firstErr error
+	var serviceConfigsSynced bool
+	for _, bundle := range d.GetAssetBundleConfigs(configDir) {
+		if bundle.NomadVar == "" {
 			continue
 		}
-		if bundle.Name == "dashboard" {
-			if !diffGated || AssetBundleChangedInList(bundle.Name, changedFiles, bundles) {
+		isChanged := !diffGated || AssetBundleMatchesRepoChanges(bundle, "", changedFiles)
+		if mappedVars[bundle.NomadVar] {
+			if isChanged && !serviceConfigsSynced {
+				serviceConfigsSynced = true
 				if err := d.SyncServiceConfigsToNomad(ctx, configDir, syncCtx...); err != nil {
 					log.Printf("[Hangar:Nomad] Notice: SyncAssetBundlesToNomad (%s): %v", bundle.Name, err)
-					recordErr(err)
+					if firstErr == nil {
+						firstErr = err
+					}
 				}
 			}
 			continue
 		}
 
-		if bundle.Name == "mirrormere" {
-			if err := d.syncMirrormereBundle(ctx, configDir, diffGated, changedFiles, bundles, bundle); err != nil {
-				recordErr(err)
-			}
-			continue
-		}
-
 		if hash := d.computeBundleHash(bundle.Name, configDir); hash != "" {
-			isChanged := !diffGated || AssetBundleChangedInList(bundle.Name, changedFiles, bundles)
 			jobName := strings.TrimPrefix(bundle.NomadVar, "nomad/jobs/")
 			cacheKey := bundle.NomadVar + ":ASSET_HASH"
 			if _, err := d.pushNomadVarQuiet(ctx, cacheKey, bundle.NomadVar, jobName, hash, isChanged, []string{"ASSET_HASH=" + hash}); err != nil {
 				log.Printf("[Hangar:Nomad] Notice: SyncAssetBundlesToNomad (%s): %v", bundle.Name, err)
-				recordErr(err)
+				if firstErr == nil {
+					firstErr = err
+				}
 			}
 		}
 	}
 
 	return firstErr
-}
-
-func (d *SyncDaemon) syncMirrormereBundle(ctx context.Context, configDir string, diffGated bool, changedFiles []string, bundles []AssetBundleConfig, bundle AssetBundleConfig) error {
-	mirrormereHash := d.computeBundleHash(bundle.Name, configDir)
-	if mirrormereHash == "" {
-		return nil
-	}
-	mirrormereYamlPath := filepath.Join(configDir, "services", "mirrormere", "mirrormere.yaml")
-	var parsed any
-	raw, err := readAndValidateYAML(mirrormereYamlPath, "mirrormere config", &parsed)
-	if err != nil {
-		log.Printf("[Hangar:Nomad] Notice: SyncAssetBundlesToNomad (mirrormere): %v", err)
-		return err
-	}
-	// Invariant: CONFIG_YAML must precede ASSET_HASH in varKeys, varArgs, and digest hashing
-	// to maintain identical cacheKey and configHash with SyncServiceConfigsToNomad (appendServiceAssetHash).
-	var varKeys, varArgs []string
-	h := sha256.New()
-	if len(raw) > 0 {
-		varKeys = append(varKeys, "CONFIG_YAML")
-		varArgs = append(varArgs, "CONFIG_YAML=@"+mirrormereYamlPath)
-		h.Write([]byte("CONFIG_YAML:"))
-		h.Write(raw)
-		h.Write([]byte("\n"))
-	}
-	varKeys = append(varKeys, "ASSET_HASH")
-	varArgs = append(varArgs, "ASSET_HASH="+mirrormereHash)
-	h.Write([]byte("ASSET_HASH:" + mirrormereHash + "\n"))
-
-	isChanged := !diffGated || AssetBundleChangedInList("mirrormere", changedFiles, bundles)
-	cacheKey := bundle.NomadVar + ":" + strings.Join(varKeys, "+")
-	configHash := hex.EncodeToString(h.Sum(nil))
-	jobName := strings.TrimPrefix(bundle.NomadVar, "nomad/jobs/")
-
-	if _, err := d.pushNomadVarQuiet(ctx, cacheKey, bundle.NomadVar, jobName, configHash, isChanged, varArgs); err != nil {
-		log.Printf("[Hangar:Nomad] Notice: SyncAssetBundlesToNomad (mirrormere): %v", err)
-		return err
-	}
-	return nil
 }
 
 // StartPeriodicLoop runs the background ticker loop.
@@ -954,7 +816,7 @@ func isServiceConfigChangedInGit(nomadVar string, diffGated bool, checkPaths, ch
 	}
 	for _, b := range bundles {
 		if b.NomadVar == nomadVar {
-			return AssetBundleChangedInList(b.Name, changedFiles, bundles)
+			return AssetBundleMatchesRepoChanges(b, "", changedFiles)
 		}
 	}
 	return false

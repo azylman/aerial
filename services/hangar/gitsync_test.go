@@ -445,9 +445,10 @@ func TestEnsureRepoAndSync_TableDriven(t *testing.T) {
 		var nomadMu sync.Mutex
 
 		d := NewDaemon(DaemonConfig{
-			Repos:     []string{localDir},
-			ConfigDir: configDir,
-			NomadAddr: "http://127.0.0.1:4646",
+			Repos:          []string{localDir},
+			ConfigDir:      configDir,
+			NomadAddr:      "http://127.0.0.1:4646",
+			ServiceConfigs: testServiceConfigs(),
 			NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
 				nomadMu.Lock()
 				nomadCalls = append(nomadCalls, args)
@@ -577,23 +578,9 @@ func (e *nomadConfigSyncTestEnv) waitForEvents(t *testing.T, count int) []Hangar
 }
 
 type nomadSyncValidationCase struct {
-	name, target, dirAsFile, wantErrSub string
-	files                               map[string]string
-	disableNomad, nomadErr              bool
-	checkEmptyHomepageHash              bool
-}
-
-func syncNomadConfig(ctx context.Context, d *SyncDaemon, target, configDir string, syncCtx ...ConfigSyncContext) error {
-	switch target {
-	case "brain":
-		return d.SyncBrainConfigToNomad(ctx, configDir, syncCtx...)
-	case "homepage":
-		return d.SyncHomepageConfigToNomad(ctx, configDir, syncCtx...)
-	case "service":
-		return d.SyncServiceConfigsToNomad(ctx, configDir, syncCtx...)
-	default:
-		return errors.New("unknown target: " + target)
-	}
+	name, dirAsFile, wantErrSub string
+	files                       map[string]string
+	disableNomad, nomadErr      bool
 }
 
 func runNomadValidationCases(t *testing.T, cases []nomadSyncValidationCase) {
@@ -621,24 +608,13 @@ func runNomadValidationCases(t *testing.T, cases []nomadSyncValidationCase) {
 					return nil, []byte("nomad var put permission denied"), errors.New("exit 1")
 				}
 			}
-			err := syncNomadConfig(ctx, env.daemon, tc.target, env.configDir)
-
+			err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir)
 			if tc.wantErrSub != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
 					t.Fatalf("expected error containing %q, got %v", tc.wantErrSub, err)
 				}
 			} else if err != nil {
 				t.Fatalf("expected nil error, got %v", err)
-			}
-			if tc.checkEmptyHomepageHash {
-				calls := env.nomadCalls()
-				if len(calls) != 1 || len(calls[0]) < 5 || calls[0][2] != "-force" || calls[0][3] != "nomad/jobs/homepage" {
-					t.Fatalf("expected nomad/jobs/homepage target, got %v", calls)
-				}
-				joined := strings.Join(calls[0], " ")
-				if !strings.Contains(joined, "CONFIG_HASH=") || strings.Contains(joined, "HOMEPAGE_YAML=@") {
-					t.Errorf("expected CONFIG_HASH and NO HOMEPAGE_YAML on empty dir, got %v", calls[0])
-				}
 			}
 		})
 	}
@@ -652,198 +628,65 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 	t.Run("validation_and_disabled_paths", func(t *testing.T) {
 		t.Parallel()
 		runNomadValidationCases(t, []nomadSyncValidationCase{
-			{name: "missing_config_yaml_safe_noop", target: "brain"},
-			{name: "directory_as_config_yaml_error", target: "brain", dirAsFile: "config.yaml", wantErrSub: "failed to read brain config"},
-			{name: "invalid_yaml_syntax_error", target: "brain", files: map[string]string{"config.yaml": "invalid: yaml: [unclosed"}, wantErrSub: "invalid YAML syntax"},
-			{name: "semantic_validation_missing_channels_default", target: "brain", files: map[string]string{"config.yaml": "channels:\n  other:\n    mode: threads\n"}, wantErrSub: "channels.default is required"},
-			{name: "disabled_nomad_addr_safe_noop_brain", target: "brain", files: map[string]string{"config.yaml": validBrainYAML}, disableNomad: true},
-			{name: "nomad_cli_failure_returns_error_brain", target: "brain", files: map[string]string{"config.yaml": validBrainYAML}, nomadErr: true, wantErrSub: "failed updating Nomad variable"},
-
-			{name: "empty_dir_branch_pushes_empty_hash_homepage", target: "homepage", checkEmptyHomepageHash: true},
-			{name: "directory_as_homepage_yaml_error", target: "homepage", dirAsFile: "services/homepage/homepage.yaml", wantErrSub: "failed to read homepage config"},
-			{name: "invalid_yaml_syntax_in_homepage_yaml", target: "homepage", files: map[string]string{"services/homepage/homepage.yaml": "invalid: yaml: [unclosed"}, wantErrSub: "invalid YAML syntax"},
-			{name: "disabled_nomad_addr_safe_noop_homepage", target: "homepage", files: map[string]string{"services/homepage/homepage.yaml": "port: \"3001\"\n"}, disableNomad: true},
-			{name: "nomad_cli_failure_returns_error_homepage", target: "homepage", files: map[string]string{"services/homepage/homepage.yaml": "port: \"3001\"\n"}, nomadErr: true, wantErrSub: "failed updating Nomad variable"},
-
-			{name: "empty_dir_graceful_skip_service", target: "service"},
-			{name: "directory_instead_of_file_error", target: "service", dirAsFile: "services/haro/haro.yaml", wantErrSub: "failed to read service config"},
-			{name: "invalid_yaml_syntax_in_service_config", target: "service", files: map[string]string{"services/haro/haro.yaml": "invalid: yaml: [unclosed"}, wantErrSub: "invalid YAML syntax"},
-			{name: "disabled_nomad_addr_safe_noop_service", target: "service", files: map[string]string{"services/haro/haro.yaml": "port: \"4005\"\n"}, disableNomad: true},
-			{name: "nomad_cli_failure_returns_error_service", target: "service", files: map[string]string{"services/haro/haro.yaml": "port: \"4005\"\n"}, nomadErr: true, wantErrSub: "failed updating Nomad variable"},
+			{name: "empty_dir_graceful_skip"},
+			{name: "directory_as_config_yaml_error", dirAsFile: "config.yaml", wantErrSub: "failed to read service config"},
+			{name: "invalid_yaml_syntax_error", files: map[string]string{"config.yaml": "invalid: yaml: [unclosed"}, wantErrSub: "invalid YAML syntax"},
+			{name: "semantic_validation_missing_channels_default", files: map[string]string{"config.yaml": "channels:\n  other:\n    mode: threads\n"}, wantErrSub: "channels.default is required"},
+			{name: "directory_instead_of_service_file_error", dirAsFile: "services/haro/haro.yaml", wantErrSub: "failed to read service config"},
+			{name: "invalid_yaml_syntax_in_service_config", files: map[string]string{"services/haro/haro.yaml": "invalid: yaml: [unclosed"}, wantErrSub: "invalid YAML syntax"},
+			{name: "disabled_nomad_addr_safe_noop", files: map[string]string{"config.yaml": validBrainYAML, "services/haro/haro.yaml": "port: \"4005\"\n"}, disableNomad: true},
+			{name: "nomad_cli_failure_returns_error", files: map[string]string{"config.yaml": validBrainYAML}, nomadErr: true, wantErrSub: "failed updating Nomad variable"},
 		})
 	})
 
 	t.Run("caching_diff_gating_and_events", func(t *testing.T) {
 		t.Parallel()
-		type syncLifecycleCase struct {
-			name              string
-			target            string
-			initialFiles      map[string]string
-			mkdirs            []string
-			modifiedFiles     map[string]string
-			cacheKey          string
-			wantInitialCalls  int
-			wantModifiedCalls int
-			untouchedCtx      ConfigSyncContext
-			sameContentCtx    ConfigSyncContext
-			modifiedCtx       ConfigSyncContext
-			wantJobName       string
+		env := newNomadConfigSyncTestEnv(t)
+		initialFiles := map[string]string{
+			"config.yaml":                 validBrainYAML,
+			"services/haro/haro.yaml":     "enabled: true\n",
+			"services/hangar/hangar.yaml": "service_configs:\n  - rel_path: \"config.yaml\"\n    nomad_var: \"nomad/jobs/eri\"\n    var_key: \"CONFIG_YAML\"\n  - rel_path: \"services/haro/haro.yaml\"\n    nomad_var: \"nomad/jobs/haro\"\n    var_key: \"CONFIG_YAML\"\n",
+		}
+		for rel, content := range initialFiles {
+			full := filepath.Join(env.configDir, rel)
+			_ = os.MkdirAll(filepath.Dir(full), 0o755)
+			_ = os.WriteFile(full, []byte(content), 0o644)
 		}
 
-		cases := []syncLifecycleCase{
-			{
-				name:              "brain",
-				target:            "brain",
-				initialFiles:      map[string]string{"config.yaml": validBrainYAML},
-				modifiedFiles:     map[string]string{"config.yaml": "channels:\n  default:\n    mode: always\n"},
-				cacheKey:          "nomad/jobs/eri:CONFIG_YAML",
-				wantInitialCalls:  1,
-				wantModifiedCalls: 1,
-				untouchedCtx:      ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_untouched", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/voice/voice.yaml"}},
-				sameContentCtx:    ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_same", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"config.yaml"}, ExpectedJobs: []string{"eri"}},
-				modifiedCtx:       ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_modified", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"config.yaml"}, ExpectedJobs: []string{"eri"}},
-				wantJobName:       "eri",
-			},
-			{
-				name:   "homepage",
-				target: "homepage",
-				mkdirs: []string{"homepage/subdir"},
-				initialFiles: map[string]string{
-					"services/homepage/homepage.yaml": "port: \"3001\"\nallowed_hosts: \"*\"\n",
-					"homepage/services.yaml":          "- My Group: []\n",
-					"homepage/widgets.yaml":           "- search: {}\n",
-					"homepage/.hidden":                "ignore me",
-					"homepage/temp.tmp":               "ignore me too",
-				},
-				modifiedFiles: map[string]string{
-					"homepage/widgets.yaml": "- search: { updated: true }\n",
-				},
-				cacheKey:         "nomad/jobs/homepage",
-				wantInitialCalls: 1,
-				untouchedCtx:     ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_untouched", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/voice/voice.yaml"}},
-				sameContentCtx:   ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_same", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/homepage/homepage.yaml"}, ExpectedJobs: []string{"homepage"}},
-				modifiedCtx:      ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_modified", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"homepage/widgets.yaml"}, ExpectedJobs: []string{"homepage"}},
-				wantJobName:      "homepage",
-			},
-			{
-				name:   "service",
-				target: "service",
-				initialFiles: map[string]string{
-					"services/voice/voice.yaml":   "model: small.en\n",
-					"services/haro/haro.yaml":     "enabled: true\n",
-					"services/hangar/hangar.yaml": "service_configs:\n  - rel_path: \"services/voice/voice.yaml\"\n    nomad_var: \"nomad/jobs/voice\"\n    var_key: \"CONFIG_YAML\"\n  - rel_path: \"services/haro/haro.yaml\"\n    nomad_var: \"nomad/jobs/haro\"\n    var_key: \"CONFIG_YAML\"\n",
-				},
-				modifiedFiles: map[string]string{
-					"services/voice/voice.yaml": "model: distil-small.en\n",
-				},
-				cacheKey:         "nomad/jobs/voice:CONFIG_YAML",
-				wantInitialCalls: 2,
-				untouchedCtx:     ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_untouched", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/hangar/hangar.yaml"}},
-				sameContentCtx:   ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_same", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/voice/voice.yaml"}, ExpectedJobs: []string{"voice"}},
-				modifiedCtx:      ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_modified", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/voice/voice.yaml"}, ExpectedJobs: []string{"voice"}},
-				wantJobName:      "voice",
-			},
+		// (a) initial push
+		if err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir); err != nil || len(env.nomadCalls()) != 2 {
+			t.Fatalf("initial push err=%v, calls=%d, want 2", err, len(env.nomadCalls()))
 		}
-
-		for _, tc := range cases {
-			t.Run(tc.name, func(t *testing.T) {
-				t.Parallel()
-				env := newNomadConfigSyncTestEnv(t)
-				for _, dir := range tc.mkdirs {
-					if err := os.MkdirAll(filepath.Join(env.configDir, dir), 0o755); err != nil {
-						t.Fatal(err)
-					}
-				}
-				for rel, content := range tc.initialFiles {
-					full := filepath.Join(env.configDir, rel)
-					if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-						t.Fatal(err)
-					}
-					if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
-						t.Fatal(err)
-					}
-				}
-
-				// (a) initial push
-				if err := syncNomadConfig(ctx, env.daemon, tc.target, env.configDir); err != nil {
-					t.Fatalf("initial push failed: %v", err)
-				}
-				if len(env.nomadCalls()) != tc.wantInitialCalls {
-					t.Fatalf("initial push calls = %d, want %d", len(env.nomadCalls()), tc.wantInitialCalls)
-				}
-
-				// (b) cached second push
-				if err := syncNomadConfig(ctx, env.daemon, tc.target, env.configDir); err != nil || len(env.nomadCalls()) != tc.wantInitialCalls {
-					t.Fatalf("cached push calls = %d, want %d", len(env.nomadCalls()), tc.wantInitialCalls)
-				}
-
-				// (c) diff-gated untouched file
-				callsBeforeUntouched := len(env.nomadCalls())
-				if err := syncNomadConfig(ctx, env.daemon, tc.target, env.configDir, tc.untouchedCtx); err != nil || len(env.nomadCalls()) != callsBeforeUntouched {
-					t.Fatalf("untouched diff calls = %d, want %d", len(env.nomadCalls()), callsBeforeUntouched)
-				}
-				env.daemon.lastPushedConfigMu.Lock()
-				cached := env.daemon.lastPushedConfig[tc.cacheKey]
-				env.daemon.lastPushedConfigMu.Unlock()
-				if cached == "" {
-					t.Fatalf("expected cache to be primed for %s", tc.cacheKey)
-				}
-
-				// (d) diff-gated same-content file with CommitSHA after periodic sync (not suppressed by un-SHA'd cache, then cached on repeat)
-				wantMod := tc.wantModifiedCalls
-				if wantMod == 0 {
-					wantMod = 1
-				}
-				callsBeforeSame := len(env.nomadCalls())
-				if err := syncNomadConfig(ctx, env.daemon, tc.target, env.configDir, tc.sameContentCtx); err != nil || len(env.nomadCalls()) != callsBeforeSame+wantMod {
-					t.Fatalf("same content with commitSHA calls = %d, want %d", len(env.nomadCalls()), callsBeforeSame+wantMod)
-				}
-				sameEvts := env.waitForEvents(t, wantMod)
-				if len(sameEvts) == 0 || sameEvts[0].CommitSHA != tc.sameContentCtx.CommitSHA || len(sameEvts[0].ExpectedJobs) != 1 || sameEvts[0].ExpectedJobs[0] != tc.wantJobName {
-					t.Fatalf("expected deploy_started with commitSHA %s and expected_jobs [%s], got %+v", tc.sameContentCtx.CommitSHA, tc.wantJobName, sameEvts)
-				}
-				callsAfterFirstSame := len(env.nomadCalls())
-				if err := syncNomadConfig(ctx, env.daemon, tc.target, env.configDir, tc.sameContentCtx); err != nil || len(env.nomadCalls()) != callsAfterFirstSame {
-					t.Fatalf("repeated same content with same commitSHA calls = %d, want %d", len(env.nomadCalls()), callsAfterFirstSame)
-				}
-				if err := syncNomadConfig(ctx, env.daemon, tc.target, env.configDir); err != nil || len(env.nomadCalls()) != callsAfterFirstSame {
-					t.Fatalf("periodic sync after commitSHA push calls = %d, want %d", len(env.nomadCalls()), callsAfterFirstSame)
-				}
-
-				// (e) diff-gated modified file
-				for rel, content := range tc.modifiedFiles {
-					full := filepath.Join(env.configDir, rel)
-					if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-						t.Fatal(err)
-					}
-					if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
-						t.Fatal(err)
-					}
-				}
-				callsBeforeMod := len(env.nomadCalls())
-				if err := syncNomadConfig(ctx, env.daemon, tc.target, env.configDir, tc.modifiedCtx); err != nil {
-					t.Fatalf("modified sync error: %v", err)
-				}
-				calls := env.nomadCalls()
-				if len(calls) != callsBeforeMod+wantMod {
-					t.Fatalf("expected %d new call(s), got %d (total %d)", wantMod, len(calls)-callsBeforeMod, len(calls))
-				}
-				lastCall := strings.Join(calls[len(calls)-1], " ")
-				if !strings.Contains(lastCall, "COMMIT_SHA="+tc.modifiedCtx.CommitSHA) {
-					t.Fatalf("expected COMMIT_SHA=%s in last call: %s", tc.modifiedCtx.CommitSHA, lastCall)
-				}
-				evts := env.waitForEvents(t, wantMod)
-				var foundJob bool
-				for _, evt := range evts {
-					if evt.Event == "deploy_started" && evt.JobName == tc.wantJobName && evt.Repo == tc.modifiedCtx.Repo && evt.CommitSHA == tc.modifiedCtx.CommitSHA && evt.PRNumber == tc.modifiedCtx.PRNumber && evt.TargetID == tc.modifiedCtx.TargetID && len(evt.ExpectedJobs) == 1 && evt.ExpectedJobs[0] == tc.wantJobName {
-						foundJob = true
-						break
-					}
-				}
-				if !foundJob {
-					t.Errorf("did not find expected deploy_started event for %s in: %+v", tc.wantJobName, evts)
-				}
-			})
+		// (b) cached second push
+		if err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir); err != nil || len(env.nomadCalls()) != 2 {
+			t.Fatalf("cached push calls = %d, want 2", len(env.nomadCalls()))
+		}
+		// (c) diff-gated untouched file
+		untouchedCtx := ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_untouched", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"services/hangar/hangar.yaml"}}
+		if err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir, untouchedCtx); err != nil || len(env.nomadCalls()) != 2 {
+			t.Fatalf("untouched diff calls = %d, want 2", len(env.nomadCalls()))
+		}
+		// (d) diff-gated same-content file with CommitSHA after periodic sync
+		sameCtx := ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_same", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"config.yaml"}, ExpectedJobs: []string{"eri"}}
+		if err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir, sameCtx); err != nil || len(env.nomadCalls()) != 3 {
+			t.Fatalf("same content with commitSHA calls = %d, want 3", len(env.nomadCalls()))
+		}
+		sameEvts := env.waitForEvents(t, 1)
+		if sameEvts[0].CommitSHA != "sha_same" || len(sameEvts[0].ExpectedJobs) != 1 || sameEvts[0].ExpectedJobs[0] != "eri" {
+			t.Fatalf("unexpected deploy_started event: %+v", sameEvts)
+		}
+		if err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir, sameCtx); err != nil || len(env.nomadCalls()) != 3 {
+			t.Fatalf("repeated same content with same commitSHA calls = %d, want 3", len(env.nomadCalls()))
+		}
+		// (e) diff-gated modified file
+		_ = os.WriteFile(filepath.Join(env.configDir, "config.yaml"), []byte("channels:\n  default:\n    mode: always\n"), 0o644)
+		modCtx := ConfigSyncContext{Repo: "azylman/aerial-config", CommitSHA: "sha_modified", PRNumber: 101, TargetID: "1555405874565091380", DiffGated: true, ChangedFiles: []string{"config.yaml"}, ExpectedJobs: []string{"eri"}}
+		if err := env.daemon.SyncServiceConfigsToNomad(ctx, env.configDir, modCtx); err != nil || len(env.nomadCalls()) != 4 {
+			t.Fatalf("modified sync err=%v, calls=%d, want 4", err, len(env.nomadCalls()))
+		}
+		evts := env.waitForEvents(t, 1)
+		if evts[0].Event != "deploy_started" || evts[0].JobName != "eri" || evts[0].CommitSHA != "sha_modified" {
+			t.Errorf("unexpected deploy_started event: %+v", evts[0])
 		}
 	})
 
@@ -913,6 +756,23 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 		jobNomadCtx := ConfigSyncContext{DiffGated: true, ChangedFiles: []string{"jobs/multi-job.nomad"}, CommitSHA: "sha2"}
 		if err := multiEnv.daemon.SyncServiceConfigsToNomad(ctx, multiEnv.configDir, jobNomadCtx); err != nil || len(multiEnv.nomadCalls()) != 2 {
 			t.Fatalf("expected diff-gating to trigger on jobs/multi-job.nomad, calls=%d", len(multiEnv.nomadCalls()))
+		}
+
+		homepageEnv := newNomadConfigSyncTestEnv(t)
+		homepageEnv.daemon.serviceConfigs = []ServiceConfigMapping{
+			{RelPath: "services/homepage/homepage.yaml", NomadVar: "nomad/jobs/homepage", VarKey: "HOMEPAGE_YAML"},
+		}
+		_ = os.MkdirAll(filepath.Join(homepageEnv.configDir, "services", "homepage"), 0o755)
+		_ = os.WriteFile(filepath.Join(homepageEnv.configDir, "services", "homepage", "homepage.yaml"), []byte("title: Home\n"), 0o644)
+
+		if err := homepageEnv.daemon.SyncServiceConfigsToNomad(ctx, homepageEnv.configDir); err != nil || len(homepageEnv.nomadCalls()) != 1 {
+			t.Fatalf("expected homepage config to sync with 1 call, err=%v, calls=%d", err, len(homepageEnv.nomadCalls()))
+		}
+		hpCall := strings.Join(homepageEnv.nomadCalls()[0], " ")
+		if !strings.Contains(hpCall, "var put -force nomad/jobs/homepage") ||
+			!strings.Contains(hpCall, "HOMEPAGE_YAML=@") ||
+			!strings.Contains(hpCall, "CONFIG_HASH=") {
+			t.Fatalf("expected homepage call to include CONFIG_HASH= and HOMEPAGE_YAML=@, got: %s", hpCall)
 		}
 	})
 }
@@ -1044,6 +904,7 @@ func TestSyncAssetBundlesToNomad_TableDriven(t *testing.T) {
 			env.daemon.serviceConfigs = []ServiceConfigMapping{
 				{RelPath: "services/dashboard/dashboard.yaml", NomadVar: "nomad/jobs/dashboard", VarKey: "CONFIG_YAML"},
 				{RelPath: "services/haro/haro.yaml", NomadVar: "nomad/jobs/haro", VarKey: "CONFIG_YAML"},
+				{RelPath: "services/mirrormere/mirrormere.yaml", NomadVar: "nomad/jobs/mirrormere-core", VarKey: "CONFIG_YAML"},
 			}
 
 			var syncCtx []ConfigSyncContext

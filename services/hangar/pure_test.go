@@ -327,6 +327,8 @@ func TestResolveGitBin_TableDriven(t *testing.T) {
 
 func TestGenerateDockerConfig_TableDriven(t *testing.T) {
 	dummyPAT := "test-pat-dummy-12345"
+	defaultAuth := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + dummyPAT))
+	customAuth := base64.StdEncoding.EncodeToString([]byte("custom-user:" + dummyPAT))
 
 	tests := []struct {
 		name         string
@@ -334,129 +336,22 @@ func TestGenerateDockerConfig_TableDriven(t *testing.T) {
 		registry     string
 		username     string
 		pat          string
-		validate     func(t *testing.T, out []byte, err error)
+		wantSub      string
 	}{
-		{
-			name:         "empty pat returns existing content without error",
-			existingJSON: `{"credsStore":"desktop"}`,
-			registry:     "ghcr.io",
-			username:     "azylman",
-			pat:          "",
-			validate: func(t *testing.T, out []byte, err error) {
-				if err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-				if string(out) != `{"credsStore":"desktop"}` {
-					t.Errorf("expected unchanged content, got: %s", string(out))
-				}
-			},
-		},
-		{
-			name:         "whitespace pat returns existing content without error",
-			existingJSON: `{"credsStore":"desktop"}`,
-			registry:     "ghcr.io",
-			username:     "azylman",
-			pat:          "   \t\n  ",
-			validate: func(t *testing.T, out []byte, err error) {
-				if err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-				if string(out) != `{"credsStore":"desktop"}` {
-					t.Errorf("expected unchanged content, got: %s", string(out))
-				}
-			},
-		},
-		{
-			name:         "fresh generation with default registry and username",
-			existingJSON: "",
-			registry:     "",
-			username:     "",
-			pat:          dummyPAT,
-			validate: func(t *testing.T, out []byte, err error) {
-				if err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-				var parsed struct {
-					Auths map[string]struct {
-						Auth string `json:"auth"`
-					} `json:"auths"`
-				}
-				if err := json.Unmarshal(out, &parsed); err != nil {
-					t.Fatalf("failed to unmarshal generated json: %v", err)
-				}
-				authEntry, ok := parsed.Auths["ghcr.io"]
-				if !ok {
-					t.Fatalf("expected ghcr.io in auths map")
-				}
-				expectedAuth := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + dummyPAT))
-				if authEntry.Auth != expectedAuth {
-					t.Errorf("auth mismatch: got %q, want %q", authEntry.Auth, expectedAuth)
-				}
-			},
-		},
-		{
-			name:         "merges into existing config preserving other registries and top-level fields",
-			existingJSON: `{"credsStore":"pass","auths":{"docker.io":{"auth":"ZG9ja2VydXNlcjpkb2NrZXJwYXNz"}}}`,
-			registry:     "ghcr.io",
-			username:     "custom-user",
-			pat:          dummyPAT,
-			validate: func(t *testing.T, out []byte, err error) {
-				if err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-				var parsed map[string]any
-				if err := json.Unmarshal(out, &parsed); err != nil {
-					t.Fatalf("failed to unmarshal output: %v", err)
-				}
-				if parsed["credsStore"] != "pass" {
-					t.Errorf("expected credsStore preserved, got %v", parsed["credsStore"])
-				}
-				auths, ok := parsed["auths"].(map[string]any)
-				if !ok {
-					t.Fatalf("expected auths map")
-				}
-				if _, ok := auths["docker.io"]; !ok {
-					t.Errorf("expected docker.io preserved in auths")
-				}
-				ghcrEntry, ok := auths["ghcr.io"].(map[string]any)
-				if !ok {
-					t.Fatalf("expected ghcr.io entry")
-				}
-				expectedAuth := base64.StdEncoding.EncodeToString([]byte("custom-user:" + dummyPAT))
-				if ghcrEntry["auth"] != expectedAuth {
-					t.Errorf("ghcr auth mismatch: got %v, want %s", ghcrEntry["auth"], expectedAuth)
-				}
-			},
-		},
-		{
-			name:         "recovers from malformed existing JSON cleanly",
-			existingJSON: `{invalid-json-content`,
-			registry:     "ghcr.io",
-			username:     "azylman",
-			pat:          dummyPAT,
-			validate: func(t *testing.T, out []byte, err error) {
-				if err != nil {
-					t.Fatalf("unexpected error on malformed recovery: %v", err)
-				}
-				var parsed map[string]any
-				if err := json.Unmarshal(out, &parsed); err != nil {
-					t.Fatalf("failed to unmarshal output: %v", err)
-				}
-				auths, ok := parsed["auths"].(map[string]any)
-				if !ok {
-					t.Fatalf("expected auths map after recovery")
-				}
-				if _, ok := auths["ghcr.io"]; !ok {
-					t.Errorf("expected ghcr.io entry present after recovery")
-				}
-			},
-		},
+		{"empty pat returns existing content", `{"credsStore":"desktop"}`, "ghcr.io", "azylman", "", `"credsStore":"desktop"`},
+		{"whitespace pat returns existing content", `{"credsStore":"desktop"}`, "ghcr.io", "azylman", "  \t\n ", `"credsStore":"desktop"`},
+		{"fresh generation with defaults", "", "", "", dummyPAT, defaultAuth},
+		{"merges into existing config preserving docker.io", `{"credsStore":"pass","auths":{"docker.io":{"auth":"ZG9ja2VydXNlcjpkb2NrZXJwYXNz"}}}`, "ghcr.io", "custom-user", dummyPAT, customAuth},
+		{"recovers from malformed existing JSON", `{invalid-json`, "ghcr.io", "azylman", dummyPAT, `"ghcr.io"`},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			out, err := GenerateDockerConfig([]byte(tt.existingJSON), tt.registry, tt.username, tt.pat)
-			tt.validate(t, out, err)
+			var parsed map[string]any
+			if err != nil || json.Unmarshal(out, &parsed) != nil || !strings.Contains(string(out), tt.wantSub) {
+				t.Fatalf("GenerateDockerConfig() err=%v, out=%s, wantSub=%q", err, string(out), tt.wantSub)
+			}
 		})
 	}
 }
@@ -465,71 +360,26 @@ func TestResolveRegistryUser_TableDriven(t *testing.T) {
 	tests := []struct {
 		name     string
 		repoURL  string
-		lookup   func(string) string
+		env      map[string]string
+		nilEnv   bool
 		expected string
 	}{
-		{
-			name:    "DOCKER_REGISTRY_USER takes highest priority",
-			repoURL: "https://github.com/azylman/aerial-config.git",
-			lookup: func(k string) string {
-				switch k {
-				case "DOCKER_REGISTRY_USER":
-					return "explicit-user"
-				case "GITHUB_ACTOR":
-					return "actor-user"
-				default:
-					return ""
-				}
-			},
-			expected: "explicit-user",
-		},
-		{
-			name:    "GITHUB_ACTOR takes priority over repo URL parsing",
-			repoURL: "https://github.com/azylman/aerial-config.git",
-			lookup: func(k string) string {
-				if k == "GITHUB_ACTOR" {
-					return "actor-user"
-				}
-				return ""
-			},
-			expected: "actor-user",
-		},
-		{
-			name:     "parses owner from https github URL",
-			repoURL:  "https://github.com/my-org/my-repo.git",
-			lookup:   func(string) string { return "" },
-			expected: "my-org",
-		},
-		{
-			name:     "parses owner from https URL without .git suffix",
-			repoURL:  "https://github.com/custom-owner/custom-repo",
-			lookup:   func(string) string { return "" },
-			expected: "custom-owner",
-		},
-		{
-			name:     "parses owner from git@ ssh URL",
-			repoURL:  "git@github.com:ssh-owner/ssh-repo.git",
-			lookup:   func(string) string { return "" },
-			expected: "ssh-owner",
-		},
-		{
-			name:     "nil lookup with unparseable URL defaults to x-access-token",
-			repoURL:  "invalid-url-without-slashes",
-			lookup:   nil,
-			expected: "x-access-token",
-		},
-		{
-			name:     "empty lookup and empty URL defaults to x-access-token",
-			repoURL:  "",
-			lookup:   func(string) string { return "" },
-			expected: "x-access-token",
-		},
+		{"DOCKER_REGISTRY_USER priority", "https://github.com/azylman/aerial-config.git", map[string]string{"DOCKER_REGISTRY_USER": "explicit-user", "GITHUB_ACTOR": "actor-user"}, false, "explicit-user"},
+		{"GITHUB_ACTOR priority", "https://github.com/azylman/aerial-config.git", map[string]string{"GITHUB_ACTOR": "actor-user"}, false, "actor-user"},
+		{"https github URL with .git", "https://github.com/my-org/my-repo.git", nil, false, "my-org"},
+		{"https github URL without .git", "https://github.com/custom-owner/custom-repo", nil, false, "custom-owner"},
+		{"git@ ssh URL", "git@github.com:ssh-owner/ssh-repo.git", nil, false, "ssh-owner"},
+		{"nil lookup unparseable URL", "invalid-url", nil, true, "x-access-token"},
+		{"empty URL defaults to x-access-token", "", nil, false, "x-access-token"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ResolveRegistryUser(tt.repoURL, tt.lookup)
-			if got != tt.expected {
+			var lookup func(string) string
+			if !tt.nilEnv {
+				lookup = func(k string) string { return tt.env[k] }
+			}
+			if got := ResolveRegistryUser(tt.repoURL, lookup); got != tt.expected {
 				t.Errorf("ResolveRegistryUser() = %q, want %q", got, tt.expected)
 			}
 		})
@@ -539,50 +389,24 @@ func TestResolveRegistryUser_TableDriven(t *testing.T) {
 func TestResolveDockerConfigPath_TableDriven(t *testing.T) {
 	tests := []struct {
 		name     string
-		lookup   func(string) string
+		env      map[string]string
+		nilEnv   bool
 		expected string
 	}{
-		{
-			name: "DOCKER_CONFIG takes precedence",
-			lookup: func(k string) string {
-				switch k {
-				case "DOCKER_CONFIG":
-					return "/custom/docker/cfg"
-				case "HOME":
-					return "/home/user"
-				default:
-					return ""
-				}
-			},
-			expected: "/custom/docker/cfg/config.json",
-		},
-		{
-			name: "HOME is used when DOCKER_CONFIG is unset",
-			lookup: func(k string) string {
-				if k == "HOME" {
-					return "/home/user"
-				}
-				return ""
-			},
-			expected: "/home/user/.docker/config.json",
-		},
-		{
-			name:     "defaults to /root/.docker/config.json when lookup is nil",
-			lookup:   nil,
-			expected: "/root/.docker/config.json",
-		},
-		{
-			name:     "defaults to /root/.docker/config.json when env is empty",
-			lookup:   func(string) string { return "" },
-			expected: "/root/.docker/config.json",
-		},
+		{"DOCKER_CONFIG takes precedence", map[string]string{"DOCKER_CONFIG": "/custom/docker/cfg", "HOME": "/home/user"}, false, "/custom/docker/cfg/config.json"},
+		{"HOME used when DOCKER_CONFIG unset", map[string]string{"HOME": "/home/user"}, false, "/home/user/.docker/config.json"},
+		{"nil lookup defaults to root", nil, true, "/root/.docker/config.json"},
+		{"empty env defaults to root", nil, false, "/root/.docker/config.json"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ResolveDockerConfigPath(tt.lookup)
-			if filepath.ToSlash(got) != tt.expected {
-				t.Errorf("ResolveDockerConfigPath() = %q, want %q", filepath.ToSlash(got), tt.expected)
+			var lookup func(string) string
+			if !tt.nilEnv {
+				lookup = func(k string) string { return tt.env[k] }
+			}
+			if got := filepath.ToSlash(ResolveDockerConfigPath(lookup)); got != tt.expected {
+				t.Errorf("ResolveDockerConfigPath() = %q, want %q", got, tt.expected)
 			}
 		})
 	}
@@ -996,48 +820,33 @@ func testAssetBundles(composeDir, configDir, mirrormereDir string) []AssetBundle
 
 func testServiceConfigs() []ServiceConfigMapping {
 	return []ServiceConfigMapping{
+		{RelPath: "config.yaml", NomadVar: "nomad/jobs/eri", VarKey: "CONFIG_YAML"},
+		{RelPath: "services/homepage/homepage.yaml", NomadVar: "nomad/jobs/homepage", VarKey: "HOMEPAGE_YAML"},
 		{RelPath: "services/haro/haro.yaml", NomadVar: "nomad/jobs/haro", VarKey: "CONFIG_YAML"},
 		{RelPath: "services/coven/coven.yaml", NomadVar: "nomad/jobs/coven", VarKey: "CONFIG_YAML"},
-		{RelPath: "services/prospera/prospera.yaml", NomadVar: "nomad/jobs/prospera", VarKey: "CONFIG_YAML"},
-		{RelPath: "services/mcp/github-mcp.yaml", NomadVar: "nomad/jobs/github-mcp", VarKey: "CONFIG_YAML"},
-		{RelPath: "services/mcp/nomad-mcp.yaml", NomadVar: "nomad/jobs/nomad-mcp", VarKey: "CONFIG_YAML"},
-		{RelPath: "services/mcp/discord-mcp.yaml", NomadVar: "nomad/jobs/discord-mcp", VarKey: "CONFIG_YAML"},
-		{RelPath: "services/mcp/kernel-mcp.yaml", NomadVar: "nomad/jobs/kernel-mcp", VarKey: "CONFIG_YAML"},
-		{RelPath: "services/mcp/infisical-mcp.yaml", NomadVar: "nomad/jobs/infisical-mcp", VarKey: "CONFIG_YAML"},
 		{RelPath: "services/synapse/synapse.yaml", NomadVar: "nomad/jobs/synapse", VarKey: "CONFIG_YAML"},
-		{RelPath: "services/victoriametrics/scrape.yml", NomadVar: "nomad/jobs/victoriametrics", VarKey: "CONFIG_YAML"},
 		{RelPath: "services/dashboard/dashboard.yaml", NomadVar: "nomad/jobs/dashboard", VarKey: "CONFIG_YAML"},
+		{RelPath: "services/mirrormere/mirrormere.yaml", NomadVar: "nomad/jobs/mirrormere-core", VarKey: "CONFIG_YAML"},
 	}
 }
 
 func seedRepoWorkflowFixture(t testing.TB, repoDir string) {
 	t.Helper()
-	type repoRule struct {
-		filters string
-		catalog string
-	}
-	fixtures := map[string]repoRule{
-		"sidecar": {
-			filters: "vision:\n  - 'vision/**'\nmigrator:\n  - 'scratch-service/migrations/**'\n  - 'atlas.hcl'",
-			catalog: `{ service: "vision", image_name: "aerial-sidecar-vision" }, { service: "migrator", image_name: "aerial-sidecar-migrator" }`,
-		},
-		"mirrormere": {
-			filters: "mirrormere:\n  - 'cmd/**'\n  - 'internal/**'\n  - 'api/**'\n  - 'Dockerfile'\near:\n  - 'client/ear/**'\ncast-watcher:\n  - 'client/cast-watcher/**'\n  - 'go.mod'",
-			catalog: `{ service: "mirrormere", image_name: "mirrormere" }, { service: "ear", image_name: "mirrormere-ear" }, { service: "cast-watcher", image_name: "mirrormere-cast-watcher" }`,
-		},
-		"aerial": {
-			filters: "eri:\n  - 'services/eri/**'\n  - 'pkg/**'\nharo:\n  - 'services/haro/**'\n  - 'pkg/**'\ncoven:\n  - 'services/coven/**'\n  - 'pkg/**'\ndiscord-mcp:\n  - 'mcp/discord-mcp/**'\n  - 'pkg/**'\nkernel-mcp:\n  - 'mcp/kernel-mcp/**'\n  - 'pkg/**'\ngithub-mcp:\n  - 'mcp/github-mcp/**'\nnomad-mcp:\n  - 'mcp/nomad-mcp/**'\ninfisical-mcp:\n  - 'mcp/infisical-mcp/**'\ndashboard:\n  - 'services/dashboard/**'\n  - 'pkg/**'\ndocs:\n  - 'services/docs-service/**'\nproxy:\n  - 'services/proxy/**'\nhangar:\n  - 'services/hangar/**'\n  - 'pkg/**'\nsynapse:\n  - 'services/synapse/**'\n  - 'pkg/**'\nvanadis:\n  - 'services/vanadis/**'\n  - 'pkg/**'\n  - 'Dockerfile'\nprospera:\n  - 'services/prospera/**'\n  - 'pkg/**'\ngithub-runner:\n  - 'services/github-runner/**'",
-			catalog: `{ service: "eri", image_name: "aerial-eri" }, { service: "haro", image_name: "aerial-haro" }, { service: "coven", image_name: "aerial-coven" }, { service: "discord-mcp", image_name: "aerial-discord-mcp" }, { service: "kernel-mcp", image_name: "aerial-kernel-mcp" }, { service: "github-mcp", image_name: "aerial-github-mcp" }, { service: "nomad-mcp", image_name: "aerial-nomad-mcp" }, { service: "infisical-mcp", image_name: "aerial-infisical-mcp" }, { service: "dashboard", image_name: "aerial-dashboard" }, { service: "docs", image_name: "aerial-docs" }, { service: "proxy", image_name: "aerial-proxy" }, { service: "hangar", image_name: "aerial-hangar" }, { service: "synapse", image_name: "aerial-synapse" }, { service: "vanadis", image_name: "aerial-vanadis" }, { service: "prospera", image_name: "aerial-prospera" }, { service: "github-runner", image_name: "aerial-github-runner" }`,
-		},
-	}
 	base := strings.ToLower(filepath.Base(repoDir))
-	rule := fixtures["aerial"]
-	if strings.Contains(base, "sidecar") {
-		rule = fixtures["sidecar"]
-	} else if strings.Contains(base, "mirrormere") {
-		rule = fixtures["mirrormere"]
+	switch {
+	case strings.Contains(base, "sidecar"):
+		writeTestWorkflowFixture(t, repoDir,
+			"vision:\n  - 'vision/**'\nmigrator:\n  - 'scratch-service/migrations/**'\n  - 'atlas.hcl'",
+			`{ service: "vision", image_name: "aerial-sidecar-vision" }, { service: "migrator", image_name: "aerial-sidecar-migrator" }`)
+	case strings.Contains(base, "mirrormere"):
+		writeTestWorkflowFixture(t, repoDir,
+			"mirrormere:\n  - 'cmd/**'\n  - 'Dockerfile'\near:\n  - 'client/ear/**'\ncast-watcher:\n  - 'client/cast-watcher/**'\n  - 'go.mod'",
+			`{ service: "mirrormere", image_name: "mirrormere" }, { service: "ear", image_name: "mirrormere-ear" }, { service: "cast-watcher", image_name: "mirrormere-cast-watcher" }`)
+	default:
+		writeTestWorkflowFixture(t, repoDir,
+			"eri:\n  - 'services/eri/**'\n  - 'pkg/**'\ncoven:\n  - 'services/coven/**'\n  - 'pkg/**'\nsynapse:\n  - 'services/synapse/**'\n  - 'pkg/**'\nhangar:\n  - 'services/hangar/**'\n  - 'pkg/**'\nvanadis:\n  - 'services/vanadis/**'\n  - 'pkg/**'\n  - 'Dockerfile'\ndocs:\n  - 'services/docs-service/**'\ndiscord-mcp:\n  - 'mcp/discord-mcp/**'\n  - 'pkg/**'\ninfisical-mcp:\n  - 'mcp/infisical-mcp/**'",
+			`{ service: "eri", image_name: "aerial-eri" }, { service: "coven", image_name: "aerial-coven" }, { service: "synapse", image_name: "aerial-synapse" }, { service: "hangar", image_name: "aerial-hangar" }, { service: "vanadis", image_name: "aerial-vanadis" }, { service: "docs", image_name: "aerial-docs" }, { service: "discord-mcp", image_name: "aerial-discord-mcp" }, { service: "infisical-mcp", image_name: "aerial-infisical-mcp" }`)
 	}
-	writeTestWorkflowFixture(t, repoDir, rule.filters, rule.catalog)
 }
 
 func TestJobHasContainerBuildChanges_TableDriven(t *testing.T) {
@@ -1050,8 +859,6 @@ func TestJobHasContainerBuildChanges_TableDriven(t *testing.T) {
 	seedRepoWorkflowFixture(t, mirrormereDir)
 
 	specVanadis := `job "vanadis" { task "vanadis" { config { image = "ghcr.io/azylman/aerial-vanadis:${var.image_tag}" } } }`
-	specSynapse := `job "synapse" { task "synapse" { config { image = "ghcr.io/azylman/aerial-synapse:${var.image_tag}" } } }`
-	specProspera := `job "prospera" { task "prospera" { config { image = "ghcr.io/azylman/aerial-prospera:${var.image_tag}" } } }`
 	specDocs := `job "docs" { task "docs" { config { image = "ghcr.io/azylman/aerial-docs:${var.image_tag}" } } }`
 	specMCP := `job "discord-mcp" { task "mcp" { config { image = "ghcr.io/azylman/aerial-discord-mcp:${var.image_tag}" } } }`
 	specExternal := `job "coverage-ingest" { task "flush" { config { image = "golang:1.27.1-alpine" } } }`
@@ -1064,30 +871,19 @@ func TestJobHasContainerBuildChanges_TableDriven(t *testing.T) {
 		want     bool
 	}{
 		{"matching services dir", aerialDir, specVanadis, []string{"services/vanadis/main.go"}, true},
-		{"matching synapse service dir", aerialDir, specSynapse, []string{"services/synapse/main.go"}, true},
-		{"matching prospera service dir", aerialDir, specProspera, []string{"services/prospera/main.go"}, true},
-		{"matching legacy root dir", aerialDir, specVanadis, []string{"vanadis/Dockerfile"}, false},
 		{"matching mcp dir", aerialDir, specMCP, []string{"mcp/discord-mcp/main.go"}, true},
-		{"matching kernel-mcp dir", aerialDir, `job "kernel-mcp" { task "kernel-mcp" { config { image = "ghcr.io/azylman/aerial-kernel-mcp:${var.image_tag}" } } }`, []string{"mcp/kernel-mcp/main.go"}, true},
 		{"matching docs-service alias", aerialDir, specDocs, []string{"services/docs-service/Dockerfile"}, true},
 		{"matching root Dockerfile", aerialDir, specVanadis, []string{"Dockerfile"}, true},
 		{"matching pkg dir", aerialDir, specVanadis, []string{"pkg/httpkit/httpkit.go"}, true},
-		{"matching pkg dir on synapse", aerialDir, specSynapse, []string{"pkg/httpkit/httpkit.go"}, true},
-		{"matching pkg dir on prospera", aerialDir, specProspera, []string{"pkg/httpkit/httpkit.go"}, true},
-		{"matching pkg dir on mcp go service", aerialDir, specMCP, []string{"pkg/ollama/client.go"}, true},
-		{"matching pkg dir on kernel-mcp", aerialDir, `job "kernel-mcp" { task "kernel-mcp" { config { image = "ghcr.io/azylman/aerial-kernel-mcp:${var.image_tag}" } } }`, []string{"pkg/httpkit/httpkit.go"}, true},
 		{"pkg dir does not match non-pkg service", aerialDir, specDocs, []string{"pkg/httpkit/httpkit.go"}, false},
 		{"unmatched other service dir", aerialDir, specVanadis, []string{"services/hangar/main.go", "nomad/jobs/vanadis.nomad"}, false},
 		{"external image never matches", aerialDir, specExternal, []string{"services/vanadis/main.go", "Dockerfile"}, false},
 		{"empty changed files", aerialDir, specVanadis, nil, false},
 		{"sidecar vision image matches vision dir", sidecarsDir, `job "vision" { task "vision" { config { image = "ghcr.io/azylman/aerial-sidecar-vision:${var.image_tag}" } } }`, []string{"vision/app/detector.py"}, true},
-		{"sidecar vision image ignores other sidecar dir", sidecarsDir, `job "vision" { task "vision" { config { image = "ghcr.io/azylman/aerial-sidecar-vision:${var.image_tag}" } } }`, []string{"banana/app/main.py"}, false},
-		{"sidecar migrator matches atlas.hcl and scratch migrations", sidecarsDir, `job "aerial-sidecars-db-migrate" { task "atlas" { config { image = "ghcr.io/azylman/aerial-sidecar-migrator:latest" } } }`, []string{"atlas.hcl"}, true},
-		{"sidecar migrator matches scratch-service migrations", sidecarsDir, `job "aerial-sidecars-db-migrate" { task "atlas" { config { image = "ghcr.io/azylman/aerial-sidecar-migrator:latest" } } }`, []string{"scratch-service/migrations/20261031.sql"}, true},
-		{"mirrormere core matches cmd and Dockerfile", mirrormereDir, `job "mirrormere-core" { task "core" { config { image = "ghcr.io/azylman/mirrormere:${var.image_tag}" } } }`, []string{"cmd/mirrormere/main.go"}, true},
+		{"sidecar migrator matches atlas.hcl", sidecarsDir, `job "aerial-sidecars-db-migrate" { task "atlas" { config { image = "ghcr.io/azylman/aerial-sidecar-migrator:latest" } } }`, []string{"atlas.hcl"}, true},
+		{"mirrormere core matches cmd", mirrormereDir, `job "mirrormere-core" { task "core" { config { image = "ghcr.io/azylman/mirrormere:${var.image_tag}" } } }`, []string{"cmd/mirrormere/main.go"}, true},
 		{"mirrormere core ignores web static assets", mirrormereDir, `job "mirrormere-core" { task "core" { config { image = "ghcr.io/azylman/mirrormere:${var.image_tag}" } } }`, []string{"web/index.html", "widgets/clock/widget.js"}, false},
 		{"mirrormere ear matches client ear dir", mirrormereDir, `job "kiosk-ear" { task "ear" { config { image = "ghcr.io/azylman/mirrormere-ear:${var.image_tag}" } } }`, []string{"client/ear/main.py"}, true},
-		{"mirrormere cast-watcher matches go.mod and client cast-watcher", mirrormereDir, `job "kiosk-cast-watcher" { task "watcher" { config { image = "ghcr.io/azylman/mirrormere-cast-watcher:${var.image_tag}" } } }`, []string{"go.mod"}, true},
 	}
 
 	for _, tc := range tests {
@@ -1110,63 +906,13 @@ R100	jobs/old.nomad	jobs/new.nomad
 	if len(changes) != 5 {
 		t.Fatalf("expected 5 nomad changes, got %d: %+v", len(changes), changes)
 	}
-
-	if changes[0].Path != "jobs/infisical.nomad" || changes[0].Action != "apply" || changes[0].JobName != "infisical" {
-		t.Errorf("unexpected change[0]: %+v", changes[0])
+	if changes[0].Path != "jobs/infisical.nomad" || changes[0].Action != "apply" || changes[0].JobName != "infisical" ||
+		changes[2].Path != "jobs/deprecated.nomad" || changes[2].Action != "delete" || changes[2].JobName != "deprecated" ||
+		changes[3].Action != "delete" || changes[3].JobName != "old" || changes[4].Action != "apply" || changes[4].JobName != "new" {
+		t.Errorf("unexpected changes: %+v", changes)
 	}
-	if changes[1].Path != "jobs/mirrormere-core.nomad" || changes[1].Action != "apply" || changes[1].JobName != "mirrormere-core" {
-		t.Errorf("unexpected change[1]: %+v", changes[1])
-	}
-	if changes[2].Path != "jobs/deprecated.nomad" || changes[2].Action != "delete" || changes[2].JobName != "deprecated" {
-		t.Errorf("unexpected change[2]: %+v", changes[2])
-	}
-	if changes[3].Path != "jobs/old.nomad" || changes[3].Action != "delete" || changes[3].JobName != "old" {
-		t.Errorf("unexpected change[3]: %+v", changes[3])
-	}
-	if changes[4].Path != "jobs/new.nomad" || changes[4].Action != "apply" || changes[4].JobName != "new" {
-		t.Errorf("unexpected change[4]: %+v", changes[4])
-	}
-
-	// Additional ParseNomadGitStatus cases
-	emptyStatus := ParseNomadGitStatus("")
-	if len(emptyStatus) != 0 {
-		t.Errorf("expected 0 changes for empty status")
-	}
-
-	renameStatus := ParseNomadGitStatus("R090\tjobs/old.nomad\tjobs/renamed.nomad\n")
-	if len(renameStatus) != 2 ||
-		renameStatus[0].Action != "delete" || renameStatus[0].JobName != "old" ||
-		renameStatus[1].Action != "apply" || renameStatus[1].JobName != "renamed" {
-		t.Errorf("expected 2 changes (delete old, apply renamed) for rename status, got %+v", renameStatus)
-	}
-
-	nonNomadStatus := ParseNomadGitStatus("M\tdocker-compose.yml\nA\tREADME.md\n")
-	if len(nonNomadStatus) != 0 {
-		t.Errorf("expected 0 changes for non-nomad files")
-	}
-
-	migrationStatus := ParseNomadGitStatus("A\tbrain/pkg/db/migrations/20261016182900_add_vanadis_chunk_started_at.sql\nM\tbrain/pkg/db/migrations/atlas.sum\nM\tbrain/pkg/db/schema.sql\n")
-	if len(migrationStatus) != 1 || migrationStatus[0].JobName != "db-migrate" || migrationStatus[0].Path != "nomad/jobs/db-migrate.nomad" || migrationStatus[0].Action != "apply" {
-		t.Errorf("expected db-migrate change when migration files modified, got %+v", migrationStatus)
-	}
-	if len(ParseNomadGitStatus("D\tbrain/pkg/db/migrations/old.sql\n")) != 0 {
-		t.Errorf("expected 0 changes when migration file is deleted only")
-	}
-	if !IsMigrationFile("brain/pkg/db/migrations/20261016_init.sql") || !IsMigrationFile("/brain/pkg/db/migrations/atlas.sum") || IsMigrationFile("brain/pkg/db/schema.sql") || IsMigrationFile("") || IsMigrationFile("brain/pkg/db/migrations") {
-		t.Errorf("unexpected IsMigrationFile classification for brain")
-	}
-	if !IsMigrationFile("services/eri/pkg/db/migrations/20261021_init.sql") || !IsMigrationFile("/services/eri/pkg/db/migrations/atlas.sum") || IsMigrationFile("services/eri/pkg/db/schema.sql") || IsMigrationFile("services/eri/pkg/db/migrations") {
-		t.Errorf("unexpected IsMigrationFile classification for services/eri")
-	}
-	if !IsMigrationFile("eri/pkg/db/migrations/20261021_init.sql") || !IsMigrationFile("/eri/pkg/db/migrations/atlas.sum") || IsMigrationFile("eri/pkg/db/schema.sql") || IsMigrationFile("eri/pkg/db/migrations") {
-		t.Errorf("unexpected IsMigrationFile classification for eri")
-	}
-	if ren := ParseNomadGitStatus("R100\tbrain/pkg/db/old.sql\tbrain/pkg/db/migrations/20261016_new.sql\n"); len(ren) != 1 || ren[0].JobName != "db-migrate" {
-		t.Errorf("expected db-migrate when file renamed into migrations dir, got %+v", ren)
-	}
-	ensured := EnsureDBMigrateNomadChange([]NomadFileChange{{Path: "nomad/jobs/vanadis.nomad", Action: "apply", JobName: "vanadis"}, {Path: "nomad/jobs/db-migrate.nomad", Action: "apply", JobName: "db-migrate"}})
-	if len(ensured) != 2 || ensured[0].JobName != "db-migrate" || ensured[1].JobName != "vanadis" || len(EnsureDBMigrateNomadChange(ensured)) != 2 {
-		t.Errorf("expected db-migrate moved to index 0 and idempotent, got %+v", ensured)
+	if len(ParseNomadGitStatus("")) != 0 || len(ParseNomadGitStatus("M\tdocker-compose.yml\nA\tREADME.md\n")) != 0 {
+		t.Errorf("expected 0 changes for empty or non-nomad status")
 	}
 	varStatus := ParseNomadGitStatus("M\tjobs/eri.vars.hcl\nD\tjobs/vanadis.vars.hcl\nR100\tjobs/old.vars.hcl\tjobs/new.vars.hcl\n")
 	if len(varStatus) != 4 || varStatus[0].Action != "apply" || varStatus[0].JobName != "eri" || varStatus[1].Action != "apply" || varStatus[1].JobName != "vanadis" || varStatus[2].Action != "apply" || varStatus[2].JobName != "old" || varStatus[3].Action != "apply" || varStatus[3].JobName != "new" {
@@ -1200,30 +946,17 @@ func TestHasContainerBuildChanges_TableDriven(t *testing.T) {
 		files    []string
 		expected bool
 	}{
-		{"aerial-config always false", configDir, []string{"jobs/brain.nomad", "rules/common.md", "Dockerfile"}, false},
-		{"aerial core legacy brain touched returns false", aerialDir, []string{"brain/main.go"}, false},
-		{"aerial core services touched", aerialDir, []string{"services/coven/main.go"}, true},
-		{"aerial core mcp touched", aerialDir, []string{"mcp/github-mcp/main.go"}, true},
-		{"aerial core legacy coven touched returns false", aerialDir, []string{"coven/main.go"}, false},
-		{"aerial core eri touched", aerialDir, []string{"services/eri/main.go"}, true},
-		{"aerial core legacy webhooks-router touched returns false", aerialDir, []string{"webhooks-router/main.go"}, false},
-		{"aerial core legacy vanadis touched returns false", aerialDir, []string{"vanadis/main.go"}, false},
-		{"aerial core legacy github-runner touched returns false", aerialDir, []string{"github-runner/Dockerfile"}, false},
+		{"aerial-config without workflows returns false", configDir, []string{"jobs/brain.nomad", "rules/common.md", "Dockerfile"}, false},
+		{"aerial core services touched", aerialDir, []string{"services/eri/main.go"}, true},
+		{"aerial core mcp touched", aerialDir, []string{"mcp/discord-mcp/main.go"}, true},
 		{"aerial core Dockerfile touched", aerialDir, []string{"Dockerfile"}, true},
-		{"aerial core go.mod touched returns false", aerialDir, []string{"go.mod"}, false},
 		{"aerial core pkg touched", aerialDir, []string{"pkg/httpkit/httpkit.go"}, true},
-		{"aerial core scripts touched returns false", aerialDir, []string{"scripts/verify.sh"}, false},
-		{"aerial core rules touched returns false", aerialDir, []string{"rules/discord/foo.md"}, false},
-		{"aerial core .agents touched returns false", aerialDir, []string{".agents/skills/self-improvement/SKILL.md"}, false},
-		{"aerial core docker publish workflow touched returns false", aerialDir, []string{".github/workflows/docker-publish.yml"}, false},
-		{"aerial core non-build files (docs, nomad, readme)", aerialDir, []string{"nomad/jobs/migrate.nomad", "README.md", "docs/spec.md"}, false},
+		{"aerial core non-build files", aerialDir, []string{"nomad/jobs/migrate.nomad", "README.md", "scripts/verify.sh", ".github/workflows/docker-publish.yml"}, false},
 		{"aerial core empty files", aerialDir, nil, false},
 		{"aerial-sidecars service dir touched", sidecarsDir, []string{"vision/app/detector.py"}, true},
-		{"aerial-sidecars atlas.hcl touched", sidecarsDir, []string{"atlas.hcl"}, true},
-		{"aerial-sidecars non-build files (docs, scripts, github, root)", sidecarsDir, []string{"README.md", "docs/spec.md", "scripts/test.sh", ".github/workflows/docker-publish.yml", "nomad/jobs/migrate.nomad"}, false},
-		{"mirrormere cmd and Dockerfile touched", mirrormereDir, []string{"cmd/mirrormere/main.go"}, true},
-		{"mirrormere root Dockerfile touched", mirrormereDir, []string{"Dockerfile"}, true},
-		{"mirrormere web and eink-node non-container paths", mirrormereDir, []string{"web/index.html", "widgets/clock/widget.js", "client/eink-node/main.py", "README.md"}, false},
+		{"aerial-sidecars non-build files", sidecarsDir, []string{"README.md", "nomad/jobs/migrate.nomad"}, false},
+		{"mirrormere cmd touched", mirrormereDir, []string{"cmd/mirrormere/main.go"}, true},
+		{"mirrormere web non-container paths", mirrormereDir, []string{"web/index.html", "widgets/clock/widget.js"}, false},
 	}
 
 	for _, tt := range tests {
@@ -1776,6 +1509,8 @@ func TestResolveExpectedDeployJobs_TableDriven(t *testing.T) {
 	writeJob(filepath.Join(sidecarsDir, "nomad", "jobs", "migrate.nomad"), `job "aerial-sidecars-db-migrate" { task "atlas" { config { image = "ghcr.io/azylman/aerial-sidecar-migrator:latest" } } }`)
 
 	serviceMappings := []ServiceConfigMapping{
+		{RelPath: "config.yaml", NomadVar: "nomad/jobs/eri", VarKey: "CONFIG_YAML"},
+		{RelPath: "services/homepage/homepage.yaml", NomadVar: "nomad/jobs/homepage", VarKey: "HOMEPAGE_YAML"},
 		{RelPath: "services/haro/haro.yaml", NomadVar: "nomad/jobs/haro", VarKey: "CONFIG_YAML"},
 		{RelPath: "services/voice/voice.yaml", NomadVar: "nomad/jobs/voice", VarKey: "CONFIG_YAML"},
 	}
@@ -1818,6 +1553,14 @@ func TestResolveExpectedDeployJobs_TableDriven(t *testing.T) {
 		},
 		{
 			name:           "aerial-config variable mappings and nomad changes combined",
+			repoPath:       configDir,
+			changedFiles:   []string{"config.yaml", "services/homepage/homepage.yaml", "services/voice/voice.yaml"},
+			nomadChanges:   []NomadFileChange{{Path: "jobs/hangar.nomad", Action: "apply", JobName: "hangar"}},
+			serviceConfigs: serviceMappings,
+			want:           []string{"eri", "homepage", "voice", "hangar"},
+		},
+		{
+			name:           "aerial-config homepage widget asset changes resolve homepage in expected jobs",
 			repoPath:       configDir,
 			changedFiles:   []string{"config.yaml", "homepage/widgets.yaml", "services/voice/voice.yaml"},
 			nomadChanges:   []NomadFileChange{{Path: "jobs/hangar.nomad", Action: "apply", JobName: "hangar"}},
@@ -2193,56 +1936,15 @@ func TestBuildAssetBundleTarGz_TableDriven(t *testing.T) {
 	}
 }
 
-func TestAssetBundleChangedInList_TableDriven(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name     string
-		bundle   string
-		files    []string
-		expected bool
-	}{
-		{"dashboard static change", "dashboard", []string{"services/dashboard/static/app.js"}, true},
-		{"dashboard job change", "dashboard", []string{"nomad/jobs/dashboard.nomad"}, true},
-		{"dashboard job change alt", "dashboard", []string{"jobs/dashboard.nomad"}, true},
-		{"dashboard unrelated go change", "dashboard", []string{"services/dashboard/main.go"}, false},
-		{"docs service app change", "docs", []string{"services/docs-service/app/index.html"}, true},
-		{"docs markdown change", "docs", []string{"docs/index.md"}, true},
-		{"docs job change", "docs", []string{"nomad/jobs/docs.nomad"}, true},
-		{"docs unrelated go change", "docs", []string{"services/docs-service/main.go"}, false},
-		{"grafana system dashboard change", "grafana", []string{"nomad/grafana/dashboards/sys.json"}, true},
-		{"grafana custom dashboard change", "grafana", []string{"services/grafana/dashboards/user.json"}, true},
-		{"grafana job change", "grafana", []string{"nomad/jobs/grafana.nomad"}, true},
-		{"grafana unrelated change", "grafana", []string{"services/grafana/main.go"}, false},
-		{"homepage core change", "homepage", []string{"services/homepage/entrypoint.sh"}, true},
-		{"homepage user config change", "homepage", []string{"homepage/services.yaml"}, true},
-		{"homepage service yaml change", "homepage", []string{"services/homepage/homepage.yaml"}, true},
-		{"homepage job change", "homepage", []string{"nomad/jobs/homepage.nomad"}, true},
-		{"homepage test directory excluded", "homepage", []string{"services/homepage/test/prepare-config.test.js"}, false},
-		{"homepage unrelated change", "homepage", []string{"services/eri/main.go"}, false},
-		{"mirrormere web change", "mirrormere", []string{"web/index.html"}, true},
-		{"mirrormere widgets change", "mirrormere", []string{"widgets/weather.js"}, true},
-		{"mirrormere job change", "mirrormere", []string{"jobs/mirrormere-core.nomad"}, true},
-		{"mirrormere unrelated change", "mirrormere", []string{"server.go"}, false},
-		{"migrations sql change", "migrations", []string{"services/eri/pkg/db/migrations/001_init.sql"}, true},
-		{"migrations job change", "migrations", []string{"nomad/jobs/db-migrate.nomad"}, true},
-		{"migrations unrelated change", "migrations", []string{"services/eri/main.go"}, false},
-		{"unknown bundle", "unknown", []string{"services/dashboard/static/app.js"}, false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := AssetBundleChangedInList(tc.bundle, tc.files, testAssetBundles("", "", ""))
-			if got != tc.expected {
-				t.Errorf("AssetBundleChangedInList(%q, %v) = %v, want %v", tc.bundle, tc.files, got, tc.expected)
-			}
-		})
-	}
-}
-
 func TestAssetBundleMatchesRepoChanges_TableDriven(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
+	bundles := testAssetBundles("", "", "")
+	byName := make(map[string]AssetBundleConfig, len(bundles))
+	for _, b := range bundles {
+		byName[b.Name] = b
+	}
+
 	tests := []struct {
 		name     string
 		bundle   AssetBundleConfig
@@ -2250,70 +1952,25 @@ func TestAssetBundleMatchesRepoChanges_TableDriven(t *testing.T) {
 		files    []string
 		want     bool
 	}{
-		{
-			name: "relative source prefix match",
-			bundle: AssetBundleConfig{
-				Name: "test-rel",
-				Sources: map[string]string{
-					"app": "services/my-app",
-				},
-			},
-			repoPath: tmpDir,
-			files:    []string{"services/my-app/index.html"},
-			want:     true,
-		},
-		{
-			name: "relative source excluded path",
-			bundle: AssetBundleConfig{
-				Name: "test-rel-excl",
-				Sources: map[string]string{
-					"app": "services/my-app",
-				},
-				Excludes: []string{"services/my-app/test"},
-			},
-			repoPath: tmpDir,
-			files:    []string{"services/my-app/test/spec.js"},
-			want:     false,
-		},
-		{
-			name: "trigger job match",
-			bundle: AssetBundleConfig{
-				Name:       "test-trigger",
-				TriggerJob: "nomad/jobs/db-migrate.nomad",
-			},
-			repoPath: tmpDir,
-			files:    []string{"jobs/db-migrate.nomad"},
-			want:     true,
-		},
-		{
-			name: "nomad var job match",
-			bundle: AssetBundleConfig{
-				Name:     "test-nomad-var",
-				NomadVar: "nomad/jobs/dashboard",
-			},
-			repoPath: tmpDir,
-			files:    []string{"nomad/jobs/dashboard.nomad"},
-			want:     true,
-		},
-		{
-			name: "unrelated changes",
-			bundle: AssetBundleConfig{
-				Name: "test-unrelated",
-				Sources: map[string]string{
-					"app": "services/my-app",
-				},
-			},
-			repoPath: tmpDir,
-			files:    []string{"services/other/main.go", ""},
-			want:     false,
-		},
+		{"dashboard static change", byName["dashboard"], "", []string{"services/dashboard/static/app.js"}, true},
+		{"dashboard job change", byName["dashboard"], "", []string{"nomad/jobs/dashboard.nomad"}, true},
+		{"dashboard unrelated go change", byName["dashboard"], "", []string{"services/dashboard/main.go"}, false},
+		{"docs markdown change", byName["docs"], "", []string{"docs/index.md"}, true},
+		{"grafana dashboard change", byName["grafana"], "", []string{"nomad/grafana/dashboards/sys.json"}, true},
+		{"homepage core change", byName["homepage"], "", []string{"services/homepage/entrypoint.sh"}, true},
+		{"homepage test directory excluded", byName["homepage"], "", []string{"services/homepage/test/prepare-config.test.js"}, false},
+		{"mirrormere widgets change", byName["mirrormere"], "", []string{"widgets/weather.js"}, true},
+		{"migrations sql change", byName["migrations"], "", []string{"services/eri/pkg/db/migrations/001_init.sql"}, true},
+		{"migrations job change", byName["migrations"], "", []string{"nomad/jobs/db-migrate.nomad"}, true},
+		{"repo-scoped source prefix match", AssetBundleConfig{Name: "rel", Sources: map[string]string{"app": "services/my-app"}}, tmpDir, []string{"services/my-app/index.html"}, true},
+		{"repo-scoped excluded path", AssetBundleConfig{Name: "excl", Sources: map[string]string{"app": "services/my-app"}, Excludes: []string{"services/my-app/test"}}, tmpDir, []string{"services/my-app/test/spec.js"}, false},
+		{"repo-scoped unrelated change", AssetBundleConfig{Name: "unrel", Sources: map[string]string{"app": "services/my-app"}}, tmpDir, []string{"services/other/main.go", ""}, false},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := AssetBundleMatchesRepoChanges(tc.bundle, tc.repoPath, tc.files)
-			if got != tc.want {
+			if got := AssetBundleMatchesRepoChanges(tc.bundle, tc.repoPath, tc.files); got != tc.want {
 				t.Errorf("AssetBundleMatchesRepoChanges() = %v, want %v", got, tc.want)
 			}
 		})
