@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -989,69 +988,6 @@ func isDependabotPR(p GitHubPullRequestPayload) bool {
 			strings.EqualFold(strings.TrimSpace(p.Sender.Login), "dependabot[bot]"))
 }
 
-func (s *RouterServer) enablePRAutoMerge(ctx context.Context, repo string, prNumber int, nodeID string) error {
-	trimmedID := strings.TrimSpace(nodeID)
-	if trimmedID == "" {
-		return nil
-	}
-
-	apiURL := firstNonEmpty(s.cfg.GitHubAPIURL, "https://api.github.com")
-	reqPayload := struct {
-		Query     string            `json:"query"`
-		Variables map[string]string `json:"variables"`
-	}{
-		Query: `mutation($node_id: ID!) { enablePullRequestAutoMerge(input: {pullRequestId: $node_id, mergeMethod: SQUASH}) { clientMutationId } }`,
-		Variables: map[string]string{
-			"node_id":       trimmedID,
-			"pullRequestId": trimmedID,
-		},
-	}
-	bodyBytes, err := json.Marshal(reqPayload)
-	if err != nil {
-		return fmt.Errorf("marshal enablePullRequestAutoMerge payload: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL+"/graphql", bytes.NewReader(bodyBytes))
-	if err != nil {
-		return fmt.Errorf("create graphql auto-merge request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if s.cfg.GitHubToken != "" {
-		req.Header.Set("Authorization", "token "+s.cfg.GitHubToken)
-	}
-
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("graphql auto-merge request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		if readErr != nil {
-			respBody = nil
-		}
-		return fmt.Errorf("graphql auto-merge for %s#%d returned status %d: %s", repo, prNumber, resp.StatusCode, strings.TrimSpace(string(respBody)))
-	}
-
-	var gqlResp struct {
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&gqlResp); err != nil {
-		return fmt.Errorf("decode graphql response for %s#%d: %w", repo, prNumber, err)
-	}
-	if len(gqlResp.Errors) > 0 {
-		var msgs []string
-		for _, e := range gqlResp.Errors {
-			msgs = append(msgs, e.Message)
-		}
-		return fmt.Errorf("graphql auto-merge for %s#%d error: %s", repo, prNumber, strings.Join(msgs, "; "))
-	}
-	return nil
-}
-
 func (s *RouterServer) processGitHubPullRequestEvent(ctx context.Context, delivery string, body []byte, res *ResolvedGitHubEvent) (*ResolvedGitHubEvent, error) {
 	var p GitHubPullRequestPayload
 	if err := json.Unmarshal(body, &p); err != nil {
@@ -1076,9 +1012,6 @@ func (s *RouterServer) processGitHubPullRequestEvent(ctx context.Context, delive
 		res.Repo, res.PRNumber, res.Action, res.HeadSHA, res.MergeSHA, res.Branch, p.PullRequest.Merged, res.Sender, delivery)
 
 	if isDependabotPR(p) && (res.Action == "opened" || res.Action == "reopened" || res.Action == "synchronize") {
-		if err := s.enablePRAutoMerge(ctx, res.Repo, res.PRNumber, p.PullRequest.NodeID); err != nil {
-			log.Printf("[synapse] [github] warning enabling auto-merge for %s#%d: %v", res.Repo, res.PRNumber, err)
-		}
 		if s.registry != nil && res.PRNumber > 0 {
 			targetID := s.resolveHeadlessPRTargetID(ctx, res.Repo, res.PRNumber)
 			if targetID != "" {
