@@ -517,7 +517,7 @@ transforms:
             .level = "warn"
           } else if .service == "photos-sync" && starts_with(string!(.message), "Finished run:") {
             .level = "info"
-          } else if .service == "google-mcp" && match(string!(.message), r'^\[(OAUTH|TOOL|GMAIL|CALENDAR|TASKS)\]') {
+          } else if .service == "google-mcp" && match(string!(.message), r'^\[(OAUTH|TOOL|GMAIL|CALENDAR|TASKS|CREDS|AUTH|DRIVE|DOCS|SHEETS|SLIDES|FORMS|CHAT|KEEP|CONTACTS|SEARCH|SERVER|MCP)\]') {
             .level = "info"
           } else if starts_with(string!(.message), "[supergateway]") {
             if starts_with(string!(.message), "[supergateway] Child → StreamableHttp:") || starts_with(string!(.message), "[supergateway] StreamableHttp → Child:") {
@@ -564,6 +564,61 @@ transforms:
               .level = "info"
             }
           }
+        }
+
+        # Python standard hyphenated logs
+        if !exists(.level) {
+          parsed_py, err = parse_regex(.message, r'^(?P<py_timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:,\d+)?)\s+-\s+(?P<logger>\S+)\s+-\s+(?P<severity>INFO|WARN|WARNING|ERROR|CRITICAL|DEBUG)\s+-\s+(?P<msg>.*)$')
+          if err == null {
+            .message = parsed_py.msg
+            sev = string!(parsed_py.severity)
+            if sev == "INFO" {
+              .level = "info"
+            } else if sev == "WARN" || sev == "WARNING" {
+              .level = "warn"
+            } else if sev == "ERROR" || sev == "CRITICAL" {
+              .level = "error"
+            } else if sev == "DEBUG" {
+              .level = "debug"
+            }
+          }
+        }
+
+        # Zerolog console lines (cloudflared, kernel-browser [neko])
+        if !exists(.level) {
+          parsed_zero, err = parse_regex(.message, r'^(?:\[[^\]]+\]\s*)?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?\s+(?P<severity>INF|WRN|ERR|DBG|FTL|PNC)\b\s*(?P<msg>.*)$')
+          if err == null {
+            sev = string!(parsed_zero.severity)
+            if sev == "INF" {
+              .level = "info"
+            } else if sev == "WRN" {
+              .level = "warn"
+            } else if sev == "ERR" || sev == "FTL" || sev == "PNC" {
+              .level = "error"
+            } else if sev == "DBG" {
+              .level = "debug"
+            }
+          }
+        }
+
+        # ONNX Runtime logs (voice, laya)
+        if !exists(.level) {
+          parsed_onnx, err = parse_regex(.message, r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?\s+\[(?P<sev>[IWEF]):onnxruntime:')
+          if err == null {
+            sev = string!(parsed_onnx.sev)
+            if sev == "W" {
+              .level = "warn"
+            } else if sev == "I" {
+              .level = "info"
+            } else if sev == "E" || sev == "F" {
+              .level = "error"
+            }
+          }
+        }
+
+        # Warning classification for benign container cp ownership notices
+        if !exists(.level) && contains(string!(.message), "cp: can't preserve ownership") {
+          .level = "warn"
         }
 
         # Strict unparsed fallback: unrecognized logs on stderr remain errors
