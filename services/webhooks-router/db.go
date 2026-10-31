@@ -128,10 +128,11 @@ type pgxQueryExecer interface {
 
 // PostgresPRRegistry implements PRRegistryUpdater backed by a pgxpool.Pool.
 type PostgresPRRegistry struct {
-	pool       pgxQueryExecer
-	vanadisURL string
-	haroURL    string
-	httpClient *http.Client
+	pool              pgxQueryExecer
+	vanadisURL        string
+	haroURL           string
+	httpClient        *http.Client
+	vanadisRetryDelay time.Duration
 }
 
 // NewPostgresPRRegistry constructs a new PostgresPRRegistry.
@@ -140,10 +141,11 @@ func NewPostgresPRRegistry(pool pgxQueryExecer, opts ...func(*PostgresPRRegistry
 		pool = nil
 	}
 	r := &PostgresPRRegistry{
-		pool:       pool,
-		vanadisURL: "http://vanadis.aerial",
-		haroURL:    "http://haro.aerial",
-		httpClient: &http.Client{Timeout: 10 * time.Second},
+		pool:              pool,
+		vanadisURL:        "http://vanadis.aerial",
+		haroURL:           "http://haro.aerial",
+		httpClient:        &http.Client{Timeout: 10 * time.Second},
+		vanadisRetryDelay: 500 * time.Millisecond,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -364,8 +366,8 @@ func (r *PostgresPRRegistry) RegisterPR(ctx context.Context, req PRRegisterReque
 	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	upsertQuery := `INSERT INTO pr_registry (repo, pr_number, branch, head_sha, target_id, title, status, metadata, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, 'open', $7::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT (repo, pr_number) DO UPDATE SET branch = EXCLUDED.branch, head_sha = EXCLUDED.head_sha, target_id = EXCLUDED.target_id, title = CASE WHEN EXCLUDED.title != '' THEN EXCLUDED.title ELSE pr_registry.title END, status = CASE WHEN pr_registry.status IN ('merged', 'synced', 'deploying', 'deployed') THEN pr_registry.status ELSE 'open' END, metadata = CASE WHEN EXCLUDED.metadata != '{}'::jsonb THEN EXCLUDED.metadata ELSE pr_registry.metadata END, updated_at = CURRENT_TIMESTAMP;`
-	if _, err := r.pool.Exec(qCtx, upsertQuery, repo, req.PRNumber, branch, headSHA, targetID, title, meta); err != nil {
+	upsertQuery := `INSERT INTO pr_registry (repo, pr_number, branch, head_sha, target_id, title, status, metadata, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, 'open', CASE WHEN $8 != '' THEN jsonb_set($7::jsonb, '{vanadis_chunk_id}', to_jsonb($8::text), true) ELSE $7::jsonb END, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT (repo, pr_number) DO UPDATE SET branch = EXCLUDED.branch, head_sha = EXCLUDED.head_sha, target_id = EXCLUDED.target_id, title = CASE WHEN EXCLUDED.title != '' THEN EXCLUDED.title ELSE pr_registry.title END, status = CASE WHEN pr_registry.status IN ('merged', 'synced', 'deploying', 'deployed') THEN pr_registry.status ELSE 'open' END, metadata = CASE WHEN EXCLUDED.metadata != '{}'::jsonb THEN COALESCE(pr_registry.metadata, '{}'::jsonb) || EXCLUDED.metadata ELSE pr_registry.metadata END, updated_at = CURRENT_TIMESTAMP;`
+	if _, err := r.pool.Exec(qCtx, upsertQuery, repo, req.PRNumber, branch, headSHA, targetID, title, meta, chunkID); err != nil {
 		return "", fmt.Errorf("register pr: %w", err)
 	}
 
@@ -432,8 +434,8 @@ func (r *PostgresPRRegistry) EnsurePRRegistered(ctx context.Context, repo string
 	}
 	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	upsertQuery := `INSERT INTO pr_registry (repo, pr_number, branch, head_sha, target_id, title, status, metadata, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, 'open', '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT (repo, pr_number) DO UPDATE SET branch = CASE WHEN EXCLUDED.branch != '' THEN EXCLUDED.branch ELSE pr_registry.branch END, head_sha = CASE WHEN pr_registry.head_sha = '' THEN EXCLUDED.head_sha ELSE pr_registry.head_sha END, target_id = CASE WHEN pr_registry.target_id = '' THEN EXCLUDED.target_id ELSE pr_registry.target_id END, title = CASE WHEN pr_registry.title = '' THEN EXCLUDED.title ELSE pr_registry.title END, updated_at = CURRENT_TIMESTAMP;`
-	if _, err := r.pool.Exec(qCtx, upsertQuery, repo, prNumber, strings.TrimSpace(branch), strings.TrimSpace(headSHA), targetID, strings.TrimSpace(title)); err != nil {
+	upsertQuery := `INSERT INTO pr_registry (repo, pr_number, branch, head_sha, target_id, title, status, metadata, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, 'open', CASE WHEN $7 != '' THEN jsonb_build_object('vanadis_chunk_id', $7::text) ELSE '{}'::jsonb END, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT (repo, pr_number) DO UPDATE SET branch = CASE WHEN EXCLUDED.branch != '' THEN EXCLUDED.branch ELSE pr_registry.branch END, head_sha = CASE WHEN pr_registry.head_sha = '' THEN EXCLUDED.head_sha ELSE pr_registry.head_sha END, target_id = CASE WHEN pr_registry.target_id = '' THEN EXCLUDED.target_id ELSE pr_registry.target_id END, title = CASE WHEN pr_registry.title = '' THEN EXCLUDED.title ELSE pr_registry.title END, metadata = CASE WHEN EXCLUDED.metadata != '{}'::jsonb THEN COALESCE(pr_registry.metadata, '{}'::jsonb) || EXCLUDED.metadata ELSE pr_registry.metadata END, updated_at = CURRENT_TIMESTAMP;`
+	if _, err := r.pool.Exec(qCtx, upsertQuery, repo, prNumber, strings.TrimSpace(branch), strings.TrimSpace(headSHA), targetID, strings.TrimSpace(title), vanadisChunkID); err != nil {
 		return "", fmt.Errorf("ensure pr registered: %w", err)
 	}
 	return targetID, nil
@@ -824,6 +826,10 @@ type vanadisChunkPRLookup struct {
 	HasRemainingChunks bool   `json:"has_remaining_chunks"`
 }
 
+func isTransientVanadisStatus(code int) bool {
+	return code == http.StatusBadGateway || code == http.StatusServiceUnavailable || code == http.StatusGatewayTimeout
+}
+
 func (r *PostgresPRRegistry) getChunkByPR(ctx context.Context, repo string, prNumber int) (*vanadisChunkPRLookup, error) {
 	repo = normalizeRepo(repo)
 	if r == nil || repo == "" || prNumber <= 0 {
@@ -831,27 +837,47 @@ func (r *PostgresPRRegistry) getChunkByPR(ctx context.Context, repo string, prNu
 	}
 	client, vURL := r.getVanadisClient()
 	endpoint := fmt.Sprintf("%s/chunks/by-pr?repo=%s&pr_number=%d", vURL, url.QueryEscape(repo), prNumber)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create get chunk by pr request: %w", err)
+	delay := r.vanadisRetryDelay
+	if delay <= 0 {
+		delay = 500 * time.Millisecond
 	}
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("get chunk by pr: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		if readErr != nil {
-			return nil, fmt.Errorf("get chunk by pr: unexpected status %d (read error: %w)", resp.StatusCode, readErr)
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return nil, fmt.Errorf("create get chunk by pr request: %w", err)
 		}
-		return nil, fmt.Errorf("get chunk by pr: unexpected status %d: %s", resp.StatusCode, string(body))
+		resp, err := client.Do(httpReq)
+		if err != nil {
+			return nil, fmt.Errorf("get chunk by pr: %w", err)
+		}
+		if resp.StatusCode == http.StatusOK {
+			var lookup vanadisChunkPRLookup
+			decErr := json.NewDecoder(resp.Body).Decode(&lookup)
+			resp.Body.Close()
+			if decErr != nil {
+				return nil, fmt.Errorf("decode get chunk by pr response: %w", decErr)
+			}
+			return &lookup, nil
+		}
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		resp.Body.Close()
+		if readErr != nil {
+			lastErr = fmt.Errorf("get chunk by pr: unexpected status %d (read error: %w)", resp.StatusCode, readErr)
+		} else {
+			lastErr = fmt.Errorf("get chunk by pr: unexpected status %d: %s", resp.StatusCode, string(body))
+		}
+		if !isTransientVanadisStatus(resp.StatusCode) || attempt+1 >= maxAttempts {
+			return nil, lastErr
+		}
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
-	var lookup vanadisChunkPRLookup
-	if err := json.NewDecoder(resp.Body).Decode(&lookup); err != nil {
-		return nil, fmt.Errorf("decode get chunk by pr response: %w", err)
-	}
-	return &lookup, nil
+	return nil, lastErr
 }
 
 func (r *PostgresPRRegistry) ResolveVanadisChunkForPR(ctx context.Context, repo string, prNumber int) (bool, string, string, error) {
@@ -869,9 +895,23 @@ func (r *PostgresPRRegistry) ResolveVanadisChunkForPR(ctx context.Context, repo 
 	return true, strings.TrimSpace(lookup.ChunkID), cleanEffort, nil
 }
 
+func (r *PostgresPRRegistry) hasPersistedVanadisChunkID(ctx context.Context, repo string, prNumber int) bool {
+	repo = normalizeRepo(repo)
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
+		return false
+	}
+	const query = `SELECT COALESCE(metadata->>'vanadis_chunk_id', '') != '' FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1;`
+	var hasChunk bool
+	found, err := r.queryRowScan(ctx, "check persisted vanadis_chunk_id", query, []any{&hasChunk}, repo, prNumber)
+	return err == nil && found && hasChunk
+}
+
 func (r *PostgresPRRegistry) ShouldSuppressVanadisDeployWake(ctx context.Context, repo string, prNumber int) (bool, error) {
 	lookup, err := r.getChunkByPR(ctx, repo, prNumber)
 	if err != nil {
+		if r.hasPersistedVanadisChunkID(ctx, repo, prNumber) {
+			return true, nil
+		}
 		return false, err
 	}
 	if lookup == nil || !lookup.Matched {
