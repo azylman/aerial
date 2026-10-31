@@ -122,7 +122,8 @@ func setupTestPostgresTables(t *testing.T, db *sql.DB) {
 		event_type TEXT NOT NULL,
 		prompt TEXT NOT NULL,
 		effort TEXT NOT NULL DEFAULT 'medium',
-		created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+		created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+		persistent BOOLEAN NOT NULL DEFAULT FALSE
 	);
 	CREATE INDEX IF NOT EXISTS idx_event_triggers_lookup ON event_triggers (source, target, event_type);
 	CREATE INDEX IF NOT EXISTS idx_event_triggers_channel ON event_triggers (channel_id, created_at ASC);
@@ -576,6 +577,32 @@ func TestDB_OperationsAndErrors(t *testing.T) {
 	if claimed, err := ClaimEventTriggers(ctx, db, "", nil, ""); err != nil || len(claimed) != 0 {
 		t.Errorf("expected empty, nil for empty ClaimEventTriggers, got %v, %v", claimed, err)
 	}
+	if isSQLiteDB(nil) {
+		t.Error("expected false for nil db")
+	}
+	if pgdb, err := sql.Open("pgx", "postgres://mock:mock@127.0.0.1:5432/mock"); err == nil {
+		if isSQLiteDB(pgdb) {
+			t.Error("expected false for pgx driver")
+		}
+		_ = pgdb.Close()
+	}
+	if _, err := DeleteOneShotSchedule(ctx, db, ""); err == nil {
+		t.Error("expected error for empty id in DeleteOneShotSchedule")
+	}
+	if err := AdvanceCronNextRun(ctx, db, "", time.Now()); err == nil {
+		t.Error("expected error for empty id in AdvanceCronNextRun")
+	}
+	if err := AdvanceHeartbeatNextRun(ctx, db, "", time.Now()); err == nil {
+		t.Error("expected error for empty id in AdvanceHeartbeatNextRun")
+	}
+	func() {
+		oldFn := isSQLiteDBFn
+		isSQLiteDBFn = func(*sql.DB) bool { return false }
+		defer func() { isSQLiteDBFn = oldFn }()
+		if _, err := ClaimEventTriggers(ctx, closedDB, "camera", []string{"garage"}, "person_arrived"); err == nil {
+			t.Error("expected error from closed db on Postgres query path")
+		}
+	}()
 	_ = NewToolHandler(&Config{VanadisURL: "http://vanadis.aerial", Timezone: "UTC"}, db)
 }
 
@@ -1334,6 +1361,16 @@ func TestHandleClaimEventTriggers_Table(t *testing.T) {
 		Prompt:    "check passed",
 		Effort:    "medium",
 	})
+	_ = InsertEventTrigger(context.Background(), server.handler.db, EventTrigger{
+		ID:         "trig-claim-persistent-1",
+		ChannelID:  "1555405874565091380",
+		Source:     "camera",
+		Target:     "garage",
+		EventType:  "person_arrived",
+		Prompt:     "check garage person",
+		Effort:     "medium",
+		Persistent: true,
+	})
 
 	closedDB, err := OpenDB(&Config{DatabaseURL: ":memory:"})
 	if err != nil {
@@ -1357,6 +1394,8 @@ func TestHandleClaimEventTriggers_Table(t *testing.T) {
 		{"closed db error", http.MethodPost, `{"source":"github","targets":["azylman/aerial"],"event_type":"ci_passed"}`, serverClosed, http.StatusInternalServerError, 0},
 		{"claim matching trigger", http.MethodPost, `{"source":"github","targets":["azylman/aerial","azylman/aerial:main"],"event_type":"ci_passed"}`, server, http.StatusOK, 1},
 		{"second claim returns empty", http.MethodPost, `{"source":"github","targets":["azylman/aerial"],"event_type":"ci_passed"}`, server, http.StatusOK, 0},
+		{"claim matching persistent trigger", http.MethodPost, `{"source":"camera","targets":["garage"],"event_type":"person_arrived"}`, server, http.StatusOK, 1},
+		{"second claim on persistent trigger still returns it", http.MethodPost, `{"source":"camera","targets":["garage"],"event_type":"person_arrived"}`, server, http.StatusOK, 1},
 	}
 
 	for _, tc := range tests {
@@ -1453,6 +1492,16 @@ func TestHandleFireEventTriggers_Table(t *testing.T) {
 		Prompt:    "Device alpha ready",
 		Effort:    "low",
 	})
+	_ = InsertEventTrigger(context.Background(), server.handler.db, EventTrigger{
+		ID:         "trig-fire-persistent-1",
+		ChannelID:  "1555405874565091380",
+		Source:     "camera",
+		Target:     "entryway",
+		EventType:  "package_delivered",
+		Prompt:     "package arrived",
+		Effort:     "low",
+		Persistent: true,
+	})
 
 	closedDB, err := OpenDB(&Config{DatabaseURL: ":memory:"})
 	if err != nil {
@@ -1482,6 +1531,10 @@ func TestHandleFireEventTriggers_Table(t *testing.T) {
 		{"fire dispatch error re-inserts trigger and returns 502", http.MethodPost, `{"source":"custom_source","target":"device.alpha","event_type":"ready","context_header":"External state change"}`, serverFailDisp, http.StatusBadGateway, 0},
 		{"fire retry succeeds after re-insert", http.MethodPost, `{"source":"custom_source","target":"device.alpha","event_type":"ready","context_header":"External state change"}`, serverOKDisp, http.StatusOK, 1},
 		{"fire subsequent call returns 0 fired", http.MethodPost, `{"source":"custom_source","target":"device.alpha","event_type":"ready"}`, serverOKDisp, http.StatusOK, 0},
+		{"fire persistent trigger first time", http.MethodPost, `{"source":"camera","targets":["entryway"],"event_type":"package_delivered"}`, serverOKDisp, http.StatusOK, 1},
+		{"fire persistent trigger second time still fires", http.MethodPost, `{"source":"camera","targets":["entryway"],"event_type":"package_delivered"}`, serverOKDisp, http.StatusOK, 1},
+		{"fire dispatch error does not reinsert duplicate for persistent trigger", http.MethodPost, `{"source":"camera","targets":["entryway"],"event_type":"package_delivered"}`, serverFailDisp, http.StatusBadGateway, 0},
+		{"fire retry succeeds for persistent trigger after failed dispatch", http.MethodPost, `{"source":"camera","targets":["entryway"],"event_type":"package_delivered"}`, serverOKDisp, http.StatusOK, 1},
 	}
 
 	for _, tc := range tests {

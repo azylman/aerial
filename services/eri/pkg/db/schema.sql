@@ -426,7 +426,8 @@ CREATE TABLE IF NOT EXISTS event_triggers (
     event_type TEXT NOT NULL,
     prompt TEXT NOT NULL,
     effort TEXT NOT NULL DEFAULT 'medium',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    persistent BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE INDEX IF NOT EXISTS idx_event_triggers_lookup ON event_triggers (source, target, event_type);

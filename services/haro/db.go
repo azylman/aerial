@@ -83,14 +83,15 @@ type HeartbeatSchedule struct {
 }
 
 type EventTrigger struct {
-	ID        string    `json:"id"`
-	ChannelID string    `json:"channel_id"`
-	Source    string    `json:"source"`
-	Target    string    `json:"target"`
-	EventType string    `json:"event_type"`
-	Prompt    string    `json:"prompt"`
-	Effort    string    `json:"effort"`
-	CreatedAt time.Time `json:"created_at"`
+	ID         string    `json:"id"`
+	ChannelID  string    `json:"channel_id"`
+	Source     string    `json:"source"`
+	Target     string    `json:"target"`
+	EventType  string    `json:"event_type"`
+	Prompt     string    `json:"prompt"`
+	Effort     string    `json:"effort"`
+	CreatedAt  time.Time `json:"created_at"`
+	Persistent bool      `json:"persistent"`
 }
 
 type ScheduleRun struct {
@@ -776,8 +777,8 @@ func InsertEventTrigger(ctx context.Context, database *sql.DB, t EventTrigger) e
 	if err != nil {
 		effort = "medium"
 	}
-	query := `INSERT INTO event_triggers (id, channel_id, source, target, event_type, prompt, effort, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
-	_, err = database.ExecContext(ctx, query, t.ID, t.ChannelID, t.Source, t.Target, t.EventType, t.Prompt, effort, t.CreatedAt)
+	query := `INSERT INTO event_triggers (id, channel_id, source, target, event_type, prompt, effort, created_at, persistent) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
+	_, err = database.ExecContext(ctx, query, t.ID, t.ChannelID, t.Source, t.Target, t.EventType, t.Prompt, effort, t.CreatedAt, t.Persistent)
 	return err
 }
 
@@ -791,10 +792,10 @@ func ListEventTriggers(ctx context.Context, database *sql.DB, channelID string) 
 	var query string
 	var rows *sql.Rows
 	if channelID != "" {
-		query = `SELECT id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at FROM event_triggers WHERE channel_id = $1 ORDER BY created_at ASC`
+		query = `SELECT id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at, persistent FROM event_triggers WHERE channel_id = $1 ORDER BY created_at ASC`
 		rows, err = database.QueryContext(ctx, query, channelID)
 	} else {
-		query = `SELECT id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at FROM event_triggers ORDER BY created_at ASC`
+		query = `SELECT id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at, persistent FROM event_triggers ORDER BY created_at ASC`
 		rows, err = database.QueryContext(ctx, query)
 	}
 	if err != nil {
@@ -808,7 +809,7 @@ func scanEventTriggerRows(rows *sql.Rows) ([]EventTrigger, error) {
 	results := []EventTrigger{}
 	for rows.Next() {
 		var t EventTrigger
-		if err := rows.Scan(&t.ID, &t.ChannelID, &t.Source, &t.Target, &t.EventType, &t.Prompt, &t.Effort, &t.CreatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.ChannelID, &t.Source, &t.Target, &t.EventType, &t.Prompt, &t.Effort, &t.CreatedAt, &t.Persistent); err != nil {
 			return nil, err
 		}
 		results = append(results, t)
@@ -859,6 +860,15 @@ func CheckEventTriggers(ctx context.Context, database *sql.DB, source string, ta
 	return matched, nil
 }
 
+var isSQLiteDBFn = isSQLiteDB
+
+func isSQLiteDB(db *sql.DB) bool {
+	if db == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(fmt.Sprintf("%T", db.Driver())), "sqlite")
+}
+
 // ClaimEventTriggers atomically deletes and returns matching event triggers from event_triggers.
 func ClaimEventTriggers(ctx context.Context, database *sql.DB, source string, targets []string, eventType string) ([]EventTrigger, error) {
 	ctx, err := normCtxAndDB(ctx, database)
@@ -869,7 +879,44 @@ func ClaimEventTriggers(ctx context.Context, database *sql.DB, source string, ta
 	if !ok {
 		return nil, nil
 	}
-	rawQuery := fmt.Sprintf(`DELETE FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) RETURNING id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at`, placeholders)
+
+	if isSQLiteDBFn(database) {
+		tx, txErr := database.BeginTx(ctx, nil)
+		if txErr != nil {
+			return nil, txErr
+		}
+		defer func() {
+			if rErr := tx.Rollback(); rErr != nil && !errors.Is(rErr, sql.ErrTxDone) {
+				log.Printf("[Haro] failed to rollback claim transaction: %v", rErr)
+			}
+		}()
+
+		selectQuery := fmt.Sprintf(`SELECT id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at, persistent FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) ORDER BY created_at ASC`, placeholders)
+		rows, qErr := tx.QueryContext(ctx, selectQuery, args...)
+		if qErr != nil {
+			return nil, qErr
+		}
+		triggers, scanErr := scanEventTriggerRows(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+
+		deleteQuery := fmt.Sprintf(`DELETE FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) AND persistent = FALSE`, placeholders)
+		if _, dErr := tx.ExecContext(ctx, deleteQuery, args...); dErr != nil {
+			return nil, dErr
+		}
+
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return triggers, nil
+	}
+
+	rawQuery := fmt.Sprintf(`WITH deleted AS (
+		DELETE FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) AND persistent = FALSE RETURNING id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium') AS effort, created_at, persistent
+	), kept AS (
+		SELECT id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium') AS effort, created_at, persistent FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) AND persistent = TRUE
+	) SELECT * FROM deleted UNION ALL SELECT * FROM kept ORDER BY created_at ASC`, placeholders, placeholders)
 	rows, err := database.QueryContext(ctx, rawQuery, args...)
 	if err != nil {
 		return nil, err

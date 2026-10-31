@@ -670,6 +670,12 @@ func HandleWatchEvent(ctx context.Context, db *sql.DB, args map[string]any, extr
 	target := getMapString(args, "target")
 	eventType := getMapString(args, "event_type")
 
+	persistentPtr, _ := getMapBool(args, "persistent")
+	persistent := false
+	if persistentPtr != nil {
+		persistent = *persistentPtr
+	}
+
 	normSource, normTarget, normEventType, err := ValidateEventWatchSpec(source, target, eventType, extraSources...)
 	if err != nil {
 		return nil, err
@@ -681,14 +687,15 @@ func HandleWatchEvent(ctx context.Context, db *sql.DB, args map[string]any, extr
 
 	id := uuid.New().String()
 	trigger := EventTrigger{
-		ID:        id,
-		ChannelID: channelID,
-		Source:    normSource,
-		Target:    normTarget,
-		EventType: normEventType,
-		Prompt:    prompt,
-		Effort:    effort,
-		CreatedAt: time.Now().UTC(),
+		ID:         id,
+		ChannelID:  channelID,
+		Source:     normSource,
+		Target:     normTarget,
+		EventType:  normEventType,
+		Prompt:     prompt,
+		Effort:     effort,
+		CreatedAt:  time.Now().UTC(),
+		Persistent: persistent,
 	}
 
 	if err := InsertEventTrigger(ctx, db, trigger); err != nil {
@@ -713,6 +720,7 @@ func HandleWatchEvent(ctx context.Context, db *sql.DB, args map[string]any, extr
 		"target":     normTarget,
 		"event_type": normEventType,
 		"effort":     effort,
+		"persistent": trigger.Persistent,
 		"message":    "Event watch registered successfully.",
 	}
 	jsonBytes, err := json.Marshal(out)

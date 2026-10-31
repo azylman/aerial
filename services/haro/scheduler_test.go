@@ -418,6 +418,22 @@ func TestHTTPPromptDispatcher_Dispatch(t *testing.T) {
 			req:           DispatchRequest{Source: "heartbeat", Prompt: "test"},
 			wantErr:       true,
 		},
+		{
+			name:           "default http client used when httpClient is nil",
+			serverStatus:   http.StatusAccepted,
+			serverResponse: `{"status":"accepted","dispatch_id":"disp-nc","message_id":"disp-nc"}`,
+			req: DispatchRequest{
+				Source:    "heartbeat",
+				SessionID: "heartbeat-hb-nc",
+				Prompt:    "nil client test",
+			},
+			wantDispatchID: "disp-nc",
+		},
+		{
+			name:    "empty brain url defaults to eri.aerial",
+			req:     DispatchRequest{Source: "heartbeat", Prompt: "test default url"},
+			wantErr: true,
+		},
 	}
 
 	for _, tc := range tests {
@@ -437,6 +453,10 @@ func TestHTTPPromptDispatcher_Dispatch(t *testing.T) {
 			var dispatcher *HTTPPromptDispatcher
 			if tc.nilDispatcher {
 				dispatcher = nil
+			} else if tc.name == "default http client used when httpClient is nil" {
+				dispatcher = &HTTPPromptDispatcher{brainURL: server.URL}
+			} else if tc.name == "empty brain url defaults to eri.aerial" {
+				dispatcher = &HTTPPromptDispatcher{}
 			} else {
 				serverURL := server.URL + "/"
 				if tc.closeServer {
@@ -446,6 +466,12 @@ func TestHTTPPromptDispatcher_Dispatch(t *testing.T) {
 			}
 
 			ctx := context.Background()
+			if tc.name == "empty brain url defaults to eri.aerial" {
+				cancelCtx, cancel := context.WithCancel(ctx)
+				cancel()
+				ctx = cancelCtx
+			}
+
 			resp, err := dispatcher.Dispatch(ctx, tc.req)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("Dispatch() err = %v, wantErr = %v", err, tc.wantErr)
@@ -1850,6 +1876,20 @@ func TestPureHelpers_ValidateEventWatchSpec(t *testing.T) {
 		{"nomad uppercase normalized deploy_failed", "nomad", "AERIAL-POSTGRES", "deploy_failed", nil, "nomad", "aerial-postgres", "deploy_failed", false},
 		{"nomad invalid event_type", "nomad", "aerial-brain", "started", nil, "", "", "", true},
 		{"nomad invalid target characters", "nomad", "aerial_brain", "deploy_success", nil, "", "", "", true},
+		// camera
+		{"camera garage person_arrived", "camera", "garage", "person_arrived", nil, "camera", "garage", "person_arrived", false},
+		{"camera grill vehicle_arrived uppercase", "CAMERA", "GRILL", "VEHICLE_ARRIVED", nil, "camera", "grill", "vehicle_arrived", false},
+		{"camera tub animal_detected", "camera", "tub", "animal_detected", nil, "camera", "tub", "animal_detected", false},
+		{"camera entryway package_delivered", "camera", "entryway", "package_delivered", nil, "camera", "entryway", "package_delivered", false},
+		{"camera entryway package_removed", "camera", "entryway", "package_removed", nil, "camera", "entryway", "package_removed", false},
+		{"camera nanit baby_awake", "camera", "nanit", "baby_awake", nil, "camera", "nanit", "baby_awake", false},
+		{"camera nanit baby_asleep", "camera", "nanit", "baby_asleep", nil, "camera", "nanit", "baby_asleep", false},
+		{"camera wildcard motion", "camera", "*", "motion", nil, "camera", "*", "motion", false},
+		{"camera person_departed", "camera", "garage", "person_departed", nil, "camera", "garage", "person_departed", false},
+		{"camera vehicle_departed", "camera", "garage", "vehicle_departed", nil, "camera", "garage", "vehicle_departed", false},
+		{"camera invalid target kitchen", "camera", "kitchen", "motion", nil, "", "", "", true},
+		{"camera invalid target unknown", "camera", "backyard", "person_arrived", nil, "", "", "", true},
+		{"camera invalid event_type", "camera", "garage", "fire_detected", nil, "", "", "", true},
 		// unknown source vs configured extra_event_sources
 		{"unknown source without extraSources", "custom_iot", "device.washer", "idle", nil, "", "", "", true},
 		{"configured extra source valid", "Custom_IoT", "device.washer", "IDLE", []string{"custom_iot"}, "custom_iot", "device.washer", "idle", false},
@@ -2026,6 +2066,28 @@ func TestDB_EventTriggers(t *testing.T) {
 		Prompt:    "Brain deployed with defaults",
 		Effort:    "invalid-effort",
 	}
+	trig5 := EventTrigger{
+		ID:         "et-5",
+		ChannelID:  "111111111111111111",
+		Source:     "camera",
+		Target:     "garage",
+		EventType:  "person_arrived",
+		Prompt:     "Standing camera watch garage",
+		Effort:     "medium",
+		CreatedAt:  time.Now().UTC(),
+		Persistent: true,
+	}
+	trig6 := EventTrigger{
+		ID:         "et-6",
+		ChannelID:  "111111111111111111",
+		Source:     "camera",
+		Target:     "garage",
+		EventType:  "person_arrived",
+		Prompt:     "One-shot camera watch",
+		Effort:     "low",
+		CreatedAt:  time.Now().UTC(),
+		Persistent: false,
+	}
 
 	if err := InsertEventTrigger(ctx, db, trig1); err != nil {
 		t.Fatalf("InsertEventTrigger 1 failed: %v", err)
@@ -2039,14 +2101,20 @@ func TestDB_EventTriggers(t *testing.T) {
 	if err := InsertEventTrigger(ctx, db, trig4); err != nil {
 		t.Fatalf("InsertEventTrigger 4 failed: %v", err)
 	}
+	if err := InsertEventTrigger(ctx, db, trig5); err != nil {
+		t.Fatalf("InsertEventTrigger 5 failed: %v", err)
+	}
+	if err := InsertEventTrigger(ctx, db, trig6); err != nil {
+		t.Fatalf("InsertEventTrigger 6 failed: %v", err)
+	}
 
 	listTests := []struct {
 		name      string
 		channelID string
 		wantCount int
 	}{
-		{"list all", "", 4},
-		{"list channel 1", "111111111111111111", 3},
+		{"list all", "", 6},
+		{"list channel 1", "111111111111111111", 5},
 		{"list channel 2", "222222222222222222", 1},
 		{"list non-existent channel", "999999999999999999", 0},
 	}
@@ -2103,6 +2171,36 @@ func TestDB_EventTriggers(t *testing.T) {
 			}
 			if deleted != tc.wantDelete {
 				t.Errorf("DeleteSchedule deleted = %v, want %v", deleted, tc.wantDelete)
+			}
+		})
+	}
+
+	// Verify ClaimEventTriggers persistent vs non-persistent retention
+	claimTests := []struct {
+		name      string
+		source    string
+		targets   []string
+		eventType string
+		wantCount int
+		wantIDs   []string
+	}{
+		{"first claim returns both persistent and non-persistent", "camera", []string{"garage"}, "person_arrived", 2, []string{"et-5", "et-6"}},
+		{"second claim retains persistent and deletes non-persistent", "camera", []string{"garage"}, "person_arrived", 1, []string{"et-5"}},
+		{"third claim still retains persistent", "camera", []string{"garage"}, "person_arrived", 1, []string{"et-5"}},
+	}
+	for _, tc := range claimTests {
+		t.Run("claim_"+tc.name, func(t *testing.T) {
+			claimed, err := ClaimEventTriggers(ctx, db, tc.source, tc.targets, tc.eventType)
+			if err != nil {
+				t.Fatalf("ClaimEventTriggers failed: %v", err)
+			}
+			if len(claimed) != tc.wantCount {
+				t.Fatalf("ClaimEventTriggers count = %d, want %d", len(claimed), tc.wantCount)
+			}
+			for i, id := range tc.wantIDs {
+				if claimed[i].ID != id {
+					t.Errorf("claimed[%d].ID = %s, want %s", i, claimed[i].ID, id)
+				}
 			}
 		})
 	}
@@ -2214,6 +2312,18 @@ func TestEventWatchTools(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "success with camera source and persistent true",
+			args: map[string]any{
+				"channel_id": "1562847268833337378",
+				"source":     "camera",
+				"target":     "garage",
+				"event_type": "person_arrived",
+				"prompt":     "garage person detected",
+				"persistent": true,
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tc := range watchTests {
@@ -2225,6 +2335,12 @@ func TestEventWatchTools(t *testing.T) {
 			if !tc.wantErr {
 				if res == nil || len(res.Content) == 0 {
 					t.Fatalf("expected non-empty CallToolResult")
+				}
+				if wantPers, ok := tc.args["persistent"].(bool); ok && wantPers {
+					txt, isTxt := res.Content[0].(*mcp.TextContent)
+					if !isTxt || !strings.Contains(txt.Text, `"persistent":true`) {
+						t.Errorf("expected persistent:true in output, got %v", res.Content[0])
+					}
 				}
 			}
 		})
