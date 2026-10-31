@@ -256,6 +256,9 @@ func (m *memoryVanadisStore) UpdateBuildStatusMessageID(_ context.Context, id, m
 }
 
 func (m *memoryVanadisStore) GetChunk(_ context.Context, chunkID string) (*VanadisChunk, *VanadisBuild, error) {
+	if m.getErr != nil {
+		return nil, nil, m.getErr
+	}
 	for bID, list := range m.chunks {
 		for _, c := range list {
 			if c.ID == chunkID {
