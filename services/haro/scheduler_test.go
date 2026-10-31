@@ -1876,20 +1876,6 @@ func TestPureHelpers_ValidateEventWatchSpec(t *testing.T) {
 		{"nomad uppercase normalized deploy_failed", "nomad", "AERIAL-POSTGRES", "deploy_failed", nil, "nomad", "aerial-postgres", "deploy_failed", false},
 		{"nomad invalid event_type", "nomad", "aerial-brain", "started", nil, "", "", "", true},
 		{"nomad invalid target characters", "nomad", "aerial_brain", "deploy_success", nil, "", "", "", true},
-		// camera
-		{"camera garage person_arrived", "camera", "garage", "person_arrived", nil, "camera", "garage", "person_arrived", false},
-		{"camera grill vehicle_arrived uppercase", "CAMERA", "GRILL", "VEHICLE_ARRIVED", nil, "camera", "grill", "vehicle_arrived", false},
-		{"camera tub animal_detected", "camera", "tub", "animal_detected", nil, "camera", "tub", "animal_detected", false},
-		{"camera entryway package_delivered", "camera", "entryway", "package_delivered", nil, "camera", "entryway", "package_delivered", false},
-		{"camera entryway package_removed", "camera", "entryway", "package_removed", nil, "camera", "entryway", "package_removed", false},
-		{"camera nanit baby_awake", "camera", "nanit", "baby_awake", nil, "camera", "nanit", "baby_awake", false},
-		{"camera nanit baby_asleep", "camera", "nanit", "baby_asleep", nil, "camera", "nanit", "baby_asleep", false},
-		{"camera wildcard motion", "camera", "*", "motion", nil, "camera", "*", "motion", false},
-		{"camera person_departed", "camera", "garage", "person_departed", nil, "camera", "garage", "person_departed", false},
-		{"camera vehicle_departed", "camera", "garage", "vehicle_departed", nil, "camera", "garage", "vehicle_departed", false},
-		{"camera invalid target kitchen", "camera", "kitchen", "motion", nil, "", "", "", true},
-		{"camera invalid target unknown", "camera", "backyard", "person_arrived", nil, "", "", "", true},
-		{"camera invalid event_type", "camera", "garage", "fire_detected", nil, "", "", "", true},
 		// unknown source vs configured extra_event_sources
 		{"unknown source without extraSources", "custom_iot", "device.washer", "idle", nil, "", "", "", true},
 		{"configured extra source valid", "Custom_IoT", "device.washer", "IDLE", []string{"custom_iot"}, "custom_iot", "device.washer", "idle", false},
@@ -2256,9 +2242,10 @@ func TestEventWatchTools(t *testing.T) {
 	defer SetVanadisURL(oldVanadis)
 
 	watchTests := []struct {
-		name    string
-		args    map[string]any
-		wantErr bool
+		name         string
+		args         map[string]any
+		extraSources []string
+		wantErr      bool
 	}{
 		{
 			name:    "missing channel_id",
@@ -2313,7 +2300,7 @@ func TestEventWatchTools(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "success with camera source and persistent true",
+			name: "success with extra source and persistent true",
 			args: map[string]any{
 				"channel_id": "1562847268833337378",
 				"source":     "camera",
@@ -2322,13 +2309,14 @@ func TestEventWatchTools(t *testing.T) {
 				"prompt":     "garage person detected",
 				"persistent": true,
 			},
-			wantErr: false,
+			extraSources: []string{"camera"},
+			wantErr:      false,
 		},
 	}
 
 	for _, tc := range watchTests {
 		t.Run("watch_"+tc.name, func(t *testing.T) {
-			res, err := HandleWatchEvent(ctx, db, tc.args)
+			res, err := HandleWatchEvent(ctx, db, tc.args, tc.extraSources...)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("HandleWatchEvent() err = %v, wantErr = %v", err, tc.wantErr)
 			}
