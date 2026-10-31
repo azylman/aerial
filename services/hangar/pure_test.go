@@ -1284,7 +1284,7 @@ func TestIsHangarJob_TableDriven(t *testing.T) {
 		{"hangar", true},
 		{"Hangar", true},
 		{" HANGAR ", true},
-		{"webhooks-router", false},
+		{"synapse", false},
 		{"brain", false},
 		{"", false},
 	}
@@ -1304,7 +1304,7 @@ func TestIsHangarImage_TableDriven(t *testing.T) {
 	}{
 		{"ghcr.io/azylman/aerial-hangar:latest", true},
 		{"aerial-hangar", true},
-		{"ghcr.io/azylman/aerial-webhooks-router:latest", false},
+		{"ghcr.io/azylman/aerial-synapse:latest", false},
 		{"brain:latest", false},
 		{"", false},
 	}
@@ -1321,10 +1321,10 @@ func TestSortNomadChangesHangarLast_TableDriven(t *testing.T) {
 	changes := []NomadFileChange{
 		{JobName: "hangar", Path: "jobs/hangar.nomad"},
 		{JobName: "brain", Path: "jobs/brain.nomad"},
-		{JobName: "webhooks-router", Path: "jobs/webhooks-router.nomad"},
+		{JobName: "synapse", Path: "jobs/synapse.nomad"},
 	}
 	SortNomadChangesHangarLast(changes)
-	if changes[0].JobName != "brain" || changes[1].JobName != "webhooks-router" || changes[2].JobName != "hangar" {
+	if changes[0].JobName != "brain" || changes[1].JobName != "synapse" || changes[2].JobName != "hangar" {
 		t.Fatalf("unexpected order after SortNomadChangesHangarLast: %+v", changes)
 	}
 }

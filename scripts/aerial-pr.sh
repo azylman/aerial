@@ -843,8 +843,8 @@ submit_scratch() {
             brain_reg_url="${AERIAL_PR_REGISTER_URL%/}/internal/pr/register"
         fi
     else
-        # Probe candidate endpoints for webhooks-router or Eri/Brain's /internal/pr/register handler
-        for cand in "http://webhooks-router.aerial" "http://127.0.0.1:4020" "http://127.0.0.1:8088" "http://eri.aerial" "http://brain.aerial" "http://host.docker.internal:8088" "http://127.0.0.1:8080" "http://aerial-brain:8080"; do
+        # Probe candidate endpoints for synapse, webhooks-router, or Eri/Brain's /internal/pr/register handler
+        for cand in "http://synapse.aerial" "http://webhooks-router.aerial" "http://127.0.0.1:4020" "http://127.0.0.1:8088" "http://eri.aerial" "http://brain.aerial" "http://host.docker.internal:8088" "http://127.0.0.1:8080" "http://aerial-brain:8080"; do
             local probe_code
             probe_code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 1 -m 2 -X POST "${cand}/internal/pr/register" 2>/dev/null || true)
             if [ "$probe_code" = "400" ] || [ "$probe_code" = "200" ]; then
@@ -853,7 +853,7 @@ submit_scratch() {
             fi
         done
         if [ -z "$brain_reg_url" ]; then
-            brain_reg_url="http://webhooks-router.aerial/internal/pr/register"
+            brain_reg_url="http://synapse.aerial/internal/pr/register"
         fi
     fi
 
@@ -870,7 +870,7 @@ submit_scratch() {
 
     if ! register_pr_in_brain "$brain_reg_url" "$reg_payload" "$pr_num" "$target_id"; then
         if [ -n "$pr_trailer" ]; then
-            echo "⚠️ [aerial-pr] Warning: Brain registration unreachable; relying on webhooks-router PR trailer self-healing for PR #${pr_num}." >&2
+            echo "⚠️ [aerial-pr] Warning: Brain registration unreachable; relying on synapse PR trailer self-healing for PR #${pr_num}." >&2
         else
             if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
                 echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2

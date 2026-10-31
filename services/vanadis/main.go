@@ -48,18 +48,19 @@ var (
 
 // Config holds runtime configuration for the Vanadis orchestrator service.
 type Config struct {
-	Port              string
-	PostgresURL       string
-	BrainURL          string
-	WebhooksRouterURL string
+	Port        string
+	PostgresURL string
+	BrainURL    string
+	SynapseURL  string
 }
 
 // VanadisYAMLConfig defines the declarative file schema for /config/vanadis.yaml.
 type VanadisYAMLConfig struct {
-	Port              string `yaml:"port"`
-	PostgresURL       string `yaml:"postgres_url"`
-	BrainURL          string `yaml:"brain_url"`
-	WebhooksRouterURL string `yaml:"webhooks_router_url"`
+	Port                        string `yaml:"port"`
+	PostgresURL                 string `yaml:"postgres_url"`
+	BrainURL                    string `yaml:"brain_url"`
+	SynapseURL                  string `yaml:"synapse_url"`
+	DeprecatedWebhooksRouterURL string `yaml:"webhooks_router_url,omitempty"`
 }
 
 var (
@@ -117,10 +118,10 @@ func LoadConfig(configPath string) Config {
 		pgURL = fmt.Sprintf("postgres://aerial:aerial_secure_pass@%s:5432/aerial?sslmode=disable", host)
 	}
 	return Config{
-		Port:              firstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4025"),
-		PostgresURL:       pgURL,
-		BrainURL:          strings.TrimRight(firstNonEmpty(os.Getenv("BRAIN_INTERNAL_URL"), os.Getenv("BRAIN_URL"), fileCfg.BrainURL, "http://127.0.0.1:8088"), "/"),
-		WebhooksRouterURL: strings.TrimRight(firstNonEmpty(os.Getenv("WEBHOOKS_ROUTER_URL"), fileCfg.WebhooksRouterURL, "http://webhooks-router.aerial"), "/"),
+		Port:        firstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4025"),
+		PostgresURL: pgURL,
+		BrainURL:    strings.TrimRight(firstNonEmpty(os.Getenv("BRAIN_INTERNAL_URL"), os.Getenv("BRAIN_URL"), fileCfg.BrainURL, "http://127.0.0.1:8088"), "/"),
+		SynapseURL:  strings.TrimRight(firstNonEmpty(os.Getenv("SYNAPSE_URL"), os.Getenv("WEBHOOKS_ROUTER_URL"), fileCfg.SynapseURL, fileCfg.DeprecatedWebhooksRouterURL, "http://synapse.aerial"), "/"),
 	}
 }
 
@@ -753,7 +754,7 @@ func (s *VanadisServer) syncBuildWidget(ctx context.Context, buildID, banner str
 		log.Printf("[vanadis] warning: marshal widget sync payload failed for build %s: %v", cleanBuildID, err)
 		return
 	}
-	routerURL := strings.TrimRight(firstNonEmpty(s.cfg.WebhooksRouterURL, "http://127.0.0.1:4020"), "/")
+	routerURL := strings.TrimRight(firstNonEmpty(s.cfg.SynapseURL, "http://127.0.0.1:4020"), "/")
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, routerURL+"/internal/widget/sync", bytes.NewReader(bodyBytes))
 	if err != nil {
 		log.Printf("[vanadis] warning: create widget sync request failed for build %s: %v", cleanBuildID, err)

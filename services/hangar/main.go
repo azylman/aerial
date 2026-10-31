@@ -220,8 +220,8 @@ type SyncDaemon struct {
 	registryClient *http.Client
 
 	// Webhooks & Deploy Lifecycle
-	webhooksRouterURL string
-	deployDispatcher  func(ctx context.Context, evt HangarDeployEvent) error
+	synapseURL       string
+	deployDispatcher func(ctx context.Context, evt HangarDeployEvent) error
 
 	// Nomad Config Cache
 	lastPushedConfigMu sync.Mutex
@@ -274,8 +274,8 @@ func (d *SyncDaemon) getDeployDispatcher() func(ctx context.Context, evt HangarD
 
 func (d *SyncDaemon) defaultDeployDispatcher(ctx context.Context, evt HangarDeployEvent) error {
 	routerURL := "http://127.0.0.1:4020"
-	if d != nil && strings.TrimSpace(d.webhooksRouterURL) != "" {
-		routerURL = strings.TrimRight(strings.TrimSpace(d.webhooksRouterURL), "/")
+	if d != nil && strings.TrimSpace(d.synapseURL) != "" {
+		routerURL = strings.TrimRight(strings.TrimSpace(d.synapseURL), "/")
 	}
 	targetURL := routerURL + "/api/webhooks/hangar"
 
@@ -362,7 +362,7 @@ type DaemonConfig struct {
 	NomadAddr         string
 	NomadToken        string
 	RegistryClient    *http.Client
-	WebhooksRouterURL string
+	SynapseURL        string
 	DeployDispatcher  func(ctx context.Context, evt HangarDeployEvent) error
 	ServiceConfigs    []ServiceConfigMapping
 }
@@ -384,7 +384,7 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 	}
 	cfg.ComposeDir = firstNonEmpty(cfg.ComposeDir, ResolveRepoPath("aerial", cfg.Repos), "/share/aerial")
 	cfg.ConfigDir = firstNonEmpty(cfg.ConfigDir, ResolveRepoPath("aerial-config", cfg.Repos), "/share/aerial-config")
-	webhooksRouterURL := firstNonEmpty(cfg.WebhooksRouterURL, "http://127.0.0.1:4020")
+	synapseURL := firstNonEmpty(cfg.SynapseURL, "http://127.0.0.1:4020")
 	extraSecrets := append([]string(nil), cfg.ExtraSecrets...)
 	if s := strings.TrimSpace(cfg.DiscordToken); s != "" {
 		extraSecrets = append(extraSecrets, s)
@@ -407,7 +407,7 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 		nomadToken:           cfg.NomadToken,
 		nomadKnownDigests:    make(map[string]string),
 		registryClient:       cfg.RegistryClient,
-		webhooksRouterURL:    webhooksRouterURL,
+		synapseURL:           synapseURL,
 		deployDispatcher:     cfg.DeployDispatcher,
 		reconcileCh:          make(chan struct{}, 1),
 		pendingImageRollouts: make(map[string]PendingImageRollout),
@@ -665,13 +665,14 @@ type RepoConfig struct {
 
 // HangarYAMLConfig defines the declarative file schema for services/hangar/hangar.yaml.
 type HangarYAMLConfig struct {
-	Port              string                 `yaml:"port"`
-	SyncInterval      string                 `yaml:"sync_interval"`
-	NomadAddr         string                 `yaml:"nomad_addr"`
-	WebhooksRouterURL string                 `yaml:"webhooks_router_url"`
-	Repos             []RepoConfig           `yaml:"repos"`
-	SyncRepos         []string               `yaml:"sync_repos"`
-	ServiceConfigs    []ServiceConfigMapping `yaml:"service_configs"`
+	Port                        string                 `yaml:"port"`
+	SyncInterval                string                 `yaml:"sync_interval"`
+	NomadAddr                   string                 `yaml:"nomad_addr"`
+	SynapseURL                  string                 `yaml:"synapse_url"`
+	DeprecatedWebhooksRouterURL string                 `yaml:"webhooks_router_url,omitempty"`
+	Repos                       []RepoConfig           `yaml:"repos"`
+	SyncRepos                   []string               `yaml:"sync_repos"`
+	ServiceConfigs              []ServiceConfigMapping `yaml:"service_configs"`
 }
 
 // NewConfigFromLookup extracts DaemonConfig using a provided lookup function.
@@ -725,7 +726,7 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 	configDir := firstNonEmpty(ResolveRepoPath("aerial-config", repos), "/share/aerial-config")
 
 	nomadAddr := firstNonEmpty(strings.TrimSpace(fileCfg.NomadAddr), "http://host.docker.internal:4646")
-	webhooksRouterURL := firstNonEmpty(strings.TrimSpace(fileCfg.WebhooksRouterURL), "http://127.0.0.1:4020")
+	synapseURL := firstNonEmpty(strings.TrimSpace(fileCfg.SynapseURL), strings.TrimSpace(fileCfg.DeprecatedWebhooksRouterURL), "http://127.0.0.1:4020")
 
 	pat := lookup("GITHUB_PAT")
 	nomadToken := lookup("NOMAD_TOKEN")
@@ -771,7 +772,7 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 		ExtraSecrets:      extraSecrets,
 		NomadAddr:         nomadAddr,
 		NomadToken:        nomadToken,
-		WebhooksRouterURL: webhooksRouterURL,
+		SynapseURL:        synapseURL,
 		ServiceConfigs:    serviceConfigs,
 	}
 }

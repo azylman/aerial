@@ -177,7 +177,7 @@ func TestNewConfigFromLookup_TableDriven(t *testing.T) {
 	structuredYAML := `port: "9090"
 sync_interval: "30s"
 nomad_addr: "http://nomad.test:4646"
-webhooks_router_url: "http://webhooks.test:4020"
+synapse_url: "http://synapse.test:4020"
 repos:
   - path: "/custom/aerial-config"
     url: "https://github.com/custom/aerial-config.git"
@@ -212,7 +212,7 @@ webhooks_router_url: "http://127.0.0.1:4020"`
 		wantDiscordChannel       string
 		wantDiscordWebhook       string
 		wantNomadAddr            string
-		wantWebhooksRouterURL    string
+		wantSynapseURL           string
 		wantExtraSecretsLen      int
 		checkExtraSecrets        bool
 		wantServiceConfigRelPath string
@@ -231,7 +231,7 @@ webhooks_router_url: "http://127.0.0.1:4020"`
 			wantComposeDir:           "/custom/aerial",
 			wantConfigDir:            "/custom/aerial-config",
 			wantNomadAddr:            "http://nomad.test:4646",
-			wantWebhooksRouterURL:    "http://webhooks.test:4020",
+			wantSynapseURL:           "http://synapse.test:4020",
 			wantServiceConfigRelPath: "services/voice/voice.yaml",
 		},
 		{
@@ -262,39 +262,39 @@ webhooks_router_url: "http://127.0.0.1:4020"`
 			checkExtraSecrets:   true,
 		},
 		{
-			name:                  "sync_repos fallback when repos is empty",
-			yamlContent:           syncReposYAML,
-			wantPort:              "8087",
-			wantInterval:          45 * time.Second,
-			wantRepos:             []string{"/custom/aerial-config", "/custom/aerial"},
-			wantComposeDir:        "/custom/aerial",
-			wantConfigDir:         "/custom/aerial-config",
-			wantNomadAddr:         "http://nomad.cluster:4646",
-			wantWebhooksRouterURL: "http://127.0.0.1:4020",
+			name:           "sync_repos fallback when repos is empty",
+			yamlContent:    syncReposYAML,
+			wantPort:       "8087",
+			wantInterval:   45 * time.Second,
+			wantRepos:      []string{"/custom/aerial-config", "/custom/aerial"},
+			wantComposeDir: "/custom/aerial",
+			wantConfigDir:  "/custom/aerial-config",
+			wantNomadAddr:  "http://nomad.cluster:4646",
+			wantSynapseURL: "http://127.0.0.1:4020",
 		},
 		{
-			name:                  "empty lookup defaults",
-			env:                   map[string]string{},
-			wantPort:              "8087",
-			wantInterval:          60 * time.Second,
-			wantRepos:             []string{"/share/aerial-config", "/share/aerial", "/share/mirrormere"},
-			wantComposeDir:        "/share/aerial",
-			wantConfigDir:         "/share/aerial-config",
-			wantNomadAddr:         "http://host.docker.internal:4646",
-			wantWebhooksRouterURL: "http://127.0.0.1:4020",
-			wantExtraSecretsLen:   0,
-			checkExtraSecrets:     true,
+			name:                "empty lookup defaults",
+			env:                 map[string]string{},
+			wantPort:            "8087",
+			wantInterval:        60 * time.Second,
+			wantRepos:           []string{"/share/aerial-config", "/share/aerial", "/share/mirrormere"},
+			wantComposeDir:      "/share/aerial",
+			wantConfigDir:       "/share/aerial-config",
+			wantNomadAddr:       "http://host.docker.internal:4646",
+			wantSynapseURL:      "http://127.0.0.1:4020",
+			wantExtraSecretsLen: 0,
+			checkExtraSecrets:   true,
 		},
 		{
-			name:                  "invalid YAML warning fallback to defaults",
-			yamlContent:           "invalid: [unclosed yaml",
-			wantPort:              "8087",
-			wantInterval:          60 * time.Second,
-			wantRepos:             []string{"/share/aerial-config", "/share/aerial", "/share/mirrormere"},
-			wantComposeDir:        "/share/aerial",
-			wantConfigDir:         "/share/aerial-config",
-			wantNomadAddr:         "http://host.docker.internal:4646",
-			wantWebhooksRouterURL: "http://127.0.0.1:4020",
+			name:           "invalid YAML warning fallback to defaults",
+			yamlContent:    "invalid: [unclosed yaml",
+			wantPort:       "8087",
+			wantInterval:   60 * time.Second,
+			wantRepos:      []string{"/share/aerial-config", "/share/aerial", "/share/mirrormere"},
+			wantComposeDir: "/share/aerial",
+			wantConfigDir:  "/share/aerial-config",
+			wantNomadAddr:  "http://host.docker.internal:4646",
+			wantSynapseURL: "http://127.0.0.1:4020",
 		},
 		{
 			name:        "non-secret env vars are ignored in favor of YAML",
@@ -306,13 +306,13 @@ webhooks_router_url: "http://127.0.0.1:4020"`
 				"NOMAD_ADDR":          "http://ignored.nomad:4646",
 				"WEBHOOKS_ROUTER_URL": "http://ignored.router:4020",
 			},
-			wantPort:              "9090",
-			wantInterval:          30 * time.Second,
-			wantRepos:             []string{"/custom/aerial-config", "/custom/aerial", "/custom/mirrormere"},
-			wantComposeDir:        "/custom/aerial",
-			wantConfigDir:         "/custom/aerial-config",
-			wantNomadAddr:         "http://nomad.test:4646",
-			wantWebhooksRouterURL: "http://webhooks.test:4020",
+			wantPort:       "9090",
+			wantInterval:   30 * time.Second,
+			wantRepos:      []string{"/custom/aerial-config", "/custom/aerial", "/custom/mirrormere"},
+			wantComposeDir: "/custom/aerial",
+			wantConfigDir:  "/custom/aerial-config",
+			wantNomadAddr:  "http://nomad.test:4646",
+			wantSynapseURL: "http://synapse.test:4020",
 		},
 	}
 
@@ -378,8 +378,8 @@ webhooks_router_url: "http://127.0.0.1:4020"`
 			if tt.wantNomadAddr != "" && cfg.NomadAddr != tt.wantNomadAddr {
 				t.Errorf("NomadAddr = %q, want %q", cfg.NomadAddr, tt.wantNomadAddr)
 			}
-			if tt.wantWebhooksRouterURL != "" && cfg.WebhooksRouterURL != tt.wantWebhooksRouterURL {
-				t.Errorf("WebhooksRouterURL = %q, want %q", cfg.WebhooksRouterURL, tt.wantWebhooksRouterURL)
+			if tt.wantSynapseURL != "" && cfg.SynapseURL != tt.wantSynapseURL {
+				t.Errorf("SynapseURL = %q, want %q", cfg.SynapseURL, tt.wantSynapseURL)
 			}
 			if tt.checkExtraSecrets && len(cfg.ExtraSecrets) != tt.wantExtraSecretsLen {
 				t.Errorf("len(ExtraSecrets) = %d, want %d (%v)", len(cfg.ExtraSecrets), tt.wantExtraSecretsLen, cfg.ExtraSecrets)
@@ -733,7 +733,7 @@ func TestExecutorsAndDispatchers_TableDriven(t *testing.T) {
 					defer srv.Close()
 					routerURL = srv.URL
 				}
-				d := &SyncDaemon{webhooksRouterURL: routerURL}
+				d := &SyncDaemon{synapseURL: routerURL}
 				err := d.defaultDeployDispatcher(context.Background(), HangarDeployEvent{JobName: "test"})
 				if (err != nil) != tc.wantErr {
 					t.Errorf("defaultDeployDispatcher() error = %v, wantErr = %v", err, tc.wantErr)

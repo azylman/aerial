@@ -505,7 +505,7 @@ func TestExtractServiceNameFromJobName_TableDriven(t *testing.T) {
 		{name: "github mcp", jobName: "github-mcp Deploy", expected: "github-mcp"},
 		{name: "nomad mcp", jobName: "nomad-mcp Build", expected: "nomad-mcp"},
 		{name: "infisical mcp", jobName: "infisical-mcp Build", expected: "infisical-mcp"},
-		{name: "webhooks router", jobName: "webhooks-router Build", expected: "webhooks-router"},
+		{name: "synapse service", jobName: "Build & Push synapse", expected: "synapse"},
 		{name: "ollama service", jobName: "Setup ollama image", expected: "ollama"},
 		{name: "agentsview service", jobName: "agentsview container", expected: "agentsview"},
 		{name: "unit test generic", jobName: "Unit Test Matrix", expected: "unit-tests"},

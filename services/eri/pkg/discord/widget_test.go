@@ -166,9 +166,9 @@ func TestBuildStatusWidgetComponents_VanadisBuild(t *testing.T) {
 				Repo:          "aerial",
 				Title:         "Silent prompt",
 				Status:        "deploying",
-				ActiveStep:    "-# ↳ `aerial`: ⏳ building image\n\n↳ `webhooks-router`: 🔄 starting\n",
+				ActiveStep:    "-# ↳ `aerial`: ⏳ building image\n\n↳ `synapse`: 🔄 starting\n",
 				PRNumber:      736,
-				DeployingJobs: []string{"aerial-brain", "webhooks-router"},
+				DeployingJobs: []string{"aerial-brain", "synapse"},
 			},
 			{
 				Index:      3,
@@ -232,7 +232,7 @@ func TestBuildStatusWidgetComponents_VanadisBuild(t *testing.T) {
 		t.Fatalf("expected chunk 2 to be *discordgo.Section, got %T", container.Components[3])
 	}
 	c2Text := c2Sec.Components[0].(*discordgo.TextDisplay)
-	if c2Text.Content != "🚀 **`aerial`**: Silent prompt\n-# ↳ `aerial`: ⏳ building image\n-# ↳ `webhooks-router`: 🔄 starting" {
+	if c2Text.Content != "🚀 **`aerial`**: Silent prompt\n-# ↳ `aerial`: ⏳ building image\n-# ↳ `synapse`: 🔄 starting" {
 		t.Errorf("unexpected chunk 2 row text: %q", c2Text.Content)
 	}
 
@@ -296,8 +296,8 @@ func TestFormatChunkActiveStepLines(t *testing.T) {
 		},
 		{
 			name:       "multi-line with empty lines and mixed prefixes",
-			activeStep: "-# ↳ `aerial`: ⏳ building image\n\n   \n↳ `webhooks-router`: 🔄 starting\n",
-			want:       "\n-# ↳ `aerial`: ⏳ building image\n-# ↳ `webhooks-router`: 🔄 starting",
+			activeStep: "-# ↳ `aerial`: ⏳ building image\n\n   \n↳ `synapse`: 🔄 starting\n",
+			want:       "\n-# ↳ `aerial`: ⏳ building image\n-# ↳ `synapse`: 🔄 starting",
 		},
 		{
 			name:       "only prefixes and empty lines",

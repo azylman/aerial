@@ -44,7 +44,7 @@ const DefaultConfigRepoOwner = "azylman"
 const DefaultConfigRepoName = "aerial-config"
 
 // DefaultBrainPRRegisterURL is the default internal brain PR registration endpoint.
-const DefaultBrainPRRegisterURL = "http://webhooks-router.aerial/internal/pr/register"
+const DefaultBrainPRRegisterURL = "http://synapse.aerial/internal/pr/register"
 
 var systemChannelIDRegex = regexp.MustCompile(`^[0-9]{17,20}$`)
 

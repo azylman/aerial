@@ -433,7 +433,7 @@ func TestVanadisMCP_Tools(t *testing.T) {
 			}))
 			defer syncWidgetSrv.Close()
 
-			srv := NewVanadisServer(Config{Port: "0", WebhooksRouterURL: syncWidgetSrv.URL}, srvStore, nil, syncWidgetSrv.Client())
+			srv := NewVanadisServer(Config{Port: "0", SynapseURL: syncWidgetSrv.URL}, srvStore, nil, syncWidgetSrv.Client())
 			handler := srv.newMCPHandler()
 
 			reqBody := `{"jsonrpc":"2.0","id":100,"method":"tools/call","params":{"name":"` + tc.toolName + `","arguments":` + tc.args + `}}`

@@ -232,10 +232,10 @@ type gitPushCase struct {
 
 func TestExecuteGitPushEvent_TableDriven(t *testing.T) { // t.Run(
 	ctx := context.Background()
-	jobWithAerialImg := `job "webhooks-router" {
+	jobWithAerialImg := `job "synapse" {
 		task "router" {
 			config {
-				image = "ghcr.io/azylman/aerial-webhooks-router:latest"
+				image = "ghcr.io/azylman/aerial-synapse:latest"
 			}
 		}
 	}`
@@ -432,31 +432,31 @@ func TestExecuteGitPushEvent_TableDriven(t *testing.T) { // t.Run(
 		},
 		{
 			name:             "deferred nomad job when image missing in registry",
-			gitScript:        mockGitScript{beforeSHA: "sha_before", afterSHA: "sha_after", nameStatus: "M jobs/webhooks-router.nomad\n"},
-			jobFiles:         map[string]string{"jobs/webhooks-router.nomad": jobWithAerialImg},
+			gitScript:        mockGitScript{beforeSHA: "sha_before", afterSHA: "sha_after", nameStatus: "M jobs/synapse.nomad\n"},
+			jobFiles:         map[string]string{"jobs/synapse.nomad": jobWithAerialImg},
 			registryMode:     "not_found",
 			req:              GitPushEventRequest{Repo: "aerial-config", Ref: "refs/heads/main"},
 			wantCode:         http.StatusOK,
 			wantBuilding:     true,
 			wantNomadChanged: true,
-			wantExpectedJobs: []string{"webhooks-router"},
+			wantExpectedJobs: []string{"synapse"},
 		},
 		{
 			name:             "image ready applies nomad job and dispatches deploy_started",
-			gitScript:        mockGitScript{beforeSHA: "sha_before", afterSHA: "sha_after", nameStatus: "M jobs/webhooks-router.nomad\n"},
-			jobFiles:         map[string]string{"jobs/webhooks-router.nomad": jobWithAerialImg},
+			gitScript:        mockGitScript{beforeSHA: "sha_before", afterSHA: "sha_after", nameStatus: "M jobs/synapse.nomad\n"},
+			jobFiles:         map[string]string{"jobs/synapse.nomad": jobWithAerialImg},
 			registryMode:     "digest_ready",
 			req:              GitPushEventRequest{Repo: "aerial-config", Ref: "refs/heads/main", Commit: "commit_abc123", PRNumber: 255, TargetID: "1555422677936644147"},
 			wantCode:         http.StatusOK,
 			wantNomadChanged: true,
-			wantApplied:      []string{"webhooks-router"},
-			wantExpectedJobs: []string{"webhooks-router"},
+			wantApplied:      []string{"synapse"},
+			wantExpectedJobs: []string{"synapse"},
 			wantEvents:       []string{"sync_success", "deploy_started"},
 		},
 		{
 			name:             "deploy failed dispatches deploy_failed",
-			gitScript:        mockGitScript{beforeSHA: "sha_before", afterSHA: "sha_after", nameStatus: "M jobs/webhooks-router.nomad\n"},
-			jobFiles:         map[string]string{"jobs/webhooks-router.nomad": `job "webhooks-router" {}`},
+			gitScript:        mockGitScript{beforeSHA: "sha_before", afterSHA: "sha_after", nameStatus: "M jobs/synapse.nomad\n"},
+			jobFiles:         map[string]string{"jobs/synapse.nomad": `job "synapse" {}`},
 			nomadFailCmd:     "run",
 			req:              GitPushEventRequest{Repo: "aerial-config", Ref: "refs/heads/main", Commit: "fail_commit_123"},
 			wantCode:         http.StatusOK,
@@ -794,7 +794,7 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) { // t.Run(
 			task "router" {
 				driver = "docker"
 				config {
-					image = "ghcr.io/azylman/aerial-webhooks-router:${var.image_tag}"
+					image = "ghcr.io/azylman/aerial-synapse:${var.image_tag}"
 				}
 			}
 		}
@@ -873,7 +873,7 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) { // t.Run(
 			jobFile: "router.nomad",
 			jobHCL:  routerHCL,
 			req: ImageReadyEventRequest{
-				Image:     "ghcr.io/azylman/aerial-webhooks-router:latest",
+				Image:     "ghcr.io/azylman/aerial-synapse:latest",
 				Digest:    "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 				Repo:      "azylman/aerial",
 				CommitSHA: "sha12345",
@@ -892,7 +892,7 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) { // t.Run(
 			jobHCL:           routerHCL,
 			registryNotFound: true,
 			req: ImageReadyEventRequest{
-				Image:     "ghcr.io/azylman/aerial-webhooks-router:latest",
+				Image:     "ghcr.io/azylman/aerial-synapse:latest",
 				CommitSHA: "unpushed_sha_44d3d1f",
 				Repo:      "azylman/aerial",
 			},
@@ -905,7 +905,7 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) { // t.Run(
 			jobFile: "router.nomad",
 			jobHCL:  routerHCL,
 			req: ImageReadyEventRequest{
-				Image:    "ghcr.io/azylman/aerial-webhooks-router:latest",
+				Image:    "ghcr.io/azylman/aerial-synapse:latest",
 				Digest:   "@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 				Repo:     "azylman/aerial",
 				PRNumber: 615,
@@ -935,7 +935,7 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) { // t.Run(
 			jobHCL:           routerHCL,
 			registryNotFound: true,
 			req: ImageReadyEventRequest{
-				Image:    "ghcr.io/azylman/aerial-webhooks-router:latest",
+				Image:    "ghcr.io/azylman/aerial-synapse:latest",
 				Repo:     "azylman/aerial",
 				PRNumber: 615,
 			},
@@ -950,7 +950,7 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) { // t.Run(
 			jobFile: "router.nomad",
 			jobHCL:  routerHCL,
 			req: ImageReadyEventRequest{
-				Image:  "ghcr.io/azylman/aerial-webhooks-router:latest",
+				Image:  "ghcr.io/azylman/aerial-synapse:latest",
 				Digest: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 				Repo:   "azylman/aerial",
 			},
@@ -1094,7 +1094,7 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) { // t.Run(
 			jobHCL:  routerHCL,
 			varFile: "router.vars.hcl",
 			req: ImageReadyEventRequest{
-				Image:     "ghcr.io/azylman/aerial-webhooks-router:latest",
+				Image:     "ghcr.io/azylman/aerial-synapse:latest",
 				CommitSHA: "sha_varfile",
 			},
 			wantCode:   http.StatusOK,
@@ -1460,7 +1460,7 @@ func TestImageRolloutQueue_TableDriven(t *testing.T) {
 		})
 
 		env.writeJob("jobs", "hangar.nomad", `job "hangar" { task "h" { config { image = "ghcr.io/azylman/aerial-hangar:latest" } } }`)
-		env.writeJob("jobs", "webhooks-router.nomad", `job "webhooks-router" { task "r" { config { image = "ghcr.io/azylman/aerial-webhooks-router:latest" } } }`)
+		env.writeJob("jobs", "synapse.nomad", `job "synapse" { task "r" { config { image = "ghcr.io/azylman/aerial-synapse:latest" } } }`)
 
 		d := env.daemon
 
@@ -1486,10 +1486,10 @@ func TestImageRolloutQueue_TableDriven(t *testing.T) {
 		}
 		d.pendingImageMu.Unlock()
 		d.pendingImageMu.Lock()
-		d.pendingImageRollouts["webhooks-router"] = PendingImageRollout{
-			JobName: "webhooks-router",
+		d.pendingImageRollouts["synapse"] = PendingImageRollout{
+			JobName: "synapse",
 			Request: ImageReadyEventRequest{
-				Image: "ghcr.io/azylman/aerial-webhooks-router:latest",
+				Image: "ghcr.io/azylman/aerial-synapse:latest",
 			},
 		}
 		d.pendingImageMu.Unlock()
@@ -1501,8 +1501,8 @@ func TestImageRolloutQueue_TableDriven(t *testing.T) {
 		if len(executedJobs) != 2 {
 			t.Fatalf("expected 2 executed jobs, got %v", executedJobs)
 		}
-		if executedJobs[0] != "webhooks-router" || executedJobs[1] != "hangar" {
-			t.Fatalf("expected webhooks-router first and hangar last, got %v", executedJobs)
+		if executedJobs[0] != "synapse" || executedJobs[1] != "hangar" {
+			t.Fatalf("expected synapse first and hangar last, got %v", executedJobs)
 		}
 	})
 }

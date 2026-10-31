@@ -3885,9 +3885,9 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 			}
 
 			pool = NewWorkerPool(WorkerPoolConfig{
-				Store:             store,
-				TimeoutMinutes:    1,
-				WebhooksRouterURL: routerURL,
+				Store:          store,
+				TimeoutMinutes: 1,
+				SynapseURL:     routerURL,
 				DeliveryFunc: func(s *discordgo.Session, c, text string) error {
 					t.Errorf("unexpected Discord DeliveryFunc call for headless dispatch")
 					return nil
@@ -3932,12 +3932,12 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 			defer pool.Stop()
 
 			if tc.syncBadURL {
-				pBad := &WorkerPool{cfg: WorkerPoolConfig{WebhooksRouterURL: "://bad-url"}}
+				pBad := &WorkerPool{cfg: WorkerPoolConfig{SynapseURL: "://bad-url"}}
 				pBad.ensureChunkWidgetHydrated("Build ID: b1", "c1", "b1")
 				pDef := &WorkerPool{}
 				pDef.SetDiscordSession(&discordgo.Session{})
-				if got := pDef.resolveWebhooksRouterURL(); got != "http://webhooks-router.aerial" {
-					t.Fatalf("resolveWebhooksRouterURL() = %q, want http://webhooks-router.aerial", got)
+				if got := pDef.resolveSynapseURL(); got != "http://synapse.aerial" {
+					t.Fatalf("resolveSynapseURL() = %q, want http://synapse.aerial", got)
 				}
 			}
 

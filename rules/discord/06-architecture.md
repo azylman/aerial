@@ -30,7 +30,7 @@ Aerial runs as a multi-node HashiCorp Nomad cluster supervised by Nomad and `han
   - **`dashboard`**: Web status HUD rendering live queue state, schedules, memory, and turn health.
   - **`docs`**: Living documentation portal serving architectural specifications and runbooks.
   - **`agentsview`**: Web observability dashboard rendering agent session transcripts and tool traces.
-  - **`webhooks-router`**: Event-driven router dispatching Infisical secret webhooks to Nomad variables, GitHub push/CI webhooks to `hangar` and `eri`, and Vanadis chunk lifecycle progression.
+  - **`synapse`**: Event-driven router dispatching Infisical secret webhooks to Nomad variables, GitHub push/CI webhooks to `hangar` and `eri`, and Vanadis chunk lifecycle progression.
   - **`edge-proxy`**: Ingress reverse proxy and HMAC verification gateway exposing secure external webhooks into the local Nomad mesh.
 
 - **Observability & Supporting Services**:
@@ -55,7 +55,7 @@ Aerial operates on a strict **Multi-Repository Architecture & Separation of Conc
 
 ### 1. Core Engine Monorepo (`azylman/aerial` at `/share/aerial` — `scripts/aerial-pr.sh init aerial`)
 - **Purpose**: Generic, domain-agnostic open-source foundation.
-- **Contents**: Core Go services (`services/eri`, `services/haro`, `services/coven`, `services/vanadis`, `services/hangar`, `services/webhooks-router`, `services/dashboard`), MCP servers (`mcp/discord-mcp`, `mcp/github-mcp`, `mcp/infisical-mcp`, `mcp/nomad-mcp`), shared Go packages (`pkg/`), base system rules (`rules/`), built-in skills (`.agents/skills/`), Nomad job definitions (`nomad/jobs/*.nomad`), Dockerfiles, and CI/verification scripts (`scripts/`).
+- **Contents**: Core Go services (`services/eri`, `services/haro`, `services/coven`, `services/vanadis`, `services/hangar`, `services/synapse`, `services/dashboard`), MCP servers (`mcp/discord-mcp`, `mcp/github-mcp`, `mcp/infisical-mcp`, `mcp/nomad-mcp`), shared Go packages (`pkg/`), base system rules (`rules/`), built-in skills (`.agents/skills/`), Nomad job definitions (`nomad/jobs/*.nomad`), Dockerfiles, and CI/verification scripts (`scripts/`).
 - **Strict Invariants**:
   - **100% Generic & Domain-Agnostic**: All prompts, code, error handlers, and schemas must remain completely generic and reusable for any user.
   - **Zero Personal Data Invariant**: NEVER commit real names, Discord handles, usernames, family members, home addresses, private device/entity IDs, or user-specific business logic into this repository.
