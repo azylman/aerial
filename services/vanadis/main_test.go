@@ -754,7 +754,7 @@ func TestLoadConfigAndEnv(t *testing.T) {
 	defer func() {
 		vanadisFallbackConfigPath, lookupHostFn = origFallback, origLookup
 	}()
-	for _, k := range []string{"PORT", "POSTGRES_URL", "DATABASE_URL", "BRAIN_INTERNAL_URL", "BRAIN_URL", "WEBHOOKS_ROUTER_URL", "CONFIG_PATH"} {
+	for _, k := range []string{"PORT", "POSTGRES_URL", "DATABASE_URL", "BRAIN_INTERNAL_URL", "BRAIN_URL", "SYNAPSE_URL", "WEBHOOKS_ROUTER_URL", "CONFIG_PATH"} {
 		t.Setenv(k, "")
 	}
 	tmpDir := t.TempDir()
@@ -777,7 +777,7 @@ func TestLoadConfigAndEnv(t *testing.T) {
 			if !strings.Contains(cfg.PostgresURL, tc.wantHost) {
 				t.Fatalf("expected postgres URL to contain %s, got %s", tc.wantHost, cfg.PostgresURL)
 			}
-			if tc.name == "DNSFallback_AerialPostgres" && (cfg.Port != "4025" || cfg.BrainURL != "http://127.0.0.1:8088" || cfg.WebhooksRouterURL != "http://webhooks-router.aerial") {
+			if tc.name == "DNSFallback_AerialPostgres" && (cfg.Port != "4025" || cfg.BrainURL != "http://127.0.0.1:8088" || cfg.SynapseURL != "http://synapse.aerial") {
 				t.Fatalf("unexpected defaults: %+v", cfg)
 			}
 		})
@@ -785,7 +785,7 @@ func TestLoadConfigAndEnv(t *testing.T) {
 	yamlPath := filepath.Join(tmpDir, "vanadis.yaml")
 	_ = os.WriteFile(yamlPath, []byte("port: \"4099\"\npostgres_url: \"postgres://u:p@db:5432/vanadis\"\nbrain_url: \"http://eri.aerial:8088/\"\nwebhooks_router_url: \"http://router.aerial:4020/\"\n"), 0o600)
 	vanadisFallbackConfigPath = yamlPath
-	if cfg := LoadConfig(filepath.Join(tmpDir, "missing.yaml")); cfg.Port != "4099" || cfg.PostgresURL != "postgres://u:p@db:5432/vanadis" || cfg.BrainURL != "http://eri.aerial:8088" || cfg.WebhooksRouterURL != "http://router.aerial:4020" {
+	if cfg := LoadConfig(filepath.Join(tmpDir, "missing.yaml")); cfg.Port != "4099" || cfg.PostgresURL != "postgres://u:p@db:5432/vanadis" || cfg.BrainURL != "http://eri.aerial:8088" || cfg.SynapseURL != "http://router.aerial:4020" {
 		t.Fatalf("unexpected yaml config: %+v", cfg)
 	}
 	badPath := filepath.Join(tmpDir, "bad.yaml")
@@ -795,8 +795,12 @@ func TestLoadConfigAndEnv(t *testing.T) {
 	t.Setenv("POSTGRES_URL", "postgres://env:5432/db")
 	t.Setenv("BRAIN_INTERNAL_URL", "http://internal-brain:8088/")
 	t.Setenv("WEBHOOKS_ROUTER_URL", "http://env-router:4020/")
-	if envCfg := LoadConfigFromEnv(); envCfg.Port != "4030" || envCfg.PostgresURL != "postgres://env:5432/db" || envCfg.BrainURL != "http://internal-brain:8088" || envCfg.WebhooksRouterURL != "http://env-router:4020" {
+	if envCfg := LoadConfigFromEnv(); envCfg.Port != "4030" || envCfg.PostgresURL != "postgres://env:5432/db" || envCfg.BrainURL != "http://internal-brain:8088" || envCfg.SynapseURL != "http://env-router:4020" {
 		t.Fatalf("unexpected env override config: %+v", envCfg)
+	}
+	t.Setenv("SYNAPSE_URL", "http://synapse-override:4020/")
+	if envCfg := LoadConfigFromEnv(); envCfg.SynapseURL != "http://synapse-override:4020" {
+		t.Fatalf("unexpected SYNAPSE_URL override: %+v", envCfg)
 	}
 }
 
@@ -1260,7 +1264,7 @@ func TestHTTPEndpoints(t *testing.T) {
 	}))
 	defer cancelBrainSrv.Close()
 	srv.cfg.BrainURL = cancelBrainSrv.URL
-	srv.cfg.WebhooksRouterURL = cancelBrainSrv.URL
+	srv.cfg.SynapseURL = cancelBrainSrv.URL
 	srv.httpClient = cancelBrainSrv.Client()
 	_ = memStore.UpdateChunkStatus(context.Background(), buildID+"-chunk-1", "merged")
 	_ = memStore.UpdateChunkStatus(context.Background(), "custom-chunk-2", "running")
@@ -1420,7 +1424,7 @@ func TestSyncBuildWidget(t *testing.T) {
 	}))
 	defer ts.Close()
 	srv := &VanadisServer{
-		cfg:        Config{WebhooksRouterURL: ts.URL},
+		cfg:        Config{SynapseURL: ts.URL},
 		httpClient: ts.Client(),
 		store:      store,
 	}
@@ -1437,7 +1441,7 @@ func TestSyncBuildWidget(t *testing.T) {
 	}
 
 	// Nil httpClient early return
-	nilClientSrv := &VanadisServer{cfg: Config{WebhooksRouterURL: ts.URL}}
+	nilClientSrv := &VanadisServer{cfg: Config{SynapseURL: ts.URL}}
 	nilClientSrv.syncBuildWidget(ctx, "b1", "")
 
 	// 500 error response status
@@ -1446,7 +1450,7 @@ func TestSyncBuildWidget(t *testing.T) {
 	}))
 	defer tsErr.Close()
 	srvErr := &VanadisServer{
-		cfg:        Config{WebhooksRouterURL: tsErr.URL},
+		cfg:        Config{SynapseURL: tsErr.URL},
 		httpClient: tsErr.Client(),
 	}
 	srvErr.syncBuildWidget(ctx, "b1", "")
@@ -1456,7 +1460,7 @@ func TestSyncBuildWidget(t *testing.T) {
 	closedURL := tsClosed.URL
 	tsClosed.Close()
 	srvClosed := &VanadisServer{
-		cfg:        Config{WebhooksRouterURL: closedURL},
+		cfg:        Config{SynapseURL: closedURL},
 		httpClient: ts.Client(),
 	}
 	srvClosed.syncBuildWidget(ctx, "b1", "")

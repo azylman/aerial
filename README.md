@@ -63,7 +63,7 @@ Aerial separates generic platform orchestration from private homelab state using
 │ • postgres (PG 18 + pgvector)│ • Wyoming protocol (:10300)  │ • Voice fingerprinter sidecar │
 │ • coredns (*.aerial, *.lan)  │ • Host volume whisper_cache  │ • Wake-word detection         │
 │ • infisical & redis (Secrets)│ • High-bandwidth speech pipe │ • Real-time user touch HUD    │
-│ • webhooks-router & hangar   │ • CUDA / Tensor acceleration │ • Local audio capture         │
+│ • synapse & hangar           │ • CUDA / Tensor acceleration │ • Local audio capture         │
 │ • User Sidecars (*.nomad)    │ • Edge AI speech engine      │ • Ambient room microphone     │
 │ • Full Telemetry Matrix      │ • Host GPU worker offload    │ • Wayland display kiosk       │
 └──────────────────────────────┴──────────────────────────────┴───────────────────────────────┘
@@ -347,10 +347,10 @@ Aerial includes an enterprise-grade, out-of-the-box observability matrix with si
 
 Aerial uses an automated, event-driven GitOps push continuous deployment pipeline:
 1. **GitHub Actions Matrix Builds**: Triggers dynamic matrix builds for modified microservices (including dependents when shared `pkg/` changes) and publishes them to GitHub Container Registry (`ghcr.io/azylman/aerial-*`).
-2. **Event-Driven Push GitOps Router (`webhooks-router`)**: Receives authenticated GitHub push and CI webhooks through Cloudflare tunnels and `edge-proxy`, immediately triggering `hangar` GitOps sync, Nomad job reconciliation, and `vanadis` build chunk progression.
+2. **Event-Driven Push GitOps Router (`synapse`)**: Receives authenticated GitHub push and CI webhooks through Cloudflare tunnels and `edge-proxy`, immediately triggering `hangar` GitOps sync, Nomad job reconciliation, and `vanadis` build chunk progression.
 3. **Dedicated Hangar Sidecar (`hangar`)**: A dedicated background daemon holding read-write mounts on `/share/aerial-config` and `/share/aerial`, dispatching declarative Nomad job updates, managing snapshot rollbacks, image quarantine, and exposing `/sync` and `/reconcile` triggers.
 4. **Physical Immutability & Asynchronous PR Workflow**: The `eri` execution container mounts repositories strictly **read-only (`:ro`)**. When making code, configuration, persona, or peripheral adjustments across any repository, Aerial uses `scripts/aerial-pr.sh init [repo]` to initialize an ephemeral scratch directory, runs pre-flight syntax and verification checks (`./scripts/verify.sh --staged`), and submits asynchronously via `scripts/aerial-pr.sh submit` with native GitHub auto-merge (`SQUASH`) enabled and registered in PostgreSQL `pr_registry`.
-5. **Event-Driven Continuous Delivery & Proactive CI Self-Healing**: Once submitted, turns terminate immediately with zero foreground CI polling. When CI turns green, GitHub automatically merges the PR and `hangar` deploys the Nomad jobs, posting confirmation directly to the registered Discord thread. If CI checks or `roborev` fail, `webhooks-router` wakes `eri` with a proactive remediation prompt to checkout the branch, resolve the failure locally, verify, and push directly to the PR branch.
+5. **Event-Driven Continuous Delivery & Proactive CI Self-Healing**: Once submitted, turns terminate immediately with zero foreground CI polling. When CI turns green, GitHub automatically merges the PR and `hangar` deploys the Nomad jobs, posting confirmation directly to the registered Discord thread. If CI checks or `roborev` fail, `synapse` wakes `eri` with a proactive remediation prompt to checkout the branch, resolve the failure locally, verify, and push directly to the PR branch.
 
 ---
 
@@ -364,7 +364,7 @@ Aerial uses an automated, event-driven GitOps push continuous deployment pipelin
 | **`coven`** | `4008` | Semantic fact extraction, hybrid RRF memory search, ACT-R memory decay, and procedural skill synthesis MCP service (`http://coven.aerial/mcp`). |
 | **`vanadis`** | `4025` | Autonomous multi-chunk build queue orchestrator backed by PostgreSQL and River with JIT symbol line-slice resolution. |
 | **`hangar`** | `8087` | Dedicated GitOps sidecar daemon managing automated repository synchronization, push reconciliation for Nomad jobs, image update detection, snapshot rollbacks, and Prometheus metrics. Mounted `:rw`. |
-| **`webhooks-router`** | `4020` | Event-driven webhook dispatcher routing GitHub push/CI webhooks to `hangar`, `eri`, and `vanadis`, and Infisical secret changes to Nomad variables. |
+| **`synapse`** | `4020` | Event-driven webhook dispatcher routing GitHub push/CI webhooks to `hangar`, `eri`, and `vanadis`, and Infisical secret changes to Nomad variables. |
 | **`edge-proxy`** | `4021` | Ingress reverse proxy verifying webhook HMAC signatures and forwarding external traffic into the local Nomad mesh. |
 | **`coredns`** | `53` | Dynamic Nomad service discovery daemon rendering internal DNS records (`*.aerial`, `*.lan`) directly from `nomadServices`. |
 | **`infisical`** | Dynamic (`infisical.aerial`) | Centralized secret management and automated rotation backed by Redis, dynamically syncing secrets into Nomad variables (`nomadVar`). |

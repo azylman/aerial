@@ -611,7 +611,7 @@ func TestGetRemoteImageRevision_TableDriven(t *testing.T) {
 		},
 		{
 			name:     "Case 2: Direct Manifest with aerial.commit_sha annotations without fetching blob",
-			imageRef: "ghcr.io/azylman/aerial-webhooks-router:latest",
+			imageRef: "ghcr.io/azylman/aerial-synapse:latest",
 			clientOpts: mockOCIOptions{
 				ProbeStatus: http.StatusOK,
 				ProbeBody: fmt.Sprintf(`{

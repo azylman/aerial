@@ -662,7 +662,7 @@ func TestConfig_LoadAndResolve(t *testing.T) {
 database_url: "postgres://u:p@localhost:5432/testdb"
 brain_url: "http://eri.aerial"
 brain_llm_url: "http://brain.local/internal/llm"
-brain_pr_register_url: "http://webhooks-router.aerial/internal/pr/register"
+brain_pr_register_url: "http://synapse.aerial/internal/pr/register"
 custom_skills_dir: "/config/custom-skills"
 rules_dir: "/config/rules"
 config_repo_owner: "azylman"
@@ -1852,7 +1852,7 @@ func TestMain_Execution(t *testing.T) {
 database_url: "postgres://u:p@localhost/db"
 brain_url: "http://eri.aerial"
 brain_llm_url: "http://eri.aerial/internal/llm"
-brain_pr_register_url: "http://webhooks-router.aerial/internal/pr/register"
+brain_pr_register_url: "http://synapse.aerial/internal/pr/register"
 custom_skills_dir: "/config/custom-skills"
 rules_dir: "/config/rules"
 config_repo_owner: "azylman"
@@ -8359,7 +8359,7 @@ func TestConfig_BrainURLResolution(t *testing.T) {
 database_url: "postgres://localhost/test"
 brain_url: "http://custom-eri:8000"
 brain_llm_url: "http://custom-proxy:9000/v1/llm"
-brain_pr_register_url: "http://webhooks-router.aerial/internal/pr/register"
+brain_pr_register_url: "http://synapse.aerial/internal/pr/register"
 custom_skills_dir: "/config/custom-skills"
 rules_dir: "/config/rules"
 config_repo_owner: "azylman"
@@ -8379,7 +8379,7 @@ ollama:
 	_ = os.WriteFile(noLLMFile, []byte(strings.Replace(baseContent, `brain_llm_url: "http://custom-proxy:9000/v1/llm"`, `brain_llm_url: ""`, 1)), 0o644)
 
 	noPRRegFile := filepath.Join(tmpDir, "no_pr_reg.yaml")
-	_ = os.WriteFile(noPRRegFile, []byte(strings.Replace(baseContent, `brain_pr_register_url: "http://webhooks-router.aerial/internal/pr/register"`, `brain_pr_register_url: ""`, 1)), 0o644)
+	_ = os.WriteFile(noPRRegFile, []byte(strings.Replace(baseContent, `brain_pr_register_url: "http://synapse.aerial/internal/pr/register"`, `brain_pr_register_url: ""`, 1)), 0o644)
 
 	tests := []struct {
 		name         string
@@ -8436,7 +8436,7 @@ func TestLoadConfig_TableDriven(t *testing.T) {
 database_url: 'postgres://localhost/coven_test'
 brain_url: 'http://eri.aerial'
 brain_llm_url: 'http://eri.aerial/internal/llm'
-brain_pr_register_url: 'http://webhooks-router.aerial/internal/pr/register'
+brain_pr_register_url: 'http://synapse.aerial/internal/pr/register'
 custom_skills_dir: '/custom/skills'
 rules_dir: '/custom/rules'
 config_repo_owner: 'azylman'

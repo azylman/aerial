@@ -187,7 +187,7 @@ TARGET_PRECEDENCE_CHECK=$(bash -c "
     res3=\$(unset AERIAL_TARGET_ID DISCORD_THREAD_ID; DISCORD_CHANNEL_ID=\"target_channel\" resolve_target_id)
     [ \"\$res3\" = \"target_channel\" ] && echo \"target3:ok\" || echo \"target3:fail\"
 
-    # Subtest 4: returns empty string when no Discord target context exists (delegating fallback to webhooks-router)
+    # Subtest 4: returns empty string when no Discord target context exists (delegating fallback to synapse)
     res4=\$(unset AERIAL_TARGET_ID DISCORD_THREAD_ID DISCORD_CHANNEL_ID ANTIGRAVITY_APP_DATA_DIR ANTIGRAVITY_CONVERSATION_ID; resolve_target_id)
     [ -z \"\$res4\" ] && echo \"target4:ok\" || echo \"target4:fail:\$res4\"
 
@@ -316,7 +316,7 @@ PR_ENDPOINT_CHECK=$(bash -c "
     export -f curl
     res2=\$(bash -c '
         brain_reg_url=\"\"
-        for cand in \"http://webhooks-router.aerial\" \"http://127.0.0.1:4020\" \"http://127.0.0.1:8088\" \"http://eri.aerial\" \"http://brain.aerial\" \"http://host.docker.internal:8088\" \"http://127.0.0.1:8080\" \"http://aerial-brain:8080\"; do
+        for cand in \"http://synapse.aerial\" \"http://webhooks-router.aerial\" \"http://127.0.0.1:4020\" \"http://127.0.0.1:8088\" \"http://eri.aerial\" \"http://brain.aerial\" \"http://host.docker.internal:8088\" \"http://127.0.0.1:8080\" \"http://aerial-brain:8080\"; do
             probe_code=\$(curl -s -o /dev/null -w \"%{http_code}\" --connect-timeout 1 -m 2 -X POST \"\${cand}/internal/pr/register\" 2>/dev/null || true)
             if [ \"\$probe_code\" = \"400\" ] || [ \"\$probe_code\" = \"200\" ]; then
                 brain_reg_url=\"\${cand}/internal/pr/register\"
@@ -324,22 +324,22 @@ PR_ENDPOINT_CHECK=$(bash -c "
             fi
         done
         if [ -z \"\$brain_reg_url\" ]; then
-            brain_reg_url=\"http://webhooks-router.aerial/internal/pr/register\"
+            brain_reg_url=\"http://synapse.aerial/internal/pr/register\"
         fi
         echo \"\$brain_reg_url\"
     ')
-    [ \"\$res2\" = 'http://webhooks-router.aerial/internal/pr/register' ] && echo 'ep2:ok'
+    [ \"\$res2\" = 'http://synapse.aerial/internal/pr/register' ] && echo 'ep2:ok'
 
-    # Test 3: First responding candidate is selected (webhooks-router candidate)
+    # Test 3: First responding candidate is selected (synapse candidate)
     curl() {
-        if [[ \"\$*\" == *\"http://webhooks-router.aerial/internal/pr/register\"* ]]; then
+        if [[ \"\$*\" == *\"http://synapse.aerial/internal/pr/register\"* ]]; then
             printf '400'
         fi
     }
     export -f curl
     res3=\$(bash -c '
         brain_reg_url=\"\"
-        for cand in \"http://webhooks-router.aerial\" \"http://127.0.0.1:4020\" \"http://127.0.0.1:8088\" \"http://eri.aerial\" \"http://brain.aerial\" \"http://host.docker.internal:8088\" \"http://127.0.0.1:8080\" \"http://aerial-brain:8080\"; do
+        for cand in \"http://synapse.aerial\" \"http://webhooks-router.aerial\" \"http://127.0.0.1:4020\" \"http://127.0.0.1:8088\" \"http://eri.aerial\" \"http://brain.aerial\" \"http://host.docker.internal:8088\" \"http://127.0.0.1:8080\" \"http://aerial-brain:8080\"; do
             probe_code=\$(curl -s -o /dev/null -w \"%{http_code}\" --connect-timeout 1 -m 2 -X POST \"\${cand}/internal/pr/register\" 2>/dev/null || true)
             if [ \"\$probe_code\" = \"400\" ] || [ \"\$probe_code\" = \"200\" ]; then
                 brain_reg_url=\"\${cand}/internal/pr/register\"
@@ -348,11 +348,11 @@ PR_ENDPOINT_CHECK=$(bash -c "
         done
         echo \"\$brain_reg_url\"
     ')
-    [ \"\$res3\" = 'http://webhooks-router.aerial/internal/pr/register' ] && echo 'ep3:ok'
+    [ \"\$res3\" = 'http://synapse.aerial/internal/pr/register' ] && echo 'ep3:ok'
 ")
 assert_eq "true" "$(echo "$PR_ENDPOINT_CHECK" | grep -q 'ep1:ok' && echo true || echo false)" "AERIAL_PR_REGISTER_URL override appends /internal/pr/register"
-assert_eq "true" "$(echo "$PR_ENDPOINT_CHECK" | grep -q 'ep2:ok' && echo true || echo false)" "PR register endpoint defaults to webhooks-router fallback"
-assert_eq "true" "$(echo "$PR_ENDPOINT_CHECK" | grep -q 'ep3:ok' && echo true || echo false)" "PR register endpoint probes webhooks-router.aerial first"
+assert_eq "true" "$(echo "$PR_ENDPOINT_CHECK" | grep -q 'ep2:ok' && echo true || echo false)" "PR register endpoint defaults to synapse fallback"
+assert_eq "true" "$(echo "$PR_ENDPOINT_CHECK" | grep -q 'ep3:ok' && echo true || echo false)" "PR register endpoint probes synapse.aerial first"
 
 # Case 11: rebase_staged_changes rebases onto advanced upstream before verification and aborts on conflict
 REBASE_STAGED_CHECK=$(bash -c "

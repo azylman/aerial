@@ -87,7 +87,7 @@ Scale review rigor and subagent orchestration dynamically by blast radius:
 
 ## 3. Event-Driven CI Remediation & RoboRev Disagreement Playbook
 
-When `webhooks-router` wakes Brain on a CI check failure or `roborev` review failure, Aerial **must proactively remediate the PR** rather than merely reporting the failure:
+When `synapse` wakes Brain on a CI check failure or `roborev` review failure, Aerial **must proactively remediate the PR** rather than merely reporting the failure:
 
 ### 3.1 Deterministic CI Check Failures (Tests, Lint, Coverage, Build)
 1. Inspect the pre-extracted failure log in the wake prompt (or fetch check details if needed).

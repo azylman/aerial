@@ -2391,7 +2391,7 @@ func TestServer_MutationEndpoints(t *testing.T) {
 				store = mem
 			}
 
-			srv := NewVanadisServer(Config{WebhooksRouterURL: tsWidget.URL}, store, nil, tsWidget.Client())
+			srv := NewVanadisServer(Config{SynapseURL: tsWidget.URL}, store, nil, tsWidget.Client())
 			mux := SetupMux(srv)
 
 			var req *http.Request

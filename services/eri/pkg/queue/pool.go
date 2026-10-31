@@ -91,7 +91,7 @@ type WorkerPoolConfig struct {
 	ProcessPool, LowEffortProcessPool, MediumEffortProcessPool, VoiceProcessPool    runner.AgentPool
 	Classifier                                                                      *classifier.Classifier
 	HaroURL                                                                         string
-	WebhooksRouterURL                                                               string
+	SynapseURL                                                                      string
 
 	// Optional hooks for testing/custom overrides
 	RunnerFunc                  func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)

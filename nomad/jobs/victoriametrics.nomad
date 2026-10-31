@@ -141,16 +141,16 @@ scrape_configs:
           instance: "postgres"
 {{- end }}
 
-  - job_name: "webhooks-router"
+  - job_name: "synapse"
     static_configs:
-{{- range nomadService "webhooks-router" }}
+{{- range nomadService "synapse" }}
       - targets: ["{{ .Address }}:{{ .Port }}"]
         labels:
-          instance: "webhooks-router"
+          instance: "synapse"
 {{- else }}
       - targets: ["127.0.0.1:4020"]
         labels:
-          instance: "webhooks-router"
+          instance: "synapse"
 {{- end }}
 EOH
         destination   = "local/scrape.yml"

@@ -408,7 +408,7 @@ func ImageSourceRepo(imageRef string) string {
 	if strings.Contains(ref, "mirrormere") {
 		return "azylman/mirrormere"
 	}
-	// Check core aerial images (webhooks-router, infisical-mcp, nomad-mcp, brain, hangar, etc.)
+	// Check core aerial images (synapse, infisical-mcp, nomad-mcp, brain, hangar, etc.)
 	if strings.Contains(ref, "aerial-") || strings.Contains(ref, "/aerial:") || strings.HasSuffix(ref, "/aerial") {
 		return "azylman/aerial"
 	}
@@ -418,12 +418,12 @@ func ImageSourceRepo(imageRef string) string {
 // HangarDeployEvent represents deployment and rollback lifecycle events.
 type HangarDeployEvent struct {
 	Event        string    `json:"event"`                   // "deploy_started", "deploy_success", "deploy_failed", "deploy_rollback"
-	JobName      string    `json:"job_name"`                // Nomad job name (e.g. "webhooks-router", "brain")
+	JobName      string    `json:"job_name"`                // Nomad job name (e.g. "synapse", "brain")
 	Repo         string    `json:"repo,omitempty"`          // repository name (e.g. "azylman/aerial", "azylman/aerial-config")
 	CommitSHA    string    `json:"commit_sha,omitempty"`    // git commit SHA (head or merge commit)
 	PRNumber     int       `json:"pr_number,omitempty"`     // PR number if known
 	TargetID     string    `json:"target_id,omitempty"`     // Discord thread / channel snowflake
-	Image        string    `json:"image,omitempty"`         // container image (e.g. ghcr.io/azylman/aerial-webhooks-router:latest)
+	Image        string    `json:"image,omitempty"`         // container image (e.g. ghcr.io/azylman/aerial-synapse:latest)
 	Digest       string    `json:"digest,omitempty"`        // image digest (sha256:...)
 	Status       string    `json:"status"`                  // "started", "success", "failed", "rollback"
 	DeploymentID string    `json:"deployment_id,omitempty"` // Nomad deployment UUID

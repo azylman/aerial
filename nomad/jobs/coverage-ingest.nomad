@@ -66,7 +66,7 @@ psql "$POSTGRES_URL" -c "DELETE FROM production_code_coverage WHERE service IN (
 
 echo "🔄 [coverage-ingest] Streaming and ingesting runtime coverage from registered services..."
 for entry in \
-  "webhooks-router|http://webhooks-router.aerial/debug/coverage/flush" \
+  "synapse|http://synapse.aerial/debug/coverage/flush" \
   "vanadis|http://vanadis.aerial/debug/coverage/flush" \
   "hangar|http://hangar.aerial/debug/coverage/flush" \
   "haro|http://haro.aerial/debug/coverage/flush" \

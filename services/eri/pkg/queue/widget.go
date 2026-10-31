@@ -30,12 +30,12 @@ func (p *WorkerPool) hasWarmChunkWidget(chunkID string) bool {
 	return false
 }
 
-func (p *WorkerPool) resolveWebhooksRouterURL() string {
-	if u := strings.TrimSpace(p.cfg.WebhooksRouterURL); u != "" {
+func (p *WorkerPool) resolveSynapseURL() string {
+	if u := strings.TrimSpace(p.cfg.SynapseURL); u != "" {
 		return strings.TrimRight(u, "/")
 	}
 	if p.DiscordSession() != nil {
-		return "http://webhooks-router.aerial"
+		return "http://synapse.aerial"
 	}
 	return ""
 }
@@ -44,7 +44,7 @@ func (p *WorkerPool) ensureChunkWidgetHydrated(prompt, chunkID, buildID string) 
 	if p.hasWarmChunkWidget(chunkID) {
 		return
 	}
-	routerURL := p.resolveWebhooksRouterURL()
+	routerURL := p.resolveSynapseURL()
 	bodyJSON, ok := extractDispatchWidgetSyncPayload(prompt, buildID)
 	if routerURL == "" || !ok {
 		return

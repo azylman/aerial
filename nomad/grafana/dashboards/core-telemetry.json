@@ -312,7 +312,7 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "webhooks_router_discord_gateway_latency_seconds * 1000",
+          "expr": "synapse_discord_gateway_latency_seconds * 1000",
           "refId": "A"
         }
       ],
@@ -1155,7 +1155,7 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "webhooks_router_discord_gateway_latency_seconds * 1000",
+          "expr": "synapse_discord_gateway_latency_seconds * 1000",
           "legendFormat": "Gateway Heartbeat Latency (ms)",
           "refId": "A"
         },
@@ -3644,7 +3644,7 @@
             "uid": "VictoriaMetrics"
           },
           "editorMode": "code",
-          "expr": "sum by (queue, state) (webhooks_router_queue_depth)",
+          "expr": "sum by (queue, state) (synapse_queue_depth)",
           "legendFormat": "{{queue}} ({{state}})",
           "range": true,
           "refId": "A"
@@ -3655,7 +3655,7 @@
             "uid": "VictoriaMetrics"
           },
           "editorMode": "code",
-          "expr": "max by (queue) (webhooks_router_queue_oldest_age_seconds)",
+          "expr": "max by (queue) (synapse_queue_oldest_age_seconds)",
           "legendFormat": "Oldest Age (s): {{queue}}",
           "range": true,
           "refId": "B"
@@ -3750,7 +3750,7 @@
             "uid": "VictoriaMetrics"
           },
           "editorMode": "code",
-          "expr": "sum by (kind, status) (rate(webhooks_router_jobs_processed_total[5m])) * 60",
+          "expr": "sum by (kind, status) (rate(synapse_jobs_processed_total[5m])) * 60",
           "legendFormat": "Processed/min: {{kind}} ({{status}})",
           "range": true,
           "refId": "A"
@@ -3761,7 +3761,7 @@
             "uid": "VictoriaMetrics"
           },
           "editorMode": "code",
-          "expr": "sum by (kind) (rate(webhooks_router_unique_skipped_total[5m])) * 60",
+          "expr": "sum by (kind) (rate(synapse_unique_skipped_total[5m])) * 60",
           "legendFormat": "Dedup Skipped/min: {{kind}}",
           "range": true,
           "refId": "B"
@@ -3772,7 +3772,7 @@
             "uid": "VictoriaMetrics"
           },
           "editorMode": "code",
-          "expr": "sum by (kind, reason) (rate(webhooks_router_job_retries_total[5m])) * 60",
+          "expr": "sum by (kind, reason) (rate(synapse_job_retries_total[5m])) * 60",
           "legendFormat": "Retries/min: {{kind}} ({{reason}})",
           "range": true,
           "refId": "C"
@@ -3783,7 +3783,7 @@
             "uid": "VictoriaMetrics"
           },
           "editorMode": "code",
-          "expr": "sum by (kind, reason) (rate(webhooks_router_jobs_dropped_total[5m])) * 60",
+          "expr": "sum by (kind, reason) (rate(synapse_jobs_dropped_total[5m])) * 60",
           "legendFormat": "Dropped/min: {{kind}} ({{reason}})",
           "range": true,
           "refId": "D"
@@ -3794,7 +3794,7 @@
             "uid": "VictoriaMetrics"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le, kind) (rate(webhooks_router_job_duration_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, kind) (rate(synapse_job_duration_seconds_bucket[5m])))",
           "legendFormat": "Job Duration p95 (s): {{kind}}",
           "range": true,
           "refId": "E"

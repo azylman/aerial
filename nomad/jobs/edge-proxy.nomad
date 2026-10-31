@@ -139,9 +139,9 @@ http {
 
         # Upstream proxy target for validated GitHub webhooks
         location @backend {
-            proxy_pass http://webhooks_router;
+            proxy_pass http://synapse;
             proxy_http_version 1.1;
-            proxy_set_header Host webhooks-router.aerial;
+            proxy_set_header Host synapse.aerial;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
             proxy_set_header X-Forwarded-Proto $forwarded_proto;
@@ -247,8 +247,8 @@ upstream mesh_proxy {
     keepalive 16;
 }
 
-upstream webhooks_router {
-{{- range nomadService "webhooks-router" }}
+upstream synapse {
+{{- range nomadService "synapse" }}
     server {{ if contains ":" .Address }}[{{ .Address }}]{{ else }}{{ .Address }}{{ end }}:{{ .Port }};
 {{- else }}
     server 127.0.0.1:65535 down;

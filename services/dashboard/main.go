@@ -551,7 +551,7 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalN
 				{Name: "github-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "nomad-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "infisical-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-				{Name: "webhooks-router", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: "synapse", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "ollama", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "agentsview", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "hangar", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
