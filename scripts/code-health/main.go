@@ -19,12 +19,15 @@ import (
 )
 
 const (
-	maxFileLines       = 1500
-	maxDepth           = 5
-	minCloneFuncLines  = 20
-	minCloneTokens     = 12
-	cloneShingleSize   = 3
-	maxCloneSimilarity = 0.80
+	maxFileLines             = 1500
+	maxDepth                 = 5
+	minCloneFuncLines        = 20
+	minCloneTokens           = 12
+	cloneShingleSize         = 3
+	maxCloneSimilarity       = 0.80
+	maxCloneEditSimilarity   = 0.85
+	minStructCloneFields     = 5
+	maxStructCloneSimilarity = 0.85
 )
 
 var splitTestRegex = regexp.MustCompile(`^Test.*_(Extra|More.*|Additional.*|Uncovered.*|EdgeCases|CornerCases|Branches|AllBranches|Chunk\d+.*|Coverage.*)$`)
@@ -46,11 +49,19 @@ type Baseline struct {
 }
 
 type funcCloneSig struct {
+	rel          string
+	pkgKey       string
+	name         string
+	lines        int
+	grams        map[string]struct{}
+	scopedTokens []string
+}
+
+type structCloneSig struct {
 	rel    string
 	pkgKey string
 	name   string
-	lines  int
-	grams  map[string]struct{}
+	fields map[string]struct{}
 }
 
 func main() {
@@ -251,7 +262,7 @@ func buildBaseline(absRoot string, targets []string) (Baseline, error) {
 		Functions: make(map[string]FuncMetrics),
 	}
 	for _, rel := range targets {
-		fm, fns, _, skipped, _, err := analyzeFile(filepath.Join(absRoot, rel), rel)
+		fm, fns, _, _, skipped, _, err := analyzeFile(filepath.Join(absRoot, rel), rel)
 		if err != nil {
 			return b, err
 		}
@@ -280,9 +291,10 @@ func outlierFuncMetrics(m FuncMetrics) (FuncMetrics, bool) {
 
 func checkTargets(absRoot string, targets, testTargets []string, base Baseline) ([]string, error) {
 	var violations []string
-	var allSigs []funcCloneSig
+	var allFuncSigs []funcCloneSig
+	var allStructSigs []structCloneSig
 	for _, rel := range targets {
-		fm, fns, sigs, skipped, nolintViolations, err := analyzeFile(filepath.Join(absRoot, rel), rel)
+		fm, fns, sigs, structSigs, skipped, nolintViolations, err := analyzeFile(filepath.Join(absRoot, rel), rel)
 		if err != nil {
 			return nil, err
 		}
@@ -297,10 +309,12 @@ func checkTargets(absRoot string, targets, testTargets []string, base Baseline) 
 			violations = append(violations, fmt.Sprintf("%s: file length %d exceeds limit %d (ceiling %d)", rel, fm.Lines, fileLimit, maxFileLines))
 		}
 		violations = append(violations, checkFuncMetrics(rel, fns, base.Functions)...)
-		allSigs = append(allSigs, sigs...)
+		allFuncSigs = append(allFuncSigs, sigs...)
+		allStructSigs = append(allStructSigs, structSigs...)
 	}
 
-	violations = append(violations, checkCloneViolations(allSigs)...)
+	violations = append(violations, checkCloneViolations(allFuncSigs)...)
+	violations = append(violations, checkStructCloneViolations(allStructSigs)...)
 
 	for _, rel := range testTargets {
 		testViolations, err := analyzeTestFile(filepath.Join(absRoot, filepath.FromSlash(rel)), rel)
@@ -313,10 +327,11 @@ func checkTargets(absRoot string, targets, testTargets []string, base Baseline) 
 	return violations, nil
 }
 
-func checkCloneViolations(sigs []funcCloneSig) []string {
-	pkgSigs := make(map[string][]funcCloneSig)
+func forEachPackagePair[T any](sigs []T, pkgOf, relOf, nameOf func(T) string, fn func(a, b T)) {
+	pkgSigs := make(map[string][]T)
 	for _, s := range sigs {
-		pkgSigs[s.pkgKey] = append(pkgSigs[s.pkgKey], s)
+		pkg := pkgOf(s)
+		pkgSigs[pkg] = append(pkgSigs[pkg], s)
 	}
 
 	var pkgKeys []string
@@ -325,27 +340,83 @@ func checkCloneViolations(sigs []funcCloneSig) []string {
 	}
 	sort.Strings(pkgKeys)
 
-	var violations []string
 	for _, pkgKey := range pkgKeys {
 		group := pkgSigs[pkgKey]
 		sort.Slice(group, func(i, j int) bool {
-			if group[i].rel != group[j].rel {
-				return group[i].rel < group[j].rel
+			relI, relJ := relOf(group[i]), relOf(group[j])
+			if relI != relJ {
+				return relI < relJ
 			}
-			return group[i].name < group[j].name
+			return nameOf(group[i]) < nameOf(group[j])
 		})
 		for i := 0; i < len(group); i++ {
 			for j := i + 1; j < len(group); j++ {
-				a := group[i]
-				b := group[j]
-				sim := jaccardSimilarity(a.grams, b.grams)
-				if sim >= maxCloneSimilarity {
-					violations = append(violations, fmt.Sprintf("%s (%s) <-> %s (%s): near-miss AST clone similarity %.2f exceeds %.2f ceiling", a.rel, a.name, b.rel, b.name, sim, maxCloneSimilarity))
-				}
+				fn(group[i], group[j])
 			}
 		}
 	}
+}
+
+func checkCloneViolations(sigs []funcCloneSig) []string {
+	var violations []string
+	forEachPackagePair(
+		sigs,
+		func(s funcCloneSig) string { return s.pkgKey },
+		func(s funcCloneSig) string { return s.rel },
+		func(s funcCloneSig) string { return s.name },
+		func(a, b funcCloneSig) {
+			if sim := jaccardSimilarity(a.grams, b.grams); sim >= maxCloneSimilarity {
+				violations = append(violations, fmt.Sprintf("%s (%s) <-> %s (%s): near-miss AST clone similarity %.2f exceeds %.2f ceiling", a.rel, a.name, b.rel, b.name, sim, maxCloneSimilarity))
+			} else if editSim := editSimilarity(a.scopedTokens, b.scopedTokens); editSim >= maxCloneEditSimilarity {
+				violations = append(violations, fmt.Sprintf("%s (%s) <-> %s (%s): near-miss AST edit similarity %.2f exceeds %.2f ceiling", a.rel, a.name, b.rel, b.name, editSim, maxCloneEditSimilarity))
+			}
+		},
+	)
 	return violations
+}
+
+func checkStructCloneViolations(sigs []structCloneSig) []string {
+	var violations []string
+	forEachPackagePair(
+		sigs,
+		func(s structCloneSig) string { return s.pkgKey },
+		func(s structCloneSig) string { return s.rel },
+		func(s structCloneSig) string { return s.name },
+		func(a, b structCloneSig) {
+			sim := jaccardSimilarity(a.fields, b.fields)
+			if sim >= maxStructCloneSimilarity {
+				violations = append(violations, fmt.Sprintf("%s (%s) <-> %s (%s): struct field similarity %.2f exceeds %.2f ceiling", a.rel, a.name, b.rel, b.name, sim, maxStructCloneSimilarity))
+			}
+		},
+	)
+	return violations
+}
+
+func editSimilarity(a, b []string) float64 {
+	if len(a) == 0 || len(b) == 0 {
+		return 0.0
+	}
+	m, n := len(a), len(b)
+	dp := make([]int, n+1)
+	for j := 0; j <= n; j++ {
+		dp[j] = j
+	}
+	for i := 1; i <= m; i++ {
+		prev := dp[0]
+		dp[0] = i
+		for j := 1; j <= n; j++ {
+			temp := dp[j]
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			dp[j] = min(prev+cost, min(dp[j]+1, dp[j-1]+1))
+			prev = temp
+		}
+	}
+	dist := dp[n]
+	maxLen := max(m, n)
+	return 1.0 - float64(dist)/float64(maxLen)
 }
 
 func jaccardSimilarity(a, b map[string]struct{}) float64 {
@@ -382,13 +453,13 @@ func checkFuncMetrics(rel string, fns map[string]FuncMetrics, baseFns map[string
 	return violations
 }
 
-func analyzeFile(fullPath, rel string) (FileMetrics, map[string]FuncMetrics, []funcCloneSig, bool, []string, error) {
+func analyzeFile(fullPath, rel string) (FileMetrics, map[string]FuncMetrics, []funcCloneSig, []structCloneSig, bool, []string, error) {
 	src, err := os.ReadFile(fullPath)
 	if err != nil {
-		return FileMetrics{}, nil, nil, false, nil, err
+		return FileMetrics{}, nil, nil, nil, false, nil, err
 	}
 	if isGeneratedSource(src) {
-		return FileMetrics{}, nil, nil, true, nil, nil
+		return FileMetrics{}, nil, nil, nil, true, nil, nil
 	}
 	lines := bytes.Count(src, []byte("\n")) + 1
 	if len(src) > 0 && src[len(src)-1] == '\n' {
@@ -398,7 +469,7 @@ func analyzeFile(fullPath, rel string) (FileMetrics, map[string]FuncMetrics, []f
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, fullPath, src, parser.ParseComments)
 	if err != nil {
-		return FileMetrics{}, nil, nil, false, nil, err
+		return FileMetrics{}, nil, nil, nil, false, nil, err
 	}
 
 	nolintViolations := findBannedNolints(f, fset)
@@ -424,16 +495,58 @@ func analyzeFile(fullPath, rel string) (FileMetrics, map[string]FuncMetrics, []f
 		}
 		if fnLines >= minCloneFuncLines {
 			tokens := buildCloneTokens(fn.Body)
+			var scopedTokens []string
+			if len(tokens) >= minCloneTokens {
+				scopedTokens = buildScopedCloneTokens(fn.Body)
+			}
 			sigs = append(sigs, funcCloneSig{
-				rel:    rel,
-				pkgKey: pkgKey,
-				name:   name,
-				lines:  fnLines,
-				grams:  buildCloneGrams(tokens),
+				rel:          rel,
+				pkgKey:       pkgKey,
+				name:         name,
+				lines:        fnLines,
+				grams:        buildCloneGrams(tokens),
+				scopedTokens: scopedTokens,
 			})
 		}
 	}
-	return FileMetrics{Lines: lines}, fns, sigs, false, nolintViolations, nil
+	structSigs := collectStructCloneSigs(f, rel, pkgKey)
+	return FileMetrics{Lines: lines}, fns, sigs, structSigs, false, nolintViolations, nil
+}
+
+func appendNodeCloneTokens(tokens []string, n ast.Node) []string {
+	switch x := n.(type) {
+	case *ast.IfStmt:
+		tokens = append(tokens, "if")
+		if x.Else != nil {
+			tokens = append(tokens, "else")
+		}
+	case *ast.ForStmt:
+		tokens = append(tokens, "for")
+	case *ast.RangeStmt:
+		tokens = append(tokens, "range")
+	case *ast.SwitchStmt, *ast.TypeSwitchStmt:
+		tokens = append(tokens, "switch")
+	case *ast.CaseClause:
+		tokens = append(tokens, "case")
+	case *ast.SelectStmt:
+		tokens = append(tokens, "select")
+	case *ast.CommClause:
+		tokens = append(tokens, "comm")
+	case *ast.ReturnStmt:
+		tokens = append(tokens, "return")
+	case *ast.DeferStmt:
+		tokens = append(tokens, "defer")
+	case *ast.CallExpr:
+		switch fn := x.Fun.(type) {
+		case *ast.SelectorExpr:
+			tokens = append(tokens, "call:."+fn.Sel.Name)
+		case *ast.Ident:
+			if !isGoBuiltin(fn.Name) {
+				tokens = append(tokens, "call:"+fn.Name)
+			}
+		}
+	}
+	return tokens
 }
 
 func buildCloneTokens(body *ast.BlockStmt) []string {
@@ -442,41 +555,107 @@ func buildCloneTokens(body *ast.BlockStmt) []string {
 		if n == nil {
 			return true
 		}
-		switch x := n.(type) {
-		case *ast.IfStmt:
-			tokens = append(tokens, "if")
-			if x.Else != nil {
-				tokens = append(tokens, "else")
-			}
-		case *ast.ForStmt:
-			tokens = append(tokens, "for")
-		case *ast.RangeStmt:
-			tokens = append(tokens, "range")
-		case *ast.SwitchStmt, *ast.TypeSwitchStmt:
-			tokens = append(tokens, "switch")
-		case *ast.CaseClause:
-			tokens = append(tokens, "case")
-		case *ast.SelectStmt:
-			tokens = append(tokens, "select")
-		case *ast.CommClause:
-			tokens = append(tokens, "comm")
-		case *ast.ReturnStmt:
-			tokens = append(tokens, "return")
-		case *ast.DeferStmt:
-			tokens = append(tokens, "defer")
-		case *ast.CallExpr:
-			switch fn := x.Fun.(type) {
-			case *ast.SelectorExpr:
-				tokens = append(tokens, "call:."+fn.Sel.Name)
-			case *ast.Ident:
-				if !isGoBuiltin(fn.Name) {
-					tokens = append(tokens, "call:"+fn.Name)
-				}
-			}
-		}
+		tokens = appendNodeCloneTokens(tokens, n)
 		return true
 	})
 	return tokens
+}
+
+func buildScopedCloneTokens(body *ast.BlockStmt) []string {
+	if body == nil {
+		return nil
+	}
+	var tokens []string
+	var blockStack []bool
+	ast.Inspect(body, func(n ast.Node) bool {
+		if n == nil {
+			if len(blockStack) > 0 {
+				isBlock := blockStack[len(blockStack)-1]
+				blockStack = blockStack[:len(blockStack)-1]
+				if isBlock {
+					tokens = append(tokens, "}")
+				}
+			}
+			return true
+		}
+		_, isBlock := n.(*ast.BlockStmt)
+		blockStack = append(blockStack, isBlock)
+		if isBlock {
+			tokens = append(tokens, "{")
+		}
+		tokens = appendNodeCloneTokens(tokens, n)
+		return true
+	})
+	return tokens
+}
+
+func collectStructCloneSigs(f *ast.File, rel, pkgKey string) []structCloneSig {
+	var sigs []structCloneSig
+	for _, decl := range f.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || gd.Tok != token.TYPE {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			ts, ok := spec.(*ast.TypeSpec)
+			if !ok {
+				continue
+			}
+			st, ok := ts.Type.(*ast.StructType)
+			if !ok {
+				continue
+			}
+			fields := buildStructFields(st)
+			if len(fields) >= minStructCloneFields {
+				sigs = append(sigs, structCloneSig{
+					rel:    rel,
+					pkgKey: pkgKey,
+					name:   ts.Name.Name,
+					fields: fields,
+				})
+			}
+		}
+	}
+	return sigs
+}
+
+func buildStructFields(st *ast.StructType) map[string]struct{} {
+	fields := make(map[string]struct{})
+	if st == nil || st.Fields == nil {
+		return fields
+	}
+	for _, f := range st.Fields.List {
+		tagVal := ""
+		if f.Tag != nil {
+			tagVal = f.Tag.Value
+		}
+		typeStr := formatFieldType(f.Type)
+		if len(f.Names) == 0 {
+			fields["embed:"+typeStr+":"+tagVal] = struct{}{}
+			continue
+		}
+		for _, name := range f.Names {
+			fields[name.Name+":"+typeStr+":"+tagVal] = struct{}{}
+		}
+	}
+	return fields
+}
+
+func formatFieldType(expr ast.Expr) string {
+	switch x := expr.(type) {
+	case *ast.Ident:
+		return x.Name
+	case *ast.StarExpr:
+		return "*" + formatFieldType(x.X)
+	case *ast.SelectorExpr:
+		return formatFieldType(x.X) + "." + x.Sel.Name
+	case *ast.ArrayType:
+		return "[]" + formatFieldType(x.Elt)
+	case *ast.MapType:
+		return "map[" + formatFieldType(x.Key) + "]" + formatFieldType(x.Value)
+	default:
+		return "other"
+	}
 }
 
 func buildCloneGrams(tokens []string) map[string]struct{} {

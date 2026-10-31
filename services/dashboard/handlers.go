@@ -212,93 +212,86 @@ func fetchUpstreamJSON(ctx context.Context, client *http.Client, targetURL strin
 	return http.StatusOK, "", nil
 }
 
+func serveUpstreamGET[T any](
+	w http.ResponseWriter,
+	r *http.Request,
+	client *http.Client,
+	upstreamLabel, unreachableMsg, targetURL string,
+	urlErr error,
+	makeErrPayload func(status, errMsg string) T,
+	normalize func(*T),
+) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		http.Error(w, `{"error":"Method Not Allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	if urlErr != nil {
+		http.Error(w, `{"error":"Invalid upstream URL configuration"}`, http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+
+	var data T
+	statusCode, _, fetchErr := fetchUpstreamJSON(r.Context(), client, targetURL, &data)
+	if fetchErr != nil {
+		if statusCode == 0 {
+			log.Printf("[Dashboard] Upstream %s request failed (%s): %v", upstreamLabel, targetURL, fetchErr)
+			writeJSON(w, r, http.StatusServiceUnavailable, makeErrPayload("degraded", unreachableMsg))
+			return
+		}
+		if statusCode != http.StatusOK {
+			log.Printf("[Dashboard] Upstream %s returned status %d", upstreamLabel, statusCode)
+			writeJSON(w, r, statusCode, makeErrPayload("error", "Upstream "+upstreamLabel+" error occurred"))
+			return
+		}
+		writeJSON(w, r, http.StatusBadGateway, makeErrPayload("error", "Failed to decode upstream "+upstreamLabel+" response"))
+		return
+	}
+
+	if normalize != nil {
+		normalize(&data)
+	}
+
+	writeJSON(w, r, http.StatusOK, data)
+}
+
 func factsHandler(brainBaseURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, `{"error":"Method Not Allowed"}`, http.StatusMethodNotAllowed)
-			return
-		}
-
 		targetURL, limit, offset, err := BuildFactsUpstreamURL(brainBaseURL, r.URL.Query())
-		if err != nil {
-			http.Error(w, `{"error":"Invalid upstream URL configuration"}`, http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-
-		var data FactsAPIResponse
-		statusCode, _, fetchErr := fetchUpstreamJSON(r.Context(), brainHTTPClient, targetURL, &data)
-		if fetchErr != nil {
-			if statusCode == 0 {
-				log.Printf("[Dashboard] Upstream brain request failed (%s): %v", targetURL, fetchErr)
-				writeJSON(w, r, http.StatusServiceUnavailable, FactsAPIResponse{
+		serveUpstreamGET(
+			w, r, brainHTTPClient, "brain", "Brain service unreachable. Retrying...", targetURL, err,
+			func(status, errMsg string) FactsAPIResponse {
+				return FactsAPIResponse{
 					Facts:  []FactItem{},
 					Total:  0,
 					Limit:  limit,
 					Offset: offset,
-					Status: "degraded",
-					Error:  "Brain service unreachable. Retrying...",
-				})
-				return
-			}
-			if statusCode != http.StatusOK {
-				log.Printf("[Dashboard] Upstream brain returned status %d", statusCode)
-				writeJSON(w, r, statusCode, FactsAPIResponse{
-					Facts:  []FactItem{},
-					Total:  0,
-					Limit:  limit,
-					Offset: offset,
-					Status: "error",
-					Error:  "Upstream brain error occurred",
-				})
-				return
-			}
-			writeJSON(w, r, http.StatusBadGateway, FactsAPIResponse{
-				Facts:  []FactItem{},
-				Total:  0,
-				Limit:  limit,
-				Offset: offset,
-				Status: "error",
-				Error:  "Failed to decode upstream brain response",
-			})
-			return
-		}
-
-		if data.Facts == nil {
-			data.Facts = []FactItem{}
-		}
-
-		writeJSON(w, r, http.StatusOK, data)
+					Status: status,
+					Error:  errMsg,
+				}
+			},
+			func(d *FactsAPIResponse) {
+				if d.Facts == nil {
+					d.Facts = []FactItem{}
+				}
+			},
+		)
 	}
 }
 
 func schedulesHandler(haroBaseURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			http.Error(w, `{"error":"Method Not Allowed"}`, http.StatusMethodNotAllowed)
-			return
-		}
-
 		targetURL, err := BuildSchedulesUpstreamURL(haroBaseURL)
-		if err != nil {
-			http.Error(w, `{"error":"Invalid upstream URL configuration"}`, http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-
-		var data SchedulesAPIResponse
-		statusCode, _, fetchErr := fetchUpstreamJSON(r.Context(), brainHTTPClient, targetURL, &data)
-		if fetchErr != nil {
-			if statusCode == 0 {
-				log.Printf("[Dashboard] Upstream brain request failed (%s): %v", targetURL, fetchErr)
-				writeJSON(w, r, http.StatusServiceUnavailable, SchedulesAPIResponse{
-					Status: "degraded",
-					Error:  "Brain service unreachable. Retrying...",
+		serveUpstreamGET(
+			w, r, brainHTTPClient, "brain", "Brain service unreachable. Retrying...", targetURL, err,
+			func(status, errMsg string) SchedulesAPIResponse {
+				return SchedulesAPIResponse{
+					Status: status,
+					Error:  errMsg,
 					Summary: ScheduleSummaryMetrics{
 						TotalActive:    0,
 						CronCount:      0,
@@ -308,179 +301,72 @@ func schedulesHandler(haroBaseURL string) http.HandlerFunc {
 					},
 					Crons:    []CronSchedule{},
 					OneShots: []OneShotSchedule{},
-				})
-				return
-			}
-			if statusCode != http.StatusOK {
-				log.Printf("[Dashboard] Upstream brain returned status %d", statusCode)
-				writeJSON(w, r, statusCode, SchedulesAPIResponse{
-					Status: "error",
-					Error:  "Upstream brain error occurred",
-					Summary: ScheduleSummaryMetrics{
-						TotalActive:    0,
-						CronCount:      0,
-						OneShotCount:   0,
-						TotalRuns24h:   0,
-						SuccessRate24h: 100.0,
-					},
-					Crons:    []CronSchedule{},
-					OneShots: []OneShotSchedule{},
-				})
-				return
-			}
-			writeJSON(w, r, http.StatusBadGateway, SchedulesAPIResponse{
-				Status: "error",
-				Error:  "Failed to decode upstream brain response",
-				Summary: ScheduleSummaryMetrics{
-					TotalActive:    0,
-					CronCount:      0,
-					OneShotCount:   0,
-					TotalRuns24h:   0,
-					SuccessRate24h: 100.0,
-				},
-				Crons:    []CronSchedule{},
-				OneShots: []OneShotSchedule{},
-			})
-			return
-		}
-
-		if data.Crons == nil {
-			data.Crons = []CronSchedule{}
-		}
-		if data.OneShots == nil {
-			data.OneShots = []OneShotSchedule{}
-		}
-
-		writeJSON(w, r, http.StatusOK, data)
+				}
+			},
+			func(d *SchedulesAPIResponse) {
+				if d.Crons == nil {
+					d.Crons = []CronSchedule{}
+				}
+				if d.OneShots == nil {
+					d.OneShots = []OneShotSchedule{}
+				}
+			},
+		)
 	}
 }
 
 func scheduleRunsHandler(haroBaseURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			http.Error(w, `{"error":"Method Not Allowed"}`, http.StatusMethodNotAllowed)
-			return
-		}
-
 		targetURL, limit, offset, err := BuildScheduleRunsUpstreamURL(haroBaseURL, r.URL.Query())
-		if err != nil {
-			http.Error(w, `{"error":"Invalid upstream URL configuration"}`, http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-
-		var data ScheduleRunsAPIResponse
-		statusCode, _, fetchErr := fetchUpstreamJSON(r.Context(), brainHTTPClient, targetURL, &data)
-		if fetchErr != nil {
-			if statusCode == 0 {
-				log.Printf("[Dashboard] Upstream brain request failed (%s): %v", targetURL, fetchErr)
-				writeJSON(w, r, http.StatusServiceUnavailable, ScheduleRunsAPIResponse{
-					Status: "degraded",
-					Error:  "Brain service unreachable. Retrying...",
+		serveUpstreamGET(
+			w, r, brainHTTPClient, "brain", "Brain service unreachable. Retrying...", targetURL, err,
+			func(status, errMsg string) ScheduleRunsAPIResponse {
+				return ScheduleRunsAPIResponse{
+					Status: status,
+					Error:  errMsg,
 					Total:  0,
 					Limit:  limit,
 					Offset: offset,
 					Runs:   []ScheduleRun{},
-				})
-				return
-			}
-			if statusCode != http.StatusOK {
-				log.Printf("[Dashboard] Upstream brain returned status %d", statusCode)
-				writeJSON(w, r, statusCode, ScheduleRunsAPIResponse{
-					Status: "error",
-					Error:  "Upstream brain error occurred",
-					Total:  0,
-					Limit:  limit,
-					Offset: offset,
-					Runs:   []ScheduleRun{},
-				})
-				return
-			}
-			writeJSON(w, r, http.StatusBadGateway, ScheduleRunsAPIResponse{
-				Status: "error",
-				Error:  "Failed to decode upstream brain response",
-				Total:  0,
-				Limit:  limit,
-				Offset: offset,
-				Runs:   []ScheduleRun{},
-			})
-			return
-		}
-
-		if data.Runs == nil {
-			data.Runs = []ScheduleRun{}
-		}
-
-		writeJSON(w, r, http.StatusOK, data)
+				}
+			},
+			func(d *ScheduleRunsAPIResponse) {
+				if d.Runs == nil {
+					d.Runs = []ScheduleRun{}
+				}
+			},
+		)
 	}
 }
 
 func buildsHandler(vanadisBaseURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			http.Error(w, `{"error":"Method Not Allowed"}`, http.StatusMethodNotAllowed)
-			return
-		}
-
 		targetURL, _, err := BuildVanadisBuildsUpstreamURL(vanadisBaseURL, r.URL.Query())
-		if err != nil {
-			http.Error(w, `{"error":"Invalid upstream URL configuration"}`, http.StatusInternalServerError)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-
-		var data BuildsAPIResponse
-		statusCode, _, fetchErr := fetchUpstreamJSON(r.Context(), vanadisHTTPClient, targetURL, &data)
-		if fetchErr != nil {
-			if statusCode == 0 {
-				log.Printf("[Dashboard] Upstream vanadis request failed (%s): %v", targetURL, fetchErr)
-				writeJSON(w, r, http.StatusServiceUnavailable, BuildsAPIResponse{
-					Status: "degraded",
-					Error:  "Vanadis service unreachable. Retrying...",
+		serveUpstreamGET(
+			w, r, vanadisHTTPClient, "vanadis", "Vanadis service unreachable. Retrying...", targetURL, err,
+			func(status, errMsg string) BuildsAPIResponse {
+				return BuildsAPIResponse{
+					Status: status,
+					Error:  errMsg,
 					Total:  0,
 					Builds: []VanadisBuildDTO{},
-				})
-				return
-			}
-			if statusCode != http.StatusOK {
-				log.Printf("[Dashboard] Upstream vanadis returned status %d", statusCode)
-				writeJSON(w, r, statusCode, BuildsAPIResponse{
-					Status: "error",
-					Error:  "Upstream vanadis error occurred",
-					Total:  0,
-					Builds: []VanadisBuildDTO{},
-				})
-				return
-			}
-			writeJSON(w, r, http.StatusBadGateway, BuildsAPIResponse{
-				Status: "error",
-				Error:  "Failed to decode upstream vanadis response",
-				Total:  0,
-				Builds: []VanadisBuildDTO{},
-			})
-			return
-		}
-
-		if data.Builds == nil {
-			data.Builds = []VanadisBuildDTO{}
-		}
-		for i := range data.Builds {
-			data.Builds[i].SharedContext = ""
-			for j := range data.Builds[i].Chunks {
-				data.Builds[i].Chunks[j].Instructions = ""
-				data.Builds[i].Chunks[j].TargetFiles = nil
-				data.Builds[i].Chunks[j].TargetSymbols = nil
-				data.Builds[i].Chunks[j].AcceptanceCriteria = nil
-			}
-		}
-
-		writeJSON(w, r, http.StatusOK, data)
+				}
+			},
+			func(d *BuildsAPIResponse) {
+				if d.Builds == nil {
+					d.Builds = []VanadisBuildDTO{}
+				}
+				for i := range d.Builds {
+					d.Builds[i].SharedContext = ""
+					for j := range d.Builds[i].Chunks {
+						d.Builds[i].Chunks[j].Instructions = ""
+						d.Builds[i].Chunks[j].TargetFiles = nil
+						d.Builds[i].Chunks[j].TargetSymbols = nil
+						d.Builds[i].Chunks[j].AcceptanceCriteria = nil
+					}
+				}
+			},
+		)
 	}
 }
 

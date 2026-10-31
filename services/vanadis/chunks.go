@@ -885,28 +885,39 @@ func (s *VanadisServer) handleChunkByPR(w http.ResponseWriter, r *http.Request) 
 	httpkit.WriteJSON(w, http.StatusOK, lookup)
 }
 
-func (s *VanadisServer) handleAttachChunkPR(w http.ResponseWriter, r *http.Request) {
+func decodeChunkPRPost[T any](s *VanadisServer, w http.ResponseWriter, r *http.Request, missingMsg string, valid func(*T) bool) (T, bool) {
+	var zero T
 	if s.store == nil {
 		writeErr(w, http.StatusInternalServerError, "vanadis store not configured")
-		return
+		return zero, false
 	}
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
+		return zero, false
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, 2<<20))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "failed to read request body")
-		return
+		return zero, false
 	}
-	var req AttachChunkPRRequest
+	var req T
 	if err := json.Unmarshal(body, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid json payload")
-		return
+		return zero, false
 	}
-	req.ChunkID = strings.TrimSpace(req.ChunkID)
-	if req.ChunkID == "" || req.PRNumber <= 0 {
-		writeErr(w, http.StatusBadRequest, "chunk_id and valid pr_number are required")
+	if !valid(&req) {
+		writeErr(w, http.StatusBadRequest, missingMsg)
+		return zero, false
+	}
+	return req, true
+}
+
+func (s *VanadisServer) handleAttachChunkPR(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeChunkPRPost(s, w, r, "chunk_id and valid pr_number are required", func(req *AttachChunkPRRequest) bool {
+		req.ChunkID = strings.TrimSpace(req.ChunkID)
+		return req.ChunkID != "" && req.PRNumber > 0
+	})
+	if !ok {
 		return
 	}
 	threadID, err := s.store.AttachChunkPR(r.Context(), req.ChunkID, req.PRNumber, req.Repo)
@@ -922,27 +933,11 @@ func (s *VanadisServer) handleAttachChunkPR(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *VanadisServer) handleAdvanceChunkPR(w http.ResponseWriter, r *http.Request) {
-	if s.store == nil {
-		writeErr(w, http.StatusInternalServerError, "vanadis store not configured")
-		return
-	}
-	if r.Method != http.MethodPost {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 2<<20))
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "failed to read request body")
-		return
-	}
-	var req ChunkPRRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid json payload")
-		return
-	}
-	req.Repo = strings.TrimSpace(req.Repo)
-	if req.Repo == "" || req.PRNumber <= 0 {
-		writeErr(w, http.StatusBadRequest, "repo and valid pr_number are required")
+	req, ok := decodeChunkPRPost(s, w, r, "repo and valid pr_number are required", func(req *ChunkPRRequest) bool {
+		req.Repo = strings.TrimSpace(req.Repo)
+		return req.Repo != "" && req.PRNumber > 0
+	})
+	if !ok {
 		return
 	}
 	res, err := s.store.AdvanceChunkByPR(r.Context(), req.Repo, req.PRNumber)
@@ -968,27 +963,11 @@ func (s *VanadisServer) handleAdvanceChunkPR(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *VanadisServer) handleFailChunkPR(w http.ResponseWriter, r *http.Request) {
-	if s.store == nil {
-		writeErr(w, http.StatusInternalServerError, "vanadis store not configured")
-		return
-	}
-	if r.Method != http.MethodPost {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 2<<20))
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "failed to read request body")
-		return
-	}
-	var req ChunkPRRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid json payload")
-		return
-	}
-	req.Repo = strings.TrimSpace(req.Repo)
-	if req.Repo == "" || req.PRNumber <= 0 {
-		writeErr(w, http.StatusBadRequest, "repo and valid pr_number are required")
+	req, ok := decodeChunkPRPost(s, w, r, "repo and valid pr_number are required", func(req *ChunkPRRequest) bool {
+		req.Repo = strings.TrimSpace(req.Repo)
+		return req.Repo != "" && req.PRNumber > 0
+	})
+	if !ok {
 		return
 	}
 	buildID, chunkID, failed, err := s.store.FailChunkByPR(r.Context(), req.Repo, req.PRNumber)
