@@ -295,11 +295,29 @@ func (s *SQLStore) InsertFact(ctx context.Context, factText string, embedding []
 	return id, err
 }
 
-// UpdateFact updates an existing fact with new values and increments reinforce_count.
-func (s *SQLStore) UpdateFact(ctx context.Context, id int64, factText string, embedding []float32) error {
+func (s *SQLStore) execFactMutation(ctx context.Context, op, query string, args ...any) error {
 	if err := s.checkDB(); err != nil {
 		return err
 	}
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	res, err := s.db.ExecContext(queryCtx, query, args...)
+	if err != nil {
+		return fmt.Errorf("failed to %s fact: %w", op, err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrFactNotFound
+	}
+	return nil
+}
+
+// UpdateFact updates an existing fact with new values and increments reinforce_count.
+func (s *SQLStore) UpdateFact(ctx context.Context, id int64, factText string, embedding []float32) error {
 	factText = strings.TrimSpace(factText)
 	if factText == "" {
 		return fmt.Errorf("fact text cannot be empty")
@@ -307,68 +325,20 @@ func (s *SQLStore) UpdateFact(ctx context.Context, id int64, factText string, em
 	if len(embedding) != ExpectedEmbeddingDim {
 		return fmt.Errorf("invalid embedding dimension: expected %d, got %d", ExpectedEmbeddingDim, len(embedding))
 	}
-	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
-	defer cancel()
-
 	query := `UPDATE facts SET fact_text = $1, embedding = $2, last_reinforced_at = NOW(), reinforce_count = COALESCE(reinforce_count, 1) + 1 WHERE id = $3`
-	res, err := s.db.ExecContext(queryCtx, query, factText, pgvector.NewVector(embedding), id)
-	if err != nil {
-		return fmt.Errorf("failed to update fact: %w", err)
-	}
-	rows, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return ErrFactNotFound
-	}
-	return nil
+	return s.execFactMutation(ctx, "update", query, factText, pgvector.NewVector(embedding), id)
 }
 
 // ReinforceFact strengthens an existing fact by updating last_reinforced_at and incrementing reinforce_count.
 func (s *SQLStore) ReinforceFact(ctx context.Context, id int64) error {
-	if err := s.checkDB(); err != nil {
-		return err
-	}
-	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
-	defer cancel()
-
 	now := time.Now().UTC()
 	query := `UPDATE facts SET last_reinforced_at = $1, reinforce_count = COALESCE(reinforce_count, 1) + 1 WHERE id = $2`
-	res, err := s.db.ExecContext(queryCtx, query, now, id)
-	if err != nil {
-		return fmt.Errorf("failed to reinforce fact: %w", err)
-	}
-	rows, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return ErrFactNotFound
-	}
-	return nil
+	return s.execFactMutation(ctx, "reinforce", query, now, id)
 }
 
 // DeleteFact removes a fact by ID.
 func (s *SQLStore) DeleteFact(ctx context.Context, id int64) error {
-	if err := s.checkDB(); err != nil {
-		return err
-	}
-	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	res, err := s.db.ExecContext(queryCtx, `DELETE FROM facts WHERE id = $1`, id)
-	if err != nil {
-		return fmt.Errorf("failed to delete fact: %w", err)
-	}
-	rows, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return ErrFactNotFound
-	}
-	return nil
+	return s.execFactMutation(ctx, "delete", `DELETE FROM facts WHERE id = $1`, id)
 }
 
 // FindDuplicateFact finds an existing fact highly similar to the provided embedding vector.

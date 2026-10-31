@@ -69,18 +69,7 @@ type OneShotSchedule struct {
 	Effort    string    `json:"effort,omitempty"`
 }
 
-type HeartbeatSchedule struct {
-	ID          string    `json:"id"`
-	TargetID    string    `json:"channel_id"`
-	TitlePrefix string    `json:"title_prefix"`
-	CronExpr    string    `json:"cron_expression"`
-	Prompt      string    `json:"prompt,omitempty"`
-	Timezone    string    `json:"timezone"`
-	Effort      string    `json:"effort,omitempty"`
-	NextRunAt   time.Time `json:"next_run_at"`
-	Enabled     bool      `json:"enabled"`
-	CreatedAt   time.Time `json:"created_at"`
-}
+type HeartbeatSchedule = CronSchedule
 
 type EventTrigger struct {
 	ID         string    `json:"id"`
@@ -349,21 +338,16 @@ func GetHeartbeatSchedule(ctx context.Context, database *sql.DB, id string) (*He
 	return getScheduleByID(ctx, database, id, "heartbeat", query, scanHeartbeatSchedule)
 }
 
-func UpdateHeartbeatSchedule(ctx context.Context, database *sql.DB, h HeartbeatSchedule) error {
+func execScheduleUpdate(ctx context.Context, database *sql.DB, label, id, query string, args ...any) error {
 	ctx, err := normCtxAndDB(ctx, database)
 	if err != nil {
 		return err
 	}
-	h.ID = strings.TrimSpace(h.ID)
-	if h.ID == "" {
+	id = strings.TrimSpace(id)
+	if id == "" {
 		return fmt.Errorf("schedule_id cannot be empty")
 	}
-	effort, err := NormalizeEffort(h.Effort)
-	if err != nil {
-		return err
-	}
-	query := `UPDATE heartbeat_schedules SET target_id = $1, title_prefix = $2, cron_expr = $3, prompt = $4, timezone = $5, effort = $6, next_run_at = $7, enabled = $8 WHERE id = $9`
-	res, err := database.ExecContext(ctx, query, h.TargetID, h.TitlePrefix, h.CronExpr, h.Prompt, h.Timezone, effort, h.NextRunAt, h.Enabled, h.ID)
+	res, err := database.ExecContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}
@@ -372,9 +356,19 @@ func UpdateHeartbeatSchedule(ctx context.Context, database *sql.DB, h HeartbeatS
 		return fmt.Errorf("failed to determine rows affected: %w", err)
 	}
 	if rowsAffected == 0 {
-		return fmt.Errorf("heartbeat schedule %q not found", h.ID)
+		return fmt.Errorf("%s schedule %q not found", label, id)
 	}
 	return nil
+}
+
+func UpdateHeartbeatSchedule(ctx context.Context, database *sql.DB, h HeartbeatSchedule) error {
+	effort, err := NormalizeEffort(h.Effort)
+	if err != nil {
+		return err
+	}
+	id := strings.TrimSpace(h.ID)
+	query := `UPDATE heartbeat_schedules SET target_id = $1, title_prefix = $2, cron_expr = $3, prompt = $4, timezone = $5, effort = $6, next_run_at = $7, enabled = $8 WHERE id = $9`
+	return execScheduleUpdate(ctx, database, "heartbeat", id, query, h.TargetID, h.TitlePrefix, h.CronExpr, h.Prompt, h.Timezone, effort, h.NextRunAt, h.Enabled, id)
 }
 
 func UpdateCronSchedule(ctx context.Context, database *sql.DB, id string, effort, cronExpr, prompt, titlePrefix, timezone *string, nextRunAt *time.Time) error {
@@ -473,27 +467,8 @@ func queryDueSchedules[T any](ctx context.Context, database *sql.DB, query strin
 }
 
 func advanceScheduleNextRun(ctx context.Context, database *sql.DB, table, label, id string, nextRun time.Time) error {
-	ctx, err := normCtxAndDB(ctx, database)
-	if err != nil {
-		return err
-	}
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return fmt.Errorf("schedule_id cannot be empty")
-	}
 	query := fmt.Sprintf("UPDATE %s SET next_run_at = $1 WHERE id = $2", table)
-	res, err := database.ExecContext(ctx, query, nextRun, id)
-	if err != nil {
-		return err
-	}
-	rowsAffected, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to determine rows affected: %w", err)
-	}
-	if rowsAffected == 0 {
-		return fmt.Errorf("%s schedule %q not found", label, id)
-	}
-	return nil
+	return execScheduleUpdate(ctx, database, label, id, query, nextRun, strings.TrimSpace(id))
 }
 
 func GetDueCronSchedules(ctx context.Context, database *sql.DB, now time.Time) ([]CronSchedule, error) {

@@ -79,25 +79,34 @@ func (d *SyncDaemon) runGitDiffWithFallback(ctx context.Context, repoPath, diffF
 	return string(out), nil
 }
 
-// HasNomadConfigChanges checks whether Nomad daemon configuration files changed between commits.
-func (d *SyncDaemon) HasNomadConfigChanges(ctx context.Context, repoPath, prevHead, currHead string) (bool, error) {
+func (d *SyncDaemon) diffNomadCommitRange(ctx context.Context, repoPath, diffFlag, warnPrefix, prevHead, currHead string, pathArgs ...string) (string, bool, error) {
 	if ctx.Err() != nil {
-		return false, ctx.Err()
+		return "", false, ctx.Err()
 	}
 	if prevHead == "" || currHead == "" || prevHead == currHead {
-		return false, nil
+		return "", false, nil
 	}
 	if repoPath == "" {
-		return false, nil
+		return "", false, nil
 	}
 
-	out, err := d.runGitDiffWithFallback(ctx, repoPath, "--name-only", prevHead, currHead, "HEAD", "nomad")
+	out, err := d.runGitDiffWithFallback(ctx, repoPath, diffFlag, prevHead, currHead, "HEAD", pathArgs...)
 	if err != nil {
 		if ctx.Err() != nil {
-			return false, ctx.Err()
+			return "", false, ctx.Err()
 		}
-		log.Printf("[Hangar] Warning: Failed to inspect nomad diff in %s (%v); failing safe to false", repoPath, err)
-		return false, nil
+		log.Printf("%s in %s (%v)", warnPrefix, repoPath, err)
+		return "", false, nil
+	}
+
+	return out, true, nil
+}
+
+// HasNomadConfigChanges checks whether Nomad daemon configuration files changed between commits.
+func (d *SyncDaemon) HasNomadConfigChanges(ctx context.Context, repoPath, prevHead, currHead string) (bool, error) {
+	out, ok, err := d.diffNomadCommitRange(ctx, repoPath, "--name-only", "[Hangar] Warning: Failed to inspect nomad diff", prevHead, currHead, "nomad")
+	if err != nil || !ok {
+		return false, err
 	}
 
 	lines := strings.Split(strings.TrimSpace(out), "\n")
@@ -106,23 +115,9 @@ func (d *SyncDaemon) HasNomadConfigChanges(ctx context.Context, repoPath, prevHe
 
 // HasNomadChanges checks whether any Nomad job specifications changed between commits.
 func (d *SyncDaemon) HasNomadChanges(ctx context.Context, repoPath, prevHead, currHead string) ([]NomadFileChange, error) {
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-	if prevHead == "" || currHead == "" || prevHead == currHead {
-		return nil, nil
-	}
-	if repoPath == "" {
-		return nil, nil
-	}
-
-	out, err := d.runGitDiffWithFallback(ctx, repoPath, "--name-status", prevHead, currHead, "HEAD")
-	if err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		log.Printf("[Hangar:Nomad] Warning: Failed to inspect diff in %s (%v)", repoPath, err)
-		return nil, nil
+	out, ok, err := d.diffNomadCommitRange(ctx, repoPath, "--name-status", "[Hangar:Nomad] Warning: Failed to inspect diff", prevHead, currHead)
+	if err != nil || !ok {
+		return nil, err
 	}
 
 	return ParseNomadGitStatus(out), nil

@@ -389,85 +389,6 @@ func filterShortFrictionCandidates(cands []ProceduralCandidate) []ProceduralCand
 	return group
 }
 
-type procCliqueEdge struct {
-	i, j int
-	sim  float64
-}
-
-type procCandidateMatch struct {
-	cand ProceduralCandidate
-	sim  float64
-}
-
-func buildProceduralCliqueEdges(group []ProceduralCandidate, minSim float64) []procCliqueEdge {
-	var edges []procCliqueEdge
-	for i := 0; i < len(group); i++ {
-		for j := i + 1; j < len(group); j++ {
-			sim := CosineSimilarity(group[i].Embedding, group[j].Embedding)
-			if sim >= minSim {
-				edges = append(edges, procCliqueEdge{i: i, j: j, sim: sim})
-			}
-		}
-	}
-
-	sort.SliceStable(edges, func(a, b int) bool {
-		if edges[a].sim != edges[b].sim {
-			return edges[a].sim > edges[b].sim
-		}
-		if group[edges[a].i].ID != group[edges[b].i].ID {
-			return group[edges[a].i].ID < group[edges[b].i].ID
-		}
-		return group[edges[a].j].ID < group[edges[b].j].ID
-	})
-	return edges
-}
-
-func matchesAllProceduralCliqueMembers(members []ProceduralCandidate, emb []float32, minSim float64) bool {
-	for _, member := range members {
-		sim := CosineSimilarity(member.Embedding, emb)
-		if sim < minSim {
-			return false
-		}
-	}
-	return true
-}
-
-func expandProceduralClique(group []ProceduralCandidate, e procCliqueEdge, used map[int64]bool, minSim float64, maxSize int) []ProceduralCandidate {
-	u, v := group[e.i], group[e.j]
-	clique := []ProceduralCandidate{u, v}
-	if maxSize <= 2 {
-		return clique
-	}
-
-	var matchCands []procCandidateMatch
-	for k := 0; k < len(group); k++ {
-		if k == e.i || k == e.j || used[group[k].ID] {
-			continue
-		}
-		simU := CosineSimilarity(u.Embedding, group[k].Embedding)
-		simV := CosineSimilarity(v.Embedding, group[k].Embedding)
-		if simU >= minSim && simV >= minSim {
-			matchCands = append(matchCands, procCandidateMatch{cand: group[k], sim: min(simU, simV)})
-		}
-	}
-	sort.SliceStable(matchCands, func(a, b int) bool {
-		if matchCands[a].sim != matchCands[b].sim {
-			return matchCands[a].sim > matchCands[b].sim
-		}
-		return matchCands[a].cand.ID < matchCands[b].cand.ID
-	})
-
-	for _, c := range matchCands {
-		if len(clique) >= maxSize {
-			break
-		}
-		if matchesAllProceduralCliqueMembers(clique[2:], c.cand.Embedding, minSim) {
-			clique = append(clique, c.cand)
-		}
-	}
-	return clique
-}
-
 // findCandidateCliques clusters procedural candidates into complete-linkage cliques of size [minSize, maxSize].
 func findCandidateCliques(cands []ProceduralCandidate, minSim float64, minSize, maxSize int) [][]ProceduralCandidate {
 	if minSim <= 0 {
@@ -485,29 +406,11 @@ func findCandidateCliques(cands []ProceduralCandidate, minSim float64, minSize, 
 		group = filterCreateCliqueCandidates(cands)
 	}
 
-	sort.Slice(group, func(i, j int) bool {
-		return group[i].ID < group[j].ID
-	})
-
-	edges := buildProceduralCliqueEdges(group, minSim)
-
-	var cliques [][]ProceduralCandidate
-	used := make(map[int64]bool, len(group))
-	for _, e := range edges {
-		u, v := group[e.i], group[e.j]
-		if used[u.ID] || used[v.ID] {
-			continue
-		}
-		clique := expandProceduralClique(group, e, used, minSim, maxSize)
-		if len(clique) >= minSize {
-			sort.Slice(clique, func(a, b int) bool { return clique[a].ID < clique[b].ID })
-			for _, m := range clique {
-				used[m.ID] = true
-			}
-			cliques = append(cliques, clique)
-		}
-	}
-	return cliques
+	return findCompleteLinkageCliques(
+		group, minSim, 1.0, minSize, maxSize,
+		func(c ProceduralCandidate) int64 { return c.ID },
+		func(c ProceduralCandidate) []float32 { return c.Embedding },
+	)
 }
 
 // ValidateCompiledSkillMarkdown validates compiled skill markdown against structural, length, and scope constraints.
