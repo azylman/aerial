@@ -510,9 +510,6 @@ func (s *Server) handleClaimEventTriggers(w http.ResponseWriter, r *http.Request
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	if triggers == nil {
-		triggers = []EventTrigger{}
-	}
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
 		"status":   "ok",
 		"triggers": triggers,
@@ -546,8 +543,10 @@ func (s *Server) handleFireEventTriggers(w http.ResponseWriter, r *http.Request)
 		RecordScheduleDispatchDuration("event_watch", time.Since(start).Seconds())
 		if dispErr != nil {
 			RecordScheduleRun("event_watch", "failed")
-			if reinsertErr := InsertEventTrigger(context.WithoutCancel(r.Context()), s.handler.db, trig); reinsertErr != nil {
-				log.Printf("[Haro] failed to re-insert event trigger %s after dispatch error: %v", trig.ID, reinsertErr)
+			if !trig.Persistent {
+				if reinsertErr := InsertEventTrigger(context.WithoutCancel(r.Context()), s.handler.db, trig); reinsertErr != nil {
+					log.Printf("[Haro] failed to re-insert event trigger %s after dispatch error: %v", trig.ID, reinsertErr)
+				}
 			}
 			if firstDispatchErr == nil {
 				firstDispatchErr = dispErr

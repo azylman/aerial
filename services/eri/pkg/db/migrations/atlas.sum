@@ -1,4 +1,4 @@
-h1:TQx0Ii/+0CiqXquPk7PpneNr7nR4PQfI7RQnPLTE95g=
+h1:Fdv21AzOk9akMYvKVMSIhRyTz5h3wJkRzIsdb2wcX5w=
 20261001221347_baseline.sql h1:uwrTrII8CWvC/4E6FLZx5vGvYuO48AxqjCh+Wi/43kg=
 20261002155428_add_pr_registry.sql h1:tfYt/SDhTn/o/uTIcpHMD+XnpPELqiYySBkrwS+imJQ=
 20261002164500_add_river_queue.sql h1:TOtzV6uJrR9mibPzmVN8RRQ7fVAS95WmFLTvMQ9vETk=
@@ -21,3 +21,4 @@ h1:TQx0Ii/+0CiqXquPk7PpneNr7nR4PQfI7RQnPLTE95g=
 20261028152516_migrate_silent_messages_and_drop_columns.sql h1:md77TPrb8kslbsGFFvPtLJwbL5R9C/DcFh7y6rd3aEU=
 20261028172220_drop_messages_schedule_run_id.sql h1:HFeg7iYmZt3fxJxgXj9xEbE7LKASRWBOvUQ7xxGeywk=
 20261029033200_add_vanadis_chunk_completed_at.sql h1:a8Dq9JUlgcV4pIYcOFFEwPVP+zkpNR2hPX6iKgq2dCY=
+20261031064337_add_event_triggers_persistent.sql h1:tKCr/o2ar50JJLEJSQyDdKZoOl9oLW/DRqpUrx+4I2U=
