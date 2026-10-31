@@ -1422,6 +1422,7 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 		useNilRegistry      bool
 		prNumber            int
 		targetID            string
+		branch              string
 		suppressVanadis     bool
 		suppressVanadisErr  error
 		finalVanadis        bool
@@ -1461,6 +1462,14 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 				"Continuous Delivery deployment completed for job brain on azylman/aerial",
 				"Directive: Confirm the deployment and suggest logical next steps, follow-up verification, or related tasks concisely.",
 			},
+		},
+		{
+			name:                "dispatchDeploymentSuccessPrompt dependabot branch suppresses wake and widget",
+			isDeploymentSuccess: true,
+			targetID:            validSnowflake,
+			branch:              "dependabot/github_actions/fetch-metadata-3",
+			wantPrompts:         0,
+			wantWidgets:         0,
 		},
 		{
 			name:                "dispatchDeploymentSuccessPrompt invalid snowflake is no-op",
@@ -1525,6 +1534,7 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 			if !tc.useNilRegistry {
 				mockReg = &mockPRRegistry{
 					resolveTargetID:    tc.targetID,
+					resolveBranch:      tc.branch,
 					suppressVanadisRes: tc.suppressVanadis,
 					suppressVanadisErr: tc.suppressVanadisErr,
 					finalVanadisRes:    tc.finalVanadis,
@@ -2174,6 +2184,7 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 		mockTargetID    string
 		mockBranch      string
 		prDBStatus      string
+		prDBBranch      string
 		prDBBanner      string
 		prDBCIChecks    string
 		prDBMetadata    string
@@ -2242,6 +2253,23 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 			mockTargetID:   "",
 			repo:           "azylman/aerial",
 			prNumber:       101,
+			wantDispatched: false,
+		},
+		{
+			name:           "non-Postgres registry dependabot branch suppresses widget",
+			useMockReg:     true,
+			mockTargetID:   "1555405874565091380",
+			mockBranch:     "dependabot/go_modules/foo-1.0.0",
+			repo:           "azylman/aerial",
+			prNumber:       101,
+			wantDispatched: false,
+		},
+		{
+			name:           "Postgres standalone PR dependabot branch suppresses widget",
+			repo:           "azylman/aerial",
+			prNumber:       101,
+			prDBStatus:     "open",
+			prDBBranch:     "dependabot/go_modules/foo-1.0.0",
 			wantDispatched: false,
 		},
 		{
@@ -2566,6 +2594,9 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 								}
 								*dest[8].(*string) = meta
 							}
+							if len(dest) > 9 {
+								*dest[9].(*string) = tc.prDBBranch
+							}
 							return nil
 						}}
 					}
@@ -2639,6 +2670,8 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 				if last.SkipSink != tc.wantSkipSink {
 					t.Errorf("got last.SkipSink = %v, want %v", last.SkipSink, tc.wantSkipSink)
 				}
+			} else if !tc.wantErr && len(mockDisp.WidgetCalls()) != 0 {
+				t.Errorf("expected 0 dispatched widget calls, got %d", len(mockDisp.WidgetCalls()))
 			}
 			if tc.wantVanadisStep != "" && receivedVanadisActiveStep != tc.wantVanadisStep {
 				t.Errorf("got receivedVanadisActiveStep = %q, want %q", receivedVanadisActiveStep, tc.wantVanadisStep)

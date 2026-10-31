@@ -982,8 +982,12 @@ func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res 
 	return nil
 }
 
+func isDependabotBranch(branch string) bool {
+	return strings.HasPrefix(strings.TrimSpace(branch), "dependabot/")
+}
+
 func isDependabotPR(p GitHubPullRequestPayload) bool {
-	return strings.HasPrefix(strings.TrimSpace(p.PullRequest.Head.Ref), "dependabot/") &&
+	return isDependabotBranch(p.PullRequest.Head.Ref) &&
 		(strings.EqualFold(strings.TrimSpace(p.PullRequest.User.Login), "dependabot[bot]") ||
 			strings.EqualFold(strings.TrimSpace(p.Sender.Login), "dependabot[bot]"))
 }
@@ -1034,7 +1038,7 @@ func (s *RouterServer) processGitHubPullRequestEvent(ctx context.Context, delive
 }
 
 func (s *RouterServer) recordCheckRunStatus(ctx context.Context, res *ResolvedGitHubEvent) {
-	if s.registry == nil || res.PRNumber <= 0 || res.HeadSHA == "" || isGateAggregatorCheck(res.CheckName) {
+	if s.registry == nil || res.PRNumber <= 0 || res.HeadSHA == "" || isGateAggregatorCheck(res.CheckName) || isDependabotBranch(res.Branch) {
 		return
 	}
 	checkState := classifyCheckState(res.Status, res.Conclusion)
