@@ -530,8 +530,10 @@ func newNomadConfigSyncTestEnv(t *testing.T) *nomadConfigSyncTestEnv {
 		eventsCh:  make(chan HangarDeployEvent, 16),
 	}
 	env.daemon = NewDaemon(DaemonConfig{
-		NomadAddr: "http://127.0.0.1:4646",
-		ConfigDir: env.configDir,
+		NomadAddr:      "http://127.0.0.1:4646",
+		ConfigDir:      env.configDir,
+		ServiceConfigs: testServiceConfigs(),
+		AssetBundles:   testAssetBundles(filepath.Join(env.configDir, "aerial"), env.configDir, filepath.Join(env.configDir, "mirrormere")),
 		NomadExecutor: func(ctx context.Context, args ...string) ([]byte, []byte, error) {
 			env.mu.Lock()
 			env.calls = append(env.calls, args)
@@ -847,34 +849,33 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 
 	t.Run("service_config_mappings_and_non_yaml", func(t *testing.T) {
 		t.Parallel()
-		var foundKernelMCP bool
-		for _, m := range DefaultManagedServiceConfigs {
-			if strings.Contains(m.NomadVar, "voice") || strings.Contains(m.NomadVar, "mirrormere") {
-				t.Errorf("expected DefaultManagedServiceConfigs to remain generic, found: %v", m)
-			}
-			if m.NomadVar == "nomad/jobs/kernel-mcp" {
-				foundKernelMCP = true
-			}
+		if unconfigured := (&SyncDaemon{}).GetServiceConfigMappings(t.TempDir()); unconfigured != nil {
+			t.Fatalf("expected nil when unconfigured, got %v", unconfigured)
 		}
-		if !foundKernelMCP {
-			t.Errorf("expected DefaultManagedServiceConfigs to contain kernel-mcp mapping")
+		if unconfigured := (&SyncDaemon{}).GetAssetBundleConfigs(t.TempDir()); unconfigured != nil {
+			t.Fatalf("expected nil when unconfigured, got %v", unconfigured)
 		}
 
 		customDir := t.TempDir()
 		_ = os.MkdirAll(filepath.Join(customDir, "services", "hangar"), 0o755)
-		_ = os.WriteFile(filepath.Join(customDir, "services", "hangar", "hangar.yaml"), []byte("service_configs:\n  - rel_path: \"services/custom/custom.yaml\"\n    nomad_var: \"nomad/jobs/custom-job\"\n    var_key: \"CONFIG_YAML\"\n"), 0o644)
+		_ = os.WriteFile(filepath.Join(customDir, "services", "hangar", "hangar.yaml"), []byte("service_configs:\n  - rel_path: \"services/custom/custom.yaml\"\n    nomad_var: \"nomad/jobs/custom-job\"\n    var_key: \"CONFIG_YAML\"\nasset_bundles:\n  - name: \"custom-bundle\"\n    sources:\n      app: \"services/custom\"\n"), 0o644)
 		d := NewDaemon(DaemonConfig{ConfigDir: customDir})
 		if customMappings := d.GetServiceConfigMappings(customDir); len(customMappings) != 1 || customMappings[0].RelPath != "services/custom/custom.yaml" || customMappings[0].NomadVar != "nomad/jobs/custom-job" {
 			t.Fatalf("expected custom mappings from hangar.yaml, got %v", customMappings)
 		}
+		if customBundles := d.GetAssetBundleConfigs(customDir); len(customBundles) != 1 || customBundles[0].Name != "custom-bundle" {
+			t.Fatalf("expected custom bundles from hangar.yaml, got %v", customBundles)
+		}
 
-		dCustom := &SyncDaemon{serviceConfigs: []ServiceConfigMapping{{RelPath: "services/test/test.yaml", NomadVar: "nomad/jobs/test-job", VarKey: "CONFIG_YAML"}}}
+		dCustom := &SyncDaemon{
+			serviceConfigs: []ServiceConfigMapping{{RelPath: "services/test/test.yaml", NomadVar: "nomad/jobs/test-job", VarKey: "CONFIG_YAML"}},
+			assetBundles:   []AssetBundleConfig{{Name: "test-bundle"}},
+		}
 		if daemonMappings := dCustom.GetServiceConfigMappings(t.TempDir()); len(daemonMappings) != 1 || daemonMappings[0].RelPath != "services/test/test.yaml" {
 			t.Fatalf("expected daemon-configured mappings, got %v", daemonMappings)
 		}
-
-		if defaultMappings := (&SyncDaemon{}).GetServiceConfigMappings(t.TempDir()); len(defaultMappings) != len(DefaultManagedServiceConfigs) {
-			t.Fatalf("expected DefaultManagedServiceConfigs fallback, got %d mappings", len(defaultMappings))
+		if daemonBundles := dCustom.GetAssetBundleConfigs(t.TempDir()); len(daemonBundles) != 1 || daemonBundles[0].Name != "test-bundle" {
+			t.Fatalf("expected daemon-configured bundles, got %v", daemonBundles)
 		}
 
 		env := newNomadConfigSyncTestEnv(t)
@@ -1039,6 +1040,7 @@ func TestSyncAssetBundlesToNomad_TableDriven(t *testing.T) {
 
 			env.daemon.composeDir = composeDir
 			env.daemon.repos = []string{composeDir, env.configDir, mirrormereDir}
+			env.daemon.assetBundles = testAssetBundles(composeDir, env.configDir, mirrormereDir)
 			env.daemon.serviceConfigs = []ServiceConfigMapping{
 				{RelPath: "services/dashboard/dashboard.yaml", NomadVar: "nomad/jobs/dashboard", VarKey: "CONFIG_YAML"},
 				{RelPath: "services/haro/haro.yaml", NomadVar: "nomad/jobs/haro", VarKey: "CONFIG_YAML"},
@@ -1179,7 +1181,7 @@ func TestIsServiceConfigChangedInGit_TableDriven(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := isServiceConfigChangedInGit(tc.nomadVar, tc.diffGated, tc.checkPaths, tc.changedFiles)
+			got := isServiceConfigChangedInGit(tc.nomadVar, tc.diffGated, tc.checkPaths, tc.changedFiles, testAssetBundles("", "", ""))
 			if got != tc.wantResult {
 				t.Errorf("isServiceConfigChangedInGit(%s) = %v, want %v", tc.nomadVar, got, tc.wantResult)
 			}
@@ -1196,8 +1198,9 @@ func TestAppendServiceAssetHash_TableDriven(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(composeDir, "services", "dashboard", "static", "index.html"), []byte("<h1>Dash</h1>"), 0o644)
 
 	d := &SyncDaemon{
-		composeDir: composeDir,
-		repos:      []string{composeDir},
+		composeDir:   composeDir,
+		repos:        []string{composeDir},
+		assetBundles: testAssetBundles(composeDir, tmpDir, tmpDir),
 	}
 
 	tests := []struct {

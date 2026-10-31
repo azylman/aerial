@@ -377,11 +377,7 @@ func (d *SyncDaemon) pushNomadVarQuiet(ctx context.Context, cacheKey, nomadVar, 
 }
 
 func (d *SyncDaemon) computeBundleHash(bundle, configDir string) string {
-	mirrormereDir := ResolveRepoPath("mirrormere", d.repos)
-	if mirrormereDir == "" && d.composeDir != "" {
-		mirrormereDir = filepath.Join(filepath.Dir(d.composeDir), "mirrormere")
-	}
-	sources, excludes, err := ResolveAssetBundleSources(bundle, d.composeDir, configDir, mirrormereDir, d.GetAssetBundleConfigs(configDir))
+	sources, excludes, err := ResolveAssetBundleSources(bundle, d.GetAssetBundleConfigs(configDir))
 	if err != nil {
 		return ""
 	}
@@ -517,7 +513,7 @@ func (d *SyncDaemon) SyncHomepageConfigToNomad(ctx context.Context, configDir st
 	configHash := hex.EncodeToString(h.Sum(nil))
 
 	diffGated := len(syncCtx) > 0 && syncCtx[0].DiffGated
-	isChangedInGit := !diffGated || homepageInChangedList(syncCtx[0].ChangedFiles) || AssetBundleChangedInList("homepage", syncCtx[0].ChangedFiles)
+	isChangedInGit := !diffGated || homepageInChangedList(syncCtx[0].ChangedFiles) || AssetBundleChangedInList("homepage", syncCtx[0].ChangedFiles, d.GetAssetBundleConfigs(configDir))
 
 	varArgs := []string{"CONFIG_HASH=" + configHash}
 	if len(raw) > 0 {
@@ -545,25 +541,9 @@ type ServiceConfigMapping struct {
 	VarKey   string `yaml:"var_key"`
 }
 
-// DefaultManagedServiceConfigs specifies the default built-in MCP and auxiliary service configs
-// synchronized into Nomad variables when not overridden by services/hangar/hangar.yaml.
-var DefaultManagedServiceConfigs = []ServiceConfigMapping{
-	{RelPath: "services/haro/haro.yaml", NomadVar: "nomad/jobs/haro", VarKey: "CONFIG_YAML"},
-	{RelPath: "services/coven/coven.yaml", NomadVar: "nomad/jobs/coven", VarKey: "CONFIG_YAML"},
-	{RelPath: "services/prospera/prospera.yaml", NomadVar: "nomad/jobs/prospera", VarKey: "CONFIG_YAML"},
-	{RelPath: "services/mcp/github-mcp.yaml", NomadVar: "nomad/jobs/github-mcp", VarKey: "CONFIG_YAML"},
-	{RelPath: "services/mcp/nomad-mcp.yaml", NomadVar: "nomad/jobs/nomad-mcp", VarKey: "CONFIG_YAML"},
-	{RelPath: "services/mcp/discord-mcp.yaml", NomadVar: "nomad/jobs/discord-mcp", VarKey: "CONFIG_YAML"},
-	{RelPath: "services/mcp/kernel-mcp.yaml", NomadVar: "nomad/jobs/kernel-mcp", VarKey: "CONFIG_YAML"},
-	{RelPath: "services/mcp/infisical-mcp.yaml", NomadVar: "nomad/jobs/infisical-mcp", VarKey: "CONFIG_YAML"},
-	{RelPath: "services/synapse/synapse.yaml", NomadVar: "nomad/jobs/synapse", VarKey: "CONFIG_YAML"},
-	{RelPath: "services/victoriametrics/scrape.yml", NomadVar: "nomad/jobs/victoriametrics", VarKey: "CONFIG_YAML"},
-	{RelPath: "services/dashboard/dashboard.yaml", NomadVar: "nomad/jobs/dashboard", VarKey: "CONFIG_YAML"},
-}
-
 // GetServiceConfigMappings resolves the active service config mappings for a given configDir.
 // If configDir contains services/hangar/hangar.yaml with non-empty service_configs, it dynamically parses and returns them.
-// Otherwise, it falls back to daemon-configured serviceConfigs, or DefaultManagedServiceConfigs if none are configured.
+// Otherwise, it falls back to daemon-configured serviceConfigs, returning nil if neither is configured.
 func (d *SyncDaemon) GetServiceConfigMappings(configDir string) []ServiceConfigMapping {
 	if configDir != "" {
 		hangarCfgPath := filepath.Join(configDir, "services", "hangar", "hangar.yaml")
@@ -575,12 +555,12 @@ func (d *SyncDaemon) GetServiceConfigMappings(configDir string) []ServiceConfigM
 	if d != nil && len(d.serviceConfigs) > 0 {
 		return d.serviceConfigs
 	}
-	return DefaultManagedServiceConfigs
+	return nil
 }
 
 // GetAssetBundleConfigs resolves the active asset bundle configs for a given configDir.
 // If configDir contains services/hangar/hangar.yaml with non-empty asset_bundles, it dynamically parses and returns them.
-// Otherwise, it falls back to daemon-configured assetBundles, or DefaultAssetBundles if none are configured.
+// Otherwise, it falls back to daemon-configured assetBundles, returning nil if neither is configured.
 func (d *SyncDaemon) GetAssetBundleConfigs(configDir string) []AssetBundleConfig {
 	if configDir != "" {
 		hangarCfgPath := filepath.Join(configDir, "services", "hangar", "hangar.yaml")
@@ -592,15 +572,7 @@ func (d *SyncDaemon) GetAssetBundleConfigs(configDir string) []AssetBundleConfig
 	if d != nil && len(d.assetBundles) > 0 {
 		return d.assetBundles
 	}
-	var composeDir, mirrormereDir string
-	if d != nil {
-		composeDir = d.composeDir
-		mirrormereDir = ResolveRepoPath("mirrormere", d.repos)
-		if mirrormereDir == "" && d.composeDir != "" {
-			mirrormereDir = filepath.Join(filepath.Dir(d.composeDir), "mirrormere")
-		}
-	}
-	return DefaultAssetBundles(composeDir, configDir, mirrormereDir)
+	return nil
 }
 
 func anyFileInChangedList(targets []string, changedFiles []string) bool {
@@ -977,10 +949,8 @@ func isServiceConfigChangedInGit(nomadVar string, diffGated bool, checkPaths, ch
 		return true
 	}
 	var bundles []AssetBundleConfig
-	if len(configured) > 0 && len(configured[0]) > 0 {
+	if len(configured) > 0 {
 		bundles = configured[0]
-	} else {
-		bundles = DefaultAssetBundles("", "", "")
 	}
 	for _, b := range bundles {
 		if b.NomadVar == nomadVar {

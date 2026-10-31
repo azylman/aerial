@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -589,12 +588,7 @@ func (d *SyncDaemon) HandleArtifactBundle(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	mirrormereDir := ResolveRepoPath("mirrormere", d.repos)
-	if mirrormereDir == "" && d.composeDir != "" {
-		mirrormereDir = filepath.Join(filepath.Dir(d.composeDir), "mirrormere")
-	}
-
-	sources, excludeRelPaths, err := ResolveAssetBundleSources(bundle, d.composeDir, d.configDir, mirrormereDir, d.GetAssetBundleConfigs(d.configDir))
+	sources, excludeRelPaths, err := ResolveAssetBundleSources(bundle, d.GetAssetBundleConfigs(d.configDir))
 	if err != nil {
 		writeJSON(w, r, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
