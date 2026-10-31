@@ -519,25 +519,37 @@ func GetDueOneShotSchedules(ctx context.Context, database *sql.DB, now time.Time
 	return queryDueSchedules(ctx, database, baseQuery, now, scanOneShotSchedule)
 }
 
-func DeleteOneShotSchedule(ctx context.Context, database *sql.DB, id string) (bool, error) {
+func deleteByID(ctx context.Context, database *sql.DB, query, emptyErrMsg, errPrefix, id string) (bool, error) {
 	ctx, err := normCtxAndDB(ctx, database)
 	if err != nil {
 		return false, err
 	}
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return false, fmt.Errorf("schedule_id cannot be empty")
+		if emptyErrMsg != "" {
+			return false, fmt.Errorf("%s", emptyErrMsg)
+		}
+		return false, fmt.Errorf("id cannot be empty")
 	}
-	query := `DELETE FROM one_shot_schedules WHERE id = $1`
 	res, err := database.ExecContext(ctx, query, id)
 	if err != nil {
+		if errPrefix != "" {
+			return false, fmt.Errorf("%s: %w", errPrefix, err)
+		}
 		return false, err
 	}
 	rowsAffected, err := res.RowsAffected()
 	if err != nil {
+		if errPrefix != "" {
+			return false, fmt.Errorf("%s: failed to determine rows affected: %w", errPrefix, err)
+		}
 		return false, fmt.Errorf("failed to determine rows affected: %w", err)
 	}
 	return rowsAffected > 0, nil
+}
+
+func DeleteOneShotSchedule(ctx context.Context, database *sql.DB, id string) (bool, error) {
+	return deleteByID(ctx, database, "DELETE FROM one_shot_schedules WHERE id = $1", "schedule_id cannot be empty", "failed to delete one-shot schedule", id)
 }
 
 func CreateScheduleRun(ctx context.Context, database *sql.DB, r ScheduleRun) error {
@@ -860,24 +872,7 @@ func ClaimEventTriggers(ctx context.Context, database *sql.DB, source string, ta
 
 // DeleteEventTrigger removes an event trigger by id.
 func DeleteEventTrigger(ctx context.Context, database *sql.DB, id string) (bool, error) {
-	ctx, err := normCtxAndDB(ctx, database)
-	if err != nil {
-		return false, err
-	}
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return false, fmt.Errorf("id cannot be empty")
-	}
-	query := `DELETE FROM event_triggers WHERE id = $1`
-	res, err := database.ExecContext(ctx, query, id)
-	if err != nil {
-		return false, err
-	}
-	rowsAffected, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	return rowsAffected > 0, nil
+	return deleteByID(ctx, database, "DELETE FROM event_triggers WHERE id = $1", "id cannot be empty", "failed to delete event trigger", id)
 }
 
 func findEarliestNextRun(crons []CronSchedule, heartbeats []HeartbeatSchedule, oneshots []OneShotSchedule) *time.Time {
