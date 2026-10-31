@@ -80,6 +80,7 @@ type voiceTurnTestCase struct {
 }
 
 func setupVoiceTestPool(t *testing.T, tt *voiceTurnTestCase, cancelCaller context.CancelFunc, onRecordPrompt func(string)) (*WorkerPool, *runner.UnifiedProcessPool, bool) {
+	t.Helper()
 	if tt.poolNil {
 		return nil, nil, false
 	}
@@ -605,7 +606,7 @@ func TestSummarizeAndHistoryHelpers(t *testing.T) {
 			{ID: "123456789012345678", Content: "Aerial msg", Timestamp: now, Author: &discordgo.User{ID: "bot-user-123", Username: "aerial", Bot: true}},
 			{ID: "123456789012345682", Content: "Zero ts", Timestamp: time.Time{}, Author: &discordgo.User{ID: "user-789", Username: "Alice"}},
 		})
-		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}, nil
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}, nil
 	})
 	emptyStore := setupTestStore(t)
 
@@ -811,16 +812,16 @@ func TestStatusUpdater_GuardrailsAndRESTTransport(t *testing.T) {
 	s.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		u := req.URL.String()
 		switch {
-		case req.Method == "POST" && strings.Contains(u, "/messages"):
+		case req.Method == http.MethodPost && strings.Contains(u, "/messages"):
 			b, _ := json.Marshal(&discordgo.Message{ID: "msg-created-123"})
-			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}, nil
-		case req.Method == "PATCH":
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}, nil
+		case req.Method == http.MethodPatch:
 			b, _ := json.Marshal(&discordgo.Message{ID: "msg-edited-123"})
-			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}, nil
-		case req.Method == "DELETE":
-			return &http.Response{StatusCode: 204, Body: io.NopCloser(bytes.NewReader(nil))}, nil
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}, nil
+		case req.Method == http.MethodDelete:
+			return &http.Response{StatusCode: http.StatusNoContent, Body: io.NopCloser(bytes.NewReader(nil))}, nil
 		default:
-			return &http.Response{StatusCode: 400, Body: io.NopCloser(bytes.NewReader([]byte(`{"message":"bad request"}`)))}, nil
+			return &http.Response{StatusCode: http.StatusBadRequest, Body: io.NopCloser(bytes.NewReader([]byte(`{"message":"bad request"}`)))}, nil
 		}
 	})
 

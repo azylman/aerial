@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -523,7 +524,7 @@ func IsMessageNotFoundError(err error) bool {
 	}
 	var restErr *discordgo.RESTError
 	if errors.As(err, &restErr) {
-		if restErr.Response != nil && restErr.Response.StatusCode == 404 {
+		if restErr.Response != nil && restErr.Response.StatusCode == http.StatusNotFound {
 			return true
 		}
 		if restErr.Message != nil && restErr.Message.Code == 10008 {
@@ -556,7 +557,7 @@ func IsPermissionError(err error) bool {
 	}
 	var restErr *discordgo.RESTError
 	if errors.As(err, &restErr) {
-		if restErr.Response != nil && restErr.Response.StatusCode == 403 {
+		if restErr.Response != nil && restErr.Response.StatusCode == http.StatusForbidden {
 			return true
 		}
 		if restErr.Message != nil && (restErr.Message.Code == 50001 || restErr.Message.Code == 50013) {

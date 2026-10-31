@@ -539,7 +539,10 @@ func (s *GeminiAPISession) hydrateHistory() {
 		if trimmed == "" {
 			continue
 		}
-		var entry struct{ Type, Content string }
+		var entry struct {
+			Type    string `json:"type"`
+			Content string `json:"content"`
+		}
 		if err := json.Unmarshal([]byte(trimmed), &entry); err != nil || entry.Content == "" {
 			continue
 		}

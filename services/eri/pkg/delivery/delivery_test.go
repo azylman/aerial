@@ -575,7 +575,7 @@ func TestErrorClassifiers(t *testing.T) {
 
 func TestErrorClassifiers_RESTError(t *testing.T) {
 	// 404
-	err404 := &discordgo.RESTError{Response: &http.Response{StatusCode: 404}}
+	err404 := &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusNotFound}}
 	if !IsMessageNotFoundError(err404) {
 		t.Error("expected true for RESTError 404")
 	}
@@ -595,7 +595,7 @@ func TestErrorClassifiers_RESTError(t *testing.T) {
 		t.Error("expected true for RESTError 50084")
 	}
 	// 403
-	err403 := &discordgo.RESTError{Response: &http.Response{StatusCode: 403}}
+	err403 := &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusForbidden}}
 	if !IsPermissionError(err403) {
 		t.Error("expected true for RESTError 403")
 	}

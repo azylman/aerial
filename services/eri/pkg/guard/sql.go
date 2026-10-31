@@ -74,7 +74,7 @@ type livePgxConn struct {
 func (c *livePgxConn) PrepareAndExplain(ctx context.Context, sqlStr string) ([]SQLColumn, []byte, error) {
 	tx, err := c.conn.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {
-		return nil, nil, nil //nolint:nilerr
+		return nil, nil, nil
 	}
 	defer func() {
 		if err := tx.Rollback(ctx); err != nil {

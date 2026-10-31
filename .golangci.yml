@@ -1,34 +1,66 @@
 version: "2"
 linters:
   enable:
+    - asasalint
+    - asciicheck
+    - bidichk
     - bodyclose
     - containedctx
     - copyloopvar
     - cyclop
     - dupl
+    - dupword
+    - durationcheck
     - errcheck
     - errchkjson
     - errname
     - errorlint
+    - exptostd
     - fatcontext
     - funlen
+    - gocheckcompilerdirectives
+    - gochecksumtype
     - gocognit
     - gocritic
     - gocyclo
+    - goprintffuncname
     - govet
+    - iface
     - ineffassign
+    - iotamixing
+    - loggercheck
+    - maintidx
+    - makezero
+    - mirror
+    - misspell
+    - musttag
+    - nakedret
     - nestif
     - nilerr
+    - nilnesserr
     - nilnil
     - noctx
+    - nolintlint
+    - nosprintfhostport
     - predeclared
+    - protogetter
+    - reassign
+    - recvcheck
+    - rowserrcheck
+    - sloglint
+    - spancheck
     - sqlclosecheck
     - staticcheck
+    - testableexamples
+    - thelper
     - tparallel
     - unconvert
     - unparam
     - unused
+    - usestdlibvars
+    - usetesting
     - wastedassign
+    - whitespace
   settings:
     cyclop:
       max-complexity: 20
@@ -36,6 +68,8 @@ linters:
       skip-tests: true
     dupl:
       threshold: 100
+    dupword:
+      comments-only: true
     errcheck:
       check-type-assertions: true
       check-blank: true
@@ -70,6 +104,9 @@ linters:
     staticcheck:
       checks:
         - "SA*"
+    thelper:
+      tb:
+        name: false
   exclusions:
     generated: lax
     rules:
@@ -82,14 +119,12 @@ linters:
           - funlen
           - gocognit
           - gocyclo
-          - ineffassign
+          - maintidx
           - nestif
           - nilnil
           - noctx
           - staticcheck
           - unparam
-          - unused
-          - wastedassign
         path: _test\.go
       - linters:
           - containedctx

@@ -25,7 +25,7 @@ func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 
 func jsonHTTPResponse(v any) *http.Response {
 	b, _ := json.Marshal(v)
-	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}
 }
 
 func TestSanitizeHistoryContent(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -740,7 +741,7 @@ func buildPostgresDSN(lookup func(string) string) string {
 	if dbName == "" {
 		dbName = "aerial"
 	}
-	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable", dbUser, dbPass, dbHost, dbPort, dbName)
+	return fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=disable", dbUser, dbPass, net.JoinHostPort(dbHost, dbPort), dbName)
 }
 
 func overrideEnvStr(dst *string, lookup func(string) string, keys ...string) {

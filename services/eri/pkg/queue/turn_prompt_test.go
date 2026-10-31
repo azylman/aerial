@@ -39,7 +39,7 @@ func TestTurnExecution_GetRecentThreadMessages(t *testing.T) {
 	dgSuccess, _ := discordgo.New("Bot test-token")
 	dgSuccess.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		body, _ := json.Marshal(mockDiscordMsgs)
-		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(body))}, nil
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(body))}, nil
 	})
 	dgFail, _ := discordgo.New("Bot test")
 	dgFail.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) { return nil, errors.New("simulated error") })

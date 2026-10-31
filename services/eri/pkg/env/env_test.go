@@ -87,6 +87,7 @@ func newTestProvisioner(t *testing.T, aerialFiles, configFiles map[string]string
 }
 
 func writeSkillFixture(t *testing.T, baseDir, relPath, content string) string {
+	t.Helper()
 	return writeTestFile(t, filepath.Join(baseDir, relPath), content)
 }
 

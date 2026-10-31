@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -393,8 +392,7 @@ func TestRouter_HandleStatus(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.gitCommitEnv != "" {
-				os.Setenv("GIT_COMMIT", tc.gitCommitEnv)
-				defer os.Unsetenv("GIT_COMMIT")
+				t.Setenv("GIT_COMMIT", tc.gitCommitEnv)
 			}
 
 			router, _, transport, session := setupTestRouter("admin-123", tc.httpStatus)
@@ -445,11 +443,9 @@ func TestRouter_HandleStatus(t *testing.T) {
 				defer haroSrv.Close()
 				switch tc.envMode {
 				case "haro_env":
-					os.Setenv("HARO_URL", haroSrv.URL)
-					defer os.Unsetenv("HARO_URL")
+					t.Setenv("HARO_URL", haroSrv.URL)
 				case "coven_env":
-					os.Setenv("COVEN_URL", memSrv.URL)
-					defer os.Unsetenv("COVEN_URL")
+					t.Setenv("COVEN_URL", memSrv.URL)
 					router.deps.MemoryURL = ""
 					router.deps.HaroURL = haroSrv.URL
 				default:
