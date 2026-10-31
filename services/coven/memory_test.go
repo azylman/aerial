@@ -5102,7 +5102,7 @@ func makePairwiseSimilarVectors(n int, targetSim float64) [][]float32 {
 	s := float32(math.Sqrt(targetSim))
 	rem := float32(math.Sqrt(1.0 - targetSim))
 	vecs := make([][]float32, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		v := make([]float32, ExpectedEmbeddingDim)
 		v[0] = s
 		if i+1 < ExpectedEmbeddingDim {
@@ -5134,7 +5134,7 @@ func TestFindConsolidationCliques(t *testing.T) {
 	orthogonalVec[ExpectedEmbeddingDim-1] = 1.0 // Orthogonal to vecs[0..7]
 
 	vecsB := make([][]float32, 3)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		v := make([]float32, ExpectedEmbeddingDim)
 		v[10] = float32(math.Sqrt(0.78))
 		v[11+i] = float32(math.Sqrt(0.22))

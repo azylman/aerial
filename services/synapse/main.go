@@ -749,7 +749,7 @@ func isValidVanadisChunkID(id string) bool {
 	if len(id) < 1 || len(id) > 120 {
 		return false
 	}
-	for i := 0; i < len(id); i++ {
+	for i := range len(id) {
 		c := id[i]
 		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
 			return false
@@ -931,9 +931,9 @@ func (s *RouterServer) handleHangarDeployFailedOrRollback(ctx context.Context, e
 		actionDesc, fixDesc = "Deployment failed and rolled back", "deployment rollback failure"
 	}
 	dmMsg := fmt.Sprintf("💥 %s%s for %s. Following up...", prefix, actionDesc, evt.JobName)
-	banner := fmt.Sprintf("Deployment failed for %s", evt.JobName)
+	banner := "Deployment failed for " + evt.JobName
 	if evt.Event == "deploy_rollback" {
-		banner = fmt.Sprintf("Deployment failed and rolled back for %s", evt.JobName)
+		banner = "Deployment failed and rolled back for " + evt.JobName
 	}
 	if evt.PRNumber > 0 {
 		s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "deploy_failed", banner)

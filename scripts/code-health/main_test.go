@@ -14,7 +14,7 @@ import (
 func buildLargeGoSource(fileLines, funcLines int) string {
 	var sb strings.Builder
 	sb.WriteString("package sample\n\nfunc ForwardDecl()\n\nfunc BigFunc(x int) int {\n")
-	for i := 0; i < funcLines; i++ {
+	for range funcLines {
 		sb.WriteString("\tx++\n")
 	}
 	sb.WriteString("\treturn x\n}\n")

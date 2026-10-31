@@ -47,6 +47,7 @@ func (r *mockRow) Scan(dest ...any) error {
 
 type mockRows struct {
 	pgx.Rows
+
 	items            []VanadisChunk
 	builds           []VanadisBuild
 	idx              int
@@ -87,6 +88,7 @@ func (r *mockRows) Scan(dest ...any) error {
 
 type mockTx struct {
 	pgx.Tx
+
 	execFn                 func(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
 	queryFn                func(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	queryRowFn             func(ctx context.Context, sql string, args ...any) pgx.Row
@@ -724,6 +726,7 @@ func (m *mockRiverInserter) Insert(_ context.Context, args river.JobArgs, _ *riv
 
 type mockRiverLifecycle struct {
 	mockRiverInserter
+
 	startErr, stopErr error
 }
 
@@ -1514,6 +1517,7 @@ func TestClassifyAndSummarizeBuildEntry(t *testing.T) {
 
 type mockRiverJobRows struct {
 	pgx.Rows
+
 	rows [][]any
 	idx  int
 }

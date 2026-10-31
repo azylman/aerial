@@ -390,7 +390,7 @@ func applyReconciliationState(dep *DeploymentStatus, recon *ReconciliationStatus
 		dep.Progress = 55
 		failMsg := "Hangar reconciliation failed"
 		if recon.Error != "" {
-			failMsg = fmt.Sprintf("Hangar reconciliation failed: %s", recon.Error)
+			failMsg = "Hangar reconciliation failed: " + recon.Error
 		}
 		dep.CommitMsg = failMsg
 		if len(dep.Steps) < 5 {
@@ -420,7 +420,7 @@ func ingestHangarReconciliation(
 		shortReconSHA = "hangar"
 	}
 
-	entry := reg.getOrCreate(normReconSHA, fmt.Sprintf("dep-aerial-stack-%s", shortReconSHA))
+	entry := reg.getOrCreate(normReconSHA, "dep-aerial-stack-"+shortReconSHA)
 	dep := entry.dep
 
 	if dep.StartedAt.IsZero() && !recon.StartedAt.IsZero() {

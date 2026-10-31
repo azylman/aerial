@@ -122,7 +122,7 @@ func (c *Client) GenerateEmbedding(ctx context.Context, text string, isQuery boo
 	totalAttempts := maxRetries + 1
 	var lastErr error
 
-	for attempt := 0; attempt < totalAttempts; attempt++ {
+	for attempt := range totalAttempts {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}

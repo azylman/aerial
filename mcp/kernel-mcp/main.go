@@ -182,7 +182,7 @@ func (s *Server) HandleMCPStreamable(w http.ResponseWriter, r *http.Request) {
 			})
 
 		default:
-			s.writeRPCError(w, reqID, -32601, fmt.Sprintf("Method not found: %s", req.Method))
+			s.writeRPCError(w, reqID, -32601, "Method not found: "+req.Method)
 		}
 	})
 
@@ -223,7 +223,7 @@ func (s *Server) toolBrowserNavigate(ctx context.Context, argsRaw json.RawMessag
 	if err := s.client.Navigate(ctx, args.URL); err != nil {
 		return fmt.Sprintf("Navigation failed: %v", err), true
 	}
-	return fmt.Sprintf("Navigated to %s", args.URL), false
+	return "Navigated to " + args.URL, false
 }
 
 func (s *Server) toolBrowserEvaluate(ctx context.Context, argsRaw json.RawMessage) (string, bool) {
@@ -307,7 +307,7 @@ func (s *Server) toolBrowserClick(ctx context.Context, argsRaw json.RawMessage) 
 
 	var cr ClickResult
 	if err := json.Unmarshal(raw, &cr); err != nil || !cr.Found {
-		return fmt.Sprintf("Element not found for selector: %s", args.Selector), true
+		return "Element not found for selector: " + args.Selector, true
 	}
 
 	if cr.HasRect {
@@ -351,7 +351,7 @@ func (s *Server) toolBrowserType(ctx context.Context, argsRaw json.RawMessage) (
 
 	var fr FocusResult
 	if err := json.Unmarshal(raw, &fr); err != nil || !fr.Found {
-		return fmt.Sprintf("Element not found for selector: %s", args.Selector), true
+		return "Element not found for selector: " + args.Selector, true
 	}
 
 	if fr.HasRect {
@@ -451,7 +451,7 @@ func (s *Server) toolAmazonAddToCart(ctx context.Context, argsRaw json.RawMessag
 	}
 	asin := strings.TrimSpace(args.ASIN)
 	if !ValidateASIN(asin) {
-		return fmt.Sprintf("Invalid ASIN format: %s", asin), true
+		return "Invalid ASIN format: " + asin, true
 	}
 
 	productURL := "https://www.amazon.com/dp/" + asin
@@ -474,7 +474,7 @@ func (s *Server) toolAmazonAddToCart(ctx context.Context, argsRaw json.RawMessag
 		ProductTitle string `json:"productTitle"`
 	}
 	if err := json.Unmarshal(raw, &btnRes); err != nil || !btnRes.Found {
-		return fmt.Sprintf("Add to cart button not found for ASIN: %s", asin), true
+		return "Add to cart button not found for ASIN: " + asin, true
 	}
 
 	if btnRes.HasRect {
@@ -529,7 +529,7 @@ func (s *Server) executeTool(ctx context.Context, toolName string, argsRaw json.
 	case "amazon_add_to_cart":
 		return s.toolAmazonAddToCart(ctx, argsRaw)
 	default:
-		return fmt.Sprintf("Unknown tool: %s", toolName), true
+		return "Unknown tool: " + toolName, true
 	}
 }
 

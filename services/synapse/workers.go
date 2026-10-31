@@ -334,6 +334,7 @@ func (GitHubWebhookArgs) InsertOpts() river.InsertOpts { return defaultRiverInse
 // GitHubWebhookWorker processes GitHub webhook events asynchronously from River.
 type GitHubWebhookWorker struct {
 	river.WorkerDefaults[GitHubWebhookArgs]
+
 	server *RouterServer
 }
 
@@ -367,6 +368,7 @@ func (HangarWebhookArgs) InsertOpts() river.InsertOpts { return defaultRiverInse
 // HangarWebhookWorker processes Hangar deployment and sync webhook events from River.
 type HangarWebhookWorker struct {
 	river.WorkerDefaults[HangarWebhookArgs]
+
 	server *RouterServer
 }
 
@@ -403,6 +405,7 @@ func (NomadEventArgs) InsertOpts() river.InsertOpts { return defaultRiverInsertO
 // NomadEventWorker processes Nomad deployment and allocation events from River.
 type NomadEventWorker struct {
 	river.WorkerDefaults[NomadEventArgs]
+
 	server *RouterServer
 }
 
@@ -438,6 +441,7 @@ func (NomadCrashAlertArgs) InsertOpts() river.InsertOpts { return defaultRiverIn
 // NomadCrashAlertWorker processes unmanaged Nomad job crash alerts from River.
 type NomadCrashAlertWorker struct {
 	river.WorkerDefaults[NomadCrashAlertArgs]
+
 	server *RouterServer
 }
 
@@ -478,6 +482,7 @@ func (WidgetSyncArgs) InsertOpts() river.InsertOpts {
 // WidgetSyncWorker processes Discord PR and build status widget updates from River.
 type WidgetSyncWorker struct {
 	river.WorkerDefaults[WidgetSyncArgs]
+
 	server *RouterServer
 }
 
@@ -515,6 +520,7 @@ func (EventTriggerWebhookArgs) InsertOpts() river.InsertOpts {
 // EventTriggerWebhookWorker processes enqueued external event triggers asynchronously from River.
 type EventTriggerWebhookWorker struct {
 	river.WorkerDefaults[EventTriggerWebhookArgs]
+
 	server *RouterServer
 }
 
@@ -560,6 +566,7 @@ func (MergeConflictArgs) InsertOpts() river.InsertOpts {
 // MergeConflictWorker processes PR merge conflict remediation dispatches from River.
 type MergeConflictWorker struct {
 	river.WorkerDefaults[MergeConflictArgs]
+
 	server *RouterServer
 }
 
@@ -617,6 +624,7 @@ func (DiscordIngressArgs) InsertOpts() river.InsertOpts {
 // DiscordIngressWorker processes Discord message ingress events with single-consumer head-of-line backpressure.
 type DiscordIngressWorker struct {
 	river.WorkerDefaults[DiscordIngressArgs]
+
 	server     *RouterServer
 	retryDelay time.Duration
 	maxAge     time.Duration
@@ -693,6 +701,7 @@ func (DiscordInteractionArgs) InsertOpts() river.InsertOpts {
 // DiscordInteractionWorker processes Discord interactions asynchronously from River.
 type DiscordInteractionWorker struct {
 	river.WorkerDefaults[DiscordInteractionArgs]
+
 	server *RouterServer
 }
 
@@ -918,7 +927,7 @@ func (d *DefaultOutboundDispatcher) postBrainWithRetry(ctx context.Context, endp
 	endpoint := d.brainURL + endpointPath
 	var lastErr error
 
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	for attempt := range maxAttempts {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}

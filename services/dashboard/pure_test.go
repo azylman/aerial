@@ -1212,7 +1212,7 @@ func TestMergeClusterDeploymentsWithHangar_PureTableDriven(t *testing.T) {
 				}
 			}
 			if tt.wantRepeats > 0 {
-				for iter := 0; iter < tt.wantRepeats; iter++ {
+				for iter := range tt.wantRepeats {
 					iterDeps := MergeClusterDeploymentsWithHangar(tt.runs, tt.jobs, tt.gitSync, tt.containers, tt.currentCommit, ref)
 					if len(iterDeps) != len(tt.wantList) {
 						t.Fatalf("iteration %d: expected %d deployments, got %d", iter, len(tt.wantList), len(iterDeps))

@@ -85,7 +85,7 @@ func (d *SyncDaemon) doRegistryRequestWithAuth(ctx context.Context, method, targ
 
 	httpkit.CloseWarn(resp.Body, "unauthorized probe response body")
 
-	authHeader := resp.Header.Get("Www-Authenticate")
+	authHeader := resp.Header.Get("WWW-Authenticate")
 	token, err := d.fetchRegistryBearerToken(ctx, targetURL, registry, repository, authHeader)
 	if err != nil {
 		return nil, err

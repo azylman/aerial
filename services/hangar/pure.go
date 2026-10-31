@@ -119,7 +119,7 @@ func BuildGitEnv(pat string, environ []string) []string {
 	return append(env,
 		"GIT_CONFIG_COUNT=2",
 		"GIT_CONFIG_KEY_0=http.extraHeader",
-		"GIT_CONFIG_VALUE_0="+fmt.Sprintf("AUTHORIZATION: basic %s", cleanEncoded),
+		"GIT_CONFIG_VALUE_0=AUTHORIZATION: basic "+cleanEncoded,
 		"GIT_CONFIG_KEY_1=http.version",
 		"GIT_CONFIG_VALUE_1=HTTP/1.1",
 	)

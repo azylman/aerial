@@ -207,6 +207,7 @@ type VanadisChunk struct {
 // VanadisBuildEntry represents a summarized VanadisBuild including overall queue state and chunk aggregates.
 type VanadisBuildEntry struct {
 	VanadisBuild
+
 	QueueState      string         `json:"queue_state"`
 	TotalChunks     int            `json:"total_chunks"`
 	CompletedChunks int            `json:"completed_chunks"`
@@ -306,7 +307,7 @@ func isValidVanadisChunkID(id string) bool {
 	if len(id) < 1 || len(id) > 120 {
 		return false
 	}
-	for i := 0; i < len(id); i++ {
+	for i := range len(id) {
 		c := id[i]
 		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
 			return false
@@ -631,6 +632,7 @@ func formatSymbolGrepCommand(targetFiles, targetSymbols []string) string {
 // ExecuteChunkWorker processes Vanadis chunk execution jobs from River.
 type ExecuteChunkWorker struct {
 	river.WorkerDefaults[ExecuteChunkArgs]
+
 	server *VanadisServer
 }
 

@@ -77,7 +77,7 @@ func parsePGArrayContent(content string) ([]string, error) {
 	var cur strings.Builder
 	inQuotes, escaped, hasItem := false, false, false
 
-	for i := 0; i < len(content); i++ {
+	for i := range len(content) {
 		ch := content[i]
 		if escaped {
 			cur.WriteByte(ch)

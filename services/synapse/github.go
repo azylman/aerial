@@ -39,7 +39,7 @@ func (s *RouterServer) getGitHubJSON(ctx context.Context, path string, maxBytes 
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusForbidden {
-		remaining := resp.Header.Get("X-RateLimit-Remaining")
+		remaining := resp.Header.Get("X-Ratelimit-Remaining")
 		return fmt.Errorf("github api rate limit or forbidden (remaining: %s)", remaining)
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -103,7 +103,7 @@ func (s *RouterServer) updatePRBranch(ctx context.Context, repo string, prNumber
 	}
 	bodyLower := strings.ToLower(string(body))
 	if resp.StatusCode == http.StatusForbidden {
-		remaining := resp.Header.Get("X-RateLimit-Remaining")
+		remaining := resp.Header.Get("X-Ratelimit-Remaining")
 		return false, fmt.Errorf("github api rate limit or forbidden (remaining: %s)", remaining)
 	}
 	if resp.StatusCode == http.StatusConflict || (resp.StatusCode == http.StatusUnprocessableEntity && strings.Contains(bodyLower, "conflict")) {
@@ -492,12 +492,12 @@ func extractPRNumberFromCommitMessage(msg string) int {
 }
 
 func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
-	event := r.Header.Get("X-GitHub-Event")
+	event := r.Header.Get("X-Github-Event")
 	if strings.TrimSpace(event) == "" {
 		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "missing X-GitHub-Event header"})
 		return
 	}
-	delivery := r.Header.Get("X-GitHub-Delivery")
+	delivery := r.Header.Get("X-Github-Delivery")
 
 	body, ok := readWebhookBody(w, r, 5<<20)
 	if !ok {

@@ -23,7 +23,7 @@ func TestRepoLock_ThreadSafety(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	counter := 0
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

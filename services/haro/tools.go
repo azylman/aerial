@@ -259,7 +259,7 @@ type ListSchedulesOutput struct {
 }
 
 func FormatSchedulesSummary(out ListSchedulesOutput) string {
-	var lines []string
+	lines := make([]string, 0, len(out.Recurring)+len(out.OneShot)+len(out.Heartbeats))
 	for _, r := range out.Recurring {
 		lines = append(lines, fmt.Sprintf("[RECURRING] ID: %s | Title: %s | Cron: %s | Channel: %s | Effort: %s | Next: %s", r.ID, r.TitlePrefix, r.CronExpr, r.TargetID, r.Effort, r.NextRunAt.Format(time.RFC3339)))
 	}

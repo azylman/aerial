@@ -175,7 +175,7 @@ func SanitizePII(text string) string {
 	}
 	return cardPattern.ReplaceAllStringFunc(text, func(m string) string {
 		digits := 0
-		for i := 0; i < len(m); i++ {
+		for i := range len(m) {
 			if m[i] >= '0' && m[i] <= '9' {
 				digits++
 			}
@@ -214,7 +214,7 @@ func RewriteWSUrl(rawWS, host, port string) string {
 		if rawWS != "" && !strings.Contains(rawWS, "://") && strings.HasPrefix(rawWS, "/") {
 			return fmt.Sprintf("ws://%s%s", targetHost, rawWS)
 		}
-		return fmt.Sprintf("ws://%s", targetHost)
+		return "ws://" + targetHost
 	}
 	path := u.Path
 	if u.RawQuery != "" {

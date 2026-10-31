@@ -185,7 +185,7 @@ func (d *SyncDaemon) fetchAndFastForwardRepo(opCtx context.Context, repoPath str
 		outReset, errResetBytes, errReset := d.getGitExecutor()(opCtx, repoPath, "reset", "--hard", "FETCH_HEAD")
 		if errReset != nil {
 			combinedReset := string(append(outReset, errResetBytes...))
-			return fmt.Sprintf("reset failed: %s", SanitizeLog(combinedReset))
+			return "reset failed: " + SanitizeLog(combinedReset)
 		}
 
 		if _, cleanStderr, cleanErr := d.getGitExecutor()(opCtx, repoPath, "clean", "-fd"); cleanErr != nil {

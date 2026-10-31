@@ -261,7 +261,7 @@ func formatVanadisBuildCompletedPrompt(res *VanadisAdvancementResult) string {
 		fmt.Sprintf("Vanadis build %s completed (Tier %d, %d chunks merged).", res.BuildID, res.Tier, total),
 	}
 	if obj := strings.TrimSpace(res.Objective); obj != "" {
-		lines = append(lines, fmt.Sprintf("Objective: %s", obj))
+		lines = append(lines, "Objective: "+obj)
 	}
 	if total > 0 {
 		lines = append(lines, "", "Merged Chunks Ledger:")

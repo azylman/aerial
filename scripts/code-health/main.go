@@ -334,7 +334,7 @@ func forEachPackagePair[T any](sigs []T, pkgOf, relOf, nameOf func(T) string, fn
 		pkgSigs[pkg] = append(pkgSigs[pkg], s)
 	}
 
-	var pkgKeys []string
+	pkgKeys := make([]string, 0, len(pkgSigs))
 	for k := range pkgSigs {
 		pkgKeys = append(pkgKeys, k)
 	}
@@ -349,7 +349,7 @@ func forEachPackagePair[T any](sigs []T, pkgOf, relOf, nameOf func(T) string, fn
 			}
 			return nameOf(group[i]) < nameOf(group[j])
 		})
-		for i := 0; i < len(group); i++ {
+		for i := range group {
 			for j := i + 1; j < len(group); j++ {
 				fn(group[i], group[j])
 			}
@@ -437,7 +437,7 @@ func jaccardSimilarity(a, b map[string]struct{}) float64 {
 }
 
 func checkFuncMetrics(rel string, fns map[string]FuncMetrics, baseFns map[string]FuncMetrics) []string {
-	var names []string
+	names := make([]string, 0, len(fns))
 	for k := range fns {
 		names = append(names, k)
 	}

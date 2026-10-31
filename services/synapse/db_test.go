@@ -30,6 +30,7 @@ func (r mockVanadisPgxRow) Scan(dest ...any) error {
 
 type mockVanadisPgxRows struct {
 	pgx.Rows
+
 	items     []VanadisChunkSummary
 	intItems  []int
 	idx       int
@@ -89,6 +90,7 @@ func (r *mockVanadisPgxRows) Scan(dest ...any) error {
 
 type mockVanadisPgxTx struct {
 	pgx.Tx
+
 	queryRowFn func(ctx context.Context, sql string, args ...any) pgx.Row
 	execFn     func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 	queryFn    func(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
