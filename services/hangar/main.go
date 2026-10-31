@@ -228,6 +228,7 @@ type SyncDaemon struct {
 	lastPushedConfig   map[string]string
 
 	serviceConfigs []ServiceConfigMapping
+	assetBundles   []AssetBundleConfig
 }
 
 func (d *SyncDaemon) getNomadExecutor() NomadExecutor {
@@ -344,6 +345,15 @@ func (d *SyncDaemon) GetReconciliationStatus() ReconciliationStatus {
 	return ReconciliationStatus{State: "idle", Stage: "idle"}
 }
 
+// AssetBundleConfig defines the declarative mapping for a static or artifact asset bundle.
+type AssetBundleConfig struct {
+	Name       string            `yaml:"name"`
+	NomadVar   string            `yaml:"nomad_var,omitempty"`
+	TriggerJob string            `yaml:"trigger_job,omitempty"`
+	Excludes   []string          `yaml:"excludes,omitempty"`
+	Sources    map[string]string `yaml:"sources"`
+}
+
 // DaemonConfig holds configuration options for the GitSync daemon.
 type DaemonConfig struct {
 	Port              string
@@ -365,6 +375,7 @@ type DaemonConfig struct {
 	SynapseURL        string
 	DeployDispatcher  func(ctx context.Context, evt HangarDeployEvent) error
 	ServiceConfigs    []ServiceConfigMapping
+	AssetBundles      []AssetBundleConfig
 }
 
 // NewDaemon initializes a new SyncDaemon from config.
@@ -417,6 +428,7 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 		repoGitHubSlugs:      make(map[string]string),
 		lastPushedConfig:     make(map[string]string),
 		serviceConfigs:       cfg.ServiceConfigs,
+		assetBundles:         cfg.AssetBundles,
 	}
 }
 
@@ -582,7 +594,7 @@ func (d *SyncDaemon) HandleArtifactBundle(w http.ResponseWriter, r *http.Request
 		mirrormereDir = filepath.Join(filepath.Dir(d.composeDir), "mirrormere")
 	}
 
-	sources, excludeRelPaths, err := ResolveAssetBundleSources(bundle, d.composeDir, d.configDir, mirrormereDir)
+	sources, excludeRelPaths, err := ResolveAssetBundleSources(bundle, d.composeDir, d.configDir, mirrormereDir, d.GetAssetBundleConfigs(d.configDir))
 	if err != nil {
 		writeJSON(w, r, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
@@ -671,6 +683,7 @@ type HangarYAMLConfig struct {
 	SynapseURL     string                 `yaml:"synapse_url"`
 	Repos          []RepoConfig           `yaml:"repos"`
 	ServiceConfigs []ServiceConfigMapping `yaml:"service_configs"`
+	AssetBundles   []AssetBundleConfig    `yaml:"asset_bundles"`
 }
 
 // NewConfigFromLookup extracts DaemonConfig using a provided lookup function.
@@ -747,6 +760,11 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 		serviceConfigs = fileCfg.ServiceConfigs
 	}
 
+	var assetBundles []AssetBundleConfig
+	if len(fileCfg.AssetBundles) > 0 {
+		assetBundles = fileCfg.AssetBundles
+	}
+
 	return DaemonConfig{
 		Port:              port,
 		Repos:             repos,
@@ -763,6 +781,7 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 		NomadToken:        nomadToken,
 		SynapseURL:        synapseURL,
 		ServiceConfigs:    serviceConfigs,
+		AssetBundles:      assetBundles,
 	}
 }
 

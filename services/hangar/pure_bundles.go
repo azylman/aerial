@@ -288,22 +288,73 @@ func HasContainerBuildChanges(repoPath string, changedFiles []string) bool {
 	return len(AffectedWorkflowImages(repoPath, changedFiles)) > 0
 }
 
+// DefaultAssetBundles returns the default built-in asset bundle configurations.
+func DefaultAssetBundles(composeDir, configDir, mirrormereDir string) []AssetBundleConfig {
+	return []AssetBundleConfig{
+		{
+			Name:       "migrations",
+			TriggerJob: "nomad/jobs/db-migrate.nomad",
+			Sources: map[string]string{
+				".": filepath.Join(composeDir, "services/eri/pkg/db/migrations"),
+			},
+		},
+		{
+			Name:     "dashboard",
+			NomadVar: "nomad/jobs/dashboard",
+			Sources: map[string]string{
+				".": filepath.Join(composeDir, "services/dashboard/static"),
+			},
+		},
+		{
+			Name:     "docs",
+			NomadVar: "nomad/jobs/docs",
+			Sources: map[string]string{
+				"app":     filepath.Join(composeDir, "services/docs-service/app"),
+				"content": filepath.Join(configDir, "docs"),
+			},
+		},
+		{
+			Name:     "grafana",
+			NomadVar: "nomad/jobs/grafana",
+			Sources: map[string]string{
+				"system": filepath.Join(composeDir, "nomad/grafana/dashboards"),
+				"custom": filepath.Join(configDir, "services/grafana/dashboards"),
+			},
+		},
+		{
+			Name:     "homepage",
+			NomadVar: "nomad/jobs/homepage",
+			Excludes: []string{"core-homepage/test"},
+			Sources: map[string]string{
+				"core-homepage": filepath.Join(composeDir, "services/homepage"),
+				"user-homepage": filepath.Join(configDir, "homepage"),
+			},
+		},
+		{
+			Name:     "mirrormere",
+			NomadVar: "nomad/jobs/mirrormere-core",
+			Sources: map[string]string{
+				"web":     filepath.Join(mirrormereDir, "web"),
+				"widgets": filepath.Join(mirrormereDir, "widgets"),
+			},
+		},
+	}
+}
+
 // ResolveAssetBundleSources maps a bundle name ("migrations", "dashboard", "docs", "grafana", "homepage", "mirrormere")
 // to its prefix->sourceDir map and excluded relative paths.
-func ResolveAssetBundleSources(bundle, composeDir, configDir, mirrormereDir string) (map[string]string, []string, error) {
-	switch strings.Trim(strings.TrimSuffix(strings.Trim(filepath.ToSlash(bundle), "/"), ".tar.gz"), "/") {
-	case "migrations":
-		return map[string]string{".": filepath.Join(composeDir, "services/eri/pkg/db/migrations")}, nil, nil
-	case "dashboard":
-		return map[string]string{".": filepath.Join(composeDir, "services/dashboard/static")}, nil, nil
-	case "docs":
-		return map[string]string{"app": filepath.Join(composeDir, "services/docs-service/app"), "content": filepath.Join(configDir, "docs")}, nil, nil
-	case "grafana":
-		return map[string]string{"system": filepath.Join(composeDir, "nomad/grafana/dashboards"), "custom": filepath.Join(configDir, "services/grafana/dashboards")}, nil, nil
-	case "homepage":
-		return map[string]string{"core-homepage": filepath.Join(composeDir, "services/homepage"), "user-homepage": filepath.Join(configDir, "homepage")}, []string{"core-homepage/test"}, nil
-	case "mirrormere":
-		return map[string]string{"web": filepath.Join(mirrormereDir, "web"), "widgets": filepath.Join(mirrormereDir, "widgets")}, nil, nil
+func ResolveAssetBundleSources(bundle, composeDir, configDir, mirrormereDir string, configured ...[]AssetBundleConfig) (map[string]string, []string, error) {
+	b := strings.Trim(strings.TrimSuffix(strings.Trim(filepath.ToSlash(bundle), "/"), ".tar.gz"), "/")
+	var bundles []AssetBundleConfig
+	if len(configured) > 0 && len(configured[0]) > 0 {
+		bundles = configured[0]
+	} else {
+		bundles = DefaultAssetBundles(composeDir, configDir, mirrormereDir)
+	}
+	for _, cfg := range bundles {
+		if strings.EqualFold(cfg.Name, b) {
+			return cfg.Sources, cfg.Excludes, nil
+		}
 	}
 	return nil, nil, fmt.Errorf("unknown asset bundle: %s", bundle)
 }
@@ -417,33 +468,160 @@ func isJobMatch(clean, job string) bool {
 	return clean == "nomad/jobs/"+job+".nomad" || clean == "jobs/"+job+".nomad"
 }
 
-func isHomepageBundleFile(clean string) bool {
-	return isJobMatch(clean, "homepage") || clean == "services/homepage/homepage.yaml" || clean == "homepage" || strings.HasPrefix(clean, "homepage/") || (strings.HasPrefix(clean, "services/homepage/") && !strings.HasPrefix(clean, "services/homepage/test/"))
+func bundleJobMatches(bundle AssetBundleConfig, cleanF string) bool {
+	if bundle.TriggerJob != "" {
+		cleanTrigger := cleanChangedFilePath(bundle.TriggerJob)
+		triggerBase := strings.TrimSuffix(filepath.Base(cleanTrigger), ".nomad")
+		if cleanF == cleanTrigger || isJobMatch(cleanF, triggerBase) {
+			return true
+		}
+	}
+	if bundle.NomadVar != "" {
+		jobName := strings.TrimPrefix(bundle.NomadVar, "nomad/jobs/")
+		if isJobMatch(cleanF, jobName) {
+			return true
+		}
+	}
+	return false
 }
 
-func matchBundleFile(b, clean string) bool {
-	switch b {
-	case "dashboard":
-		return strings.HasPrefix(clean, "services/dashboard/static/") || isJobMatch(clean, "dashboard")
-	case "docs":
-		return strings.HasPrefix(clean, "services/docs-service/app/") || strings.HasPrefix(clean, "docs/") || clean == "docs" || isJobMatch(clean, "docs")
-	case "grafana":
-		return strings.HasPrefix(clean, "nomad/grafana/dashboards/") || strings.HasPrefix(clean, "services/grafana/dashboards/") || isJobMatch(clean, "grafana")
-	case "homepage":
-		return isHomepageBundleFile(clean)
-	case "mirrormere":
-		return isJobMatch(clean, "mirrormere-core") || clean == "web" || strings.HasPrefix(clean, "web/") || clean == "widgets" || strings.HasPrefix(clean, "widgets/")
-	case "migrations":
-		return strings.HasPrefix(clean, "services/eri/pkg/db/migrations/") || isJobMatch(clean, "db-migrate")
+func isPathExcluded(cleanF, rel, arcPath string, excludes []string) bool {
+	for _, excl := range excludes {
+		c := strings.Trim(filepath.ToSlash(excl), "/")
+		if c != "" && (arcPath == c || strings.HasPrefix(arcPath, c+"/") || rel == c || strings.HasPrefix(rel, c+"/") || cleanF == c || strings.HasPrefix(cleanF, c+"/")) {
+			return true
+		}
+	}
+	return false
+}
+
+func computeArcPath(prefixKey, rel string) string {
+	prefix := strings.Trim(filepath.ToSlash(prefixKey), "/")
+	if prefix == "." {
+		prefix = ""
+	}
+	arcPath := filepath.ToSlash(rel)
+	if prefix != "" {
+		if rel == "" || rel == "." {
+			return prefix
+		}
+		return prefix + "/" + arcPath
+	}
+	return arcPath
+}
+
+func checkFileMatchesSources(absFile, cleanF string, bundle AssetBundleConfig) bool {
+	for prefixKey, srcDir := range bundle.Sources {
+		cleanSrc := filepath.Clean(srcDir)
+		var rel string
+		var isUnder bool
+		if filepath.IsAbs(cleanSrc) {
+			relToSrc, err := filepath.Rel(cleanSrc, absFile)
+			if err == nil && !strings.HasPrefix(relToSrc, "..") {
+				rel = relToSrc
+				isUnder = true
+			}
+		} else {
+			cleanSrcSlash := cleanChangedFilePath(cleanSrc)
+			if cleanF == cleanSrcSlash || strings.HasPrefix(cleanF, cleanSrcSlash+"/") {
+				rel = strings.TrimPrefix(strings.TrimPrefix(cleanF, cleanSrcSlash), "/")
+				isUnder = true
+			}
+		}
+		if !isUnder {
+			continue
+		}
+		arcPath := computeArcPath(prefixKey, rel)
+		if !isPathExcluded(cleanF, rel, arcPath, bundle.Excludes) {
+			return true
+		}
+	}
+	return false
+}
+
+// AssetBundleMatchesRepoChanges checks if a git push in repoPath affects an AssetBundleConfig.
+func AssetBundleMatchesRepoChanges(bundle AssetBundleConfig, repoPath string, changedFiles []string) bool {
+	cleanRepo := filepath.Clean(repoPath)
+	for _, f := range changedFiles {
+		cleanF := cleanChangedFilePath(f)
+		if cleanF == "" || cleanF == "." {
+			continue
+		}
+		if bundleJobMatches(bundle, cleanF) {
+			return true
+		}
+		absFile := filepath.Clean(filepath.Join(cleanRepo, filepath.FromSlash(cleanF)))
+		if checkFileMatchesSources(absFile, cleanF, bundle) {
+			return true
+		}
 	}
 	return false
 }
 
 // AssetBundleChangedInList evaluates whether any changed file affects the specified asset bundle.
-func AssetBundleChangedInList(bundle string, changedFiles []string) bool {
+func AssetBundleChangedInList(bundle string, changedFiles []string, configured ...[]AssetBundleConfig) bool {
 	b := strings.Trim(strings.TrimSuffix(strings.ToLower(strings.TrimSpace(bundle)), ".tar.gz"), "/")
+	var bundles []AssetBundleConfig
+	if len(configured) > 0 && len(configured[0]) > 0 {
+		bundles = configured[0]
+	} else {
+		bundles = DefaultAssetBundles("", "", "")
+	}
+	for _, cfg := range bundles {
+		if strings.EqualFold(cfg.Name, b) {
+			return matchAssetBundleFiles(cfg, changedFiles)
+		}
+	}
+	return false
+}
+
+func checkRelMatchesSources(cleanF string, bundle AssetBundleConfig) bool {
+	for prefixKey, srcDir := range bundle.Sources {
+		var rel string
+		var isUnder bool
+		if filepath.IsAbs(srcDir) {
+			cleanSrc := filepath.ToSlash(filepath.Clean(srcDir))
+			parts := strings.Split(cleanSrc, "/")
+			for i := 1; i < len(parts); i++ {
+				candidate := strings.Join(parts[i:], "/")
+				if cleanF == candidate || strings.HasPrefix(cleanF, candidate+"/") {
+					rel = strings.TrimPrefix(strings.TrimPrefix(cleanF, candidate), "/")
+					isUnder = true
+					break
+				}
+			}
+		} else {
+			cleanSrc := cleanChangedFilePath(srcDir)
+			cleanSrcRel := strings.TrimPrefix(cleanSrc, "./")
+			if cleanSrcRel == "." {
+				cleanSrcRel = ""
+			}
+			if cleanSrcRel != "" && (cleanF == cleanSrcRel || strings.HasPrefix(cleanF, cleanSrcRel+"/")) {
+				rel = strings.TrimPrefix(strings.TrimPrefix(cleanF, cleanSrcRel), "/")
+				isUnder = true
+			}
+		}
+		if !isUnder {
+			continue
+		}
+		arcPath := computeArcPath(prefixKey, rel)
+		if !isPathExcluded(cleanF, rel, arcPath, bundle.Excludes) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchAssetBundleFiles(bundle AssetBundleConfig, changedFiles []string) bool {
 	for _, f := range changedFiles {
-		if matchBundleFile(b, strings.TrimPrefix(filepath.ToSlash(filepath.Clean(strings.TrimSpace(f))), "/")) {
+		cleanF := cleanChangedFilePath(f)
+		if cleanF == "" || cleanF == "." {
+			continue
+		}
+		if bundleJobMatches(bundle, cleanF) {
+			return true
+		}
+		if checkRelMatchesSources(cleanF, bundle) {
 			return true
 		}
 	}
@@ -634,8 +812,44 @@ func SortMatchedJobsHangarLast(matches []MatchedNomadJob) {
 	})
 }
 
+func resolveAerialConfigExpectedJobs(changedFiles []string, serviceConfigs []ServiceConfigMapping, add func(string)) {
+	if fileInChangedList("config.yaml", changedFiles) {
+		add("eri")
+	}
+	if homepageInChangedList(changedFiles) {
+		add("homepage")
+	}
+	for _, m := range serviceConfigs {
+		if fileInChangedList(m.RelPath, changedFiles) {
+			add(strings.TrimPrefix(strings.TrimSpace(m.NomadVar), "nomad/jobs/"))
+		}
+	}
+}
+
+func resolveContainerWorkflowExpectedJobs(repoPath string, changedFiles, candidateRepos []string, add func(string)) {
+	affectedImages := AffectedWorkflowImages(repoPath, changedFiles)
+	if len(affectedImages) == 0 {
+		return
+	}
+	var dirs []string
+	for _, r := range append([]string{repoPath}, candidateRepos...) {
+		dirs = append(dirs, filepath.Join(r, "jobs"), filepath.Join(r, "nomad", "jobs"))
+	}
+	walkNomadJobFiles(dirs, func(dir, jobPath, jobName, content string) bool {
+		for _, img := range ExtractNomadJobImages(content) {
+			for _, affected := range affectedImages {
+				if ImageMatches(img, affected) {
+					add(jobName)
+					return true
+				}
+			}
+		}
+		return true
+	})
+}
+
 // ResolveExpectedDeployJobs computes the deduplicated, deterministically ordered list of Nomad jobs
-// expected to deploy for a git push across all 4 triggers (.nomad specs, DB migrations,
+// expected to deploy for a git push across all 4 triggers (.nomad specs, TriggerJob asset bundles,
 // aerial-config Nomad variable mappings, and container build changes).
 func ResolveExpectedDeployJobs(
 	repoPath string,
@@ -643,10 +857,26 @@ func ResolveExpectedDeployJobs(
 	nomadChanges []NomadFileChange,
 	serviceConfigs []ServiceConfigMapping,
 	candidateRepos []string,
+	assetBundles ...[]AssetBundleConfig,
 ) []string {
 	cleanRepo := filepath.ToSlash(strings.ToLower(filepath.Clean(repoPath)))
-	isAerialCore := strings.HasSuffix(cleanRepo, "/aerial") || cleanRepo == "aerial"
-	isAerialConfig := strings.Contains(cleanRepo, "aerial-config")
+
+	var bundles []AssetBundleConfig
+	if len(assetBundles) > 0 && len(assetBundles[0]) > 0 {
+		bundles = assetBundles[0]
+	} else {
+		bundles = DefaultAssetBundles(repoPath, repoPath, repoPath)
+	}
+
+	var configDir string
+	for _, b := range bundles {
+		if b.Name == "docs" {
+			if contentDir, ok := b.Sources["content"]; ok {
+				configDir = filepath.Dir(filepath.Clean(contentDir))
+			}
+		}
+	}
+	isAerialConfig := strings.Contains(cleanRepo, "aerial-config") || (configDir != "" && filepath.Clean(repoPath) == filepath.Clean(configDir))
 
 	seen := make(map[string]struct{})
 	var jobs []string
@@ -668,45 +898,21 @@ func ResolveExpectedDeployJobs(
 		}
 	}
 
-	// 2. Database migration changes in aerial core
-	if isAerialCore && HasMigrationChanges(changedFiles) {
-		add("db-migrate")
+	// 2. TriggerJob asset bundles (e.g. migrations -> db-migrate)
+	for _, bundle := range bundles {
+		if bundle.TriggerJob != "" && AssetBundleMatchesRepoChanges(bundle, repoPath, changedFiles) {
+			jobName := strings.TrimSuffix(filepath.Base(bundle.TriggerJob), ".nomad")
+			add(jobName)
+		}
 	}
 
 	// 3. aerial-config Nomad variable mappings
 	if isAerialConfig {
-		if fileInChangedList("config.yaml", changedFiles) {
-			add("eri")
-		}
-		if homepageInChangedList(changedFiles) {
-			add("homepage")
-		}
-		for _, m := range serviceConfigs {
-			if fileInChangedList(m.RelPath, changedFiles) {
-				add(strings.TrimPrefix(strings.TrimSpace(m.NomadVar), "nomad/jobs/"))
-			}
-		}
+		resolveAerialConfigExpectedJobs(changedFiles, serviceConfigs, add)
 	}
 
 	// 4. Container build changes across repositories (aerial, aerial-sidecars, mirrormere)
-	affectedImages := AffectedWorkflowImages(repoPath, changedFiles)
-	if len(affectedImages) > 0 {
-		var dirs []string
-		for _, r := range append([]string{repoPath}, candidateRepos...) {
-			dirs = append(dirs, filepath.Join(r, "jobs"), filepath.Join(r, "nomad", "jobs"))
-		}
-		walkNomadJobFiles(dirs, func(dir, jobPath, jobName, content string) bool {
-			for _, img := range ExtractNomadJobImages(content) {
-				for _, affected := range affectedImages {
-					if ImageMatches(img, affected) {
-						add(jobName)
-						return true
-					}
-				}
-			}
-			return true
-		})
-	}
+	resolveContainerWorkflowExpectedJobs(repoPath, changedFiles, candidateRepos, add)
 
 	if len(jobs) == 0 {
 		return nil

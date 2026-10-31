@@ -208,7 +208,12 @@ repos:
 service_configs:
   - rel_path: "services/voice/voice.yaml"
     nomad_var: "nomad/jobs/voice"
-    var_key: "CONFIG_YAML"`
+    var_key: "CONFIG_YAML"
+asset_bundles:
+  - name: "custom-bundle"
+    nomad_var: "nomad/jobs/custom"
+    sources:
+      app: "/custom/app"`
 
 	reposYAML := `port: "8087"
 sync_interval: "45s"
@@ -238,6 +243,7 @@ synapse_url: "http://127.0.0.1:4020"`
 		wantExtraSecretsLen      int
 		checkExtraSecrets        bool
 		wantServiceConfigRelPath string
+		wantAssetBundleName      string
 	}{
 		{
 			name:        "structured repos and daemon endpoints in YAML",
@@ -255,6 +261,7 @@ synapse_url: "http://127.0.0.1:4020"`
 			wantNomadAddr:            "http://nomad.test:4646",
 			wantSynapseURL:           "http://synapse.test:4020",
 			wantServiceConfigRelPath: "services/voice/voice.yaml",
+			wantAssetBundleName:      "custom-bundle",
 		},
 		{
 			name: "secret env lookups with GITHUB_PAT, NOMAD_TOKEN, DISCORD tokens, and extraSecrets",
@@ -407,6 +414,11 @@ synapse_url: "http://127.0.0.1:4020"`
 			if tt.wantServiceConfigRelPath != "" {
 				if len(cfg.ServiceConfigs) != 1 || cfg.ServiceConfigs[0].RelPath != tt.wantServiceConfigRelPath {
 					t.Errorf("ServiceConfigs = %v, want RelPath %q", cfg.ServiceConfigs, tt.wantServiceConfigRelPath)
+				}
+			}
+			if tt.wantAssetBundleName != "" {
+				if len(cfg.AssetBundles) != 1 || cfg.AssetBundles[0].Name != tt.wantAssetBundleName {
+					t.Errorf("AssetBundles = %v, want Name %q", cfg.AssetBundles, tt.wantAssetBundleName)
 				}
 			}
 		})
