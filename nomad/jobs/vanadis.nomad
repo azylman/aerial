@@ -56,7 +56,7 @@ job "vanadis" {
 
       env {
         CONFIG_PATH   = "/local/vanadis.yaml"
-        BRAIN_URL     = "http://eri.aerial"
+        ERI_URL       = "http://eri.aerial"
         PORT          = "4025"
       }
 

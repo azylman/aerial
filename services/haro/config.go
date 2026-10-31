@@ -36,6 +36,7 @@ type Config struct {
 	Timezone          string   `yaml:"timezone"`
 	Port              string   `yaml:"port"`
 	BrainURL          string   `yaml:"brain_url"`
+	EriURL            string   `yaml:"eri_url"`
 	VanadisURL        string   `yaml:"vanadis_url"`
 	ExtraEventSources []string `yaml:"extra_event_sources"`
 }
@@ -45,6 +46,7 @@ type SchedulerYAMLConfig struct {
 	Port              string   `yaml:"port"`
 	Timezone          string   `yaml:"timezone"`
 	BrainURL          string   `yaml:"brain_url"`
+	EriURL            string   `yaml:"eri_url"`
 	VanadisURL        string   `yaml:"vanadis_url"`
 	ExtraEventSources []string `yaml:"extra_event_sources"`
 }
@@ -85,18 +87,27 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		return nil, fmt.Errorf("config: database connection string is required")
 	}
 
-	brainURL := os.Getenv("BRAIN_INTERNAL_URL")
-	if brainURL == "" {
-		brainURL = os.Getenv("BRAIN_URL")
+	eriURL := os.Getenv("ERI_URL")
+	if eriURL == "" {
+		eriURL = os.Getenv("ERI_INTERNAL_URL")
 	}
-	if brainURL == "" {
-		brainURL = ycfg.BrainURL
+	if eriURL == "" {
+		eriURL = os.Getenv("BRAIN_INTERNAL_URL")
 	}
-	brainURL = strings.TrimSpace(brainURL)
-	if brainURL == "" {
-		brainURL = "http://eri.aerial"
+	if eriURL == "" {
+		eriURL = os.Getenv("BRAIN_URL")
 	}
-	brainURL = strings.TrimRight(brainURL, "/")
+	if eriURL == "" {
+		eriURL = ycfg.EriURL
+	}
+	if eriURL == "" {
+		eriURL = ycfg.BrainURL
+	}
+	eriURL = strings.TrimSpace(eriURL)
+	if eriURL == "" {
+		eriURL = "http://eri.aerial"
+	}
+	eriURL = strings.TrimRight(eriURL, "/")
 
 	vanadisURL := os.Getenv("VANADIS_URL")
 	if vanadisURL == "" {
@@ -123,7 +134,8 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		DatabaseURL:       cleanDB,
 		Timezone:          tz,
 		Port:              port,
-		BrainURL:          brainURL,
+		BrainURL:          eriURL,
+		EriURL:            eriURL,
 		VanadisURL:        vanadisURL,
 		ExtraEventSources: extraSources,
 	}, nil

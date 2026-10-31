@@ -104,7 +104,7 @@ job "eri" {
       env {
         PORT                = "8088"
         AERIAL_HANGAR_URL   = "http://hangar.aerial/sync"
-        AERIAL_BRAIN_URL    = "http://eri.aerial"
+        ERI_URL             = "http://eri.aerial"
         GIT_TERMINAL_PROMPT = "0"
         GOCACHE             = "/data/cache/go-build"
         GOPATH              = "/data/cache/go"
@@ -155,36 +155,11 @@ EOH
 {{- with nomadVar "nomad/jobs/eri" -}}
 {{- if .CONFIG_YAML -}}{{- .CONFIG_YAML -}}{{- end -}}
 {{- end -}}
-{{- else if nomadVarExists "nomad/jobs/brain" -}}
-{{- with nomadVar "nomad/jobs/brain" -}}
-{{- if .CONFIG_YAML -}}{{- .CONFIG_YAML -}}{{- end -}}
-{{- end -}}
 {{- end -}}
 EOH
         destination   = "local/config.yaml"
         change_mode   = "signal"
         change_signal = "SIGHUP"
-      }
-
-      service {
-        name     = "brain"
-        port     = "http"
-        provider = "nomad"
-
-        check {
-          name     = "brain-health"
-          type     = "http"
-          port     = "http"
-          path     = "/health"
-          interval = "15s"
-          timeout  = "5s"
-
-          check_restart {
-            limit           = 3
-            grace           = "60s"
-            ignore_warnings = false
-          }
-        }
       }
 
       service {

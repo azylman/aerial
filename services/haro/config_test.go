@@ -89,13 +89,17 @@ func TestLoadConfigFile(t *testing.T) {
 func TestLoadConfig_BrainURLResolution(t *testing.T) {
 	tmpDir := t.TempDir()
 	pathWithBrain := filepath.Join(tmpDir, "with_brain.yaml")
+	pathWithEri := filepath.Join(tmpDir, "with_eri.yaml")
 	pathWithoutBrain := filepath.Join(tmpDir, "without_brain.yaml")
 	_ = os.WriteFile(pathWithBrain, []byte("port: '4005'\ntimezone: 'UTC'\nbrain_url: 'http://yaml.brain:8080/'\n"), 0o644)
+	_ = os.WriteFile(pathWithEri, []byte("port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8088/'\n"), 0o644)
 	_ = os.WriteFile(pathWithoutBrain, []byte("port: '4005'\ntimezone: 'UTC'\n"), 0o644)
 
 	tests := []struct {
 		name             string
 		path             string
+		envEri           string
+		envEriInternal   string
 		envBrainInternal string
 		envBrain         string
 		envDB            string
@@ -103,7 +107,26 @@ func TestLoadConfig_BrainURLResolution(t *testing.T) {
 		wantBrainURL     string
 	}{
 		{
-			name:             "BRAIN_INTERNAL_URL takes precedence",
+			name:             "ERI_URL takes top precedence",
+			path:             pathWithBrain,
+			envEri:           "http://eri.aerial:9001/",
+			envEriInternal:   "http://eri-internal.aerial:9000/",
+			envBrainInternal: "http://internal.aerial:9000/",
+			envBrain:         "http://brain.aerial:8000/",
+			envDB:            "postgres://localhost/db",
+			wantBrainURL:     "http://eri.aerial:9001",
+		},
+		{
+			name:             "ERI_INTERNAL_URL takes precedence over BRAIN_INTERNAL_URL",
+			path:             pathWithBrain,
+			envEriInternal:   "http://eri-internal.aerial:9000/",
+			envBrainInternal: "http://internal.aerial:9000/",
+			envBrain:         "http://brain.aerial:8000/",
+			envDB:            "postgres://localhost/db",
+			wantBrainURL:     "http://eri-internal.aerial:9000",
+		},
+		{
+			name:             "BRAIN_INTERNAL_URL takes precedence over BRAIN_URL",
 			path:             pathWithBrain,
 			envBrainInternal: "http://internal.aerial:9000/",
 			envBrain:         "http://brain.aerial:8000/",
@@ -117,6 +140,12 @@ func TestLoadConfig_BrainURLResolution(t *testing.T) {
 			envBrain:         "http://brain.aerial:8000/",
 			envDB:            "postgres://localhost/db",
 			wantBrainURL:     "http://brain.aerial:8000",
+		},
+		{
+			name:         "yaml eri_url used when env empty",
+			path:         pathWithEri,
+			envDB:        "postgres://localhost/db",
+			wantBrainURL: "http://yaml.eri:8088",
 		},
 		{
 			name:             "yaml brain_url used when env empty",
@@ -146,6 +175,8 @@ func TestLoadConfig_BrainURLResolution(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("ERI_URL", tc.envEri)
+			t.Setenv("ERI_INTERNAL_URL", tc.envEriInternal)
 			t.Setenv("BRAIN_INTERNAL_URL", tc.envBrainInternal)
 			t.Setenv("BRAIN_URL", tc.envBrain)
 			t.Setenv("DATABASE_URL", tc.envDB)
@@ -154,8 +185,13 @@ func TestLoadConfig_BrainURLResolution(t *testing.T) {
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("LoadConfig() err = %v, wantErr = %v", err, tc.wantErr)
 			}
-			if !tc.wantErr && cfg.BrainURL != tc.wantBrainURL {
-				t.Errorf("cfg.BrainURL = %q, want %q", cfg.BrainURL, tc.wantBrainURL)
+			if !tc.wantErr {
+				if cfg.BrainURL != tc.wantBrainURL {
+					t.Errorf("cfg.BrainURL = %q, want %q", cfg.BrainURL, tc.wantBrainURL)
+				}
+				if cfg.EriURL != tc.wantBrainURL {
+					t.Errorf("cfg.EriURL = %q, want %q", cfg.EriURL, tc.wantBrainURL)
+				}
 			}
 		})
 	}

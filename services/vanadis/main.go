@@ -51,6 +51,7 @@ type Config struct {
 	Port        string
 	PostgresURL string
 	BrainURL    string
+	EriURL      string
 	SynapseURL  string
 }
 
@@ -59,6 +60,7 @@ type VanadisYAMLConfig struct {
 	Port                        string `yaml:"port"`
 	PostgresURL                 string `yaml:"postgres_url"`
 	BrainURL                    string `yaml:"brain_url"`
+	EriURL                      string `yaml:"eri_url"`
 	SynapseURL                  string `yaml:"synapse_url"`
 	DeprecatedWebhooksRouterURL string `yaml:"webhooks_router_url,omitempty"`
 }
@@ -120,7 +122,8 @@ func LoadConfig(configPath string) Config {
 	return Config{
 		Port:        firstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4025"),
 		PostgresURL: pgURL,
-		BrainURL:    strings.TrimRight(firstNonEmpty(os.Getenv("BRAIN_INTERNAL_URL"), os.Getenv("BRAIN_URL"), fileCfg.BrainURL, "http://127.0.0.1:8088"), "/"),
+		BrainURL:    strings.TrimRight(firstNonEmpty(os.Getenv("ERI_URL"), os.Getenv("ERI_INTERNAL_URL"), os.Getenv("BRAIN_INTERNAL_URL"), os.Getenv("BRAIN_URL"), fileCfg.EriURL, fileCfg.BrainURL, "http://127.0.0.1:8088"), "/"),
+		EriURL:      strings.TrimRight(firstNonEmpty(os.Getenv("ERI_URL"), os.Getenv("ERI_INTERNAL_URL"), os.Getenv("BRAIN_INTERNAL_URL"), os.Getenv("BRAIN_URL"), fileCfg.EriURL, fileCfg.BrainURL, "http://127.0.0.1:8088"), "/"),
 		SynapseURL:  strings.TrimRight(firstNonEmpty(os.Getenv("SYNAPSE_URL"), os.Getenv("WEBHOOKS_ROUTER_URL"), fileCfg.SynapseURL, fileCfg.DeprecatedWebhooksRouterURL, "http://synapse.aerial"), "/"),
 	}
 }

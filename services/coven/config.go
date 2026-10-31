@@ -72,7 +72,9 @@ type Config struct {
 	Port               string       `yaml:"port"`
 	DatabaseURL        string       `yaml:"database_url"`
 	BrainURL           string       `yaml:"brain_url"`
+	EriURL             string       `yaml:"eri_url"`
 	BrainLLMURL        string       `yaml:"brain_llm_url"`
+	EriLLMURL          string       `yaml:"eri_llm_url"`
 	Ollama             OllamaConfig `yaml:"ollama"`
 	CustomSkillsDir    string       `yaml:"custom_skills_dir"`
 	RulesDir           string       `yaml:"rules_dir"`
@@ -80,6 +82,7 @@ type Config struct {
 	ConfigRepoOwner    string       `yaml:"config_repo_owner"`
 	ConfigRepoName     string       `yaml:"config_repo_name"`
 	BrainPRRegisterURL string       `yaml:"brain_pr_register_url"`
+	PRRegisterURL      string       `yaml:"pr_register_url"`
 	SystemChannelID    string       `yaml:"system_channel_id"`
 }
 
@@ -88,7 +91,9 @@ type MemoryYAMLConfig struct {
 	Port               string       `yaml:"port"`
 	DatabaseURL        string       `yaml:"database_url"`
 	BrainURL           string       `yaml:"brain_url"`
+	EriURL             string       `yaml:"eri_url"`
 	BrainLLMURL        string       `yaml:"brain_llm_url"`
+	EriLLMURL          string       `yaml:"eri_llm_url"`
 	Ollama             OllamaConfig `yaml:"ollama"`
 	CustomSkillsDir    string       `yaml:"custom_skills_dir"`
 	RulesDir           string       `yaml:"rules_dir"`
@@ -96,6 +101,8 @@ type MemoryYAMLConfig struct {
 	ConfigRepoOwner    string       `yaml:"config_repo_owner"`
 	ConfigRepoName     string       `yaml:"config_repo_name"`
 	BrainPRRegisterURL string       `yaml:"brain_pr_register_url"`
+	PRRegisterURL      string       `yaml:"pr_register_url"`
+	EriPRRegisterURL   string       `yaml:"eri_pr_register_url"`
 	SystemChannelID    string       `yaml:"system_channel_id"`
 }
 
@@ -135,16 +142,16 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 	if port == "" {
 		return nil, fmt.Errorf("config: port is required in %s", cleanPath)
 	}
-	brainURL := strings.TrimSpace(ycfg.BrainURL)
-	if brainURL == "" {
+	eriURL := resolveFirstNonEmpty(os.Getenv("ERI_URL"), ycfg.EriURL, ycfg.BrainURL)
+	if eriURL == "" {
 		return nil, fmt.Errorf("config: brain_url is required in %s", cleanPath)
 	}
-	brainLLMURL := strings.TrimSpace(ycfg.BrainLLMURL)
-	if brainLLMURL == "" {
+	eriLLMURL := resolveFirstNonEmpty(os.Getenv("ERI_LLM_URL"), ycfg.EriLLMURL, ycfg.BrainLLMURL)
+	if eriLLMURL == "" {
 		return nil, fmt.Errorf("config: brain_llm_url is required in %s", cleanPath)
 	}
-	brainPRRegisterURL := strings.TrimSpace(ycfg.BrainPRRegisterURL)
-	if brainPRRegisterURL == "" {
+	prRegisterURL := resolveFirstNonEmpty(os.Getenv("PR_REGISTER_URL"), ycfg.PRRegisterURL, ycfg.EriPRRegisterURL, ycfg.BrainPRRegisterURL)
+	if prRegisterURL == "" {
 		return nil, fmt.Errorf("config: brain_pr_register_url is required in %s", cleanPath)
 	}
 	customSkillsDir := strings.TrimSpace(ycfg.CustomSkillsDir)
@@ -189,14 +196,17 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 	return &Config{
 		Port:               port,
 		DatabaseURL:        databaseURL,
-		BrainURL:           brainURL,
-		BrainLLMURL:        brainLLMURL,
+		BrainURL:           eriURL,
+		EriURL:             eriURL,
+		BrainLLMURL:        eriLLMURL,
+		EriLLMURL:          eriLLMURL,
 		CustomSkillsDir:    customSkillsDir,
 		RulesDir:           rulesDir,
 		GitHubPAT:          gitHubPAT,
 		ConfigRepoOwner:    configRepoOwner,
 		ConfigRepoName:     configRepoName,
-		BrainPRRegisterURL: brainPRRegisterURL,
+		BrainPRRegisterURL: prRegisterURL,
+		PRRegisterURL:      prRegisterURL,
 		SystemChannelID:    systemChannelID,
 		Ollama: OllamaConfig{
 			BaseURL:     ollamaBaseURL,

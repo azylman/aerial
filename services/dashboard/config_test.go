@@ -323,6 +323,29 @@ config_path: "/custom/path/config.yaml"
 	singleRepoPath := filepath.Join(tmpDir, "single_repo.yaml")
 	_ = os.WriteFile(singleRepoPath, []byte(singleRepoYAML), 0o644)
 
+	eriYAML := `
+port: "8084"
+eri_url: "http://eri-direct.aerial"
+memory_url: "http://coven.aerial"
+hangar_url: "http://hangar.aerial"
+haro_url: "http://haro.aerial"
+vanadis_url: "http://vanadis.aerial"
+github_repo: "azylman/aerial"
+`
+	eriPath := filepath.Join(tmpDir, "eri.yaml")
+	_ = os.WriteFile(eriPath, []byte(eriYAML), 0o644)
+
+	noBrainYAML := `
+port: "8084"
+memory_url: "http://coven.aerial"
+hangar_url: "http://hangar.aerial"
+haro_url: "http://haro.aerial"
+vanadis_url: "http://vanadis.aerial"
+github_repo: "azylman/aerial"
+`
+	noBrainPath := filepath.Join(tmpDir, "no_brain.yaml")
+	_ = os.WriteFile(noBrainPath, []byte(noBrainYAML), 0o644)
+
 	badYAMLPath := filepath.Join(tmpDir, "bad.yaml")
 	_ = os.WriteFile(badYAMLPath, []byte("port: [unclosed"), 0o644)
 
@@ -383,6 +406,37 @@ config_path: "/custom/path/config.yaml"
 			wantGHRepos:    []string{"azylman/single-repo"},
 			wantGHToken:    "token-from-env",
 			wantConfigPath: "/custom/path/config.yaml",
+		},
+		{
+			name:           "eri_url in yaml",
+			path:           eriPath,
+			wantPort:       "8084",
+			wantBrainURL:   "http://eri-direct.aerial",
+			wantMemoryURL:  "http://coven.aerial",
+			wantHangarURL:  "http://hangar.aerial",
+			wantGitSyncURL: "http://hangar.aerial",
+			wantHaroURL:    "http://haro.aerial",
+			wantVanadisURL: "http://vanadis.aerial",
+			wantGHRepo:     "azylman/aerial",
+			wantGHRepos:    []string{"azylman/aerial"},
+			wantConfigPath: eriPath,
+		},
+		{
+			name: "ERI_URL env fallback when absent from yaml",
+			path: noBrainPath,
+			env: map[string]string{
+				"ERI_URL": "http://env-eri.aerial:8088",
+			},
+			wantPort:       "8084",
+			wantBrainURL:   "http://env-eri.aerial:8088",
+			wantMemoryURL:  "http://coven.aerial",
+			wantHangarURL:  "http://hangar.aerial",
+			wantGitSyncURL: "http://hangar.aerial",
+			wantHaroURL:    "http://haro.aerial",
+			wantVanadisURL: "http://vanadis.aerial",
+			wantGHRepo:     "azylman/aerial",
+			wantGHRepos:    []string{"azylman/aerial"},
+			wantConfigPath: noBrainPath,
 		},
 		{
 			name:           "LoadConfig wrapper",
@@ -453,8 +507,8 @@ config_path: "/custom/path/config.yaml"
 			if tc.wantPort != "" && cfg.Port != tc.wantPort {
 				t.Errorf("Port = %q, want %q", cfg.Port, tc.wantPort)
 			}
-			if tc.wantBrainURL != "" && cfg.BrainURL != tc.wantBrainURL {
-				t.Errorf("BrainURL = %q, want %q", cfg.BrainURL, tc.wantBrainURL)
+			if tc.wantBrainURL != "" && (cfg.BrainURL != tc.wantBrainURL || cfg.EriURL != tc.wantBrainURL) {
+				t.Errorf("BrainURL = %q, EriURL = %q, want %q", cfg.BrainURL, cfg.EriURL, tc.wantBrainURL)
 			}
 			if tc.wantMemoryURL != "" && cfg.MemoryURL != tc.wantMemoryURL {
 				t.Errorf("MemoryURL = %q, want %q", cfg.MemoryURL, tc.wantMemoryURL)
