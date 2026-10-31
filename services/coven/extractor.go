@@ -763,13 +763,13 @@ const (
 	MaxConsolidationPasses      = 3
 )
 
-type factCliqueEdge struct {
+type cliqueEdge struct {
 	i, j int
 	sim  float64
 }
 
-type factCandidateMatch struct {
-	fact ScoredFactWithEmbedding
+type cliqueCandidateMatch[T any] struct {
+	item T
 	sim  float64
 }
 
@@ -777,83 +777,7 @@ func similarityInBounds(sim, minSim, maxSim float64) bool {
 	return sim >= minSim && (maxSim >= 1.0 || sim <= maxSim)
 }
 
-func buildFactCliqueEdges(group []ScoredFactWithEmbedding, minSim, maxSim float64, watermarkFactID int64) []factCliqueEdge {
-	var edges []factCliqueEdge
-	for i := 0; i < len(group); i++ {
-		for j := i + 1; j < len(group); j++ {
-			if watermarkFactID > 0 && group[i].Fact.ID <= watermarkFactID && group[j].Fact.ID <= watermarkFactID {
-				continue
-			}
-			if sim := CosineSimilarity(group[i].Embedding, group[j].Embedding); similarityInBounds(sim, minSim, maxSim) {
-				edges = append(edges, factCliqueEdge{i: i, j: j, sim: sim})
-			}
-		}
-	}
-	sort.SliceStable(edges, func(a, b int) bool {
-		if edges[a].sim != edges[b].sim {
-			return edges[a].sim > edges[b].sim
-		}
-		if group[edges[a].i].Fact.ID != group[edges[b].i].Fact.ID {
-			return group[edges[a].i].Fact.ID < group[edges[b].i].Fact.ID
-		}
-		return group[edges[a].j].Fact.ID < group[edges[b].j].Fact.ID
-	})
-	return edges
-}
-
-func matchesAllFactCliqueMembers(members []ScoredFactWithEmbedding, cand ScoredFactWithEmbedding, minSim, maxSim float64) bool {
-	for _, member := range members {
-		sim := CosineSimilarity(member.Embedding, cand.Embedding)
-		if !similarityInBounds(sim, minSim, maxSim) {
-			return false
-		}
-	}
-	return true
-}
-
-func expandFactClique(group []ScoredFactWithEmbedding, e factCliqueEdge, used map[int64]bool, minSim, maxSim float64, maxSize int) []ScoredFactWithEmbedding {
-	u, v := group[e.i], group[e.j]
-	clique := []ScoredFactWithEmbedding{u, v}
-	if maxSize <= 2 {
-		return clique
-	}
-
-	var cands []factCandidateMatch
-	for k := 0; k < len(group); k++ {
-		if k == e.i || k == e.j || used[group[k].Fact.ID] {
-			continue
-		}
-		simU := CosineSimilarity(u.Embedding, group[k].Embedding)
-		simV := CosineSimilarity(v.Embedding, group[k].Embedding)
-		if similarityInBounds(simU, minSim, maxSim) && similarityInBounds(simV, minSim, maxSim) {
-			cands = append(cands, factCandidateMatch{fact: group[k], sim: min(simU, simV)})
-		}
-	}
-	sort.SliceStable(cands, func(a, b int) bool {
-		if cands[a].sim != cands[b].sim {
-			return cands[a].sim > cands[b].sim
-		}
-		return cands[a].fact.Fact.ID < cands[b].fact.Fact.ID
-	})
-
-	for _, c := range cands {
-		if len(clique) >= maxSize {
-			break
-		}
-		if matchesAllFactCliqueMembers(clique[2:], c.fact, minSim, maxSim) {
-			clique = append(clique, c.fact)
-		}
-	}
-	return clique
-}
-
-// FindConsolidationCliques finds complete-linkage cliques of size [minSize, maxSize]
-// where every pair of facts (u, v) in the clique satisfies minSim <= CosineSimilarity(u.Embedding, v.Embedding) <= maxSim.
-func FindConsolidationCliques(facts []ScoredFactWithEmbedding, minSim, maxSim float64, minSize, maxSize int, watermarkFactID ...int64) [][]ScoredFactWithEmbedding {
-	var minNewFactID int64
-	if len(watermarkFactID) > 0 {
-		minNewFactID = watermarkFactID[0]
-	}
+func normalizeCliqueParams(minSim, maxSim float64, minSize, maxSize int) (float64, float64, int, int) {
 	if minSim <= 0 {
 		minSim = DefaultConsolidationMinSim
 	}
@@ -866,39 +790,136 @@ func FindConsolidationCliques(facts []ScoredFactWithEmbedding, minSim, maxSim fl
 	if maxSize < minSize {
 		maxSize = max(DefaultConsolidationMaxSize, minSize)
 	}
+	return minSim, maxSim, minSize, maxSize
+}
 
-	var group []ScoredFactWithEmbedding
-	for _, f := range facts {
-		if len(f.Embedding) == 0 {
+func buildCliqueEdges[T any](group []T, minSim, maxSim float64, watermarkID int64, idOf func(T) int64, embOf func(T) []float32) []cliqueEdge {
+	var edges []cliqueEdge
+	for i := 0; i < len(group); i++ {
+		embI := embOf(group[i])
+		idI := idOf(group[i])
+		for j := i + 1; j < len(group); j++ {
+			if watermarkID > 0 && idI <= watermarkID && idOf(group[j]) <= watermarkID {
+				continue
+			}
+			sim := CosineSimilarity(embI, embOf(group[j]))
+			if similarityInBounds(sim, minSim, maxSim) {
+				edges = append(edges, cliqueEdge{i: i, j: j, sim: sim})
+			}
+		}
+	}
+	sort.SliceStable(edges, func(a, b int) bool {
+		if edges[a].sim != edges[b].sim {
+			return edges[a].sim > edges[b].sim
+		}
+		idA := idOf(group[edges[a].i])
+		idB := idOf(group[edges[b].i])
+		if idA != idB {
+			return idA < idB
+		}
+		return idOf(group[edges[a].j]) < idOf(group[edges[b].j])
+	})
+	return edges
+}
+
+func matchesAllCliqueMembers[T any](members []T, candEmb []float32, minSim, maxSim float64, embOf func(T) []float32) bool {
+	for _, member := range members {
+		sim := CosineSimilarity(embOf(member), candEmb)
+		if !similarityInBounds(sim, minSim, maxSim) {
+			return false
+		}
+	}
+	return true
+}
+
+func expandClique[T any](group []T, e cliqueEdge, used map[int64]bool, minSim, maxSim float64, maxSize int, idOf func(T) int64, embOf func(T) []float32) []T {
+	u, v := group[e.i], group[e.j]
+	clique := []T{u, v}
+	if maxSize <= 2 {
+		return clique
+	}
+
+	embU, embV := embOf(u), embOf(v)
+	var cands []cliqueCandidateMatch[T]
+	for k := 0; k < len(group); k++ {
+		if k == e.i || k == e.j || used[idOf(group[k])] {
 			continue
 		}
-		group = append(group, f)
+		embK := embOf(group[k])
+		simU := CosineSimilarity(embU, embK)
+		simV := CosineSimilarity(embV, embK)
+		if similarityInBounds(simU, minSim, maxSim) && similarityInBounds(simV, minSim, maxSim) {
+			cands = append(cands, cliqueCandidateMatch[T]{item: group[k], sim: min(simU, simV)})
+		}
+	}
+	sort.SliceStable(cands, func(a, b int) bool {
+		if cands[a].sim != cands[b].sim {
+			return cands[a].sim > cands[b].sim
+		}
+		return idOf(cands[a].item) < idOf(cands[b].item)
+	})
+
+	for _, c := range cands {
+		if len(clique) >= maxSize {
+			break
+		}
+		if matchesAllCliqueMembers(clique[2:], embOf(c.item), minSim, maxSim, embOf) {
+			clique = append(clique, c.item)
+		}
+	}
+	return clique
+}
+
+func findCompleteLinkageCliques[T any](items []T, minSim, maxSim float64, minSize, maxSize int, idOf func(T) int64, embOf func(T) []float32, watermark ...int64) [][]T {
+	minSim, maxSim, minSize, maxSize = normalizeCliqueParams(minSim, maxSim, minSize, maxSize)
+
+	var group []T
+	for _, item := range items {
+		if len(embOf(item)) > 0 {
+			group = append(group, item)
+		}
 	}
 
 	sort.Slice(group, func(i, j int) bool {
-		return group[i].Fact.ID < group[j].Fact.ID
+		return idOf(group[i]) < idOf(group[j])
 	})
 
-	edges := buildFactCliqueEdges(group, minSim, maxSim, minNewFactID)
+	var watermarkID int64
+	if len(watermark) > 0 {
+		watermarkID = watermark[0]
+	}
 
-	var cliques [][]ScoredFactWithEmbedding
+	edges := buildCliqueEdges(group, minSim, maxSim, watermarkID, idOf, embOf)
+
+	var cliques [][]T
 	used := make(map[int64]bool, len(group))
 	for _, e := range edges {
 		u, v := group[e.i], group[e.j]
-		if used[u.Fact.ID] || used[v.Fact.ID] {
+		if used[idOf(u)] || used[idOf(v)] {
 			continue
 		}
-		clique := expandFactClique(group, e, used, minSim, maxSim, maxSize)
+		clique := expandClique(group, e, used, minSim, maxSim, maxSize, idOf, embOf)
 		if len(clique) >= minSize {
-			sort.Slice(clique, func(a, b int) bool { return clique[a].Fact.ID < clique[b].Fact.ID })
-			for _, member := range clique {
-				used[member.Fact.ID] = true
+			sort.Slice(clique, func(a, b int) bool { return idOf(clique[a]) < idOf(clique[b]) })
+			for _, m := range clique {
+				used[idOf(m)] = true
 			}
 			cliques = append(cliques, clique)
 		}
 	}
 
 	return cliques
+}
+
+// FindConsolidationCliques finds complete-linkage cliques of size [minSize, maxSize]
+// where every pair of facts (u, v) in the clique satisfies minSim <= CosineSimilarity(u.Embedding, v.Embedding) <= maxSim.
+func FindConsolidationCliques(facts []ScoredFactWithEmbedding, minSim, maxSim float64, minSize, maxSize int, watermarkFactID ...int64) [][]ScoredFactWithEmbedding {
+	return findCompleteLinkageCliques(
+		facts, minSim, maxSim, minSize, maxSize,
+		func(f ScoredFactWithEmbedding) int64 { return f.Fact.ID },
+		func(f ScoredFactWithEmbedding) []float32 { return f.Embedding },
+		watermarkFactID...,
+	)
 }
 
 func maxFactIDFromSlice(facts []ScoredFactWithEmbedding, prevMax int64) int64 {

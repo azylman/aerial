@@ -385,20 +385,7 @@ type CronScheduleWithDesc struct {
 	Effort          string    `json:"effort,omitempty"`
 }
 
-type HeartbeatScheduleWithDesc struct {
-	ID              string    `json:"id"`
-	TargetID        string    `json:"target_id,omitempty"`
-	ChannelID       string    `json:"channel_id"`
-	TitlePrefix     string    `json:"title_prefix"`
-	CronExpr        string    `json:"cron_expr"`
-	CronDescription string    `json:"cron_description"`
-	Prompt          string    `json:"prompt"`
-	Timezone        string    `json:"timezone"`
-	NextRunAt       time.Time `json:"next_run_at"`
-	Enabled         bool      `json:"enabled"`
-	CreatedAt       time.Time `json:"created_at"`
-	Effort          string    `json:"effort,omitempty"`
-}
+type HeartbeatScheduleWithDesc = CronScheduleWithDesc
 
 type OneShotScheduleJSON struct {
 	ID        string    `json:"id"`
@@ -466,9 +453,9 @@ func FormatCronSchedulesWithDesc(raw []CronSchedule) []CronScheduleWithDesc {
 func FormatHeartbeatSchedulesWithDesc(raw []HeartbeatSchedule) []HeartbeatScheduleWithDesc {
 	heartbeats := make([]HeartbeatScheduleWithDesc, 0, len(raw))
 	for _, h := range raw {
-		heartbeats = append(heartbeats, HeartbeatScheduleWithDesc(buildRecurringScheduleWithDesc(
+		heartbeats = append(heartbeats, buildRecurringScheduleWithDesc(
 			h.ID, h.TargetID, h.TitlePrefix, h.CronExpr, h.Prompt, h.Timezone, h.Effort, h.NextRunAt, h.CreatedAt, h.Enabled,
-		)))
+		))
 	}
 	return heartbeats
 }
