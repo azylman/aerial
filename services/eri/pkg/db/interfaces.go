@@ -122,4 +122,5 @@ type Store interface {
 	DispatchStore
 	SessionStore
 	TranscriptStore
+	AcquireLeaderLock(ctx context.Context) (func(), error)
 }

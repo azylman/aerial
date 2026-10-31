@@ -56,4 +56,5 @@ func assertStoreUnavailable(t *testing.T, s Store) {
 	requireErr(t, s.SaveThreadSummary(ctx, "t", "s", "w"), "SaveThreadSummary")
 	requireErr(t, c1(s.GetSessionActivityStats(ctx, "t")), "GetSessionActivityStats")
 	requireErr(t, c1(s.FindUnrotatedSessions(ctx, 8)), "FindUnrotatedSessions")
+	requireErr(t, c1(s.AcquireLeaderLock(ctx)), "AcquireLeaderLock")
 }

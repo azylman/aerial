@@ -55,6 +55,7 @@ func assertStoreUnavailable(t *testing.T, s db.Store) {
 	requireErr(t, s.SaveThreadSummary(ctx, "t", "s", "w"), "SaveThreadSummary")
 	requireErr(t, c1(s.GetSessionActivityStats(ctx, "t")), "GetSessionActivityStats")
 	requireErr(t, c1(s.FindUnrotatedSessions(ctx, 8)), "FindUnrotatedSessions")
+	requireErr(t, c1(s.AcquireLeaderLock(ctx)), "AcquireLeaderLock")
 }
 
 func TestFakeStore_HasActiveThreadTurn(t *testing.T) {
@@ -103,6 +104,25 @@ func TestFakeStoreLifecycleAndFailNext(t *testing.T) {
 	}
 	if _, err := s.GetMessage(ctx, "m1"); err != nil {
 		t.Fatalf("expected success after consumed FailNext, got %v", err)
+	}
+
+	if rel, err := s.AcquireLeaderLock(ctx); err != nil || rel == nil {
+		t.Fatalf("expected AcquireLeaderLock success, got %v", err)
+	} else {
+		rel()
+	}
+	var hookCalled bool
+	s.SetLeaderLockHook(func(ctx context.Context) (func(), error) {
+		hookCalled = true
+		return func() {}, nil
+	})
+	if rel, err := s.AcquireLeaderLock(ctx); err != nil || rel == nil || !hookCalled {
+		t.Fatalf("expected custom leaderLockHook called, got hookCalled=%v, err=%v", hookCalled, err)
+	}
+	canceledCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := s.AcquireLeaderLock(canceledCtx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled from AcquireLeaderLock, got %v", err)
 	}
 
 	mustOK(t, s.Close(), "Close")

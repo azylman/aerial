@@ -81,17 +81,17 @@ func ResolvePoolKey(ephemeral *bool, effort string) (PoolKey, error) {
 }
 
 type WorkerPoolConfig struct {
-	Store                                                                           db.Store
-	DiscordSession                                                                  *discordgo.Session
-	AgyBin, APIKey, Model, LowEffortModel, MediumEffortModel, SystemPrompt          string
-	TimeoutMinutes, MaxAttempts                                                     int
-	BackoffBase, IdleTimeout, DrainTimeout, RetryDelayOverride, MaintenanceInterval time.Duration
-	SessionManager                                                                  *session.Manager
-	Pools                                                                           map[PoolKey]runner.AgentPool
-	ProcessPool, LowEffortProcessPool, MediumEffortProcessPool, VoiceProcessPool    runner.AgentPool
-	Classifier                                                                      *classifier.Classifier
-	HaroURL                                                                         string
-	SynapseURL                                                                      string
+	Store                                                                        db.Store
+	DiscordSession                                                               *discordgo.Session
+	AgyBin, APIKey, Model, LowEffortModel, MediumEffortModel, SystemPrompt       string
+	TimeoutMinutes, MaxAttempts                                                  int
+	BackoffBase, IdleTimeout, RetryDelayOverride, MaintenanceInterval            time.Duration
+	SessionManager                                                               *session.Manager
+	Pools                                                                        map[PoolKey]runner.AgentPool
+	ProcessPool, LowEffortProcessPool, MediumEffortProcessPool, VoiceProcessPool runner.AgentPool
+	Classifier                                                                   *classifier.Classifier
+	HaroURL                                                                      string
+	SynapseURL                                                                   string
 
 	// Optional hooks for testing/custom overrides
 	RunnerFunc                  func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
@@ -150,8 +150,7 @@ type WorkerPool struct {
 	chunkToBuildID    map[string]string
 	activeChunkSteps  map[string]string
 	activeChunkTurns  map[string]string
-	claimedMessages   sync.Map
-	claimedDispatches sync.Map
+	leaderHold        bool
 }
 
 // SummaryGroup returns the singleflight.Group coordinating thread summarizations for this pool instance.
@@ -311,9 +310,6 @@ func applyWorkerPoolTimingDefaults(cfg *WorkerPoolConfig) {
 	}
 	if cfg.BackoffBase <= 0 {
 		cfg.BackoffBase = 3 * time.Second
-	}
-	if cfg.DrainTimeout <= 0 {
-		cfg.DrainTimeout = 10 * time.Second
 	}
 }
 
@@ -699,100 +695,27 @@ func formatUnrotatedSessionLine(sess *discordgo.Session, s db.SessionInfo) strin
 	return fmt.Sprintf("- Channel <#%s>: **%d** turns (session: `%s`)", rawThreadID, s.TurnCount, s.InternalSessionID)
 }
 
-// StopWithTimeout initiates a bounded graceful drain of the worker pool.
-func (p *WorkerPool) StopWithTimeout(drainTimeout time.Duration) {
+// HoldUntilLeader gates worker spawning on EnqueueBurst and EnqueueDispatch
+// until ReleaseLeaderHold is called after acquiring the leader lock.
+func (p *WorkerPool) HoldUntilLeader() {
+	if p == nil {
+		return
+	}
 	p.mu.Lock()
-	if p.stopped {
-		p.mu.Unlock()
-		return
-	}
-	p.stopped = true
+	p.leaderHold = true
 	p.mu.Unlock()
-
-	if drainTimeout <= 0 {
-		drainTimeout = p.cfg.DrainTimeout
-		if drainTimeout <= 0 {
-			drainTimeout = 10 * time.Second
-		}
-	}
-
-	deadline := time.Now().Add(drainTimeout)
-	for time.Now().Before(deadline) {
-		p.mu.Lock()
-		busy := false
-		for _, state := range p.threadChs {
-			if len(state.ch) > 0 || state.activeEnqueuers > 0 || state.inFlight {
-				busy = true
-				break
-			}
-		}
-		p.mu.Unlock()
-		if !busy {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-
-	p.cancel()
-	done := make(chan struct{})
-	go func() {
-		p.wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		log.Printf("[WorkerPool] Graceful drain completed cleanly")
-	case <-time.After(2 * time.Second):
-		log.Printf("[WorkerPool] Warning: worker exit wait timed out")
-	}
-
-	sweepCtx, sweepCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer sweepCancel()
-	if store := p.Store(); store != nil {
-		p.sweepInterruptedProcessingEntries(sweepCtx, store)
-	}
 }
 
-func (p *WorkerPool) resetProcessingMessages(ctx context.Context, store db.Store) {
-	msgs, err := store.GetPendingOrProcessingMessages(ctx, 0)
-	if err != nil {
-		return
+// ReleaseLeaderHold clears the canary leader hold and returns true if the pool was held.
+func (p *WorkerPool) ReleaseLeaderHold() bool {
+	if p == nil {
+		return false
 	}
-	for _, m := range msgs {
-		if m.Status != db.StatusProcessing {
-			continue
-		}
-		if _, ok := p.claimedMessages.Load(m.ID); !ok {
-			continue
-		}
-		if err := store.UpdateMessageStatus(ctx, m.ID, db.StatusPending, "deployment_drain"); err != nil {
-			log.Printf("[WorkerPool] Warning resetting message %s to pending: %v", m.ID, err)
-		}
-	}
-}
-
-func (p *WorkerPool) resetProcessingDispatches(ctx context.Context, store db.Store) {
-	dispatches, err := store.GetPendingOrProcessingDispatches(ctx, 0)
-	if err != nil {
-		return
-	}
-	for _, d := range dispatches {
-		if d.Status != db.StatusProcessing {
-			continue
-		}
-		if _, ok := p.claimedDispatches.Load(d.ID); !ok {
-			continue
-		}
-		if err := store.UpdateDispatchStatus(ctx, d.ID, db.StatusPending, "deployment_drain"); err != nil {
-			log.Printf("[WorkerPool] Warning resetting dispatch %s to pending: %v", d.ID, err)
-		}
-	}
-}
-
-func (p *WorkerPool) sweepInterruptedProcessingEntries(ctx context.Context, store db.Store) {
-	p.resetProcessingMessages(ctx, store)
-	p.resetProcessingDispatches(ctx, store)
+	p.mu.Lock()
+	wasHeld := p.leaderHold
+	p.leaderHold = false
+	p.mu.Unlock()
+	return wasHeld
 }
 
 func unwrapUnifiedPool(pool runner.AgentPool) *runner.UnifiedProcessPool {
@@ -833,7 +756,28 @@ func (p *WorkerPool) collectUniquePoolsLocked() []runner.AgentPool {
 }
 
 func (p *WorkerPool) Stop() {
-	p.StopWithTimeout(p.cfg.DrainTimeout)
+	p.mu.Lock()
+	if p.stopped {
+		p.mu.Unlock()
+		return
+	}
+	p.stopped = true
+	p.mu.Unlock()
+
+	p.cancel()
+	done := make(chan struct{})
+	go func() {
+		p.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		log.Printf("[WorkerPool] Workers exited cleanly")
+	case <-time.After(2 * time.Second):
+		log.Printf("[WorkerPool] Warning: worker exit wait timed out")
+	}
+
 	p.mu.Lock()
 	pools := p.collectUniquePoolsLocked()
 	p.mu.Unlock()

@@ -1725,27 +1725,6 @@ func TestTurnExecution_PrepareAttemptPrompt(t *testing.T) {
 			wantPrompt:    contPrompt,
 		},
 		{
-			name:          "deployment-drained dispatch attempt 1 with on-disk session returns continuation template",
-			attempt:       1,
-			promptToSend:  origPrompt,
-			hasSessionID:  true,
-			hasOnDiskSess: true,
-			isDispatch:    true,
-			restartCount:  0,
-			errorMessage:  "interrupted by graceful deployment",
-			wantPrompt:    contPrompt,
-		},
-		{
-			name:          "deployment-drained discord burst attempt 1 with on-disk session returns continuation template",
-			attempt:       1,
-			promptToSend:  origPrompt,
-			hasSessionID:  true,
-			hasOnDiskSess: true,
-			isDispatch:    false,
-			burst:         []db.Message{{ID: "m1", ErrorMessage: "interrupted by graceful deployment"}},
-			wantPrompt:    contPrompt,
-		},
-		{
 			name:          "restarted discord burst attempt 1 with on-disk session returns continuation template",
 			attempt:       1,
 			promptToSend:  origPrompt,
@@ -1914,6 +1893,7 @@ func TestWorker_ProcessDispatch_StatefulEvictionAndRestartContinuation(t *testin
 				t.Fatalf("timeout waiting for dispatch execution")
 			}
 
+			waitPoolIdle(t, pool, 3*time.Second)
 			pool.Stop()
 
 			d, err := store.GetDispatch(ctx, disp.ID)

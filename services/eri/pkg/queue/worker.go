@@ -216,9 +216,6 @@ func (te *turnExecution) rotateSessionID(threadID, newSessionID string) {
 //nolint:unparam
 func (te *turnExecution) finalizeBurstMessages(msgs []db.Message, msgStatus, msgOutput, runStatus, runErr, model string, notify, isResponse bool) {
 	if te.isDispatch() {
-		if te.pool != nil && te.dispatch != nil {
-			te.pool.claimedDispatches.Delete(te.dispatch.ID)
-		}
 		if isResponse {
 			te.updateDispatchCompleted(te.dispatch.ID, msgOutput)
 		} else {
@@ -227,9 +224,6 @@ func (te *turnExecution) finalizeBurstMessages(msgs []db.Message, msgStatus, msg
 		return
 	}
 	for _, m := range msgs {
-		if te.pool != nil {
-			te.pool.claimedMessages.Delete(m.ID)
-		}
 		if isResponse {
 			te.updateMessageCompleted(m.ID, msgOutput)
 		} else {
@@ -488,7 +482,6 @@ func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 		}
 		return
 	}
-	p.claimedDispatches.Store(d.ID, struct{}{})
 
 	isEphem := strings.TrimSpace(d.SessionID) == ""
 	leaseKey := d.SessionID
@@ -632,9 +625,6 @@ func (te *turnExecution) claimPendingBurst() []db.Message {
 			log.Printf("[WorkerPool] Skipping message %s: already claimed or completed", m.ID)
 			continue
 		}
-		if te.pool != nil {
-			te.pool.claimedMessages.Store(m.ID, struct{}{})
-		}
 		claimedBurst = append(claimedBurst, m)
 	}
 	return claimedBurst
@@ -758,22 +748,11 @@ func (te *turnExecution) classifyAmbientMessages(msgs []db.Message) (float64, st
 
 func (te *turnExecution) handleAllAmbientPlan() bool {
 	if te.pool != nil && te.pool.ctx != nil && te.pool.ctx.Err() != nil {
-		log.Printf("[WorkerPool] Context cancelled during ambient classification for thread %s. Resetting to PENDING for clean deployment recovery.", te.threadID)
+		log.Printf("[WorkerPool] Context cancelled during ambient classification for thread %s. Leaving PROCESSING for startup recovery.", te.threadID)
 		metrics.RecordTurnCompleted("cancelled", te.triggerType, "classifier", time.Since(te.execStart))
-		for _, m := range te.burst {
-			te.updateMessageStatus(m.ID, db.StatusPending, "interrupted by graceful deployment")
-			if te.pool != nil {
-				te.pool.claimedMessages.Delete(m.ID)
-			}
-		}
 		return true
 	}
 	te.markAmbientBurst()
-	if te.pool != nil {
-		for _, m := range te.burst {
-			te.pool.claimedMessages.Delete(m.ID)
-		}
-	}
 	return true
 }
 
@@ -907,6 +886,9 @@ func (te *turnExecution) handleTrailing() {
 	te.trailingMsgs = nil
 	te.trailingInfos = nil
 	te.activeSessionMu.Unlock()
+	if !te.isQuotaPaused && te.pool != nil && te.pool.ctx != nil && te.pool.ctx.Err() != nil {
+		return
+	}
 	for i, m := range trailing {
 		info := trailingInfos[i]
 		if te.isQuotaPaused {
@@ -970,22 +952,15 @@ func (te *turnExecution) checkGlobalQuotaLockout(currentAPIKey, currentModel str
 	return true
 }
 
-func isDeploymentDrained(errorMsg string) bool {
-	return errorMsg == "deployment_drain" || errorMsg == "interrupted by graceful deployment"
-}
-
 func (te *turnExecution) isRestartedOrDrainedTurn(lastErrDetail string) bool {
 	if lastErrDetail != "" {
 		return false
 	}
 	if te.isDispatch() {
-		if te.dispatch == nil {
-			return false
-		}
-		return te.dispatch.RestartCount > 0 || isDeploymentDrained(te.dispatch.ErrorMessage)
+		return te.dispatch != nil && te.dispatch.RestartCount > 0
 	}
 	for _, m := range te.burst {
-		if m.RestartCount > 0 || isDeploymentDrained(m.ErrorMessage) {
+		if m.RestartCount > 0 {
 			return true
 		}
 	}
@@ -1119,7 +1094,7 @@ func (te *turnExecution) handleWatchdogFailure(attempt, maxAttempts int, current
 	if te.pool.ctx.Err() != nil {
 		log.Printf("[WorkerPool] Pool shutting down on watchdog timeout for thread %s. Resetting to PENDING.", te.threadID)
 		metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
-		te.cancelBurstOnShutdown("timeout", currentModel, false)
+		te.cancelBurstOnShutdown("timeout", false)
 		return false
 	}
 
@@ -1201,7 +1176,7 @@ func (te *turnExecution) handleNonTransientFailure(attempt, maxAttempts int, cur
 	te.stopIndicators()
 	if te.pool.ctx.Err() != nil {
 		log.Printf("[WorkerPool] Pool shutting down during non-transient error for thread %s. Resetting to PENDING.", te.threadID)
-		te.cancelBurstOnShutdown("failed", currentModel, false)
+		te.cancelBurstOnShutdown("failed", false)
 		return
 	}
 
@@ -1229,7 +1204,7 @@ func (te *turnExecution) handleAttemptsExhausted(maxAttempts int, currentAgyBin,
 	if te.pool.ctx.Err() != nil {
 		log.Printf("[WorkerPool] Pool shutting down during turn for thread %s. Suppressing exhaustion alert and resetting to PENDING for deployment recovery.", te.threadID)
 		metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
-		te.cancelBurstOnShutdown("failed", currentModel, true)
+		te.cancelBurstOnShutdown("failed", true)
 		return
 	}
 	te.deliverFailureNotice(currentAgyBin, currentAPIKey, lastErrDetail, lastStderr, fmt.Sprintf("execution failed after exhausting %d attempts", maxAttempts), "exhaustion notice")
@@ -1297,7 +1272,7 @@ func (te *turnExecution) dispatchFailedAttempt(attempt, maxAttempts int, isTrans
 		log.Printf("[WorkerPool] Turn execution cancelled due to pool shutdown (thread: %s, attempt: %d/%d). Resetting to PENDING for clean deployment recovery.", te.threadID, attempt, maxAttempts)
 		te.stopIndicators()
 		metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
-		te.cancelBurstOnShutdown("failed", currentModel, false)
+		te.cancelBurstOnShutdown("failed", false)
 		return false
 	}
 

@@ -65,6 +65,11 @@ func (p *WorkerPool) EnqueueBurst(msgs ...db.Message) {
 		log.Printf("[WorkerPool] Warning: attempted to enqueue %d message(s) to stopped pool", len(msgs))
 		return
 	}
+	if p.leaderHold {
+		p.mu.Unlock()
+		log.Printf("[WorkerPool] Holding %d message(s) in PENDING state until leader lock acquired", len(msgs))
+		return
+	}
 
 	type newWorker struct {
 		scopeKey string
@@ -114,6 +119,11 @@ func (p *WorkerPool) EnqueueDispatch(d db.Dispatch) {
 	if p.stopped {
 		p.mu.Unlock()
 		log.Printf("[WorkerPool] Warning: attempted to enqueue dispatch %s to stopped pool", d.ID)
+		return
+	}
+	if p.leaderHold {
+		p.mu.Unlock()
+		log.Printf("[WorkerPool] Holding dispatch %s in PENDING state until leader lock acquired", d.ID)
 		return
 	}
 	scopeKey := strings.TrimSpace(d.SessionID)
