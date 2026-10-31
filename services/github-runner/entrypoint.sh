@@ -225,17 +225,23 @@ RUNNER_LABELS="${RUNNER_LABELS:-self-hosted,roborev}"
 echo "${PATH}" > /actions-runner/.path
 
 if [ -d "/cache" ]; then
-  mkdir -p /cache/go-build /cache/go-mod /cache/pip "/cache/golangci-lint-${RUNNER_NAME}"
+  mkdir -p /cache/go-build /cache/go-mod /cache/pip "/cache/golangci-lint-${RUNNER_NAME}" "/cache/cargo-target-${RUNNER_NAME}"
   export GOCACHE="/cache/go-build"
   export GOMODCACHE="/cache/go-mod"
   export PIP_CACHE_DIR="/cache/pip"
   export GOLANGCI_LINT_CACHE="/cache/golangci-lint-${RUNNER_NAME}"
+  export RUSTUP_HOME="/usr/local/rustup"
+  export CARGO_HOME="/usr/local/cargo"
+  export CARGO_TARGET_DIR="/cache/cargo-target-${RUNNER_NAME}"
 
   cat >> /actions-runner/.env <<EOF
 GOCACHE=/cache/go-build
 GOMODCACHE=/cache/go-mod
 PIP_CACHE_DIR=/cache/pip
 GOLANGCI_LINT_CACHE=/cache/golangci-lint-${RUNNER_NAME}
+RUSTUP_HOME=/usr/local/rustup
+CARGO_HOME=/usr/local/cargo
+CARGO_TARGET_DIR=/cache/cargo-target-${RUNNER_NAME}
 EOF
 fi
 
