@@ -145,6 +145,11 @@ func startDiscordGateway(ctx context.Context, server *RouterServer, token string
 	}
 	log.Println("[webhooks-router] [discord] Discord Gateway connected successfully")
 
+	if server != nil {
+		server.SetGatewayLatencyFn(dg.HeartbeatLatency)
+		SetDiscordGatewayLatency(dg.HeartbeatLatency().Seconds())
+	}
+
 	var stopOnce sync.Once
 	stopFn := func() {
 		stopOnce.Do(func() {
@@ -363,7 +368,11 @@ func isCatchUpMessageEligible(m *discordgo.Message, botUserID, minSnowflake stri
 	if botUserID != "" && m.Author.ID == botUserID {
 		return false
 	}
-	if (!m.Timestamp.IsZero() && now.Sub(m.Timestamp) > discordCatchUpStaleTTL) || compareDiscordSnowflakes(m.ID, minSnowflake) <= 0 {
+	if !m.Timestamp.IsZero() && (m.Timestamp.Before(now.Add(-discordCatchUpStaleTTL)) || now.Sub(m.Timestamp) > discordCatchUpStaleTTL) {
+		RecordJobDropped(QueueDiscordIngress, DiscordIngressArgs{}.Kind(), "catchup_stale_ttl")
+		return false
+	}
+	if compareDiscordSnowflakes(m.ID, minSnowflake) <= 0 {
 		return false
 	}
 	return true

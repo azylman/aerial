@@ -35,6 +35,8 @@ type RouterServer struct {
 	dispatcher           OutboundDispatcher
 	onProcessed          func(event, delivery string)
 	nonRoboRevFailedSHAs sync.Map
+	queueStats           queueStatsQuerier
+	gatewayLatencyFn     func() time.Duration
 }
 
 // NewRouterServer constructs a new RouterServer instance.
@@ -52,9 +54,11 @@ func NewRouterServer(cfg Config, client *http.Client, riverClient ...RiverInsert
 	return s
 }
 
-func (s *RouterServer) SetRiverClient(rc RiverInserter)    { s.riverClient = rc }
-func (s *RouterServer) SetRegistry(reg PRRegistryUpdater)  { s.registry = reg }
-func (s *RouterServer) SetDispatcher(d OutboundDispatcher) { s.dispatcher = d }
+func (s *RouterServer) SetRiverClient(rc RiverInserter)             { s.riverClient = rc }
+func (s *RouterServer) SetRegistry(reg PRRegistryUpdater)           { s.registry = reg }
+func (s *RouterServer) SetDispatcher(d OutboundDispatcher)          { s.dispatcher = d }
+func (s *RouterServer) SetQueueStats(q queueStatsQuerier)           { s.queueStats = q }
+func (s *RouterServer) SetGatewayLatencyFn(fn func() time.Duration) { s.gatewayLatencyFn = fn }
 
 func readWebhookBody(w http.ResponseWriter, r *http.Request, maxBytes int64) ([]byte, bool) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBytes))
@@ -101,7 +105,7 @@ func (s *RouterServer) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /health", s.handleHealthz)
-	mux.Handle("GET /metrics", promhttp.Handler())
+	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("POST /internal/pr/register", s.handlePRRegister)
 	mux.HandleFunc("POST /internal/widget/sync", s.handleInternalWidgetSync)
 	mux.HandleFunc("POST /webhooks/infisical", s.handleInfisicalWebhook)
@@ -116,6 +120,18 @@ func (s *RouterServer) Routes() http.Handler {
 	mux.HandleFunc("POST /debug/coverage/flush", coverageFlush)
 	mux.HandleFunc("GET /debug/coverage/flush", coverageFlush)
 	return mux
+}
+
+func (s *RouterServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if s != nil && s.queueStats != nil {
+		if err := collectRiverQueueMetrics(r.Context(), s.queueStats); err != nil {
+			log.Printf("[webhooks-router] [metrics] error collecting river queue metrics: %v", err)
+		}
+	}
+	if s != nil && s.gatewayLatencyFn != nil {
+		SetDiscordGatewayLatency(s.gatewayLatencyFn().Seconds())
+	}
+	promhttp.Handler().ServeHTTP(w, r)
 }
 
 func (s *RouterServer) resolveHeadlessPRTargetID(ctx context.Context, repo string, prNumber int) string {
@@ -1095,6 +1111,7 @@ func setupRiverWorkerPool(ctx context.Context, server *RouterServer, cfg Config)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create pgxpool: %w", err)
 	}
+	server.SetQueueStats(pool)
 	server.SetRegistry(NewPostgresPRRegistry(pool, WithVanadisClient(cfg.VanadisURL, server.httpClient), WithHaroClient(cfg.HaroURL, server.httpClient)))
 
 	workers := river.NewWorkers()

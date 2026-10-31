@@ -1757,17 +1757,21 @@ func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
 
 	RecordUniqueSkipped("")
 	RecordUniqueSkipped("test_kind_metric")
-
-	routes := NewRouterServer(Config{Port: "4020"}, nil).Routes()
+	RecordJobEnqueued("", "", "")
+	RecordJobRetry("", "", "")
+	RecordJobDropped("", "", "")
+	SetDiscordGatewayLatency(0.042)
+	registerCollector(JobsEnqueuedTotal)
 
 	tests := []struct {
-		name         string
-		method       string
-		path         string
-		mockMetaErr  error
-		mockCountErr error
-		wantCode     int
-		wantBodySubs []string
+		name          string
+		method        string
+		path          string
+		mockMetaErr   error
+		mockCountErr  error
+		queueStatsErr bool
+		wantCode      int
+		wantBodySubs  []string
 	}{
 		{
 			name:         "/healthz returns 200 and json",
@@ -1777,11 +1781,25 @@ func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
 			wantBodySubs: []string{`"status":"ok"`, `"service":"webhooks-router"`},
 		},
 		{
-			name:         "/metrics returns 200 and prometheus metrics",
-			method:       http.MethodGet,
-			path:         "/metrics",
-			wantCode:     http.StatusOK,
-			wantBodySubs: []string{"webhooks_router_unique_skipped_total", `kind="test_kind_metric"`},
+			name:     "/metrics returns 200 and prometheus metrics with queue stats and gateway latency",
+			method:   http.MethodGet,
+			path:     "/metrics",
+			wantCode: http.StatusOK,
+			wantBodySubs: []string{
+				"webhooks_router_unique_skipped_total",
+				`kind="test_kind_metric"`,
+				"webhooks_router_queue_depth",
+				"webhooks_router_queue_oldest_age_seconds",
+				"webhooks_router_discord_gateway_latency_seconds 0.042",
+			},
+		},
+		{
+			name:          "/metrics with queue stats error logs and still returns 200",
+			method:        http.MethodGet,
+			path:          "/metrics",
+			queueStatsErr: true,
+			wantCode:      http.StatusOK,
+			wantBodySubs:  []string{"webhooks_router_discord_gateway_latency_seconds 0.042"},
 		},
 		{
 			name:     "/debug/coverage/flush calls flush and returns 200",
@@ -1814,7 +1832,23 @@ func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
 				return tc.mockCountErr
 			}
 
-			rec := doHTTPRequest(routes, tc.method, tc.path, nil, nil)
+			srv := NewRouterServer(Config{Port: "4020"}, nil)
+			mockQ := &mockQueueStatsQuerier{
+				rows: &mockPgxRows{
+					rows: []mockRowData{
+						{queue: "default", state: "available", count: 4, oldestAge: 33.5},
+					},
+				},
+			}
+			if tc.queueStatsErr {
+				mockQ.queryErr = errors.New("simulated queue query error")
+			}
+			srv.SetQueueStats(mockQ)
+			srv.SetGatewayLatencyFn(func() time.Duration {
+				return 42 * time.Millisecond
+			})
+
+			rec := doHTTPRequest(srv.Routes(), tc.method, tc.path, nil, nil)
 			if rec.Code != tc.wantCode {
 				t.Fatalf("code = %d, want %d (body: %s)", rec.Code, tc.wantCode, rec.Body.String())
 			}
