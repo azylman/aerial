@@ -336,7 +336,7 @@ func TestSummarizeThreadHistory_SingleflightBarrier(t *testing.T) {
 	}
 
 	sfg, done := new(singleflight.Group), make(chan string, 3)
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		go func() {
 			summary, _ := SummarizeThreadHistoryWithGroup(context.Background(), sfg, mockLLM, "test-model", "thread-sf", msgs)
 			done <- summary
@@ -351,7 +351,7 @@ func TestSummarizeThreadHistory_SingleflightBarrier(t *testing.T) {
 	waitForSingleflightFollowers(t, "SummarizeThreadHistoryWithGroup", 2)
 	close(release)
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		select {
 		case res := <-done:
 			if res != "<THREAD_SUMMARY>deduplicated summary</THREAD_SUMMARY>" {

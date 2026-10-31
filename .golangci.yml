@@ -5,16 +5,19 @@ linters:
     - asciicheck
     - bidichk
     - bodyclose
+    - canonicalheader
     - containedctx
     - copyloopvar
     - cyclop
     - dupl
     - dupword
     - durationcheck
+    - embeddedstructfieldcheck
     - errcheck
     - errchkjson
     - errname
     - errorlint
+    - exhaustive
     - exptostd
     - fatcontext
     - funlen
@@ -23,10 +26,12 @@ linters:
     - gocognit
     - gocritic
     - gocyclo
+    - gomoddirectives
     - goprintffuncname
     - govet
     - iface
     - ineffassign
+    - intrange
     - iotamixing
     - loggercheck
     - maintidx
@@ -42,6 +47,8 @@ linters:
     - noctx
     - nolintlint
     - nosprintfhostport
+    - perfsprint
+    - prealloc
     - predeclared
     - protogetter
     - reassign
@@ -56,6 +63,7 @@ linters:
     - tparallel
     - unconvert
     - unparam
+    - unqueryvet
     - unused
     - usestdlibvars
     - usetesting
@@ -65,7 +73,12 @@ linters:
     cyclop:
       max-complexity: 20
       package-average: 10.0
-      skip-tests: true
+    exhaustive:
+      default-signifies-exhaustive: true
+    gomoddirectives:
+      replace-local: true
+    perfsprint:
+      error-format: false
     dupl:
       threshold: 100
     dupword:

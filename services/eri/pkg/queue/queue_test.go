@@ -496,7 +496,7 @@ func TestResolveEffectiveChannel(t *testing.T) {
 				})}
 				id := tc.inputIDs[0]
 				var doneWg sync.WaitGroup
-				for i := 0; i < tc.concurrent; i++ {
+				for range tc.concurrent {
 					doneWg.Add(1)
 					go func() {
 						defer doneWg.Done()
@@ -969,7 +969,7 @@ func TestResolveBotRoleIDsSuite(t *testing.T) {
 			if tc.concurrentCallers > 0 {
 				var wg sync.WaitGroup
 				wg.Add(tc.concurrentCallers)
-				for i := 0; i < tc.concurrentCallers; i++ {
+				for range tc.concurrentCallers {
 					go func() {
 						defer wg.Done()
 						r := append([]string(nil), ResolveBotRoleIDs(s, tc.guildID, tc.botID)...)
@@ -984,7 +984,7 @@ func TestResolveBotRoleIDsSuite(t *testing.T) {
 				close(releaseCh)
 				wg.Wait()
 			} else {
-				for i := 0; i < tc.calls; i++ {
+				for i := range tc.calls {
 					r := append([]string(nil), ResolveBotRoleIDs(s, tc.guildID, tc.botID)...)
 					sort.Strings(r)
 					if strings.Join(r, ",") != wantJoined {
@@ -997,7 +997,7 @@ func TestResolveBotRoleIDsSuite(t *testing.T) {
 				t.Fatalf("fetchCalls = %d, want %d", got, tc.wantFetchCalls)
 			}
 			if tc.testCooldownPruning {
-				for i := 0; i < 150; i++ {
+				for i := range 150 {
 					setRESTCooldown(fmt.Sprintf("suite-key-%d", i), -time.Minute)
 				}
 				setRESTCooldown("suite-key-active", time.Minute)
@@ -2123,7 +2123,7 @@ func TestPostTurnHook_SerializedRelease(t *testing.T) {
 					default:
 						close(turn1PostStarted)
 						<-turn2Launched
-						for i := 0; i < 64; i++ {
+						for range 64 {
 							runtime.Gosched()
 						}
 						mu.Lock()
@@ -2286,7 +2286,7 @@ func runSessionRotationCase(t *testing.T, tc sessionRotationCase) {
 	if tc.saveInitialSession {
 		_ = saveSessionID(store, tc.threadID, sessionID)
 	}
-	for i := 0; i < tc.seedTurns; i++ {
+	for range tc.seedTurns {
 		_, _ = incrementSessionTurnCount(store, tc.threadID)
 	}
 	if tc.preTranscriptSteps > 0 {
@@ -2717,7 +2717,7 @@ func TestWorkerPool_DeliverStatusWidget(t *testing.T) {
 					t.Fatalf("setup prior request failed: %v", err)
 				}
 			}
-			for i := 0; i < tc.fifoFillCount; i++ {
+			for i := range tc.fifoFillCount {
 				fillReq := discord.StatusWidgetRequest{
 					ID:        fmt.Sprintf("fifo-build-%d", i),
 					ChannelID: targetChan,
@@ -3235,6 +3235,7 @@ func TestWorkerPool_ProcessPoolWiringAndTurnRouting(t *testing.T) {
 
 type spyPoolSessionDeps struct {
 	runner.AgentPool
+
 	callbacksSet bool
 	managerSet   bool
 }
@@ -3311,6 +3312,7 @@ func TestWorkerPool_WirePoolSessionDependencies_TableDriven(t *testing.T) {
 
 type mockErrSessionStore struct {
 	db.Store
+
 	findErr error
 }
 
@@ -3381,7 +3383,7 @@ func TestWorkerPool_CheckUnrotatedSessions_Scenarios(t *testing.T) {
 				for i, turns := range tc.sessionTurns {
 					thID := fmt.Sprintf("th-scen-%d", i+1)
 					_ = fake.SaveSessionID(context.Background(), thID, fmt.Sprintf("sess-scen-%d", i+1))
-					for j := 0; j < turns; j++ {
+					for range turns {
 						_, _ = fake.IncrementSessionTurnCount(context.Background(), thID)
 					}
 					if tc.dormantBackdate > 0 {
@@ -3429,7 +3431,7 @@ func TestWorkerPool_CheckUnrotatedSessions_DeduplicationAndPruning(t *testing.T)
 	lastReported := make(map[string]int)
 
 	_ = fake.SaveSessionID(ctx, "th-test", "sess-1")
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		_, _ = fake.IncrementSessionTurnCount(ctx, "th-test")
 	}
 	p.checkUnrotatedSessions(ctx, lastReported)
@@ -3440,7 +3442,7 @@ func TestWorkerPool_CheckUnrotatedSessions_DeduplicationAndPruning(t *testing.T)
 		t.Fatalf("expected 0 alerts, got %d", calls)
 	}
 
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		_, _ = fake.IncrementSessionTurnCount(ctx, "th-test")
 	}
 	p.checkUnrotatedSessions(ctx, lastReported)
@@ -3490,7 +3492,7 @@ func TestWorkerPool_MaintenanceTicker_FiresCheck(t *testing.T) {
 	defer func() { _ = fake.Close() }()
 	ctx := context.Background()
 	_ = fake.SaveSessionID(ctx, "th-ticker-test", "sess-ticker")
-	for i := 0; i < 11; i++ {
+	for range 11 {
 		_, _ = fake.IncrementSessionTurnCount(ctx, "th-ticker-test")
 	}
 
@@ -4062,7 +4064,7 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 				}
 				deliveredWidgetsMu.Unlock()
 				if stepsSeen == 0 {
-					var summaries []string
+					summaries := make([]string, 0, len(deliveredWidgets))
 					for _, w := range deliveredWidgets {
 						summaries = append(summaries, fmt.Sprintf("(SkipSink=%v, Chunks=%+v)", w.SkipSink, w.Chunks))
 					}
@@ -4108,7 +4110,7 @@ func TestDispatchExecution_ColdStartAndRotation(t *testing.T) {
 	})
 	defer pool.Stop()
 
-	for i := 0; i < session.DefaultMaxSessionTurns-1; i++ {
+	for range session.DefaultMaxSessionTurns - 1 {
 		_, _ = store.IncrementSessionTurnCount(ctx, "heartbeat-rot")
 	}
 
@@ -4553,6 +4555,7 @@ func TestMakeSessionCallbacks(t *testing.T) {
 
 type mockDaemonGetterPool struct {
 	runner.AgentPool
+
 	daemons map[string]*runner.StreamingDaemon
 }
 

@@ -79,10 +79,13 @@ var rateLimitKeywords = []string{
 }
 
 func isRateLimitError(errDetail string, extraStrs ...string) bool {
-	combined := strings.ToLower(errDetail)
+	var sb strings.Builder
+	sb.WriteString(strings.ToLower(errDetail))
 	for _, s := range extraStrs {
-		combined += " " + strings.ToLower(s)
+		sb.WriteByte(' ')
+		sb.WriteString(strings.ToLower(s))
 	}
+	combined := sb.String()
 	if strings.Contains(combined, "disk quota") {
 		return false
 	}
@@ -306,7 +309,7 @@ func (te *turnExecution) handleQuotaPause(errDetail, stderr, currentModel, burst
 		oneShot := oneShotScheduleRequest{
 			ID:       oneShotID,
 			ThreadID: te.threadID,
-			Prompt:   fmt.Sprintf("[QUOTA_RETRY] %s", te.turnPrompt),
+			Prompt:   "[QUOTA_RETRY] " + te.turnPrompt,
 			Effort:   burstEffort,
 			RunAt:    runAt,
 		}

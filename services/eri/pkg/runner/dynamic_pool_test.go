@@ -264,10 +264,10 @@ func TestDynamicVoicePool_ConcurrentAccessDuringReload(t *testing.T) {
 	var wg sync.WaitGroup
 	ctx := context.Background()
 	wg.Add(numWorkers + 1)
-	for i := 0; i < numWorkers; i++ {
+	for i := range numWorkers {
 		go func(wID int) {
 			defer wg.Done()
-			for j := 0; j < numIterations; j++ {
+			for j := range numIterations {
 				if l, err := dyn.AcquireLease(ctx, fmt.Sprintf("t-%d", (wID+j)%5)); err != nil || l == nil {
 					t.Errorf("worker %d AcquireLease error: %v", wID, err)
 					return
@@ -277,7 +277,7 @@ func TestDynamicVoicePool_ConcurrentAccessDuringReload(t *testing.T) {
 	}
 	go func() {
 		defer wg.Done()
-		for j := 0; j < 20; j++ {
+		for range 20 {
 			toggle.Add(1)
 			dyn.MarkDirty()
 			runtime.Gosched()
@@ -301,7 +301,7 @@ func TestDynamicVoicePool_SerializedReloadsAndDrain(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(10)
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		go func() {
 			defer wg.Done()
 			dyn.MarkDirty()

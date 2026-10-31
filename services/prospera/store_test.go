@@ -700,7 +700,7 @@ func TestPGStore_SaveVoiceMessage_Concurrent(t *testing.T) {
 		Body:       "concurrent race test",
 	}
 	wg.Add(numGoroutines)
-	for i := 0; i < numGoroutines; i++ {
+	for range numGoroutines {
 		go func() {
 			defer wg.Done()
 			ins, err := store.SaveVoiceMessage(ctx, concurMsg)

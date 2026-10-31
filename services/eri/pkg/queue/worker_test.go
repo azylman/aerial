@@ -1094,6 +1094,7 @@ func TestWorker_EvaluateAmbientWake_HTTPAndSilent_TableDriven(t *testing.T) {
 
 type retryNotifyStore struct {
 	db.Store
+
 	onRetry func()
 }
 

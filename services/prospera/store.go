@@ -511,7 +511,7 @@ func appendCallJSONSlice[T any](ctx context.Context, s *PGStore, callID, column,
 		return fmt.Errorf("store: get %s: %w", errLabel, err)
 	}
 
-	var list []T
+	list := make([]T, 0, 1)
 	if raw != "" {
 		if err := json.Unmarshal([]byte(raw), &list); err != nil {
 			return fmt.Errorf("store: unmarshal %s: %w", errLabel, err)

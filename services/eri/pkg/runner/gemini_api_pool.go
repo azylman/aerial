@@ -938,7 +938,7 @@ func (s *GeminiAPISession) Send(prompt string, turn *TurnContext) error {
 	var totalUsage AgyUsage
 	started := false
 
-	for iteration := 0; iteration < maxToolIterations; iteration++ {
+	for range maxToolIterations {
 		reqPayload := geminiStreamRequest{
 			Contents:          workingContents,
 			Tools:             tools,

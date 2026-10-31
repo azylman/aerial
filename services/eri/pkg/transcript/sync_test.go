@@ -75,6 +75,7 @@ func TestNewOllamaEmbedder_TableDriven(t *testing.T) {
 
 type channelTranscriptStore struct {
 	db.TranscriptStore
+
 	notify chan struct{}
 	err    error
 }
@@ -190,7 +191,7 @@ func TestStartTranscriptSync_TableDriven(t *testing.T) {
 			}
 			cfg := config.NewFromData(&config.ConfigData{DataDir: tempDir})
 			StartTranscriptSync(ctx, store, cfg, brainDir, nil, tc.interval)
-			for i := 0; i < tc.expectTicks; i++ {
+			for i := range tc.expectTicks {
 				select {
 				case <-notify:
 				case <-time.After(2 * time.Second):

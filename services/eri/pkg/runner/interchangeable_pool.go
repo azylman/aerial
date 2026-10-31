@@ -49,7 +49,7 @@ func NewInterchangeablePool(underlying *UnifiedProcessPool, cfg InterchangeableP
 	}
 
 	workers, available := make([]string, workerCount), make(chan string, workerCount)
-	for i := 0; i < workerCount; i++ {
+	for i := range workerCount {
 		key := fmt.Sprintf("%s-%d", keyPrefix, i)
 		workers[i] = key
 		available <- key

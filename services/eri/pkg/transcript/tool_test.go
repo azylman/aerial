@@ -670,7 +670,7 @@ func TestGetTranscriptStepWindow(t *testing.T) {
 				ctx := context.Background()
 				_ = fake.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-win-1"})
 				steps := make([]db.TranscriptStep, 10)
-				for i := 0; i < 10; i++ {
+				for i := range 10 {
 					steps[i] = db.TranscriptStep{
 						SessionID: "sess-win-1",
 						StepIndex: i,

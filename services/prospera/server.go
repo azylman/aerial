@@ -451,7 +451,7 @@ func (s *Server) handleTwilioSMS(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	var mediaURLs []string
-	for i := 0; i < numMedia; i++ {
+	for i := range numMedia {
 		u := r.PostForm.Get(fmt.Sprintf("MediaUrl%d", i))
 		if u != "" {
 			mediaURLs = append(mediaURLs, u)

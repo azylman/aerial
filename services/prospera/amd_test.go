@@ -78,7 +78,7 @@ func TestAMDGreetingController_InboundFrames(t *testing.T) {
 			var lastAction AMDAction
 
 			for _, f := range tc.frames {
-				for r := 0; r < f.repeat; r++ {
+				for range f.repeat {
 					lastAction = ctrl.OnInboundFrame(f.rms, f.ms)
 				}
 			}

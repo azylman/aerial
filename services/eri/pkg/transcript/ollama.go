@@ -19,6 +19,7 @@ const (
 // Client manages HTTP embedding requests to Ollama for transcript indexing and search.
 type Client struct {
 	*ollama.Client
+
 	cfg   *config.Config
 	roots []string
 }

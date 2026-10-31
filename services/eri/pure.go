@@ -130,7 +130,7 @@ func defaultDataDir(isTesting bool) string {
 
 func buildDiscordPools(basePoolCfg func(home, model string, prewarmed []string) runner.PoolConfig, discordHome, highModel, medModel, lowModel string, spawner runner.DaemonSpawner) (map[queue.PoolKey]runner.AgentPool, []runner.AgentPool) {
 	pools := make(map[queue.PoolKey]runner.AgentPool, 5)
-	var ordered []runner.AgentPool
+	ordered := make([]runner.AgentPool, 0, len(queue.AllValidPoolKeys()))
 	for _, k := range queue.AllValidPoolKeys() {
 		model := highModel
 		switch k.Effort {

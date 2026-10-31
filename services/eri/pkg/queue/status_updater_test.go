@@ -369,7 +369,7 @@ func TestStatusUpdater_CircuitBreakers(t *testing.T) {
 				u.statusMessageID, u.phase, u.dirty = "msg-exist", "thinking", true
 				u.flush()
 			}
-			for i := 0; i < 3; i++ {
+			for range 3 {
 				u.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "test_tool", State: "ACTIVE"})
 				u.flush()
 			}

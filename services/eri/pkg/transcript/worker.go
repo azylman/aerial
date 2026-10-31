@@ -357,7 +357,7 @@ func generateSettledSummaryText(
 ) string {
 	summaryText := ""
 	if isSettled && llmFunc != nil && len(dialogueLines) > 0 {
-		prompt := fmt.Sprintf("Summarize the following agent conversation transcript in 2-3 concise sentences. Focus on technical entities, tools executed, and outcomes.\n\nTranscript:\n%s", strings.Join(dialogueLines, "\n"))
+		prompt := "Summarize the following agent conversation transcript in 2-3 concise sentences. Focus on technical entities, tools executed, and outcomes.\n\nTranscript:\n" + strings.Join(dialogueLines, "\n")
 		if res, err := llmFunc(ctx, prompt); err == nil && strings.TrimSpace(res) != "" {
 			summaryText = strings.TrimSpace(res)
 		}
@@ -367,7 +367,7 @@ func generateSettledSummaryText(
 		summaryText = CleanSessionSummary(step0Prompt, DefaultSummaryMaxRunes)
 	}
 	if summaryText == "" {
-		summaryText = fmt.Sprintf("Session %s", sessionID)
+		summaryText = "Session " + sessionID
 	}
 
 	return summaryText

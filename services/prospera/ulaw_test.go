@@ -83,7 +83,7 @@ func TestMuLawCodec(t *testing.T) {
 
 	t.Run("all 256 bytes roundtrip", func(t *testing.T) {
 		t.Parallel()
-		for b := 0; b < 256; b++ {
+		for b := range 256 {
 			in := byte(b)
 			pcm := MuLawToPCM16([]byte{in})
 			if len(pcm) != 1 {

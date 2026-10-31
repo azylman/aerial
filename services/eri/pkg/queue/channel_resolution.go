@@ -89,7 +89,7 @@ func IsNumericSnowflake(id string) bool {
 	if id == "" {
 		return false
 	}
-	for i := 0; i < len(id); i++ {
+	for i := range len(id) {
 		if id[i] < '0' || id[i] > '9' {
 			return false
 		}
@@ -402,7 +402,7 @@ func FormatThreadTitle(titlePrefix, prompt string, now time.Time) string {
 		clean := db.CleanTaskSummary(prompt)
 		title = fmt.Sprintf("%s – %s", clean, dateStr)
 	} else {
-		title = fmt.Sprintf("Scheduled Routine – %s", dateStr)
+		title = "Scheduled Routine – " + dateStr
 	}
 	runes := []rune(title)
 	if len(runes) > 100 {
@@ -422,7 +422,7 @@ func IsValidThreadKey(id string) bool {
 	if len(id) < 1 || len(id) > 128 || strings.Contains(id, ":") {
 		return false
 	}
-	for i := 0; i < len(id); i++ {
+	for i := range len(id) {
 		c := id[i]
 		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
 			return false

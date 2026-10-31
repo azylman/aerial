@@ -630,7 +630,7 @@ func (s *MediaStreamSession) handleAMDAction(action AMDAction) {
 		s.mu.Unlock()
 
 		if !alreadyReleased {
-			turnMsg := BuildGeminiClientContent(fmt.Sprintf("Call connected. Open the conversation naturally and warmly in your own words (do not read the task verbatim) for: %s", s.openingGreeting), "user")
+			turnMsg := BuildGeminiClientContent("Call connected. Open the conversation naturally and warmly in your own words (do not read the task verbatim) for: "+s.openingGreeting, "user")
 			if err := s.sendGeminiJSON(turnMsg); err != nil {
 				log.Printf("prospera: send turn msg err: %v", err)
 			}
@@ -649,10 +649,12 @@ func (s *MediaStreamSession) handleAMDAction(action AMDAction) {
 		if vm == "" {
 			vm = s.openingGreeting
 		}
-		turnMsg := BuildGeminiClientContent(fmt.Sprintf("Voicemail beep heard. Speak this exact voicemail message and then call end_call: %s", vm), "user")
+		turnMsg := BuildGeminiClientContent("Voicemail beep heard. Speak this exact voicemail message and then call end_call: "+vm, "user")
 		if err := s.sendGeminiJSON(turnMsg); err != nil {
 			log.Printf("prospera: send turn msg err: %v", err)
 		}
+	case AMDActionNone:
+		// No action needed for AMDActionNone
 	}
 }
 
