@@ -1065,6 +1065,18 @@ func TestMCPProvisioning(t *testing.T) {
 			if (servers["discord"] != nil) != tc.wantDiscord {
 				t.Errorf("discord presence = %v, want %v", servers["discord"] != nil, tc.wantDiscord)
 			}
+			if (servers["vanadis"] != nil) != tc.wantDiscord {
+				t.Errorf("vanadis presence = %v, want %v", servers["vanadis"] != nil, tc.wantDiscord)
+			}
+			if tc.wantDiscord && servers["vanadis"] != nil {
+				if vMap, ok := servers["vanadis"].(map[string]interface{}); ok {
+					if vMap["serverUrl"] != "http://vanadis.aerial/mcp" {
+						t.Errorf("vanadis serverUrl = %v, want http://vanadis.aerial/mcp", vMap["serverUrl"])
+					}
+				} else {
+					t.Errorf("expected servers[\"vanadis\"] to be map[string]interface{}, got %T", servers["vanadis"])
+				}
+			}
 			if (servers["github"] != nil) != tc.wantGitHub {
 				t.Errorf("github presence = %v, want %v", servers["github"] != nil, tc.wantGitHub)
 			}
