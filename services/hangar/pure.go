@@ -601,34 +601,103 @@ func isStaticAssetOnlyFile(clean string) bool {
 	return strings.HasPrefix(c, "services/dashboard/static/") || strings.HasPrefix(c, "services/docs-service/app/")
 }
 
-// JobHasContainerBuildChanges returns true if any azylman/aerial container image referenced
+// JobHasContainerBuildChanges returns true if any container image referenced
 // in jobSpec has matching source file modifications in changedFiles.
 func JobHasContainerBuildChanges(jobSpec string, changedFiles []string) bool {
+	return jobHasRepoContainerBuildChanges("", jobSpec, changedFiles)
+}
+
+func cleanChangedFilePath(f string) string {
+	return strings.TrimPrefix(path.Clean(strings.ReplaceAll(strings.TrimSpace(f), "\\", "/")), "/")
+}
+
+func matchesPathOrPrefix(clean string, exact, prefixes []string) bool {
+	for _, e := range exact {
+		if clean == e {
+			return true
+		}
+	}
+	for _, p := range prefixes {
+		if strings.HasPrefix(clean, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func aerialImageHasBuildChanges(svc string, changedFiles []string) bool {
+	prefixes := []string{"services/" + svc + "/", "mcp/" + svc + "/"}
+	if svc == "docs" {
+		prefixes = append(prefixes, "services/docs-service/")
+	}
+	if serviceBuildDependsOnPkg(svc) {
+		prefixes = append(prefixes, "pkg/")
+	}
+	exact := []string{"Dockerfile", ".dockerignore"}
+	for _, f := range changedFiles {
+		clean := cleanChangedFilePath(f)
+		if !isStaticAssetOnlyFile(clean) && matchesPathOrPrefix(clean, exact, prefixes) {
+			return true
+		}
+	}
+	return false
+}
+
+func sidecarImageHasBuildChanges(svc string, changedFiles []string) bool {
+	prefixes := []string{svc + "/"}
+	var exact []string
+	if svc == "migrator" {
+		prefixes = append(prefixes, "scratch-service/migrations/")
+		exact = []string{"atlas.hcl"}
+	}
+	for _, f := range changedFiles {
+		if matchesPathOrPrefix(cleanChangedFilePath(f), exact, prefixes) {
+			return true
+		}
+	}
+	return false
+}
+
+func mirrormereImageHasBuildChanges(base string, changedFiles []string) bool {
+	var exact, prefixes []string
+	if base == "mirrormere" {
+		exact = []string{"Dockerfile", ".dockerignore", "go.mod", "go.sum", "Makefile"}
+		prefixes = []string{"cmd/", "internal/", "api/"}
+	} else {
+		sub := strings.TrimPrefix(base, "mirrormere-")
+		prefixes = []string{"client/" + sub + "/", "sidecars/" + sub + "/"}
+		if sub == "cast-watcher" || sub == "hass-proxy" {
+			exact = []string{".dockerignore", "go.mod", "go.sum"}
+		}
+	}
+	for _, f := range changedFiles {
+		if matchesPathOrPrefix(cleanChangedFilePath(f), exact, prefixes) {
+			return true
+		}
+	}
+	return false
+}
+
+func imageHasBuildChanges(srcRepo, img string, changedFiles []string) bool {
+	base := path.Base(stripImageTag(strings.ToLower(strings.TrimSpace(img))))
+	switch srcRepo {
+	case "azylman/aerial-sidecars":
+		return sidecarImageHasBuildChanges(strings.TrimPrefix(base, "aerial-sidecar-"), changedFiles)
+	case "azylman/mirrormere":
+		return mirrormereImageHasBuildChanges(base, changedFiles)
+	default:
+		return aerialImageHasBuildChanges(strings.TrimPrefix(base, "aerial-"), changedFiles)
+	}
+}
+
+func jobHasRepoContainerBuildChanges(repoSlug, jobSpec string, changedFiles []string) bool {
 	for _, img := range ExtractNomadJobImages(jobSpec) {
-		if !strings.EqualFold(ImageSourceRepo(img), "azylman/aerial") {
+		srcRepo := ImageSourceRepo(img)
+		if srcRepo == "" || (repoSlug != "" && !strings.EqualFold(srcRepo, repoSlug)) {
 			continue
 		}
-		svc := strings.TrimPrefix(path.Base(stripImageTag(strings.ToLower(strings.TrimSpace(img)))), "aerial-")
-		prefixes := []string{"services/" + svc + "/", "mcp/" + svc + "/"}
-		if svc == "docs" {
-			prefixes = append(prefixes, "services/docs-service/")
-		}
-		if serviceBuildDependsOnPkg(svc) {
-			prefixes = append(prefixes, "pkg/")
-		}
-		for _, f := range changedFiles {
-			clean := strings.TrimPrefix(path.Clean(strings.ReplaceAll(strings.TrimSpace(f), "\\", "/")), "/")
-			if isStaticAssetOnlyFile(clean) {
-				continue
-			}
-			if clean == "Dockerfile" || clean == ".dockerignore" {
-				return true
-			}
-			for _, p := range prefixes {
-				if strings.HasPrefix(clean, p) {
-					return true
-				}
-			}
+		if imageHasBuildChanges(srcRepo, img, changedFiles) {
+			return true
 		}
 	}
 	return false
