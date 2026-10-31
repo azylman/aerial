@@ -756,7 +756,17 @@ func (s *RouterServer) HandleNomadJobSuccess(ctx context.Context, jobID, refID s
 	}
 	log.Printf("[synapse] [nomad] deployment confirmed for %s#%d (job: %s, commit: %s, target: %s, ref: %s)",
 		repo, prNumber, cleanJob, mergeSHA, targetID, refID)
-	return s.dispatchDeploymentSuccessPrompt(ctx, targetID, cleanJob, repo, mergeSHA, prNumber, refID)
+	if err := s.dispatchDeploymentSuccessPrompt(ctx, targetID, cleanJob, repo, mergeSHA, prNumber, refID); err != nil {
+		s.setPRWidgetState(ctx, repo, prNumber, "deploying", "")
+		if appErr := s.registry.AppendPRJobs(ctx, repo, prNumber, []string{cleanJob}); appErr != nil {
+			log.Printf("[synapse] [nomad] warning restoring job %s to pr %s#%d jobs: %v", cleanJob, repo, prNumber, appErr)
+		}
+		if statErr := s.registry.UpdatePRStatus(ctx, repo, prNumber, "deploying", nil); statErr != nil {
+			log.Printf("[synapse] [nomad] warning reverting pr %s#%d status to deploying: %v", repo, prNumber, statErr)
+		}
+		return err
+	}
+	return nil
 }
 
 // ReconcileActiveDeployments performs the startup sweep across all pending deployments in pr_registry.

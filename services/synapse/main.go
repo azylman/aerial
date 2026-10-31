@@ -525,29 +525,32 @@ func (s *RouterServer) postVanadisSyncWidget(qCtx context.Context, pgReg *Postgr
 	if err != nil {
 		return false, fmt.Errorf("marshal sync chunk widget request: %w", err)
 	}
-	httpReq, err := http.NewRequestWithContext(qCtx, http.MethodPost, vURL+"/chunks/sync-pr-widget", bytes.NewReader(bodyBytes))
-	if err != nil {
-		return false, fmt.Errorf("create sync chunk widget request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return false, fmt.Errorf("sync vanadis pr widget: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		if readErr != nil {
-			return false, fmt.Errorf("sync vanadis pr widget: unexpected status %d (read error: %w)", resp.StatusCode, readErr)
-		}
-		return false, fmt.Errorf("sync vanadis pr widget: unexpected status %d: %s", resp.StatusCode, string(body))
-	}
 	var syncRes struct {
 		Matched bool   `json:"matched"`
 		BuildID string `json:"build_id"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&syncRes); err != nil {
-		return false, fmt.Errorf("decode sync chunk widget response: %w", err)
+	err = pgReg.doHTTPWithRetry(qCtx, client, "sync vanadis pr widget", func() (*http.Request, error) {
+		req, reqErr := http.NewRequestWithContext(qCtx, http.MethodPost, vURL+"/chunks/sync-pr-widget", bytes.NewReader(bodyBytes))
+		if reqErr != nil {
+			return nil, reqErr
+		}
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	}, func(resp *http.Response) error {
+		if resp.StatusCode != http.StatusOK {
+			body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
+			if readErr != nil {
+				return fmt.Errorf("sync vanadis pr widget: unexpected status %d (read error: %w)", resp.StatusCode, readErr)
+			}
+			return fmt.Errorf("sync vanadis pr widget: unexpected status %d: %s", resp.StatusCode, string(body))
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&syncRes); err != nil {
+			return fmt.Errorf("decode sync chunk widget response: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return false, err
 	}
 	return syncRes.Matched, nil
 }
@@ -672,10 +675,15 @@ func (s *RouterServer) vanadisPromptOpts(ctx context.Context, repo string, prNum
 	opts := vanadisPromptOpts{silent: true, effort: "medium"}
 	if s != nil && s.registry != nil {
 		if pgReg, ok := s.registry.(*PostgresPRRegistry); ok {
-			if matched, chunkID, effort, err := pgReg.ResolveVanadisChunkForPR(ctx, repo, prNum); err == nil && matched {
-				opts.chunkID = chunkID
+			matched, chunkID, effort, err := pgReg.ResolveVanadisChunkForPR(ctx, repo, prNum)
+			if err == nil && matched && strings.TrimSpace(chunkID) != "" {
+				opts.chunkID = strings.TrimSpace(chunkID)
 				if effort != "" {
 					opts.effort = effort
+				}
+			} else {
+				if persisted := pgReg.getPersistedVanadisChunkID(ctx, repo, prNum); persisted != "" {
+					opts.chunkID = persisted
 				}
 			}
 		}
@@ -683,32 +691,26 @@ func (s *RouterServer) vanadisPromptOpts(ctx context.Context, repo string, prNum
 	return opts
 }
 
-func (s *RouterServer) isVanadisPR(ctx context.Context, repo string, prNum int) bool {
+func (s *RouterServer) isVanadisPR(ctx context.Context, repo string, prNum int) (bool, error) {
 	if s.registry == nil || prNum <= 0 {
-		return false
+		return false, nil
 	}
-	suppressed, err := s.registry.ShouldSuppressVanadisDeployWake(ctx, repo, prNum)
-	if err != nil {
-		log.Printf("[synapse] [vanadis] warning checking Vanadis deploy suppression for %s#%d: %v", repo, prNum, err)
-		return false
-	}
-	return suppressed
+	return s.registry.ShouldSuppressVanadisDeployWake(ctx, repo, prNum)
 }
 
-func (s *RouterServer) isFinalVanadisChunk(ctx context.Context, repo string, prNum int) bool {
+func (s *RouterServer) isFinalVanadisChunk(ctx context.Context, repo string, prNum int) (bool, error) {
 	if s.registry == nil || prNum <= 0 {
-		return false
+		return false, nil
 	}
-	finalChunk, err := s.registry.IsFinalVanadisChunk(ctx, repo, prNum)
-	if err != nil {
-		log.Printf("[synapse] [vanadis] warning checking Vanadis final chunk status for %s#%d: %v", repo, prNum, err)
-		return false
-	}
-	return finalChunk
+	return s.registry.IsFinalVanadisChunk(ctx, repo, prNum)
 }
 
 func (s *RouterServer) advanceNonFinalVanadisChunk(ctx context.Context, repo string, prNumber int) error {
-	if s.isFinalVanadisChunk(ctx, repo, prNumber) {
+	finalChunk, err := s.isFinalVanadisChunk(ctx, repo, prNumber)
+	if err != nil {
+		return err
+	}
+	if finalChunk {
 		return nil
 	}
 	return s.advanceVanadisChunk(ctx, repo, prNumber)
@@ -718,9 +720,15 @@ func (s *RouterServer) advanceVanadisChunkOnSync(ctx context.Context, repo strin
 	if s.registry == nil || prNumber <= 0 {
 		return nil
 	}
-	if syncHasExpected && s.isFinalVanadisChunk(ctx, repo, prNumber) {
-		log.Printf("[synapse] [vanadis] deferring final chunk advancement on sync_success for %s#%d until deploy_success", repo, prNumber)
-		return nil
+	if syncHasExpected {
+		finalChunk, err := s.isFinalVanadisChunk(ctx, repo, prNumber)
+		if err != nil {
+			return err
+		}
+		if finalChunk {
+			log.Printf("[synapse] [vanadis] deferring final chunk advancement on sync_success for %s#%d until deploy_success", repo, prNumber)
+			return nil
+		}
 	}
 	return s.advanceVanadisChunk(ctx, repo, prNumber)
 }
@@ -999,12 +1007,17 @@ func (s *RouterServer) handleHangarSyncSuccess(ctx context.Context, evt HangarDe
 		if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber); err != nil {
 			log.Printf("[synapse] [widget] warning syncing sync_success widget for %s#%d: %v", evt.Repo, evt.PRNumber, err)
 		}
-	} else if !s.isVanadisPR(ctx, evt.Repo, evt.PRNumber) {
+		return nil
+	}
+	vanadisPR, err := s.isVanadisPR(ctx, evt.Repo, evt.PRNumber)
+	if err != nil {
+		return err
+	}
+	if !vanadisPR {
 		return s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, firstNonEmpty(evt.JobName, "git-sync"), evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID)
-	} else {
-		if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber); err != nil {
-			log.Printf("[synapse] [widget] warning syncing sync_success widget for %s#%d: %v", evt.Repo, evt.PRNumber, err)
-		}
+	}
+	if err := s.SyncPRWidget(ctx, evt.Repo, evt.PRNumber); err != nil {
+		log.Printf("[synapse] [widget] warning syncing sync_success widget for %s#%d: %v", evt.Repo, evt.PRNumber, err)
 	}
 	return nil
 }
@@ -1014,9 +1027,12 @@ func (s *RouterServer) dispatchDeploymentSuccessPrompt(ctx context.Context, targ
 		return nil
 	}
 
-	vanadisPR := s.isVanadisPR(ctx, repo, prNum)
-	if vanadisPR && s.isFinalVanadisChunk(ctx, repo, prNum) {
-		log.Printf("[synapse] [vanadis] suppressing deploy_success /prompt wake and advancing final chunk for %s#%d (job=%s)", repo, prNum, jobName)
+	vanadisPR, err := s.isVanadisPR(ctx, repo, prNum)
+	if err != nil {
+		return err
+	}
+	if vanadisPR {
+		log.Printf("[synapse] [vanadis] suppressing deploy_success /prompt wake and advancing chunk for %s#%d (job=%s)", repo, prNum, jobName)
 		return s.advanceVanadisChunk(ctx, repo, prNum)
 	}
 
@@ -1024,11 +1040,6 @@ func (s *RouterServer) dispatchDeploymentSuccessPrompt(ctx context.Context, targ
 		if err := s.SyncPRWidget(ctx, repo, prNum); err != nil {
 			log.Printf("[synapse] [widget] warning syncing deploy_success widget: %v", err)
 		}
-	}
-
-	if vanadisPR {
-		log.Printf("[synapse] [vanadis] suppressing mid-run deploy_success /prompt wake for %s#%d (job=%s)", repo, prNum, jobName)
-		return nil
 	}
 
 	repoPart := ""

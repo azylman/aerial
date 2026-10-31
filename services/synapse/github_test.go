@@ -312,8 +312,14 @@ func TestProcessGitHubEvent(t *testing.T) {
 		{
 			name: "pull_request closed unmerged transitions registry", event: "pull_request", delivery: "del-pr-closed",
 			payload: `{"action":"closed","number":516,"pull_request":{"number":516,"head":{"ref":"feat/discard","sha":"head222"},"merged":false},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"arcane103"}}`,
-			reg:     &mockPRRegistry{closedTargetID: "target-closed-1", failVanadisErr: errors.New("fail err")},
+			reg:     &mockPRRegistry{closedTargetID: "target-closed-1"},
 			wantPR:  516, wantTargetID: "target-closed-1", wantClosedCalls: 1, wantFailVanadis: 1,
+		},
+		{
+			name: "pull_request closed unmerged failVanadisChunk error propagates", event: "pull_request", delivery: "del-pr-closed-fail-vanadis-err",
+			payload: `{"action":"closed","number":516,"pull_request":{"number":516,"head":{"ref":"feat/discard","sha":"head222"},"merged":false},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"arcane103"}}`,
+			reg:     &mockPRRegistry{closedTargetID: "target-closed-1", failVanadisErr: errors.New("fail err")},
+			wantErr: true,
 		},
 		{
 			name: "pull_request synchronize transitions registry", event: "pull_request", delivery: "del-pr-sync",
@@ -679,6 +685,20 @@ func TestProcessGitHubEvent(t *testing.T) {
 			reg:     &mockPRRegistry{resolvePRNum: 221, resolveBranch: "feat/ui-no-deploy", resolveTargetID: "1562162630997581946", hasExpectedRes: false, suppressVanadisRes: true},
 			disp:    &mockOutboundDispatcher{},
 			wantPR:  221, wantAdvanceCalls: 1, wantPrompts: 0,
+		},
+		{
+			name: "workflow_run on main completeNoDeployWorkflowRun HasExpectedDeployJobs error propagates", event: "workflow_run", delivery: "del-wf-mirrormere-has-expected-err",
+			payload: `{"action":"completed","workflow_run":{"id":800,"name":"Continuous Delivery","head_sha":"merge221","head_branch":"main","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/mirrormere"}}`,
+			reg:     &mockPRRegistry{resolvePRNum: 221, resolveBranch: "feat/ui-no-deploy", resolveTargetID: "1562162630997581946", hasExpectedErr: errors.New("simulated has expected deploy jobs error")},
+			disp:    &mockOutboundDispatcher{},
+			wantErr: true,
+		},
+		{
+			name: "workflow_run on main completeNoDeployWorkflowRun isVanadisPR error propagates", event: "workflow_run", delivery: "del-wf-mirrormere-is-vanadis-err",
+			payload: `{"action":"completed","workflow_run":{"id":800,"name":"Continuous Delivery","head_sha":"merge221","head_branch":"main","status":"completed","conclusion":"success","pull_requests":[]},"repository":{"full_name":"azylman/mirrormere"}}`,
+			reg:     &mockPRRegistry{resolvePRNum: 221, resolveBranch: "feat/ui-no-deploy", resolveTargetID: "1562162630997581946", hasExpectedRes: false, suppressVanadisErr: errors.New("simulated is vanadis pr error")},
+			disp:    &mockOutboundDispatcher{},
+			wantErr: true,
 		},
 		{
 			name:     "dependabot PR opened auto-merge success",
@@ -1113,7 +1133,7 @@ func TestDispatchWorkflowRunImages(t *testing.T) {
 			hasExpectedErr:  errors.New("expected err"),
 			suppressVanadis: true,
 			widgetErr:       errors.New("widget sync err"),
-			wantErr:         false,
+			wantErr:         true,
 		},
 		{
 			name:           "resolved image with 0 matched Nomad jobs completes no-deploy workflow run",

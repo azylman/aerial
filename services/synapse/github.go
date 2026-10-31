@@ -172,7 +172,7 @@ func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, he
 	}
 	hasExpected, err := s.registry.HasExpectedDeployJobs(ctx, repo, prNum)
 	if err != nil {
-		log.Printf("[synapse] [registry] warning checking expected deploy jobs for %s#%d on workflow_run: %v", repo, prNum, err)
+		return fmt.Errorf("failed to check expected deploy jobs: %w", err)
 	}
 	if hasExpected {
 		return nil
@@ -181,7 +181,11 @@ func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, he
 	if err := s.advanceVanadisChunk(ctx, repo, prNum); err != nil {
 		return err
 	}
-	if !s.isVanadisPR(ctx, repo, prNum) {
+	vanadisPR, err := s.isVanadisPR(ctx, repo, prNum)
+	if err != nil {
+		return err
+	}
+	if !vanadisPR {
 		return s.dispatchDeploymentSuccessPrompt(ctx, targetID, "git-merge", repo, headSHA, prNum, "")
 	}
 	if err := s.SyncPRWidget(ctx, repo, prNum); err != nil {
@@ -917,7 +921,7 @@ func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGi
 	}
 	res.TargetID = firstNonEmpty(res.TargetID, targetID)
 	if err := s.failVanadisChunk(ctx, res.Repo, res.PRNumber, "pr_closed_unmerged"); err != nil {
-		log.Printf("[synapse] [vanadis] warning failing vanadis chunk for closed unmerged PR %s#%d: %v", res.Repo, res.PRNumber, err)
+		return err
 	}
 	if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
 		log.Printf("[synapse] [widget] warning syncing pr_closed widget for %s#%d: %v", res.Repo, res.PRNumber, err)

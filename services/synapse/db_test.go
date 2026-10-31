@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -328,6 +329,7 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 		// EnsurePRRegistered
 		{name: "EnsurePRRegistered empty repo guard", op: "EnsurePRRegistered", repo: "", prNumber: 692, wantTarget: ""},
 		{name: "EnsurePRRegistered chunk query error", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", vanadisStatus: http.StatusInternalServerError, vanadisBody: `{"error":"internal"}`, wantErr: true},
+		{name: "EnsurePRRegistered chunk attach 400 bad request returns error", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", vanadisStatus: http.StatusBadRequest, vanadisBody: `{"error":"bad request"}`, wantErr: true},
 		{name: "EnsurePRRegistered chunk resolves thread_id and upserts pr_registry", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", vanadisStatus: http.StatusOK, vanadisBody: `{"status":"attached","thread_id":"1562162630997581946"}`, targetIDReturn: "1562162630997581946", wantTarget: "1562162630997581946"},
 		{name: "EnsurePRRegistered invalid targetID after chunk miss skips upsert", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", vanadisStatus: http.StatusNotFound, vanadisBody: `{"error":"not found"}`, wantTarget: ""},
 		{name: "EnsurePRRegistered upsert exec error", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, targetID: "1562162630997581946", mockExecErr: errors.New("upsert err"), wantErr: true},
@@ -365,6 +367,23 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 		{name: "HasExpectedDeployJobs true when jobs exist", op: "HasExpectedDeployJobs", repo: "azylman/aerial", prNumber: 42, wantUpdated: true, wantSQLSubstr: "deployed_jobs"},
 		{name: "HasExpectedDeployJobs not found returns false", op: "HasExpectedDeployJobs", repo: "azylman/aerial", prNumber: 42, mockSelectErr: pgx.ErrNoRows, wantUpdated: false},
 		{name: "HasExpectedDeployJobs db error", op: "HasExpectedDeployJobs", repo: "azylman/aerial", prNumber: 42, mockSelectErr: errors.New("db error"), wantErr: true},
+
+		// AppendPRJobs
+		{name: "AppendPRJobs empty repo guard", op: "AppendPRJobs", repo: "", prNumber: 42, jobs: []string{"coven"}},
+		{name: "AppendPRJobs zero pr guard", op: "AppendPRJobs", repo: "azylman/aerial", prNumber: 0, jobs: []string{"coven"}},
+		{name: "AppendPRJobs nil pool guard", op: "AppendPRJobs", nilPool: true, repo: "azylman/aerial", prNumber: 42, jobs: []string{"coven"}},
+		{name: "AppendPRJobs empty jobs guard", op: "AppendPRJobs", repo: "azylman/aerial", prNumber: 42, jobs: []string{}},
+		{name: "AppendPRJobs success", op: "AppendPRJobs", repo: "azylman/aerial", prNumber: 42, jobs: []string{"coven"}, wantSQLSubstr: "UPDATE pr_registry"},
+		{name: "AppendPRJobs exec error", op: "AppendPRJobs", repo: "azylman/aerial", prNumber: 42, jobs: []string{"coven"}, mockExecErr: errors.New("exec error"), wantErr: true},
+
+		// UpdatePRStatus
+		{name: "UpdatePRStatus empty repo guard", op: "UpdatePRStatus", repo: "", prNumber: 42, targetID: "deploying"},
+		{name: "UpdatePRStatus zero pr guard", op: "UpdatePRStatus", repo: "azylman/aerial", prNumber: 0, targetID: "deploying"},
+		{name: "UpdatePRStatus nil pool guard", op: "UpdatePRStatus", nilPool: true, repo: "azylman/aerial", prNumber: 42, targetID: "deploying"},
+		{name: "UpdatePRStatus empty status guard", op: "UpdatePRStatus", repo: "azylman/aerial", prNumber: 42, targetID: ""},
+		{name: "UpdatePRStatus success without meta", op: "UpdatePRStatus", repo: "azylman/aerial", prNumber: 42, targetID: "deploying", wantSQLSubstr: "UPDATE pr_registry"},
+		{name: "UpdatePRStatus success with meta", op: "UpdatePRStatus", repo: "azylman/aerial", prNumber: 42, targetID: "deploying", metaJSON: `{"banner":"reverting"}`, wantSQLSubstr: "UPDATE pr_registry"},
+		{name: "UpdatePRStatus exec error", op: "UpdatePRStatus", repo: "azylman/aerial", prNumber: 42, targetID: "deploying", mockExecErr: errors.New("exec error"), wantErr: true},
 	}
 
 	for _, tc := range tests {
@@ -787,6 +806,20 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 				if gotHas != tc.wantUpdated {
 					t.Errorf("gotHas = %v, want %v", gotHas, tc.wantUpdated)
 				}
+			case "AppendPRJobs":
+				err := reg.AppendPRJobs(ctx, tc.repo, tc.prNumber, tc.jobs)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("AppendPRJobs err = %v, wantErr = %v", err, tc.wantErr)
+				}
+			case "UpdatePRStatus":
+				var meta map[string]interface{}
+				if tc.metaJSON != "" {
+					_ = json.Unmarshal([]byte(tc.metaJSON), &meta)
+				}
+				err := reg.UpdatePRStatus(ctx, tc.repo, tc.prNumber, tc.targetID, meta)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("UpdatePRStatus err = %v, wantErr = %v", err, tc.wantErr)
+				}
 			}
 			if tc.wantSQLSubstr != "" && !strings.Contains(gotSQL, tc.wantSQLSubstr) && !strings.Contains(gotExecSQL, tc.wantSQLSubstr) {
 				t.Errorf("gotSQL = %q, gotExecSQL = %q, want substring %q", gotSQL, gotExecSQL, tc.wantSQLSubstr)
@@ -865,6 +898,7 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 		persistedChunk     bool
 		cancelOnRetry      bool
 		zeroRetryDelay     bool
+		networkErr         bool
 		wantErr            bool
 		wantBool           bool
 		wantEffort         string
@@ -1047,6 +1081,14 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 			wantEffort: "medium",
 		},
 		{
+			name:         "ResolveVanadisChunkForPR retries transient 429 and 503 and succeeds",
+			method:       "ResolveVanadisChunkForPR",
+			httpStatuses: []int{http.StatusTooManyRequests, http.StatusServiceUnavailable, http.StatusOK},
+			httpBody:     `{"matched":true,"chunk_id":"c1","build_id":"b1","effort":"low"}`,
+			wantBool:     true,
+			wantEffort:   "low",
+		},
+		{
 			name:       "ResolveVanadisChunkForPR returns false when not matched",
 			method:     "ResolveVanadisChunkForPR",
 			httpStatus: http.StatusOK,
@@ -1084,6 +1126,13 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 			wantBool:   true,
 		},
 		{
+			name:         "FailVanadisChunkByPR retries transient 500 and succeeds",
+			method:       "FailVanadisChunkByPR",
+			httpStatuses: []int{http.StatusInternalServerError, http.StatusOK},
+			httpBody:     `{"build_id":"b1","chunk_id":"c1","failed":true}`,
+			wantBool:     true,
+		},
+		{
 			name:       "FailVanadisChunkByPR returns error on 500",
 			method:     "FailVanadisChunkByPR",
 			httpStatus: http.StatusInternalServerError,
@@ -1106,6 +1155,15 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 			httpBody:     `{"matched":true,"advanced":false,"build_id":"b1","thread_id":"t1","build_status":"running"}`,
 			wantMatched:  true,
 			wantAdvanced: false,
+		},
+		{
+			name:             "AdvanceVanadisChunkByPR retries transient 503 and succeeds",
+			method:           "AdvanceVanadisChunkByPR",
+			httpStatuses:     []int{http.StatusServiceUnavailable, http.StatusOK},
+			httpBody:         `{"matched":true,"advanced":true,"build_id":"b1","thread_id":"t1","next_chunk_index":1,"build_completed":false}`,
+			wantMatched:      true,
+			wantAdvanced:     true,
+			wantNextChunkIdx: 1,
 		},
 		{
 			name:             "AdvanceVanadisChunkByPR mid-run advancement success",
@@ -1134,11 +1192,48 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 			wantErr:    true,
 		},
 		{
+			name:           "AdvanceVanadisChunkByPR non-transient 400 returns error",
+			method:         "AdvanceVanadisChunkByPR",
+			httpStatus:     http.StatusBadRequest,
+			httpBody:       `{"error":"bad request"}`,
+			zeroRetryDelay: true,
+			wantErr:        true,
+		},
+		{
+			name:           "ResolveVanadisChunkForPR non-transient 400 returns error",
+			method:         "ResolveVanadisChunkForPR",
+			httpStatus:     http.StatusBadRequest,
+			httpBody:       `{"error":"bad request"}`,
+			zeroRetryDelay: true,
+			wantErr:        true,
+		},
+		{
 			name:       "AdvanceVanadisChunkByPR invalid json returns error",
 			method:     "AdvanceVanadisChunkByPR",
 			httpStatus: http.StatusOK,
 			httpBody:   `{invalid-json`,
 			wantErr:    true,
+		},
+		{
+			name:           "ResolveVanadisChunkForPR network error retries and fails",
+			method:         "ResolveVanadisChunkForPR",
+			networkErr:     true,
+			zeroRetryDelay: true,
+			wantErr:        true,
+		},
+		{
+			name:           "AdvanceVanadisChunkByPR network error retries and fails",
+			method:         "AdvanceVanadisChunkByPR",
+			networkErr:     true,
+			zeroRetryDelay: true,
+			wantErr:        true,
+		},
+		{
+			name:           "FailVanadisChunkByPR network error retries and fails",
+			method:         "FailVanadisChunkByPR",
+			networkErr:     true,
+			zeroRetryDelay: true,
+			wantErr:        true,
 		},
 	}
 
@@ -1150,7 +1245,12 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 			var vURL string
 			var vClient *http.Client
 			var reqIdx int
-			if tc.httpStatus != 0 || len(tc.httpStatuses) > 0 || tc.httpBody != "" {
+			if tc.networkErr {
+				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+				ts.Close()
+				vURL = ts.URL
+				vClient = ts.Client()
+			} else if tc.httpStatus != 0 || len(tc.httpStatuses) > 0 || tc.httpBody != "" {
 				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					status := tc.httpStatus
 					if len(tc.httpStatuses) > 0 {
@@ -1182,6 +1282,9 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
 							if bPtr, ok := dest[0].(*bool); ok {
 								*bPtr = true
+							}
+							if sPtr, ok := dest[0].(*string); ok {
+								*sPtr = "build-123-chunk-1"
 							}
 							return nil
 						}}
