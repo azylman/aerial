@@ -394,10 +394,10 @@ type HeartbeatScheduleWithDesc struct {
 	CronDescription string    `json:"cron_description"`
 	Prompt          string    `json:"prompt"`
 	Timezone        string    `json:"timezone"`
-	Effort          string    `json:"effort,omitempty"`
 	NextRunAt       time.Time `json:"next_run_at"`
 	Enabled         bool      `json:"enabled"`
 	CreatedAt       time.Time `json:"created_at"`
+	Effort          string    `json:"effort,omitempty"`
 }
 
 type OneShotScheduleJSON struct {
@@ -434,24 +434,30 @@ type CreateOneShotRequest struct {
 	Effort   string    `json:"effort,omitempty"`
 }
 
+func buildRecurringScheduleWithDesc(id, targetID, titlePrefix, cronExpr, prompt, timezone, effort string, nextRunAt, createdAt time.Time, enabled bool) CronScheduleWithDesc {
+	return CronScheduleWithDesc{
+		ID:              id,
+		TargetID:        targetID,
+		ChannelID:       targetID,
+		TitlePrefix:     SanitizeScheduleText(titlePrefix),
+		CronExpr:        cronExpr,
+		CronDescription: FormatCronDescription(cronExpr),
+		Prompt:          SanitizeScheduleText(prompt),
+		Timezone:        timezone,
+		NextRunAt:       nextRunAt,
+		Enabled:         enabled,
+		CreatedAt:       createdAt,
+		Effort:          effort,
+	}
+}
+
 // FormatCronSchedulesWithDesc converts raw CronSchedule records into serialized CronScheduleWithDesc items.
 func FormatCronSchedulesWithDesc(raw []CronSchedule) []CronScheduleWithDesc {
 	crons := make([]CronScheduleWithDesc, 0, len(raw))
 	for _, c := range raw {
-		crons = append(crons, CronScheduleWithDesc{
-			ID:              c.ID,
-			TargetID:        c.TargetID,
-			ChannelID:       c.TargetID,
-			TitlePrefix:     SanitizeScheduleText(c.TitlePrefix),
-			CronExpr:        c.CronExpr,
-			CronDescription: FormatCronDescription(c.CronExpr),
-			Prompt:          SanitizeScheduleText(c.Prompt),
-			Timezone:        c.Timezone,
-			NextRunAt:       c.NextRunAt,
-			Enabled:         c.Enabled,
-			CreatedAt:       c.CreatedAt,
-			Effort:          c.Effort,
-		})
+		crons = append(crons, buildRecurringScheduleWithDesc(
+			c.ID, c.TargetID, c.TitlePrefix, c.CronExpr, c.Prompt, c.Timezone, c.Effort, c.NextRunAt, c.CreatedAt, c.Enabled,
+		))
 	}
 	return crons
 }
@@ -460,20 +466,9 @@ func FormatCronSchedulesWithDesc(raw []CronSchedule) []CronScheduleWithDesc {
 func FormatHeartbeatSchedulesWithDesc(raw []HeartbeatSchedule) []HeartbeatScheduleWithDesc {
 	heartbeats := make([]HeartbeatScheduleWithDesc, 0, len(raw))
 	for _, h := range raw {
-		heartbeats = append(heartbeats, HeartbeatScheduleWithDesc{
-			ID:              h.ID,
-			TargetID:        h.TargetID,
-			ChannelID:       h.TargetID,
-			TitlePrefix:     SanitizeScheduleText(h.TitlePrefix),
-			CronExpr:        h.CronExpr,
-			CronDescription: FormatCronDescription(h.CronExpr),
-			Prompt:          SanitizeScheduleText(h.Prompt),
-			Timezone:        h.Timezone,
-			Effort:          h.Effort,
-			NextRunAt:       h.NextRunAt,
-			Enabled:         h.Enabled,
-			CreatedAt:       h.CreatedAt,
-		})
+		heartbeats = append(heartbeats, HeartbeatScheduleWithDesc(buildRecurringScheduleWithDesc(
+			h.ID, h.TargetID, h.TitlePrefix, h.CronExpr, h.Prompt, h.Timezone, h.Effort, h.NextRunAt, h.CreatedAt, h.Enabled,
+		)))
 	}
 	return heartbeats
 }

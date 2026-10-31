@@ -243,7 +243,29 @@ func InsertHeartbeatSchedule(ctx context.Context, database *sql.DB, h HeartbeatS
 	return err
 }
 
-func querySchedules[T any](ctx context.Context, database *sql.DB, baseQuery, filterCol, targetID, orderCol string, scanFn func(*sql.Rows) (T, error)) ([]T, error) {
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanCronSchedule(r rowScanner) (CronSchedule, error) {
+	var c CronSchedule
+	err := r.Scan(&c.ID, &c.TargetID, &c.TitlePrefix, &c.CronExpr, &c.Prompt, &c.Timezone, &c.NextRunAt, &c.Enabled, &c.CreatedAt, &c.Effort)
+	return c, err
+}
+
+func scanOneShotSchedule(r rowScanner) (OneShotSchedule, error) {
+	var s OneShotSchedule
+	err := r.Scan(&s.ID, &s.ThreadID, &s.Prompt, &s.RunAt, &s.CreatedAt, &s.Effort)
+	return s, err
+}
+
+func scanHeartbeatSchedule(r rowScanner) (HeartbeatSchedule, error) {
+	var h HeartbeatSchedule
+	err := r.Scan(&h.ID, &h.TargetID, &h.TitlePrefix, &h.CronExpr, &h.Prompt, &h.Timezone, &h.NextRunAt, &h.Enabled, &h.CreatedAt, &h.Effort)
+	return h, err
+}
+
+func querySchedules[T any](ctx context.Context, database *sql.DB, baseQuery, filterCol, targetID, orderCol string, scanFn func(rowScanner) (T, error)) ([]T, error) {
 	ctx, err := normCtxAndDB(ctx, database)
 	if err != nil {
 		return nil, err
@@ -279,92 +301,52 @@ func querySchedules[T any](ctx context.Context, database *sql.DB, baseQuery, fil
 
 func ListCronSchedules(ctx context.Context, database *sql.DB, targetID string) ([]CronSchedule, error) {
 	baseQuery := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM cron_schedules WHERE enabled = TRUE`
-	return querySchedules(ctx, database, baseQuery, "target_id", targetID, "created_at", func(rows *sql.Rows) (CronSchedule, error) {
-		var c CronSchedule
-		err := rows.Scan(&c.ID, &c.TargetID, &c.TitlePrefix, &c.CronExpr, &c.Prompt, &c.Timezone, &c.NextRunAt, &c.Enabled, &c.CreatedAt, &c.Effort)
-		return c, err
-	})
+	return querySchedules(ctx, database, baseQuery, "target_id", targetID, "created_at", scanCronSchedule)
 }
 
 func ListOneShotSchedules(ctx context.Context, database *sql.DB, targetID string) ([]OneShotSchedule, error) {
 	baseQuery := `SELECT id, thread_id, prompt, run_at, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM one_shot_schedules`
-	return querySchedules(ctx, database, baseQuery, "thread_id", targetID, "run_at", func(rows *sql.Rows) (OneShotSchedule, error) {
-		var s OneShotSchedule
-		err := rows.Scan(&s.ID, &s.ThreadID, &s.Prompt, &s.RunAt, &s.CreatedAt, &s.Effort)
-		return s, err
-	})
+	return querySchedules(ctx, database, baseQuery, "thread_id", targetID, "run_at", scanOneShotSchedule)
 }
 
 func ListHeartbeatSchedules(ctx context.Context, database *sql.DB, targetID string) ([]HeartbeatSchedule, error) {
 	baseQuery := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'low') FROM heartbeat_schedules WHERE enabled = TRUE`
-	return querySchedules(ctx, database, baseQuery, "target_id", targetID, "created_at", func(rows *sql.Rows) (HeartbeatSchedule, error) {
-		var h HeartbeatSchedule
-		err := rows.Scan(&h.ID, &h.TargetID, &h.TitlePrefix, &h.CronExpr, &h.Prompt, &h.Timezone, &h.NextRunAt, &h.Enabled, &h.CreatedAt, &h.Effort)
-		return h, err
-	})
+	return querySchedules(ctx, database, baseQuery, "target_id", targetID, "created_at", scanHeartbeatSchedule)
+}
+
+func getScheduleByID[T any](ctx context.Context, database *sql.DB, id, label, query string, scanFn func(rowScanner) (T, error)) (*T, error) {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return nil, err
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, fmt.Errorf("schedule_id cannot be empty")
+	}
+	row := database.QueryRowContext(ctx, query, id)
+	item, err := scanFn(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("%s schedule %q not found: %w", label, id, sql.ErrNoRows)
+		}
+		return nil, err
+	}
+	return &item, nil
 }
 
 func GetCronSchedule(ctx context.Context, database *sql.DB, id string) (*CronSchedule, error) {
-	ctx, err := normCtxAndDB(ctx, database)
-	if err != nil {
-		return nil, err
-	}
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return nil, fmt.Errorf("schedule_id cannot be empty")
-	}
 	query := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM cron_schedules WHERE id = $1`
-	var c CronSchedule
-	row := database.QueryRowContext(ctx, query, id)
-	if err := row.Scan(&c.ID, &c.TargetID, &c.TitlePrefix, &c.CronExpr, &c.Prompt, &c.Timezone, &c.NextRunAt, &c.Enabled, &c.CreatedAt, &c.Effort); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("cron schedule %q not found: %w", id, sql.ErrNoRows)
-		}
-		return nil, err
-	}
-	return &c, nil
+	return getScheduleByID(ctx, database, id, "cron", query, scanCronSchedule)
 }
 
 func GetOneShotSchedule(ctx context.Context, database *sql.DB, id string) (*OneShotSchedule, error) {
-	ctx, err := normCtxAndDB(ctx, database)
-	if err != nil {
-		return nil, err
-	}
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return nil, fmt.Errorf("schedule_id cannot be empty")
-	}
 	query := `SELECT id, thread_id, prompt, run_at, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM one_shot_schedules WHERE id = $1`
-	var s OneShotSchedule
-	row := database.QueryRowContext(ctx, query, id)
-	if err := row.Scan(&s.ID, &s.ThreadID, &s.Prompt, &s.RunAt, &s.CreatedAt, &s.Effort); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("one-shot schedule %q not found: %w", id, sql.ErrNoRows)
-		}
-		return nil, err
-	}
-	return &s, nil
+	return getScheduleByID(ctx, database, id, "one-shot", query, scanOneShotSchedule)
 }
 
 func GetHeartbeatSchedule(ctx context.Context, database *sql.DB, id string) (*HeartbeatSchedule, error) {
-	ctx, err := normCtxAndDB(ctx, database)
-	if err != nil {
-		return nil, err
-	}
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return nil, fmt.Errorf("schedule_id cannot be empty")
-	}
 	query := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'low') FROM heartbeat_schedules WHERE id = $1`
-	var h HeartbeatSchedule
-	row := database.QueryRowContext(ctx, query, id)
-	if err := row.Scan(&h.ID, &h.TargetID, &h.TitlePrefix, &h.CronExpr, &h.Prompt, &h.Timezone, &h.NextRunAt, &h.Enabled, &h.CreatedAt, &h.Effort); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("heartbeat schedule %q not found: %w", id, sql.ErrNoRows)
-		}
-		return nil, err
-	}
-	return &h, nil
+	return getScheduleByID(ctx, database, id, "heartbeat", query, scanHeartbeatSchedule)
 }
 
 func UpdateHeartbeatSchedule(ctx context.Context, database *sql.DB, h HeartbeatSchedule) error {
@@ -468,121 +450,73 @@ func DeleteSchedule(ctx context.Context, database *sql.DB, scheduleID string) (b
 	return total > 0, nil
 }
 
-func GetDueCronSchedules(ctx context.Context, database *sql.DB, now time.Time) ([]CronSchedule, error) {
+func queryDueSchedules[T any](ctx context.Context, database *sql.DB, query string, now time.Time, scanFn func(rowScanner) (T, error)) ([]T, error) {
 	ctx, err := normCtxAndDB(ctx, database)
 	if err != nil {
 		return nil, err
 	}
-	baseQuery := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM cron_schedules WHERE enabled = TRUE AND next_run_at <= $1 ORDER BY next_run_at ASC`
-	rows, err := database.QueryContext(ctx, baseQuery, now)
+	rows, err := database.QueryContext(ctx, query, now)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var results []CronSchedule
+	var results []T
 	for rows.Next() {
-		var c CronSchedule
-		if err := rows.Scan(&c.ID, &c.TargetID, &c.TitlePrefix, &c.CronExpr, &c.Prompt, &c.Timezone, &c.NextRunAt, &c.Enabled, &c.CreatedAt, &c.Effort); err != nil {
+		item, err := scanFn(rows)
+		if err != nil {
 			return nil, err
 		}
-		results = append(results, c)
+		results = append(results, item)
 	}
 	return results, rows.Err()
+}
+
+func advanceScheduleNextRun(ctx context.Context, database *sql.DB, table, label, id string, nextRun time.Time) error {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return err
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return fmt.Errorf("schedule_id cannot be empty")
+	}
+	query := fmt.Sprintf("UPDATE %s SET next_run_at = $1 WHERE id = $2", table)
+	res, err := database.ExecContext(ctx, query, nextRun, id)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to determine rows affected: %w", err)
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("%s schedule %q not found", label, id)
+	}
+	return nil
+}
+
+func GetDueCronSchedules(ctx context.Context, database *sql.DB, now time.Time) ([]CronSchedule, error) {
+	baseQuery := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM cron_schedules WHERE enabled = TRUE AND next_run_at <= $1 ORDER BY next_run_at ASC`
+	return queryDueSchedules(ctx, database, baseQuery, now, scanCronSchedule)
 }
 
 func AdvanceCronNextRun(ctx context.Context, database *sql.DB, id string, nextRun time.Time) error {
-	ctx, err := normCtxAndDB(ctx, database)
-	if err != nil {
-		return err
-	}
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return fmt.Errorf("schedule_id cannot be empty")
-	}
-	query := `UPDATE cron_schedules SET next_run_at = $1 WHERE id = $2`
-	res, err := database.ExecContext(ctx, query, nextRun, id)
-	if err != nil {
-		return err
-	}
-	rowsAffected, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to determine rows affected: %w", err)
-	}
-	if rowsAffected == 0 {
-		return fmt.Errorf("cron schedule %q not found", id)
-	}
-	return nil
+	return advanceScheduleNextRun(ctx, database, "cron_schedules", "cron", id, nextRun)
 }
 
 func GetDueHeartbeatSchedules(ctx context.Context, database *sql.DB, now time.Time) ([]HeartbeatSchedule, error) {
-	ctx, err := normCtxAndDB(ctx, database)
-	if err != nil {
-		return nil, err
-	}
 	baseQuery := `SELECT id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'low') FROM heartbeat_schedules WHERE enabled = TRUE AND next_run_at <= $1 ORDER BY next_run_at ASC`
-	rows, err := database.QueryContext(ctx, baseQuery, now)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var results []HeartbeatSchedule
-	for rows.Next() {
-		var h HeartbeatSchedule
-		if err := rows.Scan(&h.ID, &h.TargetID, &h.TitlePrefix, &h.CronExpr, &h.Prompt, &h.Timezone, &h.NextRunAt, &h.Enabled, &h.CreatedAt, &h.Effort); err != nil {
-			return nil, err
-		}
-		results = append(results, h)
-	}
-	return results, rows.Err()
+	return queryDueSchedules(ctx, database, baseQuery, now, scanHeartbeatSchedule)
 }
 
 func AdvanceHeartbeatNextRun(ctx context.Context, database *sql.DB, id string, nextRun time.Time) error {
-	ctx, err := normCtxAndDB(ctx, database)
-	if err != nil {
-		return err
-	}
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return fmt.Errorf("schedule_id cannot be empty")
-	}
-	query := `UPDATE heartbeat_schedules SET next_run_at = $1 WHERE id = $2`
-	res, err := database.ExecContext(ctx, query, nextRun, id)
-	if err != nil {
-		return err
-	}
-	rowsAffected, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to determine rows affected: %w", err)
-	}
-	if rowsAffected == 0 {
-		return fmt.Errorf("heartbeat schedule %q not found", id)
-	}
-	return nil
+	return advanceScheduleNextRun(ctx, database, "heartbeat_schedules", "heartbeat", id, nextRun)
 }
 
 func GetDueOneShotSchedules(ctx context.Context, database *sql.DB, now time.Time) ([]OneShotSchedule, error) {
-	ctx, err := normCtxAndDB(ctx, database)
-	if err != nil {
-		return nil, err
-	}
 	baseQuery := `SELECT id, thread_id, prompt, run_at, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM one_shot_schedules WHERE run_at <= $1 ORDER BY run_at ASC`
-	rows, err := database.QueryContext(ctx, baseQuery, now)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var results []OneShotSchedule
-	for rows.Next() {
-		var s OneShotSchedule
-		if err := rows.Scan(&s.ID, &s.ThreadID, &s.Prompt, &s.RunAt, &s.CreatedAt, &s.Effort); err != nil {
-			return nil, err
-		}
-		results = append(results, s)
-	}
-	return results, rows.Err()
+	return queryDueSchedules(ctx, database, baseQuery, now, scanOneShotSchedule)
 }
 
 func DeleteOneShotSchedule(ctx context.Context, database *sql.DB, id string) (bool, error) {
