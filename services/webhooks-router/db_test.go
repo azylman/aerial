@@ -347,6 +347,7 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 		{name: "RegisterPR success direct targetID", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", targetID: "1555405874565091380", wantTarget: "1555405874565091380", wantSQLSubstr: "INSERT INTO pr_registry"},
 		{name: "RegisterPR success discord prefixed targetID", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", targetID: "discord-1555405874565091380", wantTarget: "1555405874565091380", wantSQLSubstr: "INSERT INTO pr_registry"},
 		{name: "RegisterPR chunk overrides dispatch session key targetID", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", targetID: "dispatch-8d23879c", jobName: "chunk-1", vanadisStatus: http.StatusOK, vanadisBody: `{"status":"attached","thread_id":"discord-1555405874565091380"}`, targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantSQLSubstr: "INSERT INTO pr_registry"},
+		{name: "RegisterPR chunk with invalid metadata JSON initializes map and upserts", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", targetID: "1555405874565091380", jobName: "chunk-1", metaJSON: "{invalid", vanadisStatus: http.StatusOK, vanadisBody: `{"status":"attached","thread_id":"1555405874565091380"}`, targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantSQLSubstr: "INSERT INTO pr_registry"},
 
 		// RecordExpectedJobs
 		{name: "RecordExpectedJobs empty repo guard", op: "RecordExpectedJobs", repo: "", prNumber: 42, jobs: []string{"coven"}, wantUpdated: false},
@@ -859,7 +860,11 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 		useNilRegistry     bool
 		emptyGuard         bool
 		httpStatus         int
+		httpStatuses       []int
 		httpBody           string
+		persistedChunk     bool
+		cancelOnRetry      bool
+		zeroRetryDelay     bool
 		wantErr            bool
 		wantBool           bool
 		wantEffort         string
@@ -961,6 +966,30 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 			httpStatus: http.StatusOK,
 			httpBody:   `{invalid-json`,
 			wantErr:    true,
+		},
+		{
+			name:         "ShouldSuppressVanadisDeployWake retries transient 502 and succeeds",
+			method:       "ShouldSuppressVanadisDeployWake",
+			httpStatuses: []int{http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusOK},
+			httpBody:     `{"matched":true,"chunk_id":"c1","build_id":"b1","has_remaining_chunks":true}`,
+			wantBool:     true,
+		},
+		{
+			name:           "ShouldSuppressVanadisDeployWake falls back to persisted vanadis_chunk_id after 502 retries",
+			method:         "ShouldSuppressVanadisDeployWake",
+			httpStatus:     http.StatusBadGateway,
+			httpBody:       `<html>502</html>`,
+			persistedChunk: true,
+			wantBool:       true,
+		},
+		{
+			name:           "ShouldSuppressVanadisDeployWake returns error on context cancelled during 502 retry",
+			method:         "ShouldSuppressVanadisDeployWake",
+			httpStatus:     http.StatusGatewayTimeout,
+			httpBody:       `<html>504</html>`,
+			cancelOnRetry:  true,
+			zeroRetryDelay: true,
+			wantErr:        true,
 		},
 
 		// IsFinalVanadisChunk
@@ -1116,13 +1145,27 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			callCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
 			var vURL string
 			var vClient *http.Client
-			if tc.httpStatus != 0 || tc.httpBody != "" {
+			var reqIdx int
+			if tc.httpStatus != 0 || len(tc.httpStatuses) > 0 || tc.httpBody != "" {
 				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					status := tc.httpStatus
+					if len(tc.httpStatuses) > 0 {
+						if reqIdx < len(tc.httpStatuses) {
+							status = tc.httpStatuses[reqIdx]
+						} else {
+							status = tc.httpStatuses[len(tc.httpStatuses)-1]
+						}
+					}
+					reqIdx++
 					if status == 0 {
 						status = http.StatusOK
+					}
+					if tc.cancelOnRetry {
+						cancel()
 					}
 					w.WriteHeader(status)
 					_, _ = w.Write([]byte(tc.httpBody))
@@ -1132,7 +1175,25 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 				vClient = ts.Client()
 			}
 
-			reg := NewPostgresPRRegistry(nil, WithVanadisClient(vURL, vClient))
+			var pool pgxQueryExecer
+			if tc.persistedChunk {
+				pool = &mockVanadisPgxPool{
+					queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
+						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+							if bPtr, ok := dest[0].(*bool); ok {
+								*bPtr = true
+							}
+							return nil
+						}}
+					},
+				}
+			}
+
+			reg := NewPostgresPRRegistry(pool, WithVanadisClient(vURL, vClient))
+			reg.vanadisRetryDelay = time.Millisecond
+			if tc.zeroRetryDelay {
+				reg.vanadisRetryDelay = 0
+			}
 			if tc.useNilRegistry {
 				reg = nil
 			}
@@ -1144,7 +1205,7 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 			}
 			switch tc.method {
 			case "ShouldSuppressVanadisDeployWake":
-				sup, err := reg.ShouldSuppressVanadisDeployWake(ctx, repo, prNum)
+				sup, err := reg.ShouldSuppressVanadisDeployWake(callCtx, repo, prNum)
 				if (err != nil) != tc.wantErr {
 					t.Fatalf("ShouldSuppressVanadisDeployWake() err = %v, wantErr = %v", err, tc.wantErr)
 				}
