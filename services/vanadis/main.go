@@ -40,6 +40,10 @@ var (
 	ErrBuildNotFound = errors.New("vanadis build not found")
 	// ErrChunkNotFound indicates a requested VanadisChunk does not exist in PostgreSQL.
 	ErrChunkNotFound = errors.New("vanadis chunk not found")
+	// ErrBuildConflict indicates a VanadisBuild or chunk state conflict (e.g. not running or not pending).
+	ErrBuildConflict = errors.New("vanadis build state conflict")
+	// ErrInvalidBuildInput indicates invalid inputs for a VanadisBuild or chunk mutation.
+	ErrInvalidBuildInput = errors.New("invalid vanadis build input")
 )
 
 // Config holds runtime configuration for the Vanadis orchestrator service.
@@ -265,6 +269,10 @@ type VanadisStore interface {
 	AttachChunkPR(ctx context.Context, chunkID string, prNumber int, repo string) (string, error)
 	AdvanceChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisAdvancementResult, error)
 	FailChunkByPR(ctx context.Context, repo string, prNumber int) (buildID, chunkID string, failed bool, err error)
+	UpdateBuild(ctx context.Context, buildID string, req UpdateBuildRequest) (*VanadisBuild, error)
+	UpdateChunk(ctx context.Context, buildID, chunkRef string, req UpdateChunkRequest) (*VanadisChunk, error)
+	AppendChunks(ctx context.Context, buildID string, inputs []CreateChunkInput) ([]VanadisChunk, error)
+	RemoveChunk(ctx context.Context, buildID, chunkRef string) (*VanadisChunk, []VanadisChunk, error)
 }
 
 type pgxQueryExecer interface {
@@ -910,8 +918,13 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 
 func writeStoreErr(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
-	if errors.Is(err, ErrBuildNotFound) || errors.Is(err, ErrChunkNotFound) {
+	switch {
+	case errors.Is(err, ErrInvalidBuildInput):
+		status = http.StatusBadRequest
+	case errors.Is(err, ErrBuildNotFound) || errors.Is(err, ErrChunkNotFound):
 		status = http.StatusNotFound
+	case errors.Is(err, ErrBuildConflict):
+		status = http.StatusConflict
 	}
 	writeErr(w, status, err.Error())
 }
@@ -1077,48 +1090,105 @@ func (s *VanadisServer) cancelBuildChunksAndPrompts(ctx context.Context, buildID
 	}
 }
 
+func (s *VanadisServer) handleBuildCancel(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	existing, existingChunks, gErr := s.store.GetBuild(r.Context(), id)
+	if gErr == nil && existing != nil && (existing.Status == "completed" || existing.Status == "failed") {
+		writeErr(w, http.StatusConflict, fmt.Sprintf("cannot cancel build in terminal status %q", existing.Status))
+		return
+	}
+	if err := s.store.UpdateBuildStatus(r.Context(), id, "cancelled"); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	s.cancelBuildChunksAndPrompts(r.Context(), id, existing, existingChunks)
+	httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "cancelled", "build_id": id})
+}
+
+func (s *VanadisServer) handleBuildRoot(w http.ResponseWriter, r *http.Request, id string) {
+	switch r.Method {
+	case http.MethodGet:
+		build, chunks, err := s.store.GetBuild(r.Context(), id)
+		if err != nil {
+			writeStoreErr(w, err)
+			return
+		}
+		httpkit.WriteJSON(w, http.StatusOK, map[string]any{"build": build, "chunks": chunks, "entry": SummarizeBuildEntry(*build, chunks)})
+	case http.MethodPatch:
+		s.handleUpdateBuild(w, r, id)
+	default:
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *VanadisServer) handleBuildChunkRoutes(w http.ResponseWriter, r *http.Request, id, chunkRef string) {
+	switch r.Method {
+	case http.MethodGet:
+		s.handleGetBuildChunk(w, r, id, chunkRef)
+	case http.MethodPatch:
+		s.handleUpdateChunk(w, r, id, chunkRef)
+	case http.MethodDelete:
+		s.handleRemoveChunk(w, r, id, chunkRef)
+	default:
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
 func (s *VanadisServer) handleBuildByID(w http.ResponseWriter, r *http.Request) {
 	if s.store == nil {
 		writeErr(w, http.StatusInternalServerError, "vanadis store not configured")
 		return
 	}
-	trimmed := strings.Trim(strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/builds/"), "/runs/"), "/")
-	if trimmed == "" {
+	raw := strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/runs/"), "/builds/")
+	hasTrailingSlash := strings.HasSuffix(raw, "/")
+	clean := strings.TrimSuffix(raw, "/")
+	if clean == "" {
 		writeErr(w, http.StatusBadRequest, "build id is required")
 		return
 	}
-	if id, isCancel := strings.CutSuffix(trimmed, "/cancel"); isCancel {
-		if r.Method != http.MethodPost {
-			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
-		if id = strings.TrimSpace(id); id == "" {
-			writeErr(w, http.StatusBadRequest, "build id is required")
-			return
-		}
-		existing, existingChunks, gErr := s.store.GetBuild(r.Context(), id)
-		if gErr == nil && existing != nil && (existing.Status == "completed" || existing.Status == "failed") {
-			writeErr(w, http.StatusConflict, fmt.Sprintf("cannot cancel build in terminal status %q", existing.Status))
-			return
-		}
-		if err := s.store.UpdateBuildStatus(r.Context(), id, "cancelled"); err != nil {
-			writeStoreErr(w, err)
-			return
-		}
-		s.cancelBuildChunksAndPrompts(r.Context(), id, existing, existingChunks)
-		httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "cancelled", "build_id": id})
+	parts := strings.Split(clean, "/")
+	id := strings.TrimSpace(parts[0])
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, "build id is required")
 		return
 	}
-	if r.Method != http.MethodGet {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
+	switch len(parts) {
+	case 1:
+		s.handleBuildRoot(w, r, id)
+	case 2:
+		switch parts[1] {
+		case "cancel":
+			s.handleBuildCancel(w, r, id)
+		case "chunks":
+			if hasTrailingSlash && (r.Method == http.MethodGet || r.Method == http.MethodPatch || r.Method == http.MethodDelete) {
+				writeErr(w, http.StatusBadRequest, "chunk_ref is required")
+				return
+			}
+			if r.Method != http.MethodPost {
+				writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			s.handleAppendChunks(w, r, id)
+		default:
+			writeErr(w, http.StatusNotFound, "not found")
+		}
+	case 3:
+		if parts[1] == "chunks" {
+			chunkRef := strings.TrimSpace(parts[2])
+			if chunkRef == "" {
+				writeErr(w, http.StatusBadRequest, "chunk_ref is required")
+				return
+			}
+			s.handleBuildChunkRoutes(w, r, id, chunkRef)
+			return
+		}
+		writeErr(w, http.StatusNotFound, "not found")
+	default:
+		writeErr(w, http.StatusNotFound, "not found")
 	}
-	build, chunks, err := s.store.GetBuild(r.Context(), trimmed)
-	if err != nil {
-		writeStoreErr(w, err)
-		return
-	}
-	httpkit.WriteJSON(w, http.StatusOK, map[string]any{"build": build, "chunks": chunks, "entry": SummarizeBuildEntry(*build, chunks)})
 }
 
 func (s *VanadisServer) handleListBuilds(w http.ResponseWriter, r *http.Request) {
