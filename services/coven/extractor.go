@@ -137,23 +137,28 @@ Requirements:
 // extracts facts via the primary LLM, generates vector embeddings via Ollama, and reconciles them into persistent DB.
 // Single-flight protected via extractionMutex.
 func ExtractActiveConversationFacts(ctx context.Context, store Store, client OllamaClient, llmFunc LLMClientFunc, activeHours int) error {
+	start := time.Now()
 	if store == nil || client == nil || llmFunc == nil {
+		RecordOperation("extract", "error", time.Since(start).Seconds())
 		return fmt.Errorf("nil database, ollama client, or llmFunc")
 	}
 
 	if !extractionMutex.TryLock() {
 		log.Printf("[Memory] Hourly fact extraction already running, skipping overlapping execution.")
+		RecordOperation("extract", "success", time.Since(start).Seconds())
 		return nil
 	}
 	defer extractionMutex.Unlock()
 
 	threadIDs, err := store.GetActiveConversationsForExtraction(ctx, activeHours)
 	if err != nil {
+		RecordOperation("extract", "error", time.Since(start).Seconds())
 		return fmt.Errorf("failed to get active conversations: %w", err)
 	}
 
 	if len(threadIDs) == 0 {
 		log.Printf("[Memory] No active conversations requiring fact extraction.")
+		RecordOperation("extract", "success", time.Since(start).Seconds())
 		return nil
 	}
 
@@ -162,6 +167,7 @@ func ExtractActiveConversationFacts(ctx context.Context, store Store, client Oll
 	for _, tid := range threadIDs {
 		select {
 		case <-ctx.Done():
+			RecordOperation("extract", "error", time.Since(start).Seconds())
 			return ctx.Err()
 		default:
 		}
@@ -171,6 +177,7 @@ func ExtractActiveConversationFacts(ctx context.Context, store Store, client Oll
 		}
 	}
 
+	RecordOperation("extract", "success", time.Since(start).Seconds())
 	return nil
 }
 
@@ -391,6 +398,8 @@ func reinforceExtractedFactIDs(ctx context.Context, store Store, ids []int64) {
 			seenReinforced[rid] = true
 			if err := store.ReinforceFact(ctx, rid); err != nil {
 				log.Printf("[Memory] Warning: Failed to reinforce trajectory fact ID %d: %v", rid, err)
+			} else {
+				RecordFactStored("reinforced")
 			}
 		}
 	}
@@ -568,6 +577,7 @@ func applyReconcileDecision(ctx context.Context, store Store, item ExtractedFact
 				log.Printf("[Memory] Error deleting fact %d: %v", targetID, err)
 				return false
 			}
+			RecordFactStored("deleted")
 			return true
 		}
 		log.Printf("[Memory] Tier 3 delete rejected: ID %d not in whitelisted neighbors (NOOP)", targetID)
@@ -586,6 +596,7 @@ func applyReconcileDecision(ctx context.Context, store Store, item ExtractedFact
 				log.Printf("[Memory] Error updating fact %d: %v", targetID, err)
 				return false
 			}
+			RecordFactStored("updated")
 			return true
 		}
 		log.Printf("[Memory] Tier 3 update rejected: ID %d not in whitelisted neighbors; falling back to ADD", targetID)
@@ -593,6 +604,7 @@ func applyReconcileDecision(ctx context.Context, store Store, item ExtractedFact
 			log.Printf("[Memory] Error inserting fallback fact: %v", err)
 			return false
 		}
+		RecordFactStored("inserted")
 		return true
 	case "NOOP":
 		targetID := dec.SupersedesID
@@ -603,12 +615,14 @@ func applyReconcileDecision(ctx context.Context, store Store, item ExtractedFact
 			log.Printf("[Memory] Error reinforcing NOOP fact %d: %v", targetID, err)
 			return false
 		}
+		RecordFactStored("reinforced")
 		return true
 	default: // "ADD" or fallback
 		if _, err := store.InsertFact(ctx, item.FactText, emb); err != nil {
 			log.Printf("[Memory] Error inserting fact: %v", err)
 			return false
 		}
+		RecordFactStored("inserted")
 		return true
 	}
 }
@@ -647,6 +661,7 @@ func reconcileCandidateFact(ctx context.Context, store Store, client OllamaClien
 			log.Printf("[Memory] Error inserting Tier 1 fact: %v", err)
 			return false
 		}
+		RecordFactStored("inserted")
 		return true
 	}
 
@@ -656,6 +671,7 @@ func reconcileCandidateFact(ctx context.Context, store Store, client OllamaClien
 			log.Printf("[Memory] Error reinforcing Tier 2 fact id=%d: %v", neighbors[0].Fact.ID, err)
 			return false
 		}
+		RecordFactStored("reinforced")
 		return true
 	}
 
@@ -665,6 +681,7 @@ func reconcileCandidateFact(ctx context.Context, store Store, client OllamaClien
 			log.Printf("[Memory] Error inserting Tier 3 fallback fact: %v", err)
 			return false
 		}
+		RecordFactStored("inserted")
 		return true
 	}
 
@@ -676,6 +693,7 @@ func reconcileCandidateFact(ctx context.Context, store Store, client OllamaClien
 			log.Printf("[Memory] Error inserting Tier 3 fallback fact on LLM error: %v", err)
 			return false
 		}
+		RecordFactStored("inserted")
 		return true
 	}
 
@@ -686,6 +704,7 @@ func reconcileCandidateFact(ctx context.Context, store Store, client OllamaClien
 			log.Printf("[Memory] Error inserting Tier 3 fallback fact on parse error: %v", err)
 			return false
 		}
+		RecordFactStored("inserted")
 		return true
 	}
 

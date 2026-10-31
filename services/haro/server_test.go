@@ -184,6 +184,7 @@ func TestServer_HTTPEndpointsAndMCPProtocol(t *testing.T) {
 		wantStatus int
 	}{
 		{"health endpoint", http.MethodGet, "/health", nil, http.StatusOK},
+		{"metrics endpoint", http.MethodGet, "/metrics", nil, http.StatusOK},
 		{"mcp get probe", http.MethodGet, "/mcp", nil, http.StatusOK},
 		{"root get probe", http.MethodGet, "/", nil, http.StatusOK},
 		{"method not allowed", http.MethodDelete, "/mcp", nil, http.StatusMethodNotAllowed},
@@ -1300,6 +1301,7 @@ func TestServer_ScheduleRoutesDispatchViaMCP(t *testing.T) {
 		wantStatus int
 	}{
 		{"mcp dispatch schedules", http.MethodGet, "/schedules", "", http.StatusOK},
+		{"mcp dispatch metrics", http.MethodGet, "/metrics", "", http.StatusOK},
 		{"mcp dispatch schedules runs", http.MethodGet, "/schedules/runs", "", http.StatusOK},
 		{"mcp dispatch schedules oneshot invalid", http.MethodPost, "/schedules/oneshot", `{}`, http.StatusBadRequest},
 		{"mcp dispatch event triggers check invalid", http.MethodPost, "/event-triggers/check", `{}`, http.StatusBadRequest},
@@ -1570,5 +1572,122 @@ func TestServer_HeartbeatSkipping_MockHTTPBrainServer(t *testing.T) {
 	}
 	if runCount != 0 {
 		t.Errorf("expected 0 schedule_runs, got %d", runCount)
+	}
+}
+
+func TestServer_Metrics_Table(t *testing.T) {
+	server, ts := setupTestServer(t)
+	defer ts.Close()
+
+	ctx := context.Background()
+	_ = InsertCronSchedule(ctx, server.handler.db, CronSchedule{
+		ID:        "m-cron-1",
+		TargetID:  "chan-1",
+		CronExpr:  "0 0 * * *",
+		Prompt:    "daily",
+		NextRunAt: time.Now().UTC(),
+		Enabled:   true,
+	})
+	_ = InsertHeartbeatSchedule(ctx, server.handler.db, HeartbeatSchedule{
+		ID:        "m-hb-1",
+		TargetID:  "chan-2",
+		CronExpr:  "0 0 * * *",
+		Prompt:    "heartbeat",
+		NextRunAt: time.Now().UTC(),
+		Enabled:   true,
+	})
+	_ = InsertOneShotSchedule(ctx, server.handler.db, OneShotSchedule{
+		ID:       "m-once-1",
+		ThreadID: "chan-3",
+		Prompt:   "once",
+		RunAt:    time.Now().UTC(),
+	})
+	_ = InsertEventTrigger(ctx, server.handler.db, EventTrigger{
+		ID:        "m-trig-1",
+		ChannelID: "chan-4",
+		Source:    "github",
+		Target:    "repo",
+		EventType: "push",
+		Prompt:    "p",
+	})
+
+	RecordScheduleRun("cron", "completed")
+	RecordScheduleRun("one_shot", "stale")
+	RecordScheduleRun("heartbeat", "skipped_active")
+	RecordScheduleRun("event_watch", "failed")
+	RecordScheduleDispatchDuration("cron", 0.42)
+	RecordScheduleDispatchDuration("event_watch", 1.25)
+
+	nilServer := &Server{}
+	serverNilDB := &Server{handler: &ToolHandler{}}
+	registerHaroCollector(SchedulesActive)
+
+	tests := []struct {
+		name           string
+		server         *Server
+		method         string
+		url            string
+		wantStatus     int
+		wantSubstrings []string
+	}{
+		{
+			name:       "valid metrics with active counts and runs",
+			server:     server,
+			method:     http.MethodGet,
+			url:        "/metrics",
+			wantStatus: http.StatusOK,
+			wantSubstrings: []string{
+				"haro_schedules_active",
+				`haro_schedules_active{schedule_type="cron"} 1`,
+				`haro_schedules_active{schedule_type="heartbeat"} 1`,
+				`haro_schedules_active{schedule_type="one_shot"} 1`,
+				`haro_schedules_active{schedule_type="event_watch"} 1`,
+				"haro_schedule_runs_total",
+				`haro_schedule_runs_total{schedule_type="cron",status="completed"}`,
+				`haro_schedule_runs_total{schedule_type="one_shot",status="stale"}`,
+				`haro_schedule_runs_total{schedule_type="heartbeat",status="skipped_active"}`,
+				`haro_schedule_runs_total{schedule_type="event_watch",status="failed"}`,
+				"haro_schedule_dispatch_duration_seconds",
+			},
+		},
+		{
+			name:       "nil server db still serves metrics ok",
+			server:     nilServer,
+			method:     http.MethodGet,
+			url:        "/metrics",
+			wantStatus: http.StatusOK,
+			wantSubstrings: []string{
+				"haro_schedules_active",
+				"haro_schedule_runs_total",
+			},
+		},
+		{
+			name:       "handler with nil db serves metrics ok",
+			server:     serverNilDB,
+			method:     http.MethodGet,
+			url:        "/metrics",
+			wantStatus: http.StatusOK,
+			wantSubstrings: []string{
+				"haro_schedules_active",
+				"haro_schedule_runs_total",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(tc.method, tc.url, nil)
+			tc.server.handleMetrics(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("handleMetrics() status = %d, want %d", rec.Code, tc.wantStatus)
+			}
+			body := rec.Body.String()
+			for _, sub := range tc.wantSubstrings {
+				if !strings.Contains(body, sub) {
+					t.Errorf("expected body to contain %q, body:\n%s", sub, body)
+				}
+			}
+		})
 	}
 }

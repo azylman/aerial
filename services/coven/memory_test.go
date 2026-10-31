@@ -1612,6 +1612,20 @@ func TestServer_Endpoints(t *testing.T) {
 			wantStatus: http.StatusMethodNotAllowed,
 		},
 		{
+			name:       "Metrics",
+			method:     http.MethodGet,
+			path:       "/metrics",
+			wantStatus: http.StatusOK,
+			wantSubstr: "coven_facts_total",
+		},
+		{
+			name:       "MCPDirectMetricsRoute",
+			method:     http.MethodGet,
+			path:       "/metrics",
+			directMCP:  true,
+			wantStatus: http.StatusOK,
+		},
+		{
 			name:       "MCPDirectConsolidateRoute",
 			method:     http.MethodPost,
 			path:       "/consolidate",
@@ -8682,6 +8696,106 @@ func TestFormatSkillCommitAndPRHelpers(t *testing.T) {
 			}
 			if resp.Action != tc.wantAction {
 				t.Errorf("Action = %q, want %q", resp.Action, tc.wantAction)
+			}
+		})
+	}
+}
+
+func TestServer_Metrics_Table(t *testing.T) {
+	store := newTestMemStore()
+	_, _ = store.InsertFact(context.Background(), "Metric fact 1", testEmbedding(1.0))
+	_, _ = store.InsertFact(context.Background(), "Metric fact 2", testEmbedding(1.0))
+	handler := NewToolHandler(&Config{}, store, &MockOllamaClient{embedding: testEmbedding(1.0)})
+	server := NewServer(handler)
+	nilServer := &Server{}
+	nilStoreServer := &Server{handler: &ToolHandler{}}
+
+	registerCovenCollector(FactsTotal)
+
+	RecordOperation("search", "success", 0.01)
+	RecordOperation("search", "error", 0.02)
+	RecordOperation("store", "success", 0.03)
+	RecordOperation("store", "error", 0.04)
+	RecordOperation("forget", "success", 0.05)
+	RecordOperation("context", "success", 0.06)
+	RecordOperation("extract", "success", 0.07)
+	RecordOperation("consolidate", "success", 0.08)
+
+	RecordFactStored("inserted")
+	RecordFactStored("updated")
+	RecordFactStored("reinforced")
+	RecordFactStored("deleted")
+
+	tests := []struct {
+		name           string
+		server         *Server
+		method         string
+		url            string
+		wantStatus     int
+		wantSubstrings []string
+	}{
+		{
+			name:       "valid metrics with facts total and operations",
+			server:     server,
+			method:     http.MethodGet,
+			url:        "/metrics",
+			wantStatus: http.StatusOK,
+			wantSubstrings: []string{
+				"coven_facts_total 2",
+				"coven_operations_total",
+				`coven_operations_total{op="search",status="success"}`,
+				`coven_operations_total{op="search",status="error"}`,
+				`coven_operations_total{op="store",status="success"}`,
+				`coven_operations_total{op="store",status="error"}`,
+				`coven_operations_total{op="forget",status="success"}`,
+				`coven_operations_total{op="context",status="success"}`,
+				`coven_operations_total{op="extract",status="success"}`,
+				`coven_operations_total{op="consolidate",status="success"}`,
+				"coven_operation_duration_seconds",
+				"coven_facts_stored_total",
+				`coven_facts_stored_total{action="inserted"}`,
+				`coven_facts_stored_total{action="updated"}`,
+				`coven_facts_stored_total{action="reinforced"}`,
+				`coven_facts_stored_total{action="deleted"}`,
+			},
+		},
+		{
+			name:       "nil server still serves metrics ok",
+			server:     nilServer,
+			method:     http.MethodGet,
+			url:        "/metrics",
+			wantStatus: http.StatusOK,
+			wantSubstrings: []string{
+				"coven_facts_total",
+				"coven_operations_total",
+			},
+		},
+		{
+			name:       "nil store server serves metrics ok",
+			server:     nilStoreServer,
+			method:     http.MethodGet,
+			url:        "/metrics",
+			wantStatus: http.StatusOK,
+			wantSubstrings: []string{
+				"coven_facts_total",
+				"coven_operations_total",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(tc.method, tc.url, nil)
+			tc.server.handleMetrics(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("handleMetrics() status = %d, want %d", rec.Code, tc.wantStatus)
+			}
+			body := rec.Body.String()
+			for _, sub := range tc.wantSubstrings {
+				if !strings.Contains(body, sub) {
+					t.Errorf("expected body to contain %q, body:\n%s", sub, body)
+				}
 			}
 		})
 	}
