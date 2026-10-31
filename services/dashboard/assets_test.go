@@ -297,7 +297,7 @@ func TestAssetRegistry_ServeHTTP(t *testing.T) {
 
 			req := httptest.NewRequest(tc.method, tc.path, nil)
 			if tc.matchETagPath != "" {
-				probeReq := httptest.NewRequest("GET", tc.matchETagPath, nil)
+				probeReq := httptest.NewRequest(http.MethodGet, tc.matchETagPath, nil)
 				probeRec := httptest.NewRecorder()
 				reg.ServeHTTP(probeRec, probeReq)
 				etag := probeRec.Header().Get("ETag")
@@ -392,7 +392,7 @@ func TestAssetRegistry_Reload(t *testing.T) {
 				t.Fatalf("Reload() error = %v, wantErr %v", err, tc.wantErr)
 			}
 
-			req := httptest.NewRequest("GET", "/", nil)
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
 			rec := httptest.NewRecorder()
 			reg.ServeHTTP(rec, req)
 

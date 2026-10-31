@@ -115,7 +115,7 @@ func LoadConfig(configPath string) Config {
 				break
 			}
 		}
-		pgURL = fmt.Sprintf("postgres://aerial:aerial_secure_pass@%s:5432/aerial?sslmode=disable", host)
+		pgURL = fmt.Sprintf("postgres://aerial:aerial_secure_pass@%s/aerial?sslmode=disable", net.JoinHostPort(host, "5432"))
 	}
 	return Config{
 		Port:        firstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4025"),

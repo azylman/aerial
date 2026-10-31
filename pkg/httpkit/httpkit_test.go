@@ -448,11 +448,9 @@ func TestResolveConfigPathWithLocal_TableDriven(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.envKey != "" {
-				os.Setenv(tc.envKey, tc.envVal)
-				defer os.Unsetenv(tc.envKey)
+				t.Setenv(tc.envKey, tc.envVal)
 			} else if tc.envVal != "" {
-				os.Setenv("CONFIG_PATH", tc.envVal)
-				defer os.Unsetenv("CONFIG_PATH")
+				t.Setenv("CONFIG_PATH", tc.envVal)
 			}
 
 			got := ResolveConfigPathWithLocal(tc.envKey, tc.localPath, tc.fallbackPaths...)

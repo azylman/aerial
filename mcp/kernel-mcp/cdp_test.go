@@ -228,7 +228,7 @@ func startFakeCDPServer(t *testing.T, opts fakeCDPOptions) (*fakeCDPServer, *Con
 						}
 					}
 
-					var result any = map[string]any{}
+					var result any
 
 					switch req.Method {
 					case "Target.attachToTarget":

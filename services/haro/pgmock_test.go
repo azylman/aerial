@@ -9,6 +9,7 @@ import (
 )
 
 func startMockPostgres(t *testing.T) string {
+	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("failed to listen on mock pg: %v", err)
