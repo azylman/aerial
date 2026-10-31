@@ -54,6 +54,38 @@ func buildCloneFuncSource(name string) string {
 `
 }
 
+func buildGappedCloneFuncSource(name string) string {
+	return `func ` + name + `(x int, ch chan int) int {
+	if x > 0 {
+		println("positive")
+	} else {
+		println("non-positive")
+	}
+	for i := 0; i < x; i++ {
+		select {
+		case <-ch:
+			return -1
+		default:
+			break
+		}
+	}
+	if x == 42 {
+		return 42
+	}
+	switch x {
+	case 1:
+		defer println("defer 1")
+	default:
+		defer println("defer default")
+	}
+	for range []int{1} {
+		println("loop")
+	}
+	return x
+}
+`
+}
+
 func buildCallAndTypeSwitchSource() string {
 	return `package sample
 
@@ -292,6 +324,64 @@ func TestRun(t *testing.T) {
 			},
 			wantCode: 1,
 			wantErr:  "near-miss AST clone similarity 1.00 exceeds 0.80 ceiling",
+		},
+		{
+			name: "type-3 gapped function clone detected via ast edit distance within same package",
+			files: map[string]string{
+				"pkg/clones.go": "package pkg\n\n" + buildCloneFuncSource("CloneA") + "\n" + buildGappedCloneFuncSource("CloneB"),
+			},
+			wantCode: 1,
+			wantErr:  "near-miss AST edit similarity 0.88 exceeds 0.85 ceiling",
+		},
+		{
+			name: "intra-package struct clone detected above threshold",
+			files: map[string]string{
+				"pkg/structs.go": `package pkg
+
+type Embed struct{}
+
+type Alpha struct {
+	Embed
+	A int
+	B *int
+	C pkg.Type
+	D []string
+	E map[string]int
+	F chan int
+}
+
+type Beta struct {
+	Embed
+	A int
+	B *int
+	C pkg.Type
+	D []string
+	E map[string]int
+	F chan int
+}
+`,
+			},
+			wantCode: 1,
+			wantErr:  "struct field similarity 1.00 exceeds 0.85 ceiling",
+		},
+		{
+			name: "structs below minimum field threshold do not trigger violation",
+			files: map[string]string{
+				"pkg/structs.go": `package pkg
+
+type SmallA struct {
+	A int
+	B string
+}
+
+type SmallB struct {
+	A int
+	B string
+}
+`,
+			},
+			wantCode: 0,
+			wantOut:  "Checked 1 Go file(s)",
 		},
 		{
 			name: "identical functions in different packages do not trigger clone violation",
@@ -714,6 +804,31 @@ func TestBuildCloneTokens(t *testing.T) {
 				"switch", "case", "call:.Process", "case", "call:fn",
 			},
 		},
+		{
+			name: "control flow constructs",
+			src: `package sample
+func Control(ch chan int) int {
+	if true {
+		defer close(ch)
+	} else {
+		for i := 0; i < 1; i++ {
+			for range []int{1} {
+				select {
+				case <-ch:
+					return 1
+				default:
+					return 0
+				}
+			}
+		}
+	}
+	return 0
+}
+`,
+			wantTokens: []string{
+				"if", "else", "defer", "for", "range", "select", "comm", "return", "comm", "return", "return",
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -742,6 +857,184 @@ func TestBuildCloneTokens(t *testing.T) {
 				if got[i] != tc.wantTokens[i] {
 					t.Errorf("token[%d] = %q, want %q", i, got[i], tc.wantTokens[i])
 				}
+			}
+		})
+	}
+}
+
+func TestBuildScopedCloneTokens(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		src        string
+		wantTokens []string
+	}{
+		{
+			name: "scoped block delimiters with calls and controls",
+			src: `package sample
+func Scoped() {
+	if true {
+		println("ok")
+	}
+}
+`,
+			wantTokens: []string{
+				"{", "if", "{", "}", "}",
+			},
+		},
+		{
+			name:       "nil body returns nil",
+			src:        "",
+			wantTokens: nil,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.src == "" {
+				if got := buildScopedCloneTokens(nil); got != nil {
+					t.Fatalf("buildScopedCloneTokens(nil) = %v, want nil", got)
+				}
+				return
+			}
+			fset := token.NewFileSet()
+			f, err := parser.ParseFile(fset, "sample.go", tc.src, 0)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			var body *ast.BlockStmt
+			for _, decl := range f.Decls {
+				if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
+					body = fn.Body
+					break
+				}
+			}
+			if body == nil {
+				t.Fatal("no function body found")
+			}
+			got := buildScopedCloneTokens(body)
+			if len(got) != len(tc.wantTokens) {
+				t.Fatalf("buildScopedCloneTokens() got %v, want %v", got, tc.wantTokens)
+			}
+			for i := range got {
+				if got[i] != tc.wantTokens[i] {
+					t.Errorf("token[%d] = %q, want %q", i, got[i], tc.wantTokens[i])
+				}
+			}
+		})
+	}
+}
+
+func TestFormatFieldType(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		expr ast.Expr
+		want string
+	}{
+		{
+			name: "ident",
+			expr: &ast.Ident{Name: "int"},
+			want: "int",
+		},
+		{
+			name: "star expr",
+			expr: &ast.StarExpr{X: &ast.Ident{Name: "string"}},
+			want: "*string",
+		},
+		{
+			name: "selector expr",
+			expr: &ast.SelectorExpr{X: &ast.Ident{Name: "pkg"}, Sel: &ast.Ident{Name: "Type"}},
+			want: "pkg.Type",
+		},
+		{
+			name: "array type",
+			expr: &ast.ArrayType{Elt: &ast.Ident{Name: "byte"}},
+			want: "[]byte",
+		},
+		{
+			name: "map type",
+			expr: &ast.MapType{Key: &ast.Ident{Name: "string"}, Value: &ast.Ident{Name: "int"}},
+			want: "map[string]int",
+		},
+		{
+			name: "fallback",
+			expr: &ast.ChanType{Value: &ast.Ident{Name: "int"}},
+			want: "other",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := formatFieldType(tc.expr); got != tc.want {
+				t.Errorf("formatFieldType() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEditSimilarity(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		a    []string
+		b    []string
+		want float64
+	}{
+		{
+			name: "both empty",
+			a:    nil,
+			b:    nil,
+			want: 0.0,
+		},
+		{
+			name: "left empty",
+			a:    nil,
+			b:    []string{"x"},
+			want: 0.0,
+		},
+		{
+			name: "right empty",
+			a:    []string{"x"},
+			b:    nil,
+			want: 0.0,
+		},
+		{
+			name: "identical slices",
+			a:    []string{"a", "b", "c"},
+			b:    []string{"a", "b", "c"},
+			want: 1.0,
+		},
+		{
+			name: "single substitution",
+			a:    []string{"a", "b", "c"},
+			b:    []string{"a", "x", "c"},
+			want: 2.0 / 3.0,
+		},
+		{
+			name: "single insertion",
+			a:    []string{"a", "b"},
+			b:    []string{"a", "x", "b"},
+			want: 2.0 / 3.0,
+		},
+		{
+			name: "completely disjoint",
+			a:    []string{"a", "b"},
+			b:    []string{"c", "d"},
+			want: 0.0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := editSimilarity(tc.a, tc.b)
+			if diff := got - tc.want; diff > 1e-6 || diff < -1e-6 {
+				t.Errorf("editSimilarity() = %f, want %f", got, tc.want)
 			}
 		})
 	}

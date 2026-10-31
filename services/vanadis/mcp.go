@@ -315,14 +315,22 @@ func (s *VanadisServer) handleMCPUpdateBuild(ctx context.Context, args MCPUpdate
 	}, nil
 }
 
-func (s *VanadisServer) handleMCPUpdateChunk(ctx context.Context, args MCPUpdateChunkArgs) (MCPUpdateChunkOutput, error) {
+func (s *VanadisServer) requireStoreAndChunkRef(buildID, chunkRef string) (string, string, error) {
 	if s.store == nil {
-		return MCPUpdateChunkOutput{}, errors.New("vanadis store not configured")
+		return "", "", errors.New("vanadis store not configured")
 	}
-	buildID := strings.TrimSpace(args.BuildID)
-	chunkRef := strings.TrimSpace(args.ChunkRef)
-	if buildID == "" || chunkRef == "" {
-		return MCPUpdateChunkOutput{}, fmt.Errorf("%w: build_id and chunk_ref are required", ErrInvalidBuildInput)
+	trimmedBuildID := strings.TrimSpace(buildID)
+	trimmedChunkRef := strings.TrimSpace(chunkRef)
+	if trimmedBuildID == "" || trimmedChunkRef == "" {
+		return "", "", fmt.Errorf("%w: build_id and chunk_ref are required", ErrInvalidBuildInput)
+	}
+	return trimmedBuildID, trimmedChunkRef, nil
+}
+
+func (s *VanadisServer) handleMCPUpdateChunk(ctx context.Context, args MCPUpdateChunkArgs) (MCPUpdateChunkOutput, error) {
+	buildID, chunkRef, err := s.requireStoreAndChunkRef(args.BuildID, args.ChunkRef)
+	if err != nil {
+		return MCPUpdateChunkOutput{}, err
 	}
 
 	req := UpdateChunkRequest{
@@ -385,13 +393,9 @@ func (s *VanadisServer) handleMCPAppendChunk(ctx context.Context, args MCPAppend
 }
 
 func (s *VanadisServer) handleMCPRemoveChunk(ctx context.Context, args MCPRemoveChunkArgs) (MCPRemoveChunkOutput, error) {
-	if s.store == nil {
-		return MCPRemoveChunkOutput{}, errors.New("vanadis store not configured")
-	}
-	buildID := strings.TrimSpace(args.BuildID)
-	chunkRef := strings.TrimSpace(args.ChunkRef)
-	if buildID == "" || chunkRef == "" {
-		return MCPRemoveChunkOutput{}, fmt.Errorf("%w: build_id and chunk_ref are required", ErrInvalidBuildInput)
+	buildID, chunkRef, err := s.requireStoreAndChunkRef(args.BuildID, args.ChunkRef)
+	if err != nil {
+		return MCPRemoveChunkOutput{}, err
 	}
 
 	removed, remaining, err := s.store.RemoveChunk(ctx, buildID, chunkRef)
