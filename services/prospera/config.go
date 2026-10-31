@@ -50,7 +50,6 @@ type Config struct {
 // ProsperaYAMLConfig defines the declarative file schema for prospera.yaml.
 type ProsperaYAMLConfig struct {
 	Port                  string `yaml:"port"`
-	BrainURL              string `yaml:"brain_url"`
 	EriURL                string `yaml:"eri_url"`
 	GoogleMCPURL          string `yaml:"google_mcp_url"`
 	CovenURL              string `yaml:"coven_url"`
@@ -141,7 +140,7 @@ func validateProsperaYAML(ycfg ProsperaYAMLConfig, cleanPath string, eriURL stri
 		return fmt.Errorf("config: port is required in %s", cleanPath)
 	}
 	if eriURL == "" {
-		return fmt.Errorf("config: brain_url is required in %s", cleanPath)
+		return fmt.Errorf("config: eri_url is required in %s", cleanPath)
 	}
 	if strings.TrimSpace(ycfg.GoogleMCPURL) == "" {
 		return fmt.Errorf("config: google_mcp_url is required in %s", cleanPath)
@@ -195,9 +194,6 @@ func LoadConfigFile(path string, getenv func(string) string) (*Config, error) {
 	}
 
 	eriURL := strings.TrimSpace(ycfg.EriURL)
-	if eriURL == "" {
-		eriURL = strings.TrimSpace(ycfg.BrainURL)
-	}
 	if eriURL == "" {
 		eriURL = strings.TrimSpace(getenv("ERI_URL"))
 	}

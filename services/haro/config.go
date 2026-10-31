@@ -45,7 +45,6 @@ type Config struct {
 type SchedulerYAMLConfig struct {
 	Port              string   `yaml:"port"`
 	Timezone          string   `yaml:"timezone"`
-	BrainURL          string   `yaml:"brain_url"`
 	EriURL            string   `yaml:"eri_url"`
 	VanadisURL        string   `yaml:"vanadis_url"`
 	ExtraEventSources []string `yaml:"extra_event_sources"`
@@ -89,19 +88,7 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 
 	eriURL := os.Getenv("ERI_URL")
 	if eriURL == "" {
-		eriURL = os.Getenv("ERI_INTERNAL_URL")
-	}
-	if eriURL == "" {
-		eriURL = os.Getenv("BRAIN_INTERNAL_URL")
-	}
-	if eriURL == "" {
-		eriURL = os.Getenv("BRAIN_URL")
-	}
-	if eriURL == "" {
 		eriURL = ycfg.EriURL
-	}
-	if eriURL == "" {
-		eriURL = ycfg.BrainURL
 	}
 	eriURL = strings.TrimSpace(eriURL)
 	if eriURL == "" {

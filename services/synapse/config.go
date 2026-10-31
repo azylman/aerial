@@ -43,7 +43,6 @@ type RouterYAMLConfig struct {
 	InfisicalEnvironment string `yaml:"infisical_environment"`
 	NomadAddr            string `yaml:"nomad_addr"`
 	HangarURL            string `yaml:"hangar_url"`
-	BrainURL             string `yaml:"brain_url"`
 	EriURL               string `yaml:"eri_url"`
 	VanadisURL           string `yaml:"vanadis_url"`
 	HaroURL              string `yaml:"haro_url"`
@@ -115,8 +114,8 @@ func LoadConfig(configPath string) Config {
 		GitHubAPIURL:          strings.TrimRight(firstNonEmpty(os.Getenv("GITHUB_API_URL"), "https://api.github.com"), "/"),
 		PostgresURL:           pgURL,
 		HangarURL:             strings.TrimRight(firstNonEmpty(os.Getenv("HANGAR_URL"), fileCfg.HangarURL, "http://127.0.0.1:8087"), "/"),
-		BrainURL:              strings.TrimRight(firstNonEmpty(os.Getenv("ERI_URL"), os.Getenv("ERI_INTERNAL_URL"), os.Getenv("BRAIN_INTERNAL_URL"), os.Getenv("BRAIN_URL"), fileCfg.EriURL, fileCfg.BrainURL, "http://127.0.0.1:8088"), "/"),
-		EriURL:                strings.TrimRight(firstNonEmpty(os.Getenv("ERI_URL"), os.Getenv("ERI_INTERNAL_URL"), os.Getenv("BRAIN_INTERNAL_URL"), os.Getenv("BRAIN_URL"), fileCfg.EriURL, fileCfg.BrainURL, "http://127.0.0.1:8088"), "/"),
+		BrainURL:              strings.TrimRight(firstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/"),
+		EriURL:                strings.TrimRight(firstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/"),
 		VanadisURL:            strings.TrimRight(firstNonEmpty(os.Getenv("VANADIS_URL"), fileCfg.VanadisURL, "http://vanadis.aerial"), "/"),
 		HaroURL:               strings.TrimRight(firstNonEmpty(os.Getenv("HARO_URL"), fileCfg.HaroURL, "http://haro.aerial"), "/"),
 		SystemChannelID:       strings.TrimSpace(firstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), os.Getenv("DISCORD_CHANNEL_ID"), sysChan)),

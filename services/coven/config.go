@@ -88,22 +88,19 @@ type Config struct {
 
 // MemoryYAMLConfig defines the declarative file schema for /config/config.yaml.
 type MemoryYAMLConfig struct {
-	Port               string       `yaml:"port"`
-	DatabaseURL        string       `yaml:"database_url"`
-	BrainURL           string       `yaml:"brain_url"`
-	EriURL             string       `yaml:"eri_url"`
-	BrainLLMURL        string       `yaml:"brain_llm_url"`
-	EriLLMURL          string       `yaml:"eri_llm_url"`
-	Ollama             OllamaConfig `yaml:"ollama"`
-	CustomSkillsDir    string       `yaml:"custom_skills_dir"`
-	RulesDir           string       `yaml:"rules_dir"`
-	GitHubPAT          string       `yaml:"github_pat"`
-	ConfigRepoOwner    string       `yaml:"config_repo_owner"`
-	ConfigRepoName     string       `yaml:"config_repo_name"`
-	BrainPRRegisterURL string       `yaml:"brain_pr_register_url"`
-	PRRegisterURL      string       `yaml:"pr_register_url"`
-	EriPRRegisterURL   string       `yaml:"eri_pr_register_url"`
-	SystemChannelID    string       `yaml:"system_channel_id"`
+	Port             string       `yaml:"port"`
+	DatabaseURL      string       `yaml:"database_url"`
+	EriURL           string       `yaml:"eri_url"`
+	EriLLMURL        string       `yaml:"eri_llm_url"`
+	Ollama           OllamaConfig `yaml:"ollama"`
+	CustomSkillsDir  string       `yaml:"custom_skills_dir"`
+	RulesDir         string       `yaml:"rules_dir"`
+	GitHubPAT        string       `yaml:"github_pat"`
+	ConfigRepoOwner  string       `yaml:"config_repo_owner"`
+	ConfigRepoName   string       `yaml:"config_repo_name"`
+	PRRegisterURL    string       `yaml:"pr_register_url"`
+	EriPRRegisterURL string       `yaml:"eri_pr_register_url"`
+	SystemChannelID  string       `yaml:"system_channel_id"`
 }
 
 func resolveFirstNonEmpty(values ...string) string {
@@ -142,17 +139,17 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 	if port == "" {
 		return nil, fmt.Errorf("config: port is required in %s", cleanPath)
 	}
-	eriURL := resolveFirstNonEmpty(os.Getenv("ERI_URL"), ycfg.EriURL, ycfg.BrainURL)
+	eriURL := resolveFirstNonEmpty(os.Getenv("ERI_URL"), ycfg.EriURL)
 	if eriURL == "" {
-		return nil, fmt.Errorf("config: brain_url is required in %s", cleanPath)
+		return nil, fmt.Errorf("config: eri_url is required in %s", cleanPath)
 	}
-	eriLLMURL := resolveFirstNonEmpty(os.Getenv("ERI_LLM_URL"), ycfg.EriLLMURL, ycfg.BrainLLMURL)
+	eriLLMURL := resolveFirstNonEmpty(os.Getenv("ERI_LLM_URL"), ycfg.EriLLMURL)
 	if eriLLMURL == "" {
-		return nil, fmt.Errorf("config: brain_llm_url is required in %s", cleanPath)
+		return nil, fmt.Errorf("config: eri_llm_url is required in %s", cleanPath)
 	}
-	prRegisterURL := resolveFirstNonEmpty(os.Getenv("PR_REGISTER_URL"), ycfg.PRRegisterURL, ycfg.EriPRRegisterURL, ycfg.BrainPRRegisterURL)
+	prRegisterURL := resolveFirstNonEmpty(os.Getenv("PR_REGISTER_URL"), ycfg.PRRegisterURL, ycfg.EriPRRegisterURL)
 	if prRegisterURL == "" {
-		return nil, fmt.Errorf("config: brain_pr_register_url is required in %s", cleanPath)
+		return nil, fmt.Errorf("config: pr_register_url is required in %s", cleanPath)
 	}
 	customSkillsDir := strings.TrimSpace(ycfg.CustomSkillsDir)
 	if customSkillsDir == "" {

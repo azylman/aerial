@@ -122,14 +122,6 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 			wantBrainURL: "http://eri-primary.aerial:8088",
 			wantEriURL:   "http://eri-primary.aerial:8088",
 		},
-		{
-			name: "eri internal url fallback env",
-			env: map[string]string{
-				"ERI_INTERNAL_URL": "http://eri-internal.aerial:8088",
-			},
-			wantBrainURL: "http://eri-internal.aerial:8088",
-			wantEriURL:   "http://eri-internal.aerial:8088",
-		},
 	}
 
 	keysToClear := []string{
@@ -138,8 +130,8 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 		"INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET", "INFISICAL_PROJECT_ID",
 		"INFISICAL_WORKSPACE_ID", "INFISICAL_ENVIRONMENT", "NOMAD_ADDR",
 		"NOMAD_TOKEN", "GITHUB_PAT", "GITHUB_TOKEN", "GITHUB_API_URL",
-		"POSTGRES_URL", "DATABASE_URL", "HANGAR_URL", "ERI_URL", "ERI_INTERNAL_URL",
-		"BRAIN_INTERNAL_URL", "BRAIN_URL", "SYSTEM_CHANNEL_ID", "DISCORD_CHANNEL_ID",
+		"POSTGRES_URL", "DATABASE_URL", "HANGAR_URL", "ERI_URL",
+		"SYSTEM_CHANNEL_ID", "DISCORD_CHANNEL_ID",
 		"CONFIG_PATH", "DISCORD_BOT_TOKEN", "DISCORD_TOKEN",
 	}
 
@@ -202,7 +194,7 @@ infisical_url: "http://infisical.custom:8085"
 infisical_environment: "staging"
 nomad_addr: "http://nomad.custom:4646"
 hangar_url: "http://hangar.custom:8087"
-brain_url: "http://brain.custom:8088"
+eri_url: "http://brain.custom:8088"
 `,
 			wantPort:      "4099",
 			wantInfURL:    "http://infisical.custom:8085",
@@ -234,7 +226,7 @@ infisical_url: "http://infisical.custom:8085"
 infisical_environment: "staging"
 nomad_addr: "http://nomad.custom:4646"
 hangar_url: "http://hangar.custom:8087"
-brain_url: "http://brain.custom:8088"
+eri_url: "http://brain.custom:8088"
 `,
 			env: map[string]string{
 				"PORT":                  "5000",
@@ -307,7 +299,7 @@ brain_url: "http://brain.custom:8088"
 
 	keysToClear := []string{
 		"PORT", "INFISICAL_URL", "INFISICAL_HOST_URL", "INFISICAL_ENVIRONMENT",
-		"NOMAD_ADDR", "HANGAR_URL", "ERI_URL", "ERI_INTERNAL_URL", "BRAIN_INTERNAL_URL", "BRAIN_URL", "SYSTEM_CHANNEL_ID", "DISCORD_CHANNEL_ID",
+		"NOMAD_ADDR", "HANGAR_URL", "ERI_URL", "SYSTEM_CHANNEL_ID", "DISCORD_CHANNEL_ID",
 	}
 
 	for _, tc := range tests {

@@ -296,7 +296,7 @@ func TestLoadConfigFile_TableDriven(t *testing.T) {
 
 	validYAML := `
 port: "8084"
-brain_url: "http://eri.aerial"
+eri_url: "http://eri.aerial"
 memory_url: "http://coven.aerial"
 hangar_url: "http://hangar.aerial"
 haro_url: "http://haro.aerial"
@@ -312,7 +312,7 @@ github_repos:
 
 	singleRepoYAML := `
 port: "8084"
-brain_url: "http://eri.aerial"
+eri_url: "http://eri.aerial"
 memory_url: "http://coven.aerial"
 gitsync_url: "http://hangar.aerial"
 haro_url: "http://haro.aerial"
