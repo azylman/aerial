@@ -4447,7 +4447,7 @@ func TestCancelBurstOnShutdown_Dispatch(t *testing.T) {
 	}
 }
 
-func TestResolveExecutionPool_EdgeCases(t *testing.T) {
+func TestResolveExecutionPool_NilReceiverAndMissingPool(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {

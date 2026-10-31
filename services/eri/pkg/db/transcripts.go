@@ -33,19 +33,31 @@ func recordTranscriptQuery(op string, start time.Time, errp *error) {
 	metrics.RecordDBQuery(op, status, time.Since(start))
 }
 
-func scanSessionSummaries(rows *sql.Rows) ([]SessionSummary, error) {
+func scanRows[T any](rows *sql.Rows, scanOne func(*sql.Rows) (T, error)) ([]T, error) {
 	if rows == nil {
 		return nil, nil
 	}
 	defer rows.Close()
-	var summaries []SessionSummary
+
+	var items []T
 	for rows.Next() {
+		item, err := scanOne(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func scanSessionSummaries(rows *sql.Rows) ([]SessionSummary, error) {
+	return scanRows(rows, func(r *sql.Rows) (SessionSummary, error) {
 		var sm SessionSummary
 		var rawMtime, rawCreatedAt, rawUpdatedAt any
-		if err := rows.Scan(&sm.SessionID, &sm.ThreadID, &sm.Summary, &sm.LastIndexedStep,
+		if err := r.Scan(&sm.SessionID, &sm.ThreadID, &sm.Summary, &sm.LastIndexedStep,
 			&rawMtime, &sm.SummaryStepWatermark, &sm.IsSettled,
 			&rawCreatedAt, &rawUpdatedAt, &sm.Score); err != nil {
-			return nil, fmt.Errorf("scan session summary result: %w", err)
+			return SessionSummary{}, fmt.Errorf("scan session summary result: %w", err)
 		}
 		if t, ok := ParseDBTime(rawMtime); ok {
 			sm.LastMtime = t
@@ -56,30 +68,23 @@ func scanSessionSummaries(rows *sql.Rows) ([]SessionSummary, error) {
 		if t, ok := ParseDBTime(rawUpdatedAt); ok {
 			sm.UpdatedAt = t
 		}
-		summaries = append(summaries, sm)
-	}
-	return summaries, rows.Err()
+		return sm, nil
+	})
 }
 
 func scanTranscriptSteps(rows *sql.Rows) ([]TranscriptStep, error) {
-	if rows == nil {
-		return nil, nil
-	}
-	defer rows.Close()
-	var steps []TranscriptStep
-	for rows.Next() {
+	return scanRows(rows, func(r *sql.Rows) (TranscriptStep, error) {
 		var step TranscriptStep
 		var rawCreatedAt any
-		if err := rows.Scan(&step.SessionID, &step.StepIndex, &step.StepType, &step.ToolName,
+		if err := r.Scan(&step.SessionID, &step.StepIndex, &step.StepType, &step.ToolName,
 			&step.Content, &rawCreatedAt, &step.RankScore); err != nil {
-			return nil, fmt.Errorf("scan transcript step result: %w", err)
+			return TranscriptStep{}, fmt.Errorf("scan transcript step result: %w", err)
 		}
 		if t, ok := ParseDBTime(rawCreatedAt); ok {
 			step.CreatedAt = t
 		}
-		steps = append(steps, step)
-	}
-	return steps, rows.Err()
+		return step, nil
+	})
 }
 
 func (s *SQLStore) GetSessionSyncStates(ctx context.Context) (results map[string]SessionSyncState, err error) {

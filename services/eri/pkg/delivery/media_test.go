@@ -71,6 +71,44 @@ func TestExtractAndSanitizeMedia(t *testing.T) {
 	if !strings.Contains(cleanText, "![Inside Code Block](not_an_image.png)") {
 		t.Errorf("Code block content should be untouched")
 	}
+
+	// Empty string
+	if text, atts := ExtractAndSanitizeMedia("", tempDir); text != "" || len(atts) != 0 {
+		t.Errorf("expected empty text and nil atts for empty input")
+	}
+
+	// Image without alt text
+	imgNoAlt := createTestPNG(t, tempDir, "no_alt.png")
+	textNoAlt, attsNoAlt := ExtractAndSanitizeMedia("Check this:\n![]("+imgNoAlt+")", tempDir)
+	if len(attsNoAlt) != 1 || strings.Contains(textNoAlt, "no_alt.png") {
+		t.Errorf("unexpected output for image without alt text: %q", textNoAlt)
+	}
+
+	// Missing image without alt text
+	textMissing, attsMissing := ExtractAndSanitizeMedia("Check this:\n![]("+filepath.Join(tempDir, "missing_no_alt.png")+")", tempDir)
+	if len(attsMissing) != 0 || !strings.Contains(textMissing, "Image attachment unavailable: missing_no_alt.png") {
+		t.Errorf("unexpected output for missing image without alt: %q", textMissing)
+	}
+
+	// Exceed MaxAttachmentsPerMessage (10 attachments limit)
+	var sb strings.Builder
+	for i := 0; i < 12; i++ {
+		imgPath := createTestPNG(t, tempDir, fmt.Sprintf("img_%d.png", i))
+		sb.WriteString("![img](" + imgPath + ")\n")
+	}
+	_, attsMany := ExtractAndSanitizeMedia(sb.String(), tempDir)
+	if len(attsMany) != MaxAttachmentsPerMessage {
+		t.Errorf("expected max %d attachments, got %d", MaxAttachmentsPerMessage, len(attsMany))
+	}
+}
+
+func TestCleanDuplicateBlankLines(t *testing.T) {
+	t.Parallel()
+
+	cleaned := cleanDuplicateBlankLines("line1\n\n\n\n\nline2")
+	if cleaned != "line1\n\nline2" {
+		t.Errorf("expected collapsed blank lines, got: %q", cleaned)
+	}
 }
 
 func TestExtractMediaMissingFileGracefulDegradation(t *testing.T) {
@@ -151,45 +189,6 @@ func TestToDiscordFile(t *testing.T) {
 	df := att.ToDiscordFile()
 	if df.Name != "chart.png" || df.ContentType != "image/png" || df.Reader == nil {
 		t.Errorf("unexpected discordgo.File: %+v", df)
-	}
-}
-
-func TestExtractAndSanitizeMedia_EdgeCases(t *testing.T) {
-	tempDir := t.TempDir()
-
-	// 1. Empty string
-	if text, atts := ExtractAndSanitizeMedia("", tempDir); text != "" || len(atts) != 0 {
-		t.Errorf("expected empty text and nil atts for empty input")
-	}
-
-	// 2. Image without alt text
-	img1 := createTestPNG(t, tempDir, "no_alt.png")
-	text1, atts1 := ExtractAndSanitizeMedia("Check this:\n![]("+img1+")", tempDir)
-	if len(atts1) != 1 || strings.Contains(text1, "no_alt.png") {
-		t.Errorf("unexpected output for image without alt text: %q", text1)
-	}
-
-	// 3. Missing image without alt text
-	text2, atts2 := ExtractAndSanitizeMedia("Check this:\n![]("+filepath.Join(tempDir, "missing_no_alt.png")+")", tempDir)
-	if len(atts2) != 0 || !strings.Contains(text2, "Image attachment unavailable: missing_no_alt.png") {
-		t.Errorf("unexpected output for missing image without alt: %q", text2)
-	}
-
-	// 4. Multiple duplicate blank lines
-	cleaned := cleanDuplicateBlankLines("line1\n\n\n\n\nline2")
-	if cleaned != "line1\n\nline2" {
-		t.Errorf("expected collapsed blank lines, got: %q", cleaned)
-	}
-
-	// 5. Exceed MaxAttachmentsPerMessage (10 attachments limit)
-	var sb strings.Builder
-	for i := 0; i < 12; i++ {
-		imgPath := createTestPNG(t, tempDir, fmt.Sprintf("img_%d.png", i))
-		sb.WriteString("![img](" + imgPath + ")\n")
-	}
-	_, attsMany := ExtractAndSanitizeMedia(sb.String(), tempDir)
-	if len(attsMany) != MaxAttachmentsPerMessage {
-		t.Errorf("expected max %d attachments, got %d", MaxAttachmentsPerMessage, len(attsMany))
 	}
 }
 
@@ -426,7 +425,7 @@ func TestResolveAndValidateLocalImage_AudioAndHeaderSniffing(t *testing.T) {
 	}
 }
 
-func TestAutoAttachNewMedia_EdgeCases(t *testing.T) {
+func TestAutoAttachNewMedia_NilGuardsAndStatFilters(t *testing.T) {
 	// 1. Empty args
 	if res := AutoAttachNewMedia("", time.Time{}, nil); res != nil {
 		t.Errorf("expected nil for empty baseDir")

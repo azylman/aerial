@@ -29,47 +29,50 @@ import (
 
 func TestInitializeBrainEnvironment(t *testing.T) {
 	tests := []struct {
-		name    string
-		setup   func(t *testing.T) *config.Config
-		wantErr bool
+		name                     string
+		nilConfig                bool
+		precreateCLIConfigAsFile bool
+		wantErr                  bool
 	}{
 		{
-			name:    "nil config",
-			setup:   func(t *testing.T) *config.Config { return nil },
+			name:      "nil config",
+			nilConfig: true,
+			wantErr:   false,
+		},
+		{
+			name:    "success fresh and idempotent",
 			wantErr: false,
 		},
 		{
-			name: "success fresh and idempotent",
-			setup: func(t *testing.T) *config.Config {
-				return newTestConfig(func(d *config.ConfigData) {
-					d.Model = "gemini-2.5-flash"
-					d.GeminiHomeDir = t.TempDir()
-					d.DataDir = t.TempDir()
-					d.APIKey = "test-api-key"
-					d.SystemPrompt = "test prompt"
-				})
-			},
-			wantErr: false,
-		},
-		{
-			name: "conflict file in cli parent",
-			setup: func(t *testing.T) *config.Config {
-				tmpDir := t.TempDir()
-				conflict := filepath.Join(tmpDir, ".gemini", "antigravity-cli")
-				_ = os.MkdirAll(filepath.Dir(conflict), 0o755)
-				_ = os.WriteFile(conflict, []byte("file-not-dir"), 0o644)
-				return newTestConfig(func(d *config.ConfigData) {
-					d.DataDir = tmpDir
-					d.GeminiHomeDir = tmpDir
-				})
-			},
-			wantErr: true,
+			name:                     "conflict file in cli parent",
+			precreateCLIConfigAsFile: true,
+			wantErr:                  true,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := tc.setup(t)
+			var cfg *config.Config
+			if !tc.nilConfig {
+				tmpDir := t.TempDir()
+				if tc.precreateCLIConfigAsFile {
+					conflict := filepath.Join(tmpDir, ".gemini", "antigravity-cli")
+					_ = os.MkdirAll(filepath.Dir(conflict), 0o755)
+					_ = os.WriteFile(conflict, []byte("file-not-dir"), 0o644)
+					cfg = newTestConfig(func(d *config.ConfigData) {
+						d.DataDir = tmpDir
+						d.GeminiHomeDir = tmpDir
+					})
+				} else {
+					cfg = newTestConfig(func(d *config.ConfigData) {
+						d.Model = "gemini-2.5-flash"
+						d.GeminiHomeDir = t.TempDir()
+						d.DataDir = t.TempDir()
+						d.APIKey = "test-api-key"
+						d.SystemPrompt = "test prompt"
+					})
+				}
+			}
 			err := InitializeBrainEnvironment(context.Background(), cfg)
 			if (err != nil) != tc.wantErr {
 				t.Errorf("wantErr=%v, got err=%v", tc.wantErr, err)
@@ -638,7 +641,7 @@ func hasEnv(envs []string, target string) bool {
 	return false
 }
 
-func TestBrainAppOptions_Coverage(t *testing.T) {
+func TestBrainAppOptions_FunctionalOptionMutators(t *testing.T) {
 	var opts brainAppOptions
 	store := dbtest.NewFakeStore()
 	WithStore(store)(&opts)

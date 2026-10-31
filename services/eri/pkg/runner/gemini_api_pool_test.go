@@ -324,6 +324,11 @@ func TestGeminiAPIPool_AccessorsAndNilPool(t *testing.T) {
 	if targets := pool.PrewarmedTargets(); len(targets) != 2 || targets[0] != "alpha" {
 		t.Errorf("failed to update prewarmed targets: %v", targets)
 	}
+
+	sessFallback := &GeminiAPISession{targetKey: "fallback-target"}
+	if sessFallback.SessionID() != "fallback-target" || sessFallback.transcriptPath() != "" {
+		t.Errorf("expected fallback session ID and empty transcript path")
+	}
 }
 
 func TestGeminiAPIPool_MarkDirtySessionRecreation(t *testing.T) {
@@ -371,14 +376,6 @@ func TestGeminiAPIPool_PrewarmedAndClose(t *testing.T) {
 	pool.MarkDirty()
 	if err := sessBeforeClose.Send("hello", &TurnContext{TurnID: "turn-closed", Prompt: "hello", Sink: newMockTurnSink()}); err == nil {
 		t.Errorf("expected error calling Send on closed pool session")
-	}
-}
-
-func TestGeminiAPISession_EdgeCases(t *testing.T) {
-	t.Parallel()
-	sess := &GeminiAPISession{targetKey: "fallback-target"}
-	if sess.SessionID() != "fallback-target" || sess.transcriptPath() != "" {
-		t.Errorf("expected fallback session ID and empty transcript path")
 	}
 }
 

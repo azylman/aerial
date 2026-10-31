@@ -255,7 +255,7 @@ func TestErrorAndWatchdogDetailHelpers(t *testing.T) {
 	}
 }
 
-func TestTokenizeCommandLine_EdgeCases(t *testing.T) {
+func TestTokenizeCommandLine(t *testing.T) {
 	for _, tc := range []struct {
 		input string
 		want  []string
