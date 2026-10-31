@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -484,35 +485,31 @@ func (s *Server) parseEventTriggerActionRequest(w http.ResponseWriter, r *http.R
 	return req, true
 }
 
-func (s *Server) handleCheckEventTriggers(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleEventTriggerQuery(w http.ResponseWriter, r *http.Request, respKey string, fn func(context.Context, *sql.DB, string, []string, string) (any, error)) {
 	req, ok := s.parseEventTriggerActionRequest(w, r)
 	if !ok {
 		return
 	}
-	matched, err := CheckEventTriggers(r.Context(), s.handler.db, req.Source, req.Targets, req.EventType)
+	res, err := fn(r.Context(), s.handler.db, req.Source, req.Targets, req.EventType)
 	if err != nil {
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
-		"status":  "ok",
-		"matched": matched,
+		"status": "ok",
+		respKey:  res,
+	})
+}
+
+func (s *Server) handleCheckEventTriggers(w http.ResponseWriter, r *http.Request) {
+	s.handleEventTriggerQuery(w, r, "matched", func(ctx context.Context, db *sql.DB, source string, targets []string, eventType string) (any, error) {
+		return CheckEventTriggers(ctx, db, source, targets, eventType)
 	})
 }
 
 func (s *Server) handleClaimEventTriggers(w http.ResponseWriter, r *http.Request) {
-	req, ok := s.parseEventTriggerActionRequest(w, r)
-	if !ok {
-		return
-	}
-	triggers, err := ClaimEventTriggers(r.Context(), s.handler.db, req.Source, req.Targets, req.EventType)
-	if err != nil {
-		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
-		"status":   "ok",
-		"triggers": triggers,
+	s.handleEventTriggerQuery(w, r, "triggers", func(ctx context.Context, db *sql.DB, source string, targets []string, eventType string) (any, error) {
+		return ClaimEventTriggers(ctx, db, source, targets, eventType)
 	})
 }
 

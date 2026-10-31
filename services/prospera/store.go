@@ -490,49 +490,54 @@ func (s *PGStore) UpdateCallState(ctx context.Context, callID, state, endReason,
 	return nil
 }
 
-// AppendTranscriptTurn transactionally appends a dialogue turn to the call's transcript.
-func (s *PGStore) AppendTranscriptTurn(ctx context.Context, callID string, turn TranscriptTurn) error {
+func appendCallJSONSlice[T any](ctx context.Context, s *PGStore, callID, column, errLabel string, item T) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("store: begin tx: %w", err)
 	}
 	defer rollbackTx(tx)
 
-	query := "SELECT transcript FROM voice_calls WHERE call_id = $1"
+	query := fmt.Sprintf("SELECT %s FROM voice_calls WHERE call_id = $1", column)
 	if !s.isSQLite {
 		query += " FOR UPDATE"
 	}
 
-	var transRaw string
-	err = tx.QueryRowContext(ctx, query, callID).Scan(&transRaw)
+	var raw string
+	err = tx.QueryRowContext(ctx, query, callID).Scan(&raw)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrCallNotFound
 		}
-		return fmt.Errorf("store: get transcript: %w", err)
+		return fmt.Errorf("store: get %s: %w", errLabel, err)
 	}
 
-	var turns []TranscriptTurn
-	if transRaw != "" {
-		if err := json.Unmarshal([]byte(transRaw), &turns); err != nil {
-			return fmt.Errorf("store: unmarshal transcript: %w", err)
+	var list []T
+	if raw != "" {
+		if err := json.Unmarshal([]byte(raw), &list); err != nil {
+			return fmt.Errorf("store: unmarshal %s: %w", errLabel, err)
 		}
 	}
-	turns = append(turns, turn)
+	list = append(list, item)
 
-	updatedJSON, err := json.Marshal(turns)
+	updatedJSON, err := json.Marshal(list)
 	if err != nil {
-		return fmt.Errorf("store: marshal transcript: %w", err)
+		return fmt.Errorf("store: marshal %s: %w", errLabel, err)
 	}
 
-	_, err = tx.ExecContext(ctx, "UPDATE voice_calls SET transcript = $1, updated_at = $2 WHERE call_id = $3",
+	updateQuery := fmt.Sprintf("UPDATE voice_calls SET %s = $1, updated_at = $2 WHERE call_id = $3", column)
+	_, err = tx.ExecContext(ctx, updateQuery,
 		string(updatedJSON), time.Now().UTC(), callID,
 	)
 	if err != nil {
-		return fmt.Errorf("store: update transcript: %w", err)
+		return fmt.Errorf("store: update %s: %w", errLabel, err)
 	}
 
 	return tx.Commit()
+}
+
+// AppendTranscriptTurn transactionally appends a dialogue turn to the call's transcript.
+func (s *PGStore) AppendTranscriptTurn(ctx context.Context, callID string, turn TranscriptTurn) error {
+	return appendCallJSONSlice(ctx, s, callID, "transcript", "transcript", turn)
 }
 
 // AdvanceLiveTranscriptCursor atomically advances the live delivery transcript cursor via compare-and-swap.
@@ -553,47 +558,7 @@ func (s *PGStore) AdvanceLiveTranscriptCursor(ctx context.Context, callID string
 
 // AppendOwnerInstruction appends a mid-call guidance instruction from the owner.
 func (s *PGStore) AppendOwnerInstruction(ctx context.Context, callID string, instr OwnerInstruction) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("store: begin tx: %w", err)
-	}
-	defer rollbackTx(tx)
-
-	query := "SELECT owner_instructions FROM voice_calls WHERE call_id = $1"
-	if !s.isSQLite {
-		query += " FOR UPDATE"
-	}
-
-	var instrRaw string
-	err = tx.QueryRowContext(ctx, query, callID).Scan(&instrRaw)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrCallNotFound
-		}
-		return fmt.Errorf("store: get owner instructions: %w", err)
-	}
-
-	var list []OwnerInstruction
-	if instrRaw != "" {
-		if err := json.Unmarshal([]byte(instrRaw), &list); err != nil {
-			return fmt.Errorf("store: unmarshal owner instructions: %w", err)
-		}
-	}
-	list = append(list, instr)
-
-	updatedJSON, err := json.Marshal(list)
-	if err != nil {
-		return fmt.Errorf("store: marshal owner instructions: %w", err)
-	}
-
-	_, err = tx.ExecContext(ctx, "UPDATE voice_calls SET owner_instructions = $1, updated_at = $2 WHERE call_id = $3",
-		string(updatedJSON), time.Now().UTC(), callID,
-	)
-	if err != nil {
-		return fmt.Errorf("store: update owner instructions: %w", err)
-	}
-
-	return tx.Commit()
+	return appendCallJSONSlice(ctx, s, callID, "owner_instructions", "owner instructions", instr)
 }
 
 // SetVoicemailRecording sets the recording URL for a voicemail call.

@@ -71,9 +71,10 @@ func NewHTTPPromptDispatcher(brainURL string) *HTTPPromptDispatcher {
 	}
 }
 
-func (d *HTTPPromptDispatcher) DispatchPrompt(ctx context.Context, req PromptDispatchRequest) (PromptDispatchResponse, error) {
+func postBrainJSON[Req any, Resp any](ctx context.Context, d *HTTPPromptDispatcher, path, opLabel string, req Req) (Resp, error) {
+	var zero Resp
 	if d == nil {
-		return PromptDispatchResponse{}, fmt.Errorf("dispatcher is nil")
+		return zero, fmt.Errorf("dispatcher is nil")
 	}
 	brainURL := strings.TrimRight(strings.TrimSpace(d.brainURL), "/")
 	if brainURL == "" {
@@ -82,12 +83,12 @@ func (d *HTTPPromptDispatcher) DispatchPrompt(ctx context.Context, req PromptDis
 
 	body, err := json.Marshal(req)
 	if err != nil {
-		return PromptDispatchResponse{}, fmt.Errorf("failed to marshal prompt dispatch request: %w", err)
+		return zero, fmt.Errorf("failed to marshal %s request: %w", opLabel, err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, brainURL+"/prompt", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, brainURL+path, bytes.NewReader(body))
 	if err != nil {
-		return PromptDispatchResponse{}, fmt.Errorf("failed to create http request: %w", err)
+		return zero, fmt.Errorf("failed to create http request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
@@ -98,7 +99,7 @@ func (d *HTTPPromptDispatcher) DispatchPrompt(ctx context.Context, req PromptDis
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		return PromptDispatchResponse{}, fmt.Errorf("prompt dispatch failed: %w", err)
+		return zero, fmt.Errorf("%s failed: %w", opLabel, err)
 	}
 	defer func() {
 		_ = resp.Body.Close()
@@ -106,7 +107,7 @@ func (d *HTTPPromptDispatcher) DispatchPrompt(ctx context.Context, req PromptDis
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return PromptDispatchResponse{}, fmt.Errorf("failed to read response body: %w", err)
+		return zero, fmt.Errorf("failed to read response body: %w", err)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -114,73 +115,25 @@ func (d *HTTPPromptDispatcher) DispatchPrompt(ctx context.Context, req PromptDis
 			Error string `json:"error"`
 		}
 		if jsonErr := json.Unmarshal(respBody, &errResp); jsonErr == nil && strings.TrimSpace(errResp.Error) != "" {
-			return PromptDispatchResponse{}, fmt.Errorf("brain /prompt error (%d): %s", resp.StatusCode, errResp.Error)
+			return zero, fmt.Errorf("brain %s error (%d): %s", path, resp.StatusCode, errResp.Error)
 		}
-		return PromptDispatchResponse{}, fmt.Errorf("brain /prompt returned HTTP %d: %s", resp.StatusCode, string(respBody))
+		return zero, fmt.Errorf("brain %s returned HTTP %d: %s", path, resp.StatusCode, string(respBody))
 	}
 
-	var dispatchResp PromptDispatchResponse
+	var dispatchResp Resp
 	if err := json.Unmarshal(respBody, &dispatchResp); err != nil {
-		return PromptDispatchResponse{}, fmt.Errorf("failed to parse prompt dispatch response: %w", err)
+		return zero, fmt.Errorf("failed to parse %s response: %w", opLabel, err)
 	}
 
 	return dispatchResp, nil
 }
 
+func (d *HTTPPromptDispatcher) DispatchPrompt(ctx context.Context, req PromptDispatchRequest) (PromptDispatchResponse, error) {
+	return postBrainJSON[PromptDispatchRequest, PromptDispatchResponse](ctx, d, "/prompt", "prompt dispatch", req)
+}
+
 func (d *HTTPPromptDispatcher) Dispatch(ctx context.Context, req DispatchRequest) (DispatchResponse, error) {
-	if d == nil {
-		return DispatchResponse{}, fmt.Errorf("dispatcher is nil")
-	}
-	brainURL := strings.TrimRight(strings.TrimSpace(d.brainURL), "/")
-	if brainURL == "" {
-		brainURL = "http://eri.aerial"
-	}
-
-	body, err := json.Marshal(req)
-	if err != nil {
-		return DispatchResponse{}, fmt.Errorf("failed to marshal dispatch request: %w", err)
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, brainURL+"/dispatch", bytes.NewReader(body))
-	if err != nil {
-		return DispatchResponse{}, fmt.Errorf("failed to create http request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	client := d.httpClient
-	if client == nil {
-		client = http.DefaultClient
-	}
-
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return DispatchResponse{}, fmt.Errorf("dispatch failed: %w", err)
-	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return DispatchResponse{}, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var errResp struct {
-			Error string `json:"error"`
-		}
-		if jsonErr := json.Unmarshal(respBody, &errResp); jsonErr == nil && strings.TrimSpace(errResp.Error) != "" {
-			return DispatchResponse{}, fmt.Errorf("brain /dispatch error (%d): %s", resp.StatusCode, errResp.Error)
-		}
-		return DispatchResponse{}, fmt.Errorf("brain /dispatch returned HTTP %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var dispatchResp DispatchResponse
-	if err := json.Unmarshal(respBody, &dispatchResp); err != nil {
-		return DispatchResponse{}, fmt.Errorf("failed to parse dispatch response: %w", err)
-	}
-
-	return dispatchResp, nil
+	return postBrainJSON[DispatchRequest, DispatchResponse](ctx, d, "/dispatch", "dispatch", req)
 }
 
 type Ticker struct {
