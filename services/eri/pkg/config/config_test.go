@@ -303,10 +303,8 @@ func TestLoadConfig_LKGCAndColdBoot(t *testing.T) {
 			for _, f := range tc.files {
 				parts := strings.SplitN(f, ":", 2)
 				p := filepath.Join(tmpDir, parts[0])
-				content := ""
 				if len(parts) == 2 {
-					content = parts[1]
-					if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+					if err := os.WriteFile(p, []byte(parts[1]), 0o600); err != nil {
 						t.Fatalf("failed to write %s: %v", p, err)
 					}
 				}

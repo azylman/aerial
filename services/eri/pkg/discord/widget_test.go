@@ -457,7 +457,7 @@ func TestDeliverStatusWidget_Edit404FallbackToSend(t *testing.T) {
 		editFunc: func(m *discordgo.MessageEdit, options ...discordgo.RequestOption) (*discordgo.Message, error) {
 			editCalled = true
 			return nil, &discordgo.RESTError{
-				Response: &http.Response{StatusCode: 404},
+				Response: &http.Response{StatusCode: http.StatusNotFound},
 				Message:  &discordgo.APIErrorMessage{Code: 10008, Message: "Unknown Message"},
 			}
 		},
@@ -609,7 +609,7 @@ func TestDeliverStatusWidget_ValidationAndErrors(t *testing.T) {
 		sender := &mockWidgetSender{
 			editFunc: func(m *discordgo.MessageEdit, options ...discordgo.RequestOption) (*discordgo.Message, error) {
 				return nil, &discordgo.RESTError{
-					Response: &http.Response{StatusCode: 404},
+					Response: &http.Response{StatusCode: http.StatusNotFound},
 				}
 			},
 			sendFunc: func(channelID string, data *discordgo.MessageSend, options ...discordgo.RequestOption) (*discordgo.Message, error) {

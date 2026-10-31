@@ -9,6 +9,7 @@ import (
 )
 
 func assertContainsAndOmits(t *testing.T, target string, contains, omits []string, context any) {
+	t.Helper()
 	for _, c := range contains {
 		if !strings.Contains(target, c) {
 			t.Errorf("%+v missing %q in %s", context, c, target)

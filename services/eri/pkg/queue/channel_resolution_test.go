@@ -258,7 +258,7 @@ func TestResolveTargetThread_TableDriven(t *testing.T) {
 							return nil, derr
 						}
 						b, _ := json.Marshal(&discordgo.Channel{ID: tid, Type: discordgo.ChannelTypeGuildPublicThread, Name: "auto-thread"})
-						return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}, nil
+						return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}, nil
 					})
 					pool.cfg.DiscordSession = dg
 				}

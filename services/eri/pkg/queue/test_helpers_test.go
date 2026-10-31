@@ -35,7 +35,10 @@ import (
 )
 
 // setupTestStore returns a clean FakeStore for testing.
-func setupTestStore(t testing.TB) *dbtest.FakeStore { return dbtest.NewFakeStore() }
+func setupTestStore(t testing.TB) *dbtest.FakeStore {
+	t.Helper()
+	return dbtest.NewFakeStore()
+}
 
 func insertMessage(store db.Store, msg db.Message) error {
 	if store == nil {
@@ -73,6 +76,7 @@ func getPreviousSessionID(store db.Store, threadID string) (string, error) {
 }
 
 func newMockHaroOneShotServer(t testing.TB) (*httptest.Server, func(threadID string) []oneShotScheduleRequest) {
+	t.Helper()
 	var mu sync.Mutex
 	var requests []oneShotScheduleRequest
 
@@ -191,11 +195,6 @@ func mockMultiTurnJSONResponse(convID, responseText string, numTurns int) string
 	})
 	return string(payload)
 }
-
-type (
-	runnerFunc            = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
-	runnerWithOptionsFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (stdout, stderr string, exitCode int, err error)
-)
 
 type mockRunnerStep struct {
 	convID          string
@@ -555,7 +554,7 @@ type burstTestCase struct {
 	name, channelID, seedSessionID, botUserID, classifierJSON, runnerConvID, runnerResponse, wantSavedSession, wantFinalStatus, wantDeliveredText, wantOldTranscriptExcludes, wantPromptPrefix, wantClassifierPromptContains, wantAlertTitle, wantAlertChannel string
 	seedSession, enableHistoryFetcher, sequentialBursts, preserveSessionInRunner, checkClassifierCalls, checkSavedSession, wantNoStubDir, checkDeliveryCalls, checkMaxTypingCalls, wantPassedInitialSession, wantSingleInstructionTagPerPrompt                 bool
 	seedTurnCount, maxAttempts, rotateBeforeTurn, wantClassifierCalls, wantRunnerCalls, wantDeliveryCalls, wantMinTypingCalls, wantMaxTypingCalls, wantTurnCount                                                                                               int
-	seedTranscripts, wantPassedSessions, wantDeliveredSubstrings, wantDeliveredExcludes, wantPromptContains, wantPromptExcludes, wantAlertBodyContains                                                                                                         []string
+	seedTranscripts, wantPassedSessions, wantPromptContains, wantPromptExcludes, wantAlertBodyContains                                                                                                                                                         []string
 	channelInstructions, wantMsgErrors, wantMsgResponses                                                                                                                                                                                                       map[string]string
 	cachedChannels                                                                                                                                                                                                                                             []*discordgo.Channel
 	historyMessages                                                                                                                                                                                                                                            []HistoryMessage

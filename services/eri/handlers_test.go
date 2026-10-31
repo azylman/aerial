@@ -362,7 +362,7 @@ func TestHandleDirectMessage(t *testing.T) {
 	})
 	restErrPool := queue.New(nil, queue.WorkerPoolConfig{
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			return &discordgo.RESTError{Response: &http.Response{StatusCode: 403}}
+			return &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusForbidden}}
 		},
 	})
 	sendErrPool := queue.New(nil, queue.WorkerPoolConfig{
@@ -472,7 +472,7 @@ func TestHandleDirectMessage(t *testing.T) {
 func TestHandleStatusWidget(t *testing.T) {
 	restErrPool := queue.New(nil, queue.WorkerPoolConfig{
 		WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) {
-			return "", &discordgo.RESTError{Response: &http.Response{StatusCode: 403}}
+			return "", &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusForbidden}}
 		},
 	})
 	sendErrPool := queue.New(nil, queue.WorkerPoolConfig{
@@ -1106,9 +1106,9 @@ func TestHandleInternalLLM_And_MemoryRetriever(t *testing.T) {
 		t.Errorf("expected error on bad json")
 	}
 
-	os.Setenv("MEMORY_MCP_URL", memSrv.URL)
+	t.Setenv("MEMORY_MCP_URL", memSrv.URL)
 	retEnv := newHTTPMemoryRetriever("")
-	os.Unsetenv("MEMORY_MCP_URL")
+	t.Setenv("MEMORY_MCP_URL", "")
 	if out, err := retEnv(context.Background(), "hello"); err != nil || !strings.Contains(out, "<retrieved_memory>") {
 		t.Errorf("expected retrieved memory with env var fallback, got %q, %v", out, err)
 	}

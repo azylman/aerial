@@ -15,6 +15,7 @@ import (
 )
 
 func startMockPostgres(t *testing.T) string {
+	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("failed to listen on mock pg: %v", err)
@@ -108,11 +109,7 @@ func handlePgConn(conn net.Conn) {
 	}
 }
 
-type (
-	dummyDBTX              struct{ d driver.Driver }
-	dummyDBTXNoDriver      = dummyDBTX
-	dummyDBTXWithNilDriver = dummyDBTX
-)
+type dummyDBTX struct{ d driver.Driver }
 
 func (d dummyDBTX) Driver() driver.Driver                                           { return d.d }
 func (d dummyDBTX) ExecContext(context.Context, string, ...any) (sql.Result, error) { return nil, nil }
