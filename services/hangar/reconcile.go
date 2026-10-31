@@ -433,6 +433,20 @@ func isBatchNomadRun(runArgs []string) bool {
 	return err == nil && strings.Contains(string(raw), `"batch"`)
 }
 
+func (d *SyncDaemon) handleNomadJobTypeChange(ctx context.Context, jobName, sanitizedCombined string, runArgs []string) ([]byte, string, error, bool) {
+	log.Printf("[Hangar:Nomad] Job %s changed scheduler type (%s); stopping with -purge before re-applying...", jobName, sanitizedCombined)
+	stopOut, stopErrBytes, stopErr := d.getNomadExecutor()(ctx, "job", "stop", "-purge", jobName)
+	if stopErr != nil {
+		log.Printf("[Hangar:Nomad] Warning: failed to purge job %s during type transition: %s (%v)", jobName, SanitizeLog(strings.TrimSpace(string(append(stopOut, stopErrBytes...)))), stopErr)
+		return nil, sanitizedCombined, nil, false
+	}
+	out, errBytes, err := d.getNomadExecutor()(ctx, runArgs...)
+	if err != nil {
+		sanitizedCombined = SanitizeLog(strings.TrimSpace(string(append(out, errBytes...))))
+	}
+	return out, sanitizedCombined, err, true
+}
+
 func (d *SyncDaemon) runNomadJobWithEvents(ctx context.Context, baseEvt HangarDeployEvent, runArgs ...string) (out []byte, sanitizedCombined string, err error) {
 	baseEvt.Event = "deploy_started"
 	baseEvt.Status = "started"
@@ -450,14 +464,8 @@ func (d *SyncDaemon) runNomadJobWithEvents(ctx context.Context, baseEvt HangarDe
 	if err != nil {
 		sanitizedCombined = SanitizeLog(strings.TrimSpace(string(append(out, errBytes...))))
 		if baseEvt.JobName != "" && isNomadJobTypeChangeError(sanitizedCombined) {
-			log.Printf("[Hangar:Nomad] Job %s changed scheduler type (%s); stopping with -purge before re-applying...", baseEvt.JobName, sanitizedCombined)
-			if stopOut, stopErrBytes, stopErr := d.getNomadExecutor()(ctx, "job", "stop", "-purge", baseEvt.JobName); stopErr != nil {
-				log.Printf("[Hangar:Nomad] Warning: failed to purge job %s during type transition: %s (%v)", baseEvt.JobName, SanitizeLog(strings.TrimSpace(string(append(stopOut, stopErrBytes...)))), stopErr)
-			} else {
-				out, errBytes, err = d.getNomadExecutor()(ctx, runArgs...)
-				if err != nil {
-					sanitizedCombined = SanitizeLog(strings.TrimSpace(string(append(out, errBytes...))))
-				}
+			if retryOut, retryCombined, retryErr, ok := d.handleNomadJobTypeChange(ctx, baseEvt.JobName, sanitizedCombined, runArgs); ok {
+				out, sanitizedCombined, err = retryOut, retryCombined, retryErr
 			}
 		}
 	}

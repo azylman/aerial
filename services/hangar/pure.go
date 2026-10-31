@@ -130,6 +130,38 @@ func ResolveGitBin(lookup func(string) string, fileExists ...func(string) bool) 
 	return resolveGitBinInternal(lookup, fileExists, exec.LookPath, runtime.GOOS)
 }
 
+func resolveWindowsGitBin(lookup func(string) string, exists func(string) bool, goos string) (string, bool) {
+	sep := string(filepath.Separator)
+	if goos == "windows" {
+		sep = "\\"
+	}
+	localAppData := lookup("LOCALAPPDATA")
+	if localAppData != "" {
+		minGit := strings.Join([]string{localAppData, "Programs", "MinGit", "cmd", "git.exe"}, sep)
+		if exists(minGit) {
+			return minGit, true
+		}
+	}
+
+	progFiles := lookup("ProgramFiles")
+	if progFiles != "" {
+		gitExe := strings.Join([]string{progFiles, "Git", "cmd", "git.exe"}, sep)
+		if exists(gitExe) {
+			return gitExe, true
+		}
+	}
+
+	userProfile := lookup("USERPROFILE")
+	if userProfile != "" {
+		minGitUser := strings.Join([]string{userProfile, "AppData", "Local", "Programs", "MinGit", "cmd", "git.exe"}, sep)
+		if exists(minGitUser) {
+			return minGitUser, true
+		}
+	}
+
+	return "", false
+}
+
 func resolveGitBinInternal(
 	lookup func(string) string,
 	fileExists []func(string) bool,
@@ -151,32 +183,8 @@ func resolveGitBinInternal(
 	}
 
 	if goos == "windows" || lookup("OS") == "Windows_NT" {
-		sep := string(filepath.Separator)
-		if goos == "windows" {
-			sep = "\\"
-		}
-		localAppData := lookup("LOCALAPPDATA")
-		if localAppData != "" {
-			minGit := strings.Join([]string{localAppData, "Programs", "MinGit", "cmd", "git.exe"}, sep)
-			if exists(minGit) {
-				return minGit
-			}
-		}
-
-		progFiles := lookup("ProgramFiles")
-		if progFiles != "" {
-			gitExe := strings.Join([]string{progFiles, "Git", "cmd", "git.exe"}, sep)
-			if exists(gitExe) {
-				return gitExe
-			}
-		}
-
-		userProfile := lookup("USERPROFILE")
-		if userProfile != "" {
-			minGitUser := strings.Join([]string{userProfile, "AppData", "Local", "Programs", "MinGit", "cmd", "git.exe"}, sep)
-			if exists(minGitUser) {
-				return minGitUser
-			}
+		if minGit, ok := resolveWindowsGitBin(lookup, exists, goos); ok {
+			return minGit
 		}
 	}
 
@@ -232,6 +240,25 @@ func GenerateDockerConfig(existingContent []byte, registry, username, pat string
 	return append(marshaled, '\n'), nil
 }
 
+func parseRepoUser(repoURL string) string {
+	trimmed := strings.TrimSuffix(repoURL, ".git")
+	var pathPart string
+	if idx := strings.Index(trimmed, "://"); idx != -1 {
+		pathPart = trimmed[idx+3:]
+		if slashIdx := strings.Index(pathPart, "/"); slashIdx != -1 {
+			pathPart = pathPart[slashIdx+1:]
+		}
+	} else if idx := strings.Index(trimmed, ":"); idx != -1 {
+		pathPart = trimmed[idx+1:]
+	}
+
+	parts := strings.Split(strings.Trim(pathPart, "/"), "/")
+	if len(parts) >= 2 && parts[0] != "" {
+		return parts[0]
+	}
+	return ""
+}
+
 // ResolveRegistryUser determines the username for registry authentication.
 // Checks DOCKER_REGISTRY_USER, GITHUB_ACTOR, parses from repoURL, or defaults to "x-access-token".
 func ResolveRegistryUser(repoURL string, lookup func(string) string) string {
@@ -244,22 +271,9 @@ func ResolveRegistryUser(repoURL string, lookup func(string) string) string {
 		}
 	}
 
-	repoURL = strings.TrimSpace(repoURL)
-	if repoURL != "" {
-		trimmed := strings.TrimSuffix(repoURL, ".git")
-		var pathPart string
-		if idx := strings.Index(trimmed, "://"); idx != -1 {
-			pathPart = trimmed[idx+3:]
-			if slashIdx := strings.Index(pathPart, "/"); slashIdx != -1 {
-				pathPart = pathPart[slashIdx+1:]
-			}
-		} else if idx := strings.Index(trimmed, ":"); idx != -1 {
-			pathPart = trimmed[idx+1:]
-		}
-
-		parts := strings.Split(strings.Trim(pathPart, "/"), "/")
-		if len(parts) >= 2 && parts[0] != "" {
-			return parts[0]
+	if repoURL = strings.TrimSpace(repoURL); repoURL != "" {
+		if user := parseRepoUser(repoURL); user != "" {
+			return user
 		}
 	}
 
@@ -306,6 +320,26 @@ func splitRegistryAndRepo(namePart string) (registry, repository string) {
 	return registry, repository
 }
 
+func parseImageTagAndName(trimmed, tag string) (string, string, error) {
+	if tag != "" {
+		return trimmed, tag, nil
+	}
+	lastColon := strings.LastIndex(trimmed, ":")
+	lastSlash := strings.LastIndex(trimmed, "/")
+	if lastColon != -1 && lastColon > lastSlash {
+		extractedTag := trimmed[lastColon+1:]
+		namePart := trimmed[:lastColon]
+		if extractedTag == "" || strings.Contains(extractedTag, "/") {
+			return "", "", fmt.Errorf("invalid tag in image reference: %q", trimmed)
+		}
+		if extractedTag == "${var.image_tag}" {
+			extractedTag = "latest"
+		}
+		return namePart, extractedTag, nil
+	}
+	return trimmed, "latest", nil
+}
+
 // ParseImageReference decomposes a container image reference into its registry,
 // repository path, and tag. Normalizes Docker Hub references (docker.io -> registry-1.docker.io
 // and library/ prefixing for official images).
@@ -329,25 +363,9 @@ func ParseImageReference(ref string) (registry, repository, tag string, err erro
 	}
 
 	// Extract tag if present
-	var namePart string
-	if tag == "" {
-		lastColon := strings.LastIndex(trimmed, ":")
-		lastSlash := strings.LastIndex(trimmed, "/")
-		if lastColon != -1 && lastColon > lastSlash {
-			tag = trimmed[lastColon+1:]
-			namePart = trimmed[:lastColon]
-			if tag == "" || strings.Contains(tag, "/") {
-				return "", "", "", fmt.Errorf("invalid tag in image reference: %q", ref)
-			}
-			if tag == "${var.image_tag}" {
-				tag = "latest"
-			}
-		} else {
-			tag = "latest"
-			namePart = trimmed
-		}
-	} else {
-		namePart = trimmed
+	namePart, tag, err := parseImageTagAndName(trimmed, tag)
+	if err != nil {
+		return "", "", "", err
 	}
 
 	if namePart == "" {
@@ -361,6 +379,33 @@ func ParseImageReference(ref string) (registry, repository, tag string, err erro
 	}
 
 	return registry, repository, tag, nil
+}
+
+func parseQuotedAuthParam(rem string) (val, nextRem string) {
+	endQuote := strings.Index(rem[1:], "\"")
+	if endQuote == -1 {
+		return strings.Trim(rem, "\""), ""
+	}
+	val = rem[1 : endQuote+1]
+	remAfter := rem[endQuote+2:]
+	if commaIdx := strings.Index(remAfter, ","); commaIdx != -1 {
+		return val, strings.TrimSpace(remAfter[commaIdx+1:])
+	}
+	return val, ""
+}
+
+func parseUnquotedAuthParam(rem string) (val, nextRem string) {
+	if commaIdx := strings.Index(rem, ","); commaIdx != -1 {
+		return strings.TrimSpace(rem[:commaIdx]), strings.TrimSpace(rem[commaIdx+1:])
+	}
+	return strings.TrimSpace(rem), ""
+}
+
+func parseAuthParamValue(rem string) (val, nextRem string) {
+	if strings.HasPrefix(rem, "\"") {
+		return parseQuotedAuthParam(rem)
+	}
+	return parseUnquotedAuthParam(rem)
 }
 
 // ParseWwwAuthenticate parses a Registry v2 Www-Authenticate challenge header
@@ -387,31 +432,8 @@ func ParseWwwAuthenticate(header string) (realm, service, scope string, err erro
 		key := strings.ToLower(strings.TrimSpace(paramsPart[:eqIdx]))
 		rem := strings.TrimSpace(paramsPart[eqIdx+1:])
 
-		var val string
-		if strings.HasPrefix(rem, "\"") {
-			endQuote := strings.Index(rem[1:], "\"")
-			if endQuote == -1 {
-				val = strings.Trim(rem, "\"")
-				paramsPart = ""
-			} else {
-				val = rem[1 : endQuote+1]
-				remAfter := rem[endQuote+2:]
-				if commaIdx := strings.Index(remAfter, ","); commaIdx != -1 {
-					paramsPart = strings.TrimSpace(remAfter[commaIdx+1:])
-				} else {
-					paramsPart = ""
-				}
-			}
-		} else {
-			if commaIdx := strings.Index(rem, ","); commaIdx != -1 {
-				val = strings.TrimSpace(rem[:commaIdx])
-				paramsPart = strings.TrimSpace(rem[commaIdx+1:])
-			} else {
-				val = strings.TrimSpace(rem)
-				paramsPart = ""
-			}
-		}
-
+		val, nextRem := parseAuthParamValue(rem)
+		paramsPart = nextRem
 		if key != "" {
 			params[key] = val
 		}

@@ -139,6 +139,37 @@ func detectRecentContainerSwap(run GitHubRun, shortSHA, currentCommit string, ae
 	return false
 }
 
+func evaluateSuccessfulCIRun(
+	run GitHubRun,
+	runJobs []GitHubJob,
+	shortSHA, currentCommit string,
+	gitSync GitSyncStatusResponse,
+	aerialContainers []DockerContainerJSON,
+	refTime time.Time,
+) (stage, ciStatus, commitMsgOverride string, progress int, skip bool) {
+	isPRRun := (run.HeadBranch != "" && run.HeadBranch != "main" && run.HeadBranch != "master") || run.Event == "pull_request"
+	if isPRRun {
+		return "", "", "", 0, true
+	}
+	hasContainerBuilds := hasActiveContainerBuildJob(runJobs)
+	hasRecentContainerSwap := detectRecentContainerSwap(run, shortSHA, currentCommit, aerialContainers)
+	if run.Repository != "" && !strings.HasSuffix(run.Repository, "/aerial") && !hasContainerBuilds {
+		hasRecentContainerSwap = true
+	}
+	isHangarActive := gitSync.Reconciliation != nil && gitSync.Reconciliation.Active
+	ciElapsed := refTime.Sub(run.UpdatedAt)
+	if ciElapsed < 0 {
+		ciElapsed = refTime.Sub(run.CreatedAt)
+	}
+	if len(runJobs) > 0 && !hasContainerBuilds {
+		return "live", "completed", "", 100, false
+	}
+	if hasContainerBuilds && !hasRecentContainerSwap && !isHangarActive && ciElapsed > 120*time.Second {
+		return "failed", "completed", "Hangar reconciliation timed out (>120s)", 55, false
+	}
+	return "awaiting_pull", "completed", "", 55, false
+}
+
 func evaluateCompletedCIRun(
 	run GitHubRun,
 	runJobs []GitHubJob,
@@ -154,27 +185,7 @@ func evaluateCompletedCIRun(
 	case "failure", "cancelled":
 		return "failed", "failed", "", 40, false
 	case "success":
-		isPRRun := (run.HeadBranch != "" && run.HeadBranch != "main" && run.HeadBranch != "master") || run.Event == "pull_request"
-		if isPRRun {
-			return "", "", "", 0, true
-		}
-		hasContainerBuilds := hasActiveContainerBuildJob(runJobs)
-		hasRecentContainerSwap := detectRecentContainerSwap(run, shortSHA, currentCommit, aerialContainers)
-		if run.Repository != "" && !strings.HasSuffix(run.Repository, "/aerial") && !hasContainerBuilds {
-			hasRecentContainerSwap = true
-		}
-		isHangarActive := gitSync.Reconciliation != nil && gitSync.Reconciliation.Active
-		ciElapsed := refTime.Sub(run.UpdatedAt)
-		if ciElapsed < 0 {
-			ciElapsed = refTime.Sub(run.CreatedAt)
-		}
-		if len(runJobs) > 0 && !hasContainerBuilds {
-			return "live", "completed", "", 100, false
-		}
-		if hasContainerBuilds && !hasRecentContainerSwap && !isHangarActive && ciElapsed > 120*time.Second {
-			return "failed", "completed", "Hangar reconciliation timed out (>120s)", 55, false
-		}
-		return "awaiting_pull", "completed", "", 55, false
+		return evaluateSuccessfulCIRun(run, runJobs, shortSHA, currentCommit, gitSync, aerialContainers, refTime)
 	default:
 		return "", "pending", "", 0, false
 	}

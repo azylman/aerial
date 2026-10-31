@@ -397,6 +397,24 @@ func (d *SyncDaemon) syncAllConfigsToNomad(ctx context.Context, logPrefix, confi
 	}
 }
 
+func validateConfigYAMLChannels(filePath string, raw []byte) error {
+	if filepath.Base(filePath) != "config.yaml" {
+		return nil
+	}
+	var ch struct {
+		Channels map[string]any `yaml:"channels"`
+	}
+	if yaml.Unmarshal(raw, &ch) == nil && ch.Channels != nil {
+		for k := range ch.Channels {
+			if strings.TrimPrefix(strings.ToLower(strings.TrimSpace(k)), "#") == "default" {
+				return nil
+			}
+		}
+		return fmt.Errorf("semantic validation error in %s: channels.default is required", filePath)
+	}
+	return nil
+}
+
 // readAndValidateYAML reads filePath and unmarshals into out if non-nil.
 // If the file does not exist, it returns (nil, nil).
 func readAndValidateYAML(filePath, label string, out any) ([]byte, error) {
@@ -407,27 +425,14 @@ func readAndValidateYAML(filePath, label string, out any) ([]byte, error) {
 		}
 		return nil, fmt.Errorf("failed to read %s at %s: %w", label, filePath, err)
 	}
-	if out != nil {
-		if err := yaml.Unmarshal(raw, out); err != nil {
-			return nil, fmt.Errorf("invalid YAML syntax in %s: %w", filePath, err)
-		}
-		if filepath.Base(filePath) == "config.yaml" {
-			var ch struct {
-				Channels map[string]any `yaml:"channels"`
-			}
-			if yaml.Unmarshal(raw, &ch) == nil && ch.Channels != nil {
-				hasDefault := false
-				for k := range ch.Channels {
-					if strings.TrimPrefix(strings.ToLower(strings.TrimSpace(k)), "#") == "default" {
-						hasDefault = true
-						break
-					}
-				}
-				if !hasDefault {
-					return nil, fmt.Errorf("semantic validation error in %s: channels.default is required", filePath)
-				}
-			}
-		}
+	if out == nil {
+		return raw, nil
+	}
+	if err := yaml.Unmarshal(raw, out); err != nil {
+		return nil, fmt.Errorf("invalid YAML syntax in %s: %w", filePath, err)
+	}
+	if err := validateConfigYAMLChannels(filePath, raw); err != nil {
+		return nil, err
 	}
 	return raw, nil
 }
@@ -559,6 +564,32 @@ func (d *SyncDaemon) SyncServiceConfigsToNomad(ctx context.Context, configDir st
 	return nil
 }
 
+func (d *SyncDaemon) syncMappedAssetBundle(ctx context.Context, bundle AssetBundleConfig, configDir string, syncCtx []ConfigSyncContext, isChanged bool, serviceConfigsSynced *bool) error {
+	if !isChanged || *serviceConfigsSynced {
+		return nil
+	}
+	*serviceConfigsSynced = true
+	if err := d.SyncServiceConfigsToNomad(ctx, configDir, syncCtx...); err != nil {
+		log.Printf("[Hangar:Nomad] Notice: SyncAssetBundlesToNomad (%s): %v", bundle.Name, err)
+		return err
+	}
+	return nil
+}
+
+func (d *SyncDaemon) syncStandaloneAssetBundle(ctx context.Context, bundle AssetBundleConfig, configDir string, isChanged bool) error {
+	hash := d.computeBundleHash(bundle.Name, configDir)
+	if hash == "" {
+		return nil
+	}
+	jobName := strings.TrimPrefix(bundle.NomadVar, "nomad/jobs/")
+	cacheKey := bundle.NomadVar + ":ASSET_HASH"
+	if _, err := d.pushNomadVarQuiet(ctx, cacheKey, bundle.NomadVar, jobName, hash, isChanged, []string{"ASSET_HASH=" + hash}); err != nil {
+		log.Printf("[Hangar:Nomad] Notice: SyncAssetBundlesToNomad (%s): %v", bundle.Name, err)
+		return err
+	}
+	return nil
+}
+
 // SyncAssetBundlesToNomad computes asset bundle hashes and synchronizes ASSET_HASH to Nomad variables.
 func (d *SyncDaemon) SyncAssetBundlesToNomad(ctx context.Context, configDir string, syncCtx ...ConfigSyncContext) error {
 	diffGated := len(syncCtx) > 0 && syncCtx[0].DiffGated
@@ -579,28 +610,14 @@ func (d *SyncDaemon) SyncAssetBundlesToNomad(ctx context.Context, configDir stri
 			continue
 		}
 		isChanged := !diffGated || AssetBundleMatchesRepoChanges(bundle, "", changedFiles)
+		var err error
 		if mappedVars[bundle.NomadVar] {
-			if isChanged && !serviceConfigsSynced {
-				serviceConfigsSynced = true
-				if err := d.SyncServiceConfigsToNomad(ctx, configDir, syncCtx...); err != nil {
-					log.Printf("[Hangar:Nomad] Notice: SyncAssetBundlesToNomad (%s): %v", bundle.Name, err)
-					if firstErr == nil {
-						firstErr = err
-					}
-				}
-			}
-			continue
+			err = d.syncMappedAssetBundle(ctx, bundle, configDir, syncCtx, isChanged, &serviceConfigsSynced)
+		} else {
+			err = d.syncStandaloneAssetBundle(ctx, bundle, configDir, isChanged)
 		}
-
-		if hash := d.computeBundleHash(bundle.Name, configDir); hash != "" {
-			jobName := strings.TrimPrefix(bundle.NomadVar, "nomad/jobs/")
-			cacheKey := bundle.NomadVar + ":ASSET_HASH"
-			if _, err := d.pushNomadVarQuiet(ctx, cacheKey, bundle.NomadVar, jobName, hash, isChanged, []string{"ASSET_HASH=" + hash}); err != nil {
-				log.Printf("[Hangar:Nomad] Notice: SyncAssetBundlesToNomad (%s): %v", bundle.Name, err)
-				if firstErr == nil {
-					firstErr = err
-				}
-			}
+		if err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
 

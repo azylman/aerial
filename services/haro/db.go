@@ -815,6 +815,38 @@ func isSQLiteDB(db *sql.DB) bool {
 	return strings.Contains(strings.ToLower(fmt.Sprintf("%T", db.Driver())), "sqlite")
 }
 
+func claimEventTriggersSQLite(ctx context.Context, database *sql.DB, placeholders string, args []any) ([]EventTrigger, error) {
+	tx, txErr := database.BeginTx(ctx, nil)
+	if txErr != nil {
+		return nil, txErr
+	}
+	defer func() {
+		if rErr := tx.Rollback(); rErr != nil && !errors.Is(rErr, sql.ErrTxDone) {
+			log.Printf("[Haro] failed to rollback claim transaction: %v", rErr)
+		}
+	}()
+
+	selectQuery := fmt.Sprintf(`SELECT id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at, persistent FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) ORDER BY created_at ASC`, placeholders)
+	rows, qErr := tx.QueryContext(ctx, selectQuery, args...)
+	if qErr != nil {
+		return nil, qErr
+	}
+	triggers, scanErr := scanEventTriggerRows(rows)
+	if scanErr != nil {
+		return nil, scanErr
+	}
+
+	deleteQuery := fmt.Sprintf(`DELETE FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) AND persistent = FALSE`, placeholders)
+	if _, dErr := tx.ExecContext(ctx, deleteQuery, args...); dErr != nil {
+		return nil, dErr
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return triggers, nil
+}
+
 // ClaimEventTriggers atomically deletes and returns matching event triggers from event_triggers.
 func ClaimEventTriggers(ctx context.Context, database *sql.DB, source string, targets []string, eventType string) ([]EventTrigger, error) {
 	ctx, err := normCtxAndDB(ctx, database)
@@ -827,35 +859,7 @@ func ClaimEventTriggers(ctx context.Context, database *sql.DB, source string, ta
 	}
 
 	if isSQLiteDBFn(database) {
-		tx, txErr := database.BeginTx(ctx, nil)
-		if txErr != nil {
-			return nil, txErr
-		}
-		defer func() {
-			if rErr := tx.Rollback(); rErr != nil && !errors.Is(rErr, sql.ErrTxDone) {
-				log.Printf("[Haro] failed to rollback claim transaction: %v", rErr)
-			}
-		}()
-
-		selectQuery := fmt.Sprintf(`SELECT id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at, persistent FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) ORDER BY created_at ASC`, placeholders)
-		rows, qErr := tx.QueryContext(ctx, selectQuery, args...)
-		if qErr != nil {
-			return nil, qErr
-		}
-		triggers, scanErr := scanEventTriggerRows(rows)
-		if scanErr != nil {
-			return nil, scanErr
-		}
-
-		deleteQuery := fmt.Sprintf(`DELETE FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) AND persistent = FALSE`, placeholders)
-		if _, dErr := tx.ExecContext(ctx, deleteQuery, args...); dErr != nil {
-			return nil, dErr
-		}
-
-		if err := tx.Commit(); err != nil {
-			return nil, err
-		}
-		return triggers, nil
+		return claimEventTriggersSQLite(ctx, database, placeholders, args)
 	}
 
 	rawQuery := fmt.Sprintf(`WITH deleted AS (

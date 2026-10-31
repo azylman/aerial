@@ -844,6 +844,50 @@ func (s *RouterServer) isStaleOrIgnoredCIFailure(ctx context.Context, res *Resol
 	return false
 }
 
+func (s *RouterServer) healDependabotPR(ctx context.Context, res *ResolvedGitHubEvent) {
+	if !strings.HasPrefix(strings.TrimSpace(res.Branch), "dependabot/") {
+		return
+	}
+	targetID := s.resolveHeadlessPRTargetID(ctx, res.Repo, res.PRNumber)
+	if targetID == "" {
+		return
+	}
+	if _, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, "", targetID, ""); err != nil {
+		log.Printf("[synapse] [registry] warning self-healing dependabot PR %s#%d on CI failure: %v", res.Repo, res.PRNumber, err)
+	}
+}
+
+func (s *RouterServer) handleCIFailureByPRNumber(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) (bool, error) {
+	s.healDependabotPR(ctx, res)
+	targetID, updated, err := s.registry.AtomicTransitionCIFailed(ctx, res.Repo, res.PRNumber)
+	if err != nil {
+		return false, err
+	}
+	res.TargetID = firstNonEmpty(res.TargetID, targetID)
+	if updated {
+		return true, s.completeCIFailureTransition(ctx, res, details, checkURL)
+	}
+	return false, nil
+}
+
+func (s *RouterServer) handleCIFailureByHeadSHA(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) (bool, error) {
+	targetID, prNum, updated, err := s.registry.AtomicTransitionCIFailedByHeadSHA(ctx, res.Repo, res.HeadSHA)
+	if err != nil {
+		return false, err
+	}
+	res.TargetID = firstNonEmpty(res.TargetID, targetID)
+	if prNum > 0 && res.PRNumber == 0 {
+		res.PRNumber = prNum
+		if res.Event == "check_run" && !isRoboRevCheck(res.CheckName) {
+			s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
+		}
+	}
+	if updated {
+		return true, s.completeCIFailureTransition(ctx, res, details, checkURL)
+	}
+	return false, nil
+}
+
 func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) error {
 	if s.isStaleOrIgnoredCIFailure(ctx, res) {
 		return nil
@@ -852,38 +896,12 @@ func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *Resol
 		s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
 	}
 	if res.PRNumber > 0 {
-		if strings.HasPrefix(strings.TrimSpace(res.Branch), "dependabot/") {
-			if targetID := s.resolveHeadlessPRTargetID(ctx, res.Repo, res.PRNumber); targetID != "" {
-				if _, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, "", targetID, ""); err != nil {
-					log.Printf("[synapse] [registry] warning self-healing dependabot PR %s#%d on CI failure: %v", res.Repo, res.PRNumber, err)
-				}
-			}
-		}
-		targetID, updated, err := s.registry.AtomicTransitionCIFailed(ctx, res.Repo, res.PRNumber)
-		if err != nil {
-			return err
-		}
-		res.TargetID = firstNonEmpty(res.TargetID, targetID)
-		if updated {
-			return s.completeCIFailureTransition(ctx, res, details, checkURL)
-		}
-		return nil
+		_, err := s.handleCIFailureByPRNumber(ctx, res, details, checkURL)
+		return err
 	}
 	if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
-		targetID, prNum, updated, err := s.registry.AtomicTransitionCIFailedByHeadSHA(ctx, res.Repo, res.HeadSHA)
-		if err != nil {
-			return err
-		}
-		res.TargetID = firstNonEmpty(res.TargetID, targetID)
-		if prNum > 0 && res.PRNumber == 0 {
-			res.PRNumber = prNum
-			if res.Event == "check_run" && !isRoboRevCheck(res.CheckName) {
-				s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
-			}
-		}
-		if updated {
-			return s.completeCIFailureTransition(ctx, res, details, checkURL)
-		}
+		_, err := s.handleCIFailureByHeadSHA(ctx, res, details, checkURL)
+		return err
 	}
 	return nil
 }
@@ -992,6 +1010,25 @@ func isDependabotPR(p GitHubPullRequestPayload) bool {
 			strings.EqualFold(strings.TrimSpace(p.Sender.Login), "dependabot[bot]"))
 }
 
+func (s *RouterServer) handleDependabotPROpen(ctx context.Context, res *ResolvedGitHubEvent, p GitHubPullRequestPayload) {
+	if !isDependabotPR(p) || (res.Action != "opened" && res.Action != "reopened" && res.Action != "synchronize") {
+		return
+	}
+	if s.registry == nil || res.PRNumber <= 0 {
+		return
+	}
+	targetID := s.resolveHeadlessPRTargetID(ctx, res.Repo, res.PRNumber)
+	if targetID == "" {
+		return
+	}
+	resolvedTargetID, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, p.PullRequest.Title, targetID, "")
+	if err != nil {
+		log.Printf("[synapse] [registry] warning registering dependabot PR %s#%d: %v", res.Repo, res.PRNumber, err)
+		return
+	}
+	res.TargetID = firstNonEmpty(res.TargetID, resolvedTargetID, targetID)
+}
+
 func (s *RouterServer) processGitHubPullRequestEvent(ctx context.Context, delivery string, body []byte, res *ResolvedGitHubEvent) (*ResolvedGitHubEvent, error) {
 	var p GitHubPullRequestPayload
 	if err := json.Unmarshal(body, &p); err != nil {
@@ -1015,19 +1052,7 @@ func (s *RouterServer) processGitHubPullRequestEvent(ctx context.Context, delive
 	log.Printf("[synapse] [github] [pull_request] repo=%s pr=%d action=%s head_sha=%s merge_sha=%s branch=%s merged=%v sender=%s delivery=%s",
 		res.Repo, res.PRNumber, res.Action, res.HeadSHA, res.MergeSHA, res.Branch, p.PullRequest.Merged, res.Sender, delivery)
 
-	if isDependabotPR(p) && (res.Action == "opened" || res.Action == "reopened" || res.Action == "synchronize") {
-		if s.registry != nil && res.PRNumber > 0 {
-			targetID := s.resolveHeadlessPRTargetID(ctx, res.Repo, res.PRNumber)
-			if targetID != "" {
-				resolvedTargetID, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, p.PullRequest.Title, targetID, "")
-				if err != nil {
-					log.Printf("[synapse] [registry] warning registering dependabot PR %s#%d: %v", res.Repo, res.PRNumber, err)
-				} else {
-					res.TargetID = firstNonEmpty(res.TargetID, resolvedTargetID, targetID)
-				}
-			}
-		}
-	}
+	s.handleDependabotPROpen(ctx, res, p)
 
 	if s.registry != nil && res.PRNumber > 0 {
 		if err := s.handlePullRequestRegistryAction(ctx, res, p.PullRequest); err != nil {

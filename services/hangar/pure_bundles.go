@@ -75,15 +75,7 @@ var (
 	imagePropRegex    = regexp.MustCompile(`(?i)["']?image_name["']?\s*:\s*["']([^"']+)["']`)
 )
 
-// ParseWorkflowBuildRules extracts paths-filter rules and catalog image mappings from workflow YAML bytes.
-func ParseWorkflowBuildRules(workflowYAML []byte) (filters map[string][]string, catalog map[string]string) {
-	filters = make(map[string][]string)
-	catalog = make(map[string]string)
-	if len(workflowYAML) == 0 {
-		return filters, catalog
-	}
-
-	// 1. Extract catalog: scan for const catalog = [...]
+func extractCatalogFromWorkflow(workflowYAML []byte, catalog map[string]string) {
 	for _, blockMatch := range catalogBlockRegex.FindAllSubmatch(workflowYAML, -1) {
 		if len(blockMatch) < 2 {
 			continue
@@ -104,8 +96,9 @@ func ParseWorkflowBuildRules(workflowYAML []byte) (filters map[string][]string, 
 			}
 		}
 	}
+}
 
-	// 2. Extract dorny/paths-filter via direct struct unmarshaling
+func extractFiltersFromWorkflow(workflowYAML []byte, filters map[string][]string) {
 	var parsed struct {
 		Jobs map[string]struct {
 			Steps []struct {
@@ -115,21 +108,34 @@ func ParseWorkflowBuildRules(workflowYAML []byte) (filters map[string][]string, 
 			} `yaml:"steps"`
 		} `yaml:"jobs"`
 	}
-	if err := yaml.Unmarshal(workflowYAML, &parsed); err == nil {
-		for _, job := range parsed.Jobs {
-			for _, step := range job.Steps {
-				if strings.TrimSpace(step.With.Filters) == "" {
-					continue
-				}
-				var stepFilters map[string][]string
-				if err := yaml.Unmarshal([]byte(step.With.Filters), &stepFilters); err == nil {
-					for k, v := range stepFilters {
-						filters[k] = v
-					}
+	if err := yaml.Unmarshal(workflowYAML, &parsed); err != nil {
+		return
+	}
+	for _, job := range parsed.Jobs {
+		for _, step := range job.Steps {
+			if strings.TrimSpace(step.With.Filters) == "" {
+				continue
+			}
+			var stepFilters map[string][]string
+			if err := yaml.Unmarshal([]byte(step.With.Filters), &stepFilters); err == nil {
+				for k, v := range stepFilters {
+					filters[k] = v
 				}
 			}
 		}
 	}
+}
+
+// ParseWorkflowBuildRules extracts paths-filter rules and catalog image mappings from workflow YAML bytes.
+func ParseWorkflowBuildRules(workflowYAML []byte) (filters map[string][]string, catalog map[string]string) {
+	filters = make(map[string][]string)
+	catalog = make(map[string]string)
+	if len(workflowYAML) == 0 {
+		return filters, catalog
+	}
+
+	extractCatalogFromWorkflow(workflowYAML, catalog)
+	extractFiltersFromWorkflow(workflowYAML, filters)
 
 	return filters, catalog
 }
@@ -289,6 +295,19 @@ func writeTarFile(tw *tar.Writer, p, arcPath string, d fs.DirEntry) error {
 	return copyErr
 }
 
+func isIgnoredTarEntry(name string) bool {
+	return name == ".git" || strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".tmp")
+}
+
+func isExcludedTarPath(arcPath string, excludeRelPaths []string) bool {
+	for _, excl := range excludeRelPaths {
+		if c := strings.Trim(filepath.ToSlash(excl), "/"); c != "" && (arcPath == c || strings.HasPrefix(arcPath, c+"/")) {
+			return true
+		}
+	}
+	return false
+}
+
 func walkTarSource(tw *tar.Writer, prefix, srcDir string, excludeRelPaths []string) error {
 	stat, err := os.Stat(srcDir)
 	if err != nil {
@@ -304,7 +323,7 @@ func walkTarSource(tw *tar.Writer, prefix, srcDir string, excludeRelPaths []stri
 		if walkErr != nil || p == srcDir {
 			return walkErr
 		}
-		if name := d.Name(); name == ".git" || strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".tmp") {
+		if isIgnoredTarEntry(d.Name()) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
@@ -321,13 +340,11 @@ func walkTarSource(tw *tar.Writer, prefix, srcDir string, excludeRelPaths []stri
 		if prefix != "" {
 			arcPath = prefix + "/" + arcPath
 		}
-		for _, excl := range excludeRelPaths {
-			if c := strings.Trim(filepath.ToSlash(excl), "/"); c != "" && (arcPath == c || strings.HasPrefix(arcPath, c+"/")) {
-				if d.IsDir() {
-					return filepath.SkipDir
-				}
-				return nil
+		if isExcludedTarPath(arcPath, excludeRelPaths) {
+			if d.IsDir() {
+				return filepath.SkipDir
 			}
+			return nil
 		}
 		return writeTarFile(tw, p, arcPath, d)
 	})

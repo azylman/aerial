@@ -88,6 +88,43 @@ func isToolNameBlocked(name string, blocked map[string]bool) bool {
 	return BlockedToolNames[clean]
 }
 
+func checkToolCallBlocked(req JSONRPCRequest, blocked map[string]bool) (bool, string, error) {
+	if strings.TrimSpace(req.Method) != "tools/call" {
+		return false, "", nil
+	}
+	var params ToolCallParams
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return false, "", err
+		}
+	}
+	if isToolNameBlocked(params.Name, blocked) {
+		return true, params.Name, nil
+	}
+	return false, params.Name, nil
+}
+
+func inspectBatchToolCalls(trimmed []byte, blocked map[string]bool) (bool, interface{}, string, error) {
+	var batch []JSONRPCRequest
+	if err := json.Unmarshal(trimmed, &batch); err != nil {
+		return false, nil, "", err
+	}
+	for _, req := range batch {
+		isBlocked, name, err := checkToolCallBlocked(req, blocked)
+		if err != nil {
+			return false, req.ID, "", err
+		}
+		if isBlocked {
+			return true, req.ID, name, nil
+		}
+	}
+	var firstID interface{}
+	if len(batch) > 0 {
+		firstID = batch[0].ID
+	}
+	return false, firstID, "", nil
+}
+
 // IsBlockedToolCall inspects a JSON-RPC request (single or batch) to see if it calls a blocked tool.
 // It detects top-level batch requests ([...]) and normalizes tool names to lowercase to prevent injection.
 func IsBlockedToolCall(rawReq []byte, blocked map[string]bool) (bool, interface{}, string, error) {
@@ -98,28 +135,7 @@ func IsBlockedToolCall(rawReq []byte, blocked map[string]bool) (bool, interface{
 
 	// 1. Check for JSON-RPC batch request: [...]
 	if trimmed[0] == '[' {
-		var batch []JSONRPCRequest
-		if err := json.Unmarshal(trimmed, &batch); err != nil {
-			return false, nil, "", err
-		}
-		for _, req := range batch {
-			if strings.TrimSpace(req.Method) == "tools/call" {
-				var params ToolCallParams
-				if len(req.Params) > 0 {
-					if err := json.Unmarshal(req.Params, &params); err != nil {
-						return false, req.ID, "", err
-					}
-				}
-				if isToolNameBlocked(params.Name, blocked) {
-					return true, req.ID, params.Name, nil
-				}
-			}
-		}
-		var firstID interface{}
-		if len(batch) > 0 {
-			firstID = batch[0].ID
-		}
-		return false, firstID, "", nil
+		return inspectBatchToolCalls(trimmed, blocked)
 	}
 
 	// 2. Single JSON-RPC request: {...}
@@ -128,22 +144,12 @@ func IsBlockedToolCall(rawReq []byte, blocked map[string]bool) (bool, interface{
 		return false, nil, "", err
 	}
 
-	if strings.TrimSpace(req.Method) != "tools/call" {
-		return false, req.ID, "", nil
+	isBlocked, name, err := checkToolCallBlocked(req, blocked)
+	if err != nil {
+		return false, req.ID, "", err
 	}
 
-	var params ToolCallParams
-	if len(req.Params) > 0 {
-		if err := json.Unmarshal(req.Params, &params); err != nil {
-			return false, req.ID, "", err
-		}
-	}
-
-	if isToolNameBlocked(params.Name, blocked) {
-		return true, req.ID, params.Name, nil
-	}
-
-	return false, req.ID, params.Name, nil
+	return isBlocked, req.ID, name, nil
 }
 
 // FilterToolsResponse filters out blocked tools from a tools/list JSON-RPC response.

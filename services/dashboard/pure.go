@@ -92,6 +92,60 @@ func buildDeploymentSteps(s1, s2, s3, s4, s5 string) []DeploymentStep {
 	}
 }
 
+func parsePositiveInt(val string) (int, bool) {
+	if val == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(val)
+	return n, err == nil && n > 0
+}
+
+func parseNonNegativeInt(val string) (int, bool) {
+	if val == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(val)
+	return n, err == nil && n >= 0
+}
+
+func clampInt(val, minVal, maxVal int) int {
+	if val < minVal {
+		return minVal
+	}
+	if val > maxVal {
+		return maxVal
+	}
+	return val
+}
+
+func applyFactsQueryParams(outQuery url.Values, inQuery url.Values) (int, int) {
+	if inQuery == nil {
+		return 0, 0
+	}
+	limit := 0
+	if n, ok := parsePositiveInt(inQuery.Get("limit")); ok {
+		limit = n
+		outQuery.Set("limit", strconv.Itoa(limit))
+	}
+
+	offset := 0
+	if n, ok := parseNonNegativeInt(inQuery.Get("offset")); ok {
+		offset = n
+		if offset > 0 {
+			outQuery.Set("offset", strconv.Itoa(offset))
+		}
+	}
+
+	if search := strings.TrimSpace(inQuery.Get("q")); search != "" {
+		runes := []rune(search)
+		if len(runes) > 64 {
+			search = strings.TrimSpace(string(runes[:64]))
+		}
+		outQuery.Set("q", search)
+	}
+	return limit, offset
+}
+
 // BuildFactsUpstreamURL validates the base URL and constructs the target upstream
 // URL with whitelisted, normalized, and clamped query parameters.
 func BuildFactsUpstreamURL(brainBaseURL string, inQuery url.Values) (targetURL string, limit, offset int, err error) {
@@ -101,31 +155,7 @@ func BuildFactsUpstreamURL(brainBaseURL string, inQuery url.Values) (targetURL s
 	}
 
 	outQuery := target.Query()
-	if inQuery != nil {
-		if limitStr := inQuery.Get("limit"); limitStr != "" {
-			if n, err := strconv.Atoi(limitStr); err == nil && n > 0 {
-				limit = n
-				outQuery.Set("limit", strconv.Itoa(limit))
-			}
-		}
-
-		if offsetStr := inQuery.Get("offset"); offsetStr != "" {
-			if n, err := strconv.Atoi(offsetStr); err == nil && n >= 0 {
-				offset = n
-				if offset > 0 {
-					outQuery.Set("offset", strconv.Itoa(offset))
-				}
-			}
-		}
-
-		if search := strings.TrimSpace(inQuery.Get("q")); search != "" {
-			runes := []rune(search)
-			if len(runes) > 64 {
-				search = strings.TrimSpace(string(runes[:64]))
-			}
-			outQuery.Set("q", search)
-		}
-	}
+	limit, offset = applyFactsQueryParams(outQuery, inQuery)
 
 	target.RawQuery = outQuery.Encode()
 	return target.String(), limit, offset, nil
@@ -153,16 +183,12 @@ func BuildScheduleRunsUpstreamURL(haroBaseURL string, inQuery url.Values) (targe
 	offset = 0
 
 	if inQuery != nil {
-		if lStr := inQuery.Get("limit"); lStr != "" {
-			if n, err := strconv.Atoi(lStr); err == nil && n > 0 && n <= 100 {
-				limit = n
-			}
+		if n, ok := parsePositiveInt(inQuery.Get("limit")); ok && n <= 100 {
+			limit = n
 		}
 
-		if oStr := inQuery.Get("offset"); oStr != "" {
-			if n, err := strconv.Atoi(oStr); err == nil && n >= 0 {
-				offset = n
-			}
+		if n, ok := parseNonNegativeInt(inQuery.Get("offset")); ok {
+			offset = n
 		}
 
 		if schedID := strings.TrimSpace(inQuery.Get("schedule_id")); schedID != "" {
@@ -192,16 +218,8 @@ func BuildVanadisBuildsUpstreamURL(vanadisBaseURL string, inQuery url.Values) (t
 	limit = 50
 
 	if inQuery != nil {
-		if lStr := strings.TrimSpace(inQuery.Get("limit")); lStr != "" {
-			if n, err := strconv.Atoi(lStr); err == nil {
-				if n < 1 {
-					limit = 1
-				} else if n > 100 {
-					limit = 100
-				} else {
-					limit = n
-				}
-			}
+		if n, err := strconv.Atoi(strings.TrimSpace(inQuery.Get("limit"))); err == nil {
+			limit = clampInt(n, 1, 100)
 		}
 
 		if status := strings.TrimSpace(inQuery.Get("status")); status != "" {
@@ -279,58 +297,79 @@ func FormatUptimeString(sec int) string {
 	return fmt.Sprintf("%dh", sec/3600)
 }
 
+func extractServiceNameFromCompose(labels map[string]string) (string, bool, bool) {
+	proj, hasProj := labels["com.docker.compose.project"]
+	if hasProj {
+		if proj == "aerial" {
+			if svc := labels["com.docker.compose.service"]; svc != "" {
+				return svc, true, true
+			}
+		}
+		// Foreign Compose project (e.g. homeassistant) -> reject
+		return "", false, true
+	}
+	return "", false, false
+}
+
+func extractServiceNameFromNomad(labels map[string]string, names []string) (string, bool) {
+	allocID := labels["com.hashicorp.nomad.alloc_id"]
+	if allocID == "" || len(names) == 0 {
+		return "", false
+	}
+	name := strings.TrimPrefix(names[0], "/")
+	suffix := "-" + allocID
+	if strings.HasSuffix(name, suffix) {
+		task := strings.TrimSuffix(name, suffix)
+		if task != "" {
+			return task, true
+		}
+	}
+	return "", false
+}
+
+func extractServiceNameFromLabels(labels map[string]string, names []string) (string, bool) {
+	if svc, ok, handled := extractServiceNameFromCompose(labels); handled {
+		return svc, ok
+	}
+	if svc := labels["aerial.service"]; svc != "" {
+		return svc, true
+	}
+	if svc, ok := extractServiceNameFromNomad(labels, names); ok {
+		return svc, true
+	}
+	if svc := labels["com.docker.compose.service"]; svc != "" {
+		return svc, true
+	}
+	return "", false
+}
+
+func extractServiceNameFromNames(names []string) (string, bool) {
+	if len(names) == 0 {
+		return "", false
+	}
+	name := strings.TrimPrefix(names[0], "/")
+	if strings.HasPrefix(name, "aerial-") {
+		svc := strings.TrimPrefix(name, "aerial-")
+		if svc != "" {
+			return svc, true
+		}
+	}
+	return "", false
+}
+
 // ExtractAerialServiceName extracts the canonical Aerial service name and returns whether
 // the container belongs to the Aerial stack (either Docker Compose or Nomad managed).
 func ExtractAerialServiceName(c DockerContainerJSON) (string, bool) {
 	if c.Labels != nil {
-		// 1. Docker Compose labels: project must be aerial if specified
-		if proj, ok := c.Labels["com.docker.compose.project"]; ok {
-			if proj == "aerial" {
-				if svc, ok := c.Labels["com.docker.compose.service"]; ok && svc != "" {
-					return svc, true
-				}
-			}
-			// Foreign Compose project (e.g. homeassistant) -> reject
+		if svc, ok := extractServiceNameFromLabels(c.Labels, c.Names); ok {
+			return svc, true
+		}
+		if _, hasProj := c.Labels["com.docker.compose.project"]; hasProj {
 			return "", false
 		}
-
-		// 2. Explicit aerial.service label (present on all first-party Aerial images)
-		if svc, ok := c.Labels["aerial.service"]; ok && svc != "" {
-			return svc, true
-		}
-
-		// 3. Nomad allocation container (task_name-<alloc_id>)
-		if allocID, ok := c.Labels["com.hashicorp.nomad.alloc_id"]; ok && allocID != "" {
-			if len(c.Names) > 0 {
-				name := strings.TrimPrefix(c.Names[0], "/")
-				// Nomad names containers <task>-<alloc_id>
-				if strings.HasSuffix(name, "-"+allocID) {
-					task := strings.TrimSuffix(name, "-"+allocID)
-					if task != "" {
-						return task, true
-					}
-				}
-			}
-		}
-
-		// 4. Fallback for test fixtures where com.docker.compose.service was set without project
-		if svc, ok := c.Labels["com.docker.compose.service"]; ok && svc != "" {
-			return svc, true
-		}
 	}
 
-	// 5. Legacy/fallback container name prefix
-	if len(c.Names) > 0 {
-		name := strings.TrimPrefix(c.Names[0], "/")
-		if strings.HasPrefix(name, "aerial-") {
-			svc := strings.TrimPrefix(name, "aerial-")
-			if svc != "" {
-				return svc, true
-			}
-		}
-	}
-
-	return "", false
+	return extractServiceNameFromNames(c.Names)
 }
 
 // IsCoreAerialContainer determines whether a container is part of the core Aerial stack.

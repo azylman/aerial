@@ -439,19 +439,8 @@ func requireMethod(w http.ResponseWriter, r *http.Request, method string) bool {
 	return true
 }
 
-// SetupMux configures HTTP handlers for metrics, health, status, and sync.
-func SetupMux(daemon *SyncDaemon) http.Handler {
-	mux := http.NewServeMux()
-
-	mux.Handle("/metrics", metrics.Handler())
-
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, r, http.StatusOK, map[string]string{"status": "ok"})
-	})
-
-	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("hangar"))
-
-	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+func handleMuxStatus(daemon *SyncDaemon) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		if !requireMethod(w, r, http.MethodGet) {
 			return
 		}
@@ -461,9 +450,11 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 
 		status := daemon.GetStatus(ctx)
 		writeJSON(w, r, http.StatusOK, status)
-	})
+	}
+}
 
-	mux.HandleFunc("/sync", func(w http.ResponseWriter, r *http.Request) {
+func handleMuxSync(daemon *SyncDaemon) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		if !requireMethod(w, r, http.MethodPost) {
 			return
 		}
@@ -480,9 +471,26 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 			"status":  "synced",
 			"results": results,
 		})
-	})
+	}
+}
 
-	mux.HandleFunc("/reconcile", func(w http.ResponseWriter, r *http.Request) {
+func parseReconcileSyncParam(r *http.Request) bool {
+	if r.URL.Query().Get("sync") == "true" {
+		return true
+	}
+	if r.Header.Get("Content-Type") == "application/json" && r.Body != nil {
+		var bodyReq struct {
+			Sync *bool `json:"sync"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&bodyReq); err == nil && bodyReq.Sync != nil {
+			return *bodyReq.Sync
+		}
+	}
+	return false
+}
+
+func handleMuxReconcile(daemon *SyncDaemon) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		if !requireMethod(w, r, http.MethodPost) {
 			return
 		}
@@ -491,16 +499,7 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 			defer httpkit.CloseWarn(r.Body, "reconcile request body")
 		}
 
-		isSync := r.URL.Query().Get("sync") == "true"
-		if !isSync && r.Header.Get("Content-Type") == "application/json" && r.Body != nil {
-			var bodyReq struct {
-				Sync *bool `json:"sync"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&bodyReq); err == nil && bodyReq.Sync != nil {
-				isSync = *bodyReq.Sync
-			}
-		}
-
+		isSync := parseReconcileSyncParam(r)
 		if isSync {
 			if err := daemon.TriggerReconcile(r.Context(), false); err != nil {
 				writeJSON(w, r, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -522,9 +521,11 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 			"message":          "Nomad reconciliation scheduled",
 			"debounce_seconds": int(reconcilerDebounceDuration.Seconds()),
 		})
-	})
+	}
+}
 
-	mux.HandleFunc("/events/git_push", func(w http.ResponseWriter, r *http.Request) {
+func handleMuxGitPush(daemon *SyncDaemon) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		if !requireMethod(w, r, http.MethodPost) {
 			return
 		}
@@ -547,9 +548,11 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 		resp, code := daemon.ExecuteGitPushEvent(ctx, req)
 		metrics.RecordSyncRequest("git_push", resp.Status)
 		writeJSON(w, r, code, resp)
-	})
+	}
+}
 
-	mux.HandleFunc("/events/image_ready", func(w http.ResponseWriter, r *http.Request) {
+func handleMuxImageReady(daemon *SyncDaemon) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		if !requireMethod(w, r, http.MethodPost) {
 			return
 		}
@@ -569,8 +572,25 @@ func SetupMux(daemon *SyncDaemon) http.Handler {
 		resp, code := daemon.EnqueueImageReadyEvent(req)
 		metrics.RecordSyncRequest("image_ready", resp.Status)
 		writeJSON(w, r, code, resp)
+	}
+}
+
+// SetupMux configures HTTP handlers for metrics, health, status, and sync.
+func SetupMux(daemon *SyncDaemon) http.Handler {
+	mux := http.NewServeMux()
+
+	mux.Handle("/metrics", metrics.Handler())
+
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, r, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
+	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("hangar"))
+	mux.HandleFunc("/status", handleMuxStatus(daemon))
+	mux.HandleFunc("/sync", handleMuxSync(daemon))
+	mux.HandleFunc("/reconcile", handleMuxReconcile(daemon))
+	mux.HandleFunc("/events/git_push", handleMuxGitPush(daemon))
+	mux.HandleFunc("/events/image_ready", handleMuxImageReady(daemon))
 	mux.HandleFunc("/internal/artifacts/", daemon.HandleArtifactBundle)
 
 	return mux

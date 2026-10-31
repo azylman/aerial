@@ -484,6 +484,39 @@ func buildsHandler(vanadisBaseURL string) http.HandlerFunc {
 	}
 }
 
+func handleBuildDetailFetchError(w http.ResponseWriter, r *http.Request, targetURL string, statusCode int, upstreamErrMsg string, fetchErr error) {
+	if statusCode == 0 {
+		log.Printf("[Dashboard] Upstream vanadis detail request failed (%s): %v", targetURL, fetchErr)
+		writeJSON(w, r, http.StatusServiceUnavailable, BuildDetailAPIResponse{
+			Status: "degraded",
+			Error:  "Vanadis service unreachable. Retrying...",
+			Chunks: []VanadisChunkDTO{},
+		})
+		return
+	}
+	if statusCode != http.StatusOK {
+		log.Printf("[Dashboard] Upstream vanadis detail returned status %d", statusCode)
+		errMsg := "Upstream vanadis error occurred"
+		if statusCode == http.StatusNotFound {
+			errMsg = "Build not found"
+		}
+		if upstreamErrMsg != "" {
+			errMsg = upstreamErrMsg
+		}
+		writeJSON(w, r, statusCode, BuildDetailAPIResponse{
+			Status: "error",
+			Error:  errMsg,
+			Chunks: []VanadisChunkDTO{},
+		})
+		return
+	}
+	writeJSON(w, r, http.StatusBadGateway, BuildDetailAPIResponse{
+		Status: "error",
+		Error:  "Failed to decode upstream vanadis response",
+		Chunks: []VanadisChunkDTO{},
+	})
+}
+
 func buildDetailHandler(vanadisBaseURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -514,36 +547,7 @@ func buildDetailHandler(vanadisBaseURL string) http.HandlerFunc {
 		var data BuildDetailAPIResponse
 		statusCode, upstreamErrMsg, fetchErr := fetchUpstreamJSON(r.Context(), vanadisHTTPClient, targetURL, &data)
 		if fetchErr != nil {
-			if statusCode == 0 {
-				log.Printf("[Dashboard] Upstream vanadis detail request failed (%s): %v", targetURL, fetchErr)
-				writeJSON(w, r, http.StatusServiceUnavailable, BuildDetailAPIResponse{
-					Status: "degraded",
-					Error:  "Vanadis service unreachable. Retrying...",
-					Chunks: []VanadisChunkDTO{},
-				})
-				return
-			}
-			if statusCode != http.StatusOK {
-				log.Printf("[Dashboard] Upstream vanadis detail returned status %d", statusCode)
-				errMsg := "Upstream vanadis error occurred"
-				if statusCode == http.StatusNotFound {
-					errMsg = "Build not found"
-				}
-				if upstreamErrMsg != "" {
-					errMsg = upstreamErrMsg
-				}
-				writeJSON(w, r, statusCode, BuildDetailAPIResponse{
-					Status: "error",
-					Error:  errMsg,
-					Chunks: []VanadisChunkDTO{},
-				})
-				return
-			}
-			writeJSON(w, r, http.StatusBadGateway, BuildDetailAPIResponse{
-				Status: "error",
-				Error:  "Failed to decode upstream vanadis response",
-				Chunks: []VanadisChunkDTO{},
-			})
+			handleBuildDetailFetchError(w, r, targetURL, statusCode, upstreamErrMsg, fetchErr)
 			return
 		}
 
