@@ -312,7 +312,7 @@ func scanVanadisChunkSummaries(rows pgx.Rows, mergedChunkID string) ([]VanadisCh
 }
 
 func isTerminalBuildStatus(status string) bool {
-	return status == "cancelled" || status == "failed" || status == "completed"
+	return status == "cancelled" || status == "failed"
 }
 
 func advanceToNextChunk(ctx context.Context, tx pgx.Tx, buildID string, nextChunkIdx int, cStatus string, allChunks []VanadisChunkSummary, res *VanadisAdvancementResult) (*VanadisAdvancementResult, error) {
@@ -342,9 +342,11 @@ func advanceToNextChunk(ctx context.Context, tx pgx.Tx, buildID string, nextChun
 }
 
 func completeBuild(ctx context.Context, tx pgx.Tx, buildID string, cStatus string, allChunks []VanadisChunkSummary, res *VanadisAdvancementResult) (*VanadisAdvancementResult, error) {
-	const updateBuildQuery = `UPDATE vanadis_builds SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = $1`
-	if _, err := tx.Exec(ctx, updateBuildQuery, buildID); err != nil {
-		return nil, fmt.Errorf("update vanadis build completed: %w", err)
+	if res.BuildStatus != "completed" {
+		const updateBuildQuery = `UPDATE vanadis_builds SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = $1`
+		if _, err := tx.Exec(ctx, updateBuildQuery, buildID); err != nil {
+			return nil, fmt.Errorf("update vanadis build completed: %w", err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit vanadis build completed tx: %w", err)

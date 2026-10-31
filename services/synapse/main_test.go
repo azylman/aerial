@@ -2020,6 +2020,8 @@ func TestAdvanceVanadisChunk(t *testing.T) {
 		advanceErr     error
 		dispDirectErr  error
 		dispWidgetErr  error
+		dispPromptErr  error
+		repeatCall     bool
 		wantErr        bool
 		wantPrompts    int
 		wantPromptSubs []string
@@ -2111,10 +2113,50 @@ func TestAdvanceVanadisChunk(t *testing.T) {
 				},
 			},
 			dispWidgetErr:  errors.New("widget err"),
+			repeatCall:     true,
 			wantErr:        false,
 			wantPrompts:    1,
 			wantPromptSubs: []string{"Vanadis build build-done completed"},
 			wantDMs:        0,
+		},
+		{
+			name:     "retry of already-completed build with Advanced false still dispatches completion prompt once",
+			prNumber: 42,
+			advanceRes: &VanadisAdvancementResult{
+				Matched:          true,
+				Advanced:         false,
+				BuildID:          "build-retry-done",
+				ThreadID:         validThread,
+				Tier:             2,
+				Objective:        "Complete all chunks on retry",
+				MergedChunkIndex: 1,
+				MergedChunkTitle: "Chunk Two",
+				NextChunkIndex:   -1,
+				BuildCompleted:   true,
+				Chunks: []VanadisChunkSummary{
+					{ChunkIndex: 0, Title: "Chunk One", Status: "merged", PRNumber: 41},
+					{ChunkIndex: 1, Title: "Chunk Two", Status: "merged", PRNumber: 42},
+				},
+			},
+			repeatCall:     true,
+			wantErr:        false,
+			wantPrompts:    1,
+			wantPromptSubs: []string{"Vanadis build build-retry-done completed", "Chunk 2/2: Chunk Two"},
+			wantDMs:        0,
+		},
+		{
+			name:     "final build completion prompt error propagates without marking dispatched",
+			prNumber: 42,
+			advanceRes: &VanadisAdvancementResult{
+				Matched:        true,
+				Advanced:       true,
+				BuildID:        "",
+				ThreadID:       validThread,
+				BuildCompleted: true,
+			},
+			dispPromptErr: errors.New("502 Bad Gateway"),
+			wantErr:       true,
+			wantPrompts:   1,
 		},
 	}
 
@@ -2131,12 +2173,18 @@ func TestAdvanceVanadisChunk(t *testing.T) {
 			disp := &mockOutboundDispatcher{
 				directMessageErr: tc.dispDirectErr,
 				widgetErr:        tc.dispWidgetErr,
+				promptErr:        tc.dispPromptErr,
 			}
 			srv := newTestRouter(Config{}, nil, reg, disp)
 
 			err := srv.advanceVanadisChunk(ctx, "azylman/aerial", tc.prNumber)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("advanceVanadisChunk() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.repeatCall {
+				if err2 := srv.advanceVanadisChunk(ctx, "azylman/aerial", tc.prNumber); err2 != nil {
+					t.Fatalf("repeat advanceVanadisChunk() err = %v, want nil", err2)
+				}
 			}
 			if tc.useNilRegistry || tc.prNumber <= 0 {
 				finalChunk, err := srv.isFinalVanadisChunk(ctx, "azylman/aerial", tc.prNumber)

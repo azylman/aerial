@@ -342,7 +342,7 @@ func (m *memoryVanadisStore) AdvanceChunkByPR(_ context.Context, repo string, pr
 		for i := range list {
 			if list[i].Repo == repo && list[i].PRNumber == prNumber {
 				b := m.builds[bID]
-				if b.Status == "cancelled" || b.Status == "failed" || b.Status == "completed" {
+				if b.Status == "cancelled" || b.Status == "failed" {
 					return &VanadisAdvancementResult{
 						Matched:          true,
 						Advanced:         false,

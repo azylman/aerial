@@ -27,15 +27,16 @@ import (
 
 // RouterServer handles webhook requests and orchestrates secret synchronization.
 type RouterServer struct {
-	cfg                  Config
-	httpClient           *http.Client
-	riverClient          RiverInserter
-	registry             PRRegistryUpdater
-	dispatcher           OutboundDispatcher
-	onProcessed          func(event, delivery string)
-	nonRoboRevFailedSHAs sync.Map
-	queueStats           queueStatsQuerier
-	gatewayLatencyFn     func() time.Duration
+	cfg                      Config
+	httpClient               *http.Client
+	riverClient              RiverInserter
+	registry                 PRRegistryUpdater
+	dispatcher               OutboundDispatcher
+	onProcessed              func(event, delivery string)
+	nonRoboRevFailedSHAs     sync.Map
+	buildCompletedDispatched sync.Map
+	queueStats               queueStatsQuerier
+	gatewayLatencyFn         func() time.Duration
 }
 
 // NewRouterServer constructs a new RouterServer instance.
@@ -802,6 +803,15 @@ func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, la
 	return nil
 }
 
+func (s *RouterServer) isBuildCompletedDispatched(buildID string) bool {
+	clean := strings.TrimSpace(buildID)
+	if clean == "" {
+		return false
+	}
+	_, ok := s.buildCompletedDispatched.Load(clean)
+	return ok
+}
+
 func (s *RouterServer) advanceVanadisChunk(ctx context.Context, repo string, prNumber int) error {
 	if s.registry == nil || prNumber <= 0 {
 		return nil
@@ -813,25 +823,20 @@ func (s *RouterServer) advanceVanadisChunk(ctx context.Context, repo string, prN
 	if res == nil || !res.Matched {
 		return nil
 	}
-	if !res.Advanced {
-		if err := s.SyncPRWidget(ctx, repo, prNumber); err != nil {
-			log.Printf("[synapse] [vanadis] warning syncing already-advanced chunk widget for %s#%d: %v", repo, prNumber, err)
-		}
-		return nil
+	if res.Advanced {
+		s.evaluateVanadisAdvancementTriggers(ctx, repo, prNumber, res)
 	}
-	s.evaluateVanadisAdvancementTriggers(ctx, repo, prNumber, res)
-	if !res.BuildCompleted && res.NextChunkIndex >= 0 {
-		if err := s.SyncPRWidget(ctx, repo, prNumber); err != nil {
-			log.Printf("[synapse] [vanadis] warning syncing chunk advancement widget for build %s: %v", res.BuildID, err)
-		}
-		return nil
+	if err := s.SyncPRWidget(ctx, repo, prNumber); err != nil {
+		log.Printf("[synapse] [vanadis] warning syncing chunk widget for %s#%d: %v", repo, prNumber, err)
 	}
-	if res.BuildCompleted {
-		if err := s.SyncPRWidget(ctx, repo, prNumber); err != nil {
-			log.Printf("[synapse] [vanadis] warning syncing build completed widget for build %s: %v", res.BuildID, err)
-		}
+	if res.BuildCompleted && !s.isBuildCompletedDispatched(res.BuildID) {
 		prompt := formatVanadisBuildCompletedPrompt(res)
-		return s.dispatchAlertWithPrompt(ctx, res.ThreadID, "vanadis_build_completed", "", prompt)
+		if err := s.dispatchAlertWithPrompt(ctx, res.ThreadID, "vanadis_build_completed", "", prompt); err != nil {
+			return err
+		}
+		if clean := strings.TrimSpace(res.BuildID); clean != "" {
+			s.buildCompletedDispatched.Store(clean, true)
+		}
 	}
 	return nil
 }

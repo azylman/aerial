@@ -467,6 +467,11 @@ func TestVanadisStore_ChunkLifecycle(t *testing.T) {
 			t.Fatalf("unexpected adv2: %+v, err: %v", adv2, err)
 		}
 
+		adv2Repeat, err := s.AdvanceChunkByPR(ctx, "aerial", 102)
+		if err != nil || adv2Repeat == nil || !adv2Repeat.Matched || adv2Repeat.Advanced || !adv2Repeat.BuildCompleted || len(adv2Repeat.Chunks) != 2 {
+			t.Fatalf("expected adv2Repeat to return completed with chunks populated and Advanced=false, got %+v, err: %v", adv2Repeat, err)
+		}
+
 		b, _, _ := s.GetBuild(ctx, bID)
 		if b.Status != "completed" {
 			t.Errorf("expected build status completed, got %q", b.Status)
