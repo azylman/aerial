@@ -641,13 +641,10 @@ type imageReadyTestEnv struct {
 	evtCh       chan HangarDeployEvent
 	runCalls    []string
 	runMu       sync.Mutex
-	restarts    []string
-	restartMu   sync.Mutex
 	stoppedJobs []string
 	stopMu      sync.Mutex
 	valErr      error
 	runErr      error
-	restartErr  error
 	runSignal   chan string
 }
 
@@ -714,16 +711,6 @@ func newImageReadyTestEnv(t *testing.T, opts ...func(*DaemonConfig)) *imageReady
 						return nil, []byte("Nomad agent connection refused"), env.runErr
 					}
 					return []byte("Evaluation ID: eval-success-123"), nil, nil
-				case "restart":
-					env.restartMu.Lock()
-					if len(args) >= 3 {
-						env.restarts = append(env.restarts, args[len(args)-1])
-					}
-					env.restartMu.Unlock()
-					if env.restartErr != nil {
-						return nil, []byte("restart failed warning"), env.restartErr
-					}
-					return []byte("Restart triggered"), nil, nil
 				case "stop":
 					env.stopMu.Lock()
 					if len(args) >= 4 {
@@ -762,22 +749,10 @@ func (e *imageReadyTestEnv) writeJob(relDir, filename, hcl string) string {
 	return path
 }
 
-func (e *imageReadyTestEnv) getDigest(jobKey string) string {
-	e.daemon.nomadDigestsMu.RLock()
-	defer e.daemon.nomadDigestsMu.RUnlock()
-	return e.daemon.nomadKnownDigests[jobKey]
-}
-
 func (e *imageReadyTestEnv) getRunCalls() []string {
 	e.runMu.Lock()
 	defer e.runMu.Unlock()
 	return append([]string(nil), e.runCalls...)
-}
-
-func (e *imageReadyTestEnv) getRestartCalls() []string {
-	e.restartMu.Lock()
-	defer e.restartMu.Unlock()
-	return append([]string(nil), e.restarts...)
 }
 
 func (e *imageReadyTestEnv) getStoppedJobs() []string {
@@ -803,13 +778,6 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) { // t.Run(
 			}
 		}
 	}`
-	legacyHCL := `job "legacy" {
-		task "legacy" {
-			config {
-				image = "ghcr.io/azylman/legacy-app:latest"
-			}
-		}
-	}`
 
 	type imageReadyCase struct {
 		name                 string
@@ -820,17 +788,14 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) { // t.Run(
 		req                  ImageReadyEventRequest
 		valErr               error
 		runErr               error
-		restartErr           error
 		registryNotFound     bool
 		removeJobOnRegistry  bool
 		pendingDeletes       []NomadFileChange
 		wantCode             int
 		wantStatus           string
 		wantRuns             int
-		wantRests            int
 		wantRunArg           string
 		wantEvent            string
-		wantCachedDigest     string
 		wantStoppedJobs      []string
 		wantRemainingPending int
 	}
@@ -869,7 +834,6 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) { // t.Run(
 			wantCode:   http.StatusOK,
 			wantStatus: "accepted",
 			wantRuns:   1,
-			wantRests:  1,
 			wantEvent:  "deploy_started",
 		},
 		{
@@ -887,7 +851,6 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) { // t.Run(
 			wantCode:   http.StatusOK,
 			wantStatus: "accepted",
 			wantRuns:   1,
-			wantRests:  0,
 			wantRunArg: "job run -detach -var=image_tag=sha12345 ",
 		},
 		{
@@ -917,21 +880,7 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) { // t.Run(
 			wantCode:   http.StatusOK,
 			wantStatus: "accepted",
 			wantRuns:   1,
-			wantRests:  0,
 			wantRunArg: "-var=image_tag=latest@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-		},
-		{
-			name:    "unparameterized legacy job triggers restart",
-			jobFile: "legacy.nomad",
-			jobHCL:  legacyHCL,
-			req: ImageReadyEventRequest{
-				Image:     "ghcr.io/azylman/legacy-app:latest",
-				CommitSHA: "legacy123",
-			},
-			wantCode:   http.StatusOK,
-			wantStatus: "accepted",
-			wantRuns:   1,
-			wantRests:  1,
 		},
 		{
 			name:             "empty sha and digest fallback to latest",
@@ -946,7 +895,6 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) { // t.Run(
 			wantCode:   http.StatusOK,
 			wantStatus: "accepted",
 			wantRuns:   1,
-			wantRests:  0,
 			wantRunArg: "-var=image_tag=latest",
 		},
 		{
@@ -961,21 +909,7 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) { // t.Run(
 			wantCode:   http.StatusOK,
 			wantStatus: "accepted",
 			wantRuns:   1,
-			wantRests:  0,
 			wantRunArg: "-var=image_tag=latest@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-		},
-		{
-			name:       "unparameterized restart warning succeeds",
-			jobFile:    "legacy.nomad",
-			jobHCL:     legacyHCL,
-			restartErr: errors.New("exit status 1"),
-			req: ImageReadyEventRequest{
-				Image: "ghcr.io/azylman/legacy-app:latest",
-			},
-			wantCode:   http.StatusOK,
-			wantStatus: "accepted",
-			wantRuns:   1,
-			wantRests:  1,
 		},
 		{
 			name:    "validation failure returns 500",
@@ -988,7 +922,6 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) { // t.Run(
 			wantCode:   http.StatusInternalServerError,
 			wantStatus: "error",
 			wantRuns:   0,
-			wantRests:  0,
 		},
 		{
 			name:                "mid-flight file removal triggers read error",
@@ -1001,7 +934,6 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) { // t.Run(
 			wantCode:   http.StatusInternalServerError,
 			wantStatus: "error",
 			wantRuns:   0,
-			wantRests:  0,
 		},
 		{
 			name:    "nomad job run error dispatches deploy_failed",
@@ -1019,23 +951,19 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) { // t.Run(
 			wantCode:   http.StatusInternalServerError,
 			wantStatus: "error",
 			wantRuns:   1,
-			wantRests:  0,
 		},
 		{
-			name:       "core composeDir matching and digest caching",
-			jobDir:     "core",
-			jobFile:    "core.nomad",
-			jobHCL:     `job "core-job" { task "t" { config { image = "ghcr.io/azylman/core-service:latest" } } }`,
-			restartErr: errors.New("restart warning err"),
+			name:    "core composeDir matching",
+			jobDir:  "core",
+			jobFile: "core.nomad",
+			jobHCL:  `job "core-job" { task "t" { config { image = "ghcr.io/azylman/core-service:latest" } } }`,
 			req: ImageReadyEventRequest{
 				Image:  "ghcr.io/azylman/core-service:latest",
 				Digest: "sha256:core123456",
 			},
-			wantCode:         http.StatusOK,
-			wantStatus:       "accepted",
-			wantRuns:         1,
-			wantRests:        1,
-			wantCachedDigest: "sha256:core123456",
+			wantCode:   http.StatusOK,
+			wantStatus: "accepted",
+			wantRuns:   1,
 		},
 		{
 			name:    "drains and stops pending deleted jobs",
@@ -1113,7 +1041,6 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) { // t.Run(
 			env := newImageReadyTestEnv(t)
 			env.valErr = tc.valErr
 			env.runErr = tc.runErr
-			env.restartErr = tc.restartErr
 
 			var jobPath string
 			if tc.jobFile != "" {
@@ -1173,10 +1100,6 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) { // t.Run(
 					t.Errorf("expected run call to contain %q, got %v", tc.wantRunArg, runs)
 				}
 			}
-			restarts := env.getRestartCalls()
-			if len(restarts) != tc.wantRests {
-				t.Errorf("expected %d restarts, got %d (%v)", tc.wantRests, len(restarts), restarts)
-			}
 			if tc.wantStoppedJobs != nil {
 				stopped := env.getStoppedJobs()
 				if len(stopped) != len(tc.wantStoppedJobs) {
@@ -1194,12 +1117,6 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) { // t.Run(
 				}
 				if gotRemainingCount != tc.wantRemainingPending {
 					t.Fatalf("expected %d remaining pending changes after drain, got %d (%+v)", tc.wantRemainingPending, gotRemainingCount, remainingPending)
-				}
-			}
-			if tc.wantCachedDigest != "" {
-				cached := env.getDigest("core-job:" + tc.req.Image)
-				if cached != tc.wantCachedDigest {
-					t.Errorf("expected cached digest %q, got %q", tc.wantCachedDigest, cached)
 				}
 			}
 			if tc.wantEvent != "" {
