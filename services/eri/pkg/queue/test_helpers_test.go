@@ -430,7 +430,7 @@ func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 		}
 		wg.Wait()
 		waitForCompletion(t, doneCh, 5*time.Second, tc.name)
-		pool.StopWithTimeout(2 * time.Second)
+		pool.Stop()
 		return
 	}
 

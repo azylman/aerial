@@ -116,7 +116,7 @@ func (te *turnExecution) handleRetryBackoff(attempt, maxAttempts int, errDetail,
 			return true
 		}
 		metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
-		te.cancelBurstOnShutdown("failed", currentModel, true)
+		te.cancelBurstOnShutdown("failed", true)
 		return true
 	}
 }
@@ -263,7 +263,7 @@ func (te *turnExecution) retryCapacityBlip(errDetail string, resetDur time.Durat
 		}
 		log.Printf("[WorkerPool] Context cancelled during capacity blip backoff for thread %s", te.threadID)
 		te.stopIndicators()
-		te.cancelBurstOnShutdown("pending", currentModel, false)
+		te.cancelBurstOnShutdown("pending", false)
 		return false
 	}
 }
@@ -439,29 +439,13 @@ func (te *turnExecution) completeAmbientMessage(m db.Message, info WakeInfo) {
 	te.finalizeBurstMessages([]db.Message{m}, db.StatusCompleted, telemetry, "completed", "", "", true, false)
 }
 
-func (te *turnExecution) cancelBurstOnShutdown(turnStatus, currentModel string, failScheduleRun bool) {
+func (te *turnExecution) cancelBurstOnShutdown(turnStatus string, failScheduleRun bool) {
 	te.turnStatus = turnStatus
-	te.turnError = "interrupted by graceful deployment"
-	runStatus := ""
-	runErr := ""
+	te.turnError = "interrupted by shutdown"
 	if failScheduleRun {
 		te.turnError = "context cancelled during execution"
-		runStatus = "failed"
-		runErr = "context cancelled during execution"
 	}
 	te.turnDurationMs = time.Since(te.execStart).Milliseconds()
-	if te.isDispatch() {
-		if s := te.store(); s != nil {
-			if err := s.UpdateDispatchStatus(context.Background(), te.dispatch.ID, db.StatusPending, "interrupted by graceful deployment"); err != nil {
-				log.Printf("[WorkerPool] Warning resetting dispatch %s to pending: %v", te.dispatch.ID, err)
-			}
-		}
-		if te.pool != nil && te.dispatch != nil {
-			te.pool.claimedDispatches.Delete(te.dispatch.ID)
-		}
-		return
-	}
-	te.finalizeBurstMessages(te.burst, db.StatusPending, "interrupted by graceful deployment", runStatus, runErr, currentModel, false, false)
 }
 
 func buildFailureNotice(cfg WorkerPoolConfig, agyBin, apiKey, errDetail, stderr, descPrefix string) string {

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -987,10 +988,257 @@ func TestCloseAllBrainPools_Error(t *testing.T) {
 	closeAllBrainPools([]runner.AgentPool{&mockErrClosingPool{}})
 }
 
-func TestNewAmbientContextResolver_NilConfig(t *testing.T) {
-	resolver := newAmbientContextResolver(nil)
-	res, err := resolver(context.Background(), nil)
-	if err != nil || res != "" {
-		t.Errorf("expected empty string and nil error for nil ambCfg, got %q, %v", res, err)
+func TestNewAmbientContextResolver(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		cfg        *config.Config
+		ambCfg     *config.AmbientContextConfig
+		repeatCall bool
+		wantErr    bool
+		wantSubstr string
+	}{
+		{
+			name:   "NilAmbConfig",
+			cfg:    nil,
+			ambCfg: nil,
+		},
+		{
+			name: "RenderValidTemplateAndCacheHit",
+			cfg:  newTestConfig(func(d *config.ConfigData) {}),
+			ambCfg: &config.AmbientContextConfig{
+				Template: "Static ambient text",
+				CacheTTL: "1m",
+			},
+			repeatCall: true,
+			wantSubstr: "Static ambient text",
+		},
+		{
+			name: "InvalidTemplateError",
+			cfg:  newTestConfig(func(d *config.ConfigData) {}),
+			ambCfg: &config.AmbientContextConfig{
+				Template: "{{.unclosed",
+				CacheTTL: "1m",
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			resolver := newAmbientContextResolver(tc.cfg)
+			res, err := resolver(context.Background(), tc.ambCfg)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantSubstr != "" && !strings.Contains(res, tc.wantSubstr) {
+				t.Errorf("expected result to contain %q, got %q", tc.wantSubstr, res)
+			}
+			if tc.repeatCall {
+				res2, err2 := resolver(context.Background(), tc.ambCfg)
+				if err2 != nil {
+					t.Fatalf("unexpected error on repeated call: %v", err2)
+				}
+				if res2 != res {
+					t.Errorf("expected cached result %q, got %q", res, res2)
+				}
+			}
+		})
 	}
 }
+
+func TestServeBrainHTTP(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		closeLn    bool
+		asyncErr   error
+		cancelCtx  bool
+		wantErr    bool
+		wantErrSub string
+	}{
+		{
+			name:      "GracefulShutdownOnContextDone",
+			cancelCtx: true,
+			wantErr:   false,
+		},
+		{
+			name:       "AsyncLeaderError",
+			asyncErr:   errors.New("leader failed"),
+			wantErr:    true,
+			wantErrSub: "leader failed",
+		},
+		{
+			name:    "ListenerClosedServeError",
+			closeLn: true,
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("failed to bind listener: %v", err)
+			}
+			defer ln.Close()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			var asyncErrCh chan error
+			if tc.asyncErr != nil {
+				asyncErrCh = make(chan error, 1)
+				asyncErrCh <- tc.asyncErr
+			}
+
+			if tc.closeLn {
+				_ = ln.Close()
+			}
+			if tc.cancelCtx {
+				cancel()
+			}
+
+			mux := http.NewServeMux()
+			var errResult error
+			if asyncErrCh != nil {
+				errResult = serveBrainHTTP(ctx, ln, mux, "test-model", asyncErrCh)
+			} else {
+				errResult = serveBrainHTTP(ctx, ln, mux, "test-model")
+			}
+
+			if tc.wantErr {
+				if errResult == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if tc.wantErrSub != "" && !strings.Contains(errResult.Error(), tc.wantErrSub) {
+					t.Errorf("expected error containing %q, got %v", tc.wantErrSub, errResult)
+				}
+				return
+			}
+			if errResult != nil {
+				t.Fatalf("unexpected error: %v", errResult)
+			}
+		})
+	}
+}
+
+func TestStartLeaderHandoff_Scenarios(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		lockErr          error
+		cancelWait       bool
+		cancelViaRelease bool
+		holdThenUnblk    bool
+		wantErr          bool
+		wantReleased     bool
+	}{
+		{name: "CanaryHoldAndPromotion", holdThenUnblk: true, wantReleased: true},
+		{name: "LeaderLockErrorPropagates", lockErr: errors.New("advisory lock failed"), wantErr: true},
+		{name: "CancelledContextWhileWaiting", cancelWait: true},
+		{name: "ReleaseWhileWaitingWithoutParentCancel", cancelWait: true, cancelViaRelease: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := dbtest.NewFakeStore()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			lockEntered := make(chan struct{})
+			unblockLock := make(chan struct{})
+			var released atomic.Bool
+
+			store.SetLeaderLockHook(func(lockCtx context.Context) (func(), error) {
+				close(lockEntered)
+				if tc.lockErr != nil {
+					return nil, tc.lockErr
+				}
+				if tc.cancelWait {
+					<-lockCtx.Done()
+					return nil, lockCtx.Err()
+				}
+				if tc.holdThenUnblk {
+					<-unblockLock
+				}
+				return func() { released.Store(true) }, nil
+			})
+
+			tmpDir := t.TempDir()
+			cfg := newTestConfig(func(d *config.ConfigData) {
+				d.AgyBin = "/bin/true"
+				d.Model = "gemini-2.5-flash"
+				d.GeminiHomeDir = tmpDir
+				d.DataDir = tmpDir
+			})
+			ephemPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-2.5-flash"}, newMockMainDaemonSpawner())
+			defer func() { _ = ephemPool.Close() }()
+
+			doneCh := make(chan struct{}, 1)
+			pool := queue.New(cfg, queue.WorkerPoolConfig{
+				Store: ephemStore(store),
+				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+					return `{"conversation_id":"11111111-2222-3333-4444-555555555555","status":"SUCCESS","response":"ok"}`, "", 0, nil
+				},
+				DeliveryFunc: func(s *discordgo.Session, c, txt string) error { return nil },
+				OnMessageCompleted: func(m db.Message, status string) {
+					select {
+					case doneCh <- struct{}{}:
+					default:
+					}
+				},
+			})
+			pool.HoldUntilLeader()
+			pool.Start()
+			defer pool.Stop()
+
+			errCh, releaseFn := startLeaderHandoff(ctx, store, pool, nil, ephemPool, cfg, cfg.Current())
+			<-lockEntered
+
+			if tc.holdThenUnblk {
+				msg := db.Message{ID: "m-canary-1", ThreadID: "1542423172400291873", Content: "held prompt", Status: db.StatusPending, CreatedAt: time.Now().UTC()}
+				_ = store.InsertMessage(ctx, msg)
+				pool.Enqueue(msg)
+				close(unblockLock)
+				select {
+				case <-doneCh:
+				case <-time.After(3 * time.Second):
+					t.Fatal("timed out waiting for held canary message after leader promotion")
+				}
+			}
+			if tc.cancelWait && !tc.cancelViaRelease {
+				cancel()
+			}
+			if tc.wantErr {
+				select {
+				case err := <-errCh:
+					if err == nil {
+						t.Fatal("expected non-nil leader lock error")
+					}
+				case <-time.After(2 * time.Second):
+					t.Fatal("timed out waiting for leader lock error")
+				}
+			}
+
+			releaseFn()
+			if released.Load() != tc.wantReleased {
+				t.Errorf("released = %v, want %v", released.Load(), tc.wantReleased)
+			}
+		})
+	}
+}
+
+func ephemStore(s db.Store) db.Store { return s }

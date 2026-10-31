@@ -86,6 +86,7 @@ type FakeStore struct {
 
 	sessionSummaries map[string]*db.SessionSummary
 	transcriptSteps  map[string][]db.TranscriptStep
+	leaderLockHook   func(ctx context.Context) (func(), error)
 }
 
 // NewFakeStore constructs an initialized, empty in-memory FakeStore.
@@ -117,6 +118,30 @@ func (f *FakeStore) FailNext(method string, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.failNext[method] = err
+}
+
+// SetLeaderLockHook configures an optional callback invoked by AcquireLeaderLock.
+func (f *FakeStore) SetLeaderLockHook(hook func(ctx context.Context) (func(), error)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.leaderLockHook = hook
+}
+
+// AcquireLeaderLock simulates acquiring the session-level advisory leader lock.
+func (f *FakeStore) AcquireLeaderLock(ctx context.Context) (func(), error) {
+	hook, err := withFakeLock(f, "AcquireLeaderLock", func() (func(context.Context) (func(), error), error) {
+		return f.leaderLockHook, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if hook != nil {
+		return hook(ctx)
+	}
+	return func() {}, nil
 }
 
 func (f *FakeStore) checkClosedAndFail(method string) error {

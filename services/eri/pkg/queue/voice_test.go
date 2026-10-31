@@ -754,6 +754,8 @@ func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
 	}
 
 	var nilPool *WorkerPool
+	nilPool.HoldUntilLeader()
+	_ = nilPool.ReleaseLeaderHold()
 	_ = nilPool.DeliverDirect("c", "t")
 	_, _ = nilPool.DeliverStatusWidget(discord.StatusWidgetRequest{})
 	pEmpty := &WorkerPool{}
@@ -778,12 +780,12 @@ func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
 	}
 
 	mockDrain := &mockDrainErrStore{Store: fake, messages: []db.Message{{ID: "m1", ThreadID: "t1", Status: db.StatusProcessing, RestartCount: 5, RetryCount: 5}}}
-	pDrain := New(nil, WorkerPoolConfig{Store: mockDrain, DrainTimeout: 10 * time.Millisecond})
+	pDrain := New(nil, WorkerPoolConfig{Store: mockDrain})
 	RecoverInterrupted(mockDrain, pDrain)
 	RecoverInterrupted(nil, nil)
 	RecoverInterrupted(fake, nil)
 	RecoverInterrupted(nil, &WorkerPool{})
-	pDrain.StopWithTimeout(0)
+	pDrain.Stop()
 
 	recStore := setupTestStore(t)
 	_ = recStore.InsertMessage(ctx, db.Message{ID: "m-rec-stale", ThreadID: "t-rec-stale", AuthorID: "u1", Status: db.StatusPending, CreatedAt: time.Now().UTC().Add(-2 * time.Hour)})
@@ -802,7 +804,7 @@ func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
 	stF.ch <- queueItem{msg: &msg0}
 	p.threadChs["t-full"] = stF
 	p.EnqueueBurst(db.Message{ID: "m-blocked", ThreadID: "t-full"})
-	p.StopWithTimeout(10 * time.Millisecond)
+	p.Stop()
 	p.EnqueueBurst(db.Message{ID: "m-after-stop"})
 }
 

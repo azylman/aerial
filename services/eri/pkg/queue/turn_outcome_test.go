@@ -268,8 +268,8 @@ func TestWorkerPool_CapacityBlip_ContextCancellation(t *testing.T) {
 				}
 			}
 			dbMsg, _ := store.GetMessage(context.Background(), tc.msgID)
-			if dbMsg == nil || dbMsg.Status != db.StatusPending || !strings.Contains(dbMsg.ErrorMessage, "interrupted by graceful deployment") {
-				t.Errorf("expected StatusPending with interrupted message")
+			if dbMsg == nil || dbMsg.Status != db.StatusProcessing {
+				t.Errorf("expected StatusProcessing preserved on shutdown, got %+v", dbMsg)
 			}
 			if pool.quotaLockedUntil.Load() > 0 {
 				t.Errorf("expected quotaLockedUntil == 0")
