@@ -833,7 +833,9 @@ func TestClassify_SystemOne(t *testing.T) {
 			}
 			if !tc.emptyURL && !tc.cancelSleep && tc.statusCode == 200 && tc.wantConf > 0 {
 				q, ok := lastReq.Questions["should_wake"]
-				if !ok || q.Type != "noul" || q.Instructions != DefaultAmbientWakePrompt {
+				if !ok || q.Type != "noul" || q.Instructions != DefaultSystemOneWakePrompt ||
+					q.Criteria["true"] != DefaultSystemOneTrueCriteria ||
+					q.Criteria["false"] != DefaultSystemOneFalseCriteria {
 					t.Fatalf("unexpected request structure: %+v", lastReq)
 				}
 			}
