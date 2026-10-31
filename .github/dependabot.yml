@@ -11,6 +11,9 @@ updates:
       github-actions:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
   - package-ecosystem: "gomod"
     directories:
@@ -35,5 +38,8 @@ updates:
       go-dependencies:
         patterns:
           - "*"
+        update-types:
+          - "minor"
+          - "patch"
     ignore:
       - dependency-name: "github.com/azylman/aerial/*"
