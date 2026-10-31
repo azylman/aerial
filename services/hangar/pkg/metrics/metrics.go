@@ -184,6 +184,11 @@ func init() {
 		HangarBuildInfo,
 	)
 
+	ReconciliationsTotal.WithLabelValues("success").Add(0)
+	ReconciliationsTotal.WithLabelValues("error").Add(0)
+	HangarReconciliationsTotal.WithLabelValues("success").Add(0)
+	HangarReconciliationsTotal.WithLabelValues("error").Add(0)
+
 	BuildInfo.WithLabelValues("1.0.0", runtime.Version()).Set(1)
 	HangarBuildInfo.WithLabelValues("1.0.0", runtime.Version()).Set(1)
 }
@@ -217,6 +222,17 @@ func RecordPull(rawRepo, status string, changed bool, duration time.Duration) {
 	}
 	PullsTotal.WithLabelValues(repo, status, changedStr).Inc()
 	PullDurationSeconds.WithLabelValues(repo, status).Observe(duration.Seconds())
+}
+
+// RecordReconciliation records reconciliation counts and durations across git-sync and hangar metrics.
+func RecordReconciliation(status string, duration time.Duration) {
+	if status == "" {
+		status = "unknown"
+	}
+	ReconciliationsTotal.WithLabelValues(status).Inc()
+	HangarReconciliationsTotal.WithLabelValues(status).Inc()
+	ComposeDurationSeconds.WithLabelValues(status).Observe(duration.Seconds())
+	HangarComposeDurationSeconds.WithLabelValues(status).Observe(duration.Seconds())
 }
 
 // RecordSyncRequest records sync triggers from periodic ticker or HTTP webhook.

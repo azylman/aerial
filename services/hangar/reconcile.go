@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/azylman/aerial/services/hangar/pkg/metrics"
 )
 
 // resolveGitDir checks if repoPath contains a .git directory or a .git file (e.g., worktree/submodule).
@@ -467,6 +469,8 @@ func (d *SyncDaemon) ReconcileNomadChanges(ctx context.Context, repoPath string,
 		return nil
 	}
 
+	start := time.Now()
+
 	repo, commit, targetID, prNumber := parseNomadMeta(meta)
 	if repo == "" && repoPath != "" {
 		repo = NormalizeGitHubSlug(repoPath)
@@ -484,6 +488,11 @@ func (d *SyncDaemon) ReconcileNomadChanges(ctx context.Context, repoPath string,
 	defer cancel()
 
 	_, _, err := d.applyNomadChangesDirectly(recCtx, repoPath, changes, true, false, nil, nil, repo, commit, targetID, strconv.Itoa(prNumber))
+	if err != nil {
+		metrics.RecordReconciliation("error", time.Since(start))
+	} else {
+		metrics.RecordReconciliation("success", time.Since(start))
+	}
 	return err
 }
 
