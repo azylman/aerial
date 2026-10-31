@@ -106,7 +106,7 @@ func TestGuardProcess_EndToEnd(t *testing.T) {
 		{"commit mode allows safe commit command", "commit", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git status"}}}`, false, 0, ""},
 		{"batch mode unscoped test denied", "batch", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "go test ./..."}}}`, true, 0, ""},
 		{"schedule mode rewrites submodule go test and preserves -race", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "go test -race ./services/eri/pkg/...", "WaitMsBeforeAsync": 10000}}}`, false, 0, "go test -C services/eri -race ./pkg/..."},
-		{"all mode rewrites submodule go test and preserves -race", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "go test -race ./services/webhooks-router/...", "WaitMsBeforeAsync": 5000}}}`, false, 10000, "go test -C services/webhooks-router -race ./..."},
+		{"all mode rewrites submodule go test and preserves -race", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "go test -race ./services/synapse/...", "WaitMsBeforeAsync": 5000}}}`, false, 10000, "go test -C services/synapse -race ./..."},
 		{"python3 -c escaped char outside quotes", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "python3 -c 'print(f\"{x[\\\"k\\\"]}\")' \\ && true", "WaitMsBeforeAsync": 10000}}}`, false, 0, `python3 -c 'print(f"{x["k"]}")' \ && true`},
 		{"python3 -c unclosed fstring", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "python3 -c 'print(f\"{x)'", "WaitMsBeforeAsync": 10000}}}`, false, 0, ""},
 		{"python3 -c unclosed quote", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "python3 -c 'print(\"abc)'", "WaitMsBeforeAsync": 10000}}}`, false, 0, ""},

@@ -604,12 +604,12 @@ func TestEvaluateNomadEventTriggers(t *testing.T) {
 		},
 		{
 			name:          "deploy_failed with details fires nomad trigger",
-			jobID:         "Webhooks-Router",
+			jobID:         "Synapse",
 			eventType:     "deploy_failed",
 			refID:         "alloc-456",
 			details:       "crashed with oom",
 			wantFired:     true,
-			wantTarget:    "webhooks-router",
+			wantTarget:    "synapse",
 			wantEventType: "deploy_failed",
 		},
 	}

@@ -32,7 +32,7 @@ func TestHandleGitHubWebhook(t *testing.T) {
 		{name: "river client insert error", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping"}, river: &mockRiverInserter{err: errors.New("simulated database failure")}, wantStatus: http.StatusInternalServerError},
 		{name: "api path success", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "del-1234"}, river: &mockRiverInserter{}, wantStatus: http.StatusOK, wantInserted: 1},
 		{name: "legacy path success", path: "/webhooks/github", body: strings.NewReader(`{"zen":"Keep it simple"}`), headers: map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "del-1234"}, river: &mockRiverInserter{}, wantStatus: http.StatusOK, wantInserted: 1},
-		{name: "duplicate skipped", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Responsive is better than fast.","hook_id":9999,"repository":{"full_name":"azylman/aerial"}}`), headers: map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "dup-gh-delivery-1"}, river: &mockRiverInserter{skipDuplicate: true}, wantStatus: http.StatusOK, wantMetricSubstr: `webhooks_router_unique_skipped_total{kind="github_webhook"}`},
+		{name: "duplicate skipped", path: "/api/webhooks/github", body: strings.NewReader(`{"zen":"Responsive is better than fast.","hook_id":9999,"repository":{"full_name":"azylman/aerial"}}`), headers: map[string]string{"X-GitHub-Event": "ping", "X-GitHub-Delivery": "dup-gh-delivery-1"}, river: &mockRiverInserter{skipDuplicate: true}, wantStatus: http.StatusOK, wantMetricSubstr: `synapse_unique_skipped_total{kind="github_webhook"}`},
 	}
 
 	for _, tc := range tests {
@@ -882,7 +882,7 @@ func TestResolveWorkflowRunImages(t *testing.T) {
 			{ID: 1, Name: "Detect Changed Microservices", Status: "completed", Conclusion: "success"},
 			{ID: 2, Name: "Run Service Unit Tests", Status: "completed", Conclusion: "success"},
 			{ID: 3, Name: "Build & Push Images to GHCR (brain)", Status: "completed", Conclusion: "success"},
-			{ID: 4, Name: "Build & Push Images to GHCR (webhooks-router)", Status: "completed", Conclusion: "success"},
+			{ID: 4, Name: "Build & Push Images to GHCR (synapse)", Status: "completed", Conclusion: "success"},
 			{ID: 5, Name: "Build & Push Images to GHCR (custom-microservice)", Status: "completed", Conclusion: "success"},
 			{ID: 6, Name: "Build & Push Images to GHCR (failed-service)", Status: "completed", Conclusion: "failure"},
 			{ID: 7, Name: "Build & Push Images to GHCR (running-service)", Status: "in_progress", Conclusion: ""},
@@ -970,7 +970,7 @@ func TestResolveWorkflowRunImages(t *testing.T) {
 			runID: 12345,
 			want: []string{
 				"ghcr.io/azylman/aerial-brain:latest",
-				"ghcr.io/azylman/aerial-webhooks-router:latest",
+				"ghcr.io/azylman/aerial-synapse:latest",
 				"ghcr.io/azylman/aerial-custom-microservice:latest",
 			},
 		},
@@ -980,7 +980,7 @@ func TestResolveWorkflowRunImages(t *testing.T) {
 			runID: 12345,
 			want: []string{
 				"ghcr.io/azylman/aerial-brain:latest",
-				"ghcr.io/azylman/aerial-webhooks-router:latest",
+				"ghcr.io/azylman/aerial-synapse:latest",
 				"ghcr.io/azylman/aerial-custom-microservice:latest",
 			},
 		},

@@ -159,20 +159,21 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 
 func TestLoadConfig_YAMLAndOverrides(t *testing.T) {
 	tests := []struct {
-		name            string
-		localYAML       string
-		fallbackYAML    string
-		aerialYAML      string
-		useEmptyPath    bool
-		missingFallback bool
-		env             map[string]string
-		wantPort        string
-		wantInfURL      string
-		wantEnv         string
-		wantNomadAddr   string
-		wantHangarURL   string
-		wantBrainURL    string
-		wantSysChan     string
+		name                   string
+		localYAML              string
+		fallbackYAML           string
+		deprecatedFallbackYAML string
+		aerialYAML             string
+		useEmptyPath           bool
+		missingFallback        bool
+		env                    map[string]string
+		wantPort               string
+		wantInfURL             string
+		wantEnv                string
+		wantNomadAddr          string
+		wantHangarURL          string
+		wantBrainURL           string
+		wantSysChan            string
 	}{
 		{
 			name: "yaml config without overrides",
@@ -217,6 +218,14 @@ brain_url: "http://brain.custom:8088"
 			wantPort:      "4088",
 			wantInfURL:    "http://infisical.fallback:8085",
 			wantNomadAddr: "http://nomad.fallback:4646",
+		},
+		{
+			name:                   "zero-byte local config with deprecated webhooks fallback",
+			localYAML:              "",
+			deprecatedFallbackYAML: "port: \"4076\"\ninfisical_url: \"http://infisical.legacy:8085\"\nnomad_addr: \"http://nomad.legacy:4646\"\n",
+			wantPort:               "4076",
+			wantInfURL:             "http://infisical.legacy:8085",
+			wantNomadAddr:          "http://nomad.legacy:4646",
 		},
 		{
 			name:            "zero-byte local config with missing fallback uses defaults",
@@ -276,31 +285,47 @@ brain_url: "http://brain.custom:8088"
 				}
 			}
 
-			oldAerial := webhooksRouterAerialConfigPath
+			oldAerial := synapseAerialConfigPath
 			if tc.aerialYAML != "" {
 				aerialPath := filepath.Join(tmpDir, "config.yaml")
 				if err := os.WriteFile(aerialPath, []byte(tc.aerialYAML), 0o644); err != nil {
 					t.Fatalf("failed to write aerial config: %v", err)
 				}
-				webhooksRouterAerialConfigPath = aerialPath
+				synapseAerialConfigPath = aerialPath
 			} else {
-				webhooksRouterAerialConfigPath = filepath.Join(tmpDir, "nonexistent-config.yaml")
+				synapseAerialConfigPath = filepath.Join(tmpDir, "nonexistent-config.yaml")
 			}
-			t.Cleanup(func() { webhooksRouterAerialConfigPath = oldAerial })
+			t.Cleanup(func() { synapseAerialConfigPath = oldAerial })
 
-			if tc.fallbackYAML != "" || tc.missingFallback {
-				oldFallback := webhooksRouterFallbackConfigPath
+			oldFallback := synapseFallbackConfigPath
+			oldWebhooksFallback := webhooksRouterFallbackConfigPath
+			if tc.deprecatedFallbackYAML != "" {
+				fbLegacyPath := filepath.Join(tmpDir, "legacy-fallback.yaml")
+				if err := os.WriteFile(fbLegacyPath, []byte(tc.deprecatedFallbackYAML), 0o644); err != nil {
+					t.Fatalf("failed to write legacy fallback config: %v", err)
+				}
+				synapseFallbackConfigPath = filepath.Join(tmpDir, "nonexistent-synapse.yaml")
+				webhooksRouterFallbackConfigPath = fbLegacyPath
+			} else if tc.fallbackYAML != "" || tc.missingFallback {
 				if tc.missingFallback {
-					webhooksRouterFallbackConfigPath = filepath.Join(tmpDir, "nonexistent.yaml")
+					synapseFallbackConfigPath = filepath.Join(tmpDir, "nonexistent.yaml")
+					webhooksRouterFallbackConfigPath = filepath.Join(tmpDir, "nonexistent-legacy.yaml")
 				} else {
 					fbPath := filepath.Join(tmpDir, "fallback.yaml")
 					if err := os.WriteFile(fbPath, []byte(tc.fallbackYAML), 0o644); err != nil {
 						t.Fatalf("failed to write fallback config: %v", err)
 					}
-					webhooksRouterFallbackConfigPath = fbPath
+					synapseFallbackConfigPath = fbPath
+					webhooksRouterFallbackConfigPath = filepath.Join(tmpDir, "nonexistent-legacy.yaml")
 				}
-				t.Cleanup(func() { webhooksRouterFallbackConfigPath = oldFallback })
+			} else {
+				synapseFallbackConfigPath = filepath.Join(tmpDir, "nonexistent-synapse.yaml")
+				webhooksRouterFallbackConfigPath = filepath.Join(tmpDir, "nonexistent-legacy.yaml")
 			}
+			t.Cleanup(func() {
+				synapseFallbackConfigPath = oldFallback
+				webhooksRouterFallbackConfigPath = oldWebhooksFallback
+			})
 
 			for _, k := range keysToClear {
 				t.Setenv(k, "")

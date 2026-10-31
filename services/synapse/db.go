@@ -212,7 +212,7 @@ func (r *PostgresPRRegistry) execReturningTargetID(ctx context.Context, repo str
 		return "", err
 	}
 	if !found {
-		log.Printf("[webhooks-router] [registry] pr not found in registry (untracked): repo=%s pr=%d", repo, prNumber)
+		log.Printf("[synapse] [registry] pr not found in registry (untracked): repo=%s pr=%d", repo, prNumber)
 		return "", nil
 	}
 	return targetID, nil
@@ -645,7 +645,7 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, 
 	}
 	defer func() {
 		if rbErr := tx.Rollback(qCtx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
-			log.Printf("[webhooks-router] [registry] tx rollback error: %v", rbErr)
+			log.Printf("[synapse] [registry] tx rollback error: %v", rbErr)
 		}
 	}()
 
@@ -670,7 +670,7 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, 
 	var meta map[string]interface{}
 	if len(metaBytes) > 0 {
 		if err := json.Unmarshal(metaBytes, &meta); err != nil {
-			log.Printf("[webhooks-router] [registry] failed to unmarshal metadata for job deploy: %v", err)
+			log.Printf("[synapse] [registry] failed to unmarshal metadata for job deploy: %v", err)
 		}
 	}
 
@@ -773,7 +773,7 @@ func (r *PostgresPRRegistry) ListDeployingPRs(ctx context.Context) ([]DeployingP
 		}
 		if len(metaBytes) > 0 {
 			if err := json.Unmarshal(metaBytes, &p.Metadata); err != nil {
-				log.Printf("[webhooks-router] [registry] failed to unmarshal metadata for pr %s#%d: %v", p.Repo, p.PRNumber, err)
+				log.Printf("[synapse] [registry] failed to unmarshal metadata for pr %s#%d: %v", p.Repo, p.PRNumber, err)
 			}
 		}
 		prs = append(prs, p)

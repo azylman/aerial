@@ -62,7 +62,7 @@ func (s *RouterServer) handleDirtyPRConflict(ctx context.Context, repo string, p
 	}
 	targetID, updated, trErr := s.registry.AtomicTransitionConflict(ctx, repo, pr.PRNumber)
 	if trErr != nil {
-		log.Printf("[webhooks-router] [registry] error transitioning PR #%d to conflict: %v", pr.PRNumber, trErr)
+		log.Printf("[synapse] [registry] error transitioning PR #%d to conflict: %v", pr.PRNumber, trErr)
 		return
 	}
 	if updated {
@@ -74,7 +74,7 @@ func (s *RouterServer) handleDirtyPRConflict(ctx context.Context, repo string, p
 			HeadSHA:  pr.HeadSHA,
 			TargetID: targetID,
 		}); err != nil {
-			log.Printf("[webhooks-router] [registry] error enqueuing conflict job for PR #%d: %v", pr.PRNumber, err)
+			log.Printf("[synapse] [registry] error enqueuing conflict job for PR #%d: %v", pr.PRNumber, err)
 		}
 	}
 }
@@ -133,11 +133,11 @@ func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) er
 			}
 			if strings.Contains(errLower, "head ref does not exist") {
 				if _, closeErr := s.registry.UpdatePRClosedUnmerged(ctx, repo, pr.PRNumber); closeErr != nil {
-					log.Printf("[webhooks-router] [registry] warning closing stale PR #%d with missing head ref: %v", pr.PRNumber, closeErr)
+					log.Printf("[synapse] [registry] warning closing stale PR #%d with missing head ref: %v", pr.PRNumber, closeErr)
 				}
 				continue
 			}
-			log.Printf("[webhooks-router] [github] warning updating open PR #%d branch: %v", pr.PRNumber, err)
+			log.Printf("[synapse] [github] warning updating open PR #%d branch: %v", pr.PRNumber, err)
 			continue
 		}
 		if conflict {
@@ -160,7 +160,7 @@ func (s *RouterServer) dispatchGitPush(ctx context.Context, repo, ref, commit, t
 		TargetID: targetID,
 		PRNumber: prNum,
 	}); err != nil {
-		log.Printf("[webhooks-router] [dispatcher] error dispatching git_push to hangar for %s: %v", repo, err)
+		log.Printf("[synapse] [dispatcher] error dispatching git_push to hangar for %s: %v", repo, err)
 		return fmt.Errorf("dispatch git_push to hangar: %w", err)
 	}
 	return nil
@@ -172,7 +172,7 @@ func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, he
 	}
 	hasExpected, err := s.registry.HasExpectedDeployJobs(ctx, repo, prNum)
 	if err != nil {
-		log.Printf("[webhooks-router] [registry] warning checking expected deploy jobs for %s#%d on workflow_run: %v", repo, prNum, err)
+		log.Printf("[synapse] [registry] warning checking expected deploy jobs for %s#%d on workflow_run: %v", repo, prNum, err)
 	}
 	if hasExpected {
 		return nil
@@ -185,7 +185,7 @@ func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, he
 		return s.dispatchDeploymentSuccessPrompt(ctx, targetID, "git-merge", repo, headSHA, prNum, "")
 	}
 	if err := s.SyncPRWidget(ctx, repo, prNum); err != nil {
-		log.Printf("[webhooks-router] [widget] warning syncing workflow_run widget for %s#%d: %v", repo, prNum, err)
+		log.Printf("[synapse] [widget] warning syncing workflow_run widget for %s#%d: %v", repo, prNum, err)
 	}
 	return nil
 }
@@ -196,7 +196,7 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 	}
 	images, err := s.resolveWorkflowRunImages(ctx, repo, runID)
 	if err != nil {
-		log.Printf("[webhooks-router] [dispatcher] error resolving images for workflow run %d (%s): %v", runID, repo, err)
+		log.Printf("[synapse] [dispatcher] error resolving images for workflow run %d (%s): %v", runID, repo, err)
 		return fmt.Errorf("resolve workflow run images: %w", err)
 	}
 	if len(images) == 0 {
@@ -220,7 +220,7 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 				TargetID:  targetID,
 			})
 			if err != nil {
-				log.Printf("[webhooks-router] [dispatcher] error dispatching image_ready to hangar for %s: %v", imageRef, err)
+				log.Printf("[synapse] [dispatcher] error dispatching image_ready to hangar for %s: %v", imageRef, err)
 				errCh <- err
 				return
 			}
@@ -237,11 +237,11 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 	allMatchedJobs := dedupeTrimmedStrings(rawJobs)
 	if len(allMatchedJobs) > 0 && s.registry != nil && prNum > 0 {
 		if _, err := s.registry.TransitionDeploying(ctx, repo, prNum, allMatchedJobs); err != nil {
-			log.Printf("[webhooks-router] [dispatcher] error transitioning pr %s#%d to deploying: %v", repo, prNum, err)
+			log.Printf("[synapse] [dispatcher] error transitioning pr %s#%d to deploying: %v", repo, prNum, err)
 			return fmt.Errorf("transition pr deploying: %w", err)
 		}
 		if err := s.SyncPRWidget(ctx, repo, prNum); err != nil {
-			log.Printf("[webhooks-router] [widget] warning syncing workflow_run deploying widget for %s#%d: %v", repo, prNum, err)
+			log.Printf("[synapse] [widget] warning syncing workflow_run deploying widget for %s#%d: %v", repo, prNum, err)
 		}
 	}
 
@@ -501,12 +501,12 @@ func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if s.riverClient == nil {
-		log.Printf("[webhooks-router] [github] ERROR: river client not initialized")
+		log.Printf("[synapse] [github] ERROR: river client not initialized")
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "river queue not initialized"})
 		return
 	}
 	if err := s.insertRiverJob(r.Context(), GitHubWebhookArgs{Event: event, Delivery: delivery, Body: body}); err != nil {
-		log.Printf("[webhooks-router] [github] ERROR: failed to insert job into river: %v", err)
+		log.Printf("[synapse] [github] ERROR: failed to insert job into river: %v", err)
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist webhook"})
 		return
 	}
@@ -537,7 +537,7 @@ func (s *RouterServer) resolveEventPR(ctx context.Context, res *ResolvedGitHubEv
 	}
 	if s.registry != nil {
 		if prNum, branch, targetID, err := s.registry.ResolvePRBySHA(ctx, res.Repo, res.HeadSHA); err != nil {
-			log.Printf("[webhooks-router] [registry] %s failed resolving PR by SHA %s locally: %v", res.Event, res.HeadSHA, err)
+			log.Printf("[synapse] [registry] %s failed resolving PR by SHA %s locally: %v", res.Event, res.HeadSHA, err)
 		} else if prNum > 0 {
 			res.PRNumber = prNum
 			if res.Branch == "" || strings.HasPrefix(res.Branch, "refs/heads/") {
@@ -549,7 +549,7 @@ func (s *RouterServer) resolveEventPR(ctx context.Context, res *ResolvedGitHubEv
 		}
 	}
 	if prNum, branch, err := s.resolvePRFromCommitSHA(ctx, res.Repo, res.HeadSHA); err != nil {
-		log.Printf("[webhooks-router] [github] %s failed resolving PR for commit %s: %v", res.Event, res.HeadSHA, err)
+		log.Printf("[synapse] [github] %s failed resolving PR for commit %s: %v", res.Event, res.HeadSHA, err)
 	} else {
 		res.PRNumber = prNum
 		if res.Branch == "" || strings.HasPrefix(res.Branch, "refs/heads/") {
@@ -841,7 +841,7 @@ func (s *RouterServer) isStaleOrIgnoredCIFailure(ctx context.Context, res *Resol
 	}
 	_, _, regHeadSHA, _, err := s.registry.ResolvePRByNumber(ctx, res.Repo, res.PRNumber)
 	if err == nil && regHeadSHA != "" && !strings.EqualFold(regHeadSHA, strings.TrimSpace(res.HeadSHA)) {
-		log.Printf("[webhooks-router] [github] ignoring stale CI failure on %s#%d for superseded commit %s (current head_sha=%s)", res.Repo, res.PRNumber, res.HeadSHA, regHeadSHA)
+		log.Printf("[synapse] [github] ignoring stale CI failure on %s#%d for superseded commit %s (current head_sha=%s)", res.Repo, res.PRNumber, res.HeadSHA, regHeadSHA)
 		return true
 	}
 	return false
@@ -892,7 +892,7 @@ func (s *RouterServer) processGitHubPingEvent(delivery string, body []byte, res 
 	if p.Repo != nil {
 		res.Repo = p.Repo.FullName
 	}
-	log.Printf("[webhooks-router] [github] [ping] hook_id=%d repo=%s zen=%q delivery=%s", p.HookID, res.Repo, p.Zen, delivery)
+	log.Printf("[synapse] [github] [ping] hook_id=%d repo=%s zen=%q delivery=%s", p.HookID, res.Repo, p.Zen, delivery)
 	return res, nil
 }
 
@@ -907,7 +907,7 @@ func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGi
 			return err
 		}
 		if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
-			log.Printf("[webhooks-router] [widget] warning syncing pr_merged widget for %s#%d: %v", res.Repo, res.PRNumber, err)
+			log.Printf("[synapse] [widget] warning syncing pr_merged widget for %s#%d: %v", res.Repo, res.PRNumber, err)
 		}
 		return nil
 	}
@@ -917,10 +917,10 @@ func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGi
 	}
 	res.TargetID = firstNonEmpty(res.TargetID, targetID)
 	if err := s.failVanadisChunk(ctx, res.Repo, res.PRNumber, "pr_closed_unmerged"); err != nil {
-		log.Printf("[webhooks-router] [vanadis] warning failing vanadis chunk for closed unmerged PR %s#%d: %v", res.Repo, res.PRNumber, err)
+		log.Printf("[synapse] [vanadis] warning failing vanadis chunk for closed unmerged PR %s#%d: %v", res.Repo, res.PRNumber, err)
 	}
 	if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
-		log.Printf("[webhooks-router] [widget] warning syncing pr_closed widget for %s#%d: %v", res.Repo, res.PRNumber, err)
+		log.Printf("[synapse] [widget] warning syncing pr_closed widget for %s#%d: %v", res.Repo, res.PRNumber, err)
 	}
 	return nil
 }
@@ -969,7 +969,7 @@ func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res 
 		res.TargetID = firstNonEmpty(res.TargetID, targetID)
 		if res.TargetID != "" {
 			if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
-				log.Printf("[webhooks-router] [widget] warning syncing pr_sync widget for %s#%d: %v", res.Repo, res.PRNumber, err)
+				log.Printf("[synapse] [widget] warning syncing pr_sync widget for %s#%d: %v", res.Repo, res.PRNumber, err)
 			}
 		}
 	case "auto_merge_disabled":
@@ -1067,12 +1067,12 @@ func (s *RouterServer) processGitHubPullRequestEvent(ctx context.Context, delive
 	}
 	res.Sender = p.Sender.Login
 	res.ResolutionSource = "pull_request_payload"
-	log.Printf("[webhooks-router] [github] [pull_request] repo=%s pr=%d action=%s head_sha=%s merge_sha=%s branch=%s merged=%v sender=%s delivery=%s",
+	log.Printf("[synapse] [github] [pull_request] repo=%s pr=%d action=%s head_sha=%s merge_sha=%s branch=%s merged=%v sender=%s delivery=%s",
 		res.Repo, res.PRNumber, res.Action, res.HeadSHA, res.MergeSHA, res.Branch, p.PullRequest.Merged, res.Sender, delivery)
 
 	if isDependabotPR(p) && (res.Action == "opened" || res.Action == "reopened" || res.Action == "synchronize") {
 		if err := s.enablePRAutoMerge(ctx, res.Repo, res.PRNumber, p.PullRequest.NodeID); err != nil {
-			log.Printf("[webhooks-router] [github] warning enabling auto-merge for %s#%d: %v", res.Repo, res.PRNumber, err)
+			log.Printf("[synapse] [github] warning enabling auto-merge for %s#%d: %v", res.Repo, res.PRNumber, err)
 		}
 	}
 
@@ -1094,12 +1094,12 @@ func (s *RouterServer) recordCheckRunStatus(ctx context.Context, res *ResolvedGi
 	}
 	updated, err := s.registry.RecordPRCheckStatus(ctx, res.Repo, res.PRNumber, res.HeadSHA, res.CheckName, checkState)
 	if err != nil {
-		log.Printf("[webhooks-router] [registry] warning recording check status for %s#%d check %q: %v", res.Repo, res.PRNumber, res.CheckName, err)
+		log.Printf("[synapse] [registry] warning recording check status for %s#%d check %q: %v", res.Repo, res.PRNumber, res.CheckName, err)
 		return
 	}
 	if updated {
 		if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
-			log.Printf("[webhooks-router] [widget] warning syncing pr widget for %s#%d: %v", res.Repo, res.PRNumber, err)
+			log.Printf("[synapse] [widget] warning syncing pr widget for %s#%d: %v", res.Repo, res.PRNumber, err)
 		}
 	}
 }
@@ -1116,7 +1116,7 @@ func (s *RouterServer) processGitHubCheckRunEvent(ctx context.Context, delivery 
 	res.Status = p.CheckRun.Status
 	res.Conclusion = p.CheckRun.Conclusion
 	s.resolveEventPR(ctx, res, p.CheckRun.PullRequests, "check_run_payload")
-	log.Printf("[webhooks-router] [github] [check_run] repo=%s check=%q head_sha=%s pr=%d branch=%s status=%s conclusion=%s source=%s target_id=%s delivery=%s",
+	log.Printf("[synapse] [github] [check_run] repo=%s check=%q head_sha=%s pr=%d branch=%s status=%s conclusion=%s source=%s target_id=%s delivery=%s",
 		res.Repo, res.CheckName, res.HeadSHA, res.PRNumber, res.Branch, res.Status, res.Conclusion, res.ResolutionSource, res.TargetID, delivery)
 
 	if p.Action == "completed" && res.Conclusion == "success" && res.PRNumber > 0 && strings.EqualFold(strings.TrimSpace(res.CheckName), "roborev") && s.registry != nil && s.canRecoverRoboRevSuccess(ctx, res.Repo, res.PRNumber, res.HeadSHA) {
@@ -1127,7 +1127,7 @@ func (s *RouterServer) processGitHubCheckRunEvent(ctx context.Context, delivery 
 		res.TargetID = firstNonEmpty(res.TargetID, targetID)
 		if targetID != "" {
 			if err := s.SyncPRWidget(ctx, res.Repo, res.PRNumber); err != nil {
-				log.Printf("[webhooks-router] [widget] warning syncing pr_open widget for %s#%d: %v", res.Repo, res.PRNumber, err)
+				log.Printf("[synapse] [widget] warning syncing pr_open widget for %s#%d: %v", res.Repo, res.PRNumber, err)
 			}
 		}
 	}
@@ -1155,7 +1155,7 @@ func (s *RouterServer) processGitHubWorkflowRunEvent(ctx context.Context, delive
 	res.Status = p.WorkflowRun.Status
 	res.Conclusion = p.WorkflowRun.Conclusion
 	s.resolveEventPR(ctx, res, p.WorkflowRun.PullRequests, "workflow_run_payload")
-	log.Printf("[webhooks-router] [github] [workflow_run] repo=%s workflow=%q head_sha=%s pr=%d branch=%s status=%s conclusion=%s source=%s target_id=%s delivery=%s",
+	log.Printf("[synapse] [github] [workflow_run] repo=%s workflow=%q head_sha=%s pr=%d branch=%s status=%s conclusion=%s source=%s target_id=%s delivery=%s",
 		res.Repo, res.CheckName, res.HeadSHA, res.PRNumber, res.Branch, res.Status, res.Conclusion, res.ResolutionSource, res.TargetID, delivery)
 
 	details := fmt.Sprintf("Workflow %q concluded with %s", p.WorkflowRun.Name, p.WorkflowRun.Conclusion)
@@ -1181,7 +1181,7 @@ func (s *RouterServer) resolveAndBackfillPushPR(ctx context.Context, res *Resolv
 	if res.PRNumber > 0 {
 		res.MergeSHA = res.HeadSHA
 	}
-	log.Printf("[webhooks-router] [github] [push] repo=%s ref=%s head_sha=%s resolved_pr=%d branch=%s source=%s target_id=%s delivery=%s",
+	log.Printf("[synapse] [github] [push] repo=%s ref=%s head_sha=%s resolved_pr=%d branch=%s source=%s target_id=%s delivery=%s",
 		res.Repo, p.Ref, res.HeadSHA, res.PRNumber, res.Branch, res.ResolutionSource, res.TargetID, res.Delivery)
 
 	if s.registry != nil && res.PRNumber > 0 && res.MergeSHA != "" {
@@ -1230,7 +1230,7 @@ func (s *RouterServer) processGitHubPushEvent(ctx context.Context, body []byte, 
 		return nil, err
 	}
 	if err := s.checkOpenPRConflicts(ctx, res.Repo); err != nil {
-		log.Printf("[webhooks-router] [github] error checking open pr conflicts for %s: %v", res.Repo, err)
+		log.Printf("[synapse] [github] error checking open pr conflicts for %s: %v", res.Repo, err)
 	}
 	return res, nil
 }
@@ -1259,7 +1259,7 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 	case "push":
 		return s.processGitHubPushEvent(ctx, body, res)
 	default:
-		log.Printf("[webhooks-router] [github] [unhandled] event=%s delivery=%s payload_size=%d bytes", event, delivery, len(body))
+		log.Printf("[synapse] [github] [unhandled] event=%s delivery=%s payload_size=%d bytes", event, delivery, len(body))
 		res.ResolutionSource = "unhandled_event"
 		return res, nil
 	}

@@ -14,7 +14,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config holds runtime configuration for webhooks-router.
+// Config holds runtime configuration for synapse.
 type Config struct {
 	Port                  string
 	InfisicalURL          string
@@ -35,7 +35,7 @@ type Config struct {
 	DiscordToken          string
 }
 
-// RouterYAMLConfig defines the declarative file schema for services/webhooks-router/webhooks-router.yaml.
+// RouterYAMLConfig defines the declarative file schema for services/synapse/synapse.yaml.
 type RouterYAMLConfig struct {
 	Port                 string `yaml:"port"`
 	InfisicalURL         string `yaml:"infisical_url"`
@@ -50,8 +50,9 @@ type RouterYAMLConfig struct {
 }
 
 var (
+	synapseFallbackConfigPath        = "/config/synapse.yaml"
 	webhooksRouterFallbackConfigPath = "/config/webhooks-router.yaml"
-	webhooksRouterAerialConfigPath   = "/config/config.yaml"
+	synapseAerialConfigPath          = "/config/config.yaml"
 )
 
 func firstNonEmpty(vals ...string) string {
@@ -73,21 +74,23 @@ func LoadConfig(configPath string) Config {
 		}
 	}
 	if targetPath == "" {
-		if fi, err := os.Stat(webhooksRouterFallbackConfigPath); err == nil && fi.Size() > 0 {
+		if fi, err := os.Stat(synapseFallbackConfigPath); err == nil && fi.Size() > 0 {
+			targetPath = synapseFallbackConfigPath
+		} else if fi, err := os.Stat(webhooksRouterFallbackConfigPath); err == nil && fi.Size() > 0 {
 			targetPath = webhooksRouterFallbackConfigPath
 		}
 	}
 	if targetPath != "" {
 		if data, err := os.ReadFile(targetPath); err == nil {
 			if err := yaml.Unmarshal(data, &fileCfg); err != nil {
-				log.Printf("[WebhooksRouter] Warning: failed to parse yaml config at %s: %v", targetPath, err)
+				log.Printf("[Synapse] Warning: failed to parse yaml config at %s: %v", targetPath, err)
 			}
 		}
 	}
 
 	sysChan := firstNonEmpty(fileCfg.SystemChannelID, fileCfg.SystemChannel)
-	if sysChan == "" && webhooksRouterAerialConfigPath != "" {
-		if data, err := os.ReadFile(webhooksRouterAerialConfigPath); err == nil {
+	if sysChan == "" && synapseAerialConfigPath != "" {
+		if data, err := os.ReadFile(synapseAerialConfigPath); err == nil {
 			var aerialCfg RouterYAMLConfig
 			if yaml.Unmarshal(data, &aerialCfg) == nil {
 				sysChan = firstNonEmpty(aerialCfg.SystemChannelID, aerialCfg.SystemChannel)

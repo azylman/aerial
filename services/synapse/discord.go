@@ -119,7 +119,7 @@ func (s *RouterServer) ProcessDiscordInteraction(ctx context.Context, args Disco
 func startDiscordGateway(ctx context.Context, server *RouterServer, token string) (func(), error) {
 	cleanToken := strings.TrimSpace(token)
 	if cleanToken == "" {
-		log.Println("[webhooks-router] [discord] DISCORD_TOKEN is empty; Discord Gateway disabled")
+		log.Println("[synapse] [discord] DISCORD_TOKEN is empty; Discord Gateway disabled")
 		return func() {}, nil
 	}
 
@@ -143,7 +143,7 @@ func startDiscordGateway(ctx context.Context, server *RouterServer, token string
 	if err := discordGatewayOpener(dg); err != nil {
 		return nil, fmt.Errorf("open discord gateway: %w", err)
 	}
-	log.Println("[webhooks-router] [discord] Discord Gateway connected successfully")
+	log.Println("[synapse] [discord] Discord Gateway connected successfully")
 
 	if server != nil {
 		server.SetGatewayLatencyFn(dg.HeartbeatLatency)
@@ -154,7 +154,7 @@ func startDiscordGateway(ctx context.Context, server *RouterServer, token string
 	stopFn := func() {
 		stopOnce.Do(func() {
 			if err := dg.Close(); err != nil {
-				log.Printf("[webhooks-router] [discord] error closing discord gateway session: %v", err)
+				log.Printf("[synapse] [discord] error closing discord gateway session: %v", err)
 			}
 		})
 	}
@@ -263,11 +263,11 @@ func enqueueDiscordMessage(ctx context.Context, server *RouterServer, s *discord
 
 	if server.riverClient != nil {
 		if err := server.insertRiverJob(enqueueCtx, args); err != nil {
-			log.Printf("[webhooks-router] [discord] failed to enqueue message %s to river: %v", m.ID, err)
+			log.Printf("[synapse] [discord] failed to enqueue message %s to river: %v", m.ID, err)
 		}
 	} else {
 		if err := server.ProcessDiscordIngress(enqueueCtx, args); err != nil {
-			log.Printf("[webhooks-router] [discord] failed to process message %s directly: %v", m.ID, err)
+			log.Printf("[synapse] [discord] failed to process message %s directly: %v", m.ID, err)
 		}
 	}
 }
@@ -314,7 +314,7 @@ func resolveCatchUpGuilds(dg *discordgo.Session) []*discordgo.Guild {
 				}
 			}
 		} else {
-			log.Printf("[webhooks-router] [discord] failed to fetch user guilds: %v", err)
+			log.Printf("[synapse] [discord] failed to fetch user guilds: %v", err)
 		}
 	}
 	return guilds
@@ -340,7 +340,7 @@ func collectCandidateChannels(dg *discordgo.Session, g *discordgo.Guild) []*disc
 				addCandidate(ch)
 			}
 		} else {
-			log.Printf("[webhooks-router] [discord] failed to fetch guild channels for guild %s: %v", g.ID, err)
+			log.Printf("[synapse] [discord] failed to fetch guild channels for guild %s: %v", g.ID, err)
 		}
 
 		if activeThreads, err := dg.GuildThreadsActive(g.ID); err == nil && activeThreads != nil {
@@ -348,7 +348,7 @@ func collectCandidateChannels(dg *discordgo.Session, g *discordgo.Guild) []*disc
 				addCandidate(th)
 			}
 		} else if err != nil {
-			log.Printf("[webhooks-router] [discord] failed to fetch active threads for guild %s: %v", g.ID, err)
+			log.Printf("[synapse] [discord] failed to fetch active threads for guild %s: %v", g.ID, err)
 		}
 	}
 
@@ -389,7 +389,7 @@ func catchUpChannelMessages(ctx context.Context, dg *discordgo.Session, server *
 
 	fetched, err := dg.ChannelMessages(ch.ID, 50, "", afterID, "")
 	if err != nil {
-		log.Printf("[webhooks-router] [discord] failed to fetch channel messages for channel %s: %v", ch.ID, err)
+		log.Printf("[synapse] [discord] failed to fetch channel messages for channel %s: %v", ch.ID, err)
 		return
 	}
 
@@ -470,11 +470,11 @@ func handleGatewayInteractionCreate(ctx context.Context, server *RouterServer, i
 
 	if server.riverClient != nil {
 		if err := server.insertRiverJob(enqueueCtx, args); err != nil {
-			log.Printf("[webhooks-router] [discord] failed to enqueue interaction %s to river: %v", i.ID, err)
+			log.Printf("[synapse] [discord] failed to enqueue interaction %s to river: %v", i.ID, err)
 		}
 	} else {
 		if err := server.ProcessDiscordInteraction(enqueueCtx, args); err != nil {
-			log.Printf("[webhooks-router] [discord] failed to process interaction %s directly: %v", i.ID, err)
+			log.Printf("[synapse] [discord] failed to process interaction %s directly: %v", i.ID, err)
 		}
 	}
 }
