@@ -386,6 +386,20 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Fetch Dependabot Metadata
+        id: metadata
+        if: github.actor == 'dependabot[bot]'
+        uses: dependabot/fetch-metadata@v2
+
+      - name: Enable Auto-Merge for Dependabot PRs
+        if: github.actor == 'dependabot[bot]' && (steps.metadata.outputs.update-type == 'version-update:semver-minor' || steps.metadata.outputs.update-type == 'version-update:semver-patch')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          export GH_TOKEN="${GITHUB_PAT:-${GH_TOKEN}}"
+          gh pr merge --auto --squash "$PR_URL"
+
       - name: Run Independent RoboRev Review Gate
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
