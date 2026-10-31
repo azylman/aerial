@@ -1284,14 +1284,16 @@ func TestNomadStreamSubscriber_StartAndReconnect(t *testing.T) {
 
 func TestRouterServer_HandleNomadJobSuccess_TableDriven(t *testing.T) {
 	tests := []struct {
-		name           string
-		reg            PRRegistryUpdater
-		disp           OutboundDispatcher
-		job            string
-		ref            string
-		wantErr        bool
-		wantDispatches int
-		wantWidgets    int
+		name              string
+		reg               PRRegistryUpdater
+		disp              OutboundDispatcher
+		job               string
+		ref               string
+		wantErr           bool
+		wantDispatches    int
+		wantWidgets       int
+		wantAppendCalls   int
+		wantStatusReverts int
 	}{
 		{name: "empty job is no-op", reg: &mockPRRegistry{}, job: ""},
 		{name: "nil registry is no-op", reg: nil, job: "brain"},
@@ -1299,6 +1301,16 @@ func TestRouterServer_HandleNomadJobSuccess_TableDriven(t *testing.T) {
 		{name: "untracked job updated false is no-op", reg: &mockPRRegistry{deployedUpdated: false}, job: "brain"},
 		{name: "intermediate job success updated false syncs widget", reg: mkDeployedReg("target-1", 10, "sha", "repo", false), disp: &mockOutboundDispatcher{}, job: "brain", ref: "dep-1", wantWidgets: 1},
 		{name: "successful transition dispatches prompt", reg: mkDeployedReg("target-1", 10, "sha", "repo", true), disp: &mockOutboundDispatcher{}, job: "brain", ref: "dep-1", wantDispatches: 1},
+		{
+			name:              "dispatchDeploymentSuccessPrompt error reverts status to deploying and restores job in metadata",
+			reg:               mkDeployedReg("1555405874565091380", 10, "sha", "azylman/aerial", true),
+			disp:              &mockOutboundDispatcher{promptErr: errors.New("dispatch prompt failed")},
+			job:               "brain",
+			ref:               "dep-1",
+			wantErr:           true,
+			wantAppendCalls:   1,
+			wantStatusReverts: 1,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1313,6 +1325,15 @@ func TestRouterServer_HandleNomadJobSuccess_TableDriven(t *testing.T) {
 				mockDisp := tc.disp.(*mockOutboundDispatcher)
 				if len(mockDisp.WidgetCalls()) != tc.wantWidgets {
 					t.Errorf("got %d widget calls, want %d", len(mockDisp.WidgetCalls()), tc.wantWidgets)
+				}
+			}
+			if tc.reg != nil {
+				mockReg := tc.reg.(*mockPRRegistry)
+				if tc.wantAppendCalls > 0 && len(mockReg.appendPRJobsCalls) != tc.wantAppendCalls {
+					t.Errorf("got %d appendPRJobs calls, want %d", len(mockReg.appendPRJobsCalls), tc.wantAppendCalls)
+				}
+				if tc.wantStatusReverts > 0 && len(mockReg.updatePRStatusCalls) != tc.wantStatusReverts {
+					t.Errorf("got %d updatePRStatus calls, want %d", len(mockReg.updatePRStatusCalls), tc.wantStatusReverts)
 				}
 			}
 		})

@@ -84,21 +84,24 @@ func (r *PostgresPRRegistry) postHaroEventTriggers(ctx context.Context, path, op
 	if err != nil {
 		return false, fmt.Errorf("marshal %s request: %w", op, err)
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, hURL+path, bytes.NewReader(bodyBytes))
+	err = r.doHTTPWithRetry(ctx, client, op, func() (*http.Request, error) {
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, hURL+path, bytes.NewReader(bodyBytes))
+		if reqErr != nil {
+			return nil, reqErr
+		}
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	}, func(resp *http.Response) error {
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("%s: unexpected status %d: %s", op, resp.StatusCode, readBodyString(io.LimitReader(resp.Body, 1024)))
+		}
+		if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
+			return fmt.Errorf("decode %s response: %w", op, err)
+		}
+		return nil
+	})
 	if err != nil {
-		return false, fmt.Errorf("create %s request: %w", op, err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return false, fmt.Errorf("%s: %w", op, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("%s: unexpected status %d: %s", op, resp.StatusCode, readBodyString(io.LimitReader(resp.Body, 1024)))
-	}
-	if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
-		return false, fmt.Errorf("decode %s response: %w", op, err)
+		return false, err
 	}
 	return true, nil
 }
@@ -141,30 +144,33 @@ func (r *PostgresPRRegistry) FailVanadisChunkDetailsByPR(ctx context.Context, re
 	if err != nil {
 		return "", "", false, fmt.Errorf("marshal fail chunk request: %w", err)
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, vURL+"/chunks/fail-pr", bytes.NewReader(bodyBytes))
-	if err != nil {
-		return "", "", false, fmt.Errorf("create fail chunk request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return "", "", false, fmt.Errorf("fail vanadis chunk by pr: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		if readErr != nil {
-			return "", "", false, fmt.Errorf("fail vanadis chunk by pr: unexpected status %d (read error: %w)", resp.StatusCode, readErr)
-		}
-		return "", "", false, fmt.Errorf("fail vanadis chunk by pr: unexpected status %d: %s", resp.StatusCode, string(body))
-	}
 	var res struct {
 		BuildID string `json:"build_id"`
 		ChunkID string `json:"chunk_id"`
 		Failed  bool   `json:"failed"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-		return "", "", false, fmt.Errorf("decode fail chunk response: %w", err)
+	err = r.doHTTPWithRetry(ctx, client, "fail vanadis chunk by pr", func() (*http.Request, error) {
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, vURL+"/chunks/fail-pr", bytes.NewReader(bodyBytes))
+		if reqErr != nil {
+			return nil, reqErr
+		}
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	}, func(resp *http.Response) error {
+		if resp.StatusCode != http.StatusOK {
+			body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
+			if readErr != nil {
+				return fmt.Errorf("fail vanadis chunk by pr: unexpected status %d (read error: %w)", resp.StatusCode, readErr)
+			}
+			return fmt.Errorf("fail vanadis chunk by pr: unexpected status %d: %s", resp.StatusCode, string(body))
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+			return fmt.Errorf("decode fail chunk response: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", "", false, err
 	}
 	return res.BuildID, res.ChunkID, res.Failed, nil
 }

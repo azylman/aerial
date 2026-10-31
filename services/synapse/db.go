@@ -117,6 +117,8 @@ type PRRegistryUpdater interface {
 	RecordPRJobState(ctx context.Context, jobName, jobState string) (repo string, prNumber int, updated bool, err error)
 	CheckEventTriggers(ctx context.Context, source string, targets []string, eventType string) (bool, error)
 	FireEventTriggers(ctx context.Context, source string, targets []string, eventType, contextHeader string) ([]ClaimedEventTrigger, error)
+	AppendPRJobs(ctx context.Context, repo string, prNumber int, jobs []string) error
+	UpdatePRStatus(ctx context.Context, repo string, prNumber int, status string, metadata map[string]interface{}) error
 }
 
 type pgxQueryExecer interface {
@@ -133,6 +135,7 @@ type PostgresPRRegistry struct {
 	haroURL           string
 	httpClient        *http.Client
 	vanadisRetryDelay time.Duration
+	vanadisRetrySleep func(ctx context.Context, d time.Duration) error
 }
 
 // NewPostgresPRRegistry constructs a new PostgresPRRegistry.
@@ -384,31 +387,34 @@ func (r *PostgresPRRegistry) attachVanadisChunkPR(ctx context.Context, repo, chu
 	if err != nil {
 		return "", fmt.Errorf("marshal attach chunk request: %w", err)
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, vURL+"/chunks/attach-pr", bytes.NewReader(bodyBytes))
-	if err != nil {
-		return "", fmt.Errorf("create attach chunk request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return "", fmt.Errorf("attach vanadis chunk pr: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return "", ErrVanadisChunkNotFound
-	}
-	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		if readErr != nil {
-			return "", fmt.Errorf("attach vanadis chunk pr: unexpected status %d (read error: %w)", resp.StatusCode, readErr)
-		}
-		return "", fmt.Errorf("attach vanadis chunk pr: unexpected status %d: %s", resp.StatusCode, string(body))
-	}
 	var attachRes struct {
 		ThreadID string `json:"thread_id"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&attachRes); err != nil {
-		return "", fmt.Errorf("decode attach chunk response: %w", err)
+	err = r.doHTTPWithRetry(ctx, client, "attach vanadis chunk pr", func() (*http.Request, error) {
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, vURL+"/chunks/attach-pr", bytes.NewReader(bodyBytes))
+		if reqErr != nil {
+			return nil, reqErr
+		}
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	}, func(resp *http.Response) error {
+		if resp.StatusCode == http.StatusNotFound {
+			return ErrVanadisChunkNotFound
+		}
+		if resp.StatusCode != http.StatusOK {
+			body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
+			if readErr != nil {
+				return fmt.Errorf("attach vanadis chunk pr: unexpected status %d (read error: %w)", resp.StatusCode, readErr)
+			}
+			return fmt.Errorf("attach vanadis chunk pr: unexpected status %d: %s", resp.StatusCode, string(body))
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&attachRes); err != nil {
+			return fmt.Errorf("decode attach chunk response: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
 	}
 	return strings.TrimSpace(attachRes.ThreadID), nil
 }
@@ -794,26 +800,29 @@ func (r *PostgresPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo s
 	if err != nil {
 		return nil, fmt.Errorf("marshal advance chunk request: %w", err)
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, vURL+"/chunks/advance-pr", bytes.NewReader(bodyBytes))
-	if err != nil {
-		return nil, fmt.Errorf("create advance chunk request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("advance vanadis chunk by pr: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		if readErr != nil {
-			return nil, fmt.Errorf("advance vanadis chunk by pr: unexpected status %d (read error: %w)", resp.StatusCode, readErr)
-		}
-		return nil, fmt.Errorf("advance vanadis chunk by pr: unexpected status %d: %s", resp.StatusCode, string(body))
-	}
 	var res VanadisAdvancementResult
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-		return nil, fmt.Errorf("decode advance chunk response: %w", err)
+	err = r.doHTTPWithRetry(ctx, client, "advance vanadis chunk by pr", func() (*http.Request, error) {
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, vURL+"/chunks/advance-pr", bytes.NewReader(bodyBytes))
+		if reqErr != nil {
+			return nil, reqErr
+		}
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	}, func(resp *http.Response) error {
+		if resp.StatusCode != http.StatusOK {
+			body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
+			if readErr != nil {
+				return fmt.Errorf("advance vanadis chunk by pr: unexpected status %d (read error: %w)", resp.StatusCode, readErr)
+			}
+			return fmt.Errorf("advance vanadis chunk by pr: unexpected status %d: %s", resp.StatusCode, string(body))
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+			return fmt.Errorf("decode advance chunk response: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return &res, nil
 }
@@ -827,7 +836,83 @@ type vanadisChunkPRLookup struct {
 }
 
 func isTransientVanadisStatus(code int) bool {
-	return code == http.StatusBadGateway || code == http.StatusServiceUnavailable || code == http.StatusGatewayTimeout
+	return code == http.StatusInternalServerError ||
+		code == http.StatusBadGateway ||
+		code == http.StatusServiceUnavailable ||
+		code == http.StatusGatewayTimeout ||
+		code == http.StatusTooManyRequests
+}
+
+func (r *PostgresPRRegistry) sleepRetry(ctx context.Context, delay time.Duration) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if r != nil && r.vanadisRetrySleep != nil {
+		return r.vanadisRetrySleep(ctx, delay)
+	}
+	if delay <= 0 {
+		return nil
+	}
+	select {
+	case <-time.After(delay):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (r *PostgresPRRegistry) doHTTPWithRetry(ctx context.Context, client *http.Client, opName string, newReq func() (*http.Request, error), handleResp func(resp *http.Response) error) error {
+	const maxAttempts = 3
+	delay := 500 * time.Millisecond
+	if r != nil && r.vanadisRetryDelay >= 0 {
+		delay = r.vanadisRetryDelay
+	}
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		httpReq, err := newReq()
+		if err != nil {
+			return fmt.Errorf("create %s request: %w", opName, err)
+		}
+		resp, err := client.Do(httpReq)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			lastErr = fmt.Errorf("%s: %w", opName, err)
+			if attempt+1 >= maxAttempts {
+				return lastErr
+			}
+			if sleepErr := r.sleepRetry(ctx, delay); sleepErr != nil {
+				return sleepErr
+			}
+			continue
+		}
+
+		if isTransientVanadisStatus(resp.StatusCode) {
+			body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
+			resp.Body.Close()
+			if readErr != nil {
+				lastErr = fmt.Errorf("%s: unexpected status %d (read error: %w)", opName, resp.StatusCode, readErr)
+			} else {
+				lastErr = fmt.Errorf("%s: unexpected status %d: %s", opName, resp.StatusCode, string(body))
+			}
+			if attempt+1 >= maxAttempts {
+				return lastErr
+			}
+			if sleepErr := r.sleepRetry(ctx, delay); sleepErr != nil {
+				return sleepErr
+			}
+			continue
+		}
+
+		err = handleResp(resp)
+		resp.Body.Close()
+		return err
+	}
+	return lastErr
 }
 
 func (r *PostgresPRRegistry) getChunkByPR(ctx context.Context, repo string, prNumber int) (*vanadisChunkPRLookup, error) {
@@ -837,47 +922,26 @@ func (r *PostgresPRRegistry) getChunkByPR(ctx context.Context, repo string, prNu
 	}
 	client, vURL := r.getVanadisClient()
 	endpoint := fmt.Sprintf("%s/chunks/by-pr?repo=%s&pr_number=%d", vURL, url.QueryEscape(repo), prNumber)
-	delay := r.vanadisRetryDelay
-	if delay <= 0 {
-		delay = 500 * time.Millisecond
-	}
-	const maxAttempts = 3
-	var lastErr error
-	for attempt := 0; attempt < maxAttempts; attempt++ {
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-		if err != nil {
-			return nil, fmt.Errorf("create get chunk by pr request: %w", err)
-		}
-		resp, err := client.Do(httpReq)
-		if err != nil {
-			return nil, fmt.Errorf("get chunk by pr: %w", err)
-		}
-		if resp.StatusCode == http.StatusOK {
-			var lookup vanadisChunkPRLookup
-			decErr := json.NewDecoder(resp.Body).Decode(&lookup)
-			resp.Body.Close()
-			if decErr != nil {
-				return nil, fmt.Errorf("decode get chunk by pr response: %w", decErr)
+	var lookup vanadisChunkPRLookup
+	err := r.doHTTPWithRetry(ctx, client, "get chunk by pr", func() (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	}, func(resp *http.Response) error {
+		if resp.StatusCode != http.StatusOK {
+			body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
+			if readErr != nil {
+				return fmt.Errorf("get chunk by pr: unexpected status %d (read error: %w)", resp.StatusCode, readErr)
 			}
-			return &lookup, nil
+			return fmt.Errorf("get chunk by pr: unexpected status %d: %s", resp.StatusCode, string(body))
 		}
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		resp.Body.Close()
-		if readErr != nil {
-			lastErr = fmt.Errorf("get chunk by pr: unexpected status %d (read error: %w)", resp.StatusCode, readErr)
-		} else {
-			lastErr = fmt.Errorf("get chunk by pr: unexpected status %d: %s", resp.StatusCode, string(body))
+		if err := json.NewDecoder(resp.Body).Decode(&lookup); err != nil {
+			return fmt.Errorf("decode get chunk by pr response: %w", err)
 		}
-		if !isTransientVanadisStatus(resp.StatusCode) || attempt+1 >= maxAttempts {
-			return nil, lastErr
-		}
-		select {
-		case <-time.After(delay):
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	return nil, lastErr
+	return &lookup, nil
 }
 
 func (r *PostgresPRRegistry) ResolveVanadisChunkForPR(ctx context.Context, repo string, prNumber int) (bool, string, string, error) {
@@ -895,15 +959,22 @@ func (r *PostgresPRRegistry) ResolveVanadisChunkForPR(ctx context.Context, repo 
 	return true, strings.TrimSpace(lookup.ChunkID), cleanEffort, nil
 }
 
-func (r *PostgresPRRegistry) hasPersistedVanadisChunkID(ctx context.Context, repo string, prNumber int) bool {
+func (r *PostgresPRRegistry) getPersistedVanadisChunkID(ctx context.Context, repo string, prNumber int) string {
 	repo = normalizeRepo(repo)
 	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 {
-		return false
+		return ""
 	}
-	const query = `SELECT COALESCE(metadata->>'vanadis_chunk_id', '') != '' FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1;`
-	var hasChunk bool
-	found, err := r.queryRowScan(ctx, "check persisted vanadis_chunk_id", query, []any{&hasChunk}, repo, prNumber)
-	return err == nil && found && hasChunk
+	const query = `SELECT COALESCE(metadata->>'vanadis_chunk_id', '') FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1;`
+	var chunkID string
+	found, err := r.queryRowScan(ctx, "get persisted vanadis_chunk_id", query, []any{&chunkID}, repo, prNumber)
+	if err != nil || !found {
+		return ""
+	}
+	return strings.TrimSpace(chunkID)
+}
+
+func (r *PostgresPRRegistry) hasPersistedVanadisChunkID(ctx context.Context, repo string, prNumber int) bool {
+	return r.getPersistedVanadisChunkID(ctx, repo, prNumber) != ""
 }
 
 func (r *PostgresPRRegistry) ShouldSuppressVanadisDeployWake(ctx context.Context, repo string, prNumber int) (bool, error) {
@@ -934,4 +1005,69 @@ func (r *PostgresPRRegistry) IsFinalVanadisChunk(ctx context.Context, repo strin
 func (r *PostgresPRRegistry) FailVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (bool, error) {
 	_, _, failed, err := r.FailVanadisChunkDetailsByPR(ctx, repo, prNumber)
 	return failed, err
+}
+
+func (r *PostgresPRRegistry) AppendPRJobs(ctx context.Context, repo string, prNumber int, jobs []string) error {
+	repo = normalizeRepo(repo)
+	cleanJobs := dedupeTrimmedStrings(jobs)
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 || len(cleanJobs) == 0 {
+		return nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+		UPDATE pr_registry
+		SET metadata = jsonb_set(
+			jsonb_set(
+				COALESCE(metadata, '{}'::jsonb),
+				'{jobs}',
+				(SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb)
+				 FROM jsonb_array_elements(COALESCE(metadata->'jobs', '[]'::jsonb) || to_jsonb($3::text[])) AS elem)
+			),
+			'{deployed_jobs}',
+			(SELECT COALESCE(jsonb_agg(elem), '[]'::jsonb)
+			 FROM jsonb_array_elements(COALESCE(metadata->'deployed_jobs', '[]'::jsonb)) AS elem
+			 WHERE NOT (elem #>> '{}' = ANY($3::text[])))
+		),
+		updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $1 AND pr_number = $2;`
+	if _, err := r.pool.Exec(qCtx, query, repo, prNumber, cleanJobs); err != nil {
+		return fmt.Errorf("append pr jobs: %w", err)
+	}
+	return nil
+}
+
+func (r *PostgresPRRegistry) UpdatePRStatus(ctx context.Context, repo string, prNumber int, status string, metadata map[string]interface{}) error {
+	repo = normalizeRepo(repo)
+	status = strings.TrimSpace(status)
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 || status == "" {
+		return nil
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	var metaBytes []byte
+	if metadata != nil {
+		var err error
+		metaBytes, err = json.Marshal(metadata)
+		if err != nil {
+			return fmt.Errorf("marshal metadata: %w", err)
+		}
+	}
+
+	query := `
+		UPDATE pr_registry
+		SET status = $3,
+		    metadata = CASE
+		        WHEN $4::jsonb IS NOT NULL AND $4::jsonb != '{}'::jsonb
+		        THEN COALESCE(metadata, '{}'::jsonb) || $4::jsonb
+		        ELSE COALESCE(metadata, '{}'::jsonb)
+		    END,
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $1 AND pr_number = $2;`
+	if _, err := r.pool.Exec(qCtx, query, repo, prNumber, status, metaBytes); err != nil {
+		return fmt.Errorf("update pr status: %w", err)
+	}
+	return nil
 }

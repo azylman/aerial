@@ -13,19 +13,22 @@ func TestCheckEventTriggers_HaroHTTP(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		nilRegistry bool
-		source      string
-		targets     []string
-		eventType   string
-		httpStatus  int
-		httpBody    string
-		wantMatched bool
-		wantErr     bool
+		name         string
+		nilRegistry  bool
+		source       string
+		targets      []string
+		eventType    string
+		httpStatus   int
+		httpStatuses []int
+		httpBody     string
+		wantMatched  bool
+		wantErr      bool
 	}{
 		{name: "check nil registry returns false", nilRegistry: true, source: "custom_source", targets: []string{"device.alpha"}, eventType: "ready"},
 		{name: "check empty targets returns false", source: "custom_source", targets: nil, eventType: "ready"},
 		{name: "check 500 error returns error", source: "custom_source", targets: []string{"device.alpha"}, eventType: "ready", httpStatus: http.StatusInternalServerError, httpBody: `{"error":"db"}`, wantErr: true},
+		{name: "check non-transient 400 error returns error", source: "custom_source", targets: []string{"device.alpha"}, eventType: "ready", httpStatus: http.StatusBadRequest, httpBody: `{"error":"bad request"}`, wantErr: true},
+		{name: "check retry transient 503 then 200 succeeds", source: "custom_source", targets: []string{"device.alpha"}, eventType: "ready", httpStatuses: []int{http.StatusServiceUnavailable, http.StatusOK}, httpBody: `{"status":"ok","matched":true}`, wantMatched: true},
 		{name: "check matched true", source: "custom_source", targets: []string{"device.alpha"}, eventType: "ready", httpStatus: http.StatusOK, httpBody: `{"status":"ok","matched":true}`, wantMatched: true},
 		{name: "check matched false", source: "custom_source", targets: []string{"device.alpha"}, eventType: "ready", httpStatus: http.StatusOK, httpBody: `{"status":"ok","matched":false}`, wantMatched: false},
 	}
@@ -35,12 +38,21 @@ func TestCheckEventTriggers_HaroHTTP(t *testing.T) {
 			t.Parallel()
 			var reg *PostgresPRRegistry
 			if !tc.nilRegistry {
+				var reqIdx int
 				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					if r.URL.Path != "/event-triggers/check" {
 						http.NotFound(w, r)
 						return
 					}
 					status := tc.httpStatus
+					if len(tc.httpStatuses) > 0 {
+						if reqIdx < len(tc.httpStatuses) {
+							status = tc.httpStatuses[reqIdx]
+						} else {
+							status = tc.httpStatuses[len(tc.httpStatuses)-1]
+						}
+					}
+					reqIdx++
 					if status == 0 {
 						status = http.StatusOK
 					}
@@ -49,6 +61,7 @@ func TestCheckEventTriggers_HaroHTTP(t *testing.T) {
 				}))
 				defer ts.Close()
 				reg = NewPostgresPRRegistry(nil, WithHaroClient(ts.URL, ts.Client()))
+				reg.vanadisRetryDelay = 0
 			}
 			matched, err := reg.CheckEventTriggers(context.Background(), tc.source, tc.targets, tc.eventType)
 			if (err != nil) != tc.wantErr {
@@ -72,6 +85,7 @@ func TestFireEventTriggers_HaroHTTP(t *testing.T) {
 		eventType     string
 		contextHeader string
 		httpStatus    int
+		httpStatuses  []int
 		httpBody      string
 		wantCount     int
 		wantErr       bool
@@ -82,6 +96,7 @@ func TestFireEventTriggers_HaroHTTP(t *testing.T) {
 		{name: "fire empty source returns nil", source: "", targets: []string{"azylman/aerial"}, eventType: "ci_passed"},
 		{name: "fire empty eventType returns nil", source: "github", targets: []string{"azylman/aerial"}, eventType: ""},
 		{name: "fire server 500 error returns error", source: "github", targets: []string{"azylman/aerial"}, eventType: "ci_passed", httpStatus: http.StatusInternalServerError, httpBody: `{"error":"db error"}`, wantErr: true},
+		{name: "fire retry transient 500 then 200 succeeds", source: "github", targets: []string{"azylman/aerial"}, eventType: "ci_passed", httpStatuses: []int{http.StatusInternalServerError, http.StatusOK}, httpBody: `{"status":"ok","fired":1,"triggers":[{"id":"trig-1"}]}`, wantCount: 1},
 		{name: "fire invalid json returns error", source: "github", targets: []string{"azylman/aerial"}, eventType: "ci_passed", httpStatus: http.StatusOK, httpBody: `{invalid`, wantErr: true},
 		{name: "fire successful with multiple rows and context_header", source: "github", targets: []string{"azylman/aerial", "azylman/aerial:main"}, eventType: "pr_merged", contextHeader: "GitHub pr_merged", httpStatus: http.StatusOK, httpBody: `{"status":"ok","fired":2,"triggers":[{"id":"trig-1","channel_id":"1555405874565091380","source":"github","target":"azylman/aerial","event_type":"pr_merged","prompt":"Continue","effort":"high"},{"id":"trig-2","channel_id":"1555405874565091380","source":"github","target":"azylman/aerial:main","event_type":"pr_merged","prompt":"Report","effort":"medium"}]}`, wantCount: 2},
 	}
@@ -91,12 +106,21 @@ func TestFireEventTriggers_HaroHTTP(t *testing.T) {
 			t.Parallel()
 			var reg *PostgresPRRegistry
 			if !tc.nilRegistry {
+				var reqIdx int
 				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					if r.URL.Path != "/event-triggers/fire" {
 						http.NotFound(w, r)
 						return
 					}
 					status := tc.httpStatus
+					if len(tc.httpStatuses) > 0 {
+						if reqIdx < len(tc.httpStatuses) {
+							status = tc.httpStatuses[reqIdx]
+						} else {
+							status = tc.httpStatuses[len(tc.httpStatuses)-1]
+						}
+					}
+					reqIdx++
 					if status == 0 {
 						status = http.StatusOK
 					}
@@ -105,6 +129,7 @@ func TestFireEventTriggers_HaroHTTP(t *testing.T) {
 				}))
 				defer ts.Close()
 				reg = NewPostgresPRRegistry(nil, WithHaroClient(ts.URL, ts.Client()))
+				reg.vanadisRetryDelay = 0
 			}
 			got, err := reg.FireEventTriggers(context.Background(), tc.source, tc.targets, tc.eventType, tc.contextHeader)
 			if (err != nil) != tc.wantErr {
@@ -134,16 +159,17 @@ func TestFailVanadisChunkDetailsByPR(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		nilRegistry bool
-		repo        string
-		prNumber    int
-		httpStatus  int
-		httpBody    string
-		buildID     string
-		chunkID     string
-		wantFailed  bool
-		wantErr     bool
+		name         string
+		nilRegistry  bool
+		repo         string
+		prNumber     int
+		httpStatus   int
+		httpStatuses []int
+		httpBody     string
+		buildID      string
+		chunkID      string
+		wantFailed   bool
+		wantErr      bool
 	}{
 		{
 			name:        "nil registry returns false",
@@ -168,6 +194,24 @@ func TestFailVanadisChunkDetailsByPR(t *testing.T) {
 			httpStatus: http.StatusInternalServerError,
 			httpBody:   `{"error":"internal err"}`,
 			wantErr:    true,
+		},
+		{
+			name:       "server 400 non-transient error returns error",
+			repo:       "azylman/aerial",
+			prNumber:   10,
+			httpStatus: http.StatusBadRequest,
+			httpBody:   `{"error":"bad request"}`,
+			wantErr:    true,
+		},
+		{
+			name:         "server retry 502 then 200 succeeds",
+			repo:         "azylman/aerial",
+			prNumber:     10,
+			httpStatuses: []int{http.StatusBadGateway, http.StatusOK},
+			httpBody:     `{"build_id":"build-123","chunk_id":"chunk-1","failed":true}`,
+			buildID:      "build-123",
+			chunkID:      "chunk-1",
+			wantFailed:   true,
 		},
 		{
 			name:       "invalid json returns error",
@@ -202,12 +246,21 @@ func TestFailVanadisChunkDetailsByPR(t *testing.T) {
 			t.Parallel()
 			var reg *PostgresPRRegistry
 			if !tc.nilRegistry {
+				var reqIdx int
 				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					if r.URL.Path != "/chunks/fail-pr" {
 						http.NotFound(w, r)
 						return
 					}
 					status := tc.httpStatus
+					if len(tc.httpStatuses) > 0 {
+						if reqIdx < len(tc.httpStatuses) {
+							status = tc.httpStatuses[reqIdx]
+						} else {
+							status = tc.httpStatuses[len(tc.httpStatuses)-1]
+						}
+					}
+					reqIdx++
 					if status == 0 {
 						status = http.StatusOK
 					}
@@ -216,6 +269,7 @@ func TestFailVanadisChunkDetailsByPR(t *testing.T) {
 				}))
 				defer ts.Close()
 				reg = NewPostgresPRRegistry(nil, WithVanadisClient(ts.URL, ts.Client()))
+				reg.vanadisRetryDelay = 0
 			}
 
 			bID, cID, failed, err := reg.FailVanadisChunkDetailsByPR(context.Background(), tc.repo, tc.prNumber)

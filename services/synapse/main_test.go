@@ -98,6 +98,13 @@ type prCall struct {
 	jobs     []string
 }
 
+type prStatusCall struct {
+	repo     string
+	prNumber int
+	status   string
+	metadata map[string]interface{}
+}
+
 type mockPRRegistry struct {
 	mergedCalls         []prCall
 	syncCalls           []prCall
@@ -216,6 +223,11 @@ type mockPRRegistry struct {
 	recordJobStatePRNum   int
 	recordJobStateUpdated bool
 	recordJobStateErr     error
+
+	appendPRJobsCalls   []prCall
+	appendPRJobsErr     error
+	updatePRStatusCalls []prStatusCall
+	updatePRStatusErr   error
 
 	err error
 }
@@ -360,7 +372,20 @@ func (m *mockPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo strin
 	if m.advanceVanadisRes != nil {
 		return m.advanceVanadisRes, nil
 	}
+	if m.suppressVanadisRes {
+		return &VanadisAdvancementResult{Matched: true, Advanced: false}, nil
+	}
 	return &VanadisAdvancementResult{}, nil
+}
+
+func (m *mockPRRegistry) AppendPRJobs(ctx context.Context, repo string, prNumber int, jobs []string) error {
+	m.appendPRJobsCalls = append(m.appendPRJobsCalls, prCall{repo: repo, prNumber: prNumber, jobs: jobs})
+	return m.checkErr(m.appendPRJobsErr)
+}
+
+func (m *mockPRRegistry) UpdatePRStatus(ctx context.Context, repo string, prNumber int, status string, metadata map[string]interface{}) error {
+	m.updatePRStatusCalls = append(m.updatePRStatusCalls, prStatusCall{repo: repo, prNumber: prNumber, status: status, metadata: metadata})
+	return m.checkErr(m.updatePRStatusErr)
 }
 
 func (m *mockPRRegistry) ShouldSuppressVanadisDeployWake(ctx context.Context, repo string, prNumber int) (bool, error) {
@@ -1157,7 +1182,7 @@ func TestProcessHangarEvent(t *testing.T) {
 			wantPromptSubs:   []string{"Vanadis build build-final-deploy completed"},
 		},
 		{
-			name: "sync_success with expected_jobs tolerates IsFinalVanadisChunk error and advances",
+			name: "sync_success with expected_jobs IsFinalVanadisChunk error propagates",
 			evt: HangarDeployEvent{
 				Event: "sync_success", JobName: "git-sync", ExpectedJobs: []string{"eri"},
 				Repo: "azylman/aerial", CommitSHA: "sha_final_err", PRNumber: 980, TargetID: "1555405874565091380", Status: "success",
@@ -1165,10 +1190,8 @@ func TestProcessHangarEvent(t *testing.T) {
 			reg: &mockPRRegistry{
 				finalVanadisErr: errors.New("vanadis final check err"),
 			},
-			disp:             &mockOutboundDispatcher{},
-			wantPR:           980,
-			wantTargetID:     "1555405874565091380",
-			wantAdvanceCalls: 1,
+			disp:    &mockOutboundDispatcher{},
+			wantErr: true,
 		},
 	}
 
@@ -1487,13 +1510,11 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 			wantWidgets: 1,
 		},
 		{
-			name:                "dispatchDeploymentSuccessPrompt Vanadis wake suppression DB error fallback",
+			name:                "dispatchDeploymentSuccessPrompt Vanadis wake suppression DB error propagates",
 			isDeploymentSuccess: true,
 			targetID:            validSnowflake,
 			suppressVanadisErr:  errors.New("db check err"),
-			widgetErr:           errors.New("widget err"),
-			wantPrompts:         1,
-			wantWidgets:         1,
+			wantErr:             true,
 		},
 	}
 
@@ -2108,8 +2129,13 @@ func TestAdvanceVanadisChunk(t *testing.T) {
 				t.Fatalf("advanceVanadisChunk() err = %v, wantErr = %v", err, tc.wantErr)
 			}
 			if tc.useNilRegistry || tc.prNumber <= 0 {
-				if srv.isFinalVanadisChunk(ctx, "azylman/aerial", tc.prNumber) {
+				finalChunk, err := srv.isFinalVanadisChunk(ctx, "azylman/aerial", tc.prNumber)
+				if err != nil || finalChunk {
 					t.Errorf("expected isFinalVanadisChunk false for guard case")
+				}
+				vanadisPR, err := srv.isVanadisPR(ctx, "azylman/aerial", tc.prNumber)
+				if err != nil || vanadisPR {
+					t.Errorf("expected isVanadisPR false for guard case")
 				}
 				if err := srv.advanceVanadisChunkOnSync(ctx, "azylman/aerial", tc.prNumber, true); err != nil {
 					t.Errorf("expected advanceVanadisChunkOnSync nil error for guard case, got %v", err)
@@ -2865,16 +2891,18 @@ func TestSyncBuildWidget_Unit(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name          string
-		useNilServer  bool
-		useMockReg    bool
-		useInserter   bool
-		inserterErr   error
-		buildID       string
-		banner        string
-		vanadisStatus int
-		wantErr       bool
-		wantQueued    int
+		name            string
+		useNilServer    bool
+		useMockReg      bool
+		useInserter     bool
+		inserterErr     error
+		buildID         string
+		banner          string
+		vanadisStatus   int
+		vanadisStatuses []int
+		vanadisBody     string
+		wantErr         bool
+		wantQueued      int
 	}{
 		{
 			name:         "nil server returns clean nil",
@@ -2915,9 +2943,29 @@ func TestSyncBuildWidget_Unit(t *testing.T) {
 			wantErr:       false,
 		},
 		{
+			name:            "Postgres registry retries transient 502 then 200 succeeds",
+			buildID:         "build-103-retry",
+			banner:          "Chunk 1 retried",
+			vanadisStatuses: []int{http.StatusBadGateway, http.StatusOK},
+			wantErr:         false,
+		},
+		{
 			name:          "Postgres registry returns error when vanadis fails",
 			buildID:       "build-104",
 			vanadisStatus: http.StatusInternalServerError,
+			wantErr:       true,
+		},
+		{
+			name:          "Postgres registry non-transient 400 error",
+			buildID:       "build-106",
+			vanadisStatus: http.StatusBadRequest,
+			wantErr:       true,
+		},
+		{
+			name:          "Postgres registry invalid json decode error",
+			buildID:       "build-105",
+			vanadisStatus: http.StatusOK,
+			vanadisBody:   `{invalid-json`,
 			wantErr:       true,
 		},
 	}
@@ -2934,14 +2982,29 @@ func TestSyncBuildWidget_Unit(t *testing.T) {
 				return
 			}
 
+			var reqIdx int
 			tsVanadis := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path != "/chunks/sync-pr-widget" {
 					http.NotFound(w, r)
 					return
 				}
-				if tc.vanadisStatus != 0 && tc.vanadisStatus != http.StatusOK {
-					w.WriteHeader(tc.vanadisStatus)
+				status := tc.vanadisStatus
+				if len(tc.vanadisStatuses) > 0 {
+					if reqIdx < len(tc.vanadisStatuses) {
+						status = tc.vanadisStatuses[reqIdx]
+					} else {
+						status = tc.vanadisStatuses[len(tc.vanadisStatuses)-1]
+					}
+				}
+				reqIdx++
+				if status != 0 && status != http.StatusOK {
+					w.WriteHeader(status)
 					_, _ = w.Write([]byte(`{"error":"vanadis build error"}`))
+					return
+				}
+				if tc.vanadisBody != "" {
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(tc.vanadisBody))
 					return
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"matched": true, "build_id": tc.buildID})
@@ -2954,7 +3017,9 @@ func TestSyncBuildWidget_Unit(t *testing.T) {
 				reg = &mockPRRegistry{resolveBranch: "feat/mock"}
 			} else {
 				pool := &mockVanadisPgxPool{}
-				reg = NewPostgresPRRegistry(pool, WithVanadisClient(tsVanadis.URL, tsVanadis.Client()))
+				pgReg := NewPostgresPRRegistry(pool, WithVanadisClient(tsVanadis.URL, tsVanadis.Client()))
+				pgReg.vanadisRetryDelay = 0
+				reg = pgReg
 			}
 
 			srv := newTestRouter(Config{VanadisURL: tsVanadis.URL}, tsVanadis.Client(), reg, mockDisp)
@@ -3079,6 +3144,7 @@ func TestRouterServer_HandleInternalWidgetSync(t *testing.T) {
 
 			pool := &mockVanadisPgxPool{}
 			reg := NewPostgresPRRegistry(pool, WithVanadisClient(tsVanadis.URL, tsVanadis.Client()))
+			reg.vanadisRetryDelay = 0
 			disp := &mockOutboundDispatcher{}
 
 			srv := newTestRouter(Config{VanadisURL: tsVanadis.URL}, tsVanadis.Client(), reg, disp)
