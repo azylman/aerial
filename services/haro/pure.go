@@ -164,25 +164,6 @@ func validateNomad(target, eventType, normEventType string) (string, error) {
 	return target, nil
 }
 
-func validateCamera(target, eventType, normEventType string) (string, error) {
-	normTarget := strings.ToLower(strings.TrimSpace(target))
-	switch normTarget {
-	case "garage", "grill", "tub", "entryway", "nanit", "*":
-	default:
-		return "", fmt.Errorf("invalid target %q for camera: expected 'garage', 'grill', 'tub', 'entryway', 'nanit', or '*'", target)
-	}
-
-	switch normEventType {
-	case "person_arrived", "person_departed", "vehicle_arrived", "vehicle_departed",
-		"package_delivered", "package_removed", "animal_detected", "baby_awake",
-		"baby_asleep", "motion":
-	default:
-		return "", fmt.Errorf("invalid event_type %q for camera: expected 'person_arrived', 'person_departed', 'vehicle_arrived', 'vehicle_departed', 'package_delivered', 'package_removed', 'animal_detected', 'baby_awake', 'baby_asleep', or 'motion'", eventType)
-	}
-
-	return normTarget, nil
-}
-
 // FormatEventTriggerPrompt combines an optional context header with an event trigger prompt.
 func FormatEventTriggerPrompt(contextHeader, prompt string) string {
 	header := strings.TrimSpace(contextHeader)
@@ -207,8 +188,6 @@ func ValidateEventWatchSpec(source, target, eventType string, extraSources ...st
 	}
 
 	switch normSource {
-	case "camera":
-		normTarget, err = validateCamera(normTarget, eventType, normEventType)
 	case "vanadis_build":
 		normTarget, err = validateVanadisBuild(normTarget, eventType, normEventType)
 	case "vanadis_chunk":
@@ -228,7 +207,7 @@ func ValidateEventWatchSpec(source, target, eventType string, extraSources ...st
 			}
 		}
 		if !allowedExtra {
-			return "", "", "", fmt.Errorf("invalid source %q: expected 'camera', 'vanadis_build', 'vanadis_chunk', 'hangar', 'github', or 'nomad'", source)
+			return "", "", "", fmt.Errorf("invalid source %q: expected 'vanadis_build', 'vanadis_chunk', 'hangar', 'github', or 'nomad'", source)
 		}
 		if normEventType == "" {
 			return "", "", "", fmt.Errorf("event_type cannot be empty for source %q", normSource)
