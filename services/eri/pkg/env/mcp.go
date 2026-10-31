@@ -77,6 +77,9 @@ func (p *Provisioner) loadDiscordBaseMCPServers(cfg *config.Config, mergedServer
 	mergedServers["discord"] = map[string]interface{}{
 		"serverUrl": "http://discord-mcp:4001/mcp",
 	}
+	mergedServers["vanadis"] = map[string]interface{}{
+		"serverUrl": "http://vanadis.aerial/mcp",
+	}
 
 	if cfg != nil {
 		cur := cfg.Current()
