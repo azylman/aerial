@@ -55,7 +55,7 @@ func TestThrowawayTurnSink(t *testing.T) {
 	}
 
 	// Exercise ctxErr checks when both ctx.Done() and resCh/errCh are concurrently available
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		resCh := make(chan string, 1)
 		resCh <- "ready"
 		_, _ = selectContext(ctxCancel, resCh, nil, "")

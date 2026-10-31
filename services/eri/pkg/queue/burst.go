@@ -512,7 +512,7 @@ func isAllBurstHeuristicSkip(burst []db.Message) bool {
 }
 
 func populateTier1TrailingWakeInfos(burst []db.Message, wakeIdx int, wakeInfos []WakeInfo, wm string, threshold float64, botUserID string, botRoleIDs []string, classify func([]db.Message) (float64, string)) {
-	for i := 0; i < wakeIdx; i++ {
+	for i := range wakeIdx {
 		wakeInfos[i] = WakeInfo{IsWake: false, Score: 0.0, Threshold: threshold, Reason: "burst_prescan_leading"}
 	}
 	for i := wakeIdx + 1; i < len(burst); i++ {

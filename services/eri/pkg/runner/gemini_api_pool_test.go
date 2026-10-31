@@ -683,14 +683,14 @@ func TestCleanParameters_StripsDisallowedKeys(t *testing.T) {
 	// Deeply nested schema check (20 levels)
 	root := map[string]interface{}{"type": "object", "additionalProperties": false}
 	curr := root
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		child := map[string]interface{}{"type": "object", "additionalProperties": false}
 		curr["properties"] = map[string]interface{}{"nested": child}
 		curr = child
 	}
 	curr["properties"] = map[string]interface{}{"leaf": map[string]interface{}{"type": "string", "additionalProperties": false}}
 	probe := cleanParameters(root)
-	for level := 0; level < 20; level++ {
+	for level := range 20 {
 		if _, hasAddl := probe["additionalProperties"]; hasAddl {
 			t.Fatalf("level %d had additionalProperties", level)
 		}

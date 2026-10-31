@@ -257,8 +257,8 @@ func TestSyncTranscripts_Scenarios(t *testing.T) {
 				{
 					sessionID: "sess-resummarize",
 					content: func() string {
-						var stepLines []string
-						for i := 0; i <= 15; i++ {
+						stepLines := make([]string, 0, 16)
+						for i := range 16 {
 							stepLines = append(stepLines, fmt.Sprintf(`{"step_index":%d,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"Step %d"}`, i, i))
 						}
 						return strings.Join(stepLines, "\n") + "\n"
@@ -405,6 +405,7 @@ func TestSyncTranscripts_Scenarios(t *testing.T) {
 
 type mockTranscriptStore struct {
 	db.TranscriptStore
+
 	failGetSyncStates bool
 	failBatchInsert   bool
 	failUpsertSummary bool

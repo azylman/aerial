@@ -337,7 +337,7 @@ func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 	}
 
 	if tc.seedTurnCount > 0 && tc.seedIdleAge == 0 {
-		for i := 0; i < tc.seedTurnCount; i++ {
+		for range tc.seedTurnCount {
 			_, _ = incrementSessionTurnCount(store, threadID)
 		}
 	}
@@ -419,7 +419,7 @@ func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 	if tc.concurrentEnqueueCount > 0 {
 		pool.Start()
 		var wg sync.WaitGroup
-		for i := 0; i < tc.concurrentEnqueueCount; i++ {
+		for i := range tc.concurrentEnqueueCount {
 			wg.Add(1)
 			go func(idx int) {
 				defer wg.Done()
@@ -605,7 +605,7 @@ func runBurstTestCase(t *testing.T, tc burstTestCase) {
 		past := time.Now().Add(-10 * time.Second)
 		_ = os.Chtimes(sessDir, past, past)
 	}
-	for i := 0; i < tc.seedTurnCount; i++ {
+	for range tc.seedTurnCount {
 		_, _ = incrementSessionTurnCount(store, tc.channelID)
 	}
 
@@ -908,6 +908,7 @@ func (e *errQueueStore) RotateSessionID(context.Context, string, string) error {
 
 type mockDrainErrStore struct {
 	db.Store
+
 	messages []db.Message
 }
 
@@ -924,6 +925,7 @@ func (m *mockDrainErrStore) UpdateMessageStatus(context.Context, string, string,
 
 type mockClaimStore struct {
 	db.Store
+
 	claimErr error
 	claimed  bool
 }

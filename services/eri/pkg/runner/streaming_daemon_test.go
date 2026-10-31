@@ -474,7 +474,7 @@ func TestStreamingDaemon_SendConcurrency(t *testing.T) {
 	const concurrency = 20
 	var wg sync.WaitGroup
 	errCh := make(chan error, concurrency)
-	for i := 0; i < concurrency; i++ {
+	for i := range concurrency {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()

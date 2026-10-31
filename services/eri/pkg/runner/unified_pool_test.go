@@ -336,7 +336,7 @@ func createTranscriptFixture(tmpDir, sessID string, steps, turns int, bBytes, db
 	}
 	if turns > 0 {
 		var sb strings.Builder
-		for i := 0; i < turns; i++ {
+		for i := range turns {
 			fmt.Fprintf(&sb, `{"step_index": %d, "source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "Turn %d"}`+"\n", i*2, i+1)
 			fmt.Fprintf(&sb, `{"step_index": %d, "source": "MODEL", "type": "PLANNER_RESPONSE", "content": "Resp %d"}`+"\n", i*2+1, i+1)
 		}
@@ -889,7 +889,7 @@ func TestUnifiedProcessPool_MarkDirty_SingleflightBarrier(t *testing.T) {
 	if err != nil || d1.InflightCount() != 0 {
 		t.Fatalf("failed creating initial daemon: %v", err)
 	}
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		pool.MarkDirty()
 	}
 	close(spawnGate)
@@ -1616,11 +1616,11 @@ func TestUnifiedSessionLease_ThreadSafety(t *testing.T) {
 			t.Parallel()
 			lease := &unifiedSessionLease{sessionID: tc.initialID}
 			var wg sync.WaitGroup
-			for i := 0; i < tc.readers; i++ {
+			for range tc.readers {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					for j := 0; j < tc.iterations; j++ {
+					for range tc.iterations {
 						if id := lease.SessionID(); id == "" {
 							t.Errorf("expected non-empty session ID")
 						}
@@ -1628,11 +1628,11 @@ func TestUnifiedSessionLease_ThreadSafety(t *testing.T) {
 					}
 				}()
 			}
-			for i := 0; i < tc.writers; i++ {
+			for i := range tc.writers {
 				wg.Add(1)
 				go func(idx int) {
 					defer wg.Done()
-					for j := 0; j < tc.iterations; j++ {
+					for j := range tc.iterations {
 						lease.mu.Lock()
 						lease.sessionID = fmt.Sprintf("sess-%d-%d", idx, j)
 						lease.mu.Unlock()

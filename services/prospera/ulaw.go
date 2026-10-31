@@ -9,7 +9,7 @@ import (
 var muLawToPCMTable [256]int16
 
 func init() {
-	for i := 0; i < 256; i++ {
+	for i := range 256 {
 		inv := ^byte(i)
 		sign := inv & 0x80
 		exponent := (inv >> 4) & 0x07
@@ -71,7 +71,7 @@ func Resample8kTo16k(in []int16) []int16 {
 		return []int16{}
 	}
 	out := make([]int16, len(in)*2)
-	for i := 0; i < len(in); i++ {
+	for i := range in {
 		out[2*i] = in[i]
 		if i+1 < len(in) {
 			out[2*i+1] = int16((int32(in[i]) + int32(in[i+1])) / 2)
@@ -91,7 +91,7 @@ func Resample24kTo8k(in []int16) []int16 {
 		return []int16{}
 	}
 	out := make([]int16, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		c := 3*i + 1
 		if c >= 3 && c+3 < len(in) {
 			filtered := int32(in[c-3]) +
@@ -123,7 +123,7 @@ func PCM16ToLEBytes(samples []int16) []byte {
 func LEBytesToPCM16(b []byte) []int16 {
 	n := len(b) / 2
 	out := make([]int16, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		out[i] = int16(binary.LittleEndian.Uint16(b[2*i:]))
 	}
 	return out

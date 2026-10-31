@@ -117,7 +117,7 @@ func (r *Reporter) postDiscordMessage(ctx context.Context, channelID, threadID, 
 		return fmt.Errorf("reporter: marshal discord payload: %w", err)
 	}
 
-	endpoint := fmt.Sprintf("%s/discord/message", strings.TrimRight(r.cfg.BrainURL, "/"))
+	endpoint := strings.TrimRight(r.cfg.BrainURL, "/") + "/discord/message"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(data))
 	if err != nil {
 		return fmt.Errorf("reporter: new discord request: %w", err)

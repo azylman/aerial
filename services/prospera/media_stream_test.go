@@ -280,7 +280,7 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 	}
 	loudPayload := base64.StdEncoding.EncodeToString(loudUlaw)
 
-	for i := 0; i < 15; i++ {
+	for range 15 {
 		_ = twilioWS.WriteJSON(map[string]any{
 			"event":     "media",
 			"streamSid": "MZ123",
@@ -289,7 +289,7 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 			},
 		})
 	}
-	for i := 0; i < 31; i++ {
+	for range 31 {
 		_ = twilioWS.WriteJSON(map[string]any{
 			"event":     "media",
 			"streamSid": "MZ123",
@@ -686,7 +686,7 @@ func TestMediaStream_BargeInAndVoicemail(t *testing.T) {
 	})
 
 	var sawClear bool
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		_ = twilioWS.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 		_, data, err := twilioWS.ReadMessage()
 		if err != nil {
@@ -1422,7 +1422,7 @@ func TestMediaStreamSession_RecordingWAVAndManager(t *testing.T) {
 		t.Fatalf("expected active session WAV > 44 bytes, got %d", len(activeWAV))
 	}
 
-	for i := 0; i < 33; i++ {
+	for i := range 33 {
 		id := "call-cap-" + strconv.Itoa(i)
 		s := NewMediaStreamSession(MediaStreamSessionConfig{CallID: id})
 		s.recordInboundPCM([]int16{100})

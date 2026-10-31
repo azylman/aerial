@@ -293,7 +293,7 @@ func TestWorkerPool_ProgressiveCapacityBackoff(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			for i := 0; i < 20; i++ {
+			for range 20 {
 				d := calculateCapacityBackoff(tt.attempt, tt.resetDur)
 				if d < tt.minFloor || d > tt.maxCeiling {
 					t.Fatalf("backoff expected between %v and %v, got %v", tt.minFloor, tt.maxCeiling, d)

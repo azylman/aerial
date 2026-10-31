@@ -74,7 +74,7 @@ func SynthesizeDTMFMuLaw(sequence string) ([]byte, error) {
 			fLow := freqs[0]
 			fHigh := freqs[1]
 
-			for i := 0; i < toneSamples; i++ {
+			for i := range toneSamples {
 				t := float64(i) / float64(sampleRate)
 				sLow := math.Sin(twoPi * fLow * t)
 				sHigh := math.Sin(twoPi * fHigh * t)

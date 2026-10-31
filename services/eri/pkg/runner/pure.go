@@ -184,7 +184,7 @@ func isValidSkillName(name string) bool {
 	if len(name) == 0 || len(name) > 64 || isReservedSkillDir(name) || name[0] == '-' || name[0] == '_' || name[len(name)-1] == '-' || name[len(name)-1] == '_' {
 		return false
 	}
-	for i := 0; i < len(name); i++ {
+	for i := range len(name) {
 		if !isSkillNameChar(name[i]) {
 			return false
 		}
