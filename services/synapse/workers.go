@@ -235,7 +235,7 @@ type queueStatsQuerier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
-const riverQueueStatsQuery = `SELECT queue, state::text, COUNT(*), COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(created_at)))::float8, 0) FROM sidecars.river_job WHERE state IN ('available', 'running', 'retryable', 'scheduled') GROUP BY queue, state`
+const riverQueueStatsQuery = `SELECT queue, state::text, COUNT(*), COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(created_at)))::float8, 0) FROM river_job WHERE state IN ('available', 'running', 'retryable', 'scheduled') AND queue IN ('default', 'merge_conflict', 'widget_sync', 'discord_ingress', 'discord_interaction') GROUP BY queue, state`
 
 func collectRiverQueueMetrics(ctx context.Context, q queueStatsQuerier) error {
 	if q == nil {

@@ -485,6 +485,13 @@ func init() {
 	)
 
 	BuildInfo.WithLabelValues("1.0.0", runtime.Version()).Set(1)
+
+	// Pre-initialize voice TTFR series so metrics exist immediately on startup before first voice turn
+	for _, mode := range []string{"sse", "json"} {
+		for _, status := range []string{"success", "error"} {
+			VoiceTTFRDurationSeconds.WithLabelValues(mode, status)
+		}
+	}
 }
 
 // RegisterDBStats registers sql.DB connection pool stats to the dedicated registry safely once.

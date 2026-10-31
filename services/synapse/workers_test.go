@@ -1008,6 +1008,13 @@ func (m *mockQueueStatsQuerier) Query(ctx context.Context, sql string, args ...a
 }
 
 func TestCollectRiverQueueMetrics(t *testing.T) {
+	if !strings.Contains(riverQueueStatsQuery, "FROM river_job") {
+		t.Errorf("riverQueueStatsQuery should query FROM river_job, got: %s", riverQueueStatsQuery)
+	}
+	if strings.Contains(riverQueueStatsQuery, "sidecars.river_job") {
+		t.Errorf("riverQueueStatsQuery should not query sidecars.river_job, got: %s", riverQueueStatsQuery)
+	}
+
 	ctx := context.Background()
 
 	tests := []struct {
