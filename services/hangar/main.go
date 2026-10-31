@@ -716,9 +716,6 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 			}
 		}
 	}
-	if len(repos) == 0 {
-		repos = []string{"/share/aerial-config", "/share/aerial", "/share/mirrormere"}
-	}
 
 	composeDir := firstNonEmpty(ResolveRepoPath("aerial", repos), "/share/aerial")
 	configDir := firstNonEmpty(ResolveRepoPath("aerial-config", repos), "/share/aerial-config")

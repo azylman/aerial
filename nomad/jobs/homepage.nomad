@@ -67,7 +67,7 @@ EOH
         data = <<EOH
 {{ if nomadVarExists "nomad/jobs/homepage" }}
 {{ with nomadVar "nomad/jobs/homepage" }}
-# Config Hash: {{ .CONFIG_HASH }}
+# Asset Hash: {{ if .ASSET_HASH }}{{ .ASSET_HASH }}{{ end }}
 {{ if .HOMEPAGE_YAML }}{{ .HOMEPAGE_YAML }}{{ end }}
 {{ end }}
 {{ end }}

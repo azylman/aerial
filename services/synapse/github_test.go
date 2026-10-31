@@ -989,9 +989,9 @@ func TestResolveWorkflowRunImages(t *testing.T) {
 			repo:  "azylman/aerial",
 			runID: 12345,
 			want: []string{
-				"ghcr.io/azylman/aerial-brain:latest",
-				"ghcr.io/azylman/aerial-synapse:latest",
-				"ghcr.io/azylman/aerial-custom-microservice:latest",
+				"ghcr.io/azylman/brain:latest",
+				"ghcr.io/azylman/synapse:latest",
+				"ghcr.io/azylman/custom-microservice:latest",
 			},
 		},
 		{
@@ -999,9 +999,9 @@ func TestResolveWorkflowRunImages(t *testing.T) {
 			repo:  "aerial",
 			runID: 12345,
 			want: []string{
-				"ghcr.io/azylman/aerial-brain:latest",
-				"ghcr.io/azylman/aerial-synapse:latest",
-				"ghcr.io/azylman/aerial-custom-microservice:latest",
+				"ghcr.io/azylman/brain:latest",
+				"ghcr.io/azylman/synapse:latest",
+				"ghcr.io/azylman/custom-microservice:latest",
 			},
 		},
 		{
@@ -1009,8 +1009,8 @@ func TestResolveWorkflowRunImages(t *testing.T) {
 			repo:  "azylman/aerial-sidecars",
 			runID: 54321,
 			want: []string{
-				"ghcr.io/azylman/aerial-sidecar-banana:latest",
-				"ghcr.io/azylman/aerial-sidecar-voice-cuda:latest",
+				"ghcr.io/azylman/banana:latest",
+				"ghcr.io/azylman/voice-cuda:latest",
 			},
 		},
 		{
@@ -1233,7 +1233,7 @@ func TestDispatchWorkflowRunImages(t *testing.T) {
 					imageReadyErr: tc.imageReadyErr,
 					widgetErr:     tc.widgetErr,
 					matchedJobs: map[string][]string{
-						"ghcr.io/azylman/aerial-brain:latest": {"brain"},
+						"ghcr.io/azylman/brain:latest": {"brain"},
 					},
 				}
 			}
@@ -1787,9 +1787,9 @@ func TestFormatCIChecksActiveStep_Unit(t *testing.T) {
 			want:         "`eri`: 🔄 starting\n`haro`: 🔄 starting",
 		},
 		{
-			name:         "merged with buildJobRegex service matches in ci_checks and proxy normalization",
+			name:         "merged with buildJobRegex service matches in ci_checks",
 			prStatus:     "merged",
-			ciChecksJSON: `{"Build & Push Images (proxy)":"passed","Build & Push Images (eri)":"in_progress"}`,
+			ciChecksJSON: `{"Build & Push Images (mesh-proxy)":"passed","Build & Push Images (eri)":"in_progress"}`,
 			want:         "`eri`: ⏳ building image\n`mesh-proxy`: 🔄 starting",
 		},
 		{

@@ -640,30 +640,22 @@ func SortMatchedJobsHangarLast(matches []MatchedNomadJob) {
 	})
 }
 
-func homepageInChangedList(changed []string) bool {
-	targetClean := "services/homepage/homepage.yaml"
-	for _, f := range changed {
-		clean := filepath.Clean(filepath.ToSlash(f))
-		clean = strings.TrimPrefix(clean, "/")
-		if clean == targetClean || clean == "homepage" || strings.HasPrefix(clean, "homepage/") {
-			return true
+// ResolveCatalogImageRef translates a workflow service reference (e.g. ghcr.io/owner/eri:latest)
+// to its published catalog image_name (e.g. ghcr.io/owner/aerial-eri:latest) using .github/workflows/*.yml.
+func ResolveCatalogImageRef(imgRef string, candidateRepos []string) string {
+	trimmed := strings.TrimSpace(imgRef)
+	stripped := stripImageTag(trimmed)
+	base := strings.ToLower(path.Base(stripped))
+	if base == "" || base == "." || base == "/" {
+		return trimmed
+	}
+	for _, r := range candidateRepos {
+		_, catalog := DiscoverRepoWorkflowRules(r)
+		if imgName, ok := catalog[base]; ok && imgName != "" && !strings.EqualFold(imgName, base) {
+			return path.Dir(stripped) + "/" + imgName + trimmed[len(stripped):]
 		}
 	}
-	return false
-}
-
-// Invariant: homepage changes in aerial-config include both services/homepage/homepage.yaml (serviceConfig)
-// and user-customized widgets/settings in homepage/ (asset bundle). Both must resolve to "homepage"
-// in ExpectedJobs so Synapse expects the deployment when either config or widgets change.
-func resolveAerialConfigExpectedJobs(changedFiles []string, serviceConfigs []ServiceConfigMapping, add func(string)) {
-	if homepageInChangedList(changedFiles) {
-		add("homepage")
-	}
-	for _, m := range serviceConfigs {
-		if fileInChangedList(m.RelPath, changedFiles) {
-			add(strings.TrimPrefix(strings.TrimSpace(m.NomadVar), "nomad/jobs/"))
-		}
-	}
+	return trimmed
 }
 
 func resolveContainerWorkflowExpectedJobs(repoPath string, changedFiles, candidateRepos []string, add func(string)) {
@@ -690,7 +682,7 @@ func resolveContainerWorkflowExpectedJobs(repoPath string, changedFiles, candida
 
 // ResolveExpectedDeployJobs computes the deduplicated, deterministically ordered list of Nomad jobs
 // expected to deploy for a git push across all 4 triggers (.nomad specs, TriggerJob asset bundles,
-// aerial-config Nomad variable mappings, and container build changes).
+// service config Nomad variable mappings, and container build changes).
 func ResolveExpectedDeployJobs(
 	repoPath string,
 	changedFiles []string,
@@ -699,22 +691,10 @@ func ResolveExpectedDeployJobs(
 	candidateRepos []string,
 	assetBundles ...[]AssetBundleConfig,
 ) []string {
-	cleanRepo := filepath.ToSlash(strings.ToLower(filepath.Clean(repoPath)))
-
 	var bundles []AssetBundleConfig
 	if len(assetBundles) > 0 {
 		bundles = assetBundles[0]
 	}
-
-	var configDir string
-	for _, b := range bundles {
-		if b.Name == "docs" {
-			if contentDir, ok := b.Sources["content"]; ok {
-				configDir = filepath.Dir(filepath.Clean(contentDir))
-			}
-		}
-	}
-	isAerialConfig := strings.Contains(cleanRepo, "aerial-config") || (configDir != "" && filepath.Clean(repoPath) == filepath.Clean(configDir))
 
 	seen := make(map[string]struct{})
 	var jobs []string
@@ -744,12 +724,27 @@ func ResolveExpectedDeployJobs(
 		}
 	}
 
-	// 3. aerial-config Nomad variable mappings
-	if isAerialConfig {
-		resolveAerialConfigExpectedJobs(changedFiles, serviceConfigs, add)
+	// 3. Service config Nomad variable mappings & associated asset bundles.
+	// Only bundles whose Nomad variables are mapped in serviceConfigs trigger deployments;
+	// unmapped bundles (e.g. docs, grafana) update variables quietly without restarting jobs.
+	if len(serviceConfigs) > 0 {
+		mappedVars := make(map[string]bool, len(serviceConfigs))
+		for _, m := range serviceConfigs {
+			cleanVar := strings.TrimSpace(m.NomadVar)
+			mappedVars[cleanVar] = true
+			if fileInChangedList(m.RelPath, changedFiles) {
+				add(strings.TrimPrefix(cleanVar, "nomad/jobs/"))
+			}
+		}
+		for _, bundle := range bundles {
+			cleanVar := strings.TrimSpace(bundle.NomadVar)
+			if cleanVar != "" && mappedVars[cleanVar] && AssetBundleMatchesRepoChanges(bundle, repoPath, changedFiles) {
+				add(strings.TrimPrefix(cleanVar, "nomad/jobs/"))
+			}
+		}
 	}
 
-	// 4. Container build changes across repositories (aerial, aerial-sidecars, mirrormere)
+	// 4. Container build changes across repositories
 	resolveContainerWorkflowExpectedJobs(repoPath, changedFiles, candidateRepos, add)
 
 	if len(jobs) == 0 {

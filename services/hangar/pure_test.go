@@ -1122,21 +1122,24 @@ func TestImageSourceRepo_TableDriven(t *testing.T) {
 	candidateRepos := []string{aerialDir, sidecarsDir, mirrormereDir}
 
 	tests := []struct {
-		name     string
-		imageRef string
-		expected string
+		name           string
+		imageRef       string
+		expected       string
+		wantCatalogRef string
 	}{
-		{"core aerial synapse", "ghcr.io/azylman/aerial-synapse:latest", "azylman/aerial"},
-		{"core aerial infisical-mcp", "ghcr.io/azylman/aerial-infisical-mcp:latest", "azylman/aerial"},
-		{"core aerial eri", "ghcr.io/azylman/aerial-eri:latest", "azylman/aerial"},
-		{"mirrormere core", "ghcr.io/azylman/mirrormere:latest", "azylman/mirrormere"},
-		{"mirrormere ear", "ghcr.io/azylman/mirrormere-ear:latest", "azylman/mirrormere"},
-		{"sidecar migrator", "ghcr.io/azylman/aerial-sidecar-migrator:latest", "azylman/aerial-sidecars"},
-		{"voice sidecar", "ghcr.io/azylman/aerial-sidecar-vision:latest", "azylman/aerial-sidecars"},
-		{"third party go2rtc", "alexxit/go2rtc:1.9.8", ""},
-		{"third party redis", "redis:7-alpine", ""},
-		{"empty string", "", ""},
-		{"azylman other image", "ghcr.io/azylman/other-tool:latest", ""},
+		{"core aerial synapse", "ghcr.io/azylman/aerial-synapse:latest", "azylman/aerial", "ghcr.io/azylman/aerial-synapse:latest"},
+		{"core aerial infisical-mcp", "ghcr.io/azylman/aerial-infisical-mcp:latest", "azylman/aerial", "ghcr.io/azylman/aerial-infisical-mcp:latest"},
+		{"core aerial eri", "ghcr.io/azylman/aerial-eri:latest", "azylman/aerial", "ghcr.io/azylman/aerial-eri:latest"},
+		{"core service key eri translates to catalog image", "ghcr.io/azylman/eri:latest", "", "ghcr.io/azylman/aerial-eri:latest"},
+		{"mirrormere core", "ghcr.io/azylman/mirrormere:latest", "azylman/mirrormere", "ghcr.io/azylman/mirrormere:latest"},
+		{"mirrormere ear", "ghcr.io/azylman/mirrormere-ear:latest", "azylman/mirrormere", "ghcr.io/azylman/mirrormere-ear:latest"},
+		{"sidecar migrator", "ghcr.io/azylman/aerial-sidecar-migrator:latest", "azylman/aerial-sidecars", "ghcr.io/azylman/aerial-sidecar-migrator:latest"},
+		{"voice sidecar", "ghcr.io/azylman/aerial-sidecar-vision:latest", "azylman/aerial-sidecars", "ghcr.io/azylman/aerial-sidecar-vision:latest"},
+		{"sidecar service key vision translates to catalog image", "ghcr.io/azylman/vision:latest", "", "ghcr.io/azylman/aerial-sidecar-vision:latest"},
+		{"third party go2rtc", "alexxit/go2rtc:1.9.8", "", "alexxit/go2rtc:1.9.8"},
+		{"third party redis", "redis:7-alpine", "", "redis:7-alpine"},
+		{"empty string", "", "", ""},
+		{"azylman other image", "ghcr.io/azylman/other-tool:latest", "", "ghcr.io/azylman/other-tool:latest"},
 	}
 
 	for _, tt := range tests {
@@ -1144,6 +1147,9 @@ func TestImageSourceRepo_TableDriven(t *testing.T) {
 			got := ResolveImageSourceRepo(tt.imageRef, candidateRepos)
 			if got != tt.expected {
 				t.Errorf("ResolveImageSourceRepo(%q) = %q, want %q", tt.imageRef, got, tt.expected)
+			}
+			if gotRef := ResolveCatalogImageRef(tt.imageRef, candidateRepos); gotRef != tt.wantCatalogRef {
+				t.Errorf("ResolveCatalogImageRef(%q) = %q, want %q", tt.imageRef, gotRef, tt.wantCatalogRef)
 			}
 		})
 	}
@@ -1566,6 +1572,13 @@ func TestResolveExpectedDeployJobs_TableDriven(t *testing.T) {
 			nomadChanges:   []NomadFileChange{{Path: "jobs/hangar.nomad", Action: "apply", JobName: "hangar"}},
 			serviceConfigs: serviceMappings,
 			want:           []string{"eri", "homepage", "voice", "hangar"},
+		},
+		{
+			name:           "asset bundle change without mapped service config does not expect deploy job",
+			repoPath:       configDir,
+			changedFiles:   []string{"docs/index.html", "services/grafana/dashboards/overview.json"},
+			serviceConfigs: serviceMappings,
+			want:           nil,
 		},
 		{
 			name:           "container build changes across repoPath and candidateRepos with hangar sorted last",

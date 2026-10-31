@@ -425,13 +425,21 @@ func isNomadJobTypeChangeError(output string) bool {
 	return strings.Contains(strings.ToLower(output), "cannot update job from type")
 }
 
+func isBatchNomadRun(runArgs []string) bool {
+	if len(runArgs) < 3 || runArgs[0] != "job" || runArgs[1] != "run" {
+		return false
+	}
+	raw, err := os.ReadFile(runArgs[len(runArgs)-1])
+	return err == nil && strings.Contains(string(raw), `"batch"`)
+}
+
 func (d *SyncDaemon) runNomadJobWithEvents(ctx context.Context, baseEvt HangarDeployEvent, runArgs ...string) (out []byte, sanitizedCombined string, err error) {
 	baseEvt.Event = "deploy_started"
 	baseEvt.Status = "started"
 	baseEvt.Timestamp = time.Now().UTC()
 	d.DispatchDeployEvent(baseEvt)
 
-	if baseEvt.JobName == "db-migrate" {
+	if baseEvt.JobName != "" && isBatchNomadRun(runArgs) {
 		if stopOut, stopErrBytes, stopErr := d.getNomadExecutor()(ctx, "job", "stop", "-purge", baseEvt.JobName); stopErr != nil {
 			log.Printf("[Hangar:Nomad] Notice: pre-run purge of %s: %s (%v)", baseEvt.JobName, SanitizeLog(strings.TrimSpace(string(append(stopOut, stopErrBytes...)))), stopErr)
 		}

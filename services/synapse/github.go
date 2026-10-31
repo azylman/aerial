@@ -569,11 +569,8 @@ func isRoboRevCheck(checkName string) bool {
 }
 
 func isGateAggregatorCheck(checkName string) bool {
-	trimmed := strings.TrimSpace(checkName)
-	return strings.EqualFold(trimmed, "CI Gate") ||
-		strings.EqualFold(trimmed, "Container Builds Gate") ||
-		strings.EqualFold(trimmed, "Sidecar Builds Gate") ||
-		strings.EqualFold(trimmed, "Configuration Gate")
+	lower := strings.ToLower(strings.TrimSpace(checkName))
+	return lower == "ci gate" || strings.HasSuffix(lower, " gate")
 }
 
 func classifyCheckState(status, conclusion string) string {
@@ -713,9 +710,6 @@ func analyzeBuildChecks(checks map[string]string) (checkJobs []string, passedBui
 		m := buildJobRegex.FindStringSubmatch(checkName)
 		if len(m) >= 2 {
 			svc := strings.TrimSpace(m[1])
-			if strings.EqualFold(svc, "proxy") {
-				svc = "mesh-proxy"
-			}
 			if svc != "" {
 				matchedServices[svc] = struct{}{}
 				if s == "passed" {
@@ -1309,7 +1303,6 @@ func (s *RouterServer) resolveWorkflowRunImages(ctx context.Context, repo string
 		owner = strings.ToLower(parts[0])
 	}
 
-	cleanRepo := strings.ToLower(repo)
 	var rawImages []string
 	for _, job := range jobsResp.Jobs {
 		if job.Status != "completed" || job.Conclusion != "success" || !hasExecutedBuildStep(job.Steps) {
@@ -1320,14 +1313,7 @@ func (s *RouterServer) resolveWorkflowRunImages(ctx context.Context, repo string
 			continue
 		}
 		service := strings.TrimSpace(m[1])
-		switch {
-		case strings.HasSuffix(cleanRepo, "aerial-sidecars") || strings.Contains(cleanRepo, "sidecar"):
-			rawImages = append(rawImages, fmt.Sprintf("ghcr.io/%s/aerial-sidecar-%s:latest", owner, service))
-		case strings.HasSuffix(cleanRepo, "mirrormere") || strings.Contains(cleanRepo, "mirrormere"):
-			rawImages = append(rawImages, fmt.Sprintf("ghcr.io/%s/%s:latest", owner, service))
-		default:
-			rawImages = append(rawImages, fmt.Sprintf("ghcr.io/%s/aerial-%s:latest", owner, service))
-		}
+		rawImages = append(rawImages, fmt.Sprintf("ghcr.io/%s/%s:latest", owner, service))
 	}
 	return dedupeTrimmedStrings(rawImages), nil
 }

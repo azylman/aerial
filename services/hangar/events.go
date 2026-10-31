@@ -334,11 +334,11 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 		errNomad = nil
 	}
 
-	configDir := d.configDir
-	if configDir == "" {
-		configDir = repoPath
+	var svcConfigs []ServiceConfigMapping
+	if isConfigRepo {
+		svcConfigs = d.GetServiceConfigMappings(repoPath)
 	}
-	expectedJobs := ResolveExpectedDeployJobs(repoPath, changedFiles, nomadChanges, d.GetServiceConfigMappings(configDir), d.candidateJobRepos(), bundleConfigs)
+	expectedJobs := ResolveExpectedDeployJobs(repoPath, changedFiles, nomadChanges, svcConfigs, d.candidateJobRepos(), bundleConfigs)
 	resp.ExpectedJobs = expectedJobs
 	sc.ExpectedJobs = expectedJobs
 
@@ -415,7 +415,8 @@ func (d *SyncDaemon) findAllNomadJobsByImage(imgRef string) []MatchedNomadJob {
 
 // ExecuteImageReadyEvent processes an incoming image ready event by deploying matching Nomad jobs.
 func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyEventRequest) (ImageReadyEventResponse, int) {
-	imgRef := strings.TrimSpace(req.Image)
+	imgRef := ResolveCatalogImageRef(req.Image, d.candidateJobRepos())
+	req.Image = imgRef
 	if imgRef == "" {
 		return ImageReadyEventResponse{
 			Status:  "error",
@@ -577,7 +578,8 @@ func (d *SyncDaemon) applyImageReadyToJob(ctx context.Context, job MatchedNomadJ
 // EnqueueImageReadyEvent validates an incoming image ready notification, records all matching
 // Nomad jobs into the pending rollout batch, signals the debouncer worker, and returns HTTP 202 Accepted immediately.
 func (d *SyncDaemon) EnqueueImageReadyEvent(req ImageReadyEventRequest) (ImageReadyEventResponse, int) {
-	imgRef := strings.TrimSpace(req.Image)
+	imgRef := ResolveCatalogImageRef(req.Image, d.candidateJobRepos())
+	req.Image = imgRef
 	if imgRef == "" {
 		return ImageReadyEventResponse{
 			Status:  "error",
