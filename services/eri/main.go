@@ -593,7 +593,7 @@ func newAmbientContextResolver(cfg *config.Config) func(ctx context.Context, amb
 	}
 }
 
-func connectAndRecoverDiscordFunnel(
+func setupDiscordFunnel(
 	ctx context.Context,
 	cfg *config.Config,
 	store db.Store,
@@ -608,7 +608,6 @@ func connectAndRecoverDiscordFunnel(
 			return discord.DeliverStatusWidget(dgSession, req, time.Now())
 		})
 	}
-	queue.RecoverInterrupted(store, pool)
 	cleanup := func() {
 		log.Printf("Stopping worker pool...")
 		if pool != nil {
@@ -622,6 +621,62 @@ func connectAndRecoverDiscordFunnel(
 		}
 	}
 	return dgSession, cleanup
+}
+
+func startLeaderHandoff(
+	ctx context.Context,
+	store db.Store,
+	pool *queue.WorkerPool,
+	allPools []runner.AgentPool,
+	ephemeralPool interface {
+		EphemeralLLMFunc(string) runner.LLMFunc
+	},
+	cfg *config.Config,
+	cur *config.ConfigData,
+) (<-chan error, func()) {
+	leaderCtx, cancelLeader := context.WithCancel(ctx)
+	leaderDone := make(chan struct{})
+	errCh := make(chan error, 1)
+	var releaseMu sync.Mutex
+	var releaseFn func()
+
+	go func() {
+		defer close(leaderDone)
+		if store != nil {
+			rel, err := store.AcquireLeaderLock(leaderCtx)
+			if err != nil {
+				if leaderCtx.Err() == nil {
+					errCh <- fmt.Errorf("failed to acquire leader lock: %w", err)
+				}
+				return
+			}
+			releaseMu.Lock()
+			releaseFn = rel
+			releaseMu.Unlock()
+		}
+		if leaderCtx.Err() != nil {
+			return
+		}
+		queue.RecoverInterrupted(store, pool)
+		PrewarmProcessPoolsSequentially(leaderCtx, allPools...)
+		var rawLLM func(context.Context, string, string) (string, error)
+		if ephemeralPool != nil {
+			rawLLM = ephemeralPool.EphemeralLLMFunc("ephemeral:summarizer")
+		}
+		syncLLM := buildSyncLLM(rawLLM, cur.LowEffortModel, cur.Model)
+		transcript.StartTranscriptSync(leaderCtx, store, cfg, "", syncLLM, 5*time.Minute)
+	}()
+
+	return errCh, func() {
+		cancelLeader()
+		<-leaderDone
+		releaseMu.Lock()
+		rel := releaseFn
+		releaseMu.Unlock()
+		if rel != nil {
+			rel()
+		}
+	}
 }
 
 func startSIGHUPReloadLoop(ctx context.Context, appHupChan <-chan os.Signal, reloadConfig func(string)) func() {
@@ -663,7 +718,7 @@ func startSIGHUPReloadLoop(ctx context.Context, appHupChan <-chan os.Signal, rel
 	}
 }
 
-func serveBrainHTTP(ctx context.Context, ln net.Listener, mux http.Handler, model string) error {
+func serveBrainHTTP(ctx context.Context, ln net.Listener, mux http.Handler, model string, asyncErrCh ...<-chan error) error {
 	srv := &http.Server{
 		Handler: metricsMiddleware(mux),
 	}
@@ -680,6 +735,11 @@ func serveBrainHTTP(ctx context.Context, ln net.Listener, mux http.Handler, mode
 		}
 	}()
 
+	var leaderErrCh <-chan error
+	if len(asyncErrCh) > 0 {
+		leaderErrCh = asyncErrCh[0]
+	}
+
 	select {
 	case <-ctx.Done():
 		log.Println("Shutting down Aerial Brain gracefully...")
@@ -692,6 +752,10 @@ func serveBrainHTTP(ctx context.Context, ln net.Listener, mux http.Handler, mode
 		return nil
 	case err := <-errChan:
 		return err
+	case err := <-leaderErrCh:
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		return errors.Join(err, srv.Shutdown(shutdownCtx))
 	}
 }
 
@@ -748,7 +812,6 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	discordPools, ephemeralPool, voicePool, allPools, poolEnv, ephemeralHome := buildBrainProcessPools(cfg, cur, sessionMgr, appOpts.processSpawner)
 	defer closeAllBrainPools(allPools)
 
-	PrewarmProcessPoolsSequentially(ctx, allPools...)
 	metrics.StartUsagePoller(ctx, 10*time.Minute, metrics.DefaultUsageRunner(cur.AgyBin, ephemeralHome, poolEnv, testing.Testing()))
 
 	cls := classifier.New(cfg, classifier.WithProcessPool(ephemeralPool))
@@ -764,9 +827,10 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		AmbientResolver:  ambientResolver,
 		HaroURL:          os.Getenv("HARO_URL"),
 	})
+	pool.HoldUntilLeader()
 	pool.Start()
 
-	dgSession, cleanupFunnel := connectAndRecoverDiscordFunnel(ctx, cfg, store, pool, cur.DiscordToken)
+	dgSession, cleanupFunnel := setupDiscordFunnel(ctx, cfg, store, pool, cur.DiscordToken)
 	defer cleanupFunnel()
 
 	var reloadOpts []ReloadOption
@@ -779,8 +843,6 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	stopHup := startSIGHUPReloadLoop(ctx, appOpts.hupChan, reloadConfig)
 	defer stopHup()
 
-	syncLLM := buildSyncLLM(ephemeralPool.EphemeralLLMFunc("ephemeral:summarizer"), cur.LowEffortModel, cur.Model)
-	transcript.StartTranscriptSync(ctx, store, cfg, "", syncLLM, 5*time.Minute)
 	txEmbedder := transcript.NewEmbedder(cfg, sessionMgr.Roots()...)
 	var embedder transcript.EmbedderFunc
 	if txEmbedder != nil {
@@ -801,7 +863,13 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	return serveBrainHTTP(ctx, ln, mux, cur.Model)
+	// Leadership release must execute first on shutdown (via LIFO defer) to cancel handoff,
+	// await worker promotion teardown, and release the PostgreSQL advisory lock before
+	// worker pools and process pools are stopped.
+	leaderErrCh, releaseLeader := startLeaderHandoff(ctx, store, pool, allPools, ephemeralPool, cfg, cur)
+	defer releaseLeader()
+
+	return serveBrainHTTP(ctx, ln, mux, cur.Model, leaderErrCh)
 }
 
 func main() {

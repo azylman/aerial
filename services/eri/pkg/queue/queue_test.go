@@ -51,15 +51,6 @@ func TestWorkerPool_ConfigInjection(t *testing.T) {
 	if pool == nil || pool.appCfg != appCfg || pool.appCfg.Current().Model != "initial-model" {
 		t.Fatalf("unexpected pool config injection: %+v", pool)
 	}
-	// Drain timeout defaults and custom overrides
-	poolDef := NewWorkerPool(WorkerPoolConfig{})
-	if poolDef.cfg.DrainTimeout != 10*time.Second {
-		t.Errorf("expected default DrainTimeout 10s, got %v", poolDef.cfg.DrainTimeout)
-	}
-	poolCustom := NewWorkerPool(WorkerPoolConfig{DrainTimeout: 250 * time.Millisecond})
-	if poolCustom.cfg.DrainTimeout != 250*time.Millisecond {
-		t.Errorf("expected custom DrainTimeout 250ms, got %v", poolCustom.cfg.DrainTimeout)
-	}
 }
 
 func mockJSONResponse(convID, responseText string) string {
@@ -641,13 +632,12 @@ func TestWorkerPoolShutdown_PreservationMatrix(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name, runnerResponse, wantStatusAfterStop, wantDelivered string
-		drainTimeout                                             time.Duration
 		blockRunnerOnCtx, blockClassifierCtx, verifyRecovery     bool
 		msg                                                      db.Message
 	}{
-		{name: "PreservesProcessingMessageWithoutApology", drainTimeout: 5 * time.Millisecond, blockRunnerOnCtx: true, verifyRecovery: true, msg: db.Message{ID: "msg-shutdown-1", ThreadID: "thread-shutdown-1", GuildID: "guild-shutdown-1", AuthorID: "user-shutdown-1", AuthorName: "User", Content: "Hello during shutdown"}, wantStatusAfterStop: db.StatusPending},
+		{name: "PreservesProcessingMessageWithoutApology", blockRunnerOnCtx: true, verifyRecovery: true, msg: db.Message{ID: "msg-shutdown-1", ThreadID: "thread-shutdown-1", GuildID: "guild-shutdown-1", AuthorID: "user-shutdown-1", AuthorName: "User", Content: "Hello during shutdown"}, wantStatusAfterStop: db.StatusProcessing},
 		{name: "RunnerSuccessPreserved", runnerResponse: "Finished just before pool stopped", msg: db.Message{ID: "msg-success-shutdown-1", ThreadID: "thread-success-shutdown-1", GuildID: "guild-success-shutdown-1", AuthorID: "user-1", AuthorName: "User", Content: "Complete fast"}, wantStatusAfterStop: db.StatusCompleted, wantDelivered: "Finished just before pool stopped"},
-		{name: "AmbientClassifierCancellationPreserved", drainTimeout: 5 * time.Millisecond, blockClassifierCtx: true, msg: db.Message{ID: "msg-ambient-shutdown-1", ThreadID: "channel-shutdown-1", GuildID: "channel-shutdown-1", AuthorID: "user-1", AuthorName: "User", Content: "hey did anyone see that movie?"}, wantStatusAfterStop: db.StatusPending},
+		{name: "AmbientClassifierCancellationPreserved", blockClassifierCtx: true, verifyRecovery: true, msg: db.Message{ID: "msg-ambient-shutdown-1", ThreadID: "channel-shutdown-1", GuildID: "channel-shutdown-1", AuthorID: "user-1", AuthorName: "User", Content: "<@aerial> hey did anyone see that movie?"}, wantStatusAfterStop: db.StatusProcessing},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -655,7 +645,7 @@ func TestWorkerPoolShutdown_PreservationMatrix(t *testing.T) {
 			store := setupTestStore(t)
 			var mu sync.Mutex
 			var deliveredMessages []string
-			stageStarted, releaseRunner := make(chan struct{}), make(chan struct{})
+			stageStarted, completedCh := make(chan struct{}), make(chan struct{})
 			var once sync.Once
 
 			var cls *classifier.Classifier
@@ -669,14 +659,13 @@ func TestWorkerPoolShutdown_PreservationMatrix(t *testing.T) {
 			}
 
 			cfg := WorkerPoolConfig{
-				Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 3, DrainTimeout: tc.drainTimeout, Classifier: cls,
+				Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 3, Classifier: cls,
 				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 					once.Do(func() { close(stageStarted) })
 					if tc.blockRunnerOnCtx {
 						<-ctx.Done()
 						return "", "process killed by signal", -1, ctx.Err()
 					}
-					<-releaseRunner
 					return mockJSONResponse("c4444444-2222-3333-4444-555555555555", tc.runnerResponse), "", 0, nil
 				},
 				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
@@ -686,11 +675,19 @@ func TestWorkerPoolShutdown_PreservationMatrix(t *testing.T) {
 					return nil
 				},
 				TypingFunc: noopTyping,
+				OnMessageCompleted: func(m db.Message, finalStatus string) {
+					select {
+					case <-completedCh:
+					default:
+						close(completedCh)
+					}
+				},
 			}
 			if tc.blockClassifierCtx {
 				cfg.ResolveChannelPolicy = func(channelID, channelName string) config.ChannelPolicy {
 					return config.ChannelPolicy{Mode: "channel", AmbientWakeThreshold: ptrFloat(0.75)}
 				}
+				tc.msg.Content = "hey did anyone see that movie?"
 			}
 
 			pool := NewWorkerPool(cfg)
@@ -703,13 +700,10 @@ func TestWorkerPoolShutdown_PreservationMatrix(t *testing.T) {
 			pool.Enqueue(msg)
 
 			waitForCompletion(t, stageStarted, 3*time.Second, "stage started")
-			stopDone := make(chan struct{})
-			go func() {
-				pool.Stop()
-				close(stopDone)
-			}()
-			close(releaseRunner)
-			waitForCompletion(t, stopDone, 5*time.Second, "pool stop")
+			if !tc.blockRunnerOnCtx && !tc.blockClassifierCtx {
+				waitForCompletion(t, completedCh, 3*time.Second, "completed before stop")
+			}
+			pool.Stop()
 
 			mu.Lock()
 			if tc.wantDelivered == "" && len(deliveredMessages) > 0 {
@@ -754,63 +748,113 @@ func TestWorkerPoolShutdown_PreservationMatrix(t *testing.T) {
 				mu.Unlock()
 
 				msgFinal, err := getMessage(store, msg.ID)
-				if err != nil || msgFinal == nil || msgFinal.Status != db.StatusCompleted || msgFinal.RestartCount != 0 || msgFinal.RetryCount != 0 {
-					t.Errorf("final msg = %+v, want COMPLETED with 0 restarts/retries", msgFinal)
+				if err != nil || msgFinal == nil || msgFinal.Status != db.StatusCompleted || msgFinal.RestartCount != 1 || msgFinal.RetryCount != 0 {
+					t.Errorf("final msg = %+v, want COMPLETED with 1 restart and 0 retries", msgFinal)
 				}
 			}
 		})
 	}
 }
 
-func TestWorkerPool_SweepInterruptedProcessingEntries_Isolation(t *testing.T) {
+func waitPoolIdle(t *testing.T, pool *WorkerPool, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		pool.mu.Lock()
+		busy := false
+		for _, state := range pool.threadChs {
+			if state != nil && (state.inFlight || len(state.ch) > 0 || state.activeEnqueuers > 0) {
+				busy = true
+				break
+			}
+		}
+		pool.mu.Unlock()
+		if !busy {
+			return
+		}
+		runtime.Gosched()
+	}
+	t.Fatalf("timed out waiting for worker pool to become idle")
+}
+
+func TestWorkerPool_HoldUntilLeaderAndRecovery_Isolation(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
 	ctx := context.Background()
+	now := time.Now().UTC()
 
-	// Insert messages
-	claimedMsg := db.Message{ID: "msg-claimed", ThreadID: "th-1", Status: db.StatusProcessing, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
-	siblingMsg := db.Message{ID: "msg-sibling", ThreadID: "th-2", Status: db.StatusProcessing, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
-	if err := insertMessage(store, claimedMsg); err != nil {
-		t.Fatalf("insert claimedMsg: %v", err)
+	orphanMsg := db.Message{ID: "msg-orphan", ThreadID: "th-1", Content: "orphan msg", Status: db.StatusProcessing, CreatedAt: now.Add(-10 * time.Second), UpdatedAt: now.Add(-10 * time.Second)}
+	heldMsg := db.Message{ID: "msg-held", ThreadID: "th-2", Content: "held canary msg", Status: db.StatusPending, CreatedAt: now, UpdatedAt: now}
+	if err := insertMessage(store, orphanMsg); err != nil {
+		t.Fatalf("insert orphanMsg: %v", err)
 	}
-	if err := insertMessage(store, siblingMsg); err != nil {
-		t.Fatalf("insert siblingMsg: %v", err)
-	}
-
-	// Insert dispatches
-	claimedDisp := db.Dispatch{ID: "disp-claimed", Prompt: "p1", Status: db.StatusProcessing, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
-	siblingDisp := db.Dispatch{ID: "disp-sibling", Prompt: "p2", Status: db.StatusProcessing, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
-	if err := store.InsertDispatch(ctx, claimedDisp); err != nil {
-		t.Fatalf("insert claimedDisp: %v", err)
-	}
-	if err := store.InsertDispatch(ctx, siblingDisp); err != nil {
-		t.Fatalf("insert siblingDisp: %v", err)
+	if err := insertMessage(store, heldMsg); err != nil {
+		t.Fatalf("insert heldMsg: %v", err)
 	}
 
-	pool := NewWorkerPool(WorkerPoolConfig{Store: store})
-	pool.claimedMessages.Store(claimedMsg.ID, struct{}{})
-	pool.claimedDispatches.Store(claimedDisp.ID, struct{}{})
-
-	pool.sweepInterruptedProcessingEntries(ctx, store)
-
-	// Verify messages
-	gotClaimedMsg, err := getMessage(store, claimedMsg.ID)
-	if err != nil || gotClaimedMsg.Status != db.StatusPending {
-		t.Errorf("claimedMsg status = %v, want %v", gotClaimedMsg.Status, db.StatusPending)
+	orphanDisp := db.Dispatch{ID: "disp-orphan", Source: "vanadis", Prompt: "p1", Status: db.StatusProcessing, CreatedAt: now.Add(-45 * time.Second), UpdatedAt: now.Add(-45 * time.Second), RestartCount: DefaultMaxRestarts}
+	heldDisp := db.Dispatch{ID: "disp-held", Source: "heartbeat", Prompt: "p2", Status: db.StatusPending, CreatedAt: now, UpdatedAt: now}
+	if err := store.InsertDispatch(ctx, orphanDisp); err != nil {
+		t.Fatalf("insert orphanDisp: %v", err)
 	}
-	gotSiblingMsg, err := getMessage(store, siblingMsg.ID)
-	if err != nil || gotSiblingMsg.Status != db.StatusProcessing {
-		t.Errorf("siblingMsg status = %v, want %v", gotSiblingMsg.Status, db.StatusProcessing)
+	if err := store.InsertDispatch(ctx, heldDisp); err != nil {
+		t.Fatalf("insert heldDisp: %v", err)
 	}
 
-	// Verify dispatches
-	gotClaimedDisp, err := store.GetDispatch(ctx, claimedDisp.ID)
-	if err != nil || gotClaimedDisp.Status != db.StatusPending {
-		t.Errorf("claimedDisp status = %v, want %v", gotClaimedDisp.Status, db.StatusPending)
+	var completedMsgs atomic.Int32
+	msgDone := make(chan struct{})
+	dispDone := make(chan struct{})
+	var dispCount atomic.Int32
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 3,
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			if strings.Contains(prompt, "p1") || strings.Contains(prompt, "p2") {
+				if dispCount.Add(1) == 2 {
+					close(dispDone)
+				}
+			}
+			return mockJSONResponse("c5555555-2222-3333-4444-555555555555", "ok"), "", 0, nil
+		},
+		DeliveryFunc: noopDelivery,
+		TypingFunc:   noopTyping,
+		OnMessageCompleted: func(m db.Message, finalStatus string) {
+			if completedMsgs.Add(1) == 2 {
+				close(msgDone)
+			}
+		},
+	})
+	pool.HoldUntilLeader()
+	pool.Start()
+	defer pool.Stop()
+
+	// Enqueue while leaderHold is active: neither message nor dispatch should spawn a worker yet.
+	pool.Enqueue(heldMsg)
+	pool.EnqueueDispatch(heldDisp)
+
+	gotHeldMsg, _ := getMessage(store, heldMsg.ID)
+	if gotHeldMsg.Status != db.StatusPending {
+		t.Fatalf("expected heldMsg to stay PENDING during leaderHold, got %s", gotHeldMsg.Status)
 	}
-	gotSiblingDisp, err := store.GetDispatch(ctx, siblingDisp.ID)
-	if err != nil || gotSiblingDisp.Status != db.StatusProcessing {
-		t.Errorf("siblingDisp status = %v, want %v", gotSiblingDisp.Status, db.StatusProcessing)
+
+	// RecoverInterrupted resets PROCESSING orphans, releases leaderHold, and enqueues all PENDING items.
+	RecoverInterrupted(store, pool)
+	waitForCompletion(t, msgDone, 5*time.Second, "recovered messages")
+	waitForCompletion(t, dispDone, 5*time.Second, "recovered dispatches")
+	waitPoolIdle(t, pool, 3*time.Second)
+
+	gotOrphanMsg, _ := getMessage(store, orphanMsg.ID)
+	gotHeldMsgAfter, _ := getMessage(store, heldMsg.ID)
+	if gotOrphanMsg.Status != db.StatusCompleted || gotOrphanMsg.RestartCount != 1 {
+		t.Errorf("orphanMsg = %+v, want COMPLETED with RestartCount=1", gotOrphanMsg)
+	}
+	if gotHeldMsgAfter.Status != db.StatusCompleted || gotHeldMsgAfter.RestartCount != 0 {
+		t.Errorf("heldMsg = %+v, want COMPLETED with RestartCount=0", gotHeldMsgAfter)
+	}
+
+	gotOrphanDisp, _ := store.GetDispatch(ctx, orphanDisp.ID)
+	if gotOrphanDisp.Status != db.StatusCompleted || gotOrphanDisp.RestartCount != DefaultMaxRestarts+1 {
+		t.Errorf("orphanDisp = %+v, want COMPLETED with RestartCount=%d", gotOrphanDisp, DefaultMaxRestarts+1)
 	}
 }
 
@@ -1642,8 +1686,8 @@ func TestWorkerPool_CancellationDuringBackoffSuite(t *testing.T) {
 					t.Errorf("DeliveryFunc should not be called when pool is cancelled")
 				}
 			}
-			if dbMsg, _ := getMessage(store, msgID); dbMsg != nil && dbMsg.Status != db.StatusPending {
-				t.Errorf("Expected status PENDING after cancellation, got: %s", dbMsg.Status)
+			if dbMsg, _ := getMessage(store, msgID); dbMsg != nil && dbMsg.Status != db.StatusProcessing {
+				t.Errorf("Expected status PROCESSING after cancellation, got: %s", dbMsg.Status)
 			}
 		})
 	}
@@ -3470,7 +3514,7 @@ func TestWorkerPool_MaintenanceTicker_FiresCheck(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for maintenance ticker")
 	}
-	p.StopWithTimeout(time.Second)
+	p.Stop()
 }
 
 func TestFormatUnrotatedSessionLine(t *testing.T) {
@@ -3981,6 +4025,7 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 				t.Fatalf("timeout waiting for dispatch runner execution")
 			}
 
+			waitPoolIdle(t, pool, 3*time.Second)
 			pool.Stop()
 
 			d, err := store.GetDispatch(context.Background(), disp.ID)
@@ -4096,6 +4141,7 @@ func TestDispatchExecution_ColdStartAndRotation(t *testing.T) {
 		t.Errorf("expected <SYSTEM_DIRECTIVE> in prompt, got:\n%s", p)
 	}
 
+	waitPoolIdle(t, pool, 3*time.Second)
 	pool.Stop()
 
 	count, _ := store.GetSessionTurnCount(ctx, "heartbeat-rot")
@@ -4268,6 +4314,7 @@ func TestDispatchExecution_RetriesAndFailure(t *testing.T) {
 		t.Fatalf("timeout waiting for retries to exhaust")
 	}
 
+	waitPoolIdle(t, pool, 3*time.Second)
 	pool.Stop()
 
 	d, err := store.GetDispatch(ctx, disp.ID)
@@ -4407,10 +4454,10 @@ func TestCancelBurstOnShutdown_Dispatch(t *testing.T) {
 	tests := []struct {
 		name            string
 		failScheduleRun bool
-		wantStatus      string
+		wantTurnErr     string
 	}{
-		{name: "graceful deployment", failScheduleRun: false, wantStatus: db.StatusPending},
-		{name: "context cancelled during execution", failScheduleRun: true, wantStatus: db.StatusPending},
+		{name: "shutdown interruption", failScheduleRun: false, wantTurnErr: "interrupted by shutdown"},
+		{name: "context cancelled during execution", failScheduleRun: true, wantTurnErr: "context cancelled during execution"},
 	}
 
 	for _, tc := range tests {
@@ -4428,20 +4475,20 @@ func TestCancelBurstOnShutdown_Dispatch(t *testing.T) {
 				pool:     pool,
 				dispatch: &interruptedDisp,
 			}
-			te.cancelBurstOnShutdown(tc.wantStatus, "test-model", tc.failScheduleRun)
+			te.cancelBurstOnShutdown("failed", tc.failScheduleRun)
+			if te.turnError != tc.wantTurnErr {
+				t.Fatalf("expected turnError %q, got %q", tc.wantTurnErr, te.turnError)
+			}
 
 			refreshed, err := store.GetDispatch(ctx, interruptedDisp.ID)
 			if err != nil || refreshed == nil {
 				t.Fatalf("failed to fetch dispatch: %v", err)
 			}
-			if refreshed.Status != tc.wantStatus {
-				t.Fatalf("expected interrupted dispatch to be reset to %s, got %+v", tc.wantStatus, refreshed)
+			if refreshed.Status != db.StatusProcessing {
+				t.Fatalf("expected interrupted dispatch to remain %s in DB for startup recovery, got %+v", db.StatusProcessing, refreshed)
 			}
 			if refreshed.RestartCount != 0 {
-				t.Fatalf("expected restart count to remain 0, got %d", refreshed.RestartCount)
-			}
-			if refreshed.ErrorMessage != "interrupted by graceful deployment" {
-				t.Fatalf("expected error message to be %q, got %q", "interrupted by graceful deployment", refreshed.ErrorMessage)
+				t.Fatalf("expected restart count to remain 0 until RecoverInterrupted runs, got %d", refreshed.RestartCount)
 			}
 		})
 	}

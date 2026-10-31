@@ -107,4 +107,20 @@ func TestSQLStoreDelegationAndQueries(t *testing.T) {
 	if _, err := closedStore.GetPendingOrProcessingMessages(ctx, 10); err == nil {
 		t.Errorf("expected error from closedStore.GetPendingOrProcessingMessages, got nil")
 	}
+
+	var nilCtx context.Context
+	if rel, err := store.AcquireLeaderLock(nilCtx); err != nil || rel == nil {
+		t.Fatalf("AcquireLeaderLock on SQLite store failed: %v", err)
+	} else {
+		rel()
+	}
+	dummyStore := &SQLStore{db: dummyDBTX{}}
+	if rel, err := dummyStore.AcquireLeaderLock(ctx); err != nil || rel == nil {
+		t.Fatalf("AcquireLeaderLock on dummyDBTX failed: %v", err)
+	} else {
+		rel()
+	}
+	if isPostgresDriver(nil) {
+		t.Errorf("expected isPostgresDriver(nil) to be false")
+	}
 }
