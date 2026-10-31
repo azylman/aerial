@@ -43,6 +43,7 @@ type TestMemStore struct {
 	unextractedTurns     map[string][]Message
 	activeThreads        []string
 	watermarks           map[string]int64
+	watermarkTimes       map[string]time.Time
 	maxRowIDs            map[string]int64
 	threadSummaries      map[string]string
 	threadPriorTurns     map[string][]Message
@@ -59,6 +60,7 @@ func newTestMemStore() *TestMemStore {
 		nextID:               1,
 		unextractedTurns:     make(map[string][]Message),
 		watermarks:           make(map[string]int64),
+		watermarkTimes:       make(map[string]time.Time),
 		maxRowIDs:            make(map[string]int64),
 		threadSummaries:      make(map[string]string),
 		threadPriorTurns:     make(map[string][]Message),
@@ -339,13 +341,36 @@ func (m *TestMemStore) GetMaxMessageRowID(ctx context.Context, threadID string) 
 	return m.maxRowIDs[threadID], nil
 }
 
+func (m *TestMemStore) GetConversationFactWatermark(ctx context.Context, threadID string) (int64, *time.Time, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failOp == "GetConversationFactWatermark" {
+		return 0, nil, m.failErr
+	}
+	rowID := m.watermarks[threadID]
+	var ts *time.Time
+	if m.watermarkTimes != nil {
+		if t, ok := m.watermarkTimes[threadID]; ok && !t.IsZero() {
+			cpy := t
+			ts = &cpy
+		}
+	}
+	return rowID, ts, nil
+}
+
 func (m *TestMemStore) UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.failOp == "UpdateConversationFactWatermark" {
 		return m.failErr
 	}
-	m.watermarks[threadID] = maxRowID
+	if maxRowID >= m.watermarks[threadID] {
+		m.watermarks[threadID] = maxRowID
+	}
+	if m.watermarkTimes == nil {
+		m.watermarkTimes = make(map[string]time.Time)
+	}
+	m.watermarkTimes[threadID] = time.Now().UTC()
 	return nil
 }
 
@@ -5312,6 +5337,7 @@ func TestConsolidateFactClusters(t *testing.T) {
 		storeFail           string
 		lockMutex           bool
 		addFacts            bool
+		seedWatermark       int64
 		seedReinforceCounts []int
 		llmResp             string
 		llmErr              error
@@ -5320,6 +5346,7 @@ func TestConsolidateFactClusters(t *testing.T) {
 		wantCount           int
 		wantRemaining       int
 		wantReinforcedCount int
+		wantWatermark       int64
 	}{
 		{
 			name:     "NilStoreError",
@@ -5491,6 +5518,50 @@ func TestConsolidateFactClusters(t *testing.T) {
 			wantErr:             false,
 			wantCount:           2,
 			wantRemaining:       1,
+			wantWatermark:       5,
+		},
+		{
+			name:          "WatermarkSkipsAlreadyEvaluatedOldCliques",
+			ctx:           ctx,
+			addFacts:      true,
+			seedWatermark: 3,
+			llmResp:       validJSON,
+			wantErr:       false,
+			wantCount:     0,
+			wantRemaining: 3,
+			wantWatermark: 3,
+		},
+		{
+			name:          "WatermarkEvaluatesCliqueWithNewFact",
+			ctx:           ctx,
+			addFacts:      true,
+			seedWatermark: 2,
+			llmResp:       validJSON,
+			wantErr:       false,
+			wantCount:     2,
+			wantRemaining: 1,
+			wantWatermark: 5,
+		},
+		{
+			name:          "WatermarkReadErrorFallsBackToFullEvaluation",
+			ctx:           ctx,
+			addFacts:      true,
+			storeFail:     "GetConversationFactWatermark",
+			llmResp:       validJSON,
+			wantErr:       false,
+			wantCount:     2,
+			wantRemaining: 1,
+			wantWatermark: 5,
+		},
+		{
+			name:          "WatermarkUpdateErrorLoggedGracefully",
+			ctx:           ctx,
+			addFacts:      true,
+			storeFail:     "UpdateConversationFactWatermark",
+			llmResp:       validJSON,
+			wantErr:       false,
+			wantCount:     2,
+			wantRemaining: 1,
 		},
 	}
 
@@ -5501,6 +5572,9 @@ func TestConsolidateFactClusters(t *testing.T) {
 				_, _ = mem.InsertFact(ctx, "Fact A", vecs[0])
 				_, _ = mem.InsertFact(ctx, "Fact B", vecs[1])
 				_, _ = mem.InsertFact(ctx, "Fact C", vecs[2])
+			}
+			if tc.seedWatermark > 0 {
+				mem.watermarks[DreamingWatermarkThreadID] = tc.seedWatermark
 			}
 			if len(tc.seedReinforceCounts) == 3 && len(mem.facts) >= 3 {
 				mem.facts[1].ReinforceCount = tc.seedReinforceCounts[0]
@@ -5550,6 +5624,9 @@ func TestConsolidateFactClusters(t *testing.T) {
 						t.Errorf("consolidated fact reinforce_count = %d, want %d", f.ReinforceCount, tc.wantReinforcedCount)
 					}
 				}
+			}
+			if tc.wantWatermark > 0 && mem.watermarks[DreamingWatermarkThreadID] != tc.wantWatermark {
+				t.Errorf("dreaming watermark = %d, want %d", mem.watermarks[DreamingWatermarkThreadID], tc.wantWatermark)
 			}
 		})
 	}
@@ -5607,15 +5684,29 @@ func TestWorker_RunDaily_Dreaming(t *testing.T) {
 	vecs := makePairwiseSimilarVectors(3, 0.78)
 
 	tests := []struct {
-		name         string
-		nilOllama    bool
-		nilLLM       bool
-		llmErr       error
-		dreamSuccess bool
+		name            string
+		nilOllama       bool
+		nilLLM          bool
+		llmErr          error
+		lastDreamingAgo time.Duration
+		dreamSuccess    bool
+		wantRemaining   int
 	}{
 		{
-			name:         "DailyDecayAndDreamingSuccess",
-			dreamSuccess: true,
+			name:          "DailyDecayAndDreamingSuccess",
+			dreamSuccess:  true,
+			wantRemaining: 1,
+		},
+		{
+			name:            "RecentDreamingWatermarkSkipsDuplicateRun",
+			lastDreamingAgo: 2 * time.Hour,
+			wantRemaining:   3,
+		},
+		{
+			name:            "ExpiredDreamingWatermarkRunsDreaming",
+			lastDreamingAgo: 25 * time.Hour,
+			dreamSuccess:    true,
+			wantRemaining:   1,
 		},
 		{
 			name:   "DailyDecayWithDreamingErrorHandled",
@@ -5637,6 +5728,9 @@ func TestWorker_RunDaily_Dreaming(t *testing.T) {
 			_, _ = mem.InsertFact(ctx, "Fact 1", vecs[0])
 			_, _ = mem.InsertFact(ctx, "Fact 2", vecs[1])
 			_, _ = mem.InsertFact(ctx, "Fact 3", vecs[2])
+			if tc.lastDreamingAgo > 0 {
+				mem.watermarkTimes[DreamingWatermarkThreadID] = time.Now().UTC().Add(-tc.lastDreamingAgo)
+			}
 
 			var ollama OllamaClient = &MockOllamaClient{embedding: vecs[0]}
 			if tc.nilOllama {
@@ -5661,10 +5755,8 @@ func TestWorker_RunDaily_Dreaming(t *testing.T) {
 			// Tick 60 is daily decay + dreaming
 			w.Tick(ctx, 60)
 
-			if tc.dreamSuccess {
-				if len(mem.facts) != 1 {
-					t.Errorf("len(mem.facts) = %d, want 1 consolidated fact", len(mem.facts))
-				}
+			if tc.wantRemaining > 0 && len(mem.facts) != tc.wantRemaining {
+				t.Errorf("len(mem.facts) = %d, want %d", len(mem.facts), tc.wantRemaining)
 			}
 		})
 	}

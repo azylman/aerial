@@ -756,6 +756,8 @@ func parseFactsJSON(raw string) (*ExtractedFactsPayload, error) {
 
 // DefaultConsolidationMinSim is the minimum pairwise cosine similarity for fact consolidation cliques.
 const (
+	DreamingWatermarkThreadID   = "__coven_dreaming__"
+	DefaultDreamingMinInterval  = 20 * time.Hour
 	DefaultConsolidationMinSim  = 0.75
 	DefaultConsolidationMaxSize = 2
 	MaxConsolidationPasses      = 3
@@ -775,10 +777,13 @@ func similarityInBounds(sim, minSim, maxSim float64) bool {
 	return sim >= minSim && (maxSim >= 1.0 || sim <= maxSim)
 }
 
-func buildFactCliqueEdges(group []ScoredFactWithEmbedding, minSim, maxSim float64) []factCliqueEdge {
+func buildFactCliqueEdges(group []ScoredFactWithEmbedding, minSim, maxSim float64, watermarkFactID int64) []factCliqueEdge {
 	var edges []factCliqueEdge
 	for i := 0; i < len(group); i++ {
 		for j := i + 1; j < len(group); j++ {
+			if watermarkFactID > 0 && group[i].Fact.ID <= watermarkFactID && group[j].Fact.ID <= watermarkFactID {
+				continue
+			}
 			if sim := CosineSimilarity(group[i].Embedding, group[j].Embedding); similarityInBounds(sim, minSim, maxSim) {
 				edges = append(edges, factCliqueEdge{i: i, j: j, sim: sim})
 			}
@@ -844,7 +849,11 @@ func expandFactClique(group []ScoredFactWithEmbedding, e factCliqueEdge, used ma
 
 // FindConsolidationCliques finds complete-linkage cliques of size [minSize, maxSize]
 // where every pair of facts (u, v) in the clique satisfies minSim <= CosineSimilarity(u.Embedding, v.Embedding) <= maxSim.
-func FindConsolidationCliques(facts []ScoredFactWithEmbedding, minSim, maxSim float64, minSize, maxSize int) [][]ScoredFactWithEmbedding {
+func FindConsolidationCliques(facts []ScoredFactWithEmbedding, minSim, maxSim float64, minSize, maxSize int, watermarkFactID ...int64) [][]ScoredFactWithEmbedding {
+	var minNewFactID int64
+	if len(watermarkFactID) > 0 {
+		minNewFactID = watermarkFactID[0]
+	}
 	if minSim <= 0 {
 		minSim = DefaultConsolidationMinSim
 	}
@@ -870,7 +879,7 @@ func FindConsolidationCliques(facts []ScoredFactWithEmbedding, minSim, maxSim fl
 		return group[i].Fact.ID < group[j].Fact.ID
 	})
 
-	edges := buildFactCliqueEdges(group, minSim, maxSim)
+	edges := buildFactCliqueEdges(group, minSim, maxSim, minNewFactID)
 
 	var cliques [][]ScoredFactWithEmbedding
 	used := make(map[int64]bool, len(group))
@@ -890,6 +899,16 @@ func FindConsolidationCliques(facts []ScoredFactWithEmbedding, minSim, maxSim fl
 	}
 
 	return cliques
+}
+
+func maxFactIDFromSlice(facts []ScoredFactWithEmbedding, prevMax int64) int64 {
+	maxID := prevMax
+	for _, f := range facts {
+		if f.Fact.ID > maxID {
+			maxID = f.Fact.ID
+		}
+	}
+	return maxID
 }
 
 func cliqueSignature(clique []ScoredFactWithEmbedding) string {
@@ -949,7 +968,15 @@ func ConsolidateFactClusters(ctx context.Context, store Store, client OllamaClie
 	}
 	defer extractionMutex.Unlock()
 
+	watermarkFactID, _, err := store.GetConversationFactWatermark(ctx, DreamingWatermarkThreadID)
+	if err != nil {
+		log.Printf("[Memory] Warning: Failed to read dreaming watermark, evaluating all cliques: %v", err)
+		watermarkFactID = 0
+	}
+
 	var totalConsolidated int
+	var anyFailed bool
+	maxFactID := watermarkFactID
 	triedCliques := make(map[string]bool)
 
 	for pass := 0; pass < MaxConsolidationPasses; pass++ {
@@ -957,12 +984,13 @@ func ConsolidateFactClusters(ctx context.Context, store Store, client OllamaClie
 		if err != nil {
 			return totalConsolidated, fmt.Errorf("failed to get facts with embeddings: %w", err)
 		}
+		maxFactID = maxFactIDFromSlice(allFacts, maxFactID)
 		if len(allFacts) == 0 {
 			break
 		}
 
 		var cliques [][]ScoredFactWithEmbedding
-		for _, c := range FindConsolidationCliques(allFacts, DefaultConsolidationMinSim, 1.0, 2, DefaultConsolidationMaxSize) {
+		for _, c := range FindConsolidationCliques(allFacts, DefaultConsolidationMinSim, 1.0, 2, DefaultConsolidationMaxSize, watermarkFactID) {
 			if sig := cliqueSignature(c); !triedCliques[sig] {
 				triedCliques[sig] = true
 				cliques = append(cliques, c)
@@ -972,13 +1000,22 @@ func ConsolidateFactClusters(ctx context.Context, store Store, client OllamaClie
 			break
 		}
 
-		passCount, deleteFailed, err := consolidateCliqueBatch(ctx, store, client, llmFunc, cliques)
+		passCount, batchFailed, err := consolidateCliqueBatch(ctx, store, client, llmFunc, cliques)
 		totalConsolidated += passCount
+		if batchFailed {
+			anyFailed = true
+		}
 		if err != nil {
 			return totalConsolidated, err
 		}
-		if passCount == 0 || deleteFailed {
+		if passCount == 0 || batchFailed {
 			break
+		}
+	}
+
+	if !anyFailed {
+		if err := store.UpdateConversationFactWatermark(ctx, DreamingWatermarkThreadID, maxFactID); err != nil {
+			log.Printf("[Memory] Warning: Failed to update dreaming watermark: %v", err)
 		}
 	}
 
@@ -1023,18 +1060,18 @@ func insertAndReinforceConsolidatedFact(ctx context.Context, store Store, client
 	return newID, true
 }
 
-func consolidateSingleFactClique(ctx context.Context, store Store, client OllamaClient, llmFunc LLMClientFunc, clique []ScoredFactWithEmbedding) (consolidated bool, deleteFailed bool) {
+func consolidateSingleFactClique(ctx context.Context, store Store, client OllamaClient, llmFunc LLMClientFunc, clique []ScoredFactWithEmbedding) (consolidated bool, cliqueFailed bool) {
 	prompt := buildConsolidationPrompt(clique)
 	resp, err := llmFunc(ctx, prompt)
 	if err != nil {
 		log.Printf("[Memory] Warning: Fact consolidation LLM synthesis failed for cluster: %v", err)
-		return false, false
+		return false, true
 	}
 
 	payload, err := parseFactsJSON(resp)
 	if err != nil {
 		log.Printf("[Memory] Warning: Fact consolidation payload parse failed: %v", err)
-		return false, false
+		return false, true
 	}
 
 	candidates := extractConsolidatedTexts(payload.Facts)
@@ -1057,38 +1094,38 @@ func consolidateSingleFactClique(ctx context.Context, store Store, client Ollama
 	}
 
 	if len(insertedIDs) == 0 {
-		return false, false
+		return false, true
 	}
 
 	for _, src := range clique {
 		if err := store.DeleteFact(ctx, src.Fact.ID); err != nil {
 			log.Printf("[Memory] Warning: Failed to delete consolidated source fact ID %d: %v", src.Fact.ID, err)
-			deleteFailed = true
+			cliqueFailed = true
 		}
 	}
-	return true, deleteFailed
+	return true, cliqueFailed
 }
 
 func consolidateCliqueBatch(ctx context.Context, store Store, client OllamaClient, llmFunc LLMClientFunc, cliques [][]ScoredFactWithEmbedding) (int, bool, error) {
 	log.Printf("[Memory] Consolidating %d candidate fact cluster(s)...", len(cliques))
 	var consolidatedCount int
-	var deleteFailed bool
+	var batchFailed bool
 
 	for _, clique := range cliques {
 		select {
 		case <-ctx.Done():
-			return consolidatedCount, deleteFailed, ctx.Err()
+			return consolidatedCount, batchFailed, ctx.Err()
 		default:
 		}
 
-		consolidated, delFail := consolidateSingleFactClique(ctx, store, client, llmFunc, clique)
-		if delFail {
-			deleteFailed = true
+		consolidated, cliqueFailed := consolidateSingleFactClique(ctx, store, client, llmFunc, clique)
+		if cliqueFailed {
+			batchFailed = true
 		}
 		if consolidated {
 			consolidatedCount++
 		}
 	}
 
-	return consolidatedCount, deleteFailed, nil
+	return consolidatedCount, batchFailed, nil
 }

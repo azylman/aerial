@@ -96,7 +96,8 @@ func (s *SQLStore) fetchTasks(ctx context.Context, endpoint string) ([]eriTaskIt
 	return data.Tasks, nil
 }
 
-func (s *SQLStore) getWatermark(ctx context.Context, threadID string) (int64, *time.Time, error) {
+// GetConversationFactWatermark retrieves the last extracted row ID and timestamp for a thread or sentinel key.
+func (s *SQLStore) GetConversationFactWatermark(ctx context.Context, threadID string) (int64, *time.Time, error) {
 	if err := s.checkDB(); err != nil {
 		return 0, nil, err
 	}
@@ -200,7 +201,7 @@ func (s *SQLStore) GetUnextractedAdminTurns(ctx context.Context, threadID string
 	if threadID = strings.TrimSpace(threadID); threadID == "" {
 		return nil, nil
 	}
-	lastRowID, _, err := s.getWatermark(ctx, threadID)
+	lastRowID, _, err := s.GetConversationFactWatermark(ctx, threadID)
 	if err != nil {
 		return nil, err
 	}
@@ -284,7 +285,7 @@ func (s *SQLStore) GetThreadContextBeforeWatermark(ctx context.Context, threadID
 		priorTurnLimit = 2
 	}
 
-	lastRowID, _, err := s.getWatermark(ctx, threadID)
+	lastRowID, _, err := s.GetConversationFactWatermark(ctx, threadID)
 	if err != nil {
 		return "", nil, err
 	}
@@ -506,7 +507,7 @@ func (s *SQLStore) GetThreadTrajectoryContext(ctx context.Context, threadID stri
 		return nil, nil, nil
 	}
 
-	_, factExtractedAt, err := s.getWatermark(ctx, threadID)
+	_, factExtractedAt, err := s.GetConversationFactWatermark(ctx, threadID)
 	if err != nil {
 		return nil, nil, err
 	}

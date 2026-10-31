@@ -108,8 +108,20 @@ func (w *Worker) runHourly(ctx context.Context) {
 	}
 }
 
+func (w *Worker) shouldRunDailyDreaming(ctx context.Context) bool {
+	_, lastRunAt, err := w.store.GetConversationFactWatermark(ctx, DreamingWatermarkThreadID)
+	if err != nil || lastRunAt == nil || lastRunAt.IsZero() {
+		return true
+	}
+	return time.Since(*lastRunAt) >= DefaultDreamingMinInterval
+}
+
 func (w *Worker) runDaily(ctx context.Context) {
 	if w.store == nil {
+		return
+	}
+	if !w.shouldRunDailyDreaming(ctx) {
+		log.Printf("[Memory Worker] Skipping daily dreaming: already completed within the last %s", DefaultDreamingMinInterval)
 		return
 	}
 	if w.ollama != nil && w.llmClient != nil {
