@@ -96,6 +96,7 @@ type ghEventCase struct {
 	disp                 *mockOutboundDispatcher
 	river                *mockRiverInserter
 	spyNoGitHubHit       bool
+	systemChannelID      string
 	wantErr              bool
 	wantRepo             string
 	wantAction           string
@@ -728,6 +729,56 @@ func TestProcessGitHubEvent(t *testing.T) {
 			payload:  `{"action":"opened","number":604,"pull_request":{"node_id":"node-500","number":604,"title":"build(deps): bump qux","head":{"ref":"dependabot/go_modules/qux-1.0.1","sha":"depsha4"},"base":{"ref":"main","sha":"basesha"},"user":{"login":"dependabot[bot]"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"dependabot[bot]"}}`,
 			wantRepo: "azylman/aerial", wantAction: "opened", wantPR: 604, wantBranch: "dependabot/go_modules/qux-1.0.1", wantHeadSHA: "depsha4", wantSender: "dependabot[bot]", wantSource: "pull_request_payload",
 		},
+		{
+			name:            "dependabot PR opened registers in pr_registry with system channel snowflake",
+			event:           "pull_request",
+			delivery:        "del-pr-dependabot-reg-1",
+			payload:         `{"action":"opened","number":605,"pull_request":{"node_id":"node-ok","number":605,"title":"build(deps): bump bar","head":{"ref":"dependabot/go_modules/bar-1.0.2","sha":"depsha605"},"base":{"ref":"main","sha":"basesha"},"user":{"login":"dependabot[bot]"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"dependabot[bot]"}}`,
+			systemChannelID: "1542423172400291873",
+			reg:             &mockPRRegistry{},
+			wantRepo:        "azylman/aerial",
+			wantAction:      "opened",
+			wantPR:          605,
+			wantBranch:      "dependabot/go_modules/bar-1.0.2",
+			wantHeadSHA:     "depsha605",
+			wantSender:      "dependabot[bot]",
+			wantSource:      "pull_request_payload",
+			wantEnsureCalls: 1,
+			wantTargetID:    "1542423172400291873",
+		},
+		{
+			name:            "dependabot PR opened registry error logs warning without failing event",
+			event:           "pull_request",
+			delivery:        "del-pr-dependabot-reg-err",
+			payload:         `{"action":"opened","number":606,"pull_request":{"node_id":"node-ok","number":606,"title":"build(deps): bump baz","head":{"ref":"dependabot/go_modules/baz-1.0.2","sha":"depsha606"},"base":{"ref":"main","sha":"basesha"},"user":{"login":"dependabot[bot]"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"dependabot[bot]"}}`,
+			systemChannelID: "1542423172400291873",
+			reg:             &mockPRRegistry{ensureErr: errors.New("db err")},
+			wantErr:         false,
+			wantRepo:        "azylman/aerial",
+			wantAction:      "opened",
+			wantPR:          606,
+			wantBranch:      "dependabot/go_modules/baz-1.0.2",
+			wantHeadSHA:     "depsha606",
+			wantSender:      "dependabot[bot]",
+			wantSource:      "pull_request_payload",
+			wantEnsureCalls: 1,
+		},
+		{
+			name:              "check_run failure on dependabot branch self-heals registration and transitions CI failed",
+			event:             "check_run",
+			delivery:          "del-cr-dependabot-fail",
+			payload:           `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Service Unit Tests","head_sha":"depfailsha","status":"completed","conclusion":"failure","html_url":"https://github.com/azylman/aerial/actions/runs/999","output":{"title":"Tests Failed","summary":"Error in bar.go"},"pull_requests":[{"number":607,"head":{"ref":"dependabot/pip/foo-1.0","sha":"depfailsha"}}]}}`,
+			systemChannelID:   "1542423172400291873",
+			reg:               &mockPRRegistry{ciFailedTargetID: "1542423172400291873", ciFailedUpdated: true},
+			disp:              &mockOutboundDispatcher{},
+			wantPR:            607,
+			wantBranch:        "dependabot/pip/foo-1.0",
+			wantHeadSHA:       "depfailsha",
+			wantEnsureCalls:   1,
+			wantCIFailedCalls: 1,
+			wantDispatches:    1,
+			wantTargetID:      "1542423172400291873",
+		},
 	}
 
 	for _, tc := range cases {
@@ -745,7 +796,7 @@ func TestProcessGitHubEvent(t *testing.T) {
 			if tc.disp != nil {
 				disp = tc.disp
 			}
-			srv := newTestRouter(Config{GitHubAPIURL: mockServer.URL, GitHubToken: "test-token"}, mockServer.Client(), reg, disp, inserters...)
+			srv := newTestRouter(Config{GitHubAPIURL: mockServer.URL, GitHubToken: "test-token", SystemChannelID: tc.systemChannelID}, mockServer.Client(), reg, disp, inserters...)
 			srv.onProcessed = func(string, string) {}
 
 			if tc.priorEvent != nil {
