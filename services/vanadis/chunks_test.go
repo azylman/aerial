@@ -1021,6 +1021,18 @@ func TestPostgresVanadisStore_ChunkMethods(t *testing.T) {
 			if _, _, _, err := s.FailChunkByPR(ctx, "aerial", 1); err == nil {
 				t.Error("expected error on FailChunkByPR")
 			}
+			if _, err := s.UpdateBuild(ctx, "b1", UpdateBuildRequest{Title: "T"}); err == nil {
+				t.Error("expected error on UpdateBuild")
+			}
+			if _, err := s.UpdateChunk(ctx, "b1", "c1", UpdateChunkRequest{Title: "T"}); err == nil {
+				t.Error("expected error on UpdateChunk")
+			}
+			if _, err := s.AppendChunks(ctx, "b1", []CreateChunkInput{{Title: "T", Instructions: "I"}}); err == nil {
+				t.Error("expected error on AppendChunks")
+			}
+			if _, _, err := s.RemoveChunk(ctx, "b1", "c1"); err == nil {
+				t.Error("expected error on RemoveChunk")
+			}
 		}
 	})
 
@@ -1703,4 +1715,1050 @@ func (r *genericMockRow) Scan(dest ...any) error {
 		return r.scanFn(dest...)
 	}
 	return nil
+}
+
+func TestResolveChunkRef(t *testing.T) {
+	chunks := []VanadisChunk{
+		{ID: "chunk-a", ChunkIndex: 0},
+		{ID: "chunk-b", ChunkIndex: 1},
+		{ID: "10", ChunkIndex: 2},
+	}
+	tests := []struct {
+		name     string
+		chunks   []VanadisChunk
+		chunkRef string
+		wantIdx  int
+	}{
+		{"empty_ref", chunks, "", -1},
+		{"whitespace_ref", chunks, "   ", -1},
+		{"match_id_exact", chunks, "chunk-a", 0},
+		{"match_id_with_whitespace", chunks, "  chunk-b  ", 1},
+		{"match_index_string", chunks, "0", 0},
+		{"match_index_second", chunks, "1", 1},
+		{"match_id_takes_precedence_over_index", chunks, "10", 2},
+		{"no_match_index_out_of_bounds", chunks, "99", -1},
+		{"no_match_unknown_id", chunks, "unknown", -1},
+		{"empty_slice", nil, "chunk-a", -1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveChunkRef(tc.chunks, tc.chunkRef)
+			if got != tc.wantIdx {
+				t.Errorf("resolveChunkRef() = %d, want %d", got, tc.wantIdx)
+			}
+		})
+	}
+}
+
+func TestVanadisStore_UpdateBuild(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name        string
+		storeErr    error
+		seedBuild   *VanadisBuild
+		buildID     string
+		req         UpdateBuildRequest
+		wantErrIs   error
+		wantErr     bool
+		wantTitle   string
+		wantObj     string
+		wantContext string
+	}{
+		{
+			name:      "store_error",
+			storeErr:  errors.New("boom"),
+			buildID:   "b1",
+			req:       UpdateBuildRequest{Title: "New"},
+			wantErr:   true,
+			wantErrIs: nil,
+		},
+		{
+			name:      "empty_build_id",
+			buildID:   "",
+			req:       UpdateBuildRequest{Title: "New"},
+			wantErr:   true,
+			wantErrIs: ErrInvalidBuildInput,
+		},
+		{
+			name:      "all_empty_fields",
+			buildID:   "b1",
+			req:       UpdateBuildRequest{Title: "   ", Objective: "  ", SharedContext: ""},
+			wantErr:   true,
+			wantErrIs: ErrInvalidBuildInput,
+		},
+		{
+			name:      "build_not_found",
+			buildID:   "missing-build",
+			req:       UpdateBuildRequest{Title: "New Title"},
+			wantErr:   true,
+			wantErrIs: ErrBuildNotFound,
+		},
+		{
+			name:      "build_not_running_conflict",
+			seedBuild: &VanadisBuild{ID: "b-conflict", Status: "completed"},
+			buildID:   "b-conflict",
+			req:       UpdateBuildRequest{Title: "New Title"},
+			wantErr:   true,
+			wantErrIs: ErrBuildConflict,
+		},
+		{
+			name:        "success_update_title_only",
+			seedBuild:   &VanadisBuild{ID: "b-ok1", Title: "Old Title", Objective: "Original Obj", SharedContext: "Original Ctx", Status: "running"},
+			buildID:     "b-ok1",
+			req:         UpdateBuildRequest{Title: "Updated Title"},
+			wantTitle:   "Updated Title",
+			wantObj:     "Original Obj",
+			wantContext: "Original Ctx",
+		},
+		{
+			name:        "success_update_all_fields",
+			seedBuild:   &VanadisBuild{ID: "b-ok2", Title: "Old Title", Objective: "Old Obj", Status: "running"},
+			buildID:     "b-ok2",
+			req:         UpdateBuildRequest{Title: "New Title", Objective: "New Obj", SharedContext: "New Ctx"},
+			wantTitle:   "New Title",
+			wantObj:     "New Obj",
+			wantContext: "New Ctx",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newMemoryVanadisStore()
+			if tc.storeErr != nil {
+				s.updateBuildErr = tc.storeErr
+			}
+			if tc.seedBuild != nil {
+				s.builds[tc.seedBuild.ID] = *tc.seedBuild
+			}
+			got, err := s.UpdateBuild(ctx, tc.buildID, tc.req)
+			if tc.wantErrIs != nil {
+				if !errors.Is(err, tc.wantErrIs) {
+					t.Fatalf("expected error %v, got %v", tc.wantErrIs, err)
+				}
+				return
+			}
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got.Title != tc.wantTitle || got.Objective != tc.wantObj || got.SharedContext != tc.wantContext {
+				t.Errorf("got title=%q obj=%q ctx=%q, want title=%q obj=%q ctx=%q", got.Title, got.Objective, got.SharedContext, tc.wantTitle, tc.wantObj, tc.wantContext)
+			}
+		})
+	}
+}
+
+func TestVanadisStore_UpdateChunk(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name         string
+		storeErr     error
+		seedBuild    *VanadisBuild
+		seedChunks   []VanadisChunk
+		buildID      string
+		chunkRef     string
+		req          UpdateChunkRequest
+		wantErrIs    error
+		wantErr      bool
+		wantRepo     string
+		wantTitle    string
+		wantInstr    string
+		wantEffort   string
+		wantFilesLen int
+		wantSymsLen  int
+	}{
+		{
+			name:      "store_error",
+			storeErr:  errors.New("boom"),
+			buildID:   "b1",
+			chunkRef:  "c1",
+			req:       UpdateChunkRequest{Title: "T"},
+			wantErr:   true,
+			wantErrIs: nil,
+		},
+		{
+			name:      "empty_build_id",
+			buildID:   "",
+			chunkRef:  "c1",
+			req:       UpdateChunkRequest{Title: "T"},
+			wantErr:   true,
+			wantErrIs: ErrInvalidBuildInput,
+		},
+		{
+			name:      "empty_chunk_ref",
+			buildID:   "b1",
+			chunkRef:  "",
+			req:       UpdateChunkRequest{Title: "T"},
+			wantErr:   true,
+			wantErrIs: ErrInvalidBuildInput,
+		},
+		{
+			name:      "no_updated_fields",
+			buildID:   "b1",
+			chunkRef:  "c1",
+			req:       UpdateChunkRequest{Title: "  ", Repo: "  ", Effort: ""},
+			wantErr:   true,
+			wantErrIs: ErrInvalidBuildInput,
+		},
+		{
+			name:      "invalid_effort",
+			buildID:   "b1",
+			chunkRef:  "c1",
+			req:       UpdateChunkRequest{Effort: "ultra-high"},
+			wantErr:   true,
+			wantErrIs: ErrInvalidBuildInput,
+		},
+		{
+			name:      "build_not_found",
+			buildID:   "missing-build",
+			chunkRef:  "c1",
+			req:       UpdateChunkRequest{Title: "New Title"},
+			wantErr:   true,
+			wantErrIs: ErrBuildNotFound,
+		},
+		{
+			name:       "build_not_running_conflict",
+			seedBuild:  &VanadisBuild{ID: "b-stopped", Status: "completed"},
+			seedChunks: []VanadisChunk{{ID: "c1", BuildID: "b-stopped", Status: "pending"}},
+			buildID:    "b-stopped",
+			chunkRef:   "c1",
+			req:        UpdateChunkRequest{Title: "New Title"},
+			wantErr:    true,
+			wantErrIs:  ErrBuildConflict,
+		},
+		{
+			name:       "chunk_not_found",
+			seedBuild:  &VanadisBuild{ID: "b-running", Status: "running"},
+			seedChunks: []VanadisChunk{{ID: "c1", BuildID: "b-running", Status: "pending"}},
+			buildID:    "b-running",
+			chunkRef:   "c999",
+			req:        UpdateChunkRequest{Title: "New Title"},
+			wantErr:    true,
+			wantErrIs:  ErrChunkNotFound,
+		},
+		{
+			name:       "chunk_not_pending_conflict",
+			seedBuild:  &VanadisBuild{ID: "b-running", Status: "running"},
+			seedChunks: []VanadisChunk{{ID: "c1", BuildID: "b-running", Status: "running"}},
+			buildID:    "b-running",
+			chunkRef:   "c1",
+			req:        UpdateChunkRequest{Title: "New Title"},
+			wantErr:    true,
+			wantErrIs:  ErrBuildConflict,
+		},
+		{
+			name:       "success_partial_update",
+			seedBuild:  &VanadisBuild{ID: "b-running", Status: "running"},
+			seedChunks: []VanadisChunk{{ID: "c1", BuildID: "b-running", ChunkIndex: 0, Repo: "azylman/aerial", Title: "Old Title", Instructions: "Old Instr", Status: "pending", Effort: "medium"}},
+			buildID:    "b-running",
+			chunkRef:   "0",
+			req: UpdateChunkRequest{
+				Repo:          "mirrormere",
+				Title:         "Updated Title",
+				Instructions:  "Updated Instr",
+				Effort:        "low",
+				TargetFiles:   []string{"foo.go"},
+				TargetSymbols: []string{"Bar"},
+			},
+			wantRepo:     "azylman/mirrormere",
+			wantTitle:    "Updated Title",
+			wantInstr:    "Updated Instr",
+			wantEffort:   "low",
+			wantFilesLen: 1,
+			wantSymsLen:  1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newMemoryVanadisStore()
+			if tc.storeErr != nil {
+				s.updateChunkErr = tc.storeErr
+			}
+			if tc.seedBuild != nil {
+				s.builds[tc.seedBuild.ID] = *tc.seedBuild
+			}
+			if len(tc.seedChunks) > 0 {
+				s.chunks[tc.seedBuild.ID] = tc.seedChunks
+			}
+			got, err := s.UpdateChunk(ctx, tc.buildID, tc.chunkRef, tc.req)
+			if tc.wantErrIs != nil {
+				if !errors.Is(err, tc.wantErrIs) {
+					t.Fatalf("expected error %v, got %v", tc.wantErrIs, err)
+				}
+				return
+			}
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got.Repo != tc.wantRepo || got.Title != tc.wantTitle || got.Instructions != tc.wantInstr || got.Effort != tc.wantEffort || len(got.TargetFiles) != tc.wantFilesLen || len(got.TargetSymbols) != tc.wantSymsLen {
+				t.Errorf("unexpected updated chunk: %+v", got)
+			}
+		})
+	}
+}
+
+func TestVanadisStore_AppendChunks(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name          string
+		storeErr      error
+		seedBuild     *VanadisBuild
+		seedChunks    []VanadisChunk
+		buildID       string
+		inputs        []CreateChunkInput
+		wantErrIs     error
+		wantErr       bool
+		wantCount     int
+		wantFirstID   string
+		wantFirstIdx  int
+		wantFirstRepo string
+	}{
+		{
+			name:      "store_error",
+			storeErr:  errors.New("boom"),
+			buildID:   "b1",
+			inputs:    []CreateChunkInput{{Title: "T", Instructions: "I"}},
+			wantErr:   true,
+			wantErrIs: nil,
+		},
+		{
+			name:      "empty_build_id",
+			buildID:   "",
+			inputs:    []CreateChunkInput{{Title: "T", Instructions: "I"}},
+			wantErr:   true,
+			wantErrIs: ErrInvalidBuildInput,
+		},
+		{
+			name:      "empty_inputs",
+			buildID:   "b1",
+			inputs:    nil,
+			wantErr:   true,
+			wantErrIs: ErrInvalidBuildInput,
+		},
+		{
+			name:      "empty_title",
+			buildID:   "b1",
+			inputs:    []CreateChunkInput{{Title: "", Instructions: "I"}},
+			wantErr:   true,
+			wantErrIs: ErrInvalidBuildInput,
+		},
+		{
+			name:      "empty_instructions",
+			buildID:   "b1",
+			inputs:    []CreateChunkInput{{Title: "T", Instructions: "  "}},
+			wantErr:   true,
+			wantErrIs: ErrInvalidBuildInput,
+		},
+		{
+			name:      "invalid_chunk_id",
+			buildID:   "b1",
+			inputs:    []CreateChunkInput{{ID: "bad:id", Title: "T", Instructions: "I"}},
+			wantErr:   true,
+			wantErrIs: ErrInvalidBuildInput,
+		},
+		{
+			name:      "invalid_effort",
+			buildID:   "b1",
+			inputs:    []CreateChunkInput{{Title: "T", Instructions: "I", Effort: "gigantic"}},
+			wantErr:   true,
+			wantErrIs: ErrInvalidBuildInput,
+		},
+		{
+			name:      "build_not_found",
+			buildID:   "missing-b",
+			inputs:    []CreateChunkInput{{Title: "T", Instructions: "I"}},
+			wantErr:   true,
+			wantErrIs: ErrBuildNotFound,
+		},
+		{
+			name:       "build_not_running_conflict",
+			seedBuild:  &VanadisBuild{ID: "b-done", Status: "completed"},
+			seedChunks: nil,
+			buildID:    "b-done",
+			inputs:     []CreateChunkInput{{Title: "T", Instructions: "I"}},
+			wantErr:    true,
+			wantErrIs:  ErrBuildConflict,
+		},
+		{
+			name:       "duplicate_explicit_id_conflict",
+			seedBuild:  &VanadisBuild{ID: "b-run", Status: "running"},
+			seedChunks: []VanadisChunk{{ID: "existing-c1", BuildID: "b-run", ChunkIndex: 0, Status: "pending"}},
+			buildID:    "b-run",
+			inputs:     []CreateChunkInput{{ID: "existing-c1", Title: "T", Instructions: "I"}},
+			wantErr:    true,
+			wantErrIs:  ErrBuildConflict,
+		},
+		{
+			name:      "success_append_to_empty_build",
+			seedBuild: &VanadisBuild{ID: "b-empty", Status: "running"},
+			buildID:   "b-empty",
+			inputs: []CreateChunkInput{
+				{Title: "C1", Instructions: "Do C1", Repo: "aerial"},
+				{Title: "C2", Instructions: "Do C2"},
+			},
+			wantCount:     2,
+			wantFirstID:   "b-empty-chunk-1",
+			wantFirstIdx:  0,
+			wantFirstRepo: "azylman/aerial",
+		},
+		{
+			name:      "success_append_inheriting_previous_repo_and_index",
+			seedBuild: &VanadisBuild{ID: "b-exist", Status: "running"},
+			seedChunks: []VanadisChunk{
+				{ID: "b-exist-chunk-1", BuildID: "b-exist", ChunkIndex: 0, Repo: "azylman/mirrormere", Status: "running"},
+			},
+			buildID: "b-exist",
+			inputs: []CreateChunkInput{
+				{Title: "C2", Instructions: "Do C2"},
+			},
+			wantCount:     1,
+			wantFirstID:   "b-exist-chunk-2",
+			wantFirstIdx:  1,
+			wantFirstRepo: "azylman/mirrormere",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newMemoryVanadisStore()
+			if tc.storeErr != nil {
+				s.appendChunksErr = tc.storeErr
+			}
+			if tc.seedBuild != nil {
+				s.builds[tc.seedBuild.ID] = *tc.seedBuild
+			}
+			if len(tc.seedChunks) > 0 {
+				s.chunks[tc.seedBuild.ID] = tc.seedChunks
+			}
+			got, err := s.AppendChunks(ctx, tc.buildID, tc.inputs)
+			if tc.wantErrIs != nil {
+				if !errors.Is(err, tc.wantErrIs) {
+					t.Fatalf("expected error %v, got %v", tc.wantErrIs, err)
+				}
+				return
+			}
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(got) != tc.wantCount {
+				t.Fatalf("got %d chunks, want %d", len(got), tc.wantCount)
+			}
+			if got[0].ID != tc.wantFirstID || got[0].ChunkIndex != tc.wantFirstIdx || got[0].Repo != tc.wantFirstRepo {
+				t.Errorf("chunk[0] mismatch: got %+v, want ID=%q Idx=%d Repo=%q", got[0], tc.wantFirstID, tc.wantFirstIdx, tc.wantFirstRepo)
+			}
+		})
+	}
+}
+
+func TestVanadisStore_RemoveChunk(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name          string
+		storeErr      error
+		seedBuild     *VanadisBuild
+		seedChunks    []VanadisChunk
+		buildID       string
+		chunkRef      string
+		wantErrIs     error
+		wantErr       bool
+		wantRemovedID string
+		wantRemainLen int
+	}{
+		{
+			name:      "store_error",
+			storeErr:  errors.New("boom"),
+			buildID:   "b1",
+			chunkRef:  "c1",
+			wantErr:   true,
+			wantErrIs: nil,
+		},
+		{
+			name:      "empty_build_id",
+			buildID:   "",
+			chunkRef:  "c1",
+			wantErr:   true,
+			wantErrIs: ErrInvalidBuildInput,
+		},
+		{
+			name:      "empty_chunk_ref",
+			buildID:   "b1",
+			chunkRef:  "",
+			wantErr:   true,
+			wantErrIs: ErrInvalidBuildInput,
+		},
+		{
+			name:      "build_not_found",
+			buildID:   "missing-b",
+			chunkRef:  "c1",
+			wantErr:   true,
+			wantErrIs: ErrBuildNotFound,
+		},
+		{
+			name:       "build_not_running_conflict",
+			seedBuild:  &VanadisBuild{ID: "b-done", Status: "completed"},
+			seedChunks: []VanadisChunk{{ID: "c1", BuildID: "b-done", ChunkIndex: 0, Status: "pending"}},
+			buildID:    "b-done",
+			chunkRef:   "c1",
+			wantErr:    true,
+			wantErrIs:  ErrBuildConflict,
+		},
+		{
+			name:       "chunk_not_found",
+			seedBuild:  &VanadisBuild{ID: "b-run", Status: "running"},
+			seedChunks: []VanadisChunk{{ID: "c1", BuildID: "b-run", ChunkIndex: 0, Status: "pending"}},
+			buildID:    "b-run",
+			chunkRef:   "missing-c",
+			wantErr:    true,
+			wantErrIs:  ErrChunkNotFound,
+		},
+		{
+			name:      "chunk_not_pending_conflict",
+			seedBuild: &VanadisBuild{ID: "b-run", Status: "running"},
+			seedChunks: []VanadisChunk{
+				{ID: "c1", BuildID: "b-run", ChunkIndex: 0, Status: "running"},
+				{ID: "c2", BuildID: "b-run", ChunkIndex: 1, Status: "pending"},
+			},
+			buildID:   "b-run",
+			chunkRef:  "c1",
+			wantErr:   true,
+			wantErrIs: ErrBuildConflict,
+		},
+		{
+			name:       "cannot_remove_only_chunk_conflict",
+			seedBuild:  &VanadisBuild{ID: "b-run", Status: "running"},
+			seedChunks: []VanadisChunk{{ID: "c1", BuildID: "b-run", ChunkIndex: 0, Status: "pending"}},
+			buildID:    "b-run",
+			chunkRef:   "c1",
+			wantErr:    true,
+			wantErrIs:  ErrBuildConflict,
+		},
+		{
+			name:      "success_remove_middle_chunk_and_compact",
+			seedBuild: &VanadisBuild{ID: "b-run", Status: "running"},
+			seedChunks: []VanadisChunk{
+				{ID: "c1", BuildID: "b-run", ChunkIndex: 0, Status: "running"},
+				{ID: "c2", BuildID: "b-run", ChunkIndex: 1, Status: "pending"},
+				{ID: "c3", BuildID: "b-run", ChunkIndex: 2, Status: "pending"},
+			},
+			buildID:       "b-run",
+			chunkRef:      "1", // resolves to c2 by index
+			wantRemovedID: "c2",
+			wantRemainLen: 2,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newMemoryVanadisStore()
+			if tc.storeErr != nil {
+				s.removeChunkErr = tc.storeErr
+			}
+			if tc.seedBuild != nil {
+				s.builds[tc.seedBuild.ID] = *tc.seedBuild
+			}
+			if len(tc.seedChunks) > 0 {
+				s.chunks[tc.seedBuild.ID] = tc.seedChunks
+			}
+			removed, remaining, err := s.RemoveChunk(ctx, tc.buildID, tc.chunkRef)
+			if tc.wantErrIs != nil {
+				if !errors.Is(err, tc.wantErrIs) {
+					t.Fatalf("expected error %v, got %v", tc.wantErrIs, err)
+				}
+				return
+			}
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if removed.ID != tc.wantRemovedID {
+				t.Errorf("removed.ID = %q, want %q", removed.ID, tc.wantRemovedID)
+			}
+			if len(remaining) != tc.wantRemainLen {
+				t.Errorf("len(remaining) = %d, want %d", len(remaining), tc.wantRemainLen)
+			}
+		})
+	}
+}
+
+func TestServer_MutationEndpoints(t *testing.T) {
+	tests := []struct {
+		name       string
+		nilStore   bool
+		useErrBody bool
+		seedBuild  *VanadisBuild
+		seedChunks []VanadisChunk
+		method     string
+		path       string
+		body       string
+		wantCode   int
+		wantWidget bool
+	}{
+		// PATCH /builds/{id}
+		{"patch_build_nil_store", true, false, nil, nil, http.MethodPatch, "/builds/b1", `{"title":"T"}`, http.StatusInternalServerError, false},
+		{"patch_build_err_reader", false, true, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodPatch, "/builds/b1", "", http.StatusBadRequest, false},
+		{"patch_build_invalid_json", false, false, nil, nil, http.MethodPatch, "/builds/b1", `{invalid-json`, http.StatusBadRequest, false},
+		{"patch_build_empty_fields", false, false, nil, nil, http.MethodPatch, "/builds/b1", `{"title":""}`, http.StatusBadRequest, false},
+		{"patch_build_not_found", false, false, nil, nil, http.MethodPatch, "/builds/b-missing", `{"title":"T"}`, http.StatusNotFound, false},
+		{"patch_build_conflict", false, false, &VanadisBuild{ID: "b-done", Status: "completed"}, nil, http.MethodPatch, "/builds/b-done", `{"title":"T"}`, http.StatusConflict, false},
+		{"patch_build_ok_no_title", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodPatch, "/builds/b1", `{"objective":"New Obj"}`, http.StatusOK, false},
+		{"patch_build_ok_with_title_syncs_widget", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodPatch, "/builds/b1", `{"title":"New Title"}`, http.StatusOK, true},
+
+		// GET /builds/{id}/chunks/{chunk_ref}
+		{"get_chunk_nil_store", true, false, nil, nil, http.MethodGet, "/builds/b1/chunks/c1", "", http.StatusInternalServerError, false},
+		{"get_chunk_build_not_found", false, false, nil, nil, http.MethodGet, "/builds/b-missing/chunks/c1", "", http.StatusNotFound, false},
+		{"get_chunk_not_found", false, false, &VanadisBuild{ID: "b1", Status: "running"}, []VanadisChunk{{ID: "c1"}}, http.MethodGet, "/builds/b1/chunks/c999", "", http.StatusNotFound, false},
+		{"get_chunk_ok_by_id", false, false, &VanadisBuild{ID: "b1", Status: "running"}, []VanadisChunk{{ID: "c1", ChunkIndex: 0, Title: "C1"}}, http.MethodGet, "/builds/b1/chunks/c1", "", http.StatusOK, false},
+		{"get_chunk_ok_by_index", false, false, &VanadisBuild{ID: "b1", Status: "running"}, []VanadisChunk{{ID: "c1", ChunkIndex: 0, Title: "C1"}}, http.MethodGet, "/builds/b1/chunks/0", "", http.StatusOK, false},
+
+		// PATCH /builds/{id}/chunks/{chunk_ref}
+		{"patch_chunk_nil_store", true, false, nil, nil, http.MethodPatch, "/builds/b1/chunks/c1", `{"title":"T"}`, http.StatusInternalServerError, false},
+		{"patch_chunk_err_reader", false, true, &VanadisBuild{ID: "b1", Status: "running"}, []VanadisChunk{{ID: "c1", Status: "pending"}}, http.MethodPatch, "/builds/b1/chunks/c1", "", http.StatusBadRequest, false},
+		{"patch_chunk_invalid_json", false, false, nil, nil, http.MethodPatch, "/builds/b1/chunks/c1", `{invalid-json`, http.StatusBadRequest, false},
+		{"patch_chunk_empty_update", false, false, nil, nil, http.MethodPatch, "/builds/b1/chunks/c1", `{"title":""}`, http.StatusBadRequest, false},
+		{"patch_chunk_not_found", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodPatch, "/builds/b1/chunks/c1", `{"title":"T"}`, http.StatusNotFound, false},
+		{"patch_chunk_conflict", false, false, &VanadisBuild{ID: "b1", Status: "running"}, []VanadisChunk{{ID: "c1", Status: "running"}}, http.MethodPatch, "/builds/b1/chunks/c1", `{"title":"T"}`, http.StatusConflict, false},
+		{"patch_chunk_ok_syncs_widget", false, false, &VanadisBuild{ID: "b1", Status: "running"}, []VanadisChunk{{ID: "c1", Status: "pending", ChunkIndex: 0}}, http.MethodPatch, "/builds/b1/chunks/c1", `{"title":"New Chunk Title"}`, http.StatusOK, true},
+
+		// POST /builds/{id}/chunks
+		{"append_chunks_nil_store", true, false, nil, nil, http.MethodPost, "/builds/b1/chunks", `{"chunks":[{"title":"T","instructions":"I"}]}`, http.StatusInternalServerError, false},
+		{"append_chunks_err_reader", false, true, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodPost, "/builds/b1/chunks", "", http.StatusBadRequest, false},
+		{"append_chunks_invalid_json", false, false, nil, nil, http.MethodPost, "/builds/b1/chunks", `{invalid-json`, http.StatusBadRequest, false},
+		{"append_chunks_empty_list", false, false, nil, nil, http.MethodPost, "/builds/b1/chunks", `{"chunks":[]}`, http.StatusBadRequest, false},
+		{"append_chunks_build_not_found", false, false, nil, nil, http.MethodPost, "/builds/b-missing/chunks", `{"chunks":[{"title":"T","instructions":"I"}]}`, http.StatusNotFound, false},
+		{"append_chunks_conflict", false, false, &VanadisBuild{ID: "b-done", Status: "completed"}, nil, http.MethodPost, "/builds/b-done/chunks", `{"chunks":[{"title":"T","instructions":"I"}]}`, http.StatusConflict, false},
+		{"append_chunks_ok_syncs_widget", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodPost, "/builds/b1/chunks", `{"chunks":[{"title":"T","instructions":"I"}]}`, http.StatusOK, true},
+
+		// DELETE /builds/{id}/chunks/{chunk_ref}
+		{"delete_chunk_nil_store", true, false, nil, nil, http.MethodDelete, "/builds/b1/chunks/c1", "", http.StatusInternalServerError, false},
+		{"delete_chunk_not_found", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodDelete, "/builds/b1/chunks/c1", "", http.StatusNotFound, false},
+		{"delete_chunk_conflict_only_chunk", false, false, &VanadisBuild{ID: "b1", Status: "running"}, []VanadisChunk{{ID: "c1", Status: "pending"}}, http.MethodDelete, "/builds/b1/chunks/c1", "", http.StatusConflict, false},
+		{"delete_chunk_ok_syncs_widget", false, false, &VanadisBuild{ID: "b1", Status: "running"}, []VanadisChunk{
+			{ID: "c1", Status: "running", ChunkIndex: 0},
+			{ID: "c2", Status: "pending", ChunkIndex: 1},
+		}, http.MethodDelete, "/builds/b1/chunks/c2", "", http.StatusOK, true},
+
+		// Method and path errors
+		{"method_not_allowed_put_build", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodPut, "/builds/b1", "", http.StatusMethodNotAllowed, false},
+		{"method_not_allowed_get_chunks_subpath", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodGet, "/builds/b1/chunks", "", http.StatusMethodNotAllowed, false},
+		{"method_not_allowed_post_chunk_ref", false, false, &VanadisBuild{ID: "b1", Status: "running"}, []VanadisChunk{{ID: "c1"}}, http.MethodPost, "/builds/b1/chunks/c1", "", http.StatusMethodNotAllowed, false},
+		{"bad_request_empty_chunk_ref_with_slash_get", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodGet, "/builds/b1/chunks/", "", http.StatusBadRequest, false},
+		{"bad_request_empty_chunk_ref_space", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodGet, "/builds/b1/chunks/%20", "", http.StatusBadRequest, false},
+		{"bad_request_empty_build_id_chunks", false, false, nil, nil, http.MethodPost, "/builds/%20/chunks", `{"chunks":[{"title":"T","instructions":"I"}]}`, http.StatusBadRequest, false},
+		{"not_found_unknown_subpath", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodGet, "/builds/b1/unknown", "", http.StatusNotFound, false},
+		{"not_found_deep_unknown_subpath", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodGet, "/builds/b1/chunks/c1/deep", "", http.StatusNotFound, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var widgetSyncCalls int
+			tsWidget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/internal/widget/sync" {
+					widgetSyncCalls++
+					httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+					return
+				}
+				http.NotFound(w, r)
+			}))
+			defer tsWidget.Close()
+
+			var store VanadisStore
+			if !tc.nilStore {
+				mem := newMemoryVanadisStore()
+				if tc.seedBuild != nil {
+					mem.builds[tc.seedBuild.ID] = *tc.seedBuild
+				}
+				if len(tc.seedChunks) > 0 {
+					mem.chunks[tc.seedBuild.ID] = tc.seedChunks
+				}
+				store = mem
+			}
+
+			srv := NewVanadisServer(Config{WebhooksRouterURL: tsWidget.URL}, store, nil, tsWidget.Client())
+			mux := SetupMux(srv)
+
+			var req *http.Request
+			if tc.useErrBody {
+				req = httptest.NewRequest(tc.method, tc.path, errorReader{})
+			} else if tc.body != "" {
+				req = httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+				req.Header.Set("Content-Type", "application/json")
+			} else {
+				req = httptest.NewRequest(tc.method, tc.path, nil)
+			}
+
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != tc.wantCode {
+				t.Fatalf("got status %d, want %d: %s", rec.Code, tc.wantCode, rec.Body.String())
+			}
+			if tc.wantWidget && widgetSyncCalls == 0 {
+				t.Errorf("expected widget sync call, got 0")
+			}
+			if !tc.wantWidget && widgetSyncCalls > 0 {
+				t.Errorf("unexpected widget sync call, got %d", widgetSyncCalls)
+			}
+		})
+	}
+}
+
+func TestPostgresVanadisStore_UpdateBuild(t *testing.T) {
+	tests := []struct {
+		name        string
+		buildID     string
+		req         UpdateBuildRequest
+		beginErr    error
+		scanErr     error
+		buildStatus string
+		execErr     error
+		commitErr   error
+		wantErrIs   error
+		wantErr     bool
+	}{
+		{"empty_build_id", "", UpdateBuildRequest{Title: "T"}, nil, nil, "", nil, nil, ErrInvalidBuildInput, true},
+		{"all_empty_fields", "b1", UpdateBuildRequest{Title: "   "}, nil, nil, "", nil, nil, ErrInvalidBuildInput, true},
+		{"begin_error", "b1", UpdateBuildRequest{Title: "T"}, errors.New("begin err"), nil, "", nil, nil, nil, true},
+		{"build_not_found", "b1", UpdateBuildRequest{Title: "T"}, nil, pgx.ErrNoRows, "", nil, nil, ErrBuildNotFound, true},
+		{"build_query_error", "b1", UpdateBuildRequest{Title: "T"}, nil, errors.New("query err"), "", nil, nil, nil, true},
+		{"build_conflict_status", "b1", UpdateBuildRequest{Title: "T"}, nil, nil, "completed", nil, nil, ErrBuildConflict, true},
+		{"exec_error", "b1", UpdateBuildRequest{Title: "T"}, nil, nil, "running", errors.New("exec err"), nil, nil, true},
+		{"commit_error", "b1", UpdateBuildRequest{Title: "T"}, nil, nil, "running", nil, errors.New("commit err"), nil, true},
+		{"success", "b1", UpdateBuildRequest{Title: "New Title", Objective: "New Obj", SharedContext: "New Ctx"}, nil, nil, "running", nil, nil, nil, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := &mockTx{
+				commitErr: tc.commitErr,
+				queryRowFn: func(context.Context, string, ...any) pgx.Row {
+					if tc.scanErr != nil {
+						return &mockRow{err: tc.scanErr}
+					}
+					return &mockRow{b: &VanadisBuild{ID: tc.buildID, Status: tc.buildStatus}}
+				},
+				execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
+					if tc.execErr != nil {
+						return pgconn.CommandTag{}, tc.execErr
+					}
+					return pgconn.NewCommandTag("UPDATE 1"), nil
+				},
+			}
+			db := mockDB{
+				beginFn: func(context.Context) (pgx.Tx, error) {
+					if tc.beginErr != nil {
+						return nil, tc.beginErr
+					}
+					return tx, nil
+				},
+			}
+			store := NewPostgresVanadisStore(&db)
+			got, err := store.UpdateBuild(context.Background(), tc.buildID, tc.req)
+			if tc.wantErrIs != nil {
+				if !errors.Is(err, tc.wantErrIs) {
+					t.Fatalf("expected error %v, got %v", tc.wantErrIs, err)
+				}
+				return
+			}
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got == nil || got.Title != tc.req.Title {
+				t.Fatalf("unexpected updated build: %+v", got)
+			}
+		})
+	}
+}
+
+func TestPostgresVanadisStore_UpdateChunk(t *testing.T) {
+	tests := []struct {
+		name          string
+		buildID       string
+		chunkRef      string
+		req           UpdateChunkRequest
+		beginErr      error
+		buildScanErr  error
+		buildStatus   string
+		chunksErr     error
+		scanChunksErr error
+		chunks        []VanadisChunk
+		execErr       error
+		commitErr     error
+		wantErrIs     error
+		wantErr       bool
+	}{
+		{"empty_build_id", "", "c1", UpdateChunkRequest{Title: "T"}, nil, nil, "", nil, nil, nil, nil, nil, ErrInvalidBuildInput, true},
+		{"empty_chunk_ref", "b1", "", UpdateChunkRequest{Title: "T"}, nil, nil, "", nil, nil, nil, nil, nil, ErrInvalidBuildInput, true},
+		{"no_fields", "b1", "c1", UpdateChunkRequest{}, nil, nil, "", nil, nil, nil, nil, nil, ErrInvalidBuildInput, true},
+		{"invalid_effort", "b1", "c1", UpdateChunkRequest{Effort: "extreme"}, nil, nil, "", nil, nil, nil, nil, nil, ErrInvalidBuildInput, true},
+		{"begin_error", "b1", "c1", UpdateChunkRequest{Title: "T"}, errors.New("begin err"), nil, "", nil, nil, nil, nil, nil, nil, true},
+		{"build_not_found", "b1", "c1", UpdateChunkRequest{Title: "T"}, nil, pgx.ErrNoRows, "", nil, nil, nil, nil, nil, ErrBuildNotFound, true},
+		{"build_query_error", "b1", "c1", UpdateChunkRequest{Title: "T"}, nil, errors.New("query err"), "", nil, nil, nil, nil, nil, nil, true},
+		{"build_conflict_status", "b1", "c1", UpdateChunkRequest{Title: "T"}, nil, nil, "completed", nil, nil, nil, nil, nil, ErrBuildConflict, true},
+		{"chunks_query_error", "b1", "c1", UpdateChunkRequest{Title: "T"}, nil, nil, "running", errors.New("chunks query err"), nil, nil, nil, nil, nil, true},
+		{"chunks_scan_error", "b1", "c1", UpdateChunkRequest{Title: "T"}, nil, nil, "running", nil, errors.New("chunks scan err"), []VanadisChunk{{ID: "c1"}}, nil, nil, nil, true},
+		{"chunk_not_found", "b1", "c999", UpdateChunkRequest{Title: "T"}, nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", Status: "pending"}}, nil, nil, ErrChunkNotFound, true},
+		{"chunk_conflict_status", "b1", "c1", UpdateChunkRequest{Title: "T"}, nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", Status: "running"}}, nil, nil, ErrBuildConflict, true},
+		{"exec_error", "b1", "c1", UpdateChunkRequest{Title: "T"}, nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", Status: "pending"}}, errors.New("exec err"), nil, nil, true},
+		{"commit_error", "b1", "c1", UpdateChunkRequest{Title: "T"}, nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", Status: "pending"}}, nil, errors.New("commit err"), nil, true},
+		{"success", "b1", "c1", UpdateChunkRequest{Repo: "mirrormere", Title: "New Title", Instructions: "New Instr", Effort: "low", TargetFiles: []string{"a.go"}, TargetSymbols: []string{"A"}}, nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", Status: "pending"}}, nil, nil, nil, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := &mockTx{
+				commitErr: tc.commitErr,
+				queryRowFn: func(context.Context, string, ...any) pgx.Row {
+					if tc.buildScanErr != nil {
+						return &mockRow{err: tc.buildScanErr}
+					}
+					return &mockRow{b: &VanadisBuild{ID: tc.buildID, Status: tc.buildStatus}}
+				},
+				queryFn: func(context.Context, string, ...any) (pgx.Rows, error) {
+					if tc.chunksErr != nil {
+						return nil, tc.chunksErr
+					}
+					return &mockRows{items: tc.chunks, scanErr: tc.scanChunksErr}, nil
+				},
+				execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
+					if tc.execErr != nil {
+						return pgconn.CommandTag{}, tc.execErr
+					}
+					return pgconn.NewCommandTag("UPDATE 1"), nil
+				},
+			}
+			db := mockDB{
+				beginFn: func(context.Context) (pgx.Tx, error) {
+					if tc.beginErr != nil {
+						return nil, tc.beginErr
+					}
+					return tx, nil
+				},
+			}
+			store := NewPostgresVanadisStore(&db)
+			got, err := store.UpdateChunk(context.Background(), tc.buildID, tc.chunkRef, tc.req)
+			if tc.wantErrIs != nil {
+				if !errors.Is(err, tc.wantErrIs) {
+					t.Fatalf("expected error %v, got %v", tc.wantErrIs, err)
+				}
+				return
+			}
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got == nil || got.Title != tc.req.Title {
+				t.Fatalf("unexpected updated chunk: %+v", got)
+			}
+		})
+	}
+}
+
+func TestPostgresVanadisStore_AppendChunks(t *testing.T) {
+	tests := []struct {
+		name          string
+		buildID       string
+		inputs        []CreateChunkInput
+		beginErr      error
+		buildScanErr  error
+		buildStatus   string
+		chunksErr     error
+		scanChunksErr error
+		existing      []VanadisChunk
+		execErr       error
+		commitErr     error
+		wantErrIs     error
+		wantErr       bool
+		wantCount     int
+	}{
+		{"empty_build_id", "", []CreateChunkInput{{Title: "T", Instructions: "I"}}, nil, nil, "", nil, nil, nil, nil, nil, ErrInvalidBuildInput, true, 0},
+		{"empty_inputs", "b1", nil, nil, nil, "", nil, nil, nil, nil, nil, ErrInvalidBuildInput, true, 0},
+		{"empty_title", "b1", []CreateChunkInput{{Title: "", Instructions: "I"}}, nil, nil, "", nil, nil, nil, nil, nil, ErrInvalidBuildInput, true, 0},
+		{"empty_instructions", "b1", []CreateChunkInput{{Title: "T", Instructions: ""}}, nil, nil, "", nil, nil, nil, nil, nil, ErrInvalidBuildInput, true, 0},
+		{"invalid_id", "b1", []CreateChunkInput{{ID: "bad:id", Title: "T", Instructions: "I"}}, nil, nil, "", nil, nil, nil, nil, nil, ErrInvalidBuildInput, true, 0},
+		{"invalid_effort", "b1", []CreateChunkInput{{Title: "T", Instructions: "I", Effort: "super"}}, nil, nil, "", nil, nil, nil, nil, nil, ErrInvalidBuildInput, true, 0},
+		{"begin_error", "b1", []CreateChunkInput{{Title: "T", Instructions: "I"}}, errors.New("begin err"), nil, "", nil, nil, nil, nil, nil, nil, true, 0},
+		{"build_not_found", "b1", []CreateChunkInput{{Title: "T", Instructions: "I"}}, nil, pgx.ErrNoRows, "", nil, nil, nil, nil, nil, ErrBuildNotFound, true, 0},
+		{"build_query_error", "b1", []CreateChunkInput{{Title: "T", Instructions: "I"}}, nil, errors.New("query err"), "", nil, nil, nil, nil, nil, nil, true, 0},
+		{"build_conflict_status", "b1", []CreateChunkInput{{Title: "T", Instructions: "I"}}, nil, nil, "completed", nil, nil, nil, nil, nil, ErrBuildConflict, true, 0},
+		{"chunks_query_error", "b1", []CreateChunkInput{{Title: "T", Instructions: "I"}}, nil, nil, "running", errors.New("chunks err"), nil, nil, nil, nil, nil, true, 0},
+		{"chunks_scan_error", "b1", []CreateChunkInput{{Title: "T", Instructions: "I"}}, nil, nil, "running", nil, errors.New("scan err"), []VanadisChunk{{ID: "c1"}}, nil, nil, nil, true, 0},
+		{"duplicate_id_conflict", "b1", []CreateChunkInput{{ID: "c1", Title: "T", Instructions: "I"}}, nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1"}}, nil, nil, ErrBuildConflict, true, 0},
+		{"exec_insert_error", "b1", []CreateChunkInput{{Title: "T", Instructions: "I"}}, nil, nil, "running", nil, nil, nil, errors.New("insert err"), nil, nil, true, 0},
+		{"commit_error", "b1", []CreateChunkInput{{Title: "T", Instructions: "I"}}, nil, nil, "running", nil, nil, nil, nil, errors.New("commit err"), nil, true, 0},
+		{"success_with_id_collision_resolution", "b1", []CreateChunkInput{{Title: "T", Instructions: "I"}}, nil, nil, "running", nil, nil, []VanadisChunk{{ID: "b1-chunk-1", ChunkIndex: 0, Repo: "azylman/mirrormere"}}, nil, nil, nil, false, 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := &mockTx{
+				commitErr: tc.commitErr,
+				queryRowFn: func(context.Context, string, ...any) pgx.Row {
+					if tc.buildScanErr != nil {
+						return &mockRow{err: tc.buildScanErr}
+					}
+					return &mockRow{b: &VanadisBuild{ID: tc.buildID, Status: tc.buildStatus}}
+				},
+				queryFn: func(context.Context, string, ...any) (pgx.Rows, error) {
+					if tc.chunksErr != nil {
+						return nil, tc.chunksErr
+					}
+					return &mockRows{items: tc.existing, scanErr: tc.scanChunksErr}, nil
+				},
+				execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
+					if tc.execErr != nil {
+						return pgconn.CommandTag{}, tc.execErr
+					}
+					return pgconn.NewCommandTag("INSERT 0 1"), nil
+				},
+			}
+			db := mockDB{
+				beginFn: func(context.Context) (pgx.Tx, error) {
+					if tc.beginErr != nil {
+						return nil, tc.beginErr
+					}
+					return tx, nil
+				},
+			}
+			store := NewPostgresVanadisStore(&db)
+			got, err := store.AppendChunks(context.Background(), tc.buildID, tc.inputs)
+			if tc.wantErrIs != nil {
+				if !errors.Is(err, tc.wantErrIs) {
+					t.Fatalf("expected error %v, got %v", tc.wantErrIs, err)
+				}
+				return
+			}
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(got) != tc.wantCount {
+				t.Fatalf("got %d chunks, want %d", len(got), tc.wantCount)
+			}
+		})
+	}
+}
+
+func TestPostgresVanadisStore_RemoveChunk(t *testing.T) {
+	tests := []struct {
+		name           string
+		buildID        string
+		chunkRef       string
+		beginErr       error
+		buildScanErr   error
+		buildStatus    string
+		chunksErr      error
+		scanChunksErr  error
+		existing       []VanadisChunk
+		delExecErr     error
+		compactExecErr error
+		commitErr      error
+		wantErrIs      error
+		wantErr        bool
+		wantRemainLen  int
+	}{
+		{"empty_build_id", "", "c1", nil, nil, "", nil, nil, nil, nil, nil, nil, ErrInvalidBuildInput, true, 0},
+		{"empty_chunk_ref", "b1", "", nil, nil, "", nil, nil, nil, nil, nil, nil, ErrInvalidBuildInput, true, 0},
+		{"begin_error", "b1", "c1", errors.New("begin err"), nil, "", nil, nil, nil, nil, nil, nil, nil, true, 0},
+		{"build_not_found", "b1", "c1", nil, pgx.ErrNoRows, "", nil, nil, nil, nil, nil, nil, ErrBuildNotFound, true, 0},
+		{"build_query_error", "b1", "c1", nil, errors.New("query err"), "", nil, nil, nil, nil, nil, nil, nil, true, 0},
+		{"build_conflict_status", "b1", "c1", nil, nil, "completed", nil, nil, nil, nil, nil, nil, ErrBuildConflict, true, 0},
+		{"chunks_query_error", "b1", "c1", nil, nil, "running", errors.New("chunks err"), nil, nil, nil, nil, nil, nil, true, 0},
+		{"chunks_scan_error", "b1", "c1", nil, nil, "running", nil, errors.New("scan err"), []VanadisChunk{{ID: "c1"}}, nil, nil, nil, nil, true, 0},
+		{"chunk_not_found", "b1", "c999", nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", Status: "pending"}}, nil, nil, nil, ErrChunkNotFound, true, 0},
+		{"chunk_conflict_status", "b1", "c1", nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", Status: "running"}, {ID: "c2", Status: "pending"}}, nil, nil, nil, ErrBuildConflict, true, 0},
+		{"cannot_remove_only_chunk", "b1", "c1", nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", Status: "pending"}}, nil, nil, nil, ErrBuildConflict, true, 0},
+		{"delete_exec_error", "b1", "c2", nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", ChunkIndex: 0, Status: "running"}, {ID: "c2", ChunkIndex: 1, Status: "pending"}}, errors.New("del err"), nil, nil, nil, true, 0},
+		{"compact_exec_error", "b1", "c1", nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", ChunkIndex: 0, Status: "pending"}, {ID: "c2", ChunkIndex: 1, Status: "pending"}}, nil, errors.New("compact err"), nil, nil, true, 0},
+		{"commit_error", "b1", "c2", nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", ChunkIndex: 0, Status: "running"}, {ID: "c2", ChunkIndex: 1, Status: "pending"}}, nil, nil, errors.New("commit err"), nil, true, 0},
+		{"success", "b1", "1", nil, nil, "running", nil, nil, []VanadisChunk{{ID: "c1", ChunkIndex: 0, Status: "running"}, {ID: "c2", ChunkIndex: 1, Status: "pending"}, {ID: "c3", ChunkIndex: 2, Status: "pending"}}, nil, nil, nil, nil, false, 2},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := &mockTx{
+				commitErr: tc.commitErr,
+				queryRowFn: func(context.Context, string, ...any) pgx.Row {
+					if tc.buildScanErr != nil {
+						return &mockRow{err: tc.buildScanErr}
+					}
+					return &mockRow{b: &VanadisBuild{ID: tc.buildID, Status: tc.buildStatus}}
+				},
+				queryFn: func(context.Context, string, ...any) (pgx.Rows, error) {
+					if tc.chunksErr != nil {
+						return nil, tc.chunksErr
+					}
+					return &mockRows{items: tc.existing, scanErr: tc.scanChunksErr}, nil
+				},
+				execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
+					if tc.delExecErr != nil {
+						return pgconn.CommandTag{}, tc.delExecErr
+					}
+					if tc.compactExecErr != nil {
+						return pgconn.CommandTag{}, tc.compactExecErr
+					}
+					return pgconn.NewCommandTag("DELETE 1"), nil
+				},
+			}
+			db := mockDB{
+				beginFn: func(context.Context) (pgx.Tx, error) {
+					if tc.beginErr != nil {
+						return nil, tc.beginErr
+					}
+					return tx, nil
+				},
+			}
+			store := NewPostgresVanadisStore(&db)
+			removed, remaining, err := store.RemoveChunk(context.Background(), tc.buildID, tc.chunkRef)
+			if tc.wantErrIs != nil {
+				if !errors.Is(err, tc.wantErrIs) {
+					t.Fatalf("expected error %v, got %v", tc.wantErrIs, err)
+				}
+				return
+			}
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if removed == nil {
+				t.Fatal("expected removed chunk, got nil")
+			}
+			if len(remaining) != tc.wantRemainLen {
+				t.Fatalf("got %d remaining chunks, want %d", len(remaining), tc.wantRemainLen)
+			}
+		})
+	}
 }

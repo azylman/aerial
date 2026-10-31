@@ -152,9 +152,9 @@ func (db *mockDB) Begin(ctx context.Context) (pgx.Tx, error) {
 }
 
 type memoryVanadisStore struct {
-	builds                                                     map[string]VanadisBuild
-	chunks                                                     map[string][]VanadisChunk
-	createErr, getErr, listErr, updateChunkErr, updateBuildErr error
+	builds                                                                                      map[string]VanadisBuild
+	chunks                                                                                      map[string][]VanadisChunk
+	createErr, getErr, listErr, updateChunkErr, updateBuildErr, appendChunksErr, removeChunkErr error
 }
 
 func newMemoryVanadisStore() *memoryVanadisStore {
@@ -488,6 +488,220 @@ func (m *memoryVanadisStore) FailChunkByPR(_ context.Context, repo string, prNum
 		}
 	}
 	return "", "", false, nil
+}
+
+func (m *memoryVanadisStore) UpdateBuild(_ context.Context, buildID string, req UpdateBuildRequest) (*VanadisBuild, error) {
+	if m.updateBuildErr != nil {
+		return nil, m.updateBuildErr
+	}
+	buildID = strings.TrimSpace(buildID)
+	title := strings.TrimSpace(req.Title)
+	obj := strings.TrimSpace(req.Objective)
+	sharedCtx := strings.TrimSpace(req.SharedContext)
+	if buildID == "" || (title == "" && obj == "" && sharedCtx == "") {
+		return nil, fmt.Errorf("%w: build id and at least one non-empty field are required", ErrInvalidBuildInput)
+	}
+	b, ok := m.builds[buildID]
+	if !ok {
+		return nil, ErrBuildNotFound
+	}
+	if b.Status != "running" {
+		return nil, fmt.Errorf("%w: build %s has status %q (must be running)", ErrBuildConflict, buildID, b.Status)
+	}
+	if title != "" {
+		b.Title = title
+	}
+	if obj != "" {
+		b.Objective = obj
+	}
+	if sharedCtx != "" {
+		b.SharedContext = sharedCtx
+	}
+	b.UpdatedAt = time.Now().UTC()
+	m.builds[buildID] = b
+	return &b, nil
+}
+
+func (m *memoryVanadisStore) UpdateChunk(_ context.Context, buildID, chunkRef string, req UpdateChunkRequest) (*VanadisChunk, error) {
+	if m.updateChunkErr != nil {
+		return nil, m.updateChunkErr
+	}
+	buildID, chunkRef = strings.TrimSpace(buildID), strings.TrimSpace(chunkRef)
+	repo := strings.TrimSpace(req.Repo)
+	title := strings.TrimSpace(req.Title)
+	instructions := strings.TrimSpace(req.Instructions)
+	effortStr := strings.TrimSpace(req.Effort)
+	hasField := repo != "" || title != "" || instructions != "" || effortStr != "" || req.TargetFiles != nil || req.TargetSymbols != nil
+	if buildID == "" || chunkRef == "" || !hasField {
+		return nil, fmt.Errorf("%w: build id, chunk ref, and at least one updated field are required", ErrInvalidBuildInput)
+	}
+	var normEffort string
+	if effortStr != "" {
+		var effErr error
+		normEffort, effErr = normalizeChunkEffort(effortStr)
+		if effErr != nil {
+			return nil, fmt.Errorf("%w: %w", ErrInvalidBuildInput, effErr)
+		}
+	}
+	b, ok := m.builds[buildID]
+	if !ok {
+		return nil, ErrBuildNotFound
+	}
+	if b.Status != "running" {
+		return nil, fmt.Errorf("%w: build %s has status %q (must be running)", ErrBuildConflict, buildID, b.Status)
+	}
+	list := m.chunks[buildID]
+	idx := resolveChunkRef(list, chunkRef)
+	if idx < 0 {
+		return nil, ErrChunkNotFound
+	}
+	c := list[idx]
+	if c.Status != "pending" {
+		return nil, fmt.Errorf("%w: chunk %s has status %q (must be pending)", ErrBuildConflict, c.ID, c.Status)
+	}
+	if repo != "" {
+		c.Repo = normalizeRepo(repo)
+	}
+	if title != "" {
+		c.Title = title
+	}
+	if instructions != "" {
+		c.Instructions = instructions
+	}
+	if req.TargetFiles != nil {
+		c.TargetFiles = nonNilSlice(req.TargetFiles)
+	}
+	if req.TargetSymbols != nil {
+		c.TargetSymbols = nonNilSlice(req.TargetSymbols)
+	}
+	if normEffort != "" {
+		c.Effort = normEffort
+	}
+	c.UpdatedAt = time.Now().UTC()
+	list[idx] = c
+	m.chunks[buildID] = list
+	return &c, nil
+}
+
+func (m *memoryVanadisStore) AppendChunks(_ context.Context, buildID string, inputs []CreateChunkInput) ([]VanadisChunk, error) {
+	if m.appendChunksErr != nil {
+		return nil, m.appendChunksErr
+	}
+	buildID = strings.TrimSpace(buildID)
+	if buildID == "" || len(inputs) == 0 {
+		return nil, fmt.Errorf("%w: build id and at least one chunk are required", ErrInvalidBuildInput)
+	}
+	for i, in := range inputs {
+		if strings.TrimSpace(in.Title) == "" || strings.TrimSpace(in.Instructions) == "" {
+			return nil, fmt.Errorf("%w: chunk[%d] title and instructions cannot be empty", ErrInvalidBuildInput, i)
+		}
+		if id := strings.TrimSpace(in.ID); id != "" && !isValidVanadisChunkID(id) {
+			return nil, fmt.Errorf("%w: chunk[%d] invalid id %q", ErrInvalidBuildInput, i, id)
+		}
+		if _, err := normalizeChunkEffort(in.Effort); err != nil {
+			return nil, fmt.Errorf("%w: chunk[%d] %w", ErrInvalidBuildInput, i, err)
+		}
+	}
+	b, ok := m.builds[buildID]
+	if !ok {
+		return nil, ErrBuildNotFound
+	}
+	if b.Status != "running" {
+		return nil, fmt.Errorf("%w: build %s has status %q (must be running)", ErrBuildConflict, buildID, b.Status)
+	}
+	existing := m.chunks[buildID]
+	usedIDs := make(map[string]bool, len(existing)+len(inputs))
+	for _, c := range existing {
+		usedIDs[c.ID] = true
+	}
+	nextIdx := 0
+	defaultRepo := "azylman/aerial"
+	if len(existing) > 0 {
+		last := existing[len(existing)-1]
+		nextIdx = last.ChunkIndex + 1
+		defaultRepo = firstNonEmpty(last.Repo, "azylman/aerial")
+	}
+	now := time.Now().UTC()
+	appended := make([]VanadisChunk, 0, len(inputs))
+	for _, in := range inputs {
+		repo := firstNonEmpty(normalizeRepo(in.Repo), defaultRepo)
+		var resolvedID string
+		if cleanID := strings.TrimSpace(in.ID); cleanID != "" {
+			if usedIDs[cleanID] {
+				return nil, fmt.Errorf("%w: duplicate chunk id %q", ErrBuildConflict, cleanID)
+			}
+			resolvedID = cleanID
+		} else {
+			n := nextIdx + 1
+			for {
+				candidate := fmt.Sprintf("%s-chunk-%d", buildID, n)
+				if !usedIDs[candidate] {
+					resolvedID = candidate
+					break
+				}
+				n++
+			}
+		}
+		usedIDs[resolvedID] = true
+		eff, _ := normalizeChunkEffort(in.Effort)
+		newChunk := VanadisChunk{
+			ID:                 resolvedID,
+			BuildID:            buildID,
+			ChunkIndex:         nextIdx,
+			Repo:               repo,
+			Title:              strings.TrimSpace(in.Title),
+			Instructions:       strings.TrimSpace(in.Instructions),
+			TargetFiles:        nonNilSlice(in.TargetFiles),
+			TargetSymbols:      nonNilSlice(in.TargetSymbols),
+			Effort:             eff,
+			AcceptanceCriteria: nonNilSlice(in.AcceptanceCriteria),
+			Status:             "pending",
+			CreatedAt:          now,
+			UpdatedAt:          now,
+		}
+		appended = append(appended, newChunk)
+		existing = append(existing, newChunk)
+		nextIdx++
+	}
+	m.chunks[buildID] = existing
+	return appended, nil
+}
+
+func (m *memoryVanadisStore) RemoveChunk(_ context.Context, buildID, chunkRef string) (*VanadisChunk, []VanadisChunk, error) {
+	if m.removeChunkErr != nil {
+		return nil, nil, m.removeChunkErr
+	}
+	buildID, chunkRef = strings.TrimSpace(buildID), strings.TrimSpace(chunkRef)
+	if buildID == "" || chunkRef == "" {
+		return nil, nil, fmt.Errorf("%w: build id and chunk ref are required", ErrInvalidBuildInput)
+	}
+	b, ok := m.builds[buildID]
+	if !ok {
+		return nil, nil, ErrBuildNotFound
+	}
+	if b.Status != "running" {
+		return nil, nil, fmt.Errorf("%w: build %s has status %q (must be running)", ErrBuildConflict, buildID, b.Status)
+	}
+	existing := m.chunks[buildID]
+	removeIdx := resolveChunkRef(existing, chunkRef)
+	if removeIdx < 0 {
+		return nil, nil, ErrChunkNotFound
+	}
+	removed := existing[removeIdx]
+	if removed.Status != "pending" {
+		return nil, nil, fmt.Errorf("%w: chunk %s has status %q (must be pending)", ErrBuildConflict, removed.ID, removed.Status)
+	}
+	if len(existing) <= 1 {
+		return nil, nil, fmt.Errorf("%w: cannot remove the only chunk of build %s", ErrBuildConflict, buildID)
+	}
+	for i := removeIdx + 1; i < len(existing); i++ {
+		existing[i].ChunkIndex--
+	}
+	remaining := make([]VanadisChunk, 0, len(existing)-1)
+	remaining = append(remaining, existing[:removeIdx]...)
+	remaining = append(remaining, existing[removeIdx+1:]...)
+	m.chunks[buildID] = remaining
+	return &removed, remaining, nil
 }
 
 type mockRiverInserter struct {
