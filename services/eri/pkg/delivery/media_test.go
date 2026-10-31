@@ -2,6 +2,7 @@ package delivery
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -545,10 +546,10 @@ func TestExtractAndSanitizeMedia_InternalAerialImages(t *testing.T) {
 		t.Fatalf("failed to parse server url: %v", err)
 	}
 
-	// Register test server host in allowedInternalHosts
+	// Register test server host in AllowedInternalHosts
 	serverHost := strings.ToLower(serverURL.Hostname())
-	allowedInternalHosts[serverHost] = true
-	defer delete(allowedInternalHosts, serverHost)
+	AllowedInternalHosts[serverHost] = true
+	defer delete(AllowedInternalHosts, serverHost)
 
 	tests := []struct {
 		name               string
@@ -646,43 +647,158 @@ func TestExtractAndSanitizeMedia_InternalAerialImages(t *testing.T) {
 }
 
 func TestResolveAndFetchInternalImage_Validation(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 5, 5))
+	var pngBuf bytes.Buffer
+	if err := png.Encode(&pngBuf, img); err != nil {
+		t.Fatalf("failed to encode png: %v", err)
+	}
+	validPNGData := pngBuf.Bytes()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/media/pic.png":
+			w.Header().Set("Content-Type", "image/png")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(validPNGData)
+		case "/media/data.json":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+		case "/media/redirect-disallowed":
+			http.Redirect(w, r, "http://external.example.com/pic.png", http.StatusFound)
+		case "/media/redirect-allowed":
+			http.Redirect(w, r, "/media/pic.png", http.StatusFound)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("failed to parse server url: %v", err)
+	}
+	serverHost := strings.ToLower(serverURL.Hostname())
+	AllowedInternalHosts[serverHost] = true
+	defer delete(AllowedInternalHosts, serverHost)
+
 	tests := []struct {
-		name    string
-		rawURL  string
-		wantErr bool
+		name            string
+		rawURL          string
+		filename        string
+		wantErr         bool
+		wantErrSentinel error
+		wantFilename    string
+		wantContentType string
 	}{
 		{
-			name:    "disallowed non-internal domain",
-			rawURL:  "https://example.com/pic.png",
-			wantErr: true,
+			name:            "disallowed non-internal domain",
+			rawURL:          "https://example.com/pic.png",
+			wantErr:         true,
+			wantErrSentinel: ErrInvalidInternalAttachment,
 		},
 		{
-			name:    "invalid url format",
-			rawURL:  "://invalid-url",
-			wantErr: true,
+			name:            "invalid url format",
+			rawURL:          "://invalid-url",
+			wantErr:         true,
+			wantErrSentinel: ErrInvalidInternalAttachment,
 		},
 		{
-			name:    "unsupported scheme file",
-			rawURL:  "file:///vision.aerial/media/test.png",
-			wantErr: true,
+			name:            "unsupported scheme file",
+			rawURL:          "file:///vision.aerial/media/test.png",
+			wantErr:         true,
+			wantErrSentinel: ErrInvalidInternalAttachment,
 		},
 		{
 			name:    "internal .aerial host with connection refused",
 			rawURL:  "http://vision.aerial:59999/nonexistent.jpg",
 			wantErr: true,
 		},
+		{
+			name:            "valid image with inferred filename",
+			rawURL:          server.URL + "/media/pic.png",
+			filename:        "",
+			wantErr:         false,
+			wantFilename:    "pic.png",
+			wantContentType: "image/png",
+		},
+		{
+			name:            "valid image with custom filename",
+			rawURL:          server.URL + "/media/pic.png",
+			filename:        "custom.png",
+			wantErr:         false,
+			wantFilename:    "custom.png",
+			wantContentType: "image/png",
+		},
+		{
+			name:            "valid json payload",
+			rawURL:          server.URL + "/media/data.json",
+			filename:        "data.json",
+			wantErr:         false,
+			wantFilename:    "data.json",
+			wantContentType: "application/json",
+		},
+		{
+			name:            "invalid traversal filename",
+			rawURL:          server.URL + "/media/pic.png",
+			filename:        "../evil.png",
+			wantErr:         true,
+			wantErrSentinel: ErrInvalidInternalAttachment,
+		},
+		{
+			name:            "invalid newline in filename",
+			rawURL:          server.URL + "/media/pic.png",
+			filename:        "line\nbreak.png",
+			wantErr:         true,
+			wantErrSentinel: ErrInvalidInternalAttachment,
+		},
+		{
+			name:            "disallowed redirect target",
+			rawURL:          server.URL + "/media/redirect-disallowed",
+			filename:        "redirect.png",
+			wantErr:         true,
+			wantErrSentinel: ErrInvalidInternalAttachment,
+		},
+		{
+			name:            "allowed redirect target",
+			rawURL:          server.URL + "/media/redirect-allowed",
+			filename:        "redirect.png",
+			wantErr:         false,
+			wantFilename:    "redirect.png",
+			wantContentType: "image/png",
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := ResolveAndFetchInternalImage(tc.rawURL)
-			if tc.wantErr && err == nil {
-				t.Errorf("expected error for %s, got nil", tc.rawURL)
+			att, err := ResolveAndFetchInternalAttachment(tc.rawURL, tc.filename)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %s, got nil", tc.rawURL)
+				}
+				if tc.wantErrSentinel != nil && !errors.Is(err, tc.wantErrSentinel) {
+					t.Errorf("expected error to wrap %v, got %v", tc.wantErrSentinel, err)
+				}
+				return
 			}
-			if !tc.wantErr && err != nil {
-				t.Errorf("unexpected error for %s: %v", tc.rawURL, err)
+			if err != nil {
+				t.Fatalf("unexpected error for %s: %v", tc.rawURL, err)
+			}
+			if att.Filename != tc.wantFilename {
+				t.Errorf("expected filename %q, got %q", tc.wantFilename, att.Filename)
+			}
+			if att.ContentType != tc.wantContentType {
+				t.Errorf("expected content type %q, got %q", tc.wantContentType, att.ContentType)
 			}
 		})
+	}
+
+	imgAtt, err := ResolveAndFetchInternalImage(server.URL + "/media/pic.png")
+	if err != nil || imgAtt.Filename != "pic.png" {
+		t.Errorf("ResolveAndFetchInternalImage failed on valid image: %v", err)
+	}
+	if _, err := ResolveAndFetchInternalImage(server.URL + "/media/data.json"); err == nil {
+		t.Errorf("expected ResolveAndFetchInternalImage to reject JSON payload")
 	}
 }
 

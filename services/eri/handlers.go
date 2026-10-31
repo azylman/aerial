@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -826,6 +827,89 @@ func setNoCacheJSONHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 }
 
+type InternalLLMAttachment struct {
+	URL      string `json:"url"`
+	Filename string `json:"filename"`
+}
+
+func validateInternalLLMAttachments(atts []InternalLLMAttachment) error {
+	if len(atts) > delivery.MaxAttachmentsPerMessage {
+		return fmt.Errorf("attachments count %d exceeds maximum of %d", len(atts), delivery.MaxAttachmentsPerMessage)
+	}
+	seen := make(map[string]bool, len(atts))
+	for _, a := range atts {
+		rawURL := strings.TrimSpace(a.URL)
+		filename := strings.TrimSpace(a.Filename)
+		if rawURL == "" || filename == "" {
+			return errors.New("attachment URL and filename cannot be empty")
+		}
+		lower := strings.ToLower(filename)
+		if seen[lower] {
+			return fmt.Errorf("duplicate attachment filename %q", filename)
+		}
+		seen[lower] = true
+	}
+	return nil
+}
+
+type stagedAttachmentFile struct {
+	path     string
+	mimeType string
+	size     int
+}
+
+func cleanTempDir(dir string) {
+	if err := os.RemoveAll(dir); err != nil {
+		log.Printf("[Internal LLM] Warning: failed to clean up temp dir %s: %v", dir, err)
+	}
+}
+
+func stageInternalLLMAttachments(atts []InternalLLMAttachment) (string, string, int, error) {
+	if len(atts) == 0 {
+		return "", "", http.StatusOK, nil
+	}
+	if err := validateInternalLLMAttachments(atts); err != nil {
+		return "", "", http.StatusBadRequest, err
+	}
+	tmpDir, err := os.MkdirTemp("", "eri-llm-*")
+	if err != nil {
+		return "", "", http.StatusInternalServerError, fmt.Errorf("failed to create temporary staging directory: %w", err)
+	}
+
+	stagedFiles := make([]stagedAttachmentFile, 0, len(atts))
+	for _, a := range atts {
+		att, err := delivery.ResolveAndFetchInternalAttachment(a.URL, a.Filename)
+		if err != nil {
+			cleanTempDir(tmpDir)
+			if errors.Is(err, delivery.ErrInvalidInternalAttachment) {
+				return "", "", http.StatusBadRequest, err
+			}
+			return "", "", http.StatusBadGateway, err
+		}
+		targetPath := filepath.Join(tmpDir, att.Filename)
+		if err := os.WriteFile(targetPath, att.Data, 0o600); err != nil {
+			cleanTempDir(tmpDir)
+			return "", "", http.StatusInternalServerError, fmt.Errorf("failed to stage attachment %q: %w", att.Filename, err)
+		}
+		stagedFiles = append(stagedFiles, stagedAttachmentFile{
+			path:     targetPath,
+			mimeType: att.ContentType,
+			size:     len(att.Data),
+		})
+	}
+
+	var sb strings.Builder
+	sb.WriteString("\n\n<ATTACHMENTS>\n")
+	sb.WriteString(fmt.Sprintf("Staged directory: %s\n", tmpDir))
+	sb.WriteString("Files are pre-downloaded and staged for direct inspection. Use read_file or view_file to examine them; do not execute curl, wget, or rm commands.\n")
+	for _, f := range stagedFiles {
+		sb.WriteString(fmt.Sprintf("- %s (%s, %d bytes)\n", f.path, f.mimeType, f.size))
+	}
+	sb.WriteString("</ATTACHMENTS>")
+
+	return tmpDir, sb.String(), http.StatusOK, nil
+}
+
 func handleInternalLLM(llmFn func(context.Context, string, string) (string, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -838,7 +922,8 @@ func handleInternalLLM(llmFn func(context.Context, string, string) (string, erro
 			return
 		}
 		var req struct {
-			Prompt string `json:"prompt"`
+			Prompt      string                  `json:"prompt"`
+			Attachments []InternalLLMAttachment `json:"attachments"`
 		}
 		if !readPostJSON(w, r, &req) {
 			return
@@ -848,6 +933,17 @@ func handleInternalLLM(llmFn func(context.Context, string, string) (string, erro
 			writeErr(w, http.StatusBadRequest, "Invalid payload: 'prompt' field is required and cannot be empty")
 			return
 		}
+
+		tmpDir, attBlock, statusCode, err := stageInternalLLMAttachments(req.Attachments)
+		if err != nil {
+			writeErr(w, statusCode, err.Error())
+			return
+		}
+		if tmpDir != "" {
+			defer cleanTempDir(tmpDir)
+			prompt += attBlock
+		}
+
 		resp, err := llmFn(r.Context(), "", prompt)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
