@@ -114,26 +114,32 @@ func isExcludedSchemaKey(k string) bool {
 	}
 }
 
+func parseSliceTypes(types []string) (string, bool) {
+	var isNullable bool
+	var primaryType string
+	for _, s := range types {
+		if strings.EqualFold(s, "null") {
+			isNullable = true
+		} else if primaryType == "" {
+			primaryType = normalizeSchemaType(s)
+		}
+	}
+	if primaryType == "" {
+		primaryType = "OBJECT"
+	}
+	return primaryType, isNullable
+}
+
 func normalizeSchemaTypeField(cp map[string]interface{}) {
 	if types, ok := toStringSlice(cp["type"]); ok {
-		var isNullable bool
-		var primaryType string
-		for _, s := range types {
-			if strings.EqualFold(s, "null") {
-				isNullable = true
-			} else if primaryType == "" {
-				primaryType = normalizeSchemaType(s)
-			}
-		}
-		if primaryType != "" {
-			cp["type"] = primaryType
-		} else {
-			cp["type"] = "OBJECT"
-		}
+		primaryType, isNullable := parseSliceTypes(types)
+		cp["type"] = primaryType
 		if isNullable {
 			cp["nullable"] = true
 		}
-	} else if t, ok := cp["type"].(string); ok {
+		return
+	}
+	if t, ok := cp["type"].(string); ok {
 		if strings.EqualFold(t, "null") {
 			cp["type"], cp["nullable"] = "OBJECT", true
 		} else {
@@ -365,6 +371,23 @@ type GeminiAPIPool struct {
 
 var _ AgentPool = (*GeminiAPIPool)(nil)
 
+func loadVoiceRulesSystemPrompt(dataDir string) string {
+	rulesDir := filepath.Join(dataDir, "runtimes", "voice", ".gemini", "config", "rules")
+	entries, err := os.ReadDir(rulesDir)
+	if err != nil || len(entries) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
+			if c, rErr := os.ReadFile(filepath.Join(rulesDir, e.Name())); rErr == nil && len(c) > 0 {
+				parts = append(parts, string(c))
+			}
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
 func NewGeminiAPIPool(cfg GeminiAPIPoolConfig) *GeminiAPIPool {
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = "https://generativelanguage.googleapis.com"
@@ -389,17 +412,8 @@ func NewGeminiAPIPool(cfg GeminiAPIPoolConfig) *GeminiAPIPool {
 		}()
 	}
 	if strings.TrimSpace(cfg.SystemPrompt) == "" && cfg.DataDir != "" {
-		rulesDir := filepath.Join(cfg.DataDir, "runtimes", "voice", ".gemini", "config", "rules")
-		if entries, err := os.ReadDir(rulesDir); err == nil && len(entries) > 0 {
-			var parts []string
-			for _, e := range entries {
-				if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
-					if c, rErr := os.ReadFile(filepath.Join(rulesDir, e.Name())); rErr == nil && len(c) > 0 {
-						parts = append(parts, string(c))
-					}
-				}
-			}
-			cfg.SystemPrompt = strings.Join(parts, "\n\n")
+		if prompt := loadVoiceRulesSystemPrompt(cfg.DataDir); prompt != "" {
+			cfg.SystemPrompt = prompt
 		}
 	}
 	return &GeminiAPIPool{
@@ -521,19 +535,22 @@ func (s *GeminiAPISession) hydrateHistory() {
 	}
 	var loaded []geminiContent
 	for _, l := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		if trimmed := strings.TrimSpace(l); trimmed != "" {
-			var entry struct{ Type, Content string }
-			if json.Unmarshal([]byte(trimmed), &entry) == nil && entry.Content != "" {
-				role := ""
-				if entry.Type == "USER_INPUT" {
-					role = "user"
-				} else if entry.Type == "PLANNER_RESPONSE" {
-					role = "model"
-				}
-				if role != "" {
-					loaded = append(loaded, geminiContent{Role: role, Parts: []geminiPart{{Text: entry.Content}}})
-				}
-			}
+		trimmed := strings.TrimSpace(l)
+		if trimmed == "" {
+			continue
+		}
+		var entry struct{ Type, Content string }
+		if err := json.Unmarshal([]byte(trimmed), &entry); err != nil || entry.Content == "" {
+			continue
+		}
+		role := ""
+		if entry.Type == "USER_INPUT" {
+			role = "user"
+		} else if entry.Type == "PLANNER_RESPONSE" {
+			role = "model"
+		}
+		if role != "" {
+			loaded = append(loaded, geminiContent{Role: role, Parts: []geminiPart{{Text: entry.Content}}})
 		}
 	}
 	if len(loaded) > 0 {
@@ -594,19 +611,20 @@ func (s *GeminiAPISession) processSSEPart(part geminiPart, turn *TurnContext, st
 	if part.FunctionCall != nil {
 		*pendingParts = append(*pendingParts, part)
 	}
-	if part.Text != "" {
-		if started != nil && !*started {
-			*started = true
-			if turn != nil && turn.Sink != nil {
-				turn.Sink.OnTurnStarted()
-			}
-		}
+	if part.Text == "" {
+		return
+	}
+	if started != nil && !*started {
+		*started = true
 		if turn != nil && turn.Sink != nil {
-			turn.Sink.OnTextDelta(part.Text)
+			turn.Sink.OnTurnStarted()
 		}
-		if fullText != nil {
-			fullText.WriteString(part.Text)
-		}
+	}
+	if turn != nil && turn.Sink != nil {
+		turn.Sink.OnTextDelta(part.Text)
+	}
+	if fullText != nil {
+		fullText.WriteString(part.Text)
 	}
 }
 
@@ -840,19 +858,25 @@ func (s *GeminiAPISession) runEmptyTextFallbackStream(ctx context.Context, clien
 		SystemInstruction: systemInstruction,
 		GenerationConfig:  &geminiGenerationConfig{ThinkingConfig: &geminiThinkingConfig{ThinkingBudget: 0}},
 	}
-	if finalBytes, err := json.Marshal(finalPayload); err == nil {
-		if finalHttpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(finalBytes)); reqErr == nil {
-			finalHttpReq.Header.Set("Content-Type", "application/json")
-			if finalResp, respErr := client.Do(finalHttpReq); respErr == nil {
-				if finalResp.StatusCode >= 200 && finalResp.StatusCode < 300 {
-					if _, sErr := s.consumeSSEStream(finalResp.Body, turn, started, fullText, totalUsage); sErr != nil {
-						log.Printf("[GeminiAPISession] Warning in fallback stream: %v", sErr)
-					}
-				} else {
-					_ = finalResp.Body.Close()
-				}
-			}
-		}
+	finalBytes, err := json.Marshal(finalPayload)
+	if err != nil {
+		return
+	}
+	finalHttpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(finalBytes))
+	if reqErr != nil {
+		return
+	}
+	finalHttpReq.Header.Set("Content-Type", "application/json")
+	finalResp, respErr := client.Do(finalHttpReq)
+	if respErr != nil {
+		return
+	}
+	if finalResp.StatusCode < 200 || finalResp.StatusCode >= 300 {
+		_ = finalResp.Body.Close()
+		return
+	}
+	if _, sErr := s.consumeSSEStream(finalResp.Body, turn, started, fullText, totalUsage); sErr != nil {
+		log.Printf("[GeminiAPISession] Warning in fallback stream: %v", sErr)
 	}
 }
 

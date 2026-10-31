@@ -102,30 +102,37 @@ func (p *Provisioner) loadDiscordBaseMCPServers(cfg *config.Config, mergedServer
 	loadFileBasedMCPServers(dataDir, fallbackConfig, mergedServers)
 }
 
+func selectTargetServers(cur *config.ConfigData, target RuleTarget) []map[string]json.RawMessage {
+	if target == TargetEphemeral {
+		if cur.McpServers.Ephemeral != nil {
+			return []map[string]json.RawMessage{cur.McpServers.Ephemeral}
+		}
+		return nil
+	}
+
+	var targetServers []map[string]json.RawMessage
+	if cur.McpServers.Common != nil {
+		targetServers = append(targetServers, cur.McpServers.Common)
+	}
+	switch target {
+	case TargetDiscord:
+		if cur.McpServers.Discord != nil {
+			targetServers = append(targetServers, cur.McpServers.Discord)
+		}
+	case TargetVoice:
+		if cur.McpServers.Voice != nil {
+			targetServers = append(targetServers, cur.McpServers.Voice)
+		}
+	}
+	return targetServers
+}
+
 func overlayConfigMCPServers(cfg *config.Config, target RuleTarget, mergedServers map[string]interface{}) {
 	if cfg == nil {
 		return
 	}
 	cur := cfg.Current()
-	var targetServers []map[string]json.RawMessage
-	if target == TargetEphemeral {
-		if cur.McpServers.Ephemeral != nil {
-			targetServers = append(targetServers, cur.McpServers.Ephemeral)
-		}
-	} else {
-		if cur.McpServers.Common != nil {
-			targetServers = append(targetServers, cur.McpServers.Common)
-		}
-		if target == TargetDiscord {
-			if cur.McpServers.Discord != nil {
-				targetServers = append(targetServers, cur.McpServers.Discord)
-			}
-		} else if target == TargetVoice {
-			if cur.McpServers.Voice != nil {
-				targetServers = append(targetServers, cur.McpServers.Voice)
-			}
-		}
-	}
+	targetServers := selectTargetServers(cur, target)
 
 	for _, srvMap := range targetServers {
 		for k, v := range srvMap {

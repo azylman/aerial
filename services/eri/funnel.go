@@ -87,6 +87,24 @@ func currentFunnelClassifier() *classifier.Classifier {
 	return nil
 }
 
+func fetchAndCacheDiscordChannel(s *discordgo.Session, channelID string) *discordgo.Channel {
+	if s == nil || s.Token == "" || !queue.IsNumericSnowflake(channelID) {
+		return nil
+	}
+	ch, err := s.Channel(channelID)
+	if err != nil || ch == nil {
+		queue.InvalidateChannelCache(channelID)
+		return nil
+	}
+	queue.CacheDiscordChannel(ch)
+	if s.State != nil {
+		if err := s.State.ChannelAdd(ch); err != nil {
+			log.Printf("[WARN] Failed to add channel %s to session state: %v", ch.ID, err)
+		}
+	}
+	return ch
+}
+
 func getDiscordChannel(s *discordgo.Session, channelID string) *discordgo.Channel {
 	if channelID == "" {
 		return nil
@@ -104,19 +122,7 @@ func getDiscordChannel(s *discordgo.Session, channelID string) *discordgo.Channe
 		}
 		return &discordgo.Channel{ID: snap.ID, Name: snap.Name, GuildID: snap.GuildID, ParentID: snap.ParentID, Type: chType}
 	}
-	if s != nil && s.Token != "" && queue.IsNumericSnowflake(channelID) {
-		if ch, err := s.Channel(channelID); err == nil && ch != nil {
-			queue.CacheDiscordChannel(ch)
-			if s.State != nil {
-				if err := s.State.ChannelAdd(ch); err != nil {
-					log.Printf("[WARN] Failed to add channel %s to session state: %v", ch.ID, err)
-				}
-			}
-			return ch
-		}
-		queue.InvalidateChannelCache(channelID)
-	}
-	return nil
+	return fetchAndCacheDiscordChannel(s, channelID)
 }
 
 func resolveGuildID(s *discordgo.Session, m *discordgo.Message) string {
@@ -559,6 +565,63 @@ func processFunnelMessageIngress(ctx context.Context, s *discordgo.Session, stor
 	return "enqueued", nil
 }
 
+func hydrateGuildRoles(dg *discordgo.Session, guildID string) {
+	if dg == nil {
+		return
+	}
+	roles, err := dg.GuildRoles(guildID)
+	if err != nil {
+		return
+	}
+	for _, role := range roles {
+		if role != nil {
+			if err := dg.State.RoleAdd(guildID, role); err != nil {
+				log.Printf("[WARN] Failed to add role %s to session state: %v", role.ID, err)
+			}
+		}
+	}
+}
+
+func hydrateGuildChannels(dg *discordgo.Session, guildID string) {
+	if dg == nil {
+		return
+	}
+	channels, err := dg.GuildChannels(guildID)
+	if err != nil {
+		return
+	}
+	for _, ch := range channels {
+		if ch == nil {
+			continue
+		}
+		ch.GuildID = guildID
+		queue.CacheDiscordChannel(ch)
+		if err := dg.State.ChannelAdd(ch); err != nil {
+			log.Printf("[WARN] Failed to add channel %s to session state: %v", ch.ID, err)
+		}
+	}
+}
+
+func hydrateGuildThreads(dg *discordgo.Session, guildID string) {
+	if dg == nil {
+		return
+	}
+	activeThreads, err := dg.GuildThreadsActive(guildID)
+	if err != nil || activeThreads == nil {
+		return
+	}
+	for _, th := range activeThreads.Threads {
+		if th == nil {
+			continue
+		}
+		th.GuildID = guildID
+		queue.CacheDiscordChannel(th)
+		if err := dg.State.ChannelAdd(th); err != nil {
+			log.Printf("[WARN] Failed to add thread %s to session state: %v", th.ID, err)
+		}
+	}
+}
+
 func hydrateGuildState(dg *discordgo.Session, ug *discordgo.UserGuild, botUserID string) {
 	if ug == nil || ug.ID == "" {
 		return
@@ -567,41 +630,9 @@ func hydrateGuildState(dg *discordgo.Session, ug *discordgo.UserGuild, botUserID
 		log.Printf("[WARN] Failed to add guild %s to session state: %v", ug.ID, err)
 	}
 
-	if roles, rErr := dg.GuildRoles(ug.ID); rErr == nil {
-		for _, role := range roles {
-			if role != nil {
-				if err := dg.State.RoleAdd(ug.ID, role); err != nil {
-					log.Printf("[WARN] Failed to add role %s to session state: %v", role.ID, err)
-				}
-			}
-		}
-	}
-
-	if channels, cErr := dg.GuildChannels(ug.ID); cErr == nil {
-		for _, ch := range channels {
-			if ch == nil {
-				continue
-			}
-			ch.GuildID = ug.ID
-			queue.CacheDiscordChannel(ch)
-			if err := dg.State.ChannelAdd(ch); err != nil {
-				log.Printf("[WARN] Failed to add channel %s to session state: %v", ch.ID, err)
-			}
-		}
-	}
-
-	if activeThreads, tErr := dg.GuildThreadsActive(ug.ID); tErr == nil && activeThreads != nil {
-		for _, th := range activeThreads.Threads {
-			if th == nil {
-				continue
-			}
-			th.GuildID = ug.ID
-			queue.CacheDiscordChannel(th)
-			if err := dg.State.ChannelAdd(th); err != nil {
-				log.Printf("[WARN] Failed to add thread %s to session state: %v", th.ID, err)
-			}
-		}
-	}
+	hydrateGuildRoles(dg, ug.ID)
+	hydrateGuildChannels(dg, ug.ID)
+	hydrateGuildThreads(dg, ug.ID)
 
 	syncBotMemberRoles(context.Background(), dg, ug.ID, botUserID)
 	go func(appID, guildID string) {

@@ -248,6 +248,24 @@ func (p *Provider) fetchAndRender(ctx context.Context) (string, error) {
 	return resStr, nil
 }
 
+func (p *Provider) triggerBackgroundRefresh() {
+	if !atomic.CompareAndSwapInt32(&p.refreshing, 0, 1) {
+		return
+	}
+	go func() {
+		defer atomic.StoreInt32(&p.refreshing, 0)
+		timeout := 250 * time.Millisecond
+		if p.cfg.TimeoutMs > 0 {
+			timeout = time.Duration(p.cfg.TimeoutMs) * time.Millisecond
+		}
+		bgCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		if _, err := p.fetchAndRender(bgCtx); err != nil {
+			log.Printf("[Ambient] SWR background refresh warning: %v", err)
+		}
+	}()
+}
+
 // Retrieve returns the rendered ambient context string, caching results in RAM for CacheTTL.
 func (p *Provider) Retrieve(ctx context.Context) (string, error) {
 	now := p.now()
@@ -262,20 +280,7 @@ func (p *Provider) Retrieve(ctx context.Context) (string, error) {
 	}
 
 	if withinHardTTL && cached != "" {
-		if atomic.CompareAndSwapInt32(&p.refreshing, 0, 1) {
-			go func() {
-				defer atomic.StoreInt32(&p.refreshing, 0)
-				timeout := 250 * time.Millisecond
-				if p.cfg.TimeoutMs > 0 {
-					timeout = time.Duration(p.cfg.TimeoutMs) * time.Millisecond
-				}
-				bgCtx, cancel := context.WithTimeout(context.Background(), timeout)
-				defer cancel()
-				if _, err := p.fetchAndRender(bgCtx); err != nil {
-					log.Printf("[Ambient] SWR background refresh warning: %v", err)
-				}
-			}()
-		}
+		p.triggerBackgroundRefresh()
 		return cached, nil
 	}
 

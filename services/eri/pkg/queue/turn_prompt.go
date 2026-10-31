@@ -161,6 +161,31 @@ type attemptConfig struct {
 	apiKey            string
 }
 
+func applyAppConfigOverrides(cfg *attemptConfig, appCfg *config.Config) {
+	if appCfg == nil {
+		return
+	}
+	cur := appCfg.Current()
+	if cur == nil {
+		return
+	}
+	if cur.Model != "" {
+		cfg.model = cur.Model
+	}
+	if cur.LowEffortModel != "" {
+		cfg.lowEffortModel = cur.LowEffortModel
+	}
+	if cur.MediumEffortModel != "" {
+		cfg.mediumEffortModel = cur.MediumEffortModel
+	}
+	if cur.APIKey != "" {
+		cfg.apiKey = cur.APIKey
+	}
+	if cur.AgyBin != "" {
+		cfg.agyBin = cur.AgyBin
+	}
+}
+
 func (te *turnExecution) resolveAttemptConfig(attempt int) attemptConfig {
 	var cfg attemptConfig
 	if te.pool == nil {
@@ -175,25 +200,7 @@ func (te *turnExecution) resolveAttemptConfig(attempt int) attemptConfig {
 	overrideModel := te.pool.overrideModel
 	te.pool.mu.Unlock()
 
-	if te.pool.appCfg != nil {
-		if cur := te.pool.appCfg.Current(); cur != nil {
-			if cur.Model != "" {
-				cfg.model = cur.Model
-			}
-			if cur.LowEffortModel != "" {
-				cfg.lowEffortModel = cur.LowEffortModel
-			}
-			if cur.MediumEffortModel != "" {
-				cfg.mediumEffortModel = cur.MediumEffortModel
-			}
-			if cur.APIKey != "" {
-				cfg.apiKey = cur.APIKey
-			}
-			if cur.AgyBin != "" {
-				cfg.agyBin = cur.AgyBin
-			}
-		}
-	}
+	applyAppConfigOverrides(&cfg, te.pool.appCfg)
 
 	if cfg.lowEffortModel == "" {
 		cfg.lowEffortModel = config.GetRuntimeConfig().LowEffortModel

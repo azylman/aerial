@@ -236,20 +236,7 @@ func (d *DefaultDispatcher) doJSONRPCWithRetry(ctx context.Context, srv ServerCo
 	}
 
 	for attempt := 0; attempt < 2; attempt++ {
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.ServerURL, bytes.NewReader(reqBody))
-		if err != nil {
-			return nil, fmt.Errorf("failed to create request for %s: %w", srv.Name, err)
-		}
-		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("Accept", "application/json, text/event-stream")
-		for k, v := range srv.Headers {
-			httpReq.Header.Set(k, v)
-		}
-		if currentSessID != "" {
-			httpReq.Header.Set("mcp-session-id", currentSessID)
-		}
-
-		resp, err := d.httpClient.Do(httpReq)
+		statusCode, respBytes, err := d.executeRPCRequest(ctx, srv, currentSessID, reqBody, maxBytes)
 		if err != nil {
 			if attempt == 0 {
 				return nil, fmt.Errorf("failed to call %s: %w", srv.Name, err)
@@ -257,21 +244,9 @@ func (d *DefaultDispatcher) doJSONRPCWithRetry(ctx context.Context, srv ServerCo
 			return nil, fmt.Errorf("failed to call %s on retry: %w", srv.Name, err)
 		}
 
-		respBytes, rErr := io.ReadAll(io.LimitReader(resp.Body, maxBytes))
-		_ = resp.Body.Close()
-		if rErr != nil {
-			return nil, fmt.Errorf("read error from %s: %w", srv.Name, rErr)
-		}
-
 		rpcResp, parseErr := parseJSONRPCBody(respBytes)
-		if attempt == 0 && isMissingSessionIDErr(resp.StatusCode, respBytes, rpcResp) {
-			d.mu.Lock()
-			if d.sessionIDs[srv.Name] == currentSessID {
-				delete(d.sessionIDs, srv.Name)
-			}
-			d.mu.Unlock()
-
-			newSessID, sErr := d.EnsureSession(ctx, srv.Name)
+		if attempt == 0 && isMissingSessionIDErr(statusCode, respBytes, rpcResp) {
+			newSessID, sErr := d.recoverSession(ctx, srv.Name, currentSessID)
 			if sErr != nil {
 				return nil, fmt.Errorf("failed to re-establish session for %s: %w", srv.Name, sErr)
 			}
@@ -279,20 +254,60 @@ func (d *DefaultDispatcher) doJSONRPCWithRetry(ctx context.Context, srv ServerCo
 			continue
 		}
 
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return nil, fmt.Errorf("mcp server %s returned status %d: %s", srv.Name, resp.StatusCode, string(respBytes))
-		}
-		if parseErr != nil || rpcResp == nil {
-			return nil, fmt.Errorf("empty or invalid JSON-RPC response from %s: %w", srv.Name, parseErr)
-		}
-		if rpcResp.Error != nil {
-			return nil, fmt.Errorf("mcp server %s returned error: %s (code %d)", srv.Name, rpcResp.Error.Message, rpcResp.Error.Code)
-		}
-
-		return rpcResp, nil
+		return validateRPCResponse(srv.Name, statusCode, respBytes, rpcResp, parseErr)
 	}
 
 	return nil, fmt.Errorf("request to %s failed after retry", srv.Name)
+}
+
+func (d *DefaultDispatcher) executeRPCRequest(ctx context.Context, srv ServerConfig, sessID string, reqBody []byte, maxBytes int64) (int, []byte, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.ServerURL, bytes.NewReader(reqBody))
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to create request for %s: %w", srv.Name, err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json, text/event-stream")
+	for k, v := range srv.Headers {
+		httpReq.Header.Set(k, v)
+	}
+	if sessID != "" {
+		httpReq.Header.Set("mcp-session-id", sessID)
+	}
+
+	resp, err := d.httpClient.Do(httpReq)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+
+	respBytes, rErr := io.ReadAll(io.LimitReader(resp.Body, maxBytes))
+	if rErr != nil {
+		return resp.StatusCode, nil, fmt.Errorf("read error from %s: %w", srv.Name, rErr)
+	}
+	return resp.StatusCode, respBytes, nil
+}
+
+func (d *DefaultDispatcher) recoverSession(ctx context.Context, srvName, oldSessID string) (string, error) {
+	d.mu.Lock()
+	if d.sessionIDs[srvName] == oldSessID {
+		delete(d.sessionIDs, srvName)
+	}
+	d.mu.Unlock()
+
+	return d.EnsureSession(ctx, srvName)
+}
+
+func validateRPCResponse(srvName string, statusCode int, respBytes []byte, rpcResp *jsonRPCResponse, parseErr error) (*jsonRPCResponse, error) {
+	if statusCode < 200 || statusCode >= 300 {
+		return nil, fmt.Errorf("mcp server %s returned status %d: %s", srvName, statusCode, string(respBytes))
+	}
+	if parseErr != nil || rpcResp == nil {
+		return nil, fmt.Errorf("empty or invalid JSON-RPC response from %s: %w", srvName, parseErr)
+	}
+	if rpcResp.Error != nil {
+		return nil, fmt.Errorf("mcp server %s returned error: %s (code %d)", srvName, rpcResp.Error.Message, rpcResp.Error.Code)
+	}
+	return rpcResp, nil
 }
 
 func (d *DefaultDispatcher) fetchServerTools(ctx context.Context, srv ServerConfig) ([]Tool, error) {
@@ -525,26 +540,36 @@ type jsonRPCError struct {
 	Data    interface{} `json:"data,omitempty"`
 }
 
+func parseSSEJSONRPCResponse(trimmed []byte) (*jsonRPCResponse, bool) {
+	if !bytes.HasPrefix(trimmed, []byte("event:")) && !bytes.HasPrefix(trimmed, []byte("data:")) && !bytes.Contains(trimmed, []byte("\ndata:")) {
+		return nil, false
+	}
+	lines := bytes.Split(trimmed, []byte("\n"))
+	for _, rawLine := range lines {
+		line := bytes.TrimSpace(rawLine)
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		dataPayload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+		if len(dataPayload) == 0 || dataPayload[0] != '{' {
+			continue
+		}
+		var resp jsonRPCResponse
+		if err := json.Unmarshal(dataPayload, &resp); err == nil {
+			return &resp, true
+		}
+	}
+	return nil, false
+}
+
 func parseJSONRPCBody(body []byte) (*jsonRPCResponse, error) {
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 {
 		return nil, errors.New("empty response body")
 	}
 
-	if bytes.HasPrefix(trimmed, []byte("event:")) || bytes.HasPrefix(trimmed, []byte("data:")) || bytes.Contains(trimmed, []byte("\ndata:")) {
-		lines := bytes.Split(trimmed, []byte("\n"))
-		for _, rawLine := range lines {
-			line := bytes.TrimSpace(rawLine)
-			if bytes.HasPrefix(line, []byte("data:")) {
-				dataPayload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
-				if len(dataPayload) > 0 && dataPayload[0] == '{' {
-					var resp jsonRPCResponse
-					if err := json.Unmarshal(dataPayload, &resp); err == nil {
-						return &resp, nil
-					}
-				}
-			}
-		}
+	if resp, ok := parseSSEJSONRPCResponse(trimmed); ok {
+		return resp, nil
 	}
 
 	var resp jsonRPCResponse

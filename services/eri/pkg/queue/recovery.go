@@ -66,6 +66,66 @@ func resetInterruptedProcessingMessage(ctx context.Context, store db.Store, m *d
 	m.RestartCount++
 }
 
+func recoverInterruptedMessages(ctx context.Context, store db.Store, pool *WorkerPool, maxAttempts int) {
+	messages, err := store.GetPendingOrProcessingMessages(ctx, 0)
+	if err != nil {
+		log.Printf("[Startup Recovery] Error querying pending/processing messages: %v", err)
+		return
+	}
+	if len(messages) == 0 {
+		return
+	}
+
+	log.Printf("[Startup Recovery] Resuming %d interrupted message(s) in chronological FIFO order...", len(messages))
+	for _, m := range messages {
+		isPoison, poisonReason, isInstantCrashLoop := isPoisonPillMessage(m, maxAttempts)
+		if isPoison {
+			handlePoisonPillMessage(ctx, store, pool, m, poisonReason)
+			continue
+		}
+
+		resetInterruptedProcessingMessage(ctx, store, &m, isInstantCrashLoop)
+
+		metrics.InterruptedTurnsRecovered.Inc()
+		log.Printf("[Startup Recovery] Enqueuing message %s (thread: %s, status: %s, restart_count: %d, retry_count: %d)",
+			m.ID, m.ThreadID, m.Status, m.RestartCount, m.RetryCount)
+		pool.Enqueue(m)
+	}
+}
+
+func recoverInterruptedDispatches(ctx context.Context, store db.Store, pool *WorkerPool, maxAttempts int) {
+	dispatches, err := store.GetPendingOrProcessingDispatches(ctx, 0)
+	if err != nil {
+		log.Printf("[Startup Recovery] Error querying pending/processing dispatches: %v", err)
+		return
+	}
+	if len(dispatches) == 0 {
+		return
+	}
+
+	log.Printf("[Startup Recovery] Resuming %d interrupted dispatch(es)...", len(dispatches))
+	for _, d := range dispatches {
+		if d.RestartCount >= DefaultMaxRestarts || d.RetryCount >= maxAttempts {
+			log.Printf("[Startup Recovery] Dispatch %s exceeded max restarts/retries. Marking FAILED.", d.ID)
+			if err := store.UpdateDispatchStatus(ctx, d.ID, db.StatusFailed, "poison pill: exceeded max restarts or attempts"); err != nil {
+				log.Printf("[Startup Recovery] Failed to update dispatch %s status to FAILED: %v", d.ID, err)
+			}
+			continue
+		}
+		if d.Status == db.StatusProcessing {
+			if err := store.ResetDispatchToPendingWithRestart(ctx, d.ID, "startup_recovery"); err != nil {
+				log.Printf("[Startup Recovery] Failed to reset dispatch %s to pending: %v", d.ID, err)
+			}
+			d.Status = db.StatusPending
+			d.RestartCount++
+		}
+		metrics.InterruptedTurnsRecovered.Inc()
+		log.Printf("[Startup Recovery] Enqueuing dispatch %s (source: %s, session_id: %s, status: %s, restart_count: %d, retry_count: %d)",
+			d.ID, d.Source, d.SessionID, d.Status, d.RestartCount, d.RetryCount)
+		pool.EnqueueDispatch(d)
+	}
+}
+
 // RecoverInterrupted resumes all PENDING and PROCESSING messages from the database on startup in chronological order.
 // If a message in PROCESSING has restart_count >= DefaultMaxRestarts or retry_count >= maxAttempts (poison pill),
 // it is not re-enqueued; instead, a poison pill notification is sent and the message is marked FAILED.
@@ -75,59 +135,11 @@ func RecoverInterrupted(store db.Store, pool *WorkerPool) {
 	}
 
 	ctx := context.Background()
-
-	messages, err := store.GetPendingOrProcessingMessages(ctx, 0)
-	if err != nil {
-		log.Printf("[Startup Recovery] Error querying pending/processing messages: %v", err)
-	}
-
 	maxAttempts := pool.cfg.MaxAttempts
 	if maxAttempts <= 0 {
 		maxAttempts = 3
 	}
 
-	if len(messages) > 0 {
-		log.Printf("[Startup Recovery] Resuming %d interrupted message(s) in chronological FIFO order...", len(messages))
-		for _, m := range messages {
-			isPoison, poisonReason, isInstantCrashLoop := isPoisonPillMessage(m, maxAttempts)
-			if isPoison {
-				handlePoisonPillMessage(ctx, store, pool, m, poisonReason)
-				continue
-			}
-
-			resetInterruptedProcessingMessage(ctx, store, &m, isInstantCrashLoop)
-
-			metrics.InterruptedTurnsRecovered.Inc()
-			log.Printf("[Startup Recovery] Enqueuing message %s (thread: %s, status: %s, restart_count: %d, retry_count: %d)",
-				m.ID, m.ThreadID, m.Status, m.RestartCount, m.RetryCount)
-			pool.Enqueue(m)
-		}
-	}
-
-	dispatches, err := store.GetPendingOrProcessingDispatches(ctx, 0)
-	if err != nil {
-		log.Printf("[Startup Recovery] Error querying pending/processing dispatches: %v", err)
-	} else if len(dispatches) > 0 {
-		log.Printf("[Startup Recovery] Resuming %d interrupted dispatch(es)...", len(dispatches))
-		for _, d := range dispatches {
-			if d.RestartCount >= DefaultMaxRestarts || d.RetryCount >= maxAttempts {
-				log.Printf("[Startup Recovery] Dispatch %s exceeded max restarts/retries. Marking FAILED.", d.ID)
-				if err := store.UpdateDispatchStatus(ctx, d.ID, db.StatusFailed, "poison pill: exceeded max restarts or attempts"); err != nil {
-					log.Printf("[Startup Recovery] Failed to update dispatch %s status to FAILED: %v", d.ID, err)
-				}
-				continue
-			}
-			if d.Status == db.StatusProcessing {
-				if err := store.ResetDispatchToPendingWithRestart(ctx, d.ID, "startup_recovery"); err != nil {
-					log.Printf("[Startup Recovery] Failed to reset dispatch %s to pending: %v", d.ID, err)
-				}
-				d.Status = db.StatusPending
-				d.RestartCount++
-			}
-			metrics.InterruptedTurnsRecovered.Inc()
-			log.Printf("[Startup Recovery] Enqueuing dispatch %s (source: %s, session_id: %s, status: %s, restart_count: %d, retry_count: %d)",
-				d.ID, d.Source, d.SessionID, d.Status, d.RestartCount, d.RetryCount)
-			pool.EnqueueDispatch(d)
-		}
-	}
+	recoverInterruptedMessages(ctx, store, pool, maxAttempts)
+	recoverInterruptedDispatches(ctx, store, pool, maxAttempts)
 }

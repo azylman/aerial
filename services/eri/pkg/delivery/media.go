@@ -128,6 +128,28 @@ func processLocalImageMatch(rawPath, baseDir, altText string, attachments *[]*At
 	return ""
 }
 
+func processMediaMarkdownMatch(match, baseDir string, attachments *[]*Attachment) string {
+	sub := mdImageRegex.FindStringSubmatch(match)
+	if len(sub) < 3 {
+		return match
+	}
+	altText := strings.TrimSpace(sub[1])
+	rawPath := strings.TrimSpace(sub[2])
+
+	// Remote URLs: check if internal .aerial URL to attach, otherwise leave untouched for Discord client unfurling
+	if strings.HasPrefix(rawPath, "http://") || strings.HasPrefix(rawPath, "https://") {
+		if !isInternalAerialHTTPURL(rawPath) || len(*attachments) >= MaxAttachmentsPerMessage {
+			return match
+		}
+		return processInternalImageMatch(rawPath, altText, attachments)
+	}
+
+	if len(*attachments) >= MaxAttachmentsPerMessage {
+		return match
+	}
+	return processLocalImageMatch(rawPath, baseDir, altText, attachments)
+}
+
 // ExtractAndSanitizeMedia parses markdown image references, resolves and validates local files,
 // extracts valid attachments up to MaxAttachmentsPerMessage, and returns sanitized text and attachments.
 func ExtractAndSanitizeMedia(text string, baseDir string) (string, []*Attachment) {
@@ -162,28 +184,7 @@ func ExtractAndSanitizeMedia(text string, baseDir string) (string, []*Attachment
 		}
 
 		newLine := mdImageRegex.ReplaceAllStringFunc(line, func(match string) string {
-			sub := mdImageRegex.FindStringSubmatch(match)
-			if len(sub) < 3 {
-				return match
-			}
-			altText := strings.TrimSpace(sub[1])
-			rawPath := strings.TrimSpace(sub[2])
-
-			// Remote URLs: check if internal .aerial URL to attach, otherwise leave untouched for Discord client unfurling
-			if strings.HasPrefix(rawPath, "http://") || strings.HasPrefix(rawPath, "https://") {
-				if !isInternalAerialHTTPURL(rawPath) {
-					return match
-				}
-				if len(attachments) >= MaxAttachmentsPerMessage {
-					return match
-				}
-				return processInternalImageMatch(rawPath, altText, &attachments)
-			}
-
-			if len(attachments) >= MaxAttachmentsPerMessage {
-				return match
-			}
-			return processLocalImageMatch(rawPath, baseDir, altText, &attachments)
+			return processMediaMarkdownMatch(match, baseDir, &attachments)
 		})
 
 		processedLines = append(processedLines, newLine)
@@ -499,27 +500,28 @@ var extMIMEMap = map[string]string{
 	".flac": "audio/flac",
 }
 
+func resolveFallbackMIMEType(mimeType, ext string) string {
+	switch {
+	case mimeType == "application/octet-stream":
+		if mapped, ok := extMIMEMap[ext]; ok {
+			return mapped
+		}
+	case mimeType == "application/ogg" && ext == ".ogg":
+		return "audio/ogg"
+	case mimeType == "video/mp4" && ext == ".m4a":
+		return "audio/mp4"
+	}
+	return mimeType
+}
+
 func detectMediaMIMETypeBytes(data []byte, ext string) (string, error) {
 	mimeType := http.DetectContentType(data)
 	ext = strings.ToLower(ext)
 
 	if !strings.HasPrefix(mimeType, "image/") && !strings.HasPrefix(mimeType, "audio/") {
-		if mimeType == "application/octet-stream" {
-			if mapped, ok := extMIMEMap[ext]; ok {
-				mimeType = mapped
-			}
-		} else if mimeType == "application/ogg" && ext == ".ogg" {
-			// http.DetectContentType sniffs standard Ogg headers (OggS) as application/ogg
-			mimeType = "audio/ogg"
-		} else if mimeType == "video/mp4" && ext == ".m4a" {
-			// http.DetectContentType sniffs MP4/M4A ftyp containers as video/mp4
-			mimeType = "audio/mp4"
-		}
-	} else if strings.HasPrefix(mimeType, "audio/") {
-		// Normalize wav audio types (http.DetectContentType often yields audio/wave)
-		if ext == ".wav" && (mimeType == "audio/wave" || mimeType == "audio/x-wav") {
-			mimeType = "audio/wav"
-		}
+		mimeType = resolveFallbackMIMEType(mimeType, ext)
+	} else if strings.HasPrefix(mimeType, "audio/") && ext == ".wav" && (mimeType == "audio/wave" || mimeType == "audio/x-wav") {
+		mimeType = "audio/wav"
 	}
 
 	if !strings.HasPrefix(mimeType, "image/") && !strings.HasPrefix(mimeType, "audio/") {

@@ -240,6 +240,16 @@ func TestHandleDispatch(t *testing.T) {
 		{"invalid effort rejected", http.MethodPost, dbtest.NewFakeStore(), `{"source":"heartbeat","prompt":"test","effort":"ultra"}`, http.StatusBadRequest, "'effort' must be 'low', 'medium', or 'high'", ""},
 		{"valid stateful accepted", http.MethodPost, dbtest.NewFakeStore(), `{"id":"disp-1","source":"heartbeat","session_id":"heartbeat-1","prompt":"run check","effort":"low"}`, http.StatusAccepted, `"status":"accepted"`, "disp-1"},
 		{"valid ephemeral accepted", http.MethodPost, dbtest.NewFakeStore(), `{"id":"disp-2","source":"vanadis","prompt":"execute build"}`, http.StatusAccepted, `"status":"accepted"`, "disp-2"},
+		{"has active dispatch turn error", http.MethodPost, func() db.Store {
+			s := dbtest.NewFakeStore()
+			s.FailNext("HasActiveDispatchTurn", errors.New("simulated error"))
+			return s
+		}(), `{"source":"heartbeat","prompt":"test","skip_if_active":true}`, http.StatusInternalServerError, "Failed to check active turn", ""},
+		{"insert dispatch error", http.MethodPost, func() db.Store {
+			s := dbtest.NewFakeStore()
+			s.FailNext("InsertDispatch", errors.New("simulated error"))
+			return s
+		}(), `{"source":"heartbeat","prompt":"test"}`, http.StatusInternalServerError, "Failed to persist dispatch", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := runHTTP(handleDispatch(tc.store, nil), tc.method, "/dispatch", strings.NewReader(tc.body))

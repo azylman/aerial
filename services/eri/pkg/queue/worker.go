@@ -1314,6 +1314,72 @@ func (te *turnExecution) dispatchFailedAttempt(attempt, maxAttempts int, isTrans
 	return false
 }
 
+type attemptFailureAction int
+
+const (
+	actionStop attemptFailureAction = iota
+	actionContinue
+	actionProceedToDispatch
+)
+
+func (te *turnExecution) handleAttemptFailureCheck(errDetail, stderr, currentModel, burstEffort string, isTransient, isSessionCorruption bool, attempt, maxAttempts int, currentAgyBin, currentAPIKey string) attemptFailureAction {
+	if runner.IsQuotaPause(errDetail, stderr) {
+		if te.handleQuotaPause(errDetail, stderr, currentModel, burstEffort, attempt, maxAttempts) {
+			return actionContinue
+		}
+		return actionStop
+	}
+
+	isWatchdog := isWatchdogTimeoutError(errDetail, stderr)
+	errCat := classifyRunnerErrorCategory(isWatchdog, isTransient, isSessionCorruption)
+	metrics.RecordRunnerError(errCat, currentModel)
+
+	if isWatchdog {
+		if te.handleWatchdogFailure(attempt, maxAttempts, currentAgyBin, currentAPIKey, errDetail, stderr, currentModel) {
+			return actionContinue
+		}
+		return actionStop
+	}
+	return actionProceedToDispatch
+}
+
+type attemptStepResult struct {
+	shouldReturn     bool
+	shouldContinue   bool
+	decrementAttempt bool
+	lastErrDetail    string
+}
+
+func (te *turnExecution) processAttemptResult(
+	isFailure bool,
+	errDetail, stderr, currentModel, burstEffort string,
+	isTransient, isSessionCorruption bool,
+	attempt, maxAttempts int,
+	currentAgyBin, currentAPIKey string,
+	resp *runner.AgyResponse,
+	stdout string,
+	autoResumeCount *int,
+	accumulatedUsage *runner.TokenUsage,
+	promptToSend *string,
+) attemptStepResult {
+	if isFailure {
+		action := te.handleAttemptFailureCheck(errDetail, stderr, currentModel, burstEffort, isTransient, isSessionCorruption, attempt, maxAttempts, currentAgyBin, currentAPIKey)
+		return attemptStepResult{
+			shouldReturn:   action == actionStop,
+			shouldContinue: action == actionContinue,
+		}
+	}
+
+	done, yieldRetry, stepErr := te.processSuccessfulAttempt(resp, 0, stdout, stderr, currentModel, attempt, maxAttempts, autoResumeCount, accumulatedUsage, promptToSend)
+	if done {
+		return attemptStepResult{shouldReturn: true}
+	}
+	if yieldRetry {
+		return attemptStepResult{shouldContinue: true, decrementAttempt: true}
+	}
+	return attemptStepResult{lastErrDetail: stepErr}
+}
+
 func (te *turnExecution) executeWithRetries() {
 	maxAttempts := te.pool.cfg.MaxAttempts
 	lastErrDetail := ""
@@ -1372,40 +1438,24 @@ func (te *turnExecution) executeWithRetries() {
 		}
 		metrics.RecordRunnerExecution(runStatus, currentModel, te.triggerType, runDur)
 
-		if isFailure {
-			// Quota Lockout Fail-Fast & Auto-Retry Check
-			if runner.IsQuotaPause(errDetail, stderr) {
-				if te.handleQuotaPause(errDetail, stderr, currentModel, burstEffort, attempt, maxAttempts) {
-					continue
-				}
-				return
-			}
-
-			isWatchdog := isWatchdogTimeoutError(errDetail, stderr)
-			errCat := classifyRunnerErrorCategory(isWatchdog, isTransient, isSessionCorruption)
-			metrics.RecordRunnerError(errCat, currentModel)
-
-			if isWatchdog {
-				if te.handleWatchdogFailure(attempt, maxAttempts, currentAgyBin, currentAPIKey, errDetail, stderr, currentModel) {
-					continue
-				}
-				return
-			}
+		stepRes := te.processAttemptResult(
+			isFailure, errDetail, stderr, currentModel, burstEffort,
+			isTransient, isSessionCorruption, attempt, maxAttempts,
+			currentAgyBin, currentAPIKey, resp, stdout,
+			&autoResumeCount, &accumulatedUsage, &promptToSend,
+		)
+		if stepRes.shouldReturn {
+			return
 		}
-
-		if !isFailure {
-			var done, yieldRetry bool
-			done, yieldRetry, errDetail = te.processSuccessfulAttempt(resp, 0, stdout, stderr, currentModel, attempt, maxAttempts, &autoResumeCount, &accumulatedUsage, &promptToSend)
-			if done {
-				return
-			}
-			if yieldRetry {
+		if stepRes.shouldContinue {
+			if stepRes.decrementAttempt {
 				attempt--
-				continue
 			}
-			if errDetail != "" {
-				lastErrDetail = errDetail
-			}
+			continue
+		}
+		if stepRes.lastErrDetail != "" {
+			errDetail = stepRes.lastErrDetail
+			lastErrDetail = stepRes.lastErrDetail
 		}
 
 		if !te.dispatchFailedAttempt(attempt, maxAttempts, isTransient, isSessionCorruption, currentAgyBin, currentAPIKey, errDetail, stderr, currentModel) {

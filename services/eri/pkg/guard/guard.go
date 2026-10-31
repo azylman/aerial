@@ -63,49 +63,59 @@ func Process(r io.Reader, w io.Writer, mode string) (err error) {
 		return json.NewEncoder(w).Encode(RecordPreInvocation(payload))
 	case string(ModePost), "post-tool":
 		return json.NewEncoder(w).Encode(RecordPostBatch(payload, args))
+	default:
+		decision := evaluateGuardMode(payload, args, mode)
+		return json.NewEncoder(w).Encode(decision)
 	}
+}
 
-	var decision *Decision
+func evaluateGuardMode(payload Payload, args ToolArgs, mode string) *Decision {
 	switch mode {
 	case "share":
-		decision = CheckShare(payload.ToolCall.Name, args)
+		return CheckShare(payload.ToolCall.Name, args)
 	case "schedule":
-		decision = CheckSchedule(payload.ToolCall.Name, args)
+		return CheckSchedule(payload.ToolCall.Name, args)
 	case "batch":
-		decision = CheckBatch(payload, args)
+		return CheckBatch(payload, args)
 	case "search":
-		decision = CheckSearch(payload.ToolCall.Name, args)
+		return CheckSearch(payload.ToolCall.Name, args)
 	case "commit":
-		decision = CheckCommit(payload.ToolCall.Name, args)
+		return CheckCommit(payload.ToolCall.Name, args)
 	default:
-		// "all" mode: evaluate share first, then schedule, then batch, then search, then commit
-		checks := []func() *Decision{
-			func() *Decision { return CheckShare(payload.ToolCall.Name, args) },
-			func() *Decision { return CheckSchedule(payload.ToolCall.Name, args) },
-			func() *Decision { return CheckBatch(payload, args) },
-			func() *Decision { return CheckSearch(payload.ToolCall.Name, args) },
-			func() *Decision { return CheckCommit(payload.ToolCall.Name, args) },
-		}
-		var mergedOverwrite map[string]any
-		for _, check := range checks {
-			decision = check()
-			if decision.Decision == DecisionDeny {
-				return json.NewEncoder(w).Encode(decision)
-			}
-			for k, v := range decision.Overwrite {
-				if mergedOverwrite == nil {
-					mergedOverwrite = make(map[string]any)
-				}
-				mergedOverwrite[k] = v
-				if k == "CommandLine" {
-					if s, ok := v.(string); ok {
-						args.CommandLine = s
-					}
-				}
-			}
-		}
-		decision.Overwrite = mergedOverwrite
+		return evaluateAllGuards(payload, args)
 	}
+}
 
-	return json.NewEncoder(w).Encode(decision)
+func evaluateAllGuards(payload Payload, args ToolArgs) *Decision {
+	checks := []func() *Decision{
+		func() *Decision { return CheckShare(payload.ToolCall.Name, args) },
+		func() *Decision { return CheckSchedule(payload.ToolCall.Name, args) },
+		func() *Decision { return CheckBatch(payload, args) },
+		func() *Decision { return CheckSearch(payload.ToolCall.Name, args) },
+		func() *Decision { return CheckCommit(payload.ToolCall.Name, args) },
+	}
+	var lastDecision *Decision
+	var mergedOverwrite map[string]any
+	for _, check := range checks {
+		lastDecision = check()
+		if lastDecision.Decision == DecisionDeny {
+			return lastDecision
+		}
+		for k, v := range lastDecision.Overwrite {
+			if mergedOverwrite == nil {
+				mergedOverwrite = make(map[string]any)
+			}
+			mergedOverwrite[k] = v
+			if k == "CommandLine" {
+				if s, ok := v.(string); ok {
+					args.CommandLine = s
+				}
+			}
+		}
+	}
+	if lastDecision == nil {
+		return &Decision{Decision: DecisionAllow}
+	}
+	lastDecision.Overwrite = mergedOverwrite
+	return lastDecision
 }

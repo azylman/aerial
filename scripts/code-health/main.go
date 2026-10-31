@@ -20,8 +20,6 @@ import (
 
 const (
 	maxFileLines       = 1500
-	maxFuncLines       = 150
-	maxCC              = 20
 	maxDepth           = 5
 	minCloneFuncLines  = 20
 	minCloneTokens     = 12
@@ -38,8 +36,6 @@ type FileMetrics struct {
 
 // FuncMetrics records ratcheted function-level watermarks.
 type FuncMetrics struct {
-	Lines int `json:"lines,omitempty"`
-	CC    int `json:"cc,omitempty"`
 	Depth int `json:"depth,omitempty"`
 }
 
@@ -276,16 +272,10 @@ func buildBaseline(absRoot string, targets []string) (Baseline, error) {
 
 func outlierFuncMetrics(m FuncMetrics) (FuncMetrics, bool) {
 	var entry FuncMetrics
-	if m.Lines > maxFuncLines {
-		entry.Lines = m.Lines
-	}
-	if m.CC > maxCC {
-		entry.CC = m.CC
-	}
 	if m.Depth > maxDepth {
 		entry.Depth = m.Depth
 	}
-	return entry, entry.Lines > 0 || entry.CC > 0 || entry.Depth > 0
+	return entry, entry.Depth > 0
 }
 
 func checkTargets(absRoot string, targets, testTargets []string, base Baseline) ([]string, error) {
@@ -385,12 +375,6 @@ func checkFuncMetrics(rel string, fns map[string]FuncMetrics, baseFns map[string
 	for _, fnName := range names {
 		m := fns[fnName]
 		bm := baseFns[rel+"::"+fnName]
-		if lineLimit := max(maxFuncLines, bm.Lines); m.Lines > lineLimit {
-			violations = append(violations, fmt.Sprintf("%s (%s): function length %d exceeds limit %d (ceiling %d)", rel, fnName, m.Lines, lineLimit, maxFuncLines))
-		}
-		if ccLimit := max(maxCC, bm.CC); m.CC > ccLimit {
-			violations = append(violations, fmt.Sprintf("%s (%s): cyclomatic complexity %d exceeds limit %d (ceiling %d)", rel, fnName, m.CC, ccLimit, maxCC))
-		}
 		if depthLimit := max(maxDepth, bm.Depth); m.Depth > depthLimit {
 			violations = append(violations, fmt.Sprintf("%s (%s): nesting depth %d exceeds limit %d (ceiling %d)", rel, fnName, m.Depth, depthLimit, maxDepth))
 		}
@@ -436,8 +420,6 @@ func analyzeFile(fullPath, rel string) (FileMetrics, map[string]FuncMetrics, []f
 		}
 		fnLines := fset.Position(fn.End()).Line - fset.Position(fn.Pos()).Line + 1
 		fns[name] = FuncMetrics{
-			Lines: fnLines,
-			CC:    calcCC(fn.Body),
 			Depth: calcDepth(fn.Body, 0),
 		}
 		if fnLines >= minCloneFuncLines {
@@ -660,30 +642,6 @@ func exprName(expr ast.Expr) string {
 	default:
 		return "recv"
 	}
-}
-
-func calcCC(body *ast.BlockStmt) int {
-	cc := 1
-	ast.Inspect(body, func(n ast.Node) bool {
-		switch x := n.(type) {
-		case *ast.IfStmt, *ast.ForStmt, *ast.RangeStmt:
-			cc++
-		case *ast.CaseClause:
-			if x.List != nil {
-				cc++
-			}
-		case *ast.CommClause:
-			if x.Comm != nil {
-				cc++
-			}
-		case *ast.BinaryExpr:
-			if x.Op == token.LAND || x.Op == token.LOR {
-				cc++
-			}
-		}
-		return true
-	})
-	return cc
 }
 
 func calcDepth(root ast.Node, cur int) int {

@@ -397,6 +397,44 @@ func isSnowflake(str string) bool {
 	return true
 }
 
+func findChannelInState(s *discordgo.Session, trimmed string) (string, bool) {
+	if s.State == nil {
+		return "", false
+	}
+	s.State.RLock()
+	defer s.State.RUnlock()
+	for _, g := range s.State.Guilds {
+		for _, ch := range g.Channels {
+			if strings.EqualFold(ch.Name, trimmed) {
+				return ch.ID, true
+			}
+		}
+	}
+	return "", false
+}
+
+func findChannelViaREST(s *discordgo.Session, trimmed string) (string, bool) {
+	if s.Ratelimiter == nil || s.Token == "" {
+		return "", false
+	}
+	userGuilds, err := s.UserGuilds(100, "", "", false)
+	if err != nil {
+		return "", false
+	}
+	for _, g := range userGuilds {
+		channels, err := s.GuildChannels(g.ID)
+		if err != nil {
+			continue
+		}
+		for _, ch := range channels {
+			if strings.EqualFold(ch.Name, trimmed) {
+				return ch.ID, true
+			}
+		}
+	}
+	return "", false
+}
+
 // ResolveChannelByNameOrID resolves a channel name (e.g. "aerial-dev" or "#aerial-dev") or snowflake ID to a channel ID.
 func ResolveChannelByNameOrID(s *discordgo.Session, nameOrID string) (string, error) {
 	if s == nil {
@@ -412,36 +450,12 @@ func ResolveChannelByNameOrID(s *discordgo.Session, nameOrID string) (string, er
 		return trimmed, nil
 	}
 
-	// 1. Check in-memory session State if available
-	if s.State != nil {
-		s.State.RLock()
-		for _, g := range s.State.Guilds {
-			for _, ch := range g.Channels {
-				if strings.EqualFold(ch.Name, trimmed) {
-					s.State.RUnlock()
-					return ch.ID, nil
-				}
-			}
-		}
-		s.State.RUnlock()
+	if id, ok := findChannelInState(s, trimmed); ok {
+		return id, nil
 	}
 
-	// 2. Query guilds and guild channels via Discord API fallback if token and client are initialized
-	if s.Ratelimiter != nil && s.Token != "" {
-		userGuilds, err := s.UserGuilds(100, "", "", false)
-		if err == nil {
-			for _, g := range userGuilds {
-				channels, err := s.GuildChannels(g.ID)
-				if err != nil {
-					continue
-				}
-				for _, ch := range channels {
-					if strings.EqualFold(ch.Name, trimmed) {
-						return ch.ID, nil
-					}
-				}
-			}
-		}
+	if id, ok := findChannelViaREST(s, trimmed); ok {
+		return id, nil
 	}
 
 	return "", fmt.Errorf("channel %q not found in any connected guild", nameOrID)

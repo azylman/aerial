@@ -236,6 +236,48 @@ func scanAddedLinePatterns(content, currentFile string, lineNum int, patterns []
 	return violations
 }
 
+type diffParseState struct {
+	currentFile string
+	lineNum     int
+	inHunk      bool
+	isBinary    bool
+}
+
+func parseDiffHeaderLine(line string, st *diffParseState) bool {
+	if strings.HasPrefix(line, "diff --git ") {
+		st.inHunk = false
+		st.isBinary = false
+		st.lineNum = 0
+		if idx := strings.Index(line, " b/"); idx != -1 {
+			st.currentFile = strings.TrimSpace(line[idx+3:])
+		}
+		return true
+	}
+	if strings.HasPrefix(line, "--- ") {
+		st.inHunk = false
+		return true
+	}
+	if strings.HasPrefix(line, "+++ ") {
+		st.inHunk = false
+		if line != "+++ /dev/null" {
+			target := strings.TrimPrefix(line, "+++ ")
+			target = strings.TrimPrefix(target, "b/")
+			st.currentFile = strings.TrimSpace(target)
+		}
+		return true
+	}
+	if strings.HasPrefix(line, "Binary files ") && strings.HasSuffix(line, "differ") {
+		st.isBinary = true
+		return true
+	}
+	if strings.HasPrefix(line, "@@ ") {
+		st.inHunk = true
+		st.lineNum = parseHunkLineNum(line)
+		return true
+	}
+	return false
+}
+
 // ScanDiffWithPatterns parses a unified diff and checks added lines against the supplied patterns.
 func ScanDiffWithPatterns(diff string, checkTestFiles bool, patterns []PatternRule) []Violation {
 	var violations []Violation
@@ -244,80 +286,40 @@ func ScanDiffWithPatterns(diff string, checkTestFiles bool, patterns []PatternRu
 	}
 
 	lines := strings.Split(diff, "\n")
-	currentFile := ""
-	lineNum := 0
-	inHunk := false
-	isBinary := false
+	var st diffParseState
 
 	for _, line := range lines {
-		// Detect file headers: diff --git a/... b/...
-		if strings.HasPrefix(line, "diff --git ") {
-			inHunk = false
-			isBinary = false
-			lineNum = 0
-			// Extract target file
-			if idx := strings.Index(line, " b/"); idx != -1 {
-				currentFile = strings.TrimSpace(line[idx+3:])
-			}
+		if parseDiffHeaderLine(line, &st) {
 			continue
 		}
 
-		// Detect diff --no-index or direct --- / +++
-		if strings.HasPrefix(line, "--- ") {
-			inHunk = false
-			continue
-		}
-
-		if strings.HasPrefix(line, "+++ ") {
-			inHunk = false
-			if line != "+++ /dev/null" {
-				target := strings.TrimPrefix(line, "+++ ")
-				target = strings.TrimPrefix(target, "b/")
-				currentFile = strings.TrimSpace(target)
-			}
-			continue
-		}
-
-		// Detect binary files
-		if strings.HasPrefix(line, "Binary files ") && strings.HasSuffix(line, "differ") {
-			isBinary = true
-			continue
-		}
-
-		// Detect hunk headers: @@ -a,b +c,d @@ or @@ -a +c @@
-		if strings.HasPrefix(line, "@@ ") {
-			inHunk = true
-			lineNum = parseHunkLineNum(line)
-			continue
-		}
-
-		if isBinary {
+		if st.isBinary {
 			continue
 		}
 
 		// If no hunk header was encountered (e.g. raw diff), start line numbering at 1
-		if isImplicitHunkStart(inHunk, lineNum, line) {
-			inHunk = true
-			lineNum = 1
+		if isImplicitHunkStart(st.inHunk, st.lineNum, line) {
+			st.inHunk = true
+			st.lineNum = 1
 		}
 
 		// Check added line
 		if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
-			currentLineNum := lineNum
-			lineNum++
+			currentLineNum := st.lineNum
+			st.lineNum++
 
-			if !checkTestFiles && isTestFile(currentFile) {
+			if !checkTestFiles && isTestFile(st.currentFile) {
 				continue
 			}
 
 			content := line[1:]
-			violations = append(violations, scanAddedLinePatterns(content, currentFile, currentLineNum, patterns)...)
+			violations = append(violations, scanAddedLinePatterns(content, st.currentFile, currentLineNum, patterns)...)
 			continue
 		}
 
 		// Context line: unified diffs emit ' ' prefix or an empty line for empty lines
-		if isDiffContextLine(inHunk, line) {
-			lineNum++
+		if isDiffContextLine(st.inHunk, line) {
+			st.lineNum++
 			continue
 		}
 
@@ -438,6 +440,38 @@ func IsCommitCommand(cmd string) (isCommit bool, targetDir string, isSubmit bool
 	return false, "", false
 }
 
+func matchGitWorktreeOrSubmodule(dir string, match func(string) bool) bool {
+	gitFile := filepath.Join(dir, ".git")
+	data, err := os.ReadFile(gitFile)
+	if err != nil {
+		return false
+	}
+	content := string(data)
+	if match(content) {
+		return true
+	}
+	if !strings.HasPrefix(strings.TrimSpace(content), "gitdir:") {
+		return false
+	}
+	gitDir := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(content), "gitdir:"))
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(dir, gitDir)
+	}
+	if cfgData, err := os.ReadFile(filepath.Join(gitDir, "config")); err == nil && match(string(cfgData)) {
+		return true
+	}
+	commonData, err := os.ReadFile(filepath.Join(gitDir, "commondir"))
+	if err != nil {
+		return false
+	}
+	commonDir := strings.TrimSpace(string(commonData))
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(gitDir, commonDir)
+	}
+	cfgData, err := os.ReadFile(filepath.Join(commonDir, "config"))
+	return err == nil && match(string(cfgData))
+}
+
 // hasRepoOriginMatch inspects .git/config, worktree gitdir/commondir, and git remote origin against a matcher func.
 func hasRepoOriginMatch(targetDir string, match func(string) bool) bool {
 	dir := targetDir
@@ -454,34 +488,8 @@ func hasRepoOriginMatch(targetDir string, match func(string) bool) bool {
 	}
 
 	// 2. Handle git worktree or submodule where .git is a file
-	gitFile := filepath.Join(dir, ".git")
-	if data, err := os.ReadFile(gitFile); err == nil {
-		content := string(data)
-		if match(content) {
-			return true
-		}
-		if strings.HasPrefix(strings.TrimSpace(content), "gitdir:") {
-			gitDir := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(content), "gitdir:"))
-			if !filepath.IsAbs(gitDir) {
-				gitDir = filepath.Join(dir, gitDir)
-			}
-			if cfgData, err := os.ReadFile(filepath.Join(gitDir, "config")); err == nil {
-				if match(string(cfgData)) {
-					return true
-				}
-			}
-			if commonData, err := os.ReadFile(filepath.Join(gitDir, "commondir")); err == nil {
-				commonDir := strings.TrimSpace(string(commonData))
-				if !filepath.IsAbs(commonDir) {
-					commonDir = filepath.Join(gitDir, commonDir)
-				}
-				if cfgData, err := os.ReadFile(filepath.Join(commonDir, "config")); err == nil {
-					if match(string(cfgData)) {
-						return true
-					}
-				}
-			}
-		}
+	if matchGitWorktreeOrSubmodule(dir, match) {
+		return true
 	}
 
 	// 3. Query git remote get-url origin

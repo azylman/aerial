@@ -442,6 +442,20 @@ func (u *StatusUpdater) Stop() {
 	u.wg.Wait()
 }
 
+func (u *StatusUpdater) performDeleteMessage(threadID, msgID, warnSuffix string) {
+	if err := u.deleteFunc(threadID, msgID); err != nil && !delivery.IsMessageNotFoundError(err) {
+		log.Printf("[StatusUpdater] Warning deleting status message%s: %v", warnSuffix, err)
+	}
+}
+
+func (u *StatusUpdater) dispatchDeleteMessage(threadID, msgID, warnSuffix string) {
+	if u.syncDelete {
+		u.performDeleteMessage(threadID, msgID, warnSuffix)
+		return
+	}
+	go u.performDeleteMessage(threadID, msgID, warnSuffix)
+}
+
 func (u *StatusUpdater) resetState(deleteRemote, disable bool, warnSuffix string) {
 	if u == nil {
 		return
@@ -457,17 +471,7 @@ func (u *StatusUpdater) resetState(deleteRemote, disable bool, warnSuffix string
 	u.mu.Unlock()
 
 	if deleteRemote && msgID != "" {
-		if u.syncDelete {
-			if err := u.deleteFunc(u.threadID, msgID); err != nil && !delivery.IsMessageNotFoundError(err) {
-				log.Printf("[StatusUpdater] Warning deleting status message%s: %v", warnSuffix, err)
-			}
-		} else {
-			go func(threadID, messageID string) {
-				if err := u.deleteFunc(threadID, messageID); err != nil && !delivery.IsMessageNotFoundError(err) {
-					log.Printf("[StatusUpdater] Warning deleting status message%s: %v", warnSuffix, err)
-				}
-			}(u.threadID, msgID)
-		}
+		u.dispatchDeleteMessage(u.threadID, msgID, warnSuffix)
 	}
 }
 

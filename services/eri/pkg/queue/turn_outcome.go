@@ -243,43 +243,51 @@ func (te *turnExecution) isQuotaRetry() bool {
 	return strings.Contains(te.turnPrompt, "[QUOTA_RETRY]")
 }
 
+func (te *turnExecution) retryCapacityBlip(errDetail string, resetDur time.Duration, currentModel string, attempt int) bool {
+	te.incrementTurnRetries(errDetail)
+	delay := calculateCapacityBackoff(attempt, resetDur)
+	if te.pool != nil && te.pool.cfg.RetryDelayOverride > 0 {
+		delay = te.pool.cfg.RetryDelayOverride
+	}
+	if te.statusUpdater != nil {
+		te.statusUpdater.SetCapacityBackoff(delay)
+	}
+	cancelChan := te.turnDone()
+	select {
+	case <-time.After(delay):
+		return true
+	case <-cancelChan:
+		if te.isInterrupted() {
+			te.finalizeInterruptedTurn(currentModel)
+			return false
+		}
+		log.Printf("[WorkerPool] Context cancelled during capacity blip backoff for thread %s", te.threadID)
+		te.stopIndicators()
+		te.cancelBurstOnShutdown("pending", currentModel, false)
+		return false
+	}
+}
+
+func (te *turnExecution) handleCapacityBlip(errDetail string, resetDur time.Duration, currentModel string, attempt, maxAttempts int) bool {
+	log.Printf("[WorkerPool] Capacity blip detected for thread %s on attempt %d/%d (reset=%v): %s.", te.threadID, attempt, maxAttempts, resetDur, errDetail)
+	if attempt < maxAttempts {
+		return te.retryCapacityBlip(errDetail, resetDur, currentModel, attempt)
+	}
+	log.Printf("[WorkerPool] Capacity blip retry budget exhausted for thread %s after %d attempts", te.threadID, maxAttempts)
+	te.stopIndicators()
+	reason := fmt.Sprintf("[CAPACITY_EXHAUSTED reset_in=%v] %s", resetDur, sanitizeErrorText(errDetail))
+	metrics.RecordRunnerError("capacity_exhausted", currentModel)
+	metrics.RecordTurnCompleted("capacity_exhausted", te.triggerType, currentModel, time.Since(te.execStart))
+	pauseMsg := notifier.FormatQuotaPauseMessage(resetDur, time.Now().UTC().Add(resetDur), false, false)
+	te.deliverQuotaNotice(pauseMsg, "capacity pause notice")
+	te.failBurstWithStatus("failed", reason, currentModel)
+	return false
+}
+
 func (te *turnExecution) handleQuotaPause(errDetail, stderr, currentModel, burstEffort string, attempt, maxAttempts int) bool {
 	resetDur, _ := runner.ExtractQuotaResetDuration(errDetail, stderr)
 	if runner.IsCapacityBlip(errDetail, stderr) || resetDur <= 5*time.Second {
-		log.Printf("[WorkerPool] Capacity blip detected for thread %s on attempt %d/%d (reset=%v): %s.", te.threadID, attempt, maxAttempts, resetDur, errDetail)
-		if attempt < maxAttempts {
-			te.incrementTurnRetries(errDetail)
-			delay := calculateCapacityBackoff(attempt, resetDur)
-			if te.pool != nil && te.pool.cfg.RetryDelayOverride > 0 {
-				delay = te.pool.cfg.RetryDelayOverride
-			}
-			if te.statusUpdater != nil {
-				te.statusUpdater.SetCapacityBackoff(delay)
-			}
-			cancelChan := te.turnDone()
-			select {
-			case <-time.After(delay):
-				return true
-			case <-cancelChan:
-				if te.isInterrupted() {
-					te.finalizeInterruptedTurn(currentModel)
-					return false
-				}
-				log.Printf("[WorkerPool] Context cancelled during capacity blip backoff for thread %s", te.threadID)
-				te.stopIndicators()
-				te.cancelBurstOnShutdown("pending", currentModel, false)
-				return false
-			}
-		}
-		log.Printf("[WorkerPool] Capacity blip retry budget exhausted for thread %s after %d attempts", te.threadID, maxAttempts)
-		te.stopIndicators()
-		reason := fmt.Sprintf("[CAPACITY_EXHAUSTED reset_in=%v] %s", resetDur, sanitizeErrorText(errDetail))
-		metrics.RecordRunnerError("capacity_exhausted", currentModel)
-		metrics.RecordTurnCompleted("capacity_exhausted", te.triggerType, currentModel, time.Since(te.execStart))
-		pauseMsg := notifier.FormatQuotaPauseMessage(resetDur, time.Now().UTC().Add(resetDur), false, false)
-		te.deliverQuotaNotice(pauseMsg, "capacity pause notice")
-		te.failBurstWithStatus("failed", reason, currentModel)
-		return false
+		return te.handleCapacityBlip(errDetail, resetDur, currentModel, attempt, maxAttempts)
 	}
 	te.isQuotaPaused = true
 	if te.stopTyping != nil {
@@ -456,28 +464,30 @@ func (te *turnExecution) cancelBurstOnShutdown(turnStatus, currentModel string, 
 	te.finalizeBurstMessages(te.burst, db.StatusPending, "interrupted by graceful deployment", runStatus, runErr, currentModel, false, false)
 }
 
+func buildFailureNotice(cfg WorkerPoolConfig, agyBin, apiKey, errDetail, stderr, descPrefix string) string {
+	if isRateLimitError(errDetail, stderr) {
+		return notifier.ModelUnavailableMessage()
+	}
+	snippet := sanitizeErrorText(errDetail)
+	if len([]rune(snippet)) > 300 {
+		snippet = string([]rune(snippet)[:300])
+	}
+	desc := descPrefix
+	if desc == "" {
+		desc = snippet
+	} else if strings.HasSuffix(desc, ": ") || strings.HasSuffix(desc, " ") {
+		desc = desc + snippet
+	} else {
+		desc = desc + ": " + snippet
+	}
+	return cfg.NotifierFunc(agyBin, apiKey, desc)
+}
+
 func (te *turnExecution) deliverFailureNotice(agyBin, apiKey, errDetail, stderr, descPrefix, logLabel string) {
 	if te.isDispatch() || te.pool == nil || te.pool.cfg.DeliveryFunc == nil {
 		return
 	}
-	var notif string
-	if isRateLimitError(errDetail, stderr) {
-		notif = notifier.ModelUnavailableMessage()
-	} else {
-		snippet := sanitizeErrorText(errDetail)
-		if len([]rune(snippet)) > 300 {
-			snippet = string([]rune(snippet)[:300])
-		}
-		desc := descPrefix
-		if desc == "" {
-			desc = snippet
-		} else if strings.HasSuffix(desc, ": ") || strings.HasSuffix(desc, " ") {
-			desc = desc + snippet
-		} else {
-			desc = desc + ": " + snippet
-		}
-		notif = te.pool.cfg.NotifierFunc(agyBin, apiKey, desc)
-	}
+	notif := buildFailureNotice(te.pool.cfg, agyBin, apiKey, errDetail, stderr, descPrefix)
 	deliveryTarget := te.threadID
 	if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), deliveryTarget, notif); err != nil {
 		log.Printf("[WorkerPool] Failed to deliver %s for thread %s: %v", logLabel, te.threadID, err)

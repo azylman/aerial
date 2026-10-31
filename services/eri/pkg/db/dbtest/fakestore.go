@@ -934,6 +934,31 @@ func (f *FakeStore) GetSessionSyncStates(ctx context.Context) (map[string]db.Ses
 	})
 }
 
+func updateExistingSessionSummary(existing *db.SessionSummary, summary db.SessionSummary, now time.Time) {
+	setIf(&existing.ThreadID, summary.ThreadID)
+	setIf(&existing.Summary, summary.Summary)
+	if len(summary.Embedding) > 0 {
+		existing.Embedding = cloneSlice(summary.Embedding)
+	}
+	if summary.LastIndexedStep >= 0 {
+		existing.LastIndexedStep = summary.LastIndexedStep
+	} else if summary.LastIndexedStep == -2 {
+		existing.LastIndexedStep = -1
+	}
+	if !summary.LastMtime.IsZero() {
+		existing.LastMtime = summary.LastMtime
+	}
+	if summary.SummaryStepWatermark >= 0 {
+		existing.SummaryStepWatermark = summary.SummaryStepWatermark
+	}
+	if summary.IsSettled {
+		existing.IsSettled = true
+	} else if summary.LastIndexedStep > existing.SummaryStepWatermark && existing.SummaryStepWatermark >= 0 {
+		existing.IsSettled = false
+	}
+	existing.UpdatedAt = now
+}
+
 func (f *FakeStore) UpsertSessionSummary(ctx context.Context, summary db.SessionSummary) error {
 	return f.withLockErr("UpsertSessionSummary", func() error {
 		if strings.TrimSpace(summary.SessionID) == "" {
@@ -942,28 +967,7 @@ func (f *FakeStore) UpsertSessionSummary(ctx context.Context, summary db.Session
 		now := time.Now().UTC()
 		existing := f.sessionSummaries[summary.SessionID]
 		if existing != nil {
-			setIf(&existing.ThreadID, summary.ThreadID)
-			setIf(&existing.Summary, summary.Summary)
-			if len(summary.Embedding) > 0 {
-				existing.Embedding = cloneSlice(summary.Embedding)
-			}
-			if summary.LastIndexedStep >= 0 {
-				existing.LastIndexedStep = summary.LastIndexedStep
-			} else if summary.LastIndexedStep == -2 {
-				existing.LastIndexedStep = -1
-			}
-			if !summary.LastMtime.IsZero() {
-				existing.LastMtime = summary.LastMtime
-			}
-			if summary.SummaryStepWatermark >= 0 {
-				existing.SummaryStepWatermark = summary.SummaryStepWatermark
-			}
-			if summary.IsSettled {
-				existing.IsSettled = true
-			} else if summary.LastIndexedStep > existing.SummaryStepWatermark && existing.SummaryStepWatermark >= 0 {
-				existing.IsSettled = false
-			}
-			existing.UpdatedAt = now
+			updateExistingSessionSummary(existing, summary, now)
 			return nil
 		}
 		cp := summary

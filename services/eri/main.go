@@ -80,6 +80,55 @@ func WithWorkerPool(pool *queue.WorkerPool) ReloadOption {
 	}
 }
 
+func ensureConfigDefaults(cfg *config.Config) {
+	cur := cfg.Current()
+	if cur == nil {
+		return
+	}
+	changed := false
+	if cur.GeminiHomeDir == "" {
+		cur.GeminiHomeDir = DefaultGeminiHomeDir()
+		changed = true
+	}
+	if cur.DataDir == "" {
+		cur.DataDir = DefaultDataDir()
+		changed = true
+	}
+	if changed {
+		cfg.Update(cur)
+	}
+}
+
+func executeConfigReload(source string, cfg *config.Config, options *reloadConfigOptions) {
+	if cfg == nil {
+		return
+	}
+	if err := options.reloadSupplier(cfg); err != nil {
+		metrics.ConfigReloadsTotal.WithLabelValues(source, "failure").Inc()
+		log.Printf("[%s] Warning: Failed to reload config: %v", source, err)
+		if options.dgSession != nil {
+			alertMsg := fmt.Sprintf("Failed to reload config:\n```\n%v\n```\nAerial has retained the Last Known Good Configuration (LKGC).", err)
+			if alertErr := delivery.SendSystemAlert(options.dgSession, cfg.Current().SystemChannel, "Invalid Configuration File", alertMsg); alertErr != nil {
+				log.Printf("[%s] Warning: Failed to send system alert for config reload failure: %v", source, alertErr)
+			}
+		}
+		return
+	}
+	metrics.ConfigReloadsTotal.WithLabelValues(source, "success").Inc()
+	ensureConfigDefaults(cfg)
+	config.RegisterConfigTokens(cfg)
+
+	if !options.skipEnvironmentSync && options.provisioner != nil {
+		if err := options.provisioner.Sync(context.Background(), cfg); err != nil {
+			log.Printf("[%s] Warning: env sync error: %v", source, err)
+		}
+	}
+
+	if options.workerPool != nil {
+		options.workerPool.MarkDirty()
+	}
+}
+
 func CreateReloadConfigFunc(cfg *config.Config, opts ...ReloadOption) func(source string) {
 	options := &reloadConfigOptions{
 		reloadSupplier: config.Reload,
@@ -103,45 +152,7 @@ func CreateReloadConfigFunc(cfg *config.Config, opts ...ReloadOption) func(sourc
 			}
 		}()
 		log.Printf("[%s] Changes detected. Reloading configuration, system rules, and skills...", source)
-		if cfg != nil {
-			if err := options.reloadSupplier(cfg); err != nil {
-				metrics.ConfigReloadsTotal.WithLabelValues(source, "failure").Inc()
-				log.Printf("[%s] Warning: Failed to reload config: %v", source, err)
-				if options.dgSession != nil {
-					alertMsg := fmt.Sprintf("Failed to reload config:\n```\n%v\n```\nAerial has retained the Last Known Good Configuration (LKGC).", err)
-					if alertErr := delivery.SendSystemAlert(options.dgSession, cfg.Current().SystemChannel, "Invalid Configuration File", alertMsg); alertErr != nil {
-						log.Printf("[%s] Warning: Failed to send system alert for config reload failure: %v", source, alertErr)
-					}
-				}
-				return
-			}
-			metrics.ConfigReloadsTotal.WithLabelValues(source, "success").Inc()
-			if cur := cfg.Current(); cur != nil {
-				changed := false
-				if cur.GeminiHomeDir == "" {
-					cur.GeminiHomeDir = DefaultGeminiHomeDir()
-					changed = true
-				}
-				if cur.DataDir == "" {
-					cur.DataDir = DefaultDataDir()
-					changed = true
-				}
-				if changed {
-					cfg.Update(cur)
-				}
-			}
-			config.RegisterConfigTokens(cfg)
-
-			if !options.skipEnvironmentSync && options.provisioner != nil {
-				if err := options.provisioner.Sync(context.Background(), cfg); err != nil {
-					log.Printf("[%s] Warning: env sync error: %v", source, err)
-				}
-			}
-
-			if options.workerPool != nil {
-				options.workerPool.MarkDirty()
-			}
-		}
+		executeConfigReload(source, cfg, options)
 	}
 }
 
@@ -250,6 +261,125 @@ func buildPoolEnv(baseEnv []string, runtimeBase string, timezone ...string) []st
 	return result
 }
 
+func initVoiceAmbientRetriever(cur *config.ConfigData) runner.AmbientContextRetriever {
+	ambCfg := cur.VoiceAmbientContext()
+	if ambCfg == nil {
+		return nil
+	}
+	voiceServers := extractMCPServers(cur, false)
+	disp := mcp.NewDispatcher(voiceServers, nil)
+	p, pErr := ambient.NewProvider(*ambCfg, disp)
+	if pErr != nil {
+		log.Printf("[INIT] Warning: failed to initialize voice ambient provider: %v", pErr)
+		return nil
+	}
+	go func() {
+		primeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := p.Prime(primeCtx); err != nil {
+			log.Printf("[INIT] Ambient context prime warning: %v", err)
+		}
+	}()
+	log.Printf("[INIT] Voice ambient context provider initialized (tools=%d, cache_ttl=%s)", len(ambCfg.Tools), ambCfg.CacheTTL)
+	return p.Retrieve
+}
+
+func buildGeminiVoicePool(cur *config.ConfigData, lowEffortModel string, prewarmedTargets []string, memoryRetriever runner.MemoryRetriever, ambRetriever runner.AmbientContextRetriever) (runner.AgentPool, string, string, []runner.MCPServerConfig, bool) {
+	apiKey := cur.HarnessAPIKey
+	if apiKey == "" {
+		apiKey = cur.APIKey
+	}
+	if apiKey == "" {
+		log.Printf("[WARN] voice.engine is configured as 'gemini_api' but neither harness_api_key nor api_key is set; safely falling back to 'agy'")
+		return nil, "", "", nil, false
+	}
+	geminiModel := lowEffortModel
+	if strings.TrimSpace(cur.Voice.Model) != "" {
+		geminiModel = strings.TrimSpace(cur.Voice.Model)
+	}
+	mcpServers := extractMCPServers(cur, false)
+	voicePool := runner.NewGeminiAPIPool(runner.GeminiAPIPoolConfig{
+		APIKey:                  apiKey,
+		Model:                   geminiModel,
+		PrewarmedTargets:        prewarmedTargets,
+		SystemPrompt:            cur.SystemPrompt,
+		MCPServers:              mcpServers,
+		AllowedTools:            cur.VoiceAllowedTools(),
+		DataDir:                 cur.DataDir,
+		MemoryRetriever:         memoryRetriever,
+		AmbientContextRetriever: ambRetriever,
+	})
+	log.Printf("[INIT] Voice engine initialized with 'gemini_api' (model=%s, prewarmed=%v, mcp_servers=%d, allowed_tools=%d)", geminiModel, prewarmedTargets, len(mcpServers), len(cur.VoiceAllowedTools()))
+	return voicePool, geminiModel, apiKey, mcpServers, true
+}
+
+func buildUnifiedVoicePool(cfg *config.Config, cur *config.ConfigData, voiceHome, lowEffortModel string, prewarmedTargets []string, spawner runner.DaemonSpawner, memoryRetriever runner.MemoryRetriever, ambRetriever runner.AmbientContextRetriever) runner.AgentPool {
+	runtimeBase := cur.DataDir
+	if runtimeBase == "" && cfg != nil {
+		runtimeBase = cfg.DataDir()
+	}
+	if runtimeBase == "" && cfg != nil {
+		runtimeBase = cfg.GeminiHomeDir()
+	}
+	voiceSessionMgr := session.New(voiceHome, runtimeBase)
+	return runner.NewUnifiedProcessPool(runner.PoolConfig{
+		GeminiHomeDir:           voiceHome,
+		Model:                   lowEffortModel,
+		AgyBin:                  cur.AgyBin,
+		Cwd:                     cur.DataDir,
+		Env:                     buildPoolEnv(os.Environ(), runtimeBase, cur.Timezone),
+		Timezone:                cur.Timezone,
+		PrewarmedTargets:        prewarmedTargets,
+		MemoryRetriever:         memoryRetriever,
+		AmbientContextRetriever: ambRetriever,
+		SessionManager:          voiceSessionMgr,
+	}, spawner)
+}
+
+func computeVoiceConfigFingerprint(voiceEngine, effectiveModel, effectiveAPIKey string, cur *config.ConfigData, prewarmedTargets []string, mcpServers []runner.MCPServerConfig) string {
+	var b strings.Builder
+	b.WriteString("engine:")
+	b.WriteString(voiceEngine)
+	b.WriteString("\nmodel:")
+	b.WriteString(effectiveModel)
+	b.WriteString("\n")
+	if effectiveAPIKey != "" {
+		keyHash := sha256.Sum256([]byte(effectiveAPIKey))
+		b.WriteString("apiKeyHash:")
+		b.WriteString(hex.EncodeToString(keyHash[:]))
+		b.WriteString("\n")
+	}
+	if ambCfg := cur.VoiceAmbientContext(); ambCfg != nil {
+		b.WriteString("ambient_context_tools:")
+		fmt.Fprintf(&b, "%d", len(ambCfg.Tools))
+		b.WriteString("\nambient_context_ttl:")
+		b.WriteString(ambCfg.CacheTTL)
+		b.WriteString("\nambient_context_template:")
+		b.WriteString(ambCfg.Template)
+		b.WriteString("\nambient_context_template_path:")
+		b.WriteString(ambCfg.TemplatePath)
+		b.WriteString("\n")
+	}
+	for _, target := range prewarmedTargets {
+		b.WriteString("prewarmed:")
+		b.WriteString(target)
+		b.WriteString("\n")
+	}
+	for _, s := range mcpServers {
+		b.WriteString("mcp:")
+		b.WriteString(s.Name)
+		b.WriteString("=")
+		b.WriteString(s.ServerURL)
+		b.WriteString("\n")
+	}
+	b.WriteString("systemPrompt:")
+	b.WriteString(cur.SystemPrompt)
+	b.WriteString("\n")
+
+	h := sha256.Sum256([]byte(b.String()))
+	return hex.EncodeToString(h[:])
+}
+
 // createVoiceProcessPool constructs a runner.AgentPool based on cfg.VoiceEngine()
 // wrapped in runner.DynamicVoicePool with a factory closure evaluating cfg.Current() dynamically.
 func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel string, spawner runner.DaemonSpawner, memRetriever ...runner.MemoryRetriever) runner.AgentPool {
@@ -276,123 +406,25 @@ func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel
 		var effectiveAPIKey string
 		var mcpServers []runner.MCPServerConfig
 
-		var ambRetriever runner.AmbientContextRetriever
-		if ambCfg := cur.VoiceAmbientContext(); ambCfg != nil {
-			voiceServers := extractMCPServers(cur, false)
-			disp := mcp.NewDispatcher(voiceServers, nil)
-			p, pErr := ambient.NewProvider(*ambCfg, disp)
-			if pErr != nil {
-				log.Printf("[INIT] Warning: failed to initialize voice ambient provider: %v", pErr)
-			} else {
-				go func() {
-					primeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-					defer cancel()
-					if err := p.Prime(primeCtx); err != nil {
-						log.Printf("[INIT] Ambient context prime warning: %v", err)
-					}
-				}()
-				ambRetriever = p.Retrieve
-				log.Printf("[INIT] Voice ambient context provider initialized (tools=%d, cache_ttl=%s)", len(ambCfg.Tools), ambCfg.CacheTTL)
-			}
-		}
+		ambRetriever := initVoiceAmbientRetriever(cur)
 
 		if voiceEngine == "gemini_api" {
-			apiKey := cur.HarnessAPIKey
-			if apiKey == "" {
-				apiKey = cur.APIKey
-			}
-			if apiKey == "" {
-				log.Printf("[WARN] voice.engine is configured as 'gemini_api' but neither harness_api_key nor api_key is set; safely falling back to 'agy'")
-				voiceEngine = "agy"
-			} else {
-				geminiModel := lowEffortModel
-				if strings.TrimSpace(cur.Voice.Model) != "" {
-					geminiModel = strings.TrimSpace(cur.Voice.Model)
-				}
-				effectiveModel = geminiModel
+			pool, model, apiKey, servers, ok := buildGeminiVoicePool(cur, lowEffortModel, prewarmedTargets, memoryRetriever, ambRetriever)
+			if ok {
+				voicePool = pool
+				effectiveModel = model
 				effectiveAPIKey = apiKey
-				mcpServers = extractMCPServers(cur, false)
-				voicePool = runner.NewGeminiAPIPool(runner.GeminiAPIPoolConfig{
-					APIKey:                  apiKey,
-					Model:                   geminiModel,
-					PrewarmedTargets:        prewarmedTargets,
-					SystemPrompt:            cur.SystemPrompt,
-					MCPServers:              mcpServers,
-					AllowedTools:            cur.VoiceAllowedTools(),
-					DataDir:                 cur.DataDir,
-					MemoryRetriever:         memoryRetriever,
-					AmbientContextRetriever: ambRetriever,
-				})
-				log.Printf("[INIT] Voice engine initialized with 'gemini_api' (model=%s, prewarmed=%v, mcp_servers=%d, allowed_tools=%d)", geminiModel, prewarmedTargets, len(mcpServers), len(cur.VoiceAllowedTools()))
+				mcpServers = servers
+			} else {
+				voiceEngine = "agy"
 			}
 		}
 		if voiceEngine != "gemini_api" {
 			effectiveModel = lowEffortModel
-			runtimeBase := cur.DataDir
-			if runtimeBase == "" && cfg != nil {
-				runtimeBase = cfg.DataDir()
-			}
-			if runtimeBase == "" && cfg != nil {
-				runtimeBase = cfg.GeminiHomeDir()
-			}
-			voiceSessionMgr := session.New(voiceHome, runtimeBase)
-			voicePool = runner.NewUnifiedProcessPool(runner.PoolConfig{
-				GeminiHomeDir:           voiceHome,
-				Model:                   lowEffortModel,
-				AgyBin:                  cur.AgyBin,
-				Cwd:                     cur.DataDir,
-				Env:                     buildPoolEnv(os.Environ(), runtimeBase, cur.Timezone),
-				Timezone:                cur.Timezone,
-				PrewarmedTargets:        prewarmedTargets,
-				MemoryRetriever:         memoryRetriever,
-				AmbientContextRetriever: ambRetriever,
-				SessionManager:          voiceSessionMgr,
-			}, spawner)
+			voicePool = buildUnifiedVoicePool(cfg, cur, voiceHome, lowEffortModel, prewarmedTargets, spawner, memoryRetriever, ambRetriever)
 		}
 
-		// Compute deterministic configuration fingerprint
-		var b strings.Builder
-		b.WriteString("engine:")
-		b.WriteString(voiceEngine)
-		b.WriteString("\nmodel:")
-		b.WriteString(effectiveModel)
-		b.WriteString("\n")
-		if effectiveAPIKey != "" {
-			keyHash := sha256.Sum256([]byte(effectiveAPIKey))
-			b.WriteString("apiKeyHash:")
-			b.WriteString(hex.EncodeToString(keyHash[:]))
-			b.WriteString("\n")
-		}
-		if ambCfg := cur.VoiceAmbientContext(); ambCfg != nil {
-			b.WriteString("ambient_context_tools:")
-			b.WriteString(fmt.Sprintf("%d", len(ambCfg.Tools)))
-			b.WriteString("\nambient_context_ttl:")
-			b.WriteString(ambCfg.CacheTTL)
-			b.WriteString("\nambient_context_template:")
-			b.WriteString(ambCfg.Template)
-			b.WriteString("\nambient_context_template_path:")
-			b.WriteString(ambCfg.TemplatePath)
-			b.WriteString("\n")
-		}
-		for _, target := range prewarmedTargets {
-			b.WriteString("prewarmed:")
-			b.WriteString(target)
-			b.WriteString("\n")
-		}
-		for _, s := range mcpServers {
-			b.WriteString("mcp:")
-			b.WriteString(s.Name)
-			b.WriteString("=")
-			b.WriteString(s.ServerURL)
-			b.WriteString("\n")
-		}
-		b.WriteString("systemPrompt:")
-		b.WriteString(cur.SystemPrompt)
-		b.WriteString("\n")
-
-		h := sha256.Sum256([]byte(b.String()))
-		fingerprint := hex.EncodeToString(h[:])
-
+		fingerprint := computeVoiceConfigFingerprint(voiceEngine, effectiveModel, effectiveAPIKey, cur, prewarmedTargets, mcpServers)
 		return voicePool, fingerprint, nil
 	}
 

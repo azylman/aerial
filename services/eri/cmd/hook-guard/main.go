@@ -35,6 +35,27 @@ func HelpMessage() string {
 	return "Usage: hook-guard [share|schedule|batch|post-batch|pre-invocation|search|commit|all]"
 }
 
+func detectModeFromBase(base string) (Mode, bool) {
+	switch {
+	case strings.Contains(base, "share"):
+		return ModeShare, true
+	case strings.Contains(base, "schedule"):
+		return ModeSchedule, true
+	case strings.Contains(base, "post-batch"), strings.Contains(base, "post-tool"):
+		return ModePost, true
+	case strings.Contains(base, "invocation"):
+		return ModeInv, true
+	case strings.Contains(base, "batch"):
+		return ModeBatch, true
+	case strings.Contains(base, "search"):
+		return ModeSearch, true
+	case strings.Contains(base, "commit"):
+		return ModeCommit, true
+	default:
+		return ModeAll, false
+	}
+}
+
 // ParseCLIConfig parses command line arguments and infers mode from executable name.
 func ParseCLIConfig(args []string) Config {
 	cfg := Config{
@@ -44,20 +65,8 @@ func ParseCLIConfig(args []string) Config {
 	// 1. Detect mode from binary base name (supporting symlinks like share-guard, schedule-guard, batch-guard, search-guard, commit-guard)
 	if len(args) > 0 {
 		base := strings.ToLower(filepath.Base(args[0]))
-		if strings.Contains(base, "share") {
-			cfg.Mode = ModeShare
-		} else if strings.Contains(base, "schedule") {
-			cfg.Mode = ModeSchedule
-		} else if strings.Contains(base, "post-batch") || strings.Contains(base, "post-tool") {
-			cfg.Mode = ModePost
-		} else if strings.Contains(base, "invocation") {
-			cfg.Mode = ModeInv
-		} else if strings.Contains(base, "batch") {
-			cfg.Mode = ModeBatch
-		} else if strings.Contains(base, "search") {
-			cfg.Mode = ModeSearch
-		} else if strings.Contains(base, "commit") {
-			cfg.Mode = ModeCommit
+		if m, ok := detectModeFromBase(base); ok {
+			cfg.Mode = m
 		}
 	}
 

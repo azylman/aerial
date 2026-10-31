@@ -414,6 +414,56 @@ func requirePostWithPool(w http.ResponseWriter, r *http.Request, pool *queue.Wor
 	return true
 }
 
+func parseDirectMessageAttachment(att DirectAttachmentPayload) (*delivery.Attachment, error) {
+	filename := strings.TrimSpace(att.Filename)
+	if filename == "" {
+		return nil, errors.New("Invalid attachment: 'filename' is required")
+	}
+	data, err := base64.StdEncoding.DecodeString(att.ContentBase64)
+	if err != nil {
+		return nil, fmt.Errorf("Invalid attachment base64: %w", err)
+	}
+	if len(data) == 0 {
+		return nil, errors.New("Invalid attachment: payload is empty")
+	}
+	if int64(len(data)) > delivery.MaxAttachmentSizeBytes {
+		return nil, fmt.Errorf("Attachment %s exceeds maximum size of %d bytes", filename, delivery.MaxAttachmentSizeBytes)
+	}
+	return &delivery.Attachment{
+		Filename:    filename,
+		ContentType: strings.TrimSpace(att.ContentType),
+		Data:        data,
+	}, nil
+}
+
+func parseDirectMessageAttachments(raw []DirectAttachmentPayload) ([]*delivery.Attachment, error) {
+	if len(raw) > delivery.MaxAttachmentsPerMessage {
+		return nil, fmt.Errorf("Too many attachments: maximum is %d", delivery.MaxAttachmentsPerMessage)
+	}
+	attachments := make([]*delivery.Attachment, 0, len(raw))
+	for _, item := range raw {
+		att, err := parseDirectMessageAttachment(item)
+		if err != nil {
+			return nil, err
+		}
+		attachments = append(attachments, att)
+	}
+	return attachments, nil
+}
+
+func resolveDirectMessageTarget(pool *queue.WorkerPool, req DirectMessageRequest) string {
+	targetID := strings.TrimSpace(req.ThreadID)
+	if targetID == "" {
+		targetID = strings.TrimSpace(req.ChannelID)
+	}
+	if !queue.IsNumericSnowflake(targetID) && targetID != "" {
+		if resolved, err := pool.ResolveChannelID(targetID); err == nil {
+			targetID = resolved
+		}
+	}
+	return targetID
+}
+
 func handleDirectMessage(pool *queue.WorkerPool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !requirePostWithPool(w, r, pool) {
@@ -425,49 +475,15 @@ func handleDirectMessage(pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		targetID := strings.TrimSpace(req.ThreadID)
-		if targetID == "" {
-			targetID = strings.TrimSpace(req.ChannelID)
-		}
-		if !queue.IsNumericSnowflake(targetID) && targetID != "" {
-			if resolved, err := pool.ResolveChannelID(targetID); err == nil {
-				targetID = resolved
-			}
-		}
+		targetID := resolveDirectMessageTarget(pool, req)
 		if !validateSnowflakeID(w, targetID, "channel_id") {
 			return
 		}
 
-		if len(req.Attachments) > delivery.MaxAttachmentsPerMessage {
-			writeErr(w, http.StatusBadRequest, fmt.Sprintf("Too many attachments: maximum is %d", delivery.MaxAttachmentsPerMessage))
+		attachments, err := parseDirectMessageAttachments(req.Attachments)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
 			return
-		}
-
-		var attachments []*delivery.Attachment
-		for _, att := range req.Attachments {
-			filename := strings.TrimSpace(att.Filename)
-			if filename == "" {
-				writeErr(w, http.StatusBadRequest, "Invalid attachment: 'filename' is required")
-				return
-			}
-			data, err := base64.StdEncoding.DecodeString(att.ContentBase64)
-			if err != nil {
-				writeErr(w, http.StatusBadRequest, fmt.Sprintf("Invalid attachment base64: %v", err))
-				return
-			}
-			if len(data) == 0 {
-				writeErr(w, http.StatusBadRequest, "Invalid attachment: payload is empty")
-				return
-			}
-			if int64(len(data)) > delivery.MaxAttachmentSizeBytes {
-				writeErr(w, http.StatusBadRequest, fmt.Sprintf("Attachment %s exceeds maximum size of %d bytes", filename, delivery.MaxAttachmentSizeBytes))
-				return
-			}
-			attachments = append(attachments, &delivery.Attachment{
-				Filename:    filename,
-				ContentType: strings.TrimSpace(att.ContentType),
-				Data:        data,
-			})
 		}
 
 		content := strings.TrimSpace(req.Content)

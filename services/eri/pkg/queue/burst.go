@@ -158,9 +158,7 @@ func (p *WorkerPool) EnqueueDispatch(d db.Dispatch) {
 	}
 }
 
-func (p *WorkerPool) runThreadWorker(scopeKey string, state *threadWorkerState) {
-	defer p.wg.Done()
-
+func (p *WorkerPool) resolveWorkerIdleTimeout() time.Duration {
 	idleTimeout := p.cfg.IdleTimeout
 	if idleTimeout <= 0 {
 		if p.appCfg != nil {
@@ -170,6 +168,53 @@ func (p *WorkerPool) runThreadWorker(scopeKey string, state *threadWorkerState) 
 			idleTimeout = DefaultMaxSessionIdleTime
 		}
 	}
+	return idleTimeout
+}
+
+func resetTimer(timer *time.Timer, d time.Duration) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(d)
+}
+
+func (p *WorkerPool) tryPruneIdleThread(scopeKey string, state *threadWorkerState) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(state.ch) == 0 && state.activeEnqueuers == 0 {
+		delete(p.threadChs, scopeKey)
+		p.scopeLocks.Delete(scopeKey)
+		return true
+	}
+	return false
+}
+
+func (p *WorkerPool) waitForNextQueueItem(scopeKey string, state *threadWorkerState, idleTimer *time.Timer, idleTimeout time.Duration) (*queueItem, bool) {
+	select {
+	case <-p.ctx.Done():
+		return nil, false
+	case popped, ok := <-state.ch:
+		if !ok {
+			return nil, false
+		}
+		metrics.QueueDepth.Dec()
+		return &popped, true
+	case <-idleTimer.C:
+		if p.tryPruneIdleThread(scopeKey, state) {
+			return nil, false
+		}
+		idleTimer.Reset(idleTimeout)
+		return nil, true
+	}
+}
+
+func (p *WorkerPool) runThreadWorker(scopeKey string, state *threadWorkerState) {
+	defer p.wg.Done()
+
+	idleTimeout := p.resolveWorkerIdleTimeout()
 	idleTimer := time.NewTimer(idleTimeout)
 	defer idleTimer.Stop()
 
@@ -181,36 +226,17 @@ func (p *WorkerPool) runThreadWorker(scopeKey string, state *threadWorkerState) 
 			item = *heldItem
 			heldItem = nil
 		} else {
-			select {
-			case <-p.ctx.Done():
+			popped, keepRunning := p.waitForNextQueueItem(scopeKey, state, idleTimer, idleTimeout)
+			if !keepRunning {
 				return
-			case popped, ok := <-state.ch:
-				if !ok {
-					return
-				}
-				metrics.QueueDepth.Dec()
-				item = popped
-			case <-idleTimer.C:
-				p.mu.Lock()
-				if len(state.ch) == 0 && heldItem == nil && state.activeEnqueuers == 0 {
-					delete(p.threadChs, scopeKey)
-					p.scopeLocks.Delete(scopeKey)
-					p.mu.Unlock()
-					return
-				}
-				p.mu.Unlock()
-				idleTimer.Reset(idleTimeout)
+			}
+			if popped == nil {
 				continue
 			}
+			item = *popped
 		}
 
-		if !idleTimer.Stop() {
-			select {
-			case <-idleTimer.C:
-			default:
-			}
-		}
-		idleTimer.Reset(idleTimeout)
+		resetTimer(idleTimer, idleTimeout)
 
 		if item.dispatch != nil {
 			p.executeWorkerDispatch(state, item.dispatch, scopeKey)
@@ -218,13 +244,7 @@ func (p *WorkerPool) runThreadWorker(scopeKey string, state *threadWorkerState) 
 			heldItem = p.executeWorkerBurst(state, *item.msg, scopeKey)
 		}
 
-		if !idleTimer.Stop() {
-			select {
-			case <-idleTimer.C:
-			default:
-			}
-		}
-		idleTimer.Reset(idleTimeout)
+		resetTimer(idleTimer, idleTimeout)
 	}
 }
 
@@ -660,21 +680,25 @@ func resolveBurstPoolKey(burst []db.Message) (PoolKey, error) {
 	return ResolvePoolKey(&falseVal, resolveBurstEffort(burst))
 }
 
+func fallbackEffortForModel(model string, isEphem bool) string {
+	switch {
+	case strings.Contains(model, "medium"):
+		return "medium"
+	case strings.Contains(model, "flash"):
+		return "low"
+	case strings.Contains(model, "pro"):
+		return "high"
+	case isEphem:
+		return "medium"
+	default:
+		return "low"
+	}
+}
+
 func resolveDispatchEffort(d db.Dispatch, isEphem bool) string {
 	eff := strings.ToLower(strings.TrimSpace(d.Effort))
 	if eff == "" {
-		model := strings.ToLower(strings.TrimSpace(d.Model))
-		if strings.Contains(model, "medium") {
-			eff = "medium"
-		} else if strings.Contains(model, "flash") {
-			eff = "low"
-		} else if strings.Contains(model, "pro") {
-			eff = "high"
-		} else if isEphem {
-			eff = "medium"
-		} else {
-			eff = "low"
-		}
+		eff = fallbackEffortForModel(strings.ToLower(strings.TrimSpace(d.Model)), isEphem)
 	}
 	if isEphem && eff == "high" {
 		eff = "medium"
@@ -717,25 +741,33 @@ func (te *turnExecution) resolveExecutionPool() (runner.AgentPool, PoolKey, erro
 	return te.pool.Pool(PoolKey{Ephemeral: false, Effort: "high"}), k, nil
 }
 
+type daemonGetter interface {
+	Get(string) (*runner.StreamingDaemon, bool)
+}
+
+func lookupDaemon(dPool daemonGetter, threadID string) *runner.StreamingDaemon {
+	if d, ok := dPool.Get(threadID); ok && d != nil {
+		return d
+	}
+	if norm := db.DiscordSessionID(threadID); norm != threadID {
+		if d, ok := dPool.Get(norm); ok && d != nil {
+			return d
+		}
+	}
+	if trimmed := strings.TrimPrefix(threadID, "discord-"); trimmed != threadID && trimmed != "" {
+		if d, ok := dPool.Get(trimmed); ok && d != nil {
+			return d
+		}
+	}
+	return nil
+}
+
 func getStreamingDaemon(pool runner.AgentPool, threadID string) *runner.StreamingDaemon {
 	if pool == nil || threadID == "" {
 		return nil
 	}
-	if dPool, ok := pool.(interface {
-		Get(string) (*runner.StreamingDaemon, bool)
-	}); ok {
-		if d, ok := dPool.Get(threadID); ok && d != nil {
-			return d
-		}
-		if norm := db.DiscordSessionID(threadID); norm != threadID {
-			if d, ok := dPool.Get(norm); ok && d != nil {
-				return d
-			}
-		} else if trimmed := strings.TrimPrefix(threadID, "discord-"); trimmed != threadID && trimmed != "" {
-			if d, ok := dPool.Get(trimmed); ok && d != nil {
-				return d
-			}
-		}
+	if dPool, ok := pool.(daemonGetter); ok {
+		return lookupDaemon(dPool, threadID)
 	}
 	return nil
 }

@@ -244,54 +244,67 @@ func (m *Manager) GetSessionLastActivity(sessionID string, customRoots ...string
 	return LastActivityFromRoots(sessionID, m.roots)
 }
 
-func (m *Manager) getTargetDirs(convID string) []string {
-	if m == nil || len(m.roots) == 0 {
-		return nil
-	}
-
-	if convID != "" {
-		var res []string
-		seen := make(map[string]bool)
-		for _, root := range m.roots {
-			p := filepath.Join(root, convID)
+func appendDataDirRuntimePaths(dataDir, convID string, seen map[string]bool, res []string) []string {
+	for _, runtime := range []string{"discord", "voice", "ephemeral"} {
+		for _, variant := range []string{"antigravity-cli", "antigravity"} {
+			p := filepath.Join(dataDir, "runtimes", runtime, ".gemini", variant, "brain", convID)
 			if !seen[p] {
 				res = append(res, p)
 				seen[p] = true
 			}
 		}
-		if m.dataDir != "" {
-			for _, runtime := range []string{"discord", "voice", "ephemeral"} {
-				p := filepath.Join(m.dataDir, "runtimes", runtime, ".gemini", "antigravity-cli", "brain", convID)
-				if !seen[p] {
-					res = append(res, p)
-					seen[p] = true
-				}
-				p2 := filepath.Join(m.dataDir, "runtimes", runtime, ".gemini", "antigravity", "brain", convID)
-				if !seen[p2] {
-					res = append(res, p2)
-					seen[p2] = true
-				}
-			}
+	}
+	return res
+}
+
+func (m *Manager) getTargetDirsForConv(convID string) []string {
+	var res []string
+	seen := make(map[string]bool)
+	for _, root := range m.roots {
+		p := filepath.Join(root, convID)
+		if !seen[p] {
+			res = append(res, p)
+			seen[p] = true
 		}
-		return res
+	}
+	if m.dataDir != "" {
+		res = appendDataDirRuntimePaths(m.dataDir, convID, seen, res)
+	}
+	return res
+}
+
+func findLatestDirInRoot(root string) (string, bool) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return "", false
+	}
+	var latestDir string
+	var latestTime time.Time
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		info, err := entry.Info()
+		if err == nil && info.ModTime().After(latestTime) {
+			latestTime = info.ModTime()
+			latestDir = filepath.Join(root, entry.Name())
+		}
+	}
+	return latestDir, latestDir != ""
+}
+
+func (m *Manager) getTargetDirs(convID string) []string {
+	if m == nil || len(m.roots) == 0 {
+		return nil
+	}
+	if convID != "" {
+		return m.getTargetDirsForConv(convID)
 	}
 
 	var targetDirs []string
 	for _, root := range m.roots {
-		if entries, err := os.ReadDir(root); err == nil {
-			var latestDir string
-			var latestTime time.Time
-			for _, entry := range entries {
-				if entry.IsDir() {
-					if info, err := entry.Info(); err == nil && info.ModTime().After(latestTime) {
-						latestTime = info.ModTime()
-						latestDir = filepath.Join(root, entry.Name())
-					}
-				}
-			}
-			if latestDir != "" {
-				targetDirs = append(targetDirs, latestDir)
-			}
+		if dir, ok := findLatestDirInRoot(root); ok {
+			targetDirs = append(targetDirs, dir)
 		}
 	}
 	return targetDirs
@@ -456,6 +469,56 @@ func (m *Manager) ExtractResponseSince(convID string, since time.Time) string {
 	return m.ExtractResponseSinceContext(context.Background(), convID, since)
 }
 
+type transcriptStepRecord struct {
+	Type      string            `json:"type"`
+	Status    string            `json:"status"`
+	Content   string            `json:"content"`
+	CreatedAt string            `json:"created_at"`
+	ToolCalls []json.RawMessage `json:"tool_calls"`
+}
+
+func scanLinesForResponse(ctx context.Context, lines []string, since time.Time) string {
+	for i := len(lines) - 1; i >= 0; i-- {
+		if ctx != nil && ctx.Err() != nil {
+			return ""
+		}
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+
+		var step transcriptStepRecord
+		if err := json.Unmarshal([]byte(line), &step); err != nil {
+			continue
+		}
+
+		if isStepBefore(step.CreatedAt, since) {
+			break
+		}
+
+		if step.Type != "PLANNER_RESPONSE" {
+			continue
+		}
+
+		trimmedContent := strings.TrimSpace(step.Content)
+		if trimmedContent == "" || strings.HasPrefix(trimmedContent, "[Tool Call Requested]:") {
+			continue
+		}
+
+		return trimmedContent
+	}
+	return ""
+}
+
+func extractResponseFromTranscriptFile(ctx context.Context, tPath string, since time.Time) string {
+	data, err := os.ReadFile(tPath)
+	if err != nil || len(data) == 0 {
+		return ""
+	}
+	lines := strings.Split(string(data), "\n")
+	return scanLinesForResponse(ctx, lines, since)
+}
+
 // ExtractResponseSinceContext parses transcript files for convID with context cancellation support.
 func (m *Manager) ExtractResponseSinceContext(ctx context.Context, convID string, since time.Time) string {
 	cleanID, ok := m.validSessionID(convID)
@@ -471,46 +534,8 @@ func (m *Manager) ExtractResponseSinceContext(ctx context.Context, convID string
 				return ""
 			}
 			tPath := filepath.Join(dir, ".system_generated", "logs", name)
-			data, err := os.ReadFile(tPath)
-			if err != nil || len(data) == 0 {
-				continue
-			}
-
-			lines := strings.Split(string(data), "\n")
-			for i := len(lines) - 1; i >= 0; i-- {
-				if ctx != nil && ctx.Err() != nil {
-					return ""
-				}
-				line := strings.TrimSpace(lines[i])
-				if line == "" {
-					continue
-				}
-
-				var step struct {
-					Type      string            `json:"type"`
-					Status    string            `json:"status"`
-					Content   string            `json:"content"`
-					CreatedAt string            `json:"created_at"`
-					ToolCalls []json.RawMessage `json:"tool_calls"`
-				}
-				if err := json.Unmarshal([]byte(line), &step); err != nil {
-					continue
-				}
-
-				if isStepBefore(step.CreatedAt, since) {
-					break
-				}
-
-				if step.Type != "PLANNER_RESPONSE" {
-					continue
-				}
-
-				trimmedContent := strings.TrimSpace(step.Content)
-				if trimmedContent == "" || strings.HasPrefix(trimmedContent, "[Tool Call Requested]:") {
-					continue
-				}
-
-				return trimmedContent
+			if resp := extractResponseFromTranscriptFile(ctx, tPath, since); resp != "" {
+				return resp
 			}
 		}
 	}
@@ -725,6 +750,40 @@ func (m *Manager) CountTranscriptSteps(sessionID string) int {
 	return maxSteps
 }
 
+func countTurnsInTranscript(filePath string) int {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return 0
+	}
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			log.Printf("[Session] Warning: failed to close file %s: %v", filePath, closeErr)
+		}
+	}()
+
+	scanner := bufio.NewScanner(f)
+	buf := make([]byte, 64*1024)
+	scanner.Buffer(buf, 1024*1024)
+	var turns int
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || !strings.Contains(line, "USER_INPUT") {
+			continue
+		}
+		var step struct {
+			Source  string `json:"source"`
+			Type    string `json:"type"`
+			Content string `json:"content"`
+		}
+		if err := json.Unmarshal([]byte(line), &step); err == nil {
+			if step.Type == "USER_INPUT" && !isAmbientInput(step.Source, step.Content) {
+				turns++
+			}
+		}
+	}
+	return turns
+}
+
 // CountTranscriptTurns returns the total number of non-ambient user turns for the session
 // by counting non-ambient USER_INPUT entries in transcript.jsonl. Returns 0 if empty, invalid, or not found.
 func (m *Manager) CountTranscriptTurns(sessionID string) int {
@@ -738,34 +797,7 @@ func (m *Manager) CountTranscriptTurns(sessionID string) int {
 		logsDir := filepath.Join(sessDir, ".system_generated", "logs")
 		for _, name := range []string{"transcript.jsonl", "transcript_full.jsonl"} {
 			filePath := filepath.Join(logsDir, name)
-			f, err := os.Open(filePath)
-			if err != nil {
-				continue
-			}
-			scanner := bufio.NewScanner(f)
-			buf := make([]byte, 64*1024)
-			scanner.Buffer(buf, 1024*1024)
-			var turns int
-			for scanner.Scan() {
-				line := strings.TrimSpace(scanner.Text())
-				if line == "" || !strings.Contains(line, "USER_INPUT") {
-					continue
-				}
-				var step struct {
-					Source  string `json:"source"`
-					Type    string `json:"type"`
-					Content string `json:"content"`
-				}
-				if err := json.Unmarshal([]byte(line), &step); err == nil {
-					if step.Type == "USER_INPUT" && !isAmbientInput(step.Source, step.Content) {
-						turns++
-					}
-				}
-			}
-			if closeErr := f.Close(); closeErr != nil {
-				log.Printf("[Session] Warning: failed to close file %s: %v", filePath, closeErr)
-			}
-			if turns > maxTurns {
+			if turns := countTurnsInTranscript(filePath); turns > maxTurns {
 				maxTurns = turns
 			}
 		}

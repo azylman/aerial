@@ -251,29 +251,33 @@ func initWorkerPools(appCfg *config.Config, isExplicitAppCfg bool, cfg WorkerPoo
 		pools[medEphemKey] = cfg.MediumEffortProcessPool
 	}
 	if pools[highKey] == nil && isExplicitAppCfg {
-		cur := appCfg.Current()
-		daemonBin, daemonDataDir, defaultModel := cfg.AgyBin, "", cfg.Model
-		if cur != nil {
-			if daemonBin == "" {
-				daemonBin = cur.AgyBin
-			}
-			daemonDataDir = cur.DataDir
-			if defaultModel == "" {
-				defaultModel = cur.Model
-			}
-		}
-		poolCfg := runner.PoolConfig{AgyBin: daemonBin, Cwd: daemonDataDir, Env: os.Environ(), DefaultModel: defaultModel}
-		if sessMgr != nil {
-			poolCfg.TranscriptRescuer = sessMgr.ExtractResponseSince
-			poolCfg.SessionManager = sessMgr
-		}
-		if store != nil {
-			poolCfg.GetSessionRecord, poolCfg.OnSessionRotated = makeSessionCallbacks(store)
-		}
-		pools[highKey] = runner.NewUnifiedProcessPool(poolCfg, nil)
+		pools[highKey] = buildDefaultHighEffortPool(appCfg, cfg, sessMgr, store)
 	}
 	wirePoolSessionDependencies(pools, sessMgr, store)
 	return pools
+}
+
+func buildDefaultHighEffortPool(appCfg *config.Config, cfg WorkerPoolConfig, sessMgr *session.Manager, store db.Store) runner.AgentPool {
+	cur := appCfg.Current()
+	daemonBin, daemonDataDir, defaultModel := cfg.AgyBin, "", cfg.Model
+	if cur != nil {
+		if daemonBin == "" {
+			daemonBin = cur.AgyBin
+		}
+		daemonDataDir = cur.DataDir
+		if defaultModel == "" {
+			defaultModel = cur.Model
+		}
+	}
+	poolCfg := runner.PoolConfig{AgyBin: daemonBin, Cwd: daemonDataDir, Env: os.Environ(), DefaultModel: defaultModel}
+	if sessMgr != nil {
+		poolCfg.TranscriptRescuer = sessMgr.ExtractResponseSince
+		poolCfg.SessionManager = sessMgr
+	}
+	if store != nil {
+		poolCfg.GetSessionRecord, poolCfg.OnSessionRotated = makeSessionCallbacks(store)
+	}
+	return runner.NewUnifiedProcessPool(poolCfg, nil)
 }
 
 // resolveDefaultAppConfig resolves appCfg or creates a default configuration from WorkerPoolConfig overrides.
@@ -750,29 +754,45 @@ func (p *WorkerPool) StopWithTimeout(drainTimeout time.Duration) {
 	}
 }
 
+func (p *WorkerPool) resetProcessingMessages(ctx context.Context, store db.Store) {
+	msgs, err := store.GetPendingOrProcessingMessages(ctx, 0)
+	if err != nil {
+		return
+	}
+	for _, m := range msgs {
+		if m.Status != db.StatusProcessing {
+			continue
+		}
+		if _, ok := p.claimedMessages.Load(m.ID); !ok {
+			continue
+		}
+		if err := store.UpdateMessageStatus(ctx, m.ID, db.StatusPending, "deployment_drain"); err != nil {
+			log.Printf("[WorkerPool] Warning resetting message %s to pending: %v", m.ID, err)
+		}
+	}
+}
+
+func (p *WorkerPool) resetProcessingDispatches(ctx context.Context, store db.Store) {
+	dispatches, err := store.GetPendingOrProcessingDispatches(ctx, 0)
+	if err != nil {
+		return
+	}
+	for _, d := range dispatches {
+		if d.Status != db.StatusProcessing {
+			continue
+		}
+		if _, ok := p.claimedDispatches.Load(d.ID); !ok {
+			continue
+		}
+		if err := store.UpdateDispatchStatus(ctx, d.ID, db.StatusPending, "deployment_drain"); err != nil {
+			log.Printf("[WorkerPool] Warning resetting dispatch %s to pending: %v", d.ID, err)
+		}
+	}
+}
+
 func (p *WorkerPool) sweepInterruptedProcessingEntries(ctx context.Context, store db.Store) {
-	if msgs, err := store.GetPendingOrProcessingMessages(ctx, 0); err == nil {
-		for _, m := range msgs {
-			if m.Status == db.StatusProcessing {
-				if _, ok := p.claimedMessages.Load(m.ID); ok {
-					if err := store.UpdateMessageStatus(ctx, m.ID, db.StatusPending, "deployment_drain"); err != nil {
-						log.Printf("[WorkerPool] Warning resetting message %s to pending: %v", m.ID, err)
-					}
-				}
-			}
-		}
-	}
-	if dispatches, err := store.GetPendingOrProcessingDispatches(ctx, 0); err == nil {
-		for _, d := range dispatches {
-			if d.Status == db.StatusProcessing {
-				if _, ok := p.claimedDispatches.Load(d.ID); ok {
-					if err := store.UpdateDispatchStatus(ctx, d.ID, db.StatusPending, "deployment_drain"); err != nil {
-						log.Printf("[WorkerPool] Warning resetting dispatch %s to pending: %v", d.ID, err)
-					}
-				}
-			}
-		}
-	}
+	p.resetProcessingMessages(ctx, store)
+	p.resetProcessingDispatches(ctx, store)
 }
 
 func unwrapUnifiedPool(pool runner.AgentPool) *runner.UnifiedProcessPool {
@@ -972,7 +992,7 @@ func DrainThreadPendingMessages(ctx context.Context, store db.Store, targetThrea
 	}
 }
 
-func (p *WorkerPool) latchInterruptAndDrainLocked(threadID string, drainQueue bool) ([]*turnExecution, []string, []db.Message) {
+func (p *WorkerPool) latchActiveTurnsLocked(threadID string, drainQueue bool) ([]*turnExecution, []string, []db.Message) {
 	var active []*turnExecution
 	var burstMsgIDs []string
 	var drainedMsgs []db.Message
@@ -994,31 +1014,47 @@ func (p *WorkerPool) latchInterruptAndDrainLocked(threadID string, drainQueue bo
 		}
 		te.activeSessionMu.Unlock()
 	}
+	return active, burstMsgIDs, drainedMsgs
+}
 
-	if drainQueue {
-		for scopeKey, state := range p.threadChs {
-			if !isScopeKeyForThread(scopeKey, threadID) || state == nil {
+func drainChannelMessages(ch chan queueItem) []db.Message {
+	var drainedMsgs []db.Message
+	var nonMsgItems []queueItem
+drainCh:
+	for {
+		select {
+		case item := <-ch:
+			if item.msg == nil {
+				nonMsgItems = append(nonMsgItems, item)
 				continue
 			}
-			var nonMsgItems []queueItem
-		drainCh:
-			for {
-				select {
-				case item := <-state.ch:
-					if item.msg == nil {
-						nonMsgItems = append(nonMsgItems, item)
-						continue
-					}
-					metrics.QueueDepth.Dec()
-					drainedMsgs = append(drainedMsgs, *item.msg)
-				default:
-					break drainCh
-				}
-			}
-			for _, nmi := range nonMsgItems {
-				state.ch <- nmi
-			}
+			metrics.QueueDepth.Dec()
+			drainedMsgs = append(drainedMsgs, *item.msg)
+		default:
+			break drainCh
 		}
+	}
+	for _, nmi := range nonMsgItems {
+		ch <- nmi
+	}
+	return drainedMsgs
+}
+
+func (p *WorkerPool) drainQueuedThreadMessagesLocked(threadID string) []db.Message {
+	var drained []db.Message
+	for scopeKey, state := range p.threadChs {
+		if !isScopeKeyForThread(scopeKey, threadID) || state == nil {
+			continue
+		}
+		drained = append(drained, drainChannelMessages(state.ch)...)
+	}
+	return drained
+}
+
+func (p *WorkerPool) latchInterruptAndDrainLocked(threadID string, drainQueue bool) ([]*turnExecution, []string, []db.Message) {
+	active, burstMsgIDs, drainedMsgs := p.latchActiveTurnsLocked(threadID, drainQueue)
+	if drainQueue {
+		drainedMsgs = append(drainedMsgs, p.drainQueuedThreadMessagesLocked(threadID)...)
 	}
 	return active, burstMsgIDs, drainedMsgs
 }
@@ -1108,15 +1144,18 @@ func (p *WorkerPool) LowEffortModel() string {
 
 func (p *WorkerPool) runnerCredentials() (string, string) {
 	agyBin, apiKey := p.cfg.AgyBin, p.cfg.APIKey
-	if p != nil && p.appCfg != nil {
-		if cur := p.appCfg.Current(); cur != nil {
-			if cur.AgyBin != "" {
-				agyBin = cur.AgyBin
-			}
-			if cur.APIKey != "" {
-				apiKey = cur.APIKey
-			}
-		}
+	if p == nil || p.appCfg == nil {
+		return agyBin, apiKey
+	}
+	cur := p.appCfg.Current()
+	if cur == nil {
+		return agyBin, apiKey
+	}
+	if cur.AgyBin != "" {
+		agyBin = cur.AgyBin
+	}
+	if cur.APIKey != "" {
+		apiKey = cur.APIKey
 	}
 	return agyBin, apiKey
 }
