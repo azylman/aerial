@@ -17,6 +17,7 @@ type OllamaClient interface {
 // Client is the concrete implementation of OllamaClient communicating with Ollama over HTTP.
 type Client struct {
 	*ollama.Client
+
 	baseURL     string
 	model       string
 	queryPrefix string

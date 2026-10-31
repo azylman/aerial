@@ -3,10 +3,10 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -87,7 +87,7 @@ func newPushEventTestEnv(t *testing.T, opts ...func(*DaemonConfig)) *pushEventTe
 func (e *pushEventTestEnv) collectEvents(count int, timeout time.Duration) []HangarDeployEvent {
 	var evts []HangarDeployEvent
 	deadline := time.After(timeout)
-	for i := 0; i < count; i++ {
+	for range count {
 		select {
 		case evt := <-e.evtCh:
 			evts = append(evts, evt)
@@ -1084,7 +1084,7 @@ func TestExecuteImageReadyEvent_TableDriven(t *testing.T) { // t.Run(
 			}
 
 			if len(tc.pendingDeletes) > 0 {
-				env.daemon.recordPendingNomadChanges(env.tmpDir, tc.pendingDeletes, tc.req.Repo, tc.req.CommitSHA, tc.req.TargetID, fmt.Sprintf("%d", tc.req.PRNumber))
+				env.daemon.recordPendingNomadChanges(env.tmpDir, tc.pendingDeletes, tc.req.Repo, tc.req.CommitSHA, tc.req.TargetID, strconv.Itoa(tc.req.PRNumber))
 			}
 
 			resp, code := env.daemon.ExecuteImageReadyEvent(ctx, tc.req)
@@ -1266,7 +1266,7 @@ func TestImageRolloutQueue_TableDriven(t *testing.T) {
 		}
 
 		var executed []string
-		for i := 0; i < 2; i++ {
+		for i := range 2 {
 			select {
 			case call := <-env.runSignal:
 				executed = append(executed, call)

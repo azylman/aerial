@@ -398,7 +398,7 @@ func (p *GitHubPoller) pollRepo(ctx context.Context, repo, baseURL string, allAc
 	}
 
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("X-Github-Api-Version", "2022-11-28")
 	if p.token != "" {
 		req.Header.Set("Authorization", "Bearer "+p.token)
 	}
@@ -482,7 +482,7 @@ func (p *GitHubPoller) fetchJobsForRun(ctx context.Context, runID int64, optiona
 	}
 
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("X-Github-Api-Version", "2022-11-28")
 	if p.token != "" {
 		req.Header.Set("Authorization", "Bearer "+p.token)
 	}

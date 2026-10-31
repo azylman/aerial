@@ -841,7 +841,7 @@ func ClaimEventTriggers(ctx context.Context, database *sql.DB, source string, ta
 		DELETE FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) AND persistent = FALSE RETURNING id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium') AS effort, created_at, persistent
 	), kept AS (
 		SELECT id, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium') AS effort, created_at, persistent FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) AND persistent = TRUE
-	) SELECT * FROM deleted UNION ALL SELECT * FROM kept ORDER BY created_at ASC`, placeholders, placeholders)
+	) SELECT id, channel_id, source, target, event_type, prompt, effort, created_at, persistent FROM deleted UNION ALL SELECT id, channel_id, source, target, event_type, prompt, effort, created_at, persistent FROM kept ORDER BY created_at ASC`, placeholders, placeholders)
 	rows, err := database.QueryContext(ctx, rawQuery, args...)
 	if err != nil {
 		return nil, err

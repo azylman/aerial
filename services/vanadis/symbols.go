@@ -86,7 +86,7 @@ func containsIdent(line, ident string) bool {
 
 func findCommentSlashIndex(line string) int {
 	inQuotes, inBacktick, escaped := false, false, false
-	for i := 0; i < len(line); i++ {
+	for i := range len(line) {
 		c := line[i]
 		switch {
 		case escaped:
@@ -116,7 +116,7 @@ func stripLineComment(line string) string {
 }
 
 func updateRawStrState(line string, inRawStr bool) bool {
-	for i := 0; i < len(line); i++ {
+	for i := range len(line) {
 		if line[i] == '`' {
 			inRawStr = !inRawStr
 		}
@@ -400,7 +400,7 @@ func runSymbolPass2(cleanSymbols []string, files []targetFileInfo, fileSpans map
 }
 
 func runTestSymbolPass(cleanSymbols []string, testFiles []targetFileInfo, fileSpans map[string][]targetSymSpan, resolved map[string]bool) {
-	var allBlocks []testFuncBlock
+	allBlocks := make([]testFuncBlock, 0, len(testFiles))
 	for _, f := range testFiles {
 		allBlocks = append(allBlocks, collectTestFuncBlocks(f.relFile, f.lines)...)
 	}

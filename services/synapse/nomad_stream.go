@@ -333,7 +333,7 @@ func (sub *NomadStreamSubscriber) consumeStream(ctx context.Context) error {
 	idx := sub.lastIndex
 	sub.mu.Unlock()
 
-	streamURL := fmt.Sprintf("%s/v1/event/stream?topic=Deployment:*&topic=Allocation:*&topic=Evaluation:*&topic=Job:*", sub.nomadAddr)
+	streamURL := sub.nomadAddr + "/v1/event/stream?topic=Deployment:*&topic=Allocation:*&topic=Evaluation:*&topic=Job:*"
 	if idx > 0 {
 		streamURL += fmt.Sprintf("&index=%d", idx)
 	}
@@ -710,7 +710,7 @@ func (s *RouterServer) HandleNomadJobFailure(ctx context.Context, jobID, refID, 
 		repo, prNumber, cleanJob, mergeSHA, targetID, refID, status)
 
 	if prNumber > 0 {
-		s.setPRWidgetState(ctx, repo, prNumber, "deploy_failed", fmt.Sprintf("Nomad deployment failed for %s", cleanJob))
+		s.setPRWidgetState(ctx, repo, prNumber, "deploy_failed", "Nomad deployment failed for "+cleanJob)
 		if err := s.SyncPRWidget(ctx, repo, prNumber); err != nil {
 			log.Printf("[synapse] [widget] warning syncing nomad deploy_failed widget: %v", err)
 		}

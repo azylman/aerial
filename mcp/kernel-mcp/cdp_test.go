@@ -3,10 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -40,6 +40,7 @@ type fakeCDPOptions struct {
 
 type fakeCDPServer struct {
 	*httptest.Server
+
 	attachedMu     sync.Mutex
 	attachedTarget string
 }
@@ -281,7 +282,7 @@ func startFakeCDPServer(t *testing.T, opts fakeCDPOptions) (*fakeCDPServer, *Con
 						_ = json.Unmarshal(req.Params, &p)
 						if p.Format == "fail-unmarshal" {
 							wsMu.Lock()
-							_ = ws.WriteMessage(websocket.TextMessage, []byte(`{"id":`+fmt.Sprint(req.ID)+`,"result":"not-a-json-object"}`))
+							_ = ws.WriteMessage(websocket.TextMessage, []byte(`{"id":`+strconv.FormatInt(req.ID, 10)+`,"result":"not-a-json-object"}`))
 							wsMu.Unlock()
 							continue
 						}

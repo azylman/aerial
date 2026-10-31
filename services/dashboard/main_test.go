@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -628,7 +629,7 @@ func TestDashboardServerLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen failed: %v", err)
 	}
-	port := fmt.Sprintf("%d", l.Addr().(*net.TCPAddr).Port)
+	port := strconv.Itoa(l.Addr().(*net.TCPAddr).Port)
 	_ = l.Close()
 
 	ghMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -926,6 +927,7 @@ func (r *roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) 
 
 type mockReadCloser struct {
 	io.Reader
+
 	closeErr error
 }
 

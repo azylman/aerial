@@ -295,7 +295,7 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 			Status:  "error",
 			Repo:    req.Repo,
 			Commit:  res.CurrentHead,
-			Message: fmt.Sprintf("git sync failed: %s", res.Error),
+			Message: "git sync failed: " + res.Error,
 		}, http.StatusInternalServerError
 	}
 
@@ -389,7 +389,7 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 }
 
 func (d *SyncDaemon) findAllNomadJobsByImage(imgRef string) []MatchedNomadJob {
-	var dirs []string
+	dirs := make([]string, 0, 2*len(d.candidateJobRepos()))
 	for _, repo := range d.candidateJobRepos() {
 		dirs = append(dirs, filepath.Join(repo, "jobs"), filepath.Join(repo, "nomad", "jobs"))
 	}
@@ -431,7 +431,7 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 		return ImageReadyEventResponse{
 			Status:  "not_found",
 			Image:   imgRef,
-			Message: fmt.Sprintf("no nomad jobs found using image %s", imgRef),
+			Message: "no nomad jobs found using image " + imgRef,
 		}, http.StatusNotFound
 	}
 
@@ -576,7 +576,7 @@ func (d *SyncDaemon) EnqueueImageReadyEvent(req ImageReadyEventRequest) (ImageRe
 		return ImageReadyEventResponse{
 			Status:  "not_found",
 			Image:   imgRef,
-			Message: fmt.Sprintf("no nomad jobs found using image %s", imgRef),
+			Message: "no nomad jobs found using image " + imgRef,
 		}, http.StatusNotFound
 	}
 

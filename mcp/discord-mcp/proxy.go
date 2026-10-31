@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/azylman/aerial/pkg/httpkit"
@@ -58,7 +59,7 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		errBytes := BuildJSONRPCErrorResponse(reqID, -32601, fmt.Sprintf("Tool %q is disabled. Outbound replies to the user are automatically delivered by Aerial Brain at the end of the turn.", toolName))
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Del("Transfer-Encoding")
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(errBytes)))
+		w.Header().Set("Content-Length", strconv.Itoa(len(errBytes)))
 		w.WriteHeader(http.StatusOK)
 		httpkit.WriteResponse(w, r, "discord-mcp", errBytes)
 		return
@@ -122,7 +123,7 @@ func (p *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.Header().Del("Transfer-Encoding")
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(respBytes)))
+	w.Header().Set("Content-Length", strconv.Itoa(len(respBytes)))
 	w.WriteHeader(resp.StatusCode)
 	httpkit.WriteResponse(w, r, "discord-mcp", respBytes)
 }

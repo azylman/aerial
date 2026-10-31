@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -189,7 +190,7 @@ func (p *GitHubSkillPublisher) doRequest(ctx context.Context, method, endpoint s
 		req.Header.Set("Authorization", "Bearer "+p.token)
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	req.Header.Set("X-Github-Api-Version", "2022-11-28")
 	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -410,7 +411,7 @@ func (p *GitHubSkillPublisher) finalizePublishedSkillPR(ctx context.Context, prN
 }
 
 func (p *GitHubSkillPublisher) enableAutoMerge(ctx context.Context, nodeID string) error {
-	graphqlEndpoint := fmt.Sprintf("%s/graphql", p.baseURL)
+	graphqlEndpoint := p.baseURL + "/graphql"
 	payload := map[string]any{
 		"query": `mutation($input: EnablePullRequestAutoMergeInput!) {
 			enablePullRequestAutoMerge(input: $input) {
@@ -503,7 +504,7 @@ func (p *GitHubSkillPublisher) NotifyShortFriction(ctx context.Context, content 
 }
 
 func formatShortFrictionAlert(batch SkillConsolidationBatch) string {
-	var ids []string
+	ids := make([]string, 0, len(batch.Candidates))
 	var steps, avoid []string
 	seenSteps := make(map[string]bool)
 	seenAvoid := make(map[string]bool)
@@ -566,7 +567,8 @@ func writeBulletIfPresent(sb *strings.Builder, label string, items []string) {
 
 func formatManualReviewPRAlert(prNumber int, owner, repo string, changes []SkillFileChange) string {
 	prURL := fmt.Sprintf("https://github.com/%s/%s/pull/%d", owner, repo, prNumber)
-	var ids, skills, triggers, steps, avoid, proposals []string
+	proposals := make([]string, 0, len(changes))
+	var ids, skills, triggers, steps, avoid []string
 	seenIDs := make(map[string]bool)
 	seenSkills := make(map[string]bool)
 	seenTriggers := make(map[string]bool)
@@ -622,9 +624,9 @@ func formatSkillCommitMessage(changes []SkillFileChange) string {
 
 func formatSkillPRTitle(changes []SkillFileChange) string {
 	if len(changes) == 1 {
-		return fmt.Sprintf("feat(skills): %s", changes[0].CommitSummary)
+		return "feat(skills): " + changes[0].CommitSummary
 	}
-	return fmt.Sprintf("feat(skills): evolve %d procedural skills", len(changes))
+	return "feat(skills): evolve " + strconv.Itoa(len(changes)) + " procedural skills"
 }
 
 func formatSkillPRBody(changes []SkillFileChange, targetID string) string {

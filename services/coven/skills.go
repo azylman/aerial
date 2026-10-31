@@ -252,7 +252,7 @@ func planLoadedSkillBatches(pending []ProceduralCandidate, diskSkillsByName map[
 	}
 
 	var batches []SkillConsolidationBatch
-	var caseASkillNames []string
+	caseASkillNames := make([]string, 0, len(caseAGroups))
 	for name := range caseAGroups {
 		caseASkillNames = append(caseASkillNames, name)
 	}
@@ -308,12 +308,12 @@ func planUnloadedSkillBatches(remaining []ProceduralCandidate, diskSkills []Disk
 		}
 	}
 
-	var batches []SkillConsolidationBatch
-	var caseBSkillNames []string
+	caseBSkillNames := make([]string, 0, len(caseBGroups))
 	for name := range caseBGroups {
 		caseBSkillNames = append(caseBSkillNames, name)
 	}
 	sort.Strings(caseBSkillNames)
+	batches := make([]SkillConsolidationBatch, 0, len(caseBSkillNames))
 
 	for _, name := range caseBSkillNames {
 		group := caseBGroups[name]

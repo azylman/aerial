@@ -183,7 +183,7 @@ func newMockOCIRegistryClient(opts mockOCIOptions) *http.Client {
 				if authHeader == "" {
 					if opts.ChallengeAuthHeader != "" {
 						h := make(http.Header)
-						h.Set("Www-Authenticate", opts.ChallengeAuthHeader)
+						h.Set("WWW-Authenticate", opts.ChallengeAuthHeader)
 						return &http.Response{
 							StatusCode: http.StatusUnauthorized,
 							Header:     h,
@@ -212,7 +212,7 @@ func newMockOCIRegistryClient(opts mockOCIOptions) *http.Client {
 				if opts.ExpectedBearer != "" && authHeader != "Bearer "+opts.ExpectedBearer {
 					h := make(http.Header)
 					if opts.ChallengeAuthHeader != "" {
-						h.Set("Www-Authenticate", opts.ChallengeAuthHeader)
+						h.Set("WWW-Authenticate", opts.ChallengeAuthHeader)
 					}
 					return &http.Response{
 						StatusCode: http.StatusUnauthorized,

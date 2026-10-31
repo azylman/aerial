@@ -92,7 +92,7 @@ func setupMockDiscordUpstream(t *testing.T) *httptest.Server {
 			}
 			return
 		}
-		if r.Header.Get("X-Mock-Invalid-JSON") == "1" {
+		if r.Header.Get("X-Mock-Invalid-Json") == "1" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("{invalid-tools-list"))
@@ -155,7 +155,7 @@ func TestProxyHandler_ServeHTTP(t *testing.T) {
 		{"tools/call allowed for discord_read_messages", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":300,"method":"tools/call","params":{"name":"discord_read_messages","arguments":{"channelId":"123"}}}`), nil, false, http.StatusOK, "executed", ""},
 		{"tools/call shapes discord_search_messages", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":301,"method":"tools/call","params":{"name":"discord_search_messages","arguments":{"guildId":"123","offset":2}}}`), nil, false, http.StatusOK, "has_more", "threads"},
 		{"GET /health reverse proxies to upstream", handler, http.MethodGet, "/health", nil, nil, false, http.StatusOK, "ok", ""},
-		{"upstream returns invalid JSON for tools/list", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`), map[string]string{"X-Mock-Invalid-JSON": "1"}, false, http.StatusOK, "{invalid-tools-list", ""},
+		{"upstream returns invalid JSON for tools/list", handler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`), map[string]string{"X-Mock-Invalid-Json": "1"}, false, http.StatusOK, "{invalid-tools-list", ""},
 		{"offline upstream returns BadGateway", offlineHandler, http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`), nil, false, http.StatusBadGateway, "", ""},
 		{"request body read error returns BadRequest", handler, http.MethodPost, "/mcp", &errReader{}, nil, false, http.StatusBadRequest, "", ""},
 		{"upstream body read error returns BadGateway", handler, http.MethodPost, "/mcp", strings.NewReader(`{}`), map[string]string{"X-Mock-Hijack": "1"}, false, http.StatusBadGateway, "", ""},

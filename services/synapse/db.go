@@ -874,7 +874,7 @@ func (r *PostgresPRRegistry) doHTTPWithRetry(ctx context.Context, client *http.C
 		delay = r.vanadisRetryDelay
 	}
 	var lastErr error
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	for attempt := range maxAttempts {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}

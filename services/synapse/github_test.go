@@ -985,7 +985,7 @@ func TestResolveWorkflowRunImages(t *testing.T) {
 		case strings.Contains(r.URL.Path, "/actions/runs/88888/jobs"):
 			_ = json.NewEncoder(w).Encode(mockSkippedPromotionJobs)
 		case strings.Contains(r.URL.Path, "/actions/runs/403/jobs"):
-			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.Header().Set("X-Ratelimit-Remaining", "0")
 			w.WriteHeader(http.StatusForbidden)
 		case strings.Contains(r.URL.Path, "/actions/runs/500/jobs"):
 			w.WriteHeader(http.StatusInternalServerError)

@@ -96,7 +96,7 @@ func LoadConfigFile(path string) (*Config, error) {
 // PollUpstream checks if upstream TCP port is accepting connections.
 // It checks attempt 0 immediately before sleeping and supports context preemption.
 func PollUpstream(ctx context.Context, upstreamPort string, maxAttempts int, delay time.Duration) bool {
-	for i := 0; i < maxAttempts; i++ {
+	for i := range maxAttempts {
 		select {
 		case <-ctx.Done():
 			return false

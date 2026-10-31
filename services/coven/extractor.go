@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -795,7 +796,7 @@ func normalizeCliqueParams(minSim, maxSim float64, minSize, maxSize int) (float6
 
 func buildCliqueEdges[T any](group []T, minSim, maxSim float64, watermarkID int64, idOf func(T) int64, embOf func(T) []float32) []cliqueEdge {
 	var edges []cliqueEdge
-	for i := 0; i < len(group); i++ {
+	for i := range group {
 		embI := embOf(group[i])
 		idI := idOf(group[i])
 		for j := i + 1; j < len(group); j++ {
@@ -841,7 +842,7 @@ func expandClique[T any](group []T, e cliqueEdge, used map[int64]bool, minSim, m
 
 	embU, embV := embOf(u), embOf(v)
 	var cands []cliqueCandidateMatch[T]
-	for k := 0; k < len(group); k++ {
+	for k := range group {
 		if k == e.i || k == e.j || used[idOf(group[k])] {
 			continue
 		}
@@ -943,7 +944,7 @@ func cliqueSignature(clique []ScoredFactWithEmbedding) string {
 		if i > 0 {
 			b.WriteByte(',')
 		}
-		b.WriteString(fmt.Sprintf("%d", id))
+		b.WriteString(strconv.FormatInt(id, 10))
 	}
 	return b.String()
 }
@@ -1000,7 +1001,7 @@ func ConsolidateFactClusters(ctx context.Context, store Store, client OllamaClie
 	maxFactID := watermarkFactID
 	triedCliques := make(map[string]bool)
 
-	for pass := 0; pass < MaxConsolidationPasses; pass++ {
+	for range MaxConsolidationPasses {
 		allFacts, err := store.GetAllFactsWithEmbeddings(ctx)
 		if err != nil {
 			return totalConsolidated, fmt.Errorf("failed to get facts with embeddings: %w", err)
@@ -1073,7 +1074,7 @@ func insertAndReinforceConsolidatedFact(ctx context.Context, store Store, client
 	}
 
 	reinforceTimes := min(maxReinforce, 10) - 1
-	for r := 0; r < reinforceTimes; r++ {
+	for range reinforceTimes {
 		if err := store.ReinforceFact(ctx, newID); err != nil {
 			log.Printf("[Memory] Warning: Failed to reinforce consolidated fact %d: %v", newID, err)
 		}

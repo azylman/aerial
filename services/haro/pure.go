@@ -68,7 +68,7 @@ func IsNumericSnowflake(id string) bool {
 	if id == "" {
 		return false
 	}
-	for i := 0; i < len(id); i++ {
+	for i := range len(id) {
 		if id[i] < '0' || id[i] > '9' {
 			return false
 		}
@@ -288,9 +288,9 @@ func parseCronStepMinutesOrHours(minStr, hourStr, domStr, monStr, dowStr string)
 func formatCronDayOfWeek(dowStr, timeStr string) string {
 	switch strings.ToUpper(dowStr) {
 	case "1-5", "MON-FRI":
-		return fmt.Sprintf("Weekdays (Mon–Fri) at %s", timeStr)
+		return "Weekdays (Mon–Fri) at " + timeStr
 	case "0,6", "6,0", "SAT,SUN", "SUN,SAT":
-		return fmt.Sprintf("Weekends (Sat–Sun) at %s", timeStr)
+		return "Weekends (Sat–Sun) at " + timeStr
 	}
 	if dowNum, err := strconv.Atoi(dowStr); err == nil && dowNum >= 0 && dowNum <= 7 {
 		return fmt.Sprintf("Every %s at %s", cronDayNames[dowNum], timeStr)
@@ -350,7 +350,7 @@ func FormatCronDescription(cronExpr string) string {
 
 	timeStr := fmt.Sprintf("%02d:%02d", h, m)
 	if domStr == "*" && monStr == "*" && dowStr == "*" {
-		return fmt.Sprintf("Every day at %s", timeStr)
+		return "Every day at " + timeStr
 	}
 	if domStr == "*" && monStr == "*" && dowStr != "*" {
 		if desc := formatCronDayOfWeek(dowStr, timeStr); desc != "" {
