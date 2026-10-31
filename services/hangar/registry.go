@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -38,7 +37,7 @@ func (d *SyncDaemon) GetRemoteImageDigest(ctx context.Context, imageRef string) 
 	}
 
 	manifestURL := fmt.Sprintf("https://%s/v2/%s/manifests/%s", registry, repository, tag)
-	resp, _, err := d.doRegistryRequestWithAuth(ctx, http.MethodHead, manifestURL, registry, repository, acceptManifestHeaders, "") //nolint:bodyclose // closed by httpkit.CloseWarn
+	resp, err := d.doRegistryRequestWithAuth(ctx, http.MethodHead, manifestURL, registry, repository, acceptManifestHeaders) //nolint:bodyclose // closed by httpkit.CloseWarn
 	if err != nil {
 		return "", err
 	}
@@ -66,42 +65,35 @@ func (d *SyncDaemon) GetRemoteImageDigest(ctx context.Context, imageRef string) 
 	return digest, nil
 }
 
-func (d *SyncDaemon) doRegistryRequestWithAuth(ctx context.Context, method, targetURL, registry, repository, acceptHeader, existingBearer string) (*http.Response, string, error) {
+func (d *SyncDaemon) doRegistryRequestWithAuth(ctx context.Context, method, targetURL, registry, repository, acceptHeader string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, targetURL, nil)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed creating request for %s: %w", targetURL, err)
+		return nil, fmt.Errorf("failed creating request for %s: %w", targetURL, err)
 	}
 	if acceptHeader != "" {
 		req.Header.Set("Accept", acceptHeader)
 	}
-	if existingBearer != "" {
-		req.Header.Set("Authorization", "Bearer "+existingBearer)
-	}
 
 	resp, err := d.getRegistryClient().Do(req)
 	if err != nil {
-		return nil, "", fmt.Errorf("request failed for %s: %w", targetURL, err)
+		return nil, fmt.Errorf("request failed for %s: %w", targetURL, err)
 	}
 
 	if resp.StatusCode != http.StatusUnauthorized {
-		return resp, existingBearer, nil
+		return resp, nil
 	}
 
-	if existingBearer != "" {
-		httpkit.CloseWarn(resp.Body, "unauthorized response body with existing bearer")
-	} else {
-		httpkit.CloseWarn(resp.Body, "unauthorized probe response body")
-	}
+	httpkit.CloseWarn(resp.Body, "unauthorized probe response body")
 
 	authHeader := resp.Header.Get("Www-Authenticate")
 	token, err := d.fetchRegistryBearerToken(ctx, targetURL, registry, repository, authHeader)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 
 	authReq, aErr := http.NewRequestWithContext(ctx, method, targetURL, nil)
 	if aErr != nil {
-		return nil, "", fmt.Errorf("failed creating authenticated request for %s: %w", targetURL, aErr)
+		return nil, fmt.Errorf("failed creating authenticated request for %s: %w", targetURL, aErr)
 	}
 	if acceptHeader != "" {
 		authReq.Header.Set("Accept", acceptHeader)
@@ -110,10 +102,10 @@ func (d *SyncDaemon) doRegistryRequestWithAuth(ctx context.Context, method, targ
 
 	finalResp, fErr := d.getRegistryClient().Do(authReq)
 	if fErr != nil {
-		return nil, "", fmt.Errorf("authenticated request failed for %s: %w", targetURL, fErr)
+		return nil, fmt.Errorf("authenticated request failed for %s: %w", targetURL, fErr)
 	}
 
-	return finalResp, token, nil
+	return finalResp, nil
 }
 
 func (d *SyncDaemon) fetchRegistryBearerToken(ctx context.Context, targetURL, registry, repository, authHeader string) (string, error) {
@@ -176,84 +168,6 @@ func (d *SyncDaemon) fetchRegistryBearerToken(ctx context.Context, targetURL, re
 	}
 
 	return token, nil
-}
-
-func (d *SyncDaemon) fetchRegistryBytes(ctx context.Context, targetURL, registry, repository, acceptHeader, existingBearer, label string) ([]byte, string, error) {
-	resp, token, err := d.doRegistryRequestWithAuth(ctx, http.MethodGet, targetURL, registry, repository, acceptHeader, existingBearer) //nolint:bodyclose // closed by httpkit.CloseWarn
-	if err != nil {
-		return nil, "", err
-	}
-	defer httpkit.CloseWarn(resp.Body, label+" response body")
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("%s request returned HTTP %d", label, resp.StatusCode)
-	}
-
-	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		return nil, "", fmt.Errorf("failed to read %s body: %w", label, err)
-	}
-	return bodyBytes, token, nil
-}
-
-// GetRemoteImageRevision retrieves the git commit revision associated with an OCI/Docker container image
-// by inspecting manifest annotations or configuration blob labels.
-func (d *SyncDaemon) GetRemoteImageRevision(ctx context.Context, imageRef string) (string, error) {
-	registry, repository, tagOrDigest, err := ParseImageReference(imageRef)
-	if err != nil {
-		return "", fmt.Errorf("invalid image reference %q: %w", imageRef, err)
-	}
-
-	manifestURL := fmt.Sprintf("https://%s/v2/%s/manifests/%s", registry, repository, tagOrDigest)
-	bodyBytes, bearerToken, err := d.fetchRegistryBytes(ctx, manifestURL, registry, repository, acceptManifestHeaders, "", fmt.Sprintf("manifest for %s", imageRef))
-	if err != nil {
-		return "", err
-	}
-
-	// Check if this is an OCI Image Index or Docker Manifest List
-	childDigest := ExtractPlatformManifestDigest(bodyBytes, "linux", "amd64")
-	if childDigest != "" {
-		if rev := ExtractRevisionFromAnnotations(ExtractManifestAnnotations(bodyBytes)); rev != "" {
-			return rev, nil
-		}
-
-		childURL := fmt.Sprintf("https://%s/v2/%s/manifests/%s", registry, repository, childDigest)
-		childBytes, childToken, childErr := d.fetchRegistryBytes(ctx, childURL, registry, repository, acceptManifestHeaders, bearerToken, fmt.Sprintf("child manifest for %s (%s)", imageRef, childDigest))
-		if childErr != nil {
-			return "", childErr
-		}
-
-		bodyBytes = childBytes
-		if childToken != "" {
-			bearerToken = childToken
-		}
-	}
-
-	// Single manifest processing:
-	// 1. Check annotations on manifest
-	if rev := ExtractRevisionFromAnnotations(ExtractManifestAnnotations(bodyBytes)); rev != "" {
-		return rev, nil
-	}
-
-	// 2. Extract config blob digest and fetch config blob
-	configDigest := ExtractConfigBlobDigest(bodyBytes)
-	if configDigest == "" {
-		return "", fmt.Errorf("no config digest or revision annotations found for %s", imageRef)
-	}
-
-	blobURL := fmt.Sprintf("https://%s/v2/%s/blobs/%s", registry, repository, configDigest)
-	const acceptBlobHeaders = "application/vnd.oci.image.config.v1+json, application/vnd.docker.container.image.v1+json, application/octet-stream"
-	blobBytes, _, blobErr := d.fetchRegistryBytes(ctx, blobURL, registry, repository, acceptBlobHeaders, bearerToken, fmt.Sprintf("config blob for %s (%s)", imageRef, configDigest))
-	if blobErr != nil {
-		return "", blobErr
-	}
-
-	rev := ExtractRevisionFromConfigJSON(blobBytes)
-	if rev == "" {
-		return "", fmt.Errorf("no valid revision label found in config blob for %s", imageRef)
-	}
-
-	return rev, nil
 }
 
 // EnsureDockerAuth writes or updates the Docker config.json file with authentication credentials

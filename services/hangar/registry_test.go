@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -120,43 +119,27 @@ type mockOCIOptions struct {
 	ProbeErr     error
 	ProbeStatus  int
 	ProbeHeaders map[string]string
-	ProbeBody    string
 
 	ChallengeAuthHeader string
 
-	TokenErr       error
-	TokenStatus    int
-	TokenBody      string
-	ExpectedPAT    string
-	ExpectedScope  string
-	OnTokenRequest func(req *http.Request)
+	TokenErr      error
+	TokenStatus   int
+	TokenBody     string
+	ExpectedPAT   string
+	ExpectedScope string
 
-	AuthErr          error
-	AuthStatus       int
-	AuthHeaders      map[string]string
-	AuthBody         string
-	ExpectedBearer   string
-	ChildManifestMap map[string]string
-	BlobMap          map[string]string
-
-	OnRequest func(req *http.Request) (*http.Response, error, bool)
+	AuthErr        error
+	AuthStatus     int
+	AuthHeaders    map[string]string
+	ExpectedBearer string
 }
 
 func newMockOCIRegistryClient(opts mockOCIOptions) *http.Client {
 	return &http.Client{
 		Transport: &roundTripperFunc{
 			fn: func(req *http.Request) (*http.Response, error) {
-				if opts.OnRequest != nil {
-					if resp, err, handled := opts.OnRequest(req); handled {
-						return resp, err
-					}
-				}
-
 				// Check token endpoint
 				if strings.Contains(req.URL.Path, "/token") || strings.HasSuffix(req.URL.Path, "/token") || req.URL.Host == "auth.docker.io" {
-					if opts.OnTokenRequest != nil {
-						opts.OnTokenRequest(req)
-					}
 					if opts.TokenErr != nil {
 						return nil, opts.TokenErr
 					}
@@ -196,54 +179,6 @@ func newMockOCIRegistryClient(opts mockOCIOptions) *http.Client {
 
 				authHeader := req.Header.Get("Authorization")
 
-				// Check child manifests
-				if opts.ChildManifestMap != nil {
-					for dgst, manifest := range opts.ChildManifestMap {
-						if strings.HasSuffix(req.URL.Path, "/"+dgst) {
-							if opts.AuthErr != nil {
-								return nil, opts.AuthErr
-							}
-							status := opts.AuthStatus
-							if status == 0 {
-								status = http.StatusOK
-							}
-							h := make(http.Header)
-							for k, v := range opts.AuthHeaders {
-								h.Set(k, v)
-							}
-							return &http.Response{
-								StatusCode: status,
-								Header:     h,
-								Body:       ioNopCloser(strings.NewReader(manifest)),
-							}, nil
-						}
-					}
-				}
-
-				// Check config blobs
-				if opts.BlobMap != nil {
-					for dgst, blob := range opts.BlobMap {
-						if strings.HasSuffix(req.URL.Path, "/"+dgst) {
-							if opts.AuthErr != nil {
-								return nil, opts.AuthErr
-							}
-							status := opts.AuthStatus
-							if status == 0 {
-								status = http.StatusOK
-							}
-							h := make(http.Header)
-							for k, v := range opts.AuthHeaders {
-								h.Set(k, v)
-							}
-							return &http.Response{
-								StatusCode: status,
-								Header:     h,
-								Body:       ioNopCloser(strings.NewReader(blob)),
-							}, nil
-						}
-					}
-				}
-
 				// Probe request without Authorization
 				if authHeader == "" {
 					if opts.ChallengeAuthHeader != "" {
@@ -269,7 +204,7 @@ func newMockOCIRegistryClient(opts mockOCIOptions) *http.Client {
 					return &http.Response{
 						StatusCode: status,
 						Header:     h,
-						Body:       ioNopCloser(strings.NewReader(opts.ProbeBody)),
+						Body:       ioNopCloser(strings.NewReader("")),
 					}, nil
 				}
 
@@ -290,40 +225,6 @@ func newMockOCIRegistryClient(opts mockOCIOptions) *http.Client {
 					return nil, opts.AuthErr
 				}
 
-				// Check child manifests
-				if opts.ChildManifestMap != nil {
-					for dgst, manifest := range opts.ChildManifestMap {
-						if strings.HasSuffix(req.URL.Path, "/"+dgst) {
-							h := make(http.Header)
-							for k, v := range opts.AuthHeaders {
-								h.Set(k, v)
-							}
-							return &http.Response{
-								StatusCode: http.StatusOK,
-								Header:     h,
-								Body:       ioNopCloser(strings.NewReader(manifest)),
-							}, nil
-						}
-					}
-				}
-
-				// Check config blobs
-				if opts.BlobMap != nil {
-					for dgst, blob := range opts.BlobMap {
-						if strings.HasSuffix(req.URL.Path, "/"+dgst) {
-							h := make(http.Header)
-							for k, v := range opts.AuthHeaders {
-								h.Set(k, v)
-							}
-							return &http.Response{
-								StatusCode: http.StatusOK,
-								Header:     h,
-								Body:       ioNopCloser(strings.NewReader(blob)),
-							}, nil
-						}
-					}
-				}
-
 				status := opts.AuthStatus
 				if status == 0 {
 					status = http.StatusOK
@@ -335,7 +236,7 @@ func newMockOCIRegistryClient(opts mockOCIOptions) *http.Client {
 				return &http.Response{
 					StatusCode: status,
 					Header:     h,
-					Body:       ioNopCloser(strings.NewReader(opts.AuthBody)),
+					Body:       ioNopCloser(strings.NewReader("")),
 				}, nil
 			},
 		},
@@ -509,238 +410,6 @@ func TestGetRemoteImageDigest_TableDriven(t *testing.T) {
 			}
 			if !tc.wantErr && digest != tc.wantDigest {
 				t.Errorf("GetRemoteImageDigest() = %q, want %q", digest, tc.wantDigest)
-			}
-		})
-	}
-}
-
-func TestGetRemoteImageRevision_TableDriven(t *testing.T) {
-	t.Parallel()
-	expectedSHA := "0123456789abcdef0123456789abcdef01234567"
-	childDigest := "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-	configBlobDigest := "sha256:2222222222222222222222222222222222222222222222222222222222222222"
-
-	indexJSON := fmt.Sprintf(`{
-		"schemaVersion": 2,
-		"mediaType": "application/vnd.oci.image.index.v1+json",
-		"manifests": [
-			{
-				"mediaType": "application/vnd.oci.image.manifest.v1+json",
-				"digest": "%s",
-				"size": 1024,
-				"platform": { "architecture": "amd64", "os": "linux" }
-			}
-		]
-	}`, childDigest)
-
-	manifestJSON := fmt.Sprintf(`{
-		"schemaVersion": 2,
-		"mediaType": "application/vnd.oci.image.manifest.v1+json",
-		"config": {
-			"mediaType": "application/vnd.oci.image.config.v1+json",
-			"digest": "%s",
-			"size": 512
-		},
-		"layers": []
-	}`, configBlobDigest)
-
-	configJSON := fmt.Sprintf(`{
-		"config": {
-			"Labels": {
-				"org.opencontainers.image.revision": "%s"
-			}
-		}
-	}`, expectedSHA)
-
-	var child401Sent bool
-
-	tests := []struct {
-		name       string
-		imageRef   string
-		clientOpts mockOCIOptions
-		wantRev    string
-		wantErr    bool
-	}{
-		{
-			name:     "invalid image reference returns error",
-			imageRef: "invalid reference with spaces",
-			wantErr:  true,
-		},
-		{
-			name:     "401 with existingBearer clears token and retries",
-			imageRef: "ghcr.io/azylman/aerial-brain:latest",
-			clientOpts: mockOCIOptions{
-				ChallengeAuthHeader: `Bearer realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:azylman/aerial-brain:pull"`,
-				AuthBody:            indexJSON,
-				ChildManifestMap: map[string]string{
-					childDigest: manifestJSON,
-				},
-				BlobMap: map[string]string{
-					configBlobDigest: configJSON,
-				},
-				OnRequest: func(req *http.Request) (*http.Response, error, bool) {
-					if strings.Contains(req.URL.Path, childDigest) && !child401Sent {
-						child401Sent = true
-						h := make(http.Header)
-						h.Set("Www-Authenticate", `Bearer realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:azylman/aerial-brain:pull"`)
-						return &http.Response{
-							StatusCode: http.StatusUnauthorized,
-							Header:     h,
-							Body:       ioNopCloser(strings.NewReader("stale bearer")),
-						}, nil, true
-					}
-					return nil, nil, false
-				},
-			},
-			wantRev: expectedSHA,
-		},
-		{
-			name:     "Case 1: OCI Index to Child Manifest to Config Blob",
-			imageRef: "ghcr.io/azylman/aerial-brain:latest",
-			clientOpts: mockOCIOptions{
-				ProbeStatus: http.StatusOK,
-				ProbeBody:   indexJSON,
-				ChildManifestMap: map[string]string{
-					childDigest: manifestJSON,
-				},
-				BlobMap: map[string]string{
-					configBlobDigest: configJSON,
-				},
-			},
-			wantRev: expectedSHA,
-		},
-		{
-			name:     "Case 2: Direct Manifest with aerial.commit_sha annotations without fetching blob",
-			imageRef: "ghcr.io/azylman/aerial-synapse:latest",
-			clientOpts: mockOCIOptions{
-				ProbeStatus: http.StatusOK,
-				ProbeBody: fmt.Sprintf(`{
-					"schemaVersion": 2,
-					"mediaType": "application/vnd.oci.image.manifest.v1+json",
-					"config": { "digest": "sha256:unused" },
-					"annotations": { "aerial.commit_sha": "%s" }
-				}`, expectedSHA),
-			},
-			wantRev: expectedSHA,
-		},
-		{
-			name:     "Case 3: 401 challenge exchange + token + config blob",
-			imageRef: "redis:latest",
-			clientOpts: mockOCIOptions{
-				ChallengeAuthHeader: `Bearer realm="https://auth.docker.io/token",service="registry.docker.io",scope="repository:library/redis:pull"`,
-				ExpectedScope:       "repository:library/redis:pull",
-				TokenBody:           `{"token":"secret-bearer-token"}`,
-				ExpectedBearer:      "secret-bearer-token",
-				AuthStatus:          http.StatusOK,
-				AuthBody: fmt.Sprintf(`{
-					"schemaVersion": 2,
-					"mediaType": "application/vnd.oci.image.manifest.v1+json",
-					"config": { "digest": "%s" }
-				}`, configBlobDigest),
-				BlobMap: map[string]string{
-					configBlobDigest: fmt.Sprintf(`{"config":{"Labels":{"org.label-schema.vcs-ref":"%s"}}}`, expectedSHA),
-				},
-			},
-			wantRev: expectedSHA,
-		},
-		{
-			name:     "Case 4: Index with annotations directly resolves revision",
-			imageRef: "ghcr.io/azylman/aerial:latest",
-			clientOpts: mockOCIOptions{
-				ProbeStatus: http.StatusOK,
-				ProbeBody: fmt.Sprintf(`{
-					"schemaVersion": 2,
-					"manifests": [
-						{
-							"digest": "%s",
-							"platform": {"os": "linux", "architecture": "amd64"}
-						}
-					],
-					"annotations": {
-						"org.opencontainers.image.revision": "%s"
-					}
-				}`, childDigest, expectedSHA),
-			},
-			wantRev: expectedSHA,
-		},
-		{
-			name:     "missing labels in config blob returns error",
-			imageRef: "ghcr.io/azylman/aerial-brain:latest",
-			clientOpts: mockOCIOptions{
-				ProbeStatus: http.StatusOK,
-				ProbeBody: fmt.Sprintf(`{
-					"schemaVersion": 2,
-					"config": { "digest": "%s" }
-				}`, configBlobDigest),
-				BlobMap: map[string]string{
-					configBlobDigest: `{"config":{"Labels":{}}}`,
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name:     "child manifest request fails with non-200",
-			imageRef: "ghcr.io/azylman/aerial-brain:latest",
-			clientOpts: mockOCIOptions{
-				ProbeStatus: http.StatusOK,
-				ProbeBody:   indexJSON,
-				AuthStatus:  http.StatusNotFound,
-				AuthBody:    "child manifest not found",
-			},
-			wantErr: true,
-		},
-		{
-			name:     "manifest missing config digest and annotations returns error",
-			imageRef: "ghcr.io/azylman/aerial-brain:latest",
-			clientOpts: mockOCIOptions{
-				ProbeStatus: http.StatusOK,
-				ProbeBody:   `{ "schemaVersion": 2 }`,
-			},
-			wantErr: true,
-		},
-		{
-			name:     "blob fetch non-200 returns error",
-			imageRef: "ghcr.io/azylman/aerial-brain:latest",
-			clientOpts: mockOCIOptions{
-				ProbeStatus: http.StatusOK,
-				ProbeBody: fmt.Sprintf(`{
-					"schemaVersion": 2,
-					"config": { "digest": "%s" }
-				}`, configBlobDigest),
-				AuthStatus: http.StatusBadGateway,
-				AuthBody:   "gateway error on blob",
-			},
-			wantErr: true,
-		},
-		{
-			name:     "probe 500 error returns error",
-			imageRef: "ghcr.io/azylman/aerial-brain:latest",
-			clientOpts: mockOCIOptions{
-				ProbeStatus: http.StatusInternalServerError,
-				ProbeBody:   "server internal error",
-			},
-			wantErr: true,
-		},
-		{
-			name:     "probe network error returns error",
-			imageRef: "ghcr.io/azylman/aerial-brain:latest",
-			clientOpts: mockOCIOptions{
-				ProbeErr: errors.New("network dial timeout"),
-			},
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			d := NewDaemon(DaemonConfig{RegistryClient: newMockOCIRegistryClient(tc.clientOpts)})
-			rev, err := d.GetRemoteImageRevision(context.Background(), tc.imageRef)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("GetRemoteImageRevision() error = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if !tc.wantErr && rev != tc.wantRev {
-				t.Errorf("GetRemoteImageRevision() = %q, want %q", rev, tc.wantRev)
 			}
 		})
 	}

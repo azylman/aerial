@@ -496,19 +496,16 @@ func resolveImageTag(commitSHA, digest string) string {
 	return "latest@" + cleanDigest
 }
 
-func buildImageReadyNomadRunArgs(jobSpec, jobPath, commitSHA, digest string, varFile ...string) ([]string, bool) {
+func buildImageReadyNomadRunArgs(jobSpec, jobPath, commitSHA, digest string, varFile ...string) []string {
 	runArgs := []string{"job", "run", "-detach"}
 	if len(varFile) > 0 && strings.TrimSpace(varFile[0]) != "" {
 		runArgs = append(runArgs, "-var-file="+strings.TrimSpace(varFile[0]))
 	}
-	varInjected := false
 	if HasNomadJobVariable(jobSpec, "image_tag") {
 		tag := resolveImageTag(commitSHA, digest)
 		runArgs = append(runArgs, "-var=image_tag="+tag)
-		varInjected = true
 	}
-	runArgs = append(runArgs, jobPath)
-	return runArgs, varInjected
+	return append(runArgs, jobPath)
 }
 
 func (d *SyncDaemon) applyImageReadyToJob(ctx context.Context, job MatchedNomadJob, req ImageReadyEventRequest, imgRef, digest string) error {
@@ -549,30 +546,12 @@ func (d *SyncDaemon) applyImageReadyToJob(ctx context.Context, job MatchedNomadJ
 	if d != nil && d.configDir != "" {
 		vf = ResolveJobVarFile(job.JobName, d.configDir)
 	}
-	runArgs, varInjected := buildImageReadyNomadRunArgs(jobSpec, job.JobPath, req.CommitSHA, digest, vf)
+	runArgs := buildImageReadyNomadRunArgs(jobSpec, job.JobPath, req.CommitSHA, digest, vf)
 
 	log.Printf("[Hangar:ImageReady] Applying Nomad job %s from %s (args: %v)...", job.JobName, job.JobPath, runArgs)
 	if _, sanitizedCombined, errRun := d.runNomadJobWithEvents(ctx, baseEvt, runArgs...); errRun != nil {
 		log.Printf("[Hangar:ImageReady] Error: job run failed for %s: %s (%v)", job.JobName, sanitizedCombined, errRun)
 		return fmt.Errorf("%s: %w", job.JobName, errRun)
-	}
-
-	if !varInjected {
-		log.Printf("[Hangar:ImageReady] Rescheduling allocation restart for unparameterized job %s...", job.JobName)
-		outRest, errRestBytes, errRest := d.getNomadExecutor()(ctx, "job", "restart", "-yes", "-reschedule", "-on-error=fail", job.JobName)
-		if errRest != nil {
-			log.Printf("[Hangar:ImageReady] Warning: job restart -reschedule failed for %s: %s (%v)", job.JobName, SanitizeLog(strings.TrimSpace(string(append(outRest, errRestBytes...)))), errRest)
-		}
-	}
-
-	if digest != "" {
-		key := job.JobName + ":" + imgRef
-		d.nomadDigestsMu.Lock()
-		if d.nomadKnownDigests == nil {
-			d.nomadKnownDigests = make(map[string]string)
-		}
-		d.nomadKnownDigests[key] = digest
-		d.nomadDigestsMu.Unlock()
 	}
 
 	return nil

@@ -641,9 +641,6 @@ func (d *SyncDaemon) StartPeriodicLoop(ctx context.Context) {
 				if _, syncErr := d.TriggerSync(); syncErr != nil {
 					log.Printf("[Hangar] Periodic sync notice: %v", syncErr)
 				}
-				if imgErr := d.CheckAndReconcileNomadImages(ctx); imgErr != nil {
-					log.Printf("[Hangar] Periodic image check notice: %v", imgErr)
-				}
 			}
 		}
 	}()

@@ -198,10 +198,6 @@ type SyncDaemon struct {
 	nomadMu             sync.Mutex
 	pendingNomadMu      sync.Mutex
 	pendingNomadChanges []NomadChangeEvent
-	nomadKnownDigests   map[string]string
-	nomadDigestsMu      sync.RWMutex
-	lastNomadImagePoll  time.Time
-	nomadPollMu         sync.Mutex
 
 	// Debounced Image Rollouts
 	pendingImageMu       sync.Mutex
@@ -415,7 +411,6 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 		nomadExecutor:        cfg.NomadExecutor,
 		nomadAddr:            cfg.NomadAddr,
 		nomadToken:           cfg.NomadToken,
-		nomadKnownDigests:    make(map[string]string),
 		registryClient:       cfg.RegistryClient,
 		synapseURL:           synapseURL,
 		deployDispatcher:     cfg.DeployDispatcher,
