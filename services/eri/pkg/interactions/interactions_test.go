@@ -385,7 +385,7 @@ func TestRouter_HandleStatus(t *testing.T) {
 		{"FallbackEnvAndIdle", "abcdef123456", "", false, false, false, false, false, false, 0, []string{"`aerial@abcdef1`", "`Idle`"}, ""},
 		{"AdvancedBranchesAndSchedules", "", "", true, false, true, true, true, false, 0, []string{"Follow up on PR deployment"}, ""},
 		{"HaroEnvFallback", "", "", false, true, true, false, false, false, 0, []string{"Morning briefing"}, "haro_env"},
-		{"SchedulerMcpEnvFallback", "", "", false, true, true, false, false, false, 0, []string{"Morning briefing"}, "sched_env"},
+		{"CovenEnvFallback", "", "", false, false, true, false, false, false, 0, []string{"Hourly health check", "1 facts recorded"}, "coven_env"},
 		{"StoreFailuresHandledGracefully", "", "", false, false, false, false, false, true, 0, []string{"0 facts recorded"}, ""},
 		{"ErrorLoggingHttp500", "", "", false, false, false, false, false, false, http.StatusInternalServerError, nil, ""},
 	}
@@ -447,9 +447,11 @@ func TestRouter_HandleStatus(t *testing.T) {
 				case "haro_env":
 					os.Setenv("HARO_URL", haroSrv.URL)
 					defer os.Unsetenv("HARO_URL")
-				case "sched_env":
-					os.Setenv("SCHEDULER_MCP_URL", haroSrv.URL+"/mcp/")
-					defer os.Unsetenv("SCHEDULER_MCP_URL")
+				case "coven_env":
+					os.Setenv("COVEN_URL", memSrv.URL)
+					defer os.Unsetenv("COVEN_URL")
+					router.deps.MemoryURL = ""
+					router.deps.HaroURL = haroSrv.URL
 				default:
 					router.deps.HaroURL = haroSrv.URL
 				}

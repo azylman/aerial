@@ -58,10 +58,6 @@ job "synapse" {
 {{- with nomadVar "nomad/jobs/synapse" -}}
 {{- if .CONFIG_YAML -}}{{- .CONFIG_YAML -}}{{- end -}}
 {{- end -}}
-{{- else if nomadVarExists "nomad/jobs/webhooks-router" -}}
-{{- with nomadVar "nomad/jobs/webhooks-router" -}}
-{{- if .CONFIG_YAML -}}{{- .CONFIG_YAML -}}{{- end -}}
-{{- end -}}
 {{- end -}}
 EOH
         destination = "local/synapse.yaml"
@@ -80,9 +76,8 @@ EOH
 {{ if nomadVarExists "nomad/jobs/shared" }}
 {{ with nomadVar "nomad/jobs/shared" }}
 {{ if .GITHUB_PAT }}GITHUB_PAT="{{ .GITHUB_PAT }}"{{ end }}
-{{ if .POSTGRES_PASSWORD }}POSTGRES_URL="postgres://aerial:{{ .POSTGRES_PASSWORD }}@postgres:5432/aerial?sslmode=disable"{{ end }}
-{{ if .DISCORD_BOT_TOKEN }}DISCORD_BOT_TOKEN="{{ .DISCORD_BOT_TOKEN }}"
-DISCORD_TOKEN="{{ .DISCORD_BOT_TOKEN }}"{{ end }}
+{{ if .POSTGRES_PASSWORD }}DATABASE_URL="postgres://aerial:{{ .POSTGRES_PASSWORD }}@postgres:5432/aerial?sslmode=disable"{{ end }}
+{{ if .DISCORD_BOT_TOKEN }}DISCORD_TOKEN="{{ .DISCORD_BOT_TOKEN }}"{{ end }}
 {{ end }}
 {{ end }}
 EOH
@@ -97,27 +92,6 @@ EOH
 
         check {
           name     = "synapse-health"
-          type     = "http"
-          path     = "/healthz"
-          interval = "15s"
-          timeout  = "3s"
-          check_restart {
-            limit           = 3
-            grace           = "60s"
-            ignore_warnings = false
-          }
-        }
-      }
-
-      # Backward-compatible service alias during rollout; resolves webhooks-router.aerial
-      # to synapse instances for existing callers before and after webhooks-router teardown.
-      service {
-        name     = "webhooks-router"
-        port     = "http"
-        provider = "nomad"
-
-        check {
-          name     = "webhooks-router-health"
           type     = "http"
           path     = "/healthz"
           interval = "15s"

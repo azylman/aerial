@@ -754,7 +754,7 @@ func TestLoadConfigAndEnv(t *testing.T) {
 	defer func() {
 		vanadisFallbackConfigPath, lookupHostFn = origFallback, origLookup
 	}()
-	for _, k := range []string{"PORT", "POSTGRES_URL", "DATABASE_URL", "ERI_URL", "SYNAPSE_URL", "WEBHOOKS_ROUTER_URL", "CONFIG_PATH"} {
+	for _, k := range []string{"PORT", "DATABASE_URL", "ERI_URL", "SYNAPSE_URL", "CONFIG_PATH"} {
 		t.Setenv(k, "")
 	}
 	tmpDir := t.TempDir()
@@ -783,7 +783,7 @@ func TestLoadConfigAndEnv(t *testing.T) {
 		})
 	}
 	yamlPath := filepath.Join(tmpDir, "vanadis.yaml")
-	_ = os.WriteFile(yamlPath, []byte("port: \"4099\"\npostgres_url: \"postgres://u:p@db:5432/vanadis\"\neri_url: \"http://eri.aerial:8088/\"\nwebhooks_router_url: \"http://router.aerial:4020/\"\n"), 0o600)
+	_ = os.WriteFile(yamlPath, []byte("port: \"4099\"\npostgres_url: \"postgres://u:p@db:5432/vanadis\"\neri_url: \"http://eri.aerial:8088/\"\nsynapse_url: \"http://router.aerial:4020/\"\n"), 0o600)
 	vanadisFallbackConfigPath = yamlPath
 	if cfg := LoadConfig(filepath.Join(tmpDir, "missing.yaml")); cfg.Port != "4099" || cfg.PostgresURL != "postgres://u:p@db:5432/vanadis" || cfg.BrainURL != "http://eri.aerial:8088" || cfg.EriURL != "http://eri.aerial:8088" || cfg.SynapseURL != "http://router.aerial:4020" {
 		t.Fatalf("unexpected yaml config: %+v", cfg)
@@ -792,9 +792,9 @@ func TestLoadConfigAndEnv(t *testing.T) {
 	_ = os.WriteFile(badPath, []byte(":::invalid_yaml"), 0o600)
 	t.Setenv("CONFIG_PATH", badPath)
 	t.Setenv("PORT", "4030")
-	t.Setenv("POSTGRES_URL", "postgres://env:5432/db")
+	t.Setenv("DATABASE_URL", "postgres://env:5432/db")
 	t.Setenv("ERI_URL", "http://env-eri:8088/")
-	t.Setenv("WEBHOOKS_ROUTER_URL", "http://env-router:4020/")
+	t.Setenv("SYNAPSE_URL", "http://env-router:4020/")
 	if envCfg := LoadConfigFromEnv(); envCfg.Port != "4030" || envCfg.PostgresURL != "postgres://env:5432/db" || envCfg.BrainURL != "http://env-eri:8088" || envCfg.EriURL != "http://env-eri:8088" || envCfg.SynapseURL != "http://env-router:4020" {
 		t.Fatalf("unexpected env override config: %+v", envCfg)
 	}

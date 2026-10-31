@@ -52,19 +52,6 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 			wantPGURL:     "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable",
 		},
 		{
-			name: "alternate environment variable keys",
-			env: map[string]string{
-				"INFISICAL_HOST_URL":                     "http://alternate:8085",
-				"INFISICAL_UNIVERSAL_AUTH_CLIENT_ID":     "u-cid",
-				"INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET": "u-csec",
-				"INFISICAL_WORKSPACE_ID":                 "w-id",
-			},
-			wantInfURL: "http://alternate:8085",
-			wantCID:    "u-cid",
-			wantCSec:   "u-csec",
-			wantPID:    "w-id",
-		},
-		{
 			name:          "default fallback loading with empty envs",
 			env:           map[string]string{},
 			wantPort:      "4020",
@@ -79,20 +66,11 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 			env: map[string]string{
 				"GITHUB_PAT":     "pat123",
 				"GITHUB_API_URL": "https://api.github.test/",
-				"POSTGRES_URL":   "postgres://custom:pass@db:5432/customdb",
+				"DATABASE_URL":   "postgres://custom:pass@db:5432/customdb",
 			},
 			wantGHTok: "pat123",
 			wantGHURL: "https://api.github.test",
 			wantPGURL: "postgres://custom:pass@db:5432/customdb",
-		},
-		{
-			name: "github token and database url fallback envs",
-			env: map[string]string{
-				"GITHUB_TOKEN": "tok456",
-				"DATABASE_URL": "postgres://dbuser:pass@db:5432/db",
-			},
-			wantGHTok: "tok456",
-			wantPGURL: "postgres://dbuser:pass@db:5432/db",
 		},
 		{
 			name:        "system channel id primary env",
@@ -100,19 +78,9 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 			wantSysChan: "123456789012345678",
 		},
 		{
-			name:        "discord channel id fallback env",
-			env:         map[string]string{"DISCORD_CHANNEL_ID": "987654321098765432"},
-			wantSysChan: "987654321098765432",
-		},
-		{
-			name:        "discord bot token primary env",
-			env:         map[string]string{"DISCORD_BOT_TOKEN": "bot-secret-token-123"},
+			name:        "discord token primary env",
+			env:         map[string]string{"DISCORD_TOKEN": "bot-secret-token-123"},
 			wantDiscTok: "bot-secret-token-123",
-		},
-		{
-			name:        "discord token fallback env",
-			env:         map[string]string{"DISCORD_TOKEN": "fallback-token-456"},
-			wantDiscTok: "fallback-token-456",
 		},
 		{
 			name: "eri url primary env",
@@ -125,14 +93,12 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 	}
 
 	keysToClear := []string{
-		"PORT", "INFISICAL_URL", "INFISICAL_HOST_URL", "INFISICAL_CLIENT_ID",
-		"INFISICAL_UNIVERSAL_AUTH_CLIENT_ID", "INFISICAL_CLIENT_SECRET",
-		"INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET", "INFISICAL_PROJECT_ID",
-		"INFISICAL_WORKSPACE_ID", "INFISICAL_ENVIRONMENT", "NOMAD_ADDR",
-		"NOMAD_TOKEN", "GITHUB_PAT", "GITHUB_TOKEN", "GITHUB_API_URL",
-		"POSTGRES_URL", "DATABASE_URL", "HANGAR_URL", "ERI_URL",
-		"SYSTEM_CHANNEL_ID", "DISCORD_CHANNEL_ID",
-		"CONFIG_PATH", "DISCORD_BOT_TOKEN", "DISCORD_TOKEN",
+		"PORT", "INFISICAL_URL", "INFISICAL_CLIENT_ID",
+		"INFISICAL_CLIENT_SECRET", "INFISICAL_PROJECT_ID",
+		"INFISICAL_ENVIRONMENT", "NOMAD_ADDR",
+		"NOMAD_TOKEN", "GITHUB_PAT", "GITHUB_API_URL",
+		"DATABASE_URL", "HANGAR_URL", "ERI_URL",
+		"SYSTEM_CHANNEL_ID", "CONFIG_PATH", "DISCORD_TOKEN",
 	}
 
 	for _, tc := range tests {
@@ -171,21 +137,20 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 
 func TestLoadConfig_YAMLAndOverrides(t *testing.T) {
 	tests := []struct {
-		name                   string
-		localYAML              string
-		fallbackYAML           string
-		deprecatedFallbackYAML string
-		aerialYAML             string
-		useEmptyPath           bool
-		missingFallback        bool
-		env                    map[string]string
-		wantPort               string
-		wantInfURL             string
-		wantEnv                string
-		wantNomadAddr          string
-		wantHangarURL          string
-		wantBrainURL           string
-		wantSysChan            string
+		name            string
+		localYAML       string
+		fallbackYAML    string
+		aerialYAML      string
+		useEmptyPath    bool
+		missingFallback bool
+		env             map[string]string
+		wantPort        string
+		wantInfURL      string
+		wantEnv         string
+		wantNomadAddr   string
+		wantHangarURL   string
+		wantBrainURL    string
+		wantSysChan     string
 	}{
 		{
 			name: "yaml config without overrides",
@@ -248,14 +213,6 @@ eri_url: "http://brain.custom:8088"
 			wantNomadAddr: "http://nomad.fallback:4646",
 		},
 		{
-			name:                   "zero-byte local config with deprecated webhooks fallback",
-			localYAML:              "",
-			deprecatedFallbackYAML: "port: \"4076\"\ninfisical_url: \"http://infisical.legacy:8085\"\nnomad_addr: \"http://nomad.legacy:4646\"\n",
-			wantPort:               "4076",
-			wantInfURL:             "http://infisical.legacy:8085",
-			wantNomadAddr:          "http://nomad.legacy:4646",
-		},
-		{
 			name:            "zero-byte local config with missing fallback uses defaults",
 			localYAML:       "",
 			missingFallback: true,
@@ -298,8 +255,8 @@ eri_url: "http://brain.custom:8088"
 	}
 
 	keysToClear := []string{
-		"PORT", "INFISICAL_URL", "INFISICAL_HOST_URL", "INFISICAL_ENVIRONMENT",
-		"NOMAD_ADDR", "HANGAR_URL", "ERI_URL", "SYSTEM_CHANNEL_ID", "DISCORD_CHANNEL_ID",
+		"PORT", "INFISICAL_URL", "INFISICAL_ENVIRONMENT",
+		"NOMAD_ADDR", "HANGAR_URL", "ERI_URL", "SYSTEM_CHANNEL_ID",
 	}
 
 	for _, tc := range tests {
@@ -326,33 +283,21 @@ eri_url: "http://brain.custom:8088"
 			t.Cleanup(func() { synapseAerialConfigPath = oldAerial })
 
 			oldFallback := synapseFallbackConfigPath
-			oldWebhooksFallback := webhooksRouterFallbackConfigPath
-			if tc.deprecatedFallbackYAML != "" {
-				fbLegacyPath := filepath.Join(tmpDir, "legacy-fallback.yaml")
-				if err := os.WriteFile(fbLegacyPath, []byte(tc.deprecatedFallbackYAML), 0o644); err != nil {
-					t.Fatalf("failed to write legacy fallback config: %v", err)
-				}
-				synapseFallbackConfigPath = filepath.Join(tmpDir, "nonexistent-synapse.yaml")
-				webhooksRouterFallbackConfigPath = fbLegacyPath
-			} else if tc.fallbackYAML != "" || tc.missingFallback {
+			if tc.fallbackYAML != "" || tc.missingFallback {
 				if tc.missingFallback {
 					synapseFallbackConfigPath = filepath.Join(tmpDir, "nonexistent.yaml")
-					webhooksRouterFallbackConfigPath = filepath.Join(tmpDir, "nonexistent-legacy.yaml")
 				} else {
 					fbPath := filepath.Join(tmpDir, "fallback.yaml")
 					if err := os.WriteFile(fbPath, []byte(tc.fallbackYAML), 0o644); err != nil {
 						t.Fatalf("failed to write fallback config: %v", err)
 					}
 					synapseFallbackConfigPath = fbPath
-					webhooksRouterFallbackConfigPath = filepath.Join(tmpDir, "nonexistent-legacy.yaml")
 				}
 			} else {
 				synapseFallbackConfigPath = filepath.Join(tmpDir, "nonexistent-synapse.yaml")
-				webhooksRouterFallbackConfigPath = filepath.Join(tmpDir, "nonexistent-legacy.yaml")
 			}
 			t.Cleanup(func() {
 				synapseFallbackConfigPath = oldFallback
-				webhooksRouterFallbackConfigPath = oldWebhooksFallback
 			})
 
 			for _, k := range keysToClear {

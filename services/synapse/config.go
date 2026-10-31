@@ -51,9 +51,8 @@ type RouterYAMLConfig struct {
 }
 
 var (
-	synapseFallbackConfigPath        = "/config/synapse.yaml"
-	webhooksRouterFallbackConfigPath = "/config/webhooks-router.yaml"
-	synapseAerialConfigPath          = "/config/config.yaml"
+	synapseFallbackConfigPath = "/config/synapse.yaml"
+	synapseAerialConfigPath   = "/config/config.yaml"
 )
 
 func firstNonEmpty(vals ...string) string {
@@ -77,8 +76,6 @@ func LoadConfig(configPath string) Config {
 	if targetPath == "" {
 		if fi, err := os.Stat(synapseFallbackConfigPath); err == nil && fi.Size() > 0 {
 			targetPath = synapseFallbackConfigPath
-		} else if fi, err := os.Stat(webhooksRouterFallbackConfigPath); err == nil && fi.Size() > 0 {
-			targetPath = webhooksRouterFallbackConfigPath
 		}
 	}
 	if targetPath != "" {
@@ -99,18 +96,18 @@ func LoadConfig(configPath string) Config {
 		}
 	}
 
-	pgURL := firstNonEmpty(os.Getenv("POSTGRES_URL"), os.Getenv("DATABASE_URL"), "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable")
+	pgURL := firstNonEmpty(os.Getenv("DATABASE_URL"), "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable")
 
 	return Config{
 		Port:                  firstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4020"),
-		InfisicalURL:          strings.TrimRight(firstNonEmpty(os.Getenv("INFISICAL_URL"), os.Getenv("INFISICAL_HOST_URL"), fileCfg.InfisicalURL, "http://infisical.aerial"), "/"),
-		InfisicalClientID:     firstNonEmpty(os.Getenv("INFISICAL_CLIENT_ID"), os.Getenv("INFISICAL_UNIVERSAL_AUTH_CLIENT_ID")),
-		InfisicalClientSecret: firstNonEmpty(os.Getenv("INFISICAL_CLIENT_SECRET"), os.Getenv("INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET")),
-		InfisicalProjectID:    firstNonEmpty(os.Getenv("INFISICAL_PROJECT_ID"), os.Getenv("INFISICAL_WORKSPACE_ID")),
+		InfisicalURL:          strings.TrimRight(firstNonEmpty(os.Getenv("INFISICAL_URL"), fileCfg.InfisicalURL, "http://infisical.aerial"), "/"),
+		InfisicalClientID:     os.Getenv("INFISICAL_CLIENT_ID"),
+		InfisicalClientSecret: os.Getenv("INFISICAL_CLIENT_SECRET"),
+		InfisicalProjectID:    os.Getenv("INFISICAL_PROJECT_ID"),
 		InfisicalEnvironment:  firstNonEmpty(os.Getenv("INFISICAL_ENVIRONMENT"), fileCfg.InfisicalEnvironment, "prod"),
 		NomadAddr:             strings.TrimRight(firstNonEmpty(os.Getenv("NOMAD_ADDR"), fileCfg.NomadAddr, "http://127.0.0.1:4646"), "/"),
 		NomadToken:            os.Getenv("NOMAD_TOKEN"),
-		GitHubToken:           firstNonEmpty(os.Getenv("GITHUB_PAT"), os.Getenv("GITHUB_TOKEN")),
+		GitHubToken:           os.Getenv("GITHUB_PAT"),
 		GitHubAPIURL:          strings.TrimRight(firstNonEmpty(os.Getenv("GITHUB_API_URL"), "https://api.github.com"), "/"),
 		PostgresURL:           pgURL,
 		HangarURL:             strings.TrimRight(firstNonEmpty(os.Getenv("HANGAR_URL"), fileCfg.HangarURL, "http://127.0.0.1:8087"), "/"),
@@ -118,8 +115,8 @@ func LoadConfig(configPath string) Config {
 		EriURL:                strings.TrimRight(firstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/"),
 		VanadisURL:            strings.TrimRight(firstNonEmpty(os.Getenv("VANADIS_URL"), fileCfg.VanadisURL, "http://vanadis.aerial"), "/"),
 		HaroURL:               strings.TrimRight(firstNonEmpty(os.Getenv("HARO_URL"), fileCfg.HaroURL, "http://haro.aerial"), "/"),
-		SystemChannelID:       strings.TrimSpace(firstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), os.Getenv("DISCORD_CHANNEL_ID"), sysChan)),
-		DiscordToken:          firstNonEmpty(os.Getenv("DISCORD_BOT_TOKEN"), os.Getenv("DISCORD_TOKEN")),
+		SystemChannelID:       strings.TrimSpace(firstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), sysChan)),
+		DiscordToken:          os.Getenv("DISCORD_TOKEN"),
 	}
 }
 

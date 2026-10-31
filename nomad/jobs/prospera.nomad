@@ -58,8 +58,7 @@ EOH
 {{ if nomadVarExists "nomad/jobs/shared" }}
 {{ with nomadVar "nomad/jobs/shared" }}
 {{ if .POSTGRES_PASSWORD }}DATABASE_URL="postgres://aerial:{{ .POSTGRES_PASSWORD }}@postgres:5432/aerial?sslmode=disable"{{ end }}
-{{ if .GEMINI_HARNESS_API_KEY }}GEMINI_HARNESS_API_KEY="{{ .GEMINI_HARNESS_API_KEY }}"
-GEMINI_API_KEY="{{ .GEMINI_HARNESS_API_KEY }}"{{ end }}
+{{ if .GEMINI_HARNESS_API_KEY }}GEMINI_HARNESS_API_KEY="{{ .GEMINI_HARNESS_API_KEY }}"{{ end }}
 {{ end }}
 {{ end }}
 {{ if nomadVarExists "nomad/jobs/voice-call" }}

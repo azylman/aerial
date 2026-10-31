@@ -771,18 +771,18 @@ func applyEnvironmentOverrides(data *ConfigData, lookup func(string) string) {
 	}
 	overrideEnvStr(&data.Port, lookup, "PORT")
 	overrideEnvStr(&data.AgyBin, lookup, "AGY_BIN")
-	overrideEnvStr(&data.APIKey, lookup, "AGY_GEMINI_API_KEY", "AGY_API_KEY")
-	overrideEnvStr(&data.HarnessAPIKey, lookup, "GEMINI_HARNESS_API_KEY", "AERIAL_GEMINI_API_KEY")
+	overrideEnvStr(&data.APIKey, lookup, "AGY_GEMINI_API_KEY")
+	overrideEnvStr(&data.HarnessAPIKey, lookup, "GEMINI_HARNESS_API_KEY")
 	overrideEnvStr(&data.SystemPrompt, lookup, "SYSTEM_PROMPT")
-	overrideEnvStr(&data.DiscordToken, lookup, "DISCORD_TOKEN", "DISCORD_BOT_TOKEN")
+	overrideEnvStr(&data.DiscordToken, lookup, "DISCORD_TOKEN")
 	overrideEnvStr(&data.GitHubPAT, lookup, "GITHUB_PAT")
 	if dsn := buildPostgresDSN(lookup); dsn != "" {
 		data.DatabaseURL = dsn
 	}
 	overrideEnvStr(&data.Model, lookup, "AGY_MODEL")
 	overrideEnvStr(&data.Timezone, lookup, "DEFAULT_TIMEZONE", "TZ")
-	overrideEnvStr(&data.SystemChannel, lookup, "SYSTEM_CHANNEL")
-	overrideEnvStr(&data.LowEffortModel, lookup, "LOW_EFFORT_MODEL", "AMBIENT_CLASSIFIER_MODEL")
+	overrideEnvStr(&data.SystemChannel, lookup, "SYSTEM_CHANNEL_ID")
+	overrideEnvStr(&data.LowEffortModel, lookup, "LOW_EFFORT_MODEL")
 	overrideEnvStr(&data.MediumEffortModel, lookup, "MEDIUM_EFFORT_MODEL")
 	overrideEnvStr(&data.ClassifierURL, lookup, "CLASSIFIER_URL")
 	overrideEnvStr(&data.ClassifierModel, lookup, "CLASSIFIER_MODEL")
@@ -792,9 +792,9 @@ func applyEnvironmentOverrides(data *ConfigData, lookup func(string) string) {
 	overrideEnvStr(&data.ThreadTitleURL, lookup, "THREAD_TITLE_URL")
 	overrideEnvStr(&data.ThreadTitleModel, lookup, "THREAD_TITLE_MODEL")
 	overrideEnvStr(&data.Ollama.BaseURL, lookup, "OLLAMA_URL")
-	overrideEnvStr(&data.Ollama.Model, lookup, "EMBEDDING_MODEL", "OLLAMA_EMBEDDING_MODEL")
+	overrideEnvStr(&data.Ollama.Model, lookup, "OLLAMA_EMBEDDING_MODEL")
 	overrideEnvStr(&data.Ollama.QueryPrefix, lookup, "EMBEDDING_QUERY_PREFIX")
-	if ncStr := getEnvFromLookup(lookup, "OLLAMA_NUM_CTX", getEnvFromLookup(lookup, "EMBEDDING_NUM_CTX", "")); ncStr != "" {
+	if ncStr := getEnvFromLookup(lookup, "OLLAMA_NUM_CTX", ""); ncStr != "" {
 		if nc, err := strconv.Atoi(strings.TrimSpace(ncStr)); err == nil && nc > 0 {
 			data.Ollama.NumCtx = nc
 		}
@@ -804,8 +804,8 @@ func applyEnvironmentOverrides(data *ConfigData, lookup func(string) string) {
 	overrideEnvStr(&data.MCPConfig, lookup, "MCP_CONFIG")
 	overrideEnvStr(&data.OpenObserveURL, lookup, "OPENOBSERVE_URL")
 	overrideEnvStr(&data.OpenObserveOrg, lookup, "OPENOBSERVE_ORG")
-	overrideEnvStr(&data.OpenObserveUser, lookup, "OPENOBSERVE_ROOT_USER_EMAIL", "OPENOBSERVE_USER")
-	overrideEnvStr(&data.OpenObservePassword, lookup, "OPENOBSERVE_ROOT_USER_PASSWORD", "OPENOBSERVE_PASSWORD")
+	overrideEnvStr(&data.OpenObserveUser, lookup, "OPENOBSERVE_USER")
+	overrideEnvStr(&data.OpenObservePassword, lookup, "OPENOBSERVE_PASSWORD")
 	overrideEnvDuration(&data.DaemonIdleTimeout, lookup, "DAEMON_IDLE_TIMEOUT", false)
 	overrideEnvDuration(&data.MaxBackgroundTaskDuration, lookup, "MAX_BACKGROUND_TASK_DURATION", false)
 }

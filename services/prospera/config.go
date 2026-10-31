@@ -209,10 +209,7 @@ func LoadConfigFile(path string, getenv func(string) string) (*Config, error) {
 		return nil, fmt.Errorf("config: DATABASE_URL is required")
 	}
 
-	geminiKey := strings.TrimSpace(getenv("GEMINI_API_KEY"))
-	if geminiKey == "" {
-		geminiKey = strings.TrimSpace(getenv("GEMINI_HARNESS_API_KEY"))
-	}
+	geminiKey := strings.TrimSpace(getenv("GEMINI_HARNESS_API_KEY"))
 
 	fromNum, err := parseFromNumber(getenv("TWILIO_FROM_NUMBER"))
 	if err != nil {

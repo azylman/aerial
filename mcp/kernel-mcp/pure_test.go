@@ -507,12 +507,12 @@ settle_delay: "250ms"
 			wantErr:     false,
 		},
 		{
-			name:        "env STEEL_CDP_URL override",
+			name:        "env KERNEL_API_URL override",
 			path:        validYAMLPath,
-			envKey:      "STEEL_CDP_URL",
-			envVal:      "http://steel.lan:9111",
+			envKey:      "KERNEL_API_URL",
+			envVal:      "http://kernel.lan:9111",
 			wantPort:    "4099",
-			wantHost:    "steel.lan",
+			wantHost:    "kernel.lan",
 			wantCDPPort: "9111",
 			wantDelay:   250 * time.Millisecond,
 			wantErr:     false,
@@ -546,8 +546,6 @@ settle_delay: "250ms"
 			t.Setenv("CDP_PORT", "")
 			t.Setenv("KERNEL_CDP_URL", "")
 			t.Setenv("KERNEL_API_URL", "")
-			t.Setenv("STEEL_CDP_URL", "")
-			t.Setenv("STEEL_API_URL", "")
 			t.Setenv("SETTLE_DELAY", "")
 			if tc.envKey != "" {
 				t.Setenv(tc.envKey, tc.envVal)

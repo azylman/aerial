@@ -197,8 +197,6 @@ type DashboardYAMLConfig struct {
 	EriURL     string   `yaml:"eri_url"`
 	MemoryURL  string   `yaml:"memory_url"`
 	HangarURL  string   `yaml:"hangar_url"`
-	GitSyncURL string   `yaml:"gitsync_url"`
-	GHRepo     string   `yaml:"github_repo"`
 	GHRepos    []string `yaml:"github_repos"`
 	ConfigPath string   `yaml:"config_path"`
 	NomadAddr  string   `yaml:"nomad_addr"`
@@ -211,10 +209,7 @@ func LoadConfig(path string) (DashboardConfig, error) {
 	return LoadConfigFile(path, os.Getenv)
 }
 
-func parseDashboardRepos(rawRepos []string, fallbackRepo string) []string {
-	if len(rawRepos) == 0 && strings.TrimSpace(fallbackRepo) != "" {
-		rawRepos = []string{strings.TrimSpace(fallbackRepo)}
-	}
+func parseDashboardRepos(rawRepos []string) []string {
 	var repos []string
 	seen := make(map[string]bool)
 	for _, r := range rawRepos {
@@ -265,9 +260,6 @@ func LoadConfigFile(path string, lookup func(string) string) (DashboardConfig, e
 	}
 	hangarURL := strings.TrimSpace(ycfg.HangarURL)
 	if hangarURL == "" {
-		hangarURL = strings.TrimSpace(ycfg.GitSyncURL)
-	}
-	if hangarURL == "" {
 		return DashboardConfig{}, fmt.Errorf("config: hangar_url is required in %s", cleanPath)
 	}
 	haroURL := strings.TrimSpace(ycfg.HaroURL)
@@ -279,15 +271,12 @@ func LoadConfigFile(path string, lookup func(string) string) (DashboardConfig, e
 		return DashboardConfig{}, fmt.Errorf("config: vanadis_url is required in %s", cleanPath)
 	}
 
-	repos := parseDashboardRepos(ycfg.GHRepos, ycfg.GHRepo)
+	repos := parseDashboardRepos(ycfg.GHRepos)
 	if len(repos) == 0 {
 		return DashboardConfig{}, fmt.Errorf("config: github_repos is required in %s", cleanPath)
 	}
 
 	ghToken := strings.TrimSpace(lookup("GITHUB_PAT"))
-	if ghToken == "" {
-		ghToken = strings.TrimSpace(lookup("GITHUB_PERSONAL_ACCESS_TOKEN"))
-	}
 
 	gitCommit := normalizeGitCommit(lookup("GIT_COMMIT"))
 	if gitCommit == "" {

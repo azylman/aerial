@@ -98,7 +98,7 @@ func (r *Router) fetchMemoryFactStatus(ctx context.Context) (int, string) {
 	latestFactStr := "none recorded yet"
 	memURL := strings.TrimRight(strings.TrimSpace(r.deps.MemoryURL), "/")
 	if memURL == "" {
-		memURL = strings.TrimRight(strings.TrimSpace(os.Getenv("MEMORY_MCP_URL")), "/")
+		memURL = strings.TrimRight(strings.TrimSpace(os.Getenv("COVEN_URL")), "/")
 	}
 	if memURL == "" {
 		memURL = "http://coven.aerial"
@@ -171,14 +171,6 @@ func resolveNextScheduleAction(ctx context.Context, explicitHaroURL string) stri
 	haroURL := strings.TrimSpace(explicitHaroURL)
 	if haroURL == "" {
 		haroURL = strings.TrimSpace(os.Getenv("HARO_URL"))
-	}
-	if haroURL == "" {
-		if schedURL := strings.TrimSpace(os.Getenv("SCHEDULER_MCP_URL")); schedURL != "" {
-			schedURL = strings.TrimRight(schedURL, "/")
-			schedURL = strings.TrimSuffix(schedURL, "/mcp")
-			schedURL = strings.TrimSuffix(schedURL, "/sse")
-			haroURL = strings.TrimRight(schedURL, "/")
-		}
 	}
 	if haroURL == "" {
 		haroURL = "http://haro.aerial"

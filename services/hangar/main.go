@@ -665,14 +665,12 @@ type RepoConfig struct {
 
 // HangarYAMLConfig defines the declarative file schema for services/hangar/hangar.yaml.
 type HangarYAMLConfig struct {
-	Port                        string                 `yaml:"port"`
-	SyncInterval                string                 `yaml:"sync_interval"`
-	NomadAddr                   string                 `yaml:"nomad_addr"`
-	SynapseURL                  string                 `yaml:"synapse_url"`
-	DeprecatedWebhooksRouterURL string                 `yaml:"webhooks_router_url,omitempty"`
-	Repos                       []RepoConfig           `yaml:"repos"`
-	SyncRepos                   []string               `yaml:"sync_repos"`
-	ServiceConfigs              []ServiceConfigMapping `yaml:"service_configs"`
+	Port           string                 `yaml:"port"`
+	SyncInterval   string                 `yaml:"sync_interval"`
+	NomadAddr      string                 `yaml:"nomad_addr"`
+	SynapseURL     string                 `yaml:"synapse_url"`
+	Repos          []RepoConfig           `yaml:"repos"`
+	ServiceConfigs []ServiceConfigMapping `yaml:"service_configs"`
 }
 
 // NewConfigFromLookup extracts DaemonConfig using a provided lookup function.
@@ -712,13 +710,6 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 		}
 	}
 	if len(repos) == 0 {
-		for _, r := range fileCfg.SyncRepos {
-			if r = strings.TrimSpace(r); r != "" {
-				repos = append(repos, r)
-			}
-		}
-	}
-	if len(repos) == 0 {
 		repos = []string{"/share/aerial-config", "/share/aerial", "/share/mirrormere"}
 	}
 
@@ -726,20 +717,18 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 	configDir := firstNonEmpty(ResolveRepoPath("aerial-config", repos), "/share/aerial-config")
 
 	nomadAddr := firstNonEmpty(strings.TrimSpace(fileCfg.NomadAddr), "http://host.docker.internal:4646")
-	synapseURL := firstNonEmpty(strings.TrimSpace(fileCfg.SynapseURL), strings.TrimSpace(fileCfg.DeprecatedWebhooksRouterURL), "http://127.0.0.1:4020")
+	synapseURL := firstNonEmpty(strings.TrimSpace(fileCfg.SynapseURL), "http://127.0.0.1:4020")
 
 	pat := lookup("GITHUB_PAT")
 	nomadToken := lookup("NOMAD_TOKEN")
-	discordToken := firstNonEmpty(lookup("DISCORD_BOT_TOKEN"), lookup("DISCORD_TOKEN"))
-	discordChannel := lookup("DISCORD_CHANNEL")
+	discordToken := lookup("DISCORD_TOKEN")
+	discordChannel := lookup("SYSTEM_CHANNEL_ID")
 	discordWebhookURL := lookup("DISCORD_WEBHOOK_URL")
 
 	extraSecretCandidates := []string{
 		lookup("POSTGRES_PASSWORD"),
 		lookup("HA_TOKEN"),
 		lookup("GEMINI_HARNESS_API_KEY"),
-		lookup("AERIAL_GEMINI_API_KEY"),
-		lookup("GEMINI_API_KEY"),
 		lookup("GITHUB_PAT"),
 		lookup("NOMAD_TOKEN"),
 	}
