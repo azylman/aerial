@@ -37,21 +37,6 @@ func fileInChangedList(target string, changed []string) bool {
 	return false
 }
 
-func homepageInChangedList(changed []string) bool {
-	targetClean := "services/homepage/homepage.yaml"
-	for _, f := range changed {
-		clean := filepath.Clean(filepath.ToSlash(f))
-		clean = strings.TrimPrefix(clean, "/")
-		if clean == targetClean {
-			return true
-		}
-		if clean == "homepage" || strings.HasPrefix(clean, "homepage/") {
-			return true
-		}
-	}
-	return false
-}
-
 func (d *SyncDaemon) getChangedFiles(ctx context.Context, repoPath, prevHead, currHead string) ([]string, error) {
 	if prevHead == "" || currHead == "" || prevHead == currHead {
 		return nil, nil
@@ -227,25 +212,12 @@ func (d *SyncDaemon) syncExternalPushBundles(ctx context.Context, repoPath strin
 	if d.configDir == "" {
 		return
 	}
-	var bundleMatched bool
-	var homepageMatched bool
 	for _, b := range bundleConfigs {
 		if AssetBundleMatchesRepoChanges(b, repoPath, changedFiles) {
-			bundleMatched = true
-			if b.Name == "homepage" {
-				homepageMatched = true
+			if err := d.SyncAssetBundlesToNomad(ctx, d.configDir, ConfigSyncContext{DiffGated: true, ChangedFiles: changedFiles}); err != nil {
+				log.Printf("[Hangar:GitPush] Notice: SyncAssetBundlesToNomad: %v", err)
 			}
-		}
-	}
-	if !bundleMatched {
-		return
-	}
-	if err := d.SyncAssetBundlesToNomad(ctx, d.configDir, ConfigSyncContext{DiffGated: true, ChangedFiles: changedFiles}); err != nil {
-		log.Printf("[Hangar:GitPush] Notice: SyncAssetBundlesToNomad: %v", err)
-	}
-	if homepageMatched {
-		if err := d.SyncHomepageConfigToNomad(ctx, d.configDir, ConfigSyncContext{DiffGated: true, ChangedFiles: changedFiles}); err != nil {
-			log.Printf("[Hangar:GitPush] Notice: SyncHomepageConfigToNomad: %v", err)
+			return
 		}
 	}
 }
