@@ -1024,7 +1024,7 @@ func TestDelivery_ReporterNilStoreAndNotFound(t *testing.T) {
 	}
 }
 
-func TestDelivery_UncoveredEdgeCases(t *testing.T) {
+func TestDelivery_WebhookAndStoreErrorPropagation(t *testing.T) {
 	t.Parallel()
 
 	// 1. postDiscordMessage client error

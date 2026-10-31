@@ -726,7 +726,7 @@ func TestToolHandler_ValidationErrors(t *testing.T) {
 	})
 }
 
-func TestToolHandler_UncoveredBranches(t *testing.T) {
+func TestToolHandler_SteerEndAndEnsurePhoneFallbacks(t *testing.T) {
 	t.Parallel()
 	cfg := &Config{TwilioFromNumber: "+15105550100"}
 
