@@ -1010,74 +1010,47 @@ func (d *DefaultOutboundDispatcher) DispatchWidget(ctx context.Context, payload 
 	return res.MessageID, nil
 }
 
-func (d *DefaultOutboundDispatcher) DispatchDiscordMessage(ctx context.Context, req DiscordMessageIngressRequest) error {
-	bodyBytes, err := json.Marshal(req)
+func (d *DefaultOutboundDispatcher) postDiscordInternalJSON(ctx context.Context, client *http.Client, timeout time.Duration, path, reqLabel, statusLabel string, payload any) error {
+	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("marshal discord message ingress request: %w", err)
+		return fmt.Errorf("marshal %s request: %w", reqLabel, err)
 	}
-	endpoint := d.brainURL + "/internal/discord/message"
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	endpoint := d.brainURL + path
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return fmt.Errorf("create discord message ingress request: %w", err)
+		return fmt.Errorf("create %s request: %w", reqLabel, err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	httpClient := d.discordMsgClient
+	httpClient := client
 	if httpClient == nil {
 		httpClient = d.httpClient
 	}
 	resp, err := httpClient.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("discord message ingress request failed: %w", err)
+		return fmt.Errorf("%s request failed: %w", reqLabel, err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if err != nil {
-		return fmt.Errorf("read discord message ingress response: %w", err)
+		return fmt.Errorf("read %s response: %w", reqLabel, err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("discord ingress returned status %d: %s", resp.StatusCode, string(respBody))
+		return fmt.Errorf("%s returned status %d: %s", statusLabel, resp.StatusCode, string(respBody))
 	}
 	return nil
 }
 
+func (d *DefaultOutboundDispatcher) DispatchDiscordMessage(ctx context.Context, req DiscordMessageIngressRequest) error {
+	return d.postDiscordInternalJSON(ctx, d.discordMsgClient, 20*time.Second, "/internal/discord/message", "discord message ingress", "discord ingress", req)
+}
+
 func (d *DefaultOutboundDispatcher) DispatchDiscordInteraction(ctx context.Context, interaction *discordgo.Interaction) error {
-	bodyBytes, err := json.Marshal(interaction)
-	if err != nil {
-		return fmt.Errorf("marshal discord interaction request: %w", err)
-	}
-	endpoint := d.brainURL + "/internal/discord/interaction"
-	ctx, cancel := context.WithTimeout(ctx, 2500*time.Millisecond)
-	defer cancel()
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return fmt.Errorf("create discord interaction request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	httpClient := d.discordInteractionClient
-	if httpClient == nil {
-		httpClient = d.httpClient
-	}
-	resp, err := httpClient.Do(httpReq)
-	if err != nil {
-		return fmt.Errorf("discord interaction request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	if err != nil {
-		return fmt.Errorf("read discord interaction response: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("discord interaction returned status %d: %s", resp.StatusCode, string(respBody))
-	}
-	return nil
+	return d.postDiscordInternalJSON(ctx, d.discordInteractionClient, 2500*time.Millisecond, "/internal/discord/interaction", "discord interaction", "discord interaction", interaction)
 }
 
 type hangarJSONResponse struct {

@@ -787,22 +787,14 @@ func (r *PostgresPRRegistry) ListDeployingPRs(ctx context.Context) ([]DeployingP
 	return prs, rows.Err()
 }
 
-func (r *PostgresPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisAdvancementResult, error) {
-	repo = normalizeRepo(repo)
-	if r == nil || repo == "" || prNumber <= 0 {
-		return &VanadisAdvancementResult{Matched: false}, nil
-	}
+func (r *PostgresPRRegistry) postVanadisJSON(ctx context.Context, path, shortLabel, opName string, payload any, dst any) error {
 	client, vURL := r.getVanadisClient()
-	bodyBytes, err := json.Marshal(map[string]any{
-		"repo":      repo,
-		"pr_number": prNumber,
-	})
+	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
-		return nil, fmt.Errorf("marshal advance chunk request: %w", err)
+		return fmt.Errorf("marshal %s request: %w", shortLabel, err)
 	}
-	var res VanadisAdvancementResult
-	err = r.doHTTPWithRetry(ctx, client, "advance vanadis chunk by pr", func() (*http.Request, error) {
-		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, vURL+"/chunks/advance-pr", bytes.NewReader(bodyBytes))
+	return r.doHTTPWithRetry(ctx, client, opName, func() (*http.Request, error) {
+		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, vURL+path, bytes.NewReader(bodyBytes))
 		if reqErr != nil {
 			return nil, reqErr
 		}
@@ -812,16 +804,30 @@ func (r *PostgresPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo s
 		if resp.StatusCode != http.StatusOK {
 			body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
 			if readErr != nil {
-				return fmt.Errorf("advance vanadis chunk by pr: unexpected status %d (read error: %w)", resp.StatusCode, readErr)
+				return fmt.Errorf("%s: unexpected status %d (read error: %w)", opName, resp.StatusCode, readErr)
 			}
-			return fmt.Errorf("advance vanadis chunk by pr: unexpected status %d: %s", resp.StatusCode, string(body))
+			return fmt.Errorf("%s: unexpected status %d: %s", opName, resp.StatusCode, string(body))
 		}
-		if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-			return fmt.Errorf("decode advance chunk response: %w", err)
+		if dst != nil {
+			if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
+				return fmt.Errorf("decode %s response: %w", shortLabel, err)
+			}
 		}
 		return nil
 	})
-	if err != nil {
+}
+
+func (r *PostgresPRRegistry) AdvanceVanadisChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisAdvancementResult, error) {
+	repo = normalizeRepo(repo)
+	if r == nil || repo == "" || prNumber <= 0 {
+		return &VanadisAdvancementResult{Matched: false}, nil
+	}
+	var res VanadisAdvancementResult
+	payload := map[string]any{
+		"repo":      repo,
+		"pr_number": prNumber,
+	}
+	if err := r.postVanadisJSON(ctx, "/chunks/advance-pr", "advance chunk", "advance vanadis chunk by pr", payload, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil

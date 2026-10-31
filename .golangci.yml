@@ -4,6 +4,7 @@ linters:
     - bodyclose
     - containedctx
     - copyloopvar
+    - dupl
     - errcheck
     - errchkjson
     - errname
@@ -24,6 +25,8 @@ linters:
     - unused
     - wastedassign
   settings:
+    dupl:
+      threshold: 100
     gocritic:
       disable-all: true
       enabled-checks:
@@ -53,6 +56,7 @@ linters:
     rules:
       - linters:
           - containedctx
+          - dupl
           - errcheck
           - errchkjson
           - ineffassign
