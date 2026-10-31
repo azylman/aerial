@@ -647,7 +647,7 @@
           "refId": "A"
         }
       ],
-      "title": "Real-Time Anomaly Z-Scores & Cadence Ratios",
+      "title": "Real-Time Anomaly Z-Scores",
       "type": "timeseries"
     },
     {

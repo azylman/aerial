@@ -402,7 +402,7 @@ transforms:
           }
         }
 
-        # Python timestamped bracketed severity parser (e.g. anomaly-detector, ear, remote)
+        # Python timestamped bracketed severity parser (e.g. ear, remote)
         if !exists(.level) {
           parsed, err = parse_regex(.message, r'^(?P<py_timestamp>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:,\d+)?)\s+\[(?P<severity>[A-Z]+)\]\s+(?:(?P<logger>[^:]+):\s+)?(?P<msg>.*)$')
           if err == null {
