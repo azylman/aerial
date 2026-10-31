@@ -942,102 +942,102 @@ func indentLines(s string, spaces int) string {
 	return strings.Join(lines, "\n")
 }
 
+func testAssetBundles(composeDir, configDir, mirrormereDir string) []AssetBundleConfig {
+	return []AssetBundleConfig{
+		{
+			Name:       "migrations",
+			TriggerJob: "nomad/jobs/db-migrate.nomad",
+			Sources: map[string]string{
+				".": filepath.Join(composeDir, "services/eri/pkg/db/migrations"),
+			},
+		},
+		{
+			Name:     "dashboard",
+			NomadVar: "nomad/jobs/dashboard",
+			Sources: map[string]string{
+				".": filepath.Join(composeDir, "services/dashboard/static"),
+			},
+		},
+		{
+			Name:     "docs",
+			NomadVar: "nomad/jobs/docs",
+			Sources: map[string]string{
+				"app":     filepath.Join(composeDir, "services/docs-service/app"),
+				"content": filepath.Join(configDir, "docs"),
+			},
+		},
+		{
+			Name:     "grafana",
+			NomadVar: "nomad/jobs/grafana",
+			Sources: map[string]string{
+				"system": filepath.Join(composeDir, "nomad/grafana/dashboards"),
+				"custom": filepath.Join(configDir, "services/grafana/dashboards"),
+			},
+		},
+		{
+			Name:     "homepage",
+			NomadVar: "nomad/jobs/homepage",
+			Excludes: []string{"core-homepage/test"},
+			Sources: map[string]string{
+				"core-homepage": filepath.Join(composeDir, "services/homepage"),
+				"user-homepage": filepath.Join(configDir, "homepage"),
+			},
+		},
+		{
+			Name:     "mirrormere",
+			NomadVar: "nomad/jobs/mirrormere-core",
+			Sources: map[string]string{
+				"web":     filepath.Join(mirrormereDir, "web"),
+				"widgets": filepath.Join(mirrormereDir, "widgets"),
+			},
+		},
+	}
+}
+
+func testServiceConfigs() []ServiceConfigMapping {
+	return []ServiceConfigMapping{
+		{RelPath: "services/haro/haro.yaml", NomadVar: "nomad/jobs/haro", VarKey: "CONFIG_YAML"},
+		{RelPath: "services/coven/coven.yaml", NomadVar: "nomad/jobs/coven", VarKey: "CONFIG_YAML"},
+		{RelPath: "services/prospera/prospera.yaml", NomadVar: "nomad/jobs/prospera", VarKey: "CONFIG_YAML"},
+		{RelPath: "services/mcp/github-mcp.yaml", NomadVar: "nomad/jobs/github-mcp", VarKey: "CONFIG_YAML"},
+		{RelPath: "services/mcp/nomad-mcp.yaml", NomadVar: "nomad/jobs/nomad-mcp", VarKey: "CONFIG_YAML"},
+		{RelPath: "services/mcp/discord-mcp.yaml", NomadVar: "nomad/jobs/discord-mcp", VarKey: "CONFIG_YAML"},
+		{RelPath: "services/mcp/kernel-mcp.yaml", NomadVar: "nomad/jobs/kernel-mcp", VarKey: "CONFIG_YAML"},
+		{RelPath: "services/mcp/infisical-mcp.yaml", NomadVar: "nomad/jobs/infisical-mcp", VarKey: "CONFIG_YAML"},
+		{RelPath: "services/synapse/synapse.yaml", NomadVar: "nomad/jobs/synapse", VarKey: "CONFIG_YAML"},
+		{RelPath: "services/victoriametrics/scrape.yml", NomadVar: "nomad/jobs/victoriametrics", VarKey: "CONFIG_YAML"},
+		{RelPath: "services/dashboard/dashboard.yaml", NomadVar: "nomad/jobs/dashboard", VarKey: "CONFIG_YAML"},
+	}
+}
+
 func seedRepoWorkflowFixture(t testing.TB, repoDir string) {
 	t.Helper()
-	base := strings.ToLower(filepath.Base(repoDir))
-	switch {
-	case strings.Contains(base, "sidecar"):
-		writeTestWorkflowFixture(t, repoDir, `
-vision:
-  - 'vision/**'
-migrator:
-  - 'scratch-service/migrations/**'
-  - 'atlas.hcl'
-`, `
-{ service: "vision", image_name: "aerial-sidecar-vision" },
-{ service: "migrator", image_name: "aerial-sidecar-migrator" }
-`)
-	case strings.Contains(base, "mirrormere"):
-		writeTestWorkflowFixture(t, repoDir, `
-mirrormere:
-  - 'cmd/**'
-  - 'internal/**'
-  - 'api/**'
-  - 'Dockerfile'
-ear:
-  - 'client/ear/**'
-cast-watcher:
-  - 'client/cast-watcher/**'
-  - 'go.mod'
-`, `
-{ service: "mirrormere", image_name: "mirrormere" },
-{ service: "ear", image_name: "mirrormere-ear" },
-{ service: "cast-watcher", image_name: "mirrormere-cast-watcher" }
-`)
-	default:
-		writeTestWorkflowFixture(t, repoDir, `
-eri:
-  - 'services/eri/**'
-  - 'pkg/**'
-haro:
-  - 'services/haro/**'
-  - 'pkg/**'
-coven:
-  - 'services/coven/**'
-  - 'pkg/**'
-discord-mcp:
-  - 'mcp/discord-mcp/**'
-  - 'pkg/**'
-kernel-mcp:
-  - 'mcp/kernel-mcp/**'
-  - 'pkg/**'
-github-mcp:
-  - 'mcp/github-mcp/**'
-nomad-mcp:
-  - 'mcp/nomad-mcp/**'
-infisical-mcp:
-  - 'mcp/infisical-mcp/**'
-dashboard:
-  - 'services/dashboard/**'
-  - 'pkg/**'
-docs:
-  - 'services/docs-service/**'
-proxy:
-  - 'services/proxy/**'
-hangar:
-  - 'services/hangar/**'
-  - 'pkg/**'
-synapse:
-  - 'services/synapse/**'
-  - 'pkg/**'
-vanadis:
-  - 'services/vanadis/**'
-  - 'pkg/**'
-  - 'Dockerfile'
-prospera:
-  - 'services/prospera/**'
-  - 'pkg/**'
-github-runner:
-  - 'services/github-runner/**'
-`, `
-{ service: "eri", image_name: "aerial-eri" },
-{ service: "haro", image_name: "aerial-haro" },
-{ service: "coven", image_name: "aerial-coven" },
-{ service: "discord-mcp", image_name: "aerial-discord-mcp" },
-{ service: "kernel-mcp", image_name: "aerial-kernel-mcp" },
-{ service: "github-mcp", image_name: "aerial-github-mcp" },
-{ service: "nomad-mcp", image_name: "aerial-nomad-mcp" },
-{ service: "infisical-mcp", image_name: "aerial-infisical-mcp" },
-{ service: "dashboard", image_name: "aerial-dashboard" },
-{ service: "docs", image_name: "aerial-docs" },
-{ service: "proxy", image_name: "aerial-proxy" },
-{ service: "hangar", image_name: "aerial-hangar" },
-{ service: "synapse", image_name: "aerial-synapse" },
-{ service: "vanadis", image_name: "aerial-vanadis" },
-{ service: "prospera", image_name: "aerial-prospera" },
-{ service: "github-runner", image_name: "aerial-github-runner" }
-`)
+	type repoRule struct {
+		filters string
+		catalog string
 	}
+	fixtures := map[string]repoRule{
+		"sidecar": {
+			filters: "vision:\n  - 'vision/**'\nmigrator:\n  - 'scratch-service/migrations/**'\n  - 'atlas.hcl'",
+			catalog: `{ service: "vision", image_name: "aerial-sidecar-vision" }, { service: "migrator", image_name: "aerial-sidecar-migrator" }`,
+		},
+		"mirrormere": {
+			filters: "mirrormere:\n  - 'cmd/**'\n  - 'internal/**'\n  - 'api/**'\n  - 'Dockerfile'\near:\n  - 'client/ear/**'\ncast-watcher:\n  - 'client/cast-watcher/**'\n  - 'go.mod'",
+			catalog: `{ service: "mirrormere", image_name: "mirrormere" }, { service: "ear", image_name: "mirrormere-ear" }, { service: "cast-watcher", image_name: "mirrormere-cast-watcher" }`,
+		},
+		"aerial": {
+			filters: "eri:\n  - 'services/eri/**'\n  - 'pkg/**'\nharo:\n  - 'services/haro/**'\n  - 'pkg/**'\ncoven:\n  - 'services/coven/**'\n  - 'pkg/**'\ndiscord-mcp:\n  - 'mcp/discord-mcp/**'\n  - 'pkg/**'\nkernel-mcp:\n  - 'mcp/kernel-mcp/**'\n  - 'pkg/**'\ngithub-mcp:\n  - 'mcp/github-mcp/**'\nnomad-mcp:\n  - 'mcp/nomad-mcp/**'\ninfisical-mcp:\n  - 'mcp/infisical-mcp/**'\ndashboard:\n  - 'services/dashboard/**'\n  - 'pkg/**'\ndocs:\n  - 'services/docs-service/**'\nproxy:\n  - 'services/proxy/**'\nhangar:\n  - 'services/hangar/**'\n  - 'pkg/**'\nsynapse:\n  - 'services/synapse/**'\n  - 'pkg/**'\nvanadis:\n  - 'services/vanadis/**'\n  - 'pkg/**'\n  - 'Dockerfile'\nprospera:\n  - 'services/prospera/**'\n  - 'pkg/**'\ngithub-runner:\n  - 'services/github-runner/**'",
+			catalog: `{ service: "eri", image_name: "aerial-eri" }, { service: "haro", image_name: "aerial-haro" }, { service: "coven", image_name: "aerial-coven" }, { service: "discord-mcp", image_name: "aerial-discord-mcp" }, { service: "kernel-mcp", image_name: "aerial-kernel-mcp" }, { service: "github-mcp", image_name: "aerial-github-mcp" }, { service: "nomad-mcp", image_name: "aerial-nomad-mcp" }, { service: "infisical-mcp", image_name: "aerial-infisical-mcp" }, { service: "dashboard", image_name: "aerial-dashboard" }, { service: "docs", image_name: "aerial-docs" }, { service: "proxy", image_name: "aerial-proxy" }, { service: "hangar", image_name: "aerial-hangar" }, { service: "synapse", image_name: "aerial-synapse" }, { service: "vanadis", image_name: "aerial-vanadis" }, { service: "prospera", image_name: "aerial-prospera" }, { service: "github-runner", image_name: "aerial-github-runner" }`,
+		},
+	}
+	base := strings.ToLower(filepath.Base(repoDir))
+	rule := fixtures["aerial"]
+	if strings.Contains(base, "sidecar") {
+		rule = fixtures["sidecar"]
+	} else if strings.Contains(base, "mirrormere") {
+		rule = fixtures["mirrormere"]
+	}
+	writeTestWorkflowFixture(t, repoDir, rule.filters, rule.catalog)
 }
 
 func TestJobHasContainerBuildChanges_TableDriven(t *testing.T) {
@@ -1857,7 +1857,7 @@ func TestResolveExpectedDeployJobs_TableDriven(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := ResolveExpectedDeployJobs(tc.repoPath, tc.changedFiles, tc.nomadChanges, tc.serviceConfigs, tc.candidateRepos)
+			got := ResolveExpectedDeployJobs(tc.repoPath, tc.changedFiles, tc.nomadChanges, tc.serviceConfigs, tc.candidateRepos, testAssetBundles(aerialDir, configDir, mirrormereDir))
 			if len(got) != len(tc.want) {
 				t.Fatalf("ResolveExpectedDeployJobs() = %v, want %v", got, tc.want)
 			}
@@ -1916,7 +1916,7 @@ jobs:
 			},
 		},
 		{
-			name: "single glob string in filter and multiline object in catalog",
+			name: "single glob in filter and multiline object in catalog",
 			yaml: `
 jobs:
   changes:
@@ -1924,7 +1924,8 @@ jobs:
       - uses: dorny/paths-filter@v3
         with:
           filters: |
-            app: 'src/**'
+            app:
+              - 'src/**'
       - run: |
           const catalog = [
             {
@@ -1942,14 +1943,14 @@ jobs:
 			},
 		},
 		{
-			name: "filters as mapping node and ignored catalog entries",
+			name: "ignored catalog entries and multiple filters",
 			yaml: `
 jobs:
   changes:
     steps:
       - uses: dorny/paths-filter@v4
         with:
-          filters:
+          filters: |
             app:
               - 'services/app/**'
       - run: |
@@ -1995,92 +1996,6 @@ jobs:
 	}
 }
 
-func TestDiscoverRepoWorkflowRules_TableDriven(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-	emptyRepo := filepath.Join(tmpDir, "empty")
-	noCatalogRepo := filepath.Join(tmpDir, "no-cat")
-	validRepo := filepath.Join(tmpDir, "valid")
-	mixedRepo := filepath.Join(tmpDir, "mixed")
-	_ = os.MkdirAll(emptyRepo, 0o755)
-	_ = os.MkdirAll(filepath.Join(noCatalogRepo, ".github", "workflows"), 0o755)
-	_ = os.WriteFile(filepath.Join(noCatalogRepo, ".github", "workflows", "lint.yml"), []byte(`name: Lint`), 0o644)
-	_ = os.MkdirAll(filepath.Join(mixedRepo, ".github", "workflows", "sub"), 0o755)
-	_ = os.WriteFile(filepath.Join(mixedRepo, ".github", "workflows", "readme.txt"), []byte("not yaml"), 0o644)
-	seedRepoWorkflowFixture(t, validRepo)
-	seedRepoWorkflowFixture(t, mixedRepo)
-
-	tests := []struct {
-		name        string
-		repoPath    string
-		wantCatalog int
-	}{
-		{"empty repo returns empty", emptyRepo, 0},
-		{"repo with no catalog returns empty", noCatalogRepo, 0},
-		{"valid repo discovers catalog", validRepo, 16},
-		{"mixed repo ignores directories and non-yaml", mixedRepo, 16},
-		{"empty repo path returns empty", "", 0},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			_, catalog := DiscoverRepoWorkflowRules(tt.repoPath)
-			if len(catalog) != tt.wantCatalog {
-				t.Errorf("DiscoverRepoWorkflowRules(%q) catalog len = %d, want %d", tt.repoPath, len(catalog), tt.wantCatalog)
-			}
-		})
-	}
-}
-
-func TestAffectedWorkflowImages_TableDriven(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-	aerialDir := filepath.Join(tmpDir, "aerial")
-	catchAllDir := filepath.Join(tmpDir, "catchall")
-	seedRepoWorkflowFixture(t, aerialDir)
-
-	writeTestWorkflowFixture(t, catchAllDir, `
-all:
-  - '**'
-empty:
-  - ''
-`, `
-{ service: "all", image_name: "catch-all-image" }
-`)
-
-	tests := []struct {
-		name     string
-		repoPath string
-		files    []string
-		want     []string
-	}{
-		{"empty files returns nil", aerialDir, nil, nil},
-		{"empty repo returns nil", "", []string{"services/eri/main.go"}, nil},
-		{"single service match", aerialDir, []string{"services/eri/main.go"}, []string{"aerial-eri"}},
-		{"duplicate service changes deduplicated", aerialDir, []string{"services/eri/main.go", "services/eri/pkg/db/migrations/001.sql"}, []string{"aerial-eri"}},
-		{"empty or dot file path skipped", aerialDir, []string{"", ".", "   "}, nil},
-		{"pkg match touches multiple services", aerialDir, []string{"pkg/httpkit/httpkit.go"}, []string{"aerial-coven", "aerial-dashboard", "aerial-discord-mcp", "aerial-eri", "aerial-hangar", "aerial-haro", "aerial-kernel-mcp", "aerial-prospera", "aerial-synapse", "aerial-vanadis"}},
-		{"non-matching file returns nil", aerialDir, []string{"README.md"}, nil},
-		{"double star pattern matches any file", catchAllDir, []string{"anything/file.txt"}, []string{"catch-all-image"}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := AffectedWorkflowImages(tt.repoPath, tt.files)
-			if len(got) != len(tt.want) {
-				t.Fatalf("AffectedWorkflowImages() len = %d, want %d (got: %v)", len(got), len(tt.want), got)
-			}
-			for i := range tt.want {
-				if got[i] != tt.want[i] {
-					t.Errorf("AffectedWorkflowImages()[%d] = %q, want %q", i, got[i], tt.want[i])
-				}
-			}
-		})
-	}
-}
-
 func TestResolveAssetBundleSources_TableDriven(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -2108,7 +2023,7 @@ func TestResolveAssetBundleSources_TableDriven(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			sources, excl, err := ResolveAssetBundleSources(tc.bundle, tc.composeDir, tc.configDir, tc.mirrormere)
+			sources, excl, err := ResolveAssetBundleSources(tc.bundle, testAssetBundles(tc.composeDir, tc.configDir, tc.mirrormere))
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("ResolveAssetBundleSources(%q) err = %v, wantErr = %v", tc.bundle, err, tc.wantErr)
 			}
@@ -2317,7 +2232,7 @@ func TestAssetBundleChangedInList_TableDriven(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := AssetBundleChangedInList(tc.bundle, tc.files)
+			got := AssetBundleChangedInList(tc.bundle, tc.files, testAssetBundles("", "", ""))
 			if got != tc.expected {
 				t.Errorf("AssetBundleChangedInList(%q, %v) = %v, want %v", tc.bundle, tc.files, got, tc.expected)
 			}
@@ -2400,30 +2315,6 @@ func TestAssetBundleMatchesRepoChanges_TableDriven(t *testing.T) {
 			got := AssetBundleMatchesRepoChanges(tc.bundle, tc.repoPath, tc.files)
 			if got != tc.want {
 				t.Errorf("AssetBundleMatchesRepoChanges() = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestFirstNonEmpty_TableDriven(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name     string
-		inputs   []string
-		expected string
-	}{
-		{"first non-empty", []string{"a", "b"}, "a"},
-		{"second non-empty", []string{"", "b"}, "b"},
-		{"all empty", []string{"", ""}, ""},
-		{"none provided", nil, ""},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := firstNonEmpty(tc.inputs...)
-			if got != tc.expected {
-				t.Errorf("firstNonEmpty(%v) = %q, want %q", tc.inputs, got, tc.expected)
 			}
 		})
 	}

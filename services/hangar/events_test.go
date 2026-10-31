@@ -46,9 +46,11 @@ func newPushEventTestEnv(t *testing.T, opts ...func(*DaemonConfig)) *pushEventTe
 	evtCh := make(chan HangarDeployEvent, 50)
 
 	cfg := DaemonConfig{
-		Repos:      repos,
-		ComposeDir: aerialDir,
-		ConfigDir:  aerialConfigDir,
+		Repos:          repos,
+		ComposeDir:     aerialDir,
+		ConfigDir:      aerialConfigDir,
+		ServiceConfigs: testServiceConfigs(),
+		AssetBundles:   testAssetBundles(aerialDir, aerialConfigDir, mirrormereDir),
 		DeployDispatcher: func(ctx context.Context, evt HangarDeployEvent) error {
 			select {
 			case evtCh <- evt:

@@ -105,70 +105,33 @@ func ParseWorkflowBuildRules(workflowYAML []byte) (filters map[string][]string, 
 		}
 	}
 
-	// 2. Extract dorny/paths-filter: unmarshal workflow YAML via yaml.v3
-	var root yaml.Node
-	if err := yaml.Unmarshal(workflowYAML, &root); err == nil {
-		parseFiltersFromNode(&root, filters)
+	// 2. Extract dorny/paths-filter via direct struct unmarshaling
+	var parsed struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				With struct {
+					Filters string `yaml:"filters"`
+				} `yaml:"with"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(workflowYAML, &parsed); err == nil {
+		for _, job := range parsed.Jobs {
+			for _, step := range job.Steps {
+				if strings.TrimSpace(step.With.Filters) == "" {
+					continue
+				}
+				var stepFilters map[string][]string
+				if err := yaml.Unmarshal([]byte(step.With.Filters), &stepFilters); err == nil {
+					for k, v := range stepFilters {
+						filters[k] = v
+					}
+				}
+			}
+		}
 	}
 
 	return filters, catalog
-}
-
-func parseFiltersFromNode(node *yaml.Node, filters map[string][]string) {
-	if node == nil {
-		return
-	}
-	if node.Kind == yaml.MappingNode {
-		for i := 0; i < len(node.Content)-1; i += 2 {
-			k := node.Content[i]
-			v := node.Content[i+1]
-			if k.Value == "filters" {
-				if v.Kind == yaml.ScalarNode {
-					var sub yaml.Node
-					if err := yaml.Unmarshal([]byte(v.Value), &sub); err == nil {
-						extractFiltersMapping(&sub, filters)
-					}
-				} else if v.Kind == yaml.MappingNode {
-					extractFiltersMapping(v, filters)
-				}
-			}
-		}
-	}
-	for _, child := range node.Content {
-		parseFiltersFromNode(child, filters)
-	}
-}
-
-func extractFiltersMapping(node *yaml.Node, filters map[string][]string) {
-	if node == nil {
-		return
-	}
-	if node.Kind == yaml.DocumentNode && len(node.Content) > 0 {
-		node = node.Content[0]
-	}
-	if node.Kind != yaml.MappingNode {
-		return
-	}
-	for i := 0; i < len(node.Content)-1; i += 2 {
-		svc := node.Content[i].Value
-		valNode := node.Content[i+1]
-		var globs []string
-		switch valNode.Kind {
-		case yaml.SequenceNode:
-			for _, item := range valNode.Content {
-				if item.Value != "" {
-					globs = append(globs, item.Value)
-				}
-			}
-		case yaml.ScalarNode:
-			if valNode.Value != "" {
-				globs = append(globs, valNode.Value)
-			}
-		}
-		if len(globs) > 0 {
-			filters[svc] = globs
-		}
-	}
 }
 
 // DiscoverRepoWorkflowRules reads .github/workflows/*.yml and *.yaml inside repoPath and merges discovered filters and catalog maps.
@@ -288,69 +251,10 @@ func HasContainerBuildChanges(repoPath string, changedFiles []string) bool {
 	return len(AffectedWorkflowImages(repoPath, changedFiles)) > 0
 }
 
-// DefaultAssetBundles returns the default built-in asset bundle configurations.
-func DefaultAssetBundles(composeDir, configDir, mirrormereDir string) []AssetBundleConfig {
-	return []AssetBundleConfig{
-		{
-			Name:       "migrations",
-			TriggerJob: "nomad/jobs/db-migrate.nomad",
-			Sources: map[string]string{
-				".": filepath.Join(composeDir, "services/eri/pkg/db/migrations"),
-			},
-		},
-		{
-			Name:     "dashboard",
-			NomadVar: "nomad/jobs/dashboard",
-			Sources: map[string]string{
-				".": filepath.Join(composeDir, "services/dashboard/static"),
-			},
-		},
-		{
-			Name:     "docs",
-			NomadVar: "nomad/jobs/docs",
-			Sources: map[string]string{
-				"app":     filepath.Join(composeDir, "services/docs-service/app"),
-				"content": filepath.Join(configDir, "docs"),
-			},
-		},
-		{
-			Name:     "grafana",
-			NomadVar: "nomad/jobs/grafana",
-			Sources: map[string]string{
-				"system": filepath.Join(composeDir, "nomad/grafana/dashboards"),
-				"custom": filepath.Join(configDir, "services/grafana/dashboards"),
-			},
-		},
-		{
-			Name:     "homepage",
-			NomadVar: "nomad/jobs/homepage",
-			Excludes: []string{"core-homepage/test"},
-			Sources: map[string]string{
-				"core-homepage": filepath.Join(composeDir, "services/homepage"),
-				"user-homepage": filepath.Join(configDir, "homepage"),
-			},
-		},
-		{
-			Name:     "mirrormere",
-			NomadVar: "nomad/jobs/mirrormere-core",
-			Sources: map[string]string{
-				"web":     filepath.Join(mirrormereDir, "web"),
-				"widgets": filepath.Join(mirrormereDir, "widgets"),
-			},
-		},
-	}
-}
-
 // ResolveAssetBundleSources maps a bundle name ("migrations", "dashboard", "docs", "grafana", "homepage", "mirrormere")
 // to its prefix->sourceDir map and excluded relative paths.
-func ResolveAssetBundleSources(bundle, composeDir, configDir, mirrormereDir string, configured ...[]AssetBundleConfig) (map[string]string, []string, error) {
+func ResolveAssetBundleSources(bundle string, bundles []AssetBundleConfig) (map[string]string, []string, error) {
 	b := strings.Trim(strings.TrimSuffix(strings.Trim(filepath.ToSlash(bundle), "/"), ".tar.gz"), "/")
-	var bundles []AssetBundleConfig
-	if len(configured) > 0 && len(configured[0]) > 0 {
-		bundles = configured[0]
-	} else {
-		bundles = DefaultAssetBundles(composeDir, configDir, mirrormereDir)
-	}
 	for _, cfg := range bundles {
 		if strings.EqualFold(cfg.Name, b) {
 			return cfg.Sources, cfg.Excludes, nil
@@ -562,10 +466,8 @@ func AssetBundleMatchesRepoChanges(bundle AssetBundleConfig, repoPath string, ch
 func AssetBundleChangedInList(bundle string, changedFiles []string, configured ...[]AssetBundleConfig) bool {
 	b := strings.Trim(strings.TrimSuffix(strings.ToLower(strings.TrimSpace(bundle)), ".tar.gz"), "/")
 	var bundles []AssetBundleConfig
-	if len(configured) > 0 && len(configured[0]) > 0 {
+	if len(configured) > 0 {
 		bundles = configured[0]
-	} else {
-		bundles = DefaultAssetBundles("", "", "")
 	}
 	for _, cfg := range bundles {
 		if strings.EqualFold(cfg.Name, b) {
@@ -862,10 +764,8 @@ func ResolveExpectedDeployJobs(
 	cleanRepo := filepath.ToSlash(strings.ToLower(filepath.Clean(repoPath)))
 
 	var bundles []AssetBundleConfig
-	if len(assetBundles) > 0 && len(assetBundles[0]) > 0 {
+	if len(assetBundles) > 0 {
 		bundles = assetBundles[0]
-	} else {
-		bundles = DefaultAssetBundles(repoPath, repoPath, repoPath)
 	}
 
 	var configDir string

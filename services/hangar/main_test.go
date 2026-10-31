@@ -992,9 +992,10 @@ func TestHandleArtifactBundle_TableDriven(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(mirrormereDir, "widgets", "clock.js"), []byte("// clock"), 0o644)
 
 	d := &SyncDaemon{
-		composeDir: composeDir,
-		configDir:  configDir,
-		repos:      []string{composeDir, configDir},
+		composeDir:   composeDir,
+		configDir:    configDir,
+		repos:        []string{composeDir, configDir},
+		assetBundles: testAssetBundles(composeDir, configDir, mirrormereDir),
 	}
 	handler := SetupMux(d)
 
