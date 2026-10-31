@@ -67,7 +67,7 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "count(count by (name) (label_replace(container_last_seen{name!=\"\"} > (time() - 30), \"name\", \"$1\", \"name\", \"^(.+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$\")))",
+          "expr": "count(count by (name) (label_replace(container_last_seen{name!=\"\", instance=~\"$node\"} > (time() - 30), \"name\", \"$1\", \"name\", \"^(.+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$\")))",
           "refId": "A"
         }
       ],
@@ -129,7 +129,7 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "sum(rate(container_cpu_usage_seconds_total{name!=\"\"}[1m])) * 100",
+          "expr": "sum(rate(container_cpu_usage_seconds_total{name!=\"\", instance=~\"$node\"}[1m])) * 100",
           "refId": "A"
         }
       ],
@@ -183,7 +183,7 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "sum(container_memory_working_set_bytes{name!=\"\"})",
+          "expr": "sum(container_memory_working_set_bytes{name!=\"\", instance=~\"$node\"})",
           "refId": "A"
         }
       ],
@@ -237,7 +237,7 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "sum(rate(container_network_receive_bytes_total[1m])) + sum(rate(container_network_transmit_bytes_total[1m]))",
+          "expr": "sum(rate(container_network_receive_bytes_total{instance=~\"$node\"}[1m])) + sum(rate(container_network_transmit_bytes_total{instance=~\"$node\"}[1m]))",
           "refId": "A"
         }
       ],
@@ -329,17 +329,17 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "count(count by (name) (label_replace(container_last_seen{name!=\"\"} > (time() - 30), \"name\", \"$1\", \"name\", \"^(.+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$\")))",
+          "expr": "count(count by (name) (label_replace(container_last_seen{name!=\"\", instance=~\"$node\"} > (time() - 30), \"name\", \"$1\", \"name\", \"^(.+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$\")))",
           "legendFormat": "Total Running",
           "refId": "A"
         },
         {
-          "expr": "count(count by (name) (label_replace(container_last_seen{name=~\"aerial-.*\"} > (time() - 30), \"name\", \"$1\", \"name\", \"^(.+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$\")))",
+          "expr": "count(count by (name) (label_replace(container_last_seen{name=~\"aerial-.*\", instance=~\"$node\"} > (time() - 30), \"name\", \"$1\", \"name\", \"^(.+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$\")))",
           "legendFormat": "Aerial Stack",
           "refId": "B"
         },
         {
-          "expr": "count(count by (name) (label_replace(container_last_seen{name!=\"\", name!~\"aerial-.*\"} > (time() - 30), \"name\", \"$1\", \"name\", \"^(.+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$\")))",
+          "expr": "count(count by (name) (label_replace(container_last_seen{name!=\"\", name!~\"aerial-.*\", instance=~\"$node\"} > (time() - 30), \"name\", \"$1\", \"name\", \"^(.+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$\")))",
           "legendFormat": "Other Containers",
           "refId": "C"
         }
@@ -409,7 +409,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (name) (label_replace(rate(container_cpu_usage_seconds_total{name=~\"^($container)(-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$\", name!=\"\"}[1m]), \"name\", \"$1\", \"name\", \"^(.+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$\")) * 100",
+          "expr": "sum by (name) (label_replace(rate(container_cpu_usage_seconds_total{name=~\"^($container)(-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$\", name!=\"\", instance=~\"$node\"}[1m]), \"name\", \"$1\", \"name\", \"^(.+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$\")) * 100",
           "legendFormat": "{{name}}",
           "refId": "A"
         }
@@ -467,7 +467,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (name) (label_replace(container_memory_working_set_bytes{name=~\"^($container)(-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$\", name!=\"\"}, \"name\", \"$1\", \"name\", \"^(.+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$\"))",
+          "expr": "sum by (name) (label_replace(container_memory_working_set_bytes{name=~\"^($container)(-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$\", name!=\"\", instance=~\"$node\"}, \"name\", \"$1\", \"name\", \"^(.+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$\"))",
           "legendFormat": "{{name}}",
           "refId": "A"
         }
@@ -530,12 +530,12 @@
       },
       "targets": [
         {
-          "expr": "sum by (name) (label_replace(rate(container_network_receive_bytes_total{name=~\"^($container)(-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$\", name!=\"\"}[1m]), \"name\", \"$1\", \"name\", \"^(.+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$\"))",
+          "expr": "sum by (name) (label_replace(rate(container_network_receive_bytes_total{name=~\"^($container)(-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$\", name!=\"\", instance=~\"$node\"}[1m]), \"name\", \"$1\", \"name\", \"^(.+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$\"))",
           "legendFormat": "{{name}} (RX)",
           "refId": "A"
         },
         {
-          "expr": "sum by (name) (label_replace(rate(container_network_transmit_bytes_total{name=~\"^($container)(-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$\", name!=\"\"}[1m]), \"name\", \"$1\", \"name\", \"^(.+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$\"))",
+          "expr": "sum by (name) (label_replace(rate(container_network_transmit_bytes_total{name=~\"^($container)(-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$\", name!=\"\", instance=~\"$node\"}[1m]), \"name\", \"$1\", \"name\", \"^(.+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$\"))",
           "legendFormat": "{{name}} (TX)",
           "refId": "B"
         }
@@ -586,12 +586,12 @@
       },
       "targets": [
         {
-          "expr": "sum by (name) (label_replace(rate(container_cpu_cfs_throttled_periods_total{name=~\"^($container)(-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?$\", name!=\"\"}[1m]), \"name\", \"$1\", \"name\", \"^(.+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$\"))",
-          "legendFormat": "{{name}} throttled/s",
+          "expr": "sum by (node, exported_job, task) (nomad_client_allocs_cpu_throttled_periods{node=~\"$node\", task=~\"$container\"})",
+          "legendFormat": "{{node}}: {{exported_job}}/{{task}}",
           "refId": "A"
         }
       ],
-      "title": "CPU CFS Throttled Periods / Sec",
+      "title": "Nomad Allocation CPU Throttled Periods",
       "type": "timeseries"
     }
   ],
@@ -604,6 +604,27 @@
   ],
   "templating": {
     "list": [
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "VictoriaMetrics"
+        },
+        "definition": "label_values(container_last_seen{name!=\"\"}, instance)",
+        "hide": 0,
+        "includeAll": true,
+        "multi": true,
+        "name": "node",
+        "query": "label_values(container_last_seen{name!=\"\"}, instance)",
+        "refresh": 1,
+        "sort": 1,
+        "type": "query"
+      },
       {
         "allValue": ".*",
         "current": {

@@ -76,8 +76,9 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "(1 - avg(rate(node_cpu_seconds_total{mode=\"idle\"}[1m]))) * 100",
-          "refId": "A"
+          "expr": "(1 - avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\", instance=~\"$node\"}[1m]))) * 100",
+          "refId": "A",
+          "legendFormat": "{{instance}}"
         }
       ],
       "title": "Host CPU Usage",
@@ -138,8 +139,9 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100",
-          "refId": "A"
+          "expr": "(1 - (node_memory_MemAvailable_bytes{instance=~\"$node\"} / node_memory_MemTotal_bytes{instance=~\"$node\"})) * 100",
+          "refId": "A",
+          "legendFormat": "{{instance}}"
         }
       ],
       "title": "Host RAM Usage",
@@ -200,8 +202,9 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "max(node_hwmon_temp_celsius) or max(node_thermal_zone_temp) or vector(45)",
-          "refId": "A"
+          "expr": "max by (instance) (node_hwmon_temp_celsius{instance=~\"$node\"}) or max by (instance) (node_thermal_zone_temp{instance=~\"$node\"})",
+          "refId": "A",
+          "legendFormat": "{{instance}}"
         }
       ],
       "title": "CPU Peak Temp",
@@ -262,8 +265,9 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "(1 - (node_filesystem_avail_bytes{mountpoint=\"/rootfs\"} / node_filesystem_size_bytes{mountpoint=\"/rootfs\"})) * 100 or (1 - (node_filesystem_avail_bytes{mountpoint=\"/\"} / node_filesystem_size_bytes{mountpoint=\"/\"}) ) * 100",
-          "refId": "A"
+          "expr": "max by (instance) ((1 - (node_filesystem_avail_bytes{mountpoint=~\"/rootfs|/mnt/data|/\", fstype!~\"tmpfs|overlay\", instance=~\"$node\"} / node_filesystem_size_bytes{mountpoint=~\"/rootfs|/mnt/data|/\", fstype!~\"tmpfs|overlay\", instance=~\"$node\"})) * 100)",
+          "refId": "A",
+          "legendFormat": "{{instance}}"
         }
       ],
       "title": "Root Disk Space",
@@ -316,8 +320,9 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "time() - node_boot_time_seconds",
-          "refId": "A"
+          "expr": "time() - node_boot_time_seconds{instance=~\"$node\"}",
+          "refId": "A",
+          "legendFormat": "{{instance}}"
         }
       ],
       "title": "Host Uptime",
@@ -383,8 +388,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (mode) (rate(node_cpu_seconds_total{mode!=\"idle\"}[1m])) * 100",
-          "legendFormat": "{{mode}}",
+          "expr": "sum by (instance, mode) (rate(node_cpu_seconds_total{mode!=\"idle\", instance=~\"$node\"}[1m])) * 100",
+          "legendFormat": "{{instance}} - {{mode}}",
           "refId": "A"
         }
       ],
@@ -434,18 +439,18 @@
       },
       "targets": [
         {
-          "expr": "node_load1",
-          "legendFormat": "Load 1m",
+          "expr": "node_load1{instance=~\"$node\"}",
+          "legendFormat": "{{instance}} - Load 1m",
           "refId": "A"
         },
         {
-          "expr": "node_load5",
-          "legendFormat": "Load 5m",
+          "expr": "node_load5{instance=~\"$node\"}",
+          "legendFormat": "{{instance}} - Load 5m",
           "refId": "B"
         },
         {
-          "expr": "node_load15",
-          "legendFormat": "Load 15m",
+          "expr": "node_load15{instance=~\"$node\"}",
+          "legendFormat": "{{instance}} - Load 15m",
           "refId": "C"
         }
       ],
@@ -507,8 +512,8 @@
       },
       "targets": [
         {
-          "expr": "node_hwmon_temp_celsius",
-          "legendFormat": "{{sensor}} ({{chip}})",
+          "expr": "node_hwmon_temp_celsius{instance=~\"$node\"}",
+          "legendFormat": "{{instance}}: {{sensor}} ({{chip}})",
           "refId": "A"
         }
       ],
@@ -562,18 +567,18 @@
       },
       "targets": [
         {
-          "expr": "node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes",
-          "legendFormat": "Used",
+          "expr": "node_memory_MemTotal_bytes{instance=~\"$node\"} - node_memory_MemAvailable_bytes{instance=~\"$node\"}",
+          "legendFormat": "{{instance}} - Used",
           "refId": "A"
         },
         {
-          "expr": "node_memory_Cached_bytes + node_memory_Buffers_bytes",
-          "legendFormat": "Cached/Buffers",
+          "expr": "node_memory_Cached_bytes{instance=~\"$node\"} + node_memory_Buffers_bytes{instance=~\"$node\"}",
+          "legendFormat": "{{instance}} - Cached/Buffers",
           "refId": "B"
         },
         {
-          "expr": "node_memory_MemAvailable_bytes",
-          "legendFormat": "Available Free",
+          "expr": "node_memory_MemAvailable_bytes{instance=~\"$node\"}",
+          "legendFormat": "{{instance}} - Available Free",
           "refId": "C"
         }
       ],
@@ -590,7 +595,29 @@
     "hardware"
   ],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "VictoriaMetrics"
+        },
+        "definition": "label_values(node_load1, instance)",
+        "hide": 0,
+        "includeAll": true,
+        "multi": true,
+        "name": "node",
+        "query": "label_values(node_load1, instance)",
+        "refresh": 1,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
   },
   "time": {
     "from": "now-1h",
