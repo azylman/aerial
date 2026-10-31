@@ -362,7 +362,7 @@ jobs:
 
   roborev:
     name: roborev
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.actor == 'azylman'
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && (github.actor == 'azylman' || github.actor == 'dependabot[bot]')
     runs-on: [self-hosted, roborev]
     timeout-minutes: 20
     permissions:
@@ -381,8 +381,13 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -o pipefail
+          if [ "${GITHUB_ACTOR:-}" = "dependabot[bot]" ] || [ "${PR_AUTHOR:-}" = "dependabot[bot]" ]; then
+            echo "Dependabot PR detected; skipping RoboRev LLM review gate."
+            exit 0
+          fi
           if ! git cat-file -e origin/main:.roborev.toml 2>/dev/null || ! (git cat-file -e origin/main:nomad/jobs/github-runner.nomad 2>/dev/null || git cat-file -e origin/main:nomad/jobs/roborev-runner.nomad 2>/dev/null); then
             echo "RoboRev not bootstrapped on main; skipping."
             exit 0

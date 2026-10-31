@@ -1,0 +1,39 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "saturday"
+      time: "06:00"
+      timezone: "America/Los_Angeles"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "gomod"
+    directories:
+      - "/pkg"
+      - "/scripts/code-health"
+      - "/mcp/discord-mcp"
+      - "/mcp/kernel-mcp"
+      - "/services/coven"
+      - "/services/dashboard"
+      - "/services/eri"
+      - "/services/hangar"
+      - "/services/haro"
+      - "/services/prospera"
+      - "/services/vanadis"
+      - "/services/webhooks-router"
+    schedule:
+      interval: "weekly"
+      day: "saturday"
+      time: "06:00"
+      timezone: "America/Los_Angeles"
+    groups:
+      go-dependencies:
+        patterns:
+          - "*"
+    ignore:
+      - dependency-name: "github.com/azylman/aerial/*"
