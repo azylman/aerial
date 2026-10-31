@@ -934,6 +934,7 @@ func SetupMux(server *VanadisServer) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", promhttp.Handler())
 	coverageFlush := httpkit.HandleCoverageFlush("vanadis")
+	mcpHandler := server.newMCPHandler()
 	for p, h := range map[string]http.HandlerFunc{
 		"GET /health": server.handleHealth, "GET /healthz": server.handleHealth,
 		"GET /builds": server.handleListBuilds, "GET /runs": server.handleListBuilds,
@@ -945,6 +946,8 @@ func SetupMux(server *VanadisServer) *http.ServeMux {
 		"/chunks/fail-pr":            server.handleFailChunkPR,
 		"/chunks/sync-pr-widget":     server.handleSyncPRWidget,
 		"/chunks/":                   server.handleChunkByID,
+		"/mcp":                       mcpHandler,
+		"/sse":                       mcpHandler,
 		"POST /debug/coverage/flush": coverageFlush, "GET /debug/coverage/flush": coverageFlush,
 	} {
 		mux.HandleFunc(p, h)
