@@ -250,7 +250,7 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "sum(rate(aerial_brain_runner_errors_total[5m])) * 60",
+          "expr": "sum(rate(aerial_brain_runner_errors_total[5m])) * 60 or vector(0)",
           "refId": "A"
         }
       ],
@@ -339,11 +339,11 @@
               },
               {
                 "color": "yellow",
-                "value": 10
+                "value": 8
               },
               {
                 "color": "red",
-                "value": 20
+                "value": 16
               }
             ]
           },
@@ -374,11 +374,12 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "aerial_brain_db_in_use_connections",
-          "refId": "A"
+          "expr": "aerial_brain_daemons_active",
+          "refId": "A",
+          "legendFormat": null
         }
       ],
-      "title": "DB In-Use Conns",
+      "title": "Active AGY Daemons",
       "type": "stat"
     },
     {
@@ -973,8 +974,8 @@
           "refId": "A"
         },
         {
-          "expr": "sum by (event_type) (rate(aerial_brain_discord_events_total[2m]))",
-          "legendFormat": "event={{event_type}}",
+          "expr": "sum by (status) (rate(aerial_brain_discord_threads_created_total[5m]))",
+          "legendFormat": "thread_created={{status}}",
           "refId": "B"
         }
       ],
@@ -1455,19 +1456,26 @@
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(aerial_brain_fact_extraction_duration_seconds_bucket[5m])))",
-          "legendFormat": "Fact Extraction Latency p95 (s)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le, source) (rate(aerial_brain_channel_history_fetch_duration_seconds_bucket[5m])))",
+          "legendFormat": "Channel History Fetch p95 ({{source}})",
+          "range": true,
           "refId": "B"
         },
         {
-          "expr": "sum by (op, status) (rate(aerial_brain_memory_operations_total[2m]))",
-          "legendFormat": "Memory Op: {{op}} ({{status}})",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "sum by (model, type, status) (rate(aerial_brain_embeddings_generated_total[5m]))",
+          "legendFormat": "Embeddings: {{model}} {{type}} ({{status}})",
+          "range": true,
           "refId": "C"
-        },
-        {
-          "expr": "sum by (status) (rate(aerial_brain_facts_extracted_total[2m]))",
-          "legendFormat": "Facts Extracted ({{status}})",
-          "refId": "D"
         }
       ],
       "title": "Memory Operations & Search Latencies",
@@ -1482,7 +1490,7 @@
         "y": 48
       },
       "id": 23,
-      "title": "\ud83d\uddc4\ufe0f PostgreSQL Database Pool & Query Performance",
+      "title": "\ud83d\uddc4\ufe0f Persistent Daemons, Session Lifecycle & DB Query Latency",
       "type": "row"
     },
     {
@@ -1565,32 +1573,51 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "aerial_brain_db_open_connections",
-          "legendFormat": "Open Connections",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "aerial_brain_daemons_active",
+          "legendFormat": "Active AGY Daemons",
+          "range": true,
           "refId": "A"
         },
         {
-          "expr": "aerial_brain_db_in_use_connections",
-          "legendFormat": "In-Use Connections",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "aerial_brain_daemon_memory_bytes / 1048576",
+          "legendFormat": "Daemon RSS Memory (MiB)",
+          "range": true,
           "refId": "B"
         },
         {
-          "expr": "aerial_brain_db_idle_connections",
-          "legendFormat": "Idle Connections",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "sum by (reason) (rate(aerial_brain_session_rotations_total[5m])) * 60",
+          "legendFormat": "Rotations/min ({{reason}})",
+          "range": true,
           "refId": "C"
         },
         {
-          "expr": "rate(aerial_brain_db_wait_count_total[2m])",
-          "legendFormat": "Wait Count / sec",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "aerial_brain_task_timeouts_total",
+          "legendFormat": "Task Timeouts",
+          "range": true,
           "refId": "D"
-        },
-        {
-          "expr": "rate(aerial_brain_db_wait_duration_seconds_total[2m])",
-          "legendFormat": "Wait Duration / sec",
-          "refId": "E"
         }
       ],
-      "title": "Database Connection Pool Status",
+      "title": "Persistent AGY Daemons & Session Rotations",
       "type": "timeseries"
     },
     {
@@ -1690,7 +1717,7 @@
         "y": 57
       },
       "id": 26,
-      "title": "\ud83c\udf10 HTTP Ingress, Scheduler & Resiliency Fallbacks",
+      "title": "\ud83c\udf10 HTTP Ingress, Lifecycle Webhooks & Context Bootstrapping",
       "type": "row"
     },
     {
@@ -1866,22 +1893,40 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "sum by (schedule_type, status) (rate(aerial_brain_scheduler_executions_total[2m]))",
-          "legendFormat": "Schedule: {{schedule_type}} ({{status}})",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le, hook) (rate(aerial_brain_webhook_duration_seconds_bucket[5m])))",
+          "legendFormat": "Webhook Latency p95: {{hook}} (s)",
+          "range": true,
           "refId": "A"
         },
         {
-          "expr": "sum by (trigger, outcome) (rate(aerial_brain_fallback_notifications_total[2m]))",
-          "legendFormat": "Fallback: {{trigger}} -> {{outcome}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "sum by (hook, status) (rate(aerial_brain_webhooks_dispatched_total[2m]))",
+          "legendFormat": "Webhook: {{hook}} ({{status}})",
+          "range": true,
           "refId": "B"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(aerial_brain_fallback_notification_duration_seconds_bucket[5m])))",
-          "legendFormat": "Fallback Synth Latency p95 (s)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "sum by (source, status) (rate(aerial_brain_channel_history_fetches_total[2m]))",
+          "legendFormat": "History Fetch: {{source}} ({{status}})",
+          "range": true,
           "refId": "C"
         }
       ],
-      "title": "Scheduler Executions & Fallback Notifier Outcomes",
+      "title": "Lifecycle Webhooks & Channel History Bootstrapping",
       "type": "timeseries"
     },
     {
@@ -1893,7 +1938,7 @@
         "y": 66
       },
       "id": 29,
-      "title": "\ud83d\udd04 GitOps Sidecar (Sync & Declarative Compose)",
+      "title": "\ud83d\udd04 Hangar GitOps (Repo Sync, Nomad Reconcile & OCI Registry)",
       "type": "row"
     },
     {
@@ -2074,22 +2119,51 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "histogram_quantile(0.90, sum by (le, status) (rate(aerial_gitsync_compose_duration_seconds_bucket[5m])))",
-          "legendFormat": "Compose Apply Latency p90 (s)",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le, registry) (rate(aerial_hangar_registry_manifest_duration_seconds_bucket[5m])))",
+          "legendFormat": "OCI Registry p95: {{registry}} (s)",
+          "range": true,
           "refId": "A"
         },
         {
-          "expr": "sum by (status) (rate(aerial_gitsync_reconciliations_total[2m]))",
-          "legendFormat": "Reconciliations ({{status}})",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "sum by (status) (rate(aerial_hangar_reconciliations_total[5m])) * 60",
+          "legendFormat": "Nomad Reconciles/min ({{status}})",
+          "range": true,
           "refId": "B"
         },
         {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "sum by (registry, status) (rate(aerial_hangar_registry_manifest_requests_total[5m])) * 60",
+          "legendFormat": "Registry Polls/min: {{registry}} ({{status}})",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
           "expr": "time() - aerial_gitsync_last_sync_timestamp_seconds",
           "legendFormat": "Seconds Since Last Sync ({{repo}})",
-          "refId": "C"
+          "range": true,
+          "refId": "D"
         }
       ],
-      "title": "Docker Compose Reconciliation & Sync Recency",
+      "title": "Nomad Reconciliation, OCI Registry Latency & Sync Recency",
       "type": "timeseries"
     },
     {
@@ -2642,7 +2716,7 @@
         "type": "prometheus",
         "uid": "VictoriaMetrics"
       },
-      "description": "Rolling 10-minute sum of upstream model capacity and quota exhaustion events categorized by reset backoff window.",
+      "description": "Persistent AGY quota remaining fraction over time by group, window, and bucket.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2652,7 +2726,7 @@
             "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
-            "axisLabel": "Events (10m)",
+            "axisLabel": "Remaining Fraction",
             "axisPlacement": "auto",
             "barAlignment": 0,
             "drawStyle": "line",
@@ -2673,7 +2747,7 @@
             "spanNulls": false,
             "stacking": {
               "group": "A",
-              "mode": "normal"
+              "mode": "none"
             },
             "thresholdsStyle": {
               "mode": "off"
@@ -2689,7 +2763,9 @@
               }
             ]
           },
-          "unit": "short"
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
         },
         "overrides": []
       },
@@ -2719,12 +2795,18 @@
       "pluginVersion": "11.1.0",
       "targets": [
         {
-          "expr": "sum by (reset_bucket) (increase(aerial_brain_model_quota_error_events[10m]))",
-          "legendFormat": "Reset: {{reset_bucket}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "max by (group, window, bucket_id) (aerial_brain_usage_quota_remaining_fraction)",
+          "legendFormat": "{{group}} ({{window}})",
+          "range": true,
           "refId": "A"
         }
       ],
-      "title": "Quota Exhaustions by Reset Window",
+      "title": "AGY Quota Remaining Over Time",
       "type": "timeseries"
     },
     {
@@ -2887,18 +2969,128 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "VictoriaMetrics" }, "description": "Remaining AGY quota percentage across 5-hour and weekly model buckets.",
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "max": 1, "min": 0, "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "yellow", "value": 0.15 }, { "color": "green", "value": 0.4 }] }, "unit": "percentunit" }, "overrides": [] },
-      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 105 }, "id": 49, "pluginVersion": "11.1.0", "title": "AGY Quota Remaining (%)", "type": "bargauge",
-      "options": { "displayMode": "gradient", "namePlacement": "auto", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "showUnfilled": true, "sizing": "auto" },
-      "targets": [{ "expr": "max by (group, window, bucket_id) (aerial_brain_usage_quota_remaining_fraction)", "instant": true, "legendFormat": "{{group}} ({{window}})", "refId": "A" }]
+      "datasource": {
+        "type": "prometheus",
+        "uid": "VictoriaMetrics"
+      },
+      "description": "Remaining AGY quota percentage across 5-hour and weekly model buckets.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "max": 1,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.15
+              },
+              {
+                "color": "green",
+                "value": 0.4
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 105
+      },
+      "id": 49,
+      "pluginVersion": "11.1.0",
+      "title": "AGY Quota Remaining (%)",
+      "type": "bargauge",
+      "options": {
+        "displayMode": "gradient",
+        "namePlacement": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showUnfilled": true,
+        "sizing": "auto"
+      },
+      "targets": [
+        {
+          "expr": "max by (group, window, bucket_id) (aerial_brain_usage_quota_remaining_fraction)",
+          "instant": true,
+          "legendFormat": "{{group}} ({{window}})",
+          "refId": "A"
+        }
+      ]
     },
     {
-      "datasource": { "type": "prometheus", "uid": "VictoriaMetrics" }, "description": "Time remaining until each 5-hour and weekly AGY quota window resets.",
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "#9b5de5", "value": null }] }, "unit": "s" }, "overrides": [] },
-      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 105 }, "id": 50, "pluginVersion": "11.1.0", "title": "AGY Quota Reset Countdown", "type": "stat",
-      "options": { "colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "value_and_name" },
-      "targets": [{ "expr": "(max by (group, window, bucket_id) (aerial_brain_usage_quota_reset_timestamp_seconds) - time()) > 0", "instant": true, "legendFormat": "{{group}} ({{window}})", "refId": "A" }]
+      "datasource": {
+        "type": "prometheus",
+        "uid": "VictoriaMetrics"
+      },
+      "description": "Time remaining until each 5-hour and weekly AGY quota window resets.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#9b5de5",
+                "value": null
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 105
+      },
+      "id": 50,
+      "pluginVersion": "11.1.0",
+      "title": "AGY Quota Reset Countdown",
+      "type": "stat",
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "expr": "(max by (group, window, bucket_id) (aerial_brain_usage_quota_reset_timestamp_seconds) - time()) > 0",
+          "instant": true,
+          "legendFormat": "{{group}} ({{window}})",
+          "refId": "A"
+        }
+      ]
     },
     {
       "collapsed": false,
@@ -2909,7 +3101,7 @@
         "y": 113
       },
       "id": 43,
-      "title": "🛠️ Agent Tool & Skill Execution Dynamics",
+      "title": "\ud83d\udee0\ufe0f Agent Tool & Skill Execution Dynamics",
       "type": "row"
     },
     {
@@ -3352,6 +3544,264 @@
       ],
       "title": "Tool Failure Rate (% Errors)",
       "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 130
+      },
+      "id": 60,
+      "panels": [],
+      "title": "\ud83c\udf0a Webhooks Router & River Queue Telemetry",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "VictoriaMetrics"
+      },
+      "description": "River queue depth categorized by state and oldest pending job age.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 15,
+            "gradientMode": "opacity",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 131
+      },
+      "id": 61,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.1.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "sum by (queue, state) (webhooks_router_queue_depth)",
+          "legendFormat": "{{queue}} ({{state}})",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "max by (queue) (webhooks_router_queue_oldest_age_seconds)",
+          "legendFormat": "Oldest Age (s): {{queue}}",
+          "range": true,
+          "refId": "B"
+        }
+      ],
+      "title": "River Queue Depth & Oldest Pending Job Age",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "VictoriaMetrics"
+      },
+      "description": "River worker processing throughput, retries, dropped jobs, and execution duration quantiles.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 15,
+            "gradientMode": "opacity",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "short"
+        }
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 131
+      },
+      "id": 62,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "11.1.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "sum by (kind, status) (rate(webhooks_router_jobs_processed_total[5m])) * 60",
+          "legendFormat": "Processed/min: {{kind}} ({{status}})",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "sum by (kind) (rate(webhooks_router_unique_skipped_total[5m])) * 60",
+          "legendFormat": "Dedup Skipped/min: {{kind}}",
+          "range": true,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "sum by (kind, reason) (rate(webhooks_router_job_retries_total[5m])) * 60",
+          "legendFormat": "Retries/min: {{kind}} ({{reason}})",
+          "range": true,
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "sum by (kind, reason) (rate(webhooks_router_jobs_dropped_total[5m])) * 60",
+          "legendFormat": "Dropped/min: {{kind}} ({{reason}})",
+          "range": true,
+          "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, sum by (le, kind) (rate(webhooks_router_job_duration_seconds_bucket[5m])))",
+          "legendFormat": "Job Duration p95 (s): {{kind}}",
+          "range": true,
+          "refId": "E"
+        }
+      ],
+      "title": "River Worker Throughput, Retries & Dedup Skips",
+      "type": "timeseries"
     }
   ],
   "refresh": "10s",
@@ -3385,8 +3835,8 @@
     ]
   },
   "timezone": "browser",
-  "title": "\u26a1 Aerial Brain & GitSync Operations",
+  "title": "\u26a1 Aerial Brain, Webhooks Router & Hangar Operations",
   "uid": "aerial-core-telemetry",
-  "version": 6,
+  "version": 7,
   "weekStart": ""
 }
