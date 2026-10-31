@@ -2064,8 +2064,10 @@ func TestSQLStore_ConstructorsAndSetters(t *testing.T) {
 		name         string
 		initialURL   string
 		setURL       string
+		setToken     string
 		client       *http.Client
 		wantBrainURL string
+		wantToken    string
 	}{
 		{
 			name:         "DefaultURL",
@@ -2075,14 +2077,18 @@ func TestSQLStore_ConstructorsAndSetters(t *testing.T) {
 		{
 			name:         "CustomURL",
 			initialURL:   "http://my-eri:5000/",
+			setToken:     "test-token",
 			client:       &http.Client{Timeout: 5 * time.Second},
 			wantBrainURL: "http://my-eri:5000",
+			wantToken:    "test-token",
 		},
 		{
 			name:         "SetterWithWhitespace",
 			initialURL:   DefaultBrainURL,
 			setURL:       " http://new-eri:6000/ ",
+			setToken:     "  padded-token  ",
 			wantBrainURL: "http://new-eri:6000",
+			wantToken:    "padded-token",
 		},
 		{
 			name:         "SetterEmptyResetsToDefault",
@@ -2105,12 +2111,85 @@ func TestSQLStore_ConstructorsAndSetters(t *testing.T) {
 				if tc.setURL != "" {
 					store.SetBrainURL(tc.setURL)
 				}
+				if tc.setToken != "" {
+					store.SetBrainToken(tc.setToken)
+				}
 			}
 			if got := store.getBrainURL(); got != tc.wantBrainURL {
 				t.Errorf("getBrainURL() = %q, want %q", got, tc.wantBrainURL)
 			}
+			if store != nil && store.brainToken != tc.wantToken {
+				t.Errorf("brainToken = %q, want %q", store.brainToken, tc.wantToken)
+			}
 			if cl := store.getHTTPClient(); cl == nil {
 				t.Error("getHTTPClient() returned nil")
+			}
+		})
+	}
+}
+
+func TestSQLStore_FetchBrainJSON(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name       string
+		token      string
+		serverCode int
+		serverBody string
+		wantErr    bool
+		wantVal    string
+	}{
+		{
+			name:       "SuccessWithToken",
+			token:      "secret-token",
+			serverCode: http.StatusOK,
+			serverBody: `{"val":"hello"}`,
+			wantErr:    false,
+			wantVal:    "hello",
+		},
+		{
+			name:       "NonOKStatus",
+			serverCode: http.StatusNotFound,
+			serverBody: `not found`,
+			wantErr:    true,
+		},
+		{
+			name:       "InvalidJSON",
+			serverCode: http.StatusOK,
+			serverBody: `{bad json}`,
+			wantErr:    true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotAuthHeader string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotAuthHeader = r.Header.Get("Authorization")
+				w.WriteHeader(tc.serverCode)
+				_, _ = w.Write([]byte(tc.serverBody))
+			}))
+			defer srv.Close()
+
+			store := &SQLStore{
+				brainURL:   srv.URL,
+				httpClient: srv.Client(),
+				brainToken: tc.token,
+			}
+			var dst struct {
+				Val string `json:"val"`
+			}
+			err := store.fetchBrainJSON(ctx, srv.URL+"/test", "test", &dst)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("fetchBrainJSON() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr {
+				if dst.Val != tc.wantVal {
+					t.Errorf("dst.Val = %q, want %q", dst.Val, tc.wantVal)
+				}
+				if tc.token != "" && gotAuthHeader != "Bearer "+tc.token {
+					t.Errorf("got auth = %q, want Bearer %s", gotAuthHeader, tc.token)
+				}
 			}
 		})
 	}
@@ -8245,7 +8324,7 @@ Procedure steps.
 	}
 }
 
-func TestConfig_LoadAndResolve_Chunk4Fields(t *testing.T) {
+func TestConfig_LoadAndResolve_SkillsAndPRRegistryEnvOverrides(t *testing.T) {
 	tmpDir := t.TempDir()
 	yamlPath := filepath.Join(tmpDir, "chunk4.yaml")
 	content := `port: "4008"
