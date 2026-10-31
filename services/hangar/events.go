@@ -169,34 +169,130 @@ func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath str
 	return applied, deferred, nil
 }
 
-// ExecuteGitPushEvent processes an incoming git push webhook event.
-func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRequest) (GitPushEventResponse, int) {
+func validateGitPushRequest(req GitPushEventRequest, repos []string) (string, GitPushEventResponse, int, bool) {
 	if req.Repo == "" {
-		return GitPushEventResponse{
+		return "", GitPushEventResponse{
 			Status:  "error",
 			Message: "missing required field: repo",
-		}, http.StatusBadRequest
+		}, http.StatusBadRequest, true
 	}
 
 	// Filter out non-main branch pushes
 	ref := strings.TrimSpace(req.Ref)
 	if ref != "" && ref != "refs/heads/main" && ref != "main" && !strings.HasSuffix(ref, "/main") {
-		return GitPushEventResponse{
+		return "", GitPushEventResponse{
 			Status:  "ignored",
 			Repo:    req.Repo,
 			Ref:     req.Ref,
 			Commit:  req.Commit,
 			Message: fmt.Sprintf("push to non-main ref %q ignored", req.Ref),
-		}, http.StatusOK
+		}, http.StatusOK, true
 	}
 
-	repoPath := ResolveRepoPath(req.Repo, d.repos)
+	repoPath := ResolveRepoPath(req.Repo, repos)
 	if repoPath == "" {
-		return GitPushEventResponse{
+		return "", GitPushEventResponse{
 			Status:  "error",
 			Repo:    req.Repo,
 			Message: fmt.Sprintf("repository %q is not managed by hangar", req.Repo),
-		}, http.StatusNotFound
+		}, http.StatusNotFound, true
+	}
+	return repoPath, GitPushEventResponse{}, 0, false
+}
+
+func injectTriggerJobBundles(bundleConfigs []AssetBundleConfig, repoPath string, changedFiles []string, nomadChanges []NomadFileChange) []NomadFileChange {
+	for _, bundle := range bundleConfigs {
+		if bundle.TriggerJob != "" && AssetBundleMatchesRepoChanges(bundle, repoPath, changedFiles) {
+			jobName := ExtractJobName("", filepath.Base(bundle.TriggerJob))
+			found := false
+			for _, ch := range nomadChanges {
+				if ch.JobName == jobName {
+					found = true
+					break
+				}
+			}
+			if !found {
+				nomadChanges = append([]NomadFileChange{{
+					Path:    bundle.TriggerJob,
+					Action:  "apply",
+					JobName: jobName,
+				}}, nomadChanges...)
+			}
+		}
+	}
+	return nomadChanges
+}
+
+func (d *SyncDaemon) syncExternalPushBundles(ctx context.Context, repoPath string, changedFiles []string, bundleConfigs []AssetBundleConfig) {
+	if d.configDir == "" {
+		return
+	}
+	var bundleMatched bool
+	var homepageMatched bool
+	for _, b := range bundleConfigs {
+		if AssetBundleMatchesRepoChanges(b, repoPath, changedFiles) {
+			bundleMatched = true
+			if b.Name == "homepage" {
+				homepageMatched = true
+			}
+		}
+	}
+	if !bundleMatched {
+		return
+	}
+	if err := d.SyncAssetBundlesToNomad(ctx, d.configDir, ConfigSyncContext{DiffGated: true, ChangedFiles: changedFiles}); err != nil {
+		log.Printf("[Hangar:GitPush] Notice: SyncAssetBundlesToNomad: %v", err)
+	}
+	if homepageMatched {
+		if err := d.SyncHomepageConfigToNomad(ctx, d.configDir, ConfigSyncContext{DiffGated: true, ChangedFiles: changedFiles}); err != nil {
+			log.Printf("[Hangar:GitPush] Notice: SyncHomepageConfigToNomad: %v", err)
+		}
+	}
+}
+
+func (d *SyncDaemon) applyGitPushNomadChanges(
+	ctx context.Context,
+	repoPath string,
+	nomadChanges []NomadFileChange,
+	isConfigRepo, containersBuilding bool,
+	changedFiles, expectedJobs []string,
+	req GitPushEventRequest,
+	resp *GitPushEventResponse,
+) int {
+	resp.NomadChanged = true
+	failOnJobErr := !isConfigRepo
+	applied, deferred, errRec := d.applyNomadChangesDirectly(ctx, repoPath, nomadChanges, failOnJobErr, containersBuilding, changedFiles, expectedJobs, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
+	resp.AppliedJobs = applied
+	if len(deferred) > 0 {
+		resp.ContainersBuilding = true
+	}
+	if errRec != nil {
+		if failOnJobErr {
+			resp.Status = "error"
+			resp.Message = fmt.Sprintf("failed applying nomad changes: %v", errRec)
+			return http.StatusInternalServerError
+		}
+		log.Printf("[Hangar:GitPush] Notice: applyNomadChangesDirectly notice: %v", errRec)
+	}
+	if isConfigRepo {
+		if len(deferred) > 0 {
+			resp.Message = fmt.Sprintf("applied %d job(s); deferred %d job(s) pending container builds", len(applied), len(deferred))
+		} else {
+			resp.Message = fmt.Sprintf("applied %d nomad job(s)", len(applied))
+		}
+	} else if resp.ContainersBuilding {
+		resp.Message = fmt.Sprintf("repository synced; applied %d nomad job(s), deferred container build rollout until image_ready", len(applied))
+	} else {
+		resp.Message = fmt.Sprintf("repository synced; applied %d nomad job(s)", len(applied))
+	}
+	return http.StatusOK
+}
+
+// ExecuteGitPushEvent processes an incoming git push webhook event.
+func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRequest) (GitPushEventResponse, int) {
+	repoPath, earlyResp, earlyCode, shouldReturn := validateGitPushRequest(req, d.repos)
+	if shouldReturn {
+		return earlyResp, earlyCode
 	}
 
 	commitSHA := req.Commit
@@ -212,7 +308,7 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 		if res.CurrentHead != "" {
 			commitSHA = res.CurrentHead
 		}
-		failEvt := HangarDeployEvent{
+		d.DispatchDeployEvent(HangarDeployEvent{
 			Event:     "sync_failed",
 			JobName:   "git-sync",
 			Repo:      req.Repo,
@@ -222,8 +318,7 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 			Status:    "failed",
 			Details:   res.Error,
 			Timestamp: time.Now().UTC(),
-		}
-		d.DispatchDeployEvent(failEvt)
+		})
 		return GitPushEventResponse{
 			Status:  "error",
 			Repo:    req.Repo,
@@ -232,6 +327,11 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 		}, http.StatusInternalServerError
 	}
 
+	if res.CurrentHead != "" {
+		commitSHA = res.CurrentHead
+	}
+	sc.CommitSHA = commitSHA
+
 	resp := GitPushEventResponse{
 		Status: "accepted",
 		Repo:   req.Repo,
@@ -239,17 +339,9 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 		Commit: res.CurrentHead,
 	}
 
-	if res.CurrentHead != "" {
-		commitSHA = res.CurrentHead
-	}
-	sc.CommitSHA = commitSHA
-
-	cleanRepo := strings.ToLower(filepath.Clean(repoPath))
-	isAerialConfig := strings.Contains(cleanRepo, "aerial-config")
-	isAerialCore := strings.HasSuffix(cleanRepo, "/aerial") || cleanRepo == "aerial"
-
+	isConfigRepo := d.configDir != "" && filepath.Clean(repoPath) == filepath.Clean(d.configDir)
 	changedFiles, errDiff := d.getChangedFiles(ctx, repoPath, res.PreviousHead, res.CurrentHead)
-	if isAerialConfig && errDiff != nil {
+	if isConfigRepo && errDiff != nil {
 		log.Printf("[Hangar:GitPush] Error: getChangedFiles failed for %s: %v", repoPath, errDiff)
 		return GitPushEventResponse{
 			Status:  "error",
@@ -260,19 +352,25 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 	}
 
 	nomadChanges, errNomad := d.HasNomadChanges(ctx, repoPath, res.PreviousHead, res.CurrentHead)
-	if isAerialConfig && errNomad != nil {
+	if isConfigRepo && errNomad != nil {
 		log.Printf("[Hangar:GitPush] Warning: HasNomadChanges failed for %s: %v", repoPath, errNomad)
 	}
-	if isAerialCore && errDiff == nil && HasMigrationChanges(changedFiles) {
-		nomadChanges = EnsureDBMigrateNomadChange(nomadChanges)
+
+	bundleConfigs := d.GetAssetBundleConfigs(d.configDir)
+	nomadChanges = injectTriggerJobBundles(bundleConfigs, repoPath, changedFiles, nomadChanges)
+	if len(nomadChanges) > 0 {
 		errNomad = nil
 	}
 
-	expectedJobs := ResolveExpectedDeployJobs(repoPath, changedFiles, nomadChanges, d.GetServiceConfigMappings(repoPath), d.candidateJobRepos())
+	configDir := d.configDir
+	if configDir == "" {
+		configDir = repoPath
+	}
+	expectedJobs := ResolveExpectedDeployJobs(repoPath, changedFiles, nomadChanges, d.GetServiceConfigMappings(configDir), d.candidateJobRepos(), bundleConfigs)
 	resp.ExpectedJobs = expectedJobs
 	sc.ExpectedJobs = expectedJobs
 
-	syncEvt := HangarDeployEvent{
+	d.DispatchDeployEvent(HangarDeployEvent{
 		Event:        "sync_success",
 		JobName:      "git-sync",
 		Repo:         req.Repo,
@@ -283,36 +381,14 @@ func (d *SyncDaemon) ExecuteGitPushEvent(ctx context.Context, req GitPushEventRe
 		Details:      "git sync completed",
 		ExpectedJobs: expectedJobs,
 		Timestamp:    time.Now().UTC(),
-	}
-	d.DispatchDeployEvent(syncEvt)
+	})
 
-	if isAerialCore {
-		return d.handleAerialCorePush(ctx, repoPath, req, resp, changedFiles, errDiff, nomadChanges, errNomad, expectedJobs)
-	}
-
-	if isAerialConfig {
-		return d.handleAerialConfigPush(ctx, repoPath, req, sc, resp, changedFiles, nomadChanges, expectedJobs)
-	}
-
-	return d.handleAuxiliaryRepoPush(ctx, cleanRepo, changedFiles, resp)
-}
-
-func (d *SyncDaemon) handleAuxiliaryRepoPush(ctx context.Context, cleanRepo string, changedFiles []string, resp GitPushEventResponse) (GitPushEventResponse, int) {
-	if strings.Contains(cleanRepo, "mirrormere") && d.configDir != "" {
-		if err := d.SyncAssetBundlesToNomad(ctx, d.configDir, ConfigSyncContext{DiffGated: true, ChangedFiles: changedFiles}); err != nil {
-			log.Printf("[Hangar:GitPush] Notice: SyncAssetBundlesToNomad: %v", err)
-		}
-	}
-	resp.Message = "repository synced"
-	return resp, http.StatusOK
-}
-
-func (d *SyncDaemon) handleAerialCorePush(ctx context.Context, repoPath string, req GitPushEventRequest, resp GitPushEventResponse, changedFiles []string, errDiff error, nomadChanges []NomadFileChange, errNomad error, expectedJobs []string) (GitPushEventResponse, int) {
-	if d.configDir != "" && (AssetBundleChangedInList("dashboard", changedFiles) ||
-		AssetBundleChangedInList("docs", changedFiles) ||
-		AssetBundleChangedInList("grafana", changedFiles) ||
-		AssetBundleChangedInList("homepage", changedFiles)) {
-		d.syncAllConfigsToNomad(ctx, "[Hangar:GitPush]", d.configDir, ConfigSyncContext{DiffGated: true, ChangedFiles: changedFiles})
+	if isConfigRepo {
+		sc.DiffGated = true
+		sc.ChangedFiles = changedFiles
+		d.syncAllConfigsToNomad(ctx, "[Hangar:GitPush]", repoPath, sc)
+	} else {
+		d.syncExternalPushBundles(ctx, repoPath, changedFiles, bundleConfigs)
 	}
 
 	containersBuilding := errDiff == nil && HasContainerBuildChanges(repoPath, changedFiles)
@@ -321,22 +397,12 @@ func (d *SyncDaemon) handleAerialCorePush(ctx context.Context, repoPath string, 
 	}
 
 	if errNomad == nil && len(nomadChanges) > 0 {
-		resp.NomadChanged = true
-		applied, deferred, errRec := d.applyNomadChangesDirectly(ctx, repoPath, nomadChanges, true, containersBuilding, changedFiles, expectedJobs, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
-		resp.AppliedJobs = applied
-		if len(deferred) > 0 {
-			resp.ContainersBuilding = true
-		}
-		if errRec != nil {
-			resp.Status = "error"
-			resp.Message = fmt.Sprintf("failed applying nomad changes: %v", errRec)
-			return resp, http.StatusInternalServerError
-		}
-		if resp.ContainersBuilding {
-			resp.Message = fmt.Sprintf("repository synced; applied %d nomad job(s), deferred container build rollout until image_ready", len(applied))
-		} else {
-			resp.Message = fmt.Sprintf("repository synced; applied %d nomad job(s)", len(applied))
-		}
+		code := d.applyGitPushNomadChanges(ctx, repoPath, nomadChanges, isConfigRepo, containersBuilding, changedFiles, expectedJobs, req, &resp)
+		return resp, code
+	}
+
+	if isConfigRepo {
+		resp.Message = "configuration synced; no nomad job changes"
 		return resp, http.StatusOK
 	}
 
@@ -346,33 +412,7 @@ func (d *SyncDaemon) handleAerialCorePush(ctx context.Context, repoPath string, 
 		return resp, http.StatusOK
 	}
 
-	resp.Message = "repository synced; no container build or nomad changes"
-	return resp, http.StatusOK
-}
-
-func (d *SyncDaemon) handleAerialConfigPush(ctx context.Context, repoPath string, req GitPushEventRequest, sc ConfigSyncContext, resp GitPushEventResponse, changedFiles []string, nomadChanges []NomadFileChange, expectedJobs []string) (GitPushEventResponse, int) {
-	sc.DiffGated = true
-	sc.ChangedFiles = changedFiles
-
-	d.syncAllConfigsToNomad(ctx, "[Hangar:GitPush]", repoPath, sc)
-
-	if len(nomadChanges) > 0 {
-		resp.NomadChanged = true
-		applied, deferred, errRec := d.applyNomadChangesDirectly(ctx, repoPath, nomadChanges, false, false, nil, expectedJobs, req.Repo, req.Commit, req.TargetID, strconv.Itoa(req.PRNumber))
-		if errRec != nil {
-			log.Printf("[Hangar:GitPush] Notice: applyNomadChangesDirectly notice: %v", errRec)
-		}
-		resp.AppliedJobs = applied
-		if len(deferred) > 0 {
-			resp.ContainersBuilding = true
-			resp.Message = fmt.Sprintf("applied %d job(s); deferred %d job(s) pending container builds", len(applied), len(deferred))
-		} else {
-			resp.Message = fmt.Sprintf("applied %d nomad job(s)", len(applied))
-		}
-	} else {
-		resp.Message = "configuration synced; no nomad job changes"
-	}
-
+	resp.Message = "repository synced"
 	return resp, http.StatusOK
 }
 

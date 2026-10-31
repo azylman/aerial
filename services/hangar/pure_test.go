@@ -1161,12 +1161,6 @@ R100	jobs/old.nomad	jobs/new.nomad
 	if !IsMigrationFile("eri/pkg/db/migrations/20261021_init.sql") || !IsMigrationFile("/eri/pkg/db/migrations/atlas.sum") || IsMigrationFile("eri/pkg/db/schema.sql") || IsMigrationFile("eri/pkg/db/migrations") {
 		t.Errorf("unexpected IsMigrationFile classification for eri")
 	}
-	if !HasMigrationChanges([]string{"README.md", "brain/pkg/db/migrations/20261016_init.sql"}) || HasMigrationChanges([]string{"brain/pkg/db/schema.sql"}) {
-		t.Errorf("unexpected HasMigrationChanges result for brain")
-	}
-	if !HasMigrationChanges([]string{"README.md", "services/eri/pkg/db/migrations/20261021_init.sql"}) || !HasMigrationChanges([]string{"eri/pkg/db/migrations/20261021_init.sql"}) {
-		t.Errorf("unexpected HasMigrationChanges result for services/eri and eri")
-	}
 	if ren := ParseNomadGitStatus("R100\tbrain/pkg/db/old.sql\tbrain/pkg/db/migrations/20261016_new.sql\n"); len(ren) != 1 || ren[0].JobName != "db-migrate" {
 		t.Errorf("expected db-migrate when file renamed into migrations dir, got %+v", ren)
 	}
@@ -2326,6 +2320,86 @@ func TestAssetBundleChangedInList_TableDriven(t *testing.T) {
 			got := AssetBundleChangedInList(tc.bundle, tc.files)
 			if got != tc.expected {
 				t.Errorf("AssetBundleChangedInList(%q, %v) = %v, want %v", tc.bundle, tc.files, got, tc.expected)
+			}
+		})
+	}
+}
+
+func TestAssetBundleMatchesRepoChanges_TableDriven(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	tests := []struct {
+		name     string
+		bundle   AssetBundleConfig
+		repoPath string
+		files    []string
+		want     bool
+	}{
+		{
+			name: "relative source prefix match",
+			bundle: AssetBundleConfig{
+				Name: "test-rel",
+				Sources: map[string]string{
+					"app": "services/my-app",
+				},
+			},
+			repoPath: tmpDir,
+			files:    []string{"services/my-app/index.html"},
+			want:     true,
+		},
+		{
+			name: "relative source excluded path",
+			bundle: AssetBundleConfig{
+				Name: "test-rel-excl",
+				Sources: map[string]string{
+					"app": "services/my-app",
+				},
+				Excludes: []string{"services/my-app/test"},
+			},
+			repoPath: tmpDir,
+			files:    []string{"services/my-app/test/spec.js"},
+			want:     false,
+		},
+		{
+			name: "trigger job match",
+			bundle: AssetBundleConfig{
+				Name:       "test-trigger",
+				TriggerJob: "nomad/jobs/db-migrate.nomad",
+			},
+			repoPath: tmpDir,
+			files:    []string{"jobs/db-migrate.nomad"},
+			want:     true,
+		},
+		{
+			name: "nomad var job match",
+			bundle: AssetBundleConfig{
+				Name:     "test-nomad-var",
+				NomadVar: "nomad/jobs/dashboard",
+			},
+			repoPath: tmpDir,
+			files:    []string{"nomad/jobs/dashboard.nomad"},
+			want:     true,
+		},
+		{
+			name: "unrelated changes",
+			bundle: AssetBundleConfig{
+				Name: "test-unrelated",
+				Sources: map[string]string{
+					"app": "services/my-app",
+				},
+			},
+			repoPath: tmpDir,
+			files:    []string{"services/other/main.go", ""},
+			want:     false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := AssetBundleMatchesRepoChanges(tc.bundle, tc.repoPath, tc.files)
+			if got != tc.want {
+				t.Errorf("AssetBundleMatchesRepoChanges() = %v, want %v", got, tc.want)
 			}
 		})
 	}

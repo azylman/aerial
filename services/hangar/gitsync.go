@@ -381,7 +381,7 @@ func (d *SyncDaemon) computeBundleHash(bundle, configDir string) string {
 	if mirrormereDir == "" && d.composeDir != "" {
 		mirrormereDir = filepath.Join(filepath.Dir(d.composeDir), "mirrormere")
 	}
-	sources, excludes, err := ResolveAssetBundleSources(bundle, d.composeDir, configDir, mirrormereDir)
+	sources, excludes, err := ResolveAssetBundleSources(bundle, d.composeDir, configDir, mirrormereDir, d.GetAssetBundleConfigs(configDir))
 	if err != nil {
 		return ""
 	}
@@ -578,6 +578,31 @@ func (d *SyncDaemon) GetServiceConfigMappings(configDir string) []ServiceConfigM
 	return DefaultManagedServiceConfigs
 }
 
+// GetAssetBundleConfigs resolves the active asset bundle configs for a given configDir.
+// If configDir contains services/hangar/hangar.yaml with non-empty asset_bundles, it dynamically parses and returns them.
+// Otherwise, it falls back to daemon-configured assetBundles, or DefaultAssetBundles if none are configured.
+func (d *SyncDaemon) GetAssetBundleConfigs(configDir string) []AssetBundleConfig {
+	if configDir != "" {
+		hangarCfgPath := filepath.Join(configDir, "services", "hangar", "hangar.yaml")
+		var hCfg HangarYAMLConfig
+		if _, err := readAndValidateYAML(hangarCfgPath, "hangar config", &hCfg); err == nil && len(hCfg.AssetBundles) > 0 {
+			return hCfg.AssetBundles
+		}
+	}
+	if d != nil && len(d.assetBundles) > 0 {
+		return d.assetBundles
+	}
+	var composeDir, mirrormereDir string
+	if d != nil {
+		composeDir = d.composeDir
+		mirrormereDir = ResolveRepoPath("mirrormere", d.repos)
+		if mirrormereDir == "" && d.composeDir != "" {
+			mirrormereDir = filepath.Join(filepath.Dir(d.composeDir), "mirrormere")
+		}
+	}
+	return DefaultAssetBundles(composeDir, configDir, mirrormereDir)
+}
+
 func anyFileInChangedList(targets []string, changedFiles []string) bool {
 	for _, t := range targets {
 		if fileInChangedList(t, changedFiles) {
@@ -594,6 +619,9 @@ func (d *SyncDaemon) SyncServiceConfigsToNomad(ctx context.Context, configDir st
 	var order []string
 	grouped := make(map[string][]ServiceConfigMapping)
 	for _, m := range mappings {
+		if m.NomadVar == "nomad/jobs/eri" || m.NomadVar == "nomad/jobs/homepage" {
+			continue
+		}
 		if _, ok := grouped[m.NomadVar]; !ok {
 			order = append(order, m.NomadVar)
 		}
@@ -651,7 +679,7 @@ func (d *SyncDaemon) SyncServiceConfigsToNomad(ctx context.Context, configDir st
 			configHash = hex.EncodeToString(h.Sum(nil))
 		}
 		cacheKey := nomadVar + ":" + strings.Join(varKeys, "+")
-		isChangedInGit := isServiceConfigChangedInGit(nomadVar, diffGated, checkPaths, changedFiles)
+		isChangedInGit := isServiceConfigChangedInGit(nomadVar, diffGated, checkPaths, changedFiles, d.GetAssetBundleConfigs(configDir))
 		pushed, err := d.pushNomadConfigVar(ctx, cacheKey, nomadVar, jobName, configHash, isChangedInGit, varArgs, syncCtx)
 		if err != nil {
 			return err
@@ -679,66 +707,79 @@ func (d *SyncDaemon) SyncAssetBundlesToNomad(ctx context.Context, configDir stri
 		}
 	}
 
-	if docsHash := d.computeBundleHash("docs", configDir); docsHash != "" {
-		isChanged := !diffGated || AssetBundleChangedInList("docs", changedFiles)
-		if _, err := d.pushNomadVarQuiet(ctx, "nomad/jobs/docs:ASSET_HASH", "nomad/jobs/docs", "docs", docsHash, isChanged, []string{"ASSET_HASH=" + docsHash}); err != nil {
-			log.Printf("[Hangar:Nomad] Notice: SyncAssetBundlesToNomad (docs): %v", err)
-			recordErr(err)
+	bundles := d.GetAssetBundleConfigs(configDir)
+	for _, bundle := range bundles {
+		if bundle.NomadVar == "" || bundle.NomadVar == "nomad/jobs/homepage" {
+			continue
 		}
-	}
-
-	if grafanaHash := d.computeBundleHash("grafana", configDir); grafanaHash != "" {
-		isChanged := !diffGated || AssetBundleChangedInList("grafana", changedFiles)
-		if _, err := d.pushNomadVarQuiet(ctx, "nomad/jobs/grafana:ASSET_HASH", "nomad/jobs/grafana", "grafana", grafanaHash, isChanged, []string{"ASSET_HASH=" + grafanaHash}); err != nil {
-			log.Printf("[Hangar:Nomad] Notice: SyncAssetBundlesToNomad (grafana): %v", err)
-			recordErr(err)
-		}
-	}
-
-	if !diffGated || AssetBundleChangedInList("dashboard", changedFiles) {
-		// Invariant: Forward diff-gating context to ensure unchanged service configs
-		// are not re-pushed when only dashboard static assets change.
-		if err := d.SyncServiceConfigsToNomad(ctx, configDir, syncCtx...); err != nil {
-			log.Printf("[Hangar:Nomad] Notice: SyncAssetBundlesToNomad (dashboard): %v", err)
-			recordErr(err)
-		}
-	}
-
-	if mirrormereHash := d.computeBundleHash("mirrormere", configDir); mirrormereHash != "" {
-		mirrormereYamlPath := filepath.Join(configDir, "services", "mirrormere", "mirrormere.yaml")
-		var parsed any
-		raw, err := readAndValidateYAML(mirrormereYamlPath, "mirrormere config", &parsed)
-		if err != nil {
-			log.Printf("[Hangar:Nomad] Notice: SyncAssetBundlesToNomad (mirrormere): %v", err)
-			recordErr(err)
-		} else {
-			// Invariant: CONFIG_YAML must precede ASSET_HASH in varKeys, varArgs, and digest hashing
-			// to maintain identical cacheKey and configHash with SyncServiceConfigsToNomad (appendServiceAssetHash).
-			var varKeys, varArgs []string
-			h := sha256.New()
-			if len(raw) > 0 {
-				varKeys = append(varKeys, "CONFIG_YAML")
-				varArgs = append(varArgs, "CONFIG_YAML=@"+mirrormereYamlPath)
-				h.Write([]byte("CONFIG_YAML:"))
-				h.Write(raw)
-				h.Write([]byte("\n"))
+		if bundle.Name == "dashboard" {
+			if !diffGated || AssetBundleChangedInList(bundle.Name, changedFiles, bundles) {
+				if err := d.SyncServiceConfigsToNomad(ctx, configDir, syncCtx...); err != nil {
+					log.Printf("[Hangar:Nomad] Notice: SyncAssetBundlesToNomad (%s): %v", bundle.Name, err)
+					recordErr(err)
+				}
 			}
-			varKeys = append(varKeys, "ASSET_HASH")
-			varArgs = append(varArgs, "ASSET_HASH="+mirrormereHash)
-			h.Write([]byte("ASSET_HASH:" + mirrormereHash + "\n"))
+			continue
+		}
 
-			isChanged := !diffGated || AssetBundleChangedInList("mirrormere", changedFiles)
-			cacheKey := "nomad/jobs/mirrormere-core:" + strings.Join(varKeys, "+")
-			configHash := hex.EncodeToString(h.Sum(nil))
+		if bundle.Name == "mirrormere" {
+			if err := d.syncMirrormereBundle(ctx, configDir, diffGated, changedFiles, bundles, bundle); err != nil {
+				recordErr(err)
+			}
+			continue
+		}
 
-			if _, err := d.pushNomadVarQuiet(ctx, cacheKey, "nomad/jobs/mirrormere-core", "mirrormere-core", configHash, isChanged, varArgs); err != nil {
-				log.Printf("[Hangar:Nomad] Notice: SyncAssetBundlesToNomad (mirrormere): %v", err)
+		if hash := d.computeBundleHash(bundle.Name, configDir); hash != "" {
+			isChanged := !diffGated || AssetBundleChangedInList(bundle.Name, changedFiles, bundles)
+			jobName := strings.TrimPrefix(bundle.NomadVar, "nomad/jobs/")
+			cacheKey := bundle.NomadVar + ":ASSET_HASH"
+			if _, err := d.pushNomadVarQuiet(ctx, cacheKey, bundle.NomadVar, jobName, hash, isChanged, []string{"ASSET_HASH=" + hash}); err != nil {
+				log.Printf("[Hangar:Nomad] Notice: SyncAssetBundlesToNomad (%s): %v", bundle.Name, err)
 				recordErr(err)
 			}
 		}
 	}
 
 	return firstErr
+}
+
+func (d *SyncDaemon) syncMirrormereBundle(ctx context.Context, configDir string, diffGated bool, changedFiles []string, bundles []AssetBundleConfig, bundle AssetBundleConfig) error {
+	mirrormereHash := d.computeBundleHash(bundle.Name, configDir)
+	if mirrormereHash == "" {
+		return nil
+	}
+	mirrormereYamlPath := filepath.Join(configDir, "services", "mirrormere", "mirrormere.yaml")
+	var parsed any
+	raw, err := readAndValidateYAML(mirrormereYamlPath, "mirrormere config", &parsed)
+	if err != nil {
+		log.Printf("[Hangar:Nomad] Notice: SyncAssetBundlesToNomad (mirrormere): %v", err)
+		return err
+	}
+	// Invariant: CONFIG_YAML must precede ASSET_HASH in varKeys, varArgs, and digest hashing
+	// to maintain identical cacheKey and configHash with SyncServiceConfigsToNomad (appendServiceAssetHash).
+	var varKeys, varArgs []string
+	h := sha256.New()
+	if len(raw) > 0 {
+		varKeys = append(varKeys, "CONFIG_YAML")
+		varArgs = append(varArgs, "CONFIG_YAML=@"+mirrormereYamlPath)
+		h.Write([]byte("CONFIG_YAML:"))
+		h.Write(raw)
+		h.Write([]byte("\n"))
+	}
+	varKeys = append(varKeys, "ASSET_HASH")
+	varArgs = append(varArgs, "ASSET_HASH="+mirrormereHash)
+	h.Write([]byte("ASSET_HASH:" + mirrormereHash + "\n"))
+
+	isChanged := !diffGated || AssetBundleChangedInList("mirrormere", changedFiles, bundles)
+	cacheKey := bundle.NomadVar + ":" + strings.Join(varKeys, "+")
+	configHash := hex.EncodeToString(h.Sum(nil))
+	jobName := strings.TrimPrefix(bundle.NomadVar, "nomad/jobs/")
+
+	if _, err := d.pushNomadVarQuiet(ctx, cacheKey, bundle.NomadVar, jobName, configHash, isChanged, varArgs); err != nil {
+		log.Printf("[Hangar:Nomad] Notice: SyncAssetBundlesToNomad (mirrormere): %v", err)
+		return err
+	}
+	return nil
 }
 
 // StartPeriodicLoop runs the background ticker loop.
@@ -911,16 +952,17 @@ func (d *SyncDaemon) GetStatus(ctx context.Context) HangarStatusResponse {
 }
 
 func (d *SyncDaemon) appendServiceAssetHash(nomadVar, configDir string, varKeys, varArgs []string, h io.Writer) ([]string, []string) {
-	var bundle string
-	switch nomadVar {
-	case "nomad/jobs/dashboard":
-		bundle = "dashboard"
-	case "nomad/jobs/mirrormere-core":
-		bundle = "mirrormere"
-	default:
+	var bundleName string
+	for _, b := range d.GetAssetBundleConfigs(configDir) {
+		if b.NomadVar == nomadVar {
+			bundleName = b.Name
+			break
+		}
+	}
+	if bundleName == "" {
 		return varKeys, varArgs
 	}
-	if assetHash := d.computeBundleHash(bundle, configDir); assetHash != "" {
+	if assetHash := d.computeBundleHash(bundleName, configDir); assetHash != "" {
 		varKeys = append(varKeys, "ASSET_HASH")
 		varArgs = append(varArgs, "ASSET_HASH="+assetHash)
 		if _, err := h.Write([]byte("ASSET_HASH:" + assetHash + "\n")); err != nil {
@@ -930,16 +972,20 @@ func (d *SyncDaemon) appendServiceAssetHash(nomadVar, configDir string, varKeys,
 	return varKeys, varArgs
 }
 
-func isServiceConfigChangedInGit(nomadVar string, diffGated bool, checkPaths, changedFiles []string) bool {
+func isServiceConfigChangedInGit(nomadVar string, diffGated bool, checkPaths, changedFiles []string, configured ...[]AssetBundleConfig) bool {
 	if !diffGated || anyFileInChangedList(checkPaths, changedFiles) {
 		return true
 	}
-	switch nomadVar {
-	case "nomad/jobs/dashboard":
-		return AssetBundleChangedInList("dashboard", changedFiles)
-	case "nomad/jobs/mirrormere-core":
-		return AssetBundleChangedInList("mirrormere", changedFiles)
-	default:
-		return false
+	var bundles []AssetBundleConfig
+	if len(configured) > 0 && len(configured[0]) > 0 {
+		bundles = configured[0]
+	} else {
+		bundles = DefaultAssetBundles("", "", "")
 	}
+	for _, b := range bundles {
+		if b.NomadVar == nomadVar {
+			return AssetBundleChangedInList(b.Name, changedFiles, bundles)
+		}
+	}
+	return false
 }

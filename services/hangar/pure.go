@@ -645,16 +645,6 @@ func IsMigrationFile(p string) bool {
 		(strings.HasPrefix(clean, "brain/pkg/db/migrations/") && clean != "brain/pkg/db/migrations/")
 }
 
-// HasMigrationChanges returns true if any changed file in changedFiles resides under brain/pkg/db/migrations/.
-func HasMigrationChanges(changedFiles []string) bool {
-	for _, f := range changedFiles {
-		if IsMigrationFile(f) {
-			return true
-		}
-	}
-	return false
-}
-
 // EnsureDBMigrateNomadChange ensures nomad/jobs/db-migrate.nomad is present at index 0 of changes as an apply action.
 func EnsureDBMigrateNomadChange(changes []NomadFileChange) []NomadFileChange {
 	if len(changes) > 0 && (changes[0].JobName == "db-migrate" || filepath.ToSlash(changes[0].Path) == "nomad/jobs/db-migrate.nomad") && changes[0].Action == "apply" {
