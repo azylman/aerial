@@ -576,131 +576,25 @@ func ExtractNomadJobImages(content string) []string {
 	return images
 }
 
-// serviceBuildDependsOnPkg reports whether the given service image depends on pkg/ and is
-// rebuilt by CI (.github/workflows/docker-publish.yml) when pkg/** changes.
-func serviceBuildDependsOnPkg(svc string) bool {
-	switch svc {
-	case "eri", "brain",
-		"haro", "scheduler-mcp",
-		"coven", "memory-mcp",
-		"discord-mcp",
-		"kernel-mcp",
-		"dashboard",
-		"hangar",
-		"synapse",
-		"vanadis",
-		"prospera":
-		return true
-	default:
+// JobHasContainerBuildChanges returns true if any container image referenced
+// in jobSpec has matching source file modifications in changedFiles according to repoPath's CI workflow rules.
+func JobHasContainerBuildChanges(repoPath, jobSpec string, changedFiles []string) bool {
+	affected := AffectedWorkflowImages(repoPath, changedFiles)
+	if len(affected) == 0 {
 		return false
 	}
-}
-
-func isStaticAssetOnlyFile(clean string) bool {
-	c := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(clean)), "/")
-	return strings.HasPrefix(c, "services/dashboard/static/") || strings.HasPrefix(c, "services/docs-service/app/")
-}
-
-// JobHasContainerBuildChanges returns true if any container image referenced
-// in jobSpec has matching source file modifications in changedFiles.
-func JobHasContainerBuildChanges(jobSpec string, changedFiles []string) bool {
-	return jobHasRepoContainerBuildChanges("", jobSpec, changedFiles)
+	for _, img := range ExtractNomadJobImages(jobSpec) {
+		for _, aff := range affected {
+			if ImageMatches(img, aff) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func cleanChangedFilePath(f string) string {
 	return strings.TrimPrefix(path.Clean(strings.ReplaceAll(strings.TrimSpace(f), "\\", "/")), "/")
-}
-
-func matchesPathOrPrefix(clean string, exact, prefixes []string) bool {
-	for _, e := range exact {
-		if clean == e {
-			return true
-		}
-	}
-	for _, p := range prefixes {
-		if strings.HasPrefix(clean, p) {
-			return true
-		}
-	}
-	return false
-}
-
-func aerialImageHasBuildChanges(svc string, changedFiles []string) bool {
-	prefixes := []string{"services/" + svc + "/", "mcp/" + svc + "/"}
-	if svc == "docs" {
-		prefixes = append(prefixes, "services/docs-service/")
-	}
-	if serviceBuildDependsOnPkg(svc) {
-		prefixes = append(prefixes, "pkg/")
-	}
-	exact := []string{"Dockerfile", ".dockerignore"}
-	for _, f := range changedFiles {
-		clean := cleanChangedFilePath(f)
-		if !isStaticAssetOnlyFile(clean) && matchesPathOrPrefix(clean, exact, prefixes) {
-			return true
-		}
-	}
-	return false
-}
-
-func sidecarImageHasBuildChanges(svc string, changedFiles []string) bool {
-	prefixes := []string{svc + "/"}
-	var exact []string
-	if svc == "migrator" {
-		prefixes = append(prefixes, "scratch-service/migrations/")
-		exact = []string{"atlas.hcl"}
-	}
-	for _, f := range changedFiles {
-		if matchesPathOrPrefix(cleanChangedFilePath(f), exact, prefixes) {
-			return true
-		}
-	}
-	return false
-}
-
-func mirrormereImageHasBuildChanges(base string, changedFiles []string) bool {
-	var exact, prefixes []string
-	if base == "mirrormere" {
-		exact = []string{"Dockerfile", ".dockerignore", "go.mod", "go.sum", "Makefile"}
-		prefixes = []string{"cmd/", "internal/", "api/"}
-	} else {
-		sub := strings.TrimPrefix(base, "mirrormere-")
-		prefixes = []string{"client/" + sub + "/", "sidecars/" + sub + "/"}
-		if sub == "cast-watcher" || sub == "hass-proxy" {
-			exact = []string{".dockerignore", "go.mod", "go.sum"}
-		}
-	}
-	for _, f := range changedFiles {
-		if matchesPathOrPrefix(cleanChangedFilePath(f), exact, prefixes) {
-			return true
-		}
-	}
-	return false
-}
-
-func imageHasBuildChanges(srcRepo, img string, changedFiles []string) bool {
-	base := path.Base(stripImageTag(strings.ToLower(strings.TrimSpace(img))))
-	switch srcRepo {
-	case "azylman/aerial-sidecars":
-		return sidecarImageHasBuildChanges(strings.TrimPrefix(base, "aerial-sidecar-"), changedFiles)
-	case "azylman/mirrormere":
-		return mirrormereImageHasBuildChanges(base, changedFiles)
-	default:
-		return aerialImageHasBuildChanges(strings.TrimPrefix(base, "aerial-"), changedFiles)
-	}
-}
-
-func jobHasRepoContainerBuildChanges(repoSlug, jobSpec string, changedFiles []string) bool {
-	for _, img := range ExtractNomadJobImages(jobSpec) {
-		srcRepo := ImageSourceRepo(img)
-		if srcRepo == "" || (repoSlug != "" && !strings.EqualFold(srcRepo, repoSlug)) {
-			continue
-		}
-		if imageHasBuildChanges(srcRepo, img, changedFiles) {
-			return true
-		}
-	}
-	return false
 }
 
 // HasNomadJobVariable returns true if the Nomad job specification content declares the specified input variable.

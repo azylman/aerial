@@ -13,9 +13,12 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 // GitPushEventRequest represents an incoming git push event.
@@ -65,83 +68,224 @@ type PendingImageRollout struct {
 	Request ImageReadyEventRequest
 }
 
-// CoreBuildPaths contains path prefixes in azylman/aerial that trigger container builds in CI.
-var CoreBuildPaths = []string{
-	"services/",
-	"mcp/",
-	"pkg/",
-	"Dockerfile",
-	"go.mod",
-	"go.sum",
-	".dockerignore",
-}
+var (
+	catalogBlockRegex = regexp.MustCompile(`(?s)const\s+catalog\s*=\s*\[(.*?)\]`)
+	catalogObjRegex   = regexp.MustCompile(`(?s)\{([^{}]+)\}`)
+	servicePropRegex  = regexp.MustCompile(`(?i)["']?service["']?\s*:\s*["']([^"']+)["']`)
+	imagePropRegex    = regexp.MustCompile(`(?i)["']?image_name["']?\s*:\s*["']([^"']+)["']`)
+)
 
-// MirrormereBuildPaths contains path prefixes and root files in azylman/mirrormere that trigger container builds in CI.
-var MirrormereBuildPaths = []string{
-	"cmd/",
-	"internal/",
-	"api/",
-	"client/",
-	"sidecars/",
-	"Dockerfile",
-	"go.mod",
-	"go.sum",
-	"Makefile",
-	".dockerignore",
-}
-
-func isSidecarContainerBuildFile(cleanFile string) bool {
-	if cleanFile == "atlas.hcl" {
-		return true
+// ParseWorkflowBuildRules extracts paths-filter rules and catalog image mappings from workflow YAML bytes.
+func ParseWorkflowBuildRules(workflowYAML []byte) (filters map[string][]string, catalog map[string]string) {
+	filters = make(map[string][]string)
+	catalog = make(map[string]string)
+	if len(workflowYAML) == 0 {
+		return filters, catalog
 	}
-	idx := strings.IndexByte(cleanFile, '/')
-	if idx <= 0 {
-		return false
-	}
-	dir := cleanFile[:idx]
-	return !strings.HasPrefix(dir, ".") && dir != "docs" && dir != "nomad" && dir != "scripts"
-}
 
-func matchesBuildPathList(cleanFile string, buildPaths []string) bool {
-	for _, buildPath := range buildPaths {
-		if strings.HasSuffix(buildPath, "/") {
-			if strings.HasPrefix(cleanFile, buildPath) {
-				return true
+	// 1. Extract catalog: scan for const catalog = [...]
+	for _, blockMatch := range catalogBlockRegex.FindAllSubmatch(workflowYAML, -1) {
+		if len(blockMatch) < 2 {
+			continue
+		}
+		for _, objMatch := range catalogObjRegex.FindAllSubmatch(blockMatch[1], -1) {
+			if len(objMatch) < 2 {
+				continue
 			}
-		} else if cleanFile == buildPath {
-			return true
+			objStr := string(objMatch[1])
+			sMatch := servicePropRegex.FindStringSubmatch(objStr)
+			iMatch := imagePropRegex.FindStringSubmatch(objStr)
+			if len(sMatch) >= 2 && len(iMatch) >= 2 {
+				svc := strings.TrimSpace(sMatch[1])
+				img := strings.TrimSpace(iMatch[1])
+				if svc != "" && img != "" {
+					catalog[svc] = img
+				}
+			}
 		}
 	}
-	return false
+
+	// 2. Extract dorny/paths-filter: unmarshal workflow YAML via yaml.v3
+	var root yaml.Node
+	if err := yaml.Unmarshal(workflowYAML, &root); err == nil {
+		parseFiltersFromNode(&root, filters)
+	}
+
+	return filters, catalog
+}
+
+func parseFiltersFromNode(node *yaml.Node, filters map[string][]string) {
+	if node == nil {
+		return
+	}
+	if node.Kind == yaml.MappingNode {
+		for i := 0; i < len(node.Content)-1; i += 2 {
+			k := node.Content[i]
+			v := node.Content[i+1]
+			if k.Value == "filters" {
+				if v.Kind == yaml.ScalarNode {
+					var sub yaml.Node
+					if err := yaml.Unmarshal([]byte(v.Value), &sub); err == nil {
+						extractFiltersMapping(&sub, filters)
+					}
+				} else if v.Kind == yaml.MappingNode {
+					extractFiltersMapping(v, filters)
+				}
+			}
+		}
+	}
+	for _, child := range node.Content {
+		parseFiltersFromNode(child, filters)
+	}
+}
+
+func extractFiltersMapping(node *yaml.Node, filters map[string][]string) {
+	if node == nil {
+		return
+	}
+	if node.Kind == yaml.DocumentNode && len(node.Content) > 0 {
+		node = node.Content[0]
+	}
+	if node.Kind != yaml.MappingNode {
+		return
+	}
+	for i := 0; i < len(node.Content)-1; i += 2 {
+		svc := node.Content[i].Value
+		valNode := node.Content[i+1]
+		var globs []string
+		switch valNode.Kind {
+		case yaml.SequenceNode:
+			for _, item := range valNode.Content {
+				if item.Value != "" {
+					globs = append(globs, item.Value)
+				}
+			}
+		case yaml.ScalarNode:
+			if valNode.Value != "" {
+				globs = append(globs, valNode.Value)
+			}
+		}
+		if len(globs) > 0 {
+			filters[svc] = globs
+		}
+	}
+}
+
+// DiscoverRepoWorkflowRules reads .github/workflows/*.yml and *.yaml inside repoPath and merges discovered filters and catalog maps.
+// Returns empty maps if repoPath has no workflow files or no catalog.
+func DiscoverRepoWorkflowRules(repoPath string) (filters map[string][]string, catalog map[string]string) {
+	filters = make(map[string][]string)
+	catalog = make(map[string]string)
+	if strings.TrimSpace(repoPath) == "" {
+		return filters, catalog
+	}
+
+	wfDir := filepath.Join(repoPath, ".github", "workflows")
+	entries, err := os.ReadDir(wfDir)
+	if err != nil {
+		return filters, catalog
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := strings.ToLower(entry.Name())
+		if !strings.HasSuffix(name, ".yml") && !strings.HasSuffix(name, ".yaml") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(wfDir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		f, c := ParseWorkflowBuildRules(data)
+		for svc, globs := range f {
+			existing := filters[svc]
+			seen := make(map[string]bool, len(existing))
+			for _, g := range existing {
+				seen[g] = true
+			}
+			for _, g := range globs {
+				if !seen[g] {
+					seen[g] = true
+					existing = append(existing, g)
+				}
+			}
+			filters[svc] = existing
+		}
+		for svc, img := range c {
+			catalog[svc] = img
+		}
+	}
+
+	if len(catalog) == 0 {
+		return make(map[string][]string), make(map[string]string)
+	}
+
+	return filters, catalog
+}
+
+func matchWorkflowPattern(pattern, cleanFile string) bool {
+	cleanPattern := cleanChangedFilePath(pattern)
+	if cleanPattern == "" {
+		return false
+	}
+	if cleanPattern == "**" {
+		return true
+	}
+	if strings.HasSuffix(cleanPattern, "/**") {
+		prefix := strings.TrimSuffix(cleanPattern, "/**")
+		return cleanFile == prefix || strings.HasPrefix(cleanFile, prefix+"/")
+	}
+	matched, err := path.Match(cleanPattern, cleanFile)
+	return err == nil && matched
+}
+
+// AffectedWorkflowImages matches changedFiles against filters[service] globs for each service -> imageName
+// in DiscoverRepoWorkflowRules(repoPath) and returns the sorted, deduplicated slice of affected imageName strings.
+func AffectedWorkflowImages(repoPath string, changedFiles []string) []string {
+	if strings.TrimSpace(repoPath) == "" || len(changedFiles) == 0 {
+		return nil
+	}
+	filters, catalog := DiscoverRepoWorkflowRules(repoPath)
+	if len(filters) == 0 || len(catalog) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{})
+	for _, f := range changedFiles {
+		clean := cleanChangedFilePath(f)
+		if clean == "" || clean == "." {
+			continue
+		}
+		for svc, imageName := range catalog {
+			if _, already := seen[imageName]; already {
+				continue
+			}
+			for _, g := range filters[svc] {
+				if matchWorkflowPattern(g, clean) {
+					seen[imageName] = struct{}{}
+					break
+				}
+			}
+		}
+	}
+
+	if len(seen) == 0 {
+		return nil
+	}
+	images := make([]string, 0, len(seen))
+	for img := range seen {
+		images = append(images, img)
+	}
+	sort.Strings(images)
+	return images
 }
 
 // HasContainerBuildChanges evaluates if any changed file in a repository touches paths that trigger container builds.
-// For aerial-config, it always returns false. For aerial, aerial-sidecars, and mirrormere, it matches repo build paths.
+// Strictly returns len(AffectedWorkflowImages(repoPath, changedFiles)) > 0 with zero hardcoded path-list or Dockerfile fallbacks.
 func HasContainerBuildChanges(repoPath string, changedFiles []string) bool {
-	cleanRepo := strings.ToLower(filepath.Clean(repoPath))
-	if strings.Contains(cleanRepo, "aerial-config") {
-		return false
-	}
-	isSidecars := strings.Contains(cleanRepo, "aerial-sidecars") || strings.Contains(cleanRepo, "sidecar")
-	isMirrormere := strings.Contains(cleanRepo, "mirrormere")
-	for _, file := range changedFiles {
-		cleanFile := cleanChangedFilePath(file)
-		switch {
-		case isSidecars:
-			if isSidecarContainerBuildFile(cleanFile) {
-				return true
-			}
-		case isMirrormere:
-			if !strings.HasPrefix(cleanFile, "client/eink-node/") && matchesBuildPathList(cleanFile, MirrormereBuildPaths) {
-				return true
-			}
-		default:
-			if !isStaticAssetOnlyFile(cleanFile) && matchesBuildPathList(cleanFile, CoreBuildPaths) {
-				return true
-			}
-		}
-	}
-	return false
+	return len(AffectedWorkflowImages(repoPath, changedFiles)) > 0
 }
 
 // ResolveAssetBundleSources maps a bundle name ("migrations", "dashboard", "docs", "grafana", "homepage", "mirrormere")
@@ -429,28 +573,24 @@ func ResolveRepoPath(query string, configuredRepos []string) string {
 	return ""
 }
 
-// ImageSourceRepo resolves which GitHub source repository is responsible for building a container image.
-// Returns an "owner/repo" slug (e.g. "azylman/aerial", "azylman/mirrormere", "azylman/aerial-sidecars")
-// or "" if the image is third-party/external.
-func ImageSourceRepo(imageRef string) string {
-	ref := strings.TrimSpace(strings.ToLower(imageRef))
+// ResolveImageSourceRepo resolves which GitHub source repository is responsible for building a container image.
+// Iterates candidateRepos, inspects DiscoverRepoWorkflowRules(r), and returns NormalizeGitHubSlug(r) for the first
+// repo whose catalog contains an imageName matching imageRef via ImageMatches(imageRef, imageName) (or "" if external).
+func ResolveImageSourceRepo(imageRef string, candidateRepos []string) string {
+	ref := strings.TrimSpace(imageRef)
 	if ref == "" {
 		return ""
 	}
-	if !strings.Contains(ref, "azylman/") && !strings.Contains(ref, "aerial") && !strings.Contains(ref, "mirrormere") {
-		return ""
-	}
-	// Check sidecars first
-	if strings.Contains(ref, "aerial-sidecar-") {
-		return "azylman/aerial-sidecars"
-	}
-	// Check mirrormere
-	if strings.Contains(ref, "mirrormere") {
-		return "azylman/mirrormere"
-	}
-	// Check core aerial images (synapse, infisical-mcp, nomad-mcp, brain, hangar, etc.)
-	if strings.Contains(ref, "aerial-") || strings.Contains(ref, "/aerial:") || strings.HasSuffix(ref, "/aerial") {
-		return "azylman/aerial"
+	for _, r := range candidateRepos {
+		if strings.TrimSpace(r) == "" {
+			continue
+		}
+		_, catalog := DiscoverRepoWorkflowRules(r)
+		for _, imageName := range catalog {
+			if ImageMatches(ref, imageName) {
+				return NormalizeGitHubSlug(r)
+			}
+		}
 	}
 	return ""
 }
@@ -549,15 +689,20 @@ func ResolveExpectedDeployJobs(
 	}
 
 	// 4. Container build changes across repositories (aerial, aerial-sidecars, mirrormere)
-	if !isAerialConfig && HasContainerBuildChanges(repoPath, changedFiles) {
-		repoSlug := NormalizeGitHubSlug(repoPath)
+	affectedImages := AffectedWorkflowImages(repoPath, changedFiles)
+	if len(affectedImages) > 0 {
 		var dirs []string
 		for _, r := range append([]string{repoPath}, candidateRepos...) {
 			dirs = append(dirs, filepath.Join(r, "jobs"), filepath.Join(r, "nomad", "jobs"))
 		}
 		walkNomadJobFiles(dirs, func(dir, jobPath, jobName, content string) bool {
-			if jobHasRepoContainerBuildChanges(repoSlug, content, changedFiles) {
-				add(jobName)
+			for _, img := range ExtractNomadJobImages(content) {
+				for _, affected := range affectedImages {
+					if ImageMatches(img, affected) {
+						add(jobName)
+						return true
+					}
+				}
 			}
 			return true
 		})

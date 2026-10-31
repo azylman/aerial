@@ -109,6 +109,7 @@ func newImagePollTestEnv(t *testing.T, tc nomadImagePollCase) *imagePollTestEnv 
 	if tc.isAerialRepo {
 		baseDir = filepath.Join(tmpDir, "aerial")
 	}
+	seedRepoWorkflowFixture(t, baseDir)
 	jobsDir := filepath.Join(baseDir, "jobs")
 	_ = os.MkdirAll(jobsDir, 0o755)
 
@@ -250,6 +251,7 @@ func TestCheckAndReconcileNomadImages_TableDriven(t *testing.T) {
 		},
 		{
 			name:            "changed_digest_uses_oci_image_revision",
+			isAerialRepo:    true,
 			jobFile:         "synapse.nomad",
 			jobContent:      `job "synapse" { group "core" { task "router" { config { image = "ghcr.io/azylman/aerial-synapse:latest" } } } }`,
 			clientMode:      "oci_revision",
@@ -464,6 +466,8 @@ func TestNomadChangeDetection_TableDriven(t *testing.T) {
 			{name: "diff detects no nomad config change", repo: "/path", prev: "v1", curr: "v2", primaryOut: "README.md\ndocker-compose.yml\n"},
 			{name: "diff fails and fallback diff-tree succeeds with config changes", repo: "/path", prev: "v1", curr: "v2", primaryErr: errors.New("diff failed"), fallbackOut: "nomad/client.hcl\n", wantChanged: true},
 			{name: "diff fails and fallback fails with normal error (fail-safe false)", repo: "/path", prev: "v1", curr: "v2", primaryErr: errors.New("git fail"), fallbackErr: errors.New("git fail")},
+			{name: "all zeros prev head triggers diff-tree fallback", repo: "/path", prev: "0000000000000000000000000000000000000000", curr: "v2", fallbackOut: "nomad/client.hcl\n", wantChanged: true},
+			{name: "all zeros prev head diff-tree error fails safe", repo: "/path", prev: "0000000000000000000000000000000000000000", curr: "v2", fallbackErr: errors.New("diff-tree failed"), wantChanged: false},
 			{name: "context canceled during primary diff", repo: "/repo", prev: "c1", curr: "c2", cancelOnCall: 1, wantErr: true, wantErrIs: context.Canceled},
 			{name: "context canceled during fallback diff-tree", repo: "/repo", prev: "c1", curr: "c2", primaryErr: errors.New("diff failed"), cancelOnCall: 2, wantErr: true, wantErrIs: context.Canceled},
 		}
@@ -528,6 +532,17 @@ func TestNomadChangeDetection_TableDriven(t *testing.T) {
 				repo: "/repo", prev: "head1", curr: "head2",
 				primaryErr:  errors.New("git error"),
 				fallbackErr: errors.New("git error"),
+			},
+			{
+				name: "all zeros prev head diff-tree succeeds",
+				repo: "/repo", prev: "0000000000000000000000000000000000000000", curr: "head2",
+				fallbackOut: "M\tjobs/app.nomad\n",
+				wantCount:   1,
+			},
+			{
+				name: "all zeros prev head diff-tree fails",
+				repo: "/repo", prev: "0000000000000000000000000000000000000000", curr: "head2",
+				fallbackErr: errors.New("git err"),
 			},
 			{name: "context canceled during primary diff", repo: "/repo", prev: "c1", curr: "c2", cancelOnCall: 1, wantErr: true, wantErrIs: context.Canceled},
 			{name: "context canceled during fallback diff-tree", repo: "/repo", prev: "c1", curr: "c2", primaryErr: errors.New("diff err"), cancelOnCall: 2, wantErr: true, wantErrIs: context.Canceled},
