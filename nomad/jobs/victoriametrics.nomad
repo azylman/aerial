@@ -152,6 +152,42 @@ scrape_configs:
         labels:
           instance: "synapse"
 {{- end }}
+
+  - job_name: "haro"
+    static_configs:
+{{- range nomadService "haro" }}
+      - targets: ["{{ .Address }}:{{ .Port }}"]
+        labels:
+          instance: "haro"
+{{- else }}
+      - targets: ["127.0.0.1:4005"]
+        labels:
+          instance: "haro"
+{{- end }}
+
+  - job_name: "coven"
+    static_configs:
+{{- range nomadService "coven" }}
+      - targets: ["{{ .Address }}:{{ .Port }}"]
+        labels:
+          instance: "coven"
+{{- else }}
+      - targets: ["127.0.0.1:4008"]
+        labels:
+          instance: "coven"
+{{- end }}
+
+  - job_name: "vanadis"
+    static_configs:
+{{- range nomadService "vanadis" }}
+      - targets: ["{{ .Address }}:{{ .Port }}"]
+        labels:
+          instance: "vanadis"
+{{- else }}
+      - targets: ["127.0.0.1:4025"]
+        labels:
+          instance: "vanadis"
+{{- end }}
 EOH
         destination   = "local/scrape.yml"
         change_mode   = "signal"
