@@ -472,7 +472,7 @@ func (s *RouterServer) ProcessWidgetSync(ctx context.Context, args WidgetSyncArg
 		if err != nil {
 			log.Printf("[synapse] [widget] resolve pr error: %v", err)
 		}
-		if targetID == "" {
+		if targetID == "" || isDependabotBranch(branch) {
 			return nil
 		}
 		widgetReq := StatusWidgetRequest{
@@ -568,14 +568,17 @@ func prWidgetBanner(status, banner string) string {
 }
 
 func (s *RouterServer) syncSinglePRWidget(qCtx context.Context, pgReg *PostgresPRRegistry, repo string, prNumber int, allowSweep bool) error {
-	prQuery := `SELECT target_id, title, status, status_message_id, created_at, updated_at, COALESCE(metadata->>'banner', ''), COALESCE((metadata->'ci_checks')::text, '{}'), COALESCE(metadata::text, '{}') FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1`
-	var targetID, title, prStatus, prMsgID, prBanner, ciChecksJSON, metadataJSON string
+	prQuery := `SELECT target_id, title, status, status_message_id, created_at, updated_at, COALESCE(metadata->>'banner', ''), COALESCE((metadata->'ci_checks')::text, '{}'), COALESCE(metadata::text, '{}'), COALESCE(branch, '') FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1`
+	var targetID, title, prStatus, prMsgID, prBanner, ciChecksJSON, metadataJSON, branch string
 	var prCreatedAt, prUpdatedAt time.Time
-	prErr := pgReg.pool.QueryRow(qCtx, prQuery, repo, prNumber).Scan(&targetID, &title, &prStatus, &prMsgID, &prCreatedAt, &prUpdatedAt, &prBanner, &ciChecksJSON, &metadataJSON)
+	prErr := pgReg.pool.QueryRow(qCtx, prQuery, repo, prNumber).Scan(&targetID, &title, &prStatus, &prMsgID, &prCreatedAt, &prUpdatedAt, &prBanner, &ciChecksJSON, &metadataJSON, &branch)
 	if prErr != nil && !errors.Is(prErr, pgx.ErrNoRows) {
 		return fmt.Errorf("sync pr widget query pr: %w", prErr)
 	}
 	prFound := prErr == nil
+	if prFound && isDependabotBranch(branch) {
+		return nil
+	}
 
 	if allowSweep && prFound && strings.EqualFold(strings.TrimSpace(prStatus), "deployed") {
 		s.sweepOlderDeployedPRWidgets(qCtx, pgReg, repo, prNumber)
@@ -996,8 +999,20 @@ func (s *RouterServer) handleHangarSyncSuccess(ctx context.Context, evt HangarDe
 	return nil
 }
 
+func (s *RouterServer) isDependabotPRNumber(ctx context.Context, repo string, prNum int) bool {
+	if s == nil || s.registry == nil || prNum <= 0 {
+		return false
+	}
+	_, branch, _, _, err := s.registry.ResolvePRByNumber(ctx, normalizeRepo(repo), prNum)
+	return err == nil && isDependabotBranch(branch)
+}
+
 func (s *RouterServer) dispatchDeploymentSuccessPrompt(ctx context.Context, targetID, jobName, repo, commitSHA string, prNum int, refID string) error {
 	if s.dispatcher == nil || !IsValidDiscordSnowflake(targetID) {
+		return nil
+	}
+	if s.isDependabotPRNumber(ctx, repo, prNum) {
+		log.Printf("[synapse] [dependabot] suppressing deploy_success /prompt wake for %s#%d (job=%s)", repo, prNum, jobName)
 		return nil
 	}
 

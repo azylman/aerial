@@ -738,6 +738,18 @@ func TestProcessGitHubEvent(t *testing.T) {
 			wantDispatches:    1,
 			wantTargetID:      "1542423172400291873",
 		},
+		{
+			name:                 "check_run success on dependabot branch skips recording check status and widget sync",
+			event:                "check_run",
+			delivery:             "del-cr-dependabot-pass",
+			payload:              `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"Service Unit Tests","head_sha":"deppasssha","status":"completed","conclusion":"success","pull_requests":[{"number":608,"head":{"ref":"dependabot/pip/bar-1.0","sha":"deppasssha"}}]}}`,
+			reg:                  &mockPRRegistry{recordCheckUpdated: true},
+			disp:                 &mockOutboundDispatcher{},
+			wantPR:               608,
+			wantBranch:           "dependabot/pip/bar-1.0",
+			wantHeadSHA:          "deppasssha",
+			wantRecordCheckCalls: 0,
+		},
 	}
 
 	for _, tc := range cases {
