@@ -61,24 +61,37 @@ type eriTranscriptStepItem struct {
 	Content  string `json:"content"`
 }
 
-func (s *SQLStore) fetchTasks(ctx context.Context, endpoint string) ([]eriTaskItem, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+func (s *SQLStore) fetchBrainJSON(ctx context.Context, endpointURL, label string, dst any) error {
+	if s.getBrainURL() == "" {
+		return fmt.Errorf("brain API URL not configured")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpointURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create eri tasks request: %w", err)
+		return fmt.Errorf("failed to create %s request: %w", label, err)
+	}
+	if s.brainToken != "" {
+		req.Header.Set("Authorization", "Bearer "+s.brainToken)
 	}
 	resp, err := s.getHTTPClient().Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("eri tasks request failed: %w", err)
+		return fmt.Errorf("%s request failed: %w", label, err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("eri tasks request returned status %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s request returned status %d", label, resp.StatusCode)
 	}
 
+	if err := json.NewDecoder(resp.Body).Decode(dst); err != nil {
+		return fmt.Errorf("failed to decode %s response: %w", label, err)
+	}
+	return nil
+}
+
+func (s *SQLStore) fetchTasks(ctx context.Context, endpoint string) ([]eriTaskItem, error) {
 	var data eriTasksResponse
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, fmt.Errorf("failed to decode eri tasks response: %w", err)
+	if err := s.fetchBrainJSON(ctx, endpoint, "eri tasks", &data); err != nil {
+		return nil, err
 	}
 	return data.Tasks, nil
 }
@@ -477,23 +490,9 @@ func (s *SQLStore) fetchTranscriptSteps(ctx context.Context, sessionCSV, sinceRF
 	searchEndpoint := fmt.Sprintf("%s/transcripts/search?mode=steps&session=%s&since=%s&limit=50",
 		s.getBrainURL(), url.QueryEscape(sessionCSV), url.QueryEscape(sinceRFC))
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, searchEndpoint, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create transcript search request: %w", err)
-	}
-	resp, err := s.getHTTPClient().Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("transcript search request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("transcript search request returned status %d", resp.StatusCode)
-	}
-
 	var searchRes eriTranscriptSearchResult
-	if err := json.NewDecoder(resp.Body).Decode(&searchRes); err != nil {
-		return nil, fmt.Errorf("failed to decode transcript search response: %w", err)
+	if err := s.fetchBrainJSON(ctx, searchEndpoint, "transcript search", &searchRes); err != nil {
+		return nil, err
 	}
 	return searchRes.Steps, nil
 }
@@ -669,8 +668,7 @@ func (s *SQLStore) GetPendingProceduralCandidates(ctx context.Context) ([]Proced
 	return candidates, nil
 }
 
-// MarkProceduralCandidatesConsolidated transitions candidate status to 'consolidated' and records the created PR number.
-func (s *SQLStore) MarkProceduralCandidatesConsolidated(ctx context.Context, ids []int64, prNumber int) error {
+func (s *SQLStore) updateProceduralCandidates(ctx context.Context, setClause, errLabel string, prefixArgs []any, ids []int64) error {
 	if err := s.checkDB(); err != nil {
 		return err
 	}
@@ -681,47 +679,30 @@ func (s *SQLStore) MarkProceduralCandidatesConsolidated(ctx context.Context, ids
 	defer cancel()
 
 	placeholders := make([]string, len(ids))
-	args := make([]any, 0, len(ids)+1)
-	args = append(args, prNumber)
+	args := make([]any, 0, len(prefixArgs)+len(ids))
+	args = append(args, prefixArgs...)
+	offset := len(prefixArgs)
 	for i, id := range ids {
-		placeholders[i] = fmt.Sprintf("$%d", i+2)
+		placeholders[i] = fmt.Sprintf("$%d", offset+i+1)
 		args = append(args, id)
 	}
 
 	query := fmt.Sprintf(`UPDATE procedural_candidates
-	SET status = 'consolidated', pr_number = $1, updated_at = CURRENT_TIMESTAMP
-	WHERE id IN (%s)`, strings.Join(placeholders, ", "))
+	SET %s, updated_at = CURRENT_TIMESTAMP
+	WHERE id IN (%s)`, setClause, strings.Join(placeholders, ", "))
 
 	if _, err := s.db.ExecContext(queryCtx, query, args...); err != nil {
-		return fmt.Errorf("failed to mark procedural candidates consolidated: %w", err)
+		return fmt.Errorf("failed to mark procedural candidates %s: %w", errLabel, err)
 	}
 	return nil
 }
 
+// MarkProceduralCandidatesConsolidated transitions candidate status to 'consolidated' and records the created PR number.
+func (s *SQLStore) MarkProceduralCandidatesConsolidated(ctx context.Context, ids []int64, prNumber int) error {
+	return s.updateProceduralCandidates(ctx, "status = 'consolidated', pr_number = $1", "consolidated", []any{prNumber}, ids)
+}
+
 // MarkProceduralCandidatesSkipped transitions candidate status to 'skipped'.
 func (s *SQLStore) MarkProceduralCandidatesSkipped(ctx context.Context, ids []int64) error {
-	if err := s.checkDB(); err != nil {
-		return err
-	}
-	if len(ids) == 0 {
-		return nil
-	}
-	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	placeholders := make([]string, len(ids))
-	args := make([]any, 0, len(ids))
-	for i, id := range ids {
-		placeholders[i] = fmt.Sprintf("$%d", i+1)
-		args = append(args, id)
-	}
-
-	query := fmt.Sprintf(`UPDATE procedural_candidates
-	SET status = 'skipped', updated_at = CURRENT_TIMESTAMP
-	WHERE id IN (%s)`, strings.Join(placeholders, ", "))
-
-	if _, err := s.db.ExecContext(queryCtx, query, args...); err != nil {
-		return fmt.Errorf("failed to mark procedural candidates skipped: %w", err)
-	}
-	return nil
+	return s.updateProceduralCandidates(ctx, "status = 'skipped'", "skipped", nil, ids)
 }

@@ -614,6 +614,79 @@ func TestDB_OneShotOperations(t *testing.T) {
 	}
 }
 
+func TestDB_DeleteByID(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+
+	_ = InsertOneShotSchedule(ctx, db, OneShotSchedule{ID: "del-test-1", ThreadID: "th-1", RunAt: time.Now()})
+
+	tests := []struct {
+		name        string
+		nilDB       bool
+		query       string
+		emptyErrMsg string
+		errPrefix   string
+		id          string
+		wantErr     bool
+		wantDeleted bool
+	}{
+		{
+			name:        "NilDB",
+			nilDB:       true,
+			query:       "DELETE FROM one_shot_schedules WHERE id = $1",
+			id:          "del-test-1",
+			wantErr:     true,
+			wantDeleted: false,
+		},
+		{
+			name:        "EmptyIDCustomMessage",
+			query:       "DELETE FROM one_shot_schedules WHERE id = $1",
+			emptyErrMsg: "custom id required",
+			id:          "   ",
+			wantErr:     true,
+			wantDeleted: false,
+		},
+		{
+			name:        "BadQuerySyntax",
+			query:       "DELETE FROM non_existent_table_xyz WHERE id = $1",
+			errPrefix:   "failed to delete test item",
+			id:          "del-test-1",
+			wantErr:     true,
+			wantDeleted: false,
+		},
+		{
+			name:        "SuccessExisting",
+			query:       "DELETE FROM one_shot_schedules WHERE id = $1",
+			id:          "del-test-1",
+			wantErr:     false,
+			wantDeleted: true,
+		},
+		{
+			name:        "SuccessNonExistent",
+			query:       "DELETE FROM one_shot_schedules WHERE id = $1",
+			id:          "del-test-nonexistent",
+			wantErr:     false,
+			wantDeleted: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			targetDB := db
+			if tc.nilDB {
+				targetDB = nil
+			}
+			deleted, err := deleteByID(ctx, targetDB, tc.query, tc.emptyErrMsg, tc.errPrefix, tc.id)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("deleteByID() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if deleted != tc.wantDeleted {
+				t.Errorf("deleteByID() deleted = %v, want %v", deleted, tc.wantDeleted)
+			}
+		})
+	}
+}
+
 func TestDB_ScheduleRunsAndPruning(t *testing.T) {
 	db := setupTestDB(t)
 	ctx := context.Background()
