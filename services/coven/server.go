@@ -82,6 +82,7 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("coven"))
+	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/facts", s.handleFacts)
 	mux.HandleFunc("/context", s.handleContext)
 	mux.HandleFunc("/consolidate", s.handleConsolidate)
@@ -198,6 +199,10 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/debug/coverage/flush" {
 		httpkit.HandleCoverageFlush("coven")(w, r)
+		return
+	}
+	if r.URL.Path == "/metrics" {
+		s.handleMetrics(w, r)
 		return
 	}
 	if r.URL.Path == "/facts" {

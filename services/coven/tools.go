@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 )
 
 // MemorySearchArgs defines inputs for the memory_search MCP tool.
@@ -84,8 +85,10 @@ func NewToolHandler(cfg *Config, store Store, ollama OllamaClient, publisher ...
 // Consolidate runs a complete-linkage clique dreaming pass over all stored facts,
 // and if a publisher is configured, triggers procedural skill consolidation.
 func (h *ToolHandler) Consolidate(ctx context.Context) (int, error) {
+	start := time.Now()
 	consolidated, err := ConsolidateFactClusters(ctx, h.store, h.ollama, h.llmClient)
 	if err != nil {
+		RecordOperation("consolidate", "error", time.Since(start).Seconds())
 		return consolidated, err
 	}
 	log.Printf("[Memory] Fact consolidation dreaming completed: %d clusters consolidated", consolidated)
@@ -102,6 +105,7 @@ func (h *ToolHandler) Consolidate(ctx context.Context) (int, error) {
 		}
 	}
 
+	RecordOperation("consolidate", "success", time.Since(start).Seconds())
 	return consolidated, nil
 }
 
@@ -121,8 +125,10 @@ func FormatMemoryContext(facts []Fact) string {
 
 // MemorySearch executes semantic search with 70/30 Hybrid RRF and MMR diversity re-ranking.
 func (h *ToolHandler) MemorySearch(ctx context.Context, args MemorySearchArgs) (MemorySearchOutput, error) {
+	start := time.Now()
 	query := strings.TrimSpace(args.Query)
 	if query == "" {
+		RecordOperation("search", "error", time.Since(start).Seconds())
 		return MemorySearchOutput{Facts: []Fact{}}, fmt.Errorf("'query' cannot be empty")
 	}
 
@@ -151,6 +157,7 @@ func (h *ToolHandler) MemorySearch(ctx context.Context, args MemorySearchArgs) (
 
 	candidates, err := h.store.SearchCandidateFacts(ctx, emb, query, candidateLimit, DefaultMinScore)
 	if err != nil {
+		RecordOperation("search", "error", time.Since(start).Seconds())
 		return MemorySearchOutput{Facts: []Fact{}}, fmt.Errorf("failed to search candidate facts: %w", err)
 	}
 
@@ -160,6 +167,7 @@ func (h *ToolHandler) MemorySearch(ctx context.Context, args MemorySearchArgs) (
 		facts[i] = s.Fact
 	}
 
+	RecordOperation("search", "success", time.Since(start).Seconds())
 	return MemorySearchOutput{
 		Facts: facts,
 		Count: len(facts),
@@ -168,8 +176,10 @@ func (h *ToolHandler) MemorySearch(ctx context.Context, args MemorySearchArgs) (
 
 // MemoryStore persists, updates, or reinforces a fact.
 func (h *ToolHandler) MemoryStore(ctx context.Context, args MemoryStoreArgs) (MemoryStoreOutput, error) {
+	start := time.Now()
 	factText := strings.TrimSpace(args.FactText)
 	if factText == "" {
+		RecordOperation("store", "error", time.Since(start).Seconds())
 		return MemoryStoreOutput{}, fmt.Errorf("'fact_text' cannot be empty")
 	}
 
@@ -178,19 +188,23 @@ func (h *ToolHandler) MemoryStore(ctx context.Context, args MemoryStoreArgs) (Me
 			FactText: factText,
 		})
 		if !admit {
+			RecordOperation("store", "error", time.Since(start).Seconds())
 			return MemoryStoreOutput{}, fmt.Errorf("fact rejected by admission gate (%s)", reason)
 		}
 	}
 
 	if h.ollama == nil {
+		RecordOperation("store", "error", time.Since(start).Seconds())
 		return MemoryStoreOutput{}, fmt.Errorf("ollama client is required for embedding generation")
 	}
 
 	emb, err := h.ollama.GenerateEmbedding(ctx, factText, false, 1)
 	if err != nil {
+		RecordOperation("store", "error", time.Since(start).Seconds())
 		return MemoryStoreOutput{}, fmt.Errorf("failed to generate embedding: %w", err)
 	}
 	if len(emb) != ExpectedEmbeddingDim {
+		RecordOperation("store", "error", time.Since(start).Seconds())
 		return MemoryStoreOutput{}, fmt.Errorf("invalid embedding dimension: expected %d, got %d", ExpectedEmbeddingDim, len(emb))
 	}
 
@@ -198,11 +212,14 @@ func (h *ToolHandler) MemoryStore(ctx context.Context, args MemoryStoreArgs) (Me
 	if args.SupersedesID > 0 {
 		err := h.store.UpdateFact(ctx, args.SupersedesID, factText, emb)
 		if err != nil {
+			RecordOperation("store", "error", time.Since(start).Seconds())
 			if errors.Is(err, ErrFactNotFound) {
 				return MemoryStoreOutput{}, fmt.Errorf("fact with id %d not found to supersede", args.SupersedesID)
 			}
 			return MemoryStoreOutput{}, fmt.Errorf("failed to supersede fact: %w", err)
 		}
+		RecordFactStored("updated")
+		RecordOperation("store", "success", time.Since(start).Seconds())
 		return MemoryStoreOutput{
 			Status:  "success",
 			FactID:  args.SupersedesID,
@@ -216,8 +233,11 @@ func (h *ToolHandler) MemoryStore(ctx context.Context, args MemoryStoreArgs) (Me
 	if err == nil && dup != nil {
 		log.Printf("[Memory] Reinforcing duplicate fact %d (sim=%.2f, text=%q)", dup.ID, sim, dup.FactText)
 		if err := h.store.ReinforceFact(ctx, dup.ID); err != nil {
+			RecordOperation("store", "error", time.Since(start).Seconds())
 			return MemoryStoreOutput{}, fmt.Errorf("failed to reinforce duplicate fact: %w", err)
 		}
+		RecordFactStored("reinforced")
+		RecordOperation("store", "success", time.Since(start).Seconds())
 		return MemoryStoreOutput{
 			Status:  "success",
 			FactID:  dup.ID,
@@ -229,9 +249,12 @@ func (h *ToolHandler) MemoryStore(ctx context.Context, args MemoryStoreArgs) (Me
 	// 3. Insert new fact
 	id, err := h.store.InsertFact(ctx, factText, emb)
 	if err != nil {
+		RecordOperation("store", "error", time.Since(start).Seconds())
 		return MemoryStoreOutput{}, fmt.Errorf("failed to insert fact: %w", err)
 	}
 
+	RecordFactStored("inserted")
+	RecordOperation("store", "success", time.Since(start).Seconds())
 	return MemoryStoreOutput{
 		Status:  "success",
 		FactID:  id,
@@ -242,18 +265,23 @@ func (h *ToolHandler) MemoryStore(ctx context.Context, args MemoryStoreArgs) (Me
 
 // MemoryForget deletes a fact by its ID.
 func (h *ToolHandler) MemoryForget(ctx context.Context, args MemoryForgetArgs) (MemoryForgetOutput, error) {
+	start := time.Now()
 	if args.FactID <= 0 {
+		RecordOperation("forget", "error", time.Since(start).Seconds())
 		return MemoryForgetOutput{}, fmt.Errorf("'fact_id' is required and must be positive")
 	}
 
 	err := h.store.DeleteFact(ctx, args.FactID)
 	if err != nil {
+		RecordOperation("forget", "error", time.Since(start).Seconds())
 		if errors.Is(err, ErrFactNotFound) {
 			return MemoryForgetOutput{}, fmt.Errorf("fact with id %d not found", args.FactID)
 		}
 		return MemoryForgetOutput{}, fmt.Errorf("failed to delete fact: %w", err)
 	}
 
+	RecordFactStored("deleted")
+	RecordOperation("forget", "success", time.Since(start).Seconds())
 	return MemoryForgetOutput{
 		Status:  "success",
 		FactID:  args.FactID,
@@ -268,12 +296,15 @@ func (h *ToolHandler) GetFacts(ctx context.Context, filter FactsFilter) (*FactsR
 
 // GetContext retrieves relevant memory facts and formats them as a prompt context block.
 func (h *ToolHandler) GetContext(ctx context.Context, query string, limit int) (*ContextResponse, error) {
+	start := time.Now()
 	if ctx != nil && ctx.Err() != nil {
+		RecordOperation("context", "error", time.Since(start).Seconds())
 		return nil, ctx.Err()
 	}
 
 	cleanQuery := strings.TrimSpace(query)
 	if cleanQuery == "" {
+		RecordOperation("context", "success", time.Since(start).Seconds())
 		return &ContextResponse{
 			Context: "",
 			Facts:   []Fact{},
@@ -305,6 +336,7 @@ func (h *ToolHandler) GetContext(ctx context.Context, query string, limit int) (
 	candidates, err := h.store.SearchCandidateFacts(ctx, emb, cleanQuery, candidateLimit, DefaultMinScore)
 	if err != nil {
 		log.Printf("[Memory] Warning: Candidate search failed: %v. Proceeding with empty context.", err)
+		RecordOperation("context", "success", time.Since(start).Seconds())
 		return &ContextResponse{
 			Context: "",
 			Facts:   []Fact{},
@@ -317,6 +349,7 @@ func (h *ToolHandler) GetContext(ctx context.Context, query string, limit int) (
 		facts[i] = s.Fact
 	}
 
+	RecordOperation("context", "success", time.Since(start).Seconds())
 	return &ContextResponse{
 		Context: FormatMemoryContext(facts),
 		Facts:   facts,

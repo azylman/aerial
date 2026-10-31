@@ -197,6 +197,7 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("haro"))
+	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/schedules", s.handleSchedules)
 	mux.HandleFunc("/schedules/runs", s.handleScheduleRuns)
 	mux.HandleFunc("/schedules/oneshot", s.handleScheduleOneShot)
@@ -226,6 +227,10 @@ func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/debug/coverage/flush" {
 		httpkit.HandleCoverageFlush("haro")(w, r)
+		return
+	}
+	if r.URL.Path == "/metrics" {
+		s.handleMetrics(w, r)
 		return
 	}
 	if r.URL.Path == "/schedules" {
@@ -532,12 +537,15 @@ func (s *Server) handleFireEventTriggers(w http.ResponseWriter, r *http.Request)
 	var firstDispatchErr error
 	for _, trig := range triggers {
 		prompt := FormatEventTriggerPrompt(req.ContextHeader, trig.Prompt)
+		start := time.Now()
 		_, dispErr := s.dispatcher.DispatchPrompt(r.Context(), PromptDispatchRequest{
 			ChannelID: trig.ChannelID,
 			Prompt:    prompt,
 			Effort:    trig.Effort,
 		})
+		RecordScheduleDispatchDuration("event_watch", time.Since(start).Seconds())
 		if dispErr != nil {
+			RecordScheduleRun("event_watch", "failed")
 			if reinsertErr := InsertEventTrigger(context.WithoutCancel(r.Context()), s.handler.db, trig); reinsertErr != nil {
 				log.Printf("[Haro] failed to re-insert event trigger %s after dispatch error: %v", trig.ID, reinsertErr)
 			}
@@ -546,6 +554,7 @@ func (s *Server) handleFireEventTriggers(w http.ResponseWriter, r *http.Request)
 			}
 			continue
 		}
+		RecordScheduleRun("event_watch", "completed")
 		fired = append(fired, trig)
 	}
 	if firstDispatchErr != nil {
