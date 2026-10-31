@@ -262,84 +262,66 @@ func formatStepWindow(res transcript.StepWindowResult) string {
 	return sb.String()
 }
 
-func executeSearchHTTP(ctx context.Context, cfg CLIConfig) (transcript.SearchResult, error) {
-	endpoint := fmt.Sprintf("%s/api/transcripts/search", strings.TrimRight(cfg.BaseURL, "/"))
-	u, err := url.Parse(endpoint)
+var (
+	newRequestWithContext = http.NewRequestWithContext
+	newHTTPClient         = func(timeout time.Duration) *http.Client {
+		return &http.Client{Timeout: timeout}
+	}
+)
+
+func fetchTranscriptAPI[T any](ctx context.Context, baseURL, endpointPath string, params url.Values) (T, error) {
+	var out T
+	targetURL := strings.TrimRight(baseURL, "/") + endpointPath
+	if len(params) > 0 {
+		targetURL += "?" + params.Encode()
+	}
+
+	req, err := newRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
-		return transcript.SearchResult{}, err
+		return out, err
 	}
 
-	q := u.Query()
-	q.Set("q", cfg.Query)
-	q.Set("mode", cfg.Mode)
-	if cfg.Tool != "" {
-		q.Set("tool", cfg.Tool)
-	}
-	if cfg.Session != "" {
-		q.Set("session", cfg.Session)
-	}
-	q.Set("limit", strconv.Itoa(cfg.Limit))
-	u.RawQuery = q.Encode()
-
-	req, err := newRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return transcript.SearchResult{}, err
-	}
-
-	client := &http.Client{Timeout: 5 * time.Second}
+	// Use 5s timeout to leave headroom for direct-DB fallback within parent CLI context
+	client := newHTTPClient(5 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
-		return transcript.SearchResult{}, err
+		return out, err
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return transcript.SearchResult{}, err
+		return out, err
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return transcript.SearchResult{}, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+		return out, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
-	var res transcript.SearchResult
-	if err := json.Unmarshal(body, &res); err != nil {
-		return transcript.SearchResult{}, fmt.Errorf("failed unmarshaling response: %w", err)
+	if err := json.Unmarshal(body, &out); err != nil {
+		return out, fmt.Errorf("failed unmarshaling response: %w", err)
 	}
 
-	return res, nil
+	return out, nil
 }
 
-var newRequestWithContext = http.NewRequestWithContext
+func executeSearchHTTP(ctx context.Context, cfg CLIConfig) (transcript.SearchResult, error) {
+	params := url.Values{}
+	params.Set("q", cfg.Query)
+	params.Set("mode", cfg.Mode)
+	if cfg.Tool != "" {
+		params.Set("tool", cfg.Tool)
+	}
+	if cfg.Session != "" {
+		params.Set("session", cfg.Session)
+	}
+	params.Set("limit", strconv.Itoa(cfg.Limit))
+
+	return fetchTranscriptAPI[transcript.SearchResult](ctx, cfg.BaseURL, "/api/transcripts/search", params)
+}
 
 func executeStatsHTTP(ctx context.Context, cfg CLIConfig) (map[string]any, error) {
-	endpoint := fmt.Sprintf("%s/api/transcripts/stats", strings.TrimRight(cfg.BaseURL, "/"))
-	req, err := newRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-	}
-
-	var stats map[string]any
-	if err := json.Unmarshal(body, &stats); err != nil {
-		return nil, err
-	}
-	return stats, nil
+	return fetchTranscriptAPI[map[string]any](ctx, cfg.BaseURL, "/api/transcripts/stats", nil)
 }
 
 var (
@@ -374,45 +356,12 @@ func executeSearchDirectDB(ctx context.Context, cfg CLIConfig) (transcript.Searc
 }
 
 func executeGetHTTP(ctx context.Context, cfg CLIConfig) (transcript.StepWindowResult, error) {
-	endpoint := fmt.Sprintf("%s/api/transcripts/steps", strings.TrimRight(cfg.BaseURL, "/"))
-	u, err := url.Parse(endpoint)
-	if err != nil {
-		return transcript.StepWindowResult{}, err
-	}
+	params := url.Values{}
+	params.Set("session", cfg.Session)
+	params.Set("step", strconv.Itoa(cfg.Step))
+	params.Set("context", strconv.Itoa(cfg.Context))
 
-	q := u.Query()
-	q.Set("session", cfg.Session)
-	q.Set("step", strconv.Itoa(cfg.Step))
-	q.Set("context", strconv.Itoa(cfg.Context))
-	u.RawQuery = q.Encode()
-
-	req, err := newRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return transcript.StepWindowResult{}, err
-	}
-
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return transcript.StepWindowResult{}, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return transcript.StepWindowResult{}, err
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return transcript.StepWindowResult{}, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-	}
-
-	var res transcript.StepWindowResult
-	if err := json.Unmarshal(body, &res); err != nil {
-		return transcript.StepWindowResult{}, fmt.Errorf("failed unmarshaling response: %w", err)
-	}
-
-	return res, nil
+	return fetchTranscriptAPI[transcript.StepWindowResult](ctx, cfg.BaseURL, "/api/transcripts/steps", params)
 }
 
 func executeGetDirectDB(ctx context.Context, cfg CLIConfig) (transcript.StepWindowResult, error) {

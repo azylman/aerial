@@ -611,14 +611,26 @@ func TestErrorClassifiers_RESTError(t *testing.T) {
 	}
 }
 
-func TestIsSnowflake_EdgeCases(t *testing.T) {
-	if isSnowflake("") {
-		t.Error("expected false for empty snowflake")
+func TestIsSnowflake(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{name: "empty snowflake", input: "", want: false},
+		{name: "alphanumeric snowflake", input: "12345abc6789", want: false},
+		{name: "valid numeric snowflake", input: "123456789012345678", want: true},
 	}
-	if isSnowflake("12345abc6789") {
-		t.Error("expected false for alphanumeric snowflake")
-	}
-	if !isSnowflake("123456789012345678") {
-		t.Error("expected true for valid numeric snowflake")
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := isSnowflake(tc.input)
+			if got != tc.want {
+				t.Errorf("isSnowflake(%q) = %v, want %v", tc.input, got, tc.want)
+			}
+		})
 	}
 }
