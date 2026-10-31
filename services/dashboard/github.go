@@ -449,7 +449,7 @@ func (p *GitHubPoller) pollRepo(ctx context.Context, repo, baseURL string, allAc
 		return p.processPolledWorkflowRuns(ctx, repo, newETag, runData.WorkflowRuns, allActiveRunIDs)
 	}
 
-	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == 429 {
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
 		log.Printf("[Dashboard:GitHub] Warning: rate limited on %s: HTTP %d", repo, resp.StatusCode)
 	} else {
 		log.Printf("[Dashboard:GitHub] Warning: unexpected HTTP %d querying %s", resp.StatusCode, repo)

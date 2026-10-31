@@ -70,7 +70,7 @@ func startMainFakeCDPServer(t *testing.T) (*httptest.Server, *Config) {
 						continue
 					}
 
-					var result any = map[string]any{}
+					var result any
 
 					switch req.Method {
 					case "Target.attachToTarget":

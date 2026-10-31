@@ -1305,7 +1305,7 @@ func TestExtractAerialServiceName(t *testing.T) {
 		{name: "Nomad container with alloc_id in name", container: mkLabeledCont("victoriametrics-mcp-6ca68da8-1599-0516-4c28-635658025294", "", map[string]string{"com.hashicorp.nomad.alloc_id": "6ca68da8-1599-0516-4c28-635658025294"}), expectedSvc: "victoriametrics-mcp", expectedOk: true},
 		{name: "Legacy container with aerial- prefix", container: mkCont("aerial-proxy", "", "", "", "", 0), expectedSvc: "proxy", expectedOk: true},
 		{name: "Host supervisor container (non-Aerial)", container: mkLabeledCont("hassio_supervisor", "", map[string]string{"io.hass.type": "supervisor"}), expectedSvc: "", expectedOk: false},
-		{name: "Host addon container (non-Aerial)", container: mkLabeledCont("app_core_mosquitto", "", map[string]string{"supervisor_managed": ""}), expectedSvc: "", expectedOk: false},
+		{name: "Host addon container (non-Aerial)", container: mkLabeledCont("app_core_zigbee2mqtt", "", map[string]string{"supervisor_managed": ""}), expectedSvc: "", expectedOk: false},
 		{name: "Empty container metadata", container: mkLabeledCont("", "running", nil), expectedSvc: "", expectedOk: false},
 	}
 

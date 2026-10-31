@@ -561,6 +561,7 @@ type mockCloser struct {
 func (m mockCloser) Close() error { return m.err }
 
 func startMockPostgres(t *testing.T) string {
+	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("failed to listen on mock pg: %v", err)
@@ -2074,6 +2075,7 @@ func (q queryMockDBTX) QueryContext(ctx context.Context, query string, args ...a
 }
 
 func setupTestDBMem(t *testing.T) *sql.DB {
+	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatalf("failed to open in-memory sqlite: %v", err)

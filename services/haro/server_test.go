@@ -145,6 +145,7 @@ func setupTestPostgresTables(t *testing.T, db *sql.DB) {
 }
 
 func setupTestServer(t *testing.T) (*Server, *httptest.Server) {
+	t.Helper()
 	cfg := &Config{DatabaseURL: ":memory:", Timezone: DefaultTimezone, Port: "8080"}
 	db, err := OpenDB(cfg)
 	if err != nil {
