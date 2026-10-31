@@ -76,28 +76,68 @@ var CoreBuildPaths = []string{
 	".dockerignore",
 }
 
+// MirrormereBuildPaths contains path prefixes and root files in azylman/mirrormere that trigger container builds in CI.
+var MirrormereBuildPaths = []string{
+	"cmd/",
+	"internal/",
+	"api/",
+	"client/",
+	"sidecars/",
+	"Dockerfile",
+	"go.mod",
+	"go.sum",
+	"Makefile",
+	".dockerignore",
+}
+
+func isSidecarContainerBuildFile(cleanFile string) bool {
+	if cleanFile == "atlas.hcl" {
+		return true
+	}
+	idx := strings.IndexByte(cleanFile, '/')
+	if idx <= 0 {
+		return false
+	}
+	dir := cleanFile[:idx]
+	return !strings.HasPrefix(dir, ".") && dir != "docs" && dir != "nomad" && dir != "scripts"
+}
+
+func matchesBuildPathList(cleanFile string, buildPaths []string) bool {
+	for _, buildPath := range buildPaths {
+		if strings.HasSuffix(buildPath, "/") {
+			if strings.HasPrefix(cleanFile, buildPath) {
+				return true
+			}
+		} else if cleanFile == buildPath {
+			return true
+		}
+	}
+	return false
+}
+
 // HasContainerBuildChanges evaluates if any changed file in a repository touches paths that trigger container builds.
-// For aerial-config, it always returns false. For aerial, it matches against CoreBuildPaths.
+// For aerial-config, it always returns false. For aerial, aerial-sidecars, and mirrormere, it matches repo build paths.
 func HasContainerBuildChanges(repoPath string, changedFiles []string) bool {
 	cleanRepo := strings.ToLower(filepath.Clean(repoPath))
 	if strings.Contains(cleanRepo, "aerial-config") {
 		return false
 	}
+	isSidecars := strings.Contains(cleanRepo, "aerial-sidecars") || strings.Contains(cleanRepo, "sidecar")
+	isMirrormere := strings.Contains(cleanRepo, "mirrormere")
 	for _, file := range changedFiles {
-		cleanFile := strings.TrimPrefix(filepath.Clean(file), "/")
-		cleanFile = strings.ReplaceAll(cleanFile, "\\", "/")
-		if isStaticAssetOnlyFile(cleanFile) {
-			continue
-		}
-		for _, buildPath := range CoreBuildPaths {
-			if strings.HasSuffix(buildPath, "/") {
-				if strings.HasPrefix(cleanFile, buildPath) {
-					return true
-				}
-			} else {
-				if cleanFile == buildPath {
-					return true
-				}
+		cleanFile := cleanChangedFilePath(file)
+		switch {
+		case isSidecars:
+			if isSidecarContainerBuildFile(cleanFile) {
+				return true
+			}
+		case isMirrormere:
+			if !strings.HasPrefix(cleanFile, "client/eink-node/") && matchesBuildPathList(cleanFile, MirrormereBuildPaths) {
+				return true
+			}
+		default:
+			if !isStaticAssetOnlyFile(cleanFile) && matchesBuildPathList(cleanFile, CoreBuildPaths) {
+				return true
 			}
 		}
 	}
@@ -508,14 +548,15 @@ func ResolveExpectedDeployJobs(
 		}
 	}
 
-	// 4. Container build changes in aerial core
-	if isAerialCore && HasContainerBuildChanges(repoPath, changedFiles) {
+	// 4. Container build changes across repositories (aerial, aerial-sidecars, mirrormere)
+	if !isAerialConfig && HasContainerBuildChanges(repoPath, changedFiles) {
+		repoSlug := NormalizeGitHubSlug(repoPath)
 		var dirs []string
 		for _, r := range append([]string{repoPath}, candidateRepos...) {
 			dirs = append(dirs, filepath.Join(r, "jobs"), filepath.Join(r, "nomad", "jobs"))
 		}
 		walkNomadJobFiles(dirs, func(dir, jobPath, jobName, content string) bool {
-			if JobHasContainerBuildChanges(content, changedFiles) {
+			if jobHasRepoContainerBuildChanges(repoSlug, content, changedFiles) {
 				add(jobName)
 			}
 			return true

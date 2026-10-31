@@ -908,6 +908,14 @@ func TestJobHasContainerBuildChanges_TableDriven(t *testing.T) {
 		{"unmatched other service dir", specVanadis, []string{"services/hangar/main.go", "nomad/jobs/vanadis.nomad"}, false},
 		{"external image never matches", specExternal, []string{"services/vanadis/main.go", "Dockerfile"}, false},
 		{"empty changed files", specVanadis, nil, false},
+		{"sidecar vision image matches vision dir", `job "vision" { task "vision" { config { image = "ghcr.io/azylman/aerial-sidecar-vision:${var.image_tag}" } } }`, []string{"vision/app/detector.py"}, true},
+		{"sidecar vision image ignores other sidecar dir", `job "vision" { task "vision" { config { image = "ghcr.io/azylman/aerial-sidecar-vision:${var.image_tag}" } } }`, []string{"banana/app/main.py"}, false},
+		{"sidecar migrator matches atlas.hcl and scratch migrations", `job "aerial-sidecars-db-migrate" { task "atlas" { config { image = "ghcr.io/azylman/aerial-sidecar-migrator:latest" } } }`, []string{"atlas.hcl"}, true},
+		{"sidecar migrator matches scratch-service migrations", `job "aerial-sidecars-db-migrate" { task "atlas" { config { image = "ghcr.io/azylman/aerial-sidecar-migrator:latest" } } }`, []string{"scratch-service/migrations/20261031.sql"}, true},
+		{"mirrormere core matches cmd and Dockerfile", `job "mirrormere-core" { task "core" { config { image = "ghcr.io/azylman/mirrormere:${var.image_tag}" } } }`, []string{"cmd/mirrormere/main.go"}, true},
+		{"mirrormere core ignores web static assets", `job "mirrormere-core" { task "core" { config { image = "ghcr.io/azylman/mirrormere:${var.image_tag}" } } }`, []string{"web/index.html", "widgets/clock/widget.js"}, false},
+		{"mirrormere ear matches client ear dir", `job "kiosk-ear" { task "ear" { config { image = "ghcr.io/azylman/mirrormere-ear:${var.image_tag}" } } }`, []string{"client/ear/main.py"}, true},
+		{"mirrormere cast-watcher matches go.mod and client cast-watcher", `job "kiosk-cast-watcher" { task "watcher" { config { image = "ghcr.io/azylman/mirrormere-cast-watcher:${var.image_tag}" } } }`, []string{"go.mod"}, true},
 	}
 
 	for _, tc := range tests {
@@ -1034,6 +1042,12 @@ func TestHasContainerBuildChanges_TableDriven(t *testing.T) {
 		{"aerial core docker publish workflow touched returns false", "/share/aerial", []string{".github/workflows/docker-publish.yml"}, false},
 		{"aerial core non-build files (docs, nomad, readme)", "/share/aerial", []string{"nomad/jobs/migrate.nomad", "README.md", "docs/spec.md"}, false},
 		{"aerial core empty files", "/share/aerial", nil, false},
+		{"aerial-sidecars service dir touched", "/share/aerial-sidecars", []string{"vision/app/detector.py"}, true},
+		{"aerial-sidecars atlas.hcl touched", "/share/aerial-sidecars", []string{"atlas.hcl"}, true},
+		{"aerial-sidecars non-build files (docs, scripts, github, root)", "/share/aerial-sidecars", []string{"README.md", "docs/spec.md", "scripts/test.sh", ".github/workflows/docker-publish.yml", "nomad/jobs/migrate.nomad"}, false},
+		{"mirrormere cmd and Dockerfile touched", "/share/mirrormere", []string{"cmd/mirrormere/main.go"}, true},
+		{"mirrormere root Dockerfile touched", "/share/mirrormere", []string{"Dockerfile"}, true},
+		{"mirrormere web and eink-node non-container paths", "/share/mirrormere", []string{"web/index.html", "widgets/clock/widget.js", "client/eink-node/main.py", "README.md"}, false},
 	}
 
 	for _, tt := range tests {
@@ -1548,10 +1562,15 @@ func TestResolveExpectedDeployJobs_TableDriven(t *testing.T) {
 	tmpDir := t.TempDir()
 	aerialDir := filepath.Join(tmpDir, "aerial")
 	configDir := filepath.Join(tmpDir, "aerial-config")
+	sidecarsDir := filepath.Join(tmpDir, "aerial-sidecars")
+	mirrormereDir := filepath.Join(tmpDir, "mirrormere")
 	if err := os.MkdirAll(filepath.Join(aerialDir, "nomad", "jobs"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Join(configDir, "jobs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(sidecarsDir, "nomad", "jobs"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1564,6 +1583,10 @@ func TestResolveExpectedDeployJobs_TableDriven(t *testing.T) {
 	writeJob(filepath.Join(aerialDir, "nomad", "jobs", "hangar.nomad"), `job "hangar" { task "hangar" { config { image = "ghcr.io/azylman/aerial-hangar:${var.image_tag}" } } }`)
 	writeJob(filepath.Join(aerialDir, "nomad", "jobs", "docs.nomad"), `job "docs" { task "docs" { config { image = "ghcr.io/azylman/aerial-docs:${var.image_tag}" } } }`)
 	writeJob(filepath.Join(configDir, "jobs", "eri.nomad"), `job "eri" { task "eri" { config { image = "ghcr.io/azylman/aerial-eri:${var.image_tag}" } } }`)
+	writeJob(filepath.Join(configDir, "jobs", "vision.nomad"), `job "vision" { task "vision" { config { image = "ghcr.io/azylman/aerial-sidecar-vision:${var.image_tag}" } } }`)
+	writeJob(filepath.Join(configDir, "jobs", "mirrormere-core.nomad"), `job "mirrormere-core" { task "core" { config { image = "ghcr.io/azylman/mirrormere:${var.image_tag}" } } }`)
+	writeJob(filepath.Join(configDir, "jobs", "kiosk-ear.nomad"), `job "kiosk-ear" { task "ear" { config { image = "ghcr.io/azylman/mirrormere-ear:${var.image_tag}" } } }`)
+	writeJob(filepath.Join(sidecarsDir, "nomad", "jobs", "migrate.nomad"), `job "aerial-sidecars-db-migrate" { task "atlas" { config { image = "ghcr.io/azylman/aerial-sidecar-migrator:latest" } } }`)
 
 	serviceMappings := []ServiceConfigMapping{
 		{RelPath: "services/haro/haro.yaml", NomadVar: "nomad/jobs/haro", VarKey: "CONFIG_YAML"},
@@ -1627,6 +1650,20 @@ func TestResolveExpectedDeployJobs_TableDriven(t *testing.T) {
 			changedFiles:   []string{"pkg/httpkit/httpkit.go"},
 			candidateRepos: []string{configDir},
 			want:           []string{"eri", "vanadis", "hangar"},
+		},
+		{
+			name:           "aerial-sidecars vision and migrator changes resolve jobs across sidecars and config repos",
+			repoPath:       sidecarsDir,
+			changedFiles:   []string{"vision/app/detector.py", "atlas.hcl"},
+			candidateRepos: []string{aerialDir, configDir},
+			want:           []string{"aerial-sidecars-db-migrate", "vision"},
+		},
+		{
+			name:           "mirrormere root Dockerfile only matches mirrormere jobs and not aerial jobs",
+			repoPath:       mirrormereDir,
+			changedFiles:   []string{"Dockerfile", "client/ear/main.py"},
+			candidateRepos: []string{aerialDir, configDir},
+			want:           []string{"kiosk-ear", "mirrormere-core"},
 		},
 	}
 
