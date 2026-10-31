@@ -601,6 +601,23 @@ transforms:
           }
         }
 
+        # Time-only zerolog console lines (go2rtc)
+        if !exists(.level) {
+          parsed_go2rtc, err = parse_regex(.message, r'^\d{2}:\d{2}:\d{2}\.\d+\s+(?P<severity>TRC|DBG|INF|WRN|ERR|FTL)\b\s*(?P<msg>.*)$')
+          if err == null {
+            sev = string!(parsed_go2rtc.severity)
+            if sev == "INF" {
+              .level = "info"
+            } else if sev == "WRN" {
+              .level = "warn"
+            } else if sev == "DBG" || sev == "TRC" {
+              .level = "debug"
+            } else if sev == "ERR" || sev == "FTL" {
+              .level = "error"
+            }
+          }
+        }
+
         # ONNX Runtime logs (voice, laya)
         if !exists(.level) {
           parsed_onnx, err = parse_regex(.message, r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?\s+\[(?P<sev>[IWEF]):onnxruntime:')
@@ -634,6 +651,10 @@ transforms:
             .level = "info"
           }
         }
+      }
+
+      if .service == "cadvisor" && contains(downcase(string(.message) ?? ""), "failed to collect filesystem stats") {
+        .level = "info"
       }
 
       # Map to OpenObserve native microsecond timestamp column

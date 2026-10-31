@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"database/sql"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -106,6 +107,15 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 	for _, m := range expectedMetrics {
 		if !strings.Contains(body, m) {
 			t.Errorf("expected metrics output to contain %q, but it was missing", m)
+		}
+	}
+
+	for _, mode := range []string{"sse", "json"} {
+		for _, status := range []string{"success", "error"} {
+			expectedCount := fmt.Sprintf(`aerial_brain_voice_ttfr_duration_seconds_count{mode="%s",status="%s"}`, mode, status)
+			if !strings.Contains(body, expectedCount) {
+				t.Errorf("expected metrics output to contain %q, but it was missing", expectedCount)
+			}
 		}
 	}
 }
