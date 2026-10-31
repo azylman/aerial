@@ -443,7 +443,7 @@ func TestTwilioWebhook_StreamUnauthorized(t *testing.T) {
 	}
 }
 
-func TestServer_EdgeCases(t *testing.T) {
+func TestServer_ToWSSAndRouteGuards(t *testing.T) {
 	t.Parallel()
 
 	server, store, cfg := setupTestServer()
@@ -794,7 +794,7 @@ func TestServer_TokenIssueFailures(t *testing.T) {
 	}
 }
 
-func TestServer_MoreBranches(t *testing.T) {
+func TestServer_UnnormalizedPhonesAndReporterErrors(t *testing.T) {
 	t.Parallel()
 	server, _, cfg := setupTestServer()
 	cfg.AllowFrom = []string{"not-a-valid-phone", "+15105550111"}

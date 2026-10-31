@@ -287,55 +287,69 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
 }
 
+type roundTripperFunc = roundTripFunc
+
 func TestDownloadRecording(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name          string
-		recordingURL  string
-		redirectURL   string
-		mockStatus    int
-		mockBody      []byte
-		mockType      string
-		wantErrSubstr string
+		name         string
+		rawURL       string
+		redirectURL  string
+		mockStatus   int
+		mockBody     []byte
+		mockType     string
+		transportErr error
+		wantErrSub   string
 	}{
 		{
-			name:          "rejects non-https scheme",
-			recordingURL:  "http://169.254.169.254/latest/meta-data",
-			wantErrSubstr: "https required",
+			name:       "rejects invalid url",
+			rawURL:     "::not-a-url",
+			wantErrSub: "invalid recording url",
 		},
 		{
-			name:          "rejects untrusted host",
-			recordingURL:  "https://evil.example.com/recording.wav",
-			wantErrSubstr: "untrusted recording host",
+			name:       "rejects non-https scheme",
+			rawURL:     "http://169.254.169.254/latest/meta-data",
+			wantErrSub: "https required",
 		},
 		{
-			name:         "successful download with twiliocdn redirect and auth strip",
-			recordingURL: "https://api.twilio.com/2010-04-01/Accounts/AC123/Recordings/RE123.wav",
-			redirectURL:  "https://media.twiliocdn.com/rec123.wav",
-			mockStatus:   http.StatusOK,
-			mockBody:     []byte("WAVE-AUDIO-DATA-BYTES"),
-			mockType:     "audio/wav",
+			name:       "rejects untrusted host",
+			rawURL:     "https://evil.example.com/recording.wav",
+			wantErrSub: "untrusted recording host",
 		},
 		{
-			name:          "rejects recording exceeding 8MB limit",
-			recordingURL:  "https://api.twilio.com/2010-04-01/Accounts/AC123/Recordings/huge.wav",
-			mockStatus:    http.StatusOK,
-			mockBody:      make([]byte, 9*1024*1024),
-			mockType:      "audio/wav",
-			wantErrSubstr: "exceeds maximum size limit",
+			name:         "transport failure",
+			rawURL:       "https://api.twilio.com/rec.wav",
+			transportErr: errors.New("network drop"),
+			wantErrSub:   "download recording request failed",
 		},
 		{
-			name:          "rejects redirect to untrusted host",
-			recordingURL:  "https://api.twilio.com/2010-04-01/Accounts/AC123/Recordings/bad_redirect.wav",
-			redirectURL:   "https://attacker.com/stolen.wav",
-			wantErrSubstr: "redirect to untrusted host",
+			name:        "successful download with twiliocdn redirect and auth strip",
+			rawURL:      "https://api.twilio.com/2010-04-01/Accounts/AC123/Recordings/RE123.wav",
+			redirectURL: "https://media.twiliocdn.com/rec123.wav",
+			mockStatus:  http.StatusOK,
+			mockBody:    []byte("WAVE-AUDIO-DATA-BYTES"),
+			mockType:    "audio/wav",
 		},
 		{
-			name:          "rejects recording download with 404 status",
-			recordingURL:  "https://api.twilio.com/2010-04-01/Accounts/AC123/Recordings/notfound.wav",
-			mockStatus:    http.StatusNotFound,
-			wantErrSubstr: "download recording returned status 404",
+			name:       "rejects recording exceeding 8MB limit",
+			rawURL:     "https://api.twilio.com/2010-04-01/Accounts/AC123/Recordings/huge.wav",
+			mockStatus: http.StatusOK,
+			mockBody:   make([]byte, 9*1024*1024),
+			mockType:   "audio/wav",
+			wantErrSub: "exceeds maximum size limit",
+		},
+		{
+			name:        "rejects redirect to untrusted host",
+			rawURL:      "https://api.twilio.com/2010-04-01/Accounts/AC123/Recordings/bad_redirect.wav",
+			redirectURL: "https://attacker.com/stolen.wav",
+			wantErrSub:  "redirect to untrusted host",
+		},
+		{
+			name:       "rejects recording download with 404 status",
+			rawURL:     "https://api.twilio.com/2010-04-01/Accounts/AC123/Recordings/notfound.wav",
+			mockStatus: http.StatusNotFound,
+			wantErrSub: "download recording returned status 404",
 		},
 	}
 
@@ -344,6 +358,9 @@ func TestDownloadRecording(t *testing.T) {
 			t.Parallel()
 
 			tripper := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if tc.transportErr != nil {
+					return nil, tc.transportErr
+				}
 				if req.URL.Hostname() == "api.twilio.com" && tc.redirectURL != "" {
 					if !strings.HasPrefix(req.Header.Get("Authorization"), "Basic ") {
 						t.Errorf("api.twilio.com request missing Basic auth, got %q", req.Header.Get("Authorization"))
@@ -376,10 +393,10 @@ func TestDownloadRecording(t *testing.T) {
 				Transport: tripper,
 			}))
 
-			data, contentType, err := client.DownloadRecording(context.Background(), tc.recordingURL)
-			if tc.wantErrSubstr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr) {
-					t.Fatalf("DownloadRecording() err = %v, want substring %q", err, tc.wantErrSubstr)
+			data, contentType, err := client.DownloadRecording(context.Background(), tc.rawURL)
+			if tc.wantErrSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
+					t.Fatalf("DownloadRecording() err = %v, want substring %q", err, tc.wantErrSub)
 				}
 				return
 			}
@@ -894,93 +911,6 @@ func TestEscapeXML(t *testing.T) {
 			t.Fatalf("escapeXML(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
-}
-
-type roundTripperFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) {
-	return f(r)
-}
-
-func TestHTTPTwilioClient_DownloadRecording_AllBranches(t *testing.T) {
-	t.Parallel()
-
-	client := NewHTTPTwilioClient("AC123", "token123")
-
-	t.Run("invalid url", func(t *testing.T) {
-		t.Parallel()
-		_, _, err := client.DownloadRecording(context.Background(), "::not-a-url")
-		if err == nil {
-			t.Fatal("expected error on invalid url")
-		}
-	})
-
-	t.Run("non https scheme", func(t *testing.T) {
-		t.Parallel()
-		_, _, err := client.DownloadRecording(context.Background(), "http://api.twilio.com/rec.wav")
-		if err == nil {
-			t.Fatal("expected error on non-https scheme")
-		}
-	})
-
-	t.Run("untrusted host", func(t *testing.T) {
-		t.Parallel()
-		_, _, err := client.DownloadRecording(context.Background(), "https://evil.com/rec.wav")
-		if err == nil {
-			t.Fatal("expected error on untrusted host")
-		}
-	})
-
-	t.Run("transport error", func(t *testing.T) {
-		t.Parallel()
-		c := NewHTTPTwilioClient("AC123", "token123", WithTwilioHTTPClient(&http.Client{
-			Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
-				return nil, errors.New("network drop")
-			}),
-		}))
-		_, _, err := c.DownloadRecording(context.Background(), "https://api.twilio.com/rec.wav")
-		if err == nil {
-			t.Fatal("expected error on transport failure")
-		}
-	})
-
-	t.Run("status error", func(t *testing.T) {
-		t.Parallel()
-		c := NewHTTPTwilioClient("AC123", "token123", WithTwilioHTTPClient(&http.Client{
-			Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
-				return &http.Response{
-					StatusCode: http.StatusNotFound,
-					Body:       io.NopCloser(strings.NewReader("not found")),
-				}, nil
-			}),
-		}))
-		_, _, err := c.DownloadRecording(context.Background(), "https://api.twilio.com/rec.wav")
-		if err == nil {
-			t.Fatal("expected error on status 404")
-		}
-	})
-
-	t.Run("success wav", func(t *testing.T) {
-		t.Parallel()
-		c := NewHTTPTwilioClient("AC123", "token123", WithTwilioHTTPClient(&http.Client{
-			Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
-				header := make(http.Header)
-				header.Set("Content-Type", "audio/wav")
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Header:     header,
-					Body:       io.NopCloser(bytes.NewReader([]byte("RIFF1234WAVEfmt"))),
-				}, nil
-			}),
-		}))
-		data, ctype, err := c.DownloadRecording(context.Background(), "https://api.twilio.com/rec.wav")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if ctype != "audio/wav" || len(data) == 0 {
-			t.Fatalf("unexpected recording response: %q, len=%d", ctype, len(data))
-		}
-	})
 }
 
 func TestStreamTokenManager_EntropyError(t *testing.T) {

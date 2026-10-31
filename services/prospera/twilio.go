@@ -261,6 +261,26 @@ func (c *HTTPTwilioClient) CreateCall(ctx context.Context, req CreateCallRequest
 	return result.SID, nil
 }
 
+func (c *HTTPTwilioClient) postFormNoContent(ctx context.Context, endpointURL, opLabel string, data url.Values) error {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpointURL, strings.NewReader(data.Encode()))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	httpReq.SetBasicAuth(c.accountSID, c.authToken)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("twilio: %s: %w", opLabel, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("twilio: %s status %d: %s", opLabel, resp.StatusCode, readBodySnippet(resp.Body))
+	}
+	return nil
+}
+
 // HangupCall completes or cancels an active call.
 func (c *HTTPTwilioClient) HangupCall(ctx context.Context, providerCallSID string) error {
 	if providerCallSID == "" {
@@ -271,23 +291,7 @@ func (c *HTTPTwilioClient) HangupCall(ctx context.Context, providerCallSID strin
 	vals.Set("Status", "completed")
 
 	endpoint := fmt.Sprintf("%s/2010-04-01/Accounts/%s/Calls/%s.json", c.baseURL, c.accountSID, providerCallSID)
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(vals.Encode()))
-	if err != nil {
-		return err
-	}
-	httpReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	httpReq.SetBasicAuth(c.accountSID, c.authToken)
-
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return fmt.Errorf("twilio: hangup call: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("twilio: hangup call status %d: %s", resp.StatusCode, readBodySnippet(resp.Body))
-	}
-	return nil
+	return c.postFormNoContent(ctx, endpoint, "hangup call", vals)
 }
 
 // IsCallActive checks if the remote Twilio call is queued, ringing, or in-progress.
@@ -442,22 +446,7 @@ func (c *HTTPTwilioClient) updatePhoneNumberWebhooks(ctx context.Context, sid, v
 	vals.Set("SmsUrl", smsURL)
 
 	updateEndpoint := fmt.Sprintf("%s/2010-04-01/Accounts/%s/IncomingPhoneNumbers/%s.json", c.baseURL, c.accountSID, sid)
-	uReq, err := http.NewRequestWithContext(ctx, http.MethodPost, updateEndpoint, strings.NewReader(vals.Encode()))
-	if err != nil {
-		return err
-	}
-	uReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	uReq.SetBasicAuth(c.accountSID, c.authToken)
-
-	uResp, err := c.httpClient.Do(uReq)
-	if err != nil {
-		return fmt.Errorf("twilio: update incoming number: %w", err)
-	}
-	defer uResp.Body.Close()
-	if uResp.StatusCode < 200 || uResp.StatusCode >= 300 {
-		return fmt.Errorf("twilio: update incoming number status %d: %s", uResp.StatusCode, readBodySnippet(uResp.Body))
-	}
-	return nil
+	return c.postFormNoContent(ctx, updateEndpoint, "update incoming number", vals)
 }
 
 func (c *HTTPTwilioClient) searchAndPurchasePhoneNumber(ctx context.Context, areaCode, voiceURL, statusURL, smsURL string) (string, error) {

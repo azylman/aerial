@@ -481,7 +481,7 @@ func TestMediaStream_TransparentReconnect(t *testing.T) {
 	}
 }
 
-func TestMediaStream_CornerCases(t *testing.T) {
+func TestCallSessionManager_SessionRegistryAndAccessors(t *testing.T) {
 	t.Parallel()
 
 	tokenMgr := NewStreamTokenManager(time.Now)
@@ -716,7 +716,7 @@ func TestStreamTokenManager_NilTimeSource(t *testing.T) {
 	}
 }
 
-func TestMediaStreamSession_EdgeCases(t *testing.T) {
+func TestMediaStreamSession_NilConnAndDialFallbacks(t *testing.T) {
 	t.Parallel()
 
 	sessNoDialer := NewMediaStreamSession(MediaStreamSessionConfig{
@@ -883,7 +883,7 @@ func TestMediaStream_StopEvent(t *testing.T) {
 	}
 }
 
-func TestWaitForSession_Branches(t *testing.T) {
+func TestCallSessionManager_WaitForSession(t *testing.T) {
 	t.Parallel()
 
 	tokenMgr := NewStreamTokenManager(time.Now)
