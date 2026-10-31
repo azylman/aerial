@@ -16,6 +16,8 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 	RecordSyncRequest("webhook", "error")
 	RecordLastSync("/share/aerial", time.Now())
 	RecordRegistryManifest("ghcr.io", "success", 150*time.Millisecond)
+	RecordReconciliation("success", 250*time.Millisecond)
+	RecordReconciliation("error", 500*time.Millisecond)
 
 	handler := Handler()
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
@@ -32,10 +34,14 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 		"aerial_gitsync_pulls_total",
 		"aerial_gitsync_pull_duration_seconds",
 		"aerial_gitsync_sync_requests_total",
+		"aerial_gitsync_reconciliations_total",
+		"aerial_gitsync_compose_duration_seconds",
 		"aerial_gitsync_last_sync_timestamp_seconds",
 		"aerial_gitsync_build_info",
 		"aerial_hangar_registry_manifest_requests_total",
 		"aerial_hangar_registry_manifest_duration_seconds",
+		"aerial_hangar_reconciliations_total",
+		"aerial_hangar_compose_duration_seconds",
 		"aerial_hangar_build_info",
 	}
 
