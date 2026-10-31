@@ -25,7 +25,7 @@ updates:
       - "/services/haro"
       - "/services/prospera"
       - "/services/vanadis"
-      - "/services/webhooks-router"
+      - "/services/synapse"
     schedule:
       interval: "weekly"
       day: "saturday"

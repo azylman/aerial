@@ -853,6 +853,13 @@ func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *Resol
 		s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
 	}
 	if res.PRNumber > 0 {
+		if strings.HasPrefix(strings.TrimSpace(res.Branch), "dependabot/") {
+			if targetID := s.resolveHeadlessPRTargetID(ctx, res.Repo, res.PRNumber); targetID != "" {
+				if _, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, "", targetID, ""); err != nil {
+					log.Printf("[synapse] [registry] warning self-healing dependabot PR %s#%d on CI failure: %v", res.Repo, res.PRNumber, err)
+				}
+			}
+		}
 		targetID, updated, err := s.registry.AtomicTransitionCIFailed(ctx, res.Repo, res.PRNumber)
 		if err != nil {
 			return err
@@ -1071,6 +1078,17 @@ func (s *RouterServer) processGitHubPullRequestEvent(ctx context.Context, delive
 	if isDependabotPR(p) && (res.Action == "opened" || res.Action == "reopened" || res.Action == "synchronize") {
 		if err := s.enablePRAutoMerge(ctx, res.Repo, res.PRNumber, p.PullRequest.NodeID); err != nil {
 			log.Printf("[synapse] [github] warning enabling auto-merge for %s#%d: %v", res.Repo, res.PRNumber, err)
+		}
+		if s.registry != nil && res.PRNumber > 0 {
+			targetID := s.resolveHeadlessPRTargetID(ctx, res.Repo, res.PRNumber)
+			if targetID != "" {
+				resolvedTargetID, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, p.PullRequest.Title, targetID, "")
+				if err != nil {
+					log.Printf("[synapse] [registry] warning registering dependabot PR %s#%d: %v", res.Repo, res.PRNumber, err)
+				} else {
+					res.TargetID = firstNonEmpty(res.TargetID, resolvedTargetID, targetID)
+				}
+			}
 		}
 	}
 
