@@ -143,6 +143,7 @@ type Store interface {
 	GetActiveConversationsForExtraction(ctx context.Context, activeHours int) ([]string, error)
 	GetUnextractedAdminTurns(ctx context.Context, threadID string) ([]Message, error)
 	GetMaxMessageRowID(ctx context.Context, threadID string) (int64, error)
+	GetConversationFactWatermark(ctx context.Context, threadID string) (int64, *time.Time, error)
 	UpdateConversationFactWatermark(ctx context.Context, threadID string, maxRowID int64) error
 	GetThreadContextBeforeWatermark(ctx context.Context, threadID string, priorTurnLimit int) (string, []Message, error)
 	GetThreadTrajectoryContext(ctx context.Context, threadID string) (retrievedFacts []string, toolCalls []string, err error)
