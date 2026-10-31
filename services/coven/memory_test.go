@@ -660,9 +660,9 @@ func TestConfig_LoadAndResolve(t *testing.T) {
 	validYamlPath := filepath.Join(tmpDir, "config.yaml")
 	validContent := `port: "4009"
 database_url: "postgres://u:p@localhost:5432/testdb"
-brain_url: "http://eri.aerial"
-brain_llm_url: "http://brain.local/internal/llm"
-brain_pr_register_url: "http://synapse.aerial/internal/pr/register"
+eri_url: "http://eri.aerial"
+eri_llm_url: "http://brain.local/internal/llm"
+pr_register_url: "http://synapse.aerial/internal/pr/register"
 custom_skills_dir: "/config/custom-skills"
 rules_dir: "/config/rules"
 config_repo_owner: "azylman"
@@ -758,6 +758,9 @@ ollama:
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("DATABASE_URL", tc.envDB)
 			t.Setenv("POSTGRES_URL", tc.envPG)
+			t.Setenv("ERI_URL", "")
+			t.Setenv("ERI_LLM_URL", "")
+			t.Setenv("PR_REGISTER_URL", "")
 
 			cfg, err := LoadConfigFile(tc.path, tc.dbURL)
 			if (err != nil) != tc.wantErr {
@@ -1864,9 +1867,9 @@ func TestMain_Execution(t *testing.T) {
 	testCfg := filepath.Join(tmpDir, "config.yaml")
 	testCfgContent := `port: "4008"
 database_url: "postgres://u:p@localhost/db"
-brain_url: "http://eri.aerial"
-brain_llm_url: "http://eri.aerial/internal/llm"
-brain_pr_register_url: "http://synapse.aerial/internal/pr/register"
+eri_url: "http://eri.aerial"
+eri_llm_url: "http://eri.aerial/internal/llm"
+pr_register_url: "http://synapse.aerial/internal/pr/register"
 custom_skills_dir: "/config/custom-skills"
 rules_dir: "/config/rules"
 config_repo_owner: "azylman"
@@ -8249,14 +8252,14 @@ func TestConfig_LoadAndResolve_Chunk4Fields(t *testing.T) {
 	yamlPath := filepath.Join(tmpDir, "chunk4.yaml")
 	content := `port: "4008"
 database_url: "postgres://localhost/test"
-brain_url: "http://eri.aerial"
-brain_llm_url: "http://eri.aerial/internal/llm"
+eri_url: "http://eri.aerial"
+eri_llm_url: "http://eri.aerial/internal/llm"
 custom_skills_dir: "/yaml/custom-skills"
 rules_dir: "/yaml/rules"
 github_pat: "pat-from-yaml"
 config_repo_owner: "yaml-owner"
 config_repo_name: "yaml-repo"
-brain_pr_register_url: "http://yaml-brain/internal/pr/register"
+pr_register_url: "http://yaml-brain/internal/pr/register"
 system_channel_id: "1562837549255495693"
 ollama:
   base_url: "http://ollama:11434"
@@ -8331,6 +8334,8 @@ ollama:
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("DATABASE_URL", "postgres://localhost/test")
+			t.Setenv("ERI_URL", "")
+			t.Setenv("ERI_LLM_URL", "")
 			t.Setenv("CUSTOM_SKILLS_DIR", tc.envSkillsDir)
 			t.Setenv("GITHUB_PAT", tc.envPAT)
 			t.Setenv("CONFIG_REPO_OWNER", tc.envOwner)
@@ -8371,9 +8376,9 @@ func TestConfig_BrainURLResolution(t *testing.T) {
 	tmpDir := t.TempDir()
 	baseContent := `port: "4008"
 database_url: "postgres://localhost/test"
-brain_url: "http://custom-eri:8000"
-brain_llm_url: "http://custom-proxy:9000/v1/llm"
-brain_pr_register_url: "http://synapse.aerial/internal/pr/register"
+eri_url: "http://custom-eri:8000"
+eri_llm_url: "http://custom-proxy:9000/v1/llm"
+pr_register_url: "http://synapse.aerial/internal/pr/register"
 custom_skills_dir: "/config/custom-skills"
 rules_dir: "/config/rules"
 config_repo_owner: "azylman"
@@ -8387,13 +8392,13 @@ ollama:
 	_ = os.WriteFile(validFile, []byte(baseContent), 0o644)
 
 	noBrainFile := filepath.Join(tmpDir, "no_brain.yaml")
-	_ = os.WriteFile(noBrainFile, []byte(strings.Replace(baseContent, `brain_url: "http://custom-eri:8000"`, `brain_url: ""`, 1)), 0o644)
+	_ = os.WriteFile(noBrainFile, []byte(strings.Replace(baseContent, `eri_url: "http://custom-eri:8000"`, `eri_url: ""`, 1)), 0o644)
 
 	noLLMFile := filepath.Join(tmpDir, "no_llm.yaml")
-	_ = os.WriteFile(noLLMFile, []byte(strings.Replace(baseContent, `brain_llm_url: "http://custom-proxy:9000/v1/llm"`, `brain_llm_url: ""`, 1)), 0o644)
+	_ = os.WriteFile(noLLMFile, []byte(strings.Replace(baseContent, `eri_llm_url: "http://custom-proxy:9000/v1/llm"`, `eri_llm_url: ""`, 1)), 0o644)
 
 	noPRRegFile := filepath.Join(tmpDir, "no_pr_reg.yaml")
-	_ = os.WriteFile(noPRRegFile, []byte(strings.Replace(baseContent, `brain_pr_register_url: "http://synapse.aerial/internal/pr/register"`, `brain_pr_register_url: ""`, 1)), 0o644)
+	_ = os.WriteFile(noPRRegFile, []byte(strings.Replace(baseContent, `pr_register_url: "http://synapse.aerial/internal/pr/register"`, `pr_register_url: ""`, 1)), 0o644)
 
 	tests := []struct {
 		name         string
@@ -8427,6 +8432,9 @@ ollama:
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("ERI_URL", "")
+			t.Setenv("ERI_LLM_URL", "")
+			t.Setenv("PR_REGISTER_URL", "")
 			cfg, err := LoadConfigFile(tc.path, "")
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("LoadConfigFile() err = %v, wantErr = %v", err, tc.wantErr)
@@ -8448,9 +8456,9 @@ func TestLoadConfig_TableDriven(t *testing.T) {
 	tmpDir := t.TempDir()
 	validContent := `port: '4011'
 database_url: 'postgres://localhost/coven_test'
-brain_url: 'http://eri.aerial'
-brain_llm_url: 'http://eri.aerial/internal/llm'
-brain_pr_register_url: 'http://synapse.aerial/internal/pr/register'
+eri_url: 'http://eri.aerial'
+eri_llm_url: 'http://eri.aerial/internal/llm'
+pr_register_url: 'http://synapse.aerial/internal/pr/register'
 custom_skills_dir: '/custom/skills'
 rules_dir: '/custom/rules'
 config_repo_owner: 'azylman'

@@ -194,7 +194,6 @@ type DashboardConfig struct {
 // DashboardYAMLConfig defines the declarative file schema for dashboard.yaml.
 type DashboardYAMLConfig struct {
 	Port       string   `yaml:"port"`
-	BrainURL   string   `yaml:"brain_url"`
 	EriURL     string   `yaml:"eri_url"`
 	MemoryURL  string   `yaml:"memory_url"`
 	HangarURL  string   `yaml:"hangar_url"`
@@ -255,13 +254,10 @@ func LoadConfigFile(path string, lookup func(string) string) (DashboardConfig, e
 	}
 	eriURL := strings.TrimSpace(ycfg.EriURL)
 	if eriURL == "" {
-		eriURL = strings.TrimSpace(ycfg.BrainURL)
-	}
-	if eriURL == "" {
 		eriURL = strings.TrimSpace(lookup("ERI_URL"))
 	}
 	if eriURL == "" {
-		return DashboardConfig{}, fmt.Errorf("config: brain_url is required in %s", cleanPath)
+		return DashboardConfig{}, fmt.Errorf("config: eri_url is required in %s", cleanPath)
 	}
 	memoryURL := strings.TrimSpace(ycfg.MemoryURL)
 	if memoryURL == "" {

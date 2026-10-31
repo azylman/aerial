@@ -23,24 +23,22 @@ import (
 
 func TestParseCLIArgs(t *testing.T) {
 	tests := []struct {
-		name            string
-		args            []string
-		envURL          string
-		envEriURL       string
-		envAerialEriURL string
-		wantCmd         string
-		wantQuery       string
-		wantMode        string
-		wantTool        string
-		wantSession     string
-		wantLimit       int
-		wantStep        int
-		wantContext     int
-		wantJSON        bool
-		wantDirect      bool
-		wantURL         string
-		wantErrSub      string
-		wantErrIs       error
+		name        string
+		args        []string
+		envEriURL   string
+		wantCmd     string
+		wantQuery   string
+		wantMode    string
+		wantTool    string
+		wantSession string
+		wantLimit   int
+		wantStep    int
+		wantContext int
+		wantJSON    bool
+		wantDirect  bool
+		wantURL     string
+		wantErrSub  string
+		wantErrIs   error
 	}{
 		{
 			name:       "EmptyArgs",
@@ -175,39 +173,15 @@ func TestParseCLIArgs(t *testing.T) {
 			wantContext: 2,
 		},
 		{
-			name:        "EnvURLOverride",
-			args:        []string{"stats"},
-			envURL:      "http://env-host:9090/",
-			wantCmd:     "stats",
-			wantMode:    "auto",
-			wantLimit:   10,
-			wantStep:    -1,
-			wantContext: 2,
-			wantURL:     "http://env-host:9090",
-		},
-		{
 			name:        "EriURLEnvOverride",
 			args:        []string{"stats"},
 			envEriURL:   "http://eri-host:9090/",
-			envURL:      "http://ignored:8080/",
 			wantCmd:     "stats",
 			wantMode:    "auto",
 			wantLimit:   10,
 			wantStep:    -1,
 			wantContext: 2,
 			wantURL:     "http://eri-host:9090",
-		},
-		{
-			name:            "AerialEriURLEnvOverride",
-			args:            []string{"stats"},
-			envAerialEriURL: "http://aerial-eri-host:9090/",
-			envURL:          "http://ignored:8080/",
-			wantCmd:         "stats",
-			wantMode:        "auto",
-			wantLimit:       10,
-			wantStep:        -1,
-			wantContext:     2,
-			wantURL:         "http://aerial-eri-host:9090",
 		},
 		{
 			name:       "InvalidFlag",
@@ -249,8 +223,8 @@ func TestParseCLIArgs(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("ERI_URL", tc.envEriURL)
-			t.Setenv("AERIAL_ERI_URL", tc.envAerialEriURL)
-			t.Setenv("AERIAL_BRAIN_URL", tc.envURL)
+			t.Setenv("AERIAL_ERI_URL", "")
+			t.Setenv("AERIAL_BRAIN_URL", "")
 			cfg, err := parseCLIArgs(tc.args)
 			if tc.wantErrIs != nil {
 				if !errors.Is(err, tc.wantErrIs) {

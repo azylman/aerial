@@ -754,7 +754,7 @@ func TestLoadConfigAndEnv(t *testing.T) {
 	defer func() {
 		vanadisFallbackConfigPath, lookupHostFn = origFallback, origLookup
 	}()
-	for _, k := range []string{"PORT", "POSTGRES_URL", "DATABASE_URL", "ERI_URL", "ERI_INTERNAL_URL", "BRAIN_INTERNAL_URL", "BRAIN_URL", "SYNAPSE_URL", "WEBHOOKS_ROUTER_URL", "CONFIG_PATH"} {
+	for _, k := range []string{"PORT", "POSTGRES_URL", "DATABASE_URL", "ERI_URL", "SYNAPSE_URL", "WEBHOOKS_ROUTER_URL", "CONFIG_PATH"} {
 		t.Setenv(k, "")
 	}
 	tmpDir := t.TempDir()
@@ -794,7 +794,6 @@ func TestLoadConfigAndEnv(t *testing.T) {
 	t.Setenv("PORT", "4030")
 	t.Setenv("POSTGRES_URL", "postgres://env:5432/db")
 	t.Setenv("ERI_URL", "http://env-eri:8088/")
-	t.Setenv("BRAIN_INTERNAL_URL", "http://internal-brain:8088/")
 	t.Setenv("WEBHOOKS_ROUTER_URL", "http://env-router:4020/")
 	if envCfg := LoadConfigFromEnv(); envCfg.Port != "4030" || envCfg.PostgresURL != "postgres://env:5432/db" || envCfg.BrainURL != "http://env-eri:8088" || envCfg.EriURL != "http://env-eri:8088" || envCfg.SynapseURL != "http://env-router:4020" {
 		t.Fatalf("unexpected env override config: %+v", envCfg)

@@ -9,24 +9,6 @@ import (
 func TestLoadConfigFile_EriKeysAndEnv(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	legacyYAML := `port: '4008'
-brain_url: 'http://legacy.brain:8080'
-brain_llm_url: 'http://legacy.brain:8080/internal/llm'
-brain_pr_register_url: 'http://legacy.synapse:4020/internal/pr/register'
-custom_skills_dir: '/custom/skills'
-rules_dir: '/custom/rules'
-config_repo_owner: 'azylman'
-config_repo_name: 'aerial-config'
-ollama:
-  base_url: 'http://ollama:11434'
-  model: 'all-minilm'
-  num_ctx: 512
-`
-	legacyFile := filepath.Join(tmpDir, "legacy.yaml")
-	if err := os.WriteFile(legacyFile, []byte(legacyYAML), 0o644); err != nil {
-		t.Fatalf("failed to write legacy config: %v", err)
-	}
-
 	eriYAML := `port: '4008'
 eri_url: 'http://eri.aerial'
 eri_llm_url: 'http://eri.aerial/internal/llm'
@@ -55,13 +37,6 @@ ollama:
 		wantEriLLMURL string
 		wantPRRegURL  string
 	}{
-		{
-			name:          "legacy yaml loaded and copied to eri fields",
-			path:          legacyFile,
-			wantEriURL:    "http://legacy.brain:8080",
-			wantEriLLMURL: "http://legacy.brain:8080/internal/llm",
-			wantPRRegURL:  "http://legacy.synapse:4020/internal/pr/register",
-		},
 		{
 			name:          "eri yaml loaded and copied to both eri and brain fields",
 			path:          eriFile,

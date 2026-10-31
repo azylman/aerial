@@ -87,7 +87,7 @@ func TestLoadConfigFile_TableDriven(t *testing.T) {
 
 	validYAML := `
 port: "4019"
-brain_url: "http://eri.aerial"
+eri_url: "http://eri.aerial"
 google_mcp_url: "http://google-mcp.aerial/mcp"
 coven_url: "http://coven.aerial"
 whisper_url: "http://voice.aerial"
@@ -116,13 +116,13 @@ max_concurrent_calls: 2
 		t.Fatalf("failed to write missing_port.yaml: %v", err)
 	}
 
-	missingBrainYAML := strings.Replace(validYAML, `brain_url: "http://eri.aerial"`, `brain_url: ""`, 1)
+	missingBrainYAML := strings.Replace(validYAML, `eri_url: "http://eri.aerial"`, `eri_url: ""`, 1)
 	missingBrainPath := filepath.Join(tmpDir, "missing_brain.yaml")
 	if err := os.WriteFile(missingBrainPath, []byte(missingBrainYAML), 0o644); err != nil {
 		t.Fatalf("failed to write missing_brain.yaml: %v", err)
 	}
 
-	eriYAML := strings.Replace(validYAML, `brain_url: "http://eri.aerial"`, `eri_url: "http://eri-prospera.aerial"`, 1)
+	eriYAML := strings.Replace(validYAML, `eri_url: "http://eri.aerial"`, `eri_url: "http://eri-prospera.aerial"`, 1)
 	eriPath := filepath.Join(tmpDir, "eri.yaml")
 	if err := os.WriteFile(eriPath, []byte(eriYAML), 0o644); err != nil {
 		t.Fatalf("failed to write eri.yaml: %v", err)
