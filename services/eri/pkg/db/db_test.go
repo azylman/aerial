@@ -285,7 +285,7 @@ func TestSessionLifecycle(t *testing.T) {
 	_ = store.SaveSessionID(ctx, "ext-1", "int-1")
 
 	// 5. Unrotated sessions
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		_, _ = store.IncrementSessionTurnCount(ctx, "th-1")
 	}
 	if unrotated, err := store.FindUnrotatedSessions(ctx, 5); err != nil || len(unrotated) != 1 || unrotated[0].ThreadID != "th-1" {

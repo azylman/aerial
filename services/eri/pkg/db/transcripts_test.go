@@ -346,7 +346,7 @@ func TestTranscriptStore_UpsertSessionSummaryWithContext_MockDB(t *testing.T) {
 
 func TestTranscriptStore_BatchInsertTranscriptStepsWithContext_MockDB(t *testing.T) {
 	steps := make([]TranscriptStep, 550)
-	for i := 0; i < 550; i++ {
+	for i := range 550 {
 		steps[i] = TranscriptStep{
 			SessionID: "sess-batch-chunk", StepIndex: i, StepType: "tool", ToolName: "run_command",
 			Content: fmt.Sprintf("step content %d", i), CreatedAt: time.Now().UTC(),

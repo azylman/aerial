@@ -944,7 +944,7 @@ func TestPrewarmProcessPoolsSequentially(t *testing.T) {
 	PrewarmProcessPoolsSequentially(ctx, p1, nil, p2, p3)
 
 	var order []string
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		select {
 		case name := <-initCh:
 			order = append(order, name)

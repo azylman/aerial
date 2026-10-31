@@ -21,8 +21,8 @@ func createTestPNG(t *testing.T, dir, filename string) string {
 	t.Helper()
 	imgPath := filepath.Join(dir, filename)
 	img := image.NewRGBA(image.Rect(0, 0, 10, 10))
-	for x := 0; x < 10; x++ {
-		for y := 0; y < 10; y++ {
+	for x := range 10 {
+		for y := range 10 {
 			img.Set(x, y, color.RGBA{R: 255, G: 0, B: 0, A: 255})
 		}
 	}
@@ -93,7 +93,7 @@ func TestExtractAndSanitizeMedia(t *testing.T) {
 
 	// Exceed MaxAttachmentsPerMessage (10 attachments limit)
 	var sb strings.Builder
-	for i := 0; i < 12; i++ {
+	for i := range 12 {
 		imgPath := createTestPNG(t, tempDir, fmt.Sprintf("img_%d.png", i))
 		sb.WriteString("![img](" + imgPath + ")\n")
 	}
@@ -433,8 +433,8 @@ func TestAutoAttachNewMedia_NilGuardsAndStatFilters(t *testing.T) {
 	}
 
 	// 2. Already at limit
-	var maxAtts []*Attachment
-	for i := 0; i < MaxAttachmentsPerMessage; i++ {
+	maxAtts := make([]*Attachment, 0, MaxAttachmentsPerMessage)
+	for i := range MaxAttachmentsPerMessage {
 		maxAtts = append(maxAtts, &Attachment{Filename: fmt.Sprintf("file%d.png", i)})
 	}
 	res := AutoAttachNewMedia("/tmp", time.Now(), maxAtts)
@@ -464,7 +464,7 @@ func TestAutoAttachNewMedia_BreakLimitsAndErrors(t *testing.T) {
 	now := time.Now()
 
 	// 1. Create 12 valid images to trigger MaxAttachmentsPerMessage break
-	for i := 0; i < 12; i++ {
+	for i := range 12 {
 		createTestPNG(t, tmpDir, fmt.Sprintf("pic_%02d.png", i))
 	}
 
@@ -529,7 +529,7 @@ func TestExtractAndSanitizeMedia_InternalAerialImages(t *testing.T) {
 		case "/media/oversized.png":
 			w.WriteHeader(http.StatusOK)
 			chunk := make([]byte, 1024*1024)
-			for i := 0; i < 9; i++ {
+			for range 9 {
 				_, _ = w.Write(chunk)
 			}
 		case "/media/corrupt.png":

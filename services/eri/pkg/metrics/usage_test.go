@@ -72,7 +72,7 @@ func TestStartUsagePollerAndRunner(t *testing.T) {
 		cancel()
 		return []byte(payload), nil
 	})
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		<-calls
 	}
 }

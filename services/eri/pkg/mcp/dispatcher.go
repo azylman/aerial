@@ -106,7 +106,7 @@ func (d *DefaultDispatcher) getServerConfig(serverName string) (ServerConfig, bo
 }
 
 func extractMCPSessionID(h http.Header) string {
-	sessID := h.Get("mcp-session-id")
+	sessID := h.Get("Mcp-Session-Id")
 	if sessID == "" {
 		sessID = h.Get("Mcp-Session-Id")
 	}
@@ -139,7 +139,7 @@ func (d *DefaultDispatcher) sendInitializedNotification(ctx context.Context, srv
 		notifyReq.Header.Set(k, v)
 	}
 	if sessID != "" {
-		notifyReq.Header.Set("mcp-session-id", sessID)
+		notifyReq.Header.Set("Mcp-Session-Id", sessID)
 	}
 	notifyResp, nErr := d.httpClient.Do(notifyReq)
 	if nErr == nil && notifyResp != nil {
@@ -235,7 +235,7 @@ func (d *DefaultDispatcher) doJSONRPCWithRetry(ctx context.Context, srv ServerCo
 		maxBytes = 10 << 20
 	}
 
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := range 2 {
 		statusCode, respBytes, err := d.executeRPCRequest(ctx, srv, currentSessID, reqBody, maxBytes)
 		if err != nil {
 			if attempt == 0 {
@@ -271,7 +271,7 @@ func (d *DefaultDispatcher) executeRPCRequest(ctx context.Context, srv ServerCon
 		httpReq.Header.Set(k, v)
 	}
 	if sessID != "" {
-		httpReq.Header.Set("mcp-session-id", sessID)
+		httpReq.Header.Set("Mcp-Session-Id", sessID)
 	}
 
 	resp, err := d.httpClient.Do(httpReq)

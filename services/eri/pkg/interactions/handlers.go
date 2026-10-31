@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -409,7 +410,7 @@ func (r *Router) handleIgnoreBots(s *discordgo.Session, i *discordgo.Interaction
 	}
 
 	enabledVal := getBoolOption(data.Options, "enabled", false)
-	valStr := fmt.Sprintf("%v", enabledVal)
+	valStr := strconv.FormatBool(enabledVal)
 	r.spawnDeployProgress(s, i.Interaction, "ignore_bots", targetChannelID, valStr)
 }
 

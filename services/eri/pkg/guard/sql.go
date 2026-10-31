@@ -528,7 +528,7 @@ func parsePsqlArgs(insertOffset int, tokens []locatedToken) psqlInvocation {
 }
 
 func parseShortPsqlFlags(inv *psqlInvocation, flags string, tokens []locatedToken, i int) int {
-	for pos := 0; pos < len(flags); pos++ {
+	for pos := range len(flags) {
 		ch := flags[pos]
 		if ch == 'A' || ch == 'H' {
 			inv.hasFormatFlag = true
@@ -613,7 +613,7 @@ func tokenizeWithOffsets(sub string, baseOffset int) []locatedToken {
 	tokStart := 0
 	inToken, inSingle, inDouble, escaped := false, false, false, false
 
-	for i := 0; i < len(sub); i++ {
+	for i := range len(sub) {
 		ch := sub[i]
 		if !escaped && !inSingle && !inDouble && (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r') {
 			if inToken {
@@ -696,7 +696,7 @@ func extractIdentifierSet(sqlStr string) map[string]bool {
 	idents := make(map[string]bool)
 	var cur strings.Builder
 	inSingle := false
-	for i := 0; i < len(sqlStr); i++ {
+	for i := range len(sqlStr) {
 		ch := sqlStr[i]
 		if ch == '\'' {
 			inSingle = !inSingle

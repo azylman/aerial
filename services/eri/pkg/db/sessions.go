@@ -18,7 +18,7 @@ func DiscordSessionID(key string) string {
 	if trimmed == "" {
 		return ""
 	}
-	for i := 0; i < len(trimmed); i++ {
+	for i := range len(trimmed) {
 		if trimmed[i] < '0' || trimmed[i] > '9' {
 			return trimmed
 		}

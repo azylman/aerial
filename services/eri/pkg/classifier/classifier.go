@@ -818,7 +818,7 @@ func (c *Classifier) classifySystemOne(ctx context.Context, targetBurst []db.Mes
 	var duration time.Duration
 	var respPayload systemOneResponse
 
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	for attempt := range maxAttempts {
 		if attempt > 0 {
 			delay := delayFn(attempt - 1)
 			if sleepErr := sleepFn(ctx, delay); sleepErr != nil {

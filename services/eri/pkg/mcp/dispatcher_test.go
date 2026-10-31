@@ -80,7 +80,7 @@ func newMockMCPServer(t *testing.T, cfg mockMCPConfig) *httptest.Server {
 				w.Header()["mcp-session-id"] = []string{sess}
 				delete(w.Header(), "Mcp-Session-Id")
 			} else {
-				w.Header().Set("mcp-session-id", sess)
+				w.Header().Set("Mcp-Session-Id", sess)
 			}
 			w.Header().Set("Content-Type", "application/json")
 			if cfg.initBody != "" {
@@ -93,7 +93,7 @@ func newMockMCPServer(t *testing.T, cfg mockMCPConfig) *httptest.Server {
 			})
 
 		case "notifications/initialized":
-			if cfg.requireSessionID && r.Header.Get("mcp-session-id") != sess {
+			if cfg.requireSessionID && r.Header.Get("Mcp-Session-Id") != sess {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
@@ -111,7 +111,7 @@ func newMockMCPServer(t *testing.T, cfg mockMCPConfig) *httptest.Server {
 				w.WriteHeader(http.StatusOK)
 				return
 			}
-			if cfg.requireSessionID && r.Header.Get("mcp-session-id") != sess {
+			if cfg.requireSessionID && r.Header.Get("Mcp-Session-Id") != sess {
 				w.WriteHeader(http.StatusBadRequest)
 				_, _ = w.Write([]byte(`{"error": "missing session id"}`))
 				return
@@ -176,7 +176,7 @@ func newMockMCPServer(t *testing.T, cfg mockMCPConfig) *httptest.Server {
 				w.WriteHeader(http.StatusOK)
 				return
 			}
-			if cfg.requireSessionID && r.Header.Get("mcp-session-id") != sess {
+			if cfg.requireSessionID && r.Header.Get("Mcp-Session-Id") != sess {
 				w.WriteHeader(http.StatusBadRequest)
 				_, _ = w.Write([]byte(`{"error": "missing session id"}`))
 				return
@@ -388,7 +388,7 @@ func TestEnsureSession(t *testing.T) {
 
 	d := mkDisp("srv", okTs.URL)
 	var wg sync.WaitGroup
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -611,7 +611,7 @@ func TestConcurrentExecute(t *testing.T) {
 		id := req["id"]
 		switch method {
 		case "initialize":
-			w.Header().Set("mcp-session-id", "sess-concur")
+			w.Header().Set("Mcp-Session-Id", "sess-concur")
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": id, "result": map[string]interface{}{"protocolVersion": "2024-11-05"}})
 		case "notifications/initialized":
@@ -647,7 +647,7 @@ func TestConcurrentExecute(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var wg sync.WaitGroup
 			errChan := make(chan error, tc.workers)
-			for i := 0; i < tc.workers; i++ {
+			for i := range tc.workers {
 				wg.Add(1)
 				go func(idx int) {
 					defer wg.Done()
@@ -680,11 +680,11 @@ func TestMockMCPLifecycle(t *testing.T) {
 		id := req["id"]
 		switch method {
 		case "initialize":
-			w.Header().Set("mcp-session-id", "sess-lifecycle")
+			w.Header().Set("Mcp-Session-Id", "sess-lifecycle")
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": id, "result": map[string]interface{}{"protocolVersion": "2024-11-05"}})
 		case "notifications/initialized":
-			if r.Header.Get("mcp-session-id") != "sess-lifecycle" {
+			if r.Header.Get("Mcp-Session-Id") != "sess-lifecycle" {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}

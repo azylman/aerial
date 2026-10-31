@@ -453,10 +453,7 @@ func extractMapTokens(m map[string]string) []string {
 }
 
 func extractMCPServerTokens(srv MCPServerConfig) []string {
-	var tokens []string
-	tokens = append(tokens, extractMapTokens(srv.Env)...)
-	tokens = append(tokens, extractMapTokens(srv.Headers)...)
-	return tokens
+	return append(extractMapTokens(srv.Env), extractMapTokens(srv.Headers)...)
 }
 
 func collectMCPServerTokens(serverMaps []map[string]MCPServerConfig) []string {
@@ -511,8 +508,7 @@ func RegisterConfigTokens(cfg *Config) {
 	}
 	cur := cfg.Current()
 
-	var tokens []string
-	tokens = append(tokens, collectCoreTokens(cur)...)
+	tokens := collectCoreTokens(cur)
 	tokens = append(tokens, collectMCPServerTokens([]map[string]MCPServerConfig{
 		cur.MCPServers.Common,
 		cur.MCPServers.Eri,
