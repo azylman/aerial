@@ -319,14 +319,7 @@ func (p *WorkerPool) StartChunkStepTurn(chunkID, buildID string, chunkIdx int, t
 	p.widgetMu.Unlock()
 }
 
-func (p *WorkerPool) prepareChunkStepDeliveryLocked(chunkID, turnID, stepText string) (*discord.StatusWidgetRequest, bool) {
-	if p.activeChunkTurns[chunkID] != turnID {
-		return nil, false
-	}
-
-	trimmedStep := strings.TrimSpace(stepText)
-	p.activeChunkSteps[chunkID] = trimmedStep
-
+func (p *WorkerPool) buildChunkStepDeliveryRequestLocked(chunkID, activeStep string) (*discord.StatusWidgetRequest, bool) {
 	buildID := p.chunkToBuildID[chunkID]
 	if buildID == "" {
 		return nil, false
@@ -350,7 +343,7 @@ func (p *WorkerPool) prepareChunkStepDeliveryLocked(chunkID, turnID, stepText st
 
 	deliveryReq := cloneStatusWidgetRequest(req, false)
 	deliveryReq.SkipSink = true
-	deliveryReq.Chunks[chunkIdx].ActiveStep = trimmedStep
+	deliveryReq.Chunks[chunkIdx].ActiveStep = activeStep
 	for i := range deliveryReq.Chunks {
 		if i != chunkIdx && isWidgetChunkInProgress(deliveryReq.Chunks[i].Status) {
 			if s, hasStep := p.activeChunkSteps[deliveryReq.Chunks[i].ID]; hasStep {
@@ -359,6 +352,17 @@ func (p *WorkerPool) prepareChunkStepDeliveryLocked(chunkID, turnID, stepText st
 		}
 	}
 	return &deliveryReq, true
+}
+
+func (p *WorkerPool) prepareChunkStepDeliveryLocked(chunkID, turnID, stepText string) (*discord.StatusWidgetRequest, bool) {
+	if p.activeChunkTurns[chunkID] != turnID {
+		return nil, false
+	}
+
+	trimmedStep := strings.TrimSpace(stepText)
+	p.activeChunkSteps[chunkID] = trimmedStep
+
+	return p.buildChunkStepDeliveryRequestLocked(chunkID, trimmedStep)
 }
 
 // FlushChunkActiveStep updates the active step for a chunk and delivers an in-place widget edit if currently running.
@@ -409,38 +413,7 @@ func (p *WorkerPool) finishChunkStepTurnLocked(chunkID, turnID string) (*discord
 		return nil, false
 	}
 
-	buildID := p.chunkToBuildID[chunkID]
-	if buildID == "" {
-		return nil, false
-	}
-
-	req, ok := p.widgetsByID[buildID]
-	if !ok || req.MessageID == "" {
-		return nil, false
-	}
-
-	chunkIdx := -1
-	for i := range req.Chunks {
-		if req.Chunks[i].ID == chunkID {
-			chunkIdx = i
-			break
-		}
-	}
-	if chunkIdx == -1 || !isWidgetChunkInProgress(req.Chunks[chunkIdx].Status) {
-		return nil, false
-	}
-
-	deliveryReq := cloneStatusWidgetRequest(req, false)
-	deliveryReq.SkipSink = true
-	deliveryReq.Chunks[chunkIdx].ActiveStep = ""
-	for i := range deliveryReq.Chunks {
-		if i != chunkIdx && isWidgetChunkInProgress(deliveryReq.Chunks[i].Status) {
-			if s, hasStep := p.activeChunkSteps[deliveryReq.Chunks[i].ID]; hasStep {
-				deliveryReq.Chunks[i].ActiveStep = s
-			}
-		}
-	}
-	return &deliveryReq, true
+	return p.buildChunkStepDeliveryRequestLocked(chunkID, "")
 }
 
 // FinishChunkStepTurn disowns step streaming for a chunk and clears its active step on the widget.
