@@ -940,6 +940,14 @@ func (s *VanadisServer) handleAdvanceChunkPR(w http.ResponseWriter, r *http.Requ
 		writeStoreErr(w, err)
 		return
 	}
+	if res != nil && res.Matched {
+		if res.Advanced {
+			RecordChunkTotal("merged")
+		}
+		if res.BuildCompleted && res.Advanced {
+			RecordBuildTotal("completed")
+		}
+	}
 	if res != nil && res.Matched && !res.BuildCompleted && res.NextChunkIndex >= 0 {
 		if err := s.insertRiverJob(r.Context(), ExecuteChunkArgs{BuildID: res.BuildID, ChunkIndex: res.NextChunkIndex}); err != nil {
 			writeErr(w, http.StatusInternalServerError, fmt.Sprintf("failed to enqueue next chunk %d: %v", res.NextChunkIndex, err))
@@ -977,6 +985,10 @@ func (s *VanadisServer) handleFailChunkPR(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		writeStoreErr(w, err)
 		return
+	}
+	if failed {
+		RecordChunkTotal("failed")
+		RecordBuildTotal("failed")
 	}
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
 		"build_id": buildID,

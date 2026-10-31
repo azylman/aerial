@@ -840,11 +840,14 @@ func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string,
 			if bErr := s.store.UpdateBuildStatus(ctx, build.ID, "failed"); bErr != nil {
 				log.Printf("[vanadis] failed marking build %s failed on final attempt: %v", build.ID, bErr)
 			}
+			RecordChunkTotal("failed")
+			RecordBuildTotal("failed")
 			attempt := 1
 			s.syncBuildWidget(ctx, build.ID, fmt.Sprintf("Chunk %d/%d (%s) failed to dispatch to Brain after %d attempts: %v", chunk.ChunkIndex+1, len(chunks), chunk.Title, attempt, err))
 		}
 		return err
 	}
+	RecordChunkTotal("dispatched")
 	return nil
 }
 
@@ -933,7 +936,11 @@ func writeStoreErr(w http.ResponseWriter, err error) {
 // SetupMux configures and returns the HTTP ServeMux for a VanadisServer.
 func SetupMux(server *VanadisServer) *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.Handle("GET /metrics", promhttp.Handler())
+	if server != nil {
+		mux.HandleFunc("GET /metrics", server.handleMetrics)
+	} else {
+		mux.Handle("GET /metrics", promhttp.Handler())
+	}
 	coverageFlush := httpkit.HandleCoverageFlush("vanadis")
 	mcpHandler := server.newMCPHandler()
 	for p, h := range map[string]http.HandlerFunc{
@@ -1052,9 +1059,11 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 		if statusErr := s.store.UpdateBuildStatus(r.Context(), buildID, "failed"); statusErr != nil {
 			log.Printf("[vanadis] warning marking build %s failed after enqueue error: %v", buildID, statusErr)
 		}
+		RecordBuildTotal("failed")
 		writeErr(w, http.StatusInternalServerError, fmt.Sprintf("failed to enqueue chunk 0: %v", err))
 		return
 	}
+	RecordBuildTotal("created")
 	httpkit.WriteJSON(w, http.StatusAccepted, map[string]any{
 		"status": "accepted", "build_id": build.ID, "thread_id": build.ThreadID, "tier": build.Tier,
 		"status_message_id": build.StatusMessageID, "chunk_count": len(chunks), "first_chunk_id": chunks[0].ID, "chunks": chunks,
@@ -1081,6 +1090,7 @@ func (s *VanadisServer) cancelBuildChunksAndPrompts(ctx context.Context, buildID
 				log.Printf("[vanadis] warning: failed marking chunk %s cancelled: %v", existingChunks[i].ID, err)
 			}
 		}
+		RecordChunkTotal("cancelled")
 		existingChunks[i].Status = "cancelled"
 		existingChunks[i].CompletedAt = now
 		existingChunks[i].UpdatedAt = now
@@ -1109,6 +1119,7 @@ func (s *VanadisServer) handleBuildCancel(w http.ResponseWriter, r *http.Request
 		return
 	}
 	s.cancelBuildChunksAndPrompts(r.Context(), id, existing, existingChunks)
+	RecordBuildTotal("cancelled")
 	httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "cancelled", "build_id": id})
 }
 

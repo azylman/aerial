@@ -1511,3 +1511,273 @@ func TestClassifyAndSummarizeBuildEntry(t *testing.T) {
 		t.Fatalf("unexpected summarized entry: %+v", entry)
 	}
 }
+
+type mockRiverJobRows struct {
+	pgx.Rows
+	rows [][]any
+	idx  int
+}
+
+func (r *mockRiverJobRows) Close()     {}
+func (r *mockRiverJobRows) Err() error { return nil }
+func (r *mockRiverJobRows) Next() bool {
+	if r.idx < len(r.rows) {
+		r.idx++
+		return true
+	}
+	return false
+}
+
+func (r *mockRiverJobRows) Scan(dest ...any) error {
+	row := r.rows[r.idx-1]
+	*dest[0].(*string) = row[0].(string)
+	*dest[1].(*int64) = row[1].(int64)
+	*dest[2].(*float64) = row[2].(float64)
+	return nil
+}
+
+func TestVanadisMetrics(t *testing.T) {
+	RecordBuildTotal("created")
+	RecordBuildTotal("completed")
+	RecordBuildTotal("failed")
+	RecordBuildTotal("cancelled")
+
+	RecordChunkTotal("dispatched")
+	RecordChunkTotal("merged")
+	RecordChunkTotal("failed")
+	RecordChunkTotal("cancelled")
+
+	registerVanadisCollector(BuildsActive)
+
+	b1 := mkBuild("b-run-1", "101", "Running Build", "obj", "running")
+	b2 := mkBuild("b-queue-1", "102", "Queued Build", "obj", "running")
+	b3 := mkBuild("b-comp-1", "103", "Completed Build", "obj", "completed")
+
+	c1 := mkChunk("c-1", "b-run-1", 0, "Chunk 1", "inst", "medium", "running")
+	c2 := mkChunk("c-2", "b-run-1", 1, "Chunk 2", "inst", "medium", "pending")
+	c3 := mkChunk("c-3", "b-run-1", 2, "Chunk 3", "inst", "medium", "pr_opened")
+	c4 := mkChunk("c-4", "b-queue-1", 0, "Chunk 4", "inst", "medium", "pending")
+	c5 := mkChunk("c-5", "b-queue-1", 1, "Chunk 5", "inst", "medium", "pending")
+	c6 := mkChunk("c-6", "b-comp-1", 0, "Chunk 6", "inst", "medium", "merged")
+
+	pgStoreWithQueue := newMockStore(mockDB{
+		queryFn: func(_ context.Context, sql string, _ ...any) (pgx.Rows, error) {
+			if strings.Contains(sql, "FROM river_job") {
+				return &mockRiverJobRows{
+					rows: [][]any{
+						{"available", int64(3), float64(15.5)},
+						{"running", int64(1), float64(2.0)},
+					},
+				}, nil
+			}
+			if strings.Contains(sql, "vanadis_builds") {
+				return &mockRows{builds: []VanadisBuild{b1, b2, b3}}, nil
+			}
+			return &mockRows{items: []VanadisChunk{c1, c2, c3, c4, c5, c6}}, nil
+		},
+	})
+	srvWithQueue := NewVanadisServer(Config{}, pgStoreWithQueue, nil, nil)
+
+	memStore := newMemoryVanadisStore()
+	_ = memStore.CreateBuild(context.Background(), b1, []VanadisChunk{c1, c2, c3})
+	srvMem := NewVanadisServer(Config{}, memStore, nil, nil)
+
+	pgStoreErr := newMockStore(mockDB{
+		queryFn: func(_ context.Context, sql string, _ ...any) (pgx.Rows, error) {
+			return nil, errors.New("db outage")
+		},
+	})
+	srvPGErr := NewVanadisServer(Config{}, pgStoreErr, nil, nil)
+
+	var nilServer *VanadisServer
+	nilStoreServer := &VanadisServer{}
+
+	tests := []struct {
+		name           string
+		server         *VanadisServer
+		method         string
+		url            string
+		wantStatus     int
+		wantSubstrings []string
+	}{
+		{
+			name:       "valid postgres server with active builds and river queue metrics",
+			server:     srvWithQueue,
+			method:     http.MethodGet,
+			url:        "/metrics",
+			wantStatus: http.StatusOK,
+			wantSubstrings: []string{
+				"vanadis_builds_active",
+				`vanadis_builds_active{queue_state="running"} 1`,
+				`vanadis_builds_active{queue_state="queued"} 1`,
+				"vanadis_chunks_active",
+				`vanadis_chunks_active{status="pending"} 3`,
+				`vanadis_chunks_active{status="running"} 1`,
+				`vanadis_chunks_active{status="pr_opened"} 1`,
+				"vanadis_queue_depth",
+				`vanadis_queue_depth{state="available"} 3`,
+				`vanadis_queue_depth{state="running"} 1`,
+				`vanadis_queue_depth{state="retryable"} 0`,
+				`vanadis_queue_depth{state="scheduled"} 0`,
+				"vanadis_queue_oldest_age_seconds 15.5",
+				"vanadis_builds_total",
+				`vanadis_builds_total{status="created"}`,
+				`vanadis_builds_total{status="completed"}`,
+				`vanadis_builds_total{status="failed"}`,
+				`vanadis_builds_total{status="cancelled"}`,
+				"vanadis_chunks_total",
+				`vanadis_chunks_total{status="dispatched"}`,
+				`vanadis_chunks_total{status="merged"}`,
+				`vanadis_chunks_total{status="failed"}`,
+				`vanadis_chunks_total{status="cancelled"}`,
+			},
+		},
+		{
+			name:       "memory store server populates build metrics",
+			server:     srvMem,
+			method:     http.MethodGet,
+			url:        "/metrics",
+			wantStatus: http.StatusOK,
+			wantSubstrings: []string{
+				"vanadis_builds_active",
+				"vanadis_chunks_active",
+				"vanadis_queue_depth",
+			},
+		},
+		{
+			name:       "nil server serves metrics ok",
+			server:     nilServer,
+			method:     http.MethodGet,
+			url:        "/metrics",
+			wantStatus: http.StatusOK,
+			wantSubstrings: []string{
+				"vanadis_builds_total",
+				"vanadis_chunks_total",
+			},
+		},
+		{
+			name:       "server with nil store serves metrics ok",
+			server:     nilStoreServer,
+			method:     http.MethodGet,
+			url:        "/metrics",
+			wantStatus: http.StatusOK,
+			wantSubstrings: []string{
+				"vanadis_builds_total",
+				"vanadis_chunks_total",
+			},
+		},
+		{
+			name:       "server with db error in queries still serves metrics ok",
+			server:     srvPGErr,
+			method:     http.MethodGet,
+			url:        "/metrics",
+			wantStatus: http.StatusOK,
+			wantSubstrings: []string{
+				"vanadis_builds_total",
+				"vanadis_chunks_total",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(tc.method, tc.url, nil)
+			tc.server.handleMetrics(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("handleMetrics() status = %d, want %d", rec.Code, tc.wantStatus)
+			}
+			body := rec.Body.String()
+			for _, sub := range tc.wantSubstrings {
+				if !strings.Contains(body, sub) {
+					t.Errorf("expected body to contain %q, body:\n%s", sub, body)
+				}
+			}
+		})
+	}
+}
+
+func TestVanadisEndpointCounterIncrements(t *testing.T) {
+	ctx := context.Background()
+	memStore := newMemoryVanadisStore()
+	inserter := &mockRiverInserter{}
+	srv := NewVanadisServer(Config{}, memStore, inserter, nil)
+
+	// 1. handleCreateBuild success -> created
+	reqBody := `{"repo":"azylman/aerial","thread_id":"123456789012345678","tier":2,"objective":"Metric test build","chunks":[{"title":"C1","instructions":"I1"}]}`
+	recCreate := httptest.NewRecorder()
+	srv.handleCreateBuild(recCreate, httptest.NewRequest(http.MethodPost, "/builds", strings.NewReader(reqBody)))
+	if recCreate.Code != http.StatusAccepted {
+		t.Fatalf("handleCreateBuild status = %d, want %d", recCreate.Code, http.StatusAccepted)
+	}
+
+	// 2. handleCreateBuild enqueue failure -> failed
+	failInserter := &mockRiverInserter{err: errors.New("enqueue fail")}
+	srvFailInsert := NewVanadisServer(Config{}, memStore, failInserter, nil)
+	recCreateFail := httptest.NewRecorder()
+	srvFailInsert.handleCreateBuild(recCreateFail, httptest.NewRequest(http.MethodPost, "/builds", strings.NewReader(reqBody)))
+	if recCreateFail.Code != http.StatusInternalServerError {
+		t.Fatalf("handleCreateBuild failure status = %d, want %d", recCreateFail.Code, http.StatusInternalServerError)
+	}
+
+	// 3. handleBuildCancel -> cancelled
+	bCancel := mkBuild("b-to-cancel", "123456789012345678", "Cancel Test", "obj", "running")
+	cCancel := mkChunk("c-to-cancel", "b-to-cancel", 0, "Cancel Chunk", "inst", "medium", "pending")
+	_ = memStore.CreateBuild(ctx, bCancel, []VanadisChunk{cCancel})
+	recCancel := httptest.NewRecorder()
+	srv.handleBuildCancel(recCancel, httptest.NewRequest(http.MethodPost, "/builds/b-to-cancel/cancel", nil), "b-to-cancel")
+	if recCancel.Code != http.StatusOK {
+		t.Fatalf("handleBuildCancel status = %d, want %d", recCancel.Code, http.StatusOK)
+	}
+
+	// 4. handleAdvanceChunkPR -> merged and completed
+	advStore := newMockStore(mockDB{
+		beginFn: func(ctx context.Context) (pgx.Tx, error) {
+			return &mockTx{
+				queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
+					return &genericMockRow{scanFn: func(dest ...any) error {
+						*dest[0].(*string) = "c1"
+						*dest[1].(*string) = "b1"
+						*dest[2].(*int) = 0
+						*dest[3].(*string) = "Chunk 1"
+						*dest[4].(*string) = "pr_opened"
+						*dest[5].(*string) = "123456789012345678"
+						*dest[6].(*int) = 2
+						*dest[7].(*string) = "Build 1"
+						*dest[8].(*string) = "Objective 1"
+						*dest[9].(*string) = "running"
+						*dest[10].(*string) = "msg-1"
+						return nil
+					}}
+				},
+				queryFn: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+					c := mkChunk("c1", "b1", 0, "Chunk 1", "inst", "medium", "pr_opened")
+					return &mockRows{items: []VanadisChunk{c}}, nil
+				},
+			}, nil
+		},
+	})
+	srvAdv := NewVanadisServer(Config{}, advStore, inserter, nil)
+	recAdv := httptest.NewRecorder()
+	srvAdv.handleAdvanceChunkPR(recAdv, httptest.NewRequest(http.MethodPost, "/chunks/advance-pr", strings.NewReader(`{"repo":"azylman/aerial","pr_number":42}`)))
+	if recAdv.Code != http.StatusOK {
+		t.Fatalf("handleAdvanceChunkPR status = %d, want %d", recAdv.Code, http.StatusOK)
+	}
+
+	// 5. handleFailChunkPR -> failed
+	failStore := newMockStore(mockDB{
+		queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
+			return &genericMockRow{scanFn: func(dest ...any) error {
+				*dest[0].(*string) = "b-fail"
+				*dest[1].(*string) = "c-fail"
+				return nil
+			}}
+		},
+	})
+	srvFailPR := NewVanadisServer(Config{}, failStore, inserter, nil)
+	recFailPR := httptest.NewRecorder()
+	srvFailPR.handleFailChunkPR(recFailPR, httptest.NewRequest(http.MethodPost, "/chunks/fail-pr", strings.NewReader(`{"repo":"azylman/aerial","pr_number":43}`)))
+	if recFailPR.Code != http.StatusOK {
+		t.Fatalf("handleFailChunkPR status = %d, want %d", recFailPR.Code, http.StatusOK)
+	}
+}
