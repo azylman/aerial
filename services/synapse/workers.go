@@ -190,26 +190,28 @@ func SetDiscordGatewayLatency(seconds float64) {
 	DiscordGatewayLatencySeconds.Set(seconds)
 }
 
-func observeRiverJob[T river.JobArgs](job *river.Job[T], defaultQueue string, fn func() error) error {
+func resolveRiverJobMeta[T river.JobArgs](job *river.Job[T], defaultQueue string) (string, string) {
 	queue := defaultQueue
 	if queue == "" {
 		queue = river.QueueDefault
 	}
-	var kind string
-	if job != nil {
-		if job.JobRow != nil {
-			if job.Queue != "" {
-				queue = job.Queue
-			}
-			if job.Attempt > 1 {
-				RecordJobRetry(queue, job.Args.Kind(), "river_retry")
-			}
-		}
-		kind = job.Args.Kind()
-	} else {
+	if job == nil {
 		var zero T
-		kind = zero.Kind()
+		return queue, zero.Kind()
 	}
+	if job.JobRow != nil {
+		if job.Queue != "" {
+			queue = job.Queue
+		}
+		if job.Attempt > 1 {
+			RecordJobRetry(queue, job.Args.Kind(), "river_retry")
+		}
+	}
+	return queue, job.Args.Kind()
+}
+
+func observeRiverJob[T river.JobArgs](job *river.Job[T], defaultQueue string, fn func() error) error {
+	queue, kind := resolveRiverJobMeta(job, defaultQueue)
 	start := time.Now()
 	err := fn()
 	duration := time.Since(start).Seconds()

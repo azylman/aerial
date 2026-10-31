@@ -111,6 +111,42 @@ func hasPositiveMetricValue(v interface{}) bool {
 	return false
 }
 
+func checkDimensionExhausted(dimMap map[string]interface{}) (hasNonTransient bool, hasAnyPositive bool) {
+	for k, count := range dimMap {
+		if metricInt(count) > 0 {
+			hasAnyPositive = true
+			lower := strings.ToLower(k)
+			if !strings.Contains(lower, "network") && !strings.Contains(lower, "port") {
+				return true, true
+			}
+		}
+	}
+	return false, hasAnyPositive
+}
+
+func isTaskGroupPlacementFailure(m map[string]interface{}) bool {
+	if m["NodesAvailable"] != nil && !hasPositiveMetricValue(m["NodesAvailable"]) {
+		return true
+	}
+	if hasPositiveMetricValue(m["ConstraintFiltered"]) ||
+		hasPositiveMetricValue(m["ClassFiltered"]) ||
+		hasPositiveMetricValue(m["QuotaExhausted"]) {
+		return true
+	}
+	hasPositiveDim := false
+	if dimMap, ok := m["DimensionExhausted"].(map[string]interface{}); ok {
+		hasNonTransient, hasAny := checkDimensionExhausted(dimMap)
+		if hasNonTransient {
+			return true
+		}
+		hasPositiveDim = hasAny
+	}
+	if !hasPositiveDim && (metricInt(m["NodesExhausted"]) > 0 || metricInt(m["AllocationResourceExhausted"]) > 0 || metricInt(m["ResourceExhausted"]) > 0) {
+		return true
+	}
+	return false
+}
+
 // hasNonTransientPlacementFailure returns true if any unqueued task group in FailedTGAllocs
 // failed placement due to non-transient resource, node, constraint, class, or quota exhaustion
 // (ignoring transient network/port collisions).
@@ -123,30 +159,7 @@ func hasNonTransientPlacementFailure(failedTG map[string]interface{}, queued map
 			continue
 		}
 		m, ok := rawMetrics.(map[string]interface{})
-		if !ok {
-			return true
-		}
-		if m["NodesAvailable"] != nil && !hasPositiveMetricValue(m["NodesAvailable"]) {
-			return true
-		}
-		if hasPositiveMetricValue(m["ConstraintFiltered"]) ||
-			hasPositiveMetricValue(m["ClassFiltered"]) ||
-			hasPositiveMetricValue(m["QuotaExhausted"]) {
-			return true
-		}
-		hasPositiveDim := false
-		if dimMap, ok := m["DimensionExhausted"].(map[string]interface{}); ok {
-			for k, count := range dimMap {
-				if metricInt(count) > 0 {
-					hasPositiveDim = true
-					lower := strings.ToLower(k)
-					if !strings.Contains(lower, "network") && !strings.Contains(lower, "port") {
-						return true
-					}
-				}
-			}
-		}
-		if !hasPositiveDim && (metricInt(m["NodesExhausted"]) > 0 || metricInt(m["AllocationResourceExhausted"]) > 0 || metricInt(m["ResourceExhausted"]) > 0) {
+		if !ok || isTaskGroupPlacementFailure(m) {
 			return true
 		}
 	}

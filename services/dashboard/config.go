@@ -41,6 +41,26 @@ var defaultGitCommitPaths = []string{
 	"/share/aerial/.git/HEAD",
 }
 
+func parseGitCommitData(p string, data []byte) (string, bool) {
+	trimmed := strings.TrimSpace(string(data))
+	if !strings.HasPrefix(trimmed, "ref: ") {
+		if len(trimmed) >= 7 {
+			return trimmed[:7], true
+		}
+		return "", false
+	}
+	refPath := filepath.Join(filepath.Dir(p), strings.TrimPrefix(trimmed, "ref: "))
+	refData, err := os.ReadFile(refPath)
+	if err != nil {
+		return "", false
+	}
+	refTrimmed := strings.TrimSpace(string(refData))
+	if len(refTrimmed) >= 7 {
+		return refTrimmed[:7], true
+	}
+	return "", false
+}
+
 func getGitCommit(customPaths ...string) string {
 	paths := defaultGitCommitPaths
 	if len(customPaths) > 0 {
@@ -48,19 +68,12 @@ func getGitCommit(customPaths ...string) string {
 	}
 
 	for _, p := range paths {
-		if data, err := os.ReadFile(p); err == nil {
-			trimmed := strings.TrimSpace(string(data))
-			if strings.HasPrefix(trimmed, "ref: ") {
-				refPath := filepath.Join(filepath.Dir(p), strings.TrimPrefix(trimmed, "ref: "))
-				if refData, err := os.ReadFile(refPath); err == nil {
-					refTrimmed := strings.TrimSpace(string(refData))
-					if len(refTrimmed) >= 7 {
-						return refTrimmed[:7]
-					}
-				}
-			} else if len(trimmed) >= 7 {
-				return trimmed[:7]
-			}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		if commit, ok := parseGitCommitData(p, data); ok {
+			return commit
 		}
 	}
 

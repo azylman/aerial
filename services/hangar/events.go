@@ -482,6 +482,20 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 	}, http.StatusOK
 }
 
+func resolveImageTag(commitSHA, digest string) string {
+	if commitSHA != "" {
+		return commitSHA
+	}
+	if digest == "" {
+		return "latest"
+	}
+	cleanDigest := strings.TrimPrefix(digest, "@")
+	if !strings.HasPrefix(cleanDigest, "sha256:") {
+		cleanDigest = "sha256:" + cleanDigest
+	}
+	return "latest@" + cleanDigest
+}
+
 func buildImageReadyNomadRunArgs(jobSpec, jobPath, commitSHA, digest string, varFile ...string) ([]string, bool) {
 	runArgs := []string{"job", "run", "-detach"}
 	if len(varFile) > 0 && strings.TrimSpace(varFile[0]) != "" {
@@ -489,18 +503,7 @@ func buildImageReadyNomadRunArgs(jobSpec, jobPath, commitSHA, digest string, var
 	}
 	varInjected := false
 	if HasNomadJobVariable(jobSpec, "image_tag") {
-		tag := commitSHA
-		if tag == "" {
-			if digest != "" {
-				cleanDigest := strings.TrimPrefix(digest, "@")
-				if !strings.HasPrefix(cleanDigest, "sha256:") {
-					cleanDigest = "sha256:" + cleanDigest
-				}
-				tag = "latest@" + cleanDigest
-			} else {
-				tag = "latest"
-			}
-		}
+		tag := resolveImageTag(commitSHA, digest)
 		runArgs = append(runArgs, "-var=image_tag="+tag)
 		varInjected = true
 	}

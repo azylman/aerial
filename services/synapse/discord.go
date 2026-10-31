@@ -272,6 +272,50 @@ func enqueueDiscordMessage(ctx context.Context, server *RouterServer, s *discord
 	}
 }
 
+func snapshotGuildState(g *discordgo.Guild) *discordgo.Guild {
+	if g == nil || g.ID == "" {
+		return nil
+	}
+	snap := &discordgo.Guild{ID: g.ID}
+	for _, ch := range g.Channels {
+		if ch != nil {
+			snap.Channels = append(snap.Channels, &discordgo.Channel{
+				ID:            ch.ID,
+				GuildID:       ch.GuildID,
+				LastMessageID: ch.LastMessageID,
+			})
+		}
+	}
+	for _, th := range g.Threads {
+		if th != nil {
+			snap.Threads = append(snap.Threads, &discordgo.Channel{
+				ID:            th.ID,
+				GuildID:       th.GuildID,
+				LastMessageID: th.LastMessageID,
+			})
+		}
+	}
+	return snap
+}
+
+func fetchFallbackUserGuilds(dg *discordgo.Session) []*discordgo.Guild {
+	if dg == nil || dg.Token == "" {
+		return nil
+	}
+	ugs, err := dg.UserGuilds(100, "", "", false)
+	if err != nil {
+		log.Printf("[synapse] [discord] failed to fetch user guilds: %v", err)
+		return nil
+	}
+	var guilds []*discordgo.Guild
+	for _, ug := range ugs {
+		if ug != nil && ug.ID != "" {
+			guilds = append(guilds, &discordgo.Guild{ID: ug.ID})
+		}
+	}
+	return guilds
+}
+
 func resolveCatchUpGuilds(dg *discordgo.Session) []*discordgo.Guild {
 	if dg == nil {
 		return nil
@@ -280,42 +324,14 @@ func resolveCatchUpGuilds(dg *discordgo.Session) []*discordgo.Guild {
 	if dg.State != nil {
 		dg.State.RLock()
 		for _, g := range dg.State.Guilds {
-			if g == nil || g.ID == "" {
-				continue
+			if snap := snapshotGuildState(g); snap != nil {
+				guilds = append(guilds, snap)
 			}
-			snap := &discordgo.Guild{ID: g.ID}
-			for _, ch := range g.Channels {
-				if ch != nil {
-					snap.Channels = append(snap.Channels, &discordgo.Channel{
-						ID:            ch.ID,
-						GuildID:       ch.GuildID,
-						LastMessageID: ch.LastMessageID,
-					})
-				}
-			}
-			for _, th := range g.Threads {
-				if th != nil {
-					snap.Threads = append(snap.Threads, &discordgo.Channel{
-						ID:            th.ID,
-						GuildID:       th.GuildID,
-						LastMessageID: th.LastMessageID,
-					})
-				}
-			}
-			guilds = append(guilds, snap)
 		}
 		dg.State.RUnlock()
 	}
-	if len(guilds) == 0 && dg.Token != "" {
-		if ugs, err := dg.UserGuilds(100, "", "", false); err == nil {
-			for _, ug := range ugs {
-				if ug != nil && ug.ID != "" {
-					guilds = append(guilds, &discordgo.Guild{ID: ug.ID})
-				}
-			}
-		} else {
-			log.Printf("[synapse] [discord] failed to fetch user guilds: %v", err)
-		}
+	if len(guilds) == 0 {
+		guilds = fetchFallbackUserGuilds(dg)
 	}
 	return guilds
 }

@@ -328,6 +328,42 @@ func (s *RouterServer) handleHangarWebhook(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+func (s *RouterServer) resolvePRFromRegistrySHA(ctx context.Context, repo, sha string) (int, string, string, bool) {
+	if s.registry == nil {
+		return 0, "", "", false
+	}
+	prNum, branch, targetID, err := s.registry.ResolvePRBySHA(ctx, repo, sha)
+	if err != nil {
+		log.Printf("[synapse] [registry] failed resolving PR by SHA %s locally: %v", sha, err)
+		return 0, "", "", false
+	}
+	if prNum <= 0 {
+		return 0, "", "", false
+	}
+	if targetID == "" {
+		if tID, _, _, _, errNum := s.registry.ResolvePRByNumber(ctx, repo, prNum); errNum == nil && tID != "" {
+			targetID = tID
+		}
+	}
+	return prNum, targetID, branch, true
+}
+
+func (s *RouterServer) backfillRegistryTargetID(ctx context.Context, repo string, prNum int, sha string) string {
+	if s.registry == nil {
+		return ""
+	}
+	targetID := ""
+	if tID, _, _, _, err := s.registry.ResolvePRByNumber(ctx, repo, prNum); err == nil && tID != "" {
+		targetID = tID
+	}
+	if backfillTID, err := s.registry.BackfillPushMergeSHA(ctx, repo, prNum, sha); err != nil {
+		log.Printf("[synapse] [registry] failed backfilling merge_sha %s for PR %s#%d: %v", sha, repo, prNum, err)
+	} else if targetID == "" && backfillTID != "" {
+		targetID = backfillTID
+	}
+	return targetID
+}
+
 // ResolveSHA resolves a commit SHA to its PR number, target Discord thread ID, and branch.
 // It checks local pr_registry first, then falls back to GitHub commit PR lookup and backfills pr_registry.
 func (s *RouterServer) ResolveSHA(ctx context.Context, repo, sha string) (int, string, string, error) {
@@ -336,18 +372,8 @@ func (s *RouterServer) ResolveSHA(ctx context.Context, repo, sha string) (int, s
 	}
 	repo = normalizeRepo(repo)
 
-	if s.registry != nil {
-		prNum, branch, targetID, err := s.registry.ResolvePRBySHA(ctx, repo, sha)
-		if err != nil {
-			log.Printf("[synapse] [registry] failed resolving PR by SHA %s locally: %v", sha, err)
-		} else if prNum > 0 {
-			if targetID == "" {
-				if tID, _, _, _, errNum := s.registry.ResolvePRByNumber(ctx, repo, prNum); errNum == nil && tID != "" {
-					targetID = tID
-				}
-			}
-			return prNum, targetID, branch, nil
-		}
+	if prNum, targetID, branch, ok := s.resolvePRFromRegistrySHA(ctx, repo, sha); ok {
+		return prNum, targetID, branch, nil
 	}
 
 	prNum, branch, err := s.resolvePRFromCommitSHA(ctx, repo, sha)
@@ -355,17 +381,7 @@ func (s *RouterServer) ResolveSHA(ctx context.Context, repo, sha string) (int, s
 		return 0, "", "", err
 	}
 
-	var targetID string
-	if s.registry != nil {
-		if tID, _, _, _, err := s.registry.ResolvePRByNumber(ctx, repo, prNum); err == nil && tID != "" {
-			targetID = tID
-		}
-		if backfillTID, err := s.registry.BackfillPushMergeSHA(ctx, repo, prNum, sha); err != nil {
-			log.Printf("[synapse] [registry] failed backfilling merge_sha %s for PR %s#%d: %v", sha, repo, prNum, err)
-		} else if targetID == "" && backfillTID != "" {
-			targetID = backfillTID
-		}
-	}
+	targetID := s.backfillRegistryTargetID(ctx, repo, prNum, sha)
 	return prNum, targetID, branch, nil
 }
 
@@ -645,25 +661,33 @@ type vanadisPromptOpts struct {
 	effort  string
 }
 
+func resolvePostgresVanadisOpts(ctx context.Context, pgReg *PostgresPRRegistry, repo string, prNum int, opts *vanadisPromptOpts) {
+	if pgReg == nil {
+		return
+	}
+	matched, chunkID, effort, err := pgReg.ResolveVanadisChunkForPR(ctx, repo, prNum)
+	if err == nil && matched && strings.TrimSpace(chunkID) != "" {
+		opts.chunkID = strings.TrimSpace(chunkID)
+		if effort != "" {
+			opts.effort = effort
+		}
+		return
+	}
+	if persisted := pgReg.getPersistedVanadisChunkID(ctx, repo, prNum); persisted != "" {
+		opts.chunkID = persisted
+	}
+}
+
 func (s *RouterServer) vanadisPromptOpts(ctx context.Context, repo string, prNum int) vanadisPromptOpts {
 	if prNum <= 0 {
 		return vanadisPromptOpts{}
 	}
 	opts := vanadisPromptOpts{silent: true, effort: "medium"}
-	if s != nil && s.registry != nil {
-		if pgReg, ok := s.registry.(*PostgresPRRegistry); ok {
-			matched, chunkID, effort, err := pgReg.ResolveVanadisChunkForPR(ctx, repo, prNum)
-			if err == nil && matched && strings.TrimSpace(chunkID) != "" {
-				opts.chunkID = strings.TrimSpace(chunkID)
-				if effort != "" {
-					opts.effort = effort
-				}
-			} else {
-				if persisted := pgReg.getPersistedVanadisChunkID(ctx, repo, prNum); persisted != "" {
-					opts.chunkID = persisted
-				}
-			}
-		}
+	if s == nil || s.registry == nil {
+		return opts
+	}
+	if pgReg, ok := s.registry.(*PostgresPRRegistry); ok {
+		resolvePostgresVanadisOpts(ctx, pgReg, repo, prNum, &opts)
 	}
 	return opts
 }
@@ -812,21 +836,38 @@ func (s *RouterServer) advanceVanadisChunk(ctx context.Context, repo string, prN
 	return nil
 }
 
-func (s *RouterServer) enrichHangarEventPRAndTarget(ctx context.Context, evt *HangarDeployEvent) {
-	if evt.CommitSHA != "" && evt.PRNumber == 0 {
-		if prNum, targetID, _, err := s.ResolveSHA(ctx, evt.Repo, evt.CommitSHA); err != nil {
-			log.Printf("[synapse] [hangar] failed resolving SHA %s: %v", evt.CommitSHA, err)
-		} else if prNum > 0 {
-			evt.PRNumber = prNum
-			evt.TargetID = firstNonEmpty(evt.TargetID, targetID)
-		}
-	} else if evt.PRNumber > 0 && evt.TargetID == "" {
-		if targetID, err := s.ResolveThreadForPR(ctx, evt.Repo, evt.PRNumber); err != nil {
-			log.Printf("[synapse] [hangar] failed resolving thread for PR %s#%d: %v", evt.Repo, evt.PRNumber, err)
-		} else if targetID != "" {
-			evt.TargetID = targetID
-		}
+func (s *RouterServer) resolveHangarEventPRNumber(ctx context.Context, evt *HangarDeployEvent) {
+	if evt.CommitSHA == "" || evt.PRNumber != 0 {
+		return
 	}
+	prNum, targetID, _, err := s.ResolveSHA(ctx, evt.Repo, evt.CommitSHA)
+	if err != nil {
+		log.Printf("[synapse] [hangar] failed resolving SHA %s: %v", evt.CommitSHA, err)
+		return
+	}
+	if prNum > 0 {
+		evt.PRNumber = prNum
+		evt.TargetID = firstNonEmpty(evt.TargetID, targetID)
+	}
+}
+
+func (s *RouterServer) resolveHangarEventTargetID(ctx context.Context, evt *HangarDeployEvent) {
+	if evt.PRNumber <= 0 || evt.TargetID != "" {
+		return
+	}
+	targetID, err := s.ResolveThreadForPR(ctx, evt.Repo, evt.PRNumber)
+	if err != nil {
+		log.Printf("[synapse] [hangar] failed resolving thread for PR %s#%d: %v", evt.Repo, evt.PRNumber, err)
+		return
+	}
+	if targetID != "" {
+		evt.TargetID = targetID
+	}
+}
+
+func (s *RouterServer) enrichHangarEventPRAndTarget(ctx context.Context, evt *HangarDeployEvent) {
+	s.resolveHangarEventPRNumber(ctx, evt)
+	s.resolveHangarEventTargetID(ctx, evt)
 	if evt.TargetID == "" && (evt.Event == "deploy_failed" || evt.Event == "deploy_rollback" || evt.Event == "sync_failed") {
 		evt.TargetID = strings.TrimSpace(s.cfg.SystemChannelID)
 	}

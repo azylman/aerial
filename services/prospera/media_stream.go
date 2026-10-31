@@ -834,6 +834,20 @@ func (s *MediaStreamSession) toolSendDTMF(fc GeminiFunctionCall) {
 	}
 }
 
+func (s *MediaStreamSession) sendGeminiToolResult(callID string, res string, err error, fallback string) {
+	var resp GeminiToolResponseMessage
+	if err != nil {
+		resp = BuildGeminiToolResponse(callID, map[string]any{"error": err.Error()})
+	} else if res != "" {
+		resp = BuildGeminiToolResponse(callID, map[string]any{"result": res})
+	} else {
+		resp = BuildGeminiToolResponse(callID, map[string]any{"result": fallback})
+	}
+	if sendErr := s.sendGeminiJSON(resp); sendErr != nil {
+		log.Printf("prospera: send tool response err: %v", sendErr)
+	}
+}
+
 func (s *MediaStreamSession) toolConsultCalendar(ctx context.Context, fc GeminiFunctionCall) {
 	var q, start, end string
 	if v, ok := fc.Args["query"].(string); ok {
@@ -845,23 +859,12 @@ func (s *MediaStreamSession) toolConsultCalendar(ctx context.Context, fc GeminiF
 	if v, ok := fc.Args["end_iso"].(string); ok {
 		end = v
 	}
-	if s.consultClient != nil {
-		res, err := s.consultClient.ConsultCalendar(ctx, q, start, end)
-		var resp GeminiToolResponseMessage
-		if err != nil {
-			resp = BuildGeminiToolResponse(fc.ID, map[string]any{"error": err.Error()})
-		} else {
-			resp = BuildGeminiToolResponse(fc.ID, map[string]any{"result": res})
-		}
-		if sendErr := s.sendGeminiJSON(resp); sendErr != nil {
-			log.Printf("prospera: send tool response err: %v", sendErr)
-		}
-	} else {
-		resp := BuildGeminiToolResponse(fc.ID, map[string]any{"result": "Calendar unavailable"})
-		if sendErr := s.sendGeminiJSON(resp); sendErr != nil {
-			log.Printf("prospera: send tool response err: %v", sendErr)
-		}
+	if s.consultClient == nil {
+		s.sendGeminiToolResult(fc.ID, "", nil, "Calendar unavailable")
+		return
 	}
+	res, err := s.consultClient.ConsultCalendar(ctx, q, start, end)
+	s.sendGeminiToolResult(fc.ID, res, err, "Calendar unavailable")
 }
 
 func (s *MediaStreamSession) toolConsultMemory(ctx context.Context, fc GeminiFunctionCall) {
@@ -869,23 +872,12 @@ func (s *MediaStreamSession) toolConsultMemory(ctx context.Context, fc GeminiFun
 	if v, ok := fc.Args["query"].(string); ok {
 		q = v
 	}
-	if s.consultClient != nil {
-		res, err := s.consultClient.ConsultMemory(ctx, q)
-		var resp GeminiToolResponseMessage
-		if err != nil {
-			resp = BuildGeminiToolResponse(fc.ID, map[string]any{"error": err.Error()})
-		} else {
-			resp = BuildGeminiToolResponse(fc.ID, map[string]any{"result": res})
-		}
-		if sendErr := s.sendGeminiJSON(resp); sendErr != nil {
-			log.Printf("prospera: send tool response err: %v", sendErr)
-		}
-	} else {
-		resp := BuildGeminiToolResponse(fc.ID, map[string]any{"result": "Memory unavailable"})
-		if sendErr := s.sendGeminiJSON(resp); sendErr != nil {
-			log.Printf("prospera: send tool response err: %v", sendErr)
-		}
+	if s.consultClient == nil {
+		s.sendGeminiToolResult(fc.ID, "", nil, "Memory unavailable")
+		return
 	}
+	res, err := s.consultClient.ConsultMemory(ctx, q)
+	s.sendGeminiToolResult(fc.ID, res, err, "Memory unavailable")
 }
 
 func (s *MediaStreamSession) toolEndCall(fc GeminiFunctionCall) {

@@ -782,6 +782,19 @@ func (s *VanadisServer) insertRiverJob(ctx context.Context, args ExecuteChunkArg
 	return err
 }
 
+func (s *VanadisServer) handleFinalDispatchFailure(ctx context.Context, build *VanadisBuild, chunk VanadisChunk, totalChunks int, dispatchErr error) {
+	if cErr := s.store.UpdateChunkStatus(ctx, chunk.ID, "failed"); cErr != nil {
+		log.Printf("[vanadis] failed marking chunk %s failed on final attempt: %v", chunk.ID, cErr)
+	}
+	if bErr := s.store.UpdateBuildStatus(ctx, build.ID, "failed"); bErr != nil {
+		log.Printf("[vanadis] failed marking build %s failed on final attempt: %v", build.ID, bErr)
+	}
+	RecordChunkTotal("failed")
+	RecordBuildTotal("failed")
+	attempt := 1
+	s.syncBuildWidget(ctx, build.ID, fmt.Sprintf("Chunk %d/%d (%s) failed to dispatch to Brain after %d attempts: %v", chunk.ChunkIndex+1, totalChunks, chunk.Title, attempt, dispatchErr))
+}
+
 // ProcessExecuteChunk loads build state, formats the chunk prompt, and dispatches it to Brain.
 func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string, chunkIndex int, isFinalAttempt bool) error {
 	if s == nil || s.store == nil {
@@ -835,16 +848,7 @@ func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string,
 	}
 	if err := s.dispatchBrainDispatch(ctx, reqPayload); err != nil {
 		if isFinalAttempt {
-			if cErr := s.store.UpdateChunkStatus(ctx, chunk.ID, "failed"); cErr != nil {
-				log.Printf("[vanadis] failed marking chunk %s failed on final attempt: %v", chunk.ID, cErr)
-			}
-			if bErr := s.store.UpdateBuildStatus(ctx, build.ID, "failed"); bErr != nil {
-				log.Printf("[vanadis] failed marking build %s failed on final attempt: %v", build.ID, bErr)
-			}
-			RecordChunkTotal("failed")
-			RecordBuildTotal("failed")
-			attempt := 1
-			s.syncBuildWidget(ctx, build.ID, fmt.Sprintf("Chunk %d/%d (%s) failed to dispatch to Brain after %d attempts: %v", chunk.ChunkIndex+1, len(chunks), chunk.Title, attempt, err))
+			s.handleFinalDispatchFailure(ctx, build, chunk, len(chunks), err)
 		}
 		return err
 	}

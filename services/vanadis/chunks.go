@@ -315,6 +315,48 @@ func isTerminalBuildStatus(status string) bool {
 	return status == "cancelled" || status == "failed" || status == "completed"
 }
 
+func advanceToNextChunk(ctx context.Context, tx pgx.Tx, buildID string, nextChunkIdx int, cStatus string, allChunks []VanadisChunkSummary, res *VanadisAdvancementResult) (*VanadisAdvancementResult, error) {
+	const updateNextChunkQuery = `UPDATE vanadis_chunks SET status = 'running', started_at = COALESCE(started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE build_id = $1 AND chunk_index = $2 AND status = 'pending'`
+	if _, err := tx.Exec(ctx, updateNextChunkQuery, buildID, nextChunkIdx); err != nil {
+		return nil, fmt.Errorf("update next vanadis chunk running: %w", err)
+	}
+	now := time.Now().UTC()
+	for i := range allChunks {
+		if allChunks[i].ChunkIndex == nextChunkIdx && allChunks[i].Status == "pending" {
+			allChunks[i].Status = "running"
+			if allChunks[i].StartedAt.IsZero() {
+				allChunks[i].StartedAt = now
+			}
+			allChunks[i].UpdatedAt = now
+			break
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit vanadis chunk advance tx: %w", err)
+	}
+	res.Advanced = cStatus != "merged"
+	res.NextChunkIndex = nextChunkIdx
+	res.BuildCompleted = false
+	res.Chunks = allChunks
+	return res, nil
+}
+
+func completeBuild(ctx context.Context, tx pgx.Tx, buildID string, cStatus string, allChunks []VanadisChunkSummary, res *VanadisAdvancementResult) (*VanadisAdvancementResult, error) {
+	const updateBuildQuery = `UPDATE vanadis_builds SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = $1`
+	if _, err := tx.Exec(ctx, updateBuildQuery, buildID); err != nil {
+		return nil, fmt.Errorf("update vanadis build completed: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit vanadis build completed tx: %w", err)
+	}
+	res.Advanced = cStatus != "merged"
+	res.BuildStatus = "completed"
+	res.NextChunkIndex = -1
+	res.BuildCompleted = true
+	res.Chunks = allChunks
+	return res, nil
+}
+
 func queryAndAdvanceChunks(ctx context.Context, tx pgx.Tx, buildID, chunkID, cStatus string, chunkIdx int, res *VanadisAdvancementResult) (*VanadisAdvancementResult, error) {
 	const chunksQuery = `SELECT id, chunk_index, repo, title, status, COALESCE(pr_number, 0), started_at, completed_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC FOR UPDATE`
 	rows, err := tx.Query(ctx, chunksQuery, buildID)
@@ -330,44 +372,10 @@ func queryAndAdvanceChunks(ctx context.Context, tx pgx.Tx, buildID, chunkID, cSt
 
 	nextChunkIdx := computeNextChunkIndex(allChunks, chunkIdx)
 	if nextChunkIdx >= 0 {
-		const updateNextChunkQuery = `UPDATE vanadis_chunks SET status = 'running', started_at = COALESCE(started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE build_id = $1 AND chunk_index = $2 AND status = 'pending'`
-		if _, err := tx.Exec(ctx, updateNextChunkQuery, buildID, nextChunkIdx); err != nil {
-			return nil, fmt.Errorf("update next vanadis chunk running: %w", err)
-		}
-		now := time.Now().UTC()
-		for i := range allChunks {
-			if allChunks[i].ChunkIndex == nextChunkIdx && allChunks[i].Status == "pending" {
-				allChunks[i].Status = "running"
-				if allChunks[i].StartedAt.IsZero() {
-					allChunks[i].StartedAt = now
-				}
-				allChunks[i].UpdatedAt = now
-				break
-			}
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return nil, fmt.Errorf("commit vanadis chunk advance tx: %w", err)
-		}
-		res.Advanced = cStatus != "merged"
-		res.NextChunkIndex = nextChunkIdx
-		res.BuildCompleted = false
-		res.Chunks = allChunks
-		return res, nil
+		return advanceToNextChunk(ctx, tx, buildID, nextChunkIdx, cStatus, allChunks, res)
 	}
 
-	const updateBuildQuery = `UPDATE vanadis_builds SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = $1`
-	if _, err := tx.Exec(ctx, updateBuildQuery, buildID); err != nil {
-		return nil, fmt.Errorf("update vanadis build completed: %w", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit vanadis build completed tx: %w", err)
-	}
-	res.Advanced = cStatus != "merged"
-	res.BuildStatus = "completed"
-	res.NextChunkIndex = -1
-	res.BuildCompleted = true
-	res.Chunks = allChunks
-	return res, nil
+	return completeBuild(ctx, tx, buildID, cStatus, allChunks, res)
 }
 
 // AdvanceChunkByPR advances a chunk to merged and computes the next chunk index or marks the build completed.
