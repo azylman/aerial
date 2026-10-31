@@ -39,6 +39,8 @@ func newPushEventTestEnv(t *testing.T, opts ...func(*DaemonConfig)) *pushEventTe
 	_ = os.MkdirAll(filepath.Join(aerialDir, ".git"), 0o755)
 	_ = os.MkdirAll(filepath.Join(aerialConfigDir, ".git"), 0o755)
 	_ = os.MkdirAll(filepath.Join(mirrormereDir, ".git"), 0o755)
+	seedRepoWorkflowFixture(t, aerialDir)
+	seedRepoWorkflowFixture(t, mirrormereDir)
 
 	repos := []string{aerialDir, aerialConfigDir, mirrormereDir}
 	evtCh := make(chan HangarDeployEvent, 50)

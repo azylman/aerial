@@ -167,8 +167,28 @@ func TestReconcilerAndPeriodicLoops_TableDriven(t *testing.T) {
 }
 
 func TestNewConfigFromLookup_TableDriven(t *testing.T) {
+	tmpConfigFile := filepath.Join(t.TempDir(), "test_hangar.yaml")
+	_ = os.WriteFile(tmpConfigFile, []byte("port: \"9999\"\n"), 0o644)
+	t.Setenv("CONFIG_PATH", tmpConfigFile)
+	if cfg := NewConfigFromEnv(); cfg.Port != "9999" {
+		t.Errorf("expected port 9999 from NewConfigFromEnv() with CONFIG_PATH, got %s", cfg.Port)
+	}
+
+	emptyConfigFile := filepath.Join(t.TempDir(), "empty.yaml")
+	_ = os.WriteFile(emptyConfigFile, []byte("   \n"), 0o644)
+	t.Setenv("CONFIG_PATH", emptyConfigFile)
 	if cfg := NewConfigFromEnv(); cfg.Port == "" {
-		t.Errorf("expected non-empty port from NewConfigFromEnv()")
+		t.Errorf("expected non-empty port from NewConfigFromEnv() with empty CONFIG_PATH file")
+	}
+
+	t.Setenv("CONFIG_PATH", filepath.Join(t.TempDir(), "nonexistent.yaml"))
+	if cfg := NewConfigFromEnv(); cfg.Port == "" {
+		t.Errorf("expected non-empty port from NewConfigFromEnv() with nonexistent CONFIG_PATH")
+	}
+
+	t.Setenv("CONFIG_PATH", "")
+	if cfg := NewConfigFromEnv(); cfg.Port == "" {
+		t.Errorf("expected non-empty port from NewConfigFromEnv() with empty CONFIG_PATH")
 	}
 	if cfg := NewConfigFromLookup(nil); cfg.Port != "8087" {
 		t.Errorf("NewConfigFromLookup(nil) Port = %q, want 8087", cfg.Port)

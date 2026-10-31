@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -794,6 +795,18 @@ job "mirrormere-core" {
 			fallbackFileName: "jobs/eri.vars.hcl",
 			expected:         "eri",
 		},
+		{
+			name:             "fallback strips nomad hcl extension",
+			content:          `# only comments`,
+			fallbackFileName: "jobs/svc.nomad.hcl",
+			expected:         "svc",
+		},
+		{
+			name:             "empty job name in job declaration falls back",
+			content:          `job "" {}`,
+			fallbackFileName: "jobs/fallback.nomad",
+			expected:         "fallback",
+		},
 	}
 
 	for _, tt := range tests {
@@ -857,6 +870,18 @@ job "raw-exec-job" {
   task "script" {
     driver = "raw_exec"
   }
+}
+// image = "ignored/comment:latest"
+# image = "ignored/comment2:latest"
+task "bad1" {
+  config {
+    image = unquoted
+  }
+}
+task "bad2" {
+  config {
+    image = "unclosed
+  }
 }`,
 			expected: nil,
 		},
@@ -877,7 +902,153 @@ job "raw-exec-job" {
 	}
 }
 
+func writeTestWorkflowFixture(t testing.TB, repoDir, filtersYAML, catalogJS string) {
+	t.Helper()
+	wfDir := filepath.Join(repoDir, ".github", "workflows")
+	if err := os.MkdirAll(wfDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := fmt.Sprintf(`name: CI
+on: [push]
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+%s
+      - name: Compute Dynamic Build Matrix
+        id: set-matrix
+        run: |
+          const catalog = [
+%s
+          ];
+`, indentLines(filtersYAML, 12), indentLines(catalogJS, 12))
+	if err := os.WriteFile(filepath.Join(wfDir, "docker-publish.yml"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func indentLines(s string, spaces int) string {
+	pad := strings.Repeat(" ", spaces)
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	for i, l := range lines {
+		if strings.TrimSpace(l) != "" {
+			lines[i] = pad + l
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func seedRepoWorkflowFixture(t testing.TB, repoDir string) {
+	t.Helper()
+	base := strings.ToLower(filepath.Base(repoDir))
+	switch {
+	case strings.Contains(base, "sidecar"):
+		writeTestWorkflowFixture(t, repoDir, `
+vision:
+  - 'vision/**'
+migrator:
+  - 'scratch-service/migrations/**'
+  - 'atlas.hcl'
+`, `
+{ service: "vision", image_name: "aerial-sidecar-vision" },
+{ service: "migrator", image_name: "aerial-sidecar-migrator" }
+`)
+	case strings.Contains(base, "mirrormere"):
+		writeTestWorkflowFixture(t, repoDir, `
+mirrormere:
+  - 'cmd/**'
+  - 'internal/**'
+  - 'api/**'
+  - 'Dockerfile'
+ear:
+  - 'client/ear/**'
+cast-watcher:
+  - 'client/cast-watcher/**'
+  - 'go.mod'
+`, `
+{ service: "mirrormere", image_name: "mirrormere" },
+{ service: "ear", image_name: "mirrormere-ear" },
+{ service: "cast-watcher", image_name: "mirrormere-cast-watcher" }
+`)
+	default:
+		writeTestWorkflowFixture(t, repoDir, `
+eri:
+  - 'services/eri/**'
+  - 'pkg/**'
+haro:
+  - 'services/haro/**'
+  - 'pkg/**'
+coven:
+  - 'services/coven/**'
+  - 'pkg/**'
+discord-mcp:
+  - 'mcp/discord-mcp/**'
+  - 'pkg/**'
+kernel-mcp:
+  - 'mcp/kernel-mcp/**'
+  - 'pkg/**'
+github-mcp:
+  - 'mcp/github-mcp/**'
+nomad-mcp:
+  - 'mcp/nomad-mcp/**'
+infisical-mcp:
+  - 'mcp/infisical-mcp/**'
+dashboard:
+  - 'services/dashboard/**'
+  - 'pkg/**'
+docs:
+  - 'services/docs-service/**'
+proxy:
+  - 'services/proxy/**'
+hangar:
+  - 'services/hangar/**'
+  - 'pkg/**'
+synapse:
+  - 'services/synapse/**'
+  - 'pkg/**'
+vanadis:
+  - 'services/vanadis/**'
+  - 'pkg/**'
+  - 'Dockerfile'
+prospera:
+  - 'services/prospera/**'
+  - 'pkg/**'
+github-runner:
+  - 'services/github-runner/**'
+`, `
+{ service: "eri", image_name: "aerial-eri" },
+{ service: "haro", image_name: "aerial-haro" },
+{ service: "coven", image_name: "aerial-coven" },
+{ service: "discord-mcp", image_name: "aerial-discord-mcp" },
+{ service: "kernel-mcp", image_name: "aerial-kernel-mcp" },
+{ service: "github-mcp", image_name: "aerial-github-mcp" },
+{ service: "nomad-mcp", image_name: "aerial-nomad-mcp" },
+{ service: "infisical-mcp", image_name: "aerial-infisical-mcp" },
+{ service: "dashboard", image_name: "aerial-dashboard" },
+{ service: "docs", image_name: "aerial-docs" },
+{ service: "proxy", image_name: "aerial-proxy" },
+{ service: "hangar", image_name: "aerial-hangar" },
+{ service: "synapse", image_name: "aerial-synapse" },
+{ service: "vanadis", image_name: "aerial-vanadis" },
+{ service: "prospera", image_name: "aerial-prospera" },
+{ service: "github-runner", image_name: "aerial-github-runner" }
+`)
+	}
+}
+
 func TestJobHasContainerBuildChanges_TableDriven(t *testing.T) {
+	tmpDir := t.TempDir()
+	aerialDir := filepath.Join(tmpDir, "aerial")
+	sidecarsDir := filepath.Join(tmpDir, "aerial-sidecars")
+	mirrormereDir := filepath.Join(tmpDir, "mirrormere")
+	seedRepoWorkflowFixture(t, aerialDir)
+	seedRepoWorkflowFixture(t, sidecarsDir)
+	seedRepoWorkflowFixture(t, mirrormereDir)
+
 	specVanadis := `job "vanadis" { task "vanadis" { config { image = "ghcr.io/azylman/aerial-vanadis:${var.image_tag}" } } }`
 	specSynapse := `job "synapse" { task "synapse" { config { image = "ghcr.io/azylman/aerial-synapse:${var.image_tag}" } } }`
 	specProspera := `job "prospera" { task "prospera" { config { image = "ghcr.io/azylman/aerial-prospera:${var.image_tag}" } } }`
@@ -886,42 +1057,43 @@ func TestJobHasContainerBuildChanges_TableDriven(t *testing.T) {
 	specExternal := `job "coverage-ingest" { task "flush" { config { image = "golang:1.27.1-alpine" } } }`
 
 	tests := []struct {
-		name    string
-		jobSpec string
-		files   []string
-		want    bool
+		name     string
+		repoPath string
+		jobSpec  string
+		files    []string
+		want     bool
 	}{
-		{"matching services dir", specVanadis, []string{"services/vanadis/main.go"}, true},
-		{"matching synapse service dir", specSynapse, []string{"services/synapse/main.go"}, true},
-		{"matching prospera service dir", specProspera, []string{"services/prospera/main.go"}, true},
-		{"matching legacy root dir", specVanadis, []string{"vanadis/Dockerfile"}, false},
-		{"matching mcp dir", specMCP, []string{"mcp/discord-mcp/main.go"}, true},
-		{"matching kernel-mcp dir", `job "kernel-mcp" { task "kernel-mcp" { config { image = "ghcr.io/azylman/aerial-kernel-mcp:${var.image_tag}" } } }`, []string{"mcp/kernel-mcp/main.go"}, true},
-		{"matching docs-service alias", specDocs, []string{"services/docs-service/Dockerfile"}, true},
-		{"matching root Dockerfile", specVanadis, []string{"Dockerfile"}, true},
-		{"matching pkg dir", specVanadis, []string{"pkg/httpkit/httpkit.go"}, true},
-		{"matching pkg dir on synapse", specSynapse, []string{"pkg/httpkit/httpkit.go"}, true},
-		{"matching pkg dir on prospera", specProspera, []string{"pkg/httpkit/httpkit.go"}, true},
-		{"matching pkg dir on mcp go service", specMCP, []string{"pkg/ollama/client.go"}, true},
-		{"matching pkg dir on kernel-mcp", `job "kernel-mcp" { task "kernel-mcp" { config { image = "ghcr.io/azylman/aerial-kernel-mcp:${var.image_tag}" } } }`, []string{"pkg/httpkit/httpkit.go"}, true},
-		{"pkg dir does not match non-pkg service", specDocs, []string{"pkg/httpkit/httpkit.go"}, false},
-		{"unmatched other service dir", specVanadis, []string{"services/hangar/main.go", "nomad/jobs/vanadis.nomad"}, false},
-		{"external image never matches", specExternal, []string{"services/vanadis/main.go", "Dockerfile"}, false},
-		{"empty changed files", specVanadis, nil, false},
-		{"sidecar vision image matches vision dir", `job "vision" { task "vision" { config { image = "ghcr.io/azylman/aerial-sidecar-vision:${var.image_tag}" } } }`, []string{"vision/app/detector.py"}, true},
-		{"sidecar vision image ignores other sidecar dir", `job "vision" { task "vision" { config { image = "ghcr.io/azylman/aerial-sidecar-vision:${var.image_tag}" } } }`, []string{"banana/app/main.py"}, false},
-		{"sidecar migrator matches atlas.hcl and scratch migrations", `job "aerial-sidecars-db-migrate" { task "atlas" { config { image = "ghcr.io/azylman/aerial-sidecar-migrator:latest" } } }`, []string{"atlas.hcl"}, true},
-		{"sidecar migrator matches scratch-service migrations", `job "aerial-sidecars-db-migrate" { task "atlas" { config { image = "ghcr.io/azylman/aerial-sidecar-migrator:latest" } } }`, []string{"scratch-service/migrations/20261031.sql"}, true},
-		{"mirrormere core matches cmd and Dockerfile", `job "mirrormere-core" { task "core" { config { image = "ghcr.io/azylman/mirrormere:${var.image_tag}" } } }`, []string{"cmd/mirrormere/main.go"}, true},
-		{"mirrormere core ignores web static assets", `job "mirrormere-core" { task "core" { config { image = "ghcr.io/azylman/mirrormere:${var.image_tag}" } } }`, []string{"web/index.html", "widgets/clock/widget.js"}, false},
-		{"mirrormere ear matches client ear dir", `job "kiosk-ear" { task "ear" { config { image = "ghcr.io/azylman/mirrormere-ear:${var.image_tag}" } } }`, []string{"client/ear/main.py"}, true},
-		{"mirrormere cast-watcher matches go.mod and client cast-watcher", `job "kiosk-cast-watcher" { task "watcher" { config { image = "ghcr.io/azylman/mirrormere-cast-watcher:${var.image_tag}" } } }`, []string{"go.mod"}, true},
+		{"matching services dir", aerialDir, specVanadis, []string{"services/vanadis/main.go"}, true},
+		{"matching synapse service dir", aerialDir, specSynapse, []string{"services/synapse/main.go"}, true},
+		{"matching prospera service dir", aerialDir, specProspera, []string{"services/prospera/main.go"}, true},
+		{"matching legacy root dir", aerialDir, specVanadis, []string{"vanadis/Dockerfile"}, false},
+		{"matching mcp dir", aerialDir, specMCP, []string{"mcp/discord-mcp/main.go"}, true},
+		{"matching kernel-mcp dir", aerialDir, `job "kernel-mcp" { task "kernel-mcp" { config { image = "ghcr.io/azylman/aerial-kernel-mcp:${var.image_tag}" } } }`, []string{"mcp/kernel-mcp/main.go"}, true},
+		{"matching docs-service alias", aerialDir, specDocs, []string{"services/docs-service/Dockerfile"}, true},
+		{"matching root Dockerfile", aerialDir, specVanadis, []string{"Dockerfile"}, true},
+		{"matching pkg dir", aerialDir, specVanadis, []string{"pkg/httpkit/httpkit.go"}, true},
+		{"matching pkg dir on synapse", aerialDir, specSynapse, []string{"pkg/httpkit/httpkit.go"}, true},
+		{"matching pkg dir on prospera", aerialDir, specProspera, []string{"pkg/httpkit/httpkit.go"}, true},
+		{"matching pkg dir on mcp go service", aerialDir, specMCP, []string{"pkg/ollama/client.go"}, true},
+		{"matching pkg dir on kernel-mcp", aerialDir, `job "kernel-mcp" { task "kernel-mcp" { config { image = "ghcr.io/azylman/aerial-kernel-mcp:${var.image_tag}" } } }`, []string{"pkg/httpkit/httpkit.go"}, true},
+		{"pkg dir does not match non-pkg service", aerialDir, specDocs, []string{"pkg/httpkit/httpkit.go"}, false},
+		{"unmatched other service dir", aerialDir, specVanadis, []string{"services/hangar/main.go", "nomad/jobs/vanadis.nomad"}, false},
+		{"external image never matches", aerialDir, specExternal, []string{"services/vanadis/main.go", "Dockerfile"}, false},
+		{"empty changed files", aerialDir, specVanadis, nil, false},
+		{"sidecar vision image matches vision dir", sidecarsDir, `job "vision" { task "vision" { config { image = "ghcr.io/azylman/aerial-sidecar-vision:${var.image_tag}" } } }`, []string{"vision/app/detector.py"}, true},
+		{"sidecar vision image ignores other sidecar dir", sidecarsDir, `job "vision" { task "vision" { config { image = "ghcr.io/azylman/aerial-sidecar-vision:${var.image_tag}" } } }`, []string{"banana/app/main.py"}, false},
+		{"sidecar migrator matches atlas.hcl and scratch migrations", sidecarsDir, `job "aerial-sidecars-db-migrate" { task "atlas" { config { image = "ghcr.io/azylman/aerial-sidecar-migrator:latest" } } }`, []string{"atlas.hcl"}, true},
+		{"sidecar migrator matches scratch-service migrations", sidecarsDir, `job "aerial-sidecars-db-migrate" { task "atlas" { config { image = "ghcr.io/azylman/aerial-sidecar-migrator:latest" } } }`, []string{"scratch-service/migrations/20261031.sql"}, true},
+		{"mirrormere core matches cmd and Dockerfile", mirrormereDir, `job "mirrormere-core" { task "core" { config { image = "ghcr.io/azylman/mirrormere:${var.image_tag}" } } }`, []string{"cmd/mirrormere/main.go"}, true},
+		{"mirrormere core ignores web static assets", mirrormereDir, `job "mirrormere-core" { task "core" { config { image = "ghcr.io/azylman/mirrormere:${var.image_tag}" } } }`, []string{"web/index.html", "widgets/clock/widget.js"}, false},
+		{"mirrormere ear matches client ear dir", mirrormereDir, `job "kiosk-ear" { task "ear" { config { image = "ghcr.io/azylman/mirrormere-ear:${var.image_tag}" } } }`, []string{"client/ear/main.py"}, true},
+		{"mirrormere cast-watcher matches go.mod and client cast-watcher", mirrormereDir, `job "kiosk-cast-watcher" { task "watcher" { config { image = "ghcr.io/azylman/mirrormere-cast-watcher:${var.image_tag}" } } }`, []string{"go.mod"}, true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := JobHasContainerBuildChanges(tc.jobSpec, tc.files); got != tc.want {
-				t.Errorf("JobHasContainerBuildChanges() = %v, want %v", got, tc.want)
+			if got := JobHasContainerBuildChanges(tc.repoPath, tc.jobSpec, tc.files); got != tc.want {
+				t.Errorf("JobHasContainerBuildChanges(%q) = %v, want %v", tc.repoPath, got, tc.want)
 			}
 		})
 	}
@@ -1018,36 +1190,46 @@ R100	jobs/old.nomad	jobs/new.nomad
 }
 
 func TestHasContainerBuildChanges_TableDriven(t *testing.T) {
+	tmpDir := t.TempDir()
+	aerialDir := filepath.Join(tmpDir, "aerial")
+	configDir := filepath.Join(tmpDir, "aerial-config")
+	sidecarsDir := filepath.Join(tmpDir, "aerial-sidecars")
+	mirrormereDir := filepath.Join(tmpDir, "mirrormere")
+
+	seedRepoWorkflowFixture(t, aerialDir)
+	seedRepoWorkflowFixture(t, sidecarsDir)
+	seedRepoWorkflowFixture(t, mirrormereDir)
+
 	tests := []struct {
 		name     string
 		repoPath string
 		files    []string
 		expected bool
 	}{
-		{"aerial-config always false", "/share/aerial-config", []string{"jobs/brain.nomad", "rules/common.md", "Dockerfile"}, false},
-		{"aerial core legacy brain touched returns false", "/share/aerial", []string{"brain/main.go"}, false},
-		{"aerial core services touched", "/share/aerial", []string{"services/coven/main.go"}, true},
-		{"aerial core mcp touched", "/share/aerial", []string{"mcp/github-mcp/main.go"}, true},
-		{"aerial core legacy coven touched returns false", "/share/aerial", []string{"coven/main.go"}, false},
-		{"aerial core eri touched", "/share/aerial", []string{"services/eri/main.go"}, true},
-		{"aerial core legacy webhooks-router touched returns false", "/share/aerial", []string{"webhooks-router/main.go"}, false},
-		{"aerial core legacy vanadis touched returns false", "/share/aerial", []string{"vanadis/main.go"}, false},
-		{"aerial core legacy github-runner touched returns false", "/share/aerial", []string{"github-runner/Dockerfile"}, false},
-		{"aerial core Dockerfile touched", "/share/aerial", []string{"Dockerfile"}, true},
-		{"aerial core go.mod touched", "/share/aerial", []string{"go.mod"}, true},
-		{"aerial core pkg touched", "/share/aerial", []string{"pkg/httpkit/httpkit.go"}, true},
-		{"aerial core scripts touched returns false", "/share/aerial", []string{"scripts/verify.sh"}, false},
-		{"aerial core rules touched returns false", "/share/aerial", []string{"rules/discord/foo.md"}, false},
-		{"aerial core .agents touched returns false", "/share/aerial", []string{".agents/skills/self-improvement/SKILL.md"}, false},
-		{"aerial core docker publish workflow touched returns false", "/share/aerial", []string{".github/workflows/docker-publish.yml"}, false},
-		{"aerial core non-build files (docs, nomad, readme)", "/share/aerial", []string{"nomad/jobs/migrate.nomad", "README.md", "docs/spec.md"}, false},
-		{"aerial core empty files", "/share/aerial", nil, false},
-		{"aerial-sidecars service dir touched", "/share/aerial-sidecars", []string{"vision/app/detector.py"}, true},
-		{"aerial-sidecars atlas.hcl touched", "/share/aerial-sidecars", []string{"atlas.hcl"}, true},
-		{"aerial-sidecars non-build files (docs, scripts, github, root)", "/share/aerial-sidecars", []string{"README.md", "docs/spec.md", "scripts/test.sh", ".github/workflows/docker-publish.yml", "nomad/jobs/migrate.nomad"}, false},
-		{"mirrormere cmd and Dockerfile touched", "/share/mirrormere", []string{"cmd/mirrormere/main.go"}, true},
-		{"mirrormere root Dockerfile touched", "/share/mirrormere", []string{"Dockerfile"}, true},
-		{"mirrormere web and eink-node non-container paths", "/share/mirrormere", []string{"web/index.html", "widgets/clock/widget.js", "client/eink-node/main.py", "README.md"}, false},
+		{"aerial-config always false", configDir, []string{"jobs/brain.nomad", "rules/common.md", "Dockerfile"}, false},
+		{"aerial core legacy brain touched returns false", aerialDir, []string{"brain/main.go"}, false},
+		{"aerial core services touched", aerialDir, []string{"services/coven/main.go"}, true},
+		{"aerial core mcp touched", aerialDir, []string{"mcp/github-mcp/main.go"}, true},
+		{"aerial core legacy coven touched returns false", aerialDir, []string{"coven/main.go"}, false},
+		{"aerial core eri touched", aerialDir, []string{"services/eri/main.go"}, true},
+		{"aerial core legacy webhooks-router touched returns false", aerialDir, []string{"webhooks-router/main.go"}, false},
+		{"aerial core legacy vanadis touched returns false", aerialDir, []string{"vanadis/main.go"}, false},
+		{"aerial core legacy github-runner touched returns false", aerialDir, []string{"github-runner/Dockerfile"}, false},
+		{"aerial core Dockerfile touched", aerialDir, []string{"Dockerfile"}, true},
+		{"aerial core go.mod touched returns false", aerialDir, []string{"go.mod"}, false},
+		{"aerial core pkg touched", aerialDir, []string{"pkg/httpkit/httpkit.go"}, true},
+		{"aerial core scripts touched returns false", aerialDir, []string{"scripts/verify.sh"}, false},
+		{"aerial core rules touched returns false", aerialDir, []string{"rules/discord/foo.md"}, false},
+		{"aerial core .agents touched returns false", aerialDir, []string{".agents/skills/self-improvement/SKILL.md"}, false},
+		{"aerial core docker publish workflow touched returns false", aerialDir, []string{".github/workflows/docker-publish.yml"}, false},
+		{"aerial core non-build files (docs, nomad, readme)", aerialDir, []string{"nomad/jobs/migrate.nomad", "README.md", "docs/spec.md"}, false},
+		{"aerial core empty files", aerialDir, nil, false},
+		{"aerial-sidecars service dir touched", sidecarsDir, []string{"vision/app/detector.py"}, true},
+		{"aerial-sidecars atlas.hcl touched", sidecarsDir, []string{"atlas.hcl"}, true},
+		{"aerial-sidecars non-build files (docs, scripts, github, root)", sidecarsDir, []string{"README.md", "docs/spec.md", "scripts/test.sh", ".github/workflows/docker-publish.yml", "nomad/jobs/migrate.nomad"}, false},
+		{"mirrormere cmd and Dockerfile touched", mirrormereDir, []string{"cmd/mirrormere/main.go"}, true},
+		{"mirrormere root Dockerfile touched", mirrormereDir, []string{"Dockerfile"}, true},
+		{"mirrormere web and eink-node non-container paths", mirrormereDir, []string{"web/index.html", "widgets/clock/widget.js", "client/eink-node/main.py", "README.md"}, false},
 	}
 
 	for _, tt := range tests {
@@ -1201,32 +1383,40 @@ func TestResolveRepoPath_TableDriven(t *testing.T) {
 }
 
 func TestImageSourceRepo_TableDriven(t *testing.T) {
+	tmpDir := t.TempDir()
+	aerialDir := filepath.Join(tmpDir, "aerial")
+	sidecarsDir := filepath.Join(tmpDir, "aerial-sidecars")
+	mirrormereDir := filepath.Join(tmpDir, "mirrormere")
+
+	seedRepoWorkflowFixture(t, aerialDir)
+	seedRepoWorkflowFixture(t, sidecarsDir)
+	seedRepoWorkflowFixture(t, mirrormereDir)
+
+	candidateRepos := []string{aerialDir, sidecarsDir, mirrormereDir}
+
 	tests := []struct {
 		name     string
 		imageRef string
 		expected string
 	}{
-		{"core aerial webhooks-router", "ghcr.io/azylman/aerial-webhooks-router:latest", "azylman/aerial"},
 		{"core aerial synapse", "ghcr.io/azylman/aerial-synapse:latest", "azylman/aerial"},
 		{"core aerial infisical-mcp", "ghcr.io/azylman/aerial-infisical-mcp:latest", "azylman/aerial"},
-		{"core aerial brain", "ghcr.io/azylman/aerial-brain:latest", "azylman/aerial"},
+		{"core aerial eri", "ghcr.io/azylman/aerial-eri:latest", "azylman/aerial"},
 		{"mirrormere core", "ghcr.io/azylman/mirrormere:latest", "azylman/mirrormere"},
-		{"mirrormere voice fingerprinter", "ghcr.io/azylman/mirrormere-voice-fingerprinter:latest", "azylman/mirrormere"},
-		{"sidecar banana", "ghcr.io/azylman/aerial-sidecar-banana:latest", "azylman/aerial-sidecars"},
-		{"voice sidecar", "ghcr.io/azylman/aerial-sidecar-voice-cuda:latest", "azylman/aerial-sidecars"},
+		{"mirrormere ear", "ghcr.io/azylman/mirrormere-ear:latest", "azylman/mirrormere"},
+		{"sidecar migrator", "ghcr.io/azylman/aerial-sidecar-migrator:latest", "azylman/aerial-sidecars"},
+		{"voice sidecar", "ghcr.io/azylman/aerial-sidecar-vision:latest", "azylman/aerial-sidecars"},
 		{"third party go2rtc", "alexxit/go2rtc:1.9.8", ""},
 		{"third party redis", "redis:7-alpine", ""},
 		{"empty string", "", ""},
-		{"aerial suffix", "ghcr.io/someone/aerial", "azylman/aerial"},
-		{"aerial with tag", "ghcr.io/someone/aerial:v1.0", "azylman/aerial"},
 		{"azylman other image", "ghcr.io/azylman/other-tool:latest", ""},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ImageSourceRepo(tt.imageRef)
+			got := ResolveImageSourceRepo(tt.imageRef, candidateRepos)
 			if got != tt.expected {
-				t.Errorf("ImageSourceRepo(%q) = %q, want %q", tt.imageRef, got, tt.expected)
+				t.Errorf("ResolveImageSourceRepo(%q) = %q, want %q", tt.imageRef, got, tt.expected)
 			}
 		})
 	}
@@ -1564,6 +1754,9 @@ func TestResolveExpectedDeployJobs_TableDriven(t *testing.T) {
 	configDir := filepath.Join(tmpDir, "aerial-config")
 	sidecarsDir := filepath.Join(tmpDir, "aerial-sidecars")
 	mirrormereDir := filepath.Join(tmpDir, "mirrormere")
+	seedRepoWorkflowFixture(t, aerialDir)
+	seedRepoWorkflowFixture(t, sidecarsDir)
+	seedRepoWorkflowFixture(t, mirrormereDir)
 	if err := os.MkdirAll(filepath.Join(aerialDir, "nomad", "jobs"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1683,31 +1876,212 @@ func TestResolveExpectedDeployJobs_TableDriven(t *testing.T) {
 	}
 }
 
-func TestIsStaticAssetOnlyFile_TableDriven(t *testing.T) {
+func TestParseWorkflowBuildRules_TableDriven(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name     string
-		path     string
-		expected bool
+		name        string
+		yaml        string
+		wantFilters map[string][]string
+		wantCatalog map[string]string
 	}{
-		{"dashboard static file", "services/dashboard/static/index.html", true},
-		{"dashboard static nested", "services/dashboard/static/assets/app.js", true},
-		{"dashboard static leading slash", "/services/dashboard/static/app.css", true},
-		{"docs service app file", "services/docs-service/app/index.html", true},
-		{"docs service app nested", "services/docs-service/app/vendor/docsify.js", true},
-		{"dashboard go file", "services/dashboard/main.go", false},
-		{"docs service go file", "services/docs-service/main.go", false},
-		{"unrelated service", "services/eri/pkg/db/db.go", false},
-		{"root Dockerfile", "Dockerfile", false},
-		{"empty path", "", false},
+		{
+			name:        "empty input",
+			yaml:        "",
+			wantFilters: map[string][]string{},
+			wantCatalog: map[string]string{},
+		},
+		{
+			name: "valid dorny filter and js catalog",
+			yaml: `
+jobs:
+  changes:
+    steps:
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            eri:
+              - 'services/eri/**'
+              - 'pkg/**'
+            docs:
+              - 'services/docs-service/**'
+      - name: Compute Dynamic Build Matrix
+        run: |
+          const catalog = [
+            { service: "eri", image_name: "aerial-eri" },
+            { service: "docs", image_name: "aerial-docs" }
+          ];
+`,
+			wantFilters: map[string][]string{
+				"eri":  {"services/eri/**", "pkg/**"},
+				"docs": {"services/docs-service/**"},
+			},
+			wantCatalog: map[string]string{
+				"eri":  "aerial-eri",
+				"docs": "aerial-docs",
+			},
+		},
+		{
+			name: "single glob string in filter and multiline object in catalog",
+			yaml: `
+jobs:
+  changes:
+    steps:
+      - uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            app: 'src/**'
+      - run: |
+          const catalog = [
+            {
+              service: "app",
+              context: "./src",
+              image_name: "my-app"
+            }
+          ];
+`,
+			wantFilters: map[string][]string{
+				"app": {"src/**"},
+			},
+			wantCatalog: map[string]string{
+				"app": "my-app",
+			},
+		},
+		{
+			name: "filters as mapping node and ignored catalog entries",
+			yaml: `
+jobs:
+  changes:
+    steps:
+      - uses: dorny/paths-filter@v4
+        with:
+          filters:
+            app:
+              - 'services/app/**'
+      - run: |
+          const catalog = [
+            { service: "", image_name: "" },
+            { dummy: true }
+          ];
+`,
+			wantFilters: map[string][]string{
+				"app": {"services/app/**"},
+			},
+			wantCatalog: map[string]string{},
+		},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := isStaticAssetOnlyFile(tc.path)
-			if got != tc.expected {
-				t.Errorf("isStaticAssetOnlyFile(%q) = %v, want %v", tc.path, got, tc.expected)
+			filters, catalog := ParseWorkflowBuildRules([]byte(tt.yaml))
+			if len(filters) != len(tt.wantFilters) {
+				t.Fatalf("ParseWorkflowBuildRules() filters len = %d, want %d", len(filters), len(tt.wantFilters))
+			}
+			for k, wantGlobs := range tt.wantFilters {
+				gotGlobs := filters[k]
+				if len(gotGlobs) != len(wantGlobs) {
+					t.Fatalf("filters[%q] len = %d, want %d", k, len(gotGlobs), len(wantGlobs))
+				}
+				for i := range wantGlobs {
+					if gotGlobs[i] != wantGlobs[i] {
+						t.Errorf("filters[%q][%d] = %q, want %q", k, i, gotGlobs[i], wantGlobs[i])
+					}
+				}
+			}
+			if len(catalog) != len(tt.wantCatalog) {
+				t.Fatalf("ParseWorkflowBuildRules() catalog len = %d, want %d", len(catalog), len(tt.wantCatalog))
+			}
+			for k, wantImg := range tt.wantCatalog {
+				if catalog[k] != wantImg {
+					t.Errorf("catalog[%q] = %q, want %q", k, catalog[k], wantImg)
+				}
+			}
+		})
+	}
+}
+
+func TestDiscoverRepoWorkflowRules_TableDriven(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	emptyRepo := filepath.Join(tmpDir, "empty")
+	noCatalogRepo := filepath.Join(tmpDir, "no-cat")
+	validRepo := filepath.Join(tmpDir, "valid")
+	mixedRepo := filepath.Join(tmpDir, "mixed")
+	_ = os.MkdirAll(emptyRepo, 0o755)
+	_ = os.MkdirAll(filepath.Join(noCatalogRepo, ".github", "workflows"), 0o755)
+	_ = os.WriteFile(filepath.Join(noCatalogRepo, ".github", "workflows", "lint.yml"), []byte(`name: Lint`), 0o644)
+	_ = os.MkdirAll(filepath.Join(mixedRepo, ".github", "workflows", "sub"), 0o755)
+	_ = os.WriteFile(filepath.Join(mixedRepo, ".github", "workflows", "readme.txt"), []byte("not yaml"), 0o644)
+	seedRepoWorkflowFixture(t, validRepo)
+	seedRepoWorkflowFixture(t, mixedRepo)
+
+	tests := []struct {
+		name        string
+		repoPath    string
+		wantCatalog int
+	}{
+		{"empty repo returns empty", emptyRepo, 0},
+		{"repo with no catalog returns empty", noCatalogRepo, 0},
+		{"valid repo discovers catalog", validRepo, 16},
+		{"mixed repo ignores directories and non-yaml", mixedRepo, 16},
+		{"empty repo path returns empty", "", 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, catalog := DiscoverRepoWorkflowRules(tt.repoPath)
+			if len(catalog) != tt.wantCatalog {
+				t.Errorf("DiscoverRepoWorkflowRules(%q) catalog len = %d, want %d", tt.repoPath, len(catalog), tt.wantCatalog)
+			}
+		})
+	}
+}
+
+func TestAffectedWorkflowImages_TableDriven(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	aerialDir := filepath.Join(tmpDir, "aerial")
+	catchAllDir := filepath.Join(tmpDir, "catchall")
+	seedRepoWorkflowFixture(t, aerialDir)
+
+	writeTestWorkflowFixture(t, catchAllDir, `
+all:
+  - '**'
+empty:
+  - ''
+`, `
+{ service: "all", image_name: "catch-all-image" }
+`)
+
+	tests := []struct {
+		name     string
+		repoPath string
+		files    []string
+		want     []string
+	}{
+		{"empty files returns nil", aerialDir, nil, nil},
+		{"empty repo returns nil", "", []string{"services/eri/main.go"}, nil},
+		{"single service match", aerialDir, []string{"services/eri/main.go"}, []string{"aerial-eri"}},
+		{"duplicate service changes deduplicated", aerialDir, []string{"services/eri/main.go", "services/eri/pkg/db/migrations/001.sql"}, []string{"aerial-eri"}},
+		{"empty or dot file path skipped", aerialDir, []string{"", ".", "   "}, nil},
+		{"pkg match touches multiple services", aerialDir, []string{"pkg/httpkit/httpkit.go"}, []string{"aerial-coven", "aerial-dashboard", "aerial-discord-mcp", "aerial-eri", "aerial-hangar", "aerial-haro", "aerial-kernel-mcp", "aerial-prospera", "aerial-synapse", "aerial-vanadis"}},
+		{"non-matching file returns nil", aerialDir, []string{"README.md"}, nil},
+		{"double star pattern matches any file", catchAllDir, []string{"anything/file.txt"}, []string{"catch-all-image"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := AffectedWorkflowImages(tt.repoPath, tt.files)
+			if len(got) != len(tt.want) {
+				t.Fatalf("AffectedWorkflowImages() len = %d, want %d (got: %v)", len(got), len(tt.want), got)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Errorf("AffectedWorkflowImages()[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
 			}
 		})
 	}
@@ -1957,34 +2331,25 @@ func TestAssetBundleChangedInList_TableDriven(t *testing.T) {
 	}
 }
 
-func TestJobHasContainerBuildChanges_StaticAssetExclusion(t *testing.T) {
+func TestFirstNonEmpty_TableDriven(t *testing.T) {
 	t.Parallel()
-	spec := `job "dashboard" {
-		task "dashboard" {
-			driver = "docker"
-			config {
-				image = "ghcr.io/azylman/aerial-dashboard:latest"
-			}
-		}
-	}`
-
 	tests := []struct {
 		name     string
-		files    []string
-		expected bool
+		inputs   []string
+		expected string
 	}{
-		{"static file change only", []string{"services/dashboard/static/index.html"}, false},
-		{"static nested file change only", []string{"services/dashboard/static/assets/bundle.js"}, false},
-		{"code change in service", []string{"services/dashboard/main.go"}, true},
-		{"dockerfile change", []string{"Dockerfile"}, true},
+		{"first non-empty", []string{"a", "b"}, "a"},
+		{"second non-empty", []string{"", "b"}, "b"},
+		{"all empty", []string{"", ""}, ""},
+		{"none provided", nil, ""},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := JobHasContainerBuildChanges(spec, tc.files)
+			got := firstNonEmpty(tc.inputs...)
 			if got != tc.expected {
-				t.Errorf("JobHasContainerBuildChanges() = %v, want %v for %v", got, tc.expected, tc.files)
+				t.Errorf("firstNonEmpty(%v) = %q, want %q", tc.inputs, got, tc.expected)
 			}
 		})
 	}

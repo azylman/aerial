@@ -76,7 +76,7 @@ func splitLines(s string) []string {
 
 func (d *SyncDaemon) shouldDeferNomadJob(ctx context.Context, jobName, jobSpec string) bool {
 	for _, img := range ExtractNomadJobImages(jobSpec) {
-		srcRepo := ImageSourceRepo(img)
+		srcRepo := ResolveImageSourceRepo(img, d.candidateJobRepos())
 		if srcRepo != "" {
 			dgst, dgstErr := d.GetRemoteImageDigest(ctx, img)
 			if dgstErr != nil || dgst == "" {
@@ -115,7 +115,7 @@ func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath str
 			continue
 		}
 		jobSpec := string(content)
-		if (containersBuilding && JobHasContainerBuildChanges(jobSpec, changedFiles)) || d.shouldDeferNomadJob(ctx, ch.JobName, jobSpec) {
+		if (containersBuilding && JobHasContainerBuildChanges(repoPath, jobSpec, changedFiles)) || d.shouldDeferNomadJob(ctx, ch.JobName, jobSpec) {
 			log.Printf("[Hangar:GitPush] Deferring Nomad job %s until container image is ready", ch.JobName)
 			deferred = append(deferred, ch.JobName)
 			continue

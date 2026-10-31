@@ -567,12 +567,12 @@ func (d *SyncDaemon) checkSingleJobImageDigest(pollCtx context.Context, repo, jo
 
 	headSHA := d.resolvePolledImageCommitSHA(pollCtx, repo, imgRef)
 
-	repoName := ImageSourceRepo(imgRef)
+	repoName := ResolveImageSourceRepo(imgRef, d.candidateJobRepos())
 	if repoName == "" {
-		repoName = filepath.Base(repo)
-		if repoName == "aerial" || repoName == "aerial-config" || repoName == "aerial-sidecars" {
-			repoName = "azylman/" + repoName
-		}
+		repoName = d.resolveRepoGitHubSlug(pollCtx, repo)
+	}
+	if repoName == "" {
+		repoName = NormalizeGitHubSlug(repo)
 	}
 
 	deployEvt := HangarDeployEvent{
