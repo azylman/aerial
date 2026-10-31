@@ -757,23 +757,6 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 		if err := multiEnv.daemon.SyncServiceConfigsToNomad(ctx, multiEnv.configDir, jobNomadCtx); err != nil || len(multiEnv.nomadCalls()) != 2 {
 			t.Fatalf("expected diff-gating to trigger on jobs/multi-job.nomad, calls=%d", len(multiEnv.nomadCalls()))
 		}
-
-		homepageEnv := newNomadConfigSyncTestEnv(t)
-		homepageEnv.daemon.serviceConfigs = []ServiceConfigMapping{
-			{RelPath: "services/homepage/homepage.yaml", NomadVar: "nomad/jobs/homepage", VarKey: "HOMEPAGE_YAML"},
-		}
-		_ = os.MkdirAll(filepath.Join(homepageEnv.configDir, "services", "homepage"), 0o755)
-		_ = os.WriteFile(filepath.Join(homepageEnv.configDir, "services", "homepage", "homepage.yaml"), []byte("title: Home\n"), 0o644)
-
-		if err := homepageEnv.daemon.SyncServiceConfigsToNomad(ctx, homepageEnv.configDir); err != nil || len(homepageEnv.nomadCalls()) != 1 {
-			t.Fatalf("expected homepage config to sync with 1 call, err=%v, calls=%d", err, len(homepageEnv.nomadCalls()))
-		}
-		hpCall := strings.Join(homepageEnv.nomadCalls()[0], " ")
-		if !strings.Contains(hpCall, "var put -force nomad/jobs/homepage") ||
-			!strings.Contains(hpCall, "HOMEPAGE_YAML=@") ||
-			!strings.Contains(hpCall, "CONFIG_HASH=") {
-			t.Fatalf("expected homepage call to include CONFIG_HASH= and HOMEPAGE_YAML=@, got: %s", hpCall)
-		}
 	})
 }
 

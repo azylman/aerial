@@ -5,8 +5,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 AERIAL_PR="${SCRIPT_DIR}/aerial-pr.sh"
-CONFIG_PR="${SCRIPT_DIR}/aerial-config-pr.sh"
-SIDECARS_PR="${SCRIPT_DIR}/aerial-sidecars-pr.sh"
 
 PASSED=0
 FAILED=0
@@ -77,10 +75,6 @@ assert_eq "url2:azylman/aerial-config" "$(echo "$REMOTE_OUTPUT" | grep '^url2:')
 assert_eq "url3:myorg/myrepo" "$(echo "$REMOTE_OUTPUT" | grep '^url3:')" "extract_remote_repo https://github.com/myorg/myrepo"
 assert_eq "url4:azylman/aerial-sidecars" "$(echo "$REMOTE_OUTPUT" | grep '^url4:')" "extract_remote_repo https://github.com/azylman/aerial-sidecars/ (trailing slash)"
 assert_eq "url5:myorg/repo.with.dots" "$(echo "$REMOTE_OUTPUT" | grep '^url5:')" "extract_remote_repo https://github.com/myorg/repo.with.dots.git (dots in name)"
-
-# Test 3: Wrapper scripts existence and executable permissions
-assert_eq "true" "$([ -x "$CONFIG_PR" ] && echo true || echo false)" "aerial-config-pr.sh is executable"
-assert_eq "true" "$([ -x "$SIDECARS_PR" ] && echo true || echo false)" "aerial-sidecars-pr.sh is executable"
 
 # Test 4: Pre-dispatch flag parsing works with invalid command (should show usage without erroring on --repo)
 USAGE_OUT=$(bash "${AERIAL_PR}" --repo aerial-config invalid-cmd 2>&1 || true)

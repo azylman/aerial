@@ -36,7 +36,7 @@ jobs:
       infisical-mcp: ${{ steps.filter.outputs.infisical-mcp }}
       dashboard: ${{ steps.filter.outputs.dashboard }}
       docs: ${{ steps.filter.outputs.docs }}
-      proxy: ${{ steps.filter.outputs.proxy }}
+      mesh-proxy: ${{ steps.filter.outputs.mesh-proxy }}
       hangar: ${{ steps.filter.outputs.hangar }}
       synapse: ${{ steps.filter.outputs.synapse }}
       vanadis: ${{ steps.filter.outputs.vanadis }}
@@ -78,7 +78,7 @@ jobs:
               - 'pkg/**'
             docs:
               - 'services/docs-service/**'
-            proxy:
+            mesh-proxy:
               - 'services/proxy/**'
             hangar:
               - 'services/hangar/**'
@@ -110,7 +110,7 @@ jobs:
               "infisical-mcp": "${{ steps.filter.outputs.infisical-mcp }}",
               dashboard: "${{ steps.filter.outputs.dashboard }}",
               docs: "${{ steps.filter.outputs.docs }}",
-              proxy: "${{ steps.filter.outputs.proxy }}",
+              "mesh-proxy": "${{ steps.filter.outputs.mesh-proxy }}",
               hangar: "${{ steps.filter.outputs.hangar }}",
               synapse: "${{ steps.filter.outputs.synapse }}",
               vanadis: "${{ steps.filter.outputs.vanadis }}",
@@ -129,7 +129,7 @@ jobs:
               { service: "infisical-mcp", context: "./mcp/infisical-mcp", file: "./mcp/infisical-mcp/Dockerfile", image_name: "aerial-infisical-mcp" },
               { service: "dashboard", context: ".", file: "./services/dashboard/Dockerfile", image_name: "aerial-dashboard" },
               { service: "docs", context: "./services/docs-service", file: "./services/docs-service/Dockerfile", image_name: "aerial-docs" },
-              { service: "proxy", context: "./services/proxy", file: "./services/proxy/Dockerfile", image_name: "aerial-proxy" },
+              { service: "mesh-proxy", context: "./services/proxy", file: "./services/proxy/Dockerfile", image_name: "aerial-proxy" },
               { service: "hangar", context: ".", file: "./services/hangar/Dockerfile", image_name: "aerial-hangar" },
               { service: "synapse", context: ".", file: "./services/synapse/Dockerfile", image_name: "aerial-synapse" },
               { service: "vanadis", context: ".", file: "./services/vanadis/Dockerfile", image_name: "aerial-vanadis" },

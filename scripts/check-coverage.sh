@@ -117,20 +117,12 @@ DISCOVERED_GO_SERVICES=$(find . -maxdepth 3 -name "go.mod" ! -path "*/.*" ! -pat
 
 # Define Services to Check
 if [ -n "$TARGET_SERVICE" ]; then
-    case "$TARGET_SERVICE" in
-        scheduler-mcp) TARGET_SERVICE="services/haro" ;;
-        memory-mcp) TARGET_SERVICE="services/coven" ;;
-        brain) TARGET_SERVICE="services/eri" ;;
-        webhooks-router) TARGET_SERVICE="services/synapse" ;;
-        *)
-            for svc in $DISCOVERED_GO_SERVICES; do
-                if [ "$svc" = "$TARGET_SERVICE" ] || [ "${svc##*/}" = "$TARGET_SERVICE" ]; then
-                    TARGET_SERVICE="$svc"
-                    break
-                fi
-            done
-            ;;
-    esac
+    for svc in $DISCOVERED_GO_SERVICES; do
+        if [ "$svc" = "$TARGET_SERVICE" ] || [ "${svc##*/}" = "$TARGET_SERVICE" ]; then
+            TARGET_SERVICE="$svc"
+            break
+        fi
+    done
     ALL_GO_SERVICES="$TARGET_SERVICE"
 else
     ALL_GO_SERVICES="$DISCOVERED_GO_SERVICES"

@@ -214,26 +214,8 @@ init_scratch() {
         mkdir -p "$base_dir"
     fi
 
-    local scratch_prefix="aerial-code-scratch"
-    local branch_prefix="feat/aerial-pr"
-    case "$REPO_NAME" in
-        aerial)
-            scratch_prefix="aerial-code-scratch"
-            branch_prefix="feat/aerial-pr"
-            ;;
-        aerial-config)
-            scratch_prefix="aerial-config-scratch"
-            branch_prefix="update/config"
-            ;;
-        aerial-sidecars)
-            scratch_prefix="aerial-sidecars-scratch"
-            branch_prefix="feat/sidecars-pr"
-            ;;
-        *)
-            scratch_prefix="${REPO_NAME}-scratch"
-            branch_prefix="feat/${REPO_NAME}-pr"
-            ;;
-    esac
+    local scratch_prefix="${REPO_NAME}-scratch"
+    local branch_prefix="feat/${REPO_NAME}-pr"
 
     local scratch_dir
     scratch_dir=$(mktemp -d "${base_dir}/${scratch_prefix}.XXXXXX")
@@ -628,21 +610,7 @@ submit_scratch() {
         fi
     fi
 
-    local default_title="feat(core): automated update by Aerial"
-    case "$REPO_NAME" in
-        aerial)
-            default_title="feat(core): automated update by Aerial"
-            ;;
-        aerial-config)
-            default_title="chore(config): automated configuration update by Aerial"
-            ;;
-        aerial-sidecars)
-            default_title="feat(sidecars): automated sidecars update by Aerial"
-            ;;
-        *)
-            default_title="feat(${REPO_NAME}): automated update by Aerial"
-            ;;
-    esac
+    local default_title="feat(${REPO_NAME}): automated update by Aerial"
 
     # Resolve PR description from convention file in scratch workspace if not explicitly passed
     if [ -z "$pr_body" ] && [ -n "$saved_pr_desc_content" ]; then

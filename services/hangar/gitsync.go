@@ -546,15 +546,6 @@ func (d *SyncDaemon) SyncServiceConfigsToNomad(ctx context.Context, configDir st
 		} else {
 			configHash = hex.EncodeToString(h.Sum(nil))
 		}
-		// Invariant: nomad/jobs/homepage.nomad interpolates CONFIG_HASH inside its
-		// local/homepage.yaml template (which has change_mode = "restart").
-		// ASSET_HASH only drives a change_mode = "script" template. Writing CONFIG_HASH
-		// ensures Nomad restarts the homepage allocation when either homepage config
-		// or homepage asset bundle changes, enabling Synapse to track deployment lifecycle.
-		if nomadVar == "nomad/jobs/homepage" {
-			varKeys = append(varKeys, "CONFIG_HASH")
-			varArgs = append(varArgs, "CONFIG_HASH="+configHash)
-		}
 		cacheKey := nomadVar + ":" + strings.Join(varKeys, "+")
 		isChangedInGit := isServiceConfigChangedInGit(nomadVar, diffGated, checkPaths, changedFiles, d.GetAssetBundleConfigs(configDir))
 		pushed, err := d.pushNomadConfigVar(ctx, cacheKey, nomadVar, jobName, configHash, isChangedInGit, varArgs, syncCtx)
