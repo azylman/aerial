@@ -264,6 +264,16 @@ func TestCheckAndReconcileNomadImages_TableDriven(t *testing.T) {
 			wantEventCommit: "9876543210abcdef9876543210abcdef98765432",
 			wantDigest:      "sha256:9999999999999999999999999999999999999999999999999999999999999999",
 		},
+		{
+			name:           "parameterized_image_tag_job_skipped",
+			isAerialRepo:   true,
+			jobFile:        "eri.nomad",
+			jobContent:     `variable "image_tag" { type = string default = "latest" } job "eri" { group "core" { task "eri" { config { image = "ghcr.io/test/img1:${var.image_tag}" } } } }`,
+			clientMode:     "dynamic_digest",
+			initialDigest:  "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+			knownDigestKey: "eri:ghcr.io/test/img1:latest",
+			knownDigestVal: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+		},
 	}
 
 	for _, tc := range pollCases {
@@ -288,6 +298,13 @@ func TestCheckAndReconcileNomadImages_TableDriven(t *testing.T) {
 			// 1. Initial poll
 			if err := env.daemon.CheckAndReconcileNomadImages(ctx); err != nil {
 				t.Fatalf("first poll unexpected error: %v", err)
+			}
+
+			if tc.name == "parameterized_image_tag_job_skipped" {
+				if *env.restartCalled || *env.restartedJob != "" {
+					t.Fatalf("expected parameterized image_tag job to be skipped without restart, got %q", *env.restartedJob)
+				}
+				return
 			}
 
 			if tc.clientMode == "oci_revision" {

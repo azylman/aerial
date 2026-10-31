@@ -654,6 +654,9 @@ func (d *SyncDaemon) CheckAndReconcileNomadImages(ctx context.Context) error {
 				return true
 			}
 			seenFiles[jobPath] = struct{}{}
+			if HasNomadJobVariable(content, "image_tag") {
+				return true
+			}
 
 			images := ExtractNomadJobImages(content)
 			for _, imgRef := range images {
