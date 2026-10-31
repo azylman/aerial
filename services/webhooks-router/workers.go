@@ -13,22 +13,126 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/jackc/pgx/v5"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/rivertype"
 )
 
-// UniqueSkippedTotal records the total number of River jobs dropped due to unique constraint debouncing.
-var UniqueSkippedTotal = prometheus.NewCounterVec(
-	prometheus.CounterOpts{
-		Name: "webhooks_router_unique_skipped_total",
-		Help: "Total number of River jobs skipped as duplicates due to unique constraints.",
-	},
-	[]string{"kind"},
+// Metric collectors for River queues and worker execution telemetry.
+var (
+	// UniqueSkippedTotal records the total number of River jobs dropped due to unique constraint debouncing.
+	UniqueSkippedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "webhooks_router_unique_skipped_total",
+			Help: "Total number of River jobs skipped as duplicates due to unique constraints.",
+		},
+		[]string{"kind"},
+	)
+
+	JobsEnqueuedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "webhooks_router_jobs_enqueued_total",
+			Help: "Total number of River jobs enqueued, skipped as duplicate, or failed on enqueue.",
+		},
+		[]string{"queue", "kind", "status"},
+	)
+
+	JobsProcessedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "webhooks_router_jobs_processed_total",
+			Help: "Total number of River jobs processed by worker execution status.",
+		},
+		[]string{"queue", "kind", "status"},
+	)
+
+	JobDurationSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "webhooks_router_job_duration_seconds",
+			Help:    "Execution duration of River jobs in seconds.",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"queue", "kind"},
+	)
+
+	JobRetriesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "webhooks_router_job_retries_total",
+			Help: "Total number of River job retry attempts by reason.",
+		},
+		[]string{"queue", "kind", "reason"},
+	)
+
+	JobsDroppedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "webhooks_router_jobs_dropped_total",
+			Help: "Total number of River jobs dropped or cancelled by reason.",
+		},
+		[]string{"queue", "kind", "reason"},
+	)
+
+	QueueDepth = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "webhooks_router_queue_depth",
+			Help: "Current depth of River queues partitioned by state.",
+		},
+		[]string{"queue", "state"},
+	)
+
+	QueueOldestAgeSeconds = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "webhooks_router_queue_oldest_age_seconds",
+			Help: "Oldest pending job age in seconds across available, retryable, and scheduled states.",
+		},
+		[]string{"queue"},
+	)
+
+	DiscordGatewayLatencySeconds = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "webhooks_router_discord_gateway_latency_seconds",
+			Help: "Heartbeat latency of the Discord Gateway connection in seconds.",
+		},
+	)
 )
 
+var (
+	knownRiverQueues = []string{
+		river.QueueDefault,
+		QueueMergeConflict,
+		QueueWidgetSync,
+		QueueDiscordIngress,
+		QueueDiscordInteraction,
+	}
+	knownRiverStates = []string{"available", "running", "retryable", "scheduled"}
+)
+
+func registerCollector(c prometheus.Collector) {
+	if err := prometheus.Register(c); err != nil {
+		var are prometheus.AlreadyRegisteredError
+		if !errors.As(err, &are) {
+			panic(err)
+		}
+	}
+}
+
 func init() {
-	prometheus.MustRegister(UniqueSkippedTotal)
+	registerCollector(UniqueSkippedTotal)
+	registerCollector(JobsEnqueuedTotal)
+	registerCollector(JobsProcessedTotal)
+	registerCollector(JobDurationSeconds)
+	registerCollector(JobRetriesTotal)
+	registerCollector(JobsDroppedTotal)
+	registerCollector(QueueDepth)
+	registerCollector(QueueOldestAgeSeconds)
+	registerCollector(DiscordGatewayLatencySeconds)
+
+	for _, q := range knownRiverQueues {
+		for _, s := range knownRiverStates {
+			QueueDepth.WithLabelValues(q, s).Set(0)
+		}
+		QueueOldestAgeSeconds.WithLabelValues(q).Set(0)
+	}
+	DiscordGatewayLatencySeconds.Set(0)
 }
 
 // RecordUniqueSkipped increments the UniqueSkippedTotal counter for the specified kind.
@@ -37,6 +141,145 @@ func RecordUniqueSkipped(kind string) {
 		return
 	}
 	UniqueSkippedTotal.WithLabelValues(kind).Inc()
+}
+
+// RecordJobEnqueued increments the JobsEnqueuedTotal counter for the specified queue, kind, and status.
+func RecordJobEnqueued(queue, kind, status string) {
+	if queue == "" {
+		queue = river.QueueDefault
+	}
+	if kind == "" {
+		kind = "unknown"
+	}
+	if status == "" {
+		status = "unknown"
+	}
+	JobsEnqueuedTotal.WithLabelValues(queue, kind, status).Inc()
+}
+
+// RecordJobRetry increments the JobRetriesTotal counter for the specified queue, kind, and reason.
+func RecordJobRetry(queue, kind, reason string) {
+	if queue == "" {
+		queue = river.QueueDefault
+	}
+	if kind == "" {
+		kind = "unknown"
+	}
+	if reason == "" {
+		reason = "unknown"
+	}
+	JobRetriesTotal.WithLabelValues(queue, kind, reason).Inc()
+}
+
+// RecordJobDropped increments the JobsDroppedTotal counter for the specified queue, kind, and reason.
+func RecordJobDropped(queue, kind, reason string) {
+	if queue == "" {
+		queue = river.QueueDefault
+	}
+	if kind == "" {
+		kind = "unknown"
+	}
+	if reason == "" {
+		reason = "unknown"
+	}
+	JobsDroppedTotal.WithLabelValues(queue, kind, reason).Inc()
+}
+
+// SetDiscordGatewayLatency sets the DiscordGatewayLatencySeconds gauge.
+func SetDiscordGatewayLatency(seconds float64) {
+	DiscordGatewayLatencySeconds.Set(seconds)
+}
+
+func observeRiverJob[T river.JobArgs](job *river.Job[T], defaultQueue string, fn func() error) error {
+	queue := defaultQueue
+	if queue == "" {
+		queue = river.QueueDefault
+	}
+	var kind string
+	if job != nil {
+		if job.JobRow != nil {
+			if job.Queue != "" {
+				queue = job.Queue
+			}
+			if job.Attempt > 1 {
+				RecordJobRetry(queue, job.Args.Kind(), "river_retry")
+			}
+		}
+		kind = job.Args.Kind()
+	} else {
+		var zero T
+		kind = zero.Kind()
+	}
+	start := time.Now()
+	err := fn()
+	duration := time.Since(start).Seconds()
+	JobDurationSeconds.WithLabelValues(queue, kind).Observe(duration)
+
+	var status string
+	var cancelErr *rivertype.JobCancelError
+	if err == nil {
+		status = "success"
+	} else if errors.As(err, &cancelErr) {
+		status = "cancelled"
+	} else if job != nil && job.JobRow != nil && job.MaxAttempts > 0 && job.Attempt >= job.MaxAttempts {
+		status = "discarded"
+		RecordJobDropped(queue, kind, "max_attempts_exhausted")
+	} else {
+		status = "error"
+	}
+	JobsProcessedTotal.WithLabelValues(queue, kind, status).Inc()
+	return err
+}
+
+type queueStatsQuerier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+const riverQueueStatsQuery = `SELECT queue, state::text, COUNT(*), COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(created_at)))::float8, 0) FROM sidecars.river_job WHERE state IN ('available', 'running', 'retryable', 'scheduled') GROUP BY queue, state`
+
+func collectRiverQueueMetrics(ctx context.Context, q queueStatsQuerier) error {
+	if q == nil {
+		return nil
+	}
+	for _, queue := range knownRiverQueues {
+		for _, state := range knownRiverStates {
+			QueueDepth.WithLabelValues(queue, state).Set(0)
+		}
+		QueueOldestAgeSeconds.WithLabelValues(queue).Set(0)
+	}
+
+	rows, err := q.Query(ctx, riverQueueStatsQuery)
+	if err != nil {
+		return fmt.Errorf("query river queue stats: %w", err)
+	}
+	defer rows.Close()
+
+	maxPendingAge := make(map[string]float64)
+	for rows.Next() {
+		var (
+			queue     string
+			state     string
+			count     int64
+			oldestAge float64
+		)
+		if err := rows.Scan(&queue, &state, &count, &oldestAge); err != nil {
+			return fmt.Errorf("scan river queue stats: %w", err)
+		}
+		QueueDepth.WithLabelValues(queue, state).Set(float64(count))
+		if state == "available" || state == "retryable" || state == "scheduled" {
+			if oldestAge > maxPendingAge[queue] {
+				maxPendingAge[queue] = oldestAge
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate river queue stats: %w", err)
+	}
+
+	for queue, age := range maxPendingAge {
+		QueueOldestAgeSeconds.WithLabelValues(queue).Set(age)
+	}
+	return nil
 }
 
 // RiverInserter defines the interface for inserting jobs into River.
@@ -58,13 +301,21 @@ func defaultRiverInsertOpts() river.InsertOpts {
 
 func (s *RouterServer) insertRiverJob(ctx context.Context, args riverJobArgsWithOpts) error {
 	opts := args.InsertOpts()
+	queue := opts.Queue
+	if queue == "" {
+		queue = river.QueueDefault
+	}
 	res, err := s.riverClient.Insert(ctx, args, &opts)
 	if err != nil {
+		RecordJobEnqueued(queue, args.Kind(), "error")
 		return err
 	}
 	if res != nil && res.UniqueSkippedAsDuplicate {
 		RecordUniqueSkipped(args.Kind())
+		RecordJobEnqueued(queue, args.Kind(), "skipped_duplicate")
+		return nil
 	}
+	RecordJobEnqueued(queue, args.Kind(), "enqueued")
 	return nil
 }
 
@@ -85,15 +336,21 @@ type GitHubWebhookWorker struct {
 }
 
 func (w *GitHubWebhookWorker) Work(ctx context.Context, job *river.Job[GitHubWebhookArgs]) error {
-	if w.server == nil {
-		return errors.New("router server not configured on worker")
-	}
-	log.Printf("[webhooks-router] [river] processing github job id=%d event=%s delivery=%s", job.ID, job.Args.Event, job.Args.Delivery)
-	if _, err := w.server.ProcessGitHubEvent(ctx, job.Args.Event, job.Args.Delivery, job.Args.Body); err != nil {
-		log.Printf("[webhooks-router] [river] error processing github job id=%d event=%s delivery=%s: %v", job.ID, job.Args.Event, job.Args.Delivery, err)
-		return err
-	}
-	return nil
+	return observeRiverJob(job, river.QueueDefault, func() error {
+		if w.server == nil {
+			return errors.New("router server not configured on worker")
+		}
+		var jobID int64
+		if job != nil && job.JobRow != nil {
+			jobID = job.ID
+		}
+		log.Printf("[webhooks-router] [river] processing github job id=%d event=%s delivery=%s", jobID, job.Args.Event, job.Args.Delivery)
+		if _, err := w.server.ProcessGitHubEvent(ctx, job.Args.Event, job.Args.Delivery, job.Args.Body); err != nil {
+			log.Printf("[webhooks-router] [river] error processing github job id=%d event=%s delivery=%s: %v", jobID, job.Args.Event, job.Args.Delivery, err)
+			return err
+		}
+		return nil
+	})
 }
 
 // HangarWebhookArgs contains payload data for durable background processing of Hangar webhooks.
@@ -112,15 +369,21 @@ type HangarWebhookWorker struct {
 }
 
 func (w *HangarWebhookWorker) Work(ctx context.Context, job *river.Job[HangarWebhookArgs]) error {
-	if w.server == nil {
-		return errors.New("router server not configured on worker")
-	}
-	log.Printf("[webhooks-router] [river] processing hangar job id=%d event=%s job_name=%s", job.ID, job.Args.Event.Event, job.Args.Event.JobName)
-	if _, err := w.server.ProcessHangarEvent(ctx, job.Args.Event); err != nil {
-		log.Printf("[webhooks-router] [river] error processing hangar job id=%d: %v", job.ID, err)
-		return err
-	}
-	return nil
+	return observeRiverJob(job, river.QueueDefault, func() error {
+		if w.server == nil {
+			return errors.New("router server not configured on worker")
+		}
+		var jobID int64
+		if job != nil && job.JobRow != nil {
+			jobID = job.ID
+		}
+		log.Printf("[webhooks-router] [river] processing hangar job id=%d event=%s job_name=%s", jobID, job.Args.Event.Event, job.Args.Event.JobName)
+		if _, err := w.server.ProcessHangarEvent(ctx, job.Args.Event); err != nil {
+			log.Printf("[webhooks-router] [river] error processing hangar job id=%d: %v", jobID, err)
+			return err
+		}
+		return nil
+	})
 }
 
 // NomadEventArgs contains payload data for durable background processing of Nomad stream events.
@@ -142,15 +405,21 @@ type NomadEventWorker struct {
 }
 
 func (w *NomadEventWorker) Work(ctx context.Context, job *river.Job[NomadEventArgs]) error {
-	if w.server == nil {
-		return errors.New("router server not configured on worker")
-	}
-	log.Printf("[webhooks-router] [river] processing nomad job id=%d topic=%s type=%s", job.ID, job.Args.Topic, job.Args.Type)
-	if err := w.server.ProcessNomadEvent(ctx, job.Args.Topic, job.Args.Type, job.Args.Payload); err != nil {
-		log.Printf("[webhooks-router] [river] error processing nomad job id=%d: %v", job.ID, err)
-		return err
-	}
-	return nil
+	return observeRiverJob(job, river.QueueDefault, func() error {
+		if w.server == nil {
+			return errors.New("router server not configured on worker")
+		}
+		var jobID int64
+		if job != nil && job.JobRow != nil {
+			jobID = job.ID
+		}
+		log.Printf("[webhooks-router] [river] processing nomad job id=%d topic=%s type=%s", jobID, job.Args.Topic, job.Args.Type)
+		if err := w.server.ProcessNomadEvent(ctx, job.Args.Topic, job.Args.Type, job.Args.Payload); err != nil {
+			log.Printf("[webhooks-router] [river] error processing nomad job id=%d: %v", jobID, err)
+			return err
+		}
+		return nil
+	})
 }
 
 // NomadCrashAlertArgs contains payload data for durable background processing of unmanaged Nomad crash alerts.
@@ -171,19 +440,21 @@ type NomadCrashAlertWorker struct {
 }
 
 func (w *NomadCrashAlertWorker) Work(ctx context.Context, job *river.Job[NomadCrashAlertArgs]) error {
-	if w.server == nil {
-		return errors.New("router server not configured on worker")
-	}
-	var jobID int64
-	if job != nil && job.JobRow != nil {
-		jobID = job.ID
-	}
-	log.Printf("[webhooks-router] [river] processing nomad crash alert job id=%d job_id=%s alloc_id=%s", jobID, job.Args.JobID, job.Args.AllocID)
-	if err := w.server.ProcessCrashAlert(ctx, job.Args); err != nil {
-		log.Printf("[webhooks-router] [river] error processing nomad crash alert job id=%d: %v", jobID, err)
-		return err
-	}
-	return nil
+	return observeRiverJob(job, river.QueueDefault, func() error {
+		if w.server == nil {
+			return errors.New("router server not configured on worker")
+		}
+		var jobID int64
+		if job != nil && job.JobRow != nil {
+			jobID = job.ID
+		}
+		log.Printf("[webhooks-router] [river] processing nomad crash alert job id=%d job_id=%s alloc_id=%s", jobID, job.Args.JobID, job.Args.AllocID)
+		if err := w.server.ProcessCrashAlert(ctx, job.Args); err != nil {
+			log.Printf("[webhooks-router] [river] error processing nomad crash alert job id=%d: %v", jobID, err)
+			return err
+		}
+		return nil
+	})
 }
 
 // QueueWidgetSync is the dedicated River queue for Discord widget sync jobs.
@@ -209,15 +480,21 @@ type WidgetSyncWorker struct {
 }
 
 func (w *WidgetSyncWorker) Work(ctx context.Context, job *river.Job[WidgetSyncArgs]) error {
-	if w.server == nil {
-		return errors.New("router server not configured on worker")
-	}
-	log.Printf("[webhooks-router] [river] processing widget sync job id=%d repo=%s pr=%d build_id=%s", job.ID, job.Args.Repo, job.Args.PRNumber, job.Args.BuildID)
-	if err := w.server.ProcessWidgetSync(ctx, job.Args); err != nil {
-		log.Printf("[webhooks-router] [river] error processing widget sync job id=%d: %v", job.ID, err)
-		return err
-	}
-	return nil
+	return observeRiverJob(job, QueueWidgetSync, func() error {
+		if w.server == nil {
+			return errors.New("router server not configured on worker")
+		}
+		var jobID int64
+		if job != nil && job.JobRow != nil {
+			jobID = job.ID
+		}
+		log.Printf("[webhooks-router] [river] processing widget sync job id=%d repo=%s pr=%d build_id=%s", jobID, job.Args.Repo, job.Args.PRNumber, job.Args.BuildID)
+		if err := w.server.ProcessWidgetSync(ctx, job.Args); err != nil {
+			log.Printf("[webhooks-router] [river] error processing widget sync job id=%d: %v", jobID, err)
+			return err
+		}
+		return nil
+	})
 }
 
 // EventTriggerWebhookArgs contains payload data for durable background firing of generic event triggers via Haro.
@@ -240,15 +517,21 @@ type EventTriggerWebhookWorker struct {
 }
 
 func (w *EventTriggerWebhookWorker) Work(ctx context.Context, job *river.Job[EventTriggerWebhookArgs]) error {
-	if w.server == nil {
-		return errors.New("router server not configured on worker")
-	}
-	log.Printf("[webhooks-router] [river] processing event trigger job id=%d source=%s event_type=%s targets=%v", job.ID, job.Args.Source, job.Args.EventType, job.Args.Targets)
-	if err := w.server.ProcessEventTriggerWebhook(ctx, job.Args); err != nil {
-		log.Printf("[webhooks-router] [river] error processing event trigger job id=%d: %v", job.ID, err)
-		return err
-	}
-	return nil
+	return observeRiverJob(job, river.QueueDefault, func() error {
+		if w.server == nil {
+			return errors.New("router server not configured on worker")
+		}
+		var jobID int64
+		if job != nil && job.JobRow != nil {
+			jobID = job.ID
+		}
+		log.Printf("[webhooks-router] [river] processing event trigger job id=%d source=%s event_type=%s targets=%v", jobID, job.Args.Source, job.Args.EventType, job.Args.Targets)
+		if err := w.server.ProcessEventTriggerWebhook(ctx, job.Args); err != nil {
+			log.Printf("[webhooks-router] [river] error processing event trigger job id=%d: %v", jobID, err)
+			return err
+		}
+		return nil
+	})
 }
 
 // QueueMergeConflict is the dedicated River queue for PR merge conflict remediation dispatches.
@@ -279,15 +562,21 @@ type MergeConflictWorker struct {
 }
 
 func (w *MergeConflictWorker) Work(ctx context.Context, job *river.Job[MergeConflictArgs]) error {
-	if w.server == nil {
-		return errors.New("router server not configured on worker")
-	}
-	log.Printf("[webhooks-router] [river] processing merge conflict job id=%d repo=%s pr=%d", job.ID, job.Args.Repo, job.Args.PRNumber)
-	if err := w.server.ProcessMergeConflict(ctx, job.Args); err != nil {
-		log.Printf("[webhooks-router] [river] error processing merge conflict job id=%d: %v", job.ID, err)
-		return err
-	}
-	return nil
+	return observeRiverJob(job, QueueMergeConflict, func() error {
+		if w.server == nil {
+			return errors.New("router server not configured on worker")
+		}
+		var jobID int64
+		if job != nil && job.JobRow != nil {
+			jobID = job.ID
+		}
+		log.Printf("[webhooks-router] [river] processing merge conflict job id=%d repo=%s pr=%d", jobID, job.Args.Repo, job.Args.PRNumber)
+		if err := w.server.ProcessMergeConflict(ctx, job.Args); err != nil {
+			log.Printf("[webhooks-router] [river] error processing merge conflict job id=%d: %v", jobID, err)
+			return err
+		}
+		return nil
+	})
 }
 
 // QueueDiscordIngress is the dedicated River queue for single-consumer sequential Discord message ingress.
@@ -340,40 +629,45 @@ func (w *DiscordIngressWorker) NextRetry(*river.Job[DiscordIngressArgs]) time.Ti
 }
 
 func (w *DiscordIngressWorker) Work(ctx context.Context, job *river.Job[DiscordIngressArgs]) error {
-	if w.server == nil {
-		return errors.New("router server not configured on worker")
-	}
-	delay := w.retryDelay
-	if delay <= 0 {
-		delay = 2 * time.Second
-	} else if delay > 5*time.Second {
-		delay = 5 * time.Second
-	}
-	maxAge := w.maxAge
-	if maxAge <= 0 {
-		maxAge = 30 * time.Minute
-	}
+	return observeRiverJob(job, QueueDiscordIngress, func() error {
+		if w.server == nil {
+			return errors.New("router server not configured on worker")
+		}
+		delay := w.retryDelay
+		if delay <= 0 {
+			delay = 2 * time.Second
+		} else if delay > 5*time.Second {
+			delay = 5 * time.Second
+		}
+		maxAge := w.maxAge
+		if maxAge <= 0 {
+			maxAge = 30 * time.Minute
+		}
 
-	for {
-		if ctx.Err() != nil {
-			return ctx.Err()
+		for {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			err := w.server.ProcessDiscordIngress(ctx, job.Args)
+			if err == nil {
+				return nil
+			}
+			if is4xxClientError(err) {
+				RecordJobDropped(QueueDiscordIngress, DiscordIngressArgs{}.Kind(), "client_4xx")
+				return river.JobCancel(err)
+			}
+			if !job.CreatedAt.IsZero() && time.Since(job.CreatedAt) >= maxAge {
+				RecordJobDropped(QueueDiscordIngress, DiscordIngressArgs{}.Kind(), "ttl_expired")
+				return river.JobCancel(fmt.Errorf("discord message %s exceeded 30m TTL: %w", job.Args.MessageID, err))
+			}
+			RecordJobRetry(QueueDiscordIngress, DiscordIngressArgs{}.Kind(), "discord_ingress_backoff")
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
-		err := w.server.ProcessDiscordIngress(ctx, job.Args)
-		if err == nil {
-			return nil
-		}
-		if is4xxClientError(err) {
-			return river.JobCancel(err)
-		}
-		if !job.CreatedAt.IsZero() && time.Since(job.CreatedAt) >= maxAge {
-			return river.JobCancel(fmt.Errorf("discord message %s exceeded 30m TTL: %w", job.Args.MessageID, err))
-		}
-		select {
-		case <-time.After(delay):
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
+	})
 }
 
 // DiscordInteractionArgs contains payload data for River queueing of Discord interaction events.
@@ -405,10 +699,12 @@ func (w *DiscordInteractionWorker) Timeout(*river.Job[DiscordInteractionArgs]) t
 }
 
 func (w *DiscordInteractionWorker) Work(ctx context.Context, job *river.Job[DiscordInteractionArgs]) error {
-	if w.server == nil {
-		return errors.New("router server not configured on worker")
-	}
-	return w.server.ProcessDiscordInteraction(ctx, job.Args)
+	return observeRiverJob(job, QueueDiscordInteraction, func() error {
+		if w.server == nil {
+			return errors.New("router server not configured on worker")
+		}
+		return w.server.ProcessDiscordInteraction(ctx, job.Args)
+	})
 }
 
 // StatusWidgetChunk represents a chunk in a Vanadis build or a PR task.
@@ -583,11 +879,28 @@ func (d *DefaultOutboundDispatcher) DispatchImageReady(ctx context.Context, req 
 	return res.MatchedJobs, nil
 }
 
-func (d *DefaultOutboundDispatcher) postBrainWithRetry(ctx context.Context, endpointPath, reqLabel, statusLabel, channelID string, maxAttempts int, defaultDelay time.Duration, expBackoff bool, payload any) error {
+func validateBrainChannel(channelID, endpointPath string) error {
 	if channelID != "" || endpointPath != "/dispatch" {
 		if !IsValidDiscordChannel(channelID) {
 			return fmt.Errorf("invalid discord snowflake channel id: %q", channelID)
 		}
+	}
+	return nil
+}
+
+func advanceBackoffDelay(delay time.Duration, expBackoff bool) time.Duration {
+	if expBackoff {
+		delay = time.Duration(float64(delay) * 1.5)
+		if delay > 5*time.Second {
+			delay = 5 * time.Second
+		}
+	}
+	return delay
+}
+
+func (d *DefaultOutboundDispatcher) postBrainWithRetry(ctx context.Context, endpointPath, reqLabel, statusLabel, channelID string, maxAttempts int, defaultDelay time.Duration, expBackoff bool, payload any) error {
+	if err := validateBrainChannel(channelID, endpointPath); err != nil {
+		return err
 	}
 	bodyBytes, err := json.Marshal(payload)
 	if err != nil {
@@ -603,9 +916,12 @@ func (d *DefaultOutboundDispatcher) postBrainWithRetry(ctx context.Context, endp
 	endpoint := d.brainURL + endpointPath
 	var lastErr error
 
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if attempt > 0 {
+			RecordJobRetry(river.QueueDefault, "brain_http_dispatch", "brain_http_retry")
 		}
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
 		if err != nil {
@@ -615,7 +931,7 @@ func (d *DefaultOutboundDispatcher) postBrainWithRetry(ctx context.Context, endp
 
 		resp, err := d.httpClient.Do(httpReq)
 		if err != nil {
-			lastErr = fmt.Errorf("%s request failed (attempt %d/%d): %w", reqLabel, attempt, maxAttempts, err)
+			lastErr = fmt.Errorf("%s request failed (attempt %d/%d): %w", reqLabel, attempt+1, maxAttempts, err)
 		} else {
 			respBody, readErr := io.ReadAll(resp.Body)
 			if readErr != nil {
@@ -629,16 +945,12 @@ func (d *DefaultOutboundDispatcher) postBrainWithRetry(ctx context.Context, endp
 			if resp.StatusCode < 500 {
 				return fmt.Errorf("%s returned status %d: %s", statusLabel, resp.StatusCode, string(respBody))
 			}
-			lastErr = fmt.Errorf("%s returned status %d (attempt %d/%d): %s", statusLabel, resp.StatusCode, attempt, maxAttempts, string(respBody))
+			lastErr = fmt.Errorf("%s returned status %d (attempt %d/%d): %s", statusLabel, resp.StatusCode, attempt+1, maxAttempts, string(respBody))
 		}
-		if attempt < maxAttempts {
+		if attempt+1 < maxAttempts {
 			select {
 			case <-time.After(delay):
-				if expBackoff {
-					if delay = time.Duration(float64(delay) * 1.5); delay > 5*time.Second {
-						delay = 5 * time.Second
-					}
-				}
+				delay = advanceBackoffDelay(delay, expBackoff)
 			case <-ctx.Done():
 				return ctx.Err()
 			}

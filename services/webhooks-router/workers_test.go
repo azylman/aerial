@@ -12,6 +12,10 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/rivertype"
 )
@@ -38,6 +42,7 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 		maxRetries         int
 		cancelDuringRetry  bool
 		nilSubClient       bool
+		wantRetryRecorded  bool
 		wantErr            bool
 		wantSubstr         string
 		wantMatchedJobs    int
@@ -125,12 +130,13 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 			responseBody: `{"status":"queued"}`,
 		},
 		{
-			name:         "DispatchPrompt retry on 500 then success",
-			callType:     "prompt",
-			snowflake:    validSnowflake,
-			failCount:    1,
-			maxRetries:   4,
-			responseBody: `{"status":"queued"}`,
+			name:              "DispatchPrompt retry on 500 then success",
+			callType:          "prompt",
+			snowflake:         validSnowflake,
+			failCount:         1,
+			maxRetries:        4,
+			wantRetryRecorded: true,
+			responseBody:      `{"status":"queued"}`,
 		},
 		{
 			name:       "DispatchPrompt exhausting retries on 500",
@@ -158,12 +164,13 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 			wantSubstr: "invalid discord snowflake",
 		},
 		{
-			name:         "DispatchDirectMessage retry on 500 then success",
-			callType:     "direct_message",
-			snowflake:    validSnowflake,
-			failCount:    1,
-			maxRetries:   4,
-			responseBody: `{"status":"sent"}`,
+			name:              "DispatchDirectMessage retry on 500 then success",
+			callType:          "direct_message",
+			snowflake:         validSnowflake,
+			failCount:         1,
+			maxRetries:        4,
+			wantRetryRecorded: true,
+			responseBody:      `{"status":"sent"}`,
 		},
 		{
 			name:         "DispatchDirectMessage 400 client error no retry",
@@ -181,11 +188,12 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 			responseBody: `{"status":"accepted"}`,
 		},
 		{
-			name:         "DispatchBackground retry on 500 then success",
-			callType:     "dispatch_background",
-			failCount:    1,
-			maxRetries:   4,
-			responseBody: `{"status":"accepted"}`,
+			name:              "DispatchBackground retry on 500 then success",
+			callType:          "dispatch_background",
+			failCount:         1,
+			maxRetries:        4,
+			wantRetryRecorded: true,
+			responseBody:      `{"status":"accepted"}`,
 		},
 		{
 			name:         "DispatchBackground 400 client error no retry",
@@ -315,6 +323,11 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 				defer cancel()
 			}
 
+			var beforeRetry float64
+			if tc.wantRetryRecorded {
+				beforeRetry = testutil.ToFloat64(JobRetriesTotal.WithLabelValues(river.QueueDefault, "brain_http_dispatch", "brain_http_retry"))
+			}
+
 			var err error
 			switch tc.callType {
 			case "git_push":
@@ -349,6 +362,12 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 			}
 			if tc.wantSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantSubstr)) {
 				t.Errorf("err = %v, want substr %q", err, tc.wantSubstr)
+			}
+			if tc.wantRetryRecorded {
+				afterRetry := testutil.ToFloat64(JobRetriesTotal.WithLabelValues(river.QueueDefault, "brain_http_dispatch", "brain_http_retry"))
+				if afterRetry <= beforeRetry {
+					t.Errorf("expected brain_http_retry to increment, before=%v after=%v", beforeRetry, afterRetry)
+				}
 			}
 		})
 	}
@@ -427,7 +446,6 @@ func TestDefaultOutboundDispatcher_DispatchWidget(t *testing.T) {
 }
 
 func TestRiverWorkers(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 
 	nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -448,45 +466,51 @@ func TestRiverWorkers(t *testing.T) {
 		workerType    string
 		nilServer     bool
 		downstreamErr bool
+		attempt       int
+		maxAttempts   int
+		wantProcessed string
 		wantErr       bool
 	}{
-		{name: "GitHubWebhookWorker valid job", workerType: "github"},
-		{name: "GitHubWebhookWorker nil server error", workerType: "github", nilServer: true, wantErr: true},
-		{name: "GitHubWebhookWorker downstream processing error", workerType: "github", downstreamErr: true, wantErr: true},
-		{name: "HangarWebhookWorker valid job", workerType: "hangar"},
-		{name: "HangarWebhookWorker nil server error", workerType: "hangar", nilServer: true, wantErr: true},
-		{name: "HangarWebhookWorker downstream dispatch error", workerType: "hangar", downstreamErr: true, wantErr: true},
-		{name: "NomadEventWorker valid job", workerType: "nomad"},
-		{name: "NomadEventWorker nil server error", workerType: "nomad", nilServer: true, wantErr: true},
-		{name: "NomadEventWorker downstream prompt error", workerType: "nomad", downstreamErr: true, wantErr: true},
-		{name: "NomadCrashAlertWorker valid job", workerType: "crash"},
-		{name: "NomadCrashAlertWorker nil server error", workerType: "crash", nilServer: true, wantErr: true},
-		{name: "NomadCrashAlertWorker downstream prompt error", workerType: "crash", downstreamErr: true, wantErr: true},
-		{name: "WidgetSyncWorker valid job", workerType: "widget"},
-		{name: "WidgetSyncWorker nil server error", workerType: "widget", nilServer: true, wantErr: true},
-		{name: "WidgetSyncWorker downstream dispatch error", workerType: "widget", downstreamErr: true, wantErr: true},
-		{name: "EventTriggerWebhookWorker valid job", workerType: "event_trigger"},
-		{name: "EventTriggerWebhookWorker nil server error", workerType: "event_trigger", nilServer: true, wantErr: true},
-		{name: "EventTriggerWebhookWorker downstream fire error", workerType: "event_trigger", downstreamErr: true, wantErr: true},
-		{name: "MergeConflictWorker valid job", workerType: "merge_conflict"},
-		{name: "MergeConflictWorker nil server error", workerType: "merge_conflict", nilServer: true, wantErr: true},
-		{name: "MergeConflictWorker downstream dispatch error", workerType: "merge_conflict", downstreamErr: true, wantErr: true},
-		{name: "DiscordIngressWorker valid job", workerType: "discord_ingress"},
-		{name: "DiscordIngressWorker nil server error", workerType: "discord_ingress", nilServer: true, wantErr: true},
-		{name: "DiscordIngressWorker 4xx cancel", workerType: "discord_ingress_4xx", wantErr: true},
-		{name: "DiscordIngressWorker retry then success", workerType: "discord_ingress_retry"},
-		{name: "DiscordIngressWorker 30m TTL cancel", workerType: "discord_ingress_ttl", wantErr: true},
-		{name: "DiscordIngressWorker zero retryDelay", workerType: "discord_ingress_zero_delay", wantErr: true},
-		{name: "DiscordIngressWorker large retryDelay", workerType: "discord_ingress_large_delay", wantErr: true},
-		{name: "DiscordIngressWorker context cancelled", workerType: "discord_ingress_ctx_cancel", wantErr: true},
-		{name: "DiscordInteractionWorker valid job", workerType: "discord_interaction"},
-		{name: "DiscordInteractionWorker nil server error", workerType: "discord_interaction", nilServer: true, wantErr: true},
-		{name: "DiscordInteractionWorker downstream error", workerType: "discord_interaction", downstreamErr: true, wantErr: true},
+		{name: "GitHubWebhookWorker valid job", workerType: "github", wantProcessed: "success"},
+		{name: "GitHubWebhookWorker nil job handled gracefully", workerType: "github_nil_job"},
+		{name: "GitHubWebhookWorker retry attempt > 1", workerType: "github", attempt: 2, wantProcessed: "success"},
+		{name: "GitHubWebhookWorker max attempts exhausted discard", workerType: "github", attempt: 5, maxAttempts: 5, downstreamErr: true, wantErr: true, wantProcessed: "discarded"},
+		{name: "GitHubWebhookWorker nil server error", workerType: "github", nilServer: true, wantErr: true, wantProcessed: "error"},
+		{name: "GitHubWebhookWorker downstream processing error", workerType: "github", downstreamErr: true, wantErr: true, wantProcessed: "error"},
+		{name: "HangarWebhookWorker valid job", workerType: "hangar", wantProcessed: "success"},
+		{name: "HangarWebhookWorker nil server error", workerType: "hangar", nilServer: true, wantErr: true, wantProcessed: "error"},
+		{name: "HangarWebhookWorker downstream dispatch error", workerType: "hangar", downstreamErr: true, wantErr: true, wantProcessed: "error"},
+		{name: "NomadEventWorker valid job", workerType: "nomad", wantProcessed: "success"},
+		{name: "NomadEventWorker max attempts exhausted discard", workerType: "nomad", attempt: 5, maxAttempts: 5, downstreamErr: true, wantErr: true, wantProcessed: "discarded"},
+		{name: "NomadEventWorker nil server error", workerType: "nomad", nilServer: true, wantErr: true, wantProcessed: "error"},
+		{name: "NomadEventWorker downstream prompt error", workerType: "nomad", downstreamErr: true, wantErr: true, wantProcessed: "error"},
+		{name: "NomadCrashAlertWorker valid job", workerType: "crash", wantProcessed: "success"},
+		{name: "NomadCrashAlertWorker nil server error", workerType: "crash", nilServer: true, wantErr: true, wantProcessed: "error"},
+		{name: "NomadCrashAlertWorker downstream prompt error", workerType: "crash", downstreamErr: true, wantErr: true, wantProcessed: "error"},
+		{name: "WidgetSyncWorker valid job", workerType: "widget", wantProcessed: "success"},
+		{name: "WidgetSyncWorker nil server error", workerType: "widget", nilServer: true, wantErr: true, wantProcessed: "error"},
+		{name: "WidgetSyncWorker downstream dispatch error", workerType: "widget", downstreamErr: true, wantErr: true, wantProcessed: "error"},
+		{name: "EventTriggerWebhookWorker valid job", workerType: "event_trigger", wantProcessed: "success"},
+		{name: "EventTriggerWebhookWorker nil server error", workerType: "event_trigger", nilServer: true, wantErr: true, wantProcessed: "error"},
+		{name: "EventTriggerWebhookWorker downstream fire error", workerType: "event_trigger", downstreamErr: true, wantErr: true, wantProcessed: "error"},
+		{name: "MergeConflictWorker valid job", workerType: "merge_conflict", wantProcessed: "success"},
+		{name: "MergeConflictWorker nil server error", workerType: "merge_conflict", nilServer: true, wantErr: true, wantProcessed: "error"},
+		{name: "MergeConflictWorker downstream dispatch error", workerType: "merge_conflict", downstreamErr: true, wantErr: true, wantProcessed: "error"},
+		{name: "DiscordIngressWorker valid job", workerType: "discord_ingress", wantProcessed: "success"},
+		{name: "DiscordIngressWorker nil server error", workerType: "discord_ingress", nilServer: true, wantErr: true, wantProcessed: "error"},
+		{name: "DiscordIngressWorker 4xx cancel", workerType: "discord_ingress_4xx", wantErr: true, wantProcessed: "cancelled"},
+		{name: "DiscordIngressWorker retry then success", workerType: "discord_ingress_retry", wantProcessed: "success"},
+		{name: "DiscordIngressWorker 30m TTL cancel", workerType: "discord_ingress_ttl", wantErr: true, wantProcessed: "cancelled"},
+		{name: "DiscordIngressWorker zero retryDelay", workerType: "discord_ingress_zero_delay", wantErr: true, wantProcessed: "cancelled"},
+		{name: "DiscordIngressWorker large retryDelay", workerType: "discord_ingress_large_delay", wantErr: true, wantProcessed: "cancelled"},
+		{name: "DiscordIngressWorker context cancelled", workerType: "discord_ingress_ctx_cancel", wantErr: true, wantProcessed: "error"},
+		{name: "DiscordInteractionWorker valid job", workerType: "discord_interaction", wantProcessed: "success"},
+		{name: "DiscordInteractionWorker nil server error", workerType: "discord_interaction", nilServer: true, wantErr: true, wantProcessed: "error"},
+		{name: "DiscordInteractionWorker downstream error", workerType: "discord_interaction", downstreamErr: true, wantErr: true, wantProcessed: "error"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
 			mockReg := &mockPRRegistry{
 				deployedTargetID: "1555405874565091380",
 				deployedPRNum:    552,
@@ -510,6 +534,44 @@ func TestRiverWorkers(t *testing.T) {
 				SystemChannelID: "1555405874565091380",
 			}, nil, mockReg, mockDisp)
 
+			expectedQueue := river.QueueDefault
+			expectedKind := ""
+			switch {
+			case tc.workerType == "github":
+				expectedKind = "github_webhook"
+			case tc.workerType == "hangar":
+				expectedKind = "hangar_webhook"
+			case tc.workerType == "nomad":
+				expectedKind = "nomad_event"
+			case tc.workerType == "crash":
+				expectedKind = "nomad_crash_alert"
+			case tc.workerType == "widget":
+				expectedQueue = QueueWidgetSync
+				expectedKind = "widget_sync"
+			case tc.workerType == "event_trigger":
+				expectedKind = "event_trigger_webhook"
+			case tc.workerType == "merge_conflict":
+				expectedQueue = QueueMergeConflict
+				expectedKind = "merge_conflict"
+			case strings.HasPrefix(tc.workerType, "discord_ingress"):
+				expectedQueue = QueueDiscordIngress
+				expectedKind = "discord_ingress"
+			case tc.workerType == "discord_interaction":
+				expectedQueue = QueueDiscordInteraction
+				expectedKind = "discord_interaction"
+			}
+
+			var beforeProcessed, beforeRetry, beforeDropped float64
+			if tc.wantProcessed != "" {
+				beforeProcessed = testutil.ToFloat64(JobsProcessedTotal.WithLabelValues(expectedQueue, expectedKind, tc.wantProcessed))
+			}
+			if tc.attempt > 1 {
+				beforeRetry = testutil.ToFloat64(JobRetriesTotal.WithLabelValues(expectedQueue, expectedKind, "river_retry"))
+			}
+			if tc.wantProcessed == "discarded" {
+				beforeDropped = testutil.ToFloat64(JobsDroppedTotal.WithLabelValues(expectedQueue, expectedKind, "max_attempts_exhausted"))
+			}
+
 			var err error
 			switch tc.workerType {
 			case "github":
@@ -518,7 +580,7 @@ func TestRiverWorkers(t *testing.T) {
 					w.server = nil
 				}
 				job := &river.Job[GitHubWebhookArgs]{
-					JobRow: &rivertype.JobRow{ID: 101},
+					JobRow: &rivertype.JobRow{ID: 101, Attempt: tc.attempt, MaxAttempts: tc.maxAttempts},
 					Args: GitHubWebhookArgs{
 						Event:    "ping",
 						Delivery: "del-worker-1",
@@ -530,13 +592,15 @@ func TestRiverWorkers(t *testing.T) {
 					job.Args.Body = []byte(`{malformed`)
 				}
 				err = w.Work(ctx, job)
+			case "github_nil_job":
+				err = observeRiverJob[GitHubWebhookArgs](nil, "", func() error { return nil })
 			case "hangar":
 				w := &HangarWebhookWorker{server: srv}
 				if tc.nilServer {
 					w.server = nil
 				}
 				job := &river.Job[HangarWebhookArgs]{
-					JobRow: &rivertype.JobRow{ID: 201},
+					JobRow: &rivertype.JobRow{ID: 201, Attempt: tc.attempt, MaxAttempts: tc.maxAttempts},
 					Args: HangarWebhookArgs{
 						Event: HangarDeployEvent{
 							Event: "deploy_success", JobName: "brain",
@@ -551,7 +615,7 @@ func TestRiverWorkers(t *testing.T) {
 					w.server = nil
 				}
 				job := &river.Job[NomadEventArgs]{
-					JobRow: &rivertype.JobRow{ID: 301},
+					JobRow: &rivertype.JobRow{ID: 301, Attempt: tc.attempt, MaxAttempts: tc.maxAttempts},
 					Args: NomadEventArgs{
 						Topic:   "Deployment",
 						Type:    "DeploymentStatusUpdate",
@@ -565,7 +629,7 @@ func TestRiverWorkers(t *testing.T) {
 					w.server = nil
 				}
 				job := &river.Job[NomadCrashAlertArgs]{
-					JobRow: &rivertype.JobRow{ID: 401},
+					JobRow: &rivertype.JobRow{ID: 401, Attempt: tc.attempt, MaxAttempts: tc.maxAttempts},
 					Args: NomadCrashAlertArgs{
 						JobID:      "openobserve",
 						AllocID:    "alloc-oom",
@@ -580,7 +644,7 @@ func TestRiverWorkers(t *testing.T) {
 					w.server = nil
 				}
 				job := &river.Job[WidgetSyncArgs]{
-					JobRow: &rivertype.JobRow{ID: 501},
+					JobRow: &rivertype.JobRow{ID: 501, Attempt: tc.attempt, MaxAttempts: tc.maxAttempts},
 					Args: WidgetSyncArgs{
 						Repo:     "azylman/aerial",
 						PRNumber: 552,
@@ -593,7 +657,7 @@ func TestRiverWorkers(t *testing.T) {
 					w.server = nil
 				}
 				job := &river.Job[EventTriggerWebhookArgs]{
-					JobRow: &rivertype.JobRow{ID: 601},
+					JobRow: &rivertype.JobRow{ID: 601, Attempt: tc.attempt, MaxAttempts: tc.maxAttempts},
 					Args: EventTriggerWebhookArgs{
 						Source:        "custom_source",
 						Targets:       []string{"device.alpha"},
@@ -608,7 +672,7 @@ func TestRiverWorkers(t *testing.T) {
 					w.server = nil
 				}
 				job := &river.Job[MergeConflictArgs]{
-					JobRow: &rivertype.JobRow{ID: 701},
+					JobRow: &rivertype.JobRow{ID: 701, Attempt: tc.attempt, MaxAttempts: tc.maxAttempts},
 					Args: MergeConflictArgs{
 						Repo:     "azylman/aerial",
 						PRNumber: 543,
@@ -630,8 +694,10 @@ func TestRiverWorkers(t *testing.T) {
 				}
 				job := &river.Job[DiscordIngressArgs]{
 					JobRow: &rivertype.JobRow{
-						ID:        801,
-						CreatedAt: time.Now(),
+						ID:          801,
+						CreatedAt:   time.Now(),
+						Attempt:     tc.attempt,
+						MaxAttempts: tc.maxAttempts,
 					},
 					Args: DiscordIngressArgs{
 						MessageID: "msg-worker-1",
@@ -660,7 +726,7 @@ func TestRiverWorkers(t *testing.T) {
 					w.server = nil
 				}
 				job := &river.Job[DiscordInteractionArgs]{
-					JobRow: &rivertype.JobRow{ID: 901},
+					JobRow: &rivertype.JobRow{ID: 901, Attempt: tc.attempt, MaxAttempts: tc.maxAttempts},
 					Args: DiscordInteractionArgs{
 						InteractionID: "inter-worker-1",
 						Interaction:   &discordgo.Interaction{ID: "inter-worker-1", Type: discordgo.InteractionApplicationCommand},
@@ -674,6 +740,24 @@ func TestRiverWorkers(t *testing.T) {
 
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("Work() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantProcessed != "" {
+				afterProcessed := testutil.ToFloat64(JobsProcessedTotal.WithLabelValues(expectedQueue, expectedKind, tc.wantProcessed))
+				if afterProcessed <= beforeProcessed {
+					t.Errorf("JobsProcessedTotal[%s] = %v, want > %v", tc.wantProcessed, afterProcessed, beforeProcessed)
+				}
+			}
+			if tc.attempt > 1 {
+				afterRetry := testutil.ToFloat64(JobRetriesTotal.WithLabelValues(expectedQueue, expectedKind, "river_retry"))
+				if afterRetry <= beforeRetry {
+					t.Errorf("JobRetriesTotal[river_retry] = %v, want > %v", afterRetry, beforeRetry)
+				}
+			}
+			if tc.wantProcessed == "discarded" {
+				afterDropped := testutil.ToFloat64(JobsDroppedTotal.WithLabelValues(expectedQueue, expectedKind, "max_attempts_exhausted"))
+				if afterDropped <= beforeDropped {
+					t.Errorf("JobsDroppedTotal[max_attempts_exhausted] = %v, want > %v", afterDropped, beforeDropped)
+				}
 			}
 		})
 	}
@@ -822,5 +906,198 @@ func TestDiscordIngressWorker_NextRetry(t *testing.T) {
 	nextRetry := (&DiscordIngressWorker{}).NextRetry(nil)
 	if nextRetry.Before(now.Add(4*time.Second)) || nextRetry.After(now.Add(6*time.Second)) {
 		t.Errorf("NextRetry() = %v, want ~5s in future", nextRetry)
+	}
+}
+
+type mockRowData struct {
+	queue     string
+	state     string
+	count     int64
+	oldestAge float64
+}
+
+type mockPgxRows struct {
+	rows    []mockRowData
+	idx     int
+	scanErr error
+	rowsErr error
+	closed  bool
+}
+
+func (m *mockPgxRows) Close() {
+	m.closed = true
+}
+
+func (m *mockPgxRows) Err() error {
+	return m.rowsErr
+}
+
+func (m *mockPgxRows) CommandTag() pgconn.CommandTag {
+	return pgconn.CommandTag{}
+}
+
+func (m *mockPgxRows) FieldDescriptions() []pgconn.FieldDescription {
+	return nil
+}
+
+func (m *mockPgxRows) Next() bool {
+	if m.scanErr != nil && m.idx == 0 {
+		return true
+	}
+	if m.idx < len(m.rows) {
+		m.idx++
+		return true
+	}
+	return false
+}
+
+func (m *mockPgxRows) Scan(dest ...any) error {
+	if m.scanErr != nil {
+		return m.scanErr
+	}
+	if m.idx <= 0 || m.idx > len(m.rows) {
+		return errors.New("out of range scan")
+	}
+	row := m.rows[m.idx-1]
+	if len(dest) >= 4 {
+		if p, ok := dest[0].(*string); ok {
+			*p = row.queue
+		}
+		if p, ok := dest[1].(*string); ok {
+			*p = row.state
+		}
+		if p, ok := dest[2].(*int64); ok {
+			*p = row.count
+		}
+		if p, ok := dest[3].(*float64); ok {
+			*p = row.oldestAge
+		}
+	}
+	return nil
+}
+
+func (m *mockPgxRows) Values() ([]any, error) {
+	return nil, nil
+}
+
+func (m *mockPgxRows) RawValues() [][]byte {
+	return nil
+}
+
+func (m *mockPgxRows) Conn() *pgx.Conn {
+	return nil
+}
+
+func (m *mockPgxRows) TypeMap() *pgtype.Map {
+	return nil
+}
+
+type mockQueueStatsQuerier struct {
+	queryErr error
+	rows     *mockPgxRows
+}
+
+func (m *mockQueueStatsQuerier) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	if m.queryErr != nil {
+		return nil, m.queryErr
+	}
+	if m.rows != nil {
+		return m.rows, nil
+	}
+	return &mockPgxRows{}, nil
+}
+
+func TestCollectRiverQueueMetrics(t *testing.T) {
+	ctx := context.Background()
+
+	tests := []struct {
+		name               string
+		nilQuerier         bool
+		queryErr           error
+		scanErr            error
+		rowsErr            error
+		rows               []mockRowData
+		wantErr            bool
+		wantSubstr         string
+		wantDepthQueue     string
+		wantDepthState     string
+		wantDepthVal       float64
+		wantOldestAgeQueue string
+		wantOldestAgeVal   float64
+	}{
+		{
+			name:       "nil querier returns nil without error",
+			nilQuerier: true,
+			wantErr:    false,
+		},
+		{
+			name:       "query error returns wrapped error",
+			queryErr:   errors.New("connection closed"),
+			wantErr:    true,
+			wantSubstr: "query river queue stats",
+		},
+		{
+			name:       "scan error returns wrapped error",
+			scanErr:    errors.New("column count mismatch"),
+			wantErr:    true,
+			wantSubstr: "scan river queue stats",
+		},
+		{
+			name:       "rows iteration error returns wrapped error",
+			rowsErr:    errors.New("network disconnect during iteration"),
+			wantErr:    true,
+			wantSubstr: "iterate river queue stats",
+		},
+		{
+			name: "multi-queue state and age aggregation populates gauges correctly",
+			rows: []mockRowData{
+				{queue: "default", state: "available", count: 7, oldestAge: 45.5},
+				{queue: "default", state: "running", count: 3, oldestAge: 120.0},
+				{queue: "default", state: "retryable", count: 2, oldestAge: 90.2},
+				{queue: "discord_ingress", state: "available", count: 12, oldestAge: 250.0},
+				{queue: "widget_sync", state: "scheduled", count: 4, oldestAge: 18.0},
+			},
+			wantDepthQueue:     "default",
+			wantDepthState:     "available",
+			wantDepthVal:       7,
+			wantOldestAgeQueue: "default",
+			wantOldestAgeVal:   90.2,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var q queueStatsQuerier
+			if !tc.nilQuerier {
+				q = &mockQueueStatsQuerier{
+					queryErr: tc.queryErr,
+					rows: &mockPgxRows{
+						rows:    tc.rows,
+						scanErr: tc.scanErr,
+						rowsErr: tc.rowsErr,
+					},
+				}
+			}
+
+			err := collectRiverQueueMetrics(ctx, q)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("collectRiverQueueMetrics() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantSubstr)) {
+				t.Errorf("err = %v, want substr %q", err, tc.wantSubstr)
+			}
+			if tc.wantDepthQueue != "" {
+				gotDepth := testutil.ToFloat64(QueueDepth.WithLabelValues(tc.wantDepthQueue, tc.wantDepthState))
+				if gotDepth != tc.wantDepthVal {
+					t.Errorf("QueueDepth[%s, %s] = %v, want %v", tc.wantDepthQueue, tc.wantDepthState, gotDepth, tc.wantDepthVal)
+				}
+			}
+			if tc.wantOldestAgeQueue != "" {
+				gotAge := testutil.ToFloat64(QueueOldestAgeSeconds.WithLabelValues(tc.wantOldestAgeQueue))
+				if gotAge != tc.wantOldestAgeVal {
+					t.Errorf("QueueOldestAgeSeconds[%s] = %v, want %v", tc.wantOldestAgeQueue, gotAge, tc.wantOldestAgeVal)
+				}
+			}
+		})
 	}
 }
