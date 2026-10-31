@@ -6,6 +6,24 @@ RUN mkdir -p /out/bin && \
     GOBIN=/out/bin CGO_ENABLED=0 go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.4.1 && \
     rm -rf /usr/local/go/test /usr/local/go/doc /usr/local/go/api
 
+FROM ubuntu:24.04 AS rust-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:${PATH}
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+    --default-toolchain stable \
+    --profile minimal \
+    --component rustfmt,clippy && \
+    rm -rf /usr/local/rustup/toolchains/*/share/doc && \
+    chmod -R a+rX /usr/local/rustup /usr/local/cargo
+
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -28,8 +46,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zlib1g \
     libssl3t64 \
     gcc \
+    g++ \
     libc6-dev \
     libatomic1 \
+    pkg-config \
+    libespeak-ng-dev \
     make \
     python3 \
     python3-venv \
@@ -57,9 +78,11 @@ RUN curl -fsSL "https://github.com/kenn-io/roborev/releases/download/v${ROBOREV_
     chmod 0755 /usr/local/bin/roborev && \
     rm -f /tmp/roborev.tar.gz
 
-# Pre-baked toolchain: Go 1.27.3, deadcode, oapi-codegen, golangci-lint, Node 22, Docker CLI + plugins
+# Pre-baked toolchain: Go 1.27.3, Rust stable, deadcode, oapi-codegen, golangci-lint, Node 22, Docker CLI + plugins
 COPY --from=go-builder /usr/local/go /usr/local/go
 COPY --from=go-builder /out/bin/* /usr/local/bin/
+COPY --from=rust-builder /usr/local/rustup /usr/local/rustup
+COPY --from=rust-builder /usr/local/cargo /usr/local/cargo
 COPY --from=golangci/golangci-lint:v2.15.0 /usr/bin/golangci-lint /usr/local/bin/golangci-lint
 COPY --from=node:22-bookworm-slim /usr/local/bin/node /usr/local/bin/node
 COPY --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
@@ -83,7 +106,9 @@ RUN python3 -m venv /opt/venv && \
         "prometheus-client>=0.20.0" \
         "git+https://github.com/brockventures/banana-protocol.git@v0.6.1"
 
-ENV PATH="/opt/venv/bin:/usr/local/go/bin:/root/go/bin:${PATH}"
+ENV RUSTUP_HOME="/usr/local/rustup" \
+    CARGO_HOME="/usr/local/cargo" \
+    PATH="/usr/local/cargo/bin:/opt/venv/bin:/usr/local/go/bin:/root/go/bin:${PATH}"
 
 # Install GitHub Actions Runner v2.338.2 with SHA256 verification
 ARG RUNNER_VERSION=2.338.2

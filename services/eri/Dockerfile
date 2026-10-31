@@ -46,6 +46,25 @@ RUN mkdir -p /tmp/superpowers /opt/skills /opt/superpowers && \
     rm -rf /tmp/superpowers && \
     ln -s /opt/skills /opt/superpowers/skills
 
+# --- Rust toolchain builder stage -----------------------------------------
+FROM ubuntu:24.04 AS rust-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:${PATH}
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+    --default-toolchain stable \
+    --profile minimal \
+    --component rustfmt,clippy && \
+    rm -rf /usr/local/rustup/toolchains/*/share/doc && \
+    chmod -R a+rX /usr/local/rustup /usr/local/cargo
+
 # --- Runtime stage -------------------------------------------------------
 FROM ubuntu:24.04
 
@@ -66,8 +85,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
     postgresql-client \
     gcc \
+    g++ \
     libc6-dev \
     libatomic1 \
+    pkg-config \
+    libespeak-ng-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Configure default SSH client with include for aerial-config
@@ -75,13 +97,17 @@ RUN mkdir -p -m 0700 /root/.ssh && \
     echo "Include /share/aerial-config/ssh/config" > /root/.ssh/config && \
     chmod 0600 /root/.ssh/config
 
-# Copy Go SDK, golangci-lint, and Node.js 22 LTS runtime from builders/images
+# Copy Go SDK, Rust toolchain, golangci-lint, and Node.js 22 LTS runtime from builders/images
 COPY --link --from=builder /usr/local/go /usr/local/go
+COPY --link --from=rust-builder /usr/local/rustup /usr/local/rustup
+COPY --link --from=rust-builder /usr/local/cargo /usr/local/cargo
 COPY --link --from=golangci/golangci-lint:v2.15.0 /usr/bin/golangci-lint /usr/local/bin/golangci-lint
 COPY --link --from=node:22-bookworm-slim /usr/local/bin/node /usr/local/bin/node
 COPY --link --from=arigaio/atlas:1.3.4 /atlas /usr/local/bin/atlas
 COPY --link --from=1password/op:2 /usr/local/bin/op /usr/local/bin/op
-ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
+ENV RUSTUP_HOME="/usr/local/rustup" \
+    CARGO_HOME="/usr/local/cargo" \
+    PATH="/usr/local/cargo/bin:/usr/local/go/bin:/root/go/bin:${PATH}"
 
 # Install official Antigravity CLI binary
 RUN curl -fsSL --compressed https://antigravity.google/cli/install.sh | bash -s -- -d /usr/local/bin
