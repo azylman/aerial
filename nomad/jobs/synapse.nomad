@@ -45,7 +45,7 @@ job "synapse" {
         CONFIG_PATH = "/local/synapse.yaml"
         NOMAD_ADDR  = "http://${attr.unique.network.ip-address}:4646"
         HANGAR_URL    = "http://hangar.aerial"
-        BRAIN_URL     = "http://eri.aerial"
+        ERI_URL       = "http://eri.aerial"
         INFISICAL_URL = "http://infisical.aerial"
         VANADIS_URL   = "http://vanadis.aerial"
         HARO_URL      = "http://haro.aerial"

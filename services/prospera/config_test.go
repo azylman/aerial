@@ -122,6 +122,12 @@ max_concurrent_calls: 2
 		t.Fatalf("failed to write missing_brain.yaml: %v", err)
 	}
 
+	eriYAML := strings.Replace(validYAML, `brain_url: "http://eri.aerial"`, `eri_url: "http://eri-prospera.aerial"`, 1)
+	eriPath := filepath.Join(tmpDir, "eri.yaml")
+	if err := os.WriteFile(eriPath, []byte(eriYAML), 0o644); err != nil {
+		t.Fatalf("failed to write eri.yaml: %v", err)
+	}
+
 	missingGoogleMCPYAML := strings.Replace(validYAML, `google_mcp_url: "http://google-mcp.aerial/mcp"`, `google_mcp_url: ""`, 1)
 	missingGoogleMCPPath := filepath.Join(tmpDir, "missing_google.yaml")
 	if err := os.WriteFile(missingGoogleMCPPath, []byte(missingGoogleMCPYAML), 0o644); err != nil {
@@ -259,6 +265,27 @@ max_concurrent_calls: 2
 			},
 			wantErr:  false,
 			wantPort: "4019",
+		},
+		{
+			name: "eri_url in yaml",
+			path: eriPath,
+			env: map[string]string{
+				"DATABASE_URL": "postgres://user:pass@localhost:5432/testdb",
+			},
+			wantErr:      false,
+			wantPort:     "4019",
+			wantBrainURL: "http://eri-prospera.aerial",
+		},
+		{
+			name: "ERI_URL env fallback when absent from yaml",
+			path: missingBrainPath,
+			env: map[string]string{
+				"DATABASE_URL": "postgres://user:pass@localhost:5432/testdb",
+				"ERI_URL":      "http://env-eri.aerial:8088",
+			},
+			wantErr:      false,
+			wantPort:     "4019",
+			wantBrainURL: "http://env-eri.aerial:8088",
 		},
 		{
 			name:    "empty path error",
@@ -424,8 +451,8 @@ max_concurrent_calls: 2
 			if tc.wantGeminiVoiceName != "" && cfg.GeminiVoiceName != tc.wantGeminiVoiceName {
 				t.Errorf("cfg.GeminiVoiceName = %q, want %q", cfg.GeminiVoiceName, tc.wantGeminiVoiceName)
 			}
-			if tc.wantBrainURL != "" && cfg.BrainURL != tc.wantBrainURL {
-				t.Errorf("cfg.BrainURL = %q, want %q", cfg.BrainURL, tc.wantBrainURL)
+			if tc.wantBrainURL != "" && (cfg.BrainURL != tc.wantBrainURL || cfg.EriURL != tc.wantBrainURL) {
+				t.Errorf("cfg.BrainURL = %q, cfg.EriURL = %q, want %q", cfg.BrainURL, cfg.EriURL, tc.wantBrainURL)
 			}
 			if tc.wantGoogleMCPURL != "" && cfg.GoogleMCPURL != tc.wantGoogleMCPURL {
 				t.Errorf("cfg.GoogleMCPURL = %q, want %q", cfg.GoogleMCPURL, tc.wantGoogleMCPURL)

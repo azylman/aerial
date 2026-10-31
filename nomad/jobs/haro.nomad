@@ -42,7 +42,7 @@ job "haro" {
       }
 
       env {
-        BRAIN_INTERNAL_URL = "http://eri.aerial"
+        ERI_URL = "http://eri.aerial"
         VANADIS_URL = "http://vanadis.aerial"
       }
 

@@ -176,6 +176,7 @@ func loadQuickLaunchLinks(configPath string) []QuickLaunchLink {
 type DashboardConfig struct {
 	Port       string
 	BrainURL   string
+	EriURL     string
 	MemoryURL  string
 	GHRepo     string
 	GHRepos    []string
@@ -194,6 +195,7 @@ type DashboardConfig struct {
 type DashboardYAMLConfig struct {
 	Port       string   `yaml:"port"`
 	BrainURL   string   `yaml:"brain_url"`
+	EriURL     string   `yaml:"eri_url"`
 	MemoryURL  string   `yaml:"memory_url"`
 	HangarURL  string   `yaml:"hangar_url"`
 	GitSyncURL string   `yaml:"gitsync_url"`
@@ -251,8 +253,14 @@ func LoadConfigFile(path string, lookup func(string) string) (DashboardConfig, e
 	if port == "" {
 		return DashboardConfig{}, fmt.Errorf("config: port is required in %s", cleanPath)
 	}
-	brainURL := strings.TrimSpace(ycfg.BrainURL)
-	if brainURL == "" {
+	eriURL := strings.TrimSpace(ycfg.EriURL)
+	if eriURL == "" {
+		eriURL = strings.TrimSpace(ycfg.BrainURL)
+	}
+	if eriURL == "" {
+		eriURL = strings.TrimSpace(lookup("ERI_URL"))
+	}
+	if eriURL == "" {
 		return DashboardConfig{}, fmt.Errorf("config: brain_url is required in %s", cleanPath)
 	}
 	memoryURL := strings.TrimSpace(ycfg.MemoryURL)
@@ -299,7 +307,8 @@ func LoadConfigFile(path string, lookup func(string) string) (DashboardConfig, e
 
 	return DashboardConfig{
 		Port:       port,
-		BrainURL:   brainURL,
+		BrainURL:   eriURL,
+		EriURL:     eriURL,
 		MemoryURL:  memoryURL,
 		GHRepo:     repos[0],
 		GHRepos:    repos,

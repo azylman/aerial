@@ -23,6 +23,8 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 		wantGHTok     string
 		wantGHURL     string
 		wantPGURL     string
+		wantBrainURL  string
+		wantEriURL    string
 		wantSysChan   string
 		wantDiscTok   string
 	}{
@@ -112,6 +114,22 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 			env:         map[string]string{"DISCORD_TOKEN": "fallback-token-456"},
 			wantDiscTok: "fallback-token-456",
 		},
+		{
+			name: "eri url primary env",
+			env: map[string]string{
+				"ERI_URL": "http://eri-primary.aerial:8088",
+			},
+			wantBrainURL: "http://eri-primary.aerial:8088",
+			wantEriURL:   "http://eri-primary.aerial:8088",
+		},
+		{
+			name: "eri internal url fallback env",
+			env: map[string]string{
+				"ERI_INTERNAL_URL": "http://eri-internal.aerial:8088",
+			},
+			wantBrainURL: "http://eri-internal.aerial:8088",
+			wantEriURL:   "http://eri-internal.aerial:8088",
+		},
 	}
 
 	keysToClear := []string{
@@ -120,9 +138,9 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 		"INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET", "INFISICAL_PROJECT_ID",
 		"INFISICAL_WORKSPACE_ID", "INFISICAL_ENVIRONMENT", "NOMAD_ADDR",
 		"NOMAD_TOKEN", "GITHUB_PAT", "GITHUB_TOKEN", "GITHUB_API_URL",
-		"POSTGRES_URL", "DATABASE_URL", "HANGAR_URL", "BRAIN_INTERNAL_URL",
-		"BRAIN_URL", "SYSTEM_CHANNEL_ID", "DISCORD_CHANNEL_ID", "CONFIG_PATH",
-		"DISCORD_BOT_TOKEN", "DISCORD_TOKEN",
+		"POSTGRES_URL", "DATABASE_URL", "HANGAR_URL", "ERI_URL", "ERI_INTERNAL_URL",
+		"BRAIN_INTERNAL_URL", "BRAIN_URL", "SYSTEM_CHANNEL_ID", "DISCORD_CHANNEL_ID",
+		"CONFIG_PATH", "DISCORD_BOT_TOKEN", "DISCORD_TOKEN",
 	}
 
 	for _, tc := range tests {
@@ -146,6 +164,8 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 				{cfg.GitHubToken, tc.wantGHTok, "GitHubToken"},
 				{cfg.GitHubAPIURL, tc.wantGHURL, "GitHubAPIURL"},
 				{cfg.PostgresURL, tc.wantPGURL, "PostgresURL"},
+				{cfg.BrainURL, tc.wantBrainURL, "BrainURL"},
+				{cfg.EriURL, tc.wantEriURL, "EriURL"},
 				{cfg.SystemChannelID, tc.wantSysChan, "SystemChannelID"},
 				{cfg.DiscordToken, tc.wantDiscTok, "DiscordToken"},
 			} {
@@ -190,6 +210,22 @@ brain_url: "http://brain.custom:8088"
 			wantNomadAddr: "http://nomad.custom:4646",
 			wantHangarURL: "http://hangar.custom:8087",
 			wantBrainURL:  "http://brain.custom:8088",
+		},
+		{
+			name: "yaml config with eri_url",
+			localYAML: `port: "4099"
+infisical_url: "http://infisical.custom:8085"
+infisical_environment: "staging"
+nomad_addr: "http://nomad.custom:4646"
+hangar_url: "http://hangar.custom:8087"
+eri_url: "http://eri.custom:8088"
+`,
+			wantPort:      "4099",
+			wantInfURL:    "http://infisical.custom:8085",
+			wantEnv:       "staging",
+			wantNomadAddr: "http://nomad.custom:4646",
+			wantHangarURL: "http://hangar.custom:8087",
+			wantBrainURL:  "http://eri.custom:8088",
 		},
 		{
 			name: "env overrides yaml values",
@@ -271,7 +307,7 @@ brain_url: "http://brain.custom:8088"
 
 	keysToClear := []string{
 		"PORT", "INFISICAL_URL", "INFISICAL_HOST_URL", "INFISICAL_ENVIRONMENT",
-		"NOMAD_ADDR", "HANGAR_URL", "BRAIN_URL", "SYSTEM_CHANNEL_ID", "DISCORD_CHANNEL_ID",
+		"NOMAD_ADDR", "HANGAR_URL", "ERI_URL", "ERI_INTERNAL_URL", "BRAIN_INTERNAL_URL", "BRAIN_URL", "SYSTEM_CHANNEL_ID", "DISCORD_CHANNEL_ID",
 	}
 
 	for _, tc := range tests {
@@ -342,6 +378,7 @@ brain_url: "http://brain.custom:8088"
 				{cfg.NomadAddr, tc.wantNomadAddr, "NomadAddr"},
 				{cfg.HangarURL, tc.wantHangarURL, "HangarURL"},
 				{cfg.BrainURL, tc.wantBrainURL, "BrainURL"},
+				{cfg.EriURL, tc.wantBrainURL, "EriURL"},
 				{cfg.SystemChannelID, tc.wantSysChan, "SystemChannelID"},
 			} {
 				if check.want != "" && check.got != check.want {

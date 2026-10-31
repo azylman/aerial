@@ -37,6 +37,7 @@ type Config struct {
 	GeminiFallbackModel   string
 	GeminiVoiceName       string
 	BrainURL              string
+	EriURL                string
 	GoogleMCPURL          string
 	CovenURL              string
 	WhisperURL            string
@@ -50,6 +51,7 @@ type Config struct {
 type ProsperaYAMLConfig struct {
 	Port                  string `yaml:"port"`
 	BrainURL              string `yaml:"brain_url"`
+	EriURL                string `yaml:"eri_url"`
 	GoogleMCPURL          string `yaml:"google_mcp_url"`
 	CovenURL              string `yaml:"coven_url"`
 	WhisperURL            string `yaml:"whisper_url"`
@@ -134,6 +136,43 @@ func LoadConfig(path string) (*Config, error) {
 	return LoadConfigFile(path, os.Getenv)
 }
 
+func validateProsperaYAML(ycfg ProsperaYAMLConfig, cleanPath string, eriURL string) error {
+	if strings.TrimSpace(ycfg.Port) == "" {
+		return fmt.Errorf("config: port is required in %s", cleanPath)
+	}
+	if eriURL == "" {
+		return fmt.Errorf("config: brain_url is required in %s", cleanPath)
+	}
+	if strings.TrimSpace(ycfg.GoogleMCPURL) == "" {
+		return fmt.Errorf("config: google_mcp_url is required in %s", cleanPath)
+	}
+	if strings.TrimSpace(ycfg.CovenURL) == "" {
+		return fmt.Errorf("config: coven_url is required in %s", cleanPath)
+	}
+	if strings.TrimSpace(ycfg.WhisperURL) == "" {
+		return fmt.Errorf("config: whisper_url is required in %s", cleanPath)
+	}
+	if strings.TrimSpace(ycfg.DefaultDiscordChannel) == "" {
+		return fmt.Errorf("config: default_discord_channel is required in %s", cleanPath)
+	}
+	if strings.TrimSpace(ycfg.GeminiLiveModel) == "" {
+		return fmt.Errorf("config: gemini_live_model is required in %s", cleanPath)
+	}
+	if strings.TrimSpace(ycfg.GeminiFallbackModel) == "" {
+		return fmt.Errorf("config: gemini_fallback_model is required in %s", cleanPath)
+	}
+	if strings.TrimSpace(ycfg.GeminiVoiceName) == "" {
+		return fmt.Errorf("config: gemini_voice_name is required in %s", cleanPath)
+	}
+	if ycfg.CallbackWindowMinutes <= 0 {
+		return fmt.Errorf("config: callback_window_minutes must be positive in %s", cleanPath)
+	}
+	if ycfg.MaxConcurrentCalls <= 0 {
+		return fmt.Errorf("config: max_concurrent_calls must be positive in %s", cleanPath)
+	}
+	return nil
+}
+
 // LoadConfigFile loads and strictly validates configuration from the YAML file at path and secrets from getenv.
 func LoadConfigFile(path string, getenv func(string) string) (*Config, error) {
 	if getenv == nil {
@@ -155,47 +194,16 @@ func LoadConfigFile(path string, getenv func(string) string) (*Config, error) {
 		return nil, fmt.Errorf("config: failed to parse YAML from %s: %w", cleanPath, err)
 	}
 
-	port := strings.TrimSpace(ycfg.Port)
-	if port == "" {
-		return nil, fmt.Errorf("config: port is required in %s", cleanPath)
+	eriURL := strings.TrimSpace(ycfg.EriURL)
+	if eriURL == "" {
+		eriURL = strings.TrimSpace(ycfg.BrainURL)
 	}
-	brainURL := strings.TrimSpace(ycfg.BrainURL)
-	if brainURL == "" {
-		return nil, fmt.Errorf("config: brain_url is required in %s", cleanPath)
+	if eriURL == "" {
+		eriURL = strings.TrimSpace(getenv("ERI_URL"))
 	}
-	googleMCPURL := strings.TrimSpace(ycfg.GoogleMCPURL)
-	if googleMCPURL == "" {
-		return nil, fmt.Errorf("config: google_mcp_url is required in %s", cleanPath)
-	}
-	covenURL := strings.TrimSpace(ycfg.CovenURL)
-	if covenURL == "" {
-		return nil, fmt.Errorf("config: coven_url is required in %s", cleanPath)
-	}
-	whisperURL := strings.TrimSpace(ycfg.WhisperURL)
-	if whisperURL == "" {
-		return nil, fmt.Errorf("config: whisper_url is required in %s", cleanPath)
-	}
-	defaultDiscordChannel := strings.TrimSpace(ycfg.DefaultDiscordChannel)
-	if defaultDiscordChannel == "" {
-		return nil, fmt.Errorf("config: default_discord_channel is required in %s", cleanPath)
-	}
-	geminiLiveModel := strings.TrimSpace(ycfg.GeminiLiveModel)
-	if geminiLiveModel == "" {
-		return nil, fmt.Errorf("config: gemini_live_model is required in %s", cleanPath)
-	}
-	geminiFallbackModel := strings.TrimSpace(ycfg.GeminiFallbackModel)
-	if geminiFallbackModel == "" {
-		return nil, fmt.Errorf("config: gemini_fallback_model is required in %s", cleanPath)
-	}
-	geminiVoiceName := strings.TrimSpace(ycfg.GeminiVoiceName)
-	if geminiVoiceName == "" {
-		return nil, fmt.Errorf("config: gemini_voice_name is required in %s", cleanPath)
-	}
-	if ycfg.CallbackWindowMinutes <= 0 {
-		return nil, fmt.Errorf("config: callback_window_minutes must be positive in %s", cleanPath)
-	}
-	if ycfg.MaxConcurrentCalls <= 0 {
-		return nil, fmt.Errorf("config: max_concurrent_calls must be positive in %s", cleanPath)
+
+	if err := validateProsperaYAML(ycfg, cleanPath, eriURL); err != nil {
+		return nil, err
 	}
 
 	publicWebhookBaseURL := strings.TrimRight(strings.TrimSpace(ycfg.PublicWebhookBaseURL), "/")
@@ -221,21 +229,22 @@ func LoadConfigFile(path string, getenv func(string) string) (*Config, error) {
 	}
 
 	return &Config{
-		Port:                  port,
+		Port:                  strings.TrimSpace(ycfg.Port),
 		DatabaseURL:           dbURL,
 		TwilioAccountSID:      strings.TrimSpace(getenv("TWILIO_ACCOUNT_SID")),
 		TwilioAuthToken:       strings.TrimSpace(getenv("TWILIO_AUTH_TOKEN")),
 		TwilioFromNumber:      fromNum,
 		PublicWebhookBaseURL:  publicWebhookBaseURL,
 		GeminiAPIKey:          geminiKey,
-		GeminiLiveModel:       geminiLiveModel,
-		GeminiFallbackModel:   geminiFallbackModel,
-		GeminiVoiceName:       geminiVoiceName,
-		BrainURL:              brainURL,
-		GoogleMCPURL:          googleMCPURL,
-		CovenURL:              covenURL,
-		WhisperURL:            whisperURL,
-		DefaultDiscordChannel: defaultDiscordChannel,
+		GeminiLiveModel:       strings.TrimSpace(ycfg.GeminiLiveModel),
+		GeminiFallbackModel:   strings.TrimSpace(ycfg.GeminiFallbackModel),
+		GeminiVoiceName:       strings.TrimSpace(ycfg.GeminiVoiceName),
+		BrainURL:              eriURL,
+		EriURL:                eriURL,
+		GoogleMCPURL:          strings.TrimSpace(ycfg.GoogleMCPURL),
+		CovenURL:              strings.TrimSpace(ycfg.CovenURL),
+		WhisperURL:            strings.TrimSpace(ycfg.WhisperURL),
+		DefaultDiscordChannel: strings.TrimSpace(ycfg.DefaultDiscordChannel),
 		CallbackWindowMinutes: ycfg.CallbackWindowMinutes,
 		MaxConcurrentCalls:    ycfg.MaxConcurrentCalls,
 		AllowFrom:             allowList,

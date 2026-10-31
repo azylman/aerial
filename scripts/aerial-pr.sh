@@ -844,7 +844,7 @@ submit_scratch() {
         fi
     else
         # Probe candidate endpoints for synapse, webhooks-router, or Eri/Brain's /internal/pr/register handler
-        for cand in "http://synapse.aerial" "http://webhooks-router.aerial" "http://127.0.0.1:4020" "http://127.0.0.1:8088" "http://eri.aerial" "http://brain.aerial" "http://host.docker.internal:8088" "http://127.0.0.1:8080" "http://aerial-brain:8080"; do
+        for cand in "http://synapse.aerial" "http://webhooks-router.aerial" "http://127.0.0.1:4020" "http://127.0.0.1:8088" "http://eri.aerial" "http://host.docker.internal:8088" "http://127.0.0.1:8080"; do
             local probe_code
             probe_code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 1 -m 2 -X POST "${cand}/internal/pr/register" 2>/dev/null || true)
             if [ "$probe_code" = "400" ] || [ "$probe_code" = "200" ]; then

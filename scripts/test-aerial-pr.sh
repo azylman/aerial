@@ -316,7 +316,7 @@ PR_ENDPOINT_CHECK=$(bash -c "
     export -f curl
     res2=\$(bash -c '
         brain_reg_url=\"\"
-        for cand in \"http://synapse.aerial\" \"http://webhooks-router.aerial\" \"http://127.0.0.1:4020\" \"http://127.0.0.1:8088\" \"http://eri.aerial\" \"http://brain.aerial\" \"http://host.docker.internal:8088\" \"http://127.0.0.1:8080\" \"http://aerial-brain:8080\"; do
+        for cand in \"http://synapse.aerial\" \"http://webhooks-router.aerial\" \"http://127.0.0.1:4020\" \"http://127.0.0.1:8088\" \"http://eri.aerial\" \"http://host.docker.internal:8088\" \"http://127.0.0.1:8080\"; do
             probe_code=\$(curl -s -o /dev/null -w \"%{http_code}\" --connect-timeout 1 -m 2 -X POST \"\${cand}/internal/pr/register\" 2>/dev/null || true)
             if [ \"\$probe_code\" = \"400\" ] || [ \"\$probe_code\" = \"200\" ]; then
                 brain_reg_url=\"\${cand}/internal/pr/register\"
@@ -339,7 +339,7 @@ PR_ENDPOINT_CHECK=$(bash -c "
     export -f curl
     res3=\$(bash -c '
         brain_reg_url=\"\"
-        for cand in \"http://synapse.aerial\" \"http://webhooks-router.aerial\" \"http://127.0.0.1:4020\" \"http://127.0.0.1:8088\" \"http://eri.aerial\" \"http://brain.aerial\" \"http://host.docker.internal:8088\" \"http://127.0.0.1:8080\" \"http://aerial-brain:8080\"; do
+        for cand in \"http://synapse.aerial\" \"http://webhooks-router.aerial\" \"http://127.0.0.1:4020\" \"http://127.0.0.1:8088\" \"http://eri.aerial\" \"http://host.docker.internal:8088\" \"http://127.0.0.1:8080\"; do
             probe_code=\$(curl -s -o /dev/null -w \"%{http_code}\" --connect-timeout 1 -m 2 -X POST \"\${cand}/internal/pr/register\" 2>/dev/null || true)
             if [ \"\$probe_code\" = \"400\" ] || [ \"\$probe_code\" = \"200\" ]; then
                 brain_reg_url=\"\${cand}/internal/pr/register\"

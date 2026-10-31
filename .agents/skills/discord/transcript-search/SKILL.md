@@ -41,7 +41,7 @@ transcript-search stats [options]
 - `-s, --session <id>`: Restrict search results to a specific session / conversation ID.
 - `-n, --limit <int>`: Maximum number of records to return (default: `10`).
 - `--json`: Output structured JSON for piping into `jq`.
-- `--url <url>`: Override the Aerial eri daemon HTTP endpoint (default: `http://localhost:8080` or `$AERIAL_BRAIN_URL`).
+- `--url <url>`: Override the Aerial eri daemon HTTP endpoint (default: `http://localhost:8080` or `$ERI_URL` / `$AERIAL_ERI_URL` / `$AERIAL_BRAIN_URL`).
 - `--direct-db`: Bypass HTTP daemon and query PostgreSQL directly via `$POSTGRES_URL`.
 
 ### Get Subcommand Flags (Step-Window Zoom)
@@ -49,7 +49,7 @@ transcript-search stats [options]
 - `-i, --step <int>`: Target step index to zoom into (required, non-negative).
 - `-C, --context <int>`: Number of surrounding context steps before and after the target step (default: `2`, range: 0–20).
 - `--json`: Output raw JSON containing `{session_id, step, context, steps: [...]}`.
-- `--url <url>`: Override the Aerial eri daemon HTTP endpoint (default: `http://localhost:8080` or `$AERIAL_BRAIN_URL`).
+- `--url <url>`: Override the Aerial eri daemon HTTP endpoint (default: `http://localhost:8080` or `$ERI_URL` / `$AERIAL_ERI_URL` / `$AERIAL_BRAIN_URL`).
 - `--direct-db`: Bypass HTTP daemon and query PostgreSQL directly via `$POSTGRES_URL`.
 
 ---
