@@ -136,40 +136,16 @@ func (r *PostgresPRRegistry) FailVanadisChunkDetailsByPR(ctx context.Context, re
 	if r == nil || repo == "" || prNumber <= 0 {
 		return "", "", false, nil
 	}
-	client, vURL := r.getVanadisClient()
-	bodyBytes, err := json.Marshal(map[string]any{
-		"repo":      repo,
-		"pr_number": prNumber,
-	})
-	if err != nil {
-		return "", "", false, fmt.Errorf("marshal fail chunk request: %w", err)
-	}
 	var res struct {
 		BuildID string `json:"build_id"`
 		ChunkID string `json:"chunk_id"`
 		Failed  bool   `json:"failed"`
 	}
-	err = r.doHTTPWithRetry(ctx, client, "fail vanadis chunk by pr", func() (*http.Request, error) {
-		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, vURL+"/chunks/fail-pr", bytes.NewReader(bodyBytes))
-		if reqErr != nil {
-			return nil, reqErr
-		}
-		req.Header.Set("Content-Type", "application/json")
-		return req, nil
-	}, func(resp *http.Response) error {
-		if resp.StatusCode != http.StatusOK {
-			body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
-			if readErr != nil {
-				return fmt.Errorf("fail vanadis chunk by pr: unexpected status %d (read error: %w)", resp.StatusCode, readErr)
-			}
-			return fmt.Errorf("fail vanadis chunk by pr: unexpected status %d: %s", resp.StatusCode, string(body))
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-			return fmt.Errorf("decode fail chunk response: %w", err)
-		}
-		return nil
-	})
-	if err != nil {
+	payload := map[string]any{
+		"repo":      repo,
+		"pr_number": prNumber,
+	}
+	if err := r.postVanadisJSON(ctx, "/chunks/fail-pr", "fail chunk", "fail vanadis chunk by pr", payload, &res); err != nil {
 		return "", "", false, err
 	}
 	return res.BuildID, res.ChunkID, res.Failed, nil

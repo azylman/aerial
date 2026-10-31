@@ -365,16 +365,18 @@ func checkNolintComment(raw string) string {
 	if idx := strings.Index(linterPart, "//"); idx >= 0 {
 		linterPart = linterPart[:idx]
 	}
-	if fields := strings.Fields(linterPart); len(fields) > 0 {
-		linterPart = fields[0]
-	}
+	linterPart = strings.TrimSpace(linterPart)
 	if linterPart == "" {
 		return "empty //nolint: directive is prohibited"
 	}
 	for _, tok := range strings.Split(linterPart, ",") {
-		switch strings.TrimSpace(tok) {
-		case "errcheck", "all":
-			return fmt.Sprintf("//nolint:%s is prohibited; all errors must be checked", strings.TrimSpace(tok))
+		fields := strings.Fields(tok)
+		if len(fields) == 0 {
+			continue
+		}
+		switch fields[0] {
+		case "errcheck", "all", "dupl":
+			return fmt.Sprintf("//nolint:%s is prohibited; all errors must be checked", fields[0])
 		}
 	}
 	return ""

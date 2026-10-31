@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -520,36 +519,11 @@ func (s *RouterServer) sweepOlderDeployedPRWidgets(qCtx context.Context, pgReg *
 }
 
 func (s *RouterServer) postVanadisSyncWidget(qCtx context.Context, pgReg *PostgresPRRegistry, payload map[string]any) (bool, error) {
-	client, vURL := pgReg.getVanadisClient()
-	bodyBytes, err := json.Marshal(payload)
-	if err != nil {
-		return false, fmt.Errorf("marshal sync chunk widget request: %w", err)
-	}
 	var syncRes struct {
 		Matched bool   `json:"matched"`
 		BuildID string `json:"build_id"`
 	}
-	err = pgReg.doHTTPWithRetry(qCtx, client, "sync vanadis pr widget", func() (*http.Request, error) {
-		req, reqErr := http.NewRequestWithContext(qCtx, http.MethodPost, vURL+"/chunks/sync-pr-widget", bytes.NewReader(bodyBytes))
-		if reqErr != nil {
-			return nil, reqErr
-		}
-		req.Header.Set("Content-Type", "application/json")
-		return req, nil
-	}, func(resp *http.Response) error {
-		if resp.StatusCode != http.StatusOK {
-			body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
-			if readErr != nil {
-				return fmt.Errorf("sync vanadis pr widget: unexpected status %d (read error: %w)", resp.StatusCode, readErr)
-			}
-			return fmt.Errorf("sync vanadis pr widget: unexpected status %d: %s", resp.StatusCode, string(body))
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&syncRes); err != nil {
-			return fmt.Errorf("decode sync chunk widget response: %w", err)
-		}
-		return nil
-	})
-	if err != nil {
+	if err := pgReg.postVanadisJSON(qCtx, "/chunks/sync-pr-widget", "sync chunk widget", "sync vanadis pr widget", payload, &syncRes); err != nil {
 		return false, err
 	}
 	return syncRes.Matched, nil
