@@ -112,14 +112,14 @@ func (p ChannelPolicy) GetWakeMode() string {
 	return "all"
 }
 
-// GetAmbientWakeThreshold returns the ambient wake threshold, defaulting to 0.77 for classifier mode and 0.0 otherwise.
+// GetAmbientWakeThreshold returns the ambient wake threshold, defaulting to 0.50 for classifier mode and 0.0 otherwise.
 func (p ChannelPolicy) GetAmbientWakeThreshold() float64 {
 	if p.AmbientWakeThreshold != nil {
 		return *p.AmbientWakeThreshold
 	}
 	m := strings.ToLower(strings.TrimSpace(p.Mode))
 	if m == "classifier" || m == "channel" {
-		return 0.77
+		return 0.50
 	}
 	return 0.0
 }
