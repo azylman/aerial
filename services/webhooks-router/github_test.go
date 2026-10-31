@@ -151,6 +151,19 @@ func TestProcessGitHubEvent(t *testing.T) {
 			_, _ = w.Write([]byte(`[{"id": 0, "body": "Non-roborev comment"}, {"id": 1, "body": "## roborev: Review Complete (` + "`old0000`" + `)\nOld bug"}, {"id": 2, "body": "## roborev: Combined Review (` + "`robo525`" + `)\nFound SQL injection in query"}]`))
 		case strings.Contains(r.URL.Path, "/actions/runs/800/jobs"):
 			_, _ = w.Write([]byte(`{"total_count":1,"jobs":[{"id":1,"name":"Verify Codebase","status":"completed","conclusion":"success"}]}`))
+		case r.URL.Path == "/graphql":
+			bodyBytes, _ := io.ReadAll(r.Body)
+			bodyStr := string(bodyBytes)
+			if strings.Contains(bodyStr, "node-500") {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = w.Write([]byte(`{"message": "internal server error"}`))
+				return
+			}
+			if strings.Contains(bodyStr, "node-err") {
+				_, _ = w.Write([]byte(`{"errors":[{"message":"GraphQL auto-merge failed"}]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"data":{"enablePullRequestAutoMerge":{"pullRequest":{"autoMergeRequest":{"enabledAt":"2026-10-30T00:00:00Z"}}}}}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -667,6 +680,34 @@ func TestProcessGitHubEvent(t *testing.T) {
 			disp:    &mockOutboundDispatcher{},
 			wantPR:  221, wantAdvanceCalls: 1, wantPrompts: 0,
 		},
+		{
+			name:     "dependabot PR opened auto-merge success",
+			event:    "pull_request",
+			delivery: "del-pr-dependabot-1",
+			payload:  `{"action":"opened","number":601,"pull_request":{"node_id":"node-ok","number":601,"title":"build(deps): bump foo","head":{"ref":"dependabot/go_modules/foo-1.0.1","sha":"depsha1"},"base":{"ref":"main","sha":"basesha"},"user":{"login":"dependabot[bot]"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"dependabot[bot]"}}`,
+			wantRepo: "azylman/aerial", wantAction: "opened", wantPR: 601, wantBranch: "dependabot/go_modules/foo-1.0.1", wantHeadSHA: "depsha1", wantSender: "dependabot[bot]", wantSource: "pull_request_payload",
+		},
+		{
+			name:     "dependabot PR opened empty node_id skips auto-merge",
+			event:    "pull_request",
+			delivery: "del-pr-dependabot-2",
+			payload:  `{"action":"opened","number":602,"pull_request":{"node_id":"","number":602,"title":"build(deps): bump bar","head":{"ref":"dependabot/go_modules/bar-1.0.1","sha":"depsha2"},"base":{"ref":"main","sha":"basesha"},"user":{"login":"dependabot[bot]"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"dependabot[bot]"}}`,
+			wantRepo: "azylman/aerial", wantAction: "opened", wantPR: 602, wantBranch: "dependabot/go_modules/bar-1.0.1", wantHeadSHA: "depsha2", wantSender: "dependabot[bot]", wantSource: "pull_request_payload",
+		},
+		{
+			name:     "dependabot PR opened graphql error logged without failure",
+			event:    "pull_request",
+			delivery: "del-pr-dependabot-3",
+			payload:  `{"action":"opened","number":603,"pull_request":{"node_id":"node-err","number":603,"title":"build(deps): bump baz","head":{"ref":"dependabot/go_modules/baz-1.0.1","sha":"depsha3"},"base":{"ref":"main","sha":"basesha"},"user":{"login":"dependabot[bot]"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"dependabot[bot]"}}`,
+			wantRepo: "azylman/aerial", wantAction: "opened", wantPR: 603, wantBranch: "dependabot/go_modules/baz-1.0.1", wantHeadSHA: "depsha3", wantSender: "dependabot[bot]", wantSource: "pull_request_payload",
+		},
+		{
+			name:     "dependabot PR opened graphql 500 logged without failure",
+			event:    "pull_request",
+			delivery: "del-pr-dependabot-4",
+			payload:  `{"action":"opened","number":604,"pull_request":{"node_id":"node-500","number":604,"title":"build(deps): bump qux","head":{"ref":"dependabot/go_modules/qux-1.0.1","sha":"depsha4"},"base":{"ref":"main","sha":"basesha"},"user":{"login":"dependabot[bot]"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"dependabot[bot]"}}`,
+			wantRepo: "azylman/aerial", wantAction: "opened", wantPR: 604, wantBranch: "dependabot/go_modules/qux-1.0.1", wantHeadSHA: "depsha4", wantSender: "dependabot[bot]", wantSource: "pull_request_payload",
+		},
 	}
 
 	for _, tc := range cases {
@@ -684,7 +725,7 @@ func TestProcessGitHubEvent(t *testing.T) {
 			if tc.disp != nil {
 				disp = tc.disp
 			}
-			srv := newTestRouter(Config{GitHubAPIURL: mockServer.URL}, mockServer.Client(), reg, disp, inserters...)
+			srv := newTestRouter(Config{GitHubAPIURL: mockServer.URL, GitHubToken: "test-token"}, mockServer.Client(), reg, disp, inserters...)
 			srv.onProcessed = func(string, string) {}
 
 			if tc.priorEvent != nil {
