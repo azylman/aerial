@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -980,6 +981,46 @@ func TestStatusRecorder_Flush(t *testing.T) {
 }
 
 func TestHandleInternalLLM_And_MemoryRetriever(t *testing.T) {
+	attSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/file.txt":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("attachment content"))
+		case "/notfound":
+			http.NotFound(w, r)
+		case "/servererror":
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer attSrv.Close()
+
+	attSrvURL, _ := url.Parse(attSrv.URL)
+	attSrvHost := strings.ToLower(attSrvURL.Hostname())
+	delivery.AllowedInternalHosts[attSrvHost] = true
+	defer delete(delivery.AllowedInternalHosts, attSrvHost)
+
+	var observedPrompt string
+	var observedDir string
+	var stagedFileContent []byte
+	var stagedFileExistsDuringRun bool
+
+	stagingLLM := handleInternalLLM(func(ctx context.Context, model, p string) (string, error) {
+		observedPrompt = p
+		if idx := strings.Index(p, "Staged directory: "); idx != -1 {
+			rest := p[idx+len("Staged directory: "):]
+			lines := strings.Split(rest, "\n")
+			observedDir = strings.TrimSpace(lines[0])
+			stagedPath := filepath.Join(observedDir, "test.txt")
+			if data, err := os.ReadFile(stagedPath); err == nil {
+				stagedFileExistsDuringRun = true
+				stagedFileContent = data
+			}
+		}
+		return `[{"category":"system","fact":"ok"}]`, nil
+	})
+
 	okLLM := handleInternalLLM(func(ctx context.Context, model, p string) (string, error) {
 		return `[{"category":"system","fact":"ok"}]`, nil
 	})
@@ -987,6 +1028,12 @@ func TestHandleInternalLLM_And_MemoryRetriever(t *testing.T) {
 		return "", errors.New("llm failed")
 	})
 	nilLLM := handleInternalLLM(nil)
+
+	var manyAtts []string
+	for i := 0; i < 11; i++ {
+		manyAtts = append(manyAtts, fmt.Sprintf(`{"url":"%s/file.txt","filename":"file%d.txt"}`, attSrv.URL, i))
+	}
+	tooManyAttsJSON := fmt.Sprintf(`{"prompt":"inspect","attachments":[%s]}`, strings.Join(manyAtts, ","))
 
 	for _, tc := range []struct {
 		name       string
@@ -1001,12 +1048,34 @@ func TestHandleInternalLLM_And_MemoryRetriever(t *testing.T) {
 		{"empty prompt", http.MethodPost, okLLM, `{"prompt":"   "}`, http.StatusBadRequest},
 		{"llm error", http.MethodPost, errLLM, `{"prompt":"extract"}`, http.StatusInternalServerError},
 		{"valid request", http.MethodPost, okLLM, `{"prompt":"extract"}`, http.StatusOK},
+		{"valid attachment staging", http.MethodPost, stagingLLM, fmt.Sprintf(`{"prompt":"inspect","attachments":[{"url":"%s/file.txt","filename":"test.txt"}]}`, attSrv.URL), http.StatusOK},
+		{"empty attachment url", http.MethodPost, okLLM, `{"prompt":"test","attachments":[{"url":"","filename":"test.txt"}]}`, http.StatusBadRequest},
+		{"empty attachment filename", http.MethodPost, okLLM, fmt.Sprintf(`{"prompt":"test","attachments":[{"url":"%s/file.txt","filename":""}]}`, attSrv.URL), http.StatusBadRequest},
+		{"duplicate attachment filename", http.MethodPost, okLLM, fmt.Sprintf(`{"prompt":"test","attachments":[{"url":"%s/file.txt","filename":"dup.txt"},{"url":"%s/file.txt","filename":"DUP.TXT"}]}`, attSrv.URL, attSrv.URL), http.StatusBadRequest},
+		{"disallowed attachment url", http.MethodPost, okLLM, `{"prompt":"test","attachments":[{"url":"http://evil.com/file.txt","filename":"test.txt"}]}`, http.StatusBadRequest},
+		{"invalid traversal attachment filename", http.MethodPost, okLLM, fmt.Sprintf(`{"prompt":"test","attachments":[{"url":"%s/file.txt","filename":"../test.txt"}]}`, attSrv.URL), http.StatusBadRequest},
+		{"exceeds max attachments", http.MethodPost, okLLM, tooManyAttsJSON, http.StatusBadRequest},
+		{"upstream 404 fetch error", http.MethodPost, okLLM, fmt.Sprintf(`{"prompt":"test","attachments":[{"url":"%s/notfound","filename":"nf.txt"}]}`, attSrv.URL), http.StatusBadGateway},
+		{"upstream 500 fetch error", http.MethodPost, okLLM, fmt.Sprintf(`{"prompt":"test","attachments":[{"url":"%s/servererror","filename":"err.txt"}]}`, attSrv.URL), http.StatusBadGateway},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if code := runHTTP(tc.handler, tc.method, "/internal/llm", strings.NewReader(tc.body)).Code; code != tc.wantStatus {
 				t.Fatalf("got status=%d, want %d", code, tc.wantStatus)
 			}
 		})
+	}
+
+	if !stagedFileExistsDuringRun {
+		t.Errorf("expected staged attachment file to exist during llmFn execution")
+	}
+	if string(stagedFileContent) != "attachment content" {
+		t.Errorf("expected staged content %q, got %q", "attachment content", string(stagedFileContent))
+	}
+	if !strings.Contains(observedPrompt, "<ATTACHMENTS>") {
+		t.Errorf("expected observed prompt to contain <ATTACHMENTS>, got %q", observedPrompt)
+	}
+	if _, err := os.Stat(observedDir); !os.IsNotExist(err) {
+		t.Errorf("expected staged tmpDir %q to be removed after handleInternalLLM returned", observedDir)
 	}
 
 	memSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

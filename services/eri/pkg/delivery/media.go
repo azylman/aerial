@@ -24,9 +24,24 @@ const (
 )
 
 var (
-	internalMediaHTTPClient = &http.Client{Timeout: 5 * time.Second}
-	allowedInternalHosts    = map[string]bool{}
+	internalMediaHTTPClient = &http.Client{
+		Timeout: 5 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if !isInternalAerialHTTPURL(req.URL.String()) {
+				return fmt.Errorf("%w: redirect target %q is not an allowed internal .aerial endpoint", ErrInvalidInternalAttachment, req.URL.String())
+			}
+			if len(via) >= 10 {
+				return errors.New("stopped after 10 redirects")
+			}
+			return nil
+		},
+	}
+	AllowedInternalHosts = map[string]bool{}
 )
+
+// ErrInvalidInternalAttachment signals that an internal attachment request specifies an invalid URL,
+// disallowed redirect target, or malformed filename.
+var ErrInvalidInternalAttachment = errors.New("invalid internal attachment")
 
 func isInternalAerialHTTPURL(rawURL string) bool {
 	u, err := url.Parse(rawURL)
@@ -40,7 +55,7 @@ func isInternalAerialHTTPURL(rawURL string) bool {
 	if host == "" {
 		return false
 	}
-	return strings.HasSuffix(host, ".aerial") || allowedInternalHosts[host]
+	return strings.HasSuffix(host, ".aerial") || AllowedInternalHosts[host]
 }
 
 // AllowedAttachmentRoots defines the whitelisted root directories for local file attachments.
@@ -498,6 +513,9 @@ var extMIMEMap = map[string]string{
 	".ogg":  "audio/ogg",
 	".m4a":  "audio/mp4",
 	".flac": "audio/flac",
+	".json": "application/json",
+	".pdf":  "application/pdf",
+	".txt":  "text/plain",
 }
 
 func resolveFallbackMIMEType(mimeType, ext string) string {
@@ -512,6 +530,17 @@ func resolveFallbackMIMEType(mimeType, ext string) string {
 		return "audio/mp4"
 	}
 	return mimeType
+}
+
+func detectAttachmentMIMETypeBytes(data []byte, ext string) string {
+	mimeType := http.DetectContentType(data)
+	ext = strings.ToLower(ext)
+	if strings.HasPrefix(mimeType, "text/plain") && ext == ".json" {
+		if mapped, ok := extMIMEMap[ext]; ok {
+			return mapped
+		}
+	}
+	return resolveFallbackMIMEType(mimeType, ext)
 }
 
 func detectMediaMIMETypeBytes(data []byte, ext string) (string, error) {
@@ -539,15 +568,37 @@ func detectMediaMIMEType(f *os.File, canonicalPath string) (string, error) {
 	return detectMediaMIMETypeBytes(header[:n], filepath.Ext(canonicalPath))
 }
 
-// ResolveAndFetchInternalImage fetches and validates an image from an internal .aerial endpoint.
-func ResolveAndFetchInternalImage(rawURL string) (*Attachment, error) {
+func resolveInternalAttachmentFilename(u *url.URL, filename string) (string, error) {
+	trimmed := strings.TrimSpace(filename)
+	if trimmed != "" {
+		clean := filepath.Base(trimmed)
+		if clean != trimmed || clean == "." || clean == ".." || clean == "/" || strings.ContainsAny(clean, "/\\\x00\r\n") {
+			return "", fmt.Errorf("%w: invalid filename %q", ErrInvalidInternalAttachment, filename)
+		}
+		return clean, nil
+	}
+	baseName := filepath.Base(u.Path)
+	ext := filepath.Ext(baseName)
+	if ext == "" || baseName == "" || baseName == "." || baseName == "/" {
+		baseName = "image.jpg"
+	}
+	return baseName, nil
+}
+
+// ResolveAndFetchInternalAttachment fetches and validates any file payload from an internal .aerial endpoint.
+func ResolveAndFetchInternalAttachment(rawURL, filename string) (*Attachment, error) {
 	if !isInternalAerialHTTPURL(rawURL) {
-		return nil, fmt.Errorf("url %q is not an allowed internal .aerial endpoint", rawURL)
+		return nil, fmt.Errorf("%w: url %q is not an allowed internal .aerial endpoint", ErrInvalidInternalAttachment, rawURL)
 	}
 
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid url: %w", err)
+		return nil, fmt.Errorf("%w: invalid url: %w", ErrInvalidInternalAttachment, err)
+	}
+
+	targetFilename, err := resolveInternalAttachmentFilename(u, filename)
+	if err != nil {
+		return nil, err
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -582,23 +633,28 @@ func ResolveAndFetchInternalImage(rawURL string) (*Attachment, error) {
 		return nil, fmt.Errorf("response size %d exceeds limit of %d bytes", len(data), MaxAttachmentSizeBytes)
 	}
 
-	baseName := filepath.Base(u.Path)
-	ext := filepath.Ext(u.Path)
-	if ext == "" || baseName == "" || baseName == "." || baseName == "/" {
-		baseName = "image.jpg"
-		ext = ".jpg"
-	}
+	mimeType := detectAttachmentMIMETypeBytes(data, filepath.Ext(targetFilename))
 
-	mimeType, err := detectMediaMIMETypeBytes(data, ext)
+	return &Attachment{
+		Filename:    targetFilename,
+		ContentType: mimeType,
+		Data:        data,
+	}, nil
+}
+
+// ResolveAndFetchInternalImage fetches and validates an image from an internal .aerial endpoint.
+func ResolveAndFetchInternalImage(rawURL string) (*Attachment, error) {
+	att, err := ResolveAndFetchInternalAttachment(rawURL, "")
 	if err != nil {
 		return nil, err
 	}
 
-	return &Attachment{
-		Filename:    baseName,
-		ContentType: mimeType,
-		Data:        data,
-	}, nil
+	mimeType, err := detectMediaMIMETypeBytes(att.Data, filepath.Ext(att.Filename))
+	if err != nil {
+		return nil, err
+	}
+	att.ContentType = mimeType
+	return att, nil
 }
 
 // ResolveAndValidateLocalImage validates path sandboxing, symlinks, file type, size, and MIME header.
