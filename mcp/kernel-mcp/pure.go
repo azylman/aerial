@@ -672,7 +672,7 @@ func applyYAMLFile(cfg *Config, configPath string) error {
 }
 
 func applyEnvOverrides(cfg *Config) {
-	for _, envURL := range []string{"KERNEL_CDP_URL", "KERNEL_API_URL", "STEEL_CDP_URL", "STEEL_API_URL"} {
+	for _, envURL := range []string{"KERNEL_CDP_URL", "KERNEL_API_URL"} {
 		if val := strings.TrimSpace(os.Getenv(envURL)); val != "" {
 			h, p := parseURLHostPort(val)
 			if h != "" {

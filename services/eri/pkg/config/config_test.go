@@ -837,9 +837,9 @@ func TestConfig_EnvironmentAndDSN(t *testing.T) {
 				"AGY_GEMINI_API_KEY":           "primary-key",
 				"AGY_MODEL":                    "gemini-custom",
 				"DEFAULT_TIMEZONE":             "UTC",
-				"SYSTEM_CHANNEL":               "alerts",
+				"SYSTEM_CHANNEL_ID":            "alerts",
 				"OPENOBSERVE_ORG":              "custom-org",
-				"OPENOBSERVE_ROOT_USER_EMAIL":  "root@domain.com",
+				"OPENOBSERVE_USER":             "root@domain.com",
 				"DAEMON_IDLE_TIMEOUT":          "15m",
 				"MAX_BACKGROUND_TASK_DURATION": "45m",
 				"OLLAMA_NUM_CTX":               "8192",
@@ -857,17 +857,11 @@ func TestConfig_EnvironmentAndDSN(t *testing.T) {
 			wantCtx:    8192,
 		},
 		{
-			name: "fallback env vars",
+			name: "tz fallback env var",
 			envMap: map[string]string{
-				"AGY_API_KEY":       "fallback-key",
-				"TZ":                "America/Chicago",
-				"OPENOBSERVE_USER":  "user@domain.com",
-				"EMBEDDING_NUM_CTX": "4096",
+				"TZ": "America/Chicago",
 			},
-			wantKey:  "fallback-key",
-			wantTZ:   "America/Chicago",
-			wantUser: "user@domain.com",
-			wantCtx:  4096,
+			wantTZ: "America/Chicago",
 		},
 	}
 	for _, tc := range overrideTests {

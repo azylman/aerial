@@ -314,10 +314,11 @@ github_repos:
 port: "8084"
 eri_url: "http://eri.aerial"
 memory_url: "http://coven.aerial"
-gitsync_url: "http://hangar.aerial"
+hangar_url: "http://hangar.aerial"
 haro_url: "http://haro.aerial"
 vanadis_url: "http://vanadis.aerial"
-github_repo: "azylman/single-repo"
+github_repos:
+  - "azylman/single-repo"
 config_path: "/custom/path/config.yaml"
 `
 	singleRepoPath := filepath.Join(tmpDir, "single_repo.yaml")
@@ -330,7 +331,8 @@ memory_url: "http://coven.aerial"
 hangar_url: "http://hangar.aerial"
 haro_url: "http://haro.aerial"
 vanadis_url: "http://vanadis.aerial"
-github_repo: "azylman/aerial"
+github_repos:
+  - "azylman/aerial"
 `
 	eriPath := filepath.Join(tmpDir, "eri.yaml")
 	_ = os.WriteFile(eriPath, []byte(eriYAML), 0o644)
@@ -341,7 +343,8 @@ memory_url: "http://coven.aerial"
 hangar_url: "http://hangar.aerial"
 haro_url: "http://haro.aerial"
 vanadis_url: "http://vanadis.aerial"
-github_repo: "azylman/aerial"
+github_repos:
+  - "azylman/aerial"
 `
 	noBrainPath := filepath.Join(tmpDir, "no_brain.yaml")
 	_ = os.WriteFile(noBrainPath, []byte(noBrainYAML), 0o644)
@@ -390,10 +393,10 @@ github_repo: "azylman/aerial"
 			wantConfigPath: validPath,
 		},
 		{
-			name: "single repo and gitsync fallback and custom config_path",
+			name: "single repo and custom config_path",
 			path: singleRepoPath,
 			env: map[string]string{
-				"GITHUB_PERSONAL_ACCESS_TOKEN": "token-from-env",
+				"GITHUB_PAT": "token-from-env",
 			},
 			wantPort:       "8084",
 			wantBrainURL:   "http://eri.aerial",

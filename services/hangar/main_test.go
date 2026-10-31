@@ -190,11 +190,13 @@ service_configs:
     nomad_var: "nomad/jobs/voice"
     var_key: "CONFIG_YAML"`
 
-	syncReposYAML := `port: "8087"
+	reposYAML := `port: "8087"
 sync_interval: "45s"
-sync_repos: ["/custom/aerial-config", "/custom/aerial"]
+repos:
+  - path: "/custom/aerial-config"
+  - path: "/custom/aerial"
 nomad_addr: "http://nomad.cluster:4646"
-webhooks_router_url: "http://127.0.0.1:4020"`
+synapse_url: "http://127.0.0.1:4020"`
 
 	tests := []struct {
 		name                     string
@@ -239,14 +241,12 @@ webhooks_router_url: "http://127.0.0.1:4020"`
 			env: map[string]string{
 				"GITHUB_PAT":             "my_secret_pat",
 				"NOMAD_TOKEN":            "my_nomad_tok",
-				"DISCORD_BOT_TOKEN":      "bot_token",
-				"DISCORD_CHANNEL":        "custom-channel",
+				"DISCORD_TOKEN":          "bot_token",
+				"SYSTEM_CHANNEL_ID":      "custom-channel",
 				"DISCORD_WEBHOOK_URL":    "https://discord.com/api/webhooks/123/abc",
 				"POSTGRES_PASSWORD":      "pg_pass",
 				"HA_TOKEN":               "ha_tok",
 				"GEMINI_HARNESS_API_KEY": "harness_key",
-				"AERIAL_GEMINI_API_KEY":  "aerial_gemini_key",
-				"GEMINI_API_KEY":         "gem_key",
 			},
 			wantPort:            "8087",
 			wantInterval:        60 * time.Second,
@@ -258,12 +258,12 @@ webhooks_router_url: "http://127.0.0.1:4020"`
 			wantDiscordToken:    "bot_token",
 			wantDiscordChannel:  "custom-channel",
 			wantDiscordWebhook:  "https://discord.com/api/webhooks/123/abc",
-			wantExtraSecretsLen: 7,
+			wantExtraSecretsLen: 5,
 			checkExtraSecrets:   true,
 		},
 		{
-			name:           "sync_repos fallback when repos is empty",
-			yamlContent:    syncReposYAML,
+			name:           "repos without url in yaml",
+			yamlContent:    reposYAML,
 			wantPort:       "8087",
 			wantInterval:   45 * time.Second,
 			wantRepos:      []string{"/custom/aerial-config", "/custom/aerial"},

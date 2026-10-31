@@ -179,7 +179,7 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		return nil, fmt.Errorf("config: ollama.num_ctx must be positive in %s", cleanPath)
 	}
 
-	databaseURL := resolveFirstNonEmpty(dbURL, os.Getenv("DATABASE_URL"), os.Getenv("POSTGRES_URL"), ycfg.DatabaseURL)
+	databaseURL := resolveFirstNonEmpty(dbURL, os.Getenv("DATABASE_URL"), ycfg.DatabaseURL)
 	if databaseURL == "" {
 		return nil, fmt.Errorf("config: database connection string is required")
 	}

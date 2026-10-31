@@ -42,14 +42,6 @@ func (te *turnExecution) createOneShotSchedule(s oneShotScheduleRequest) error {
 		haroURL = strings.TrimSpace(os.Getenv("HARO_URL"))
 	}
 	if haroURL == "" {
-		if schedURL := strings.TrimSpace(os.Getenv("SCHEDULER_MCP_URL")); schedURL != "" {
-			schedURL = strings.TrimRight(schedURL, "/")
-			schedURL = strings.TrimSuffix(schedURL, "/mcp")
-			schedURL = strings.TrimSuffix(schedURL, "/sse")
-			haroURL = strings.TrimRight(schedURL, "/")
-		}
-	}
-	if haroURL == "" {
 		haroURL = "http://haro.aerial"
 	}
 	haroURL = strings.TrimRight(haroURL, "/")

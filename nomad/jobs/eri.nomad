@@ -129,15 +129,14 @@ EOH
         data = <<EOH
 {{ if nomadVarExists "nomad/jobs/shared" }}
 {{ with nomadVar "nomad/jobs/shared" }}
-{{ if .DISCORD_BOT_TOKEN }}DISCORD_BOT_TOKEN="{{ .DISCORD_BOT_TOKEN }}"
-DISCORD_TOKEN="{{ .DISCORD_BOT_TOKEN }}"{{ end }}
+{{ if .DISCORD_BOT_TOKEN }}DISCORD_TOKEN="{{ .DISCORD_BOT_TOKEN }}"{{ end }}
 {{ if .GITHUB_PAT }}GITHUB_PAT="{{ .GITHUB_PAT }}"{{ end }}
 {{ if .HA_TOKEN }}HA_TOKEN="{{ .HA_TOKEN }}"{{ end }}
 {{ if .GEMINI_HARNESS_API_KEY }}GEMINI_HARNESS_API_KEY="{{ .GEMINI_HARNESS_API_KEY }}"{{ end }}
 {{ if .AGY_GEMINI_API_KEY }}AGY_GEMINI_API_KEY="{{ .AGY_GEMINI_API_KEY }}"
 {{ else if .GEMINI_HARNESS_API_KEY }}AGY_GEMINI_API_KEY="{{ .GEMINI_HARNESS_API_KEY }}"{{ end }}
 {{ if .POSTGRES_PASSWORD }}DATABASE_URL="postgres://aerial:{{ .POSTGRES_PASSWORD }}@postgres:5432/aerial?sslmode=disable"{{ end }}
-{{ if .OPENOBSERVE_ROOT_USER_PASSWORD }}OPENOBSERVE_ROOT_USER_PASSWORD="{{ .OPENOBSERVE_ROOT_USER_PASSWORD }}"{{ end }}
+{{ if .OPENOBSERVE_ROOT_USER_PASSWORD }}OPENOBSERVE_PASSWORD="{{ .OPENOBSERVE_ROOT_USER_PASSWORD }}"{{ end }}
 {{ if .UNIFI_PASS }}UNIFI_PASS="{{ .UNIFI_PASS }}"
 UNIFI_PASSWORD="{{ .UNIFI_PASS }}"{{ end }}
 {{ with index . "1PASSWORD_SERVICE_ACCOUNT_TOKEN" }}OP_SERVICE_ACCOUNT_TOKEN="{{ . }}"{{ end }}

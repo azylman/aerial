@@ -757,7 +757,6 @@ ollama:
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("DATABASE_URL", tc.envDB)
-			t.Setenv("POSTGRES_URL", tc.envPG)
 			t.Setenv("ERI_URL", "")
 			t.Setenv("ERI_LLM_URL", "")
 			t.Setenv("PR_REGISTER_URL", "")
@@ -1923,7 +1922,6 @@ ollama:
 			configPath = tc.cfgPath
 			t.Setenv("CONFIG_PATH", tc.cfgPath)
 			t.Setenv("DATABASE_URL", tc.dbURL)
-			t.Setenv("POSTGRES_URL", "")
 
 			runCalled := false
 			exitCalled := false
