@@ -97,7 +97,6 @@ type PRRegistryUpdater interface {
 	BackfillPushMergeSHA(ctx context.Context, repo string, prNumber int, mergeSHA string) (targetID string, err error)
 	ResolvePRBySHA(ctx context.Context, repo string, sha string) (prNumber int, branch, targetID string, err error)
 	ResolvePRByNumber(ctx context.Context, repo string, prNumber int) (targetID string, branch, headSHA, mergeSHA string, err error)
-	ListOpenPRs(ctx context.Context, repo string) ([]RegisteredPR, error)
 	AtomicTransitionConflict(ctx context.Context, repo string, prNumber int) (targetID string, updated bool, err error)
 	TransitionDeploying(ctx context.Context, repo string, prNumber int, jobs []string) (targetID string, err error)
 	AtomicTransitionDeployedByJob(ctx context.Context, jobName string) (targetID string, prNumber int, mergeSHA, repo string, updated bool, err error)
@@ -503,32 +502,6 @@ func (r *PostgresPRRegistry) ResolvePRByNumber(ctx context.Context, repo string,
 		return "", "", "", "", nil
 	}
 	return targetID, branch, headSHA, mergeSHA, nil
-}
-
-func (r *PostgresPRRegistry) ListOpenPRs(ctx context.Context, repo string) ([]RegisteredPR, error) {
-	repo = normalizeRepo(repo)
-	if repo == "" {
-		return nil, nil
-	}
-	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	query := `SELECT pr_number, branch, target_id, head_sha FROM pr_registry WHERE repo = $1 AND COALESCE(merge_sha, '') = '' AND status NOT IN ('merged', 'synced', 'closed', 'conflict', 'deploying', 'deployed', 'deploy_failed') ORDER BY pr_number ASC;`
-	rows, err := r.pool.Query(qCtx, query, repo)
-	if err != nil {
-		return nil, fmt.Errorf("list open prs: %w", err)
-	}
-	defer rows.Close()
-
-	var prs []RegisteredPR
-	for rows.Next() {
-		var p RegisteredPR
-		if err := rows.Scan(&p.PRNumber, &p.Branch, &p.TargetID, &p.HeadSHA); err != nil {
-			return nil, fmt.Errorf("scan open pr: %w", err)
-		}
-		prs = append(prs, p)
-	}
-	return prs, rows.Err()
 }
 
 func (r *PostgresPRRegistry) TransitionDeploying(ctx context.Context, repo string, prNumber int, jobs []string) (string, error) {

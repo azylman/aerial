@@ -282,13 +282,8 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 		{name: "TransitionDeploying success", op: "TransitionDeploying", repo: "azylman/aerial", prNumber: 42, jobs: []string{"brain", "synapse"}, targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380"},
 		{name: "TransitionDeploying db error", op: "TransitionDeploying", repo: "azylman/aerial", prNumber: 42, jobs: []string{"brain"}, mockSelectErr: errors.New("db error"), wantErr: true},
 
-		// ListOpenPRs
-		{name: "ListOpenPRs success", op: "ListOpenPRs", repo: "azylman/aerial", totalRows: 2, wantCount: 2, wantSQLSubstr: "COALESCE(merge_sha, '') = '' AND status NOT IN ('merged', 'synced', 'closed', 'conflict', 'deploying', 'deployed', 'deploy_failed')"},
-		{name: "ListOpenPRs query error", op: "ListOpenPRs", repo: "azylman/aerial", mockSelectErr: errors.New("query err"), wantErr: true},
-		{name: "ListOpenPRs scan error", op: "ListOpenPRs", repo: "azylman/aerial", totalRows: 1, mockScanErr: errors.New("scan err"), wantErr: true},
-		{name: "ListOpenPRs empty repo guard", op: "ListOpenPRs", repo: ""},
-
 		// ListDeployingPRs
+		{name: "ListDeployingPRs scan error", op: "ListDeployingPRs", totalRows: 1, mockScanErr: errors.New("scan err"), wantErr: true},
 		{name: "ListDeployingPRs success", op: "ListDeployingPRs", totalRows: 2, metaJSON: `{"jobs":["brain"]}`, wantCount: 2},
 		{name: "ListDeployingPRs invalid metadata JSON warning still succeeds", op: "ListDeployingPRs", totalRows: 1, metaJSON: `{invalid json`, wantCount: 1},
 		{name: "ListDeployingPRs query error", op: "ListDeployingPRs", mockSelectErr: errors.New("query err"), wantErr: true},
@@ -511,13 +506,6 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 							if tc.mockScanErr != nil {
 								return tc.mockScanErr
 							}
-							if len(dest) == 4 {
-								*dest[0].(*int) = 100 + idx
-								*dest[1].(*string) = "feat/open"
-								*dest[2].(*string) = "1555405874565091380"
-								*dest[3].(*string) = "headsha"
-								return nil
-							}
 							if len(dest) == 8 {
 								*dest[0].(*int64) = int64(200 + idx)
 								*dest[1].(*string) = "azylman/aerial"
@@ -693,14 +681,6 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 				}
 				if gotTarget != tc.wantTarget {
 					t.Errorf("gotTarget = %q, want %q", gotTarget, tc.wantTarget)
-				}
-			case "ListOpenPRs":
-				prs, err := reg.ListOpenPRs(ctx, tc.repo)
-				if (err != nil) != tc.wantErr {
-					t.Fatalf("ListOpenPRs err = %v, wantErr = %v", err, tc.wantErr)
-				}
-				if len(prs) != tc.wantCount {
-					t.Errorf("len(prs) = %d, want %d", len(prs), tc.wantCount)
 				}
 			case "ListDeployingPRs":
 				prs, err := reg.ListDeployingPRs(ctx)

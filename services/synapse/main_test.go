@@ -134,10 +134,7 @@ type mockPRRegistry struct {
 	ciFailedBySHAUpdated bool
 	ciFailedBySHAErr     error
 
-	listOpenPRsCalls []string
-	openPRs          []RegisteredPR
-	listOpenPRsErr   error
-	closedErr        error
+	closedErr error
 
 	conflictCalls    []prCall
 	conflictTargetID string
@@ -279,14 +276,6 @@ func (m *mockPRRegistry) ListDeployingPRs(ctx context.Context) ([]DeployingPR, e
 		return nil, err
 	}
 	return m.listDeployingPRs, nil
-}
-
-func (m *mockPRRegistry) ListOpenPRs(ctx context.Context, repo string) ([]RegisteredPR, error) {
-	if err := m.checkErr(m.listOpenPRsErr); err != nil {
-		return nil, err
-	}
-	m.listOpenPRsCalls = append(m.listOpenPRsCalls, repo)
-	return m.openPRs, nil
 }
 
 func (m *mockPRRegistry) AtomicTransitionConflict(ctx context.Context, repo string, prNumber int) (string, bool, error) {

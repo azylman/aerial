@@ -34,20 +34,22 @@ type Config struct {
 	HaroURL               string
 	SystemChannelID       string
 	DiscordToken          string
+	AutoUpdatePRAuthors   []string
 }
 
 // RouterYAMLConfig defines the declarative file schema for services/synapse/synapse.yaml.
 type RouterYAMLConfig struct {
-	Port                 string `yaml:"port"`
-	InfisicalURL         string `yaml:"infisical_url"`
-	InfisicalEnvironment string `yaml:"infisical_environment"`
-	NomadAddr            string `yaml:"nomad_addr"`
-	HangarURL            string `yaml:"hangar_url"`
-	EriURL               string `yaml:"eri_url"`
-	VanadisURL           string `yaml:"vanadis_url"`
-	HaroURL              string `yaml:"haro_url"`
-	SystemChannelID      string `yaml:"system_channel_id"`
-	SystemChannel        string `yaml:"system_channel"`
+	Port                 string   `yaml:"port"`
+	InfisicalURL         string   `yaml:"infisical_url"`
+	InfisicalEnvironment string   `yaml:"infisical_environment"`
+	NomadAddr            string   `yaml:"nomad_addr"`
+	HangarURL            string   `yaml:"hangar_url"`
+	EriURL               string   `yaml:"eri_url"`
+	VanadisURL           string   `yaml:"vanadis_url"`
+	HaroURL              string   `yaml:"haro_url"`
+	SystemChannelID      string   `yaml:"system_channel_id"`
+	SystemChannel        string   `yaml:"system_channel"`
+	AutoUpdatePRAuthors  []string `yaml:"auto_update_pr_authors"`
 }
 
 var (
@@ -62,6 +64,24 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+func loadAerialConfigFallback(path, sysChan string, autoUpdateAuthors []string) (string, []string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return sysChan, autoUpdateAuthors
+	}
+	var aerialCfg RouterYAMLConfig
+	if err := yaml.Unmarshal(data, &aerialCfg); err != nil {
+		return sysChan, autoUpdateAuthors
+	}
+	if sysChan == "" {
+		sysChan = firstNonEmpty(aerialCfg.SystemChannelID, aerialCfg.SystemChannel)
+	}
+	if len(autoUpdateAuthors) == 0 {
+		autoUpdateAuthors = dedupeTrimmedStrings(aerialCfg.AutoUpdatePRAuthors)
+	}
+	return sysChan, autoUpdateAuthors
 }
 
 // LoadConfig loads configuration from an optional YAML file (CONFIG_PATH) with environment variable overrides.
@@ -86,14 +106,10 @@ func LoadConfig(configPath string) Config {
 		}
 	}
 
+	autoUpdateAuthors := dedupeTrimmedStrings(fileCfg.AutoUpdatePRAuthors)
 	sysChan := firstNonEmpty(fileCfg.SystemChannelID, fileCfg.SystemChannel)
-	if sysChan == "" && synapseAerialConfigPath != "" {
-		if data, err := os.ReadFile(synapseAerialConfigPath); err == nil {
-			var aerialCfg RouterYAMLConfig
-			if yaml.Unmarshal(data, &aerialCfg) == nil {
-				sysChan = firstNonEmpty(aerialCfg.SystemChannelID, aerialCfg.SystemChannel)
-			}
-		}
+	if (sysChan == "" || len(autoUpdateAuthors) == 0) && synapseAerialConfigPath != "" {
+		sysChan, autoUpdateAuthors = loadAerialConfigFallback(synapseAerialConfigPath, sysChan, autoUpdateAuthors)
 	}
 
 	pgURL := firstNonEmpty(os.Getenv("DATABASE_URL"), "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable")
@@ -117,6 +133,7 @@ func LoadConfig(configPath string) Config {
 		HaroURL:               strings.TrimRight(firstNonEmpty(os.Getenv("HARO_URL"), fileCfg.HaroURL, "http://haro.aerial"), "/"),
 		SystemChannelID:       strings.TrimSpace(firstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), sysChan)),
 		DiscordToken:          os.Getenv("DISCORD_TOKEN"),
+		AutoUpdatePRAuthors:   autoUpdateAuthors,
 	}
 }
 
