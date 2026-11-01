@@ -19,7 +19,8 @@ exclude_patterns = [
   "*.sum",
   "*.lock",
   "package-lock.json",
-  "pnpm-lock.yaml"
+  "pnpm-lock.yaml",
+  "web/static/ui/**"
 ]
 
 review_guidelines = """

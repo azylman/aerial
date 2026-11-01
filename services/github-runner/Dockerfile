@@ -52,6 +52,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libespeak-ng-dev \
     make \
+    procps \
     python3 \
     python3-venv \
     python3-pip \
@@ -65,6 +66,15 @@ RUN mkdir -p -m 755 /etc/apt/keyrings && \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list && \
     apt-get update && apt-get install -y --no-install-recommends gh && \
     rm -rf /var/lib/apt/lists/*
+
+# Install Google Chrome Stable
+RUN mkdir -p -m 755 /etc/apt/keyrings && \
+    curl -fsSL https://dl.google.com/linux/linux_signing_key.pub -o /etc/apt/keyrings/google-chrome.asc && \
+    chmod go+r /etc/apt/keyrings/google-chrome.asc && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/google-chrome.asc] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list && \
+    apt-get update && apt-get install -y --no-install-recommends google-chrome-stable && \
+    rm -rf /var/lib/apt/lists/* && \
+    google-chrome --version
 
 # Install official Antigravity CLI (agy)
 RUN curl -fsSL --compressed https://antigravity.google/cli/install.sh | bash -s -- -d /usr/local/bin
