@@ -187,7 +187,7 @@ func (s *VanadisServer) resolveTargetBuildID(ctx context.Context, buildID, threa
 			if latestAny == nil {
 				latestAny = b
 			}
-			if b.Status == "running" && latestRunning == nil {
+			if b.Status == "running" {
 				latestRunning = b
 				break
 			}

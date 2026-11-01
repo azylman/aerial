@@ -937,10 +937,7 @@ func (s *MediaStreamSession) voiceName() string {
 func (s *MediaStreamSession) enqueueOutboundUlaw(ulawBytes []byte) {
 	const frameSize = 160 // 20ms at 8kHz
 	for i := 0; i < len(ulawBytes); i += frameSize {
-		end := i + frameSize
-		if end > len(ulawBytes) {
-			end = len(ulawBytes)
-		}
+		end := min(i+frameSize, len(ulawBytes))
 		chunk := make([]byte, end-i)
 		copy(chunk, ulawBytes[i:end])
 

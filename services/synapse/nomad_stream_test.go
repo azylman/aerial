@@ -25,16 +25,16 @@ func (sub *NomadStreamSubscriber) SetReconnectDelay(initial, maxDelay time.Durat
 func TestExtractJobsFromMetadata_TableDriven(t *testing.T) {
 	tests := []struct {
 		name     string
-		metadata map[string]interface{}
+		metadata map[string]any
 		expected []string
 	}{
 		{name: "nil metadata", metadata: nil, expected: nil},
-		{name: "jobs array string", metadata: map[string]interface{}{"jobs": []interface{}{"brain", "scheduler-mcp"}}, expected: []string{"brain", "scheduler-mcp"}},
-		{name: "deduplicates clean job names", metadata: map[string]interface{}{"jobs": []interface{}{"brain", "brain", "hangar"}}, expected: []string{"brain", "hangar"}},
-		{name: "empty jobs array", metadata: map[string]interface{}{"jobs": []interface{}{}}, expected: nil},
-		{name: "non-slice jobs", metadata: map[string]interface{}{"jobs": 123}, expected: nil},
-		{name: "typed string slice", metadata: map[string]interface{}{"jobs": []string{"job-a", "job-b"}}, expected: []string{"job-a", "job-b"}},
-		{name: "whitespace and empty jobs filtered", metadata: map[string]interface{}{"jobs": []interface{}{"", "  ", "brain"}}, expected: []string{"brain"}},
+		{name: "jobs array string", metadata: map[string]any{"jobs": []any{"brain", "scheduler-mcp"}}, expected: []string{"brain", "scheduler-mcp"}},
+		{name: "deduplicates clean job names", metadata: map[string]any{"jobs": []any{"brain", "brain", "hangar"}}, expected: []string{"brain", "hangar"}},
+		{name: "empty jobs array", metadata: map[string]any{"jobs": []any{}}, expected: nil},
+		{name: "non-slice jobs", metadata: map[string]any{"jobs": 123}, expected: nil},
+		{name: "typed string slice", metadata: map[string]any{"jobs": []string{"job-a", "job-b"}}, expected: []string{"job-a", "job-b"}},
+		{name: "whitespace and empty jobs filtered", metadata: map[string]any{"jobs": []any{"", "  ", "brain"}}, expected: []string{"brain"}},
 	}
 
 	for _, tt := range tests {
@@ -50,13 +50,13 @@ func TestExtractJobsFromMetadata_TableDriven(t *testing.T) {
 func TestExtractStartedJobsFromMetadata_TableDriven(t *testing.T) {
 	startedTests := []struct {
 		name     string
-		metadata map[string]interface{}
+		metadata map[string]any
 		expected []string
 	}{
 		{name: "nil metadata", metadata: nil, expected: nil},
-		{name: "legacy metadata without started_jobs falls back to jobs", metadata: map[string]interface{}{"jobs": []interface{}{"coven", "db-migrate"}}, expected: []string{"coven", "db-migrate"}},
-		{name: "started_jobs filters out unstarted sibling job", metadata: map[string]interface{}{"jobs": []interface{}{"coven", "db-migrate"}, "started_jobs": []interface{}{"db-migrate"}}, expected: []string{"db-migrate"}},
-		{name: "empty started_jobs returns nil", metadata: map[string]interface{}{"jobs": []interface{}{"coven"}, "started_jobs": []interface{}{}}, expected: nil},
+		{name: "legacy metadata without started_jobs falls back to jobs", metadata: map[string]any{"jobs": []any{"coven", "db-migrate"}}, expected: []string{"coven", "db-migrate"}},
+		{name: "started_jobs filters out unstarted sibling job", metadata: map[string]any{"jobs": []any{"coven", "db-migrate"}, "started_jobs": []any{"db-migrate"}}, expected: []string{"db-migrate"}},
+		{name: "empty started_jobs returns nil", metadata: map[string]any{"jobs": []any{"coven"}, "started_jobs": []any{}}, expected: nil},
 	}
 	for _, tt := range startedTests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -71,23 +71,23 @@ func TestExtractStartedJobsFromMetadata_TableDriven(t *testing.T) {
 func TestHasNonTransientPlacementFailure_TableDriven(t *testing.T) {
 	placementTests := []struct {
 		name     string
-		failedTG map[string]interface{}
+		failedTG map[string]any
 		queued   map[string]int
 		desc     string
 		want     bool
 		wantDesc string
 	}{
 		{name: "empty failedTG", failedTG: nil, desc: "only desc", want: false, wantDesc: "only desc"},
-		{name: "queued task group skipped", failedTG: map[string]interface{}{"tg": map[string]interface{}{"NodesExhausted": 1}}, queued: map[string]int{"tg": 1}, want: false},
-		{name: "non-map rawMetrics returns true", failedTG: map[string]interface{}{"tg": 1}, desc: "", want: true, wantDesc: "failed task group allocations:"},
-		{name: "NodesAvailable zero returns true", failedTG: map[string]interface{}{"tg": map[string]interface{}{"NodesAvailable": map[string]interface{}{"dc1": float64(0)}}}, desc: "no nodes", want: true, wantDesc: "no nodes (failed task group allocations:"},
-		{name: "NodesAvailable positive and transient port collision with NodesExhausted returns false", failedTG: map[string]interface{}{"tg": map[string]interface{}{"NodesAvailable": map[string]interface{}{"dc1": float64(1)}, "NodesExhausted": float64(1), "ClassExhausted": map[string]interface{}{"quiet-zero": float64(1)}, "DimensionExhausted": map[string]interface{}{"network: port collision": float64(1)}}}, want: false},
-		{name: "NodesExhausted positive without DimensionExhausted returns true", failedTG: map[string]interface{}{"tg": map[string]interface{}{"NodesExhausted": float64(1)}}, want: true},
-		{name: "ConstraintFiltered map positive returns true", failedTG: map[string]interface{}{"tg": map[string]interface{}{"ConstraintFiltered": map[string]interface{}{"missing drivers": float64(1)}}}, want: true},
-		{name: "ConstraintFiltered int positive returns true", failedTG: map[string]interface{}{"tg": map[string]interface{}{"ConstraintFiltered": 1}}, want: true},
-		{name: "QuotaExhausted slice non-empty returns true", failedTG: map[string]interface{}{"tg": map[string]interface{}{"QuotaExhausted": []interface{}{"default"}}}, want: true},
-		{name: "DimensionExhausted memory returns true", failedTG: map[string]interface{}{"tg": map[string]interface{}{"DimensionExhausted": map[string]interface{}{"memory": float64(1)}}}, want: true},
-		{name: "AllocationResourceExhausted without DimensionExhausted returns true", failedTG: map[string]interface{}{"tg": map[string]interface{}{"AllocationResourceExhausted": float64(1)}}, want: true},
+		{name: "queued task group skipped", failedTG: map[string]any{"tg": map[string]any{"NodesExhausted": 1}}, queued: map[string]int{"tg": 1}, want: false},
+		{name: "non-map rawMetrics returns true", failedTG: map[string]any{"tg": 1}, desc: "", want: true, wantDesc: "failed task group allocations:"},
+		{name: "NodesAvailable zero returns true", failedTG: map[string]any{"tg": map[string]any{"NodesAvailable": map[string]any{"dc1": float64(0)}}}, desc: "no nodes", want: true, wantDesc: "no nodes (failed task group allocations:"},
+		{name: "NodesAvailable positive and transient port collision with NodesExhausted returns false", failedTG: map[string]any{"tg": map[string]any{"NodesAvailable": map[string]any{"dc1": float64(1)}, "NodesExhausted": float64(1), "ClassExhausted": map[string]any{"quiet-zero": float64(1)}, "DimensionExhausted": map[string]any{"network: port collision": float64(1)}}}, want: false},
+		{name: "NodesExhausted positive without DimensionExhausted returns true", failedTG: map[string]any{"tg": map[string]any{"NodesExhausted": float64(1)}}, want: true},
+		{name: "ConstraintFiltered map positive returns true", failedTG: map[string]any{"tg": map[string]any{"ConstraintFiltered": map[string]any{"missing drivers": float64(1)}}}, want: true},
+		{name: "ConstraintFiltered int positive returns true", failedTG: map[string]any{"tg": map[string]any{"ConstraintFiltered": 1}}, want: true},
+		{name: "QuotaExhausted slice non-empty returns true", failedTG: map[string]any{"tg": map[string]any{"QuotaExhausted": []any{"default"}}}, want: true},
+		{name: "DimensionExhausted memory returns true", failedTG: map[string]any{"tg": map[string]any{"DimensionExhausted": map[string]any{"memory": float64(1)}}}, want: true},
+		{name: "AllocationResourceExhausted without DimensionExhausted returns true", failedTG: map[string]any{"tg": map[string]any{"AllocationResourceExhausted": float64(1)}}, want: true},
 	}
 	for _, tt := range placementTests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -357,8 +357,7 @@ func TestNomadStreamSubscriber_Events(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			ctx := t.Context()
 
 			streamData := strings.Join(tt.streamLines, "\n") + "\n"
 			nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -526,7 +525,7 @@ func TestProcessNomadEvent_TableDriven(t *testing.T) {
 		})
 	}
 
-	if allFailedTaskGroupsQueued(map[string]interface{}{"g": 1}, map[string]int{"g": 0}) {
+	if allFailedTaskGroupsQueued(map[string]any{"g": 1}, map[string]int{"g": 0}) {
 		t.Errorf("expected false for unqueued task group")
 	}
 }
@@ -545,7 +544,7 @@ func TestRouterServer_ReconcileActiveDeployments_StartupSweep(t *testing.T) {
 			reg: func() PRRegistryUpdater {
 				r := mkDeployedReg("1555405874565091380", 552, "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092", "azylman/aerial", true)
 				r.listDeployingPRs = []DeployingPR{
-					{ID: 101, Repo: "azylman/aerial", PRNumber: 552, MergeSHA: "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092", TargetID: "1555405874565091380", Metadata: map[string]interface{}{"jobs": []interface{}{"synapse"}}},
+					{ID: 101, Repo: "azylman/aerial", PRNumber: 552, MergeSHA: "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092", TargetID: "1555405874565091380", Metadata: map[string]any{"jobs": []any{"synapse"}}},
 				}
 				return r
 			}(),
@@ -559,7 +558,7 @@ func TestRouterServer_ReconcileActiveDeployments_StartupSweep(t *testing.T) {
 				r.listDeployingPRs = []DeployingPR{
 					{
 						ID: 102, Repo: "azylman/aerial", PRNumber: 971, MergeSHA: "0eb75b1f4eed46252d5fe0ac5041d1c1315bf092", TargetID: "1555405874565091380",
-						Metadata: map[string]interface{}{"jobs": []interface{}{"coven", "synapse"}, "started_jobs": []interface{}{"synapse"}},
+						Metadata: map[string]any{"jobs": []any{"coven", "synapse"}, "started_jobs": []any{"synapse"}},
 					},
 				}
 				return r
@@ -573,7 +572,7 @@ func TestRouterServer_ReconcileActiveDeployments_StartupSweep(t *testing.T) {
 		{
 			name: "transition error logs warning and continues",
 			reg: &mockPRRegistry{
-				listDeployingPRs: []DeployingPR{{PRNumber: 1, Repo: "azylman/aerial", Metadata: map[string]interface{}{"job": "brain"}}},
+				listDeployingPRs: []DeployingPR{{PRNumber: 1, Repo: "azylman/aerial", Metadata: map[string]any{"job": "brain"}}},
 				deployedErr:      errors.New("transition failed"),
 			},
 			deploysJSON: `[{"ID":"dep-1","Status":"successful"}]`,
@@ -796,8 +795,7 @@ func TestNomadStreamSubscriber_RiverQueue(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			ctx := t.Context()
 
 			streamData := strings.Join(tt.streamLines, "\n") + "\n"
 			nomadServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1241,8 +1239,7 @@ func TestNomadUnmanagedJobCrashAndDelegation(t *testing.T) {
 }
 
 func TestNomadStreamSubscriber_StartAndReconnect(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	var attempts atomic.Int32
 	reconnectedChan := make(chan struct{})
@@ -1364,8 +1361,7 @@ func TestNomadStreamSubscriber_ConsumeStream_Errors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			ctx := t.Context()
 
 			var capturedToken string
 			nomadAddr := tt.nomadAddr

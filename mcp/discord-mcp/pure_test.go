@@ -239,7 +239,7 @@ func TestBuildHealthResponse_TableDriven(t *testing.T) {
 func TestBuildHealthResponse_MarshalError(t *testing.T) {
 	oldMarshal := marshalFn
 	t.Cleanup(func() { marshalFn = oldMarshal })
-	marshalFn = func(v interface{}) ([]byte, error) {
+	marshalFn = func(v any) ([]byte, error) {
 		return nil, errors.New("simulated marshal error")
 	}
 

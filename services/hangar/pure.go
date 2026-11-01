@@ -90,11 +90,11 @@ func isAllowedEnvKey(key string) bool {
 func ScrubComposeEnv(environ []string) []string {
 	out := make([]string, 0, len(environ))
 	for _, env := range environ {
-		eq := strings.IndexByte(env, '=')
-		if eq == -1 {
+		before, _, ok := strings.Cut(env, "=")
+		if !ok {
 			continue
 		}
-		key := env[:eq]
+		key := before
 		if isAllowedEnvKey(key) {
 			out = append(out, env)
 		}
@@ -243,13 +243,13 @@ func GenerateDockerConfig(existingContent []byte, registry, username, pat string
 func parseRepoUser(repoURL string) string {
 	trimmed := strings.TrimSuffix(repoURL, ".git")
 	var pathPart string
-	if idx := strings.Index(trimmed, "://"); idx != -1 {
-		pathPart = trimmed[idx+3:]
+	if _, after, ok := strings.Cut(trimmed, "://"); ok {
+		pathPart = after
 		if slashIdx := strings.Index(pathPart, "/"); slashIdx != -1 {
 			pathPart = pathPart[slashIdx+1:]
 		}
-	} else if idx := strings.Index(trimmed, ":"); idx != -1 {
-		pathPart = trimmed[idx+1:]
+	} else if _, after, ok := strings.Cut(trimmed, ":"); ok {
+		pathPart = after
 	}
 
 	parts := strings.Split(strings.Trim(pathPart, "/"), "/")
@@ -295,12 +295,12 @@ func ResolveDockerConfigPath(lookup func(string) string) string {
 }
 
 func splitRegistryAndRepo(namePart string) (registry, repository string) {
-	slashIdx := strings.Index(namePart, "/")
-	if slashIdx != -1 {
-		firstSegment := namePart[:slashIdx]
+	before, after, ok := strings.Cut(namePart, "/")
+	if ok {
+		firstSegment := before
 		if strings.Contains(firstSegment, ".") || strings.Contains(firstSegment, ":") || firstSegment == "localhost" {
 			registry = firstSegment
-			repository = namePart[slashIdx+1:]
+			repository = after
 		} else {
 			registry = "registry-1.docker.io"
 			repository = namePart
@@ -388,15 +388,15 @@ func parseQuotedAuthParam(rem string) (val, nextRem string) {
 	}
 	val = rem[1 : endQuote+1]
 	remAfter := rem[endQuote+2:]
-	if commaIdx := strings.Index(remAfter, ","); commaIdx != -1 {
-		return val, strings.TrimSpace(remAfter[commaIdx+1:])
+	if _, after, ok := strings.Cut(remAfter, ","); ok {
+		return val, strings.TrimSpace(after)
 	}
 	return val, ""
 }
 
 func parseUnquotedAuthParam(rem string) (val, nextRem string) {
-	if commaIdx := strings.Index(rem, ","); commaIdx != -1 {
-		return strings.TrimSpace(rem[:commaIdx]), strings.TrimSpace(rem[commaIdx+1:])
+	if before, after, ok := strings.Cut(rem, ","); ok {
+		return strings.TrimSpace(before), strings.TrimSpace(after)
 	}
 	return strings.TrimSpace(rem), ""
 }
@@ -458,12 +458,12 @@ func ParseGitHubSlug(rawRemoteURL string) string {
 	}
 
 	// Handle standard SCP-like SSH syntax: git@github.com:owner/repo(.git)
-	if strings.HasPrefix(raw, "git@") {
-		cleanSSH := strings.TrimPrefix(raw, "git@")
-		colonIdx := strings.Index(cleanSSH, ":")
-		if colonIdx != -1 {
-			host := cleanSSH[:colonIdx]
-			pathPart := cleanSSH[colonIdx+1:]
+	if after, ok := strings.CutPrefix(raw, "git@"); ok {
+		cleanSSH := after
+		before, after, ok := strings.Cut(cleanSSH, ":")
+		if ok {
+			host := before
+			pathPart := after
 			if strings.EqualFold(host, "github.com") {
 				return cleanSlugPath(pathPart)
 			}
@@ -551,11 +551,11 @@ func ExtractJobName(content string, fallbackFileName string) string {
 }
 
 func extractImageFromHCLAssignment(line string) string {
-	idx := strings.Index(line, "image")
-	if idx == -1 {
+	_, after, ok := strings.Cut(line, "image")
+	if !ok {
 		return ""
 	}
-	sub := strings.TrimSpace(line[idx+len("image"):])
+	sub := strings.TrimSpace(after)
 	if !strings.HasPrefix(sub, "=") {
 		return ""
 	}
@@ -566,11 +566,11 @@ func extractImageFromHCLAssignment(line string) string {
 	}
 	quote := val[qStart]
 	rest := val[qStart+1:]
-	qEnd := strings.IndexByte(rest, quote)
-	if qEnd == -1 {
+	before0, _, ok0 := strings.Cut(rest, string([]byte{quote}))
+	if !ok0 {
 		return ""
 	}
-	img := strings.TrimSpace(rest[:qEnd])
+	img := strings.TrimSpace(before0)
 	return strings.ReplaceAll(img, "${var.image_tag}", "latest")
 }
 

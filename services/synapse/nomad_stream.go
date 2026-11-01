@@ -11,6 +11,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -46,19 +47,19 @@ type NomadDeploymentEventPayload struct {
 // NomadEvaluationEventPayload captures evaluation status updates from Nomad.
 type NomadEvaluationEventPayload struct {
 	Evaluation struct {
-		ID                string                 `json:"ID"`
-		JobID             string                 `json:"JobID"`
-		Status            string                 `json:"Status"` // "complete", "failed", "blocked", "canceled"
-		StatusDescription string                 `json:"StatusDescription"`
-		DeploymentID      string                 `json:"DeploymentID"`
-		BlockedEval       string                 `json:"BlockedEval"`
-		FailedTGAllocs    map[string]interface{} `json:"FailedTGAllocs"`
-		QueuedAllocations map[string]int         `json:"QueuedAllocations"`
+		ID                string         `json:"ID"`
+		JobID             string         `json:"JobID"`
+		Status            string         `json:"Status"` // "complete", "failed", "blocked", "canceled"
+		StatusDescription string         `json:"StatusDescription"`
+		DeploymentID      string         `json:"DeploymentID"`
+		BlockedEval       string         `json:"BlockedEval"`
+		FailedTGAllocs    map[string]any `json:"FailedTGAllocs"`
+		QueuedAllocations map[string]int `json:"QueuedAllocations"`
 	} `json:"Evaluation"`
 }
 
 // hasUnqueuedFailedAllocs returns true if any task group with placement failures lacks a queued allocation.
-func hasUnqueuedFailedAllocs(failedTG map[string]interface{}, queued map[string]int) bool {
+func hasUnqueuedFailedAllocs(failedTG map[string]any, queued map[string]int) bool {
 	if len(failedTG) == 0 {
 		return false
 	}
@@ -71,7 +72,7 @@ func hasUnqueuedFailedAllocs(failedTG map[string]interface{}, queued map[string]
 }
 
 // allFailedTaskGroupsQueued returns true if there is at least one failed task group and every failed task group has a queued allocation.
-func allFailedTaskGroupsQueued(failedTG map[string]interface{}, queued map[string]int) bool {
+func allFailedTaskGroupsQueued(failedTG map[string]any, queued map[string]int) bool {
 	if len(failedTG) == 0 {
 		return false
 	}
@@ -83,7 +84,7 @@ func allFailedTaskGroupsQueued(failedTG map[string]interface{}, queued map[strin
 	return true
 }
 
-func metricInt(v interface{}) int {
+func metricInt(v any) int {
 	switch n := v.(type) {
 	case float64:
 		return int(n)
@@ -94,24 +95,24 @@ func metricInt(v interface{}) int {
 	}
 }
 
-func hasPositiveMetricValue(v interface{}) bool {
+func hasPositiveMetricValue(v any) bool {
 	if metricInt(v) > 0 {
 		return true
 	}
 	switch mp := v.(type) {
-	case map[string]interface{}:
+	case map[string]any:
 		for _, val := range mp {
 			if metricInt(val) > 0 {
 				return true
 			}
 		}
-	case []interface{}:
+	case []any:
 		return len(mp) > 0
 	}
 	return false
 }
 
-func checkDimensionExhausted(dimMap map[string]interface{}) (hasNonTransient bool, hasAnyPositive bool) {
+func checkDimensionExhausted(dimMap map[string]any) (hasNonTransient bool, hasAnyPositive bool) {
 	for k, count := range dimMap {
 		if metricInt(count) > 0 {
 			hasAnyPositive = true
@@ -124,7 +125,7 @@ func checkDimensionExhausted(dimMap map[string]interface{}) (hasNonTransient boo
 	return false, hasAnyPositive
 }
 
-func isTaskGroupPlacementFailure(m map[string]interface{}) bool {
+func isTaskGroupPlacementFailure(m map[string]any) bool {
 	if m["NodesAvailable"] != nil && !hasPositiveMetricValue(m["NodesAvailable"]) {
 		return true
 	}
@@ -134,7 +135,7 @@ func isTaskGroupPlacementFailure(m map[string]interface{}) bool {
 		return true
 	}
 	hasPositiveDim := false
-	if dimMap, ok := m["DimensionExhausted"].(map[string]interface{}); ok {
+	if dimMap, ok := m["DimensionExhausted"].(map[string]any); ok {
 		hasNonTransient, hasAny := checkDimensionExhausted(dimMap)
 		if hasNonTransient {
 			return true
@@ -150,7 +151,7 @@ func isTaskGroupPlacementFailure(m map[string]interface{}) bool {
 // hasNonTransientPlacementFailure returns true if any unqueued task group in FailedTGAllocs
 // failed placement due to non-transient resource, node, constraint, class, or quota exhaustion
 // (ignoring transient network/port collisions).
-func hasNonTransientPlacementFailure(failedTG map[string]interface{}, queued map[string]int) bool {
+func hasNonTransientPlacementFailure(failedTG map[string]any, queued map[string]int) bool {
 	if len(failedTG) == 0 {
 		return false
 	}
@@ -158,7 +159,7 @@ func hasNonTransientPlacementFailure(failedTG map[string]interface{}, queued map
 		if queued[tg] > 0 {
 			continue
 		}
-		m, ok := rawMetrics.(map[string]interface{})
+		m, ok := rawMetrics.(map[string]any)
 		if !ok || isTaskGroupPlacementFailure(m) {
 			return true
 		}
@@ -167,7 +168,7 @@ func hasNonTransientPlacementFailure(failedTG map[string]interface{}, queued map
 }
 
 // formatFailedTGAllocs formats a human-readable evaluation failure description combining statusDesc and failedTG.
-func formatFailedTGAllocs(statusDesc string, failedTG map[string]interface{}) string {
+func formatFailedTGAllocs(statusDesc string, failedTG map[string]any) string {
 	desc := strings.TrimSpace(statusDesc)
 	if len(failedTG) == 0 {
 		return desc
@@ -845,7 +846,7 @@ func (s *RouterServer) classifyNomadJob(ctx context.Context, job string) (NomadJ
 		Periodic *struct {
 			Enabled bool `json:"Enabled"`
 		} `json:"Periodic"`
-		ParameterizedJob interface{} `json:"ParameterizedJob"`
+		ParameterizedJob any `json:"ParameterizedJob"`
 	}
 	if !s.getNomadJSON(ctx, "/v1/job/"+job, &jobSpec) || !strings.EqualFold(jobSpec.Type, "batch") {
 		return NomadJobKindService, jobSpec.Status, jobSpec.Version, jobSpec.Stop
@@ -965,14 +966,14 @@ func (s *RouterServer) isNomadEvalResolved(ctx context.Context, evalID string) b
 }
 
 // extractStringSliceFromMetadata extracts a slice of strings stored under key in metadata JSONB.
-func extractStringSliceFromMetadata(meta map[string]interface{}, key string) []string {
+func extractStringSliceFromMetadata(meta map[string]any, key string) []string {
 	if meta == nil {
 		return nil
 	}
 	var raw []string
 	if rawVal, ok := meta[key]; ok {
 		switch v := rawVal.(type) {
-		case []interface{}:
+		case []any:
 			for _, item := range v {
 				if s, ok := item.(string); ok {
 					raw = append(raw, s)
@@ -986,14 +987,14 @@ func extractStringSliceFromMetadata(meta map[string]interface{}, key string) []s
 }
 
 // extractJobsFromMetadata extracts candidate Nomad job names stored in the PR registry metadata JSONB.
-func extractJobsFromMetadata(meta map[string]interface{}) []string {
+func extractJobsFromMetadata(meta map[string]any) []string {
 	return extractStringSliceFromMetadata(meta, "jobs")
 }
 
 // extractStartedJobsFromMetadata returns candidate Nomad jobs eligible for startup sweep reconciliation.
 // When "started_jobs" is present in metadata, only pending jobs in "started_jobs" are returned;
 // legacy rows without "started_jobs" fall back to extractJobsFromMetadata.
-func extractStartedJobsFromMetadata(meta map[string]interface{}) []string {
+func extractStartedJobsFromMetadata(meta map[string]any) []string {
 	if meta == nil {
 		return nil
 	}
@@ -1024,8 +1025,7 @@ func isTaskRestartExhausted(ts NomadTaskState) bool {
 	if strings.EqualFold(ts.State, "running") {
 		return false
 	}
-	for i := len(ts.Events) - 1; i >= 0; i-- {
-		evt := ts.Events[i]
+	for _, evt := range slices.Backward(ts.Events) {
 		if evt.Type == "Started" {
 			return false
 		}
@@ -1154,8 +1154,7 @@ func extractAllocationErrorDetails(clientDesc string, taskStates map[string]Noma
 			continue
 		}
 		var errMsg string
-		for i := len(ts.Events) - 1; i >= 0; i-- {
-			evt := ts.Events[i]
+		for _, evt := range slices.Backward(ts.Events) {
 			errMsg = firstNonEmpty(evt.DriverError, evt.SetupError, evt.DownloadError, evt.ValidationError, evt.VaultError, evt.Details["driver_error"])
 			if errMsg == "" && (evt.Type == "Driver Failure" || evt.Type == "Task Setup" || evt.Type == "Failed Validation") {
 				errMsg = evt.DisplayMessage

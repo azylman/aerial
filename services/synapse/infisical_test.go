@@ -75,7 +75,7 @@ func TestHandleInfisicalAndGenericWebhooks(t *testing.T) {
 				t.Fatalf("expected status %d, got %d", tc.wantStatus, rec.Code)
 			}
 			if tc.wantTargetVar != "" || tc.wantEnv != "" || tc.wantMsg != "" {
-				var resp map[string]interface{}
+				var resp map[string]any
 				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 					t.Fatalf("failed to parse response: %v", err)
 				}

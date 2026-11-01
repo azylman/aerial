@@ -291,20 +291,20 @@ type GitHubPullRequest struct {
 const aerialPRMetadataPrefix = "<!-- aerial-pr:"
 
 func ParseAerialPRMetadata(body string) (string, string, bool) {
-	idx := strings.LastIndex(body, aerialPRMetadataPrefix)
-	if idx < 0 {
+	_, after0, ok0 := strings.CutLast(body, aerialPRMetadataPrefix)
+	if !ok0 {
 		return "", "", false
 	}
-	rest := body[idx+len(aerialPRMetadataPrefix):]
-	endIdx := strings.Index(rest, "-->")
-	if endIdx < 0 {
+	rest := after0
+	before, _, ok := strings.Cut(rest, "-->")
+	if !ok {
 		return "", "", false
 	}
 	var trailer struct {
 		TargetID       string `json:"target_id"`
 		VanadisChunkID string `json:"vanadis_chunk_id"`
 	}
-	if err := json.Unmarshal([]byte(strings.TrimSpace(rest[:endIdx])), &trailer); err != nil {
+	if err := json.Unmarshal([]byte(strings.TrimSpace(before)), &trailer); err != nil {
 		return "", "", false
 	}
 	targetID, chunkID := NormalizeDiscordTargetID(trailer.TargetID), strings.TrimSpace(trailer.VanadisChunkID)
@@ -514,7 +514,7 @@ func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	httpkit.WriteJSON(w, http.StatusOK, map[string]interface{}{
+	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
 		"status":   "accepted",
 		"event":    event,
 		"delivery": delivery,
@@ -630,7 +630,7 @@ func formatCIChecksActiveStep(prStatus, ciChecksJSON string) string {
 	return fmt.Sprintf("Waiting on CI (%d/%d passed)", passed, total)
 }
 
-func extractStringMapFromMetadata(meta map[string]interface{}, key string) map[string]string {
+func extractStringMapFromMetadata(meta map[string]any, key string) map[string]string {
 	if meta == nil {
 		return nil
 	}
@@ -640,7 +640,7 @@ func extractStringMapFromMetadata(meta map[string]interface{}, key string) map[s
 	}
 	out := make(map[string]string)
 	switch m := rawVal.(type) {
-	case map[string]interface{}:
+	case map[string]any:
 		for k, v := range m {
 			cleanKey := strings.ToLower(strings.TrimSpace(k))
 			if cleanKey == "" {
@@ -662,7 +662,7 @@ func extractStringMapFromMetadata(meta map[string]interface{}, key string) map[s
 	return out
 }
 
-func extractChecksFromJSONOrMetadata(ciChecksJSON string, meta map[string]interface{}) map[string]string {
+func extractChecksFromJSONOrMetadata(ciChecksJSON string, meta map[string]any) map[string]string {
 	var checks map[string]string
 	if trimmedChecks := strings.TrimSpace(ciChecksJSON); trimmedChecks != "" && trimmedChecks != "{}" {
 		if err := json.Unmarshal([]byte(trimmedChecks), &checks); err != nil {
@@ -672,7 +672,7 @@ func extractChecksFromJSONOrMetadata(ciChecksJSON string, meta map[string]interf
 	if len(checks) == 0 && meta != nil {
 		if rawChecks, ok := meta["ci_checks"]; ok && rawChecks != nil {
 			switch c := rawChecks.(type) {
-			case map[string]interface{}:
+			case map[string]any:
 				checks = make(map[string]string, len(c))
 				for k, v := range c {
 					if s, ok := v.(string); ok {
@@ -728,7 +728,7 @@ func analyzeBuildChecks(checks map[string]string) (checkJobs []string, passedBui
 	return checkJobs, passedBuildJobs, total, passed, failed
 }
 
-func resolveRolloutCandidateJobs(meta map[string]interface{}, checkJobs []string) []string {
+func resolveRolloutCandidateJobs(meta map[string]any, checkJobs []string) []string {
 	jobs := extractJobsFromMetadata(meta)
 	startedJobs := extractStringSliceFromMetadata(meta, "started_jobs")
 	deployedJobs := extractStringSliceFromMetadata(meta, "deployed_jobs")
@@ -784,7 +784,7 @@ func formatPRWidgetActiveStep(prStatus, ciChecksJSON, metadataJSON string) strin
 		return ""
 	}
 
-	var meta map[string]interface{}
+	var meta map[string]any
 	if trimmedMeta := strings.TrimSpace(metadataJSON); trimmedMeta != "" && trimmedMeta != "{}" {
 		if err := json.Unmarshal([]byte(trimmedMeta), &meta); err != nil {
 			meta = nil

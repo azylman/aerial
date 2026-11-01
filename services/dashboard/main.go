@@ -212,7 +212,7 @@ func drainAndClose(body io.ReadCloser, name string) {
 	}
 }
 
-func writeJSON(w http.ResponseWriter, r *http.Request, status int, data interface{}) {
+func writeJSON(w http.ResponseWriter, r *http.Request, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	b, err := json.Marshal(data)
 	if err != nil {
@@ -265,10 +265,7 @@ func fetchDockerClusterState(ctx context.Context) ([]ServiceStatus, []DockerCont
 		}
 
 		createdAt := time.Unix(c.Created, 0).UTC()
-		uptimeSec := int64(now.Sub(createdAt).Seconds())
-		if uptimeSec < 0 {
-			uptimeSec = 0
-		}
+		uptimeSec := max(int64(now.Sub(createdAt).Seconds()), 0)
 
 		status := "healthy"
 		statusLower := strings.ToLower(c.Status)

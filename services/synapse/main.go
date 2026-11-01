@@ -212,7 +212,7 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 		log.Printf("[synapse] failed to sync initial PR widget for %s#%d: %v", req.Repo, req.PRNumber, err)
 	}
 
-	httpkit.WriteJSON(w, http.StatusOK, map[string]interface{}{
+	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
 		"status":    "registered",
 		"repo":      req.Repo,
 		"pr_number": req.PRNumber,
@@ -255,7 +255,7 @@ func (s *RouterServer) handleInternalWidgetSync(w http.ResponseWriter, r *http.R
 }
 
 func (s *RouterServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	httpkit.WriteJSON(w, http.StatusOK, map[string]interface{}{
+	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
 		"status":  "ok",
 		"service": "synapse",
 		"time":    time.Now().UTC().Format(time.RFC3339),
@@ -308,7 +308,7 @@ func (s *RouterServer) handleHangarWebhook(w http.ResponseWriter, r *http.Reques
 			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist webhook"})
 			return
 		}
-		httpkit.WriteJSON(w, http.StatusAccepted, map[string]interface{}{
+		httpkit.WriteJSON(w, http.StatusAccepted, map[string]any{
 			"status":   "accepted",
 			"event":    evt.Event,
 			"job_name": evt.JobName,
@@ -320,7 +320,7 @@ func (s *RouterServer) handleHangarWebhook(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		log.Printf("[synapse] [hangar] error processing hangar event: %v", err)
 	}
-	httpkit.WriteJSON(w, http.StatusOK, map[string]interface{}{
+	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
 		"status":    "accepted",
 		"event":     processed.Event,
 		"job_name":  processed.JobName,

@@ -1070,7 +1070,7 @@ func TestRunDiscordCatchUpSweep(t *testing.T) {
 						t.Errorf("job[%d] MessageID = %q, want %q", idx, river.insertedDiscordJobs[idx].MessageID, wantID)
 					}
 				}
-			} else if srv != nil && disp != nil {
+			} else if srv != nil {
 				calls := disp.DiscordMessageCalls()
 				if len(calls) != len(tc.wantEnqueuedIDs) {
 					t.Errorf("DiscordMessageCalls = %d, want %d", len(calls), len(tc.wantEnqueuedIDs))

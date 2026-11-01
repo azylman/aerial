@@ -99,11 +99,9 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	defer workerCancel()
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		runTranscriptBatcher(workerCtx, sessionMgr, reporter)
-	}()
+	})
 
 	select {
 	case <-ctx.Done():

@@ -179,7 +179,7 @@ var vanadisHTTPClient = &http.Client{
 
 // fetchUpstreamJSON executes an HTTP GET request with a 4-second timeout against targetURL,
 // decodes any non-200 JSON error into upstreamErrMsg, or unmarshals the 200 OK JSON response into dest.
-func fetchUpstreamJSON(ctx context.Context, client *http.Client, targetURL string, dest interface{}) (int, string, error) {
+func fetchUpstreamJSON(ctx context.Context, client *http.Client, targetURL string, dest any) (int, string, error) {
 	reqCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
 

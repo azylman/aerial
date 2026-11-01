@@ -155,8 +155,7 @@ func killProcess(cmd *exec.Cmd) {
 		log.Printf("[Discord-MCP] Warning killing process: %v", err)
 	}
 	if err := cmd.Wait(); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if _, ok := errors.AsType[*exec.ExitError](err); ok {
 			return
 		}
 		if !errors.Is(err, os.ErrProcessDone) {

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -439,12 +440,9 @@ func resolveContainerCommit(c DockerContainerJSON, recon *ReconciliationStatus, 
 	commit := ExtractSingleContainerCommit(c)
 	svc, isStackContainer := ExtractAerialServiceName(c)
 	if commit == "" && recon != nil && len(recon.TargetServices) > 0 && svc != "" {
-		for _, ts := range recon.TargetServices {
-			if ts == svc {
-				if recon.CommitSHA != "" {
-					commit = recon.CommitSHA
-				}
-				break
+		if slices.Contains(recon.TargetServices, svc) {
+			if recon.CommitSHA != "" {
+				commit = recon.CommitSHA
 			}
 		}
 	}
@@ -485,10 +483,7 @@ func summarizeContainerGroup(groupContainers []DockerContainerJSON, refTime time
 		if createdAt.After(latestCreatedAt) {
 			latestCreatedAt = createdAt
 		}
-		uptimeSec := int64(refTime.Sub(createdAt).Seconds())
-		if uptimeSec < 0 {
-			uptimeSec = 0
-		}
+		uptimeSec := max(int64(refTime.Sub(createdAt).Seconds()), 0)
 		if uptimeSec < minUptimeSec {
 			minUptimeSec = uptimeSec
 		}
@@ -738,10 +733,7 @@ func indexRunningNomadAllocs(allocs []NomadAllocItem) map[string]NomadAllocItem 
 func evaluateRunningAllocStatus(alloc NomadAllocItem, now time.Time) (string, int64) {
 	var uptimeSec int64
 	if alloc.CreateTime > 0 {
-		uptimeSec = int64(now.Sub(time.Unix(0, alloc.CreateTime).UTC()).Seconds())
-		if uptimeSec < 0 {
-			uptimeSec = 0
-		}
+		uptimeSec = max(int64(now.Sub(time.Unix(0, alloc.CreateTime).UTC()).Seconds()), 0)
 	}
 
 	if alloc.DeploymentStatus != nil {

@@ -565,7 +565,7 @@ func TestMain_Execution_TableDriven(t *testing.T) {
 				runCalled = true
 				return tc.runErr
 			}
-			exitFn = func(format string, v ...interface{}) {
+			exitFn = func(format string, v ...any) {
 				exitCalled = true
 			}
 

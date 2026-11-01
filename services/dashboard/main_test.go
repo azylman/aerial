@@ -1291,7 +1291,7 @@ func TestMain_Execution(t *testing.T) {
 				runCalled = true
 				return tc.runErr
 			}
-			exitFn = func(string, ...interface{}) {
+			exitFn = func(string, ...any) {
 				exitCalled = true
 			}
 

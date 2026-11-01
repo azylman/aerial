@@ -24,7 +24,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func writeJSON(w http.ResponseWriter, r *http.Request, status int, data interface{}) {
+func writeJSON(w http.ResponseWriter, r *http.Request, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	b, err := json.Marshal(data)
 	if err != nil {
@@ -462,7 +462,7 @@ func handleMuxSync(daemon *SyncDaemon) http.HandlerFunc {
 		}
 
 		metrics.RecordSyncRequest("webhook", "synced")
-		writeJSON(w, r, http.StatusOK, map[string]interface{}{
+		writeJSON(w, r, http.StatusOK, map[string]any{
 			"status":  "synced",
 			"results": results,
 		})
@@ -501,7 +501,7 @@ func handleMuxReconcile(daemon *SyncDaemon) http.HandlerFunc {
 				return
 			}
 
-			writeJSON(w, r, http.StatusOK, map[string]interface{}{
+			writeJSON(w, r, http.StatusOK, map[string]any{
 				"status":  "reconciled",
 				"applied": true,
 			})
@@ -511,7 +511,7 @@ func handleMuxReconcile(daemon *SyncDaemon) http.HandlerFunc {
 		if qErr := daemon.TriggerReconcile(r.Context(), true); qErr != nil {
 			log.Printf("[Hangar:HTTP] Failed to queue reconcile: %v", qErr)
 		}
-		writeJSON(w, r, http.StatusAccepted, map[string]interface{}{
+		writeJSON(w, r, http.StatusAccepted, map[string]any{
 			"status":           "queued",
 			"message":          "Nomad reconciliation scheduled",
 			"debounce_seconds": int(reconcilerDebounceDuration.Seconds()),

@@ -218,7 +218,7 @@ func isCandidateGoFile(rel string) bool {
 		strings.HasSuffix(rel, ".gen.go") || strings.HasSuffix(rel, ".pb.go") {
 		return false
 	}
-	for _, seg := range strings.Split(rel, "/") {
+	for seg := range strings.SplitSeq(rel, "/") {
 		if isExcludedDir(seg) || seg == ".." {
 			return false
 		}
@@ -232,7 +232,7 @@ func isCandidateTestGoFile(rel string) bool {
 		strings.HasSuffix(rel, ".gen_test.go") || strings.HasSuffix(rel, "_gen_test.go") || strings.HasSuffix(rel, ".pb_test.go") {
 		return false
 	}
-	for _, seg := range strings.Split(rel, "/") {
+	for seg := range strings.SplitSeq(rel, "/") {
 		if isExcludedDir(seg) || seg == ".." {
 			return false
 		}
@@ -692,8 +692,8 @@ func findBannedNolints(f *ast.File, fset *token.FileSet) []string {
 
 func checkNolintComment(raw string) string {
 	text := strings.TrimPrefix(raw, "//")
-	if strings.HasPrefix(raw, "/*") {
-		text = strings.TrimSuffix(strings.TrimPrefix(raw, "/*"), "*/")
+	if after, ok := strings.CutPrefix(raw, "/*"); ok {
+		text = strings.TrimSuffix(after, "*/")
 	}
 	text = strings.TrimSpace(text)
 	if !strings.HasPrefix(text, "nolint") {
@@ -715,7 +715,7 @@ func checkNolintComment(raw string) string {
 	if linterPart == "" {
 		return "empty //nolint: directive is prohibited"
 	}
-	for _, tok := range strings.Split(linterPart, ",") {
+	for tok := range strings.SplitSeq(linterPart, ",") {
 		fields := strings.Fields(tok)
 		if len(fields) == 0 {
 			continue

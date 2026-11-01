@@ -51,7 +51,7 @@ type CDPClient struct {
 	stealthReady    bool
 	lastNavHost     string
 	pending         map[int64]chan cdpResponse
-	msgID           int64
+	msgID           atomic.Int64
 }
 
 // NewCDPClient creates a new CDP client.
@@ -253,7 +253,7 @@ func (c *CDPClient) sendCDPDirect(ctx context.Context, conn *websocket.Conn, met
 		return nil, err
 	}
 
-	id := atomic.AddInt64(&c.msgID, 1)
+	id := c.msgID.Add(1)
 	respCh := make(chan cdpResponse, 1)
 
 	c.stateMu.Lock()

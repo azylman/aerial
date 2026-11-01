@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -256,7 +257,7 @@ func (d *SyncDaemon) TriggerSync() ([]RepoSyncResult, error) {
 		return d.triggerFn()
 	}
 
-	val, err, _ := d.sfg.Do("sync", func() (interface{}, error) {
+	val, err, _ := d.sfg.Do("sync", func() (any, error) {
 		d.mu.Lock()
 		if d.ticker != nil {
 			d.ticker.Reset(d.interval)
@@ -736,10 +737,7 @@ func (d *SyncDaemon) buildSingleRepoStatus(ctx context.Context, repo string, syn
 	st.RemoteCommitTime = remoteTime
 
 	if diskTime != nil && remoteTime != nil {
-		lag := int64(remoteTime.Sub(*diskTime).Seconds())
-		if lag < 0 {
-			lag = 0
-		}
+		lag := max(int64(remoteTime.Sub(*diskTime).Seconds()), 0)
 		st.TimeLagSeconds = lag
 		if diskSha != remoteSha && lag > 0 {
 			st.SyncStatus = "lagging"
@@ -760,9 +758,7 @@ func (d *SyncDaemon) GetStatus(ctx context.Context) HangarStatusResponse {
 
 	d.statusMu.RLock()
 	syncTimes := make(map[string]time.Time, len(d.lastSyncTimes))
-	for k, v := range d.lastSyncTimes {
-		syncTimes[k] = v
-	}
+	maps.Copy(syncTimes, d.lastSyncTimes)
 	d.statusMu.RUnlock()
 
 	var maxLag int64

@@ -140,10 +140,7 @@ func (h *ToolHandler) MemorySearch(ctx context.Context, args MemorySearchArgs) (
 		limit = 20
 	}
 
-	candidateLimit := limit * 3
-	if candidateLimit < 30 {
-		candidateLimit = 30
-	}
+	candidateLimit := max(limit*3, 30)
 
 	var emb []float32
 	if h.ollama != nil {
@@ -318,10 +315,7 @@ func (h *ToolHandler) GetContext(ctx context.Context, query string, limit int) (
 		limit = 20
 	}
 
-	candidateLimit := limit * 3
-	if candidateLimit < 30 {
-		candidateLimit = 30
-	}
+	candidateLimit := max(limit*3, 30)
 
 	var emb []float32
 	if h.ollama != nil {

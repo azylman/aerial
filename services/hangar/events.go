@@ -50,7 +50,7 @@ func (d *SyncDaemon) getChangedFiles(ctx context.Context, repoPath, prevHead, cu
 
 func splitLines(s string) []string {
 	var lines []string
-	for _, line := range strings.Split(s, "\n") {
+	for line := range strings.SplitSeq(s, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed != "" {
 			lines = append(lines, trimmed)

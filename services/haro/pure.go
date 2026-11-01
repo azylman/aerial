@@ -296,7 +296,7 @@ func formatCronDayOfWeek(dowStr, timeStr string) string {
 		return fmt.Sprintf("Every %s at %s", cronDayNames[dowNum], timeStr)
 	}
 	var names []string
-	for _, p := range strings.Split(dowStr, ",") {
+	for p := range strings.SplitSeq(dowStr, ",") {
 		pTrim := strings.TrimSpace(p)
 		if dNum, err := strconv.Atoi(pTrim); err == nil && dNum >= 0 && dNum <= 7 {
 			names = append(names, cronDayShortNames[dNum])

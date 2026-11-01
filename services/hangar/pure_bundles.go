@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -117,9 +118,7 @@ func extractFiltersFromWorkflow(workflowYAML []byte, filters map[string][]string
 			}
 			var stepFilters map[string][]string
 			if err := yaml.Unmarshal([]byte(step.With.Filters), &stepFilters); err == nil {
-				for k, v := range stepFilters {
-					filters[k] = v
-				}
+				maps.Copy(filters, stepFilters)
 			}
 		}
 	}
@@ -181,9 +180,7 @@ func DiscoverRepoWorkflowRules(repoPath string) (filters map[string][]string, ca
 			}
 			filters[svc] = existing
 		}
-		for svc, img := range c {
-			catalog[svc] = img
-		}
+		maps.Copy(catalog, c)
 	}
 
 	if len(catalog) == 0 {
@@ -201,8 +198,8 @@ func matchWorkflowPattern(pattern, cleanFile string) bool {
 	if cleanPattern == "**" {
 		return true
 	}
-	if strings.HasSuffix(cleanPattern, "/**") {
-		prefix := strings.TrimSuffix(cleanPattern, "/**")
+	if before, ok := strings.CutSuffix(cleanPattern, "/**"); ok {
+		prefix := before
 		return cleanFile == prefix || strings.HasPrefix(cleanFile, prefix+"/")
 	}
 	matched, err := path.Match(cleanPattern, cleanFile)

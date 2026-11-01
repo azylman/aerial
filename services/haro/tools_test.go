@@ -35,7 +35,7 @@ func TestMain_Execution(t *testing.T) {
 	}
 
 	exitCalled := false
-	exitFn = func(string, ...interface{}) { exitCalled = true }
+	exitFn = func(string, ...any) { exitCalled = true }
 	runAppFn = func(ctx context.Context, cfg *Config) error { return http.ErrServerClosed }
 	main()
 	if exitCalled {

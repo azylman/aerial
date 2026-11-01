@@ -112,7 +112,7 @@ func (e *pushEventTestEnv) setGitScript(s mockGitScript) {
 	e.daemon.gitExecutor = func(ctx context.Context, dir string, args ...string) ([]byte, []byte, error) {
 		cmd := strings.Join(args, " ")
 		if s.failCmd != "" {
-			for _, part := range strings.Split(s.failCmd, ",") {
+			for part := range strings.SplitSeq(s.failCmd, ",") {
 				if strings.Contains(cmd, strings.TrimSpace(part)) {
 					return nil, []byte("git error"), errors.New("simulated " + s.failCmd + " failure")
 				}
@@ -1237,8 +1237,7 @@ func TestImageRolloutQueue_TableDriven(t *testing.T) {
 	})
 
 	t.Run("debounced loop execution synchronizes on channel without sleep", func(t *testing.T) {
-		loopCtx, cancel := context.WithCancel(context.Background())
-		defer cancel()
+		loopCtx := t.Context()
 
 		env := newImageReadyTestEnv(t)
 		env.runSignal = make(chan string, 10)
@@ -1291,8 +1290,7 @@ func TestImageRolloutQueue_TableDriven(t *testing.T) {
 	})
 
 	t.Run("panic recovery in rollout loop", func(t *testing.T) {
-		loopCtx, cancel := context.WithCancel(context.Background())
-		defer cancel()
+		loopCtx := t.Context()
 
 		var runCount int
 		var runMu sync.Mutex

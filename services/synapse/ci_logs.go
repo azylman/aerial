@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -110,10 +111,7 @@ func ExtractCIFailureDetails(rawLog string) string {
 		return ""
 	}
 
-	tailStart := len(cleanedLines) - 25
-	if tailStart < 0 {
-		tailStart = 0
-	}
+	tailStart := max(len(cleanedLines)-25, 0)
 
 	seen := make(map[string]struct{}, len(cleanedLines))
 	var result []string
@@ -185,8 +183,8 @@ func (s *RouterServer) fetchLatestRoboRevComment(ctx context.Context, repo strin
 	if len(shortSHA) > 7 {
 		shortSHA = shortSHA[:7]
 	}
-	for i := len(comments) - 1; i >= 0; i-- {
-		body := strings.TrimSpace(comments[i].Body)
+	for _, comment := range slices.Backward(comments) {
+		body := strings.TrimSpace(comment.Body)
 		if !strings.Contains(body, "## roborev:") {
 			continue
 		}

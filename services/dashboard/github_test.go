@@ -376,8 +376,7 @@ func TestGitHubPoller_PollAndDecode(t *testing.T) {
 }
 
 func TestGitHubPoller_StartStopTickerLoop(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	var pollCount atomic.Int32
 	secondPollCh := make(chan struct{}, 4)

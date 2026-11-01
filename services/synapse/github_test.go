@@ -54,7 +54,7 @@ func TestHandleGitHubWebhook(t *testing.T) {
 				if len(tc.river.insertedJobs) != tc.wantInserted {
 					t.Fatalf("expected %d inserted jobs, got %d", tc.wantInserted, len(tc.river.insertedJobs))
 				}
-				var resp map[string]interface{}
+				var resp map[string]any
 				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 					t.Fatalf("failed to parse json response: %v", err)
 				}
@@ -1862,12 +1862,12 @@ func TestExtractStringMapFromMetadata_Unit(t *testing.T) {
 	if res := extractStringMapFromMetadata(nil, "key"); res != nil {
 		t.Errorf("expected nil for nil meta, got %v", res)
 	}
-	if res := extractStringMapFromMetadata(map[string]interface{}{}, "key"); res != nil {
+	if res := extractStringMapFromMetadata(map[string]any{}, "key"); res != nil {
 		t.Errorf("expected nil for missing key, got %v", res)
 	}
 
-	metaObj := map[string]interface{}{
-		"job_states": map[string]interface{}{
+	metaObj := map[string]any{
+		"job_states": map[string]any{
 			" ERI ": "verifying_health",
 			"":      "invalid",
 			"HARO":  "starting",
@@ -1878,7 +1878,7 @@ func TestExtractStringMapFromMetadata_Unit(t *testing.T) {
 		t.Errorf("unexpected map from interface: %+v", gotObj)
 	}
 
-	metaStr := map[string]interface{}{
+	metaStr := map[string]any{
 		"job_states": map[string]string{
 			" CADVISOR ": " healthy ",
 		},
