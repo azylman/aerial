@@ -139,11 +139,12 @@ func buildDiscordPools(basePoolCfg func(home, model string, prewarmed []string) 
 			model = lowModel
 		}
 		var p runner.AgentPool
-		if !k.Ephemeral {
+		switch {
+		case !k.Ephemeral:
 			p = runner.NewUnifiedProcessPool(basePoolCfg(discordHome, model, nil), spawner)
-		} else if k.Effort == "medium" {
+		case k.Effort == "medium":
 			p = newWorkerInterchangeablePool(basePoolCfg(discordHome, model, []string{"discord:medium-worker-0", "discord:medium-worker-1"}), spawner, "discord:medium-worker")
-		} else {
+		default:
 			p = newWorkerInterchangeablePool(basePoolCfg(discordHome, model, []string{"discord:worker-0", "discord:worker-1"}), spawner, "discord:worker")
 		}
 		pools[k] = p

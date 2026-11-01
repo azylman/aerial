@@ -287,13 +287,14 @@ func TestGetLastStepIndex(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tmp := t.TempDir()
 			p := filepath.Join(tmp, "transcript.jsonl")
-			if tc.isDir {
+			switch {
+			case tc.isDir:
 				p = tmp
-			} else if tc.isParentFile {
+			case tc.isParentFile:
 				parentFile := filepath.Join(tmp, "not-a-dir")
 				_ = os.WriteFile(parentFile, []byte("file"), 0o644)
 				p = filepath.Join(parentFile, "transcript.jsonl")
-			} else if !tc.isMissing {
+			case !tc.isMissing:
 				_ = os.WriteFile(p, []byte(tc.content), 0o644)
 			}
 			idx, err := getLastStepIndex(p)

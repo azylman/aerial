@@ -547,9 +547,10 @@ func (s *GeminiAPISession) hydrateHistory() {
 			continue
 		}
 		role := ""
-		if entry.Type == "USER_INPUT" {
+		switch entry.Type {
+		case "USER_INPUT":
 			role = "user"
-		} else if entry.Type == "PLANNER_RESPONSE" {
+		case "PLANNER_RESPONSE":
 			role = "model"
 		}
 		if role != "" {

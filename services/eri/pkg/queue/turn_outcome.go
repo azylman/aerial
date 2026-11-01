@@ -457,12 +457,13 @@ func buildFailureNotice(cfg WorkerPoolConfig, agyBin, apiKey, errDetail, stderr,
 		snippet = string([]rune(snippet)[:300])
 	}
 	desc := descPrefix
-	if desc == "" {
+	switch {
+	case desc == "":
 		desc = snippet
-	} else if strings.HasSuffix(desc, ": ") || strings.HasSuffix(desc, " ") {
-		desc = desc + snippet
-	} else {
-		desc = desc + ": " + snippet
+	case strings.HasSuffix(desc, ": ") || strings.HasSuffix(desc, " "):
+		desc += snippet
+	default:
+		desc += ": " + snippet
 	}
 	return cfg.NotifierFunc(agyBin, apiKey, desc)
 }

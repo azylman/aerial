@@ -536,7 +536,7 @@ func buildBrainProcessPools(
 
 	discordPools, discordPoolList := buildDiscordPools(basePoolCfg, discordHome, cur.Model, mediumEffortModel, lowEffortModel, spawner)
 	ephemeralPool := newWorkerInterchangeablePool(basePoolCfg(ephemeralHome, lowEffortModel, []string{"ephemeral:worker-0", "ephemeral:worker-1"}), spawner, "ephemeral:worker")
-	var voicePool runner.AgentPool = createVoiceProcessPool(cfg, voiceHome, lowEffortModel, spawner, memoryRetriever)
+	voicePool := createVoiceProcessPool(cfg, voiceHome, lowEffortModel, spawner, memoryRetriever)
 	allPools := append(append([]runner.AgentPool{}, discordPoolList...), ephemeralPool, voicePool)
 
 	return discordPools, ephemeralPool, voicePool, allPools, poolEnv, ephemeralHome
@@ -898,14 +898,15 @@ func main() {
 	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	go func() {
 		<-stopChan
 		cancel()
 	}()
 
-	if err := RunBrainApp(ctx, cfg); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	err = RunBrainApp(ctx, cfg)
+	cancel()
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("Server failed: %v", err)
 	}
 }

@@ -306,10 +306,11 @@ func (te *turnExecution) runPreTurnHook() bool {
 	preResp, err := dispatcher.CallPreTurnHook(poolCtx, te.policy.Hooks.PreTurn, preReq)
 	if err != nil {
 		action := te.policy.Hooks.PreTurn.GetOnTimeout("drop")
-		if action == "drop" {
+		switch action {
+		case "drop":
 			te.abortBurst("pre_turn_timeout_drop")
 			return false
-		} else if action == "retry" {
+		case "retry":
 			te.rescheduleBurst(5)
 			return false
 		}

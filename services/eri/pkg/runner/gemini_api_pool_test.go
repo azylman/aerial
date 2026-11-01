@@ -712,11 +712,12 @@ func TestGeminiAPIPool_MultipleToolCallsGrouping(t *testing.T) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		w.Header().Set("Content-Type", "application/json")
-		if req.Method == "tools/list" {
+		switch req.Method {
+		case "tools/list":
 			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"tool_a"},{"name":"tool_b"}]}}`))
-		} else if req.Method == "tools/call" {
+		case "tools/call":
 			_, _ = w.Write([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Result of %s"}]}}`, req.Params.Name)))
-		} else {
+		default:
 			http.Error(w, "not found", http.StatusNotFound)
 		}
 	}))

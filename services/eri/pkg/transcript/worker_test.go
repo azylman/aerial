@@ -575,9 +575,10 @@ func TestSyncTranscripts_ErrorsAndEdgeCases(t *testing.T) {
 				brainDir = "/non/existent/path/for/transcripts/test"
 			}
 
-			if tc.hasSession {
+			switch {
+			case tc.hasSession:
 				writeTranscriptFile(t, tempDir, "sess-err-01", `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T12:00:00Z","content":"Err test"}`+"\n", time.Now().Add(-1*time.Hour))
-			} else if tc.socketFile {
+			case tc.socketFile:
 				sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("ae_t_%d.sock", time.Now().UnixNano()))
 				l, err := net.Listen("unix", sockPath)
 				if err != nil {
@@ -593,9 +594,9 @@ func TestSyncTranscripts_ErrorsAndEdgeCases(t *testing.T) {
 				if err := os.Symlink(sockPath, filepath.Join(sockDir, "transcript.jsonl")); err != nil {
 					t.Fatalf("symlink failed: %v", err)
 				}
-			} else if tc.emptyFile {
+			case tc.emptyFile:
 				writeTranscriptFile(t, tempDir, "sess-empty-file", "", time.Now().Add(-1*time.Hour))
-			} else if tc.activeFile {
+			case tc.activeFile:
 				content := strings.Join([]string{
 					`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T12:00:00Z","content":"Step 0"}`,
 					`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T12:00:05Z","content":"Step 1"}`,

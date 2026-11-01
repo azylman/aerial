@@ -151,7 +151,7 @@ func parseCLIArgs(args []string) (CLIConfig, error) {
 }
 
 func formatSearchSessions(sb *strings.Builder, sessions []db.SessionSummary) {
-	sb.WriteString(fmt.Sprintf("### 📄 Session Summaries (%d matches)\n", len(sessions)))
+	fmt.Fprintf(sb, "### 📄 Session Summaries (%d matches)\n", len(sessions))
 	for _, s := range sessions {
 		convID := s.SessionID
 		shortID := convID
@@ -161,18 +161,18 @@ func formatSearchSessions(sb *strings.Builder, sessions []db.SessionSummary) {
 		link := fmt.Sprintf("[%s](conversation://%s)", shortID, convID)
 		sb.WriteString("- Session " + link)
 		if s.ThreadID != "" {
-			sb.WriteString(fmt.Sprintf(" (Thread: `%s`)", s.ThreadID))
+			fmt.Fprintf(sb, " (Thread: `%s`)", s.ThreadID)
 		}
 		sb.WriteString(":\n")
 		if s.Summary != "" {
-			sb.WriteString(fmt.Sprintf("  *Summary:* %s\n", transcript.CleanSessionSummary(s.Summary, transcript.DefaultSummaryMaxRunes)))
+			fmt.Fprintf(sb, "  *Summary:* %s\n", transcript.CleanSessionSummary(s.Summary, transcript.DefaultSummaryMaxRunes))
 		}
 		sb.WriteString("\n")
 	}
 }
 
 func formatSearchSteps(sb *strings.Builder, steps []db.TranscriptStep) {
-	sb.WriteString(fmt.Sprintf("### 💬 Transcript Execution Steps (%d matches)\n", len(steps)))
+	fmt.Fprintf(sb, "### 💬 Transcript Execution Steps (%d matches)\n", len(steps))
 	for _, step := range steps {
 		convID := step.SessionID
 		shortID := convID
@@ -188,13 +188,13 @@ func formatSearchSteps(sb *strings.Builder, steps []db.TranscriptStep) {
 		}
 
 		ts := step.CreatedAt.Format("2006-01-02 15:04:05")
-		sb.WriteString(fmt.Sprintf("- **[%s]** Step #%d in %s (%s):\n", toolBadge, step.StepIndex, link, ts))
+		fmt.Fprintf(sb, "- **[%s]** Step #%d in %s (%s):\n", toolBadge, step.StepIndex, link, ts)
 		if step.Content != "" {
 			snippet := transcript.CleanSessionSummary(step.Content, 300)
 			if strings.Contains(snippet, "\n") {
-				sb.WriteString(fmt.Sprintf("  ```\n  %s\n  ```\n", strings.ReplaceAll(snippet, "\n", "\n  ")))
+				fmt.Fprintf(sb, "  ```\n  %s\n  ```\n", strings.ReplaceAll(snippet, "\n", "\n  "))
 			} else {
-				sb.WriteString(fmt.Sprintf("  *Content:* %s\n", snippet))
+				fmt.Fprintf(sb, "  *Content:* %s\n", snippet)
 			}
 		}
 		sb.WriteString("\n")
@@ -203,7 +203,7 @@ func formatSearchSteps(sb *strings.Builder, steps []db.TranscriptStep) {
 
 func formatSearchResults(res transcript.SearchResult) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("🔍 Search Results for: `%s` (mode: %s)\n\n", res.Query, res.Mode))
+	fmt.Fprintf(&sb, "🔍 Search Results for: `%s` (mode: %s)\n\n", res.Query, res.Mode)
 
 	hasMatches := false
 	if len(res.Sessions) > 0 {
@@ -231,7 +231,7 @@ func formatStepWindow(res transcript.StepWindowResult) string {
 		shortID = shortID[:8] + "..."
 	}
 	link := fmt.Sprintf("[%s](conversation://%s)", shortID, convID)
-	sb.WriteString(fmt.Sprintf("🔍 Transcript Step Window for Session %s (step: %d, context: ±%d)\n\n", link, res.CenterStep, res.Context))
+	fmt.Fprintf(&sb, "🔍 Transcript Step Window for Session %s (step: %d, context: ±%d)\n\n", link, res.CenterStep, res.Context)
 
 	if len(res.Steps) == 0 {
 		sb.WriteString("*(No matching steps found in range)*\n")
@@ -253,13 +253,13 @@ func formatStepWindow(res transcript.StepWindowResult) string {
 		}
 
 		ts := step.CreatedAt.Format("2006-01-02 15:04:05")
-		sb.WriteString(fmt.Sprintf("%s **[%s]** Step #%d (%s):\n", marker, toolBadge, step.StepIndex, ts))
+		fmt.Fprintf(&sb, "%s **[%s]** Step #%d (%s):\n", marker, toolBadge, step.StepIndex, ts)
 		if step.Content != "" {
 			content := transcript.CleanSessionSummary(step.Content, maxRunes)
 			if strings.Contains(content, "\n") {
-				sb.WriteString(fmt.Sprintf("  ```\n  %s\n  ```\n", strings.ReplaceAll(content, "\n", "\n  ")))
+				fmt.Fprintf(&sb, "  ```\n  %s\n  ```\n", strings.ReplaceAll(content, "\n", "\n  "))
 			} else {
-				sb.WriteString(fmt.Sprintf("  *Content:* %s\n", content))
+				fmt.Fprintf(&sb, "  *Content:* %s\n", content)
 			}
 		}
 		sb.WriteString("\n")
