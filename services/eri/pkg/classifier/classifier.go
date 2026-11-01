@@ -225,6 +225,29 @@ func replaceMentionsInBody(bodyText string, m db.Message) string {
 	return bodyText
 }
 
+// FormatReplyTarget formats a reply target author as " (replying to @TargetAuthor)", or "" if empty.
+func FormatReplyTarget(targetAuthor string) string {
+	cleanTarget := SanitizeAuthor(targetAuthor)
+	if cleanTarget == "" {
+		return ""
+	}
+	if !strings.HasPrefix(cleanTarget, "@") && !strings.EqualFold(cleanTarget, "unknown") {
+		cleanTarget = "@" + cleanTarget
+	}
+	return fmt.Sprintf(" (replying to %s)", cleanTarget)
+}
+
+// AppendAttachments appends "[attachments: url1, url2]" to content when attachments are present.
+func AppendAttachments(content string, attachments []string) string {
+	if len(attachments) == 0 {
+		return content
+	}
+	if content != "" {
+		content += " "
+	}
+	return content + fmt.Sprintf("[attachments: %s]", strings.Join(attachments, ", "))
+}
+
 func resolveMessageParts(m db.Message) (author, replyTo, bodyText string) {
 	author = SanitizeAuthor(m.AuthorName)
 	if author == "" {
@@ -234,18 +257,11 @@ func resolveMessageParts(m db.Message) (author, replyTo, bodyText string) {
 		author = "unknown"
 	}
 
-	if targetAuthor := ExtractReplyingToAuthor(m); targetAuthor != "" {
-		cleanTarget := SanitizeAuthor(targetAuthor)
-		if cleanTarget != "" {
-			if !strings.HasPrefix(cleanTarget, "@") && !strings.EqualFold(cleanTarget, "unknown") {
-				cleanTarget = "@" + cleanTarget
-			}
-			replyTo = fmt.Sprintf(" (replying to %s)", cleanTarget)
-		}
-	}
+	replyTo = FormatReplyTarget(ExtractReplyingToAuthor(m))
 
 	bodyText = SanitizeContent(m.BodyText())
 	bodyText = replaceMentionsInBody(bodyText, m)
+	bodyText = AppendAttachments(bodyText, m.Attachments)
 	return author, replyTo, bodyText
 }
 
