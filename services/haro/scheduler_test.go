@@ -2009,8 +2009,8 @@ func TestDB_EventTriggers(t *testing.T) {
 		"c-failed":    "failed",
 	}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/builds/") {
-			id := strings.TrimPrefix(r.URL.Path, "/builds/")
+		if after, ok := strings.CutPrefix(r.URL.Path, "/builds/"); ok {
+			id := after
 			if id == "b-500" {
 				http.Error(w, "internal error", http.StatusInternalServerError)
 				return
@@ -2027,8 +2027,8 @@ func TestDB_EventTriggers(t *testing.T) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/chunks/") {
-			id := strings.TrimPrefix(r.URL.Path, "/chunks/")
+		if after, ok := strings.CutPrefix(r.URL.Path, "/chunks/"); ok {
+			id := after
 			if id == "c-500" {
 				http.Error(w, "internal error", http.StatusInternalServerError)
 				return
@@ -2280,8 +2280,8 @@ func TestEventWatchTools(t *testing.T) {
 	}
 	var toctouCalls int
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/builds/") {
-			id := strings.TrimPrefix(r.URL.Path, "/builds/")
+		if after, ok := strings.CutPrefix(r.URL.Path, "/builds/"); ok {
+			id := after
 			if id == "build-toctou-1" {
 				toctouCalls++
 				if toctouCalls == 1 {
@@ -2298,8 +2298,8 @@ func TestEventWatchTools(t *testing.T) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/chunks/") {
-			id := strings.TrimPrefix(r.URL.Path, "/chunks/")
+		if after, ok := strings.CutPrefix(r.URL.Path, "/chunks/"); ok {
+			id := after
 			if st, ok := mockChunks[id]; ok {
 				httpkit.WriteJSON(w, http.StatusOK, map[string]any{"chunk": map[string]string{"status": st}})
 				return

@@ -245,10 +245,10 @@ func BuildVanadisBuildDetailUpstreamURL(vanadisBaseURL string, requestPath strin
 	}
 
 	var rawID string
-	if strings.HasPrefix(requestPath, "/dashboard/api/builds/") {
-		rawID = strings.TrimPrefix(requestPath, "/dashboard/api/builds/")
-	} else if strings.HasPrefix(requestPath, "/api/builds/") {
-		rawID = strings.TrimPrefix(requestPath, "/api/builds/")
+	if after, ok := strings.CutPrefix(requestPath, "/dashboard/api/builds/"); ok {
+		rawID = after
+	} else if after, ok := strings.CutPrefix(requestPath, "/api/builds/"); ok {
+		rawID = after
 	} else {
 		return "", "", fmt.Errorf("invalid request path %q: missing expected prefix", requestPath)
 	}
@@ -318,8 +318,8 @@ func extractServiceNameFromNomad(labels map[string]string, names []string) (stri
 	}
 	name := strings.TrimPrefix(names[0], "/")
 	suffix := "-" + allocID
-	if strings.HasSuffix(name, suffix) {
-		task := strings.TrimSuffix(name, suffix)
+	if before, ok := strings.CutSuffix(name, suffix); ok {
+		task := before
 		if task != "" {
 			return task, true
 		}
@@ -348,8 +348,8 @@ func extractServiceNameFromNames(names []string) (string, bool) {
 		return "", false
 	}
 	name := strings.TrimPrefix(names[0], "/")
-	if strings.HasPrefix(name, "aerial-") {
-		svc := strings.TrimPrefix(name, "aerial-")
+	if after, ok := strings.CutPrefix(name, "aerial-"); ok {
+		svc := after
 		if svc != "" {
 			return svc, true
 		}
@@ -642,8 +642,8 @@ func MatchesETag(ifNoneMatch, targetETag, targetHash string) bool {
 		return true
 	}
 	cleanTargetETag := strings.Trim(strings.TrimPrefix(targetETag, "W/"), "\"")
-	parts := strings.Split(ifNoneMatch, ",")
-	for _, part := range parts {
+	parts := strings.SplitSeq(ifNoneMatch, ",")
+	for part := range parts {
 		token := strings.TrimSpace(part)
 		token = strings.TrimPrefix(token, "W/")
 		token = strings.Trim(token, "\"")

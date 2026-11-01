@@ -79,7 +79,7 @@ func (s *RouterServer) handleInfisicalWebhook(w http.ResponseWriter, r *http.Req
 	workspaceID := payload.GetWorkspaceID(s.cfg.InfisicalProjectID)
 	envName := payload.GetEnvironment(s.cfg.InfisicalEnvironment)
 
-	httpkit.WriteJSON(w, http.StatusAccepted, map[string]interface{}{
+	httpkit.WriteJSON(w, http.StatusAccepted, map[string]any{
 		"status":         "accepted",
 		"message":        "Secret sync scheduled",
 		"targetVariable": TargetNomadVariable,
@@ -97,7 +97,7 @@ func (s *RouterServer) handleGenericWebhook(w http.ResponseWriter, r *http.Reque
 	}
 
 	if len(payload.Secrets) > 0 {
-		httpkit.WriteJSON(w, http.StatusAccepted, map[string]interface{}{
+		httpkit.WriteJSON(w, http.StatusAccepted, map[string]any{
 			"status":         "accepted",
 			"message":        "Direct secret sync scheduled",
 			"targetVariable": TargetNomadVariable,
@@ -112,7 +112,7 @@ func (s *RouterServer) handleGenericWebhook(w http.ResponseWriter, r *http.Reque
 	workspaceID := firstNonEmpty(payload.WorkspaceID, s.cfg.InfisicalProjectID)
 	envName := firstNonEmpty(payload.Environment, s.cfg.InfisicalEnvironment)
 
-	httpkit.WriteJSON(w, http.StatusAccepted, map[string]interface{}{
+	httpkit.WriteJSON(w, http.StatusAccepted, map[string]any{
 		"status":         "accepted",
 		"message":        "Generic secret sync scheduled",
 		"targetVariable": TargetNomadVariable,

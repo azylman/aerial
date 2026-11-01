@@ -24,14 +24,12 @@ func TestRepoLock_ThreadSafety(t *testing.T) {
 	var wg sync.WaitGroup
 	counter := 0
 	for range 50 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			l := daemon.getRepoLock(pathA)
 			l.Lock()
 			counter++
 			l.Unlock()
-		}()
+		})
 	}
 	wg.Wait()
 	if counter != 50 {

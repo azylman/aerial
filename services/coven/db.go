@@ -542,10 +542,7 @@ func (s *SQLStore) FindNearestScoredFacts(ctx context.Context, embedding []float
 	if minSim <= 0 {
 		minSim = 0.60
 	}
-	candidateLimit := limit * 3
-	if candidateLimit < 15 {
-		candidateLimit = 15
-	}
+	candidateLimit := max(limit*3, 15)
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 

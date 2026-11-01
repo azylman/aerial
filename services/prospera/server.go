@@ -495,11 +495,11 @@ func (s *Server) handleTwilioSMS(w http.ResponseWriter, r *http.Request) {
 
 func toWSS(rawURL string) string {
 	trimmed := strings.TrimSpace(rawURL)
-	if strings.HasPrefix(trimmed, "https://") {
-		return "wss://" + strings.TrimPrefix(trimmed, "https://")
+	if after, ok := strings.CutPrefix(trimmed, "https://"); ok {
+		return "wss://" + after
 	}
-	if strings.HasPrefix(trimmed, "http://") {
-		return "ws://" + strings.TrimPrefix(trimmed, "http://")
+	if after, ok := strings.CutPrefix(trimmed, "http://"); ok {
+		return "ws://" + after
 	}
 	return "wss://" + trimmed
 }

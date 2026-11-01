@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -409,11 +410,11 @@ func catchUpChannelMessages(ctx context.Context, dg *discordgo.Session, server *
 		return
 	}
 
-	for i := len(fetched) - 1; i >= 0; i-- {
+	for _, f := range slices.Backward(fetched) {
 		if ctx != nil && ctx.Err() != nil {
 			return
 		}
-		m := fetched[i]
+		m := f
 		if m == nil || m.ID == "" {
 			continue
 		}

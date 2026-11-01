@@ -107,7 +107,7 @@ func findCommentSlashIndex(line string) int {
 }
 
 func stripLineComment(line string) string {
-	if idx := strings.Index(line, "//"); idx >= 0 {
+	if found := strings.Contains(line, "//"); found {
 		if actualIdx := findCommentSlashIndex(line); actualIdx >= 0 {
 			return line[:actualIdx]
 		}

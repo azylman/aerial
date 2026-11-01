@@ -351,7 +351,7 @@ func sanitizeWorkflowRunCommits(runs []GitHubRun, repo string) {
 		runs[i].Repository = repo
 		if runs[i].HeadCommit != nil {
 			rawMsg := runs[i].HeadCommit.Message
-			firstLine := strings.SplitN(rawMsg, "\n", 2)[0]
+			firstLine, _, _ := strings.Cut(rawMsg, "\n")
 			// Truncate to 72 runes
 			runes := []rune(firstLine)
 			if len(runes) > 72 {

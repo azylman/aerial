@@ -102,7 +102,7 @@ type prStatusCall struct {
 	repo     string
 	prNumber int
 	status   string
-	metadata map[string]interface{}
+	metadata map[string]any
 }
 
 type mockPRRegistry struct {
@@ -383,7 +383,7 @@ func (m *mockPRRegistry) AppendPRJobs(ctx context.Context, repo string, prNumber
 	return m.checkErr(m.appendPRJobsErr)
 }
 
-func (m *mockPRRegistry) UpdatePRStatus(ctx context.Context, repo string, prNumber int, status string, metadata map[string]interface{}) error {
+func (m *mockPRRegistry) UpdatePRStatus(ctx context.Context, repo string, prNumber int, status string, metadata map[string]any) error {
 	m.updatePRStatusCalls = append(m.updatePRStatusCalls, prStatusCall{repo: repo, prNumber: prNumber, status: status, metadata: metadata})
 	return m.checkErr(m.updatePRStatusErr)
 }
@@ -775,7 +775,7 @@ func TestHandleHangarWebhook(t *testing.T) {
 				_ = json.Unmarshal(rec.Body.Bytes(), &errResp)
 			}
 			if rec.Code == http.StatusOK || rec.Code == http.StatusAccepted {
-				var resp map[string]interface{}
+				var resp map[string]any
 				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err == nil {
 					if tc.wantJobName != "" && resp["job_name"] != tc.wantJobName {
 						t.Errorf("job_name = %v, want %s", resp["job_name"], tc.wantJobName)
@@ -2957,7 +2957,7 @@ func TestRouterServer_HandlePRRegister(t *testing.T) {
 					t.Errorf("registerCalls = %d, want 1", len(mockReg.registerCalls))
 				}
 			}
-			if tc.wantWidgetCall && disp != nil {
+			if tc.wantWidgetCall {
 				calls := disp.WidgetCalls()
 				if len(calls) != 1 {
 					t.Errorf("WidgetCalls = %d, want 1", len(calls))

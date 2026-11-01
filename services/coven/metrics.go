@@ -50,8 +50,7 @@ var (
 
 func registerCovenCollector(c prometheus.Collector) {
 	if err := prometheus.Register(c); err != nil {
-		var are prometheus.AlreadyRegisteredError
-		if !errors.As(err, &are) {
+		if _, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); !ok {
 			panic(err)
 		}
 	}

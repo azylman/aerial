@@ -28,14 +28,14 @@ type RegisteredPR struct {
 
 // DeployingPR holds metadata for a PR currently undergoing deployment rollout.
 type DeployingPR struct {
-	ID       int64                  `json:"id"`
-	Repo     string                 `json:"repo"`
-	PRNumber int                    `json:"pr_number"`
-	Branch   string                 `json:"branch"`
-	HeadSHA  string                 `json:"head_sha"`
-	MergeSHA string                 `json:"merge_sha"`
-	TargetID string                 `json:"target_id"`
-	Metadata map[string]interface{} `json:"metadata"`
+	ID       int64          `json:"id"`
+	Repo     string         `json:"repo"`
+	PRNumber int            `json:"pr_number"`
+	Branch   string         `json:"branch"`
+	HeadSHA  string         `json:"head_sha"`
+	MergeSHA string         `json:"merge_sha"`
+	TargetID string         `json:"target_id"`
+	Metadata map[string]any `json:"metadata"`
 }
 
 // VanadisChunkSummary holds condensed status metadata for a single chunk in a Vanadis build.
@@ -118,7 +118,7 @@ type PRRegistryUpdater interface {
 	CheckEventTriggers(ctx context.Context, source string, targets []string, eventType string) (bool, error)
 	FireEventTriggers(ctx context.Context, source string, targets []string, eventType, contextHeader string) ([]ClaimedEventTrigger, error)
 	AppendPRJobs(ctx context.Context, repo string, prNumber int, jobs []string) error
-	UpdatePRStatus(ctx context.Context, repo string, prNumber int, status string, metadata map[string]interface{}) error
+	UpdatePRStatus(ctx context.Context, repo string, prNumber int, status string, metadata map[string]any) error
 }
 
 type pgxQueryExecer interface {
@@ -673,7 +673,7 @@ func (r *PostgresPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, 
 		return "", 0, "", "", false, fmt.Errorf("select deploying pr: %w", err)
 	}
 
-	var meta map[string]interface{}
+	var meta map[string]any
 	if len(metaBytes) > 0 {
 		if err := json.Unmarshal(metaBytes, &meta); err != nil {
 			log.Printf("[synapse] [registry] failed to unmarshal metadata for job deploy: %v", err)
@@ -1044,7 +1044,7 @@ func (r *PostgresPRRegistry) AppendPRJobs(ctx context.Context, repo string, prNu
 	return nil
 }
 
-func (r *PostgresPRRegistry) UpdatePRStatus(ctx context.Context, repo string, prNumber int, status string, metadata map[string]interface{}) error {
+func (r *PostgresPRRegistry) UpdatePRStatus(ctx context.Context, repo string, prNumber int, status string, metadata map[string]any) error {
 	repo = normalizeRepo(repo)
 	status = strings.TrimSpace(status)
 	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 || status == "" {

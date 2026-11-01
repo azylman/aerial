@@ -502,7 +502,7 @@ func TestEnsureRepoAndSync_TableDriven(t *testing.T) {
 		// 3. sfg.Do invalid return type error
 		started := make(chan struct{})
 		go func() {
-			_, _, _ = d.sfg.Do("sync", func() (interface{}, error) {
+			_, _, _ = d.sfg.Do("sync", func() (any, error) {
 				close(started)
 				<-time.After(20 * time.Millisecond)
 				return "invalid-type", nil

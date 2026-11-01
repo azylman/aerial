@@ -27,7 +27,7 @@ var BlockedToolNames = map[string]bool{
 // JSONRPCRequest represents a minimal JSON-RPC 2.0 request structure.
 type JSONRPCRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
-	ID      interface{}     `json:"id,omitempty"`
+	ID      any             `json:"id,omitempty"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params,omitempty"`
 }
@@ -42,16 +42,16 @@ type ToolCallParams struct {
 // Note: ID does NOT use omitempty so that nil IDs serialize as "id": null per JSON-RPC 2.0.
 type JSONRPCResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
-	ID      interface{}     `json:"id"`
+	ID      any             `json:"id"`
 	Result  json.RawMessage `json:"result,omitempty"`
 	Error   *JSONRPCError   `json:"error,omitempty"`
 }
 
 // JSONRPCError represents a JSON-RPC 2.0 error object.
 type JSONRPCError struct {
-	Code    int         `json:"code"`
-	Message string      `json:"message"`
-	Data    interface{} `json:"data,omitempty"`
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    any    `json:"data,omitempty"`
 }
 
 // ToolItem represents an individual MCP tool in tools/list.
@@ -104,7 +104,7 @@ func checkToolCallBlocked(req JSONRPCRequest, blocked map[string]bool) (bool, st
 	return false, params.Name, nil
 }
 
-func inspectBatchToolCalls(trimmed []byte, blocked map[string]bool) (bool, interface{}, string, error) {
+func inspectBatchToolCalls(trimmed []byte, blocked map[string]bool) (bool, any, string, error) {
 	var batch []JSONRPCRequest
 	if err := json.Unmarshal(trimmed, &batch); err != nil {
 		return false, nil, "", err
@@ -118,7 +118,7 @@ func inspectBatchToolCalls(trimmed []byte, blocked map[string]bool) (bool, inter
 			return true, req.ID, name, nil
 		}
 	}
-	var firstID interface{}
+	var firstID any
 	if len(batch) > 0 {
 		firstID = batch[0].ID
 	}
@@ -127,7 +127,7 @@ func inspectBatchToolCalls(trimmed []byte, blocked map[string]bool) (bool, inter
 
 // IsBlockedToolCall inspects a JSON-RPC request (single or batch) to see if it calls a blocked tool.
 // It detects top-level batch requests ([...]) and normalizes tool names to lowercase to prevent injection.
-func IsBlockedToolCall(rawReq []byte, blocked map[string]bool) (bool, interface{}, string, error) {
+func IsBlockedToolCall(rawReq []byte, blocked map[string]bool) (bool, any, string, error) {
 	trimmed := bytes.TrimSpace(rawReq)
 	if len(trimmed) == 0 {
 		return false, nil, "", io.ErrUnexpectedEOF
@@ -225,7 +225,7 @@ var marshalFn = json.Marshal
 
 // BuildJSONRPCErrorResponse constructs a compact JSON-RPC 2.0 error response byte slice.
 // If id is nil, it serializes "id": null.
-func BuildJSONRPCErrorResponse(id interface{}, code int, message string) []byte {
+func BuildJSONRPCErrorResponse(id any, code int, message string) []byte {
 	resp := JSONRPCResponse{
 		JSONRPC: "2.0",
 		ID:      id,
@@ -448,10 +448,7 @@ func ShapeSearchMessagesResponse(rawResp []byte, offset int) ([]byte, error) {
 	if offset < 0 {
 		offset = 0
 	}
-	total := payload.TotalResults
-	if total < len(projected) {
-		total = len(projected)
-	}
+	total := max(payload.TotalResults, len(projected))
 	shaped := ShapedSearchResponse{
 		TotalResults:  total,
 		ReturnedCount: len(projected),

@@ -146,10 +146,7 @@ func openDB(dsn string) (*sql.DB, error) {
 		}
 		log.Printf("[Scheduler DB] Waiting for PostgreSQL (attempt %d/%d): %v", attempt, maxAttempts, err)
 		time.Sleep(backoff)
-		backoff = time.Duration(float64(backoff) * 1.5)
-		if backoff > 5*time.Second {
-			backoff = 5 * time.Second
-		}
+		backoff = min(time.Duration(float64(backoff)*1.5), 5*time.Second)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to PostgreSQL after %d attempts: %w", maxAttempts, err)

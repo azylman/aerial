@@ -108,8 +108,7 @@ var (
 
 func registerCollector(c prometheus.Collector) {
 	if err := prometheus.Register(c); err != nil {
-		var are prometheus.AlreadyRegisteredError
-		if !errors.As(err, &are) {
+		if _, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); !ok {
 			panic(err)
 		}
 	}
@@ -218,10 +217,9 @@ func observeRiverJob[T river.JobArgs](job *river.Job[T], defaultQueue string, fn
 	JobDurationSeconds.WithLabelValues(queue, kind).Observe(duration)
 
 	var status string
-	var cancelErr *rivertype.JobCancelError
 	if err == nil {
 		status = "success"
-	} else if errors.As(err, &cancelErr) {
+	} else if _, ok := errors.AsType[*rivertype.JobCancelError](err); ok {
 		status = "cancelled"
 	} else if job != nil && job.JobRow != nil && job.MaxAttempts > 0 && job.Attempt >= job.MaxAttempts {
 		status = "discarded"
@@ -901,10 +899,7 @@ func validateBrainChannel(channelID, endpointPath string) error {
 
 func advanceBackoffDelay(delay time.Duration, expBackoff bool) time.Duration {
 	if expBackoff {
-		delay = time.Duration(float64(delay) * 1.5)
-		if delay > 5*time.Second {
-			delay = 5 * time.Second
-		}
+		delay = min(time.Duration(float64(delay)*1.5), 5*time.Second)
 	}
 	return delay
 }

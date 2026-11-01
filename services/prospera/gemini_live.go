@@ -140,10 +140,10 @@ func (c *HTTPContextConsultClient) doMCPRequest(ctx context.Context, sessionID s
 }
 
 func extractMCPJSON(raw []byte) []byte {
-	for _, line := range strings.Split(string(raw), "\n") {
+	for line := range strings.SplitSeq(string(raw), "\n") {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "data:") {
-			return []byte(strings.TrimSpace(strings.TrimPrefix(trimmed, "data:")))
+		if after, ok := strings.CutPrefix(trimmed, "data:"); ok {
+			return []byte(strings.TrimSpace(after))
 		}
 	}
 	return bytes.TrimSpace(raw)

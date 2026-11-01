@@ -21,13 +21,13 @@ import (
 )
 
 type JSONRPCResponse struct {
-	JSONRPC string      `json:"jsonrpc"`
-	ID      interface{} `json:"id,omitempty"`
-	Result  interface{} `json:"result,omitempty"`
+	JSONRPC string `json:"jsonrpc"`
+	ID      any    `json:"id,omitempty"`
+	Result  any    `json:"result,omitempty"`
 	Error   *struct {
-		Code    int         `json:"code"`
-		Message string      `json:"message"`
-		Data    interface{} `json:"data,omitempty"`
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Data    any    `json:"data,omitempty"`
 	} `json:"error,omitempty"`
 }
 
@@ -286,7 +286,7 @@ func TestServer_HTTPEndpointsAndMCPProtocol(t *testing.T) {
 				t.Fatalf("unexpected RPC error: %+v", rpcResp.Error)
 			}
 			if tc.wantToolErr {
-				resMap, _ := rpcResp.Result.(map[string]interface{})
+				resMap, _ := rpcResp.Result.(map[string]any)
 				if isErr, _ := resMap["isError"].(bool); !isErr {
 					t.Fatalf("expected isError=true, got %+v", resMap)
 				}

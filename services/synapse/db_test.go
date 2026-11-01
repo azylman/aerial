@@ -43,13 +43,7 @@ type mockVanadisPgxRows struct {
 func (r *mockVanadisPgxRows) Close()     {}
 func (r *mockVanadisPgxRows) Err() error { return r.rowsErr }
 func (r *mockVanadisPgxRows) Next() bool {
-	limit := len(r.items)
-	if len(r.intItems) > limit {
-		limit = len(r.intItems)
-	}
-	if r.totalRows > limit {
-		limit = r.totalRows
-	}
+	limit := max(r.totalRows, max(len(r.intItems), len(r.items)))
 	if r.idx < limit {
 		r.idx++
 		return true
@@ -814,7 +808,7 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 					t.Fatalf("AppendPRJobs err = %v, wantErr = %v", err, tc.wantErr)
 				}
 			case "UpdatePRStatus":
-				var meta map[string]interface{}
+				var meta map[string]any
 				if tc.metaJSON != "" {
 					_ = json.Unmarshal([]byte(tc.metaJSON), &meta)
 				}

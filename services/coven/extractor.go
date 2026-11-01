@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -938,7 +939,7 @@ func cliqueSignature(clique []ScoredFactWithEmbedding) string {
 	for i, item := range clique {
 		ids[i] = item.Fact.ID
 	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	slices.Sort(ids)
 	var b strings.Builder
 	for i, id := range ids {
 		if i > 0 {

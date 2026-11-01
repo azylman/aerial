@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -267,13 +268,7 @@ func (m *TestMemStore) GetFactsPaginated(ctx context.Context, filter FactsFilter
 		return list[i].ID > list[j].ID
 	})
 	total := len(list)
-	offset := filter.Offset
-	if offset < 0 {
-		offset = 0
-	}
-	if offset > total {
-		offset = total
-	}
+	offset := min(max(filter.Offset, 0), total)
 	end := total
 	if filter.Limit > 0 && offset+filter.Limit < total {
 		end = offset + filter.Limit
@@ -304,7 +299,7 @@ func (m *TestMemStore) GetAllFactsWithEmbeddings(ctx context.Context) ([]ScoredF
 			ids = append(ids, id)
 		}
 	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	slices.Sort(ids)
 	for _, id := range ids {
 		res = append(res, ScoredFactWithEmbedding{
 			Fact:      *m.facts[id],
@@ -1955,7 +1950,7 @@ ollama:
 				runCalled = true
 				return tc.runErr
 			}
-			exitFn = func(string, ...interface{}) {
+			exitFn = func(string, ...any) {
 				exitCalled = true
 			}
 

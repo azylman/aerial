@@ -41,12 +41,10 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	dispatcher := NewHTTPPromptDispatcher(cfg.BrainURL)
 	tickerCtx, tickerCancel := context.WithCancel(ctx)
 	var tickerWg sync.WaitGroup
-	tickerWg.Add(1)
-	go func() {
-		defer tickerWg.Done()
+	tickerWg.Go(func() {
 		ticker := NewTicker(database, dispatcher, 30*time.Second)
 		ticker.Start(tickerCtx)
-	}()
+	})
 	defer func() {
 		tickerCancel()
 		tickerWg.Wait()

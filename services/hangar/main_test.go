@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -43,8 +44,7 @@ func TestSanitizeAndEnv_TableDriven(t *testing.T) {
 
 func TestReconcilerAndPeriodicLoops_TableDriven(t *testing.T) {
 	t.Run("StartReconcilerLoop_nil_channel_init", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
+		ctx := t.Context()
 		d := &SyncDaemon{}
 		d.StartReconcilerLoop(ctx)
 		if d.reconcileCh == nil {
@@ -343,9 +343,7 @@ synapse_url: "http://127.0.0.1:4020"`
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			envMap := make(map[string]string, len(tt.env)+1)
-			for k, v := range tt.env {
-				envMap[k] = v
-			}
+			maps.Copy(envMap, tt.env)
 			if tt.yamlContent != "" {
 				cfgPath := filepath.Join(t.TempDir(), "hangar.yaml")
 				if err := os.WriteFile(cfgPath, []byte(tt.yamlContent), 0o644); err != nil {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -197,13 +198,7 @@ func (m *mockStoreForDelivery) TransitionReportStatus(ctx context.Context, callI
 		return false, nil
 	}
 	if len(allowedFrom) > 0 {
-		matched := false
-		for _, a := range allowedFrom {
-			if c.ReportStatus == a {
-				matched = true
-				break
-			}
-		}
+		matched := slices.Contains(allowedFrom, c.ReportStatus)
 		if !matched {
 			return false, nil
 		}
