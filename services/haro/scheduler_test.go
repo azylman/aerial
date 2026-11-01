@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -2385,6 +2386,17 @@ func TestEventWatchTools(t *testing.T) {
 			extraSources: []string{"camera"},
 			wantErr:      false,
 		},
+		{
+			name: "success with thread_id fallback",
+			args: map[string]any{
+				"thread_id":  "1562847268833337379",
+				"source":     "hangar",
+				"target":     "aerial",
+				"event_type": "sync_success",
+				"prompt":     "thread fallback test",
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tc := range watchTests {
@@ -2537,6 +2549,253 @@ func TestVanadisURL_Precedence(t *testing.T) {
 			got := GetVanadisURL()
 			if got != tc.wantURL {
 				t.Errorf("GetVanadisURL() = %q, want %q", got, tc.wantURL)
+			}
+		})
+	}
+}
+
+func TestScheduleHeartbeatArgs_ToMap(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		args ScheduleHeartbeatArgs
+		want map[string]any
+	}{
+		{
+			name: "empty args",
+			args: ScheduleHeartbeatArgs{},
+			want: map[string]any{},
+		},
+		{
+			name: "all fields populated",
+			args: ScheduleHeartbeatArgs{
+				ChannelID:      "1562847268833337377",
+				TargetID:       "1562847268833337378",
+				TitlePrefix:    "HB Alert",
+				CronExpression: "0 0 * * *",
+				CronExpr:       "@daily",
+				Prompt:         "poll status",
+				Timezone:       "America/Los_Angeles",
+				Effort:         "high",
+			},
+			want: map[string]any{
+				"channel_id":      "1562847268833337377",
+				"target_id":       "1562847268833337378",
+				"title_prefix":    "HB Alert",
+				"cron_expression": "0 0 * * *",
+				"cron_expr":       "@daily",
+				"prompt":          "poll status",
+				"timezone":        "America/Los_Angeles",
+				"effort":          "high",
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := tc.args.toMap()
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("toMap() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestUpdateHeartbeatArgs_ToMap(t *testing.T) {
+	t.Parallel()
+	trueVal := true
+	falseVal := false
+	tests := []struct {
+		name string
+		args UpdateHeartbeatArgs
+		want map[string]any
+	}{
+		{
+			name: "empty args",
+			args: UpdateHeartbeatArgs{},
+			want: map[string]any{},
+		},
+		{
+			name: "all fields with enabled true",
+			args: UpdateHeartbeatArgs{
+				ScheduleID:     "hb-1",
+				ID:             "hb-2",
+				ChannelID:      "1562847268833337377",
+				TargetID:       "1562847268833337378",
+				CronExpression: "*/5 * * * *",
+				CronExpr:       "@hourly",
+				Prompt:         "updated prompt",
+				TitlePrefix:    "Updated Prefix",
+				Timezone:       "UTC",
+				Effort:         "low",
+				Enabled:        &trueVal,
+			},
+			want: map[string]any{
+				"schedule_id":     "hb-1",
+				"id":              "hb-2",
+				"channel_id":      "1562847268833337377",
+				"target_id":       "1562847268833337378",
+				"cron_expression": "*/5 * * * *",
+				"cron_expr":       "@hourly",
+				"prompt":          "updated prompt",
+				"title_prefix":    "Updated Prefix",
+				"timezone":        "UTC",
+				"effort":          "low",
+				"enabled":         true,
+			},
+		},
+		{
+			name: "enabled false",
+			args: UpdateHeartbeatArgs{
+				ID:      "hb-disabled",
+				Enabled: &falseVal,
+			},
+			want: map[string]any{
+				"id":      "hb-disabled",
+				"enabled": false,
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := tc.args.toMap()
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("toMap() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWatchEventArgs_ToMap(t *testing.T) {
+	t.Parallel()
+	trueVal := true
+	falseVal := false
+	tests := []struct {
+		name string
+		args WatchEventArgs
+		want map[string]any
+	}{
+		{
+			name: "empty args",
+			args: WatchEventArgs{},
+			want: map[string]any{},
+		},
+		{
+			name: "all fields with persistent true",
+			args: WatchEventArgs{
+				ChannelID:  "1562847268833337377",
+				TargetID:   "1562847268833337378",
+				ThreadID:   "1562847268833337379",
+				Source:     "hangar",
+				Target:     "aerial",
+				EventType:  "sync_success",
+				Prompt:     "watch prompt",
+				Effort:     "high",
+				Persistent: &trueVal,
+			},
+			want: map[string]any{
+				"channel_id": "1562847268833337377",
+				"target_id":  "1562847268833337378",
+				"thread_id":  "1562847268833337379",
+				"source":     "hangar",
+				"target":     "aerial",
+				"event_type": "sync_success",
+				"prompt":     "watch prompt",
+				"effort":     "high",
+				"persistent": true,
+			},
+		},
+		{
+			name: "persistent false",
+			args: WatchEventArgs{
+				Source:     "camera",
+				Persistent: &falseVal,
+			},
+			want: map[string]any{
+				"source":     "camera",
+				"persistent": false,
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := tc.args.toMap()
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("toMap() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestListEventWatchesArgs_ToMap(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		args ListEventWatchesArgs
+		want map[string]any
+	}{
+		{
+			name: "empty args",
+			args: ListEventWatchesArgs{},
+			want: map[string]any{},
+		},
+		{
+			name: "all fields populated",
+			args: ListEventWatchesArgs{
+				ChannelID: "1562847268833337377",
+				TargetID:  "1562847268833337378",
+			},
+			want: map[string]any{
+				"channel_id": "1562847268833337377",
+				"target_id":  "1562847268833337378",
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := tc.args.toMap()
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("toMap() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCancelEventWatchArgs_ToMap(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		args CancelEventWatchArgs
+		want map[string]any
+	}{
+		{
+			name: "empty args",
+			args: CancelEventWatchArgs{},
+			want: map[string]any{},
+		},
+		{
+			name: "all fields populated",
+			args: CancelEventWatchArgs{
+				WatchID:    "w-1",
+				ID:         "w-2",
+				ScheduleID: "w-3",
+			},
+			want: map[string]any{
+				"watch_id":    "w-1",
+				"id":          "w-2",
+				"schedule_id": "w-3",
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := tc.args.toMap()
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("toMap() = %+v, want %+v", got, tc.want)
 			}
 		})
 	}

@@ -258,15 +258,19 @@ func TestServer_HTTPEndpointsAndMCPProtocol(t *testing.T) {
 		{"get_schedule success", `{"jsonrpc":"2.0","id":18,"method":"tools/call","params":{"name":"get_schedule","arguments":{"schedule_id":"test-cron-id"}}}`, false, false},
 		{"get_schedule missing", `{"jsonrpc":"2.0","id":19,"method":"tools/call","params":{"name":"get_schedule","arguments":{"schedule_id":"missing-id"}}}`, true, false},
 		{"schedule_heartbeat success", `{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"schedule_heartbeat","arguments":{"channel_id":"123456789012345678","cron_expr":"0 0 * * *","prompt":"monitor disk"}}}`, false, false},
+		{"schedule_heartbeat alias success", `{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"schedule_heartbeat","arguments":{"target_id":"123456789012345678","cron_expression":"0 0 * * *","prompt":"monitor disk"}}}`, false, false},
 		{"schedule_heartbeat invalid", `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"schedule_heartbeat","arguments":{"channel_id":"invalid-snow","cron_expr":"0 0 * * *","prompt":"monitor disk"}}}`, true, false},
 		{"update_heartbeat missing", `{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"update_heartbeat","arguments":{"id":"missing-hb","effort":"low"}}}`, true, false},
 		{"update_heartbeat success", `{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"update_heartbeat","arguments":{"id":"test-hb-id","effort":"medium"}}}`, false, false},
+		{"update_heartbeat alias success", `{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"update_heartbeat","arguments":{"schedule_id":"test-hb-id","effort":"high","title_prefix":"Updated"}}}`, false, false},
 		{"cancel_schedule missing", `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"cancel_schedule","arguments":{"schedule_id":"none"}}}`, true, false},
 		{"cancel_schedule success", `{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"cancel_schedule","arguments":{"schedule_id":"test-once-id"}}}`, false, false},
 		{"watch_event success", `{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"watch_event","arguments":{"channel_id":"123456789012345678","source":"hangar","target":"aerial","event_type":"sync_success","prompt":"deploy notification"}}}`, false, false},
+		{"watch_event thread_id success", `{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"watch_event","arguments":{"thread_id":"123456789012345678","source":"hangar","target":"aerial","event_type":"sync_success","prompt":"deploy notification"}}}`, false, false},
 		{"watch_event invalid", `{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"watch_event","arguments":{"channel_id":"bad-snowflake","source":"hangar","target":"aerial","event_type":"sync_success","prompt":"deploy notification"}}}`, true, false},
 		{"list_event_watches", `{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"list_event_watches","arguments":{}}}`, false, false},
 		{"cancel_event_watch missing", `{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"cancel_event_watch","arguments":{"watch_id":"missing-watch"}}}`, true, false},
+		{"cancel_event_watch alias missing", `{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"cancel_event_watch","arguments":{"id":"missing-watch"}}}`, true, false},
 		{"unknown tool", `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"non_existent","arguments":{}}}`, false, true},
 	}
 	for _, tc := range rpcTests {
@@ -289,6 +293,124 @@ func TestServer_HTTPEndpointsAndMCPProtocol(t *testing.T) {
 				resMap, _ := rpcResp.Result.(map[string]any)
 				if isErr, _ := resMap["isError"].(bool); !isErr {
 					t.Fatalf("expected isError=true, got %+v", resMap)
+				}
+			}
+		})
+	}
+
+	// Verify tools/list schema exposes typed properties and descriptions
+	listResp, err := http.Post(ts.URL+"/mcp", "application/json", strings.NewReader(`{"jsonrpc":"2.0","id":200,"method":"tools/list","params":{}}`))
+	if err != nil {
+		t.Fatalf("POST /mcp tools/list failed: %v", err)
+	}
+	defer listResp.Body.Close()
+
+	var listData struct {
+		Result struct {
+			Tools []struct {
+				Name        string         `json:"name"`
+				Description string         `json:"description"`
+				InputSchema map[string]any `json:"inputSchema"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(listResp.Body).Decode(&listData); err != nil {
+		t.Fatalf("decode tools/list failed: %v", err)
+	}
+
+	toolSchemas := make(map[string]map[string]any)
+	toolDescs := make(map[string]string)
+	for _, tool := range listData.Result.Tools {
+		toolSchemas[tool.Name] = tool.InputSchema
+		toolDescs[tool.Name] = tool.Description
+	}
+
+	schemaTests := []struct {
+		name         string
+		toolName     string
+		wantProps    []string
+		wantRequired []string
+		descContains string
+	}{
+		{
+			name:         "schedule_heartbeat schema and description",
+			toolName:     "schedule_heartbeat",
+			wantProps:    []string{"channel_id", "target_id", "title_prefix", "cron_expression", "cron_expr", "prompt", "timezone", "effort"},
+			wantRequired: []string{"prompt"},
+			descContains: "silent background polling and edge-triggered state tracking",
+		},
+		{
+			name:         "update_heartbeat schema and description",
+			toolName:     "update_heartbeat",
+			wantProps:    []string{"schedule_id", "id", "channel_id", "target_id", "cron_expression", "cron_expr", "prompt", "title_prefix", "timezone", "effort", "enabled"},
+			wantRequired: nil,
+			descContains: "Update an existing heartbeat monitoring schedule",
+		},
+		{
+			name:         "watch_event schema and description",
+			toolName:     "watch_event",
+			wantProps:    []string{"channel_id", "target_id", "thread_id", "source", "target", "event_type", "prompt", "effort", "persistent"},
+			wantRequired: []string{"source", "target", "event_type", "prompt"},
+			descContains: "deterministic one-shot event watch",
+		},
+		{
+			name:         "list_event_watches schema and description",
+			toolName:     "list_event_watches",
+			wantProps:    []string{"channel_id", "target_id"},
+			wantRequired: nil,
+			descContains: "List active deterministic event watch triggers",
+		},
+		{
+			name:         "cancel_event_watch schema and description",
+			toolName:     "cancel_event_watch",
+			wantProps:    []string{"watch_id", "id", "schedule_id"},
+			wantRequired: nil,
+			descContains: "Cancel an active deterministic event watch trigger",
+		},
+		{
+			name:         "list_schedules description references list_event_watches",
+			toolName:     "list_schedules",
+			wantProps:    []string{"target_id"},
+			wantRequired: nil,
+			descContains: "event watches are listed via list_event_watches",
+		},
+		{
+			name:         "schedule_recurring description references unconditional messages",
+			toolName:     "schedule_recurring",
+			wantProps:    []string{"channel_id", "cron_expression", "prompt"},
+			wantRequired: []string{"channel_id", "cron_expression", "prompt"},
+			descContains: "unconditional user-facing messages",
+		},
+	}
+	for _, tc := range schemaTests {
+		t.Run(tc.name, func(t *testing.T) {
+			schema, ok := toolSchemas[tc.toolName]
+			if !ok {
+				t.Fatalf("tool %q not found in tools/list", tc.toolName)
+			}
+			desc, ok := toolDescs[tc.toolName]
+			if !ok || !strings.Contains(desc, tc.descContains) {
+				t.Errorf("tool %q description = %q, want containing %q", tc.toolName, desc, tc.descContains)
+			}
+			props, ok := schema["properties"].(map[string]any)
+			if !ok {
+				t.Fatalf("tool %q inputSchema missing properties map", tc.toolName)
+			}
+			for _, prop := range tc.wantProps {
+				if _, ok := props[prop]; !ok {
+					t.Errorf("tool %q properties missing expected property %q", tc.toolName, prop)
+				}
+			}
+			rawReq, _ := schema["required"].([]any)
+			reqSet := make(map[string]bool)
+			for _, r := range rawReq {
+				if s, ok := r.(string); ok {
+					reqSet[s] = true
+				}
+			}
+			for _, req := range tc.wantRequired {
+				if !reqSet[req] {
+					t.Errorf("tool %q required missing expected required field %q", tc.toolName, req)
 				}
 			}
 		})

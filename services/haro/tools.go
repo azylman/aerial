@@ -466,6 +466,183 @@ func getMapBool(args map[string]any, keys ...string) (*bool, bool) {
 	return nil, false
 }
 
+// ScheduleHeartbeatArgs defines arguments for the schedule_heartbeat MCP tool.
+type ScheduleHeartbeatArgs struct {
+	ChannelID      string `json:"channel_id,omitempty" jsonschema:"Discord Channel ID for heartbeat alerts."`
+	TargetID       string `json:"target_id,omitempty" jsonschema:"Alias for channel_id."`
+	TitlePrefix    string `json:"title_prefix,omitempty" jsonschema:"Title prefix for spawned heartbeat alert threads (default: 'Heartbeat Alert')."`
+	CronExpression string `json:"cron_expression,omitempty" jsonschema:"Standard 5-field cron expression or macro evaluated periodically by Haro."`
+	CronExpr       string `json:"cron_expr,omitempty" jsonschema:"Alias for cron_expression."`
+	Prompt         string `json:"prompt" jsonschema:"Silent evaluation instructions or edge-triggered condition check."`
+	Timezone       string `json:"timezone,omitempty" jsonschema:"Timezone for cron evaluation (e.g. 'America/Los_Angeles' or 'UTC'). Defaults to configured server timezone."`
+	Effort         string `json:"effort,omitempty" jsonschema:"Effort tier: 'low', 'medium', or 'high'. Defaults to 'medium'."`
+}
+
+func (a ScheduleHeartbeatArgs) toMap() map[string]any {
+	m := make(map[string]any)
+	if a.ChannelID != "" {
+		m["channel_id"] = a.ChannelID
+	}
+	if a.TargetID != "" {
+		m["target_id"] = a.TargetID
+	}
+	if a.TitlePrefix != "" {
+		m["title_prefix"] = a.TitlePrefix
+	}
+	if a.CronExpression != "" {
+		m["cron_expression"] = a.CronExpression
+	}
+	if a.CronExpr != "" {
+		m["cron_expr"] = a.CronExpr
+	}
+	if a.Prompt != "" {
+		m["prompt"] = a.Prompt
+	}
+	if a.Timezone != "" {
+		m["timezone"] = a.Timezone
+	}
+	if a.Effort != "" {
+		m["effort"] = a.Effort
+	}
+	return m
+}
+
+// UpdateHeartbeatArgs defines arguments for the update_heartbeat MCP tool.
+type UpdateHeartbeatArgs struct {
+	ScheduleID     string `json:"schedule_id,omitempty" jsonschema:"The ID of the heartbeat schedule to update."`
+	ID             string `json:"id,omitempty" jsonschema:"Alias for schedule_id."`
+	ChannelID      string `json:"channel_id,omitempty" jsonschema:"New target Discord channel ID."`
+	TargetID       string `json:"target_id,omitempty" jsonschema:"Alias for channel_id."`
+	CronExpression string `json:"cron_expression,omitempty" jsonschema:"New cron expression."`
+	CronExpr       string `json:"cron_expr,omitempty" jsonschema:"Alias for cron_expression."`
+	Prompt         string `json:"prompt,omitempty" jsonschema:"New prompt instructions."`
+	TitlePrefix    string `json:"title_prefix,omitempty" jsonschema:"New title prefix."`
+	Timezone       string `json:"timezone,omitempty" jsonschema:"New timezone for evaluation."`
+	Effort         string `json:"effort,omitempty" jsonschema:"New effort tier: 'low', 'medium', or 'high'."`
+	Enabled        *bool  `json:"enabled,omitempty" jsonschema:"Whether the heartbeat schedule is enabled."`
+}
+
+func (a UpdateHeartbeatArgs) toMap() map[string]any {
+	m := make(map[string]any)
+	if a.ScheduleID != "" {
+		m["schedule_id"] = a.ScheduleID
+	}
+	if a.ID != "" {
+		m["id"] = a.ID
+	}
+	if a.ChannelID != "" {
+		m["channel_id"] = a.ChannelID
+	}
+	if a.TargetID != "" {
+		m["target_id"] = a.TargetID
+	}
+	if a.CronExpression != "" {
+		m["cron_expression"] = a.CronExpression
+	}
+	if a.CronExpr != "" {
+		m["cron_expr"] = a.CronExpr
+	}
+	if a.Prompt != "" {
+		m["prompt"] = a.Prompt
+	}
+	if a.TitlePrefix != "" {
+		m["title_prefix"] = a.TitlePrefix
+	}
+	if a.Timezone != "" {
+		m["timezone"] = a.Timezone
+	}
+	if a.Effort != "" {
+		m["effort"] = a.Effort
+	}
+	if a.Enabled != nil {
+		m["enabled"] = *a.Enabled
+	}
+	return m
+}
+
+// WatchEventArgs defines arguments for the watch_event MCP tool.
+type WatchEventArgs struct {
+	ChannelID  string `json:"channel_id,omitempty" jsonschema:"Target Discord channel ID or thread ID."`
+	TargetID   string `json:"target_id,omitempty" jsonschema:"Alias for channel_id."`
+	ThreadID   string `json:"thread_id,omitempty" jsonschema:"Alias for channel_id."`
+	Source     string `json:"source" jsonschema:"Event source (e.g. 'hangar', 'vanadis_build', 'vanadis_chunk', 'camera')."`
+	Target     string `json:"target" jsonschema:"Identifier of the target entity being watched."`
+	EventType  string `json:"event_type" jsonschema:"Type of event to watch (e.g. 'sync_success', 'completed', 'merged')."`
+	Prompt     string `json:"prompt" jsonschema:"Instructions to execute when the event triggers."`
+	Effort     string `json:"effort,omitempty" jsonschema:"Effort tier: 'low', 'medium', or 'high'. Defaults to 'medium'."`
+	Persistent *bool  `json:"persistent,omitempty" jsonschema:"Whether the event watch trigger remains active after firing (default false)."`
+}
+
+func (a WatchEventArgs) toMap() map[string]any {
+	m := make(map[string]any)
+	if a.ChannelID != "" {
+		m["channel_id"] = a.ChannelID
+	}
+	if a.TargetID != "" {
+		m["target_id"] = a.TargetID
+	}
+	if a.ThreadID != "" {
+		m["thread_id"] = a.ThreadID
+	}
+	if a.Source != "" {
+		m["source"] = a.Source
+	}
+	if a.Target != "" {
+		m["target"] = a.Target
+	}
+	if a.EventType != "" {
+		m["event_type"] = a.EventType
+	}
+	if a.Prompt != "" {
+		m["prompt"] = a.Prompt
+	}
+	if a.Effort != "" {
+		m["effort"] = a.Effort
+	}
+	if a.Persistent != nil {
+		m["persistent"] = *a.Persistent
+	}
+	return m
+}
+
+// ListEventWatchesArgs defines arguments for the list_event_watches MCP tool.
+type ListEventWatchesArgs struct {
+	ChannelID string `json:"channel_id,omitempty" jsonschema:"Optional Discord channel ID filter."`
+	TargetID  string `json:"target_id,omitempty" jsonschema:"Alias for channel_id filter."`
+}
+
+func (a ListEventWatchesArgs) toMap() map[string]any {
+	m := make(map[string]any)
+	if a.ChannelID != "" {
+		m["channel_id"] = a.ChannelID
+	}
+	if a.TargetID != "" {
+		m["target_id"] = a.TargetID
+	}
+	return m
+}
+
+// CancelEventWatchArgs defines arguments for the cancel_event_watch MCP tool.
+type CancelEventWatchArgs struct {
+	WatchID    string `json:"watch_id,omitempty" jsonschema:"The ID of the event watch trigger to cancel."`
+	ID         string `json:"id,omitempty" jsonschema:"Alias for watch_id."`
+	ScheduleID string `json:"schedule_id,omitempty" jsonschema:"Alias for watch_id."`
+}
+
+func (a CancelEventWatchArgs) toMap() map[string]any {
+	m := make(map[string]any)
+	if a.WatchID != "" {
+		m["watch_id"] = a.WatchID
+	}
+	if a.ID != "" {
+		m["id"] = a.ID
+	}
+	if a.ScheduleID != "" {
+		m["schedule_id"] = a.ScheduleID
+	}
+	return m
+}
+
 // HandleScheduleHeartbeat handles the schedule_heartbeat MCP tool call.
 func HandleScheduleHeartbeat(ctx context.Context, db *sql.DB, defaultTZ string, args map[string]any) (*mcp.CallToolResult, error) {
 	channelID := getMapString(args, "channel_id", "target_id")
@@ -647,7 +824,7 @@ func HandleUpdateHeartbeat(ctx context.Context, db *sql.DB, args map[string]any)
 
 // HandleWatchEvent registers a deterministic one-shot event watch trigger.
 func HandleWatchEvent(ctx context.Context, db *sql.DB, args map[string]any, extraSources ...string) (*mcp.CallToolResult, error) {
-	channelID := getMapString(args, "channel_id", "target_id")
+	channelID := getMapString(args, "channel_id", "target_id", "thread_id")
 	if !IsNumericSnowflake(channelID) {
 		return nil, fmt.Errorf("'channel_id' is required and must be a valid numeric snowflake")
 	}
