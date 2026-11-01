@@ -1034,6 +1034,7 @@ func TestWorker_EvaluateAmbientWake_HTTPAndSilent_TableDriven(t *testing.T) {
 		authorID      string
 		isThread      bool
 		mode          string
+		burst         []db.Message
 		wantSkipClass bool
 	}{
 		{
@@ -1041,6 +1042,16 @@ func TestWorker_EvaluateAmbientWake_HTTPAndSilent_TableDriven(t *testing.T) {
 			authorID:      "user-1",
 			isThread:      false,
 			mode:          "channel",
+			wantSkipClass: false,
+		},
+		{
+			name:     "multi-message ambient burst in channel mode is evaluated for ambient",
+			isThread: false,
+			mode:     "channel",
+			burst: []db.Message{
+				{ID: "msg-ambient-1", AuthorID: "user-1", Content: "first ambient message"},
+				{ID: "msg-ambient-2", AuthorID: "user-2", Content: "second ambient message"},
+			},
 			wantSkipClass: false,
 		},
 		{
@@ -1067,18 +1078,22 @@ func TestWorker_EvaluateAmbientWake_HTTPAndSilent_TableDriven(t *testing.T) {
 					Classifier: classifier.New(nil),
 				},
 			}
-			te := &turnExecution{
-				pool:     pool,
-				threadID: "chan-ambient-test",
-				isThread: tc.isThread,
-				policy:   config.ChannelPolicy{Mode: tc.mode},
-				burst: []db.Message{
+			burst := tc.burst
+			if len(burst) == 0 {
+				burst = []db.Message{
 					{
 						ID:       "msg-ambient",
 						AuthorID: tc.authorID,
 						Content:  "ambient message text",
 					},
-				},
+				}
+			}
+			te := &turnExecution{
+				pool:     pool,
+				threadID: "chan-ambient-test",
+				isThread: tc.isThread,
+				policy:   config.ChannelPolicy{Mode: tc.mode},
+				burst:    burst,
 			}
 
 			_ = te.evaluateAmbientWake()
@@ -1087,6 +1102,8 @@ func TestWorker_EvaluateAmbientWake_HTTPAndSilent_TableDriven(t *testing.T) {
 				if te.wakeInfos != nil {
 					t.Errorf("expected ambient wake to be skipped, but wakeInfos was populated: %v", te.wakeInfos)
 				}
+			} else if te.wakeInfos == nil {
+				t.Errorf("expected ambient wake to be evaluated, but wakeInfos was nil")
 			}
 		})
 	}

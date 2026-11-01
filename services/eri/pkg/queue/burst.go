@@ -514,6 +514,36 @@ func isAllBurstHeuristicSkip(burst []db.Message) bool {
 	return true
 }
 
+func isBurstDirectedAtOther(burst []db.Message, botUserID string, botRoleIDs []string) bool {
+	if len(burst) == 0 {
+		return false
+	}
+	hasDirected := false
+	directedAuthors := make(map[string]bool)
+
+	for _, m := range burst {
+		authorKey := strings.TrimSpace(m.AuthorID)
+		if authorKey == "" {
+			authorKey = strings.TrimSpace(m.AuthorName)
+		}
+
+		switch {
+		case isDirectedAtOther(m, botUserID, botRoleIDs):
+			hasDirected = true
+			if authorKey != "" {
+				directedAuthors[authorKey] = true
+			}
+		case classifier.IsHeuristicSkip(db.ExtractMessageBody(m.Content)):
+			continue
+		case authorKey != "" && directedAuthors[authorKey]:
+			continue
+		default:
+			return false
+		}
+	}
+	return hasDirected
+}
+
 func populateTier1TrailingWakeInfos(burst []db.Message, wakeIdx int, wakeInfos []WakeInfo, wm string, threshold float64, botUserID string, botRoleIDs []string, classify func([]db.Message) (float64, string)) {
 	for i := range wakeIdx {
 		wakeInfos[i] = WakeInfo{IsWake: false, Score: 0.0, Threshold: threshold, Reason: "burst_prescan_leading"}
@@ -525,6 +555,8 @@ func populateTier1TrailingWakeInfos(burst []db.Message, wakeIdx int, wakeInfos [
 			wakeInfos[i] = WakeInfo{IsWake: true, Score: 1.0, Threshold: threshold, Reason: "direct_address"}
 		case wm == "mention" || threshold <= 0.0 || classifier.IsHeuristicSkip(db.ExtractMessageBody(m.Content)):
 			wakeInfos[i] = WakeInfo{IsWake: false, Score: 0.0, Threshold: threshold, Reason: "heuristic_skip"}
+		case isDirectedAtOther(m, botUserID, botRoleIDs):
+			wakeInfos[i] = WakeInfo{IsWake: false, Score: 0.0, Threshold: threshold, Reason: "directed_at_other"}
 		default:
 			score, reason := classify([]db.Message{m})
 			wakeInfos[i] = WakeInfo{IsWake: score >= threshold, Score: score, Threshold: threshold, Reason: reason}
@@ -582,6 +614,9 @@ func PlanBurstExecution(input BurstPlanInput) BurstPlan {
 
 	if isAllBurstHeuristicSkip(input.Burst) {
 		return BurstPlan{WakeIndex: -1, IsAllAmbient: true, WakeInfos: fillBurstWakeInfos(len(input.Burst), -1, 0.0, threshold, "heuristic_skip", "heuristic_skip")}
+	}
+	if isBurstDirectedAtOther(input.Burst, input.BotUserID, input.BotRoleIDs) {
+		return BurstPlan{WakeIndex: -1, IsAllAmbient: true, WakeInfos: fillBurstWakeInfos(len(input.Burst), -1, 0.0, threshold, "directed_at_other", "directed_at_other")}
 	}
 
 	score, reason := classify(input.Burst)

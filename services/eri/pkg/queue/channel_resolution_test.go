@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
+	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -272,6 +273,114 @@ func TestResolveTargetThread_TableDriven(t *testing.T) {
 			got := pool.ResolveTargetThread(tc.channelID, tc.title, tc.prompt, time.Now())
 			if got != tc.expected {
 				t.Errorf("ResolveTargetThread() = %q, want %q", got, tc.expected)
+			}
+		})
+	}
+}
+
+func TestIsDirectedAtOther(t *testing.T) {
+	t.Parallel()
+	botID := "bot-aerial-123"
+	botRoles := []string{"role-aerial-mod"}
+
+	tests := []struct {
+		name string
+		msg  db.Message
+		want bool
+	}{
+		{
+			name: "http-client author returns false",
+			msg:  db.Message{AuthorID: "http-client", Content: "Hey <@user-bob>"},
+			want: false,
+		},
+		{
+			name: "Tier-1 direct user mention of Aerial returns false",
+			msg:  db.Message{MentionUserIDs: []string{botID}},
+			want: false,
+		},
+		{
+			name: "Tier-1 direct role mention of Aerial returns false",
+			msg:  db.Message{MentionRoleIDs: []string{"role-aerial-mod"}},
+			want: false,
+		},
+		{
+			name: "Tier-1 username mention of Aerial returns false",
+			msg:  db.Message{Mentions: []string{"Aerial"}},
+			want: false,
+		},
+		{
+			name: "Tier-1 reply to Aerial returns false",
+			msg:  db.Message{ReplyingToAuthor: "@Aerial"},
+			want: false,
+		},
+		{
+			name: "Structured MentionUserIDs directed at other returns true",
+			msg:  db.Message{MentionUserIDs: []string{"user-bob"}},
+			want: true,
+		},
+		{
+			name: "Structured MentionRoleIDs directed at other returns true",
+			msg:  db.Message{MentionRoleIDs: []string{"role-backend"}},
+			want: true,
+		},
+		{
+			name: "Structured Mentions directed at other returns true",
+			msg:  db.Message{Mentions: []string{"bob"}},
+			want: true,
+		},
+		{
+			name: "Structured ReplyingToAuthor directed at other returns true",
+			msg:  db.Message{ReplyingToAuthor: "@bob"},
+			want: true,
+		},
+		{
+			name: "Structured ReplyingToAuthor with Unknown returns false",
+			msg:  db.Message{ReplyingToAuthor: "\"Unknown\""},
+			want: false,
+		},
+		{
+			name: "Structured message with raw mention in Content returns false",
+			msg:  db.Message{ChannelID: "chan-1", Content: "Look at `<@999>` in code"},
+			want: false,
+		},
+		{
+			name: "Legacy USER_REQUEST headers mention_user_ids returns true",
+			msg:  db.Message{Content: "<USER_REQUEST>\n- content: check this\n- mention_user_ids: [99999]\n</USER_REQUEST>"},
+			want: true,
+		},
+		{
+			name: "Legacy USER_REQUEST headers mention_role_ids returns true",
+			msg:  db.Message{Content: "<USER_REQUEST>\n- content: check this\n- mention_role_ids: [role-dev]\n</USER_REQUEST>"},
+			want: true,
+		},
+		{
+			name: "Legacy USER_REQUEST headers mentions returns true",
+			msg:  db.Message{Content: "<USER_REQUEST>\n- content: check this\n- mentions: [charlie]\n</USER_REQUEST>"},
+			want: true,
+		},
+		{
+			name: "Legacy USER_REQUEST headers replying_to returns true",
+			msg:  db.Message{Content: "<USER_REQUEST>\n- replying_to:\n  author: @dave\n- content: hi\n</USER_REQUEST>"},
+			want: true,
+		},
+		{
+			name: "Legacy USER_REQUEST headers author Unknown returns false",
+			msg:  db.Message{Content: "<USER_REQUEST>\n- replying_to:\n  author: \"Unknown\"\n- content: hi\n</USER_REQUEST>"},
+			want: false,
+		},
+		{
+			name: "Raw non-enveloped mention returns true",
+			msg:  db.Message{Content: "Hey <@999> can you check this?"},
+			want: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := isDirectedAtOther(tc.msg, botID, botRoles)
+			if got != tc.want {
+				t.Errorf("isDirectedAtOther() = %v, want %v", got, tc.want)
 			}
 		})
 	}
