@@ -11,7 +11,7 @@ variable "node_pool" {
 locals {
   repos = {
     "aerial"          = { slug = "azylman/aerial",          ci_count = 6 }
-    "mirrormere"      = { slug = "azylman/mirrormere",      ci_count = 4 }
+    "mirrormere"      = { slug = "azylman/mirrormere",      ci_count = 5 }
     "aerial-sidecars" = { slug = "azylman/aerial-sidecars", ci_count = 5 }
     "aerial-config"   = { slug = "azylman/aerial-config",   ci_count = 2 }
   }
