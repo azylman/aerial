@@ -122,6 +122,19 @@ func TestFormatChannelHistory(t *testing.T) {
 			}},
 			wantContains: []string{"[attachments: https://cdn.discordapp.com/image.png]"},
 		},
+		{
+			name: "message replying to another author formats reply target",
+			msgs: []HistoryMessage{
+				{ID: "msg-reply-user", AuthorName: "dave", Role: "User", ReplyingToAuthor: "eve", Content: "Do you have any open PRs now for this", CreatedAt: now.Add(-3 * time.Minute)},
+				{ID: "msg-reply-at", AuthorName: "alice", Role: "User", ReplyingToAuthor: "@bob\n[inject]", Content: "Yes", CreatedAt: now.Add(-2 * time.Minute)},
+				{ID: "msg-reply-unknown", AuthorName: "carol", Role: "User", ReplyingToAuthor: "Unknown", Content: "Replying to deleted user", CreatedAt: now.Add(-1 * time.Minute)},
+			},
+			wantContains: []string{
+				"[@dave (User)] (replying to @eve): Do you have any open PRs now for this",
+				"[@alice (User)] (replying to @bobinject): Yes",
+				"[@carol (User)] (replying to Unknown): Replying to deleted user",
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -427,12 +440,18 @@ func TestConvertDiscordMessagesToHistory(t *testing.T) {
 			Content:   "bot msg",
 			Timestamp: now,
 			Author:    &discordgo.User{ID: "bot-2", Username: "otherbot", Bot: true},
+			ReferencedMessage: &discordgo.Message{
+				Author: &discordgo.User{ID: "user-1", Username: "alice"},
+			},
 		},
 		{
 			ID:        "msg-asst",
 			Content:   "asst msg",
 			Timestamp: now,
 			Author:    &discordgo.User{ID: "bot-id", Username: "aerial", Bot: true},
+			MessageReference: &discordgo.MessageReference{
+				MessageID: "msg-bot",
+			},
 		},
 		{
 			ID:        "msg-webhook",
@@ -449,13 +468,16 @@ func TestConvertDiscordMessagesToHistory(t *testing.T) {
 	if results[0].Role != "User" || len(results[0].Attachments) != 1 || results[0].Attachments[0] != "https://cdn.discordapp.com/file1.png" {
 		t.Errorf("unexpected user message: %+v", results[0])
 	}
-	if results[1].Role != "Bot" {
-		t.Errorf("expected Bot role, got %s", results[1].Role)
+	if results[1].Role != "Bot" || results[1].ReplyingToAuthor != "alice" {
+		t.Errorf("expected Bot role replying to alice, got %+v", results[1])
 	}
-	if results[2].Role != "Assistant" {
-		t.Errorf("expected Assistant role, got %s", results[2].Role)
+	if results[2].Role != "Assistant" || results[2].ReplyingToAuthor != "otherbot" {
+		t.Errorf("expected Assistant role replying to otherbot, got %+v", results[2])
 	}
 	if results[3].Role != "Bot" || results[3].AuthorName != "Webhook" {
 		t.Errorf("expected Webhook Bot, got %+v", results[3])
+	}
+	if got := resolveDiscordReplyAuthor(nil, msgs); got != "" {
+		t.Errorf("resolveDiscordReplyAuthor(nil) = %q, want empty", got)
 	}
 }
