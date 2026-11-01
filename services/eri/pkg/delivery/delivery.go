@@ -147,7 +147,7 @@ func (st *messageSplitState) splitOversizedLine(lineRunes []rune, willCloseFence
 }
 
 func inspectFenceLine(trimmedLine string, inCodeBlock bool, limit int) (willOpen, willClose bool, lang string) {
-	isFence := limit > 8 && strings.HasPrefix(trimmedLine, "```") && !(strings.HasSuffix(trimmedLine, "```") && len(trimmedLine) >= 6)
+	isFence := limit > 8 && strings.HasPrefix(trimmedLine, "```") && (!strings.HasSuffix(trimmedLine, "```") || len(trimmedLine) < 6)
 	if !isFence {
 		return false, false, ""
 	}

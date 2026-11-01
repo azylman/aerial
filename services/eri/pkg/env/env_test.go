@@ -1290,15 +1290,16 @@ func TestSkillsProvisioning(t *testing.T) {
 			}
 
 			if !tc.symlinkTotalFail && !tc.targetBlocked {
-				if tc.target == TargetDiscord {
+				switch tc.target {
+				case TargetDiscord:
 					if !found["custom-skill"] || !found["discord-skill"] || (tc.superpowers != found["brainstorming"]) || found["voice-skill"] {
 						t.Errorf("unexpected skills for discord target: %v", found)
 					}
-				} else if tc.target == TargetVoice {
+				case TargetVoice:
 					if !found["custom-skill"] || !found["voice-skill"] || found["discord-skill"] || found["brainstorming"] {
 						t.Errorf("unexpected skills for voice target: %v", found)
 					}
-				} else if tc.target == TargetEphemeral {
+				case TargetEphemeral:
 					if !found["eph-skill"] || found["custom-skill"] || found["discord-skill"] || found["voice-skill"] || found["brainstorming"] {
 						t.Errorf("unexpected skills for ephemeral target: %v", found)
 					}

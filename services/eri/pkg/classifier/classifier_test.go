@@ -310,11 +310,12 @@ func TestClassify_LLM(t *testing.T) {
 				ctx = context.Background()
 			}
 			var res ClassificationResult
-			if tc.useBurst {
+			switch {
+			case tc.useBurst:
 				res = cls.ClassifyBurst(ctx, tc.burst, nil)
-			} else if len(tc.burst) > 0 {
+			case len(tc.burst) > 0:
 				res = cls.Classify(ctx, tc.burst[0], nil)
-			} else {
+			default:
 				res = cls.Classify(ctx, db.Message{Content: "test"}, nil)
 			}
 
@@ -820,11 +821,12 @@ func TestClassify_SystemOne(t *testing.T) {
 			cls.OnSystemAlert = func(endpoint string, err error) { alerted = true }
 
 			var res ClassificationResult
-			if tc.emptyURL {
+			switch {
+			case tc.emptyURL:
 				res = cls.classifySystemOne(ctx, []db.Message{{AuthorName: "alex", Content: "test msg"}}, nil)
-			} else if tc.isBurst {
+			case tc.isBurst:
 				res = cls.ClassifyBurst(ctx, []db.Message{{AuthorName: "alex", Content: "burst msg 1"}, {AuthorName: "alex", Content: "burst msg 2"}}, nil)
-			} else {
+			default:
 				res = cls.Classify(ctx, db.Message{AuthorName: "alex", Content: "test msg"}, nil)
 			}
 

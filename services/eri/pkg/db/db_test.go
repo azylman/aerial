@@ -70,11 +70,12 @@ func TestDBInitAndDSN(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var err error
-			if tc.cfgNil {
+			switch {
+			case tc.cfgNil:
 				_, err = New(nil)
-			} else if tc.snapNil {
+			case tc.snapNil:
 				_, err = New(&config.Config{})
-			} else {
+			default:
 				cfg := config.NewFromData(&config.ConfigData{DatabaseURL: tc.url})
 				_, err = New(cfg)
 			}

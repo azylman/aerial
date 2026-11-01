@@ -580,11 +580,12 @@ func splitPipelineWithOffsets(cmd string) []pipelineSegment {
 			escaped = true
 			continue
 		}
-		if ch == '\'' && !inDouble {
+		switch {
+		case ch == '\'' && !inDouble:
 			inSingle = !inSingle
-		} else if ch == '"' && !inSingle {
+		case ch == '"' && !inSingle:
 			inDouble = !inDouble
-		} else if !inSingle && !inDouble {
+		case !inSingle && !inDouble:
 			if step := delimiterWidth(cmd, i); step > 0 {
 				flush(i)
 				i += step - 1

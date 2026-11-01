@@ -474,9 +474,10 @@ func (r *Router) trackDeployProgress(s *discordgo.Session, interaction *discordg
 func (r *Router) applyChannelPolicyUpdate(ctx context.Context, channelID, key, val string) error {
 	if r.deps.GitOpsChannelUpdater != nil {
 		mutateFn := func(p *config.ChannelPolicy) {
-			if key == "mode" {
+			switch key {
+			case "mode":
 				p.Mode = val
-			} else if key == "ignore_bots" {
+			case "ignore_bots":
 				b := (val == "true")
 				p.IgnoreBots = &b
 			}
@@ -492,9 +493,10 @@ func (r *Router) applyChannelPolicyUpdate(ctx context.Context, channelID, key, v
 	cur := cfg.Current()
 	if cur != nil && cur.Channels != nil {
 		pol := cur.Channels[channelID]
-		if key == "mode" {
+		switch key {
+		case "mode":
 			pol.Mode = val
-		} else if key == "ignore_bots" {
+		case "ignore_bots":
 			b := (val == "true")
 			pol.IgnoreBots = &b
 		}
