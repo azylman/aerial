@@ -22,7 +22,7 @@ import (
 
 // MCPInvoker defines the contract for executing an MCP tool.
 type MCPInvoker interface {
-	Execute(ctx context.Context, name string, args map[string]interface{}) (string, error)
+	Execute(ctx context.Context, name string, args map[string]any) (string, error)
 }
 
 // Provider fetches tool data and renders ambient context using Go templates.
@@ -32,7 +32,7 @@ type Provider struct {
 	cache         string
 	expiresAt     time.Time
 	hardExpiresAt time.Time
-	refreshing    int32
+	refreshing    atomic.Int32
 	mu            sync.RWMutex
 	sf            singleflight.Group
 	templateStr   string
@@ -201,7 +201,7 @@ func (p *Provider) collectAmbientToolData(ctx context.Context) (map[string]any, 
 }
 
 func (p *Provider) fetchAndRender(ctx context.Context) (string, error) {
-	res, err, _ := p.sf.Do("ambient_fetch", func() (interface{}, error) {
+	res, err, _ := p.sf.Do("ambient_fetch", func() (any, error) {
 		curNow := p.now()
 		p.mu.RLock()
 		if !p.expiresAt.IsZero() && curNow.Before(p.expiresAt) {
@@ -249,11 +249,11 @@ func (p *Provider) fetchAndRender(ctx context.Context) (string, error) {
 }
 
 func (p *Provider) triggerBackgroundRefresh() {
-	if !atomic.CompareAndSwapInt32(&p.refreshing, 0, 1) {
+	if !p.refreshing.CompareAndSwap(0, 1) {
 		return
 	}
 	go func() {
-		defer atomic.StoreInt32(&p.refreshing, 0)
+		defer p.refreshing.Store(0)
 		timeout := 250 * time.Millisecond
 		if p.cfg.TimeoutMs > 0 {
 			timeout = time.Duration(p.cfg.TimeoutMs) * time.Millisecond

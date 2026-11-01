@@ -415,11 +415,9 @@ func (r *Router) handleIgnoreBots(s *discordgo.Session, i *discordgo.Interaction
 }
 
 func (r *Router) spawnDeployProgress(s *discordgo.Session, interaction *discordgo.Interaction, key, channelID, val string) {
-	r.bgWg.Add(1)
-	go func() {
-		defer r.bgWg.Done()
+	r.bgWg.Go(func() {
 		r.trackDeployProgress(s, interaction, key, channelID, val)
-	}()
+	})
 }
 
 func (r *Router) trackDeployProgress(s *discordgo.Session, interaction *discordgo.Interaction, key, channelID, val string) {

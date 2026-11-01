@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -193,10 +194,10 @@ func ExtractReplyingToAuthor(m db.Message) string {
 	if strings.Contains(m.Content, "- replying_to:") {
 		idx := strings.Index(m.Content, "- replying_to:")
 		rest := m.Content[idx:]
-		if authIdx := strings.Index(rest, "author:"); authIdx != -1 {
-			authRest := rest[authIdx+len("author:"):]
-			if lineEnd := strings.Index(authRest, "\n"); lineEnd != -1 {
-				line := strings.TrimSpace(authRest[:lineEnd])
+		if _, after, ok := strings.Cut(rest, "author:"); ok {
+			authRest := after
+			if before, _, ok := strings.Cut(authRest, "\n"); ok {
+				line := strings.TrimSpace(before)
 				line = strings.Trim(line, `"'`)
 				return line
 			}
@@ -546,8 +547,7 @@ func fitMessagesTail(messages []string, budget int) []string {
 	var kept []string
 	currentRunes := 0
 
-	for i := len(messages) - 1; i >= 0; i-- {
-		msg := messages[i]
+	for _, msg := range slices.Backward(messages) {
 		msgRunes := utf8.RuneCountInString(msg)
 		needed := msgRunes
 		if len(kept) > 0 {
@@ -875,8 +875,8 @@ func CleanThreadTitle(raw string) string {
 	cleaned = strings.TrimSuffix(cleaned, ".")
 	cleaned = strings.TrimSpace(cleaned)
 
-	lines := strings.Split(cleaned, "\n")
-	for _, l := range lines {
+	lines := strings.SplitSeq(cleaned, "\n")
+	for l := range lines {
 		trimmed := strings.TrimSpace(l)
 		if trimmed != "" {
 			cleaned = sanitizer.NormalizeWhitespace(trimmed)

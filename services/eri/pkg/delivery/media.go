@@ -335,8 +335,8 @@ func stripLeadingStatusPhrases(s string) string {
 		stripped := false
 		for _, phrase := range intermediateStatusPhrases {
 			trimmedWorking := strings.TrimSpace(working)
-			if strings.HasPrefix(trimmedWorking, phrase) {
-				remainder := strings.TrimSpace(dedentLeadingListChunk(strings.Trim(strings.TrimPrefix(trimmedWorking, phrase), "\r\n")))
+			if after, ok := strings.CutPrefix(trimmedWorking, phrase); ok {
+				remainder := strings.TrimSpace(dedentLeadingListChunk(strings.Trim(after, "\r\n")))
 				// Only strip if there is substantive remainder (not just punctuation or empty)
 				if isSubstantiveContent(remainder) {
 					working = remainder

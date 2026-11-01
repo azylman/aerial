@@ -3,6 +3,7 @@ package delivery
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -83,8 +84,8 @@ func FormatDiscordLatex(text string) string {
 	}
 	out = strings.Join(lines, "\n")
 
-	for i := len(masked) - 1; i >= 0; i-- {
-		out = strings.ReplaceAll(out, fmt.Sprintf("\x00CODE%d\x00", i), masked[i])
+	for i, m := range slices.Backward(masked) {
+		out = strings.ReplaceAll(out, fmt.Sprintf("\x00CODE%d\x00", i), m)
 	}
 	return out
 }

@@ -182,8 +182,6 @@ func seedStatusFixtures(store *dbtest.FakeStore, active bool) {
 	}
 }
 
-func boolPtr(b bool) *bool { return &b }
-
 func TestApplicationCommandsAndHelpers(t *testing.T) {
 	sampleOpts := []*discordgo.ApplicationCommandInteractionDataOption{
 		mkOpt("opt_true", discordgo.ApplicationCommandOptionBoolean, true),
@@ -632,8 +630,8 @@ func TestRouter_ConfigMutationCommands(t *testing.T) {
 		{"Mode_SetInMemoryFallback", "mode", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("mode", discordgo.ApplicationCommandOptionString, "mention")}, false, false, true, 0, nil, "mention", nil, false, false, "", ""},
 		{"Mode_GitOpsError", "mode", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("mode", discordgo.ApplicationCommandOptionString, "mention")}, true, true, false, 0, []string{"Failed to apply GitOps update"}, "", nil, false, false, "", ""},
 		{"IgnoreBots_BareQuery", "ignore_bots", nil, false, false, false, 0, []string{"**Ignore Bots**:"}, "", nil, false, false, "", ""},
-		{"IgnoreBots_SetWithGitOps", "ignore_bots", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("enabled", discordgo.ApplicationCommandOptionBoolean, true)}, true, false, false, 0, nil, "", boolPtr(true), false, false, "", ""},
-		{"IgnoreBots_SetInMemoryFallback", "ignore_bots", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("enabled", discordgo.ApplicationCommandOptionBoolean, true)}, false, false, true, 0, nil, "", boolPtr(true), false, false, "", ""},
+		{"IgnoreBots_SetWithGitOps", "ignore_bots", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("enabled", discordgo.ApplicationCommandOptionBoolean, true)}, true, false, false, 0, nil, "", new(true), false, false, "", ""},
+		{"IgnoreBots_SetInMemoryFallback", "ignore_bots", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("enabled", discordgo.ApplicationCommandOptionBoolean, true)}, false, false, true, 0, nil, "", new(true), false, false, "", ""},
 		{"IgnoreBots_GitOpsError", "ignore_bots", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("enabled", discordgo.ApplicationCommandOptionBoolean, true)}, true, true, false, 0, []string{"Failed to apply GitOps update"}, "", nil, false, false, "", ""},
 		{"DeployProgress_TimeoutAndEditErrors", "", nil, false, false, false, 0, nil, "", nil, true, true, "", ""},
 		{"DeployProgress_MutateFnMode", "", nil, false, false, false, 0, nil, "", nil, true, false, "mode", "mention"},

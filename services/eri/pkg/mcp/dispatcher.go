@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"strings"
 	"sync"
@@ -25,15 +26,15 @@ type ServerConfig struct {
 
 // Tool represents a tool declared by an MCP server.
 type Tool struct {
-	Name        string                 `json:"name"`
-	Description string                 `json:"description,omitempty"`
-	InputSchema map[string]interface{} `json:"inputSchema,omitempty"`
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	InputSchema map[string]any `json:"inputSchema,omitempty"`
 }
 
 // Dispatcher defines the interface for managing and executing MCP tools.
 type Dispatcher interface {
 	ListTools(ctx context.Context) ([]Tool, error)
-	Execute(ctx context.Context, name string, args map[string]interface{}) (string, error)
+	Execute(ctx context.Context, name string, args map[string]any) (string, error)
 	Prime(ctx context.Context) error
 	EnsureSession(ctx context.Context, serverName string) (string, error)
 }
@@ -122,7 +123,7 @@ func extractMCPSessionID(h http.Header) string {
 }
 
 func (d *DefaultDispatcher) sendInitializedNotification(ctx context.Context, srv ServerConfig, sessID string) {
-	notifyReqBody, err := json.Marshal(map[string]interface{}{
+	notifyReqBody, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"method":  "notifications/initialized",
 	})
@@ -179,14 +180,14 @@ func (d *DefaultDispatcher) EnsureSession(ctx context.Context, serverName string
 		return sessID, nil
 	}
 
-	initReqBody, err := json.Marshal(map[string]interface{}{
+	initReqBody, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"id":      1,
 		"method":  "initialize",
-		"params": map[string]interface{}{
+		"params": map[string]any{
 			"protocolVersion": "2024-11-05",
-			"capabilities":    map[string]interface{}{},
-			"clientInfo": map[string]interface{}{
+			"capabilities":    map[string]any{},
+			"clientInfo": map[string]any{
 				"name":    "aerial",
 				"version": "1.0.0",
 			},
@@ -315,11 +316,11 @@ func (d *DefaultDispatcher) fetchServerTools(ctx context.Context, srv ServerConf
 	sessID := d.sessionIDs[srv.Name]
 	d.mu.RUnlock()
 
-	reqBody, err := json.Marshal(map[string]interface{}{
+	reqBody, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"id":      1,
 		"method":  "tools/list",
-		"params":  map[string]interface{}{},
+		"params":  map[string]any{},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal tools/list payload: %w", err)
@@ -402,14 +403,12 @@ func (d *DefaultDispatcher) resolveToolServer(ctx context.Context, name string) 
 	return srv, nil
 }
 
-func prepareToolCallArgs(args map[string]interface{}) map[string]interface{} {
+func prepareToolCallArgs(args map[string]any) map[string]any {
 	if args == nil {
-		return make(map[string]interface{})
+		return make(map[string]any)
 	}
-	copiedArgs := make(map[string]interface{}, len(args))
-	for k, v := range args {
-		copiedArgs[k] = v
-	}
+	copiedArgs := make(map[string]any, len(args))
+	maps.Copy(copiedArgs, args)
 	if val, ok := copiedArgs["user_google_email"].(string); ok {
 		trimmed := strings.ToLower(strings.TrimSpace(val))
 		if trimmed == "primary" || trimmed == "me" || trimmed == "default" || trimmed == "" {
@@ -454,7 +453,7 @@ func decodeToolCallResult(name string, raw json.RawMessage) (string, error) {
 }
 
 // Execute calls a named tool on the corresponding MCP server with the provided arguments.
-func (d *DefaultDispatcher) Execute(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+func (d *DefaultDispatcher) Execute(ctx context.Context, name string, args map[string]any) (string, error) {
 	if d == nil {
 		return "", errors.New("mcp dispatcher is nil")
 	}
@@ -478,11 +477,11 @@ func (d *DefaultDispatcher) Execute(ctx context.Context, name string, args map[s
 
 	callArgs := prepareToolCallArgs(args)
 
-	reqBody, err := json.Marshal(map[string]interface{}{
+	reqBody, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"id":      1,
 		"method":  "tools/call",
-		"params": map[string]interface{}{
+		"params": map[string]any{
 			"name":      name,
 			"arguments": callArgs,
 		},
@@ -529,23 +528,23 @@ func (d *DefaultDispatcher) Prime(ctx context.Context) error {
 
 type jsonRPCResponse struct {
 	JSONRPC string          `json:"jsonrpc"`
-	ID      interface{}     `json:"id,omitempty"`
+	ID      any             `json:"id,omitempty"`
 	Result  json.RawMessage `json:"result,omitempty"`
 	Error   *jsonRPCError   `json:"error,omitempty"`
 }
 
 type jsonRPCError struct {
-	Code    int         `json:"code"`
-	Message string      `json:"message"`
-	Data    interface{} `json:"data,omitempty"`
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+	Data    any    `json:"data,omitempty"`
 }
 
 func parseSSEJSONRPCResponse(trimmed []byte) (*jsonRPCResponse, bool) {
 	if !bytes.HasPrefix(trimmed, []byte("event:")) && !bytes.HasPrefix(trimmed, []byte("data:")) && !bytes.Contains(trimmed, []byte("\ndata:")) {
 		return nil, false
 	}
-	lines := bytes.Split(trimmed, []byte("\n"))
-	for _, rawLine := range lines {
+	lines := bytes.SplitSeq(trimmed, []byte("\n"))
+	for rawLine := range lines {
 		line := bytes.TrimSpace(rawLine)
 		if !bytes.HasPrefix(line, []byte("data:")) {
 			continue

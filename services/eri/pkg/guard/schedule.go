@@ -3,6 +3,7 @@ package guard
 import (
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -93,8 +94,8 @@ func rewritePythonInlineQuotes(cmd string) string {
 	}
 
 	rewritten := cmd
-	for i := len(locs) - 1; i >= 0; i-- {
-		start := locs[i][1]
+	for _, loc := range slices.Backward(locs) {
+		start := loc[1]
 		end := findClosingSingleQuote(rewritten, start)
 		if end > start {
 			fixedBody := unescapeBracedQuotes(rewritten[start:end])

@@ -568,8 +568,8 @@ func parseGitLogLimitFlag(t, nextToken string) (matched, consumeNext bool, count
 		n, err := strconv.Atoi(t[2:])
 		return err == nil, false, n
 	}
-	if strings.HasPrefix(t, "--max-count=") {
-		return true, false, atoiOrZero(strings.TrimPrefix(t, "--max-count="))
+	if after, ok := strings.CutPrefix(t, "--max-count="); ok {
+		return true, false, atoiOrZero(after)
 	}
 	if len(t) > 1 && t[0] == '-' && t[1] >= '0' && t[1] <= '9' {
 		n, err := strconv.Atoi(t[1:])

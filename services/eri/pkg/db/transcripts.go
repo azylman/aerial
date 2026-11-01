@@ -189,10 +189,7 @@ func (s *SQLStore) BatchInsertTranscriptSteps(ctx context.Context, steps []Trans
 
 	const batchSize = 100
 	for i := 0; i < len(validSteps); i += batchSize {
-		end := i + batchSize
-		if end > len(validSteps) {
-			end = len(validSteps)
-		}
+		end := min(i+batchSize, len(validSteps))
 		chunk := validSteps[i:end]
 		valStrings := make([]string, 0, len(chunk))
 		valArgs := make([]any, 0, len(chunk)*6)
@@ -236,10 +233,7 @@ func (s *SQLStore) SearchSessionSummaries(ctx context.Context, embedding []float
 	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	candidateLimit := limit * 3
-	if candidateLimit < 30 {
-		candidateLimit = 30
-	}
+	candidateLimit := max(limit*3, 30)
 
 	var query string
 	var rows *sql.Rows
@@ -299,7 +293,7 @@ func buildSearchTranscriptStepsQuery(queryText, sessionFilter, toolFilter string
 
 	if sessionFilter != "" {
 		var sessions []string
-		for _, raw := range strings.Split(sessionFilter, ",") {
+		for raw := range strings.SplitSeq(sessionFilter, ",") {
 			if trimmed := strings.TrimSpace(raw); trimmed != "" {
 				sessions = append(sessions, trimmed)
 			}

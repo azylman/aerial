@@ -248,8 +248,8 @@ func parseDiffHeaderLine(line string, st *diffParseState) bool {
 		st.inHunk = false
 		st.isBinary = false
 		st.lineNum = 0
-		if idx := strings.Index(line, " b/"); idx != -1 {
-			st.currentFile = strings.TrimSpace(line[idx+3:])
+		if _, after, ok := strings.Cut(line, " b/"); ok {
+			st.currentFile = strings.TrimSpace(after)
 		}
 		return true
 	}
@@ -331,11 +331,11 @@ func ScanDiffWithPatterns(diff string, checkTestFiles bool, patterns []PatternRu
 
 // parseHunkLineNum extracts the start line of the target file from hunk header @@ -a,b +c,d @@.
 func parseHunkLineNum(hunkHeader string) int {
-	plusIdx := strings.Index(hunkHeader, "+")
-	if plusIdx == -1 {
+	_, after, ok := strings.Cut(hunkHeader, "+")
+	if !ok {
 		return 1
 	}
-	part := hunkHeader[plusIdx+1:]
+	part := after
 	endIdx := strings.IndexAny(part, ", ")
 	if endIdx != -1 {
 		part = part[:endIdx]
@@ -600,7 +600,7 @@ func FormatCommitDenyReason(violations []Violation) string {
 }
 
 func appendUntrackedFilesDiff(diffBuilder *strings.Builder, dir, untrackedOut string) {
-	for _, f := range strings.Split(untrackedOut, "\n") {
+	for f := range strings.SplitSeq(untrackedOut, "\n") {
 		f = strings.TrimSpace(f)
 		if f == "" {
 			continue
@@ -618,7 +618,7 @@ func appendUntrackedFilesDiff(diffBuilder *strings.Builder, dir, untrackedOut st
 		diffBuilder.WriteString("--- /dev/null\n")
 		diffBuilder.WriteString("+++ b/" + f + "\n")
 		diffBuilder.WriteString("@@ -0,0 +1,1 @@\n")
-		for _, line := range strings.Split(string(data), "\n") {
+		for line := range strings.SplitSeq(string(data), "\n") {
 			diffBuilder.WriteString("+" + line + "\n")
 		}
 	}

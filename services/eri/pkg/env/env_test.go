@@ -421,7 +421,7 @@ func TestSyncSettings(t *testing.T) {
 				if err != nil {
 					t.Fatalf("failed reading settings: %v", err)
 				}
-				var parsed map[string]interface{}
+				var parsed map[string]any
 				if err := json.Unmarshal(data, &parsed); err != nil {
 					t.Fatalf("settings is not valid json: %v", err)
 				}
@@ -1044,7 +1044,7 @@ func TestMCPProvisioning(t *testing.T) {
 			}
 
 			raw := p.LoadTargetMCPConfig(cfg, tc.target)
-			var parsed map[string]map[string]interface{}
+			var parsed map[string]map[string]any
 			if err := json.Unmarshal(raw, &parsed); err != nil {
 				t.Fatalf("failed parsing MCP config: %v", err)
 			}
@@ -1054,7 +1054,7 @@ func TestMCPProvisioning(t *testing.T) {
 				t.Errorf("scheduler presence = %v, want %v", servers["scheduler"] != nil, tc.wantScheduler)
 			}
 			if tc.wantScheduler && servers["scheduler"] != nil {
-				if sMap, ok := servers["scheduler"].(map[string]interface{}); ok {
+				if sMap, ok := servers["scheduler"].(map[string]any); ok {
 					if sMap["serverUrl"] != "http://haro.aerial/mcp" {
 						t.Errorf("scheduler serverUrl = %v, want http://haro.aerial/mcp", sMap["serverUrl"])
 					}
@@ -1070,7 +1070,7 @@ func TestMCPProvisioning(t *testing.T) {
 				t.Errorf("vanadis presence = %v, want %v", servers["vanadis"] != nil, tc.wantDiscord)
 			}
 			if tc.wantDiscord && servers["vanadis"] != nil {
-				if vMap, ok := servers["vanadis"].(map[string]interface{}); ok {
+				if vMap, ok := servers["vanadis"].(map[string]any); ok {
 					if vMap["serverUrl"] != "http://vanadis.aerial/mcp" {
 						t.Errorf("vanadis serverUrl = %v, want http://vanadis.aerial/mcp", vMap["serverUrl"])
 					}
@@ -1085,8 +1085,8 @@ func TestMCPProvisioning(t *testing.T) {
 				t.Errorf("openobserve presence = %v, want %v", servers["openobserve"] != nil, tc.wantOpenObs)
 			}
 			if tc.withOpenObs && tc.wantOpenObs {
-				oo := servers["openobserve"].(map[string]interface{})
-				headers := oo["headers"].(map[string]interface{})
+				oo := servers["openobserve"].(map[string]any)
+				headers := oo["headers"].(map[string]any)
 				auth := headers["Authorization"].(string)
 				expectedVal := "Basic " + base64.StdEncoding.EncodeToString([]byte("admin:password"))
 				if auth != expectedVal {
@@ -1309,7 +1309,7 @@ func TestSkillsProvisioning(t *testing.T) {
 }
 
 func TestDefaultCanonicalHooksJSON(t *testing.T) {
-	var parsed map[string]interface{}
+	var parsed map[string]any
 	if err := json.Unmarshal([]byte(defaultCanonicalHooksJSON), &parsed); err != nil {
 		t.Fatalf("defaultCanonicalHooksJSON is not valid JSON: %v", err)
 	}

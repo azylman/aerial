@@ -378,8 +378,8 @@ func (f *FakeStore) GetActiveRecentThreadIDs(ctx context.Context, since time.Dur
 	return withFakeLock(f, "GetActiveRecentThreadIDs", func() ([]string, error) {
 		cutoff, seen := time.Now().UTC().Add(-since), make(map[string]bool)
 		var threadIDs []string
-		for i := len(f.messageOrder) - 1; i >= 0; i-- {
-			if m := f.messages[f.messageOrder[i]]; m != nil && m.ThreadID != "" && m.UpdatedAt.After(cutoff) && !seen[m.ThreadID] {
+		for _, v := range slices.Backward(f.messageOrder) {
+			if m := f.messages[v]; m != nil && m.ThreadID != "" && m.UpdatedAt.After(cutoff) && !seen[m.ThreadID] {
 				seen[m.ThreadID] = true
 				threadIDs = append(threadIDs, m.ThreadID)
 			}
@@ -401,8 +401,8 @@ func (f *FakeStore) GetRecentThreadMessages(ctx context.Context, threadID string
 	return withFakeLock(f, "GetRecentThreadMessages", func() ([]db.Message, error) {
 		limit = defaultVal(limit, 10)
 		var matches []db.Message
-		for i := len(f.messageOrder) - 1; i >= 0; i-- {
-			if m := f.messages[f.messageOrder[i]]; m != nil && m.ThreadID == threadID {
+		for _, v := range slices.Backward(f.messageOrder) {
+			if m := f.messages[v]; m != nil && m.ThreadID == threadID {
 				matches = append(matches, *cloneMessage(m))
 				if len(matches) >= limit {
 					break
@@ -604,10 +604,7 @@ func (f *FakeStore) getActiveTasksFiltered(flt db.TasksFilter) []db.ActiveTask {
 		})
 	}
 	if flt.Limit > 0 {
-		limit = flt.Limit
-		if limit > 200 {
-			limit = 200
-		}
+		limit = min(flt.Limit, 200)
 	}
 
 	if len(matchedMsgs) > limit {
@@ -750,8 +747,8 @@ func (f *FakeStore) GetRecentSessionDispatches(ctx context.Context, sessionID st
 		}
 		limit = defaultVal(limit, 10)
 		var matches []db.Dispatch
-		for i := len(f.dispatchOrder) - 1; i >= 0; i-- {
-			if d := f.dispatches[f.dispatchOrder[i]]; d != nil && d.SessionID == sessionID && d.Status == db.StatusCompleted {
+		for _, v := range slices.Backward(f.dispatchOrder) {
+			if d := f.dispatches[v]; d != nil && d.SessionID == sessionID && d.Status == db.StatusCompleted {
 				matches = append(matches, *cloneDispatch(d))
 				if len(matches) >= limit {
 					break
@@ -1070,7 +1067,7 @@ func parseAllowedSessions(filter string) map[string]bool {
 		return nil
 	}
 	allowed := make(map[string]bool)
-	for _, sid := range strings.Split(filter, ",") {
+	for sid := range strings.SplitSeq(filter, ",") {
 		if trimmed := strings.TrimSpace(sid); trimmed != "" {
 			allowed[trimmed] = true
 		}
