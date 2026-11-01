@@ -173,8 +173,6 @@ func runGitCommand(ctx context.Context, dir, pat string, args ...string) ([]byte
 type SyncDaemon struct {
 	sfg             singleflight.Group
 	mu              sync.Mutex
-	ticker          *time.Ticker
-	interval        time.Duration
 	repos           []string
 	repoUrls        map[string]string
 	pat             string
@@ -354,7 +352,6 @@ type DaemonConfig struct {
 	Port              string
 	Repos             []string
 	RepoURLs          map[string]string
-	Interval          time.Duration
 	PAT               string
 	ComposeDir        string
 	ConfigDir         string
@@ -385,9 +382,6 @@ func firstNonEmpty(vals ...string) string {
 }
 
 func NewDaemon(cfg DaemonConfig) *SyncDaemon {
-	if cfg.Interval <= 0 {
-		cfg.Interval = 60 * time.Second
-	}
 	cfg.ComposeDir = firstNonEmpty(cfg.ComposeDir, ResolveRepoPath("aerial", cfg.Repos), "/share/aerial")
 	cfg.ConfigDir = firstNonEmpty(cfg.ConfigDir, ResolveRepoPath("aerial-config", cfg.Repos), "/share/aerial-config")
 	synapseURL := firstNonEmpty(cfg.SynapseURL, "http://127.0.0.1:4020")
@@ -402,7 +396,6 @@ func NewDaemon(cfg DaemonConfig) *SyncDaemon {
 	return &SyncDaemon{
 		repos:                cfg.Repos,
 		repoUrls:             cfg.RepoURLs,
-		interval:             cfg.Interval,
 		pat:                  cfg.PAT,
 		composeDir:           cfg.ComposeDir,
 		configDir:            cfg.ConfigDir,
@@ -636,10 +629,9 @@ func RunDaemon(ctx context.Context, cfg DaemonConfig) error {
 		log.Printf("[Hangar] Docker registry authentication configured for ghcr.io")
 	}
 
-	daemon.StartPeriodicLoop(ctx)
 	daemon.StartReconcilerLoop(ctx)
 	daemon.StartImageRolloutLoop(ctx)
-	log.Printf("[Hangar] Sidecar GitOps daemon started on :%s (interval: %v, repos: %v, composeDir: %s)", cfg.Port, cfg.Interval, cfg.Repos, cfg.ComposeDir)
+	log.Printf("[Hangar] Sidecar GitOps daemon started on :%s (repos: %v, composeDir: %s)", cfg.Port, cfg.Repos, cfg.ComposeDir)
 
 	go func() {
 		if _, err := daemon.TriggerSync(); err != nil {
@@ -688,7 +680,6 @@ type RepoConfig struct {
 // HangarYAMLConfig defines the declarative file schema for services/hangar/hangar.yaml.
 type HangarYAMLConfig struct {
 	Port           string                 `yaml:"port"`
-	SyncInterval   string                 `yaml:"sync_interval"`
 	NomadAddr      string                 `yaml:"nomad_addr"`
 	SynapseURL     string                 `yaml:"synapse_url"`
 	Repos          []RepoConfig           `yaml:"repos"`
@@ -714,11 +705,6 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 	}
 
 	port := firstNonEmpty(strings.TrimSpace(fileCfg.Port), "8087")
-
-	interval := 60 * time.Second
-	if d, err := time.ParseDuration(strings.TrimSpace(fileCfg.SyncInterval)); err == nil && d > 0 {
-		interval = d
-	}
 
 	repoUrls := make(map[string]string)
 	var repos []string
@@ -776,7 +762,6 @@ func NewConfigFromLookup(lookup func(string) string) DaemonConfig {
 		Port:              port,
 		Repos:             repos,
 		RepoURLs:          repoUrls,
-		Interval:          interval,
 		PAT:               pat,
 		ComposeDir:        composeDir,
 		ConfigDir:         configDir,

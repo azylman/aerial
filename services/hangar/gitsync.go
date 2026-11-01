@@ -258,12 +258,6 @@ func (d *SyncDaemon) TriggerSync() ([]RepoSyncResult, error) {
 	}
 
 	val, err, _ := d.sfg.Do("sync", func() (any, error) {
-		d.mu.Lock()
-		if d.ticker != nil {
-			d.ticker.Reset(d.interval)
-		}
-		d.mu.Unlock()
-
 		syncCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cancel()
 
@@ -623,28 +617,6 @@ func (d *SyncDaemon) SyncAssetBundlesToNomad(ctx context.Context, configDir stri
 	}
 
 	return firstErr
-}
-
-// StartPeriodicLoop runs the background ticker loop.
-func (d *SyncDaemon) StartPeriodicLoop(ctx context.Context) {
-	d.mu.Lock()
-	d.ticker = time.NewTicker(d.interval)
-	ticker := d.ticker
-	d.mu.Unlock()
-
-	go func() {
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if _, syncErr := d.TriggerSync(); syncErr != nil {
-					log.Printf("[Hangar] Periodic sync notice: %v", syncErr)
-				}
-			}
-		}
-	}()
 }
 
 // getRepoCommit extracts the commit SHA and author timestamp for a given ref in a repository.

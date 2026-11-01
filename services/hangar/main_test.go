@@ -100,33 +100,9 @@ func TestReconcilerAndPeriodicLoops_TableDriven(t *testing.T) {
 		loopCancel()
 	})
 
-	t.Run("StartPeriodicLoop_execution_and_shutdown", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-
-		triggered := make(chan struct{}, 1)
-		d := NewDaemon(DaemonConfig{Interval: 5 * time.Millisecond, ComposeDir: t.TempDir()})
-		d.triggerFn = func() ([]RepoSyncResult, error) {
-			select {
-			case triggered <- struct{}{}:
-			default:
-			}
-			return nil, errors.New("simulated periodic sync notice")
-		}
-
-		d.StartPeriodicLoop(ctx)
-		select {
-		case <-triggered:
-		case <-time.After(3 * time.Second):
-			t.Fatal("timed out waiting for periodic loop execution")
-		}
-		cancel()
-	})
-
 	t.Run("DaemonLoops_graceful_cancel", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
-		d := NewDaemon(DaemonConfig{Interval: 10 * time.Millisecond})
-		d.StartPeriodicLoop(ctx)
+		d := NewDaemon(DaemonConfig{})
 		d.StartReconcilerLoop(ctx)
 		cancel()
 	})
@@ -195,7 +171,6 @@ func TestNewConfigFromLookup_TableDriven(t *testing.T) {
 	}
 
 	structuredYAML := `port: "9090"
-sync_interval: "30s"
 nomad_addr: "http://nomad.test:4646"
 synapse_url: "http://synapse.test:4020"
 repos:
@@ -216,7 +191,6 @@ asset_bundles:
       app: "/custom/app"`
 
 	reposYAML := `port: "8087"
-sync_interval: "45s"
 repos:
   - path: "/custom/aerial-config"
   - path: "/custom/aerial"
@@ -230,7 +204,6 @@ synapse_url: "http://127.0.0.1:4020"`
 		wantPort                 string
 		wantRepos                []string
 		wantRepoURLs             map[string]string
-		wantInterval             time.Duration
 		wantPAT                  string
 		wantNomadToken           string
 		wantComposeDir           string
@@ -255,7 +228,6 @@ synapse_url: "http://127.0.0.1:4020"`
 				"/custom/aerial":        "https://github.com/custom/aerial.git",
 				"/custom/mirrormere":    "https://github.com/custom/mirrormere.git",
 			},
-			wantInterval:             30 * time.Second,
 			wantComposeDir:           "/custom/aerial",
 			wantConfigDir:            "/custom/aerial-config",
 			wantNomadAddr:            "http://nomad.test:4646",
@@ -276,7 +248,6 @@ synapse_url: "http://127.0.0.1:4020"`
 				"GEMINI_HARNESS_API_KEY": "harness_key",
 			},
 			wantPort:            "8087",
-			wantInterval:        60 * time.Second,
 			wantComposeDir:      "/share/aerial",
 			wantConfigDir:       "/share/aerial-config",
 			wantPAT:             "my_secret_pat",
@@ -291,7 +262,6 @@ synapse_url: "http://127.0.0.1:4020"`
 			name:           "repos without url in yaml",
 			yamlContent:    reposYAML,
 			wantPort:       "8087",
-			wantInterval:   45 * time.Second,
 			wantRepos:      []string{"/custom/aerial-config", "/custom/aerial"},
 			wantComposeDir: "/custom/aerial",
 			wantConfigDir:  "/custom/aerial-config",
@@ -302,7 +272,6 @@ synapse_url: "http://127.0.0.1:4020"`
 			name:                "empty lookup defaults",
 			env:                 map[string]string{},
 			wantPort:            "8087",
-			wantInterval:        60 * time.Second,
 			wantComposeDir:      "/share/aerial",
 			wantConfigDir:       "/share/aerial-config",
 			wantNomadAddr:       "http://host.docker.internal:4646",
@@ -314,7 +283,6 @@ synapse_url: "http://127.0.0.1:4020"`
 			name:           "invalid YAML warning fallback to defaults",
 			yamlContent:    "invalid: [unclosed yaml",
 			wantPort:       "8087",
-			wantInterval:   60 * time.Second,
 			wantComposeDir: "/share/aerial",
 			wantConfigDir:  "/share/aerial-config",
 			wantNomadAddr:  "http://host.docker.internal:4646",
@@ -331,7 +299,6 @@ synapse_url: "http://127.0.0.1:4020"`
 				"WEBHOOKS_ROUTER_URL": "http://ignored.router:4020",
 			},
 			wantPort:       "9090",
-			wantInterval:   30 * time.Second,
 			wantRepos:      []string{"/custom/aerial-config", "/custom/aerial", "/custom/mirrormere"},
 			wantComposeDir: "/custom/aerial",
 			wantConfigDir:  "/custom/aerial-config",
@@ -372,9 +339,6 @@ synapse_url: "http://127.0.0.1:4020"`
 						t.Errorf("RepoURLs[%q] = %q, want %q", k, gotURL, wantURL)
 					}
 				}
-			}
-			if tt.wantInterval != 0 && cfg.Interval != tt.wantInterval {
-				t.Errorf("Interval = %v, want %v", cfg.Interval, tt.wantInterval)
 			}
 			if tt.wantPAT != "" && cfg.PAT != tt.wantPAT {
 				t.Errorf("PAT = %q, want %q", cfg.PAT, tt.wantPAT)
@@ -421,22 +385,6 @@ synapse_url: "http://127.0.0.1:4020"`
 }
 
 func TestSetupMuxAndDaemonLifecycle_TableDriven(t *testing.T) {
-	t.Run("NewDaemon interval configuration", func(t *testing.T) {
-		for _, tc := range []struct {
-			name           string
-			interval, want time.Duration
-		}{
-			{"custom interval", 50 * time.Millisecond, 50 * time.Millisecond},
-			{"default fallback", 0, 60 * time.Second},
-		} {
-			t.Run(tc.name, func(t *testing.T) {
-				if d := NewDaemon(DaemonConfig{Interval: tc.interval}); d.interval != tc.want {
-					t.Errorf("expected interval %v, got %v", tc.want, d.interval)
-				}
-			})
-		}
-	})
-
 	t.Run("SetupMux endpoints and HTTP methods", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		jobsDir := filepath.Join(tmpDir, "jobs")
@@ -526,7 +474,6 @@ func TestSetupMuxAndDaemonLifecycle_TableDriven(t *testing.T) {
 					repoDir := filepath.Join(t.TempDir(), "repo")
 					_ = os.MkdirAll(filepath.Join(repoDir, ".git"), 0o755)
 					started := make(chan struct{}, 1)
-					cfg.Interval = time.Hour
 					cfg.Repos = []string{repoDir}
 					cfg.ComposeDir = t.TempDir()
 					cfg.ConfigDir = t.TempDir()
