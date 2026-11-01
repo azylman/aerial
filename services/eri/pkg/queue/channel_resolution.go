@@ -296,6 +296,41 @@ func isTier1Wake(m db.Message, botUserID string, botRoleIDs []string) bool {
 	return false
 }
 
+func isNonUnknownTarget(raw string) bool {
+	trimmed := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(strings.Trim(raw, "\"'")), "@"))
+	return trimmed != "" && !strings.EqualFold(trimmed, "unknown")
+}
+
+func isDirectedAtOther(m db.Message, botUserID string, botRoleIDs []string) bool {
+	if m.AuthorID == "http-client" || isTier1Wake(m, botUserID, botRoleIDs) {
+		return false
+	}
+	if m.HasStructuredFields() {
+		if len(m.MentionUserIDs) > 0 || len(m.MentionRoleIDs) > 0 {
+			return true
+		}
+		for _, mention := range m.Mentions {
+			if strings.TrimSpace(mention) != "" {
+				return true
+			}
+		}
+		return isNonUnknownTarget(m.ReplyingToAuthor)
+	}
+
+	if len(extractHeaderTokens(m.Content, "- mention_user_ids: [")) > 0 ||
+		len(extractHeaderTokens(m.Content, "- mention_role_ids: [")) > 0 ||
+		len(extractHeaderTokens(m.Content, "- mentions: [")) > 0 {
+		return true
+	}
+	if isNonUnknownTarget(extractReplyAuthor(m.Content)) {
+		return true
+	}
+	if !strings.Contains(m.Content, "<USER_REQUEST>") && strings.Contains(m.Content, "<@") {
+		return true
+	}
+	return false
+}
+
 func extractHeaderTokens(content, prefix string) []string {
 	idx := strings.Index(content, prefix)
 	if idx == -1 {

@@ -736,14 +736,23 @@ func (te *turnExecution) classifyAmbientMessages(msgs []db.Message) (float64, st
 	if te.pool == nil || te.pool.cfg.Classifier == nil {
 		return 0.0, "no classifier configured"
 	}
+	var score float64
+	var reason string
 	if len(msgs) == 1 {
 		res := te.pool.cfg.Classifier.Classify(te.pool.ctx, msgs[0], recentContext)
-		return res.Confidence, res.Reason
+		score, reason = res.Confidence, res.Reason
+	} else {
+		res := te.pool.cfg.Classifier.ClassifyBurst(te.pool.ctx, msgs, recentContext)
+		score, reason = res.Confidence, res.Reason
 	}
-	res := te.pool.cfg.Classifier.ClassifyBurst(te.pool.ctx, msgs, recentContext)
-	log.Printf("[AmbientClassifier] Channel %s | BurstSize %d | Score: %.2f (Threshold: %.2f) | Wake: %t | Reason: %s",
-		te.threadID, len(msgs), res.Confidence, te.policy.GetAmbientWakeThreshold(), res.Confidence >= te.policy.GetAmbientWakeThreshold(), res.Reason)
-	return res.Confidence, res.Reason
+	channelName := te.effectiveName
+	if channelName == "" {
+		channelName = te.threadID
+	}
+	threshold := te.policy.GetAmbientWakeThreshold()
+	log.Printf("[AmbientClassifier] Channel %s (%d msgs): score=%.2f threshold=%.2f wake=%v reason=%s",
+		channelName, len(msgs), score, threshold, score >= threshold, reason)
+	return score, reason
 }
 
 func (te *turnExecution) handleAllAmbientPlan() bool {
