@@ -1,6 +1,6 @@
 ---
 name: self-improvement
-description: Tiered engineering workflow (Tiers 0-3), Girl Gang multi-agent review orchestration, Subagent-Driven Development (SDD), Dynamic Scope Re-Tiering, and CI/RoboRev remediation across Aerial repositories. Load for Tier 2/3 planning and reviews, multi-chunk Vanadis builds, schema migrations, or CI/RoboRev failure wakes.
+description: Tiered engineering workflow (Tiers 0-3), Girl Gang multi-agent review orchestration, Subagent-Driven Development (SDD), Dynamic Scope Re-Tiering, and CI/RoboRev remediation across Aerial repositories. Load for Tier 1-3 planning and reviews, Vanadis builds, schema migrations, or CI/RoboRev failure wakes.
 ---
 
 # Aerial Self-Improvement & Tiered Engineering Workflow
@@ -8,7 +8,7 @@ description: Tiered engineering workflow (Tiers 0-3), Girl Gang multi-agent revi
 Universal coding, testing, scratch workspace (`scripts/aerial-pr.sh init/submit`), and repository topology invariants are always loaded via `rules/discord/04-engineering.md` and `rules/discord/06-architecture.md`. This skill defines the **Tiered Review & Orchestration Workflow**, **Scope Escalation Gates**, and **CI / RoboRev Remediation Playbook**.
 
 ## Specialized Reference Runbooks (Load Only When Needed)
-- **Multi-Chunk Vanadis Build Plans (`scripts/aerial-build.sh enqueue`)**: Read [`references/vanadis-build-authoring.md`](references/vanadis-build-authoring.md) before authoring a multi-chunk build JSON.
+- **Vanadis Build Plans (`scripts/aerial-build.sh enqueue`)**: Read [`references/vanadis-build-authoring.md`](references/vanadis-build-authoring.md) before authoring a single-chunk or multi-chunk build JSON.
 - **Declarative Database Schema Migrations (`schema.sql` / Ariga Atlas)**: Read [`references/atlas-migrations.md`](references/atlas-migrations.md) whenever modifying database schemas.
 
 ---
@@ -23,7 +23,7 @@ Scale review rigor and subagent orchestration dynamically by blast radius:
 
 - **Tier 1 (< 50 LOC, targeted bugfixes & test additions)**:
   - **Review Overhead**: None (plan and diff review subagents bypassed).
-  - **Execution**: Continuous autonomous execution. Run single-file edits inline; delegate multi-file triage or iterative test fixes to a scoped subagent to keep the root transcript featherweight. Verify via targeted package unit tests and `./scripts/verify.sh --staged`.
+  - **Execution**: Routed through Vanadis single-chunk builds (`scripts/aerial-build.sh enqueue <plan.json>`) by default to keep the primary channel daemon and root transcript featherweight. Verify via targeted package unit tests and `./scripts/verify.sh --staged`.
 
 - **Tier 2 (50–200 LOC, multi-PR/cross-repo rollouts, standard features & multi-package refactors)**:
   - **Plan Review**: The Girl Gang review panel audits the plan in a single isolated subagent across 4 disciplines (~45s).
