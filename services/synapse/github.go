@@ -817,6 +817,15 @@ func prCheckKey(repo string, prNumber int) string {
 	return fmt.Sprintf("%s#%d", normalizeRepo(repo), prNumber)
 }
 
+func (s *RouterServer) hasCancelledCheckForSHA(repo string, prNumber int, headSHA string) bool {
+	headSHA = strings.TrimSpace(headSHA)
+	if s == nil || prNumber <= 0 || headSHA == "" {
+		return false
+	}
+	cancelledSHA, ok := s.cancelledCheckSHAs.Load(prCheckKey(repo, prNumber))
+	return ok && cancelledSHA == headSHA
+}
+
 func (s *RouterServer) canRecoverRoboRevSuccess(ctx context.Context, repo string, prNumber int, headSHA string) bool {
 	headSHA = strings.TrimSpace(headSHA)
 	if s == nil || prNumber <= 0 || headSHA == "" {
@@ -829,8 +838,25 @@ func (s *RouterServer) canRecoverRoboRevSuccess(ctx context.Context, repo string
 	return comment != "" && !strings.Contains(comment, "## roborev: Review Passed")
 }
 
+func (s *RouterServer) canRecoverCheckSuccess(ctx context.Context, repo string, prNumber int, checkName, headSHA string) bool {
+	if isGateAggregatorCheck(checkName) {
+		headSHA = strings.TrimSpace(headSHA)
+		if failedSHA, ok := s.nonRoboRevFailedSHAs.Load(prCheckKey(repo, prNumber)); ok && headSHA != "" && failedSHA == headSHA {
+			return true
+		}
+		return s.hasCancelledCheckForSHA(repo, prNumber, headSHA)
+	}
+	if strings.EqualFold(strings.TrimSpace(checkName), "roborev") {
+		return s.canRecoverRoboRevSuccess(ctx, repo, prNumber, headSHA)
+	}
+	return false
+}
+
 func (s *RouterServer) isStaleOrIgnoredCIFailure(ctx context.Context, res *ResolvedGitHubEvent) bool {
-	if s.registry == nil || (res.Conclusion != "failure" && res.Conclusion != "timed_out") || isGateAggregatorCheck(res.CheckName) {
+	if s.registry == nil || (res.Conclusion != "failure" && res.Conclusion != "timed_out") {
+		return true
+	}
+	if isGateAggregatorCheck(res.CheckName) && !s.hasCancelledCheckForSHA(res.Repo, res.PRNumber, res.HeadSHA) {
 		return true
 	}
 	if res.PRNumber <= 0 || res.HeadSHA == "" || isZeroSHA(res.HeadSHA) {
@@ -878,7 +904,7 @@ func (s *RouterServer) handleCIFailureByHeadSHA(ctx context.Context, res *Resolv
 	res.TargetID = firstNonEmpty(res.TargetID, targetID)
 	if prNum > 0 && res.PRNumber == 0 {
 		res.PRNumber = prNum
-		if res.Event == "check_run" && !isRoboRevCheck(res.CheckName) {
+		if res.Event == "check_run" && !isRoboRevCheck(res.CheckName) && !isGateAggregatorCheck(res.CheckName) {
 			s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
 		}
 	}
@@ -892,7 +918,7 @@ func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *Resol
 	if s.isStaleOrIgnoredCIFailure(ctx, res) {
 		return nil
 	}
-	if res.Event == "check_run" && res.PRNumber > 0 && res.HeadSHA != "" && !isRoboRevCheck(res.CheckName) {
+	if res.Event == "check_run" && res.PRNumber > 0 && res.HeadSHA != "" && !isRoboRevCheck(res.CheckName) && !isGateAggregatorCheck(res.CheckName) {
 		s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
 	}
 	if res.PRNumber > 0 {
@@ -984,6 +1010,7 @@ func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res 
 		return s.handlePRClosedAction(ctx, res, pr.Merged)
 	case "synchronize":
 		s.nonRoboRevFailedSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
+		s.cancelledCheckSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
 		targetID, err := s.registry.UpdatePRSync(ctx, res.Repo, res.PRNumber, res.HeadSHA)
 		if err != nil {
 			return err
@@ -1063,7 +1090,13 @@ func (s *RouterServer) processGitHubPullRequestEvent(ctx context.Context, delive
 }
 
 func (s *RouterServer) recordCheckRunStatus(ctx context.Context, res *ResolvedGitHubEvent) {
-	if s.registry == nil || res.PRNumber <= 0 || res.HeadSHA == "" || isGateAggregatorCheck(res.CheckName) || isDependabotBranch(res.Branch) {
+	if s.registry == nil || res.PRNumber <= 0 || res.HeadSHA == "" || isGateAggregatorCheck(res.CheckName) {
+		return
+	}
+	if strings.EqualFold(strings.TrimSpace(res.Status), "completed") && strings.EqualFold(strings.TrimSpace(res.Conclusion), "cancelled") {
+		s.cancelledCheckSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
+	}
+	if isDependabotBranch(res.Branch) {
 		return
 	}
 	checkState := classifyCheckState(res.Status, res.Conclusion)
@@ -1097,7 +1130,9 @@ func (s *RouterServer) processGitHubCheckRunEvent(ctx context.Context, delivery 
 	log.Printf("[synapse] [github] [check_run] repo=%s check=%q head_sha=%s pr=%d branch=%s status=%s conclusion=%s source=%s target_id=%s delivery=%s",
 		res.Repo, res.CheckName, res.HeadSHA, res.PRNumber, res.Branch, res.Status, res.Conclusion, res.ResolutionSource, res.TargetID, delivery)
 
-	if p.Action == "completed" && res.Conclusion == "success" && res.PRNumber > 0 && strings.EqualFold(strings.TrimSpace(res.CheckName), "roborev") && s.registry != nil && s.canRecoverRoboRevSuccess(ctx, res.Repo, res.PRNumber, res.HeadSHA) {
+	if p.Action == "completed" && res.Conclusion == "success" && res.PRNumber > 0 && s.registry != nil && s.canRecoverCheckSuccess(ctx, res.Repo, res.PRNumber, res.CheckName, res.HeadSHA) {
+		s.nonRoboRevFailedSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
+		s.cancelledCheckSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
 		targetID, err := s.registry.UpdatePRSync(ctx, res.Repo, res.PRNumber, res.HeadSHA)
 		if err != nil {
 			return nil, err

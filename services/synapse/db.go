@@ -311,7 +311,7 @@ func (r *PostgresPRRegistry) RecordPRCheckStatus(ctx context.Context, repo strin
 		updated_at = CURRENT_TIMESTAMP
 		WHERE repo = $1
 		  AND pr_number = $2
-		  AND ((status = 'open' AND head_sha = $3) OR (status IN ('merged', 'synced') AND merge_sha = $3))
+		  AND ((status IN ('open', 'ci_failed', 'conflict') AND head_sha = $3) OR (status IN ('merged', 'synced') AND merge_sha = $3))
 		  AND COALESCE(metadata->'ci_checks'->>$4, '') IS DISTINCT FROM $5
 		RETURNING TRUE;`
 	var updated bool
