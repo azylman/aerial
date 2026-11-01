@@ -124,6 +124,70 @@ check_rule_file_sizes() {
     done
 }
 
+# Verify dependabot configuration coverage and security group pairing
+check_dependabot_coverage() {
+    local dep_file="$REPO_ROOT/.github/dependabot.yml"
+    if [ ! -f "$dep_file" ]; then
+        echo "🚨 [Aerial Verify] Error: Missing .github/dependabot.yml configuration file!" >&2
+        exit 1
+    fi
+
+    local missing_manifests=""
+    for svc in $GO_SERVICES; do
+        if ! grep -q -F "\"/${svc}\"" "$dep_file" && ! grep -q -F "'/${svc}'" "$dep_file" && ! grep -q -E "^[[:space:]]*-[[:space:]]*\"?/${svc}\"?[[:space:]]*$" "$dep_file"; then
+            missing_manifests="${missing_manifests} /${svc}"
+        fi
+    done
+
+    # Discovered package manifests up to maxdepth 3 excluding vendor, node_modules, testdata, and hidden directories
+    local discovered_dirs
+    discovered_dirs=$(cd "$REPO_ROOT" && find . -maxdepth 3 -type f \( -name "go.mod" -o -name "Cargo.toml" -o -name "pyproject.toml" -o -name "package.json" \) \
+        ! -path "*/vendor/*" ! -path "*/node_modules/*" ! -path "*/testdata/*" ! -path "*/.*" 2>/dev/null | \
+        sed 's|^\./||' | while read -r mf; do dirname "$mf"; done | sort -u)
+
+    for dir in $discovered_dirs; do
+        local target_dir
+        if [ "$dir" = "." ]; then
+            target_dir="/"
+        else
+            target_dir="/$dir"
+        fi
+        if ! grep -q -F "\"${target_dir}\"" "$dep_file" && ! grep -q -F "'${target_dir}'" "$dep_file" && ! grep -q -E "^[[:space:]]*(-[[:space:]]*)?\"?${target_dir}\"?[[:space:]]*$" "$dep_file"; then
+            case " $missing_manifests " in
+                *" $target_dir "*) ;;
+                *) missing_manifests="${missing_manifests} $target_dir" ;;
+            esac
+        fi
+    done
+
+    if [ -n "$missing_manifests" ]; then
+        echo "🚨 [Aerial Verify] Error: Discovered package directories missing from .github/dependabot.yml:" >&2
+        for m in $missing_manifests; do
+            echo "   • $m" >&2
+        done
+        exit 1
+    fi
+
+    local eco_count ver_count sec_count
+    eco_count=$(grep -c "package-ecosystem:" "$dep_file" || true)
+    ver_count=$(grep -c "applies-to:[[:space:]]*version-updates" "$dep_file" || true)
+    sec_count=$(grep -c "applies-to:[[:space:]]*security-updates" "$dep_file" || true)
+
+    if [ "$eco_count" -le 0 ]; then
+        echo "🚨 [Aerial Verify] Error: No package-ecosystem entries defined in .github/dependabot.yml!" >&2
+        exit 1
+    fi
+
+    if [ "$eco_count" -ne "$ver_count" ] || [ "$eco_count" -ne "$sec_count" ]; then
+        echo "🚨 [Aerial Verify] Error: Dependabot grouping mismatch in .github/dependabot.yml!" >&2
+        echo "   package-ecosystems: $eco_count" >&2
+        echo "   applies-to: version-updates: $ver_count" >&2
+        echo "   applies-to: security-updates: $sec_count" >&2
+        echo "   Every package-ecosystem must have both a version-updates and security-updates group." >&2
+        exit 1
+    fi
+}
+
 # Dynamically discover all Go modules in the monorepo
 GO_SERVICES=$(cd "$REPO_ROOT" && find . -maxdepth 3 -name "go.mod" ! -path "*/.*" ! -path "*/vendor/*" | sed 's|^\./||; s|/go\.mod$||' | sort | tr '\n' ' ' | sed 's/[[:space:]]*$//')
 
@@ -504,6 +568,7 @@ if [ "$MODE" = "staged" ]; then
     check_gofmt
     check_no_main_in_tests
     check_rule_file_sizes
+    check_dependabot_coverage
     check_no_imperative_ddl
     check_code_health
 
@@ -593,6 +658,7 @@ check_utf8_bom
 check_gofmt
 check_no_main_in_tests
 check_rule_file_sizes
+check_dependabot_coverage
 
 echo "=== 1. Static Analysis & Linting ==="
 for svc in $GO_SERVICES; do

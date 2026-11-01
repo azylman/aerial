@@ -379,6 +379,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      checks: read
     steps:
       - name: Checkout PR Branch
         uses: actions/checkout@v7
@@ -425,6 +426,31 @@ jobs:
               echo "${OVERRIDE_COMMENT}" >> "$GITHUB_STEP_SUMMARY"
               echo "RoboRev gate overridden for commit ${SHORT_SHA} via verified technical rebuttal."
               exit 0
+            fi
+
+            CUR_PATCH=$(git diff "origin/main...${HEAD_SHA}" 2>/dev/null | git patch-id --stable | awk '{print $1}')
+            if [ -n "${CUR_PATCH:-}" ]; then
+              CANDIDATE_SHAS=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/commits?per_page=100" --jq '.[].sha' 2>/dev/null || true)
+              PARENT_SHA=$(git rev-parse --verify "${HEAD_SHA}^1" 2>/dev/null || true)
+              ALL_CANDIDATES=$(printf "%s\n%s\n" "${CANDIDATE_SHAS}" "${PARENT_SHA}" | grep -v '^[[:space:]]*$' | sort -u || true)
+              for PREV_SHA in $ALL_CANDIDATES; do
+                if [ "$PREV_SHA" = "$HEAD_SHA" ]; then
+                  continue
+                fi
+                if ! git cat-file -e "${PREV_SHA}^{commit}" 2>/dev/null; then
+                  continue
+                fi
+                PREV_PATCH=$(git diff "origin/main...${PREV_SHA}" 2>/dev/null | git patch-id --stable | awk '{print $1}')
+                if [ -n "${PREV_PATCH:-}" ] && [ "$PREV_PATCH" = "$CUR_PATCH" ]; then
+                  PASSED_COUNT=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${PREV_SHA}/check-runs" --jq '[.check_runs[] | select(.name == "roborev" and .status == "completed" and .conclusion == "success")] | length' 2>/dev/null || echo 0)
+                  if [ "${PASSED_COUNT:-0}" -gt 0 ]; then
+                    SUMMARY_LINE="RoboRev gate passed via unchanged patch-id ${CUR_PATCH:0:12} inherited from green commit ${PREV_SHA:0:7}."
+                    echo "$SUMMARY_LINE" >> "$GITHUB_STEP_SUMMARY"
+                    echo "$SUMMARY_LINE"
+                    exit 0
+                  fi
+                fi
+              done
             fi
           fi
           roborev ci review \
