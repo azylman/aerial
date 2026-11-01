@@ -213,17 +213,17 @@ func wirePoolSessionDependencies(pools map[PoolKey]runner.AgentPool, sessionMgr 
 		}
 		if sessionMgr != nil {
 			if tr, ok := pool.(interface {
-				SetTranscriptRescuer(func(string, time.Time) string)
+				SetTranscriptRescuer(fn func(string, time.Time) string)
 			}); ok {
 				tr.SetTranscriptRescuer(sessionMgr.ExtractResponseSince)
 			}
-			if sm, ok := pool.(interface{ SetSessionManager(*session.Manager) }); ok {
+			if sm, ok := pool.(interface{ SetSessionManager(mgr *session.Manager) }); ok {
 				sm.SetSessionManager(sessionMgr)
 			}
 		}
 		if store != nil && !k.Ephemeral {
 			if sc, ok := pool.(interface {
-				SetSessionCallbacks(func(context.Context, string) (runner.SessionRecord, error), func(context.Context, string, string, string) error)
+				SetSessionCallbacks(getFn func(context.Context, string) (runner.SessionRecord, error), saveFn func(context.Context, string, string, string) error)
 			}); ok {
 				sc.SetSessionCallbacks(getRec, onRot)
 			}
@@ -374,7 +374,9 @@ func resolveDefaultSummarizerLLM(pools map[PoolKey]runner.AgentPool) LLMFunc {
 		if candidate == nil {
 			continue
 		}
-		if ep, ok := candidate.(interface{ EphemeralLLMFunc(string) runner.LLMFunc }); ok {
+		if ep, ok := candidate.(interface {
+			EphemeralLLMFunc(model string) runner.LLMFunc
+		}); ok {
 			return ep.EphemeralLLMFunc("ephemeral:summarizer")
 		}
 	}
@@ -1057,7 +1059,7 @@ func (p *WorkerPool) MarkDirty() {
 	}
 	p.mu.Unlock()
 	for _, pool := range pools {
-		if targetUpdater, ok := pool.(interface{ UpdatePrewarmedTargets([]string) }); ok && voiceTargets != nil {
+		if targetUpdater, ok := pool.(interface{ UpdatePrewarmedTargets(targets []string) }); ok && voiceTargets != nil {
 			targetUpdater.UpdatePrewarmedTargets(voiceTargets)
 		}
 		if md, ok := pool.(interface{ MarkDirty() }); ok {

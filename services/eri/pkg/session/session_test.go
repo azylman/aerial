@@ -397,12 +397,12 @@ func TestExtractLastTurnError(t *testing.T) {
 			convID: "s-large-err",
 			transcript: func() string {
 				var sb strings.Builder
-				sb.WriteString(fmt.Sprintf(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","created_at":%q}`+"\n", t0.Format(time.RFC3339Nano)))
+				fmt.Fprintf(&sb, `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","created_at":%q}`+"\n", t0.Format(time.RFC3339Nano))
 				padding := strings.Repeat("A", 1000)
 				for i := 1; i <= 1050; i++ {
-					sb.WriteString(fmt.Sprintf(`{"step_index":%d,"source":"MODEL","type":"PLANNER_RESPONSE","content":%q}`+"\n", i, padding))
+					fmt.Fprintf(&sb, `{"step_index":%d,"source":"MODEL","type":"PLANNER_RESPONSE","content":%q}`+"\n", i, padding)
 				}
-				sb.WriteString(fmt.Sprintf(`{"step_index":1051,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","error":"large chunk fail","created_at":%q}`+"\n", t1.Format(time.RFC3339Nano)))
+				fmt.Fprintf(&sb, `{"step_index":1051,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","error":"large chunk fail","created_at":%q}`+"\n", t1.Format(time.RFC3339Nano))
 				return sb.String()
 			}(),
 			since:     t0,
@@ -618,7 +618,7 @@ func TestSessionStorageAndRotationMetrics(t *testing.T) {
 								typ = "USER_INPUT"
 								source = "USER_EXPLICIT"
 							}
-							sb.WriteString(fmt.Sprintf(`{"step_index":%d,"source":%q,"type":%q,"content":"msg"}`+"\n", i, source, typ))
+							fmt.Fprintf(&sb, `{"step_index":%d,"source":%q,"type":%q,"content":"msg"}`+"\n", i, source, typ)
 						}
 						content = sb.String()
 					} else if tc.transSize > 0 {

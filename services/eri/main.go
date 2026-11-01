@@ -629,7 +629,7 @@ func startLeaderHandoff(
 	pool *queue.WorkerPool,
 	allPools []runner.AgentPool,
 	ephemeralPool interface {
-		EphemeralLLMFunc(string) runner.LLMFunc
+		EphemeralLLMFunc(model string) runner.LLMFunc
 	},
 	cfg *config.Config,
 	cur *config.ConfigData,
@@ -720,7 +720,8 @@ func startSIGHUPReloadLoop(ctx context.Context, appHupChan <-chan os.Signal, rel
 
 func serveBrainHTTP(ctx context.Context, ln net.Listener, mux http.Handler, model string, asyncErrCh ...<-chan error) error {
 	srv := &http.Server{
-		Handler: metricsMiddleware(mux),
+		Handler:           metricsMiddleware(mux),
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	if onServerReady != nil {

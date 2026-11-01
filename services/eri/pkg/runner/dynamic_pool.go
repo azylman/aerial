@@ -97,7 +97,7 @@ func (p *DynamicVoicePool) UpdatePrewarmedTargets(targets []string) {
 	if err != nil {
 		return
 	}
-	if u, ok := pool.(interface{ UpdatePrewarmedTargets([]string) }); ok {
+	if u, ok := pool.(interface{ UpdatePrewarmedTargets(targets []string) }); ok {
 		u.UpdatePrewarmedTargets(targets)
 	}
 }

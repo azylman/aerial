@@ -71,7 +71,7 @@ func createTestSpawner(onPrompt ...func(prompt string)) *MockDaemonSpawner {
 						if strings.Contains(prompt, "custom-prompt") {
 							resp = "custom-result-ok"
 						}
-						_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"result","result":{"status":"SUCCESS","response":%q}}`+"\n", resp)))
+						_, _ = fmt.Fprintf(outW, `{"event":"result","result":{"status":"SUCCESS","response":%q}}`+"\n", resp)
 					}
 				}
 			}()
@@ -273,6 +273,7 @@ func TestInterchangeablePool_DelegationAndErrorGuards(t *testing.T) {
 	if eErr != nil || res != "custom-result-ok" || lErr != nil || res2 != "custom-result-ok" {
 		t.Fatalf("unexpected ephemeral: res=(%q, %v), llm=(%q, %v)", res, eErr, res2, lErr)
 	}
+	pool.WaitBackground()
 
 	pool.SetTranscriptRescuer(func(string, time.Time) string { return "rescued" })
 	pool.MarkDirty()

@@ -73,7 +73,7 @@ func newPipeMockSpawner(opts pipeMockSpawnerOpts) *MockDaemonSpawner {
 			go func() {
 				defer outW.Close()
 				if opts.skipInitOnAttempt == 0 || int(idx) != opts.skipInitOnAttempt {
-					_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","session_id":%q}`+"\n", sessID)))
+					_, _ = fmt.Fprintf(outW, `{"event":"init","session_id":%q}`+"\n", sessID)
 				}
 				buf := make([]byte, 4096)
 				for {
@@ -92,9 +92,9 @@ func newPipeMockSpawner(opts pipeMockSpawnerOpts) *MockDaemonSpawner {
 								status = "SUCCESS"
 							}
 						}
-						_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"result","response":%q,"error":%q,"status":%q}`+"\n", resp, errStr, status)))
+						_, _ = fmt.Fprintf(outW, `{"event":"result","response":%q,"error":%q,"status":%q}`+"\n", resp, errStr, status)
 					} else if opts.echoRes != "" && strings.Contains(line, `"event":"user"`) {
-						_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"result","result":{"status":"SUCCESS","response":%q}}`+"\n", opts.echoRes)))
+						_, _ = fmt.Fprintf(outW, `{"event":"result","result":{"status":"SUCCESS","response":%q}}`+"\n", opts.echoRes)
 					}
 				}
 			}()

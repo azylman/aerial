@@ -5,6 +5,7 @@ import (
 	"log"
 	"strings"
 	"time"
+	// Embed fallback timezone database.
 	_ "time/tzdata"
 
 	"github.com/azylman/aerial/pkg/sanitizer"
@@ -753,7 +754,7 @@ func (te *turnExecution) resolveExecutionPool() (runner.AgentPool, PoolKey, erro
 }
 
 type daemonGetter interface {
-	Get(string) (*runner.StreamingDaemon, bool)
+	Get(sessionID string) (*runner.StreamingDaemon, bool)
 }
 
 func lookupDaemon(dPool daemonGetter, threadID string) *runner.StreamingDaemon {

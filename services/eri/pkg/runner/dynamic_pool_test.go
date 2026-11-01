@@ -293,6 +293,7 @@ func TestDynamicVoicePool_SerializedReloadsAndDrain(t *testing.T) {
 		cur := atomic.AddInt32(&active, 1)
 		defer atomic.AddInt32(&active, -1)
 		for old := atomic.LoadInt32(&maxConc); cur > old && !atomic.CompareAndSwapInt32(&maxConc, old, cur); old = atomic.LoadInt32(&maxConc) {
+			runtime.Gosched()
 		}
 		runtime.Gosched()
 		return newMockVoicePool("pool"), fmt.Sprintf("fp-%d", time.Now().UnixNano()), nil
