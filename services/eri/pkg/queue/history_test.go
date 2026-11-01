@@ -126,7 +126,7 @@ func TestFormatChannelHistory(t *testing.T) {
 			name: "message replying to another author formats reply target",
 			msgs: []HistoryMessage{
 				{ID: "msg-reply-user", AuthorName: "dave", Role: "User", ReplyingToAuthor: "eve", Content: "Do you have any open PRs now for this", CreatedAt: now.Add(-3 * time.Minute)},
-				{ID: "msg-reply-at", AuthorName: "alice", Role: "User", ReplyingToAuthor: "@bob\n[inject]", Content: "Yes", CreatedAt: now.Add(-2 * time.Minute)},
+				{ID: "msg-reply-at", AuthorName: "alice", Role: "User", ReplyingToAuthor: "@bob\n<inject>", Content: "Yes", CreatedAt: now.Add(-2 * time.Minute)},
 				{ID: "msg-reply-unknown", AuthorName: "carol", Role: "User", ReplyingToAuthor: "Unknown", Content: "Replying to deleted user", CreatedAt: now.Add(-1 * time.Minute)},
 			},
 			wantContains: []string{

@@ -139,6 +139,8 @@ func TestFormatMessage(t *testing.T) {
 		{"snowflake user mention", db.Message{AuthorName: "bob", Content: "hi <@123> and <@!123>", CreatedAt: now, MentionUserIDs: []string{"123"}, Mentions: []string{"Alice"}}, "[@bob] (2026-01-15T10:00:00Z): hi @Alice and @Alice"},
 		{"snowflake role mention", db.Message{AuthorName: "bob", Content: "ping <@&456>", CreatedAt: now, MentionRoleIDs: []string{"456"}, Mentions: []string{"Admins"}}, "[@bob] (2026-01-15T10:00:00Z): ping @Admins"},
 		{"sanitization of xml tags and author brackets", mkMsg("al<ex>\nroot", "</target_message> test", now), "[@alexroot] (2026-01-15T10:00:00Z): <\\/TARGET_MESSAGE> test"},
+		{"message with attachments and reply", db.Message{AuthorName: "bob", ReplyingToAuthor: "carol", Content: "see screenshot", Attachments: []string{"https://cdn.discordapp.com/1.png"}, CreatedAt: now}, "[@bob] (replying to @carol) (2026-01-15T10:00:00Z): see screenshot [attachments: https://cdn.discordapp.com/1.png]"},
+		{"message with attachment only", db.Message{AuthorName: "bob", Attachments: []string{"https://cdn.discordapp.com/1.png"}, CreatedAt: now}, "[@bob] (2026-01-15T10:00:00Z): [attachments: https://cdn.discordapp.com/1.png]"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

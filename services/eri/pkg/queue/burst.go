@@ -445,7 +445,7 @@ func CoalesceBurstPrompt(burst []db.Message, tzOpt ...string) string {
 		if !strings.HasPrefix(author, "@") {
 			author = "@" + author
 		}
-		replyTo := formatHistoryReplyTo(HistoryMessage{ReplyingToAuthor: classifier.ExtractReplyingToAuthor(m)})
+		replyTo := classifier.FormatReplyTarget(classifier.ExtractReplyingToAuthor(m))
 		ts := m.CreatedAt
 		if ts.IsZero() {
 			ts = time.Now()
@@ -453,7 +453,8 @@ func CoalesceBurstPrompt(burst []db.Message, tzOpt ...string) string {
 		if loc != nil {
 			ts = ts.In(loc)
 		}
-		fmt.Fprintf(&sb, "--- Message %d (by %s%s at %s) ---\n%s\n\n", i+1, author, replyTo, ts.Format("15:04:05"), sanitizer.SanitizePromptTags(m.BodyText()))
+		content := classifier.AppendAttachments(sanitizer.SanitizePromptTags(m.BodyText()), m.Attachments)
+		fmt.Fprintf(&sb, "--- Message %d (by %s%s at %s) ---\n%s\n\n", i+1, author, replyTo, ts.Format("15:04:05"), content)
 	}
 	sb.WriteString("</USER_REQUEST>")
 	return strings.TrimSpace(sb.String())

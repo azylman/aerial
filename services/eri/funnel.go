@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
 	"os"
 	"strings"
@@ -344,21 +343,7 @@ func resolveReplyContext(s *discordgo.Session, m *discordgo.Message, extraRoleNa
 	if m.ReferencedMessage.Author != nil {
 		replyingToAuthor = "@" + strings.ReplaceAll(strings.ReplaceAll(m.ReferencedMessage.Author.Username, "\n", " "), "\r", "")
 	}
-	replyingToContent = resolveMessageContent(s, m.ReferencedMessage, extraRoleNames...)
-	if len(m.ReferencedMessage.Attachments) > 0 {
-		var refAtts []string
-		for _, a := range m.ReferencedMessage.Attachments {
-			if a != nil && a.URL != "" {
-				refAtts = append(refAtts, a.URL)
-			}
-		}
-		if len(refAtts) > 0 {
-			if replyingToContent != "" {
-				replyingToContent += " "
-			}
-			replyingToContent += fmt.Sprintf("[attachments: %s]", strings.Join(refAtts, ", "))
-		}
-	}
+	replyingToContent = classifier.AppendAttachments(resolveMessageContent(s, m.ReferencedMessage, extraRoleNames...), resolveAttachments(m.ReferencedMessage))
 	return replyingToAuthor, replyingToContent
 }
 

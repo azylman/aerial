@@ -60,7 +60,7 @@ func (te *turnExecution) liveSessionIDForMessage(msgID string) (string, bool) {
 	return "", true
 }
 
-func convertDiscordMessageToDBMessage(dm *discordgo.Message, threadID string) db.Message {
+func convertDiscordMessageToDBMessage(dm *discordgo.Message, threadID string, batch ...*discordgo.Message) db.Message {
 	authorID, authorName := "", ""
 	if dm.Author != nil {
 		authorID, authorName = dm.Author.ID, dm.Author.Username
@@ -82,9 +82,15 @@ func convertDiscordMessageToDBMessage(dm *discordgo.Message, threadID string) db
 			mentionUserIDs = append(mentionUserIDs, u.ID)
 		}
 	}
-	var replyingToAuthor string
-	if dm.ReferencedMessage != nil && dm.ReferencedMessage.Author != nil {
-		replyingToAuthor = "@" + dm.ReferencedMessage.Author.Username
+	var attachments []string
+	for _, a := range dm.Attachments {
+		if a != nil && a.URL != "" {
+			attachments = append(attachments, a.URL)
+		}
+	}
+	replyingToAuthor := resolveDiscordReplyAuthor(dm, batch)
+	if replyingToAuthor != "" && !strings.HasPrefix(replyingToAuthor, "@") {
+		replyingToAuthor = "@" + replyingToAuthor
 	}
 	return db.Message{
 		ID:               dm.ID,
@@ -96,6 +102,7 @@ func convertDiscordMessageToDBMessage(dm *discordgo.Message, threadID string) db
 		Mentions:         mentions,
 		MentionUserIDs:   mentionUserIDs,
 		ReplyingToAuthor: replyingToAuthor,
+		Attachments:      attachments,
 	}
 }
 
@@ -120,7 +127,7 @@ func (te *turnExecution) fetchLiveDiscordThreadMessages(dg *discordgo.Session, t
 		if dm == nil || te.isBurstMessage(dm.ID) {
 			continue
 		}
-		msgs = append(msgs, convertDiscordMessageToDBMessage(dm, threadID))
+		msgs = append(msgs, convertDiscordMessageToDBMessage(dm, threadID, discordMsgs...))
 	}
 	return msgs, true
 }
