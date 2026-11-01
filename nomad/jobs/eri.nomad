@@ -150,11 +150,12 @@ EOH
 
       template {
         data = <<EOH
-{{- if nomadVarExists "nomad/jobs/eri" -}}
-{{- with nomadVar "nomad/jobs/eri" -}}
-{{- if .CONFIG_YAML -}}{{- .CONFIG_YAML -}}{{- end -}}
-{{- end -}}
-{{- end -}}
+{{ if nomadVarExists "nomad/jobs/eri" }}
+{{ with nomadVar "nomad/jobs/eri" }}
+# Asset Hash: {{ if .ASSET_HASH }}{{ .ASSET_HASH }}{{ end }}
+{{ if .CONFIG_YAML }}{{ .CONFIG_YAML }}{{ end }}
+{{ end }}
+{{ end }}
 EOH
         destination   = "local/config.yaml"
         change_mode   = "signal"

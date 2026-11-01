@@ -25,10 +25,15 @@ if [ "${1:-}" = "--stdio-shaper" ]; then
       try {
         const msg = JSON.parse(line), idKey = msg.id !== undefined && msg.id !== null ? String(msg.id) : "";
         if (idKey && listIds.delete(idKey) && msg.result && Array.isArray(msg.result.tools)) {
+          const prohibited = new Set(["create_pull_request", "merge_pull_request", "push_files", "create_or_update_file", "delete_file"]);
+          msg.result.tools = msg.result.tools.filter((t) => !prohibited.has(t.name));
           for (const t of msg.result.tools) {
-            if (t.name === "get_file_contents" && t.inputSchema && t.inputSchema.properties) {
-              t.inputSchema.properties.start_line = { type: "integer", description: "1-indexed start line to read (default: 1)" };
-              t.inputSchema.properties.end_line = { type: "integer", description: "1-indexed inclusive end line to read (max 250 lines per call)" };
+            if (t.name === "get_file_contents") {
+              t.description = (t.description || "") + " Note: Subject to a 250-line and 12,000-character truncation ceiling per call. Pass start_line and end_line for chunked reading.";
+              if (t.inputSchema && t.inputSchema.properties) {
+                t.inputSchema.properties.start_line = { type: "integer", description: "1-indexed start line to read (default: 1)" };
+                t.inputSchema.properties.end_line = { type: "integer", description: "1-indexed inclusive end line to read (max 250 lines per call)" };
+              }
             }
           }
         } else if (idKey && fileCalls.has(idKey)) {
