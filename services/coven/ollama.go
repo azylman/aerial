@@ -63,8 +63,8 @@ func NewOllamaClient(cfg *OllamaConfig) *Client {
 			NumCtx:      c.numCtx,
 		}
 	})
-	c.Client.SetHTTPClient(httpClient)
-	c.Client.SetRetryDelay(retryDelay)
+	c.SetHTTPClient(httpClient)
+	c.SetRetryDelay(retryDelay)
 	return c
 }
 

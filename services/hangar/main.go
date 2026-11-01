@@ -813,9 +813,10 @@ func NewConfigFromEnv() DaemonConfig {
 func main() {
 	cfg := NewConfigFromEnv()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
 
-	if err := RunDaemon(ctx, cfg); err != nil {
+	err := RunDaemon(ctx, cfg)
+	cancel()
+	if err != nil {
 		log.Fatalf("[Hangar] Fatal error: %v", err)
 	}
 }

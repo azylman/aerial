@@ -293,7 +293,7 @@ Fact: `)
 EXISTING CANDIDATE NEIGHBORS (id, similarity, text):
 `)
 	for _, n := range neighbors {
-		b.WriteString(fmt.Sprintf("- ID %d (similarity %.2f): %s\n", n.Fact.ID, n.Score, n.Fact.FactText))
+		fmt.Fprintf(&b, "- ID %d (similarity %.2f): %s\n", n.Fact.ID, n.Score, n.Fact.FactText)
 	}
 	b.WriteString(`
 Requirements:
@@ -973,7 +973,7 @@ func buildConsolidationPrompt(clique []ScoredFactWithEmbedding) string {
 	b.WriteString(FactConsolidationPrompt)
 	b.WriteString("\n\nCLUSTER FACTS TO CONSOLIDATE:\n")
 	for _, item := range clique {
-		b.WriteString(fmt.Sprintf("- (ID: %d) %s\n", item.Fact.ID, item.Fact.FactText))
+		fmt.Fprintf(&b, "- (ID: %d) %s\n", item.Fact.ID, item.Fact.FactText)
 	}
 	return b.String()
 }

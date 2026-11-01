@@ -81,13 +81,14 @@ func NormalizeE164(raw string) (string, error) {
 	}
 
 	var candidate string
-	if strings.HasPrefix(cleaned, "+") {
+	switch {
+	case strings.HasPrefix(cleaned, "+"):
 		candidate = cleaned
-	} else if len(cleaned) == 11 && strings.HasPrefix(cleaned, "1") {
+	case len(cleaned) == 11 && strings.HasPrefix(cleaned, "1"):
 		candidate = "+" + cleaned
-	} else if len(cleaned) == 10 && cleaned[0] >= '2' && cleaned[0] <= '9' {
+	case len(cleaned) == 10 && cleaned[0] >= '2' && cleaned[0] <= '9':
 		candidate = "+1" + cleaned
-	} else {
+	default:
 		return "", fmt.Errorf("invalid E.164 phone number: %q", raw)
 	}
 

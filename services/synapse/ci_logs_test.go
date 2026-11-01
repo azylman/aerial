@@ -381,10 +381,8 @@ func TestCompleteCIFailureTransition(t *testing.T) {
 						t.Errorf("prompt missing %q:\n%s", sub, prompt)
 					}
 				}
-			} else {
-				if len(dispatcher.dispatchCalls) > 0 {
-					t.Fatalf("unexpected dispatchCall: %v", dispatcher.dispatchCalls)
-				}
+			} else if len(dispatcher.dispatchCalls) > 0 {
+				t.Fatalf("unexpected dispatchCall: %v", dispatcher.dispatchCalls)
 			}
 		})
 	}

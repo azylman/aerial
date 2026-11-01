@@ -637,17 +637,19 @@ func (s *RouterServer) processNomadEvaluationEvent(ctx context.Context, rawPaylo
 	hasUnqueuedFailures := hasUnqueuedFailedAllocs(eval.FailedTGAllocs, eval.QueuedAllocations)
 	isExplicitFailure := strings.EqualFold(eval.Status, "failed") || strings.EqualFold(eval.Status, "canceled") || strings.EqualFold(eval.Status, "cancelled")
 
-	if hasUnqueuedFailures || isExplicitFailure {
+	switch {
+	case hasUnqueuedFailures || isExplicitFailure:
 		if s.isNomadJobHealthy(ctx, eval.JobID) {
 			return nil
 		}
 		return s.HandleNomadJobFailure(ctx, eval.JobID, eval.ID, eval.Status, formatFailedTGAllocs(eval.StatusDescription, eval.FailedTGAllocs))
-	} else if eval.BlockedEval != "" || allFailedTaskGroupsQueued(eval.FailedTGAllocs, eval.QueuedAllocations) {
+	case eval.BlockedEval != "" || allFailedTaskGroupsQueued(eval.FailedTGAllocs, eval.QueuedAllocations):
 		return nil
-	} else if strings.EqualFold(eval.Status, "complete") && s.isNomadJobHealthy(ctx, eval.JobID) {
+	case strings.EqualFold(eval.Status, "complete") && s.isNomadJobHealthy(ctx, eval.JobID):
 		return s.HandleNomadJobSuccess(ctx, eval.JobID, eval.ID)
+	default:
+		return nil
 	}
-	return nil
 }
 
 func (s *RouterServer) processNomadJobEvent(ctx context.Context, eventType string, rawPayload json.RawMessage) error {

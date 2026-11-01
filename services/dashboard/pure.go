@@ -405,7 +405,7 @@ func IsCoreAerialContainer(c DockerContainerJSON) bool {
 // when splitting on non-alphanumeric/non-hyphen characters.
 func containsWordToken(s, token string) bool {
 	tokens := strings.FieldsFunc(s, func(r rune) bool {
-		return !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-')
+		return (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-'
 	})
 	for _, tok := range tokens {
 		if strings.EqualFold(tok, token) {
@@ -482,14 +482,16 @@ func ParseMatrixJobChips(jobs []GitHubJob, now time.Time) []MatrixJobChip {
 		seen[svc] = true
 
 		chipStatus := "pending"
-		if j.Status == "in_progress" {
+		switch j.Status {
+		case "in_progress":
 			chipStatus = "active"
-		} else if j.Status == "completed" {
-			if j.Conclusion == "success" {
+		case "completed":
+			switch j.Conclusion {
+			case "success":
 				chipStatus = "completed"
-			} else if j.Conclusion == "failure" {
+			case "failure":
 				chipStatus = "failed"
-			} else {
+			default:
 				chipStatus = "pending"
 			}
 		}

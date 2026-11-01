@@ -838,11 +838,12 @@ func (s *MediaStreamSession) toolSendDTMF(fc GeminiFunctionCall) {
 
 func (s *MediaStreamSession) sendGeminiToolResult(callID string, res string, err error, fallback string) {
 	var resp GeminiToolResponseMessage
-	if err != nil {
+	switch {
+	case err != nil:
 		resp = BuildGeminiToolResponse(callID, map[string]any{"error": err.Error()})
-	} else if res != "" {
+	case res != "":
 		resp = BuildGeminiToolResponse(callID, map[string]any{"result": res})
-	} else {
+	default:
 		resp = BuildGeminiToolResponse(callID, map[string]any{"result": fallback})
 	}
 	if sendErr := s.sendGeminiJSON(resp); sendErr != nil {

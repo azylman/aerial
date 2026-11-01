@@ -366,16 +366,7 @@ func (s *VanadisServer) handleMCPAppendChunk(ctx context.Context, args MCPAppend
 
 	inputs := make([]CreateChunkInput, len(args.Chunks))
 	for i, c := range args.Chunks {
-		inputs[i] = CreateChunkInput{
-			ID:                 c.ID,
-			Repo:               c.Repo,
-			Title:              c.Title,
-			Instructions:       c.Instructions,
-			TargetFiles:        c.TargetFiles,
-			TargetSymbols:      c.TargetSymbols,
-			Effort:             c.Effort,
-			AcceptanceCriteria: c.AcceptanceCriteria,
-		}
+		inputs[i] = CreateChunkInput(c)
 	}
 
 	appended, err := s.store.AppendChunks(ctx, buildID, inputs)

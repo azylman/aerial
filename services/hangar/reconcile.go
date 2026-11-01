@@ -557,11 +557,9 @@ func (d *SyncDaemon) executeDebouncedReconcileCycle(ctx context.Context) {
 	if d.consumePendingNomadServerRestart() {
 		if errNomad := d.reconcileNomadServer(ctx, d.composeDir); errNomad != nil {
 			log.Printf("[Hangar:GitOps] Warning: reconcileNomadServer encountered error: %v", errNomad)
-		} else {
+		} else if !sleepWithContext(ctx, reconcilerServerReadyDelay) {
 			// Wait briefly for Nomad API readiness after server container restart
-			if !sleepWithContext(ctx, reconcilerServerReadyDelay) {
-				return
-			}
+			return
 		}
 	}
 

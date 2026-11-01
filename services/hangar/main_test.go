@@ -608,11 +608,12 @@ func TestComposeGraph_NoGitsyncDependents(t *testing.T) {
 			continue
 		}
 		if inDependsOn {
-			if len(line) > 0 && line[0] != ' ' {
+			switch {
+			case len(line) > 0 && line[0] != ' ':
 				inDependsOn, currentService = false, ""
-			} else if strings.HasPrefix(line, "    ") && !strings.HasPrefix(line, "      ") && !strings.HasPrefix(line, "    depends_on:") && strings.HasSuffix(trimmed, ":") {
+			case strings.HasPrefix(line, "    ") && !strings.HasPrefix(line, "      ") && !strings.HasPrefix(line, "    depends_on:") && strings.HasSuffix(trimmed, ":"):
 				inDependsOn = false
-			} else if strings.Contains(line, "gitsync:") || trimmed == "- gitsync" {
+			case strings.Contains(line, "gitsync:") || trimmed == "- gitsync":
 				t.Fatalf("line %d: service %q declares dependency on gitsync (%s); gitsync must have in-degree 0 in Compose DAG", lineNum+1, currentService, trimmed)
 			}
 		}

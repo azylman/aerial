@@ -269,11 +269,12 @@ func fetchDockerClusterState(ctx context.Context) ([]ServiceStatus, []DockerCont
 
 		status := "healthy"
 		statusLower := strings.ToLower(c.Status)
-		if strings.Contains(statusLower, "(unhealthy)") {
+		switch {
+		case strings.Contains(statusLower, "(unhealthy)"):
 			status = "unhealthy"
-		} else if strings.Contains(statusLower, "starting") || strings.Contains(statusLower, "(health: starting)") {
+		case strings.Contains(statusLower, "starting") || strings.Contains(statusLower, "(health: starting)"):
 			status = "starting"
-		} else if c.State != "running" {
+		case c.State != "running":
 			status = "unhealthy"
 		}
 

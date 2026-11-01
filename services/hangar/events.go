@@ -246,15 +246,16 @@ func (d *SyncDaemon) applyGitPushNomadChanges(
 		}
 		log.Printf("[Hangar:GitPush] Notice: applyNomadChangesDirectly notice: %v", errRec)
 	}
-	if isConfigRepo {
+	switch {
+	case isConfigRepo:
 		if len(deferred) > 0 {
 			resp.Message = fmt.Sprintf("applied %d job(s); deferred %d job(s) pending container builds", len(applied), len(deferred))
 		} else {
 			resp.Message = fmt.Sprintf("applied %d nomad job(s)", len(applied))
 		}
-	} else if resp.ContainersBuilding {
+	case resp.ContainersBuilding:
 		resp.Message = fmt.Sprintf("repository synced; applied %d nomad job(s), deferred container build rollout until image_ready", len(applied))
-	} else {
+	default:
 		resp.Message = fmt.Sprintf("repository synced; applied %d nomad job(s)", len(applied))
 	}
 	return http.StatusOK

@@ -2400,12 +2400,13 @@ func TestServer_MutationEndpoints(t *testing.T) {
 			mux := SetupMux(srv)
 
 			var req *http.Request
-			if tc.useErrBody {
+			switch {
+			case tc.useErrBody:
 				req = httptest.NewRequest(tc.method, tc.path, errorReader{})
-			} else if tc.body != "" {
+			case tc.body != "":
 				req = httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
 				req.Header.Set("Content-Type", "application/json")
-			} else {
+			default:
 				req = httptest.NewRequest(tc.method, tc.path, nil)
 			}
 

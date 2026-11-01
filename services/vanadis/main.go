@@ -309,7 +309,7 @@ func isValidVanadisChunkID(id string) bool {
 	}
 	for i := range len(id) {
 		c := id[i]
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' && c != '_' {
 			return false
 		}
 	}
@@ -1357,8 +1357,10 @@ func RunApp(ctx context.Context, cfg Config) error { return runServer(ctx, cfg, 
 func main() {
 	cfg := LoadConfigFromEnv()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-	if err := RunApp(ctx, cfg); err != nil && !errors.Is(err, http.ErrServerClosed) {
+
+	err := RunApp(ctx, cfg)
+	cancel()
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("[vanadis] Error: %v", err)
 	}
 }

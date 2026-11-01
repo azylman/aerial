@@ -748,11 +748,12 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var h http.Handler
-			if tt.useMux {
+			switch {
+			case tt.useMux:
 				h = SetupDashboardMux(DashboardConfig{VanadisURL: tt.vanadisURL}, nil)
-			} else if tt.isDetail {
+			case tt.isDetail:
 				h = buildDetailHandler(tt.vanadisURL)
-			} else {
+			default:
 				h = buildsHandler(tt.vanadisURL)
 			}
 			req := httptest.NewRequest(tt.method, tt.target, nil)

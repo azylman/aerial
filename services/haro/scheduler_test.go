@@ -318,13 +318,14 @@ func TestHTTPPromptDispatcher(t *testing.T) {
 			defer server.Close()
 
 			var dispatcher PromptDispatcher
-			if tc.nilDispatcher {
+			switch {
+			case tc.nilDispatcher:
 				dispatcher = (*HTTPPromptDispatcher)(nil)
-			} else if tc.name == "default http client used when httpClient is nil" {
+			case tc.name == "default http client used when httpClient is nil":
 				dispatcher = &HTTPPromptDispatcher{brainURL: server.URL}
-			} else if tc.name == "empty brain url defaults to eri.aerial" {
+			case tc.name == "empty brain url defaults to eri.aerial":
 				dispatcher = &HTTPPromptDispatcher{}
-			} else {
+			default:
 				serverURL := server.URL + "/"
 				if tc.closeServer {
 					server.Close()
@@ -451,13 +452,14 @@ func TestHTTPPromptDispatcher_Dispatch(t *testing.T) {
 			defer server.Close()
 
 			var dispatcher *HTTPPromptDispatcher
-			if tc.nilDispatcher {
+			switch {
+			case tc.nilDispatcher:
 				dispatcher = nil
-			} else if tc.name == "default http client used when httpClient is nil" {
+			case tc.name == "default http client used when httpClient is nil":
 				dispatcher = &HTTPPromptDispatcher{brainURL: server.URL}
-			} else if tc.name == "empty brain url defaults to eri.aerial" {
+			case tc.name == "empty brain url defaults to eri.aerial":
 				dispatcher = &HTTPPromptDispatcher{}
-			} else {
+			default:
 				serverURL := server.URL + "/"
 				if tc.closeServer {
 					server.Close()
@@ -1796,10 +1798,8 @@ func TestTicker_EvaluateDueHeartbeats_Scenarios(t *testing.T) {
 				if !req.SkipIfActive {
 					t.Errorf("expected req.SkipIfActive = true")
 				}
-			} else {
-				if len(mock.dispatchedRequests) > 0 {
-					t.Errorf("dispatcher should NOT be called for %s, called %d times", tc.hbID, len(mock.dispatchedRequests))
-				}
+			} else if len(mock.dispatchedRequests) > 0 {
+				t.Errorf("dispatcher should NOT be called for %s, called %d times", tc.hbID, len(mock.dispatchedRequests))
 			}
 
 			// Verify schedule_runs table

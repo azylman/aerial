@@ -1866,11 +1866,12 @@ func TestExtractStringMapFromMetadata_Unit(t *testing.T) {
 		t.Errorf("expected nil for missing key, got %v", res)
 	}
 
+	paddedKey := " ERI "
 	metaObj := map[string]any{
 		"job_states": map[string]any{
-			" ERI ": "verifying_health",
-			"":      "invalid",
-			"HARO":  "starting",
+			paddedKey: "verifying_health",
+			"":        "invalid",
+			"HARO":    "starting",
 		},
 	}
 	gotObj := extractStringMapFromMetadata(metaObj, "job_states")

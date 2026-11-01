@@ -751,7 +751,7 @@ func isValidVanadisChunkID(id string) bool {
 	}
 	for i := range len(id) {
 		c := id[i]
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' && c != '_' {
 			return false
 		}
 	}
@@ -1299,9 +1299,10 @@ func main() {
 	cfg := LoadConfigFromEnv()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
 
-	if err := runApp(ctx, cfg); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	err := runApp(ctx, cfg)
+	cancel()
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("[synapse] Error: %v", err)
 	}
 }

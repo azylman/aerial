@@ -465,7 +465,8 @@ func TestDiscordGatewayHandlerClosures(t *testing.T) {
 			disp := &mockOutboundDispatcher{}
 			srv := newTestRouter(Config{}, nil, nil, disp)
 
-			if tc.isReady {
+			switch {
+			case tc.isReady:
 				canceledCtx, cancel := context.WithCancel(ctx)
 				cancel()
 				session, err := discordgo.New("Bot dummy-ready")
@@ -480,7 +481,7 @@ func TestDiscordGatewayHandlerClosures(t *testing.T) {
 				if session.State.User == nil || session.State.User.ID != "bot-ready-1" {
 					t.Errorf("User = %v, want bot-ready-1", session.State.User)
 				}
-			} else if tc.isInteraction {
+			case tc.isInteraction:
 				h := newDiscordGatewayInteractionCreateHandler(ctx, srv)
 				h(nil, &discordgo.InteractionCreate{
 					Interaction: &discordgo.Interaction{
@@ -491,7 +492,7 @@ func TestDiscordGatewayHandlerClosures(t *testing.T) {
 				if len(disp.DiscordInteractionCalls()) != 1 {
 					t.Errorf("expected 1 interaction call, got %d", len(disp.DiscordInteractionCalls()))
 				}
-			} else {
+			default:
 				h := newDiscordGatewayMessageCreateHandler(ctx, srv)
 				h(nil, &discordgo.MessageCreate{
 					Message: &discordgo.Message{
@@ -1201,14 +1202,15 @@ func (m *mockDiscordTransport) RoundTrip(req *http.Request) (*http.Response, err
 	var bodyBytes []byte
 	statusCode := http.StatusOK
 
-	if strings.HasSuffix(path, "/users/@me/guilds") {
+	switch {
+	case strings.HasSuffix(path, "/users/@me/guilds"):
 		if m.userGuildsErr {
 			statusCode = http.StatusInternalServerError
 			bodyBytes = []byte(`{"message": "error"}`)
 		} else {
 			bodyBytes, _ = json.Marshal(m.userGuildsResp)
 		}
-	} else if strings.Contains(path, "/threads/active") {
+	case strings.Contains(path, "/threads/active"):
 		parts := strings.Split(path, "/")
 		guildID := ""
 		for idx, p := range parts {
@@ -1227,7 +1229,7 @@ func (m *mockDiscordTransport) RoundTrip(req *http.Request) (*http.Response, err
 			}
 			bodyBytes, _ = json.Marshal(thList)
 		}
-	} else if strings.HasSuffix(path, "/channels") {
+	case strings.HasSuffix(path, "/channels"):
 		parts := strings.Split(path, "/")
 		guildID := ""
 		for idx, p := range parts {
@@ -1246,7 +1248,7 @@ func (m *mockDiscordTransport) RoundTrip(req *http.Request) (*http.Response, err
 			}
 			bodyBytes, _ = json.Marshal(chList)
 		}
-	} else if strings.HasSuffix(path, "/messages") {
+	case strings.HasSuffix(path, "/messages"):
 		parts := strings.Split(path, "/")
 		channelID := ""
 		for idx, p := range parts {
@@ -1268,7 +1270,7 @@ func (m *mockDiscordTransport) RoundTrip(req *http.Request) (*http.Response, err
 			}
 			bodyBytes, _ = json.Marshal(msgList)
 		}
-	} else {
+	default:
 		bodyBytes = []byte(`{}`)
 	}
 
