@@ -583,8 +583,8 @@ func extractDispatchWidgetSyncPayload(prompt, buildID string) (string, bool) {
 
 func extractVanadisDispatchInfo(d db.Dispatch) (chunkID, buildID string, chunkIdx int) {
 	chunkIdx = -1
-	if strings.HasPrefix(d.SessionID, "vanadis-") {
-		chunkID = strings.TrimSpace(strings.TrimPrefix(d.SessionID, "vanadis-"))
+	if after, ok := strings.CutPrefix(d.SessionID, "vanadis-"); ok {
+		chunkID = strings.TrimSpace(after)
 	}
 	if chunkID == "" {
 		if m := vanadisChunkIDPromptRegex.FindStringSubmatch(d.Prompt); len(m) >= 2 {

@@ -101,7 +101,7 @@ func fetchAndCacheRESTChannel(s *discordgo.Session, channelID string) (ChannelSn
 	if s.Token == "" || !IsNumericSnowflake(channelID) {
 		return ChannelSnapshot{}, false
 	}
-	res, err, _ := restSingleFlight.Do(channelID, func() (interface{}, error) { return s.Channel(channelID) })
+	res, err, _ := restSingleFlight.Do(channelID, func() (any, error) { return s.Channel(channelID) })
 	if err != nil {
 		return ChannelSnapshot{}, false
 	}
@@ -215,7 +215,7 @@ func fetchAndCacheBotMemberRoles(sess *discordgo.Session, guildID, botUserID str
 	if isRESTInCooldown(sfKey) {
 		return
 	}
-	res, sfErr, _ := restSingleFlight.Do(sfKey, func() (interface{}, error) {
+	res, sfErr, _ := restSingleFlight.Do(sfKey, func() (any, error) {
 		m, err := guildMemberFetcher(sess, guildID, botUserID)
 		if err != nil || m == nil {
 			return nil, err
@@ -313,10 +313,10 @@ func extractReplyAuthor(content string) string {
 	if idx == -1 {
 		return ""
 	}
-	for _, line := range strings.Split(content[idx:], "\n") {
+	for line := range strings.SplitSeq(content[idx:], "\n") {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "author:") {
-			return strings.TrimSpace(strings.TrimPrefix(trimmed, "author:"))
+		if after, ok := strings.CutPrefix(trimmed, "author:"); ok {
+			return strings.TrimSpace(after)
 		}
 		if trimmed != "- replying_to:" && strings.HasPrefix(trimmed, "- ") {
 			break

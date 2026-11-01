@@ -57,7 +57,7 @@ func mockJSONResponse(convID, responseText string) string {
 	if convID == "" {
 		convID = uuid.New().String()
 	}
-	payload, _ := json.Marshal(map[string]interface{}{
+	payload, _ := json.Marshal(map[string]any{
 		"conversation_id":  convID,
 		"status":           "SUCCESS",
 		"response":         responseText,
@@ -258,8 +258,6 @@ func TestRecoverInterrupted(t *testing.T) {
 	}
 }
 
-func ptrFloat(f float64) *float64 { return &f }
-
 func TestQueueChannelPolicyIgnoredAndDefaultDenyMatrix(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -276,8 +274,8 @@ func TestQueueChannelPolicyIgnoredAndDefaultDenyMatrix(t *testing.T) {
 		{name: "HTTPClient_NotDroppedByDefaultDenyIgnore", policy: config.ChannelPolicy{Mode: "ignore"}, message: db.Message{ID: "msg-http-prompt-1", ThreadID: "synthetic-http-thread-uuid", AuthorID: "http-client", Content: "Explain Kubernetes architecture"}, expectRunnerCalls: 1, expectDeliveryCalls: 1, expectTypingCalls: 1, expectStatus: db.StatusCompleted, expectResponseText: "HTTP prompt execution response"},
 		{name: "Typing_ThreadsModeActiveTurn", policy: config.ChannelPolicy{Mode: "threads"}, message: db.Message{ID: "m-type-1", ThreadID: "th-active-1", Content: "Hello thread"}, expectRunnerCalls: 1, expectDeliveryCalls: 1, expectTypingCalls: 1, expectStatus: db.StatusCompleted},
 		{name: "Typing_ChannelModeDirectMentionWake", policy: config.ChannelPolicy{Mode: "channel", WakeMode: "mention"}, message: db.Message{ID: "m-type-2", ThreadID: "th-mention-yes", Content: "<@Aerial> help me"}, expectRunnerCalls: 1, expectDeliveryCalls: 1, expectTypingCalls: 1, expectStatus: db.StatusCompleted},
-		{name: "Typing_ChannelModeAmbientClassifierWake", policy: config.ChannelPolicy{Mode: "channel", WakeMode: "classifier", AmbientWakeThreshold: ptrFloat(0.8)}, classifierConfidence: 0.95, message: db.Message{ID: "m-type-3", ThreadID: "th-ambient-wake", Content: "Let's change all of these to 8am"}, expectRunnerCalls: 1, expectDeliveryCalls: 1, expectTypingCalls: 1, expectStatus: db.StatusCompleted},
-		{name: "Typing_ChannelModeAmbientNonWakeChatter", policy: config.ChannelPolicy{Mode: "channel", WakeMode: "classifier", AmbientWakeThreshold: ptrFloat(0.8)}, classifierConfidence: 0.10, message: db.Message{ID: "m-type-4", ThreadID: "th-ambient-drop", Content: "Just random human chat between people"}, expectStatus: db.StatusCompleted},
+		{name: "Typing_ChannelModeAmbientClassifierWake", policy: config.ChannelPolicy{Mode: "channel", WakeMode: "classifier", AmbientWakeThreshold: new(0.8)}, classifierConfidence: 0.95, message: db.Message{ID: "m-type-3", ThreadID: "th-ambient-wake", Content: "Let's change all of these to 8am"}, expectRunnerCalls: 1, expectDeliveryCalls: 1, expectTypingCalls: 1, expectStatus: db.StatusCompleted},
+		{name: "Typing_ChannelModeAmbientNonWakeChatter", policy: config.ChannelPolicy{Mode: "channel", WakeMode: "classifier", AmbientWakeThreshold: new(0.8)}, classifierConfidence: 0.10, message: db.Message{ID: "m-type-4", ThreadID: "th-ambient-drop", Content: "Just random human chat between people"}, expectStatus: db.StatusCompleted},
 		{name: "Typing_IgnoredChannelPolicy", policy: config.ChannelPolicy{Mode: "ignore"}, message: db.Message{ID: "m-type-5", ThreadID: "th-ignored", Content: "Ignored message @Aerial"}, expectStatus: db.StatusCompleted},
 	}
 	for _, tc := range tests {
@@ -376,7 +374,7 @@ func TestProcessBurst_AmbientAndWakeMatrix(t *testing.T) {
 	t.Parallel()
 	defaultChannelPolicy := config.ChannelPolicy{
 		Mode:                 "channel",
-		AmbientWakeThreshold: ptrFloat(0.80),
+		AmbientWakeThreshold: new(0.80),
 	}
 
 	tests := []burstTestCase{
@@ -483,12 +481,12 @@ func TestResolveEffectiveChannel(t *testing.T) {
 				return
 			}
 			if tc.restChannel != nil && tc.concurrent > 1 {
-				var reqCount int32
+				var reqCount atomic.Int32
 				reqEntered, releaseReq := make(chan struct{}), make(chan struct{})
 				var once sync.Once
 				s, _ = discordgo.New("Bot fake-token")
 				s.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
-					atomic.AddInt32(&reqCount, 1)
+					reqCount.Add(1)
 					once.Do(func() { close(reqEntered) })
 					<-releaseReq
 					data, _ := json.Marshal(tc.restChannel)
@@ -497,20 +495,18 @@ func TestResolveEffectiveChannel(t *testing.T) {
 				id := tc.inputIDs[0]
 				var doneWg sync.WaitGroup
 				for range tc.concurrent {
-					doneWg.Add(1)
-					go func() {
-						defer doneWg.Done()
+					doneWg.Go(func() {
 						effID, effName, isThread := ResolveEffectiveChannel(s, id)
 						if effID != tc.wantEffIDs[0] || effName != tc.wantEffName || isThread != tc.wantIsThread {
 							t.Errorf("ResolveEffectiveChannel(%q) = (%q, %q, %v), want (%q, %q, %v)", id, effID, effName, isThread, tc.wantEffIDs[0], tc.wantEffName, tc.wantIsThread)
 						}
-					}()
+					})
 				}
 				<-reqEntered
 				waitForSingleflightFollowers(t, "ResolveEffectiveChannel", tc.concurrent-1)
 				close(releaseReq)
 				doneWg.Wait()
-				if count := atomic.LoadInt32(&reqCount); count != 1 {
+				if count := reqCount.Load(); count != 1 {
 					t.Errorf("expected 1 REST request due to singleflight, got %d", count)
 				}
 			} else {
@@ -541,8 +537,8 @@ func TestProcessBurst_InstructionsAndBurstMatrix(t *testing.T) {
 		{name: "ChannelInstructionsInjection", channelID: "100200300400500701", channelInstructions: map[string]string{"dev.md": "Follow Go idioms and test thoroughly."}, cachedChannels: []*discordgo.Channel{{ID: "100200300400500701", Name: "dev", Type: discordgo.ChannelTypeGuildText}}, runnerResponse: "Success", messages: []db.Message{{ID: "msg-inject-1", Content: "Build the queue worker"}}, wantRunnerCalls: 1, wantTurnCount: 1, wantPromptPrefix: "<CHANNEL_INSTRUCTIONS>\nChannel-specific guidelines for this conversation:\n\nFollow Go idioms and test thoroughly.\n</CHANNEL_INSTRUCTIONS>", wantPromptContains: []string{"Build the queue worker"}},
 		{name: "ChannelInstructionsThreadInheritance", channelID: "100200300400500703", channelInstructions: map[string]string{"dev.md": "Guidelines for dev channel discussions."}, cachedChannels: []*discordgo.Channel{{ID: "100200300400500702", Name: "dev", Type: discordgo.ChannelTypeGuildText}, {ID: "100200300400500703", Name: "feature-thread", ParentID: "100200300400500702", Type: discordgo.ChannelTypeGuildPublicThread}}, runnerResponse: "Success", messages: []db.Message{{ID: "msg-thread-inherit-1", Content: "Thread discussion prompt"}}, wantRunnerCalls: 1, wantTurnCount: 1, wantPromptPrefix: "<CHANNEL_INSTRUCTIONS>\nChannel-specific guidelines for this conversation:\n\nGuidelines for dev channel discussions.\n</CHANNEL_INSTRUCTIONS>"},
 		{name: "NoDuplicationOnRetry", channelID: "100200300400500704", channelInstructions: map[string]string{"dev.md": "Channel instructions for retry test."}, cachedChannels: []*discordgo.Channel{{ID: "100200300400500704", Name: "dev", Type: discordgo.ChannelTypeGuildText}}, maxAttempts: 2, runnerSteps: []mockRunnerStep{{returnRawStdout: true, stderr: "Error 503: high demand unavailable", exitCode: 1}, {convID: "session-retry-123", response: "Success on retry"}}, messages: []db.Message{{ID: "msg-retry-1", Content: "Retry test prompt"}}, wantRunnerCalls: 2, wantTurnCount: 1, wantSingleInstructionTagPerPrompt: true},
-		{name: "Tier1PreScan_SkipsClassifier", channelID: "chan-lounge", classifierJSON: `{"confidence": 0.0, "reason": "should not be called"}`, policy: config.ChannelPolicy{Mode: "channel", AmbientWakeThreshold: ptrFloat(0.80)}, runnerResponse: "Hello there!", messages: []db.Message{{ID: "msg-prescan-1", AuthorName: "Alice", Content: "just hanging out"}, {ID: "msg-prescan-2", AuthorName: "Bob", Content: "<@aerial> what's up?"}, {ID: "msg-prescan-3", AuthorName: "Charlie", Content: "lol"}}, wantClassifierCalls: 0, checkClassifierCalls: true, wantRunnerCalls: 1, wantTurnCount: 1},
-		{name: "CoalescedAmbientBurst", channelID: "chan-lounge", classifierJSON: `{"confidence": 0.95, "reason": "urgent issue needing answer"}`, policy: config.ChannelPolicy{Mode: "channel", AmbientWakeThreshold: ptrFloat(0.80)}, runnerResponse: "I can help with that database error!", messages: []db.Message{{ID: "msg-coalesce-1", AuthorName: "Alice", Content: "Does anyone know why postgres crashed?"}, {ID: "msg-coalesce-2", AuthorName: "Bob", Content: "brb grabbing coffee"}}, wantClassifierCalls: 1, checkClassifierCalls: true, wantClassifierPromptContains: "<target_burst>", wantRunnerCalls: 1, wantTurnCount: 1},
+		{name: "Tier1PreScan_SkipsClassifier", channelID: "chan-lounge", classifierJSON: `{"confidence": 0.0, "reason": "should not be called"}`, policy: config.ChannelPolicy{Mode: "channel", AmbientWakeThreshold: new(0.80)}, runnerResponse: "Hello there!", messages: []db.Message{{ID: "msg-prescan-1", AuthorName: "Alice", Content: "just hanging out"}, {ID: "msg-prescan-2", AuthorName: "Bob", Content: "<@aerial> what's up?"}, {ID: "msg-prescan-3", AuthorName: "Charlie", Content: "lol"}}, wantClassifierCalls: 0, checkClassifierCalls: true, wantRunnerCalls: 1, wantTurnCount: 1},
+		{name: "CoalescedAmbientBurst", channelID: "chan-lounge", classifierJSON: `{"confidence": 0.95, "reason": "urgent issue needing answer"}`, policy: config.ChannelPolicy{Mode: "channel", AmbientWakeThreshold: new(0.80)}, runnerResponse: "I can help with that database error!", messages: []db.Message{{ID: "msg-coalesce-1", AuthorName: "Alice", Content: "Does anyone know why postgres crashed?"}, {ID: "msg-coalesce-2", AuthorName: "Bob", Content: "brb grabbing coffee"}}, wantClassifierCalls: 1, checkClassifierCalls: true, wantClassifierPromptContains: "<target_burst>", wantRunnerCalls: 1, wantTurnCount: 1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -563,7 +559,7 @@ func TestProcessBurst_SessionContinuityAndRotationMatrix(t *testing.T) {
 	tests := []burstTestCase{
 		{name: "GhostSessionRecovery", channelID: "chan-lounge", seedSessionID: "stale-ghost-uuid", seedTranscripts: []string{"a8b5e679-7425-40de-944b-e07fc1f90ae7"}, policy: config.ChannelPolicy{Mode: "channel"}, runnerSteps: []mockRunnerStep{{convID: "a8b5e679-7425-40de-944b-e07fc1f90ae7", response: "Hello! I am ready to help.", stderr: "warning: conversation \"stale-ghost-uuid\" not found\nStarting conversation update stream for a8b5e679-7425-40de-944b-e07fc1f90ae7\n"}}, messages: []db.Message{{ID: "msg-ghost-recovery-1", AuthorName: "Alice", Content: "<@aerial> are you awake?"}}, wantRunnerCalls: 1, wantTurnCount: 1, wantSavedSession: "a8b5e679-7425-40de-944b-e07fc1f90ae7", checkSavedSession: true},
 		{name: "MultiTurnContinuity_AfterRecovery", channelID: "chan-lounge", seedSessionID: "stale-ghost-uuid", seedTranscripts: []string{"a8b5e679-7425-40de-944b-e07fc1f90ae7"}, policy: config.ChannelPolicy{Mode: "channel"}, sequentialBursts: true, runnerSteps: []mockRunnerStep{{convID: "a8b5e679-7425-40de-944b-e07fc1f90ae7", response: "Clean reply", stderr: "warning: conversation \"stale-ghost-uuid\" not found\nStarting conversation update stream for a8b5e679-7425-40de-944b-e07fc1f90ae7\n"}}, messages: []db.Message{{ID: "msg-recov-turn-1", AuthorName: "Alice", Content: "<@aerial> hello"}, {ID: "msg-recov-turn-2", AuthorName: "Alice", Content: "<@aerial> what did I just say?"}}, wantRunnerCalls: 2, wantTurnCount: 2, wantPassedSessions: []string{"", "a8b5e679-7425-40de-944b-e07fc1f90ae7"}},
-		{name: "ColdChannel_NoStubDirectory", channelID: "chan-cold-123", classifierJSON: `{"confidence": 0.05, "reason": "ambient chatter"}`, policy: config.ChannelPolicy{Mode: "channel", AmbientWakeThreshold: ptrFloat(0.80)}, messages: []db.Message{{ID: "msg-cold-ambient-1", AuthorName: "Alice", Content: "just saying hello to everyone in the room"}}, wantRunnerCalls: 0, wantTurnCount: 0, wantSavedSession: "", checkSavedSession: true, wantNoStubDir: true},
+		{name: "ColdChannel_NoStubDirectory", channelID: "chan-cold-123", classifierJSON: `{"confidence": 0.05, "reason": "ambient chatter"}`, policy: config.ChannelPolicy{Mode: "channel", AmbientWakeThreshold: new(0.80)}, messages: []db.Message{{ID: "msg-cold-ambient-1", AuthorName: "Alice", Content: "just saying hello to everyone in the room"}}, wantRunnerCalls: 0, wantTurnCount: 0, wantSavedSession: "", checkSavedSession: true, wantNoStubDir: true},
 		{name: "Turn1ContextInjection", channelID: "chan-history", seedTranscripts: []string{"e5b7fb78-d85d-4bd6-ba9e-330f1e30596f"}, historyMessages: histMessages, policy: config.ChannelPolicy{Mode: "channel"}, sequentialBursts: true, runnerSteps: []mockRunnerStep{{convID: "e5b7fb78-d85d-4bd6-ba9e-330f1e30596f", response: "Answering wake question!"}}, messages: []db.Message{{ID: "msg-hist-turn-1", AuthorName: "Charlie", Content: "<@aerial> turn 1 wake question"}, {ID: "msg-hist-turn-2", AuthorName: "Charlie", Content: "<@aerial> turn 2 follow-up question"}}, wantRunnerCalls: 2, wantTurnCount: 2, wantPassedSessions: []string{"", "e5b7fb78-d85d-4bd6-ba9e-330f1e30596f"}, wantTurnPromptContains: map[int][]string{0: {"<CHANNEL_HISTORY>", "First historical message", "Second historical message"}, 1: {"<CHANNEL_HISTORY>"}}, wantTurnPromptExcludes: map[int][]string{1: {"Previous assistant response"}}},
 		{name: "ThreadsMode_WarmTurnSuppressesChannelHistory", channelID: "thread-history-suppress", seedTranscripts: []string{"e5b7fb78-d85d-4bd6-ba9e-330f1e30596f"}, historyMessages: histMessages[:1], policy: config.ChannelPolicy{Mode: "threads"}, sequentialBursts: true, runnerSteps: []mockRunnerStep{{convID: "e5b7fb78-d85d-4bd6-ba9e-330f1e30596f", response: "Answering wake question!"}}, messages: []db.Message{{ID: "msg-thread-turn-1", AuthorName: "Charlie", Content: "Hey Aerial, turn 1 thread question"}, {ID: "msg-thread-turn-2", AuthorName: "Charlie", Content: "Hey Aerial, turn 2 follow-up question"}}, wantRunnerCalls: 2, wantTurnCount: 2, wantTurnPromptContains: map[int][]string{0: {"<CHANNEL_HISTORY>"}}, wantTurnPromptExcludes: map[int][]string{1: {"<CHANNEL_HISTORY>"}}},
 		{name: "SessionRotation_ResetsToColdState", channelID: "chan-rotation-cold", seedTranscripts: []string{"c9b5e679-7425-40de-944b-e07fc1f90ae7"}, historyMessages: []HistoryMessage{{ID: "hist-boot-1", AuthorName: "Alice", Role: "User", Content: "Historical message before bootstrap", CreatedAt: time.Now().UTC().Add(-5 * time.Minute)}}, policy: config.ChannelPolicy{Mode: "channel"}, sequentialBursts: true, runnerSteps: []mockRunnerStep{{convID: "c9b5e679-7425-40de-944b-e07fc1f90ae7", response: "Turn 1 answer"}, {convID: "c9b5e679-7425-40de-944b-e07fc1f90ae7", response: "Subsequent turn answer"}}, messages: []db.Message{{ID: "msg-turn-1", AuthorName: "Alice", Content: "<@aerial> Turn 1"}, {ID: "msg-turn-2", AuthorName: "Alice", Content: "<@aerial> Turn 2"}, {ID: "msg-turn-3", AuthorName: "Alice", Content: "<@aerial> Turn 3"}}, wantRunnerCalls: 3, wantTurnCount: 3, wantSavedSession: "c9b5e679-7425-40de-944b-e07fc1f90ae7", checkSavedSession: true, wantPassedSessions: []string{"", "c9b5e679-7425-40de-944b-e07fc1f90ae7", "c9b5e679-7425-40de-944b-e07fc1f90ae7"}, wantTurnPromptContains: map[int][]string{2: {"<CHANNEL_HISTORY>"}}, wantTurnPromptExcludes: map[int][]string{0: {"<PREVIOUS_SESSION>"}, 2: {"<PREVIOUS_SESSION>"}}},
@@ -593,7 +589,7 @@ func TestWakeModeMentionAndClassifierAlertMatrix(t *testing.T) {
 		burst      *burstTestCase
 		tier1Cases []tier1Case
 	}{
-		{name: "ClassifierParseErrorTriggersSystemAlert", burst: &burstTestCase{channelID: "chan-lounge", botUserID: "bot-999", classifierJSON: "```json\n{\"confidence\": 0.85}\n```", policy: config.ChannelPolicy{Mode: "channel", AmbientWakeThreshold: ptrFloat(0.80)}, messages: []db.Message{{ID: "msg-parse-err-1", AuthorName: "Alice", Content: "Hello is anybody there?"}}, wantRunnerCalls: 0, wantTurnCount: 0, wantAlertTitle: "Classifier JSON Parse Error", wantAlertChannel: config.DefaultConfigData().SystemChannel, wantAlertBodyContains: []string{"Parse Error", "Raw Output"}}},
+		{name: "ClassifierParseErrorTriggersSystemAlert", burst: &burstTestCase{channelID: "chan-lounge", botUserID: "bot-999", classifierJSON: "```json\n{\"confidence\": 0.85}\n```", policy: config.ChannelPolicy{Mode: "channel", AmbientWakeThreshold: new(0.80)}, messages: []db.Message{{ID: "msg-parse-err-1", AuthorName: "Alice", Content: "Hello is anybody there?"}}, wantRunnerCalls: 0, wantTurnCount: 0, wantAlertTitle: "Classifier JSON Parse Error", wantAlertChannel: config.DefaultConfigData().SystemChannel, wantAlertBodyContains: []string{"Parse Error", "Raw Output"}}},
 		{name: "IsTier1Wake_WakeModeMention", tier1Cases: []tier1Case{
 			{content: "Hey <@bot-12345> how are you?", want: true},
 			{content: "<USER_REQUEST>\n- replying_to:\n    author: \"@aerial\"\n    content: \"previous response\"\n- content: What was that?\n</USER_REQUEST>", want: true},
@@ -685,7 +681,7 @@ func TestWorkerPoolShutdown_PreservationMatrix(t *testing.T) {
 			}
 			if tc.blockClassifierCtx {
 				cfg.ResolveChannelPolicy = func(channelID, channelName string) config.ChannelPolicy {
-					return config.ChannelPolicy{Mode: "channel", AmbientWakeThreshold: ptrFloat(0.75)}
+					return config.ChannelPolicy{Mode: "channel", AmbientWakeThreshold: new(0.75)}
 				}
 				tc.msg.Content = "hey did anyone see that movie?"
 			}
@@ -938,11 +934,11 @@ func TestResolveBotRoleIDsSuite(t *testing.T) {
 			if tc.checkNilSession && ResolveBotRoleIDs(nil, tc.guildID, tc.botID) != nil {
 				t.Errorf("Expected nil for nil session")
 			}
-			var fetchCalls int32
+			var fetchCalls atomic.Int32
 			enteredCh, releaseCh := make(chan struct{}), make(chan struct{})
 			var once sync.Once
 			guildMemberFetcher = func(sess *discordgo.Session, gID, uID string) (*discordgo.Member, error) {
-				atomic.AddInt32(&fetchCalls, 1)
+				fetchCalls.Add(1)
 				if tc.concurrentCallers > 0 {
 					once.Do(func() { close(enteredCh) })
 					<-releaseCh
@@ -993,7 +989,7 @@ func TestResolveBotRoleIDsSuite(t *testing.T) {
 				}
 			}
 
-			if got := atomic.LoadInt32(&fetchCalls); got != tc.wantFetchCalls {
+			if got := fetchCalls.Load(); got != tc.wantFetchCalls {
 				t.Fatalf("fetchCalls = %d, want %d", got, tc.wantFetchCalls)
 			}
 			if tc.testCooldownPruning {
@@ -1751,7 +1747,7 @@ func runWakeHookEval(t *testing.T, hookResp *WakeResponse, hookErr error, timeou
 	}
 	te := &turnExecution{
 		pool: pool, burst: msgs, threadID: msgs[0].ThreadID, effectiveID: effID, triggerType: "message", execStart: now,
-		policy: config.ChannelPolicy{Mode: "channel", WakeMode: "classifier", AmbientWakeThreshold: ptrFloat(0.80), Hooks: config.ChannelHooksConfig{OnWake: &config.WebhookEndpoint{URL: "http://sidecar.local/wake", TimeoutMs: 1000, OnTimeoutAction: timeoutAction}}},
+		policy: config.ChannelPolicy{Mode: "channel", WakeMode: "classifier", AmbientWakeThreshold: new(0.80), Hooks: config.ChannelHooksConfig{OnWake: &config.WebhookEndpoint{URL: "http://sidecar.local/wake", TimeoutMs: 1000, OnTimeoutAction: timeoutAction}}},
 	}
 	shouldExit := te.evaluateAmbientWake()
 	return shouldExit, hookCalled, classifierCalled, te, store, capturedReq
@@ -1838,7 +1834,7 @@ func TestOnWakeHook_FullProcessBurst(t *testing.T) {
 			return nil
 		},
 		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-			return config.ChannelPolicy{Mode: "channel", WakeMode: "classifier", AmbientWakeThreshold: ptrFloat(0.80), Hooks: config.ChannelHooksConfig{OnWake: &config.WebhookEndpoint{URL: "http://sidecar.local/wake"}}}
+			return config.ChannelPolicy{Mode: "channel", WakeMode: "classifier", AmbientWakeThreshold: new(0.80), Hooks: config.ChannelHooksConfig{OnWake: &config.WebhookEndpoint{URL: "http://sidecar.local/wake"}}}
 		},
 	})
 
@@ -4293,14 +4289,14 @@ func TestDispatchExecution_RetriesAndFailure(t *testing.T) {
 	_ = store.InsertDispatch(ctx, disp)
 
 	exhausted := make(chan struct{})
-	var attempts int32
+	var attempts atomic.Int32
 	pool := New(nil, WorkerPoolConfig{
 		Store:          store,
 		MaxAttempts:    2,
 		BackoffBase:    1 * time.Millisecond,
 		TimeoutMinutes: 1,
 		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-			if atomic.AddInt32(&attempts, 1) == 2 {
+			if attempts.Add(1) == 2 {
 				close(exhausted)
 			}
 			return "", "fatal error", 1, errors.New("simulated dispatch execution error")

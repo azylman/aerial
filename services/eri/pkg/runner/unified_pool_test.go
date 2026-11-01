@@ -1617,16 +1617,14 @@ func TestUnifiedSessionLease_ThreadSafety(t *testing.T) {
 			lease := &unifiedSessionLease{sessionID: tc.initialID}
 			var wg sync.WaitGroup
 			for range tc.readers {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
+				wg.Go(func() {
 					for range tc.iterations {
 						if id := lease.SessionID(); id == "" {
 							t.Errorf("expected non-empty session ID")
 						}
 						lease.MarkDirty()
 					}
-				}()
+				})
 			}
 			for i := range tc.writers {
 				wg.Add(1)

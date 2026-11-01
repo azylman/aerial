@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -634,12 +635,7 @@ func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
 }
 
 func hasEnv(envs []string, target string) bool {
-	for _, e := range envs {
-		if e == target {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(envs, target)
 }
 
 func TestBrainAppOptions_FunctionalOptionMutators(t *testing.T) {
@@ -938,8 +934,7 @@ func TestPrewarmProcessPoolsSequentially(t *testing.T) {
 		onInit: func(name string) { initCh <- name },
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	PrewarmProcessPoolsSequentially(ctx, p1, nil, p2, p3)
 

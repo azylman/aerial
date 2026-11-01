@@ -388,8 +388,7 @@ func writeDiscordDeliveryError(w http.ResponseWriter, err error, failPrefix stri
 		writeErr(w, http.StatusServiceUnavailable, "Discord session not connected")
 		return
 	}
-	var restErr *discordgo.RESTError
-	if errors.As(err, &restErr) {
+	if restErr, ok := errors.AsType[*discordgo.RESTError](err); ok {
 		if restErr.Response != nil && restErr.Response.StatusCode >= 400 && restErr.Response.StatusCode < 500 {
 			writeErr(w, restErr.Response.StatusCode, fmt.Sprintf("Discord client error: %v", err))
 			return
@@ -501,7 +500,7 @@ func handleDirectMessage(pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		httpkit.WriteJSON(w, http.StatusOK, map[string]interface{}{"status": "sent", "channel_id": targetID})
+		httpkit.WriteJSON(w, http.StatusOK, map[string]any{"status": "sent", "channel_id": targetID})
 	}
 }
 
@@ -532,7 +531,7 @@ func handleStatusWidget(pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		httpkit.WriteJSON(w, http.StatusOK, map[string]interface{}{"status": "ok", "message_id": msgID})
+		httpkit.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "message_id": msgID})
 	}
 }
 
@@ -1006,7 +1005,7 @@ func parseTasksFilter(q url.Values) (db.TasksFilter, bool) {
 	hasFilter := false
 
 	if statusParam := strings.TrimSpace(q.Get("status")); statusParam != "" {
-		for _, p := range strings.Split(statusParam, ",") {
+		for p := range strings.SplitSeq(statusParam, ",") {
 			if trimmed := strings.TrimSpace(p); trimmed != "" {
 				filter.Statuses = append(filter.Statuses, trimmed)
 			}

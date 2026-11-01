@@ -101,7 +101,7 @@ func makeSendSuiteHandler(tc sendTestCase, lastReqBody *[]byte) http.HandlerFunc
 	if tc.serverMode == "" {
 		return nil
 	}
-	var turnCounter int32
+	var turnCounter atomic.Int32
 	return func(w http.ResponseWriter, r *http.Request) {
 		if tc.checkThinkingBody && lastReqBody != nil {
 			*lastReqBody, _ = io.ReadAll(r.Body)
@@ -130,7 +130,7 @@ func makeSendSuiteHandler(tc sendTestCase, lastReqBody *[]byte) http.HandlerFunc
 		case "sliding_window":
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(fmt.Sprintf(`data: {"candidates":[{"content":{"parts":[{"text":"Response %d"}],"role":"model"}}]}`+"\n\n", atomic.AddInt32(&turnCounter, 1))))
+			_, _ = w.Write([]byte(fmt.Sprintf(`data: {"candidates":[{"content":{"parts":[{"text":"Response %d"}],"role":"model"}}]}`+"\n\n", turnCounter.Add(1))))
 		case "rate_limit_429":
 			w.WriteHeader(http.StatusTooManyRequests)
 			_, _ = w.Write([]byte(`{"error":{"code":429,"message":"Resource has been exhausted","status":"RESOURCE_EXHAUSTED"}}`))
@@ -385,7 +385,7 @@ func (d *errMockDispatcher) ListDeclarations(ctx context.Context) ([]geminiFunct
 	return nil, errors.New("declarations query failed")
 }
 
-func (d *errMockDispatcher) Execute(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+func (d *errMockDispatcher) Execute(ctx context.Context, name string, args map[string]any) (string, error) {
 	return "", errors.New("execute failed")
 }
 
@@ -429,9 +429,9 @@ func makeToolCallingMCPHandler(mode string) http.HandlerFunc {
 }
 
 func makeToolCallingGeminiHandler(mode string) http.HandlerFunc {
-	var callCount int32
+	var callCount atomic.Int32
 	return func(w http.ResponseWriter, r *http.Request) {
-		step := atomic.AddInt32(&callCount, 1)
+		step := callCount.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		switch mode {
@@ -553,8 +553,8 @@ func TestGeminiAPISession_TranscriptPersistence_Suite(t *testing.T) {
 	fileContent30 := func() string {
 		var sb strings.Builder
 		for i := 1; i <= 30; i++ {
-			u, _ := json.Marshal(map[string]interface{}{"type": "USER_INPUT", "content": fmt.Sprintf("prompt %d", i)})
-			m, _ := json.Marshal(map[string]interface{}{"type": "PLANNER_RESPONSE", "content": fmt.Sprintf("reply %d", i)})
+			u, _ := json.Marshal(map[string]any{"type": "USER_INPUT", "content": fmt.Sprintf("prompt %d", i)})
+			m, _ := json.Marshal(map[string]any{"type": "PLANNER_RESPONSE", "content": fmt.Sprintf("reply %d", i)})
 			sb.WriteString(string(u) + "\n" + string(m) + "\n")
 		}
 		return sb.String()
@@ -587,29 +587,29 @@ func TestCleanParameters(t *testing.T) {
 	t.Parallel()
 	testCases := []struct {
 		name                                       string
-		input                                      map[string]interface{}
+		input                                      map[string]any
 		expectedType                               string
 		nullable, checkNonNilProps, checkAnyOfPres bool
 	}{
 		{name: "NilSchema", input: nil, expectedType: "OBJECT", checkNonNilProps: true},
-		{name: "EmptySchema", input: map[string]interface{}{}, expectedType: "OBJECT", checkNonNilProps: true},
-		{name: "IntType", input: map[string]interface{}{"type": "int"}, expectedType: "INTEGER"},
-		{name: "BoolType", input: map[string]interface{}{"type": "bool"}, expectedType: "BOOLEAN"},
-		{name: "FloatType", input: map[string]interface{}{"type": "float"}, expectedType: "NUMBER"},
-		{name: "DoubleType", input: map[string]interface{}{"type": "double"}, expectedType: "NUMBER"},
-		{name: "NullType", input: map[string]interface{}{"type": "null"}, expectedType: "OBJECT", nullable: true},
-		{name: "PolymorphicNullString", input: map[string]interface{}{"type": []interface{}{"null", "string"}}, expectedType: "STRING", nullable: true},
-		{name: "PolymorphicNullOnly", input: map[string]interface{}{"type": []interface{}{"null"}}, expectedType: "OBJECT", nullable: true},
-		{name: "StringSliceNullInt", input: map[string]interface{}{"type": []string{"null", "int"}}, expectedType: "INTEGER", nullable: true},
-		{name: "StringSliceNullOnly", input: map[string]interface{}{"type": []string{"null"}}, expectedType: "OBJECT", nullable: true},
-		{name: "OneOfFlatteningInterface", input: map[string]interface{}{"oneOf": []interface{}{map[string]interface{}{"type": "int"}, map[string]interface{}{"type": "null"}}}, expectedType: "INTEGER", nullable: true},
-		{name: "OneOfFlatteningMapSlice", input: map[string]interface{}{"oneOf": []map[string]interface{}{{"type": "null"}, {"type": "bool"}}}, expectedType: "BOOLEAN", nullable: true},
-		{name: "AnyOfFlatteningNullSecondWithTypeOverwrite", input: map[string]interface{}{"type": "string", "anyOf": []interface{}{map[string]interface{}{"type": "int", "description": "integer value"}, map[string]interface{}{"type": "null"}}}, expectedType: "INTEGER", nullable: true},
-		{name: "OneOfFlatteningMapSliceNullSecond", input: map[string]interface{}{"oneOf": []map[string]interface{}{{"type": "bool"}, {"type": "null"}}}, expectedType: "BOOLEAN", nullable: true},
-		{name: "UnflattenableTwoNonNulls", input: map[string]interface{}{"anyOf": []interface{}{map[string]interface{}{"type": "string"}, map[string]interface{}{"type": "int"}}}, expectedType: "OBJECT", checkAnyOfPres: true},
-		{name: "UnflattenableThreeAnyOf", input: map[string]interface{}{"anyOf": []interface{}{map[string]interface{}{"type": "string"}, map[string]interface{}{"type": "int"}, map[string]interface{}{"type": "null"}}}, expectedType: "OBJECT", checkAnyOfPres: true},
+		{name: "EmptySchema", input: map[string]any{}, expectedType: "OBJECT", checkNonNilProps: true},
+		{name: "IntType", input: map[string]any{"type": "int"}, expectedType: "INTEGER"},
+		{name: "BoolType", input: map[string]any{"type": "bool"}, expectedType: "BOOLEAN"},
+		{name: "FloatType", input: map[string]any{"type": "float"}, expectedType: "NUMBER"},
+		{name: "DoubleType", input: map[string]any{"type": "double"}, expectedType: "NUMBER"},
+		{name: "NullType", input: map[string]any{"type": "null"}, expectedType: "OBJECT", nullable: true},
+		{name: "PolymorphicNullString", input: map[string]any{"type": []any{"null", "string"}}, expectedType: "STRING", nullable: true},
+		{name: "PolymorphicNullOnly", input: map[string]any{"type": []any{"null"}}, expectedType: "OBJECT", nullable: true},
+		{name: "StringSliceNullInt", input: map[string]any{"type": []string{"null", "int"}}, expectedType: "INTEGER", nullable: true},
+		{name: "StringSliceNullOnly", input: map[string]any{"type": []string{"null"}}, expectedType: "OBJECT", nullable: true},
+		{name: "OneOfFlatteningInterface", input: map[string]any{"oneOf": []any{map[string]any{"type": "int"}, map[string]any{"type": "null"}}}, expectedType: "INTEGER", nullable: true},
+		{name: "OneOfFlatteningMapSlice", input: map[string]any{"oneOf": []map[string]any{{"type": "null"}, {"type": "bool"}}}, expectedType: "BOOLEAN", nullable: true},
+		{name: "AnyOfFlatteningNullSecondWithTypeOverwrite", input: map[string]any{"type": "string", "anyOf": []any{map[string]any{"type": "int", "description": "integer value"}, map[string]any{"type": "null"}}}, expectedType: "INTEGER", nullable: true},
+		{name: "OneOfFlatteningMapSliceNullSecond", input: map[string]any{"oneOf": []map[string]any{{"type": "bool"}, {"type": "null"}}}, expectedType: "BOOLEAN", nullable: true},
+		{name: "UnflattenableTwoNonNulls", input: map[string]any{"anyOf": []any{map[string]any{"type": "string"}, map[string]any{"type": "int"}}}, expectedType: "OBJECT", checkAnyOfPres: true},
+		{name: "UnflattenableThreeAnyOf", input: map[string]any{"anyOf": []any{map[string]any{"type": "string"}, map[string]any{"type": "int"}, map[string]any{"type": "null"}}}, expectedType: "OBJECT", checkAnyOfPres: true},
 		{name: "NilInput", input: nil, expectedType: "OBJECT", checkNonNilProps: true},
-		{name: "InvalidRequiredTypeInSchema", input: map[string]interface{}{"required": []interface{}{123}}, expectedType: "OBJECT"},
+		{name: "InvalidRequiredTypeInSchema", input: map[string]any{"required": []any{123}}, expectedType: "OBJECT"},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -633,36 +633,36 @@ func TestCleanParameters(t *testing.T) {
 
 func TestCleanParameters_StripsDisallowedKeys(t *testing.T) {
 	t.Parallel()
-	complexSchema := map[string]interface{}{
+	complexSchema := map[string]any{
 		"$schema": "http://json-schema.org/draft-07/schema#", "title": "TestSchema", "type": "object",
-		"additionalProperties": false, "$ref": "#/defs", "$id": "id1", "definitions": map[string]interface{}{}, "default": "val",
-		"properties": map[string]interface{}{
-			"prompt":        map[string]interface{}{"type": "string", "title": "Prompt Title", "additionalProperties": false},
+		"additionalProperties": false, "$ref": "#/defs", "$id": "id1", "definitions": map[string]any{}, "default": "val",
+		"properties": map[string]any{
+			"prompt":        map[string]any{"type": "string", "title": "Prompt Title", "additionalProperties": false},
 			"raw_field":     "not-a-map",
-			"items_slice":   map[string]interface{}{"type": "array", "items": []interface{}{map[string]interface{}{"type": "int", "additionalProperties": false}, "not-a-map"}},
-			"items_map":     map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "bool"}},
-			"empty_child":   map[string]interface{}{},
-			"optional_list": map[string]interface{}{"type": []interface{}{"null", "array"}, "items": map[string]interface{}{"type": "string"}},
-			"reversed_null": map[string]interface{}{"type": []string{"string", "null"}},
-			"branch_field":  map[string]interface{}{"anyOf": []interface{}{map[string]interface{}{"type": "null"}, map[string]interface{}{"type": "string"}}},
+			"items_slice":   map[string]any{"type": "array", "items": []any{map[string]any{"type": "int", "additionalProperties": false}, "not-a-map"}},
+			"items_map":     map[string]any{"type": "array", "items": map[string]any{"type": "bool"}},
+			"empty_child":   map[string]any{},
+			"optional_list": map[string]any{"type": []any{"null", "array"}, "items": map[string]any{"type": "string"}},
+			"reversed_null": map[string]any{"type": []string{"string", "null"}},
+			"branch_field":  map[string]any{"anyOf": []any{map[string]any{"type": "null"}, map[string]any{"type": "string"}}},
 		},
-		"allOf": []map[string]interface{}{{"type": "string"}},
+		"allOf": []map[string]any{{"type": "string"}},
 	}
 	cleaned := cleanParameters(complexSchema)
 	disallowed := []string{"additionalproperties", "$schema", "title", "default", "$ref", "$id", "definitions"}
-	var checkKeys func(m map[string]interface{}, path string)
-	checkKeys = func(m map[string]interface{}, path string) {
+	var checkKeys func(m map[string]any, path string)
+	checkKeys = func(m map[string]any, path string) {
 		for k, v := range m {
 			for _, dis := range disallowed {
 				if strings.EqualFold(k, dis) {
 					t.Errorf("found disallowed key %q at path %s", k, path)
 				}
 			}
-			if childMap, ok := v.(map[string]interface{}); ok {
+			if childMap, ok := v.(map[string]any); ok {
 				checkKeys(childMap, path+"."+k)
-			} else if childSlice, ok := v.([]interface{}); ok {
+			} else if childSlice, ok := v.([]any); ok {
 				for idx, elem := range childSlice {
-					if elemMap, ok := elem.(map[string]interface{}); ok {
+					if elemMap, ok := elem.(map[string]any); ok {
 						checkKeys(elemMap, fmt.Sprintf("%s.%s[%d]", path, k, idx))
 					}
 				}
@@ -670,33 +670,33 @@ func TestCleanParameters_StripsDisallowedKeys(t *testing.T) {
 		}
 	}
 	checkKeys(cleaned, "root")
-	props := cleaned["properties"].(map[string]interface{})
-	if cleaned["type"] != "OBJECT" || props["prompt"].(map[string]interface{})["type"] != "STRING" || props["empty_child"].(map[string]interface{})["type"] != "OBJECT" {
+	props := cleaned["properties"].(map[string]any)
+	if cleaned["type"] != "OBJECT" || props["prompt"].(map[string]any)["type"] != "STRING" || props["empty_child"].(map[string]any)["type"] != "OBJECT" {
 		t.Errorf("cleaned schema types mismatch: %+v", cleaned)
 	}
-	if optList := props["optional_list"].(map[string]interface{}); optList["type"] != "ARRAY" || optList["nullable"] != true {
+	if optList := props["optional_list"].(map[string]any); optList["type"] != "ARRAY" || optList["nullable"] != true {
 		t.Errorf("expected optional_list ARRAY nullable: %+v", optList)
 	}
-	if revNull := props["reversed_null"].(map[string]interface{}); revNull["type"] != "STRING" || revNull["nullable"] != true {
+	if revNull := props["reversed_null"].(map[string]any); revNull["type"] != "STRING" || revNull["nullable"] != true {
 		t.Errorf("expected reversed_null STRING nullable: %+v", revNull)
 	}
 	// Deeply nested schema check (20 levels)
-	root := map[string]interface{}{"type": "object", "additionalProperties": false}
+	root := map[string]any{"type": "object", "additionalProperties": false}
 	curr := root
 	for range 20 {
-		child := map[string]interface{}{"type": "object", "additionalProperties": false}
-		curr["properties"] = map[string]interface{}{"nested": child}
+		child := map[string]any{"type": "object", "additionalProperties": false}
+		curr["properties"] = map[string]any{"nested": child}
 		curr = child
 	}
-	curr["properties"] = map[string]interface{}{"leaf": map[string]interface{}{"type": "string", "additionalProperties": false}}
+	curr["properties"] = map[string]any{"leaf": map[string]any{"type": "string", "additionalProperties": false}}
 	probe := cleanParameters(root)
 	for level := range 20 {
 		if _, hasAddl := probe["additionalProperties"]; hasAddl {
 			t.Fatalf("level %d had additionalProperties", level)
 		}
-		probe = probe["properties"].(map[string]interface{})["nested"].(map[string]interface{})
+		probe = probe["properties"].(map[string]any)["nested"].(map[string]any)
 	}
-	if leaf := probe["properties"].(map[string]interface{})["leaf"].(map[string]interface{}); leaf["type"] != "STRING" {
+	if leaf := probe["properties"].(map[string]any)["leaf"].(map[string]any); leaf["type"] != "STRING" {
 		t.Fatalf("leaf not preserved: %+v", leaf)
 	}
 }
@@ -791,7 +791,7 @@ func (d *fallbackMockDispatcher) ListDeclarations(ctx context.Context) ([]gemini
 	return []geminiFunctionDeclaration{{Name: "test_tool", Description: "a test tool"}}, nil
 }
 
-func (d *fallbackMockDispatcher) Execute(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+func (d *fallbackMockDispatcher) Execute(ctx context.Context, name string, args map[string]any) (string, error) {
 	return `{"status":"ok"}`, nil
 }
 
@@ -1079,9 +1079,9 @@ func TestGeminiAPIPool_AcquireLease_TableDriven(t *testing.T) {
 				return
 			}
 
-			var callIdx int32
+			var callIdx atomic.Int32
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				idx := int(atomic.AddInt32(&callIdx, 1) - 1)
+				idx := int(callIdx.Add(1) - 1)
 				status, chunk := http.StatusOK, okChunk
 				if idx < len(tc.responseStatusCodes) && tc.responseStatusCodes[idx] != 0 {
 					status = tc.responseStatusCodes[idx]

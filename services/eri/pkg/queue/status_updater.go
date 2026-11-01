@@ -298,9 +298,7 @@ func (u *StatusUpdater) Start() {
 		return
 	}
 	u.startOnce.Do(func() {
-		u.wg.Add(1)
-		go func() {
-			defer u.wg.Done()
+		u.wg.Go(func() {
 			ticker := time.NewTicker(u.tickerInterval)
 			defer ticker.Stop()
 			for {
@@ -318,7 +316,7 @@ func (u *StatusUpdater) Start() {
 					}
 				}
 			}
-		}()
+		})
 	})
 }
 

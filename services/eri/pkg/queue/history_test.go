@@ -405,9 +405,7 @@ func TestConvertDiscordMessagesToHistory(t *testing.T) {
 	now := time.Now().UTC()
 	dg := &discordgo.Session{
 		State: &discordgo.State{
-			Ready: discordgo.Ready{
-				User: &discordgo.User{ID: "bot-id", Username: "aerial"},
-			},
+			User: &discordgo.User{ID: "bot-id", Username: "aerial"},
 		},
 	}
 

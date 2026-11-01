@@ -34,10 +34,6 @@ func writeTranscriptFile(t *testing.T, baseDir, sessionID, content string, mtime
 	return tPath
 }
 
-func boolPtr(b bool) *bool {
-	return &b
-}
-
 type sessionFileFixture struct {
 	sessionID string
 	content   string
@@ -89,7 +85,7 @@ func TestSyncTranscripts_Scenarios(t *testing.T) {
 			wantSynced:        1,
 			wantStepsInserted: 3,
 			wantSummaries:     1,
-			wantSettled:       boolPtr(true),
+			wantSettled:       new(true),
 			wantLastIndexed:   3,
 			wantSummaryText:   "Checked system health and free memory: 24GB available.",
 		},
@@ -202,7 +198,7 @@ func TestSyncTranscripts_Scenarios(t *testing.T) {
 			},
 			idleThreshold:     10 * time.Minute,
 			wantStepsInserted: 1,
-			wantSettled:       boolPtr(false),
+			wantSettled:       new(false),
 		},
 		{
 			name: "batch limit caps synced sessions",

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 	"time"
 
@@ -115,8 +116,7 @@ func (te *turnExecution) fetchLiveDiscordThreadMessages(dg *discordgo.Session, t
 
 	msgs := make([]db.Message, 0, len(discordMsgs))
 	// ChannelMessages returns newest-first; iterate backwards for chronological order.
-	for i := len(discordMsgs) - 1; i >= 0; i-- {
-		dm := discordMsgs[i]
+	for _, dm := range slices.Backward(discordMsgs) {
 		if dm == nil || te.isBurstMessage(dm.ID) {
 			continue
 		}

@@ -178,7 +178,7 @@ func mockJSONResponseWithUsage(convID, responseText string, usage runner.TokenUs
 	if convID == "" {
 		convID = uuid.New().String()
 	}
-	payload, _ := json.Marshal(map[string]interface{}{
+	payload, _ := json.Marshal(map[string]any{
 		"conversation_id": convID, "status": "SUCCESS", "response": responseText,
 		"duration_seconds": 1.0, "num_turns": 1, "usage": usage,
 	})
@@ -189,7 +189,7 @@ func mockMultiTurnJSONResponse(convID, responseText string, numTurns int) string
 	if convID == "" {
 		convID = uuid.New().String()
 	}
-	payload, _ := json.Marshal(map[string]interface{}{
+	payload, _ := json.Marshal(map[string]any{
 		"conversation_id": convID, "status": "SUCCESS", "response": responseText,
 		"duration_seconds": 1.0, "num_turns": numTurns,
 	})
