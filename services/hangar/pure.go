@@ -754,6 +754,32 @@ func walkNomadJobFiles(dirs []string, visit func(dir, jobPath, jobName, content 
 	}
 }
 
+// ParseActiveNomadJobs parses `nomad job status` CLI output and returns the IDs of active
+// top-level jobs (status != "dead", excluding periodic/parameterized child jobs containing "/").
+func ParseActiveNomadJobs(statusOutput string) []string {
+	var jobs []string
+	scanner := bufio.NewScanner(strings.NewReader(statusOutput))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "No running jobs") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 4 {
+			continue
+		}
+		jobID, jobType, status := fields[0], fields[1], strings.ToLower(fields[3])
+		if jobID == "ID" && jobType == "Type" {
+			continue
+		}
+		if strings.Contains(jobID, "/") || status == "dead" {
+			continue
+		}
+		jobs = append(jobs, jobID)
+	}
+	return jobs
+}
+
 // FindJobDefinitionInRepos searches candidate repositories for a Nomad job specification
 // that defines the specified jobName, excluding the repo at skipRepoPath.
 // Returns the file path where the job is defined and true if found, or ("", false) if not found.

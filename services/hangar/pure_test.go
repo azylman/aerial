@@ -1155,6 +1155,33 @@ func TestImageSourceRepo_TableDriven(t *testing.T) {
 	}
 }
 
+func TestParseActiveNomadJobs_TableDriven(t *testing.T) {
+	t.Parallel()
+	statusSample := "ID Type Priority Status Submit Date\nsynapse service 50 running 2026-10-31\nwebhooks-router service 50 running 2026-10-30\ncoverage-ingest/periodic-123 batch 50 dead 2026-10-31\ndb-migrate batch 50 dead 2026-10-29\nshort line\n"
+	tests := []struct {
+		name, input string
+		want        []string
+	}{
+		{"empty output", "", nil},
+		{"no running jobs message", "No running jobs\n", nil},
+		{"filters header, periodic children, dead jobs, and short lines", statusSample, []string{"synapse", "webhooks-router"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ParseActiveNomadJobs(tc.input)
+			if len(got) != len(tc.want) {
+				t.Fatalf("ParseActiveNomadJobs() = %v, want %v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("ParseActiveNomadJobs()[%d] = %q, want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
 func TestFindJobDefinitionInRepos(t *testing.T) {
 	tempDir := t.TempDir()
 	repoA := filepath.Join(tempDir, "repo-a")

@@ -108,9 +108,9 @@ func (d *SyncDaemon) applyNomadChangesDirectly(ctx context.Context, repoPath str
 		readyApplies = append(readyApplies, readyApply{change: ch, fullPath: fullPath})
 	}
 
-	// Phase 1: Teardowns (stop deleted jobs, or defer if core container build rollout is pending)
+	// Phase 1: Teardowns (stop deleted jobs, or defer if a Nomad job rollout in this push is deferred)
 	if len(deleteChanges) > 0 {
-		if containersBuilding || len(deferred) > 0 {
+		if len(deferred) > 0 {
 			d.recordPendingNomadChanges(repoPath, deleteChanges, repo, commit, targetID, strconv.Itoa(prNumber))
 		} else {
 			for _, ch := range deleteChanges {
@@ -445,6 +445,7 @@ func (d *SyncDaemon) ExecuteImageReadyEvent(ctx context.Context, req ImageReadyE
 	if len(pendingTeardowns) > 0 {
 		d.ExecuteNomadTeardowns(ctx, pendingTeardowns)
 	}
+	d.SweepOrphanedNomadJobs(ctx)
 
 	digest := req.Digest
 	if digest == "" {
