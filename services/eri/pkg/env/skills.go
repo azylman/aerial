@@ -195,8 +195,9 @@ func linkSkillTarget(srcPath, destPath, tmpDest string) bool {
 	}
 
 	if err := renameSkill(tmpDest, destPath); err != nil {
-		ignore(removeSkill(destPath))
+		ignore(removeAllSkills(destPath))
 		if err := renameSkill(tmpDest, destPath); err != nil {
+			ignore(removeSkill(tmpDest))
 			log.Printf("[Skills] Warning renaming %s -> %s: %v", tmpDest, destPath, err)
 			return false
 		}

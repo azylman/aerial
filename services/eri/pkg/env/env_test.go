@@ -1127,6 +1127,8 @@ func TestSkillsProvisioning(t *testing.T) {
 		symlinkTmpFallback bool
 		symlinkTotalFail   bool
 		renameFailFallback bool
+		replaceExistingDir bool
+		renameTotalFail    bool
 		orphanSymlinkSweep bool
 	}{
 		{name: "discord target receives common and target skills and superpowers", target: TargetDiscord, superpowers: true},
@@ -1142,6 +1144,8 @@ func TestSkillsProvisioning(t *testing.T) {
 		{name: "symlink tmp fails and triggers direct symlink fallback", target: TargetDiscord, symlinkTmpFallback: true},
 		{name: "both tmp and direct symlink fail gracefully", target: TargetDiscord, symlinkTotalFail: true},
 		{name: "rename fails and triggers destination removal fallback", target: TargetDiscord, renameFailFallback: true},
+		{name: "replacing existing skill directory does not leave tmp symlink", target: TargetDiscord, replaceExistingDir: true},
+		{name: "rename total failure cleans up tmp symlink", target: TargetDiscord, renameTotalFail: true},
 		{name: "sweepOrphanedSymlinks removes broken links and retains valid links", orphanSymlinkSweep: true},
 	}
 
@@ -1263,13 +1267,25 @@ func TestSkillsProvisioning(t *testing.T) {
 					return origRename(oldpath, newpath)
 				}
 			}
+			if tc.replaceExistingDir {
+				existingDir := filepath.Join(targetSkillsDir, "custom-skill")
+				if err := os.MkdirAll(existingDir, 0o755); err != nil {
+					t.Fatalf("failed to create existing skill directory: %v", err)
+				}
+				writeTestFile(t, filepath.Join(existingDir, "stale.txt"), "old content")
+			}
+			if tc.renameTotalFail {
+				renameSkill = func(oldpath, newpath string) error {
+					return errors.New("simulated fatal rename error")
+				}
+			}
 
 			if err := p.SyncSkills(); err != nil {
 				t.Fatalf("SyncSkills failed: %v", err)
 			}
 
 			installed := p.LinkTargetSkills(targetSkillsDir, tc.target)
-			if installed == 0 && tc.target != TargetEphemeral && !tc.symlinkTotalFail && !tc.targetBlocked {
+			if installed == 0 && tc.target != TargetEphemeral && !tc.symlinkTotalFail && !tc.targetBlocked && !tc.renameTotalFail {
 				t.Fatalf("expected installed skills > 0 for target %s", tc.target)
 			}
 
@@ -1277,6 +1293,26 @@ func TestSkillsProvisioning(t *testing.T) {
 			entries, _ := os.ReadDir(targetSkillsDir)
 			for _, e := range entries {
 				found[e.Name()] = true
+			}
+
+			if tc.replaceExistingDir {
+				tmpLink := filepath.Join(targetSkillsDir, "custom-skill.tmp")
+				if _, err := os.Lstat(tmpLink); !os.IsNotExist(err) {
+					t.Fatalf("expected tmp symlink %s to be cleaned up, got err: %v", tmpLink, err)
+				}
+				fi, err := os.Lstat(filepath.Join(targetSkillsDir, "custom-skill"))
+				if err != nil {
+					t.Fatalf("expected custom-skill to exist: %v", err)
+				}
+				if fi.Mode()&os.ModeSymlink == 0 {
+					t.Fatalf("expected custom-skill to be symlink, got mode: %v", fi.Mode())
+				}
+			}
+			if tc.renameTotalFail {
+				tmpLink := filepath.Join(targetSkillsDir, "custom-skill.tmp")
+				if _, err := os.Lstat(tmpLink); !os.IsNotExist(err) {
+					t.Fatalf("expected tmp symlink %s to be removed on failure, got err: %v", tmpLink, err)
+				}
 			}
 
 			if tc.flatSkillWarning && found["flat-root-skill"] {
@@ -1289,7 +1325,7 @@ func TestSkillsProvisioning(t *testing.T) {
 				t.Errorf("unauthorized skill was not pruned")
 			}
 
-			if !tc.symlinkTotalFail && !tc.targetBlocked {
+			if !tc.symlinkTotalFail && !tc.targetBlocked && !tc.renameTotalFail {
 				switch tc.target {
 				case TargetDiscord:
 					if !found["custom-skill"] || !found["discord-skill"] || (tc.superpowers != found["brainstorming"]) || found["voice-skill"] {

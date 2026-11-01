@@ -487,7 +487,7 @@ var Tools = []Tool{
 	},
 	{
 		Name:        "browser_evaluate",
-		Description: "Evaluate a JavaScript expression in the context of the active page.",
+		Description: "Evaluate a JavaScript expression in the context of the active page. Note: fetch(, XMLHttpRequest, and .click() are blocked by security guardrails (directing callers to browser_click for clicking and browser_get_content for reading text).",
 		InputSchema: InputSchema{
 			Type: "object",
 			Properties: map[string]PropertyDef{
@@ -500,12 +500,12 @@ var Tools = []Tool{
 	},
 	{
 		Name:        "browser_get_content",
-		Description: "Extract text content or HTML from the active page. Defaults to clean text capped at 15000 characters to prevent context bloat.",
+		Description: "Extract visible plain text (innerText) from the active page matching a selector, capped at maxLength characters (default: 15000) to prevent context bloat.",
 		InputSchema: InputSchema{
 			Type: "object",
 			Properties: map[string]PropertyDef{
 				"selector":  {Type: "string", Description: "CSS selector (defaults to body)."},
-				"maxLength": {Type: "number", Description: "Maximum characters to return (default: 15000)."},
+				"maxLength": {Type: "integer", Description: "Maximum characters to return (default: 15000)."},
 			},
 		},
 	},
@@ -550,7 +550,7 @@ var Tools = []Tool{
 			Type: "object",
 			Properties: map[string]PropertyDef{
 				"query":      {Type: "string", Description: "Search keywords or product description."},
-				"maxResults": {Type: "number", Description: "Maximum number of results to extract (default: 5)."},
+				"maxResults": {Type: "integer", Description: "Maximum number of results to extract (default: 5)."},
 			},
 			Required: []string{"query"},
 		},
@@ -565,11 +565,11 @@ var Tools = []Tool{
 	},
 	{
 		Name:        "amazon_add_to_cart",
-		Description: "Add an item to the Amazon cart from the current product page or an ASIN/URL, then verify addition.",
+		Description: "Add an item to the Amazon cart by its ASIN, then verify addition. The asin must be a 10-character alphanumeric ASIN rather than a URL.",
 		InputSchema: InputSchema{
 			Type: "object",
 			Properties: map[string]PropertyDef{
-				"asin": {Type: "string", Description: "Amazon ASIN (10 alphanumeric characters)."},
+				"asin": {Type: "string", Description: "10-character alphanumeric Amazon ASIN (e.g. B08N5WRWNW). Must be an ASIN rather than a URL."},
 			},
 			Required: []string{"asin"},
 		},
