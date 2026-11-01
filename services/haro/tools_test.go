@@ -73,9 +73,7 @@ func TestRunApp_Lifecycle(t *testing.T) {
 		if resp != nil {
 			_ = resp.Body.Close()
 		}
-		select {
-		case <-time.After(20 * time.Millisecond):
-		}
+		<-time.After(20 * time.Millisecond)
 	}
 	if resp == nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("health check failed, status: %v", resp)

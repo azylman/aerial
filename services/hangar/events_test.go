@@ -138,27 +138,27 @@ func (e *pushEventTestEnv) setGitScript(s mockGitScript) {
 	}
 }
 
-func (env *pushEventTestEnv) setupCase(tc gitPushCase) {
+func (e *pushEventTestEnv) setupCase(tc gitPushCase) {
 	if tc.nomadAddr != "" {
-		env.daemon.nomadAddr = tc.nomadAddr
+		e.daemon.nomadAddr = tc.nomadAddr
 	}
 	if tc.serviceFiles {
-		_ = os.MkdirAll(filepath.Join(env.aerialConfigDir, "services", "voice"), 0o755)
-		_ = os.MkdirAll(filepath.Join(env.aerialConfigDir, "services", "hangar"), 0o755)
-		_ = os.WriteFile(filepath.Join(env.aerialConfigDir, "services", "voice", "voice.yaml"), []byte("model: small.en\n"), 0o644)
+		_ = os.MkdirAll(filepath.Join(e.aerialConfigDir, "services", "voice"), 0o755)
+		_ = os.MkdirAll(filepath.Join(e.aerialConfigDir, "services", "hangar"), 0o755)
+		_ = os.WriteFile(filepath.Join(e.aerialConfigDir, "services", "voice", "voice.yaml"), []byte("model: small.en\n"), 0o644)
 		hangarContent := "service_configs:\n  - rel_path: \"services/voice/voice.yaml\"\n    nomad_var: \"nomad/jobs/voice\"\n    var_key: \"CONFIG_YAML\"\n"
-		_ = os.WriteFile(filepath.Join(env.aerialConfigDir, "services", "hangar", "hangar.yaml"), []byte(hangarContent), 0o644)
+		_ = os.WriteFile(filepath.Join(e.aerialConfigDir, "services", "hangar", "hangar.yaml"), []byte(hangarContent), 0o644)
 	}
-	targetDir := env.aerialDir
+	targetDir := e.aerialDir
 	if strings.Contains(tc.req.Repo, "aerial-config") {
-		targetDir = env.aerialConfigDir
+		targetDir = e.aerialConfigDir
 	}
 	for p, content := range tc.jobFiles {
 		fullP := filepath.Join(targetDir, p)
 		_ = os.MkdirAll(filepath.Dir(fullP), 0o755)
 		_ = os.WriteFile(fullP, []byte(content), 0o644)
 	}
-	env.daemon.nomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+	e.daemon.nomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
 		if len(args) >= 2 && args[0] == "job" && args[1] == "validate" {
 			if tc.nomadFailCmd == "validate" {
 				return nil, []byte("validate error"), errors.New("invalid job")
@@ -169,9 +169,9 @@ func (env *pushEventTestEnv) setupCase(tc gitPushCase) {
 			return []byte("OK"), nil, nil
 		}
 		if len(args) >= 2 && args[0] == "job" && args[1] == "run" {
-			env.mu.Lock()
-			env.appliedPaths = append(env.appliedPaths, args[len(args)-1])
-			env.mu.Unlock()
+			e.mu.Lock()
+			e.appliedPaths = append(e.appliedPaths, args[len(args)-1])
+			e.mu.Unlock()
 			if tc.nomadFailCmd == "run" {
 				return nil, []byte("driver error: failed to place allocation"), errors.New("nomad run failed")
 			}
@@ -182,9 +182,9 @@ func (env *pushEventTestEnv) setupCase(tc gitPushCase) {
 		}
 		if len(args) >= 2 && args[0] == "var" && args[1] == "put" {
 			if len(args) >= 4 {
-				env.mu.Lock()
-				env.varPutJobs = append(env.varPutJobs, args[3])
-				env.mu.Unlock()
+				e.mu.Lock()
+				e.varPutJobs = append(e.varPutJobs, args[3])
+				e.mu.Unlock()
 			}
 			if tc.nomadFailCmd == "var" {
 				return nil, []byte("nomad var put permission denied"), errors.New("var put failed")
@@ -195,18 +195,18 @@ func (env *pushEventTestEnv) setupCase(tc gitPushCase) {
 	}
 	switch tc.registryMode {
 	case "not_found":
-		env.daemon.registryClient = &http.Client{Transport: &roundTripperFunc{fn: func(req *http.Request) (*http.Response, error) {
+		e.daemon.registryClient = &http.Client{Transport: &roundTripperFunc{fn: func(req *http.Request) (*http.Response, error) {
 			return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: ioNopCloser(strings.NewReader(`{"errors":[{"code":"MANIFEST_UNKNOWN"}]}`))}, nil
 		}}}
 	case "digest_ready":
-		env.daemon.registryClient = &http.Client{Transport: &roundTripperFunc{fn: func(req *http.Request) (*http.Response, error) {
+		e.daemon.registryClient = &http.Client{Transport: &roundTripperFunc{fn: func(req *http.Request) (*http.Response, error) {
 			resp := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: ioNopCloser(strings.NewReader(`{}`))}
 			resp.Header.Set("Docker-Content-Digest", "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
 			return resp, nil
 		}}}
 	}
 	if tc.gitScript != (mockGitScript{}) {
-		env.setGitScript(tc.gitScript)
+		e.setGitScript(tc.gitScript)
 	}
 }
 

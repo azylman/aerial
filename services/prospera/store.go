@@ -166,7 +166,7 @@ func unmarshalCallJSON(c *VoiceCall, briefRaw, instrRaw, transRaw string) error 
 	return nil
 }
 
-func scanCall(scanner interface{ Scan(...any) error }) (*VoiceCall, error) {
+func scanCall(scanner interface{ Scan(dest ...any) error }) (*VoiceCall, error) {
 	var c VoiceCall
 	var providerSID, endReason, callbackOfID, discordChan, discordThread, answeredBy, vmURL, repSummary sql.NullString
 	var ansAt, endAt sql.NullTime

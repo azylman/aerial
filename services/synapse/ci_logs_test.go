@@ -101,7 +101,7 @@ func TestExtractCIFailureDetails(t *testing.T) {
 				sb.WriteString("🚨 alert trigger\n")
 				sb.WriteString("##[error]Process failed\n")
 				for i := 1; i <= 30; i++ {
-					sb.WriteString(fmt.Sprintf("regular build log step %d\n", i))
+					fmt.Fprintf(&sb, "regular build log step %d\n", i)
 				}
 				sb.WriteString("regular build log step 30\n")
 				return sb.String()

@@ -19,7 +19,7 @@ var (
 
 	dbStatsOnce sync.Once
 
-	// Turn & Worker Pool Metrics
+	// TurnsTotal and related metrics track turn and worker pool execution.
 	TurnsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "aerial_brain_turns_total",
@@ -37,7 +37,7 @@ var (
 		[]string{"status", "trigger_type", "model"},
 	)
 
-	// LLM Token Consumption Metrics
+	// TokensTotal and related metrics track LLM token consumption.
 	TokensTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "aerial_brain_tokens_total",
@@ -67,7 +67,7 @@ var (
 		},
 	)
 
-	// Subprocess Runner Metrics
+	// RunnerExecutionsTotal and related metrics track subprocess runner execution.
 	RunnerExecutionsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "aerial_brain_runner_executions_total",
@@ -93,7 +93,7 @@ var (
 		[]string{"error_type", "model"},
 	)
 
-	// Yield Trap Telemetry
+	// YieldTrapEventsTotal tracks yield trap telemetry.
 	YieldTrapEventsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "aerial_brain_yield_trap_total",
@@ -102,7 +102,7 @@ var (
 		[]string{"action", "source", "model"},
 	)
 
-	// Persistent Daemon & Background Task Telemetry
+	// DaemonsActive and related metrics track persistent daemon and background task telemetry.
 	DaemonsActive = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "aerial_brain_daemons_active",
@@ -140,7 +140,7 @@ var (
 		},
 	)
 
-	// Voice Telemetry
+	// VoiceTTFRDurationSeconds tracks voice time-to-first-response telemetry.
 	VoiceTTFRDurationSeconds = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "aerial_brain_voice_ttfr_duration_seconds",
@@ -150,7 +150,7 @@ var (
 		[]string{"mode", "status"},
 	)
 
-	// Classifier Telemetry (Ambient Relevance & Latency)
+	// ClassifierDurationSeconds and related metrics track ambient relevance classifier telemetry.
 	ClassifierDurationSeconds = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "aerial_brain_classifier_duration_seconds",
@@ -176,7 +176,7 @@ var (
 		},
 	)
 
-	// Thread Title Summarization Telemetry
+	// ThreadTitleDurationSeconds tracks thread title summarization latency.
 	ThreadTitleDurationSeconds = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "aerial_brain_thread_title_duration_seconds",
@@ -186,7 +186,7 @@ var (
 		[]string{"status", "model"},
 	)
 
-	// Discord Funnel & Gateway Telemetry
+	// DiscordEventsTotal and related metrics track Discord funnel and gateway telemetry.
 	DiscordEventsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "aerial_brain_discord_events_total",
@@ -218,7 +218,7 @@ var (
 		[]string{"status"},
 	)
 
-	// Discord Outbound Delivery Telemetry
+	// DiscordDeliveriesTotal and related metrics track Discord outbound delivery telemetry.
 	DiscordDeliveriesTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "aerial_brain_discord_deliveries_total",
@@ -243,7 +243,7 @@ var (
 		},
 	)
 
-	// Scheduler Telemetry
+	// SchedulerExecutionsTotal and related metrics track scheduler execution telemetry.
 	SchedulerExecutionsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "aerial_brain_scheduler_executions_total",
@@ -261,7 +261,7 @@ var (
 		[]string{"schedule_type"},
 	)
 
-	// Semantic Memory & Embeddings Telemetry
+	// MemoryOperationsTotal and related metrics track semantic memory and embedding telemetry.
 	MemoryOperationsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "aerial_brain_memory_operations_total",
@@ -295,7 +295,7 @@ var (
 		[]string{"model", "type", "status"},
 	)
 
-	// Database Query Telemetry
+	// DBQueryDurationSeconds tracks database query latency telemetry.
 	DBQueryDurationSeconds = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "aerial_brain_db_query_duration_seconds",
@@ -305,7 +305,7 @@ var (
 		[]string{"op", "status"},
 	)
 
-	// HTTP Ingress API Telemetry
+	// HTTPRequestsTotal and related metrics track HTTP ingress API telemetry.
 	HTTPRequestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "aerial_brain_http_requests_total",
@@ -330,7 +330,7 @@ var (
 		},
 	)
 
-	// Channel History Telemetry
+	// ChannelHistoryFetchesTotal and related metrics track channel history fetch telemetry.
 	ChannelHistoryFetchesTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "aerial_brain_channel_history_fetches_total",
@@ -356,7 +356,7 @@ var (
 		},
 	)
 
-	// Hot-Reload & Build Metadata
+	// ConfigReloadsTotal tracks hot-reload configuration events.
 	ConfigReloadsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "aerial_brain_config_reloads_total",
@@ -365,7 +365,7 @@ var (
 		[]string{"source", "status"},
 	)
 
-	// Lifecycle Webhook Telemetry
+	// WebhooksDispatchedTotal and related metrics track lifecycle webhook telemetry.
 	WebhooksDispatchedTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "aerial_brain_webhooks_dispatched_total",
@@ -383,7 +383,7 @@ var (
 		[]string{"hook"},
 	)
 
-	// Session Rotation Telemetry
+	// SessionRotationsTotal and related metrics track session rotation and build metadata.
 	SessionRotationsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "aerial_brain_session_rotations_total",
@@ -400,7 +400,7 @@ var (
 		[]string{"version", "goversion"},
 	)
 
-	// Agent Tool & Skill Execution Telemetry
+	// ToolCallsTotal and related metrics track agent tool and skill execution telemetry.
 	ToolCallsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "aerial_brain_tool_calls_total",

@@ -108,14 +108,14 @@ func TestDBInitAndDSN(t *testing.T) {
 		_ = dbPragma.Close()
 	}
 
-	oldSqlOpen := sqlOpen
-	defer func() { sqlOpen = oldSqlOpen }()
+	oldSQLOpen := sqlOpen
+	defer func() { sqlOpen = oldSQLOpen }()
 	sqlOpen = func(driverName, dataSourceName string) (*sql.DB, error) {
 		return nil, errors.New("simulated open error")
 	}
 	_, errOpen := Open("postgres://localhost/test")
 	assertErr(t, errOpen, "sqlOpen failure")
-	sqlOpen = oldSqlOpen
+	sqlOpen = oldSQLOpen
 
 	database := setupTestDB(t)
 	defer database.Close()

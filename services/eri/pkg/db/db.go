@@ -11,6 +11,7 @@ import (
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
+	// Register pgx stdlib driver for database/sql.
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 

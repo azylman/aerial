@@ -549,7 +549,7 @@ func fitMessagesTail(messages []string, budget int) []string {
 		msgRunes := utf8.RuneCountInString(msg)
 		needed := msgRunes
 		if len(kept) > 0 {
-			needed += 1 // account for "\n" separator
+			needed++ // account for "\n" separator
 		}
 		if currentRunes+needed > budget {
 			break

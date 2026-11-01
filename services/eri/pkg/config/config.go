@@ -622,12 +622,12 @@ func (c *Config) VoicePrewarmedTargets() []string {
 
 // VoiceAllowedTools returns a defensive copy of configured voice allowed tools on ConfigData.
 // A nil return indicates unconstrained (all tools allowed); an empty non-nil slice indicates zero tools allowed.
-func (cd *ConfigData) VoiceAllowedTools() []string {
-	if cd == nil || cd.Voice.AllowedTools == nil {
+func (c *ConfigData) VoiceAllowedTools() []string {
+	if c == nil || c.Voice.AllowedTools == nil {
 		return nil
 	}
-	tools := make([]string, len(cd.Voice.AllowedTools))
-	copy(tools, cd.Voice.AllowedTools)
+	tools := make([]string, len(c.Voice.AllowedTools))
+	copy(tools, c.Voice.AllowedTools)
 	return tools
 }
 

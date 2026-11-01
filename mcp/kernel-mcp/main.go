@@ -555,8 +555,9 @@ func runServer(ctx context.Context, cfg *Config) error {
 
 	addr := net.JoinHostPort("0.0.0.0", cfg.Port)
 	httpServer := &http.Server{
-		Addr:    addr,
-		Handler: mux,
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	errChan := make(chan error, 1)
