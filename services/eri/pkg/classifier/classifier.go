@@ -280,10 +280,10 @@ const DefaultAmbientWakePrompt = "determine whether the author of the target mes
 const DefaultSystemOneWakePrompt = "Evaluate ONLY the final 'Target message:' (using 'Recent context:' for conversation history). Decide whether the author of the Target message is addressing Aerial and expects Aerial to reply."
 
 // DefaultSystemOneTrueCriteria defines the positive criteria for System-1 wake evaluation.
-const DefaultSystemOneTrueCriteria = "The Target message is spoken to Aerial: it names or replies to Aerial with a question, command, reminder, or request, OR it is a direct follow-up question, critique, or approval to Aerial's immediately preceding response without addressing anyone else."
+const DefaultSystemOneTrueCriteria = "The Target message is spoken to Aerial: it names or replies to Aerial with a question, command, reminder, or request, OR it is a direct follow-up question, critique, or approval (including brief confirmations like 'yes do that') to Aerial's immediately preceding response or offer without addressing anyone else."
 
 // DefaultSystemOneFalseCriteria defines the negative criteria for System-1 wake evaluation.
-const DefaultSystemOneFalseCriteria = "The Target message is NOT spoken to Aerial: it tags or replies to a different person or bot (e.g. '@User' or '(replying to @User)' other than Aerial), only refers to Aerial in the third person (e.g. 'from Aerial' or 'than Aerial'), is a self-answered or rhetorical remark, is a standalone status announcement, or continues banter between other participants."
+const DefaultSystemOneFalseCriteria = "The Target message is NOT spoken to Aerial: it tags or replies to a different person or bot (e.g. '@User' or '(replying to @User)' other than Aerial), continues an exchange where another participant spoke after Aerial, only refers to Aerial in the third person (e.g. 'from Aerial' or 'than Aerial'), is a self-answered or rhetorical remark, is a standalone status announcement, or continues banter/complaints between other participants."
 
 // MaxSystemOneContextMessages is the maximum number of preceding context messages included in ModernBERT dialogue state.
 const MaxSystemOneContextMessages = 5
