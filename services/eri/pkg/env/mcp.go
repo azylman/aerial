@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,7 +15,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/config"
 )
 
-func loadOpenObserveMCPServer(cur *config.ConfigData, mergedServers map[string]interface{}) {
+func loadOpenObserveMCPServer(cur *config.ConfigData, mergedServers map[string]any) {
 	if cur.OpenObserveUser == "" || cur.OpenObservePassword == "" {
 		return
 	}
@@ -28,7 +29,7 @@ func loadOpenObserveMCPServer(cur *config.ConfigData, mergedServers map[string]i
 	}
 	mcpEndpoint := fmt.Sprintf("%s/api/%s/mcp", strings.TrimSuffix(ooURL, "/"), ooOrg)
 	authVal := base64.StdEncoding.EncodeToString([]byte(cur.OpenObserveUser + ":" + cur.OpenObservePassword))
-	mergedServers["openobserve"] = map[string]interface{}{
+	mergedServers["openobserve"] = map[string]any{
 		"serverUrl": mcpEndpoint,
 		"headers": map[string]string{
 			"Authorization": "Basic " + authVal,
@@ -36,7 +37,7 @@ func loadOpenObserveMCPServer(cur *config.ConfigData, mergedServers map[string]i
 	}
 }
 
-func loadFileBasedMCPServers(dataDir, fallbackConfig string, mergedServers map[string]interface{}) {
+func loadFileBasedMCPServers(dataDir, fallbackConfig string, mergedServers map[string]any) {
 	configPaths := []string{
 		"/share/aerial-config/mcp.config.json",
 		"/share/aerial-config/mcp.json",
@@ -62,29 +63,27 @@ func loadFileBasedMCPServers(dataDir, fallbackConfig string, mergedServers map[s
 	}
 
 	if len(rawBytes) > 0 {
-		var parsed map[string]interface{}
+		var parsed map[string]any
 		if err := json.Unmarshal(rawBytes, &parsed); err == nil {
-			if servers, ok := parsed["mcpServers"].(map[string]interface{}); ok {
-				for k, v := range servers {
-					mergedServers[k] = v
-				}
+			if servers, ok := parsed["mcpServers"].(map[string]any); ok {
+				maps.Copy(mergedServers, servers)
 			}
 		}
 	}
 }
 
-func (p *Provisioner) loadDiscordBaseMCPServers(cfg *config.Config, mergedServers map[string]interface{}) {
-	mergedServers["discord"] = map[string]interface{}{
+func (p *Provisioner) loadDiscordBaseMCPServers(cfg *config.Config, mergedServers map[string]any) {
+	mergedServers["discord"] = map[string]any{
 		"serverUrl": "http://discord-mcp:4001/mcp",
 	}
-	mergedServers["vanadis"] = map[string]interface{}{
+	mergedServers["vanadis"] = map[string]any{
 		"serverUrl": "http://vanadis.aerial/mcp",
 	}
 
 	if cfg != nil {
 		cur := cfg.Current()
 		if cur.GitHubPAT != "" {
-			mergedServers["github"] = map[string]interface{}{
+			mergedServers["github"] = map[string]any{
 				"serverUrl": "http://github-mcp:4003/mcp",
 			}
 		}
@@ -128,7 +127,7 @@ func selectTargetServers(cur *config.ConfigData, target RuleTarget) []map[string
 	return targetServers
 }
 
-func overlayConfigMCPServers(cfg *config.Config, target RuleTarget, mergedServers map[string]interface{}) {
+func overlayConfigMCPServers(cfg *config.Config, target RuleTarget, mergedServers map[string]any) {
 	if cfg == nil {
 		return
 	}
@@ -137,7 +136,7 @@ func overlayConfigMCPServers(cfg *config.Config, target RuleTarget, mergedServer
 
 	for _, srvMap := range targetServers {
 		for k, v := range srvMap {
-			var parsedVal interface{}
+			var parsedVal any
 			if err := json.Unmarshal(v, &parsedVal); err == nil {
 				mergedServers[k] = parsedVal
 			} else {
@@ -149,15 +148,15 @@ func overlayConfigMCPServers(cfg *config.Config, target RuleTarget, mergedServer
 
 // LoadTargetMCPConfig constructs the merged MCP configuration partitioned for target runtime.
 func (p *Provisioner) LoadTargetMCPConfig(cfg *config.Config, target RuleTarget) json.RawMessage {
-	mergedServers := make(map[string]interface{})
+	mergedServers := make(map[string]any)
 
 	// 1. Start with built-in default MCP microservices
 	// Scheduler and memory are common across all runtimes except ephemeral
 	if target != TargetEphemeral {
-		mergedServers["scheduler"] = map[string]interface{}{
+		mergedServers["scheduler"] = map[string]any{
 			"serverUrl": "http://haro.aerial/mcp",
 		}
-		mergedServers["memory"] = map[string]interface{}{
+		mergedServers["memory"] = map[string]any{
 			"serverUrl": "http://coven.aerial/mcp",
 		}
 	}
@@ -169,7 +168,7 @@ func (p *Provisioner) LoadTargetMCPConfig(cfg *config.Config, target RuleTarget)
 	// 3. Overlay custom MCP servers from config.yaml
 	overlayConfigMCPServers(cfg, target, mergedServers)
 
-	finalConfig := map[string]interface{}{
+	finalConfig := map[string]any{
 		"mcpServers": mergedServers,
 	}
 
@@ -246,10 +245,10 @@ func (p *Provisioner) EnsureTargetMcpConfig(targetGeminiDir string, rawConfig js
 		configContent = rawConfig
 	}
 
-	var js map[string]interface{}
+	var js map[string]any
 	var serverList []string
 	if err := json.Unmarshal(configContent, &js); err == nil {
-		if servers, ok := js["mcpServers"].(map[string]interface{}); ok {
+		if servers, ok := js["mcpServers"].(map[string]any); ok {
 			for name := range servers {
 				serverList = append(serverList, name)
 			}

@@ -134,7 +134,7 @@ func (p *Provisioner) provisionOAuthState(configDir string) error {
 	return nil
 }
 
-func (p *Provisioner) applyOAuthSettings(settings map[string]interface{}, configDir, settingsPath string) error {
+func (p *Provisioner) applyOAuthSettings(settings map[string]any, configDir, settingsPath string) error {
 	// OAuth / ADC mode: modelProvider must NOT be set to "gemini"
 	if mp, exists := settings["modelProvider"]; exists {
 		log.Printf("Purging modelProvider=%v from %s (OAuth/ADC mode requires omitting modelProvider)", mp, settingsPath)
@@ -161,12 +161,12 @@ func (p *Provisioner) SyncSettings(apiKey, model string) error {
 	}
 
 	settingsPath := filepath.Join(configDir, "settings.json")
-	settings := make(map[string]interface{})
+	settings := make(map[string]any)
 
 	if data, err := os.ReadFile(settingsPath); err == nil {
 		if err := json.Unmarshal(data, &settings); err != nil {
 			log.Printf("Corrupted settings.json detected at %s, recreating: %v", settingsPath, err)
-			settings = make(map[string]interface{})
+			settings = make(map[string]any)
 		}
 	}
 

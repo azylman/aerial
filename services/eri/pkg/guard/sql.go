@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -403,8 +404,7 @@ func inspectPsqlPipeline(cmdLine string, describer SQLDescriber) *Decision {
 	}
 
 	rewritten := cmdLine
-	for i := len(invocations) - 1; i >= 0; i-- {
-		inv := invocations[i]
+	for _, inv := range slices.Backward(invocations) {
 		if !inv.hasFormatFlag && inv.insertOffset > 0 && inv.insertOffset <= len(rewritten) {
 			rewritten = rewritten[:inv.insertOffset] + " -A" + rewritten[inv.insertOffset:]
 		}
@@ -516,8 +516,8 @@ func parsePsqlArgs(insertOffset int, tokens []locatedToken) psqlInvocation {
 			inv.queries = append(inv.queries, tokens[i].value)
 			continue
 		}
-		if strings.HasPrefix(t, "--command=") {
-			inv.queries = append(inv.queries, strings.TrimPrefix(t, "--command="))
+		if after, ok := strings.CutPrefix(t, "--command="); ok {
+			inv.queries = append(inv.queries, after)
 			continue
 		}
 		if strings.HasPrefix(t, "-") && !strings.HasPrefix(t, "--") {

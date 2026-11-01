@@ -233,12 +233,12 @@ func formatChunkActiveStepLines(activeStep string) string {
 	for _, rawLine := range lines {
 		line := strings.TrimSpace(rawLine)
 		for {
-			if strings.HasPrefix(line, "-#") {
-				line = strings.TrimSpace(strings.TrimPrefix(line, "-#"))
+			if after, ok := strings.CutPrefix(line, "-#"); ok {
+				line = strings.TrimSpace(after)
 				continue
 			}
-			if strings.HasPrefix(line, "↳") {
-				line = strings.TrimSpace(strings.TrimPrefix(line, "↳"))
+			if after, ok := strings.CutPrefix(line, "↳"); ok {
+				line = strings.TrimSpace(after)
 				continue
 			}
 			break

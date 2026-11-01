@@ -69,8 +69,8 @@ func ExtractMessageBody(content string) string {
 	if !strings.Contains(trimmed, "<USER_REQUEST>") {
 		return trimmed
 	}
-	if idx := strings.Index(trimmed, "- content:"); idx != -1 {
-		rest := trimmed[idx+len("- content:"):]
+	if _, after, ok := strings.Cut(trimmed, "- content:"); ok {
+		rest := after
 		endIdx := -1
 		for _, m := range []string{"\n- timestamp:", "\n- mentions:", "\n- attachments:", "\n- ", "\n</USER_REQUEST>"} {
 			if pos := strings.Index(rest, m); pos != -1 && (endIdx == -1 || pos < endIdx) {
@@ -82,8 +82,8 @@ func ExtractMessageBody(content string) string {
 		}
 		return unescapeUserRequest(rest)
 	}
-	if pIdx := strings.Index(trimmed, "Prompt:"); pIdx != -1 {
-		rest := trimmed[pIdx+len("Prompt:"):]
+	if _, after, ok := strings.Cut(trimmed, "Prompt:"); ok {
+		rest := after
 		if endIdx := strings.Index(rest, "</USER_REQUEST>"); endIdx != -1 {
 			rest = rest[:endIdx]
 		}

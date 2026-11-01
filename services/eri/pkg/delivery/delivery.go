@@ -133,10 +133,7 @@ func (st *messageSplitState) splitOversizedLine(lineRunes []rune, willCloseFence
 			avail = st.limit - st.currentRunes - st.closingMargin(willCloseFence)
 		}
 
-		take := len(remaining)
-		if take > avail {
-			take = avail
-		}
+		take := min(len(remaining), avail)
 		part := string(remaining[:take])
 		st.current.WriteString(part)
 		st.currentRunes += len([]rune(part))
@@ -522,8 +519,7 @@ func IsMessageNotFoundError(err error) bool {
 	if err == nil {
 		return false
 	}
-	var restErr *discordgo.RESTError
-	if errors.As(err, &restErr) {
+	if restErr, ok := errors.AsType[*discordgo.RESTError](err); ok {
 		if restErr.Response != nil && restErr.Response.StatusCode == http.StatusNotFound {
 			return true
 		}
@@ -540,8 +536,7 @@ func IsThreadArchivedOrLockedError(err error) bool {
 	if err == nil {
 		return false
 	}
-	var restErr *discordgo.RESTError
-	if errors.As(err, &restErr) {
+	if restErr, ok := errors.AsType[*discordgo.RESTError](err); ok {
 		if restErr.Message != nil && (restErr.Message.Code == 50083 || restErr.Message.Code == 50084) {
 			return true
 		}
@@ -555,8 +550,7 @@ func IsPermissionError(err error) bool {
 	if err == nil {
 		return false
 	}
-	var restErr *discordgo.RESTError
-	if errors.As(err, &restErr) {
+	if restErr, ok := errors.AsType[*discordgo.RESTError](err); ok {
 		if restErr.Response != nil && restErr.Response.StatusCode == http.StatusForbidden {
 			return true
 		}

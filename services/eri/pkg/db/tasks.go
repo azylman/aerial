@@ -75,8 +75,8 @@ func CleanTaskSummary(content string) string {
 
 // InferTriggerType deduces the source trigger type for a task from its author.
 func InferTriggerType(authorID string) string {
-	if strings.HasPrefix(authorID, "dispatch:") {
-		return strings.TrimPrefix(authorID, "dispatch:")
+	if after, ok := strings.CutPrefix(authorID, "dispatch:"); ok {
+		return after
 	}
 	if authorID == "http-client" {
 		return "http"

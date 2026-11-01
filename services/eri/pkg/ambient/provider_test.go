@@ -28,10 +28,10 @@ func (p *Provider) SetNowFunc(fn func() time.Time) {
 type mockInvoker struct {
 	mu       sync.Mutex
 	calls    int
-	execFunc func(ctx context.Context, name string, args map[string]interface{}) (string, error)
+	execFunc func(ctx context.Context, name string, args map[string]any) (string, error)
 }
 
-func (m *mockInvoker) Execute(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+func (m *mockInvoker) Execute(ctx context.Context, name string, args map[string]any) (string, error) {
 	m.mu.Lock()
 	m.calls++
 	fn := m.execFunc
@@ -112,7 +112,7 @@ func TestProvider_SuccessfulMultiToolExecution(t *testing.T) {
 	t.Parallel()
 
 	inv := &mockInvoker{
-		execFunc: func(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+		execFunc: func(ctx context.Context, name string, args map[string]any) (string, error) {
 			switch name {
 			case "music_status":
 				return `{"status": "playing", "artist": "lofi girl"}`, nil
@@ -168,7 +168,7 @@ func TestProvider_PartialFailureResilience(t *testing.T) {
 	t.Parallel()
 
 	inv := &mockInvoker{
-		execFunc: func(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+		execFunc: func(ctx context.Context, name string, args map[string]any) (string, error) {
 			if name == "failing_tool" {
 				return "", errors.New("connection timed out")
 			}
@@ -242,7 +242,7 @@ func TestProvider_RAMCacheHit(t *testing.T) {
 	t.Parallel()
 
 	inv := &mockInvoker{
-		execFunc: func(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+		execFunc: func(ctx context.Context, name string, args map[string]any) (string, error) {
 			return `{"count": 1}`, nil
 		},
 	}
@@ -300,7 +300,7 @@ func TestProvider_SingleflightDeduplication(t *testing.T) {
 
 	var toolInvocations int32
 	inv := &mockInvoker{
-		execFunc: func(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+		execFunc: func(ctx context.Context, name string, args map[string]any) (string, error) {
 			atomic.AddInt32(&toolInvocations, 1)
 			// Small sleep so concurrent calls overlap
 			time.Sleep(50 * time.Millisecond)
@@ -363,7 +363,7 @@ func TestProvider_ExpiredCacheRefresh(t *testing.T) {
 	var counterMu sync.Mutex
 
 	inv := &mockInvoker{
-		execFunc: func(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+		execFunc: func(ctx context.Context, name string, args map[string]any) (string, error) {
 			counterMu.Lock()
 			counter++
 			val := counter
@@ -509,7 +509,7 @@ RawText: {{.raw.text}}
 	}
 
 	inv := &mockInvoker{
-		execFunc: func(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+		execFunc: func(ctx context.Context, name string, args map[string]any) (string, error) {
 			if name == "json_tool" {
 				return `{"nested": {"foo": "bar"}, "count": 0, "active": false, "is_true": true, "valid_str": "custom", "non_zero": 123, "empty_list": [], "empty_map": {}}`, nil
 			}
@@ -607,7 +607,7 @@ func TestProvider_RetrieveContextCancelled(t *testing.T) {
 	t.Parallel()
 
 	inv := &mockInvoker{
-		execFunc: func(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+		execFunc: func(ctx context.Context, name string, args map[string]any) (string, error) {
 			<-ctx.Done()
 			return "", ctx.Err()
 		},
@@ -642,7 +642,7 @@ func TestProvider_TemplateExecutionError(t *testing.T) {
 	t.Parallel()
 
 	inv := &mockInvoker{
-		execFunc: func(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+		execFunc: func(ctx context.Context, name string, args map[string]any) (string, error) {
 			return `{}`, nil
 		},
 	}
@@ -676,7 +676,7 @@ func TestProvider_Prime(t *testing.T) {
 	t.Parallel()
 
 	inv := &mockInvoker{
-		execFunc: func(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+		execFunc: func(ctx context.Context, name string, args map[string]any) (string, error) {
 			return `{"state": "primed"}`, nil
 		},
 	}
@@ -727,7 +727,7 @@ func TestProvider_StaleWhileRevalidate(t *testing.T) {
 	refreshDone := make(chan struct{})
 
 	inv := &mockInvoker{
-		execFunc: func(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+		execFunc: func(ctx context.Context, name string, args map[string]any) (string, error) {
 			counterMu.Lock()
 			counter++
 			c := counter
@@ -841,7 +841,7 @@ func TestProvider_HardExpiredForcesSyncRevalidation(t *testing.T) {
 	var counterMu sync.Mutex
 
 	inv := &mockInvoker{
-		execFunc: func(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+		execFunc: func(ctx context.Context, name string, args map[string]any) (string, error) {
 			counterMu.Lock()
 			counter++
 			c := counter
@@ -901,13 +901,13 @@ func TestProvider_HardExpiredForcesSyncRevalidation(t *testing.T) {
 func TestProvider_AtomicCAS_PreventsConcurrentRefresh(t *testing.T) {
 	t.Parallel()
 
-	var toolCalls int32
+	var toolCalls atomic.Int32
 	toolStarted := make(chan struct{})
 	blockTool := make(chan struct{})
 
 	inv := &mockInvoker{
-		execFunc: func(ctx context.Context, name string, args map[string]interface{}) (string, error) {
-			count := atomic.AddInt32(&toolCalls, 1)
+		execFunc: func(ctx context.Context, name string, args map[string]any) (string, error) {
+			count := toolCalls.Add(1)
 			if count == 2 {
 				// Signal second invocation (background refresh) started
 				close(toolStarted)
@@ -992,7 +992,7 @@ func TestProvider_AtomicCAS_PreventsConcurrentRefresh(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Only 2 total calls to the tool: 1 initial + 1 background refresh (no duplicates spawned)
-	if total := atomic.LoadInt32(&toolCalls); total != 2 {
+	if total := toolCalls.Load(); total != 2 {
 		t.Errorf("expected exactly 2 tool calls (1 initial + 1 bg refresh), got %d", total)
 	}
 }

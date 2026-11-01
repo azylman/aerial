@@ -56,14 +56,6 @@ func mapLookup(kv map[string]string) func(string) string {
 	}
 }
 
-func f64Ptr(v float64) *float64 {
-	return &v
-}
-
-func boolPtr(v bool) *bool {
-	return &v
-}
-
 func TestLoadConfig_Ingestion(t *testing.T) {
 	origGlobal := activeGlobalConfig.Current()
 	t.Cleanup(func() {
@@ -545,7 +537,7 @@ channels:
 		"default": {
 			Mode:                 "threads",
 			Effort:               "medium",
-			IgnoreBots:           boolPtr(true),
+			IgnoreBots:           new(true),
 			WakeMode:             "mention",
 			AmbientWakeThreshold: &thresh,
 			Hooks: ChannelHooksConfig{
@@ -558,10 +550,10 @@ channels:
 			Mode:                 "channel",
 			Effort:               "low",
 			WakeMode:             "classifier",
-			AmbientWakeThreshold: f64Ptr(0.85),
+			AmbientWakeThreshold: new(0.85),
 		},
 		"aerial-dev": {
-			IgnoreBots: boolPtr(false),
+			IgnoreBots: new(false),
 		},
 		"lounge": {
 			Mode:            "mention",
@@ -569,7 +561,7 @@ channels:
 		},
 		"1543668253363150928": {
 			Mode:       "channel",
-			IgnoreBots: boolPtr(false),
+			IgnoreBots: new(false),
 		},
 		"ignored-channel": {
 			Mode: "ignore",
@@ -1060,15 +1052,13 @@ func TestConfig_AccessorsAndConcurrency(t *testing.T) {
 	})
 	var wg sync.WaitGroup
 	for range 10 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range 50 {
 				cur := raceCfg.Current()
 				_ = cur.Model
 				_ = cur.Channels["default"].Mode
 			}
-		}()
+		})
 	}
 	for i := range 4 {
 		wg.Add(1)
@@ -1551,13 +1541,13 @@ func TestAmbientContextConfig(t *testing.T) {
 
 	src := &AmbientContextConfig{
 		CacheTTL: "20s", TimeoutMs: 150, Template: "Test {{.now}}",
-		Tools: []AmbientToolConfig{{Name: "ha", Server: "ha-mcp", Tool: "get_state", Arguments: map[string]interface{}{"entity_id": "light.kitchen", "nested": map[string]interface{}{"key": "val"}, "tags": []interface{}{"a", "b"}, "val": 42}}},
+		Tools: []AmbientToolConfig{{Name: "ha", Server: "ha-mcp", Tool: "get_state", Arguments: map[string]any{"entity_id": "light.kitchen", "nested": map[string]any{"key": "val"}, "tags": []any{"a", "b"}, "val": 42}}},
 	}
 	cloned := cloneAmbientContextConfig(src)
 	cloned.CacheTTL, cloned.Tools[0].Name = "99s", "mutated"
 	cloned.Tools[0].Arguments["entity_id"] = "light.bedroom"
-	cloned.Tools[0].Arguments["nested"].(map[string]interface{})["key"] = "mutated_val"
-	cloned.Tools[0].Arguments["tags"].([]interface{})[0] = "mutated_tag"
+	cloned.Tools[0].Arguments["nested"].(map[string]any)["key"] = "mutated_val"
+	cloned.Tools[0].Arguments["tags"].([]any)[0] = "mutated_tag"
 	cloned.Tools[0].Arguments["val"] = 99
 
 	if src.CacheTTL != "20s" || src.Tools[0].Name != "ha" || src.Tools[0].Arguments["entity_id"] != "light.kitchen" || src.Tools[0].Arguments["val"] == 99 || cloneAmbientContextConfig(nil) != nil || cloneInterfaceMap(nil) != nil {

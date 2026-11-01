@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -95,12 +96,7 @@ type BatchState struct {
 }
 
 func isUnscopedTest(cmd string) bool {
-	for _, sub := range splitPipeline(cmd) {
-		if isUnscopedTestSingle(sub) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(splitPipeline(cmd), isUnscopedTestSingle)
 }
 
 func isUnscopedTestSingle(cmd string) bool {
@@ -292,8 +288,7 @@ func stripGoTestVerbose(cmdLine string) string {
 		spans = append(spans, collectGoTestSegmentSpans(cmdLine, tokens, idx)...)
 	}
 	rewritten := cmdLine
-	for i := len(spans) - 1; i >= 0; i-- {
-		sp := spans[i]
+	for _, sp := range slices.Backward(spans) {
 		rewritten = rewritten[:sp.start] + sp.repl + rewritten[sp.end:]
 	}
 	return rewritten
@@ -538,8 +533,8 @@ func opportunisticGC(dir string, now time.Time) {
 
 func readsSinceLastTargetEdit(records []ToolInvocation, target string) []ToolInvocation {
 	startIdx := 0
-	for i := len(records) - 1; i >= 0; i-- {
-		if records[i].Category == "edit" && records[i].Target == target {
+	for i, record := range slices.Backward(records) {
+		if record.Category == "edit" && record.Target == target {
 			startIdx = i + 1
 			break
 		}
@@ -564,8 +559,7 @@ func removeTargetInvocations(records []ToolInvocation, category, target string) 
 }
 
 func findTouchingPriorRead(priorReads []ToolInvocation, start, end int) *ToolInvocation {
-	for i := len(priorReads) - 1; i >= 0; i-- {
-		r := priorReads[i]
+	for _, r := range slices.Backward(priorReads) {
 		if start <= r.EndLine+DefaultContiguousGapLines && end >= r.StartLine-DefaultContiguousGapLines {
 			return &r
 		}
@@ -583,10 +577,7 @@ func promotePageRange(start, end int, touching *ToolInvocation) (int, int) {
 			return newStart, newStart + DefaultPageReadLines - 1
 		}
 		uEnd := max(end, touching.EndLine)
-		newStart := max(1, uEnd-DefaultPageReadLines+1)
-		if newStart > start {
-			newStart = start
-		}
+		newStart := min(max(1, uEnd-DefaultPageReadLines+1), start)
 		return newStart, newStart + DefaultPageReadLines - 1
 	}
 	span := end - start + 1
@@ -681,8 +672,7 @@ func shapeGitStatus(cmdLine string) string {
 		}
 	}
 	rewritten := cmdLine
-	for i := len(insertOffsets) - 1; i >= 0; i-- {
-		pos := insertOffsets[i]
+	for _, pos := range slices.Backward(insertOffsets) {
 		rewritten = rewritten[:pos] + " -sb" + rewritten[pos:]
 	}
 	return rewritten
@@ -904,9 +894,9 @@ func RecordPreInvocationWithDir(payload Payload, dir string, now time.Time) *Inv
 
 func rollbackFailedEdit(records []ToolInvocation, target string, stepIdx int) ([]ToolInvocation, bool) {
 	matchIdx := -1
-	for i := len(records) - 1; i >= 0; i-- {
-		if records[i].Category == "edit" && records[i].Target == target {
-			if stepIdx <= 0 || records[i].StepIdx == stepIdx {
+	for i, record := range slices.Backward(records) {
+		if record.Category == "edit" && record.Target == target {
+			if stepIdx <= 0 || record.StepIdx == stepIdx {
 				return append(records[:i], records[i+1:]...), true
 			} else if matchIdx < 0 {
 				matchIdx = i
@@ -932,30 +922,23 @@ func isTerminalSubmitSingle(seg string) bool {
 			}
 		}
 	case "aerial-build.sh":
-		for _, arg := range fields[1:] {
-			if arg == "enqueue" {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func isTerminalSubmitCommand(cmdLine string) bool {
-	for _, seg := range splitPipeline(cmdLine) {
-		if isTerminalSubmitSingle(seg) {
+		if slices.Contains(fields[1:], "enqueue") {
 			return true
 		}
 	}
 	return false
 }
 
+func isTerminalSubmitCommand(cmdLine string) bool {
+	return slices.ContainsFunc(splitPipeline(cmdLine), isTerminalSubmitSingle)
+}
+
 func parseProcStatPPIDAndPGRP(statContent string) (ppid, pgrp int, ok bool) {
-	idx := strings.LastIndexByte(statContent, ')')
-	if idx < 0 {
+	_, after, ok := strings.CutLast(statContent, ")")
+	if !ok {
 		return 0, 0, false
 	}
-	fields := strings.Fields(statContent[idx+1:])
+	fields := strings.Fields(after)
 	if len(fields) < 3 {
 		return 0, 0, false
 	}

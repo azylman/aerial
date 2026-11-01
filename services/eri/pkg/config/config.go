@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"maps"
 	"net"
 	"os"
 	"strconv"
@@ -36,10 +37,10 @@ type ChannelHooksConfig struct {
 }
 
 type AmbientToolConfig struct {
-	Name      string                 `yaml:"name" json:"name"`
-	Server    string                 `yaml:"server,omitempty" json:"server,omitempty"`
-	Tool      string                 `yaml:"tool" json:"tool"`
-	Arguments map[string]interface{} `yaml:"arguments,omitempty" json:"arguments,omitempty"`
+	Name      string         `yaml:"name" json:"name"`
+	Server    string         `yaml:"server,omitempty" json:"server,omitempty"`
+	Tool      string         `yaml:"tool" json:"tool"`
+	Arguments map[string]any `yaml:"arguments,omitempty" json:"arguments,omitempty"`
 }
 
 type AmbientContextConfig struct {
@@ -263,7 +264,7 @@ func applyDaemonDefaults(c *ConfigData, idleTimeout time.Duration, maxDaemons in
 	}
 }
 
-func unmarshalRawMCPConfig(rawMCP interface{}) (string, error) {
+func unmarshalRawMCPConfig(rawMCP any) (string, error) {
 	if rawMCP == nil {
 		return "", nil
 	}
@@ -279,7 +280,7 @@ func unmarshalRawMCPConfig(rawMCP interface{}) (string, error) {
 	}
 }
 
-func populateTargetMcpServers(rawServers map[string]interface{}) (TargetMcpConfig, error) {
+func populateTargetMcpServers(rawServers map[string]any) (TargetMcpConfig, error) {
 	cfg := TargetMcpConfig{
 		Common:    make(map[string]json.RawMessage),
 		Discord:   make(map[string]json.RawMessage),
@@ -308,7 +309,7 @@ func populateTargetMcpServers(rawServers map[string]interface{}) (TargetMcpConfi
 		if targetVal == nil {
 			continue
 		}
-		subMap, ok := targetVal.(map[string]interface{})
+		subMap, ok := targetVal.(map[string]any)
 		if !ok {
 			return cfg, fmt.Errorf("mcp_servers category %q must be a mapping of server names to configurations", targetKey)
 		}
@@ -332,7 +333,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		SystemChannel             string                   `yaml:"system_channel"`
 		AdminUsers                []string                 `yaml:"admin_users"`
 		Channels                  map[string]ChannelPolicy `yaml:"channels"`
-		McpServers                map[string]interface{}   `yaml:"mcp_servers"`
+		McpServers                map[string]any           `yaml:"mcp_servers"`
 		Voice                     VoiceConfig              `yaml:"voice"`
 		DatabaseURL               string                   `yaml:"database_url"`
 		Port                      string                   `yaml:"port"`
@@ -354,7 +355,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		ClassifierProtocol        string                   `yaml:"classifier_protocol"`
 		ThreadTitleURL            string                   `yaml:"thread_title_url"`
 		ThreadTitleModel          string                   `yaml:"thread_title_model"`
-		MCPConfig                 interface{}              `yaml:"mcp_config"`
+		MCPConfig                 any                      `yaml:"mcp_config"`
 		DaemonIdleTimeout         time.Duration            `yaml:"daemon_idle_timeout"`
 		MaxConcurrentDaemons      int                      `yaml:"max_concurrent_daemons"`
 		MaxBackgroundTaskDuration time.Duration            `yaml:"max_background_task_duration"`
@@ -435,12 +436,12 @@ func cloneAmbientContextConfig(src *AmbientContextConfig) *AmbientContextConfig 
 	return &dst
 }
 
-func cloneValue(v interface{}) interface{} {
+func cloneValue(v any) any {
 	switch val := v.(type) {
-	case map[string]interface{}:
+	case map[string]any:
 		return cloneInterfaceMap(val)
-	case []interface{}:
-		res := make([]interface{}, len(val))
+	case []any:
+		res := make([]any, len(val))
 		for i, item := range val {
 			res[i] = cloneValue(item)
 		}
@@ -450,11 +451,11 @@ func cloneValue(v interface{}) interface{} {
 	}
 }
 
-func cloneInterfaceMap(m map[string]interface{}) map[string]interface{} {
+func cloneInterfaceMap(m map[string]any) map[string]any {
 	if m == nil {
 		return nil
 	}
-	res := make(map[string]interface{}, len(m))
+	res := make(map[string]any, len(m))
 	for k, v := range m {
 		res[k] = cloneValue(v)
 	}
@@ -869,10 +870,7 @@ func waitForColdBootConfig(paths []string, timeout time.Duration) {
 		if remaining <= 0 {
 			break
 		}
-		sleepDur := 10 * time.Millisecond
-		if remaining < sleepDur {
-			sleepDur = remaining
-		}
+		sleepDur := min(remaining, 10*time.Millisecond)
 		time.Sleep(sleepDur)
 	}
 	log.Printf("[Config] Cold-boot wait timed out after %v, proceeding with search", timeout)
@@ -974,15 +972,11 @@ func cloneMCPServerConfigMap(src map[string]MCPServerConfig) map[string]MCPServe
 		}
 		if v.Env != nil {
 			srv.Env = make(map[string]string, len(v.Env))
-			for ek, ev := range v.Env {
-				srv.Env[ek] = ev
-			}
+			maps.Copy(srv.Env, v.Env)
 		}
 		if v.Headers != nil {
 			srv.Headers = make(map[string]string, len(v.Headers))
-			for hk, hv := range v.Headers {
-				srv.Headers[hk] = hv
-			}
+			maps.Copy(srv.Headers, v.Headers)
 		}
 		dst[k] = srv
 	}

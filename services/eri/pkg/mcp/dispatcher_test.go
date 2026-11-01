@@ -44,7 +44,7 @@ func newMockMCPServer(t *testing.T, cfg mockMCPConfig) *httptest.Server {
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		bodyBytes, _ := io.ReadAll(r.Body)
-		var req map[string]interface{}
+		var req map[string]any
 		_ = json.Unmarshal(bodyBytes, &req)
 
 		method, _ := req["method"].(string)
@@ -87,9 +87,9 @@ func newMockMCPServer(t *testing.T, cfg mockMCPConfig) *httptest.Server {
 				_, _ = w.Write([]byte(cfg.initBody))
 				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"jsonrpc": "2.0", "id": id,
-				"result": map[string]interface{}{"protocolVersion": "2024-11-05"},
+				"result": map[string]any{"protocolVersion": "2024-11-05"},
 			})
 
 		case "notifications/initialized":
@@ -141,9 +141,9 @@ func newMockMCPServer(t *testing.T, cfg mockMCPConfig) *httptest.Server {
 			if tools == nil {
 				tools = []Tool{{Name: "default_tool", Description: "Default mock tool"}}
 			}
-			respPayload, _ := json.Marshal(map[string]interface{}{
+			respPayload, _ := json.Marshal(map[string]any{
 				"jsonrpc": "2.0", "id": id,
-				"result": map[string]interface{}{"tools": tools},
+				"result": map[string]any{"tools": tools},
 			})
 			if cfg.useSSE {
 				w.Header().Set("Content-Type", "text/event-stream")
@@ -162,9 +162,9 @@ func newMockMCPServer(t *testing.T, cfg mockMCPConfig) *httptest.Server {
 			}
 			if calls == 1 && cfg.failFirstCallRPC32600 {
 				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				_ = json.NewEncoder(w).Encode(map[string]any{
 					"jsonrpc": "2.0", "id": id,
-					"error": map[string]interface{}{
+					"error": map[string]any{
 						"code":    -32600,
 						"message": "Invalid request: missing session id",
 					},
@@ -197,7 +197,7 @@ func newMockMCPServer(t *testing.T, cfg mockMCPConfig) *httptest.Server {
 				_, _ = w.Write([]byte(cfg.toolsCallBody))
 				return
 			}
-			var resultVal interface{}
+			var resultVal any
 			if cfg.callResultRaw != "" {
 				resultVal = json.RawMessage(cfg.callResultRaw)
 			} else {
@@ -205,12 +205,12 @@ func newMockMCPServer(t *testing.T, cfg mockMCPConfig) *httptest.Server {
 				if txt == "" {
 					txt = "call success"
 				}
-				resultVal = map[string]interface{}{
-					"content": []map[string]interface{}{{"type": "text", "text": txt}},
+				resultVal = map[string]any{
+					"content": []map[string]any{{"type": "text", "text": txt}},
 					"isError": cfg.callIsError,
 				}
 			}
-			respPayload, _ := json.Marshal(map[string]interface{}{
+			respPayload, _ := json.Marshal(map[string]any{
 				"jsonrpc": "2.0", "id": id,
 				"result": resultVal,
 			})
@@ -389,12 +389,10 @@ func TestEnsureSession(t *testing.T) {
 	d := mkDisp("srv", okTs.URL)
 	var wg sync.WaitGroup
 	for range 20 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_ = d.getServerMutex("srv")
 			_, _ = d.EnsureSession(context.Background(), "srv")
-		}()
+		})
 	}
 	wg.Wait()
 }
@@ -490,23 +488,23 @@ func TestExecute(t *testing.T) {
 	var emailReceived atomic.Pointer[string]
 	emailTs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		bodyBytes, _ := io.ReadAll(r.Body)
-		var req map[string]interface{}
+		var req map[string]any
 		_ = json.Unmarshal(bodyBytes, &req)
 		method, _ := req["method"].(string)
 		if method == "initialize" {
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": 1, "result": map[string]interface{}{"protocolVersion": "2024-11-05"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": map[string]any{"protocolVersion": "2024-11-05"}})
 			return
 		}
-		params, _ := req["params"].(map[string]interface{})
-		args, _ := params["arguments"].(map[string]interface{})
+		params, _ := req["params"].(map[string]any)
+		args, _ := params["arguments"].(map[string]any)
 		if val, ok := args["user_google_email"].(string); ok {
 			emailReceived.Store(&val)
 		} else {
 			emailReceived.Store(nil)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": 1, "result": "ok"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": 1, "result": "ok"})
 	}))
 	defer emailTs.Close()
 
@@ -514,7 +512,7 @@ func TestExecute(t *testing.T) {
 		name       string
 		dispatcher *DefaultDispatcher
 		toolName   string
-		args       map[string]interface{}
+		args       map[string]any
 		wantRes    string
 		wantErr    bool
 		wantSubstr string
@@ -539,8 +537,8 @@ func TestExecute(t *testing.T) {
 		{"InvalidURLFails", mkDispWithRoute("inv", "://invalid\x7f", "inv_tool"), "inv_tool", nil, "", true, "failed to create request"},
 		{"ClosedPortFails", mkDispWithRoute("closed", "http://127.0.0.1:59996", "closed_tool"), "closed_tool", nil, "", true, "failed to call"},
 		{"SSEStreamCall", mkDispWithRoute("sse", sseTs.URL, "sse_tool"), "sse_tool", nil, "sse text call", false, ""},
-		{"EmailNormalizationPrimary", mkDispWithRoute("email", emailTs.URL, "email_tool"), "email_tool", map[string]interface{}{"user_google_email": "PRIMARY", "foo": "bar"}, "ok", false, ""},
-		{"EmailNormalizationPreserve", mkDispWithRoute("email", emailTs.URL, "email_tool"), "email_tool", map[string]interface{}{"user_google_email": "alex@domain.com"}, "ok", false, ""},
+		{"EmailNormalizationPrimary", mkDispWithRoute("email", emailTs.URL, "email_tool"), "email_tool", map[string]any{"user_google_email": "PRIMARY", "foo": "bar"}, "ok", false, ""},
+		{"EmailNormalizationPreserve", mkDispWithRoute("email", emailTs.URL, "email_tool"), "email_tool", map[string]any{"user_google_email": "alex@domain.com"}, "ok", false, ""},
 	}
 
 	for _, tc := range tests {
@@ -605,7 +603,7 @@ func TestPrime(t *testing.T) {
 func TestConcurrentExecute(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		bodyBytes, _ := io.ReadAll(r.Body)
-		var req map[string]interface{}
+		var req map[string]any
 		_ = json.Unmarshal(bodyBytes, &req)
 		method, _ := req["method"].(string)
 		id := req["id"]
@@ -613,19 +611,19 @@ func TestConcurrentExecute(t *testing.T) {
 		case "initialize":
 			w.Header().Set("Mcp-Session-Id", "sess-concur")
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": id, "result": map[string]interface{}{"protocolVersion": "2024-11-05"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"protocolVersion": "2024-11-05"}})
 		case "notifications/initialized":
 			w.WriteHeader(http.StatusOK)
 		case "tools/list":
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": id, "result": map[string]interface{}{"tools": []Tool{{Name: "concur_tool"}}}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"tools": []Tool{{Name: "concur_tool"}}}})
 		case "tools/call":
-			params, _ := req["params"].(map[string]interface{})
-			args, _ := params["arguments"].(map[string]interface{})
+			params, _ := req["params"].(map[string]any)
+			args, _ := params["arguments"].(map[string]any)
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"jsonrpc": "2.0", "id": id,
-				"result": map[string]interface{}{"content": []map[string]interface{}{{"type": "text", "text": fmt.Sprintf("val-%v", args["idx"])}}},
+				"result": map[string]any{"content": []map[string]any{{"type": "text", "text": fmt.Sprintf("val-%v", args["idx"])}}},
 			})
 		}
 	}))
@@ -651,7 +649,7 @@ func TestConcurrentExecute(t *testing.T) {
 				wg.Add(1)
 				go func(idx int) {
 					defer wg.Done()
-					res, err := d.Execute(context.Background(), "concur_tool", map[string]interface{}{"idx": idx})
+					res, err := d.Execute(context.Background(), "concur_tool", map[string]any{"idx": idx})
 					if err != nil {
 						errChan <- err
 						return
@@ -674,7 +672,7 @@ func TestMockMCPLifecycle(t *testing.T) {
 	var notifyReceived atomic.Bool
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		bodyBytes, _ := io.ReadAll(r.Body)
-		var req map[string]interface{}
+		var req map[string]any
 		_ = json.Unmarshal(bodyBytes, &req)
 		method, _ := req["method"].(string)
 		id := req["id"]
@@ -682,7 +680,7 @@ func TestMockMCPLifecycle(t *testing.T) {
 		case "initialize":
 			w.Header().Set("Mcp-Session-Id", "sess-lifecycle")
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": id, "result": map[string]interface{}{"protocolVersion": "2024-11-05"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"protocolVersion": "2024-11-05"}})
 		case "notifications/initialized":
 			if r.Header.Get("Mcp-Session-Id") != "sess-lifecycle" {
 				w.WriteHeader(http.StatusBadRequest)
@@ -692,10 +690,10 @@ func TestMockMCPLifecycle(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 		case "tools/list":
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": id, "result": map[string]interface{}{"tools": []Tool{{Name: "lc_tool"}}}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"tools": []Tool{{Name: "lc_tool"}}}})
 		case "tools/call":
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"jsonrpc": "2.0", "id": id, "result": map[string]interface{}{"content": []map[string]interface{}{{"type": "text", "text": "lc ok"}}}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{"content": []map[string]any{{"type": "text", "text": "lc ok"}}}})
 		}
 	}))
 	defer ts.Close()

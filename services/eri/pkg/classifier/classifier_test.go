@@ -773,11 +773,11 @@ func TestClassify_SystemOne(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var attempts int32
+			var attempts atomic.Int32
 			var lastReq systemOneRequest
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				_ = json.NewDecoder(r.Body).Decode(&lastReq)
-				curr := atomic.AddInt32(&attempts, 1)
+				curr := attempts.Add(1)
 				if int(curr) <= tc.retryFailures {
 					http.Error(w, "transient error", http.StatusInternalServerError)
 					return
