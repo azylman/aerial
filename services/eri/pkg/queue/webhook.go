@@ -152,7 +152,7 @@ func validateWebhookDispatchArgs(d *DefaultWebhookDispatcher, endpoint *config.W
 	return url, nil
 }
 
-func classifyWebhookDispatchStatus(err error, ctx, timeoutCtx context.Context) string {
+func classifyWebhookDispatchStatus(ctx, timeoutCtx context.Context, err error) string {
 	if err == nil {
 		return "success"
 	}
@@ -204,7 +204,7 @@ func (d *DefaultWebhookDispatcher) dispatch(ctx context.Context, hook string, en
 
 	start := time.Now()
 	defer func() {
-		status := classifyWebhookDispatchStatus(err, ctx, timeoutCtx)
+		status := classifyWebhookDispatchStatus(ctx, timeoutCtx, err)
 		metrics.RecordWebhookDispatch(hook, status, time.Since(start))
 	}()
 

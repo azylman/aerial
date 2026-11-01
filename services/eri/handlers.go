@@ -1176,9 +1176,7 @@ func handleInternalDiscordInteraction(store db.Store, pool *queue.WorkerPool) ht
 			return
 		}
 		var interaction discordgo.Interaction
-		if err := json.Unmarshal(body, &interaction); err == nil && interaction.ID != "" {
-			// Successfully unmarshaled direct interaction
-		} else {
+		if err := json.Unmarshal(body, &interaction); err != nil || interaction.ID == "" {
 			var env struct {
 				Interaction *discordgo.Interaction `json:"interaction"`
 			}

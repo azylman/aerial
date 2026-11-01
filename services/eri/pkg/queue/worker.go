@@ -519,7 +519,7 @@ func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 	}
 	defer func() {
 		if !te.isEphemeral && te.activePool != nil {
-			if evicter, ok := te.activePool.(interface{ EvictSession(string) error }); ok {
+			if evicter, ok := te.activePool.(interface{ EvictSession(sessionKey string) error }); ok {
 				if err := evicter.EvictSession(te.leaseKey()); err != nil {
 					log.Printf("[WorkerPool] Warning evicting session for %s: %v", te.leaseKey(), err)
 				}
@@ -1130,11 +1130,11 @@ func (te *turnExecution) processSuccessfulAttempt(resp *runner.AgyResponse, exit
 	if accumulatedUsage != nil {
 		usage = *accumulatedUsage
 	}
-	if ok, emptyErr := te.deliverSuccessAndFinalize(resp, usage, currentModel, attempt, maxAttempts); ok {
+	ok, emptyErr := te.deliverSuccessAndFinalize(resp, usage, currentModel, attempt, maxAttempts)
+	if ok {
 		return true, false, ""
-	} else {
-		return false, false, emptyErr
 	}
+	return false, false, emptyErr
 }
 
 func (te *turnExecution) handleSessionCorruptionRetry(attempt, maxAttempts int, currentAgyBin, currentAPIKey, errDetail, stderr, currentModel string) (shutdown bool) {

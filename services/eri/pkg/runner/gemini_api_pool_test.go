@@ -130,7 +130,7 @@ func makeSendSuiteHandler(tc sendTestCase, lastReqBody *[]byte) http.HandlerFunc
 		case "sliding_window":
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(fmt.Sprintf(`data: {"candidates":[{"content":{"parts":[{"text":"Response %d"}],"role":"model"}}]}`+"\n\n", turnCounter.Add(1))))
+			_, _ = fmt.Fprintf(w, "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Response %d\"}],\"role\":\"model\"}}]}\n\n", turnCounter.Add(1))
 		case "rate_limit_429":
 			w.WriteHeader(http.StatusTooManyRequests)
 			_, _ = w.Write([]byte(`{"error":{"code":429,"message":"Resource has been exhausted","status":"RESOURCE_EXHAUSTED"}}`))
@@ -403,9 +403,10 @@ func makeToolCallingMCPHandler(mode string) http.HandlerFunc {
 			}
 			_ = json.NewDecoder(r.Body).Decode(&req)
 			w.Header().Set("Content-Type", "application/json")
-			if req.Method == "tools/list" {
+			switch req.Method {
+			case "tools/list":
 				_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"ha_call_write_tool","description":"Call HA service","inputSchema":{"type":"object","properties":{"entity_id":{"type":"string"}}}}]}}`))
-			} else if req.Method == "tools/call" {
+			case "tools/call":
 				_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"light.living_room turned off"}]}}`))
 			}
 		}
@@ -716,7 +717,7 @@ func TestGeminiAPIPool_MultipleToolCallsGrouping(t *testing.T) {
 		case "tools/list":
 			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"tool_a"},{"name":"tool_b"}]}}`))
 		case "tools/call":
-			_, _ = w.Write([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Result of %s"}]}}`, req.Params.Name)))
+			_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Result of %s"}]}}`, req.Params.Name)
 		default:
 			http.Error(w, "not found", http.StatusNotFound)
 		}
@@ -849,7 +850,7 @@ func newAllowedToolsMockServer() *httptest.Server {
 			return
 		}
 		if req.Method == "tools/call" {
-			_, _ = w.Write([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"executed: %s"}]}}`, req.Params.Name)))
+			_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"executed: %s"}]}}`, req.Params.Name)
 			return
 		}
 		http.Error(w, "unknown method", http.StatusBadRequest)
@@ -943,7 +944,7 @@ func TestGeminiAPISession_Send_Retrievers(t *testing.T) {
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				receivedBody, _ = io.ReadAll(r.Body)
 				w.Header().Set("Content-Type", "text/event-stream")
-				_, _ = w.Write([]byte(fmt.Sprintf("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":%q}],\"role\":\"model\"}}]}\n\n", tc.modelResponse)))
+				_, _ = fmt.Fprintf(w, "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":%q}],\"role\":\"model\"}}]}\n\n", tc.modelResponse)
 			}))
 			defer ts.Close()
 

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	// Embed fallback timezone database.
 	_ "time/tzdata"
 
 	"github.com/azylman/aerial/pkg/sanitizer"

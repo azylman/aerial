@@ -192,7 +192,7 @@ func startTestStreamingDaemon(t *testing.T, cfg DaemonConfig, initLine string, d
 	return &daemonTestHarness{daemon: daemon, inR: inR, inW: inW, outW: outW, errW: errW, handle: handle}
 }
 
-func tryStartWithPipes(t *testing.T, ctx context.Context, cfg DaemonConfig, closeOutImmediately bool, initLine string, optHandle ...*MockProcessHandle) (*MockProcessHandle, error) {
+func tryStartWithPipes(ctx context.Context, t *testing.T, cfg DaemonConfig, closeOutImmediately bool, initLine string, optHandle ...*MockProcessHandle) (*MockProcessHandle, error) {
 	t.Helper()
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
@@ -241,7 +241,7 @@ func TestStreamingDaemon_HandshakeSuccessAndDefaults(t *testing.T) {
 
 func TestStreamingDaemon_HandshakeFailures(t *testing.T) {
 	mockHandle := &MockProcessHandle{pid: 888, killErr: errors.New("kill error on startup")}
-	handle, err := tryStartWithPipes(t, context.Background(), DaemonConfig{SessionID: "00000000-0000-0000-0000-000000000001", Timeout: 50 * time.Millisecond}, false, "", mockHandle)
+	handle, err := tryStartWithPipes(context.Background(), t, DaemonConfig{SessionID: "00000000-0000-0000-0000-000000000001", Timeout: 50 * time.Millisecond}, false, "", mockHandle)
 	mockHandle.mu.Lock()
 	killed := mockHandle.killed
 	mockHandle.mu.Unlock()
@@ -249,7 +249,7 @@ func TestStreamingDaemon_HandshakeFailures(t *testing.T) {
 		t.Fatalf("expected handshake timeout error and killed process: %v", err)
 	}
 
-	if _, err = tryStartWithPipes(t, context.Background(), cfgForSession("00000000-0000-0000-0000-000000000001"), true, ""); err == nil || !strings.Contains(err.Error(), "daemon stdout closed before init event") {
+	if _, err = tryStartWithPipes(context.Background(), t, cfgForSession("00000000-0000-0000-0000-000000000001"), true, ""); err == nil || !strings.Contains(err.Error(), "daemon stdout closed before init event") {
 		t.Fatalf("expected stdout closed error, got: %v", err)
 	}
 
@@ -268,7 +268,7 @@ func TestStreamingDaemon_HandshakeFailures(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err = tryStartWithPipes(t, ctx, cfgForSession("00000000-0000-0000-0000-000000000001"), false, ""); err == nil || !strings.Contains(err.Error(), "cancelled") {
+	if _, err = tryStartWithPipes(ctx, t, cfgForSession("00000000-0000-0000-0000-000000000001"), false, ""); err == nil || !strings.Contains(err.Error(), "cancelled") {
 		t.Fatalf("expected cancellation error, got: %v", err)
 	}
 	_ = handle
@@ -282,7 +282,7 @@ func TestStreamingDaemon_HandshakeMalformedInit(t *testing.T) {
 		{"invalid uuid in init event", `{"event":"init","session_id":"not-a-valid-uuid"}` + "\n"},
 	}
 	for _, tc := range tests {
-		_, err := tryStartWithPipes(t, context.Background(), cfgForSession("00000000-0000-0000-0000-000000000001"), false, tc.line)
+		_, err := tryStartWithPipes(context.Background(), t, cfgForSession("00000000-0000-0000-0000-000000000001"), false, tc.line)
 		if err == nil || !strings.Contains(err.Error(), "failed parsing init event") {
 			t.Errorf("%s: expected 'failed parsing init event' error, got %v", tc.name, err)
 		}

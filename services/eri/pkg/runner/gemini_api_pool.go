@@ -866,12 +866,12 @@ func (s *GeminiAPISession) runEmptyTextFallbackStream(ctx context.Context, clien
 	if err != nil {
 		return
 	}
-	finalHttpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(finalBytes))
+	finalHTTPReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, reqURL, bytes.NewReader(finalBytes))
 	if reqErr != nil {
 		return
 	}
-	finalHttpReq.Header.Set("Content-Type", "application/json")
-	finalResp, respErr := client.Do(finalHttpReq)
+	finalHTTPReq.Header.Set("Content-Type", "application/json")
+	finalResp, respErr := client.Do(finalHTTPReq)
 	if respErr != nil {
 		return
 	}

@@ -283,7 +283,7 @@ func newEventDrivenVoiceDaemonSpawner(cfg voiceProcessPoolSpawnerConfig) *mockDa
 				if sessID == "" {
 					sessID = "550e8400-e29b-41d4-a716-446655440000"
 				}
-				_, _ = outW.Write([]byte(fmt.Sprintf("{\"event\":\"init\",\"session_id\":%q,\"conversation_id\":%q}\n", sessID, sessID)))
+				_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"session_id\":%q,\"conversation_id\":%q}\n", sessID, sessID)
 				scanner := bufio.NewScanner(inR)
 				if scanner.Scan() && cfg.cancelCallerOnScan != nil {
 					cfg.cancelCallerOnScan()
@@ -311,7 +311,7 @@ func newEventDrivenVoiceDaemonSpawner(cfg voiceProcessPoolSpawnerConfig) *mockDa
 				if cfg.tokens.TotalTokens > 0 {
 					usagePart = fmt.Sprintf(",\"usage\":{\"input_tokens\":%d,\"output_tokens\":%d,\"total_tokens\":%d}", cfg.tokens.InputTokens, cfg.tokens.OutputTokens, cfg.tokens.TotalTokens)
 				}
-				_, _ = outW.Write([]byte(fmt.Sprintf("{\"event\":\"result\",\"result\":{\"status\":%q,\"response\":%q,\"error\":%q,\"conversation_id\":%q%s%s}}\n", status, cfg.resultResponse, cfg.resultError, sessID, exitPart, usagePart)))
+				_, _ = fmt.Fprintf(outW, "{\"event\":\"result\",\"result\":{\"status\":%q,\"response\":%q,\"error\":%q,\"conversation_id\":%q%s%s}}\n", status, cfg.resultResponse, cfg.resultError, sessID, exitPart, usagePart)
 			}()
 			return inW, outR, errR, newMockProcessHandle(12345), nil
 		},
@@ -651,7 +651,9 @@ func TestSummarizeAndHistoryHelpers(t *testing.T) {
 	teNil := &turnExecution{pool: &WorkerPool{}}
 	_, _ = teNil.resolveWebhookDispatcher()
 	_ = teNil.resolveTurnPolicy()
-	_, _, _, _ = teNil.executeLeaseAttempt("test-model", "prompt", 1)
+	if _, _, _, err := teNil.executeLeaseAttempt("test-model", "prompt", 1); err == nil {
+		t.Fatal("expected error")
+	}
 	teSumClassifier := &turnExecution{
 		pool: &WorkerPool{
 			cfg: WorkerPoolConfig{

@@ -65,7 +65,7 @@ func TestWorker_PassesSessionIDToAgentPool(t *testing.T) {
 				if sessID == "" {
 					sessID = "c1111111-2222-3333-4444-555555555555"
 				}
-				_, _ = outW.Write([]byte(fmt.Sprintf(`{"event":"init","conversation_id":%q}`+"\n", sessID)))
+				_, _ = fmt.Fprintf(outW, `{"event":"init","conversation_id":%q}`+"\n", sessID)
 				scanner := bufio.NewScanner(inR)
 				for scanner.Scan() {
 					_, _ = outW.Write([]byte(`{"event":"result","result":{"status":"SUCCESS","response":"ok","usage":{"total_tokens":5}}}` + "\n"))
@@ -587,7 +587,7 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 			defer errW.Close()
 			go func() {
 				defer outW.Close()
-				_, _ = outW.Write([]byte(fmt.Sprintf("{\"event\":\"init\",\"conversation_id\":%q}\n", sessUUID)))
+				_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", sessUUID)
 				buf := make([]byte, 16384)
 				for {
 					n, rErr := inR.Read(buf)
@@ -598,7 +598,7 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 						mu.Lock()
 						capturedPrompts = append(capturedPrompts, string(buf[:n]))
 						mu.Unlock()
-						_, _ = outW.Write([]byte(fmt.Sprintf("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ephemeral ok\",\"conversation_id\":%q,\"usage\":{\"total_tokens\":5}}}\n", sessUUID)))
+						_, _ = fmt.Fprintf(outW, "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ephemeral ok\",\"conversation_id\":%q,\"usage\":{\"total_tokens\":5}}}\n", sessUUID)
 						select {
 						case doneCh <- struct{}{}:
 						default:
@@ -779,7 +779,7 @@ func TestWorker_StatefulLowAndMediumPools_ResumeAndPersistSessions(t *testing.T)
 					defer errW.Close()
 					go func() {
 						defer outW.Close()
-						_, _ = outW.Write([]byte(fmt.Sprintf("{\"event\":\"init\",\"conversation_id\":%q}\n", rotatedSessUUID)))
+						_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", rotatedSessUUID)
 						buf := make([]byte, 16384)
 						for {
 							n, rErr := inR.Read(buf)
@@ -787,7 +787,7 @@ func TestWorker_StatefulLowAndMediumPools_ResumeAndPersistSessions(t *testing.T)
 								return
 							}
 							if n > 0 {
-								_, _ = outW.Write([]byte(fmt.Sprintf("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok\",\"conversation_id\":%q,\"usage\":{\"total_tokens\":5}}}\n", rotatedSessUUID)))
+								_, _ = fmt.Fprintf(outW, "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok\",\"conversation_id\":%q,\"usage\":{\"total_tokens\":5}}}\n", rotatedSessUUID)
 							}
 						}
 					}()

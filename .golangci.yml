@@ -9,6 +9,8 @@ linters:
     - containedctx
     - copyloopvar
     - cyclop
+    - decorder
+    - dogsled
     - dupl
     - dupword
     - durationcheck
@@ -26,10 +28,15 @@ linters:
     - gocognit
     - gocritic
     - gocyclo
+    - godoclint
     - gomoddirectives
     - goprintffuncname
+    - gosec
+    - gosmopolitan
     - govet
+    - grouper
     - iface
+    - inamedparam
     - ineffassign
     - intrange
     - iotamixing
@@ -54,6 +61,7 @@ linters:
     - protogetter
     - reassign
     - recvcheck
+    - revive
     - rowserrcheck
     - sloglint
     - spancheck
@@ -125,6 +133,56 @@ linters:
         - "SA*"
         - "S1*"
         - "QF1*"
+    dogsled:
+      max-blank-identifiers: 3
+    gosec:
+      excludes:
+        - G101
+        - G104
+        - G115
+        - G117
+        - G118
+        - G122
+        - G201
+        - G202
+        - G203
+        - G204
+        - G301
+        - G302
+        - G304
+        - G306
+        - G402
+        - G404
+        - G505
+        - G701
+        - G702
+        - G703
+        - G704
+        - G705
+        - G706
+    gosmopolitan:
+      allow-time-local: true
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: empty-block
+        - name: error-naming
+        - name: error-return
+        - name: errorf
+        - name: increment-decrement
+        - name: indent-error-flow
+        - name: range
+        - name: receiver-naming
+        - name: redefines-builtin-id
+        - name: superfluous-else
+        - name: time-naming
+        - name: unexported-return
+        - name: unreachable-code
+        - name: var-declaration
+        - name: var-naming
     thelper:
       tb:
         name: false
@@ -140,13 +198,18 @@ linters:
           - funlen
           - gocognit
           - gocyclo
+          - gosec
+          - gosmopolitan
           - maintidx
           - nestif
           - nilnil
           - noctx
-          - staticcheck
           - unparam
         path: _test\.go
+      - linters:
+          - staticcheck
+        path: _test\.go
+        text: "SA1012:"
       - linters:
           - containedctx
         path: services/eri/pkg/(queue/(pool|worker)|runner/(interchangeable_pool|streaming_daemon|unified_pool))\.go

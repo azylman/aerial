@@ -71,7 +71,7 @@ func (p *testRunnerAgentPool) getTargetLock(targetKey string) *sync.Mutex {
 
 func (p *testRunnerAgentPool) Get(threadID string) (*runner.StreamingDaemon, bool) {
 	if tp, ok := p.trackerPool.(interface {
-		Get(string) (*runner.StreamingDaemon, bool)
+		Get(sessionID string) (*runner.StreamingDaemon, bool)
 	}); ok {
 		return tp.Get(threadID)
 	}
@@ -80,7 +80,7 @@ func (p *testRunnerAgentPool) Get(threadID string) (*runner.StreamingDaemon, boo
 
 func (p *testRunnerAgentPool) GetOrCreate(ctx context.Context, threadID, sessionID string) (*runner.StreamingDaemon, error) {
 	if tp, ok := p.trackerPool.(interface {
-		GetOrCreate(context.Context, string, string) (*runner.StreamingDaemon, error)
+		GetOrCreate(ctx context.Context, sessionID, model string) (*runner.StreamingDaemon, error)
 	}); ok {
 		return tp.GetOrCreate(ctx, threadID, sessionID)
 	}
@@ -158,7 +158,7 @@ func (p *testRunnerAgentPool) EvictSession(targetKey string) error {
 		delete(p.sessions, targetKey)
 	}
 	p.mu.Unlock()
-	if ep, ok := p.trackerPool.(interface{ EvictSession(string) error }); ok {
+	if ep, ok := p.trackerPool.(interface{ EvictSession(sessionKey string) error }); ok {
 		return ep.EvictSession(targetKey)
 	}
 	return nil
