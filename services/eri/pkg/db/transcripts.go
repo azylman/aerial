@@ -238,7 +238,8 @@ func (s *SQLStore) SearchSessionSummaries(ctx context.Context, embedding []float
 	var query string
 	var rows *sql.Rows
 
-	if hasEmbedding && queryText != "" {
+	switch {
+	case hasEmbedding && queryText != "":
 		query = `WITH vector_hits AS (
 			SELECT session_id, ROW_NUMBER() OVER (ORDER BY embedding <=> $1) AS rank
 			FROM session_summaries WHERE embedding IS NOT NULL ORDER BY embedding <=> $1 LIMIT $2
@@ -254,7 +255,7 @@ func (s *SQLStore) SearchSessionSummaries(ctx context.Context, embedding []float
 		WHERE ((COALESCE(0.5 / (60.0 + v.rank), 0.0) + COALESCE(0.5 / (60.0 + t.rank), 0.0)) * 60.0) >= $4
 		ORDER BY score DESC LIMIT $5;`
 		rows, err = s.db.QueryContext(queryCtx, query, pgvector.NewVector(embedding), candidateLimit, queryText, minScore, limit)
-	} else if hasEmbedding {
+	case hasEmbedding:
 		query = `WITH candidates AS (
 			SELECT session_id, thread_id, summary, last_indexed_step, last_mtime, 
 				summary_step_watermark, is_settled, created_at, updated_at, (1.0 - (embedding <=> $1)) AS similarity
@@ -264,7 +265,7 @@ func (s *SQLStore) SearchSessionSummaries(ctx context.Context, embedding []float
 			summary_step_watermark, is_settled, created_at, updated_at, similarity AS score
 		FROM candidates WHERE similarity >= $3 ORDER BY similarity DESC LIMIT $4;`
 		rows, err = s.db.QueryContext(queryCtx, query, pgvector.NewVector(embedding), candidateLimit, minScore, limit)
-	} else {
+	default:
 		query = `WITH text_hits AS (
 			SELECT session_id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(fts_tokens, websearch_to_tsquery('simple', $1)) DESC) AS rank
 			FROM session_summaries WHERE fts_tokens @@ websearch_to_tsquery('simple', $1) LIMIT $2

@@ -802,7 +802,8 @@ func resolvePriorRecords(state *BatchState, payload Payload, ts int64) (int, []T
 	invNum := state.InvocationNum
 	var prior []ToolInvocation
 	for _, r := range state.Records {
-		if !((invNum > 0 && r.Turn > 0 && r.Turn == invNum) || ((invNum == 0 || r.Turn == 0) && isSameStep(r, payload.StepIdx, ts))) {
+		isMatchingTurn := (invNum > 0 && r.Turn > 0 && r.Turn == invNum) || ((invNum == 0 || r.Turn == 0) && isSameStep(r, payload.StepIdx, ts))
+		if !isMatchingTurn {
 			prior = append(prior, r)
 		}
 	}

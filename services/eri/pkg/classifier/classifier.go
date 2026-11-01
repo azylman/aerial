@@ -191,9 +191,7 @@ func ExtractReplyingToAuthor(m db.Message) string {
 	if m.ReplyingToAuthor != "" {
 		return m.ReplyingToAuthor
 	}
-	if strings.Contains(m.Content, "- replying_to:") {
-		idx := strings.Index(m.Content, "- replying_to:")
-		rest := m.Content[idx:]
+	if _, rest, ok := strings.Cut(m.Content, "- replying_to:"); ok {
 		if _, after, ok := strings.Cut(rest, "author:"); ok {
 			authRest := after
 			if before, _, ok := strings.Cut(authRest, "\n"); ok {

@@ -398,12 +398,13 @@ func matchGitCommitTokens(tokens []string) (bool, string) {
 	var foundDir string
 	for i := 1; i < len(tokens); i++ {
 		tok := tokens[i]
-		if tok == "-C" && i+1 < len(tokens) {
+		switch {
+		case tok == "-C" && i+1 < len(tokens):
 			foundDir = tokens[i+1]
 			i++
-		} else if strings.HasPrefix(tok, "-C") && len(tok) > 2 {
+		case strings.HasPrefix(tok, "-C") && len(tok) > 2:
 			foundDir = strings.TrimPrefix(tok, "-C")
-		} else if tok == "commit" {
+		case tok == "commit":
 			return true, foundDir
 		}
 	}
@@ -591,8 +592,8 @@ func FormatCommitDenyReason(violations []Violation) string {
 	var sb strings.Builder
 	sb.WriteString("Commit blocked by commit-safety-guard: sensitive pattern violations detected:\n")
 	for _, v := range violations {
-		sb.WriteString(fmt.Sprintf("- %s:%d [%s] matches '%s' (sample: %s)\n",
-			v.File, v.LineNum, v.Category, v.Pattern, v.Sample))
+		fmt.Fprintf(&sb, "- %s:%d [%s] matches '%s' (sample: %s)\n",
+			v.File, v.LineNum, v.Category, v.Pattern, v.Sample)
 	}
 	sb.WriteString("Please remove secrets, tokens, or PII before committing. ")
 	sb.WriteString("If this is a configuration change intended for aerial-config, author changes in aerial-config where this guard is disabled.")

@@ -135,13 +135,14 @@ func hasProtectedOutputRedirect(cmd string) bool {
 
 func gitCommandTargetsShare(tokens []string) bool {
 	for i, t := range tokens {
-		if t == "-C" && i+1 < len(tokens) && IsProtectedPath(tokens[i+1]) {
+		switch {
+		case t == "-C" && i+1 < len(tokens) && IsProtectedPath(tokens[i+1]):
 			return true
-		} else if strings.HasPrefix(t, "-C") && len(t) > 2 && IsProtectedPath(strings.TrimPrefix(t, "-C")) {
+		case strings.HasPrefix(t, "-C") && len(t) > 2 && IsProtectedPath(strings.TrimPrefix(t, "-C")):
 			return true
-		} else if strings.HasPrefix(t, "--git-dir=") && IsProtectedPath(strings.TrimPrefix(t, "--git-dir=")) {
+		case strings.HasPrefix(t, "--git-dir=") && IsProtectedPath(strings.TrimPrefix(t, "--git-dir=")):
 			return true
-		} else if strings.HasPrefix(t, "--work-tree=") && IsProtectedPath(strings.TrimPrefix(t, "--work-tree=")) {
+		case strings.HasPrefix(t, "--work-tree=") && IsProtectedPath(strings.TrimPrefix(t, "--work-tree=")):
 			return true
 		}
 	}
@@ -208,13 +209,14 @@ func isGitMutating(args []string) bool {
 	idx := 0
 	for idx < len(args) {
 		arg := args[idx]
-		if arg == "-C" && idx+1 < len(args) {
+		switch {
+		case arg == "-C" && idx+1 < len(args):
 			idx += 2
 			continue
-		} else if strings.HasPrefix(arg, "-C") || strings.HasPrefix(arg, "--git-dir=") || strings.HasPrefix(arg, "--work-tree=") {
+		case strings.HasPrefix(arg, "-C") || strings.HasPrefix(arg, "--git-dir=") || strings.HasPrefix(arg, "--work-tree="):
 			idx++
 			continue
-		} else if strings.HasPrefix(arg, "-") {
+		case strings.HasPrefix(arg, "-"):
 			idx++
 			continue
 		}

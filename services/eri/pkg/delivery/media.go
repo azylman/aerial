@@ -431,11 +431,12 @@ func parseCodeFence(line string) (marker string, length int, isSingleLineSpan bo
 		trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, ">"))
 	}
 
-	if strings.HasPrefix(trimmed, "```") {
+	switch {
+	case strings.HasPrefix(trimmed, "```"):
 		marker = "```"
-	} else if strings.HasPrefix(trimmed, "~~~") {
+	case strings.HasPrefix(trimmed, "~~~"):
 		marker = "~~~"
-	} else {
+	default:
 		return "", 0, false
 	}
 
@@ -469,11 +470,12 @@ func resolveSandboxedImagePath(rawPath, baseDir string) (string, error) {
 	cleanRaw := strings.TrimPrefix(rawPath, "file://")
 
 	var targetPath string
-	if filepath.IsAbs(cleanRaw) {
+	switch {
+	case filepath.IsAbs(cleanRaw):
 		targetPath = filepath.Clean(cleanRaw)
-	} else if baseDir != "" {
+	case baseDir != "":
 		targetPath = filepath.Clean(filepath.Join(baseDir, cleanRaw))
-	} else {
+	default:
 		targetPath = filepath.Clean(cleanRaw)
 	}
 

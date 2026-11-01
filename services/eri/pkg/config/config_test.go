@@ -1164,12 +1164,7 @@ func TestLoadInstructions_ChannelAndScope(t *testing.T) {
 					t.Fatalf("failed to write test file %s: %v", filePath, err)
 				}
 			}
-			var got string
-			if tc.isScope {
-				got = LoadScopeInstructions(tc.target)
-			} else {
-				got = LoadScopeInstructions(tc.target)
-			}
+			got := LoadScopeInstructions(tc.target)
 			if (tc.wantSubstr == "" && got != "") || (tc.wantSubstr != "" && !strings.Contains(got, tc.wantSubstr)) || (tc.wantAbsent != "" && strings.Contains(got, tc.wantAbsent)) {
 				t.Fatalf("unexpected got %q", got)
 			}
