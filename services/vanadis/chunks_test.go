@@ -40,7 +40,8 @@ func TestHelpers_WidgetStatus(t *testing.T) {
 		prStatus    string
 		want        string
 	}{
-		{"failed", "deployed", "failed"},
+		{"failed", "open", "failed"},
+		{"failed", "deployed", "deployed"},
 		{"pending", "deployed", "deployed"},
 		{"pending", "deploying", "deploying"},
 		{"pending", "synced", "synced"},
@@ -455,6 +456,17 @@ func TestVanadisStore_ChunkLifecycle(t *testing.T) {
 		adv1, err := s.AdvanceChunkByPR(ctx, "aerial", 101)
 		if err != nil || adv1 == nil || !adv1.Matched || !adv1.Advanced || adv1.BuildCompleted || adv1.NextChunkIndex != 1 {
 			t.Fatalf("unexpected adv1: %+v, err: %v", adv1, err)
+		}
+
+		sRec, bRecID, cRecIDs := setupTestStoreWithBuild()
+		_, _ = sRec.AttachChunkPR(ctx, cRecIDs[0], 111, "aerial")
+		_, _, _, _ = sRec.FailChunkByPR(ctx, "aerial", 111)
+		advRecov, err := sRec.AdvanceChunkByPR(ctx, "aerial", 111)
+		if err != nil || advRecov == nil || !advRecov.Matched || !advRecov.Advanced || advRecov.BuildStatus != "running" || advRecov.NextChunkIndex != 1 {
+			t.Fatalf("expected failed build/chunk to recover on PR merge, got %+v, err: %v", advRecov, err)
+		}
+		if bRec, _, _ := sRec.GetBuild(ctx, bRecID); bRec.Status != "running" {
+			t.Fatalf("expected recovered build status running, got %q", bRec.Status)
 		}
 
 		adv1Repeat, err := s.AdvanceChunkByPR(ctx, "aerial", 101)
@@ -1587,12 +1599,12 @@ func TestPostgresVanadisStore_ChunkMethods(t *testing.T) {
 							*dest[1].(*string) = "b1"
 							*dest[2].(*int) = 0
 							*dest[3].(*string) = "Chunk 1"
-							*dest[4].(*string) = "pr_opened"
+							*dest[4].(*string) = "failed"
 							*dest[5].(*string) = "thread-1"
 							*dest[6].(*int) = 2
 							*dest[7].(*string) = "Build 1"
 							*dest[8].(*string) = "Objective 1"
-							*dest[9].(*string) = "running"
+							*dest[9].(*string) = "failed"
 							*dest[10].(*string) = "msg-1"
 							return nil
 						}}
@@ -1607,8 +1619,47 @@ func TestPostgresVanadisStore_ChunkMethods(t *testing.T) {
 			},
 		})
 		resNext, err := sAdvanceNextSuccess.AdvanceChunkByPR(ctx, "aerial", 101)
-		if err != nil || !resNext.Matched || !resNext.Advanced || resNext.NextChunkIndex != 1 {
-			t.Errorf("expected success advancing to next chunk, got %+v err=%v", resNext, err)
+		if err != nil || !resNext.Matched || !resNext.Advanced || resNext.NextChunkIndex != 1 || resNext.BuildStatus != "running" {
+			t.Errorf("expected success advancing and recovering build to next chunk, got %+v err=%v", resNext, err)
+		}
+
+		// Recover build running error when advancing to next chunk
+		sRecoverBuildErr := newMockStore(mockDB{
+			beginFn: func(context.Context) (pgx.Tx, error) {
+				return &mockTx{
+					queryRowFn: func(context.Context, string, ...any) pgx.Row {
+						return &genericMockRow{scanFn: func(dest ...any) error {
+							*dest[0].(*string) = "c1"
+							*dest[1].(*string) = "b1"
+							*dest[2].(*int) = 0
+							*dest[3].(*string) = "Chunk 1"
+							*dest[4].(*string) = "failed"
+							*dest[5].(*string) = "thread-1"
+							*dest[6].(*int) = 2
+							*dest[7].(*string) = "Build 1"
+							*dest[8].(*string) = "Objective 1"
+							*dest[9].(*string) = "failed"
+							*dest[10].(*string) = "msg-1"
+							return nil
+						}}
+					},
+					queryFn: func(context.Context, string, ...any) (pgx.Rows, error) {
+						return &mockRows{items: []VanadisChunk{
+							{ID: "c1", ChunkIndex: 0, Status: "merged"},
+							{ID: "c2", ChunkIndex: 1, Status: "pending"},
+						}}, nil
+					},
+					execFn: func(_ context.Context, sql string, _ ...any) (pgconn.CommandTag, error) {
+						if strings.Contains(sql, "UPDATE vanadis_builds SET status = 'running'") {
+							return pgconn.CommandTag{}, errors.New("recover build err")
+						}
+						return pgconn.NewCommandTag("UPDATE 1"), nil
+					},
+				}, nil
+			},
+		})
+		if _, err := sRecoverBuildErr.AdvanceChunkByPR(ctx, "aerial", 101); err == nil {
+			t.Error("expected error on recover build running failure")
 		}
 
 		// Success completing build

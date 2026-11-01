@@ -134,9 +134,6 @@ func normalizeWidgetStatus(dbStatus string) string {
 
 func resolveVanadisChunkWidgetStatus(chunkStatus, prDBStatus string) string {
 	cStat := normalizeWidgetStatus(chunkStatus)
-	if cStat == "failed" {
-		return "failed"
-	}
 	switch normalizeWidgetStatus(prDBStatus) {
 	case "deployed":
 		return "deployed"
@@ -312,10 +309,17 @@ func scanVanadisChunkSummaries(rows pgx.Rows, mergedChunkID string) ([]VanadisCh
 }
 
 func isTerminalBuildStatus(status string) bool {
-	return status == "cancelled" || status == "failed"
+	return status == "cancelled"
 }
 
 func advanceToNextChunk(ctx context.Context, tx pgx.Tx, buildID string, nextChunkIdx int, cStatus string, allChunks []VanadisChunkSummary, res *VanadisAdvancementResult) (*VanadisAdvancementResult, error) {
+	if res.BuildStatus == "failed" {
+		const recoverBuildQuery = `UPDATE vanadis_builds SET status = 'running', updated_at = CURRENT_TIMESTAMP WHERE id = $1`
+		if _, err := tx.Exec(ctx, recoverBuildQuery, buildID); err != nil {
+			return nil, fmt.Errorf("recover vanadis build running: %w", err)
+		}
+		res.BuildStatus = "running"
+	}
 	const updateNextChunkQuery = `UPDATE vanadis_chunks SET status = 'running', started_at = COALESCE(started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP WHERE build_id = $1 AND chunk_index = $2 AND status = 'pending'`
 	if _, err := tx.Exec(ctx, updateNextChunkQuery, buildID, nextChunkIdx); err != nil {
 		return nil, fmt.Errorf("update next vanadis chunk running: %w", err)
