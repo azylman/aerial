@@ -684,9 +684,10 @@ func TestRiverWorkers(t *testing.T) {
 				err = w.Work(ctx, job)
 			case "discord_ingress", "discord_ingress_4xx", "discord_ingress_retry", "discord_ingress_ttl", "discord_ingress_zero_delay", "discord_ingress_large_delay", "discord_ingress_ctx_cancel":
 				w := &DiscordIngressWorker{server: srv, retryDelay: 1 * time.Millisecond}
-				if tc.workerType == "discord_ingress_zero_delay" {
+				switch tc.workerType {
+				case "discord_ingress_zero_delay":
 					w.retryDelay = 0
-				} else if tc.workerType == "discord_ingress_large_delay" {
+				case "discord_ingress_large_delay":
 					w.retryDelay = 10 * time.Second
 				}
 				if tc.nilServer {

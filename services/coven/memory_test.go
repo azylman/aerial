@@ -6353,14 +6353,15 @@ func TestTestMemStore_ProceduralCandidates(t *testing.T) {
 				return
 			}
 
-			if tc.wantStatus == "consolidated" {
+			switch tc.wantStatus {
+			case "consolidated":
 				if err := mem.MarkProceduralCandidatesConsolidated(ctx, []int64{id}, tc.markPR); err != nil {
 					t.Fatalf("MarkProceduralCandidatesConsolidated() err = %v", err)
 				}
 				if mem.proceduralCandidates[id].Status != "consolidated" || mem.proceduralCandidates[id].PRNumber != tc.markPR {
 					t.Errorf("candidate state = %v", mem.proceduralCandidates[id])
 				}
-			} else if tc.wantStatus == "skipped" {
+			case "skipped":
 				if err := mem.MarkProceduralCandidatesSkipped(ctx, []int64{id}); err != nil {
 					t.Fatalf("MarkProceduralCandidatesSkipped() err = %v", err)
 				}

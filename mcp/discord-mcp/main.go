@@ -140,8 +140,9 @@ func StartProxyServer(port, upstreamBase string) (*http.Server, error) {
 	mux.Handle("/", proxyHandler)
 
 	srv := &http.Server{
-		Addr:    ":" + port,
-		Handler: mux,
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	return srv, nil

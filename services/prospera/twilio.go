@@ -393,7 +393,7 @@ func (c *HTTPTwilioClient) EnsurePhoneNumber(ctx context.Context, areaCode, webh
 
 	if len(existing) > 0 {
 		target := existing[0]
-		if target.VoiceUrl != voiceURL || target.StatusCallback != statusURL || target.SmsUrl != smsURL {
+		if target.VoiceURL != voiceURL || target.StatusCallback != statusURL || target.SmsURL != smsURL {
 			if err := c.updatePhoneNumberWebhooks(ctx, target.SID, voiceURL, statusURL, smsURL); err != nil {
 				return "", err
 			}
@@ -407,9 +407,9 @@ func (c *HTTPTwilioClient) EnsurePhoneNumber(ctx context.Context, areaCode, webh
 type incomingNumberRecord struct {
 	SID            string `json:"sid"`
 	PhoneNumber    string `json:"phone_number"`
-	VoiceUrl       string `json:"voice_url"`
+	VoiceURL       string `json:"voice_url"`
 	StatusCallback string `json:"status_callback"`
-	SmsUrl         string `json:"sms_url"`
+	SmsURL         string `json:"sms_url"`
 }
 
 func (c *HTTPTwilioClient) listIncomingPhoneNumbers(ctx context.Context) ([]incomingNumberRecord, error) {

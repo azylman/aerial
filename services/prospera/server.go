@@ -210,7 +210,7 @@ func (s *Server) handleInboundVoiceRouting(w http.ResponseWriter, r *http.Reques
 	// Tier 1: AllowFrom allowlist
 	for _, a := range s.cfg.AllowFrom {
 		if normA, err := NormalizeE164(a); err == nil && normA == normFrom {
-			s.connectInboundStream(w, r.Context(), callSid, normFrom, normTo, nil)
+			s.connectInboundStream(r.Context(), w, callSid, normFrom, normTo, nil)
 			return
 		}
 	}
@@ -229,15 +229,15 @@ func (s *Server) handleInboundVoiceRouting(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	if recentCall != nil {
-		s.connectInboundStream(w, r.Context(), callSid, normFrom, normTo, recentCall)
+		s.connectInboundStream(r.Context(), w, callSid, normFrom, normTo, recentCall)
 		return
 	}
 
 	// Tier 3: Unknown caller -> Voicemail recording
-	s.routeVoicemailRecording(w, r.Context(), callSid, normFrom, normTo)
+	s.routeVoicemailRecording(r.Context(), w, callSid, normFrom, normTo)
 }
 
-func (s *Server) connectInboundStream(w http.ResponseWriter, ctx context.Context, callSid, normFrom, normTo string, callbackOf *VoiceCall) {
+func (s *Server) connectInboundStream(ctx context.Context, w http.ResponseWriter, callSid, normFrom, normTo string, callbackOf *VoiceCall) {
 	callID := "call-in-" + uuid.NewString()
 	c := VoiceCall{
 		CallID:           callID,
@@ -282,7 +282,7 @@ func (s *Server) connectInboundStream(w http.ResponseWriter, ctx context.Context
 	writeXML(w, twiml)
 }
 
-func (s *Server) routeVoicemailRecording(w http.ResponseWriter, ctx context.Context, callSid, normFrom, normTo string) {
+func (s *Server) routeVoicemailRecording(ctx context.Context, w http.ResponseWriter, callSid, normFrom, normTo string) {
 	callID := "call-in-" + uuid.NewString()
 	c := VoiceCall{
 		CallID:           callID,

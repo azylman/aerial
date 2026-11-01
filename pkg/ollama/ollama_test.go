@@ -90,7 +90,7 @@ func TestGenerateEmbedding_TableDriven(t *testing.T) {
 		queryPrefix   string
 		maxRetries    int
 		retryDelay    time.Duration
-		nilHttpClient bool
+		nilHTTPClient bool
 		cancelInDelay bool
 		handlerStatus int
 		handlerBody   string
@@ -209,7 +209,7 @@ func TestGenerateEmbedding_TableDriven(t *testing.T) {
 			name:          "default http client fallback when nil",
 			text:          "default client check",
 			maxRetries:    1,
-			nilHttpClient: true,
+			nilHTTPClient: true,
 			handlerStatus: http.StatusOK,
 			handlerBody:   `{"embedding": [0.77]}`,
 			wantEmbedding: []float32{0.77},
@@ -265,7 +265,7 @@ func TestGenerateEmbedding_TableDriven(t *testing.T) {
 					QueryPrefix: tc.queryPrefix,
 				}
 			})
-			if !tc.nilHttpClient {
+			if !tc.nilHTTPClient {
 				client.SetHTTPClient(server.Client())
 			} else {
 				client.SetHTTPClient(nil)

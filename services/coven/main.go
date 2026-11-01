@@ -65,8 +65,9 @@ func RunApp(ctx context.Context, cfg *Config) error {
 	}()
 
 	httpServer := &http.Server{
-		Addr:    ":" + port,
-		Handler: server.Routes(),
+		Addr:              ":" + port,
+		Handler:           server.Routes(),
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	errChan := make(chan error, 1)

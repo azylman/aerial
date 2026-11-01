@@ -64,9 +64,10 @@ func TestStartUsagePollerAndRunner(t *testing.T) {
 	StartUsagePoller(ctx, 5*time.Millisecond, func(ctx context.Context) ([]byte, error) {
 		count++
 		calls <- count
-		if count == 1 {
+		switch count {
+		case 1:
 			return nil, os.ErrInvalid
-		} else if count == 2 {
+		case 2:
 			return []byte(`{bad`), nil
 		}
 		cancel()
