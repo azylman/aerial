@@ -179,8 +179,7 @@ func TestStartTranscriptSync_TableDriven(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			ctx := t.Context()
 			notify := make(chan struct{}, 10)
 			fakeStore := dbtest.NewFakeStore()
 			var store db.TranscriptStore

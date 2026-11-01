@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -597,9 +598,7 @@ func (p *WorkerPool) Start() {
 	// WorkerPool starts workers lazily per active thread
 	log.Printf("[WorkerPool] Started queue worker pool with max %d attempts per turn", p.cfg.MaxAttempts)
 	if p.AgentPool() != nil || p.cfg.Store != nil {
-		p.wg.Add(1)
-		go func() {
-			defer p.wg.Done()
+		p.wg.Go(func() {
 			interval := p.cfg.MaintenanceInterval
 			if interval <= 0 {
 				interval = 30 * time.Minute
@@ -615,7 +614,7 @@ func (p *WorkerPool) Start() {
 					p.checkUnrotatedSessions(p.ctx, lastReportedTurnCount)
 				}
 			}
-		}()
+		})
 	}
 }
 
@@ -739,10 +738,8 @@ func (p *WorkerPool) collectUniquePoolsLocked() []runner.AgentPool {
 		if ap == nil {
 			return
 		}
-		for _, existing := range out {
-			if existing == ap {
-				return
-			}
+		if slices.Contains(out, ap) {
+			return
 		}
 		out = append(out, ap)
 	}

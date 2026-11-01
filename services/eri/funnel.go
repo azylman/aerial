@@ -682,10 +682,7 @@ func openDiscordSessionWithRetry(ctx context.Context, dg *discordgo.Session) {
 				}
 				if err := discordSessionOpener(dg); err != nil {
 					log.Printf("Discord funnel retry failed: %v. Retrying in %v...", err, backoff)
-					backoff = backoff * 2
-					if backoff > maxBackoff {
-						backoff = maxBackoff
-					}
+					backoff = min(backoff*2, maxBackoff)
 					continue
 				}
 				log.Printf("Discord funnel worker started successfully inside Brain")

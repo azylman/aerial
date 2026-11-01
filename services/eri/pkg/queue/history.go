@@ -249,10 +249,7 @@ func fetchHistoryFromDB(store db.Store, channelID, beforeID string, limit int, c
 
 	fetchLimit := limit
 	if beforeID != "" {
-		fetchLimit = limit * 2
-		if fetchLimit < 50 {
-			fetchLimit = 50
-		}
+		fetchLimit = max(limit*2, 50)
 	}
 	msgs, err := store.GetRecentThreadMessages(ctx, channelID, fetchLimit)
 	if err != nil {
@@ -314,7 +311,7 @@ func SummarizeThreadHistoryWithGroup(ctx context.Context, sfg *singleflight.Grou
 		sfg = &threadSummaryGroup
 	}
 
-	v, err, _ := sfg.Do(threadID, func() (interface{}, error) {
+	v, err, _ := sfg.Do(threadID, func() (any, error) {
 		timeoutCtx, cancel := context.WithTimeout(ctx, DefaultThreadSummaryTimeout)
 		defer cancel()
 

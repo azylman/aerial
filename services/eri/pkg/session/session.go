@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -478,11 +479,11 @@ type transcriptStepRecord struct {
 }
 
 func scanLinesForResponse(ctx context.Context, lines []string, since time.Time) string {
-	for i := len(lines) - 1; i >= 0; i-- {
+	for _, line := range slices.Backward(lines) {
 		if ctx != nil && ctx.Err() != nil {
 			return ""
 		}
-		line := strings.TrimSpace(lines[i])
+		line := strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
@@ -593,8 +594,8 @@ func getLastStepIndex(filePath string) (int, error) {
 		}
 
 		lines := strings.Split(strings.TrimRight(string(buf[:n]), "\r\n"), "\n")
-		for i := len(lines) - 1; i >= 0; i-- {
-			line := strings.TrimSpace(lines[i])
+		for _, line := range slices.Backward(lines) {
+			line := strings.TrimSpace(line)
 			if line == "" {
 				continue
 			}

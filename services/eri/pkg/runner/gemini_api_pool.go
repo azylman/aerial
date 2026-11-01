@@ -30,17 +30,17 @@ type (
 	MCPTool         = mcp.Tool
 	MCPDispatcher   interface {
 		ListDeclarations(ctx context.Context) ([]geminiFunctionDeclaration, error)
-		Execute(ctx context.Context, name string, args map[string]interface{}) (string, error)
+		Execute(ctx context.Context, name string, args map[string]any) (string, error)
 	}
 )
 
-func cleanParameters(schema map[string]interface{}) map[string]interface{} {
+func cleanParameters(schema map[string]any) map[string]any {
 	res := cleanSchemaNode(schema)
 	if t, ok := res["type"].(string); !ok || t == "" {
 		res["type"] = "OBJECT"
 	}
 	if res["type"] == "OBJECT" && res["properties"] == nil {
-		res["properties"] = map[string]interface{}{}
+		res["properties"] = map[string]any{}
 	}
 	return res
 }
@@ -58,11 +58,11 @@ func normalizeSchemaType(t string) string {
 	}
 }
 
-func toStringSlice(v interface{}) ([]string, bool) {
+func toStringSlice(v any) ([]string, bool) {
 	switch s := v.(type) {
 	case []string:
 		return s, true
-	case []interface{}:
+	case []any:
 		res := make([]string, len(s))
 		for i, elem := range s {
 			str, ok := elem.(string)
@@ -77,19 +77,19 @@ func toStringSlice(v interface{}) ([]string, bool) {
 	}
 }
 
-func cleanSubSchemaList(val interface{}) ([]interface{}, []map[string]interface{}, bool) {
+func cleanSubSchemaList(val any) ([]any, []map[string]any, bool) {
 	switch v := val.(type) {
-	case []map[string]interface{}:
-		res := make([]interface{}, len(v))
+	case []map[string]any:
+		res := make([]any, len(v))
 		for i, m := range v {
 			res[i] = cleanSchemaNode(m)
 		}
 		return res, v, true
-	case []interface{}:
-		res := make([]interface{}, len(v))
-		maps := make([]map[string]interface{}, 0, len(v))
+	case []any:
+		res := make([]any, len(v))
+		maps := make([]map[string]any, 0, len(v))
 		for i, elem := range v {
-			if m, ok := elem.(map[string]interface{}); ok {
+			if m, ok := elem.(map[string]any); ok {
 				res[i] = cleanSchemaNode(m)
 				maps = append(maps, m)
 			} else {
@@ -130,7 +130,7 @@ func parseSliceTypes(types []string) (string, bool) {
 	return primaryType, isNullable
 }
 
-func normalizeSchemaTypeField(cp map[string]interface{}) {
+func normalizeSchemaTypeField(cp map[string]any) {
 	if types, ok := toStringSlice(cp["type"]); ok {
 		primaryType, isNullable := parseSliceTypes(types)
 		cp["type"] = primaryType
@@ -148,11 +148,11 @@ func normalizeSchemaTypeField(cp map[string]interface{}) {
 	}
 }
 
-func findNullableUnionTarget(items []map[string]interface{}) map[string]interface{} {
+func findNullableUnionTarget(items []map[string]any) map[string]any {
 	if len(items) != 2 {
 		return nil
 	}
-	isNull := func(m map[string]interface{}) bool {
+	isNull := func(m map[string]any) bool {
 		t, ok := m["type"].(string)
 		return ok && strings.EqualFold(t, "null")
 	}
@@ -165,7 +165,7 @@ func findNullableUnionTarget(items []map[string]interface{}) map[string]interfac
 	return nil
 }
 
-func collapseNullableUnion(cp map[string]interface{}, unionKey string) {
+func collapseNullableUnion(cp map[string]any, unionKey string) {
 	val, ok := cp[unionKey]
 	if !ok {
 		return
@@ -191,14 +191,14 @@ func collapseNullableUnion(cp map[string]interface{}, unionKey string) {
 	cp["nullable"] = true
 }
 
-func cleanSchemaProperties(cp map[string]interface{}) {
-	propsMap, ok := cp["properties"].(map[string]interface{})
+func cleanSchemaProperties(cp map[string]any) {
+	propsMap, ok := cp["properties"].(map[string]any)
 	if !ok {
 		return
 	}
-	cleanedProps := make(map[string]interface{}, len(propsMap))
+	cleanedProps := make(map[string]any, len(propsMap))
 	for k, v := range propsMap {
-		if m, ok := v.(map[string]interface{}); ok {
+		if m, ok := v.(map[string]any); ok {
 			cleanedProps[k] = cleanSchemaNode(m)
 		} else {
 			cleanedProps[k] = v
@@ -207,8 +207,8 @@ func cleanSchemaProperties(cp map[string]interface{}) {
 	cp["properties"] = cleanedProps
 }
 
-func cleanSchemaItemsAndUnions(cp map[string]interface{}) {
-	if itemsMap, ok := cp["items"].(map[string]interface{}); ok {
+func cleanSchemaItemsAndUnions(cp map[string]any) {
+	if itemsMap, ok := cp["items"].(map[string]any); ok {
 		cp["items"] = cleanSchemaNode(itemsMap)
 	} else if cleaned, _, ok := cleanSubSchemaList(cp["items"]); ok {
 		cp["items"] = cleaned
@@ -222,11 +222,11 @@ func cleanSchemaItemsAndUnions(cp map[string]interface{}) {
 	}
 }
 
-func cleanSchemaNode(schema map[string]interface{}) map[string]interface{} {
+func cleanSchemaNode(schema map[string]any) map[string]any {
 	if schema == nil {
-		return map[string]interface{}{"type": "OBJECT"}
+		return map[string]any{"type": "OBJECT"}
 	}
-	cp := make(map[string]interface{}, len(schema))
+	cp := make(map[string]any, len(schema))
 	for k, v := range schema {
 		if isExcludedSchemaKey(k) {
 			continue
@@ -243,7 +243,7 @@ func cleanSchemaNode(schema map[string]interface{}) map[string]interface{} {
 		cp["type"] = "OBJECT"
 	}
 	if cp["type"] == "OBJECT" && cp["properties"] == nil {
-		cp["properties"] = map[string]interface{}{}
+		cp["properties"] = map[string]any{}
 	}
 	return cp
 }
@@ -273,7 +273,7 @@ func (d *DefaultMCPDispatcher) ListDeclarations(ctx context.Context) ([]geminiFu
 	return decls, nil
 }
 
-func (d *DefaultMCPDispatcher) Execute(ctx context.Context, name string, args map[string]interface{}) (string, error) {
+func (d *DefaultMCPDispatcher) Execute(ctx context.Context, name string, args map[string]any) (string, error) {
 	if d == nil || d.d == nil {
 		return "", errors.New("mcp dispatcher is nil")
 	}
@@ -307,13 +307,13 @@ type GeminiAPIPoolConfig struct {
 
 type (
 	geminiFunctionCall struct {
-		ID   string                 `json:"id,omitempty"`
-		Name string                 `json:"name"`
-		Args map[string]interface{} `json:"args,omitempty"`
+		ID   string         `json:"id,omitempty"`
+		Name string         `json:"name"`
+		Args map[string]any `json:"args,omitempty"`
 	}
 	geminiFunctionResp struct {
-		Name     string                 `json:"name"`
-		Response map[string]interface{} `json:"response"`
+		Name     string         `json:"name"`
+		Response map[string]any `json:"response"`
 	}
 	geminiPart struct {
 		Text             string              `json:"text,omitempty"`
@@ -326,9 +326,9 @@ type (
 		Parts []geminiPart `json:"parts"`
 	}
 	geminiFunctionDeclaration struct {
-		Name        string                 `json:"name"`
-		Description string                 `json:"description,omitempty"`
-		Parameters  map[string]interface{} `json:"parameters,omitempty"`
+		Name        string         `json:"name"`
+		Description string         `json:"description,omitempty"`
+		Parameters  map[string]any `json:"parameters,omitempty"`
 	}
 	geminiTool struct {
 		FunctionDeclarations []geminiFunctionDeclaration `json:"functionDeclarations,omitempty"`
@@ -534,7 +534,7 @@ func (s *GeminiAPISession) hydrateHistory() {
 		return
 	}
 	var loaded []geminiContent
-	for _, l := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+	for l := range strings.SplitSeq(strings.TrimSpace(string(data)), "\n") {
 		trimmed := strings.TrimSpace(l)
 		if trimmed == "" {
 			continue
@@ -579,8 +579,8 @@ func (s *GeminiAPISession) appendTranscript(userPrompt, modelResponse string) {
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	u, err1 := json.Marshal(map[string]interface{}{"source": "USER_EXPLICIT", "type": "USER_INPUT", "content": userPrompt, "created_at": now})
-	m, err2 := json.Marshal(map[string]interface{}{"source": "MODEL", "type": "PLANNER_RESPONSE", "content": modelResponse, "created_at": now})
+	u, err1 := json.Marshal(map[string]any{"source": "USER_EXPLICIT", "type": "USER_INPUT", "content": userPrompt, "created_at": now})
+	m, err2 := json.Marshal(map[string]any{"source": "MODEL", "type": "PLANNER_RESPONSE", "content": modelResponse, "created_at": now})
 	if err1 != nil || err2 != nil {
 		return
 	}
@@ -833,9 +833,9 @@ func (s *GeminiAPISession) executeSingleToolCall(ctx context.Context, dispatcher
 	if turn != nil && turn.Sink != nil {
 		turn.Sink.OnToolCompleted(canonicalTool, mcpServer, time.Since(start), status)
 	}
-	respMap := map[string]interface{}{"output": toolOutput}
+	respMap := map[string]any{"output": toolOutput}
 	if execErr != nil {
-		respMap = map[string]interface{}{"error": execErr.Error()}
+		respMap = map[string]any{"error": execErr.Error()}
 	}
 	return geminiPart{FunctionResponse: &geminiFunctionResp{Name: fc.Name, Response: respMap}}
 }

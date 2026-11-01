@@ -404,10 +404,7 @@ func newDiscordTurnSink(statusUpdater *StatusUpdater) *runner.BufferingTurnSink 
 // attempt * 30s floor (or resetDur if larger) + up to 3000ms jitter.
 func calculateCapacityBackoff(attempt int, resetDur time.Duration) time.Duration {
 	minFloor := time.Duration(attempt) * 30 * time.Second
-	delay := resetDur
-	if delay < minFloor {
-		delay = minFloor
-	}
+	delay := max(resetDur, minFloor)
 	delay += time.Duration(rand.Intn(3000)) * time.Millisecond
 	return delay
 }

@@ -356,7 +356,7 @@ type WatchdogOptions struct {
 // ExtractSessionID extracts a session UUID from agy output.
 // Strict NDJSON lines are unmarshaled directly via json.Unmarshal; log-prefixed lines fall through to extractUUIDByRegex.
 func ExtractSessionID(output string, _ time.Time) string {
-	for _, rawLine := range strings.Split(output, "\n") {
+	for rawLine := range strings.SplitSeq(output, "\n") {
 		line := strings.TrimSpace(rawLine)
 		var probe sessionProbe
 		if strings.HasPrefix(line, "{") && json.Unmarshal([]byte(line), &probe) == nil && probe.extractUUID() != "" {

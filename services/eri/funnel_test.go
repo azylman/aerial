@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -905,13 +906,7 @@ func TestPopulateDiscordMessageFields(t *testing.T) {
 	if len(msg.MentionRoleIDs) != 2 || msg.MentionRoleIDs[0] != "role-mod" {
 		t.Errorf("mentionRoleIDs mismatch: %v", msg.MentionRoleIDs)
 	}
-	foundCustom := false
-	for _, mention := range msg.Mentions {
-		if mention == "CustomRole" {
-			foundCustom = true
-			break
-		}
-	}
+	foundCustom := slices.Contains(msg.Mentions, "CustomRole")
 	if !foundCustom {
 		t.Errorf("expected CustomRole in mentions, got: %v", msg.Mentions)
 	}

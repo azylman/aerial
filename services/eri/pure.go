@@ -23,7 +23,7 @@ var mentionAndEmojiRegex = regexp.MustCompile(`(?i)<(@!?|@&|#|a?:[a-z0-9_]+:)[0-
 func DeriveThreadTitle(content string) string {
 	cleaned := strings.TrimSpace(mentionAndEmojiRegex.ReplaceAllString(content, ""))
 	var firstLine string
-	for _, line := range strings.Split(cleaned, "\n") {
+	for line := range strings.SplitSeq(cleaned, "\n") {
 		if trimmed := strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(line), "#> \t")); trimmed != "" {
 			firstLine = trimmed
 			break
@@ -55,8 +55,7 @@ func IsThreadAlreadyExistsError(err error) bool {
 	}
 	var restErr *discordgo.RESTError
 	if !errors.As(err, &restErr) {
-		var restErrVal discordgo.RESTError
-		if errors.As(err, &restErrVal) {
+		if restErrVal, ok := errors.AsType[discordgo.RESTError](err); ok {
 			restErr = &restErrVal
 		}
 	}

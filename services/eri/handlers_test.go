@@ -422,7 +422,7 @@ func TestHandleDirectMessage(t *testing.T) {
 		if w.Code != http.StatusOK || capturedChannelID != "1542423172400291873" || capturedText != "Deploy succeeded!" {
 			t.Fatalf("unexpected delivery: code=%d, ch=%q, txt=%q", w.Code, capturedChannelID, capturedText)
 		}
-		var resp map[string]interface{}
+		var resp map[string]any
 		_ = json.Unmarshal(w.Body.Bytes(), &resp)
 		if resp["status"] != "sent" || resp["channel_id"] != "1542423172400291873" {
 			t.Fatalf("unexpected response body: %+v", resp)
@@ -534,7 +534,7 @@ func TestHandleStatusWidget(t *testing.T) {
 		if capturedReq.ID != "build-123" || capturedReq.ChannelID != "1542423172400291873" || len(capturedReq.Chunks) != 1 {
 			t.Fatalf("unexpected captured request: %+v", capturedReq)
 		}
-		var resp map[string]interface{}
+		var resp map[string]any
 		_ = json.Unmarshal(w.Body.Bytes(), &resp)
 		if resp["status"] != "ok" || resp["message_id"] != "created-widget-msg-789" {
 			t.Fatalf("unexpected response body: %+v", resp)
@@ -760,11 +760,9 @@ func TestHandleTasks(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 10 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			handler(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/tasks", nil))
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -1009,8 +1007,8 @@ func TestHandleInternalLLM_And_MemoryRetriever(t *testing.T) {
 
 	stagingLLM := handleInternalLLM(func(ctx context.Context, model, p string) (string, error) {
 		observedPrompt = p
-		if idx := strings.Index(p, "Staged directory: "); idx != -1 {
-			rest := p[idx+len("Staged directory: "):]
+		if _, after, ok := strings.Cut(p, "Staged directory: "); ok {
+			rest := after
 			lines := strings.Split(rest, "\n")
 			observedDir = strings.TrimSpace(lines[0])
 			stagedPath := filepath.Join(observedDir, "test.txt")
