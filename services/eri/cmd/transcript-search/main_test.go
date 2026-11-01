@@ -1041,11 +1041,12 @@ func TestNewRequestWithContextErrors(t *testing.T) {
 func TestJSONMarshalIndentErrors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if strings.Contains(r.URL.Path, "stats") {
+		switch {
+		case strings.Contains(r.URL.Path, "stats"):
 			_ = json.NewEncoder(w).Encode(map[string]any{"total_sessions": 10, "status": "ok"})
-		} else if strings.Contains(r.URL.Path, "steps") {
+		case strings.Contains(r.URL.Path, "steps"):
 			_ = json.NewEncoder(w).Encode(transcript.StepWindowResult{SessionID: "s", CenterStep: 0})
-		} else {
+		default:
 			_ = json.NewEncoder(w).Encode(transcript.SearchResult{Query: "test", Mode: "auto"})
 		}
 	}))

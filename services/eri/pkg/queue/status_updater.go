@@ -80,14 +80,15 @@ func FormatToolStatus(toolName, commandName string, elapsed time.Duration) strin
 	}
 
 	var text string
-	if verb == "Executing" && (cleanLower == "run_command" || cleanLower == "execute_command" || cleanLower == "bash" || cleanLower == "sh") {
+	switch {
+	case verb == "Executing" && (cleanLower == "run_command" || cleanLower == "execute_command" || cleanLower == "bash" || cleanLower == "sh"):
 		if cmd == "" {
 			cmd = "command"
 		}
 		text = fmt.Sprintf("⚡ Executing `%s`... (%.1fs)", cmd, sec)
-	} else if cmd != "" {
+	case cmd != "":
 		text = fmt.Sprintf("⚡ %s `%s`... (%.1fs)", verb, cmd, sec)
-	} else {
+	default:
 		text = fmt.Sprintf("⚡ Running `%s`... (%.1fs)", clean, sec)
 	}
 
@@ -237,10 +238,10 @@ func (u *StatusUpdater) HandleStep(ev *runner.StepUpdateEvent) {
 
 	typ := ev.ResolvedType()
 	var shouldTriggerFlush bool
-	switch {
-	case typ == "thinking":
+	switch typ {
+	case "thinking":
 		u.phase, u.activeCommand, u.dirty = "thinking", "", true
-	case typ == "tool_call" || typ == "tool":
+	case "tool_call", "tool":
 		toolName := ev.ResolvedToolName()
 		if ev.State == "DONE" || ev.State == "ERROR" {
 			if u.activeTool == toolName || toolName == "" || u.activeCommand == toolName || u.activeTool == "call_mcp_tool" || toolName == "call_mcp_tool" {
@@ -252,7 +253,7 @@ func (u *StatusUpdater) HandleStep(ev *runner.StepUpdateEvent) {
 		} else {
 			u.activeTool, u.activeCommand, u.toolStart, u.lastCompletedTool, u.lastCompletedCommand, u.phase, u.dirty, shouldTriggerFlush = toolName, ev.ResolvedToolDetail(), time.Now(), "", "", "tool", true, true
 		}
-	case typ == "agent_response" || typ == "text_delta":
+	case "agent_response", "text_delta":
 		u.activeCommand = ""
 		if u.phase != "responding" {
 			u.phase, u.dirty, shouldTriggerFlush = "responding", true, true
@@ -403,11 +404,12 @@ func (u *StatusUpdater) editExistingStatusMessage(msgID, text string) {
 	u.mu.Lock()
 	u.inFlightREST = false
 	if err != nil {
-		if delivery.IsMessageNotFoundError(err) {
+		switch {
+		case delivery.IsMessageNotFoundError(err):
 			u.statusMessageID, u.disabled = "", true
-		} else if delivery.IsThreadArchivedOrLockedError(err) || delivery.IsPermissionError(err) {
+		case delivery.IsThreadArchivedOrLockedError(err) || delivery.IsPermissionError(err):
 			u.disabled = true
-		} else {
+		default:
 			u.dirty = true
 		}
 	} else {

@@ -44,11 +44,12 @@ func (r *TurnResolver) Resolve(ctx context.Context, res *TurnResult, err error, 
 	outcome.ErrorDetail = errDetail
 
 	lowerErr := strings.ToLower(errDetail)
-	if hasContextWindowKeyword(lowerErr) {
+	switch {
+	case hasContextWindowKeyword(lowerErr):
 		outcome.ErrorDetail = "prompt length exceeds maximum model context window (hard failure)"
-	} else if hasCorruptionKeyword(lowerErr) {
+	case hasCorruptionKeyword(lowerErr):
 		outcome.IsSessionCorruption = true
-	} else if IsQuotaPause(errDetail, "") || strings.Contains(lowerErr, "resource_exhausted") || strings.Contains(lowerErr, "429") || strings.Contains(lowerErr, "rate limit") || strings.Contains(lowerErr, "out of memory") || strings.Contains(lowerErr, "transient") || (!isNonTransientError(errDetail) && !strings.Contains(lowerErr, "unrecoverable")) {
+	case IsQuotaPause(errDetail, "") || strings.Contains(lowerErr, "resource_exhausted") || strings.Contains(lowerErr, "429") || strings.Contains(lowerErr, "rate limit") || strings.Contains(lowerErr, "out of memory") || strings.Contains(lowerErr, "transient") || (!isNonTransientError(errDetail) && !strings.Contains(lowerErr, "unrecoverable")):
 		outcome.IsTransient = true
 	}
 	return outcome

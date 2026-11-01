@@ -448,19 +448,20 @@ func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 		}
 	}
 
-	if tc.enqueueAsBurst {
+	switch {
+	case tc.enqueueAsBurst:
 		pool.EnqueueBurst(msgs...)
 		pool.Start()
 		defer pool.Stop()
 		waitForCompletion(t, doneCh, 3*time.Second, tc.name)
-	} else if tc.sequentialTurns {
+	case tc.sequentialTurns:
 		pool.Start()
 		defer pool.Stop()
 		for _, m := range msgs {
 			pool.Enqueue(m)
 			waitForCompletion(t, turnDoneCh, 3*time.Second, tc.name)
 		}
-	} else {
+	default:
 		pool.Start()
 		defer pool.Stop()
 		for _, m := range msgs {

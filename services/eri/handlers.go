@@ -606,9 +606,10 @@ func handleVoiceAskSSE(w http.ResponseWriter, r *http.Request, pool *queue.Worke
 		}
 		flusher.Flush()
 
-		if event == "reply" || event == "delta" || event == "sentence" {
+		switch event {
+		case "reply", "delta", "sentence":
 			recordTTFR("success")
-		} else if event == "error" {
+		case "error":
 			recordTTFR("error")
 		}
 	}
@@ -899,10 +900,10 @@ func stageInternalLLMAttachments(atts []InternalLLMAttachment) (string, string, 
 
 	var sb strings.Builder
 	sb.WriteString("\n\n<ATTACHMENTS>\n")
-	sb.WriteString(fmt.Sprintf("Staged directory: %s\n", tmpDir))
+	fmt.Fprintf(&sb, "Staged directory: %s\n", tmpDir)
 	sb.WriteString("Files are pre-downloaded and staged for direct inspection. Use read_file or view_file to examine them; do not execute curl, wget, or rm commands.\n")
 	for _, f := range stagedFiles {
-		sb.WriteString(fmt.Sprintf("- %s (%s, %d bytes)\n", f.path, f.mimeType, f.size))
+		fmt.Fprintf(&sb, "- %s (%s, %d bytes)\n", f.path, f.mimeType, f.size)
 	}
 	sb.WriteString("</ATTACHMENTS>")
 

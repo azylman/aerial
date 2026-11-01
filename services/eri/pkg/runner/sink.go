@@ -177,11 +177,12 @@ func (s *BufferingTurnSink) OnResult(res *TurnResult) {
 		accumulated, purged := s.builder.String(), s.purgedIntermediate
 		s.mu.Unlock()
 
-		if res == nil {
+		switch {
+		case res == nil:
 			res = &TurnResult{Response: accumulated}
-		} else if strings.TrimSpace(accumulated) != "" {
+		case strings.TrimSpace(accumulated) != "":
 			res.Response = accumulated
-		} else if purged {
+		case purged:
 			res.Response = ""
 		}
 		runHook(s.cfg.OnComplete, res)

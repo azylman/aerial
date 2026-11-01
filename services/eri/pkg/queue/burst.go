@@ -517,11 +517,12 @@ func populateTier1TrailingWakeInfos(burst []db.Message, wakeIdx int, wakeInfos [
 	}
 	for i := wakeIdx + 1; i < len(burst); i++ {
 		m := burst[i]
-		if isTier1Wake(m, botUserID, botRoleIDs) {
+		switch {
+		case isTier1Wake(m, botUserID, botRoleIDs):
 			wakeInfos[i] = WakeInfo{IsWake: true, Score: 1.0, Threshold: threshold, Reason: "direct_address"}
-		} else if wm == "mention" || threshold <= 0.0 || classifier.IsHeuristicSkip(db.ExtractMessageBody(m.Content)) {
+		case wm == "mention" || threshold <= 0.0 || classifier.IsHeuristicSkip(db.ExtractMessageBody(m.Content)):
 			wakeInfos[i] = WakeInfo{IsWake: false, Score: 0.0, Threshold: threshold, Reason: "heuristic_skip"}
-		} else {
+		default:
 			score, reason := classify([]db.Message{m})
 			wakeInfos[i] = WakeInfo{IsWake: score >= threshold, Score: score, Threshold: threshold, Reason: reason}
 		}

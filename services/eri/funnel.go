@@ -24,7 +24,7 @@ var (
 	funnelPool              atomic.Pointer[queue.WorkerPool]
 	activeInteractionRouter atomic.Pointer[interactions.Router]
 	titleSummarizeSem       = make(chan struct{}, 2)
-	discordSessionOpener    = func(dg *discordgo.Session) error { return hydrateDiscordSessionREST(dg) }
+	discordSessionOpener    = hydrateDiscordSessionREST
 	funnelRetryBackoff      = 2 * time.Second
 	funnelMemberFetcher     = func(s *discordgo.Session, guildID, userID string) (*discordgo.Member, error) {
 		if s == nil {

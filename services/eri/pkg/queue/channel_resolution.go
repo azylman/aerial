@@ -396,12 +396,13 @@ func FormatThreadTitle(titlePrefix, prompt string, now time.Time) string {
 	dateStr := now.Format("Jan 02, 2006")
 	trimmed := strings.TrimSpace(titlePrefix)
 	var title string
-	if trimmed != "" {
+	switch {
+	case trimmed != "":
 		title = fmt.Sprintf("%s – %s", trimmed, dateStr)
-	} else if strings.TrimSpace(prompt) != "" {
+	case strings.TrimSpace(prompt) != "":
 		clean := db.CleanTaskSummary(prompt)
 		title = fmt.Sprintf("%s – %s", clean, dateStr)
-	} else {
+	default:
 		title = "Scheduled Routine – " + dateStr
 	}
 	runes := []rune(title)
@@ -424,7 +425,7 @@ func IsValidThreadKey(id string) bool {
 	}
 	for i := range len(id) {
 		c := id[i]
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' && c != '_' {
 			return false
 		}
 	}

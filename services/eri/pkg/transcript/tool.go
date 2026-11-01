@@ -90,7 +90,7 @@ func ExecuteTranscriptSearch(
 
 	normalizedMode := normalizeSearchMode(opts.Mode)
 
-	if trimmedQuery == "" && !(normalizedMode == "steps" && sessID != "") {
+	if trimmedQuery == "" && (normalizedMode != "steps" || sessID == "") {
 		return SearchResult{
 			Query: trimmedQuery,
 			Mode:  normalizedMode,

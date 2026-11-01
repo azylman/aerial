@@ -1009,11 +1009,12 @@ func recordStreamErrorMetric(errMsg, model string, recordProcessErr bool) {
 	if errMsg == "" && !recordProcessErr {
 		return
 	}
-	if IsCapacityBlip(errMsg, "") {
+	switch {
+	case IsCapacityBlip(errMsg, ""):
 		metrics.RecordRunnerError("capacity_throttle", model)
-	} else if IsQuotaPause(errMsg, "") {
+	case IsQuotaPause(errMsg, ""):
 		metrics.RecordRunnerError("quota_paused", model)
-	} else if recordProcessErr {
+	case recordProcessErr:
 		metrics.RecordRunnerError("process_error", model)
 	}
 }
