@@ -77,7 +77,7 @@ func NewServer(handler *ToolHandler, dispatcher ...PromptDispatcher) *Server {
 func (s *Server) registerTools() {
 	mcp.AddTool(s.mcpServer, &mcp.Tool{
 		Name:        "schedule_recurring",
-		Description: "Register a persistent recurring schedule. Fresh Discord threads will be created in the target channel on each run.",
+		Description: "Register a persistent recurring schedule for unconditional user-facing messages on every tick. Fresh Discord threads will be created in the target channel on each run.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args ScheduleRecurringArgs) (*mcp.CallToolResult, ScheduleRecurringOutput, error) {
 		out, err := s.handler.ScheduleRecurring(ctx, args)
 		if err == nil {
@@ -99,7 +99,7 @@ func (s *Server) registerTools() {
 
 	mcp.AddTool(s.mcpServer, &mcp.Tool{
 		Name:        "schedule_once",
-		Description: "Register a persistent one-shot reminder that triggers once at a designated time or relative duration.",
+		Description: "Register a persistent one-shot reminder that triggers once at a designated time or relative duration for one-time delayed reminders.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args ScheduleOnceArgs) (*mcp.CallToolResult, ScheduleOnceOutput, error) {
 		out, err := s.handler.ScheduleOnce(ctx, args)
 		if err == nil {
@@ -110,7 +110,7 @@ func (s *Server) registerTools() {
 
 	mcp.AddTool(s.mcpServer, &mcp.Tool{
 		Name:        "list_schedules",
-		Description: "List all active recurring schedules and pending reminders.",
+		Description: "List all active recurring schedules and pending reminders. Note: event watches are listed via list_event_watches.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args ListSchedulesArgs) (*mcp.CallToolResult, ListSchedulesOutput, error) {
 		out, err := s.handler.ListSchedules(ctx, args)
 		if err != nil {
@@ -145,9 +145,9 @@ func (s *Server) registerTools() {
 
 	mcp.AddTool(s.mcpServer, &mcp.Tool{
 		Name:        "schedule_heartbeat",
-		Description: "Register a persistent heartbeat monitoring schedule evaluated periodically by Haro.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
-		res, err := HandleScheduleHeartbeat(ctx, s.handler.db, s.handler.timezone, args)
+		Description: "Register a persistent heartbeat monitoring schedule evaluated periodically by Haro for silent background polling and edge-triggered state tracking (such as flight status, permit updates, or external API watches) that only messages Discord when state materially changes, whereas schedule_recurring is for unconditional user-facing messages on every tick and schedule_once is for one-time delayed reminders.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args ScheduleHeartbeatArgs) (*mcp.CallToolResult, any, error) {
+		res, err := HandleScheduleHeartbeat(ctx, s.handler.db, s.handler.timezone, args.toMap())
 		if err == nil {
 			s.InvalidateSchedulesCache()
 		}
@@ -157,8 +157,8 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcpServer, &mcp.Tool{
 		Name:        "update_heartbeat",
 		Description: "Update an existing heartbeat monitoring schedule.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
-		res, err := HandleUpdateHeartbeat(ctx, s.handler.db, args)
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args UpdateHeartbeatArgs) (*mcp.CallToolResult, any, error) {
+		res, err := HandleUpdateHeartbeat(ctx, s.handler.db, args.toMap())
 		if err == nil {
 			s.InvalidateSchedulesCache()
 		}
@@ -168,28 +168,28 @@ func (s *Server) registerTools() {
 	mcp.AddTool(s.mcpServer, &mcp.Tool{
 		Name:        "watch_event",
 		Description: "Register a deterministic one-shot event watch trigger fired when an external event occurs.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args WatchEventArgs) (*mcp.CallToolResult, any, error) {
 		var extraSources []string
 		if s.handler != nil && s.handler.cfg != nil {
 			extraSources = s.handler.cfg.ExtraEventSources
 		}
-		res, err := HandleWatchEvent(ctx, s.handler.db, args, extraSources...)
+		res, err := HandleWatchEvent(ctx, s.handler.db, args.toMap(), extraSources...)
 		return res, nil, err
 	})
 
 	mcp.AddTool(s.mcpServer, &mcp.Tool{
 		Name:        "list_event_watches",
 		Description: "List active deterministic event watch triggers.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
-		res, err := HandleListEventWatches(ctx, s.handler.db, args)
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args ListEventWatchesArgs) (*mcp.CallToolResult, any, error) {
+		res, err := HandleListEventWatches(ctx, s.handler.db, args.toMap())
 		return res, nil, err
 	})
 
 	mcp.AddTool(s.mcpServer, &mcp.Tool{
 		Name:        "cancel_event_watch",
 		Description: "Cancel an active deterministic event watch trigger by watch ID.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, args map[string]any) (*mcp.CallToolResult, any, error) {
-		res, err := HandleCancelEventWatch(ctx, s.handler.db, args)
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args CancelEventWatchArgs) (*mcp.CallToolResult, any, error) {
+		res, err := HandleCancelEventWatch(ctx, s.handler.db, args.toMap())
 		return res, nil, err
 	})
 }
