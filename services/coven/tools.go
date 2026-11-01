@@ -24,7 +24,7 @@ type MemorySearchOutput struct {
 
 // MemoryStoreArgs defines inputs for the memory_store MCP tool.
 type MemoryStoreArgs struct {
-	FactText     string `json:"fact_text" jsonschema:"The fact text to persist or update."`
+	FactText     string `json:"fact_text" jsonschema:"The fact text to persist or update. Must satisfy admission gate constraints (15 to 300 characters, standalone third-person durable fact, no URLs, markdown code blocks, or ephemeral turn chatter). Facts with >=0.85 cosine similarity to an existing memory automatically reinforce it."`
 	SupersedesID int64  `json:"supersedes_id,omitempty" jsonschema:"Optional ID of an existing fact to overwrite and supersede."`
 }
 

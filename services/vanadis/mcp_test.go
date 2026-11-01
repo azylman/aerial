@@ -74,6 +74,22 @@ func TestVanadisMCP_HTTPTransport(t *testing.T) {
 			wantSubstr: "get_build",
 		},
 		{
+			name:       "tools list rpc required fields",
+			method:     http.MethodPost,
+			path:       "/mcp",
+			body:       `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`,
+			wantStatus: http.StatusOK,
+			wantSubstr: `"required":["build_id"]`,
+		},
+		{
+			name:       "call tool missing required build_id returns schema error",
+			method:     http.MethodPost,
+			path:       "/mcp",
+			body:       `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"update_build","arguments":{"title":"New Title"}}}`,
+			wantStatus: http.StatusOK,
+			wantSubstr: `missing properties: [\"build_id\"]`,
+		},
+		{
 			name:       "vanadis_ prefix normalization on tools call",
 			method:     http.MethodPost,
 			path:       "/mcp",
@@ -297,7 +313,7 @@ func TestVanadisMCP_Tools(t *testing.T) {
 		{
 			name:        "update_build missing build_id",
 			toolName:    "update_build",
-			args:        `{"title":"New Title"}`,
+			args:        `{"build_id":"   ","title":"New Title"}`,
 			wantToolErr: true,
 			wantSubstr:  "build_id is required",
 		},
@@ -328,7 +344,7 @@ func TestVanadisMCP_Tools(t *testing.T) {
 		{
 			name:        "update_chunk missing build_id or chunk_ref",
 			toolName:    "update_chunk",
-			args:        `{"build_id":"build-mcp-1"}`,
+			args:        `{"build_id":"build-mcp-1","chunk_ref":""}`,
 			wantToolErr: true,
 			wantSubstr:  "build_id and chunk_ref are required",
 		},
@@ -359,7 +375,7 @@ func TestVanadisMCP_Tools(t *testing.T) {
 		{
 			name:        "append_chunk missing build_id",
 			toolName:    "append_chunk",
-			args:        `{"chunks":[{"title":"C3","instructions":"I3"}]}`,
+			args:        `{"build_id":"","chunks":[{"title":"C3","instructions":"I3"}]}`,
 			wantToolErr: true,
 			wantSubstr:  "build_id is required",
 		},
@@ -390,7 +406,7 @@ func TestVanadisMCP_Tools(t *testing.T) {
 		{
 			name:        "remove_chunk missing args",
 			toolName:    "remove_chunk",
-			args:        `{"build_id":"build-mcp-1"}`,
+			args:        `{"build_id":"build-mcp-1","chunk_ref":""}`,
 			wantToolErr: true,
 			wantSubstr:  "build_id and chunk_ref are required",
 		},

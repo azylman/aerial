@@ -50,6 +50,18 @@ func TestToolHandler_InitiateCall(t *testing.T) {
 			wantMode: "conversation",
 		},
 		{
+			name: "valid initiate call with partial brief",
+			args: InitiateCallArgs{
+				To:      "+15105550199",
+				Message: "Hello, this is an automated confirmation call.",
+				Brief: CallBrief{
+					Context: "Context details",
+				},
+			},
+			wantErr:  false,
+			wantMode: "conversation",
+		},
+		{
 			name: "valid initiate call with notify mode",
 			args: InitiateCallArgs{
 				To:      "+15105550199",
@@ -466,7 +478,7 @@ func TestMCPStreamableHTTPHandler(t *testing.T) {
 		},
 		{
 			name:     "tools call initiate_call",
-			body:     `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"initiate_call","arguments":{"to":"+15105550199","message":"hello"}}}`,
+			body:     `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"initiate_call","arguments":{"to":"+15105550199","message":"hello","brief":{"context":"reservation details"}}}}`,
 			wantCode: http.StatusOK,
 			wantSub:  `"call_id"`,
 		},

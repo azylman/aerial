@@ -1732,6 +1732,14 @@ func TestServer_Endpoints(t *testing.T) {
 			body:       `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"memory_forget","arguments":{"fact_id":1}}}`,
 			wantStatus: http.StatusOK,
 		},
+		{
+			name:       "MCPToolsListDocumentsAdmissionGate",
+			method:     http.MethodPost,
+			path:       "/mcp",
+			body:       `{"jsonrpc":"2.0","id":4,"method":"tools/list","params":{}}`,
+			wantStatus: http.StatusOK,
+			wantSubstr: "admission gate constraints",
+		},
 	}
 
 	for _, tc := range tests {
