@@ -61,7 +61,7 @@ type MCPGetChunkOutput struct {
 
 // MCPUpdateBuildArgs defines arguments for update_build tool.
 type MCPUpdateBuildArgs struct {
-	BuildID       string `json:"build_id,omitempty" jsonschema:"Vanadis build identifier to mutate."`
+	BuildID       string `json:"build_id" jsonschema:"Vanadis build identifier to mutate."`
 	Title         string `json:"title,omitempty" jsonschema:"New build title replacing existing title."`
 	Objective     string `json:"objective,omitempty" jsonschema:"New build objective replacing existing objective."`
 	SharedContext string `json:"shared_context,omitempty" jsonschema:"New shared build context replacing existing context."`
@@ -75,8 +75,8 @@ type MCPUpdateBuildOutput struct {
 
 // MCPUpdateChunkArgs defines arguments for update_chunk tool.
 type MCPUpdateChunkArgs struct {
-	BuildID       string   `json:"build_id,omitempty" jsonschema:"Parent Vanadis build identifier containing the chunk."`
-	ChunkRef      string   `json:"chunk_ref,omitempty" jsonschema:"Chunk identifier or 0-based chunk_index of the chunk to mutate."`
+	BuildID       string   `json:"build_id" jsonschema:"Parent Vanadis build identifier containing the chunk."`
+	ChunkRef      string   `json:"chunk_ref" jsonschema:"Chunk identifier or 0-based chunk_index of the chunk to mutate."`
 	Repo          string   `json:"repo,omitempty" jsonschema:"Target repository for the chunk."`
 	Title         string   `json:"title,omitempty" jsonschema:"New title for the chunk."`
 	Instructions  string   `json:"instructions,omitempty" jsonschema:"New instructions for the chunk."`
@@ -95,8 +95,8 @@ type MCPUpdateChunkOutput struct {
 type MCPCreateChunkItem struct {
 	ID                 string   `json:"id,omitempty" jsonschema:"Optional unique chunk identifier (1..120 chars)."`
 	Repo               string   `json:"repo,omitempty" jsonschema:"Optional target repository override."`
-	Title              string   `json:"title,omitempty" jsonschema:"Chunk title."`
-	Instructions       string   `json:"instructions,omitempty" jsonschema:"Chunk instructions."`
+	Title              string   `json:"title" jsonschema:"Chunk title."`
+	Instructions       string   `json:"instructions" jsonschema:"Chunk instructions."`
 	TargetFiles        []string `json:"target_files,omitempty" jsonschema:"Target files for this chunk."`
 	TargetSymbols      []string `json:"target_symbols,omitempty" jsonschema:"Target symbols for this chunk."`
 	Effort             string   `json:"effort,omitempty" jsonschema:"Effort level ('low', 'medium', 'high')."`
@@ -105,8 +105,8 @@ type MCPCreateChunkItem struct {
 
 // MCPAppendChunkArgs defines arguments for append_chunk tool.
 type MCPAppendChunkArgs struct {
-	BuildID string               `json:"build_id,omitempty" jsonschema:"Vanadis build identifier to append chunks to."`
-	Chunks  []MCPCreateChunkItem `json:"chunks,omitempty" jsonschema:"List of new pending chunks to append."`
+	BuildID string               `json:"build_id" jsonschema:"Vanadis build identifier to append chunks to."`
+	Chunks  []MCPCreateChunkItem `json:"chunks" jsonschema:"List of new pending chunks to append."`
 }
 
 // MCPAppendChunkOutput defines output for append_chunk tool.
@@ -118,8 +118,8 @@ type MCPAppendChunkOutput struct {
 
 // MCPRemoveChunkArgs defines arguments for remove_chunk tool.
 type MCPRemoveChunkArgs struct {
-	BuildID  string `json:"build_id,omitempty" jsonschema:"Parent Vanadis build identifier containing the chunk."`
-	ChunkRef string `json:"chunk_ref,omitempty" jsonschema:"Chunk identifier or 0-based chunk_index to remove."`
+	BuildID  string `json:"build_id" jsonschema:"Parent Vanadis build identifier containing the chunk."`
+	ChunkRef string `json:"chunk_ref" jsonschema:"Chunk identifier or 0-based chunk_index to remove."`
 }
 
 // MCPRemoveChunkOutput defines output for remove_chunk tool.

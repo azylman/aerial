@@ -36,7 +36,7 @@ func NewToolHandler(cfg *Config, store Store, twilio TwilioClient, sessionMgr *C
 type InitiateCallArgs struct {
 	To               string    `json:"to" jsonschema:"Destination phone number in E.164 format"`
 	Message          string    `json:"message,omitempty" jsonschema:"Opening spoken greeting or task instruction"`
-	Mode             string    `json:"mode,omitempty" jsonschema:"Operating mode: conversation or notify"`
+	Mode             string    `json:"mode,omitempty" jsonschema:"Operating mode: 'conversation' for interactive bidirectional dialog or 'notify' for one-way spoken announcement (default 'conversation')"`
 	DTMFSequence     string    `json:"dtmf_sequence,omitempty" jsonschema:"Optional pre-connect DTMF sequence"`
 	DiscordChannelID string    `json:"discord_channel_id,omitempty" jsonschema:"Target Discord channel for transcripts and updates"`
 	DiscordThreadID  string    `json:"discord_thread_id,omitempty" jsonschema:"Target Discord thread for updates"`
@@ -54,7 +54,7 @@ type InitiateCallOutput struct {
 type SteerCallArgs struct {
 	CallID  string `json:"call_id" jsonschema:"Active call ID to steer"`
 	Message string `json:"message" jsonschema:"Guidance or message text to inject (max 500 chars)"`
-	Mode    string `json:"mode,omitempty" jsonschema:"Steer mode: guidance or say"`
+	Mode    string `json:"mode,omitempty" jsonschema:"Steer mode: 'guidance' to instruct the assistant on behavior/strategy without speaking verbatim, or 'say' to speak the message verbatim out loud (default 'guidance')"`
 }
 
 // SteerCallOutput defines return payload for steer_call.
@@ -86,7 +86,7 @@ type GetCallStatusOutput struct {
 
 // ListCallsArgs defines input arguments for list_calls.
 type ListCallsArgs struct {
-	Limit int `json:"limit,omitempty" jsonschema:"Maximum calls to return (default 20)"`
+	Limit int `json:"limit,omitempty" jsonschema:"Maximum calls to return (default 20, max 50; values <=0 or >50 clamp to 20)"`
 }
 
 // ListCallsOutput defines return payload for list_calls.
@@ -110,7 +110,7 @@ type SendSMSOutput struct {
 
 // ListSMSArgs defines input arguments for list_sms.
 type ListSMSArgs struct {
-	Limit int `json:"limit,omitempty" jsonschema:"Maximum messages to return (default 20)"`
+	Limit int `json:"limit,omitempty" jsonschema:"Maximum messages to return (default 20, max 50; values <=0 or >50 clamp to 20)"`
 }
 
 // ListSMSOutput defines return payload for list_sms.

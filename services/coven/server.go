@@ -62,7 +62,7 @@ func (s *Server) registerTools() {
 
 	mcp.AddTool(s.mcpServer, &mcp.Tool{
 		Name:        "memory_store",
-		Description: "Persist, update, or reinforce a semantic fact in long-term memory.",
+		Description: "Persist, update, or reinforce a semantic fact in long-term memory. Subject to admission gate constraints (15 to 300 characters, standalone third-person durable fact, no URLs, markdown code blocks, or ephemeral turn chatter). Facts with >=0.85 cosine similarity to an existing memory automatically reinforce it.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args MemoryStoreArgs) (*mcp.CallToolResult, MemoryStoreOutput, error) {
 		out, err := s.handler.MemoryStore(ctx, args)
 		return nil, out, err
