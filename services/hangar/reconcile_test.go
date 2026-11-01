@@ -799,6 +799,52 @@ func TestNomadJobReconciliation_TableDriven(t *testing.T) {
 				}
 			})
 		}
+
+		var nilDaemon *SyncDaemon
+		nilDaemon.SweepOrphanedNomadJobs(ctx)
+		(&SyncDaemon{repos: []string{"", t.TempDir()}}).SweepOrphanedNomadJobs(ctx)
+
+		sweepStatusOut := "ID Type Priority Status Submit Date\nbrain service 50 running 2026-10-31\npending-rename service 50 running 2026-10-31\nwebhooks-router service 50 running 2026-10-30\ncoverage-ingest/periodic-123 batch 50 running 2026-10-31\ndead-job batch 50 dead 2026-10-30\n"
+		sweepCases := []struct {
+			name, statusOut string
+			statusErr       error
+			pending         []NomadFileChange
+			wantStopped     []string
+		}{
+			{"purges active orphan while preserving defined and pending jobs", sweepStatusOut, nil, []NomadFileChange{{JobName: "pending-rename", Action: "delete"}}, []string{"webhooks-router"}},
+			{"nomad job status error logs warning and skips stop", "connection refused", errors.New("status failed"), nil, nil},
+		}
+		for _, tc := range sweepCases {
+			t.Run(tc.name, func(t *testing.T) {
+				mu.Lock()
+				stoppedJobs = nil
+				mu.Unlock()
+				dSweep := newNomadReconcileDaemon(func(cfg *DaemonConfig) {
+					cfg.Repos, cfg.ConfigDir, cfg.ComposeDir = []string{"", repoA, repoB}, repoA, repoB
+					cfg.NomadExecutor = func(ctx context.Context, args ...string) ([]byte, []byte, error) {
+						mu.Lock()
+						defer mu.Unlock()
+						if len(args) >= 2 && args[0] == "job" && args[1] == "status" {
+							return []byte(tc.statusOut), nil, tc.statusErr
+						}
+						if len(args) >= 3 && args[0] == "job" && args[1] == "stop" {
+							stoppedJobs = append(stoppedJobs, args[len(args)-1])
+						}
+						return []byte("OK"), nil, nil
+					}
+				})
+				if len(tc.pending) > 0 {
+					dSweep.recordPendingNomadChanges(repoB, tc.pending)
+				}
+				dSweep.SweepOrphanedNomadJobs(ctx)
+				mu.Lock()
+				got := append([]string(nil), stoppedJobs...)
+				mu.Unlock()
+				if len(got) != len(tc.wantStopped) || (len(got) > 0 && got[0] != tc.wantStopped[0]) {
+					t.Fatalf("stopped = %v, want %v", got, tc.wantStopped)
+				}
+			})
+		}
 	})
 
 	t.Run("ReconcilePendingNomad_table", func(t *testing.T) {

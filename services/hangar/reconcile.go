@@ -507,6 +507,57 @@ func (d *SyncDaemon) ReconcileNomadChanges(ctx context.Context, repoPath string,
 	return err
 }
 
+func (d *SyncDaemon) collectDefinedNomadJobs() map[string]bool {
+	defined := make(map[string]bool)
+	var dirs []string
+	for _, repo := range d.candidateJobRepos() {
+		if repo == "" {
+			continue
+		}
+		cleanRepo := filepath.Clean(repo)
+		dirs = append(dirs, filepath.Join(cleanRepo, "jobs"), filepath.Join(cleanRepo, "nomad", "jobs"))
+	}
+	walkNomadJobFiles(dirs, func(_, _, name, _ string) bool {
+		if name != "" {
+			defined[name] = true
+		}
+		return true
+	})
+	return defined
+}
+
+// SweepOrphanedNomadJobs stops and purges any active top-level Nomad job that has no
+// corresponding .nomad definition across candidate repositories (and is not pending in-memory teardown).
+func (d *SyncDaemon) SweepOrphanedNomadJobs(ctx context.Context) {
+	if d == nil {
+		return
+	}
+	defined := d.collectDefinedNomadJobs()
+	if len(defined) == 0 {
+		return
+	}
+	d.pendingNomadMu.Lock()
+	for _, evt := range d.pendingNomadChanges {
+		for _, ch := range evt.Changes {
+			if ch.JobName != "" {
+				defined[ch.JobName] = true
+			}
+		}
+	}
+	d.pendingNomadMu.Unlock()
+
+	out, errBytes, err := d.getNomadExecutor()(ctx, "job", "status")
+	if err != nil {
+		log.Printf("[Hangar:Nomad] Warning: failed to list Nomad jobs for orphan sweep: %s (%v)", SanitizeLog(strings.TrimSpace(string(append(out, errBytes...)))), err)
+		return
+	}
+	for _, jobID := range ParseActiveNomadJobs(string(out)) {
+		if !defined[jobID] {
+			d.stopDeletedNomadJob(ctx, "[Hangar:Nomad]", "", jobID)
+		}
+	}
+}
+
 func (d *SyncDaemon) ExecuteNomadTeardowns(ctx context.Context, pending []NomadChangeEvent) {
 	if len(pending) == 0 {
 		return
@@ -552,6 +603,7 @@ func (d *SyncDaemon) executeDebouncedReconcileCycle(ctx context.Context) {
 	// Phase 1: Teardowns for any deleted Nomad jobs (releases ports)
 	pendingDeletes := d.drainPendingNomadDeletes()
 	d.ExecuteNomadTeardowns(ctx, pendingDeletes)
+	d.SweepOrphanedNomadJobs(ctx)
 
 	// Phase 2: Check for Nomad server daemon config changes
 	if d.consumePendingNomadServerRestart() {

@@ -645,6 +645,7 @@ func RunDaemon(ctx context.Context, cfg DaemonConfig) error {
 		if _, err := daemon.TriggerSync(); err != nil {
 			log.Printf("[Hangar] Initial startup sync completed with notice: %v", err)
 		}
+		daemon.SweepOrphanedNomadJobs(ctx)
 	}()
 
 	mux := SetupMux(daemon)
