@@ -117,7 +117,7 @@ func FormatMemoryContext(facts []Fact) string {
 	var sb strings.Builder
 	sb.WriteString("<retrieved_memory>\n")
 	for _, f := range facts {
-		sb.WriteString(fmt.Sprintf("- [id:%d] %s\n", f.ID, f.FactText))
+		fmt.Fprintf(&sb, "- [id:%d] %s\n", f.ID, f.FactText)
 	}
 	sb.WriteString("</retrieved_memory>\n")
 	return sb.String()

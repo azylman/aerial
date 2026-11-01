@@ -194,7 +194,7 @@ func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, he
 }
 
 func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo string, runID int64, headBranch, conclusion, headSHA, targetID string, prNum int) error {
-	if s.dispatcher == nil || conclusion != "success" || !(headBranch == "main" || strings.HasPrefix(headBranch, "refs/heads/main")) {
+	if s.dispatcher == nil || conclusion != "success" || (headBranch != "main" && !strings.HasPrefix(headBranch, "refs/heads/main")) {
 		return nil
 	}
 	images, err := s.resolveWorkflowRunImages(ctx, repo, runID)

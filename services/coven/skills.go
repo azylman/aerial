@@ -111,11 +111,12 @@ func ParseSkillFrontmatter(raw string) (name, description, body string, err erro
 	}
 
 	rest := cleaned[3:]
-	if strings.HasPrefix(rest, "\r\n") {
+	switch {
+	case strings.HasPrefix(rest, "\r\n"):
 		rest = rest[2:]
-	} else if strings.HasPrefix(rest, "\n") {
+	case strings.HasPrefix(rest, "\n"):
 		rest = rest[1:]
-	} else {
+	default:
 		return "", "", "", fmt.Errorf("invalid frontmatter opening delimiter")
 	}
 
@@ -133,11 +134,12 @@ func ParseSkillFrontmatter(raw string) (name, description, body string, err erro
 		if after == "" || strings.HasPrefix(after, "\n") || strings.HasPrefix(after, "\r\n") {
 			closingIdx = absIdx
 			fmContent = rest[:closingIdx]
-			if strings.HasPrefix(after, "\r\n") {
+			switch {
+			case strings.HasPrefix(after, "\r\n"):
 				body = strings.TrimSpace(after[2:])
-			} else if strings.HasPrefix(after, "\n") {
+			case strings.HasPrefix(after, "\n"):
 				body = strings.TrimSpace(after[1:])
-			} else {
+			default:
 				body = ""
 			}
 			break
@@ -479,13 +481,13 @@ func buildSkillDesignerPrompt(batch SkillConsolidationBatch) string {
 	sb.WriteString("You are an expert AI skill designer for the Aerial assistant system.\n")
 	sb.WriteString("Your task is to synthesize procedural knowledge extracted from actual runtime trajectory friction into clean, robust SKILL.md guidelines.\n\n")
 
-	sb.WriteString(fmt.Sprintf("Action: %s\n", batch.Action))
-	sb.WriteString(fmt.Sprintf("Target Domain: %s\n", batch.Domain))
+	fmt.Fprintf(&sb, "Action: %s\n", batch.Action)
+	fmt.Fprintf(&sb, "Target Domain: %s\n", batch.Domain)
 
 	if batch.Action == "EDIT" && batch.TargetSkill != nil {
-		sb.WriteString(fmt.Sprintf("Target Skill Name: %s\n", batch.TargetSkill.Name))
-		sb.WriteString(fmt.Sprintf("Target Skill RelPath: %s\n", batch.TargetSkill.RelPath))
-		sb.WriteString(fmt.Sprintf("Target Skill Description: %s\n\n", batch.TargetSkill.Description))
+		fmt.Fprintf(&sb, "Target Skill Name: %s\n", batch.TargetSkill.Name)
+		fmt.Fprintf(&sb, "Target Skill RelPath: %s\n", batch.TargetSkill.RelPath)
+		fmt.Fprintf(&sb, "Target Skill Description: %s\n\n", batch.TargetSkill.Description)
 		sb.WriteString("Existing SKILL.md Content:\n```markdown\n")
 		sb.WriteString(batch.TargetSkill.RawContent)
 		sb.WriteString("\n```\n\n")
@@ -493,21 +495,21 @@ func buildSkillDesignerPrompt(batch SkillConsolidationBatch) string {
 
 	sb.WriteString("Procedural Friction Candidates to Consolidate:\n")
 	for i, c := range batch.Candidates {
-		sb.WriteString(fmt.Sprintf("Candidate #%d (ID: %d):\n", i+1, c.ID))
+		fmt.Fprintf(&sb, "Candidate #%d (ID: %d):\n", i+1, c.ID)
 		if c.LoadedSkill != "" {
-			sb.WriteString(fmt.Sprintf("  Loaded Skill: %s\n", c.LoadedSkill))
+			fmt.Fprintf(&sb, "  Loaded Skill: %s\n", c.LoadedSkill)
 		}
-		sb.WriteString(fmt.Sprintf("  Trigger: %s\n", c.Trigger))
+		fmt.Fprintf(&sb, "  Trigger: %s\n", c.Trigger)
 		if len(c.Steps) > 0 {
 			sb.WriteString("  Observed Steps:\n")
 			for _, step := range c.Steps {
-				sb.WriteString(fmt.Sprintf("    - %s\n", step))
+				fmt.Fprintf(&sb, "    - %s\n", step)
 			}
 		}
 		if len(c.Avoid) > 0 {
 			sb.WriteString("  Avoid / Friction:\n")
 			for _, avoid := range c.Avoid {
-				sb.WriteString(fmt.Sprintf("    - %s\n", avoid))
+				fmt.Fprintf(&sb, "    - %s\n", avoid)
 			}
 		}
 	}

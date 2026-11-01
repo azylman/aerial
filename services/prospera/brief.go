@@ -130,11 +130,11 @@ func BuildSystemPrompt(brief CallBrief, mode CallMode, ownerInstructions []strin
 	sb.WriteString("Speak like a warm, natural human on a live phone call—use a relaxed conversational cadence, natural contractions (like \"I'm\", \"we're\", \"I'd\"), expressive intonation, and everyday phrasing rather than stiff or scripted readback. Keep spoken turns brief (1-2 short sentences) suited for real-time telephone conversation, and never recite the task brief verbatim; open with a friendly, casual hook and let the other person respond before sharing extra details.\n\n")
 
 	if brief.Language != "" {
-		sb.WriteString(fmt.Sprintf("SPOKEN LANGUAGE: %s\n\n", brief.Language))
+		fmt.Fprintf(&sb, "SPOKEN LANGUAGE: %s\n\n", brief.Language)
 	}
 
 	if brief.Identity.Introduction != "" {
-		sb.WriteString(fmt.Sprintf("IDENTITY INTRODUCTION: %s\n", brief.Identity.Introduction))
+		fmt.Fprintf(&sb, "IDENTITY INTRODUCTION: %s\n", brief.Identity.Introduction)
 	}
 	switch brief.Identity.Disclose {
 	case "", "when-asked":
@@ -144,21 +144,21 @@ func BuildSystemPrompt(brief CallBrief, mode CallMode, ownerInstructions []strin
 			sb.WriteString("AI IDENTITY DISCLOSURE POLICY: when-asked (Progressive disclosure: if asked who is calling or for your name, state that your name is Aerial and phrase your role naturally for the situation—for example, '<Name>'s assistant' when the person's name has been given or is in the permitted disclosures/context, 'the homeowner's assistant' for a contractor, or simply that you are an assistant helping schedule or check on this—never literally say 'the owner's assistant' where it sounds unnatural like at a restaurant or dentist. Only disclose that you are an AI assistant if explicitly asked whether you are an AI or automated system.)\n\n")
 		}
 	default:
-		sb.WriteString(fmt.Sprintf("AI IDENTITY DISCLOSURE POLICY: %s\n\n", brief.Identity.Disclose))
+		fmt.Fprintf(&sb, "AI IDENTITY DISCLOSURE POLICY: %s\n\n", brief.Identity.Disclose)
 	}
 
 	sb.WriteString("CALLER PERSPECTIVE & PARTY FRAMING (NO FIRST-PERSON IMPERSONATION): Never impersonate the person you are calling for or claim their personal, medical, or family relationships as your own (never say 'my wife', 'my husband', 'my partner', 'my kids', or 'my house'). Even when using progressive disclosure without introducing yourself upfront, always frame household, guest, or personal details using natural neutral or third-person attribution (for example, 'the appointment is under <Name>', 'the property has a side gate', or 'one of the people in the group...').\n\n")
 
-	sb.WriteString(fmt.Sprintf("TASK OBJECTIVE:\n%s\n\n", brief.Task))
+	fmt.Fprintf(&sb, "TASK OBJECTIVE:\n%s\n\n", brief.Task)
 
 	if brief.Context != "" {
-		sb.WriteString(fmt.Sprintf("BACKGROUND CONTEXT:\n%s\n\n", brief.Context))
+		fmt.Fprintf(&sb, "BACKGROUND CONTEXT:\n%s\n\n", brief.Context)
 	}
 
 	if len(brief.Disclosures) > 0 {
 		sb.WriteString("PERMITTED DISCLOSURES:\n")
 		for _, d := range brief.Disclosures {
-			sb.WriteString(fmt.Sprintf("- %s\n", d))
+			fmt.Fprintf(&sb, "- %s\n", d)
 		}
 		sb.WriteString("\n")
 	}
@@ -174,7 +174,7 @@ func BuildSystemPrompt(brief CallBrief, mode CallMode, ownerInstructions []strin
 	sb.WriteString("MANDATORY TOOL LOOKUP (NO GUESSING): Never guess, assume, or default to 'no' or 'none' when asked about any detail not explicitly stated in TASK OBJECTIVE, BACKGROUND CONTEXT, or PERMITTED DISCLOSURES. If the task is strictly for a specific date or time and does not authorize alternative dates, politely decline other dates directly without calling 'consult_calendar'; only call 'consult_calendar' when the brief allows date/time flexibility or requires checking schedule availability before confirming a proposed slot. Before answering any question about household details, addresses, preferences, restrictions, or background facts not listed above, you MUST call 'consult_memory' first and answer strictly from the returned facts using the neutral or third-person framing rule above.\n\n")
 
 	if brief.SuccessCriteria != "" {
-		sb.WriteString(fmt.Sprintf("SUCCESS CRITERIA (CONFIRM BEFORE ENDING):\n%s\n\n", brief.SuccessCriteria))
+		fmt.Fprintf(&sb, "SUCCESS CRITERIA (CONFIRM BEFORE ENDING):\n%s\n\n", brief.SuccessCriteria)
 	}
 
 	switch mode {
@@ -189,7 +189,7 @@ func BuildSystemPrompt(brief CallBrief, mode CallMode, ownerInstructions []strin
 	if len(ownerInstructions) > 0 {
 		sb.WriteString("LIVE OWNER GUIDANCE:\n")
 		for _, instr := range ownerInstructions {
-			sb.WriteString(fmt.Sprintf("- %s\n", instr))
+			fmt.Fprintf(&sb, "- %s\n", instr)
 		}
 		sb.WriteString("\n")
 	}

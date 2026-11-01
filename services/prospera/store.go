@@ -448,7 +448,8 @@ func (s *PGStore) UpdateCallState(ctx context.Context, callID, state, endReason,
 
 	var query string
 	var args []any
-	if setEnded {
+	switch {
+	case setEnded:
 		query = `UPDATE voice_calls SET 
 			state = $1, 
 			end_reason = CASE WHEN $2 != '' THEN $2 ELSE end_reason END, 
@@ -457,7 +458,7 @@ func (s *PGStore) UpdateCallState(ctx context.Context, callID, state, endReason,
 			updated_at = $5
 			WHERE call_id = $6`
 		args = []any{state, endReason, answeredBy, now, now, callID}
-	} else if state == "in-progress" {
+	case state == "in-progress":
 		query = `UPDATE voice_calls SET 
 			state = $1, 
 			end_reason = CASE WHEN $2 != '' THEN $2 ELSE end_reason END, 
@@ -466,7 +467,7 @@ func (s *PGStore) UpdateCallState(ctx context.Context, callID, state, endReason,
 			updated_at = $5
 			WHERE call_id = $6`
 		args = []any{state, endReason, answeredBy, now, now, callID}
-	} else {
+	default:
 		query = `UPDATE voice_calls SET 
 			state = $1, 
 			end_reason = CASE WHEN $2 != '' THEN $2 ELSE end_reason END, 

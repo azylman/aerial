@@ -35,7 +35,7 @@ func BuildPostCallSummaryPrompt(call *VoiceCall) string {
 			if role == "" {
 				role = "unknown"
 			}
-			sb.WriteString(fmt.Sprintf("[%s]: %s\n", role, cleaned))
+			fmt.Fprintf(&sb, "[%s]: %s\n", role, cleaned)
 		}
 	}
 
@@ -174,7 +174,7 @@ func (r *Reporter) FlushLiveTranscript(ctx context.Context, callID string) error
 		}
 		text := strings.TrimSpace(turn.Text)
 		if text != "" {
-			sb.WriteString(fmt.Sprintf("**%s**: %s\n", speaker, text))
+			fmt.Fprintf(&sb, "**%s**: %s\n", speaker, text)
 		}
 	}
 
@@ -544,11 +544,11 @@ func (r *Reporter) DeliverInboundSMS(ctx context.Context, msg VoiceMessage) erro
 	channel := r.resolveDiscordChannel("")
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("💬 **Inbound SMS Received**\n**From**: %s | **To**: %s\n\n%s", msg.FromNumber, msg.ToNumber, msg.Body))
+	fmt.Fprintf(&sb, "💬 **Inbound SMS Received**\n**From**: %s | **To**: %s\n\n%s", msg.FromNumber, msg.ToNumber, msg.Body)
 	if len(msg.MediaURLs) > 0 {
 		sb.WriteString("\n\n**Media URLs**:\n")
 		for _, u := range msg.MediaURLs {
-			sb.WriteString(fmt.Sprintf("- %s\n", u))
+			fmt.Fprintf(&sb, "- %s\n", u)
 		}
 	}
 

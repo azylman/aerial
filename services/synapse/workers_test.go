@@ -706,15 +706,16 @@ func TestRiverWorkers(t *testing.T) {
 					},
 				}
 				workCtx := ctx
-				if tc.workerType == "discord_ingress_4xx" || tc.workerType == "discord_ingress_zero_delay" || tc.workerType == "discord_ingress_large_delay" {
+				switch tc.workerType {
+				case "discord_ingress_4xx", "discord_ingress_zero_delay", "discord_ingress_large_delay":
 					mockDisp.discordMessageErr = errors.New("status 400 bad request")
-				} else if tc.workerType == "discord_ingress_retry" {
+				case "discord_ingress_retry":
 					mockDisp.discordMessageFailCount = 1
 					mockDisp.discordMessageErr = errors.New("status 503 unavailable")
-				} else if tc.workerType == "discord_ingress_ttl" {
+				case "discord_ingress_ttl":
 					job.CreatedAt = time.Now().Add(-31 * time.Minute)
 					mockDisp.discordMessageErr = errors.New("status 500 error")
-				} else if tc.workerType == "discord_ingress_ctx_cancel" {
+				case "discord_ingress_ctx_cancel":
 					cancCtx, cancel := context.WithCancel(ctx)
 					cancel()
 					workCtx = cancCtx

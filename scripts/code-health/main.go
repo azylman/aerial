@@ -70,7 +70,7 @@ func main() {
 
 func writef(w io.Writer, format string, args ...any) {
 	var buf bytes.Buffer
-	buf.WriteString(fmt.Sprintf(format, args...))
+	fmt.Fprintf(&buf, format, args...)
 	if _, err := w.Write(buf.Bytes()); err != nil {
 		return
 	}

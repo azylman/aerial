@@ -528,13 +528,13 @@ func formatShortFrictionAlert(batch SkillConsolidationBatch) string {
 		}
 	}
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("⚡ **Recurring 1-Liner Friction Alert (%dx Repeats: %s)**\n", len(batch.Candidates), strings.Join(ids, ", ")))
-	sb.WriteString(fmt.Sprintf("- **Pattern**: %s\n", trigger))
+	fmt.Fprintf(&sb, "⚡ **Recurring 1-Liner Friction Alert (%dx Repeats: %s)**\n", len(batch.Candidates), strings.Join(ids, ", "))
+	fmt.Fprintf(&sb, "- **Pattern**: %s\n", trigger)
 	if len(steps) > 0 {
-		sb.WriteString(fmt.Sprintf("- **Observed Workaround**: %s\n", strings.Join(steps, "; ")))
+		fmt.Fprintf(&sb, "- **Observed Workaround**: %s\n", strings.Join(steps, "; "))
 	}
 	if len(avoid) > 0 {
-		sb.WriteString(fmt.Sprintf("- **Friction / Avoid**: %s\n", strings.Join(avoid, "; ")))
+		fmt.Fprintf(&sb, "- **Friction / Avoid**: %s\n", strings.Join(avoid, "; "))
 	}
 	sb.WriteString("Should we fix the underlying container/tooling or codify a rule?")
 	return sb.String()
@@ -561,7 +561,7 @@ func appendUniqueTrimmed(dst []string, seen map[string]bool, vals ...string) []s
 
 func writeBulletIfPresent(sb *strings.Builder, label string, items []string) {
 	if len(items) > 0 {
-		sb.WriteString(fmt.Sprintf("- **%s**: %s\n", label, strings.Join(items, "; ")))
+		fmt.Fprintf(sb, "- **%s**: %s\n", label, strings.Join(items, "; "))
 	}
 }
 
@@ -594,9 +594,9 @@ func formatManualReviewPRAlert(prNumber int, owner, repo string, changes []Skill
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("🛡️ **Manual Review Required: Procedural Skill PR [#%d](%s)** (auto-merge disabled)\n", prNumber, prURL))
+	fmt.Fprintf(&sb, "🛡️ **Manual Review Required: Procedural Skill PR [#%d](%s)** (auto-merge disabled)\n", prNumber, prURL)
 	if len(ids) > 0 || len(skills) > 0 {
-		sb.WriteString(fmt.Sprintf("- **Source Candidates**: %s (Protected Skill Context: %s)\n", strings.Join(ids, ", "), strings.Join(skills, ", ")))
+		fmt.Fprintf(&sb, "- **Source Candidates**: %s (Protected Skill Context: %s)\n", strings.Join(ids, ", "), strings.Join(skills, ", "))
 	}
 	writeBulletIfPresent(&sb, "Issue / Friction Pattern", triggers)
 	writeBulletIfPresent(&sb, "Observed Steps", steps)
@@ -615,9 +615,9 @@ func formatSkillCommitMessage(changes []SkillFileChange) string {
 		return fmt.Sprintf("feat(skills): %s\n\n%s", changes[0].CommitSummary, changes[0].RelPath)
 	}
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("feat(skills): update %d procedural skills\n\n", len(changes)))
+	fmt.Fprintf(&sb, "feat(skills): update %d procedural skills\n\n", len(changes))
 	for _, c := range changes {
-		sb.WriteString(fmt.Sprintf("- %s: %s\n", c.RelPath, c.CommitSummary))
+		fmt.Fprintf(&sb, "- %s: %s\n", c.RelPath, c.CommitSummary)
 	}
 	return sb.String()
 }
@@ -641,7 +641,7 @@ func formatSkillPRBody(changes []SkillFileChange, targetID string) string {
 
 	sb.WriteString("## Changes\n")
 	for _, c := range changes {
-		sb.WriteString(fmt.Sprintf("- **%s** `%s`: %s\n", c.Action, c.RelPath, c.CommitSummary))
+		fmt.Fprintf(&sb, "- **%s** `%s`: %s\n", c.Action, c.RelPath, c.CommitSummary)
 	}
 	sb.WriteString("\n## Verification\n")
 	sb.WriteString("- Frontmatter schema and length boundaries verified by Coven validator.\n")

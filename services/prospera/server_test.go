@@ -186,7 +186,8 @@ func TestTwilioVoiceWebhook_ThreeTierInbound(t *testing.T) {
 				t.Fatalf("response body %q does not contain %q", rec.Body.String(), tc.wantBodySub)
 			}
 
-			if tc.wantCallTier == "tier1" {
+			switch tc.wantCallTier {
+			case "tier1":
 				c, err := store.GetCallByProviderSID(context.Background(), "CA-in-tier1")
 				if err != nil || c == nil {
 					t.Fatalf("tier1 call not found in store: %v", err)
@@ -197,7 +198,7 @@ func TestTwilioVoiceWebhook_ThreeTierInbound(t *testing.T) {
 				if c.Brief.Approvals == "" {
 					t.Fatal("tier1 Approvals should be set to defaultApprovalFirewall")
 				}
-			} else if tc.wantCallTier == "tier2" {
+			case "tier2":
 				c, err := store.GetCallByProviderSID(context.Background(), "CA-in-tier2")
 				if err != nil || c == nil {
 					t.Fatalf("tier2 call not found in store: %v", err)
@@ -208,7 +209,7 @@ func TestTwilioVoiceWebhook_ThreeTierInbound(t *testing.T) {
 				if !strings.Contains(c.Brief.Context, "Dentist appointment confirmation") {
 					t.Fatalf("tier2 Context = %q, want prior call task in context", c.Brief.Context)
 				}
-			} else if tc.wantCallTier == "tier3" {
+			case "tier3":
 				c, err := store.GetCallByProviderSID(context.Background(), "CA-in-tier3")
 				if err != nil || c == nil {
 					t.Fatalf("tier3 call not found in store: %v", err)

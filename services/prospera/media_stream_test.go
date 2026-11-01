@@ -120,7 +120,8 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 			msgStr := string(msgBytes)
 			recordGeminiMsg(msgStr)
 
-			if strings.Contains(msgStr, "Call connected") {
+			switch {
+			case strings.Contains(msgStr, "Call connected"):
 				pcm24 := make([]byte, 4800)
 				_ = conn.WriteJSON(map[string]any{
 					"serverContent": map[string]any{
@@ -144,7 +145,7 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 						"turnComplete": true,
 					},
 				})
-			} else if strings.Contains(msgStr, "test_dtmf_trigger") {
+			case strings.Contains(msgStr, "test_dtmf_trigger"):
 				_ = conn.WriteJSON(map[string]any{
 					"toolCall": map[string]any{
 						"functionCalls": []map[string]any{
@@ -156,7 +157,7 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 						},
 					},
 				})
-			} else if strings.Contains(msgStr, "test_calendar_trigger") {
+			case strings.Contains(msgStr, "test_calendar_trigger"):
 				_ = conn.WriteJSON(map[string]any{
 					"toolCall": map[string]any{
 						"functionCalls": []map[string]any{
@@ -168,7 +169,7 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 						},
 					},
 				})
-			} else if strings.Contains(msgStr, "test_memory_trigger") {
+			case strings.Contains(msgStr, "test_memory_trigger"):
 				_ = conn.WriteJSON(map[string]any{
 					"toolCall": map[string]any{
 						"functionCalls": []map[string]any{
@@ -180,7 +181,7 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 						},
 					},
 				})
-			} else if strings.Contains(msgStr, "test_end_trigger") {
+			case strings.Contains(msgStr, "test_end_trigger"):
 				_ = conn.WriteJSON(map[string]any{
 					"toolCall": map[string]any{
 						"functionCalls": []map[string]any{

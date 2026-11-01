@@ -24,7 +24,7 @@ func isHexSHA(s string) bool {
 		return false
 	}
 	for _, ch := range trimmed {
-		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F')) {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') && (ch < 'A' || ch > 'F') {
 			return false
 		}
 	}
@@ -271,11 +271,12 @@ func applyCIRunToDeployment(
 	}
 
 	hangarStatus := "pending"
-	if stage == "awaiting_pull" {
+	switch {
+	case stage == "awaiting_pull":
 		hangarStatus = "active"
-	} else if stage == "failed" && commitMsg == "Hangar reconciliation timed out (>120s)" {
+	case stage == "failed" && commitMsg == "Hangar reconciliation timed out (>120s)":
 		hangarStatus = "failed"
-	} else if stage == "live" {
+	case stage == "live":
 		hangarStatus = "completed"
 	}
 
@@ -487,11 +488,12 @@ func summarizeContainerGroup(groupContainers []DockerContainerJSON, refTime time
 		if uptimeSec < minUptimeSec {
 			minUptimeSec = uptimeSec
 		}
-		if c.Health != nil && c.Health.Status == "starting" {
+		switch {
+		case c.Health != nil && c.Health.Status == "starting":
 			hasStarting = true
-		} else if c.State != "running" || (c.Health != nil && c.Health.Status == "unhealthy") {
+		case c.State != "running" || (c.Health != nil && c.Health.Status == "unhealthy"):
 			hasDegraded = true
-		} else {
+		default:
 			healthyCount++
 		}
 	}
@@ -586,16 +588,17 @@ func applyContainerGroupState(
 	isHangarSwapping := isHangarActive && gitSync.Reconciliation.State == "swapping"
 	isHangarPulling := isHangarActive && gitSync.Reconciliation.State == "pulling"
 
-	if hasDegraded {
+	switch {
+	case hasDegraded:
 		applyGroupDegradedState(dep)
 		attachContainerChips(dep, groupContainers, gitSync, refTime)
-	} else if hasStarting || minUptimeSec < 120 || isHangarSwapping {
+	case hasStarting || minUptimeSec < 120 || isHangarSwapping:
 		applyGroupSwappingState(dep, healthyCount, len(groupContainers))
 		attachContainerChips(dep, groupContainers, gitSync, refTime)
-	} else if isHangarPulling {
+	case isHangarPulling:
 		applyGroupPullingState(dep)
 		attachContainerChips(dep, groupContainers, gitSync, refTime)
-	} else if minUptimeSec < 600 {
+	case minUptimeSec < 600:
 		applyGroupLiveGraceState(dep, groupContainers, gitSync, refTime)
 	}
 }
