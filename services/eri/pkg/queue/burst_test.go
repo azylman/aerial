@@ -239,6 +239,7 @@ func TestCoalesceBurstPrompt(t *testing.T) {
 		{name: "Multiple messages produces coalesced burst", burst: []db.Message{m1, m2}, wantContains: []string{"[Multiple messages received in channel]", "--- Message 1 (by @alice at 12:00:00) ---\nHello there", "--- Message 2 (by @bob at 12:00:05) ---\nI have a follow-up question"}},
 		{name: "Multiple messages with timezone formatting", burst: []db.Message{m1}, tz: "America/New_York", wantContains: []string{"- timestamp: 2026-09-23T08:00:00-04:00"}},
 		{name: "Multiple messages with empty and no-at author", burst: []db.Message{{AuthorName: "bob", Content: "Second message", CreatedAt: ts}, {AuthorName: "", Content: "Third message"}}, wantContains: []string{"--- Message 1 (by @bob", "--- Message 2 (by @user"}},
+		{name: "Multiple messages preserves reply target author", burst: []db.Message{m1, {ID: "m-reply", AuthorName: "carol", ReplyingToAuthor: "@dave", Content: "Do you have any open PRs", CreatedAt: ts.Add(10 * time.Second)}}, wantContains: []string{"--- Message 2 (by @carol (replying to @dave) at 12:00:10) ---\nDo you have any open PRs"}},
 	}
 
 	for _, tc := range tests {
