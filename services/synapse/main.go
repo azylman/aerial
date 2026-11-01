@@ -34,6 +34,7 @@ type RouterServer struct {
 	dispatcher               OutboundDispatcher
 	onProcessed              func(event, delivery string)
 	nonRoboRevFailedSHAs     sync.Map
+	cancelledCheckSHAs       sync.Map
 	buildCompletedDispatched sync.Map
 	queueStats               queueStatsQuerier
 	gatewayLatencyFn         func() time.Duration
