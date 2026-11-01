@@ -55,9 +55,25 @@ func (s *RouterServer) getGitHubJSON(ctx context.Context, path string, maxBytes 
 	return nil
 }
 
+func (s *RouterServer) isAutoUpdateAuthorAllowed(author string) bool {
+	clean := strings.TrimSpace(author)
+	if clean == "" || s == nil {
+		return false
+	}
+	for _, allowed := range s.cfg.AutoUpdatePRAuthors {
+		if strings.EqualFold(clean, strings.TrimSpace(allowed)) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *RouterServer) handleDirtyPRConflict(ctx context.Context, repo string, pr RegisteredPR) {
 	if pr.HeadSHA != "" {
 		s.nonRoboRevFailedSHAs.Store(prCheckKey(repo, pr.PRNumber), strings.TrimSpace(pr.HeadSHA))
+	}
+	if s.registry == nil {
+		return
 	}
 	targetID, updated, trErr := s.registry.AtomicTransitionConflict(ctx, repo, pr.PRNumber)
 	if trErr != nil {
@@ -112,35 +128,46 @@ func (s *RouterServer) updatePRBranch(ctx context.Context, repo string, prNumber
 	return false, fmt.Errorf("update-branch returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 }
 
-func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) error {
+func (s *RouterServer) handleStaleOpenPR(ctx context.Context, repo string, prNumber int) {
 	if s.registry == nil {
+		return
+	}
+	if _, closeErr := s.registry.UpdatePRClosedUnmerged(ctx, repo, prNumber); closeErr != nil {
+		log.Printf("[synapse] [registry] warning closing stale PR #%d with missing head ref: %v", prNumber, closeErr)
+	}
+}
+
+func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) error {
+	normRepo := normalizeRepo(repo)
+	if len(s.cfg.AutoUpdatePRAuthors) == 0 || normRepo == "" {
 		return nil
 	}
-	openPRs, err := s.registry.ListOpenPRs(ctx, repo)
-	if err != nil {
+	var openPRs []GitHubPullRequest
+	if err := s.getGitHubJSON(ctx, fmt.Sprintf("/repos/%s/pulls?state=open&base=main&sort=created&direction=asc&per_page=100", normRepo), 5<<20, &openPRs); err != nil {
 		return fmt.Errorf("list open prs: %w", err)
 	}
 	for _, pr := range openPRs {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		conflict, err := s.updatePRBranch(ctx, repo, pr.PRNumber)
+		if !s.isAutoUpdateAuthorAllowed(pr.User.Login) {
+			continue
+		}
+		conflict, err := s.updatePRBranch(ctx, normRepo, pr.Number)
 		if err != nil {
 			errLower := strings.ToLower(err.Error())
 			if strings.Contains(err.Error(), "403") || strings.Contains(errLower, "rate limit") {
 				return err
 			}
 			if strings.Contains(errLower, "head ref does not exist") {
-				if _, closeErr := s.registry.UpdatePRClosedUnmerged(ctx, repo, pr.PRNumber); closeErr != nil {
-					log.Printf("[synapse] [registry] warning closing stale PR #%d with missing head ref: %v", pr.PRNumber, closeErr)
-				}
+				s.handleStaleOpenPR(ctx, normRepo, pr.Number)
 				continue
 			}
-			log.Printf("[synapse] [github] warning updating open PR #%d branch: %v", pr.PRNumber, err)
+			log.Printf("[synapse] [github] warning updating open PR #%d branch: %v", pr.Number, err)
 			continue
 		}
 		if conflict {
-			s.handleDirtyPRConflict(ctx, repo, pr)
+			s.handleDirtyPRConflict(ctx, normRepo, RegisteredPR{PRNumber: pr.Number, Branch: pr.Head.Ref, HeadSHA: pr.Head.SHA})
 			continue
 		}
 		break

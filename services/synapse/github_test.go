@@ -97,6 +97,7 @@ type ghEventCase struct {
 	river                *mockRiverInserter
 	spyNoGitHubHit       bool
 	systemChannelID      string
+	autoUpdateAuthors    []string
 	wantErr              bool
 	wantRepo             string
 	wantAction           string
@@ -148,6 +149,8 @@ func TestProcessGitHubEvent(t *testing.T) {
 		case strings.Contains(r.URL.Path, "/pulls/543/update-branch"):
 			w.WriteHeader(http.StatusUnprocessableEntity)
 			_, _ = w.Write([]byte(`{"message": "merge conflict between base and head"}`))
+		case r.Method == http.MethodGet && (r.URL.Path == "/repos/azylman/aerial/pulls" || strings.HasSuffix(r.URL.Path, "/repos/azylman/aerial/pulls")):
+			_, _ = w.Write([]byte(`[{"number": 543, "head": {"ref": "feat/conflict-check", "sha": "head543"}, "user": {"login": "trusted-author"}}]`))
 		case strings.Contains(r.URL.Path, "/issues/525/comments"):
 			_, _ = w.Write([]byte(`[{"id": 0, "body": "Non-roborev comment"}, {"id": 1, "body": "## roborev: Review Complete (` + "`old0000`" + `)\nOld bug"}, {"id": 2, "body": "## roborev: Combined Review (` + "`robo525`" + `)\nFound SQL injection in query"}]`))
 		case strings.Contains(r.URL.Path, "/actions/runs/800/jobs"):
@@ -625,8 +628,9 @@ func TestProcessGitHubEvent(t *testing.T) {
 		{
 			name: "push to main triggers conflict check on open PRs", event: "push", delivery: "del-push-conflict",
 			payload:           `{"ref":"refs/heads/main","after":"maincommit123","repository":{"full_name":"azylman/aerial"}}`,
-			reg:               &mockPRRegistry{openPRs: []RegisteredPR{{PRNumber: 543, Branch: "feat/conflict-check", TargetID: "1555405874565091380", HeadSHA: "head543"}}, conflictTargetID: "1555405874565091380", conflictUpdated: true},
+			reg:               &mockPRRegistry{conflictTargetID: "1555405874565091380", conflictUpdated: true},
 			disp:              &mockOutboundDispatcher{},
+			autoUpdateAuthors: []string{"trusted-author"},
 			wantConflictCalls: 1, wantGitPushes: 1, wantDMs: 0, wantDispatches: 1, wantPromptSubstr: "Merge conflict detected on PR #543",
 		},
 		{
@@ -823,7 +827,7 @@ func TestProcessGitHubEvent(t *testing.T) {
 			if tc.disp != nil {
 				disp = tc.disp
 			}
-			srv := newTestRouter(Config{GitHubAPIURL: mockServer.URL, GitHubToken: "test-token", SystemChannelID: tc.systemChannelID}, mockServer.Client(), reg, disp, inserters...)
+			srv := newTestRouter(Config{GitHubAPIURL: mockServer.URL, GitHubToken: "test-token", SystemChannelID: tc.systemChannelID, AutoUpdatePRAuthors: tc.autoUpdateAuthors}, mockServer.Client(), reg, disp, inserters...)
 			srv.onProcessed = func(string, string) {}
 
 			if tc.priorEvent != nil {
@@ -1353,18 +1357,25 @@ func TestDispatchWorkflowRunImages(t *testing.T) {
 
 // --- 7. PR Conflict Checks & SHA/Thread Resolution ---
 
+func makeTestOpenPR(number int, branch, sha, author string) GitHubPullRequest {
+	return GitHubPullRequest{Number: number, Head: GitHubPRRef{Ref: branch, SHA: sha}, User: struct {
+		Login string `json:"login"`
+	}{Login: author}}
+}
+
 func TestCheckOpenPRConflicts(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
 	tests := []struct {
 		name               string
+		autoUpdateAuthors  []string
+		listPRsStatus      int
 		useNilRegistry     bool
 		useRiver           bool
 		riverErr           error
-		listOpenPRsErr     error
 		conflictErr        error
-		openPRs            []RegisteredPR
+		openPRs            []GitHubPullRequest
 		prResponses        []string
 		prStatusCodes      []int
 		closedErr          error
@@ -1381,32 +1392,87 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 		wantUpdatedPRs     []string
 	}{
 		{
-			name:           "nil registry is clean no-op",
-			useNilRegistry: true,
-			wantErr:        false,
+			name:              "empty autoUpdateAuthors is clean no-op",
+			autoUpdateAuthors: nil,
+			openPRs: []GitHubPullRequest{
+				makeTestOpenPR(550, "feat/behind-1", "head550", "trusted-author"),
+			},
+			wantErr: false,
 		},
 		{
-			name:           "ListOpenPRs error returns error",
-			listOpenPRsErr: errors.New("db list open prs failed"),
-			wantErr:        true,
-			wantErrSubstr:  "list open prs",
+			name:              "nil registry still updates whitelisted PRs",
+			useNilRegistry:    true,
+			autoUpdateAuthors: []string{"trusted-author"},
+			openPRs: []GitHubPullRequest{
+				makeTestOpenPR(550, "feat/clean", "head550", "trusted-author"),
+			},
+			prResponses:    []string{`{"message":"Updating pull request branch."}`},
+			prStatusCodes:  []int{http.StatusAccepted},
+			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/550/update-branch"},
 		},
 		{
-			name:           "422 merge conflict transitions and dispatches via background /dispatch without DM",
-			openPRs:        []RegisteredPR{{PRNumber: 543, Branch: "feat/my-feature", TargetID: "1555405874565091380", HeadSHA: "head543"}},
-			prStatusCodes:  []int{http.StatusUnprocessableEntity},
-			prResponses:    []string{`{"message":"merge conflict between base and head"}`},
-			wantConflict:   true,
-			wantConflictPR: 543,
-			wantDMs:        0,
-			wantDispatches: 1,
-			wantPromptSubs: []string{"Merge conflict detected on PR #543"},
-			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/543/update-branch"},
+			name:              "nil registry on conflict does not crash",
+			useNilRegistry:    true,
+			autoUpdateAuthors: []string{"trusted-author"},
+			openPRs:           []GitHubPullRequest{makeTestOpenPR(543, "feat/my-feature", "head543", "trusted-author")},
+			prStatusCodes:     []int{http.StatusUnprocessableEntity},
+			prResponses:       []string{`{"message":"merge conflict between base and head"}`},
+			wantUpdatedPRs:    []string{"/repos/azylman/aerial/pulls/543/update-branch"},
+		},
+		{
+			name:              "nil registry on stale head ref does not crash",
+			useNilRegistry:    true,
+			autoUpdateAuthors: []string{"trusted-author"},
+			openPRs: []GitHubPullRequest{
+				makeTestOpenPR(512, "feat/stale-branch", "head512", "trusted-author"),
+				makeTestOpenPR(550, "feat/clean-branch", "head550", "trusted-author"),
+			},
+			prResponses: []string{
+				`{"message":"head ref does not exist"}`,
+				`{"message":"Updating pull request branch."}`,
+			},
+			prStatusCodes: []int{http.StatusUnprocessableEntity, http.StatusAccepted},
+			wantUpdatedPRs: []string{
+				"/repos/azylman/aerial/pulls/512/update-branch",
+				"/repos/azylman/aerial/pulls/550/update-branch",
+			},
+		},
+		{
+			name:              "skips non-whitelisted PR authors and updates whitelisted PR",
+			autoUpdateAuthors: []string{"trusted-author"},
+			openPRs: []GitHubPullRequest{
+				makeTestOpenPR(540, "feat/untrusted", "head540", "untrusted-user"),
+				makeTestOpenPR(541, "feat/trusted", "head541", "trusted-author"),
+			},
+			prResponses:    []string{`{"message":"Updating pull request branch."}`},
+			prStatusCodes:  []int{http.StatusAccepted},
+			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/541/update-branch"},
+		},
+		{
+			name:              "list open PRs error returns error",
+			autoUpdateAuthors: []string{"trusted-author"},
+			listPRsStatus:     http.StatusInternalServerError,
+			wantErr:           true,
+			wantErrSubstr:     "list open prs",
+		},
+		{
+			name:              "422 merge conflict transitions and dispatches via background /dispatch without DM",
+			autoUpdateAuthors: []string{"trusted-author"},
+			openPRs:           []GitHubPullRequest{makeTestOpenPR(543, "feat/my-feature", "head543", "trusted-author")},
+			prStatusCodes:     []int{http.StatusUnprocessableEntity},
+			prResponses:       []string{`{"message":"merge conflict between base and head"}`},
+			wantConflict:      true,
+			wantConflictPR:    543,
+			wantDMs:           0,
+			wantDispatches:    1,
+			wantPromptSubs:    []string{"Merge conflict detected on PR #543"},
+			wantUpdatedPRs:    []string{"/repos/azylman/aerial/pulls/543/update-branch"},
 		},
 		{
 			name:               "409 conflict with river client enqueues MergeConflictArgs on merge_conflict queue",
 			useRiver:           true,
-			openPRs:            []RegisteredPR{{PRNumber: 543, Branch: "feat/my-feature", TargetID: "1555405874565091380", HeadSHA: "head543"}},
+			autoUpdateAuthors:  []string{"trusted-author"},
+			openPRs:            []GitHubPullRequest{makeTestOpenPR(543, "feat/my-feature", "head543", "trusted-author")},
 			prStatusCodes:      []int{http.StatusConflict},
 			prResponses:        []string{`{"message":"Merge conflict"}`},
 			wantConflict:       true,
@@ -1417,31 +1483,34 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 			wantUpdatedPRs:     []string{"/repos/azylman/aerial/pulls/543/update-branch"},
 		},
 		{
-			name:           "river insert error on conflict logs warning without failing check",
-			useRiver:       true,
-			riverErr:       errors.New("river insert failed"),
-			openPRs:        []RegisteredPR{{PRNumber: 543, Branch: "feat/my-feature", TargetID: "1555405874565091380", HeadSHA: "head543"}},
-			prStatusCodes:  []int{http.StatusConflict},
-			prResponses:    []string{`{"message":"Merge conflict"}`},
-			wantConflict:   true,
-			wantConflictPR: 543,
-			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/543/update-branch"},
+			name:              "river insert error on conflict logs warning without failing check",
+			useRiver:          true,
+			riverErr:          errors.New("river insert failed"),
+			autoUpdateAuthors: []string{"trusted-author"},
+			openPRs:           []GitHubPullRequest{makeTestOpenPR(543, "feat/my-feature", "head543", "trusted-author")},
+			prStatusCodes:     []int{http.StatusConflict},
+			prResponses:       []string{`{"message":"Merge conflict"}`},
+			wantConflict:      true,
+			wantConflictPR:    543,
+			wantUpdatedPRs:    []string{"/repos/azylman/aerial/pulls/543/update-branch"},
 		},
 		{
-			name: "open PRs update only oldest clean PR in FIFO order",
-			openPRs: []RegisteredPR{
-				{PRNumber: 550, Branch: "feat/behind-1", TargetID: "1555405874565091380", HeadSHA: "head550"},
-				{PRNumber: 551, Branch: "feat/behind-2", TargetID: "1555405874565091380", HeadSHA: "head551"},
+			name:              "open PRs update only oldest clean PR in FIFO order",
+			autoUpdateAuthors: []string{"trusted-author"},
+			openPRs: []GitHubPullRequest{
+				makeTestOpenPR(550, "feat/behind-1", "head550", "trusted-author"),
+				makeTestOpenPR(551, "feat/behind-2", "head551", "trusted-author"),
 			},
 			prResponses:    []string{`{"message":"Updating pull request branch."}`},
 			prStatusCodes:  []int{http.StatusAccepted},
 			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/550/update-branch"},
 		},
 		{
-			name: "conflicted oldest PR transitions to conflict and advances to update next clean PR",
-			openPRs: []RegisteredPR{
-				{PRNumber: 545, Branch: "feat/conflicted-1", TargetID: "1555405874565091380", HeadSHA: "head545"},
-				{PRNumber: 546, Branch: "feat/clean-2", TargetID: "1555405874565091380", HeadSHA: "head546"},
+			name:              "conflicted oldest PR transitions to conflict and advances to update next clean PR",
+			autoUpdateAuthors: []string{"trusted-author"},
+			openPRs: []GitHubPullRequest{
+				makeTestOpenPR(545, "feat/conflicted-1", "head545", "trusted-author"),
+				makeTestOpenPR(546, "feat/clean-2", "head546", "trusted-author"),
 			},
 			prResponses: []string{
 				`{"message":"merge conflict between base and head"}`,
@@ -1458,43 +1527,48 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 			},
 		},
 		{
-			name:           "non-conflict 422 logs warning and skips without marking conflict",
-			openPRs:        []RegisteredPR{{PRNumber: 552, Branch: "feat/behind-err", TargetID: "1555405874565091380", HeadSHA: "head552"}},
-			prResponses:    []string{`{"message":"Validation Failed"}`},
-			prStatusCodes:  []int{http.StatusUnprocessableEntity},
-			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/552/update-branch"},
+			name:              "non-conflict 422 logs warning and skips without marking conflict",
+			autoUpdateAuthors: []string{"trusted-author"},
+			openPRs:           []GitHubPullRequest{makeTestOpenPR(552, "feat/behind-err", "head552", "trusted-author")},
+			prResponses:       []string{`{"message":"Validation Failed"}`},
+			prStatusCodes:     []int{http.StatusUnprocessableEntity},
+			wantUpdatedPRs:    []string{"/repos/azylman/aerial/pulls/552/update-branch"},
 		},
 		{
-			name:           "403 rate-limit error returns error",
-			openPRs:        []RegisteredPR{{PRNumber: 546, Branch: "feat/rate-limit", TargetID: "1555405874565091380", HeadSHA: "head546"}},
-			prStatusCodes:  []int{http.StatusForbidden},
-			prResponses:    []string{`{"message":"API rate limit exceeded"}`},
-			wantErr:        true,
-			wantErrSubstr:  "rate limit",
-			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/546/update-branch"},
+			name:              "403 rate-limit error returns error",
+			autoUpdateAuthors: []string{"trusted-author"},
+			openPRs:           []GitHubPullRequest{makeTestOpenPR(546, "feat/rate-limit", "head546", "trusted-author")},
+			prStatusCodes:     []int{http.StatusForbidden},
+			prResponses:       []string{`{"message":"API rate limit exceeded"}`},
+			wantErr:           true,
+			wantErrSubstr:     "rate limit",
+			wantUpdatedPRs:    []string{"/repos/azylman/aerial/pulls/546/update-branch"},
 		},
 		{
-			name:           "non-403 error skips PR and returns nil",
-			openPRs:        []RegisteredPR{{PRNumber: 547, Branch: "feat/not-found", TargetID: "1555405874565091380", HeadSHA: "head547"}},
-			prStatusCodes:  []int{http.StatusNotFound},
-			prResponses:    []string{`{"message":"Not Found"}`},
-			wantErr:        false,
-			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/547/update-branch"},
+			name:              "non-403 error skips PR and returns nil",
+			autoUpdateAuthors: []string{"trusted-author"},
+			openPRs:           []GitHubPullRequest{makeTestOpenPR(547, "feat/not-found", "head547", "trusted-author")},
+			prStatusCodes:     []int{http.StatusNotFound},
+			prResponses:       []string{`{"message":"Not Found"}`},
+			wantErr:           false,
+			wantUpdatedPRs:    []string{"/repos/azylman/aerial/pulls/547/update-branch"},
 		},
 		{
-			name:           "conflict transition error logged cleanly without returning error",
-			openPRs:        []RegisteredPR{{PRNumber: 549, Branch: "feat/trans-err", TargetID: "1555405874565091380", HeadSHA: "head549"}},
-			prStatusCodes:  []int{http.StatusUnprocessableEntity},
-			prResponses:    []string{`{"message":"merge conflict between base and head"}`},
-			conflictErr:    errors.New("conflict transition err"),
-			wantErr:        false,
-			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/549/update-branch"},
+			name:              "conflict transition error logged cleanly without returning error",
+			autoUpdateAuthors: []string{"trusted-author"},
+			openPRs:           []GitHubPullRequest{makeTestOpenPR(549, "feat/trans-err", "head549", "trusted-author")},
+			prStatusCodes:     []int{http.StatusUnprocessableEntity},
+			prResponses:       []string{`{"message":"merge conflict between base and head"}`},
+			conflictErr:       errors.New("conflict transition err"),
+			wantErr:           false,
+			wantUpdatedPRs:    []string{"/repos/azylman/aerial/pulls/549/update-branch"},
 		},
 		{
-			name: "422 head ref does not exist closes stale PR and advances to next clean PR",
-			openPRs: []RegisteredPR{
-				{PRNumber: 512, Branch: "feat/stale-branch", TargetID: "1555405874565091380", HeadSHA: "head512"},
-				{PRNumber: 550, Branch: "feat/clean-branch", TargetID: "1555405874565091380", HeadSHA: "head550"},
+			name:              "422 head ref does not exist closes stale PR and advances to next clean PR",
+			autoUpdateAuthors: []string{"trusted-author"},
+			openPRs: []GitHubPullRequest{
+				makeTestOpenPR(512, "feat/stale-branch", "head512", "trusted-author"),
+				makeTestOpenPR(550, "feat/clean-branch", "head550", "trusted-author"),
 			},
 			prResponses: []string{
 				`{"message":"head ref does not exist"}`,
@@ -1508,13 +1582,14 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 			},
 		},
 		{
-			name:           "422 head ref does not exist logs close error cleanly without failing check",
-			openPRs:        []RegisteredPR{{PRNumber: 512, Branch: "feat/stale-branch", TargetID: "1555405874565091380", HeadSHA: "head512"}},
-			prStatusCodes:  []int{http.StatusUnprocessableEntity},
-			prResponses:    []string{`{"message":"head ref does not exist"}`},
-			closedErr:      errors.New("close db err"),
-			wantClosedPRs:  nil,
-			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/512/update-branch"},
+			name:              "422 head ref does not exist logs close error cleanly without failing check",
+			autoUpdateAuthors: []string{"trusted-author"},
+			openPRs:           []GitHubPullRequest{makeTestOpenPR(512, "feat/stale-branch", "head512", "trusted-author")},
+			prStatusCodes:     []int{http.StatusUnprocessableEntity},
+			prResponses:       []string{`{"message":"head ref does not exist"}`},
+			closedErr:         errors.New("close db err"),
+			wantClosedPRs:     nil,
+			wantUpdatedPRs:    []string{"/repos/azylman/aerial/pulls/512/update-branch"},
 		},
 	}
 
@@ -1525,6 +1600,17 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 			var mu sync.Mutex
 			var putPaths []string
 			apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/pulls") {
+					w.Header().Set("Content-Type", "application/json")
+					if tc.listPRsStatus != 0 {
+						w.WriteHeader(tc.listPRsStatus)
+						_, _ = w.Write([]byte(`{"message":"server error"}`))
+						return
+					}
+					w.WriteHeader(http.StatusOK)
+					_ = json.NewEncoder(w).Encode(tc.openPRs)
+					return
+				}
 				if r.Method == http.MethodPut {
 					mu.Lock()
 					putPaths = append(putPaths, r.URL.Path)
@@ -1550,8 +1636,6 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 			var mockReg PRRegistryUpdater
 			if !tc.useNilRegistry {
 				mockReg = &mockPRRegistry{
-					openPRs:          tc.openPRs,
-					listOpenPRsErr:   tc.listOpenPRsErr,
 					conflictErr:      tc.conflictErr,
 					conflictTargetID: "1555405874565091380",
 					conflictUpdated:  true,
@@ -1565,7 +1649,7 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 				mockRiver = &mockRiverInserter{err: tc.riverErr}
 				inserters = append(inserters, mockRiver)
 			}
-			srv := newTestRouter(Config{GitHubAPIURL: apiServer.URL, GitHubToken: "test-token"}, nil, mockReg, mockDisp, inserters...)
+			srv := newTestRouter(Config{GitHubAPIURL: apiServer.URL, GitHubToken: "test-token", AutoUpdatePRAuthors: tc.autoUpdateAuthors}, nil, mockReg, mockDisp, inserters...)
 
 			err := srv.checkOpenPRConflicts(ctx, "azylman/aerial")
 			if (err != nil) != tc.wantErr {

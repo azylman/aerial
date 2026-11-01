@@ -151,6 +151,7 @@ func TestLoadConfig_YAMLAndOverrides(t *testing.T) {
 		wantHangarURL   string
 		wantBrainURL    string
 		wantSysChan     string
+		wantAuthors     []string
 	}{
 		{
 			name: "yaml config without overrides",
@@ -248,6 +249,17 @@ eri_url: "http://brain.custom:8088"
 			wantSysChan: "aerial-dev",
 		},
 		{
+			name:        "auto_update_pr_authors loaded from yaml",
+			localYAML:   "auto_update_pr_authors:\n  - \"trusted-author\"\n  - \"peer-author\"\n",
+			wantAuthors: []string{"trusted-author", "peer-author"},
+		},
+		{
+			name:        "auto_update_pr_authors loaded from aerial config.yaml fallback",
+			localYAML:   "port: \"4020\"\n",
+			aerialYAML:  "auto_update_pr_authors:\n  - \"fallback-author\"\n",
+			wantAuthors: []string{"fallback-author"},
+		},
+		{
 			name:      "invalid yaml logs warning and uses defaults",
 			localYAML: "invalid: [yaml",
 			wantPort:  "4020",
@@ -320,6 +332,17 @@ eri_url: "http://brain.custom:8088"
 			} {
 				if check.want != "" && check.got != check.want {
 					t.Errorf("%s = %q, want %q", check.field, check.got, check.want)
+				}
+			}
+			if tc.wantAuthors != nil {
+				if len(cfg.AutoUpdatePRAuthors) != len(tc.wantAuthors) {
+					t.Errorf("AutoUpdatePRAuthors len = %d, want %d", len(cfg.AutoUpdatePRAuthors), len(tc.wantAuthors))
+				} else {
+					for i, a := range tc.wantAuthors {
+						if cfg.AutoUpdatePRAuthors[i] != a {
+							t.Errorf("AutoUpdatePRAuthors[%d] = %q, want %q", i, cfg.AutoUpdatePRAuthors[i], a)
+						}
+					}
 				}
 			}
 		})
