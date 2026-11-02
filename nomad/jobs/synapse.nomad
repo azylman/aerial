@@ -42,14 +42,15 @@ job "synapse" {
       }
 
       env {
-        CONFIG_PATH = "/local/synapse.yaml"
-        NOMAD_ADDR  = "http://${attr.unique.network.ip-address}:4646"
-        HANGAR_URL    = "http://hangar.aerial"
-        ERI_URL       = "http://eri.aerial"
-        INFISICAL_URL = "http://infisical.aerial"
-        VANADIS_URL   = "http://vanadis.aerial"
-        HARO_URL      = "http://haro.aerial"
-        PORT          = "4020"
+        CONFIG_PATH           = "/local/synapse.yaml"
+        NOMAD_ADDR            = "http://${attr.unique.network.ip-address}:4646"
+        HANGAR_URL            = "http://hangar.aerial"
+        ERI_URL               = "http://eri.aerial"
+        INFISICAL_URL         = "http://infisical.aerial"
+        INFISICAL_ENVIRONMENT = "default"
+        VANADIS_URL           = "http://vanadis.aerial"
+        HARO_URL              = "http://haro.aerial"
+        PORT                  = "4020"
       }
 
       template {
@@ -66,13 +67,6 @@ EOH
 
       template {
         data = <<EOH
-{{ if nomadVarExists "nomad/jobs/infisical-mcp" }}
-{{ with nomadVar "nomad/jobs/infisical-mcp" }}
-{{ if .client_id.Value }}INFISICAL_CLIENT_ID="{{ .client_id.Value }}"{{ end }}
-{{ if .client_secret.Value }}INFISICAL_CLIENT_SECRET="{{ .client_secret.Value }}"{{ end }}
-{{ if .project_id.Value }}INFISICAL_PROJECT_ID="{{ .project_id.Value }}"{{ end }}
-{{ end }}
-{{ end }}
 {{ if nomadVarExists "nomad/jobs/shared" }}
 {{ with nomadVar "nomad/jobs/shared" }}
 {{ if .INFISICAL_CLIENT_ID.Value }}INFISICAL_CLIENT_ID="{{ .INFISICAL_CLIENT_ID.Value }}"{{ end }}

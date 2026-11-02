@@ -53,17 +53,6 @@ EOH
         change_mode = "restart"
       }
 
-      template {
-        data = <<EOH
-{{ if nomadVarExists "nomad/jobs/nomad-mcp" }}
-{{ with nomadVar "nomad/jobs/nomad-mcp" }}
-{{ if .token }}NOMAD_TOKEN="{{ .token }}"{{ end }}
-{{ end }}
-{{ end }}
-EOH
-        destination = "secrets/nomad.env"
-        env         = true
-      }
 
       service {
         name     = "nomad-mcp"

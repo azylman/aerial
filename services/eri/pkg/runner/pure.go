@@ -36,7 +36,30 @@ func filterEnvKeys(env []string, excluded ...string) []string {
 }
 
 func FilterAgyBaseEnv(env []string) []string {
-	return filterEnvKeys(env, "GEMINI_API_KEY", "ANTIGRAVITY_API_KEY", "GOOGLE_GENAI_API_KEY")
+	return filterEnvKeys(env,
+		"GEMINI_API_KEY",
+		"ANTIGRAVITY_API_KEY",
+		"GOOGLE_GENAI_API_KEY",
+		"GEMINI_HARNESS_API_KEY",
+		"AGY_GEMINI_API_KEY",
+		"GITHUB_PAT",
+		"DISCORD_TOKEN",
+		"DISCORD_BOT_TOKEN",
+		"DATABASE_URL",
+		"POSTGRES_PASSWORD",
+		"HA_TOKEN",
+		"OPENOBSERVE_PASSWORD",
+		"OPENOBSERVE_ROOT_USER_PASSWORD",
+		"UNIFI_PASS",
+		"UNIFI_PASSWORD",
+		"OP_SERVICE_ACCOUNT_TOKEN",
+		"1PASSWORD_SERVICE_ACCOUNT_TOKEN",
+		"QNAP_PASS",
+		"NOMAD_TOKEN",
+		"INFISICAL_CLIENT_SECRET",
+		"CLOUDFLARE_MCP_TOKEN",
+		"UBEREATS_MCP_TOKEN",
+	)
 }
 
 func filterHomeEnv(env []string) []string {
@@ -75,9 +98,7 @@ func BuildAgyEnv(input AgyEnvInput) []string {
 	var cmdEnv []string
 	if len(input.BaseEnv) > 0 {
 		base := filterVanadisChunkEnv(input.BaseEnv)
-		if strings.TrimSpace(input.APIKey) == "" {
-			base = FilterAgyBaseEnv(base)
-		}
+		base = FilterAgyBaseEnv(base)
 		if strings.TrimSpace(input.HomeDir) != "" {
 			base = filterHomeEnv(base)
 		}
