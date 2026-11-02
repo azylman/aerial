@@ -110,6 +110,7 @@ job "eri" {
         GOPATH              = "/data/cache/go"
         GOMODCACHE          = "/data/cache/go/pkg/mod"
         GOLANGCI_LINT_CACHE = "/data/cache/golangci-lint"
+        GEMINI_HOME_DIR     = "/data"
       }
 
       template {
@@ -127,25 +128,28 @@ EOH
 
       template {
         data = <<EOH
-{{ if nomadVarExists "nomad/jobs/shared" }}
-{{ with nomadVar "nomad/jobs/shared" }}
-{{ if .DISCORD_BOT_TOKEN }}DISCORD_TOKEN="{{ .DISCORD_BOT_TOKEN }}"{{ end }}
-{{ if .GITHUB_PAT }}GITHUB_PAT="{{ .GITHUB_PAT }}"{{ end }}
-{{ if .HA_TOKEN }}HA_TOKEN="{{ .HA_TOKEN }}"{{ end }}
-{{ if .GEMINI_HARNESS_API_KEY }}GEMINI_HARNESS_API_KEY="{{ .GEMINI_HARNESS_API_KEY }}"{{ end }}
-{{ if .AGY_GEMINI_API_KEY }}AGY_GEMINI_API_KEY="{{ .AGY_GEMINI_API_KEY }}"
-{{ else if .GEMINI_HARNESS_API_KEY }}AGY_GEMINI_API_KEY="{{ .GEMINI_HARNESS_API_KEY }}"{{ end }}
-{{ if .POSTGRES_PASSWORD }}DATABASE_URL="postgres://aerial:{{ .POSTGRES_PASSWORD }}@postgres:5432/aerial?sslmode=disable"{{ end }}
-{{ if .OPENOBSERVE_ROOT_USER_PASSWORD }}OPENOBSERVE_PASSWORD="{{ .OPENOBSERVE_ROOT_USER_PASSWORD }}"{{ end }}
-{{ if .UNIFI_PASS }}UNIFI_PASS="{{ .UNIFI_PASS }}"
-UNIFI_PASSWORD="{{ .UNIFI_PASS }}"{{ end }}
-{{ with index . "1PASSWORD_SERVICE_ACCOUNT_TOKEN" }}OP_SERVICE_ACCOUNT_TOKEN="{{ . }}"{{ end }}
-{{ end }}
-{{ end }}
+{{- if nomadVarExists "nomad/jobs/shared" -}}
+{{- with nomadVar "nomad/jobs/shared" -}}
+{{ . | toJSON }}
+{{- end -}}
+{{- else -}}
+{}
+{{- end -}}
+EOH
+        destination   = "secrets/shared-secrets.json"
+        perms         = "0600"
+        change_mode   = "signal"
+        change_signal = "SIGHUP"
+      }
+
+      template {
+        data = <<EOH
 ${var.extra_env_template}
 EOH
-        destination = "secrets/eri.env"
-        env         = true
+        destination   = "secrets/eri.env"
+        env           = true
+        change_mode   = "signal"
+        change_signal = "SIGHUP"
       }
 
       template {

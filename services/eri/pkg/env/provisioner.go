@@ -30,8 +30,12 @@ type Provisioner struct {
 }
 
 var (
+	getEuid          = os.Geteuid
+	chownPath        = os.Lchown
+	chmodPath        = os.Chmod
 	statOptSkills    = os.Stat
 	statAgentsSkills = os.Stat
+	rootHomeDir      = "/root"
 )
 
 // New creates a Provisioner targeting the given homeDir and dataDir.
@@ -224,7 +228,65 @@ func (p *Provisioner) Sync(ctx context.Context, cfg *config.Config) error {
 		return fmt.Errorf("failed to sync hooks: %w", err)
 	}
 
+	p.chownProvisionedPaths()
+
 	return nil
+}
+
+func (p *Provisioner) chownProvisionedPaths() {
+	if getEuid() != 0 {
+		return
+	}
+	if p.homeDir == rootHomeDir {
+		ignore(chmodPath(rootHomeDir, 0o755))
+	}
+	homeGemini := filepath.Join(p.homeDir, ".gemini")
+	ignore(filepath.Walk(homeGemini, func(path string, info os.FileInfo, err error) error {
+		if err == nil && info != nil && info.Mode()&os.ModeSymlink == 0 {
+			ignore(chownPath(path, 1000, 1000))
+		}
+		return nil
+	}))
+	for _, target := range allRuntimeTargets {
+		rtHome := p.runtimeHomeDir(target)
+		ignore(chownPath(rtHome, 1000, 1000))
+		base := filepath.Join(rtHome, ".gemini")
+		ignore(chownPath(base, 1000, 1000))
+		for _, sub := range []string{"rules", "config"} {
+			ignore(filepath.Walk(filepath.Join(base, sub), func(path string, info os.FileInfo, err error) error {
+				if err == nil && info != nil && info.Mode()&os.ModeSymlink == 0 {
+					ignore(chownPath(path, 1000, 1000))
+				}
+				return nil
+			}))
+		}
+		cliDir := filepath.Join(base, "antigravity-cli")
+		ignore(chownPath(cliDir, 1000, 1000))
+		if entries, err := os.ReadDir(cliDir); err == nil {
+			for _, entry := range entries {
+				if entry.Type()&os.ModeSymlink != 0 {
+					continue
+				}
+				ignore(chownPath(filepath.Join(cliDir, entry.Name()), 1000, 1000))
+			}
+		}
+	}
+	if p.dataDir != "" {
+		ignore(chownPath(p.dataDir, 1000, 1000))
+		ignore(chownPath(filepath.Join(p.dataDir, "runtimes"), 1000, 1000))
+		for _, dir := range []string{
+			filepath.Join(p.dataDir, "brain"),
+			filepath.Join(p.dataDir, "conversations"),
+			filepath.Join(p.dataDir, "cache"),
+		} {
+			ignore(filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+				if err == nil && info != nil && info.Mode()&os.ModeSymlink == 0 {
+					ignore(chownPath(path, 1000, 1000))
+				}
+				return nil
+			}))
+		}
+	}
 }
 
 func (p *Provisioner) writeAtomic(targetPath, content string) error {

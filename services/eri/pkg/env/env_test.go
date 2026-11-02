@@ -232,6 +232,8 @@ func TestSync_EndToEndAndIsolation(t *testing.T) {
 		failSettings  bool
 		failRules     bool
 		failMCP       bool
+		mockRoot      bool
+		homeIsRoot    bool
 		wantErr       bool
 	}{
 		{name: "empty home returns nil", emptyHome: true, wantErr: false},
@@ -240,6 +242,8 @@ func TestSync_EndToEndAndIsolation(t *testing.T) {
 		{name: "sync failure propagated from settings error", failSettings: true, wantErr: true},
 		{name: "sync failure propagated from rules error", failRules: true, wantErr: true},
 		{name: "sync failure propagated from mcp error", failMCP: true, wantErr: true},
+		{name: "sync with mock root triggers chown", withActiveCfg: true, mockRoot: true, wantErr: false},
+		{name: "chown provisioned paths with root home", withActiveCfg: false, mockRoot: true, homeIsRoot: true, wantErr: false},
 	}
 
 	for _, tc := range tests {
@@ -252,11 +256,58 @@ func TestSync_EndToEndAndIsolation(t *testing.T) {
 				return
 			}
 
+			origGetEuid := getEuid
+			origChownPath := chownPath
+			origChmodPath := chmodPath
+			origRootHome := rootHomeDir
+			defer func() {
+				getEuid = origGetEuid
+				chownPath = origChownPath
+				chmodPath = origChmodPath
+				rootHomeDir = origRootHome
+			}()
+
+			var chowned []string
+			var chmodded []string
+			if tc.mockRoot {
+				getEuid = func() int { return 0 }
+				chownPath = func(path string, uid, gid int) error {
+					chowned = append(chowned, path)
+					return nil
+				}
+				chmodPath = func(path string, mode os.FileMode) error {
+					chmodded = append(chmodded, path)
+					return nil
+				}
+			} else {
+				getEuid = func() int { return 1000 }
+			}
+
 			p, aerialDir, _ := newTestProvisioner(t, map[string]string{
 				"common/01_base.md":  "Base rule content",
 				"discord/01_flow.md": "Discord flow content",
 				"voice/01_flow.md":   "Voice flow content",
 			}, nil)
+
+			if tc.homeIsRoot {
+				mockRootDir := filepath.Join(t.TempDir(), "mock-root")
+				_ = os.MkdirAll(filepath.Join(mockRootDir, ".gemini"), 0o755)
+				rootHomeDir = mockRootDir
+				origHome := p.homeDir
+				p.homeDir = mockRootDir
+				p.chownProvisionedPaths()
+				p.homeDir = origHome
+				if len(chmodded) == 0 || chmodded[0] != mockRootDir {
+					t.Errorf("expected chmodPath to be called for %s, got %v", mockRootDir, chmodded)
+				}
+			}
+
+			if tc.mockRoot && tc.withActiveCfg {
+				symlinkTarget := filepath.Join(t.TempDir(), "target-skill")
+				writeTestFile(t, filepath.Join(symlinkTarget, "SKILL.md"), "skill body")
+				symlinkPath := filepath.Join(p.homeDir, ".gemini", "symlink-test")
+				_ = os.Symlink(symlinkTarget, symlinkPath)
+			}
 
 			if tc.failSettings {
 				writeTestFile(t, filepath.Join(p.homeDir, ".gemini", "antigravity-cli"), "file-blocking-dir")
@@ -280,6 +331,32 @@ func TestSync_EndToEndAndIsolation(t *testing.T) {
 			err := p.Sync(context.Background(), cfg)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("Sync() error = %v, wantErr %v", err, tc.wantErr)
+			}
+
+			if tc.mockRoot && !tc.wantErr && tc.withActiveCfg {
+				if len(chowned) == 0 {
+					t.Errorf("expected chownPath to be called when getEuid returns 0")
+				}
+				var foundRtHome, foundBrain bool
+				for _, cp := range chowned {
+					if strings.Contains(cp, filepath.Join("runtimes", "discord")) {
+						foundRtHome = true
+					}
+					if strings.Contains(cp, "brain") {
+						foundBrain = true
+					}
+				}
+				if !foundRtHome {
+					t.Errorf("expected runtime home directory to be chowned")
+				}
+				if !foundBrain {
+					t.Errorf("expected brain storage to be chowned")
+				}
+				for _, cp := range chowned {
+					if strings.Contains(cp, "target-skill") || strings.Contains(cp, "symlink-test") {
+						t.Errorf("symlink or symlink target was unexpectedly chowned: %s", cp)
+					}
+				}
 			}
 
 			if !tc.wantErr && tc.withActiveCfg {

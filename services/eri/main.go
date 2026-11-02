@@ -221,6 +221,18 @@ func buildPoolEnv(baseEnv []string, runtimeBase string, timezone ...string) []st
 			log.Printf("[WARN] Failed to create cache directory %q: %v", dir, err)
 		}
 	}
+	if getEuid() == 0 {
+		if walkErr := filepath.Walk(cacheBase, func(path string, info os.FileInfo, err error) error {
+			if err == nil && info != nil && info.Mode()&os.ModeSymlink == 0 {
+				if cErr := chownFile(path, 1000, 1000); cErr != nil {
+					log.Printf("[WARN] Failed to chown cache directory %q: %v", path, cErr)
+				}
+			}
+			return nil
+		}); walkErr != nil {
+			log.Printf("[WARN] Failed to walk cache directory %q for chown: %v", cacheBase, walkErr)
+		}
+	}
 
 	envMap := make(map[string]bool)
 	for _, e := range baseEnv {
@@ -468,6 +480,8 @@ func PrewarmProcessPoolsSequentially(ctx context.Context, pools ...runner.AgentP
 }
 
 var (
+	getEuid       = os.Geteuid
+	chownFile     = os.Lchown
 	onServerReady func(addr string)
 	openDefaultDB = db.New
 )

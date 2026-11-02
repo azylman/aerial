@@ -292,7 +292,7 @@ function verifyAndProxy(r) {
         return;
     }
 
-    const secret = "{{ if nomadVarExists "nomad/jobs/edge-proxy" }}{{ with nomadVar "nomad/jobs/edge-proxy" }}{{ .hmac_key }}{{ end }}{{ else if nomadVarExists "nomad/jobs/aerial-edge-proxy" }}{{ with nomadVar "nomad/jobs/aerial-edge-proxy" }}{{ .hmac_key }}{{ end }}{{ else if nomadVarExists "nomad/jobs/webhooks-edge" }}{{ with nomadVar "nomad/jobs/webhooks-edge" }}{{ .hmac_key }}{{ end }}{{ end }}";
+    const secret = "{{ if nomadVarExists "nomad/jobs/shared" }}{{ with nomadVar "nomad/jobs/shared" }}{{ .GITHUB_WEBHOOK_SECRET }}{{ end }}{{ end }}";
     if (!secret) {
         r.return(500, '{"error":"HMAC key not configured in nomad variables"}\n');
         return;

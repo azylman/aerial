@@ -39,8 +39,35 @@ func TestBuildDaemonArgs(t *testing.T) {
 
 func TestBuildAgyEnv(t *testing.T) {
 	t.Parallel()
-	filt := FilterAgyBaseEnv([]string{"FOO=bar", "GEMINI_API_KEY=secret1", "gemini_api_key=secret2", "ANTIGRAVITY_API_KEY=s3", "GOOGLE_GENAI_API_KEY=s4", "MALFORMED_NO_EQUALS", "PATH=/usr/bin"})
-	if fj := strings.Join(filt, "\n"); strings.Contains(fj, "secret") || !strings.Contains(fj, "FOO=bar") || !strings.Contains(fj, "MALFORMED_NO_EQUALS") {
+	filt := FilterAgyBaseEnv([]string{
+		"FOO=bar",
+		"GEMINI_API_KEY=secret1",
+		"gemini_api_key=secret2",
+		"ANTIGRAVITY_API_KEY=s3",
+		"GOOGLE_GENAI_API_KEY=s4",
+		"gemini_harness_api_key=s5",
+		"AGY_GEMINI_API_KEY=s6",
+		"github_pat=s7",
+		"DISCORD_TOKEN=s8",
+		"discord_bot_token=s9",
+		"DATABASE_URL=s10",
+		"POSTGRES_PASSWORD=s11",
+		"ha_token=s12",
+		"OPENOBSERVE_PASSWORD=s13",
+		"OPENOBSERVE_ROOT_USER_PASSWORD=s14",
+		"unifi_pass=s15",
+		"UNIFI_PASSWORD=s16",
+		"op_service_account_token=s17",
+		"1PASSWORD_SERVICE_ACCOUNT_TOKEN=s18",
+		"qnap_pass=s19",
+		"NOMAD_TOKEN=s20",
+		"infisical_client_secret=s21",
+		"CLOUDFLARE_MCP_TOKEN=s22",
+		"ubereats_mcp_token=s23",
+		"MALFORMED_NO_EQUALS",
+		"PATH=/usr/bin",
+	})
+	if fj := strings.Join(filt, "\n"); strings.Contains(fj, "secret") || strings.Contains(fj, "=s") || !strings.Contains(fj, "FOO=bar") || !strings.Contains(fj, "MALFORMED_NO_EQUALS") || !strings.Contains(fj, "PATH=/usr/bin") {
 		t.Errorf("FilterAgyBaseEnv leak or drop: %v", filt)
 	}
 
@@ -63,9 +90,9 @@ func TestBuildAgyEnv(t *testing.T) {
 			[]string{"AERIAL_VANADIS_CHUNK_ID=stale-chunk", "HOME=/root", "USERPROFILE=C:\\root", "GEMINI_CLI_HOME=/gemini"},
 		},
 		{
-			AgyEnvInput{BaseEnv: []string{"CUSTOM_BASE=1", "GEMINI_API_KEY=ambient-key", "ANTIGRAVITY_API_KEY=ambient-key", "GOOGLE_GENAI_API_KEY=ambient-key", "gemini_api_key=ambient2", "AERIAL_VANADIS_CHUNK_ID=stale-chunk", "VANADIS_CHUNK_ID=stale-legacy-chunk", "MALFORMED_NO_EQUALS", "OTHER_ENV=kept"}},
+			AgyEnvInput{BaseEnv: []string{"CUSTOM_BASE=1", "GEMINI_API_KEY=ambient-key", "ANTIGRAVITY_API_KEY=ambient-key", "GOOGLE_GENAI_API_KEY=ambient-key", "gemini_api_key=ambient2", "GITHUB_PAT=secret-pat", "DISCORD_TOKEN=secret-discord", "DATABASE_URL=postgres://leak", "NOMAD_TOKEN=secret-nomad", "AERIAL_VANADIS_CHUNK_ID=stale-chunk", "VANADIS_CHUNK_ID=stale-legacy-chunk", "MALFORMED_NO_EQUALS", "OTHER_ENV=kept"}},
 			[]string{"CUSTOM_BASE=1", "OTHER_ENV=kept", "MALFORMED_NO_EQUALS"},
-			[]string{"ambient-key", "ambient2", "AERIAL_VANADIS_CHUNK_ID=stale-chunk", "VANADIS_CHUNK_ID=stale-legacy-chunk"},
+			[]string{"ambient-key", "ambient2", "secret-pat", "secret-discord", "postgres://leak", "secret-nomad", "AERIAL_VANADIS_CHUNK_ID=stale-chunk", "VANADIS_CHUNK_ID=stale-legacy-chunk"},
 		},
 		{
 			AgyEnvInput{TargetID: "discord-1564872824148205579"},

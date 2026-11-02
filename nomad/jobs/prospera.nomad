@@ -59,10 +59,6 @@ EOH
 {{ with nomadVar "nomad/jobs/shared" }}
 {{ if .POSTGRES_PASSWORD }}DATABASE_URL="postgres://aerial:{{ .POSTGRES_PASSWORD }}@postgres:5432/aerial?sslmode=disable"{{ end }}
 {{ if .GEMINI_HARNESS_API_KEY }}GEMINI_HARNESS_API_KEY="{{ .GEMINI_HARNESS_API_KEY }}"{{ end }}
-{{ end }}
-{{ end }}
-{{ if nomadVarExists "nomad/jobs/voice-call" }}
-{{ with nomadVar "nomad/jobs/voice-call" }}
 {{ if .TWILIO_ACCOUNT_SID }}TWILIO_ACCOUNT_SID="{{ .TWILIO_ACCOUNT_SID }}"{{ end }}
 {{ if .TWILIO_AUTH_TOKEN }}TWILIO_AUTH_TOKEN="{{ .TWILIO_AUTH_TOKEN }}"{{ end }}
 {{ if .TWILIO_FROM_NUMBER }}TWILIO_FROM_NUMBER="{{ .TWILIO_FROM_NUMBER }}"{{ end }}

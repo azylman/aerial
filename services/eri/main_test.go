@@ -896,6 +896,28 @@ func TestBuildPoolEnv(t *testing.T) {
 	}
 }
 
+func TestBuildPoolEnv_RootChown(t *testing.T) {
+	origGetEuid := getEuid
+	origChown := chownFile
+	defer func() {
+		getEuid = origGetEuid
+		chownFile = origChown
+	}()
+
+	var chowned []string
+	getEuid = func() int { return 0 }
+	chownFile = func(path string, uid, gid int) error {
+		chowned = append(chowned, path)
+		return nil
+	}
+
+	tmpDir := t.TempDir()
+	_ = buildPoolEnv([]string{"A=B"}, tmpDir)
+	if len(chowned) == 0 {
+		t.Errorf("expected chownFile to be called for cache directories when getEuid == 0")
+	}
+}
+
 type mockSequentialPool struct {
 	name       string
 	initCalled bool

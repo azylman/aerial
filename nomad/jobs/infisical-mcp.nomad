@@ -55,14 +55,6 @@ EOH
 
       template {
         data = <<EOH
-{{ if nomadVarExists "nomad/jobs/infisical-mcp" }}
-{{ with nomadVar "nomad/jobs/infisical-mcp" }}
-{{ if .client_id.Value }}INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="{{ .client_id.Value }}"{{ end }}
-{{ if .client_secret.Value }}INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET="{{ .client_secret.Value }}"{{ end }}
-{{ if .token.Value }}INFISICAL_TOKEN="{{ .token.Value }}"{{ end }}
-{{ if .project_id.Value }}INFISICAL_PROJECT_ID="{{ .project_id.Value }}"{{ end }}
-{{ end }}
-{{ end }}
 {{ if nomadVarExists "nomad/jobs/shared" }}
 {{ with nomadVar "nomad/jobs/shared" }}
 {{ if .INFISICAL_CLIENT_ID.Value }}INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="{{ .INFISICAL_CLIENT_ID.Value }}"{{ end }}
