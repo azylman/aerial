@@ -60,6 +60,9 @@ type ToolArgs struct {
 	ServerName        string          `json:"ServerName"`
 	ToolName          string          `json:"ToolName"`
 	Arguments         json.RawMessage `json:"Arguments"`
+	ServerNameLower   string          `json:"server_name,omitempty"`
+	ToolNameLower     string          `json:"tool_name,omitempty"`
+	ArgumentsLower    json.RawMessage `json:"arguments,omitempty"`
 	Action            string          `json:"Action"`
 	WaitMsBeforeAsync json.RawMessage `json:"WaitMsBeforeAsync"`
 	IsDaemon          json.RawMessage `json:"IsDaemon"`
@@ -90,7 +93,8 @@ func (a ToolArgs) WaitMs() int {
 
 func (a ToolArgs) hasAnyField() bool {
 	return a.FilePath() != "" || a.CommandLine != "" || a.Cwd != "" ||
-		a.ToolName != "" || a.ServerName != "" || a.Action != "" ||
+		a.ToolName != "" || a.ServerName != "" || a.ToolNameLower != "" || a.ServerNameLower != "" ||
+		a.Action != "" || len(a.Arguments) > 0 || len(a.ArgumentsLower) > 0 ||
 		len(a.WaitMsBeforeAsync) > 0 || len(a.IsDaemon) > 0
 }
 
