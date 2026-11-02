@@ -95,6 +95,12 @@ COPY --from=rust-builder /usr/local/rustup /usr/local/rustup
 COPY --from=rust-builder /usr/local/cargo /usr/local/cargo
 COPY --from=golangci/golangci-lint:v2.15.0 /usr/bin/golangci-lint /usr/local/bin/golangci-lint
 COPY --from=node:22-bookworm-slim /usr/local/bin/node /usr/local/bin/node
+COPY --from=node:22-bookworm-slim /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
+    ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx && \
+    ln -s ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack && \
+    node --version && \
+    npm --version
 COPY --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=docker:27-cli /usr/local/libexec/docker/cli-plugins/ /usr/local/libexec/docker/cli-plugins/
 
