@@ -518,6 +518,14 @@ func (p *WorkerPool) getDiscordSession() *discordgo.Session {
 
 func (p *WorkerPool) DiscordSession() *discordgo.Session { return p.getDiscordSession() }
 
+// AppConfig returns the worker pool's application configuration.
+func (p *WorkerPool) AppConfig() *config.Config {
+	if p == nil {
+		return nil
+	}
+	return p.appCfg
+}
+
 // ResolveChannelID resolves a channel name (e.g. "prospera" or "#prospera") or numeric snowflake ID to a channel ID.
 func (p *WorkerPool) ResolveChannelID(nameOrID string) (string, error) {
 	trimmed := strings.TrimSpace(nameOrID)

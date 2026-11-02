@@ -68,6 +68,10 @@ REMOTE_OUTPUT=$(bash -c "
     echo \"url4:\${PARSED_OWNER}/\${PARSED_REPO}\"
     extract_remote_repo \"https://github.com/myorg/repo.with.dots.git\"
     echo \"url5:\${PARSED_OWNER}/\${PARSED_REPO}\"
+    extract_remote_repo \"http://127.0.0.1:8088/internal/github-git/azylman/aerial.git\"
+    echo \"url6:\${PARSED_OWNER}/\${PARSED_REPO}\"
+    extract_remote_repo \"http://127.0.0.1:8088/internal/github-git/azylman/aerial\"
+    echo \"url7:\${PARSED_OWNER}/\${PARSED_REPO}\"
 ")
 
 assert_eq "url1:azylman/aerial-sidecars" "$(echo "$REMOTE_OUTPUT" | grep '^url1:')" "extract_remote_repo https://github.com/azylman/aerial-sidecars.git"
@@ -75,6 +79,23 @@ assert_eq "url2:azylman/aerial-config" "$(echo "$REMOTE_OUTPUT" | grep '^url2:')
 assert_eq "url3:myorg/myrepo" "$(echo "$REMOTE_OUTPUT" | grep '^url3:')" "extract_remote_repo https://github.com/myorg/myrepo"
 assert_eq "url4:azylman/aerial-sidecars" "$(echo "$REMOTE_OUTPUT" | grep '^url4:')" "extract_remote_repo https://github.com/azylman/aerial-sidecars/ (trailing slash)"
 assert_eq "url5:myorg/repo.with.dots" "$(echo "$REMOTE_OUTPUT" | grep '^url5:')" "extract_remote_repo https://github.com/myorg/repo.with.dots.git (dots in name)"
+assert_eq "url6:azylman/aerial" "$(echo "$REMOTE_OUTPUT" | grep '^url6:')" "extract_remote_repo loopback URL with .git"
+assert_eq "url7:azylman/aerial" "$(echo "$REMOTE_OUTPUT" | grep '^url7:')" "extract_remote_repo loopback URL without .git"
+
+# Test 2B: Loopback detection and build_auth_header
+LOOPBACK_OUTPUT=$(bash -c "
+    REPO_TEST_MODE=1
+    unset GITHUB_PAT
+    export AERIAL_USE_LOOPBACK_GITHUB=1
+    export AERIAL_INTERNAL_ERI_URL=\"http://127.0.0.1:9099\"
+    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
+    echo \"loopback_flag:\${USE_LOOPBACK_GITHUB}\"
+    echo \"api_base:\${GITHUB_API_BASE}\"
+    echo \"auth_hdr:\$(build_auth_header)\"
+")
+assert_eq "loopback_flag:1" "$(echo "$LOOPBACK_OUTPUT" | grep '^loopback_flag:')" "USE_LOOPBACK_GITHUB set when AERIAL_USE_LOOPBACK_GITHUB=1"
+assert_eq "api_base:http://127.0.0.1:9099/internal/github-api" "$(echo "$LOOPBACK_OUTPUT" | grep '^api_base:')" "GITHUB_API_BASE set to loopback endpoint"
+assert_eq "auth_hdr:loopback" "$(echo "$LOOPBACK_OUTPUT" | grep '^auth_hdr:')" "build_auth_header returns loopback when USE_LOOPBACK_GITHUB=1"
 
 # Test 4: Pre-dispatch flag parsing works with invalid command (should show usage without erroring on --repo)
 USAGE_OUT=$(bash "${AERIAL_PR}" --repo aerial-config invalid-cmd 2>&1 || true)
@@ -435,7 +456,7 @@ ROBOREV_OVERRIDE_CHECK=$(
     echo "$err3" | grep -q "Rebuttal file not found" && echo "val3:ok" || echo "val3:fail"
 
     # Subtest 4: Missing GITHUB_PAT validation
-    err4=$(unset GITHUB_PAT; override_roborev 42 "rebuttal" 2>&1) || true
+    err4=$(unset GITHUB_PAT; USE_LOOPBACK_GITHUB=0 override_roborev 42 "rebuttal" 2>&1) || true
     echo "$err4" | grep -q "GITHUB_PAT environment variable must be set" && echo "val4:ok" || echo "val4:fail"
 
     # Subtest 5: Closed PR rejection
@@ -476,7 +497,7 @@ ROBOREV_OVERRIDE_CHECK=$(
             case "$1" in
                 -X) method="$2"; shift 2 ;;
                 -d) data="$2"; shift 2 ;;
-                https://*) url="$1"; shift ;;
+                http://*|https://*) url="$1"; shift ;;
                 *) shift ;;
             esac
         done
@@ -513,7 +534,7 @@ ROBOREV_OVERRIDE_CHECK=$(
         local url=""
         while [ $# -gt 0 ]; do
             case "$1" in
-                https://*) url="$1"; shift ;;
+                http://*|https://*) url="$1"; shift ;;
                 *) shift ;;
             esac
         done
@@ -554,7 +575,7 @@ ROBOREV_OVERRIDE_CHECK=$(
         while [ $# -gt 0 ]; do
             case "$1" in
                 -d) data="$2"; shift 2 ;;
-                https://*) url="$1"; shift ;;
+                http://*|https://*) url="$1"; shift ;;
                 *) shift ;;
             esac
         done
@@ -585,7 +606,7 @@ ROBOREV_OVERRIDE_CHECK=$(
         local url=""
         while [ $# -gt 0 ]; do
             case "$1" in
-                https://*) url="$1"; shift ;;
+                http://*|https://*) url="$1"; shift ;;
                 *) shift ;;
             esac
         done

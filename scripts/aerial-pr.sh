@@ -12,6 +12,15 @@ REPO_NAME="${AERIAL_REPO_NAME:-$DEFAULT_REPO}"
 REPO_NAME_EXPLICIT=0
 DEFAULT_BRANCH="main"
 
+GITHUB_API_BASE="${GITHUB_API_URL:-https://api.github.com}"
+USE_LOOPBACK_GITHUB=0
+if [ -z "${GITHUB_PAT:-}" ]; then
+    if [ "${AERIAL_USE_LOOPBACK_GITHUB:-0}" = "1" ] || { [ "${REPO_TEST_MODE:-0}" != "1" ] && [ "$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 1 -m 2 "${AERIAL_INTERNAL_ERI_URL:-http://127.0.0.1:8088}/healthz" 2>/dev/null || true)" = "200" ]; }; then
+        USE_LOOPBACK_GITHUB=1
+        GITHUB_API_BASE="${AERIAL_INTERNAL_ERI_URL:-http://127.0.0.1:8088}/internal/github-api"
+    fi
+fi
+
 normalize_repo() {
     local r="${1:-}"
     # Strip any leading owner/ prefix (e.g. azylman/aerial-config -> aerial-config)
@@ -40,9 +49,9 @@ extract_remote_repo() {
     PARSED_REPO=""
     local clean_url="${remote_url%/}"
     clean_url="${clean_url%.git}"
-    if [[ "$clean_url" =~ github\.com[:/]([^/]+)/([^/]+)$ ]]; then
-        PARSED_OWNER="${BASH_REMATCH[1]}"
-        PARSED_REPO="${BASH_REMATCH[2]}"
+    if [[ "$clean_url" =~ (github\.com|/internal/github-git)[:/]([^/]+)/([^/]+)$ ]]; then
+        PARSED_OWNER="${BASH_REMATCH[2]}"
+        PARSED_REPO="${BASH_REMATCH[3]}"
     fi
 }
 
@@ -137,6 +146,10 @@ if [ -n "$cmd" ]; then
 fi
 
 build_auth_header() {
+    if [ "${USE_LOOPBACK_GITHUB:-0}" = "1" ]; then
+        echo "loopback"
+        return 0
+    fi
     local pat="${GITHUB_PAT:-}"
     if [ -z "$pat" ]; then
         echo "ERROR: GITHUB_PAT environment variable is required." >&2
@@ -199,7 +212,11 @@ init_scratch() {
         esac
     done
 
-    REPO_URL="${AERIAL_REPO_URL_OVERRIDE:-https://github.com/${REPO_OWNER}/${REPO_NAME}.git}"
+    local default_repo_url="https://github.com/${REPO_OWNER}/${REPO_NAME}.git"
+    if [ "${USE_LOOPBACK_GITHUB:-0}" = "1" ]; then
+        default_repo_url="${AERIAL_INTERNAL_ERI_URL:-http://127.0.0.1:8088}/internal/github-git/${REPO_OWNER}/${REPO_NAME}.git"
+    fi
+    REPO_URL="${AERIAL_REPO_URL_OVERRIDE:-$default_repo_url}"
 
     local auth_header
     auth_header=$(build_auth_header)
@@ -290,7 +307,7 @@ resolve_vanadis_chunk_id() {
 enable_github_auto_merge() {
     local node_id="$1"
     local pr_num="${2:-}"
-    if [ -z "$node_id" ] || [ -z "${GITHUB_PAT:-}" ]; then
+    if [ -z "$node_id" ] || { [ -z "${GITHUB_PAT:-}" ] && [ "${USE_LOOPBACK_GITHUB:-0}" -ne 1 ]; }; then
         return 0
     fi
 
@@ -311,11 +328,16 @@ enable_github_auto_merge() {
         --arg node_id "$node_id" \
         '{query: $query, variables: {input: {pullRequestId: $node_id, mergeMethod: "SQUASH"}}}')
 
+    local auth_args=()
+    if [ -n "${GITHUB_PAT:-}" ]; then
+        auth_args=(-H "Authorization: token ${GITHUB_PAT}")
+    fi
+
     local resp
     resp=$(curl -s --connect-timeout 3 -m 10 -X POST \
-        -H "Authorization: token ${GITHUB_PAT}" \
+        "${auth_args[@]}" \
         -H "Content-Type: application/json" \
-        "https://api.github.com/graphql" \
+        "${GITHUB_API_BASE}/graphql" \
         -d "$payload" 2>/dev/null || true)
 
     if echo "$resp" | jq -e '.data.enablePullRequestAutoMerge.pullRequest.autoMergeRequest != null' >/dev/null 2>&1; then
@@ -384,10 +406,14 @@ push_scratch_branch() {
 
 lookup_existing_open_pr() {
     local branch="$1"
+    local auth_args=()
+    if [ -n "${GITHUB_PAT:-}" ]; then
+        auth_args=(-H "Authorization: token ${GITHUB_PAT}")
+    fi
     curl -s --connect-timeout 3 -m 10 \
-        -H "Authorization: token ${GITHUB_PAT}" \
+        "${auth_args[@]}" \
         -H "Accept: application/vnd.github.v3+json" \
-        "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/pulls?state=open&head=${REPO_OWNER}:${branch}" 2>/dev/null | jq -c '.[0] // empty' 2>/dev/null || true
+        "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/pulls?state=open&head=${REPO_OWNER}:${branch}" 2>/dev/null | jq -c '.[0] // empty' 2>/dev/null || true
 }
 
 format_aerial_pr_trailer() {
@@ -624,7 +650,7 @@ submit_scratch() {
     # If submitting on an existing PR branch without a local description, inherit metadata from the open PR
     local current_branch existing_pr=""
     current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
-    if [ -z "${pr_body//[[:space:]]/}" ] && [ -n "${GITHUB_PAT:-}" ] && [ -n "$current_branch" ] && [ "$current_branch" != "$DEFAULT_BRANCH" ] && [ "$current_branch" != "HEAD" ]; then
+    if [ -z "${pr_body//[[:space:]]/}" ] && { [ -n "${GITHUB_PAT:-}" ] || [ "${USE_LOOPBACK_GITHUB:-0}" -eq 1 ]; } && [ -n "$current_branch" ] && [ "$current_branch" != "$DEFAULT_BRANCH" ] && [ "$current_branch" != "HEAD" ]; then
         existing_pr=$(lookup_existing_open_pr "$current_branch")
         if [ -n "$existing_pr" ]; then
             pr_body=$(echo "$existing_pr" | jq -r '.body // empty')
@@ -756,10 +782,15 @@ submit_scratch() {
             --arg body "$pr_body" \
             '{title: $title, head: $head, base: $base, body: $body}')
 
+        local auth_args=()
+        if [ -n "${GITHUB_PAT:-}" ]; then
+            auth_args=(-H "Authorization: token ${GITHUB_PAT}")
+        fi
+
         pr_raw=$(curl -s --connect-timeout 3 -m 10 -w "\n%{http_code}" -X POST \
-            -H "Authorization: token ${GITHUB_PAT}" \
+            "${auth_args[@]}" \
             -H "Accept: application/vnd.github.v3+json" \
-            "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/pulls" \
+            "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/pulls" \
             -d "$pr_payload")
 
         pr_code=$(echo "$pr_raw" | tail -n1)
@@ -779,10 +810,14 @@ submit_scratch() {
         echo "ERROR: Failed to create Pull Request (HTTP ${pr_code}): ${pr_resp}" >&2
         # Prune remote branch only when it was newly created (never delete an existing remote PR branch)
         if [ "${PUSH_UPDATED_EXISTING:-0}" -eq 0 ] && [ -z "${existing_pr:-}" ]; then
+            local del_auth_args=()
+            if [ -n "${GITHUB_PAT:-}" ]; then
+                del_auth_args=(-H "Authorization: token ${GITHUB_PAT}")
+            fi
             curl -s --connect-timeout 3 -m 10 -X DELETE \
-                -H "Authorization: token ${GITHUB_PAT}" \
+                "${del_auth_args[@]}" \
                 -H "Accept: application/vnd.github.v3+json" \
-                "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/git/refs/heads/${branch}" >/dev/null 2>&1 || true
+                "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/git/refs/heads/${branch}" >/dev/null 2>&1 || true
         fi
         # Prevent trap from nuking the local workspace so code can be recovered
         if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
@@ -931,8 +966,8 @@ override_roborev() {
         exit 1
     fi
 
-    if [ -z "${GITHUB_PAT:-}" ]; then
-        echo "ERROR: GITHUB_PAT environment variable must be set." >&2
+    if [ -z "${GITHUB_PAT:-}" ] && [ "${USE_LOOPBACK_GITHUB:-0}" -ne 1 ]; then
+        echo "ERROR: GITHUB_PAT environment variable must be set (or loopback proxy available)." >&2
         exit 1
     fi
 
@@ -947,14 +982,18 @@ override_roborev() {
     fi
 
     gh_api_call() {
+        local auth_args=()
+        if [ -n "${GITHUB_PAT:-}" ]; then
+            auth_args=(-H "Authorization: token ${GITHUB_PAT}")
+        fi
         curl -s --connect-timeout 3 -m 15 --retry 3 --retry-delay 2 --retry-connrefused -w "\n%{http_code}" \
-            -H "Authorization: token ${GITHUB_PAT}" \
+            "${auth_args[@]}" \
             -H "Accept: application/vnd.github.v3+json" "$@"
     }
 
     # 1. Fetch Pull Request details
     local pr_raw pr_code pr_resp
-    pr_raw=$(gh_api_call -X GET "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${pr_num}")
+    pr_raw=$(gh_api_call -X GET "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${pr_num}")
     pr_code=$(echo "$pr_raw" | tail -n1)
     pr_resp=$(echo "$pr_raw" | sed '$d')
 
@@ -992,7 +1031,7 @@ EOF
 )
     comment_payload=$(jq -n --arg b "$comment_body" '{body: $b}')
     comment_raw=$(gh_api_call -H "Content-Type: application/json" -X POST -d "$comment_payload" \
-        "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/issues/${pr_num}/comments")
+        "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/issues/${pr_num}/comments")
     comment_code=$(echo "$comment_raw" | tail -n1)
 
     if [ -z "$comment_code" ] || [ "$comment_code" -lt 200 ] || [ "$comment_code" -ge 300 ]; then
@@ -1004,7 +1043,7 @@ EOF
 
     # 3. Locate single latest RoboRev workflow run for head_sha
     local runs_raw runs_code runs_resp run_id
-    runs_raw=$(gh_api_call -X GET "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs?head_sha=${head_sha}")
+    runs_raw=$(gh_api_call -X GET "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs?head_sha=${head_sha}")
     runs_code=$(echo "$runs_raw" | tail -n1)
     runs_resp=$(echo "$runs_raw" | sed '$d')
 
@@ -1025,12 +1064,12 @@ EOF
 
     # 4. Trigger workflow re-run (rerun-failed-jobs falling back to rerun)
     local rerun_raw rerun_code
-    rerun_raw=$(gh_api_call -X POST "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs/${run_id}/rerun-failed-jobs")
+    rerun_raw=$(gh_api_call -X POST "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs/${run_id}/rerun-failed-jobs")
     rerun_code=$(echo "$rerun_raw" | tail -n1)
 
     if [ -z "$rerun_code" ] || [ "$rerun_code" -lt 200 ] || [ "$rerun_code" -ge 300 ]; then
         echo "⚠️ rerun-failed-jobs returned HTTP ${rerun_code}; attempting fallback to full workflow rerun..." >&2
-        rerun_raw=$(gh_api_call -X POST "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs/${run_id}/rerun")
+        rerun_raw=$(gh_api_call -X POST "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs/${run_id}/rerun")
         rerun_code=$(echo "$rerun_raw" | tail -n1)
         if [ -z "$rerun_code" ] || [ "$rerun_code" -lt 200 ] || [ "$rerun_code" -ge 300 ]; then
             local rerun_resp

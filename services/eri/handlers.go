@@ -19,6 +19,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/sanitizer"
+	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
 	"github.com/azylman/aerial/services/eri/pkg/discord"
@@ -1238,15 +1239,23 @@ func (rec *statusRecorder) Flush() {
 
 func normalizeRoute(path string) string {
 	switch {
-	case path == "/prompt", path == "/dispatch", path == "/dispatch/cancel", path == "/health", path == "/metrics", path == "/internal/llm",
+	case path == "/prompt", path == "/dispatch", path == "/dispatch/cancel", path == "/metrics", path == "/internal/llm",
 		path == "/internal/discord/message", path == "/internal/discord/interaction", path == "/internal/guard/scan":
 		return path
+	case path == "/health" || path == "/healthz":
+		return "/health"
 	case path == "/voice/ask" || path == "/api/voice/ask":
 		return "/voice/ask"
 	case strings.HasPrefix(path, "/transcripts/") || strings.HasPrefix(path, "/api/transcripts"):
 		return "/transcripts"
 	case path == "/tasks" || strings.HasPrefix(path, "/tasks/"):
 		return "/tasks"
+	case path == "/internal/mcp" || strings.HasPrefix(path, "/internal/mcp/"):
+		return "/internal/mcp"
+	case path == "/internal/github-api" || strings.HasPrefix(path, "/internal/github-api/"):
+		return "/internal/github-api"
+	case path == "/internal/github-git" || strings.HasPrefix(path, "/internal/github-git/"):
+		return "/internal/github-git"
 	default:
 		return "unmatched"
 	}
@@ -1347,6 +1356,17 @@ func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, embedder 
 	mux.HandleFunc("/internal/discord/message", handleInternalDiscordMessage(store, pool))
 	mux.HandleFunc("/internal/discord/interaction", handleInternalDiscordInteraction(store, pool))
 	mux.HandleFunc("/internal/guard/scan", handleInternalGuardScan())
+
+	var cfg *config.Config
+	if pool != nil && pool.AppConfig() != nil {
+		cfg = pool.AppConfig()
+	} else {
+		cfg = config.ActiveConfig()
+	}
+	mux.HandleFunc("/internal/mcp/", handleInternalMCPProxy(cfg))
+	mux.HandleFunc("/internal/github-api/", handleInternalGitHubAPIProxy(cfg))
+	mux.HandleFunc("/internal/github-git/", handleInternalGitHubGitProxy(cfg))
+
 	mux.HandleFunc("/voice/ask", handleVoiceAsk(pool))
 	mux.HandleFunc("/api/voice/ask", handleVoiceAsk(pool))
 	mux.HandleFunc("/transcripts/search", handleTranscriptSearch(store, embedder))
@@ -1362,12 +1382,14 @@ func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, embedder 
 	}
 	mux.HandleFunc("/internal/llm", handleInternalLLM(llmFn))
 	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("eri"))
-	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	healthHandler := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write([]byte(`{"status":"ok"}`)); err != nil {
 			log.Printf("[HTTP] Failed to write health response: %v", err)
 		}
-	})
+	}
+	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/healthz", healthHandler)
 	return mux
 }
