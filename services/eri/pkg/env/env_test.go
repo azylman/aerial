@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 )
 
@@ -1292,6 +1293,8 @@ func TestResolveUpstreamMCPServer(t *testing.T) {
 }
 
 func TestSanitizeMCPServersForDisk(t *testing.T) {
+	sanitizer.RegisterSensitiveTokens("secret-webhook-token-12345")
+	defer sanitizer.ResetSensitiveTokensForTest()
 	tests := []struct {
 		name        string
 		servers     map[string]any
@@ -1309,6 +1312,40 @@ func TestSanitizeMCPServersForDisk(t *testing.T) {
 			},
 			port:        "8088",
 			wantURL:     "http://127.0.0.1:8088/internal/mcp/openobserve",
+			wantHeaders: false,
+		},
+		{
+			name: "server with registered secret in serverUrl gets rewritten",
+			servers: map[string]any{
+				"ha-mcp": map[string]any{
+					"serverUrl": "http://192.168.1.14:8123/api/webhook/secret-webhook-token-12345",
+				},
+			},
+			port:        "8088",
+			wantURL:     "http://127.0.0.1:8088/internal/mcp/ha-mcp",
+			wantHeaders: false,
+		},
+		{
+			name: "server with registered secret in snake_case server_url gets rewritten",
+			servers: map[string]any{
+				"ha-mcp": map[string]any{
+					"server_url": "http://192.168.1.14:8123/api/webhook/secret-webhook-token-12345",
+				},
+			},
+			port:        "8088",
+			wantURL:     "http://127.0.0.1:8088/internal/mcp/ha-mcp",
+			wantHeaders: false,
+		},
+		{
+			name: "server with headers and snake_case server_url gets rewritten and credentials deleted",
+			servers: map[string]any{
+				"ha-mcp": map[string]any{
+					"server_url": "http://192.168.1.14:8123/api/webhook/secret-webhook-token-12345",
+					"headers":    map[string]string{"Authorization": "Bearer secret"},
+				},
+			},
+			port:        "8088",
+			wantURL:     "http://127.0.0.1:8088/internal/mcp/ha-mcp",
 			wantHeaders: false,
 		},
 		{
@@ -1365,6 +1402,9 @@ func TestSanitizeMCPServersForDisk(t *testing.T) {
 					}
 					if !tc.wantHeaders && sMap["headers"] != nil {
 						t.Errorf("server %q headers = %v, want nil", name, sMap["headers"])
+					}
+					if sMap["server_url"] != nil {
+						t.Errorf("server %q server_url = %v, want nil", name, sMap["server_url"])
 					}
 				}
 			}

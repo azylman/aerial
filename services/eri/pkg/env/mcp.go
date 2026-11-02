@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 )
 
@@ -38,7 +39,7 @@ func loadOpenObserveMCPServer(cur *config.ConfigData, mergedServers map[string]a
 }
 
 // SanitizeMCPServersForDisk scrubs credentials from MCP servers for writing to disk,
-// rewriting servers with headers through the eri loopback proxy.
+// rewriting servers with headers or secret-bearing URLs through the eri loopback proxy.
 func SanitizeMCPServersForDisk(servers map[string]any, loopbackPort string) {
 	port := strings.TrimPrefix(strings.TrimSpace(loopbackPort), ":")
 	if port == "" || port == "0" {
@@ -49,14 +50,22 @@ func SanitizeMCPServersForDisk(servers map[string]any, loopbackPort string) {
 		if !ok {
 			continue
 		}
-		hasHeaders := false
+		needsProxy := false
 		if h, ok := srvMap["headers"].(map[string]string); ok && len(h) > 0 {
-			hasHeaders = true
+			needsProxy = true
 		} else if h, ok := srvMap["headers"].(map[string]any); ok && len(h) > 0 {
-			hasHeaders = true
+			needsProxy = true
 		}
-		if hasHeaders {
+		if !needsProxy {
+			if rawURL, ok := srvMap["serverUrl"].(string); ok && rawURL != "" && sanitizer.SanitizeString(rawURL) != rawURL {
+				needsProxy = true
+			} else if rawURL, ok := srvMap["server_url"].(string); ok && rawURL != "" && sanitizer.SanitizeString(rawURL) != rawURL {
+				needsProxy = true
+			}
+		}
+		if needsProxy {
 			delete(srvMap, "headers")
+			delete(srvMap, "server_url")
 			srvMap["serverUrl"] = fmt.Sprintf("http://127.0.0.1:%s/internal/mcp/%s", port, name)
 			servers[name] = srvMap
 		}
