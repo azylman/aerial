@@ -33,13 +33,50 @@ if [ -n "$MASK_SECRETS" ]; then
   export INFISICAL_MASK_SECRET_VALUES="$MASK_SECRETS"
 fi
 
-# Check if required Infisical credentials are present.
+# Unset empty or whitespace-only Infisical env vars so @infisical/mcp's Zod
+# min(1).optional() validator never trips on empty strings rendered by templates.
+for var_name in \
+  INFISICAL_TOKEN \
+  INFISICAL_UNIVERSAL_AUTH_CLIENT_ID \
+  INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET \
+  INFISICAL_PROJECT_ID \
+  INFISICAL_ENABLED_TOOLS; do
+  eval "raw_val=\${$var_name:-}"
+  trimmed_val=$(printf '%s' "$raw_val" | tr -d '[:space:]')
+  if [ -z "$trimmed_val" ]; then
+    unset "$var_name"
+  fi
+done
+
+# Check if required Infisical credentials are present; fall back to mesh auto-auth token endpoint if absent.
 AUTH_CONFIGURED=false
 
-if [ -n "$INFISICAL_TOKEN" ]; then
+if [ -n "${INFISICAL_UNIVERSAL_AUTH_CLIENT_ID:-}" ] && [ -n "${INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET:-}" ]; then
+  export INFISICAL_AUTH_METHOD="${AUTH_METHOD:-universal-auth}"
   AUTH_CONFIGURED=true
-elif [ -n "$INFISICAL_UNIVERSAL_AUTH_CLIENT_ID" ] && [ -n "$INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET" ]; then
+elif [ -n "${INFISICAL_TOKEN:-}" ]; then
+  export INFISICAL_AUTH_METHOD="access-token"
   AUTH_CONFIGURED=true
+elif command -v curl >/dev/null 2>&1; then
+  FALLBACK_JSON=$(curl -fsS --max-time 5 -X POST "${INF_HOST%/}/api/v1/auth/token" 2>/dev/null || true)
+  if [ -n "$FALLBACK_JSON" ]; then
+    FALLBACK_TOKEN=$(printf '%s' "$FALLBACK_JSON" | node -e '
+      let d = "";
+      process.stdin.on("data", c => d += c);
+      process.stdin.on("end", () => {
+        try {
+          const j = JSON.parse(d);
+          const t = (j.token || j.accessToken || "").trim();
+          if (t) process.stdout.write(t);
+        } catch (_) {}
+      });
+    ' 2>/dev/null || true)
+    if [ -n "$FALLBACK_TOKEN" ]; then
+      export INFISICAL_TOKEN="$FALLBACK_TOKEN"
+      export INFISICAL_AUTH_METHOD="access-token"
+      AUTH_CONFIGURED=true
+    fi
+  fi
 fi
 
 if [ "$AUTH_CONFIGURED" = "true" ]; then
