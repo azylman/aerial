@@ -794,6 +794,8 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		return err
 	}
 
+	config.RegisterConfigTokens(cfg)
+
 	provisioner := env.NewFromConfig(cfg)
 	if err := InitializeBrainEnvironment(ctx, cfg); err != nil {
 		log.Printf("Warning initializing brain environment: %v", err)
@@ -819,8 +821,6 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 			}
 		}()
 	}
-
-	config.RegisterConfigTokens(cfg)
 
 	sessionMgr := session.New(cfg.GeminiHomeDir(), cfg.DataDir())
 
