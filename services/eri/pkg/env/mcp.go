@@ -37,6 +37,115 @@ func loadOpenObserveMCPServer(cur *config.ConfigData, mergedServers map[string]a
 	}
 }
 
+// SanitizeMCPServersForDisk scrubs credentials from MCP servers for writing to disk,
+// rewriting servers with headers through the eri loopback proxy.
+func SanitizeMCPServersForDisk(servers map[string]any, loopbackPort string) {
+	port := strings.TrimPrefix(strings.TrimSpace(loopbackPort), ":")
+	if port == "" || port == "0" {
+		port = "8088"
+	}
+	for name, val := range servers {
+		srvMap, ok := val.(map[string]any)
+		if !ok {
+			continue
+		}
+		hasHeaders := false
+		if h, ok := srvMap["headers"].(map[string]string); ok && len(h) > 0 {
+			hasHeaders = true
+		} else if h, ok := srvMap["headers"].(map[string]any); ok && len(h) > 0 {
+			hasHeaders = true
+		}
+		if hasHeaders {
+			delete(srvMap, "headers")
+			srvMap["serverUrl"] = fmt.Sprintf("http://127.0.0.1:%s/internal/mcp/%s", port, name)
+			servers[name] = srvMap
+		}
+	}
+}
+
+// ResolveUpstreamMCPServer builds the unredacted server map from cfg and returns the upstream URL and headers for serverName.
+func ResolveUpstreamMCPServer(cfg *config.Config, serverName string) (serverURL string, headers map[string]string, ok bool) {
+	if cfg == nil || serverName == "" {
+		return "", nil, false
+	}
+	cur := cfg.Current()
+	if cur == nil {
+		return "", nil, false
+	}
+
+	mergedServers := make(map[string]any)
+	mergedServers["scheduler"] = map[string]any{
+		"serverUrl": "http://haro.aerial/mcp",
+	}
+	mergedServers["memory"] = map[string]any{
+		"serverUrl": "http://coven.aerial/mcp",
+	}
+	mergedServers["discord"] = map[string]any{
+		"serverUrl": "http://discord-mcp:4001/mcp",
+	}
+	mergedServers["vanadis"] = map[string]any{
+		"serverUrl": "http://vanadis.aerial/mcp",
+	}
+	if cur.GitHubPAT != "" {
+		mergedServers["github"] = map[string]any{
+			"serverUrl": "http://github-mcp:4003/mcp",
+		}
+	}
+	loadOpenObserveMCPServer(cur, mergedServers)
+
+	loadFileBasedMCPServers(cur.DataDir, cur.MCPConfig, mergedServers)
+
+	targetMaps := []map[string]json.RawMessage{
+		cur.McpServers.Common,
+		cur.McpServers.Discord,
+		cur.McpServers.Voice,
+		cur.McpServers.Ephemeral,
+	}
+	for _, srvMap := range targetMaps {
+		for k, v := range srvMap {
+			var parsedVal any
+			if err := json.Unmarshal(v, &parsedVal); err == nil {
+				mergedServers[k] = parsedVal
+			} else {
+				mergedServers[k] = v
+			}
+		}
+	}
+
+	val, found := mergedServers[serverName]
+	if !found {
+		return "", nil, false
+	}
+
+	srvMap, ok := val.(map[string]any)
+	if !ok {
+		return "", nil, false
+	}
+
+	var rawURL string
+	if u, ok := srvMap["serverUrl"].(string); ok {
+		rawURL = u
+	} else if u, ok := srvMap["server_url"].(string); ok {
+		rawURL = u
+	}
+	if rawURL == "" {
+		return "", nil, false
+	}
+
+	hMap := make(map[string]string)
+	if h, ok := srvMap["headers"].(map[string]string); ok {
+		maps.Copy(hMap, h)
+	} else if h, ok := srvMap["headers"].(map[string]any); ok {
+		for k, v := range h {
+			if sv, ok := v.(string); ok {
+				hMap[k] = sv
+			}
+		}
+	}
+
+	return rawURL, hMap, true
+}
+
 func loadFileBasedMCPServers(dataDir, fallbackConfig string, mergedServers map[string]any) {
 	configPaths := []string{
 		"/share/aerial-config/mcp.config.json",
@@ -167,6 +276,12 @@ func (p *Provisioner) LoadTargetMCPConfig(cfg *config.Config, target RuleTarget)
 
 	// 3. Overlay custom MCP servers from config.yaml
 	overlayConfigMCPServers(cfg, target, mergedServers)
+
+	var loopbackPort string
+	if cfg != nil {
+		loopbackPort = cfg.Current().Port
+	}
+	SanitizeMCPServersForDisk(mergedServers, loopbackPort)
 
 	finalConfig := map[string]any{
 		"mcpServers": mergedServers,

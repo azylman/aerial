@@ -489,6 +489,9 @@ func TestRepoAndCommitDetection(t *testing.T) {
 func TestCheckCommit(t *testing.T) {
 	oldRunner := gitCmdRunner
 	defer func() { gitCmdRunner = oldRunner }()
+	oldGuardScanURL := GuardScanURL
+	GuardScanURL = ""
+	defer func() { GuardScanURL = oldGuardScanURL }()
 
 	tmpCore := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(tmpCore, ".git"), 0o755); err != nil {
