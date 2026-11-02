@@ -270,10 +270,8 @@ func (s *RouterServer) completeCIFailureTransition(ctx context.Context, res *Res
 	return s.dispatchCIFailurePrompt(ctx, res.TargetID, res.CheckName, res.Repo, res.HeadSHA, res.PRNumber, details, checkURL, res.Branch)
 }
 
-func formatCollaboratorCIFailureMessage(mention, repo string, prNumber int, prTitle, branch, headSHA, checkName, checkURL, details string) string {
+func formatCollaboratorPRTarget(repo string, prNumber int, prTitle, branch, headSHA string) string {
 	normRepo := normalizeRepo(repo)
-	cleanMention := strings.TrimSpace(mention)
-	cleanCheckName := strings.TrimSpace(checkName)
 	cleanTitle := strings.TrimSpace(prTitle)
 	cleanBranch := strings.TrimPrefix(strings.TrimSpace(branch), "refs/heads/")
 	shortSHA := strings.TrimSpace(headSHA)
@@ -284,17 +282,6 @@ func formatCollaboratorCIFailureMessage(mention, repo string, prNumber int, prTi
 	prLink := fmt.Sprintf("[%s#%d](https://github.com/%s/pull/%d)", normRepo, prNumber, normRepo, prNumber)
 	if normRepo == "" {
 		prLink = fmt.Sprintf("PR #%d", prNumber)
-	}
-
-	var header strings.Builder
-	if cleanMention != "" {
-		header.WriteString(cleanMention)
-		header.WriteString(" ")
-	}
-	if cleanCheckName != "" {
-		fmt.Fprintf(&header, "CI check %q failed for %s", cleanCheckName, prLink)
-	} else {
-		fmt.Fprintf(&header, "CI check failed for %s", prLink)
 	}
 
 	var meta []string
@@ -308,11 +295,26 @@ func formatCollaboratorCIFailureMessage(mention, repo string, prNumber int, prTi
 		meta = append(meta, "commit: "+shortSHA)
 	}
 	if len(meta) > 0 {
-		header.WriteString(" (")
-		header.WriteString(strings.Join(meta, ", "))
-		header.WriteString(")")
+		return fmt.Sprintf("%s (%s)", prLink, strings.Join(meta, ", "))
 	}
-	header.WriteString(".")
+	return prLink
+}
+
+func formatCollaboratorCIFailureMessage(mention, repo string, prNumber int, prTitle, branch, headSHA, checkName, checkURL, details string) string {
+	cleanMention := strings.TrimSpace(mention)
+	cleanCheckName := strings.TrimSpace(checkName)
+	target := formatCollaboratorPRTarget(repo, prNumber, prTitle, branch, headSHA)
+
+	var header strings.Builder
+	if cleanMention != "" {
+		header.WriteString(cleanMention)
+		header.WriteString(" ")
+	}
+	if cleanCheckName != "" {
+		fmt.Fprintf(&header, "CI check %q failed for %s.", cleanCheckName, target)
+	} else {
+		fmt.Fprintf(&header, "CI check failed for %s.", target)
+	}
 
 	var extraLine string
 	if cleanURL := strings.TrimSpace(checkURL); cleanURL != "" {
@@ -320,6 +322,15 @@ func formatCollaboratorCIFailureMessage(mention, repo string, prNumber int, prTi
 	}
 
 	return formatErrorDetailsBlock(header.String(), details, extraLine, "")
+}
+
+func formatCollaboratorConflictMessage(mention, repo string, prNumber int, prTitle, branch, headSHA string) string {
+	target := formatCollaboratorPRTarget(repo, prNumber, prTitle, branch, headSHA)
+	cleanMention := strings.TrimSpace(mention)
+	if cleanMention != "" {
+		return fmt.Sprintf("%s Merge conflict with `main` detected on %s — automatic branch update could not resolve conflicts. Please rebase or merge `origin/main` and push.", cleanMention, target)
+	}
+	return fmt.Sprintf("Merge conflict with `main` detected on %s — automatic branch update could not resolve conflicts. Please rebase or merge `origin/main` and push.", target)
 }
 
 func (s *RouterServer) isCollaboratorAlertedForSHA(repo string, prNumber int, headSHA string) bool {
@@ -338,6 +349,60 @@ func (s *RouterServer) recordCollaboratorAlertSHA(repo string, prNumber int, hea
 	}
 	prev, loaded := s.collaboratorAlertedSHAs.Swap(prCheckKey(repo, prNumber), headSHA)
 	return !loaded || !strings.EqualFold(fmt.Sprint(prev), headSHA)
+}
+
+func (s *RouterServer) isCollaboratorConflictAlertedForSHA(repo string, prNumber int, headSHA string) bool {
+	headSHA = strings.TrimSpace(headSHA)
+	if s == nil || prNumber <= 0 || headSHA == "" || isZeroSHA(headSHA) {
+		return false
+	}
+	v, ok := s.collaboratorConflictSHAs.Load(prCheckKey(repo, prNumber))
+	return ok && strings.EqualFold(fmt.Sprint(v), headSHA)
+}
+
+func (s *RouterServer) recordCollaboratorConflictSHA(repo string, prNumber int, headSHA string) bool {
+	headSHA = strings.TrimSpace(headSHA)
+	if s == nil || prNumber <= 0 || headSHA == "" || isZeroSHA(headSHA) {
+		return false
+	}
+	prev, loaded := s.collaboratorConflictSHAs.Swap(prCheckKey(repo, prNumber), headSHA)
+	return !loaded || !strings.EqualFold(fmt.Sprint(prev), headSHA)
+}
+
+func (s *RouterServer) notifyCollaboratorConflict(ctx context.Context, repo string, pr GitHubPullRequest) error {
+	if s == nil || s.dispatcher == nil || pr.Number <= 0 || strings.TrimSpace(pr.Head.SHA) == "" || isZeroSHA(pr.Head.SHA) || !s.hasCollaboratorCIAlertsForRepo(repo) {
+		return nil
+	}
+	if s.isCollaboratorConflictAlertedForSHA(repo, pr.Number, pr.Head.SHA) {
+		return nil
+	}
+	targetSHA := strings.TrimSpace(pr.Head.SHA)
+	normRepo := normalizeRepo(repo)
+	if strings.TrimSpace(pr.User.Login) == "" {
+		path := fmt.Sprintf("/repos/%s/pulls/%d", normRepo, pr.Number)
+		if err := s.getGitHubJSON(ctx, path, 2<<20, &pr); err != nil {
+			return err
+		}
+	}
+	if pr.Merged || (pr.State != "" && !strings.EqualFold(pr.State, "open")) {
+		return nil
+	}
+	if pr.Head.SHA != "" && !strings.EqualFold(pr.Head.SHA, targetSHA) {
+		return nil
+	}
+	channelID, mention, ok := s.lookupCollaboratorCIAlert(repo, pr.User.Login)
+	if !ok {
+		return nil
+	}
+	if !s.recordCollaboratorConflictSHA(repo, pr.Number, targetSHA) {
+		return nil
+	}
+	msg := formatCollaboratorConflictMessage(mention, repo, pr.Number, pr.Title, pr.Head.Ref, targetSHA)
+	if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{ChannelID: channelID, Content: msg}); err != nil {
+		s.collaboratorConflictSHAs.CompareAndDelete(prCheckKey(repo, pr.Number), targetSHA)
+		return err
+	}
+	return nil
 }
 
 func (s *RouterServer) notifyCollaboratorCIFailure(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) error {

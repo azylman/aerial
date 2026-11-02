@@ -68,30 +68,40 @@ func (s *RouterServer) isAutoUpdateAuthorAllowed(author string) bool {
 	return false
 }
 
-func (s *RouterServer) handleDirtyPRConflict(ctx context.Context, repo string, pr RegisteredPR) {
-	if pr.HeadSHA != "" {
-		s.nonRoboRevFailedSHAs.Store(prCheckKey(repo, pr.PRNumber), strings.TrimSpace(pr.HeadSHA))
-	}
-	s.recordFailedCISHA(repo, pr.PRNumber, pr.HeadSHA)
+func (s *RouterServer) transitionRegisteredConflict(ctx context.Context, repo string, prNumber int, branch, headSHA string) (bool, error) {
 	if s.registry == nil {
-		return
+		return false, nil
 	}
-	targetID, updated, trErr := s.registry.AtomicTransitionConflict(ctx, repo, pr.PRNumber)
-	if trErr != nil {
-		log.Printf("[synapse] [registry] error transitioning PR #%d to conflict: %v", pr.PRNumber, trErr)
-		return
+	targetID, updated, err := s.registry.AtomicTransitionConflict(ctx, repo, prNumber)
+	if err != nil {
+		return false, err
 	}
 	if updated {
-		targetID = firstNonEmpty(targetID, pr.TargetID)
-		if err := s.enqueueMergeConflict(ctx, MergeConflictArgs{
-			Repo:     repo,
-			PRNumber: pr.PRNumber,
-			Branch:   pr.Branch,
-			HeadSHA:  pr.HeadSHA,
-			TargetID: targetID,
-		}); err != nil {
-			log.Printf("[synapse] [registry] error enqueuing conflict job for PR #%d: %v", pr.PRNumber, err)
-		}
+		args := MergeConflictArgs{Repo: repo, PRNumber: prNumber, Branch: branch, HeadSHA: headSHA, TargetID: targetID}
+		return true, s.enqueueMergeConflict(ctx, args)
+	}
+	if targetID != "" {
+		return true, nil
+	}
+	regTID, _, _, _, rErr := s.registry.ResolvePRByNumber(ctx, repo, prNumber)
+	return rErr == nil && regTID != "", nil
+}
+
+func (s *RouterServer) handleDirtyPRConflict(ctx context.Context, repo string, pr GitHubPullRequest) {
+	if pr.Head.SHA != "" {
+		s.nonRoboRevFailedSHAs.Store(prCheckKey(repo, pr.Number), strings.TrimSpace(pr.Head.SHA))
+	}
+	s.recordFailedCISHA(repo, pr.Number, pr.Head.SHA)
+	handled, err := s.transitionRegisteredConflict(ctx, repo, pr.Number, pr.Head.Ref, pr.Head.SHA)
+	if err != nil {
+		log.Printf("[synapse] [registry] error transitioning PR #%d to conflict: %v", pr.Number, err)
+		return
+	}
+	if handled {
+		return
+	}
+	if err := s.notifyCollaboratorConflict(ctx, repo, pr); err != nil {
+		log.Printf("[synapse] [github] warning notifying collaborator conflict for %s#%d: %v", repo, pr.Number, err)
 	}
 }
 
@@ -176,7 +186,7 @@ func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) er
 			continue
 		}
 		if conflict {
-			s.handleDirtyPRConflict(ctx, normRepo, RegisteredPR{PRNumber: pr.Number, Branch: pr.Head.Ref, HeadSHA: pr.Head.SHA})
+			s.handleDirtyPRConflict(ctx, normRepo, pr)
 			continue
 		}
 		s.markUpdatedForCurrentMain(normRepo, pr.Number)
@@ -882,6 +892,7 @@ func (s *RouterServer) clearFailedCISHA(repo string, prNumber int) {
 	s.nonRoboRevFailedSHAs.Delete(key)
 	s.cancelledCheckSHAs.Delete(key)
 	s.collaboratorAlertedSHAs.Delete(key)
+	s.collaboratorConflictSHAs.Delete(key)
 }
 
 func (s *RouterServer) markUpdatedForCurrentMain(repo string, prNumber int) {
@@ -1110,28 +1121,21 @@ func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGi
 	return nil
 }
 
-func (s *RouterServer) handlePRAutoMergeDisabledAction(ctx context.Context, res *ResolvedGitHubEvent) error {
+func (s *RouterServer) handlePRAutoMergeDisabledAction(ctx context.Context, res *ResolvedGitHubEvent, pr GitHubPullRequest) error {
 	if res.HeadSHA != "" {
 		s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
 	}
 	s.recordFailedCISHA(res.Repo, res.PRNumber, res.HeadSHA)
-	targetID, updated, err := s.registry.AtomicTransitionConflict(ctx, res.Repo, res.PRNumber)
-	if err != nil {
+	handled, err := s.transitionRegisteredConflict(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA)
+	if err != nil || handled {
 		return err
 	}
-	res.TargetID = firstNonEmpty(res.TargetID, targetID)
-	if updated {
-		if err := s.enqueueMergeConflict(ctx, MergeConflictArgs{
-			Repo:     res.Repo,
-			PRNumber: res.PRNumber,
-			Branch:   res.Branch,
-			HeadSHA:  res.HeadSHA,
-			TargetID: res.TargetID,
-		}); err != nil {
-			return err
-		}
+	if pr.Number == 0 {
+		pr.Number = res.PRNumber
 	}
-	return nil
+	pr.Head.Ref = firstNonEmpty(pr.Head.Ref, res.Branch)
+	pr.Head.SHA = firstNonEmpty(pr.Head.SHA, res.HeadSHA)
+	return s.notifyCollaboratorConflict(ctx, res.Repo, pr)
 }
 
 func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res *ResolvedGitHubEvent, pr GitHubPullRequest) error {
@@ -1161,7 +1165,7 @@ func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res 
 			}
 		}
 	case "auto_merge_disabled":
-		return s.handlePRAutoMergeDisabledAction(ctx, res)
+		return s.handlePRAutoMergeDisabledAction(ctx, res, pr)
 	}
 	return nil
 }
