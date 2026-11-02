@@ -1735,10 +1735,10 @@ func TestLoadSharedSecrets_TableDriven(t *testing.T) {
 			wantVal:  "op-tok-789",
 		},
 		{
-			name:     "gemini harness api key alias fallback",
+			name:     "gemini harness api key is not aliased to agy gemini api key",
 			filePath: validJSON,
 			wantKey:  "AGY_GEMINI_API_KEY",
-			wantVal:  "harness-key-abc",
+			wantVal:  "",
 		},
 		{
 			name:     "unifi pass alias fallback",
