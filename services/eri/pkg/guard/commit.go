@@ -1,15 +1,24 @@
 package guard
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/azylman/aerial/pkg/sanitizer"
 )
+
+// GuardScanURL is the loopback URL for eri's internal guard scan endpoint.
+var GuardScanURL = "http://127.0.0.1:8088/internal/guard/scan"
 
 // Violation represents a secret or PII detection in a commit diff.
 type Violation struct {
@@ -278,11 +287,9 @@ func parseDiffHeaderLine(line string, st *diffParseState) bool {
 	return false
 }
 
-// ScanDiffWithPatterns parses a unified diff and checks added lines against the supplied patterns.
-func ScanDiffWithPatterns(diff string, checkTestFiles bool, patterns []PatternRule) []Violation {
-	var violations []Violation
-	if len(diff) == 0 || len(patterns) == 0 {
-		return violations
+func iterateDiffAddedLines(diff string, checkTestFiles bool, onAddedLine func(content, file string, lineNum int)) {
+	if len(diff) == 0 {
+		return
 	}
 
 	lines := strings.Split(diff, "\n")
@@ -297,13 +304,11 @@ func ScanDiffWithPatterns(diff string, checkTestFiles bool, patterns []PatternRu
 			continue
 		}
 
-		// If no hunk header was encountered (e.g. raw diff), start line numbering at 1
 		if isImplicitHunkStart(st.inHunk, st.lineNum, line) {
 			st.inHunk = true
 			st.lineNum = 1
 		}
 
-		// Check added line
 		if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
 			currentLineNum := st.lineNum
 			st.lineNum++
@@ -312,20 +317,166 @@ func ScanDiffWithPatterns(diff string, checkTestFiles bool, patterns []PatternRu
 				continue
 			}
 
-			content := line[1:]
-			violations = append(violations, scanAddedLinePatterns(content, st.currentFile, currentLineNum, patterns)...)
+			onAddedLine(line[1:], st.currentFile, currentLineNum)
 			continue
 		}
 
-		// Context line: unified diffs emit ' ' prefix or an empty line for empty lines
 		if isDiffContextLine(st.inHunk, line) {
 			st.lineNum++
 			continue
 		}
+	}
+}
 
-		// Deleted line: '-' line, do not increment target file lineNum
+// ScanDiffForSecrets scans a diff against both active patterns and registered Infisical secrets.
+func ScanDiffForSecrets(diff string, checkTestFiles bool, patterns []PatternRule) []Violation {
+	violations := ScanDiffWithPatterns(diff, checkTestFiles, patterns)
+	iterateDiffAddedLines(diff, checkTestFiles, func(content, file string, lineNum int) {
+		for _, sample := range sanitizer.MatchSensitiveTokens(content) {
+			violations = append(violations, Violation{
+				Category: "InfisicalSecret",
+				Pattern:  "registered_secret",
+				File:     file,
+				LineNum:  lineNum,
+				Sample:   sample,
+			})
+		}
+	})
+	return violations
+}
+
+// ScanDiffWithPatterns parses a unified diff and checks added lines against the supplied patterns.
+func ScanDiffWithPatterns(diff string, checkTestFiles bool, patterns []PatternRule) []Violation {
+	if len(diff) == 0 || len(patterns) == 0 {
+		return nil
 	}
 
+	var violations []Violation
+	iterateDiffAddedLines(diff, checkTestFiles, func(content, file string, lineNum int) {
+		violations = append(violations, scanAddedLinePatterns(content, file, lineNum, patterns)...)
+	})
+	return violations
+}
+
+// ScanTextForSecrets scans text line-by-line against registered Infisical secrets and pattern rules.
+// RFC1918_192_168 and InternalClusterDomain patterns are skipped so local cluster commands/URLs remain permitted.
+func ScanTextForSecrets(text, sourceLabel string, patterns []PatternRule) []Violation {
+	if text == "" {
+		return nil
+	}
+
+	var violations []Violation
+	lines := strings.Split(text, "\n")
+	for lineNum, line := range lines {
+		currentLineNum := lineNum + 1
+
+		matches := sanitizer.MatchSensitiveTokens(line)
+		for _, sample := range matches {
+			violations = append(violations, Violation{
+				Category: "InfisicalSecret",
+				Pattern:  "registered_secret",
+				File:     sourceLabel,
+				LineNum:  currentLineNum,
+				Sample:   sample,
+			})
+		}
+
+		for _, p := range patterns {
+			if p.Category == "RFC1918_192_168" || p.Category == "InternalClusterDomain" {
+				continue
+			}
+			if sample := p.Regex.FindString(line); sample != "" {
+				violations = append(violations, Violation{
+					Category: p.Category,
+					Pattern:  p.Regex.String(),
+					File:     sourceLabel,
+					LineNum:  currentLineNum,
+					Sample:   sample,
+				})
+			}
+		}
+	}
+
+	return violations
+}
+
+// GuardScanClient is the HTTP client used to query GuardScanURL.
+var GuardScanClient = &http.Client{
+	Timeout: 1500 * time.Millisecond,
+	Transport: &http.Transport{
+		DisableKeepAlives: true,
+	},
+}
+
+func queryLoopbackGuardScan(diff, text, sourceLabel string, checkTestFiles, ignoreInternalDomain bool) ([]Violation, bool) {
+	if GuardScanURL == "" {
+		return nil, false
+	}
+	reqBody, err := json.Marshal(map[string]any{
+		"diff":                   diff,
+		"text":                   text,
+		"source_label":           sourceLabel,
+		"check_test_files":       checkTestFiles,
+		"ignore_internal_domain": ignoreInternalDomain,
+	})
+	if err != nil {
+		return nil, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, GuardScanURL, bytes.NewReader(reqBody))
+	if reqErr != nil {
+		return nil, false
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	client := GuardScanClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, doErr := client.Do(httpReq)
+	if doErr != nil {
+		return nil, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, false
+	}
+	var scanResp struct {
+		Decision   string      `json:"decision"`
+		Reason     string      `json:"reason"`
+		Violations []Violation `json:"violations"`
+	}
+	if decodeErr := json.NewDecoder(resp.Body).Decode(&scanResp); decodeErr != nil {
+		return nil, false
+	}
+	return scanResp.Violations, true
+}
+
+// scanViaLoopbackOrLocal attempts to call eri's POST /internal/guard/scan loopback endpoint;
+// if GuardScanURL is empty, unreachable, or returns a non-200 status, it falls back to local scanning.
+func scanViaLoopbackOrLocal(diff, text, sourceLabel string, checkTestFiles, ignoreInternalDomain bool) []Violation {
+	if violations, ok := queryLoopbackGuardScan(diff, text, sourceLabel, checkTestFiles, ignoreInternalDomain); ok {
+		return violations
+	}
+
+	var violations []Violation
+	patterns := GetActivePatterns()
+	if diff != "" {
+		pats := patterns
+		if ignoreInternalDomain {
+			filtered := make([]PatternRule, 0, len(patterns))
+			for _, p := range patterns {
+				if p.Category != "InternalClusterDomain" {
+					filtered = append(filtered, p)
+				}
+			}
+			pats = filtered
+		}
+		violations = append(violations, ScanDiffForSecrets(diff, checkTestFiles, pats)...)
+	}
+	if text != "" {
+		violations = append(violations, ScanTextForSecrets(text, sourceLabel, patterns)...)
+	}
 	return violations
 }
 
@@ -666,12 +817,12 @@ func CheckCommit(toolName string, args ToolArgs) *Decision {
 	normalizedName := normalizeToolName(toolName)
 
 	if normalizedName != "run_command" {
-		return &Decision{Decision: DecisionAllow}
+		return CheckOutboundSecrets(toolName, args)
 	}
 
 	isCommit, targetDir, isSubmit := IsCommitCommand(args.CommandLine)
 	if !isCommit {
-		return &Decision{Decision: DecisionAllow}
+		return CheckOutboundSecrets(toolName, args)
 	}
 
 	dir := targetDir
@@ -695,17 +846,52 @@ func CheckCommit(toolName string, args ToolArgs) *Decision {
 		diff = collectCommitDiff(dir, args.CommandLine)
 	}
 
-	patterns := GetActivePatterns()
-	if IsCoreAerial(dir, args.CommandLine) {
-		filtered := make([]PatternRule, 0, len(patterns))
-		for _, p := range patterns {
-			if p.Category != "InternalClusterDomain" {
-				filtered = append(filtered, p)
-			}
+	ignoreInternalDomain := IsCoreAerial(dir, args.CommandLine)
+	violations := scanViaLoopbackOrLocal(diff, "", "commit", false, ignoreInternalDomain)
+	if len(violations) > 0 {
+		return &Decision{
+			Decision: DecisionDeny,
+			Reason:   FormatCommitDenyReason(violations),
 		}
-		patterns = filtered
 	}
-	violations := ScanDiffWithPatterns(diff, false, patterns)
+
+	return &Decision{Decision: DecisionAllow}
+}
+
+// CheckOutboundSecrets inspects run_command (args.CommandLine) and call_mcp_tool / mcp_*
+// (marshaling args.Arguments/Extra + args.CommandLine) against registered Infisical secrets and pattern rules.
+func CheckOutboundSecrets(toolName string, args ToolArgs) *Decision {
+	rawLower := strings.ToLower(strings.TrimSpace(toolName))
+	cleanName := normalizeToolName(toolName)
+	var textToScan string
+
+	switch {
+	case cleanName == "run_command":
+		textToScan = args.CommandLine
+	case cleanName == "call_mcp_tool" || strings.HasPrefix(cleanName, "mcp_") || strings.HasPrefix(rawLower, "mcp_") || strings.HasPrefix(rawLower, "mcp:"):
+		var parts []string
+		if args.CommandLine != "" {
+			parts = append(parts, args.CommandLine)
+		}
+		if len(args.Arguments) > 0 {
+			parts = append(parts, string(args.Arguments))
+		}
+		if args.ToolName != "" {
+			parts = append(parts, args.ToolName)
+		}
+		if args.ServerName != "" {
+			parts = append(parts, args.ServerName)
+		}
+		textToScan = strings.Join(parts, "\n")
+	default:
+		return &Decision{Decision: DecisionAllow}
+	}
+
+	if textToScan == "" {
+		return &Decision{Decision: DecisionAllow}
+	}
+
+	violations := scanViaLoopbackOrLocal("", textToScan, cleanName, true, true)
 	if len(violations) > 0 {
 		return &Decision{
 			Decision: DecisionDeny,
