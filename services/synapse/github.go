@@ -913,6 +913,93 @@ func (s *RouterServer) clearFailedCISHA(repo string, prNumber int) {
 	s.cancelledCheckSHAs.Delete(key)
 	s.collaboratorAlertedSHAs.Delete(key)
 	s.collaboratorConflictSHAs.Delete(key)
+	s.failedCheckRuns.Delete(key)
+}
+
+type failedCheckState struct {
+	mu           sync.Mutex
+	headSHA      string
+	everFailed   map[string]bool
+	activeFailed map[string]bool
+}
+
+func (s *RouterServer) recordFailedCheckRun(repo string, prNumber int, headSHA, checkName string) {
+	normHeadSHA := strings.TrimSpace(headSHA)
+	normCheck := strings.ToLower(strings.TrimSpace(checkName))
+	if s == nil || prNumber <= 0 || normHeadSHA == "" || isZeroSHA(normHeadSHA) || normCheck == "" {
+		return
+	}
+	key := prCheckKey(repo, prNumber)
+	val, _ := s.failedCheckRuns.LoadOrStore(key, &failedCheckState{
+		everFailed:   make(map[string]bool),
+		activeFailed: make(map[string]bool),
+	})
+	entry, ok := val.(*failedCheckState)
+	if !ok || entry == nil {
+		return
+	}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+
+	if !strings.EqualFold(entry.headSHA, normHeadSHA) {
+		entry.headSHA = normHeadSHA
+		entry.everFailed = make(map[string]bool)
+		entry.activeFailed = make(map[string]bool)
+	}
+	entry.everFailed[normCheck] = true
+	entry.activeFailed[normCheck] = true
+}
+
+func (s *RouterServer) loadMatchingFailedCheckState(repo string, prNumber int, headSHA string) *failedCheckState {
+	normHeadSHA := strings.TrimSpace(headSHA)
+	if s == nil || prNumber <= 0 || normHeadSHA == "" || isZeroSHA(normHeadSHA) {
+		return nil
+	}
+	val, ok := s.failedCheckRuns.Load(prCheckKey(repo, prNumber))
+	if !ok {
+		return nil
+	}
+	entry, ok := val.(*failedCheckState)
+	if !ok || entry == nil {
+		return nil
+	}
+	return entry
+}
+
+func (s *RouterServer) clearActiveFailedCheckRun(repo string, prNumber int, headSHA, checkName string) {
+	normCheck := strings.ToLower(strings.TrimSpace(checkName))
+	if normCheck == "" {
+		return
+	}
+	entry := s.loadMatchingFailedCheckState(repo, prNumber, headSHA)
+	if entry == nil {
+		return
+	}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+
+	if strings.EqualFold(entry.headSHA, strings.TrimSpace(headSHA)) {
+		delete(entry.activeFailed, normCheck)
+	}
+}
+
+func (s *RouterServer) canRecoverNonGateCheckSuccess(repo string, prNumber int, checkName, headSHA string) bool {
+	normCheck := strings.ToLower(strings.TrimSpace(checkName))
+	if normCheck == "" {
+		return false
+	}
+	entry := s.loadMatchingFailedCheckState(repo, prNumber, headSHA)
+	if entry == nil {
+		return false
+	}
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+
+	if !strings.EqualFold(entry.headSHA, strings.TrimSpace(headSHA)) || !entry.everFailed[normCheck] {
+		return false
+	}
+	delete(entry.activeFailed, normCheck)
+	return len(entry.activeFailed) == 0
 }
 
 func (s *RouterServer) markUpdatedForCurrentMain(repo string, prNumber int) {
@@ -998,10 +1085,10 @@ func (s *RouterServer) canRecoverCheckSuccess(ctx context.Context, repo string, 
 		}
 		return s.hasCancelledCheckForSHA(repo, prNumber, headSHA)
 	}
-	if strings.EqualFold(strings.TrimSpace(checkName), "roborev") {
+	if isRoboRevCheck(checkName) {
 		return s.canRecoverRoboRevSuccess(ctx, repo, prNumber, headSHA)
 	}
-	return false
+	return s.canRecoverNonGateCheckSuccess(repo, prNumber, checkName, headSHA)
 }
 
 func (s *RouterServer) isStaleOrIgnoredCIFailure(ctx context.Context, res *ResolvedGitHubEvent) bool {
@@ -1061,6 +1148,7 @@ func (s *RouterServer) handleCIFailureByHeadSHA(ctx context.Context, res *Resolv
 		res.PRNumber = prNum
 		if res.Event == "check_run" && !isRoboRevCheck(res.CheckName) && !isGateAggregatorCheck(res.CheckName) {
 			s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
+			s.recordFailedCheckRun(res.Repo, res.PRNumber, res.HeadSHA, res.CheckName)
 		}
 	}
 	if updated {
@@ -1075,6 +1163,7 @@ func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *Resol
 	}
 	if res.Event == "check_run" && res.PRNumber > 0 && res.HeadSHA != "" && !isRoboRevCheck(res.CheckName) && !isGateAggregatorCheck(res.CheckName) {
 		s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
+		s.recordFailedCheckRun(res.Repo, res.PRNumber, res.HeadSHA, res.CheckName)
 	}
 	var (
 		updated bool
@@ -1197,6 +1286,7 @@ func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res 
 		s.clearFailedCISHA(res.Repo, res.PRNumber)
 		s.nonRoboRevFailedSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
 		s.cancelledCheckSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
+		s.failedCheckRuns.Delete(prCheckKey(res.Repo, res.PRNumber))
 		targetID, err := s.registry.UpdatePRSync(ctx, res.Repo, res.PRNumber, res.HeadSHA)
 		if err != nil {
 			return err
@@ -1297,6 +1387,9 @@ func (s *RouterServer) recordCheckRunStatus(ctx context.Context, res *ResolvedGi
 	if checkState == "" || checkState == "failed" {
 		return
 	}
+	if checkState == "pending" && !isRoboRevCheck(res.CheckName) {
+		s.clearActiveFailedCheckRun(res.Repo, res.PRNumber, res.HeadSHA, res.CheckName)
+	}
 	updated, err := s.registry.RecordPRCheckStatus(ctx, res.Repo, res.PRNumber, res.HeadSHA, res.CheckName, checkState)
 	if err != nil {
 		log.Printf("[synapse] [registry] warning recording check status for %s#%d check %q: %v", res.Repo, res.PRNumber, res.CheckName, err)
@@ -1328,6 +1421,7 @@ func (s *RouterServer) processGitHubCheckRunEvent(ctx context.Context, delivery 
 		s.clearFailedCISHA(res.Repo, res.PRNumber)
 		s.nonRoboRevFailedSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
 		s.cancelledCheckSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
+		s.failedCheckRuns.Delete(prCheckKey(res.Repo, res.PRNumber))
 		targetID, err := s.registry.UpdatePRSync(ctx, res.Repo, res.PRNumber, res.HeadSHA)
 		if err != nil {
 			return nil, err

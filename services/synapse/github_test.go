@@ -397,6 +397,41 @@ func TestProcessGitHubEvent(t *testing.T) {
 			wantConclusion: "success",
 		},
 		{
+			name: "check_run success on rerun for non-gate check recovers after prior failure on same SHA", event: "check_run", delivery: "del-cr-nongate-recover-fail",
+			priorEvent: &ghPriorEvent{
+				event:    "check_run",
+				delivery: "del-cr-perf-fail-before-rerun",
+				payload:  `{"action":"completed","check_run":{"name":"Display performance budget (React)","head_sha":"rerunperf888","status":"completed","conclusion":"failure","pull_requests":[{"number":530,"head":{"ref":"feat/test","sha":"rerunperf888"}}]},"repository":{"full_name":"azylman/mirrormere"}}`,
+			},
+			payload:              `{"action":"completed","check_run":{"name":"Display performance budget (React)","head_sha":"rerunperf888","status":"completed","conclusion":"success","pull_requests":[{"number":530,"head":{"ref":"feat/test","sha":"rerunperf888"}}]},"repository":{"full_name":"azylman/mirrormere"}}`,
+			reg:                  &mockPRRegistry{syncTargetID: "1555405874565091380", ciFailedTargetID: "1555405874565091380", ciFailedUpdated: true},
+			wantPR:               530,
+			wantHeadSHA:          "rerunperf888",
+			wantTargetID:         "1555405874565091380",
+			wantSyncCalls:        1,
+			wantConclusion:       "success",
+			wantCIFailedCalls:    1,
+			wantRecordCheckCalls: 1,
+			wantRecordCheckState: "passed",
+		},
+		{
+			name: "check_run success for unrelated non-gate check after another check failed on same SHA does not recover", event: "check_run", delivery: "del-cr-unrelated-nongate-no-recover",
+			priorEvent: &ghPriorEvent{
+				event:    "check_run",
+				delivery: "del-cr-perf-fail-parallel",
+				payload:  `{"action":"completed","check_run":{"name":"Display performance budget (React)","head_sha":"parallelhead888","status":"completed","conclusion":"failure","pull_requests":[{"number":530,"head":{"ref":"feat/test","sha":"parallelhead888"}}]},"repository":{"full_name":"azylman/mirrormere"}}`,
+			},
+			payload:              `{"action":"completed","check_run":{"name":"Unit Tests","head_sha":"parallelhead888","status":"completed","conclusion":"success","pull_requests":[{"number":530,"head":{"ref":"feat/test","sha":"parallelhead888"}}]},"repository":{"full_name":"azylman/mirrormere"}}`,
+			reg:                  &mockPRRegistry{syncTargetID: "1555405874565091380", ciFailedTargetID: "1555405874565091380", ciFailedUpdated: true},
+			wantPR:               530,
+			wantHeadSHA:          "parallelhead888",
+			wantSyncCalls:        0,
+			wantConclusion:       "success",
+			wantCIFailedCalls:    1,
+			wantRecordCheckCalls: 1,
+			wantRecordCheckState: "passed",
+		},
+		{
 			name: "check_run failure for Container Builds Gate is ignored", event: "check_run", delivery: "del-cr-gate-ignore",
 			payload: `{"action":"completed","check_run":{"name":"Container Builds Gate","head_sha":"checkhead444","status":"completed","conclusion":"failure","pull_requests":[{"number":518,"head":{"ref":"feat/test","sha":"checkhead444"}}]},"repository":{"full_name":"azylman/aerial"}}`,
 			reg:     &mockPRRegistry{ciFailedTargetID: "target-111", ciFailedUpdated: true},
@@ -2149,6 +2184,138 @@ func TestCommitSHAPRCacheHelpers(t *testing.T) {
 			}
 			if branch != tc.wantBranch {
 				t.Errorf("lookupCommitSHAPR() branch = %q, want %q", branch, tc.wantBranch)
+			}
+		})
+	}
+}
+
+func TestFailedCheckTrackerHelpers(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name               string
+		nilServer          bool
+		repo               string
+		prNumber           int
+		headSHA            string
+		presetHeadSHA      string
+		presetFailedChecks []string
+		presetClearChecks  []string
+		evalCheck          string
+		wantRecover        bool
+	}{
+		{
+			name:        "nil server returns false",
+			nilServer:   true,
+			repo:        "azylman/aerial",
+			prNumber:    10,
+			headSHA:     "sha10",
+			evalCheck:   "Unit Tests",
+			wantRecover: false,
+		},
+		{
+			name:        "invalid PR number returns false",
+			repo:        "azylman/aerial",
+			prNumber:    0,
+			headSHA:     "sha10",
+			evalCheck:   "Unit Tests",
+			wantRecover: false,
+		},
+		{
+			name:        "empty head sha returns false",
+			repo:        "azylman/aerial",
+			prNumber:    10,
+			headSHA:     "",
+			evalCheck:   "Unit Tests",
+			wantRecover: false,
+		},
+		{
+			name:        "zero head sha returns false",
+			repo:        "azylman/aerial",
+			prNumber:    10,
+			headSHA:     "0000000000000000000000000000000000000000",
+			evalCheck:   "Unit Tests",
+			wantRecover: false,
+		},
+		{
+			name:        "empty check name returns false",
+			repo:        "azylman/aerial",
+			prNumber:    10,
+			headSHA:     "sha10",
+			evalCheck:   "",
+			wantRecover: false,
+		},
+		{
+			name:               "single check failure and rerun success recovers",
+			repo:               "azylman/aerial",
+			prNumber:           11,
+			headSHA:            "sha11",
+			presetHeadSHA:      "sha11",
+			presetFailedChecks: []string{"Unit Tests"},
+			evalCheck:          "Unit Tests",
+			wantRecover:        true,
+		},
+		{
+			name:               "unrelated check that never failed returns false",
+			repo:               "azylman/aerial",
+			prNumber:           12,
+			headSHA:            "sha12",
+			presetHeadSHA:      "sha12",
+			presetFailedChecks: []string{"Unit Tests"},
+			evalCheck:          "Lint",
+			wantRecover:        false,
+		},
+		{
+			name:               "mismatched sha returns false",
+			repo:               "azylman/aerial",
+			prNumber:           13,
+			headSHA:            "sha13-new",
+			presetHeadSHA:      "sha13-old",
+			presetFailedChecks: []string{"Unit Tests"},
+			evalCheck:          "Unit Tests",
+			wantRecover:        false,
+		},
+		{
+			name:               "two checks failed: one cleared active and one succeeds recovers",
+			repo:               "azylman/aerial",
+			prNumber:           14,
+			headSHA:            "sha14",
+			presetHeadSHA:      "sha14",
+			presetFailedChecks: []string{"Lint", "Unit Tests"},
+			presetClearChecks:  []string{"Lint"},
+			evalCheck:          "Unit Tests",
+			wantRecover:        true,
+		},
+		{
+			name:               "two checks failed: one still active prevents recovery",
+			repo:               "azylman/aerial",
+			prNumber:           15,
+			headSHA:            "sha15",
+			presetHeadSHA:      "sha15",
+			presetFailedChecks: []string{"Lint", "Unit Tests"},
+			evalCheck:          "Unit Tests",
+			wantRecover:        false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var srv *RouterServer
+			if !tc.nilServer {
+				srv = &RouterServer{}
+			}
+			if srv != nil && tc.presetHeadSHA != "" {
+				for _, c := range tc.presetFailedChecks {
+					srv.recordFailedCheckRun(tc.repo, tc.prNumber, tc.presetHeadSHA, c)
+				}
+				for _, c := range tc.presetClearChecks {
+					srv.clearActiveFailedCheckRun(tc.repo, tc.prNumber, tc.presetHeadSHA, c)
+				}
+			}
+			got := srv.canRecoverNonGateCheckSuccess(tc.repo, tc.prNumber, tc.evalCheck, tc.headSHA)
+			if got != tc.wantRecover {
+				t.Fatalf("canRecoverNonGateCheckSuccess() = %v, want %v", got, tc.wantRecover)
 			}
 		})
 	}

@@ -36,6 +36,7 @@ type RouterServer struct {
 	nonRoboRevFailedSHAs     sync.Map
 	cancelledCheckSHAs       sync.Map
 	failedCheckSHAs          sync.Map
+	failedCheckRuns          sync.Map
 	collaboratorAlertedSHAs  sync.Map
 	collaboratorConflictSHAs sync.Map
 	updatedForCurrentMain    sync.Map
