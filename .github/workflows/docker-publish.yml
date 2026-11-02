@@ -373,7 +373,13 @@ jobs:
 
   roborev:
     name: roborev
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && (github.actor == 'azylman' || github.actor == 'dependabot[bot]')
+    if: >
+      github.event_name == 'pull_request' &&
+      (github.actor == 'azylman' || github.actor == 'mcarmody' || github.actor == 'brockventures' || github.actor == 'dependabot[bot]') &&
+      (github.event.pull_request.user.login == 'azylman' || github.event.pull_request.user.login == 'mcarmody' || github.event.pull_request.user.login == 'brockventures' || github.event.pull_request.user.login == 'dependabot[bot]') &&
+      (github.event.pull_request.head.repo.full_name == github.repository ||
+       github.event.pull_request.head.repo.full_name == 'mcarmody/aerial' ||
+       github.event.pull_request.head.repo.full_name == 'brockventures/aerial')
     runs-on: [self-hosted, roborev]
     timeout-minutes: 20
     permissions:
@@ -392,15 +398,6 @@ jobs:
         if: github.actor == 'dependabot[bot]'
         uses: dependabot/fetch-metadata@v3
 
-      - name: Enable Auto-Merge for Dependabot PRs
-        if: github.actor == 'dependabot[bot]'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-        run: |
-          export GH_TOKEN="${GITHUB_PAT:-${GH_TOKEN}}"
-          gh pr merge --auto --squash "$PR_URL"
-
       - name: Run Independent RoboRev Review Gate
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -418,6 +415,8 @@ jobs:
             echo "RoboRev not bootstrapped on main; skipping."
             exit 0
           fi
+          export GH_TOKEN="${GITHUB_PAT:-${GH_TOKEN}}"
+          export GITHUB_TOKEN="${GITHUB_PAT:-${GITHUB_TOKEN}}"
           SHORT_SHA="${HEAD_SHA:0:7}"
           if [ -n "${PR_NUMBER:-}" ] && [ -n "${HEAD_SHA:-}" ]; then
             OVERRIDE_COMMENT=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100" \
@@ -471,6 +470,15 @@ jobs:
           fi
           echo "::error::RoboRev reported actionable findings (>= medium severity)."
           exit 1
+
+      - name: Enable Auto-Merge on Review Pass
+        if: success() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          export GH_TOKEN="${GITHUB_PAT:-${GH_TOKEN}}"
+          gh pr merge --auto --squash "$PR_URL" || true
 
   build-gate:
     name: CI Gate
