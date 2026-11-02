@@ -1228,6 +1228,10 @@ func (s *RouterServer) processGitHubPullRequestEvent(ctx context.Context, delive
 		s.clearFailedCISHA(res.Repo, res.PRNumber)
 	}
 
+	if res.PRNumber > 0 && res.HeadSHA != "" {
+		s.recordCommitSHAPR(res.Repo, res.HeadSHA, res.PRNumber, res.Branch)
+	}
+
 	if s.registry != nil && res.PRNumber > 0 {
 		if err := s.handlePullRequestRegistryAction(ctx, res, p.PullRequest); err != nil {
 			return nil, err
@@ -1427,14 +1431,62 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 	}
 }
 
+func (s *RouterServer) recordCommitSHAPR(repo, sha string, prNumber int, branch string) {
+	normRepo := strings.ToLower(normalizeRepo(repo))
+	normSHA := strings.ToLower(strings.TrimSpace(sha))
+	if s == nil || normRepo == "" || normSHA == "" || isZeroSHA(normSHA) || prNumber <= 0 {
+		return
+	}
+	s.commitSHAPRs.Store(normRepo+"@"+normSHA, GitHubCheckRunPR{
+		Number: prNumber,
+		Head: GitHubPRRef{
+			Ref: strings.TrimSpace(branch),
+			SHA: normSHA,
+		},
+	})
+}
+
+func (s *RouterServer) lookupCommitSHAPR(repo, sha string) (int, string, bool) {
+	if s == nil {
+		return 0, "", false
+	}
+	normRepo := strings.ToLower(normalizeRepo(repo))
+	normSHA := strings.ToLower(strings.TrimSpace(sha))
+	if normRepo == "" || normSHA == "" || isZeroSHA(normSHA) {
+		return 0, "", false
+	}
+	v, ok := s.commitSHAPRs.Load(normRepo + "@" + normSHA)
+	if !ok {
+		return 0, "", false
+	}
+	item, ok := v.(GitHubCheckRunPR)
+	if !ok || item.Number <= 0 {
+		return 0, "", false
+	}
+	return item.Number, item.Head.Ref, true
+}
+
 func (s *RouterServer) resolvePRFromCommitSHA(ctx context.Context, repo, sha string) (int, string, error) {
 	repo = normalizeRepo(repo)
 	if repo == "" || sha == "" || isZeroSHA(sha) {
 		return 0, "", fmt.Errorf("invalid repo or sha for pr resolution")
 	}
+	if prNum, branch, ok := s.lookupCommitSHAPR(repo, sha); ok {
+		return prNum, branch, nil
+	}
 	var prs []GitHubCommitPRItem
 	if err := s.getGitHubJSON(ctx, fmt.Sprintf("/repos/%s/commits/%s/pulls", repo, url.PathEscape(sha)), 1<<20, &prs); err != nil {
 		return 0, "", err
+	}
+	if len(prs) == 0 {
+		var openPRs []GitHubCommitPRItem
+		if err := s.getGitHubJSON(ctx, fmt.Sprintf("/repos/%s/pulls?state=open&per_page=100", repo), 2<<20, &openPRs); err == nil {
+			for _, item := range openPRs {
+				if strings.EqualFold(strings.TrimSpace(item.Head.SHA), strings.TrimSpace(sha)) {
+					prs = append(prs, item)
+				}
+			}
+		}
 	}
 	if len(prs) == 0 {
 		return 0, "", fmt.Errorf("no pull requests associated with commit %s", sha)
@@ -1445,6 +1497,7 @@ func (s *RouterServer) resolvePRFromCommitSHA(ctx context.Context, repo, sha str
 			selected = item
 		}
 	}
+	s.recordCommitSHAPR(repo, sha, selected.Number, selected.Head.Ref)
 	return selected.Number, selected.Head.Ref, nil
 }
 
