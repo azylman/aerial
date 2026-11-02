@@ -693,8 +693,8 @@ func TestBuildSystemOneState(t *testing.T) {
 			targets:      []db.Message{{AuthorName: "user7", Content: strings.Repeat("7", 600)}},
 			context:      historySix,
 			wantPrefix:   "Recent context:\n",
-			wantContains: []string{"\n\nTarget message:\n", "user2:", "user3:", "user4:", "user5:", "user6:", "user7:"},
-			wantExcluded: []string{"user1:"},
+			wantContains: []string{"\n\nTarget message:\n", "user5:", "user6:", "user7:"},
+			wantExcluded: []string{"user1:", "user2:", "user3:", "user4:"},
 			checkRuneCap: MaxSystemOneStateRunes,
 		},
 		{
