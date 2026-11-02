@@ -387,19 +387,13 @@ func IsHeuristicSkip(content string) bool {
 	}
 
 	// Check if message is purely banter/laugh-track/acknowledgments
+	if reBanter.MatchString(trimmed) {
+		return true
+	}
 	clean := strings.TrimFunc(trimmed, func(r rune) bool {
 		return unicode.IsPunct(r) || unicode.IsSpace(r) || unicode.IsSymbol(r)
 	})
-	if clean == "" || reBanter.MatchString(clean) {
-		return true
-	}
-
-	// Very short message (< 10 chars) without query intent or alert keywords
-	if len(trimmed) < 10 {
-		return true
-	}
-
-	return false
+	return clean == "" || reBanter.MatchString(clean)
 }
 
 func (c *Classifier) fallbackModel(cur *config.ConfigData) string {

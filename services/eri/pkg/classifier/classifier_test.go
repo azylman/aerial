@@ -232,8 +232,9 @@ func TestIsHeuristicSkip(t *testing.T) {
 		{"inquiry is it down", "is it down?", false},
 		{"alert keyword postgres crashed", "postgres crashed", false},
 		{"alert keyword prod 500 error", "prod 500 error", false},
-		{"short message under 10 chars", "short msg", true},
-		{"message exactly 10 chars", "0123456789", false},
+		{"short directive yeah do a", "Yeah do A", false},
+		{"short directive yes do it", "yes do it", false},
+		{"pure emoji and punctuation", "👍✨", true},
 		{"longer substantive discussion", "I wonder if we can use raft consensus for distributed locking", false},
 	}
 	for _, tc := range tests {
