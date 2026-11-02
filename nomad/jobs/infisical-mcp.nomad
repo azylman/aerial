@@ -57,10 +57,18 @@ EOH
         data = <<EOH
 {{ if nomadVarExists "nomad/jobs/infisical-mcp" }}
 {{ with nomadVar "nomad/jobs/infisical-mcp" }}
-{{ if .client_id }}INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="{{ .client_id }}"{{ end }}
-{{ if .client_secret }}INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET="{{ .client_secret }}"{{ end }}
-{{ if .token }}INFISICAL_TOKEN="{{ .token }}"{{ end }}
-{{ if .project_id }}INFISICAL_PROJECT_ID="{{ .project_id }}"{{ end }}
+{{ if .client_id.Value }}INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="{{ .client_id.Value }}"{{ end }}
+{{ if .client_secret.Value }}INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET="{{ .client_secret.Value }}"{{ end }}
+{{ if .token.Value }}INFISICAL_TOKEN="{{ .token.Value }}"{{ end }}
+{{ if .project_id.Value }}INFISICAL_PROJECT_ID="{{ .project_id.Value }}"{{ end }}
+{{ end }}
+{{ end }}
+{{ if nomadVarExists "nomad/jobs/shared" }}
+{{ with nomadVar "nomad/jobs/shared" }}
+{{ if .INFISICAL_CLIENT_ID.Value }}INFISICAL_UNIVERSAL_AUTH_CLIENT_ID="{{ .INFISICAL_CLIENT_ID.Value }}"{{ end }}
+{{ if .INFISICAL_CLIENT_SECRET.Value }}INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET="{{ .INFISICAL_CLIENT_SECRET.Value }}"{{ end }}
+{{ if .INFISICAL_TOKEN.Value }}INFISICAL_TOKEN="{{ .INFISICAL_TOKEN.Value }}"{{ end }}
+{{ if .INFISICAL_PROJECT_ID.Value }}INFISICAL_PROJECT_ID="{{ .INFISICAL_PROJECT_ID.Value }}"{{ end }}
 {{ end }}
 {{ end }}
 EOH
