@@ -471,6 +471,21 @@ func allocationEventIdempotencyKey(raw json.RawMessage, poststopLookup func(jobI
 	return "", true
 }
 
+// isNomadEvalExplicitFailure returns true if the evaluation status indicates an explicit
+// scheduling failure rather than scheduler supersession or a canceled deployment evaluation.
+func isNomadEvalExplicitFailure(status, desc, deploymentID string) bool {
+	if strings.EqualFold(status, "failed") {
+		return true
+	}
+	if strings.EqualFold(status, "canceled") || strings.EqualFold(status, "cancelled") {
+		if strings.Contains(strings.ToLower(desc), "more recent eval was processed") || deploymentID != "" {
+			return false
+		}
+		return true
+	}
+	return false
+}
+
 func evaluationEventIdempotencyKey(raw json.RawMessage) (string, bool) {
 	var evalPayload NomadEvaluationEventPayload
 	if err := json.Unmarshal(raw, &evalPayload); err != nil {
@@ -487,13 +502,15 @@ func evaluationEventIdempotencyKey(raw json.RawMessage) (string, bool) {
 		return fmt.Sprintf("nomad:evaluation:%s:%s:blocked", eval.JobID, eval.ID), true
 	}
 	hasUnqueuedFailures := hasUnqueuedFailedAllocs(eval.FailedTGAllocs, eval.QueuedAllocations)
-	isExplicitFailure := strings.EqualFold(eval.Status, "failed") || strings.EqualFold(eval.Status, "canceled") || strings.EqualFold(eval.Status, "cancelled")
+	isCanceled := strings.EqualFold(eval.Status, "canceled") || strings.EqualFold(eval.Status, "cancelled")
+	isSuperseded := strings.Contains(strings.ToLower(eval.StatusDescription), "more recent eval was processed")
+	isExplicitFailure := isNomadEvalExplicitFailure(eval.Status, eval.StatusDescription, eval.DeploymentID)
 
 	if hasUnqueuedFailures || isExplicitFailure {
 		// Pass through to River/ProcessNomadEvent for failure handling
 		return fmt.Sprintf("nomad:evaluation:%s:%s:%s", eval.JobID, eval.ID, eval.Status), true
 	}
-	if eval.BlockedEval != "" || allFailedTaskGroupsQueued(eval.FailedTGAllocs, eval.QueuedAllocations) {
+	if eval.BlockedEval != "" || allFailedTaskGroupsQueued(eval.FailedTGAllocs, eval.QueuedAllocations) || isSuperseded || (isCanceled && eval.DeploymentID != "") {
 		// Blocked evaluation or all unplaced allocations queued for rollout; wait for follow-up allocation/deployment events
 		return "", false
 	}
@@ -635,7 +652,7 @@ func (s *RouterServer) processNomadEvaluationEvent(ctx context.Context, rawPaylo
 		return s.HandleNomadJobFailure(ctx, eval.JobID, eval.ID, eval.Status, formatFailedTGAllocs(eval.StatusDescription, eval.FailedTGAllocs))
 	}
 	hasUnqueuedFailures := hasUnqueuedFailedAllocs(eval.FailedTGAllocs, eval.QueuedAllocations)
-	isExplicitFailure := strings.EqualFold(eval.Status, "failed") || strings.EqualFold(eval.Status, "canceled") || strings.EqualFold(eval.Status, "cancelled")
+	isExplicitFailure := isNomadEvalExplicitFailure(eval.Status, eval.StatusDescription, eval.DeploymentID)
 
 	switch {
 	case hasUnqueuedFailures || isExplicitFailure:
