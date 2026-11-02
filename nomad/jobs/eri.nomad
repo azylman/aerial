@@ -146,10 +146,8 @@ EOH
         data = <<EOH
 ${var.extra_env_template}
 EOH
-        destination   = "secrets/eri.env"
-        env           = true
-        change_mode   = "signal"
-        change_signal = "SIGHUP"
+        destination = "secrets/eri.env"
+        env         = true
       }
 
       template {
