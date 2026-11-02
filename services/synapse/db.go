@@ -18,14 +18,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// RegisteredPR holds basic identification for an active pull request.
-type RegisteredPR struct {
-	PRNumber int    `json:"pr_number"`
-	Branch   string `json:"branch"`
-	TargetID string `json:"target_id"`
-	HeadSHA  string `json:"head_sha"`
-}
-
 // DeployingPR holds metadata for a PR currently undergoing deployment rollout.
 type DeployingPR struct {
 	ID       int64          `json:"id"`

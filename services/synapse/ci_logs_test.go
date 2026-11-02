@@ -662,6 +662,84 @@ func TestFormatCollaboratorCIFailureMessage(t *testing.T) {
 	}
 }
 
+func TestFormatCollaboratorConflictMessage(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		mention    string
+		repo       string
+		prNumber   int
+		prTitle    string
+		branch     string
+		headSHA    string
+		wantSub    []string
+		wantNotSub []string
+	}{
+		{
+			name:     "rich conflict message with mention and metadata",
+			mention:  "<@111111111111111111>",
+			repo:     "collab-repo",
+			prNumber: 42,
+			prTitle:  "Add Widget Feature",
+			branch:   "refs/heads/feat/widget",
+			headSHA:  "ed197571a381920f540e7a3c55b68008a45912a0",
+			wantSub: []string{
+				"<@111111111111111111> Merge conflict with `main` detected on [azylman/collab-repo#42](https://github.com/azylman/collab-repo/pull/42) (\"Add Widget Feature\", branch: feat/widget, commit: ed19757) — automatic branch update could not resolve conflicts. Please rebase or merge `origin/main` and push.",
+			},
+		},
+		{
+			name:     "conflict message without mention",
+			mention:  "",
+			repo:     "azylman/collab-repo",
+			prNumber: 99,
+			prTitle:  "Fix Bug",
+			branch:   "feat/fix",
+			headSHA:  "a1b2c3d4e5f6",
+			wantSub: []string{
+				"Merge conflict with `main` detected on [azylman/collab-repo#99](https://github.com/azylman/collab-repo/pull/99) (\"Fix Bug\", branch: feat/fix, commit: a1b2c3d) — automatic branch update could not resolve conflicts. Please rebase or merge `origin/main` and push.",
+			},
+			wantNotSub: []string{
+				"<@",
+			},
+		},
+		{
+			name:     "minimal fields without repo or title",
+			mention:  "",
+			repo:     "",
+			prNumber: 7,
+			prTitle:  "",
+			branch:   "",
+			headSHA:  "",
+			wantSub: []string{
+				"Merge conflict with `main` detected on PR #7 — automatic branch update could not resolve conflicts. Please rebase or merge `origin/main` and push.",
+			},
+			wantNotSub: []string{
+				"<@",
+				"https://github.com",
+				"branch:",
+				"commit:",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := formatCollaboratorConflictMessage(tc.mention, tc.repo, tc.prNumber, tc.prTitle, tc.branch, tc.headSHA)
+			for _, sub := range tc.wantSub {
+				if !strings.Contains(got, sub) {
+					t.Errorf("formatCollaboratorConflictMessage missing %q:\n%s", sub, got)
+				}
+			}
+			for _, notSub := range tc.wantNotSub {
+				if strings.Contains(got, notSub) {
+					t.Errorf("formatCollaboratorConflictMessage unexpectedly contained %q:\n%s", notSub, got)
+				}
+			}
+		})
+	}
+}
+
 func TestResolveCIFailureDetails(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

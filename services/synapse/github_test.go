@@ -2472,3 +2472,496 @@ func TestCollaboratorCIFailureNotification(t *testing.T) {
 		})
 	}
 }
+
+func TestCollaboratorConflictNotification_CheckOpenPRConflicts(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	defaultRules := []CollaboratorCIAlertRule{
+		{
+			Repo:      "collab-repo",
+			ChannelID: "123456789012345678",
+			Authors: map[string]string{
+				"collab-alpha": "<@111111111111111111>",
+			},
+		},
+	}
+
+	tests := []struct {
+		name                 string
+		prState              string
+		prMerged             bool
+		prHeadSHA            string
+		prAuthor             string
+		prTitle              string
+		prHeadRef            string
+		updateBranchStatus   int
+		dispDMErr            error
+		preAlertedSHA        string
+		clearFailedCI        bool
+		registryTargetID     string
+		registryUpdated      bool
+		resolveTargetID      string
+		configRules          []CollaboratorCIAlertRule
+		wantDMs              int
+		wantDMChannel        string
+		wantDMSubstrings     []string
+		wantDMDedupLoaded    bool
+		wantConflictEnqueued int
+		wantErr              bool
+	}{
+		{
+			name:                 "successful collaborator conflict alert on updatePRBranch 409 conflict",
+			prState:              "open",
+			prHeadSHA:            "collabsha101",
+			prAuthor:             "collab-alpha",
+			prTitle:              "Feature Collab",
+			prHeadRef:            "feat/collab",
+			updateBranchStatus:   http.StatusConflict,
+			configRules:          defaultRules,
+			wantDMs:              1,
+			wantDMChannel:        "123456789012345678",
+			wantDMSubstrings:     []string{"<@111111111111111111>", "Merge conflict with `main` detected on [azylman/collab-repo#101](https://github.com/azylman/collab-repo/pull/101)", "\"Feature Collab\"", "branch: feat/collab", "commit: collabs", "automatic branch update could not resolve conflicts. Please rebase or merge `origin/main` and push."},
+			wantDMDedupLoaded:    true,
+			wantConflictEnqueued: 0,
+		},
+		{
+			name:                 "per-SHA deduplication skips duplicate conflict alert on same SHA",
+			prState:              "open",
+			prHeadSHA:            "collabsha101",
+			prAuthor:             "collab-alpha",
+			prTitle:              "Feature Collab",
+			prHeadRef:            "feat/collab",
+			updateBranchStatus:   http.StatusConflict,
+			preAlertedSHA:        "collabsha101",
+			configRules:          defaultRules,
+			wantDMs:              0,
+			wantDMDedupLoaded:    true,
+			wantConflictEnqueued: 0,
+		},
+		{
+			name:                 "clearFailedCISHA reset allows alerting on new commit SHA",
+			prState:              "open",
+			prHeadSHA:            "collabsha102",
+			prAuthor:             "collab-alpha",
+			prTitle:              "Feature Collab",
+			prHeadRef:            "feat/collab",
+			updateBranchStatus:   http.StatusConflict,
+			preAlertedSHA:        "collabsha101",
+			clearFailedCI:        true,
+			configRules:          defaultRules,
+			wantDMs:              1,
+			wantDMChannel:        "123456789012345678",
+			wantDMSubstrings:     []string{"<@111111111111111111>", "Merge conflict with `main` detected on [azylman/collab-repo#101](https://github.com/azylman/collab-repo/pull/101)", "commit: collabs"},
+			wantDMDedupLoaded:    true,
+			wantConflictEnqueued: 0,
+		},
+		{
+			name:                 "registered PR updated in registry skips collaborator alert and enqueues conflict job",
+			prState:              "open",
+			prHeadSHA:            "collabsha101",
+			prAuthor:             "collab-alpha",
+			prTitle:              "Feature Collab",
+			prHeadRef:            "feat/collab",
+			updateBranchStatus:   http.StatusConflict,
+			registryTargetID:     "1555405874565091380",
+			registryUpdated:      true,
+			configRules:          defaultRules,
+			wantDMs:              0,
+			wantDMDedupLoaded:    false,
+			wantConflictEnqueued: 1,
+		},
+		{
+			name:                 "registered PR already in conflict (targetID non-empty, not updated) skips collaborator alert",
+			prState:              "open",
+			prHeadSHA:            "collabsha101",
+			prAuthor:             "collab-alpha",
+			prTitle:              "Feature Collab",
+			prHeadRef:            "feat/collab",
+			updateBranchStatus:   http.StatusConflict,
+			registryTargetID:     "1555405874565091380",
+			registryUpdated:      false,
+			configRules:          defaultRules,
+			wantDMs:              0,
+			wantDMDedupLoaded:    false,
+			wantConflictEnqueued: 0,
+		},
+		{
+			name:                 "registered PR resolved by ResolvePRByNumber skips collaborator alert",
+			prState:              "open",
+			prHeadSHA:            "collabsha101",
+			prAuthor:             "collab-alpha",
+			prTitle:              "Feature Collab",
+			prHeadRef:            "feat/collab",
+			updateBranchStatus:   http.StatusConflict,
+			resolveTargetID:      "1555405874565091380",
+			registryUpdated:      false,
+			configRules:          defaultRules,
+			wantDMs:              0,
+			wantDMDedupLoaded:    false,
+			wantConflictEnqueued: 0,
+		},
+		{
+			name:                 "DispatchDirectMessage error rolls back deduplication for retry",
+			prState:              "open",
+			prHeadSHA:            "collabsha101",
+			prAuthor:             "collab-alpha",
+			prTitle:              "Feature Collab",
+			prHeadRef:            "feat/collab",
+			updateBranchStatus:   http.StatusConflict,
+			dispDMErr:            errors.New("discord rate limited"),
+			configRules:          defaultRules,
+			wantDMs:              1,
+			wantDMDedupLoaded:    false,
+			wantConflictEnqueued: 0,
+		},
+		{
+			name:                 "clean update with no conflict emits zero DMs",
+			prState:              "open",
+			prHeadSHA:            "collabsha101",
+			prAuthor:             "collab-alpha",
+			prTitle:              "Feature Collab",
+			prHeadRef:            "feat/collab",
+			updateBranchStatus:   http.StatusOK,
+			configRules:          defaultRules,
+			wantDMs:              0,
+			wantDMDedupLoaded:    false,
+			wantConflictEnqueued: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if strings.Contains(r.URL.Path, "/update-branch") {
+					w.WriteHeader(tc.updateBranchStatus)
+					if tc.updateBranchStatus == http.StatusConflict {
+						_ = json.NewEncoder(w).Encode(map[string]string{"message": "Merge conflict"})
+					}
+					return
+				}
+				if strings.Contains(r.URL.Path, "/pulls") {
+					pr := GitHubPullRequest{
+						Number: 101,
+						Title:  tc.prTitle,
+						State:  tc.prState,
+						Merged: tc.prMerged,
+						Head: GitHubPRRef{
+							Ref: tc.prHeadRef,
+							SHA: tc.prHeadSHA,
+						},
+						User: struct {
+							Login string `json:"login"`
+						}{
+							Login: tc.prAuthor,
+						},
+					}
+					_ = json.NewEncoder(w).Encode([]GitHubPullRequest{pr})
+					return
+				}
+				w.WriteHeader(http.StatusNotFound)
+			}))
+			defer mockServer.Close()
+
+			disp := &mockOutboundDispatcher{
+				directMessageErr: tc.dispDMErr,
+			}
+			reg := &mockPRRegistry{
+				conflictTargetID: tc.registryTargetID,
+				conflictUpdated:  tc.registryUpdated,
+				resolveTargetID:  tc.resolveTargetID,
+			}
+			river := &mockRiverInserter{}
+			cfg := Config{
+				GitHubAPIURL:         mockServer.URL,
+				CollaboratorCIAlerts: tc.configRules,
+				AutoUpdatePRAuthors:  []string{"collab-alpha"},
+			}
+			srv := newTestRouter(cfg, mockServer.Client(), reg, disp, river)
+
+			if tc.preAlertedSHA != "" {
+				srv.collaboratorConflictSHAs.Store(prCheckKey("collab-repo", 101), tc.preAlertedSHA)
+			}
+			if tc.clearFailedCI {
+				srv.clearFailedCISHA("collab-repo", 101)
+			}
+
+			err := srv.checkOpenPRConflicts(ctx, "azylman/collab-repo")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("checkOpenPRConflicts err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			dmCalls := disp.DirectMessageCalls()
+			if len(dmCalls) != tc.wantDMs {
+				t.Fatalf("DirectMessageCalls len = %d, want %d", len(dmCalls), tc.wantDMs)
+			}
+			if tc.wantDMs > 0 && tc.wantDMChannel != "" {
+				if dmCalls[0].ChannelID != tc.wantDMChannel {
+					t.Errorf("DM ChannelID = %q, want %q", dmCalls[0].ChannelID, tc.wantDMChannel)
+				}
+			}
+			if len(dmCalls) > 0 {
+				content := dmCalls[0].Content
+				for _, sub := range tc.wantDMSubstrings {
+					if !strings.Contains(content, sub) {
+						t.Errorf("DM content missing %q:\n%s", sub, content)
+					}
+				}
+			}
+			_, loaded := srv.collaboratorConflictSHAs.Load(prCheckKey("collab-repo", 101))
+			if loaded != tc.wantDMDedupLoaded {
+				t.Errorf("collaboratorConflictSHAs loaded = %v, want %v", loaded, tc.wantDMDedupLoaded)
+			}
+			if len(river.insertedConflictJobs) != tc.wantConflictEnqueued {
+				t.Errorf("insertedConflictJobs len = %d, want %d", len(river.insertedConflictJobs), tc.wantConflictEnqueued)
+			}
+		})
+	}
+}
+
+func TestCollaboratorConflictNotification_AutoMergeDisabled(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	defaultRules := []CollaboratorCIAlertRule{
+		{
+			Repo:      "collab-repo",
+			ChannelID: "123456789012345678",
+			Authors: map[string]string{
+				"collab-alpha": "<@111111111111111111>",
+			},
+		},
+	}
+
+	tests := []struct {
+		name                 string
+		prState              string
+		prMerged             bool
+		prHeadSHA            string
+		payloadAuthor        string
+		apiAuthor            string
+		prTitle              string
+		prHeadRef            string
+		dispDMErr            error
+		preAlertedSHA        string
+		clearFailedCI        bool
+		registryTargetID     string
+		registryUpdated      bool
+		resolveTargetID      string
+		configRules          []CollaboratorCIAlertRule
+		wantDMs              int
+		wantDMChannel        string
+		wantDMSubstrings     []string
+		wantDMDedupLoaded    bool
+		wantConflictEnqueued int
+		wantErr              bool
+	}{
+		{
+			name:                 "unregistered PR dispatches collaborator conflict alert on auto_merge_disabled",
+			prState:              "open",
+			prHeadSHA:            "collabsha101",
+			payloadAuthor:        "collab-alpha",
+			prTitle:              "Feature Collab",
+			prHeadRef:            "feat/collab",
+			configRules:          defaultRules,
+			wantDMs:              1,
+			wantDMChannel:        "123456789012345678",
+			wantDMSubstrings:     []string{"<@111111111111111111>", "Merge conflict with `main` detected on [azylman/collab-repo#101](https://github.com/azylman/collab-repo/pull/101)", "\"Feature Collab\"", "branch: feat/collab", "commit: collabs", "automatic branch update could not resolve conflicts. Please rebase or merge `origin/main` and push."},
+			wantDMDedupLoaded:    true,
+			wantConflictEnqueued: 0,
+		},
+		{
+			name:                 "fallback GitHub PR lookup when pr.User.Login is empty in payload",
+			prState:              "open",
+			prHeadSHA:            "collabsha101",
+			payloadAuthor:        "",
+			apiAuthor:            "collab-alpha",
+			prTitle:              "Feature Collab",
+			prHeadRef:            "feat/collab",
+			configRules:          defaultRules,
+			wantDMs:              1,
+			wantDMChannel:        "123456789012345678",
+			wantDMSubstrings:     []string{"<@111111111111111111>", "Merge conflict with `main` detected on [azylman/collab-repo#101](https://github.com/azylman/collab-repo/pull/101)"},
+			wantDMDedupLoaded:    true,
+			wantConflictEnqueued: 0,
+		},
+		{
+			name:                 "per-SHA deduplication skips duplicate auto_merge_disabled alert",
+			prState:              "open",
+			prHeadSHA:            "collabsha101",
+			payloadAuthor:        "collab-alpha",
+			prTitle:              "Feature Collab",
+			prHeadRef:            "feat/collab",
+			preAlertedSHA:        "collabsha101",
+			configRules:          defaultRules,
+			wantDMs:              0,
+			wantDMDedupLoaded:    true,
+			wantConflictEnqueued: 0,
+		},
+		{
+			name:                 "clearFailedCISHA reset allows re-alerting on new commit SHA on auto_merge_disabled",
+			prState:              "open",
+			prHeadSHA:            "collabsha102",
+			payloadAuthor:        "collab-alpha",
+			prTitle:              "Feature Collab",
+			prHeadRef:            "feat/collab",
+			preAlertedSHA:        "collabsha101",
+			clearFailedCI:        true,
+			configRules:          defaultRules,
+			wantDMs:              1,
+			wantDMChannel:        "123456789012345678",
+			wantDMDedupLoaded:    true,
+			wantConflictEnqueued: 0,
+		},
+		{
+			name:                 "registered PR updated in registry enqueues conflict job and skips collaborator alert",
+			prState:              "open",
+			prHeadSHA:            "collabsha101",
+			payloadAuthor:        "collab-alpha",
+			prTitle:              "Feature Collab",
+			prHeadRef:            "feat/collab",
+			registryTargetID:     "1555405874565091380",
+			registryUpdated:      true,
+			configRules:          defaultRules,
+			wantDMs:              0,
+			wantDMDedupLoaded:    false,
+			wantConflictEnqueued: 1,
+		},
+		{
+			name:                 "registered PR with targetID resolved from ResolvePRByNumber skips collaborator alert",
+			prState:              "open",
+			prHeadSHA:            "collabsha101",
+			payloadAuthor:        "collab-alpha",
+			prTitle:              "Feature Collab",
+			prHeadRef:            "feat/collab",
+			resolveTargetID:      "1555405874565091380",
+			registryUpdated:      false,
+			configRules:          defaultRules,
+			wantDMs:              0,
+			wantDMDedupLoaded:    false,
+			wantConflictEnqueued: 0,
+		},
+		{
+			name:                 "DispatchDirectMessage error rolls back deduplication on auto_merge_disabled",
+			prState:              "open",
+			prHeadSHA:            "collabsha101",
+			payloadAuthor:        "collab-alpha",
+			prTitle:              "Feature Collab",
+			prHeadRef:            "feat/collab",
+			dispDMErr:            errors.New("discord send failure"),
+			configRules:          defaultRules,
+			wantDMs:              1,
+			wantDMDedupLoaded:    false,
+			wantConflictEnqueued: 0,
+			wantErr:              true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if strings.Contains(r.URL.Path, "/pulls/101") {
+					author := firstNonEmpty(tc.apiAuthor, tc.payloadAuthor)
+					pr := GitHubPullRequest{
+						Number: 101,
+						Title:  tc.prTitle,
+						State:  tc.prState,
+						Merged: tc.prMerged,
+						Head: GitHubPRRef{
+							Ref: tc.prHeadRef,
+							SHA: tc.prHeadSHA,
+						},
+						User: struct {
+							Login string `json:"login"`
+						}{
+							Login: author,
+						},
+					}
+					_ = json.NewEncoder(w).Encode(pr)
+					return
+				}
+				w.WriteHeader(http.StatusNotFound)
+			}))
+			defer mockServer.Close()
+
+			disp := &mockOutboundDispatcher{
+				directMessageErr: tc.dispDMErr,
+			}
+			reg := &mockPRRegistry{
+				conflictTargetID: tc.registryTargetID,
+				conflictUpdated:  tc.registryUpdated,
+				resolveTargetID:  tc.resolveTargetID,
+			}
+			river := &mockRiverInserter{}
+			cfg := Config{
+				GitHubAPIURL:         mockServer.URL,
+				CollaboratorCIAlerts: tc.configRules,
+			}
+			srv := newTestRouter(cfg, mockServer.Client(), reg, disp, river)
+
+			if tc.preAlertedSHA != "" {
+				srv.collaboratorConflictSHAs.Store(prCheckKey("collab-repo", 101), tc.preAlertedSHA)
+			}
+			if tc.clearFailedCI {
+				srv.clearFailedCISHA("collab-repo", 101)
+			}
+
+			res := &ResolvedGitHubEvent{
+				Event:    "pull_request",
+				Action:   "auto_merge_disabled",
+				Repo:     "azylman/collab-repo",
+				PRNumber: 101,
+				HeadSHA:  tc.prHeadSHA,
+				Branch:   tc.prHeadRef,
+				TargetID: tc.registryTargetID,
+			}
+			pr := GitHubPullRequest{
+				Number: 101,
+				Title:  tc.prTitle,
+				State:  tc.prState,
+				Merged: tc.prMerged,
+				Head: GitHubPRRef{
+					Ref: tc.prHeadRef,
+					SHA: tc.prHeadSHA,
+				},
+				User: struct {
+					Login string `json:"login"`
+				}{
+					Login: tc.payloadAuthor,
+				},
+			}
+
+			err := srv.handlePRAutoMergeDisabledAction(ctx, res, pr)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("handlePRAutoMergeDisabledAction err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			dmCalls := disp.DirectMessageCalls()
+			if len(dmCalls) != tc.wantDMs {
+				t.Fatalf("DirectMessageCalls len = %d, want %d", len(dmCalls), tc.wantDMs)
+			}
+			if tc.wantDMs > 0 && tc.wantDMChannel != "" {
+				if dmCalls[0].ChannelID != tc.wantDMChannel {
+					t.Errorf("DM ChannelID = %q, want %q", dmCalls[0].ChannelID, tc.wantDMChannel)
+				}
+			}
+			if len(dmCalls) > 0 {
+				content := dmCalls[0].Content
+				for _, sub := range tc.wantDMSubstrings {
+					if !strings.Contains(content, sub) {
+						t.Errorf("DM content missing %q:\n%s", sub, content)
+					}
+				}
+			}
+			_, loaded := srv.collaboratorConflictSHAs.Load(prCheckKey("collab-repo", 101))
+			if loaded != tc.wantDMDedupLoaded {
+				t.Errorf("collaboratorConflictSHAs loaded = %v, want %v", loaded, tc.wantDMDedupLoaded)
+			}
+			if len(river.insertedConflictJobs) != tc.wantConflictEnqueued {
+				t.Errorf("insertedConflictJobs len = %d, want %d", len(river.insertedConflictJobs), tc.wantConflictEnqueued)
+			}
+		})
+	}
+}
