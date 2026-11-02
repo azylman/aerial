@@ -892,6 +892,7 @@ func TestNormalizeRoute(t *testing.T) {
 		{"/internal/llm", "/internal/llm"},
 		{"/internal/discord/message", "/internal/discord/message"},
 		{"/internal/discord/interaction", "/internal/discord/interaction"},
+		{"/internal/guard/scan", "/internal/guard/scan"},
 		{"/schedules", "unmatched"},
 		{"/schedules/runs", "unmatched"},
 		{"/transcripts", "unmatched"},
@@ -1136,6 +1137,18 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 	}
 	if w := runHTTP(mux.ServeHTTP, http.MethodPost, "/dispatch/cancel", strings.NewReader(`{"dispatch_id":"disp-1"}`)); w.Code != http.StatusOK {
 		t.Errorf("Expected 200 from /dispatch/cancel, got %d", w.Code)
+	}
+	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/internal/guard/scan", nil); w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("Expected 405 from GET /internal/guard/scan, got %d", w.Code)
+	}
+	if w := runHTTP(mux.ServeHTTP, http.MethodPost, "/internal/guard/scan", strings.NewReader(`{"bad json`)); w.Code != http.StatusBadRequest {
+		t.Errorf("Expected 400 from bad JSON to /internal/guard/scan, got %d", w.Code)
+	}
+	if w := runHTTP(mux.ServeHTTP, http.MethodPost, "/internal/guard/scan", strings.NewReader(`{"diff":"diff --git a/a.go b/a.go\n+var x = 1\n","text":"echo ok","ignore_internal_domain":true}`)); w.Code != http.StatusOK {
+		t.Errorf("Expected 200 from valid /internal/guard/scan, got %d", w.Code)
+	}
+	if w := runHTTP(mux.ServeHTTP, http.MethodPost, "/internal/guard/scan", strings.NewReader(`{"text":"export TOKEN=ghp_111111111122222222223333333333444444"}`)); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"decision":"deny"`) {
+		t.Errorf("Expected deny from secret /internal/guard/scan, got code=%d body=%s", w.Code, w.Body.String())
 	}
 	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/transcripts", nil); w.Code != http.StatusNotFound {
 		t.Errorf("Expected 404 from deleted /transcripts, got %d", w.Code)
