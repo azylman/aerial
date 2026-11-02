@@ -133,7 +133,7 @@ func LoadConfig(configPath string) Config {
 		InfisicalClientID:     os.Getenv("INFISICAL_CLIENT_ID"),
 		InfisicalClientSecret: os.Getenv("INFISICAL_CLIENT_SECRET"),
 		InfisicalProjectID:    os.Getenv("INFISICAL_PROJECT_ID"),
-		InfisicalEnvironment:  firstNonEmpty(os.Getenv("INFISICAL_ENVIRONMENT"), fileCfg.InfisicalEnvironment, "prod"),
+		InfisicalEnvironment:  firstNonEmpty(os.Getenv("INFISICAL_ENVIRONMENT"), fileCfg.InfisicalEnvironment, "default"),
 		NomadAddr:             strings.TrimRight(firstNonEmpty(os.Getenv("NOMAD_ADDR"), fileCfg.NomadAddr, "http://127.0.0.1:4646"), "/"),
 		NomadToken:            os.Getenv("NOMAD_TOKEN"),
 		GitHubToken:           os.Getenv("GITHUB_PAT"),

@@ -56,7 +56,7 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 			env:           map[string]string{},
 			wantPort:      "4020",
 			wantInfURL:    "http://infisical.aerial",
-			wantEnv:       "prod",
+			wantEnv:       "default",
 			wantNomadAddr: "http://127.0.0.1:4646",
 			wantGHURL:     "https://api.github.com",
 			wantPGURL:     "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable",

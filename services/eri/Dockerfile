@@ -95,7 +95,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Configure default SSH client with include for aerial-config
 RUN mkdir -p -m 0700 /root/.ssh && \
     echo "Include /share/aerial-config/ssh/config" > /root/.ssh/config && \
-    chmod 0600 /root/.ssh/config
+    chmod 0600 /root/.ssh/config && \
+    mkdir -p -m 0755 /etc/ssh/ssh_config.d && \
+    echo "Include /share/aerial-config/ssh/config" > /etc/ssh/ssh_config.d/aerial.conf && \
+    chmod 0644 /etc/ssh/ssh_config.d/aerial.conf
 
 # Copy Go SDK, Rust toolchain, golangci-lint, and Node.js 22 LTS runtime from builders/images
 COPY --link --from=builder /usr/local/go /usr/local/go
@@ -138,7 +141,8 @@ COPY --link --from=builder /hook-guard /usr/local/bin/hook-guard
 RUN ln -s /usr/local/bin/hook-guard /usr/local/bin/share-guard && \
     ln -s /usr/local/bin/hook-guard /usr/local/bin/schedule-guard && \
     ln -s /usr/local/bin/hook-guard /usr/local/bin/batch-guard && \
-    ln -s /usr/local/bin/hook-guard /usr/local/bin/search-guard
+    ln -s /usr/local/bin/hook-guard /usr/local/bin/search-guard && \
+    ln -sf /usr/local/bin/hook-guard /usr/local/bin/commit-guard
 COPY --link scripts/ /usr/local/bin/
 RUN chmod +x /usr/local/bin/*.sh 2>/dev/null || true
 COPY --link rules /app/rules

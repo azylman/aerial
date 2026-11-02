@@ -10,8 +10,19 @@ import (
 	"syscall"
 )
 
+var getEuid = os.Geteuid
+
+const (
+	agyUnprivilegedUID = 1000
+	agyUnprivilegedGID = 1000
+)
+
 func configureSysProcAttr(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	sysAttr := &syscall.SysProcAttr{Setpgid: true}
+	if getEuid() == 0 {
+		sysAttr.Credential = &syscall.Credential{Uid: agyUnprivilegedUID, Gid: agyUnprivilegedGID}
+	}
+	cmd.SysProcAttr = sysAttr
 }
 
 func isIgnorableKillError(err error) bool {

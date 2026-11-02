@@ -11,10 +11,24 @@ import (
 )
 
 func TestRunnerPosix_ProcessGroupAndSignalHelpers(t *testing.T) {
+	origGetEuid := getEuid
+	defer func() { getEuid = origGetEuid }()
+
+	getEuid = func() int { return 1000 }
 	cmdPgid := &exec.Cmd{}
 	configureSysProcAttr(cmdPgid)
-	if cmdPgid.SysProcAttr == nil || !cmdPgid.SysProcAttr.Setpgid {
+	if cmdPgid.SysProcAttr == nil || !cmdPgid.SysProcAttr.Setpgid || cmdPgid.SysProcAttr.Credential != nil {
+		t.Errorf("expected SysProcAttr.Setpgid=true and nil Credential for non-root")
+	}
+
+	getEuid = func() int { return 0 }
+	cmdRoot := &exec.Cmd{}
+	configureSysProcAttr(cmdRoot)
+	if cmdRoot.SysProcAttr == nil || !cmdRoot.SysProcAttr.Setpgid {
 		t.Errorf("expected SysProcAttr.Setpgid=true")
+	}
+	if cmdRoot.SysProcAttr.Credential == nil || cmdRoot.SysProcAttr.Credential.Uid != agyUnprivilegedUID || cmdRoot.SysProcAttr.Credential.Gid != agyUnprivilegedGID {
+		t.Errorf("expected Credential UID/GID 1000 for root, got: %v", cmdRoot.SysProcAttr.Credential)
 	}
 
 	if isIgnorableKillError(nil) || !isIgnorableKillError(os.ErrProcessDone) || !isIgnorableKillError(syscall.ESRCH) || isIgnorableKillError(errors.New("other error")) {

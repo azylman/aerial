@@ -862,7 +862,7 @@ func applyEnvironmentOverrides(data *ConfigData, lookup func(string) string) {
 			data.Ollama.NumCtx = nc
 		}
 	}
-	overrideEnvStr(&data.GeminiHomeDir, lookup, "GEMINI_HOME")
+	overrideEnvStr(&data.GeminiHomeDir, lookup, "GEMINI_HOME", "GEMINI_HOME_DIR")
 	overrideEnvStr(&data.DataDir, lookup, "DATA_DIR")
 	overrideEnvStr(&data.MCPConfig, lookup, "MCP_CONFIG")
 	overrideEnvStr(&data.OpenObserveURL, lookup, "OPENOBSERVE_URL")
