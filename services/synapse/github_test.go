@@ -623,16 +623,23 @@ func TestProcessGitHubEvent(t *testing.T) {
 		},
 		{
 			name: "pull_request auto_merge_disabled dispatches conflict DM and prompt", event: "pull_request", delivery: "del-amd",
-			payload:    `{"action":"auto_merge_disabled","number":543,"pull_request":{"number":543,"head":{"ref":"feat/my-feature","sha":"head543"}},"repository":{"full_name":"azylman/aerial"}}`,
+			payload:    `{"action":"auto_merge_disabled","number":543,"pull_request":{"number":543,"head":{"ref":"feat/my-feature","sha":"head543"},"mergeable_state":"dirty"},"repository":{"full_name":"azylman/aerial"}}`,
 			reg:        &mockPRRegistry{conflictTargetID: "1555405874565091380", conflictUpdated: true},
 			disp:       &mockOutboundDispatcher{},
 			wantAction: "auto_merge_disabled", wantPR: 543, wantConflictCalls: 1, wantDMs: 0, wantDispatches: 1, wantPromptSubstr: "Merge conflict detected on PR #543",
 		},
 		{
 			name: "pull_request auto_merge_disabled error propagating", event: "pull_request", delivery: "del-amd-err",
-			payload: `{"action":"auto_merge_disabled","number":543,"pull_request":{"number":543,"head":{"ref":"feat/my-feature","sha":"head543"}},"repository":{"full_name":"azylman/aerial"}}`,
+			payload: `{"action":"auto_merge_disabled","number":543,"pull_request":{"number":543,"head":{"ref":"feat/my-feature","sha":"head543"},"mergeable_state":"dirty"},"repository":{"full_name":"azylman/aerial"}}`,
 			reg:     &mockPRRegistry{conflictErr: errors.New("simulated conflict transition error")},
 			wantErr: true,
+		},
+		{
+			name: "pull_request auto_merge_disabled clean state ignores conflict", event: "pull_request", delivery: "del-amd-clean",
+			payload:    `{"action":"auto_merge_disabled","number":543,"pull_request":{"number":543,"head":{"ref":"feat/my-feature","sha":"head543"},"mergeable_state":"clean"},"repository":{"full_name":"azylman/aerial"}}`,
+			reg:        &mockPRRegistry{conflictTargetID: "1555405874565091380", conflictUpdated: true},
+			disp:       &mockOutboundDispatcher{},
+			wantAction: "auto_merge_disabled", wantPR: 543, wantConflictCalls: 0, wantDMs: 0, wantDispatches: 0,
 		},
 		{
 			name: "push to main triggers conflict check on open PRs", event: "push", delivery: "del-push-conflict",
@@ -2931,6 +2938,10 @@ func TestCollaboratorConflictNotification_AutoMergeDisabled(t *testing.T) {
 		prState              string
 		prMerged             bool
 		prHeadSHA            string
+		prMergeableState     string
+		apiMergeableState    string
+		ghAPIStatus          int
+		apiHeadSHA           string
 		payloadAuthor        string
 		apiAuthor            string
 		prTitle              string
@@ -2953,6 +2964,7 @@ func TestCollaboratorConflictNotification_AutoMergeDisabled(t *testing.T) {
 			name:                 "unregistered PR dispatches collaborator conflict alert on auto_merge_disabled",
 			prState:              "open",
 			prHeadSHA:            "collabsha101",
+			prMergeableState:     "dirty",
 			payloadAuthor:        "collab-alpha",
 			prTitle:              "Feature Collab",
 			prHeadRef:            "feat/collab",
@@ -2967,6 +2979,7 @@ func TestCollaboratorConflictNotification_AutoMergeDisabled(t *testing.T) {
 			name:                 "fallback GitHub PR lookup when pr.User.Login is empty in payload",
 			prState:              "open",
 			prHeadSHA:            "collabsha101",
+			prMergeableState:     "dirty",
 			payloadAuthor:        "",
 			apiAuthor:            "collab-alpha",
 			prTitle:              "Feature Collab",
@@ -2982,6 +2995,7 @@ func TestCollaboratorConflictNotification_AutoMergeDisabled(t *testing.T) {
 			name:                 "per-SHA deduplication skips duplicate auto_merge_disabled alert",
 			prState:              "open",
 			prHeadSHA:            "collabsha101",
+			prMergeableState:     "dirty",
 			payloadAuthor:        "collab-alpha",
 			prTitle:              "Feature Collab",
 			prHeadRef:            "feat/collab",
@@ -2995,6 +3009,7 @@ func TestCollaboratorConflictNotification_AutoMergeDisabled(t *testing.T) {
 			name:                 "clearFailedCISHA reset allows re-alerting on new commit SHA on auto_merge_disabled",
 			prState:              "open",
 			prHeadSHA:            "collabsha102",
+			prMergeableState:     "dirty",
 			payloadAuthor:        "collab-alpha",
 			prTitle:              "Feature Collab",
 			prHeadRef:            "feat/collab",
@@ -3010,6 +3025,7 @@ func TestCollaboratorConflictNotification_AutoMergeDisabled(t *testing.T) {
 			name:                 "registered PR updated in registry enqueues conflict job and skips collaborator alert",
 			prState:              "open",
 			prHeadSHA:            "collabsha101",
+			prMergeableState:     "dirty",
 			payloadAuthor:        "collab-alpha",
 			prTitle:              "Feature Collab",
 			prHeadRef:            "feat/collab",
@@ -3024,6 +3040,7 @@ func TestCollaboratorConflictNotification_AutoMergeDisabled(t *testing.T) {
 			name:                 "registered PR with targetID resolved from ResolvePRByNumber skips collaborator alert",
 			prState:              "open",
 			prHeadSHA:            "collabsha101",
+			prMergeableState:     "dirty",
 			payloadAuthor:        "collab-alpha",
 			prTitle:              "Feature Collab",
 			prHeadRef:            "feat/collab",
@@ -3038,12 +3055,113 @@ func TestCollaboratorConflictNotification_AutoMergeDisabled(t *testing.T) {
 			name:                 "DispatchDirectMessage error rolls back deduplication on auto_merge_disabled",
 			prState:              "open",
 			prHeadSHA:            "collabsha101",
+			prMergeableState:     "dirty",
 			payloadAuthor:        "collab-alpha",
 			prTitle:              "Feature Collab",
 			prHeadRef:            "feat/collab",
 			dispDMErr:            errors.New("discord send failure"),
 			configRules:          defaultRules,
 			wantDMs:              1,
+			wantDMDedupLoaded:    false,
+			wantConflictEnqueued: 0,
+			wantErr:              true,
+		},
+		{
+			name:                 "non-dirty payload state clean skipped with 0 DMs and 0 conflict jobs",
+			prState:              "open",
+			prHeadSHA:            "collabsha101",
+			prMergeableState:     "clean",
+			payloadAuthor:        "collab-alpha",
+			prTitle:              "Feature Collab",
+			prHeadRef:            "feat/collab",
+			configRules:          defaultRules,
+			wantDMs:              0,
+			wantDMDedupLoaded:    false,
+			wantConflictEnqueued: 0,
+		},
+		{
+			name:                 "non-dirty payload state unstable skipped with 0 DMs and 0 conflict jobs",
+			prState:              "open",
+			prHeadSHA:            "collabsha101",
+			prMergeableState:     "unstable",
+			payloadAuthor:        "collab-alpha",
+			prTitle:              "Feature Collab",
+			prHeadRef:            "feat/collab",
+			configRules:          defaultRules,
+			wantDMs:              0,
+			wantDMDedupLoaded:    false,
+			wantConflictEnqueued: 0,
+		},
+		{
+			name:                 "unknown payload state where API returns unknown skipped with 0 DMs",
+			prState:              "open",
+			prHeadSHA:            "collabsha101",
+			prMergeableState:     "unknown",
+			apiMergeableState:    "unknown",
+			payloadAuthor:        "collab-alpha",
+			prTitle:              "Feature Collab",
+			prHeadRef:            "feat/collab",
+			configRules:          defaultRules,
+			wantDMs:              0,
+			wantDMDedupLoaded:    false,
+			wantConflictEnqueued: 0,
+		},
+		{
+			name:                 "unknown payload state where API returns dirty dispatches 1 collaborator conflict DM",
+			prState:              "open",
+			prHeadSHA:            "collabsha101",
+			prMergeableState:     "unknown",
+			apiMergeableState:    "dirty",
+			payloadAuthor:        "collab-alpha",
+			prTitle:              "Feature Collab",
+			prHeadRef:            "feat/collab",
+			configRules:          defaultRules,
+			wantDMs:              1,
+			wantDMChannel:        "123456789012345678",
+			wantDMSubstrings:     []string{"<@111111111111111111>", "Merge conflict with `main` detected on [azylman/collab-repo#101](https://github.com/azylman/collab-repo/pull/101)"},
+			wantDMDedupLoaded:    true,
+			wantConflictEnqueued: 0,
+		},
+		{
+			name:                 "unknown payload state where API returns superseded head.sha skipped with 0 DMs",
+			prState:              "open",
+			prHeadSHA:            "collabsha101",
+			prMergeableState:     "unknown",
+			apiMergeableState:    "dirty",
+			apiHeadSHA:           "superseded-sha999",
+			payloadAuthor:        "collab-alpha",
+			prTitle:              "Feature Collab",
+			prHeadRef:            "feat/collab",
+			configRules:          defaultRules,
+			wantDMs:              0,
+			wantDMDedupLoaded:    false,
+			wantConflictEnqueued: 0,
+		},
+		{
+			name:                 "unknown payload state where API returns closed state skipped with 0 DMs",
+			prState:              "closed",
+			prHeadSHA:            "collabsha101",
+			prMergeableState:     "unknown",
+			apiMergeableState:    "dirty",
+			payloadAuthor:        "collab-alpha",
+			prTitle:              "Feature Collab",
+			prHeadRef:            "feat/collab",
+			configRules:          defaultRules,
+			wantDMs:              0,
+			wantDMDedupLoaded:    false,
+			wantConflictEnqueued: 0,
+		},
+		{
+			name:                 "unknown payload state where API returns HTTP 500 propagates error",
+			prState:              "open",
+			prHeadSHA:            "collabsha101",
+			prMergeableState:     "unknown",
+			ghAPIStatus:          http.StatusInternalServerError,
+			payloadAuthor:        "collab-alpha",
+			prTitle:              "Feature Collab",
+			prHeadRef:            "feat/collab",
+			configRules:          defaultRules,
+			wantDMs:              0,
 			wantDMDedupLoaded:    false,
 			wantConflictEnqueued: 0,
 			wantErr:              true,
@@ -3056,15 +3174,26 @@ func TestCollaboratorConflictNotification_AutoMergeDisabled(t *testing.T) {
 			mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				if strings.Contains(r.URL.Path, "/pulls/101") {
+					if tc.ghAPIStatus > 0 && tc.ghAPIStatus != http.StatusOK {
+						w.WriteHeader(tc.ghAPIStatus)
+						_, _ = w.Write([]byte(`{"message": "github api error"}`))
+						return
+					}
 					author := firstNonEmpty(tc.apiAuthor, tc.payloadAuthor)
+					apiHeadSHA := firstNonEmpty(tc.apiHeadSHA, tc.prHeadSHA)
+					apiMergeState := tc.apiMergeableState
+					if apiMergeState == "" {
+						apiMergeState = tc.prMergeableState
+					}
 					pr := GitHubPullRequest{
-						Number: 101,
-						Title:  tc.prTitle,
-						State:  tc.prState,
-						Merged: tc.prMerged,
+						Number:         101,
+						Title:          tc.prTitle,
+						State:          tc.prState,
+						Merged:         tc.prMerged,
+						MergeableState: apiMergeState,
 						Head: GitHubPRRef{
 							Ref: tc.prHeadRef,
-							SHA: tc.prHeadSHA,
+							SHA: apiHeadSHA,
 						},
 						User: struct {
 							Login string `json:"login"`
@@ -3111,10 +3240,11 @@ func TestCollaboratorConflictNotification_AutoMergeDisabled(t *testing.T) {
 				TargetID: tc.registryTargetID,
 			}
 			pr := GitHubPullRequest{
-				Number: 101,
-				Title:  tc.prTitle,
-				State:  tc.prState,
-				Merged: tc.prMerged,
+				Number:         101,
+				Title:          tc.prTitle,
+				State:          tc.prState,
+				Merged:         tc.prMerged,
+				MergeableState: tc.prMergeableState,
 				Head: GitHubPRRef{
 					Ref: tc.prHeadRef,
 					SHA: tc.prHeadSHA,

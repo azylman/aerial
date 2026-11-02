@@ -332,9 +332,29 @@ type GitHubPullRequest struct {
 	Draft          bool        `json:"draft"`
 	Merged         bool        `json:"merged"`
 	MergeCommitSHA string      `json:"merge_commit_sha"`
+	Mergeable      *bool       `json:"mergeable,omitempty"`
+	MergeableState string      `json:"mergeable_state,omitempty"`
 	User           struct {
 		Login string `json:"login"`
 	} `json:"user"`
+}
+
+func isPRMergeConflict(pr GitHubPullRequest) bool {
+	if strings.EqualFold(strings.TrimSpace(pr.MergeableState), "dirty") {
+		return true
+	}
+	if pr.Mergeable != nil && !*pr.Mergeable {
+		return true
+	}
+	return false
+}
+
+func isPRMergeabilityUnknown(pr GitHubPullRequest) bool {
+	if pr.Mergeable != nil {
+		return false
+	}
+	trimmedState := strings.TrimSpace(pr.MergeableState)
+	return trimmedState == "" || strings.EqualFold(trimmedState, "unknown")
 }
 
 const aerialPRMetadataPrefix = "<!-- aerial-pr:"
@@ -1122,6 +1142,34 @@ func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGi
 }
 
 func (s *RouterServer) handlePRAutoMergeDisabledAction(ctx context.Context, res *ResolvedGitHubEvent, pr GitHubPullRequest) error {
+	if pr.Number == 0 {
+		pr.Number = res.PRNumber
+	}
+	pr.Head.Ref = firstNonEmpty(pr.Head.Ref, res.Branch)
+	pr.Head.SHA = firstNonEmpty(pr.Head.SHA, res.HeadSHA)
+
+	if isPRMergeabilityUnknown(pr) && pr.Number > 0 && normalizeRepo(res.Repo) != "" {
+		var fetched GitHubPullRequest
+		if err := s.getGitHubJSON(ctx, fmt.Sprintf("/repos/%s/pulls/%d", normalizeRepo(res.Repo), pr.Number), 2<<20, &fetched); err != nil {
+			return err
+		}
+		if fetched.Merged || (fetched.State != "" && !strings.EqualFold(fetched.State, "open")) || (res.HeadSHA != "" && fetched.Head.SHA != "" && !strings.EqualFold(fetched.Head.SHA, strings.TrimSpace(res.HeadSHA))) {
+			return nil
+		}
+		num := pr.Number
+		headRef := pr.Head.Ref
+		headSHA := pr.Head.SHA
+		pr = fetched
+		pr.Number = num
+		pr.Head.Ref = firstNonEmpty(pr.Head.Ref, headRef)
+		pr.Head.SHA = firstNonEmpty(pr.Head.SHA, headSHA)
+	}
+
+	if !isPRMergeConflict(pr) {
+		log.Printf("[synapse] [github] ignoring auto_merge_disabled on %s#%d (mergeable_state=%q)", res.Repo, pr.Number, pr.MergeableState)
+		return nil
+	}
+
 	if res.HeadSHA != "" {
 		s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
 	}
@@ -1130,11 +1178,6 @@ func (s *RouterServer) handlePRAutoMergeDisabledAction(ctx context.Context, res 
 	if err != nil || handled {
 		return err
 	}
-	if pr.Number == 0 {
-		pr.Number = res.PRNumber
-	}
-	pr.Head.Ref = firstNonEmpty(pr.Head.Ref, res.Branch)
-	pr.Head.SHA = firstNonEmpty(pr.Head.SHA, res.HeadSHA)
 	return s.notifyCollaboratorConflict(ctx, res.Repo, pr)
 }
 
