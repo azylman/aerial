@@ -42,6 +42,7 @@ type RouterServer struct {
 	buildCompletedDispatched sync.Map
 	queueStats               queueStatsQuerier
 	gatewayLatencyFn         func() time.Duration
+	commitSHAPRs             sync.Map
 }
 
 // NewRouterServer constructs a new RouterServer instance.

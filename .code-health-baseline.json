@@ -1,4 +1,7 @@
 {
-  "files": {},
-  "functions": {}
+  "files": {
+    "services/synapse/github.go": {
+      "lines": 1536
+    }
+  }
 }
