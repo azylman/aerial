@@ -585,3 +585,166 @@ func TestPopulateMissingBranch(t *testing.T) {
 		})
 	}
 }
+
+func TestFormatCollaboratorCIFailureMessage(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		mention    string
+		repo       string
+		prNumber   int
+		prTitle    string
+		branch     string
+		headSHA    string
+		checkName  string
+		checkURL   string
+		details    string
+		wantSub    []string
+		wantNotSub []string
+	}{
+		{
+			name:      "all fields populated formats rich notification",
+			mention:   "<@111111111111111111>",
+			repo:      "collab-repo",
+			prNumber:  42,
+			prTitle:   "Add Widget Feature",
+			branch:    "refs/heads/feat/widget",
+			headSHA:   "ed197571a381920f540e7a3c55b68008a45912a0",
+			checkName: "build-and-test",
+			checkURL:  "https://github.com/azylman/collab-repo/actions/runs/10/job/20",
+			details:   "exit status 1: tests failed",
+			wantSub: []string{
+				"<@111111111111111111> CI check \"build-and-test\" failed for [azylman/collab-repo#42](https://github.com/azylman/collab-repo/pull/42)",
+				"\"Add Widget Feature\"",
+				"branch: feat/widget",
+				"commit: ed19757",
+				"Error details:\n```\nexit status 1: tests failed\n```",
+				"Check URL: https://github.com/azylman/collab-repo/actions/runs/10/job/20",
+			},
+		},
+		{
+			name:      "minimal fields without mention or details",
+			mention:   "",
+			repo:      "azylman/collab-repo",
+			prNumber:  99,
+			prTitle:   "",
+			branch:    "",
+			headSHA:   "",
+			checkName: "Lint",
+			checkURL:  "",
+			details:   "",
+			wantSub: []string{
+				"CI check \"Lint\" failed for [azylman/collab-repo#99](https://github.com/azylman/collab-repo/pull/99).",
+			},
+			wantNotSub: []string{
+				"<@",
+				"Error details:",
+				"Check URL:",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := formatCollaboratorCIFailureMessage(tc.mention, tc.repo, tc.prNumber, tc.prTitle, tc.branch, tc.headSHA, tc.checkName, tc.checkURL, tc.details)
+			for _, sub := range tc.wantSub {
+				if !strings.Contains(got, sub) {
+					t.Errorf("formatCollaboratorCIFailureMessage missing %q:\n%s", sub, got)
+				}
+			}
+			for _, notSub := range tc.wantNotSub {
+				if strings.Contains(got, notSub) {
+					t.Errorf("formatCollaboratorCIFailureMessage unexpectedly contained %q:\n%s", notSub, got)
+				}
+			}
+		})
+	}
+}
+
+func TestResolveCIFailureDetails(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "/issues/10/comments") {
+			_, _ = w.Write([]byte(`[
+				{"id": 1, "body": "## roborev: Combined Review (` + "`sha1111`" + `)\nroborev defect detected"}
+			]`))
+			return
+		}
+		if strings.Contains(r.URL.Path, "/jobs/555/logs") {
+			_, _ = w.Write([]byte("2026-10-22T21:40:12Z Error: fetched job failure log\n"))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(mockServer.Close)
+
+	srv := newTestRouter(Config{
+		GitHubAPIURL: mockServer.URL,
+	}, mockServer.Client(), nil, nil)
+
+	tests := []struct {
+		name     string
+		res      *ResolvedGitHubEvent
+		details  string
+		checkURL string
+		wantSub  string
+	}{
+		{
+			name:     "nil event returns details unchanged",
+			res:      nil,
+			details:  "original details",
+			checkURL: "",
+			wantSub:  "original details",
+		},
+		{
+			name: "roborev check fetches comment",
+			res: &ResolvedGitHubEvent{
+				Repo:      "azylman/aerial",
+				PRNumber:  10,
+				HeadSHA:   "sha1111",
+				CheckName: "roborev",
+			},
+			details:  "short error",
+			checkURL: "",
+			wantSub:  "roborev defect detected",
+		},
+		{
+			name: "actions job log fetched on short details",
+			res: &ResolvedGitHubEvent{
+				Repo:      "azylman/aerial",
+				PRNumber:  42,
+				HeadSHA:   "sha2222",
+				CheckName: "CI / test",
+			},
+			details:  "Failed",
+			checkURL: "https://github.com/azylman/aerial/actions/runs/123/job/555",
+			wantSub:  "fetched job failure log",
+		},
+		{
+			name: "existing verbose details preserved without fetch",
+			res: &ResolvedGitHubEvent{
+				Repo:      "azylman/aerial",
+				PRNumber:  42,
+				HeadSHA:   "sha2222",
+				CheckName: "CI / test",
+			},
+			details:  strings.Repeat("long detailed error stack trace\n", 10),
+			checkURL: "https://github.com/azylman/aerial/actions/runs/123/job/555",
+			wantSub:  "long detailed error stack trace",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := srv.resolveCIFailureDetails(ctx, tc.res, tc.details, tc.checkURL)
+			if !strings.Contains(got, tc.wantSub) {
+				t.Errorf("resolveCIFailureDetails got %q, want substring %q", got, tc.wantSub)
+			}
+		})
+	}
+}

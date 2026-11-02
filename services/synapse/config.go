@@ -14,6 +14,13 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// CollaboratorCIAlertRule defines per-repository collaborator alerting configuration for CI failures.
+type CollaboratorCIAlertRule struct {
+	Repo      string            `yaml:"repo"`
+	ChannelID string            `yaml:"channel_id"`
+	Authors   map[string]string `yaml:"authors"`
+}
+
 // Config holds runtime configuration for synapse.
 type Config struct {
 	Port                  string
@@ -35,21 +42,23 @@ type Config struct {
 	SystemChannelID       string
 	DiscordToken          string
 	AutoUpdatePRAuthors   []string
+	CollaboratorCIAlerts  []CollaboratorCIAlertRule
 }
 
 // RouterYAMLConfig defines the declarative file schema for services/synapse/synapse.yaml.
 type RouterYAMLConfig struct {
-	Port                 string   `yaml:"port"`
-	InfisicalURL         string   `yaml:"infisical_url"`
-	InfisicalEnvironment string   `yaml:"infisical_environment"`
-	NomadAddr            string   `yaml:"nomad_addr"`
-	HangarURL            string   `yaml:"hangar_url"`
-	EriURL               string   `yaml:"eri_url"`
-	VanadisURL           string   `yaml:"vanadis_url"`
-	HaroURL              string   `yaml:"haro_url"`
-	SystemChannelID      string   `yaml:"system_channel_id"`
-	SystemChannel        string   `yaml:"system_channel"`
-	AutoUpdatePRAuthors  []string `yaml:"auto_update_pr_authors"`
+	Port                 string                    `yaml:"port"`
+	InfisicalURL         string                    `yaml:"infisical_url"`
+	InfisicalEnvironment string                    `yaml:"infisical_environment"`
+	NomadAddr            string                    `yaml:"nomad_addr"`
+	HangarURL            string                    `yaml:"hangar_url"`
+	EriURL               string                    `yaml:"eri_url"`
+	VanadisURL           string                    `yaml:"vanadis_url"`
+	HaroURL              string                    `yaml:"haro_url"`
+	SystemChannelID      string                    `yaml:"system_channel_id"`
+	SystemChannel        string                    `yaml:"system_channel"`
+	AutoUpdatePRAuthors  []string                  `yaml:"auto_update_pr_authors"`
+	CollaboratorCIAlerts []CollaboratorCIAlertRule `yaml:"collaborator_ci_alerts"`
 }
 
 var (
@@ -66,14 +75,14 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
-func loadAerialConfigFallback(path, sysChan string, autoUpdateAuthors []string) (string, []string) {
+func loadAerialConfigFallback(path, sysChan string, autoUpdateAuthors []string, collaboratorAlerts []CollaboratorCIAlertRule) (string, []string, []CollaboratorCIAlertRule) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return sysChan, autoUpdateAuthors
+		return sysChan, autoUpdateAuthors, collaboratorAlerts
 	}
 	var aerialCfg RouterYAMLConfig
 	if err := yaml.Unmarshal(data, &aerialCfg); err != nil {
-		return sysChan, autoUpdateAuthors
+		return sysChan, autoUpdateAuthors, collaboratorAlerts
 	}
 	if sysChan == "" {
 		sysChan = firstNonEmpty(aerialCfg.SystemChannelID, aerialCfg.SystemChannel)
@@ -81,7 +90,10 @@ func loadAerialConfigFallback(path, sysChan string, autoUpdateAuthors []string) 
 	if len(autoUpdateAuthors) == 0 {
 		autoUpdateAuthors = dedupeTrimmedStrings(aerialCfg.AutoUpdatePRAuthors)
 	}
-	return sysChan, autoUpdateAuthors
+	if len(collaboratorAlerts) == 0 {
+		collaboratorAlerts = normalizeCollaboratorCIAlerts(aerialCfg.CollaboratorCIAlerts)
+	}
+	return sysChan, autoUpdateAuthors, collaboratorAlerts
 }
 
 // LoadConfig loads configuration from an optional YAML file (CONFIG_PATH) with environment variable overrides.
@@ -106,10 +118,11 @@ func LoadConfig(configPath string) Config {
 		}
 	}
 
+	collaboratorAlerts := normalizeCollaboratorCIAlerts(fileCfg.CollaboratorCIAlerts)
 	autoUpdateAuthors := dedupeTrimmedStrings(fileCfg.AutoUpdatePRAuthors)
 	sysChan := firstNonEmpty(fileCfg.SystemChannelID, fileCfg.SystemChannel)
-	if (sysChan == "" || len(autoUpdateAuthors) == 0) && synapseAerialConfigPath != "" {
-		sysChan, autoUpdateAuthors = loadAerialConfigFallback(synapseAerialConfigPath, sysChan, autoUpdateAuthors)
+	if (sysChan == "" || len(autoUpdateAuthors) == 0 || len(collaboratorAlerts) == 0) && synapseAerialConfigPath != "" {
+		sysChan, autoUpdateAuthors, collaboratorAlerts = loadAerialConfigFallback(synapseAerialConfigPath, sysChan, autoUpdateAuthors, collaboratorAlerts)
 	}
 
 	pgURL := firstNonEmpty(os.Getenv("DATABASE_URL"), "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable")
@@ -134,7 +147,86 @@ func LoadConfig(configPath string) Config {
 		SystemChannelID:       strings.TrimSpace(firstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), sysChan)),
 		DiscordToken:          os.Getenv("DISCORD_TOKEN"),
 		AutoUpdatePRAuthors:   autoUpdateAuthors,
+		CollaboratorCIAlerts:  collaboratorAlerts,
 	}
+}
+
+func normalizeCollaboratorCIAlerts(rules []CollaboratorCIAlertRule) []CollaboratorCIAlertRule {
+	var out []CollaboratorCIAlertRule
+	for _, rule := range rules {
+		repo := normalizeRepo(rule.Repo)
+		channelID := NormalizeDiscordTargetID(rule.ChannelID)
+		if repo == "" || !IsValidDiscordSnowflake(channelID) {
+			continue
+		}
+		authors := make(map[string]string, len(rule.Authors))
+		for author, mention := range rule.Authors {
+			cleanAuthor := strings.ToLower(strings.TrimSpace(author))
+			cleanMention := strings.TrimSpace(mention)
+			if cleanAuthor != "" && cleanMention != "" {
+				authors[cleanAuthor] = cleanMention
+			}
+		}
+		if len(authors) == 0 {
+			continue
+		}
+		out = append(out, CollaboratorCIAlertRule{
+			Repo:      repo,
+			ChannelID: channelID,
+			Authors:   authors,
+		})
+	}
+	return out
+}
+
+func (s *RouterServer) hasCollaboratorCIAlertsForRepo(repo string) bool {
+	if s == nil {
+		return false
+	}
+	normRepo := normalizeRepo(repo)
+	if normRepo == "" {
+		return false
+	}
+	for _, rule := range s.cfg.CollaboratorCIAlerts {
+		if strings.EqualFold(normRepo, normalizeRepo(rule.Repo)) && IsValidDiscordSnowflake(NormalizeDiscordTargetID(rule.ChannelID)) {
+			for a, m := range rule.Authors {
+				if strings.TrimSpace(a) != "" && strings.TrimSpace(m) != "" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func (s *RouterServer) lookupCollaboratorCIAlert(repo, author string) (channelID, mention string, ok bool) {
+	if s == nil {
+		return "", "", false
+	}
+	normRepo := normalizeRepo(repo)
+	cleanAuthor := strings.ToLower(strings.TrimSpace(author))
+	if normRepo == "" || cleanAuthor == "" {
+		return "", "", false
+	}
+	for _, rule := range s.cfg.CollaboratorCIAlerts {
+		ruleRepo := normalizeRepo(rule.Repo)
+		if !strings.EqualFold(normRepo, ruleRepo) {
+			continue
+		}
+		cID := NormalizeDiscordTargetID(rule.ChannelID)
+		if !IsValidDiscordSnowflake(cID) {
+			continue
+		}
+		for a, m := range rule.Authors {
+			if strings.EqualFold(strings.TrimSpace(a), cleanAuthor) {
+				cleanMention := strings.TrimSpace(m)
+				if cleanMention != "" {
+					return cID, cleanMention, true
+				}
+			}
+		}
+	}
+	return "", "", false
 }
 
 // LoadConfigFromEnv initializes configuration from environment variables with optional CONFIG_PATH fallback.

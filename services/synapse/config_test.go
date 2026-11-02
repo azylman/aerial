@@ -137,21 +137,22 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 
 func TestLoadConfig_YAMLAndOverrides(t *testing.T) {
 	tests := []struct {
-		name            string
-		localYAML       string
-		fallbackYAML    string
-		aerialYAML      string
-		useEmptyPath    bool
-		missingFallback bool
-		env             map[string]string
-		wantPort        string
-		wantInfURL      string
-		wantEnv         string
-		wantNomadAddr   string
-		wantHangarURL   string
-		wantBrainURL    string
-		wantSysChan     string
-		wantAuthors     []string
+		name                   string
+		localYAML              string
+		fallbackYAML           string
+		aerialYAML             string
+		useEmptyPath           bool
+		missingFallback        bool
+		env                    map[string]string
+		wantPort               string
+		wantInfURL             string
+		wantEnv                string
+		wantNomadAddr          string
+		wantHangarURL          string
+		wantBrainURL           string
+		wantSysChan            string
+		wantAuthors            []string
+		wantCollaboratorAlerts []CollaboratorCIAlertRule
 	}{
 		{
 			name: "yaml config without overrides",
@@ -260,6 +261,43 @@ eri_url: "http://brain.custom:8088"
 			wantAuthors: []string{"fallback-author"},
 		},
 		{
+			name: "collaborator_ci_alerts loaded from local yaml",
+			localYAML: `collaborator_ci_alerts:
+  - repo: "collab-repo"
+    channel_id: "123456789012345678"
+    authors:
+      collab-alpha: "<@111111111111111111>"
+`,
+			wantCollaboratorAlerts: []CollaboratorCIAlertRule{
+				{
+					Repo:      "azylman/collab-repo",
+					ChannelID: "123456789012345678",
+					Authors: map[string]string{
+						"collab-alpha": "<@111111111111111111>",
+					},
+				},
+			},
+		},
+		{
+			name:      "collaborator_ci_alerts loaded from aerial config.yaml fallback",
+			localYAML: "port: \"4020\"\n",
+			aerialYAML: `collaborator_ci_alerts:
+  - repo: "collab-fallback"
+    channel_id: "234567890123456789"
+    authors:
+      collab-beta: "<@222222222222222222>"
+`,
+			wantCollaboratorAlerts: []CollaboratorCIAlertRule{
+				{
+					Repo:      "azylman/collab-fallback",
+					ChannelID: "234567890123456789",
+					Authors: map[string]string{
+						"collab-beta": "<@222222222222222222>",
+					},
+				},
+			},
+		},
+		{
 			name:      "invalid yaml logs warning and uses defaults",
 			localYAML: "invalid: [yaml",
 			wantPort:  "4020",
@@ -341,6 +379,25 @@ eri_url: "http://brain.custom:8088"
 					for i, a := range tc.wantAuthors {
 						if cfg.AutoUpdatePRAuthors[i] != a {
 							t.Errorf("AutoUpdatePRAuthors[%d] = %q, want %q", i, cfg.AutoUpdatePRAuthors[i], a)
+						}
+					}
+				}
+			}
+			if tc.wantCollaboratorAlerts != nil {
+				if len(cfg.CollaboratorCIAlerts) != len(tc.wantCollaboratorAlerts) {
+					t.Errorf("CollaboratorCIAlerts len = %d, want %d", len(cfg.CollaboratorCIAlerts), len(tc.wantCollaboratorAlerts))
+				} else {
+					for i, rule := range tc.wantCollaboratorAlerts {
+						if cfg.CollaboratorCIAlerts[i].Repo != rule.Repo {
+							t.Errorf("CollaboratorCIAlerts[%d].Repo = %q, want %q", i, cfg.CollaboratorCIAlerts[i].Repo, rule.Repo)
+						}
+						if cfg.CollaboratorCIAlerts[i].ChannelID != rule.ChannelID {
+							t.Errorf("CollaboratorCIAlerts[%d].ChannelID = %q, want %q", i, cfg.CollaboratorCIAlerts[i].ChannelID, rule.ChannelID)
+						}
+						for k, v := range rule.Authors {
+							if cfg.CollaboratorCIAlerts[i].Authors[k] != v {
+								t.Errorf("CollaboratorCIAlerts[%d].Authors[%q] = %q, want %q", i, k, cfg.CollaboratorCIAlerts[i].Authors[k], v)
+							}
 						}
 					}
 				}
@@ -577,6 +634,211 @@ func TestIs4xxClientError(t *testing.T) {
 			t.Parallel()
 			if got := is4xxClientError(tc.err); got != tc.want {
 				t.Errorf("%s: is4xxClientError(%v) = %v, want %v", tc.name, tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeCollaboratorCIAlerts(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		rules []CollaboratorCIAlertRule
+		want  []CollaboratorCIAlertRule
+	}{
+		{
+			name:  "empty rules returns empty",
+			rules: nil,
+			want:  nil,
+		},
+		{
+			name: "normalizes repo, channel id, and lowercases authors",
+			rules: []CollaboratorCIAlertRule{
+				{
+					Repo:      "collab-repo",
+					ChannelID: "discord-123456789012345678",
+					Authors: map[string]string{
+						strings.Trim("x Collab-Alpha x", "x"): " <@111111111111111111> ",
+						"COLLAB-BETA":                         "<@222222222222222222>",
+					},
+				},
+			},
+			want: []CollaboratorCIAlertRule{
+				{
+					Repo:      "azylman/collab-repo",
+					ChannelID: "123456789012345678",
+					Authors: map[string]string{
+						"collab-alpha": "<@111111111111111111>",
+						"collab-beta":  "<@222222222222222222>",
+					},
+				},
+			},
+		},
+		{
+			name: "drops rule with invalid channel snowflake",
+			rules: []CollaboratorCIAlertRule{
+				{
+					Repo:      "azylman/collab-repo",
+					ChannelID: "invalid-snowflake",
+					Authors:   map[string]string{"collab-alpha": "<@111111111111111111>"},
+				},
+			},
+			want: nil,
+		},
+		{
+			name: "drops rule with empty repo",
+			rules: []CollaboratorCIAlertRule{
+				{
+					Repo:      "   ",
+					ChannelID: "123456789012345678",
+					Authors:   map[string]string{"collab-alpha": "<@111111111111111111>"},
+				},
+			},
+			want: nil,
+		},
+		{
+			name: "drops rule with zero valid authors",
+			rules: []CollaboratorCIAlertRule{
+				{
+					Repo:      "azylman/collab-repo",
+					ChannelID: "123456789012345678",
+					Authors:   map[string]string{"   ": "<@111111111111111111>", "collab-alpha": "   "},
+				},
+			},
+			want: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := normalizeCollaboratorCIAlerts(tc.rules)
+			if len(got) != len(tc.want) {
+				t.Fatalf("normalizeCollaboratorCIAlerts len = %d, want %d", len(got), len(tc.want))
+			}
+			for i := range got {
+				if got[i].Repo != tc.want[i].Repo {
+					t.Errorf("[%d].Repo = %q, want %q", i, got[i].Repo, tc.want[i].Repo)
+				}
+				if got[i].ChannelID != tc.want[i].ChannelID {
+					t.Errorf("[%d].ChannelID = %q, want %q", i, got[i].ChannelID, tc.want[i].ChannelID)
+				}
+				if len(got[i].Authors) != len(tc.want[i].Authors) {
+					t.Errorf("[%d].Authors len = %d, want %d", i, len(got[i].Authors), len(tc.want[i].Authors))
+				}
+				for k, v := range tc.want[i].Authors {
+					if got[i].Authors[k] != v {
+						t.Errorf("[%d].Authors[%q] = %q, want %q", i, k, got[i].Authors[k], v)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestLookupCollaboratorCIAlert(t *testing.T) {
+	t.Parallel()
+	rules := []CollaboratorCIAlertRule{
+		{
+			Repo:      "azylman/collab-repo",
+			ChannelID: "123456789012345678",
+			Authors: map[string]string{
+				"collab-alpha": "<@111111111111111111>",
+			},
+		},
+		{
+			Repo:      "otherorg/custom-repo",
+			ChannelID: "discord-987654321098765432",
+			Authors: map[string]string{
+				"collab-beta": "<@222222222222222222>",
+			},
+		},
+	}
+	server := &RouterServer{
+		cfg: Config{CollaboratorCIAlerts: rules},
+	}
+
+	tests := []struct {
+		name          string
+		srv           *RouterServer
+		repo          string
+		author        string
+		wantChannelID string
+		wantMention   string
+		wantOK        bool
+		wantHasAlerts bool
+	}{
+		{
+			name:          "exact match returns channel and mention",
+			srv:           server,
+			repo:          "azylman/collab-repo",
+			author:        "collab-alpha",
+			wantChannelID: "123456789012345678",
+			wantMention:   "<@111111111111111111>",
+			wantOK:        true,
+			wantHasAlerts: true,
+		},
+		{
+			name:          "case-insensitive repo and author match without azylman prefix",
+			srv:           server,
+			repo:          "COLLAB-REPO",
+			author:        "Collab-Alpha",
+			wantChannelID: "123456789012345678",
+			wantMention:   "<@111111111111111111>",
+			wantOK:        true,
+			wantHasAlerts: true,
+		},
+		{
+			name:          "custom org repo with session prefix in channel id",
+			srv:           server,
+			repo:          "otherorg/custom-repo",
+			author:        "collab-beta",
+			wantChannelID: "987654321098765432",
+			wantMention:   "<@222222222222222222>",
+			wantOK:        true,
+			wantHasAlerts: true,
+		},
+		{
+			name:          "unknown author returns false",
+			srv:           server,
+			repo:          "azylman/collab-repo",
+			author:        "unknown-author",
+			wantOK:        false,
+			wantHasAlerts: true,
+		},
+		{
+			name:          "unknown repo returns false",
+			srv:           server,
+			repo:          "azylman/nonexistent-repo",
+			author:        "collab-alpha",
+			wantOK:        false,
+			wantHasAlerts: false,
+		},
+		{
+			name:          "nil router server returns false",
+			srv:           nil,
+			repo:          "azylman/collab-repo",
+			author:        "collab-alpha",
+			wantOK:        false,
+			wantHasAlerts: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gotChannel, gotMention, gotOK := tc.srv.lookupCollaboratorCIAlert(tc.repo, tc.author)
+			if gotOK != tc.wantOK {
+				t.Fatalf("lookupCollaboratorCIAlert ok = %v, want %v", gotOK, tc.wantOK)
+			}
+			if gotChannel != tc.wantChannelID {
+				t.Errorf("lookupCollaboratorCIAlert channel = %q, want %q", gotChannel, tc.wantChannelID)
+			}
+			if gotMention != tc.wantMention {
+				t.Errorf("lookupCollaboratorCIAlert mention = %q, want %q", gotMention, tc.wantMention)
+			}
+			if gotHas := tc.srv.hasCollaboratorCIAlertsForRepo(tc.repo); gotHas != tc.wantHasAlerts {
+				t.Errorf("hasCollaboratorCIAlertsForRepo = %v, want %v", gotHas, tc.wantHasAlerts)
 			}
 		})
 	}

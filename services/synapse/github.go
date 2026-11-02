@@ -314,6 +314,7 @@ type GitHubPRRef struct {
 type GitHubPullRequest struct {
 	NodeID         string      `json:"node_id"`
 	Number         int         `json:"number"`
+	State          string      `json:"state"`
 	Title          string      `json:"title"`
 	Body           string      `json:"body"`
 	Head           GitHubPRRef `json:"head"`
@@ -880,6 +881,7 @@ func (s *RouterServer) clearFailedCISHA(repo string, prNumber int) {
 	s.failedCheckSHAs.Delete(key)
 	s.nonRoboRevFailedSHAs.Delete(key)
 	s.cancelledCheckSHAs.Delete(key)
+	s.collaboratorAlertedSHAs.Delete(key)
 }
 
 func (s *RouterServer) markUpdatedForCurrentMain(repo string, prNumber int) {
@@ -981,7 +983,10 @@ func (s *RouterServer) isStaleOrIgnoredCIFailure(ctx context.Context, res *Resol
 	if res.PRNumber <= 0 || res.HeadSHA == "" || isZeroSHA(res.HeadSHA) {
 		return false
 	}
-	_, _, regHeadSHA, _, err := s.registry.ResolvePRByNumber(ctx, res.Repo, res.PRNumber)
+	regTargetID, _, regHeadSHA, _, err := s.registry.ResolvePRByNumber(ctx, res.Repo, res.PRNumber)
+	if err == nil && regTargetID != "" {
+		res.TargetID = firstNonEmpty(res.TargetID, regTargetID)
+	}
 	if err == nil && regHeadSHA != "" && !strings.EqualFold(regHeadSHA, strings.TrimSpace(res.HeadSHA)) {
 		log.Printf("[synapse] [github] ignoring stale CI failure on %s#%d for superseded commit %s (current head_sha=%s)", res.Repo, res.PRNumber, res.HeadSHA, regHeadSHA)
 		return true
@@ -1040,11 +1045,19 @@ func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *Resol
 	if res.Event == "check_run" && res.PRNumber > 0 && res.HeadSHA != "" && !isRoboRevCheck(res.CheckName) && !isGateAggregatorCheck(res.CheckName) {
 		s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
 	}
-	var err error
+	var (
+		updated bool
+		err     error
+	)
 	if res.PRNumber > 0 {
-		_, err = s.handleCIFailureByPRNumber(ctx, res, details, checkURL)
+		updated, err = s.handleCIFailureByPRNumber(ctx, res, details, checkURL)
 	} else if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
-		_, err = s.handleCIFailureByHeadSHA(ctx, res, details, checkURL)
+		updated, err = s.handleCIFailureByHeadSHA(ctx, res, details, checkURL)
+	}
+	if err == nil && !updated && res.TargetID == "" {
+		if notifyErr := s.notifyCollaboratorCIFailure(ctx, res, details, checkURL); notifyErr != nil {
+			return notifyErr
+		}
 	}
 	if res.PRNumber > 0 && res.HeadSHA != "" && s.recordFailedCISHA(res.Repo, res.PRNumber, res.HeadSHA) {
 		if cascadeErr := s.checkOpenPRConflicts(ctx, res.Repo); cascadeErr != nil {
