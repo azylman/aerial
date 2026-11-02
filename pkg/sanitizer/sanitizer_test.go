@@ -1,6 +1,7 @@
 package sanitizer
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -308,10 +309,124 @@ func TestSanitizeAuthor_TableDriven(t *testing.T) {
 }
 
 func resetSensitiveTokens() {
-	sensitiveTokensMu.Lock()
-	defer sensitiveTokensMu.Unlock()
-	empty := make([]string, 0)
-	sensitiveTokensPtr.Store(&empty)
+	ResetSensitiveTokensForTest()
+}
+
+func TestMaskTokenSample_TableDriven(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{name: "empty", input: "", expected: "[REDACTED]"},
+		{name: "short whitespace only", input: "   ", expected: "[REDACTED]"},
+		{name: "short token less than 6 chars", input: "abc", expected: "[REDACTED]"},
+		{name: "5 chars trimmed", input: "  abcde  ", expected: "[REDACTED]"},
+		{name: "exactly 6 chars", input: "123456", expected: "12***56"},
+		{name: "longer token", input: "ghp_secrettokenvalue12345", expected: "gh***45"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := MaskTokenSample(tc.input)
+			if got != tc.expected {
+				t.Errorf("MaskTokenSample(%q) = %q, want %q", tc.input, got, tc.expected)
+			}
+		})
+	}
+}
+
+func TestMatchSensitiveTokens_TableDriven(t *testing.T) {
+	tests := []struct {
+		name     string
+		tokens   []string
+		input    string
+		expected []string
+	}{
+		{
+			name:     "empty input",
+			tokens:   []string{"secret_token_123"},
+			input:    "",
+			expected: nil,
+		},
+		{
+			name:     "no registered tokens",
+			tokens:   nil,
+			input:    "safe string",
+			expected: nil,
+		},
+		{
+			name:     "no matches",
+			tokens:   []string{"secret_token_123"},
+			input:    "completely safe string",
+			expected: nil,
+		},
+		{
+			name:     "single match",
+			tokens:   []string{"secret_token_123"},
+			input:    "error: secret_token_123 failed",
+			expected: []string{"se***23"},
+		},
+		{
+			name:     "multiple matches deduplicated and longest first",
+			tokens:   []string{"token_alpha_long", "token_beta_longer_value", "token_short"},
+			input:    "contains token_alpha_long and token_beta_longer_value",
+			expected: []string{"to***ue", "to***ng"},
+		},
+		{
+			name:     "short token masked as [REDACTED]",
+			tokens:   []string{"123456", "abcd"},
+			input:    "123456 and abcd",
+			expected: []string{"12***56", "[REDACTED]"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ResetSensitiveTokensForTest()
+			defer ResetSensitiveTokensForTest()
+
+			if len(tc.tokens) > 0 {
+				RegisterSensitiveTokens(tc.tokens...)
+			}
+			got := MatchSensitiveTokens(tc.input)
+			if !slices.Equal(got, tc.expected) {
+				t.Errorf("MatchSensitiveTokens(%q) = %v, want %v", tc.input, got, tc.expected)
+			}
+		})
+	}
+}
+
+func TestResetSensitiveTokensForTest_TableDriven(t *testing.T) {
+	tests := []struct {
+		name  string
+		token string
+		input string
+	}{
+		{
+			name:  "token cleared after reset",
+			token: "my_temporary_secret_token_999",
+			input: "log with my_temporary_secret_token_999",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ResetSensitiveTokensForTest()
+			RegisterSensitiveTokens(tc.token)
+			if len(MatchSensitiveTokens(tc.input)) == 0 {
+				t.Fatalf("expected token %q to match before reset", tc.token)
+			}
+			ResetSensitiveTokensForTest()
+			if len(MatchSensitiveTokens(tc.input)) != 0 {
+				t.Fatalf("expected token %q to NOT match after reset", tc.token)
+			}
+		})
+	}
 }
 
 func TestRegisterSensitiveTokens_TableDriven(t *testing.T) {
