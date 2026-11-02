@@ -24,6 +24,9 @@ var ConfigSearchPaths = []string{
 	"/share/aerial/config.yaml",
 }
 
+// SharedSecretsPath defines the filesystem location for shared cluster secrets.
+var SharedSecretsPath = "/secrets/shared-secrets.json"
+
 type WebhookEndpoint struct {
 	URL             string `yaml:"url" json:"url"`
 	TimeoutMs       int    `yaml:"timeout_ms,omitempty" json:"timeout_ms,omitempty"`
@@ -715,6 +718,64 @@ func Reload(activeCfg *Config) error {
 	return ReloadWithSupplier(activeCfg, New)
 }
 
+// LoadSharedSecrets reads a JSON key-value map of shared secrets from path.
+// If path is empty, the file is missing, or the JSON is invalid, an empty map is returned.
+// Values are trimmed, and alias fallbacks are populated when the primary key is empty.
+func LoadSharedSecrets(path string) map[string]string {
+	result := make(map[string]string)
+	if strings.TrimSpace(path) == "" {
+		return result
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return result
+	}
+	var raw map[string]string
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return result
+	}
+	for k, v := range raw {
+		result[k] = strings.TrimSpace(v)
+	}
+
+	aliases := [][2]string{
+		{"DISCORD_TOKEN", "DISCORD_BOT_TOKEN"},
+		{"OPENOBSERVE_PASSWORD", "OPENOBSERVE_ROOT_USER_PASSWORD"},
+		{"OP_SERVICE_ACCOUNT_TOKEN", "1PASSWORD_SERVICE_ACCOUNT_TOKEN"},
+		{"AGY_GEMINI_API_KEY", "GEMINI_HARNESS_API_KEY"},
+		{"UNIFI_PASSWORD", "UNIFI_PASS"},
+	}
+	for _, pair := range aliases {
+		primary, fallback := pair[0], pair[1]
+		if result[primary] == "" && result[fallback] != "" {
+			result[primary] = result[fallback]
+		}
+	}
+	return result
+}
+
+// WithSharedSecretsLookup wraps a primary lookup function (e.g. os.Getenv) with shared secrets file fallbacks.
+// If POSTGRES_PASSWORD is set in shared secrets while POSTGRES_HOST is unset in both primary and shared secrets,
+// POSTGRES_HOST defaults to "postgres".
+func WithSharedSecretsLookup(primary func(string) string, secretsPath string) func(string) string {
+	secrets := LoadSharedSecrets(secretsPath)
+	if primary == nil {
+		primary = func(string) string { return "" }
+	}
+	return func(k string) string {
+		if v := primary(k); v != "" {
+			return v
+		}
+		if v := secrets[k]; v != "" {
+			return v
+		}
+		if k == "POSTGRES_HOST" && secrets["POSTGRES_PASSWORD"] != "" {
+			return "postgres"
+		}
+		return ""
+	}
+}
+
 func buildPostgresDSN(lookup func(string) string) string {
 	if lookup == nil {
 		lookup = func(string) string { return "" }
@@ -930,7 +991,8 @@ func LoadConfigFromPaths(paths ...string) (*Config, error) {
 		waitForColdBootConfig(paths, 5*time.Second)
 	}
 
-	fresh, err := LoadConfigFromLookup(os.Getenv, paths...)
+	lookup := WithSharedSecretsLookup(os.Getenv, SharedSecretsPath)
+	fresh, err := LoadConfigFromLookup(lookup, paths...)
 	if err != nil {
 		return nil, err
 	}

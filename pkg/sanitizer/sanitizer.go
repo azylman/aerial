@@ -63,6 +63,49 @@ func getSensitiveTokens() []string {
 	return *p
 }
 
+// ResetSensitiveTokensForTest clears registered sensitive tokens under lock. Strictly for testing.
+func ResetSensitiveTokensForTest() {
+	sensitiveTokensMu.Lock()
+	defer sensitiveTokensMu.Unlock()
+	empty := make([]string, 0)
+	sensitiveTokensPtr.Store(&empty)
+}
+
+// MaskTokenSample masks a token string for safe diagnostic display.
+// Whitespace is trimmed; tokens shorter than 6 characters return "[REDACTED]",
+// while longer tokens preserve the first 2 and last 2 characters surrounding "***".
+func MaskTokenSample(tok string) string {
+	trimmed := strings.TrimSpace(tok)
+	if len(trimmed) < 6 {
+		return "[REDACTED]"
+	}
+	return trimmed[:2] + "***" + trimmed[len(trimmed)-2:]
+}
+
+// MatchSensitiveTokens returns masked diagnostic samples of any registered sensitive tokens
+// found in input, deduplicated and ordered longest-first. Returns nil if input is empty or no tokens match.
+func MatchSensitiveTokens(input string) []string {
+	if input == "" {
+		return nil
+	}
+	tokens := getSensitiveTokens()
+	if len(tokens) == 0 {
+		return nil
+	}
+	var matches []string
+	seen := make(map[string]bool)
+	for _, tok := range tokens {
+		if tok != "" && strings.Contains(input, tok) {
+			sample := MaskTokenSample(tok)
+			if !seen[sample] {
+				seen[sample] = true
+				matches = append(matches, sample)
+			}
+		}
+	}
+	return matches
+}
+
 // RegisterSensitiveTokens safely registers secret strings into the global redaction pool.
 // Uses a copy-on-write atomic swap so reads remain completely lock-free.
 func RegisterSensitiveTokens(tokens ...string) {

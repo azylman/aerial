@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/bwmarrin/discordgo"
 )
 
@@ -630,6 +631,112 @@ func TestIsSnowflake(t *testing.T) {
 			got := isSnowflake(tc.input)
 			if got != tc.want {
 				t.Errorf("isSnowflake(%q) = %v, want %v", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSendMessageWithAttachments_Sanitization_TableDriven(t *testing.T) {
+	tests := []struct {
+		name       string
+		token      string
+		rawText    string
+		wantSubstr string
+		wantAbsent string
+	}{
+		{
+			name:       "sensitive token redacted from outbound message",
+			token:      "discord_outbound_secret_token_12345",
+			rawText:    "here is the key: discord_outbound_secret_token_12345",
+			wantSubstr: "here is the key: [REDACTED]",
+			wantAbsent: "discord_outbound_secret_token_12345",
+		},
+		{
+			name:       "pat redacted from outbound message",
+			token:      "",
+			rawText:    "pat: ghp_111122223333444455556666777788889999",
+			wantSubstr: "pat: [REDACTED]",
+			wantAbsent: "ghp_111122223333444455556666777788889999",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.token != "" {
+				sanitizer.RegisterSensitiveTokens(tc.token)
+				defer sanitizer.ResetSensitiveTokensForTest()
+			}
+
+			var capturedPayload string
+			sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
+				if req.Body != nil {
+					b, _ := io.ReadAll(req.Body)
+					capturedPayload = string(b)
+				}
+				return mockJSONResponse(http.StatusOK, `{"id":"msg-san","channel_id":"ch-san","content":"ok"}`)
+			})
+
+			if err := SendMessageWithAttachments(sess, "ch-san", tc.rawText, nil); err != nil {
+				t.Fatalf("SendMessageWithAttachments failed: %v", err)
+			}
+			if !strings.Contains(capturedPayload, tc.wantSubstr) {
+				t.Errorf("expected payload to contain %q, got: %s", tc.wantSubstr, capturedPayload)
+			}
+			if strings.Contains(capturedPayload, tc.wantAbsent) {
+				t.Errorf("expected payload to NOT contain %q, got: %s", tc.wantAbsent, capturedPayload)
+			}
+		})
+	}
+}
+
+func TestEditMessage_Sanitization_TableDriven(t *testing.T) {
+	tests := []struct {
+		name       string
+		token      string
+		rawText    string
+		wantSubstr string
+		wantAbsent string
+	}{
+		{
+			name:       "sensitive token redacted from edited message",
+			token:      "discord_edit_secret_token_67890",
+			rawText:    "updated key: discord_edit_secret_token_67890",
+			wantSubstr: "updated key: [REDACTED]",
+			wantAbsent: "discord_edit_secret_token_67890",
+		},
+		{
+			name:       "pat redacted from edited message",
+			token:      "",
+			rawText:    "edited pat: ghp_999988887777666655554444333322221111",
+			wantSubstr: "edited pat: [REDACTED]",
+			wantAbsent: "ghp_999988887777666655554444333322221111",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.token != "" {
+				sanitizer.RegisterSensitiveTokens(tc.token)
+				defer sanitizer.ResetSensitiveTokensForTest()
+			}
+
+			var capturedPayload string
+			sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
+				if req.Body != nil {
+					b, _ := io.ReadAll(req.Body)
+					capturedPayload = string(b)
+				}
+				return mockJSONResponse(http.StatusOK, `{"id":"msg-edit-san","channel_id":"ch-edit","content":"ok"}`)
+			})
+
+			if err := EditMessage(sess, "ch-edit", "msg-edit-san", tc.rawText); err != nil {
+				t.Fatalf("EditMessage failed: %v", err)
+			}
+			if !strings.Contains(capturedPayload, tc.wantSubstr) {
+				t.Errorf("expected payload to contain %q, got: %s", tc.wantSubstr, capturedPayload)
+			}
+			if strings.Contains(capturedPayload, tc.wantAbsent) {
+				t.Errorf("expected payload to NOT contain %q, got: %s", tc.wantAbsent, capturedPayload)
 			}
 		})
 	}

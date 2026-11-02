@@ -500,27 +500,40 @@ func collectRawMCPServerTokens(rawMaps []map[string]json.RawMessage) []string {
 	return tokens
 }
 
-// RegisterConfigTokens extracts secrets from the injected *Config and registers them
-// into the global redaction pool.
+// RegisterConfigTokens extracts secrets from the injected *Config and registered shared secrets file,
+// registering them into the global redaction pool.
 func RegisterConfigTokens(cfg *Config) {
-	if cfg == nil {
-		return
+	var tokens []string
+	if cfg != nil {
+		cur := cfg.Current()
+		tokens = collectCoreTokens(cur)
+		tokens = append(tokens, collectMCPServerTokens([]map[string]MCPServerConfig{
+			cur.MCPServers.Common,
+			cur.MCPServers.Eri,
+			cur.MCPServers.Voice,
+			cur.MCPServers.Ephemeral,
+		})...)
+		tokens = append(tokens, collectRawMCPServerTokens([]map[string]json.RawMessage{
+			cur.McpServers.Common,
+			cur.McpServers.Discord,
+			cur.McpServers.Voice,
+			cur.McpServers.Ephemeral,
+		})...)
 	}
-	cur := cfg.Current()
 
-	tokens := collectCoreTokens(cur)
-	tokens = append(tokens, collectMCPServerTokens([]map[string]MCPServerConfig{
-		cur.MCPServers.Common,
-		cur.MCPServers.Eri,
-		cur.MCPServers.Voice,
-		cur.MCPServers.Ephemeral,
-	})...)
-	tokens = append(tokens, collectRawMCPServerTokens([]map[string]json.RawMessage{
-		cur.McpServers.Common,
-		cur.McpServers.Discord,
-		cur.McpServers.Voice,
-		cur.McpServers.Ephemeral,
-	})...)
+	shared := LoadSharedSecrets(SharedSecretsPath)
+	if len(shared) > 0 {
+		keys := make([]string, 0, len(shared))
+		for k := range shared {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if v := strings.TrimSpace(shared[k]); v != "" {
+				tokens = append(tokens, v)
+			}
+		}
+	}
 
 	if len(tokens) > 0 {
 		sanitizer.RegisterSensitiveTokens(tokens...)

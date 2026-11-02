@@ -1665,3 +1665,246 @@ func TestRegisterConfigTokens(t *testing.T) {
 		})
 	}
 }
+
+func TestLoadSharedSecrets_TableDriven(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	validJSON := filepath.Join(tmpDir, "valid.json")
+	_ = os.WriteFile(validJSON, []byte(`{
+		"FOO": "  bar  ",
+		"DISCORD_BOT_TOKEN": "bot-tok-123",
+		"OPENOBSERVE_ROOT_USER_PASSWORD": "oo-pass-456",
+		"1PASSWORD_SERVICE_ACCOUNT_TOKEN": "op-tok-789",
+		"GEMINI_HARNESS_API_KEY": "harness-key-abc",
+		"UNIFI_PASS": "unifi-pass-def"
+	}`), 0o600)
+
+	existingPrimaryJSON := filepath.Join(tmpDir, "existing-primary.json")
+	_ = os.WriteFile(existingPrimaryJSON, []byte(`{
+		"DISCORD_TOKEN": "primary-tok",
+		"DISCORD_BOT_TOKEN": "fallback-tok"
+	}`), 0o600)
+
+	invalidJSON := filepath.Join(tmpDir, "invalid.json")
+	_ = os.WriteFile(invalidJSON, []byte(`{not valid json`), 0o600)
+
+	tests := []struct {
+		name         string
+		filePath     string
+		wantKey      string
+		wantVal      string
+		wantMapEmpty bool
+	}{
+		{
+			name:         "empty path returns empty map",
+			filePath:     "",
+			wantMapEmpty: true,
+		},
+		{
+			name:         "missing file returns empty map",
+			filePath:     filepath.Join(tmpDir, "nonexistent.json"),
+			wantMapEmpty: true,
+		},
+		{
+			name:         "invalid json returns empty map",
+			filePath:     invalidJSON,
+			wantMapEmpty: true,
+		},
+		{
+			name:     "trimmed values parsed correctly",
+			filePath: validJSON,
+			wantKey:  "FOO",
+			wantVal:  "bar",
+		},
+		{
+			name:     "discord bot token alias fallback",
+			filePath: validJSON,
+			wantKey:  "DISCORD_TOKEN",
+			wantVal:  "bot-tok-123",
+		},
+		{
+			name:     "openobserve root password alias fallback",
+			filePath: validJSON,
+			wantKey:  "OPENOBSERVE_PASSWORD",
+			wantVal:  "oo-pass-456",
+		},
+		{
+			name:     "1password service account alias fallback",
+			filePath: validJSON,
+			wantKey:  "OP_SERVICE_ACCOUNT_TOKEN",
+			wantVal:  "op-tok-789",
+		},
+		{
+			name:     "gemini harness api key alias fallback",
+			filePath: validJSON,
+			wantKey:  "AGY_GEMINI_API_KEY",
+			wantVal:  "harness-key-abc",
+		},
+		{
+			name:     "unifi pass alias fallback",
+			filePath: validJSON,
+			wantKey:  "UNIFI_PASSWORD",
+			wantVal:  "unifi-pass-def",
+		},
+		{
+			name:     "primary key not overwritten by alias fallback",
+			filePath: existingPrimaryJSON,
+			wantKey:  "DISCORD_TOKEN",
+			wantVal:  "primary-tok",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			res := LoadSharedSecrets(tc.filePath)
+			if tc.wantMapEmpty {
+				if len(res) != 0 {
+					t.Errorf("LoadSharedSecrets() returned non-empty map: %v", res)
+				}
+				return
+			}
+			if got := res[tc.wantKey]; got != tc.wantVal {
+				t.Errorf("LoadSharedSecrets()[%q] = %q, want %q", tc.wantKey, got, tc.wantVal)
+			}
+		})
+	}
+}
+
+func TestWithSharedSecretsLookup_TableDriven(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	sharedFile := filepath.Join(tmpDir, "shared.json")
+	_ = os.WriteFile(sharedFile, []byte(`{
+		"SECRET_ONLY": "secret-val",
+		"OVERRIDDEN": "shared-val",
+		"POSTGRES_PASSWORD": "secret-pg-pass"
+	}`), 0o600)
+
+	customHostFile := filepath.Join(tmpDir, "custom-host.json")
+	_ = os.WriteFile(customHostFile, []byte(`{
+		"POSTGRES_HOST": "shared-db.internal",
+		"POSTGRES_PASSWORD": "secret-pg-pass"
+	}`), 0o600)
+
+	noPassFile := filepath.Join(tmpDir, "no-pass.json")
+	_ = os.WriteFile(noPassFile, []byte(`{
+		"OTHER": "val"
+	}`), 0o600)
+
+	tests := []struct {
+		name       string
+		primaryMap map[string]string
+		isNilPrim  bool
+		filePath   string
+		queryKey   string
+		expected   string
+	}{
+		{
+			name:       "primary wins over shared secret",
+			primaryMap: map[string]string{"OVERRIDDEN": "primary-val"},
+			filePath:   sharedFile,
+			queryKey:   "OVERRIDDEN",
+			expected:   "primary-val",
+		},
+		{
+			name:       "fallback to shared secret when unset in primary",
+			primaryMap: map[string]string{},
+			filePath:   sharedFile,
+			queryKey:   "SECRET_ONLY",
+			expected:   "secret-val",
+		},
+		{
+			name:      "nil primary handled safely",
+			isNilPrim: true,
+			filePath:  sharedFile,
+			queryKey:  "SECRET_ONLY",
+			expected:  "secret-val",
+		},
+		{
+			name:       "postgres host defaulted when password present in shared secrets",
+			primaryMap: map[string]string{},
+			filePath:   sharedFile,
+			queryKey:   "POSTGRES_HOST",
+			expected:   "postgres",
+		},
+		{
+			name:       "postgres host preserved from primary even if password in shared secrets",
+			primaryMap: map[string]string{"POSTGRES_HOST": "primary-db.internal"},
+			filePath:   sharedFile,
+			queryKey:   "POSTGRES_HOST",
+			expected:   "primary-db.internal",
+		},
+		{
+			name:       "postgres host preserved from shared secrets if specified",
+			primaryMap: map[string]string{},
+			filePath:   customHostFile,
+			queryKey:   "POSTGRES_HOST",
+			expected:   "shared-db.internal",
+		},
+		{
+			name:       "postgres host empty when password unset",
+			primaryMap: map[string]string{},
+			filePath:   noPassFile,
+			queryKey:   "POSTGRES_HOST",
+			expected:   "",
+		},
+		{
+			name:       "missing key returns empty",
+			primaryMap: map[string]string{},
+			filePath:   sharedFile,
+			queryKey:   "NONEXISTENT",
+			expected:   "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var prim func(string) string
+			if !tc.isNilPrim {
+				prim = mapLookup(tc.primaryMap)
+			}
+			lookup := WithSharedSecretsLookup(prim, tc.filePath)
+			if got := lookup(tc.queryKey); got != tc.expected {
+				t.Errorf("lookup(%q) = %q, want %q", tc.queryKey, got, tc.expected)
+			}
+		})
+	}
+}
+
+func TestRegisterConfigTokens_SharedSecrets_TableDriven(t *testing.T) {
+	origSharedPath := SharedSecretsPath
+	defer func() {
+		SharedSecretsPath = origSharedPath
+	}()
+
+	tmpDir := t.TempDir()
+	secretsFile := filepath.Join(tmpDir, "shared-secrets.json")
+	_ = os.WriteFile(secretsFile, []byte(`{
+		"DYNAMIC_SHARED_SECRET": "dynamic_shared_secret_token_val_12345"
+	}`), 0o600)
+	SharedSecretsPath = secretsFile
+
+	tests := []struct {
+		name       string
+		cfg        *Config
+		input      string
+		wantResult string
+	}{
+		{
+			name:       "shared secrets token registered and redacted",
+			cfg:        nil,
+			input:      "alert with dynamic_shared_secret_token_val_12345 in message",
+			wantResult: "alert with [REDACTED] in message",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			RegisterConfigTokens(tc.cfg)
+			got := sanitizer.SanitizeString(tc.input)
+			if got != tc.wantResult {
+				t.Errorf("SanitizeString() = %q, want %q", got, tc.wantResult)
+			}
+		})
+	}
+}
