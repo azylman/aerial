@@ -72,6 +72,7 @@ func (s *RouterServer) handleDirtyPRConflict(ctx context.Context, repo string, p
 	if pr.HeadSHA != "" {
 		s.nonRoboRevFailedSHAs.Store(prCheckKey(repo, pr.PRNumber), strings.TrimSpace(pr.HeadSHA))
 	}
+	s.recordFailedCISHA(repo, pr.PRNumber, pr.HeadSHA)
 	if s.registry == nil {
 		return
 	}
@@ -129,6 +130,8 @@ func (s *RouterServer) updatePRBranch(ctx context.Context, repo string, prNumber
 }
 
 func (s *RouterServer) handleStaleOpenPR(ctx context.Context, repo string, prNumber int) {
+	s.clearFailedCISHA(repo, prNumber)
+	s.updatedForCurrentMain.Delete(prCheckKey(repo, prNumber))
 	if s.registry == nil {
 		return
 	}
@@ -150,8 +153,14 @@ func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) er
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if !s.isAutoUpdateAuthorAllowed(pr.User.Login) {
+		if pr.Draft || !s.isAutoUpdateAuthorAllowed(pr.User.Login) {
 			continue
+		}
+		if s.hasFailedCIForSHA(ctx, normRepo, pr.Number, pr.Head.SHA) {
+			continue
+		}
+		if s.wasUpdatedForCurrentMain(normRepo, pr.Number) {
+			break
 		}
 		conflict, err := s.updatePRBranch(ctx, normRepo, pr.Number)
 		if err != nil {
@@ -170,6 +179,7 @@ func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) er
 			s.handleDirtyPRConflict(ctx, normRepo, RegisteredPR{PRNumber: pr.Number, Branch: pr.Head.Ref, HeadSHA: pr.Head.SHA})
 			continue
 		}
+		s.markUpdatedForCurrentMain(normRepo, pr.Number)
 		break
 	}
 	return nil
@@ -308,6 +318,7 @@ type GitHubPullRequest struct {
 	Body           string      `json:"body"`
 	Head           GitHubPRRef `json:"head"`
 	Base           GitHubPRRef `json:"base"`
+	Draft          bool        `json:"draft"`
 	Merged         bool        `json:"merged"`
 	MergeCommitSHA string      `json:"merge_commit_sha"`
 	User           struct {
@@ -379,6 +390,14 @@ type GitHubCheckRunPayload struct {
 	Repository struct {
 		FullName string `json:"full_name"`
 	} `json:"repository"`
+}
+
+type GitHubCheckRunsResponse struct {
+	CheckRuns []struct {
+		Name       string `json:"name"`
+		Status     string `json:"status"`
+		Conclusion string `json:"conclusion"`
+	} `json:"check_runs"`
 }
 
 type GitHubWorkflowRunPayload struct {
@@ -844,6 +863,79 @@ func prCheckKey(repo string, prNumber int) string {
 	return fmt.Sprintf("%s#%d", normalizeRepo(repo), prNumber)
 }
 
+func (s *RouterServer) recordFailedCISHA(repo string, prNumber int, headSHA string) bool {
+	headSHA = strings.TrimSpace(headSHA)
+	if s == nil || prNumber <= 0 || headSHA == "" || isZeroSHA(headSHA) {
+		return false
+	}
+	prev, loaded := s.failedCheckSHAs.Swap(prCheckKey(repo, prNumber), headSHA)
+	return !loaded || !strings.EqualFold(fmt.Sprint(prev), headSHA)
+}
+
+func (s *RouterServer) clearFailedCISHA(repo string, prNumber int) {
+	if s == nil || prNumber <= 0 {
+		return
+	}
+	key := prCheckKey(repo, prNumber)
+	s.failedCheckSHAs.Delete(key)
+	s.nonRoboRevFailedSHAs.Delete(key)
+	s.cancelledCheckSHAs.Delete(key)
+}
+
+func (s *RouterServer) markUpdatedForCurrentMain(repo string, prNumber int) {
+	if s == nil || prNumber <= 0 {
+		return
+	}
+	s.updatedForCurrentMain.Store(prCheckKey(repo, prNumber), true)
+}
+
+func (s *RouterServer) wasUpdatedForCurrentMain(repo string, prNumber int) bool {
+	if s == nil || prNumber <= 0 {
+		return false
+	}
+	v, ok := s.updatedForCurrentMain.Load(prCheckKey(repo, prNumber))
+	return ok && v == true
+}
+
+func (s *RouterServer) clearUpdatedPRsForRepo(repo string) {
+	if s == nil {
+		return
+	}
+	prefix := normalizeRepo(repo) + "#"
+	s.updatedForCurrentMain.Range(func(k, _ any) bool {
+		if keyStr, ok := k.(string); ok && strings.HasPrefix(keyStr, prefix) {
+			s.updatedForCurrentMain.Delete(k)
+		}
+		return true
+	})
+}
+
+func (s *RouterServer) hasFailedCIForSHA(ctx context.Context, repo string, prNumber int, headSHA string) bool {
+	headSHA = strings.TrimSpace(headSHA)
+	normRepo := normalizeRepo(repo)
+	if s == nil || normRepo == "" || prNumber <= 0 || headSHA == "" || isZeroSHA(headSHA) {
+		return false
+	}
+	key := prCheckKey(normRepo, prNumber)
+	for _, m := range []*sync.Map{&s.failedCheckSHAs, &s.nonRoboRevFailedSHAs, &s.cancelledCheckSHAs} {
+		if v, ok := m.Load(key); ok && strings.EqualFold(fmt.Sprint(v), headSHA) {
+			return true
+		}
+	}
+	var checkRuns GitHubCheckRunsResponse
+	path := fmt.Sprintf("/repos/%s/commits/%s/check-runs?per_page=100", normRepo, url.PathEscape(headSHA))
+	if err := s.getGitHubJSON(ctx, path, 2<<20, &checkRuns); err != nil {
+		return false
+	}
+	for _, cr := range checkRuns.CheckRuns {
+		if !isGateAggregatorCheck(cr.Name) && classifyCheckState(cr.Status, cr.Conclusion) == "failed" {
+			s.failedCheckSHAs.Store(key, headSHA)
+			return true
+		}
+	}
+	return false
+}
+
 func (s *RouterServer) hasCancelledCheckForSHA(repo string, prNumber int, headSHA string) bool {
 	headSHA = strings.TrimSpace(headSHA)
 	if s == nil || prNumber <= 0 || headSHA == "" {
@@ -948,15 +1040,18 @@ func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *Resol
 	if res.Event == "check_run" && res.PRNumber > 0 && res.HeadSHA != "" && !isRoboRevCheck(res.CheckName) && !isGateAggregatorCheck(res.CheckName) {
 		s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
 	}
+	var err error
 	if res.PRNumber > 0 {
-		_, err := s.handleCIFailureByPRNumber(ctx, res, details, checkURL)
-		return err
+		_, err = s.handleCIFailureByPRNumber(ctx, res, details, checkURL)
+	} else if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
+		_, err = s.handleCIFailureByHeadSHA(ctx, res, details, checkURL)
 	}
-	if res.HeadSHA != "" && !isZeroSHA(res.HeadSHA) {
-		_, err := s.handleCIFailureByHeadSHA(ctx, res, details, checkURL)
-		return err
+	if res.PRNumber > 0 && res.HeadSHA != "" && s.recordFailedCISHA(res.Repo, res.PRNumber, res.HeadSHA) {
+		if cascadeErr := s.checkOpenPRConflicts(ctx, res.Repo); cascadeErr != nil {
+			log.Printf("[synapse] [github] error checking open pr conflicts on ci failure for %s: %v", res.Repo, cascadeErr)
+		}
 	}
-	return nil
+	return err
 }
 
 func (s *RouterServer) processGitHubPingEvent(delivery string, body []byte, res *ResolvedGitHubEvent) (*ResolvedGitHubEvent, error) {
@@ -972,6 +1067,8 @@ func (s *RouterServer) processGitHubPingEvent(delivery string, body []byte, res 
 }
 
 func (s *RouterServer) handlePRClosedAction(ctx context.Context, res *ResolvedGitHubEvent, merged bool) error {
+	s.clearFailedCISHA(res.Repo, res.PRNumber)
+	s.updatedForCurrentMain.Delete(prCheckKey(res.Repo, res.PRNumber))
 	if merged {
 		targetID, err := s.registry.UpdatePRMerged(ctx, res.Repo, res.PRNumber, res.MergeSHA)
 		if err != nil {
@@ -1004,6 +1101,7 @@ func (s *RouterServer) handlePRAutoMergeDisabledAction(ctx context.Context, res 
 	if res.HeadSHA != "" {
 		s.nonRoboRevFailedSHAs.Store(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
 	}
+	s.recordFailedCISHA(res.Repo, res.PRNumber, res.HeadSHA)
 	targetID, updated, err := s.registry.AtomicTransitionConflict(ctx, res.Repo, res.PRNumber)
 	if err != nil {
 		return err
@@ -1036,6 +1134,7 @@ func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res 
 	case "closed":
 		return s.handlePRClosedAction(ctx, res, pr.Merged)
 	case "synchronize":
+		s.clearFailedCISHA(res.Repo, res.PRNumber)
 		s.nonRoboRevFailedSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
 		s.cancelledCheckSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
 		targetID, err := s.registry.UpdatePRSync(ctx, res.Repo, res.PRNumber, res.HeadSHA)
@@ -1108,6 +1207,10 @@ func (s *RouterServer) processGitHubPullRequestEvent(ctx context.Context, delive
 
 	s.handleDependabotPROpen(ctx, res, p)
 
+	if res.Action == "synchronize" && res.PRNumber > 0 {
+		s.clearFailedCISHA(res.Repo, res.PRNumber)
+	}
+
 	if s.registry != nil && res.PRNumber > 0 {
 		if err := s.handlePullRequestRegistryAction(ctx, res, p.PullRequest); err != nil {
 			return nil, err
@@ -1158,6 +1261,7 @@ func (s *RouterServer) processGitHubCheckRunEvent(ctx context.Context, delivery 
 		res.Repo, res.CheckName, res.HeadSHA, res.PRNumber, res.Branch, res.Status, res.Conclusion, res.ResolutionSource, res.TargetID, delivery)
 
 	if p.Action == "completed" && res.Conclusion == "success" && res.PRNumber > 0 && s.registry != nil && s.canRecoverCheckSuccess(ctx, res.Repo, res.PRNumber, res.CheckName, res.HeadSHA) {
+		s.clearFailedCISHA(res.Repo, res.PRNumber)
 		s.nonRoboRevFailedSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
 		s.cancelledCheckSHAs.Delete(prCheckKey(res.Repo, res.PRNumber))
 		targetID, err := s.registry.UpdatePRSync(ctx, res.Repo, res.PRNumber, res.HeadSHA)
@@ -1269,6 +1373,7 @@ func (s *RouterServer) processGitHubPushEvent(ctx context.Context, body []byte, 
 	if err := s.dispatchGitPush(ctx, res.Repo, p.Ref, res.HeadSHA, res.TargetID, res.PRNumber); err != nil {
 		return nil, err
 	}
+	s.clearUpdatedPRsForRepo(res.Repo)
 	if err := s.checkOpenPRConflicts(ctx, res.Repo); err != nil {
 		log.Printf("[synapse] [github] error checking open pr conflicts for %s: %v", res.Repo, err)
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -127,6 +128,7 @@ type ghEventCase struct {
 	wantDMSubstr         string
 	wantRecordCheckCalls int
 	wantRecordCheckState string
+	wantUpdatedBranchHit string
 }
 
 func TestProcessGitHubEvent(t *testing.T) {
@@ -151,6 +153,13 @@ func TestProcessGitHubEvent(t *testing.T) {
 			_, _ = w.Write([]byte(`{"message": "merge conflict between base and head"}`))
 		case r.Method == http.MethodGet && (r.URL.Path == "/repos/azylman/aerial/pulls" || strings.HasSuffix(r.URL.Path, "/repos/azylman/aerial/pulls")):
 			_, _ = w.Write([]byte(`[{"number": 543, "head": {"ref": "feat/conflict-check", "sha": "head543"}, "user": {"login": "trusted-author"}}]`))
+		case r.Method == http.MethodGet && (r.URL.Path == "/repos/azylman/mirrormere/pulls" || strings.HasSuffix(r.URL.Path, "/repos/azylman/mirrormere/pulls")):
+			_, _ = w.Write([]byte(`[{"number": 891, "head": {"ref": "feat/fail-pr", "sha": "failhead891"}, "user": {"login": "trusted-author"}}, {"number": 894, "head": {"ref": "feat/clean-pr", "sha": "cleanhead894"}, "user": {"login": "trusted-author"}}]`))
+		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/repos/azylman/mirrormere/pulls/894/update-branch"):
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"message": "Updating pull request branch."}`))
+		case strings.Contains(r.URL.Path, "/check-runs"):
+			_, _ = w.Write([]byte(`{"check_runs":[]}`))
 		case strings.Contains(r.URL.Path, "/issues/525/comments"):
 			_, _ = w.Write([]byte(`[{"id": 0, "body": "Non-roborev comment"}, {"id": 1, "body": "## roborev: Review Complete (` + "`old0000`" + `)\nOld bug"}, {"id": 2, "body": "## roborev: Combined Review (` + "`robo525`" + `)\nFound SQL injection in query"}]`))
 		case strings.Contains(r.URL.Path, "/actions/runs/800/jobs"):
@@ -810,6 +819,20 @@ func TestProcessGitHubEvent(t *testing.T) {
 			wantHeadSHA:          "deppasssha",
 			wantRecordCheckCalls: 0,
 		},
+		{
+			name:                 "check_run failure cascades open pr conflicts and updates next clean pr",
+			event:                "check_run",
+			delivery:             "del-cr-cascade-update",
+			payload:              `{"action":"completed","repository":{"full_name":"azylman/mirrormere"},"check_run":{"name":"Service Unit Tests","head_sha":"failhead891","status":"completed","conclusion":"failure","pull_requests":[{"number":891,"head":{"ref":"feat/fail-pr","sha":"failhead891"}}]}}`,
+			autoUpdateAuthors:    []string{"trusted-author"},
+			reg:                  &mockPRRegistry{ciFailedTargetID: "1555405874565091380", ciFailedUpdated: true},
+			disp:                 &mockOutboundDispatcher{},
+			wantPR:               891,
+			wantHeadSHA:          "failhead891",
+			wantCIFailedCalls:    1,
+			wantDispatches:       1,
+			wantUpdatedBranchHit: "/repos/azylman/mirrormere/pulls/894/update-branch",
+		},
 	}
 
 	for _, tc := range cases {
@@ -846,6 +869,11 @@ func TestProcessGitHubEvent(t *testing.T) {
 			if tc.spyNoGitHubHit {
 				if _, hit := ghPaths.Load("/repos/azylman/aerial/commits/localsha123/pulls"); hit {
 					t.Fatalf("expected 0 GitHub API hits for localsha123, but endpoint was called")
+				}
+			}
+			if tc.wantUpdatedBranchHit != "" {
+				if _, hit := ghPaths.Load(tc.wantUpdatedBranchHit); !hit {
+					t.Errorf("expected branch update hit for %q, but was not called", tc.wantUpdatedBranchHit)
 				}
 			}
 			if tc.wantRepo != "" && res.Repo != tc.wantRepo {
@@ -1368,28 +1396,32 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name               string
-		autoUpdateAuthors  []string
-		listPRsStatus      int
-		useNilRegistry     bool
-		useRiver           bool
-		riverErr           error
-		conflictErr        error
-		openPRs            []GitHubPullRequest
-		prResponses        []string
-		prStatusCodes      []int
-		closedErr          error
-		wantClosedPRs      []int
-		wantErr            bool
-		wantErrSubstr      string
-		wantConflict       bool
-		wantConflictPR     int
-		wantConflictQueued int
-		wantPrompts        int
-		wantDispatches     int
-		wantPromptSubs     []string
-		wantDMs            int
-		wantUpdatedPRs     []string
+		name                 string
+		autoUpdateAuthors    []string
+		listPRsStatus        int
+		useNilRegistry       bool
+		useRiver             bool
+		riverErr             error
+		conflictErr          error
+		openPRs              []GitHubPullRequest
+		prResponses          []string
+		prStatusCodes        []int
+		closedErr            error
+		wantClosedPRs        []int
+		wantErr              bool
+		wantErrSubstr        string
+		wantConflict         bool
+		wantConflictPR       int
+		wantConflictQueued   int
+		wantPrompts          int
+		wantDispatches       int
+		wantPromptSubs       []string
+		wantDMs              int
+		wantUpdatedPRs       []string
+		checkRunsBySHA       map[string]string
+		presetFailedSHAs     map[int]string
+		presetUpdatedPRs     []int
+		wantCachedFailedSHAs map[int]string
 	}{
 		{
 			name:              "empty autoUpdateAuthors is clean no-op",
@@ -1591,6 +1623,56 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 			wantClosedPRs:     nil,
 			wantUpdatedPRs:    []string{"/repos/azylman/aerial/pulls/512/update-branch"},
 		},
+		{
+			name:              "skips draft PRs and updates next clean PR",
+			autoUpdateAuthors: []string{"trusted-author"},
+			openPRs: []GitHubPullRequest{
+				{Number: 550, Head: GitHubPRRef{Ref: "feat/draft", SHA: "head550"}, Draft: true, User: struct {
+					Login string `json:"login"`
+				}{Login: "trusted-author"}},
+				makeTestOpenPR(551, "feat/ready", "head551", "trusted-author"),
+			},
+			prResponses:    []string{`{"message":"Updating pull request branch."}`},
+			prStatusCodes:  []int{http.StatusAccepted},
+			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/551/update-branch"},
+		},
+		{
+			name:              "skips PR with in-memory failedCheckSHAs and updates next clean PR",
+			autoUpdateAuthors: []string{"trusted-author"},
+			presetFailedSHAs:  map[int]string{550: "head550"},
+			openPRs: []GitHubPullRequest{
+				makeTestOpenPR(550, "feat/failing", "head550", "trusted-author"),
+				makeTestOpenPR(551, "feat/clean", "head551", "trusted-author"),
+			},
+			prResponses:    []string{`{"message":"Updating pull request branch."}`},
+			prStatusCodes:  []int{http.StatusAccepted},
+			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/551/update-branch"},
+		},
+		{
+			name:              "skips PR with failed check-run in API, caches failure, and updates next clean PR",
+			autoUpdateAuthors: []string{"trusted-author"},
+			checkRunsBySHA: map[string]string{
+				"head550": `{"check_runs":[{"name":"Unit Tests","status":"completed","conclusion":"failure"}]}`,
+			},
+			openPRs: []GitHubPullRequest{
+				makeTestOpenPR(550, "feat/failing-check", "head550", "trusted-author"),
+				makeTestOpenPR(551, "feat/clean", "head551", "trusted-author"),
+			},
+			prResponses:          []string{`{"message":"Updating pull request branch."}`},
+			prStatusCodes:        []int{http.StatusAccepted},
+			wantUpdatedPRs:       []string{"/repos/azylman/aerial/pulls/551/update-branch"},
+			wantCachedFailedSHAs: map[int]string{550: "head550"},
+		},
+		{
+			name:              "breaks without updating when leading clean PR already updated for current main",
+			autoUpdateAuthors: []string{"trusted-author"},
+			presetUpdatedPRs:  []int{550},
+			openPRs: []GitHubPullRequest{
+				makeTestOpenPR(550, "feat/in-flight", "head550", "trusted-author"),
+				makeTestOpenPR(551, "feat/waiting", "head551", "trusted-author"),
+			},
+			wantUpdatedPRs: nil,
+		},
 	}
 
 	for _, tc := range tests {
@@ -1609,6 +1691,20 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 					}
 					w.WriteHeader(http.StatusOK)
 					_ = json.NewEncoder(w).Encode(tc.openPRs)
+					return
+				}
+				if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/check-runs") {
+					w.Header().Set("Content-Type", "application/json")
+					trimmed := strings.TrimSuffix(r.URL.Path, "/check-runs")
+					sha := trimmed[strings.LastIndex(trimmed, "/")+1:]
+					body := `{"check_runs":[]}`
+					if tc.checkRunsBySHA != nil {
+						if resp, ok := tc.checkRunsBySHA[sha]; ok {
+							body = resp
+						}
+					}
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(body))
 					return
 				}
 				if r.Method == http.MethodPut {
@@ -1650,6 +1746,12 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 				inserters = append(inserters, mockRiver)
 			}
 			srv := newTestRouter(Config{GitHubAPIURL: apiServer.URL, GitHubToken: "test-token", AutoUpdatePRAuthors: tc.autoUpdateAuthors}, nil, mockReg, mockDisp, inserters...)
+			for prNum, sha := range tc.presetFailedSHAs {
+				srv.recordFailedCISHA("azylman/aerial", prNum, sha)
+			}
+			for _, prNum := range tc.presetUpdatedPRs {
+				srv.markUpdatedForCurrentMain("azylman/aerial", prNum)
+			}
 
 			err := srv.checkOpenPRConflicts(ctx, "azylman/aerial")
 			if (err != nil) != tc.wantErr {
@@ -1657,6 +1759,12 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 			}
 			if tc.wantErrSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr)) {
 				t.Errorf("err = %v, want substr %q", err, tc.wantErrSubstr)
+			}
+			for prNum, wantSHA := range tc.wantCachedFailedSHAs {
+				v, ok := srv.failedCheckSHAs.Load(prCheckKey("azylman/aerial", prNum))
+				if !ok || fmt.Sprint(v) != wantSHA {
+					t.Errorf("cached failedCheckSHAs[%d] = %v (ok=%v), want %q", prNum, v, ok, wantSHA)
+				}
 			}
 			mu.Lock()
 			gotUpdated := append([]string(nil), putPaths...)
