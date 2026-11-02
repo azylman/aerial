@@ -2380,7 +2380,7 @@ func TestCollaboratorCIFailureNotification(t *testing.T) {
 		wantErr              bool
 	}{
 		{
-			name:              "successful collaborator alert with job logs and formatting",
+			name:              "successful collaborator alert with check URL and metadata",
 			prState:           "open",
 			prHeadSHA:         "collabsha101",
 			prAuthor:          "collab-alpha",
@@ -2395,11 +2395,11 @@ func TestCollaboratorCIFailureNotification(t *testing.T) {
 			configRules:       defaultRules,
 			wantDMs:           1,
 			wantDMChannel:     "123456789012345678",
-			wantDMSubstrings:  []string{"<@111111111111111111>", "CI check \"build-and-test\" failed for [azylman/collab-repo#101](https://github.com/azylman/collab-repo/pull/101)", "\"Feature Collab\"", "branch: feat/collab", "commit: collabs", "test suite failure in package foo", "Check URL: https://github.com/azylman/collab-repo/actions/runs/1/job/999"},
+			wantDMSubstrings:  []string{"<@111111111111111111>", "CI check \"build-and-test\" failed for [azylman/collab-repo#101](https://github.com/azylman/collab-repo/pull/101)", "\"Feature Collab\"", "branch: feat/collab", "commit: collabs", "Check URL: https://github.com/azylman/collab-repo/actions/runs/1/job/999"},
 			wantDMDedupLoaded: true,
 		},
 		{
-			name:              "roborev comment enrichment",
+			name:              "roborev failure collaborator alert without comment body",
 			prState:           "open",
 			prHeadSHA:         "collabsha101",
 			prAuthor:          "collab-alpha",
@@ -2411,7 +2411,7 @@ func TestCollaboratorCIFailureNotification(t *testing.T) {
 			configRules:       defaultRules,
 			wantDMs:           1,
 			wantDMChannel:     "123456789012345678",
-			wantDMSubstrings:  []string{"Syntax error detected in worker"},
+			wantDMSubstrings:  []string{"<@111111111111111111>", "CI check \"roborev\" failed for [azylman/collab-repo#101](https://github.com/azylman/collab-repo/pull/101)"},
 			wantDMDedupLoaded: true,
 		},
 		{

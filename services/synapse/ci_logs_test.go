@@ -598,12 +598,11 @@ func TestFormatCollaboratorCIFailureMessage(t *testing.T) {
 		headSHA    string
 		checkName  string
 		checkURL   string
-		details    string
 		wantSub    []string
 		wantNotSub []string
 	}{
 		{
-			name:      "all fields populated formats rich notification",
+			name:      "all fields populated formats rich notification without error details",
 			mention:   "<@111111111111111111>",
 			repo:      "collab-repo",
 			prNumber:  42,
@@ -612,18 +611,38 @@ func TestFormatCollaboratorCIFailureMessage(t *testing.T) {
 			headSHA:   "ed197571a381920f540e7a3c55b68008a45912a0",
 			checkName: "build-and-test",
 			checkURL:  "https://github.com/azylman/collab-repo/actions/runs/10/job/20",
-			details:   "exit status 1: tests failed",
 			wantSub: []string{
 				"<@111111111111111111> CI check \"build-and-test\" failed for [azylman/collab-repo#42](https://github.com/azylman/collab-repo/pull/42)",
 				"\"Add Widget Feature\"",
 				"branch: feat/widget",
 				"commit: ed19757",
-				"Error details:\n```\nexit status 1: tests failed\n```",
 				"Check URL: https://github.com/azylman/collab-repo/actions/runs/10/job/20",
+			},
+			wantNotSub: []string{
+				"Error details:",
 			},
 		},
 		{
-			name:      "minimal fields without mention or details",
+			name:      "empty checkName formats generic failure header",
+			mention:   "",
+			repo:      "azylman/collab-repo",
+			prNumber:  99,
+			prTitle:   "",
+			branch:    "",
+			headSHA:   "",
+			checkName: "",
+			checkURL:  "",
+			wantSub: []string{
+				"CI check failed for [azylman/collab-repo#99](https://github.com/azylman/collab-repo/pull/99).",
+			},
+			wantNotSub: []string{
+				"<@",
+				"Error details:",
+				"Check URL:",
+			},
+		},
+		{
+			name:      "populated checkName without url",
 			mention:   "",
 			repo:      "azylman/collab-repo",
 			prNumber:  99,
@@ -632,7 +651,6 @@ func TestFormatCollaboratorCIFailureMessage(t *testing.T) {
 			headSHA:   "",
 			checkName: "Lint",
 			checkURL:  "",
-			details:   "",
 			wantSub: []string{
 				"CI check \"Lint\" failed for [azylman/collab-repo#99](https://github.com/azylman/collab-repo/pull/99).",
 			},
@@ -647,7 +665,7 @@ func TestFormatCollaboratorCIFailureMessage(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := formatCollaboratorCIFailureMessage(tc.mention, tc.repo, tc.prNumber, tc.prTitle, tc.branch, tc.headSHA, tc.checkName, tc.checkURL, tc.details)
+			got := formatCollaboratorCIFailureMessage(tc.mention, tc.repo, tc.prNumber, tc.prTitle, tc.branch, tc.headSHA, tc.checkName, tc.checkURL)
 			for _, sub := range tc.wantSub {
 				if !strings.Contains(got, sub) {
 					t.Errorf("formatCollaboratorCIFailureMessage missing %q:\n%s", sub, got)

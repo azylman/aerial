@@ -300,7 +300,7 @@ func formatCollaboratorPRTarget(repo string, prNumber int, prTitle, branch, head
 	return prLink
 }
 
-func formatCollaboratorCIFailureMessage(mention, repo string, prNumber int, prTitle, branch, headSHA, checkName, checkURL, details string) string {
+func formatCollaboratorCIFailureMessage(mention, repo string, prNumber int, prTitle, branch, headSHA, checkName, checkURL string) string {
 	cleanMention := strings.TrimSpace(mention)
 	cleanCheckName := strings.TrimSpace(checkName)
 	target := formatCollaboratorPRTarget(repo, prNumber, prTitle, branch, headSHA)
@@ -316,12 +316,11 @@ func formatCollaboratorCIFailureMessage(mention, repo string, prNumber int, prTi
 		fmt.Fprintf(&header, "CI check failed for %s.", target)
 	}
 
-	var extraLine string
 	if cleanURL := strings.TrimSpace(checkURL); cleanURL != "" {
-		extraLine = "Check URL: " + cleanURL
+		fmt.Fprintf(&header, "\nCheck URL: %s", cleanURL)
 	}
 
-	return formatErrorDetailsBlock(header.String(), details, extraLine, "")
+	return header.String()
 }
 
 func formatCollaboratorConflictMessage(mention, repo string, prNumber int, prTitle, branch, headSHA string) string {
@@ -405,7 +404,7 @@ func (s *RouterServer) notifyCollaboratorConflict(ctx context.Context, repo stri
 	return nil
 }
 
-func (s *RouterServer) notifyCollaboratorCIFailure(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) error {
+func (s *RouterServer) notifyCollaboratorCIFailure(ctx context.Context, res *ResolvedGitHubEvent, checkURL string) error {
 	if s == nil || s.dispatcher == nil || res == nil || res.PRNumber <= 0 || res.HeadSHA == "" || isZeroSHA(res.HeadSHA) || !s.hasCollaboratorCIAlertsForRepo(res.Repo) {
 		return nil
 	}
@@ -431,9 +430,8 @@ func (s *RouterServer) notifyCollaboratorCIFailure(ctx context.Context, res *Res
 	if !s.recordCollaboratorAlertSHA(res.Repo, res.PRNumber, res.HeadSHA) {
 		return nil
 	}
-	details = s.resolveCIFailureDetails(ctx, res, details, checkURL)
 	branch := firstNonEmpty(pr.Head.Ref, res.Branch)
-	msg := formatCollaboratorCIFailureMessage(mention, res.Repo, res.PRNumber, pr.Title, branch, res.HeadSHA, res.CheckName, checkURL, details)
+	msg := formatCollaboratorCIFailureMessage(mention, res.Repo, res.PRNumber, pr.Title, branch, res.HeadSHA, res.CheckName, checkURL)
 	if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{ChannelID: channelID, Content: msg}); err != nil {
 		s.collaboratorAlertedSHAs.CompareAndDelete(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
 		return err
