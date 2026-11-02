@@ -239,9 +239,9 @@ func (s *RouterServer) dispatchCIFailurePrompt(ctx context.Context, targetID, ch
 	return s.dispatchAlertWithPrompt(ctx, targetID, "ci_failed", "", prompt, opts)
 }
 
-func (s *RouterServer) completeCIFailureTransition(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) error {
+func (s *RouterServer) resolveCIFailureDetails(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) string {
 	if res == nil {
-		return nil
+		return details
 	}
 	if res.PRNumber > 0 && isRoboRevCheck(res.CheckName) {
 		if comment := s.fetchLatestRoboRevComment(ctx, res.Repo, res.PRNumber, res.HeadSHA); comment != "" {
@@ -255,11 +255,125 @@ func (s *RouterServer) completeCIFailureTransition(ctx context.Context, res *Res
 			}
 		}
 	}
+	return details
+}
+
+func (s *RouterServer) completeCIFailureTransition(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) error {
+	if res == nil {
+		return nil
+	}
+	details = s.resolveCIFailureDetails(ctx, res, details, checkURL)
 	s.populateMissingBranch(ctx, res)
 	if s.checkRemediationCapReached(ctx, res) {
 		return nil
 	}
 	return s.dispatchCIFailurePrompt(ctx, res.TargetID, res.CheckName, res.Repo, res.HeadSHA, res.PRNumber, details, checkURL, res.Branch)
+}
+
+func formatCollaboratorCIFailureMessage(mention, repo string, prNumber int, prTitle, branch, headSHA, checkName, checkURL, details string) string {
+	normRepo := normalizeRepo(repo)
+	cleanMention := strings.TrimSpace(mention)
+	cleanCheckName := strings.TrimSpace(checkName)
+	cleanTitle := strings.TrimSpace(prTitle)
+	cleanBranch := strings.TrimPrefix(strings.TrimSpace(branch), "refs/heads/")
+	shortSHA := strings.TrimSpace(headSHA)
+	if len(shortSHA) > 7 {
+		shortSHA = shortSHA[:7]
+	}
+
+	prLink := fmt.Sprintf("[%s#%d](https://github.com/%s/pull/%d)", normRepo, prNumber, normRepo, prNumber)
+	if normRepo == "" {
+		prLink = fmt.Sprintf("PR #%d", prNumber)
+	}
+
+	var header strings.Builder
+	if cleanMention != "" {
+		header.WriteString(cleanMention)
+		header.WriteString(" ")
+	}
+	if cleanCheckName != "" {
+		fmt.Fprintf(&header, "CI check %q failed for %s", cleanCheckName, prLink)
+	} else {
+		fmt.Fprintf(&header, "CI check failed for %s", prLink)
+	}
+
+	var meta []string
+	if cleanTitle != "" {
+		meta = append(meta, fmt.Sprintf("%q", cleanTitle))
+	}
+	if cleanBranch != "" {
+		meta = append(meta, "branch: "+cleanBranch)
+	}
+	if shortSHA != "" {
+		meta = append(meta, "commit: "+shortSHA)
+	}
+	if len(meta) > 0 {
+		header.WriteString(" (")
+		header.WriteString(strings.Join(meta, ", "))
+		header.WriteString(")")
+	}
+	header.WriteString(".")
+
+	var extraLine string
+	if cleanURL := strings.TrimSpace(checkURL); cleanURL != "" {
+		extraLine = "Check URL: " + cleanURL
+	}
+
+	return formatErrorDetailsBlock(header.String(), details, extraLine, "")
+}
+
+func (s *RouterServer) isCollaboratorAlertedForSHA(repo string, prNumber int, headSHA string) bool {
+	headSHA = strings.TrimSpace(headSHA)
+	if s == nil || prNumber <= 0 || headSHA == "" || isZeroSHA(headSHA) {
+		return false
+	}
+	v, ok := s.collaboratorAlertedSHAs.Load(prCheckKey(repo, prNumber))
+	return ok && strings.EqualFold(fmt.Sprint(v), headSHA)
+}
+
+func (s *RouterServer) recordCollaboratorAlertSHA(repo string, prNumber int, headSHA string) bool {
+	headSHA = strings.TrimSpace(headSHA)
+	if s == nil || prNumber <= 0 || headSHA == "" || isZeroSHA(headSHA) {
+		return false
+	}
+	prev, loaded := s.collaboratorAlertedSHAs.Swap(prCheckKey(repo, prNumber), headSHA)
+	return !loaded || !strings.EqualFold(fmt.Sprint(prev), headSHA)
+}
+
+func (s *RouterServer) notifyCollaboratorCIFailure(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) error {
+	if s == nil || s.dispatcher == nil || res == nil || res.PRNumber <= 0 || res.HeadSHA == "" || isZeroSHA(res.HeadSHA) || !s.hasCollaboratorCIAlertsForRepo(res.Repo) {
+		return nil
+	}
+	if s.isCollaboratorAlertedForSHA(res.Repo, res.PRNumber, res.HeadSHA) {
+		return nil
+	}
+	normRepo := normalizeRepo(res.Repo)
+	path := fmt.Sprintf("/repos/%s/pulls/%d", normRepo, res.PRNumber)
+	var pr GitHubPullRequest
+	if err := s.getGitHubJSON(ctx, path, 2<<20, &pr); err != nil {
+		return err
+	}
+	if pr.Merged || (pr.State != "" && !strings.EqualFold(pr.State, "open")) {
+		return nil
+	}
+	if pr.Head.SHA != "" && !strings.EqualFold(pr.Head.SHA, strings.TrimSpace(res.HeadSHA)) {
+		return nil
+	}
+	channelID, mention, ok := s.lookupCollaboratorCIAlert(res.Repo, pr.User.Login)
+	if !ok {
+		return nil
+	}
+	if !s.recordCollaboratorAlertSHA(res.Repo, res.PRNumber, res.HeadSHA) {
+		return nil
+	}
+	details = s.resolveCIFailureDetails(ctx, res, details, checkURL)
+	branch := firstNonEmpty(pr.Head.Ref, res.Branch)
+	msg := formatCollaboratorCIFailureMessage(mention, res.Repo, res.PRNumber, pr.Title, branch, res.HeadSHA, res.CheckName, checkURL, details)
+	if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{ChannelID: channelID, Content: msg}); err != nil {
+		s.collaboratorAlertedSHAs.CompareAndDelete(prCheckKey(res.Repo, res.PRNumber), strings.TrimSpace(res.HeadSHA))
+		return err
+	}
+	return nil
 }
 
 func (s *RouterServer) populateMissingBranch(ctx context.Context, res *ResolvedGitHubEvent) {
