@@ -1086,7 +1086,7 @@ func (s *RouterServer) handleCIFailureTransition(ctx context.Context, res *Resol
 		updated, err = s.handleCIFailureByHeadSHA(ctx, res, details, checkURL)
 	}
 	if err == nil && !updated && res.TargetID == "" {
-		if notifyErr := s.notifyCollaboratorCIFailure(ctx, res, details, checkURL); notifyErr != nil {
+		if notifyErr := s.notifyCollaboratorCIFailure(ctx, res, checkURL); notifyErr != nil {
 			return notifyErr
 		}
 	}
