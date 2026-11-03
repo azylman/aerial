@@ -2461,8 +2461,8 @@ func TestWorkerPool_DeliverStatusWidget(t *testing.T) {
 		name, widgetMsgID, expectErrContains, expectMsgID string
 		nilPool, nilSession                               bool
 		req                                               discord.StatusWidgetRequest
-		blockBuildCards                                   bool
-		parentBlockBuildCards                             bool
+		noBuildUpdates                                    bool
+		parentNoBuildUpdates                              bool
 		systemChannel                                     string
 		cachedChannel                                     *discordgo.Channel
 		expectDeliveredChannelID                          string
@@ -2490,16 +2490,16 @@ func TestWorkerPool_DeliverStatusWidget(t *testing.T) {
 			widgetMsgID:              "msg-appcfg",
 			req:                      discord.StatusWidgetRequest{ChannelID: targetChan, Chunks: []discord.StatusWidgetChunk{{ID: "c-deploy", Status: "running", DeployingJobs: []string{"eri"}}}},
 			useAppConfigPolicy:       true,
-			blockBuildCards:          true,
+			noBuildUpdates:           true,
 			systemChannel:            sysChanSnowflake,
 			expectMsgID:              "msg-appcfg",
 			expectDeliveredChannelID: sysChanSnowflake,
 		},
 		{name: "injected WidgetDeliveryFunc is invoked without redirection", widgetMsgID: "widget-msg-123", req: discord.StatusWidgetRequest{ChannelID: targetChan}, expectMsgID: "widget-msg-123", expectDeliveredChannelID: targetChan},
-		{name: "block_build_cards redirects target channel to system channel snowflake", widgetMsgID: "widget-msg-456", req: discord.StatusWidgetRequest{ChannelID: targetChan}, blockBuildCards: true, systemChannel: sysChanSnowflake, expectMsgID: "widget-msg-456", expectDeliveredChannelID: sysChanSnowflake},
-		{name: "block_build_cards redirects thread to system channel via parent policy", widgetMsgID: "widget-msg-789", req: discord.StatusWidgetRequest{ChannelID: threadSnowflake}, parentBlockBuildCards: true, systemChannel: sysChanSnowflake, cachedChannel: &discordgo.Channel{ID: threadSnowflake, Type: discordgo.ChannelTypeGuildPublicThread, ParentID: parentChan, Name: "build-thread"}, expectMsgID: "widget-msg-789", expectDeliveredChannelID: sysChanSnowflake},
-		{name: "block_build_cards resolves channel name system_channel via discord session", widgetMsgID: "widget-msg-321", req: discord.StatusWidgetRequest{ChannelID: targetChan}, blockBuildCards: true, systemChannel: "aerial-dev", useMockSession: true, expectMsgID: "widget-msg-321", expectDeliveredChannelID: sysChanSnowflake},
-		{name: "block_build_cards unresolvable system channel falls back to target channel", widgetMsgID: "widget-msg-101", req: discord.StatusWidgetRequest{ChannelID: targetChan}, blockBuildCards: true, systemChannel: "nonexistent-channel", expectMsgID: "widget-msg-101", expectDeliveredChannelID: targetChan},
+		{name: "no_build_updates redirects target channel to system channel snowflake", widgetMsgID: "widget-msg-456", req: discord.StatusWidgetRequest{ChannelID: targetChan}, noBuildUpdates: true, systemChannel: sysChanSnowflake, expectMsgID: "widget-msg-456", expectDeliveredChannelID: sysChanSnowflake},
+		{name: "no_build_updates redirects thread to system channel via parent policy", widgetMsgID: "widget-msg-789", req: discord.StatusWidgetRequest{ChannelID: threadSnowflake}, parentNoBuildUpdates: true, systemChannel: sysChanSnowflake, cachedChannel: &discordgo.Channel{ID: threadSnowflake, Type: discordgo.ChannelTypeGuildPublicThread, ParentID: parentChan, Name: "build-thread"}, expectMsgID: "widget-msg-789", expectDeliveredChannelID: sysChanSnowflake},
+		{name: "no_build_updates resolves channel name system_channel via discord session", widgetMsgID: "widget-msg-321", req: discord.StatusWidgetRequest{ChannelID: targetChan}, noBuildUpdates: true, systemChannel: "aerial-dev", useMockSession: true, expectMsgID: "widget-msg-321", expectDeliveredChannelID: sysChanSnowflake},
+		{name: "no_build_updates unresolvable system channel falls back to target channel", widgetMsgID: "widget-msg-101", req: discord.StatusWidgetRequest{ChannelID: targetChan}, noBuildUpdates: true, systemChannel: "nonexistent-channel", expectMsgID: "widget-msg-101", expectDeliveredChannelID: targetChan},
 		{
 			name:        "inherits existing message ID when req message ID is empty",
 			widgetMsgID: "msg-inherit-999",
@@ -2678,11 +2678,11 @@ func TestWorkerPool_DeliverStatusWidget(t *testing.T) {
 			p := &WorkerPool{}
 			if !tc.useAppConfigPolicy {
 				p.cfg.ResolveChannelPolicy = func(channelID, channelName string) config.ChannelPolicy {
-					if tc.blockBuildCards && (channelID == targetChan || channelName == targetChan) {
-						return config.ChannelPolicy{BlockBuildCards: true}
+					if tc.noBuildUpdates && (channelID == targetChan || channelName == targetChan) {
+						return config.ChannelPolicy{NoBuildUpdates: true}
 					}
-					if tc.parentBlockBuildCards && (channelID == parentChan || channelName == parentChan) {
-						return config.ChannelPolicy{BlockBuildCards: true}
+					if tc.parentNoBuildUpdates && (channelID == parentChan || channelName == parentChan) {
+						return config.ChannelPolicy{NoBuildUpdates: true}
 					}
 					return config.ChannelPolicy{}
 				}
@@ -2694,7 +2694,7 @@ func TestWorkerPool_DeliverStatusWidget(t *testing.T) {
 				p.appCfg = config.NewFromData(&config.ConfigData{
 					SystemChannel: tc.systemChannel,
 					Channels: map[string]config.ChannelPolicy{
-						targetChan: {BlockBuildCards: tc.blockBuildCards},
+						targetChan: {NoBuildUpdates: tc.noBuildUpdates},
 					},
 				})
 			} else if tc.systemChannel != "" {
@@ -2797,6 +2797,107 @@ func TestWorkerPool_DeliverStatusWidget(t *testing.T) {
 						t.Fatalf("cached widget missing chunk %q", cID)
 					}
 				}
+			}
+		})
+	}
+}
+
+func TestIsBuildCompletionPrompt(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		prompt string
+		want   bool
+	}{
+		{name: "continuous delivery exact", prompt: "Continuous Delivery deployment completed for job git-merge on azylman/mirrormere", want: true},
+		{name: "continuous delivery lower", prompt: "continuous delivery deployment completed for job eri", want: true},
+		{name: "vanadis build completed exact", prompt: "Vanadis build build-123 completed (Tier 2, 2 chunks merged).", want: true},
+		{name: "vanadis build completed lower", prompt: "vanadis build build-abc completed", want: true},
+		{name: "vanadis chunk merged", prompt: "Vanadis chunk build-1-chunk-1 merged for aerial#10", want: false},
+		{name: "regular user request", prompt: "Please summarize recent commits on main", want: false},
+		{name: "empty prompt", prompt: "", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsBuildCompletionPrompt(tc.prompt); got != tc.want {
+				t.Errorf("IsBuildCompletionPrompt(%q) = %v, want %v", tc.prompt, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWorkerPool_RedirectBuildPrompt(t *testing.T) {
+	t.Parallel()
+	const (
+		sysChanSnowflake = "1564150557705248879"
+		targetChan       = "target-chan-1"
+		threadSnowflake  = "1564150557705248880"
+		parentChan       = "parent-chan-1"
+	)
+	mockSess, _ := discordgo.New("Bot fake-token")
+	mockSess.State = discordgo.NewState()
+	mockSess.State.GuildAdd(&discordgo.Guild{
+		ID: "guild-1",
+		Channels: []*discordgo.Channel{
+			{ID: sysChanSnowflake, Name: "aerial-dev"},
+		},
+	})
+
+	tests := []struct {
+		name                 string
+		nilPool              bool
+		channelID            string
+		prompt               string
+		noBuildUpdates       bool
+		parentNoBuildUpdates bool
+		systemChannel        string
+		cachedChannel        *discordgo.Channel
+		useMockSession       bool
+		want                 string
+	}{
+		{name: "nil pool returns channelID", nilPool: true, channelID: "chan-1", prompt: "Continuous Delivery deployment completed for job eri", want: "chan-1"},
+		{name: "empty channelID returns empty", channelID: "", prompt: "Continuous Delivery deployment completed for job eri", want: ""},
+		{name: "non-build prompt not redirected", channelID: targetChan, prompt: "Check system health", noBuildUpdates: true, systemChannel: sysChanSnowflake, want: targetChan},
+		{name: "continuous delivery redirects target channel", channelID: targetChan, prompt: "Continuous Delivery deployment completed for job eri", noBuildUpdates: true, systemChannel: sysChanSnowflake, want: sysChanSnowflake},
+		{name: "vanadis build completed redirects target channel", channelID: targetChan, prompt: "Vanadis build build-99 completed", noBuildUpdates: true, systemChannel: sysChanSnowflake, want: sysChanSnowflake},
+		{name: "build prompt redirects thread via parent policy", channelID: threadSnowflake, prompt: "Vanadis build build-99 completed", parentNoBuildUpdates: true, systemChannel: sysChanSnowflake, cachedChannel: &discordgo.Channel{ID: threadSnowflake, Type: discordgo.ChannelTypeGuildPublicThread, ParentID: parentChan, Name: "build-thread"}, want: sysChanSnowflake},
+		{name: "build prompt without no_build_updates does not redirect", channelID: targetChan, prompt: "Continuous Delivery deployment completed for job eri", noBuildUpdates: false, systemChannel: sysChanSnowflake, want: targetChan},
+		{name: "unresolvable system channel falls back to target channel", channelID: targetChan, prompt: "Continuous Delivery deployment completed for job eri", noBuildUpdates: true, systemChannel: "nonexistent", want: targetChan},
+		{name: "resolves channel name system_channel via discord session", channelID: targetChan, prompt: "Continuous Delivery deployment completed for job eri", noBuildUpdates: true, systemChannel: "aerial-dev", useMockSession: true, want: sysChanSnowflake},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.cachedChannel != nil {
+				CacheDiscordChannel(tc.cachedChannel)
+			}
+			if tc.nilPool {
+				var p *WorkerPool
+				if got := p.RedirectBuildPrompt(tc.channelID, tc.prompt); got != tc.want {
+					t.Fatalf("RedirectBuildPrompt() = %q, want %q", got, tc.want)
+				}
+				return
+			}
+			p := &WorkerPool{}
+			p.cfg.ResolveChannelPolicy = func(channelID, channelName string) config.ChannelPolicy {
+				if tc.noBuildUpdates && (channelID == targetChan || channelName == targetChan) {
+					return config.ChannelPolicy{NoBuildUpdates: true}
+				}
+				if tc.parentNoBuildUpdates && (channelID == parentChan || channelName == parentChan) {
+					return config.ChannelPolicy{NoBuildUpdates: true}
+				}
+				return config.ChannelPolicy{}
+			}
+			if tc.useMockSession {
+				p.SetDiscordSession(mockSess)
+			}
+			if tc.systemChannel != "" {
+				p.appCfg = config.NewFromData(&config.ConfigData{SystemChannel: tc.systemChannel})
+			}
+			if got := p.RedirectBuildPrompt(tc.channelID, tc.prompt); got != tc.want {
+				t.Fatalf("RedirectBuildPrompt() = %q, want %q", got, tc.want)
 			}
 		})
 	}

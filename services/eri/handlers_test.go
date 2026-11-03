@@ -109,6 +109,20 @@ func TestHandlePromptValidation(t *testing.T) {
 	})
 	defer threadPool.Stop()
 
+	redirectCfg := config.NewFromData(&config.ConfigData{
+		SystemChannel: "1564150557705248879",
+		Channels: map[string]config.ChannelPolicy{
+			"1542423172400291873": {
+				Mode:           "channel",
+				NoBuildUpdates: true,
+			},
+		},
+	})
+	redirectPool := queue.New(redirectCfg, queue.WorkerPoolConfig{
+		Store: store,
+	})
+	defer redirectPool.Stop()
+
 	for _, tc := range []struct {
 		name          string
 		pool          *queue.WorkerPool
@@ -127,6 +141,28 @@ func TestHandlePromptValidation(t *testing.T) {
 		{"nil pool", nil, `{"prompt":"hello nil pool","channel_id":"1542423172400291873","message_id":"msg-nil-pool"}`, "msg-nil-pool", "1542423172400291873", "1542423172400291873", "", "", "hello nil pool"},
 		{"auto-generated uuid when message_id omitted", pool, `{"prompt":"auto uuid prompt","channel_id":"1542423172400291873"}`, "", "", "", "", "", "auto uuid prompt"},
 		{"resolve target thread", threadPool, `{"prompt":"create thread prompt","channel_id":"1542423172400291873","title":"Heartbeat Alert","message_id":"msg-thread-create"}`, "msg-thread-create", "1542999999999999999", "1542999999999999999", "", "", "create thread prompt"},
+		{
+			"cd build completion redirects to system channel when no_build_updates",
+			redirectPool,
+			`{"prompt":"Continuous Delivery deployment completed for job aerial-eri","channel_id":"1542423172400291873","message_id":"msg-cd-redirect"}`,
+			"msg-cd-redirect",
+			"1564150557705248879",
+			"1564150557705248879",
+			"",
+			"",
+			"Continuous Delivery deployment completed for job aerial-eri",
+		},
+		{
+			"vanadis build completion redirects to system channel when no_build_updates",
+			redirectPool,
+			`{"prompt":"Vanadis build build-123 completed successfully","channel_id":"1542423172400291873","message_id":"msg-vanadis-redirect"}`,
+			"msg-vanadis-redirect",
+			"1564150557705248879",
+			"1564150557705248879",
+			"",
+			"",
+			"Vanadis build build-123 completed successfully",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := runHTTP(handlePrompt(store, tc.pool), http.MethodPost, "/prompt", strings.NewReader(tc.payload))
@@ -180,9 +216,24 @@ func TestHandlePrompt_SkipIfActive(t *testing.T) {
 	errStore := dbtest.NewFakeStore()
 	errStore.FailNext("HasActiveThreadTurn", errors.New("simulated db failure"))
 
+	redirectCfg := config.NewFromData(&config.ConfigData{
+		SystemChannel: "1564150557705248879",
+		Channels: map[string]config.ChannelPolicy{
+			"1542423172400291873": {
+				Mode:           "channel",
+				NoBuildUpdates: true,
+			},
+		},
+	})
+	redirectPool := queue.New(redirectCfg, queue.WorkerPoolConfig{
+		Store: activeStore,
+	})
+	defer redirectPool.Stop()
+
 	tests := []struct {
 		name       string
 		store      db.Store
+		pool       *queue.WorkerPool
 		body       string
 		wantStatus int
 		wantSubstr string
@@ -202,6 +253,14 @@ func TestHandlePrompt_SkipIfActive(t *testing.T) {
 			wantSubstr: `"status":"accepted"`,
 		},
 		{
+			name:       "redirected build completion prompt on active channel succeeds if system channel idle",
+			store:      activeStore,
+			pool:       redirectPool,
+			body:       `{"prompt":"Vanadis build build-1 completed","channel_id":"1542423172400291873","skip_if_active":true}`,
+			wantStatus: http.StatusAccepted,
+			wantSubstr: `"status":"accepted"`,
+		},
+		{
 			name:       "store error returns 500",
 			store:      errStore,
 			body:       `{"prompt":"check","channel_id":"1542423172400291873","skip_if_active":true}`,
@@ -212,7 +271,7 @@ func TestHandlePrompt_SkipIfActive(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			w := runHTTP(handlePrompt(tc.store, nil), http.MethodPost, "/prompt", strings.NewReader(tc.body))
+			w := runHTTP(handlePrompt(tc.store, tc.pool), http.MethodPost, "/prompt", strings.NewReader(tc.body))
 			if w.Code != tc.wantStatus || !strings.Contains(w.Body.String(), tc.wantSubstr) {
 				t.Fatalf("got status=%d body=%q, want status=%d substr=%q", w.Code, w.Body.String(), tc.wantStatus, tc.wantSubstr)
 			}

@@ -116,6 +116,10 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
+		if pool != nil {
+			channelID = pool.RedirectBuildPrompt(channelID, req.Prompt)
+		}
+
 		model := strings.TrimSpace(req.Model)
 		effort := resolvePromptEffort(model, strings.TrimSpace(req.Effort))
 
