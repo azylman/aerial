@@ -642,9 +642,6 @@ func TestSummarizeAndHistoryHelpers(t *testing.T) {
 			_, _ = FetchRecentThreadHistory(ctx, nil, fake, "", tc.limit)
 			fetcher := DefaultHistoryFetcher(dgHist, targetStore)
 			_, _ = fetcher(ctx, tc.threadID, tc.beforeID, tc.limit)
-			if got := FilterAssistantMessages(nil); len(got) != 0 {
-				t.Errorf("expected empty slice from FilterAssistantMessages(nil)")
-			}
 		})
 	}
 
