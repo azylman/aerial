@@ -30,15 +30,57 @@ func TestTurnExecution_GetRecentThreadMessages(t *testing.T) {
 	now := time.Now().UTC()
 	mockDiscordMsgs := []*discordgo.Message{
 		nil,
+		{
+			ID:        "1552732003076669003",
+			ChannelID: "1552732003076669460",
+			Content:   "",
+			Timestamp: now.Add(-2 * time.Minute),
+			Author:    &discordgo.User{ID: "bot-123", Username: "Aerial"},
+			Components: []discordgo.MessageComponent{
+				&discordgo.Container{
+					Components: []discordgo.MessageComponent{
+						&discordgo.TextDisplay{Content: "### 🛠️ Vanadis Build: Widget Support"},
+						&discordgo.Section{
+							Components: []discordgo.MessageComponent{
+								&discordgo.TextDisplay{Content: "✅ `aerial`: Build completed"},
+							},
+							Accessory: &discordgo.Button{
+								Label: "PR #888 ↗",
+								URL:   "https://github.com/azylman/aerial/pull/888",
+							},
+						},
+					},
+				},
+			},
+		},
 		{ID: "1552732003076669002", ChannelID: "1552732003076669460", Content: "Can we add SVG?", Timestamp: now.Add(-5 * time.Minute), Author: &discordgo.User{ID: "100000000000000001", Username: "test-user"}, Mentions: []*discordgo.User{{ID: "bot-123", Username: "Aerial"}}, ReferencedMessage: &discordgo.Message{Author: &discordgo.User{Username: "Aerial"}}},
 		{ID: "1552732003076669001", ChannelID: "1552732003076669460", Content: "Weather widget", Timestamp: now.Add(-10 * time.Minute), Author: &discordgo.User{ID: "100000000000000001", Username: "test-user"}},
 		{ID: "1552732003076669000", ChannelID: "1552732003076669460", Content: "Webhook notification", WebhookID: "hook-123"},
 		{ID: "1552732003076669099", ChannelID: "1552732003076669460", Content: "Current burst msg", Timestamp: now},
 	}
+	marshalMockMessages := func(msgs []*discordgo.Message) []byte {
+		payload := make([]any, len(msgs))
+		for i, m := range msgs {
+			if m == nil {
+				payload[i] = nil
+				continue
+			}
+			payload[i] = struct {
+				*discordgo.Message
+
+				Components []discordgo.MessageComponent `json:"components,omitempty"`
+			}{
+				Message:    m,
+				Components: m.Components,
+			}
+		}
+		body, _ := json.Marshal(payload)
+		return body
+	}
+	mockBody := marshalMockMessages(mockDiscordMsgs)
 	dgSuccess, _ := discordgo.New("Bot test-token")
 	dgSuccess.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		body, _ := json.Marshal(mockDiscordMsgs)
-		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(body))}, nil
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(mockBody))}, nil
 	})
 	var flakyCalls atomic.Int32
 	dgFlaky, _ := discordgo.New("Bot test-flaky")
@@ -46,21 +88,39 @@ func TestTurnExecution_GetRecentThreadMessages(t *testing.T) {
 		if flakyCalls.Add(1) == 1 {
 			return nil, errors.New("transient 502")
 		}
-		body, _ := json.Marshal(mockDiscordMsgs)
-		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(body))}, nil
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(mockBody))}, nil
 	})
 	dgFail, _ := discordgo.New("Bot test")
 	dgFail.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) { return nil, errors.New("simulated error") })
 
 	tests := []struct {
 		name, firstID, firstAuthor string
+		wantLastContent            string
 		dg                         *discordgo.Session
 		burst                      []db.Message
 		limit, wantCount           int
 		wantErr                    bool
 	}{
-		{name: "DiscordAPI_Success", dg: dgSuccess, burst: []db.Message{{ID: "1552732003076669099"}}, limit: 10, wantCount: 3, firstID: "1552732003076669000", firstAuthor: "Webhook"},
-		{name: "TransientError_RetriesAndSucceeds", dg: dgFlaky, burst: []db.Message{{ID: "1552732003076669099"}}, limit: 0, wantCount: 3, firstID: "1552732003076669000", firstAuthor: "Webhook"},
+		{
+			name:            "DiscordAPI_Success",
+			dg:              dgSuccess,
+			burst:           []db.Message{{ID: "1552732003076669099"}},
+			limit:           10,
+			wantCount:       4,
+			firstID:         "1552732003076669000",
+			firstAuthor:     "Webhook",
+			wantLastContent: "### 🛠️ Vanadis Build: Widget Support\n✅ `aerial`: Build completed [PR #888 ↗](https://github.com/azylman/aerial/pull/888)",
+		},
+		{
+			name:            "TransientError_RetriesAndSucceeds",
+			dg:              dgFlaky,
+			burst:           []db.Message{{ID: "1552732003076669099"}},
+			limit:           0,
+			wantCount:       4,
+			firstID:         "1552732003076669000",
+			firstAuthor:     "Webhook",
+			wantLastContent: "### 🛠️ Vanadis Build: Widget Support\n✅ `aerial`: Build completed [PR #888 ↗](https://github.com/azylman/aerial/pull/888)",
+		},
 		{name: "PersistentError_ClampedLimit", dg: dgFail, limit: 200, wantErr: true},
 		{name: "NilSession", limit: 10, wantCount: 0},
 	}
@@ -84,6 +144,9 @@ func TestTurnExecution_GetRecentThreadMessages(t *testing.T) {
 			}
 			if tc.wantCount > 0 && (msgs[0].ID != tc.firstID || msgs[0].AuthorName != tc.firstAuthor) {
 				t.Errorf("mismatch on first message: got %+v, want ID=%s Author=%s", msgs[0], tc.firstID, tc.firstAuthor)
+			}
+			if tc.wantLastContent != "" && msgs[len(msgs)-1].Content != tc.wantLastContent {
+				t.Errorf("last message content mismatch: got %q, want %q", msgs[len(msgs)-1].Content, tc.wantLastContent)
 			}
 		})
 	}

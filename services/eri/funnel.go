@@ -12,6 +12,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/discord"
 	"github.com/azylman/aerial/services/eri/pkg/interactions"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
@@ -292,6 +293,14 @@ func resolveMessageContent(s *discordgo.Session, m *discordgo.Message, extraRole
 		extras = extraRoleNames[0]
 	}
 	content := m.Content
+	if strings.TrimSpace(content) == "" && len(m.Components) > 0 {
+		if extracted := discord.ExtractMessageComponentsText(m.Components); extracted != "" {
+			mCopy := *m
+			mCopy.Content = extracted
+			m = &mCopy
+			content = extracted
+		}
+	}
 	if s != nil {
 		if resolved, err := m.ContentWithMoreMentionsReplaced(s); err == nil && resolved != "" {
 			content = resolved
