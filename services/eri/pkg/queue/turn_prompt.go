@@ -479,9 +479,6 @@ func (te *turnExecution) resolveThreadColdStartSummary(getTurnHistory func(int) 
 func (te *turnExecution) resolveColdStartLookbackMessages(isColdStart, isChannelMode bool, getTurnHistory func(int) []HistoryMessage) []HistoryMessage {
 	if !te.isEphemeral && (isColdStart || isChannelMode) {
 		lookbackMsgs := getTurnHistory(10)
-		if isChannelMode && !isColdStart && len(lookbackMsgs) > 0 {
-			lookbackMsgs = FilterAssistantMessages(lookbackMsgs)
-		}
 		if len(lookbackMsgs) > 0 {
 			log.Printf("[WorkerPool] Injected channel history into prompt for thread %s", te.threadID)
 		}

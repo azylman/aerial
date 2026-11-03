@@ -197,21 +197,6 @@ func resolveDiscordReplyAuthor(dm *discordgo.Message, discordMsgs []*discordgo.M
 	return ""
 }
 
-// FilterAssistantMessages removes messages authored by Aerial or marked with Role "Assistant".
-func FilterAssistantMessages(msgs []HistoryMessage) []HistoryMessage {
-	if len(msgs) == 0 {
-		return nil
-	}
-	filtered := make([]HistoryMessage, 0, len(msgs))
-	for _, m := range msgs {
-		if m.Role == "Assistant" || strings.EqualFold(m.AuthorName, "aerial") || strings.EqualFold(m.AuthorName, "assistant") {
-			continue
-		}
-		filtered = append(filtered, m)
-	}
-	return filtered
-}
-
 func resolveHistoryBeforeTime(ctx context.Context, store db.Store, beforeID string) time.Time {
 	if beforeID == "" || store == nil {
 		return time.Time{}
@@ -275,31 +260,31 @@ func fetchHistoryFromDB(store db.Store, channelID, beforeID string, limit int, c
 	return results, nil
 }
 
-// FetchRecentThreadHistory retrieves up to 100 recent messages for a thread from PostgreSQL, falling back to Discord API.
+// FetchRecentThreadHistory retrieves up to 100 recent messages for a thread from Discord API, falling back to PostgreSQL.
 func FetchRecentThreadHistory(ctx context.Context, dg *discordgo.Session, store db.Store, threadID string, limit int) ([]HistoryMessage, error) {
 	start := time.Now()
 	if limit <= 0 || limit > 100 {
 		limit = 100
 	}
 
+	if dg != nil && threadID != "" && IsNumericSnowflake(threadID) {
+		fetchCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+
+		discordMsgs, err := dg.ChannelMessages(threadID, limit, "", "", "", discordgo.WithContext(fetchCtx))
+		if err == nil {
+			results := convertDiscordMessagesToHistory(dg, discordMsgs)
+			metrics.RecordChannelHistoryFetch("discord_api_thread", "success", time.Since(start), len(results))
+			return results, nil
+		}
+		metrics.RecordChannelHistoryFetch("discord_api_thread", "fallback", time.Since(start), 0)
+		log.Printf("[Queue] Discord ChannelMessages failed for thread %s (falling back to database): %v", threadID, err)
+	}
+
 	if msgs, err := fetchHistoryFromDB(store, threadID, "", limit, ctx); err == nil && len(msgs) > 0 {
 		return msgs, nil
 	}
-	if dg == nil || threadID == "" || !IsNumericSnowflake(threadID) {
-		return nil, fmt.Errorf("no database messages and discord fallback unavailable")
-	}
-
-	fetchCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-
-	discordMsgs, err := dg.ChannelMessages(threadID, limit, "", "", "", discordgo.WithContext(fetchCtx))
-	if err != nil {
-		metrics.RecordChannelHistoryFetch("discord_api_thread", "error", time.Since(start), 0)
-		return nil, err
-	}
-	results := convertDiscordMessagesToHistory(dg, discordMsgs)
-	metrics.RecordChannelHistoryFetch("discord_api_thread", "success", time.Since(start), len(results))
-	return results, nil
+	return nil, fmt.Errorf("no discord messages and database fallback unavailable")
 }
 
 // LLMFunc is a function that generates text from a model (aliased to runner.LLMFunc).
