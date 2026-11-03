@@ -876,6 +876,26 @@ func TestProcessGitHubEvent(t *testing.T) {
 			wantUpdatedBranchHit: "/repos/azylman/mirrormere/pulls/894/update-branch",
 		},
 		{
+			name:                 "check_run gate aggregator success triggers open pr conflicts check and branch update",
+			event:                "check_run",
+			delivery:             "del-cr-gate-success-update",
+			payload:              `{"action":"completed","repository":{"full_name":"azylman/aerial"},"check_run":{"name":"CI Gate","head_sha":"head543","status":"completed","conclusion":"success","pull_requests":[{"number":543,"head":{"ref":"feat/conflict-check","sha":"head543"}}]}}`,
+			autoUpdateAuthors:    []string{"trusted-author"},
+			wantPR:               543,
+			wantHeadSHA:          "head543",
+			wantUpdatedBranchHit: "/repos/azylman/aerial/pulls/543/update-branch",
+		},
+		{
+			name:              "check_run gate aggregator success handles conflict check error cleanly",
+			event:             "check_run",
+			delivery:          "del-cr-gate-success-err",
+			payload:           `{"action":"completed","repository":{"full_name":"azylman/unknown-repo"},"check_run":{"name":"CI Gate","head_sha":"head999","status":"completed","conclusion":"success","pull_requests":[{"number":999,"head":{"ref":"feat/unknown","sha":"head999"}}]}}`,
+			autoUpdateAuthors: []string{"trusted-author"},
+			wantPR:            999,
+			wantHeadSHA:       "head999",
+			wantErr:           false,
+		},
+		{
 			name:     "check_run on fork PR resolves PR and branch from cached pull_request synchronize event",
 			event:    "check_run",
 			delivery: "del-cr-fork-pr-cache",
@@ -1491,6 +1511,19 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 				makeTestOpenPR(550, "feat/behind-1", "head550", "trusted-author"),
 			},
 			wantErr: false,
+		},
+		{
+			name:              "422 no new commits on base branch marks PR updated and stops FIFO loop",
+			autoUpdateAuthors: []string{"trusted-author"},
+			openPRs: []GitHubPullRequest{
+				makeTestOpenPR(550, "feat/behind-1", "head550", "trusted-author"),
+				makeTestOpenPR(551, "feat/behind-2", "head551", "trusted-author"),
+			},
+			prResponses: []string{
+				`{"message":"There are no new commits on the base branch."}`,
+			},
+			prStatusCodes:  []int{http.StatusUnprocessableEntity},
+			wantUpdatedPRs: []string{"/repos/azylman/aerial/pulls/550/update-branch"},
 		},
 		{
 			name:              "nil registry still updates whitelisted PRs",
