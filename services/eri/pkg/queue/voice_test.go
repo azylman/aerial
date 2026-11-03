@@ -608,25 +608,19 @@ func TestSummarizeAndHistoryHelpers(t *testing.T) {
 		})
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}, nil
 	})
-	emptyStore := setupTestStore(t)
-
 	tests := []struct {
 		name, threadID, beforeID, wantSummarySub string
 		limit                                    int
-		useEmptyStore, withLLM                   bool
+		withLLM                                  bool
 	}{
 		{name: "fast_db_summary", threadID: "thread-fast-1", beforeID: "msg-role-7", limit: 10, withLLM: true, wantSummarySub: "Summary result"},
-		{name: "rest_snowflake_zero_limit", threadID: "123456789012345678", beforeID: "123456789012345678", limit: 0, useEmptyStore: true},
-		{name: "rest_clamped_limit", threadID: "123456789012345678", beforeID: "non-num", limit: 150, useEmptyStore: true},
+		{name: "rest_snowflake_zero_limit", threadID: "123456789012345678", beforeID: "123456789012345678", limit: 0},
+		{name: "rest_clamped_limit", threadID: "123456789012345678", beforeID: "non-num", limit: 150},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
-			targetStore := fake
-			if tc.useEmptyStore {
-				targetStore = emptyStore
-			}
 			if tc.withLLM {
 				llm := func(ctx context.Context, model, prompt string) (string, error) {
 					return "<THREAD_SUMMARY>\nSummary result\n</THREAD_SUMMARY>", nil
@@ -637,10 +631,9 @@ func TestSummarizeAndHistoryHelpers(t *testing.T) {
 					t.Errorf("SummarizeThreadHistoryWithGroup() = (%q, %v), wantSub=%q", sumRes, sumErr, tc.wantSummarySub)
 				}
 			}
-			_, _ = fetchHistoryFromDB(targetStore, tc.threadID, tc.beforeID, tc.limit)
-			_, _ = FetchRecentThreadHistory(ctx, dgHist, targetStore, tc.threadID, tc.limit)
-			_, _ = FetchRecentThreadHistory(ctx, nil, fake, "", tc.limit)
-			fetcher := DefaultHistoryFetcher(dgHist, targetStore)
+			_, _ = FetchRecentThreadHistory(ctx, dgHist, tc.threadID, tc.limit)
+			_, _ = FetchRecentThreadHistory(ctx, nil, "", tc.limit)
+			fetcher := DefaultHistoryFetcher(dgHist)
 			_, _ = fetcher(ctx, tc.threadID, tc.beforeID, tc.limit)
 		})
 	}

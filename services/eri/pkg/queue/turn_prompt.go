@@ -106,19 +106,29 @@ func convertDiscordMessageToDBMessage(dm *discordgo.Message, threadID string, ba
 	}
 }
 
-func (te *turnExecution) fetchLiveDiscordThreadMessages(dg *discordgo.Session, threadID string, limit int) ([]db.Message, bool) {
-	fetchCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+func (te *turnExecution) getRecentThreadMessages(threadID string, limit int) ([]db.Message, error) {
+	if limit <= 0 {
+		limit = 10
+	} else if limit > 100 {
+		limit = 100
+	}
+	if te == nil || te.pool == nil {
+		return nil, nil
+	}
+	dg := te.pool.getDiscordSession()
+	if dg == nil || threadID == "" || !IsNumericSnowflake(threadID) {
+		return nil, nil
+	}
 
 	beforeID := ""
 	if len(te.burst) > 0 && IsNumericSnowflake(te.burst[0].ID) {
 		beforeID = te.burst[0].ID
 	}
 
-	discordMsgs, err := dg.ChannelMessages(threadID, limit, beforeID, "", "", discordgo.WithContext(fetchCtx))
+	discordMsgs, err := fetchDiscordChannelMessagesWithRetry(te.poolCtx(), dg, threadID, beforeID, limit)
 	if err != nil {
-		log.Printf("[Worker] Discord ChannelMessages failed for thread %s (falling back to database): %v", threadID, err)
-		return nil, false
+		log.Printf("[Worker] Discord ChannelMessages failed for thread %s after %d attempts: %v", threadID, historyFetchMaxAttempts, err)
+		return nil, err
 	}
 
 	msgs := make([]db.Message, 0, len(discordMsgs))
@@ -129,34 +139,7 @@ func (te *turnExecution) fetchLiveDiscordThreadMessages(dg *discordgo.Session, t
 		}
 		msgs = append(msgs, convertDiscordMessageToDBMessage(dm, threadID, discordMsgs...))
 	}
-	return msgs, true
-}
-
-func (te *turnExecution) getRecentThreadMessages(threadID string, limit int) ([]db.Message, error) {
-	if limit <= 0 {
-		limit = 10
-	} else if limit > 100 {
-		limit = 100
-	}
-
-	// 1. Prefer live Discord messages if session and valid snowflake are available.
-	if te.pool != nil {
-		if dg := te.pool.getDiscordSession(); dg != nil && threadID != "" && IsNumericSnowflake(threadID) {
-			if msgs, ok := te.fetchLiveDiscordThreadMessages(dg, threadID, limit); ok {
-				return msgs, nil
-			}
-		}
-	}
-
-	// 2. Fallback to database on disk.
-	if s := te.store(); s != nil {
-		dbMsgs, err := s.GetRecentThreadMessages(context.Background(), threadID, limit)
-		if err != nil {
-			return nil, err
-		}
-		return dbMsgs, nil
-	}
-	return nil, nil
+	return msgs, nil
 }
 
 type attemptConfig struct {
@@ -319,7 +302,7 @@ func (te *turnExecution) fetchTurnHistory(fetchCtx context.Context, limit int) [
 		}
 		turnHistory, err = te.pool.cfg.HistoryFetcher(fetchCtx, te.threadID, beforeID, limit)
 	} else {
-		turnHistory, err = FetchRecentThreadHistory(fetchCtx, te.pool.getDiscordSession(), te.store(), te.threadID, limit)
+		turnHistory, err = FetchRecentThreadHistory(fetchCtx, te.pool.getDiscordSession(), te.threadID, limit)
 	}
 	if err != nil {
 		log.Printf("[WorkerPool] Warning: History fetch failed for thread %s: %v", te.threadID, err)

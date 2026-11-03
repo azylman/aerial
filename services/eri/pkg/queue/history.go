@@ -13,7 +13,6 @@ import (
 
 	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
-	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/bwmarrin/discordgo"
@@ -21,9 +20,12 @@ import (
 )
 
 const (
-	maxHistoryAge          = 4 * time.Hour
-	maxHistoryContentRunes = 1000
-	truncationMarker       = "... [truncated]"
+	maxHistoryAge              = 4 * time.Hour
+	maxHistoryContentRunes     = 1000
+	truncationMarker           = "... [truncated]"
+	historyFetchMaxAttempts    = 3
+	historyFetchAttemptTimeout = 2 * time.Second
+	historyFetchRetryBaseDelay = 50 * time.Millisecond
 )
 
 var (
@@ -121,35 +123,64 @@ func formatHistoryContent(m HistoryMessage) string {
 	return classifier.AppendAttachments(content, m.Attachments)
 }
 
-// DefaultHistoryFetcher returns a HistoryFetcherFunc that fetches recent messages from Discord REST API with DB fallback.
-func DefaultHistoryFetcher(dg *discordgo.Session, store db.Store) HistoryFetcherFunc {
-	return func(ctx context.Context, channelID, beforeID string, limit int) ([]HistoryMessage, error) {
-		start := time.Now()
-		if channelID == "" || !IsNumericSnowflake(channelID) || dg == nil {
-			return fetchHistoryFromDB(store, channelID, beforeID, limit, ctx)
+func fetchDiscordChannelMessagesWithRetry(ctx context.Context, dg *discordgo.Session, channelID, beforeID string, limit int) ([]*discordgo.Message, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var lastErr error
+	for attempt := range historyFetchMaxAttempts {
+		if attempt > 0 {
+			timer := time.NewTimer(historyFetchRetryBaseDelay * (1 << (attempt - 1)))
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, ctx.Err()
+			case <-timer.C:
+			}
 		}
-		fetchCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		defer cancel()
+		fetchCtx, cancel := context.WithTimeout(ctx, historyFetchAttemptTimeout)
+		discordMsgs, err := dg.ChannelMessages(channelID, limit, beforeID, "", "", discordgo.WithContext(fetchCtx))
+		cancel()
+		if err == nil {
+			return discordMsgs, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return nil, lastErr
+}
 
-		before := beforeID
-		if !IsNumericSnowflake(before) {
-			before = ""
-		}
+func fetchDiscordHistory(ctx context.Context, dg *discordgo.Session, metricSource, channelID, beforeID string, limit int) ([]HistoryMessage, error) {
+	start := time.Now()
+	if dg == nil || channelID == "" || !IsNumericSnowflake(channelID) {
+		return nil, fmt.Errorf("discord history fetch unavailable for %q", channelID)
+	}
+	before := beforeID
+	if !IsNumericSnowflake(before) {
+		before = ""
+	}
+	discordMsgs, err := fetchDiscordChannelMessagesWithRetry(ctx, dg, channelID, before, limit)
+	if err != nil {
+		metrics.RecordChannelHistoryFetch(metricSource, "error", time.Since(start), 0)
+		log.Printf("[Queue] Discord ChannelMessages failed for %s after %d attempts: %v", channelID, historyFetchMaxAttempts, err)
+		return nil, err
+	}
+	results := convertDiscordMessagesToHistory(dg, discordMsgs)
+	metrics.RecordChannelHistoryFetch(metricSource, "success", time.Since(start), len(results))
+	return results, nil
+}
+
+// DefaultHistoryFetcher returns a HistoryFetcherFunc that fetches recent messages from Discord REST API with retries on error.
+func DefaultHistoryFetcher(dg *discordgo.Session) HistoryFetcherFunc {
+	return func(ctx context.Context, channelID, beforeID string, limit int) ([]HistoryMessage, error) {
 		if limit <= 0 {
 			limit = 10
 		} else if limit > 100 {
 			limit = 100
 		}
-
-		discordMsgs, err := dg.ChannelMessages(channelID, limit, before, "", "", discordgo.WithContext(fetchCtx))
-		if err != nil {
-			metrics.RecordChannelHistoryFetch("discord_api", "fallback", time.Since(start), 0)
-			log.Printf("[Queue] Discord ChannelMessages failed for %s (falling back to database): %v", channelID, err)
-			return fetchHistoryFromDB(store, channelID, before, limit, ctx)
-		}
-		results := convertDiscordMessagesToHistory(dg, discordMsgs)
-		metrics.RecordChannelHistoryFetch("discord_api", "success", time.Since(start), len(results))
-		return results, nil
+		return fetchDiscordHistory(ctx, dg, "discord_api", channelID, beforeID, limit)
 	}
 }
 
@@ -197,94 +228,12 @@ func resolveDiscordReplyAuthor(dm *discordgo.Message, discordMsgs []*discordgo.M
 	return ""
 }
 
-func resolveHistoryBeforeTime(ctx context.Context, store db.Store, beforeID string) time.Time {
-	if beforeID == "" || store == nil {
-		return time.Time{}
-	}
-	if beforeMsg, err := store.GetMessage(ctx, beforeID); err == nil && beforeMsg != nil && !beforeMsg.CreatedAt.IsZero() {
-		return beforeMsg.CreatedAt
-	}
-	if IsNumericSnowflake(beforeID) {
-		if ts, err := discordgo.SnowflakeTimestamp(beforeID); err == nil {
-			return ts
-		}
-	}
-	return time.Time{}
-}
-
-func classifyDBMessageRole(m db.Message) string {
-	if m.AuthorID == "assistant" || strings.EqualFold(m.AuthorName, "aerial") || strings.EqualFold(m.AuthorName, "assistant") {
-		return "Assistant"
-	}
-	if m.AuthorID == "bot" || strings.EqualFold(m.AuthorName, "bot") || strings.HasPrefix(m.AuthorID, "bot-") {
-		return "Bot"
-	}
-	return "User"
-}
-
-func fetchHistoryFromDB(store db.Store, channelID, beforeID string, limit int, ctxOpt ...context.Context) ([]HistoryMessage, error) {
-	start := time.Now()
-	if store == nil {
-		return nil, nil
-	}
-	ctx := context.Background()
-	if len(ctxOpt) > 0 && ctxOpt[0] != nil {
-		ctx = ctxOpt[0]
-	}
-
-	beforeTime := resolveHistoryBeforeTime(ctx, store, beforeID)
-
-	fetchLimit := limit
-	if beforeID != "" {
-		fetchLimit = max(limit*2, 50)
-	}
-	msgs, err := store.GetRecentThreadMessages(ctx, channelID, fetchLimit)
-	if err != nil {
-		metrics.RecordChannelHistoryFetch("database", "error", time.Since(start), 0)
-		return nil, err
-	}
-
-	results := make([]HistoryMessage, 0, len(msgs))
-	for _, m := range msgs {
-		if beforeID != "" && (m.ID == beforeID || (!beforeTime.IsZero() && !m.CreatedAt.Before(beforeTime))) {
-			continue
-		}
-		if len(results) >= limit {
-			break
-		}
-		role := classifyDBMessageRole(m)
-		replyingTo := classifier.ExtractReplyingToAuthor(m)
-		results = append(results, HistoryMessage{ID: m.ID, AuthorName: m.AuthorName, Role: role, ReplyingToAuthor: replyingTo, Content: m.BodyText(), Attachments: m.Attachments, CreatedAt: m.CreatedAt})
-	}
-	metrics.RecordChannelHistoryFetch("database", "success", time.Since(start), len(results))
-	return results, nil
-}
-
-// FetchRecentThreadHistory retrieves up to 100 recent messages for a thread from Discord API, falling back to PostgreSQL.
-func FetchRecentThreadHistory(ctx context.Context, dg *discordgo.Session, store db.Store, threadID string, limit int) ([]HistoryMessage, error) {
-	start := time.Now()
+// FetchRecentThreadHistory retrieves up to 100 recent messages for a thread from Discord API with retries on error.
+func FetchRecentThreadHistory(ctx context.Context, dg *discordgo.Session, threadID string, limit int) ([]HistoryMessage, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 100
 	}
-
-	if dg != nil && threadID != "" && IsNumericSnowflake(threadID) {
-		fetchCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		defer cancel()
-
-		discordMsgs, err := dg.ChannelMessages(threadID, limit, "", "", "", discordgo.WithContext(fetchCtx))
-		if err == nil {
-			results := convertDiscordMessagesToHistory(dg, discordMsgs)
-			metrics.RecordChannelHistoryFetch("discord_api_thread", "success", time.Since(start), len(results))
-			return results, nil
-		}
-		metrics.RecordChannelHistoryFetch("discord_api_thread", "fallback", time.Since(start), 0)
-		log.Printf("[Queue] Discord ChannelMessages failed for thread %s (falling back to database): %v", threadID, err)
-	}
-
-	if msgs, err := fetchHistoryFromDB(store, threadID, "", limit, ctx); err == nil && len(msgs) > 0 {
-		return msgs, nil
-	}
-	return nil, fmt.Errorf("no discord messages and database fallback unavailable")
+	return fetchDiscordHistory(ctx, dg, "discord_api_thread", threadID, "", limit)
 }
 
 // LLMFunc is a function that generates text from a model (aliased to runner.LLMFunc).

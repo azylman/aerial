@@ -446,7 +446,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 
 	if p.cfg.HistoryFetcher == nil {
 		p.cfg.HistoryFetcher = func(ctx context.Context, cID, beforeID string, limit int) ([]HistoryMessage, error) {
-			return DefaultHistoryFetcher(p.getDiscordSession(), p.Store())(ctx, cID, beforeID, limit)
+			return DefaultHistoryFetcher(p.getDiscordSession())(ctx, cID, beforeID, limit)
 		}
 	}
 
