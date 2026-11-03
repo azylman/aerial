@@ -556,8 +556,8 @@ channels:
 			IgnoreBots: new(false),
 		},
 		"lounge": {
-			Mode:            "mention",
-			BlockBuildCards: true,
+			Mode:           "mention",
+			NoBuildUpdates: true,
 		},
 		"1543668253363150928": {
 			Mode:       "channel",
@@ -572,31 +572,31 @@ channels:
 	}
 
 	resolutionTests := []struct {
-		name          string
-		channels      map[string]ChannelPolicy
-		channelID     string
-		channelName   string
-		wantMode      string
-		wantEffort    string
-		wantWake      string
-		wantIgnore    bool
-		wantBotIgn    bool
-		wantBlockCard bool
-		wantThreshold float64
-		wantHasHook   bool
+		name               string
+		channels           map[string]ChannelPolicy
+		channelID          string
+		channelName        string
+		wantMode           string
+		wantEffort         string
+		wantWake           string
+		wantIgnore         bool
+		wantBotIgn         bool
+		wantNoBuildUpdates bool
+		wantThreshold      float64
+		wantHasHook        bool
 	}{
 		{
-			name:          "match lounge with block build cards",
-			channels:      channels,
-			channelID:     "12345",
-			channelName:   "lounge",
-			wantMode:      "mention",
-			wantEffort:    "medium",
-			wantWake:      "mention",
-			wantBotIgn:    true,
-			wantBlockCard: true,
-			wantThreshold: 0.75,
-			wantHasHook:   true,
+			name:               "match lounge with no build updates",
+			channels:           channels,
+			channelID:          "12345",
+			channelName:        "lounge",
+			wantMode:           "mention",
+			wantEffort:         "medium",
+			wantWake:           "mention",
+			wantBotIgn:         true,
+			wantNoBuildUpdates: true,
+			wantThreshold:      0.75,
+			wantHasHook:        true,
 		},
 		{
 			name:          "match snowflake id",
@@ -680,8 +680,8 @@ channels:
 			if res.IsBotIgnored() != tc.wantBotIgn {
 				t.Errorf("IsBotIgnored = %v, want %v", res.IsBotIgnored(), tc.wantBotIgn)
 			}
-			if res.BlockBuildCards != tc.wantBlockCard {
-				t.Errorf("BlockBuildCards = %v, want %v", res.BlockBuildCards, tc.wantBlockCard)
+			if res.NoBuildUpdates != tc.wantNoBuildUpdates {
+				t.Errorf("NoBuildUpdates = %v, want %v", res.NoBuildUpdates, tc.wantNoBuildUpdates)
 			}
 			if tc.wantThreshold > 0 && res.GetAmbientWakeThreshold() != tc.wantThreshold {
 				t.Errorf("AmbientWakeThreshold = %v, want %v", res.GetAmbientWakeThreshold(), tc.wantThreshold)
@@ -710,16 +710,16 @@ channels:
 
 	defaultBlockedChannels := map[string]ChannelPolicy{
 		"default": {
-			Mode:            "threads",
-			BlockBuildCards: true,
+			Mode:           "threads",
+			NoBuildUpdates: true,
 		},
 		"open": {
 			Mode: "channel",
 		},
 	}
 	resInherited := ResolveChannelPolicy(defaultBlockedChannels, "any-id", "open")
-	if !resInherited.BlockBuildCards {
-		t.Errorf("expected BlockBuildCards to be inherited from default")
+	if !resInherited.NoBuildUpdates {
+		t.Errorf("expected NoBuildUpdates to be inherited from default")
 	}
 
 	hooks := channels["default"].Hooks
@@ -1202,13 +1202,13 @@ func TestChannelHooks_MethodsAndCloning(t *testing.T) {
 		})
 	}
 
-	p := ChannelPolicy{Mode: "threads", BlockBuildCards: true, Hooks: ChannelHooksConfig{
+	p := ChannelPolicy{Mode: "threads", NoBuildUpdates: true, Hooks: ChannelHooksConfig{
 		OnWake:   &WebhookEndpoint{URL: "https://sidecar:8080/on-wake", TimeoutMs: 2500, OnTimeoutAction: "wake"},
 		PreTurn:  &WebhookEndpoint{URL: "http://127.0.0.1:9090/pre", TimeoutMs: 1500, OnTimeoutAction: "retry"},
 		PostTurn: &WebhookEndpoint{URL: "http://127.0.0.1:9090/post", TimeoutMs: 4000, OnTimeoutAction: "proceed"},
 	}}
-	if p.Hooks.OnWake.URL != "https://sidecar:8080/on-wake" || !p.BlockBuildCards {
-		t.Fatal("Hooks or BlockBuildCards mismatch")
+	if p.Hooks.OnWake.URL != "https://sidecar:8080/on-wake" || !p.NoBuildUpdates {
+		t.Fatal("Hooks or NoBuildUpdates mismatch")
 	}
 
 	yBytes, _ := yaml.Marshal(p)
@@ -1216,7 +1216,7 @@ func TestChannelHooks_MethodsAndCloning(t *testing.T) {
 	_ = yaml.Unmarshal(yBytes, &pYAML)
 	jBytes, _ := json.Marshal(p)
 	_ = json.Unmarshal(jBytes, &pJSON)
-	if pYAML.Hooks.OnWake.URL != p.Hooks.OnWake.URL || pJSON.Hooks.PreTurn.URL != p.Hooks.PreTurn.URL || !pYAML.BlockBuildCards || !pJSON.BlockBuildCards {
+	if pYAML.Hooks.OnWake.URL != p.Hooks.OnWake.URL || pJSON.Hooks.PreTurn.URL != p.Hooks.PreTurn.URL || !pYAML.NoBuildUpdates || !pJSON.NoBuildUpdates {
 		t.Fatal("round-trip mismatch")
 	}
 
@@ -1234,7 +1234,7 @@ func TestChannelHooks_MethodsAndCloning(t *testing.T) {
 	}
 	cloned := cloneChannelPolicy(p)
 	cloned.Hooks.OnWake.URL = "http://cloned/wake"
-	if p.Hooks.OnWake.URL == "http://cloned/wake" || !cloned.BlockBuildCards {
+	if p.Hooks.OnWake.URL == "http://cloned/wake" || !cloned.NoBuildUpdates {
 		t.Fatal("cloneChannelPolicy deep copy failed")
 	}
 }

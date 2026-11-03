@@ -467,12 +467,69 @@ func IsValidThreadKey(id string) bool {
 	return true
 }
 
+// IsBuildCompletionPrompt reports whether prompt represents a Continuous Delivery deployment
+// or Vanadis build completion notice.
+func IsBuildCompletionPrompt(prompt string) bool {
+	if strings.Contains(prompt, "Continuous Delivery deployment completed for job") {
+		return true
+	}
+	if strings.Contains(prompt, "Vanadis build ") && strings.Contains(prompt, " completed") {
+		return true
+	}
+	pLower := strings.ToLower(prompt)
+	return strings.Contains(pLower, "continuous delivery deployment completed for job") ||
+		(strings.Contains(pLower, "vanadis build ") && strings.Contains(pLower, " completed"))
+}
+
+func (p *WorkerPool) redirectChannelIfNoBuildUpdatesWithSession(sess *discordgo.Session, channelID string) string {
+	if p == nil || channelID == "" {
+		return channelID
+	}
+	if sess == nil {
+		sess = p.getDiscordSession()
+	}
+	effID, effName, _, _ := ResolveChannelAndThread(sess, channelID)
+	policy := p.resolveChannelPolicy(effID, effName)
+	if !policy.NoBuildUpdates && channelID != effID && channelID != "" {
+		if targetPolicy := p.resolveChannelPolicy(channelID, ""); targetPolicy.NoBuildUpdates {
+			policy.NoBuildUpdates = true
+		}
+	}
+	if !policy.NoBuildUpdates {
+		return channelID
+	}
+	sysChan := p.systemChannel()
+	if sysChan == "" {
+		return channelID
+	}
+	if sysChanID, err := p.ResolveChannelID(sysChan); err == nil && sysChanID != "" && IsNumericSnowflake(sysChanID) {
+		return sysChanID
+	}
+	return channelID
+}
+
+// RedirectChannelIfNoBuildUpdates redirects channelID to the configured system channel snowflake
+// if the target channel or its parent channel has NoBuildUpdates enabled.
+func (p *WorkerPool) RedirectChannelIfNoBuildUpdates(channelID string) string {
+	return p.redirectChannelIfNoBuildUpdatesWithSession(nil, channelID)
+}
+
+// RedirectBuildPrompt redirects channelID to the configured system channel if prompt is a build
+// or deployment completion notice and the channel's policy has NoBuildUpdates set.
+func (p *WorkerPool) RedirectBuildPrompt(channelID, prompt string) string {
+	if !IsBuildCompletionPrompt(prompt) {
+		return channelID
+	}
+	return p.RedirectChannelIfNoBuildUpdates(channelID)
+}
+
 // ResolveTargetThread resolves a target Discord thread for a prompt, auto-creating a thread
 // if channel policy permits and the target is not already a thread.
 func (p *WorkerPool) ResolveTargetThread(channelID, title, prompt string, now time.Time) string {
 	if p == nil || channelID == "" {
 		return channelID
 	}
+	channelID = p.RedirectBuildPrompt(channelID, prompt)
 	sess := p.getDiscordSession()
 	snap, ok := resolveChannelSnapshot(sess, channelID)
 	var policy config.ChannelPolicy

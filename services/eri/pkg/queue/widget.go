@@ -127,23 +127,10 @@ func cloneStatusWidgetRequest(req discord.StatusWidgetRequest, stripSteps bool) 
 }
 
 func (p *WorkerPool) applyChannelPolicyRedirect(sess *discordgo.Session, req *discord.StatusWidgetRequest) {
-	effID, effName, _, _ := ResolveChannelAndThread(sess, req.ChannelID)
-	policy := p.resolveChannelPolicy(effID, effName)
-	if !policy.BlockBuildCards && req.ChannelID != effID && req.ChannelID != "" {
-		if targetPolicy := p.resolveChannelPolicy(req.ChannelID, ""); targetPolicy.BlockBuildCards {
-			policy.BlockBuildCards = true
-		}
-	}
-	if !policy.BlockBuildCards {
+	if p == nil || req == nil {
 		return
 	}
-	sysChan := p.systemChannel()
-	if sysChan == "" {
-		return
-	}
-	if sysChanID, err := p.ResolveChannelID(sysChan); err == nil && sysChanID != "" && IsNumericSnowflake(sysChanID) {
-		req.ChannelID = sysChanID
-	}
+	req.ChannelID = p.redirectChannelIfNoBuildUpdatesWithSession(sess, req.ChannelID)
 }
 
 func (p *WorkerPool) clearChunkStepStateLocked(chunkID string) {

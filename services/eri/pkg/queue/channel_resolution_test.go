@@ -127,6 +127,8 @@ func TestResolveTargetThread_TableDriven(t *testing.T) {
 		prompt          string
 		cachedChannel   *discordgo.Channel
 		policyMode      string
+		noBuildUpdates  bool
+		systemChannel   string
 		omitPolicyFn    bool
 		hasHook         bool
 		hookThreadID    string
@@ -236,6 +238,33 @@ func TestResolveTargetThread_TableDriven(t *testing.T) {
 			discordErr:      errors.New("thread start failed"),
 			expected:        "44332211",
 		},
+		{
+			name:           "continuous delivery prompt redirects to system channel when no_build_updates enabled",
+			channelID:      "44332211",
+			prompt:         "Continuous Delivery deployment completed for job git-sync on azylman/aerial-config",
+			policyMode:     "channel",
+			noBuildUpdates: true,
+			systemChannel:  "99881122",
+			expected:       "99881122",
+		},
+		{
+			name:           "vanadis build completion prompt redirects to system channel when no_build_updates enabled",
+			channelID:      "44332211",
+			prompt:         "Vanadis build build-123 completed (Tier 2, 2 chunks merged).",
+			policyMode:     "channel",
+			noBuildUpdates: true,
+			systemChannel:  "99881122",
+			expected:       "99881122",
+		},
+		{
+			name:           "build prompt without no_build_updates stays on channel",
+			channelID:      "44332211",
+			prompt:         "Continuous Delivery deployment completed for job git-sync on azylman/aerial-config",
+			policyMode:     "channel",
+			noBuildUpdates: false,
+			systemChannel:  "99881122",
+			expected:       "44332211",
+		},
 	}
 
 	for _, tc := range tests {
@@ -248,8 +277,11 @@ func TestResolveTargetThread_TableDriven(t *testing.T) {
 				pool = &WorkerPool{}
 				if !tc.omitPolicyFn {
 					pool.cfg.ResolveChannelPolicy = func(channelID, channelName string) config.ChannelPolicy {
-						return config.ChannelPolicy{Mode: tc.policyMode}
+						return config.ChannelPolicy{Mode: tc.policyMode, NoBuildUpdates: tc.noBuildUpdates}
 					}
+				}
+				if tc.systemChannel != "" {
+					pool.appCfg = config.NewFromData(&config.ConfigData{SystemChannel: tc.systemChannel})
 				}
 				if tc.withDiscordSess {
 					dg, _ := discordgo.New("Bot test-token")

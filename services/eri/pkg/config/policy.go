@@ -262,8 +262,8 @@ func ResolveChannelPolicy(channels map[string]ChannelPolicy, channelID, channelN
 	if res.Effort == "" && def.Effort != "" {
 		res.Effort = def.Effort
 	}
-	if !res.BlockBuildCards {
-		res.BlockBuildCards = def.BlockBuildCards
+	if !res.NoBuildUpdates {
+		res.NoBuildUpdates = def.NoBuildUpdates
 	}
 	if res.IgnoreBots == nil {
 		res.IgnoreBots = clonePtr(def.IgnoreBots)
