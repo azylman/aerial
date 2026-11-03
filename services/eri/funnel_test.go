@@ -865,123 +865,263 @@ func TestSyncBotMemberRoles(t *testing.T) {
 }
 
 func TestPopulateDiscordMessageFields(t *testing.T) {
-	var empty db.Message
-	populateDiscordMessageFields(nil, nil, &empty)
-	if empty.HasStructuredFields() {
-		t.Errorf("expected empty fields for nil message")
-	}
-
+	t.Parallel()
 	s := newMockDiscordSession(t, nil)
 	_ = s.State.GuildAdd(&discordgo.Guild{
 		ID:    "guild-1",
 		Roles: []*discordgo.Role{{ID: "role-mod", Name: "Moderator"}},
 	})
 
-	m := &discordgo.Message{
-		ID: "msg-1", ChannelID: "chan-1", GuildID: "guild-1", Content: "test content",
-		Author:            &discordgo.User{ID: "user-1", Username: "testuser\n", GlobalName: "Test User\r", Bot: false},
-		ReferencedMessage: &discordgo.Message{Author: &discordgo.User{Username: "bob"}, Content: "hello ref", Attachments: []*discordgo.MessageAttachment{{URL: "https://example.com/ref.png"}}},
-		Mentions:          []*discordgo.User{nil, {ID: "u-mention-1", Username: "alice\n"}},
-		MentionRoles:      []string{"role-mod", "role-unknown"},
-		Attachments:       []*discordgo.MessageAttachment{nil, {URL: "https://example.com/att.png"}, {URL: ""}},
+	tests := []struct {
+		name                 string
+		s                    *discordgo.Session
+		m                    *discordgo.Message
+		extraRoles           map[string]string
+		wantEmpty            bool
+		wantChannelID        string
+		wantAuthorGlobalName string
+		wantReplyingToAuthor string
+		wantReplyingToCont   string
+		wantMentionUserIDs   []string
+		wantMentionRoleIDs   []string
+		wantAttachments      []string
+		wantMentionsContain  string
+	}{
+		{
+			name:      "NilMessage",
+			m:         nil,
+			wantEmpty: true,
+		},
+		{
+			name: "StandardMessageWithPlainReference",
+			s:    s,
+			m: &discordgo.Message{
+				ID: "msg-1", ChannelID: "chan-1", GuildID: "guild-1", Content: "test content",
+				Author:            &discordgo.User{ID: "user-1", Username: "testuser\n", GlobalName: "Test User\r", Bot: false},
+				ReferencedMessage: &discordgo.Message{Author: &discordgo.User{Username: "bob"}, Content: "hello ref", Attachments: []*discordgo.MessageAttachment{{URL: "https://example.com/ref.png"}}},
+				Mentions:          []*discordgo.User{nil, {ID: "u-mention-1", Username: "alice\n"}},
+				MentionRoles:      []string{"role-mod", "role-unknown"},
+				Attachments:       []*discordgo.MessageAttachment{nil, {URL: "https://example.com/att.png"}, {URL: ""}},
+			},
+			extraRoles:           map[string]string{"role-unknown": "CustomRole"},
+			wantChannelID:        "chan-1",
+			wantAuthorGlobalName: "Test User\r",
+			wantReplyingToAuthor: "@bob",
+			wantReplyingToCont:   "hello ref [attachments: https://example.com/ref.png]",
+			wantMentionUserIDs:   []string{"u-mention-1"},
+			wantMentionRoleIDs:   []string{"role-mod", "role-unknown"},
+			wantAttachments:      []string{"https://example.com/att.png"},
+			wantMentionsContain:  "CustomRole",
+		},
+		{
+			name: "ReferencedMessageWithComponentsV2BuildCard",
+			s:    s,
+			m: &discordgo.Message{
+				ID: "msg-2", ChannelID: "chan-1", GuildID: "guild-1", Content: "replying to card",
+				Author: &discordgo.User{ID: "user-2", Username: "cynthia"},
+				ReferencedMessage: &discordgo.Message{
+					Author:  &discordgo.User{Username: "aerial"},
+					Content: "",
+					Components: []discordgo.MessageComponent{
+						&discordgo.Container{
+							Components: []discordgo.MessageComponent{
+								&discordgo.TextDisplay{Content: "### 🛠️ Vanadis Build: Feature Test"},
+								&discordgo.Section{
+									Components: []discordgo.MessageComponent{
+										&discordgo.TextDisplay{Content: "✅ `aerial`: Finished chunk"},
+									},
+									Accessory: &discordgo.Button{
+										Label: "PR #101 ↗",
+										URL:   "https://github.com/azylman/aerial/pull/101",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantChannelID:        "chan-1",
+			wantReplyingToAuthor: "@aerial",
+			wantReplyingToCont:   "### 🛠️ Vanadis Build: Feature Test\n✅ `aerial`: Finished chunk [PR #101 ↗](https://github.com/azylman/aerial/pull/101)",
+		},
+		{
+			name: "ReferencedMessageNilAuthor",
+			m: &discordgo.Message{
+				ChannelID:         "chan-2",
+				ReferencedMessage: &discordgo.Message{Content: "no author ref"},
+			},
+			wantChannelID:        "chan-2",
+			wantReplyingToAuthor: "Unknown",
+			wantReplyingToCont:   "no author ref",
+		},
 	}
-
-	var msg db.Message
-	populateDiscordMessageFields(s, m, &msg, map[string]string{"role-unknown": "CustomRole"})
-	if msg.ChannelID != "chan-1" {
-		t.Errorf("channel ID mismatch: %+v", msg)
-	}
-	if msg.AuthorGlobalName != "Test User\r" {
-		t.Errorf("author name mismatch: %+v", msg)
-	}
-	if msg.ReplyingToAuthor != "@bob" || msg.ReplyingToContent != "hello ref [attachments: https://example.com/ref.png]" {
-		t.Errorf("replyingTo mismatch: %s / %s", msg.ReplyingToAuthor, msg.ReplyingToContent)
-	}
-	if m.ReferencedMessage.GuildID != "guild-1" {
-		t.Errorf("referenced message guild ID not copied: %q", m.ReferencedMessage.GuildID)
-	}
-	if len(msg.MentionUserIDs) != 1 || msg.MentionUserIDs[0] != "u-mention-1" {
-		t.Errorf("mentionUserIDs mismatch: %v", msg.MentionUserIDs)
-	}
-	if len(msg.MentionRoleIDs) != 2 || msg.MentionRoleIDs[0] != "role-mod" {
-		t.Errorf("mentionRoleIDs mismatch: %v", msg.MentionRoleIDs)
-	}
-	foundCustom := slices.Contains(msg.Mentions, "CustomRole")
-	if !foundCustom {
-		t.Errorf("expected CustomRole in mentions, got: %v", msg.Mentions)
-	}
-	if len(msg.Attachments) != 1 || msg.Attachments[0] != "https://example.com/att.png" {
-		t.Errorf("attachments mismatch: %v", msg.Attachments)
-	}
-
-	mNilAuth := &discordgo.Message{
-		ChannelID:         "chan-2",
-		ReferencedMessage: &discordgo.Message{Content: "no author ref"},
-	}
-	var msgNilAuth db.Message
-	populateDiscordMessageFields(nil, mNilAuth, &msgNilAuth)
-	if msgNilAuth.ReplyingToAuthor != "Unknown" {
-		t.Errorf("expected Unknown for referenced message with nil author, got %q", msgNilAuth.ReplyingToAuthor)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var msg db.Message
+			if tc.extraRoles != nil {
+				populateDiscordMessageFields(tc.s, tc.m, &msg, tc.extraRoles)
+			} else {
+				populateDiscordMessageFields(tc.s, tc.m, &msg)
+			}
+			if tc.wantEmpty {
+				if msg.HasStructuredFields() {
+					t.Errorf("expected empty fields for nil message")
+				}
+				return
+			}
+			if msg.ChannelID != tc.wantChannelID {
+				t.Errorf("channel ID mismatch: got %q, want %q", msg.ChannelID, tc.wantChannelID)
+			}
+			if tc.wantAuthorGlobalName != "" && msg.AuthorGlobalName != tc.wantAuthorGlobalName {
+				t.Errorf("author global name mismatch: got %q, want %q", msg.AuthorGlobalName, tc.wantAuthorGlobalName)
+			}
+			if msg.ReplyingToAuthor != tc.wantReplyingToAuthor {
+				t.Errorf("replyingToAuthor mismatch: got %q, want %q", msg.ReplyingToAuthor, tc.wantReplyingToAuthor)
+			}
+			if msg.ReplyingToContent != tc.wantReplyingToCont {
+				t.Errorf("replyingToContent mismatch: got %q, want %q", msg.ReplyingToContent, tc.wantReplyingToCont)
+			}
+			if tc.wantMentionUserIDs != nil && !slices.Equal(msg.MentionUserIDs, tc.wantMentionUserIDs) {
+				t.Errorf("mentionUserIDs mismatch: got %v, want %v", msg.MentionUserIDs, tc.wantMentionUserIDs)
+			}
+			if tc.wantMentionRoleIDs != nil && !slices.Equal(msg.MentionRoleIDs, tc.wantMentionRoleIDs) {
+				t.Errorf("mentionRoleIDs mismatch: got %v, want %v", msg.MentionRoleIDs, tc.wantMentionRoleIDs)
+			}
+			if tc.wantAttachments != nil && !slices.Equal(msg.Attachments, tc.wantAttachments) {
+				t.Errorf("attachments mismatch: got %v, want %v", msg.Attachments, tc.wantAttachments)
+			}
+			if tc.wantMentionsContain != "" && !slices.Contains(msg.Mentions, tc.wantMentionsContain) {
+				t.Errorf("expected %q in mentions, got: %v", tc.wantMentionsContain, msg.Mentions)
+			}
+		})
 	}
 }
 
 func TestResolveMessageContent(t *testing.T) {
-	if got := resolveMessageContent(nil, nil); got != "" {
-		t.Errorf("expected empty string for nil message, got %q", got)
-	}
-
-	m := &discordgo.Message{
-		Content: "<@1542285964213358633> work on tasks 265, 263",
-		Mentions: []*discordgo.User{
-			{ID: "1542285964213358633", Username: "Zero"},
-		},
-	}
-	if got := resolveMessageContent(nil, m); got != "@Zero work on tasks 265, 263" {
-		t.Errorf("resolveMessageContent(nil, m) = %q, want @Zero work on tasks 265, 263", got)
-	}
-
+	t.Parallel()
 	s := newMockDiscordSession(t, nil)
 	_ = s.State.GuildAdd(&discordgo.Guild{
 		ID:    "guild-1",
 		Roles: []*discordgo.Role{{ID: "role-1", Name: "Admins", Mentionable: false}},
 	})
 	_ = s.State.ChannelAdd(&discordgo.Channel{ID: "chan-1", GuildID: "guild-1"})
-	mWithRoles := &discordgo.Message{
-		ChannelID: "chan-1", GuildID: "guild-1", Content: "Pinging <@&role-1> and <@1542285964213358633>",
-		Mentions:     []*discordgo.User{{ID: "1542285964213358633", Username: "Zero"}},
-		MentionRoles: []string{"role-1"},
-	}
-	if got := resolveMessageContent(s, mWithRoles); got != "Pinging @Admins and @Zero" {
-		t.Errorf("resolveMessageContent(s, mWithRoles) = %q, want Pinging @Admins and @Zero", got)
-	}
-
-	if got := resolveMessageContent(nil, &discordgo.Message{Content: ""}); got != "" {
-		t.Errorf("expected empty string for empty content, got %q", got)
-	}
 
 	sStateErr := &discordgo.Session{StateEnabled: true, State: discordgo.NewState()}
-	mFallback := &discordgo.Message{
-		ChannelID: "chan-not-found", Content: "Pinging <@1542285964213358633>",
-		Mentions: []*discordgo.User{{ID: "1542285964213358633", Username: "Zero"}},
-	}
-	if got := resolveMessageContent(sStateErr, mFallback); got != "Pinging @Zero" {
-		t.Errorf("expected Pinging @Zero, got %q", got)
-	}
 
-	mRoleNotFound := &discordgo.Message{
-		ChannelID: "chan-1", GuildID: "guild-1", Content: "Pinging <@&role-999>",
-		MentionRoles: []string{"role-999"},
+	tests := []struct {
+		name       string
+		s          *discordgo.Session
+		m          *discordgo.Message
+		extraRoles map[string]string
+		want       string
+	}{
+		{
+			name: "NilMessage",
+			s:    nil,
+			m:    nil,
+			want: "",
+		},
+		{
+			name: "UserMentionReplaced",
+			s:    nil,
+			m: &discordgo.Message{
+				Content: "<@1542285964213358633> work on tasks 265, 263",
+				Mentions: []*discordgo.User{
+					{ID: "1542285964213358633", Username: "Zero"},
+				},
+			},
+			want: "@Zero work on tasks 265, 263",
+		},
+		{
+			name: "RoleAndUserMentionWithSession",
+			s:    s,
+			m: &discordgo.Message{
+				ChannelID: "chan-1", GuildID: "guild-1", Content: "Pinging <@&role-1> and <@1542285964213358633>",
+				Mentions:     []*discordgo.User{{ID: "1542285964213358633", Username: "Zero"}},
+				MentionRoles: []string{"role-1"},
+			},
+			want: "Pinging @Admins and @Zero",
+		},
+		{
+			name: "EmptyContentNoComponents",
+			s:    nil,
+			m:    &discordgo.Message{Content: ""},
+			want: "",
+		},
+		{
+			name: "FallbackStateError",
+			s:    sStateErr,
+			m: &discordgo.Message{
+				ChannelID: "chan-not-found", Content: "Pinging <@1542285964213358633>",
+				Mentions: []*discordgo.User{{ID: "1542285964213358633", Username: "Zero"}},
+			},
+			want: "Pinging @Zero",
+		},
+		{
+			name: "RoleNotFoundLeavesOriginal",
+			s:    s,
+			m: &discordgo.Message{
+				ChannelID: "chan-1", GuildID: "guild-1", Content: "Pinging <@&role-999>",
+				MentionRoles: []string{"role-999"},
+			},
+			want: "Pinging <@&role-999>",
+		},
+		{
+			name: "ExtraRoleProvided",
+			s:    nil,
+			m: &discordgo.Message{
+				ChannelID: "chan-1", GuildID: "guild-1", Content: "Pinging <@&role-extra>",
+				MentionRoles: []string{"role-extra"},
+			},
+			extraRoles: map[string]string{"role-extra": "ExtraRole"},
+			want:       "Pinging @ExtraRole",
+		},
+		{
+			name: "ComponentsV2_ExtractedAndMentionsReplaced",
+			s:    s,
+			m: &discordgo.Message{
+				ChannelID: "chan-1", GuildID: "guild-1",
+				Content: "",
+				Mentions: []*discordgo.User{
+					{ID: "1542285964213358633", Username: "Zero"},
+				},
+				MentionRoles: []string{"role-1"},
+				Components: []discordgo.MessageComponent{
+					&discordgo.Container{
+						Components: []discordgo.MessageComponent{
+							&discordgo.TextDisplay{
+								Content: "Build review ping: <@1542285964213358633> and <@&role-1>",
+							},
+							&discordgo.Section{
+								Components: []discordgo.MessageComponent{
+									&discordgo.TextDisplay{Content: "Chunk 1: Done"},
+								},
+								Accessory: &discordgo.Button{
+									Label: "PR #99 ↗",
+									URL:   "https://github.com/azylman/aerial/pull/99",
+								},
+							},
+						},
+					},
+				},
+			},
+			want: "Build review ping: @Zero and @Admins\nChunk 1: Done [PR #99 ↗](https://github.com/azylman/aerial/pull/99)",
+		},
 	}
-	if got := resolveMessageContent(s, mRoleNotFound); got != "Pinging <@&role-999>" {
-		t.Errorf("expected original content when role not found, got %q", got)
-	}
-
-	mRoleExtra := &discordgo.Message{
-		ChannelID: "chan-1", GuildID: "guild-1", Content: "Pinging <@&role-extra>",
-		MentionRoles: []string{"role-extra"},
-	}
-	if got := resolveMessageContent(nil, mRoleExtra, map[string]string{"role-extra": "ExtraRole"}); got != "Pinging @ExtraRole" {
-		t.Errorf("expected Pinging @ExtraRole, got %q", got)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var got string
+			if tc.extraRoles != nil {
+				got = resolveMessageContent(tc.s, tc.m, tc.extraRoles)
+			} else {
+				got = resolveMessageContent(tc.s, tc.m)
+			}
+			if got != tc.want {
+				t.Errorf("resolveMessageContent() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

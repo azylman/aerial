@@ -10,6 +10,7 @@ import (
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/discord"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/bwmarrin/discordgo"
 )
@@ -92,12 +93,16 @@ func convertDiscordMessageToDBMessage(dm *discordgo.Message, threadID string, ba
 	if replyingToAuthor != "" && !strings.HasPrefix(replyingToAuthor, "@") {
 		replyingToAuthor = "@" + replyingToAuthor
 	}
+	content := dm.Content
+	if strings.TrimSpace(content) == "" && len(dm.Components) > 0 {
+		content = discord.ExtractMessageComponentsText(dm.Components)
+	}
 	return db.Message{
 		ID:               dm.ID,
 		ThreadID:         threadID,
 		AuthorID:         authorID,
 		AuthorName:       authorName,
-		Content:          dm.Content,
+		Content:          content,
 		CreatedAt:        createdAt,
 		Mentions:         mentions,
 		MentionUserIDs:   mentionUserIDs,
