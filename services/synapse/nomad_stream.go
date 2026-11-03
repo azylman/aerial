@@ -442,33 +442,62 @@ func totalAllocationRestarts(taskStates map[string]NomadTaskState) int {
 	return total
 }
 
+func totalAllocationSignals(taskStates map[string]NomadTaskState) int {
+	total := 0
+	for _, ts := range taskStates {
+		for _, evt := range ts.Events {
+			if strings.EqualFold(evt.Type, "Signaling") {
+				total++
+			}
+		}
+	}
+	return total
+}
+
+func isCandidateAllocation(desired, client string, taskStates map[string]NomadTaskState) (isRunning, isFailed, isExhausted, ok bool) {
+	isRunning = desired == "run" && client == "running"
+	isComplete := desired == "run" && client == "complete" && !hasFailedTaskState(taskStates)
+	isFailed = strings.EqualFold(client, "failed")
+	isExhausted = desired == "run" && isAllocationRestartExhausted(taskStates)
+	if !isRunning && !isComplete && !isFailed && !isExhausted {
+		return false, false, false, false
+	}
+	return isRunning, isFailed, isExhausted, true
+}
+
+func formatAllocIdempotencyKey(allocID, jobID, clientStatus string, taskStates map[string]NomadTaskState, isFailed, isExhausted, isRunning bool) string {
+	if allocID == "" || jobID == "" {
+		return ""
+	}
+	if isFailed || isExhausted {
+		return fmt.Sprintf("nomad:allocation:%s:%s:failed", jobID, allocID)
+	}
+	status := strings.ToLower(clientStatus)
+	key := fmt.Sprintf("nomad:allocation:%s:%s:%s", jobID, allocID, status)
+	if restarts := totalAllocationRestarts(taskStates); isRunning && restarts > 0 {
+		key = fmt.Sprintf("nomad:allocation:%s:%s:%s:%d", jobID, allocID, status, restarts)
+	}
+	if signals := totalAllocationSignals(taskStates); isRunning && signals > 0 {
+		key += fmt.Sprintf(":sig%d", signals)
+	}
+	return key
+}
+
 func allocationEventIdempotencyKey(raw json.RawMessage, poststopLookup func(jobID string) map[string]bool) (string, bool) {
 	var allocPayload NomadAllocationEventPayload
 	if err := json.Unmarshal(raw, &allocPayload); err != nil {
 		return "", false
 	}
 	alloc := allocPayload.Allocation
-	isRunning := alloc.DesiredStatus == "run" && alloc.ClientStatus == "running"
-	isComplete := alloc.DesiredStatus == "run" && alloc.ClientStatus == "complete" && !hasFailedTaskState(alloc.TaskStates)
-	isFailed := strings.EqualFold(alloc.ClientStatus, "failed")
-	isExhausted := alloc.DesiredStatus == "run" && isAllocationRestartExhausted(alloc.TaskStates)
-	if !isRunning && !isComplete && !isFailed && !isExhausted {
+	isRunning, isFailed, isExhausted, ok := isCandidateAllocation(alloc.DesiredStatus, alloc.ClientStatus, alloc.TaskStates)
+	if !ok {
 		return "", false
 	}
 	if isRunning && !isFailed && !isExhausted && isAllocationRestartingWithLookup(alloc.JobID, alloc.TaskStates, poststopLookup) {
 		return "", false
 	}
-	if alloc.ID != "" && alloc.JobID != "" {
-		if isFailed || isExhausted {
-			return fmt.Sprintf("nomad:allocation:%s:%s:failed", alloc.JobID, alloc.ID), true
-		}
-		status := strings.ToLower(alloc.ClientStatus)
-		if restarts := totalAllocationRestarts(alloc.TaskStates); isRunning && restarts > 0 {
-			return fmt.Sprintf("nomad:allocation:%s:%s:%s:%d", alloc.JobID, alloc.ID, status, restarts), true
-		}
-		return fmt.Sprintf("nomad:allocation:%s:%s:%s", alloc.JobID, alloc.ID, status), true
-	}
-	return "", true
+	key := formatAllocIdempotencyKey(alloc.ID, alloc.JobID, alloc.ClientStatus, alloc.TaskStates, isFailed, isExhausted, isRunning)
+	return key, true
 }
 
 // isNomadEvalExplicitFailure returns true if the evaluation status indicates an explicit
@@ -764,6 +793,62 @@ func (s *RouterServer) recordNomadJobProgress(ctx context.Context, jobID, state 
 	}
 }
 
+func (s *RouterServer) hasUnseenDeployingPRForJob(ctx context.Context, jobName string, seen map[string]bool) bool {
+	if s == nil || s.registry == nil {
+		return false
+	}
+	cleanJob := strings.TrimSpace(jobName)
+	if cleanJob == "" {
+		return false
+	}
+	prs, err := s.registry.ListDeployingPRs(ctx)
+	if err != nil {
+		log.Printf("[synapse] [nomad] warning listing deploying prs for job %s: %v", cleanJob, err)
+		return false
+	}
+	for _, p := range prs {
+		key := fmt.Sprintf("%s#%d", strings.ToLower(strings.TrimSpace(p.Repo)), p.PRNumber)
+		if seen != nil && seen[key] {
+			continue
+		}
+		for _, job := range extractStartedJobsFromMetadata(p.Metadata) {
+			if strings.EqualFold(strings.TrimSpace(job), cleanJob) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (s *RouterServer) syncIntermediateDeployWidget(ctx context.Context, repo, cleanJob string, prNumber int) {
+	if prNumber <= 0 || repo == "" {
+		return
+	}
+	if err := s.SyncPRWidget(ctx, repo, prNumber); err != nil {
+		log.Printf("[synapse] [widget] warning syncing nomad intermediate deploy widget for %s#%d (job: %s): %v", repo, prNumber, cleanJob, err)
+	}
+}
+
+func (s *RouterServer) revertDeployedJobFailure(ctx context.Context, repo, cleanJob string, prNumber int) {
+	s.setPRWidgetState(ctx, repo, prNumber, "deploying", "")
+	if appErr := s.registry.AppendPRJobs(ctx, repo, prNumber, []string{cleanJob}); appErr != nil {
+		log.Printf("[synapse] [nomad] warning restoring job %s to pr %s#%d jobs: %v", cleanJob, repo, prNumber, appErr)
+	}
+	if statErr := s.registry.UpdatePRStatus(ctx, repo, prNumber, "deploying", nil); statErr != nil {
+		log.Printf("[synapse] [nomad] warning reverting pr %s#%d status to deploying: %v", repo, prNumber, statErr)
+	}
+}
+
+func (s *RouterServer) confirmDeployedJobTransition(ctx context.Context, cleanJob, refID, targetID, mergeSHA, repo string, prNumber int) error {
+	log.Printf("[synapse] [nomad] deployment confirmed for %s#%d (job: %s, commit: %s, target: %s, ref: %s)",
+		repo, prNumber, cleanJob, mergeSHA, targetID, refID)
+	if err := s.dispatchDeploymentSuccessPrompt(ctx, targetID, cleanJob, repo, mergeSHA, prNumber, refID); err != nil {
+		s.revertDeployedJobFailure(ctx, repo, cleanJob, prNumber)
+		return err
+	}
+	return nil
+}
+
 // HandleNomadJobSuccess processes a confirmed successful deployment or running allocation for a Nomad job.
 func (s *RouterServer) HandleNomadJobSuccess(ctx context.Context, jobID, refID string) error {
 	cleanJob := strings.TrimSpace(jobID)
@@ -774,30 +859,28 @@ func (s *RouterServer) HandleNomadJobSuccess(ctx context.Context, jobID, refID s
 	if s.registry == nil {
 		return nil
 	}
-	targetID, prNumber, mergeSHA, repo, updated, err := s.registry.AtomicTransitionDeployedByJob(ctx, cleanJob)
-	if err != nil {
-		log.Printf("[synapse] [nomad] error transitioning job %s to deployed: %v", cleanJob, err)
-		return err
-	}
-	if !updated {
+
+	seen := make(map[string]bool)
+	for {
+		targetID, prNumber, mergeSHA, repo, updated, err := s.registry.AtomicTransitionDeployedByJob(ctx, cleanJob)
+		if err != nil {
+			log.Printf("[synapse] [nomad] error transitioning job %s to deployed: %v", cleanJob, err)
+			return err
+		}
 		if prNumber > 0 && repo != "" {
-			if err := s.SyncPRWidget(ctx, repo, prNumber); err != nil {
-				log.Printf("[synapse] [widget] warning syncing nomad intermediate deploy widget for %s#%d (job: %s): %v", repo, prNumber, cleanJob, err)
+			seen[fmt.Sprintf("%s#%d", strings.ToLower(strings.TrimSpace(repo)), prNumber)] = true
+		}
+		if !updated {
+			s.syncIntermediateDeployWidget(ctx, repo, cleanJob, prNumber)
+		} else {
+			if err := s.confirmDeployedJobTransition(ctx, cleanJob, refID, targetID, mergeSHA, repo, prNumber); err != nil {
+				return err
 			}
 		}
-		return nil
-	}
-	log.Printf("[synapse] [nomad] deployment confirmed for %s#%d (job: %s, commit: %s, target: %s, ref: %s)",
-		repo, prNumber, cleanJob, mergeSHA, targetID, refID)
-	if err := s.dispatchDeploymentSuccessPrompt(ctx, targetID, cleanJob, repo, mergeSHA, prNumber, refID); err != nil {
-		s.setPRWidgetState(ctx, repo, prNumber, "deploying", "")
-		if appErr := s.registry.AppendPRJobs(ctx, repo, prNumber, []string{cleanJob}); appErr != nil {
-			log.Printf("[synapse] [nomad] warning restoring job %s to pr %s#%d jobs: %v", cleanJob, repo, prNumber, appErr)
+
+		if prNumber == 0 || !s.hasUnseenDeployingPRForJob(ctx, cleanJob, seen) {
+			break
 		}
-		if statErr := s.registry.UpdatePRStatus(ctx, repo, prNumber, "deploying", nil); statErr != nil {
-			log.Printf("[synapse] [nomad] warning reverting pr %s#%d status to deploying: %v", repo, prNumber, statErr)
-		}
-		return err
 	}
 	return nil
 }
@@ -815,9 +898,15 @@ func (s *RouterServer) ReconcileActiveDeployments(ctx context.Context) error {
 		return nil
 	}
 	log.Printf("[synapse] [sweep] found %d active deployment(s) in pr_registry, reconciling with Nomad...", len(pending))
+	reconciled := make(map[string]bool)
 	for _, p := range pending {
 		for _, job := range extractStartedJobsFromMetadata(p.Metadata) {
+			normJob := strings.ToLower(strings.TrimSpace(job))
+			if normJob == "" || reconciled[normJob] {
+				continue
+			}
 			if s.isNomadJobHealthy(ctx, job) {
+				reconciled[normJob] = true
 				if err := s.HandleNomadJobSuccess(ctx, job, "startup-sweep"); err != nil {
 					log.Printf("[synapse] [sweep] error handling nomad job success for %s: %v", job, err)
 				}
@@ -970,6 +1059,48 @@ func (s *RouterServer) isNomadJobHealthy(ctx context.Context, job string) bool {
 func (s *RouterServer) isNomadBatchTemplateHealthy(ctx context.Context, job string) bool {
 	kind, status, _, stop := s.classifyNomadJob(ctx, job)
 	return kind == NomadJobKindBatchTemplate && strings.EqualFold(status, "running") && !stop
+}
+
+// isNomadInPlaceConfigReloadHealthy queries Nomad for jobs where Nomad variable changes reload in-place
+// via non-restarting templates (e.g. signal, script, noop) without dropping or recreating allocations.
+func (s *RouterServer) isNomadInPlaceConfigReloadHealthy(ctx context.Context, job, details string) bool {
+	if s == nil || !strings.HasPrefix(strings.TrimSpace(details), "nomad var put ") {
+		return false
+	}
+	cleanJob := strings.TrimSpace(job)
+	if cleanJob == "" {
+		return false
+	}
+	var jobSpec struct {
+		Status     string `json:"Status"`
+		Stop       bool   `json:"Stop"`
+		TaskGroups []struct {
+			Tasks []struct {
+				Templates []struct {
+					ChangeMode string `json:"ChangeMode"`
+				} `json:"Templates"`
+			} `json:"Tasks"`
+		} `json:"TaskGroups"`
+	}
+	if !s.getNomadJSON(ctx, "/v1/job/"+cleanJob, &jobSpec) {
+		return false
+	}
+	if !strings.EqualFold(jobSpec.Status, "running") || jobSpec.Stop {
+		return false
+	}
+	templateCount := 0
+	for _, tg := range jobSpec.TaskGroups {
+		for _, task := range tg.Tasks {
+			for _, tmpl := range task.Templates {
+				templateCount++
+				mode := strings.TrimSpace(tmpl.ChangeMode)
+				if mode == "" || strings.EqualFold(mode, "restart") {
+					return false
+				}
+			}
+		}
+	}
+	return templateCount > 0
 }
 
 // isNomadEvalResolved queries Nomad for the live status of an evaluation and returns true

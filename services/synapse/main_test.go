@@ -105,6 +105,15 @@ type prStatusCall struct {
 	metadata map[string]any
 }
 
+type deployedResult struct {
+	targetID string
+	prNumber int
+	mergeSHA string
+	repo     string
+	updated  bool
+	err      error
+}
+
 type mockPRRegistry struct {
 	mergedCalls         []prCall
 	syncCalls           []prCall
@@ -153,6 +162,7 @@ type mockPRRegistry struct {
 	deployedRepo     string
 	deployedUpdated  bool
 	deployedErr      error
+	deployedResults  []deployedResult
 
 	deployFailedCalls    []prCall
 	deployFailedTargetID string
@@ -248,10 +258,18 @@ func (m *mockPRRegistry) TransitionDeploying(ctx context.Context, repo string, p
 }
 
 func (m *mockPRRegistry) AtomicTransitionDeployedByJob(ctx context.Context, jobName string) (string, int, string, string, bool, error) {
+	m.deployedJobCalls = append(m.deployedJobCalls, jobName)
+	if len(m.deployedResults) > 0 {
+		res := m.deployedResults[0]
+		m.deployedResults = m.deployedResults[1:]
+		if res.err != nil {
+			return "", 0, "", "", false, res.err
+		}
+		return res.targetID, res.prNumber, res.mergeSHA, res.repo, res.updated, nil
+	}
 	if err := m.checkErr(m.deployedErr); err != nil {
 		return "", 0, "", "", false, err
 	}
-	m.deployedJobCalls = append(m.deployedJobCalls, jobName)
 	return m.deployedTargetID, m.deployedPRNum, m.deployedMergeSHA, m.deployedRepo, m.deployedUpdated, nil
 }
 
@@ -1056,6 +1074,19 @@ func TestProcessHangarEvent(t *testing.T) {
 			wantDeployedJobs:   []string{"coverage-ingest"},
 			wantPrompts:        1,
 			wantPromptSubs:     []string{"Continuous Delivery deployment completed for job coverage-ingest on azylman/aerial (PR #851, commit: 1fc4aaf, ref: batch-registered)"},
+		},
+		{
+			name:               "deploy_started in-place signal config reload transitions to deployed immediately",
+			evt:                mkHangarEvt("deploy_started", "eri", "azylman/aerial-config", "2fc4aaf", 852, "1555405874565091380", "started", "nomad var put nomad/jobs/eri"),
+			nomadJobJSON:       `{"ID":"eri","Type":"service","Status":"running","Stop":false,"TaskGroups":[{"Tasks":[{"Templates":[{"ChangeMode":"signal"}]}]}]}`,
+			reg:                mkDeployedReg("1555405874565091380", 852, "2fc4aaf", "azylman/aerial-config", true),
+			disp:               &mockOutboundDispatcher{},
+			wantPR:             852,
+			wantTargetID:       "1555405874565091380",
+			wantDeployingCalls: 1,
+			wantDeployedJobs:   []string{"eri"},
+			wantPrompts:        1,
+			wantPromptSubs:     []string{"Continuous Delivery deployment completed for job eri on azylman/aerial-config (PR #852, commit: 2fc4aaf, ref: batch-registered)"},
 		},
 		{
 			name:               "deploy_started periodic batch job tolerates HandleNomadJobSuccess error",

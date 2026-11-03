@@ -345,10 +345,11 @@ func (d *SyncDaemon) pushNomadConfigVar(ctx context.Context, cacheKey, nomadVar,
 			PRNumber:     syncCtx[0].PRNumber,
 			TargetID:     syncCtx[0].TargetID,
 			Status:       "started",
+			Details:      "nomad var put " + nomadVar,
 			ExpectedJobs: syncCtx[0].ExpectedJobs,
 			Timestamp:    time.Now().UTC(),
 		}
-		go d.DispatchDeployEvent(baseEvt)
+		d.DispatchDeployEvent(baseEvt)
 	}
 
 	stdout, stderr, err := nomadExec(valCtx, args...)
