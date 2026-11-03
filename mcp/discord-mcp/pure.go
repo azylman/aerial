@@ -332,13 +332,23 @@ type rawDiscordSearchPayload struct {
 	Messages     []json.RawMessage `json:"messages"`
 }
 
+type rawDiscordComponent struct {
+	Type       int                   `json:"type,omitempty"`
+	Content    string                `json:"content,omitempty"`
+	Label      string                `json:"label,omitempty"`
+	URL        string                `json:"url,omitempty"`
+	Components []rawDiscordComponent `json:"components,omitempty"`
+	Accessory  *rawDiscordComponent  `json:"accessory,omitempty"`
+}
+
 type rawDiscordMessage struct {
-	ID        string `json:"id"`
-	Timestamp string `json:"timestamp"`
-	ChannelID string `json:"channel_id"`
-	Content   string `json:"content"`
-	Hit       *bool  `json:"hit,omitempty"`
-	Author    struct {
+	ID         string                `json:"id"`
+	Timestamp  string                `json:"timestamp"`
+	ChannelID  string                `json:"channel_id"`
+	Content    string                `json:"content"`
+	Components []rawDiscordComponent `json:"components,omitempty"`
+	Hit        *bool                 `json:"hit,omitempty"`
+	Author     struct {
 		ID         string `json:"id"`
 		Username   string `json:"username"`
 		GlobalName string `json:"global_name"`
@@ -364,6 +374,85 @@ func ExtractSearchOffset(rawReq []byte) int {
 	return args.Offset
 }
 
+func formatRawButtonText(label, url string) string {
+	label = strings.TrimSpace(label)
+	url = strings.TrimSpace(url)
+	switch {
+	case label != "" && url != "":
+		return "[" + label + "](" + url + ")"
+	case label != "":
+		return "[" + label + "]"
+	case url != "":
+		return url
+	default:
+		return ""
+	}
+}
+
+func extractRawSectionText(components []rawDiscordComponent, accessory *rawDiscordComponent) string {
+	childText := extractRawComponentsText(components)
+	var btnSuffix string
+	if accessory != nil {
+		btnLabel := strings.TrimSpace(accessory.Label)
+		btnURL := strings.TrimSpace(accessory.URL)
+		if btnLabel != "" || btnURL != "" {
+			switch {
+			case btnLabel != "" && btnURL != "":
+				btnSuffix = " [" + btnLabel + "](" + btnURL + ")"
+			case btnLabel != "":
+				btnSuffix = " [" + btnLabel + "]"
+			case btnURL != "":
+				btnSuffix = " " + btnURL
+			}
+		}
+	}
+	if childText != "" {
+		return childText + btnSuffix
+	}
+	return strings.TrimSpace(btnSuffix)
+}
+
+func extractSingleRawComponentText(comp rawDiscordComponent) string {
+	content := strings.TrimSpace(comp.Content)
+	buttonText := formatRawButtonText(comp.Label, comp.URL)
+
+	if comp.Accessory != nil {
+		return extractRawSectionText(comp.Components, comp.Accessory)
+	}
+
+	var childLines []string
+	for _, child := range comp.Components {
+		if text := extractSingleRawComponentText(child); text != "" {
+			childLines = append(childLines, text)
+		}
+	}
+	childrenText := strings.Join(childLines, "\n")
+
+	var parts []string
+	if content != "" {
+		parts = append(parts, content)
+	}
+	if childrenText != "" {
+		parts = append(parts, childrenText)
+	}
+	if buttonText != "" && len(parts) == 0 {
+		parts = append(parts, buttonText)
+	} else if buttonText != "" {
+		parts[len(parts)-1] = parts[len(parts)-1] + " " + buttonText
+	}
+	return strings.Join(parts, "\n")
+}
+
+func extractRawComponentsText(comps []rawDiscordComponent) string {
+	var lines []string
+	for _, comp := range comps {
+		if text := extractSingleRawComponentText(comp); text != "" {
+			lines = append(lines, text)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 func projectDiscordMessage(m rawDiscordMessage) ProjectedDiscordMessage {
 	author := strings.TrimSpace(m.Author.Username)
 	if g := strings.TrimSpace(m.Author.GlobalName); g != "" && !strings.EqualFold(g, author) {
@@ -373,13 +462,17 @@ func projectDiscordMessage(m rawDiscordMessage) ProjectedDiscordMessage {
 			author = g
 		}
 	}
+	content := m.Content
+	if strings.TrimSpace(content) == "" && len(m.Components) > 0 {
+		content = extractRawComponentsText(m.Components)
+	}
 	return ProjectedDiscordMessage{
 		ID:        m.ID,
 		Timestamp: m.Timestamp,
 		ChannelID: m.ChannelID,
 		Author:    author,
 		AuthorID:  m.Author.ID,
-		Content:   m.Content,
+		Content:   content,
 	}
 }
 

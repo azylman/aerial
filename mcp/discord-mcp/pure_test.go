@@ -417,6 +417,9 @@ func TestShapeSearchMessagesResponse_TableDriven(t *testing.T) {
 	mixedEntriesResp := `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"total_results\":2,\"messages\":[\" \", \"[bad\", \"{bad\", {\"id\":\"m4\",\"content\":\"valid\"}]}"}]}}`
 	lastPageResp := `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"total_results\":0,\"messages\":[[{\"id\":\"m1\",\"content\":\"only\"}]]}"}]}}`
 
+	componentsV2Resp := `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"total_results\":1,\"messages\":[{\"id\":\"m10\",\"channel_id\":\"c1\",\"content\":\"\",\"components\":[{\"type\":17,\"components\":[{\"type\":10,\"content\":\"### Build Card Header\"},{\"type\":9,\"components\":[{\"type\":10,\"content\":\"PR row line\"}],\"accessory\":{\"type\":2,\"label\":\"PR #42\",\"url\":\"https://github.com/azylman/aerial/pull/42\"}},{\"type\":9,\"components\":[{\"type\":10,\"content\":\"Label only section\"}],\"accessory\":{\"type\":2,\"label\":\"Open Link\"}},{\"type\":9,\"components\":[{\"type\":10,\"content\":\"URL only section\"}],\"accessory\":{\"type\":2,\"url\":\"https://example.com\"}},{\"type\":2,\"label\":\"Standalone Button\",\"url\":\"https://button.example.com\"},{\"type\":2,\"label\":\"Label Button Only\"},{\"type\":2,\"url\":\"https://url-only.example.com\"},{\"type\":10,\"content\":\"*Updated footer*\"}]}]}]}"}]}}`
+	nonEmptyContentWithComponentsResp := `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"total_results\":1,\"messages\":[{\"id\":\"m11\",\"channel_id\":\"c1\",\"content\":\"Original Plain Text\",\"components\":[{\"type\":10,\"content\":\"Component text that should be ignored\"}]}]}"}]}}`
+
 	tests := []struct {
 		name       string
 		rawResp    string
@@ -430,6 +433,8 @@ func TestShapeSearchMessagesResponse_TableDriven(t *testing.T) {
 		{"malformed and whitespace message entries safely ignored", mixedEntriesResp, 0, `valid`, "", false},
 		{"author formatted with global_name and username", nestedHitResp, 0, `DisplayUser (user123)`, "ctx", false},
 		{"last page has_more false and negative offset clamped", lastPageResp, -1, `\"has_more\":false`, "", false},
+		{"components v2 container with section link button label only and url only extracted", componentsV2Resp, 0, `### Build Card Header\\nPR row line [PR #42](https://github.com/azylman/aerial/pull/42)\\nLabel only section [Open Link]\\nURL only section https://example.com\\n[Standalone Button](https://button.example.com)\\n[Label Button Only]\\nhttps://url-only.example.com\\n*Updated footer*`, "", false},
+		{"non-empty content takes precedence over components", nonEmptyContentWithComponentsResp, 0, `Original Plain Text`, "Component text that should be ignored", false},
 		{"non-search text payload left unchanged", `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"other\":1}"}]}}`, 0, `\"other\"`, "", false},
 		{"missing content array left unchanged", `{"jsonrpc":"2.0","id":1,"result":{"other":1}}`, 0, `"other":1`, "", false},
 		{"empty result left unchanged", `{"jsonrpc":"2.0","id":1}`, 0, `"id":1`, "", false},
