@@ -193,19 +193,22 @@ GO_SERVICES=$(cd "$REPO_ROOT" && find . -maxdepth 3 -name "go.mod" ! -path "*/.*
 
 run_golangci_lint() {
     svc="$1"
-    targetPkg="${2:-./...}"
+    shift
+    targets="${*:-./...}"
     if [ -d "$svc" ]; then
         if [ "$MODE" != "staged" ]; then
-            echo "   [golangci-lint] Linting $svc ($targetPkg)..."
+            echo "   [golangci-lint] Linting $svc ($targets)..."
         fi
         if has_cmd golangci-lint; then
             export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.27.3}"
-            (cd "$svc" && golangci-lint run --allow-parallel-runners --path-prefix="$svc/" --config "$REPO_ROOT/.golangci.yml" "$targetPkg")
+            # shellcheck disable=SC2086
+            (cd "$svc" && golangci-lint run --allow-parallel-runners --path-prefix="$svc/" --config "$REPO_ROOT/.golangci.yml" $targets)
         elif has_docker; then
+            # shellcheck disable=SC2086
             docker run --rm \
                 -v "$REPO_ROOT:/workspace" -w "/workspace/$svc" \
                 golangci/golangci-lint:v2.15.0 \
-                golangci-lint run --path-prefix="$svc/" --config /workspace/.golangci.yml "$targetPkg"
+                golangci-lint run --path-prefix="$svc/" --config /workspace/.golangci.yml $targets
         else
             echo "🚨 [Aerial Verify] Error: Neither golangci-lint nor docker found in PATH." >&2
             exit 1
@@ -587,9 +590,25 @@ if [ "$MODE" = "staged" ]; then
         if echo "$STAGED_FILES" | grep -q "^$svc/"; then
             svc_staged=1
         fi
-        if [ "$svc_staged" -eq 1 ] || [ "$lint_all_go" -eq 1 ]; then
+        if [ "$lint_all_go" -eq 1 ]; then
             run_golangci_lint "$svc" "./..."
-            run_deadcode "$svc"
+        elif [ "$svc_staged" -eq 1 ]; then
+            pkgs=$(echo "$STAGED_FILES" | grep "^$svc/.*\.go$" | sed "s|^$svc/||" | while read -r f; do dirname "$f"; done | sort -u)
+            staged_pkg_targets=""
+            for p in $pkgs; do
+                if [ -d "$svc/$p" ]; then
+                    if [ "$p" = "." ]; then
+                        target="."
+                    else
+                        target="./$p"
+                    fi
+                    staged_pkg_targets="${staged_pkg_targets:+$staged_pkg_targets }$target"
+                fi
+            done
+            if [ -n "$staged_pkg_targets" ]; then
+                # shellcheck disable=SC2086
+                run_golangci_lint "$svc" $staged_pkg_targets
+            fi
         fi
         if [ "$svc_staged" -eq 1 ]; then
             pkgs=$(echo "$STAGED_FILES" | grep "^$svc/.*\.go$" | sed "s|^$svc/||" | while read -r f; do dirname "$f"; done | sort -u)
