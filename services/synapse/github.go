@@ -136,6 +136,9 @@ func (s *RouterServer) updatePRBranch(ctx context.Context, repo string, prNumber
 	if resp.StatusCode == http.StatusConflict || (resp.StatusCode == http.StatusUnprocessableEntity && strings.Contains(bodyLower, "conflict")) {
 		return true, nil
 	}
+	if resp.StatusCode == http.StatusUnprocessableEntity && strings.Contains(bodyLower, "no new commits on the base branch") {
+		return false, nil
+	}
 	return false, fmt.Errorf("update-branch returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 }
 
@@ -1440,6 +1443,11 @@ func (s *RouterServer) processGitHubCheckRunEvent(ctx context.Context, delivery 
 	checkURL := firstNonEmpty(strings.TrimSpace(p.CheckRun.HTMLURL), strings.TrimSpace(p.CheckRun.DetailsURL))
 	if err := s.handleCIFailureTransition(ctx, res, details, checkURL); err != nil {
 		return nil, err
+	}
+	if p.Action == "completed" && res.Conclusion == "success" && isGateAggregatorCheck(res.CheckName) && res.PRNumber > 0 {
+		if err := s.checkOpenPRConflicts(ctx, res.Repo); err != nil {
+			log.Printf("[synapse] [github] error checking open pr conflicts on gate success for %s: %v", res.Repo, err)
+		}
 	}
 	return res, nil
 }
