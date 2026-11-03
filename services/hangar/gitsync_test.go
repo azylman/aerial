@@ -685,7 +685,7 @@ func TestSyncConfigsToNomad_TableDriven(t *testing.T) {
 			t.Fatalf("modified sync err=%v, calls=%d, want 4", err, len(env.nomadCalls()))
 		}
 		evts := env.waitForEvents(t, 1)
-		if evts[0].Event != "deploy_started" || evts[0].JobName != "eri" || evts[0].CommitSHA != "sha_modified" {
+		if evts[0].Event != "deploy_started" || evts[0].JobName != "eri" || evts[0].CommitSHA != "sha_modified" || evts[0].Details != "nomad var put nomad/jobs/eri" {
 			t.Errorf("unexpected deploy_started event: %+v", evts[0])
 		}
 	})

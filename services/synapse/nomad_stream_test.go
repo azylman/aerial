@@ -569,6 +569,24 @@ func TestRouterServer_ReconcileActiveDeployments_StartupSweep(t *testing.T) {
 			allocsJSON:       `[{"ID":"alloc-new","JobID":"synapse","DesiredStatus":"run","ClientStatus":"running"}]`,
 			wantDeployedJobs: []string{"synapse"},
 		},
+		{
+			name: "startup sweep transitions all deploying PRs waiting on same job",
+			reg: func() PRRegistryUpdater {
+				r := &mockPRRegistry{
+					deployedResults: []deployedResult{
+						{targetID: "1555405874565091380", prNumber: 552, mergeSHA: "sha552", repo: "azylman/aerial", updated: true},
+						{targetID: "1555405874565091380", prNumber: 553, mergeSHA: "sha553", repo: "azylman/aerial", updated: true},
+					},
+					listDeployingPRs: []DeployingPR{
+						{ID: 101, Repo: "azylman/aerial", PRNumber: 552, MergeSHA: "sha552", TargetID: "1555405874565091380", Metadata: map[string]any{"jobs": []any{"synapse"}, "started_jobs": []any{"synapse"}}},
+						{ID: 102, Repo: "azylman/aerial", PRNumber: 553, MergeSHA: "sha553", TargetID: "1555405874565091380", Metadata: map[string]any{"jobs": []any{"synapse"}, "started_jobs": []any{"synapse"}}},
+					},
+				}
+				return r
+			}(),
+			allocsJSON:       `[{"ID":"alloc-new","JobID":"synapse","DesiredStatus":"run","ClientStatus":"running"}]`,
+			wantDeployedJobs: []string{"synapse", "synapse"},
+		},
 		{name: "nil registry returns nil", reg: nil},
 		{name: "registry list error returns error", reg: &mockPRRegistry{err: errors.New("db error")}, wantErr: true},
 		{name: "empty pending deployments returns nil", reg: &mockPRRegistry{listDeployingPRs: nil}},
@@ -717,6 +735,64 @@ func TestRouterServer_IsNomadJobHealthy_TableDriven(t *testing.T) {
 	}
 }
 
+func TestRouterServer_IsNomadInPlaceConfigReloadHealthy_TableDriven(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	tests := []struct {
+		name        string
+		job         string
+		details     string
+		nilServer   bool
+		jobSpecJSON string
+		statusCode  int
+		wantHealthy bool
+	}{
+		{name: "empty details returns false", job: "eri", details: "", wantHealthy: false},
+		{name: "non-matching details returns false", job: "eri", details: "deploying new image", wantHealthy: false},
+		{name: "nil server returns false", job: "eri", details: "nomad var put nomad/jobs/eri", nilServer: true, wantHealthy: false},
+		{name: "empty job returns false", job: "   ", details: "nomad var put nomad/jobs/eri", wantHealthy: false},
+		{name: "nomad api 404 returns false", job: "eri", details: "nomad var put nomad/jobs/eri", statusCode: http.StatusNotFound, wantHealthy: false},
+		{name: "job status dead returns false", job: "eri", details: "nomad var put nomad/jobs/eri", jobSpecJSON: `{"Status":"dead","Stop":false,"TaskGroups":[{"Tasks":[{"Templates":[{"ChangeMode":"signal"}]}]}]}`, wantHealthy: false},
+		{name: "job stop true returns false", job: "eri", details: "nomad var put nomad/jobs/eri", jobSpecJSON: `{"Status":"running","Stop":true,"TaskGroups":[{"Tasks":[{"Templates":[{"ChangeMode":"signal"}]}]}]}`, wantHealthy: false},
+		{name: "zero templates returns false", job: "eri", details: "nomad var put nomad/jobs/eri", jobSpecJSON: `{"Status":"running","Stop":false,"TaskGroups":[{"Tasks":[{"Templates":[]}]}]}`, wantHealthy: false},
+		{name: "template with restart changemode returns false", job: "eri", details: "nomad var put nomad/jobs/eri", jobSpecJSON: `{"Status":"running","Stop":false,"TaskGroups":[{"Tasks":[{"Templates":[{"ChangeMode":"restart"}]}]}]}`, wantHealthy: false},
+		{name: "template with empty changemode returns false", job: "eri", details: "nomad var put nomad/jobs/eri", jobSpecJSON: `{"Status":"running","Stop":false,"TaskGroups":[{"Tasks":[{"Templates":[{"ChangeMode":""}]}]}]}`, wantHealthy: false},
+		{name: "template with signal changemode is healthy", job: "eri", details: "nomad var put nomad/jobs/eri", jobSpecJSON: `{"Status":"running","Stop":false,"TaskGroups":[{"Tasks":[{"Templates":[{"ChangeMode":"signal"}]}]}]}`, wantHealthy: true},
+		{name: "template with script changemode is healthy", job: "eri", details: "nomad var put nomad/jobs/eri", jobSpecJSON: `{"Status":"running","Stop":false,"TaskGroups":[{"Tasks":[{"Templates":[{"ChangeMode":"script"}]}]}]}`, wantHealthy: true},
+		{name: "template with noop changemode is healthy", job: "eri", details: "nomad var put nomad/jobs/eri", jobSpecJSON: `{"Status":"running","Stop":false,"TaskGroups":[{"Tasks":[{"Templates":[{"ChangeMode":"noop"}]}]}]}`, wantHealthy: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if tc.statusCode != 0 {
+					w.WriteHeader(tc.statusCode)
+					return
+				}
+				if tc.jobSpecJSON != "" {
+					_, _ = w.Write([]byte(tc.jobSpecJSON))
+					return
+				}
+				w.WriteHeader(http.StatusNotFound)
+			}))
+			defer ts.Close()
+
+			var srv *RouterServer
+			if !tc.nilServer {
+				srv = NewRouterServer(Config{NomadAddr: ts.URL}, ts.Client())
+			}
+
+			got := srv.isNomadInPlaceConfigReloadHealthy(ctx, tc.job, tc.details)
+			if got != tc.wantHealthy {
+				t.Errorf("isNomadInPlaceConfigReloadHealthy() = %v, want %v", got, tc.wantHealthy)
+			}
+		})
+	}
+}
+
 func TestNomadStreamSubscriber_RiverQueue(t *testing.T) {
 	tests := []struct {
 		name             string
@@ -748,11 +824,12 @@ func TestNomadStreamSubscriber_RiverQueue(t *testing.T) {
 				`{"Index":2017,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":{"Allocation":{"ID":"alloc-haro","JobID":"haro","DesiredStatus":"run","ClientStatus":"running","TaskStates":{"haro":{"State":"running","Restarts":1,"Events":[{"Type":"Started"},{"Type":"Restart Signaled"},{"Type":"Terminated","ExitCode":137},{"Type":"Restarting"},{"Type":"Started"}]}}}}}]}`,
 				`{"Index":2018,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"ID":"eval-canceled-superseded","JobID":"synapse","Status":"canceled","StatusDescription":"canceled after more recent eval was processed","DeploymentID":"dep-123"}}}]}`,
 				`{"Index":2019,"Events":[{"Topic":"Evaluation","Type":"EvaluationUpdated","Payload":{"Evaluation":{"ID":"eval-canceled-dep","JobID":"synapse","Status":"canceled","DeploymentID":"dep-123"}}}]}`,
+				`{"Index":2020,"Events":[{"Topic":"Allocation","Type":"AllocationUpdated","Payload":{"Allocation":{"ID":"alloc-eri-sig","JobID":"eri","DesiredStatus":"run","ClientStatus":"running","TaskStates":{"eri":{"State":"running","Restarts":0,"Events":[{"Type":"Started"},{"Type":"Signaling"}]}}}}}]}`,
 				"{}",
 			},
-			wantJobs:    8,
-			wantTopics:  []string{"Deployment", "Allocation", "Deployment", "Allocation", "Job", "Allocation", "Evaluation", "Allocation"},
-			wantSubstrs: []string{"dep-succ", "nomad:allocation:scheduler-mcp:alloc-run:running", "dep-fail", ":failed", "nomad:job:coverage-ingest:42:registered", "nomad:allocation:scheduler-mcp:alloc-run:complete", "nomad:evaluation:coven:eval-blk-1:blocked", "nomad:allocation:haro:alloc-haro:running:1"},
+			wantJobs:    9,
+			wantTopics:  []string{"Deployment", "Allocation", "Deployment", "Allocation", "Job", "Allocation", "Evaluation", "Allocation", "Allocation"},
+			wantSubstrs: []string{"dep-succ", "nomad:allocation:scheduler-mcp:alloc-run:running", "dep-fail", ":failed", "nomad:job:coverage-ingest:42:registered", "nomad:allocation:scheduler-mcp:alloc-run:complete", "nomad:evaluation:coven:eval-blk-1:blocked", "nomad:allocation:haro:alloc-haro:running:1", "nomad:allocation:eri:alloc-eri-sig:running:sig1"},
 		},
 		{
 			name: "duplicate nomad event increments skipped metric",
@@ -1312,6 +1389,23 @@ func TestRouterServer_HandleNomadJobSuccess_TableDriven(t *testing.T) {
 			wantErr:           true,
 			wantAppendCalls:   1,
 			wantStatusReverts: 1,
+		},
+		{
+			name: "multi-PR waiting on same job transitions all PRs",
+			reg: &mockPRRegistry{
+				deployedResults: []deployedResult{
+					{targetID: "target-1", prNumber: 101, mergeSHA: "sha1", repo: "azylman/aerial", updated: true},
+					{targetID: "target-2", prNumber: 102, mergeSHA: "sha2", repo: "azylman/aerial", updated: true},
+				},
+				listDeployingPRs: []DeployingPR{
+					{ID: 1, Repo: "azylman/aerial", PRNumber: 101, TargetID: "target-1", Metadata: map[string]any{"jobs": []any{"brain"}, "started_jobs": []any{"brain"}}},
+					{ID: 2, Repo: "azylman/aerial", PRNumber: 102, TargetID: "target-2", Metadata: map[string]any{"jobs": []any{"brain"}, "started_jobs": []any{"brain"}}},
+				},
+			},
+			disp:           &mockOutboundDispatcher{},
+			job:            "brain",
+			ref:            "dep-1",
+			wantDispatches: 2,
 		},
 	}
 	for _, tc := range tests {

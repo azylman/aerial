@@ -899,7 +899,7 @@ func (s *RouterServer) handleHangarDeployStartedRegistry(ctx context.Context, ev
 	} else if tID == "" {
 		log.Printf("[synapse] [hangar] skipping deploy_started for %s on %s#%d (job already deployed or PR inactive)", evt.JobName, evt.Repo, evt.PRNumber)
 		return true
-	} else if s.isNomadBatchTemplateHealthy(ctx, evt.JobName) {
+	} else if s.isNomadBatchTemplateHealthy(ctx, evt.JobName) || s.isNomadInPlaceConfigReloadHealthy(ctx, evt.JobName, evt.Details) {
 		if err := s.HandleNomadJobSuccess(ctx, evt.JobName, firstNonEmpty(evt.DeploymentID, "batch-registered")); err != nil {
 			log.Printf("[synapse] [hangar] warning handling batch job success for %s: %v", evt.JobName, err)
 		}
