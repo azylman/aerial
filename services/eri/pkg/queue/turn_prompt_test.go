@@ -21,7 +21,6 @@ import (
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
-	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
 )
@@ -41,31 +40,34 @@ func TestTurnExecution_GetRecentThreadMessages(t *testing.T) {
 		body, _ := json.Marshal(mockDiscordMsgs)
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(body))}, nil
 	})
+	var flakyCalls atomic.Int32
+	dgFlaky, _ := discordgo.New("Bot test-flaky")
+	dgFlaky.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if flakyCalls.Add(1) == 1 {
+			return nil, errors.New("transient 502")
+		}
+		body, _ := json.Marshal(mockDiscordMsgs)
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(body))}, nil
+	})
 	dgFail, _ := discordgo.New("Bot test")
 	dgFail.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) { return nil, errors.New("simulated error") })
-
-	fakeStore := dbtest.NewFakeStore()
-	ctx := context.Background()
-	_ = fakeStore.InsertMessage(ctx, db.Message{ID: "msg-1", ThreadID: "1552732003076669460", AuthorName: "test-user", Content: "Normal chat", CreatedAt: now.Add(-2 * time.Minute)})
 
 	tests := []struct {
 		name, firstID, firstAuthor string
 		dg                         *discordgo.Session
-		store                      db.Store
 		burst                      []db.Message
 		limit, wantCount           int
 		wantErr                    bool
 	}{
 		{name: "DiscordAPI_Success", dg: dgSuccess, burst: []db.Message{{ID: "1552732003076669099"}}, limit: 10, wantCount: 3, firstID: "1552732003076669000", firstAuthor: "Webhook"},
-		{name: "FallbackDB_Direct", dg: dgFail, store: fakeStore, limit: 0, wantCount: 1, firstID: "msg-1", firstAuthor: "test-user"},
-		{name: "FallbackDB_ClampedLimit", dg: dgFail, store: fakeStore, limit: 200, wantCount: 1, firstID: "msg-1", firstAuthor: "test-user"},
-		{name: "StoreError", store: &mockErrRecentStore{}, limit: 10, wantErr: true},
-		{name: "NilStore", limit: 10, wantCount: 0},
+		{name: "TransientError_RetriesAndSucceeds", dg: dgFlaky, burst: []db.Message{{ID: "1552732003076669099"}}, limit: 0, wantCount: 3, firstID: "1552732003076669000", firstAuthor: "Webhook"},
+		{name: "PersistentError_ClampedLimit", dg: dgFail, limit: 200, wantErr: true},
+		{name: "NilSession", limit: 10, wantCount: 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			pool := &WorkerPool{cfg: WorkerPoolConfig{DiscordSession: tc.dg, Store: tc.store}}
+			pool := &WorkerPool{cfg: WorkerPoolConfig{DiscordSession: tc.dg}}
 			te := &turnExecution{pool: pool, burst: tc.burst}
 			msgs, err := te.getRecentThreadMessages("1552732003076669460", tc.limit)
 			if tc.wantErr {
@@ -85,12 +87,6 @@ func TestTurnExecution_GetRecentThreadMessages(t *testing.T) {
 			}
 		})
 	}
-}
-
-type mockErrRecentStore struct{ db.Store }
-
-func (m *mockErrRecentStore) GetRecentThreadMessages(ctx context.Context, threadID string, limit int) ([]db.Message, error) {
-	return nil, errors.New("simulated db failure")
 }
 
 func TestWorker_RotateSessionID_EvictsDaemons(t *testing.T) {

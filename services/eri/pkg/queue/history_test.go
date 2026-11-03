@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/bwmarrin/discordgo"
 	"golang.org/x/sync/singleflight"
 )
@@ -167,42 +166,63 @@ func TestFormatChannelHistory(t *testing.T) {
 func TestFetchDiscordChannelHistory_Table(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
-	store := setupTestStore(t)
-	_ = insertMessage(store, db.Message{ID: "msg-1", ThreadID: "chan-test", AuthorID: "user-1", AuthorName: "Alice", Content: "Hello db 1", CreatedAt: now.Add(-20 * time.Minute)})
-	_ = insertMessage(store, db.Message{ID: "msg-2", ThreadID: "chan-test", AuthorID: "bot-1", AuthorName: "MusicBot", Content: "Playing track", CreatedAt: now.Add(-10 * time.Minute)})
-	_ = insertMessage(store, db.Message{ID: "msg-fallback", ThreadID: "123456789012345678", AuthorID: "user-1", AuthorName: "Bob", Content: "Fallback msg", CreatedAt: now.Add(-5 * time.Minute)})
 
 	dgErr, _ := discordgo.New("Bot test-token")
 	dgErr.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) { return nil, errors.New("502 bad gateway") })
+
+	sampleMsgs := []*discordgo.Message{
+		{ID: "1003", Content: "Aerial speaking", Timestamp: now.Add(-5 * time.Minute), Author: &discordgo.User{ID: "999999", Username: "Aerial", Bot: true}},
+		{ID: "1002", Content: "Music playing", Timestamp: now.Add(-10 * time.Minute), Author: &discordgo.User{ID: "888888", Username: "MusicBot", Bot: true}},
+		{ID: "1001", Content: "Hey everyone", Timestamp: now.Add(-15 * time.Minute), Author: &discordgo.User{ID: "777777", Username: "Alice", Bot: false}},
+	}
 
 	dgSuccess, _ := discordgo.New("Bot test-token")
 	dgSuccess.State = discordgo.NewState()
 	dgSuccess.State.User = &discordgo.User{ID: "999999", Username: "Aerial", Bot: true}
 	dgSuccess.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		return jsonHTTPResponse([]*discordgo.Message{
-			{ID: "1003", Content: "Aerial speaking", Timestamp: now.Add(-5 * time.Minute), Author: &discordgo.User{ID: "999999", Username: "Aerial", Bot: true}},
-			{ID: "1002", Content: "Music playing", Timestamp: now.Add(-10 * time.Minute), Author: &discordgo.User{ID: "888888", Username: "MusicBot", Bot: true}},
-			{ID: "1001", Content: "Hey everyone", Timestamp: now.Add(-15 * time.Minute), Author: &discordgo.User{ID: "777777", Username: "Alice", Bot: false}},
-		}), nil
+		return jsonHTTPResponse(sampleMsgs), nil
 	})
+
+	var flakyCalls atomic.Int32
+	dgFlaky, _ := discordgo.New("Bot test-token")
+	dgFlaky.State = discordgo.NewState()
+	dgFlaky.State.User = &discordgo.User{ID: "999999", Username: "Aerial", Bot: true}
+	dgFlaky.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if flakyCalls.Add(1) == 1 {
+			return nil, errors.New("502 bad gateway")
+		}
+		return jsonHTTPResponse(sampleMsgs), nil
+	})
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
 
 	tests := []struct {
 		name                string
+		ctx                 context.Context
 		sess                *discordgo.Session
-		store               db.Store
 		channelID           string
 		limit, wantCount    int
 		wantFirst, wantRole string
+		wantErr             bool
 	}{
-		{"non-snowflake fallback to db", nil, store, "chan-test", 10, 2, "Alice", "User"},
-		{"error fallback to store", dgErr, store, "123456789012345678", 10, 1, "Bob", "User"},
-		{"discord REST success role mappings", dgSuccess, nil, "123456789012345678", 10, 3, "Aerial", "Assistant"},
+		{"non-snowflake returns error", context.Background(), dgSuccess, "chan-test", 10, 0, "", "", true},
+		{"canceled context aborts retry", canceledCtx, dgErr, "123456789012345678", 10, 0, "", "", true},
+		{"persistent error fails after retries", nil, dgErr, "123456789012345678", 10, 0, "", "", true},
+		{"transient error succeeds on retry", nil, dgFlaky, "123456789012345678", 10, 3, "Aerial", "Assistant", false},
+		{"discord REST success role mappings", context.Background(), dgSuccess, "123456789012345678", 10, 3, "Aerial", "Assistant", false},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			history, err := DefaultHistoryFetcher(tc.sess, tc.store)(context.Background(), tc.channelID, "", tc.limit)
+			history, err := DefaultHistoryFetcher(tc.sess)(tc.ctx, tc.channelID, "", tc.limit)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("unexpected fetcher error: %v", err)
 			}
@@ -219,8 +239,9 @@ func TestFetchDiscordChannelHistory_Table(t *testing.T) {
 func TestFetchRecentThreadHistory_Table(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
-	store := setupTestStore(t)
-	_ = insertMessage(store, db.Message{ID: "msg-thread-1", ThreadID: "111111111111111111", AuthorID: "user-1", AuthorName: "Alice", Content: "DB Thread Message", CreatedAt: now})
+
+	dgErr, _ := discordgo.New("Bot test")
+	dgErr.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) { return nil, errors.New("503 service unavailable") })
 
 	dg, _ := discordgo.New("Bot test")
 	dg.State = discordgo.NewState()
@@ -244,17 +265,17 @@ func TestFetchRecentThreadHistory_Table(t *testing.T) {
 		limit, wantCount int
 		wantErr          bool
 	}{
-		{"DB first success", nil, "111111111111111111", 10, 1, false},
-		{"Fallback unavailable empty thread", dg, "", 10, 0, true},
-		{"Fallback unavailable non-numeric", dg, "non-numeric", 10, 0, true},
-		{"Fallback unavailable nil session", nil, "222222222222222222", 10, 0, true},
-		{"Discord REST fallback mappings", dg, "222222222222222222", 50, 6, false},
+		{"Empty thread returns error", dg, "", 10, 0, true},
+		{"Non-numeric thread returns error", dg, "non-numeric", 10, 0, true},
+		{"Nil session returns error", nil, "222222222222222222", 10, 0, true},
+		{"Persistent error fails after retries", dgErr, "222222222222222222", 10, 0, true},
+		{"Discord REST mappings", dg, "222222222222222222", 50, 6, false},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			history, err := FetchRecentThreadHistory(context.Background(), tc.sess, store, tc.threadID, tc.limit)
+			history, err := FetchRecentThreadHistory(context.Background(), tc.sess, tc.threadID, tc.limit)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got nil")
