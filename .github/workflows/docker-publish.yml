@@ -19,6 +19,7 @@ concurrency:
 permissions:
   contents: read
   packages: write
+  checks: read
 
 jobs:
   changes:
@@ -180,6 +181,33 @@ jobs:
             [ "$FAILED_ANY" -eq 0 ]
           fi
 
+      - name: Hold Failure Until RoboRev Completes
+        if: failure() && github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          export GH_TOKEN="${GITHUB_PAT:-${GH_TOKEN}}"
+          export GITHUB_TOKEN="${GITHUB_PAT:-${GITHUB_TOKEN}}"
+          if [ -z "${HEAD_SHA:-}" ]; then
+            exit 0
+          fi
+          echo "Holding job failure status until roborev completes for commit ${HEAD_SHA:0:7}..."
+          for i in $(seq 1 120); do
+            STATUS=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/check-runs?per_page=100" --jq '[.check_runs[] | select(.name == "roborev")] | last | .status // "missing"' 2>/dev/null || echo "error")
+            if [ "$STATUS" = "completed" ]; then
+              echo "roborev completed; releasing held failure status."
+              exit 0
+            fi
+            if [ "$STATUS" = "missing" ] && [ "$i" -ge 6 ]; then
+              echo "roborev check-run not present after 30s; releasing held failure status."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Timed out waiting for roborev after 600s; releasing held failure status."
+
   lint:
     name: Lint Microservices & Frontend
     needs: changes
@@ -263,6 +291,33 @@ jobs:
         if: needs.changes.outputs.docs == 'true'
         run: |
           node --check services/docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js
+
+      - name: Hold Failure Until RoboRev Completes
+        if: failure() && github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          export GH_TOKEN="${GITHUB_PAT:-${GH_TOKEN}}"
+          export GITHUB_TOKEN="${GITHUB_PAT:-${GITHUB_TOKEN}}"
+          if [ -z "${HEAD_SHA:-}" ]; then
+            exit 0
+          fi
+          echo "Holding job failure status until roborev completes for commit ${HEAD_SHA:0:7}..."
+          for i in $(seq 1 120); do
+            STATUS=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/check-runs?per_page=100" --jq '[.check_runs[] | select(.name == "roborev")] | last | .status // "missing"' 2>/dev/null || echo "error")
+            if [ "$STATUS" = "completed" ]; then
+              echo "roborev completed; releasing held failure status."
+              exit 0
+            fi
+            if [ "$STATUS" = "missing" ] && [ "$i" -ge 6 ]; then
+              echo "roborev check-run not present after 30s; releasing held failure status."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Timed out waiting for roborev after 600s; releasing held failure status."
 
   build-and-push:
     name: Build & Push Images to GHCR (${{ matrix.service }})
