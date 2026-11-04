@@ -1169,18 +1169,56 @@ func extractStartedJobsFromMetadata(meta map[string]any) []string {
 	return out
 }
 
+// isBenignStartupEvent returns true when evt represents active or benign container startup progress.
+func isBenignStartupEvent(evt NomadTaskEvent) bool {
+	switch evt.Type {
+	case "Started", "Driver", "Received":
+		return true
+	case "Task Setup":
+		return strings.TrimSpace(evt.SetupError) == ""
+	default:
+		return false
+	}
+}
+
+// hasPrecedingTaskFailure returns true if any event preceding a restart event indicates a task failure,
+// stopping backward traversal at the most recent "Started" event boundary.
+func hasPrecedingTaskFailure(events []NomadTaskEvent) bool {
+	for _, evt := range slices.Backward(events) {
+		if evt.Type == "Started" {
+			break
+		}
+		if evt.ExitCode != 0 {
+			return true
+		}
+		if strings.EqualFold(evt.Details["oom_killed"], "true") {
+			return true
+		}
+		if firstNonEmpty(evt.DriverError, evt.SetupError, evt.DownloadError, evt.ValidationError, evt.VaultError, evt.Details["driver_error"]) != "" {
+			return true
+		}
+		if evt.Type == "Driver Failure" || evt.Type == "Failed Validation" {
+			return true
+		}
+	}
+	return false
+}
+
 // isTaskRestartExhausted returns true if a task has exhausted its restart policy attempts
 // and is not actively running.
 func isTaskRestartExhausted(ts NomadTaskState) bool {
 	if strings.EqualFold(ts.State, "running") {
 		return false
 	}
-	for _, evt := range slices.Backward(ts.Events) {
-		if evt.Type == "Started" {
+	for i, evt := range slices.Backward(ts.Events) {
+		if evt.Type == "Started" || evt.Type == "Driver" || (evt.Type == "Task Setup" && strings.TrimSpace(evt.SetupError) == "") {
 			return false
 		}
-		if evt.Type == "Not Restarting" || strings.HasPrefix(evt.RestartReason, "Exceeded allowed attempts") {
+		if evt.Type == "Not Restarting" {
 			return true
+		}
+		if strings.HasPrefix(evt.RestartReason, "Exceeded allowed attempts") {
+			return ts.Failed || hasPrecedingTaskFailure(ts.Events[:i])
 		}
 	}
 	return false
@@ -1289,6 +1327,37 @@ func isAllocationRestarting(taskStates map[string]NomadTaskState, poststopTasks 
 	return false
 }
 
+// extractTaskError inspects a task's events and returns a concise error description.
+func extractTaskError(ts NomadTaskState) string {
+	for _, evt := range slices.Backward(ts.Events) {
+		errMsg := firstNonEmpty(evt.DriverError, evt.SetupError, evt.DownloadError, evt.ValidationError, evt.VaultError, evt.Details["driver_error"])
+		// DisplayMessage is only treated as an error diagnostic for dedicated failure event types;
+		// Task Setup failures are captured via SetupError above and error-free setup events are benign startup progress.
+		if errMsg == "" && (evt.Type == "Driver Failure" || evt.Type == "Failed Validation") {
+			errMsg = evt.DisplayMessage
+		}
+		if errMsg == "" && evt.ExitCode != 0 {
+			errMsg = fmt.Sprintf("exited with code %d", evt.ExitCode)
+			if evt.DisplayMessage != "" {
+				errMsg = fmt.Sprintf("%s (%s)", evt.DisplayMessage, errMsg)
+			}
+		}
+		if errMsg != "" {
+			return errMsg
+		}
+	}
+	for _, evt := range slices.Backward(ts.Events) {
+		if isBenignStartupEvent(evt) {
+			continue
+		}
+		candidate := firstNonEmpty(strings.TrimSpace(evt.DisplayMessage), strings.TrimSpace(evt.RestartReason))
+		if candidate != "" {
+			return candidate
+		}
+	}
+	return ""
+}
+
 // extractAllocationErrorDetails extracts human-readable failure diagnostics from allocation task states and events.
 func extractAllocationErrorDetails(clientDesc string, taskStates map[string]NomadTaskState) string {
 	taskNames := make([]string, 0, len(taskStates))
@@ -1303,27 +1372,7 @@ func extractAllocationErrorDetails(clientDesc string, taskStates map[string]Noma
 		if !ts.Failed && !strings.EqualFold(ts.State, "dead") && !isTaskRestartExhausted(ts) {
 			continue
 		}
-		var errMsg string
-		for _, evt := range slices.Backward(ts.Events) {
-			errMsg = firstNonEmpty(evt.DriverError, evt.SetupError, evt.DownloadError, evt.ValidationError, evt.VaultError, evt.Details["driver_error"])
-			if errMsg == "" && (evt.Type == "Driver Failure" || evt.Type == "Task Setup" || evt.Type == "Failed Validation") {
-				errMsg = evt.DisplayMessage
-			}
-			if errMsg == "" && evt.ExitCode != 0 {
-				errMsg = fmt.Sprintf("exited with code %d", evt.ExitCode)
-				if evt.DisplayMessage != "" {
-					errMsg = fmt.Sprintf("%s (%s)", evt.DisplayMessage, errMsg)
-				}
-			}
-			if errMsg != "" {
-				break
-			}
-		}
-		if errMsg == "" && len(ts.Events) > 0 {
-			lastEvt := ts.Events[len(ts.Events)-1]
-			errMsg = firstNonEmpty(strings.TrimSpace(lastEvt.DisplayMessage), strings.TrimSpace(lastEvt.RestartReason))
-		}
-		if errMsg != "" {
+		if errMsg := extractTaskError(ts); errMsg != "" {
 			taskErrors = append(taskErrors, fmt.Sprintf("task %q: %s", name, errMsg))
 		}
 	}
