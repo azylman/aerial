@@ -56,6 +56,14 @@ job "github-runner" {
           image              = "ghcr.io/azylman/aerial-github-runner:${var.image_tag}"
           dns_servers        = ["${attr.unique.network.ip-address}"]
           dns_search_domains = ["aerial"]
+          mounts = [
+            {
+              type     = "volume"
+              target   = "/root/.roborev"
+              source   = "aerial-roborev-${group.key}"
+              readonly = false
+            }
+          ]
         }
 
         env {
@@ -100,8 +108,8 @@ EOH
   }
 
   # group "ci-runners" pool: docker.sock and aerial-ci-cache:/cache are mounted strictly on ci-* groups
-  # for container builds and integration testing, while roborev-* groups isolate untrusted code review
-  # execution without host docker access.
+  # for container builds and integration testing, while roborev-* groups mount only their isolated
+  # aerial-roborev-${group.key}:/root/.roborev review state volume without host docker access.
   dynamic "group" {
     for_each = local.repos
     labels   = ["ci-${group.key}"]
