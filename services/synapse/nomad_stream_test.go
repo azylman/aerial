@@ -1069,6 +1069,66 @@ func TestIsTaskRestartExhausted_TableDriven(t *testing.T) {
 			ts:   NomadTaskState{State: "pending", Events: []NomadTaskEvent{{Type: "Restarting", RestartReason: "Exceeded allowed attempts, applying a delay"}, {Type: "Started"}}},
 			want: false,
 		},
+		{
+			name: "delay followed by Driver downloading image returns false",
+			ts: NomadTaskState{
+				State: "pending",
+				Events: []NomadTaskEvent{
+					{Type: "Terminated", ExitCode: 1},
+					{Type: "Restarting", RestartReason: "Exceeded allowed attempts, applying a delay"},
+					{Type: "Driver", DisplayMessage: "Downloading image"},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "delay followed by error-free Task Setup returns false",
+			ts: NomadTaskState{
+				State: "pending",
+				Events: []NomadTaskEvent{
+					{Type: "Terminated", ExitCode: 1},
+					{Type: "Restarting", RestartReason: "Exceeded allowed attempts, applying a delay"},
+					{Type: "Task Setup", DisplayMessage: "Building task directory"},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "delay preceded only by clean exit and killing events returns false",
+			ts: NomadTaskState{
+				State: "pending",
+				Events: []NomadTaskEvent{
+					{Type: "Started"},
+					{Type: "Killing", DisplayMessage: "Sent interrupt signal 2"},
+					{Type: "Terminated", ExitCode: 0},
+					{Type: "Restarting", RestartReason: "Exceeded allowed attempts, applying a delay"},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "delay preceded by OOM-killed exit code 0 returns true",
+			ts: NomadTaskState{
+				State: "pending",
+				Events: []NomadTaskEvent{
+					{Type: "Started"},
+					{Type: "Terminated", ExitCode: 0, Details: map[string]string{"oom_killed": "true"}},
+					{Type: "Restarting", RestartReason: "Exceeded allowed attempts, applying a delay"},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "delay preceded by DriverError returns true",
+			ts: NomadTaskState{
+				State: "pending",
+				Events: []NomadTaskEvent{
+					{Type: "Driver Failure", DriverError: "failed to initialize driver"},
+					{Type: "Restarting", RestartReason: "Exceeded allowed attempts, applying a delay"},
+				},
+			},
+			want: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1102,6 +1162,61 @@ func TestIsAllocationRestartExhausted_TableDriven(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := isAllocationRestartExhausted(tt.taskStates); got != tt.want {
 				t.Errorf("isAllocationRestartExhausted() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsBenignStartupEvent_TableDriven(t *testing.T) {
+	tests := []struct {
+		name string
+		evt  NomadTaskEvent
+		want bool
+	}{
+		{name: "Started event is benign", evt: NomadTaskEvent{Type: "Started"}, want: true},
+		{name: "Driver event is benign", evt: NomadTaskEvent{Type: "Driver", DisplayMessage: "Downloading image"}, want: true},
+		{name: "Received event is benign", evt: NomadTaskEvent{Type: "Received"}, want: true},
+		{name: "Task Setup without error is benign", evt: NomadTaskEvent{Type: "Task Setup", DisplayMessage: "Building directories"}, want: true},
+		{name: "Task Setup with whitespace error is benign", evt: NomadTaskEvent{Type: "Task Setup", SetupError: "   "}, want: true},
+		{name: "Task Setup with SetupError is not benign", evt: NomadTaskEvent{Type: "Task Setup", SetupError: "prestart failed"}, want: false},
+		{name: "Terminated event is not benign", evt: NomadTaskEvent{Type: "Terminated"}, want: false},
+		{name: "Killing event is not benign", evt: NomadTaskEvent{Type: "Killing"}, want: false},
+		{name: "Restarting event is not benign", evt: NomadTaskEvent{Type: "Restarting"}, want: false},
+		{name: "Driver Failure is not benign", evt: NomadTaskEvent{Type: "Driver Failure"}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isBenignStartupEvent(tt.evt); got != tt.want {
+				t.Errorf("isBenignStartupEvent() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHasPrecedingTaskFailure_TableDriven(t *testing.T) {
+	tests := []struct {
+		name   string
+		events []NomadTaskEvent
+		want   bool
+	}{
+		{name: "empty events slice", events: nil, want: false},
+		{name: "clean exit zero", events: []NomadTaskEvent{{Type: "Started"}, {Type: "Terminated", ExitCode: 0}}, want: false},
+		{name: "non-zero exit code", events: []NomadTaskEvent{{Type: "Terminated", ExitCode: 1}}, want: true},
+		{name: "oom killed detail with exit code zero", events: []NomadTaskEvent{{Type: "Terminated", ExitCode: 0, Details: map[string]string{"oom_killed": "true"}}}, want: true},
+		{name: "driver error", events: []NomadTaskEvent{{Type: "Driver Failure", DriverError: "driver crashed"}}, want: true},
+		{name: "driver error in details map", events: []NomadTaskEvent{{Type: "Terminated", Details: map[string]string{"driver_error": "out of memory"}}}, want: true},
+		{name: "setup error", events: []NomadTaskEvent{{Type: "Task Setup", SetupError: "mount failed"}}, want: true},
+		{name: "download error", events: []NomadTaskEvent{{Type: "Downloading", DownloadError: "network timeout"}}, want: true},
+		{name: "validation error", events: []NomadTaskEvent{{Type: "Failed Validation", ValidationError: "bad spec"}}, want: true},
+		{name: "vault error", events: []NomadTaskEvent{{Type: "Vault", VaultError: "token expired"}}, want: true},
+		{name: "driver failure type without DriverError text", events: []NomadTaskEvent{{Type: "Driver Failure", DisplayMessage: "driver failed"}}, want: true},
+		{name: "failed validation type without ValidationError text", events: []NomadTaskEvent{{Type: "Failed Validation", DisplayMessage: "schema error"}}, want: true},
+		{name: "stops scanning at Started boundary", events: []NomadTaskEvent{{Type: "Terminated", ExitCode: 1}, {Type: "Started"}, {Type: "Terminated", ExitCode: 0}}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasPrecedingTaskFailure(tt.events); got != tt.want {
+				t.Errorf("hasPrecedingTaskFailure() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -1217,6 +1332,59 @@ func TestExtractAllocationErrorDetails_TableDriven(t *testing.T) {
 			name:       "driver failure event with display message only",
 			taskStates: map[string]NomadTaskState{"task": {Failed: true, Events: []NomadTaskEvent{{Type: "Driver Failure", DisplayMessage: "driver msg"}}}},
 			wantSubstr: `task "task": driver msg`,
+		},
+		{
+			name: "skips trailing benign driver downloading image event on failed task",
+			taskStates: map[string]NomadTaskState{
+				"server": {
+					Failed: true,
+					Events: []NomadTaskEvent{
+						{Type: "Terminated", ExitCode: 1, DisplayMessage: "process crashed"},
+						{Type: "Restarting", RestartReason: "Exceeded allowed attempts, applying a delay"},
+						{Type: "Driver", DisplayMessage: "Downloading image"},
+					},
+				},
+			},
+			wantSubstr: `task "server": process crashed (exited with code 1)`,
+		},
+		{
+			name: "fallback skips trailing benign driver event and extracts restart reason",
+			taskStates: map[string]NomadTaskState{
+				"server": {
+					Failed: true,
+					Events: []NomadTaskEvent{
+						{Type: "Restarting", RestartReason: "Exceeded allowed attempts, applying a delay"},
+						{Type: "Driver", DisplayMessage: "Downloading image"},
+					},
+				},
+			},
+			wantSubstr: `task "server": Exceeded allowed attempts, applying a delay`,
+		},
+		{
+			name: "failed task with initial benign task setup and fallback alloc unhealthy extracts alloc unhealthy",
+			taskStates: map[string]NomadTaskState{
+				"server": {
+					Failed: true,
+					Events: []NomadTaskEvent{
+						{Type: "Task Setup", DisplayMessage: "Building task directory"},
+						{Type: "Alloc Unhealthy", DisplayMessage: "Unhealthy because of failed task"},
+					},
+				},
+			},
+			wantSubstr: `task "server": Unhealthy because of failed task`,
+		},
+		{
+			name: "failed task with restart delay and trailing benign task setup extracts restart reason",
+			taskStates: map[string]NomadTaskState{
+				"server": {
+					Failed: true,
+					Events: []NomadTaskEvent{
+						{Type: "Restarting", RestartReason: "Exceeded allowed attempts, applying a delay"},
+						{Type: "Task Setup", DisplayMessage: "Building task directory"},
+					},
+				},
+			},
+			wantSubstr: `task "server": Exceeded allowed attempts, applying a delay`,
 		},
 	}
 
