@@ -3288,10 +3288,22 @@ func TestWorkerPool_ProcessPoolWiringAndTurnRouting(t *testing.T) {
 				return
 			}
 			if tc.reconcilePrewarmed {
-				vPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-2.5-flash", PrewarmedTargets: tc.prewarmedTargets}, newMockDaemonSpawner())
+				dSpawner, mSpawner, lSpawner, vSpawner := newMockSpawner(), newMockSpawner(), newMockSpawner(), newMockSpawner()
+				dPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-4-argon-high"}, dSpawner)
+				defer func() { _ = dPool.Close() }()
+				mPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-medium"}, mSpawner)
+				defer func() { _ = mPool.Close() }()
+				lPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, lSpawner)
+				defer func() { _ = lPool.Close() }()
+				vPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-2.5-flash", PrewarmedTargets: tc.prewarmedTargets}, vSpawner)
 				defer func() { _ = vPool.Close() }()
-				appCfg := newTestConfig(func(d *config.ConfigData) { d.Voice.PrewarmedTargets = tc.expectedVoiceTargets })
-				pool := New(appCfg, WorkerPoolConfig{VoiceProcessPool: vPool})
+				appCfg := newTestConfig(func(d *config.ConfigData) {
+					d.Model = "claude-sonnet-5-5-low"
+					d.MediumEffortModel = "gpt-oss-120b-medium"
+					d.LowEffortModel = "gpt-oss-120b-low"
+					d.Voice.PrewarmedTargets = tc.expectedVoiceTargets
+				})
+				pool := New(appCfg, WorkerPoolConfig{ProcessPool: dPool, MediumEffortProcessPool: mPool, LowEffortProcessPool: lPool, VoiceProcessPool: vPool})
 				defer pool.Stop()
 				pool.MarkDirty()
 				_, _ = vPool.GetOrCreate(context.Background(), tc.expectedVoiceTargets[0], "")
@@ -3299,6 +3311,15 @@ func TestWorkerPool_ProcessPoolWiringAndTurnRouting(t *testing.T) {
 				_, hasDaemon := vPool.Get(tc.expectedVoiceTargets[0])
 				if len(targets) != len(tc.expectedVoiceTargets) || targets[0] != tc.expectedVoiceTargets[0] || !hasDaemon {
 					t.Fatalf("prewarmed targets mismatch: %v", targets)
+				}
+				if len(dPool.PrewarmedTargets()) != 0 {
+					t.Fatalf("expected discord pool prewarmed targets to remain empty, got %v", dPool.PrewarmedTargets())
+				}
+				_, _ = dPool.GetOrCreate(context.Background(), "t-high", "")
+				_, _ = mPool.GetOrCreate(context.Background(), "t-med", "")
+				_, _ = lPool.GetOrCreate(context.Background(), "t-low", "")
+				if dSpawner.LastSpawnCfg().Model != "claude-sonnet-5-5-low" || mSpawner.LastSpawnCfg().Model != "gpt-oss-120b-medium" || lSpawner.LastSpawnCfg().Model != "gpt-oss-120b-low" || vSpawner.LastSpawnCfg().Model != "gpt-oss-120b-low" {
+					t.Fatalf("unexpected pool models after MarkDirty: d=%q m=%q l=%q v=%q", dSpawner.LastSpawnCfg().Model, mSpawner.LastSpawnCfg().Model, lSpawner.LastSpawnCfg().Model, vSpawner.LastSpawnCfg().Model)
 				}
 				return
 			}

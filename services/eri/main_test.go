@@ -210,8 +210,23 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 	})
 
 	t.Run("with worker pool", func(t *testing.T) {
-		cfg := newTestConfig()
-		CreateReloadConfigFunc(cfg, WithSkipEnvironmentSync(), WithReloadSupplier(func(active *config.Config) error { return nil }), WithWorkerPool(queue.New(cfg, queue.WorkerPoolConfig{})))("TestWithWorkerPool")
+		cfg := newTestConfig(func(d *config.ConfigData) {
+			d.LowEffortModel = "gpt-oss-120b-medium"
+		})
+		var spawnedModel string
+		spawner := &mockMainDaemonSpawner{
+			SpawnFn: func(ctx context.Context, dCfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+				spawnedModel = dCfg.Model
+				return newMockMainDaemonSpawner().Spawn(ctx, dCfg)
+			},
+		}
+		ephemPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, spawner)
+		defer func() { _ = ephemPool.Close() }()
+		CreateReloadConfigFunc(cfg, WithSkipEnvironmentSync(), WithReloadSupplier(func(active *config.Config) error { return nil }), WithWorkerPool(queue.New(cfg, queue.WorkerPoolConfig{})), WithEphemeralPool(ephemPool))("TestWithWorkerPool")
+		_, _ = ephemPool.GetOrCreate(context.Background(), "ephemeral:worker-0", "")
+		if spawnedModel != "gpt-oss-120b-medium" {
+			t.Fatalf("expected ephemeralPool model updated to gpt-oss-120b-medium, got %q", spawnedModel)
+		}
 	})
 }
 
@@ -746,7 +761,18 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 		}
 		cfg := config.NewFromData(data)
 
-		pool := createVoiceProcessPool(cfg, voiceHome, "fallback-model", spawner)
+		var mu sync.Mutex
+		var lastSpawnedModel string
+		trackingSpawner := &mockMainDaemonSpawner{
+			SpawnFn: func(ctx context.Context, dCfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+				mu.Lock()
+				lastSpawnedModel = dCfg.Model
+				mu.Unlock()
+				return newMockMainDaemonSpawner().Spawn(ctx, dCfg)
+			},
+		}
+
+		pool := createVoiceProcessPool(cfg, voiceHome, "fallback-model", trackingSpawner)
 		defer pool.Close()
 
 		dynPool, ok := pool.(*runner.DynamicVoicePool)
@@ -761,6 +787,55 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 			if sid == "k" {
 				t.Fatalf("expected initial pool to be UnifiedProcessPool, got sessionID=%q", sid)
 			}
+		}
+		mu.Lock()
+		initialModel := lastSpawnedModel
+		mu.Unlock()
+		if initialModel != "agy-model" {
+			t.Fatalf("expected initial spawned model to be agy-model, got %q", initialModel)
+		}
+
+		// Update config to agy with new model first to verify agy hot-reload
+		cfg.Update(&config.ConfigData{
+			HarnessAPIKey:  "harness-key",
+			LowEffortModel: "gpt-oss-120b-low",
+			Voice: config.VoiceConfig{
+				Engine: "agy",
+				Model:  "gpt-oss-120b-medium",
+			},
+		})
+		dynPool.MarkDirty()
+		if lease, err := dynPool.AcquireLease(context.Background(), "k"); err != nil {
+			t.Fatalf("AcquireLease failed after agy model reload: %v", err)
+		} else {
+			_ = lease.Release()
+		}
+		mu.Lock()
+		reloadedModel := lastSpawnedModel
+		mu.Unlock()
+		if reloadedModel != "gpt-oss-120b-medium" {
+			t.Fatalf("expected reloaded spawned model to be gpt-oss-120b-medium, got %q", reloadedModel)
+		}
+
+		// Update config to agy without explicit Voice.Model to verify fallback to LowEffortModel
+		cfg.Update(&config.ConfigData{
+			HarnessAPIKey:  "harness-key",
+			LowEffortModel: "gpt-oss-120b-low",
+			Voice: config.VoiceConfig{
+				Engine: "agy",
+			},
+		})
+		dynPool.MarkDirty()
+		if lease, err := dynPool.AcquireLease(context.Background(), "k"); err != nil {
+			t.Fatalf("AcquireLease failed after agy fallback reload: %v", err)
+		} else {
+			_ = lease.Release()
+		}
+		mu.Lock()
+		fallbackModel := lastSpawnedModel
+		mu.Unlock()
+		if fallbackModel != "gpt-oss-120b-low" {
+			t.Fatalf("expected fallback spawned model to be gpt-oss-120b-low, got %q", fallbackModel)
 		}
 
 		// Update config to gemini_api

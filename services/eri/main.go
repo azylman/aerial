@@ -59,6 +59,7 @@ type reloadConfigOptions struct {
 	skipEnvironmentSync bool
 	provisioner         *env.Provisioner
 	workerPool          *queue.WorkerPool
+	ephemeralPool       runner.AgentPool
 	onReload            func(source string)
 }
 
@@ -77,6 +78,12 @@ func WithProvisioner(p *env.Provisioner) ReloadOption {
 func WithWorkerPool(pool *queue.WorkerPool) ReloadOption {
 	return func(o *reloadConfigOptions) {
 		o.workerPool = pool
+	}
+}
+
+func WithEphemeralPool(pool runner.AgentPool) ReloadOption {
+	return func(o *reloadConfigOptions) {
+		o.ephemeralPool = pool
 	}
 }
 
@@ -121,6 +128,16 @@ func executeConfigReload(source string, cfg *config.Config, options *reloadConfi
 	if !options.skipEnvironmentSync && options.provisioner != nil {
 		if err := options.provisioner.Sync(context.Background(), cfg); err != nil {
 			log.Printf("[%s] Warning: env sync error: %v", source, err)
+		}
+	}
+
+	if options.ephemeralPool != nil {
+		lowModel, _ := resolveBrainModelDefaults(cfg.Current())
+		if modelUpdater, ok := options.ephemeralPool.(interface{ UpdateModel(model string) }); ok {
+			modelUpdater.UpdateModel(lowModel)
+		}
+		if md, ok := options.ephemeralPool.(interface{ MarkDirty() }); ok {
+			md.MarkDirty()
 		}
 	}
 
@@ -413,6 +430,11 @@ func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel
 			prewarmedTargets = []string{}
 		}
 
+		effectiveLow := strings.TrimSpace(lowEffortModel)
+		if cur != nil && strings.TrimSpace(cur.LowEffortModel) != "" {
+			effectiveLow = strings.TrimSpace(cur.LowEffortModel)
+		}
+
 		var voicePool runner.AgentPool
 		var effectiveModel string
 		var effectiveAPIKey string
@@ -421,7 +443,7 @@ func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel
 		ambRetriever := initVoiceAmbientRetriever(cur)
 
 		if voiceEngine == "gemini_api" {
-			pool, model, apiKey, servers, ok := buildGeminiVoicePool(cur, lowEffortModel, prewarmedTargets, memoryRetriever, ambRetriever)
+			pool, model, apiKey, servers, ok := buildGeminiVoicePool(cur, effectiveLow, prewarmedTargets, memoryRetriever, ambRetriever)
 			if ok {
 				voicePool = pool
 				effectiveModel = model
@@ -432,8 +454,11 @@ func createVoiceProcessPool(cfg *config.Config, voiceHome string, lowEffortModel
 			}
 		}
 		if voiceEngine != "gemini_api" {
-			effectiveModel = lowEffortModel
-			voicePool = buildUnifiedVoicePool(cfg, cur, voiceHome, lowEffortModel, prewarmedTargets, spawner, memoryRetriever, ambRetriever)
+			effectiveModel = effectiveLow
+			if cur != nil && strings.TrimSpace(cur.Voice.Model) != "" {
+				effectiveModel = strings.TrimSpace(cur.Voice.Model)
+			}
+			voicePool = buildUnifiedVoicePool(cfg, cur, voiceHome, effectiveModel, prewarmedTargets, spawner, memoryRetriever, ambRetriever)
 		}
 
 		fingerprint := computeVoiceConfigFingerprint(voiceEngine, effectiveModel, effectiveAPIKey, cur, prewarmedTargets, mcpServers)
@@ -849,7 +874,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	defer cleanupFunnel()
 
 	var reloadOpts []ReloadOption
-	reloadOpts = append(reloadOpts, WithDiscordSession(dgSession), WithProvisioner(provisioner), WithWorkerPool(pool))
+	reloadOpts = append(reloadOpts, WithDiscordSession(dgSession), WithProvisioner(provisioner), WithWorkerPool(pool), WithEphemeralPool(ephemeralPool))
 	if appOpts.onReload != nil {
 		reloadOpts = append(reloadOpts, func(o *reloadConfigOptions) { o.onReload = appOpts.onReload })
 	}

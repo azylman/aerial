@@ -276,8 +276,12 @@ func TestInterchangeablePool_DelegationAndErrorGuards(t *testing.T) {
 	pool.WaitBackground()
 
 	pool.SetTranscriptRescuer(func(string, time.Time) string { return "rescued" })
+	pool.UpdateModel("claude-sonnet-5-5-low")
 	pool.MarkDirty()
 	pool.WaitBackground()
+	if underlying.cfg.Model != "claude-sonnet-5-5-low" {
+		t.Fatalf("expected underlying model updated to claude-sonnet-5-5-low, got %q", underlying.cfg.Model)
+	}
 	if pool.Underlying() != underlying {
 		t.Fatalf("unexpected Underlying: %v", pool.Underlying())
 	}
@@ -303,6 +307,7 @@ func TestInterchangeablePool_DelegationAndErrorGuards(t *testing.T) {
 	_, nlErr := nilPool.EphemeralLLMFunc("t")(ctx, "m", "p")
 	nd, ndOk := nilPool.Get("t")
 	nilPool.SetTranscriptRescuer(nil)
+	nilPool.UpdateModel("claude-sonnet-5-5-low")
 	nilPool.MarkDirty()
 	nilPool.WaitBackground()
 	nilPool.SetSessionManager(nil)

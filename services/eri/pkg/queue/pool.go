@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"slices"
 	"strings"
@@ -127,6 +128,7 @@ type threadWorkerState struct {
 
 type WorkerPool struct {
 	appCfg            *config.Config
+	hasExplicitAppCfg bool
 	overrideModel     string
 	cfg               WorkerPoolConfig
 	sessionMgr        *session.Manager
@@ -434,7 +436,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &WorkerPool{
-		appCfg: resolvedAppCfg, cfg: cfg, pools: pools, voiceProcessPool: cfg.VoiceProcessPool,
+		appCfg: resolvedAppCfg, hasExplicitAppCfg: isExplicitAppCfg, cfg: cfg, pools: pools, voiceProcessPool: cfg.VoiceProcessPool,
 		sessionMgr: cfg.SessionManager, threadChs: make(map[string]*threadWorkerState),
 		activeTurns: make(map[string]*turnExecution), ctx: ctx, cancel: cancel,
 		webhookDispatcher: cfg.WebhookDispatcher, createThreadFn: cfg.CreateThreadFunc,
@@ -1054,6 +1056,43 @@ func (p *WorkerPool) InterruptThread(ctx context.Context, threadID string, drain
 	p.CloseThreadProcesses(threadID, "interrupt")
 }
 
+func (p *WorkerPool) poolModelForEffort(effort string) string {
+	switch effort {
+	case "low":
+		return p.LowEffortModel()
+	case "medium":
+		return p.MediumEffortModel()
+	default:
+		return p.GetRuntimeConfig()
+	}
+}
+
+func updatePoolModel(pool runner.AgentPool, model string) {
+	if modelUpdater, ok := pool.(interface{ UpdateModel(model string) }); ok {
+		modelUpdater.UpdateModel(model)
+	}
+}
+
+func (p *WorkerPool) reconcilePoolModelsAndVoiceTargets(poolByKey map[PoolKey]runner.AgentPool, voicePool runner.AgentPool, hasExplicitAppCfg bool, voiceTargets []string, voiceModel string) {
+	if hasExplicitAppCfg {
+		for _, k := range AllValidPoolKeys() {
+			updatePoolModel(poolByKey[k], p.poolModelForEffort(k.Effort))
+		}
+	}
+	if voicePool == nil {
+		return
+	}
+	if targetUpdater, ok := voicePool.(interface{ UpdatePrewarmedTargets(targets []string) }); ok && voiceTargets != nil {
+		targetUpdater.UpdatePrewarmedTargets(voiceTargets)
+	}
+	if hasExplicitAppCfg {
+		if voiceModel == "" {
+			voiceModel = p.LowEffortModel()
+		}
+		updatePoolModel(voicePool, voiceModel)
+	}
+}
+
 // MarkDirty notifies the process pools to mark active daemons dirty and evict idle daemons.
 func (p *WorkerPool) MarkDirty() {
 	if p == nil {
@@ -1061,15 +1100,22 @@ func (p *WorkerPool) MarkDirty() {
 	}
 	p.mu.Lock()
 	pools := p.collectUniquePoolsLocked()
+	voicePool := p.voiceProcessPool
+	hasExplicitAppCfg := p.hasExplicitAppCfg
+	poolByKey := maps.Clone(p.pools)
 	var voiceTargets []string
+	var voiceModel string
 	if p.appCfg != nil {
 		voiceTargets = p.appCfg.VoicePrewarmedTargets()
+		if cur := p.appCfg.Current(); cur != nil {
+			voiceModel = strings.TrimSpace(cur.Voice.Model)
+		}
 	}
 	p.mu.Unlock()
+
+	p.reconcilePoolModelsAndVoiceTargets(poolByKey, voicePool, hasExplicitAppCfg, voiceTargets, voiceModel)
+
 	for _, pool := range pools {
-		if targetUpdater, ok := pool.(interface{ UpdatePrewarmedTargets(targets []string) }); ok && voiceTargets != nil {
-			targetUpdater.UpdatePrewarmedTargets(voiceTargets)
-		}
 		if md, ok := pool.(interface{ MarkDirty() }); ok {
 			md.MarkDirty()
 		}
@@ -1089,6 +1135,23 @@ func (p *WorkerPool) LowEffortModel() string {
 	}
 	if strings.TrimSpace(p.cfg.LowEffortModel) != "" {
 		return strings.TrimSpace(p.cfg.LowEffortModel)
+	}
+	return def
+}
+
+// MediumEffortModel returns the configured medium effort reasoning model name.
+func (p *WorkerPool) MediumEffortModel() string {
+	def := config.DefaultConfigData().MediumEffortModel
+	if p == nil {
+		return def
+	}
+	if p.appCfg != nil {
+		if cur := p.appCfg.Current(); cur != nil && strings.TrimSpace(cur.MediumEffortModel) != "" {
+			return strings.TrimSpace(cur.MediumEffortModel)
+		}
+	}
+	if strings.TrimSpace(p.cfg.MediumEffortModel) != "" {
+		return strings.TrimSpace(p.cfg.MediumEffortModel)
 	}
 	return def
 }
