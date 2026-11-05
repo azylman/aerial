@@ -4,28 +4,38 @@ FROM golang:1.27.3-bookworm AS builder
 
 WORKDIR /src
 
+# Prune Go SDK test, doc, and api directories before source copy to keep /usr/local/go layer static
+RUN rm -rf /usr/local/go/test /usr/local/go/doc /usr/local/go/api
+
 COPY pkg/go.mod pkg/go.sum* ./pkg/
 COPY services/eri/go.mod services/eri/go.sum* ./services/eri/
 WORKDIR /src/services/eri
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
 COPY pkg/ /src/pkg/
-COPY services/eri/ ./
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg/mod \
-    CGO_ENABLED=0 go build -cover -covermode=atomic -trimpath -ldflags="-s -w" -o /app/eri .
 
 # Exclude CLI helpers (transcript-search, hook-guard) from -cover to avoid per-hook counter file floods.
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg/mod \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /transcript-search ./cmd/transcript-search
-
+# Build CLI helpers before copying full services/eri tree so service edits do not invalidate their layers.
+COPY services/eri/pkg/guard/ ./pkg/guard/
+COPY services/eri/cmd/hook-guard/ ./cmd/hook-guard/
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /hook-guard ./cmd/hook-guard
 
-# Prune Go SDK test, doc, and api directories before exporting to runtime stage
-RUN rm -rf /usr/local/go/test /usr/local/go/doc /usr/local/go/api
+COPY services/eri/pkg/config/ ./pkg/config/
+COPY services/eri/pkg/metrics/ ./pkg/metrics/
+COPY services/eri/pkg/session/ ./pkg/session/
+COPY services/eri/pkg/db/ ./pkg/db/
+COPY services/eri/pkg/transcript/ ./pkg/transcript/
+COPY services/eri/cmd/transcript-search/ ./cmd/transcript-search/
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /transcript-search ./cmd/transcript-search
+
+COPY services/eri/ ./
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 go build -cover -covermode=atomic -trimpath -ldflags="-s -w" -o /app/eri .
 
 # --- Superpowers stage ---------------------------------------------------
 FROM alpine:3.24 AS superpowers
@@ -133,20 +143,21 @@ COPY --link --from=superpowers /opt/superpowers /opt/superpowers
 
 WORKDIR /app
 
-COPY --link --from=builder /app/eri /app/eri
 RUN ln -s /app/eri /usr/local/bin/aerial-brain && \
-    ln -s /app/eri /usr/local/bin/aerial-eri
-COPY --link --from=builder /transcript-search /usr/local/bin/transcript-search
-COPY --link --from=builder /hook-guard /usr/local/bin/hook-guard
-RUN ln -s /usr/local/bin/hook-guard /usr/local/bin/share-guard && \
+    ln -s /app/eri /usr/local/bin/aerial-eri && \
+    ln -s /usr/local/bin/hook-guard /usr/local/bin/share-guard && \
     ln -s /usr/local/bin/hook-guard /usr/local/bin/schedule-guard && \
     ln -s /usr/local/bin/hook-guard /usr/local/bin/batch-guard && \
     ln -s /usr/local/bin/hook-guard /usr/local/bin/search-guard && \
     ln -sf /usr/local/bin/hook-guard /usr/local/bin/commit-guard
+
 COPY --link scripts/ /usr/local/bin/
 RUN chmod +x /usr/local/bin/*.sh 2>/dev/null || true
 COPY --link rules /app/rules
 COPY --link .agents /app/.agents
+COPY --link --from=builder /hook-guard /usr/local/bin/hook-guard
+COPY --link --from=builder /transcript-search /usr/local/bin/transcript-search
+COPY --link --from=builder /app/eri /app/eri
 
 ENV GIT_TERMINAL_PROMPT=0
 
