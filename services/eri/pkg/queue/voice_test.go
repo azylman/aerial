@@ -30,41 +30,52 @@ import (
 func TestWorkerPool_EffortModelResolution(t *testing.T) {
 	t.Parallel()
 	defaultLow := config.DefaultConfigData().LowEffortModel
-	appLow, appEmpty := "app-cfg-low-model", ""
+	defaultMed := config.DefaultConfigData().MediumEffortModel
+	appLow, appMed, appEmpty := "app-cfg-low-model", "app-cfg-med-model", ""
 
 	tests := []struct {
-		name, cfgModel string
-		poolNil        bool
-		appCfgVal      *string
-		wantResult     string
+		name, cfgLow, cfgMed string
+		poolNil              bool
+		appLowVal, appMedVal *string
+		wantLow, wantMed     string
 	}{
-		{"Low_NilPoolFallback", "", true, nil, defaultLow},
-		{"Low_CustomModelInCfg", "gemini-flash-low-test", false, nil, "gemini-flash-low-test"},
-		{"Low_AppCfgOverride", "", false, &appLow, "app-cfg-low-model"},
-		{"Low_AppCfgEmptyWithCfgFallback", "cfg-fallback-model", false, &appEmpty, "cfg-fallback-model"},
-		{"Low_AppCfgEmptyAndCfgEmptyDefaults", "", false, &appEmpty, defaultLow},
-		{"Low_AppCfgNilAndCfgEmptyDefaults", "", false, nil, defaultLow},
+		{"NilPoolFallback", "", "", true, nil, nil, defaultLow, defaultMed},
+		{"CustomModelInCfg", "gemini-flash-low-test", "gemini-flash-med-test", false, nil, nil, "gemini-flash-low-test", "gemini-flash-med-test"},
+		{"AppCfgOverride", "", "", false, &appLow, &appMed, "app-cfg-low-model", "app-cfg-med-model"},
+		{"AppCfgEmptyWithCfgFallback", "cfg-fallback-low", "cfg-fallback-med", false, &appEmpty, &appEmpty, "cfg-fallback-low", "cfg-fallback-med"},
+		{"AppCfgEmptyAndCfgEmptyDefaults", "", "", false, &appEmpty, &appEmpty, defaultLow, defaultMed},
+		{"AppCfgNilAndCfgEmptyDefaults", "", "", false, nil, nil, defaultLow, defaultMed},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			if tt.poolNil {
 				var nilPool *WorkerPool
-				if got := nilPool.LowEffortModel(); got != tt.wantResult {
-					t.Errorf("LowEffortModel() = %q, want %q", got, tt.wantResult)
+				if got := nilPool.LowEffortModel(); got != tt.wantLow {
+					t.Errorf("LowEffortModel() = %q, want %q", got, tt.wantLow)
+				}
+				if got := nilPool.MediumEffortModel(); got != tt.wantMed {
+					t.Errorf("MediumEffortModel() = %q, want %q", got, tt.wantMed)
 				}
 				return
 			}
 			var appCfg *config.Config
-			if tt.appCfgVal != nil {
-				val := *tt.appCfgVal
+			if tt.appLowVal != nil || tt.appMedVal != nil {
 				appCfg = newTestConfig(func(d *config.ConfigData) {
-					d.LowEffortModel = val
+					if tt.appLowVal != nil {
+						d.LowEffortModel = *tt.appLowVal
+					}
+					if tt.appMedVal != nil {
+						d.MediumEffortModel = *tt.appMedVal
+					}
 				})
 			}
-			p := New(appCfg, WorkerPoolConfig{LowEffortModel: tt.cfgModel})
-			if got := p.LowEffortModel(); got != tt.wantResult {
-				t.Errorf("LowEffortModel() = %q, want %q", got, tt.wantResult)
+			p := New(appCfg, WorkerPoolConfig{LowEffortModel: tt.cfgLow, MediumEffortModel: tt.cfgMed})
+			if got := p.LowEffortModel(); got != tt.wantLow {
+				t.Errorf("LowEffortModel() = %q, want %q", got, tt.wantLow)
+			}
+			if got := p.MediumEffortModel(); got != tt.wantMed {
+				t.Errorf("MediumEffortModel() = %q, want %q", got, tt.wantMed)
 			}
 		})
 	}

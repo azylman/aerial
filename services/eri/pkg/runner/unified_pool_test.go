@@ -136,15 +136,21 @@ func TestUnifiedProcessPool_Defaults(t *testing.T) {
 func TestUnifiedProcessPool_ModelResolution(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name, model, defaultModel, wantModel string
-		checkDaemon                          bool
+		name, model, defaultModel, updateModel, wantModel, wantUpdatedModel string
+		nilPool, checkDaemon                                                bool
 	}{
-		{name: "ModelBound", model: "gemini-3.8-flash-low", wantModel: "gemini-3.8-flash-low", checkDaemon: true},
-		{name: "ModelFallback", defaultModel: "gemini-2.5-pro", wantModel: "gemini-2.5-pro"},
+		{name: "NilPoolUpdateModel", nilPool: true, updateModel: "claude-sonnet-5-5-low"},
+		{name: "ModelBoundAndHotReload", model: "gemini-3.8-flash-low", updateModel: "gpt-oss-120b-medium", wantModel: "gemini-3.8-flash-low", wantUpdatedModel: "gpt-oss-120b-medium", checkDaemon: true},
+		{name: "ModelFallbackAndEmptyUpdateIgnored", defaultModel: "gemini-2.5-pro", updateModel: "   ", wantModel: "gemini-2.5-pro", wantUpdatedModel: "gemini-2.5-pro"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			if tc.nilPool {
+				var p *UnifiedProcessPool
+				p.UpdateModel(tc.updateModel)
+				return
+			}
 			mock := NewMockSpawner()
 			pool := NewUnifiedProcessPool(PoolConfig{Model: tc.model, DefaultModel: tc.defaultModel}, mock)
 			defer pool.Close()
@@ -161,6 +167,24 @@ func TestUnifiedProcessPool_ModelResolution(t *testing.T) {
 				mock.mu.Unlock()
 				if spawnCfg.Model != tc.wantModel {
 					t.Fatalf("expected model %s, got %s", tc.wantModel, spawnCfg.Model)
+				}
+			}
+			pool.UpdateModel(tc.updateModel)
+			pool.MarkDirty()
+			pool.WaitBackground()
+			if got := pool.cfg.Model; got != tc.wantUpdatedModel {
+				t.Fatalf("expected updated pool model %q, got %q", tc.wantUpdatedModel, got)
+			}
+			if tc.checkDaemon {
+				daemon, err := pool.GetOrCreate(context.Background(), "target-1", "")
+				if err != nil || daemon == nil {
+					t.Fatalf("unexpected GetOrCreate after UpdateModel: daemon=%v err=%v", daemon, err)
+				}
+				mock.mu.Lock()
+				spawnCfg := mock.lastSpawnCfg
+				mock.mu.Unlock()
+				if spawnCfg.Model != tc.wantUpdatedModel {
+					t.Fatalf("expected updated daemon model %s, got %s", tc.wantUpdatedModel, spawnCfg.Model)
 				}
 			}
 		})

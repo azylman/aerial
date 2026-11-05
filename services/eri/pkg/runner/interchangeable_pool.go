@@ -224,6 +224,12 @@ func (p *InterchangeablePool) SetSessionCallbacks(getRec func(ctx context.Contex
 	}
 }
 
+func (p *InterchangeablePool) UpdateModel(model string) {
+	if p != nil && p.underlying != nil {
+		p.underlying.UpdateModel(model)
+	}
+}
+
 func (p *InterchangeablePool) MarkDirty() {
 	if p != nil && p.underlying != nil {
 		p.underlying.MarkDirty()

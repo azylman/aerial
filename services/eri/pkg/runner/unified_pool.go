@@ -118,6 +118,20 @@ func (p *UnifiedProcessPool) SetSessionCallbacks(getRec func(ctx context.Context
 	p.mu.Unlock()
 }
 
+// UpdateModel updates the model used for newly spawned or rotated daemons in the pool.
+func (p *UnifiedProcessPool) UpdateModel(model string) {
+	if p == nil {
+		return
+	}
+	trimmed := strings.TrimSpace(model)
+	if trimmed == "" {
+		return
+	}
+	p.mu.Lock()
+	p.cfg.Model, p.cfg.DefaultModel = trimmed, trimmed
+	p.mu.Unlock()
+}
+
 // Initialize pre-warms configured target daemons sequentially in the caller's context.
 func (p *UnifiedProcessPool) Initialize(ctx context.Context) error {
 	if p.isClosed() {
@@ -220,17 +234,21 @@ func (p *UnifiedProcessPool) checkExistingDaemonForCreateLocked(targetKey, trimm
 }
 
 func (p *UnifiedProcessPool) buildDaemonConfig(targetKey, trimmedSess string, initialTurns []int) (DaemonConfig, error) {
-	daemonEnv := filterVanadisChunkEnv(p.cfg.Env)
-	if home := strings.TrimSpace(p.cfg.GeminiHomeDir); home != "" {
+	p.mu.RLock()
+	cfg := p.cfg
+	p.mu.RUnlock()
+
+	daemonEnv := filterVanadisChunkEnv(cfg.Env)
+	if home := strings.TrimSpace(cfg.GeminiHomeDir); home != "" {
 		geminiDir := filepath.Join(home, ".gemini")
 		if err := os.MkdirAll(geminiDir, 0o755); err != nil {
 			return DaemonConfig{}, fmt.Errorf("failed to create runtime home directory %q: %w", geminiDir, err)
 		}
 		daemonEnv = BuildAgyEnv(AgyEnvInput{
-			BaseEnv:  p.cfg.Env,
+			BaseEnv:  cfg.Env,
 			HomeDir:  home,
 			TargetID: targetKey,
-			Timezone: p.cfg.Timezone,
+			Timezone: cfg.Timezone,
 		})
 	}
 
@@ -241,10 +259,10 @@ func (p *UnifiedProcessPool) buildDaemonConfig(targetKey, trimmedSess string, in
 
 	return DaemonConfig{
 		ThreadID: targetKey, SessionID: trimmedSess, InitialTurnCount: initTurnCount,
-		Model: p.cfg.Model, AgyBin: p.cfg.AgyBin, Cwd: p.cfg.Cwd, Env: daemonEnv,
-		GeminiHomeDir: p.cfg.GeminiHomeDir, Timeout: p.cfg.HandshakeTimeout,
-		TranscriptRescuer: p.cfg.TranscriptRescuer, MemoryRetriever: p.cfg.MemoryRetriever,
-		AmbientContextRetriever: p.cfg.AmbientContextRetriever,
+		Model: cfg.Model, AgyBin: cfg.AgyBin, Cwd: cfg.Cwd, Env: daemonEnv,
+		GeminiHomeDir: cfg.GeminiHomeDir, Timeout: cfg.HandshakeTimeout,
+		TranscriptRescuer: cfg.TranscriptRescuer, MemoryRetriever: cfg.MemoryRetriever,
+		AmbientContextRetriever: cfg.AmbientContextRetriever,
 	}, nil
 }
 
