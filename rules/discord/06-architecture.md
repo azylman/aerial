@@ -33,19 +33,21 @@ Aerial runs as a multi-node HashiCorp Nomad cluster supervised by Nomad and `han
   - **`synapse`**: Event-driven router dispatching Infisical secret webhooks to Nomad variables, GitHub push/CI webhooks to `hangar` and `eri`, and Vanadis chunk lifecycle progression.
   - **`edge-proxy`**: Ingress reverse proxy and HMAC verification gateway exposing secure external webhooks into the local Nomad mesh.
 
-- **Observability & Supporting Services**:
+- **Observability, AI Inference & Supporting Services**:
   - **`vector`**: High-performance log collector and transform pipeline shipping container stdout/stderr into OpenObserve.
   - **`cadvisor`**: Container resource metrics collector (CPU, memory, network, disk).
   - **`node-exporter`**: Host telemetry collector gathering CPU, memory, storage, thermals, and OS metrics.
   - **`postgres-exporter`**: Database metrics exporter collecting connection pools, transactions, and cache stats.
   - **`victoriametrics`**: Single-node Prometheus-compatible TSDB storing system metrics with modular scrape configs.
   - **`grafana`**: Cyberpunk-themed visual telemetry dashboards.
-  - **`ollama`**: Local LLM and vector embedding server for semantic memory.
+  - **`senses`**: Unified Rust CUDA ONNX Runtime service handling speech recognition (NeMo Parakeet TDT 0.6B v2 STT), voice synthesis (Kokoro-82M TTS), vector embeddings (BAAI/bge-small-en-v1.5), speaker verification (ECAPA-TDNN), and object detection (YOLO11n).
+  - **`pjev`**: Local CUDA GGUF LLM and embedding inference service.
+  - **`vision`**: Camera vision and multimodal event orchestration service.
 
 - **Heterogeneous 3-Node Cluster Topology**:
-  - **`quiet-zero`** (Core Server Node): Primary server hosting persistent storage, PostgreSQL + pgvector, `eri` execution engine, `hangar` GitOps, CoreDNS, Infisical, and full-stack telemetry.
-  - **`calibarn`** (AI / GPU Compute Node): Hardware-accelerated edge node with NVIDIA GPU acceleration hosting speech recognition (Faster-Whisper large-v3-turbo) and voice synthesis (Kokoro-82M TTS) over Wyoming protocol.
-  - **`cockpit`** (Touch Kiosk Node): Interactive touch display HUD hosting microphone capture (`ear`), wake-word detection, and WebRTC media streaming.
+  - **`quiet-zero`** (Core Storage & Telemetry Node): Primary server hosting persistent NVMe storage, PostgreSQL 18 + pgvector, `haro`, `synapse`, CoreDNS, Infisical, VictoriaMetrics, OpenObserve, Grafana, and MCP microservices.
+  - **`calibarn`** (AI / GPU & Performance Compute Node): NixOS 26.05 node with NVIDIA GPU acceleration hosting `eri`, `vanadis`, `coven`, `agentsview`, `hangar`, `senses`, `pjev`, `vision`, `kernel-browser`, and self-hosted GitHub Actions runners.
+  - **`cockpit`** (Touch Kiosk Node): Interactive touch display HUD hosting microphone capture (`kiosk-ear`), wake-word detection, remote display control (`kiosk-remote`), Cast watcher (`kiosk-cast-watcher`), and WebRTC media streaming (`kiosk-go2rtc`).
 
 To inspect active job allocations, service health, or cluster status, query Nomad jobs via `nomad-mcp` (`list_jobs`, `get_job`, `get_allocation_logs`) or inspect `nomad/jobs/*.nomad`.
 
