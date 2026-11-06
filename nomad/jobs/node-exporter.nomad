@@ -53,6 +53,7 @@ job "node-exporter" {
           "--path.sysfs=/host/sys",
           "--path.rootfs=/rootfs",
           "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)",
+          "--collector.filesystem.fs-types-exclude=^(autofs|binfmt_misc|bpf|cgroup2?|configfs|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|iso9660|mqueue|nsfs|overlay|proc|procfs|pstore|rpc_pipefs|securityfs|selinuxfs|squashfs|sysfs|tracefs|cifs|smb3|nfs|nfs4)$$",
           "--log.format=json"
         ]
       }
