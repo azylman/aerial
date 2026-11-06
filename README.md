@@ -16,7 +16,7 @@ Built in **Go (1.27)** and orchestrated as a resilient bare-metal homelab mesh:
 - **Service Discovery & Routing**: **CoreDNS** (internal mesh DNS) + **Nginx** (reverse proxy & edge ingress).
 - **Persistence & Vector Memory**: **PostgreSQL 18 + pgvector** — Multi-turn conversation state, strict 1-to-1 single-service table ownership, and hybrid RRF semantic memory (`coven`).
 - **Schema Migrations**: **Ariga Atlas** — Declarative schema migrations, automated diffing, and checksum validation via Nomad batch jobs.
-- **Queuing & Idempotent Ingestion**: **River** — Transactional, PostgreSQL-backed Go job queue powering strictly idempotent webhook processing, event dispatch, and multi-chunk build orchestration (`vanadis`).
+- **Idempotent, guaranteed delivery event handling**: **Webhooks + River queue** — Transactional, PostgreSQL-backed Go job queue powering strictly idempotent webhook processing, event dispatch, and multi-chunk build orchestration (`vanadis`).
 - **Secrets Management**: **Infisical + Redis** — Centralized secret governance with dynamic runtime injection and zero plaintext disk persistence.
 - **Observability & Telemetry**:
   - **Metrics**: **VictoriaMetrics** (TSDB) + **Grafana** (telemetry HUDs) + Prometheus Exporters (**cAdvisor**, **Node Exporter**, **Postgres Exporter**)
