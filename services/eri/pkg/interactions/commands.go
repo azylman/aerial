@@ -20,6 +20,14 @@ func CommandDefinitions() []*discordgo.ApplicationCommand {
 		{
 			Name:        "quota",
 			Description: "Show remaining model quota and reset windows",
+			Options: []*discordgo.ApplicationCommandOption{
+				{
+					Type:        discordgo.ApplicationCommandOptionBoolean,
+					Name:        "public",
+					Description: "Post the result in the channel for everyone to see (default: only you)",
+					Required:    false,
+				},
+			},
 		},
 		{
 			Name:        "rotate",
