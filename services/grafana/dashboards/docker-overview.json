@@ -18,7 +18,7 @@
         "y": 0
       },
       "id": 100,
-      "title": "\u26a1 Container Fleet Overview",
+      "title": "⚡ Container Fleet Overview",
       "type": "row"
     },
     {
@@ -72,7 +72,8 @@
         }
       ],
       "title": "Running Containers",
-      "type": "stat"
+      "type": "stat",
+      "description": "Running container count across nodes. Anomaly target: docker_running_containers_dropout (count(count by (name) (label_replace(container_last_seen{name!=\"\"} > (time() - 30), \"name\", \"$1\", \"name\", \"^(.+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$\"))))."
     },
     {
       "datasource": {
@@ -134,7 +135,8 @@
         }
       ],
       "title": "Total Containers CPU Usage",
-      "type": "stat"
+      "type": "stat",
+      "description": "Fleet container CPU usage across nodes. Anomaly target: docker_fleet_cpu_spike (sum(rate(container_cpu_usage_seconds_total{name!=\"\"}[1m])) * 100)."
     },
     {
       "datasource": {
@@ -242,7 +244,8 @@
         }
       ],
       "title": "Total Network I/O",
-      "type": "stat"
+      "type": "stat",
+      "description": "Fleet container network bandwidth. Anomaly target: docker_net_io_flood (sum(rate(container_network_receive_bytes_total[1m])) + sum(rate(container_network_transmit_bytes_total[1m])))."
     },
     {
       "datasource": {
@@ -345,7 +348,8 @@
         }
       ],
       "title": "Running Containers Over Time",
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "Running container count across nodes. Anomaly target: docker_running_containers_dropout (count(count by (name) (label_replace(container_last_seen{name!=\"\"} > (time() - 30), \"name\", \"$1\", \"name\", \"^(.+)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$\"))))."
     },
     {
       "collapsed": false,
@@ -356,7 +360,7 @@
         "y": 12
       },
       "id": 101,
-      "title": "\ud83d\udcc8 Resource Utilization by Container",
+      "title": "📈 Resource Utilization by Container",
       "type": "row"
     },
     {
@@ -415,7 +419,8 @@
         }
       ],
       "title": "Container CPU Usage (%)",
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "Fleet container CPU usage across nodes. Anomaly target: docker_fleet_cpu_spike (sum(rate(container_cpu_usage_seconds_total{name!=\"\"}[1m])) * 100)."
     },
     {
       "datasource": {
@@ -484,7 +489,7 @@
         "y": 21
       },
       "id": 102,
-      "title": "\ud83c\udf10 Network & Throttling",
+      "title": "🌐 Network & Throttling",
       "type": "row"
     },
     {
@@ -541,7 +546,8 @@
         }
       ],
       "title": "Container Network Bandwidth (RX / TX)",
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "Fleet container network bandwidth. Anomaly target: docker_net_io_flood (sum(rate(container_network_receive_bytes_total[1m])) + sum(rate(container_network_transmit_bytes_total[1m])))."
     },
     {
       "datasource": {

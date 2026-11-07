@@ -18,7 +18,7 @@
         "y": 0
       },
       "id": 100,
-      "title": "\ud83d\udda5\ufe0f MiniPC Hardware & System Status",
+      "title": "🖥️ MiniPC Hardware & System Status",
       "type": "row"
     },
     {
@@ -82,7 +82,8 @@
         }
       ],
       "title": "Host CPU Usage",
-      "type": "stat"
+      "type": "stat",
+      "description": "Host CPU utilization across nodes. Anomaly target: host_cpu (max(1 - avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[1m]))) * 100). vmalert rule: aerial_anomaly_score:host_cpu."
     },
     {
       "datasource": {
@@ -145,7 +146,8 @@
         }
       ],
       "title": "Host RAM Usage",
-      "type": "stat"
+      "type": "stat",
+      "description": "Host RAM utilization and memory breakdown. Anomaly target: host_ram_saturation (max((1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100))."
     },
     {
       "datasource": {
@@ -208,7 +210,8 @@
         }
       ],
       "title": "CPU Peak Temp",
-      "type": "stat"
+      "type": "stat",
+      "description": "Hardware thermal sensors and peak temperature. Anomaly target: host_thermal_spike (max(node_hwmon_temp_celsius) or max(node_thermal_zone_temp))."
     },
     {
       "datasource": {
@@ -271,7 +274,8 @@
         }
       ],
       "title": "Root Disk Space",
-      "type": "stat"
+      "type": "stat",
+      "description": "Root and data filesystem space utilization. Anomaly target: host_disk_exhaustion (max((1 - (node_filesystem_avail_bytes{mountpoint=~\"/mnt/data|/\"} / node_filesystem_size_bytes{mountpoint=~\"/mnt/data|/\"})) * 100))."
     },
     {
       "datasource": {
@@ -337,7 +341,7 @@
         "y": 5
       },
       "id": 101,
-      "title": "\u26a1 CPU & Load Trends",
+      "title": "⚡ CPU & Load Trends",
       "type": "row"
     },
     {
@@ -394,7 +398,8 @@
         }
       ],
       "title": "CPU Utilization Breakdown",
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "Host CPU utilization across nodes. Anomaly target: host_cpu (max(1 - avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\"}[1m]))) * 100). vmalert rule: aerial_anomaly_score:host_cpu."
     },
     {
       "datasource": {
@@ -455,7 +460,8 @@
         }
       ],
       "title": "System Load Averages (1m / 5m / 15m)",
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "System load averages across cluster nodes. Anomaly target: host_system_load (max(node_load1))."
     },
     {
       "collapsed": false,
@@ -466,7 +472,7 @@
         "y": 14
       },
       "id": 102,
-      "title": "\ud83c\udf21\ufe0f Thermal & Memory Health",
+      "title": "🌡️ Thermal & Memory Health",
       "type": "row"
     },
     {
@@ -517,8 +523,9 @@
           "refId": "A"
         }
       ],
-      "title": "Hardware Thermal Sensors (\u00b0C)",
-      "type": "timeseries"
+      "title": "Hardware Thermal Sensors (°C)",
+      "type": "timeseries",
+      "description": "Hardware thermal sensors and peak temperature. Anomaly target: host_thermal_spike (max(node_hwmon_temp_celsius) or max(node_thermal_zone_temp))."
     },
     {
       "datasource": {
@@ -583,7 +590,8 @@
         }
       ],
       "title": "Host Memory Breakdown",
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "Host RAM utilization and memory breakdown. Anomaly target: host_ram_saturation (max((1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100))."
     }
   ],
   "refresh": "15s",
