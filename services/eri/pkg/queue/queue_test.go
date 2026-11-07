@@ -2470,6 +2470,7 @@ func TestWorkerPool_DeliverStatusWidget(t *testing.T) {
 		priorRequests                                     []discord.StatusWidgetRequest
 		priorSteps                                        map[string]string
 		expectDeliveredChunks                             []discord.StatusWidgetChunk
+		expectDeliveredMessageID                          string
 		fifoFillCount                                     int
 		expectEvictedBuildID                              string
 		deliveryFuncErr                                   error
@@ -2508,6 +2509,24 @@ func TestWorkerPool_DeliverStatusWidget(t *testing.T) {
 			},
 			req:         discord.StatusWidgetRequest{ID: "b-inherit", ChannelID: targetChan},
 			expectMsgID: "msg-inherit-999",
+		},
+		{
+			name: "cached newer snowflake overrides stale caller message ID",
+			priorRequests: []discord.StatusWidgetRequest{
+				{ID: "b-newer-cached", MessageID: "1568701370469584946", ChannelID: targetChan},
+			},
+			req:                      discord.StatusWidgetRequest{ID: "b-newer-cached", MessageID: "1568690000000000000", ChannelID: targetChan},
+			expectMsgID:              "1568701370469584946",
+			expectDeliveredMessageID: "1568701370469584946",
+		},
+		{
+			name: "caller with newer snowflake overrides cached older message ID",
+			priorRequests: []discord.StatusWidgetRequest{
+				{ID: "b-newer-caller", MessageID: "1568690000000000000", ChannelID: targetChan},
+			},
+			req:                      discord.StatusWidgetRequest{ID: "b-newer-caller", MessageID: "1568701370469584946", ChannelID: targetChan},
+			expectMsgID:              "1568701370469584946",
+			expectDeliveredMessageID: "1568701370469584946",
 		},
 		{
 			name:        "preserves existing chunk IDs when req chunk ID is empty",
@@ -2706,7 +2725,13 @@ func TestWorkerPool_DeliverStatusWidget(t *testing.T) {
 				}
 				deliveredChanID = req.ChannelID
 				deliveredReq = req
-				return tc.widgetMsgID, nil
+				if tc.widgetMsgID != "" {
+					return tc.widgetMsgID, nil
+				}
+				if req.MessageID != "" {
+					return req.MessageID, nil
+				}
+				return "default-delivered-msg", nil
 			})
 			for _, pr := range tc.priorRequests {
 				if _, err := p.DeliverStatusWidget(pr); err != nil {
@@ -2742,6 +2767,9 @@ func TestWorkerPool_DeliverStatusWidget(t *testing.T) {
 			}
 			if tc.expectDeliveredChannelID != "" && deliveredChanID != tc.expectDeliveredChannelID {
 				t.Fatalf("delivered ChannelID = %q, want %q", deliveredChanID, tc.expectDeliveredChannelID)
+			}
+			if tc.expectDeliveredMessageID != "" && deliveredReq.MessageID != tc.expectDeliveredMessageID {
+				t.Fatalf("delivered MessageID = %q, want %q", deliveredReq.MessageID, tc.expectDeliveredMessageID)
 			}
 			if len(tc.expectDeliveredChunks) > 0 {
 				if len(deliveredReq.Chunks) != len(tc.expectDeliveredChunks) {
@@ -2800,6 +2828,40 @@ func TestWorkerPool_DeliverStatusWidget(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("DeliverStatusWidgetWithContext canceled context returns context.Canceled without delivery or cache mutation", func(t *testing.T) {
+		t.Parallel()
+		deliveryCalled := false
+		p := &WorkerPool{}
+		p.SetWidgetDeliveryFunc(func(req discord.StatusWidgetRequest) (string, error) {
+			deliveryCalled = true
+			return "delivered-msg", nil
+		})
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		req := discord.StatusWidgetRequest{
+			ID:        "b-canceled",
+			ChannelID: targetChan,
+			MessageID: "msg-init",
+			Chunks:    []discord.StatusWidgetChunk{{ID: "c-1", Status: "running"}},
+		}
+
+		_, err := p.DeliverStatusWidgetWithContext(ctx, req)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+		if deliveryCalled {
+			t.Fatal("expected delivery func not to be called")
+		}
+		p.widgetMu.Lock()
+		_, exists := p.widgetsByID["b-canceled"]
+		p.widgetMu.Unlock()
+		if exists {
+			t.Fatal("expected widgetsByID not to be mutated on canceled context")
+		}
+	})
 }
 
 func TestIsBuildCompletionPrompt(t *testing.T) {
