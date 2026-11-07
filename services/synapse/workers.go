@@ -800,6 +800,7 @@ type OutboundDispatcher interface {
 
 type DefaultOutboundDispatcher struct {
 	hangarURL                string
+	fluxReceiverURL          string
 	brainURL                 string
 	httpClient               *http.Client
 	gitPushClient            *http.Client
@@ -829,6 +830,38 @@ func NewDefaultOutboundDispatcher(hangarURL, brainURL string, client *http.Clien
 		retryDelay:               1500 * time.Millisecond,
 		maxAttempts:              6,
 	}
+}
+
+func (d *DefaultOutboundDispatcher) SetFluxReceiverURL(url string) {
+	d.fluxReceiverURL = strings.TrimRight(url, "/")
+}
+
+func (d *DefaultOutboundDispatcher) forwardFluxReceiver(ctx context.Context, payload any) error {
+	if d.fluxReceiverURL == "" {
+		return nil
+	}
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal flux receiver payload: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, d.fluxReceiverURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return fmt.Errorf("create flux receiver request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := d.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("flux receiver request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		if readErr != nil {
+			return fmt.Errorf("flux receiver returned status %d", resp.StatusCode)
+		}
+		return fmt.Errorf("flux receiver returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
 }
 
 func (d *DefaultOutboundDispatcher) postHangar(ctx context.Context, endpointPath, opName, targetDesc string, payload any) ([]byte, bool, error) {
@@ -871,21 +904,41 @@ func (d *DefaultOutboundDispatcher) postHangar(ctx context.Context, endpointPath
 }
 
 func (d *DefaultOutboundDispatcher) DispatchGitPush(ctx context.Context, req GitPushEventRequest) error {
-	_, _, err := d.postHangar(ctx, "/events/git_push", "git push", "repo "+req.Repo+" is not managed by hangar", req)
-	return err
+	var fluxErr error
+	if d.fluxReceiverURL != "" {
+		fluxErr = d.forwardFluxReceiver(ctx, req)
+	}
+	if d.hangarURL != "" {
+		_, _, err := d.postHangar(ctx, "/events/git_push", "git push", "repo "+req.Repo+" is not managed by hangar", req)
+		if fluxErr != nil {
+			log.Printf("[synapse] [dispatcher] warning forwarding git push to flux receiver: %v", fluxErr)
+		}
+		return err
+	}
+	return fluxErr
 }
 
 func (d *DefaultOutboundDispatcher) DispatchImageReady(ctx context.Context, req ImageReadyEventRequest) ([]string, error) {
-	respBody, skipped, err := d.postHangar(ctx, "/events/image_ready", "image ready", "image "+req.Image+" has no matching nomad jobs", req)
-	if err != nil || skipped {
-		return nil, err
+	var fluxErr error
+	if d.fluxReceiverURL != "" {
+		fluxErr = d.forwardFluxReceiver(ctx, req)
 	}
-	var res ImageReadyEventResponse
-	if err := json.Unmarshal(respBody, &res); err != nil {
-		log.Printf("[synapse] [dispatcher] warning decoding image ready response for %s: %v", req.Image, err)
-		return nil, nil
+	if d.hangarURL != "" {
+		respBody, skipped, err := d.postHangar(ctx, "/events/image_ready", "image ready", "image "+req.Image+" has no matching nomad jobs", req)
+		if fluxErr != nil {
+			log.Printf("[synapse] [dispatcher] warning forwarding image ready to flux receiver: %v", fluxErr)
+		}
+		if err != nil || skipped {
+			return nil, err
+		}
+		var res ImageReadyEventResponse
+		if err := json.Unmarshal(respBody, &res); err != nil {
+			log.Printf("[synapse] [dispatcher] warning decoding image ready response for %s: %v", req.Image, err)
+			return nil, nil
+		}
+		return res.MatchedJobs, nil
 	}
-	return res.MatchedJobs, nil
+	return nil, fluxErr
 }
 
 func validateBrainChannel(channelID, endpointPath string) error {

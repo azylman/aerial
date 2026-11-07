@@ -46,6 +46,7 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 		wantErr            bool
 		wantSubstr         string
 		wantMatchedJobs    int
+		wantRequests       int
 	}{
 		{
 			name:         "DispatchGitPush success 200",
@@ -107,6 +108,44 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 			responseHeaderType: "text/html",
 			responseBody:       `<html><title>404 Not Found</title><body>Proxy Error</body></html>`,
 			wantErr:            true,
+		},
+		{
+			name:         "DispatchGitPush forwards to flux receiver",
+			callType:     "git_push_flux",
+			statusCode:   http.StatusOK,
+			responseBody: `{"status":"accepted"}`,
+			wantRequests: 2,
+		},
+		{
+			name:            "DispatchImageReady forwards to flux receiver",
+			callType:        "image_ready_flux",
+			statusCode:      http.StatusOK,
+			responseBody:    `{"status":"accepted","matched_jobs":["synapse"]}`,
+			wantMatchedJobs: 1,
+			wantRequests:    2,
+		},
+		{
+			name:         "DispatchGitPush flux only without hangar",
+			callType:     "git_push_flux_only",
+			statusCode:   http.StatusOK,
+			responseBody: `{"status":"accepted"}`,
+			wantRequests: 1,
+		},
+		{
+			name:         "DispatchGitPush flux only error returns error",
+			callType:     "git_push_flux_only",
+			statusCode:   http.StatusInternalServerError,
+			responseBody: `{"error":"flux down"}`,
+			wantErr:      true,
+			wantRequests: 1,
+		},
+		{
+			name:         "DispatchImageReady flux only error returns error",
+			callType:     "image_ready_flux_only",
+			statusCode:   http.StatusInternalServerError,
+			responseBody: `{"error":"flux down"}`,
+			wantErr:      true,
+			wantRequests: 1,
 		},
 		{
 			name:               "DispatchImageReady HTML 404 rejected",
@@ -302,6 +341,13 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 			defer ts.Close()
 
 			disp := NewDefaultOutboundDispatcher(ts.URL, ts.URL, nil)
+			switch tc.callType {
+			case "git_push_flux", "image_ready_flux":
+				disp.SetFluxReceiverURL(ts.URL)
+			case "git_push_flux_only", "image_ready_flux_only":
+				disp = NewDefaultOutboundDispatcher("", ts.URL, nil)
+				disp.SetFluxReceiverURL(ts.URL)
+			}
 			if tc.nilSubClient {
 				disp.discordMsgClient = nil
 				disp.discordInteractionClient = nil
@@ -330,9 +376,9 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 
 			var err error
 			switch tc.callType {
-			case "git_push":
+			case "git_push", "git_push_flux", "git_push_flux_only":
 				err = disp.DispatchGitPush(testCtx, GitPushEventRequest{Ref: "refs/heads/main", Commit: "testcommit123"})
-			case "image_ready":
+			case "image_ready", "image_ready_flux", "image_ready_flux_only":
 				jobs, e := disp.DispatchImageReady(testCtx, ImageReadyEventRequest{Image: "ghcr.io/azylman/aerial-synapse:latest", Digest: "sha256:abcd"})
 				err = e
 				if tc.wantMatchedJobs > 0 && len(jobs) != tc.wantMatchedJobs {
@@ -368,6 +414,9 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 				if afterRetry <= beforeRetry {
 					t.Errorf("expected brain_http_retry to increment, before=%v after=%v", beforeRetry, afterRetry)
 				}
+			}
+			if tc.wantRequests > 0 && int(attempts.Load()) != tc.wantRequests {
+				t.Errorf("got %d HTTP requests, want %d", attempts.Load(), tc.wantRequests)
 			}
 		})
 	}

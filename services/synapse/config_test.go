@@ -23,6 +23,7 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 		wantGHTok     string
 		wantGHURL     string
 		wantPGURL     string
+		wantFluxURL   string
 		wantBrainURL  string
 		wantEriURL    string
 		wantSysChan   string
@@ -90,6 +91,13 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 			wantBrainURL: "http://eri-primary.aerial:8088",
 			wantEriURL:   "http://eri-primary.aerial:8088",
 		},
+		{
+			name: "flux receiver url primary env",
+			env: map[string]string{
+				"FLUX_RECEIVER_URL": "http://flux-receiver.aerial/webhook/",
+			},
+			wantFluxURL: "http://flux-receiver.aerial/webhook",
+		},
 	}
 
 	keysToClear := []string{
@@ -97,7 +105,7 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 		"INFISICAL_CLIENT_SECRET", "INFISICAL_PROJECT_ID",
 		"INFISICAL_ENVIRONMENT", "NOMAD_ADDR",
 		"NOMAD_TOKEN", "GITHUB_PAT", "GITHUB_API_URL",
-		"DATABASE_URL", "HANGAR_URL", "ERI_URL",
+		"DATABASE_URL", "HANGAR_URL", "FLUX_RECEIVER_URL", "ERI_URL",
 		"SYSTEM_CHANNEL_ID", "CONFIG_PATH", "DISCORD_TOKEN",
 	}
 
@@ -122,6 +130,7 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 				{cfg.GitHubToken, tc.wantGHTok, "GitHubToken"},
 				{cfg.GitHubAPIURL, tc.wantGHURL, "GitHubAPIURL"},
 				{cfg.PostgresURL, tc.wantPGURL, "PostgresURL"},
+				{cfg.FluxReceiverURL, tc.wantFluxURL, "FluxReceiverURL"},
 				{cfg.BrainURL, tc.wantBrainURL, "BrainURL"},
 				{cfg.EriURL, tc.wantEriURL, "EriURL"},
 				{cfg.SystemChannelID, tc.wantSysChan, "SystemChannelID"},
@@ -149,6 +158,7 @@ func TestLoadConfig_YAMLAndOverrides(t *testing.T) {
 		wantEnv                string
 		wantNomadAddr          string
 		wantHangarURL          string
+		wantFluxURL            string
 		wantBrainURL           string
 		wantSysChan            string
 		wantAuthors            []string
@@ -169,6 +179,14 @@ eri_url: "http://brain.custom:8088"
 			wantNomadAddr: "http://nomad.custom:4646",
 			wantHangarURL: "http://hangar.custom:8087",
 			wantBrainURL:  "http://brain.custom:8088",
+		},
+		{
+			name: "yaml config with flux_receiver_url",
+			localYAML: `port: "4099"
+flux_receiver_url: "http://flux-receiver.custom:8080/hook/"
+`,
+			wantPort:    "4099",
+			wantFluxURL: "http://flux-receiver.custom:8080/hook",
 		},
 		{
 			name: "yaml config with eri_url",
@@ -250,6 +268,12 @@ eri_url: "http://brain.custom:8088"
 			wantSysChan: "aerial-dev",
 		},
 		{
+			name:        "system_channel_id loaded from aerial config.yaml fallback",
+			localYAML:   "port: \"4020\"\n",
+			aerialYAML:  "system_channel_id: \"998877665544332211\"\n",
+			wantSysChan: "998877665544332211",
+		},
+		{
 			name:        "auto_update_pr_authors loaded from yaml",
 			localYAML:   "auto_update_pr_authors:\n  - \"trusted-author\"\n  - \"peer-author\"\n",
 			wantAuthors: []string{"trusted-author", "peer-author"},
@@ -306,7 +330,7 @@ eri_url: "http://brain.custom:8088"
 
 	keysToClear := []string{
 		"PORT", "INFISICAL_URL", "INFISICAL_ENVIRONMENT",
-		"NOMAD_ADDR", "HANGAR_URL", "ERI_URL", "SYSTEM_CHANNEL_ID",
+		"NOMAD_ADDR", "HANGAR_URL", "FLUX_RECEIVER_URL", "ERI_URL", "SYSTEM_CHANNEL_ID",
 	}
 
 	for _, tc := range tests {
@@ -364,6 +388,7 @@ eri_url: "http://brain.custom:8088"
 				{cfg.InfisicalEnvironment, tc.wantEnv, "InfisicalEnvironment"},
 				{cfg.NomadAddr, tc.wantNomadAddr, "NomadAddr"},
 				{cfg.HangarURL, tc.wantHangarURL, "HangarURL"},
+				{cfg.FluxReceiverURL, tc.wantFluxURL, "FluxReceiverURL"},
 				{cfg.BrainURL, tc.wantBrainURL, "BrainURL"},
 				{cfg.EriURL, tc.wantBrainURL, "EriURL"},
 				{cfg.SystemChannelID, tc.wantSysChan, "SystemChannelID"},
@@ -821,6 +846,22 @@ func TestLookupCollaboratorCIAlert(t *testing.T) {
 			author:        "collab-alpha",
 			wantOK:        false,
 			wantHasAlerts: false,
+		},
+		{
+			name:          "empty repo returns false",
+			srv:           server,
+			repo:          "",
+			author:        "collab-alpha",
+			wantOK:        false,
+			wantHasAlerts: false,
+		},
+		{
+			name:          "empty author returns false",
+			srv:           server,
+			repo:          "azylman/collab-repo",
+			author:        "",
+			wantOK:        false,
+			wantHasAlerts: true,
 		},
 	}
 
