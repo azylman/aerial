@@ -22,6 +22,7 @@ updates:
       - "/pkg"
       - "/scripts/code-health"
       - "/mcp/discord-mcp"
+      - "/mcp/docket-mcp"
       - "/mcp/kernel-mcp"
       - "/services/coven"
       - "/services/dashboard"
