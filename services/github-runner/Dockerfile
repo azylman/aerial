@@ -4,6 +4,7 @@ FROM golang:1.27.3-bookworm AS go-builder
 RUN mkdir -p /out/bin && \
     GOBIN=/out/bin CGO_ENABLED=0 go install golang.org/x/tools/cmd/deadcode@v0.52.0 && \
     GOBIN=/out/bin CGO_ENABLED=0 go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.4.1 && \
+    GOBIN=/out/bin CGO_ENABLED=0 go install go.kenn.io/roborev/cmd/roborev@v0.74.1-0.20261107140411-0cc4d482018f && \
     rm -rf /usr/local/go/test /usr/local/go/doc /usr/local/go/api
 
 FROM ubuntu:24.04 AS rust-builder
@@ -56,6 +57,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-venv \
     python3-pip \
+    postgresql-client \
     libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -79,16 +81,7 @@ RUN mkdir -p -m 755 /etc/apt/keyrings && \
 # Install official Antigravity CLI (agy)
 RUN curl -fsSL --compressed https://antigravity.google/cli/install.sh | bash -s -- -d /usr/local/bin
 
-# Install kenn-io/roborev v0.74.0 with SHA256 verification
-ARG ROBOREV_VERSION=0.74.0
-ARG ROBOREV_SHA256=9f8b72b7bb42b1572b11b6fa52f59255a6862ce714d945b64e776f24c2192a87
-RUN curl -fsSL "https://github.com/kenn-io/roborev/releases/download/v${ROBOREV_VERSION}/roborev_${ROBOREV_VERSION}_linux_amd64.tar.gz" -o /tmp/roborev.tar.gz && \
-    echo "${ROBOREV_SHA256}  /tmp/roborev.tar.gz" | sha256sum -c - && \
-    tar -xzf /tmp/roborev.tar.gz -C /usr/local/bin roborev && \
-    chmod 0755 /usr/local/bin/roborev && \
-    rm -f /tmp/roborev.tar.gz
-
-# Pre-baked toolchain: Go 1.27.3, Rust stable, deadcode, oapi-codegen, golangci-lint, Node 22, Docker CLI + plugins
+# Pre-baked toolchain: Go 1.27.3, Rust stable, deadcode, oapi-codegen, roborev, golangci-lint, Node 22, Docker CLI + plugins
 COPY --from=go-builder /usr/local/go /usr/local/go
 COPY --from=go-builder /out/bin/* /usr/local/bin/
 COPY --from=rust-builder /usr/local/rustup /usr/local/rustup
