@@ -3,23 +3,35 @@
     "scheduler": {
       "serverUrl": "http://haro.aerial/mcp"
     },
-    "discord": {
-      "serverUrl": "http://discord-mcp:4001/mcp"
+    "memory": {
+      "serverUrl": "http://coven.aerial/mcp"
     },
-    "docker": {
-      "serverUrl": "http://docker-mcp:4002/mcp"
+    "vanadis": {
+      "serverUrl": "http://vanadis.aerial/mcp"
+    },
+    "discord": {
+      "serverUrl": "http://discord-mcp.aerial/mcp"
     },
     "github": {
-      "serverUrl": "http://github-mcp:4003/mcp"
+      "serverUrl": "http://github-mcp.aerial/mcp"
+    },
+    "kubernetes": {
+      "serverUrl": "http://kubernetes-mcp.aerial/mcp"
+    },
+    "infisical": {
+      "serverUrl": "http://infisical-mcp.aerial/mcp"
     },
     "victoriametrics": {
-      "serverUrl": "http://victoriametrics-mcp:4004/mcp"
+      "serverUrl": "http://victoriametrics-mcp.aerial/mcp"
+    },
+    "kernel": {
+      "serverUrl": "http://kernel-mcp.aerial/mcp"
     },
     "openobserve": {
       "headers": {
         "Authorization": "Basic YWRtaW5AYWVyaWFsLmxvY2FsOkFlcmlhbCFMb2dzMjAyNiM="
       },
-      "serverUrl": "http://openobserve:5080/openobserve/api/default/mcp"
+      "serverUrl": "http://openobserve.aerial:5080/openobserve/api/default/mcp"
     }
   }
 }

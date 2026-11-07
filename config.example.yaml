@@ -11,23 +11,23 @@ timezone: America/Los_Angeles
 # Discord system channel name or snowflake ID for startup and error alerts
 system_channel: aerial-dev
 
-# Optional Local/Edge Classifier Endpoint (Ollama)
-# When specified, ambient triage calls route to this Ollama instance.
+# Optional Local/Edge Classifier Endpoint (pjev / System-1)
+# When specified, ambient triage calls route to this endpoint (e.g. pjev on calibarn).
 # If omitted or empty, ambient triage uses cloud low_effort_model via Agy.
-# classifier_url: http://calibarn.aerial:11434
-# classifier_model: qwen2.5:3b # Defaults to qwen2.5:3b if classifier_url is set but model is omitted
+# classifier_url: http://pjev.aerial/v1/systemone
+# classifier_model: pjev-2b-32v-q4_k_s # Defaults to pjev-2b-32v-q4_k_s if classifier_url is set but model is omitted
 
-# Optional Local/Edge Thread Title Summarization Endpoint (Ollama)
-# When specified, thread titling calls route to this endpoint (runs in ~300ms locally).
+# Optional Local/Edge Thread Title Summarization Endpoint (senses / Ollama)
+# When specified, thread titling calls route to this endpoint (e.g. senses on calibarn).
 # If omitted, falls back to classifier_url if set, else uses cloud low_effort_model.
-# thread_title_url: http://calibarn.aerial:11434
+# thread_title_url: http://senses.aerial
 # thread_title_model: qwen2.5:3b # Defaults to qwen2.5:3b if thread_title_url is set
 
 # ------------------------------------------------------------------------------
 # Administrator Allowlist
 # ------------------------------------------------------------------------------
 # List of Discord user Snowflake IDs who are authorized to perform system-level
-# changes (modifying GEMINI.md, AGENTS.md, config.yaml, Docker containers, crons).
+# changes (modifying rules/, config.yaml, Kubernetes workloads, crons).
 # Messages from these users are tagged with is_admin: true.
 admin_users:
   - 123456789012345678 # Primary Admin
