@@ -57,6 +57,10 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 			wantRequests: 1,
 		},
 		{
+			name:     "DispatchGitPush without flux receiver returns nil",
+			callType: "git_push",
+		},
+		{
 			name:            "DispatchImageReady forwards to flux receiver",
 			callType:        "image_ready_flux",
 			statusCode:      http.StatusOK,
@@ -239,6 +243,57 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 			responseBody: `{"status":"ok"}`,
 			nilSubClient: true,
 		},
+		{
+			name:            "DispatchImageReady via kubeAPIServer and flux receiver success",
+			callType:        "image_ready_kube",
+			statusCode:      http.StatusOK,
+			wantMatchedJobs: []string{"aerial-synapse"},
+		},
+		{
+			name:         "DispatchImageReady workload none skipped",
+			callType:     "image_ready_none",
+			wantRequests: 0,
+		},
+		{
+			name:       "DispatchImageReady kube error only returns error",
+			callType:   "image_ready_kube_err",
+			statusCode: http.StatusInternalServerError,
+			wantErr:    true,
+		},
+		{
+			name:       "DispatchImageReady both kube and flux error returns combined error",
+			callType:   "image_ready_both_err",
+			statusCode: http.StatusInternalServerError,
+			wantErr:    true,
+		},
+		{
+			name:       "DispatchImageReady triggerFluxKustomizationReconcile error returns error",
+			callType:   "image_ready_kust_err",
+			statusCode: http.StatusOK,
+			wantErr:    true,
+		},
+		{
+			name:       "DispatchImageReady configmap 404 POST error returns error",
+			callType:   "image_ready_kube_404_post_err",
+			statusCode: http.StatusOK,
+			wantErr:    true,
+		},
+		{
+			name:       "DispatchImageReady configmap 404 POST conflict retry patch failure returns error",
+			callType:   "image_ready_kube_404_409_retry_err",
+			statusCode: http.StatusOK,
+			wantErr:    true,
+		},
+		{
+			name:       "DispatchImageReady configmap 404 creates then patches on 409 conflict",
+			callType:   "image_ready_kube_404_409",
+			statusCode: http.StatusOK,
+		},
+		{
+			name:       "DispatchImageReady configmap 404 creates successfully on POST",
+			callType:   "image_ready_kube_404_post_ok",
+			statusCode: http.StatusOK,
+		},
 	}
 
 	for _, tc := range tests {
@@ -247,6 +302,70 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 			var attempts atomic.Int32
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				att := attempts.Add(1)
+				if tc.callType == "image_ready_kube_404_409" {
+					if r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "aerial-image-tags") && att == 1 {
+						http.Error(w, "not found", http.StatusNotFound)
+						return
+					}
+					if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "configmaps") {
+						http.Error(w, "conflict", http.StatusConflict)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(`{}`))
+					return
+				}
+				if tc.callType == "image_ready_kube_404_post_ok" {
+					if r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "aerial-image-tags") && att == 1 {
+						http.Error(w, "not found", http.StatusNotFound)
+						return
+					}
+					if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "configmaps") {
+						w.Header().Set("Content-Type", "application/json")
+						w.WriteHeader(http.StatusCreated)
+						_, _ = w.Write([]byte(`{}`))
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(`{}`))
+					return
+				}
+				if tc.callType == "image_ready_kube_404_post_err" {
+					if r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "aerial-image-tags") {
+						http.Error(w, "not found", http.StatusNotFound)
+						return
+					}
+					if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "configmaps") {
+						http.Error(w, "post failed", http.StatusBadRequest)
+						return
+					}
+				}
+				if tc.callType == "image_ready_kube_404_409_retry_err" {
+					if r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "aerial-image-tags") && att == 1 {
+						http.Error(w, "not found", http.StatusNotFound)
+						return
+					}
+					if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "configmaps") {
+						http.Error(w, "conflict", http.StatusConflict)
+						return
+					}
+					if r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "aerial-image-tags") && att == 3 {
+						http.Error(w, "retry patch failed", http.StatusBadRequest)
+						return
+					}
+				}
+				if tc.callType == "image_ready_kust_err" {
+					if strings.Contains(r.URL.Path, "kustomizations") {
+						http.Error(w, "kustomization patch failed", http.StatusBadRequest)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(`{}`))
+					return
+				}
 				if int(att) <= tc.failCount {
 					http.Error(w, "transient error", http.StatusInternalServerError)
 					return
@@ -269,6 +388,20 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 			switch tc.callType {
 			case "git_push_flux", "image_ready_flux":
 				disp.SetFluxReceiverURL(ts.URL)
+			case "image_ready_both_err":
+				disp.SetKubeConfig(ts.URL, "test-token")
+				disp.SetFluxReceiverURL(ts.URL)
+			case "image_ready_kust_err":
+				disp.SetKubeConfig(ts.URL, "test-token")
+			case "image_ready_kube", "image_ready_none":
+				disp.SetKubeConfig(ts.URL, "test-token")
+				disp.SetFluxReceiverURL(ts.URL)
+			case "image_ready_kube_err":
+				disp.SetKubeConfig(ts.URL, "test-token")
+			case "image_ready_kube_404_409":
+				disp.SetKubeConfig(ts.URL, "test-token")
+			case "image_ready_kube_404_post_err", "image_ready_kube_404_409_retry_err", "image_ready_kube_404_post_ok":
+				disp.SetKubeConfig(ts.URL, "test-token")
 			}
 			if tc.nilSubClient {
 				disp.discordMsgClient = nil
@@ -300,11 +433,29 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 			switch tc.callType {
 			case "git_push", "git_push_flux":
 				err = disp.DispatchGitPush(testCtx, GitPushEventRequest{Ref: "refs/heads/main", Commit: "testcommit123"})
-			case "image_ready", "image_ready_flux":
-				jobs, e := disp.DispatchImageReady(testCtx, ImageReadyEventRequest{Image: "ghcr.io/azylman/aerial-synapse:latest", Digest: "sha256:abcd"})
+			case "image_ready", "image_ready_flux", "image_ready_kube", "image_ready_kube_err", "image_ready_kube_404_409", "image_ready_kube_404_post_ok", "image_ready_both_err", "image_ready_kust_err", "image_ready_kube_404_post_err", "image_ready_kube_404_409_retry_err":
+				jobs, e := disp.DispatchImageReady(testCtx, ImageReadyEventRequest{
+					Repo:      "azylman/aerial",
+					Image:     "ghcr.io/azylman/aerial-synapse:latest",
+					CommitSHA: "abcdef1234567890abcdef1234567890abcdef12",
+					Digest:    "sha256:abcd",
+				})
 				err = e
 				if len(tc.wantMatchedJobs) > 0 && !slices.Equal(jobs, tc.wantMatchedJobs) {
 					t.Errorf("got matched jobs %v, want %v", jobs, tc.wantMatchedJobs)
+				}
+			case "image_ready_none":
+				jobs, e := disp.DispatchImageReady(testCtx, ImageReadyEventRequest{
+					Repo:      "azylman/aerial",
+					Image:     "ghcr.io/azylman/none:latest",
+					CommitSHA: "abcdef1234567890abcdef1234567890abcdef12",
+				})
+				err = e
+				if len(jobs) > 0 {
+					t.Errorf("expected nil jobs for none, got %v", jobs)
+				}
+				if attempts.Load() != 0 {
+					t.Errorf("expected 0 HTTP requests for none, got %d", attempts.Load())
 				}
 			case "prompt":
 				err = disp.DispatchPrompt(testCtx, PromptRequest{ChannelID: tc.snowflake, Prompt: "test prompt message"})
@@ -339,6 +490,116 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 			}
 			if tc.wantRequests > 0 && int(attempts.Load()) != tc.wantRequests {
 				t.Errorf("got %d HTTP requests, want %d", attempts.Load(), tc.wantRequests)
+			}
+		})
+	}
+}
+
+func TestResolveImageTagAndKustomization(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name              string
+		repo              string
+		imageRef          string
+		wantTagKey        string
+		wantKustomization string
+		wantWorkload      string
+	}{
+		{
+			name:              "empty image",
+			repo:              "azylman/aerial",
+			imageRef:          "",
+			wantTagKey:        "",
+			wantKustomization: "",
+			wantWorkload:      "",
+		},
+		{
+			name:              "none image",
+			repo:              "azylman/aerial",
+			imageRef:          "ghcr.io/azylman/none:latest",
+			wantTagKey:        "",
+			wantKustomization: "",
+			wantWorkload:      "",
+		},
+		{
+			name:              "aerial repo with aerial- prefix",
+			repo:              "azylman/aerial",
+			imageRef:          "ghcr.io/azylman/aerial-synapse:sha123",
+			wantTagKey:        "TAG_AERIAL_SYNAPSE",
+			wantKustomization: "aerial-core",
+			wantWorkload:      "aerial-synapse",
+		},
+		{
+			name:              "aerial repo without prefix",
+			repo:              "aerial",
+			imageRef:          "ghcr.io/azylman/synapse:sha123",
+			wantTagKey:        "TAG_AERIAL_SYNAPSE",
+			wantKustomization: "aerial-core",
+			wantWorkload:      "synapse",
+		},
+		{
+			name:              "aerial-sidecars repo with aerial-sidecar- prefix",
+			repo:              "azylman/aerial-sidecars",
+			imageRef:          "ghcr.io/azylman/aerial-sidecar-prospera:sha123",
+			wantTagKey:        "TAG_AERIAL_SIDECAR_PROSPERA",
+			wantKustomization: "aerial-config",
+			wantWorkload:      "aerial-sidecar-prospera",
+		},
+		{
+			name:              "aerial-sidecars repo without prefix",
+			repo:              "aerial-sidecars",
+			imageRef:          "ghcr.io/azylman/prospera:sha123",
+			wantTagKey:        "TAG_AERIAL_SIDECAR_PROSPERA",
+			wantKustomization: "aerial-config",
+			wantWorkload:      "prospera",
+		},
+		{
+			name:              "mirrormere repo with mirrormere- prefix",
+			repo:              "azylman/mirrormere",
+			imageRef:          "ghcr.io/azylman/mirrormere-kiosk:sha123",
+			wantTagKey:        "TAG_MIRRORMERE_KIOSK",
+			wantKustomization: "aerial-config",
+			wantWorkload:      "mirrormere-kiosk",
+		},
+		{
+			name:              "mirrormere repo without prefix",
+			repo:              "mirrormere",
+			imageRef:          "ghcr.io/azylman/kiosk:sha123",
+			wantTagKey:        "TAG_MIRRORMERE_KIOSK",
+			wantKustomization: "aerial-config",
+			wantWorkload:      "kiosk",
+		},
+		{
+			name:              "other repo with aerial- prefix",
+			repo:              "other-org/other-repo",
+			imageRef:          "ghcr.io/other/aerial-extra:sha123",
+			wantTagKey:        "TAG_AERIAL_EXTRA",
+			wantKustomization: "aerial-core",
+			wantWorkload:      "aerial-extra",
+		},
+		{
+			name:              "other repo with sidecar or thirdparty",
+			repo:              "other-org/other-repo",
+			imageRef:          "ghcr.io/other/custom-service:sha123",
+			wantTagKey:        "TAG_CUSTOM_SERVICE",
+			wantKustomization: "aerial-config",
+			wantWorkload:      "custom-service",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tagKey, kust, workload := resolveImageTagAndKustomization(tc.repo, tc.imageRef)
+			if tagKey != tc.wantTagKey {
+				t.Errorf("tagKey = %q, want %q", tagKey, tc.wantTagKey)
+			}
+			if kust != tc.wantKustomization {
+				t.Errorf("kustomization = %q, want %q", kust, tc.wantKustomization)
+			}
+			if workload != tc.wantWorkload {
+				t.Errorf("workload = %q, want %q", workload, tc.wantWorkload)
 			}
 		})
 	}
