@@ -12,111 +12,108 @@ Welcome to **Aerial Docs**, your personal living documentation and architecture 
 ```mermaid
 flowchart TB
     subgraph Ingress ["🌐 Ingress & Edge Layer"]
-        User(["Discord User / Gateway"])
-        Browser(["Web Browser / Client"])
-        Proxy["aerial-proxy (:8089)
-Nginx Edge Gateway"]
+        DiscordUser(["Discord User / Gateway"])
+        WebBrowser(["Web Browser / Client"])
+        Synapse["synapse (:4020)
+• Discord Gateway WebSocket & River Ingress
+• GitHub, Flux & Infisical Webhooks"]
+        LanGW["lan-gateway (:80 / :443)
+NGINX Gateway Fabric"]
+        EdgeGW["edge-gateway (:4021)
+External Webhook Ingress"]
     end
 
-    subgraph Core ["🧠 Core Execution Daemon"]
-        Brain["aerial-brain (:8080 -> host:8088)
-• Headless agy Agent Runner
-• In-Process Discord Funnel
-• Fast Ambient Classifier
-• SIGHUP Zero-Downtime Reloading
-• :ro Repositories Mount"]
+    subgraph CoreAI ["🧠 Core Execution & AI Services"]
+        Eri["eri (:8080)
+• Antigravity Agent Runtime & Memory
+• Voice & Prompt Execution Pipeline"]
+        Haro["haro (:4005)
+Persistent Scheduler & Event Watches"]
+        Coven["coven (:4008)
+Semantic Fact Extraction & Memory Decay"]
+        Vanadis["vanadis (:4025)
+Multi-Chunk Build Queue Orchestrator"]
+        Pjev["pjev (:8000)
+System-1 Ambient Triage (/v1/systemone)"]
+        Senses["senses (:8880 / :10300)
+STT, TTS, Embeddings & Wyoming"]
     end
 
-    subgraph Persistence ["💾 Persistence & Memory"]
-        Postgres[("aerial-postgres (:5432)
-• PostgreSQL 18 + pgvector
-• Atomic CAS Task Queue
-• Vector RAG (384-dim)
-• Schedules & Grafana DB")]
-        Ollama["aerial-ollama (:11434)
-• all-minilm Embeddings"]
-    end
-
-    subgraph MCP ["🔌 Model Context Protocol (MCP)"]
-        Scheduler["aerial-scheduler-mcp (:8080)
-PostgreSQL Cron & Reminders"]
-        Discord["aerial-discord-mcp (:4001)
-Outbound Discord API"]
-        DockerHost["aerial-docker-mcp (:4002)
-Native in-image Docker MCP"]
-        GitHub["aerial-github-mcp (:4003)
-Native in-image GitHub MCP"]
+    subgraph Persistence ["💾 Persistence & GitOps"]
+        Postgres[("postgres (:5432 / :9187)
+• CloudNativePG PostgreSQL 18 + pgvector
+• River Task Queues & PR Registry
+• Vector RAG & State Persistence")]
+        Flux["flux-system
+Flux CD k3s Reconciler (./k8s)"]
+        GitSync["git-sync sidecars
+Mounts /share/aerial:ro & /share/aerial-config:ro"]
     end
 
     subgraph WebServices ["📊 Web & Documentation Microservices"]
-        Dashboard["aerial-dashboard (:8080)
-Cyberpunk Status HUD"]
-        Docs["aerial-docs (:80)
+        Homepage["homepage (:8080)
+Service Discovery HUD"]
+        Dashboard["dashboard (:8080)
+Live Cluster Status HUD"]
+        Docs["docs (:80)
 Docsify + Mermaid Engine"]
-        Agentsview["aerial-agentsview (:8080)
+        Agentsview["agentsview (:8080)
 Transcript Visualizer"]
     end
 
-    subgraph GitOps ["🔄 GitOps & Continuous Deployment"]
-        GitSync["aerial-gitsync (:8080)
-• :rw Repository Mounts
-• Singleflight Git Sync
-• Declarative Compose Reconciler"]
-        Watchtower["aerial-watchtower
-GHCR Image Auto-Updater"]
-        Autoheal["aerial-autoheal
-Healthcheck Supervisor"]
-    end
-
     subgraph Observability ["📈 Full-Stack Observability"]
-        Victoria["aerial-victoriametrics (:8428)
-Single-Node TSDB (5y Retention)
-Modular scrape.d/*.yml"]
-        Grafana["aerial-grafana (:3000)
-PostgreSQL Backend
-Cyberpunk Telemetry HUD"]
-        CAdvisor["aerial-cadvisor (:8080)
-Container Metrics"]
-        NodeExp["aerial-node-exporter (:9100)
+        Victoria["victoriametrics (:8428)
+Single-Node Prometheus TSDB"]
+        VMAlert["vmalert (:8880)
+Anomaly Alert Rule Evaluator"]
+        Grafana["grafana (:3000)
+Visual Telemetry Dashboards"]
+        OpenObserve["openobserve (:5080)
+Structured Log Analytics"]
+        FluentBit["fluent-bit
+Container Log Forwarder"]
+        NodeExp["node-exporter (:9100)
 Host System Metrics"]
-        PGExp["aerial-postgres-exporter (:9187)
-Database Pool Metrics"]
+        CAdvisor["kubelet-cadvisor (:10250)
+Kubelet Container Metrics"]
     end
 
-    %% Ingress routing
-    User -->|Events & Mentions| Brain
-    Browser -->|HTTP Requests| Proxy
-    Proxy -->|/ -> 302 Redirect| Dashboard
-    Proxy -->|/dashboard/| Dashboard
-    Proxy -->|/docs/| Docs
-    Proxy -->|/agentsview/| Agentsview
-    Proxy -->|/grafana/| Grafana
+    %% Ingress flow
+    DiscordUser -->|Gateway WebSocket| Synapse
+    Synapse -->|POST /discord/ingress\nPOST /discord/interaction| Eri
+    WebBrowser --> LanGW
+    WebBrowser --> EdgeGW
+    LanGW --> Homepage
+    LanGW --> Dashboard
+    LanGW --> Docs
+    LanGW --> Agentsview
+    LanGW --> Grafana
+    LanGW --> OpenObserve
 
     %% Core interactions
-    Brain -->|Atomic CAS / Sessions / Memory| Postgres
-    Brain -->|Generate Embeddings| Ollama
-    Brain -->|Tools Call| Scheduler
-    Brain -->|Tools Call| Discord
-    Brain -->|Tools Call| DockerHost
-    Brain -->|Tools Call| GitHub
-    Brain -->|/metrics| Victoria
+    Eri --> Haro
+    Eri --> Coven
+    Eri --> Vanadis
+    Eri --> Pjev
+    Eri --> Senses
+    Eri --> Postgres
+    Haro --> Postgres
+    Coven --> Postgres
+    Vanadis --> Postgres
+    Synapse --> Postgres
 
-    %% Persistence
-    Scheduler --> Postgres
-    Grafana -->|Dashboard Persistence| Postgres
-    PGExp --> Postgres
+    %% GitOps & Persistence
+    Flux --> GitSync
 
-    %% GitOps
-    GitSync -->|docker compose up -d| Brain
-    GitSync -->|/metrics| Victoria
-
-    %% Observability Scrapes
-    Victoria -->|Scrapes| CAdvisor
+    %% Observability Scrapes & Logs
+    Victoria -->|Scrapes| Postgres
     Victoria -->|Scrapes| NodeExp
-    Victoria -->|Scrapes| PGExp
-    Victoria -->|Scrapes| Brain
-    Victoria -->|Scrapes| GitSync
-    Grafana -->|PromQL Queries| Victoria
+    Victoria -->|Scrapes| CAdvisor
+    Victoria -->|Scrapes| Eri
+    Victoria -->|Scrapes| Synapse
+    VMAlert --> Victoria
+    Grafana -->|PromQL| Victoria
+    FluentBit -->|Ships Logs| OpenObserve
 ```
 
 ---
@@ -127,20 +124,28 @@ In your `aerial-config` repository:
 
 ```text
 aerial-config/
-├── config.yaml               # Core agent & channel policies
-├── AGENTS.md                 # Persona & communication guidelines
+├── config.yaml               # Core agent, model & channel configuration
+├── rules/                    # System persona overrides & preferences
+│   ├── common/
+│   ├── persona/
+│   ├── discord/
+│   └── voice/
 ├── channels/                 # Per-channel operational instructions
 │   └── lounge.md
+├── custom-skills/            # Private operational runbooks & domain skills
+├── homepage/                 # Service discovery cards & bookmarks
+├── k8s/                      # User-defined Kubernetes manifests & Kustomizations
+├── services/                 # Dedicated service configuration files
+│   └── dashboard/
 ├── victoriametrics/          # Modular Prometheus scrape configs
-│   └── homeassistant.yml
 └── docs/                     # Living Docsify documentation portal
     ├── README.md             # Docs homepage
     ├── _sidebar.md           # Sidebar navigation
-    ├── architecture.md       # Multi-container topology
+    ├── architecture.md       # Multi-node k3s cluster topology
     ├── observability.md      # TSDB, metrics & Grafana
     ├── gitops.md             # Continuous delivery & PR workflow
     ├── channels.md           # Discord interaction & wake modes
-    └── security.md           # Admin allowlist & kernel security
+    └── security.md           # Admin allowlist & RBAC security
 ```
 
 ---
