@@ -489,7 +489,7 @@ func (s *RouterServer) ProcessWidgetSync(ctx context.Context, args WidgetSyncArg
 	if repo == "" || prNumber <= 0 {
 		return nil
 	}
-	qCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	qCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
 	pgReg, ok := s.registry.(*PostgresPRRegistry)
