@@ -79,6 +79,20 @@ data:
   discord-mcp.yaml: |
     port: "8080"
     upstream_port: "4025"
+  docket-mcp.yaml: |
+    port: "8080"
+    vikunja_url: "http://docket-store.default.svc.cluster.local:3456"
+    default_project_id: 1
+    database_url: "postgres://aerial:postgres@postgres:5432/docket?sslmode=disable"
+    ollama:
+      base_url: "http://senses.default.svc.cluster.local:8880"
+      model: "bge-small-en-v1.5"
+  docket-schema.sql: |
+    ALTER TABLE tasks ADD COLUMN IF NOT EXISTS resolution TEXT NOT NULL DEFAULT '';
+    ALTER TABLE tasks ADD COLUMN IF NOT EXISTS embedding vector(384);
+    ALTER TABLE tasks ADD COLUMN IF NOT EXISTS fts_tokens tsvector GENERATED ALWAYS AS (to_tsvector('simple', COALESCE(title, '') || ' ' || COALESCE(description, ''))) STORED;
+    CREATE INDEX IF NOT EXISTS idx_tasks_embedding_hnsw ON tasks USING hnsw (embedding vector_cosine_ops);
+    CREATE INDEX IF NOT EXISTS idx_tasks_fts_tokens ON tasks USING gin (fts_tokens);
   github-mcp.yaml: |
     port: "8080"
   infisical-mcp.yaml: |
@@ -1197,4 +1211,189 @@ spec:
       targetPort: 8080
   selector:
     app.kubernetes.io/name: prospera
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: docket-store
+  name: docket-store
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: docket-store
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: docket-store
+    spec:
+      initContainers:
+        - command:
+            - /bin/sh
+            - -c
+            - |
+              psql -h postgres -U aerial -d postgres -tc "SELECT 1 FROM pg_database WHERE datname = 'docket'" | grep -q 1 || psql -h postgres -U aerial -d postgres -c "CREATE DATABASE docket;" && psql -h postgres -U aerial -d docket -c "CREATE EXTENSION IF NOT EXISTS vector;"
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: POSTGRES_PASSWORD
+                  name: shared-secrets
+          image: ghcr.io/cloudnative-pg/postgresql:18
+          name: init-docket-db
+      containers:
+        - env:
+            - name: VIKUNJA_SERVICE_ENABLEREGISTRATION
+              value: "true"
+            - name: VIKUNJA_SERVICE_JWTSECRET
+              valueFrom:
+                secretKeyRef:
+                  key: POSTGRES_PASSWORD
+                  name: shared-secrets
+            - name: VIKUNJA_DATABASE_TYPE
+              value: postgres
+            - name: VIKUNJA_DATABASE_HOST
+              value: postgres
+            - name: VIKUNJA_DATABASE_PORT
+              value: "5432"
+            - name: VIKUNJA_DATABASE_USER
+              value: aerial
+            - name: VIKUNJA_DATABASE_DATABASE
+              value: docket
+            - name: VIKUNJA_DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: POSTGRES_PASSWORD
+                  name: shared-secrets
+          image: vikunja/vikunja:latest
+          name: docket-store
+          ports:
+            - containerPort: 3456
+              name: http
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /app/vikunja/files
+              name: files
+      nodeSelector:
+        kubernetes.io/hostname: quiet-zero
+      securityContext:
+        fsGroup: 1000
+      volumes:
+        - emptyDir: {}
+          name: files
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: docket-store
+  namespace: default
+spec:
+  ports:
+    - name: http
+      port: 3456
+      protocol: TCP
+      targetPort: 3456
+    - name: http-default
+      port: 80
+      protocol: TCP
+      targetPort: 3456
+  selector:
+    app.kubernetes.io/name: docket-store
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: docket-mcp
+  name: docket-mcp
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: docket-mcp
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: docket-mcp
+    spec:
+      initContainers:
+        - command:
+            - /bin/sh
+            - -c
+            - |
+              until psql -h postgres -U aerial -d docket -tc "SELECT to_regclass('public.tasks')" | grep -q tasks; do sleep 2; done && psql -h postgres -U aerial -d docket -v ON_ERROR_STOP=1 -f /config/docket-schema.sql
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: POSTGRES_PASSWORD
+                  name: shared-secrets
+          image: ghcr.io/cloudnative-pg/postgresql:18
+          name: init-docket-schema
+          volumeMounts:
+            - mountPath: /config/docket-schema.sql
+              name: config
+              subPath: docket-schema.sql
+      containers:
+        - env:
+            - name: PORT
+              value: "8080"
+            - name: CONFIG_PATH
+              value: /config/config.yaml
+            - name: POSTGRES_URL
+              value: "postgres://aerial:postgres@postgres:5432/docket?sslmode=disable"
+          envFrom:
+            - secretRef:
+                name: shared-secrets
+          image: ghcr.io/azylman/aerial-docket-mcp:latest
+          name: docket-mcp
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /config/config.yaml
+              name: config
+              subPath: docket-mcp.yaml
+            - mountPath: /local/config.yaml
+              name: config
+              subPath: docket-mcp.yaml
+            - mountPath: /config/docket-schema.sql
+              name: config
+              subPath: docket-schema.sql
+      volumes:
+        - configMap:
+            defaultMode: 420
+            name: mcp-configs
+          name: config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: docket-mcp
+  namespace: default
+spec:
+  ports:
+    - name: http
+      port: 8080
+      protocol: TCP
+      targetPort: 8080
+    - name: http-default
+      port: 80
+      protocol: TCP
+      targetPort: 8080
+  selector:
+    app.kubernetes.io/name: docket-mcp
   type: ClusterIP
