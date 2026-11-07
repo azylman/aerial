@@ -226,7 +226,7 @@ func (r *PostgresPRRegistry) execAtomicTransition(ctx context.Context, repo stri
 }
 
 func (r *PostgresPRRegistry) UpdatePRMerged(ctx context.Context, repo string, prNumber int, mergeSHA string) (string, error) {
-	query := `UPDATE pr_registry SET status = CASE WHEN status IN ('synced', 'deploying', 'deployed', 'deploy_failed') THEN status ELSE 'merged' END, merge_sha = CASE WHEN $3 != '' THEN $3 ELSE merge_sha END, metadata = CASE WHEN status = 'deploy_failed' THEN COALESCE(metadata, '{}'::jsonb) WHEN status IN ('merged', 'synced', 'deploying', 'deployed') THEN COALESCE(metadata, '{}'::jsonb) - 'banner' ELSE (COALESCE(metadata, '{}'::jsonb) - 'banner') - 'ci_checks' END, updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 RETURNING target_id;`
+	query := `UPDATE pr_registry SET status = CASE WHEN status IN ('synced', 'deploying', 'deployed', 'deploy_failed') THEN status ELSE 'merged' END, merge_sha = CASE WHEN $3 != '' THEN $3 ELSE merge_sha END, metadata = CASE WHEN status = 'deploy_failed' THEN COALESCE(metadata, '{}'::jsonb) WHEN status IN ('merged', 'synced', 'deploying', 'deployed') THEN COALESCE(metadata, '{}'::jsonb) - 'banner' ELSE COALESCE(metadata, '{}'::jsonb) - 'banner' END, updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 RETURNING target_id;`
 	return r.execReturningTargetID(ctx, repo, prNumber, "update pr merged", query, strings.TrimSpace(mergeSHA))
 }
 
@@ -241,7 +241,7 @@ func (r *PostgresPRRegistry) UpdatePRSync(ctx context.Context, repo string, prNu
 }
 
 func (r *PostgresPRRegistry) BackfillPushMergeSHA(ctx context.Context, repo string, prNumber int, mergeSHA string) (string, error) {
-	query := `UPDATE pr_registry SET merge_sha = $3, status = CASE WHEN status IN ('synced', 'deploying', 'deployed', 'deploy_failed') THEN status ELSE 'merged' END, metadata = CASE WHEN status = 'deploy_failed' THEN COALESCE(metadata, '{}'::jsonb) WHEN status IN ('merged', 'synced', 'deploying', 'deployed') THEN COALESCE(metadata, '{}'::jsonb) - 'banner' ELSE (COALESCE(metadata, '{}'::jsonb) - 'banner') - 'ci_checks' END, updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 RETURNING target_id;`
+	query := `UPDATE pr_registry SET merge_sha = $3, status = CASE WHEN status IN ('synced', 'deploying', 'deployed', 'deploy_failed') THEN status ELSE 'merged' END, metadata = CASE WHEN status = 'deploy_failed' THEN COALESCE(metadata, '{}'::jsonb) WHEN status IN ('merged', 'synced', 'deploying', 'deployed') THEN COALESCE(metadata, '{}'::jsonb) - 'banner' ELSE COALESCE(metadata, '{}'::jsonb) - 'banner' END, updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number = $2 RETURNING target_id;`
 	return r.execReturningTargetID(ctx, repo, prNumber, "backfill push merge_sha", query, strings.TrimSpace(mergeSHA))
 }
 

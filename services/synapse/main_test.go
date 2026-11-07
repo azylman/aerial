@@ -1133,6 +1133,98 @@ func TestProcessDeployEvent(t *testing.T) {
 			wantTargetID: "1555405874565091380",
 			wantPrompts:  0,
 		},
+		{
+			name: "deploy_success on aerial-core with build checks in metadata and merged status handles sync success",
+			evt:  mkDeployEvt("deploy_success", "aerial-core", "azylman/aerial", "sha-aerial-sync", 893, "1555405874565091380", "success", ""),
+			pgReg: NewPostgresPRRegistry(&mockVanadisPgxPool{
+				queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
+					if strings.Contains(sql, "SELECT status, COALESCE(metadata, '{}'::jsonb)") {
+						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+							if len(dest) >= 2 {
+								if s, ok := dest[0].(*string); ok {
+									*s = "merged"
+								}
+								if b, ok := dest[1].(*[]byte); ok {
+									*b = []byte(`{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`)
+								}
+							}
+							return nil
+						}}
+					}
+					return mockVanadisPgxRow{}
+				},
+				execFn: func(qCtx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+					return pgconn.NewCommandTag("UPDATE 1"), nil
+				},
+			}),
+			disp:         &mockOutboundDispatcher{},
+			wantPR:       893,
+			wantTargetID: "1555405874565091380",
+			wantPrompts:  0,
+		},
+		{
+			name: "enrichDeployEventPRAndTarget matches active deploying PR from ListDeployingPRs",
+			evt:  mkDeployEvt("deploy_success", "aerial-config", "", "sha-unresolved", 0, "", "success", ""),
+			reg: &mockPRRegistry{
+				listDeployingPRs: []DeployingPR{
+					{
+						Repo:     "azylman/mirrormere",
+						PRNumber: 777,
+						HeadSHA:  "sha-mirrormere-head",
+						TargetID: "1555405874565091380",
+						Metadata: map[string]any{
+							"started_jobs": []any{"mirrormere-kiosk"},
+						},
+					},
+				},
+			},
+			disp:         &mockOutboundDispatcher{},
+			wantPR:       777,
+			wantTargetID: "1555405874565091380",
+			wantPrompts:  1,
+		},
+		{
+			name: "enrichDeployEventPRAndTarget aerial repo matches aerial-core and resolves thread via ResolveThreadForPR",
+			evt:  mkDeployEvt("deploy_success", "aerial-core", "", "sha-aerial-unres", 0, "", "success", ""),
+			reg: &mockPRRegistry{
+				listDeployingPRs: []DeployingPR{
+					{
+						Repo:     "azylman/aerial",
+						PRNumber: 888,
+						MergeSHA: "sha-aerial-merge",
+						Metadata: map[string]any{
+							"started_jobs": []any{"aerial-synapse"},
+						},
+					},
+				},
+				resolveTargetID: "1555405874565091380",
+			},
+			disp:         &mockOutboundDispatcher{},
+			wantPR:       888,
+			wantTargetID: "1555405874565091380",
+			wantPrompts:  1,
+		},
+		{
+			name: "enrichDeployEventPRAndTarget default repo branch matches aerial-config",
+			evt:  mkDeployEvt("deploy_success", "aerial-config", "", "sha-sidecar-unres", 0, "", "success", ""),
+			reg: &mockPRRegistry{
+				listDeployingPRs: []DeployingPR{
+					{
+						Repo:     "other/sidecar",
+						PRNumber: 999,
+						HeadSHA:  "sha-sidecar-head",
+						TargetID: "1555405874565091380",
+						Metadata: map[string]any{
+							"started_jobs": []any{"custom-sidecar"},
+						},
+					},
+				},
+			},
+			disp:         &mockOutboundDispatcher{},
+			wantPR:       999,
+			wantTargetID: "1555405874565091380",
+			wantPrompts:  1,
+		},
 	}
 
 	for _, tc := range tests {
@@ -1374,6 +1466,7 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 		wantPromptSubs      []string
 		wantDMs             int
 		wantWidgets         int
+		resolveErr          error
 		widgetErr           error
 	}{
 		{
@@ -1386,6 +1479,12 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 			name:         "ResolveThreadForPR zero prNumber returns empty",
 			prNumber:     0,
 			wantTargetID: "",
+		},
+		{
+			name:       "ResolveThreadForPR registry error returns error",
+			prNumber:   456,
+			resolveErr: errors.New("db error"),
+			wantErr:    true,
 		},
 		{
 			name:         "ResolveThreadForPR valid prNumber returns targetID",
@@ -1476,6 +1575,7 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 				mockReg = &mockPRRegistry{
 					resolveTargetID:    tc.targetID,
 					resolveBranch:      tc.branch,
+					resolveErr:         tc.resolveErr,
 					suppressVanadisRes: tc.suppressVanadis,
 					suppressVanadisErr: tc.suppressVanadisErr,
 					finalVanadisRes:    tc.finalVanadis,

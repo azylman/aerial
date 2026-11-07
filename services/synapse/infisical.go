@@ -230,9 +230,9 @@ func loadK8sCertPool(caPath string) *x509.CertPool {
 	return nil
 }
 
-func (s *RouterServer) getKubeToken() string {
-	if s.cfg.KubeToken != "" {
-		return s.cfg.KubeToken
+func getKubeServiceAccountToken(explicitToken string) string {
+	if explicitToken != "" {
+		return explicitToken
 	}
 	if data, err := os.ReadFile(kubeTokenPath); err == nil {
 		return strings.TrimSpace(string(data))
@@ -240,9 +240,13 @@ func (s *RouterServer) getKubeToken() string {
 	return ""
 }
 
-func (s *RouterServer) getK8sHTTPClient() *http.Client {
-	if s.httpClient != nil && !strings.HasPrefix(s.cfg.KubeAPIServer, "https://") {
-		return s.httpClient
+func (s *RouterServer) getKubeToken() string {
+	return getKubeServiceAccountToken(s.cfg.KubeToken)
+}
+
+func getK8sHTTPClient(apiServer string, httpClient *http.Client) *http.Client {
+	if httpClient != nil && !strings.HasPrefix(apiServer, "https://") {
+		return httpClient
 	}
 	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
@@ -261,6 +265,10 @@ func (s *RouterServer) getK8sHTTPClient() *http.Client {
 		Timeout:   15 * time.Second,
 		Transport: transport,
 	}
+}
+
+func (s *RouterServer) getK8sHTTPClient() *http.Client {
+	return getK8sHTTPClient(s.cfg.KubeAPIServer, s.httpClient)
 }
 
 func (s *RouterServer) upsertK8sSecret(ctx context.Context, items map[string]string) error {

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -297,6 +298,7 @@ func deployEventIdempotencyKey(evt DeployEvent, originPrefix string) string {
 }
 
 func (s *RouterServer) enqueueOrProcessDeployEvent(w http.ResponseWriter, r *http.Request, evt DeployEvent, originPrefix string) {
+	s.enrichDeployEventPRAndTarget(r.Context(), &evt)
 	logPrefix := firstNonEmpty(originPrefix, "deploy")
 	if s.riverClient != nil {
 		idempotencyKey := deployEventIdempotencyKey(evt, originPrefix)
@@ -410,6 +412,16 @@ func (s *RouterServer) setPRWidgetState(ctx context.Context, repo string, prNumb
 		        ELSE $3
 		    END,
 		    metadata = CASE
+		        WHEN $3 = 'deployed' THEN jsonb_set(
+		            jsonb_set(
+		                CASE
+		                    WHEN $4 != '' THEN jsonb_set(COALESCE(metadata, '{}'::jsonb), '{banner}', to_jsonb($4::text), true)
+		                    ELSE COALESCE(metadata, '{}'::jsonb) - 'banner'
+		                END,
+		                '{jobs}', '[]'::jsonb, true
+		            ),
+		            '{deployed_jobs}', COALESCE(metadata->'started_jobs', metadata->'deployed_jobs', '[]'::jsonb), true
+		        )
 		        WHEN $4 != '' THEN jsonb_set(COALESCE(metadata, '{}'::jsonb), '{banner}', to_jsonb($4::text), true)
 		        ELSE COALESCE(metadata, '{}'::jsonb) - 'banner'
 		    END,
@@ -870,6 +882,29 @@ func (s *RouterServer) resolveDeployEventTargetID(ctx context.Context, evt *Depl
 
 func (s *RouterServer) enrichDeployEventPRAndTarget(ctx context.Context, evt *DeployEvent) {
 	s.resolveDeployEventPRNumber(ctx, evt)
+	if evt.PRNumber == 0 && s.registry != nil && (evt.JobName == "aerial-config" || evt.JobName == "aerial-core") {
+		if deployingPRs, err := s.registry.ListDeployingPRs(ctx); err == nil && len(deployingPRs) > 0 {
+			for _, p := range slices.Backward(deployingPRs) {
+				cleanRepo := cleanRepoName(p.Repo)
+				var targetKust string
+				switch cleanRepo {
+				case "aerial":
+					targetKust = "aerial-core"
+				case "mirrormere", "aerial-sidecars", "aerial-config":
+					targetKust = "aerial-config"
+				default:
+					targetKust = "aerial-config"
+				}
+				if targetKust == evt.JobName && len(extractStringSliceFromMetadata(p.Metadata, "started_jobs")) > 0 {
+					evt.Repo = p.Repo
+					evt.PRNumber = p.PRNumber
+					evt.CommitSHA = firstNonEmpty(p.MergeSHA, p.HeadSHA, evt.CommitSHA)
+					evt.TargetID = firstNonEmpty(evt.TargetID, p.TargetID)
+					break
+				}
+			}
+		}
+	}
 	s.resolveDeployEventTargetID(ctx, evt)
 	if evt.TargetID == "" && (evt.Event == "deploy_failed" || evt.Event == "deploy_rollback" || evt.Event == "sync_failed") {
 		evt.TargetID = strings.TrimSpace(s.cfg.SystemChannelID)
@@ -961,6 +996,41 @@ func (s *RouterServer) handleDeploySyncFailed(ctx context.Context, evt DeployEve
 	return s.dispatchAlertWithPrompt(ctx, evt.TargetID, "sync_failed", dmMsg, prompt, s.vanadisPromptOpts(ctx, evt.Repo, evt.PRNumber))
 }
 
+func (s *RouterServer) shouldTreatDeploySuccessAsSync(ctx context.Context, evt DeployEvent) bool {
+	if evt.PRNumber <= 0 || (evt.JobName != "aerial-core" && evt.JobName != "aerial-config") || s.registry == nil {
+		return false
+	}
+	pgReg, ok := s.registry.(*PostgresPRRegistry)
+	if !ok || pgReg == nil || pgReg.pool == nil {
+		return false
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	var status string
+	var metaBytes []byte
+	err := pgReg.pool.QueryRow(qCtx, `SELECT status, COALESCE(metadata, '{}'::jsonb) FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1;`, normalizeRepo(evt.Repo), evt.PRNumber).Scan(&status, &metaBytes)
+	if err != nil {
+		return false
+	}
+	normStatus := strings.ToLower(strings.TrimSpace(status))
+	if normStatus != "merged" && normStatus != "synced" {
+		return false
+	}
+	var meta map[string]any
+	if len(metaBytes) > 0 {
+		if uErr := json.Unmarshal(metaBytes, &meta); uErr != nil {
+			meta = nil
+		}
+	}
+	checks := extractChecksFromJSONOrMetadata("", meta)
+	checkJobs, passedBuildJobs, total, passed, failed := analyzeBuildChecks(checks)
+	_ = passedBuildJobs
+	_ = total
+	_ = passed
+	_ = failed
+	return len(checkJobs) > 0
+}
+
 func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) (*DeployEvent, error) {
 	s.enrichDeployEventPRAndTarget(ctx, &evt)
 
@@ -993,6 +1063,10 @@ func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) 
 		}
 		return &evt, nil
 	case "deploy_success":
+		if s.shouldTreatDeploySuccessAsSync(ctx, evt) {
+			return &evt, s.handleDeploySyncSuccess(ctx, evt, true)
+		}
+
 		if s.shouldSuppressDuplicateDeploySuccess(ctx, evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber) {
 			log.Printf("[synapse] [deploy] suppressing duplicate deploy_success for repo=%s job=%s pr=%d commit=%s",
 				evt.Repo, evt.JobName, evt.PRNumber, evt.CommitSHA)
@@ -1246,6 +1320,7 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 	server := NewRouterServer(cfg, nil)
 	dispatcher := NewDefaultOutboundDispatcher(cfg.BrainURL, nil)
 	dispatcher.SetFluxReceiverURL(cfg.FluxReceiverURL)
+	dispatcher.SetKubeConfig(cfg.KubeAPIServer, cfg.KubeToken)
 	server.SetDispatcher(dispatcher)
 
 	dbPool, riverClient, err := setupRiverWorkerPool(ctx, server, cfg)
