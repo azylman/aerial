@@ -1477,32 +1477,33 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []struct {
-		name                 string
-		autoUpdateAuthors    []string
-		listPRsStatus        int
-		useNilRegistry       bool
-		useRiver             bool
-		riverErr             error
-		conflictErr          error
-		openPRs              []GitHubPullRequest
-		prResponses          []string
-		prStatusCodes        []int
-		closedErr            error
-		wantClosedPRs        []int
-		wantErr              bool
-		wantErrSubstr        string
-		wantConflict         bool
-		wantConflictPR       int
-		wantConflictQueued   int
-		wantPrompts          int
-		wantDispatches       int
-		wantPromptSubs       []string
-		wantDMs              int
-		wantUpdatedPRs       []string
-		checkRunsBySHA       map[string]string
-		presetFailedSHAs     map[int]string
-		presetUpdatedPRs     []int
-		wantCachedFailedSHAs map[int]string
+		name                  string
+		autoUpdateAuthors     []string
+		listPRsStatus         int
+		useNilRegistry        bool
+		useRiver              bool
+		riverErr              error
+		conflictErr           error
+		openPRs               []GitHubPullRequest
+		prResponses           []string
+		prStatusCodes         []int
+		closedErr             error
+		wantClosedPRs         []int
+		wantErr               bool
+		wantErrSubstr         string
+		wantConflict          bool
+		wantConflictPR        int
+		wantConflictQueued    int
+		wantPrompts           int
+		wantDispatches        int
+		wantPromptSubs        []string
+		wantDMs               int
+		wantUpdatedPRs        []string
+		checkRunsBySHA        map[string]string
+		presetFailedSHAs      map[int]string
+		presetUpdatedPRs      []int
+		wantCachedFailedSHAs  map[int]string
+		wantUncachedFailedPRs []int
 	}{
 		{
 			name:              "empty autoUpdateAuthors is clean no-op",
@@ -1767,6 +1768,51 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 			},
 			wantUpdatedPRs: nil,
 		},
+		{
+			name:              "skips PR with pending check-run without caching failure and updates next clean PR",
+			autoUpdateAuthors: []string{"trusted-author"},
+			checkRunsBySHA: map[string]string{
+				"head550": `{"check_runs":[{"name":"roborev","status":"in_progress","conclusion":""}]}`,
+			},
+			openPRs: []GitHubPullRequest{
+				makeTestOpenPR(550, "feat/pending-check", "head550", "trusted-author"),
+				makeTestOpenPR(551, "feat/clean", "head551", "trusted-author"),
+			},
+			prResponses:           []string{`{"message":"Updating pull request branch."}`},
+			prStatusCodes:         []int{http.StatusAccepted},
+			wantUpdatedPRs:        []string{"/repos/azylman/aerial/pulls/551/update-branch"},
+			wantUncachedFailedPRs: []int{550},
+		},
+		{
+			name:              "breaks without updating when leading clean PR already updated for current main has pending checks",
+			autoUpdateAuthors: []string{"trusted-author"},
+			presetUpdatedPRs:  []int{550},
+			checkRunsBySHA: map[string]string{
+				"head550": `{"check_runs":[{"name":"roborev","status":"in_progress","conclusion":""}]}`,
+			},
+			openPRs: []GitHubPullRequest{
+				makeTestOpenPR(550, "feat/in-flight", "head550", "trusted-author"),
+				makeTestOpenPR(551, "feat/waiting", "head551", "trusted-author"),
+			},
+			wantUpdatedPRs:        nil,
+			wantUncachedFailedPRs: []int{550},
+		},
+		{
+			name:              "advances to update next clean PR when leading PR updated for current main has failed checks",
+			autoUpdateAuthors: []string{"trusted-author"},
+			presetUpdatedPRs:  []int{550},
+			checkRunsBySHA: map[string]string{
+				"head550": `{"check_runs":[{"name":"unit-tests","status":"completed","conclusion":"failure"}]}`,
+			},
+			openPRs: []GitHubPullRequest{
+				makeTestOpenPR(550, "feat/failed-in-flight", "head550", "trusted-author"),
+				makeTestOpenPR(551, "feat/clean", "head551", "trusted-author"),
+			},
+			prResponses:          []string{`{"message":"Updating pull request branch."}`},
+			prStatusCodes:        []int{http.StatusAccepted},
+			wantUpdatedPRs:       []string{"/repos/azylman/aerial/pulls/551/update-branch"},
+			wantCachedFailedSHAs: map[int]string{550: "head550"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -1858,6 +1904,11 @@ func TestCheckOpenPRConflicts(t *testing.T) {
 				v, ok := srv.failedCheckSHAs.Load(prCheckKey("azylman/aerial", prNum))
 				if !ok || fmt.Sprint(v) != wantSHA {
 					t.Errorf("cached failedCheckSHAs[%d] = %v (ok=%v), want %q", prNum, v, ok, wantSHA)
+				}
+			}
+			for _, prNum := range tc.wantUncachedFailedPRs {
+				if v, ok := srv.failedCheckSHAs.Load(prCheckKey("azylman/aerial", prNum)); ok {
+					t.Errorf("cached failedCheckSHAs[%d] = %v, want uncached", prNum, v)
 				}
 			}
 			mu.Lock()
@@ -2392,6 +2443,124 @@ func TestFailedCheckTrackerHelpers(t *testing.T) {
 			got := srv.canRecoverNonGateCheckSuccess(tc.repo, tc.prNumber, tc.evalCheck, tc.headSHA)
 			if got != tc.wantRecover {
 				t.Fatalf("canRecoverNonGateCheckSuccess() = %v, want %v", got, tc.wantRecover)
+			}
+		})
+	}
+}
+
+func TestIsCachedFailedCISHA(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		nilServer  bool
+		repo       string
+		prNumber   int
+		headSHA    string
+		presetMap  string
+		presetSHA  string
+		wantCached bool
+	}{
+		{
+			name:       "nil server returns false",
+			nilServer:  true,
+			repo:       "azylman/aerial",
+			prNumber:   10,
+			headSHA:    "sha10",
+			wantCached: false,
+		},
+		{
+			name:       "empty repo returns false",
+			repo:       "",
+			prNumber:   10,
+			headSHA:    "sha10",
+			wantCached: false,
+		},
+		{
+			name:       "invalid prNumber <= 0 returns false",
+			repo:       "azylman/aerial",
+			prNumber:   0,
+			headSHA:    "sha10",
+			wantCached: false,
+		},
+		{
+			name:       "empty head sha returns false",
+			repo:       "azylman/aerial",
+			prNumber:   10,
+			headSHA:    "",
+			wantCached: false,
+		},
+		{
+			name:       "zero head sha returns false",
+			repo:       "azylman/aerial",
+			prNumber:   10,
+			headSHA:    "0000000000000000000000000000000000000000",
+			wantCached: false,
+		},
+		{
+			name:       "uncached pr returns false",
+			repo:       "azylman/aerial",
+			prNumber:   10,
+			headSHA:    "sha10",
+			wantCached: false,
+		},
+		{
+			name:       "cached in failedCheckSHAs returns true",
+			repo:       "azylman/aerial",
+			prNumber:   10,
+			headSHA:    "sha10",
+			presetMap:  "failedCheckSHAs",
+			presetSHA:  "sha10",
+			wantCached: true,
+		},
+		{
+			name:       "cached in nonRoboRevFailedSHAs returns true",
+			repo:       "azylman/aerial",
+			prNumber:   10,
+			headSHA:    "sha10",
+			presetMap:  "nonRoboRevFailedSHAs",
+			presetSHA:  "sha10",
+			wantCached: true,
+		},
+		{
+			name:       "cached in cancelledCheckSHAs returns true",
+			repo:       "azylman/aerial",
+			prNumber:   10,
+			headSHA:    "sha10",
+			presetMap:  "cancelledCheckSHAs",
+			presetSHA:  "sha10",
+			wantCached: true,
+		},
+		{
+			name:       "cached sha mismatch returns false",
+			repo:       "azylman/aerial",
+			prNumber:   10,
+			headSHA:    "sha10-new",
+			presetMap:  "failedCheckSHAs",
+			presetSHA:  "sha10-old",
+			wantCached: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var srv *RouterServer
+			if !tc.nilServer {
+				srv = &RouterServer{}
+				key := prCheckKey(tc.repo, tc.prNumber)
+				switch tc.presetMap {
+				case "failedCheckSHAs":
+					srv.failedCheckSHAs.Store(key, tc.presetSHA)
+				case "nonRoboRevFailedSHAs":
+					srv.nonRoboRevFailedSHAs.Store(key, tc.presetSHA)
+				case "cancelledCheckSHAs":
+					srv.cancelledCheckSHAs.Store(key, tc.presetSHA)
+				}
+			}
+			got := srv.isCachedFailedCISHA(tc.repo, tc.prNumber, tc.headSHA)
+			if got != tc.wantCached {
+				t.Fatalf("isCachedFailedCISHA() = %v, want %v", got, tc.wantCached)
 			}
 		})
 	}
