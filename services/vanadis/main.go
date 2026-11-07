@@ -858,6 +858,27 @@ func (s *VanadisServer) syncBuildWidget(ctx context.Context, buildID, banner str
 	}
 }
 
+func (s *VanadisServer) dispatchWakePrompt(ctx context.Context, threadID, prompt string) error {
+	if s == nil || s.httpClient == nil {
+		return nil
+	}
+	cleanThreadID := strings.TrimSpace(threadID)
+	cleanPrompt := strings.TrimSpace(prompt)
+	if cleanThreadID == "" || cleanPrompt == "" {
+		return nil
+	}
+	payload := map[string]string{
+		"channel_id": cleanThreadID,
+		"prompt":     cleanPrompt,
+	}
+	_, err := s.postBrainJSON(ctx, "/prompt", payload, 4<<10)
+	if err != nil {
+		log.Printf("[vanadis] warning: failed to dispatch wake prompt to thread %s: %v", cleanThreadID, err)
+		return err
+	}
+	return nil
+}
+
 func (s *VanadisServer) insertRiverJob(ctx context.Context, args ExecuteChunkArgs) error {
 	if s.riverClient == nil {
 		return errors.New("river client not configured")
@@ -1042,6 +1063,8 @@ func SetupMux(server *VanadisServer) *http.ServeMux {
 		"/chunks/attach-pr":          server.handleAttachChunkPR,
 		"/chunks/advance-pr":         server.handleAdvanceChunkPR,
 		"/chunks/fail-pr":            server.handleFailChunkPR,
+		"/chunks/complete":           server.handleCompleteChunk,
+		"/chunks/fail":               server.handleFailChunk,
 		"/chunks/sync-pr-widget":     server.handleSyncPRWidget,
 		"/chunks/":                   server.handleChunkByID,
 		"/mcp":                       mcpHandler,

@@ -504,7 +504,78 @@ func (m *memoryVanadisStore) FailChunkByPR(_ context.Context, repo string, prNum
 }
 
 func (m *memoryVanadisStore) CompleteActionChunk(_ context.Context, chunkID string) (*VanadisAdvancementResult, error) {
-	return nil, nil
+	chunkID = strings.TrimSpace(chunkID)
+	if chunkID == "" {
+		return nil, errors.New("chunk id cannot be empty")
+	}
+	for bID, list := range m.chunks {
+		for i := range list {
+			if list[i].ID == chunkID {
+				b := m.builds[bID]
+				res := &VanadisAdvancementResult{
+					Matched:          true,
+					Advanced:         false,
+					BuildID:          bID,
+					ThreadID:         b.ThreadID,
+					Tier:             b.Tier,
+					Title:            firstNonEmpty(b.Title, b.Objective),
+					Objective:        b.Objective,
+					BuildStatus:      b.Status,
+					StatusMessageID:  b.StatusMessageID,
+					MergedChunkIndex: list[i].ChunkIndex,
+					MergedChunkTitle: list[i].Title,
+					NextChunkIndex:   -1,
+					BuildCompleted:   b.Status == "completed",
+				}
+				if list[i].Mode != "action" || list[i].Status != "running" || b.Status != "running" {
+					return res, nil
+				}
+				list[i].Status = "completed"
+				now := time.Now().UTC()
+				list[i].CompletedAt = now
+				list[i].UpdatedAt = now
+				m.chunks[bID] = list
+
+				nextIdx := -1
+				for j := range list {
+					if j > i && !isChunkDoneStatus(list[j].Status) {
+						nextIdx = list[j].ChunkIndex
+						break
+					}
+				}
+
+				var summaries []VanadisChunkSummary
+				for _, c := range list {
+					summaries = append(summaries, VanadisChunkSummary{
+						ID: c.ID, ChunkIndex: c.ChunkIndex, Mode: c.Mode, Repo: c.Repo, Title: c.Title, Status: c.Status, PRNumber: c.PRNumber, StartedAt: c.StartedAt, CompletedAt: c.CompletedAt, UpdatedAt: c.UpdatedAt,
+					})
+				}
+				res.Advanced = true
+				res.Chunks = summaries
+				if nextIdx >= 0 {
+					for j := range list {
+						if list[j].ChunkIndex == nextIdx && list[j].Status == "pending" {
+							list[j].Status = "running"
+							list[j].StartedAt = now
+							list[j].UpdatedAt = now
+							break
+						}
+					}
+					m.chunks[bID] = list
+					res.NextChunkIndex = nextIdx
+					res.BuildCompleted = false
+				} else {
+					b.Status = "completed"
+					b.UpdatedAt = now
+					m.builds[bID] = b
+					res.BuildStatus = "completed"
+					res.BuildCompleted = true
+				}
+				return res, nil
+			}
+		}
+	}
+	return nil, ErrChunkNotFound
 }
 
 func (m *memoryVanadisStore) FailChunk(_ context.Context, chunkID, reason string) (*VanadisBuild, *VanadisChunk, bool, error) {
@@ -1512,6 +1583,7 @@ func TestVanadisMetrics(t *testing.T) {
 
 	RecordChunkTotal("dispatched")
 	RecordChunkTotal("merged")
+	RecordChunkTotal("completed")
 	RecordChunkTotal("failed")
 	RecordChunkTotal("cancelled")
 
@@ -1596,6 +1668,7 @@ func TestVanadisMetrics(t *testing.T) {
 				"vanadis_chunks_total",
 				`vanadis_chunks_total{status="dispatched"}`,
 				`vanadis_chunks_total{status="merged"}`,
+				`vanadis_chunks_total{status="completed"}`,
 				`vanadis_chunks_total{status="failed"}`,
 				`vanadis_chunks_total{status="cancelled"}`,
 			},

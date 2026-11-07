@@ -16,7 +16,7 @@ type MCPChunkBrief struct {
 	ID         string `json:"id"`
 	ChunkIndex int    `json:"chunk_index"`
 	Title      string `json:"title"`
-	Mode       string `json:"mode,omitempty"`
+	Mode       string `json:"mode"`
 	Status     string `json:"status"`
 	Repo       string `json:"repo"`
 	PRNumber   int    `json:"pr_number"`
@@ -78,7 +78,7 @@ type MCPUpdateBuildOutput struct {
 type MCPUpdateChunkArgs struct {
 	BuildID       string   `json:"build_id" jsonschema:"Parent Vanadis build identifier containing the chunk."`
 	ChunkRef      string   `json:"chunk_ref" jsonschema:"Chunk identifier or 0-based chunk_index of the chunk to mutate."`
-	Mode          string   `json:"mode,omitempty" jsonschema:"Optional new mode for the chunk ('pr' or 'action')."`
+	Mode          *string  `json:"mode,omitempty" jsonschema:"Optional new mode for the chunk ('pr' or 'action')."`
 	Repo          string   `json:"repo,omitempty" jsonschema:"Target repository for the chunk."`
 	Title         string   `json:"title,omitempty" jsonschema:"New title for the chunk."`
 	Instructions  string   `json:"instructions,omitempty" jsonschema:"New instructions for the chunk."`
@@ -135,8 +135,8 @@ type MCPRemoveChunkOutput struct {
 
 // MCPFailChunkArgs defines arguments for fail_chunk tool.
 type MCPFailChunkArgs struct {
-	ChunkID string `json:"chunk_id" jsonschema:"Unique identifier of the failing chunk."`
-	Reason  string `json:"reason" jsonschema:"Reason or explanation for the unrecoverable action failure."`
+	ChunkID string `json:"chunk_id" jsonschema:"Chunk ID to mark as failed"`
+	Reason  string `json:"reason" jsonschema:"Detailed explanation of the unrecoverable blocker"`
 }
 
 // MCPFailChunkOutput defines output for fail_chunk tool.
@@ -351,16 +351,20 @@ func (s *VanadisServer) handleMCPUpdateChunk(ctx context.Context, args MCPUpdate
 		return MCPUpdateChunkOutput{}, err
 	}
 
+	var modePtr *string
+	if args.Mode != nil && strings.TrimSpace(*args.Mode) != "" {
+		trimmed := strings.TrimSpace(*args.Mode)
+		modePtr = &trimmed
+	}
+
 	req := UpdateChunkRequest{
+		Mode:          modePtr,
 		Repo:          args.Repo,
 		Title:         args.Title,
 		Instructions:  args.Instructions,
 		TargetFiles:   args.TargetFiles,
 		TargetSymbols: args.TargetSymbols,
 		Effort:        args.Effort,
-	}
-	if m := strings.TrimSpace(args.Mode); m != "" {
-		req.Mode = &m
 	}
 
 	updated, err := s.store.UpdateChunk(ctx, buildID, chunkRef, req)
@@ -425,17 +429,12 @@ func (s *VanadisServer) handleMCPRemoveChunk(ctx context.Context, args MCPRemove
 	}, nil
 }
 
-func (s *VanadisServer) handleMCPFailChunk(ctx context.Context, args MCPFailChunkArgs) (MCPFailChunkOutput, error) {
-	if s.store == nil {
-		return MCPFailChunkOutput{}, errors.New("vanadis store not configured")
-	}
-	chunkID := strings.TrimSpace(args.ChunkID)
-	reason := strings.TrimSpace(args.Reason)
-	if chunkID == "" || reason == "" {
-		return MCPFailChunkOutput{}, fmt.Errorf("%w: chunk_id and reason are required", ErrInvalidBuildInput)
-	}
+func (s *VanadisServer) mcpFailChunk(ctx context.Context, args MCPFailChunkArgs) (MCPFailChunkOutput, error) {
+	return s.handleMCPFailChunk(ctx, args)
+}
 
-	build, chunk, failed, err := s.store.FailChunk(ctx, chunkID, reason)
+func (s *VanadisServer) handleMCPFailChunk(ctx context.Context, args MCPFailChunkArgs) (MCPFailChunkOutput, error) {
+	build, chunk, failed, err := s.failChunkInternal(ctx, args.ChunkID, args.Reason)
 	if err != nil {
 		return MCPFailChunkOutput{}, err
 	}
@@ -444,15 +443,9 @@ func (s *VanadisServer) handleMCPFailChunk(ctx context.Context, args MCPFailChun
 	if build != nil {
 		buildID = build.ID
 	}
-	resChunkID := chunkID
+	resChunkID := strings.TrimSpace(args.ChunkID)
 	if chunk != nil {
 		resChunkID = chunk.ID
-	}
-
-	if failed && build != nil {
-		RecordChunkTotal("failed")
-		RecordBuildTotal("failed")
-		s.syncBuildWidget(ctx, build.ID, "Action chunk failed: "+reason)
 	}
 
 	return MCPFailChunkOutput{
@@ -516,7 +509,7 @@ func (s *VanadisServer) registerMCPTools(mcpServer *mcp.Server) {
 		Name:        "fail_chunk",
 		Description: "Mark an unrecoverable action chunk as failed, terminating the build.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args MCPFailChunkArgs) (*mcp.CallToolResult, MCPFailChunkOutput, error) {
-		out, err := s.handleMCPFailChunk(ctx, args)
+		out, err := s.mcpFailChunk(ctx, args)
 		return nil, out, err
 	})
 }
