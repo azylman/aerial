@@ -469,11 +469,19 @@ func synthesizeContainersFromServices(services []ServiceStatus, now time.Time) [
 	return out
 }
 
-func resolveClusterState(ctx context.Context, nomadAddr, gitCommit string, gitSync GitSyncStatusResponse, now time.Time) ([]ServiceStatus, []DockerContainerJSON, string, error) {
+func resolveClusterState(ctx context.Context, kubeAPIServer, nomadAddr, gitCommit string, gitSync GitSyncStatusResponse, now time.Time) ([]ServiceStatus, []DockerContainerJSON, string, error) {
 	var services []ServiceStatus
 	var rawContainers []DockerContainerJSON
 	var err error
-	if nomadAddr != "" {
+	if kubeAPIServer != "" {
+		k8sServices, k8sErr := fetchK8sClusterState(ctx, kubeAPIServer)
+		if k8sErr == nil && len(k8sServices) > 0 {
+			services = k8sServices
+		} else if k8sErr != nil {
+			log.Printf("[dashboard] Warning: Failed to fetch K8s cluster state (%s): %v, falling back to Nomad/Docker", kubeAPIServer, k8sErr)
+		}
+	}
+	if len(services) == 0 && nomadAddr != "" {
 		nomadServices, nomadErr := fetchNomadClusterState(ctx, nomadAddr)
 		if nomadErr == nil && len(nomadServices) > 0 {
 			services = nomadServices
@@ -499,10 +507,14 @@ func resolveClusterState(ctx context.Context, nomadAddr, gitCommit string, gitSy
 	return services, rawContainers, currentCommit, err
 }
 
-func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalNomadAddr ...string) http.HandlerFunc {
+func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalAddrs ...string) http.HandlerFunc {
 	nomadAddr := ""
-	if len(optionalNomadAddr) > 0 {
-		nomadAddr = strings.TrimSpace(optionalNomadAddr[0])
+	kubeAPIServer := ""
+	if len(optionalAddrs) > 0 {
+		nomadAddr = strings.TrimSpace(optionalAddrs[0])
+	}
+	if len(optionalAddrs) > 1 {
+		kubeAPIServer = strings.TrimSpace(optionalAddrs[1])
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -521,7 +533,7 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalN
 		}
 
 		gitSync := fetchGitSyncStatus(ctx, gitsyncURL)
-		services, rawContainers, currentCommit, err := resolveClusterState(ctx, nomadAddr, gitCommit, gitSync, now)
+		services, rawContainers, currentCommit, err := resolveClusterState(ctx, kubeAPIServer, nomadAddr, gitCommit, gitSync, now)
 		deployments := mergeClusterDeploymentsWithHangar(rawContainers, ghRuns, ghJobs, gitSync, currentCommit)
 		if deployments == nil {
 			deployments = []DeploymentStatus{}
@@ -611,8 +623,8 @@ func SetupDashboardMux(cfg DashboardConfig, assetReg *AssetRegistry) http.Handle
 	}
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/dashboard/health", healthHandler)
-	mux.HandleFunc("/api/status", statusHandler(cfg.BrainURL, cfg.GitSyncURL, cfg.ConfigPath, cfg.GitCommit, cfg.NomadAddr))
-	mux.HandleFunc("/dashboard/api/status", statusHandler(cfg.BrainURL, cfg.GitSyncURL, cfg.ConfigPath, cfg.GitCommit, cfg.NomadAddr))
+	mux.HandleFunc("/api/status", statusHandler(cfg.BrainURL, cfg.GitSyncURL, cfg.ConfigPath, cfg.GitCommit, cfg.NomadAddr, cfg.KubeAPIServer))
+	mux.HandleFunc("/dashboard/api/status", statusHandler(cfg.BrainURL, cfg.GitSyncURL, cfg.ConfigPath, cfg.GitCommit, cfg.NomadAddr, cfg.KubeAPIServer))
 	mux.HandleFunc("/api/facts", factsHandler(memoryURL))
 	mux.HandleFunc("/dashboard/api/facts", factsHandler(memoryURL))
 	mux.HandleFunc("/api/schedules", schedulesHandler(haroURL))

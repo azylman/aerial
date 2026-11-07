@@ -66,6 +66,12 @@ func TestStatusHandler(t *testing.T) {
 					StartedAt:      time.Now().UTC().Add(-10 * time.Second),
 				},
 			})
+		case strings.HasPrefix(r.URL.Path, "/k8s/ok/apis/apps/v1/namespaces/default/deployments"):
+			_, _ = w.Write([]byte(`{"items":[{"metadata":{"name":"k8s-brain"},"spec":{"replicas":1},"status":{"replicas":1,"readyReplicas":1}}]}`))
+		case strings.HasPrefix(r.URL.Path, "/k8s/ok/api/v1/namespaces/default/pods"):
+			_, _ = w.Write([]byte(`{"items":[{"metadata":{"name":"k8s-brain-pod","labels":{"app.kubernetes.io/name":"k8s-brain"}},"status":{"phase":"Running","containerStatuses":[{"name":"k8s-brain","ready":true,"state":{}}]}}]}`))
+		case strings.HasPrefix(r.URL.Path, "/k8s/error500"):
+			http.Error(w, "k8s server error", http.StatusInternalServerError)
 		case strings.HasPrefix(r.URL.Path, "/nomad/ok/v1/jobs"):
 			_, _ = w.Write([]byte(`[{"ID":"nomad-brain","Type":"service","Status":"running"},{"ID":"nomad-proxy","Type":"service","Status":"dead"}]`))
 		case strings.HasPrefix(r.URL.Path, "/nomad/ok/v1/allocations"):
@@ -89,6 +95,7 @@ func TestStatusHandler(t *testing.T) {
 		brainMode         string
 		gitSyncMode       string
 		nomadMode         string
+		k8sMode           string
 		emptyCommit       bool
 		dockerJSON        string
 		pollerRuns        []GitHubRun
@@ -199,6 +206,33 @@ func TestStatusHandler(t *testing.T) {
 			wantCode:      http.StatusOK,
 			wantQuickLink: "TESTLINK",
 		},
+		{
+			name:            "K8s_State_Success",
+			k8sMode:         "ok",
+			wantCode:        http.StatusOK,
+			wantServiceName: "k8s-brain",
+		},
+		{
+			name:            "K8s_State_Success_Via_Mux",
+			useMux:          true,
+			k8sMode:         "ok",
+			wantCode:        http.StatusOK,
+			wantServiceName: "k8s-brain",
+		},
+		{
+			name:            "K8s_Error_Fallback_To_Nomad",
+			k8sMode:         "error500",
+			nomadMode:       "ok",
+			wantCode:        http.StatusOK,
+			wantServiceName: "nomad-brain",
+		},
+		{
+			name:            "K8s_Error_Fallback_To_Docker",
+			k8sMode:         "error500",
+			nomadMode:       "error500",
+			wantCode:        http.StatusOK,
+			wantMinServices: 1,
+		},
 	}
 
 	for _, tc := range tests {
@@ -263,6 +297,14 @@ func TestStatusHandler(t *testing.T) {
 				nomadAddr = mockServer.URL + "/nomad/empty"
 			}
 
+			kubeAPIServer := ""
+			switch tc.k8sMode {
+			case "ok":
+				kubeAPIServer = mockServer.URL + "/k8s/ok"
+			case "error500":
+				kubeAPIServer = mockServer.URL + "/k8s/error500"
+			}
+
 			commitArg := "testcommit"
 			if tc.emptyCommit {
 				commitArg = ""
@@ -270,16 +312,17 @@ func TestStatusHandler(t *testing.T) {
 			var h http.Handler
 			if tc.useMux {
 				cfg := DashboardConfig{
-					Port:       "8080",
-					BrainURL:   brainURL,
-					GitSyncURL: gitSyncURL,
-					ConfigPath: cfgFile,
-					GitCommit:  commitArg,
-					NomadAddr:  nomadAddr,
+					Port:          "8080",
+					BrainURL:      brainURL,
+					GitSyncURL:    gitSyncURL,
+					ConfigPath:    cfgFile,
+					GitCommit:     commitArg,
+					NomadAddr:     nomadAddr,
+					KubeAPIServer: kubeAPIServer,
 				}
 				h = SetupDashboardMux(cfg, nil)
 			} else {
-				h = statusHandler(brainURL, gitSyncURL, cfgFile, commitArg, nomadAddr)
+				h = statusHandler(brainURL, gitSyncURL, cfgFile, commitArg, nomadAddr, kubeAPIServer)
 			}
 
 			method := tc.method
