@@ -294,12 +294,51 @@ func resolveWidgetStartedAt(req StatusWidgetRequest) time.Time {
 	return started
 }
 
+func isWidgetCompleted(req StatusWidgetRequest) bool {
+	status := strings.ToLower(strings.TrimSpace(req.Status))
+	switch status {
+	case "completed", "deployed", "success", "green":
+	default:
+		return false
+	}
+
+	for _, c := range req.Chunks {
+		chunkStatus := strings.ToLower(strings.TrimSpace(c.Status))
+		switch chunkStatus {
+		case "running", "coding", "pr_opened", "open", "merged", "synced", "deploying", "pending":
+			return false
+		}
+	}
+	return true
+}
+
+func resolveWidgetCompletedAt(req StatusWidgetRequest, now time.Time) time.Time {
+	var latest time.Time
+	for _, c := range req.Chunks {
+		end := c.CompletedAt
+		if end.IsZero() {
+			end = c.UpdatedAt
+		}
+		if !end.IsZero() && end.After(latest) {
+			latest = end
+		}
+	}
+	if !latest.IsZero() {
+		return latest
+	}
+	return now
+}
+
 func formatWidgetFooterText(req StatusWidgetRequest, now time.Time) string {
 	if now.IsZero() {
 		now = time.Now()
 	}
 	started := resolveWidgetStartedAt(req)
 	if !started.IsZero() {
+		if isWidgetCompleted(req) {
+			end := resolveWidgetCompletedAt(req, now)
+			return fmt.Sprintf("*Started <t:%d:R> · Duration %s*", started.Unix(), FormatChunkDuration(end.Sub(started)))
+		}
 		return fmt.Sprintf("*Started <t:%d:R> · Updated <t:%d:R>*", started.Unix(), now.Unix())
 	}
 	return fmt.Sprintf("*Updated <t:%d:R>*", now.Unix())
