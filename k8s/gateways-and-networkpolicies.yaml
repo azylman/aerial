@@ -1,0 +1,366 @@
+apiVersion: gateway.nginx.org/v1alpha1
+kind: NginxProxy
+metadata:
+  name: ngf-proxy-config
+  namespace: default
+spec:
+  telemetry:
+    exporter:
+      endpoint: "http://openobserve.default.svc.cluster.local:5080"
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: lan-gateway
+  namespace: default
+spec:
+  gatewayClassName: nginx
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: zylman-wildcard-tls
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: edge-gateway
+  namespace: default
+spec:
+  gatewayClassName: nginx
+  listeners:
+    - name: http-edge
+      protocol: HTTP
+      port: 4021
+---
+# HTTP :80 aerial.lan -> 301 https://aerial.zylman.com
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: lan-redirect-route
+  namespace: default
+spec:
+  parentRefs:
+    - name: lan-gateway
+      sectionName: http
+  hostnames:
+    - "aerial.lan"
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            hostname: "aerial.zylman.com"
+            statusCode: 301
+---
+# lan-gateway serves ONLY 8 Homepage web UIs + home-assistant + kernel-browser
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: homepage-lan-route
+  namespace: default
+spec:
+  parentRefs:
+    - name: lan-gateway
+      sectionName: https
+  hostnames:
+    - "homepage.lan.zylman.com"
+    - "home.lan.zylman.com"
+  rules:
+    - backendRefs:
+        - name: homepage
+          port: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: dashboard-lan-route
+  namespace: default
+spec:
+  parentRefs:
+    - name: lan-gateway
+      sectionName: https
+  hostnames:
+    - "dashboard.lan.zylman.com"
+  rules:
+    - backendRefs:
+        - name: dashboard
+          port: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: docs-lan-route
+  namespace: default
+spec:
+  parentRefs:
+    - name: lan-gateway
+      sectionName: https
+  hostnames:
+    - "docs.lan.zylman.com"
+  rules:
+    - backendRefs:
+        - name: docs
+          port: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: agentsview-lan-route
+  namespace: default
+spec:
+  parentRefs:
+    - name: lan-gateway
+      sectionName: https
+  hostnames:
+    - "agentsview.lan.zylman.com"
+  rules:
+    - backendRefs:
+        - name: agentsview
+          port: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: grafana-lan-route
+  namespace: default
+spec:
+  parentRefs:
+    - name: lan-gateway
+      sectionName: https
+  hostnames:
+    - "grafana.lan.zylman.com"
+  rules:
+    - backendRefs:
+        - name: grafana
+          port: 3000
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: openobserve-lan-route
+  namespace: default
+spec:
+  parentRefs:
+    - name: lan-gateway
+      sectionName: https
+  hostnames:
+    - "openobserve.lan.zylman.com"
+  rules:
+    - backendRefs:
+        - name: openobserve
+          port: 5080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: aura-farming-lan-route
+  namespace: default
+spec:
+  parentRefs:
+    - name: lan-gateway
+      sectionName: https
+  hostnames:
+    - "aura-farming.lan.zylman.com"
+  rules:
+    - backendRefs:
+        - name: aura-farming
+          port: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: gatus-lan-route
+  namespace: default
+spec:
+  parentRefs:
+    - name: lan-gateway
+      sectionName: https
+  hostnames:
+    - "gatus.lan.zylman.com"
+  rules:
+    - backendRefs:
+        - name: gatus
+          port: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: home-assistant-lan-route
+  namespace: default
+spec:
+  parentRefs:
+    - name: lan-gateway
+      sectionName: https
+  hostnames:
+    - "home-assistant.lan.zylman.com"
+    - "ha.lan.zylman.com"
+  rules:
+    - backendRefs:
+        - name: home-assistant
+          port: 8123
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: kernel-browser-lan-route
+  namespace: default
+spec:
+  parentRefs:
+    - name: lan-gateway
+      sectionName: https
+  hostnames:
+    - "kernel-browser.lan.zylman.com"
+  rules:
+    - backendRefs:
+        - name: kernel-browser
+          port: 8080
+---
+# edge-gateway routes (webhooks.zylman.com, docs.zylman.com, aerial.zylman.com, browser.zylman.com, and unifi.zylman.com -> 302)
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: webhooks-edge-route
+  namespace: default
+spec:
+  parentRefs:
+    - name: edge-gateway
+  hostnames:
+    - "webhooks.zylman.com"
+  rules:
+    - backendRefs:
+        - name: synapse
+          port: 4020
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: docs-edge-route
+  namespace: default
+spec:
+  parentRefs:
+    - name: edge-gateway
+  hostnames:
+    - "docs.zylman.com"
+  rules:
+    - backendRefs:
+        - name: docs
+          port: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: aerial-edge-route
+  namespace: default
+spec:
+  parentRefs:
+    - name: edge-gateway
+  hostnames:
+    - "aerial.zylman.com"
+  rules:
+    - backendRefs:
+        - name: eri
+          port: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: browser-edge-route
+  namespace: default
+spec:
+  parentRefs:
+    - name: edge-gateway
+  hostnames:
+    - "browser.zylman.com"
+  rules:
+    - backendRefs:
+        - name: kernel-browser
+          port: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: unifi-edge-redirect-route
+  namespace: default
+spec:
+  parentRefs:
+    - name: edge-gateway
+  hostnames:
+    - "unifi.zylman.com"
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            hostname: "unifi.ui.com"
+            statusCode: 302
+---
+# NetworkPolicy definitions for cloudflared and edge-gateway
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: edge-gateway-netpol
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      gateway.networking.k8s.io/gateway-name: edge-gateway
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: cloudflared
+      ports:
+        - protocol: TCP
+          port: 4021
+  egress:
+    - to:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: ["synapse", "docs", "eri", "kernel-browser"]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cloudflared-netpol
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: cloudflared
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              gateway.networking.k8s.io/gateway-name: edge-gateway
+      ports:
+        - protocol: TCP
+          port: 4021
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: UDP
+          port: 7844
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

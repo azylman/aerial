@@ -124,6 +124,20 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
     npm --version
 COPY --link --from=arigaio/atlas:1.3.4 /atlas /usr/local/bin/atlas
 COPY --link --from=1password/op:2 /usr/local/bin/op /usr/local/bin/op
+RUN curl -fsSL https://dl.k8s.io/release/v1.32.2/bin/linux/amd64/kubectl -o /usr/local/bin/kubectl && \
+    echo "4f6a959dcc5b702135f8354cc7109b542a2933c46b808b248a214c1f69f817ea  /usr/local/bin/kubectl" | sha256sum -c - && \
+    chmod 0755 /usr/local/bin/kubectl && \
+    curl -fsSL https://get.helm.sh/helm-v3.17.1-linux-amd64.tar.gz -o /tmp/helm.tar.gz && \
+    echo "3b66f3cd28409f29832b1b35b43d9922959a32d795003149707fea84cbcd4469  /tmp/helm.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/helm.tar.gz --strip-components=1 -C /usr/local/bin linux-amd64/helm && \
+    rm -f /tmp/helm.tar.gz && \
+    chmod 0755 /usr/local/bin/helm && \
+    curl -fsSL https://github.com/fluxcd/flux2/releases/download/v2.5.1/flux_2.5.1_linux_amd64.tar.gz -o /tmp/flux.tar.gz && \
+    echo "f64c85db4b94aefcdf6e0f2825c32573fc2bd234e5489ff332fee62776973ec3  /tmp/flux.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/flux.tar.gz -C /usr/local/bin flux && \
+    rm -f /tmp/flux.tar.gz && \
+    chmod 0755 /usr/local/bin/flux && \
+    kubectl version --client && helm version --short && flux --version
 ENV RUSTUP_HOME="/usr/local/rustup" \
     CARGO_HOME="/usr/local/cargo" \
     PATH="/usr/local/cargo/bin:/usr/local/go/bin:/root/go/bin:${PATH}"

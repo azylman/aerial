@@ -1,0 +1,275 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: aerial
+  namespace: flux-system
+spec:
+  interval: 1m
+  url: https://github.com/azylman/aerial.git
+  ref:
+    branch: main
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: aerial-config
+  namespace: flux-system
+spec:
+  interval: 1m
+  url: https://github.com/azylman/aerial-config.git
+  ref:
+    branch: main
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: aerial-core
+  namespace: flux-system
+spec:
+  interval: 5m
+  targetNamespace: default
+  sourceRef:
+    kind: GitRepository
+    name: aerial
+  path: ./k8s
+  prune: true
+  wait: true
+  timeout: 5m
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: aerial-config
+  namespace: flux-system
+spec:
+  interval: 5m
+  targetNamespace: default
+  sourceRef:
+    kind: GitRepository
+    name: aerial-config
+  path: ./k8s
+  prune: true
+  wait: true
+  timeout: 5m
+---
+apiVersion: notification.toolkit.fluxcd.io/v1beta3
+kind: Provider
+metadata:
+  name: synapse-provider
+  namespace: flux-system
+spec:
+  type: generic
+  address: http://synapse.default.svc.cluster.local/webhooks/flux
+---
+apiVersion: notification.toolkit.fluxcd.io/v1beta3
+kind: Alert
+metadata:
+  name: synapse-alert
+  namespace: flux-system
+spec:
+  providerRef:
+    name: synapse-provider
+  eventSeverity: info
+  eventSources:
+    - kind: GitRepository
+      name: '*'
+    - kind: Kustomization
+      name: '*'
+---
+apiVersion: notification.toolkit.fluxcd.io/v1
+kind: Receiver
+metadata:
+  name: github-receiver
+  namespace: flux-system
+spec:
+  type: github
+  events:
+    - "ping"
+    - "push"
+  secretRef:
+    name: webhook-token
+  resources:
+    - kind: GitRepository
+      name: aerial
+    - kind: GitRepository
+      name: aerial-config
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: admin@aerial.lan
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+      - dns01:
+          cloudflare:
+            apiTokenSecretRef:
+              name: cloudflare-api-token-secret
+              key: api-token
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: zylman-wildcard-tls
+  namespace: default
+spec:
+  secretName: zylman-wildcard-tls
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  commonName: zylman.com
+  dnsNames:
+    - zylman.com
+    - "*.zylman.com"
+    - "*.lan.zylman.com"
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ClusterSecretStore
+metadata:
+  name: infisical
+spec:
+  provider:
+    generic: {}
+---
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: shared-secrets
+  namespace: default
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: infisical
+    kind: ClusterSecretStore
+  target:
+    name: shared-secrets
+    creationPolicy: Owner
+  data: []
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: postgres
+  namespace: default
+spec:
+  instances: 1
+  imageName: ghcr.io/cloudnative-pg/postgresql:18
+  postgresql:
+    parameters:
+      log_destination: jsonlog
+      shared_preload_libraries: "vector"
+  monitoring:
+    enablePodMonitor: true
+  storage:
+    size: 20Gi
+    storageClass: local-path
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: default
+spec:
+  type: ClusterIP
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: 5432
+    - name: metrics
+      port: 9187
+      targetPort: 9187
+  selector:
+    cnpg.io/cluster: postgres
+    role: primary
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: postgres-nightly-backup
+  namespace: default
+spec:
+  schedule: "0 0 3 * * *"
+  backupOwnerReference: self
+  cluster:
+    name: postgres
+---
+apiVersion: db.atlasgo.io/v1alpha1
+kind: AtlasMigration
+metadata:
+  name: aerial-schema
+  namespace: default
+spec:
+  urlFrom:
+    secretKeyRef:
+      name: shared-secrets
+      key: POSTGRES_URL
+  dir:
+    remote:
+      name: aerial
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: arc-runner-set
+  namespace: default
+spec:
+  interval: 5m
+  chart:
+    spec:
+      chart: gha-runner-scale-set
+      version: 0.15.1
+      sourceRef:
+        kind: HelmRepository
+        name: actions-runner-controller
+        namespace: flux-system
+  values:
+    githubConfigUrl: "https://github.com/azylman/aerial"
+    nodeSelector:
+      compute-tier: performance
+    template:
+      spec:
+        containers:
+          - name: runner
+            volumeMounts:
+              - name: cache
+                mountPath: /cache
+              - name: share
+                mountPath: /share
+        volumes:
+          - name: cache
+            emptyDir: {}
+          - name: share
+            emptyDir: {}
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: smb-nas
+provisioner: smb.csi.k8s.io
+volumeBindingMode: Immediate
+parameters:
+  source: "//nas.lan/Aerial"
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nas-aerial-pv
+spec:
+  capacity:
+    storage: 1Ti
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: smb-nas
+  mountOptions:
+    - dir_mode=0777
+    - file_mode=0777
+  csi:
+    driver: smb.csi.k8s.io
+    volumeHandle: nas-aerial-pv
+    volumeAttributes:
+      source: "//nas.lan/Aerial"
