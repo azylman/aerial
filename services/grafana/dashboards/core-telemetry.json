@@ -18,7 +18,7 @@
         "y": 0
       },
       "id": 1,
-      "title": "\ud83d\udef0\ufe0f System Pulse & Operational Health",
+      "title": "🛰️ System Pulse & Operational Health",
       "type": "row"
     },
     {
@@ -143,7 +143,8 @@
         }
       ],
       "title": "Queue Depth",
-      "type": "stat"
+      "type": "stat",
+      "description": "Aerial execution engine task queue depth. Anomaly target: eri_queue_backlog (aerial_brain_queue_depth)."
     },
     {
       "datasource": {
@@ -255,7 +256,8 @@
         }
       ],
       "title": "Runner Errors",
-      "type": "stat"
+      "type": "stat",
+      "description": "Aerial execution engine runner errors. Anomaly target: aerial_eri_runner_errors (sum(rate(aerial_brain_runner_errors_total[5m])) * 60 or vector(0)). vmalert rules: aerial_anomaly_score:eri_runner_errors, aerial_anomaly_score:zscore."
     },
     {
       "datasource": {
@@ -317,7 +319,8 @@
         }
       ],
       "title": "Discord Ping",
-      "type": "stat"
+      "type": "stat",
+      "description": "Discord gateway WebSocket latency and active typing sessions. Anomaly target: eri_discord_gateway_lag (synapse_discord_gateway_latency_seconds * 1000)."
     },
     {
       "datasource": {
@@ -507,7 +510,7 @@
         "y": 5
       },
       "id": 10,
-      "title": "\u26a1 Turn Execution & Subprocess Runner Dynamics",
+      "title": "⚡ Turn Execution & Subprocess Runner Dynamics",
       "type": "row"
     },
     {
@@ -875,7 +878,8 @@
         }
       ],
       "title": "Runner Errors by Taxonomy",
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "Aerial execution engine runner errors. Anomaly target: aerial_eri_runner_errors (sum(rate(aerial_brain_runner_errors_total[5m])) * 60 or vector(0)). vmalert rules: aerial_anomaly_score:eri_runner_errors, aerial_anomaly_score:zscore."
     },
     {
       "collapsed": false,
@@ -886,7 +890,7 @@
         "y": 22
       },
       "id": 15,
-      "title": "\ud83d\udcac Discord Gateway, Outbound Deliveries & Ambient Classifier",
+      "title": "💬 Discord Gateway, Outbound Deliveries & Ambient Classifier",
       "type": "row"
     },
     {
@@ -1166,7 +1170,8 @@
         }
       ],
       "title": "Gateway Latency & Active Typing Sessions",
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "Discord gateway WebSocket latency and active typing sessions. Anomaly target: eri_discord_gateway_lag (synapse_discord_gateway_latency_seconds * 1000)."
     },
     {
       "datasource": {
@@ -1264,7 +1269,8 @@
         }
       ],
       "title": "Ambient Classifier Decisions & Confidence Score",
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "System-1 ambient classifier decisions, latency, and confidence score. Anomaly target: eri_classifier_latency_p90 (histogram_quantile(0.90, sum by (le) (rate(aerial_brain_classifier_duration_seconds_bucket[15m]))) or vector(0))."
     },
     {
       "collapsed": false,
@@ -1275,7 +1281,7 @@
         "y": 39
       },
       "id": 20,
-      "title": "\ud83e\udde0 Vector Memory, Embeddings & Semantic Search",
+      "title": "🧠 Vector Memory, Embeddings & Semantic Search",
       "type": "row"
     },
     {
@@ -1491,7 +1497,7 @@
         "y": 48
       },
       "id": 23,
-      "title": "\ud83d\uddc4\ufe0f Persistent Daemons, Session Lifecycle & DB Query Latency",
+      "title": "🗄️ Persistent Daemons, Session Lifecycle & DB Query Latency",
       "type": "row"
     },
     {
@@ -1719,7 +1725,7 @@
       ],
       "title": "Brain Postgres DB Query Latency by Operation (p95 & Avg)",
       "type": "timeseries",
-      "description": "PostgreSQL database query latency from eri (aerial_brain_db_query_duration_seconds_bucket / _sum / _count)."
+      "description": "PostgreSQL database query latency from eri (aerial_brain_db_query_duration_seconds_bucket / _sum / _count). Anomaly target: eri_db_query_duration_avg ((sum(rate(aerial_brain_db_query_duration_seconds_sum[5m])) / clamp_min(sum(rate(aerial_brain_db_query_duration_seconds_count[5m])), 0.001)) or vector(0))."
     },
     {
       "collapsed": false,
@@ -1730,7 +1736,7 @@
         "y": 57
       },
       "id": 26,
-      "title": "\ud83c\udf10 HTTP Ingress, Lifecycle Webhooks & Context Bootstrapping",
+      "title": "🌐 HTTP Ingress, Lifecycle Webhooks & Context Bootstrapping",
       "type": "row"
     },
     {
@@ -1951,7 +1957,7 @@
         "y": 66
       },
       "id": 29,
-      "title": "\ud83d\udd04 Hangar GitOps (Repo Sync, Nomad Reconcile & OCI Registry)",
+      "title": "🔄 Hangar GitOps (Repo Sync, Nomad Reconcile & OCI Registry)",
       "type": "row"
     },
     {
@@ -2188,7 +2194,7 @@
         "y": 75
       },
       "id": 32,
-      "title": "\ud83d\udc8e LLM Token Consumption & Quota Windows",
+      "title": "💎 LLM Token Consumption & Quota Windows",
       "type": "row"
     },
     {
@@ -2501,7 +2507,7 @@
         }
       ],
       "title": "Token Burn Rate by Model",
-      "description": "Rolling per-minute token consumption velocity categorized by model.",
+      "description": "Rolling per-minute token consumption velocity categorized by model. Anomaly target: eri_token_burn_acceleration (sum(rate(aerial_brain_tokens_total{type=\"total\"}[5m])) * 60).",
       "type": "timeseries"
     },
     {
@@ -2631,7 +2637,7 @@
         }
       ],
       "title": "Token Burn Rate by Channel",
-      "description": "Rolling per-minute token consumption velocity partitioned by Discord channel.",
+      "description": "Rolling per-minute token consumption velocity partitioned by Discord channel. Anomaly target: eri_token_burn_acceleration (sum(rate(aerial_brain_tokens_total{type=\"total\"}[5m])) * 60).",
       "type": "timeseries"
     },
     {
@@ -2827,7 +2833,7 @@
         "type": "prometheus",
         "uid": "VictoriaMetrics"
       },
-      "description": "Correlation of upstream LLM rate limiting errors (rolling 10m sum, left axis) against total token consumption velocity (right axis).",
+      "description": "Correlation of upstream LLM rate limiting errors (rolling 10m sum, left axis) against total token consumption velocity (right axis). Anomaly target: eri_token_burn_acceleration (sum(rate(aerial_brain_tokens_total{type=\"total\"}[5m])) * 60).",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -3114,7 +3120,7 @@
         "y": 113
       },
       "id": 43,
-      "title": "\ud83d\udee0\ufe0f Agent Tool & Skill Execution Dynamics",
+      "title": "🛠️ Agent Tool & Skill Execution Dynamics",
       "type": "row"
     },
     {
@@ -3568,7 +3574,7 @@
       },
       "id": 60,
       "panels": [],
-      "title": "\ud83c\udf0a Webhooks Router & River Queue Telemetry",
+      "title": "🌊 Webhooks Router & River Queue Telemetry",
       "type": "row"
     },
     {
@@ -3576,7 +3582,7 @@
         "type": "prometheus",
         "uid": "VictoriaMetrics"
       },
-      "description": "River queue depth categorized by state and oldest pending job age.",
+      "description": "River queue depth categorized by state and oldest pending job age. Anomaly targets: synapse_queue_backlog (sum(synapse_queue_depth{state=~\"available|retryable\"}) or vector(0)), synapse_discord_ingress_lag (max(synapse_queue_oldest_age_seconds{queue=\"discord_ingress\"}) or vector(0)).",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -3682,7 +3688,7 @@
         "type": "prometheus",
         "uid": "VictoriaMetrics"
       },
-      "description": "River worker processing throughput, retries, dropped jobs, and execution duration quantiles.",
+      "description": "River worker processing throughput, retries, dropped jobs, and execution duration quantiles. Anomaly targets: synapse_job_retries (sum(rate(synapse_job_retries_total[5m])) * 60 or vector(0)), synapse_jobs_dropped (sum(increase(synapse_jobs_dropped_total[1h])) or vector(0)).",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -3834,7 +3840,7 @@
         "type": "prometheus",
         "uid": "VictoriaMetrics"
       },
-      "description": "Persistent schedule states, run frequencies, and dispatch latency.",
+      "description": "Persistent schedule states, run frequencies, and dispatch latency. Anomaly target: haro_schedule_failure_rate (sum(rate(haro_schedule_runs_total{status=\"failed\"}[5m])) * 60).",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -3951,7 +3957,7 @@
         "type": "prometheus",
         "uid": "VictoriaMetrics"
       },
-      "description": "Total semantic facts, extraction and consolidation rates, and operation durations.",
+      "description": "Total semantic facts, extraction and consolidation rates, and operation durations. Anomaly target: coven_operation_errors_rate (sum(rate(coven_operations_total{status=\"error\"}[5m])) * 60).",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -4079,7 +4085,7 @@
         "type": "prometheus",
         "uid": "VictoriaMetrics"
       },
-      "description": "Active builds, active chunks, River queue depth, and chunk throughput.",
+      "description": "Active builds, active chunks, River queue depth, and chunk throughput. Anomaly targets: vanadis_chunk_failures_rate (sum(rate(vanadis_chunks_total{status=\"failed\"}[5m])) * 60), vanadis_queue_oldest_pending_age (max(vanadis_queue_oldest_age_seconds) or vector(0)).",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -4197,6 +4203,16 @@
           "legendFormat": "Chunks/min: {{status}}",
           "range": true,
           "refId": "D"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "expr": "max(vanadis_queue_oldest_age_seconds) or vector(0)",
+          "legendFormat": "Oldest Pending Age (s)",
+          "range": true,
+          "refId": "E"
         }
       ],
       "title": "Vanadis Orchestration & Queue Depth",
@@ -4234,7 +4250,7 @@
     ]
   },
   "timezone": "browser",
-  "title": "\u26a1 Aerial Brain, Webhooks Router & Hangar Operations",
+  "title": "⚡ Aerial Brain, Webhooks Router & Hangar Operations",
   "uid": "aerial-core-telemetry",
   "version": 7,
   "weekStart": ""

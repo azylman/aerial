@@ -18,7 +18,7 @@
         "y": 0
       },
       "id": 100,
-      "title": "\ud83d\udc18 PostgreSQL Instance & Health Pulse",
+      "title": "🐘 PostgreSQL Instance & Health Pulse",
       "type": "row"
     },
     {
@@ -98,7 +98,8 @@
         }
       ],
       "title": "Database Status",
-      "type": "stat"
+      "type": "stat",
+      "description": "PostgreSQL database connectivity and up status. Anomaly target: postgres_service_down (pg_up)."
     },
     {
       "datasource": {
@@ -178,7 +179,7 @@
       ],
       "title": "Active Backends & Connection States (pg_stat_activity)",
       "type": "stat",
-      "description": "Active PostgreSQL database backends (pg_stat_database_numbackends) and connection states (sum by (state) (pg_stat_activity_count))."
+      "description": "Active PostgreSQL database backends (pg_stat_database_numbackends) and connection states (sum by (state) (pg_stat_activity_count)). Anomaly target: postgres_active_backends (sum(pg_stat_database_numbackends{datname!~\"template.*\"}))."
     },
     {
       "datasource": {
@@ -240,14 +241,15 @@
             "uid": "VictoriaMetrics"
           },
           "editorMode": "code",
-          "expr": "(sum(rate(pg_stat_database_blks_hit{datname!~\"template.*\"}[5m])) / (sum(rate(pg_stat_database_blks_hit{datname!~\"template.*\"}[5m])) + sum(rate(pg_stat_database_blks_read{datname!~\"template.*\"}[5m])))) * 100",
+          "expr": "((sum(rate(pg_stat_database_blks_hit{datname!~\"template.*\"}[5m])) / clamp_min(sum(rate(pg_stat_database_blks_hit{datname!~\"template.*\"}[5m])) + sum(rate(pg_stat_database_blks_read{datname!~\"template.*\"}[5m])), 0.001)) * 100) or vector(100)",
           "legendFormat": "Hit Ratio",
           "range": true,
           "refId": "A"
         }
       ],
       "title": "Buffer Cache Hit Ratio",
-      "type": "gauge"
+      "type": "gauge",
+      "description": "Buffer cache hit ratio and block I/O efficiency. Anomaly target: postgres_cache_hit_drop (((sum(rate(pg_stat_database_blks_hit{datname!~\"template.*\"}[5m])) / clamp_min(sum(rate(pg_stat_database_blks_hit{datname!~\"template.*\"}[5m])) + sum(rate(pg_stat_database_blks_read{datname!~\"template.*\"}[5m])), 0.001)) * 100) or vector(100))."
     },
     {
       "datasource": {
@@ -370,10 +372,22 @@
           "legendFormat": "Deadlocks",
           "range": true,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase(pg_stat_database_deadlocks{datname!~\"template.*\"}[1h]))",
+          "legendFormat": "1h Increase",
+          "range": true,
+          "refId": "B"
         }
       ],
       "title": "Deadlock Count",
-      "type": "stat"
+      "type": "stat",
+      "description": "PostgreSQL transaction deadlocks detected. Anomaly target: postgres_deadlocks (sum(increase(pg_stat_database_deadlocks{datname!~\"template.*\"}[1h]))). vmalert rule: aerial_anomaly_score:postgres_deadlocks."
     },
     {
       "datasource": {
@@ -442,7 +456,8 @@
         }
       ],
       "title": "Rollback Rate",
-      "type": "stat"
+      "type": "stat",
+      "description": "Transaction rollback rate and commit/rollback ratio. Anomaly target: postgres_rollback_surge (sum(rate(pg_stat_database_xact_rollback{datname!~\"template.*\"}[5m])))."
     },
     {
       "collapsed": false,
@@ -453,7 +468,7 @@
         "y": 5
       },
       "id": 200,
-      "title": "\u26a1 Transactions & Query Throughput",
+      "title": "⚡ Transactions & Query Throughput",
       "type": "row"
     },
     {
@@ -516,7 +531,8 @@
         }
       ],
       "title": "Transaction Throughput (Commits vs Rollbacks)",
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "Transaction rollback rate and commit/rollback ratio. Anomaly target: postgres_rollback_surge (sum(rate(pg_stat_database_xact_rollback{datname!~\"template.*\"}[5m])))."
     },
     {
       "datasource": {
@@ -611,7 +627,7 @@
         "y": 14
       },
       "id": 300,
-      "title": "\ud83d\udd12 Buffer IO & Lock Statistics",
+      "title": "🔒 Buffer IO & Lock Statistics",
       "type": "row"
     },
     {
@@ -674,7 +690,8 @@
         }
       ],
       "title": "Disk vs Buffer Block IO",
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "Buffer cache hit ratio and block I/O efficiency. Anomaly target: postgres_cache_hit_drop (((sum(rate(pg_stat_database_blks_hit{datname!~\"template.*\"}[5m])) / clamp_min(sum(rate(pg_stat_database_blks_hit{datname!~\"template.*\"}[5m])) + sum(rate(pg_stat_database_blks_read{datname!~\"template.*\"}[5m])), 0.001)) * 100) or vector(100))."
     },
     {
       "datasource": {
@@ -737,7 +754,7 @@
       ],
       "title": "Lock Distribution by Mode & Exclusive Locks (pg_locks_count)",
       "type": "timeseries",
-      "description": "PostgreSQL lock counts by mode including ExclusiveLock and AccessExclusiveLock contention."
+      "description": "PostgreSQL lock counts by mode including ExclusiveLock and AccessExclusiveLock contention. Anomaly target: postgres_exclusive_locks (sum(pg_locks_count{mode=~\"(?i)exclusivelock|accessexclusivelock\"}) or vector(0))."
     }
   ],
   "refresh": "10s",
@@ -753,6 +770,6 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "\ud83d\udc18 PostgreSQL Overview",
+  "title": "🐘 PostgreSQL Overview",
   "uid": "aerial-postgres-overview"
 }
