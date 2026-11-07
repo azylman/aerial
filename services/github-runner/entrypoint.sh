@@ -46,10 +46,28 @@ Global Aerial Stack & Cluster Invariants (applies across all repositories):
 1. Security & Secrets: Zero plaintext tokens, API keys, passwords, or GitHub PATs in code, configs, logs, or git configs. Zero imperative SQL DDL (ALTER TABLE, DROP TABLE) in application code (must use declarative schema.sql + Atlas migrations). Prevent command injection, SSRF, XSS, and path traversal on untrusted inputs.
 2. Concurrency & Reliability: Zero data races, unclosed HTTP response bodies, or leaked goroutines/tickers/timers. Zero arbitrary time.Sleep calls in tests or production plumbing.
 3. Architecture & Testing: Functional Core / Imperative Shell. Go unit tests must use homogeneous table-driven loops without closure fields on table structs (run, check, setup, runnerFn, opts, etc.) or catch-all Test*Coverage* names.
-4. Internal Cluster & Runtime Coverage Topology: All services run inside a private NixOS k3s Kubernetes cluster (*.aerial, *.lan, postgres, synapse, eri, vanadis, haro, coven) behind NGINX Gateway Fabric (lan-gateway and edge-gateway) that never exposes /debug/*. Outbound internal cluster DNS names are trusted private mesh endpoints, not public internet URLs. Compiling Go binaries directly with -cover -covermode=atomic in Dockerfiles and unconditionally registering GET/POST /debug/coverage/flush (calling coverage.WriteMetaDir and coverage.WriteCountersDir into an ephemeral os.MkdirTemp directory and streaming an application/x-tar archive) are intentional cluster-wide invariants. Do NOT flag /debug/coverage/flush, WriteMetaDir, WriteCountersDir, or -cover in Dockerfiles as security, DoS, or disk-I/O findings. In services/github-runner/entrypoint.sh and k8s/operators-and-storage.yaml, retaining GITHUB_PAT for ./run.sh in roborev-runner-* runner deployments/scale sets (RUNNER_LABELS=self-hosted,roborev) while stripping GITHUB_PAT/GH_TOKEN/GITHUB_TOKEN inside the /usr/local/bin/roborev wrapper is intentional so allowlisted fork PRs can post review comments via gh pr comment without exposing tokens to agy review subprocesses. Mounting /var/run/docker.sock and /cache in ci-runner-* runner deployments/scale sets (RUNNER_LABELS=self-hosted,ci, which strip GITHUB_PAT via env -u GITHUB_PAT ./run.sh) while roborev-runner-* deployments mount only their isolated /root/.roborev review state volume without docker.sock is an intentional cluster invariant.
+4. Internal Cluster & Runtime Coverage Topology: All services run inside a private NixOS k3s Kubernetes cluster (*.aerial, *.lan, postgres, synapse, eri, vanadis, haro, coven) behind NGINX Gateway Fabric (lan-gateway and edge-gateway) that never exposes /debug/*. Outbound internal cluster DNS names are trusted private mesh endpoints, not public internet URLs. Compiling Go binaries directly with -cover -covermode=atomic in Dockerfiles and unconditionally registering GET/POST /debug/coverage/flush (calling coverage.WriteMetaDir and coverage.WriteCountersDir into an ephemeral os.MkdirTemp directory and streaming an application/x-tar archive) are intentional cluster-wide invariants. Do NOT flag /debug/coverage/flush, WriteMetaDir, WriteCountersDir, or -cover in Dockerfiles as security, DoS, or disk-I/O findings. In services/github-runner/entrypoint.sh and k8s/operators-and-storage.yaml, retaining GITHUB_PAT for ./run.sh in roborev-runner-* runner deployments/scale sets (RUNNER_LABELS=self-hosted,roborev) while stripping GITHUB_PAT/GH_TOKEN/GITHUB_TOKEN inside the /usr/local/bin/roborev wrapper is intentional so allowlisted fork PRs can post review comments via gh pr comment without exposing tokens to agy review subprocesses. Mounting /var/run/docker.sock and /cache in ci-runner-* runner deployments/scale sets (RUNNER_LABELS=self-hosted,ci, which strip GITHUB_PAT via env -u GITHUB_PAT ./run.sh) while roborev-runner-* scale sets use isolated per-pod /root/.roborev storage synced to in-cluster PostgreSQL via /local/postgres-password without docker.sock is an intentional cluster invariant.
 5. Prior Review Consistency (<prior-range-reviews>): When <prior-range-reviews> is present in the prompt, treat any file, function, or code block that was already reviewed in an ancestor commit on this branch and NOT modified between the prior reviewed commit and HEAD as previously approved. Do NOT raise new findings on untouched code that passed an earlier review on the same branch unless a newly modified line directly broke a caller/callee contract with that code. If a prior finding was fixed, verify the fix and do not re-flag it or invent tangential style/nitpick findings in the same area.
 """
 EOF
+
+if [ -s "/local/postgres-password" ]; then
+  cp -f "/local/postgres-password" "/root/.roborev/postgres-password"
+  chmod 0600 "/root/.roborev/postgres-password"
+elif [ -s "/secrets/postgres-password" ]; then
+  cp -f "/secrets/postgres-password" "/root/.roborev/postgres-password"
+  chmod 0600 "/root/.roborev/postgres-password"
+fi
+
+if [ -s "/root/.roborev/postgres-password" ]; then
+  cat >> /root/.roborev/config.toml <<'EOF'
+
+[sync]
+enabled = true
+postgres_url = "postgres://aerial:${file:/root/.roborev/postgres-password}@postgres:5432/aerial?sslmode=disable"
+interval = "1h"
+EOF
+fi
 chmod 0600 /root/.roborev/config.toml
 
 # Seed antigravity-oauth-token as a writable 0600 file from /local/antigravity-oauth-token (or fallback /secrets/antigravity-oauth-token)
@@ -158,6 +176,9 @@ cat > /root/.gemini/antigravity-cli/permissions.json <<'EOF'
       "unsandboxed(readlink)"
     ],
     "deny": [
+      "read_file(/local/*)",
+      "read_file(/secrets/*)",
+      "read_file(/root/.roborev/*)",
       "command(git push)",
       "command(git commit)",
       "command(git reset)",
@@ -350,8 +371,14 @@ if [[ "${1:-}" == "ci" && "${2:-}" == "review" ]]; then
     trap 'rm -f "${raw_out}" "${body_out}" "${formatted_out}"' EXIT
 
     set +e
+    if [ -s "/root/.roborev/postgres-password" ]; then
+      env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real sync now >/dev/null 2>&1 || true
+    fi
     env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real "${cmd_args[@]}" > "${raw_out}" 2>&1
     rc=$?
+    if [ -s "/root/.roborev/postgres-password" ]; then
+      env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real sync now >/dev/null 2>&1 || true
+    fi
     set -e
 
     if grep -q "^Review (by " "${raw_out}"; then
@@ -535,6 +562,41 @@ trap cleanup SIGTERM SIGINT
 if [[ ",${RUNNER_LABELS}," == *",roborev,"* ]] && [ -x /usr/local/bin/roborev.real ]; then
   echo "Starting persistent roborev daemon..."
   env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real daemon start || true
+  if [ -s "/root/.roborev/postgres-password" ] && command -v psql >/dev/null 2>&1; then
+    env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real sync now >/dev/null 2>&1 || true
+    PGPASSWORD="$(tr -d '\r\n' < /root/.roborev/postgres-password)" psql -h postgres -U aerial -d aerial -v ON_ERROR_STOP=0 -q <<'SQL' >/dev/null 2>&1 || true
+CREATE INDEX IF NOT EXISTS idx_review_jobs_enqueued_at ON roborev.review_jobs(enqueued_at);
+CREATE OR REPLACE FUNCTION roborev.prune_expired_reviews()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  DELETE FROM roborev.responses
+   WHERE job_uuid IN (SELECT uuid FROM roborev.review_jobs WHERE enqueued_at < NOW() - INTERVAL '14 days');
+  DELETE FROM roborev.reviews
+   WHERE job_uuid IN (SELECT uuid FROM roborev.review_jobs WHERE enqueued_at < NOW() - INTERVAL '14 days');
+  DELETE FROM roborev.review_jobs
+   WHERE enqueued_at < NOW() - INTERVAL '14 days';
+  DELETE FROM roborev.commits c
+   WHERE c.created_at < NOW() - INTERVAL '14 days'
+     AND NOT EXISTS (SELECT 1 FROM roborev.review_jobs j WHERE j.commit_id = c.id);
+  RETURN NULL;
+END;
+$$;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_trigger t
+    JOIN pg_class c ON c.oid = t.tgrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'roborev' AND c.relname = 'review_jobs' AND t.tgname = 'trg_prune_expired_reviews'
+  ) THEN
+    CREATE TRIGGER trg_prune_expired_reviews
+    AFTER INSERT ON roborev.review_jobs
+    FOR EACH STATEMENT EXECUTE FUNCTION roborev.prune_expired_reviews();
+  END IF;
+END;
+$$;
+SQL
+  fi
 fi
 
 echo "Starting runner..."
