@@ -1253,9 +1253,11 @@ spec:
           name: init-docket-db
       containers:
         - env:
+            - name: VIKUNJA_SERVICE_PUBLICURL
+              value: "https://docket.lan.zylman.com"
             - name: VIKUNJA_SERVICE_ENABLEREGISTRATION
               value: "true"
-            - name: VIKUNJA_SERVICE_JWTSECRET
+            - name: VIKUNJA_SERVICE_SECRET
               valueFrom:
                 secretKeyRef:
                   key: POSTGRES_PASSWORD
