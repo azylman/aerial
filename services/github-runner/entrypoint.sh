@@ -472,33 +472,23 @@ RUNNER_LABELS="${RUNNER_LABELS:-self-hosted,roborev}"
 echo "${PATH}" > /actions-runner/.path
 
 if [ -d "/cache" ]; then
-  mkdir -p /cache/go-build /cache/go-mod /cache/pip /cache/slots
-  CACHE_SLOT="${RUNNER_NAME}"
-  for slot_idx in $(seq 0 63); do
-    exec 9>"/cache/slots/slot-${slot_idx}.lock"
-    if flock -n 9; then
-      CACHE_SLOT="slot-${slot_idx}"
-      break
-    fi
-  done
-
-  mkdir -p "/cache/golangci-lint-${CACHE_SLOT}" "/cache/cargo-target-${CACHE_SLOT}"
+  mkdir -p /cache/go-build /cache/go-mod /cache/pip /cache/golangci-lint /cache/cargo-target
   export GOCACHE="/cache/go-build"
   export GOMODCACHE="/cache/go-mod"
   export PIP_CACHE_DIR="/cache/pip"
-  export GOLANGCI_LINT_CACHE="/cache/golangci-lint-${CACHE_SLOT}"
+  export GOLANGCI_LINT_CACHE="/cache/golangci-lint"
   export RUSTUP_HOME="/usr/local/rustup"
   export CARGO_HOME="/usr/local/cargo"
-  export CARGO_TARGET_DIR="/cache/cargo-target-${CACHE_SLOT}"
+  export CARGO_TARGET_DIR="/cache/cargo-target"
 
   cat >> /actions-runner/.env <<EOF
 GOCACHE=/cache/go-build
 GOMODCACHE=/cache/go-mod
 PIP_CACHE_DIR=/cache/pip
-GOLANGCI_LINT_CACHE=/cache/golangci-lint-${CACHE_SLOT}
+GOLANGCI_LINT_CACHE=/cache/golangci-lint
 RUSTUP_HOME=/usr/local/rustup
 CARGO_HOME=/usr/local/cargo
-CARGO_TARGET_DIR=/cache/cargo-target-${CACHE_SLOT}
+CARGO_TARGET_DIR=/cache/cargo-target
 EOF
 fi
 
@@ -549,9 +539,9 @@ fi
 
 echo "Starting runner..."
 if [[ ",${RUNNER_LABELS}," == *",ci,"* ]]; then
-  env -u GITHUB_PAT ./run.sh 9>&- &
+  env -u GITHUB_PAT ./run.sh &
 else
-  ./run.sh 9>&- &
+  ./run.sh &
 fi
 RUNNER_PID=$!
 wait "${RUNNER_PID}"
