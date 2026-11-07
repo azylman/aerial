@@ -510,7 +510,7 @@ func (r *PostgresPRRegistry) TransitionDeploying(ctx context.Context, repo strin
 				(SELECT COALESCE(jsonb_agg(DISTINCT elem), '[]'::jsonb) FROM jsonb_array_elements(COALESCE(metadata->'started_jobs', '[]'::jsonb) || to_jsonb($3::text[])) AS elem)
 			),
 			updated_at = CURRENT_TIMESTAMP
-		WHERE repo = $1 AND pr_number = $2 AND status NOT IN ('closed', 'conflict')
+		WHERE repo = $1 AND pr_number = $2 AND status NOT IN ('closed', 'conflict', 'deployed')
 		  AND EXISTS (SELECT 1 FROM jsonb_array_elements(to_jsonb($3::text[])) AS req_elem WHERE NOT (COALESCE(metadata->'deployed_jobs', '[]'::jsonb) @> jsonb_build_array(req_elem)))
 		RETURNING target_id;`
 	return r.execReturningTargetID(ctx, repo, prNumber, "transition deploying", query, cleanJobs)

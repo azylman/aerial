@@ -221,6 +221,7 @@ func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, he
 		return nil
 	}
 	s.setPRWidgetState(ctx, repo, prNum, "deployed", "")
+	s.recordDeploySuccessDispatched(repo, "git-merge", headSHA, prNum)
 	if err := s.advanceVanadisChunk(ctx, repo, prNum); err != nil {
 		return err
 	}

@@ -1068,6 +1068,7 @@ func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) 
 		}
 
 		if s.shouldSuppressDuplicateDeploySuccess(ctx, evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber) {
+			s.reconcileStuckDeployingPRWidget(ctx, evt.Repo, evt.PRNumber)
 			log.Printf("[synapse] [deploy] suppressing duplicate deploy_success for repo=%s job=%s pr=%d commit=%s",
 				evt.Repo, evt.JobName, evt.PRNumber, evt.CommitSHA)
 			return &evt, nil
@@ -1085,6 +1086,27 @@ func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) 
 		return &evt, s.handleDeploySyncFailed(ctx, evt, prefix)
 	}
 	return &evt, nil
+}
+
+func (s *RouterServer) reconcileStuckDeployingPRWidget(ctx context.Context, repo string, prNum int) {
+	if s == nil || s.registry == nil || repo == "" || prNum <= 0 {
+		return
+	}
+	pgReg, ok := s.registry.(*PostgresPRRegistry)
+	if !ok || pgReg == nil || pgReg.pool == nil {
+		return
+	}
+	normRepo := normalizeRepo(repo)
+	qCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	var status string
+	err := pgReg.pool.QueryRow(qCtx, `SELECT status FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1;`, normRepo, prNum).Scan(&status)
+	if err == nil && strings.EqualFold(strings.TrimSpace(status), "deploying") {
+		s.setPRWidgetState(ctx, repo, prNum, "deployed", "")
+		if err := s.SyncPRWidget(ctx, repo, prNum); err != nil {
+			log.Printf("[synapse] [widget] warning syncing reconciled stuck deploying widget for %s#%d: %v", repo, prNum, err)
+		}
+	}
 }
 
 func (s *RouterServer) recordDeploySuccessDispatched(repo, jobName, commitSHA string, prNum int) {
