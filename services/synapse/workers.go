@@ -401,7 +401,18 @@ type WidgetSyncArgs struct {
 
 func (WidgetSyncArgs) Kind() string { return "widget_sync" }
 func (WidgetSyncArgs) InsertOpts() river.InsertOpts {
-	return river.InsertOpts{Queue: QueueWidgetSync, MaxAttempts: 5}
+	return river.InsertOpts{
+		Queue:       QueueWidgetSync,
+		MaxAttempts: 5,
+		UniqueOpts: river.UniqueOpts{
+			ByArgs: true,
+			ByState: []rivertype.JobState{
+				rivertype.JobStateAvailable,
+				rivertype.JobStateScheduled,
+				rivertype.JobStateRetryable,
+			},
+		},
+	}
 }
 
 // WidgetSyncWorker processes Discord PR and build status widget updates from River.

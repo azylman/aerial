@@ -965,6 +965,7 @@ func TestRiverJobArgsAndUniqueOpts(t *testing.T) {
 		wantKind     string
 		wantQueue    string
 		wantByArgs   bool
+		wantByStates []rivertype.JobState
 		wantByPeriod time.Duration
 		wantAttempts int
 	}{
@@ -985,6 +986,8 @@ func TestRiverJobArgsAndUniqueOpts(t *testing.T) {
 			args:         WidgetSyncArgs{Repo: "azylman/aerial", PRNumber: 101},
 			wantKind:     "widget_sync",
 			wantQueue:    QueueWidgetSync,
+			wantByArgs:   true,
+			wantByStates: []rivertype.JobState{rivertype.JobStateAvailable, rivertype.JobStateScheduled, rivertype.JobStateRetryable},
 			wantAttempts: 5,
 		},
 		{
@@ -1038,6 +1041,11 @@ func TestRiverJobArgsAndUniqueOpts(t *testing.T) {
 			}
 			if tc.wantByArgs && !opts.UniqueOpts.ByArgs {
 				t.Errorf("UniqueOpts.ByArgs = false, want true")
+			}
+			if len(tc.wantByStates) > 0 {
+				if !slices.Equal(opts.UniqueOpts.ByState, tc.wantByStates) {
+					t.Errorf("UniqueOpts.ByState = %v, want %v", opts.UniqueOpts.ByState, tc.wantByStates)
+				}
 			}
 			if tc.wantByPeriod > 0 && opts.UniqueOpts.ByPeriod != tc.wantByPeriod {
 				t.Errorf("UniqueOpts.ByPeriod = %v, want %v", opts.UniqueOpts.ByPeriod, tc.wantByPeriod)
