@@ -362,7 +362,7 @@ spec:
           - name: listener
         nodeSelector:
           kubernetes.io/hostname: calibarn
-    maxRunners: 2
+    maxRunners: 6
     minRunners: 0
     runnerScaleSetName: roborev-runner-aerial
     scaleSetLabels:
@@ -386,25 +386,25 @@ spec:
             image: ghcr.io/azylman/aerial-github-runner:${TAG_AERIAL_GITHUB_RUNNER:=latest}
             name: runner
             volumeMounts:
-              - mountPath: /root/.roborev
-                name: roborev-data
               - mountPath: /local/antigravity-oauth-token
                 name: oauth-token
                 readOnly: true
                 subPath: antigravity-oauth-token
+              - mountPath: /local/postgres-password
+                name: oauth-token
+                readOnly: true
+                subPath: postgres-password
         nodeSelector:
           kubernetes.io/hostname: calibarn
         volumes:
-          - hostPath:
-              path: /var/lib/docker/volumes/aerial-roborev-aerial/_data
-              type: DirectoryOrCreate
-            name: roborev-data
           - name: oauth-token
             secret:
               defaultMode: 384
               items:
                 - key: ANTIGRAVITY_OAUTH_TOKEN
                   path: antigravity-oauth-token
+                - key: POSTGRES_PASSWORD
+                  path: postgres-password
               optional: true
               secretName: shared-secrets
   valuesFrom:
@@ -510,7 +510,7 @@ spec:
           - name: listener
         nodeSelector:
           kubernetes.io/hostname: calibarn
-    maxRunners: 2
+    maxRunners: 4
     minRunners: 0
     runnerScaleSetName: roborev-runner-mirrormere
     scaleSetLabels:
@@ -534,25 +534,25 @@ spec:
             image: ghcr.io/azylman/aerial-github-runner:${TAG_AERIAL_GITHUB_RUNNER:=latest}
             name: runner
             volumeMounts:
-              - mountPath: /root/.roborev
-                name: roborev-data
               - mountPath: /local/antigravity-oauth-token
                 name: oauth-token
                 readOnly: true
                 subPath: antigravity-oauth-token
+              - mountPath: /local/postgres-password
+                name: oauth-token
+                readOnly: true
+                subPath: postgres-password
         nodeSelector:
           kubernetes.io/hostname: calibarn
         volumes:
-          - hostPath:
-              path: /var/lib/docker/volumes/aerial-roborev-mirrormere/_data
-              type: DirectoryOrCreate
-            name: roborev-data
           - name: oauth-token
             secret:
               defaultMode: 384
               items:
                 - key: ANTIGRAVITY_OAUTH_TOKEN
                   path: antigravity-oauth-token
+                - key: POSTGRES_PASSWORD
+                  path: postgres-password
               optional: true
               secretName: shared-secrets
   valuesFrom:
@@ -658,7 +658,7 @@ spec:
           - name: listener
         nodeSelector:
           kubernetes.io/hostname: calibarn
-    maxRunners: 2
+    maxRunners: 4
     minRunners: 0
     runnerScaleSetName: roborev-runner-aerial-sidecars
     scaleSetLabels:
@@ -682,25 +682,25 @@ spec:
             image: ghcr.io/azylman/aerial-github-runner:${TAG_AERIAL_GITHUB_RUNNER:=latest}
             name: runner
             volumeMounts:
-              - mountPath: /root/.roborev
-                name: roborev-data
               - mountPath: /local/antigravity-oauth-token
                 name: oauth-token
                 readOnly: true
                 subPath: antigravity-oauth-token
+              - mountPath: /local/postgres-password
+                name: oauth-token
+                readOnly: true
+                subPath: postgres-password
         nodeSelector:
           kubernetes.io/hostname: calibarn
         volumes:
-          - hostPath:
-              path: /var/lib/docker/volumes/aerial-roborev-aerial-sidecars/_data
-              type: DirectoryOrCreate
-            name: roborev-data
           - name: oauth-token
             secret:
               defaultMode: 384
               items:
                 - key: ANTIGRAVITY_OAUTH_TOKEN
                   path: antigravity-oauth-token
+                - key: POSTGRES_PASSWORD
+                  path: postgres-password
               optional: true
               secretName: shared-secrets
   valuesFrom:
@@ -830,25 +830,25 @@ spec:
             image: ghcr.io/azylman/aerial-github-runner:${TAG_AERIAL_GITHUB_RUNNER:=latest}
             name: runner
             volumeMounts:
-              - mountPath: /root/.roborev
-                name: roborev-data
               - mountPath: /local/antigravity-oauth-token
                 name: oauth-token
                 readOnly: true
                 subPath: antigravity-oauth-token
+              - mountPath: /local/postgres-password
+                name: oauth-token
+                readOnly: true
+                subPath: postgres-password
         nodeSelector:
           kubernetes.io/hostname: calibarn
         volumes:
-          - hostPath:
-              path: /var/lib/docker/volumes/aerial-roborev-aerial-config/_data
-              type: DirectoryOrCreate
-            name: roborev-data
           - name: oauth-token
             secret:
               defaultMode: 384
               items:
                 - key: ANTIGRAVITY_OAUTH_TOKEN
                   path: antigravity-oauth-token
+                - key: POSTGRES_PASSWORD
+                  path: postgres-password
               optional: true
               secretName: shared-secrets
   valuesFrom:
