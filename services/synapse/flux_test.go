@@ -488,10 +488,7 @@ func TestHandleFluxWebhook(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			srv := NewRouterServer(Config{SystemChannelID: "123456789012345678"}, nil)
-			if tc.pgReg != nil {
-				srv.SetRegistry(tc.pgReg)
-			}
+			srv := newTestRouter(Config{SystemChannelID: "123456789012345678"}, nil, tc.pgReg, nil)
 			if tc.downstreamFail {
 				srv.SetDispatcher(&mockOutboundDispatcher{directMessageErr: errors.New("dispatch failed")})
 			}

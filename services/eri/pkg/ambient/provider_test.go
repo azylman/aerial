@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -302,8 +303,8 @@ func TestProvider_SingleflightDeduplication(t *testing.T) {
 	inv := &mockInvoker{
 		execFunc: func(ctx context.Context, name string, args map[string]any) (string, error) {
 			atomic.AddInt32(&toolInvocations, 1)
-			// Small sleep so concurrent calls overlap
-			time.Sleep(50 * time.Millisecond)
+			// Hold briefly via timer channel so concurrent callers overlap in singleflight
+			<-time.After(30 * time.Millisecond)
 			return `{"status": "ok"}`, nil
 		},
 	}
@@ -805,14 +806,9 @@ func TestProvider_StaleWhileRevalidate(t *testing.T) {
 		t.Fatal("timed out waiting for background refresh")
 	}
 
-	for range 50 {
-		time.Sleep(10 * time.Millisecond)
-		p.mu.RLock()
-		cached := p.cache
-		p.mu.RUnlock()
-		if strings.Contains(cached, "Val: 2") {
-			break
-		}
+	deadline := time.Now().Add(2 * time.Second)
+	for p.refreshing.Load() != 0 && time.Now().Before(deadline) {
+		runtime.Gosched()
 	}
 
 	if inv.CallCount() != 2 {
@@ -988,8 +984,11 @@ func TestProvider_AtomicCAS_PreventsConcurrentRefresh(t *testing.T) {
 	// Unblock the tool execution
 	close(blockTool)
 
-	// Wait a moment for refreshing flag to clear and cache to update
-	time.Sleep(50 * time.Millisecond)
+	// Wait for refreshing flag to clear and cache to update
+	deadline := time.Now().Add(2 * time.Second)
+	for p.refreshing.Load() != 0 && time.Now().Before(deadline) {
+		runtime.Gosched()
+	}
 
 	// Only 2 total calls to the tool: 1 initial + 1 background refresh (no duplicates spawned)
 	if total := toolCalls.Load(); total != 2 {

@@ -83,6 +83,25 @@ func (z *zeroCallTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	return nil, errors.New("unexpected outbound HTTP call")
 }
 
+type loopbackOnlyTransport struct{ base http.RoundTripper }
+
+func (l *loopbackOnlyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if h := req.URL.Hostname(); h != "127.0.0.1" && h != "::1" && h != "localhost" {
+		return nil, errors.New("hermetic test guard: blocked non-loopback HTTP call to " + req.URL.Host)
+	}
+	return l.base.RoundTrip(req)
+}
+
+type noopClusterTransport struct{}
+
+func (noopClusterTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"matched":false,"advanced":false,"fired":0,"triggers":[]}`))}, nil
+}
+
+func init() {
+	http.DefaultTransport = &loopbackOnlyTransport{base: http.DefaultTransport}
+}
+
 type prCall struct {
 	repo     string
 	prNumber int
@@ -681,8 +700,17 @@ func (m *mockOutboundDispatcher) DiscordInteractionCalls() []*discordgo.Interact
 }
 
 func newTestRouter(cfg Config, client *http.Client, reg PRRegistryUpdater, disp OutboundDispatcher, riverInserter ...RiverInserter) *RouterServer {
+	if client == nil && cfg.GitHubAPIURL == "" && cfg.InfisicalURL == "" && cfg.KubeAPIServer == "" {
+		client = &http.Client{Transport: &zeroCallTransport{}}
+	}
 	srv := NewRouterServer(cfg, client, riverInserter...)
 	if reg != nil {
+		if pgReg, ok := reg.(*PostgresPRRegistry); ok && pgReg != nil {
+			if pgReg.vanadisURL == "http://vanadis.aerial" && pgReg.haroURL == "http://haro.aerial" {
+				pgReg.httpClient = &http.Client{Transport: noopClusterTransport{}}
+				pgReg.vanadisRetryDelay = 0
+			}
+		}
 		srv.SetRegistry(reg)
 	}
 	if disp != nil {

@@ -193,6 +193,12 @@ func TestStatusHandler(t *testing.T) {
 		},
 	}
 
+	origDockerDefault := dockerSocketClient
+	defer func() { dockerSocketClient = origDockerDefault }()
+	dockerSocketClient = &http.Client{Transport: &roundTripperFunc{fn: func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("hermetic test: docker socket disabled")
+	}}}
+
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.dockerJSON != "" {
@@ -637,6 +643,13 @@ func TestDashboardServerLifecycle(t *testing.T) {
 		GitCommit:  "testsha",
 	}
 
+	sighupReady := make(chan chan<- os.Signal, 1)
+	origSighupNotify := sighupNotifyFn
+	sighupNotifyFn = func(c chan<- os.Signal) {
+		sighupReady <- c
+	}
+	defer func() { sighupNotifyFn = origSighupNotify }()
+
 	t.Cleanup(func() {
 		globalGHPoller = nil
 	})
@@ -662,10 +675,9 @@ func TestDashboardServerLifecycle(t *testing.T) {
 		t.Fatalf("server failed to start on %s within deadline", probeAddr)
 	}
 
-	// Send SIGHUP to exercise static asset reload
-	if err := syscall.Kill(syscall.Getpid(), syscall.SIGHUP); err != nil {
-		t.Errorf("failed to send SIGHUP: %v", err)
-	}
+	// Send SIGHUP via injected signal channel to exercise static asset reload
+	capturedSighup := <-sighupReady
+	capturedSighup <- syscall.SIGHUP
 
 	// Verify server remains responsive after SIGHUP
 	resp, err := http.Get("http://" + probeAddr + "/health")

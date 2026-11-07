@@ -258,8 +258,7 @@ func TestAutoAttachNewMedia(t *testing.T) {
 		t.Fatalf("failed to create scratch dir: %v", err)
 	}
 
-	sinceTime := time.Now()
-	time.Sleep(10 * time.Millisecond)
+	sinceTime := time.Now().Add(-time.Second)
 
 	// Create test images in baseDir and scratchDir
 	img1 := createTestPNG(t, tempDir, "gen_1.png")
@@ -681,6 +680,15 @@ func TestResolveAndFetchInternalImage_Validation(t *testing.T) {
 	serverHost := strings.ToLower(serverURL.Hostname())
 	AllowedInternalHosts[serverHost] = true
 	defer delete(AllowedInternalHosts, serverHost)
+
+	origTransport := internalMediaHTTPClient.Transport
+	internalMediaHTTPClient.Transport = &mockRoundTripper{roundTrip: func(req *http.Request) (*http.Response, error) {
+		if req.URL.Hostname() == "vision.aerial" {
+			return nil, errors.New("dial tcp: connection refused")
+		}
+		return http.DefaultTransport.RoundTrip(req)
+	}}
+	defer func() { internalMediaHTTPClient.Transport = origTransport }()
 
 	tests := []struct {
 		name            string

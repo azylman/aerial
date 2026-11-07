@@ -571,7 +571,7 @@ func RunDashboardServer(ctx context.Context, cfg DashboardConfig) error {
 	}
 
 	sighupCh := make(chan os.Signal, 1)
-	signal.Notify(sighupCh, syscall.SIGHUP)
+	sighupNotifyFn(sighupCh)
 	defer signal.Stop(sighupCh)
 
 	go func() {
@@ -635,6 +635,7 @@ var (
 	loadConfigFn      = LoadConfig
 	runDashboardFn    = RunDashboardServer
 	exitFn            = log.Fatalf
+	sighupNotifyFn    = func(c chan<- os.Signal) { signal.Notify(c, syscall.SIGHUP) }
 )
 
 func main() {
