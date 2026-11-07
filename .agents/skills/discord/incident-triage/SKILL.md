@@ -150,21 +150,11 @@ Map findings to the **8-Point Core Failure Taxonomy**:
 
 ## 4. Post-Mortem Delivery Format
 
-Deliver the post-mortem directly to the user in clean Markdown (strictly < 1,800 characters, bulleted lists only, no markdown tables, leading naturally with the key conclusion first):
+Deliver the post-mortem directly to the user in clean Markdown (strictly < 1,800 characters, bulleted lists or short paragraphs, no markdown tables, leading naturally with the key conclusion first):
 
-```markdown
-[One-sentence conclusion stating exact failure mode or latency source].
-
-### 🔍 Forensic Findings
-- **Target Event**: [Message ID, service, or operation at <timestamp>].
-- **Metrics Observed**: [Key VictoriaMetrics data: TTFR, latency duration, CPU/memory spike, OOM count].
-- **Telemetry & Traces**: [Key OpenObserve log excerpt or database status].
-- **Failure Taxonomy**: [Failure Mode Category or Performance Root Cause].
-
-### 🛠️ Root Cause & Remediation
-- **Why it happened**: [Clear technical explanation of code/runtime failure or bottleneck].
-- **Next Step**: [Failing test in `services/eri/pkg/...` via `systematic-debugging` or operational fix via `self-improvement`].
-```
+- **Direct Conclusion First**: State what happened, the failure mode (mapped from the 8-Point Core Failure Taxonomy in Phase 5), why it happened, and the remediation or handoff step (`systematic-debugging` or `self-improvement` when a code fix is warranted).
+- **Proportional Explanation Standard**: Scale response structure to the question. Answer routine status or root-cause queries in 1–3 concise sentences or a short bulleted list rather than forcing rigid multi-header forensic boilerplate.
+- **Telemetry Abstraction Invariant**: Every conclusion must remain grounded in verified telemetry from VictoriaMetrics, OpenObserve, and PostgreSQL per Section 1 (`Zero-Guessing Invariant`). However, translate low-level telemetry into high-level explanations—never dump unrequested ephemeral identifiers (database migration timestamp filenames, Kubernetes pod template hashes, Discord message snowflakes, internal database row UUIDs, raw log lines, or exact microsecond timestamps). Reserve specific identifiers for actionable engineering coordinates (service names, canonical source file paths, PR/Task numbers, and human-readable durations) or when explicitly requested by the user.
 
 ---
 
