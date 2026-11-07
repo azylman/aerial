@@ -37,6 +37,7 @@ type StatusWidgetRequest struct {
 	Banner    string              `json:"banner,omitempty"`
 	SkipSink  bool                `json:"skip_sink,omitempty"`
 	Chunks    []StatusWidgetChunk `json:"chunks"`
+	StartedAt time.Time           `json:"started_at,omitempty"`
 }
 
 // WidgetSinkMessageThreshold is the number of newer non-widget messages after a status widget
@@ -283,6 +284,27 @@ func buildWidgetChunkComponent(c StatusWidgetChunk) discordgo.MessageComponent {
 	}
 }
 
+func resolveWidgetStartedAt(req StatusWidgetRequest) time.Time {
+	started := req.StartedAt
+	for _, c := range req.Chunks {
+		if !c.StartedAt.IsZero() && (started.IsZero() || c.StartedAt.Before(started)) {
+			started = c.StartedAt
+		}
+	}
+	return started
+}
+
+func formatWidgetFooterText(req StatusWidgetRequest, now time.Time) string {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	started := resolveWidgetStartedAt(req)
+	if !started.IsZero() {
+		return fmt.Sprintf("*Started <t:%d:R> · Updated <t:%d:R>*", started.Unix(), now.Unix())
+	}
+	return fmt.Sprintf("*Updated <t:%d:R>*", now.Unix())
+}
+
 // BuildStatusWidgetComponents constructs a Components V2 Container message component.
 func BuildStatusWidgetComponents(req StatusWidgetRequest, now time.Time) ([]discordgo.MessageComponent, error) {
 	color := AccentColor(req.Status)
@@ -316,10 +338,7 @@ func BuildStatusWidgetComponents(req StatusWidgetRequest, now time.Time) ([]disc
 	}
 
 	// Footer TextDisplay
-	if now.IsZero() {
-		now = time.Now()
-	}
-	footerText := fmt.Sprintf("*Updated <t:%d:R>*", now.Unix())
+	footerText := formatWidgetFooterText(req, now)
 	containerComponents = append(containerComponents, &discordgo.TextDisplay{
 		Content: footerText,
 	})

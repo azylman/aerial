@@ -721,6 +721,40 @@ func TestBuildStatusWidgetComponents_ChunkRuntimes(t *testing.T) {
 	if c3Text.Content != "✅ **`aerial`**: Completed chunk missing UpdatedAt" {
 		t.Errorf("unexpected chunk 3 text: %q", c3Text.Content)
 	}
+
+	footerText := container.Components[5].(*discordgo.TextDisplay)
+	if footerText.Content != "*Started <t:1760000000:R> · Updated <t:1760000500:R>*" {
+		t.Errorf("unexpected footer text: %q", footerText.Content)
+	}
+
+	// Verify top-level req.StartedAt precedence over chunk start times when earlier,
+	// and chunk start time precedence when earlier than req.StartedAt.
+	earlierStart := time.Unix(1759999000, 0)
+	reqWithTopStart := req
+	reqWithTopStart.StartedAt = earlierStart
+	compsTop, err := BuildStatusWidgetComponents(reqWithTopStart, now)
+	if err != nil {
+		t.Fatalf("BuildStatusWidgetComponents with StartedAt failed: %v", err)
+	}
+	containerTop := compsTop[0].(*discordgo.Container)
+	footerTop := containerTop.Components[5].(*discordgo.TextDisplay)
+	if footerTop.Content != "*Started <t:1759999000:R> · Updated <t:1760000500:R>*" {
+		t.Errorf("unexpected footer text with earlier top-level StartedAt: %q", footerTop.Content)
+	}
+
+	// Top-level StartedAt later than chunk start time should still resolve to earliest chunk start time
+	laterStart := time.Unix(1760000100, 0)
+	reqWithLaterTopStart := req
+	reqWithLaterTopStart.StartedAt = laterStart
+	compsLater, err := BuildStatusWidgetComponents(reqWithLaterTopStart, now)
+	if err != nil {
+		t.Fatalf("BuildStatusWidgetComponents with later StartedAt failed: %v", err)
+	}
+	containerLater := compsLater[0].(*discordgo.Container)
+	footerLater := containerLater.Components[5].(*discordgo.TextDisplay)
+	if footerLater.Content != "*Started <t:1760000000:R> · Updated <t:1760000500:R>*" {
+		t.Errorf("unexpected footer text with later top-level StartedAt: %q", footerLater.Content)
+	}
 }
 
 func TestExtractMessageComponentsText(t *testing.T) {

@@ -743,6 +743,7 @@ type StatusWidgetRequest struct {
 	Banner    string              `json:"banner,omitempty"`
 	Chunks    []StatusWidgetChunk `json:"chunks"`
 	SkipSink  bool                `json:"skip_sink,omitempty"`
+	StartedAt time.Time           `json:"started_at,omitempty"`
 }
 
 type GitPushEventRequest struct {
