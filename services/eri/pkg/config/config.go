@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"maps"
-	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -754,8 +753,6 @@ func LoadSharedSecrets(path string) map[string]string {
 }
 
 // WithSharedSecretsLookup wraps a primary lookup function (e.g. os.Getenv) with shared secrets file fallbacks.
-// If POSTGRES_PASSWORD is set in shared secrets while POSTGRES_HOST is unset in both primary and shared secrets,
-// POSTGRES_HOST defaults to "postgres".
 func WithSharedSecretsLookup(primary func(string) string, secretsPath string) func(string) string {
 	secrets := LoadSharedSecrets(secretsPath)
 	if primary == nil {
@@ -768,9 +765,6 @@ func WithSharedSecretsLookup(primary func(string) string, secretsPath string) fu
 		if v := secrets[k]; v != "" {
 			return v
 		}
-		if k == "POSTGRES_HOST" && secrets["POSTGRES_PASSWORD"] != "" {
-			return "postgres"
-		}
 		return ""
 	}
 }
@@ -782,27 +776,14 @@ func buildPostgresDSN(lookup func(string) string) string {
 	if envDSN := strings.TrimSpace(lookup("DATABASE_URL")); envDSN != "" {
 		return envDSN
 	}
-	dbHost := strings.TrimSpace(lookup("POSTGRES_HOST"))
-	if dbHost == "" {
+	if pgURL := strings.TrimSpace(lookup("POSTGRES_URL")); pgURL != "" {
+		return pgURL
+	}
+	dbPass := strings.TrimSpace(lookup("POSTGRES_PASSWORD"))
+	if dbPass == "" {
 		return ""
 	}
-	dbPort := strings.TrimSpace(lookup("POSTGRES_PORT"))
-	if dbPort == "" {
-		dbPort = "5432"
-	}
-	dbUser := strings.TrimSpace(lookup("POSTGRES_USER"))
-	if dbUser == "" {
-		dbUser = "aerial"
-	}
-	dbPass := lookup("POSTGRES_PASSWORD")
-	if dbPass == "" {
-		dbPass = "aerial_secure_pass"
-	}
-	dbName := strings.TrimSpace(lookup("POSTGRES_DB"))
-	if dbName == "" {
-		dbName = "aerial"
-	}
-	return fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=disable", dbUser, dbPass, net.JoinHostPort(dbHost, dbPort), dbName)
+	return fmt.Sprintf("postgres://aerial:%s@postgres:5432/aerial?sslmode=disable", dbPass)
 }
 
 func overrideEnvStr(dst *string, lookup func(string) string, keys ...string) {

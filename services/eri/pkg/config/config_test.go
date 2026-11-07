@@ -766,33 +766,41 @@ func TestConfig_EnvironmentAndDSN(t *testing.T) {
 		expected string
 	}{
 		{
-			name:     "unset host returns empty",
+			name:     "unset returns empty",
 			envMap:   map[string]string{},
 			expected: "",
 		},
 		{
-			name:     "host only uses defaults",
-			envMap:   map[string]string{"POSTGRES_HOST": "db.internal"},
-			expected: "postgres://aerial:aerial_secure_pass@db.internal:5432/aerial?sslmode=disable",
+			name:     "postgres password builds standard aerial dsn",
+			envMap:   map[string]string{"POSTGRES_PASSWORD": "secret_pg_pass"},
+			expected: "postgres://aerial:secret_pg_pass@postgres:5432/aerial?sslmode=disable",
 		},
 		{
-			name: "full custom postgres overrides",
+			name: "postgres url takes precedence over postgres password",
 			envMap: map[string]string{
-				"POSTGRES_HOST":     "custom-pg",
-				"POSTGRES_PORT":     "5433",
-				"POSTGRES_USER":     "myuser",
-				"POSTGRES_PASSWORD": "mypassword",
-				"POSTGRES_DB":       "mydb",
+				"POSTGRES_URL":      "postgres://custom:pass@custom-pg:5433/custom_db?sslmode=require",
+				"POSTGRES_PASSWORD": "secret_pg_pass",
 			},
-			expected: "postgres://myuser:mypassword@custom-pg:5433/mydb?sslmode=disable",
+			expected: "postgres://custom:pass@custom-pg:5433/custom_db?sslmode=require",
 		},
 		{
-			name: "database url direct precedence",
+			name: "database url direct highest precedence",
 			envMap: map[string]string{
-				"DATABASE_URL":  "postgres://direct:conn@db:5432/app",
-				"POSTGRES_HOST": "custom-pg",
+				"DATABASE_URL":      "postgres://direct:conn@db:5432/app",
+				"POSTGRES_URL":      "postgres://custom:pass@custom-pg:5433/custom_db?sslmode=require",
+				"POSTGRES_PASSWORD": "secret_pg_pass",
 			},
 			expected: "postgres://direct:conn@db:5432/app",
+		},
+		{
+			name: "legacy non-secret postgres env lookups ignored",
+			envMap: map[string]string{
+				"POSTGRES_HOST": "custom-pg",
+				"POSTGRES_PORT": "5433",
+				"POSTGRES_USER": "myuser",
+				"POSTGRES_DB":   "mydb",
+			},
+			expected: "",
 		},
 	}
 	for _, tc := range dsnTests {
@@ -1780,17 +1788,6 @@ func TestWithSharedSecretsLookup_TableDriven(t *testing.T) {
 		"POSTGRES_PASSWORD": "secret-pg-pass"
 	}`), 0o600)
 
-	customHostFile := filepath.Join(tmpDir, "custom-host.json")
-	_ = os.WriteFile(customHostFile, []byte(`{
-		"POSTGRES_HOST": "shared-db.internal",
-		"POSTGRES_PASSWORD": "secret-pg-pass"
-	}`), 0o600)
-
-	noPassFile := filepath.Join(tmpDir, "no-pass.json")
-	_ = os.WriteFile(noPassFile, []byte(`{
-		"OTHER": "val"
-	}`), 0o600)
-
 	tests := []struct {
 		name       string
 		primaryMap map[string]string
@@ -1821,38 +1818,24 @@ func TestWithSharedSecretsLookup_TableDriven(t *testing.T) {
 			expected:  "secret-val",
 		},
 		{
-			name:       "postgres host defaulted when password present in shared secrets",
+			name:       "postgres password returned from shared secrets",
 			primaryMap: map[string]string{},
 			filePath:   sharedFile,
-			queryKey:   "POSTGRES_HOST",
-			expected:   "postgres",
-		},
-		{
-			name:       "postgres host preserved from primary even if password in shared secrets",
-			primaryMap: map[string]string{"POSTGRES_HOST": "primary-db.internal"},
-			filePath:   sharedFile,
-			queryKey:   "POSTGRES_HOST",
-			expected:   "primary-db.internal",
-		},
-		{
-			name:       "postgres host preserved from shared secrets if specified",
-			primaryMap: map[string]string{},
-			filePath:   customHostFile,
-			queryKey:   "POSTGRES_HOST",
-			expected:   "shared-db.internal",
-		},
-		{
-			name:       "postgres host empty when password unset",
-			primaryMap: map[string]string{},
-			filePath:   noPassFile,
-			queryKey:   "POSTGRES_HOST",
-			expected:   "",
+			queryKey:   "POSTGRES_PASSWORD",
+			expected:   "secret-pg-pass",
 		},
 		{
 			name:       "missing key returns empty",
 			primaryMap: map[string]string{},
 			filePath:   sharedFile,
 			queryKey:   "NONEXISTENT",
+			expected:   "",
+		},
+		{
+			name:       "postgres host not synthesized when password present",
+			primaryMap: map[string]string{},
+			filePath:   sharedFile,
+			queryKey:   "POSTGRES_HOST",
 			expected:   "",
 		},
 	}
@@ -1880,7 +1863,13 @@ func TestRegisterConfigTokens_SharedSecrets_TableDriven(t *testing.T) {
 	tmpDir := t.TempDir()
 	secretsFile := filepath.Join(tmpDir, "shared-secrets.json")
 	_ = os.WriteFile(secretsFile, []byte(`{
-		"DYNAMIC_SHARED_SECRET": "dynamic_shared_secret_token_val_12345"
+		"DYNAMIC_SHARED_SECRET": "dynamic_shared_secret_token_val_12345",
+		"POSTGRES_USER": "aerial_nonsecret_user",
+		"POSTGRES_PORT": "5432_nonsecret_port",
+		"POSTGRES_HOST": "postgres_nonsecret_host",
+		"POSTGRES_DB": "aerial_nonsecret_db",
+		"POSTGRES_SSLMODE": "disable_nonsecret_ssl",
+		"NAS_HOST": "truenas_nonsecret_host"
 	}`), 0o600)
 	SharedSecretsPath = secretsFile
 
@@ -1895,6 +1884,12 @@ func TestRegisterConfigTokens_SharedSecrets_TableDriven(t *testing.T) {
 			cfg:        nil,
 			input:      "alert with dynamic_shared_secret_token_val_12345 in message",
 			wantResult: "alert with [REDACTED] in message",
+		},
+		{
+			name:       "non-secret shared keys are not registered or redacted",
+			cfg:        nil,
+			input:      "db user aerial_nonsecret_user port 5432_nonsecret_port host postgres_nonsecret_host db aerial_nonsecret_db ssl disable_nonsecret_ssl nas truenas_nonsecret_host",
+			wantResult: "db user aerial_nonsecret_user port 5432_nonsecret_port host postgres_nonsecret_host db aerial_nonsecret_db ssl disable_nonsecret_ssl nas truenas_nonsecret_host",
 		},
 	}
 
