@@ -118,6 +118,8 @@ cat > /root/.gemini/antigravity-cli/permissions.json <<'EOF'
   "permissions": {
     "allow": [
       "read_file(*)",
+      "command(*)",
+      "unsandboxed(*)",
       "command(pwd)",
       "command(wc)",
       "command(ls)",
@@ -374,6 +376,7 @@ if [[ "${1:-}" == "ci" && "${2:-}" == "review" ]]; then
     if [ -s "/root/.roborev/postgres-password" ]; then
       env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real sync now >/dev/null 2>&1 || true
     fi
+    env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real daemon start >/dev/null 2>&1 || true
     env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real "${cmd_args[@]}" > "${raw_out}" 2>&1
     rc=$?
     if [ -s "/root/.roborev/postgres-password" ]; then
@@ -558,46 +561,6 @@ cleanup() {
 }
 
 trap cleanup SIGTERM SIGINT
-
-if [[ ",${RUNNER_LABELS}," == *",roborev,"* ]] && [ -x /usr/local/bin/roborev.real ]; then
-  echo "Starting persistent roborev daemon..."
-  env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real daemon start || true
-  if [ -s "/root/.roborev/postgres-password" ] && command -v psql >/dev/null 2>&1; then
-    env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real sync now >/dev/null 2>&1 || true
-    PGPASSWORD="$(tr -d '\r\n' < /root/.roborev/postgres-password)" psql -h postgres -U aerial -d aerial -v ON_ERROR_STOP=0 -q <<'SQL' >/dev/null 2>&1 || true
-CREATE INDEX IF NOT EXISTS idx_review_jobs_enqueued_at ON roborev.review_jobs(enqueued_at);
-CREATE OR REPLACE FUNCTION roborev.prune_expired_reviews()
-RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
-  DELETE FROM roborev.responses
-   WHERE job_uuid IN (SELECT uuid FROM roborev.review_jobs WHERE enqueued_at < NOW() - INTERVAL '14 days');
-  DELETE FROM roborev.reviews
-   WHERE job_uuid IN (SELECT uuid FROM roborev.review_jobs WHERE enqueued_at < NOW() - INTERVAL '14 days');
-  DELETE FROM roborev.review_jobs
-   WHERE enqueued_at < NOW() - INTERVAL '14 days';
-  DELETE FROM roborev.commits c
-   WHERE c.created_at < NOW() - INTERVAL '14 days'
-     AND NOT EXISTS (SELECT 1 FROM roborev.review_jobs j WHERE j.commit_id = c.id);
-  RETURN NULL;
-END;
-$$;
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_trigger t
-    JOIN pg_class c ON c.oid = t.tgrelid
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE n.nspname = 'roborev' AND c.relname = 'review_jobs' AND t.tgname = 'trg_prune_expired_reviews'
-  ) THEN
-    CREATE TRIGGER trg_prune_expired_reviews
-    AFTER INSERT ON roborev.review_jobs
-    FOR EACH STATEMENT EXECUTE FUNCTION roborev.prune_expired_reviews();
-  END IF;
-END;
-$$;
-SQL
-  fi
-fi
 
 echo "Starting runner..."
 if [[ ",${RUNNER_LABELS}," == *",ci,"* ]]; then
