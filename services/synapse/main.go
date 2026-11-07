@@ -432,6 +432,23 @@ func (s *RouterServer) setPRWidgetState(ctx context.Context, repo string, prNumb
 	}
 }
 
+func (s *RouterServer) resolvePRWidgetSyncStatus(ctx context.Context, repo string, prNumber int) string {
+	if s == nil || s.registry == nil || repo == "" || prNumber <= 0 {
+		return ""
+	}
+	pgReg, ok := s.registry.(*PostgresPRRegistry)
+	if !ok || pgReg == nil || pgReg.pool == nil {
+		return ""
+	}
+	qCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	var status string
+	if err := pgReg.pool.QueryRow(qCtx, "SELECT status FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1", normalizeRepo(repo), prNumber).Scan(&status); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(status)
+}
+
 func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber int) error {
 	if s == nil || s.dispatcher == nil || s.registry == nil || repo == "" || prNumber <= 0 {
 		return nil
@@ -441,6 +458,7 @@ func (s *RouterServer) SyncPRWidget(ctx context.Context, repo string, prNumber i
 		PRNumber: prNumber,
 	}
 	if s.riverClient != nil {
+		args.Status = s.resolvePRWidgetSyncStatus(ctx, args.Repo, prNumber)
 		if err := s.insertRiverJob(ctx, args); err != nil {
 			log.Printf("[synapse] [widget] error enqueuing widget sync into river: %v", err)
 			return fmt.Errorf("enqueue widget sync: %w", err)

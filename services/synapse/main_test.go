@@ -2174,39 +2174,40 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 	chunk0Update := chunk0Start.Add(5 * time.Minute)
 
 	tests := []struct {
-		name            string
-		useNilServer    bool
-		useMockReg      bool
-		useInserter     bool
-		inserterErr     error
-		mockTargetID    string
-		mockBranch      string
-		prDBStatus      string
-		prDBBranch      string
-		prDBBanner      string
-		prDBCIChecks    string
-		prDBMetadata    string
-		buildDBStatus   string
-		chunk1DBStatus  string
-		repo            string
-		prNumber        int
-		olderPRs        []int
-		vanadisMatch    bool
-		dispErr         error
-		queryErr        error
-		prQueryErr      error
-		execErr         error
-		wantErr         bool
-		wantDispatched  bool
-		wantQueued      int
-		wantWidgetID    string
-		wantStatus      string
-		wantBanner      string
-		wantActiveStep  string
-		wantSkipSink    bool
-		wantVanadisStep string
-		wantChannel     string
-		wantChunks      int
+		name             string
+		useNilServer     bool
+		useMockReg       bool
+		useInserter      bool
+		inserterErr      error
+		mockTargetID     string
+		mockBranch       string
+		prDBStatus       string
+		prDBBranch       string
+		prDBBanner       string
+		prDBCIChecks     string
+		prDBMetadata     string
+		buildDBStatus    string
+		chunk1DBStatus   string
+		repo             string
+		prNumber         int
+		olderPRs         []int
+		vanadisMatch     bool
+		dispErr          error
+		queryErr         error
+		prQueryErr       error
+		execErr          error
+		wantErr          bool
+		wantDispatched   bool
+		wantQueued       int
+		wantQueuedStatus string
+		wantWidgetID     string
+		wantStatus       string
+		wantBanner       string
+		wantActiveStep   string
+		wantSkipSink     bool
+		wantVanadisStep  string
+		wantChannel      string
+		wantChunks       int
 	}{
 		{
 			name:         "nil server returns clean nil",
@@ -2226,7 +2227,15 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 		},
 		{
 			name: "riverClient configured queues WidgetSyncArgs without inline HTTP dispatch", useMockReg: true, useInserter: true,
-			mockTargetID: "1555405874565091380", mockBranch: "feat/queued", repo: "aerial", prNumber: 101, wantQueued: 1,
+			mockTargetID: "1555405874565091380", mockBranch: "feat/queued", repo: "aerial", prNumber: 101, wantQueued: 1, wantQueuedStatus: "",
+		},
+		{
+			name: "Postgres registry queues WidgetSyncArgs with status from pr_registry", useInserter: true,
+			repo: "azylman/aerial", prNumber: 101, prDBStatus: "merged", wantQueued: 1, wantQueuedStatus: "merged",
+		},
+		{
+			name: "Postgres registry queues WidgetSyncArgs with empty status on query error", useInserter: true,
+			repo: "azylman/aerial", prNumber: 101, prQueryErr: errors.New("status lookup failed"), wantQueued: 1, wantQueuedStatus: "",
 		},
 		{
 			name: "riverClient insert error returns error", useMockReg: true, useInserter: true,
@@ -2510,8 +2519,13 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 				if (err != nil) != tc.wantErr {
 					t.Fatalf("SyncPRWidget fallback err = %v, wantErr = %v", err, tc.wantErr)
 				}
-				if tc.wantQueued > 0 && (inserter == nil || len(inserter.insertedWidgetSyncJobs) != tc.wantQueued) {
-					t.Fatalf("expected %d queued widget sync jobs, got %+v", tc.wantQueued, inserter)
+				if tc.wantQueued > 0 {
+					if inserter == nil || len(inserter.insertedWidgetSyncJobs) != tc.wantQueued {
+						t.Fatalf("expected %d queued widget sync jobs, got %+v", tc.wantQueued, inserter)
+					}
+					if lastJob := inserter.insertedWidgetSyncJobs[len(inserter.insertedWidgetSyncJobs)-1]; lastJob.Status != tc.wantQueuedStatus {
+						t.Errorf("got queued job Status = %q, want %q", lastJob.Status, tc.wantQueuedStatus)
+					}
 				}
 				if tc.wantDispatched {
 					calls := mockDisp.WidgetCalls()
@@ -2554,13 +2568,22 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 						}}
 					}
 					if strings.Contains(sql, "FROM pr_registry") {
-						if tc.prQueryErr != nil {
-							return &mockVanadisPgxRow{scanFn: func(dest ...any) error {
+						return &mockVanadisPgxRow{scanFn: func(dest ...any) error {
+							if len(dest) == 1 {
+								if tc.prQueryErr != nil {
+									return tc.prQueryErr
+								}
+								dbStat := tc.prDBStatus
+								if dbStat == "" {
+									dbStat = "open"
+								}
+								*dest[0].(*string) = dbStat
+								return nil
+							}
+							if tc.prQueryErr != nil {
 								*dest[0].(*string) = "1555405874565091380"
 								return tc.prQueryErr
-							}}
-						}
-						return &mockVanadisPgxRow{scanFn: func(dest ...any) error {
+							}
 							*dest[0].(*string) = "1555405874565091380"
 							*dest[1].(*string) = "feat: awesome feature"
 							dbStat := tc.prDBStatus
@@ -2646,12 +2669,25 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 			t.Cleanup(tsVanadis.Close)
 
 			srv := newTestRouter(Config{VanadisURL: tsVanadis.URL}, tsVanadis.Client(), NewPostgresPRRegistry(pool, WithVanadisClient(tsVanadis.URL, tsVanadis.Client())), mockDisp)
+			var inserter *mockRiverInserter
+			if tc.useInserter {
+				inserter = &mockRiverInserter{err: tc.inserterErr}
+				srv.SetRiverClient(inserter)
+			}
 			if tc.prDBBanner != "" {
 				srv.setPRWidgetState(ctx, tc.repo, tc.prNumber, tc.prDBStatus, tc.prDBBanner)
 			}
 			err := srv.SyncPRWidget(ctx, tc.repo, tc.prNumber)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("SyncPRWidget err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantQueued > 0 {
+				if inserter == nil || len(inserter.insertedWidgetSyncJobs) != tc.wantQueued {
+					t.Fatalf("expected %d queued widget sync jobs, got %+v", tc.wantQueued, inserter)
+				}
+				if lastJob := inserter.insertedWidgetSyncJobs[len(inserter.insertedWidgetSyncJobs)-1]; lastJob.Status != tc.wantQueuedStatus {
+					t.Errorf("got queued job Status = %q, want %q", lastJob.Status, tc.wantQueuedStatus)
+				}
 			}
 			if tc.wantDispatched {
 				calls := mockDisp.WidgetCalls()
