@@ -1,8 +1,101 @@
 apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  annotations:
+    volume.kubernetes.io/selected-node: calibarn
+    volume.kubernetes.io/storage-provisioner: rancher.io/local-path
+  name: openobserve-pvc
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: local-path
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  annotations:
+    volume.kubernetes.io/selected-node: calibarn
+    volume.kubernetes.io/storage-provisioner: rancher.io/local-path
+  name: victoriametrics-pvc
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
+  storageClassName: local-path
+---
+apiVersion: v1
+data:
+  dashboards.yml: |
+    apiVersion: 1
+    providers:
+      - name: 'Aerial System'
+        orgId: 1
+        folder: ''
+        type: file
+        disableDeletion: false
+        editable: true
+        updateIntervalSeconds: 30
+        allowUiUpdates: false
+        options:
+          path: /local/dashboards/system
+          foldersFromFilesStructure: true
+      - name: 'Aerial Custom'
+        orgId: 1
+        folder: ''
+        type: file
+        disableDeletion: false
+        editable: true
+        updateIntervalSeconds: 30
+        allowUiUpdates: false
+        options:
+          path: /local/dashboards/custom
+          foldersFromFilesStructure: true
+  victoriametrics.yml: |
+    apiVersion: 1
+    datasources:
+      - name: VictoriaMetrics
+        type: prometheus
+        access: proxy
+        url: http://victoriametrics:8428
+        isDefault: true
+        jsonData:
+          httpMethod: POST
+          timeInterval: "15s"
+        editable: false
 kind: ConfigMap
 metadata:
-  name: fluent-bit-config
+  name: grafana-provisioning
   namespace: default
+---
+apiVersion: v1
+data:
+  discord-mcp.yaml: |
+    port: "8080"
+    upstream_port: "4025"
+  github-mcp.yaml: |
+    port: "8080"
+  infisical-mcp.yaml: |
+    port: "8080"
+    infisical_host_url: "http://infisical.aerial"
+    auth_method: "universal-auth"
+    mask_secret_values: false
+  kernel-mcp.yaml: |
+    cdp_host: "browser.aerial"
+    cdp_port: "9222"
+    port: "8080"
+kind: ConfigMap
+metadata:
+  name: mcp-configs
+  namespace: default
+---
+apiVersion: v1
 data:
   fluent-bit.conf: |
     [SERVICE]
@@ -40,8 +133,8 @@ data:
         URI           /api/default/docker_logs/_json
         Format        json
         Header        Content-Type application/json
-        http_user     root@example.com
-        http_passwd   ComplexPassword123#
+        http_user     admin@aerial.local
+        http_passwd   ${OPENOBSERVE_ROOT_USER_PASSWORD}
   parsers.conf: |
     [PARSER]
         Name        cri
@@ -49,14 +142,20 @@ data:
         Regex       ^(?<time>[^ ]+) (?<stream>stdout|stderr) (?<logtag>[^ ]*) (?<log>.*)$
         Time_Key    time
         Time_Format %Y-%m-%dT%H:%M:%S.%L%z
+kind: ConfigMap
+metadata:
+  name: fluent-bit-config
+  namespace: default
 ---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: fluent-bit
-  namespace: default
+  annotations:
+    deprecated.daemonset.template.generation: "1"
   labels:
     app.kubernetes.io/name: fluent-bit
+  name: fluent-bit
+  namespace: default
 spec:
   selector:
     matchLabels:
@@ -66,30 +165,41 @@ spec:
       labels:
         app.kubernetes.io/name: fluent-bit
     spec:
+      containers:
+        - envFrom:
+            - secretRef:
+                name: shared-secrets
+          image: cr.fluentbit.io/fluent/fluent-bit:3.2.4
+          name: fluent-bit
+          volumeMounts:
+            - mountPath: /var/log
+              name: varlog
+            - mountPath: /var/lib/docker/containers
+              name: varlibdockercontainers
+              readOnly: true
+            - mountPath: /fluent-bit/etc/
+              name: config
       serviceAccountName: fluent-bit-sa
       tolerations:
         - operator: Exists
-      containers:
-        - name: fluent-bit
-          image: cr.fluentbit.io/fluent/fluent-bit:3.2.4
-          volumeMounts:
-            - name: varlog
-              mountPath: /var/log
-            - name: varlibdockercontainers
-              mountPath: /var/lib/docker/containers
-              readOnly: true
-            - name: config
-              mountPath: /fluent-bit/etc/
       volumes:
-        - name: varlog
-          hostPath:
+        - hostPath:
             path: /var/log
-        - name: varlibdockercontainers
-          hostPath:
+            type: ""
+          name: varlog
+        - hostPath:
             path: /var/lib/docker/containers
-        - name: config
-          configMap:
+            type: ""
+          name: varlibdockercontainers
+        - configMap:
+            defaultMode: 420
             name: fluent-bit-config
+          name: config
+  updateStrategy:
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+    type: RollingUpdate
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -102,30 +212,38 @@ kind: ClusterRole
 metadata:
   name: fluent-bit-read
 rules:
-  - apiGroups: [""]
-    resources: ["namespaces", "pods"]
-    verbs: ["get", "list", "watch"]
+  - apiGroups:
+      - ""
+    resources:
+      - namespaces
+      - pods
+    verbs:
+      - get
+      - list
+      - watch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: fluent-bit-read-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fluent-bit-read
 subjects:
   - kind: ServiceAccount
     name: fluent-bit-sa
     namespace: default
-roleRef:
-  kind: ClusterRole
-  name: fluent-bit-read
-  apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: node-exporter
-  namespace: default
+  annotations:
+    deprecated.daemonset.template.generation: "1"
   labels:
     app.kubernetes.io/name: node-exporter
+  name: node-exporter
+  namespace: default
 spec:
   selector:
     matchLabels:
@@ -135,41 +253,50 @@ spec:
       labels:
         app.kubernetes.io/name: node-exporter
     spec:
+      containers:
+        - args:
+            - --path.procfs=/host/proc
+            - --path.sysfs=/host/sys
+            - --path.rootfs=/host/root
+          image: prom/node-exporter:v1.12.1
+          name: node-exporter
+          ports:
+            - containerPort: 9100
+              hostPort: 9100
+              name: metrics
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /host/proc
+              name: proc
+              readOnly: true
+            - mountPath: /host/sys
+              name: sys
+              readOnly: true
+            - mountPath: /host/root
+              name: root
+              readOnly: true
       hostNetwork: true
       hostPID: true
       tolerations:
         - operator: Exists
-      containers:
-        - name: node-exporter
-          image: prom/node-exporter:v1.12.1
-          args:
-            - "--path.procfs=/host/proc"
-            - "--path.sysfs=/host/sys"
-            - "--path.rootfs=/host/root"
-          ports:
-            - name: metrics
-              containerPort: 9100
-              hostPort: 9100
-          volumeMounts:
-            - name: proc
-              mountPath: /host/proc
-              readOnly: true
-            - name: sys
-              mountPath: /host/sys
-              readOnly: true
-            - name: root
-              mountPath: /host/root
-              readOnly: true
       volumes:
-        - name: proc
-          hostPath:
+        - hostPath:
             path: /proc
-        - name: sys
-          hostPath:
+            type: ""
+          name: proc
+        - hostPath:
             path: /sys
-        - name: root
-          hostPath:
+            type: ""
+          name: sys
+        - hostPath:
             path: /
+            type: ""
+          name: root
+  updateStrategy:
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+    type: RollingUpdate
 ---
 apiVersion: v1
 kind: Service
@@ -177,19 +304,16 @@ metadata:
   name: node-exporter
   namespace: default
 spec:
-  type: ClusterIP
   ports:
     - name: metrics
       port: 9100
+      protocol: TCP
       targetPort: 9100
   selector:
     app.kubernetes.io/name: node-exporter
+  type: ClusterIP
 ---
 apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: vmalert-rules
-  namespace: default
 data:
   anomaly-rules.yml: |
     groups:
@@ -217,43 +341,51 @@ data:
           - record: aerial_anomaly_score:zscore
             expr: |
               zscore_over_time(aerial_brain_runner_errors_total[2h])
+kind: ConfigMap
+metadata:
+  name: vmalert-rules
+  namespace: default
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: victoriametrics
-  namespace: default
   labels:
     app.kubernetes.io/name: victoriametrics
+  name: victoriametrics
+  namespace: default
 spec:
   replicas: 1
-  strategy:
-    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: victoriametrics
+  strategy:
+    type: Recreate
   template:
     metadata:
       labels:
         app.kubernetes.io/name: victoriametrics
     spec:
       containers:
-        - name: victoriametrics
+        - args:
+            - -httpListenAddr=:8428
+            - -storageDataPath=/victoria-metrics-data
+            - -retentionPeriod=5y
+            - -loggerFormat=json
           image: victoriametrics/victoria-metrics:v1.155.0
-          args:
-            - "-httpListenAddr=:8428"
-            - "-storageDataPath=/victoria-metrics-data"
-            - "-retentionPeriod=5y"
-            - "-loggerFormat=json"
+          name: victoriametrics
           ports:
-            - name: http
-              containerPort: 8428
+            - containerPort: 8428
+              name: http
+              protocol: TCP
           volumeMounts:
-            - name: storage
-              mountPath: /victoria-metrics-data
+            - mountPath: /victoria-metrics-data
+              name: storage
+      nodeSelector:
+        kubernetes.io/hostname: calibarn
       volumes:
         - name: storage
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: victoriametrics-pvc
 ---
 apiVersion: v1
 kind: Service
@@ -261,50 +393,62 @@ metadata:
   name: victoriametrics
   namespace: default
 spec:
-  type: ClusterIP
   ports:
     - name: http
       port: 8428
+      protocol: TCP
+      targetPort: 8428
+    - name: http-default
+      port: 80
+      protocol: TCP
       targetPort: 8428
   selector:
     app.kubernetes.io/name: victoriametrics
+  type: ClusterIP
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: vmalert
-  namespace: default
   labels:
     app.kubernetes.io/name: vmalert
+  name: vmalert
+  namespace: default
 spec:
   replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: vmalert
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
   template:
     metadata:
       labels:
         app.kubernetes.io/name: vmalert
     spec:
       containers:
-        - name: vmalert
+        - args:
+            - -rule=/etc/vmalert/rules/*.yml
+            - -datasource.url=http://victoriametrics:8428
+            - -remoteWrite.url=http://victoriametrics:8428
+            - -evaluationInterval=30s
+            - -loggerFormat=json
           image: victoriametrics/vmalert:v1.155.0
-          args:
-            - "-rule=/etc/vmalert/rules/*.yml"
-            - "-datasource.url=http://victoriametrics:8428"
-            - "-remoteWrite.url=http://victoriametrics:8428"
-            - "-evaluationInterval=30s"
-            - "-loggerFormat=json"
+          name: vmalert
           ports:
-            - name: http
-              containerPort: 8880
+            - containerPort: 8880
+              name: http
+              protocol: TCP
           volumeMounts:
-            - name: rules
-              mountPath: /etc/vmalert/rules
+            - mountPath: /etc/vmalert/rules
+              name: rules
       volumes:
-        - name: rules
-          configMap:
+        - configMap:
+            defaultMode: 420
             name: vmalert-rules
+          name: rules
 ---
 apiVersion: v1
 kind: Service
@@ -312,42 +456,111 @@ metadata:
   name: vmalert
   namespace: default
 spec:
-  type: ClusterIP
   ports:
     - name: http
       port: 8880
+      protocol: TCP
+      targetPort: 8880
+    - name: http-default
+      port: 80
+      protocol: TCP
       targetPort: 8880
   selector:
     app.kubernetes.io/name: vmalert
+  type: ClusterIP
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: grafana
-  namespace: default
   labels:
     app.kubernetes.io/name: grafana
+  name: grafana
+  namespace: default
 spec:
   replicas: 1
-  strategy:
-    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: grafana
+  strategy:
+    type: Recreate
   template:
     metadata:
       labels:
         app.kubernetes.io/name: grafana
     spec:
       containers:
-        - name: grafana
-          image: grafana/grafana:13.3.0
-          ports:
-            - name: http
-              containerPort: 3000
-          env:
+        - env:
+            - name: GF_PATHS_PROVISIONING
+              value: /local/provisioning
+            - name: GF_DATABASE_TYPE
+              value: sqlite3
+            - name: GF_SERVER_ROOT_URL
+              value: '%(protocol)s://%(domain)s:%(http_port)s/grafana/'
+            - name: GF_SERVER_SERVE_FROM_SUB_PATH
+              value: "true"
+            - name: GF_SECURITY_ADMIN_USER
+              value: admin
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: POSTGRES_PASSWORD
+                  name: shared-secrets
+            - name: GF_USERS_ALLOW_SIGN_UP
+              value: "false"
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "true"
+            - name: GF_AUTH_ANONYMOUS_ORG_ROLE
+              value: Admin
+            - name: GF_AUTH_ANONYMOUS_ORG_NAME
+              value: Main Org.
+            - name: GF_AUTH_ANONYMOUS_HIDE_VERSION
+              value: "true"
+            - name: GF_AUTH_DISABLE_LOGIN_FORM
+              value: "true"
+            - name: GF_AUTH_DISABLE_SIGNOUT_MENU
+              value: "true"
+            - name: GF_PANELS_DISABLE_SANITIZE_HTML
+              value: "true"
+            - name: GF_LOG_MODE
+              value: console
             - name: GF_LOG_CONSOLE_FORMAT
-              value: "json"
+              value: json
+          image: grafana/grafana:13.3.0
+          name: grafana
+          ports:
+            - containerPort: 3000
+              name: http
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /local/provisioning/datasources/victoriametrics.yml
+              name: prov-ds
+              subPath: victoriametrics.yml
+            - mountPath: /local/provisioning/dashboards/dashboards.yml
+              name: prov-db
+              subPath: dashboards.yml
+            - mountPath: /local/dashboards/system
+              name: dash-sys
+              readOnly: true
+            - mountPath: /local/dashboards/custom
+              name: dash-cust
+              readOnly: true
+      volumes:
+        - configMap:
+            defaultMode: 420
+            name: grafana-provisioning
+          name: prov-ds
+        - configMap:
+            defaultMode: 420
+            name: grafana-provisioning
+          name: prov-db
+        - hostPath:
+            path: /share/aerial/nomad/grafana/dashboards
+            type: ""
+          name: dash-sys
+        - hostPath:
+            path: /share/aerial-config/services/grafana/dashboards
+            type: ""
+          name: dash-cust
 ---
 apiVersion: v1
 kind: Service
@@ -355,44 +568,89 @@ metadata:
   name: grafana
   namespace: default
 spec:
-  type: ClusterIP
   ports:
     - name: http
       port: 3000
+      protocol: TCP
+      targetPort: 3000
+    - name: http-default
+      port: 80
+      protocol: TCP
       targetPort: 3000
   selector:
     app.kubernetes.io/name: grafana
+  type: ClusterIP
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: openobserve
-  namespace: default
   labels:
     app.kubernetes.io/name: openobserve
+  name: openobserve
+  namespace: default
 spec:
   replicas: 1
-  strategy:
-    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: openobserve
+  strategy:
+    type: Recreate
   template:
     metadata:
       labels:
         app.kubernetes.io/name: openobserve
     spec:
       containers:
-        - name: openobserve
-          image: public.ecr.aws/zinclabs/openobserve:v1.1.2
-          ports:
-            - name: http
-              containerPort: 5080
-          env:
+        - env:
             - name: ZO_ROOT_USER_EMAIL
-              value: "root@example.com"
+              value: admin@aerial.local
             - name: ZO_ROOT_USER_PASSWORD
-              value: "ComplexPassword123#"
+              valueFrom:
+                secretKeyRef:
+                  key: OPENOBSERVE_ROOT_USER_PASSWORD
+                  name: shared-secrets
+            - name: ZO_DATA_DIR
+              value: /data
+            - name: ZO_DATA_WAL_DIR
+              value: /data/wal
+            - name: ZO_DATA_STREAM_DIR
+              value: /data/stream
+            - name: ZO_META_STORE
+              value: postgres
+            - name: ZO_META_POSTGRES_HOST
+              value: postgres
+            - name: ZO_META_POSTGRES_PORT
+              value: "5432"
+            - name: ZO_META_POSTGRES_USER
+              value: aerial
+            - name: ZO_META_POSTGRES_DBNAME
+              value: openobserve
+            - name: ZO_META_POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: POSTGRES_PASSWORD
+                  name: shared-secrets
+            - name: ZO_BASE_URI
+              value: /openobserve
+            - name: ZO_TELEMETRY
+              value: "false"
+            - name: ZO_AUTO_QUERY_ENABLED
+              value: "true"
+          image: public.ecr.aws/zinclabs/openobserve:v1.1.2
+          name: openobserve
+          ports:
+            - containerPort: 5080
+              name: http
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /data
+              name: data
+      nodeSelector:
+        kubernetes.io/hostname: calibarn
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: openobserve-pvc
 ---
 apiVersion: v1
 kind: Service
@@ -400,38 +658,53 @@ metadata:
   name: openobserve
   namespace: default
 spec:
-  type: ClusterIP
   ports:
     - name: http
       port: 5080
+      protocol: TCP
+      targetPort: 5080
+    - name: http-default
+      port: 80
+      protocol: TCP
       targetPort: 5080
   selector:
     app.kubernetes.io/name: openobserve
+  type: ClusterIP
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: kubernetes-mcp
-  namespace: default
   labels:
     app.kubernetes.io/name: kubernetes-mcp
+  name: kubernetes-mcp
+  namespace: default
 spec:
   replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: kubernetes-mcp
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
   template:
     metadata:
       labels:
         app.kubernetes.io/name: kubernetes-mcp
     spec:
-      serviceAccountName: dashboard-sa
       containers:
-        - name: kubernetes-mcp-server
-          image: ghcr.io/azylman/kubernetes-mcp-server:latest
+        - args:
+            - --config
+            - /etc/kubernetes-mcp-server/config.toml
+          image: quay.io/containers/kubernetes_mcp_server:latest
+          imagePullPolicy: Always
+          name: kubernetes-mcp-server
           ports:
-            - name: mcp
-              containerPort: 8080
+            - containerPort: 8080
+              name: mcp
+              protocol: TCP
+      serviceAccountName: dashboard-sa
 ---
 apiVersion: v1
 kind: Service
@@ -439,43 +712,62 @@ metadata:
   name: kubernetes-mcp
   namespace: default
 spec:
-  type: ClusterIP
   ports:
     - name: mcp
       port: 80
+      protocol: TCP
       targetPort: 8080
   selector:
     app.kubernetes.io/name: kubernetes-mcp
+  type: ClusterIP
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: discord-mcp
-  namespace: default
   labels:
     app.kubernetes.io/name: discord-mcp
+  name: discord-mcp
+  namespace: default
 spec:
   replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: discord-mcp
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
   template:
     metadata:
       labels:
         app.kubernetes.io/name: discord-mcp
     spec:
       containers:
-        - name: discord-mcp
-          image: ghcr.io/azylman/aerial-discord-mcp:latest
-          ports:
-            - name: http
-              containerPort: 8080
+        - env:
+            - name: PORT
+              value: "8080"
           envFrom:
             - secretRef:
                 name: shared-secrets
-          env:
-            - name: PORT
-              value: "8080"
+          image: ghcr.io/azylman/aerial-discord-mcp:9bbbf9fe7bab6ea8eaa74257f1b55b61b8c48baf
+          name: discord-mcp
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /config/config.yaml
+              name: config
+              subPath: discord-mcp.yaml
+            - mountPath: /local/config.yaml
+              name: config
+              subPath: discord-mcp.yaml
+      volumes:
+        - configMap:
+            defaultMode: 420
+            name: mcp-configs
+          name: config
 ---
 apiVersion: v1
 kind: Service
@@ -483,43 +775,66 @@ metadata:
   name: discord-mcp
   namespace: default
 spec:
-  type: ClusterIP
   ports:
     - name: http
       port: 8080
+      protocol: TCP
+      targetPort: 8080
+    - name: http-default
+      port: 80
+      protocol: TCP
       targetPort: 8080
   selector:
     app.kubernetes.io/name: discord-mcp
+  type: ClusterIP
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: github-mcp
-  namespace: default
   labels:
     app.kubernetes.io/name: github-mcp
+  name: github-mcp
+  namespace: default
 spec:
   replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: github-mcp
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
   template:
     metadata:
       labels:
         app.kubernetes.io/name: github-mcp
     spec:
       containers:
-        - name: github-mcp
-          image: ghcr.io/azylman/aerial-github-mcp:latest
-          ports:
-            - name: http
-              containerPort: 8080
+        - env:
+            - name: PORT
+              value: "8080"
           envFrom:
             - secretRef:
                 name: shared-secrets
-          env:
-            - name: PORT
-              value: "8080"
+          image: ghcr.io/azylman/aerial-github-mcp:6280af8bca6e0b7204bc1a8574b738f976bcbfb9
+          name: github-mcp
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /config/config.yaml
+              name: config
+              subPath: github-mcp.yaml
+            - mountPath: /local/config.yaml
+              name: config
+              subPath: github-mcp.yaml
+      volumes:
+        - configMap:
+            defaultMode: 420
+            name: mcp-configs
+          name: config
 ---
 apiVersion: v1
 kind: Service
@@ -527,43 +842,66 @@ metadata:
   name: github-mcp
   namespace: default
 spec:
-  type: ClusterIP
   ports:
     - name: http
       port: 8080
+      protocol: TCP
+      targetPort: 8080
+    - name: http-default
+      port: 80
+      protocol: TCP
       targetPort: 8080
   selector:
     app.kubernetes.io/name: github-mcp
+  type: ClusterIP
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: infisical-mcp
-  namespace: default
   labels:
     app.kubernetes.io/name: infisical-mcp
+  name: infisical-mcp
+  namespace: default
 spec:
   replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: infisical-mcp
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
   template:
     metadata:
       labels:
         app.kubernetes.io/name: infisical-mcp
     spec:
       containers:
-        - name: infisical-mcp
-          image: ghcr.io/azylman/aerial-infisical-mcp:latest
-          ports:
-            - name: http
-              containerPort: 8080
+        - env:
+            - name: PORT
+              value: "8080"
           envFrom:
             - secretRef:
                 name: shared-secrets
-          env:
-            - name: PORT
-              value: "8080"
+          image: ghcr.io/azylman/aerial-infisical-mcp:41f7d648be841df2cceba02ed332d148013b6998
+          name: infisical-mcp
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /config/config.yaml
+              name: config
+              subPath: infisical-mcp.yaml
+            - mountPath: /local/config.yaml
+              name: config
+              subPath: infisical-mcp.yaml
+      volumes:
+        - configMap:
+            defaultMode: 420
+            name: mcp-configs
+          name: config
 ---
 apiVersion: v1
 kind: Service
@@ -571,40 +909,57 @@ metadata:
   name: infisical-mcp
   namespace: default
 spec:
-  type: ClusterIP
   ports:
     - name: http
       port: 8080
+      protocol: TCP
+      targetPort: 8080
+    - name: http-default
+      port: 80
+      protocol: TCP
       targetPort: 8080
   selector:
     app.kubernetes.io/name: infisical-mcp
+  type: ClusterIP
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: victoriametrics-mcp
-  namespace: default
   labels:
     app.kubernetes.io/name: victoriametrics-mcp
+  name: victoriametrics-mcp
+  namespace: default
 spec:
   replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: victoriametrics-mcp
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
   template:
     metadata:
       labels:
         app.kubernetes.io/name: victoriametrics-mcp
     spec:
       containers:
-        - name: victoriametrics-mcp
+        - env:
+            - name: MCP_SERVER_MODE
+              value: http
+            - name: MCP_LISTEN_ADDR
+              value: 0.0.0.0:8080
+            - name: VM_INSTANCE_ENTRYPOINT
+              value: http://victoriametrics:8428
+            - name: VM_INSTANCE_TYPE
+              value: single
           image: ghcr.io/victoriametrics/mcp-victoriametrics:1.20.2
+          name: victoriametrics-mcp
           ports:
-            - name: http
-              containerPort: 8080
-          env:
-            - name: VM_ADDRESS
-              value: "http://victoriametrics:8428"
+            - containerPort: 8080
+              name: http
+              protocol: TCP
 ---
 apiVersion: v1
 kind: Service
@@ -612,43 +967,66 @@ metadata:
   name: victoriametrics-mcp
   namespace: default
 spec:
-  type: ClusterIP
   ports:
     - name: http
       port: 8080
+      protocol: TCP
+      targetPort: 8080
+    - name: http-default
+      port: 80
+      protocol: TCP
       targetPort: 8080
   selector:
     app.kubernetes.io/name: victoriametrics-mcp
+  type: ClusterIP
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: kernel-mcp
-  namespace: default
   labels:
     app.kubernetes.io/name: kernel-mcp
+  name: kernel-mcp
+  namespace: default
 spec:
   replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: kernel-mcp
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
   template:
     metadata:
       labels:
         app.kubernetes.io/name: kernel-mcp
     spec:
       containers:
-        - name: kernel-mcp
-          image: ghcr.io/azylman/aerial-kernel-mcp:latest
-          ports:
-            - name: http
-              containerPort: 8080
+        - env:
+            - name: PORT
+              value: "8080"
           envFrom:
             - secretRef:
                 name: shared-secrets
-          env:
-            - name: PORT
-              value: "8080"
+          image: ghcr.io/azylman/aerial-kernel-mcp:d73fba1240f27a662be15bcb27e0b3c1698ef3cc
+          name: kernel-mcp
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /config/config.yaml
+              name: config
+              subPath: kernel-mcp.yaml
+            - mountPath: /local/config.yaml
+              name: config
+              subPath: kernel-mcp.yaml
+      volumes:
+        - configMap:
+            defaultMode: 420
+            name: mcp-configs
+          name: config
 ---
 apiVersion: v1
 kind: Service
@@ -656,43 +1034,63 @@ metadata:
   name: kernel-mcp
   namespace: default
 spec:
-  type: ClusterIP
   ports:
     - name: http
       port: 8080
+      protocol: TCP
+      targetPort: 8080
+    - name: http-default
+      port: 80
+      protocol: TCP
       targetPort: 8080
   selector:
     app.kubernetes.io/name: kernel-mcp
+  type: ClusterIP
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: prospera
-  namespace: default
   labels:
     app.kubernetes.io/name: prospera
+  name: prospera
+  namespace: default
 spec:
   replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: prospera
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
   template:
     metadata:
       labels:
         app.kubernetes.io/name: prospera
     spec:
       containers:
-        - name: prospera
-          image: ghcr.io/azylman/aerial-prospera:latest
-          ports:
-            - name: http
-              containerPort: 8080
+        - env:
+            - name: PORT
+              value: "8080"
           envFrom:
             - secretRef:
                 name: shared-secrets
-          env:
-            - name: PORT
-              value: "8080"
+          image: ghcr.io/azylman/aerial-prospera:eb5d8743aa63c9e2c37ed7b5d769a47d08611b9c
+          name: prospera
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /config
+              name: config
+              readOnly: true
+      volumes:
+        - hostPath:
+            path: /share/aerial-config/services/prospera
+            type: ""
+          name: config
 ---
 apiVersion: v1
 kind: Service
@@ -700,10 +1098,15 @@ metadata:
   name: prospera
   namespace: default
 spec:
-  type: ClusterIP
   ports:
     - name: http
       port: 8080
+      protocol: TCP
+      targetPort: 8080
+    - name: http-default
+      port: 80
+      protocol: TCP
       targetPort: 8080
   selector:
     app.kubernetes.io/name: prospera
+  type: ClusterIP

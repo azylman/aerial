@@ -5,9 +5,10 @@ metadata:
   namespace: flux-system
 spec:
   interval: 1m
-  url: https://github.com/azylman/aerial.git
   ref:
     branch: main
+  timeout: 60s
+  url: https://github.com/azylman/aerial.git
 ---
 apiVersion: source.toolkit.fluxcd.io/v1
 kind: GitRepository
@@ -16,11 +17,12 @@ metadata:
   namespace: flux-system
 spec:
   interval: 1m
-  url: https://github.com/azylman/aerial-config.git
   ref:
     branch: main
   secretRef:
     name: github-auth
+  timeout: 60s
+  url: https://github.com/azylman/aerial-config.git
 ---
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
@@ -28,15 +30,15 @@ metadata:
   name: aerial-core
   namespace: flux-system
 spec:
+  force: false
   interval: 5m
-  targetNamespace: default
+  path: ./k8s
+  prune: true
   sourceRef:
     kind: GitRepository
     name: aerial
-  path: ./k8s
-  prune: true
-  wait: true
   timeout: 5m
+  wait: true
 ---
 apiVersion: kustomize.toolkit.fluxcd.io/v1
 kind: Kustomization
@@ -44,15 +46,15 @@ metadata:
   name: aerial-config
   namespace: flux-system
 spec:
+  force: false
   interval: 5m
-  targetNamespace: default
+  path: ./k8s
+  prune: true
   sourceRef:
     kind: GitRepository
     name: aerial-config
-  path: ./k8s
-  prune: true
-  wait: true
   timeout: 5m
+  wait: true
 ---
 apiVersion: notification.toolkit.fluxcd.io/v1beta3
 kind: Provider
@@ -60,8 +62,8 @@ metadata:
   name: synapse-provider
   namespace: flux-system
 spec:
-  type: generic
   address: http://synapse.default.svc.cluster.local/webhooks/flux
+  type: generic
 ---
 apiVersion: notification.toolkit.fluxcd.io/v1beta3
 kind: Alert
@@ -69,14 +71,14 @@ metadata:
   name: synapse-alert
   namespace: flux-system
 spec:
-  providerRef:
-    name: synapse-provider
   eventSeverity: info
   eventSources:
     - kind: GitRepository
       name: '*'
     - kind: Kustomization
       name: '*'
+  providerRef:
+    name: synapse-provider
 ---
 apiVersion: notification.toolkit.fluxcd.io/v1
 kind: Receiver
@@ -84,17 +86,18 @@ metadata:
   name: github-receiver
   namespace: flux-system
 spec:
-  type: github
   events:
-    - "ping"
-    - "push"
-  secretRef:
-    name: webhook-token
+    - ping
+    - push
+  interval: 10m
   resources:
     - kind: GitRepository
       name: aerial
     - kind: GitRepository
       name: aerial-config
+  secretRef:
+    name: webhook-token
+  type: github
 ---
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
@@ -102,16 +105,16 @@ metadata:
   name: letsencrypt-prod
 spec:
   acme:
-    server: https://acme-v02.api.letsencrypt.org/directory
     email: admin@aerial.lan
     privateKeySecretRef:
       name: letsencrypt-prod-account-key
+    server: https://acme-v02.api.letsencrypt.org/directory
     solvers:
       - dns01:
           cloudflare:
             apiTokenSecretRef:
-              name: cloudflare-api-token-secret
               key: api-token
+              name: cloudflare-api-token-secret
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate
@@ -119,38 +122,15 @@ metadata:
   name: zylman-wildcard-tls
   namespace: default
 spec:
-  secretName: zylman-wildcard-tls
-  issuerRef:
-    name: letsencrypt-prod
-    kind: ClusterIssuer
   commonName: zylman.com
   dnsNames:
     - zylman.com
-    - "*.zylman.com"
-    - "*.lan.zylman.com"
----
-apiVersion: external-secrets.io/v1beta1
-kind: ClusterSecretStore
-metadata:
-  name: infisical
-spec:
-  provider:
-    generic: {}
----
-apiVersion: external-secrets.io/v1beta1
-kind: ExternalSecret
-metadata:
-  name: shared-secrets
-  namespace: default
-spec:
-  refreshInterval: 1h
-  secretStoreRef:
-    name: infisical
-    kind: ClusterSecretStore
-  target:
-    name: shared-secrets
-    creationPolicy: Owner
-  data: []
+    - '*.zylman.com'
+    - '*.lan.zylman.com'
+  issuerRef:
+    kind: ClusterIssuer
+    name: letsencrypt-prod
+  secretName: zylman-wildcard-tls
 ---
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
@@ -158,17 +138,92 @@ metadata:
   name: postgres
   namespace: default
 spec:
-  instances: 1
+  affinity:
+    podAntiAffinityType: required
+  bootstrap:
+    initdb:
+      database: app
+      encoding: UTF8
+      localeCType: C
+      localeCollate: C
+      owner: app
+  enablePDB: true
+  enableSuperuserAccess: false
+  failoverDelay: 0
   imageName: ghcr.io/cloudnative-pg/postgresql:18
+  instances: 2
+  logLevel: info
+  managed:
+    roles:
+      - connectionLimit: -1
+        ensure: present
+        inherit: true
+        login: true
+        name: aerial
+        passwordSecret:
+          name: postgres-aerial-role
+        superuser: true
+  maxSyncReplicas: 0
+  minSyncReplicas: 0
+  monitoring:
+    customQueriesConfigMap:
+      - key: queries
+        name: cnpg-default-monitoring
+    disableDefaultQueries: false
+    enablePodMonitor: false
+  postgresGID: 26
+  postgresUID: 26
   postgresql:
     parameters:
-      log_destination: jsonlog
-      shared_preload_libraries: "vector"
-  monitoring:
-    enablePodMonitor: true
+      archive_mode: "on"
+      archive_timeout: 5min
+      dynamic_shared_memory_type: posix
+      full_page_writes: "on"
+      log_destination: csvlog
+      log_directory: /controller/log
+      log_filename: postgres
+      log_rotation_age: "0"
+      log_rotation_size: "0"
+      log_truncate_on_rotation: "false"
+      logging_collector: "on"
+      max_parallel_workers: "32"
+      max_replication_slots: "32"
+      max_worker_processes: "32"
+      shared_memory_type: mmap
+      shared_preload_libraries: ""
+      ssl_max_protocol_version: TLSv1.3
+      ssl_min_protocol_version: TLSv1.3
+      wal_keep_size: 512MB
+      wal_level: logical
+      wal_log_hints: "on"
+      wal_receiver_timeout: 5s
+      wal_sender_timeout: 5s
+    syncReplicaElectionConstraint:
+      enabled: false
+  primaryUpdateMethod: restart
+  primaryUpdateStrategy: unsupervised
+  probes:
+    liveness:
+      isolationCheck:
+        connectionTimeout: 1000
+        enabled: true
+        requestTimeout: 1000
+  replicationSlots:
+    highAvailability:
+      enabled: true
+      slotPrefix: _cnpg_
+    synchronizeReplicas:
+      enabled: true
+    updateInterval: 30
+  resources: {}
+  smartShutdownTimeout: 180
+  startDelay: 3600
+  stopDelay: 1800
   storage:
+    resizeInUseVolumes: true
     size: 20Gi
     storageClass: local-path
+  switchoverDelay: 3600
 ---
 apiVersion: v1
 kind: Service
@@ -176,17 +231,19 @@ metadata:
   name: postgres
   namespace: default
 spec:
-  type: ClusterIP
   ports:
     - name: postgresql
       port: 5432
+      protocol: TCP
       targetPort: 5432
     - name: metrics
       port: 9187
+      protocol: TCP
       targetPort: 9187
   selector:
     cnpg.io/cluster: postgres
     role: primary
+  type: ClusterIP
 ---
 apiVersion: postgresql.cnpg.io/v1
 kind: ScheduledBackup
@@ -194,84 +251,459 @@ metadata:
   name: postgres-nightly-backup
   namespace: default
 spec:
-  schedule: "0 0 3 * * *"
   backupOwnerReference: self
   cluster:
     name: postgres
----
-apiVersion: db.atlasgo.io/v1alpha1
-kind: AtlasMigration
-metadata:
-  name: aerial-schema
-  namespace: default
-spec:
-  urlFrom:
-    secretKeyRef:
-      name: shared-secrets
-      key: POSTGRES_URL
-  dir:
-    remote:
-      name: aerial
----
-apiVersion: helm.toolkit.fluxcd.io/v2
-kind: HelmRelease
-metadata:
-  name: arc-runner-set
-  namespace: default
-spec:
-  interval: 5m
-  chart:
-    spec:
-      chart: gha-runner-scale-set
-      version: 0.15.1
-      sourceRef:
-        kind: HelmRepository
-        name: actions-runner-controller
-        namespace: flux-system
-  values:
-    githubConfigUrl: "https://github.com/azylman/aerial"
-    nodeSelector:
-      compute-tier: performance
-    template:
-      spec:
-        containers:
-          - name: runner
-            volumeMounts:
-              - name: cache
-                mountPath: /cache
-              - name: share
-                mountPath: /share
-        volumes:
-          - name: cache
-            emptyDir: {}
-          - name: share
-            emptyDir: {}
+  method: barmanObjectStore
+  schedule: 0 0 3 * * *
 ---
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
   name: smb-nas
-provisioner: smb.csi.k8s.io
-volumeBindingMode: Immediate
 parameters:
-  source: "//nas.lan/Aerial"
+  source: //nas.lan/Aerial
+provisioner: smb.csi.k8s.io
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
 ---
 apiVersion: v1
 kind: PersistentVolume
 metadata:
   name: nas-aerial-pv
 spec:
-  capacity:
-    storage: 1Ti
   accessModes:
     - ReadWriteMany
-  persistentVolumeReclaimPolicy: Retain
-  storageClassName: smb-nas
+  capacity:
+    storage: 1Ti
+  csi:
+    driver: smb.csi.k8s.io
+    volumeAttributes:
+      source: //nas.lan/Aerial
+    volumeHandle: nas-aerial-pv
   mountOptions:
     - dir_mode=0777
     - file_mode=0777
-  csi:
-    driver: smb.csi.k8s.io
-    volumeHandle: nas-aerial-pv
-    volumeAttributes:
-      source: "//nas.lan/Aerial"
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: smb-nas
+  volumeMode: Filesystem
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: roborev-runner-aerial
+  name: roborev-runner-aerial
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: roborev-runner-aerial
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: roborev-runner-aerial
+    spec:
+      containers:
+        - env:
+            - name: TARGET_REPO
+              value: azylman/aerial
+            - name: RUNNER_NAME
+              value: aerial-roborev-aerial
+            - name: RUNNER_LABELS
+              value: self-hosted,roborev
+            - name: GITHUB_PAT
+              valueFrom:
+                secretKeyRef:
+                  key: GITHUB_PAT
+                  name: shared-secrets
+          image: ghcr.io/azylman/aerial-github-runner:latest
+          name: runner
+          volumeMounts:
+            - mountPath: /root/.roborev
+              name: roborev-data
+            - mountPath: /local/antigravity-oauth-token
+              name: oauth-token
+              readOnly: true
+              subPath: antigravity-oauth-token
+      nodeSelector:
+        kubernetes.io/hostname: calibarn
+      volumes:
+        - hostPath:
+            path: /var/lib/docker/volumes/aerial-roborev-aerial/_data
+            type: DirectoryOrCreate
+          name: roborev-data
+        - name: oauth-token
+          secret:
+            defaultMode: 384
+            items:
+              - key: ANTIGRAVITY_OAUTH_TOKEN
+                path: antigravity-oauth-token
+            optional: true
+            secretName: shared-secrets
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: ci-runner-aerial
+  name: ci-runner-aerial
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ci-runner-aerial
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ci-runner-aerial
+    spec:
+      containers:
+        - env:
+            - name: TARGET_REPO
+              value: azylman/aerial
+            - name: RUNNER_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: RUNNER_LABELS
+              value: self-hosted,ci
+            - name: GITHUB_PAT
+              valueFrom:
+                secretKeyRef:
+                  key: GITHUB_PAT
+                  name: shared-secrets
+          image: ghcr.io/azylman/aerial-github-runner:latest
+          name: runner
+          volumeMounts:
+            - mountPath: /var/run/docker.sock
+              name: docker-sock
+            - mountPath: /cache
+              name: ci-cache
+      nodeSelector:
+        kubernetes.io/hostname: calibarn
+      volumes:
+        - hostPath:
+            path: /var/run/docker.sock
+          name: docker-sock
+        - hostPath:
+            path: /var/lib/docker/volumes/aerial-ci-cache/_data
+            type: DirectoryOrCreate
+          name: ci-cache
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: roborev-runner-mirrormere
+  name: roborev-runner-mirrormere
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: roborev-runner-mirrormere
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: roborev-runner-mirrormere
+    spec:
+      containers:
+        - env:
+            - name: TARGET_REPO
+              value: azylman/mirrormere
+            - name: RUNNER_NAME
+              value: aerial-roborev-mirrormere
+            - name: RUNNER_LABELS
+              value: self-hosted,roborev
+            - name: GITHUB_PAT
+              valueFrom:
+                secretKeyRef:
+                  key: GITHUB_PAT
+                  name: shared-secrets
+          image: ghcr.io/azylman/aerial-github-runner:latest
+          name: runner
+          volumeMounts:
+            - mountPath: /root/.roborev
+              name: roborev-data
+            - mountPath: /local/antigravity-oauth-token
+              name: oauth-token
+              readOnly: true
+              subPath: antigravity-oauth-token
+      nodeSelector:
+        kubernetes.io/hostname: calibarn
+      volumes:
+        - hostPath:
+            path: /var/lib/docker/volumes/aerial-roborev-mirrormere/_data
+            type: DirectoryOrCreate
+          name: roborev-data
+        - name: oauth-token
+          secret:
+            defaultMode: 384
+            items:
+              - key: ANTIGRAVITY_OAUTH_TOKEN
+                path: antigravity-oauth-token
+            optional: true
+            secretName: shared-secrets
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: ci-runner-mirrormere
+  name: ci-runner-mirrormere
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ci-runner-mirrormere
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ci-runner-mirrormere
+    spec:
+      containers:
+        - env:
+            - name: TARGET_REPO
+              value: azylman/mirrormere
+            - name: RUNNER_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: RUNNER_LABELS
+              value: self-hosted,ci
+            - name: GITHUB_PAT
+              valueFrom:
+                secretKeyRef:
+                  key: GITHUB_PAT
+                  name: shared-secrets
+          image: ghcr.io/azylman/aerial-github-runner:latest
+          name: runner
+          volumeMounts:
+            - mountPath: /var/run/docker.sock
+              name: docker-sock
+            - mountPath: /cache
+              name: ci-cache
+      nodeSelector:
+        kubernetes.io/hostname: calibarn
+      volumes:
+        - hostPath:
+            path: /var/run/docker.sock
+          name: docker-sock
+        - hostPath:
+            path: /var/lib/docker/volumes/aerial-ci-cache/_data
+            type: DirectoryOrCreate
+          name: ci-cache
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: roborev-runner-aerial-sidecars
+  name: roborev-runner-aerial-sidecars
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: roborev-runner-aerial-sidecars
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: roborev-runner-aerial-sidecars
+    spec:
+      containers:
+        - env:
+            - name: TARGET_REPO
+              value: azylman/aerial-sidecars
+            - name: RUNNER_NAME
+              value: aerial-roborev-aerial-sidecars
+            - name: RUNNER_LABELS
+              value: self-hosted,roborev
+            - name: GITHUB_PAT
+              valueFrom:
+                secretKeyRef:
+                  key: GITHUB_PAT
+                  name: shared-secrets
+          image: ghcr.io/azylman/aerial-github-runner:latest
+          name: runner
+          volumeMounts:
+            - mountPath: /root/.roborev
+              name: roborev-data
+            - mountPath: /local/antigravity-oauth-token
+              name: oauth-token
+              readOnly: true
+              subPath: antigravity-oauth-token
+      nodeSelector:
+        kubernetes.io/hostname: calibarn
+      volumes:
+        - hostPath:
+            path: /var/lib/docker/volumes/aerial-roborev-aerial-sidecars/_data
+            type: DirectoryOrCreate
+          name: roborev-data
+        - name: oauth-token
+          secret:
+            defaultMode: 384
+            items:
+              - key: ANTIGRAVITY_OAUTH_TOKEN
+                path: antigravity-oauth-token
+            optional: true
+            secretName: shared-secrets
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: ci-runner-aerial-sidecars
+  name: ci-runner-aerial-sidecars
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ci-runner-aerial-sidecars
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ci-runner-aerial-sidecars
+    spec:
+      containers:
+        - env:
+            - name: TARGET_REPO
+              value: azylman/aerial-sidecars
+            - name: RUNNER_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: RUNNER_LABELS
+              value: self-hosted,ci
+            - name: GITHUB_PAT
+              valueFrom:
+                secretKeyRef:
+                  key: GITHUB_PAT
+                  name: shared-secrets
+          image: ghcr.io/azylman/aerial-github-runner:latest
+          name: runner
+          volumeMounts:
+            - mountPath: /var/run/docker.sock
+              name: docker-sock
+            - mountPath: /cache
+              name: ci-cache
+      nodeSelector:
+        kubernetes.io/hostname: calibarn
+      volumes:
+        - hostPath:
+            path: /var/run/docker.sock
+          name: docker-sock
+        - hostPath:
+            path: /var/lib/docker/volumes/aerial-ci-cache/_data
+            type: DirectoryOrCreate
+          name: ci-cache
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: roborev-runner-aerial-config
+  name: roborev-runner-aerial-config
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: roborev-runner-aerial-config
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: roborev-runner-aerial-config
+    spec:
+      containers:
+        - env:
+            - name: TARGET_REPO
+              value: azylman/aerial-config
+            - name: RUNNER_NAME
+              value: aerial-roborev-aerial-config
+            - name: RUNNER_LABELS
+              value: self-hosted,roborev
+            - name: GITHUB_PAT
+              valueFrom:
+                secretKeyRef:
+                  key: GITHUB_PAT
+                  name: shared-secrets
+          image: ghcr.io/azylman/aerial-github-runner:latest
+          name: runner
+          volumeMounts:
+            - mountPath: /root/.roborev
+              name: roborev-data
+            - mountPath: /local/antigravity-oauth-token
+              name: oauth-token
+              readOnly: true
+              subPath: antigravity-oauth-token
+      nodeSelector:
+        kubernetes.io/hostname: calibarn
+      volumes:
+        - hostPath:
+            path: /var/lib/docker/volumes/aerial-roborev-aerial-config/_data
+            type: DirectoryOrCreate
+          name: roborev-data
+        - name: oauth-token
+          secret:
+            defaultMode: 384
+            items:
+              - key: ANTIGRAVITY_OAUTH_TOKEN
+                path: antigravity-oauth-token
+            optional: true
+            secretName: shared-secrets
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: ci-runner-aerial-config
+  name: ci-runner-aerial-config
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ci-runner-aerial-config
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ci-runner-aerial-config
+    spec:
+      containers:
+        - env:
+            - name: TARGET_REPO
+              value: azylman/aerial-config
+            - name: RUNNER_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: RUNNER_LABELS
+              value: self-hosted,ci
+            - name: GITHUB_PAT
+              valueFrom:
+                secretKeyRef:
+                  key: GITHUB_PAT
+                  name: shared-secrets
+          image: ghcr.io/azylman/aerial-github-runner:latest
+          name: runner
+          volumeMounts:
+            - mountPath: /var/run/docker.sock
+              name: docker-sock
+            - mountPath: /cache
+              name: ci-cache
+      nodeSelector:
+        kubernetes.io/hostname: calibarn
+      volumes:
+        - hostPath:
+            path: /var/run/docker.sock
+          name: docker-sock
+        - hostPath:
+            path: /var/lib/docker/volumes/aerial-ci-cache/_data
+            type: DirectoryOrCreate
+          name: ci-cache
