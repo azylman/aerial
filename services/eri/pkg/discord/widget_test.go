@@ -755,6 +755,85 @@ func TestBuildStatusWidgetComponents_ChunkRuntimes(t *testing.T) {
 	if footerLater.Content != "*Started <t:1760000000:R> · Updated <t:1760000500:R>*" {
 		t.Errorf("unexpected footer text with later top-level StartedAt: %q", footerLater.Content)
 	}
+
+	// Completed build with completed chunks renders Duration in footer using latest completion timestamp
+	reqCompleted := req
+	reqCompleted.Status = "completed"
+	reqCompleted.Chunks = []StatusWidgetChunk{
+		{
+			Index:       0,
+			Repo:        "aerial",
+			Title:       "Completed chunk 0",
+			Status:      "deployed",
+			StartedAt:   start,
+			CompletedAt: completedAt,
+		},
+		{
+			Index:       1,
+			Repo:        "aerial",
+			Title:       "Completed chunk 1",
+			Status:      "success",
+			StartedAt:   start,
+			CompletedAt: completedAt.Add(2 * time.Minute),
+		},
+	}
+	compsCompleted, err := BuildStatusWidgetComponents(reqCompleted, now)
+	if err != nil {
+		t.Fatalf("BuildStatusWidgetComponents completed build failed: %v", err)
+	}
+	containerCompleted := compsCompleted[0].(*discordgo.Container)
+	footerCompleted := containerCompleted.Components[3].(*discordgo.TextDisplay)
+	// Latest completion time is completedAt + 2m = 6m 12s after start
+	if footerCompleted.Content != "*Started <t:1760000000:R> · Duration 6m 12s*" {
+		t.Errorf("unexpected footer text for completed build: %q", footerCompleted.Content)
+	}
+
+	// Completed build with top-level StartedAt and chunks missing CompletedAt/UpdatedAt falls back to now
+	reqCompletedFallback := StatusWidgetRequest{
+		ChannelID: "1542423172400291873",
+		ID:        "build-fallback",
+		Tier:      1,
+		Title:     "Completed build fallback",
+		Status:    "completed",
+		StartedAt: start,
+		Chunks: []StatusWidgetChunk{
+			{
+				Index:  0,
+				Repo:   "aerial",
+				Title:  "Chunk without timestamps",
+				Status: "deployed",
+			},
+		},
+	}
+	compsFallback, err := BuildStatusWidgetComponents(reqCompletedFallback, now)
+	if err != nil {
+		t.Fatalf("BuildStatusWidgetComponents completed fallback failed: %v", err)
+	}
+	containerFallback := compsFallback[0].(*discordgo.Container)
+	footerFallback := containerFallback.Components[2].(*discordgo.TextDisplay)
+	// now is start + 500s = 8m 20s
+	if footerFallback.Content != "*Started <t:1760000000:R> · Duration 8m 20s*" {
+		t.Errorf("unexpected footer text for completed fallback build: %q", footerFallback.Content)
+	}
+
+	// Completed build with in-progress chunk (e.g. "deploying") continues to render Updated timestamp
+	reqWithDeploying := reqCompleted
+	reqWithDeploying.Chunks = append(reqWithDeploying.Chunks, StatusWidgetChunk{
+		Index:     2,
+		Repo:      "aerial",
+		Title:     "Deploying chunk",
+		Status:    "deploying",
+		StartedAt: start,
+	})
+	compsDeploying, err := BuildStatusWidgetComponents(reqWithDeploying, now)
+	if err != nil {
+		t.Fatalf("BuildStatusWidgetComponents with deploying chunk failed: %v", err)
+	}
+	containerDeploying := compsDeploying[0].(*discordgo.Container)
+	footerDeploying := containerDeploying.Components[4].(*discordgo.TextDisplay)
+	if footerDeploying.Content != "*Started <t:1760000000:R> · Updated <t:1760000500:R>*" {
+		t.Errorf("unexpected footer text for build with deploying chunk: %q", footerDeploying.Content)
+	}
 }
 
 func TestExtractMessageComponentsText(t *testing.T) {
