@@ -101,6 +101,7 @@ func TestHelpers_WidgetStatus(t *testing.T) {
 				Status:          "running",
 				StatusMessageID: "msg-123",
 				Title:           "Test Build",
+				CreatedAt:       time.Unix(1760000000, 0),
 			},
 			chunks: []VanadisChunk{
 				{ID: "c1", ChunkIndex: 0, PRNumber: 101, Status: "open"},
@@ -313,6 +314,9 @@ func TestHelpers_WidgetStatus(t *testing.T) {
 			}
 			if len(got.Chunks) > 0 && got.Chunks[0].ActiveStep != tc.wantActiveStep {
 				t.Errorf("buildSyncWidgetRequest Chunk[0].ActiveStep = %q, want %q", got.Chunks[0].ActiveStep, tc.wantActiveStep)
+			}
+			if !tc.build.CreatedAt.IsZero() && !got.StartedAt.Equal(tc.build.CreatedAt) {
+				t.Errorf("buildSyncWidgetRequest StartedAt = %v, want %v", got.StartedAt, tc.build.CreatedAt)
 			}
 		})
 	}

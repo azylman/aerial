@@ -683,6 +683,7 @@ type StatusWidgetRequest struct {
 	Banner    string              `json:"banner,omitempty"`
 	SkipSink  bool                `json:"skip_sink,omitempty"`
 	Chunks    []StatusWidgetChunk `json:"chunks"`
+	StartedAt time.Time           `json:"started_at,omitempty"`
 }
 
 // VanadisServer manages HTTP endpoints and River worker coordination for Vanadis builds.

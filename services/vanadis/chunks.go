@@ -1045,6 +1045,7 @@ func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncC
 		Status:    widgetStatus,
 		Banner:    widgetBanner,
 		Chunks:    wChunks,
+		StartedAt: build.CreatedAt,
 	}
 }
 

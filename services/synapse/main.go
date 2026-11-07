@@ -650,6 +650,7 @@ func (s *RouterServer) syncSinglePRWidget(qCtx context.Context, pgReg *PostgresP
 		Status:    finalStatus,
 		Banner:    widgetBanner,
 		SkipSink:  shouldSkipWidgetSink(prMsgID, activeStep, finalStatus),
+		StartedAt: prCreatedAt,
 		Chunks: []StatusWidgetChunk{
 			{
 				Index:      0,
