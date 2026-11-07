@@ -157,11 +157,17 @@ func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) er
 		if pr.Draft || !s.isAutoUpdateAuthorAllowed(pr.User.Login) {
 			continue
 		}
-		if s.hasFailedCIForSHA(ctx, normRepo, pr.Number, pr.Head.SHA) {
-			continue
-		}
+		hasFailedOrPending := s.hasFailedCIForSHA(ctx, normRepo, pr.Number, pr.Head.SHA)
 		if s.wasUpdatedForCurrentMain(normRepo, pr.Number) {
+			// If the in-flight PR updated for current main actually failed CI, continue to update the next clean PR.
+			// Otherwise (checks are still pending, passed, or initializing), break to prevent concurrent branch updates.
+			if hasFailedOrPending && s.isCachedFailedCISHA(normRepo, pr.Number, pr.Head.SHA) {
+				continue
+			}
 			break
+		}
+		if hasFailedOrPending {
+			continue
 		}
 		conflict, err := s.updatePRBranch(ctx, normRepo, pr.Number)
 		if err != nil {
@@ -1020,7 +1026,7 @@ func (s *RouterServer) clearUpdatedPRsForRepo(repo string) {
 	})
 }
 
-func (s *RouterServer) hasFailedCIForSHA(ctx context.Context, repo string, prNumber int, headSHA string) bool {
+func (s *RouterServer) isCachedFailedCISHA(repo string, prNumber int, headSHA string) bool {
 	headSHA = strings.TrimSpace(headSHA)
 	normRepo := normalizeRepo(repo)
 	if s == nil || normRepo == "" || prNumber <= 0 || headSHA == "" || isZeroSHA(headSHA) {
@@ -1032,18 +1038,36 @@ func (s *RouterServer) hasFailedCIForSHA(ctx context.Context, repo string, prNum
 			return true
 		}
 	}
+	return false
+}
+
+func (s *RouterServer) hasFailedCIForSHA(ctx context.Context, repo string, prNumber int, headSHA string) bool {
+	if s.isCachedFailedCISHA(repo, prNumber, headSHA) {
+		return true
+	}
+	headSHA = strings.TrimSpace(headSHA)
+	normRepo := normalizeRepo(repo)
+	if s == nil || normRepo == "" || prNumber <= 0 || headSHA == "" || isZeroSHA(headSHA) {
+		return false
+	}
+	key := prCheckKey(normRepo, prNumber)
 	var checkRuns GitHubCheckRunsResponse
 	path := fmt.Sprintf("/repos/%s/commits/%s/check-runs?per_page=100", normRepo, url.PathEscape(headSHA))
 	if err := s.getGitHubJSON(ctx, path, 2<<20, &checkRuns); err != nil {
 		return false
 	}
+	hasPending := false
 	for _, cr := range checkRuns.CheckRuns {
-		if !isGateAggregatorCheck(cr.Name) && classifyCheckState(cr.Status, cr.Conclusion) == "failed" {
+		state := classifyCheckState(cr.Status, cr.Conclusion)
+		if !isGateAggregatorCheck(cr.Name) && state == "failed" {
 			s.failedCheckSHAs.Store(key, headSHA)
 			return true
 		}
+		if state == "pending" {
+			hasPending = true
+		}
 	}
-	return false
+	return hasPending
 }
 
 func (s *RouterServer) hasCancelledCheckForSHA(repo string, prNumber int, headSHA string) bool {
