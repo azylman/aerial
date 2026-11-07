@@ -40,7 +40,8 @@ func TestHelpers_WidgetStatus(t *testing.T) {
 		prStatus    string
 		want        string
 	}{
-		{"failed", "open", "failed"},
+		{"failed", "open", "open"},
+		{"merged", "open", "merged"},
 		{"failed", "deployed", "deployed"},
 		{"pending", "deployed", "deployed"},
 		{"pending", "deploying", "deploying"},
@@ -86,13 +87,14 @@ func TestHelpers_WidgetStatus(t *testing.T) {
 	}
 
 	syncWidgetTests := []struct {
-		name           string
-		build          VanadisBuild
-		chunks         []VanadisChunk
-		req            SyncChunkPRWidgetRequest
-		wantStatus     string
-		wantSkipSink   bool
-		wantActiveStep string
+		name                string
+		build               VanadisBuild
+		chunks              []VanadisChunk
+		req                 SyncChunkPRWidgetRequest
+		wantStatus          string
+		wantSkipSink        bool
+		wantActiveStep      string
+		wantZeroCompletedAt bool
 	}{
 		{
 			name: "preserves active step and allows sink when chunk is open and build running with message",
@@ -302,6 +304,31 @@ func TestHelpers_WidgetStatus(t *testing.T) {
 			wantSkipSink:   false,
 			wantActiveStep: "",
 		},
+		{
+			name: "recovers failed build and failed chunk on open pr",
+			build: VanadisBuild{
+				ID:              "build-recover",
+				Status:          "failed",
+				StatusMessageID: "msg-recover",
+				Title:           "Test Build Recover",
+				CreatedAt:       time.Unix(1760000000, 0),
+			},
+			chunks: []VanadisChunk{
+				{ID: "c-recover", ChunkIndex: 0, PRNumber: 110, Status: "failed", CompletedAt: time.Unix(1760001000, 0)},
+			},
+			req: SyncChunkPRWidgetRequest{
+				BuildID:    "build-recover",
+				Repo:       "azylman/aerial",
+				PRNumber:   110,
+				PRStatus:   "open",
+				ActiveStep: "Waiting on CI (1/4 passed)",
+				PRFound:    true,
+			},
+			wantStatus:          "running",
+			wantSkipSink:        false,
+			wantActiveStep:      "Waiting on CI (1/4 passed)",
+			wantZeroCompletedAt: true,
+		},
 	}
 	for _, tc := range syncWidgetTests {
 		t.Run("sync_widget_"+tc.name, func(t *testing.T) {
@@ -314,6 +341,9 @@ func TestHelpers_WidgetStatus(t *testing.T) {
 			}
 			if len(got.Chunks) > 0 && got.Chunks[0].ActiveStep != tc.wantActiveStep {
 				t.Errorf("buildSyncWidgetRequest Chunk[0].ActiveStep = %q, want %q", got.Chunks[0].ActiveStep, tc.wantActiveStep)
+			}
+			if tc.wantZeroCompletedAt && len(got.Chunks) > 0 && !got.Chunks[0].CompletedAt.IsZero() {
+				t.Errorf("buildSyncWidgetRequest Chunk[0].CompletedAt = %v, want zero", got.Chunks[0].CompletedAt)
 			}
 			if !tc.build.CreatedAt.IsZero() && !got.StartedAt.Equal(tc.build.CreatedAt) {
 				t.Errorf("buildSyncWidgetRequest StartedAt = %v, want %v", got.StartedAt, tc.build.CreatedAt)
@@ -902,6 +932,33 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 			if len(last.Chunks) == 0 || last.Chunks[0].ActiveStep != "Waiting on CI (2/4 passed)" {
 				t.Errorf("expected chunk ActiveStep to be %q, got %+v", "Waiting on CI (2/4 passed)", last.Chunks)
 			}
+		}
+
+		// Recovery from failed state on open PR sync
+		_, _, failed, err := sWidget.FailChunkByPR(context.Background(), "aerial", 301)
+		if err != nil || !failed {
+			t.Fatalf("FailChunkByPR got failed=%v, err=%v", failed, err)
+		}
+		cFailed, bFailed, _ := sWidget.GetChunk(context.Background(), cWidgetIDs[0])
+		if cFailed.Status != "failed" || bFailed.Status != "failed" {
+			t.Fatalf("expected chunk and build status failed before recovery, got chunk=%s build=%s", cFailed.Status, bFailed.Status)
+		}
+
+		recoverPayload := `{"repo":"aerial","pr_number":301,"pr_status":"open","active_step":"Waiting on CI (1/4 passed)","pr_found":true}`
+		recRecover := httptest.NewRecorder()
+		muxWidget.ServeHTTP(recRecover, httptest.NewRequest(http.MethodPost, "/chunks/sync-pr-widget", strings.NewReader(recoverPayload)))
+		if recRecover.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for recover sync, got %d: %s", recRecover.Code, recRecover.Body.String())
+		}
+		cRecovered, bRecovered, _ := sWidget.GetChunk(context.Background(), cWidgetIDs[0])
+		if cRecovered.Status != "pr_opened" {
+			t.Errorf("expected recovered chunk status pr_opened, got %q", cRecovered.Status)
+		}
+		if bRecovered.Status != "running" {
+			t.Errorf("expected recovered build status running, got %q", bRecovered.Status)
+		}
+		if !cRecovered.CompletedAt.IsZero() {
+			t.Errorf("expected recovered chunk CompletedAt to be zero, got %v", cRecovered.CompletedAt)
 		}
 
 		// Build ID direct sync
