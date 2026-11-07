@@ -141,11 +141,11 @@ func TestVanadisMCP_Tools(t *testing.T) {
 	b3.CreatedAt = now.Add(-1 * time.Minute)
 
 	c1_0 := mkChunk("chunk-1", "build-mcp-1", 0, "Chunk 1", "Inst 1", "medium", "running")
-	c1_0.Repo = "azylman/aerial"
+	c1_0.Repo = normalizeRepo("aerial")
 	c1_0.PRNumber = 101
 
 	c1_1 := mkChunk("chunk-2", "build-mcp-1", 1, "Chunk 2", "Inst 2", "high", "pending")
-	c1_1.Repo = "azylman/aerial"
+	c1_1.Repo = normalizeRepo("aerial")
 
 	setupStore := func() *memoryVanadisStore {
 		store := newMemoryVanadisStore()
@@ -362,6 +362,13 @@ func TestVanadisMCP_Tools(t *testing.T) {
 			wantToolErr: false,
 			wantSubstr:  `"status":"updated"`,
 		},
+		{
+			name:        "update_chunk mode update success",
+			toolName:    "update_chunk",
+			args:        `{"build_id":"build-mcp-1","chunk_ref":"1","mode":"action","title":"Switched to Action","instructions":"Run action"}`,
+			wantToolErr: false,
+			wantSubstr:  `"status":"updated"`,
+		},
 
 		// append_chunk
 		{
@@ -389,7 +396,14 @@ func TestVanadisMCP_Tools(t *testing.T) {
 		{
 			name:        "append_chunk success",
 			toolName:    "append_chunk",
-			args:        `{"build_id":"build-mcp-1","chunks":[{"title":"Part 3","instructions":"Do part 3","effort":"medium"}]}`,
+			args:        `{"build_id":"build-mcp-1","chunks":[{"repo":"aerial","title":"Part 3","instructions":"Do part 3","effort":"medium"}]}`,
+			wantToolErr: false,
+			wantSubstr:  `"status":"appended"`,
+		},
+		{
+			name:        "append_chunk action mode success",
+			toolName:    "append_chunk",
+			args:        `{"build_id":"build-mcp-1","chunks":[{"mode":"action","title":"Action Step","instructions":"Run migration","effort":"low"}]}`,
 			wantToolErr: false,
 			wantSubstr:  `"status":"appended"`,
 		},
@@ -423,6 +437,44 @@ func TestVanadisMCP_Tools(t *testing.T) {
 			args:        `{"build_id":"build-mcp-1","chunk_ref":"1"}`,
 			wantToolErr: false,
 			wantSubstr:  `"status":"removed"`,
+		},
+
+		// fail_chunk
+		{
+			name:        "fail_chunk nil store",
+			nilStore:    true,
+			toolName:    "fail_chunk",
+			args:        `{"chunk_id":"chunk-1","reason":"unrecoverable failure"}`,
+			wantToolErr: true,
+			wantSubstr:  "vanadis store not configured",
+		},
+		{
+			name:        "fail_chunk missing chunk_id",
+			toolName:    "fail_chunk",
+			args:        `{"chunk_id":"","reason":"unrecoverable failure"}`,
+			wantToolErr: true,
+			wantSubstr:  "chunk_id and reason are required",
+		},
+		{
+			name:        "fail_chunk missing reason",
+			toolName:    "fail_chunk",
+			args:        `{"chunk_id":"chunk-1","reason":""}`,
+			wantToolErr: true,
+			wantSubstr:  "chunk_id and reason are required",
+		},
+		{
+			name:        "fail_chunk chunk not found",
+			toolName:    "fail_chunk",
+			args:        `{"chunk_id":"nonexistent-chunk","reason":"unrecoverable failure"}`,
+			wantToolErr: true,
+			wantSubstr:  "chunk not found",
+		},
+		{
+			name:        "fail_chunk success",
+			toolName:    "fail_chunk",
+			args:        `{"chunk_id":"chunk-1","reason":"unrecoverable action error"}`,
+			wantToolErr: false,
+			wantSubstr:  `"status":"failed"`,
 		},
 	}
 

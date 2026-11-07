@@ -72,17 +72,21 @@ func (r *mockRows) Scan(dest ...any) error {
 	if r.scanErr != nil {
 		return r.scanErr
 	}
-	if len(r.builds) > 0 || len(dest) == 10 {
+	if len(r.builds) > 0 {
 		fillBuildDest(r.builds[r.idx-1], dest)
 		return nil
 	}
-	if len(dest) == 9 && len(r.items) > 0 {
+	if len(r.items) > 0 {
 		c := r.items[r.idx-1]
-		*dest[0].(*string), *dest[1].(*int), *dest[2].(*string), *dest[3].(*string), *dest[4].(*string), *dest[5].(*int), *dest[6].(*sql.NullTime), *dest[7].(*sql.NullTime), *dest[8].(*time.Time) = c.ID, c.ChunkIndex, c.Repo, c.Title, c.Status, c.PRNumber, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.UpdatedAt
-		return nil
+		if len(dest) == 10 {
+			*dest[0].(*string), *dest[1].(*int), *dest[2].(*string), *dest[3].(*string), *dest[4].(*string), *dest[5].(*string), *dest[6].(*int), *dest[7].(*sql.NullTime), *dest[8].(*sql.NullTime), *dest[9].(*time.Time) = c.ID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Status, c.PRNumber, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.UpdatedAt
+			return nil
+		}
+		if len(dest) == 17 {
+			*dest[0].(*string), *dest[1].(*string), *dest[2].(*int), *dest[3].(*string), *dest[4].(*string), *dest[5].(*string), *dest[6].(*string), *dest[7].(*[]string), *dest[8].(*[]string), *dest[9].(*string), *dest[10].(*[]string), *dest[11].(*string), *dest[12].(*int), *dest[13].(*sql.NullTime), *dest[14].(*sql.NullTime), *dest[15].(*time.Time), *dest[16].(*time.Time) = c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.CreatedAt, c.UpdatedAt
+			return nil
+		}
 	}
-	c := r.items[r.idx-1]
-	*dest[0].(*string), *dest[1].(*string), *dest[2].(*int), *dest[3].(*string), *dest[4].(*string), *dest[5].(*string), *dest[6].(*[]string), *dest[7].(*[]string), *dest[8].(*string), *dest[9].(*[]string), *dest[10].(*string), *dest[11].(*int), *dest[12].(*sql.NullTime), *dest[13].(*sql.NullTime), *dest[14].(*time.Time), *dest[15].(*time.Time) = c.ID, c.BuildID, c.ChunkIndex, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.CreatedAt, c.UpdatedAt
 	return nil
 }
 
@@ -499,6 +503,37 @@ func (m *memoryVanadisStore) FailChunkByPR(_ context.Context, repo string, prNum
 	return "", "", false, nil
 }
 
+func (m *memoryVanadisStore) CompleteActionChunk(_ context.Context, chunkID string) (*VanadisAdvancementResult, error) {
+	return nil, nil
+}
+
+func (m *memoryVanadisStore) FailChunk(_ context.Context, chunkID, reason string) (*VanadisBuild, *VanadisChunk, bool, error) {
+	chunkID = strings.TrimSpace(chunkID)
+	if chunkID == "" {
+		return nil, nil, false, errors.New("chunk id cannot be empty")
+	}
+	for bID, list := range m.chunks {
+		for i := range list {
+			if list[i].ID == chunkID {
+				b := m.builds[bID]
+				if isChunkDoneStatus(list[i].Status) || list[i].Status == "failed" || b.Status == "completed" || b.Status == "cancelled" {
+					return &b, &list[i], false, nil
+				}
+				list[i].Status = "failed"
+				now := time.Now().UTC()
+				list[i].CompletedAt = now
+				list[i].UpdatedAt = now
+				m.chunks[bID] = list
+				b.Status = "failed"
+				b.UpdatedAt = now
+				m.builds[bID] = b
+				return &b, &list[i], true, nil
+			}
+		}
+	}
+	return nil, nil, false, ErrChunkNotFound
+}
+
 func (m *memoryVanadisStore) UpdateBuild(_ context.Context, buildID string, req UpdateBuildRequest) (*VanadisBuild, error) {
 	if m.updateBuildErr != nil {
 		return nil, m.updateBuildErr
@@ -536,21 +571,9 @@ func (m *memoryVanadisStore) UpdateChunk(_ context.Context, buildID, chunkRef st
 		return nil, m.updateChunkErr
 	}
 	buildID, chunkRef = strings.TrimSpace(buildID), strings.TrimSpace(chunkRef)
-	repo := strings.TrimSpace(req.Repo)
-	title := strings.TrimSpace(req.Title)
-	instructions := strings.TrimSpace(req.Instructions)
-	effortStr := strings.TrimSpace(req.Effort)
-	hasField := repo != "" || title != "" || instructions != "" || effortStr != "" || req.TargetFiles != nil || req.TargetSymbols != nil
-	if buildID == "" || chunkRef == "" || !hasField {
-		return nil, fmt.Errorf("%w: build id, chunk ref, and at least one updated field are required", ErrInvalidBuildInput)
-	}
-	var normEffort string
-	if effortStr != "" {
-		var effErr error
-		normEffort, effErr = normalizeChunkEffort(effortStr)
-		if effErr != nil {
-			return nil, fmt.Errorf("%w: %w", ErrInvalidBuildInput, effErr)
-		}
+	normEffort, err := validateUpdateChunkInput(buildID, chunkRef, req)
+	if err != nil {
+		return nil, err
 	}
 	b, ok := m.builds[buildID]
 	if !ok {
@@ -568,23 +591,8 @@ func (m *memoryVanadisStore) UpdateChunk(_ context.Context, buildID, chunkRef st
 	if c.Status != "pending" {
 		return nil, fmt.Errorf("%w: chunk %s has status %q (must be pending)", ErrBuildConflict, c.ID, c.Status)
 	}
-	if repo != "" {
-		c.Repo = normalizeRepo(repo)
-	}
-	if title != "" {
-		c.Title = title
-	}
-	if instructions != "" {
-		c.Instructions = instructions
-	}
-	if req.TargetFiles != nil {
-		c.TargetFiles = nonNilSlice(req.TargetFiles)
-	}
-	if req.TargetSymbols != nil {
-		c.TargetSymbols = nonNilSlice(req.TargetSymbols)
-	}
-	if normEffort != "" {
-		c.Effort = normEffort
+	if err := applyChunkUpdates(&c, req, normEffort); err != nil {
+		return nil, err
 	}
 	c.UpdatedAt = time.Now().UTC()
 	list[idx] = c
@@ -597,19 +605,8 @@ func (m *memoryVanadisStore) AppendChunks(_ context.Context, buildID string, inp
 		return nil, m.appendChunksErr
 	}
 	buildID = strings.TrimSpace(buildID)
-	if buildID == "" || len(inputs) == 0 {
-		return nil, fmt.Errorf("%w: build id and at least one chunk are required", ErrInvalidBuildInput)
-	}
-	for i, in := range inputs {
-		if strings.TrimSpace(in.Title) == "" || strings.TrimSpace(in.Instructions) == "" {
-			return nil, fmt.Errorf("%w: chunk[%d] title and instructions cannot be empty", ErrInvalidBuildInput, i)
-		}
-		if id := strings.TrimSpace(in.ID); id != "" && !isValidVanadisChunkID(id) {
-			return nil, fmt.Errorf("%w: chunk[%d] invalid id %q", ErrInvalidBuildInput, i, id)
-		}
-		if _, err := normalizeChunkEffort(in.Effort); err != nil {
-			return nil, fmt.Errorf("%w: chunk[%d] %w", ErrInvalidBuildInput, i, err)
-		}
+	if err := validateAppendChunksInputs(buildID, inputs); err != nil {
+		return nil, err
 	}
 	b, ok := m.builds[buildID]
 	if !ok {
@@ -624,49 +621,16 @@ func (m *memoryVanadisStore) AppendChunks(_ context.Context, buildID string, inp
 		usedIDs[c.ID] = true
 	}
 	nextIdx := 0
-	defaultRepo := "azylman/aerial"
 	if len(existing) > 0 {
 		last := existing[len(existing)-1]
 		nextIdx = last.ChunkIndex + 1
-		defaultRepo = firstNonEmpty(last.Repo, "azylman/aerial")
 	}
 	now := time.Now().UTC()
 	appended := make([]VanadisChunk, 0, len(inputs))
 	for _, in := range inputs {
-		repo := firstNonEmpty(normalizeRepo(in.Repo), defaultRepo)
-		var resolvedID string
-		if cleanID := strings.TrimSpace(in.ID); cleanID != "" {
-			if usedIDs[cleanID] {
-				return nil, fmt.Errorf("%w: duplicate chunk id %q", ErrBuildConflict, cleanID)
-			}
-			resolvedID = cleanID
-		} else {
-			n := nextIdx + 1
-			for {
-				candidate := fmt.Sprintf("%s-chunk-%d", buildID, n)
-				if !usedIDs[candidate] {
-					resolvedID = candidate
-					break
-				}
-				n++
-			}
-		}
-		usedIDs[resolvedID] = true
-		eff, _ := normalizeChunkEffort(in.Effort)
-		newChunk := VanadisChunk{
-			ID:                 resolvedID,
-			BuildID:            buildID,
-			ChunkIndex:         nextIdx,
-			Repo:               repo,
-			Title:              strings.TrimSpace(in.Title),
-			Instructions:       strings.TrimSpace(in.Instructions),
-			TargetFiles:        nonNilSlice(in.TargetFiles),
-			TargetSymbols:      nonNilSlice(in.TargetSymbols),
-			Effort:             eff,
-			AcceptanceCriteria: nonNilSlice(in.AcceptanceCriteria),
-			Status:             "pending",
-			CreatedAt:          now,
-			UpdatedAt:          now,
+		newChunk, err := buildAppendedChunk(buildID, in, nextIdx, usedIDs, now)
+		if err != nil {
+			return nil, err
 		}
 		appended = append(appended, newChunk)
 		existing = append(existing, newChunk)
@@ -753,7 +717,7 @@ func mkChunk(id, buildID string, idx int, title, instr, effort, status string) V
 	if effort == "" {
 		effort = "medium"
 	}
-	return VanadisChunk{ID: id, BuildID: buildID, ChunkIndex: idx, Title: title, Instructions: instr, Effort: effort, Status: status, TargetFiles: []string{}, TargetSymbols: []string{}, AcceptanceCriteria: []string{}}
+	return VanadisChunk{ID: id, BuildID: buildID, ChunkIndex: idx, Mode: "pr", Repo: normalizeRepo("aerial"), Title: title, Instructions: instr, Effort: effort, Status: status, TargetFiles: []string{}, TargetSymbols: []string{}, AcceptanceCriteria: []string{}}
 }
 
 func TestLoadConfigAndEnv(t *testing.T) {
@@ -816,23 +780,6 @@ func TestExecuteChunkArgsAndNormalizeRepo(t *testing.T) {
 	if args := (ExecuteChunkArgs{BuildID: "b1", ChunkIndex: 2}); args.Kind() != "vanadis_execute_chunk" || args.InsertOpts().Queue != VanadisQueueName || args.InsertOpts().MaxAttempts != 3 || !args.InsertOpts().UniqueOpts.ByArgs {
 		t.Fatalf("unexpected ExecuteChunkArgs metadata: %+v", args)
 	}
-	repoTests := []struct {
-		name, input, want string
-	}{
-		{"empty repo", "", ""},
-		{"whitespace repo", "   ", ""},
-		{"already qualified", "azylman/aerial", "azylman/aerial"},
-		{"unqualified repo", "aerial", "azylman/aerial"},
-		{"unqualified with spaces", "  mirrormere  ", "azylman/mirrormere"},
-	}
-	for _, tc := range repoTests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := normalizeRepo(tc.input); got != tc.want {
-				t.Fatalf("normalizeRepo(%q) = %q, want %q", tc.input, got, tc.want)
-			}
-		})
-	}
 }
 
 func TestPostgresVanadisStore(t *testing.T) {
@@ -864,6 +811,11 @@ func TestPostgresVanadisStore(t *testing.T) {
 		{"empty chunk title", validBuild, []VanadisChunk{mkChunk("c", "", 0, "", "i", "", "")}},
 		{"empty chunk instructions", validBuild, []VanadisChunk{mkChunk("c", "", 0, "t", "", "", "")}},
 		{"invalid chunk effort", validBuild, []VanadisChunk{mkChunk("c", "", 0, "t", "i", "ultra", "")}},
+		{"invalid chunk mode", validBuild, []VanadisChunk{{ID: "c", ChunkIndex: 0, Mode: "bad-mode", Repo: "aerial", Title: "t", Instructions: "i"}}},
+		{"pr mode empty repo", validBuild, []VanadisChunk{{ID: "c", ChunkIndex: 0, Mode: "pr", Repo: "", Title: "t", Instructions: "i"}}},
+		{"action mode with repo", validBuild, []VanadisChunk{{ID: "c", ChunkIndex: 0, Mode: "action", Repo: "aerial", Title: "t", Instructions: "i"}}},
+		{"action mode with files", validBuild, []VanadisChunk{{ID: "c", ChunkIndex: 0, Mode: "action", Repo: "", Title: "t", Instructions: "i", TargetFiles: []string{"f.go"}}}},
+		{"action mode with symbols", validBuild, []VanadisChunk{{ID: "c", ChunkIndex: 0, Mode: "action", Repo: "", Title: "t", Instructions: "i", TargetSymbols: []string{"s"}}}},
 	} {
 		if err := store.CreateBuild(ctx, tc.build, tc.chunks); err == nil {
 			t.Fatalf("expected error for case %s", tc.name)
@@ -1043,9 +995,9 @@ func TestFormatChunkPrompt(t *testing.T) {
 	for _, want := range []string{
 		"[VANADIS BUILD CHUNK EXECUTION]", "Build ID: build-999", "Build Title: Build Vanadis Queue Execution Pipeline",
 		"=== Build Objective ===\nBuild Vanadis Queue", "=== Shared Build Context ===\nArchitecture: River queue backed by PostgreSQL.",
-		"[Chunk 1/3] Task 1: Schema (azylman/aerial, PR #101)", "=== Active Chunk (Chunk 2 of 3) ===", "Repository: azylman/aerial",
+		"[Chunk 1/3] Task 1: Schema (aerial, PR #101)", "=== Active Chunk (Chunk 2 of 3) ===", "Repository: aerial",
 		"Target Files: vanadis/main.go, vanadis/main_test.go", "Target Symbols: VanadisServer, FormatChunkPrompt",
-		"- [Chunk 3/3] Task 3: Webhook Advancement (azylman/aerial)", "optimizing all design and implementation choices for the `Build Objective`",
+		"- [Chunk 3/3] Task 3: Webhook Advancement (aerial)", "optimizing all design and implementation choices for the `Build Objective`",
 		"./scripts/check-coverage.sh --service <svc> --check --gaps",
 		"Run after init: `grep -n -E \"VanadisServer|FormatChunkPrompt\" \"$SCRATCH_DIR/vanadis/main.go\" \"$SCRATCH_DIR/vanadis/main_test.go\"`",
 		"4. NEVER spawn or invoke subagents (`invoke_subagent`, `define_subagent`): Vanadis build chunks are already isolated leaf tasks—execute all file edits, tests, and verification directly in this turn.",
@@ -1119,8 +1071,11 @@ func TestExecuteChunkWorkerAndProcessExecuteChunk(t *testing.T) {
 	}
 	c0 := mkChunk("c-0", "b-run", 0, "C0", "I0", "", "merged")
 	c0.PRNumber = 10
-	_ = memStore.CreateBuild(ctx, mkBuild("b-run", "thread-777", "", "", "running"), []VanadisChunk{c0, mkChunk("c-1", "b-run", 1, "C1", "I1", "high", "pending")})
-	if srv.ProcessExecuteChunk(ctx, "b-run", 99, false) == nil || srv.ProcessExecuteChunk(ctx, "b-run", 0, false) != nil {
+	cActDone := mkChunk("c-act-done", "b-run", 2, "C2", "I2", "", "completed")
+	cActDone.Mode = "action"
+	cActDone.Repo = ""
+	_ = memStore.CreateBuild(ctx, mkBuild("b-run", "thread-777", "", "", "running"), []VanadisChunk{c0, mkChunk("c-1", "b-run", 1, "C1", "I1", "high", "pending"), cActDone})
+	if srv.ProcessExecuteChunk(ctx, "b-run", 99, false) == nil || srv.ProcessExecuteChunk(ctx, "b-run", 0, false) != nil || srv.ProcessExecuteChunk(ctx, "b-run", 2, false) != nil {
 		t.Fatal("unexpected chunk status handling")
 	}
 	memStore.updateChunkErr = errors.New("update chunk failed")
@@ -1194,20 +1149,25 @@ func TestHTTPEndpoints(t *testing.T) {
 	srv.SetStore(memStore)
 	checkCode(http.MethodPost, "/builds", errorReader{}, http.StatusBadRequest)
 	for _, p := range []string{
-		`{invalid`, `{"repo":""}`, `{"repo":"aerial","thread_id":""}`,
-		`{"repo":"aerial","thread_id":"not-numeric","objective":"obj","chunks":[{"title":"t","instructions":"i"}]}`,
-		`{"repo":"aerial","thread_id":"123","objective":""}`, `{"repo":"aerial","thread_id":"123","objective":"obj","chunks":[]}`,
-		`{"repo":"aerial","thread_id":"123","objective":"obj","chunks":[{"title":"","instructions":"i"}]}`,
-		`{"repo":"aerial","thread_id":"123","objective":"obj","chunks":[{"title":"t","instructions":""}]}`,
-		`{"repo":"aerial","thread_id":"123","objective":"obj","chunks":[{"title":"t","instructions":"i","effort":"unsupported"}]}`,
-		`{"repo":"aerial","thread_id":"123","objective":"obj","chunks":[{"id":"bad:id","title":"t","instructions":"i"}]}`,
+		`{invalid`, `{"thread_id":""}`,
+		`{"thread_id":"not-numeric","objective":"obj","chunks":[{"repo":"aerial","title":"t","instructions":"i"}]}`,
+		`{"thread_id":"123","objective":""}`, `{"thread_id":"123","objective":"obj","chunks":[]}`,
+		`{"thread_id":"123","objective":"obj","chunks":[{"repo":"aerial","title":"","instructions":"i"}]}`,
+		`{"thread_id":"123","objective":"obj","chunks":[{"repo":"aerial","title":"t","instructions":""}]}`,
+		`{"thread_id":"123","objective":"obj","chunks":[{"repo":"aerial","title":"t","instructions":"i","effort":"unsupported"}]}`,
+		`{"thread_id":"123","objective":"obj","chunks":[{"repo":"aerial","id":"bad:id","title":"t","instructions":"i"}]}`,
+		`{"thread_id":"123","objective":"obj","chunks":[{"mode":"pr","repo":"","title":"t","instructions":"i"}]}`,
+		`{"thread_id":"123","objective":"obj","chunks":[{"mode":"action","repo":"aerial","title":"t","instructions":"i"}]}`,
+		`{"thread_id":"123","objective":"obj","chunks":[{"mode":"invalid","repo":"aerial","title":"t","instructions":"i"}]}`,
+		`{"thread_id":"123","objective":"obj","chunks":[{"mode":"action","repo":"","target_files":["a.go"],"title":"t","instructions":"i"}]}`,
+		`{"thread_id":"123","objective":"obj","chunks":[{"mode":"action","repo":"","target_symbols":["A"],"title":"t","instructions":"i"}]}`,
 	} {
 		checkCode(http.MethodPost, "/builds", strings.NewReader(p), http.StatusBadRequest)
 	}
 	if err := validateCreateBuildInputs("b1", "123", "obj", []VanadisChunk{{ID: "bad:id", Title: "t", Instructions: "i"}}); err == nil || !strings.Contains(err.Error(), "chunks[0].id must be 1..120 characters") {
 		t.Fatalf("expected validateCreateBuildInputs chunk id error, got %v", err)
 	}
-	validPayload := `{"repo":"aerial","thread_id":"stateful_medium:discord-1555999","title":"Implement Feature X Build Title","objective":"Implement feature X","shared_context":"Targeting Nomad cluster","chunks":[{"title":"Part 1","instructions":"Do part 1","effort":"low"},{"id":"custom-chunk-2","title":"Part 2","instructions":"Do part 2","target_files":["a.go"],"target_symbols":["A"],"effort":"high","acceptance_criteria":["All green"]}]}`
+	validPayload := `{"thread_id":"stateful_medium:discord-1555999","title":"Implement Feature X Build Title","objective":"Implement feature X","shared_context":"Targeting Nomad cluster","chunks":[{"repo":"aerial","title":"Part 1","instructions":"Do part 1","effort":"low"},{"repo":"aerial","id":"custom-chunk-2","title":"Part 2","instructions":"Do part 2","target_files":["a.go"],"target_symbols":["A"],"effort":"high","acceptance_criteria":["All green"]}]}`
 	memStore.createErr = errors.New("create failed")
 	checkCode(http.MethodPost, "/builds", strings.NewReader(validPayload), http.StatusInternalServerError)
 	memStore.createErr = nil
@@ -1712,7 +1672,7 @@ func TestVanadisEndpointCounterIncrements(t *testing.T) {
 	srv := NewVanadisServer(Config{}, memStore, inserter, nil)
 
 	// 1. handleCreateBuild success -> created
-	reqBody := `{"repo":"azylman/aerial","thread_id":"123456789012345678","tier":2,"objective":"Metric test build","chunks":[{"title":"C1","instructions":"I1"}]}`
+	reqBody := `{"thread_id":"123456789012345678","tier":2,"objective":"Metric test build","chunks":[{"repo":"aerial","title":"C1","instructions":"I1"}]}`
 	recCreate := httptest.NewRecorder()
 	srv.handleCreateBuild(recCreate, httptest.NewRequest(http.MethodPost, "/builds", strings.NewReader(reqBody)))
 	if recCreate.Code != http.StatusAccepted {
@@ -1747,14 +1707,15 @@ func TestVanadisEndpointCounterIncrements(t *testing.T) {
 						*dest[0].(*string) = "c1"
 						*dest[1].(*string) = "b1"
 						*dest[2].(*int) = 0
-						*dest[3].(*string) = "Chunk 1"
-						*dest[4].(*string) = "pr_opened"
-						*dest[5].(*string) = "123456789012345678"
-						*dest[6].(*int) = 2
-						*dest[7].(*string) = "Build 1"
-						*dest[8].(*string) = "Objective 1"
-						*dest[9].(*string) = "running"
-						*dest[10].(*string) = "msg-1"
+						*dest[3].(*string) = "pr"
+						*dest[4].(*string) = "Chunk 1"
+						*dest[5].(*string) = "pr_opened"
+						*dest[6].(*string) = "123456789012345678"
+						*dest[7].(*int) = 2
+						*dest[8].(*string) = "Build 1"
+						*dest[9].(*string) = "Objective 1"
+						*dest[10].(*string) = "running"
+						*dest[11].(*string) = "msg-1"
 						return nil
 					}}
 				},
@@ -1767,7 +1728,7 @@ func TestVanadisEndpointCounterIncrements(t *testing.T) {
 	})
 	srvAdv := NewVanadisServer(Config{}, advStore, inserter, nil)
 	recAdv := httptest.NewRecorder()
-	srvAdv.handleAdvanceChunkPR(recAdv, httptest.NewRequest(http.MethodPost, "/chunks/advance-pr", strings.NewReader(`{"repo":"azylman/aerial","pr_number":42}`)))
+	srvAdv.handleAdvanceChunkPR(recAdv, httptest.NewRequest(http.MethodPost, "/chunks/advance-pr", strings.NewReader(`{"repo":"aerial","pr_number":42}`)))
 	if recAdv.Code != http.StatusOK {
 		t.Fatalf("handleAdvanceChunkPR status = %d, want %d", recAdv.Code, http.StatusOK)
 	}
@@ -1784,7 +1745,7 @@ func TestVanadisEndpointCounterIncrements(t *testing.T) {
 	})
 	srvFailPR := NewVanadisServer(Config{}, failStore, inserter, nil)
 	recFailPR := httptest.NewRecorder()
-	srvFailPR.handleFailChunkPR(recFailPR, httptest.NewRequest(http.MethodPost, "/chunks/fail-pr", strings.NewReader(`{"repo":"azylman/aerial","pr_number":43}`)))
+	srvFailPR.handleFailChunkPR(recFailPR, httptest.NewRequest(http.MethodPost, "/chunks/fail-pr", strings.NewReader(`{"repo":"aerial","pr_number":43}`)))
 	if recFailPR.Code != http.StatusOK {
 		t.Fatalf("handleFailChunkPR status = %d, want %d", recFailPR.Code, http.StatusOK)
 	}

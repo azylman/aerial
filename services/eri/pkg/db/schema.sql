@@ -378,7 +378,8 @@ CREATE TABLE IF NOT EXISTS vanadis_chunks (
     id TEXT PRIMARY KEY,
     build_id TEXT NOT NULL REFERENCES vanadis_builds(id) ON DELETE CASCADE,
     chunk_index INTEGER NOT NULL,
-    repo TEXT NOT NULL DEFAULT 'azylman/aerial',
+    mode TEXT NOT NULL DEFAULT 'pr',
+    repo TEXT NOT NULL DEFAULT '',
     title TEXT NOT NULL,
     instructions TEXT NOT NULL,
     target_files TEXT[] NOT NULL DEFAULT '{}',
@@ -391,7 +392,8 @@ CREATE TABLE IF NOT EXISTS vanadis_chunks (
     completed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uq_vanadis_chunks_build_index UNIQUE (build_id, chunk_index)
+    CONSTRAINT uq_vanadis_chunks_build_index UNIQUE (build_id, chunk_index),
+    CONSTRAINT vanadis_chunks_mode_check CHECK ((mode = 'pr' AND repo <> '') OR (mode = 'action' AND repo = '' AND pr_number IS NULL))
 );
 
 CREATE INDEX IF NOT EXISTS idx_vanadis_chunks_build_status ON vanadis_chunks (build_id, status);
