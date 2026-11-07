@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -8,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func TestTranslateFluxAlertToDeployEvent(t *testing.T) {
@@ -320,10 +323,12 @@ func TestHandleFluxWebhook(t *testing.T) {
 		withRiver      bool
 		riverFail      bool
 		downstreamFail bool
+		pgReg          *PostgresPRRegistry
 		wantStatusCode int
 		wantStatus     string
 		wantEvent      string
 		wantJobName    string
+		wantPRNumber   int
 		wantRiverJobs  int
 	}{
 		{
@@ -386,12 +391,107 @@ func TestHandleFluxWebhook(t *testing.T) {
 			wantEvent:      "deploy_failed",
 			wantJobName:    "webhooks-router",
 		},
+		{
+			name:      "POST /webhooks/flux ignores pre-image kustomization deploy_started event without inserting river jobs",
+			endpoint:  "/webhooks/flux",
+			payload:   `{"involvedObject":{"kind":"Kustomization","name":"aerial-core","namespace":"flux-system"},"severity":"info","reason":"Progressing","message":"progressing","metadata":{"revision":"main@sha1:12345"}}`,
+			withRiver: true,
+			pgReg: NewPostgresPRRegistry(&mockVanadisPgxPool{
+				queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
+					if strings.Contains(sql, "SELECT pr_number, branch, target_id FROM pr_registry") {
+						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+							if len(dest) >= 3 {
+								if p, ok := dest[0].(*int); ok {
+									*p = 896
+								}
+								if b, ok := dest[1].(*string); ok {
+									*b = "feat/test"
+								}
+								if t, ok := dest[2].(*string); ok {
+									*t = "1555405874565091380"
+								}
+							}
+							return nil
+						}}
+					}
+					if strings.Contains(sql, "SELECT status, COALESCE(metadata, '{}'::jsonb)") {
+						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+							if len(dest) >= 2 {
+								if s, ok := dest[0].(*string); ok {
+									*s = "merged"
+								}
+								if b, ok := dest[1].(*[]byte); ok {
+									*b = []byte(`{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`)
+								}
+							}
+							return nil
+						}}
+					}
+					return mockVanadisPgxRow{}
+				},
+			}),
+			wantStatusCode: http.StatusOK,
+			wantStatus:     "ignored",
+			wantEvent:      "deploy_started",
+			wantJobName:    "aerial-core",
+			wantPRNumber:   896,
+			wantRiverJobs:  0,
+		},
+		{
+			name:      "POST /webhooks/flux ignores pre-image kustomization deploy_success event without inserting river jobs",
+			endpoint:  "/webhooks/flux",
+			payload:   `{"involvedObject":{"kind":"Kustomization","name":"aerial-core","namespace":"flux-system"},"severity":"info","reason":"ReconciliationSucceeded","message":"reconciled","metadata":{"revision":"main@sha1:12345"}}`,
+			withRiver: true,
+			pgReg: NewPostgresPRRegistry(&mockVanadisPgxPool{
+				queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
+					if strings.Contains(sql, "SELECT pr_number, branch, target_id FROM pr_registry") {
+						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+							if len(dest) >= 3 {
+								if p, ok := dest[0].(*int); ok {
+									*p = 896
+								}
+								if b, ok := dest[1].(*string); ok {
+									*b = "feat/test"
+								}
+								if t, ok := dest[2].(*string); ok {
+									*t = "1555405874565091380"
+								}
+							}
+							return nil
+						}}
+					}
+					if strings.Contains(sql, "SELECT status, COALESCE(metadata, '{}'::jsonb)") {
+						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+							if len(dest) >= 2 {
+								if s, ok := dest[0].(*string); ok {
+									*s = "synced"
+								}
+								if b, ok := dest[1].(*[]byte); ok {
+									*b = []byte(`{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`)
+								}
+							}
+							return nil
+						}}
+					}
+					return mockVanadisPgxRow{}
+				},
+			}),
+			wantStatusCode: http.StatusOK,
+			wantStatus:     "ignored",
+			wantEvent:      "deploy_success",
+			wantJobName:    "aerial-core",
+			wantPRNumber:   896,
+			wantRiverJobs:  0,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			srv := NewRouterServer(Config{SystemChannelID: "123456789012345678"}, nil)
+			if tc.pgReg != nil {
+				srv.SetRegistry(tc.pgReg)
+			}
 			if tc.downstreamFail {
 				srv.SetDispatcher(&mockOutboundDispatcher{directMessageErr: errors.New("dispatch failed")})
 			}
@@ -430,6 +530,11 @@ func TestHandleFluxWebhook(t *testing.T) {
 				if tc.wantJobName != "" {
 					if gotJob, _ := res["job_name"].(string); gotJob != tc.wantJobName {
 						t.Errorf("job_name = %q, want %q", gotJob, tc.wantJobName)
+					}
+				}
+				if tc.wantPRNumber != 0 {
+					if gotPR, _ := res["pr_number"].(float64); int(gotPR) != tc.wantPRNumber {
+						t.Errorf("pr_number = %v, want %d", res["pr_number"], tc.wantPRNumber)
 					}
 				}
 			}

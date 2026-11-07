@@ -300,6 +300,16 @@ func deployEventIdempotencyKey(evt DeployEvent, originPrefix string) string {
 func (s *RouterServer) enqueueOrProcessDeployEvent(w http.ResponseWriter, r *http.Request, evt DeployEvent, originPrefix string) {
 	s.enrichDeployEventPRAndTarget(r.Context(), &evt)
 	logPrefix := firstNonEmpty(originPrefix, "deploy")
+	if (evt.Event == "deploy_started" || evt.Event == "deploy_success") && s.shouldTreatDeploySuccessAsSync(r.Context(), evt) {
+		log.Printf("[synapse] [%s] ignoring pre-image %s for %s on %s#%d (waiting for image build)", logPrefix, evt.Event, evt.JobName, evt.Repo, evt.PRNumber)
+		httpkit.WriteJSON(w, http.StatusOK, map[string]any{
+			"status":    "ignored",
+			"event":     evt.Event,
+			"job_name":  evt.JobName,
+			"pr_number": evt.PRNumber,
+		})
+		return
+	}
 	if s.riverClient != nil {
 		idempotencyKey := deployEventIdempotencyKey(evt, originPrefix)
 		if err := s.insertRiverJob(r.Context(), DeployWebhookArgs{IdempotencyKey: idempotencyKey, Event: evt}); err != nil {
@@ -933,6 +943,10 @@ func (s *RouterServer) handleDeployStartedRegistry(ctx context.Context, evt Depl
 	if s.registry == nil || evt.PRNumber == 0 || evt.Event != "deploy_started" || evt.JobName == "" {
 		return false
 	}
+	if s.shouldTreatDeploySuccessAsSync(ctx, evt) {
+		log.Printf("[synapse] [deploy] skipping deploy_started for %s on %s#%d (waiting for image build)", evt.JobName, evt.Repo, evt.PRNumber)
+		return true
+	}
 	if len(evt.ExpectedJobs) > 0 {
 		if _, err := s.registry.RecordExpectedJobs(ctx, evt.Repo, evt.PRNumber, evt.ExpectedJobs); err != nil {
 			log.Printf("[synapse] [registry] warning recording expected jobs on deploy_started for %s#%d: %v", evt.Repo, evt.PRNumber, err)
@@ -959,6 +973,7 @@ func (s *RouterServer) recordDeploySyncExpectedJobs(ctx context.Context, evt Dep
 			syncHasExpected = syncHasExpected || regHasExpected
 		}
 	}
+	syncHasExpected = syncHasExpected || s.isWaitingForImageBuild(ctx, evt.Repo, evt.PRNumber)
 	return syncHasExpected
 }
 
@@ -1014,8 +1029,8 @@ func (s *RouterServer) handleDeploySyncFailed(ctx context.Context, evt DeployEve
 	return s.dispatchAlertWithPrompt(ctx, evt.TargetID, "sync_failed", dmMsg, prompt, s.vanadisPromptOpts(ctx, evt.Repo, evt.PRNumber))
 }
 
-func (s *RouterServer) shouldTreatDeploySuccessAsSync(ctx context.Context, evt DeployEvent) bool {
-	if evt.PRNumber <= 0 || (evt.JobName != "aerial-core" && evt.JobName != "aerial-config") || s.registry == nil {
+func (s *RouterServer) isWaitingForImageBuild(ctx context.Context, repo string, prNumber int) bool {
+	if s == nil || s.registry == nil || strings.TrimSpace(repo) == "" || prNumber <= 0 {
 		return false
 	}
 	pgReg, ok := s.registry.(*PostgresPRRegistry)
@@ -1026,12 +1041,12 @@ func (s *RouterServer) shouldTreatDeploySuccessAsSync(ctx context.Context, evt D
 	defer cancel()
 	var status string
 	var metaBytes []byte
-	err := pgReg.pool.QueryRow(qCtx, `SELECT status, COALESCE(metadata, '{}'::jsonb) FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1;`, normalizeRepo(evt.Repo), evt.PRNumber).Scan(&status, &metaBytes)
+	err := pgReg.pool.QueryRow(qCtx, `SELECT status, COALESCE(metadata, '{}'::jsonb) FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1;`, normalizeRepo(repo), prNumber).Scan(&status, &metaBytes)
 	if err != nil {
 		return false
 	}
 	normStatus := strings.ToLower(strings.TrimSpace(status))
-	if normStatus != "merged" && normStatus != "synced" {
+	if normStatus != "open" && normStatus != "merged" && normStatus != "synced" {
 		return false
 	}
 	var meta map[string]any
@@ -1040,6 +1055,9 @@ func (s *RouterServer) shouldTreatDeploySuccessAsSync(ctx context.Context, evt D
 			meta = nil
 		}
 	}
+	if len(extractStringSliceFromMetadata(meta, "started_jobs")) > 0 {
+		return false
+	}
 	checks := extractChecksFromJSONOrMetadata("", meta)
 	checkJobs, passedBuildJobs, total, passed, failed := analyzeBuildChecks(checks)
 	_ = passedBuildJobs
@@ -1047,6 +1065,10 @@ func (s *RouterServer) shouldTreatDeploySuccessAsSync(ctx context.Context, evt D
 	_ = passed
 	_ = failed
 	return len(checkJobs) > 0
+}
+
+func (s *RouterServer) shouldTreatDeploySuccessAsSync(ctx context.Context, evt DeployEvent) bool {
+	return (evt.JobName == "aerial-core" || evt.JobName == "aerial-config") && s.isWaitingForImageBuild(ctx, evt.Repo, evt.PRNumber)
 }
 
 func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) (*DeployEvent, error) {
