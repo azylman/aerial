@@ -1930,11 +1930,11 @@ func TestPureHelpers_ValidateEventWatchSpec(t *testing.T) {
 		{"vanadis_chunk failed", "vanadis_chunk", "anyprefix-chunk-99", "failed", nil, "vanadis_chunk", "anyprefix-chunk-99", "failed", false},
 		{"vanadis_chunk invalid event_type", "vanadis_chunk", "build-123-chunk-1", "completed", nil, "", "", "", true},
 		{"vanadis_chunk invalid target", "vanadis_chunk", "build-123", "merged", nil, "", "", "", true},
-		// hangar
-		{"hangar bare repo sync_success", "hangar", "aerial", "sync_success", nil, "hangar", "azylman/aerial", "sync_success", false},
-		{"hangar full repo sync_failed", "hangar", "azylman/aerial-config", "sync_failed", nil, "hangar", "azylman/aerial-config", "sync_failed", false},
-		{"hangar invalid event_type", "hangar", "aerial", "deployed", nil, "", "", "", true},
-		{"hangar unmanaged repo", "hangar", "other/repo", "sync_success", nil, "", "", "", true},
+		// flux
+		{"flux bare repo sync_success", "flux", "aerial", "sync_success", nil, "flux", "azylman/aerial", "sync_success", false},
+		{"flux full repo sync_failed", "flux", "azylman/aerial-config", "sync_failed", nil, "flux", "azylman/aerial-config", "sync_failed", false},
+		{"flux invalid event_type", "flux", "aerial", "deployed", nil, "", "", "", true},
+		{"flux unmanaged repo", "flux", "other/repo", "sync_success", nil, "", "", "", true},
 		// github
 		{"github repo only pr_merged", "github", "aerial", "pr_merged", nil, "github", "azylman/aerial", "pr_merged", false},
 		{"github repo with branch ci_passed", "github", "azylman/aerial:main", "ci_passed", nil, "github", "azylman/aerial:main", "ci_passed", false},
@@ -2075,7 +2075,7 @@ func TestDB_EventTriggers(t *testing.T) {
 		{"vanadis_chunk 500 error", "vanadis_chunk", "c-500", true},
 		{"vanadis_chunk bad json", "vanadis_chunk", "c-badjson", true},
 		{"empty target", "vanadis_build", "   ", true},
-		{"other source hangar", "hangar", "azylman/aerial", false},
+		{"other source flux", "flux", "azylman/aerial", false},
 		{"other source github", "github", "azylman/aerial:main", false},
 		{"other source nomad", "nomad", "aerial-brain", false},
 	}
@@ -2092,10 +2092,10 @@ func TestDB_EventTriggers(t *testing.T) {
 	trig1 := EventTrigger{
 		ID:        "et-1",
 		ChannelID: "111111111111111111",
-		Source:    "hangar",
+		Source:    "flux",
 		Target:    "azylman/aerial",
 		EventType: "sync_success",
-		Prompt:    "Hangar sync finished",
+		Prompt:    "Flux sync finished",
 		Effort:    "low",
 		CreatedAt: time.Now().UTC(),
 	}
@@ -2323,22 +2323,22 @@ func TestEventWatchTools(t *testing.T) {
 	}{
 		{
 			name:    "missing channel_id",
-			args:    map[string]any{"source": "hangar", "target": "aerial", "event_type": "sync_success", "prompt": "ok"},
+			args:    map[string]any{"source": "flux", "target": "aerial", "event_type": "sync_success", "prompt": "ok"},
 			wantErr: true,
 		},
 		{
 			name:    "non-numeric snowflake channel_id",
-			args:    map[string]any{"channel_id": "bad-id", "source": "hangar", "target": "aerial", "event_type": "sync_success", "prompt": "ok"},
+			args:    map[string]any{"channel_id": "bad-id", "source": "flux", "target": "aerial", "event_type": "sync_success", "prompt": "ok"},
 			wantErr: true,
 		},
 		{
 			name:    "missing prompt",
-			args:    map[string]any{"channel_id": "1562847268833337377", "source": "hangar", "target": "aerial", "event_type": "sync_success"},
+			args:    map[string]any{"channel_id": "1562847268833337377", "source": "flux", "target": "aerial", "event_type": "sync_success"},
 			wantErr: true,
 		},
 		{
 			name:    "invalid effort",
-			args:    map[string]any{"channel_id": "1562847268833337377", "source": "hangar", "target": "aerial", "event_type": "sync_success", "prompt": "ok", "effort": "extreme"},
+			args:    map[string]any{"channel_id": "1562847268833337377", "source": "flux", "target": "aerial", "event_type": "sync_success", "prompt": "ok", "effort": "extreme"},
 			wantErr: true,
 		},
 		{
@@ -2358,7 +2358,7 @@ func TestEventWatchTools(t *testing.T) {
 		},
 		{
 			name:    "success with defaults",
-			args:    map[string]any{"channel_id": "1562847268833337377", "source": "hangar", "target": "aerial", "event_type": "sync_success", "prompt": "deploy ready"},
+			args:    map[string]any{"channel_id": "1562847268833337377", "source": "flux", "target": "aerial", "event_type": "sync_success", "prompt": "deploy ready"},
 			wantErr: false,
 		},
 		{
@@ -2390,7 +2390,7 @@ func TestEventWatchTools(t *testing.T) {
 			name: "success with thread_id fallback",
 			args: map[string]any{
 				"thread_id":  "1562847268833337379",
-				"source":     "hangar",
+				"source":     "flux",
 				"target":     "aerial",
 				"event_type": "sync_success",
 				"prompt":     "thread fallback test",
@@ -2496,9 +2496,9 @@ func TestEventWatchTools(t *testing.T) {
 
 	// Test HandleCancelEventWatch
 	// Seed 3 event triggers to test different cancel keys
-	_ = InsertEventTrigger(ctx, db, EventTrigger{ID: "watch-key-1", ChannelID: "1562847268833337377", Source: "hangar", Target: "azylman/aerial", EventType: "sync_success", Prompt: "p1"})
-	_ = InsertEventTrigger(ctx, db, EventTrigger{ID: "watch-key-2", ChannelID: "1562847268833337377", Source: "hangar", Target: "azylman/aerial", EventType: "sync_success", Prompt: "p2"})
-	_ = InsertEventTrigger(ctx, db, EventTrigger{ID: "watch-key-3", ChannelID: "1562847268833337377", Source: "hangar", Target: "azylman/aerial", EventType: "sync_success", Prompt: "p3"})
+	_ = InsertEventTrigger(ctx, db, EventTrigger{ID: "watch-key-1", ChannelID: "1562847268833337377", Source: "flux", Target: "azylman/aerial", EventType: "sync_success", Prompt: "p1"})
+	_ = InsertEventTrigger(ctx, db, EventTrigger{ID: "watch-key-2", ChannelID: "1562847268833337377", Source: "flux", Target: "azylman/aerial", EventType: "sync_success", Prompt: "p2"})
+	_ = InsertEventTrigger(ctx, db, EventTrigger{ID: "watch-key-3", ChannelID: "1562847268833337377", Source: "flux", Target: "azylman/aerial", EventType: "sync_success", Prompt: "p3"})
 
 	cancelTests := []struct {
 		name    string
@@ -2687,7 +2687,7 @@ func TestWatchEventArgs_ToMap(t *testing.T) {
 				ChannelID:  "1562847268833337377",
 				TargetID:   "1562847268833337378",
 				ThreadID:   "1562847268833337379",
-				Source:     "hangar",
+				Source:     "flux",
 				Target:     "aerial",
 				EventType:  "sync_success",
 				Prompt:     "watch prompt",
@@ -2698,7 +2698,7 @@ func TestWatchEventArgs_ToMap(t *testing.T) {
 				"channel_id": "1562847268833337377",
 				"target_id":  "1562847268833337378",
 				"thread_id":  "1562847268833337379",
-				"source":     "hangar",
+				"source":     "flux",
 				"target":     "aerial",
 				"event_type": "sync_success",
 				"prompt":     "watch prompt",

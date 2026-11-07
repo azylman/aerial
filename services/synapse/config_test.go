@@ -160,7 +160,6 @@ func TestLoadConfig_YAMLAndOverrides(t *testing.T) {
 		wantInfURL      string
 		wantEnv         string
 		wantNomadAddr   string
-		wantHangarURL   string
 		wantFluxURL     string
 		wantBrainURL    string
 		wantSysChan     string
@@ -172,14 +171,12 @@ func TestLoadConfig_YAMLAndOverrides(t *testing.T) {
 infisical_url: "http://infisical.custom:8085"
 infisical_environment: "staging"
 nomad_addr: "http://nomad.custom:4646"
-hangar_url: "http://hangar.custom:8087"
 eri_url: "http://brain.custom:8088"
 `,
 			wantPort:      "4099",
 			wantInfURL:    "http://infisical.custom:8085",
 			wantEnv:       "staging",
 			wantNomadAddr: "http://nomad.custom:4646",
-			wantHangarURL: "http://hangar.custom:8087",
 			wantBrainURL:  "http://brain.custom:8088",
 		},
 		{
@@ -196,14 +193,12 @@ flux_receiver_url: "http://flux-receiver.custom:8080/hook/"
 infisical_url: "http://infisical.custom:8085"
 infisical_environment: "staging"
 nomad_addr: "http://nomad.custom:4646"
-hangar_url: "http://hangar.custom:8087"
 eri_url: "http://eri.custom:8088"
 `,
 			wantPort:      "4099",
 			wantInfURL:    "http://infisical.custom:8085",
 			wantEnv:       "staging",
 			wantNomadAddr: "http://nomad.custom:4646",
-			wantHangarURL: "http://hangar.custom:8087",
 			wantBrainURL:  "http://eri.custom:8088",
 		},
 		{
@@ -212,7 +207,6 @@ eri_url: "http://eri.custom:8088"
 infisical_url: "http://infisical.custom:8085"
 infisical_environment: "staging"
 nomad_addr: "http://nomad.custom:4646"
-hangar_url: "http://hangar.custom:8087"
 eri_url: "http://brain.custom:8088"
 `,
 			env: map[string]string{
@@ -223,7 +217,6 @@ eri_url: "http://brain.custom:8088"
 			wantInfURL:    "http://infisical.custom:8085",
 			wantEnv:       "dev",
 			wantNomadAddr: "http://nomad.custom:4646",
-			wantHangarURL: "http://hangar.custom:8087",
 			wantBrainURL:  "http://brain.custom:8088",
 		},
 		{
@@ -352,7 +345,6 @@ eri_url: "http://brain.custom:8088"
 				{cfg.InfisicalURL, tc.wantInfURL, "InfisicalURL"},
 				{cfg.InfisicalEnvironment, tc.wantEnv, "InfisicalEnvironment"},
 				{cfg.NomadAddr, tc.wantNomadAddr, "NomadAddr"},
-				{cfg.HangarURL, tc.wantHangarURL, "HangarURL"},
 				{cfg.FluxReceiverURL, tc.wantFluxURL, "FluxReceiverURL"},
 				{cfg.BrainURL, tc.wantBrainURL, "BrainURL"},
 				{cfg.EriURL, tc.wantBrainURL, "EriURL"},

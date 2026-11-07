@@ -515,7 +515,6 @@ func TestExtractServiceNameFromJobName_TableDriven(t *testing.T) {
 		{name: "Validate Configuration job", jobName: "Validate Configuration", expected: "config"},
 		{name: "parentheses sidecar aura-farming", jobName: "Build & Push Sidecar Images to GHCR (aura-farming)", expected: "aura-farming"},
 		{name: "parentheses sidecar banana", jobName: "Build & Push Sidecar Images to GHCR (banana)", expected: "banana"},
-		{name: "hangar service", jobName: "Build hangar", expected: "hangar"},
 		{name: "docs service", jobName: "Build docs", expected: "docs"},
 		{name: "unrelated job", jobName: "Cleanup Stale Artifacts", expected: ""},
 		{name: "verify does not match eri", jobName: "verify", expected: ""},

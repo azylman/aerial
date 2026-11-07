@@ -564,7 +564,6 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalA
 				{Name: "synapse", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "ollama", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "agentsview", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-				{Name: "hangar", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "autoheal", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "proxy", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "dashboard", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},

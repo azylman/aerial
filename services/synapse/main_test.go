@@ -28,7 +28,7 @@ import (
 type mockRiverInserter struct {
 	mu                     sync.Mutex
 	insertedJobs           []GitHubWebhookArgs
-	insertedHangarJobs     []HangarWebhookArgs
+	insertedDeployJobs     []DeployWebhookArgs
 	insertedNomadJobs      []NomadEventArgs
 	insertedCrashAlertJobs []NomadCrashAlertArgs
 	insertedWidgetSyncJobs []WidgetSyncArgs
@@ -51,8 +51,8 @@ func (m *mockRiverInserter) Insert(ctx context.Context, args river.JobArgs, opts
 	switch a := args.(type) {
 	case GitHubWebhookArgs:
 		m.insertedJobs = append(m.insertedJobs, a)
-	case HangarWebhookArgs:
-		m.insertedHangarJobs = append(m.insertedHangarJobs, a)
+	case DeployWebhookArgs:
+		m.insertedDeployJobs = append(m.insertedDeployJobs, a)
 	case NomadEventArgs:
 		m.insertedNomadJobs = append(m.insertedNomadJobs, a)
 	case NomadCrashAlertArgs:
@@ -710,8 +710,8 @@ func doHTTPRequest(handler http.Handler, method, path string, body io.Reader, he
 	return rec
 }
 
-func mkHangarEvt(event, job, repo, sha string, pr int, targetID, status, details string) HangarDeployEvent {
-	return HangarDeployEvent{Event: event, JobName: job, Repo: repo, CommitSHA: sha, PRNumber: pr, TargetID: targetID, Status: status, Details: details}
+func mkDeployEvt(event, job, repo, sha string, pr int, targetID, status, details string) DeployEvent {
+	return DeployEvent{Event: event, JobName: job, Repo: repo, CommitSHA: sha, PRNumber: pr, TargetID: targetID, Status: status, Details: details}
 }
 
 func mkDeployedReg(targetID string, pr int, sha, repo string, updated bool) *mockPRRegistry {
@@ -722,115 +722,16 @@ func mkDeployFailedReg(targetID string, pr int, sha, repo string, updated bool) 
 	return &mockPRRegistry{deployFailedJobTargetID: targetID, deployFailedJobPRNum: pr, deployFailedJobMergeSHA: sha, deployFailedJobRepo: repo, deployFailedJobUpdated: updated}
 }
 
-// --- 4. Hangar Webhook HTTP Handler & Event Processing ---
+// --- 4. Deploy Event Processing ---
 
-func TestHandleHangarWebhook(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name, path, wantJobName, wantTargetID, wantMetricSubstr string
-		body                                                    io.Reader
-		reg                                                     *mockPRRegistry
-		river                                                   *mockRiverInserter
-		wantStatus, wantPR, wantResolveSHACalls, wantRiverJobs  int
-	}{
-		{name: "malformed JSON api path", path: "/api/webhooks/hangar", body: strings.NewReader(`{invalid json`), wantStatus: http.StatusBadRequest},
-		{name: "malformed JSON legacy path", path: "/webhooks/hangar", body: strings.NewReader(`{invalid json`), wantStatus: http.StatusBadRequest},
-		{name: "read error in body", path: "/api/webhooks/hangar", body: errReader{}, wantStatus: http.StatusBadRequest},
-		{name: "missing event field", path: "/api/webhooks/hangar", body: strings.NewReader(`{"job_name":"brain"}`), wantStatus: http.StatusBadRequest},
-		{name: "missing job_name for deploy event", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_started"}`), wantStatus: http.StatusBadRequest},
-		{name: "empty object payload", path: "/api/webhooks/hangar", body: strings.NewReader(`{}`), wantStatus: http.StatusBadRequest},
-		{name: "empty job_name deploy_success", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_success","job_name":"","repo":"azylman/aerial","status":"success"}`), wantStatus: http.StatusBadRequest},
-		{name: "sync_success empty job_name defaults to git-sync", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"sync_success","job_name":"","repo":"azylman/aerial","commit_sha":"abc1234","status":"success"}`), wantStatus: http.StatusOK, wantJobName: "git-sync"},
-		{name: "sync_failed empty job_name defaults to git-sync", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"sync_failed","job_name":"","repo":"azylman/aerial","commit_sha":"abc1234","status":"success"}`), wantStatus: http.StatusOK, wantJobName: "git-sync"},
-		{name: "valid deploy_started api path", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_started","job_name":"brain","repo":"azylman/aerial","pr_number":420,"target_id":"thread-999","status":"started","details":"Nomad job evaluation placed"}`), wantStatus: http.StatusOK, wantJobName: "brain", wantPR: 420, wantTargetID: "thread-999"},
-		{name: "valid deploy_started legacy path", path: "/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_started","job_name":"brain","repo":"azylman/aerial","pr_number":420,"target_id":"thread-999","status":"started","details":"Nomad job evaluation placed"}`), wantStatus: http.StatusOK, wantJobName: "brain", wantPR: 420, wantTargetID: "thread-999"},
-		{name: "valid deploy_success", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_success","job_name":"brain","repo":"azylman/aerial","pr_number":420,"target_id":"thread-999","status":"success","details":"Healthy deployment completed"}`), wantStatus: http.StatusOK, wantJobName: "brain", wantPR: 420, wantTargetID: "thread-999"},
-		{name: "valid deploy_failed", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_failed","job_name":"brain","repo":"azylman/aerial","pr_number":420,"target_id":"thread-999","status":"failed","details":"Allocation failed healthcheck"}`), wantStatus: http.StatusOK, wantJobName: "brain", wantPR: 420, wantTargetID: "thread-999"},
-		{name: "valid deploy_rollback", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_rollback","job_name":"brain","repo":"azylman/aerial","pr_number":420,"target_id":"thread-999","status":"rollback","details":"Reverted to previous healthy release"}`), wantStatus: http.StatusOK, wantJobName: "brain", wantPR: 420, wantTargetID: "thread-999"},
-		{name: "resolve PR and TargetID by SHA", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_success","job_name":"webhooks-router","repo":"azylman/aerial","commit_sha":"deploycommit123","status":"success","details":"Deployed successfully"}`), reg: &mockPRRegistry{resolvePRNum: 789, resolveTargetID: "thread-resolved-789"}, wantStatus: http.StatusOK, wantPR: 789, wantTargetID: "thread-resolved-789", wantResolveSHACalls: 1},
-		{name: "resolve PR by SHA preserves existing target_id", path: "/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_rollback","job_name":"webhooks-router","repo":"azylman/aerial","commit_sha":"deploycommit123","target_id":"existing-target-snowflake","status":"rollback"}`), reg: &mockPRRegistry{resolvePRNum: 789, resolveTargetID: "thread-resolved-789"}, wantStatus: http.StatusOK, wantPR: 789, wantTargetID: "existing-target-snowflake", wantResolveSHACalls: 1},
-		{name: "provided PR number skips resolve PR by SHA", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_started","job_name":"brain","repo":"azylman/aerial","commit_sha":"deploycommit123","pr_number":123,"status":"started"}`), reg: &mockPRRegistry{resolvePRNum: 789, resolveTargetID: "thread-resolved-789"}, wantStatus: http.StatusOK, wantPR: 123, wantResolveSHACalls: 0},
-		{name: "registry resolve error still accepts event", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_success","job_name":"webhooks-router","repo":"azylman/aerial","commit_sha":"deploycommit123","status":"success"}`), reg: &mockPRRegistry{resolveErr: errors.New("db error")}, wantStatus: http.StatusOK},
-		{name: "nil registry still accepts event", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_success","job_name":"webhooks-router","repo":"azylman/aerial","commit_sha":"deploycommit123","status":"success"}`), reg: nil, wantStatus: http.StatusOK},
-		{name: "river accepts on api path", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_success","job_name":"brain","repo":"azylman/aerial","pr_number":558,"target_id":"1555405874565091380","status":"success","details":"Deployment healthy"}`), river: &mockRiverInserter{}, wantStatus: http.StatusAccepted, wantJobName: "brain", wantRiverJobs: 1},
-		{name: "river accepts on legacy path", path: "/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_success","job_name":"brain","repo":"azylman/aerial","pr_number":558,"target_id":"1555405874565091380","status":"success","details":"Deployment healthy"}`), river: &mockRiverInserter{}, wantStatus: http.StatusAccepted, wantJobName: "brain", wantRiverJobs: 1},
-		{name: "river insertion error", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_success","job_name":"brain","repo":"azylman/aerial","pr_number":558,"target_id":"1555405874565091380","status":"success","details":"Deployment healthy"}`), river: &mockRiverInserter{err: errors.New("simulated river insert error")}, wantStatus: http.StatusInternalServerError},
-		{name: "river duplicate skipped increments metric", path: "/api/webhooks/hangar", body: strings.NewReader(`{"event":"deploy_success","job_name":"brain","commit_sha":"abc1234"}`), river: &mockRiverInserter{skipDuplicate: true}, wantStatus: http.StatusAccepted, wantMetricSubstr: `synapse_unique_skipped_total{kind="hangar_webhook"}`},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var inserters []RiverInserter
-			if tc.river != nil {
-				inserters = append(inserters, tc.river)
-			}
-			var reg PRRegistryUpdater
-			if tc.reg != nil {
-				reg = tc.reg
-			}
-			srv := newTestRouter(Config{}, nil, reg, nil, inserters...)
-			routes := srv.Routes()
-
-			rec := doHTTPRequest(routes, http.MethodPost, tc.path, tc.body, nil)
-			if rec.Code != tc.wantStatus {
-				t.Fatalf("expected status %d, got %d (body: %s)", tc.wantStatus, rec.Code, rec.Body.String())
-			}
-			if rec.Code == http.StatusBadRequest && tc.body != nil {
-				var errResp map[string]string
-				_ = json.Unmarshal(rec.Body.Bytes(), &errResp)
-			}
-			if rec.Code == http.StatusOK || rec.Code == http.StatusAccepted {
-				var resp map[string]any
-				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err == nil {
-					if tc.wantJobName != "" && resp["job_name"] != tc.wantJobName {
-						t.Errorf("job_name = %v, want %s", resp["job_name"], tc.wantJobName)
-					}
-					if tc.wantTargetID != "" && resp["target_id"] != tc.wantTargetID {
-						t.Errorf("target_id = %v, want %s", resp["target_id"], tc.wantTargetID)
-					}
-					if tc.wantPR > 0 {
-						if prVal, ok := resp["pr_number"].(float64); !ok || int(prVal) != tc.wantPR {
-							t.Errorf("pr_number = %v, want %d", resp["pr_number"], tc.wantPR)
-						}
-					}
-				}
-			}
-			if tc.reg != nil && tc.wantResolveSHACalls > 0 {
-				if len(tc.reg.resolveBySHACalls) != tc.wantResolveSHACalls {
-					t.Errorf("resolveBySHACalls = %d, want %d", len(tc.reg.resolveBySHACalls), tc.wantResolveSHACalls)
-				}
-			}
-			if tc.river != nil && tc.wantRiverJobs > 0 {
-				if len(tc.river.insertedHangarJobs) != tc.wantRiverJobs {
-					t.Errorf("insertedHangarJobs = %d, want %d", len(tc.river.insertedHangarJobs), tc.wantRiverJobs)
-				}
-				if len(tc.river.insertedOpts) > 0 {
-					opts := tc.river.insertedOpts[0]
-					if opts.MaxAttempts != 5 || !opts.UniqueOpts.ByArgs || opts.UniqueOpts.ByPeriod != 15*time.Minute {
-						t.Errorf("unexpected insert opts: %+v", opts)
-					}
-				}
-			}
-			if tc.wantMetricSubstr != "" {
-				recM := doHTTPRequest(routes, http.MethodGet, "/metrics", nil, nil)
-				if !strings.Contains(recM.Body.String(), tc.wantMetricSubstr) {
-					t.Errorf("expected /metrics to include %q, got:\n%s", tc.wantMetricSubstr, recM.Body.String())
-				}
-			}
-		})
-	}
-}
-
-func TestProcessHangarEvent(t *testing.T) {
+func TestProcessDeployEvent(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
 	tests := []struct {
 		name               string
-		evt                HangarDeployEvent
-		extraEvts          []HangarDeployEvent
+		evt                DeployEvent
+		extraEvts          []DeployEvent
 		sysChan            string
 		nomadJobJSON       string
 		reg                *mockPRRegistry
@@ -850,23 +751,23 @@ func TestProcessHangarEvent(t *testing.T) {
 	}{
 		{
 			name: "deploy_started ignored without PR number or targetID",
-			evt:  mkHangarEvt("deploy_started", "brain", "azylman/aerial", "sha-test", 0, "", "started", ""),
+			evt:  mkDeployEvt("deploy_started", "brain", "azylman/aerial", "sha-test", 0, "", "started", ""),
 		},
 		{
 			name: "deploy_success ignored without PR number or targetID",
-			evt:  mkHangarEvt("deploy_success", "brain", "azylman/aerial", "sha-test", 0, "", "success", ""),
+			evt:  mkDeployEvt("deploy_success", "brain", "azylman/aerial", "sha-test", 0, "", "success", ""),
 		},
 		{
 			name: "deploy_failed ignored without PR number or targetID",
-			evt:  mkHangarEvt("deploy_failed", "brain", "azylman/aerial", "sha-test", 0, "", "failed", ""),
+			evt:  mkDeployEvt("deploy_failed", "brain", "azylman/aerial", "sha-test", 0, "", "failed", ""),
 		},
 		{
 			name: "deploy_rollback ignored without PR number or targetID",
-			evt:  mkHangarEvt("deploy_rollback", "brain", "azylman/aerial", "sha-test", 0, "", "rollback", ""),
+			evt:  mkDeployEvt("deploy_rollback", "brain", "azylman/aerial", "sha-test", 0, "", "rollback", ""),
 		},
 		{
 			name:               "deploy_started resolves SHA and transitions deploying",
-			evt:                mkHangarEvt("deploy_started", "webhooks-router", "azylman/aerial", "sha111", 0, "", "started", ""),
+			evt:                mkDeployEvt("deploy_started", "webhooks-router", "azylman/aerial", "sha111", 0, "", "started", ""),
 			reg:                &mockPRRegistry{resolvePRNum: 99, resolveTargetID: "target-99"},
 			wantPR:             99,
 			wantTargetID:       "target-99",
@@ -874,32 +775,32 @@ func TestProcessHangarEvent(t *testing.T) {
 		},
 		{
 			name:         "deploy_started tolerates registry error",
-			evt:          mkHangarEvt("deploy_started", "webhooks-router", "azylman/aerial", "sha111", 0, "", "started", ""),
+			evt:          mkDeployEvt("deploy_started", "webhooks-router", "azylman/aerial", "sha111", 0, "", "started", ""),
 			reg:          &mockPRRegistry{resolvePRNum: 99, resolveTargetID: "target-99", deployingErr: errors.New("db error")},
 			wantPR:       99,
 			wantTargetID: "target-99",
 		},
 		{
 			name:         "deploy_success transitions state",
-			evt:          mkHangarEvt("deploy_success", "webhooks-router", "azylman/aerial", "", 99, "target-99", "success", "deployment completed"),
+			evt:          mkDeployEvt("deploy_success", "webhooks-router", "azylman/aerial", "", 99, "target-99", "success", "deployment completed"),
 			wantPR:       99,
 			wantTargetID: "target-99",
 		},
 		{
 			name:         "deploy_rollback transitions state",
-			evt:          mkHangarEvt("deploy_rollback", "webhooks-router", "azylman/aerial", "", 99, "target-99", "rollback", "rolled back"),
+			evt:          mkDeployEvt("deploy_rollback", "webhooks-router", "azylman/aerial", "", 99, "target-99", "rollback", "rolled back"),
 			wantPR:       99,
 			wantTargetID: "target-99",
 		},
 		{
 			name:         "deploy_failed transitions state",
-			evt:          mkHangarEvt("deploy_failed", "webhooks-router", "azylman/aerial", "", 99, "target-99", "failed", "deploy unhealthy"),
+			evt:          mkDeployEvt("deploy_failed", "webhooks-router", "azylman/aerial", "", 99, "target-99", "failed", "deploy unhealthy"),
 			wantPR:       99,
 			wantTargetID: "target-99",
 		},
 		{
 			name:         "deploy_started valid snowflake",
-			evt:          mkHangarEvt("deploy_started", "brain", "azylman/aerial", "sha1234", 527, "1555405874565091380", "started", ""),
+			evt:          mkDeployEvt("deploy_started", "brain", "azylman/aerial", "sha1234", 527, "1555405874565091380", "started", ""),
 			reg:          &mockPRRegistry{},
 			disp:         &mockOutboundDispatcher{},
 			wantPR:       527,
@@ -907,7 +808,7 @@ func TestProcessHangarEvent(t *testing.T) {
 		},
 		{
 			name:         "deploy_success valid snowflake",
-			evt:          mkHangarEvt("deploy_success", "brain", "azylman/aerial", "sha3d2a", 528, "1555405874565091380", "success", ""),
+			evt:          mkDeployEvt("deploy_success", "brain", "azylman/aerial", "sha3d2a", 528, "1555405874565091380", "success", ""),
 			reg:          &mockPRRegistry{},
 			disp:         &mockOutboundDispatcher{},
 			wantPR:       528,
@@ -920,7 +821,7 @@ func TestProcessHangarEvent(t *testing.T) {
 		},
 		{
 			name:           "deploy_rollback valid snowflake",
-			evt:            mkHangarEvt("deploy_rollback", "webhooks-router", "azylman/aerial", "shafail", 529, "1555405874565091380", "rollback", strings.Repeat("error detail line\n", 50)),
+			evt:            mkDeployEvt("deploy_rollback", "webhooks-router", "azylman/aerial", "shafail", 529, "1555405874565091380", "rollback", strings.Repeat("error detail line\n", 50)),
 			reg:            &mockPRRegistry{deployFailedUpdated: true},
 			disp:           &mockOutboundDispatcher{},
 			wantPR:         529,
@@ -935,7 +836,7 @@ func TestProcessHangarEvent(t *testing.T) {
 		},
 		{
 			name:           "deploy_failed valid snowflake",
-			evt:            mkHangarEvt("deploy_failed", "hangar", "azylman/aerial", "shabroken", 530, "1555405874565091380", "failed", "exit status 1"),
+			evt:            mkDeployEvt("deploy_failed", "hangar", "azylman/aerial", "shabroken", 530, "1555405874565091380", "failed", "exit status 1"),
 			reg:            &mockPRRegistry{deployFailedUpdated: true},
 			disp:           &mockOutboundDispatcher{},
 			wantPR:         530,
@@ -949,14 +850,14 @@ func TestProcessHangarEvent(t *testing.T) {
 		},
 		{
 			name:    "deploy_failed prompt error reverts state and returns error",
-			evt:     mkHangarEvt("deploy_failed", "eri", "azylman/aerial", "shabroken", 531, "1555405874565091380", "failed", "exit status 1"),
+			evt:     mkDeployEvt("deploy_failed", "eri", "azylman/aerial", "shabroken", 531, "1555405874565091380", "failed", "exit status 1"),
 			reg:     &mockPRRegistry{deployFailedUpdated: true},
 			disp:    &mockOutboundDispatcher{dispatchErr: errors.New("eri 502 bad gateway")},
 			wantErr: true,
 		},
 		{
 			name:           "deploy_rollback without targetID falls back to system_channel name",
-			evt:            mkHangarEvt("deploy_rollback", "eri", "azylman/aerial", "shafail", 532, "", "rollback", "dotenv parse error"),
+			evt:            mkDeployEvt("deploy_rollback", "eri", "azylman/aerial", "shafail", 532, "", "rollback", "dotenv parse error"),
 			sysChan:        "aerial-dev",
 			reg:            &mockPRRegistry{deployFailedUpdated: true},
 			disp:           &mockOutboundDispatcher{},
@@ -967,13 +868,13 @@ func TestProcessHangarEvent(t *testing.T) {
 		},
 		{
 			name: "sync_success without PR number",
-			evt:  mkHangarEvt("sync_success", "", "azylman/aerial-config", "sha999", 0, "1555405874565091380", "", ""),
+			evt:  mkDeployEvt("sync_success", "", "azylman/aerial-config", "sha999", 0, "1555405874565091380", "", ""),
 			reg:  &mockPRRegistry{},
 			disp: &mockOutboundDispatcher{},
 		},
 		{
 			name:         "sync_failed with details",
-			evt:          mkHangarEvt("sync_failed", "", "azylman/aerial-config", "sha888", 0, "1555405874565091380", "", "merge conflict in rules/persona"),
+			evt:          mkDeployEvt("sync_failed", "", "azylman/aerial-config", "sha888", 0, "1555405874565091380", "", "merge conflict in rules/persona"),
 			reg:          &mockPRRegistry{},
 			disp:         &mockOutboundDispatcher{},
 			wantDMs:      1,
@@ -987,19 +888,19 @@ func TestProcessHangarEvent(t *testing.T) {
 		},
 		{
 			name: "deploy_success invalid snowflake ignored",
-			evt:  mkHangarEvt("deploy_success", "hangar", "", "", 0, "not-a-snowflake", "", ""),
+			evt:  mkDeployEvt("deploy_success", "hangar", "", "", 0, "not-a-snowflake", "", ""),
 			reg:  &mockPRRegistry{},
 			disp: &mockOutboundDispatcher{},
 		},
 		{
 			name: "deploy_started invalid snowflake ignored",
-			evt:  mkHangarEvt("deploy_started", "hangar", "", "", 0, "not-a-snowflake", "", ""),
+			evt:  mkDeployEvt("deploy_started", "hangar", "", "", 0, "not-a-snowflake", "", ""),
 			reg:  &mockPRRegistry{},
 			disp: &mockOutboundDispatcher{},
 		},
 		{
 			name:             "sync_success late resolution via ResolvePRBySHA",
-			evt:              mkHangarEvt("sync_success", "", "azylman/aerial-config", "dccc646186d7bf7d17efa6cac6f730d17f66125b", 0, "", "", ""),
+			evt:              mkDeployEvt("sync_success", "", "azylman/aerial-config", "dccc646186d7bf7d17efa6cac6f730d17f66125b", 0, "", "", ""),
 			reg:              &mockPRRegistry{resolvePRNum: 241, resolveTargetID: "1555405874565091380"},
 			disp:             &mockOutboundDispatcher{},
 			wantPR:           241,
@@ -1010,7 +911,7 @@ func TestProcessHangarEvent(t *testing.T) {
 		},
 		{
 			name:         "deploy_success on aerial-config",
-			evt:          mkHangarEvt("deploy_success", "homepage", "azylman/aerial-config", "sha_cfg_succ", 242, "1555405874565091380", "success", ""),
+			evt:          mkDeployEvt("deploy_success", "homepage", "azylman/aerial-config", "sha_cfg_succ", 242, "1555405874565091380", "success", ""),
 			reg:          &mockPRRegistry{},
 			disp:         &mockOutboundDispatcher{},
 			wantPR:       242,
@@ -1022,7 +923,7 @@ func TestProcessHangarEvent(t *testing.T) {
 		},
 		{
 			name:           "sync_failed with PR number",
-			evt:            mkHangarEvt("sync_failed", "", "azylman/aerial", "merge542", 542, "1555405874565091380", "failed", "merge conflict in rules/foo.md"),
+			evt:            mkDeployEvt("sync_failed", "", "azylman/aerial", "merge542", 542, "1555405874565091380", "failed", "merge conflict in rules/foo.md"),
 			reg:            &mockPRRegistry{},
 			disp:           &mockOutboundDispatcher{},
 			wantPR:         542,
@@ -1036,14 +937,14 @@ func TestProcessHangarEvent(t *testing.T) {
 		},
 		{
 			name:    "deploy_started widget error propagation",
-			evt:     mkHangarEvt("deploy_started", "brain", "azylman/aerial", "sha_start_test", 603, "1555405874565091380", "started", ""),
+			evt:     mkDeployEvt("deploy_started", "brain", "azylman/aerial", "sha_start_test", 603, "1555405874565091380", "started", ""),
 			reg:     &mockPRRegistry{resolveTargetID: "1555405874565091380"},
 			disp:    &mockOutboundDispatcher{widgetErr: errors.New("brain offline")},
 			wantErr: true,
 		},
 		{
 			name:             "sync_success advances Vanadis with valid targetID",
-			evt:              mkHangarEvt("sync_success", "", "azylman/aerial-config", "sha_vanadis_1", 301, "1555405874565091380", "success", ""),
+			evt:              mkDeployEvt("sync_success", "", "azylman/aerial-config", "sha_vanadis_1", 301, "1555405874565091380", "success", ""),
 			reg:              &mockPRRegistry{suppressVanadisRes: true},
 			disp:             &mockOutboundDispatcher{},
 			wantPR:           301,
@@ -1052,21 +953,21 @@ func TestProcessHangarEvent(t *testing.T) {
 		},
 		{
 			name:             "sync_success advances Vanadis with empty targetID",
-			evt:              mkHangarEvt("sync_success", "", "azylman/aerial-config", "sha_vanadis_2", 302, "", "success", ""),
+			evt:              mkDeployEvt("sync_success", "", "azylman/aerial-config", "sha_vanadis_2", 302, "", "success", ""),
 			reg:              &mockPRRegistry{},
 			wantPR:           302,
 			wantAdvanceCalls: 1,
 		},
 		{
 			name:    "sync_success Vanadis advance error propagates",
-			evt:     mkHangarEvt("sync_success", "", "azylman/aerial-config", "sha_vanadis_3", 303, "1555405874565091380", "success", ""),
+			evt:     mkDeployEvt("sync_success", "", "azylman/aerial-config", "sha_vanadis_3", 303, "1555405874565091380", "success", ""),
 			reg:     &mockPRRegistry{advanceVanadisErr: errors.New("vanadis err")},
 			disp:    &mockOutboundDispatcher{},
 			wantErr: true,
 		},
 		{
 			name:               "deploy_started periodic batch job transitions to deployed immediately",
-			evt:                mkHangarEvt("deploy_started", "coverage-ingest", "azylman/aerial", "1fc4aaf", 851, "1555405874565091380", "started", ""),
+			evt:                mkDeployEvt("deploy_started", "coverage-ingest", "azylman/aerial", "1fc4aaf", 851, "1555405874565091380", "started", ""),
 			nomadJobJSON:       `{"ID":"coverage-ingest","Type":"batch","Status":"running","Stop":false,"Periodic":{"Enabled":true}}`,
 			reg:                mkDeployedReg("1555405874565091380", 851, "1fc4aaf", "azylman/aerial", true),
 			disp:               &mockOutboundDispatcher{},
@@ -1079,7 +980,7 @@ func TestProcessHangarEvent(t *testing.T) {
 		},
 		{
 			name:               "deploy_started in-place signal config reload transitions to deployed immediately",
-			evt:                mkHangarEvt("deploy_started", "eri", "azylman/aerial-config", "2fc4aaf", 852, "1555405874565091380", "started", "nomad var put nomad/jobs/eri"),
+			evt:                mkDeployEvt("deploy_started", "eri", "azylman/aerial-config", "2fc4aaf", 852, "1555405874565091380", "started", "nomad var put nomad/jobs/eri"),
 			nomadJobJSON:       `{"ID":"eri","Type":"service","Status":"running","Stop":false,"TaskGroups":[{"Tasks":[{"Templates":[{"ChangeMode":"signal"}]}]}]}`,
 			reg:                mkDeployedReg("1555405874565091380", 852, "2fc4aaf", "azylman/aerial-config", true),
 			disp:               &mockOutboundDispatcher{},
@@ -1092,7 +993,7 @@ func TestProcessHangarEvent(t *testing.T) {
 		},
 		{
 			name:               "deploy_started periodic batch job tolerates HandleNomadJobSuccess error",
-			evt:                mkHangarEvt("deploy_started", "coverage-ingest", "azylman/aerial", "1fc4aaf", 851, "1555405874565091380", "started", ""),
+			evt:                mkDeployEvt("deploy_started", "coverage-ingest", "azylman/aerial", "1fc4aaf", 851, "1555405874565091380", "started", ""),
 			nomadJobJSON:       `{"ID":"coverage-ingest","Type":"batch","Status":"running","Stop":false,"Periodic":{"Enabled":true}}`,
 			reg:                &mockPRRegistry{deployedErr: errors.New("db transition err")},
 			disp:               &mockOutboundDispatcher{},
@@ -1102,7 +1003,7 @@ func TestProcessHangarEvent(t *testing.T) {
 		},
 		{
 			name:               "deploy_started skipped when job already deployed",
-			evt:                mkHangarEvt("deploy_started", "coven", "azylman/aerial", "bc1d3ef", 971, "1555405874565091380", "started", ""),
+			evt:                mkDeployEvt("deploy_started", "coven", "azylman/aerial", "bc1d3ef", 971, "1555405874565091380", "started", ""),
 			reg:                &mockPRRegistry{skipDeployingTransition: true},
 			disp:               &mockOutboundDispatcher{},
 			wantPR:             971,
@@ -1111,7 +1012,7 @@ func TestProcessHangarEvent(t *testing.T) {
 		},
 		{
 			name: "deploy_started with expected_jobs records expected sibling jobs before transition",
-			evt: HangarDeployEvent{
+			evt: DeployEvent{
 				Event: "deploy_started", JobName: "db-migrate", ExpectedJobs: []string{"coven", "db-migrate"},
 				Repo: "azylman/aerial", CommitSHA: "bc1d3ef", PRNumber: 972, TargetID: "1555405874565091380", Status: "started",
 			},
@@ -1123,7 +1024,7 @@ func TestProcessHangarEvent(t *testing.T) {
 		},
 		{
 			name: "sync_success with expected_jobs advances Vanadis while suppressing merged widget",
-			evt: HangarDeployEvent{
+			evt: DeployEvent{
 				Event: "sync_success", JobName: "git-sync", ExpectedJobs: []string{"coven", "db-migrate"},
 				Repo: "azylman/aerial", CommitSHA: "sha_sync_exp", PRNumber: 973, TargetID: "1555405874565091380", Status: "success",
 			},
@@ -1135,14 +1036,14 @@ func TestProcessHangarEvent(t *testing.T) {
 		},
 		{
 			name:             "sync_success with registry expected jobs and empty targetID advances Vanadis",
-			evt:              mkHangarEvt("sync_success", "git-sync", "azylman/aerial", "sha_sync_reg_exp", 974, "", "success", ""),
+			evt:              mkDeployEvt("sync_success", "git-sync", "azylman/aerial", "sha_sync_reg_exp", 974, "", "success", ""),
 			reg:              &mockPRRegistry{recordExpectedRes: true},
 			wantPR:           974,
 			wantAdvanceCalls: 1,
 		},
 		{
 			name:             "sync_success tolerates RecordExpectedJobs error and advances when no expected jobs",
-			evt:              mkHangarEvt("sync_success", "git-sync", "azylman/aerial-config", "sha_sync_err", 975, "1555405874565091380", "success", ""),
+			evt:              mkDeployEvt("sync_success", "git-sync", "azylman/aerial-config", "sha_sync_err", 975, "1555405874565091380", "success", ""),
 			reg:              &mockPRRegistry{recordExpectedErr: errors.New("record expected db error")},
 			disp:             &mockOutboundDispatcher{},
 			wantPR:           975,
@@ -1153,7 +1054,7 @@ func TestProcessHangarEvent(t *testing.T) {
 		},
 		{
 			name: "sync_success with expected_jobs on final Vanadis chunk defers advancement until deploy_success",
-			evt: HangarDeployEvent{
+			evt: DeployEvent{
 				Event: "sync_success", JobName: "git-sync", ExpectedJobs: []string{"eri"},
 				Repo: "azylman/aerial", CommitSHA: "sha_final_defer", PRNumber: 976, TargetID: "1555405874565091380", Status: "success",
 			},
@@ -1168,7 +1069,7 @@ func TestProcessHangarEvent(t *testing.T) {
 		},
 		{
 			name: "sync_success with expected_jobs and empty targetID on final Vanadis chunk defers advancement",
-			evt:  mkHangarEvt("sync_success", "git-sync", "azylman/aerial", "sha_final_empty_tid", 977, "", "success", ""),
+			evt:  mkDeployEvt("sync_success", "git-sync", "azylman/aerial", "sha_final_empty_tid", 977, "", "success", ""),
 			reg: &mockPRRegistry{
 				recordExpectedRes: true,
 				finalVanadisRes:   true,
@@ -1178,7 +1079,7 @@ func TestProcessHangarEvent(t *testing.T) {
 		},
 		{
 			name: "sync_success without expected_jobs on final Vanadis chunk advances and dispatches build completed prompt",
-			evt:  mkHangarEvt("sync_success", "git-sync", "azylman/aerial-config", "sha_final_sync_only", 978, "1555405874565091380", "success", ""),
+			evt:  mkDeployEvt("sync_success", "git-sync", "azylman/aerial-config", "sha_final_sync_only", 978, "1555405874565091380", "success", ""),
 			reg: &mockPRRegistry{
 				advanceVanadisRes: &VanadisAdvancementResult{Matched: true, Advanced: true, BuildID: "build-skill-sync", ThreadID: "1555405874565091380", BuildCompleted: true},
 			},
@@ -1191,7 +1092,7 @@ func TestProcessHangarEvent(t *testing.T) {
 		},
 		{
 			name: "deploy_success on final Vanadis chunk suppresses deploy prompt and dispatches build completed prompt",
-			evt:  mkHangarEvt("deploy_success", "eri", "azylman/aerial", "sha_final_deploy", 979, "1555405874565091380", "success", ""),
+			evt:  mkDeployEvt("deploy_success", "eri", "azylman/aerial", "sha_final_deploy", 979, "1555405874565091380", "success", ""),
 			reg: &mockPRRegistry{
 				suppressVanadisRes: true,
 				advanceVanadisRes:  &VanadisAdvancementResult{Matched: true, Advanced: true, BuildID: "build-final-deploy", ThreadID: "1555405874565091380", BuildCompleted: true},
@@ -1205,7 +1106,7 @@ func TestProcessHangarEvent(t *testing.T) {
 		},
 		{
 			name: "sync_success with expected_jobs IsFinalVanadisChunk error propagates",
-			evt: HangarDeployEvent{
+			evt: DeployEvent{
 				Event: "sync_success", JobName: "git-sync", ExpectedJobs: []string{"eri"},
 				Repo: "azylman/aerial", CommitSHA: "sha_final_err", PRNumber: 980, TargetID: "1555405874565091380", Status: "success",
 			},
@@ -1217,9 +1118,9 @@ func TestProcessHangarEvent(t *testing.T) {
 		},
 		{
 			name: "duplicate deploy_success for same PR suppressed",
-			evt:  mkHangarEvt("deploy_success", "brain", "azylman/aerial", "sha-dup-pr", 890, "1555405874565091380", "success", ""),
-			extraEvts: []HangarDeployEvent{
-				mkHangarEvt("deploy_success", "brain", "azylman/aerial", "sha-dup-pr", 890, "1555405874565091380", "success", ""),
+			evt:  mkDeployEvt("deploy_success", "brain", "azylman/aerial", "sha-dup-pr", 890, "1555405874565091380", "success", ""),
+			extraEvts: []DeployEvent{
+				mkDeployEvt("deploy_success", "brain", "azylman/aerial", "sha-dup-pr", 890, "1555405874565091380", "success", ""),
 			},
 			reg:          &mockPRRegistry{},
 			disp:         &mockOutboundDispatcher{},
@@ -1232,9 +1133,9 @@ func TestProcessHangarEvent(t *testing.T) {
 		},
 		{
 			name: "duplicate deploy_success for same repo job and commitSHA suppressed",
-			evt:  mkHangarEvt("deploy_success", "cadvisor", "azylman/aerial", "sha-dup-sha", 0, "1555405874565091380", "success", ""),
-			extraEvts: []HangarDeployEvent{
-				mkHangarEvt("deploy_success", "cadvisor", "azylman/aerial", "sha-dup-sha", 0, "1555405874565091380", "success", ""),
+			evt:  mkDeployEvt("deploy_success", "cadvisor", "azylman/aerial", "sha-dup-sha", 0, "1555405874565091380", "success", ""),
+			extraEvts: []DeployEvent{
+				mkDeployEvt("deploy_success", "cadvisor", "azylman/aerial", "sha-dup-sha", 0, "1555405874565091380", "success", ""),
 			},
 			reg:          &mockPRRegistry{},
 			disp:         &mockOutboundDispatcher{},
@@ -1246,9 +1147,9 @@ func TestProcessHangarEvent(t *testing.T) {
 		},
 		{
 			name: "deploy_success following sync_success without expected_jobs is suppressed",
-			evt:  mkHangarEvt("sync_success", "git-sync", "azylman/aerial-config", "sha-sync-no-exp", 891, "1555405874565091380", "success", ""),
-			extraEvts: []HangarDeployEvent{
-				mkHangarEvt("deploy_success", "homepage", "azylman/aerial-config", "sha-sync-no-exp", 891, "1555405874565091380", "success", ""),
+			evt:  mkDeployEvt("sync_success", "git-sync", "azylman/aerial-config", "sha-sync-no-exp", 891, "1555405874565091380", "success", ""),
+			extraEvts: []DeployEvent{
+				mkDeployEvt("deploy_success", "homepage", "azylman/aerial-config", "sha-sync-no-exp", 891, "1555405874565091380", "success", ""),
 			},
 			reg:              &mockPRRegistry{},
 			disp:             &mockOutboundDispatcher{},
@@ -1262,7 +1163,7 @@ func TestProcessHangarEvent(t *testing.T) {
 		},
 		{
 			name: "deploy_success suppressed when postgres pr_registry already has status deployed",
-			evt:  mkHangarEvt("deploy_success", "brain", "azylman/aerial", "sha-db-deployed", 892, "1555405874565091380", "success", ""),
+			evt:  mkDeployEvt("deploy_success", "brain", "azylman/aerial", "sha-db-deployed", 892, "1555405874565091380", "success", ""),
 			pgReg: NewPostgresPRRegistry(&mockVanadisPgxPool{
 				queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
 					if strings.Contains(sql, "SELECT status FROM pr_registry") {
@@ -1313,13 +1214,13 @@ func TestProcessHangarEvent(t *testing.T) {
 				client = ts.Client()
 			}
 			srv := newTestRouter(cfg, client, reg, disp)
-			res, err := srv.ProcessHangarEvent(ctx, tc.evt)
+			res, err := srv.ProcessDeployEvent(ctx, tc.evt)
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("ProcessHangarEvent() err = %v, wantErr %v", err, tc.wantErr)
+				t.Fatalf("ProcessDeployEvent() err = %v, wantErr %v", err, tc.wantErr)
 			}
 			for _, extra := range tc.extraEvts {
-				if _, err := srv.ProcessHangarEvent(ctx, extra); err != nil {
-					t.Fatalf("ProcessHangarEvent(extra) err = %v", err)
+				if _, err := srv.ProcessDeployEvent(ctx, extra); err != nil {
+					t.Fatalf("ProcessDeployEvent(extra) err = %v", err)
 				}
 			}
 			if tc.wantErr {

@@ -426,7 +426,7 @@ function renderDeployments(deployments) {
         const steps = dep.steps || [
             { name: "Commit Trigger", icon: "📦", status: "completed" },
             { name: "CI Build & GHCR", icon: "⚙️", status: "completed" },
-            { name: "Hangar Sync", icon: "⬇️", status: "completed" },
+            { name: "Flux Sync", icon: "⬇️", status: "completed" },
             { name: "Container Swap", icon: "🔄", status: isLive ? "completed" : "active" },
             { name: "Health Check", icon: "🩺", status: isLive ? "completed" : "pending" }
         ];

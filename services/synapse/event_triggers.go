@@ -247,7 +247,7 @@ func (s *RouterServer) ProcessEventTriggerWebhook(ctx context.Context, args Even
 	return err
 }
 
-func (s *RouterServer) evaluateHangarEventTriggers(ctx context.Context, evt HangarDeployEvent) {
+func (s *RouterServer) evaluateFluxEventTriggers(ctx context.Context, evt DeployEvent) {
 	if evt.Event != "sync_success" && evt.Event != "sync_failed" {
 		return
 	}
@@ -255,11 +255,11 @@ func (s *RouterServer) evaluateHangarEventTriggers(ctx context.Context, evt Hang
 	if repo == "" {
 		return
 	}
-	contextHeader := fmt.Sprintf("Hangar git sync %s for %s", evt.Event, repo)
+	contextHeader := fmt.Sprintf("Flux git sync %s for %s", evt.Event, repo)
 	if strings.TrimSpace(evt.Details) != "" {
-		contextHeader = fmt.Sprintf("Hangar git sync %s for %s: %s", evt.Event, repo, strings.TrimSpace(evt.Details))
+		contextHeader = fmt.Sprintf("Flux git sync %s for %s: %s", evt.Event, repo, strings.TrimSpace(evt.Details))
 	}
-	s.fireEventTriggers(ctx, "hangar", []string{repo}, evt.Event, contextHeader)
+	s.fireEventTriggers(ctx, "flux", []string{repo}, evt.Event, contextHeader)
 }
 
 func (s *RouterServer) evaluateNomadEventTriggers(ctx context.Context, jobID, eventType, refID, details string) {
