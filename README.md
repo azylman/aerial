@@ -65,7 +65,7 @@ Aerial separates generic platform orchestration from private homelab state using
 │ • homepage, agentsview       │ • CloudNativePG standby      │ • kiosk-remote & go2rtc       │
 │ • CloudNativePG primary      │ • Compute & storage tier     │ • kiosk-cast-watcher          │
 │ • valkey, infisical          │ • Standard worker workloads  │ • Display power CronJobs      │
-│ • victoriametrics & vmalert  │                              │ • Local touch HUD & microphone│
+│ • victoriametrics & vmalert  │ • docket-store (Vikunja)     │ • Local touch HUD & microphone│
 │ • senses & pjev (NVIDIA GPU) │                              │ • role=kiosk:NoSchedule       │
 │ • prospera & CI runners      │                              │                               │
 └──────────────────────────────┴──────────────────────────────┴───────────────────────────────┘
@@ -79,6 +79,7 @@ Aerial separates generic platform orchestration from private homelab state using
 │ GitHub Operations MCP (:8080)│ Discord REST MCP (:8080)     │ OpenObserve Telemetry (:5080) │
 │ Kernel Browser MCP (:8080)   │ VictoriaMetrics MCP (:8080)  │ Grafana Cyberpunk HUD (:3000) │
 │ Prospera Phone Agent (:8080) │ Vanadis Build Queue (:4025)  │ Fluent Bit Log DaemonSet      │
+│ Docket Issue Tracker (:8080) │                              │                               │
 └──────────────────────────────┴──────────────────────────────┴───────────────────────────────┘
 ```
 
@@ -243,6 +244,7 @@ By default, `eri` automatically mounts built-in MCP servers across runtimes:
 - **`discord`** (`http://discord-mcp.aerial/mcp` - Outbound Discord messaging & thread tools)
 - **`github`** (`http://github-mcp.aerial/mcp` - GitHub repository, PR, and issue operations with PAT auth)
 - **`openobserve`** (`http://openobserve.aerial:5080/openobserve/api/default/mcp` - Native telemetry, log exploration, and SQL search)
+- **`docket`** (`http://docket-mcp.aerial/mcp` - Issue tracking, DAG dependencies, and hybrid RRF task search backed by Vikunja and PostgreSQL 18)
 
 Additional cluster MCP microservices (`kubernetes-mcp` on `http://kubernetes-mcp.aerial/mcp`, `infisical-mcp` on `http://infisical-mcp.aerial/mcp`, `victoriametrics-mcp` on `http://victoriametrics-mcp.aerial/mcp`, and `kernel-mcp` on `http://kernel-mcp.aerial/mcp`) can be enabled per target runtime in `config.yaml`.
 
@@ -360,8 +362,8 @@ Aerial includes an enterprise-grade, out-of-the-box observability matrix with si
 
 Aerial uses an automated, event-driven GitOps continuous deployment pipeline:
 1. **GitHub Actions Matrix Builds**: Triggers dynamic matrix builds for modified microservices (including dependents when shared `pkg/` changes) and publishes them to GitHub Container Registry (`ghcr.io/azylman/aerial-*`).
-2. **Event-Driven Push GitOps Router (`synapse`)**: Receives authenticated GitHub push and CI webhooks through Cloudflare tunnels and `edge-gateway`, immediately triggering Flux CD reconciliation (`FLUX_RECEIVER_URL`), notifying `eri`, and advancing `vanadis` build chunks.
-3. **Flux CD & Kubernetes git-sync**: Flux CD reconciles `./k8s` Kustomizations for core services and user configurations. Dedicated Kubernetes `git-sync` sidecar initContainers (`registry.k8s.io/git-sync/git-sync:v4.8.0`) continuously sync `/share/aerial:ro` and `/share/aerial-config:ro` for `eri`.
+2. **Event-Driven Push GitOps Router (`synapse`)**: Receives authenticated GitHub push and CI webhooks through Cloudflare tunnels and `edge-gateway`, updates `ConfigMap/aerial-image-tags` in `flux-system` on image promotions, immediately triggers Flux CD reconciliation (`FLUX_RECEIVER_URL`), notifies `eri`, and advances `vanadis` build chunks.
+3. **Flux CD & Kubernetes git-sync**: Flux CD reconciles `./k8s` Kustomizations for core services and user configurations, substituting pinned image tags via `postBuild.substituteFrom` without git commit churn. Dedicated Kubernetes `git-sync` sidecar initContainers (`registry.k8s.io/git-sync/git-sync:v4.8.0`) continuously sync `/share/aerial:ro` and `/share/aerial-config:ro` for `eri`.
 4. **Physical Immutability & Asynchronous PR Workflow**: The `eri` execution pod mounts repositories strictly **read-only (`:ro`)**. When making code, configuration, persona, or peripheral adjustments across any repository, Aerial uses `scripts/aerial-pr.sh init [repo]` to initialize an ephemeral scratch directory, runs pre-flight syntax and verification checks (`./scripts/verify.sh --staged`), and submits asynchronously via `scripts/aerial-pr.sh submit` with native GitHub auto-merge (`SQUASH`) enabled and registered in PostgreSQL `pr_registry`.
 5. **Event-Driven Continuous Delivery & Proactive CI Self-Healing**: Once submitted, turns terminate immediately with zero foreground CI polling. When CI turns green, GitHub automatically merges the PR and Flux CD deploys the updated manifests, posting confirmation directly to the registered Discord thread. If CI checks or `roborev` fail, `synapse` wakes `eri` with a proactive remediation prompt to checkout the branch, resolve the failure locally, verify, and push directly to the PR branch.
 
@@ -387,6 +389,8 @@ Aerial uses an automated, event-driven GitOps continuous deployment pipeline:
 | **`github-mcp`** | `8080` | Native Streamable HTTP GitHub MCP server with PAT authentication for PR, issue, and code operations. |
 | **`victoriametrics-mcp`**| `8080` | VictoriaMetrics MCP server exposing metrics querying and alert inspection over Streamable HTTP. |
 | **`kernel-mcp`** | `8080` | Headless browser automation and web interaction microservice. |
+| **`docket-mcp`** | `8080` | Native Streamable HTTP MCP server (`http://docket-mcp.aerial/mcp`) for issue tracking, DAG triage, and hybrid RRF task search backed by Vikunja and PostgreSQL 18. |
+| **`docket-store`** | `3456` | Vikunja issue tracking API service scheduled on `quiet-zero` backed by PostgreSQL 18 (`postgres:5432/docket`). |
 | **`openobserve`** | `5080` | Cloud-native log analytics and Streamable HTTP MCP server (`/openobserve/api/default/mcp`) for structured log exploration and SQL search. |
 | **`senses`** | `8880` / `10300` | Unified Rust CUDA ONNX Runtime inference service serving NeMo Parakeet TDT 0.6B v2 STT, Kokoro-82M TTS, BAAI/bge-small embeddings, and speaker verification. |
 | **`pjev`** | `8000` | Local CUDA GGUF LLM inference service serving `/v1/systemone` ambient triage. |
@@ -401,7 +405,7 @@ Aerial uses an automated, event-driven GitOps continuous deployment pipeline:
 | **`victoriametrics`** | `8428` | VictoriaMetrics single-node TSDB scraping Prometheus metrics from all pods and nodes with 5-year retention and dynamic `scrape.d/` config. |
 | **`vmalert`** | `8880` | Prometheus-compatible alerting engine evaluating anomaly detection and metric threshold rules. |
 | **`grafana`** | `3000` | Grafana visual dashboards serving system HUD & container metrics with SQLite backend and pre-provisioned dashboards. |
-| **`github-runner`** | Replicas | Self-hosted GitHub Actions runners executing CI matrices and automated RoboRev code reviews. |
+| **`github-runner`** | Replicas | Scale-to-zero Actions Runner Controller (ARC) `AutoscalingRunnerSet` HelmReleases executing CI matrices and automated RoboRev code reviews. |
 
 ---
 
