@@ -86,7 +86,7 @@ func buildDeploymentSteps(s1, s2, s3, s4, s5 string) []DeploymentStep {
 	return []DeploymentStep{
 		{Name: "Commit Trigger", Icon: "📦", Status: s1},
 		{Name: "CI Build & GHCR", Icon: "⚙️", Status: s2},
-		{Name: "Hangar Sync", Icon: "⬇️", Status: s3},
+		{Name: "Flux Sync", Icon: "⬇️", Status: s3},
 		{Name: "Container Swap", Icon: "🔄", Status: s4},
 		{Name: "Health Check", Icon: "🩺", Status: s5},
 	}
@@ -434,7 +434,6 @@ func ExtractServiceNameFromJobName(jobName string) string {
 		"synapse",
 		"ollama",
 		"agentsview",
-		"hangar",
 		"docs",
 	}
 	for _, s := range services {

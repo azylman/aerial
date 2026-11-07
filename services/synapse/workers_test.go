@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -45,115 +46,39 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 		wantRetryRecorded  bool
 		wantErr            bool
 		wantSubstr         string
-		wantMatchedJobs    int
+		wantMatchedJobs    []string
 		wantRequests       int
 	}{
-		{
-			name:         "DispatchGitPush success 200",
-			callType:     "git_push",
-			statusCode:   http.StatusOK,
-			responseBody: `{"status":"accepted"}`,
-		},
-		{
-			name:            "DispatchImageReady success 200",
-			callType:        "image_ready",
-			statusCode:      http.StatusOK,
-			responseBody:    `{"status":"accepted","matched_jobs":["brain"]}`,
-			wantMatchedJobs: 1,
-		},
-		{
-			name:         "DispatchImageReady invalid JSON decode warning",
-			callType:     "image_ready",
-			statusCode:   http.StatusOK,
-			responseBody: `{not json`,
-		},
-		{
-			name:         "DispatchGitPush hangar 404 unmanaged tolerated",
-			callType:     "git_push",
-			statusCode:   http.StatusNotFound,
-			responseBody: `{"status":"error","message":"repository not managed by hangar"}`,
-		},
-		{
-			name:         "DispatchGitPush hangar 404 other returns error",
-			callType:     "git_push",
-			statusCode:   http.StatusNotFound,
-			responseBody: "endpoint not found",
-			wantErr:      true,
-			wantSubstr:   "hangar git push returned 404",
-		},
-		{
-			name:         "DispatchImageReady hangar 404 not found tolerated",
-			callType:     "image_ready",
-			statusCode:   http.StatusNotFound,
-			responseBody: `{"status":"not_found","message":"no nomad jobs found using image"}`,
-		},
-		{
-			name:         "DispatchGitPush 500 error not tolerated",
-			callType:     "git_push",
-			statusCode:   http.StatusInternalServerError,
-			responseBody: `{"error":"internal"}`,
-			wantErr:      true,
-		},
-		{
-			name:         "DispatchImageReady 500 error not tolerated",
-			callType:     "image_ready",
-			statusCode:   http.StatusInternalServerError,
-			responseBody: `{"error":"internal"}`,
-			wantErr:      true,
-		},
-		{
-			name:               "DispatchGitPush HTML 404 rejected",
-			callType:           "git_push",
-			statusCode:         http.StatusNotFound,
-			responseHeaderType: "text/html",
-			responseBody:       `<html><title>404 Not Found</title><body>Proxy Error</body></html>`,
-			wantErr:            true,
-		},
 		{
 			name:         "DispatchGitPush forwards to flux receiver",
 			callType:     "git_push_flux",
 			statusCode:   http.StatusOK,
 			responseBody: `{"status":"accepted"}`,
-			wantRequests: 2,
+			wantRequests: 1,
 		},
 		{
 			name:            "DispatchImageReady forwards to flux receiver",
 			callType:        "image_ready_flux",
 			statusCode:      http.StatusOK,
-			responseBody:    `{"status":"accepted","matched_jobs":["synapse"]}`,
-			wantMatchedJobs: 1,
-			wantRequests:    2,
+			responseBody:    `{"status":"accepted"}`,
+			wantMatchedJobs: []string{"aerial-synapse"},
+			wantRequests:    1,
 		},
 		{
-			name:         "DispatchGitPush flux only without hangar",
-			callType:     "git_push_flux_only",
-			statusCode:   http.StatusOK,
-			responseBody: `{"status":"accepted"}`,
-			wantRequests: 1,
-		},
-		{
-			name:         "DispatchGitPush flux only error returns error",
-			callType:     "git_push_flux_only",
+			name:         "DispatchGitPush flux error returns error",
+			callType:     "git_push_flux",
 			statusCode:   http.StatusInternalServerError,
 			responseBody: `{"error":"flux down"}`,
 			wantErr:      true,
 			wantRequests: 1,
 		},
 		{
-			name:         "DispatchImageReady flux only error returns error",
-			callType:     "image_ready_flux_only",
+			name:         "DispatchImageReady flux error returns error",
+			callType:     "image_ready_flux",
 			statusCode:   http.StatusInternalServerError,
 			responseBody: `{"error":"flux down"}`,
 			wantErr:      true,
 			wantRequests: 1,
-		},
-		{
-			name:               "DispatchImageReady HTML 404 rejected",
-			callType:           "image_ready",
-			statusCode:         http.StatusNotFound,
-			responseHeaderType: "text/html",
-			responseBody:       `<html><title>404 Not Found</title><body>Proxy Error</body></html>`,
-			wantErr:            true,
 		},
 		{
 			name:       "DispatchPrompt invalid snowflake",
@@ -340,12 +265,9 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 			}))
 			defer ts.Close()
 
-			disp := NewDefaultOutboundDispatcher(ts.URL, ts.URL, nil)
+			disp := NewDefaultOutboundDispatcher(ts.URL, nil)
 			switch tc.callType {
 			case "git_push_flux", "image_ready_flux":
-				disp.SetFluxReceiverURL(ts.URL)
-			case "git_push_flux_only", "image_ready_flux_only":
-				disp = NewDefaultOutboundDispatcher("", ts.URL, nil)
 				disp.SetFluxReceiverURL(ts.URL)
 			}
 			if tc.nilSubClient {
@@ -376,13 +298,13 @@ func TestDefaultOutboundDispatcher(t *testing.T) {
 
 			var err error
 			switch tc.callType {
-			case "git_push", "git_push_flux", "git_push_flux_only":
+			case "git_push", "git_push_flux":
 				err = disp.DispatchGitPush(testCtx, GitPushEventRequest{Ref: "refs/heads/main", Commit: "testcommit123"})
-			case "image_ready", "image_ready_flux", "image_ready_flux_only":
+			case "image_ready", "image_ready_flux":
 				jobs, e := disp.DispatchImageReady(testCtx, ImageReadyEventRequest{Image: "ghcr.io/azylman/aerial-synapse:latest", Digest: "sha256:abcd"})
 				err = e
-				if tc.wantMatchedJobs > 0 && len(jobs) != tc.wantMatchedJobs {
-					t.Errorf("got %d matched jobs, want %d", len(jobs), tc.wantMatchedJobs)
+				if len(tc.wantMatchedJobs) > 0 && !slices.Equal(jobs, tc.wantMatchedJobs) {
+					t.Errorf("got matched jobs %v, want %v", jobs, tc.wantMatchedJobs)
 				}
 			case "prompt":
 				err = disp.DispatchPrompt(testCtx, PromptRequest{ChannelID: tc.snowflake, Prompt: "test prompt message"})
@@ -479,7 +401,7 @@ func TestDefaultOutboundDispatcher_DispatchWidget(t *testing.T) {
 			}))
 			defer ts.Close()
 
-			disp := NewDefaultOutboundDispatcher("", ts.URL, ts.Client())
+			disp := NewDefaultOutboundDispatcher(ts.URL, ts.Client())
 			msgID, err := disp.DispatchWidget(ctx, StatusWidgetRequest{
 				ChannelID: tc.channelID,
 				ID:        "widget-1",
@@ -526,9 +448,9 @@ func TestRiverWorkers(t *testing.T) {
 		{name: "GitHubWebhookWorker max attempts exhausted discard", workerType: "github", attempt: 5, maxAttempts: 5, downstreamErr: true, wantErr: true, wantProcessed: "discarded"},
 		{name: "GitHubWebhookWorker nil server error", workerType: "github", nilServer: true, wantErr: true, wantProcessed: "error"},
 		{name: "GitHubWebhookWorker downstream processing error", workerType: "github", downstreamErr: true, wantErr: true, wantProcessed: "error"},
-		{name: "HangarWebhookWorker valid job", workerType: "hangar", wantProcessed: "success"},
-		{name: "HangarWebhookWorker nil server error", workerType: "hangar", nilServer: true, wantErr: true, wantProcessed: "error"},
-		{name: "HangarWebhookWorker downstream dispatch error", workerType: "hangar", downstreamErr: true, wantErr: true, wantProcessed: "error"},
+		{name: "DeployWebhookWorker valid job", workerType: "deploy", wantProcessed: "success"},
+		{name: "DeployWebhookWorker nil server error", workerType: "deploy", nilServer: true, wantErr: true, wantProcessed: "error"},
+		{name: "DeployWebhookWorker downstream dispatch error", workerType: "deploy", downstreamErr: true, wantErr: true, wantProcessed: "error"},
 		{name: "NomadEventWorker valid job", workerType: "nomad", wantProcessed: "success"},
 		{name: "NomadEventWorker max attempts exhausted discard", workerType: "nomad", attempt: 5, maxAttempts: 5, downstreamErr: true, wantErr: true, wantProcessed: "discarded"},
 		{name: "NomadEventWorker nil server error", workerType: "nomad", nilServer: true, wantErr: true, wantProcessed: "error"},
@@ -588,8 +510,8 @@ func TestRiverWorkers(t *testing.T) {
 			switch {
 			case tc.workerType == "github":
 				expectedKind = "github_webhook"
-			case tc.workerType == "hangar":
-				expectedKind = "hangar_webhook"
+			case tc.workerType == "deploy":
+				expectedKind = "deploy_webhook"
 			case tc.workerType == "nomad":
 				expectedKind = "nomad_event"
 			case tc.workerType == "crash":
@@ -643,15 +565,15 @@ func TestRiverWorkers(t *testing.T) {
 				err = w.Work(ctx, job)
 			case "github_nil_job":
 				err = observeRiverJob[GitHubWebhookArgs](nil, "", func() error { return nil })
-			case "hangar":
-				w := &HangarWebhookWorker{server: srv}
+			case "deploy":
+				w := &DeployWebhookWorker{server: srv}
 				if tc.nilServer {
 					w.server = nil
 				}
-				job := &river.Job[HangarWebhookArgs]{
+				job := &river.Job[DeployWebhookArgs]{
 					JobRow: &rivertype.JobRow{ID: 201, Attempt: tc.attempt, MaxAttempts: tc.maxAttempts},
-					Args: HangarWebhookArgs{
-						Event: HangarDeployEvent{
+					Args: DeployWebhookArgs{
+						Event: DeployEvent{
 							Event: "deploy_success", JobName: "brain",
 							PRNumber: 558, TargetID: "1555405874565091380", Status: "success",
 						},
@@ -832,9 +754,9 @@ func TestRiverJobArgsAndUniqueOpts(t *testing.T) {
 			wantKind: "github_webhook",
 		},
 		{
-			name:         "HangarWebhookArgs",
-			args:         HangarWebhookArgs{IdempotencyKey: "key-1"},
-			wantKind:     "hangar_webhook",
+			name:         "DeployWebhookArgs",
+			args:         DeployWebhookArgs{IdempotencyKey: "key-1"},
+			wantKind:     "deploy_webhook",
 			wantByArgs:   true,
 			wantByPeriod: 15 * time.Minute,
 		},

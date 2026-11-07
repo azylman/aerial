@@ -110,16 +110,16 @@ func validateVanadisChunk(target, eventType, normEventType string) (string, erro
 	return target, nil
 }
 
-func validateHangar(target, eventType, normEventType string) (string, error) {
+func validateFlux(target, eventType, normEventType string) (string, error) {
 	if normEventType != "sync_success" && normEventType != "sync_failed" {
-		return "", fmt.Errorf("invalid event_type %q for hangar: expected 'sync_success' or 'sync_failed'", eventType)
+		return "", fmt.Errorf("invalid event_type %q for flux: expected 'sync_success' or 'sync_failed'", eventType)
 	}
 	repo := target
 	if !strings.Contains(repo, "/") {
 		repo = "azylman/" + repo
 	}
 	if !managedEventRepos[repo] {
-		return "", fmt.Errorf("invalid target %q for hangar: repo %q not in managed allowlist", target, repo)
+		return "", fmt.Errorf("invalid target %q for flux: repo %q not in managed allowlist", target, repo)
 	}
 	return repo, nil
 }
@@ -192,8 +192,8 @@ func ValidateEventWatchSpec(source, target, eventType string, extraSources ...st
 		normTarget, err = validateVanadisBuild(normTarget, eventType, normEventType)
 	case "vanadis_chunk":
 		normTarget, err = validateVanadisChunk(normTarget, eventType, normEventType)
-	case "hangar":
-		normTarget, err = validateHangar(normTarget, eventType, normEventType)
+	case "flux":
+		normTarget, err = validateFlux(normTarget, eventType, normEventType)
 	case "github":
 		normTarget, err = validateGithub(normTarget, eventType, normEventType)
 	case "nomad":
@@ -207,7 +207,7 @@ func ValidateEventWatchSpec(source, target, eventType string, extraSources ...st
 			}
 		}
 		if !allowedExtra {
-			return "", "", "", fmt.Errorf("invalid source %q: expected 'vanadis_build', 'vanadis_chunk', 'hangar', 'github', or 'nomad'", source)
+			return "", "", "", fmt.Errorf("invalid source %q: expected 'vanadis_build', 'vanadis_chunk', 'flux', 'github', or 'nomad'", source)
 		}
 		if normEventType == "" {
 			return "", "", "", fmt.Errorf("event_type cannot be empty for source %q", normSource)

@@ -283,9 +283,6 @@ func LoadConfigFile(path string, lookup func(string) string) (DashboardConfig, e
 		return DashboardConfig{}, fmt.Errorf("config: memory_url is required in %s", cleanPath)
 	}
 	hangarURL := strings.TrimSpace(ycfg.HangarURL)
-	if hangarURL == "" {
-		return DashboardConfig{}, fmt.Errorf("config: hangar_url is required in %s", cleanPath)
-	}
 	haroURL := strings.TrimSpace(ycfg.HaroURL)
 	if haroURL == "" {
 		return DashboardConfig{}, fmt.Errorf("config: haro_url is required in %s", cleanPath)

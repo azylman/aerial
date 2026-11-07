@@ -197,8 +197,8 @@ func (s *RouterServer) dispatchGitPush(ctx context.Context, repo, ref, commit, t
 		TargetID: targetID,
 		PRNumber: prNum,
 	}); err != nil {
-		log.Printf("[synapse] [dispatcher] error dispatching git_push to hangar for %s: %v", repo, err)
-		return fmt.Errorf("dispatch git_push to hangar: %w", err)
+		log.Printf("[synapse] [dispatcher] error dispatching git_push for %s: %v", repo, err)
+		return fmt.Errorf("dispatch git_push: %w", err)
 	}
 	return nil
 }
@@ -261,7 +261,7 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 				TargetID:  targetID,
 			})
 			if err != nil {
-				log.Printf("[synapse] [dispatcher] error dispatching image_ready to hangar for %s: %v", imageRef, err)
+				log.Printf("[synapse] [dispatcher] error dispatching image_ready for %s: %v", imageRef, err)
 				errCh <- err
 				return
 			}

@@ -58,9 +58,9 @@ func resolveFluxRepo(alert FluxAlertEvent) string {
 	return "azylman/aerial"
 }
 
-// TranslateFluxAlertToHangarEvent translates a Flux alert event into an equivalent HangarDeployEvent.
+// TranslateFluxAlertToDeployEvent translates a Flux alert event into an equivalent DeployEvent.
 // Returns false if the alert kind/reason is not recognized or does not map to an actionable deploy/sync event.
-func TranslateFluxAlertToHangarEvent(alert FluxAlertEvent) (HangarDeployEvent, bool) {
+func TranslateFluxAlertToDeployEvent(alert FluxAlertEvent) (DeployEvent, bool) {
 	repo := resolveFluxRepo(alert)
 	var commitSHA string
 	if alert.Metadata != nil {
@@ -80,7 +80,7 @@ func TranslateFluxAlertToHangarEvent(alert FluxAlertEvent) (HangarDeployEvent, b
 	case "GitRepository":
 		switch {
 		case reason == "NewArtifact" || reason == "GitOperationSucceeded":
-			return HangarDeployEvent{
+			return DeployEvent{
 				Event:     "sync_success",
 				Status:    "success",
 				JobName:   "git-sync",
@@ -90,7 +90,7 @@ func TranslateFluxAlertToHangarEvent(alert FluxAlertEvent) (HangarDeployEvent, b
 				Timestamp: ts,
 			}, true
 		case severity == "error" || reason == "GitOperationFailed":
-			return HangarDeployEvent{
+			return DeployEvent{
 				Event:     "sync_failed",
 				Status:    "failed",
 				JobName:   "git-sync",
@@ -100,14 +100,14 @@ func TranslateFluxAlertToHangarEvent(alert FluxAlertEvent) (HangarDeployEvent, b
 				Timestamp: ts,
 			}, true
 		default:
-			return HangarDeployEvent{}, false
+			return DeployEvent{}, false
 		}
 
 	case "Kustomization", "HelmRelease":
 		jobName := strings.TrimSpace(alert.InvolvedObject.Name)
 		switch {
 		case reason == "Progressing":
-			return HangarDeployEvent{
+			return DeployEvent{
 				Event:     "deploy_started",
 				Status:    "started",
 				JobName:   jobName,
@@ -117,7 +117,7 @@ func TranslateFluxAlertToHangarEvent(alert FluxAlertEvent) (HangarDeployEvent, b
 				Timestamp: ts,
 			}, true
 		case reason == "ReconciliationSucceeded":
-			return HangarDeployEvent{
+			return DeployEvent{
 				Event:     "deploy_success",
 				Status:    "success",
 				JobName:   jobName,
@@ -127,7 +127,7 @@ func TranslateFluxAlertToHangarEvent(alert FluxAlertEvent) (HangarDeployEvent, b
 				Timestamp: ts,
 			}, true
 		case severity == "error" || isFluxFailureReason(reason):
-			return HangarDeployEvent{
+			return DeployEvent{
 				Event:     "deploy_failed",
 				Status:    "failed",
 				JobName:   jobName,
@@ -137,11 +137,11 @@ func TranslateFluxAlertToHangarEvent(alert FluxAlertEvent) (HangarDeployEvent, b
 				Timestamp: ts,
 			}, true
 		default:
-			return HangarDeployEvent{}, false
+			return DeployEvent{}, false
 		}
 
 	default:
-		return HangarDeployEvent{}, false
+		return DeployEvent{}, false
 	}
 }
 
@@ -160,7 +160,7 @@ func (s *RouterServer) handleFluxWebhook(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	hangarEvt, ok := TranslateFluxAlertToHangarEvent(alert)
+	deployEvt, ok := TranslateFluxAlertToDeployEvent(alert)
 	if !ok {
 		log.Printf("[synapse] [flux] ignoring unhandled flux alert: kind=%s name=%s reason=%s severity=%s",
 			alert.InvolvedObject.Kind, alert.InvolvedObject.Name, alert.Reason, alert.Severity)
@@ -171,5 +171,5 @@ func (s *RouterServer) handleFluxWebhook(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	s.enqueueOrProcessHangarEvent(w, r, hangarEvt, "flux")
+	s.enqueueOrProcessDeployEvent(w, r, deployEvt, "flux")
 }

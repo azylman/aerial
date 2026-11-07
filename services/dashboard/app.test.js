@@ -932,7 +932,7 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
                         steps: [
                             { name: 'Commit Trigger', status: 'completed' },
                             { name: 'CI Build & GHCR', status: 'completed' },
-                            { name: 'Hangar Sync', status: 'completed' },
+                            { name: 'Flux Sync', status: 'completed' },
                             { name: 'Container Swap', status: 'active' },
                             { name: 'Health Check', status: 'pending' }
                         ]
@@ -944,7 +944,7 @@ describe('Permet HUD Pure Logic Unit Tests', () => {
                         steps: [
                             { name: 'Commit Trigger', status: 'completed' },
                             { name: 'CI Build & GHCR', status: 'active' },
-                            { name: 'Hangar Sync', status: 'pending' },
+                            { name: 'Flux Sync', status: 'pending' },
                             { name: 'Container Swap', status: 'pending' },
                             { name: 'Health Check', status: 'pending' }
                         ]
