@@ -158,6 +158,8 @@ data:
         Time_Format %Y-%m-%dT%H:%M:%S.%L%z
 kind: ConfigMap
 metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/substitute: disabled
   name: fluent-bit-config
   namespace: default
 ---
@@ -852,7 +854,7 @@ spec:
           envFrom:
             - secretRef:
                 name: shared-secrets
-          image: ghcr.io/azylman/aerial-discord-mcp:latest
+          image: ghcr.io/azylman/aerial-discord-mcp:${TAG_AERIAL_DISCORD_MCP:=latest}
           imagePullPolicy: Always
           name: discord-mcp
           ports:
@@ -920,7 +922,7 @@ spec:
           envFrom:
             - secretRef:
                 name: shared-secrets
-          image: ghcr.io/azylman/aerial-github-mcp:latest
+          image: ghcr.io/azylman/aerial-github-mcp:${TAG_AERIAL_GITHUB_MCP:=latest}
           imagePullPolicy: Always
           name: github-mcp
           ports:
@@ -988,7 +990,7 @@ spec:
           envFrom:
             - secretRef:
                 name: shared-secrets
-          image: ghcr.io/azylman/aerial-infisical-mcp:latest
+          image: ghcr.io/azylman/aerial-infisical-mcp:${TAG_AERIAL_INFISICAL_MCP:=latest}
           imagePullPolicy: Always
           name: infisical-mcp
           ports:
@@ -1114,7 +1116,7 @@ spec:
           envFrom:
             - secretRef:
                 name: shared-secrets
-          image: ghcr.io/azylman/aerial-kernel-mcp:latest
+          image: ghcr.io/azylman/aerial-kernel-mcp:${TAG_AERIAL_KERNEL_MCP:=latest}
           imagePullPolicy: Always
           name: kernel-mcp
           ports:
@@ -1182,7 +1184,7 @@ spec:
           envFrom:
             - secretRef:
                 name: shared-secrets
-          image: ghcr.io/azylman/aerial-prospera:latest
+          image: ghcr.io/azylman/aerial-prospera:${TAG_AERIAL_PROSPERA:=latest}
           imagePullPolicy: Always
           name: prospera
           ports:
@@ -1364,7 +1366,7 @@ spec:
           envFrom:
             - secretRef:
                 name: shared-secrets
-          image: ghcr.io/azylman/aerial-docket-mcp:latest
+          image: ghcr.io/azylman/aerial-docket-mcp:${TAG_AERIAL_DOCKET_MCP:=latest}
           name: docket-mcp
           ports:
             - containerPort: 8080

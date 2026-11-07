@@ -33,6 +33,11 @@ spec:
   force: false
   interval: 5m
   path: ./k8s
+  postBuild:
+    substituteFrom:
+      - kind: ConfigMap
+        name: aerial-image-tags
+        optional: true
   prune: true
   sourceRef:
     kind: GitRepository
@@ -49,6 +54,11 @@ spec:
   force: false
   interval: 5m
   path: ./k8s
+  postBuild:
+    substituteFrom:
+      - kind: ConfigMap
+        name: aerial-image-tags
+        optional: true
   prune: true
   sourceRef:
     kind: GitRepository
@@ -373,7 +383,7 @@ spec:
                   secretKeyRef:
                     key: GITHUB_PAT
                     name: shared-secrets
-            image: ghcr.io/azylman/aerial-github-runner:latest
+            image: ghcr.io/azylman/aerial-github-runner:${TAG_AERIAL_GITHUB_RUNNER:=latest}
             name: runner
             volumeMounts:
               - mountPath: /root/.roborev
@@ -448,7 +458,7 @@ spec:
                 value: azylman/aerial
               - name: RUNNER_LABELS
                 value: self-hosted,ci
-            image: ghcr.io/azylman/aerial-github-runner:latest
+            image: ghcr.io/azylman/aerial-github-runner:${TAG_AERIAL_GITHUB_RUNNER:=latest}
             name: runner
             volumeMounts:
               - mountPath: /var/run/docker.sock
@@ -521,7 +531,7 @@ spec:
                   secretKeyRef:
                     key: GITHUB_PAT
                     name: shared-secrets
-            image: ghcr.io/azylman/aerial-github-runner:latest
+            image: ghcr.io/azylman/aerial-github-runner:${TAG_AERIAL_GITHUB_RUNNER:=latest}
             name: runner
             volumeMounts:
               - mountPath: /root/.roborev
@@ -596,7 +606,7 @@ spec:
                 value: azylman/mirrormere
               - name: RUNNER_LABELS
                 value: self-hosted,ci
-            image: ghcr.io/azylman/aerial-github-runner:latest
+            image: ghcr.io/azylman/aerial-github-runner:${TAG_AERIAL_GITHUB_RUNNER:=latest}
             name: runner
             volumeMounts:
               - mountPath: /var/run/docker.sock
@@ -669,7 +679,7 @@ spec:
                   secretKeyRef:
                     key: GITHUB_PAT
                     name: shared-secrets
-            image: ghcr.io/azylman/aerial-github-runner:latest
+            image: ghcr.io/azylman/aerial-github-runner:${TAG_AERIAL_GITHUB_RUNNER:=latest}
             name: runner
             volumeMounts:
               - mountPath: /root/.roborev
@@ -744,7 +754,7 @@ spec:
                 value: azylman/aerial-sidecars
               - name: RUNNER_LABELS
                 value: self-hosted,ci
-            image: ghcr.io/azylman/aerial-github-runner:latest
+            image: ghcr.io/azylman/aerial-github-runner:${TAG_AERIAL_GITHUB_RUNNER:=latest}
             name: runner
             volumeMounts:
               - mountPath: /var/run/docker.sock
@@ -817,7 +827,7 @@ spec:
                   secretKeyRef:
                     key: GITHUB_PAT
                     name: shared-secrets
-            image: ghcr.io/azylman/aerial-github-runner:latest
+            image: ghcr.io/azylman/aerial-github-runner:${TAG_AERIAL_GITHUB_RUNNER:=latest}
             name: runner
             volumeMounts:
               - mountPath: /root/.roborev
@@ -892,7 +902,7 @@ spec:
                 value: azylman/aerial-config
               - name: RUNNER_LABELS
                 value: self-hosted,ci
-            image: ghcr.io/azylman/aerial-github-runner:latest
+            image: ghcr.io/azylman/aerial-github-runner:${TAG_AERIAL_GITHUB_RUNNER:=latest}
             name: runner
             volumeMounts:
               - mountPath: /var/run/docker.sock

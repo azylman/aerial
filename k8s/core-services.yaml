@@ -159,7 +159,7 @@ spec:
           envFrom:
             - secretRef:
                 name: shared-secrets
-          image: ghcr.io/azylman/aerial-eri:latest
+          image: ghcr.io/azylman/aerial-eri:${TAG_AERIAL_ERI:=latest}
           imagePullPolicy: Always
           name: eri
           ports:
@@ -292,6 +292,8 @@ spec:
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/substitute: disabled
   labels:
     app.kubernetes.io/name: host-git-sync
   name: host-git-sync
@@ -401,7 +403,7 @@ spec:
           envFrom:
             - secretRef:
                 name: shared-secrets
-          image: ghcr.io/azylman/aerial-vanadis:latest
+          image: ghcr.io/azylman/aerial-vanadis:${TAG_AERIAL_VANADIS:=latest}
           imagePullPolicy: Always
           name: vanadis
           ports:
@@ -471,7 +473,7 @@ spec:
           envFrom:
             - secretRef:
                 name: shared-secrets
-          image: ghcr.io/azylman/aerial-coven:latest
+          image: ghcr.io/azylman/aerial-coven:${TAG_AERIAL_COVEN:=latest}
           imagePullPolicy: Always
           name: coven
           ports:
@@ -627,7 +629,7 @@ spec:
           envFrom:
             - secretRef:
                 name: shared-secrets
-          image: ghcr.io/azylman/aerial-haro:latest
+          image: ghcr.io/azylman/aerial-haro:${TAG_AERIAL_HARO:=latest}
           imagePullPolicy: Always
           name: haro
           ports:
@@ -703,6 +705,54 @@ subjects:
     name: synapse-sa
     namespace: default
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: synapse-flux-reconciler
+  namespace: flux-system
+rules:
+  - apiGroups:
+      - ""
+    resourceNames:
+      - aerial-image-tags
+    resources:
+      - configmaps
+    verbs:
+      - get
+      - update
+      - patch
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - create
+  - apiGroups:
+      - kustomize.toolkit.fluxcd.io
+    resourceNames:
+      - aerial-core
+      - aerial-config
+    resources:
+      - kustomizations
+    verbs:
+      - get
+      - patch
+      - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: synapse-flux-reconciler-binding
+  namespace: flux-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: synapse-flux-reconciler
+subjects:
+  - kind: ServiceAccount
+    name: synapse-sa
+    namespace: default
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -754,7 +804,7 @@ spec:
           envFrom:
             - secretRef:
                 name: shared-secrets
-          image: ghcr.io/azylman/aerial-synapse:latest
+          image: ghcr.io/azylman/aerial-synapse:${TAG_AERIAL_SYNAPSE:=latest}
           imagePullPolicy: Always
           name: synapse
           ports:
@@ -822,7 +872,7 @@ spec:
           envFrom:
             - secretRef:
                 name: shared-secrets
-          image: ghcr.io/azylman/aerial-dashboard:latest
+          image: ghcr.io/azylman/aerial-dashboard:${TAG_AERIAL_DASHBOARD:=latest}
           imagePullPolicy: Always
           name: dashboard
           ports:
@@ -977,7 +1027,7 @@ spec:
         - env:
             - name: PORT
               value: "80"
-          image: ghcr.io/azylman/aerial-docs:latest
+          image: ghcr.io/azylman/aerial-docs:${TAG_AERIAL_DOCS:=latest}
           name: docs
           ports:
             - containerPort: 80

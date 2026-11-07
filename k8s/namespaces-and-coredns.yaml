@@ -12,5 +12,7 @@ data:
     }
 kind: ConfigMap
 metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/substitute: disabled
   name: coredns-custom
   namespace: kube-system
