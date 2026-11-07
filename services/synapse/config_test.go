@@ -10,27 +10,27 @@ import (
 
 func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 	tests := []struct {
-		name          string
-		env           map[string]string
-		wantPort      string
-		wantInfURL    string
-		wantCID       string
-		wantCSec      string
-		wantPID       string
-		wantEnv       string
-		wantNomadAddr string
-		wantNomadTok  string
-		wantGHTok     string
-		wantGHURL     string
-		wantPGURL     string
-		wantFluxURL   string
-		wantBrainURL  string
-		wantEriURL    string
-		wantSysChan   string
-		wantDiscTok   string
+		name           string
+		env            map[string]string
+		wantPort       string
+		wantInfURL     string
+		wantCID        string
+		wantCSec       string
+		wantPID        string
+		wantEnv        string
+		wantKubeServer string
+		wantKubeTok    string
+		wantGHTok      string
+		wantGHURL      string
+		wantPGURL      string
+		wantFluxURL    string
+		wantBrainURL   string
+		wantEriURL     string
+		wantSysChan    string
+		wantDiscTok    string
 	}{
 		{
-			name: "primary infisical and nomad envs",
+			name: "primary infisical envs",
 			env: map[string]string{
 				"PORT":                    "9999",
 				"INFISICAL_URL":           "http://infisical:8085/",
@@ -38,29 +38,41 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 				"INFISICAL_CLIENT_SECRET": "csec",
 				"INFISICAL_PROJECT_ID":    "pid",
 				"INFISICAL_ENVIRONMENT":   "staging",
-				"NOMAD_ADDR":              "http://nomad:4646/",
-				"NOMAD_TOKEN":             "ntok",
 			},
-			wantPort:      "9999",
-			wantInfURL:    "http://infisical:8085",
-			wantCID:       "cid",
-			wantCSec:      "csec",
-			wantPID:       "pid",
-			wantEnv:       "staging",
-			wantNomadAddr: "http://nomad:4646",
-			wantNomadTok:  "ntok",
-			wantGHURL:     "https://api.github.com",
-			wantPGURL:     "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable",
+			wantPort:   "9999",
+			wantInfURL: "http://infisical:8085",
+			wantCID:    "cid",
+			wantCSec:   "csec",
+			wantPID:    "pid",
+			wantEnv:    "staging",
+			wantGHURL:  "https://api.github.com",
+			wantPGURL:  "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable",
 		},
 		{
-			name:          "default fallback loading with empty envs",
-			env:           map[string]string{},
-			wantPort:      "4020",
-			wantInfURL:    "http://infisical.aerial",
-			wantEnv:       "default",
-			wantNomadAddr: "",
-			wantGHURL:     "https://api.github.com",
-			wantPGURL:     "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable",
+			name:       "default fallback loading with empty envs",
+			env:        map[string]string{},
+			wantPort:   "4020",
+			wantInfURL: "http://infisical.aerial",
+			wantEnv:    "default",
+			wantGHURL:  "https://api.github.com",
+			wantPGURL:  "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable",
+		},
+		{
+			name: "primary kube envs",
+			env: map[string]string{
+				"KUBE_API_SERVER": "https://kube.aerial:6443/",
+				"KUBE_TOKEN":      "secret-token",
+			},
+			wantKubeServer: "https://kube.aerial:6443",
+			wantKubeTok:    "secret-token",
+		},
+		{
+			name: "fallback kube host and port",
+			env: map[string]string{
+				"KUBERNETES_SERVICE_HOST": "10.43.0.1",
+				"KUBERNETES_SERVICE_PORT": "443",
+			},
+			wantKubeServer: "https://10.43.0.1:443",
 		},
 		{
 			name: "github and postgres primary envs",
@@ -103,8 +115,9 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 	keysToClear := []string{
 		"PORT", "INFISICAL_URL", "INFISICAL_CLIENT_ID",
 		"INFISICAL_CLIENT_SECRET", "INFISICAL_PROJECT_ID",
-		"INFISICAL_ENVIRONMENT", "NOMAD_ADDR",
-		"NOMAD_TOKEN", "GITHUB_PAT", "GITHUB_API_URL",
+		"INFISICAL_ENVIRONMENT", "KUBE_API_SERVER",
+		"KUBE_TOKEN", "KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT",
+		"GITHUB_PAT", "GITHUB_API_URL",
 		"DATABASE_URL", "HANGAR_URL", "FLUX_RECEIVER_URL", "ERI_URL",
 		"SYSTEM_CHANNEL_ID", "CONFIG_PATH", "DISCORD_TOKEN",
 	}
@@ -125,8 +138,8 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 				{cfg.InfisicalClientSecret, tc.wantCSec, "InfisicalClientSecret"},
 				{cfg.InfisicalProjectID, tc.wantPID, "InfisicalProjectID"},
 				{cfg.InfisicalEnvironment, tc.wantEnv, "InfisicalEnvironment"},
-				{cfg.NomadAddr, tc.wantNomadAddr, "NomadAddr"},
-				{cfg.NomadToken, tc.wantNomadTok, "NomadToken"},
+				{cfg.KubeAPIServer, tc.wantKubeServer, "KubeAPIServer"},
+				{cfg.KubeToken, tc.wantKubeTok, "KubeToken"},
 				{cfg.GitHubToken, tc.wantGHTok, "GitHubToken"},
 				{cfg.GitHubAPIURL, tc.wantGHURL, "GitHubAPIURL"},
 				{cfg.PostgresURL, tc.wantPGURL, "PostgresURL"},
@@ -139,9 +152,6 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 				if check.want != "" && check.got != check.want {
 					t.Errorf("%s = %q, want %q", check.field, check.got, check.want)
 				}
-			}
-			if tc.name == "default fallback loading with empty envs" && cfg.NomadAddr != "" {
-				t.Errorf("NomadAddr = %q, want empty", cfg.NomadAddr)
 			}
 		})
 	}
@@ -159,7 +169,6 @@ func TestLoadConfig_YAMLAndOverrides(t *testing.T) {
 		wantPort        string
 		wantInfURL      string
 		wantEnv         string
-		wantNomadAddr   string
 		wantFluxURL     string
 		wantBrainURL    string
 		wantSysChan     string
@@ -170,14 +179,12 @@ func TestLoadConfig_YAMLAndOverrides(t *testing.T) {
 			localYAML: `port: "4099"
 infisical_url: "http://infisical.custom:8085"
 infisical_environment: "staging"
-nomad_addr: "http://nomad.custom:4646"
 eri_url: "http://brain.custom:8088"
 `,
-			wantPort:      "4099",
-			wantInfURL:    "http://infisical.custom:8085",
-			wantEnv:       "staging",
-			wantNomadAddr: "http://nomad.custom:4646",
-			wantBrainURL:  "http://brain.custom:8088",
+			wantPort:     "4099",
+			wantInfURL:   "http://infisical.custom:8085",
+			wantEnv:      "staging",
+			wantBrainURL: "http://brain.custom:8088",
 		},
 		{
 			name: "yaml config with flux_receiver_url",
@@ -192,40 +199,35 @@ flux_receiver_url: "http://flux-receiver.custom:8080/hook/"
 			localYAML: `port: "4099"
 infisical_url: "http://infisical.custom:8085"
 infisical_environment: "staging"
-nomad_addr: "http://nomad.custom:4646"
 eri_url: "http://eri.custom:8088"
 `,
-			wantPort:      "4099",
-			wantInfURL:    "http://infisical.custom:8085",
-			wantEnv:       "staging",
-			wantNomadAddr: "http://nomad.custom:4646",
-			wantBrainURL:  "http://eri.custom:8088",
+			wantPort:     "4099",
+			wantInfURL:   "http://infisical.custom:8085",
+			wantEnv:      "staging",
+			wantBrainURL: "http://eri.custom:8088",
 		},
 		{
 			name: "env overrides yaml values",
 			localYAML: `port: "4099"
 infisical_url: "http://infisical.custom:8085"
 infisical_environment: "staging"
-nomad_addr: "http://nomad.custom:4646"
 eri_url: "http://brain.custom:8088"
 `,
 			env: map[string]string{
 				"PORT":                  "5000",
 				"INFISICAL_ENVIRONMENT": "dev",
 			},
-			wantPort:      "5000",
-			wantInfURL:    "http://infisical.custom:8085",
-			wantEnv:       "dev",
-			wantNomadAddr: "http://nomad.custom:4646",
-			wantBrainURL:  "http://brain.custom:8088",
+			wantPort:     "5000",
+			wantInfURL:   "http://infisical.custom:8085",
+			wantEnv:      "dev",
+			wantBrainURL: "http://brain.custom:8088",
 		},
 		{
-			name:          "zero-byte local config with existing fallback",
-			localYAML:     "",
-			fallbackYAML:  "port: \"4088\"\ninfisical_url: \"http://infisical.fallback:8085\"\nnomad_addr: \"http://nomad.fallback:4646\"\n",
-			wantPort:      "4088",
-			wantInfURL:    "http://infisical.fallback:8085",
-			wantNomadAddr: "http://nomad.fallback:4646",
+			name:         "zero-byte local config with existing fallback",
+			localYAML:    "",
+			fallbackYAML: "port: \"4088\"\ninfisical_url: \"http://infisical.fallback:8085\"\n",
+			wantPort:     "4088",
+			wantInfURL:   "http://infisical.fallback:8085",
 		},
 		{
 			name:            "zero-byte local config with missing fallback uses defaults",
@@ -237,7 +239,7 @@ eri_url: "http://brain.custom:8088"
 		{
 			name:         "empty config path with valid fallback",
 			useEmptyPath: true,
-			fallbackYAML: "port: \"4088\"\ninfisical_url: \"http://infisical.fallback:8085\"\nnomad_addr: \"http://nomad.fallback:4646\"\n",
+			fallbackYAML: "port: \"4088\"\ninfisical_url: \"http://infisical.fallback:8085\"\n",
 			wantPort:     "4088",
 		},
 		{
@@ -288,7 +290,7 @@ eri_url: "http://brain.custom:8088"
 
 	keysToClear := []string{
 		"PORT", "INFISICAL_URL", "INFISICAL_ENVIRONMENT",
-		"NOMAD_ADDR", "HANGAR_URL", "FLUX_RECEIVER_URL", "ERI_URL", "SYSTEM_CHANNEL_ID",
+		"HANGAR_URL", "FLUX_RECEIVER_URL", "ERI_URL", "SYSTEM_CHANNEL_ID",
 	}
 
 	for _, tc := range tests {
@@ -344,7 +346,6 @@ eri_url: "http://brain.custom:8088"
 				{cfg.Port, tc.wantPort, "Port"},
 				{cfg.InfisicalURL, tc.wantInfURL, "InfisicalURL"},
 				{cfg.InfisicalEnvironment, tc.wantEnv, "InfisicalEnvironment"},
-				{cfg.NomadAddr, tc.wantNomadAddr, "NomadAddr"},
 				{cfg.FluxReceiverURL, tc.wantFluxURL, "FluxReceiverURL"},
 				{cfg.BrainURL, tc.wantBrainURL, "BrainURL"},
 				{cfg.EriURL, tc.wantBrainURL, "EriURL"},

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"regexp"
 	"strings"
@@ -22,8 +23,8 @@ type Config struct {
 	InfisicalClientSecret string
 	InfisicalProjectID    string
 	InfisicalEnvironment  string
-	NomadAddr             string
-	NomadToken            string
+	KubeAPIServer         string
+	KubeToken             string
 	GitHubToken           string
 	GitHubAPIURL          string
 	PostgresURL           string
@@ -42,7 +43,6 @@ type RouterYAMLConfig struct {
 	Port                 string   `yaml:"port"`
 	InfisicalURL         string   `yaml:"infisical_url"`
 	InfisicalEnvironment string   `yaml:"infisical_environment"`
-	NomadAddr            string   `yaml:"nomad_addr"`
 	FluxReceiverURL      string   `yaml:"flux_receiver_url"`
 	EriURL               string   `yaml:"eri_url"`
 	VanadisURL           string   `yaml:"vanadis_url"`
@@ -114,6 +114,15 @@ func LoadConfig(configPath string) Config {
 
 	pgURL := firstNonEmpty(os.Getenv("DATABASE_URL"), "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable")
 
+	kubeServer := os.Getenv("KUBE_API_SERVER")
+	if kubeServer == "" {
+		host, port := os.Getenv("KUBERNETES_SERVICE_HOST"), os.Getenv("KUBERNETES_SERVICE_PORT")
+		if host != "" && port != "" {
+			kubeServer = "https://" + net.JoinHostPort(host, port)
+		}
+	}
+	kubeToken := os.Getenv("KUBE_TOKEN")
+
 	return Config{
 		Port:                  firstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4020"),
 		InfisicalURL:          strings.TrimRight(firstNonEmpty(os.Getenv("INFISICAL_URL"), fileCfg.InfisicalURL, "http://infisical.aerial"), "/"),
@@ -121,8 +130,8 @@ func LoadConfig(configPath string) Config {
 		InfisicalClientSecret: os.Getenv("INFISICAL_CLIENT_SECRET"),
 		InfisicalProjectID:    os.Getenv("INFISICAL_PROJECT_ID"),
 		InfisicalEnvironment:  firstNonEmpty(os.Getenv("INFISICAL_ENVIRONMENT"), fileCfg.InfisicalEnvironment, "default"),
-		NomadAddr:             strings.TrimRight(firstNonEmpty(os.Getenv("NOMAD_ADDR"), fileCfg.NomadAddr), "/"),
-		NomadToken:            os.Getenv("NOMAD_TOKEN"),
+		KubeAPIServer:         strings.TrimRight(kubeServer, "/"),
+		KubeToken:             kubeToken,
 		GitHubToken:           os.Getenv("GITHUB_PAT"),
 		GitHubAPIURL:          strings.TrimRight(firstNonEmpty(os.Getenv("GITHUB_API_URL"), "https://api.github.com"), "/"),
 		PostgresURL:           pgURL,

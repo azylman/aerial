@@ -10,10 +10,6 @@ data:
         name regex (.*)\.aerial\.?$ {1}.default.svc.cluster.local.
         answer name (.*)\.default\.svc\.cluster\.local\.?$ {1}.aerial.
     }
-    rewrite stop {
-        name regex (.*)\.lan\.?$ {1}.default.svc.cluster.local.
-        answer name (.*)\.default\.svc\.cluster\.local\.?$ {1}.lan.
-    }
 kind: ConfigMap
 metadata:
   name: coredns-custom

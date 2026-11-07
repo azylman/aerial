@@ -262,18 +262,6 @@ func (s *RouterServer) evaluateFluxEventTriggers(ctx context.Context, evt Deploy
 	s.fireEventTriggers(ctx, "flux", []string{repo}, evt.Event, contextHeader)
 }
 
-func (s *RouterServer) evaluateNomadEventTriggers(ctx context.Context, jobID, eventType, refID, details string) {
-	normJob := strings.ToLower(strings.TrimSpace(jobID))
-	if normJob == "" {
-		return
-	}
-	contextHeader := fmt.Sprintf("Nomad deployment %s for job %s (ref: %s)", eventType, normJob, refID)
-	if strings.TrimSpace(details) != "" {
-		contextHeader = fmt.Sprintf("Nomad deployment %s for job %s (ref: %s): %s", eventType, normJob, refID, strings.TrimSpace(details))
-	}
-	s.fireEventTriggers(ctx, "nomad", []string{normJob}, eventType, contextHeader)
-}
-
 func (s *RouterServer) evaluateVanadisAdvancementTriggers(ctx context.Context, repo string, prNumber int, res *VanadisAdvancementResult) {
 	if res == nil || !res.Matched || !res.Advanced {
 		return

@@ -653,8 +653,8 @@ if [ "$MODE" = "staged" ]; then
     fi
 
     # Check grafana dashboard JSON syntax
-    if echo "$STAGED_FILES" | grep -q -E "^(nomad/)?grafana/dashboards/"; then
-        for jf in nomad/grafana/dashboards/*.json; do
+    if echo "$STAGED_FILES" | grep -q -E "^(services/)?grafana/dashboards/"; then
+        for jf in services/grafana/dashboards/*.json; do
             run_json_syntax "$jf"
         done
     fi
@@ -694,7 +694,7 @@ run_node_syntax "services/dashboard/static/app.js"
 run_node_syntax "services/docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js"
 run_node_syntax "services/homepage/lib/merge.js"
 run_node_syntax "services/homepage/prepare-config.js"
-for jf in nomad/grafana/dashboards/*.json; do
+for jf in services/grafana/dashboards/*.json; do
     run_json_syntax "$jf"
 done
 

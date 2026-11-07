@@ -582,6 +582,44 @@ spec:
     app.kubernetes.io/name: haro
   type: ClusterIP
 ---
+apiVersion: v1
+imagePullSecrets:
+  - name: ghcr-creds
+kind: ServiceAccount
+metadata:
+  name: synapse-sa
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: synapse-secret-writer
+  namespace: default
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - get
+      - create
+      - update
+      - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: synapse-secret-writer-binding
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: synapse-secret-writer
+subjects:
+  - kind: ServiceAccount
+    name: synapse-sa
+    namespace: default
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -605,6 +643,7 @@ spec:
       labels:
         app.kubernetes.io/name: synapse
     spec:
+      serviceAccountName: synapse-sa
       containers:
         - env:
             - name: PORT

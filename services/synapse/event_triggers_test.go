@@ -627,86 +627,6 @@ func TestEvaluateFluxEventTriggers(t *testing.T) {
 	}
 }
 
-func TestEvaluateNomadEventTriggers(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name          string
-		jobID         string
-		eventType     string
-		refID         string
-		details       string
-		wantFired     bool
-		wantTarget    string
-		wantEventType string
-	}{
-		{
-			name:      "empty jobID ignored",
-			jobID:     "   ",
-			eventType: "deploy_success",
-			wantFired: false,
-		},
-		{
-			name:          "deploy_success normalizes and fires nomad trigger",
-			jobID:         " Brain ",
-			eventType:     "deploy_success",
-			refID:         "dep-123",
-			details:       "",
-			wantFired:     true,
-			wantTarget:    "brain",
-			wantEventType: "deploy_success",
-		},
-		{
-			name:          "deploy_failed with details fires nomad trigger",
-			jobID:         "Synapse",
-			eventType:     "deploy_failed",
-			refID:         "alloc-456",
-			details:       "crashed with oom",
-			wantFired:     true,
-			wantTarget:    "synapse",
-			wantEventType: "deploy_failed",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			mockReg := &mockPRRegistry{
-				claimTriggersRes: []ClaimedEventTrigger{
-					{
-						ID:        "nomad-trig",
-						ChannelID: "1555405874565091380",
-						Source:    "nomad",
-						Target:    tc.wantTarget,
-						EventType: tc.wantEventType,
-						Prompt:    "Nomad event",
-					},
-				},
-			}
-			mockDisp := &mockOutboundDispatcher{}
-			srv := NewRouterServer(Config{}, nil)
-			srv.SetRegistry(mockReg)
-			srv.SetDispatcher(mockDisp)
-
-			srv.evaluateNomadEventTriggers(context.Background(), tc.jobID, tc.eventType, tc.refID, tc.details)
-
-			if !tc.wantFired {
-				if len(mockReg.claimTriggersCalls) != 0 {
-					t.Fatalf("expected 0 claim calls, got %d", len(mockReg.claimTriggersCalls))
-				}
-				return
-			}
-			if len(mockReg.claimTriggersCalls) != 1 {
-				t.Fatalf("expected 1 claim call, got %d", len(mockReg.claimTriggersCalls))
-			}
-			call := mockReg.claimTriggersCalls[0]
-			if call.source != "nomad" || call.eventType != tc.wantEventType || len(call.targets) != 1 || call.targets[0] != tc.wantTarget {
-				t.Fatalf("unexpected claim call: %+v", call)
-			}
-		})
-	}
-}
-
 func TestEvaluateVanadisAdvancementTriggers(t *testing.T) {
 	t.Parallel()
 
@@ -1298,18 +1218,6 @@ func TestIntegrations_EventTriggers(t *testing.T) {
 			wantEventType: "failed",
 		},
 		{
-			name:          "HandleNomadJobSuccess fires nomad deploy_success triggers",
-			testScenario:  "nomad_success",
-			wantSource:    "nomad",
-			wantEventType: "deploy_success",
-		},
-		{
-			name:          "HandleNomadJobFailure fires nomad deploy_failed triggers",
-			testScenario:  "nomad_failure",
-			wantSource:    "nomad",
-			wantEventType: "deploy_failed",
-		},
-		{
 			name:          "advanceVanadisChunk fires vanadis_chunk merged triggers",
 			testScenario:  "vanadis_advance",
 			wantSource:    "vanadis_chunk",
@@ -1361,10 +1269,6 @@ func TestIntegrations_EventTriggers(t *testing.T) {
 					PRNumber: 1,
 					TargetID: "1555405874565091380",
 				}, 4)
-			case "nomad_success":
-				_ = srv.HandleNomadJobSuccess(ctx, "brain", "dep-succ")
-			case "nomad_failure":
-				_ = srv.HandleNomadJobFailure(ctx, "brain", "dep-fail", "failed", "oom")
 			case "vanadis_advance":
 				_ = srv.advanceVanadisChunk(ctx, "azylman/aerial", 1)
 			}

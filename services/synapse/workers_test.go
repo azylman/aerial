@@ -451,13 +451,6 @@ func TestRiverWorkers(t *testing.T) {
 		{name: "DeployWebhookWorker valid job", workerType: "deploy", wantProcessed: "success"},
 		{name: "DeployWebhookWorker nil server error", workerType: "deploy", nilServer: true, wantErr: true, wantProcessed: "error"},
 		{name: "DeployWebhookWorker downstream dispatch error", workerType: "deploy", downstreamErr: true, wantErr: true, wantProcessed: "error"},
-		{name: "NomadEventWorker valid job", workerType: "nomad", wantProcessed: "success"},
-		{name: "NomadEventWorker max attempts exhausted discard", workerType: "nomad", attempt: 5, maxAttempts: 5, downstreamErr: true, wantErr: true, wantProcessed: "discarded"},
-		{name: "NomadEventWorker nil server error", workerType: "nomad", nilServer: true, wantErr: true, wantProcessed: "error"},
-		{name: "NomadEventWorker downstream prompt error", workerType: "nomad", downstreamErr: true, wantErr: true, wantProcessed: "error"},
-		{name: "NomadCrashAlertWorker valid job", workerType: "crash", wantProcessed: "success"},
-		{name: "NomadCrashAlertWorker nil server error", workerType: "crash", nilServer: true, wantErr: true, wantProcessed: "error"},
-		{name: "NomadCrashAlertWorker downstream prompt error", workerType: "crash", downstreamErr: true, wantErr: true, wantProcessed: "error"},
 		{name: "WidgetSyncWorker valid job", workerType: "widget", wantProcessed: "success"},
 		{name: "WidgetSyncWorker nil server error", workerType: "widget", nilServer: true, wantErr: true, wantProcessed: "error"},
 		{name: "WidgetSyncWorker downstream dispatch error", workerType: "widget", downstreamErr: true, wantErr: true, wantProcessed: "error"},
@@ -501,7 +494,6 @@ func TestRiverWorkers(t *testing.T) {
 				}
 			}
 			srv := newTestRouter(Config{
-				NomadAddr:       nomadServer.URL,
 				SystemChannelID: "1555405874565091380",
 			}, nil, mockReg, mockDisp)
 
@@ -512,10 +504,6 @@ func TestRiverWorkers(t *testing.T) {
 				expectedKind = "github_webhook"
 			case tc.workerType == "deploy":
 				expectedKind = "deploy_webhook"
-			case tc.workerType == "nomad":
-				expectedKind = "nomad_event"
-			case tc.workerType == "crash":
-				expectedKind = "nomad_crash_alert"
 			case tc.workerType == "widget":
 				expectedQueue = QueueWidgetSync
 				expectedKind = "widget_sync"
@@ -577,35 +565,6 @@ func TestRiverWorkers(t *testing.T) {
 							Event: "deploy_success", JobName: "brain",
 							PRNumber: 558, TargetID: "1555405874565091380", Status: "success",
 						},
-					},
-				}
-				err = w.Work(ctx, job)
-			case "nomad":
-				w := &NomadEventWorker{server: srv}
-				if tc.nilServer {
-					w.server = nil
-				}
-				job := &river.Job[NomadEventArgs]{
-					JobRow: &rivertype.JobRow{ID: 301, Attempt: tc.attempt, MaxAttempts: tc.maxAttempts},
-					Args: NomadEventArgs{
-						Topic:   "Deployment",
-						Type:    "DeploymentStatusUpdate",
-						Payload: []byte(`{"Deployment":{"ID":"dep-101","JobID":"brain","Status":"successful"}}`),
-					},
-				}
-				err = w.Work(ctx, job)
-			case "crash":
-				w := &NomadCrashAlertWorker{server: srv}
-				if tc.nilServer {
-					w.server = nil
-				}
-				job := &river.Job[NomadCrashAlertArgs]{
-					JobRow: &rivertype.JobRow{ID: 401, Attempt: tc.attempt, MaxAttempts: tc.maxAttempts},
-					Args: NomadCrashAlertArgs{
-						JobID:      "openobserve",
-						AllocID:    "alloc-oom",
-						Status:     "failed",
-						StatusDesc: "OOMKilled exit code 137",
 					},
 				}
 				err = w.Work(ctx, job)
@@ -757,20 +716,6 @@ func TestRiverJobArgsAndUniqueOpts(t *testing.T) {
 			name:         "DeployWebhookArgs",
 			args:         DeployWebhookArgs{IdempotencyKey: "key-1"},
 			wantKind:     "deploy_webhook",
-			wantByArgs:   true,
-			wantByPeriod: 15 * time.Minute,
-		},
-		{
-			name:         "NomadEventArgs",
-			args:         NomadEventArgs{Topic: "Deployment"},
-			wantKind:     "nomad_event",
-			wantByArgs:   true,
-			wantByPeriod: 15 * time.Minute,
-		},
-		{
-			name:         "NomadCrashAlertArgs",
-			args:         NomadCrashAlertArgs{JobID: "brain"},
-			wantKind:     "nomad_crash_alert",
 			wantByArgs:   true,
 			wantByPeriod: 15 * time.Minute,
 		},

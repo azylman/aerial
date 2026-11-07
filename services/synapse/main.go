@@ -272,16 +272,16 @@ func (s *RouterServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 type DeployEvent struct {
 	Event        string    `json:"event"`                   // "deploy_started", "deploy_success", "deploy_failed", "deploy_rollback"
-	JobName      string    `json:"job_name"`                // Nomad job name (e.g. "webhooks-router", "brain")
-	ExpectedJobs []string  `json:"expected_jobs,omitempty"` // All Nomad jobs expected to deploy for this PR/sync
+	JobName      string    `json:"job_name"`                // Deployment job or service name (e.g. "eri", "synapse")
+	ExpectedJobs []string  `json:"expected_jobs,omitempty"` // All jobs expected to deploy for this PR/sync
 	Repo         string    `json:"repo,omitempty"`          // repository name (e.g. "azylman/aerial", "azylman/aerial-config")
 	CommitSHA    string    `json:"commit_sha,omitempty"`    // git commit SHA (head or merge commit)
 	PRNumber     int       `json:"pr_number,omitempty"`     // PR number if known
 	TargetID     string    `json:"target_id,omitempty"`     // Discord thread / channel snowflake
-	Image        string    `json:"image,omitempty"`         // container image (e.g. ghcr.io/azylman/aerial-webhooks-router:latest)
+	Image        string    `json:"image,omitempty"`         // container image (e.g. ghcr.io/azylman/aerial-synapse:latest)
 	Digest       string    `json:"digest,omitempty"`        // image digest (sha256:...)
 	Status       string    `json:"status"`                  // "started", "success", "failed", "rollback"
-	DeploymentID string    `json:"deployment_id,omitempty"` // Nomad deployment UUID
+	DeploymentID string    `json:"deployment_id,omitempty"` // Deployment identifier or UUID
 	Details      string    `json:"details,omitempty"`       // status description or error message
 	Timestamp    time.Time `json:"timestamp"`
 }
@@ -890,11 +890,6 @@ func (s *RouterServer) handleDeployStartedRegistry(ctx context.Context, evt Depl
 	} else if tID == "" {
 		log.Printf("[synapse] [deploy] skipping deploy_started for %s on %s#%d (job already deployed or PR inactive)", evt.JobName, evt.Repo, evt.PRNumber)
 		return true
-	} else if s.isNomadBatchTemplateHealthy(ctx, evt.JobName) || s.isNomadInPlaceConfigReloadHealthy(ctx, evt.JobName, evt.Details) {
-		if err := s.HandleNomadJobSuccess(ctx, evt.JobName, firstNonEmpty(evt.DeploymentID, "batch-registered")); err != nil {
-			log.Printf("[synapse] [deploy] warning handling batch job success for %s: %v", evt.JobName, err)
-		}
-		return true
 	}
 	return false
 }
@@ -1212,8 +1207,6 @@ func setupRiverWorkerPool(ctx context.Context, server *RouterServer, cfg Config)
 	workers := river.NewWorkers()
 	river.AddWorker(workers, &GitHubWebhookWorker{server: server})
 	river.AddWorker(workers, &DeployWebhookWorker{server: server})
-	river.AddWorker(workers, &NomadEventWorker{server: server})
-	river.AddWorker(workers, &NomadCrashAlertWorker{server: server})
 	river.AddWorker(workers, &WidgetSyncWorker{server: server})
 	river.AddWorker(workers, &EventTriggerWebhookWorker{server: server})
 	river.AddWorker(workers, &MergeConflictWorker{server: server})
@@ -1263,21 +1256,6 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 		defer dbPool.Close()
 	}
 
-	// Initialize and launch Nomad Event Stream subscriber
-	if strings.TrimSpace(cfg.NomadAddr) != "" {
-		nomadSub := NewNomadStreamSubscriber(server)
-		nomadSub.Start(ctx)
-	}
-
-	// Reconcile any active deployments from pr_registry (startup sweep)
-	go func() {
-		sweepCtx, sweepCancel := context.WithTimeout(ctx, 15*time.Second)
-		defer sweepCancel()
-		if sweepErr := server.ReconcileActiveDeployments(sweepCtx); sweepErr != nil {
-			log.Printf("[synapse] [sweep] startup active deployment reconciliation error: %v", sweepErr)
-		}
-	}()
-
 	// Initialize and launch Discord Gateway consumer
 	stopDiscord, err := startDiscordGateway(ctx, server, cfg.DiscordToken)
 	if err != nil {
@@ -1308,8 +1286,8 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 
 	errChan := make(chan error, 1)
 	go func() {
-		log.Printf("[synapse] Server listening on %s (Infisical: %s, Nomad: %s, TargetVariable: %s)",
-			ln.Addr().String(), cfg.InfisicalURL, cfg.NomadAddr, TargetNomadVariable)
+		log.Printf("[synapse] Server listening on %s (Infisical: %s, KubeAPIServer: %s, TargetSecret: %s)",
+			ln.Addr().String(), cfg.InfisicalURL, cfg.KubeAPIServer, TargetK8sSecret)
 		if err := httpServer.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errChan <- err
 		}

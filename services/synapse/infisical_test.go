@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -52,17 +55,17 @@ func TestHandleInfisicalAndGenericWebhooks(t *testing.T) {
 	routes := NewRouterServer(Config{}, nil).Routes()
 
 	cases := []struct {
-		name, path, wantTargetVar, wantEnv, wantMsg string
-		body                                        io.Reader
-		wantStatus                                  int
+		name, path, wantTargetSec, wantTargetVar, wantEnv, wantMsg string
+		body                                                       io.Reader
+		wantStatus                                                 int
 	}{
-		{name: "infisical valid payload", path: "/webhooks/infisical", body: strings.NewReader(`{"event":"secrets.modified"}`), wantStatus: http.StatusAccepted, wantTargetVar: TargetNomadVariable},
+		{name: "infisical valid payload", path: "/webhooks/infisical", body: strings.NewReader(`{"event":"secrets.modified"}`), wantStatus: http.StatusAccepted, wantTargetSec: TargetK8sSecret, wantTargetVar: TargetK8sSecret},
 		{name: "infisical malformed json", path: "/webhooks/infisical", body: strings.NewReader(`{not valid json}`), wantStatus: http.StatusBadRequest},
 		{name: "infisical body read error", path: "/webhooks/infisical", body: errReader{}, wantStatus: http.StatusBadRequest},
-		{name: "generic standard sync", path: "/webhooks/generic", body: strings.NewReader(`{"environment":"prod"}`), wantStatus: http.StatusAccepted, wantTargetVar: TargetNomadVariable},
+		{name: "generic standard sync", path: "/webhooks/generic", body: strings.NewReader(`{"environment":"prod"}`), wantStatus: http.StatusAccepted, wantTargetSec: TargetK8sSecret, wantTargetVar: TargetK8sSecret},
 		{name: "generic empty body allowed", path: "/webhooks/generic", body: strings.NewReader(""), wantStatus: http.StatusAccepted},
-		{name: "generic direct secrets map", path: "/webhooks/generic", body: strings.NewReader(`{"secrets":{"KEY1":"VAL1"}}`), wantStatus: http.StatusAccepted, wantTargetVar: TargetNomadVariable, wantMsg: "Direct secret sync scheduled"},
-		{name: "generic explicit workspace and env", path: "/webhooks/generic", body: strings.NewReader(`{"workspaceId":"custom-ws","environment":"dev"}`), wantStatus: http.StatusAccepted, wantTargetVar: TargetNomadVariable, wantEnv: "dev"},
+		{name: "generic direct secrets map", path: "/webhooks/generic", body: strings.NewReader(`{"secrets":{"KEY1":"VAL1"}}`), wantStatus: http.StatusAccepted, wantTargetSec: TargetK8sSecret, wantTargetVar: TargetK8sSecret, wantMsg: "Direct secret sync scheduled"},
+		{name: "generic explicit workspace and env", path: "/webhooks/generic", body: strings.NewReader(`{"workspaceId":"custom-ws","environment":"dev"}`), wantStatus: http.StatusAccepted, wantTargetSec: TargetK8sSecret, wantTargetVar: TargetK8sSecret, wantEnv: "dev"},
 		{name: "generic bad json", path: "/webhooks/generic", body: strings.NewReader(`{invalid`), wantStatus: http.StatusBadRequest},
 		{name: "generic body read error", path: "/webhooks/generic", body: errReader{}, wantStatus: http.StatusBadRequest},
 	}
@@ -74,10 +77,13 @@ func TestHandleInfisicalAndGenericWebhooks(t *testing.T) {
 			if rec.Code != tc.wantStatus {
 				t.Fatalf("expected status %d, got %d", tc.wantStatus, rec.Code)
 			}
-			if tc.wantTargetVar != "" || tc.wantEnv != "" || tc.wantMsg != "" {
+			if tc.wantTargetSec != "" || tc.wantTargetVar != "" || tc.wantEnv != "" || tc.wantMsg != "" {
 				var resp map[string]any
 				if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 					t.Fatalf("failed to parse response: %v", err)
+				}
+				if tc.wantTargetSec != "" && resp["targetSecret"] != tc.wantTargetSec {
+					t.Errorf("expected targetSecret %q, got %v", tc.wantTargetSec, resp["targetSecret"])
 				}
 				if tc.wantTargetVar != "" && resp["targetVariable"] != tc.wantTargetVar {
 					t.Errorf("expected targetVariable %q, got %v", tc.wantTargetVar, resp["targetVariable"])
@@ -104,22 +110,26 @@ func TestSyncSecrets(t *testing.T) {
 		loginBody     string
 		secretsStatus int
 		secretsBody   string
-		nomadStatus   int
+		k8sPutStatus  int
+		k8sPostStatus int
 		unreachable   bool
 		wantErr       bool
-		wantNomadPuts int32
+		wantK8sPuts   int32
+		wantK8sPosts  int32
 	}{
-		{name: "successful full sync flow", loginStatus: http.StatusOK, loginBody: `{"accessToken":"mock-jwt-token"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"API_KEY","secretValue":"secret123"}]}`, nomadStatus: http.StatusOK, wantNomadPuts: 1},
+		{name: "successful full sync flow", loginStatus: http.StatusOK, loginBody: `{"accessToken":"mock-jwt-token"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"API_KEY","secretValue":"secret123"}]}`, k8sPutStatus: http.StatusOK, wantK8sPuts: 1},
 		{name: "missing infisical credentials", cfgOverride: &Config{}, wantErr: true},
 		{name: "login 500 server error", loginStatus: http.StatusInternalServerError, loginBody: "server error", wantErr: true},
 		{name: "login invalid json response", loginStatus: http.StatusOK, loginBody: "{invalid-json", wantErr: true},
 		{name: "login empty token string", loginStatus: http.StatusOK, loginBody: `{"accessToken":""}`, wantErr: true},
-		{name: "login fallback token field", loginStatus: http.StatusOK, loginBody: `{"token":"fallback-token"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"K","secretValue":"V"}]}`, nomadStatus: http.StatusOK, wantNomadPuts: 1},
+		{name: "login fallback token field", loginStatus: http.StatusOK, loginBody: `{"token":"fallback-token"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"K","secretValue":"V"}]}`, k8sPutStatus: http.StatusOK, wantK8sPuts: 1},
 		{name: "secrets fetch 502 bad gateway", loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusBadGateway, wantErr: true},
 		{name: "secrets fetch invalid json", loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusOK, secretsBody: "{invalid-secrets", wantErr: true},
-		{name: "nomad put 201 created", loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"A","secretValue":"B"}]}`, nomadStatus: http.StatusCreated, wantNomadPuts: 1},
-		{name: "nomad put 204 no content", loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"A","secretValue":"B"}]}`, nomadStatus: http.StatusNoContent, wantNomadPuts: 1},
-		{name: "nomad put 500 internal server error", loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"K","secretValue":"V"}]}`, nomadStatus: http.StatusInternalServerError, wantErr: true, wantNomadPuts: 1},
+		{name: "k8s put 201 created", loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"A","secretValue":"B"}]}`, k8sPutStatus: http.StatusCreated, wantK8sPuts: 1},
+		{name: "k8s put 404 falls back to post 201 created", loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"A","secretValue":"B"}]}`, k8sPutStatus: http.StatusNotFound, k8sPostStatus: http.StatusCreated, wantK8sPuts: 1, wantK8sPosts: 1},
+		{name: "k8s put 404 post fails 500", loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"A","secretValue":"B"}]}`, k8sPutStatus: http.StatusNotFound, k8sPostStatus: http.StatusInternalServerError, wantErr: true, wantK8sPuts: 1, wantK8sPosts: 1},
+		{name: "missing kube api server", cfgOverride: &Config{InfisicalClientID: "cid", InfisicalClientSecret: "csec", InfisicalURL: "http://mock"}, loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"K","secretValue":"V"}]}`, wantErr: true},
+		{name: "k8s put 500 internal server error", loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"K","secretValue":"V"}]}`, k8sPutStatus: http.StatusInternalServerError, wantErr: true, wantK8sPuts: 1},
 		{name: "unreachable client connections", unreachable: true, wantErr: true},
 	}
 
@@ -131,7 +141,7 @@ func TestSyncSecrets(t *testing.T) {
 					InfisicalURL:          "http://127.0.0.1:1",
 					InfisicalClientID:     "cid",
 					InfisicalClientSecret: "csec",
-					NomadAddr:             "http://127.0.0.1:1",
+					KubeAPIServer:         "http://127.0.0.1:1",
 				}, &http.Client{Timeout: 50 * time.Millisecond})
 
 				if err := badClientServer.SyncSecrets(ctx, "ws", "env"); err == nil {
@@ -140,13 +150,14 @@ func TestSyncSecrets(t *testing.T) {
 				if _, err := badClientServer.fetchInfisicalSecrets(ctx, "tok", "ws", "env"); err == nil {
 					t.Errorf("fetchInfisicalSecrets() expected error on unreachable, got nil")
 				}
-				if err := badClientServer.putNomadVariable(ctx, map[string]string{"A": "B"}); err == nil {
-					t.Errorf("putNomadVariable() expected error on unreachable, got nil")
+				if err := badClientServer.upsertK8sSecret(ctx, map[string]string{"A": "B"}); err == nil {
+					t.Errorf("upsertK8sSecret() expected error on unreachable, got nil")
 				}
 				return
 			}
 
-			var nomadPutCount atomic.Int32
+			var k8sPutCount atomic.Int32
+			var k8sPostCount atomic.Int32
 			mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				switch {
@@ -156,9 +167,12 @@ func TestSyncSecrets(t *testing.T) {
 				case r.Method == http.MethodGet && r.URL.Path == "/api/v3/secrets/raw":
 					w.WriteHeader(tc.secretsStatus)
 					_, _ = w.Write([]byte(tc.secretsBody))
-				case r.Method == http.MethodPut && r.URL.Path == "/v1/var/"+TargetNomadVariable:
-					nomadPutCount.Add(1)
-					w.WriteHeader(tc.nomadStatus)
+				case r.Method == http.MethodPut && r.URL.Path == "/api/v1/namespaces/default/secrets/shared-secrets":
+					k8sPutCount.Add(1)
+					w.WriteHeader(tc.k8sPutStatus)
+				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/namespaces/default/secrets":
+					k8sPostCount.Add(1)
+					w.WriteHeader(tc.k8sPostStatus)
 				default:
 					http.NotFound(w, r)
 				}
@@ -171,8 +185,8 @@ func TestSyncSecrets(t *testing.T) {
 				InfisicalClientSecret: "client-secret",
 				InfisicalProjectID:    "proj-123",
 				InfisicalEnvironment:  "prod",
-				NomadAddr:             mockServer.URL,
-				NomadToken:            "test-nomad-token",
+				KubeAPIServer:         mockServer.URL,
+				KubeToken:             "test-kube-token",
 			}
 			if tc.cfgOverride != nil {
 				cfg = *tc.cfgOverride
@@ -183,8 +197,160 @@ func TestSyncSecrets(t *testing.T) {
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("SyncSecrets() err = %v, wantErr %v", err, tc.wantErr)
 			}
-			if gotPuts := nomadPutCount.Load(); gotPuts != tc.wantNomadPuts {
-				t.Errorf("nomad PUT count = %d, want %d", gotPuts, tc.wantNomadPuts)
+			if gotPuts := k8sPutCount.Load(); gotPuts != tc.wantK8sPuts {
+				t.Errorf("k8s PUT count = %d, want %d", gotPuts, tc.wantK8sPuts)
+			}
+			if gotPosts := k8sPostCount.Load(); gotPosts != tc.wantK8sPosts {
+				t.Errorf("k8s POST count = %d, want %d", gotPosts, tc.wantK8sPosts)
+			}
+		})
+	}
+}
+
+func TestLoadK8sCertPool(t *testing.T) {
+	t.Parallel()
+	tempDir := t.TempDir()
+	emptyFile := filepath.Join(tempDir, "empty.crt")
+	_ = os.WriteFile(emptyFile, []byte(""), 0o644)
+	invalidFile := filepath.Join(tempDir, "invalid.crt")
+	_ = os.WriteFile(invalidFile, []byte("not pem"), 0o644)
+
+	mockTLSServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	t.Cleanup(mockTLSServer.Close)
+	validPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: mockTLSServer.Certificate().Raw,
+	})
+	validFile := filepath.Join(tempDir, "valid.crt")
+	_ = os.WriteFile(validFile, validPEM, 0o644)
+
+	tests := []struct {
+		name       string
+		path       string
+		wantLoaded bool
+	}{
+		{name: "empty path returns nil", path: "", wantLoaded: false},
+		{name: "nonexistent file returns nil", path: filepath.Join(tempDir, "nonexistent.crt"), wantLoaded: false},
+		{name: "empty file returns nil", path: emptyFile, wantLoaded: false},
+		{name: "invalid pem returns nil", path: invalidFile, wantLoaded: false},
+		{name: "valid pem returns cert pool", path: validFile, wantLoaded: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pool := loadK8sCertPool(tc.path)
+			if tc.wantLoaded && pool == nil {
+				t.Errorf("expected non-nil cert pool for %s", tc.path)
+			}
+			if !tc.wantLoaded && pool != nil {
+				t.Errorf("expected nil cert pool for %s", tc.path)
+			}
+		})
+	}
+}
+
+func TestGetKubeToken(t *testing.T) {
+	tempDir := t.TempDir()
+	tokenFile := filepath.Join(tempDir, "sa-token")
+	_ = os.WriteFile(tokenFile, []byte("  projected-sa-token  \n"), 0o600)
+
+	origTokenPath := kubeTokenPath
+	t.Cleanup(func() { kubeTokenPath = origTokenPath })
+
+	tests := []struct {
+		name      string
+		cfgToken  string
+		tokenPath string
+		wantToken string
+	}{
+		{name: "returns config token when set", cfgToken: "explicit-token", tokenPath: tokenFile, wantToken: "explicit-token"},
+		{name: "reads from token file when config token empty", cfgToken: "", tokenPath: tokenFile, wantToken: "projected-sa-token"},
+		{name: "returns empty string when token file missing", cfgToken: "", tokenPath: filepath.Join(tempDir, "missing-token"), wantToken: ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			kubeTokenPath = tc.tokenPath
+			srv := &RouterServer{cfg: Config{KubeToken: tc.cfgToken}}
+			got := srv.getKubeToken()
+			if got != tc.wantToken {
+				t.Errorf("getKubeToken() = %q, want %q", got, tc.wantToken)
+			}
+		})
+	}
+}
+
+func TestGetK8sHTTPClient(t *testing.T) {
+	tempDir := t.TempDir()
+	mockTLSServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	t.Cleanup(mockTLSServer.Close)
+	validPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: mockTLSServer.Certificate().Raw,
+	})
+	validCAFile := filepath.Join(tempDir, "ca.crt")
+	_ = os.WriteFile(validCAFile, validPEM, 0o644)
+
+	origCAPath := kubeCAPath
+	t.Cleanup(func() { kubeCAPath = origCAPath })
+
+	tests := []struct {
+		name          string
+		apiServer     string
+		caPath        string
+		hasHTTPClient bool
+		wantCustom    bool
+		wantRootCA    bool
+	}{
+		{
+			name:          "custom client reused for http endpoint",
+			apiServer:     "http://localhost:8080",
+			caPath:        validCAFile,
+			hasHTTPClient: true,
+			wantCustom:    true,
+		},
+		{
+			name:          "https endpoint builds client with root CA",
+			apiServer:     "https://kubernetes.default.svc",
+			caPath:        validCAFile,
+			hasHTTPClient: true,
+			wantRootCA:    true,
+		},
+		{
+			name:          "https endpoint without root CA file builds transport without root CA",
+			apiServer:     "https://kubernetes.default.svc",
+			caPath:        filepath.Join(tempDir, "missing.crt"),
+			hasHTTPClient: false,
+			wantRootCA:    false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			kubeCAPath = tc.caPath
+			var customClient *http.Client
+			if tc.hasHTTPClient {
+				customClient = &http.Client{Timeout: 42 * time.Millisecond}
+			}
+			srv := &RouterServer{
+				cfg:        Config{KubeAPIServer: tc.apiServer},
+				httpClient: customClient,
+			}
+			client := srv.getK8sHTTPClient()
+			if tc.wantCustom {
+				if client != customClient {
+					t.Fatalf("expected custom client to be returned, got %v", client)
+				}
+				return
+			}
+			tr, ok := client.Transport.(*http.Transport)
+			if !ok || tr == nil {
+				t.Fatalf("expected *http.Transport, got %T", client.Transport)
+			}
+			hasRootCA := tr.TLSClientConfig != nil && tr.TLSClientConfig.RootCAs != nil
+			if hasRootCA != tc.wantRootCA {
+				t.Errorf("hasRootCA = %v, want %v", hasRootCA, tc.wantRootCA)
 			}
 		})
 	}

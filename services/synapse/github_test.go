@@ -1327,7 +1327,7 @@ func TestDispatchWorkflowRunImages(t *testing.T) {
 			wantErr:         true,
 		},
 		{
-			name:           "resolved image with 0 matched Nomad jobs completes no-deploy workflow run",
+			name:           "resolved image with 0 matched jobs completes no-deploy workflow run",
 			headBranch:     "main",
 			conclusion:     "success",
 			jobsStatus:     http.StatusOK,
@@ -2219,6 +2219,49 @@ func TestCommitSHAPRCacheHelpers(t *testing.T) {
 				t.Errorf("lookupCommitSHAPR() branch = %q, want %q", branch, tc.wantBranch)
 			}
 		})
+	}
+}
+
+func TestUpdatedForCurrentMainHelpers(t *testing.T) {
+	t.Parallel()
+
+	var nilSrv *RouterServer
+	nilSrv.markUpdatedForCurrentMain("azylman/aerial", 123)
+	if nilSrv.wasUpdatedForCurrentMain("azylman/aerial", 123) {
+		t.Errorf("expected false for nil server")
+	}
+	nilSrv.clearUpdatedPRsForRepo("azylman/aerial")
+
+	srv := &RouterServer{}
+	srv.markUpdatedForCurrentMain("azylman/aerial", 0)
+	if srv.wasUpdatedForCurrentMain("azylman/aerial", 0) {
+		t.Errorf("expected false for pr <= 0")
+	}
+
+	srv.markUpdatedForCurrentMain("azylman/aerial", 42)
+	srv.markUpdatedForCurrentMain("azylman/aerial", 43)
+	srv.markUpdatedForCurrentMain("azylman/other", 99)
+
+	if !srv.wasUpdatedForCurrentMain("azylman/aerial", 42) {
+		t.Errorf("expected true for PR 42")
+	}
+	if !srv.wasUpdatedForCurrentMain("azylman/aerial", 43) {
+		t.Errorf("expected true for PR 43")
+	}
+	if !srv.wasUpdatedForCurrentMain("azylman/other", 99) {
+		t.Errorf("expected true for PR 99")
+	}
+
+	srv.clearUpdatedPRsForRepo("azylman/aerial")
+
+	if srv.wasUpdatedForCurrentMain("azylman/aerial", 42) {
+		t.Errorf("expected false for cleared PR 42")
+	}
+	if srv.wasUpdatedForCurrentMain("azylman/aerial", 43) {
+		t.Errorf("expected false for cleared PR 43")
+	}
+	if !srv.wasUpdatedForCurrentMain("azylman/other", 99) {
+		t.Errorf("expected true for remaining PR 99")
 	}
 }
 
