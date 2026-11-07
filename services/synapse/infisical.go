@@ -3,17 +3,26 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"strings"
+	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
 )
 
-// TargetNomadVariable is the hardcoded destination Nomad variable for all synced secrets.
-const TargetNomadVariable = "nomad/jobs/shared"
+// TargetK8sSecret is the hardcoded destination Kubernetes secret for all synced secrets.
+const TargetK8sSecret = "default/shared-secrets"
+
+// TargetNomadVariable is retained for backward compatibility with existing clients/tests.
+const TargetNomadVariable = TargetK8sSecret
 
 // InfisicalWebhookPayload captures common payload variants from Infisical webhooks.
 type InfisicalWebhookPayload struct {
@@ -58,11 +67,12 @@ type InfisicalSecretsResponse struct {
 	Secrets []InfisicalSecretItem `json:"secrets"`
 }
 
-type NomadVariable struct {
-	Path        string            `json:"Path"`
-	Items       map[string]string `json:"Items"`
-	CreateIndex uint64            `json:"CreateIndex,omitempty"`
-	ModifyIndex uint64            `json:"ModifyIndex,omitempty"`
+type K8sSecret struct {
+	APIVersion string            `json:"apiVersion"`
+	Kind       string            `json:"kind"`
+	Metadata   map[string]string `json:"metadata"`
+	Type       string            `json:"type"`
+	StringData map[string]string `json:"stringData"`
 }
 
 type GenericWebhookPayload struct {
@@ -82,7 +92,8 @@ func (s *RouterServer) handleInfisicalWebhook(w http.ResponseWriter, r *http.Req
 	httpkit.WriteJSON(w, http.StatusAccepted, map[string]any{
 		"status":         "accepted",
 		"message":        "Secret sync scheduled",
-		"targetVariable": TargetNomadVariable,
+		"targetSecret":   TargetK8sSecret,
+		"targetVariable": TargetK8sSecret,
 		"environment":    envName,
 	})
 	runBackgroundSync("infisical webhook sync", func(ctx context.Context) error {
@@ -100,11 +111,12 @@ func (s *RouterServer) handleGenericWebhook(w http.ResponseWriter, r *http.Reque
 		httpkit.WriteJSON(w, http.StatusAccepted, map[string]any{
 			"status":         "accepted",
 			"message":        "Direct secret sync scheduled",
-			"targetVariable": TargetNomadVariable,
+			"targetSecret":   TargetK8sSecret,
+			"targetVariable": TargetK8sSecret,
 			"keyCount":       len(payload.Secrets),
 		})
 		runBackgroundSync("direct generic sync", func(ctx context.Context) error {
-			return s.putNomadVariable(ctx, payload.Secrets)
+			return s.upsertK8sSecret(ctx, payload.Secrets)
 		})
 		return
 	}
@@ -115,7 +127,8 @@ func (s *RouterServer) handleGenericWebhook(w http.ResponseWriter, r *http.Reque
 	httpkit.WriteJSON(w, http.StatusAccepted, map[string]any{
 		"status":         "accepted",
 		"message":        "Generic secret sync scheduled",
-		"targetVariable": TargetNomadVariable,
+		"targetSecret":   TargetK8sSecret,
+		"targetVariable": TargetK8sSecret,
 		"environment":    envName,
 	})
 	runBackgroundSync("generic webhook sync", func(ctx context.Context) error {
@@ -192,35 +205,137 @@ func (s *RouterServer) fetchInfisicalSecrets(ctx context.Context, token, workspa
 	return items, nil
 }
 
-func (s *RouterServer) putNomadVariable(ctx context.Context, items map[string]string) error {
-	data, err := json.Marshal(NomadVariable{Path: TargetNomadVariable, Items: items})
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, fmt.Sprintf("%s/v1/var/%s", s.cfg.NomadAddr, TargetNomadVariable), bytes.NewReader(data))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if s.cfg.NomadToken != "" {
-		req.Header.Set("X-Nomad-Token", s.cfg.NomadToken)
-	}
+var (
+	kubeCAPath    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+	kubeTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+)
 
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("nomad put variable request failed: %w", err)
+func loadK8sCertPool(caPath string) *x509.CertPool {
+	if caPath == "" {
+		return nil
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("nomad put variable returned status %d: %s", resp.StatusCode, readBodyString(resp.Body))
+	caData, err := os.ReadFile(caPath)
+	if err != nil || len(caData) == 0 {
+		return nil
+	}
+	certPool, err := x509.SystemCertPool()
+	if err != nil || certPool == nil {
+		certPool = x509.NewCertPool()
+	} else {
+		certPool = certPool.Clone()
+	}
+	if certPool.AppendCertsFromPEM(caData) {
+		return certPool
 	}
 	return nil
 }
 
-// SyncSecrets coordinates fetching secrets from Infisical and synchronizing directly to Nomad.
+func (s *RouterServer) getKubeToken() string {
+	if s.cfg.KubeToken != "" {
+		return s.cfg.KubeToken
+	}
+	if data, err := os.ReadFile(kubeTokenPath); err == nil {
+		return strings.TrimSpace(string(data))
+	}
+	return ""
+}
+
+func (s *RouterServer) getK8sHTTPClient() *http.Client {
+	if s.httpClient != nil && !strings.HasPrefix(s.cfg.KubeAPIServer, "https://") {
+		return s.httpClient
+	}
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		IdleConnTimeout: 90 * time.Second,
+	}
+	if rootCAs := loadK8sCertPool(kubeCAPath); rootCAs != nil {
+		transport.TLSClientConfig = &tls.Config{
+			RootCAs: rootCAs,
+		}
+	}
+	return &http.Client{
+		Timeout:   15 * time.Second,
+		Transport: transport,
+	}
+}
+
+func (s *RouterServer) upsertK8sSecret(ctx context.Context, items map[string]string) error {
+	secretObj := K8sSecret{
+		APIVersion: "v1",
+		Kind:       "Secret",
+		Metadata: map[string]string{
+			"name":      "shared-secrets",
+			"namespace": "default",
+		},
+		Type:       "Opaque",
+		StringData: items,
+	}
+	data, err := json.Marshal(secretObj)
+	if err != nil {
+		return err
+	}
+
+	apiServer := strings.TrimRight(s.cfg.KubeAPIServer, "/")
+	if apiServer == "" {
+		return fmt.Errorf("kubernetes API server not configured")
+	}
+
+	putURL := apiServer + "/api/v1/namespaces/default/secrets/shared-secrets"
+	putReq, err := http.NewRequestWithContext(ctx, http.MethodPut, putURL, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	putReq.Header.Set("Content-Type", "application/json")
+	token := s.getKubeToken()
+	if token != "" {
+		putReq.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	client := s.getK8sHTTPClient()
+
+	resp, err := client.Do(putReq)
+	if err != nil {
+		return fmt.Errorf("k8s secret PUT request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusCreated {
+		return nil
+	}
+
+	if resp.StatusCode == http.StatusNotFound {
+		postURL := apiServer + "/api/v1/namespaces/default/secrets"
+		postReq, err := http.NewRequestWithContext(ctx, http.MethodPost, postURL, bytes.NewReader(data))
+		if err != nil {
+			return err
+		}
+		postReq.Header.Set("Content-Type", "application/json")
+		if token != "" {
+			postReq.Header.Set("Authorization", "Bearer "+token)
+		}
+
+		postResp, err := client.Do(postReq)
+		if err != nil {
+			return fmt.Errorf("k8s secret POST request failed: %w", err)
+		}
+		defer postResp.Body.Close()
+
+		if postResp.StatusCode == http.StatusOK || postResp.StatusCode == http.StatusCreated {
+			return nil
+		}
+		return fmt.Errorf("k8s secret POST returned status %d: %s", postResp.StatusCode, readBodyString(postResp.Body))
+	}
+
+	return fmt.Errorf("k8s secret PUT returned status %d: %s", resp.StatusCode, readBodyString(resp.Body))
+}
+
+// SyncSecrets coordinates fetching secrets from Infisical and synchronizing directly to Kubernetes Secrets.
 func (s *RouterServer) SyncSecrets(ctx context.Context, workspaceID, envName string) error {
-	log.Printf("[synapse] Initiating secret sync to %s (env: %s)", TargetNomadVariable, envName)
+	log.Printf("[synapse] Initiating secret sync to %s (env: %s)", TargetK8sSecret, envName)
 	token, err := s.getInfisicalToken(ctx)
 	if err != nil {
 		return err
@@ -229,9 +344,9 @@ func (s *RouterServer) SyncSecrets(ctx context.Context, workspaceID, envName str
 	if err != nil {
 		return err
 	}
-	if err := s.putNomadVariable(ctx, newItems); err != nil {
+	if err := s.upsertK8sSecret(ctx, newItems); err != nil {
 		return err
 	}
-	log.Printf("[synapse] Successfully synchronized %d secrets to %s", len(newItems), TargetNomadVariable)
+	log.Printf("[synapse] Successfully synchronized %d secrets to %s", len(newItems), TargetK8sSecret)
 	return nil
 }

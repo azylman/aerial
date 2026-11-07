@@ -29,8 +29,6 @@ type mockRiverInserter struct {
 	mu                     sync.Mutex
 	insertedJobs           []GitHubWebhookArgs
 	insertedDeployJobs     []DeployWebhookArgs
-	insertedNomadJobs      []NomadEventArgs
-	insertedCrashAlertJobs []NomadCrashAlertArgs
 	insertedWidgetSyncJobs []WidgetSyncArgs
 	insertedEventJobs      []EventTriggerWebhookArgs
 	insertedConflictJobs   []MergeConflictArgs
@@ -53,10 +51,6 @@ func (m *mockRiverInserter) Insert(ctx context.Context, args river.JobArgs, opts
 		m.insertedJobs = append(m.insertedJobs, a)
 	case DeployWebhookArgs:
 		m.insertedDeployJobs = append(m.insertedDeployJobs, a)
-	case NomadEventArgs:
-		m.insertedNomadJobs = append(m.insertedNomadJobs, a)
-	case NomadCrashAlertArgs:
-		m.insertedCrashAlertJobs = append(m.insertedCrashAlertJobs, a)
 	case WidgetSyncArgs:
 		m.insertedWidgetSyncJobs = append(m.insertedWidgetSyncJobs, a)
 	case EventTriggerWebhookArgs:
@@ -714,14 +708,6 @@ func mkDeployEvt(event, job, repo, sha string, pr int, targetID, status, details
 	return DeployEvent{Event: event, JobName: job, Repo: repo, CommitSHA: sha, PRNumber: pr, TargetID: targetID, Status: status, Details: details}
 }
 
-func mkDeployedReg(targetID string, pr int, sha, repo string, updated bool) *mockPRRegistry {
-	return &mockPRRegistry{resolveTargetID: targetID, deployedTargetID: targetID, deployedPRNum: pr, deployedMergeSHA: sha, deployedRepo: repo, deployedUpdated: updated}
-}
-
-func mkDeployFailedReg(targetID string, pr int, sha, repo string, updated bool) *mockPRRegistry {
-	return &mockPRRegistry{deployFailedJobTargetID: targetID, deployFailedJobPRNum: pr, deployFailedJobMergeSHA: sha, deployFailedJobRepo: repo, deployFailedJobUpdated: updated}
-}
-
 // --- 4. Deploy Event Processing ---
 
 func TestProcessDeployEvent(t *testing.T) {
@@ -733,7 +719,6 @@ func TestProcessDeployEvent(t *testing.T) {
 		evt                DeployEvent
 		extraEvts          []DeployEvent
 		sysChan            string
-		nomadJobJSON       string
 		reg                *mockPRRegistry
 		pgReg              *PostgresPRRegistry
 		disp               *mockOutboundDispatcher
@@ -966,42 +951,6 @@ func TestProcessDeployEvent(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:               "deploy_started periodic batch job transitions to deployed immediately",
-			evt:                mkDeployEvt("deploy_started", "coverage-ingest", "azylman/aerial", "1fc4aaf", 851, "1555405874565091380", "started", ""),
-			nomadJobJSON:       `{"ID":"coverage-ingest","Type":"batch","Status":"running","Stop":false,"Periodic":{"Enabled":true}}`,
-			reg:                mkDeployedReg("1555405874565091380", 851, "1fc4aaf", "azylman/aerial", true),
-			disp:               &mockOutboundDispatcher{},
-			wantPR:             851,
-			wantTargetID:       "1555405874565091380",
-			wantDeployingCalls: 1,
-			wantDeployedJobs:   []string{"coverage-ingest"},
-			wantPrompts:        1,
-			wantPromptSubs:     []string{"Continuous Delivery deployment completed for job coverage-ingest on azylman/aerial (PR #851, commit: 1fc4aaf, ref: batch-registered)"},
-		},
-		{
-			name:               "deploy_started in-place signal config reload transitions to deployed immediately",
-			evt:                mkDeployEvt("deploy_started", "eri", "azylman/aerial-config", "2fc4aaf", 852, "1555405874565091380", "started", "nomad var put nomad/jobs/eri"),
-			nomadJobJSON:       `{"ID":"eri","Type":"service","Status":"running","Stop":false,"TaskGroups":[{"Tasks":[{"Templates":[{"ChangeMode":"signal"}]}]}]}`,
-			reg:                mkDeployedReg("1555405874565091380", 852, "2fc4aaf", "azylman/aerial-config", true),
-			disp:               &mockOutboundDispatcher{},
-			wantPR:             852,
-			wantTargetID:       "1555405874565091380",
-			wantDeployingCalls: 1,
-			wantDeployedJobs:   []string{"eri"},
-			wantPrompts:        1,
-			wantPromptSubs:     []string{"Continuous Delivery deployment completed for job eri on azylman/aerial-config (PR #852, commit: 2fc4aaf, ref: batch-registered)"},
-		},
-		{
-			name:               "deploy_started periodic batch job tolerates HandleNomadJobSuccess error",
-			evt:                mkDeployEvt("deploy_started", "coverage-ingest", "azylman/aerial", "1fc4aaf", 851, "1555405874565091380", "started", ""),
-			nomadJobJSON:       `{"ID":"coverage-ingest","Type":"batch","Status":"running","Stop":false,"Periodic":{"Enabled":true}}`,
-			reg:                &mockPRRegistry{deployedErr: errors.New("db transition err")},
-			disp:               &mockOutboundDispatcher{},
-			wantPR:             851,
-			wantTargetID:       "1555405874565091380",
-			wantDeployingCalls: 1,
-		},
-		{
 			name:               "deploy_started skipped when job already deployed",
 			evt:                mkDeployEvt("deploy_started", "coven", "azylman/aerial", "bc1d3ef", 971, "1555405874565091380", "started", ""),
 			reg:                &mockPRRegistry{skipDeployingTransition: true},
@@ -1204,15 +1153,6 @@ func TestProcessDeployEvent(t *testing.T) {
 			}
 			cfg := Config{SystemChannelID: tc.sysChan}
 			client := &http.Client{Transport: &zeroCallTransport{}}
-			if tc.nomadJobJSON != "" {
-				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.Header().Set("Content-Type", "application/json")
-					_, _ = w.Write([]byte(tc.nomadJobJSON))
-				}))
-				defer ts.Close()
-				cfg.NomadAddr = ts.URL
-				client = ts.Client()
-			}
 			srv := newTestRouter(cfg, client, reg, disp)
 			res, err := srv.ProcessDeployEvent(ctx, tc.evt)
 			if (err != nil) != tc.wantErr {
@@ -1686,98 +1626,7 @@ func TestResolveThreadForPRAndDeploymentSuccessPrompt(t *testing.T) {
 	}
 }
 
-// --- 8. River Workers, Crash Alerts & Server Endpoints ---
-
-func TestCrashAlerts(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	args := NomadCrashAlertArgs{
-		JobID:      "openobserve",
-		AllocID:    "alloc-oom",
-		Status:     "failed",
-		StatusDesc: "OOMKilled exit code 137",
-	}
-
-	tests := []struct {
-		name        string
-		channel     string
-		disp        *mockOutboundDispatcher
-		wantErr     bool
-		wantDMs     int
-		wantPrompts int
-	}{
-		{
-			name:        "valid system channel dispatches DM and prompt",
-			channel:     "1555405874565091380",
-			disp:        &mockOutboundDispatcher{},
-			wantDMs:     1,
-			wantPrompts: 1,
-		},
-		{
-			name:        "named system channel dispatches DM and prompt",
-			channel:     "aerial-dev",
-			disp:        &mockOutboundDispatcher{},
-			wantDMs:     1,
-			wantPrompts: 1,
-		},
-		{
-			name:    "invalid channel is clean no-op",
-			channel: "invalid channel!",
-			disp:    &mockOutboundDispatcher{},
-		},
-		{
-			name:    "nil dispatcher is clean no-op",
-			channel: "1555405874565091380",
-			disp:    nil,
-		},
-		{
-			name:        "4xx on prompt is ignored",
-			channel:     "1555405874565091380",
-			disp:        &mockOutboundDispatcher{promptErr: errors.New("brain prompt returned status 404: channel not found")},
-			wantDMs:     1,
-			wantPrompts: 1,
-		},
-		{
-			name:        "4xx on DM is ignored",
-			channel:     "1555405874565091380",
-			disp:        &mockOutboundDispatcher{directMessageErr: errors.New("brain internal message returned status 400: bad request")},
-			wantDMs:     1,
-			wantPrompts: 0,
-		},
-		{
-			name:        "5xx on prompt returns error",
-			channel:     "1555405874565091380",
-			disp:        &mockOutboundDispatcher{promptErr: errors.New("brain prompt returned status 500: internal server error")},
-			wantErr:     true,
-			wantDMs:     1,
-			wantPrompts: 1,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var disp OutboundDispatcher
-			if tc.disp != nil {
-				disp = tc.disp
-			}
-			s := newTestRouter(Config{SystemChannelID: tc.channel}, nil, nil, disp)
-			err := s.ProcessCrashAlert(ctx, args)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("ProcessCrashAlert() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.disp != nil {
-				if len(tc.disp.DirectMessageCalls()) != tc.wantDMs {
-					t.Errorf("got %d DMs, want %d", len(tc.disp.DirectMessageCalls()), tc.wantDMs)
-				}
-				if len(tc.disp.PromptCalls()) != tc.wantPrompts {
-					t.Errorf("got %d prompts, want %d", len(tc.disp.PromptCalls()), tc.wantPrompts)
-				}
-			}
-		})
-	}
-}
+// --- 8. Server Endpoints ---
 
 func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
 	oldCountersFn := httpkit.WriteCountersDirFn
@@ -3348,54 +3197,6 @@ func TestProcessMergeConflict_Table(t *testing.T) {
 					t.Errorf("DispatchCalls = %d, want %d", len(disp.DispatchCalls()), tc.wantPrompts)
 				}
 			}
-		})
-	}
-}
-
-func TestRecordNomadJobProgress_Cases(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	tests := []struct {
-		name   string
-		server *RouterServer
-		jobID  string
-		state  string
-	}{
-		{
-			name:   "nil server",
-			server: nil,
-			jobID:  "job-1",
-			state:  "running",
-		},
-		{
-			name:   "empty jobID",
-			server: newTestRouter(Config{}, nil, &mockPRRegistry{}, nil),
-			jobID:  "",
-			state:  "running",
-		},
-		{
-			name:   "registry error",
-			server: newTestRouter(Config{}, nil, &mockPRRegistry{recordJobStateErr: errors.New("db err")}, nil),
-			jobID:  "job-1",
-			state:  "running",
-		},
-		{
-			name: "updated with pr and repo",
-			server: newTestRouter(Config{}, nil, &mockPRRegistry{
-				recordJobStateRepo:    "azylman/aerial",
-				recordJobStatePRNum:   123,
-				recordJobStateUpdated: true,
-			}, nil),
-			jobID: "job-1",
-			state: "running",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			tc.server.recordNomadJobProgress(ctx, tc.jobID, tc.state)
 		})
 	}
 }

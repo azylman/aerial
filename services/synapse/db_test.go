@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1341,6 +1342,33 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 						}
 					}
 				}
+			}
+		})
+	}
+}
+
+func TestExtractJobsFromMetadata_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		metadata map[string]any
+		expected []string
+	}{
+		{name: "nil metadata", metadata: nil, expected: nil},
+		{name: "jobs array string", metadata: map[string]any{"jobs": []any{"brain", "scheduler-mcp"}}, expected: []string{"brain", "scheduler-mcp"}},
+		{name: "deduplicates clean job names", metadata: map[string]any{"jobs": []any{"brain", "brain", "hangar"}}, expected: []string{"brain", "hangar"}},
+		{name: "empty jobs array", metadata: map[string]any{"jobs": []any{}}, expected: nil},
+		{name: "non-slice jobs", metadata: map[string]any{"jobs": 123}, expected: nil},
+		{name: "typed string slice", metadata: map[string]any{"jobs": []string{"job-a", "job-b"}}, expected: []string{"job-a", "job-b"}},
+		{name: "whitespace and empty jobs filtered", metadata: map[string]any{"jobs": []any{"", "  ", "brain"}}, expected: []string{"brain"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := extractJobsFromMetadata(tt.metadata)
+			if !reflect.DeepEqual(got, tt.expected) {
+				t.Errorf("extractJobsFromMetadata() = %v, want %v", got, tt.expected)
 			}
 		})
 	}

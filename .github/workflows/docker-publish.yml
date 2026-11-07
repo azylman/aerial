@@ -34,11 +34,9 @@ jobs:
       docket-mcp: ${{ steps.filter.outputs.docket-mcp }}
       kernel-mcp: ${{ steps.filter.outputs.kernel-mcp }}
       github-mcp: ${{ steps.filter.outputs.github-mcp }}
-      nomad-mcp: ${{ steps.filter.outputs.nomad-mcp }}
       infisical-mcp: ${{ steps.filter.outputs.infisical-mcp }}
       dashboard: ${{ steps.filter.outputs.dashboard }}
       docs: ${{ steps.filter.outputs.docs }}
-      mesh-proxy: ${{ steps.filter.outputs.mesh-proxy }}
       synapse: ${{ steps.filter.outputs.synapse }}
       vanadis: ${{ steps.filter.outputs.vanadis }}
       prospera: ${{ steps.filter.outputs.prospera }}
@@ -73,8 +71,6 @@ jobs:
               - 'pkg/**'
             github-mcp:
               - 'mcp/github-mcp/**'
-            nomad-mcp:
-              - 'mcp/nomad-mcp/**'
             infisical-mcp:
               - 'mcp/infisical-mcp/**'
             dashboard:
@@ -82,8 +78,6 @@ jobs:
               - 'pkg/**'
             docs:
               - 'services/docs-service/**'
-            mesh-proxy:
-              - 'services/proxy/**'
             synapse:
               - 'services/synapse/**'
               - 'pkg/**'
@@ -108,11 +102,9 @@ jobs:
               "docket-mcp": "${{ steps.filter.outputs.docket-mcp }}",
               "kernel-mcp": "${{ steps.filter.outputs.kernel-mcp }}",
               "github-mcp": "${{ steps.filter.outputs.github-mcp }}",
-              "nomad-mcp": "${{ steps.filter.outputs.nomad-mcp }}",
               "infisical-mcp": "${{ steps.filter.outputs.infisical-mcp }}",
               dashboard: "${{ steps.filter.outputs.dashboard }}",
               docs: "${{ steps.filter.outputs.docs }}",
-              "mesh-proxy": "${{ steps.filter.outputs.mesh-proxy }}",
               synapse: "${{ steps.filter.outputs.synapse }}",
               vanadis: "${{ steps.filter.outputs.vanadis }}",
               prospera: "${{ steps.filter.outputs.prospera }}",
@@ -127,11 +119,9 @@ jobs:
               { service: "docket-mcp", context: ".", file: "./mcp/docket-mcp/Dockerfile", image_name: "aerial-docket-mcp" },
               { service: "kernel-mcp", context: ".", file: "./mcp/kernel-mcp/Dockerfile", image_name: "aerial-kernel-mcp" },
               { service: "github-mcp", context: "./mcp/github-mcp", file: "./mcp/github-mcp/Dockerfile", image_name: "aerial-github-mcp" },
-              { service: "nomad-mcp", context: "./mcp/nomad-mcp", file: "./mcp/nomad-mcp/Dockerfile", image_name: "aerial-nomad-mcp" },
               { service: "infisical-mcp", context: "./mcp/infisical-mcp", file: "./mcp/infisical-mcp/Dockerfile", image_name: "aerial-infisical-mcp" },
               { service: "dashboard", context: ".", file: "./services/dashboard/Dockerfile", image_name: "aerial-dashboard" },
               { service: "docs", context: "./services/docs-service", file: "./services/docs-service/Dockerfile", image_name: "aerial-docs" },
-              { service: "mesh-proxy", context: "./services/proxy", file: "./services/proxy/Dockerfile", image_name: "aerial-proxy" },
               { service: "synapse", context: ".", file: "./services/synapse/Dockerfile", image_name: "aerial-synapse" },
               { service: "vanadis", context: ".", file: "./services/vanadis/Dockerfile", image_name: "aerial-vanadis" },
               { service: "prospera", context: ".", file: "./services/prospera/Dockerfile", image_name: "aerial-prospera" },
@@ -239,7 +229,7 @@ jobs:
           fi
 
           # 3. Grafana Dashboard JSON Syntax
-          for jf in nomad/grafana/dashboards/*.json; do
+          for jf in services/grafana/dashboards/*.json; do
             if [ -f "$jf" ]; then
               node -e "JSON.parse(require('fs').readFileSync('$jf', 'utf8'))"
             fi

@@ -10,7 +10,7 @@ providers:
     updateIntervalSeconds: 30
     allowUiUpdates: false
     options:
-      path: /share/aerial/nomad/grafana/dashboards
+      path: /share/aerial/services/grafana/dashboards
       foldersFromFilesStructure: true
   - name: 'Aerial Custom'
     orgId: 1

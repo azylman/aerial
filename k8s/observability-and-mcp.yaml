@@ -346,6 +346,76 @@ metadata:
   name: vmalert-rules
   namespace: default
 ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: victoriametrics-sa
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: victoriametrics-sa
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+      - nodes/proxy
+      - nodes/metrics
+      - nodes/stats
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: victoriametrics-sa
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: victoriametrics-sa
+subjects:
+  - kind: ServiceAccount
+    name: victoriametrics-sa
+    namespace: default
+---
+apiVersion: v1
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+    scrape_config_files:
+      - "/config/scrape.yml"
+    scrape_configs:
+      - job_name: eri
+        static_configs:
+          - targets: ["eri:8080"]
+      - job_name: haro
+        static_configs:
+          - targets: ["haro:4005"]
+      - job_name: coven
+        static_configs:
+          - targets: ["coven:4008"]
+      - job_name: vanadis
+        static_configs:
+          - targets: ["vanadis:4025"]
+      - job_name: synapse
+        static_configs:
+          - targets: ["synapse:4020"]
+      - job_name: node-exporter
+        static_configs:
+          - targets:
+              - calibarn.lan:9100
+              - quiet-zero.lan:9100
+              - kiosk.lan:9100
+kind: ConfigMap
+metadata:
+  name: victoriametrics-scrape
+  namespace: default
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -371,6 +441,11 @@ spec:
             - -storageDataPath=/victoria-metrics-data
             - -retentionPeriod=5y
             - -loggerFormat=json
+            - -promscrape.config=/etc/victoriametrics/prometheus.yml
+            - -promscrape.config.strictParse=false
+          envFrom:
+            - secretRef:
+                name: shared-secrets
           image: victoriametrics/victoria-metrics:v1.155.0
           name: victoriametrics
           ports:
@@ -380,12 +455,25 @@ spec:
           volumeMounts:
             - mountPath: /victoria-metrics-data
               name: storage
+            - mountPath: /etc/victoriametrics
+              name: victoriametrics-scrape
+            - mountPath: /config
+              name: custom-scrape
+              readOnly: true
       nodeSelector:
         kubernetes.io/hostname: calibarn
+      serviceAccountName: victoriametrics-sa
       volumes:
         - name: storage
           persistentVolumeClaim:
             claimName: victoriametrics-pvc
+        - configMap:
+            name: victoriametrics-scrape
+          name: victoriametrics-scrape
+        - hostPath:
+            path: /share/aerial-config/services/victoriametrics
+            type: ""
+          name: custom-scrape
 ---
 apiVersion: v1
 kind: Service
@@ -554,7 +642,7 @@ spec:
             name: grafana-provisioning
           name: prov-db
         - hostPath:
-            path: /share/aerial/nomad/grafana/dashboards
+            path: /share/aerial/services/grafana/dashboards
             type: ""
           name: dash-sys
         - hostPath:

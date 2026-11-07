@@ -333,7 +333,7 @@ Aerial includes an enterprise-grade, out-of-the-box observability matrix with si
 - **Dynamic Modular Scrapes**: VictoriaMetrics automatically discovers and live-reloads scrape configurations mounted from `/share/aerial-config/victoriametrics/*.yml` every 15 seconds without container restarts (`-promscrape.configCheckInterval=15s`).
 - **Anomaly Detection & Recording Rules (`vmalert`)**: Evaluates Median Absolute Deviation (MAD) anomaly rules and alert definitions on port `:8880`.
 
-### 2. Pre-Provisioned Grafana Dashboards (`nomad/grafana/dashboards/`)
+### 2. Pre-Provisioned Grafana Dashboards (`services/grafana/dashboards/`)
 - **Single-Click Anonymous Admin Access**: Instant dashboard access without login friction.
 - **Persistent Backend**: Dashboards and user settings persist in SQLite (`GF_DATABASE_TYPE=sqlite3`) with dashboards provisioned from JSON definitions.
 - **Pre-Provisioned Dashboard Suite**:

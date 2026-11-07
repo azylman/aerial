@@ -27,7 +27,6 @@ updates:
       - "/services/coven"
       - "/services/dashboard"
       - "/services/eri"
-      - "/services/hangar"
       - "/services/haro"
       - "/services/prospera"
       - "/services/vanadis"

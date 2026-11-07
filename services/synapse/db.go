@@ -1042,3 +1042,29 @@ func (r *PostgresPRRegistry) UpdatePRStatus(ctx context.Context, repo string, pr
 	}
 	return nil
 }
+
+// extractStringSliceFromMetadata extracts a slice of strings stored under key in metadata JSONB.
+func extractStringSliceFromMetadata(meta map[string]any, key string) []string {
+	if meta == nil {
+		return nil
+	}
+	var raw []string
+	if rawVal, ok := meta[key]; ok {
+		switch v := rawVal.(type) {
+		case []any:
+			for _, item := range v {
+				if s, ok := item.(string); ok {
+					raw = append(raw, s)
+				}
+			}
+		case []string:
+			raw = append(raw, v...)
+		}
+	}
+	return dedupeTrimmedStrings(raw)
+}
+
+// extractJobsFromMetadata extracts candidate job names stored in the PR registry metadata JSONB.
+func extractJobsFromMetadata(meta map[string]any) []string {
+	return extractStringSliceFromMetadata(meta, "jobs")
+}
