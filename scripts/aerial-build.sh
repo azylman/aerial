@@ -2,6 +2,10 @@
 set -euo pipefail
 
 # scripts/aerial-build.sh - CLI client for Vanadis Autonomous Build Queue Orchestrator
+#
+# Build plans define an array of sequential chunks. Each chunk has an explicit mode:
+# - 'pr' (default): requires a non-empty chunk-level 'repo' (e.g. "azylman/aerial")
+# - 'action': operational chunk running against live services; 'repo' must be omitted or empty ("")
 
 VANADIS_URL="${VANADIS_URL:-http://vanadis.aerial}"
 VANADIS_URL="${VANADIS_URL%/}"
@@ -16,6 +20,9 @@ Commands:
   enqueue [--file|-f] <plan.json>   Validate and enqueue a multi-chunk build plan in Vanadis
   status <build_id>                 Fetch build and chunk status from Vanadis
   cancel <build_id>                 Cancel an active Vanadis build run
+
+Build Plans:
+  Chunks support mode 'pr' (default, requires chunk-level repo) and 'action' (omitted/empty repo).
 
 Environment:
   VANADIS_URL          Vanadis base URL (default: http://vanadis.aerial, fallback: http://127.0.0.1:4025)
@@ -151,7 +158,7 @@ cmd_enqueue() {
     resp="$(vanadis_request "POST" "/builds" "$payload")"
 
     if printf '%s' "$resp" | jq empty >/dev/null 2>&1; then
-        printf '%s\n' "$resp" | jq 'if .chunks then .chunks |= map({id, chunk_index, title, effort, status}) else . end + {"turn_action": "end_turn"}'
+        printf '%s\n' "$resp" | jq 'if .chunks then .chunks |= map({id, chunk_index, mode, repo, title, effort, status}) else . end + {"turn_action": "end_turn"}'
     else
         printf '%s\n' "$resp"
     fi

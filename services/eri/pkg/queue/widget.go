@@ -1,7 +1,9 @@
 package queue
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
@@ -37,6 +39,85 @@ func (p *WorkerPool) resolveSynapseURL() string {
 	}
 	if p.DiscordSession() != nil {
 		return "http://synapse.aerial"
+	}
+	return ""
+}
+
+func (p *WorkerPool) resolveVanadisURL() string {
+	if p == nil {
+		return ""
+	}
+	if u := strings.TrimSpace(p.cfg.VanadisURL); u != "" {
+		return strings.TrimRight(u, "/")
+	}
+	if p.DiscordSession() != nil {
+		return "http://vanadis.aerial"
+	}
+	return ""
+}
+
+func (p *WorkerPool) notifyVanadisChunkOutcome(chunkID, turnStatus, turnError string) {
+	chunkID = strings.TrimSpace(chunkID)
+	if p == nil || chunkID == "" {
+		return
+	}
+	vanadisURL := p.resolveVanadisURL()
+	if vanadisURL == "" {
+		return
+	}
+
+	var endpoint string
+	var reqBody []byte
+	var err error
+
+	switch turnStatus {
+	case "success":
+		endpoint = vanadisURL + "/chunks/complete"
+		reqBody, err = json.Marshal(map[string]string{
+			"chunk_id": chunkID,
+		})
+	case "failed", "timeout":
+		endpoint = vanadisURL + "/chunks/fail"
+		reason := firstNonEmpty(strings.TrimSpace(turnError), "dispatch turn "+turnStatus)
+		reqBody, err = json.Marshal(map[string]string{
+			"chunk_id": chunkID,
+			"reason":   reason,
+		})
+	default:
+		return
+	}
+
+	if err != nil {
+		log.Printf("[WorkerPool] Warning marshalling vanadis chunk %s payload: %v", chunkID, err)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(reqBody))
+	if err != nil {
+		log.Printf("[WorkerPool] Warning creating vanadis chunk %s request: %v", chunkID, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("[WorkerPool] Warning notifying vanadis chunk %s outcome (%s): %v", chunkID, turnStatus, err)
+		return
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		log.Printf("[WorkerPool] Warning notifying vanadis chunk %s outcome (%s): unexpected status %d", chunkID, turnStatus, resp.StatusCode)
+	}
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
 	}
 	return ""
 }
