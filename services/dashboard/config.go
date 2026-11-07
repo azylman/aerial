@@ -197,10 +197,8 @@ type DashboardConfig struct {
 	GHToken       string
 	GitCommit     string
 	GitSyncURL    string
-	HangarURL     string
 	ConfigPath    string
 	APIBaseURL    string
-	NomadAddr     string
 	KubeAPIServer string
 	VanadisURL    string
 	HaroURL       string
@@ -211,10 +209,8 @@ type DashboardYAMLConfig struct {
 	Port          string   `yaml:"port"`
 	EriURL        string   `yaml:"eri_url"`
 	MemoryURL     string   `yaml:"memory_url"`
-	HangarURL     string   `yaml:"hangar_url"`
 	GHRepos       []string `yaml:"github_repos"`
 	ConfigPath    string   `yaml:"config_path"`
-	NomadAddr     string   `yaml:"nomad_addr"`
 	KubeAPIServer string   `yaml:"kube_api_server"`
 	VanadisURL    string   `yaml:"vanadis_url"`
 	HaroURL       string   `yaml:"haro_url"`
@@ -282,7 +278,6 @@ func LoadConfigFile(path string, lookup func(string) string) (DashboardConfig, e
 	if memoryURL == "" {
 		return DashboardConfig{}, fmt.Errorf("config: memory_url is required in %s", cleanPath)
 	}
-	hangarURL := strings.TrimSpace(ycfg.HangarURL)
 	haroURL := strings.TrimSpace(ycfg.HaroURL)
 	if haroURL == "" {
 		return DashboardConfig{}, fmt.Errorf("config: haro_url is required in %s", cleanPath)
@@ -309,8 +304,6 @@ func LoadConfigFile(path string, lookup func(string) string) (DashboardConfig, e
 		cfgPath = cleanPath
 	}
 
-	nomadAddr := strings.TrimSpace(ycfg.NomadAddr)
-
 	kubeAPIServer := strings.TrimSpace(ycfg.KubeAPIServer)
 	if kubeAPIServer == "" {
 		kubeAPIServer = strings.TrimSpace(lookup("KUBE_API_SERVER"))
@@ -332,10 +325,7 @@ func LoadConfigFile(path string, lookup func(string) string) (DashboardConfig, e
 		GHRepos:       repos,
 		GHToken:       ghToken,
 		GitCommit:     gitCommit,
-		GitSyncURL:    hangarURL,
-		HangarURL:     hangarURL,
 		ConfigPath:    cfgPath,
-		NomadAddr:     nomadAddr,
 		KubeAPIServer: kubeAPIServer,
 		VanadisURL:    vanadisURL,
 		HaroURL:       haroURL,

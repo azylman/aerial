@@ -718,6 +718,74 @@ func startLeaderHandoff(
 	}
 }
 
+// resolveGitSyncTarget returns the evaluated symlink target or git commit/modtime for a directory,
+// allowing detection of git-sync commit flips or worktree switches.
+func resolveGitSyncTarget(path string) string {
+	if target, err := os.Readlink(path); err == nil {
+		return target
+	}
+	headPath := filepath.Join(path, ".git", "HEAD")
+	if data, err := os.ReadFile(headPath); err == nil {
+		head := strings.TrimSpace(string(data))
+		if refTarget, ok := strings.CutPrefix(head, "ref: "); ok {
+			refPath := filepath.Join(path, ".git", refTarget)
+			if refData, err := os.ReadFile(refPath); err == nil {
+				return strings.TrimSpace(string(refData))
+			}
+		}
+		return head
+	}
+	if fi, err := os.Stat(path); err == nil {
+		return fmt.Sprintf("%d-%d", fi.ModTime().UnixNano(), fi.Size())
+	}
+	return ""
+}
+
+var (
+	aerialShareRoot = "/share/aerial"
+	configShareRoot = "/share/aerial-config"
+)
+
+func pollGitSyncTargets(lastAerial, lastConfig string, reloadConfig func(string)) (string, string) {
+	currentAerial := resolveGitSyncTarget(aerialShareRoot)
+	currentConfig := resolveGitSyncTarget(configShareRoot)
+
+	aerialChanged := currentAerial != "" && lastAerial != "" && currentAerial != lastAerial
+	configChanged := currentConfig != "" && lastConfig != "" && currentConfig != lastConfig
+
+	if aerialChanged || configChanged {
+		log.Printf("[git-sync] Detected checkout change (aerial: %s -> %s, config: %s -> %s), triggering reload",
+			lastAerial, currentAerial, lastConfig, currentConfig)
+		reloadConfig("git-sync")
+		return currentAerial, currentConfig
+	}
+
+	if lastAerial == "" && currentAerial != "" {
+		lastAerial = currentAerial
+	}
+	if lastConfig == "" && currentConfig != "" {
+		lastConfig = currentConfig
+	}
+	return lastAerial, lastConfig
+}
+
+func startGitSyncWatcher(ctx context.Context, reloadConfig func(string)) {
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+
+	lastAerial := resolveGitSyncTarget(aerialShareRoot)
+	lastConfig := resolveGitSyncTarget(configShareRoot)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			lastAerial, lastConfig = pollGitSyncTargets(lastAerial, lastConfig, reloadConfig)
+		}
+	}
+}
+
 func startSIGHUPReloadLoop(ctx context.Context, appHupChan <-chan os.Signal, reloadConfig func(string)) func() {
 	var hupChan <-chan os.Signal
 	var stopHup func()
@@ -748,6 +816,8 @@ func startSIGHUPReloadLoop(ctx context.Context, appHupChan <-chan os.Signal, rel
 			}
 		}
 	}()
+
+	go startGitSyncWatcher(hupCtx, reloadConfig)
 
 	return func() {
 		if stopHup != nil {

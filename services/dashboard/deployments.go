@@ -1,13 +1,27 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"slices"
 	"sort"
 	"strings"
 	"time"
 )
+
+type DockerContainerHealth = struct {
+	Status string `json:"Status"`
+}
+
+type DockerContainerJSON struct {
+	ID      string                 `json:"Id"`
+	Names   []string               `json:"Names"`
+	Image   string                 `json:"Image"`
+	Created int64                  `json:"Created"`
+	State   string                 `json:"State"`
+	Status  string                 `json:"Status"`
+	Labels  map[string]string      `json:"Labels"`
+	Health  *DockerContainerHealth `json:"Health,omitempty"`
+}
 
 type pipelineEntry struct {
 	dep       *DeploymentStatus
@@ -674,162 +688,4 @@ func MergeClusterDeploymentsWithHangar(
 		result = result[:5]
 	}
 	return result
-}
-
-type NomadJobSummaryGroup struct {
-	Queued   int `json:"Queued"`
-	Complete int `json:"Complete"`
-	Failed   int `json:"Failed"`
-	Running  int `json:"Running"`
-	Starting int `json:"Starting"`
-}
-
-type NomadJobItem struct {
-	ID         string `json:"ID"`
-	Name       string `json:"Name"`
-	Status     string `json:"Status"`
-	Type       string `json:"Type"`
-	JobSummary struct {
-		Summary map[string]NomadJobSummaryGroup `json:"Summary"`
-	} `json:"JobSummary"`
-	SubmitTime int64 `json:"SubmitTime"`
-}
-
-type NomadDeploymentStatus struct {
-	Healthy   bool   `json:"Healthy"`
-	Timestamp string `json:"Timestamp"`
-}
-
-type NomadTaskState struct {
-	State     string     `json:"State"`
-	Failed    bool       `json:"Failed"`
-	Restarts  int        `json:"Restarts"`
-	StartedAt *time.Time `json:"StartedAt"`
-}
-
-type NomadAllocItem struct {
-	ID               string                    `json:"ID"`
-	JobID            string                    `json:"JobID"`
-	Name             string                    `json:"Name"`
-	ClientStatus     string                    `json:"ClientStatus"`
-	DesiredStatus    string                    `json:"DesiredStatus"`
-	DeploymentStatus *NomadDeploymentStatus    `json:"DeploymentStatus"`
-	CreateTime       int64                     `json:"CreateTime"`
-	ModifyTime       int64                     `json:"ModifyTime"`
-	TaskStates       map[string]NomadTaskState `json:"TaskStates"`
-}
-
-func indexRunningNomadAllocs(allocs []NomadAllocItem) map[string]NomadAllocItem {
-	runningAllocs := make(map[string]NomadAllocItem)
-	for _, alloc := range allocs {
-		if alloc.ClientStatus != "running" {
-			continue
-		}
-		existing, exists := runningAllocs[alloc.JobID]
-		if !exists || alloc.CreateTime > existing.CreateTime {
-			runningAllocs[alloc.JobID] = alloc
-		}
-	}
-	return runningAllocs
-}
-
-func evaluateRunningAllocStatus(alloc NomadAllocItem, now time.Time) (string, int64) {
-	var uptimeSec int64
-	if alloc.CreateTime > 0 {
-		uptimeSec = max(int64(now.Sub(time.Unix(0, alloc.CreateTime).UTC()).Seconds()), 0)
-	}
-
-	if alloc.DeploymentStatus != nil {
-		if alloc.DeploymentStatus.Healthy {
-			return "healthy", uptimeSec
-		}
-		for _, task := range alloc.TaskStates {
-			if task.State == "running" || task.State == "pending" {
-				return "starting", uptimeSec
-			}
-		}
-		return "unhealthy", uptimeSec
-	}
-
-	for _, task := range alloc.TaskStates {
-		if task.Failed || task.State != "running" {
-			return "unhealthy", uptimeSec
-		}
-	}
-	return "healthy", uptimeSec
-}
-
-func evaluateUnallocatedJobStatus(job NomadJobItem) (string, int64) {
-	startingCount := 0
-	for _, grp := range job.JobSummary.Summary {
-		startingCount += grp.Starting
-	}
-	if job.Status == "pending" || startingCount > 0 {
-		return "starting", 0
-	}
-	return "unhealthy", 0
-}
-
-func resolveNomadJobServiceStatus(job NomadJobItem, runningAllocs map[string]NomadAllocItem, now time.Time) (string, int64) {
-	jobID := job.ID
-	if jobID == "" {
-		jobID = job.Name
-	}
-	alloc, hasAlloc := runningAllocs[jobID]
-	if !hasAlloc && job.Name != "" {
-		alloc, hasAlloc = runningAllocs[job.Name]
-	}
-	if hasAlloc {
-		return evaluateRunningAllocStatus(alloc, now)
-	}
-	return evaluateUnallocatedJobStatus(job)
-}
-
-// ParseNomadClusterState parses Nomad jobs and allocations into unified ServiceStatus items.
-func ParseNomadClusterState(jobsData, allocsData []byte, now time.Time) ([]ServiceStatus, error) {
-	if now.IsZero() {
-		now = time.Now().UTC()
-	}
-
-	var jobs []NomadJobItem
-	if err := json.Unmarshal(jobsData, &jobs); err != nil {
-		return nil, fmt.Errorf("failed to parse nomad jobs: %w", err)
-	}
-
-	var allocs []NomadAllocItem
-	if err := json.Unmarshal(allocsData, &allocs); err != nil {
-		return nil, fmt.Errorf("failed to parse nomad allocations: %w", err)
-	}
-
-	runningAllocs := indexRunningNomadAllocs(allocs)
-
-	services := make([]ServiceStatus, 0, len(jobs))
-	for _, job := range jobs {
-		if job.Type != "" && job.Type != "service" {
-			continue
-		}
-
-		jobID := job.ID
-		if jobID == "" {
-			jobID = job.Name
-		}
-		if jobID == "" {
-			continue
-		}
-
-		status, uptimeSec := resolveNomadJobServiceStatus(job, runningAllocs, now)
-
-		services = append(services, ServiceStatus{
-			Name:          jobID,
-			Status:        status,
-			UptimeSeconds: uptimeSec,
-			LastCheckTime: now,
-		})
-	}
-
-	sort.Slice(services, func(i, j int) bool {
-		return services[i].Name < services[j].Name
-	})
-
-	return services, nil
 }

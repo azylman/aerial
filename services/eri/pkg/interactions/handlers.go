@@ -447,7 +447,7 @@ func (r *Router) trackDeployProgress(s *discordgo.Session, interaction *discordg
 	// 5-stage progress simulation with 3-5s throttling
 	stages := []string{
 		"⚙️ Applying channel policy change... `[2/5: CI Check]`",
-		"⬇️ Syncing repository with host... `[3/5: Hangar Sync]`",
+		"⬇️ Syncing repository with host... `[3/5: Flux Sync]`",
 		"🔄 Hot-reloading gateway policies... `[4/5: Hot-Reload]`",
 		fmt.Sprintf("✅ Channel policy live for <#%s> (`%s: %s`) `[5/5: Live]`", channelID, key, val),
 	}

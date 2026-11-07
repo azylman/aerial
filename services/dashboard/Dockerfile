@@ -16,6 +16,7 @@ FROM alpine:3.24
 RUN apk add --no-cache ca-certificates
 WORKDIR /app
 COPY --from=builder --link /app/aerial-dashboard .
+COPY services/dashboard/static /app/static
 EXPOSE 8080
 HEALTHCHECK --interval=15s --timeout=5s --start-period=5s --start-interval=2s --retries=3 \
   CMD wget -q --spider http://127.0.0.1:8080/health || exit 1

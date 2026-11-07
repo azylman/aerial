@@ -60,7 +60,6 @@ func TestBuildAgyEnv(t *testing.T) {
 		"op_service_account_token=s17",
 		"1PASSWORD_SERVICE_ACCOUNT_TOKEN=s18",
 		"qnap_pass=s19",
-		"NOMAD_TOKEN=s20",
 		"infisical_client_secret=s21",
 		"CLOUDFLARE_MCP_TOKEN=s22",
 		"ubereats_mcp_token=s23",
@@ -90,9 +89,9 @@ func TestBuildAgyEnv(t *testing.T) {
 			[]string{"AERIAL_VANADIS_CHUNK_ID=stale-chunk", "HOME=/root", "USERPROFILE=C:\\root", "GEMINI_CLI_HOME=/gemini"},
 		},
 		{
-			AgyEnvInput{BaseEnv: []string{"CUSTOM_BASE=1", "GEMINI_API_KEY=ambient-key", "ANTIGRAVITY_API_KEY=ambient-key", "GOOGLE_GENAI_API_KEY=ambient-key", "gemini_api_key=ambient2", "GITHUB_PAT=secret-pat", "DISCORD_TOKEN=secret-discord", "DATABASE_URL=postgres://leak", "NOMAD_TOKEN=secret-nomad", "AERIAL_VANADIS_CHUNK_ID=stale-chunk", "VANADIS_CHUNK_ID=stale-legacy-chunk", "MALFORMED_NO_EQUALS", "OTHER_ENV=kept"}},
+			AgyEnvInput{BaseEnv: []string{"CUSTOM_BASE=1", "GEMINI_API_KEY=ambient-key", "ANTIGRAVITY_API_KEY=ambient-key", "GOOGLE_GENAI_API_KEY=ambient-key", "gemini_api_key=ambient2", "GITHUB_PAT=secret-pat", "DISCORD_TOKEN=secret-discord", "DATABASE_URL=postgres://leak", "AERIAL_VANADIS_CHUNK_ID=stale-chunk", "VANADIS_CHUNK_ID=stale-legacy-chunk", "MALFORMED_NO_EQUALS", "OTHER_ENV=kept"}},
 			[]string{"CUSTOM_BASE=1", "OTHER_ENV=kept", "MALFORMED_NO_EQUALS"},
-			[]string{"ambient-key", "ambient2", "secret-pat", "secret-discord", "postgres://leak", "secret-nomad", "AERIAL_VANADIS_CHUNK_ID=stale-chunk", "VANADIS_CHUNK_ID=stale-legacy-chunk"},
+			[]string{"ambient-key", "ambient2", "secret-pat", "secret-discord", "postgres://leak", "AERIAL_VANADIS_CHUNK_ID=stale-chunk", "VANADIS_CHUNK_ID=stale-legacy-chunk"},
 		},
 		{
 			AgyEnvInput{TargetID: "discord-1564872824148205579"},

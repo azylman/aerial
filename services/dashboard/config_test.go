@@ -366,18 +366,6 @@ github_repos:
 	badYAMLPath := filepath.Join(tmpDir, "bad.yaml")
 	_ = os.WriteFile(badYAMLPath, []byte("port: [unclosed"), 0o644)
 
-	noHangarYAML := `
-port: "8084"
-eri_url: "http://eri.aerial"
-memory_url: "http://coven.aerial"
-haro_url: "http://haro.aerial"
-vanadis_url: "http://vanadis.aerial"
-github_repos:
-  - "azylman/aerial"
-`
-	noHangarPath := filepath.Join(tmpDir, "no_hangar.yaml")
-	_ = os.WriteFile(noHangarPath, []byte(noHangarYAML), 0o644)
-
 	tests := []struct {
 		name              string
 		path              string
@@ -388,15 +376,11 @@ github_repos:
 		wantPort          string
 		wantBrainURL      string
 		wantMemoryURL     string
-		wantHangarURL     string
-		wantGitSyncURL    string
-		wantEmptyURLs     bool
 		wantHaroURL       string
 		wantVanadisURL    string
 		wantGHRepo        string
 		wantGHRepos       []string
 		wantGHToken       string
-		wantNomadAddr     string
 		wantKubeAPIServer string
 		wantConfigPath    string
 	}{
@@ -410,14 +394,11 @@ github_repos:
 			wantPort:       "8084",
 			wantBrainURL:   "http://eri.aerial",
 			wantMemoryURL:  "http://coven.aerial",
-			wantHangarURL:  "http://hangar.aerial",
-			wantGitSyncURL: "http://hangar.aerial",
 			wantHaroURL:    "http://haro.aerial",
 			wantVanadisURL: "http://vanadis.aerial",
 			wantGHRepo:     "azylman/aerial",
 			wantGHRepos:    []string{"azylman/aerial", "azylman/aerial-config"},
 			wantGHToken:    "pat-12345",
-			wantNomadAddr:  "http://nomad.cluster:4646",
 			wantConfigPath: validPath,
 		},
 		{
@@ -429,8 +410,6 @@ github_repos:
 			wantPort:       "8084",
 			wantBrainURL:   "http://eri.aerial",
 			wantMemoryURL:  "http://coven.aerial",
-			wantHangarURL:  "http://hangar.aerial",
-			wantGitSyncURL: "http://hangar.aerial",
 			wantHaroURL:    "http://haro.aerial",
 			wantVanadisURL: "http://vanadis.aerial",
 			wantGHRepo:     "azylman/single-repo",
@@ -444,8 +423,6 @@ github_repos:
 			wantPort:       "8084",
 			wantBrainURL:   "http://eri-direct.aerial",
 			wantMemoryURL:  "http://coven.aerial",
-			wantHangarURL:  "http://hangar.aerial",
-			wantGitSyncURL: "http://hangar.aerial",
 			wantHaroURL:    "http://haro.aerial",
 			wantVanadisURL: "http://vanadis.aerial",
 			wantGHRepo:     "azylman/aerial",
@@ -461,8 +438,6 @@ github_repos:
 			wantPort:       "8084",
 			wantBrainURL:   "http://env-eri.aerial:8088",
 			wantMemoryURL:  "http://coven.aerial",
-			wantHangarURL:  "http://hangar.aerial",
-			wantGitSyncURL: "http://hangar.aerial",
 			wantHaroURL:    "http://haro.aerial",
 			wantVanadisURL: "http://vanadis.aerial",
 			wantGHRepo:     "azylman/aerial",
@@ -477,21 +452,6 @@ github_repos:
 			wantGHRepo:     "azylman/aerial",
 		},
 		{
-			name:           "missing hangar_url succeeds with empty HangarURL",
-			path:           noHangarPath,
-			wantPort:       "8084",
-			wantBrainURL:   "http://eri.aerial",
-			wantMemoryURL:  "http://coven.aerial",
-			wantHangarURL:  "",
-			wantGitSyncURL: "",
-			wantEmptyURLs:  true,
-			wantHaroURL:    "http://haro.aerial",
-			wantVanadisURL: "http://vanadis.aerial",
-			wantGHRepo:     "azylman/aerial",
-			wantGHRepos:    []string{"azylman/aerial"},
-			wantConfigPath: noHangarPath,
-		},
-		{
 			name:      "nil lookup defaults to os.Getenv",
 			path:      validPath,
 			nilLookup: true,
@@ -503,8 +463,6 @@ github_repos:
 			wantPort:          "8084",
 			wantBrainURL:      "http://eri.aerial",
 			wantMemoryURL:     "http://coven.aerial",
-			wantHangarURL:     "http://hangar.aerial",
-			wantGitSyncURL:    "http://hangar.aerial",
 			wantHaroURL:       "http://haro.aerial",
 			wantVanadisURL:    "http://vanadis.aerial",
 			wantGHRepo:        "azylman/aerial",
@@ -521,13 +479,10 @@ github_repos:
 			wantPort:          "8084",
 			wantBrainURL:      "http://eri.aerial",
 			wantMemoryURL:     "http://coven.aerial",
-			wantHangarURL:     "http://hangar.aerial",
-			wantGitSyncURL:    "http://hangar.aerial",
 			wantHaroURL:       "http://haro.aerial",
 			wantVanadisURL:    "http://vanadis.aerial",
 			wantGHRepo:        "azylman/aerial",
 			wantGHRepos:       []string{"azylman/aerial", "azylman/aerial-config"},
-			wantNomadAddr:     "http://nomad.cluster:4646",
 			wantKubeAPIServer: "https://k8s-env.cluster:6443",
 			wantConfigPath:    validPath,
 		},
@@ -541,13 +496,10 @@ github_repos:
 			wantPort:          "8084",
 			wantBrainURL:      "http://eri.aerial",
 			wantMemoryURL:     "http://coven.aerial",
-			wantHangarURL:     "http://hangar.aerial",
-			wantGitSyncURL:    "http://hangar.aerial",
 			wantHaroURL:       "http://haro.aerial",
 			wantVanadisURL:    "http://vanadis.aerial",
 			wantGHRepo:        "azylman/aerial",
 			wantGHRepos:       []string{"azylman/aerial", "azylman/aerial-config"},
-			wantNomadAddr:     "http://nomad.cluster:4646",
 			wantKubeAPIServer: "https://10.43.0.1:6443",
 			wantConfigPath:    validPath,
 		},
@@ -560,13 +512,10 @@ github_repos:
 			wantPort:          "8084",
 			wantBrainURL:      "http://eri.aerial",
 			wantMemoryURL:     "http://coven.aerial",
-			wantHangarURL:     "http://hangar.aerial",
-			wantGitSyncURL:    "http://hangar.aerial",
 			wantHaroURL:       "http://haro.aerial",
 			wantVanadisURL:    "http://vanadis.aerial",
 			wantGHRepo:        "azylman/aerial",
 			wantGHRepos:       []string{"azylman/aerial", "azylman/aerial-config"},
-			wantNomadAddr:     "http://nomad.cluster:4646",
 			wantKubeAPIServer: "https://10.43.0.1:443",
 			wantConfigPath:    validPath,
 		},
@@ -632,12 +581,6 @@ github_repos:
 			if tc.wantMemoryURL != "" && cfg.MemoryURL != tc.wantMemoryURL {
 				t.Errorf("MemoryURL = %q, want %q", cfg.MemoryURL, tc.wantMemoryURL)
 			}
-			if (tc.wantHangarURL != "" || tc.wantEmptyURLs) && cfg.HangarURL != tc.wantHangarURL {
-				t.Errorf("HangarURL = %q, want %q", cfg.HangarURL, tc.wantHangarURL)
-			}
-			if (tc.wantGitSyncURL != "" || tc.wantEmptyURLs) && cfg.GitSyncURL != tc.wantGitSyncURL {
-				t.Errorf("GitSyncURL = %q, want %q", cfg.GitSyncURL, tc.wantGitSyncURL)
-			}
 			if tc.wantHaroURL != "" && cfg.HaroURL != tc.wantHaroURL {
 				t.Errorf("HaroURL = %q, want %q", cfg.HaroURL, tc.wantHaroURL)
 			}
@@ -652,9 +595,6 @@ github_repos:
 			}
 			if tc.wantGHToken != "" && cfg.GHToken != tc.wantGHToken {
 				t.Errorf("GHToken = %q, want %q", cfg.GHToken, tc.wantGHToken)
-			}
-			if tc.wantNomadAddr != "" && cfg.NomadAddr != tc.wantNomadAddr {
-				t.Errorf("NomadAddr = %q, want %q", cfg.NomadAddr, tc.wantNomadAddr)
 			}
 			if tc.wantKubeAPIServer != "" && cfg.KubeAPIServer != tc.wantKubeAPIServer {
 				t.Errorf("KubeAPIServer = %q, want %q", cfg.KubeAPIServer, tc.wantKubeAPIServer)

@@ -1945,11 +1945,6 @@ func TestPureHelpers_ValidateEventWatchSpec(t *testing.T) {
 		{"github empty branch rejected", "github", "aerial:", "ci_passed", nil, "", "", "", true},
 		{"github unmanaged repo rejected", "github", "unmanaged/repo:main", "ci_passed", nil, "", "", "", true},
 		{"github invalid event_type", "github", "aerial", "completed", nil, "", "", "", true},
-		// nomad
-		{"nomad deploy_success", "nomad", "aerial-brain", "deploy_success", nil, "nomad", "aerial-brain", "deploy_success", false},
-		{"nomad uppercase normalized deploy_failed", "nomad", "AERIAL-POSTGRES", "deploy_failed", nil, "nomad", "aerial-postgres", "deploy_failed", false},
-		{"nomad invalid event_type", "nomad", "aerial-brain", "started", nil, "", "", "", true},
-		{"nomad invalid target characters", "nomad", "aerial_brain", "deploy_success", nil, "", "", "", true},
 		// unknown source vs configured extra_event_sources
 		{"unknown source without extraSources", "custom_iot", "device.washer", "idle", nil, "", "", "", true},
 		{"configured extra source valid", "Custom_IoT", "device.washer", "IDLE", []string{"custom_iot"}, "custom_iot", "device.washer", "idle", false},
