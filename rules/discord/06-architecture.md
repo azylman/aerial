@@ -11,7 +11,7 @@ Aerial runs on a 3-node NixOS 26.05 k3s Kubernetes cluster supervised by Flux CD
   - **`haro`**: Persistent scheduling, heartbeat, and event-watch orchestration service evaluating cron, one-shot, and event triggers and dispatching due turns to `eri`.
   - **`coven`**: Semantic fact extraction, ACT-R memory decay, and procedural skill synthesis service.
   - **`vanadis`**: Autonomous multi-chunk build queue orchestrator with JIT symbol line-slice resolution.
-  - **`postgres`**: CloudNativePG 2-instance PostgreSQL 18 + `pgvector` cluster with native `:9187` Prometheus metrics for production persistence (messages, sessions, atomic CAS task queues, schedules, event triggers, vector embeddings, PR registry, and Grafana).
+  - **`postgres`**: CloudNativePG 2-instance PostgreSQL 18 + `pgvector` cluster with native `:9187` Prometheus metrics for production persistence (messages, sessions, atomic CAS task queues, schedules, event triggers, vector embeddings, PR registry, and Grafana), also hosting the logical `docket` database for `docket-store` (Vikunja) and `docket-mcp`.
   - **`flux-system` / `git-sync`**: Flux CD (`flux-system`) reconciling `./k8s` Kustomizations and Kubernetes `git-sync` sidecar initContainers mounting `/share/aerial:ro` and `/share/aerial-config:ro` into `eri`.
   - **`coredns`**: Kubernetes CoreDNS daemon rewriting internal DNS records (`*.aerial`, `*.lan` -> `*.default.svc.cluster.local`).
   - **`infisical`**: Centralized secret management and automated rotation backed by Valkey 9, dynamically syncing secrets into Kubernetes Secrets (`shared-secrets`).
@@ -32,7 +32,7 @@ Aerial runs on a 3-node NixOS 26.05 k3s Kubernetes cluster supervised by Flux CD
   - **`dashboard`**: Web status HUD rendering live queue state, schedules, memory, and turn health.
   - **`docs`**: Living documentation portal serving architectural specifications and runbooks.
   - **`agentsview`**: Web observability dashboard rendering agent session transcripts and tool traces.
-  - **`synapse`**: Event-driven ingress router (`:4020`) owning the live Discord Gateway WebSocket connection, startup catch-up sweeps, and River-backed message/interaction ingestion to `eri`, plus routing GitHub push/CI webhooks to Flux CD (`FLUX_RECEIVER_URL`), `/webhooks/flux` deployment notifications, Vanadis chunk progression, and Infisical secret sync to Kubernetes Secrets (`shared-secrets`).
+  - **`synapse`**: Event-driven ingress router (`:4020`) owning the live Discord Gateway WebSocket connection, startup catch-up sweeps, and River-backed message/interaction ingestion to `eri`, plus routing GitHub push/CI webhooks to Flux CD (`FLUX_RECEIVER_URL`), updating `ConfigMap/aerial-image-tags` in `flux-system` and triggering Flux Kustomization reconciliation (`postBuild.substituteFrom`) on CI image promotions, `/webhooks/flux` deployment notifications, Vanadis chunk progression, and Infisical secret sync to Kubernetes Secrets (`shared-secrets`).
   - **`edge-gateway`**: NGINX Gateway Fabric ingress gateway (`HTTPRoute`s on `:4021`) exposing secure external tunnel webhooks into the cluster mesh.
 
 - **Observability, AI Inference & Supporting Services**:
@@ -49,8 +49,8 @@ Aerial runs on a 3-node NixOS 26.05 k3s Kubernetes cluster supervised by Flux CD
   - **`prospera`**: Autonomous PSTN voice call and SMS interaction service.
 
 - **Heterogeneous 3-Node Cluster Topology**:
-  - **`quiet-zero`** (Storage & Standard Agent Node): NixOS 26.05 k3s agent (`compute-tier=standard`, `storage-tier=nvme`) hosting persistent storage workloads, CloudNativePG PostgreSQL 18 + pgvector, and standard microservices.
-  - **`calibarn`** (k3s Control-Plane Server & AI / GPU Compute Node): NixOS 26.05 k3s server with NVIDIA GPU acceleration hosting `eri`, `vanadis`, `coven`, `haro`, `synapse`, `agentsview`, `senses`, `pjev`, `vision`, `prospera`, `kernel-browser`, and 8 self-hosted GitHub Actions CI & RoboRev runner deployments.
+  - **`quiet-zero`** (Storage & Standard Agent Node): NixOS 26.05 k3s agent (`compute-tier=standard`, `storage-tier=nvme`) hosting persistent storage workloads, CloudNativePG PostgreSQL 18 + pgvector, `docket-store` (Vikunja), and standard microservices.
+  - **`calibarn`** (k3s Control-Plane Server & AI / GPU Compute Node): NixOS 26.05 k3s server with NVIDIA GPU acceleration hosting `eri`, `vanadis`, `coven`, `haro`, `synapse`, `agentsview`, `senses`, `pjev`, `vision`, `prospera`, `kernel-browser`, and 8 scale-to-zero Actions Runner Controller (ARC) AutoscalingRunnerSet HelmReleases for GitHub Actions CI & RoboRev.
   - **`cockpit`** (Touch Kiosk Node): NixOS 26.05 k3s kiosk agent (`role=kiosk:NoSchedule`) hosting `kiosk-display` (Wayland cage + Chromium + PipeWire), microphone capture (`kiosk-ear`), wake-word detection, remote display control (`kiosk-remote`), Cast watcher (`kiosk-cast-watcher`), WebRTC media streaming (`kiosk-go2rtc`), and display power CronJobs.
 
 To inspect active cluster resources, pod status, or logs, query Kubernetes via `kubernetes-mcp` (`pods_list`, `pods_get`, `pods_log`, `events_list`) or inspect `k8s/*.yaml`.
