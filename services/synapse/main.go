@@ -118,8 +118,6 @@ func (s *RouterServer) Routes() http.Handler {
 	mux.HandleFunc("POST /webhooks/generic", s.handleGenericWebhook)
 	mux.HandleFunc("POST /api/webhooks/github", s.handleGitHubWebhook)
 	mux.HandleFunc("POST /webhooks/github", s.handleGitHubWebhook)
-	mux.HandleFunc("POST /api/webhooks/hangar", s.handleHangarWebhook)
-	mux.HandleFunc("POST /webhooks/hangar", s.handleHangarWebhook)
 	mux.HandleFunc("POST /api/webhooks/flux", s.handleFluxWebhook)
 	mux.HandleFunc("POST /webhooks/flux", s.handleFluxWebhook)
 	mux.HandleFunc("POST /api/webhooks/events", s.handleEventsWebhook)
@@ -270,9 +268,9 @@ func (s *RouterServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Hangar Webhook Payloads and Resolution Types
+// Deployment Webhook Payloads and Resolution Types
 
-type HangarDeployEvent struct {
+type DeployEvent struct {
 	Event        string    `json:"event"`                   // "deploy_started", "deploy_success", "deploy_failed", "deploy_rollback"
 	JobName      string    `json:"job_name"`                // Nomad job name (e.g. "webhooks-router", "brain")
 	ExpectedJobs []string  `json:"expected_jobs,omitempty"` // All Nomad jobs expected to deploy for this PR/sync
@@ -288,7 +286,7 @@ type HangarDeployEvent struct {
 	Timestamp    time.Time `json:"timestamp"`
 }
 
-func hangarEventIdempotencyKey(evt HangarDeployEvent, originPrefix string) string {
+func deployEventIdempotencyKey(evt DeployEvent, originPrefix string) string {
 	if evt.CommitSHA == "" || evt.JobName == "" {
 		return randomNonce()
 	}
@@ -298,11 +296,11 @@ func hangarEventIdempotencyKey(evt HangarDeployEvent, originPrefix string) strin
 	return fmt.Sprintf("%s:%s:%s:%s", evt.Event, evt.Repo, evt.JobName, evt.CommitSHA)
 }
 
-func (s *RouterServer) enqueueOrProcessHangarEvent(w http.ResponseWriter, r *http.Request, evt HangarDeployEvent, originPrefix string) {
-	logPrefix := firstNonEmpty(originPrefix, "hangar")
+func (s *RouterServer) enqueueOrProcessDeployEvent(w http.ResponseWriter, r *http.Request, evt DeployEvent, originPrefix string) {
+	logPrefix := firstNonEmpty(originPrefix, "deploy")
 	if s.riverClient != nil {
-		idempotencyKey := hangarEventIdempotencyKey(evt, originPrefix)
-		if err := s.insertRiverJob(r.Context(), HangarWebhookArgs{IdempotencyKey: idempotencyKey, Event: evt}); err != nil {
+		idempotencyKey := deployEventIdempotencyKey(evt, originPrefix)
+		if err := s.insertRiverJob(r.Context(), DeployWebhookArgs{IdempotencyKey: idempotencyKey, Event: evt}); err != nil {
 			log.Printf("[synapse] [%s] ERROR: failed to insert job into river: %v", logPrefix, err)
 			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist webhook"})
 			return
@@ -315,7 +313,7 @@ func (s *RouterServer) enqueueOrProcessHangarEvent(w http.ResponseWriter, r *htt
 		return
 	}
 
-	processed, err := s.ProcessHangarEvent(r.Context(), evt)
+	processed, err := s.ProcessDeployEvent(r.Context(), evt)
 	if err != nil {
 		log.Printf("[synapse] [%s] error processing event: %v", logPrefix, err)
 	}
@@ -326,27 +324,6 @@ func (s *RouterServer) enqueueOrProcessHangarEvent(w http.ResponseWriter, r *htt
 		"pr_number": processed.PRNumber,
 		"target_id": processed.TargetID,
 	})
-}
-
-func (s *RouterServer) handleHangarWebhook(w http.ResponseWriter, r *http.Request) {
-	var evt HangarDeployEvent
-	if !readWebhookJSON(w, r, 1<<20, false, &evt) {
-		return
-	}
-	if strings.TrimSpace(evt.Event) == "" {
-		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "missing required fields"})
-		return
-	}
-	if strings.TrimSpace(evt.JobName) == "" {
-		if strings.HasPrefix(evt.Event, "sync_") {
-			evt.JobName = "git-sync"
-		} else {
-			httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "missing required fields"})
-			return
-		}
-	}
-
-	s.enqueueOrProcessHangarEvent(w, r, evt, "")
 }
 
 func (s *RouterServer) resolvePRFromRegistrySHA(ctx context.Context, repo, sha string) (int, string, string, bool) {
@@ -862,13 +839,13 @@ func (s *RouterServer) advanceVanadisChunk(ctx context.Context, repo string, prN
 	return nil
 }
 
-func (s *RouterServer) resolveHangarEventPRNumber(ctx context.Context, evt *HangarDeployEvent) {
+func (s *RouterServer) resolveDeployEventPRNumber(ctx context.Context, evt *DeployEvent) {
 	if evt.CommitSHA == "" || evt.PRNumber != 0 {
 		return
 	}
 	prNum, targetID, _, err := s.ResolveSHA(ctx, evt.Repo, evt.CommitSHA)
 	if err != nil {
-		log.Printf("[synapse] [hangar] failed resolving SHA %s: %v", evt.CommitSHA, err)
+		log.Printf("[synapse] [deploy] failed resolving SHA %s: %v", evt.CommitSHA, err)
 		return
 	}
 	if prNum > 0 {
@@ -877,13 +854,13 @@ func (s *RouterServer) resolveHangarEventPRNumber(ctx context.Context, evt *Hang
 	}
 }
 
-func (s *RouterServer) resolveHangarEventTargetID(ctx context.Context, evt *HangarDeployEvent) {
+func (s *RouterServer) resolveDeployEventTargetID(ctx context.Context, evt *DeployEvent) {
 	if evt.PRNumber <= 0 || evt.TargetID != "" {
 		return
 	}
 	targetID, err := s.ResolveThreadForPR(ctx, evt.Repo, evt.PRNumber)
 	if err != nil {
-		log.Printf("[synapse] [hangar] failed resolving thread for PR %s#%d: %v", evt.Repo, evt.PRNumber, err)
+		log.Printf("[synapse] [deploy] failed resolving thread for PR %s#%d: %v", evt.Repo, evt.PRNumber, err)
 		return
 	}
 	if targetID != "" {
@@ -891,15 +868,15 @@ func (s *RouterServer) resolveHangarEventTargetID(ctx context.Context, evt *Hang
 	}
 }
 
-func (s *RouterServer) enrichHangarEventPRAndTarget(ctx context.Context, evt *HangarDeployEvent) {
-	s.resolveHangarEventPRNumber(ctx, evt)
-	s.resolveHangarEventTargetID(ctx, evt)
+func (s *RouterServer) enrichDeployEventPRAndTarget(ctx context.Context, evt *DeployEvent) {
+	s.resolveDeployEventPRNumber(ctx, evt)
+	s.resolveDeployEventTargetID(ctx, evt)
 	if evt.TargetID == "" && (evt.Event == "deploy_failed" || evt.Event == "deploy_rollback" || evt.Event == "sync_failed") {
 		evt.TargetID = strings.TrimSpace(s.cfg.SystemChannelID)
 	}
 }
 
-func (s *RouterServer) handleHangarDeployStartedRegistry(ctx context.Context, evt HangarDeployEvent) bool {
+func (s *RouterServer) handleDeployStartedRegistry(ctx context.Context, evt DeployEvent) bool {
 	if s.registry == nil || evt.PRNumber == 0 || evt.Event != "deploy_started" || evt.JobName == "" {
 		return false
 	}
@@ -911,18 +888,18 @@ func (s *RouterServer) handleHangarDeployStartedRegistry(ctx context.Context, ev
 	if tID, err := s.registry.TransitionDeploying(ctx, evt.Repo, evt.PRNumber, []string{evt.JobName}); err != nil {
 		log.Printf("[synapse] [registry] warning transitioning pr %s#%d to deploying for job %s: %v", evt.Repo, evt.PRNumber, evt.JobName, err)
 	} else if tID == "" {
-		log.Printf("[synapse] [hangar] skipping deploy_started for %s on %s#%d (job already deployed or PR inactive)", evt.JobName, evt.Repo, evt.PRNumber)
+		log.Printf("[synapse] [deploy] skipping deploy_started for %s on %s#%d (job already deployed or PR inactive)", evt.JobName, evt.Repo, evt.PRNumber)
 		return true
 	} else if s.isNomadBatchTemplateHealthy(ctx, evt.JobName) || s.isNomadInPlaceConfigReloadHealthy(ctx, evt.JobName, evt.Details) {
 		if err := s.HandleNomadJobSuccess(ctx, evt.JobName, firstNonEmpty(evt.DeploymentID, "batch-registered")); err != nil {
-			log.Printf("[synapse] [hangar] warning handling batch job success for %s: %v", evt.JobName, err)
+			log.Printf("[synapse] [deploy] warning handling batch job success for %s: %v", evt.JobName, err)
 		}
 		return true
 	}
 	return false
 }
 
-func (s *RouterServer) recordHangarSyncExpectedJobs(ctx context.Context, evt HangarDeployEvent) bool {
+func (s *RouterServer) recordDeploySyncExpectedJobs(ctx context.Context, evt DeployEvent) bool {
 	if evt.Event != "sync_success" || evt.PRNumber == 0 {
 		return false
 	}
@@ -937,7 +914,7 @@ func (s *RouterServer) recordHangarSyncExpectedJobs(ctx context.Context, evt Han
 	return syncHasExpected
 }
 
-func (s *RouterServer) handleHangarDeployFailedOrRollback(ctx context.Context, evt HangarDeployEvent, prefix string) error {
+func (s *RouterServer) handleDeployFailedOrRollback(ctx context.Context, evt DeployEvent, prefix string) error {
 	targetID := evt.TargetID
 	if s.registry != nil && evt.PRNumber > 0 {
 		tID, updated, err := s.registry.AtomicTransitionDeployFailed(ctx, evt.Repo, evt.PRNumber)
@@ -973,7 +950,7 @@ func (s *RouterServer) handleHangarDeployFailedOrRollback(ctx context.Context, e
 	return nil
 }
 
-func (s *RouterServer) handleHangarSyncFailed(ctx context.Context, evt HangarDeployEvent, prefix string) error {
+func (s *RouterServer) handleDeploySyncFailed(ctx context.Context, evt DeployEvent, prefix string) error {
 	header := fmt.Sprintf("Git sync failed for repo %s (commit: %s, PR #%d).", evt.Repo, evt.CommitSHA, evt.PRNumber)
 	if evt.PRNumber == 0 {
 		header = fmt.Sprintf("Git sync failed for repo %s (commit: %s).", evt.Repo, evt.CommitSHA)
@@ -989,19 +966,19 @@ func (s *RouterServer) handleHangarSyncFailed(ctx context.Context, evt HangarDep
 	return s.dispatchAlertWithPrompt(ctx, evt.TargetID, "sync_failed", dmMsg, prompt, s.vanadisPromptOpts(ctx, evt.Repo, evt.PRNumber))
 }
 
-func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployEvent) (*HangarDeployEvent, error) {
-	s.enrichHangarEventPRAndTarget(ctx, &evt)
+func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) (*DeployEvent, error) {
+	s.enrichDeployEventPRAndTarget(ctx, &evt)
 
-	log.Printf("[synapse] [hangar] [deploy] event=%s job=%s repo=%s pr=%d commit=%s status=%s target_id=%s deployment_id=%s details=%q",
+	log.Printf("[synapse] [deploy] event=%s job=%s repo=%s pr=%d commit=%s status=%s target_id=%s deployment_id=%s details=%q",
 		evt.Event, evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA, evt.Status, evt.TargetID, evt.DeploymentID, evt.Details)
 
-	s.evaluateHangarEventTriggers(ctx, evt)
+	s.evaluateFluxEventTriggers(ctx, evt)
 
-	if s.handleHangarDeployStartedRegistry(ctx, evt) {
+	if s.handleDeployStartedRegistry(ctx, evt) {
 		return &evt, nil
 	}
 
-	syncHasExpected := s.recordHangarSyncExpectedJobs(ctx, evt)
+	syncHasExpected := s.recordDeploySyncExpectedJobs(ctx, evt)
 
 	if !s.isValidAlertTarget(evt.TargetID) || s.dispatcher == nil {
 		if evt.Event == "sync_success" && evt.PRNumber > 0 {
@@ -1032,11 +1009,11 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 		}
 		return &evt, s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, evt.JobName, evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID)
 	case "deploy_rollback", "deploy_failed":
-		return &evt, s.handleHangarDeployFailedOrRollback(ctx, evt, prefix)
+		return &evt, s.handleDeployFailedOrRollback(ctx, evt, prefix)
 	case "sync_success":
-		return &evt, s.handleHangarSyncSuccess(ctx, evt, syncHasExpected)
+		return &evt, s.handleDeploySyncSuccess(ctx, evt, syncHasExpected)
 	case "sync_failed":
-		return &evt, s.handleHangarSyncFailed(ctx, evt, prefix)
+		return &evt, s.handleDeploySyncFailed(ctx, evt, prefix)
 	}
 	return &evt, nil
 }
@@ -1085,7 +1062,7 @@ func (s *RouterServer) shouldSuppressDuplicateDeploySuccess(ctx context.Context,
 	return false
 }
 
-func (s *RouterServer) handleHangarSyncSuccess(ctx context.Context, evt HangarDeployEvent, syncHasExpected bool) error {
+func (s *RouterServer) handleDeploySyncSuccess(ctx context.Context, evt DeployEvent, syncHasExpected bool) error {
 	if evt.PRNumber <= 0 {
 		return nil
 	}
@@ -1234,7 +1211,7 @@ func setupRiverWorkerPool(ctx context.Context, server *RouterServer, cfg Config)
 
 	workers := river.NewWorkers()
 	river.AddWorker(workers, &GitHubWebhookWorker{server: server})
-	river.AddWorker(workers, &HangarWebhookWorker{server: server})
+	river.AddWorker(workers, &DeployWebhookWorker{server: server})
 	river.AddWorker(workers, &NomadEventWorker{server: server})
 	river.AddWorker(workers, &NomadCrashAlertWorker{server: server})
 	river.AddWorker(workers, &WidgetSyncWorker{server: server})
@@ -1274,7 +1251,7 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 	defer cancel()
 
 	server := NewRouterServer(cfg, nil)
-	dispatcher := NewDefaultOutboundDispatcher(cfg.HangarURL, cfg.BrainURL, nil)
+	dispatcher := NewDefaultOutboundDispatcher(cfg.BrainURL, nil)
 	dispatcher.SetFluxReceiverURL(cfg.FluxReceiverURL)
 	server.SetDispatcher(dispatcher)
 

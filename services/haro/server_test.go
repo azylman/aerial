@@ -265,9 +265,9 @@ func TestServer_HTTPEndpointsAndMCPProtocol(t *testing.T) {
 		{"update_heartbeat alias success", `{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"update_heartbeat","arguments":{"schedule_id":"test-hb-id","effort":"high","title_prefix":"Updated"}}}`, false, false},
 		{"cancel_schedule missing", `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"cancel_schedule","arguments":{"schedule_id":"none"}}}`, true, false},
 		{"cancel_schedule success", `{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"cancel_schedule","arguments":{"schedule_id":"test-once-id"}}}`, false, false},
-		{"watch_event success", `{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"watch_event","arguments":{"channel_id":"123456789012345678","source":"hangar","target":"aerial","event_type":"sync_success","prompt":"deploy notification"}}}`, false, false},
-		{"watch_event thread_id success", `{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"watch_event","arguments":{"thread_id":"123456789012345678","source":"hangar","target":"aerial","event_type":"sync_success","prompt":"deploy notification"}}}`, false, false},
-		{"watch_event invalid", `{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"watch_event","arguments":{"channel_id":"bad-snowflake","source":"hangar","target":"aerial","event_type":"sync_success","prompt":"deploy notification"}}}`, true, false},
+		{"watch_event success", `{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"watch_event","arguments":{"channel_id":"123456789012345678","source":"flux","target":"aerial","event_type":"sync_success","prompt":"deploy notification"}}}`, false, false},
+		{"watch_event thread_id success", `{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"watch_event","arguments":{"thread_id":"123456789012345678","source":"flux","target":"aerial","event_type":"sync_success","prompt":"deploy notification"}}}`, false, false},
+		{"watch_event invalid", `{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"watch_event","arguments":{"channel_id":"bad-snowflake","source":"flux","target":"aerial","event_type":"sync_success","prompt":"deploy notification"}}}`, true, false},
 		{"list_event_watches", `{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"list_event_watches","arguments":{}}}`, false, false},
 		{"cancel_event_watch missing", `{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"cancel_event_watch","arguments":{"watch_id":"missing-watch"}}}`, true, false},
 		{"cancel_event_watch alias missing", `{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"cancel_event_watch","arguments":{"id":"missing-watch"}}}`, true, false},
@@ -671,10 +671,10 @@ func TestDB_OperationsAndErrors(t *testing.T) {
 			if err := ValidateLiveEventTarget(tc.ctx, tc.db, "vanadis_build", "b1"); err == nil {
 				t.Errorf("%s: expected err ValidateLiveEventTarget", tc.name)
 			}
-			if _, err := CheckEventTriggers(tc.ctx, tc.db, "hangar", []string{"aerial"}, "sync_success"); err == nil {
+			if _, err := CheckEventTriggers(tc.ctx, tc.db, "flux", []string{"aerial"}, "sync_success"); err == nil {
 				t.Errorf("%s: expected err CheckEventTriggers", tc.name)
 			}
-			if _, err := ClaimEventTriggers(tc.ctx, tc.db, "hangar", []string{"aerial"}, "sync_success"); err == nil {
+			if _, err := ClaimEventTriggers(tc.ctx, tc.db, "flux", []string{"aerial"}, "sync_success"); err == nil {
 				t.Errorf("%s: expected err ClaimEventTriggers", tc.name)
 			}
 			if _, err := HandleListEventWatches(tc.ctx, tc.db, nil); err == nil {
@@ -686,7 +686,7 @@ func TestDB_OperationsAndErrors(t *testing.T) {
 			if _, err := HandleScheduleHeartbeat(tc.ctx, tc.db, "UTC", map[string]any{"channel_id": "123456789012345678", "cron_expr": "0 0 * * *", "prompt": "p"}); err == nil {
 				t.Errorf("%s: expected err HandleScheduleHeartbeat", tc.name)
 			}
-			if _, err := HandleWatchEvent(tc.ctx, tc.db, map[string]any{"channel_id": "123456789012345678", "source": "hangar", "target": "aerial", "event_type": "sync_success", "prompt": "p"}); err == nil {
+			if _, err := HandleWatchEvent(tc.ctx, tc.db, map[string]any{"channel_id": "123456789012345678", "source": "flux", "target": "aerial", "event_type": "sync_success", "prompt": "p"}); err == nil {
 				t.Errorf("%s: expected err HandleWatchEvent", tc.name)
 			}
 		})

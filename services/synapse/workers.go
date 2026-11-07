@@ -354,23 +354,23 @@ func (w *GitHubWebhookWorker) Work(ctx context.Context, job *river.Job[GitHubWeb
 	})
 }
 
-// HangarWebhookArgs contains payload data for durable background processing of Hangar webhooks.
-type HangarWebhookArgs struct {
-	IdempotencyKey string            `json:"idempotency_key,omitempty" river:"unique"`
-	Event          HangarDeployEvent `json:"event"`
+// DeployWebhookArgs contains payload data for durable background processing of deployment webhooks.
+type DeployWebhookArgs struct {
+	IdempotencyKey string      `json:"idempotency_key,omitempty" river:"unique"`
+	Event          DeployEvent `json:"event"`
 }
 
-func (HangarWebhookArgs) Kind() string                 { return "hangar_webhook" }
-func (HangarWebhookArgs) InsertOpts() river.InsertOpts { return defaultRiverInsertOpts() }
+func (DeployWebhookArgs) Kind() string                 { return "deploy_webhook" }
+func (DeployWebhookArgs) InsertOpts() river.InsertOpts { return defaultRiverInsertOpts() }
 
-// HangarWebhookWorker processes Hangar deployment and sync webhook events from River.
-type HangarWebhookWorker struct {
-	river.WorkerDefaults[HangarWebhookArgs]
+// DeployWebhookWorker processes deployment and sync webhook events from River.
+type DeployWebhookWorker struct {
+	river.WorkerDefaults[DeployWebhookArgs]
 
 	server *RouterServer
 }
 
-func (w *HangarWebhookWorker) Work(ctx context.Context, job *river.Job[HangarWebhookArgs]) error {
+func (w *DeployWebhookWorker) Work(ctx context.Context, job *river.Job[DeployWebhookArgs]) error {
 	return observeRiverJob(job, river.QueueDefault, func() error {
 		if w.server == nil {
 			return errors.New("router server not configured on worker")
@@ -379,9 +379,9 @@ func (w *HangarWebhookWorker) Work(ctx context.Context, job *river.Job[HangarWeb
 		if job != nil && job.JobRow != nil {
 			jobID = job.ID
 		}
-		log.Printf("[synapse] [river] processing hangar job id=%d event=%s job_name=%s", jobID, job.Args.Event.Event, job.Args.Event.JobName)
-		if _, err := w.server.ProcessHangarEvent(ctx, job.Args.Event); err != nil {
-			log.Printf("[synapse] [river] error processing hangar job id=%d: %v", jobID, err)
+		log.Printf("[synapse] [river] processing deploy job id=%d event=%s job_name=%s", jobID, job.Args.Event.Event, job.Args.Event.JobName)
+		if _, err := w.server.ProcessDeployEvent(ctx, job.Args.Event); err != nil {
+			log.Printf("[synapse] [river] error processing deploy job id=%d: %v", jobID, err)
 			return err
 		}
 		return nil
@@ -781,13 +781,6 @@ type DirectMessageRequest struct {
 	Content   string `json:"content"`
 }
 
-type ImageReadyEventResponse struct {
-	Status      string   `json:"status"`
-	Image       string   `json:"image,omitempty"`
-	MatchedJobs []string `json:"matched_jobs,omitempty"`
-	Message     string   `json:"message,omitempty"`
-}
-
 type OutboundDispatcher interface {
 	DispatchGitPush(ctx context.Context, req GitPushEventRequest) error
 	DispatchImageReady(ctx context.Context, req ImageReadyEventRequest) ([]string, error)
@@ -800,32 +793,26 @@ type OutboundDispatcher interface {
 }
 
 type DefaultOutboundDispatcher struct {
-	hangarURL                string
 	fluxReceiverURL          string
 	brainURL                 string
 	httpClient               *http.Client
-	gitPushClient            *http.Client
 	discordMsgClient         *http.Client
 	discordInteractionClient *http.Client
 	retryDelay               time.Duration
 	maxAttempts              int
 }
 
-func NewDefaultOutboundDispatcher(hangarURL, brainURL string, client *http.Client) *DefaultOutboundDispatcher {
-	gitPushClient := client
+func NewDefaultOutboundDispatcher(brainURL string, client *http.Client) *DefaultOutboundDispatcher {
 	discordMsgClient := client
 	discordInteractionClient := client
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
-		gitPushClient = &http.Client{Timeout: 65 * time.Second}
 		discordMsgClient = &http.Client{Timeout: 20 * time.Second}
 		discordInteractionClient = &http.Client{Timeout: 2500 * time.Millisecond}
 	}
 	return &DefaultOutboundDispatcher{
-		hangarURL:                strings.TrimRight(hangarURL, "/"),
 		brainURL:                 strings.TrimRight(brainURL, "/"),
 		httpClient:               client,
-		gitPushClient:            gitPushClient,
 		discordMsgClient:         discordMsgClient,
 		discordInteractionClient: discordInteractionClient,
 		retryDelay:               1500 * time.Millisecond,
@@ -865,81 +852,34 @@ func (d *DefaultOutboundDispatcher) forwardFluxReceiver(ctx context.Context, pay
 	return nil
 }
 
-func (d *DefaultOutboundDispatcher) postHangar(ctx context.Context, endpointPath, opName, targetDesc string, payload any) ([]byte, bool, error) {
-	bodyBytes, err := json.Marshal(payload)
-	if err != nil {
-		return nil, false, fmt.Errorf("marshal %s request: %w", opName, err)
+func extractImageWorkloadName(imageRef string) string {
+	ref := strings.TrimSpace(imageRef)
+	if lastSlash := strings.LastIndex(ref, "/"); lastSlash != -1 {
+		ref = ref[lastSlash+1:]
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, d.hangarURL+endpointPath, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return nil, false, fmt.Errorf("create %s request: %w", opName, err)
+	if colonIdx := strings.Index(ref, ":"); colonIdx != -1 {
+		ref = ref[:colonIdx]
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	httpClient := d.httpClient
-	if endpointPath == "/events/git_push" && d.gitPushClient != nil {
-		httpClient = d.gitPushClient
-	}
-	resp, err := httpClient.Do(httpReq)
-	if err != nil {
-		return nil, false, fmt.Errorf("%s request failed: %w", opName, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound {
-		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		if readErr == nil && isHangarUnmanagedError(respBody) {
-			log.Printf("[synapse] [dispatcher] hangar confirmed %s (skipping): %s", targetDesc, string(respBody))
-			return nil, true, nil
-		}
-		return nil, false, fmt.Errorf("hangar %s returned 404: %s", opName, string(respBody))
-	}
-	respBody, readErr := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if readErr != nil {
-			return nil, false, fmt.Errorf("hangar %s returned status %d (read error: %w)", opName, resp.StatusCode, readErr)
-		}
-		return nil, false, fmt.Errorf("hangar %s returned status %d: %s", opName, resp.StatusCode, string(respBody))
-	}
-	return respBody, false, nil
+	return strings.TrimSpace(ref)
 }
 
 func (d *DefaultOutboundDispatcher) DispatchGitPush(ctx context.Context, req GitPushEventRequest) error {
-	var fluxErr error
 	if d.fluxReceiverURL != "" {
-		fluxErr = d.forwardFluxReceiver(ctx, req)
+		return d.forwardFluxReceiver(ctx, req)
 	}
-	if d.hangarURL != "" {
-		_, _, err := d.postHangar(ctx, "/events/git_push", "git push", "repo "+req.Repo+" is not managed by hangar", req)
-		if fluxErr != nil {
-			log.Printf("[synapse] [dispatcher] warning forwarding git push to flux receiver: %v", fluxErr)
-		}
-		return err
-	}
-	return fluxErr
+	return nil
 }
 
 func (d *DefaultOutboundDispatcher) DispatchImageReady(ctx context.Context, req ImageReadyEventRequest) ([]string, error) {
-	var fluxErr error
 	if d.fluxReceiverURL != "" {
-		fluxErr = d.forwardFluxReceiver(ctx, req)
-	}
-	if d.hangarURL != "" {
-		respBody, skipped, err := d.postHangar(ctx, "/events/image_ready", "image ready", "image "+req.Image+" has no matching nomad jobs", req)
-		if fluxErr != nil {
-			log.Printf("[synapse] [dispatcher] warning forwarding image ready to flux receiver: %v", fluxErr)
-		}
-		if err != nil || skipped {
+		if err := d.forwardFluxReceiver(ctx, req); err != nil {
 			return nil, err
 		}
-		var res ImageReadyEventResponse
-		if err := json.Unmarshal(respBody, &res); err != nil {
-			log.Printf("[synapse] [dispatcher] warning decoding image ready response for %s: %v", req.Image, err)
-			return nil, nil
+		if job := extractImageWorkloadName(req.Image); job != "" {
+			return []string{job}, nil
 		}
-		return res.MatchedJobs, nil
 	}
-	return nil, fluxErr
+	return nil, nil
 }
 
 func validateBrainChannel(channelID, endpointPath string) error {
@@ -1111,21 +1051,4 @@ func (d *DefaultOutboundDispatcher) DispatchDiscordMessage(ctx context.Context, 
 
 func (d *DefaultOutboundDispatcher) DispatchDiscordInteraction(ctx context.Context, interaction *discordgo.Interaction) error {
 	return d.postDiscordInternalJSON(ctx, d.discordInteractionClient, 2500*time.Millisecond, "/internal/discord/interaction", "discord interaction", "discord interaction", interaction)
-}
-
-type hangarJSONResponse struct {
-	Status  string `json:"status"`
-	Message string `json:"message"`
-}
-
-func isHangarUnmanagedError(body []byte) bool {
-	var hResp hangarJSONResponse
-	if err := json.Unmarshal(body, &hResp); err != nil {
-		return false
-	}
-	if hResp.Status == "not_found" {
-		return true
-	}
-	msg := strings.ToLower(hResp.Message)
-	return strings.Contains(msg, "not managed by hangar") || strings.Contains(msg, "no nomad jobs found")
 }

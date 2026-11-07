@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-func TestTranslateFluxAlertToHangarEvent(t *testing.T) {
+func TestTranslateFluxAlertToDeployEvent(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 6, 18, 0, 0, 0, time.UTC)
 
@@ -278,9 +278,9 @@ func TestTranslateFluxAlertToHangarEvent(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, ok := TranslateFluxAlertToHangarEvent(tc.alert)
+			got, ok := TranslateFluxAlertToDeployEvent(tc.alert)
 			if ok != tc.wantOK {
-				t.Fatalf("TranslateFluxAlertToHangarEvent() ok = %v, wantOK = %v", ok, tc.wantOK)
+				t.Fatalf("TranslateFluxAlertToDeployEvent() ok = %v, wantOK = %v", ok, tc.wantOK)
 			}
 			if !tc.wantOK {
 				return
@@ -435,8 +435,8 @@ func TestHandleFluxWebhook(t *testing.T) {
 			}
 
 			if tc.withRiver && mockRiver != nil {
-				if len(mockRiver.insertedHangarJobs) != tc.wantRiverJobs {
-					t.Errorf("inserted river jobs = %d, want %d", len(mockRiver.insertedHangarJobs), tc.wantRiverJobs)
+				if len(mockRiver.insertedDeployJobs) != tc.wantRiverJobs {
+					t.Errorf("inserted river jobs = %d, want %d", len(mockRiver.insertedDeployJobs), tc.wantRiverJobs)
 				}
 			}
 		})
@@ -468,12 +468,12 @@ func TestCleanRevisionSHAAndRepoHelpers(t *testing.T) {
 		})
 	}
 
-	// Test zero timestamp fallback in TranslateFluxAlertToHangarEvent
+	// Test zero timestamp fallback in TranslateFluxAlertToDeployEvent
 	zeroTimeAlert := FluxAlertEvent{
 		InvolvedObject: FluxInvolvedObject{Kind: "GitRepository", Name: "aerial"},
 		Reason:         "NewArtifact",
 	}
-	evt, ok := TranslateFluxAlertToHangarEvent(zeroTimeAlert)
+	evt, ok := TranslateFluxAlertToDeployEvent(zeroTimeAlert)
 	if !ok || evt.Timestamp.IsZero() {
 		t.Errorf("expected ok=true and non-zero timestamp for zero-time alert")
 	}

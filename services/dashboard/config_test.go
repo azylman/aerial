@@ -366,6 +366,18 @@ github_repos:
 	badYAMLPath := filepath.Join(tmpDir, "bad.yaml")
 	_ = os.WriteFile(badYAMLPath, []byte("port: [unclosed"), 0o644)
 
+	noHangarYAML := `
+port: "8084"
+eri_url: "http://eri.aerial"
+memory_url: "http://coven.aerial"
+haro_url: "http://haro.aerial"
+vanadis_url: "http://vanadis.aerial"
+github_repos:
+  - "azylman/aerial"
+`
+	noHangarPath := filepath.Join(tmpDir, "no_hangar.yaml")
+	_ = os.WriteFile(noHangarPath, []byte(noHangarYAML), 0o644)
+
 	tests := []struct {
 		name              string
 		path              string
@@ -378,6 +390,7 @@ github_repos:
 		wantMemoryURL     string
 		wantHangarURL     string
 		wantGitSyncURL    string
+		wantEmptyURLs     bool
 		wantHaroURL       string
 		wantVanadisURL    string
 		wantGHRepo        string
@@ -462,6 +475,21 @@ github_repos:
 			callLoadConfig: true,
 			wantPort:       "8084",
 			wantGHRepo:     "azylman/aerial",
+		},
+		{
+			name:           "missing hangar_url succeeds with empty HangarURL",
+			path:           noHangarPath,
+			wantPort:       "8084",
+			wantBrainURL:   "http://eri.aerial",
+			wantMemoryURL:  "http://coven.aerial",
+			wantHangarURL:  "",
+			wantGitSyncURL: "",
+			wantEmptyURLs:  true,
+			wantHaroURL:    "http://haro.aerial",
+			wantVanadisURL: "http://vanadis.aerial",
+			wantGHRepo:     "azylman/aerial",
+			wantGHRepos:    []string{"azylman/aerial"},
+			wantConfigPath: noHangarPath,
 		},
 		{
 			name:      "nil lookup defaults to os.Getenv",
@@ -604,10 +632,10 @@ github_repos:
 			if tc.wantMemoryURL != "" && cfg.MemoryURL != tc.wantMemoryURL {
 				t.Errorf("MemoryURL = %q, want %q", cfg.MemoryURL, tc.wantMemoryURL)
 			}
-			if tc.wantHangarURL != "" && cfg.HangarURL != tc.wantHangarURL {
+			if (tc.wantHangarURL != "" || tc.wantEmptyURLs) && cfg.HangarURL != tc.wantHangarURL {
 				t.Errorf("HangarURL = %q, want %q", cfg.HangarURL, tc.wantHangarURL)
 			}
-			if tc.wantGitSyncURL != "" && cfg.GitSyncURL != tc.wantGitSyncURL {
+			if (tc.wantGitSyncURL != "" || tc.wantEmptyURLs) && cfg.GitSyncURL != tc.wantGitSyncURL {
 				t.Errorf("GitSyncURL = %q, want %q", cfg.GitSyncURL, tc.wantGitSyncURL)
 			}
 			if tc.wantHaroURL != "" && cfg.HaroURL != tc.wantHaroURL {

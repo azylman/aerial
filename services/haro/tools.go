@@ -565,7 +565,7 @@ type WatchEventArgs struct {
 	ChannelID  string `json:"channel_id,omitempty" jsonschema:"Target Discord channel ID or thread ID."`
 	TargetID   string `json:"target_id,omitempty" jsonschema:"Alias for channel_id."`
 	ThreadID   string `json:"thread_id,omitempty" jsonschema:"Alias for channel_id."`
-	Source     string `json:"source" jsonschema:"Event source (e.g. 'hangar', 'vanadis_build', 'vanadis_chunk', 'camera')."`
+	Source     string `json:"source" jsonschema:"Event source (e.g. 'flux', 'vanadis_build', 'vanadis_chunk', 'camera')."`
 	Target     string `json:"target" jsonschema:"Identifier of the target entity being watched."`
 	EventType  string `json:"event_type" jsonschema:"Type of event to watch (e.g. 'sync_success', 'completed', 'merged')."`
 	Prompt     string `json:"prompt" jsonschema:"Instructions to execute when the event triggers."`

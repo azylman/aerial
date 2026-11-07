@@ -38,7 +38,6 @@ jobs:
       dashboard: ${{ steps.filter.outputs.dashboard }}
       docs: ${{ steps.filter.outputs.docs }}
       mesh-proxy: ${{ steps.filter.outputs.mesh-proxy }}
-      hangar: ${{ steps.filter.outputs.hangar }}
       synapse: ${{ steps.filter.outputs.synapse }}
       vanadis: ${{ steps.filter.outputs.vanadis }}
       prospera: ${{ steps.filter.outputs.prospera }}
@@ -81,9 +80,6 @@ jobs:
               - 'services/docs-service/**'
             mesh-proxy:
               - 'services/proxy/**'
-            hangar:
-              - 'services/hangar/**'
-              - 'pkg/**'
             synapse:
               - 'services/synapse/**'
               - 'pkg/**'
@@ -112,7 +108,6 @@ jobs:
               dashboard: "${{ steps.filter.outputs.dashboard }}",
               docs: "${{ steps.filter.outputs.docs }}",
               "mesh-proxy": "${{ steps.filter.outputs.mesh-proxy }}",
-              hangar: "${{ steps.filter.outputs.hangar }}",
               synapse: "${{ steps.filter.outputs.synapse }}",
               vanadis: "${{ steps.filter.outputs.vanadis }}",
               prospera: "${{ steps.filter.outputs.prospera }}",
@@ -131,7 +126,6 @@ jobs:
               { service: "dashboard", context: ".", file: "./services/dashboard/Dockerfile", image_name: "aerial-dashboard" },
               { service: "docs", context: "./services/docs-service", file: "./services/docs-service/Dockerfile", image_name: "aerial-docs" },
               { service: "mesh-proxy", context: "./services/proxy", file: "./services/proxy/Dockerfile", image_name: "aerial-proxy" },
-              { service: "hangar", context: ".", file: "./services/hangar/Dockerfile", image_name: "aerial-hangar" },
               { service: "synapse", context: ".", file: "./services/synapse/Dockerfile", image_name: "aerial-synapse" },
               { service: "vanadis", context: ".", file: "./services/vanadis/Dockerfile", image_name: "aerial-vanadis" },
               { service: "prospera", context: ".", file: "./services/prospera/Dockerfile", image_name: "aerial-prospera" },

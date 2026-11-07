@@ -547,7 +547,7 @@ func TestFireEventTriggers(t *testing.T) {
 	}
 }
 
-func TestEvaluateHangarEventTriggers(t *testing.T) {
+func TestEvaluateFluxEventTriggers(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -573,24 +573,24 @@ func TestEvaluateHangarEventTriggers(t *testing.T) {
 			wantFired: false,
 		},
 		{
-			name:           "sync_success with details fires hangar trigger",
+			name:           "sync_success with details fires flux trigger",
 			event:          "sync_success",
 			repo:           "aerial",
 			details:        "synced 5 files",
 			wantFired:      true,
 			wantTarget:     "azylman/aerial",
 			wantEventType:  "sync_success",
-			wantPromptPart: "Hangar git sync sync_success for azylman/aerial: synced 5 files",
+			wantPromptPart: "Flux git sync sync_success for azylman/aerial: synced 5 files",
 		},
 		{
-			name:           "sync_failed without details fires hangar trigger",
+			name:           "sync_failed without details fires flux trigger",
 			event:          "sync_failed",
 			repo:           "azylman/aerial-config",
 			details:        "",
 			wantFired:      true,
 			wantTarget:     "azylman/aerial-config",
 			wantEventType:  "sync_failed",
-			wantPromptPart: "Hangar git sync sync_failed for azylman/aerial-config",
+			wantPromptPart: "Flux git sync sync_failed for azylman/aerial-config",
 		},
 	}
 
@@ -601,7 +601,7 @@ func TestEvaluateHangarEventTriggers(t *testing.T) {
 			srv := NewRouterServer(Config{}, nil)
 			srv.SetRegistry(mockReg)
 
-			srv.evaluateHangarEventTriggers(context.Background(), HangarDeployEvent{
+			srv.evaluateFluxEventTriggers(context.Background(), DeployEvent{
 				Event:   tc.event,
 				Repo:    tc.repo,
 				Details: tc.details,
@@ -617,8 +617,8 @@ func TestEvaluateHangarEventTriggers(t *testing.T) {
 				t.Fatalf("expected 1 fire call, got %d", len(mockReg.claimTriggersCalls))
 			}
 			call := mockReg.claimTriggersCalls[0]
-			if call.source != "hangar" || call.eventType != tc.wantEventType || len(call.targets) != 1 || call.targets[0] != tc.wantTarget {
-				t.Fatalf("unexpected fire call: %+v, want source=hangar target=%s event=%s", call, tc.wantTarget, tc.wantEventType)
+			if call.source != "flux" || call.eventType != tc.wantEventType || len(call.targets) != 1 || call.targets[0] != tc.wantTarget {
+				t.Fatalf("unexpected fire call: %+v, want source=flux target=%s event=%s", call, tc.wantTarget, tc.wantEventType)
 			}
 			if !strings.Contains(call.contextHeader, tc.wantPromptPart) {
 				t.Fatalf("contextHeader %q does not contain %q", call.contextHeader, tc.wantPromptPart)
@@ -1268,9 +1268,9 @@ func TestIntegrations_EventTriggers(t *testing.T) {
 		wantEventType string
 	}{
 		{
-			name:          "ProcessHangarEvent sync_success fires hangar triggers",
-			testScenario:  "hangar_sync_success",
-			wantSource:    "hangar",
+			name:          "ProcessDeployEvent sync_success fires flux triggers",
+			testScenario:  "flux_sync_success",
+			wantSource:    "flux",
 			wantEventType: "sync_success",
 		},
 		{
@@ -1341,8 +1341,8 @@ func TestIntegrations_EventTriggers(t *testing.T) {
 
 			ctx := context.Background()
 			switch tc.testScenario {
-			case "hangar_sync_success":
-				_, _ = srv.ProcessHangarEvent(ctx, HangarDeployEvent{
+			case "flux_sync_success":
+				_, _ = srv.ProcessDeployEvent(ctx, DeployEvent{
 					Event: "sync_success",
 					Repo:  "azylman/aerial",
 				})
