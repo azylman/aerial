@@ -466,7 +466,7 @@ jobs:
             echo "Dependabot PR detected; skipping RoboRev LLM review gate."
             exit 0
           fi
-          if ! git cat-file -e origin/main:.roborev.toml 2>/dev/null || ! (git cat-file -e origin/main:nomad/jobs/github-runner.nomad 2>/dev/null || git cat-file -e origin/main:nomad/jobs/roborev-runner.nomad 2>/dev/null); then
+          if ! git cat-file -e origin/main:.roborev.toml 2>/dev/null; then
             echo "RoboRev not bootstrapped on main; skipping."
             exit 0
           fi

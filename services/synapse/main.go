@@ -39,6 +39,7 @@ type RouterServer struct {
 	failedCheckRuns          sync.Map
 	updatedForCurrentMain    sync.Map
 	buildCompletedDispatched sync.Map
+	deploySuccessDispatched  sync.Map
 	queueStats               queueStatsQuerier
 	gatewayLatencyFn         func() time.Duration
 	commitSHAPRs             sync.Map
@@ -1020,6 +1021,12 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 		}
 		return &evt, nil
 	case "deploy_success":
+		if s.shouldSuppressDuplicateDeploySuccess(ctx, evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber) {
+			log.Printf("[synapse] [deploy] suppressing duplicate deploy_success for repo=%s job=%s pr=%d commit=%s",
+				evt.Repo, evt.JobName, evt.PRNumber, evt.CommitSHA)
+			return &evt, nil
+		}
+		s.recordDeploySuccessDispatched(evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber)
 		if evt.PRNumber > 0 {
 			s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "deployed", "")
 		}
@@ -1034,6 +1041,50 @@ func (s *RouterServer) ProcessHangarEvent(ctx context.Context, evt HangarDeployE
 	return &evt, nil
 }
 
+func (s *RouterServer) recordDeploySuccessDispatched(repo, jobName, commitSHA string, prNum int) {
+	normRepo := normalizeRepo(repo)
+	if prNum > 0 {
+		s.deploySuccessDispatched.Store(fmt.Sprintf("pr:%s:%d", normRepo, prNum), true)
+	}
+	cleanJob := strings.TrimSpace(jobName)
+	cleanSHA := strings.TrimSpace(commitSHA)
+	if cleanSHA != "" && cleanJob != "" {
+		s.deploySuccessDispatched.Store(fmt.Sprintf("sha:%s:%s:%s", normRepo, cleanJob, cleanSHA), true)
+	}
+}
+
+func (s *RouterServer) shouldSuppressDuplicateDeploySuccess(ctx context.Context, repo, jobName, commitSHA string, prNum int) bool {
+	normRepo := normalizeRepo(repo)
+	cleanJob := strings.TrimSpace(jobName)
+	cleanSHA := strings.TrimSpace(commitSHA)
+
+	if prNum > 0 {
+		if _, ok := s.deploySuccessDispatched.Load(fmt.Sprintf("pr:%s:%d", normRepo, prNum)); ok {
+			return true
+		}
+	}
+	if cleanSHA != "" && cleanJob != "" {
+		if _, ok := s.deploySuccessDispatched.Load(fmt.Sprintf("sha:%s:%s:%s", normRepo, cleanJob, cleanSHA)); ok {
+			return true
+		}
+	}
+
+	if prNum > 0 && s.registry != nil {
+		if pgReg, ok := s.registry.(*PostgresPRRegistry); ok && pgReg != nil && pgReg.pool != nil {
+			qCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+			var status string
+			err := pgReg.pool.QueryRow(qCtx, `SELECT status FROM pr_registry WHERE repo = $1 AND pr_number = $2 LIMIT 1;`, normRepo, prNum).Scan(&status)
+			if err == nil && strings.EqualFold(strings.TrimSpace(status), "deployed") {
+				s.recordDeploySuccessDispatched(repo, jobName, commitSHA, prNum)
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 func (s *RouterServer) handleHangarSyncSuccess(ctx context.Context, evt HangarDeployEvent, syncHasExpected bool) error {
 	if evt.PRNumber <= 0 {
 		return nil
@@ -1042,6 +1093,7 @@ func (s *RouterServer) handleHangarSyncSuccess(ctx context.Context, evt HangarDe
 		s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "synced", "")
 	} else {
 		s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "deployed", "")
+		s.recordDeploySuccessDispatched(evt.Repo, evt.JobName, evt.CommitSHA, evt.PRNumber)
 	}
 	if err := s.advanceVanadisChunkOnSync(ctx, evt.Repo, evt.PRNumber, syncHasExpected); err != nil {
 		return err
@@ -1235,8 +1287,10 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 	}
 
 	// Initialize and launch Nomad Event Stream subscriber
-	nomadSub := NewNomadStreamSubscriber(server)
-	nomadSub.Start(ctx)
+	if strings.TrimSpace(cfg.NomadAddr) != "" {
+		nomadSub := NewNomadStreamSubscriber(server)
+		nomadSub.Start(ctx)
+	}
 
 	// Reconcile any active deployments from pr_registry (startup sweep)
 	go func() {

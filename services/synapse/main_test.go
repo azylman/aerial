@@ -830,9 +830,11 @@ func TestProcessHangarEvent(t *testing.T) {
 	tests := []struct {
 		name               string
 		evt                HangarDeployEvent
+		extraEvts          []HangarDeployEvent
 		sysChan            string
 		nomadJobJSON       string
 		reg                *mockPRRegistry
+		pgReg              *PostgresPRRegistry
 		disp               *mockOutboundDispatcher
 		wantErr            bool
 		wantPR             int
@@ -1213,13 +1215,86 @@ func TestProcessHangarEvent(t *testing.T) {
 			disp:    &mockOutboundDispatcher{},
 			wantErr: true,
 		},
+		{
+			name: "duplicate deploy_success for same PR suppressed",
+			evt:  mkHangarEvt("deploy_success", "brain", "azylman/aerial", "sha-dup-pr", 890, "1555405874565091380", "success", ""),
+			extraEvts: []HangarDeployEvent{
+				mkHangarEvt("deploy_success", "brain", "azylman/aerial", "sha-dup-pr", 890, "1555405874565091380", "success", ""),
+			},
+			reg:          &mockPRRegistry{},
+			disp:         &mockOutboundDispatcher{},
+			wantPR:       890,
+			wantTargetID: "1555405874565091380",
+			wantPrompts:  1,
+			wantPromptSubs: []string{
+				"Continuous Delivery deployment completed for job brain",
+			},
+		},
+		{
+			name: "duplicate deploy_success for same repo job and commitSHA suppressed",
+			evt:  mkHangarEvt("deploy_success", "cadvisor", "azylman/aerial", "sha-dup-sha", 0, "1555405874565091380", "success", ""),
+			extraEvts: []HangarDeployEvent{
+				mkHangarEvt("deploy_success", "cadvisor", "azylman/aerial", "sha-dup-sha", 0, "1555405874565091380", "success", ""),
+			},
+			reg:          &mockPRRegistry{},
+			disp:         &mockOutboundDispatcher{},
+			wantTargetID: "1555405874565091380",
+			wantPrompts:  1,
+			wantPromptSubs: []string{
+				"Continuous Delivery deployment completed for job cadvisor",
+			},
+		},
+		{
+			name: "deploy_success following sync_success without expected_jobs is suppressed",
+			evt:  mkHangarEvt("sync_success", "git-sync", "azylman/aerial-config", "sha-sync-no-exp", 891, "1555405874565091380", "success", ""),
+			extraEvts: []HangarDeployEvent{
+				mkHangarEvt("deploy_success", "homepage", "azylman/aerial-config", "sha-sync-no-exp", 891, "1555405874565091380", "success", ""),
+			},
+			reg:              &mockPRRegistry{},
+			disp:             &mockOutboundDispatcher{},
+			wantPR:           891,
+			wantTargetID:     "1555405874565091380",
+			wantAdvanceCalls: 1,
+			wantPrompts:      1,
+			wantPromptSubs: []string{
+				"Continuous Delivery deployment completed for job git-sync on azylman/aerial-config",
+			},
+		},
+		{
+			name: "deploy_success suppressed when postgres pr_registry already has status deployed",
+			evt:  mkHangarEvt("deploy_success", "brain", "azylman/aerial", "sha-db-deployed", 892, "1555405874565091380", "success", ""),
+			pgReg: NewPostgresPRRegistry(&mockVanadisPgxPool{
+				queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
+					if strings.Contains(sql, "SELECT status FROM pr_registry") {
+						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+							if len(dest) > 0 {
+								if s, ok := dest[0].(*string); ok {
+									*s = "deployed"
+								}
+							}
+							return nil
+						}}
+					}
+					return mockVanadisPgxRow{}
+				},
+			}),
+			disp:         &mockOutboundDispatcher{},
+			wantPR:       892,
+			wantTargetID: "1555405874565091380",
+			wantPrompts:  0,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			reg := tc.reg
-			if reg == nil {
+			var reg PRRegistryUpdater
+			switch {
+			case tc.pgReg != nil:
+				reg = tc.pgReg
+			case tc.reg != nil:
+				reg = tc.reg
+			default:
 				reg = &mockPRRegistry{}
 			}
 			var disp OutboundDispatcher
@@ -1241,6 +1316,11 @@ func TestProcessHangarEvent(t *testing.T) {
 			res, err := srv.ProcessHangarEvent(ctx, tc.evt)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("ProcessHangarEvent() err = %v, wantErr %v", err, tc.wantErr)
+			}
+			for _, extra := range tc.extraEvts {
+				if _, err := srv.ProcessHangarEvent(ctx, extra); err != nil {
+					t.Fatalf("ProcessHangarEvent(extra) err = %v", err)
+				}
 			}
 			if tc.wantErr {
 				return

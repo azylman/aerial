@@ -58,7 +58,7 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 			wantPort:      "4020",
 			wantInfURL:    "http://infisical.aerial",
 			wantEnv:       "default",
-			wantNomadAddr: "http://127.0.0.1:4646",
+			wantNomadAddr: "",
 			wantGHURL:     "https://api.github.com",
 			wantPGURL:     "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable",
 		},
@@ -139,6 +139,9 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 				if check.want != "" && check.got != check.want {
 					t.Errorf("%s = %q, want %q", check.field, check.got, check.want)
 				}
+			}
+			if tc.name == "default fallback loading with empty envs" && cfg.NomadAddr != "" {
+				t.Errorf("NomadAddr = %q, want empty", cfg.NomadAddr)
 			}
 		})
 	}
