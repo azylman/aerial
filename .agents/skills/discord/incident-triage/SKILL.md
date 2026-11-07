@@ -75,7 +75,7 @@ VictoriaMetrics is the cluster-wide time-series database (TSDB) collecting metri
 - **Step 1: Check Grafana Dashboards for Production-Validated PromQL**:
   - Grafana dashboards contain tested PromQL formulas, quantile bucket expressions, and rate windows. Note that Grafana uses SQLite in Kubernetes (`GF_DATABASE_TYPE=sqlite3`).
   - Search dashboard definitions directly in git:
-    - **Git Dashboard Definitions (`nomad/grafana/dashboards/*.json` & `services/grafana/dashboards/*.json`)**: Contains repo-provisioned dashboards (`core-telemetry.json`, `token-usage.json`, `host-system-overview.json`, etc.). Search with:
+    - **Git Dashboard Definitions (`nomad/grafana/dashboards/*.json` & `services/grafana/dashboards/*.json`)**: Contains repo-provisioned dashboards (`core-telemetry.json`, `token-usage.json`, `host-system-overview.json`, etc.) across legacy `nomad/grafana/dashboards/*.json` and `services/grafana/dashboards/*.json`. Search with:
       ```bash
       grep -i "<keyword>" nomad/grafana/dashboards/*.json services/grafana/dashboards/*.json
       ```
@@ -177,5 +177,5 @@ Deliver the post-mortem directly to the user in clean Markdown (strictly < 1,800
 - **NEVER** use `log.*` column prefixes in OpenObserve (Fluent Bit promotes fields directly to top-level).
 - **NEVER** pass milliseconds to OpenObserve `_timestamp` (must be converted to microseconds: `ms * 1000`).
 - **NEVER** query a Prometheus histogram by its bare metric name (histograms only exist as `_bucket`, `_sum`, and `_count`; bare names return empty vectors `[]`).
-- **NEVER** guess PromQL formulas without checking Grafana dashboards (`nomad/grafana/dashboards/*.json`) or running `victoriametrics:series` first.
+- **NEVER** guess PromQL formulas without checking Grafana dashboards (legacy `nomad/grafana/dashboards/*.json` or `services/grafana/dashboards/*.json`) or running `victoriametrics:series` first.
 - **NEVER** touch production code without reproducing the failure via a failing unit test in `services/eri/pkg/...` first.

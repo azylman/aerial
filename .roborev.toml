@@ -11,7 +11,7 @@ exclude_patterns = [
 ]
 
 review_guidelines = """
-Repository Scope: azylman/aerial (Aerial Core Engine Monorepo — Go 1.27 microservices, HashiCorp Nomad job specifications, and Docker images).
+Repository Scope: azylman/aerial (Aerial Core Engine Monorepo — Go 1.27 microservices, k3s/Flux CD Kubernetes manifests (k8s/*.yaml), and Docker images).
 Repo-Specific Invariants (appended to global Aerial cluster guidelines in ~/.roborev/config.toml):
 1. Zero Personal Data & Sensitive Identifiers: Never allow personal names, Discord handles, home addresses, or private entity IDs in this generic open-source engine repository.
 2. Hermetic Storage & Runner Tests: Unit tests must never write to shared host paths (/data, /share) or execute live agy/shell subprocesses or raw POSIX signal broadcasts.
