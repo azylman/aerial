@@ -56,8 +56,8 @@ type DiscordWidgetSender interface {
 	ChannelMessageDelete(channelID, messageID string, options ...discordgo.RequestOption) error
 }
 
-func shouldSinkWidget(s DiscordWidgetSender, channelID, messageID string) bool {
-	msgs, err := s.ChannelMessages(channelID, WidgetSinkQueryLimit, "", messageID, "")
+func shouldSinkWidget(s DiscordWidgetSender, channelID, messageID string, opts ...discordgo.RequestOption) bool {
+	msgs, err := s.ChannelMessages(channelID, WidgetSinkQueryLimit, "", messageID, "", opts...)
 	if err != nil {
 		return false
 	}
@@ -390,24 +390,24 @@ func BuildStatusWidgetComponents(req StatusWidgetRequest, now time.Time) ([]disc
 	return []discordgo.MessageComponent{container}, nil
 }
 
-func trySinkStatusWidget(s DiscordWidgetSender, channelID, trimmedMsgID string, components []discordgo.MessageComponent) (string, bool) {
+func trySinkStatusWidget(s DiscordWidgetSender, channelID, trimmedMsgID string, components []discordgo.MessageComponent, opts ...discordgo.RequestOption) (string, bool) {
 	send := &discordgo.MessageSend{
 		Flags:      discordgo.MessageFlagsIsComponentsV2 | discordgo.MessageFlagsSuppressNotifications,
 		Components: components,
 	}
-	created, sendErr := s.ChannelMessageSendComplex(channelID, send)
+	created, sendErr := s.ChannelMessageSendComplex(channelID, send, opts...)
 	if sendErr != nil || created == nil {
 		return "", false
 	}
-	if delErr := s.ChannelMessageDelete(channelID, trimmedMsgID); delErr != nil && !delivery.IsMessageNotFoundError(delErr) {
+	if delErr := s.ChannelMessageDelete(channelID, trimmedMsgID, opts...); delErr != nil && !delivery.IsMessageNotFoundError(delErr) {
 		log.Printf("[Widget] Warning: failed to delete old status widget message %s: %v", trimmedMsgID, delErr)
 	}
 	return created.ID, true
 }
 
-func updateExistingStatusWidget(s DiscordWidgetSender, req StatusWidgetRequest, trimmedMsgID string, components []discordgo.MessageComponent) (string, error) {
-	if !req.SkipSink && shouldSinkWidget(s, req.ChannelID, trimmedMsgID) {
-		if id, ok := trySinkStatusWidget(s, req.ChannelID, trimmedMsgID, components); ok {
+func updateExistingStatusWidget(s DiscordWidgetSender, req StatusWidgetRequest, trimmedMsgID string, components []discordgo.MessageComponent, opts ...discordgo.RequestOption) (string, error) {
+	if !req.SkipSink && shouldSinkWidget(s, req.ChannelID, trimmedMsgID, opts...) {
+		if id, ok := trySinkStatusWidget(s, req.ChannelID, trimmedMsgID, components, opts...); ok {
 			return id, nil
 		}
 	}
@@ -420,7 +420,7 @@ func updateExistingStatusWidget(s DiscordWidgetSender, req StatusWidgetRequest, 
 		Flags:      discordgo.MessageFlagsIsComponentsV2,
 		Components: &components,
 	}
-	msg, editErr := s.ChannelMessageEditComplex(edit)
+	msg, editErr := s.ChannelMessageEditComplex(edit, opts...)
 	if editErr == nil && msg != nil {
 		return msg.ID, nil
 	}
@@ -431,7 +431,7 @@ func updateExistingStatusWidget(s DiscordWidgetSender, req StatusWidgetRequest, 
 			Flags:      discordgo.MessageFlagsIsComponentsV2,
 			Components: components,
 		}
-		created, sendErr := s.ChannelMessageSendComplex(req.ChannelID, send)
+		created, sendErr := s.ChannelMessageSendComplex(req.ChannelID, send, opts...)
 		if sendErr != nil {
 			return "", fmt.Errorf("failed to send new status widget message after 404 edit: %w", sendErr)
 		}
@@ -442,7 +442,7 @@ func updateExistingStatusWidget(s DiscordWidgetSender, req StatusWidgetRequest, 
 }
 
 // DeliverStatusWidget delivers or updates a status widget via Discord Components V2.
-func DeliverStatusWidget(s DiscordWidgetSender, req StatusWidgetRequest, now time.Time) (string, error) {
+func DeliverStatusWidget(s DiscordWidgetSender, req StatusWidgetRequest, now time.Time, opts ...discordgo.RequestOption) (string, error) {
 	if s == nil {
 		return "", errors.New("discord widget sender is nil")
 	}
@@ -457,7 +457,7 @@ func DeliverStatusWidget(s DiscordWidgetSender, req StatusWidgetRequest, now tim
 
 	trimmedMsgID := strings.TrimSpace(req.MessageID)
 	if trimmedMsgID != "" {
-		return updateExistingStatusWidget(s, req, trimmedMsgID, components)
+		return updateExistingStatusWidget(s, req, trimmedMsgID, components, opts...)
 	}
 
 	// New message
@@ -465,7 +465,7 @@ func DeliverStatusWidget(s DiscordWidgetSender, req StatusWidgetRequest, now tim
 		Flags:      discordgo.MessageFlagsIsComponentsV2,
 		Components: components,
 	}
-	created, sendErr := s.ChannelMessageSendComplex(req.ChannelID, send)
+	created, sendErr := s.ChannelMessageSendComplex(req.ChannelID, send, opts...)
 	if sendErr != nil {
 		return "", fmt.Errorf("failed to send status widget message: %w", sendErr)
 	}
