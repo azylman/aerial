@@ -35,6 +35,7 @@ type Config struct {
 	GitHubAPIURL          string
 	PostgresURL           string
 	HangarURL             string
+	FluxReceiverURL       string
 	BrainURL              string
 	EriURL                string
 	VanadisURL            string
@@ -52,6 +53,7 @@ type RouterYAMLConfig struct {
 	InfisicalEnvironment string                    `yaml:"infisical_environment"`
 	NomadAddr            string                    `yaml:"nomad_addr"`
 	HangarURL            string                    `yaml:"hangar_url"`
+	FluxReceiverURL      string                    `yaml:"flux_receiver_url"`
 	EriURL               string                    `yaml:"eri_url"`
 	VanadisURL           string                    `yaml:"vanadis_url"`
 	HaroURL              string                    `yaml:"haro_url"`
@@ -140,6 +142,7 @@ func LoadConfig(configPath string) Config {
 		GitHubAPIURL:          strings.TrimRight(firstNonEmpty(os.Getenv("GITHUB_API_URL"), "https://api.github.com"), "/"),
 		PostgresURL:           pgURL,
 		HangarURL:             strings.TrimRight(firstNonEmpty(os.Getenv("HANGAR_URL"), fileCfg.HangarURL, "http://127.0.0.1:8087"), "/"),
+		FluxReceiverURL:       strings.TrimRight(firstNonEmpty(os.Getenv("FLUX_RECEIVER_URL"), fileCfg.FluxReceiverURL), "/"),
 		BrainURL:              strings.TrimRight(firstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/"),
 		EriURL:                strings.TrimRight(firstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/"),
 		VanadisURL:            strings.TrimRight(firstNonEmpty(os.Getenv("VANADIS_URL"), fileCfg.VanadisURL, "http://vanadis.aerial"), "/"),

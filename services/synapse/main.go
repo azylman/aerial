@@ -121,6 +121,8 @@ func (s *RouterServer) Routes() http.Handler {
 	mux.HandleFunc("POST /webhooks/github", s.handleGitHubWebhook)
 	mux.HandleFunc("POST /api/webhooks/hangar", s.handleHangarWebhook)
 	mux.HandleFunc("POST /webhooks/hangar", s.handleHangarWebhook)
+	mux.HandleFunc("POST /api/webhooks/flux", s.handleFluxWebhook)
+	mux.HandleFunc("POST /webhooks/flux", s.handleFluxWebhook)
 	mux.HandleFunc("POST /api/webhooks/events", s.handleEventsWebhook)
 	mux.HandleFunc("POST /webhooks/events", s.handleEventsWebhook)
 	coverageFlush := httpkit.HandleCoverageFlush("synapse")
@@ -287,6 +289,46 @@ type HangarDeployEvent struct {
 	Timestamp    time.Time `json:"timestamp"`
 }
 
+func hangarEventIdempotencyKey(evt HangarDeployEvent, originPrefix string) string {
+	if evt.CommitSHA == "" || evt.JobName == "" {
+		return randomNonce()
+	}
+	if originPrefix != "" {
+		return fmt.Sprintf("%s:%s:%s:%s:%s", originPrefix, evt.Event, evt.Repo, evt.JobName, evt.CommitSHA)
+	}
+	return fmt.Sprintf("%s:%s:%s:%s", evt.Event, evt.Repo, evt.JobName, evt.CommitSHA)
+}
+
+func (s *RouterServer) enqueueOrProcessHangarEvent(w http.ResponseWriter, r *http.Request, evt HangarDeployEvent, originPrefix string) {
+	logPrefix := firstNonEmpty(originPrefix, "hangar")
+	if s.riverClient != nil {
+		idempotencyKey := hangarEventIdempotencyKey(evt, originPrefix)
+		if err := s.insertRiverJob(r.Context(), HangarWebhookArgs{IdempotencyKey: idempotencyKey, Event: evt}); err != nil {
+			log.Printf("[synapse] [%s] ERROR: failed to insert job into river: %v", logPrefix, err)
+			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist webhook"})
+			return
+		}
+		httpkit.WriteJSON(w, http.StatusAccepted, map[string]any{
+			"status":   "accepted",
+			"event":    evt.Event,
+			"job_name": evt.JobName,
+		})
+		return
+	}
+
+	processed, err := s.ProcessHangarEvent(r.Context(), evt)
+	if err != nil {
+		log.Printf("[synapse] [%s] error processing event: %v", logPrefix, err)
+	}
+	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
+		"status":    "accepted",
+		"event":     processed.Event,
+		"job_name":  processed.JobName,
+		"pr_number": processed.PRNumber,
+		"target_id": processed.TargetID,
+	})
+}
+
 func (s *RouterServer) handleHangarWebhook(w http.ResponseWriter, r *http.Request) {
 	var evt HangarDeployEvent
 	if !readWebhookJSON(w, r, 1<<20, false, &evt) {
@@ -305,35 +347,7 @@ func (s *RouterServer) handleHangarWebhook(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	if s.riverClient != nil {
-		idempotencyKey := randomNonce()
-		if evt.CommitSHA != "" && evt.JobName != "" {
-			idempotencyKey = fmt.Sprintf("%s:%s:%s:%s", evt.Event, evt.Repo, evt.JobName, evt.CommitSHA)
-		}
-		if err := s.insertRiverJob(r.Context(), HangarWebhookArgs{IdempotencyKey: idempotencyKey, Event: evt}); err != nil {
-			log.Printf("[synapse] [hangar] ERROR: failed to insert job into river: %v", err)
-			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist webhook"})
-			return
-		}
-		httpkit.WriteJSON(w, http.StatusAccepted, map[string]any{
-			"status":   "accepted",
-			"event":    evt.Event,
-			"job_name": evt.JobName,
-		})
-		return
-	}
-
-	processed, err := s.ProcessHangarEvent(r.Context(), evt)
-	if err != nil {
-		log.Printf("[synapse] [hangar] error processing hangar event: %v", err)
-	}
-	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
-		"status":    "accepted",
-		"event":     processed.Event,
-		"job_name":  processed.JobName,
-		"pr_number": processed.PRNumber,
-		"target_id": processed.TargetID,
-	})
+	s.enqueueOrProcessHangarEvent(w, r, evt, "")
 }
 
 func (s *RouterServer) resolvePRFromRegistrySHA(ctx context.Context, repo, sha string) (int, string, string, bool) {
@@ -1209,7 +1223,9 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 	defer cancel()
 
 	server := NewRouterServer(cfg, nil)
-	server.SetDispatcher(NewDefaultOutboundDispatcher(cfg.HangarURL, cfg.BrainURL, nil))
+	dispatcher := NewDefaultOutboundDispatcher(cfg.HangarURL, cfg.BrainURL, nil)
+	dispatcher.SetFluxReceiverURL(cfg.FluxReceiverURL)
+	server.SetDispatcher(dispatcher)
 
 	dbPool, riverClient, err := setupRiverWorkerPool(ctx, server, cfg)
 	if err != nil {
