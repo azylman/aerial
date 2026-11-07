@@ -2678,6 +2678,177 @@ func TestSyncPRWidget_Unit(t *testing.T) {
 	}
 }
 
+func TestReconcileStuckDeployingPRWidget(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	tests := []struct {
+		name           string
+		nilServer      bool
+		nilRegistry    bool
+		useMockReg     bool
+		nilPool        bool
+		repo           string
+		prNum          int
+		queryStatus    string
+		queryErr       error
+		wantExecCount  int
+		wantWidgetCall bool
+		wantWidgetStat string
+	}{
+		{
+			name:      "nil server guard",
+			nilServer: true,
+			repo:      "azylman/aerial",
+			prNum:     42,
+		},
+		{
+			name:        "nil registry guard",
+			nilRegistry: true,
+			repo:        "azylman/aerial",
+			prNum:       42,
+		},
+		{
+			name:       "non-postgres registry guard",
+			useMockReg: true,
+			repo:       "azylman/aerial",
+			prNum:      42,
+		},
+		{
+			name:    "nil pool guard",
+			nilPool: true,
+			repo:    "azylman/aerial",
+			prNum:   42,
+		},
+		{
+			name:  "empty repo guard",
+			repo:  "",
+			prNum: 42,
+		},
+		{
+			name:  "zero prNum guard",
+			repo:  "azylman/aerial",
+			prNum: 0,
+		},
+		{
+			name:        "db error scanning status does not reconcile",
+			repo:        "azylman/aerial",
+			prNum:       42,
+			queryErr:    errors.New("db scan error"),
+			queryStatus: "",
+		},
+		{
+			name:        "pr status already deployed is a no-op",
+			repo:        "azylman/aerial",
+			prNum:       42,
+			queryStatus: "deployed",
+		},
+		{
+			name:           "pr status deploying reconciles to deployed and dispatches widget",
+			repo:           "azylman/aerial",
+			prNum:          42,
+			queryStatus:    "deploying",
+			wantExecCount:  1,
+			wantWidgetCall: true,
+			wantWidgetStat: "deployed",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			mockDisp := &mockOutboundDispatcher{}
+			var execCalls int
+			currentStatus := tc.queryStatus
+
+			if tc.nilServer {
+				var nilSrv *RouterServer
+				nilSrv.reconcileStuckDeployingPRWidget(ctx, tc.repo, tc.prNum)
+				return
+			}
+
+			var reg PRRegistryUpdater
+			switch {
+			case tc.nilRegistry:
+				reg = nil
+			case tc.useMockReg:
+				reg = &mockPRRegistry{}
+			case tc.nilPool:
+				reg = NewPostgresPRRegistry(nil)
+			default:
+				pool := &mockVanadisPgxPool{
+					queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
+						if strings.Contains(sql, "SELECT status FROM pr_registry") {
+							if tc.queryErr != nil {
+								return &mockVanadisPgxRow{scanFn: func(dest ...any) error { return tc.queryErr }}
+							}
+							return &mockVanadisPgxRow{scanFn: func(dest ...any) error {
+								if len(dest) > 0 {
+									if s, ok := dest[0].(*string); ok {
+										*s = currentStatus
+									}
+								}
+								return nil
+							}}
+						}
+						if strings.Contains(sql, "SELECT target_id, title, status") {
+							return &mockVanadisPgxRow{scanFn: func(dest ...any) error {
+								if len(dest) >= 10 {
+									*dest[0].(*string) = "1555405874565091380"
+									*dest[1].(*string) = "Fix Widget Race"
+									*dest[2].(*string) = currentStatus
+									*dest[3].(*string) = "status-msg-1"
+									*dest[4].(*time.Time) = time.Now()
+									*dest[5].(*time.Time) = time.Now()
+									*dest[6].(*string) = ""
+									*dest[7].(*string) = "{}"
+									*dest[8].(*string) = "{}"
+									*dest[9].(*string) = "feat/fix-race"
+								}
+								return nil
+							}}
+						}
+						return &mockVanadisPgxRow{}
+					},
+					execFn: func(qCtx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+						if strings.Contains(sql, "UPDATE pr_registry") && strings.Contains(sql, "SET status = CASE") {
+							execCalls++
+							if len(args) >= 3 {
+								if st, ok := args[2].(string); ok && st != "" {
+									currentStatus = st
+								}
+							}
+						}
+						return pgconn.NewCommandTag("UPDATE 1"), nil
+					},
+				}
+				reg = NewPostgresPRRegistry(pool)
+			}
+
+			srv := newTestRouter(Config{}, nil, reg, mockDisp)
+			srv.reconcileStuckDeployingPRWidget(ctx, tc.repo, tc.prNum)
+
+			if execCalls != tc.wantExecCount {
+				t.Errorf("setPRWidgetState execCalls = %d, want %d", execCalls, tc.wantExecCount)
+			}
+
+			calls := mockDisp.WidgetCalls()
+			if tc.wantWidgetCall {
+				if len(calls) == 0 {
+					t.Fatalf("expected widget call dispatched, got 0")
+				}
+				last := calls[len(calls)-1]
+				if last.Status != tc.wantWidgetStat {
+					t.Errorf("got widget status = %q, want %q", last.Status, tc.wantWidgetStat)
+				}
+			} else if len(calls) != 0 {
+				t.Errorf("expected 0 widget calls, got %d", len(calls))
+			}
+		})
+	}
+}
+
 func TestRouterServer_HandlePRRegister(t *testing.T) {
 	t.Parallel()
 
