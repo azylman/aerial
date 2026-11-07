@@ -349,28 +349,43 @@ github_repos:
 	noBrainPath := filepath.Join(tmpDir, "no_brain.yaml")
 	_ = os.WriteFile(noBrainPath, []byte(noBrainYAML), 0o644)
 
+	kubeYAML := `
+port: "8084"
+eri_url: "http://eri.aerial"
+memory_url: "http://coven.aerial"
+hangar_url: "http://hangar.aerial"
+haro_url: "http://haro.aerial"
+vanadis_url: "http://vanadis.aerial"
+kube_api_server: "http://kube.cluster:6443"
+github_repos:
+  - "azylman/aerial"
+`
+	kubePath := filepath.Join(tmpDir, "kube.yaml")
+	_ = os.WriteFile(kubePath, []byte(kubeYAML), 0o644)
+
 	badYAMLPath := filepath.Join(tmpDir, "bad.yaml")
 	_ = os.WriteFile(badYAMLPath, []byte("port: [unclosed"), 0o644)
 
 	tests := []struct {
-		name           string
-		path           string
-		env            map[string]string
-		nilLookup      bool
-		callLoadConfig bool
-		wantErr        bool
-		wantPort       string
-		wantBrainURL   string
-		wantMemoryURL  string
-		wantHangarURL  string
-		wantGitSyncURL string
-		wantHaroURL    string
-		wantVanadisURL string
-		wantGHRepo     string
-		wantGHRepos    []string
-		wantGHToken    string
-		wantNomadAddr  string
-		wantConfigPath string
+		name              string
+		path              string
+		env               map[string]string
+		nilLookup         bool
+		callLoadConfig    bool
+		wantErr           bool
+		wantPort          string
+		wantBrainURL      string
+		wantMemoryURL     string
+		wantHangarURL     string
+		wantGitSyncURL    string
+		wantHaroURL       string
+		wantVanadisURL    string
+		wantGHRepo        string
+		wantGHRepos       []string
+		wantGHToken       string
+		wantNomadAddr     string
+		wantKubeAPIServer string
+		wantConfigPath    string
 	}{
 		{
 			name: "valid full configuration with token and commit",
@@ -453,6 +468,79 @@ github_repos:
 			path:      validPath,
 			nilLookup: true,
 			wantPort:  "8084",
+		},
+		{
+			name:              "kube_api_server in yaml",
+			path:              kubePath,
+			wantPort:          "8084",
+			wantBrainURL:      "http://eri.aerial",
+			wantMemoryURL:     "http://coven.aerial",
+			wantHangarURL:     "http://hangar.aerial",
+			wantGitSyncURL:    "http://hangar.aerial",
+			wantHaroURL:       "http://haro.aerial",
+			wantVanadisURL:    "http://vanadis.aerial",
+			wantGHRepo:        "azylman/aerial",
+			wantGHRepos:       []string{"azylman/aerial"},
+			wantKubeAPIServer: "http://kube.cluster:6443",
+			wantConfigPath:    kubePath,
+		},
+		{
+			name: "KUBE_API_SERVER env fallback when absent from yaml",
+			path: validPath,
+			env: map[string]string{
+				"KUBE_API_SERVER": "https://k8s-env.cluster:6443",
+			},
+			wantPort:          "8084",
+			wantBrainURL:      "http://eri.aerial",
+			wantMemoryURL:     "http://coven.aerial",
+			wantHangarURL:     "http://hangar.aerial",
+			wantGitSyncURL:    "http://hangar.aerial",
+			wantHaroURL:       "http://haro.aerial",
+			wantVanadisURL:    "http://vanadis.aerial",
+			wantGHRepo:        "azylman/aerial",
+			wantGHRepos:       []string{"azylman/aerial", "azylman/aerial-config"},
+			wantNomadAddr:     "http://nomad.cluster:4646",
+			wantKubeAPIServer: "https://k8s-env.cluster:6443",
+			wantConfigPath:    validPath,
+		},
+		{
+			name: "KUBERNETES_SERVICE_HOST and PORT env fallback",
+			path: validPath,
+			env: map[string]string{
+				"KUBERNETES_SERVICE_HOST": "10.43.0.1",
+				"KUBERNETES_SERVICE_PORT": "6443",
+			},
+			wantPort:          "8084",
+			wantBrainURL:      "http://eri.aerial",
+			wantMemoryURL:     "http://coven.aerial",
+			wantHangarURL:     "http://hangar.aerial",
+			wantGitSyncURL:    "http://hangar.aerial",
+			wantHaroURL:       "http://haro.aerial",
+			wantVanadisURL:    "http://vanadis.aerial",
+			wantGHRepo:        "azylman/aerial",
+			wantGHRepos:       []string{"azylman/aerial", "azylman/aerial-config"},
+			wantNomadAddr:     "http://nomad.cluster:4646",
+			wantKubeAPIServer: "https://10.43.0.1:6443",
+			wantConfigPath:    validPath,
+		},
+		{
+			name: "KUBERNETES_SERVICE_HOST default port 443 fallback",
+			path: validPath,
+			env: map[string]string{
+				"KUBERNETES_SERVICE_HOST": "10.43.0.1",
+			},
+			wantPort:          "8084",
+			wantBrainURL:      "http://eri.aerial",
+			wantMemoryURL:     "http://coven.aerial",
+			wantHangarURL:     "http://hangar.aerial",
+			wantGitSyncURL:    "http://hangar.aerial",
+			wantHaroURL:       "http://haro.aerial",
+			wantVanadisURL:    "http://vanadis.aerial",
+			wantGHRepo:        "azylman/aerial",
+			wantGHRepos:       []string{"azylman/aerial", "azylman/aerial-config"},
+			wantNomadAddr:     "http://nomad.cluster:4646",
+			wantKubeAPIServer: "https://10.43.0.1:443",
+			wantConfigPath:    validPath,
 		},
 		{
 			name:    "empty path error",
@@ -539,6 +627,9 @@ github_repos:
 			}
 			if tc.wantNomadAddr != "" && cfg.NomadAddr != tc.wantNomadAddr {
 				t.Errorf("NomadAddr = %q, want %q", cfg.NomadAddr, tc.wantNomadAddr)
+			}
+			if tc.wantKubeAPIServer != "" && cfg.KubeAPIServer != tc.wantKubeAPIServer {
+				t.Errorf("KubeAPIServer = %q, want %q", cfg.KubeAPIServer, tc.wantKubeAPIServer)
 			}
 			if tc.wantConfigPath != "" && cfg.ConfigPath != tc.wantConfigPath {
 				t.Errorf("ConfigPath = %q, want %q", cfg.ConfigPath, tc.wantConfigPath)

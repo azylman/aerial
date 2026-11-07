@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -187,34 +188,36 @@ func loadQuickLaunchLinks(configPath string) []QuickLaunchLink {
 
 // DashboardConfig holds configuration settings for the dashboard web server.
 type DashboardConfig struct {
-	Port       string
-	BrainURL   string
-	EriURL     string
-	MemoryURL  string
-	GHRepo     string
-	GHRepos    []string
-	GHToken    string
-	GitCommit  string
-	GitSyncURL string
-	HangarURL  string
-	ConfigPath string
-	APIBaseURL string
-	NomadAddr  string
-	VanadisURL string
-	HaroURL    string
+	Port          string
+	BrainURL      string
+	EriURL        string
+	MemoryURL     string
+	GHRepo        string
+	GHRepos       []string
+	GHToken       string
+	GitCommit     string
+	GitSyncURL    string
+	HangarURL     string
+	ConfigPath    string
+	APIBaseURL    string
+	NomadAddr     string
+	KubeAPIServer string
+	VanadisURL    string
+	HaroURL       string
 }
 
 // DashboardYAMLConfig defines the declarative file schema for dashboard.yaml.
 type DashboardYAMLConfig struct {
-	Port       string   `yaml:"port"`
-	EriURL     string   `yaml:"eri_url"`
-	MemoryURL  string   `yaml:"memory_url"`
-	HangarURL  string   `yaml:"hangar_url"`
-	GHRepos    []string `yaml:"github_repos"`
-	ConfigPath string   `yaml:"config_path"`
-	NomadAddr  string   `yaml:"nomad_addr"`
-	VanadisURL string   `yaml:"vanadis_url"`
-	HaroURL    string   `yaml:"haro_url"`
+	Port          string   `yaml:"port"`
+	EriURL        string   `yaml:"eri_url"`
+	MemoryURL     string   `yaml:"memory_url"`
+	HangarURL     string   `yaml:"hangar_url"`
+	GHRepos       []string `yaml:"github_repos"`
+	ConfigPath    string   `yaml:"config_path"`
+	NomadAddr     string   `yaml:"nomad_addr"`
+	KubeAPIServer string   `yaml:"kube_api_server"`
+	VanadisURL    string   `yaml:"vanadis_url"`
+	HaroURL       string   `yaml:"haro_url"`
 }
 
 // LoadConfig loads configuration from path using os.Getenv.
@@ -233,6 +236,14 @@ func parseDashboardRepos(rawRepos []string) []string {
 		}
 	}
 	return repos
+}
+
+func firstNonEmptyPort(val, fallback string) string {
+	trimmed := strings.TrimSpace(val)
+	if trimmed != "" {
+		return trimmed
+	}
+	return fallback
 }
 
 // LoadConfigFile loads and strictly validates dashboard configuration from a YAML file.
@@ -303,20 +314,33 @@ func LoadConfigFile(path string, lookup func(string) string) (DashboardConfig, e
 
 	nomadAddr := strings.TrimSpace(ycfg.NomadAddr)
 
+	kubeAPIServer := strings.TrimSpace(ycfg.KubeAPIServer)
+	if kubeAPIServer == "" {
+		kubeAPIServer = strings.TrimSpace(lookup("KUBE_API_SERVER"))
+	}
+	if kubeAPIServer == "" {
+		host := strings.TrimSpace(lookup("KUBERNETES_SERVICE_HOST"))
+		if host != "" {
+			port := firstNonEmptyPort(lookup("KUBERNETES_SERVICE_PORT"), "443")
+			kubeAPIServer = "https://" + net.JoinHostPort(host, port)
+		}
+	}
+
 	return DashboardConfig{
-		Port:       port,
-		BrainURL:   eriURL,
-		EriURL:     eriURL,
-		MemoryURL:  memoryURL,
-		GHRepo:     repos[0],
-		GHRepos:    repos,
-		GHToken:    ghToken,
-		GitCommit:  gitCommit,
-		GitSyncURL: hangarURL,
-		HangarURL:  hangarURL,
-		ConfigPath: cfgPath,
-		NomadAddr:  nomadAddr,
-		VanadisURL: vanadisURL,
-		HaroURL:    haroURL,
+		Port:          port,
+		BrainURL:      eriURL,
+		EriURL:        eriURL,
+		MemoryURL:     memoryURL,
+		GHRepo:        repos[0],
+		GHRepos:       repos,
+		GHToken:       ghToken,
+		GitCommit:     gitCommit,
+		GitSyncURL:    hangarURL,
+		HangarURL:     hangarURL,
+		ConfigPath:    cfgPath,
+		NomadAddr:     nomadAddr,
+		KubeAPIServer: kubeAPIServer,
+		VanadisURL:    vanadisURL,
+		HaroURL:       haroURL,
 	}, nil
 }

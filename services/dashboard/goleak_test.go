@@ -22,6 +22,9 @@ func TestMain(m *testing.M) {
 		if nomadHTTPClient != nil {
 			nomadHTTPClient.CloseIdleConnections()
 		}
+		if k8sHTTPClient != nil {
+			k8sHTTPClient.CloseIdleConnections()
+		}
 		if vanadisHTTPClient != nil {
 			vanadisHTTPClient.CloseIdleConnections()
 		}
