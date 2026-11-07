@@ -987,7 +987,7 @@ func TestRiverJobArgsAndUniqueOpts(t *testing.T) {
 			wantKind:     "widget_sync",
 			wantQueue:    QueueWidgetSync,
 			wantByArgs:   true,
-			wantByStates: []rivertype.JobState{rivertype.JobStateAvailable, rivertype.JobStateScheduled, rivertype.JobStateRetryable},
+			wantByStates: []rivertype.JobState{rivertype.JobStateAvailable, rivertype.JobStatePending, rivertype.JobStateRunning, rivertype.JobStateRetryable, rivertype.JobStateScheduled},
 			wantAttempts: 5,
 		},
 		{
@@ -1045,6 +1045,17 @@ func TestRiverJobArgsAndUniqueOpts(t *testing.T) {
 			if len(tc.wantByStates) > 0 {
 				if !slices.Equal(opts.UniqueOpts.ByState, tc.wantByStates) {
 					t.Errorf("UniqueOpts.ByState = %v, want %v", opts.UniqueOpts.ByState, tc.wantByStates)
+				}
+				requiredV3States := []rivertype.JobState{
+					rivertype.JobStateAvailable,
+					rivertype.JobStatePending,
+					rivertype.JobStateRunning,
+					rivertype.JobStateScheduled,
+				}
+				for _, reqState := range requiredV3States {
+					if !slices.Contains(opts.UniqueOpts.ByState, reqState) {
+						t.Errorf("UniqueOpts.ByState missing required River v3 state %v", reqState)
+					}
 				}
 			}
 			if tc.wantByPeriod > 0 && opts.UniqueOpts.ByPeriod != tc.wantByPeriod {

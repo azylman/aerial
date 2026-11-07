@@ -397,6 +397,7 @@ type WidgetSyncArgs struct {
 	PRNumber int    `json:"pr_number,omitempty"`
 	BuildID  string `json:"build_id,omitempty"`
 	Banner   string `json:"banner,omitempty"`
+	Status   string `json:"status,omitempty"`
 }
 
 func (WidgetSyncArgs) Kind() string { return "widget_sync" }
@@ -408,8 +409,10 @@ func (WidgetSyncArgs) InsertOpts() river.InsertOpts {
 			ByArgs: true,
 			ByState: []rivertype.JobState{
 				rivertype.JobStateAvailable,
-				rivertype.JobStateScheduled,
+				rivertype.JobStatePending,
+				rivertype.JobStateRunning,
 				rivertype.JobStateRetryable,
+				rivertype.JobStateScheduled,
 			},
 		},
 	}
