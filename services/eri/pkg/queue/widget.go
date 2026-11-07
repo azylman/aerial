@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -198,12 +199,29 @@ func (p *WorkerPool) evictOldestWidgetLocked() {
 	}
 }
 
+func shouldPreferCachedMessageID(reqMsgID, cachedMsgID string) bool {
+	cachedTrimmed := strings.TrimSpace(cachedMsgID)
+	if cachedTrimmed == "" {
+		return false
+	}
+	reqTrimmed := strings.TrimSpace(reqMsgID)
+	if reqTrimmed == "" {
+		return true
+	}
+	cachedID, errCached := strconv.ParseUint(cachedTrimmed, 10, 64)
+	reqID, errReq := strconv.ParseUint(reqTrimmed, 10, 64)
+	if errCached == nil && errReq == nil {
+		return cachedID > reqID
+	}
+	return false
+}
+
 func (p *WorkerPool) syncWidgetDeliveryStateLocked(req *discord.StatusWidgetRequest) {
 	if req.ID == "" {
 		return
 	}
 	existing, hasExisting := p.widgetsByID[req.ID]
-	if req.MessageID == "" && hasExisting && existing.MessageID != "" {
+	if hasExisting && shouldPreferCachedMessageID(req.MessageID, existing.MessageID) {
 		req.MessageID = existing.MessageID
 	}
 	isTerminalBuild := strings.EqualFold(req.Status, "completed") || strings.EqualFold(req.Status, "cancelled")
@@ -229,11 +247,11 @@ func (p *WorkerPool) syncWidgetDeliveryStateLocked(req *discord.StatusWidgetRequ
 	p.widgetsByID[req.ID] = cloneStatusWidgetRequest(*req, true)
 }
 
-func (p *WorkerPool) sendWidgetRequest(sess *discordgo.Session, req discord.StatusWidgetRequest) (string, error) {
+func (p *WorkerPool) sendWidgetRequest(ctx context.Context, sess *discordgo.Session, req discord.StatusWidgetRequest) (string, error) {
 	if p.cfg.WidgetDeliveryFunc != nil {
 		return p.cfg.WidgetDeliveryFunc(req)
 	}
-	return discord.DeliverStatusWidget(sess, req, time.Now())
+	return discord.DeliverStatusWidget(sess, req, time.Now(), discordgo.WithContext(ctx))
 }
 
 func (p *WorkerPool) recordDeliveredWidgetMessageID(buildID, msgID string) {
@@ -248,10 +266,16 @@ func (p *WorkerPool) recordDeliveredWidgetMessageID(buildID, msgID string) {
 	p.widgetMu.Unlock()
 }
 
-// DeliverStatusWidget delivers or edits a status widget while maintaining cache and active steps.
-func (p *WorkerPool) DeliverStatusWidget(req discord.StatusWidgetRequest) (string, error) {
+// DeliverStatusWidgetWithContext delivers or edits a status widget while respecting context cancellation, maintaining cache and active steps.
+func (p *WorkerPool) DeliverStatusWidgetWithContext(ctx context.Context, req discord.StatusWidgetRequest) (string, error) {
 	if p == nil {
 		return "", errors.New("worker pool is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
 	sess := p.DiscordSession()
 	if sess == nil && p.cfg.WidgetDeliveryFunc == nil {
@@ -261,6 +285,10 @@ func (p *WorkerPool) DeliverStatusWidget(req discord.StatusWidgetRequest) (strin
 	p.widgetDeliveryMu.Lock()
 	defer p.widgetDeliveryMu.Unlock()
 
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
 	p.applyChannelPolicyRedirect(sess, &req)
 
 	p.widgetMu.Lock()
@@ -268,7 +296,7 @@ func (p *WorkerPool) DeliverStatusWidget(req discord.StatusWidgetRequest) (strin
 	p.syncWidgetDeliveryStateLocked(&req)
 	p.widgetMu.Unlock()
 
-	msgID, err := p.sendWidgetRequest(sess, req)
+	msgID, err := p.sendWidgetRequest(ctx, sess, req)
 	if err != nil {
 		return "", err
 	}

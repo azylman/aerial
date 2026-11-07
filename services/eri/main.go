@@ -28,7 +28,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
-	"github.com/azylman/aerial/services/eri/pkg/discord"
 	"github.com/azylman/aerial/services/eri/pkg/env"
 	"github.com/azylman/aerial/services/eri/pkg/mcp"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
@@ -643,9 +642,6 @@ func setupDiscordFunnel(
 	dgSession := connectDiscordFunnel(ctx, store, pool, discordToken)
 	if pool != nil && dgSession != nil {
 		pool.SetDiscordSession(dgSession)
-		pool.SetWidgetDeliveryFunc(func(req discord.StatusWidgetRequest) (string, error) {
-			return discord.DeliverStatusWidget(dgSession, req, time.Now())
-		})
 	}
 	cleanup := func() {
 		log.Printf("Stopping worker pool...")

@@ -531,7 +531,7 @@ func handleStatusWidget(pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		msgID, err := pool.DeliverStatusWidget(req)
+		msgID, err := pool.DeliverStatusWidgetWithContext(r.Context(), req)
 		if err != nil {
 			writeDiscordDeliveryError(w, err, "Failed to deliver widget")
 			return

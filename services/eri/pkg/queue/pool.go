@@ -500,12 +500,6 @@ func (p *WorkerPool) SetDiscordSession(s *discordgo.Session) {
 	p.cfg.DiscordSession = s
 }
 
-func (p *WorkerPool) SetWidgetDeliveryFunc(fn func(req discord.StatusWidgetRequest) (string, error)) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.cfg.WidgetDeliveryFunc = fn
-}
-
 func (p *WorkerPool) Classifier() *classifier.Classifier {
 	p.mu.Lock()
 	defer p.mu.Unlock()

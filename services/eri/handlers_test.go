@@ -546,77 +546,110 @@ func TestHandleStatusWidget(t *testing.T) {
 		},
 	})
 
-	for _, tc := range []struct {
-		name       string
-		method     string
-		pool       *queue.WorkerPool
-		body       string
-		wantStatus int
-		wantSubstr string
+	var capturedReq discord.StatusWidgetRequest
+	successPool := queue.New(nil, queue.WorkerPoolConfig{
+		WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) {
+			capturedReq = req
+			return "created-widget-msg-789", nil
+		},
+	})
+
+	muxPool := queue.New(nil, queue.WorkerPoolConfig{
+		WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) { return "widget-99", nil },
+	})
+
+	tests := []struct {
+		name              string
+		method            string
+		urlPath           string
+		pool              *queue.WorkerPool
+		body              string
+		wantStatus        int
+		wantSubstr        string
+		useMux            bool
+		wantMessageID     string
+		wantDeliveredID   string
+		wantDeliveredChan string
+		wantChunkCount    int
 	}{
-		{"method not allowed", http.MethodGet, &queue.WorkerPool{}, "", http.StatusMethodNotAllowed, "Method not allowed"},
-		{"nil pool", http.MethodPost, nil, `{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`, http.StatusInternalServerError, "Worker pool not available"},
-		{"invalid JSON", http.MethodPost, &queue.WorkerPool{}, "{invalid-json", http.StatusBadRequest, "Invalid JSON payload"},
-		{"missing channel_id", http.MethodPost, &queue.WorkerPool{}, `{"chunks":[{"title":"task"}]}`, http.StatusBadRequest, "Invalid payload: 'channel_id' field is required and cannot be empty"},
-		{"non-snowflake channel_id", http.MethodPost, &queue.WorkerPool{}, `{"channel_id":"invalid-snow","chunks":[{"title":"task"}]}`, http.StatusBadRequest, "Invalid payload: 'channel_id' must be a valid numeric Discord snowflake"},
-		{"empty chunks", http.MethodPost, &queue.WorkerPool{}, `{"channel_id":"1542423172400291873","chunks":[]}`, http.StatusBadRequest, "Invalid payload: 'chunks' field is required and cannot be empty"},
-		{"discord session not connected", http.MethodPost, &queue.WorkerPool{}, `{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`, http.StatusServiceUnavailable, "Discord session not connected"},
-		{"discord client RESTError", http.MethodPost, restErrPool, `{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`, http.StatusForbidden, "Discord client error"},
-		{"discord client cannot send", http.MethodPost, sendErrPool, `{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`, http.StatusBadRequest, "Discord client error"},
-		{"generic delivery failure", http.MethodPost, failErrPool, `{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`, http.StatusInternalServerError, "Failed to deliver widget"},
-	} {
+		{name: "method not allowed", method: http.MethodGet, pool: &queue.WorkerPool{}, wantStatus: http.StatusMethodNotAllowed, wantSubstr: "Method not allowed"},
+		{name: "nil pool", method: http.MethodPost, pool: nil, body: `{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`, wantStatus: http.StatusInternalServerError, wantSubstr: "Worker pool not available"},
+		{name: "invalid JSON", method: http.MethodPost, pool: &queue.WorkerPool{}, body: "{invalid-json", wantStatus: http.StatusBadRequest, wantSubstr: "Invalid JSON payload"},
+		{name: "missing channel_id", method: http.MethodPost, pool: &queue.WorkerPool{}, body: `{"chunks":[{"title":"task"}]}`, wantStatus: http.StatusBadRequest, wantSubstr: "Invalid payload: 'channel_id' field is required and cannot be empty"},
+		{name: "non-snowflake channel_id", method: http.MethodPost, pool: &queue.WorkerPool{}, body: `{"channel_id":"invalid-snow","chunks":[{"title":"task"}]}`, wantStatus: http.StatusBadRequest, wantSubstr: "Invalid payload: 'channel_id' must be a valid numeric Discord snowflake"},
+		{name: "empty chunks", method: http.MethodPost, pool: &queue.WorkerPool{}, body: `{"channel_id":"1542423172400291873","chunks":[]}`, wantStatus: http.StatusBadRequest, wantSubstr: "Invalid payload: 'chunks' field is required and cannot be empty"},
+		{name: "discord session not connected", method: http.MethodPost, pool: &queue.WorkerPool{}, body: `{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`, wantStatus: http.StatusServiceUnavailable, wantSubstr: "Discord session not connected"},
+		{name: "discord client RESTError", method: http.MethodPost, pool: restErrPool, body: `{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`, wantStatus: http.StatusForbidden, wantSubstr: "Discord client error"},
+		{name: "discord client cannot send", method: http.MethodPost, pool: sendErrPool, body: `{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`, wantStatus: http.StatusBadRequest, wantSubstr: "Discord client error"},
+		{name: "generic delivery failure", method: http.MethodPost, pool: failErrPool, body: `{"channel_id":"1542423172400291873","chunks":[{"title":"task"}]}`, wantStatus: http.StatusInternalServerError, wantSubstr: "Failed to deliver widget"},
+		{
+			name:              "success returns 200 with message_id and delivers widget",
+			method:            http.MethodPost,
+			pool:              successPool,
+			body:              `{"channel_id":"1542423172400291873","id":"build-123","title":"Build Title","status":"running","chunks":[{"index":1,"repo":"aerial","title":"Chunk 1","status":"completed"}]}`,
+			wantStatus:        http.StatusOK,
+			wantMessageID:     "created-widget-msg-789",
+			wantDeliveredID:   "build-123",
+			wantDeliveredChan: "1542423172400291873",
+			wantChunkCount:    1,
+		},
+		{
+			name:       "mux route mounting for /discord/widget",
+			method:     http.MethodPost,
+			urlPath:    "/discord/widget",
+			pool:       muxPool,
+			body:       `{"channel_id":"1542423172400291873","chunks":[{"title":"t"}]}`,
+			useMux:     true,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "mux route dropped for /internal/widget",
+			method:     http.MethodPost,
+			urlPath:    "/internal/widget",
+			pool:       muxPool,
+			body:       `{"channel_id":"1542423172400291873","chunks":[{"title":"t"}]}`,
+			useMux:     true,
+			wantStatus: http.StatusNotFound,
+		},
+	}
+
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var r io.Reader
 			if tc.body != "" {
 				r = strings.NewReader(tc.body)
 			}
-			w := runHTTP(handleStatusWidget(tc.pool), tc.method, "/discord/widget", r)
-			if w.Code != tc.wantStatus || !strings.Contains(w.Body.String(), tc.wantSubstr) {
-				t.Fatalf("got status=%d body=%q, want status=%d substr=%q", w.Code, w.Body.String(), tc.wantStatus, tc.wantSubstr)
+			path := tc.urlPath
+			if path == "" {
+				path = "/discord/widget"
+			}
+			var w *httptest.ResponseRecorder
+			if tc.useMux {
+				mux := SetupBrainMuxWithEmbedder(dbtest.NewFakeStore(), tc.pool, nil)
+				w = httptest.NewRecorder()
+				mux.ServeHTTP(w, httptest.NewRequest(tc.method, path, r))
+			} else {
+				w = runHTTP(handleStatusWidget(tc.pool), tc.method, path, r)
+			}
+
+			if w.Code != tc.wantStatus {
+				t.Fatalf("got status=%d body=%q, want status=%d", w.Code, w.Body.String(), tc.wantStatus)
+			}
+			if tc.wantSubstr != "" && !strings.Contains(w.Body.String(), tc.wantSubstr) {
+				t.Fatalf("got body=%q, want substr=%q", w.Body.String(), tc.wantSubstr)
+			}
+			if tc.wantMessageID != "" {
+				var resp map[string]any
+				_ = json.Unmarshal(w.Body.Bytes(), &resp)
+				if resp["status"] != "ok" || resp["message_id"] != tc.wantMessageID {
+					t.Fatalf("unexpected response body: %+v", resp)
+				}
+			}
+			if tc.wantDeliveredID != "" && (capturedReq.ID != tc.wantDeliveredID || capturedReq.ChannelID != tc.wantDeliveredChan || len(capturedReq.Chunks) != tc.wantChunkCount) {
+				t.Fatalf("unexpected captured request: %+v", capturedReq)
 			}
 		})
 	}
-
-	t.Run("success returns 200 with message_id and delivers widget", func(t *testing.T) {
-		var capturedReq discord.StatusWidgetRequest
-		handler := handleStatusWidget(queue.New(nil, queue.WorkerPoolConfig{
-			WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) {
-				capturedReq = req
-				return "created-widget-msg-789", nil
-			},
-		}))
-
-		payload := `{"channel_id":"1542423172400291873","id":"build-123","title":"Build Title","status":"running","chunks":[{"index":1,"repo":"aerial","title":"Chunk 1","status":"completed"}]}`
-		w := runHTTP(handler, http.MethodPost, "/discord/widget", strings.NewReader(payload))
-		if w.Code != http.StatusOK {
-			t.Fatalf("expected 200 OK, got %d (body: %s)", w.Code, w.Body.String())
-		}
-		if capturedReq.ID != "build-123" || capturedReq.ChannelID != "1542423172400291873" || len(capturedReq.Chunks) != 1 {
-			t.Fatalf("unexpected captured request: %+v", capturedReq)
-		}
-		var resp map[string]any
-		_ = json.Unmarshal(w.Body.Bytes(), &resp)
-		if resp["status"] != "ok" || resp["message_id"] != "created-widget-msg-789" {
-			t.Fatalf("unexpected response body: %+v", resp)
-		}
-	})
-
-	t.Run("mux route mounting for /discord/widget", func(t *testing.T) {
-		pool := queue.New(nil, queue.WorkerPoolConfig{
-			WidgetDeliveryFunc: func(req discord.StatusWidgetRequest) (string, error) { return "widget-99", nil },
-		})
-		mux := SetupBrainMuxWithEmbedder(dbtest.NewFakeStore(), pool, nil)
-		w := httptest.NewRecorder()
-		mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/discord/widget", strings.NewReader(`{"channel_id":"1542423172400291873","chunks":[{"title":"t"}]}`)))
-		if w.Code != http.StatusOK {
-			t.Errorf("expected 200 for /discord/widget, got %d", w.Code)
-		}
-		wInternal := httptest.NewRecorder()
-		mux.ServeHTTP(wInternal, httptest.NewRequest(http.MethodPost, "/internal/widget", strings.NewReader(`{"channel_id":"1542423172400291873","chunks":[{"title":"t"}]}`)))
-		if wInternal.Code != http.StatusNotFound {
-			t.Errorf("expected 404 for dropped /internal/widget, got %d", wInternal.Code)
-		}
-	})
 }
 
 func TestHandleTranscriptSearchAndStats(t *testing.T) {
