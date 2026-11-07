@@ -189,6 +189,7 @@ type VanadisChunk struct {
 	ID                 string    `json:"id"`
 	BuildID            string    `json:"build_id"`
 	ChunkIndex         int       `json:"chunk_index"`
+	Mode               string    `json:"mode"`
 	Repo               string    `json:"repo,omitempty"`
 	Title              string    `json:"title"`
 	Instructions       string    `json:"instructions"`
@@ -271,6 +272,8 @@ type VanadisStore interface {
 	GetChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisChunkPRLookup, error)
 	AttachChunkPR(ctx context.Context, chunkID string, prNumber int, repo string) (string, error)
 	AdvanceChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisAdvancementResult, error)
+	CompleteActionChunk(ctx context.Context, chunkID string) (*VanadisAdvancementResult, error)
+	FailChunk(ctx context.Context, chunkID, reason string) (*VanadisBuild, *VanadisChunk, bool, error)
 	FailChunkByPR(ctx context.Context, repo string, prNumber int) (buildID, chunkID string, failed bool, err error)
 	UpdateBuild(ctx context.Context, buildID string, req UpdateBuildRequest) (*VanadisBuild, error)
 	UpdateChunk(ctx context.Context, buildID, chunkRef string, req UpdateChunkRequest) (*VanadisChunk, error)
@@ -296,10 +299,27 @@ func NewPostgresVanadisStore(db pgxQueryExecer) *PostgresVanadisStore {
 }
 
 func normalizeRepo(repo string) string {
-	if repo = strings.TrimSpace(repo); repo == "" || strings.Contains(repo, "/") {
-		return repo
+	return strings.TrimSpace(repo)
+}
+
+func normalizeChunkMode(raw string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "pr":
+		return "pr", nil
+	case "action":
+		return "action", nil
+	default:
+		return "", fmt.Errorf("invalid chunk mode %q: must be 'pr' or 'action'", raw)
 	}
-	return "azylman/" + repo
+}
+
+func isChunkDoneStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "merged", "completed":
+		return true
+	default:
+		return false
+	}
 }
 
 func isValidVanadisChunkID(id string) bool {
@@ -330,6 +350,9 @@ func validateCreateBuildInputs(buildID, threadID, objective string, chunks []Van
 		if cb := strings.TrimSpace(c.BuildID); cb != "" && cb != buildID {
 			return fmt.Errorf("chunk[%d] build_id %q does not match build id %q", i, cb, buildID)
 		}
+		if err := validateChunkModeAndRepo(i, c.Mode, c.Repo, c.TargetFiles, c.TargetSymbols); err != nil {
+			return err
+		}
 		if _, err := normalizeChunkEffort(c.Effort); err != nil {
 			return fmt.Errorf("chunk[%d] %w", i, err)
 		}
@@ -347,7 +370,25 @@ func isTerminalChunkStatus(status string) bool {
 }
 
 func execInsertVanadisChunk(ctx context.Context, tx pgx.Tx, buildID string, c VanadisChunk) error {
-	const cQ = `INSERT INTO vanadis_chunks (id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, pr_number, started_at, completed_at, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);`
+	const cQ = `INSERT INTO vanadis_chunks (id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, pr_number, started_at, completed_at, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);`
+	cMode, err := normalizeChunkMode(c.Mode)
+	if err != nil {
+		return fmt.Errorf("chunk %s: %w", c.ID, err)
+	}
+	cRepo := ""
+	if cMode == "pr" {
+		cRepo = normalizeRepo(c.Repo)
+		if cRepo == "" {
+			return fmt.Errorf("chunk %s: repo is required for pr mode", c.ID)
+		}
+	} else {
+		if strings.TrimSpace(c.Repo) != "" {
+			return fmt.Errorf("chunk %s: action chunk must have empty repo", c.ID)
+		}
+		if len(c.TargetFiles) > 0 || len(c.TargetSymbols) > 0 {
+			return fmt.Errorf("chunk %s: action chunk must not specify target files or symbols", c.ID)
+		}
+	}
 	cStatus := firstNonEmpty(strings.TrimSpace(c.Status), "pending")
 	cEffort, err := normalizeChunkEffort(c.Effort)
 	if err != nil {
@@ -367,7 +408,7 @@ func execInsertVanadisChunk(ctx context.Context, tx pgx.Tx, buildID string, c Va
 	} else if isTerminalChunkStatus(cStatus) {
 		completedAt = time.Now().UTC()
 	}
-	if _, err := tx.Exec(ctx, cQ, strings.TrimSpace(c.ID), buildID, c.ChunkIndex, firstNonEmpty(normalizeRepo(c.Repo), "azylman/aerial"), strings.TrimSpace(c.Title), strings.TrimSpace(c.Instructions), nonNilSlice(c.TargetFiles), nonNilSlice(c.TargetSymbols), cEffort, nonNilSlice(c.AcceptanceCriteria), cStatus, prNum, startedAt, completedAt); err != nil {
+	if _, err := tx.Exec(ctx, cQ, strings.TrimSpace(c.ID), buildID, c.ChunkIndex, cMode, cRepo, strings.TrimSpace(c.Title), strings.TrimSpace(c.Instructions), nonNilSlice(c.TargetFiles), nonNilSlice(c.TargetSymbols), cEffort, nonNilSlice(c.AcceptanceCriteria), cStatus, prNum, startedAt, completedAt); err != nil {
 		return fmt.Errorf("failed to insert vanadis chunk %s: %w", c.ID, err)
 	}
 	return nil
@@ -424,7 +465,7 @@ func (s *PostgresVanadisStore) GetBuild(ctx context.Context, buildID string) (*V
 		}
 		return nil, nil, fmt.Errorf("query build %s: %w", buildID, err)
 	}
-	const chunksQuery = `SELECT id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC;`
+	const chunksQuery = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC;`
 	rows, err := s.db.Query(ctx, chunksQuery, buildID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("query chunks for build %s: %w", buildID, err)
@@ -442,7 +483,7 @@ func scanChunks(rows pgx.Rows) ([]VanadisChunk, error) {
 	for rows.Next() {
 		var c VanadisChunk
 		var startedAt, completedAt sql.NullTime
-		if err := rows.Scan(&c.ID, &c.BuildID, &c.ChunkIndex, &c.Repo, &c.Title, &c.Instructions, &c.TargetFiles, &c.TargetSymbols, &c.Effort, &c.AcceptanceCriteria, &c.Status, &c.PRNumber, &startedAt, &completedAt, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.BuildID, &c.ChunkIndex, &c.Mode, &c.Repo, &c.Title, &c.Instructions, &c.TargetFiles, &c.TargetSymbols, &c.Effort, &c.AcceptanceCriteria, &c.Status, &c.PRNumber, &startedAt, &completedAt, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("failed to scan vanadis chunk: %w", err)
 		}
 		if startedAt.Valid {
@@ -491,7 +532,7 @@ func (s *PostgresVanadisStore) ListBuilds(ctx context.Context, limit int) ([]Van
 	if len(builds) == 0 {
 		return []VanadisBuildEntry{}, nil
 	}
-	const chunksQuery = `SELECT id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = ANY($1) ORDER BY build_id, chunk_index ASC;`
+	const chunksQuery = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = ANY($1) ORDER BY build_id, chunk_index ASC;`
 	cRows, err := s.db.Query(ctx, chunksQuery, buildIDs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query vanadis chunks: %w", err)
@@ -554,6 +595,71 @@ func FormatChunkPrompt(build VanadisBuild, chunks []VanadisChunk, activeIdx int)
 	return formatChunkPromptWithShareRoot(build, chunks, activeIdx, defaultShareRoot)
 }
 
+func formatPromptCompletedLedger(sb *strings.Builder, completed []VanadisChunk, total int) {
+	sb.WriteString("=== Completed Chunks Ledger ===\n")
+	if len(completed) == 0 {
+		sb.WriteString("(none — this is the first chunk)\n\n")
+		return
+	}
+	for k, c := range completed {
+		if c.Mode == "action" && (c.Status == "completed" || c.Status == "merged") {
+			fmt.Fprintf(sb, "- [Chunk %d/%d] %s (action, completed)\n", k+1, total, c.Title)
+		} else {
+			fmt.Fprintf(sb, "- [Chunk %d/%d] %s (%s, PR #%d)\n", k+1, total, c.Title, firstNonEmpty(normalizeRepo(c.Repo), normalizeRepo("aerial")), c.PRNumber)
+		}
+	}
+	sb.WriteString("\n")
+}
+
+func formatPromptActiveChunk(sb *strings.Builder, active VanadisChunk, activeIdx, total int, activeRepo, shareRoot string) {
+	if active.Mode == "action" {
+		fmt.Fprintf(sb, "=== Active Chunk (Chunk %d of %d) ===\nChunk ID: %s\nTitle: %s\nChunk Mode: action\nInstructions:\n%s\n\n", activeIdx+1, total, active.ID, active.Title, active.Instructions)
+		return
+	}
+	targetFilesStr := firstNonEmpty(strings.Join(active.TargetFiles, ", "), "(none specified)")
+	fmt.Fprintf(sb, "=== Active Chunk (Chunk %d of %d) ===\nChunk ID: %s\nTitle: %s\nRepository: %s\nTarget Files: %s\n", activeIdx+1, total, active.ID, active.Title, activeRepo, targetFilesStr)
+	if len(active.TargetSymbols) > 0 {
+		fmt.Fprintf(sb, "Target Symbols: %s\n", strings.Join(active.TargetSymbols, ", "))
+	}
+	spanLines, _ := ResolveSymbolSpans(shareRoot, activeRepo, active.TargetFiles, active.TargetSymbols)
+	if len(spanLines) > 0 {
+		fmt.Fprintf(sb, "Target Symbol Spans:\n%s\n", strings.Join(spanLines, "\n"))
+	}
+	fmt.Fprintf(sb, "Instructions:\n%s\n\n", active.Instructions)
+}
+
+func formatPromptRemainingChunks(sb *strings.Builder, remaining []VanadisChunk, activeIdx, total int) {
+	sb.WriteString("=== Remaining Chunks ===\n")
+	if len(remaining) == 0 {
+		sb.WriteString("(none — this is the final chunk)\n\n")
+		return
+	}
+	sb.WriteString("DO NOT implement these remaining chunks in this turn—they are listed strictly for architectural boundary awareness.\n")
+	for k, c := range remaining {
+		if c.Mode == "action" {
+			fmt.Fprintf(sb, "- [Chunk %d/%d] %s (action)\n", activeIdx+2+k, total, c.Title)
+		} else {
+			fmt.Fprintf(sb, "- [Chunk %d/%d] %s (%s)\n", activeIdx+2+k, total, c.Title, firstNonEmpty(normalizeRepo(c.Repo), normalizeRepo("aerial")))
+		}
+	}
+	sb.WriteString("\n")
+}
+
+func formatPromptContract(sb *strings.Builder, active VanadisChunk, activeRepo, shareRoot string) {
+	if active.Mode == "action" {
+		fmt.Fprintf(sb, "=== Action Chunk Execution Contract ===\n1. Execute the operational instructions directly in this turn, adhering to the Build Objective and Shared Build Context.\n2. Iterate and diagnose until all acceptance criteria are verified.\n3. NEVER spawn or invoke subagents (`invoke_subagent`, `define_subagent`): Vanadis build chunks are already isolated leaf tasks—execute all operational steps directly in this turn.\n4. End turn normally on success: the eri harness automatically marks the action chunk completed and advances the build.\n5. If an unrecoverable blocker prevents completion, call the vanadis MCP tool fail_chunk with chunk_id %q and the failure reason, and end the turn.\n", active.ID)
+		return
+	}
+	fmt.Fprintf(sb, "=== Mandatory Execution Contract ===\n1. Initialize a fresh scratch workspace off `origin/main`: `/share/aerial/scripts/aerial-pr.sh init %s`\n2. Implement ONLY this chunk following TDD, optimizing all design and implementation choices for the `Build Objective` and `Shared Build Context` so the change achieves the objective in substance and integrates cleanly and idiomatically into the existing architecture without superficial workarounds, dead scaffolding, or bolted-on catch-all blocks, run package tests and `./scripts/verify.sh --staged` (if coverage is below 95%%, run `./scripts/check-coverage.sh --service <svc> --check --gaps` in a single pass rather than manual `go test -coverprofile` loops), and write `PR_DESCRIPTION.md`.\n   If any detail in chunk `Instructions` is ambiguous, underspecified, or conflicts with the `Build Objective`, the `Build Objective` takes precedence—adapt the implementation to satisfy the `Build Objective`.\n3. Inspect `Target Files` and `Target Symbols` directly rather than running broad repo-wide searches: resolve live symbol line offsets first and `view_file` ONLY those targeted `StartLine`–`EndLine` slices instead of reading entire files from line 1.\n", activeRepo)
+	_, allResolved := ResolveSymbolSpans(shareRoot, activeRepo, active.TargetFiles, active.TargetSymbols)
+	if !allResolved {
+		if grepCmd := formatSymbolGrepCommand(active.TargetFiles, active.TargetSymbols); grepCmd != "" {
+			fmt.Fprintf(sb, "   Run after init: `%s`\n", grepCmd)
+		}
+	}
+	fmt.Fprintf(sb, "4. NEVER spawn or invoke subagents (`invoke_subagent`, `define_subagent`): Vanadis build chunks are already isolated leaf tasks—execute all file edits, tests, and verification directly in this turn.\n5. Submit via `/share/aerial/scripts/aerial-pr.sh submit \"$SCRATCH_DIR\" \"<commit_msg>\" --vanadis-chunk %s`\n6. Terminate turn immediately after submission.\n", active.ID)
+}
+
 func formatChunkPromptWithShareRoot(build VanadisBuild, chunks []VanadisChunk, activeIdx int, shareRoot string) (string, error) {
 	if len(chunks) == 0 {
 		return "", errors.New("chunks slice cannot be empty")
@@ -563,51 +669,27 @@ func formatChunkPromptWithShareRoot(build VanadisBuild, chunks []VanadisChunk, a
 	}
 	total := len(chunks)
 	active := chunks[activeIdx]
-	activeRepo := firstNonEmpty(normalizeRepo(active.Repo), "azylman/aerial")
+	isActionChunk := active.Mode == "action"
+	activeRepo := ""
+	if !isActionChunk {
+		activeRepo = firstNonEmpty(normalizeRepo(active.Repo), normalizeRepo("aerial"))
+	}
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: %s\n", build.ID)
 	if bTitle := strings.TrimSpace(build.Title); bTitle != "" {
 		fmt.Fprintf(&sb, "Build Title: %s\n", bTitle)
 	}
-	fmt.Fprintf(&sb, "Repository: %s\nTier: %d\n\n=== Build Objective ===\n%s\n\n", activeRepo, build.Tier, strings.TrimSpace(build.Objective))
+	if !isActionChunk {
+		fmt.Fprintf(&sb, "Repository: %s\n", activeRepo)
+	}
+	fmt.Fprintf(&sb, "Tier: %d\n\n=== Build Objective ===\n%s\n\n", build.Tier, strings.TrimSpace(build.Objective))
 	if sharedCtx := strings.TrimSpace(build.SharedContext); sharedCtx != "" {
 		fmt.Fprintf(&sb, "=== Shared Build Context ===\n%s\n\n", sharedCtx)
 	}
-	sb.WriteString("=== Completed Chunks Ledger ===\n")
-	if activeIdx == 0 {
-		sb.WriteString("(none — this is the first chunk)\n\n")
-	} else {
-		for k, c := range chunks[:activeIdx] {
-			fmt.Fprintf(&sb, "- [Chunk %d/%d] %s (%s, PR #%d)\n", k+1, total, c.Title, firstNonEmpty(normalizeRepo(c.Repo), "azylman/aerial"), c.PRNumber)
-		}
-		sb.WriteString("\n")
-	}
-	targetFilesStr := firstNonEmpty(strings.Join(active.TargetFiles, ", "), "(none specified)")
-	fmt.Fprintf(&sb, "=== Active Chunk (Chunk %d of %d) ===\nChunk ID: %s\nTitle: %s\nRepository: %s\nTarget Files: %s\n", activeIdx+1, total, active.ID, active.Title, activeRepo, targetFilesStr)
-	if len(active.TargetSymbols) > 0 {
-		fmt.Fprintf(&sb, "Target Symbols: %s\n", strings.Join(active.TargetSymbols, ", "))
-	}
-	spanLines, allResolved := ResolveSymbolSpans(shareRoot, activeRepo, active.TargetFiles, active.TargetSymbols)
-	if len(spanLines) > 0 {
-		fmt.Fprintf(&sb, "Target Symbol Spans:\n%s\n", strings.Join(spanLines, "\n"))
-	}
-	fmt.Fprintf(&sb, "Instructions:\n%s\n\n=== Remaining Chunks ===\n", active.Instructions)
-	if activeIdx+1 >= total {
-		sb.WriteString("(none — this is the final chunk)\n\n")
-	} else {
-		sb.WriteString("DO NOT implement these remaining chunks in this turn—they are listed strictly for architectural boundary awareness.\n")
-		for k, c := range chunks[activeIdx+1:] {
-			fmt.Fprintf(&sb, "- [Chunk %d/%d] %s (%s)\n", activeIdx+2+k, total, c.Title, firstNonEmpty(normalizeRepo(c.Repo), "azylman/aerial"))
-		}
-		sb.WriteString("\n")
-	}
-	fmt.Fprintf(&sb, "=== Mandatory Execution Contract ===\n1. Initialize a fresh scratch workspace off `origin/main`: `/share/aerial/scripts/aerial-pr.sh init %s`\n2. Implement ONLY this chunk following TDD, optimizing all design and implementation choices for the `Build Objective` and `Shared Build Context` so the change achieves the objective in substance and integrates cleanly and idiomatically into the existing architecture without superficial workarounds, dead scaffolding, or bolted-on catch-all blocks, run package tests and `./scripts/verify.sh --staged` (if coverage is below 95%%, run `./scripts/check-coverage.sh --service <svc> --check --gaps` in a single pass rather than manual `go test -coverprofile` loops), and write `PR_DESCRIPTION.md`.\n   If any detail in chunk `Instructions` is ambiguous, underspecified, or conflicts with the `Build Objective`, the `Build Objective` takes precedence—adapt the implementation to satisfy the `Build Objective`.\n3. Inspect `Target Files` and `Target Symbols` directly rather than running broad repo-wide searches: resolve live symbol line offsets first and `view_file` ONLY those targeted `StartLine`–`EndLine` slices instead of reading entire files from line 1.\n", activeRepo)
-	if !allResolved {
-		if grepCmd := formatSymbolGrepCommand(active.TargetFiles, active.TargetSymbols); grepCmd != "" {
-			fmt.Fprintf(&sb, "   Run after init: `%s`\n", grepCmd)
-		}
-	}
-	fmt.Fprintf(&sb, "4. NEVER spawn or invoke subagents (`invoke_subagent`, `define_subagent`): Vanadis build chunks are already isolated leaf tasks—execute all file edits, tests, and verification directly in this turn.\n5. Submit via `/share/aerial/scripts/aerial-pr.sh submit \"$SCRATCH_DIR\" \"<commit_msg>\" --vanadis-chunk %s`\n6. Terminate turn immediately after submission.\n", active.ID)
+	formatPromptCompletedLedger(&sb, chunks[:activeIdx], total)
+	formatPromptActiveChunk(&sb, active, activeIdx, total, activeRepo, shareRoot)
+	formatPromptRemainingChunks(&sb, chunks[activeIdx+1:], activeIdx, total)
+	formatPromptContract(&sb, active, activeRepo, shareRoot)
 	return sb.String(), nil
 }
 
@@ -826,7 +908,7 @@ func (s *VanadisServer) ProcessExecuteChunk(ctx context.Context, buildID string,
 		return fmt.Errorf("chunk index %d not found in build %s", chunkIndex, buildID)
 	}
 	chunk := chunks[activeIdx]
-	if chunk.Status == "pr_opened" || chunk.Status == "merged" {
+	if chunk.Status == "pr_opened" || isChunkDoneStatus(chunk.Status) {
 		log.Printf("[vanadis] chunk %s (index %d) already in status %q, skipping", chunk.ID, chunkIndex, chunk.Status)
 		return nil
 	}
@@ -887,6 +969,7 @@ func isNumericSnowflake(s string) bool {
 // CreateChunkInput defines a single chunk in a CreateBuildRequest.
 type CreateChunkInput struct {
 	ID                 string   `json:"id"`
+	Mode               string   `json:"mode,omitempty"`
 	Repo               string   `json:"repo,omitempty"`
 	Title              string   `json:"title"`
 	Instructions       string   `json:"instructions"`
@@ -899,7 +982,6 @@ type CreateChunkInput struct {
 // CreateBuildRequest defines the JSON request body for POST /builds.
 type CreateBuildRequest struct {
 	ID            string             `json:"id"`
-	Repo          string             `json:"repo"`
 	ThreadID      string             `json:"thread_id"`
 	Tier          int                `json:"tier"`
 	Title         string             `json:"title"`
@@ -978,7 +1060,7 @@ func (s *VanadisServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func parseCreateBuildChunks(buildID, repo string, now time.Time, rawChunks []CreateChunkInput) ([]VanadisChunk, error) {
+func parseCreateBuildChunks(buildID string, now time.Time, rawChunks []CreateChunkInput) ([]VanadisChunk, error) {
 	chunks := make([]VanadisChunk, len(rawChunks))
 	for i, c := range rawChunks {
 		title, instructions := strings.TrimSpace(c.Title), strings.TrimSpace(c.Instructions)
@@ -988,6 +1070,28 @@ func parseCreateBuildChunks(buildID, repo string, now time.Time, rawChunks []Cre
 		chunkID := firstNonEmpty(strings.TrimSpace(c.ID), fmt.Sprintf("%s-chunk-%d", buildID, i+1))
 		if !isValidVanadisChunkID(chunkID) {
 			return nil, fmt.Errorf("chunks[%d].id must be 1..120 characters of [a-zA-Z0-9_-]", i)
+		}
+		mode, err := normalizeChunkMode(c.Mode)
+		if err != nil {
+			return nil, fmt.Errorf("chunk[%d] %w", i, err)
+		}
+		repo := ""
+		switch mode {
+		case "pr":
+			repo = normalizeRepo(c.Repo)
+			if repo == "" {
+				return nil, fmt.Errorf("chunk[%d] repo is required for pr mode", i)
+			}
+		case "action":
+			if strings.TrimSpace(c.Repo) != "" {
+				return nil, fmt.Errorf("chunk[%d] action chunk must have empty repo", i)
+			}
+			if len(c.TargetFiles) > 0 {
+				return nil, fmt.Errorf("chunk[%d] action chunk must not specify target_files", i)
+			}
+			if len(c.TargetSymbols) > 0 {
+				return nil, fmt.Errorf("chunk[%d] action chunk must not specify target_symbols", i)
+			}
 		}
 		effort, err := normalizeChunkEffort(c.Effort)
 		if err != nil {
@@ -1000,8 +1104,8 @@ func parseCreateBuildChunks(buildID, repo string, now time.Time, rawChunks []Cre
 			startedAt = now
 		}
 		chunks[i] = VanadisChunk{
-			ID: chunkID, BuildID: buildID, ChunkIndex: i,
-			Repo: firstNonEmpty(normalizeRepo(c.Repo), repo), Title: title, Instructions: instructions,
+			ID: chunkID, BuildID: buildID, ChunkIndex: i, Mode: mode,
+			Repo: repo, Title: title, Instructions: instructions,
 			TargetFiles: nonNilSlice(c.TargetFiles), TargetSymbols: nonNilSlice(c.TargetSymbols), Effort: effort,
 			AcceptanceCriteria: nonNilSlice(c.AcceptanceCriteria), Status: status, StartedAt: startedAt, CreatedAt: now, UpdatedAt: now,
 		}
@@ -1024,15 +1128,8 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusBadRequest, "invalid json payload")
 		return
 	}
-	repo := normalizeRepo(req.Repo)
-	if repo == "" && len(req.Chunks) > 0 {
-		repo = normalizeRepo(req.Chunks[0].Repo)
-	}
 	threadID, objective := normalizeDiscordThreadID(req.ThreadID), strings.TrimSpace(req.Objective)
 	switch {
-	case repo == "":
-		writeErr(w, http.StatusBadRequest, "repo is required")
-		return
 	case !isNumericSnowflake(threadID):
 		writeErr(w, http.StatusBadRequest, "thread_id is required and must be a numeric Discord snowflake")
 		return
@@ -1053,7 +1150,7 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 		ID: buildID, ThreadID: threadID, Tier: tier, Title: firstNonEmpty(strings.TrimSpace(req.Title), objective),
 		Objective: objective, SharedContext: strings.TrimSpace(req.SharedContext), Status: "running", CreatedAt: now, UpdatedAt: now,
 	}
-	chunks, err := parseCreateBuildChunks(buildID, repo, now, req.Chunks)
+	chunks, err := parseCreateBuildChunks(buildID, now, req.Chunks)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return

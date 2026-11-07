@@ -21,6 +21,7 @@ import (
 type VanadisChunkSummary struct {
 	ID          string    `json:"id"`
 	ChunkIndex  int       `json:"chunk_index"`
+	Mode        string    `json:"mode"`
 	Repo        string    `json:"repo,omitempty"`
 	Title       string    `json:"title"`
 	Status      string    `json:"status"`
@@ -90,6 +91,7 @@ type UpdateBuildRequest struct {
 
 // UpdateChunkRequest defines the request payload for mutating an existing pending chunk.
 type UpdateChunkRequest struct {
+	Mode          *string  `json:"mode,omitempty"`
 	Repo          string   `json:"repo,omitempty"`
 	Title         string   `json:"title,omitempty"`
 	Instructions  string   `json:"instructions,omitempty"`
@@ -171,7 +173,7 @@ func (s *PostgresVanadisStore) GetChunk(ctx context.Context, chunkID string) (*V
 	if chunkID == "" {
 		return nil, nil, errors.New("chunk id cannot be empty")
 	}
-	const chunkQuery = `SELECT id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE id = $1;`
+	const chunkQuery = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE id = $1;`
 	rows, err := s.db.Query(ctx, chunkQuery, chunkID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("query chunk %s: %w", chunkID, err)
@@ -244,6 +246,19 @@ func (s *PostgresVanadisStore) AttachChunkPR(ctx context.Context, chunkID string
 	if chunkID == "" || prNumber <= 0 {
 		return "", errors.New("chunk id and valid pr number are required")
 	}
+
+	var mode string
+	chkErr := s.db.QueryRow(ctx, `SELECT mode FROM vanadis_chunks WHERE id = $1;`, chunkID).Scan(&mode)
+	if chkErr != nil {
+		if errors.Is(chkErr, pgx.ErrNoRows) {
+			return "", ErrChunkNotFound
+		}
+		return "", fmt.Errorf("check chunk mode %s: %w", chunkID, chkErr)
+	}
+	if mode == "action" {
+		return "", fmt.Errorf("%w: action chunk cannot attach a pull request", ErrBuildConflict)
+	}
+
 	var threadID string
 	var err error
 	if repo != "" {
@@ -271,7 +286,7 @@ func computeNextChunkIndex(chunks []VanadisChunkSummary, currentIdx int) int {
 	nextChunkIdx := -1
 	fallbackIdx := -1
 	for _, cs := range chunks {
-		if cs.Status != "merged" {
+		if !isChunkDoneStatus(cs.Status) {
 			if cs.ChunkIndex > currentIdx && (nextChunkIdx == -1 || cs.ChunkIndex < nextChunkIdx) {
 				nextChunkIdx = cs.ChunkIndex
 			} else if fallbackIdx == -1 {
@@ -290,7 +305,7 @@ func scanVanadisChunkSummaries(rows pgx.Rows, mergedChunkID string) ([]VanadisCh
 	for rows.Next() {
 		var cs VanadisChunkSummary
 		var startedAt, completedAt sql.NullTime
-		if scanErr := rows.Scan(&cs.ID, &cs.ChunkIndex, &cs.Repo, &cs.Title, &cs.Status, &cs.PRNumber, &startedAt, &completedAt, &cs.UpdatedAt); scanErr != nil {
+		if scanErr := rows.Scan(&cs.ID, &cs.ChunkIndex, &cs.Mode, &cs.Repo, &cs.Title, &cs.Status, &cs.PRNumber, &startedAt, &completedAt, &cs.UpdatedAt); scanErr != nil {
 			return nil, fmt.Errorf("scan vanadis chunk summary: %w", scanErr)
 		}
 		if startedAt.Valid {
@@ -300,7 +315,11 @@ func scanVanadisChunkSummaries(rows pgx.Rows, mergedChunkID string) ([]VanadisCh
 			cs.CompletedAt = completedAt.Time
 		}
 		if cs.ID == mergedChunkID {
-			cs.Status = "merged"
+			if cs.Mode == "action" {
+				cs.Status = "completed"
+			} else {
+				cs.Status = "merged"
+			}
 			if cs.CompletedAt.IsZero() {
 				cs.CompletedAt = time.Now().UTC()
 			}
@@ -369,7 +388,7 @@ func completeBuild(ctx context.Context, tx pgx.Tx, buildID string, cStatus strin
 }
 
 func queryAndAdvanceChunks(ctx context.Context, tx pgx.Tx, buildID, chunkID, cStatus string, chunkIdx int, res *VanadisAdvancementResult) (*VanadisAdvancementResult, error) {
-	const chunksQuery = `SELECT id, chunk_index, repo, title, status, COALESCE(pr_number, 0), started_at, completed_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC FOR UPDATE`
+	const chunksQuery = `SELECT id, chunk_index, mode, repo, title, status, COALESCE(pr_number, 0), started_at, completed_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC FOR UPDATE`
 	rows, err := tx.Query(ctx, chunksQuery, buildID)
 	if err != nil {
 		return nil, fmt.Errorf("query vanadis build chunks for advance: %w", err)
@@ -409,16 +428,16 @@ func (s *PostgresVanadisStore) AdvanceChunkByPR(ctx context.Context, repo string
 	}()
 
 	const selectChunkQuery = `
-		SELECT c.id, c.build_id, c.chunk_index, c.title, c.status, b.thread_id, b.tier, COALESCE(NULLIF(b.title, ''), b.objective), b.objective, b.status, COALESCE(b.status_message_id, '')
+		SELECT c.id, c.build_id, c.chunk_index, c.mode, c.title, c.status, b.thread_id, b.tier, COALESCE(NULLIF(b.title, ''), b.objective), b.objective, b.status, COALESCE(b.status_message_id, '')
 		FROM vanadis_chunks c
 		JOIN vanadis_builds b ON c.build_id = b.id
 		WHERE c.repo = $1 AND c.pr_number = $2
 		ORDER BY c.updated_at DESC LIMIT 1 FOR UPDATE`
 
-	var chunkID, buildID, cTitle, cStatus, threadID, bTitle, objective, bStatus, bStatusMsgID string
+	var chunkID, buildID, cTitle, cStatus, threadID, bTitle, objective, bStatus, bStatusMsgID, cMode string
 	var chunkIdx, tier int
 	err = tx.QueryRow(ctx, selectChunkQuery, repo, prNumber).Scan(
-		&chunkID, &buildID, &chunkIdx, &cTitle, &cStatus, &threadID, &tier, &bTitle, &objective, &bStatus, &bStatusMsgID,
+		&chunkID, &buildID, &chunkIdx, &cMode, &cTitle, &cStatus, &threadID, &tier, &bTitle, &objective, &bStatus, &bStatusMsgID,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return &VanadisAdvancementResult{Matched: false}, nil
@@ -557,7 +576,7 @@ func lockRunningBuildAndChunks(ctx context.Context, tx pgx.Tx, buildID string) (
 		return nil, fmt.Errorf("%w: build %s has status %q (must be running)", ErrBuildConflict, buildID, b.Status)
 	}
 
-	const chunksQuery = `SELECT id, build_id, chunk_index, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC FOR UPDATE;`
+	const chunksQuery = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC FOR UPDATE;`
 	rows, err := tx.Query(ctx, chunksQuery, buildID)
 	if err != nil {
 		return nil, fmt.Errorf("lock chunks for build %s: %w", buildID, err)
@@ -578,9 +597,14 @@ func validateUpdateChunkInput(buildID, chunkRef string, req UpdateChunkRequest) 
 	title := strings.TrimSpace(req.Title)
 	instructions := strings.TrimSpace(req.Instructions)
 	effortStr := strings.TrimSpace(req.Effort)
-	hasField := repo != "" || title != "" || instructions != "" || effortStr != "" || req.TargetFiles != nil || req.TargetSymbols != nil
+	hasField := req.Mode != nil || repo != "" || title != "" || instructions != "" || effortStr != "" || req.TargetFiles != nil || req.TargetSymbols != nil
 	if !hasField {
 		return "", fmt.Errorf("%w: build id, chunk ref, and at least one updated field are required", ErrInvalidBuildInput)
+	}
+	if req.Mode != nil {
+		if _, err := normalizeChunkMode(*req.Mode); err != nil {
+			return "", fmt.Errorf("%w: %w", ErrInvalidBuildInput, err)
+		}
 	}
 	if effortStr != "" {
 		normEffort, effErr := normalizeChunkEffort(effortStr)
@@ -592,25 +616,66 @@ func validateUpdateChunkInput(buildID, chunkRef string, req UpdateChunkRequest) 
 	return "", nil
 }
 
-func applyChunkUpdates(c *VanadisChunk, req UpdateChunkRequest, normEffort string) {
-	if repo := strings.TrimSpace(req.Repo); repo != "" {
-		c.Repo = normalizeRepo(repo)
+func applyChunkUpdates(c *VanadisChunk, req UpdateChunkRequest, normEffort string) error {
+	newMode := c.Mode
+	if req.Mode != nil {
+		m, err := normalizeChunkMode(*req.Mode)
+		if err != nil {
+			return err
+		}
+		newMode = m
 	}
+	newRepo := c.Repo
+	if repo := strings.TrimSpace(req.Repo); repo != "" {
+		newRepo = normalizeRepo(repo)
+	} else if newMode == "action" {
+		newRepo = ""
+	}
+	newTargetFiles := c.TargetFiles
+	if req.TargetFiles != nil {
+		newTargetFiles = nonNilSlice(req.TargetFiles)
+	} else if newMode == "action" {
+		newTargetFiles = []string{}
+	}
+	newTargetSymbols := c.TargetSymbols
+	if req.TargetSymbols != nil {
+		newTargetSymbols = nonNilSlice(req.TargetSymbols)
+	} else if newMode == "action" {
+		newTargetSymbols = []string{}
+	}
+
+	switch newMode {
+	case "pr":
+		if newRepo == "" {
+			return fmt.Errorf("%w: repo is required for pr mode", ErrInvalidBuildInput)
+		}
+	case "action":
+		if newRepo != "" {
+			return fmt.Errorf("%w: action chunk must have empty repo", ErrInvalidBuildInput)
+		}
+		if len(newTargetFiles) > 0 {
+			return fmt.Errorf("%w: action chunk must not specify target_files", ErrInvalidBuildInput)
+		}
+		if len(newTargetSymbols) > 0 {
+			return fmt.Errorf("%w: action chunk must not specify target_symbols", ErrInvalidBuildInput)
+		}
+	}
+
+	c.Mode = newMode
+	c.Repo = newRepo
+	c.TargetFiles = newTargetFiles
+	c.TargetSymbols = newTargetSymbols
+
 	if title := strings.TrimSpace(req.Title); title != "" {
 		c.Title = title
 	}
 	if instructions := strings.TrimSpace(req.Instructions); instructions != "" {
 		c.Instructions = instructions
 	}
-	if req.TargetFiles != nil {
-		c.TargetFiles = nonNilSlice(req.TargetFiles)
-	}
-	if req.TargetSymbols != nil {
-		c.TargetSymbols = nonNilSlice(req.TargetSymbols)
-	}
 	if normEffort != "" {
 		c.Effort = normEffort
 	}
+	return nil
 }
 
 // UpdateChunk modifies fields of a pending chunk within a running VanadisBuild.
@@ -648,10 +713,12 @@ func (s *PostgresVanadisStore) UpdateChunk(ctx context.Context, buildID, chunkRe
 		return nil, fmt.Errorf("%w: chunk %s has status %q (must be pending)", ErrBuildConflict, c.ID, c.Status)
 	}
 
-	applyChunkUpdates(&c, req, normEffort)
+	if err := applyChunkUpdates(&c, req, normEffort); err != nil {
+		return nil, err
+	}
 
-	const updateChunkQ = `UPDATE vanadis_chunks SET repo = $1, title = $2, instructions = $3, target_files = $4, target_symbols = $5, effort = $6, updated_at = CURRENT_TIMESTAMP WHERE id = $7;`
-	if _, err := tx.Exec(ctx, updateChunkQ, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.ID); err != nil {
+	const updateChunkQ = `UPDATE vanadis_chunks SET mode = $1, repo = $2, title = $3, instructions = $4, target_files = $5, target_symbols = $6, effort = $7, updated_at = CURRENT_TIMESTAMP WHERE id = $8;`
+	if _, err := tx.Exec(ctx, updateChunkQ, c.Mode, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.ID); err != nil {
 		return nil, fmt.Errorf("update chunk %s: %w", c.ID, err)
 	}
 	c.UpdatedAt = time.Now().UTC()
@@ -672,6 +739,9 @@ func validateAppendChunksInputs(buildID string, inputs []CreateChunkInput) error
 		}
 		if id := strings.TrimSpace(in.ID); id != "" && !isValidVanadisChunkID(id) {
 			return fmt.Errorf("%w: chunk[%d] invalid id %q", ErrInvalidBuildInput, i, id)
+		}
+		if err := validateChunkModeAndRepo(i, in.Mode, in.Repo, in.TargetFiles, in.TargetSymbols); err != nil {
+			return fmt.Errorf("%w: %w", ErrInvalidBuildInput, err)
 		}
 		if _, err := normalizeChunkEffort(in.Effort); err != nil {
 			return fmt.Errorf("%w: chunk[%d] %w", ErrInvalidBuildInput, i, err)
@@ -697,21 +767,29 @@ func resolveAppendedChunkID(buildID string, rawID string, nextIdx int, usedIDs m
 	}
 }
 
-func buildAppendedChunk(buildID string, in CreateChunkInput, nextIdx int, defaultRepo string, usedIDs map[string]bool, now time.Time) (VanadisChunk, error) {
+func buildAppendedChunk(buildID string, in CreateChunkInput, nextIdx int, usedIDs map[string]bool, now time.Time) (VanadisChunk, error) {
 	resolvedID, err := resolveAppendedChunkID(buildID, in.ID, nextIdx, usedIDs)
 	if err != nil {
 		return VanadisChunk{}, err
 	}
 	usedIDs[resolvedID] = true
+	mode, err := normalizeChunkMode(in.Mode)
+	if err != nil {
+		return VanadisChunk{}, fmt.Errorf("%w: %w", ErrInvalidBuildInput, err)
+	}
+	repo := ""
+	if mode == "pr" {
+		repo = normalizeRepo(in.Repo)
+	}
 	eff, err := normalizeChunkEffort(in.Effort)
 	if err != nil {
 		return VanadisChunk{}, err
 	}
-	repo := firstNonEmpty(normalizeRepo(in.Repo), defaultRepo)
 	return VanadisChunk{
 		ID:                 resolvedID,
 		BuildID:            buildID,
 		ChunkIndex:         nextIdx,
+		Mode:               mode,
 		Repo:               repo,
 		Title:              strings.TrimSpace(in.Title),
 		Instructions:       strings.TrimSpace(in.Instructions),
@@ -756,17 +834,15 @@ func (s *PostgresVanadisStore) AppendChunks(ctx context.Context, buildID string,
 	}
 
 	nextIdx := 0
-	defaultRepo := "azylman/aerial"
 	if len(existing) > 0 {
 		last := existing[len(existing)-1]
 		nextIdx = last.ChunkIndex + 1
-		defaultRepo = firstNonEmpty(last.Repo, "azylman/aerial")
 	}
 
 	now := time.Now().UTC()
 	appended := make([]VanadisChunk, 0, len(inputs))
 	for _, in := range inputs {
-		newChunk, err := buildAppendedChunk(buildID, in, nextIdx, defaultRepo, usedIDs, now)
+		newChunk, err := buildAppendedChunk(buildID, in, nextIdx, usedIDs, now)
 		if err != nil {
 			return nil, err
 		}
@@ -1027,7 +1103,10 @@ func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncC
 	widgetStatus := firstNonEmpty(normalizeWidgetStatus(build.Status), "running")
 	wChunks := make([]StatusWidgetChunk, len(chunks))
 	for i, c := range chunks {
-		chunkRepo := firstNonEmpty(c.Repo, "azylman/aerial")
+		chunkRepo := firstNonEmpty(c.Repo, "aerial")
+		if c.Mode == "action" {
+			chunkRepo = "action"
+		}
 		chunkStatus := normalizeWidgetStatus(c.Status)
 		completedAt := c.CompletedAt
 		var activeStep string
@@ -1040,7 +1119,7 @@ func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncC
 				activeStep = strings.TrimSpace(req.ActiveStep)
 				completedAt = time.Time{}
 			}
-		} else if chunkStatus == "merged" {
+		} else if chunkStatus == "merged" || (c.Mode == "action" && chunkStatus == "completed") {
 			chunkStatus = "deployed"
 		}
 		wChunks[i] = StatusWidgetChunk{
