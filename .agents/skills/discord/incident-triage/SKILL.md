@@ -72,14 +72,18 @@ VictoriaMetrics is the cluster-wide time-series database (TSDB) collecting metri
 - **Never Guess PromQL Expressions or Metric Types**:
   - Prometheus metrics can be Gauges, Counters (requiring `rate(...)`), or Histograms.
   - **The Histogram Trap**: Histograms (such as voice TTFR, runner durations, classifier timings) DO NOT have bare time series. Querying `aerial_brain_voice_ttfr_duration_seconds` directly returns an empty vector `[]`. Histograms only exist as `_bucket`, `_sum`, and `_count`.
-- **Step 1: Check Grafana Dashboards for Production-Validated PromQL**:
-  - Grafana dashboards contain tested PromQL formulas, quantile bucket expressions, and rate windows. Note that Grafana uses SQLite in Kubernetes (`GF_DATABASE_TYPE=sqlite3`).
-  - Search dashboard definitions directly in git:
-    - **Git Dashboard Definitions (`services/grafana/dashboards/*.json`)**: Contains repo-provisioned dashboards (`core-telemetry.json`, `token-usage.json`, `host-system-overview.json`, etc.) in `services/grafana/dashboards/*.json`. Search with:
-      ```bash
-      grep -i "<keyword>" services/grafana/dashboards/*.json
-      ```
-  - If a dashboard panel exists, extract and reuse the exact PromQL query directly.
+- **Step 1: Check Grafana Dashboards & vmalert Rules for Production-Validated PromQL**:
+  - Grafana dashboards and `vmalert` rules contain tested PromQL formulas, quantile bucket expressions, and rate windows. Note that Grafana uses SQLite in Kubernetes (`GF_DATABASE_TYPE=sqlite3`).
+  - Search dashboard definitions directly in mounted git repositories:
+    - **Git Dashboard Definitions**: Provisioned dashboards live across both repositories:
+      - System core dashboards: `/share/aerial/services/grafana/dashboards/*.json` (`core-telemetry.json`, `token-usage.json`, `host-system-overview.json`, `postgres-overview.json`, `docker-overview.json`)
+      - Custom domain dashboards: `/share/aerial-config/services/grafana/dashboards/*.json` (`calibarn-gpu-hud.json`, `home-assistant-telemetry.json`, `unifi-network-hud.json`, `voice-kiosk-hud.json`)
+      - Search with:
+        ```bash
+        grep -i "<keyword>" /share/aerial/services/grafana/dashboards/*.json /share/aerial-config/services/grafana/dashboards/*.json
+        ```
+    - **vmalert Rule Definitions**: When triaging active or historical alerts (`ALERTS{alertstate="firing"}`), inspect canonical recording and alert rules in `k8s/observability-and-mcp.yaml` (`ConfigMap/vmalert-rules`) or query rule endpoints via `victoriametrics:alerts` / `victoriametrics:rules`.
+  - If a dashboard panel or alert rule exists, extract and reuse the exact PromQL query directly.
 - **Step 2: Live TSDB Series Discovery (VictoriaMetrics MCP)**:
   - If no dashboard panel matches, discover the exact live metric names and suffixes using `victoriametrics:series` or `victoriametrics:metrics` with a regex match:
     - `match[]={__name__=~".*<keyword>.*"}`
@@ -167,5 +171,5 @@ Deliver the post-mortem directly to the user in clean Markdown (strictly < 1,800
 - **NEVER** use `log.*` column prefixes in OpenObserve (Fluent Bit promotes fields directly to top-level).
 - **NEVER** pass milliseconds to OpenObserve `_timestamp` (must be converted to microseconds: `ms * 1000`).
 - **NEVER** query a Prometheus histogram by its bare metric name (histograms only exist as `_bucket`, `_sum`, and `_count`; bare names return empty vectors `[]`).
-- **NEVER** guess PromQL formulas without checking Grafana dashboards (`services/grafana/dashboards/*.json`) or running `victoriametrics:series` first.
+- **NEVER** guess PromQL formulas without checking Grafana dashboards (`/share/aerial/services/grafana/dashboards/*.json`, `/share/aerial-config/services/grafana/dashboards/*.json`) or running `victoriametrics:series` first.
 - **NEVER** touch production code without reproducing the failure via a failing unit test in `services/eri/pkg/...` first.
