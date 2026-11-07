@@ -1163,6 +1163,81 @@ func TestProcessDeployEvent(t *testing.T) {
 			wantPrompts:  0,
 		},
 		{
+			name: "deploy_started on aerial-core skipped when waiting for image build",
+			evt:  mkDeployEvt("deploy_started", "aerial-core", "azylman/aerial", "sha-aerial-started", 89894, "1555405874565091380", "started", ""),
+			pgReg: NewPostgresPRRegistry(&mockVanadisPgxPool{
+				queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
+					if strings.Contains(sql, "SELECT status, COALESCE(metadata, '{}'::jsonb)") {
+						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+							if len(dest) >= 2 {
+								if s, ok := dest[0].(*string); ok {
+									*s = "merged"
+								}
+								if b, ok := dest[1].(*[]byte); ok {
+									*b = []byte(`{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`)
+								}
+							}
+							return nil
+						}}
+					}
+					if strings.Contains(sql, "SET status = 'deploying'") {
+						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+							if len(dest) > 0 {
+								if s, ok := dest[0].(*string); ok {
+									*s = "1555405874565091380"
+								}
+							}
+							return nil
+						}}
+					}
+					if strings.Contains(sql, "SELECT target_id, title, status") {
+						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+							if len(dest) > 0 {
+								if s, ok := dest[0].(*string); ok {
+									*s = "1555405874565091380"
+								}
+							}
+							return nil
+						}}
+					}
+					return mockVanadisPgxRow{}
+				},
+			}),
+			disp:         &mockOutboundDispatcher{widgetErr: errors.New("unexpected widget sync for skipped deploy_started")},
+			wantPR:       89894,
+			wantTargetID: "1555405874565091380",
+			wantPrompts:  0,
+		},
+		{
+			name: "sync_success on git-sync with ci_checks build jobs stays in synced without firing deploy prompt",
+			evt:  mkDeployEvt("sync_success", "git-sync", "azylman/aerial", "sha-aerial-sync-pending", 89895, "1555405874565091380", "success", ""),
+			pgReg: NewPostgresPRRegistry(&mockVanadisPgxPool{
+				queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
+					if strings.Contains(sql, "SELECT status, COALESCE(metadata, '{}'::jsonb)") {
+						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+							if len(dest) >= 2 {
+								if s, ok := dest[0].(*string); ok {
+									*s = "merged"
+								}
+								if b, ok := dest[1].(*[]byte); ok {
+									*b = []byte(`{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`)
+								}
+							}
+							return nil
+						}}
+					}
+					return mockVanadisPgxRow{}
+				},
+				execFn: func(qCtx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+					return pgconn.NewCommandTag("UPDATE 1"), nil
+				},
+			}),
+			disp:         &mockOutboundDispatcher{},
+			wantPR:       89895,
+			wantTargetID: "1555405874565091380",
+			wantPrompts:  0,
+		},
+		{
 			name: "enrichDeployEventPRAndTarget matches active deploying PR from ListDeployingPRs",
 			evt:  mkDeployEvt("deploy_success", "aerial-config", "", "sha-unresolved", 0, "", "success", ""),
 			reg: &mockPRRegistry{
@@ -1307,6 +1382,189 @@ func TestProcessDeployEvent(t *testing.T) {
 						}
 					}
 				}
+			}
+		})
+	}
+}
+
+func TestIsWaitingForImageBuild(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	tests := []struct {
+		name       string
+		serverNil  bool
+		nilReg     bool
+		mockReg    bool
+		nilPool    bool
+		repo       string
+		prNumber   int
+		status     string
+		metadata   string
+		queryErr   error
+		wantResult bool
+	}{
+		{
+			name:       "nil server returns false",
+			serverNil:  true,
+			repo:       "azylman/aerial",
+			prNumber:   42,
+			status:     "merged",
+			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
+			wantResult: false,
+		},
+		{
+			name:       "nil registry returns false",
+			nilReg:     true,
+			repo:       "azylman/aerial",
+			prNumber:   42,
+			status:     "merged",
+			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
+			wantResult: false,
+		},
+		{
+			name:       "empty repo returns false",
+			repo:       "",
+			prNumber:   42,
+			status:     "merged",
+			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
+			wantResult: false,
+		},
+		{
+			name:       "zero prNumber returns false",
+			repo:       "azylman/aerial",
+			prNumber:   0,
+			status:     "merged",
+			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
+			wantResult: false,
+		},
+		{
+			name:       "non-postgres registry returns false",
+			mockReg:    true,
+			repo:       "azylman/aerial",
+			prNumber:   42,
+			status:     "merged",
+			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
+			wantResult: false,
+		},
+		{
+			name:       "nil pool returns false",
+			nilPool:    true,
+			repo:       "azylman/aerial",
+			prNumber:   42,
+			status:     "merged",
+			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
+			wantResult: false,
+		},
+		{
+			name:       "query error returns false",
+			repo:       "azylman/aerial",
+			prNumber:   42,
+			queryErr:   errors.New("db error"),
+			wantResult: false,
+		},
+		{
+			name:       "unsupported status returns false",
+			repo:       "azylman/aerial",
+			prNumber:   42,
+			status:     "deploying",
+			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
+			wantResult: false,
+		},
+		{
+			name:       "invalid metadata unmarshals to nil and returns false",
+			repo:       "azylman/aerial",
+			prNumber:   42,
+			status:     "merged",
+			metadata:   `{invalid json`,
+			wantResult: false,
+		},
+		{
+			name:       "started_jobs non-empty returns false",
+			repo:       "azylman/aerial",
+			prNumber:   42,
+			status:     "merged",
+			metadata:   `{"started_jobs":["aerial-synapse"],"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
+			wantResult: false,
+		},
+		{
+			name:       "no build checks in metadata returns false",
+			repo:       "azylman/aerial",
+			prNumber:   42,
+			status:     "merged",
+			metadata:   `{"ci_checks":{"Go Unit Tests":"passed"}}`,
+			wantResult: false,
+		},
+		{
+			name:       "open status with build checks returns true",
+			repo:       "azylman/aerial",
+			prNumber:   42,
+			status:     "open",
+			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
+			wantResult: true,
+		},
+		{
+			name:       "merged status with build checks returns true",
+			repo:       "azylman/aerial",
+			prNumber:   42,
+			status:     "merged",
+			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
+			wantResult: true,
+		},
+		{
+			name:       "synced status with build checks returns true",
+			repo:       "azylman/aerial",
+			prNumber:   42,
+			status:     "synced",
+			metadata:   `{"ci_checks":{"Build & Push (aerial-synapse)":"passed"}}`,
+			wantResult: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.serverNil {
+				var nilSrv *RouterServer
+				if got := nilSrv.isWaitingForImageBuild(ctx, tc.repo, tc.prNumber); got != tc.wantResult {
+					t.Errorf("isWaitingForImageBuild() = %v, want %v", got, tc.wantResult)
+				}
+				return
+			}
+			srv := NewRouterServer(Config{}, nil)
+			switch {
+			case tc.mockReg:
+				srv.SetRegistry(&mockPRRegistry{})
+			case tc.nilPool:
+				srv.SetRegistry(NewPostgresPRRegistry(nil))
+			case !tc.nilReg:
+				pool := &mockVanadisPgxPool{
+					queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
+						if tc.queryErr != nil {
+							return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+								return tc.queryErr
+							}}
+						}
+						return mockVanadisPgxRow{scanFn: func(dest ...any) error {
+							if len(dest) >= 2 {
+								if s, ok := dest[0].(*string); ok {
+									*s = tc.status
+								}
+								if b, ok := dest[1].(*[]byte); ok {
+									if tc.metadata != "" {
+										*b = []byte(tc.metadata)
+									}
+								}
+							}
+							return nil
+						}}
+					},
+				}
+				srv.SetRegistry(NewPostgresPRRegistry(pool))
+			}
+			got := srv.isWaitingForImageBuild(ctx, tc.repo, tc.prNumber)
+			if got != tc.wantResult {
+				t.Errorf("isWaitingForImageBuild() = %v, want %v", got, tc.wantResult)
 			}
 		})
 	}
