@@ -150,7 +150,7 @@
           "fields": "",
           "values": false
         },
-        "textMode": "auto"
+        "textMode": "value_and_name"
       },
       "pluginVersion": "11.1.0",
       "targets": [
@@ -164,10 +164,21 @@
           "legendFormat": "Active Connections",
           "range": true,
           "refId": "A"
+        },
+        {
+          "expr": "sum(pg_stat_activity_count{datname!~\"template.*\", state=\"active\"}) or vector(0)",
+          "legendFormat": "Active Queries",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(pg_stat_activity_count{datname!~\"template.*\", state=~\"idle in transaction.*\"}) or vector(0)",
+          "legendFormat": "Idle in Tx",
+          "refId": "C"
         }
       ],
-      "title": "Active Backends",
-      "type": "stat"
+      "title": "Active Backends & Connection States (pg_stat_activity)",
+      "type": "stat",
+      "description": "Active PostgreSQL database backends (pg_stat_database_numbackends) and connection states (sum by (state) (pg_stat_activity_count))."
     },
     {
       "datasource": {
@@ -711,10 +722,22 @@
           "legendFormat": "Locks ({{mode}})",
           "range": true,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "sum(pg_locks_count{mode=~\"(?i)exclusivelock|accessexclusivelock\"}) or vector(0)",
+          "legendFormat": "Exclusive / AccessExclusive Locks",
+          "range": true,
+          "refId": "B"
         }
       ],
-      "title": "Lock Distribution by Mode",
-      "type": "timeseries"
+      "title": "Lock Distribution by Mode & Exclusive Locks (pg_locks_count)",
+      "type": "timeseries",
+      "description": "PostgreSQL lock counts by mode including ExclusiveLock and AccessExclusiveLock contention."
     }
   ],
   "refresh": "10s",
