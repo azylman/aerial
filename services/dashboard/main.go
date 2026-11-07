@@ -13,7 +13,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -180,26 +179,6 @@ var dockerSocketClient = &http.Client{
 	},
 }
 
-// HTTP client for Nomad cluster state inspection
-var nomadHTTPClient = &http.Client{
-	Timeout: 3 * time.Second,
-}
-
-type DockerContainerHealth = struct {
-	Status string `json:"Status"`
-}
-
-type DockerContainerJSON struct {
-	ID      string                 `json:"Id"`
-	Names   []string               `json:"Names"`
-	Image   string                 `json:"Image"`
-	Created int64                  `json:"Created"`
-	State   string                 `json:"State"`
-	Status  string                 `json:"Status"`
-	Labels  map[string]string      `json:"Labels"`
-	Health  *DockerContainerHealth `json:"Health,omitempty"`
-}
-
 func drainAndClose(body io.ReadCloser, name string) {
 	if body == nil {
 		return
@@ -287,64 +266,6 @@ func fetchDockerClusterState(ctx context.Context) ([]ServiceStatus, []DockerCont
 	}
 
 	return services, rawContainers, nil
-}
-
-func fetchNomadClusterState(ctx context.Context, nomadAddr string) ([]ServiceStatus, error) {
-	cleanNomadAddr := strings.TrimRight(strings.TrimSpace(nomadAddr), "/")
-	if cleanNomadAddr == "" {
-		return nil, fmt.Errorf("empty nomad address")
-	}
-
-	reqCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-
-	jobsURL := cleanNomadAddr + "/v1/jobs?filter=" + url.QueryEscape(`Type=="service"`)
-	reqJobs, err := http.NewRequestWithContext(reqCtx, http.MethodGet, jobsURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	reqJobs.Header.Set("Accept", "application/json")
-
-	respJobs, err := nomadHTTPClient.Do(reqJobs)
-	if err != nil {
-		return nil, err
-	}
-	defer respJobs.Body.Close()
-	defer drainAndClose(respJobs.Body, "nomad jobs response body")
-
-	if respJobs.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("nomad jobs returned HTTP %d", respJobs.StatusCode)
-	}
-
-	jobsData, err := io.ReadAll(respJobs.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	allocsURL := cleanNomadAddr + "/v1/allocations?filter=" + url.QueryEscape(`ClientStatus=="running"`)
-	reqAllocs, err := http.NewRequestWithContext(reqCtx, http.MethodGet, allocsURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	reqAllocs.Header.Set("Accept", "application/json")
-
-	respAllocs, err := nomadHTTPClient.Do(reqAllocs)
-	if err != nil {
-		return nil, err
-	}
-	defer respAllocs.Body.Close()
-	defer drainAndClose(respAllocs.Body, "nomad allocs response body")
-
-	if respAllocs.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("nomad allocs returned HTTP %d", respAllocs.StatusCode)
-	}
-
-	allocsData, err := io.ReadAll(respAllocs.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	return ParseNomadClusterState(jobsData, allocsData, time.Now().UTC())
 }
 
 func fetchActiveTasksFromBrain(ctx context.Context, brainURL string) ([]ActiveTaskStatus, error) {
@@ -447,7 +368,7 @@ func fetchGitSyncStatus(ctx context.Context, gitsyncURL string) GitSyncStatusRes
 	return status
 }
 
-// synthesizeContainersFromServices converts Nomad ServiceStatus entries into DockerContainerJSON
+// synthesizeContainersFromServices converts ServiceStatus entries into DockerContainerJSON
 // records without stamping aerial.commit_sha so resolveContainerCommit can match recon.TargetServices
 // before falling back to currentCommit.
 func synthesizeContainersFromServices(services []ServiceStatus, now time.Time) []DockerContainerJSON {
@@ -469,7 +390,7 @@ func synthesizeContainersFromServices(services []ServiceStatus, now time.Time) [
 	return out
 }
 
-func resolveClusterState(ctx context.Context, kubeAPIServer, nomadAddr, gitCommit string, gitSync GitSyncStatusResponse, now time.Time) ([]ServiceStatus, []DockerContainerJSON, string, error) {
+func resolveClusterState(ctx context.Context, kubeAPIServer, gitCommit string, gitSync GitSyncStatusResponse, now time.Time) ([]ServiceStatus, []DockerContainerJSON, string, error) {
 	var services []ServiceStatus
 	var rawContainers []DockerContainerJSON
 	var err error
@@ -478,15 +399,7 @@ func resolveClusterState(ctx context.Context, kubeAPIServer, nomadAddr, gitCommi
 		if k8sErr == nil && len(k8sServices) > 0 {
 			services = k8sServices
 		} else if k8sErr != nil {
-			log.Printf("[dashboard] Warning: Failed to fetch K8s cluster state (%s): %v, falling back to Nomad/Docker", kubeAPIServer, k8sErr)
-		}
-	}
-	if len(services) == 0 && nomadAddr != "" {
-		nomadServices, nomadErr := fetchNomadClusterState(ctx, nomadAddr)
-		if nomadErr == nil && len(nomadServices) > 0 {
-			services = nomadServices
-		} else if nomadErr != nil {
-			log.Printf("[dashboard] Warning: Failed to fetch Nomad cluster state (%s): %v, falling back to Docker", nomadAddr, nomadErr)
+			log.Printf("[dashboard] Warning: Failed to fetch K8s cluster state (%s): %v, falling back to Docker", kubeAPIServer, k8sErr)
 		}
 	}
 	if len(services) == 0 {
@@ -508,13 +421,9 @@ func resolveClusterState(ctx context.Context, kubeAPIServer, nomadAddr, gitCommi
 }
 
 func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalAddrs ...string) http.HandlerFunc {
-	nomadAddr := ""
 	kubeAPIServer := ""
 	if len(optionalAddrs) > 0 {
-		nomadAddr = strings.TrimSpace(optionalAddrs[0])
-	}
-	if len(optionalAddrs) > 1 {
-		kubeAPIServer = strings.TrimSpace(optionalAddrs[1])
+		kubeAPIServer = strings.TrimSpace(optionalAddrs[0])
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -533,7 +442,7 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalA
 		}
 
 		gitSync := fetchGitSyncStatus(ctx, gitsyncURL)
-		services, rawContainers, currentCommit, err := resolveClusterState(ctx, kubeAPIServer, nomadAddr, gitCommit, gitSync, now)
+		services, rawContainers, currentCommit, err := resolveClusterState(ctx, kubeAPIServer, gitCommit, gitSync, now)
 		deployments := mergeClusterDeploymentsWithHangar(rawContainers, ghRuns, ghJobs, gitSync, currentCommit)
 		if deployments == nil {
 			deployments = []DeploymentStatus{}
@@ -559,7 +468,6 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalA
 				{Name: "discord-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "kernel-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "github-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-				{Name: "nomad-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "infisical-mcp", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "synapse", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "ollama", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
@@ -622,8 +530,8 @@ func SetupDashboardMux(cfg DashboardConfig, assetReg *AssetRegistry) http.Handle
 	}
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/dashboard/health", healthHandler)
-	mux.HandleFunc("/api/status", statusHandler(cfg.BrainURL, cfg.GitSyncURL, cfg.ConfigPath, cfg.GitCommit, cfg.NomadAddr, cfg.KubeAPIServer))
-	mux.HandleFunc("/dashboard/api/status", statusHandler(cfg.BrainURL, cfg.GitSyncURL, cfg.ConfigPath, cfg.GitCommit, cfg.NomadAddr, cfg.KubeAPIServer))
+	mux.HandleFunc("/api/status", statusHandler(cfg.BrainURL, cfg.GitSyncURL, cfg.ConfigPath, cfg.GitCommit, cfg.KubeAPIServer))
+	mux.HandleFunc("/dashboard/api/status", statusHandler(cfg.BrainURL, cfg.GitSyncURL, cfg.ConfigPath, cfg.GitCommit, cfg.KubeAPIServer))
 	mux.HandleFunc("/api/facts", factsHandler(memoryURL))
 	mux.HandleFunc("/dashboard/api/facts", factsHandler(memoryURL))
 	mux.HandleFunc("/api/schedules", schedulesHandler(haroURL))
@@ -686,14 +594,9 @@ func RunDashboardServer(ctx context.Context, cfg DashboardConfig) error {
 	if len(repos) == 0 && cfg.GHRepo != "" {
 		repos = []string{cfg.GHRepo}
 	}
-	hangarURL := cfg.HangarURL
-	if hangarURL == "" {
-		hangarURL = cfg.GitSyncURL
-	}
-	if len(repos) > 0 || hangarURL != "" {
+	if len(repos) > 0 {
 		globalGHPoller = NewMultiGitHubPoller(repos, cfg.GHToken)
 		globalGHPoller.configPath = cfg.ConfigPath
-		globalGHPoller.hangarURL = hangarURL
 		if cfg.APIBaseURL != "" {
 			globalGHPoller.apiBaseURL = cfg.APIBaseURL
 		}

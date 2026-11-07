@@ -852,7 +852,8 @@ spec:
           envFrom:
             - secretRef:
                 name: shared-secrets
-          image: ghcr.io/azylman/aerial-discord-mcp:9bbbf9fe7bab6ea8eaa74257f1b55b61b8c48baf
+          image: ghcr.io/azylman/aerial-discord-mcp:latest
+          imagePullPolicy: Always
           name: discord-mcp
           ports:
             - containerPort: 8080
@@ -919,7 +920,8 @@ spec:
           envFrom:
             - secretRef:
                 name: shared-secrets
-          image: ghcr.io/azylman/aerial-github-mcp:6280af8bca6e0b7204bc1a8574b738f976bcbfb9
+          image: ghcr.io/azylman/aerial-github-mcp:latest
+          imagePullPolicy: Always
           name: github-mcp
           ports:
             - containerPort: 8080
@@ -986,7 +988,8 @@ spec:
           envFrom:
             - secretRef:
                 name: shared-secrets
-          image: ghcr.io/azylman/aerial-infisical-mcp:41f7d648be841df2cceba02ed332d148013b6998
+          image: ghcr.io/azylman/aerial-infisical-mcp:latest
+          imagePullPolicy: Always
           name: infisical-mcp
           ports:
             - containerPort: 8080
@@ -1111,7 +1114,8 @@ spec:
           envFrom:
             - secretRef:
                 name: shared-secrets
-          image: ghcr.io/azylman/aerial-kernel-mcp:d73fba1240f27a662be15bcb27e0b3c1698ef3cc
+          image: ghcr.io/azylman/aerial-kernel-mcp:latest
+          imagePullPolicy: Always
           name: kernel-mcp
           ports:
             - containerPort: 8080
@@ -1178,7 +1182,8 @@ spec:
           envFrom:
             - secretRef:
                 name: shared-secrets
-          image: ghcr.io/azylman/aerial-prospera:eb5d8743aa63c9e2c37ed7b5d769a47d08611b9c
+          image: ghcr.io/azylman/aerial-prospera:latest
+          imagePullPolicy: Always
           name: prospera
           ports:
             - containerPort: 8080

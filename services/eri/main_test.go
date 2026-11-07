@@ -228,6 +228,102 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 			t.Fatalf("expected ephemeralPool model updated to gpt-oss-120b-medium, got %q", spawnedModel)
 		}
 	})
+
+	t.Run("git-sync target resolution and change detection", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		subDirA := filepath.Join(tmpDir, "revA")
+		subDirB := filepath.Join(tmpDir, "revB")
+		_ = os.MkdirAll(subDirA, 0o755)
+		_ = os.MkdirAll(subDirB, 0o755)
+
+		symlinkPath := filepath.Join(tmpDir, "current")
+		if err := os.Symlink(subDirA, symlinkPath); err != nil {
+			t.Fatalf("failed to create test symlink: %v", err)
+		}
+
+		targetA := resolveGitSyncTarget(symlinkPath)
+		if targetA != subDirA {
+			t.Errorf("expected targetA %q, got %q", subDirA, targetA)
+		}
+
+		_ = os.Remove(symlinkPath)
+		if err := os.Symlink(subDirB, symlinkPath); err != nil {
+			t.Fatalf("failed to update test symlink: %v", err)
+		}
+
+		targetB := resolveGitSyncTarget(symlinkPath)
+		if targetB != subDirB {
+			t.Errorf("expected targetB %q, got %q", subDirB, targetB)
+		}
+
+		// Plain git repository (.git/HEAD) resolution
+		gitRepoDir := filepath.Join(tmpDir, "plain-repo")
+		gitHeadDir := filepath.Join(gitRepoDir, ".git")
+		_ = os.MkdirAll(filepath.Join(gitHeadDir, "refs", "heads"), 0o755)
+		_ = os.WriteFile(filepath.Join(gitHeadDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644)
+		_ = os.WriteFile(filepath.Join(gitHeadDir, "refs", "heads", "main"), []byte("commit-sha-12345\n"), 0o644)
+
+		repoTarget := resolveGitSyncTarget(gitRepoDir)
+		if repoTarget != "commit-sha-12345" {
+			t.Errorf("expected resolved git ref target commit-sha-12345, got %q", repoTarget)
+		}
+
+		// Detached HEAD case
+		detachedDir := filepath.Join(tmpDir, "detached-repo")
+		detachedGit := filepath.Join(detachedDir, ".git")
+		_ = os.MkdirAll(detachedGit, 0o755)
+		_ = os.WriteFile(filepath.Join(detachedGit, "HEAD"), []byte("commit-sha-detached\n"), 0o644)
+		detachedTarget := resolveGitSyncTarget(detachedDir)
+		if detachedTarget != "commit-sha-detached" {
+			t.Errorf("expected detached git target, got %q", detachedTarget)
+		}
+
+		// Exercise pollGitSyncTargets branches
+		oldAerialRoot := aerialShareRoot
+		oldConfigRoot := configShareRoot
+		defer func() {
+			aerialShareRoot = oldAerialRoot
+			configShareRoot = oldConfigRoot
+		}()
+		aerialShareRoot = symlinkPath
+		configShareRoot = filepath.Join(tmpDir, "does-not-exist")
+
+		var pollReloads []string
+		pollReloadFn := func(src string) {
+			pollReloads = append(pollReloads, src)
+		}
+		// Populate initial last targets
+		lA, lC := pollGitSyncTargets("", "", pollReloadFn)
+		if lA != targetB {
+			t.Errorf("expected lA %q, got %q", targetB, lA)
+		}
+
+		// No change when initial last matches current
+		pollGitSyncTargets(lA, lC, pollReloadFn)
+		if len(pollReloads) != 0 {
+			t.Errorf("expected no reload on initial target, got %v", pollReloads)
+		}
+		// Change detected when target is different
+		pollGitSyncTargets("differentA", lC, pollReloadFn)
+		if len(pollReloads) != 1 || pollReloads[0] != "git-sync" {
+			t.Errorf("expected git-sync reload, got %v", pollReloads)
+		}
+
+		// Also test config change branch
+		configShareRoot = symlinkPath
+		pollGitSyncTargets(lA, "differentC", pollReloadFn)
+		if len(pollReloads) != 2 || pollReloads[1] != "git-sync" {
+			t.Errorf("expected git-sync reload on config change, got %v", pollReloads)
+		}
+
+		// Plain directory without .git (stat fallback)
+		statDir := filepath.Join(tmpDir, "plain-dir")
+		_ = os.MkdirAll(statDir, 0o755)
+		statTarget := resolveGitSyncTarget(statDir)
+		if statTarget == "" {
+			t.Errorf("expected non-empty statTarget for plain directory")
+		}
+	})
 }
 
 func TestDefaultPaths(t *testing.T) {

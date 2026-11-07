@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
@@ -110,35 +109,6 @@ func mkRecon(active bool, state, sha, errMsg string, targets []string, startOff 
 			StartedAt:      testRefTime.Add(startOff),
 		},
 	}
-}
-
-func mkNomadJob(id, name, jobType, status, deployStatus string, starting int) NomadJobItem {
-	_ = deployStatus
-	j := NomadJobItem{ID: id, Name: name, Type: jobType, Status: status}
-	if starting > 0 {
-		j.JobSummary = struct {
-			Summary map[string]NomadJobSummaryGroup `json:"Summary"`
-		}{
-			Summary: map[string]NomadJobSummaryGroup{
-				"web": {Starting: starting},
-			},
-		}
-	}
-	return j
-}
-
-func mkNomadAlloc(id, jobID, clientStatus string, createOff time.Duration, healthy *bool, tasks map[string]NomadTaskState) NomadAllocItem {
-	a := NomadAllocItem{
-		ID:           id,
-		JobID:        jobID,
-		ClientStatus: clientStatus,
-		CreateTime:   testRefTime.Add(createOff).UnixNano(),
-		TaskStates:   tasks,
-	}
-	if healthy != nil {
-		a.DeploymentStatus = &NomadDeploymentStatus{Healthy: *healthy}
-	}
-	return a
 }
 
 func TestBuildFactsUpstreamURL_TableDriven(t *testing.T) {
@@ -503,7 +473,6 @@ func TestExtractServiceNameFromJobName_TableDriven(t *testing.T) {
 		{name: "discord mcp", jobName: "discord-mcp Tests", expected: "discord-mcp"},
 		{name: "kernel mcp", jobName: "kernel-mcp Tests", expected: "kernel-mcp"},
 		{name: "github mcp", jobName: "github-mcp Deploy", expected: "github-mcp"},
-		{name: "nomad mcp", jobName: "nomad-mcp Build", expected: "nomad-mcp"},
 		{name: "infisical mcp", jobName: "infisical-mcp Build", expected: "infisical-mcp"},
 		{name: "synapse service", jobName: "Build & Push synapse", expected: "synapse"},
 		{name: "ollama service", jobName: "Setup ollama image", expected: "ollama"},
@@ -578,9 +547,8 @@ func TestBuildContainerChips_TableDriven(t *testing.T) {
 		{name: "deduplicates running brain containers with future and current created", containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", 1*time.Hour), mkCont("aerial-brain", "brain", "", "running", "", 0)}, now: testRefTime, wantChips: []MatrixJobChip{{Name: "brain", Duration: "0s"}}},
 		{name: "nomad containers with alloc_id labels", containers: []DockerContainerJSON{
 			mkLabeledCont("brain-2a3a24e5-d6ce-2069-bad1-f328c7a24af0", "running", map[string]string{"aerial.service": "brain", "com.hashicorp.nomad.alloc_id": "2a3a24e5-d6ce-2069-bad1-f328c7a24af0"}),
-			mkLabeledCont("victoriametrics-mcp-6ca68da8-1599-0516-4c28-635658025294", "running", map[string]string{"com.hashicorp.nomad.alloc_id": "6ca68da8-1599-0516-4c28-635658025294"}),
 			mkLabeledCont("hassio_supervisor", "running", nil),
-		}, now: testRefTime, wantChips: []MatrixJobChip{{Name: "brain", Status: "completed", Conclusion: "success"}, {Name: "victoriametrics-mcp", Status: "completed"}}},
+		}, now: testRefTime, wantChips: []MatrixJobChip{{Name: "brain", Status: "completed", Conclusion: "success"}}},
 		{name: "zero reference time defaults to now", containers: []DockerContainerJSON{mkCont("aerial-brain", "", "", "running", "", -10*time.Second)}, now: time.Time{}, wantChips: []MatrixJobChip{{Status: "completed", Conclusion: "success"}}},
 	}
 
@@ -1301,7 +1269,6 @@ func TestExtractAerialServiceName(t *testing.T) {
 		{name: "Docker Compose container", container: mkLabeledCont("aerial-brain-1", "", map[string]string{"com.docker.compose.project": "aerial", "com.docker.compose.service": "brain"}), expectedSvc: "brain", expectedOk: true},
 		{name: "Foreign Docker Compose project container", container: mkLabeledCont("homeassistant-web-1", "", map[string]string{"com.docker.compose.project": "homeassistant", "com.docker.compose.service": "web"}), expectedSvc: "", expectedOk: false},
 		{name: "Nomad container with aerial.service label", container: mkLabeledCont("haro-6f0e3a1d-8af5-f530-2ca8-eee83dfac17e", "", map[string]string{"aerial.service": "haro", "com.hashicorp.nomad.alloc_id": "6f0e3a1d-8af5-f530-2ca8-eee83dfac17e"}), expectedSvc: "haro", expectedOk: true},
-		{name: "Nomad container with alloc_id in name", container: mkLabeledCont("victoriametrics-mcp-6ca68da8-1599-0516-4c28-635658025294", "", map[string]string{"com.hashicorp.nomad.alloc_id": "6ca68da8-1599-0516-4c28-635658025294"}), expectedSvc: "victoriametrics-mcp", expectedOk: true},
 		{name: "Legacy container with aerial- prefix", container: mkCont("aerial-proxy", "", "", "", "", 0), expectedSvc: "proxy", expectedOk: true},
 		{name: "Host supervisor container (non-Aerial)", container: mkLabeledCont("hassio_supervisor", "", map[string]string{"io.hass.type": "supervisor"}), expectedSvc: "", expectedOk: false},
 		{name: "Host addon container (non-Aerial)", container: mkLabeledCont("app_core_zigbee2mqtt", "", map[string]string{"supervisor_managed": ""}), expectedSvc: "", expectedOk: false},
@@ -1316,159 +1283,6 @@ func TestExtractAerialServiceName(t *testing.T) {
 			}
 			if svc != tc.expectedSvc {
 				t.Errorf("expected svc=%q, got %q", tc.expectedSvc, svc)
-			}
-		})
-	}
-}
-
-func TestParseNomadClusterState(t *testing.T) {
-	now := testRefTime
-	boolPtr := func(b bool) *bool { return &b }
-	mustJSON := func(v any) []byte {
-		b, err := json.Marshal(v)
-		if err != nil {
-			t.Fatalf("failed to marshal JSON: %v", err)
-		}
-		return b
-	}
-
-	tests := []struct {
-		name         string
-		jobsData     []byte
-		allocsData   []byte
-		now          time.Time
-		wantErr      bool
-		wantCount    int
-		wantServices []ServiceStatus
-	}{
-		{
-			name:       "healthy services with deployment",
-			jobsData:   mustJSON([]NomadJobItem{mkNomadJob("brain", "", "service", "running", "", 0)}),
-			allocsData: mustJSON([]NomadAllocItem{mkNomadAlloc("alloc-brain", "brain", "running", -60*time.Second, boolPtr(true), nil)}),
-			now:        now,
-			wantCount:  1,
-			wantServices: []ServiceStatus{
-				{Name: "brain", Status: "healthy", UptimeSeconds: 60},
-			},
-		},
-		{
-			name:       "starting service with deployment healthy=false and running task",
-			jobsData:   mustJSON([]NomadJobItem{mkNomadJob("hangar", "", "service", "running", "", 0)}),
-			allocsData: mustJSON([]NomadAllocItem{mkNomadAlloc("alloc-hangar", "hangar", "running", -10*time.Second, boolPtr(false), map[string]NomadTaskState{"task1": {State: "running"}})}),
-			now:        now,
-			wantCount:  1,
-			wantServices: []ServiceStatus{
-				{Status: "starting", UptimeSeconds: 10},
-			},
-		},
-		{
-			name:       "starting service with deployment healthy=false and pending task",
-			jobsData:   mustJSON([]NomadJobItem{mkNomadJob("hangar", "", "service", "running", "", 0)}),
-			allocsData: mustJSON([]NomadAllocItem{mkNomadAlloc("alloc-hangar", "hangar", "running", -10*time.Second, boolPtr(false), map[string]NomadTaskState{"task1": {State: "pending"}})}),
-			now:        now,
-			wantCount:  1,
-			wantServices: []ServiceStatus{
-				{Status: "starting"},
-			},
-		},
-		{
-			name:       "unhealthy service with dead task",
-			jobsData:   mustJSON([]NomadJobItem{mkNomadJob("hangar", "", "service", "running", "", 0)}),
-			allocsData: mustJSON([]NomadAllocItem{mkNomadAlloc("alloc-hangar", "hangar", "running", -10*time.Second, boolPtr(false), map[string]NomadTaskState{"task1": {State: "dead"}})}),
-			now:        now,
-			wantCount:  1,
-			wantServices: []ServiceStatus{
-				{Status: "unhealthy"},
-			},
-		},
-		{
-			name:       "unhealthy service with failed task or no allocs",
-			jobsData:   mustJSON([]NomadJobItem{mkNomadJob("svc-failed", "", "service", "running", "", 0), mkNomadJob("svc-no-alloc", "", "service", "dead", "", 0)}),
-			allocsData: mustJSON([]NomadAllocItem{mkNomadAlloc("alloc-failed", "svc-failed", "running", -30*time.Second, nil, map[string]NomadTaskState{"task1": {State: "running", Failed: true}})}),
-			now:        now,
-			wantCount:  2,
-			wantServices: []ServiceStatus{
-				{Name: "svc-failed", Status: "unhealthy"},
-				{Name: "svc-no-alloc", Status: "unhealthy"},
-			},
-		},
-		{
-			name:     "nil deployment status with healthy and unhealthy tasks",
-			jobsData: mustJSON([]NomadJobItem{mkNomadJob("proxy", "", "service", "running", "", 0), mkNomadJob("gateway", "", "service", "running", "", 0)}),
-			allocsData: mustJSON([]NomadAllocItem{
-				mkNomadAlloc("alloc-proxy", "proxy", "running", -100*time.Second, nil, map[string]NomadTaskState{"proxy-task": {State: "running"}}),
-				mkNomadAlloc("alloc-gateway", "gateway", "running", -100*time.Second, nil, map[string]NomadTaskState{"gateway-task": {State: "pending"}}),
-			}),
-			now:       now,
-			wantCount: 2,
-			wantServices: []ServiceStatus{
-				{Name: "gateway", Status: "unhealthy"},
-				{Name: "proxy", Status: "healthy", UptimeSeconds: 100},
-			},
-		},
-		{
-			name: "no running alloc with pending status or starting group",
-			jobsData: mustJSON([]NomadJobItem{
-				mkNomadJob("pending-svc", "", "service", "pending", "", 0),
-				mkNomadJob("starting-svc", "", "service", "running", "", 1),
-			}),
-			allocsData: []byte("[]"),
-			now:        now,
-			wantCount:  2,
-			wantServices: []ServiceStatus{
-				{Name: "pending-svc", Status: "starting"},
-				{Name: "starting-svc", Status: "starting"},
-			},
-		},
-		{
-			name: "multiple running allocs selects highest CreateTime and filters batch",
-			jobsData: mustJSON([]NomadJobItem{
-				mkNomadJob("svc-multi", "", "service", "running", "", 0),
-				mkNomadJob("batch-ignored", "", "batch", "running", "", 0),
-				mkNomadJob("", "named-only", "service", "running", "", 0),
-				mkNomadJob("", "", "service", "running", "", 0),
-			}),
-			allocsData: mustJSON([]NomadAllocItem{
-				mkNomadAlloc("alloc-old", "svc-multi", "running", -200*time.Second, boolPtr(false), nil),
-				mkNomadAlloc("alloc-new", "svc-multi", "running", -40*time.Second, boolPtr(true), nil),
-				mkNomadAlloc("alloc-batch", "batch-ignored", "running", -10*time.Second, nil, nil),
-				mkNomadAlloc("alloc-named", "named-only", "running", -15*time.Second, boolPtr(true), nil),
-				mkNomadAlloc("alloc-nonrunning", "svc-multi", "complete", -5*time.Second, nil, nil),
-			}),
-			now:       time.Time{},
-			wantCount: 2,
-			wantServices: []ServiceStatus{
-				{Name: "named-only", Status: "healthy"},
-				{Name: "svc-multi", Status: "healthy"},
-			},
-		},
-		{name: "malformed jobs JSON returns error", jobsData: []byte("not valid json"), allocsData: []byte("[]"), now: now, wantErr: true},
-		{name: "malformed allocs JSON returns error", jobsData: []byte("[]"), allocsData: []byte("not valid json"), now: now, wantErr: true},
-		{name: "empty payloads returns empty slice", jobsData: []byte("[]"), allocsData: []byte("[]"), now: now, wantCount: 0},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			services, err := ParseNomadClusterState(tt.jobsData, tt.allocsData, tt.now)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("ParseNomadClusterState() error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if tt.wantErr {
-				return
-			}
-			if len(services) != tt.wantCount {
-				t.Fatalf("ParseNomadClusterState() count = %d, want %d", len(services), tt.wantCount)
-			}
-			for i, want := range tt.wantServices {
-				if want.Name != "" && services[i].Name != want.Name {
-					t.Errorf("service[%d].Name = %q, want %q", i, services[i].Name, want.Name)
-				}
-				if want.Status != "" && services[i].Status != want.Status {
-					t.Errorf("service[%d].Status = %q, want %q", i, services[i].Status, want.Status)
-				}
-				if want.UptimeSeconds > 0 && services[i].UptimeSeconds != want.UptimeSeconds {
-					t.Errorf("service[%d].UptimeSeconds = %d, want %d", i, services[i].UptimeSeconds, want.UptimeSeconds)
-				}
 			}
 		})
 	}

@@ -438,8 +438,6 @@ func TestGitHubPoller_MultiRepoAndDiscovery_TableDriven(t *testing.T) {
 		{name: "MultiRepoFanoutAndSnapshotPrioritization"},
 		{name: "DynamicConfigReload"},
 		{name: "GetActiveReposEdgeCases"},
-		{name: "FetchHangarRepos"},
-		{name: "HangarDiscoveryAndLKGCRetention"},
 	}
 
 	for _, tc := range tests {
@@ -631,98 +629,6 @@ dashboard:
 				emptyPoller := &GitHubPoller{}
 				if got := emptyPoller.getActiveRepos(); got != nil {
 					t.Errorf("expected nil for empty poller, got %v", got)
-				}
-
-			case "FetchHangarRepos":
-				if res := fetchHangarRepos(ctx, "", nil); res != nil {
-					t.Errorf("expected nil for empty URL, got %v", res)
-				}
-				if res := fetchHangarRepos(ctx, "http://127.0.0.1:54320/unreachable", &http.Client{Timeout: 50 * time.Millisecond}); res != nil {
-					t.Errorf("expected nil for unreachable URL, got %v", res)
-				}
-
-				srv500 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.WriteHeader(http.StatusInternalServerError)
-				}))
-				defer srv500.Close()
-				if res := fetchHangarRepos(ctx, srv500.URL, srv500.Client()); res != nil {
-					t.Errorf("expected nil for 500 response, got %v", res)
-				}
-
-				srvBadJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.WriteHeader(http.StatusOK)
-					_, _ = w.Write([]byte("{invalid-json"))
-				}))
-				defer srvBadJSON.Close()
-				if res := fetchHangarRepos(ctx, srvBadJSON.URL, srvBadJSON.Client()); res != nil {
-					t.Errorf("expected nil for bad JSON, got %v", res)
-				}
-
-				srvOK := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					resp := GitSyncStatusResponse{
-						Status: "synced",
-						Repos: map[string]RepoStatus{
-							"/share/aerial":       {GitHubRepo: "azylman/aerial"},
-							"/share/mirrormere":   {GitHubRepo: "Azylman/MirrorMere"},
-							"/share/aerial-alias": {GitHubRepo: "azylman/aerial"},
-							"/share/no-github":    {GitHubRepo: ""},
-						},
-					}
-					w.Header().Set("Content-Type", "application/json")
-					_ = json.NewEncoder(w).Encode(resp)
-				}))
-				defer srvOK.Close()
-
-				res := fetchHangarRepos(ctx, srvOK.URL, srvOK.Client())
-				expected := []string{"azylman/aerial", "azylman/mirrormere"}
-				if len(res) != len(expected) {
-					t.Fatalf("expected %d repos, got %d: %v", len(expected), len(res), res)
-				}
-				for i, exp := range expected {
-					if res[i] != exp {
-						t.Errorf("res[%d] = %q, want %q", i, res[i], exp)
-					}
-				}
-
-			case "HangarDiscoveryAndLKGCRetention":
-				hangarShouldFail := false
-				srvHangar := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if hangarShouldFail {
-						w.WriteHeader(http.StatusInternalServerError)
-						return
-					}
-					resp := GitSyncStatusResponse{
-						Status: "synced",
-						Repos: map[string]RepoStatus{
-							"/share/mirrormere": {GitHubRepo: "azylman/mirrormere"},
-						},
-					}
-					w.Header().Set("Content-Type", "application/json")
-					_ = json.NewEncoder(w).Encode(resp)
-				}))
-				defer srvHangar.Close()
-
-				srvGH := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.Header().Set("Content-Type", "application/json")
-					_ = json.NewEncoder(w).Encode(GitHubRunsResponse{})
-				}))
-				defer srvGH.Close()
-
-				discoveryPoller := NewMultiGitHubPoller([]string{"azylman/aerial"}, "token")
-				discoveryPoller.apiBaseURL = srvGH.URL
-				discoveryPoller.hangarURL = srvHangar.URL
-
-				discoveryPoller.pollOnce(ctx)
-				activeRepos := discoveryPoller.getActiveRepos()
-				if len(activeRepos) != 2 || activeRepos[0] != "azylman/aerial" || activeRepos[1] != "azylman/mirrormere" {
-					t.Fatalf("expected 2 repos discovered, got %d: %v", len(activeRepos), activeRepos)
-				}
-
-				hangarShouldFail = true
-				discoveryPoller.pollOnce(ctx)
-				retainedRepos := discoveryPoller.getActiveRepos()
-				if len(retainedRepos) != 2 {
-					t.Fatalf("expected 2 repos retained under LKGC on Hangar failure, got %d: %v", len(retainedRepos), retainedRepos)
 				}
 			}
 		})

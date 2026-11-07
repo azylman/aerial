@@ -290,6 +290,86 @@ spec:
   type: ClusterIP
 ---
 apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  labels:
+    app.kubernetes.io/name: host-git-sync
+  name: host-git-sync
+  namespace: default
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: host-git-sync
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: host-git-sync
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values:
+                      - cockpit
+      containers:
+        - command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              while true; do
+                for repo in aerial aerial-config mirrormere; do
+                  target="/share/$repo"
+                  url="https://github.com/azylman/${repo}.git"
+                  mkdir -p "$target"
+                  if [ ! -d "$target/.git" ]; then
+                    echo "Initializing in-place repository at $target for $url..."
+                    (cd "$target" && git init && (git remote add origin "$url" 2>/dev/null || git remote set-url origin "$url") && git fetch --depth=1 origin main && git reset --hard FETCH_HEAD) || true
+                  else
+                    (cd "$target" && (git remote set-url origin "$url" 2>/dev/null || true) && git fetch --depth=1 origin main && git reset --hard FETCH_HEAD) || true
+                  fi
+                done
+                sleep 15
+              done
+          env:
+            - name: GITHUB_PAT
+              valueFrom:
+                secretKeyRef:
+                  key: GITHUB_PAT
+                  name: shared-secrets
+            - name: GIT_CONFIG_COUNT
+              value: "2"
+            - name: GIT_CONFIG_KEY_0
+              value: safe.directory
+            - name: GIT_CONFIG_VALUE_0
+              value: '*'
+            - name: GIT_CONFIG_KEY_1
+              value: url.https://x-access-token:$(GITHUB_PAT)@github.com/.insteadOf
+            - name: GIT_CONFIG_VALUE_1
+              value: https://github.com/
+          image: alpine/git:2.47.2
+          imagePullPolicy: IfNotPresent
+          name: host-git-sync
+          resources:
+            limits:
+              cpu: 100m
+              memory: 128Mi
+            requests:
+              cpu: 20m
+              memory: 64Mi
+          volumeMounts:
+            - mountPath: /share
+              name: share
+      volumes:
+        - hostPath:
+            path: /share
+            type: DirectoryOrCreate
+          name: share
+---
+apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
@@ -321,7 +401,8 @@ spec:
           envFrom:
             - secretRef:
                 name: shared-secrets
-          image: ghcr.io/azylman/aerial-vanadis:9bb68ff688408f95f2bf80bbe0bc440a74a1bcd2
+          image: ghcr.io/azylman/aerial-vanadis:latest
+          imagePullPolicy: Always
           name: vanadis
           ports:
             - containerPort: 4025
@@ -390,7 +471,8 @@ spec:
           envFrom:
             - secretRef:
                 name: shared-secrets
-          image: ghcr.io/azylman/aerial-coven:d73fba1240f27a662be15bcb27e0b3c1698ef3cc
+          image: ghcr.io/azylman/aerial-coven:latest
+          imagePullPolicy: Always
           name: coven
           ports:
             - containerPort: 4008
@@ -545,7 +627,8 @@ spec:
           envFrom:
             - secretRef:
                 name: shared-secrets
-          image: ghcr.io/azylman/aerial-haro:d73fba1240f27a662be15bcb27e0b3c1698ef3cc
+          image: ghcr.io/azylman/aerial-haro:latest
+          imagePullPolicy: Always
           name: haro
           ports:
             - containerPort: 4005
@@ -671,7 +754,8 @@ spec:
           envFrom:
             - secretRef:
                 name: shared-secrets
-          image: ghcr.io/azylman/aerial-synapse:9bb68ff688408f95f2bf80bbe0bc440a74a1bcd2
+          image: ghcr.io/azylman/aerial-synapse:latest
+          imagePullPolicy: Always
           name: synapse
           ports:
             - containerPort: 4020
@@ -738,7 +822,8 @@ spec:
           envFrom:
             - secretRef:
                 name: shared-secrets
-          image: ghcr.io/azylman/aerial-dashboard:760924aceed3efd04c5f932371f1333ad9fb6cd7
+          image: ghcr.io/azylman/aerial-dashboard:latest
+          imagePullPolicy: Always
           name: dashboard
           ports:
             - containerPort: 8080
@@ -751,18 +836,25 @@ spec:
             - mountPath: /local/static
               name: static
               readOnly: true
+            - mountPath: /share
+              name: share
+              readOnly: true
       nodeSelector:
         compute-tier: performance
       serviceAccountName: dashboard-sa
       volumes:
         - hostPath:
-            path: /var/lib/docker/volumes/aerial-share/_data/aerial-config/services/dashboard
+            path: /share/aerial-config/services/dashboard
             type: ""
           name: config
         - hostPath:
-            path: /var/lib/docker/volumes/aerial-share/_data/aerial/services/dashboard/static
+            path: /share/aerial/services/dashboard/static
             type: ""
           name: static
+        - hostPath:
+            path: /share
+            type: ""
+          name: share
 ---
 apiVersion: v1
 kind: Service
@@ -807,15 +899,37 @@ spec:
         app.kubernetes.io/name: homepage
     spec:
       containers:
-        - env:
+        - command:
+            - /bin/sh
+            - /local/core-homepage/entrypoint.sh
+          env:
             - name: PORT
               value: "3000"
+          envFrom:
+            - secretRef:
+                name: shared-secrets
           image: ghcr.io/gethomepage/homepage:v2.7.0
           name: homepage
           ports:
             - containerPort: 3000
               name: http
               protocol: TCP
+          volumeMounts:
+            - mountPath: /share
+              name: share
+              readOnly: true
+            - mountPath: /local/core-homepage
+              name: core-homepage
+              readOnly: true
+      volumes:
+        - hostPath:
+            path: /share
+            type: ""
+          name: share
+        - hostPath:
+            path: /share/aerial/services/homepage
+            type: ""
+          name: core-homepage
 ---
 apiVersion: v1
 kind: Service
@@ -862,13 +976,22 @@ spec:
       containers:
         - env:
             - name: PORT
-              value: "8080"
+              value: "80"
           image: ghcr.io/azylman/aerial-docs:latest
           name: docs
           ports:
-            - containerPort: 8080
+            - containerPort: 80
               name: http
               protocol: TCP
+          volumeMounts:
+            - mountPath: /share
+              name: share
+              readOnly: true
+      volumes:
+        - hostPath:
+            path: /share
+            type: ""
+          name: share
 ---
 apiVersion: v1
 kind: Service
@@ -880,7 +1003,7 @@ spec:
     - name: http
       port: 8080
       protocol: TCP
-      targetPort: 8080
+      targetPort: 80
     - name: http-80
       port: 80
       protocol: TCP

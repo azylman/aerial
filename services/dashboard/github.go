@@ -73,8 +73,6 @@ type GitHubPoller struct {
 	lastPollTime     time.Time
 	lastError        error
 	stopCh           chan struct{}
-	hangarURL        string
-	dynamicRepos     []string
 }
 
 var globalGHPoller *GitHubPoller
@@ -114,54 +112,6 @@ func NewMultiGitHubPoller(repos []string, token string) *GitHubPoller {
 	}
 }
 
-// fetchHangarRepos queries Hangar's GET /status endpoint and extracts valid github_repo slugs.
-func fetchHangarRepos(ctx context.Context, hangarURL string, client *http.Client) []string {
-	if hangarURL == "" {
-		return nil
-	}
-	reqURL := strings.TrimRight(hangarURL, "/") + "/status"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return nil
-	}
-
-	httpClient := client
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 2 * time.Second}
-	}
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
-	defer drainAndClose(resp.Body, "hangar repos response body")
-
-	if resp.StatusCode != http.StatusOK {
-		return nil
-	}
-
-	var status GitSyncStatusResponse
-	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
-		return nil
-	}
-
-	var repos []string
-	seen := make(map[string]bool)
-	for _, repoStatus := range status.Repos {
-		slug := strings.TrimSpace(repoStatus.GitHubRepo)
-		if slug != "" {
-			lower := strings.ToLower(slug)
-			if !seen[lower] {
-				seen[lower] = true
-				repos = append(repos, lower)
-			}
-		}
-	}
-	sort.Strings(repos)
-	return repos
-}
-
 func (p *GitHubPoller) getActiveRepos() []string {
 	if p == nil {
 		return nil
@@ -190,14 +140,6 @@ func (p *GitHubPoller) getActiveRepos() []string {
 			result = append(result, trimmed)
 		}
 	}
-	for _, r := range p.dynamicRepos {
-		trimmed := strings.TrimSpace(r)
-		lower := strings.ToLower(trimmed)
-		if trimmed != "" && !seen[lower] {
-			seen[lower] = true
-			result = append(result, trimmed)
-		}
-	}
 	return result
 }
 
@@ -205,11 +147,8 @@ func (p *GitHubPoller) Start(ctx context.Context) {
 	if p == nil {
 		return
 	}
-	p.mu.RLock()
-	hasHangar := p.hangarURL != ""
-	p.mu.RUnlock()
 	repos := p.getActiveRepos()
-	if len(repos) == 0 && !hasHangar {
+	if len(repos) == 0 {
 		return
 	}
 	go func() {
@@ -241,24 +180,6 @@ func (p *GitHubPoller) Start(ctx context.Context) {
 			}
 		}
 	}()
-}
-
-func (p *GitHubPoller) refreshHangarDynamicRepos(ctx context.Context) {
-	p.mu.RLock()
-	hURL := p.hangarURL
-	p.mu.RUnlock()
-
-	if hURL == "" {
-		return
-	}
-	hCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	dynRepos := fetchHangarRepos(hCtx, hURL, p.client)
-	cancel()
-	if len(dynRepos) > 0 {
-		p.mu.Lock()
-		p.dynamicRepos = dynRepos
-		p.mu.Unlock()
-	}
 }
 
 func (p *GitHubPoller) commitPolledRunsAndPruneJobs(repos []string, allActiveRunIDs map[int64]bool) bool {
@@ -318,7 +239,6 @@ func (p *GitHubPoller) pollOnce(ctx context.Context) bool {
 	if p == nil {
 		return false
 	}
-	p.refreshHangarDynamicRepos(ctx)
 
 	repos := p.getActiveRepos()
 	if len(repos) == 0 {

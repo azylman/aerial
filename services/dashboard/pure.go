@@ -311,30 +311,11 @@ func extractServiceNameFromCompose(labels map[string]string) (string, bool, bool
 	return "", false, false
 }
 
-func extractServiceNameFromNomad(labels map[string]string, names []string) (string, bool) {
-	allocID := labels["com.hashicorp.nomad.alloc_id"]
-	if allocID == "" || len(names) == 0 {
-		return "", false
-	}
-	name := strings.TrimPrefix(names[0], "/")
-	suffix := "-" + allocID
-	if before, ok := strings.CutSuffix(name, suffix); ok {
-		task := before
-		if task != "" {
-			return task, true
-		}
-	}
-	return "", false
-}
-
-func extractServiceNameFromLabels(labels map[string]string, names []string) (string, bool) {
+func extractServiceNameFromLabels(labels map[string]string) (string, bool) {
 	if svc, ok, handled := extractServiceNameFromCompose(labels); handled {
 		return svc, ok
 	}
 	if svc := labels["aerial.service"]; svc != "" {
-		return svc, true
-	}
-	if svc, ok := extractServiceNameFromNomad(labels, names); ok {
 		return svc, true
 	}
 	if svc := labels["com.docker.compose.service"]; svc != "" {
@@ -358,10 +339,10 @@ func extractServiceNameFromNames(names []string) (string, bool) {
 }
 
 // ExtractAerialServiceName extracts the canonical Aerial service name and returns whether
-// the container belongs to the Aerial stack (either Docker Compose or Nomad managed).
+// the container belongs to the Aerial stack (Docker Compose managed).
 func ExtractAerialServiceName(c DockerContainerJSON) (string, bool) {
 	if c.Labels != nil {
-		if svc, ok := extractServiceNameFromLabels(c.Labels, c.Names); ok {
+		if svc, ok := extractServiceNameFromLabels(c.Labels); ok {
 			return svc, true
 		}
 		if _, hasProj := c.Labels["com.docker.compose.project"]; hasProj {
@@ -429,7 +410,6 @@ func ExtractServiceNameFromJobName(jobName string) string {
 		"discord-mcp",
 		"kernel-mcp",
 		"github-mcp",
-		"nomad-mcp",
 		"infisical-mcp",
 		"synapse",
 		"ollama",

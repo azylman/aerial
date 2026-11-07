@@ -81,7 +81,6 @@ var (
 	reVanadisChunk    = regexp.MustCompile(`^.+?-chunk-[0-9]+$`)
 	reAllDigits       = regexp.MustCompile(`^[0-9]+$`)
 	reHexSHA          = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
-	reNomadJob        = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 	managedEventRepos = map[string]bool{
 		"azylman/aerial":          true,
 		"azylman/aerial-config":   true,
@@ -153,17 +152,6 @@ func validateGithub(target, eventType, normEventType string) (string, error) {
 	return repoPart + ":" + branchPart, nil
 }
 
-func validateNomad(target, eventType, normEventType string) (string, error) {
-	if normEventType != "deploy_success" && normEventType != "deploy_failed" {
-		return "", fmt.Errorf("invalid event_type %q for nomad: expected 'deploy_success' or 'deploy_failed'", eventType)
-	}
-	target = strings.ToLower(target)
-	if !reNomadJob.MatchString(target) {
-		return "", fmt.Errorf("invalid target %q for nomad: must match '^[a-z0-9][a-z0-9-]*$'", target)
-	}
-	return target, nil
-}
-
 // FormatEventTriggerPrompt combines an optional context header with an event trigger prompt.
 func FormatEventTriggerPrompt(contextHeader, prompt string) string {
 	header := strings.TrimSpace(contextHeader)
@@ -196,8 +184,6 @@ func ValidateEventWatchSpec(source, target, eventType string, extraSources ...st
 		normTarget, err = validateFlux(normTarget, eventType, normEventType)
 	case "github":
 		normTarget, err = validateGithub(normTarget, eventType, normEventType)
-	case "nomad":
-		normTarget, err = validateNomad(normTarget, eventType, normEventType)
 	default:
 		allowedExtra := false
 		for _, extra := range extraSources {
@@ -207,7 +193,7 @@ func ValidateEventWatchSpec(source, target, eventType string, extraSources ...st
 			}
 		}
 		if !allowedExtra {
-			return "", "", "", fmt.Errorf("invalid source %q: expected 'vanadis_build', 'vanadis_chunk', 'flux', 'github', or 'nomad'", source)
+			return "", "", "", fmt.Errorf("invalid source %q: expected 'vanadis_build', 'vanadis_chunk', 'flux', or 'github'", source)
 		}
 		if normEventType == "" {
 			return "", "", "", fmt.Errorf("event_type cannot be empty for source %q", normSource)

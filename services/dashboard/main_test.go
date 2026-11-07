@@ -72,16 +72,6 @@ func TestStatusHandler(t *testing.T) {
 			_, _ = w.Write([]byte(`{"items":[{"metadata":{"name":"k8s-brain-pod","labels":{"app.kubernetes.io/name":"k8s-brain"}},"status":{"phase":"Running","containerStatuses":[{"name":"k8s-brain","ready":true,"state":{}}]}}]}`))
 		case strings.HasPrefix(r.URL.Path, "/k8s/error500"):
 			http.Error(w, "k8s server error", http.StatusInternalServerError)
-		case strings.HasPrefix(r.URL.Path, "/nomad/ok/v1/jobs"):
-			_, _ = w.Write([]byte(`[{"ID":"nomad-brain","Type":"service","Status":"running"},{"ID":"nomad-proxy","Type":"service","Status":"dead"}]`))
-		case strings.HasPrefix(r.URL.Path, "/nomad/ok/v1/allocations"):
-			_, _ = w.Write([]byte(`[
-				{"ID":"a1","JobID":"nomad-brain","ClientStatus":"running","DeploymentStatus":{"Healthy":true}}
-			]`))
-		case strings.HasPrefix(r.URL.Path, "/nomad/error500"):
-			http.Error(w, "server error", http.StatusInternalServerError)
-		case strings.HasPrefix(r.URL.Path, "/nomad/empty"):
-			_, _ = w.Write([]byte(`[]`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -94,7 +84,6 @@ func TestStatusHandler(t *testing.T) {
 		useMux            bool
 		brainMode         string
 		gitSyncMode       string
-		nomadMode         string
 		k8sMode           string
 		emptyCommit       bool
 		dockerJSON        string
@@ -171,29 +160,6 @@ func TestStatusHandler(t *testing.T) {
 			wantIsDeploying:   true,
 		},
 		{
-			name:            "NomadPrimary",
-			nomadMode:       "ok",
-			gitSyncMode:     "synced",
-			emptyCommit:     true,
-			wantCode:        http.StatusOK,
-			wantMinServices: 2,
-			wantServiceName: "nomad-brain",
-		},
-		{
-			name:            "NomadFallbackOnError",
-			nomadMode:       "error500",
-			dockerJSON:      "[]",
-			wantCode:        http.StatusOK,
-			wantMinServices: 1,
-			wantServiceName: "brain",
-		},
-		{
-			name:            "NomadFallbackOnEmpty",
-			nomadMode:       "empty",
-			wantCode:        http.StatusOK,
-			wantMinServices: 1,
-		},
-		{
 			name:     "MethodNotAllowed",
 			method:   http.MethodPost,
 			wantCode: http.StatusMethodNotAllowed,
@@ -220,16 +186,8 @@ func TestStatusHandler(t *testing.T) {
 			wantServiceName: "k8s-brain",
 		},
 		{
-			name:            "K8s_Error_Fallback_To_Nomad",
-			k8sMode:         "error500",
-			nomadMode:       "ok",
-			wantCode:        http.StatusOK,
-			wantServiceName: "nomad-brain",
-		},
-		{
 			name:            "K8s_Error_Fallback_To_Docker",
 			k8sMode:         "error500",
-			nomadMode:       "error500",
 			wantCode:        http.StatusOK,
 			wantMinServices: 1,
 		},
@@ -287,16 +245,6 @@ func TestStatusHandler(t *testing.T) {
 				gitSyncURL = mockServer.URL + "/hangar/swapping"
 			}
 
-			nomadAddr := ""
-			switch tc.nomadMode {
-			case "ok":
-				nomadAddr = mockServer.URL + "/nomad/ok"
-			case "error500":
-				nomadAddr = mockServer.URL + "/nomad/error500"
-			case "empty":
-				nomadAddr = mockServer.URL + "/nomad/empty"
-			}
-
 			kubeAPIServer := ""
 			switch tc.k8sMode {
 			case "ok":
@@ -317,12 +265,11 @@ func TestStatusHandler(t *testing.T) {
 					GitSyncURL:    gitSyncURL,
 					ConfigPath:    cfgFile,
 					GitCommit:     commitArg,
-					NomadAddr:     nomadAddr,
 					KubeAPIServer: kubeAPIServer,
 				}
 				h = SetupDashboardMux(cfg, nil)
 			} else {
-				h = statusHandler(brainURL, gitSyncURL, cfgFile, commitArg, nomadAddr, kubeAPIServer)
+				h = statusHandler(brainURL, gitSyncURL, cfgFile, commitArg, kubeAPIServer)
 			}
 
 			method := tc.method
@@ -816,7 +763,7 @@ func TestFetchDockerClusterState_Extended(t *testing.T) {
 			name:         "Success_MixedContainers",
 			statusCode:   http.StatusOK,
 			body:         string(sampleContainersJSON),
-			wantServices: 6,
+			wantServices: 5,
 		},
 		{
 			name:       "HTTP500_Error",
@@ -864,7 +811,7 @@ func TestFetchDockerClusterState_Extended(t *testing.T) {
 				t.Fatalf("fetchDockerClusterState failed: %v", err)
 			}
 			if len(services) != tc.wantServices {
-				t.Errorf("expected %d services (including Nomad), got %d", tc.wantServices, len(services))
+				t.Errorf("expected %d services, got %d", tc.wantServices, len(services))
 			}
 		})
 	}
@@ -1096,123 +1043,6 @@ func TestDashboard_CloseWarnAndDisconnect(t *testing.T) {
 	unzipped, readErr := io.ReadAll(gzReader)
 	if readErr != nil || string(unzipped) != `{"status":"ok"}` {
 		t.Errorf("unexpected gzip body %q (err=%v)", string(unzipped), readErr)
-	}
-}
-
-func TestFetchNomadClusterState(t *testing.T) {
-	ctx := context.Background()
-
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "bad method", http.StatusMethodNotAllowed)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case strings.HasPrefix(r.URL.Path, "/jobs500"):
-			http.Error(w, "internal server error", http.StatusInternalServerError)
-		case strings.HasPrefix(r.URL.Path, "/allocs500"):
-			if strings.HasSuffix(r.URL.Path, "/jobs") {
-				w.Write([]byte(`[{"ID":"brain","Type":"service"}]`))
-				return
-			}
-			http.Error(w, "allocs failure", http.StatusInternalServerError)
-		case strings.HasPrefix(r.URL.Path, "/jobsbadjson"):
-			if strings.HasSuffix(r.URL.Path, "/jobs") {
-				w.Write([]byte(`not json`))
-				return
-			}
-			w.Write([]byte(`[]`))
-		case r.URL.Path == "/v1/jobs":
-			if !strings.Contains(r.URL.RawQuery, "Type") {
-				http.Error(w, "expected filter query on jobs", http.StatusBadRequest)
-				return
-			}
-			w.Write([]byte(`[{"ID":"brain","Type":"service","Status":"running"}]`))
-		case r.URL.Path == "/v1/allocations":
-			if !strings.Contains(r.URL.RawQuery, "ClientStatus") {
-				http.Error(w, "expected filter query on allocs", http.StatusBadRequest)
-				return
-			}
-			w.Write([]byte(`[{"ID":"alloc-1","JobID":"brain","ClientStatus":"running","CreateTime":1775240000000000000,"DeploymentStatus":{"Healthy":true}}]`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer ts.Close()
-
-	tests := []struct {
-		name          string
-		addr          string
-		wantServices  int
-		wantName      string
-		wantStatus    string
-		wantErr       bool
-		wantErrSubstr string
-	}{
-		{
-			name:         "success",
-			addr:         ts.URL,
-			wantServices: 1,
-			wantName:     "brain",
-			wantStatus:   "healthy",
-		},
-		{
-			name:    "empty_nomad_address",
-			addr:    "   ",
-			wantErr: true,
-		},
-		{
-			name:    "invalid_url",
-			addr:    "http:// ",
-			wantErr: true,
-		},
-		{
-			name:          "jobs_500_error",
-			addr:          ts.URL + "/jobs500",
-			wantErr:       true,
-			wantErrSubstr: "nomad jobs returned HTTP 500",
-		},
-		{
-			name:          "allocs_500_error",
-			addr:          ts.URL + "/allocs500",
-			wantErr:       true,
-			wantErrSubstr: "nomad allocs returned HTTP 500",
-		},
-		{
-			name:    "jobs_malformed_json",
-			addr:    ts.URL + "/jobsbadjson",
-			wantErr: true,
-		},
-		{
-			name:    "network_error",
-			addr:    "http://127.0.0.1:59999",
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			services, err := fetchNomadClusterState(ctx, tc.addr)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil")
-				}
-				if tc.wantErrSubstr != "" && !strings.Contains(err.Error(), tc.wantErrSubstr) {
-					t.Fatalf("expected error containing %q, got: %v", tc.wantErrSubstr, err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if len(services) != tc.wantServices {
-				t.Fatalf("expected %d services, got %d", tc.wantServices, len(services))
-			}
-			if len(services) > 0 && (services[0].Name != tc.wantName || services[0].Status != tc.wantStatus) {
-				t.Errorf("unexpected service: %+v", services[0])
-			}
-		})
 	}
 }
 

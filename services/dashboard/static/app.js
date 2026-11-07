@@ -357,17 +357,17 @@ function renderDeployments(deployments) {
             deployBadge.textContent = `${activeDeploys.length} DEPLOYS IN PROGRESS`;
             deployBadge.className = 'section-badge active';
         } else if (isSwapping) {
-            deployBadge.textContent = `🔄 HANGAR SWAPPING`;
+            deployBadge.textContent = `🔄 FLUX SWAPPING`;
             deployBadge.className = 'section-badge swapping';
         } else if (isPulling) {
-            deployBadge.textContent = `⬇️ HANGAR PULLING`;
+            deployBadge.textContent = `⬇️ FLUX PULLING`;
             deployBadge.className = 'section-badge pulling';
         } else if (isBuilding) {
             const buildingCount = deploys.filter(dep => dep.stage === 'building' || dep.stage === 'queued').length;
             deployBadge.textContent = buildingCount > 1 ? `⚡ ${buildingCount} CI BUILDS ACTIVE` : `⚡ 1 CI BUILD ACTIVE`;
             deployBadge.className = 'section-badge building';
         } else if (isAwaitingPull) {
-            deployBadge.textContent = `⬇️ AWAITING HANGAR SYNC`;
+            deployBadge.textContent = `⬇️ AWAITING FLUX SYNC`;
             deployBadge.className = 'section-badge active';
         } else if (activeDeploys.length > 0) {
             deployBadge.textContent = `${activeDeploys.length} IN PROGRESS`;
@@ -391,7 +391,7 @@ function renderDeployments(deployments) {
                     <span class="pulse-dot healthy"></span>
                     <span>ALL SERVICES IN SYNC // NO PENDING DEPLOYS</span>
                 </div>
-                <div>HANGAR RECONCILING</div>
+                <div>FLUX RECONCILING</div>
             </div>
         `;
         return;
