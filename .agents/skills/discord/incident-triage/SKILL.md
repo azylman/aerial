@@ -1,7 +1,7 @@
 ---
 name: incident-triage
 description: >-
-  Forensic runbook and telemetry triage workflow whenever asked to investigate why an Aerial turn, task, service, or workflow failed, duplicated, timed out, misrouted, or was unexpectedly silenced (e.g. "what happened here", "why did you reply there", "why didn't you respond"), or when asked about system performance, latency, durations, voice TTFR, or timings (e.g. "how long did this take", "investigate latency", "why was voice slow"). Strictly relies on generic core stack telemetry (VictoriaMetrics MCP, OpenObserve MCP, PostgreSQL, Docker MCP, Discord API).
+  Forensic runbook and telemetry triage workflow whenever asked to investigate why an Aerial turn, task, service, or workflow failed, duplicated, timed out, misrouted, or was unexpectedly silenced (e.g. "what happened here", "why did you reply there", "why didn't you respond"), or when asked about system performance, latency, durations, voice TTFR, or timings (e.g. "how long did this take", "investigate latency", "why was voice slow"). Strictly relies on generic core stack telemetry (VictoriaMetrics MCP, OpenObserve MCP, PostgreSQL, Kubernetes MCP, Discord API).
 ---
 
 # Aerial Incident Triage & Forensic Runbook
@@ -13,8 +13,8 @@ This skill defines the standardized operational protocol for diagnosing runtime 
 ## 1. Principles & Boundaries
 
 - **Zero-Guessing Invariant**: Never guess why an action occurred or failed. Every conclusion MUST be backed by immutable telemetry: TSDB metrics, structured log entries, or database records.
-- **Two-Repository Boundary**: This skill is strictly generic and core-contained. It relies exclusively on generic core stack components (`aerial-eri`, `aerial-victoriametrics`, `aerial-openobserve`, `aerial-postgres`, `aerial-vector`, Docker daemon, Discord API). It MUST NEVER hardcode non-core service names, user-config overlays (`ha-mcp`, `google`, `ubereats`), custom sidecars, or private channel IDs. Services outside the core stack are discovered dynamically at runtime.
-- **Metric-First Hierarchy**: Always query metrics first via VictoriaMetrics to pinpoint exact microsecond timestamps and duration boundaries before querying logs. Never jump directly to dumping raw container logs via Docker MCP unless observability services are offline.
+- **Two-Repository Boundary**: This skill is strictly generic and core-contained. It relies exclusively on generic core stack components (`eri`, `synapse`, `victoriametrics`, `openobserve`, CloudNativePG `postgres`, `fluent-bit`, Kubernetes API, Discord API). Note that `synapse` ingests Discord Gateway events into River before dispatching to `eri`. It MUST NEVER hardcode non-core service names, user-config overlays (`ha-mcp`, `google`, `ubereats`), custom sidecars, or private channel IDs. Services outside the core stack are discovered dynamically at runtime.
+- **Metric-First Hierarchy**: Always query metrics first via VictoriaMetrics to pinpoint exact microsecond timestamps and duration boundaries before querying logs. Never jump directly to dumping raw container logs via Kubernetes MCP unless observability services are offline.
 - **Strictly Zero Host Memory Inspection**: Never inspect host memory (`/proc/meminfo`, system memory heuristics). Container memory is observed strictly through cAdvisor metrics (`container_memory_rss`) in VictoriaMetrics.
 - **Silent Multi-Step Execution**: Perform all diagnostic queries silently without intermediate play-by-play status chatter.
 - **Handoff Contract**: `incident-triage` is Phase 0 (Forensics & Root Cause Identification). Once the root-cause failure mode and offending code path are isolated, if code changes are needed in `aerial`, hand off immediately to:
@@ -41,16 +41,16 @@ Activate this skill when:
 When an investigation involves non-core features, external clients, or user-space services (e.g. "kiosk", "dashboard", "smart home", "audio client"):
 - **Dynamic Service Resolution**:
   - Inspect the user's prompt for mentioned features, clients, or sidecars.
-  - Query `docker-mcp:list_containers` to inspect active container names on the host.
-  - Match user intent to the discovered container names and dynamically bind `<target_services>`.
-  - Strictly DO NOT hardcode non-core container names into this runbook or prompt templates.
+  - Query `kubernetes-mcp:pods_list` to inspect active pods in the cluster.
+  - Match user intent to the discovered pod or service names and dynamically bind `<target_services>`.
+  - Strictly DO NOT hardcode non-core pod or container names into this runbook or prompt templates.
 - **Coordinate & Snowflake Extraction (Discord Context)**:
   - If a Discord message link is provided (`https://discord.com/channels/<guild_id>/<channel_id>/<message_id>`), derive the microsecond timestamp via snowflake math:
     - `timestamp_ms = (int(message_id) >> 22) + 1420070400000`
     - `timestamp_us = timestamp_ms * 1000`
-  - For Discord turns, check `aerial-postgres` messages table using vertical output:
+  - For Discord turns, check the CloudNativePG `postgres` messages table using vertical output via `kubectl exec` or `kubernetes-mcp:pods_exec`:
     ```bash
-    docker exec -i aerial-postgres psql -U aerial -d aerial -x -c "
+    kubectl exec -i -c postgres $(kubectl get pods -l cnpg.io/cluster=postgres,role=primary -o jsonpath='{.items[0].metadata.name}') -- psql -U aerial -d aerial -x -c "
     SELECT id, thread_id, author_id, author_name, status, retry_count, restart_count,
            error_message, LEFT(response_text, 160) as resp_snippet,
            created_at, updated_at
@@ -73,18 +73,11 @@ VictoriaMetrics is the cluster-wide time-series database (TSDB) collecting metri
   - Prometheus metrics can be Gauges, Counters (requiring `rate(...)`), or Histograms.
   - **The Histogram Trap**: Histograms (such as voice TTFR, runner durations, classifier timings) DO NOT have bare time series. Querying `aerial_brain_voice_ttfr_duration_seconds` directly returns an empty vector `[]`. Histograms only exist as `_bucket`, `_sum`, and `_count`.
 - **Step 1: Check Grafana Dashboards for Production-Validated PromQL**:
-  - Grafana dashboards contain tested PromQL formulas, quantile bucket expressions, and rate windows. Dashboards are stored across two locations:
-    - **PostgreSQL Database (`aerial` DB, `dashboard` table)**: Contains all user-defined and hardware/edge client dashboards (e.g. `🎙️ Voice Telemetry & Kiosk HUD`, `Home Assistant Telemetry & Environmental HUD`, `📡 UniFi Network & Wireless HUD`, `🐘 PostgreSQL Overview`). Query with:
+  - Grafana dashboards contain tested PromQL formulas, quantile bucket expressions, and rate windows. Note that Grafana uses SQLite in Kubernetes (`GF_DATABASE_TYPE=sqlite3`).
+  - Search dashboard definitions directly in git:
+    - **Git Dashboard Definitions (`nomad/grafana/dashboards/*.json` & `services/grafana/dashboards/*.json`)**: Contains repo-provisioned dashboards (`core-telemetry.json`, `token-usage.json`, `host-system-overview.json`, etc.). Search with:
       ```bash
-      docker exec -i aerial-postgres psql -U aerial -d aerial -t -A -c "
-      SELECT title, uid, substring(data from 1 for 1000)
-      FROM dashboard 
-      WHERE data ILIKE '%<keyword>%' OR title ILIKE '%<keyword>%';
-      "
-      ```
-    - **Git Dashboard Definitions (`grafana/dashboards/*.json`)**: Contains repo-provisioned core dashboards (`core-telemetry.json`, `token-usage.json`, `docker-overview.json`, `host-system-overview.json`). Search with:
-      ```bash
-      grep -i "<keyword>" grafana/dashboards/*.json
+      grep -i "<keyword>" nomad/grafana/dashboards/*.json services/grafana/dashboards/*.json
       ```
   - If a dashboard panel exists, extract and reuse the exact PromQL query directly.
 - **Step 2: Live TSDB Series Discovery (VictoriaMetrics MCP)**:
@@ -102,10 +95,10 @@ VictoriaMetrics is the cluster-wide time-series database (TSDB) collecting metri
 - **Step 3: Ground-Truth Code Registry Fallback (`services/eri/pkg/metrics/metrics.go`)**:
   - If the TSDB is cold or has no recent samples, inspect `services/eri/pkg/metrics/metrics.go` to look up declared metric types (`HistogramVec`, `Gauge`, `CounterVec`) and label key dimensions.
 - **cAdvisor Container Resource Metrics**:
-  - Query container resource metrics for `aerial-eri` or dynamically discovered `<target_services>`:
-    - Memory RSS: `container_memory_rss{name="<container_name>"}`
-    - CPU Rate: `rate(container_cpu_usage_seconds_total{name="<container_name>"}[1m])`
-    - OOM Events: `container_oom_events_total{name="<container_name>"}`
+  - Query container resource metrics for `eri` or dynamically discovered `<target_services>`:
+    - Memory RSS: `container_memory_rss{pod=~"<pod_name>.*"}` or `container_memory_rss{name="<container_name>"}`
+    - CPU Rate: `rate(container_cpu_usage_seconds_total{pod=~"<pod_name>.*"}[1m])`
+    - OOM Events: `container_oom_events_total{pod=~"<pod_name>.*"}`
 - **Establish Event Time Window**:
   - Use metric spikes, latency jumps, or error increments to pinpoint the event timestamp `t_event`.
   - Center a 2 to 5 minute time window around `t_event` for log correlation: `t_start = t_event - 2m` and `t_end = t_event + 3m`.
@@ -131,14 +124,14 @@ Once the event timestamp `t_event` and `<target_services>` are pinpointed from m
     - `AND level IN ('warn', 'error', 'fatal', 'panic')`
     - `AND (message LIKE '%error%' OR message LIKE '%timeout%' OR message LIKE '%disconnect%')`
 - **Tracing Across Service Boundaries**:
-  - Correlate timestamps across `eri` and `<target_services>` to determine whether latency or failure originated in `aerial-eri` or the external component.
+  - Correlate timestamps across `eri`, `synapse`, and `<target_services>` to determine whether latency or failure originated in `synapse`, `eri`, or an external component.
 
-### Phase 4: Raw Docker Logs (Docker MCP)
+### Phase 4: Raw Pod Logs (Kubernetes MCP)
 
 - **Strict Last-Resort Fallback**:
-  - Query raw container logs via `docker-mcp:fetch_container_logs` ONLY if OpenObserve or Vector is unreachable, crashed, or experiencing ingestion delays.
+  - Query raw pod logs via `kubernetes-mcp:pods_log` ONLY if OpenObserve or Fluent Bit is unreachable, crashed, or experiencing ingestion delays.
   - NEVER dump unbounded log streams into the context window.
-  - Always specify strict line limits (`tail: 50` or `tail: 100`) and target specific containers.
+  - Always specify strict line limits (`tail: 50` or `tail: 100`) and target specific pods/containers.
 
 ### Phase 5: Root-Cause Synthesis & Failure Taxonomy Mapping
 
@@ -177,12 +170,12 @@ Deliver the post-mortem directly to the user in clean Markdown (strictly < 1,800
 
 ## 5. Red Flags & Anti-Patterns
 
-- **NEVER** dump raw Docker logs via Docker MCP without querying VictoriaMetrics and OpenObserve first.
+- **NEVER** dump raw container logs via Kubernetes MCP without querying VictoriaMetrics and OpenObserve first.
 - **NEVER** guess or speculate without running metric queries or checking OpenObserve logs.
-- **NEVER** hardcode non-core service names in skill files or prompts; use `docker-mcp:list_containers` for dynamic discovery.
+- **NEVER** hardcode non-core service names in skill files or prompts; use `kubernetes-mcp:pods_list` for dynamic discovery.
 - **NEVER** inspect host memory directly (`/proc/meminfo`); inspect container cAdvisor metrics via VictoriaMetrics.
-- **NEVER** use `log.*` column prefixes in OpenObserve (Vector promotes fields directly to top-level).
+- **NEVER** use `log.*` column prefixes in OpenObserve (Fluent Bit promotes fields directly to top-level).
 - **NEVER** pass milliseconds to OpenObserve `_timestamp` (must be converted to microseconds: `ms * 1000`).
 - **NEVER** query a Prometheus histogram by its bare metric name (histograms only exist as `_bucket`, `_sum`, and `_count`; bare names return empty vectors `[]`).
-- **NEVER** guess PromQL formulas without checking Grafana dashboards (PostgreSQL `dashboard` table or `grafana/dashboards/*.json`) or running `victoriametrics:series` first.
+- **NEVER** guess PromQL formulas without checking Grafana dashboards (`nomad/grafana/dashboards/*.json`) or running `victoriametrics:series` first.
 - **NEVER** touch production code without reproducing the failure via a failing unit test in `services/eri/pkg/...` first.

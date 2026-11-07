@@ -19,7 +19,7 @@
      - `schedule_recurring`: Unconditional user-facing messages delivered on every tick (e.g. daily standup, weekly meal prep).
      - `schedule_heartbeat`: Silent background polling and edge-triggered state tracking (e.g. flight status, permit updates, external API watches) that only messages Discord when state materially changes.
      - `schedule_once`: One-time delayed reminders at a designated timestamp or relative duration.
-     - `watch_event`: Deterministic event watches triggered by external system events (e.g. Hangar sync, Vanadis build/chunk completion, camera detections).
+     - `watch_event`: Deterministic event watches triggered by external system events (e.g. Flux CD deployment sync, Vanadis build/chunk completion, camera detections).
 
 5. **Instruction Precedence Hierarchy**:
    1. Dynamic `<CHANNEL_INSTRUCTIONS>` (channel-specific guidelines for active channel/thread in Discord).
