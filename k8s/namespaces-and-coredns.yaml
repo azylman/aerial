@@ -4,21 +4,17 @@ metadata:
   name: aerial
 ---
 apiVersion: v1
+data:
+  aerial.override: |
+    rewrite stop {
+        name regex (.*)\.aerial\.?$ {1}.default.svc.cluster.local.
+        answer name (.*)\.default\.svc\.cluster\.local\.?$ {1}.aerial.
+    }
+    rewrite stop {
+        name regex (.*)\.lan\.?$ {1}.default.svc.cluster.local.
+        answer name (.*)\.default\.svc\.cluster\.local\.?$ {1}.lan.
+    }
 kind: ConfigMap
 metadata:
   name: coredns-custom
   namespace: kube-system
-data:
-  aerial.server: |
-    aerial:53 {
-        errors
-        cache 30
-        rewrite name suffix .aerial .default.svc.cluster.local
-        forward . /etc/resolv.conf
-    }
-    lan:53 {
-        errors
-        cache 30
-        rewrite name suffix .lan .default.svc.cluster.local
-        forward . /etc/resolv.conf
-    }

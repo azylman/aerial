@@ -1,19 +1,104 @@
+apiVersion: v1
+data:
+  auto-auth.mjs: |
+    import { registerHooks } from "node:module";
+    import fs from "node:fs";
+    import { fileURLToPath } from "node:url";
+
+    registerHooks({
+      load(url, context, nextLoad) {
+        if (url.endsWith("/server/routes/v1/auth-router.mjs")) {
+          const orig = fs.readFileSync(fileURLToPath(url), "utf8");
+          const target = `\t\t\t} catch (err) {
+    \t\t\t\tres.cookie("jid", "", {
+    \t\t\t\t\thttpOnly: true,
+    \t\t\t\t\tpath: "/api",
+    \t\t\t\t\tsameSite: "strict",
+    \t\t\t\t\tsecure: appCfg.HTTPS_ENABLED,
+    \t\t\t\t\tmaxAge: 0
+    \t\t\t\t});
+    \t\t\t\tthrow err;
+    \t\t\t}`;
+          const replacement = `\t\t\t} catch (err) {
+    \t\t\t\tconst adminUser = await server.store.user.findOne({ superAdmin: true });
+    \t\t\t\tconst userOrgs = adminUser ? await server.services.org.findAllOrganizationOfUser(adminUser.id) : [];
+    \t\t\t\tif (!adminUser || !userOrgs.length) {
+    \t\t\t\t\tres.cookie("jid", "", {
+    \t\t\t\t\t\thttpOnly: true,
+    \t\t\t\t\t\tpath: "/api",
+    \t\t\t\t\t\tsameSite: "strict",
+    \t\t\t\t\t\tsecure: appCfg.HTTPS_ENABLED,
+    \t\t\t\t\t\tmaxAge: 0
+    \t\t\t\t\t});
+    \t\t\t\t\tthrow err;
+    \t\t\t\t}
+    \t\t\t\ttokenVersion = await server.services.authToken.getUserTokenSession({
+    \t\t\t\t\tuserId: adminUser.id,
+    \t\t\t\t\tip: req.realIp || "127.0.0.1",
+    \t\t\t\t\tuserAgent: req.headers["user-agent"] || "infisical-lan"
+    \t\t\t\t});
+    \t\t\t\tdecodedToken = {
+    \t\t\t\t\tauthMethod: "email",
+    \t\t\t\t\tauthTokenType: "refreshToken",
+    \t\t\t\t\tuserId: adminUser.id,
+    \t\t\t\t\ttokenVersionId: tokenVersion.id,
+    \t\t\t\t\trefreshVersion: tokenVersion.refreshVersion,
+    \t\t\t\t\torganizationId: userOrgs[0].id,
+    \t\t\t\t\tisMfaVerified: true
+    \t\t\t\t};
+    \t\t\t\tisGraceHit = false;
+    \t\t\t}`;
+          if (orig.includes(target)) {
+            return { format: "module", shortCircuit: true, source: orig.replace(target, replacement) };
+          }
+        }
+        return nextLoad(url, context);
+      }
+    });
+kind: ConfigMap
+metadata:
+  name: infisical-auto-auth
+  namespace: default
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: aerial-dashboard-reader
 rules:
-  - apiGroups: ["apps"]
-    resources: ["deployments", "statefulsets", "daemonsets"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: [""]
-    resources: ["pods", "services", "namespaces", "configmaps", "events"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["kustomize.toolkit.fluxcd.io"]
-    resources: ["kustomizations"]
-    verbs: ["get", "list", "watch"]
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+      - statefulsets
+      - daemonsets
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+      - services
+      - namespaces
+      - configmaps
+      - events
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - kustomize.toolkit.fluxcd.io
+    resources:
+      - kustomizations
+    verbs:
+      - get
+      - list
+      - watch
 ---
 apiVersion: v1
+imagePullSecrets:
+  - name: ghcr-creds
 kind: ServiceAccount
 metadata:
   name: dashboard-sa
@@ -23,95 +108,167 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: aerial-dashboard-reader-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aerial-dashboard-reader
 subjects:
   - kind: ServiceAccount
     name: dashboard-sa
     namespace: default
-roleRef:
-  kind: ClusterRole
-  name: aerial-dashboard-reader
-  apiGroup: rbac.authorization.k8s.io
 ---
-# 1. ERI Deployment & Service
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: eri
-  namespace: default
   labels:
     app.kubernetes.io/name: eri
+  name: eri
+  namespace: default
 spec:
-  replicas: 1
   minReadySeconds: 10
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: eri
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
   template:
     metadata:
       labels:
         app.kubernetes.io/name: eri
     spec:
-      shareProcessNamespace: true
-      nodeSelector:
-        compute-tier: performance
-      initContainers:
-        - name: git-sync-aerial
-          image: registry.k8s.io/git-sync/git-sync:v4.8.0
-          restartPolicy: Always
-          args:
-            - "--repo=https://github.com/azylman/aerial.git"
-            - "--ref=main"
-            - "--root=/share/aerial"
-            - "--period=10s"
-            - "--link=current"
-            - "--exechook-command=kill -HUP 1"
-          volumeMounts:
-            - name: share-aerial
-              mountPath: /share/aerial
-        - name: git-sync-aerial-config
-          image: registry.k8s.io/git-sync/git-sync:v4.8.0
-          restartPolicy: Always
-          args:
-            - "--repo=https://github.com/azylman/aerial-config.git"
-            - "--ref=main"
-            - "--root=/share/aerial-config"
-            - "--period=10s"
-            - "--link=current"
-            - "--exechook-command=kill -HUP 1"
-          volumeMounts:
-            - name: share-aerial-config
-              mountPath: /share/aerial-config
       containers:
-        - name: eri
-          image: ghcr.io/azylman/aerial-eri:latest
-          ports:
-            - name: http
-              containerPort: 8080
+        - env:
+            - name: PORT
+              value: "8080"
+            - name: GEMINI_HOME_DIR
+              value: /data
+            - name: DATA_DIR
+              value: /data
+            - name: ERI_URL
+              value: http://eri.aerial
+            - name: HARO_URL
+              value: http://haro.aerial
+            - name: AERIAL_INTERNAL_ERI_URL
+              value: http://127.0.0.1:8080
+            - name: GIT_TERMINAL_PROMPT
+              value: "0"
           envFrom:
             - secretRef:
                 name: shared-secrets
-          env:
-            - name: PORT
-              value: "8080"
+          image: ghcr.io/azylman/aerial-eri:latest
+          imagePullPolicy: Always
+          name: eri
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
           volumeMounts:
-            - name: share-aerial
-              mountPath: /share/aerial
-            - name: share-aerial-config
-              mountPath: /share/aerial-config
-            - name: brain-data
-              mountPath: /data
+            - mountPath: /share
+              name: share
+            - mountPath: /data
+              name: brain-data
+            - mountPath: /local/antigravity-oauth-token
+              name: oauth-token
+              readOnly: true
+              subPath: antigravity-oauth-token
+      initContainers:
+        - args:
+            - --repo=https://github.com/azylman/aerial.git
+            - --ref=main
+            - --root=/share/.sync/aerial
+            - --link=/share/aerial
+            - --period=10s
+          env:
+            - name: GIT_CONFIG_COUNT
+              value: "1"
+            - name: GIT_CONFIG_KEY_0
+              value: safe.directory
+            - name: GIT_CONFIG_VALUE_0
+              value: '*'
+            - name: GITSYNC_USERNAME
+              value: x-access-token
+            - name: GITSYNC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: GITHUB_PAT
+                  name: shared-secrets
+          image: registry.k8s.io/git-sync/git-sync:v4.8.0
+          name: git-sync-aerial
+          restartPolicy: Always
+          startupProbe:
+            exec:
+              command:
+                - git
+                - -C
+                - /share/aerial
+                - rev-parse
+                - HEAD
+            failureThreshold: 60
+            periodSeconds: 1
+          volumeMounts:
+            - mountPath: /share
+              name: share
+        - args:
+            - --repo=https://github.com/azylman/aerial-config.git
+            - --ref=main
+            - --root=/share/.sync/aerial-config
+            - --link=/share/aerial-config
+            - --period=10s
+          env:
+            - name: GIT_CONFIG_COUNT
+              value: "1"
+            - name: GIT_CONFIG_KEY_0
+              value: safe.directory
+            - name: GIT_CONFIG_VALUE_0
+              value: '*'
+            - name: GITSYNC_USERNAME
+              value: x-access-token
+            - name: GITSYNC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: GITHUB_PAT
+                  name: shared-secrets
+          image: registry.k8s.io/git-sync/git-sync:v4.8.0
+          name: git-sync-aerial-config
+          restartPolicy: Always
+          startupProbe:
+            exec:
+              command:
+                - git
+                - -C
+                - /share/aerial-config
+                - rev-parse
+                - HEAD
+            failureThreshold: 60
+            periodSeconds: 1
+          volumeMounts:
+            - mountPath: /share
+              name: share
+      nodeSelector:
+        compute-tier: performance
+        kubernetes.io/hostname: calibarn
+      securityContext:
+        fsGroup: 65533
+      shareProcessNamespace: true
       volumes:
-        - name: share-aerial
-          emptyDir: {}
-        - name: share-aerial-config
-          emptyDir: {}
-        - name: brain-data
-          emptyDir: {}
+        - emptyDir: {}
+          name: share
+        - hostPath:
+            path: /var/lib/docker/volumes/aerial-brain-data/_data
+            type: Directory
+          name: brain-data
+        - name: oauth-token
+          secret:
+            defaultMode: 384
+            items:
+              - key: ANTIGRAVITY_OAUTH_TOKEN
+                path: antigravity-oauth-token
+            optional: true
+            secretName: shared-secrets
 ---
 apiVersion: v1
 kind: Service
@@ -119,90 +276,68 @@ metadata:
   name: eri
   namespace: default
 spec:
-  type: ClusterIP
   ports:
     - name: http
       port: 8080
+      protocol: TCP
+      targetPort: 8080
+    - name: http-80
+      port: 80
+      protocol: TCP
       targetPort: 8080
   selector:
     app.kubernetes.io/name: eri
+  type: ClusterIP
 ---
-# 2. Vanadis Deployment & Service
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: vanadis
-  namespace: default
   labels:
     app.kubernetes.io/name: vanadis
+  name: vanadis
+  namespace: default
 spec:
-  replicas: 1
   minReadySeconds: 10
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: vanadis
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
   template:
     metadata:
       labels:
         app.kubernetes.io/name: vanadis
     spec:
-      shareProcessNamespace: true
-      nodeSelector:
-        compute-tier: performance
-      initContainers:
-        - name: git-sync-aerial
-          image: registry.k8s.io/git-sync/git-sync:v4.8.0
-          restartPolicy: Always
-          args:
-            - "--repo=https://github.com/azylman/aerial.git"
-            - "--ref=main"
-            - "--root=/share/aerial"
-            - "--period=10s"
-            - "--link=current"
-            - "--exechook-command=kill -HUP 1"
-          volumeMounts:
-            - name: share-aerial
-              mountPath: /share/aerial
-        - name: git-sync-aerial-config
-          image: registry.k8s.io/git-sync/git-sync:v4.8.0
-          restartPolicy: Always
-          args:
-            - "--repo=https://github.com/azylman/aerial-config.git"
-            - "--ref=main"
-            - "--root=/share/aerial-config"
-            - "--period=10s"
-            - "--link=current"
-            - "--exechook-command=kill -HUP 1"
-          volumeMounts:
-            - name: share-aerial-config
-              mountPath: /share/aerial-config
       containers:
-        - name: vanadis
-          image: ghcr.io/azylman/aerial-vanadis:latest
-          ports:
-            - name: http
-              containerPort: 4025
+        - env:
+            - name: PORT
+              value: "4025"
+            - name: ERI_URL
+              value: http://eri.aerial
           envFrom:
             - secretRef:
                 name: shared-secrets
-          env:
-            - name: PORT
-              value: "4025"
+          image: ghcr.io/azylman/aerial-vanadis:9bb68ff688408f95f2bf80bbe0bc440a74a1bcd2
+          name: vanadis
+          ports:
+            - containerPort: 4025
+              name: http
+              protocol: TCP
           volumeMounts:
-            - name: share-aerial
-              mountPath: /share/aerial
-            - name: share-aerial-config
-              mountPath: /share/aerial-config
+            - mountPath: /share
+              name: share
+              readOnly: true
+      nodeSelector:
+        kubernetes.io/hostname: calibarn
       volumes:
-        - name: share-aerial
-          emptyDir: {}
-        - name: share-aerial-config
-          emptyDir: {}
+        - hostPath:
+            path: /share
+            type: ""
+          name: share
 ---
 apiVersion: v1
 kind: Service
@@ -210,90 +345,75 @@ metadata:
   name: vanadis
   namespace: default
 spec:
-  type: ClusterIP
   ports:
     - name: http
       port: 4025
+      protocol: TCP
+      targetPort: 4025
+    - name: http-80
+      port: 80
+      protocol: TCP
       targetPort: 4025
   selector:
     app.kubernetes.io/name: vanadis
+  type: ClusterIP
 ---
-# 3. Coven Deployment & Service
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: coven
-  namespace: default
   labels:
     app.kubernetes.io/name: coven
+  name: coven
+  namespace: default
 spec:
-  replicas: 1
   minReadySeconds: 10
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: coven
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
   template:
     metadata:
       labels:
         app.kubernetes.io/name: coven
     spec:
-      shareProcessNamespace: true
-      nodeSelector:
-        compute-tier: performance
-      initContainers:
-        - name: git-sync-aerial
-          image: registry.k8s.io/git-sync/git-sync:v4.8.0
-          restartPolicy: Always
-          args:
-            - "--repo=https://github.com/azylman/aerial.git"
-            - "--ref=main"
-            - "--root=/share/aerial"
-            - "--period=10s"
-            - "--link=current"
-            - "--exechook-command=kill -HUP 1"
-          volumeMounts:
-            - name: share-aerial
-              mountPath: /share/aerial
-        - name: git-sync-aerial-config
-          image: registry.k8s.io/git-sync/git-sync:v4.8.0
-          restartPolicy: Always
-          args:
-            - "--repo=https://github.com/azylman/aerial-config.git"
-            - "--ref=main"
-            - "--root=/share/aerial-config"
-            - "--period=10s"
-            - "--link=current"
-            - "--exechook-command=kill -HUP 1"
-          volumeMounts:
-            - name: share-aerial-config
-              mountPath: /share/aerial-config
       containers:
-        - name: coven
-          image: ghcr.io/azylman/aerial-coven:latest
-          ports:
-            - name: http
-              containerPort: 4008
+        - env:
+            - name: PORT
+              value: "4008"
+            - name: CONFIG_PATH
+              value: /config/coven.yaml
           envFrom:
             - secretRef:
                 name: shared-secrets
-          env:
-            - name: PORT
-              value: "4008"
+          image: ghcr.io/azylman/aerial-coven:d73fba1240f27a662be15bcb27e0b3c1698ef3cc
+          name: coven
+          ports:
+            - containerPort: 4008
+              name: http
+              protocol: TCP
           volumeMounts:
-            - name: share-aerial
-              mountPath: /share/aerial
-            - name: share-aerial-config
-              mountPath: /share/aerial-config
+            - mountPath: /share
+              name: share
+              readOnly: true
+            - mountPath: /config
+              name: config
+              readOnly: true
+      nodeSelector:
+        kubernetes.io/hostname: calibarn
       volumes:
-        - name: share-aerial
-          emptyDir: {}
-        - name: share-aerial-config
-          emptyDir: {}
+        - hostPath:
+            path: /share
+            type: ""
+          name: share
+        - hostPath:
+            path: /share/aerial-config/services/coven
+            type: ""
+          name: config
 ---
 apiVersion: v1
 kind: Service
@@ -301,52 +421,74 @@ metadata:
   name: coven
   namespace: default
 spec:
-  type: ClusterIP
   ports:
     - name: http
       port: 4008
+      protocol: TCP
+      targetPort: 4008
+    - name: http-80
+      port: 80
+      protocol: TCP
       targetPort: 4008
   selector:
     app.kubernetes.io/name: coven
+  type: ClusterIP
 ---
-# 4. Agentsview Deployment & Service
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: agentsview
-  namespace: default
   labels:
     app.kubernetes.io/name: agentsview
+  name: agentsview
+  namespace: default
 spec:
-  replicas: 1
   minReadySeconds: 10
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: agentsview
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
   template:
     metadata:
       labels:
         app.kubernetes.io/name: agentsview
     spec:
-      nodeSelector:
-        compute-tier: performance
       containers:
-        - name: agentsview
-          image: ghcr.io/azylman/agentsview:latest
-          ports:
-            - name: http
-              containerPort: 8080
-          envFrom:
-            - secretRef:
-                name: shared-secrets
+        - command:
+            - agentsview
+            - serve
+            - --host=0.0.0.0
+            - --port=8080
+            - --write-timeout=2m
           env:
             - name: PORT
               value: "8080"
+            - name: AGENTSVIEW_DATA_DIR
+              value: /data/agentsview
+          envFrom:
+            - secretRef:
+                name: shared-secrets
+          image: ghcr.io/azylman/agentsview:latest
+          imagePullPolicy: Always
+          name: agentsview
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /data
+              name: brain-data
+      nodeSelector:
+        compute-tier: performance
+      volumes:
+        - hostPath:
+            path: /var/lib/docker/volumes/aerial-brain-data/_data
+            type: Directory
+          name: brain-data
 ---
 apiVersion: v1
 kind: Service
@@ -354,50 +496,72 @@ metadata:
   name: agentsview
   namespace: default
 spec:
-  type: ClusterIP
   ports:
     - name: http
       port: 8080
+      protocol: TCP
+      targetPort: 8080
+    - name: http-80
+      port: 80
+      protocol: TCP
       targetPort: 8080
   selector:
     app.kubernetes.io/name: agentsview
+  type: ClusterIP
 ---
-# 5. Haro Deployment & Service
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: haro
-  namespace: default
   labels:
     app.kubernetes.io/name: haro
+  name: haro
+  namespace: default
 spec:
-  replicas: 1
   minReadySeconds: 10
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: haro
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
   template:
     metadata:
       labels:
         app.kubernetes.io/name: haro
     spec:
       containers:
-        - name: haro
-          image: ghcr.io/azylman/aerial-haro:latest
-          ports:
-            - name: http
-              containerPort: 4005
+        - env:
+            - name: PORT
+              value: "4005"
+            - name: CONFIG_PATH
+              value: /config/haro.yaml
+            - name: ERI_URL
+              value: http://eri.aerial
+            - name: VANADIS_URL
+              value: http://vanadis.aerial
           envFrom:
             - secretRef:
                 name: shared-secrets
-          env:
-            - name: PORT
-              value: "4005"
+          image: ghcr.io/azylman/aerial-haro:d73fba1240f27a662be15bcb27e0b3c1698ef3cc
+          name: haro
+          ports:
+            - containerPort: 4005
+              name: http
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /config
+              name: config
+              readOnly: true
+      nodeSelector:
+        kubernetes.io/hostname: calibarn
+      volumes:
+        - hostPath:
+            path: /share/aerial-config/services/haro
+            type: ""
+          name: config
 ---
 apiVersion: v1
 kind: Service
@@ -405,52 +569,86 @@ metadata:
   name: haro
   namespace: default
 spec:
-  type: ClusterIP
   ports:
     - name: http
       port: 4005
+      protocol: TCP
+      targetPort: 4005
+    - name: http-80
+      port: 80
+      protocol: TCP
       targetPort: 4005
   selector:
     app.kubernetes.io/name: haro
+  type: ClusterIP
 ---
-# 6. Synapse Deployment & Service
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: synapse
-  namespace: default
   labels:
     app.kubernetes.io/name: synapse
+  name: synapse
+  namespace: default
 spec:
-  replicas: 1
   minReadySeconds: 10
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: synapse
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
   template:
     metadata:
       labels:
         app.kubernetes.io/name: synapse
     spec:
       containers:
-        - name: synapse
-          image: ghcr.io/azylman/aerial-synapse:latest
-          ports:
-            - name: http
-              containerPort: 4020
+        - env:
+            - name: PORT
+              value: "4020"
+            - name: CONFIG_PATH
+              value: /config/synapse.yaml
+            - name: ERI_URL
+              value: http://eri.aerial
+            - name: INFISICAL_URL
+              value: http://infisical.aerial
+            - name: INFISICAL_ENVIRONMENT
+              value: default
+            - name: VANADIS_URL
+              value: http://vanadis.aerial
+            - name: HARO_URL
+              value: http://haro.aerial
+            - name: FLUX_RECEIVER_URL
+              value: http://notification-controller.flux-system.svc.cluster.local/
+            - name: DISCORD_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: DISCORD_BOT_TOKEN
+                  name: shared-secrets
+                  optional: true
           envFrom:
             - secretRef:
                 name: shared-secrets
-          env:
-            - name: PORT
-              value: "4020"
-            - name: FLUX_RECEIVER_URL
-              value: "http://notification-controller.flux-system.svc.cluster.local/"
+          image: ghcr.io/azylman/aerial-synapse:9bb68ff688408f95f2bf80bbe0bc440a74a1bcd2
+          name: synapse
+          ports:
+            - containerPort: 4020
+              name: http
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /config
+              name: config
+              readOnly: true
+      nodeSelector:
+        kubernetes.io/hostname: calibarn
+      volumes:
+        - hostPath:
+            path: /share/aerial-config/services/synapse
+            type: ""
+          name: config
 ---
 apiVersion: v1
 kind: Service
@@ -458,51 +656,74 @@ metadata:
   name: synapse
   namespace: default
 spec:
-  type: ClusterIP
   ports:
     - name: http
       port: 4020
+      protocol: TCP
+      targetPort: 4020
+    - name: http-80
+      port: 80
+      protocol: TCP
       targetPort: 4020
   selector:
     app.kubernetes.io/name: synapse
+  type: ClusterIP
 ---
-# 7. Dashboard Deployment & Service
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: dashboard
-  namespace: default
   labels:
     app.kubernetes.io/name: dashboard
+  name: dashboard
+  namespace: default
 spec:
-  replicas: 1
   minReadySeconds: 10
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: dashboard
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
   template:
     metadata:
       labels:
         app.kubernetes.io/name: dashboard
     spec:
-      serviceAccountName: dashboard-sa
       containers:
-        - name: dashboard
-          image: ghcr.io/azylman/aerial-dashboard:latest
-          ports:
-            - name: http
-              containerPort: 8080
+        - env:
+            - name: PORT
+              value: "8080"
           envFrom:
             - secretRef:
                 name: shared-secrets
-          env:
-            - name: PORT
-              value: "8080"
+          image: ghcr.io/azylman/aerial-dashboard:760924aceed3efd04c5f932371f1333ad9fb6cd7
+          name: dashboard
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /config
+              name: config
+              readOnly: true
+            - mountPath: /local/static
+              name: static
+              readOnly: true
+      nodeSelector:
+        compute-tier: performance
+      serviceAccountName: dashboard-sa
+      volumes:
+        - hostPath:
+            path: /var/lib/docker/volumes/aerial-share/_data/aerial-config/services/dashboard
+            type: ""
+          name: config
+        - hostPath:
+            path: /var/lib/docker/volumes/aerial-share/_data/aerial/services/dashboard/static
+            type: ""
+          name: static
 ---
 apiVersion: v1
 kind: Service
@@ -510,47 +731,52 @@ metadata:
   name: dashboard
   namespace: default
 spec:
-  type: ClusterIP
   ports:
     - name: http
       port: 8080
+      protocol: TCP
+      targetPort: 8080
+    - name: http-80
+      port: 80
+      protocol: TCP
       targetPort: 8080
   selector:
     app.kubernetes.io/name: dashboard
+  type: ClusterIP
 ---
-# 8. Homepage Deployment & Service
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: homepage
-  namespace: default
   labels:
     app.kubernetes.io/name: homepage
+  name: homepage
+  namespace: default
 spec:
-  replicas: 1
   minReadySeconds: 10
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: homepage
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
   template:
     metadata:
       labels:
         app.kubernetes.io/name: homepage
     spec:
       containers:
-        - name: homepage
-          image: ghcr.io/gethomepage/homepage:v2.7.0
-          ports:
-            - name: http
-              containerPort: 3000
-          env:
+        - env:
             - name: PORT
               value: "3000"
+          image: ghcr.io/gethomepage/homepage:v2.7.0
+          name: homepage
+          ports:
+            - containerPort: 3000
+              name: http
+              protocol: TCP
 ---
 apiVersion: v1
 kind: Service
@@ -558,47 +784,52 @@ metadata:
   name: homepage
   namespace: default
 spec:
-  type: ClusterIP
   ports:
     - name: http
       port: 8080
+      protocol: TCP
+      targetPort: 3000
+    - name: http-80
+      port: 80
+      protocol: TCP
       targetPort: 3000
   selector:
     app.kubernetes.io/name: homepage
+  type: ClusterIP
 ---
-# 9. Docs Deployment & Service
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: docs
-  namespace: default
   labels:
     app.kubernetes.io/name: docs
+  name: docs
+  namespace: default
 spec:
-  replicas: 1
   minReadySeconds: 10
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: docs
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
   template:
     metadata:
       labels:
         app.kubernetes.io/name: docs
     spec:
       containers:
-        - name: docs
-          image: ghcr.io/azylman/aerial-docs:latest
-          ports:
-            - name: http
-              containerPort: 8080
-          env:
+        - env:
             - name: PORT
               value: "8080"
+          image: ghcr.io/azylman/aerial-docs:latest
+          name: docs
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
 ---
 apiVersion: v1
 kind: Service
@@ -606,44 +837,49 @@ metadata:
   name: docs
   namespace: default
 spec:
-  type: ClusterIP
   ports:
     - name: http
       port: 8080
+      protocol: TCP
       targetPort: 8080
+    - name: http-80
+      port: 80
+      protocol: TCP
+      targetPort: 80
   selector:
     app.kubernetes.io/name: docs
+  type: ClusterIP
 ---
-# 10. Valkey Deployment & Service
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: valkey
-  namespace: default
   labels:
     app.kubernetes.io/name: valkey
+  name: valkey
+  namespace: default
 spec:
-  replicas: 1
   minReadySeconds: 10
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: valkey
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
   template:
     metadata:
       labels:
         app.kubernetes.io/name: valkey
     spec:
       containers:
-        - name: valkey
-          image: valkey/valkey:9-alpine
+        - image: valkey/valkey:9-alpine
+          name: valkey
           ports:
-            - name: valkey
-              containerPort: 6379
+            - containerPort: 6379
+              name: valkey
+              protocol: TCP
 ---
 apiVersion: v1
 kind: Service
@@ -651,50 +887,51 @@ metadata:
   name: valkey
   namespace: default
 spec:
-  type: ClusterIP
   ports:
     - name: valkey
       port: 6379
+      protocol: TCP
       targetPort: 6379
   selector:
     app.kubernetes.io/name: valkey
+  type: ClusterIP
 ---
-# 11. Infisical Deployment & Service
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: infisical
-  namespace: default
   labels:
     app.kubernetes.io/name: infisical
+  name: infisical
+  namespace: default
 spec:
-  replicas: 1
   minReadySeconds: 10
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: infisical
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
   template:
     metadata:
       labels:
         app.kubernetes.io/name: infisical
     spec:
       containers:
-        - name: infisical
-          image: infisical/infisical:v0.167.4
-          ports:
-            - name: http
-              containerPort: 8080
+        - env:
+            - name: REDIS_URL
+              value: redis://valkey:6379
           envFrom:
             - secretRef:
                 name: shared-secrets
-          env:
-            - name: REDIS_URL
-              value: "redis://valkey:6379"
+          image: infisical/infisical:v0.167.4
+          name: infisical
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
 ---
 apiVersion: v1
 kind: Service
@@ -702,10 +939,15 @@ metadata:
   name: infisical
   namespace: default
 spec:
-  type: ClusterIP
   ports:
     - name: http
       port: 8080
+      protocol: TCP
+      targetPort: 8080
+    - name: http-80
+      port: 80
+      protocol: TCP
       targetPort: 8080
   selector:
     app.kubernetes.io/name: infisical
+  type: ClusterIP
