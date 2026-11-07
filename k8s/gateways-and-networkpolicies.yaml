@@ -1,3 +1,77 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ngf-snippets-rbac
+rules:
+  - apiGroups:
+      - gateway.nginx.org
+    resources:
+      - snippetsfilters
+      - snippetspolicies
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - gateway.nginx.org
+    resources:
+      - snippetsfilters/status
+      - snippetspolicies/status
+    verbs:
+      - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ngf-snippets-rbac
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ngf-snippets-rbac
+subjects:
+  - kind: ServiceAccount
+    name: ngf-nginx-gateway-fabric
+    namespace: nginx-gateway
+---
+apiVersion: gateway.nginx.org/v1alpha1
+kind: SnippetsFilter
+metadata:
+  name: gatus-status-subfilter
+  namespace: default
+spec:
+  snippets:
+    - context: http.server.location
+      value: |
+        proxy_set_header Accept-Encoding "";
+        sub_filter_types text/css application/javascript text/javascript application/json application/manifest+json;
+        sub_filter_once off;
+        sub_filter 'src="/js/' 'src="/status/js/';
+        sub_filter 'href="/css/' 'href="/status/css/';
+        sub_filter 'href="/manifest.json"' 'href="/status/manifest.json"';
+        sub_filter 'href="/favicon' 'href="/status/favicon';
+        sub_filter 'href="/apple-touch-icon' 'href="/status/apple-touch-icon';
+        sub_filter 's.p="/"' 's.p="/status/"';
+        sub_filter 'history:(0,i.PO)("/")' 'history:(0,i.PO)("/status/")';
+        sub_filter 'serverUrl:{type:String,default:".."}' 'serverUrl:{type:String,default:"/status"}';
+        sub_filter 'endpoint:"/api/v1/' 'endpoint:"/status/api/v1/';
+        sub_filter '"/api/v1/' '"/status/api/v1/';
+---
+apiVersion: gateway.nginx.org/v1alpha1
+kind: SnippetsFilter
+metadata:
+  name: agentsview-subfilter
+  namespace: default
+spec:
+  snippets:
+    - context: http.server.location
+      value: |
+        proxy_set_header Accept-Encoding "";
+        sub_filter_types text/javascript application/javascript text/css;
+        sub_filter_once off;
+        sub_filter 'src="/assets/' 'src="/agentsview/assets/';
+        sub_filter 'href="/assets/' 'href="/agentsview/assets/';
+        sub_filter 'href="/favicon.svg"' 'href="/agentsview/favicon.svg"';
+---
 apiVersion: gateway.nginx.org/v1alpha2
 kind: NginxProxy
 metadata:
@@ -82,6 +156,7 @@ metadata:
   namespace: default
 spec:
   hostnames:
+    - aerial.zylman.com
     - homepage.lan.zylman.com
     - home.lan.zylman.com
   parentRefs:
@@ -90,6 +165,223 @@ spec:
       name: lan-gateway
       sectionName: https
   rules:
+    - filters:
+        - requestRedirect:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /dashboard/
+            statusCode: 301
+          type: RequestRedirect
+      matches:
+        - path:
+            type: Exact
+            value: /dashboard
+    - filters:
+        - requestRedirect:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /grafana/
+            statusCode: 301
+          type: RequestRedirect
+      matches:
+        - path:
+            type: Exact
+            value: /grafana
+    - filters:
+        - requestRedirect:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /openobserve/
+            statusCode: 301
+          type: RequestRedirect
+      matches:
+        - path:
+            type: Exact
+            value: /openobserve
+    - filters:
+        - requestRedirect:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /agentsview/
+            statusCode: 301
+          type: RequestRedirect
+      matches:
+        - path:
+            type: Exact
+            value: /agentsview
+    - filters:
+        - requestRedirect:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /aura-farming/
+            statusCode: 301
+          type: RequestRedirect
+      matches:
+        - path:
+            type: Exact
+            value: /aura-farming
+    - filters:
+        - requestRedirect:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /status/
+            statusCode: 301
+          type: RequestRedirect
+      matches:
+        - path:
+            type: Exact
+            value: /status
+    - filters:
+        - requestRedirect:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /docs/
+            statusCode: 301
+          type: RequestRedirect
+      matches:
+        - path:
+            type: Exact
+            value: /docs
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: dashboard
+          port: 8080
+          weight: 1
+      matches:
+        - path:
+            type: PathPrefix
+            value: /dashboard/
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: grafana
+          port: 3000
+          weight: 1
+      matches:
+        - path:
+            type: PathPrefix
+            value: /grafana/
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: openobserve
+          port: 5080
+          weight: 1
+      matches:
+        - path:
+            type: PathPrefix
+            value: /openobserve/
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: agentsview
+          port: 8080
+          weight: 1
+      filters:
+        - urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+          type: URLRewrite
+        - extensionRef:
+            group: gateway.nginx.org
+            kind: SnippetsFilter
+            name: agentsview-subfilter
+          type: ExtensionRef
+      matches:
+        - path:
+            type: PathPrefix
+            value: /agentsview/
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: agentsview
+          port: 8080
+          weight: 1
+      matches:
+        - path:
+            type: PathPrefix
+            value: /assets/
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: aura-farming
+          port: 8080
+          weight: 1
+      filters:
+        - urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+          type: URLRewrite
+      matches:
+        - path:
+            type: PathPrefix
+            value: /aura-farming/
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: aura-farming
+          port: 8080
+          weight: 1
+      matches:
+        - path:
+            type: PathPrefix
+            value: /api/aura-farming/
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: gatus
+          port: 8080
+          weight: 1
+      filters:
+        - urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /api/
+          type: URLRewrite
+      matches:
+        - path:
+            type: PathPrefix
+            value: /status/api/
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: gatus
+          port: 8080
+          weight: 1
+      filters:
+        - urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+          type: URLRewrite
+        - extensionRef:
+            group: gateway.nginx.org
+            kind: SnippetsFilter
+            name: gatus-status-subfilter
+          type: ExtensionRef
+      matches:
+        - path:
+            type: PathPrefix
+            value: /status/
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: docs
+          port: 8080
+          weight: 1
+      filters:
+        - urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+          type: URLRewrite
+      matches:
+        - path:
+            type: PathPrefix
+            value: /docs/
     - backendRefs:
         - group: ""
           kind: Service
@@ -134,6 +426,7 @@ metadata:
 spec:
   hostnames:
     - docs.lan.zylman.com
+    - docs.zylman.com
   parentRefs:
     - group: gateway.networking.k8s.io
       kind: Gateway
@@ -285,6 +578,7 @@ spec:
   hostnames:
     - home-assistant.lan.zylman.com
     - ha.lan.zylman.com
+    - home.zylman.com
   parentRefs:
     - group: gateway.networking.k8s.io
       kind: Gateway
@@ -310,6 +604,7 @@ metadata:
 spec:
   hostnames:
     - kernel-browser.lan.zylman.com
+    - browser.zylman.com
   parentRefs:
     - group: gateway.networking.k8s.io
       kind: Gateway
@@ -413,10 +708,227 @@ spec:
       kind: Gateway
       name: edge-gateway
   rules:
+    - filters:
+        - requestRedirect:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /dashboard/
+            statusCode: 301
+          type: RequestRedirect
+      matches:
+        - path:
+            type: Exact
+            value: /dashboard
+    - filters:
+        - requestRedirect:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /grafana/
+            statusCode: 301
+          type: RequestRedirect
+      matches:
+        - path:
+            type: Exact
+            value: /grafana
+    - filters:
+        - requestRedirect:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /openobserve/
+            statusCode: 301
+          type: RequestRedirect
+      matches:
+        - path:
+            type: Exact
+            value: /openobserve
+    - filters:
+        - requestRedirect:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /agentsview/
+            statusCode: 301
+          type: RequestRedirect
+      matches:
+        - path:
+            type: Exact
+            value: /agentsview
+    - filters:
+        - requestRedirect:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /aura-farming/
+            statusCode: 301
+          type: RequestRedirect
+      matches:
+        - path:
+            type: Exact
+            value: /aura-farming
+    - filters:
+        - requestRedirect:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /status/
+            statusCode: 301
+          type: RequestRedirect
+      matches:
+        - path:
+            type: Exact
+            value: /status
+    - filters:
+        - requestRedirect:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /docs/
+            statusCode: 301
+          type: RequestRedirect
+      matches:
+        - path:
+            type: Exact
+            value: /docs
     - backendRefs:
         - group: ""
           kind: Service
-          name: eri
+          name: dashboard
+          port: 8080
+          weight: 1
+      matches:
+        - path:
+            type: PathPrefix
+            value: /dashboard/
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: grafana
+          port: 3000
+          weight: 1
+      matches:
+        - path:
+            type: PathPrefix
+            value: /grafana/
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: openobserve
+          port: 5080
+          weight: 1
+      matches:
+        - path:
+            type: PathPrefix
+            value: /openobserve/
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: agentsview
+          port: 8080
+          weight: 1
+      filters:
+        - urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+          type: URLRewrite
+        - extensionRef:
+            group: gateway.nginx.org
+            kind: SnippetsFilter
+            name: agentsview-subfilter
+          type: ExtensionRef
+      matches:
+        - path:
+            type: PathPrefix
+            value: /agentsview/
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: agentsview
+          port: 8080
+          weight: 1
+      matches:
+        - path:
+            type: PathPrefix
+            value: /assets/
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: aura-farming
+          port: 8080
+          weight: 1
+      filters:
+        - urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+          type: URLRewrite
+      matches:
+        - path:
+            type: PathPrefix
+            value: /aura-farming/
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: aura-farming
+          port: 8080
+          weight: 1
+      matches:
+        - path:
+            type: PathPrefix
+            value: /api/aura-farming/
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: gatus
+          port: 8080
+          weight: 1
+      filters:
+        - urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /api/
+          type: URLRewrite
+      matches:
+        - path:
+            type: PathPrefix
+            value: /status/api/
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: gatus
+          port: 8080
+          weight: 1
+      filters:
+        - urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+          type: URLRewrite
+        - extensionRef:
+            group: gateway.nginx.org
+            kind: SnippetsFilter
+            name: gatus-status-subfilter
+          type: ExtensionRef
+      matches:
+        - path:
+            type: PathPrefix
+            value: /status/
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: docs
+          port: 8080
+          weight: 1
+      filters:
+        - urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+          type: URLRewrite
+      matches:
+        - path:
+            type: PathPrefix
+            value: /docs/
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: homepage
           port: 8080
           weight: 1
       matches:
@@ -460,6 +972,10 @@ spec:
     - group: gateway.networking.k8s.io
       kind: Gateway
       name: edge-gateway
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: lan-gateway
+      sectionName: https
   rules:
     - filters:
         - requestRedirect:
@@ -489,6 +1005,13 @@ spec:
                   - docs
                   - eri
                   - kernel-browser
+                  - homepage
+                  - dashboard
+                  - agentsview
+                  - grafana
+                  - openobserve
+                  - aura-farming
+                  - gatus
     - ports:
         - port: 443
           protocol: TCP
@@ -512,6 +1035,9 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: cloudflared
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: gatus
       ports:
         - port: 4021
           protocol: TCP
