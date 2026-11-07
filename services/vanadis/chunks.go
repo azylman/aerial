@@ -152,6 +152,11 @@ func resolveVanadisChunkWidgetStatus(chunkStatus, prDBStatus string) string {
 			return "merged"
 		}
 		return "failed"
+	case "open", "pr_opened":
+		if cStat == "merged" {
+			return "merged"
+		}
+		return "open"
 	default:
 		return firstNonEmpty(cStat, "open")
 	}
@@ -999,12 +1004,32 @@ func isVanadisChunkStreamingPhase(chunkStatus string) bool {
 	}
 }
 
+func hasFailedWidgetChunk(chunks []StatusWidgetChunk) bool {
+	for _, c := range chunks {
+		if c.Status == "failed" || c.Status == "conflict" {
+			return true
+		}
+	}
+	return false
+}
+
+func resolveWidgetBanner(widgetStatus string, req SyncChunkPRWidgetRequest) string {
+	if (widgetStatus == "failed" || widgetStatus == "conflict") && req.PRFound {
+		return req.PRBanner
+	}
+	if req.PRNumber == 0 && strings.TrimSpace(req.PRBanner) != "" {
+		return strings.TrimSpace(req.PRBanner)
+	}
+	return ""
+}
+
 func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncChunkPRWidgetRequest) StatusWidgetRequest {
 	widgetStatus := firstNonEmpty(normalizeWidgetStatus(build.Status), "running")
 	wChunks := make([]StatusWidgetChunk, len(chunks))
 	for i, c := range chunks {
 		chunkRepo := firstNonEmpty(c.Repo, "azylman/aerial")
 		chunkStatus := normalizeWidgetStatus(c.Status)
+		completedAt := c.CompletedAt
 		var activeStep string
 		if req.PRNumber > 0 && c.PRNumber == req.PRNumber && req.PRFound {
 			chunkStatus = resolveVanadisChunkWidgetStatus(c.Status, req.PRStatus)
@@ -1013,6 +1038,7 @@ func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncC
 			}
 			if isVanadisChunkStreamingPhase(chunkStatus) {
 				activeStep = strings.TrimSpace(req.ActiveStep)
+				completedAt = time.Time{}
 			}
 		} else if chunkStatus == "merged" {
 			chunkStatus = "deployed"
@@ -1026,15 +1052,12 @@ func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncC
 			ActiveStep:  activeStep,
 			PRNumber:    c.PRNumber,
 			StartedAt:   c.StartedAt,
-			CompletedAt: c.CompletedAt,
+			CompletedAt: completedAt,
 			UpdatedAt:   c.UpdatedAt,
 		}
 	}
-	widgetBanner := ""
-	if (widgetStatus == "failed" || widgetStatus == "conflict") && req.PRFound {
-		widgetBanner = req.PRBanner
-	} else if req.PRNumber == 0 && strings.TrimSpace(req.PRBanner) != "" {
-		widgetBanner = strings.TrimSpace(req.PRBanner)
+	if widgetStatus == "failed" && req.PRFound && req.PRNumber > 0 && !hasFailedWidgetChunk(wChunks) {
+		widgetStatus = "running"
 	}
 	return StatusWidgetRequest{
 		ChannelID: build.ThreadID,
@@ -1043,9 +1066,41 @@ func buildSyncWidgetRequest(build VanadisBuild, chunks []VanadisChunk, req SyncC
 		Tier:      build.Tier,
 		Title:     firstNonEmpty(strings.TrimSpace(build.Title), build.Objective),
 		Status:    widgetStatus,
-		Banner:    widgetBanner,
+		Banner:    resolveWidgetBanner(widgetStatus, req),
 		Chunks:    wChunks,
 		StartedAt: build.CreatedAt,
+	}
+}
+
+func (s *VanadisServer) recoverBuildOnPRSync(ctx context.Context, build *VanadisBuild, chunks []VanadisChunk, req SyncChunkPRWidgetRequest) {
+	if s == nil || s.store == nil || !req.PRFound || req.PRNumber <= 0 || build == nil {
+		return
+	}
+	for i := range chunks {
+		c := &chunks[i]
+		if c.PRNumber == req.PRNumber && normalizeWidgetStatus(c.Status) == "failed" {
+			if isVanadisChunkStreamingPhase(resolveVanadisChunkWidgetStatus(c.Status, req.PRStatus)) {
+				if err := s.store.UpdateChunkStatus(ctx, c.ID, "pr_opened"); err == nil {
+					c.Status = "pr_opened"
+					c.CompletedAt = time.Time{}
+				}
+			}
+		}
+	}
+	if normalizeWidgetStatus(build.Status) == "failed" {
+		hasFailure := false
+		for _, c := range chunks {
+			norm := normalizeWidgetStatus(c.Status)
+			if norm == "failed" || norm == "conflict" {
+				hasFailure = true
+				break
+			}
+		}
+		if !hasFailure {
+			if err := s.store.UpdateBuildStatus(ctx, build.ID, "running"); err == nil {
+				build.Status = "running"
+			}
+		}
 	}
 }
 
@@ -1096,6 +1151,7 @@ func (s *VanadisServer) handleSyncPRWidget(w http.ResponseWriter, r *http.Reques
 			writeStoreErr(w, err)
 			return
 		}
+		s.recoverBuildOnPRSync(r.Context(), build, chunks, req)
 		widgetReq := buildSyncWidgetRequest(*build, chunks, req)
 		if err := s.dispatchAndPersistWidget(r.Context(), build.ID, build.StatusMessageID, widgetReq); err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
@@ -1122,6 +1178,7 @@ func (s *VanadisServer) handleSyncPRWidget(w http.ResponseWriter, r *http.Reques
 		writeStoreErr(w, err)
 		return
 	}
+	s.recoverBuildOnPRSync(r.Context(), build, chunks, req)
 	widgetReq := buildSyncWidgetRequest(*build, chunks, req)
 	if err := s.dispatchAndPersistWidget(r.Context(), build.ID, build.StatusMessageID, widgetReq); err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
