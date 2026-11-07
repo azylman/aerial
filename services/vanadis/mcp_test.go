@@ -369,6 +369,13 @@ func TestVanadisMCP_Tools(t *testing.T) {
 			wantToolErr: false,
 			wantSubstr:  `"status":"updated"`,
 		},
+		{
+			name:        "update_chunk empty mode treated as unset",
+			toolName:    "update_chunk",
+			args:        `{"build_id":"build-mcp-1","chunk_ref":"1","mode":"","title":"Updated Chunk 2 Title Again"}`,
+			wantToolErr: false,
+			wantSubstr:  `"status":"updated"`,
+		},
 
 		// append_chunk
 		{

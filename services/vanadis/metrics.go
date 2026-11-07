@@ -68,7 +68,7 @@ var (
 	knownQueueStates         = []string{"running", "queued"}
 	knownChunkActiveStatuses = []string{"pending", "running", "pr_opened"}
 	knownBuildStatuses       = []string{"created", "completed", "failed", "cancelled"}
-	knownChunkStatuses       = []string{"dispatched", "merged", "failed", "cancelled"}
+	knownChunkStatuses       = []string{"dispatched", "merged", "completed", "failed", "cancelled"}
 	knownRiverJobStates      = []string{"available", "running", "retryable", "scheduled"}
 )
 

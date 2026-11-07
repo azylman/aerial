@@ -1114,6 +1114,242 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 		if rec500.Code != http.StatusInternalServerError {
 			t.Errorf("expected 500 when store is nil, got %d", rec500.Code)
 		}
+
+		// POST /chunks/complete tests
+		t.Run("POST_ChunksComplete", func(t *testing.T) {
+			sAct := newMemoryVanadisStore()
+			bActID := "build-act-complete"
+			bAct := mkBuild(bActID, "123456789012345678", "Action Build", "Test Action Completion", "running")
+			cAct1 := VanadisChunk{
+				ID:         "chunk-act-1",
+				BuildID:    bActID,
+				ChunkIndex: 0,
+				Mode:       "action",
+				Title:      "Action Step 1",
+				Status:     "running",
+				Effort:     "low",
+				CreatedAt:  time.Now().UTC(),
+				UpdatedAt:  time.Now().UTC(),
+			}
+			cAct2 := VanadisChunk{
+				ID:         "chunk-act-2",
+				BuildID:    bActID,
+				ChunkIndex: 1,
+				Mode:       "action",
+				Title:      "Action Step 2",
+				Status:     "pending",
+				Effort:     "low",
+				CreatedAt:  time.Now().UTC(),
+				UpdatedAt:  time.Now().UTC(),
+			}
+			_ = sAct.CreateBuild(context.Background(), bAct, []VanadisChunk{cAct1, cAct2})
+
+			var wakePrompts []map[string]string
+			tsBrainAct := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/internal/widget/sync":
+					httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+				case "/prompt":
+					var p map[string]string
+					_ = json.NewDecoder(r.Body).Decode(&p)
+					wakePrompts = append(wakePrompts, p)
+					httpkit.WriteJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer tsBrainAct.Close()
+
+			insAct := &mockRiverInserter{}
+			srvAct := NewVanadisServer(Config{BrainURL: tsBrainAct.URL, SynapseURL: tsBrainAct.URL}, sAct, insAct, tsBrainAct.Client())
+			muxAct := SetupMux(srvAct)
+
+			// 1. Advance first action chunk -> next chunk queued in River
+			rec1 := httptest.NewRecorder()
+			muxAct.ServeHTTP(rec1, httptest.NewRequest(http.MethodPost, "/chunks/complete", strings.NewReader(`{"chunk_id":"chunk-act-1"}`)))
+			if rec1.Code != http.StatusOK {
+				t.Fatalf("expected 200 OK advancing action chunk, got %d: %s", rec1.Code, rec1.Body.String())
+			}
+			var res1 VanadisAdvancementResult
+			_ = json.Unmarshal(rec1.Body.Bytes(), &res1)
+			if !res1.Matched || !res1.Advanced || res1.NextChunkIndex != 1 || res1.BuildCompleted {
+				t.Errorf("unexpected advancement result for chunk 1: %+v", res1)
+			}
+			if len(insAct.inserted) != 1 || insAct.inserted[0].ChunkIndex != 1 {
+				t.Errorf("expected chunk 1 queued in river, got %+v", insAct.inserted)
+			}
+
+			// 2. Complete second (final) action chunk -> build completed & wake prompt dispatched
+			rec2 := httptest.NewRecorder()
+			muxAct.ServeHTTP(rec2, httptest.NewRequest(http.MethodPost, "/chunks/complete", strings.NewReader(`{"chunk_id":"chunk-act-2"}`)))
+			if rec2.Code != http.StatusOK {
+				t.Fatalf("expected 200 OK completing build, got %d: %s", rec2.Code, rec2.Body.String())
+			}
+			var res2 VanadisAdvancementResult
+			_ = json.Unmarshal(rec2.Body.Bytes(), &res2)
+			if !res2.Matched || !res2.Advanced || !res2.BuildCompleted || res2.BuildStatus != "completed" {
+				t.Errorf("unexpected completion result for chunk 2: %+v", res2)
+			}
+			if len(wakePrompts) != 1 || wakePrompts[0]["channel_id"] != "123456789012345678" || !strings.Contains(wakePrompts[0]["prompt"], "Vanadis build build-act-complete completed") {
+				t.Errorf("unexpected wake prompt dispatched: %+v", wakePrompts)
+			}
+
+			// 3. Repeat complete -> noop
+			recNoop := httptest.NewRecorder()
+			muxAct.ServeHTTP(recNoop, httptest.NewRequest(http.MethodPost, "/chunks/complete", strings.NewReader(`{"chunk_id":"chunk-act-2"}`)))
+			if recNoop.Code != http.StatusOK {
+				t.Fatalf("expected 200 OK for noop, got %d: %s", recNoop.Code, recNoop.Body.String())
+			}
+			var resNoop map[string]any
+			_ = json.Unmarshal(recNoop.Body.Bytes(), &resNoop)
+			if resNoop["status"] != "noop" || resNoop["build_id"] != bActID {
+				t.Errorf("expected noop result, got %+v", resNoop)
+			}
+
+			// 4. Missing chunk_id -> 400
+			recMissing := httptest.NewRecorder()
+			muxAct.ServeHTTP(recMissing, httptest.NewRequest(http.MethodPost, "/chunks/complete", strings.NewReader(`{"chunk_id":""}`)))
+			if recMissing.Code != http.StatusBadRequest {
+				t.Errorf("expected 400 on empty chunk_id, got %d", recMissing.Code)
+			}
+
+			// 5. Invalid JSON -> 400
+			recBadJSON := httptest.NewRecorder()
+			muxAct.ServeHTTP(recBadJSON, httptest.NewRequest(http.MethodPost, "/chunks/complete", strings.NewReader(`{invalid`)))
+			if recBadJSON.Code != http.StatusBadRequest {
+				t.Errorf("expected 400 on invalid JSON, got %d", recBadJSON.Code)
+			}
+
+			// 6. Non-POST -> 405
+			recMethod := httptest.NewRecorder()
+			muxAct.ServeHTTP(recMethod, httptest.NewRequest(http.MethodGet, "/chunks/complete", nil))
+			if recMethod.Code != http.StatusMethodNotAllowed {
+				t.Errorf("expected 405 on GET, got %d", recMethod.Code)
+			}
+
+			// 7. Non-existent chunk -> 404
+			rec404 := httptest.NewRecorder()
+			muxAct.ServeHTTP(rec404, httptest.NewRequest(http.MethodPost, "/chunks/complete", strings.NewReader(`{"chunk_id":"nonexistent"}`)))
+			if rec404.Code != http.StatusNotFound {
+				t.Errorf("expected 404 on nonexistent chunk, got %d", rec404.Code)
+			}
+
+			// 8. Nil store -> 500
+			srvNil := NewVanadisServer(Config{}, nil, nil, nil)
+			recNil := httptest.NewRecorder()
+			SetupMux(srvNil).ServeHTTP(recNil, httptest.NewRequest(http.MethodPost, "/chunks/complete", strings.NewReader(`{"chunk_id":"c1"}`)))
+			if recNil.Code != http.StatusInternalServerError {
+				t.Errorf("expected 500 on nil store, got %d", recNil.Code)
+			}
+		})
+
+		// POST /chunks/fail tests
+		t.Run("POST_ChunksFail", func(t *testing.T) {
+			sFail := newMemoryVanadisStore()
+			bFailID := "build-act-fail"
+			bFail := mkBuild(bFailID, "123456789012345678", "Fail Build", "Test Action Failure", "running")
+			cFail1 := VanadisChunk{
+				ID:         "chunk-fail-1",
+				BuildID:    bFailID,
+				ChunkIndex: 0,
+				Mode:       "action",
+				Title:      "Action Step Fail",
+				Status:     "running",
+				Effort:     "low",
+				CreatedAt:  time.Now().UTC(),
+				UpdatedAt:  time.Now().UTC(),
+			}
+			_ = sFail.CreateBuild(context.Background(), bFail, []VanadisChunk{cFail1})
+
+			var failPrompts []map[string]string
+			var widgetBanners []string
+			tsBrainFail := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/internal/widget/sync":
+					var wr map[string]string
+					_ = json.NewDecoder(r.Body).Decode(&wr)
+					widgetBanners = append(widgetBanners, wr["banner"])
+					httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+				case "/prompt":
+					var p map[string]string
+					_ = json.NewDecoder(r.Body).Decode(&p)
+					failPrompts = append(failPrompts, p)
+					httpkit.WriteJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer tsBrainFail.Close()
+
+			srvFail := NewVanadisServer(Config{BrainURL: tsBrainFail.URL, SynapseURL: tsBrainFail.URL}, sFail, nil, tsBrainFail.Client())
+			muxFail := SetupMux(srvFail)
+
+			// 1. Success failing chunk
+			rec1 := httptest.NewRecorder()
+			muxFail.ServeHTTP(rec1, httptest.NewRequest(http.MethodPost, "/chunks/fail", strings.NewReader(`{"chunk_id":"chunk-fail-1","reason":"hardware timeout"}`)))
+			if rec1.Code != http.StatusOK {
+				t.Fatalf("expected 200 OK on chunk fail, got %d: %s", rec1.Code, rec1.Body.String())
+			}
+			var res1 map[string]any
+			_ = json.Unmarshal(rec1.Body.Bytes(), &res1)
+			if res1["status"] != "failed" || res1["failed"] != true || res1["chunk_id"] != "chunk-fail-1" || res1["build_id"] != bFailID {
+				t.Errorf("unexpected fail response: %+v", res1)
+			}
+			if len(widgetBanners) == 0 || !strings.Contains(widgetBanners[len(widgetBanners)-1], "hardware timeout") {
+				t.Errorf("expected failure banner in widget sync, got %+v", widgetBanners)
+			}
+			if len(failPrompts) != 1 || !strings.Contains(failPrompts[0]["prompt"], "[VANADIS BUILD FAILED]") || !strings.Contains(failPrompts[0]["prompt"], "hardware timeout") {
+				t.Errorf("expected failure wake prompt, got %+v", failPrompts)
+			}
+
+			// 2. Repeat fail -> already failed (failed: false)
+			recRepeat := httptest.NewRecorder()
+			muxFail.ServeHTTP(recRepeat, httptest.NewRequest(http.MethodPost, "/chunks/fail", strings.NewReader(`{"chunk_id":"chunk-fail-1","reason":"hardware timeout"}`)))
+			if recRepeat.Code != http.StatusOK {
+				t.Fatalf("expected 200 OK on repeat fail, got %d", recRepeat.Code)
+			}
+			var resRepeat map[string]any
+			_ = json.Unmarshal(recRepeat.Body.Bytes(), &resRepeat)
+			if resRepeat["failed"] != false {
+				t.Errorf("expected failed=false on already failed chunk, got %+v", resRepeat)
+			}
+
+			// 3. Validation errors
+			for _, bad := range []string{
+				`{}`,
+				`{"chunk_id":""}`,
+				`{"chunk_id":"chunk-fail-1","reason":""}`,
+				`{invalid-json`,
+			} {
+				recBad := httptest.NewRecorder()
+				muxFail.ServeHTTP(recBad, httptest.NewRequest(http.MethodPost, "/chunks/fail", strings.NewReader(bad)))
+				if recBad.Code != http.StatusBadRequest {
+					t.Errorf("expected 400 for payload %s, got %d", bad, recBad.Code)
+				}
+			}
+
+			// 4. Method not allowed (GET) -> 405
+			recMethod := httptest.NewRecorder()
+			muxFail.ServeHTTP(recMethod, httptest.NewRequest(http.MethodGet, "/chunks/fail", nil))
+			if recMethod.Code != http.StatusMethodNotAllowed {
+				t.Errorf("expected 405 on GET, got %d", recMethod.Code)
+			}
+
+			// 5. Non-existent chunk -> 404
+			rec404 := httptest.NewRecorder()
+			muxFail.ServeHTTP(rec404, httptest.NewRequest(http.MethodPost, "/chunks/fail", strings.NewReader(`{"chunk_id":"nonexistent","reason":"err"}`)))
+			if rec404.Code != http.StatusNotFound {
+				t.Errorf("expected 404 on nonexistent chunk, got %d", rec404.Code)
+			}
+
+			// 6. Nil store -> 500
+			srvNil := NewVanadisServer(Config{}, nil, nil, nil)
+			recNil := httptest.NewRecorder()
+			SetupMux(srvNil).ServeHTTP(recNil, httptest.NewRequest(http.MethodPost, "/chunks/fail", strings.NewReader(`{"chunk_id":"c1","reason":"err"}`)))
+			if recNil.Code != http.StatusInternalServerError {
+				t.Errorf("expected 500 on nil store, got %d", recNil.Code)
+			}
+		})
 	})
 }
 

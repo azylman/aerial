@@ -176,3 +176,76 @@ func (s *PostgresVanadisStore) FailChunk(ctx context.Context, chunkID, reason st
 	b.UpdatedAt = now
 	return &b, &c, true, nil
 }
+
+func formatChunkLedgerLabel(c VanadisChunkSummary) string {
+	if c.Mode == "action" {
+		return "(action, completed)"
+	}
+	cRepo := strings.TrimSpace(c.Repo)
+	if cRepo == "" {
+		cRepo = "azylman/aerial"
+	}
+	if c.PRNumber > 0 {
+		return fmt.Sprintf("(%s, PR #%d)", cRepo, c.PRNumber)
+	}
+	return fmt.Sprintf("(%s)", cRepo)
+}
+
+func formatBuildCompletedWakePrompt(res *VanadisAdvancementResult) string {
+	if res == nil {
+		return ""
+	}
+	total := len(res.Chunks)
+	lines := []string{
+		fmt.Sprintf("Vanadis build %s completed (Tier %d, %d chunks completed).", res.BuildID, res.Tier, total),
+	}
+	if obj := strings.TrimSpace(res.Objective); obj != "" {
+		lines = append(lines, "Objective: "+obj)
+	}
+	if total > 0 {
+		lines = append(lines, "", "Completed Chunks Ledger:")
+		for _, c := range res.Chunks {
+			lines = append(lines, fmt.Sprintf("- Chunk %d/%d: %s %s", c.ChunkIndex+1, total, c.Title, formatChunkLedgerLabel(c)))
+		}
+	}
+	lines = append(lines, "", "All Vanadis build chunks have completed. Review the work and formulate the final substantive deliverable to the user.")
+	return strings.Join(lines, "\n")
+}
+
+func (s *VanadisServer) failChunkInternal(ctx context.Context, chunkID, reason string) (*VanadisBuild, *VanadisChunk, bool, error) {
+	if s.store == nil {
+		return nil, nil, false, errors.New("vanadis store not configured")
+	}
+	chunkID = strings.TrimSpace(chunkID)
+	reason = strings.TrimSpace(reason)
+	if chunkID == "" || reason == "" {
+		return nil, nil, false, fmt.Errorf("%w: chunk_id and reason are required", ErrInvalidBuildInput)
+	}
+
+	build, chunk, transitioned, err := s.store.FailChunk(ctx, chunkID, reason)
+	if err != nil {
+		return nil, nil, false, err
+	}
+
+	if transitioned && build != nil && chunk != nil {
+		RecordChunkTotal("failed")
+		RecordBuildTotal("failed")
+
+		totalChunks := chunk.ChunkIndex + 1
+		if _, allChunks, bErr := s.store.GetBuild(ctx, build.ID); bErr == nil && len(allChunks) > 0 {
+			totalChunks = len(allChunks)
+		}
+
+		banner := fmt.Sprintf("Chunk %d/%d (%s) failed: %s", chunk.ChunkIndex+1, totalChunks, chunk.Title, reason)
+		s.syncBuildWidget(ctx, build.ID, banner)
+
+		if strings.TrimSpace(build.ThreadID) != "" {
+			prompt := fmt.Sprintf("[VANADIS BUILD FAILED]\nBuild ID: %s\nObjective: %s\n\nChunk %d/%d (%s) failed: %s", build.ID, build.Objective, chunk.ChunkIndex+1, totalChunks, chunk.Title, reason)
+			if err := s.dispatchWakePrompt(ctx, build.ThreadID, prompt); err != nil {
+				log.Printf("[vanadis] warning: failed dispatching fail wake prompt to thread %s: %v", build.ThreadID, err)
+			}
+		}
+	}
+
+	return build, chunk, transitioned, nil
+}
