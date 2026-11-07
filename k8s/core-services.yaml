@@ -248,6 +248,26 @@ spec:
           volumeMounts:
             - mountPath: /share
               name: share
+        - args:
+            - migrate
+            - apply
+            - --dir
+            - file:///share/aerial/services/eri/pkg/db/migrations
+            - --url
+            - $(DATABASE_URL)
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  key: DATABASE_URL
+                  name: shared-secrets
+          image: arigaio/atlas:1.3.4
+          imagePullPolicy: IfNotPresent
+          name: db-migrate
+          volumeMounts:
+            - mountPath: /share
+              name: share
+              readOnly: true
       nodeSelector:
         compute-tier: performance
         kubernetes.io/hostname: calibarn
@@ -410,6 +430,27 @@ spec:
             - containerPort: 4025
               name: http
               protocol: TCP
+          volumeMounts:
+            - mountPath: /share
+              name: share
+              readOnly: true
+      initContainers:
+        - args:
+            - migrate
+            - apply
+            - --dir
+            - file:///share/aerial/services/eri/pkg/db/migrations
+            - --url
+            - $(DATABASE_URL)
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  key: DATABASE_URL
+                  name: shared-secrets
+          image: arigaio/atlas:1.3.4
+          imagePullPolicy: IfNotPresent
+          name: db-migrate
           volumeMounts:
             - mountPath: /share
               name: share
