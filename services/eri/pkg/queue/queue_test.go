@@ -4008,6 +4008,7 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 		emitStep           bool
 		wantSyncedRepo     string
 		wantSyncedPRNumber int
+		wantVanadisChunkID string
 	}{
 		{
 			name:         "ephemeral vanadis chunk",
@@ -4028,15 +4029,16 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 			wantRespText: "all systems normal",
 		},
 		{
-			name:         "vanadis chunk step streaming to build card widget",
-			source:       "vanadis",
-			sessionID:    "vanadis-chunk-step-live",
-			prompt:       "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: build-streaming-live\nChunk ID: chunk-step-live\n=== Active Chunk (Chunk 1 of 1) ===\nImplement step streaming",
-			respJSON:     `{"conversation_id":"77777777-7777-7777-7777-777777777777","status":"SUCCESS","response":"step streaming succeeded"}`,
-			wantStatus:   db.StatusCompleted,
-			wantRespText: "step streaming succeeded",
-			seedWidget:   true,
-			emitStep:     true,
+			name:               "vanadis chunk step streaming to build card widget",
+			source:             "vanadis",
+			sessionID:          "vanadis-chunk-step-live",
+			prompt:             "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: build-streaming-live\nChunk ID: chunk-step-live\n=== Active Chunk (Chunk 1 of 1) ===\nImplement step streaming",
+			respJSON:           `{"conversation_id":"77777777-7777-7777-7777-777777777777","status":"SUCCESS","response":"step streaming succeeded"}`,
+			wantStatus:         db.StatusCompleted,
+			wantRespText:       "step streaming succeeded",
+			seedWidget:         true,
+			emitStep:           true,
+			wantVanadisChunkID: "chunk-step-live",
 		},
 		{
 			name:               "cold widget cache on PR CI remediation lazily syncs widget and streams steps",
@@ -4079,6 +4081,24 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 			}
 			var pool *WorkerPool
 
+			var vanadisReqsMu sync.Mutex
+			var vanadisReqs []struct {
+				Path string
+				Body map[string]string
+			}
+			vanadisSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var b map[string]string
+				_ = json.NewDecoder(r.Body).Decode(&b)
+				vanadisReqsMu.Lock()
+				vanadisReqs = append(vanadisReqs, struct {
+					Path string
+					Body map[string]string
+				}{Path: r.URL.Path, Body: b})
+				vanadisReqsMu.Unlock()
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer vanadisSrv.Close()
+
 			var routerSrv *httptest.Server
 			if tc.coldWidgetSync || tc.syncConnErr {
 				routerSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -4114,6 +4134,7 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 				Store:          store,
 				TimeoutMinutes: 1,
 				SynapseURL:     routerURL,
+				VanadisURL:     vanadisSrv.URL,
 				DeliveryFunc: func(s *discordgo.Session, c, text string) error {
 					t.Errorf("unexpected Discord DeliveryFunc call for headless dispatch")
 					return nil
@@ -4158,12 +4179,22 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 			defer pool.Stop()
 
 			if tc.syncBadURL {
-				pBad := &WorkerPool{cfg: WorkerPoolConfig{SynapseURL: "://bad-url"}}
+				pBad := &WorkerPool{cfg: WorkerPoolConfig{SynapseURL: "://bad-url", VanadisURL: "http://vanadis.aerial/api/"}}
 				pBad.ensureChunkWidgetHydrated("Build ID: b1", "c1", "b1")
 				pDef := &WorkerPool{}
 				pDef.SetDiscordSession(&discordgo.Session{})
 				if got := pDef.resolveSynapseURL(); got != "http://synapse.aerial" {
 					t.Fatalf("resolveSynapseURL() = %q, want http://synapse.aerial", got)
+				}
+				if got := pDef.resolveVanadisURL(); got != "http://vanadis.aerial" {
+					t.Fatalf("resolveVanadisURL() with discord session = %q, want http://vanadis.aerial", got)
+				}
+				if got := pBad.resolveVanadisURL(); got != "http://vanadis.aerial/api" {
+					t.Fatalf("resolveVanadisURL() with custom url = %q, want http://vanadis.aerial/api", got)
+				}
+				pNil := &WorkerPool{}
+				if got := pNil.resolveVanadisURL(); got != "" {
+					t.Fatalf("resolveVanadisURL() on empty pool = %q, want empty", got)
 				}
 			}
 
@@ -4224,6 +4255,21 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 			if tc.wantSyncedRepo != "" {
 				if syncedPayload.Repo != tc.wantSyncedRepo || syncedPayload.PRNumber != tc.wantSyncedPRNumber {
 					t.Fatalf("syncedPayload = %+v, want repo=%q pr=%d", syncedPayload, tc.wantSyncedRepo, tc.wantSyncedPRNumber)
+				}
+			}
+
+			if tc.wantVanadisChunkID != "" {
+				vanadisReqsMu.Lock()
+				var foundComplete bool
+				for _, req := range vanadisReqs {
+					if req.Path == "/chunks/complete" && req.Body["chunk_id"] == tc.wantVanadisChunkID {
+						foundComplete = true
+						break
+					}
+				}
+				vanadisReqsMu.Unlock()
+				if !foundComplete {
+					t.Fatalf("expected /chunks/complete call for chunk %q, got: %+v", tc.wantVanadisChunkID, vanadisReqs)
 				}
 			}
 
@@ -4460,55 +4506,280 @@ func TestRecoverInterrupted_Dispatches(t *testing.T) {
 
 func TestDispatchExecution_RetriesAndFailure(t *testing.T) {
 	t.Parallel()
-	store := dbtest.NewFakeStore()
-	ctx := context.Background()
 
-	disp := db.Dispatch{
-		ID:        "disp-fail-retry",
-		Source:    "heartbeat",
-		SessionID: "heartbeat-failing",
-		Prompt:    "fail this dispatch",
-		Status:    db.StatusPending,
-	}
-	_ = store.InsertDispatch(ctx, disp)
-
-	exhausted := make(chan struct{})
-	var attempts atomic.Int32
-	pool := New(nil, WorkerPoolConfig{
-		Store:          store,
-		MaxAttempts:    2,
-		BackoffBase:    1 * time.Millisecond,
-		TimeoutMinutes: 1,
-		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-			if attempts.Add(1) == 2 {
-				close(exhausted)
-			}
-			return "", "fatal error", 1, errors.New("simulated dispatch execution error")
+	tests := []struct {
+		name              string
+		source            string
+		sessionID         string
+		prompt            string
+		wantStatus        string
+		wantMinRetries    int
+		wantVanadisFailID string
+	}{
+		{
+			name:           "heartbeat dispatch exhausts retries to failed status",
+			source:         "heartbeat",
+			sessionID:      "heartbeat-failing",
+			prompt:         "fail this dispatch",
+			wantStatus:     db.StatusFailed,
+			wantMinRetries: 1,
 		},
-	})
-	defer pool.Stop()
-
-	pool.EnqueueDispatch(disp)
-
-	select {
-	case <-exhausted:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("timeout waiting for retries to exhaust")
+		{
+			name:              "vanadis chunk exhausts retries and notifies vanadis failure",
+			source:            "vanadis",
+			sessionID:         "vanadis-chunk-fail-term",
+			prompt:            "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: b-fail\nChunk ID: chunk-fail-term\nfail this chunk",
+			wantStatus:        db.StatusFailed,
+			wantMinRetries:    1,
+			wantVanadisFailID: "chunk-fail-term",
+		},
 	}
 
-	waitPoolIdle(t, pool, 3*time.Second)
-	pool.Stop()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := dbtest.NewFakeStore()
+			ctx := context.Background()
 
-	d, err := store.GetDispatch(ctx, disp.ID)
-	if err != nil || d == nil {
-		t.Fatalf("failed to get dispatch %s: %v", disp.ID, err)
+			var vanadisReqsMu sync.Mutex
+			var vanadisReqs []struct {
+				Path string
+				Body map[string]string
+			}
+			vanadisSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var b map[string]string
+				_ = json.NewDecoder(r.Body).Decode(&b)
+				vanadisReqsMu.Lock()
+				vanadisReqs = append(vanadisReqs, struct {
+					Path string
+					Body map[string]string
+				}{Path: r.URL.Path, Body: b})
+				vanadisReqsMu.Unlock()
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer vanadisSrv.Close()
+
+			disp := db.Dispatch{
+				ID:        uuid.New().String(),
+				Source:    tc.source,
+				SessionID: tc.sessionID,
+				Prompt:    tc.prompt,
+				Status:    db.StatusPending,
+			}
+			_ = store.InsertDispatch(ctx, disp)
+
+			exhausted := make(chan struct{})
+			var attempts atomic.Int32
+			pool := New(nil, WorkerPoolConfig{
+				Store:          store,
+				MaxAttempts:    2,
+				BackoffBase:    1 * time.Millisecond,
+				TimeoutMinutes: 1,
+				VanadisURL:     vanadisSrv.URL,
+				RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+					if attempts.Add(1) == 2 {
+						close(exhausted)
+					}
+					return "", "fatal error", 1, errors.New("simulated dispatch execution error")
+				},
+			})
+			defer pool.Stop()
+
+			pool.EnqueueDispatch(disp)
+
+			select {
+			case <-exhausted:
+			case <-time.After(3 * time.Second):
+				t.Fatalf("timeout waiting for retries to exhaust")
+			}
+
+			waitPoolIdle(t, pool, 3*time.Second)
+			pool.Stop()
+
+			d, err := store.GetDispatch(ctx, disp.ID)
+			if err != nil || d == nil {
+				t.Fatalf("failed to get dispatch %s: %v", disp.ID, err)
+			}
+			if d.Status != tc.wantStatus {
+				t.Fatalf("dispatch %s did not reach status %s after retries, got %s", disp.ID, tc.wantStatus, d.Status)
+			}
+			if d.RetryCount < tc.wantMinRetries {
+				t.Fatalf("expected retry_count >= %d, got %d", tc.wantMinRetries, d.RetryCount)
+			}
+
+			if tc.wantVanadisFailID != "" {
+				vanadisReqsMu.Lock()
+				var foundFail bool
+				for _, req := range vanadisReqs {
+					if req.Path == "/chunks/fail" && req.Body["chunk_id"] == tc.wantVanadisFailID && req.Body["reason"] != "" {
+						foundFail = true
+						break
+					}
+				}
+				vanadisReqsMu.Unlock()
+				if !foundFail {
+					t.Fatalf("expected /chunks/fail call for chunk %q, got: %+v", tc.wantVanadisFailID, vanadisReqs)
+				}
+			}
+		})
 	}
-	if d.Status != db.StatusFailed {
-		t.Fatalf("dispatch %s did not reach FAILED status after retries, got %s", disp.ID, d.Status)
+}
+
+func TestWorkerPool_ResolveVanadisURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		pool       *WorkerPool
+		withSess   bool
+		vanadisURL string
+		want       string
+	}{
+		{name: "nil pool", pool: nil, want: ""},
+		{name: "configured URL trimmed", pool: &WorkerPool{cfg: WorkerPoolConfig{VanadisURL: "http://vanadis.local:4025///"}}, want: "http://vanadis.local:4025"},
+		{name: "fallback with discord session", pool: &WorkerPool{}, withSess: true, want: "http://vanadis.aerial"},
+		{name: "empty without discord session", pool: &WorkerPool{}, want: ""},
 	}
-	if d.RetryCount < 1 {
-		t.Fatalf("expected retry_count >= 1, got %d", d.RetryCount)
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := tc.pool
+			if tc.withSess && p != nil {
+				p.SetDiscordSession(&discordgo.Session{})
+			}
+			if got := p.resolveVanadisURL(); got != tc.want {
+				t.Fatalf("resolveVanadisURL() = %q, want %q", got, tc.want)
+			}
+		})
 	}
+}
+
+func TestWorkerPool_NotifyVanadisChunkOutcome(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		chunkID      string
+		turnStatus   string
+		turnError    string
+		emptyURL     bool
+		serverStatus int
+		wantEndpoint string
+		wantBody     map[string]string
+		wantCalls    int
+	}{
+		{
+			name:       "empty chunk ID returns immediately",
+			chunkID:    "",
+			turnStatus: "success",
+			wantCalls:  0,
+		},
+		{
+			name:       "empty vanadis URL returns immediately",
+			chunkID:    "c-1",
+			turnStatus: "success",
+			emptyURL:   true,
+			wantCalls:  0,
+		},
+		{
+			name:         "success notifies chunks complete",
+			chunkID:      "c-success",
+			turnStatus:   "success",
+			wantEndpoint: "/chunks/complete",
+			wantBody:     map[string]string{"chunk_id": "c-success"},
+			wantCalls:    1,
+		},
+		{
+			name:         "failed notifies chunks fail with error detail",
+			chunkID:      "c-fail",
+			turnStatus:   "failed",
+			turnError:    "build compilation error",
+			wantEndpoint: "/chunks/fail",
+			wantBody:     map[string]string{"chunk_id": "c-fail", "reason": "build compilation error"},
+			wantCalls:    1,
+		},
+		{
+			name:         "timeout without error falls back to default reason",
+			chunkID:      "c-timeout",
+			turnStatus:   "timeout",
+			turnError:    "",
+			wantEndpoint: "/chunks/fail",
+			wantBody:     map[string]string{"chunk_id": "c-timeout", "reason": "dispatch turn timeout"},
+			wantCalls:    1,
+		},
+		{
+			name:       "unhandled status makes no calls",
+			chunkID:    "c-cancelled",
+			turnStatus: "cancelled",
+			wantCalls:  0,
+		},
+		{
+			name:         "server error 500 does not panic",
+			chunkID:      "c-err500",
+			turnStatus:   "success",
+			serverStatus: http.StatusInternalServerError,
+			wantEndpoint: "/chunks/complete",
+			wantBody:     map[string]string{"chunk_id": "c-err500"},
+			wantCalls:    1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var reqsMu sync.Mutex
+			var reqs []struct {
+				path string
+				body map[string]string
+			}
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var b map[string]string
+				_ = json.NewDecoder(r.Body).Decode(&b)
+				reqsMu.Lock()
+				reqs = append(reqs, struct {
+					path string
+					body map[string]string
+				}{path: r.URL.Path, body: b})
+				reqsMu.Unlock()
+				status := http.StatusOK
+				if tc.serverStatus != 0 {
+					status = tc.serverStatus
+				}
+				w.WriteHeader(status)
+			}))
+			defer srv.Close()
+
+			url := srv.URL
+			if tc.emptyURL {
+				url = ""
+			}
+
+			pool := &WorkerPool{cfg: WorkerPoolConfig{VanadisURL: url}}
+			pool.notifyVanadisChunkOutcome(tc.chunkID, tc.turnStatus, tc.turnError)
+
+			reqsMu.Lock()
+			defer reqsMu.Unlock()
+			if len(reqs) != tc.wantCalls {
+				t.Fatalf("reqs count = %d, want %d", len(reqs), tc.wantCalls)
+			}
+			if tc.wantCalls > 0 {
+				if reqs[0].path != tc.wantEndpoint {
+					t.Fatalf("endpoint = %q, want %q", reqs[0].path, tc.wantEndpoint)
+				}
+				for k, v := range tc.wantBody {
+					if reqs[0].body[k] != v {
+						t.Fatalf("body[%q] = %q, want %q", k, reqs[0].body[k], v)
+					}
+				}
+			}
+		})
+	}
+
+	// Also test nil pool safety
+	var nilPool *WorkerPool
+	nilPool.notifyVanadisChunkOutcome("c-nil", "success", "")
 }
 
 func TestDispatchPromptAssembly(t *testing.T) {

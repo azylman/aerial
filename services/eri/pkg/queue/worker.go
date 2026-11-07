@@ -536,6 +536,11 @@ func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 	if chunkID != "" {
 		p.StartChunkStepTurn(chunkID, buildID, chunkIdx, d.ID)
 		p.ensureChunkWidgetHydrated(d.Prompt, chunkID, buildID)
+		if d.Source == "vanadis" {
+			defer func() {
+				p.notifyVanadisChunkOutcome(chunkID, te.turnStatus, te.turnError)
+			}()
+		}
 		defer p.FinishChunkStepTurn(chunkID, d.ID)
 		te.statusUpdater = NewChunkStepStatusUpdater(chunkID, func(step string) error {
 			return p.FlushChunkActiveStep(chunkID, d.ID, step)
