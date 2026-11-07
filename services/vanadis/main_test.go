@@ -26,6 +26,14 @@ import (
 	"github.com/riverqueue/river/rivertype"
 )
 
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+var noopHTTPClient = &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+})}
+
 type mockRow struct {
 	b   *VanadisBuild
 	err error
@@ -1127,7 +1135,7 @@ func TestExecuteChunkWorkerAndProcessExecuteChunk(t *testing.T) {
 	}))
 	defer brainSrv.Close()
 	memStore := newMemoryVanadisStore()
-	srv := NewVanadisServer(Config{BrainURL: brainSrv.URL}, memStore, &mockRiverInserter{}, brainSrv.Client())
+	srv := NewVanadisServer(Config{BrainURL: brainSrv.URL, SynapseURL: brainSrv.URL}, memStore, &mockRiverInserter{}, brainSrv.Client())
 	if err := srv.ProcessExecuteChunk(ctx, "nonexistent", 0, false); err != nil {
 		t.Fatalf("expected nil on missing build, got %v", err)
 	}
@@ -1179,12 +1187,15 @@ func TestExecuteChunkWorkerAndProcessExecuteChunk(t *testing.T) {
 	}
 	_ = memStore.UpdateBuildStatus(ctx, "b-run", "running")
 	_ = memStore.UpdateChunkStatus(ctx, "c-1", "pending")
-	_ = NewVanadisServer(Config{BrainURL: "http://[::1]:namedport"}, memStore, nil, nil).ProcessExecuteChunk(ctx, "b-run", 1, true)
+	noopClient := &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("simulated network error")
+	})}
+	_ = NewVanadisServer(Config{BrainURL: "http://[::1]:namedport"}, memStore, nil, noopClient).ProcessExecuteChunk(ctx, "b-run", 1, true)
 	closedSrv := httptest.NewServer(http.NotFoundHandler())
 	closedURL := closedSrv.URL
 	closedSrv.Close()
 	memStore.updateBuildErr = errors.New("build fail update err")
-	_ = NewVanadisServer(Config{BrainURL: closedURL}, memStore, nil, nil).ProcessExecuteChunk(ctx, "b-run", 1, true)
+	_ = NewVanadisServer(Config{BrainURL: closedURL, SynapseURL: closedURL}, memStore, nil, noopClient).ProcessExecuteChunk(ctx, "b-run", 1, true)
 	memStore.updateBuildErr = nil
 	httpkit.WriteJSON(httptest.NewRecorder(), http.StatusOK, make(chan int))
 }
@@ -1192,7 +1203,7 @@ func TestExecuteChunkWorkerAndProcessExecuteChunk(t *testing.T) {
 func TestHTTPEndpoints(t *testing.T) {
 	memStore := newMemoryVanadisStore()
 	inserter := &mockRiverInserter{}
-	srv := NewVanadisServer(Config{Port: "0", BrainURL: "http://127.0.0.1:8088"}, memStore, inserter, nil)
+	srv := NewVanadisServer(Config{Port: "0", BrainURL: "http://127.0.0.1:8088"}, memStore, inserter, noopHTTPClient)
 	mux := srv.Routes()
 	doReq := func(method, path string, body io.Reader) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
@@ -1742,7 +1753,8 @@ func TestVanadisEndpointCounterIncrements(t *testing.T) {
 	ctx := context.Background()
 	memStore := newMemoryVanadisStore()
 	inserter := &mockRiverInserter{}
-	srv := NewVanadisServer(Config{}, memStore, inserter, nil)
+	noopClient := noopHTTPClient
+	srv := NewVanadisServer(Config{}, memStore, inserter, noopClient)
 
 	// 1. handleCreateBuild success -> created
 	reqBody := `{"thread_id":"123456789012345678","tier":2,"objective":"Metric test build","chunks":[{"repo":"aerial","title":"C1","instructions":"I1"}]}`
@@ -1754,7 +1766,7 @@ func TestVanadisEndpointCounterIncrements(t *testing.T) {
 
 	// 2. handleCreateBuild enqueue failure -> failed
 	failInserter := &mockRiverInserter{err: errors.New("enqueue fail")}
-	srvFailInsert := NewVanadisServer(Config{}, memStore, failInserter, nil)
+	srvFailInsert := NewVanadisServer(Config{}, memStore, failInserter, noopClient)
 	recCreateFail := httptest.NewRecorder()
 	srvFailInsert.handleCreateBuild(recCreateFail, httptest.NewRequest(http.MethodPost, "/builds", strings.NewReader(reqBody)))
 	if recCreateFail.Code != http.StatusInternalServerError {
@@ -1799,7 +1811,7 @@ func TestVanadisEndpointCounterIncrements(t *testing.T) {
 			}, nil
 		},
 	})
-	srvAdv := NewVanadisServer(Config{}, advStore, inserter, nil)
+	srvAdv := NewVanadisServer(Config{}, advStore, inserter, noopClient)
 	recAdv := httptest.NewRecorder()
 	srvAdv.handleAdvanceChunkPR(recAdv, httptest.NewRequest(http.MethodPost, "/chunks/advance-pr", strings.NewReader(`{"repo":"aerial","pr_number":42}`)))
 	if recAdv.Code != http.StatusOK {
@@ -1816,7 +1828,7 @@ func TestVanadisEndpointCounterIncrements(t *testing.T) {
 			}}
 		},
 	})
-	srvFailPR := NewVanadisServer(Config{}, failStore, inserter, nil)
+	srvFailPR := NewVanadisServer(Config{}, failStore, inserter, noopClient)
 	recFailPR := httptest.NewRecorder()
 	srvFailPR.handleFailChunkPR(recFailPR, httptest.NewRequest(http.MethodPost, "/chunks/fail-pr", strings.NewReader(`{"repo":"aerial","pr_number":43}`)))
 	if recFailPR.Code != http.StatusOK {

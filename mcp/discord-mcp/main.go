@@ -149,18 +149,25 @@ func StartProxyServer(port, upstreamBase string) (*http.Server, error) {
 }
 
 func killProcess(cmd *exec.Cmd) {
+	killProcessWith(cmd, func(c *exec.Cmd) error { return c.Process.Kill() }, func(c *exec.Cmd) error { return c.Wait() }, log.Printf)
+}
+
+func killProcessWith(cmd *exec.Cmd, killFn, waitFn func(*exec.Cmd) error, warnFn func(format string, v ...any)) {
 	if cmd == nil || cmd.Process == nil {
 		return
 	}
-	if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) && !errors.Is(err, syscall.ESRCH) {
-		log.Printf("[Discord-MCP] Warning killing process: %v", err)
+	if warnFn == nil {
+		warnFn = log.Printf
 	}
-	if err := cmd.Wait(); err != nil {
+	if err := killFn(cmd); err != nil && !errors.Is(err, os.ErrProcessDone) && !errors.Is(err, syscall.ESRCH) {
+		warnFn("[Discord-MCP] Warning killing process: %v", err)
+	}
+	if err := waitFn(cmd); err != nil {
 		if _, ok := errors.AsType[*exec.ExitError](err); ok {
 			return
 		}
 		if !errors.Is(err, os.ErrProcessDone) {
-			log.Printf("[Discord-MCP] Warning waiting for process: %v", err)
+			warnFn("[Discord-MCP] Warning waiting for process: %v", err)
 		}
 	}
 }

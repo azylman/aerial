@@ -760,6 +760,12 @@ func analyzeTestFile(fullPath, rel string) ([]string, error) {
 	}
 
 	ast.Inspect(f, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if reason := checkBannedTestCall(call); reason != "" {
+				line := fset.Position(call.Pos()).Line
+				violations = append(violations, fmt.Sprintf("%s:%d: %s", rel, line, reason))
+			}
+		}
 		st, ok := n.(*ast.StructType)
 		if !ok || st.Fields == nil {
 			return true
@@ -779,6 +785,21 @@ func analyzeTestFile(fullPath, rel string) ([]string, error) {
 	})
 
 	return violations, nil
+}
+
+func checkBannedTestCall(call *ast.CallExpr) string {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return ""
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	if ok && pkg.Name == "time" && sel.Sel.Name == "Sleep" {
+		return "time.Sleep in tests is prohibited; use event-driven channels, condition variables, or injected delay overrides"
+	}
+	if ok && pkg.Name == "syscall" && sel.Sel.Name == "Kill" {
+		return "raw syscall.Kill in tests is prohibited; use dependency-injected signal or process-kill functions"
+	}
+	return ""
 }
 
 func isBannedClosureFieldName(name string) bool {

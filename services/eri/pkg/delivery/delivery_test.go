@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/bwmarrin/discordgo"
@@ -393,20 +392,24 @@ func TestSendMessageWithAttachments_MockSession(t *testing.T) {
 }
 
 func TestStartTyping_MockSession(t *testing.T) {
+	typed := make(chan struct{}, 8)
 	sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
+		typed <- struct{}{}
 		return mockJSONResponse(http.StatusNoContent, "")
 	})
 
 	stop := StartTyping(sess, "12345")
-	time.Sleep(20 * time.Millisecond)
+	<-typed
 	stop()
 
 	// Error branch from ChannelTyping
+	typedErr := make(chan struct{}, 8)
 	sessErr := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
+		typedErr <- struct{}{}
 		return nil, errors.New("simulated network typing failure")
 	})
 	stopErr := StartTyping(sessErr, "chan-typing-error")
-	time.Sleep(10 * time.Millisecond)
+	<-typedErr
 	stopErr()
 }
 

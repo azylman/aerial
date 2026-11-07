@@ -526,11 +526,39 @@ func TestAnalyzeTestFile(t *testing.T) {
 		{
 			name: "clean test file produces no violations",
 			content: `package pkg
-func TestValid() {}
+
+import (
+	"syscall"
+	"time"
+)
+
+func TestValid() {
+	_ = time.Now()
+	_ = syscall.Getpid()
+}
 type Case struct {
 	expected int
 }
 `,
+		},
+		{
+			name: "banned time.Sleep and syscall.Kill detected",
+			content: `package pkg
+
+import (
+	"syscall"
+	"time"
+)
+
+func TestBannedCalls() {
+	time.Sleep(time.Millisecond)
+	_ = syscall.Kill(1, syscall.SIGHUP)
+}
+`,
+			wantViolations: []string{
+				"time.Sleep in tests is prohibited; use event-driven channels, condition variables, or injected delay overrides",
+				"raw syscall.Kill in tests is prohibited; use dependency-injected signal or process-kill functions",
+			},
 		},
 		{
 			name: "generated test file is skipped",

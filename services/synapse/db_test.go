@@ -547,6 +547,8 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 				defer ts.Close()
 				vURL = ts.URL
 				vClient = ts.Client()
+			} else {
+				vClient = &http.Client{Transport: noopClusterTransport{}}
 			}
 
 			reg := NewPostgresPRRegistry(pool, WithVanadisClient(vURL, vClient))
@@ -1220,7 +1222,7 @@ func TestPostgresPRRegistry_VanadisMethods_Unit(t *testing.T) {
 			callCtx, cancel := context.WithCancel(ctx)
 			defer cancel()
 			var vURL string
-			var vClient *http.Client
+			vClient := &http.Client{Transport: noopClusterTransport{}}
 			var reqIdx int
 			if tc.networkErr {
 				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))

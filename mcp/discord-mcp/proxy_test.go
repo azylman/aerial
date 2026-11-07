@@ -441,30 +441,57 @@ func TestWriteProxyResponse_TableDriven(t *testing.T) {
 }
 
 func TestKillProcess_TableDriven(t *testing.T) {
-	cmdRunning := exec.Command("sleep", "1")
-	_ = cmdRunning.Start()
-	t.Cleanup(func() {
-		if cmdRunning.Process != nil {
-			_ = cmdRunning.Process.Kill()
-		}
-	})
-
-	cmdFinished := exec.Command("true")
-	_ = cmdFinished.Run()
+	t.Parallel()
+	mockProcCmd := &exec.Cmd{Process: &os.Process{Pid: 424242}}
 
 	tests := []struct {
-		name string
-		cmd  *exec.Cmd
+		name          string
+		cmd           *exec.Cmd
+		killErr       error
+		waitErr       error
+		wantKill      bool
+		wantWait      bool
+		wantWarnCount int
 	}{
-		{"nil cmd", nil},
-		{"cmd without process", exec.Command("true")},
-		{"running process", cmdRunning},
-		{"finished process", cmdFinished},
+		{"nil cmd", nil, nil, nil, false, false, 0},
+		{"cmd without process", &exec.Cmd{}, nil, nil, false, false, 0},
+		{"running process clean kill", mockProcCmd, nil, &exec.ExitError{}, true, true, 0},
+		{"finished process already done", mockProcCmd, os.ErrProcessDone, os.ErrProcessDone, true, true, 0},
+		{"process killed with ESRCH", mockProcCmd, syscall.ESRCH, nil, true, true, 0},
+		{"generic kill and wait warnings", mockProcCmd, errors.New("kill failed"), errors.New("wait failed"), true, true, 2},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			killProcess(tc.cmd)
+			t.Parallel()
+			if tc.cmd == nil || tc.cmd.Process == nil {
+				killProcess(tc.cmd)
+			}
+			var gotKill, gotWait bool
+			var warnings []string
+			killFn := func(*exec.Cmd) error {
+				gotKill = true
+				return tc.killErr
+			}
+			waitFn := func(*exec.Cmd) error {
+				gotWait = true
+				return tc.waitErr
+			}
+			warnFn := func(format string, v ...any) {
+				warnings = append(warnings, fmt.Sprintf(format, v...))
+			}
+
+			killProcessWith(tc.cmd, killFn, waitFn, warnFn)
+
+			if gotKill != tc.wantKill {
+				t.Errorf("kill called = %v, want %v", gotKill, tc.wantKill)
+			}
+			if gotWait != tc.wantWait {
+				t.Errorf("wait called = %v, want %v", gotWait, tc.wantWait)
+			}
+			if len(warnings) != tc.wantWarnCount {
+				t.Errorf("warnings count = %d, want %d: %v", len(warnings), tc.wantWarnCount, warnings)
+			}
 		})
 	}
 }
