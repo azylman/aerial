@@ -19,7 +19,7 @@ Scale review rigor and subagent orchestration dynamically by blast radius:
 
 - **Tier 0 (≤ 5 LOC, single-line changes, config tweaks, doc typos)**:
   - **Review Overhead**: None. Execute inline, verify with `./scripts/verify.sh --staged`, and submit via `scripts/aerial-pr.sh submit`.
-  - **Negative Scope Blacklist**: Strictly forbidden for SQL/database schemas, security/auth primitives, concurrency/mutex logic, Nomad/Docker topology, or core queue/runner loops (auto-escalates to Tier 1+).
+  - **Negative Scope Blacklist**: Strictly forbidden for SQL/database schemas, security/auth primitives, concurrency/mutex logic, Kubernetes/Docker topology, or core queue/runner loops (auto-escalates to Tier 1+).
 
 - **Tier 1 (< 50 LOC, targeted bugfixes & test additions)**:
   - **Review Overhead**: None (plan and diff review subagents bypassed).
@@ -36,7 +36,7 @@ Scale review rigor and subagent orchestration dynamically by blast radius:
     - Cumulative diff **> 200 LOC** (additions + deletions).
     - Touches to **core queue logic** (`services/eri/pkg/queue`, `WorkerPool`, worker turn loops, burst scheduling).
     - Touches to **core runner logic and turn resolution** (`services/eri/pkg/runner`, streaming daemons, process pools, turn sinks/resolvers).
-    - Database schema migrations (`schema.sql`, SQL migrations) or service topology changes (`nomad/jobs/*.nomad`, Dockerfiles).
+    - Database schema migrations (`schema.sql`, SQL migrations) or service topology changes (`k8s/*.yaml`, Dockerfiles).
     - Cross-cutting architectural overhauls or breaking API changes.
   - **Plan Review**: The Girl Gang audits the plan in an isolated subagent across 4 disciplines (~45s).
   - **Human Checkpoint**: **MANDATORY HUMAN REVIEW CHECKPOINT (STOP)**—synthesize panel findings and wait for explicit user approval before touching code or enqueueing a Vanadis build.
