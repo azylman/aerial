@@ -500,6 +500,15 @@ func collectRawMCPServerTokens(rawMaps []map[string]json.RawMessage) []string {
 	return tokens
 }
 
+func isNonSecretSharedKey(k string) bool {
+	switch strings.ToUpper(strings.TrimSpace(k)) {
+	case "POSTGRES_USER", "POSTGRES_DB", "POSTGRES_PORT", "POSTGRES_HOST", "POSTGRES_SSLMODE", "NAS_HOST":
+		return true
+	default:
+		return false
+	}
+}
+
 // RegisterConfigTokens extracts secrets from the injected *Config and registered shared secrets file,
 // registering them into the global redaction pool.
 func RegisterConfigTokens(cfg *Config) {
@@ -529,6 +538,9 @@ func RegisterConfigTokens(cfg *Config) {
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
+			if isNonSecretSharedKey(k) {
+				continue
+			}
 			if v := strings.TrimSpace(shared[k]); v != "" {
 				tokens = append(tokens, v)
 			}
