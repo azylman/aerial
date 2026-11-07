@@ -1368,8 +1368,9 @@
           "refId": "B"
         }
       ],
-      "title": "Ollama Embedding Generation Latency (p90 / p50)",
-      "type": "timeseries"
+      "title": "Senses Embedding Generation Latency (p90 / p50)",
+      "type": "timeseries",
+      "description": "Vector embedding generation latency (aerial_brain_embedding_duration_seconds_bucket) by model and type via senses."
     },
     {
       "datasource": {
@@ -1703,10 +1704,22 @@
           "expr": "histogram_quantile(0.95, sum by (le, op) (rate(aerial_brain_db_query_duration_seconds_bucket[5m])))",
           "legendFormat": "{{op}} (p95)",
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "VictoriaMetrics"
+          },
+          "editorMode": "code",
+          "expr": "(sum(rate(aerial_brain_db_query_duration_seconds_sum[5m])) / clamp_min(sum(rate(aerial_brain_db_query_duration_seconds_count[5m])), 0.001)) or vector(0)",
+          "legendFormat": "Overall Avg",
+          "range": true,
+          "refId": "B"
         }
       ],
-      "title": "Query Latency by Operation (p95)",
-      "type": "timeseries"
+      "title": "Brain Postgres DB Query Latency by Operation (p95 & Avg)",
+      "type": "timeseries",
+      "description": "PostgreSQL database query latency from eri (aerial_brain_db_query_duration_seconds_bucket / _sum / _count)."
     },
     {
       "collapsed": false,
