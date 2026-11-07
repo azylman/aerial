@@ -31,6 +31,7 @@ jobs:
       haro: ${{ steps.filter.outputs.haro }}
       coven: ${{ steps.filter.outputs.coven }}
       discord-mcp: ${{ steps.filter.outputs.discord-mcp }}
+      docket-mcp: ${{ steps.filter.outputs.docket-mcp }}
       kernel-mcp: ${{ steps.filter.outputs.kernel-mcp }}
       github-mcp: ${{ steps.filter.outputs.github-mcp }}
       nomad-mcp: ${{ steps.filter.outputs.nomad-mcp }}
@@ -63,6 +64,9 @@ jobs:
               - 'pkg/**'
             discord-mcp:
               - 'mcp/discord-mcp/**'
+              - 'pkg/**'
+            docket-mcp:
+              - 'mcp/docket-mcp/**'
               - 'pkg/**'
             kernel-mcp:
               - 'mcp/kernel-mcp/**'
@@ -101,6 +105,7 @@ jobs:
               haro: "${{ steps.filter.outputs.haro }}",
               coven: "${{ steps.filter.outputs.coven }}",
               "discord-mcp": "${{ steps.filter.outputs.discord-mcp }}",
+              "docket-mcp": "${{ steps.filter.outputs.docket-mcp }}",
               "kernel-mcp": "${{ steps.filter.outputs.kernel-mcp }}",
               "github-mcp": "${{ steps.filter.outputs.github-mcp }}",
               "nomad-mcp": "${{ steps.filter.outputs.nomad-mcp }}",
@@ -119,6 +124,7 @@ jobs:
               { service: "haro", context: ".", file: "./services/haro/Dockerfile", image_name: "aerial-haro" },
               { service: "coven", context: ".", file: "./services/coven/Dockerfile", image_name: "aerial-coven" },
               { service: "discord-mcp", context: ".", file: "./mcp/discord-mcp/Dockerfile", image_name: "aerial-discord-mcp" },
+              { service: "docket-mcp", context: ".", file: "./mcp/docket-mcp/Dockerfile", image_name: "aerial-docket-mcp" },
               { service: "kernel-mcp", context: ".", file: "./mcp/kernel-mcp/Dockerfile", image_name: "aerial-kernel-mcp" },
               { service: "github-mcp", context: "./mcp/github-mcp", file: "./mcp/github-mcp/Dockerfile", image_name: "aerial-github-mcp" },
               { service: "nomad-mcp", context: "./mcp/nomad-mcp", file: "./mcp/nomad-mcp/Dockerfile", image_name: "aerial-nomad-mcp" },
