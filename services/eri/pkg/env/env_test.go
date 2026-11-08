@@ -808,10 +808,15 @@ func TestSyncRules(t *testing.T) {
 		ephemeralFail bool
 		runtimeFail   bool
 		concurrent    bool
+		noDataDir     bool
+		staleClaudeMD bool
 		wantErr       bool
+		wantPrimaryMD bool
 	}{
 		{name: "empty home returns nil", emptyHome: true, wantErr: false},
 		{name: "successful sync compiles and provisions all runtimes", wantErr: false},
+		{name: "stale primary CLAUDE.md removed when runtimes exist", staleClaudeMD: true, wantErr: false},
+		{name: "no dataDir writes primary CLAUDE.md", noDataDir: true, wantErr: false, wantPrimaryMD: true},
 		{name: "zero rules aborts swap under lobotomy protection", zeroRules: true, wantErr: true},
 		{name: "voice rules compilation failure returns error", voiceFail: true, wantErr: true},
 		{name: "ephemeral rules compilation failure returns error", ephemeralFail: true, wantErr: true},
@@ -836,6 +841,15 @@ func TestSyncRules(t *testing.T) {
 				"discord/01_rule.md": "Discord content",
 				"voice/01_rule.md":   "Voice content",
 			}, nil)
+			if tc.noDataDir {
+				np := New(t.TempDir(), "")
+				np.SetAerialRulesDir(p.aerialRulesDir)
+				np.SetConfigRulesDir(p.configRulesDir)
+				p = np
+			}
+			if tc.staleClaudeMD {
+				writeTestFile(t, filepath.Join(p.homeDir, ".claude", "CLAUDE.md"), "stale")
+			}
 
 			if tc.zeroRules {
 				p.SetAerialRulesDir(t.TempDir())
@@ -891,11 +905,18 @@ func TestSyncRules(t *testing.T) {
 				}
 				claudeMD := filepath.Join(p.homeDir, ".claude", "CLAUDE.md")
 				claudeData, cErr := os.ReadFile(claudeMD)
-				if cErr != nil || len(claudeData) == 0 {
-					t.Fatalf("expected CLAUDE.md in %s: %v", claudeMD, cErr)
+				if tc.wantPrimaryMD {
+					if cErr != nil || len(claudeData) == 0 {
+						t.Fatalf("expected CLAUDE.md in %s: %v", claudeMD, cErr)
+					}
+					if strings.Contains(string(claudeData), "---") {
+						t.Errorf("CLAUDE.md should not contain YAML frontmatter: %s", string(claudeData))
+					}
+				} else if !os.IsNotExist(cErr) {
+					t.Errorf("expected no primary CLAUDE.md in %s, got err=%v", claudeMD, cErr)
 				}
-				if strings.Contains(string(claudeData), "---") {
-					t.Errorf("CLAUDE.md should not contain YAML frontmatter: %s", string(claudeData))
+				if tc.noDataDir {
+					return
 				}
 				for _, target := range allRuntimeTargets {
 					rtClaudeMD := filepath.Join(p.runtimeHomeDir(target), ".claude", "CLAUDE.md")
