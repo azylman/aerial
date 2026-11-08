@@ -1186,27 +1186,6 @@ spec:
     app.kubernetes.io/name: console
   type: ClusterIP
 ---
-# Temporary alias: keeps dashboard.aerial resolving for homepage and gatus
-# until aerial-config switches to console.aerial. Removed by the next chunk.
-apiVersion: v1
-kind: Service
-metadata:
-  name: dashboard
-  namespace: default
-spec:
-  ports:
-    - name: http
-      port: 8080
-      protocol: TCP
-      targetPort: 8084
-    - name: http-80
-      port: 80
-      protocol: TCP
-      targetPort: 8084
-  selector:
-    app.kubernetes.io/name: console
-  type: ClusterIP
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:
