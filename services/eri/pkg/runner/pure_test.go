@@ -157,6 +157,13 @@ func TestBuildAgyEnv(t *testing.T) {
 		"infisical_client_secret=s21",
 		"CLOUDFLARE_MCP_TOKEN=s22",
 		"ubereats_mcp_token=s23",
+		"CUSTOM_APP_SECRET=s25",
+		"MY_AUTH_TOKEN=s26",
+		"REDIS_PASSWORD=s27",
+		"HTTP_PROXY_PASS=s28",
+		"DEPLOY_PAT=s29",
+		"STRIPE_API_KEY=s30",
+		"SSH_PRIVATE_KEY=s31",
 		"MALFORMED_NO_EQUALS",
 		"PATH=/usr/bin",
 	})

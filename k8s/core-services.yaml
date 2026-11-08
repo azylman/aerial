@@ -156,9 +156,60 @@ spec:
               value: http://127.0.0.1:8080
             - name: GIT_TERMINAL_PROMPT
               value: "0"
-          envFrom:
-            - secretRef:
-                name: shared-secrets
+            - name: DISCORD_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: DISCORD_BOT_TOKEN
+                  name: shared-secrets
+                  optional: true
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: POSTGRES_PASSWORD
+                  name: shared-secrets
+                  optional: true
+            - name: GEMINI_HARNESS_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: GEMINI_HARNESS_API_KEY
+                  name: shared-secrets
+                  optional: true
+            - name: GITHUB_PAT
+              valueFrom:
+                secretKeyRef:
+                  key: GITHUB_PAT
+                  name: shared-secrets
+                  optional: true
+            - name: OPENOBSERVE_ROOT_USER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: OPENOBSERVE_ROOT_USER_PASSWORD
+                  name: shared-secrets
+                  optional: true
+            - name: HA_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: HA_TOKEN
+                  name: shared-secrets
+                  optional: true
+            - name: UBEREATS_MCP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: UBEREATS_MCP_TOKEN
+                  name: shared-secrets
+                  optional: true
+            - name: CLOUDFLARE_MCP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: CLOUDFLARE_MCP_TOKEN
+                  name: shared-secrets
+                  optional: true
+            - name: CLAUDE_CODE_OAUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: CLAUDE_CODE_OAUTH_TOKEN
+                  name: shared-secrets
+                  optional: true
           image: ghcr.io/azylman/aerial-eri:${TAG_AERIAL_ERI:=latest}
           imagePullPolicy: Always
           name: eri
@@ -181,6 +232,9 @@ spec:
               name: oauth-token
               readOnly: true
               subPath: antigravity-oauth-token
+            - mountPath: /secrets
+              name: shared-secrets
+              readOnly: true
       initContainers:
         - args:
             - --repo=https://github.com/azylman/aerial.git
@@ -273,6 +327,11 @@ spec:
             items:
               - key: ANTIGRAVITY_OAUTH_TOKEN
                 path: antigravity-oauth-token
+            optional: true
+            secretName: shared-secrets
+        - name: shared-secrets
+          secret:
+            defaultMode: 256
             optional: true
             secretName: shared-secrets
 ---
