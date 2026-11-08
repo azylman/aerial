@@ -889,6 +889,84 @@ func TestSyncRules(t *testing.T) {
 				if rErr != nil || len(entries) == 0 {
 					t.Fatalf("expected rules in %s: %v", rulesDir, rErr)
 				}
+				claudeMD := filepath.Join(p.homeDir, ".claude", "CLAUDE.md")
+				claudeData, cErr := os.ReadFile(claudeMD)
+				if cErr != nil || len(claudeData) == 0 {
+					t.Fatalf("expected CLAUDE.md in %s: %v", claudeMD, cErr)
+				}
+				if strings.Contains(string(claudeData), "---") {
+					t.Errorf("CLAUDE.md should not contain YAML frontmatter: %s", string(claudeData))
+				}
+				for _, target := range allRuntimeTargets {
+					rtClaudeMD := filepath.Join(p.runtimeHomeDir(target), ".claude", "CLAUDE.md")
+					if _, err := os.Stat(rtClaudeMD); err != nil {
+						t.Errorf("expected CLAUDE.md in %s runtime: %v", target, err)
+					}
+					rtClaudeProjects := filepath.Join(p.runtimeHomeDir(target), ".claude", "projects")
+					if fi, err := os.Lstat(rtClaudeProjects); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+						t.Errorf("expected projects symlink in %s runtime: %v", target, err)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestClaudeTargetMcpAndSettingsProvisioning(t *testing.T) {
+	tests := []struct {
+		name          string
+		nilProv       bool
+		emptyDir      bool
+		emptyRaw      json.RawMessage
+		invalidJSON   json.RawMessage
+		noMCPServers  json.RawMessage
+		blockedClaude bool
+	}{
+		{name: "nil provisioner", nilProv: true},
+		{name: "empty dir", emptyDir: true},
+		{name: "empty raw config", emptyRaw: json.RawMessage("")},
+		{name: "null raw config", emptyRaw: json.RawMessage("null")},
+		{name: "quotes raw config", emptyRaw: json.RawMessage(`""`)},
+		{name: "invalid json returns raw", invalidJSON: json.RawMessage(`{not valid`), emptyRaw: json.RawMessage(`{not valid`)},
+		{name: "no mcpServers in json", noMCPServers: json.RawMessage(`{"other": 1}`)},
+		{name: "blocked claude dir", blockedClaude: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			var p *Provisioner
+			if !tc.nilProv {
+				p = New(tmp, tmp)
+			}
+			targetDir := filepath.Join(tmp, ".claude")
+			if tc.emptyDir {
+				targetDir = ""
+			}
+			if tc.blockedClaude {
+				targetDir = filepath.Join(tmp, "blocked_claude")
+				writeTestFile(t, targetDir, "blocking file")
+			}
+
+			raw := json.RawMessage(`{"mcpServers":{"srv":{"server_url":"http://test:8080"}}}`)
+			if len(tc.emptyRaw) > 0 {
+				raw = tc.emptyRaw
+			}
+			if len(tc.invalidJSON) > 0 {
+				converted := ConvertMCPConfigForClaude(tc.invalidJSON)
+				if string(converted) != string(tc.invalidJSON) {
+					t.Fatalf("expected raw return on invalid JSON: %s", string(converted))
+				}
+			}
+			if len(tc.noMCPServers) > 0 {
+				converted := ConvertMCPConfigForClaude(tc.noMCPServers)
+				if string(converted) != string(tc.noMCPServers) {
+					t.Fatalf("expected raw return when no mcpServers: %s", string(converted))
+				}
+			}
+
+			if p != nil {
+				_ = p.EnsureTargetClaudeMcpConfig(targetDir, raw)
+				p.provisionTargetClaudeSettings(targetDir)
 			}
 		})
 	}
@@ -1204,6 +1282,19 @@ func TestMCPProvisioning(t *testing.T) {
 
 			if err := p.SyncMCP(context.Background(), cfg); err != nil {
 				t.Fatalf("SyncMCP failed: %v", err)
+			}
+			claudeJSON := filepath.Join(tmpHome, ".claude", "mcp_config.json")
+			if cData, err := os.ReadFile(claudeJSON); err == nil {
+				var cParsed map[string]map[string]any
+				if err := json.Unmarshal(cData, &cParsed); err == nil {
+					cServers := cParsed["mcpServers"]
+					if tc.wantScheduler && cServers["scheduler"] != nil {
+						sMap := cServers["scheduler"].(map[string]any)
+						if sMap["type"] != "http" || sMap["url"] != "http://haro.aerial/mcp" {
+							t.Errorf("claude scheduler config mismatch: %+v", sMap)
+						}
+					}
+				}
 			}
 		})
 	}
@@ -1739,6 +1830,14 @@ func TestSyncHooks(t *testing.T) {
 					if _, err := os.Stat(rtHooksJSON); err != nil {
 						t.Errorf("expected hooks.json in runtime %s: %v", target, err)
 					}
+					rtClaudeSettings := filepath.Join(tmpData, "runtimes", string(target), ".claude", "settings.json")
+					if _, err := os.Stat(rtClaudeSettings); err != nil {
+						t.Errorf("expected settings.json in claude runtime %s: %v", target, err)
+					}
+				}
+				primaryClaudeSettings := filepath.Join(tmpHome, ".claude", "settings.json")
+				if _, err := os.Stat(primaryClaudeSettings); err != nil {
+					t.Errorf("expected settings.json in primary claude home: %v", err)
 				}
 			}
 

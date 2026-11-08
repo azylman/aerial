@@ -41,8 +41,8 @@ var whileSleepPattern = regexp.MustCompile(`while\s+.*?(?:do|;)\s*(?:/bin/|/usr/
 var pythonSingleQuotePattern = regexp.MustCompile(`(?:^|[;&|\n]\s*)(?:/usr/bin/|/usr/local/bin/|/bin/)?python[0-9.]*\s+-c\s+'`)
 
 // CheckSchedule evaluates tool calls against scheduling, sleep, polling, and synchronous wait invariants.
-func CheckSchedule(toolName string, args ToolArgs) *Decision {
-	switch normalizeToolName(toolName) {
+func CheckSchedule(payload Payload, args ToolArgs) *Decision {
+	switch normalizeToolName(payload.ToolCall.Name) {
 	case "schedule":
 		return &Decision{Decision: DecisionDeny, Reason: ScheduleDenyReason}
 	case "manage_task":
@@ -53,17 +53,17 @@ func CheckSchedule(toolName string, args ToolArgs) *Decision {
 		if args.NormalizedAction() == "list" {
 			return &Decision{Decision: DecisionDeny, Reason: SubagentPollDenyReason}
 		}
-	case "view_file", "read_file":
+	case "view_file", "read_file", "read":
 		if isTaskLogPath(args.FilePath()) {
 			return &Decision{Decision: DecisionDeny, Reason: TaskPollDenyReason}
 		}
-	case "run_command":
-		return checkScheduleRunCommand(args)
+	case "run_command", "bash":
+		return checkScheduleRunCommand(args, payload.IsClaude())
 	}
 	return &Decision{Decision: DecisionAllow}
 }
 
-func checkScheduleRunCommand(args ToolArgs) *Decision {
+func checkScheduleRunCommand(args ToolArgs, isClaude bool) *Decision {
 	if isSleepCommand(args.CommandLine) {
 		return &Decision{Decision: DecisionDeny, Reason: SleepDenyReason}
 	}
@@ -75,7 +75,7 @@ func checkScheduleRunCommand(args ToolArgs) *Decision {
 	if rewritten := stripGoTestVerbose(rewritePythonInlineQuotes(args.CommandLine)); rewritten != args.CommandLine {
 		overwrite = map[string]any{"CommandLine": rewritten}
 	}
-	if !args.IsDaemonBool() && args.WaitMs() != MaxSyncWaitMs {
+	if !isClaude && !args.IsDaemonBool() && args.WaitMs() != MaxSyncWaitMs {
 		if overwrite == nil {
 			overwrite = make(map[string]any)
 		}

@@ -19,6 +19,29 @@ func runGuard(t *testing.T, mode string, input string) Decision {
 		t.Fatalf("unexpected Process error: %v", err)
 	}
 
+	// Try unmarshaling as ClaudeHookResponse first if input is Claude format
+	var claudeResp ClaudeHookResponse
+	if err := json.Unmarshal(out.Bytes(), &claudeResp); err == nil && claudeResp.HookSpecificOutput.HookEventName != "" {
+		d := Decision{
+			Decision: DecisionType(claudeResp.HookSpecificOutput.PermissionDecision),
+			Reason:   claudeResp.HookSpecificOutput.PermissionDecisionReason,
+		}
+		if len(claudeResp.HookSpecificOutput.UpdatedInput) > 0 {
+			d.Overwrite = make(map[string]any, len(claudeResp.HookSpecificOutput.UpdatedInput))
+			for k, v := range claudeResp.HookSpecificOutput.UpdatedInput {
+				switch k {
+				case "command":
+					d.Overwrite["CommandLine"] = v
+				case "offset":
+					d.Overwrite["StartLine"] = v
+				default:
+					d.Overwrite[k] = v
+				}
+			}
+		}
+		return d
+	}
+
 	var d Decision
 	if err := json.Unmarshal(out.Bytes(), &d); err != nil {
 		t.Fatalf("failed to unmarshal output %q: %v", out.String(), err)
@@ -98,6 +121,8 @@ func TestGuardProcess_EndToEnd(t *testing.T) {
 		{"all mode denies sleep violation", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "sleep 5"}}}`, true, 0, ""},
 		{"all mode denies unconstrained search", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "find / -name secret"}}}`, true, 0, ""},
 		{"all mode allows safe command and overwrites WaitMsBeforeAsync", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git status", "Cwd": "/data", "WaitMsBeforeAsync": 5000}}}`, false, 10000, "git status -sb"},
+		{"claude bash git status rewritten without waitms overwrite", "all", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "git status"}}`, false, 0, "git status -sb"},
+		{"claude share edit denied", "share", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Edit", "tool_input": {"file_path": "/share/aerial/main.go"}}`, true, 0, ""},
 		{"all mode preserves psql -A overwrite and WaitMsBeforeAsync", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "psql -c \"\\dt\"", "Cwd": "/data"}}}`, false, 10000, `psql -A -c "\dt"`},
 		{"non-intercepted view_file", "all", `{"toolCall": {"name": "view_file", "args": {"AbsolutePath": "/share/aerial/README.md"}}}`, false, 0, ""},
 		{"empty tool call", "all", `{"toolCall": {"name": "", "args": {}}}`, false, 0, ""},
@@ -115,6 +140,9 @@ func TestGuardProcess_EndToEnd(t *testing.T) {
 		{"empty command in schedule", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "   "}}}`, false, 10000, ""},
 		{"empty tokens between semicolons in share", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "echo 1; ; echo 2", "Cwd": "/data"}}}`, false, 0, ""},
 		{"safe output redirect in share", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "echo safe > /data/scratch/output.txt", "Cwd": "/data"}}}`, false, 0, ""},
+		{"claude read small span expanded", "batch", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Read", "tool_input": {"file_path": "/data/main.go", "offset": 10, "limit": 3}}`, false, 0, ""},
+		{"claude short mcp tool allowed", "all", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "mcp__short", "tool_input": {}}`, false, 0, ""},
+		{"claude mcp tool name normalized", "batch", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "mcp__server__bash", "tool_input": {"command": "git status"}}`, false, 0, "git status -sb"},
 	}
 
 	for _, tc := range tests {
@@ -206,6 +234,94 @@ func (errorWriter) Write([]byte) (int, error) {
 	return 0, errors.New("simulated write failure")
 }
 
+func TestDirectCheckSchedule(t *testing.T) {
+	tests := []struct {
+		name     string
+		toolName string
+		args     ToolArgs
+		wantDeny bool
+	}{
+		{"schedule denied", "schedule", ToolArgs{}, true},
+		{"task status denied", "manage_task", ToolArgs{Action: "status"}, true},
+		{"task list denied", "manage_task", ToolArgs{Action: "list"}, true},
+		{"subagent list denied", "manage_subagents", ToolArgs{Action: "list"}, true},
+		{"task log read denied", "read", ToolArgs{File: "/data/runtimes/discord/.gemini/antigravity-cli/brain/a/.system_generated/tasks/task-1.log"}, true},
+		{"sleep denied", "bash", ToolArgs{CommandLine: "sleep 5"}, true},
+		{"safe bash allowed", "bash", ToolArgs{CommandLine: "ls -la"}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			d := CheckSchedule(Payload{ToolCall: ToolCall{Name: tc.toolName}}, tc.args)
+			if tc.wantDeny && d.Decision != DecisionDeny {
+				t.Fatalf("expected deny for %s, got %v", tc.name, d)
+			}
+			if !tc.wantDeny && d.Decision != DecisionAllow {
+				t.Fatalf("expected allow for %s, got %v", tc.name, d)
+			}
+		})
+	}
+}
+
+func TestClaudeHookResponseFormatting(t *testing.T) {
+	tests := []struct {
+		name       string
+		dec        *Decision
+		wantPerm   string
+		wantReason string
+		wantCmd    string
+		wantOffset int
+		wantLimit  int
+	}{
+		{
+			name:     "nil decision",
+			dec:      nil,
+			wantPerm: "allow",
+		},
+		{
+			name:       "deny decision",
+			dec:        &Decision{Decision: DecisionDeny, Reason: "blocked reason"},
+			wantPerm:   "deny",
+			wantReason: "blocked reason",
+		},
+		{
+			name: "allow with command and line overwrites",
+			dec: &Decision{
+				Decision: DecisionAllow,
+				Overwrite: map[string]any{
+					"CommandLine": "echo 123",
+					"StartLine":   10,
+					"EndLine":     25,
+					"custom_key":  "custom_val",
+				},
+			},
+			wantPerm:   "allow",
+			wantCmd:    "echo 123",
+			wantOffset: 10,
+			wantLimit:  16,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := FormatClaudeResponse(tc.dec)
+			if resp.HookSpecificOutput.PermissionDecision != tc.wantPerm {
+				t.Fatalf("permissionDecision = %q, want %q", resp.HookSpecificOutput.PermissionDecision, tc.wantPerm)
+			}
+			if tc.wantReason != "" && resp.HookSpecificOutput.PermissionDecisionReason != tc.wantReason {
+				t.Fatalf("reason = %q, want %q", resp.HookSpecificOutput.PermissionDecisionReason, tc.wantReason)
+			}
+			if tc.wantCmd != "" && resp.HookSpecificOutput.UpdatedInput["command"] != tc.wantCmd {
+				t.Fatalf("updatedInput[command] = %v, want %q", resp.HookSpecificOutput.UpdatedInput["command"], tc.wantCmd)
+			}
+			if tc.wantOffset > 0 && resp.HookSpecificOutput.UpdatedInput["offset"] != tc.wantOffset {
+				t.Fatalf("updatedInput[offset] = %v, want %d", resp.HookSpecificOutput.UpdatedInput["offset"], tc.wantOffset)
+			}
+			if tc.wantLimit > 0 && resp.HookSpecificOutput.UpdatedInput["limit"] != tc.wantLimit {
+				t.Fatalf("updatedInput[limit] = %v, want %d", resp.HookSpecificOutput.UpdatedInput["limit"], tc.wantLimit)
+			}
+		})
+	}
+}
+
 func TestGuardProcess_IOAndModes(t *testing.T) {
 	t.Parallel()
 
@@ -252,19 +368,27 @@ func TestGuardProcess_IOAndModes(t *testing.T) {
 	})
 
 	parseTests := []struct {
-		name     string
-		raw      string
-		wantFile string
-		wantCmd  string
+		name          string
+		raw           string
+		wantFile      string
+		wantCmd       string
+		wantStartLine int
+		wantEndLine   int
 	}{
-		{"nil bytes", "", "", ""},
-		{"empty json string", `""`, "", ""},
-		{"plain string", `"plain non-json string"`, "", ""},
-		{"string not json map", `"not-a-json-map"`, "", ""},
-		{"json string encoded object", `"{\"CommandLine\": \"echo 1\", \"Cwd\": \"/data\"}"`, "", "echo 1"},
-		{"direct map object", `{"path": "/tmp/test.go", "CommandLine": "cat test.go"}`, "/tmp/test.go", "cat test.go"},
-		{"arguments only object", `{"Arguments": {"token": "secret"}}`, "", ""},
-		{"arguments lowercase only object", `{"arguments": {"token": "secret"}}`, "", ""},
+		{"nil bytes", "", "", "", 0, 0},
+		{"empty json string", `""`, "", "", 0, 0},
+		{"plain string", `"plain non-json string"`, "", "", 0, 0},
+		{"string not json map", `"not-a-json-map"`, "", "", 0, 0},
+		{"json string encoded object", `"{\"CommandLine\": \"echo 1\", \"Cwd\": \"/data\"}"`, "", "echo 1", 0, 0},
+		{"direct map object", `{"path": "/tmp/test.go", "CommandLine": "cat test.go"}`, "/tmp/test.go", "cat test.go", 0, 0},
+		{"claude snake_case fields", `{"file_path": "/tmp/claude.go", "command": "echo claude", "offset": 10, "limit": 20}`, "/tmp/claude.go", "echo claude", 10, 29},
+		{"arguments only object", `{"Arguments": {"token": "secret"}}`, "", "", 0, 0},
+		{"arguments lowercase only object", `{"arguments": {"token": "secret"}}`, "", "", 0, 0},
+		{"target file only", `{"TargetFile": "/tmp/target.go"}`, "/tmp/target.go", "", 0, 0},
+		{"absolute path only", `{"AbsolutePath": "/tmp/abs.go"}`, "/tmp/abs.go", "", 0, 0},
+		{"file only", `{"file": "/tmp/file.go"}`, "/tmp/file.go", "", 0, 0},
+		{"offset only", `{"offset": 15}`, "", "", 15, 0},
+		{"limit only", `{"limit": 25}`, "", "", 1, 25},
 	}
 	for _, tc := range parseTests {
 		t.Run("parse_"+tc.name, func(t *testing.T) {
@@ -274,9 +398,88 @@ func TestGuardProcess_IOAndModes(t *testing.T) {
 				raw = []byte(tc.raw)
 			}
 			args := ParseArgs(raw)
-			if args.FilePath() != tc.wantFile || (tc.wantCmd != "" && args.CommandLine != tc.wantCmd) {
-				t.Fatalf("ParseArgs(%s) = %+v, want file=%q cmd=%q", tc.raw, args, tc.wantFile, tc.wantCmd)
+			if args.FilePath() != tc.wantFile || (tc.wantCmd != "" && args.CommandLine != tc.wantCmd) || (tc.wantStartLine > 0 && args.StartLine != tc.wantStartLine) || (tc.wantEndLine > 0 && args.EndLine != tc.wantEndLine) {
+				t.Fatalf("ParseArgs(%s) = %+v, want file=%q cmd=%q start=%d end=%d", tc.raw, args, tc.wantFile, tc.wantCmd, tc.wantStartLine, tc.wantEndLine)
 			}
+		})
+	}
+}
+
+func TestPayloadAndToolArgsAccessors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		payload    *Payload
+		args       *ToolArgs
+		wantClaude bool
+		wantAction string
+		wantDaemon bool
+		wantWaitMs int
+		wantFile   string
+		wantHasAny bool
+	}{
+		{
+			name: "nil instances",
+		},
+		{
+			name:    "empty instances",
+			payload: &Payload{},
+			args:    &ToolArgs{},
+		},
+		{
+			name:       "claude session id",
+			payload:    &Payload{SessionID: "s1"},
+			wantClaude: true,
+		},
+		{
+			name: "tool args populated",
+			args: &ToolArgs{
+				Action:            "\"STATUS\"",
+				IsDaemon:          json.RawMessage("true"),
+				WaitMsBeforeAsync: json.RawMessage("5000"),
+				FilePathSnake:     "/tmp/snake.go",
+			},
+			wantAction: "status",
+			wantDaemon: true,
+			wantWaitMs: 5000,
+			wantFile:   "/tmp/snake.go",
+			wantHasAny: true,
+		},
+		{
+			name: "tool args unparseable wait ms and daemon string",
+			args: &ToolArgs{
+				IsDaemon:          json.RawMessage("\"TRUE\""),
+				WaitMsBeforeAsync: json.RawMessage("\"invalid\""),
+			},
+			wantDaemon: true,
+			wantHasAny: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.payload.IsClaude() != tc.wantClaude {
+				t.Fatalf("IsClaude() = %v, want %v", tc.payload.IsClaude(), tc.wantClaude)
+			}
+			tc.payload.Normalize()
+			if tc.args.NormalizedAction() != tc.wantAction {
+				t.Fatalf("NormalizedAction() = %q, want %q", tc.args.NormalizedAction(), tc.wantAction)
+			}
+			if tc.args.IsDaemonBool() != tc.wantDaemon {
+				t.Fatalf("IsDaemonBool() = %v, want %v", tc.args.IsDaemonBool(), tc.wantDaemon)
+			}
+			if tc.args.WaitMs() != tc.wantWaitMs {
+				t.Fatalf("WaitMs() = %v, want %v", tc.args.WaitMs(), tc.wantWaitMs)
+			}
+			if tc.args.FilePath() != tc.wantFile {
+				t.Fatalf("FilePath() = %q, want %q", tc.args.FilePath(), tc.wantFile)
+			}
+			if tc.args.hasAnyField() != tc.wantHasAny {
+				t.Fatalf("hasAnyField() = %v, want %v", tc.args.hasAnyField(), tc.wantHasAny)
+			}
+			tc.args.Normalize()
 		})
 	}
 }

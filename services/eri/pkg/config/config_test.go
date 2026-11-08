@@ -809,6 +809,8 @@ func TestConfig_EnvironmentAndDSN(t *testing.T) {
 		envMap     map[string]string
 		wantPort   string
 		wantBin    string
+		wantEngine string
+		wantClaude string
 		wantKey    string
 		wantModel  string
 		wantTZ     string
@@ -828,6 +830,8 @@ func TestConfig_EnvironmentAndDSN(t *testing.T) {
 				"AGY_MODEL":                    "gemini-custom",
 				"DEFAULT_TIMEZONE":             "UTC",
 				"SYSTEM_CHANNEL_ID":            "alerts",
+				"ENGINE":                       "claude",
+				"CLAUDE_BIN":                   "/usr/local/bin/claude",
 				"OPENOBSERVE_ORG":              "custom-org",
 				"OPENOBSERVE_USER":             "root@domain.com",
 				"DAEMON_IDLE_TIMEOUT":          "15m",
@@ -836,6 +840,8 @@ func TestConfig_EnvironmentAndDSN(t *testing.T) {
 			},
 			wantPort:   "8081",
 			wantBin:    "/bin/agy",
+			wantEngine: "claude",
+			wantClaude: "/usr/local/bin/claude",
 			wantKey:    "primary-key",
 			wantModel:  "gemini-custom",
 			wantTZ:     "UTC",
@@ -863,6 +869,12 @@ func TestConfig_EnvironmentAndDSN(t *testing.T) {
 			}
 			if tc.wantBin != "" && data.AgyBin != tc.wantBin {
 				t.Errorf("AgyBin = %q, want %q", data.AgyBin, tc.wantBin)
+			}
+			if tc.wantEngine != "" && data.Engine != tc.wantEngine {
+				t.Errorf("Engine = %q, want %q", data.Engine, tc.wantEngine)
+			}
+			if tc.wantClaude != "" && data.ClaudeBin != tc.wantClaude {
+				t.Errorf("ClaudeBin = %q, want %q", data.ClaudeBin, tc.wantClaude)
 			}
 			if tc.wantKey != "" && data.APIKey != tc.wantKey {
 				t.Errorf("APIKey = %q, want %q", data.APIKey, tc.wantKey)
@@ -1419,6 +1431,32 @@ func TestVoiceConfigAndEngine(t *testing.T) {
 				t.Fatalf("Current().VoiceEngine(%q) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
+	}
+
+	processEngineTests := []struct{ in, want string }{
+		{"", "agy"},
+		{"   ", "agy"},
+		{"agy", "agy"},
+		{"AGY", "agy"},
+		{"  agy  ", "agy"},
+		{"claude", "claude"},
+		{"CLAUDE", "claude"},
+		{" Claude ", "claude"},
+		{"other", "agy"},
+	}
+	for _, tc := range processEngineTests {
+		t.Run("process_engine_"+tc.in, func(t *testing.T) {
+			cfg := NewTestConfig(func(c *ConfigData) { c.Engine = tc.in })
+			if got := cfg.Engine(); got != tc.want {
+				t.Fatalf("Engine(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			if got := cfg.Current().GetEngine(); got != tc.want {
+				t.Fatalf("Current().GetEngine(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+	if (*Config)(nil).Engine() != "agy" || (*ConfigData)(nil).GetEngine() != "agy" {
+		t.Fatal("nil Config/ConfigData Engine accessor failed")
 	}
 
 	featureTests := []struct {

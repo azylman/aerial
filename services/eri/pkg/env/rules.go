@@ -303,6 +303,33 @@ func (p *Provisioner) linkOrCopyAsset(src, dst string) {
 	}
 }
 
+func stripRuleFrontmatter(content string) string {
+	trimmed := strings.TrimSpace(content)
+	if strings.HasPrefix(trimmed, "---") {
+		after := trimmed[3:]
+		if _, body, found := strings.Cut(after, "---"); found {
+			return strings.TrimSpace(body)
+		}
+	}
+	return trimmed
+}
+
+func (p *Provisioner) syncClaudeMD(rules []ruleSourceFile, claudeDir string) error {
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		return err
+	}
+	var stripped []string
+	for _, r := range rules {
+		body := stripRuleFrontmatter(r.content)
+		if body != "" {
+			stripped = append(stripped, body)
+		}
+	}
+	claudeMDContent := strings.Join(stripped, "\n\n")
+	targetPath := filepath.Join(claudeDir, "CLAUDE.md")
+	return p.writeAtomic(targetPath, claudeMDContent)
+}
+
 func (p *Provisioner) provisionRuntimeSharedAssets(runtimeHome string) {
 	runtimeGemini := filepath.Join(runtimeHome, ".gemini")
 	primaryGemini := filepath.Join(p.homeDir, ".gemini")
@@ -348,6 +375,19 @@ func (p *Provisioner) provisionRuntimeSharedAssets(runtimeHome string) {
 	ignore(os.MkdirAll(canonicalBrain, 0o755))
 	ignore(os.MkdirAll(canonicalConversations, 0o755))
 	p.linkSharedSessionStorage(runtimeGemini, canonicalBrain, canonicalConversations)
+
+	// Unify claude projects across runtimes into shared storage
+	if p.dataDir != "" {
+		canonicalClaudeProjects := filepath.Join(p.dataDir, "claude", "projects")
+		ignore(os.MkdirAll(canonicalClaudeProjects, 0o755))
+		runtimeClaude := filepath.Join(runtimeHome, ".claude")
+		ignore(os.MkdirAll(runtimeClaude, 0o755))
+		runtimeProjects := filepath.Join(runtimeClaude, "projects")
+		prepareSharedTargetDir(runtimeProjects, filepath.Clean(canonicalClaudeProjects))
+		if sErr := symlinkRuntimeAsset(canonicalClaudeProjects, runtimeProjects); sErr != nil {
+			log.Printf("[Env] Warning: failed to link shared claude projects %s -> %s: %v", runtimeProjects, canonicalClaudeProjects, sErr)
+		}
+	}
 }
 
 func migrateExistingSessionDir(targetDir, canonicalDir string) {
@@ -450,12 +490,25 @@ func (p *Provisioner) SyncRules(customPrompt string) error {
 		return fmt.Errorf("failed to sync rules to primary home: %w", err)
 	}
 	log.Printf("[Env] Configured modular rules in %s (target: discord)", primaryGemini)
+	primaryClaude := filepath.Join(p.homeDir, ".claude")
+	if err := p.syncClaudeMD(discordRules, primaryClaude); err != nil {
+		log.Printf("[Env] Warning: failed to sync primary CLAUDE.md: %v", err)
+	}
 	if p.dataDir != "" {
 		canonicalBrain := filepath.Join(p.dataDir, "brain")
 		canonicalConversations := filepath.Join(p.dataDir, "conversations")
 		ignore(os.MkdirAll(canonicalBrain, 0o755))
 		ignore(os.MkdirAll(canonicalConversations, 0o755))
 		p.linkSharedSessionStorage(primaryGemini, canonicalBrain, canonicalConversations)
+
+		canonicalClaudeProjects := filepath.Join(p.dataDir, "claude", "projects")
+		ignore(os.MkdirAll(canonicalClaudeProjects, 0o755))
+		ignore(os.MkdirAll(primaryClaude, 0o755))
+		primaryProjects := filepath.Join(primaryClaude, "projects")
+		prepareSharedTargetDir(primaryProjects, filepath.Clean(canonicalClaudeProjects))
+		if sErr := symlinkRuntimeAsset(canonicalClaudeProjects, primaryProjects); sErr != nil {
+			log.Printf("[Env] Warning: failed to link shared claude projects %s -> %s: %v", primaryProjects, canonicalClaudeProjects, sErr)
+		}
 	}
 
 	// 5. If dataDir is configured, provision isolated runtimes for discord, voice, and ephemeral
@@ -470,8 +523,11 @@ func (p *Provisioner) SyncRules(customPrompt string) error {
 			gemini := filepath.Join(home, ".gemini")
 			if err := p.syncRulesToDir(compiled[target], gemini); err != nil {
 				log.Printf("[Env] Warning: failed to sync rules to %s runtime: %v", target, err)
-			} else {
-				p.provisionRuntimeSharedAssets(home)
+			}
+			p.provisionRuntimeSharedAssets(home)
+			claudeDir := filepath.Join(home, ".claude")
+			if err := p.syncClaudeMD(compiled[target], claudeDir); err != nil {
+				log.Printf("[Env] Warning: failed to sync %s runtime CLAUDE.md: %v", target, err)
 			}
 		}
 	}

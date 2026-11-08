@@ -94,7 +94,7 @@ func CheckShare(toolName string, args ToolArgs) *Decision {
 	normalizedName := normalizeToolName(toolName)
 
 	switch normalizedName {
-	case "replace_file_content", "write_to_file", "edit_file", "write_file":
+	case "replace_file_content", "write_to_file", "edit_file", "write_file", "edit", "multiedit", "write":
 		if IsProtectedPath(args.FilePath()) {
 			return &Decision{
 				Decision: DecisionDeny,
@@ -102,7 +102,7 @@ func CheckShare(toolName string, args ToolArgs) *Decision {
 			}
 		}
 
-	case "run_command":
+	case "run_command", "bash":
 		if inspectRunCommand(args.CommandLine, args.Cwd) {
 			return &Decision{
 				Decision: DecisionDeny,

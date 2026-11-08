@@ -456,7 +456,7 @@ func CheckSearchWithSQL(toolName string, args ToolArgs, describer SQLDescriber) 
 	if normalizedName == "call_mcp_tool" {
 		return inspectMCPToolCall(args)
 	}
-	if normalizedName != "run_command" && normalizedName != "grep_search" && normalizedName != "find_by_name" {
+	if normalizedName != "run_command" && normalizedName != "bash" && normalizedName != "grep_search" && normalizedName != "find_by_name" {
 		return &Decision{Decision: DecisionAllow}
 	}
 
