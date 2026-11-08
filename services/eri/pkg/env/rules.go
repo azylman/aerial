@@ -491,8 +491,16 @@ func (p *Provisioner) SyncRules(customPrompt string) error {
 	}
 	log.Printf("[Env] Configured modular rules in %s (target: discord)", primaryGemini)
 	primaryClaude := filepath.Join(p.homeDir, ".claude")
-	if err := p.syncClaudeMD(discordRules, primaryClaude); err != nil {
-		log.Printf("[Env] Warning: failed to sync primary CLAUDE.md: %v", err)
+	if p.dataDir == "" {
+		if err := p.syncClaudeMD(discordRules, primaryClaude); err != nil {
+			log.Printf("[Env] Warning: failed to sync primary CLAUDE.md: %v", err)
+		}
+	} else {
+		// Runtime homes own CLAUDE.md. Claude pools run with Cwd=dataDir, so a
+		// primary CLAUDE.md under that cwd would load a second time as project memory.
+		if err := os.Remove(filepath.Join(primaryClaude, "CLAUDE.md")); err != nil && !os.IsNotExist(err) {
+			log.Printf("[Env] Warning: failed to remove stale primary CLAUDE.md: %v", err)
+		}
 	}
 	if p.dataDir != "" {
 		canonicalBrain := filepath.Join(p.dataDir, "brain")
