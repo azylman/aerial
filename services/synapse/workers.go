@@ -830,7 +830,11 @@ func resolveImageTagAndKustomization(repo, imageRef string) (tagKey, kustomizati
 	case "aerial-sidecars":
 		base := strings.TrimPrefix(workloadName, "aerial-sidecar-")
 		imageName = "aerial-sidecar-" + base
-		kustomizationName = "aerial-config"
+		if imageName == "aerial-sidecar-migrator" {
+			kustomizationName = "aerial-core"
+		} else {
+			kustomizationName = "aerial-config"
+		}
 	case "mirrormere":
 		if strings.HasPrefix(workloadName, "mirrormere") {
 			imageName = workloadName

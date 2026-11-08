@@ -908,22 +908,21 @@ func (s *RouterServer) resolveDeployEventTargetID(ctx context.Context, evt *Depl
 	}
 }
 
+func matchesDeployingPRKustomization(repo string, startedJobs []string, kustomizationName string) bool {
+	for _, job := range startedJobs {
+		if _, kust, _ := resolveImageTagAndKustomization(repo, job); kust == kustomizationName {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *RouterServer) enrichDeployEventPRAndTarget(ctx context.Context, evt *DeployEvent) {
 	s.resolveDeployEventPRNumber(ctx, evt)
 	if evt.PRNumber == 0 && s.registry != nil && (evt.JobName == "aerial-config" || evt.JobName == "aerial-core") {
 		if deployingPRs, err := s.registry.ListDeployingPRs(ctx); err == nil && len(deployingPRs) > 0 {
 			for _, p := range slices.Backward(deployingPRs) {
-				cleanRepo := cleanRepoName(p.Repo)
-				var targetKust string
-				switch cleanRepo {
-				case "aerial":
-					targetKust = "aerial-core"
-				case "mirrormere", "aerial-sidecars", "aerial-config":
-					targetKust = "aerial-config"
-				default:
-					targetKust = "aerial-config"
-				}
-				if targetKust == evt.JobName && len(extractStringSliceFromMetadata(p.Metadata, "started_jobs")) > 0 {
+				if matchesDeployingPRKustomization(p.Repo, extractStringSliceFromMetadata(p.Metadata, "started_jobs"), evt.JobName) {
 					evt.Repo = p.Repo
 					evt.PRNumber = p.PRNumber
 					evt.CommitSHA = firstNonEmpty(p.MergeSHA, p.HeadSHA, evt.CommitSHA)
