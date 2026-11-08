@@ -1197,7 +1197,7 @@ spec:
                   key: POSTGRES_PASSWORD
                   name: shared-secrets
             - name: DB_CONNECTION_URI
-              value: postgres://aerial:$(POSTGRES_PASSWORD)@postgres:5432/aerial?sslmode=disable
+              value: postgres://aerial:$(POSTGRES_PASSWORD)@postgres:5432/infisical?sslmode=disable
           envFrom:
             - secretRef:
                 name: shared-secrets
