@@ -696,7 +696,7 @@ func startLeaderHandoff(
 	},
 	cfg *config.Config,
 	cur *config.ConfigData,
-) (<-chan error, func()) {
+) (<-chan error, func(), func()) {
 	leaderCtx, cancelLeader := context.WithCancel(ctx)
 	leaderDone := make(chan struct{})
 	errCh := make(chan error, 1)
@@ -730,16 +730,22 @@ func startLeaderHandoff(
 		transcript.StartTranscriptSync(leaderCtx, store, cfg, "", syncLLM, 5*time.Minute)
 	}()
 
-	return errCh, func() {
+	stopHandoff := func() {
 		cancelLeader()
 		<-leaderDone
+	}
+
+	releaseLock := func() {
 		releaseMu.Lock()
 		rel := releaseFn
+		releaseFn = nil
 		releaseMu.Unlock()
 		if rel != nil {
 			rel()
 		}
 	}
+
+	return errCh, stopHandoff, releaseLock
 }
 
 // resolveGitSyncTarget returns the evaluated symlink target or git commit/modtime for a directory,
@@ -943,6 +949,13 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 
 	sessionMgr := session.New(cfg.GeminiHomeDir(), cfg.DataDir())
 
+	var releaseLeaderLock func()
+	defer func() {
+		if releaseLeaderLock != nil {
+			releaseLeaderLock()
+		}
+	}()
+
 	discordPools, ephemeralPool, voicePool, allPools, poolEnv, ephemeralHome := buildBrainProcessPools(cfg, cur, sessionMgr, appOpts.processSpawner)
 	defer closeAllBrainPools(allPools)
 
@@ -954,6 +967,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	ambientResolver := newAmbientContextResolver(cfg)
 
 	pool := queue.New(cfg, queue.WorkerPoolConfig{
+		ParentContext:    ctx,
 		Store:            store,
 		Classifier:       cls,
 		SessionManager:   sessionMgr,
@@ -999,11 +1013,9 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		}
 	}()
 
-	// Leadership release must execute first on shutdown (via LIFO defer) to cancel handoff,
-	// await worker promotion teardown, and release the PostgreSQL advisory lock before
-	// worker pools and process pools are stopped.
-	leaderErrCh, releaseLeader := startLeaderHandoff(ctx, store, pool, allPools, ephemeralPool, cfg, cur)
-	defer releaseLeader()
+	leaderErrCh, stopHandoff, releaseLock := startLeaderHandoff(ctx, store, pool, allPools, ephemeralPool, cfg, cur)
+	releaseLeaderLock = releaseLock
+	defer stopHandoff()
 
 	return serveBrainHTTP(ctx, ln, mux, cur.Model, leaderErrCh)
 }

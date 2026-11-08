@@ -83,6 +83,7 @@ func ResolvePoolKey(ephemeral *bool, effort string) (PoolKey, error) {
 }
 
 type WorkerPoolConfig struct {
+	ParentContext                                                                context.Context
 	Store                                                                        db.Store
 	DiscordSession                                                               *discordgo.Session
 	AgyBin, APIKey, Model, LowEffortModel, MediumEffortModel, SystemPrompt       string
@@ -445,7 +446,11 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		cfg.LLMFunc = resolveDefaultSummarizerLLM(pools)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	parentCtx := cfg.ParentContext
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parentCtx)
 	p := &WorkerPool{
 		appCfg: resolvedAppCfg, hasExplicitAppCfg: isExplicitAppCfg, cfg: cfg, pools: pools, voiceProcessPool: cfg.VoiceProcessPool,
 		sessionMgr: cfg.SessionManager, threadChs: make(map[string]*threadWorkerState),

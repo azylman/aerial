@@ -1521,7 +1521,7 @@ func TestStartLeaderHandoff_Scenarios(t *testing.T) {
 			pool.Start()
 			defer pool.Stop()
 
-			errCh, releaseFn := startLeaderHandoff(ctx, store, pool, nil, ephemPool, cfg, cfg.Current())
+			errCh, stopHandoff, releaseLock := startLeaderHandoff(ctx, store, pool, nil, ephemPool, cfg, cfg.Current())
 			<-lockEntered
 
 			if tc.holdThenUnblk {
@@ -1549,7 +1549,11 @@ func TestStartLeaderHandoff_Scenarios(t *testing.T) {
 				}
 			}
 
-			releaseFn()
+			stopHandoff()
+			if released.Load() {
+				t.Fatalf("expected lock not to be released immediately after stopHandoff")
+			}
+			releaseLock()
 			if released.Load() != tc.wantReleased {
 				t.Errorf("released = %v, want %v", released.Load(), tc.wantReleased)
 			}
