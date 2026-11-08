@@ -1044,9 +1044,23 @@ REPO_DIR="$TEST_ROOT/aerial"
 mkdir -p "$STATE_DIR" "$REPO_DIR"
 
 awk '/^  cat > \/usr\/local\/bin\/roborev <<'\''EOF'\''$/ { flag=1; next } flag && /^EOF$/ { flag=0; exit } flag { print }' "$ENTRYPOINT_FILE" \
-  | sed "s|/usr/local/bin/roborev.real|$MOCK_REAL|g; s|/usr/local/bin/sync-gemini-settings|$MOCK_SYNC_SETTINGS|g; s|/root/.roborev/postgres-password|$STATE_DIR/postgres-password|g" > "$WRAPPER_SCRIPT"
+  | sed "s|/usr/local/bin/roborev.real|$MOCK_REAL|g; s|/usr/local/bin/sync-gemini-settings|$MOCK_SYNC_SETTINGS|g; s|/root/.roborev/postgres-password|$STATE_DIR/postgres-password|g; s|/root/.roborev/reviews.db|$STATE_DIR/reviews.db|g" > "$WRAPPER_SCRIPT"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$MOCK_SYNC_SETTINGS"
 printf 'secret-pw\n' > "$STATE_DIR/postgres-password"
+
+python3 -c "
+import sqlite3
+conn = sqlite3.connect('$STATE_DIR/reviews.db')
+cur = conn.cursor()
+cur.execute('CREATE TABLE sync_state (key TEXT PRIMARY KEY, value TEXT)')
+cur.execute('INSERT INTO sync_state VALUES (\"machine_id\", \"local-runner-mach\")')
+cur.execute('CREATE TABLE review_jobs (id INT PRIMARY KEY, source_machine_id TEXT, session_id TEXT)')
+cur.execute('INSERT INTO review_jobs VALUES (1, \"remote-mach-1\", \"sess-100\")')
+cur.execute('INSERT INTO review_jobs VALUES (2, \"remote-mach-2\", \"\")')
+cur.execute('INSERT INTO review_jobs VALUES (3, \"remote-mach-3\", NULL)')
+conn.commit()
+conn.close()
+"
 cat << 'MOCK_EOF' > "$MOCK_REAL"
 #!/usr/bin/env bash
 echo "$*" >> "${CALL_LOG}"
@@ -1089,6 +1103,18 @@ if grep -q "repo move aerial $REPO_DIR" "$CALL_LOG" &&
   echo 'backfill_followup:ok'
 fi
 
+aligned_rows=$(python3 -c "
+import sqlite3
+conn = sqlite3.connect('$STATE_DIR/reviews.db')
+cur = conn.cursor()
+cur.execute('SELECT id, source_machine_id FROM review_jobs ORDER BY id')
+print(cur.fetchall())
+conn.close()
+")
+if [[ "$aligned_rows" == "[(1, 'local-runner-mach'), (2, 'remote-mach-2'), (3, 'remote-mach-3')]" ]]; then
+  echo 'align_source_machine_id:ok'
+fi
+
 : > "$CALL_LOG"
 jq -n --arg ref "${BASE_SHA}..${COMMIT2_SHA}" '[{id:43,git_ref:$ref,status:"done",panel_role:"synthesis"}]' > "$STATE_DIR/jobs.json"
 printf '{"comments":[{"response":"Already recorded rebuttal."}]}\n' > "$STATE_DIR/show.json"
@@ -1102,6 +1128,7 @@ CASE17_EOF
 )
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'backfill_followup:ok' && echo true || echo false)" "github-runner roborev wrapper moves placeholder repo and backfills prior roborev-override rebuttals before review --wait"
 assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'head_shortcircuit:ok' && echo true || echo false)" "github-runner roborev wrapper skips duplicate comment and short-circuits Review Passed when override matches current HEAD"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'align_source_machine_id:ok' && echo true || echo false)" "github-runner roborev wrapper aligns review_jobs.source_machine_id on synced rows with non-empty session_id to local machine_id"
 
 echo "--------------------------------------------------------"
 echo "Test results: $PASSED passed, $FAILED failed"
