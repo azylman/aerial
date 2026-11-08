@@ -1090,11 +1090,27 @@ func TestFormatChunkPrompt(t *testing.T) {
 		"./scripts/check-coverage.sh --service <svc> --check --gaps",
 		"Run after init: `grep -n -E \"VanadisServer|FormatChunkPrompt\" \"$SCRATCH_DIR/vanadis/main.go\" \"$SCRATCH_DIR/vanadis/main_test.go\"`",
 		"4. NEVER spawn or invoke subagents (`invoke_subagent`, `define_subagent`): Vanadis build chunks are already isolated leaf tasks—execute all file edits, tests, and verification directly in this turn.",
-		"5. Submit via `/share/aerial/scripts/aerial-pr.sh submit \"$SCRATCH_DIR\" \"<commit_msg>\" --vanadis-chunk build-999-chunk-2`",
-		"6. Terminate turn immediately after submission.",
+		"5. File any out-of-scope bugs, tech debt, or follow-up tasks discovered during execution via the docket MCP create tool (referencing the active Build ID and Chunk ID \"build-999-chunk-2\" in the task description) rather than expanding the active PR's scope.",
+		"6. Submit via `/share/aerial/scripts/aerial-pr.sh submit \"$SCRATCH_DIR\" \"<commit_msg>\" --vanadis-chunk build-999-chunk-2`",
+		"7. Terminate turn immediately after submission.",
 	} {
 		if !strings.Contains(p1, want) {
 			t.Fatalf("prompt for chunk 1 missing %q:\n%s", want, p1)
+		}
+	}
+	actionChunk := mkChunk("build-999-chunk-act", "", 1, "Task Action", "Do action task", "", "running")
+	actionChunk.Mode = "action"
+	actionChunk.Repo = ""
+	pAction, err := FormatChunkPrompt(build, []VanadisChunk{c1, actionChunk, c3}, 1)
+	if err != nil {
+		t.Fatalf("unexpected error for action chunk prompt: %v", err)
+	}
+	for _, want := range []string{
+		"=== Action Chunk Execution Contract ===",
+		"6. File any out-of-scope bugs, tech debt, or follow-up tasks discovered during execution via the docket MCP create tool (referencing the active Build ID and Chunk ID \"build-999-chunk-act\" in the task description) rather than expanding the active chunk's scope.",
+	} {
+		if !strings.Contains(pAction, want) {
+			t.Fatalf("action chunk prompt missing %q:\n%s", want, pAction)
 		}
 	}
 	if strings.Contains(p1, "review the full `git diff`") {
