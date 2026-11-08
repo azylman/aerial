@@ -2787,6 +2787,30 @@ func TestFormatCIChecksActiveStep_Unit(t *testing.T) {
 			want:         "Building container images (1/1 completed)",
 		},
 		{
+			name:         "deploying kustomizations none rolled out",
+			prStatus:     "deploying",
+			metadataJSON: `{"jobs":["eri"],"kustomization_requests":{"marida-core":{"namespace":"flux-system","requested_at":"t1"},"aerial-core":{"namespace":"flux-system","requested_at":"t1"}}}`,
+			want:         "`aerial-core`: 🔄 rolling out\n`marida-core`: 🔄 rolling out",
+		},
+		{
+			name:         "deploying kustomizations partially rolled out",
+			prStatus:     "deploying",
+			metadataJSON: `{"kustomization_requests":{"marida-core":{"namespace":"flux-system","requested_at":"t1"},"aerial-core":{"namespace":"flux-system","requested_at":"t1"}},"deployed_kustomizations":["aerial-core"]}`,
+			want:         "`aerial-core`: ✅ rolled out\n`marida-core`: 🔄 rolling out",
+		},
+		{
+			name:         "deploying kustomizations all rolled out",
+			prStatus:     "deploying",
+			metadataJSON: `{"kustomization_requests":{"marida-core":{"namespace":"apps","requested_at":"t1"},"aerial-core":{"namespace":"flux-system","requested_at":"t1"}},"deployed_kustomizations":["aerial-core","marida-core"]}`,
+			want:         "`aerial-core`: ✅ rolled out\n`marida-core`: ✅ rolled out",
+		},
+		{
+			name:         "deploying legacy empty kustomization requests falls back to jobs",
+			prStatus:     "deploying",
+			metadataJSON: `{"jobs":["eri"],"kustomization_requests":{},"deployed_jobs":["eri"]}`,
+			want:         "`eri`: ✅ healthy",
+		},
+		{
 			name:     "unsupported status returns empty",
 			prStatus: "deployed",
 			want:     "",
