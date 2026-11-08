@@ -394,6 +394,8 @@ spec:
                 name: oauth-token
                 readOnly: true
                 subPath: postgres-password
+              - mountPath: /root/.gemini/antigravity-cli/brain
+                name: roborev-brain-cache
         nodeSelector:
           kubernetes.io/hostname: calibarn
         volumes:
@@ -407,6 +409,10 @@ spec:
                   path: postgres-password
               optional: true
               secretName: shared-secrets
+          - hostPath:
+              path: /var/lib/docker/volumes/aerial-roborev-cache/_data/brain
+              type: DirectoryOrCreate
+            name: roborev-brain-cache
   valuesFrom:
     - kind: Secret
       name: shared-secrets
@@ -542,6 +548,8 @@ spec:
                 name: oauth-token
                 readOnly: true
                 subPath: postgres-password
+              - mountPath: /root/.gemini/antigravity-cli/brain
+                name: roborev-brain-cache
         nodeSelector:
           kubernetes.io/hostname: calibarn
         volumes:
@@ -555,6 +563,10 @@ spec:
                   path: postgres-password
               optional: true
               secretName: shared-secrets
+          - hostPath:
+              path: /var/lib/docker/volumes/aerial-roborev-cache/_data/brain
+              type: DirectoryOrCreate
+            name: roborev-brain-cache
   valuesFrom:
     - kind: Secret
       name: shared-secrets
@@ -690,6 +702,8 @@ spec:
                 name: oauth-token
                 readOnly: true
                 subPath: postgres-password
+              - mountPath: /root/.gemini/antigravity-cli/brain
+                name: roborev-brain-cache
         nodeSelector:
           kubernetes.io/hostname: calibarn
         volumes:
@@ -703,6 +717,10 @@ spec:
                   path: postgres-password
               optional: true
               secretName: shared-secrets
+          - hostPath:
+              path: /var/lib/docker/volumes/aerial-roborev-cache/_data/brain
+              type: DirectoryOrCreate
+            name: roborev-brain-cache
   valuesFrom:
     - kind: Secret
       name: shared-secrets
@@ -838,6 +856,8 @@ spec:
                 name: oauth-token
                 readOnly: true
                 subPath: postgres-password
+              - mountPath: /root/.gemini/antigravity-cli/brain
+                name: roborev-brain-cache
         nodeSelector:
           kubernetes.io/hostname: calibarn
         volumes:
@@ -851,6 +871,10 @@ spec:
                   path: postgres-password
               optional: true
               secretName: shared-secrets
+          - hostPath:
+              path: /var/lib/docker/volumes/aerial-roborev-cache/_data/brain
+              type: DirectoryOrCreate
+            name: roborev-brain-cache
   valuesFrom:
     - kind: Secret
       name: shared-secrets
