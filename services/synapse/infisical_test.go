@@ -112,6 +112,7 @@ func TestSyncSecrets(t *testing.T) {
 		secretsBody   string
 		k8sPutStatus  int
 		k8sPostStatus int
+		cnpgPutStatus int
 		unreachable   bool
 		wantErr       bool
 		wantK8sPuts   int32
@@ -130,6 +131,8 @@ func TestSyncSecrets(t *testing.T) {
 		{name: "k8s put 404 post fails 500", loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"A","secretValue":"B"}]}`, k8sPutStatus: http.StatusNotFound, k8sPostStatus: http.StatusInternalServerError, wantErr: true, wantK8sPuts: 1, wantK8sPosts: 1},
 		{name: "missing kube api server", cfgOverride: &Config{InfisicalClientID: "cid", InfisicalClientSecret: "csec", InfisicalURL: "http://mock"}, loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"K","secretValue":"V"}]}`, wantErr: true},
 		{name: "k8s put 500 internal server error", loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"K","secretValue":"V"}]}`, k8sPutStatus: http.StatusInternalServerError, wantErr: true, wantK8sPuts: 1},
+		{name: "sync with postgres password upserts shared and cnpg secrets", loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"POSTGRES_PASSWORD","secretValue":"supersecret"}]}`, k8sPutStatus: http.StatusOK, wantK8sPuts: 2},
+		{name: "cnpg secret put failure returns error", loginStatus: http.StatusOK, loginBody: `{"accessToken":"tok"}`, secretsStatus: http.StatusOK, secretsBody: `{"secrets":[{"secretKey":"POSTGRES_PASSWORD","secretValue":"supersecret"}]}`, k8sPutStatus: http.StatusOK, cnpgPutStatus: http.StatusInternalServerError, wantErr: true, wantK8sPuts: 2},
 		{name: "unreachable client connections", unreachable: true, wantErr: true},
 	}
 
@@ -158,6 +161,10 @@ func TestSyncSecrets(t *testing.T) {
 
 			var k8sPutCount atomic.Int32
 			var k8sPostCount atomic.Int32
+			cnpgStatus := tc.cnpgPutStatus
+			if cnpgStatus == 0 {
+				cnpgStatus = http.StatusOK
+			}
 			mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				switch {
@@ -170,6 +177,9 @@ func TestSyncSecrets(t *testing.T) {
 				case r.Method == http.MethodPut && r.URL.Path == "/api/v1/namespaces/default/secrets/shared-secrets":
 					k8sPutCount.Add(1)
 					w.WriteHeader(tc.k8sPutStatus)
+				case r.Method == http.MethodPut && r.URL.Path == "/api/v1/namespaces/default/secrets/postgres-aerial-role":
+					k8sPutCount.Add(1)
+					w.WriteHeader(cnpgStatus)
 				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/namespaces/default/secrets":
 					k8sPostCount.Add(1)
 					w.WriteHeader(tc.k8sPostStatus)

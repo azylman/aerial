@@ -21,6 +21,9 @@ import (
 // TargetK8sSecret is the hardcoded destination Kubernetes secret for all synced secrets.
 const TargetK8sSecret = "default/shared-secrets"
 
+// TargetCNPGSecretName is the destination Kubernetes basic-auth secret for CloudNativePG aerial role credentials.
+const TargetCNPGSecretName = "postgres-aerial-role"
+
 // TargetNomadVariable is retained for backward compatibility with existing clients/tests.
 const TargetNomadVariable = TargetK8sSecret
 
@@ -67,10 +70,16 @@ type InfisicalSecretsResponse struct {
 	Secrets []InfisicalSecretItem `json:"secrets"`
 }
 
+type K8sSecretMeta struct {
+	Name      string            `json:"name"`
+	Namespace string            `json:"namespace"`
+	Labels    map[string]string `json:"labels,omitempty"`
+}
+
 type K8sSecret struct {
 	APIVersion string            `json:"apiVersion"`
 	Kind       string            `json:"kind"`
-	Metadata   map[string]string `json:"metadata"`
+	Metadata   K8sSecretMeta     `json:"metadata"`
 	Type       string            `json:"type"`
 	StringData map[string]string `json:"stringData"`
 }
@@ -271,17 +280,7 @@ func (s *RouterServer) getK8sHTTPClient() *http.Client {
 	return getK8sHTTPClient(s.cfg.KubeAPIServer, s.httpClient)
 }
 
-func (s *RouterServer) upsertK8sSecret(ctx context.Context, items map[string]string) error {
-	secretObj := K8sSecret{
-		APIVersion: "v1",
-		Kind:       "Secret",
-		Metadata: map[string]string{
-			"name":      "shared-secrets",
-			"namespace": "default",
-		},
-		Type:       "Opaque",
-		StringData: items,
-	}
+func (s *RouterServer) putOrCreateK8sSecret(ctx context.Context, secretObj K8sSecret) error {
 	data, err := json.Marshal(secretObj)
 	if err != nil {
 		return err
@@ -292,7 +291,7 @@ func (s *RouterServer) upsertK8sSecret(ctx context.Context, items map[string]str
 		return fmt.Errorf("kubernetes API server not configured")
 	}
 
-	putURL := apiServer + "/api/v1/namespaces/default/secrets/shared-secrets"
+	putURL := apiServer + "/api/v1/namespaces/default/secrets/" + secretObj.Metadata.Name
 	putReq, err := http.NewRequestWithContext(ctx, http.MethodPut, putURL, bytes.NewReader(data))
 	if err != nil {
 		return err
@@ -339,6 +338,46 @@ func (s *RouterServer) upsertK8sSecret(ctx context.Context, items map[string]str
 	}
 
 	return fmt.Errorf("k8s secret PUT returned status %d: %s", resp.StatusCode, readBodyString(resp.Body))
+}
+
+func (s *RouterServer) upsertK8sSecret(ctx context.Context, items map[string]string) error {
+	sharedSecretObj := K8sSecret{
+		APIVersion: "v1",
+		Kind:       "Secret",
+		Metadata: K8sSecretMeta{
+			Name:      "shared-secrets",
+			Namespace: "default",
+		},
+		Type:       "Opaque",
+		StringData: items,
+	}
+	if err := s.putOrCreateK8sSecret(ctx, sharedSecretObj); err != nil {
+		return err
+	}
+
+	if pgPass := items["POSTGRES_PASSWORD"]; pgPass != "" {
+		cnpgSecretObj := K8sSecret{
+			APIVersion: "v1",
+			Kind:       "Secret",
+			Metadata: K8sSecretMeta{
+				Name:      TargetCNPGSecretName,
+				Namespace: "default",
+				Labels: map[string]string{
+					"cnpg.io/reload": "true",
+				},
+			},
+			Type: "kubernetes.io/basic-auth",
+			StringData: map[string]string{
+				"username": "aerial",
+				"password": pgPass,
+			},
+		}
+		if err := s.putOrCreateK8sSecret(ctx, cnpgSecretObj); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // SyncSecrets coordinates fetching secrets from Infisical and synchronizing directly to Kubernetes Secrets.
