@@ -535,7 +535,5 @@ func RegisterConfigTokens(cfg *Config) {
 		}
 	}
 
-	if len(tokens) > 0 {
-		sanitizer.RegisterSensitiveTokens(tokens...)
-	}
+	sanitizer.ReplaceSensitiveTokens(tokens...)
 }
