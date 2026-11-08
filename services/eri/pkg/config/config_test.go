@@ -868,21 +868,22 @@ func TestConfig_EnvironmentAndDSN(t *testing.T) {
 	}
 
 	overrideTests := []struct {
-		name       string
-		envMap     map[string]string
-		wantPort   string
-		wantBin    string
-		wantEngine string
-		wantClaude string
-		wantKey    string
-		wantModel  string
-		wantTZ     string
-		wantChan   string
-		wantOrg    string
-		wantUser   string
-		wantIdle   time.Duration
-		wantMaxDur time.Duration
-		wantCtx    int
+		name             string
+		envMap           map[string]string
+		wantPort         string
+		wantBin          string
+		wantEngine       string
+		wantClaude       string
+		wantKey          string
+		wantModel        string
+		wantTZ           string
+		wantChan         string
+		wantOrg          string
+		wantUser         string
+		wantDiscordToken string
+		wantIdle         time.Duration
+		wantMaxDur       time.Duration
+		wantCtx          int
 	}{
 		{
 			name: "primary env vars",
@@ -922,6 +923,13 @@ func TestConfig_EnvironmentAndDSN(t *testing.T) {
 			},
 			wantTZ: "America/Chicago",
 		},
+		{
+			name: "discord bot token fallback",
+			envMap: map[string]string{
+				"DISCORD_BOT_TOKEN": "fallback-bot-token-123",
+			},
+			wantDiscordToken: "fallback-bot-token-123",
+		},
 	}
 	for _, tc := range overrideTests {
 		t.Run("override_"+tc.name, func(t *testing.T) {
@@ -956,6 +964,9 @@ func TestConfig_EnvironmentAndDSN(t *testing.T) {
 			}
 			if tc.wantUser != "" && data.OpenObserveUser != tc.wantUser {
 				t.Errorf("OpenObserveUser = %q, want %q", data.OpenObserveUser, tc.wantUser)
+			}
+			if tc.wantDiscordToken != "" && data.DiscordToken != tc.wantDiscordToken {
+				t.Errorf("DiscordToken = %q, want %q", data.DiscordToken, tc.wantDiscordToken)
 			}
 			if tc.wantIdle > 0 && data.DaemonIdleTimeout != tc.wantIdle {
 				t.Errorf("DaemonIdleTimeout = %v, want %v", data.DaemonIdleTimeout, tc.wantIdle)
