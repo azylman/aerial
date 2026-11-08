@@ -1302,6 +1302,50 @@ func TestServer_ChunkEndpoints(t *testing.T) {
 				t.Errorf("expected failure wake prompt, got %+v", failPrompts)
 			}
 
+			// 1b. Shutdown interruption reasons return 200 with failed: false and preserve statuses
+			sFailSD := newMemoryVanadisStore()
+			bFailSDID := "build-act-fail-shutdown"
+			bFailSD := mkBuild(bFailSDID, "123456789012345678", "Fail Build SD", "Test Shutdown Interruption", "running")
+			cFailSD := VanadisChunk{
+				ID:         "chunk-fail-sd",
+				BuildID:    bFailSDID,
+				ChunkIndex: 0,
+				Mode:       "action",
+				Title:      "Action Step Shutdown",
+				Status:     "in_progress",
+				Effort:     "low",
+				CreatedAt:  time.Now().UTC(),
+				UpdatedAt:  time.Now().UTC(),
+			}
+			_ = sFailSD.CreateBuild(context.Background(), bFailSD, []VanadisChunk{cFailSD})
+			srvFailSD := NewVanadisServer(Config{BrainURL: tsBrainFail.URL, SynapseURL: tsBrainFail.URL}, sFailSD, nil, tsBrainFail.Client())
+			muxFailSD := SetupMux(srvFailSD)
+
+			shutdownReasons := []string{"interrupted by shutdown", "context cancelled during execution", "  Interrupted By Shutdown  "}
+			for _, rReason := range shutdownReasons {
+				recSD := httptest.NewRecorder()
+				payload := fmt.Sprintf(`{"chunk_id":"chunk-fail-sd","reason":%q}`, rReason)
+				muxFailSD.ServeHTTP(recSD, httptest.NewRequest(http.MethodPost, "/chunks/fail", strings.NewReader(payload)))
+				if recSD.Code != http.StatusOK {
+					t.Fatalf("expected 200 OK on shutdown fail for reason %q, got %d: %s", rReason, recSD.Code, recSD.Body.String())
+				}
+				var resSD map[string]any
+				_ = json.Unmarshal(recSD.Body.Bytes(), &resSD)
+				if resSD["failed"] != false || resSD["chunk_id"] != "chunk-fail-sd" || resSD["build_id"] != bFailSDID {
+					t.Errorf("expected failed=false for shutdown reason %q, got %+v", rReason, resSD)
+				}
+				cCheck, bCheck, err := sFailSD.GetChunk(context.Background(), "chunk-fail-sd")
+				if err != nil {
+					t.Fatalf("GetChunk error: %v", err)
+				}
+				if cCheck.Status != "in_progress" {
+					t.Errorf("expected chunk status in_progress for reason %q, got %q", rReason, cCheck.Status)
+				}
+				if bCheck.Status != "running" {
+					t.Errorf("expected build status running for reason %q, got %q", rReason, bCheck.Status)
+				}
+			}
+
 			// 2. Repeat fail -> already failed (failed: false)
 			recRepeat := httptest.NewRecorder()
 			muxFail.ServeHTTP(recRepeat, httptest.NewRequest(http.MethodPost, "/chunks/fail", strings.NewReader(`{"chunk_id":"chunk-fail-1","reason":"hardware timeout"}`)))
