@@ -106,20 +106,14 @@ func MatchSensitiveTokens(input string) []string {
 	return matches
 }
 
-// RegisterSensitiveTokens safely registers secret strings into the global redaction pool.
-// Uses a copy-on-write atomic swap so reads remain completely lock-free.
-func RegisterSensitiveTokens(tokens ...string) {
-	sensitiveTokensMu.Lock()
-	defer sensitiveTokensMu.Unlock()
-
-	current := getSensitiveTokens()
-	seen := make(map[string]bool, len(current)+len(tokens))
-	for _, tok := range current {
+func buildSensitiveTokenSlice(existing, tokens []string) []string {
+	seen := make(map[string]bool, len(existing)+len(tokens))
+	for _, tok := range existing {
 		seen[tok] = true
 	}
 
-	updated := make([]string, len(current), len(current)+len(tokens))
-	copy(updated, current)
+	updated := make([]string, len(existing), len(existing)+len(tokens))
+	copy(updated, existing)
 
 	for _, tok := range tokens {
 		trimmed := strings.TrimSpace(tok)
@@ -133,6 +127,26 @@ func RegisterSensitiveTokens(tokens ...string) {
 		return len(updated[i]) > len(updated[j])
 	})
 
+	return updated
+}
+
+// ReplaceSensitiveTokens atomically replaces the global sensitive token pool with the provided tokens.
+// Uses a copy-on-write atomic swap so reads remain completely lock-free.
+func ReplaceSensitiveTokens(tokens ...string) {
+	sensitiveTokensMu.Lock()
+	defer sensitiveTokensMu.Unlock()
+
+	updated := buildSensitiveTokenSlice(nil, tokens)
+	sensitiveTokensPtr.Store(&updated)
+}
+
+// RegisterSensitiveTokens safely registers secret strings into the global redaction pool.
+// Uses a copy-on-write atomic swap so reads remain completely lock-free.
+func RegisterSensitiveTokens(tokens ...string) {
+	sensitiveTokensMu.Lock()
+	defer sensitiveTokensMu.Unlock()
+
+	updated := buildSensitiveTokenSlice(getSensitiveTokens(), tokens)
 	sensitiveTokensPtr.Store(&updated)
 }
 

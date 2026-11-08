@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -287,6 +288,14 @@ func (m *memoryVanadisStore) GetChunk(_ context.Context, chunkID string) (*Vanad
 	return nil, nil, ErrChunkNotFound
 }
 
+func reposMatch(a, b string) bool {
+	b = normalizeRepo(b)
+	if b == "" {
+		return false
+	}
+	return slices.Contains(repoMatchCandidates(a), b)
+}
+
 func (m *memoryVanadisStore) GetChunkByPR(_ context.Context, repo string, prNumber int) (*VanadisChunkPRLookup, error) {
 	repo = normalizeRepo(repo)
 	if repo == "" || prNumber <= 0 {
@@ -298,7 +307,7 @@ func (m *memoryVanadisStore) GetChunkByPR(_ context.Context, repo string, prNumb
 			continue
 		}
 		for _, c := range list {
-			if c.Repo == repo && c.PRNumber == prNumber {
+			if reposMatch(c.Repo, repo) && c.PRNumber == prNumber {
 				hasRemaining := false
 				for _, c2 := range list {
 					if c2.ChunkIndex > c.ChunkIndex {
@@ -328,7 +337,7 @@ func (m *memoryVanadisStore) AttachChunkPR(_ context.Context, chunkID string, pr
 	for bID, list := range m.chunks {
 		for i := range list {
 			if list[i].ID == chunkID {
-				if repo != "" && list[i].Repo != repo {
+				if repo != "" && !reposMatch(list[i].Repo, repo) {
 					return "", fmt.Errorf("chunk %s repo %q does not match %q", chunkID, list[i].Repo, repo)
 				}
 				list[i].PRNumber = prNumber
@@ -354,7 +363,7 @@ func (m *memoryVanadisStore) AdvanceChunkByPR(_ context.Context, repo string, pr
 	}
 	for bID, list := range m.chunks {
 		for i := range list {
-			if list[i].Repo == repo && list[i].PRNumber == prNumber {
+			if reposMatch(list[i].Repo, repo) && list[i].PRNumber == prNumber {
 				b := m.builds[bID]
 				if b.Status == "cancelled" {
 					return &VanadisAdvancementResult{
@@ -491,7 +500,7 @@ func (m *memoryVanadisStore) FailChunkByPR(_ context.Context, repo string, prNum
 	}
 	for bID, list := range m.chunks {
 		for i := range list {
-			if list[i].Repo == repo && list[i].PRNumber == prNumber && list[i].Status != "merged" && list[i].Status != "failed" {
+			if reposMatch(list[i].Repo, repo) && list[i].PRNumber == prNumber && list[i].Status != "merged" && list[i].Status != "failed" {
 				list[i].Status = "failed"
 				now := time.Now().UTC()
 				if list[i].CompletedAt.IsZero() {

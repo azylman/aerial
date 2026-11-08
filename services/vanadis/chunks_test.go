@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -603,6 +604,54 @@ func TestVanadisStore_ChunkLifecycle(t *testing.T) {
 			t.Error("expected fail on invalid args to return false")
 		}
 	})
+}
+
+func TestRepoMatching_TableDriven(t *testing.T) {
+	candidateTests := []struct {
+		name     string
+		input    string
+		expected []string
+	}{
+		{
+			name:     "empty repo returns nil",
+			input:    "",
+			expected: nil,
+		},
+		{
+			name:     "bare repo adds default owner prefix",
+			input:    "aerial",
+			expected: []string{"aerial", "azylman/aerial"},
+		},
+		{
+			name:     "bare repo with whitespace trims and adds default owner prefix",
+			input:    "  aerial  ",
+			expected: []string{"aerial", "azylman/aerial"},
+		},
+		{
+			name:     "prefixed repo with default owner adds bare candidate",
+			input:    "azylman/aerial",
+			expected: []string{"azylman/aerial", "aerial"},
+		},
+		{
+			name:     "other org repo returns single candidate",
+			input:    "other-org/aerial",
+			expected: []string{"other-org/aerial"},
+		},
+		{
+			name:     "nested slash under default owner returns single candidate",
+			input:    "azylman/sub/repo",
+			expected: []string{"azylman/sub/repo"},
+		},
+	}
+
+	for _, tc := range candidateTests {
+		t.Run("candidates_"+tc.name, func(t *testing.T) {
+			got := repoMatchCandidates(tc.input)
+			if !slices.Equal(got, tc.expected) {
+				t.Errorf("repoMatchCandidates(%q) = %v, want %v", tc.input, got, tc.expected)
+			}
+		})
+	}
 }
 
 func TestServer_ChunkEndpoints(t *testing.T) {
@@ -1543,8 +1592,14 @@ func TestPostgresVanadisStore_ChunkMethods(t *testing.T) {
 		}
 
 		// Success
+		var capturedCandidates []string
 		sSuccess := newMockStore(mockDB{
-			queryRowFn: func(context.Context, string, ...any) pgx.Row {
+			queryRowFn: func(_ context.Context, _ string, args ...any) pgx.Row {
+				if len(args) > 0 {
+					if cands, ok := args[0].([]string); ok {
+						capturedCandidates = cands
+					}
+				}
 				return &genericMockRow{scanFn: func(dest ...any) error {
 					*dest[0].(*string) = "c1"
 					*dest[1].(*string) = "b1"
@@ -1557,6 +1612,9 @@ func TestPostgresVanadisStore_ChunkMethods(t *testing.T) {
 		resSuccess, err := sSuccess.GetChunkByPR(ctx, "aerial", 101)
 		if err != nil || !resSuccess.Matched || resSuccess.ChunkID != "c1" || resSuccess.Effort != "low" || !resSuccess.HasRemainingChunks {
 			t.Errorf("unexpected success lookup: %+v, err=%v", resSuccess, err)
+		}
+		if !slices.Equal(capturedCandidates, []string{"aerial", "azylman/aerial"}) {
+			t.Errorf("GetChunkByPR candidates = %v, want [aerial azylman/aerial]", capturedCandidates)
 		}
 	})
 
@@ -1708,6 +1766,35 @@ func TestPostgresVanadisStore_ChunkMethods(t *testing.T) {
 		threadID, err := sNoRepo.AttachChunkPR(ctx, "c1", 101, "")
 		if err != nil || threadID != "thread-123" {
 			t.Errorf("unexpected AttachChunkPR result: threadID=%q err=%v", threadID, err)
+		}
+
+		// Success with repo candidates
+		var capturedAttachCandidates []string
+		sWithRepo := newMockStore(mockDB{
+			queryRowFn: func(_ context.Context, sql string, args ...any) pgx.Row {
+				if strings.Contains(sql, "SELECT mode") {
+					return &genericMockRow{scanFn: func(dest ...any) error {
+						*dest[0].(*string) = "pr"
+						return nil
+					}}
+				}
+				if len(args) >= 3 {
+					if cands, ok := args[2].([]string); ok {
+						capturedAttachCandidates = cands
+					}
+				}
+				return &genericMockRow{scanFn: func(dest ...any) error {
+					*dest[0].(*string) = "thread-123"
+					return nil
+				}}
+			},
+		})
+		threadIDWithRepo, err := sWithRepo.AttachChunkPR(ctx, "c1", 101, "aerial")
+		if err != nil || threadIDWithRepo != "thread-123" {
+			t.Errorf("unexpected AttachChunkPR with repo result: threadID=%q err=%v", threadIDWithRepo, err)
+		}
+		if !slices.Equal(capturedAttachCandidates, []string{"aerial", "azylman/aerial"}) {
+			t.Errorf("AttachChunkPR candidates = %v, want [aerial azylman/aerial]", capturedAttachCandidates)
 		}
 	})
 
@@ -1960,10 +2047,16 @@ func TestPostgresVanadisStore_ChunkMethods(t *testing.T) {
 		}
 
 		// Success advancing to next chunk
+		var capturedAdvanceCandidates []string
 		sAdvanceNextSuccess := newMockStore(mockDB{
 			beginFn: func(context.Context) (pgx.Tx, error) {
 				return &mockTx{
-					queryRowFn: func(context.Context, string, ...any) pgx.Row {
+					queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
+						if len(args) > 0 {
+							if cands, ok := args[0].([]string); ok {
+								capturedAdvanceCandidates = cands
+							}
+						}
 						return mockAdvRow("pr", "Chunk 1", "failed", "failed")
 					},
 					queryFn: func(context.Context, string, ...any) (pgx.Rows, error) {
@@ -1978,6 +2071,9 @@ func TestPostgresVanadisStore_ChunkMethods(t *testing.T) {
 		resNext, err := sAdvanceNextSuccess.AdvanceChunkByPR(ctx, "aerial", 101)
 		if err != nil || !resNext.Matched || !resNext.Advanced || resNext.NextChunkIndex != 1 || resNext.BuildStatus != "running" {
 			t.Errorf("expected success advancing and recovering build to next chunk, got %+v err=%v", resNext, err)
+		}
+		if !slices.Equal(capturedAdvanceCandidates, []string{"aerial", "azylman/aerial"}) {
+			t.Errorf("AdvanceChunkByPR candidates = %v, want [aerial azylman/aerial]", capturedAdvanceCandidates)
 		}
 
 		// Recover build running error when advancing to next chunk
@@ -2077,8 +2173,14 @@ func TestPostgresVanadisStore_ChunkMethods(t *testing.T) {
 		}
 
 		// Success
+		var capturedFailCandidates []string
 		sFailSuccess := newMockStore(mockDB{
-			queryRowFn: func(context.Context, string, ...any) pgx.Row {
+			queryRowFn: func(ctx context.Context, sql string, args ...any) pgx.Row {
+				if len(args) > 0 {
+					if cands, ok := args[0].([]string); ok {
+						capturedFailCandidates = cands
+					}
+				}
 				return &genericMockRow{scanFn: func(dest ...any) error {
 					*dest[0].(*string) = "b1"
 					*dest[1].(*string) = "c1"
@@ -2089,6 +2191,9 @@ func TestPostgresVanadisStore_ChunkMethods(t *testing.T) {
 		bID, cID, failed, err := sFailSuccess.FailChunkByPR(ctx, "aerial", 101)
 		if err != nil || !failed || bID != "b1" || cID != "c1" {
 			t.Errorf("unexpected FailChunkByPR success: got (%s, %s, %v, %v)", bID, cID, failed, err)
+		}
+		if !slices.Equal(capturedFailCandidates, []string{"aerial", "azylman/aerial"}) {
+			t.Errorf("FailChunkByPR candidates = %v, want [aerial azylman/aerial]", capturedFailCandidates)
 		}
 	})
 

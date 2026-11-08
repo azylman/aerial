@@ -214,8 +214,8 @@ func (s *PostgresVanadisStore) GetChunkByPR(ctx context.Context, repo string, pr
 	if s == nil || s.db == nil {
 		return nil, errors.New("database connection is nil")
 	}
-	repo = normalizeRepo(repo)
-	if repo == "" || prNumber <= 0 {
+	candidates := repoMatchCandidates(repo)
+	if len(candidates) == 0 || prNumber <= 0 {
 		return &VanadisChunkPRLookup{Matched: false}, nil
 	}
 	const query = `
@@ -226,12 +226,12 @@ func (s *PostgresVanadisStore) GetChunkByPR(ctx context.Context, repo string, pr
 		       )
 		FROM vanadis_chunks c
 		JOIN vanadis_builds b ON c.build_id = b.id
-		WHERE c.repo = $1 AND c.pr_number = $2 AND b.status != 'cancelled'
+		WHERE c.repo = ANY($1) AND c.pr_number = $2 AND b.status != 'cancelled'
 		ORDER BY c.updated_at DESC
 		LIMIT 1;`
 	var chunkID, buildID, effort string
 	var hasRemaining bool
-	err := s.db.QueryRow(ctx, query, repo, prNumber).Scan(&chunkID, &buildID, &effort, &hasRemaining)
+	err := s.db.QueryRow(ctx, query, candidates, prNumber).Scan(&chunkID, &buildID, &effort, &hasRemaining)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return &VanadisChunkPRLookup{Matched: false}, nil
@@ -253,7 +253,7 @@ func (s *PostgresVanadisStore) AttachChunkPR(ctx context.Context, chunkID string
 		return "", errors.New("database connection is nil")
 	}
 	chunkID = strings.TrimSpace(chunkID)
-	repo = normalizeRepo(repo)
+	candidates := repoMatchCandidates(repo)
 	if chunkID == "" || prNumber <= 0 {
 		return "", errors.New("chunk id and valid pr number are required")
 	}
@@ -272,9 +272,9 @@ func (s *PostgresVanadisStore) AttachChunkPR(ctx context.Context, chunkID string
 
 	var threadID string
 	var err error
-	if repo != "" {
-		const qWithRepo = `UPDATE vanadis_chunks c SET pr_number = $1, status = CASE WHEN c.status IN ('merged', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $2 AND c.repo = $3 AND c.status != 'cancelled' AND b.status != 'cancelled' RETURNING b.thread_id;`
-		err = s.db.QueryRow(ctx, qWithRepo, prNumber, chunkID, repo).Scan(&threadID)
+	if len(candidates) > 0 {
+		const qWithRepo = `UPDATE vanadis_chunks c SET pr_number = $1, status = CASE WHEN c.status IN ('merged', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $2 AND c.repo = ANY($3) AND c.status != 'cancelled' AND b.status != 'cancelled' RETURNING b.thread_id;`
+		err = s.db.QueryRow(ctx, qWithRepo, prNumber, chunkID, candidates).Scan(&threadID)
 	} else {
 		const qNoRepo = `UPDATE vanadis_chunks c SET pr_number = $1, status = CASE WHEN c.status IN ('merged', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $2 AND c.status != 'cancelled' AND b.status != 'cancelled' RETURNING b.thread_id;`
 		err = s.db.QueryRow(ctx, qNoRepo, prNumber, chunkID).Scan(&threadID)
@@ -436,8 +436,8 @@ func (s *PostgresVanadisStore) AdvanceChunkByPR(ctx context.Context, repo string
 	if s == nil || s.db == nil {
 		return nil, errors.New("database connection is nil")
 	}
-	repo = normalizeRepo(repo)
-	if repo == "" || prNumber <= 0 {
+	candidates := repoMatchCandidates(repo)
+	if len(candidates) == 0 || prNumber <= 0 {
 		return &VanadisAdvancementResult{Matched: false}, nil
 	}
 	tx, err := s.db.Begin(ctx)
@@ -454,12 +454,12 @@ func (s *PostgresVanadisStore) AdvanceChunkByPR(ctx context.Context, repo string
 		SELECT c.id, c.build_id, c.chunk_index, c.mode, c.title, c.status, b.thread_id, b.tier, COALESCE(NULLIF(b.title, ''), b.objective), b.objective, b.status, COALESCE(b.status_message_id, '')
 		FROM vanadis_chunks c
 		JOIN vanadis_builds b ON c.build_id = b.id
-		WHERE c.repo = $1 AND c.pr_number = $2
+		WHERE c.repo = ANY($1) AND c.pr_number = $2
 		ORDER BY c.updated_at DESC LIMIT 1 FOR UPDATE`
 
 	var chunkID, buildID, cTitle, cStatus, threadID, bTitle, objective, bStatus, bStatusMsgID, cMode string
 	var chunkIdx, tier int
-	err = tx.QueryRow(ctx, selectChunkQuery, repo, prNumber).Scan(
+	err = tx.QueryRow(ctx, selectChunkQuery, candidates, prNumber).Scan(
 		&chunkID, &buildID, &chunkIdx, &cMode, &cTitle, &cStatus, &threadID, &tier, &bTitle, &objective, &bStatus, &bStatusMsgID,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -504,18 +504,18 @@ func (s *PostgresVanadisStore) FailChunkByPR(ctx context.Context, repo string, p
 	if s == nil || s.db == nil {
 		return "", "", false, errors.New("database connection is nil")
 	}
-	repo = normalizeRepo(repo)
-	if repo == "" || prNumber <= 0 {
+	candidates := repoMatchCandidates(repo)
+	if len(candidates) == 0 || prNumber <= 0 {
 		return "", "", false, nil
 	}
 	const query = `
 		UPDATE vanadis_chunks c
 		SET status = 'failed', completed_at = COALESCE(c.completed_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP
 		FROM vanadis_builds b
-		WHERE c.build_id = b.id AND c.repo = $1 AND c.pr_number = $2 AND c.status NOT IN ('merged', 'failed')
+		WHERE c.build_id = b.id AND c.repo = ANY($1) AND c.pr_number = $2 AND c.status NOT IN ('merged', 'failed')
 		RETURNING c.build_id, c.id;`
 	var buildID, chunkID string
-	err := s.db.QueryRow(ctx, query, repo, prNumber).Scan(&buildID, &chunkID)
+	err := s.db.QueryRow(ctx, query, candidates, prNumber).Scan(&buildID, &chunkID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", "", false, nil

@@ -1693,8 +1693,10 @@ func TestAmbientContextConfig(t *testing.T) {
 }
 
 func TestRegisterConfigTokens(t *testing.T) {
+	t.Cleanup(sanitizer.ResetSensitiveTokensForTest)
 	tests := []struct {
 		name       string
+		initialCfg *Config
 		cfg        *Config
 		input      string
 		wantResult string
@@ -1764,10 +1766,25 @@ func TestRegisterConfigTokens(t *testing.T) {
 			input:      "sec: secret_secrets_token_9999, api: secret_api_key_888888, harn: secret_harness_key_77777, pat: ghp_testpersonalaccesstoken6666666, db: secret_db_pass_55555, raw-env: secret_raw_env_44444, raw-hdr: secret_raw_hdr_33333",
 			wantResult: "sec: [REDACTED], api: [REDACTED], harn: [REDACTED], pat: [REDACTED], db: [REDACTED], raw-env: [REDACTED], raw-hdr: [REDACTED]",
 		},
+		{
+			name: "purges removed config secrets on reload",
+			initialCfg: NewFromData(&ConfigData{
+				DiscordToken: "secret_discord_token_initial_12345",
+				APIKey:       "secret_api_key_initial_888888",
+			}),
+			cfg: NewFromData(&ConfigData{
+				DiscordToken: "secret_discord_token_initial_12345",
+			}),
+			input:      "sec: secret_api_key_initial_888888, preserved: secret_discord_token_initial_12345",
+			wantResult: "sec: secret_api_key_initial_888888, preserved: [REDACTED]",
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.initialCfg != nil {
+				RegisterConfigTokens(tc.initialCfg)
+			}
 			RegisterConfigTokens(tc.cfg)
 
 			got := sanitizer.SanitizeString(tc.input)
@@ -2038,6 +2055,7 @@ func TestWithSharedSecretsLookup_TableDriven(t *testing.T) {
 }
 
 func TestRegisterConfigTokens_SharedSecrets_TableDriven(t *testing.T) {
+	t.Cleanup(sanitizer.ResetSensitiveTokensForTest)
 	origSharedPath := SharedSecretsPath
 	defer func() {
 		SharedSecretsPath = origSharedPath
@@ -2049,16 +2067,20 @@ func TestRegisterConfigTokens_SharedSecrets_TableDriven(t *testing.T) {
 		"DYNAMIC_SHARED_SECRET": "dynamic_shared_secret_token_val_12345"
 	}`), 0o600)
 
+	emptySecretsFile := filepath.Join(tmpDir, "empty-secrets.json")
+	_ = os.WriteFile(emptySecretsFile, []byte(`{}`), 0o600)
+
 	secretsDir := filepath.Join(tmpDir, "secrets_dir")
 	_ = os.MkdirAll(secretsDir, 0o755)
 	_ = os.WriteFile(filepath.Join(secretsDir, "DYNAMIC_DIR_SECRET"), []byte("dynamic_dir_secret_token_val_67890"), 0o600)
 
 	tests := []struct {
-		name       string
-		path       string
-		cfg        *Config
-		input      string
-		wantResult string
+		name        string
+		initialPath string
+		path        string
+		cfg         *Config
+		input       string
+		wantResult  string
 	}{
 		{
 			name:       "shared secrets token registered and redacted from json file",
@@ -2074,10 +2096,22 @@ func TestRegisterConfigTokens_SharedSecrets_TableDriven(t *testing.T) {
 			input:      "alert with dynamic_dir_secret_token_val_67890 in message",
 			wantResult: "alert with [REDACTED] in message",
 		},
+		{
+			name:        "shared secrets purged on reload when secret removed from json file",
+			initialPath: secretsFile,
+			path:        emptySecretsFile,
+			cfg:         nil,
+			input:       "alert with dynamic_shared_secret_token_val_12345 in message",
+			wantResult:  "alert with dynamic_shared_secret_token_val_12345 in message",
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.initialPath != "" {
+				SharedSecretsPath = tc.initialPath
+				RegisterConfigTokens(nil)
+			}
 			SharedSecretsPath = tc.path
 			RegisterConfigTokens(tc.cfg)
 			got := sanitizer.SanitizeString(tc.input)
