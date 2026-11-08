@@ -263,7 +263,7 @@ func isTaskReady(node TaskNode, nodes map[int64]TaskNode) bool {
 		return false
 	}
 	for _, bid := range node.BlockedBy {
-		if bNode, exists := nodes[bid]; exists && bNode.Status == "open" {
+		if bNode, exists := nodes[bid]; exists && bNode.Status != "completed" {
 			return false
 		}
 	}
@@ -331,31 +331,65 @@ func buildReadyNode(node TaskNode, nodes map[int64]TaskNode) ReadyTask {
 func ValidateCloseGuard(nodes map[int64]TaskNode, id int64, resolution string) error {
 	switch resolution {
 	case "wont_do":
-		return nil
+		if _, exists := nodes[id]; !exists {
+			return fmt.Errorf("task %d not found in graph", id)
+		}
+		return validateWontDoClose(nodes, id)
 	case "completed":
 		node, exists := nodes[id]
 		if !exists {
 			return fmt.Errorf("task %d not found in graph", id)
 		}
-		var openBlockers []int64
-		for _, bid := range node.BlockedBy {
-			if b, ok := nodes[bid]; ok && b.Status == "open" {
-				openBlockers = append(openBlockers, bid)
-			}
-		}
-		var openSubtasks []int64
-		for _, sid := range node.SubtaskIDs {
-			if s, ok := nodes[sid]; ok && s.Status == "open" {
-				openSubtasks = append(openSubtasks, sid)
-			}
-		}
-		if len(openBlockers) > 0 || len(openSubtasks) > 0 {
-			return fmt.Errorf("cannot complete task %d: open blockers: %v, open subtasks: %v", id, openBlockers, openSubtasks)
-		}
-		return nil
+		return validateCompletedClose(nodes, node, id)
 	default:
 		return fmt.Errorf("invalid resolution: %q (must be 'completed' or 'wont_do')", resolution)
 	}
+}
+
+func validateWontDoClose(nodes map[int64]TaskNode, id int64) error {
+	closingSet := make(map[int64]bool)
+	closingSet[id] = true
+	for _, sid := range CollectOpenSubtreeIDs(nodes, id) {
+		closingSet[sid] = true
+	}
+	openBlockedSet := make(map[int64]bool)
+	for cid := range closingSet {
+		for _, bid := range nodes[cid].Blocks {
+			if !closingSet[bid] {
+				if bNode, ok := nodes[bid]; ok && bNode.Status == "open" {
+					openBlockedSet[bid] = true
+				}
+			}
+		}
+	}
+	if len(openBlockedSet) > 0 {
+		openBlocked := make([]int64, 0, len(openBlockedSet))
+		for bid := range openBlockedSet {
+			openBlocked = append(openBlocked, bid)
+		}
+		slices.Sort(openBlocked)
+		return fmt.Errorf("cannot close task %d as wont_do: blocks open tasks: %v", id, openBlocked)
+	}
+	return nil
+}
+
+func validateCompletedClose(nodes map[int64]TaskNode, node TaskNode, id int64) error {
+	var openBlockers []int64
+	for _, bid := range node.BlockedBy {
+		if b, ok := nodes[bid]; ok && b.Status == "open" {
+			openBlockers = append(openBlockers, bid)
+		}
+	}
+	var openSubtasks []int64
+	for _, sid := range node.SubtaskIDs {
+		if s, ok := nodes[sid]; ok && s.Status == "open" {
+			openSubtasks = append(openSubtasks, sid)
+		}
+	}
+	if len(openBlockers) > 0 || len(openSubtasks) > 0 {
+		return fmt.Errorf("cannot complete task %d: open blockers: %v, open subtasks: %v", id, openBlockers, openSubtasks)
+	}
+	return nil
 }
 
 // CollectOpenSubtreeIDs collects IDs of all open tasks transitively beneath rootID.

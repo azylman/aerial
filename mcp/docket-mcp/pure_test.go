@@ -210,6 +210,8 @@ func TestBuildReadyTree(t *testing.T) {
 		8:  {ID: 8, Title: "Top with Nonexistent Parent", Status: "open", ParentID: int64Ptr(999)},
 		9:  {ID: 9, Title: "Deep Sub Ready 9", Status: "open", ParentID: int64Ptr(2)},
 		10: {ID: 10, Title: "Done Subtask 10", Status: "completed", ParentID: int64Ptr(1)},
+		12: {ID: 12, Title: "Top WontDo Blocker 12", Status: "wont_do"},
+		13: {ID: 13, Title: "Top Blocked by WontDo 13", Status: "open", BlockedBy: []int64{12}},
 	}
 
 	// Update node 2 subtask IDs
@@ -287,14 +289,23 @@ func TestValidateCloseGuard(t *testing.T) {
 	t.Parallel()
 
 	nodes := map[int64]TaskNode{
-		1: {ID: 1, Status: "open", BlockedBy: []int64{2}, SubtaskIDs: []int64{3}},
-		2: {ID: 2, Status: "open"},
-		3: {ID: 3, Status: "open"},
-		4: {ID: 4, Status: "open", BlockedBy: []int64{5}, SubtaskIDs: []int64{6}},
-		5: {ID: 5, Status: "completed"},
-		6: {ID: 6, Status: "wont_do"},
-		7: {ID: 7, Status: "open", BlockedBy: []int64{2}},
-		8: {ID: 8, Status: "open", SubtaskIDs: []int64{3}},
+		1:  {ID: 1, Status: "open", BlockedBy: []int64{2}, SubtaskIDs: []int64{3}},
+		2:  {ID: 2, Status: "open"},
+		3:  {ID: 3, Status: "open"},
+		4:  {ID: 4, Status: "open", BlockedBy: []int64{5}, SubtaskIDs: []int64{6}},
+		5:  {ID: 5, Status: "completed"},
+		6:  {ID: 6, Status: "wont_do"},
+		7:  {ID: 7, Status: "open", BlockedBy: []int64{2}},
+		8:  {ID: 8, Status: "open", SubtaskIDs: []int64{3}},
+		9:  {ID: 9, Status: "open", Blocks: []int64{10}},
+		10: {ID: 10, Status: "open"},
+		11: {ID: 11, Status: "open", SubtaskIDs: []int64{12}},
+		12: {ID: 12, Status: "open", Blocks: []int64{13}},
+		13: {ID: 13, Status: "open"},
+		14: {ID: 14, Status: "open", Blocks: []int64{15, 16, 17}, SubtaskIDs: []int64{17}},
+		15: {ID: 15, Status: "completed"},
+		16: {ID: 16, Status: "wont_do"},
+		17: {ID: 17, Status: "open"},
 	}
 
 	tests := []struct {
@@ -310,6 +321,34 @@ func TestValidateCloseGuard(t *testing.T) {
 			id:         1,
 			resolution: "wont_do",
 			wantErr:    "",
+		},
+		{
+			name:       "wont_do rejected when target task blocks open task",
+			nodes:      nodes,
+			id:         9,
+			resolution: "wont_do",
+			wantErr:    "cannot close task 9 as wont_do: blocks open tasks: [10]",
+		},
+		{
+			name:       "wont_do rejected when open subtask in cascaded subtree blocks external open task",
+			nodes:      nodes,
+			id:         11,
+			resolution: "wont_do",
+			wantErr:    "cannot close task 11 as wont_do: blocks open tasks: [13]",
+		},
+		{
+			name:       "wont_do allowed when blocked tasks are closed or in same cascaded subtree",
+			nodes:      nodes,
+			id:         14,
+			resolution: "wont_do",
+			wantErr:    "",
+		},
+		{
+			name:       "wont_do on nonexistent task returns error",
+			nodes:      nodes,
+			id:         999,
+			resolution: "wont_do",
+			wantErr:    "task 999 not found in graph",
 		},
 		{
 			name:       "completed allowed when all blockers and subtasks are closed",
@@ -448,6 +487,14 @@ func TestComputeUnblockedIDs(t *testing.T) {
 		7: {ID: 7, Status: "open"},      // New task not in before
 	}
 
+	afterWontDo := map[int64]TaskNode{
+		1: {ID: 1, Status: "wont_do", Blocks: []int64{2, 3}},
+		2: {ID: 2, Status: "open", BlockedBy: []int64{1}},
+		3: {ID: 3, Status: "open", BlockedBy: []int64{1, 4}},
+		4: {ID: 4, Status: "open", Blocks: []int64{3}},
+		5: {ID: 5, Status: "open"},
+	}
+
 	tests := []struct {
 		name      string
 		before    map[int64]TaskNode
@@ -461,6 +508,13 @@ func TestComputeUnblockedIDs(t *testing.T) {
 			after:     after,
 			closedIDs: []int64{1},
 			wantIDs:   []int64{2},
+		},
+		{
+			name:      "blocker transitions to wont_do leaves dependent blocked",
+			before:    before,
+			after:     afterWontDo,
+			closedIDs: []int64{1},
+			wantIDs:   nil,
 		},
 		{
 			name:      "no transitions when no dependencies change",
