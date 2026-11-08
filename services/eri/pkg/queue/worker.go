@@ -44,6 +44,7 @@ type turnExecution struct {
 	turnCtx                                                                                     context.Context
 	turnCancel                                                                                  context.CancelFunc
 	interrupted                                                                                 atomic.Bool
+	interruptReason                                                                             string
 }
 
 func (te *turnExecution) isDispatch() bool {
@@ -116,6 +117,24 @@ func (te *turnExecution) isInterrupted() bool {
 	return te != nil && te.interrupted.Load()
 }
 
+func (te *turnExecution) setInterruptReason(reason string) {
+	if te == nil {
+		return
+	}
+	te.activeSessionMu.Lock()
+	te.interruptReason = reason
+	te.activeSessionMu.Unlock()
+}
+
+func (te *turnExecution) getInterruptReason() string {
+	if te == nil {
+		return ""
+	}
+	te.activeSessionMu.Lock()
+	defer te.activeSessionMu.Unlock()
+	return te.interruptReason
+}
+
 func (te *turnExecution) cancelTurn() {
 	if te != nil && te.turnCancel != nil {
 		te.turnCancel()
@@ -125,7 +144,20 @@ func (te *turnExecution) cancelTurn() {
 func (te *turnExecution) finalizeInterruptedTurn(currentModel string) {
 	te.stopIndicators()
 	metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
-	te.failBurstWithStatus("cancelled", InterruptedByOperatorReason, currentModel)
+
+	// If this turn was a dispatch that was already marked terminal (FAILED) by CancelPendingDispatches,
+	// do not overwrite the status/error_message in the database.
+	if te.isDispatch() && te.store() != nil {
+		if d, err := te.store().GetDispatch(context.Background(), te.dispatch.ID); err == nil && d != nil && d.Status == db.StatusFailed {
+			return
+		}
+	}
+
+	reason := InterruptedByOperatorReason
+	if customReason := te.getInterruptReason(); customReason != "" {
+		reason = customReason
+	}
+	te.failBurstWithStatus("cancelled", reason, currentModel)
 }
 
 func (te *turnExecution) store() db.Store {
@@ -454,6 +486,43 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 	te.executeWithRetries()
 }
 
+func (te *turnExecution) releaseActivePoolLease() {
+	if !te.isEphemeral && te.activePool != nil {
+		if evicter, ok := te.activePool.(interface{ EvictSession(sessionKey string) error }); ok {
+			if err := evicter.EvictSession(te.leaseKey()); err != nil {
+				log.Printf("[WorkerPool] Warning evicting session for %s: %v", te.leaseKey(), err)
+			}
+		}
+	}
+	if te.lease != nil {
+		if relErr := te.lease.Release(); relErr != nil {
+			log.Printf("[WorkerPool] Warning releasing lease for %s: %v", te.threadID, relErr)
+		}
+	}
+}
+
+func (p *WorkerPool) setupVanadisChunkTurn(d db.Dispatch, te *turnExecution) func() {
+	chunkID, buildID, chunkIdx := extractVanadisDispatchInfo(d)
+	if chunkID == "" {
+		return func() {}
+	}
+	p.StartChunkStepTurn(chunkID, buildID, chunkIdx, d.ID)
+	p.ensureChunkWidgetHydrated(d.Prompt, chunkID, buildID)
+	te.statusUpdater = NewChunkStepStatusUpdater(chunkID, func(step string) error {
+		return p.FlushChunkActiveStep(chunkID, d.ID, step)
+	})
+	return func() {
+		if te.statusUpdater != nil {
+			te.statusUpdater.Stop()
+			te.statusUpdater.DeleteStatusMessage()
+		}
+		p.FinishChunkStepTurn(chunkID, d.ID)
+		if d.Source == "vanadis" && (p.ctx == nil || p.ctx.Err() == nil) && !te.isInterrupted() {
+			p.notifyVanadisChunkOutcome(chunkID, te.turnStatus, te.turnError)
+		}
+	}
+}
+
 func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 	if p.ctx.Err() != nil {
 		return
@@ -517,39 +586,10 @@ func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
 	if !te.acquirePoolAndLease() {
 		return
 	}
-	defer func() {
-		if !te.isEphemeral && te.activePool != nil {
-			if evicter, ok := te.activePool.(interface{ EvictSession(sessionKey string) error }); ok {
-				if err := evicter.EvictSession(te.leaseKey()); err != nil {
-					log.Printf("[WorkerPool] Warning evicting session for %s: %v", te.leaseKey(), err)
-				}
-			}
-		}
-		if te.lease != nil {
-			if relErr := te.lease.Release(); relErr != nil {
-				log.Printf("[WorkerPool] Warning releasing lease for %s: %v", te.threadID, relErr)
-			}
-		}
-	}()
+	defer te.releaseActivePoolLease()
 
-	chunkID, buildID, chunkIdx := extractVanadisDispatchInfo(d)
-	if chunkID != "" {
-		p.StartChunkStepTurn(chunkID, buildID, chunkIdx, d.ID)
-		p.ensureChunkWidgetHydrated(d.Prompt, chunkID, buildID)
-		if d.Source == "vanadis" {
-			defer func() {
-				p.notifyVanadisChunkOutcome(chunkID, te.turnStatus, te.turnError)
-			}()
-		}
-		defer p.FinishChunkStepTurn(chunkID, d.ID)
-		te.statusUpdater = NewChunkStepStatusUpdater(chunkID, func(step string) error {
-			return p.FlushChunkActiveStep(chunkID, d.ID, step)
-		})
-		defer func() {
-			te.statusUpdater.Stop()
-			te.statusUpdater.DeleteStatusMessage()
-		}()
-	}
+	cleanupChunk := p.setupVanadisChunkTurn(d, te)
+	defer cleanupChunk()
 
 	te.turnAttempted = true
 	te.turnPrompt = te.buildDispatchPrompt()

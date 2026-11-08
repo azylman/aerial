@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -320,7 +321,7 @@ type CancelDispatchRequest struct {
 	Reason     string `json:"reason,omitempty"`
 }
 
-func handleCancelDispatch(store db.Store) http.HandlerFunc {
+func handleCancelDispatch(store db.Store, pools ...*queue.WorkerPool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", "POST")
@@ -349,6 +350,14 @@ func handleCancelDispatch(store db.Store) http.HandlerFunc {
 		if err != nil {
 			writeStoreErr(w, "cancelling dispatches", err)
 			return
+		}
+		if len(pools) > 0 && pools[0] != nil {
+			poolIDs := pools[0].CancelDispatches(dispatchID, buildID, reason)
+			for _, pid := range poolIDs {
+				if !slices.Contains(cancelledIDs, pid) {
+					cancelledIDs = append(cancelledIDs, pid)
+				}
+			}
 		}
 		httpkit.WriteJSON(w, http.StatusOK, map[string]any{"status": "ok", "cancelled_count": len(cancelledIDs), "cancelled_ids": cancelledIDs})
 	}
@@ -1354,7 +1363,7 @@ func SetupBrainMuxWithEmbedder(store db.Store, pool *queue.WorkerPool, embedder 
 	mux.Handle("/metrics", metrics.Handler())
 	mux.HandleFunc("/prompt", handlePrompt(store, pool))
 	mux.HandleFunc("/dispatch", handleDispatch(store, pool))
-	mux.HandleFunc("/dispatch/cancel", handleCancelDispatch(store))
+	mux.HandleFunc("/dispatch/cancel", handleCancelDispatch(store, pool))
 	mux.HandleFunc("/discord/message", handleDirectMessage(pool))
 	mux.HandleFunc("/discord/widget", handleStatusWidget(pool))
 	mux.HandleFunc("/internal/discord/message", handleInternalDiscordMessage(store, pool))

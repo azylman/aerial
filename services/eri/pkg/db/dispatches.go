@@ -243,8 +243,12 @@ func (s *SQLStore) CancelPendingDispatches(ctx context.Context, dispatchID, buil
 	}
 
 	buildPattern := ""
+	sessionPattern := ""
+	chunkPattern := ""
 	if bID != "" {
 		buildPattern = "Build ID: " + bID + "\n"
+		sessionPattern = "vanadis-" + bID + "-chunk-%"
+		chunkPattern = "Chunk ID: " + bID + "-chunk-"
 	}
 
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
@@ -252,13 +256,17 @@ func (s *SQLStore) CancelPendingDispatches(ctx context.Context, dispatchID, buil
 
 	query := `UPDATE dispatches
 	SET status = 'FAILED', error_message = $1, updated_at = $2
-	WHERE status = 'PENDING' AND (
+	WHERE status IN ('PENDING', 'PROCESSING') AND (
 		($3 != '' AND id = $3) OR
-		($4 != '' AND prompt LIKE '%' || $4 || '%')
+		($4 != '' AND (
+			prompt LIKE '%' || $4 || '%' OR
+			session_id LIKE $5 OR
+			prompt LIKE '%' || $6 || '%'
+		))
 	)
 	RETURNING id;`
 
-	rows, err := s.db.QueryContext(queryCtx, query, reason, time.Now().UTC(), dID, buildPattern)
+	rows, err := s.db.QueryContext(queryCtx, query, reason, time.Now().UTC(), dID, buildPattern, sessionPattern, chunkPattern)
 	if err != nil {
 		return nil, err
 	}

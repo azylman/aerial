@@ -697,6 +697,14 @@ func TestDispatchStore_SQLite(t *testing.T) {
 		Prompt:    "Build ID: b-123\nChunk 1",
 	}
 	mustOK(t, store.InsertDispatch(ctx, d3), "InsertDispatch disp-3")
+	d3b := Dispatch{
+		ID:        "disp-3b",
+		Source:    "vanadis",
+		SessionID: "vanadis-b-123-chunk-2",
+		Prompt:    "Executing chunk 2",
+	}
+	mustOK(t, store.InsertDispatch(ctx, d3b), "InsertDispatch disp-3b")
+	mustOK(t, store.UpdateDispatchStatus(ctx, "disp-3b", StatusProcessing, "running"), "UpdateDispatchStatus disp-3b")
 	hasActive, err := store.HasActiveDispatchTurn(ctx, "build-1", "")
 	mustOK(t, err, "HasActiveDispatchTurn")
 	if !hasActive {
@@ -706,12 +714,28 @@ func TestDispatchStore_SQLite(t *testing.T) {
 	// 8. Cancel pending dispatches
 	cancelled, err := store.CancelPendingDispatches(ctx, "", "b-123", "aborted build")
 	mustOK(t, err, "CancelPendingDispatches")
-	if len(cancelled) != 1 || cancelled[0] != "disp-3" {
-		t.Errorf("expected cancelled [disp-3], got %v", cancelled)
+	if len(cancelled) != 2 || !slices.Contains(cancelled, "disp-3") || !slices.Contains(cancelled, "disp-3b") {
+		t.Errorf("expected cancelled [disp-3, disp-3b], got %v", cancelled)
 	}
 	got, _ = store.GetDispatch(ctx, "disp-3")
 	if got.Status != "FAILED" || got.ErrorMessage != "aborted build" {
 		t.Errorf("unexpected status after cancel: %+v", got)
+	}
+	gotB, _ := store.GetDispatch(ctx, "disp-3b")
+	if gotB.Status != "FAILED" || gotB.ErrorMessage != "aborted build" {
+		t.Errorf("unexpected status for disp-3b after cancel: %+v", gotB)
+	}
+	d3Solo := Dispatch{
+		ID:     "disp-3-solo",
+		Source: "heartbeat",
+		Prompt: "solo heartbeat",
+		Status: StatusPending,
+	}
+	mustOK(t, store.InsertDispatch(ctx, d3Solo), "InsertDispatch disp-3-solo")
+	cancelledSolo, err := store.CancelPendingDispatches(ctx, "disp-3-solo", "", "cancelled solo")
+	mustOK(t, err, "CancelPendingDispatches solo")
+	if len(cancelledSolo) != 1 || cancelledSolo[0] != "disp-3-solo" {
+		t.Errorf("expected cancelled [disp-3-solo], got %v", cancelledSolo)
 	}
 
 	// 9. Pending or processing dispatches

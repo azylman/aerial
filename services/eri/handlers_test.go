@@ -363,7 +363,8 @@ func TestHandleCancelDispatch(t *testing.T) {
 		for _, d := range []db.Dispatch{
 			{ID: "disp-b1-c1", Source: "vanadis", Prompt: "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: build-99\n", Status: db.StatusPending},
 			{ID: "disp-b1-c2", Source: "vanadis", Prompt: "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: build-99\n", Status: db.StatusPending},
-			{ID: "disp-active", Source: "vanadis", Prompt: "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: build-99\n", Status: db.StatusProcessing},
+			{ID: "disp-active", Source: "vanadis", SessionID: "vanadis-build-99-chunk-1", Prompt: "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: build-99\n", Status: db.StatusProcessing},
+			{ID: "disp-active-sess", Source: "vanadis", SessionID: "vanadis-build-99-chunk-2", Prompt: "Action chunk without explicit prompt marker", Status: db.StatusProcessing},
 			{ID: "disp-single", Source: "heartbeat", Prompt: "hourly pulse", Status: db.StatusPending},
 		} {
 			_ = s.InsertDispatch(ctx, d)
@@ -378,22 +379,27 @@ func TestHandleCancelDispatch(t *testing.T) {
 		name       string
 		method     string
 		store      db.Store
+		pool       *queue.WorkerPool
 		body       string
 		wantStatus int
 		wantSubstr string
 	}{
-		{"method not allowed", http.MethodGet, seedStore(""), "", http.StatusMethodNotAllowed, "Method not allowed"},
-		{"nil store", http.MethodPost, nil, `{"build_id":"build-99"}`, http.StatusInternalServerError, "Database store not configured"},
-		{"invalid json", http.MethodPost, seedStore(""), `{invalid`, http.StatusBadRequest, "Invalid JSON payload"},
-		{"missing ids", http.MethodPost, seedStore(""), `{"reason":"no ids"}`, http.StatusBadRequest, "'dispatch_id' (or 'message_id') or 'build_id' is required"},
-		{"store error", http.MethodPost, seedStore("CancelPendingDispatches"), `{"build_id":"build-99"}`, http.StatusInternalServerError, "Failed to fetch cancelling dispatches"},
-		{"cancel by build_id", http.MethodPost, seedStore(""), `{"build_id":"build-99"}`, http.StatusOK, `"cancelled_count":2`},
-		{"cancel by dispatch_id", http.MethodPost, seedStore(""), `{"dispatch_id":"disp-single"}`, http.StatusOK, `"cancelled_ids":["disp-single"]`},
-		{"cancel by dispatch_id custom reason", http.MethodPost, seedStore(""), `{"dispatch_id":"disp-single","reason":"superseded"}`, http.StatusOK, `"cancelled_ids":["disp-single"]`},
-		{"cancel by message_id alias", http.MethodPost, seedStore(""), `{"message_id":"disp-single"}`, http.StatusOK, `"cancelled_ids":["disp-single"]`},
+		{"method not allowed", http.MethodGet, seedStore(""), nil, "", http.StatusMethodNotAllowed, "Method not allowed"},
+		{"nil store", http.MethodPost, nil, nil, `{"build_id":"build-99"}`, http.StatusInternalServerError, "Database store not configured"},
+		{"invalid json", http.MethodPost, seedStore(""), nil, `{invalid`, http.StatusBadRequest, "Invalid JSON payload"},
+		{"missing ids", http.MethodPost, seedStore(""), nil, `{"reason":"no ids"}`, http.StatusBadRequest, "'dispatch_id' (or 'message_id') or 'build_id' is required"},
+		{"store error", http.MethodPost, seedStore("CancelPendingDispatches"), nil, `{"build_id":"build-99"}`, http.StatusInternalServerError, "Failed to fetch cancelling dispatches"},
+		{"cancel by build_id", http.MethodPost, seedStore(""), nil, `{"build_id":"build-99"}`, http.StatusOK, `"cancelled_count":4`},
+		{"cancel by dispatch_id", http.MethodPost, seedStore(""), nil, `{"dispatch_id":"disp-single"}`, http.StatusOK, `"cancelled_ids":["disp-single"]`},
+		{"cancel by dispatch_id custom reason", http.MethodPost, seedStore(""), nil, `{"dispatch_id":"disp-single","reason":"superseded"}`, http.StatusOK, `"cancelled_ids":["disp-single"]`},
+		{"cancel by message_id alias", http.MethodPost, seedStore(""), nil, `{"message_id":"disp-single"}`, http.StatusOK, `"cancelled_ids":["disp-single"]`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			w := runHTTP(handleCancelDispatch(tc.store), tc.method, "/dispatch/cancel", strings.NewReader(tc.body))
+			var pools []*queue.WorkerPool
+			if tc.pool != nil {
+				pools = append(pools, tc.pool)
+			}
+			w := runHTTP(handleCancelDispatch(tc.store, pools...), tc.method, "/dispatch/cancel", strings.NewReader(tc.body))
 			if w.Code != tc.wantStatus || !strings.Contains(w.Body.String(), tc.wantSubstr) {
 				t.Fatalf("got status=%d body=%q, want status=%d substr=%q", w.Code, w.Body.String(), tc.wantStatus, tc.wantSubstr)
 			}

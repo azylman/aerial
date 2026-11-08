@@ -61,6 +61,9 @@ func (p *WorkerPool) notifyVanadisChunkOutcome(chunkID, turnStatus, turnError st
 	if p == nil || chunkID == "" {
 		return
 	}
+	if p.ctx != nil && p.ctx.Err() != nil {
+		return
+	}
 	vanadisURL := p.resolveVanadisURL()
 	if vanadisURL == "" {
 		return

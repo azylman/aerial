@@ -789,10 +789,10 @@ func (f *FakeStore) CancelPendingDispatches(ctx context.Context, dispatchID, bui
 		now := time.Now().UTC()
 		for _, id := range f.dispatchOrder {
 			d := f.dispatches[id]
-			if d == nil || d.Status != db.StatusPending {
+			if d == nil || (d.Status != db.StatusPending && d.Status != db.StatusProcessing) {
 				continue
 			}
-			match := (dID != "" && d.ID == dID) || (bID != "" && strings.Contains(d.Prompt, "Build ID: "+bID+"\n"))
+			match := (dID != "" && d.ID == dID) || (bID != "" && (strings.Contains(d.Prompt, "Build ID: "+bID+"\n") || strings.HasPrefix(d.SessionID, "vanadis-"+bID+"-chunk-") || strings.Contains(d.Prompt, "Chunk ID: "+bID+"-chunk-")))
 			if match {
 				d.Status = db.StatusFailed
 				d.ErrorMessage = reason
