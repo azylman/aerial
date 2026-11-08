@@ -1029,6 +1029,80 @@ assert_eq "true" "$(echo "$TREE_CACHE_AND_BRANCH_CHECK" | grep -q 'tree_cache_in
 assert_eq "true" "$(echo "$TREE_CACHE_AND_BRANCH_CHECK" | grep -q 'init_branch:ok' && echo true || echo false)" "init_scratch --branch clones, tracks origin/main, and stays on existing PR branch"
 assert_eq "true" "$(echo "$TREE_CACHE_AND_BRANCH_CHECK" | grep -q 'init_branch_submit:ok' && echo true || echo false)" "submit_scratch rebases and updates PR cleanly from init_scratch --branch checkout"
 
+# Case 17: github-runner roborev wrapper repo move + roborev-override rebuttal backfill and head short-circuit
+ROBOREV_WRAPPER_CHECK=$(SCRIPT_DIR="$SCRIPT_DIR" bash -s << 'CASE17_EOF'
+set -euo pipefail
+TEST_ROOT=$(mktemp -d /tmp/roborev-wrapper-test.XXXXXX)
+trap 'rm -rf "$TEST_ROOT"' EXIT
+ENTRYPOINT_FILE="${SCRIPT_DIR}/../services/github-runner/entrypoint.sh"
+WRAPPER_SCRIPT="$TEST_ROOT/roborev-wrapper.sh"
+MOCK_REAL="$TEST_ROOT/roborev.real"
+MOCK_SYNC_SETTINGS="$TEST_ROOT/sync-gemini-settings"
+CALL_LOG="$TEST_ROOT/calls.log"
+STATE_DIR="$TEST_ROOT/state"
+REPO_DIR="$TEST_ROOT/aerial"
+mkdir -p "$STATE_DIR" "$REPO_DIR"
+
+awk '/^  cat > \/usr\/local\/bin\/roborev <<'\''EOF'\''$/ { flag=1; next } flag && /^EOF$/ { flag=0; exit } flag { print }' "$ENTRYPOINT_FILE" \
+  | sed "s|/usr/local/bin/roborev.real|$MOCK_REAL|g; s|/usr/local/bin/sync-gemini-settings|$MOCK_SYNC_SETTINGS|g; s|/root/.roborev/postgres-password|$STATE_DIR/postgres-password|g" > "$WRAPPER_SCRIPT"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$MOCK_SYNC_SETTINGS"
+printf 'secret-pw\n' > "$STATE_DIR/postgres-password"
+cat << 'MOCK_EOF' > "$MOCK_REAL"
+#!/usr/bin/env bash
+echo "$*" >> "${CALL_LOG}"
+case "${1:-}" in
+  list) cat "${STATE_DIR}/jobs.json" ;;
+  show) cat "${STATE_DIR}/show.json" ;;
+  review) printf 'Review (by gemini)\n------------------------------------------------------------\nNo issues found.\n' ;;
+  *) exit 0 ;;
+esac
+MOCK_EOF
+chmod +x "$WRAPPER_SCRIPT" "$MOCK_SYNC_SETTINGS" "$MOCK_REAL"
+
+git init -q "$REPO_DIR"
+git -C "$REPO_DIR" config user.name 'Tester'
+git -C "$REPO_DIR" config user.email 'tester@example.com'
+git -C "$REPO_DIR" checkout -q -b main
+echo 'base' > "$REPO_DIR/file.txt" && git -C "$REPO_DIR" add file.txt && git -C "$REPO_DIR" commit -q -m 'base'
+BASE_SHA=$(git -C "$REPO_DIR" rev-parse HEAD)
+git -C "$REPO_DIR" checkout -q -b feat/test-rebuttal
+echo 'v1' > "$REPO_DIR/file.txt" && git -C "$REPO_DIR" add file.txt && git -C "$REPO_DIR" commit -q -m 'commit 1'
+COMMIT1_SHA=$(git -C "$REPO_DIR" rev-parse HEAD) && COMMIT1_SHORT="${COMMIT1_SHA:0:7}"
+echo 'v2' > "$REPO_DIR/file.txt" && git -C "$REPO_DIR" add file.txt && git -C "$REPO_DIR" commit -q -m 'commit 2'
+COMMIT2_SHA=$(git -C "$REPO_DIR" rev-parse HEAD) && COMMIT2_SHORT="${COMMIT2_SHA:0:7}"
+
+jq -n --arg ref "${BASE_SHA}..${COMMIT1_SHA}" '[{id:42,git_ref:$ref,status:"done",panel_role:"synthesis"}]' > "$STATE_DIR/jobs.json"
+printf '{"comments":[]}\n' > "$STATE_DIR/show.json"
+jq -n --arg short "$COMMIT1_SHORT" --arg full "$COMMIT1_SHA" '[{user:{login:"owneruser"},author_association:"OWNER",body:("## roborev-override (`"+$short+"`)\n\n**Commit:** `"+$full+"`\n**Technical Rebuttal:**\nIntentional design choice for chunk 1.")}]' > "$STATE_DIR/comments.json"
+jq -n --arg head "$COMMIT2_SHA" --arg base "$BASE_SHA" '{repository:{full_name:"owneruser/aerial"},pull_request:{number:99,head:{ref:"feat/test-rebuttal",sha:$head},base:{sha:$base}}}' > "$STATE_DIR/event.json"
+
+curl() { cat "$STATE_DIR/comments.json"; }
+export -f curl
+export CALL_LOG STATE_DIR GH_TOKEN='mock_token' GITHUB_REPOSITORY='owneruser/aerial' GITHUB_EVENT_PATH="$STATE_DIR/event.json"
+
+out_followup=$(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent gemini --min-severity medium --reasoning thorough)
+if grep -q "repo move aerial $REPO_DIR" "$CALL_LOG" &&
+   grep -q "comment --commenter owneruser --job 42 Intentional design choice for chunk 1." "$CALL_LOG" &&
+   grep -q "close 42" "$CALL_LOG" &&
+   grep -q "review --wait --branch=feat/test-rebuttal --base=${BASE_SHA}" "$CALL_LOG" &&
+   echo "$out_followup" | grep -q "^## roborev: Review Passed (\`${COMMIT2_SHORT}\`)"; then
+  echo 'backfill_followup:ok'
+fi
+
+: > "$CALL_LOG"
+jq -n --arg ref "${BASE_SHA}..${COMMIT2_SHA}" '[{id:43,git_ref:$ref,status:"done",panel_role:"synthesis"}]' > "$STATE_DIR/jobs.json"
+printf '{"comments":[{"response":"Already recorded rebuttal."}]}\n' > "$STATE_DIR/show.json"
+jq -n --arg short "$COMMIT2_SHORT" --arg full "$COMMIT2_SHA" '[{user:{login:"owneruser"},author_association:"OWNER",body:("## roborev-override (`"+$short+"`)\n\n**Commit:** `"+$full+"`\n**Technical Rebuttal:**\nAlready recorded rebuttal.")}]' > "$STATE_DIR/comments.json"
+out_head=$(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent gemini --min-severity medium --reasoning thorough)
+if ! grep -q "comment --commenter" "$CALL_LOG" && grep -q "close 43" "$CALL_LOG" && ! grep -q "review --wait" "$CALL_LOG" &&
+   echo "$out_head" | grep -q "^## roborev: Review Passed (\`${COMMIT2_SHORT}\`)"; then
+  echo 'head_shortcircuit:ok'
+fi
+CASE17_EOF
+)
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'backfill_followup:ok' && echo true || echo false)" "github-runner roborev wrapper moves placeholder repo and backfills prior roborev-override rebuttals before review --wait"
+assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'head_shortcircuit:ok' && echo true || echo false)" "github-runner roborev wrapper skips duplicate comment and short-circuits Review Passed when override matches current HEAD"
+
 echo "--------------------------------------------------------"
 echo "Test results: $PASSED passed, $FAILED failed"
 if [ "$FAILED" -gt 0 ]; then

@@ -109,7 +109,7 @@ Distinguish deterministic CI checks (authoritative) from `roborev` AI reviews (a
 - **Resolution Paths**:
   - **True Positive**: Fix the defect in a scratch checkout (`aerial-pr.sh init <repo> --branch <branch>`), run `./scripts/verify.sh --staged`, and update the PR via `/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> "fix(scope): summary"`.
   - **Context Gap**: Add a concise inline code comment explaining the non-obvious cross-file invariant and submit via `aerial-pr.sh submit <scratch_dir> "docs(scope): clarify invariant"`. Update `.roborev.toml` (`review_guidelines`) only if the gap reflects a general, repo-wide architectural pattern (never narrow one-off exceptions).
-  - **False Positive / Architectural Disagreement**: Reject the suggestion and record a commit-SHA-bound technical rebuttal to pass the gate and clear the PR failure banner:
+  - **False Positive / Architectural Disagreement**: Reject the suggestion and record a commit-SHA-bound technical rebuttal to pass the gate and clear the PR failure banner (the runner automatically syncs `override-roborev` rebuttals into native `roborev` review responses and closes the review so `<prior-range-reviews>` carries the rebuttal forward on subsequent commits without needing to duplicate it in `PR_DESCRIPTION.md`):
     ```bash
     /share/aerial/scripts/aerial-pr.sh --repo <repo> override-roborev <pr_num> '<technical_rebuttal>'
     ```
