@@ -497,6 +497,12 @@ type GitHubWorkflowJobsResponse struct {
 
 var buildJobRegex = regexp.MustCompile(`(?i)Build\s*(?:&|and)\s*(?:Push|Publish)(?:\s+(?:Sidecar\s+)?(?:Container\s+)?Images?(?:\s+to\s+GHCR)?)?\s*\(([^)]+)\)`)
 
+// buildJobService returns a build check's service name, rejecting empty or unexpanded "${{ }}" captures.
+func buildJobService(checkName string) (string, bool) {
+	svc := strings.TrimSpace(append(buildJobRegex.FindStringSubmatch(checkName), "", "")[1])
+	return svc, svc != "" && !strings.Contains(svc, "${{")
+}
+
 type GitHubCommit struct {
 	ID      string `json:"id"`
 	Message string `json:"message"`
@@ -785,14 +791,10 @@ func analyzeBuildChecks(checks map[string]string) (checkJobs []string, passedBui
 			}
 		}
 
-		m := buildJobRegex.FindStringSubmatch(checkName)
-		if len(m) >= 2 {
-			svc := strings.TrimSpace(m[1])
-			if svc != "" {
-				matchedServices[svc] = struct{}{}
-				if s == "passed" {
-					passedBuildJobs[strings.ToLower(svc)] = true
-				}
+		if svc, ok := buildJobService(checkName); ok {
+			matchedServices[svc] = struct{}{}
+			if s == "passed" {
+				passedBuildJobs[strings.ToLower(svc)] = true
 			}
 		}
 	}
@@ -1670,12 +1672,9 @@ func (s *RouterServer) resolveWorkflowRunImages(ctx context.Context, repo string
 		if job.Status != "completed" || job.Conclusion != "success" || !hasExecutedBuildStep(job.Steps) {
 			continue
 		}
-		m := buildJobRegex.FindStringSubmatch(job.Name)
-		if len(m) < 2 {
-			continue
+		if service, ok := buildJobService(job.Name); ok {
+			rawImages = append(rawImages, fmt.Sprintf("ghcr.io/%s/%s:latest", owner, service))
 		}
-		service := strings.TrimSpace(m[1])
-		rawImages = append(rawImages, fmt.Sprintf("ghcr.io/%s/%s:latest", owner, service))
 	}
 	return dedupeTrimmedStrings(rawImages), nil
 }
