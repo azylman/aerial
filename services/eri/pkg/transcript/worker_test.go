@@ -2,6 +2,7 @@ package transcript
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -705,5 +706,249 @@ func TestFindTranscriptFile_AlternativeLocations(t *testing.T) {
 	}
 	if stats.Synced != 2 {
 		t.Errorf("expected 2 synced from alternative locations, got %d", stats.Synced)
+	}
+}
+
+func TestParseTranscriptTimestamp(t *testing.T) {
+	fallback := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name     string
+		rawTime  string
+		wantTime time.Time
+	}{
+		{name: "empty timestamp", rawTime: "", wantTime: fallback},
+		{name: "invalid timestamp", rawTime: "invalid-date", wantTime: fallback},
+		{name: "rfc3339nano", rawTime: "2026-10-01T10:00:00.123456789Z", wantTime: time.Date(2026, 10, 1, 10, 0, 0, 123456789, time.UTC)},
+		{name: "rfc3339 standard", rawTime: "2026-10-01T10:00:00Z", wantTime: time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseTranscriptTimestamp(tc.rawTime, fallback)
+			if !got.Equal(tc.wantTime) {
+				t.Fatalf("parseTranscriptTimestamp(%q) = %v, want %v", tc.rawTime, got, tc.wantTime)
+			}
+		})
+	}
+}
+
+func TestExtractClaudeBlockText(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		wantStr string
+	}{
+		{name: "empty raw message", raw: "", wantStr: ""},
+		{name: "quoted string", raw: `"simple text output"`, wantStr: "simple text output"},
+		{name: "text blocks array", raw: `[{"type":"text","text":"first line"},{"type":"text","text":"second line"}]`, wantStr: "first line\nsecond line"},
+		{name: "fallback raw json", raw: `{"key":"value"}`, wantStr: `{"key":"value"}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractClaudeBlockText(json.RawMessage(tc.raw))
+			if got != tc.wantStr {
+				t.Fatalf("extractClaudeBlockText(%q) = %q, want %q", tc.raw, got, tc.wantStr)
+			}
+		})
+	}
+}
+
+func TestFindTranscriptFile_PathResolution(t *testing.T) {
+	tests := []struct {
+		name      string
+		relPath   string
+		sessionID string
+		wantFound bool
+	}{
+		{name: "not found", sessionID: "s-missing", wantFound: false},
+		{name: "dot system generated logs", relPath: "s-dot/.system_generated/logs/transcript.jsonl", sessionID: "s-dot", wantFound: true},
+		{name: "no dot system generated logs", relPath: "s-nodot/system_generated/logs/transcript.jsonl", sessionID: "s-nodot", wantFound: true},
+		{name: "direct under session dir", relPath: "s-direct/transcript.jsonl", sessionID: "s-direct", wantFound: true},
+		{name: "session id jsonl in brain", relPath: "s-brain.jsonl", sessionID: "s-brain", wantFound: true},
+		{name: "claude relative 1", relPath: "../claude/projects/p1/s-claude1.jsonl", sessionID: "s-claude1", wantFound: true},
+		{name: "claude relative 2", relPath: "../../../claude/projects/p2/s-claude2.jsonl", sessionID: "s-claude2", wantFound: true},
+		{name: "claude relative dot claude", relPath: "../.claude/projects/p3/s-claude3.jsonl", sessionID: "s-claude3", wantFound: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			brainDir := filepath.Join(tmp, "sub1", "sub2", "brain")
+			_ = os.MkdirAll(brainDir, 0o755)
+
+			if tc.relPath != "" {
+				fullPath := filepath.Join(brainDir, tc.relPath)
+				_ = os.MkdirAll(filepath.Dir(fullPath), 0o755)
+				_ = os.WriteFile(fullPath, []byte("content"), 0o644)
+			}
+
+			got := findTranscriptFile(brainDir, tc.sessionID)
+			if tc.wantFound && got == "" {
+				t.Fatalf("expected to find transcript file for %q", tc.sessionID)
+			} else if !tc.wantFound && got != "" {
+				t.Fatalf("expected not to find transcript file, got %q", got)
+			}
+		})
+	}
+}
+
+func TestSyncTranscripts_ClaudeScenarios(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                 string
+		sessionID            string
+		content              string
+		customClaudeDir      bool
+		withLLM              bool
+		withEmbedder         bool
+		secondPassContent    string
+		wantSteps            int
+		wantSummaries        int
+		wantSettled          bool
+		wantSkippedUnchanged int
+		secondPassSteps      int
+	}{
+		{
+			name:      "claude transcript with prompt thinking tool use tool result and reply",
+			sessionID: "sess-claude-full",
+			content: strings.Join([]string{
+				`{"type":"user","timestamp":"2026-10-01T10:00:00Z","message":{"role":"user","content":"Inspect disk usage"}}`,
+				`{"type":"assistant","timestamp":"2026-10-01T10:00:02Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Checking storage"},{"type":"tool_use","name":"run_command","input":{"CommandLine":"df -h"}}]}}`,
+				`{"type":"user","timestamp":"2026-10-01T10:00:05Z","message":{"role":"user","content":[{"type":"tool_result","is_error":false,"content":"/dev/sda1 50G 20G 30G"}]}}`,
+				`{"type":"assistant","timestamp":"2026-10-01T10:00:08Z","message":{"role":"assistant","content":[{"type":"text","text":"Disk usage is at 40%."}]}}`,
+			}, "\n") + "\n",
+			withLLM:              true,
+			withEmbedder:         true,
+			wantSteps:            4,
+			wantSummaries:        1,
+			wantSettled:          true,
+			secondPassContent:    "",
+			wantSkippedUnchanged: 1,
+		},
+		{
+			name:      "claude transcript with tool error and raw assistant string and custom claude dir",
+			sessionID: "sess-claude-custom-dir",
+			content: strings.Join([]string{
+				`{"type":"user","timestamp":"2026-10-01T10:00:00Z","message":{"role":"user","content":"Test failing command"}}`,
+				`{"type":"user","timestamp":"2026-10-01T10:00:02Z","message":{"role":"user","content":[{"type":"tool_result","is_error":true,"content":[{"type":"text","text":"command failed with code 1"}]}]}}`,
+				`{"type":"assistant","timestamp":"2026-10-01T10:00:04Z","message":{"role":"assistant","content":"Recovering from error"}}`,
+			}, "\n") + "\n",
+			customClaudeDir: true,
+			wantSteps:       3,
+			wantSummaries:   1,
+			wantSettled:     true,
+			secondPassContent: strings.Join([]string{
+				`{"type":"user","timestamp":"2026-10-01T10:00:00Z","message":{"role":"user","content":"Test failing command"}}`,
+				`{"type":"user","timestamp":"2026-10-01T10:00:02Z","message":{"role":"user","content":[{"type":"tool_result","is_error":true,"content":[{"type":"text","text":"command failed with code 1"}]}]}}`,
+				`{"type":"assistant","timestamp":"2026-10-01T10:00:04Z","message":{"role":"assistant","content":"Recovering from error"}}`,
+				`{"type":"assistant","timestamp":"2026-10-01T10:00:06Z","message":{"role":"assistant","content":[{"type":"text","text":"Extra resolution step"}]}}`,
+			}, "\n") + "\n",
+			secondPassSteps: 4,
+		},
+		{
+			name:      "claude transcript with unparseable or ambient messages skipped",
+			sessionID: "sess-claude-skips",
+			content: strings.Join([]string{
+				`{"type":"other","message":{}}`,
+				`{"type":"user","timestamp":"2026-10-01T10:00:00Z","message":{"role":"user","content":12345}}`,
+				`{"type":"user","timestamp":"2026-10-01T10:00:02Z","message":{"role":"user","content":"Valid prompt"}}`,
+				`{"type":"assistant","timestamp":"2026-10-01T10:00:04Z","message":{"role":"assistant","content":12345}}`,
+			}, "\n") + "\n",
+			wantSteps:     1,
+			wantSummaries: 1,
+			wantSettled:   true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			tmp := t.TempDir()
+			brainDir := filepath.Join(tmp, "brain")
+			_ = os.MkdirAll(brainDir, 0o755)
+			store := dbtest.NewFakeStore()
+
+			var claudeProjectDir string
+			if tc.customClaudeDir {
+				claudeProjectDir = filepath.Join(tmp, "custom-claude-projects")
+			} else {
+				claudeProjectDir = filepath.Join(brainDir, "..", "claude", "projects")
+			}
+			projDir := filepath.Join(claudeProjectDir, "-test-project")
+			_ = os.MkdirAll(projDir, 0o755)
+
+			filePath := filepath.Join(projDir, tc.sessionID+".jsonl")
+			_ = os.WriteFile(filePath, []byte(tc.content), 0o644)
+			t0 := time.Now().Add(-time.Hour).Truncate(time.Second)
+			_ = os.Chtimes(filePath, t0, t0)
+
+			opts := SyncOptions{
+				BrainDir:      brainDir,
+				BatchLimit:    10,
+				IdleThreshold: 10 * time.Minute,
+				HeadLimit:     1000,
+				TailLimit:     1000,
+			}
+			if tc.customClaudeDir {
+				opts.ClaudeProjectsDir = claudeProjectDir
+			}
+
+			var llm func(ctx context.Context, prompt string) (string, error)
+			if tc.withLLM {
+				llm = func(ctx context.Context, prompt string) (string, error) {
+					return "Claude session summary: analyzed disk.", nil
+				}
+			}
+
+			var embedder func(ctx context.Context, text string) ([]float32, error)
+			if tc.withEmbedder {
+				embedder = func(ctx context.Context, text string) ([]float32, error) {
+					vec := make([]float32, db.ExpectedEmbeddingDim)
+					vec[0] = 0.55
+					return vec, nil
+				}
+			}
+
+			stats, err := SyncTranscripts(ctx, store, brainDir, embedder, llm, opts)
+			if err != nil {
+				t.Fatalf("SyncTranscripts failed: %v", err)
+			}
+			if stats.StepsInserted != tc.wantSteps {
+				t.Fatalf("StepsInserted = %d, want %d", stats.StepsInserted, tc.wantSteps)
+			}
+			if stats.SummariesGenerated != tc.wantSummaries {
+				t.Fatalf("SummariesGenerated = %d, want %d", stats.SummariesGenerated, tc.wantSummaries)
+			}
+
+			states, err := store.GetSessionSyncStates(ctx)
+			if err != nil {
+				t.Fatalf("GetSessionSyncStates failed: %v", err)
+			}
+			st, ok := states[tc.sessionID]
+			if !ok {
+				t.Fatalf("expected state for session %q", tc.sessionID)
+			}
+			if st.IsSettled != tc.wantSettled {
+				t.Fatalf("IsSettled = %v, want %v", st.IsSettled, tc.wantSettled)
+			}
+
+			if tc.secondPassContent != "" || tc.wantSkippedUnchanged > 0 {
+				if tc.secondPassContent != "" {
+					_ = os.WriteFile(filePath, []byte(tc.secondPassContent), 0o644)
+					t1 := time.Now().Add(-30 * time.Minute).Truncate(time.Second)
+					_ = os.Chtimes(filePath, t1, t1)
+				}
+				stats2, err := SyncTranscripts(ctx, store, brainDir, embedder, llm, opts)
+				if err != nil {
+					t.Fatalf("SyncTranscripts second pass failed: %v", err)
+				}
+				if tc.wantSkippedUnchanged > 0 && stats2.SkippedUnchanged != tc.wantSkippedUnchanged {
+					t.Fatalf("second pass SkippedUnchanged = %d, want %d", stats2.SkippedUnchanged, tc.wantSkippedUnchanged)
+				}
+				if tc.secondPassSteps > 0 && stats2.StepsInserted != tc.secondPassSteps {
+					t.Fatalf("second pass StepsInserted = %d, want %d", stats2.StepsInserted, tc.secondPassSteps)
+				}
+			}
+		})
 	}
 }

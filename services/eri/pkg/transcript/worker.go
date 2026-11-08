@@ -55,8 +55,8 @@ func normalizeSyncOptions(brainDir string, opts SyncOptions) (string, SyncOption
 	return targetBrainDir, opts, nil
 }
 
-// SyncTranscripts scans the brain directory for session transcripts, reconciles modification
-// times against the database, ingests new steps, and updates debounced macro summaries.
+// SyncTranscripts scans the brain directory and Claude project directories for session transcripts,
+// reconciles modification times against the database, ingests new steps, and updates debounced macro summaries.
 func SyncTranscripts(
 	ctx context.Context,
 	store db.TranscriptStore,
@@ -90,19 +90,8 @@ func SyncTranscripts(
 		return stats, fmt.Errorf("load session sync states: %w", err)
 	}
 
-	// Deterministic ordering of sessions
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Name() < entries[j].Name()
-	})
-
+	discovered := make(map[string]string)
 	for _, entry := range entries {
-		select {
-		case <-ctx.Done():
-			stats.Duration = time.Since(start)
-			return stats, ctx.Err()
-		default:
-		}
-
 		if !entry.IsDir() {
 			continue
 		}
@@ -112,10 +101,39 @@ func SyncTranscripts(
 		}
 
 		transcriptPath := findTranscriptFile(targetBrainDir, sessionID)
-		if transcriptPath == "" {
-			continue
+		if transcriptPath != "" {
+			discovered[sessionID] = transcriptPath
+		}
+	}
+
+	// Also discover Claude sessions from Claude project directories
+	var claudeBases []string
+	if opts.ClaudeProjectsDir != "" {
+		claudeBases = append(claudeBases, opts.ClaudeProjectsDir)
+	}
+	claudeBases = append(claudeBases,
+		filepath.Clean(filepath.Join(targetBrainDir, "..", "claude", "projects")),
+		filepath.Clean(filepath.Join(targetBrainDir, "..", "..", "..", "claude", "projects")),
+		filepath.Clean(filepath.Join(targetBrainDir, "..", ".claude", "projects")),
+	)
+	discoverClaudeProjectSessions(claudeBases, discovered)
+
+	// Deterministic ordering of sessions
+	sessionIDs := make([]string, 0, len(discovered))
+	for id := range discovered {
+		sessionIDs = append(sessionIDs, id)
+	}
+	sort.Strings(sessionIDs)
+
+	for _, sessionID := range sessionIDs {
+		select {
+		case <-ctx.Done():
+			stats.Duration = time.Since(start)
+			return stats, ctx.Err()
+		default:
 		}
 
+		transcriptPath := discovered[sessionID]
 		fi, err := os.Stat(transcriptPath)
 		if err != nil {
 			continue
@@ -145,15 +163,72 @@ func SyncTranscripts(
 	return stats, nil
 }
 
+func scanClaudeProjDir(projDir string, discovered map[string]string) {
+	files, err := os.ReadDir(projDir)
+	if err != nil {
+		return
+	}
+	for _, f := range files {
+		if f.IsDir() || !strings.HasSuffix(f.Name(), ".jsonl") {
+			continue
+		}
+		sessionID := strings.TrimSuffix(f.Name(), ".jsonl")
+		if sessionID == "" || strings.HasPrefix(sessionID, ".") {
+			continue
+		}
+		if _, exists := discovered[sessionID]; !exists {
+			discovered[sessionID] = filepath.Join(projDir, f.Name())
+		}
+	}
+}
+
+func discoverClaudeProjectSessions(claudeBases []string, discovered map[string]string) {
+	seenClaudeBase := make(map[string]bool)
+	for _, base := range claudeBases {
+		if seenClaudeBase[base] {
+			continue
+		}
+		seenClaudeBase[base] = true
+		projEntries, err := os.ReadDir(base)
+		if err != nil {
+			continue
+		}
+		for _, proj := range projEntries {
+			if !proj.IsDir() {
+				continue
+			}
+			projDir := filepath.Join(base, proj.Name())
+			scanClaudeProjDir(projDir, discovered)
+		}
+	}
+}
+
 func findTranscriptFile(brainDir, sessionID string) string {
 	candidates := []string{
 		filepath.Join(brainDir, sessionID, ".system_generated", "logs", "transcript.jsonl"),
 		filepath.Join(brainDir, sessionID, "system_generated", "logs", "transcript.jsonl"),
 		filepath.Join(brainDir, sessionID, "transcript.jsonl"),
+		filepath.Join(brainDir, sessionID+".jsonl"),
 	}
 	for _, c := range candidates {
 		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
 			return c
+		}
+	}
+	for _, claudeBase := range []string{
+		filepath.Clean(filepath.Join(brainDir, "..", "claude", "projects")),
+		filepath.Clean(filepath.Join(brainDir, "..", "..", "..", "claude", "projects")),
+		filepath.Clean(filepath.Join(brainDir, "..", ".claude", "projects")),
+	} {
+		if entries, err := os.ReadDir(claudeBase); err == nil {
+			for _, entry := range entries {
+				if entry.IsDir() {
+					cand := filepath.Join(claudeBase, entry.Name(), sessionID+".jsonl")
+					if fi, err := os.Stat(cand); err == nil && !fi.IsDir() {
+						return cand
+					}
+				}
+			}
 		}
 	}
 	return ""
@@ -242,11 +317,187 @@ func (st *transcriptScanState) recordStep(raw rawTranscriptStep) {
 	st.parsedSteps = append(st.parsedSteps, raw)
 }
 
+type claudeEntry struct {
+	Type      string `json:"type"`
+	Timestamp string `json:"timestamp"`
+	Message   *struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	} `json:"message"`
+	Error json.RawMessage `json:"error"`
+}
+
+type claudeContentBlock struct {
+	Type      string          `json:"type"`
+	Text      string          `json:"text"`
+	Thinking  string          `json:"thinking"`
+	Name      string          `json:"name"`
+	Input     json.RawMessage `json:"input"`
+	Content   json.RawMessage `json:"content"`
+	IsError   bool            `json:"is_error"`
+	ToolUseID string          `json:"tool_use_id"`
+}
+
+func extractClaudeBlockText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &blocks); err == nil {
+		var texts []string
+		for _, b := range blocks {
+			if b.Text != "" {
+				texts = append(texts, b.Text)
+			}
+		}
+		return strings.Join(texts, "\n")
+	}
+	return string(raw)
+}
+
+func (st *transcriptScanState) parseClaudeUserEntry(claude claudeEntry) bool {
+	var promptStr string
+	if err := json.Unmarshal(claude.Message.Content, &promptStr); err == nil {
+		raw := rawTranscriptStep{
+			StepIndex: st.maxStepIndex + 1,
+			Source:    "USER_EXPLICIT",
+			Type:      "USER_INPUT",
+			Status:    "DONE",
+			CreatedAt: claude.Timestamp,
+			Content:   promptStr,
+		}
+		st.recordStep(raw)
+		return true
+	}
+
+	var blocks []claudeContentBlock
+	if err := json.Unmarshal(claude.Message.Content, &blocks); err == nil && len(blocks) > 0 {
+		return st.parseClaudeToolResultBlocks(blocks, claude.Timestamp)
+	}
+	return false
+}
+
+func (st *transcriptScanState) parseClaudeToolResultBlocks(blocks []claudeContentBlock, timestamp string) bool {
+	var isToolResult bool
+	var toolContents []string
+	var isError bool
+	for _, b := range blocks {
+		if b.Type == "tool_result" {
+			isToolResult = true
+			if b.IsError {
+				isError = true
+			}
+			text := extractClaudeBlockText(b.Content)
+			if text != "" {
+				toolContents = append(toolContents, text)
+			}
+		}
+	}
+	if !isToolResult {
+		return false
+	}
+	status := "DONE"
+	if isError {
+		status = "ERROR"
+	}
+	raw := rawTranscriptStep{
+		StepIndex: st.maxStepIndex + 1,
+		Source:    "TOOL",
+		Type:      "TOOL",
+		Status:    status,
+		CreatedAt: timestamp,
+		Content:   strings.Join(toolContents, "\n"),
+	}
+	st.recordStep(raw)
+	return true
+}
+
+func (st *transcriptScanState) parseClaudeAssistantEntry(claude claudeEntry) bool {
+	var blocks []claudeContentBlock
+	if err := json.Unmarshal(claude.Message.Content, &blocks); err == nil {
+		var textParts []string
+		var thinkingParts []string
+		var toolCalls []rawToolCall
+
+		for _, b := range blocks {
+			switch b.Type {
+			case "text":
+				if b.Text != "" {
+					textParts = append(textParts, b.Text)
+				}
+			case "thinking":
+				if b.Thinking != "" {
+					thinkingParts = append(thinkingParts, b.Thinking)
+				}
+			case "tool_use":
+				toolCalls = append(toolCalls, rawToolCall{
+					Name: b.Name,
+					Args: b.Input,
+				})
+			}
+		}
+
+		raw := rawTranscriptStep{
+			StepIndex: st.maxStepIndex + 1,
+			Source:    "MODEL",
+			Type:      "PLANNER_RESPONSE",
+			Status:    "DONE",
+			CreatedAt: claude.Timestamp,
+			Content:   strings.Join(textParts, "\n"),
+			Thinking:  strings.Join(thinkingParts, "\n"),
+			ToolCalls: toolCalls,
+		}
+		st.recordStep(raw)
+		return true
+	}
+
+	var text string
+	if err := json.Unmarshal(claude.Message.Content, &text); err == nil {
+		raw := rawTranscriptStep{
+			StepIndex: st.maxStepIndex + 1,
+			Source:    "MODEL",
+			Type:      "PLANNER_RESPONSE",
+			Status:    "DONE",
+			CreatedAt: claude.Timestamp,
+			Content:   text,
+		}
+		st.recordStep(raw)
+		return true
+	}
+	return false
+}
+
+func (st *transcriptScanState) parseClaudeEntry(claude claudeEntry) bool {
+	switch claude.Type {
+	case "user":
+		return st.parseClaudeUserEntry(claude)
+	case "assistant":
+		return st.parseClaudeAssistantEntry(claude)
+	default:
+		return false
+	}
+}
+
 func (st *transcriptScanState) parseLine(line string, isLast bool, stats *SyncStats) {
 	trimmed := strings.TrimSpace(line)
 	if trimmed == "" {
 		return
 	}
+
+	var claude claudeEntry
+	if err := json.Unmarshal([]byte(trimmed), &claude); err == nil && claude.Message != nil && (claude.Type == "user" || claude.Type == "assistant") {
+		if st.parseClaudeEntry(claude) {
+			return
+		}
+	}
+
 	var raw rawTranscriptStep
 	if err := json.Unmarshal([]byte(trimmed), &raw); err != nil {
 		if isLast {
