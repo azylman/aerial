@@ -682,6 +682,15 @@ func TestBuildPostgresDSN(t *testing.T) {
 			expected:  "postgres://myuser:mypassword@custom-pg:5433/mydb?sslmode=disable",
 		},
 		{
+			name: "kubernetes service link tcp port normalized",
+			lookupMap: map[string]string{
+				"POSTGRES_PASSWORD": "secretpassword",
+				"POSTGRES_PORT":     "tcp://10.43.183.188:5432",
+			},
+			defaultDB: "aerial",
+			expected:  "postgres://aerial:secretpassword@postgres:5432/aerial?sslmode=disable",
+		},
+		{
 			name: "default db fallback when postgres db unset",
 			lookupMap: map[string]string{
 				"POSTGRES_HOST":     "postgres",
