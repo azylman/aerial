@@ -1090,8 +1090,9 @@ func TestResolveWorkflowRunImages(t *testing.T) {
 	ctx := context.Background()
 
 	mockJobs := GitHubWorkflowJobsResponse{
-		TotalCount: 7,
+		TotalCount: 8,
 		Jobs: []GitHubWorkflowJobItem{
+			{ID: 8, Name: "Build & Push Images to GHCR (${{ matrix.service }})", Status: "completed", Conclusion: "success", Steps: []GitHubWorkflowJobStep{{Name: "Build and Push Docker Image", Status: "completed", Conclusion: "success", Number: 1}}},
 			{ID: 1, Name: "Detect Changed Microservices", Status: "completed", Conclusion: "success"},
 			{ID: 2, Name: "Run Service Unit Tests", Status: "completed", Conclusion: "success"},
 			{ID: 3, Name: "Build & Push Images to GHCR (brain)", Status: "completed", Conclusion: "success"},
@@ -2766,6 +2767,18 @@ func TestFormatCIChecksActiveStep_Unit(t *testing.T) {
 			prStatus:     "merged",
 			ciChecksJSON: `{"Build & Push Images (mesh-proxy)":"passed","Build & Push Images (eri)":"in_progress"}`,
 			want:         "`eri`: ⏳ building image\n`mesh-proxy`: 🔄 starting",
+		},
+		{
+			name:         "merged with only unexpanded matrix build check falls back to container images count",
+			prStatus:     "merged",
+			ciChecksJSON: `{"Build & Push Images to GHCR (${{ matrix.service }})":"passed","CI Gate":"passed"}`,
+			want:         "Building container images (2/2 completed)",
+		},
+		{
+			name:         "merged with unexpanded matrix build check alongside real service renders only real service",
+			prStatus:     "merged",
+			ciChecksJSON: `{"Build & Push Images to GHCR (${{ matrix.service }})":"passed","Build & Push Images to GHCR (eri)":"in_progress"}`,
+			want:         "`eri`: ⏳ building image",
 		},
 		{
 			name:         "merged with non-matching ci_checks falls back to container images count",
