@@ -971,10 +971,9 @@ func handleInternalLLM(llmFn func(context.Context, string, string) (string, erro
 func newHTTPMemoryRetriever(baseURL string) runner.MemoryRetriever {
 	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if baseURL == "" {
-		baseURL = strings.TrimRight(strings.TrimSpace(os.Getenv("MEMORY_MCP_URL")), "/")
-	}
-	if baseURL == "" {
-		baseURL = "http://coven.aerial"
+		return func(ctx context.Context, query string) (string, error) {
+			return "", nil
+		}
 	}
 	client := &http.Client{Timeout: 2 * time.Second}
 	return func(ctx context.Context, query string) (string, error) {
@@ -1219,9 +1218,14 @@ func handleInternalDiscordInteraction(store db.Store, pool *queue.WorkerPool) ht
 		ic := &discordgo.InteractionCreate{Interaction: &interaction}
 		router := activeInteractionRouter.Load()
 		if router == nil {
+			var haroURL, covenURL string
+			if fc := currentFunnelConfig(); fc != nil && fc.Current() != nil {
+				haroURL = fc.Current().HaroURL
+				covenURL = fc.Current().CovenURL
+			}
 			router = interactions.NewRouter(interactions.InteractionDeps{
 				Store: store, Pool: pool, PoolProvider: funnelPool.Load,
-				Config: currentFunnelConfig(), ConfigProvider: currentFunnelConfig, HaroURL: os.Getenv("HARO_URL"),
+				Config: currentFunnelConfig(), ConfigProvider: currentFunnelConfig, HaroURL: haroURL, MemoryURL: covenURL,
 			})
 			activeInteractionRouter.Store(router)
 		}

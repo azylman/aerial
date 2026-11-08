@@ -199,10 +199,6 @@ type brainAppOptions struct {
 
 func extractMCPServers(cur *config.ConfigData, includeDiscord bool) []runner.MCPServerConfig {
 	serverMap := make(map[string]runner.MCPServerConfig)
-	serverMap["scheduler"] = runner.MCPServerConfig{
-		Name:      "scheduler",
-		ServerURL: "http://haro.aerial/mcp",
-	}
 	if cur != nil {
 		type srvJSON struct {
 			ServerURL string            `json:"serverUrl"`
@@ -365,6 +361,7 @@ func buildUnifiedVoicePool(cfg *config.Config, cur *config.ConfigData, voiceHome
 		runtimeBase = cfg.GeminiHomeDir()
 	}
 	voiceSessionMgr := session.New(voiceHome, runtimeBase)
+	voiceEnv := buildPoolEnv(os.Environ(), runtimeBase, cur.Timezone)
 	return runner.NewUnifiedProcessPool(runner.PoolConfig{
 		Engine:                  cur.GetEngine(),
 		ClaudeBin:               cur.ClaudeBin,
@@ -372,7 +369,7 @@ func buildUnifiedVoicePool(cfg *config.Config, cur *config.ConfigData, voiceHome
 		Model:                   lowEffortModel,
 		AgyBin:                  cur.AgyBin,
 		Cwd:                     cur.DataDir,
-		Env:                     buildPoolEnv(os.Environ(), runtimeBase, cur.Timezone),
+		Env:                     voiceEnv,
 		Timezone:                cur.Timezone,
 		PrewarmedTargets:        prewarmedTargets,
 		MemoryRetriever:         memoryRetriever,
@@ -578,7 +575,16 @@ func buildBrainProcessPools(
 	ephemeralHome := filepath.Join(runtimeBase, "runtimes", "ephemeral")
 
 	poolEnv := buildPoolEnv(os.Environ(), runtimeBase, cur.Timezone)
-	memoryRetriever := newHTTPMemoryRetriever("")
+	if cur.BotID != "" {
+		poolEnv = append(poolEnv, "AERIAL_BOT_ID="+cur.BotID)
+	}
+	if cur.SynapseURL != "" {
+		poolEnv = append(poolEnv, "SYNAPSE_URL="+cur.SynapseURL)
+	}
+	if cur.VanadisURL != "" {
+		poolEnv = append(poolEnv, "VANADIS_URL="+cur.VanadisURL)
+	}
+	memoryRetriever := newHTTPMemoryRetriever(cur.CovenURL)
 
 	basePoolCfg := func(home, model string, prewarmed []string) runner.PoolConfig {
 		pcfg := runner.PoolConfig{
@@ -975,7 +981,9 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		VoiceProcessPool: voicePool,
 		LLMFunc:          ephemeralPool.EphemeralLLMFunc("ephemeral:summarizer"),
 		AmbientResolver:  ambientResolver,
-		HaroURL:          os.Getenv("HARO_URL"),
+		HaroURL:          cur.HaroURL,
+		SynapseURL:       cur.SynapseURL,
+		VanadisURL:       cur.VanadisURL,
 	})
 	pool.HoldUntilLeader()
 	pool.Start()

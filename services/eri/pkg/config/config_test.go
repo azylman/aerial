@@ -63,14 +63,19 @@ func TestLoadConfig_Ingestion(t *testing.T) {
 	})
 
 	tests := []struct {
-		name        string
-		content     string
-		envMap      map[string]string
-		wantModel   string
-		wantTZ      string
-		wantSysChan string
-		wantErr     bool
-		errContains string
+		name           string
+		content        string
+		envMap         map[string]string
+		wantModel      string
+		wantTZ         string
+		wantSysChan    string
+		wantBotID      string
+		wantSynapseURL string
+		wantVanadisURL string
+		wantHaroURL    string
+		wantCovenURL   string
+		wantErr        bool
+		errContains    string
 	}{
 		{
 			name: "valid modern yaml",
@@ -192,6 +197,26 @@ mcp_config:
 `,
 			wantModel: DefaultConfigData().Model,
 		},
+		{
+			name: "service urls trimming and bot id",
+			content: `
+model: "gemini-1.5-pro"
+bot_id: "  aerial-prime  "
+synapse_url: "  http://synapse.internal:4020///  "
+vanadis_url: "http://vanadis.internal:4025/  "
+haro_url: "  http://haro.internal:4026  "
+coven_url: "http://coven.internal:4027/"
+channels:
+  default:
+    mode: "threads"
+`,
+			wantModel:      "gemini-1.5-pro",
+			wantBotID:      "aerial-prime",
+			wantSynapseURL: "http://synapse.internal:4020",
+			wantVanadisURL: "http://vanadis.internal:4025",
+			wantHaroURL:    "http://haro.internal:4026",
+			wantCovenURL:   "http://coven.internal:4027",
+		},
 	}
 
 	for _, tc := range tests {
@@ -220,6 +245,21 @@ mcp_config:
 			}
 			if tc.wantSysChan != "" && cur.SystemChannel != tc.wantSysChan {
 				t.Errorf("SystemChannel = %q, want %q", cur.SystemChannel, tc.wantSysChan)
+			}
+			if tc.wantBotID != "" && cur.BotID != tc.wantBotID {
+				t.Errorf("BotID = %q, want %q", cur.BotID, tc.wantBotID)
+			}
+			if tc.wantSynapseURL != "" && cur.SynapseURL != tc.wantSynapseURL {
+				t.Errorf("SynapseURL = %q, want %q", cur.SynapseURL, tc.wantSynapseURL)
+			}
+			if tc.wantVanadisURL != "" && cur.VanadisURL != tc.wantVanadisURL {
+				t.Errorf("VanadisURL = %q, want %q", cur.VanadisURL, tc.wantVanadisURL)
+			}
+			if tc.wantHaroURL != "" && cur.HaroURL != tc.wantHaroURL {
+				t.Errorf("HaroURL = %q, want %q", cur.HaroURL, tc.wantHaroURL)
+			}
+			if tc.wantCovenURL != "" && cur.CovenURL != tc.wantCovenURL {
+				t.Errorf("CovenURL = %q, want %q", cur.CovenURL, tc.wantCovenURL)
 			}
 		})
 	}

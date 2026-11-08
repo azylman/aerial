@@ -394,65 +394,29 @@ assert_eq "true" "$(echo "$REGISTER_PR_CHECK" | grep -q 'reg1:ok' && echo true |
 assert_eq "true" "$(echo "$REGISTER_PR_CHECK" | grep -q 'reg2:ok:2' && echo true || echo false)" "register_pr_in_brain retries transient error and succeeds on attempt 2"
 assert_eq "true" "$(echo "$REGISTER_PR_CHECK" | grep -q 'reg3:failed_as_expected:3' && echo true || echo false)" "register_pr_in_brain fails non-zero after exhausting all 3 attempts"
 
-# Case 10b: PR registration endpoint probing and AERIAL_PR_REGISTER_URL override
+# Case 10b: PR registration endpoint resolution via AERIAL_PR_REGISTER_URL, SYNAPSE_URL, and CONFIG_PATH
 PR_ENDPOINT_CHECK=$(bash -c "
     REPO_TEST_MODE=1
     source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
 
     # Test 1: AERIAL_PR_REGISTER_URL override used directly
-    res1=\$(AERIAL_PR_REGISTER_URL='http://custom-router.aerial:4020' bash -c '
-        if [ -n \"\${AERIAL_PR_REGISTER_URL:-}\" ]; then
-            if [[ \"\${AERIAL_PR_REGISTER_URL}\" == */internal/pr/register ]]; then
-                echo \"\${AERIAL_PR_REGISTER_URL}\"
-            else
-                echo \"\${AERIAL_PR_REGISTER_URL%/}/internal/pr/register\"
-            fi
-        fi
-    ')
+    res1=\$(AERIAL_PR_REGISTER_URL='http://custom-router.aerial:4020' resolve_pr_register_url)
     [ \"\$res1\" = 'http://custom-router.aerial:4020/internal/pr/register' ] && echo 'ep1:ok'
 
-    # Test 2: Default fallback when no candidates respond
-    curl() { return 1; }
-    export -f curl
-    res2=\$(bash -c '
-        brain_reg_url=\"\"
-        for cand in \"http://synapse.aerial\" \"http://webhooks-router.aerial\" \"http://127.0.0.1:4020\" \"http://127.0.0.1:8088\" \"http://eri.aerial\" \"http://host.docker.internal:8088\" \"http://127.0.0.1:8080\"; do
-            probe_code=\$(curl -s -o /dev/null -w \"%{http_code}\" --connect-timeout 1 -m 2 -X POST \"\${cand}/internal/pr/register\" 2>/dev/null || true)
-            if [ \"\$probe_code\" = \"400\" ] || [ \"\$probe_code\" = \"200\" ]; then
-                brain_reg_url=\"\${cand}/internal/pr/register\"
-                break
-            fi
-        done
-        if [ -z \"\$brain_reg_url\" ]; then
-            brain_reg_url=\"http://synapse.aerial/internal/pr/register\"
-        fi
-        echo \"\$brain_reg_url\"
-    ')
-    [ \"\$res2\" = 'http://synapse.aerial/internal/pr/register' ] && echo 'ep2:ok'
+    # Test 2: SYNAPSE_URL env resolution
+    res2=\$(SYNAPSE_URL='http://synapse.local:4020' resolve_pr_register_url)
+    [ \"\$res2\" = 'http://synapse.local:4020/internal/pr/register' ] && echo 'ep2:ok'
 
-    # Test 3: First responding candidate is selected (synapse candidate)
-    curl() {
-        if [[ \"\$*\" == *\"http://synapse.aerial/internal/pr/register\"* ]]; then
-            printf '400'
-        fi
-    }
-    export -f curl
-    res3=\$(bash -c '
-        brain_reg_url=\"\"
-        for cand in \"http://synapse.aerial\" \"http://webhooks-router.aerial\" \"http://127.0.0.1:4020\" \"http://127.0.0.1:8088\" \"http://eri.aerial\" \"http://host.docker.internal:8088\" \"http://127.0.0.1:8080\"; do
-            probe_code=\$(curl -s -o /dev/null -w \"%{http_code}\" --connect-timeout 1 -m 2 -X POST \"\${cand}/internal/pr/register\" 2>/dev/null || true)
-            if [ \"\$probe_code\" = \"400\" ] || [ \"\$probe_code\" = \"200\" ]; then
-                brain_reg_url=\"\${cand}/internal/pr/register\"
-                break
-            fi
-        done
-        echo \"\$brain_reg_url\"
-    ')
-    [ \"\$res3\" = 'http://synapse.aerial/internal/pr/register' ] && echo 'ep3:ok'
+    # Test 3: CONFIG_PATH yaml resolution
+    TEST_CFG=\"\$(mktemp /tmp/test-config-yaml.XXXXXX)\"
+    echo 'synapse_url: \"http://synapse.from-cfg:4020\"' > \"\$TEST_CFG\"
+    res3=\$(CONFIG_PATH=\"\$TEST_CFG\" resolve_pr_register_url)
+    rm -f \"\$TEST_CFG\"
+    [ \"\$res3\" = 'http://synapse.from-cfg:4020/internal/pr/register' ] && echo 'ep3:ok'
 ")
 assert_eq "true" "$(echo "$PR_ENDPOINT_CHECK" | grep -q 'ep1:ok' && echo true || echo false)" "AERIAL_PR_REGISTER_URL override appends /internal/pr/register"
-assert_eq "true" "$(echo "$PR_ENDPOINT_CHECK" | grep -q 'ep2:ok' && echo true || echo false)" "PR register endpoint defaults to synapse fallback"
-assert_eq "true" "$(echo "$PR_ENDPOINT_CHECK" | grep -q 'ep3:ok' && echo true || echo false)" "PR register endpoint probes synapse.aerial first"
+assert_eq "true" "$(echo "$PR_ENDPOINT_CHECK" | grep -q 'ep2:ok' && echo true || echo false)" "PR register endpoint resolves from SYNAPSE_URL"
+assert_eq "true" "$(echo "$PR_ENDPOINT_CHECK" | grep -q 'ep3:ok' && echo true || echo false)" "PR register endpoint resolves from CONFIG_PATH"
 
 # Case 11: rebase_staged_changes rebases onto advanced upstream before verification and aborts on conflict
 REBASE_STAGED_CHECK=$(bash -c "
@@ -743,11 +707,20 @@ assert_eq "true" "$(echo "$CLI_DISPUTE_CHECK" | grep -q 'Valid numeric pr_num re
 TRAILER_CHECK=$(bash -c "
     REPO_TEST_MODE=1
     source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-    echo \"t1:\$(format_aerial_pr_trailer '1562162630997581946' 'build-123-chunk-2')\"
-    echo \"t2:\$(format_aerial_pr_trailer '' '')\"
+    echo \"t1:\$(CONFIG_PATH=/dev/null format_aerial_pr_trailer '1562162630997581946' 'build-123-chunk-2')\"
+    echo \"t2:\$(CONFIG_PATH=/dev/null format_aerial_pr_trailer '' '')\"
+    echo \"t3:\$(CONFIG_PATH=/dev/null format_aerial_pr_trailer '1562162630997581946' 'build-123-chunk-2' 'aerial-main')\"
+    echo \"t4:\$(CONFIG_PATH=/dev/null AERIAL_BOT_ID='eri-sub' format_aerial_pr_trailer '1562162630997581946' '')\"
+    TEST_CFG=\"\$(mktemp /tmp/trailer-cfg.XXXXXX)\"
+    echo 'bot_id: \"aerial-cfg\"' > \"\$TEST_CFG\"
+    echo \"t5:\$(CONFIG_PATH=\"\$TEST_CFG\" format_aerial_pr_trailer '1562162630997581946' '')\"
+    rm -f \"\$TEST_CFG\"
 ")
 assert_eq 't1:<!-- aerial-pr: {"target_id":"1562162630997581946","vanadis_chunk_id":"build-123-chunk-2"} -->' "$(echo "$TRAILER_CHECK" | grep '^t1:')" "format_aerial_pr_trailer formats compact JSON trailer comment"
 assert_eq "t2:" "$(echo "$TRAILER_CHECK" | grep '^t2:')" "format_aerial_pr_trailer returns empty string when all metadata fields are empty"
+assert_eq 't3:<!-- aerial-pr: {"target_id":"1562162630997581946","vanadis_chunk_id":"build-123-chunk-2","bot_id":"aerial-main"} -->' "$(echo "$TRAILER_CHECK" | grep '^t3:')" "format_aerial_pr_trailer formats trailer with explicit bot_id"
+assert_eq 't4:<!-- aerial-pr: {"target_id":"1562162630997581946","vanadis_chunk_id":"","bot_id":"eri-sub"} -->' "$(echo "$TRAILER_CHECK" | grep '^t4:')" "format_aerial_pr_trailer formats trailer with AERIAL_BOT_ID env"
+assert_eq 't5:<!-- aerial-pr: {"target_id":"1562162630997581946","vanadis_chunk_id":"","bot_id":"aerial-cfg"} -->' "$(echo "$TRAILER_CHECK" | grep '^t5:')" "format_aerial_pr_trailer formats trailer with CONFIG_PATH bot_id"
 
 # Case 14: push_scratch_branch falls back to --force-with-lease when rebased branch already exists on remote
 PUSH_REBASED_CHECK=$(bash -c "

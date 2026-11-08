@@ -74,7 +74,7 @@ func (r *Router) handleStatus(s *discordgo.Session, i *discordgo.InteractionCrea
 	defer cancel()
 
 	factCount, latestFactStr := r.fetchMemoryFactStatus(ctx)
-	nextActionStr := resolveNextScheduleAction(ctx, r.deps.HaroURL)
+	nextActionStr := r.resolveNextScheduleAction(ctx)
 	runtimeStr := r.resolveRuntimeStatus(ctx, i.ChannelID)
 	deployStr := r.resolveDeployStatus()
 
@@ -98,11 +98,11 @@ func (r *Router) fetchMemoryFactStatus(ctx context.Context) (int, string) {
 	factCount := 0
 	latestFactStr := "none recorded yet"
 	memURL := strings.TrimRight(strings.TrimSpace(r.deps.MemoryURL), "/")
-	if memURL == "" {
-		memURL = strings.TrimRight(strings.TrimSpace(os.Getenv("COVEN_URL")), "/")
+	if memURL == "" && r.getConfig() != nil && r.getConfig().Current() != nil {
+		memURL = strings.TrimRight(strings.TrimSpace(r.getConfig().Current().CovenURL), "/")
 	}
 	if memURL == "" {
-		memURL = "http://coven.aerial"
+		return factCount, latestFactStr
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, memURL+"/facts?limit=1", nil)
 	if err != nil {
@@ -168,15 +168,19 @@ func (r *Router) resolveDeployStatus() string {
 	return "Live, healthy"
 }
 
+func (r *Router) resolveNextScheduleAction(ctx context.Context) string {
+	haroURL := strings.TrimRight(strings.TrimSpace(r.deps.HaroURL), "/")
+	if haroURL == "" && r.getConfig() != nil && r.getConfig().Current() != nil {
+		haroURL = strings.TrimRight(strings.TrimSpace(r.getConfig().Current().HaroURL), "/")
+	}
+	return resolveNextScheduleAction(ctx, haroURL)
+}
+
 func resolveNextScheduleAction(ctx context.Context, explicitHaroURL string) string {
-	haroURL := strings.TrimSpace(explicitHaroURL)
+	haroURL := strings.TrimRight(strings.TrimSpace(explicitHaroURL), "/")
 	if haroURL == "" {
-		haroURL = strings.TrimSpace(os.Getenv("HARO_URL"))
+		return "none scheduled"
 	}
-	if haroURL == "" {
-		haroURL = "http://haro.aerial"
-	}
-	haroURL = strings.TrimRight(haroURL, "/")
 
 	reqCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
 	defer cancel()

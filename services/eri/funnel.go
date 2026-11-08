@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log"
-	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -710,9 +709,14 @@ func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.Worke
 		SetFunnelPool(pool)
 	}
 
+	var haroURL, covenURL string
+	if fc := currentFunnelConfig(); fc != nil && fc.Current() != nil {
+		haroURL = fc.Current().HaroURL
+		covenURL = fc.Current().CovenURL
+	}
 	interactionRouter := interactions.NewRouter(interactions.InteractionDeps{
 		Store: store, Pool: pool, PoolProvider: funnelPool.Load,
-		Config: currentFunnelConfig(), ConfigProvider: currentFunnelConfig, HaroURL: os.Getenv("HARO_URL"),
+		Config: currentFunnelConfig(), ConfigProvider: currentFunnelConfig, HaroURL: haroURL, MemoryURL: covenURL,
 	})
 	activeInteractionRouter.Store(interactionRouter)
 

@@ -7,9 +7,39 @@ set -euo pipefail
 # - 'pr' (default): requires a non-empty chunk-level 'repo' (e.g. "azylman/aerial")
 # - 'action': operational chunk running against live services; 'repo' must be omitted or empty ("")
 
-VANADIS_URL="${VANADIS_URL:-http://vanadis.aerial}"
+read_config_yaml_val() {
+    local key="$1"
+    local config_files=()
+    if [ -n "${CONFIG_PATH:-}" ]; then
+        config_files+=("${CONFIG_PATH}")
+    else
+        config_files+=("/local/config.yaml" "/share/aerial-config/config.yaml")
+    fi
+
+    for f in "${config_files[@]}"; do
+        if [ -f "$f" ] && [ -r "$f" ]; then
+            local val
+            val=$(awk -v k="$key" '
+                $0 ~ "^" k ":[ \t]*" {
+                    sub("^" k ":[ \t]*", "")
+                    sub(/[ \t]*#.*$/, "")
+                    gsub(/^["\x27]|["\x27]$/, "")
+                    print
+                    exit
+                }
+            ' "$f" 2>/dev/null || true)
+            if [ -n "$val" ]; then
+                echo "$val"
+                return 0
+            fi
+        fi
+    done
+    echo ""
+}
+
+VANADIS_URL="${VANADIS_URL:-$(read_config_yaml_val vanadis_url)}"
 VANADIS_URL="${VANADIS_URL%/}"
-VANADIS_FALLBACK_URL="${VANADIS_FALLBACK_URL:-http://127.0.0.1:4025}"
+VANADIS_FALLBACK_URL="${VANADIS_FALLBACK_URL:-}"
 VANADIS_FALLBACK_URL="${VANADIS_FALLBACK_URL%/}"
 
 usage() {
@@ -25,7 +55,7 @@ Build Plans:
   Chunks support mode 'pr' (default, requires chunk-level repo) and 'action' (omitted/empty repo).
 
 Environment:
-  VANADIS_URL          Vanadis base URL (default: http://vanadis.aerial, fallback: http://127.0.0.1:4025)
+  VANADIS_URL          Vanadis base URL (resolved from config.yaml vanadis_url if unset)
   DISCORD_THREAD_ID    Automatically injected as thread_id when omitted from plan.json
   DISCORD_CHANNEL_ID   Fallback thread_id when DISCORD_THREAD_ID is unset
 EOF
@@ -64,9 +94,14 @@ vanadis_request() {
     local path="$2"
     local body="${3:-}"
 
+    if [ -z "$VANADIS_URL" ]; then
+        echo "ERROR: VANADIS_URL is not configured (set VANADIS_URL or declare vanadis_url in config.yaml)" >&2
+        return 1
+    fi
+
     local raw_resp=""
     if ! raw_resp="$(do_curl_request "$method" "${VANADIS_URL}${path}" "$body" 2>/dev/null)"; then
-        if [ "$VANADIS_URL" != "$VANADIS_FALLBACK_URL" ]; then
+        if [ -n "$VANADIS_FALLBACK_URL" ] && [ "$VANADIS_URL" != "$VANADIS_FALLBACK_URL" ]; then
             if ! raw_resp="$(do_curl_request "$method" "${VANADIS_FALLBACK_URL}${path}" "$body" 2>&1)"; then
                 echo "ERROR: Failed to connect to Vanadis at ${VANADIS_URL}${path} and fallback ${VANADIS_FALLBACK_URL}${path}: ${raw_resp}" >&2
                 return 1

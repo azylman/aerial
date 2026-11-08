@@ -172,6 +172,16 @@ assert_eq "POST http://127.0.0.1:4025/builds/build-test-101/cancel" "$(cat "$CAP
 HTTP_ERR="$(VANADIS_URL="http://127.0.0.1:4025" MOCK_HTTP_STATUS=500 "$AERIAL_BUILD" status build-test-101 2>&1 || true)"
 assert_contains "failed with HTTP 500" "$HTTP_ERR" "HTTP 500 error is reported and exits non-zero"
 
+# Test 9: Missing VANADIS_URL error when unset in env and config.yaml
+NO_URL_ERR="$(CONFIG_PATH="/dev/null" VANADIS_URL="" "$AERIAL_BUILD" status build-test-101 2>&1 || true)"
+assert_contains "VANADIS_URL is not configured" "$NO_URL_ERR" "status fails cleanly when VANADIS_URL is not configured"
+
+# Test 10: CONFIG_PATH resolution
+TEST_CONFIG_YAML="${TMP_DIR}/config.yaml"
+echo 'vanadis_url: "http://127.0.0.1:4025"' > "$TEST_CONFIG_YAML"
+CONFIG_STATUS_OUT="$(CONFIG_PATH="$TEST_CONFIG_YAML" VANADIS_URL="" "$AERIAL_BUILD" status build-test-101)"
+assert_eq "running" "$(printf '%s' "$CONFIG_STATUS_OUT" | jq -r '.build.status')" "status command resolves VANADIS_URL from CONFIG_PATH"
+
 echo "--------------------------------------------------------"
 echo "Test results: $PASSED passed, $FAILED failed"
 if [ "$FAILED" -gt 0 ]; then

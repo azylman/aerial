@@ -235,6 +235,11 @@ type ConfigData struct {
 	MaxBackgroundTaskDuration time.Duration            `yaml:"max_background_task_duration,omitempty" json:"max_background_task_duration,omitempty"`
 	Engine                    string                   `yaml:"engine,omitempty" json:"engine,omitempty"`
 	ClaudeBin                 string                   `yaml:"claude_bin,omitempty" json:"claude_bin,omitempty"`
+	BotID                     string                   `yaml:"bot_id" json:"bot_id"`
+	SynapseURL                string                   `yaml:"synapse_url" json:"synapse_url"`
+	VanadisURL                string                   `yaml:"vanadis_url" json:"vanadis_url"`
+	HaroURL                   string                   `yaml:"haro_url" json:"haro_url"`
+	CovenURL                  string                   `yaml:"coven_url" json:"coven_url"`
 }
 
 func normalizePrewarmedTargets(targets []string) []string {
@@ -366,6 +371,11 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		MaxBackgroundTaskDuration time.Duration            `yaml:"max_background_task_duration"`
 		Engine                    string                   `yaml:"engine"`
 		ClaudeBin                 string                   `yaml:"claude_bin"`
+		BotID                     string                   `yaml:"bot_id"`
+		SynapseURL                string                   `yaml:"synapse_url"`
+		VanadisURL                string                   `yaml:"vanadis_url"`
+		HaroURL                   string                   `yaml:"haro_url"`
+		CovenURL                  string                   `yaml:"coven_url"`
 	}
 
 	var raw rawConfigHelper
@@ -386,6 +396,11 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	c.AgyBin = raw.AgyBin
 	c.Engine = raw.Engine
 	c.ClaudeBin = raw.ClaudeBin
+	c.BotID = strings.TrimSpace(raw.BotID)
+	c.SynapseURL = strings.TrimRight(strings.TrimSpace(raw.SynapseURL), "/")
+	c.VanadisURL = strings.TrimRight(strings.TrimSpace(raw.VanadisURL), "/")
+	c.HaroURL = strings.TrimRight(strings.TrimSpace(raw.HaroURL), "/")
+	c.CovenURL = strings.TrimRight(strings.TrimSpace(raw.CovenURL), "/")
 	c.APIKey = raw.APIKey
 	c.HarnessAPIKey = raw.HarnessAPIKey
 	c.SystemPrompt = raw.SystemPrompt
