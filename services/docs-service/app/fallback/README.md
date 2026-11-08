@@ -53,7 +53,7 @@ Mounts /share/aerial:ro & /share/aerial-config:ro"]
     subgraph WebServices ["📊 Web & Documentation Microservices"]
         Homepage["homepage (:8080)
 Service Discovery HUD"]
-        Dashboard["dashboard (:8080)
+        Console["console (:8080)
 Live Cluster Status HUD"]
         Docs["docs (:80)
 Docsify + Mermaid Engine"]
@@ -84,7 +84,7 @@ Kubelet Container Metrics"]
     WebBrowser --> LanGW
     WebBrowser --> EdgeGW
     LanGW --> Homepage
-    LanGW --> Dashboard
+    LanGW --> Console
     LanGW --> Docs
     LanGW --> Agentsview
     LanGW --> Grafana
@@ -136,7 +136,7 @@ aerial-config/
 ├── homepage/                 # Service discovery cards & bookmarks
 ├── k8s/                      # User-defined Kubernetes manifests & Kustomizations
 ├── services/                 # Dedicated service configuration files
-│   └── dashboard/
+│   └── console/
 ├── victoriametrics/          # Modular Prometheus scrape configs
 └── docs/                     # Living Docsify documentation portal
     ├── README.md             # Docs homepage

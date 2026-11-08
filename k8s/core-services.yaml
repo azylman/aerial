@@ -63,7 +63,7 @@ metadata:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: aerial-dashboard-reader
+  name: aerial-console-reader
 rules:
   - apiGroups:
       - apps
@@ -101,20 +101,20 @@ imagePullSecrets:
   - name: ghcr-creds
 kind: ServiceAccount
 metadata:
-  name: dashboard-sa
+  name: console-sa
   namespace: default
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: aerial-dashboard-reader-binding
+  name: aerial-console-reader-binding
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: aerial-dashboard-reader
+  name: aerial-console-reader
 subjects:
   - kind: ServiceAccount
-    name: dashboard-sa
+    name: console-sa
     namespace: default
 ---
 apiVersion: apps/v1
@@ -1100,7 +1100,7 @@ spec:
 ---
 apiVersion: v1
 data:
-  dashboard.yaml: |
+  console.yaml: |
     port: "8084"
     eri_url: "http://eri.aerial"
     memory_url: "http://coven.aerial"
@@ -1112,22 +1112,22 @@ data:
       - "azylman/aerial-config"
 kind: ConfigMap
 metadata:
-  name: dashboard-config
+  name: console-config
   namespace: default
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
-    app.kubernetes.io/name: dashboard
-  name: dashboard
+    app.kubernetes.io/name: console
+  name: console
   namespace: default
 spec:
   minReadySeconds: 10
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: dashboard
+      app.kubernetes.io/name: console
   strategy:
     rollingUpdate:
       maxSurge: 1
@@ -1136,37 +1136,58 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: dashboard
+        app.kubernetes.io/name: console
     spec:
       containers:
         - env:
             - name: PORT
               value: "8084"
             - name: CONFIG_PATH
-              value: /config/dashboard.yaml
+              value: /config/console.yaml
           envFrom:
             - secretRef:
                 name: shared-secrets
-          image: ghcr.io/azylman/aerial-dashboard:${TAG_AERIAL_DASHBOARD:=latest}
+          image: ghcr.io/azylman/aerial-console:${TAG_AERIAL_CONSOLE:=latest}
           imagePullPolicy: Always
-          name: dashboard
+          name: console
           ports:
             - containerPort: 8084
               name: http
               protocol: TCP
           volumeMounts:
-            - mountPath: /config/dashboard.yaml
+            - mountPath: /config/console.yaml
               name: config
-              subPath: dashboard.yaml
+              subPath: console.yaml
       nodeSelector:
         compute-tier: performance
-      serviceAccountName: dashboard-sa
+      serviceAccountName: console-sa
       volumes:
         - configMap:
             defaultMode: 420
-            name: dashboard-config
+            name: console-config
           name: config
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: console
+  namespace: default
+spec:
+  ports:
+    - name: http
+      port: 8080
+      protocol: TCP
+      targetPort: 8084
+    - name: http-80
+      port: 80
+      protocol: TCP
+      targetPort: 8084
+  selector:
+    app.kubernetes.io/name: console
+  type: ClusterIP
+---
+# Temporary alias: keeps dashboard.aerial resolving for homepage and gatus
+# until aerial-config switches to console.aerial. Removed by the next chunk.
 apiVersion: v1
 kind: Service
 metadata:
@@ -1183,7 +1204,7 @@ spec:
       protocol: TCP
       targetPort: 8084
   selector:
-    app.kubernetes.io/name: dashboard
+    app.kubernetes.io/name: console
   type: ClusterIP
 ---
 apiVersion: apps/v1

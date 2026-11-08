@@ -28,7 +28,7 @@ test('mergeServices: merges novel and matching groups with service deduplication
   const core = [
     {
       'Aerial AI & Mission Control': [
-        { 'Aerial Command HUD': { href: '/dashboard/', icon: 'hud.png' } },
+        { 'Aerial Command HUD': { href: '/console/', icon: 'hud.png' } },
         { AgentsView: { href: '/agentsview/', icon: 'term.png' } }
       ]
     },

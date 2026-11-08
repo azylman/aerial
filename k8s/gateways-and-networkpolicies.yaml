@@ -169,13 +169,35 @@ spec:
         - requestRedirect:
             path:
               type: ReplaceFullPath
-              replaceFullPath: /dashboard/
+              replaceFullPath: /console/
+            statusCode: 301
+          type: RequestRedirect
+      matches:
+        - path:
+            type: Exact
+            value: /console
+    - filters:
+        - requestRedirect:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /console/
             statusCode: 301
           type: RequestRedirect
       matches:
         - path:
             type: Exact
             value: /dashboard
+    - filters:
+        - requestRedirect:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /console/
+            statusCode: 301
+          type: RequestRedirect
+      matches:
+        - path:
+            type: PathPrefix
+            value: /dashboard/
     - filters:
         - requestRedirect:
             path:
@@ -262,13 +284,13 @@ spec:
     - backendRefs:
         - group: ""
           kind: Service
-          name: dashboard
+          name: console
           port: 8080
           weight: 1
       matches:
         - path:
             type: PathPrefix
-            value: /dashboard/
+            value: /console/
     - backendRefs:
         - group: ""
           kind: Service
@@ -413,7 +435,32 @@ spec:
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
-  name: dashboard-lan-route
+  name: console-lan-route
+  namespace: default
+spec:
+  hostnames:
+    - console.lan.zylman.com
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: lan-gateway
+      sectionName: https
+  rules:
+    - backendRefs:
+        - group: ""
+          kind: Service
+          name: console
+          port: 8080
+          weight: 1
+      matches:
+        - path:
+            type: PathPrefix
+            value: /
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: dashboard-lan-redirect-route
   namespace: default
 spec:
   hostnames:
@@ -424,16 +471,12 @@ spec:
       name: lan-gateway
       sectionName: https
   rules:
-    - backendRefs:
-        - group: ""
-          kind: Service
-          name: dashboard
-          port: 8080
-          weight: 1
-      matches:
-        - path:
-            type: PathPrefix
-            value: /
+    - filters:
+        - requestRedirect:
+            hostname: console.lan.zylman.com
+            scheme: https
+            statusCode: 301
+          type: RequestRedirect
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
@@ -729,13 +772,35 @@ spec:
         - requestRedirect:
             path:
               type: ReplaceFullPath
-              replaceFullPath: /dashboard/
+              replaceFullPath: /console/
+            statusCode: 301
+          type: RequestRedirect
+      matches:
+        - path:
+            type: Exact
+            value: /console
+    - filters:
+        - requestRedirect:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: /console/
             statusCode: 301
           type: RequestRedirect
       matches:
         - path:
             type: Exact
             value: /dashboard
+    - filters:
+        - requestRedirect:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /console/
+            statusCode: 301
+          type: RequestRedirect
+      matches:
+        - path:
+            type: PathPrefix
+            value: /dashboard/
     - filters:
         - requestRedirect:
             path:
@@ -819,13 +884,13 @@ spec:
     - backendRefs:
         - group: ""
           kind: Service
-          name: dashboard
+          name: console
           port: 8080
           weight: 1
       matches:
         - path:
             type: PathPrefix
-            value: /dashboard/
+            value: /console/
     - backendRefs:
         - group: ""
           kind: Service
@@ -1037,7 +1102,7 @@ spec:
                   - eri
                   - kernel-browser
                   - homepage
-                  - dashboard
+                  - console
                   - agentsview
                   - grafana
                   - openobserve
