@@ -851,15 +851,12 @@ rules:
       - create
   - apiGroups:
       - kustomize.toolkit.fluxcd.io
-    resourceNames:
-      - aerial-core
-      - aerial-config
     resources:
       - kustomizations
     verbs:
       - get
+      - list
       - patch
-      - update
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -870,6 +867,40 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: synapse-flux-reconciler
+subjects:
+  - kind: ServiceAccount
+    name: synapse-sa
+    namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: synapse-workload-reader
+rules:
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+      - statefulsets
+      - daemonsets
+    verbs:
+      - list
+  - apiGroups:
+      - batch
+    resources:
+      - jobs
+      - cronjobs
+    verbs:
+      - list
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: synapse-workload-reader-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: synapse-workload-reader
 subjects:
   - kind: ServiceAccount
     name: synapse-sa

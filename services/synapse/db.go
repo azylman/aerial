@@ -110,6 +110,7 @@ type PRRegistryUpdater interface {
 	CheckEventTriggers(ctx context.Context, source string, targets []string, eventType string) (bool, error)
 	FireEventTriggers(ctx context.Context, source string, targets []string, eventType, contextHeader string) ([]ClaimedEventTrigger, error)
 	AppendPRJobs(ctx context.Context, repo string, prNumber int, jobs []string) error
+	RecordKustomizationRequests(ctx context.Context, repo string, prNumber int, requests map[string]kustomizationRequest) error
 	UpdatePRStatus(ctx context.Context, repo string, prNumber int, status string, metadata map[string]any) error
 }
 
@@ -1016,6 +1017,42 @@ func (r *PostgresPRRegistry) AppendPRJobs(ctx context.Context, repo string, prNu
 		WHERE repo = $1 AND pr_number = $2;`
 	if _, err := r.pool.Exec(qCtx, query, repo, prNumber, cleanJobs); err != nil {
 		return fmt.Errorf("append pr jobs: %w", err)
+	}
+	return nil
+}
+
+const (
+	kustomizationRequestsKey  = "kustomization_requests"
+	deployedKustomizationsKey = "deployed_kustomizations"
+)
+
+// kustomizationRequest is the reconcile request recorded for one Flux Kustomization of a PR rollout.
+type kustomizationRequest struct {
+	Namespace   string `json:"namespace"`
+	RequestedAt string `json:"requested_at"`
+}
+
+// RecordKustomizationRequests replaces the PR's kustomization_requests wholesale and clears
+// deployed_kustomizations so completion is tracked only against the latest reconcile requests.
+func (r *PostgresPRRegistry) RecordKustomizationRequests(ctx context.Context, repo string, prNumber int, requests map[string]kustomizationRequest) error {
+	repo = normalizeRepo(repo)
+	if r == nil || r.pool == nil || repo == "" || prNumber <= 0 || len(requests) == 0 {
+		return nil
+	}
+	reqBytes, err := json.Marshal(requests)
+	if err != nil {
+		return fmt.Errorf("marshal kustomization requests: %w", err)
+	}
+	qCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := `
+		UPDATE pr_registry
+		SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb) - '` + deployedKustomizationsKey + `', '{` + kustomizationRequestsKey + `}', $3::jsonb),
+			updated_at = CURRENT_TIMESTAMP
+		WHERE repo = $1 AND pr_number = $2;`
+	if _, err := r.pool.Exec(qCtx, query, repo, prNumber, reqBytes); err != nil {
+		return fmt.Errorf("record kustomization requests: %w", err)
 	}
 	return nil
 }

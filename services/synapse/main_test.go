@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -249,6 +250,9 @@ type mockPRRegistry struct {
 	updatePRStatusCalls []prStatusCall
 	updatePRStatusErr   error
 
+	kustomizationRequestCalls []map[string]kustomizationRequest
+	kustomizationRequestErr   error
+
 	err error
 }
 
@@ -406,6 +410,14 @@ func (m *mockPRRegistry) AppendPRJobs(ctx context.Context, repo string, prNumber
 	return m.checkErr(m.appendPRJobsErr)
 }
 
+func (m *mockPRRegistry) RecordKustomizationRequests(ctx context.Context, repo string, prNumber int, requests map[string]kustomizationRequest) error {
+	if err := m.checkErr(m.kustomizationRequestErr); err != nil {
+		return err
+	}
+	m.kustomizationRequestCalls = append(m.kustomizationRequestCalls, requests)
+	return nil
+}
+
 func (m *mockPRRegistry) UpdatePRStatus(ctx context.Context, repo string, prNumber int, status string, metadata map[string]any) error {
 	m.updatePRStatusCalls = append(m.updatePRStatusCalls, prStatusCall{repo: repo, prNumber: prNumber, status: status, metadata: metadata})
 	return m.checkErr(m.updatePRStatusErr)
@@ -557,14 +569,19 @@ func (m *mockPRRegistry) RecordPRJobState(ctx context.Context, jobName, jobState
 type mockOutboundDispatcher struct {
 	mu                      sync.Mutex
 	gitPushCalls            []GitPushEventRequest
-	imageReadyCalls         []ImageReadyEventRequest
+	promoteCalls            []ImageReadyEventRequest
+	reconcileCalls          []fluxKustomizationRef
 	promptCalls             []PromptRequest
 	dispatchCalls           []DispatchRequest
 	directMessageCalls      []DirectMessageRequest
 	discordMessageCalls     []DiscordMessageIngressRequest
 	discordInteractionCalls []*discordgo.Interaction
 	gitPushErr              error
-	imageReadyErr           error
+	promoteErr              error
+	discoverErr             error
+	reconcileErrs           map[string]error
+	handled                 bool
+	handledErr              error
 	promptErr               error
 	dispatchErr             error
 	directMessageErr        error
@@ -575,7 +592,7 @@ type mockOutboundDispatcher struct {
 	widgetErr               error
 	widgetReturnMsgID       string
 	widgetCalls             []StatusWidgetRequest
-	matchedJobs             map[string][]string
+	kustomizationsByImage   map[string][]fluxKustomizationRef
 }
 
 func (m *mockOutboundDispatcher) DispatchGitPush(ctx context.Context, req GitPushEventRequest) error {
@@ -585,15 +602,46 @@ func (m *mockOutboundDispatcher) DispatchGitPush(ctx context.Context, req GitPus
 	return m.gitPushErr
 }
 
-func (m *mockOutboundDispatcher) DispatchImageReady(ctx context.Context, req ImageReadyEventRequest) ([]string, error) {
+func (m *mockOutboundDispatcher) DiscoverImageKustomizations(ctx context.Context, imageNames []string) ([]fluxKustomizationRef, error) {
 	m.mu.Lock()
-	m.imageReadyCalls = append(m.imageReadyCalls, req)
-	var jobs []string
-	if m.matchedJobs != nil {
-		jobs = m.matchedJobs[req.Image]
+	defer m.mu.Unlock()
+	if m.discoverErr != nil {
+		return nil, m.discoverErr
 	}
-	m.mu.Unlock()
-	return jobs, m.imageReadyErr
+	var refs []fluxKustomizationRef
+	for _, name := range imageNames {
+		for _, ref := range m.kustomizationsByImage[name] {
+			if !slices.Contains(refs, ref) {
+				refs = append(refs, ref)
+			}
+		}
+	}
+	return refs, nil
+}
+
+func (m *mockOutboundDispatcher) PromoteImageTag(ctx context.Context, req ImageReadyEventRequest) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.promoteCalls = append(m.promoteCalls, req)
+	if m.promoteErr != nil {
+		return "", m.promoteErr
+	}
+	_, _, workload := resolveImageTag(req.Repo, req.Image)
+	return workload, nil
+}
+
+func (m *mockOutboundDispatcher) ReconcileKustomization(ctx context.Context, ref fluxKustomizationRef) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.reconcileCalls = append(m.reconcileCalls, ref)
+	if err := m.reconcileErrs[ref.Name]; err != nil {
+		return "", err
+	}
+	return "requested-" + ref.Name, nil
+}
+
+func (m *mockOutboundDispatcher) KustomizationReconcileHandled(ctx context.Context, ref fluxKustomizationRef, requestedAt string) (bool, error) {
+	return m.handled, m.handledErr
 }
 
 func (m *mockOutboundDispatcher) DispatchPrompt(ctx context.Context, req PromptRequest) error {
@@ -623,10 +671,16 @@ func (m *mockOutboundDispatcher) GitPushCalls() []GitPushEventRequest {
 	return append([]GitPushEventRequest(nil), m.gitPushCalls...)
 }
 
-func (m *mockOutboundDispatcher) ImageReadyCalls() []ImageReadyEventRequest {
+func (m *mockOutboundDispatcher) PromoteCalls() []ImageReadyEventRequest {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return append([]ImageReadyEventRequest(nil), m.imageReadyCalls...)
+	return append([]ImageReadyEventRequest(nil), m.promoteCalls...)
+}
+
+func (m *mockOutboundDispatcher) ReconcileCalls() []fluxKustomizationRef {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]fluxKustomizationRef(nil), m.reconcileCalls...)
 }
 
 func (m *mockOutboundDispatcher) PromptCalls() []PromptRequest {
@@ -1279,7 +1333,7 @@ func TestProcessDeployEvent(t *testing.T) {
 						HeadSHA:  "sha-mirrormere-head",
 						TargetID: "1555405874565091380",
 						Metadata: map[string]any{
-							"started_jobs": []any{"mirrormere-kiosk"},
+							"kustomization_requests": map[string]any{"aerial-config": map[string]any{"namespace": "flux-system", "requested_at": "2026-11-08T00:00:00Z"}},
 						},
 					},
 				},
@@ -1302,7 +1356,7 @@ func TestProcessDeployEvent(t *testing.T) {
 						HeadSHA:  "sha-mirrormere-head",
 						TargetID: "1555405874565091380",
 						Metadata: map[string]any{
-							"started_jobs": []any{"mirrormere-kiosk"},
+							"kustomization_requests": map[string]any{"aerial-config": map[string]any{"namespace": "flux-system", "requested_at": "2026-11-08T00:00:00Z"}},
 						},
 					},
 				},
@@ -1322,7 +1376,7 @@ func TestProcessDeployEvent(t *testing.T) {
 						PRNumber: 888,
 						MergeSHA: "sha-aerial-merge",
 						Metadata: map[string]any{
-							"started_jobs": []any{"aerial-synapse"},
+							"kustomization_requests": map[string]any{"aerial-core": map[string]any{"namespace": "flux-system", "requested_at": "2026-11-08T00:00:00Z"}},
 						},
 					},
 				},
@@ -1344,7 +1398,7 @@ func TestProcessDeployEvent(t *testing.T) {
 						HeadSHA:  "sha-sidecar-head",
 						TargetID: "1555405874565091380",
 						Metadata: map[string]any{
-							"started_jobs": []any{"custom-sidecar"},
+							"kustomization_requests": map[string]any{"aerial-config": map[string]any{"namespace": "flux-system", "requested_at": "2026-11-08T00:00:00Z"}},
 						},
 					},
 				},
@@ -1365,7 +1419,7 @@ func TestProcessDeployEvent(t *testing.T) {
 						HeadSHA:  "sha-sidecar-mig-head",
 						TargetID: "1555405874565091380",
 						Metadata: map[string]any{
-							"started_jobs": []any{"aerial-sidecar-migrator"},
+							"kustomization_requests": map[string]any{"aerial-core": map[string]any{"namespace": "flux-system", "requested_at": "2026-11-08T00:00:00Z"}},
 						},
 					},
 				},
@@ -1387,7 +1441,7 @@ func TestProcessDeployEvent(t *testing.T) {
 						PRNumber: 1484,
 						MergeSHA: "sha-pr-1484",
 						Metadata: map[string]any{
-							"started_jobs": []any{"aerial-synapse"},
+							"kustomization_requests": map[string]any{"aerial-core": map[string]any{"namespace": "flux-system", "requested_at": "2026-11-08T00:00:00Z"}},
 						},
 					},
 					{
@@ -1395,7 +1449,7 @@ func TestProcessDeployEvent(t *testing.T) {
 						PRNumber: 1484,
 						MergeSHA: "sha-pr-1484",
 						Metadata: map[string]any{
-							"started_jobs": []any{"aerial-synapse"},
+							"kustomization_requests": map[string]any{"aerial-core": map[string]any{"namespace": "flux-system", "requested_at": "2026-11-08T00:00:00Z"}},
 						},
 					},
 					{
@@ -1404,7 +1458,7 @@ func TestProcessDeployEvent(t *testing.T) {
 						HeadSHA:  "sha-mirrormere-700",
 						TargetID: "1555405874565091380",
 						Metadata: map[string]any{
-							"started_jobs": []any{"mirrormere-kiosk"},
+							"kustomization_requests": map[string]any{"aerial-config": map[string]any{"namespace": "flux-system", "requested_at": "2026-11-08T00:00:00Z"}},
 						},
 					},
 					{
@@ -1413,7 +1467,7 @@ func TestProcessDeployEvent(t *testing.T) {
 						MergeSHA: "sha-pr-1485",
 						TargetID: "1555405874565091380",
 						Metadata: map[string]any{
-							"started_jobs": []any{"aerial-eri"},
+							"kustomization_requests": map[string]any{"aerial-core": map[string]any{"namespace": "flux-system", "requested_at": "2026-11-08T00:00:00Z"}},
 						},
 					},
 				},

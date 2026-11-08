@@ -724,7 +724,10 @@ type DirectMessageRequest struct {
 
 type OutboundDispatcher interface {
 	DispatchGitPush(ctx context.Context, req GitPushEventRequest) error
-	DispatchImageReady(ctx context.Context, req ImageReadyEventRequest) ([]string, error)
+	DiscoverImageKustomizations(ctx context.Context, imageNames []string) ([]fluxKustomizationRef, error)
+	PromoteImageTag(ctx context.Context, req ImageReadyEventRequest) (workloadName string, err error)
+	ReconcileKustomization(ctx context.Context, ref fluxKustomizationRef) (requestedAt string, err error)
+	KustomizationReconcileHandled(ctx context.Context, ref fluxKustomizationRef, requestedAt string) (bool, error)
 	DispatchPrompt(ctx context.Context, req PromptRequest) error
 	DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error
 	DispatchWidget(ctx context.Context, payload StatusWidgetRequest) (string, error)
@@ -815,43 +818,27 @@ func extractImageWorkloadName(imageRef string) string {
 	return strings.TrimSpace(ref)
 }
 
-func resolveImageTagAndKustomization(repo, imageRef string) (tagKey, kustomizationName, workloadName string) {
+func resolveImageTag(repo, imageRef string) (tagKey, imageName, workloadName string) {
 	workloadName = extractImageWorkloadName(imageRef)
 	if workloadName == "" || strings.EqualFold(workloadName, "none") {
 		return "", "", ""
 	}
-	cleanRepo := cleanRepoName(repo)
-	var imageName string
-	switch cleanRepo {
+	switch cleanRepoName(repo) {
 	case "aerial":
-		base := strings.TrimPrefix(workloadName, "aerial-")
-		imageName = "aerial-" + base
-		kustomizationName = "aerial-core"
+		imageName = "aerial-" + strings.TrimPrefix(workloadName, "aerial-")
 	case "aerial-sidecars":
-		base := strings.TrimPrefix(workloadName, "aerial-sidecar-")
-		imageName = "aerial-sidecar-" + base
-		if imageName == "aerial-sidecar-migrator" {
-			kustomizationName = "aerial-core"
-		} else {
-			kustomizationName = "aerial-config"
-		}
+		imageName = "aerial-sidecar-" + strings.TrimPrefix(workloadName, "aerial-sidecar-")
 	case "mirrormere":
 		if strings.HasPrefix(workloadName, "mirrormere") {
 			imageName = workloadName
 		} else {
 			imageName = "mirrormere-" + workloadName
 		}
-		kustomizationName = "aerial-config"
 	default:
 		imageName = workloadName
-		if strings.HasPrefix(imageName, "aerial-") && !strings.HasPrefix(imageName, "aerial-sidecar-") {
-			kustomizationName = "aerial-core"
-		} else {
-			kustomizationName = "aerial-config"
-		}
 	}
 	tagKey = "TAG_" + strings.ToUpper(strings.ReplaceAll(imageName, "-", "_"))
-	return tagKey, kustomizationName, workloadName
+	return tagKey, imageName, workloadName
 }
 
 func (d *DefaultOutboundDispatcher) createOrRetryImageTagConfigMap(ctx context.Context, client *http.Client, token, tagKey, commitSHA string, doPatch func() (int, []byte, error)) error {
@@ -958,48 +945,6 @@ func (d *DefaultOutboundDispatcher) upsertImageTagConfigMap(ctx context.Context,
 	return fmt.Errorf("configmap patch returned status %d: %s", statusCode, string(body))
 }
 
-func (d *DefaultOutboundDispatcher) triggerFluxKustomizationReconcile(ctx context.Context, kustomizationName string) error {
-	apiServer := d.kubeAPIServer
-	token := d.getKubeToken()
-	client := getK8sHTTPClient(apiServer, d.httpClient)
-
-	patchBody, err := json.Marshal(map[string]any{
-		"metadata": map[string]any{
-			"annotations": map[string]string{
-				"reconcile.fluxcd.io/requestedAt": time.Now().UTC().Format(time.RFC3339Nano),
-			},
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("marshal kustomization patch body: %w", err)
-	}
-
-	patchURL := fmt.Sprintf("%s/apis/kustomize.toolkit.fluxcd.io/v1/namespaces/flux-system/kustomizations/%s", apiServer, kustomizationName)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, patchURL, bytes.NewReader(patchBody))
-	if err != nil {
-		return fmt.Errorf("create kustomization patch request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/merge-patch+json")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("kustomization patch request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return nil
-	}
-	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	if readErr != nil {
-		return fmt.Errorf("kustomization patch returned status %d", resp.StatusCode)
-	}
-	return fmt.Errorf("kustomization patch returned status %d: %s", resp.StatusCode, string(respBody))
-}
-
 func (d *DefaultOutboundDispatcher) DispatchGitPush(ctx context.Context, req GitPushEventRequest) error {
 	if d.fluxReceiverURL != "" {
 		return d.forwardFluxReceiver(ctx, req)
@@ -1007,20 +952,21 @@ func (d *DefaultOutboundDispatcher) DispatchGitPush(ctx context.Context, req Git
 	return nil
 }
 
-func (d *DefaultOutboundDispatcher) DispatchImageReady(ctx context.Context, req ImageReadyEventRequest) ([]string, error) {
-	tagKey, kustomizationName, workloadName := resolveImageTagAndKustomization(req.Repo, req.Image)
+// PromoteImageTag writes the image's TAG_ key into the shared image tag ConfigMap and forwards the
+// event to the Flux receiver. It never reconciles: callers reconcile the owning Kustomizations only
+// after every image of a run is promoted so a single reconcile renders all of them.
+func (d *DefaultOutboundDispatcher) PromoteImageTag(ctx context.Context, req ImageReadyEventRequest) (string, error) {
+	tagKey, _, workloadName := resolveImageTag(req.Repo, req.Image)
 	if workloadName == "" {
-		return nil, nil
+		return "", nil
 	}
 
 	var kubeSuccess, fluxSuccess bool
 	var kubeErr, fluxErr error
 
-	if d.kubeAPIServer != "" && req.CommitSHA != "" && !isZeroSHA(req.CommitSHA) && tagKey != "" {
+	if d.kubeAPIServer != "" && req.CommitSHA != "" && !isZeroSHA(req.CommitSHA) {
 		if err := d.upsertImageTagConfigMap(ctx, tagKey, req.CommitSHA); err != nil {
 			kubeErr = fmt.Errorf("upsert image tag configmap: %w", err)
-		} else if err := d.triggerFluxKustomizationReconcile(ctx, kustomizationName); err != nil {
-			kubeErr = fmt.Errorf("trigger flux kustomization reconcile: %w", err)
 		} else {
 			kubeSuccess = true
 		}
@@ -1035,19 +981,143 @@ func (d *DefaultOutboundDispatcher) DispatchImageReady(ctx context.Context, req 
 	}
 
 	if kubeErr != nil && fluxErr != nil {
-		return nil, errors.Join(kubeErr, fluxErr)
+		return "", errors.Join(kubeErr, fluxErr)
 	}
 	if kubeErr != nil && !fluxSuccess {
-		return nil, kubeErr
+		return "", kubeErr
 	}
 	if fluxErr != nil && !kubeSuccess {
-		return nil, fluxErr
+		return "", fluxErr
 	}
-
 	if kubeSuccess || fluxSuccess {
-		return []string{workloadName}, nil
+		return workloadName, nil
 	}
-	return nil, nil
+	return "", nil
+}
+
+// kubeJSON performs a raw kube API request and returns the response body, failing on non-2xx statuses.
+func (d *DefaultOutboundDispatcher) kubeJSON(ctx context.Context, method, path, contentType string, body []byte) ([]byte, error) {
+	if d.kubeAPIServer == "" {
+		return nil, errors.New("kube api server not configured")
+	}
+	var reqBody io.Reader
+	if body != nil {
+		reqBody = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, d.kubeAPIServer+path, reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("create kube %s %s request: %w", method, path, err)
+	}
+	req.Header.Set("Accept", "application/json")
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	if token := d.getKubeToken(); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := getK8sHTTPClient(d.kubeAPIServer, d.httpClient).Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("kube %s %s request failed: %w", method, path, err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	if err != nil {
+		return nil, fmt.Errorf("read kube %s %s response: %w", method, path, err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("kube %s %s returned status %d: %s", method, path, resp.StatusCode, truncateKubeBody(respBody))
+	}
+	return respBody, nil
+}
+
+func truncateKubeBody(body []byte) string {
+	const maxLen = 512
+	if len(body) > maxLen {
+		return string(body[:maxLen]) + "..."
+	}
+	return string(body)
+}
+
+// workloadListPaths are the cluster-wide list endpoints for every workload kind that can run an image.
+var workloadListPaths = []string{
+	"/apis/apps/v1/deployments",
+	"/apis/apps/v1/statefulsets",
+	"/apis/apps/v1/daemonsets",
+	"/apis/batch/v1/jobs",
+	"/apis/batch/v1/cronjobs",
+}
+
+func (d *DefaultOutboundDispatcher) listWorkloadImages(ctx context.Context) ([]workloadImageRef, error) {
+	var workloads []workloadImageRef
+	for _, path := range workloadListPaths {
+		body, err := d.kubeJSON(ctx, http.MethodGet, path, "", nil)
+		if err != nil {
+			return nil, fmt.Errorf("list workloads: %w", err)
+		}
+		refs, err := decodeWorkloadImageRefs(body)
+		if err != nil {
+			return nil, fmt.Errorf("decode %s: %w", path, err)
+		}
+		workloads = append(workloads, refs...)
+	}
+	return workloads, nil
+}
+
+// DiscoverImageKustomizations returns every Flux Kustomization owning a workload that runs one of
+// imageNames. When no labeled workload matches, it falls back to every flux-system Kustomization that
+// substitutes from the image tag ConfigMap, so a promoted tag is never left un-reconciled.
+func (d *DefaultOutboundDispatcher) DiscoverImageKustomizations(ctx context.Context, imageNames []string) ([]fluxKustomizationRef, error) {
+	if d.kubeAPIServer == "" || len(imageNames) == 0 {
+		return nil, nil
+	}
+	workloads, err := d.listWorkloadImages(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if refs := kustomizationsForImages(workloads, imageNames); len(refs) > 0 {
+		return refs, nil
+	}
+	body, err := d.kubeJSON(ctx, http.MethodGet, kustomizationPath(fluxKustomizationRef{Namespace: fluxSystemNamespace}), "", nil)
+	if err != nil {
+		return nil, fmt.Errorf("list kustomizations: %w", err)
+	}
+	refs, err := decodeImageTagKustomizations(body)
+	if err != nil {
+		return nil, fmt.Errorf("decode kustomizations: %w", err)
+	}
+	return refs, nil
+}
+
+// ReconcileKustomization requests a Flux reconcile and returns the requestedAt token Flux echoes back
+// in status.lastHandledReconcileAt once the request is handled.
+func (d *DefaultOutboundDispatcher) ReconcileKustomization(ctx context.Context, ref fluxKustomizationRef) (string, error) {
+	requestedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	patchBody, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{
+			"annotations": map[string]string{fluxReconcileRequestedAtAnnotation: requestedAt},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal kustomization patch body: %w", err)
+	}
+	if _, err := d.kubeJSON(ctx, http.MethodPatch, kustomizationPath(ref), "application/merge-patch+json", patchBody); err != nil {
+		return "", fmt.Errorf("reconcile kustomization %s/%s: %w", ref.Namespace, ref.Name, err)
+	}
+	return requestedAt, nil
+}
+
+// KustomizationReconcileHandled reports whether Flux has handled the reconcile request identified by
+// requestedAt and the Kustomization is Ready.
+func (d *DefaultOutboundDispatcher) KustomizationReconcileHandled(ctx context.Context, ref fluxKustomizationRef, requestedAt string) (bool, error) {
+	body, err := d.kubeJSON(ctx, http.MethodGet, kustomizationPath(ref), "", nil)
+	if err != nil {
+		return false, fmt.Errorf("get kustomization %s/%s: %w", ref.Namespace, ref.Name, err)
+	}
+	var obj fluxKustomizationObject
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return false, fmt.Errorf("decode kustomization %s/%s: %w", ref.Namespace, ref.Name, err)
+	}
+	return obj.reconcileHandled(requestedAt), nil
 }
 
 func validateBrainChannel(channelID, endpointPath string) error {
