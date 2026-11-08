@@ -378,7 +378,7 @@ func TestLoadConfig_LKGCAndColdBoot(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	validBoot := filepath.Join(tmpDir, "boot.yaml")
-	_ = os.WriteFile(validBoot, []byte("model: test\n"), 0o600)
+	_ = os.WriteFile(validBoot, []byte("model: test\nchannels:\n  default:\n    mode: threads\n"), 0o600)
 	waitForColdBootConfig([]string{validBoot}, 500*time.Millisecond)
 	waitForColdBootConfig([]string{filepath.Join(tmpDir, "absent")}, 1*time.Millisecond)
 	waitForColdBootConfig(nil, 1*time.Millisecond)
@@ -406,10 +406,33 @@ func TestLoadConfig_LKGCAndColdBoot(t *testing.T) {
 	_ = ReloadWithSupplier(ActiveConfig(), nil)
 	_ = Reload(ActiveConfig())
 
+	defaultPaths := []string{"/default/a.yaml", "/default/b.yaml"}
+	if got := ResolveConfigSearchPaths(nil, defaultPaths...); len(got) != len(defaultPaths) || got[0] != defaultPaths[0] {
+		t.Errorf("ResolveConfigSearchPaths(nil) = %v, want %v", got, defaultPaths)
+	}
+	if got := ResolveConfigSearchPaths(func(k string) string { return "" }, defaultPaths...); len(got) != len(defaultPaths) || got[0] != defaultPaths[0] {
+		t.Errorf("ResolveConfigSearchPaths(empty) = %v, want %v", got, defaultPaths)
+	}
+	if got := ResolveConfigSearchPaths(func(k string) string {
+		if k == "CONFIG_PATH" {
+			return "/custom/config.yaml"
+		}
+		return ""
+	}, defaultPaths...); len(got) != len(defaultPaths)+1 || got[0] != "/custom/config.yaml" || got[1] != defaultPaths[0] {
+		t.Errorf("ResolveConfigSearchPaths(custom) = %v, want prepended /custom/config.yaml", got)
+	}
+
 	t.Setenv("AGY_MODEL", "")
 	t.Setenv("DEFAULT_TIMEZONE", "")
 	t.Setenv("TZ", "")
-	_, _ = New()
+	t.Setenv("CONFIG_PATH", validBoot)
+	newCfg, errNew := New()
+	if errNew != nil {
+		t.Fatalf("New() with CONFIG_PATH=%s failed: %v", validBoot, errNew)
+	}
+	if newCfg.Current().Model != "test" {
+		t.Errorf("New() got model %q, want %q", newCfg.Current().Model, "test")
+	}
 }
 
 func TestChannelPolicy_ValidationAndResolution(t *testing.T) {
