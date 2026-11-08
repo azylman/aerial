@@ -915,7 +915,14 @@ rules:
     verbs:
       - get
       - list
+      - watch
       - patch
+  - apiGroups:
+      - source.toolkit.fluxcd.io
+    resources:
+      - gitrepositories
+    verbs:
+      - get
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

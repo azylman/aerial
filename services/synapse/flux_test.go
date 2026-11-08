@@ -29,9 +29,10 @@ func TestTranslateFluxAlertToDeployEvent(t *testing.T) {
 		wantRepo   string
 		wantSHA    string
 		wantDetail string
+		wantKind   string
 	}{
 		{
-			name: "GitRepository NewArtifact maps to sync_success",
+			name: "GitRepository NewArtifact without payload repo maps to sync_success on the default repo",
 			alert: FluxAlertEvent{
 				InvolvedObject: FluxInvolvedObject{Kind: "GitRepository", Name: "aerial-config", Namespace: "flux-system"},
 				Severity:       "info",
@@ -43,10 +44,11 @@ func TestTranslateFluxAlertToDeployEvent(t *testing.T) {
 				},
 			},
 			wantOK:     true,
+			wantKind:   "GitRepository",
 			wantEvent:  "sync_success",
 			wantStatus: "success",
 			wantJob:    "git-sync",
-			wantRepo:   "azylman/aerial-config",
+			wantRepo:   "azylman/aerial",
 			wantSHA:    "abcdef1234567890abcdef1234567890abcdef12",
 			wantDetail: "stored artifact for commit 'feat: test'",
 		},
@@ -63,6 +65,7 @@ func TestTranslateFluxAlertToDeployEvent(t *testing.T) {
 				},
 			},
 			wantOK:     true,
+			wantKind:   "GitRepository",
 			wantEvent:  "sync_success",
 			wantStatus: "success",
 			wantJob:    "git-sync",
@@ -83,6 +86,7 @@ func TestTranslateFluxAlertToDeployEvent(t *testing.T) {
 				},
 			},
 			wantOK:     true,
+			wantKind:   "GitRepository",
 			wantEvent:  "sync_failed",
 			wantStatus: "failed",
 			wantJob:    "git-sync",
@@ -100,6 +104,7 @@ func TestTranslateFluxAlertToDeployEvent(t *testing.T) {
 				Message:        "authentication failure",
 			},
 			wantOK:     true,
+			wantKind:   "GitRepository",
 			wantEvent:  "sync_failed",
 			wantStatus: "failed",
 			wantJob:    "git-sync",
@@ -130,6 +135,7 @@ func TestTranslateFluxAlertToDeployEvent(t *testing.T) {
 				},
 			},
 			wantOK:     true,
+			wantKind:   "Kustomization",
 			wantEvent:  "deploy_started",
 			wantStatus: "started",
 			wantJob:    "webhooks-router",
@@ -151,6 +157,7 @@ func TestTranslateFluxAlertToDeployEvent(t *testing.T) {
 				},
 			},
 			wantOK:     true,
+			wantKind:   "HelmRelease",
 			wantEvent:  "deploy_success",
 			wantStatus: "success",
 			wantJob:    "coredns",
@@ -171,6 +178,7 @@ func TestTranslateFluxAlertToDeployEvent(t *testing.T) {
 				},
 			},
 			wantOK:     true,
+			wantKind:   "Kustomization",
 			wantEvent:  "deploy_failed",
 			wantStatus: "failed",
 			wantJob:    "brain",
@@ -188,6 +196,7 @@ func TestTranslateFluxAlertToDeployEvent(t *testing.T) {
 				Message:        "pod unhealthy",
 			},
 			wantOK:     true,
+			wantKind:   "Kustomization",
 			wantEvent:  "deploy_failed",
 			wantStatus: "failed",
 			wantJob:    "synapse",
@@ -204,6 +213,7 @@ func TestTranslateFluxAlertToDeployEvent(t *testing.T) {
 				Message:        "kustomize build error",
 			},
 			wantOK:     true,
+			wantKind:   "Kustomization",
 			wantEvent:  "deploy_failed",
 			wantStatus: "failed",
 			wantJob:    "synapse",
@@ -220,6 +230,7 @@ func TestTranslateFluxAlertToDeployEvent(t *testing.T) {
 				Message:        "artifact not found",
 			},
 			wantOK:     true,
+			wantKind:   "Kustomization",
 			wantEvent:  "deploy_failed",
 			wantStatus: "failed",
 			wantJob:    "synapse",
@@ -236,6 +247,7 @@ func TestTranslateFluxAlertToDeployEvent(t *testing.T) {
 				Message:        "schema validation error",
 			},
 			wantOK:     true,
+			wantKind:   "Kustomization",
 			wantEvent:  "deploy_failed",
 			wantStatus: "failed",
 			wantJob:    "synapse",
@@ -252,6 +264,7 @@ func TestTranslateFluxAlertToDeployEvent(t *testing.T) {
 				Message:        "unspecified error",
 			},
 			wantOK:     true,
+			wantKind:   "Kustomization",
 			wantEvent:  "deploy_failed",
 			wantStatus: "failed",
 			wantJob:    "synapse",
@@ -307,6 +320,9 @@ func TestTranslateFluxAlertToDeployEvent(t *testing.T) {
 			}
 			if got.Details != tc.wantDetail {
 				t.Errorf("Details = %q, want %q", got.Details, tc.wantDetail)
+			}
+			if got.SourceKind != tc.wantKind {
+				t.Errorf("SourceKind = %q, want %q", got.SourceKind, tc.wantKind)
 			}
 			if got.Timestamp.IsZero() {
 				t.Errorf("Timestamp is zero, expected set timestamp")
@@ -717,38 +733,6 @@ func TestKustomizationsForImages(t *testing.T) {
 			t.Parallel()
 			if got := kustomizationsForImages(tc.workloads, tc.imageNames); !slices.Equal(got, tc.want) {
 				t.Errorf("kustomizationsForImages() = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestMatchesDeployingPRKustomization(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name          string
-		meta          string
-		kustomization string
-		want          bool
-	}{
-		{name: "requested kustomization matches", meta: `{"kustomization_requests":{"marida-core":{"namespace":"flux-system","requested_at":"t1"}}}`, kustomization: "marida-core", want: true},
-		{name: "other kustomization does not match", meta: `{"kustomization_requests":{"marida-core":{"namespace":"flux-system","requested_at":"t1"}}}`, kustomization: "aerial-core"},
-		{name: "legacy started_jobs alone does not match", meta: `{"started_jobs":["aerial-synapse"]}`, kustomization: "aerial-core"},
-		{name: "malformed requests value does not match", meta: `{"kustomization_requests":["aerial-core"]}`, kustomization: "aerial-core"},
-		{name: "nil metadata does not match", kustomization: "aerial-core"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var meta map[string]any
-			if tc.meta != "" {
-				if err := json.Unmarshal([]byte(tc.meta), &meta); err != nil {
-					t.Fatalf("unmarshal meta: %v", err)
-				}
-			}
-			if got := matchesDeployingPRKustomization(meta, tc.kustomization); got != tc.want {
-				t.Errorf("matchesDeployingPRKustomization() = %v, want %v", got, tc.want)
 			}
 		})
 	}

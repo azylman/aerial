@@ -12,3 +12,6 @@ PR_DESCRIPTION.md
 .pr_description.md
 *.pr_description.*
 .cache/
+
+# Go build outputs from running `go build` inside a service directory
+/services/synapse/synapse

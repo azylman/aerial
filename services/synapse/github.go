@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
 )
@@ -314,15 +315,17 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 		return s.completeNoDeployWorkflowRun(ctx, repo, headSHA, targetID, prNum)
 	}
 
-	// Phases d+e: reconcile each owning Kustomization and record what this PR requested.
-	requests, reconcileErr := s.reconcileImageKustomizations(ctx, refs)
-	if len(requests) > 0 && trackPR {
+	// Phases d+e: durably record every reconcile request before patching any of them, so a watch event can
+	// never observe a request that is not yet recorded. A crash or failure between record and patch is
+	// repaired by the Kustomization watcher re-patching the recorded value.
+	requests := newKustomizationRequests(refs, time.Now().UTC())
+	if trackPR {
 		if err := s.registry.RecordKustomizationRequests(ctx, repo, prNum, requests); err != nil {
 			log.Printf("[synapse] [dispatcher] error recording kustomization requests for %s#%d: %v", repo, prNum, err)
-			return errors.Join(reconcileErr, fmt.Errorf("record kustomization requests: %w", err))
+			return fmt.Errorf("record kustomization requests: %w", err)
 		}
 	}
-	return reconcileErr
+	return s.reconcileImageKustomizations(ctx, refs, requests)
 }
 
 // promoteWorkflowRunImages promotes every image concurrently and waits for all of them.
@@ -343,20 +346,26 @@ func (s *RouterServer) promoteWorkflowRunImages(ctx context.Context, images []st
 	return errors.Join(errs...)
 }
 
-// reconcileImageKustomizations requests a reconcile of every ref; one failure never skips the rest.
-func (s *RouterServer) reconcileImageKustomizations(ctx context.Context, refs []fluxKustomizationRef) (map[string]kustomizationRequest, error) {
+// newKustomizationRequests builds the reconcile request recorded for each ref, all requested at now.
+func newKustomizationRequests(refs []fluxKustomizationRef, now time.Time) map[string]kustomizationRequest {
+	requestedAt := now.Format(time.RFC3339Nano)
 	requests := make(map[string]kustomizationRequest, len(refs))
-	var errs []error
 	for _, ref := range refs {
-		requestedAt, err := s.dispatcher.ReconcileKustomization(ctx, ref)
-		if err != nil {
-			log.Printf("[synapse] [dispatcher] error reconciling kustomization %s/%s: %v", ref.Namespace, ref.Name, err)
-			errs = append(errs, err)
-			continue
-		}
 		requests[ref.Name] = kustomizationRequest{Namespace: ref.Namespace, RequestedAt: requestedAt}
 	}
-	return requests, errors.Join(errs...)
+	return requests
+}
+
+// reconcileImageKustomizations patches each ref with its recorded request; one failure never skips the rest.
+func (s *RouterServer) reconcileImageKustomizations(ctx context.Context, refs []fluxKustomizationRef, requests map[string]kustomizationRequest) error {
+	var errs []error
+	for _, ref := range refs {
+		if err := s.dispatcher.ReconcileKustomization(ctx, ref, requests[ref.Name].RequestedAt); err != nil {
+			log.Printf("[synapse] [dispatcher] error reconciling kustomization %s/%s: %v", ref.Namespace, ref.Name, err)
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // GitHub Webhook Payloads and Resolution Types

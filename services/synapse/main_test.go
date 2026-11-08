@@ -253,6 +253,12 @@ type mockPRRegistry struct {
 	kustomizationRequestCalls []map[string]kustomizationRequest
 	kustomizationRequestErr   error
 
+	markKustomizationsCalls []prCall
+	markKustomizationsRes   bool
+	markKustomizationsErr   error
+	hasKustomizationReqs    bool
+	hasKustomizationReqsErr error
+
 	err error
 }
 
@@ -418,6 +424,21 @@ func (m *mockPRRegistry) RecordKustomizationRequests(ctx context.Context, repo s
 	return nil
 }
 
+func (m *mockPRRegistry) MarkKustomizationsDeployed(ctx context.Context, repo string, prNumber int, names []string) (bool, error) {
+	m.markKustomizationsCalls = append(m.markKustomizationsCalls, prCall{repo: repo, prNumber: prNumber, jobs: names})
+	if err := m.checkErr(m.markKustomizationsErr); err != nil {
+		return false, err
+	}
+	return m.markKustomizationsRes, nil
+}
+
+func (m *mockPRRegistry) HasKustomizationRequests(ctx context.Context, repo string, prNumber int) (bool, error) {
+	if err := m.checkErr(m.hasKustomizationReqsErr); err != nil {
+		return false, err
+	}
+	return m.hasKustomizationReqs, nil
+}
+
 func (m *mockPRRegistry) UpdatePRStatus(ctx context.Context, repo string, prNumber int, status string, metadata map[string]any) error {
 	m.updatePRStatusCalls = append(m.updatePRStatusCalls, prStatusCall{repo: repo, prNumber: prNumber, status: status, metadata: metadata})
 	return m.checkErr(m.updatePRStatusErr)
@@ -571,6 +592,7 @@ type mockOutboundDispatcher struct {
 	gitPushCalls            []GitPushEventRequest
 	promoteCalls            []ImageReadyEventRequest
 	reconcileCalls          []fluxKustomizationRef
+	reconcileRequestedAts   []string
 	promptCalls             []PromptRequest
 	dispatchCalls           []DispatchRequest
 	directMessageCalls      []DirectMessageRequest
@@ -580,8 +602,8 @@ type mockOutboundDispatcher struct {
 	promoteErr              error
 	discoverErr             error
 	reconcileErrs           map[string]error
-	handled                 bool
-	handledErr              error
+	sourceRepo              string
+	sourceRepoErr           error
 	promptErr               error
 	dispatchErr             error
 	directMessageErr        error
@@ -630,18 +652,16 @@ func (m *mockOutboundDispatcher) PromoteImageTag(ctx context.Context, req ImageR
 	return workload, nil
 }
 
-func (m *mockOutboundDispatcher) ReconcileKustomization(ctx context.Context, ref fluxKustomizationRef) (string, error) {
+func (m *mockOutboundDispatcher) ReconcileKustomization(ctx context.Context, ref fluxKustomizationRef, requestedAt string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.reconcileCalls = append(m.reconcileCalls, ref)
-	if err := m.reconcileErrs[ref.Name]; err != nil {
-		return "", err
-	}
-	return "requested-" + ref.Name, nil
+	m.reconcileRequestedAts = append(m.reconcileRequestedAts, requestedAt)
+	return m.reconcileErrs[ref.Name]
 }
 
-func (m *mockOutboundDispatcher) KustomizationReconcileHandled(ctx context.Context, ref fluxKustomizationRef, requestedAt string) (bool, error) {
-	return m.handled, m.handledErr
+func (m *mockOutboundDispatcher) ResolveFluxSourceRepo(ctx context.Context, obj FluxInvolvedObject) (string, error) {
+	return m.sourceRepo, m.sourceRepoErr
 }
 
 func (m *mockOutboundDispatcher) DispatchPrompt(ctx context.Context, req PromptRequest) error {
@@ -791,6 +811,10 @@ func doHTTPRequest(handler http.Handler, method, path string, body io.Reader, he
 
 func mkDeployEvt(event, job, repo, sha string, pr int, targetID, status, details string) DeployEvent {
 	return DeployEvent{Event: event, JobName: job, Repo: repo, CommitSHA: sha, PRNumber: pr, TargetID: targetID, Status: status, Details: details}
+}
+
+func mkKustomizationEvt(event, job, repo, sha string, pr int, targetID, status string) DeployEvent {
+	return DeployEvent{Event: event, SourceKind: "Kustomization", JobName: job, Repo: repo, CommitSHA: sha, PRNumber: pr, TargetID: targetID, Status: status}
 }
 
 // --- 4. Deploy Event Processing ---
@@ -1220,7 +1244,7 @@ func TestProcessDeployEvent(t *testing.T) {
 		},
 		{
 			name: "deploy_success on aerial-core with build checks in metadata and merged status handles sync success",
-			evt:  mkDeployEvt("deploy_success", "aerial-core", "azylman/aerial", "sha-aerial-sync", 893, "1555405874565091380", "success", ""),
+			evt:  mkKustomizationEvt("deploy_success", "aerial-core", "azylman/aerial", "sha-aerial-sync", 893, "1555405874565091380", "success"),
 			pgReg: NewPostgresPRRegistry(&mockVanadisPgxPool{
 				queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
 					if strings.Contains(sql, "SELECT status, COALESCE(metadata, '{}'::jsonb)") {
@@ -1249,7 +1273,7 @@ func TestProcessDeployEvent(t *testing.T) {
 		},
 		{
 			name: "deploy_started on aerial-core skipped when waiting for image build",
-			evt:  mkDeployEvt("deploy_started", "aerial-core", "azylman/aerial", "sha-aerial-started", 89894, "1555405874565091380", "started", ""),
+			evt:  mkKustomizationEvt("deploy_started", "aerial-core", "azylman/aerial", "sha-aerial-started", 89894, "1555405874565091380", "started"),
 			pgReg: NewPostgresPRRegistry(&mockVanadisPgxPool{
 				queryRowFn: func(qCtx context.Context, sql string, args ...any) pgx.Row {
 					if strings.Contains(sql, "SELECT status, COALESCE(metadata, '{}'::jsonb)") {
@@ -1323,162 +1347,49 @@ func TestProcessDeployEvent(t *testing.T) {
 			wantPrompts:  0,
 		},
 		{
-			name: "enrichDeployEventPRAndTarget matches active deploying PR from ListDeployingPRs",
-			evt:  mkDeployEvt("deploy_success", "aerial-config", "", "sha-unresolved", 0, "", "success", ""),
-			reg: &mockPRRegistry{
-				listDeployingPRs: []DeployingPR{
-					{
-						Repo:     "azylman/mirrormere",
-						PRNumber: 777,
-						HeadSHA:  "sha-mirrormere-head",
-						TargetID: "1555405874565091380",
-						Metadata: map[string]any{
-							"kustomization_requests": map[string]any{"aerial-config": map[string]any{"namespace": "flux-system", "requested_at": "2026-11-08T00:00:00Z"}},
-						},
-					},
-				},
-			},
-			disp:         &mockOutboundDispatcher{},
-			wantPR:       777,
-			wantTargetID: "1555405874565091380",
-			wantPrompts:  1,
-		},
-		{
-			name: "enrichDeployEventPRAndTarget overrides stale already-deployed aerial-config PR with active deploying PR",
-			evt:  mkDeployEvt("deploy_success", "aerial-config", "azylman/aerial-config", "sha-stale-config", 0, "", "success", ""),
-			reg: &mockPRRegistry{
-				resolvePRNum:    555,
-				resolveTargetID: "1111111111111111111",
-				listDeployingPRs: []DeployingPR{
-					{
-						Repo:     "azylman/mirrormere",
-						PRNumber: 777,
-						HeadSHA:  "sha-mirrormere-head",
-						TargetID: "1555405874565091380",
-						Metadata: map[string]any{
-							"kustomization_requests": map[string]any{"aerial-config": map[string]any{"namespace": "flux-system", "requested_at": "2026-11-08T00:00:00Z"}},
-						},
-					},
-				},
-			},
-			disp:         &mockOutboundDispatcher{},
-			wantPR:       777,
-			wantTargetID: "1555405874565091380",
-			wantPrompts:  1,
-		},
-		{
-			name: "enrichDeployEventPRAndTarget aerial repo matches aerial-core and resolves thread via ResolveThreadForPR",
-			evt:  mkDeployEvt("deploy_success", "aerial-core", "", "sha-aerial-unres", 0, "", "success", ""),
-			reg: &mockPRRegistry{
-				listDeployingPRs: []DeployingPR{
-					{
-						Repo:     "azylman/aerial",
-						PRNumber: 888,
-						MergeSHA: "sha-aerial-merge",
-						Metadata: map[string]any{
-							"kustomization_requests": map[string]any{"aerial-core": map[string]any{"namespace": "flux-system", "requested_at": "2026-11-08T00:00:00Z"}},
-						},
-					},
-				},
-				resolveTargetID: "1555405874565091380",
-			},
-			disp:         &mockOutboundDispatcher{},
-			wantPR:       888,
-			wantTargetID: "1555405874565091380",
-			wantPrompts:  1,
-		},
-		{
-			name: "enrichDeployEventPRAndTarget default repo branch matches aerial-config",
-			evt:  mkDeployEvt("deploy_success", "aerial-config", "", "sha-sidecar-unres", 0, "", "success", ""),
-			reg: &mockPRRegistry{
-				listDeployingPRs: []DeployingPR{
-					{
-						Repo:     "other/sidecar",
-						PRNumber: 999,
-						HeadSHA:  "sha-sidecar-head",
-						TargetID: "1555405874565091380",
-						Metadata: map[string]any{
-							"kustomization_requests": map[string]any{"aerial-config": map[string]any{"namespace": "flux-system", "requested_at": "2026-11-08T00:00:00Z"}},
-						},
-					},
-				},
-			},
-			disp:         &mockOutboundDispatcher{},
-			wantPR:       999,
-			wantTargetID: "1555405874565091380",
-			wantPrompts:  1,
-		},
-		{
-			name: "enrichDeployEventPRAndTarget aerial-sidecars migrator matches aerial-core",
-			evt:  mkDeployEvt("deploy_success", "aerial-core", "", "sha-sidecar-mig-unres", 0, "", "success", ""),
-			reg: &mockPRRegistry{
-				listDeployingPRs: []DeployingPR{
-					{
-						Repo:     "azylman/aerial-sidecars",
-						PRNumber: 1001,
-						HeadSHA:  "sha-sidecar-mig-head",
-						TargetID: "1555405874565091380",
-						Metadata: map[string]any{
-							"kustomization_requests": map[string]any{"aerial-core": map[string]any{"namespace": "flux-system", "requested_at": "2026-11-08T00:00:00Z"}},
-						},
-					},
-				},
-			},
-			disp:         &mockOutboundDispatcher{},
-			wantPR:       1001,
-			wantTargetID: "1555405874565091380",
-			wantPrompts:  1,
-		},
-		{
-			name: "deploy_success completes coalesced older deploying PRs in same kustomization",
-			evt:  mkDeployEvt("deploy_success", "aerial-core", "azylman/aerial", "sha-pr-1485", 1485, "1555405874565091380", "success", ""),
-			reg: &mockPRRegistry{
-				resolvePRNum:    1485,
-				resolveTargetID: "1555405874565091380",
-				listDeployingPRs: []DeployingPR{
-					{
-						Repo:     "azylman/aerial",
-						PRNumber: 1484,
-						MergeSHA: "sha-pr-1484",
-						Metadata: map[string]any{
-							"kustomization_requests": map[string]any{"aerial-core": map[string]any{"namespace": "flux-system", "requested_at": "2026-11-08T00:00:00Z"}},
-						},
-					},
-					{
-						Repo:     "azylman/aerial",
-						PRNumber: 1484,
-						MergeSHA: "sha-pr-1484",
-						Metadata: map[string]any{
-							"kustomization_requests": map[string]any{"aerial-core": map[string]any{"namespace": "flux-system", "requested_at": "2026-11-08T00:00:00Z"}},
-						},
-					},
-					{
-						Repo:     "azylman/mirrormere",
-						PRNumber: 700,
-						HeadSHA:  "sha-mirrormere-700",
-						TargetID: "1555405874565091380",
-						Metadata: map[string]any{
-							"kustomization_requests": map[string]any{"aerial-config": map[string]any{"namespace": "flux-system", "requested_at": "2026-11-08T00:00:00Z"}},
-						},
-					},
-					{
-						Repo:     "azylman/aerial",
-						PRNumber: 1485,
-						MergeSHA: "sha-pr-1485",
-						TargetID: "1555405874565091380",
-						Metadata: map[string]any{
-							"kustomization_requests": map[string]any{"aerial-core": map[string]any{"namespace": "flux-system", "requested_at": "2026-11-08T00:00:00Z"}},
-						},
-					},
-				},
-			},
+			name:         "Kustomization deploy_success never completes a watcher-tracked PR",
+			evt:          mkKustomizationEvt("deploy_success", "aerial-core", "azylman/aerial", "sha-pr-1485", 1485, "1555405874565091380", "success"),
+			reg:          &mockPRRegistry{hasKustomizationReqs: true, resolveTargetID: "1555405874565091380"},
 			disp:         &mockOutboundDispatcher{},
 			wantPR:       1485,
 			wantTargetID: "1555405874565091380",
-			wantPrompts:  2,
+		},
+		{
+			name:         "CI job deploy_success never completes a watcher-tracked PR",
+			evt:          mkDeployEvt("deploy_success", "eri", "azylman/aerial", "sha-pr-1485", 1485, "1555405874565091380", "success", ""),
+			reg:          &mockPRRegistry{hasKustomizationReqs: true, resolveTargetID: "1555405874565091380"},
+			disp:         &mockOutboundDispatcher{},
+			wantPR:       1485,
+			wantTargetID: "1555405874565091380",
+		},
+		{
+			name:         "Kustomization deploy_failed alert defers to the watcher for a tracked PR",
+			evt:          mkKustomizationEvt("deploy_failed", "aerial-core", "azylman/aerial", "sha-pr-1485", 1485, "1555405874565091380", "failed"),
+			reg:          &mockPRRegistry{hasKustomizationReqs: true, deployFailedUpdated: true, resolveTargetID: "1555405874565091380"},
+			disp:         &mockOutboundDispatcher{},
+			wantPR:       1485,
+			wantTargetID: "1555405874565091380",
+		},
+		{
+			name:         "untracked PR keeps legacy Kustomization deploy_success completion",
+			evt:          mkKustomizationEvt("deploy_success", "aerial-core", "azylman/aerial", "sha-legacy", 1300, "1555405874565091380", "success"),
+			reg:          &mockPRRegistry{resolveTargetID: "1555405874565091380"},
+			disp:         &mockOutboundDispatcher{},
+			wantPR:       1300,
+			wantTargetID: "1555405874565091380",
+			wantPrompts:  1,
 			wantPromptSubs: []string{
-				"Continuous Delivery deployment completed for job aerial-core on azylman/aerial (PR #1485, commit: sha-pr-1485).",
+				"Continuous Delivery deployment completed for job aerial-core on azylman/aerial (PR #1300, commit: sha-legacy).",
 			},
+		},
+		{
+			name:         "tracked-PR lookup error falls back to legacy completion",
+			evt:          mkDeployEvt("deploy_success", "eri", "azylman/aerial", "sha-legacy", 1301, "1555405874565091380", "success", ""),
+			reg:          &mockPRRegistry{hasKustomizationReqsErr: errors.New("db down"), resolveTargetID: "1555405874565091380"},
+			disp:         &mockOutboundDispatcher{},
+			wantPR:       1301,
+			wantTargetID: "1555405874565091380",
+			wantPrompts:  1,
 		},
 	}
 

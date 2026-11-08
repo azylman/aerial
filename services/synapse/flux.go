@@ -49,16 +49,17 @@ func cleanRevisionSHA(raw string) string {
 	return raw
 }
 
+// alertPayloadRepo returns the repo an alert carries in its payload or metadata, if any.
+func alertPayloadRepo(alert FluxAlertEvent) string {
+	if candidate := strings.TrimSpace(alert.Repo); candidate != "" {
+		return candidate
+	}
+	return strings.TrimSpace(alert.Metadata["repo"])
+}
+
 // resolveFluxRepo determines the normalized repo name from an alert event.
 func resolveFluxRepo(alert FluxAlertEvent) string {
-	candidate := strings.TrimSpace(alert.Repo)
-	if candidate == "" && alert.Metadata != nil {
-		candidate = strings.TrimSpace(alert.Metadata["repo"])
-	}
-	if candidate == "" && strings.TrimSpace(alert.InvolvedObject.Name) == "aerial-config" {
-		candidate = "azylman/aerial-config"
-	}
-	if candidate != "" {
+	if candidate := alertPayloadRepo(alert); candidate != "" {
 		return normalizeRepo(candidate)
 	}
 	return "azylman/aerial"
@@ -87,23 +88,25 @@ func TranslateFluxAlertToDeployEvent(alert FluxAlertEvent) (DeployEvent, bool) {
 		switch {
 		case reason == "NewArtifact" || reason == "GitOperationSucceeded":
 			return DeployEvent{
-				Event:     "sync_success",
-				Status:    "success",
-				JobName:   "git-sync",
-				Repo:      repo,
-				CommitSHA: commitSHA,
-				Details:   alert.Message,
-				Timestamp: ts,
+				Event:      "sync_success",
+				Status:     "success",
+				SourceKind: kind,
+				JobName:    "git-sync",
+				Repo:       repo,
+				CommitSHA:  commitSHA,
+				Details:    alert.Message,
+				Timestamp:  ts,
 			}, true
 		case severity == "error" || reason == "GitOperationFailed":
 			return DeployEvent{
-				Event:     "sync_failed",
-				Status:    "failed",
-				JobName:   "git-sync",
-				Repo:      repo,
-				CommitSHA: commitSHA,
-				Details:   alert.Message,
-				Timestamp: ts,
+				Event:      "sync_failed",
+				Status:     "failed",
+				SourceKind: kind,
+				JobName:    "git-sync",
+				Repo:       repo,
+				CommitSHA:  commitSHA,
+				Details:    alert.Message,
+				Timestamp:  ts,
 			}, true
 		default:
 			return DeployEvent{}, false
@@ -114,33 +117,36 @@ func TranslateFluxAlertToDeployEvent(alert FluxAlertEvent) (DeployEvent, bool) {
 		switch {
 		case reason == "Progressing":
 			return DeployEvent{
-				Event:     "deploy_started",
-				Status:    "started",
-				JobName:   jobName,
-				Repo:      repo,
-				CommitSHA: commitSHA,
-				Details:   alert.Message,
-				Timestamp: ts,
+				Event:      "deploy_started",
+				Status:     "started",
+				SourceKind: kind,
+				JobName:    jobName,
+				Repo:       repo,
+				CommitSHA:  commitSHA,
+				Details:    alert.Message,
+				Timestamp:  ts,
 			}, true
 		case reason == "ReconciliationSucceeded":
 			return DeployEvent{
-				Event:     "deploy_success",
-				Status:    "success",
-				JobName:   jobName,
-				Repo:      repo,
-				CommitSHA: commitSHA,
-				Details:   alert.Message,
-				Timestamp: ts,
+				Event:      "deploy_success",
+				Status:     "success",
+				SourceKind: kind,
+				JobName:    jobName,
+				Repo:       repo,
+				CommitSHA:  commitSHA,
+				Details:    alert.Message,
+				Timestamp:  ts,
 			}, true
 		case severity == "error" || isFluxFailureReason(reason):
 			return DeployEvent{
-				Event:     "deploy_failed",
-				Status:    "failed",
-				JobName:   jobName,
-				Repo:      repo,
-				CommitSHA: commitSHA,
-				Details:   alert.Message,
-				Timestamp: ts,
+				Event:      "deploy_failed",
+				Status:     "failed",
+				SourceKind: kind,
+				JobName:    jobName,
+				Repo:       repo,
+				CommitSHA:  commitSHA,
+				Details:    alert.Message,
+				Timestamp:  ts,
 			}, true
 		default:
 			return DeployEvent{}, false
@@ -179,6 +185,9 @@ func (s *RouterServer) handleFluxWebhook(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	if alertPayloadRepo(alert) == "" {
+		alert.Repo = s.resolveFluxAlertSourceRepo(r.Context(), alert)
+	}
 	deployEvt, ok := TranslateFluxAlertToDeployEvent(alert)
 	if !ok {
 		log.Printf("[synapse] [flux] ignoring unhandled flux alert: kind=%s name=%s reason=%s severity=%s",
@@ -193,67 +202,38 @@ func (s *RouterServer) handleFluxWebhook(w http.ResponseWriter, r *http.Request)
 	s.enqueueOrProcessDeployEvent(w, r, deployEvt, "flux")
 }
 
-// matchesDeployingPRKustomization reports whether a PR recorded a reconcile request for kustomizationName.
-func matchesDeployingPRKustomization(meta map[string]any, kustomizationName string) bool {
-	requests, ok := meta[kustomizationRequestsKey].(map[string]any)
-	if !ok {
-		return false
+// resolveFluxAlertSourceRepo derives the repo of an alert without one from the involved object's Flux
+// GitRepository source; "" (the resolveFluxRepo default) when it cannot be resolved.
+func (s *RouterServer) resolveFluxAlertSourceRepo(ctx context.Context, alert FluxAlertEvent) string {
+	if s.dispatcher == nil {
+		return ""
 	}
-	_, ok = requests[kustomizationName]
-	return ok
+	repo, err := s.dispatcher.ResolveFluxSourceRepo(ctx, alert.InvolvedObject)
+	if err != nil {
+		log.Printf("[synapse] [flux] warning resolving source repo for %s %s/%s: %v", alert.InvolvedObject.Kind, alert.InvolvedObject.Namespace, alert.InvolvedObject.Name, err)
+		return ""
+	}
+	return repo
 }
 
-func isPRInDeployingList(deployingPRs []DeployingPR, repo string, prNumber int) bool {
-	if prNumber <= 0 {
-		return false
-	}
-	normRepo := normalizeRepo(repo)
-	for _, p := range deployingPRs {
-		if strings.EqualFold(normalizeRepo(p.Repo), normRepo) && p.PRNumber == prNumber {
-			return true
+// gitRepoSlug extracts "owner/repo" from a git remote URL (https, ssh:// or scp-like), or "" if none.
+func gitRepoSlug(rawURL string) string {
+	ref := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSpace(rawURL), "/"), ".git")
+	if i := strings.Index(ref, "://"); i != -1 {
+		ref = ref[i+3:]
+		if j := strings.Index(ref, "/"); j != -1 {
+			ref = ref[j+1:]
+		} else {
+			return ""
 		}
+	} else if i := strings.Index(ref, ":"); i != -1 {
+		ref = ref[i+1:]
 	}
-	return false
-}
-
-func (s *RouterServer) completeCoalescedDeployingPRs(ctx context.Context, evt DeployEvent) {
-	if s == nil || s.registry == nil || (evt.JobName != "aerial-config" && evt.JobName != "aerial-core") {
-		return
+	parts := strings.Split(strings.Trim(ref, "/"), "/")
+	if len(parts) < 2 || parts[len(parts)-2] == "" || parts[len(parts)-1] == "" {
+		return ""
 	}
-	deployingPRs, err := s.registry.ListDeployingPRs(ctx)
-	if err != nil || len(deployingPRs) == 0 {
-		return
-	}
-	normEvtRepo := normalizeRepo(evt.Repo)
-	var pending []DeployingPR
-	for _, p := range deployingPRs {
-		if p.PRNumber <= 0 || (strings.EqualFold(normalizeRepo(p.Repo), normEvtRepo) && p.PRNumber == evt.PRNumber) {
-			continue
-		}
-		if !matchesDeployingPRKustomization(p.Metadata, evt.JobName) {
-			continue
-		}
-		commitSHA := firstNonEmpty(p.MergeSHA, p.HeadSHA, evt.CommitSHA)
-		if s.shouldSuppressDuplicateDeploySuccess(ctx, p.Repo, evt.JobName, commitSHA, p.PRNumber) {
-			s.reconcileStuckDeployingPRWidget(ctx, p.Repo, p.PRNumber)
-			continue
-		}
-		s.recordDeploySuccessDispatched(p.Repo, evt.JobName, commitSHA, p.PRNumber)
-		s.setPRWidgetState(ctx, p.Repo, p.PRNumber, "deployed", "")
-		pending = append(pending, p)
-	}
-	for _, p := range pending {
-		commitSHA := firstNonEmpty(p.MergeSHA, p.HeadSHA, evt.CommitSHA)
-		targetID := strings.TrimSpace(p.TargetID)
-		if targetID == "" {
-			if resolved, rErr := s.ResolveThreadForPR(ctx, p.Repo, p.PRNumber); rErr == nil {
-				targetID = resolved
-			}
-		}
-		if dErr := s.dispatchDeploymentSuccessPrompt(ctx, targetID, evt.JobName, p.Repo, commitSHA, p.PRNumber, evt.DeploymentID); dErr != nil {
-			log.Printf("[synapse] [deploy] warning dispatching coalesced deploy_success for %s#%d: %v", p.Repo, p.PRNumber, dErr)
-		}
-	}
+	return parts[len(parts)-2] + "/" + parts[len(parts)-1]
 }
 
 const (
@@ -274,6 +254,11 @@ func compareKustomizationRefs(a, b fluxKustomizationRef) int {
 		return c
 	}
 	return strings.Compare(a.Name, b.Name)
+}
+
+// gitRepositoryPath returns the kube API path of a Flux GitRepository.
+func gitRepositoryPath(namespace, name string) string {
+	return "/apis/source.toolkit.fluxcd.io/v1/namespaces/" + url.PathEscape(namespace) + "/gitrepositories/" + url.PathEscape(name)
 }
 
 // kustomizationPath returns the kube API path of ref, or of its namespace's collection when Name is empty.
@@ -384,16 +369,29 @@ func kustomizationsForImages(workloads []workloadImageRef, imageNames []string) 
 }
 
 type fluxCondition struct {
-	Type   string `json:"type"`
-	Status string `json:"status"`
+	Type    string `json:"type"`
+	Status  string `json:"status"`
+	Reason  string `json:"reason,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+// fluxSourceRef is a Kustomization spec.sourceRef.
+type fluxSourceRef struct {
+	Kind      string `json:"kind"`
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
 }
 
 type fluxKustomizationObject struct {
 	Metadata struct {
-		Name      string `json:"name"`
-		Namespace string `json:"namespace"`
+		Name            string            `json:"name"`
+		Namespace       string            `json:"namespace"`
+		ResourceVersion string            `json:"resourceVersion"`
+		Annotations     map[string]string `json:"annotations"`
 	} `json:"metadata"`
 	Spec struct {
+		Suspend   bool          `json:"suspend"`
+		SourceRef fluxSourceRef `json:"sourceRef"`
 		PostBuild struct {
 			SubstituteFrom []struct {
 				Kind string `json:"kind"`
@@ -416,12 +414,15 @@ func (k fluxKustomizationObject) substitutesImageTags() bool {
 	return false
 }
 
-// reconcileHandled is true once Flux echoed requestedAt into status and reports Ready=True.
-func (k fluxKustomizationObject) reconcileHandled(requestedAt string) bool {
-	if requestedAt == "" || k.Status.LastHandledReconcileAt != requestedAt {
-		return false
+// observation projects the fields the rollout watcher acts on; namespace defaults to defaultNamespace.
+func (k fluxKustomizationObject) observation(defaultNamespace string) kustomizationObservation {
+	return kustomizationObservation{
+		Ref:                    fluxKustomizationRef{Namespace: cmp.Or(k.Metadata.Namespace, defaultNamespace), Name: k.Metadata.Name},
+		Suspended:              k.Spec.Suspend,
+		RequestedAt:            k.Metadata.Annotations[fluxReconcileRequestedAtAnnotation],
+		LastHandledReconcileAt: k.Status.LastHandledReconcileAt,
+		Conditions:             k.Status.Conditions,
 	}
-	return slices.Contains(k.Status.Conditions, fluxCondition{Type: "Ready", Status: "True"})
 }
 
 // decodeImageTagKustomizations returns the sorted Kustomizations of a list that substitute from the

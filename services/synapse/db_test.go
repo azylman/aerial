@@ -376,6 +376,20 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 		{name: "RecordKustomizationRequests empty requests guard", op: "RecordKustomizationRequests", repo: "azylman/aerial", prNumber: 42, mockExecErr: errors.New("unexpected exec")},
 		{name: "RecordKustomizationRequests replaces requests and clears deployed", op: "RecordKustomizationRequests", repo: "azylman/aerial", prNumber: 42, kustRequests: map[string]kustomizationRequest{"aerial-core": {Namespace: "flux-system", RequestedAt: "t1"}}, wantSQLSubstr: "COALESCE(metadata, '{}'::jsonb) - 'deployed_kustomizations', '{kustomization_requests}', $3::jsonb"},
 		{name: "RecordKustomizationRequests exec error", op: "RecordKustomizationRequests", repo: "azylman/aerial", prNumber: 42, kustRequests: map[string]kustomizationRequest{"aerial-core": {Namespace: "flux-system", RequestedAt: "t1"}}, mockExecErr: errors.New("exec error"), wantErr: true},
+		// MarkKustomizationsDeployed
+		{name: "MarkKustomizationsDeployed empty repo guard", op: "MarkKustomizationsDeployed", repo: "", prNumber: 42, jobs: []string{"aerial-core"}, mockSelectErr: errors.New("unexpected query")},
+		{name: "MarkKustomizationsDeployed zero pr guard", op: "MarkKustomizationsDeployed", repo: "azylman/aerial", prNumber: 0, jobs: []string{"aerial-core"}, mockSelectErr: errors.New("unexpected query")},
+		{name: "MarkKustomizationsDeployed nil pool guard", op: "MarkKustomizationsDeployed", nilPool: true, repo: "azylman/aerial", prNumber: 42, jobs: []string{"aerial-core"}},
+		{name: "MarkKustomizationsDeployed empty names guard", op: "MarkKustomizationsDeployed", repo: "azylman/aerial", prNumber: 42, jobs: []string{" "}, mockSelectErr: errors.New("unexpected query")},
+		{name: "MarkKustomizationsDeployed returns the scanned transition", op: "MarkKustomizationsDeployed", repo: "azylman/aerial", prNumber: 42, jobs: []string{"marida-core"}, wantUpdated: true},
+		{name: "MarkKustomizationsDeployed already deployed returns false", op: "MarkKustomizationsDeployed", repo: "azylman/aerial", prNumber: 42, jobs: []string{"marida-core"}, mockSelectErr: pgx.ErrNoRows},
+		{name: "MarkKustomizationsDeployed db error", op: "MarkKustomizationsDeployed", repo: "azylman/aerial", prNumber: 42, jobs: []string{"marida-core"}, mockSelectErr: errors.New("db error"), wantErr: true},
+
+		// HasKustomizationRequests
+		{name: "HasKustomizationRequests zero pr guard", op: "HasKustomizationRequests", repo: "azylman/aerial", prNumber: 0, mockSelectErr: errors.New("unexpected query")},
+		{name: "HasKustomizationRequests tracked PR", op: "HasKustomizationRequests", repo: "azylman/aerial", prNumber: 42, wantUpdated: true},
+		{name: "HasKustomizationRequests unknown PR", op: "HasKustomizationRequests", repo: "azylman/aerial", prNumber: 42, mockSelectErr: pgx.ErrNoRows},
+		{name: "HasKustomizationRequests db error", op: "HasKustomizationRequests", repo: "azylman/aerial", prNumber: 42, mockSelectErr: errors.New("db error"), wantErr: true},
 		{name: "AppendPRJobs exec error", op: "AppendPRJobs", repo: "azylman/aerial", prNumber: 42, jobs: []string{"coven"}, mockExecErr: errors.New("exec error"), wantErr: true},
 
 		// UpdatePRStatus
@@ -809,6 +823,22 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 				err := reg.RecordKustomizationRequests(ctx, tc.repo, tc.prNumber, tc.kustRequests)
 				if (err != nil) != tc.wantErr {
 					t.Fatalf("RecordKustomizationRequests err = %v, wantErr = %v", err, tc.wantErr)
+				}
+			case "MarkKustomizationsDeployed":
+				got, err := reg.MarkKustomizationsDeployed(ctx, tc.repo, tc.prNumber, tc.jobs)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("MarkKustomizationsDeployed err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if got != tc.wantUpdated {
+					t.Errorf("transitioned = %v, want %v", got, tc.wantUpdated)
+				}
+			case "HasKustomizationRequests":
+				got, err := reg.HasKustomizationRequests(ctx, tc.repo, tc.prNumber)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("HasKustomizationRequests err = %v, wantErr = %v", err, tc.wantErr)
+				}
+				if got != tc.wantUpdated {
+					t.Errorf("tracked = %v, want %v", got, tc.wantUpdated)
 				}
 			case "UpdatePRStatus":
 				var meta map[string]any

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -726,8 +728,8 @@ type OutboundDispatcher interface {
 	DispatchGitPush(ctx context.Context, req GitPushEventRequest) error
 	DiscoverImageKustomizations(ctx context.Context, imageNames []string) ([]fluxKustomizationRef, error)
 	PromoteImageTag(ctx context.Context, req ImageReadyEventRequest) (workloadName string, err error)
-	ReconcileKustomization(ctx context.Context, ref fluxKustomizationRef) (requestedAt string, err error)
-	KustomizationReconcileHandled(ctx context.Context, ref fluxKustomizationRef, requestedAt string) (bool, error)
+	ReconcileKustomization(ctx context.Context, ref fluxKustomizationRef, requestedAt string) error
+	ResolveFluxSourceRepo(ctx context.Context, obj FluxInvolvedObject) (string, error)
 	DispatchPrompt(ctx context.Context, req PromptRequest) error
 	DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error
 	DispatchWidget(ctx context.Context, payload StatusWidgetRequest) (string, error)
@@ -1088,36 +1090,104 @@ func (d *DefaultOutboundDispatcher) DiscoverImageKustomizations(ctx context.Cont
 	return refs, nil
 }
 
-// ReconcileKustomization requests a Flux reconcile and returns the requestedAt token Flux echoes back
-// in status.lastHandledReconcileAt once the request is handled.
-func (d *DefaultOutboundDispatcher) ReconcileKustomization(ctx context.Context, ref fluxKustomizationRef) (string, error) {
-	requestedAt := time.Now().UTC().Format(time.RFC3339Nano)
+// ReconcileKustomization requests a Flux reconcile by patching the requestedAt annotation to the
+// caller-recorded value; Flux echoes it back in status.lastHandledReconcileAt once handled. Re-patching
+// the same value is idempotent.
+func (d *DefaultOutboundDispatcher) ReconcileKustomization(ctx context.Context, ref fluxKustomizationRef, requestedAt string) error {
 	patchBody, err := json.Marshal(map[string]any{
 		"metadata": map[string]any{
 			"annotations": map[string]string{fluxReconcileRequestedAtAnnotation: requestedAt},
 		},
 	})
 	if err != nil {
-		return "", fmt.Errorf("marshal kustomization patch body: %w", err)
+		return fmt.Errorf("marshal kustomization patch body: %w", err)
 	}
 	if _, err := d.kubeJSON(ctx, http.MethodPatch, kustomizationPath(ref), "application/merge-patch+json", patchBody); err != nil {
-		return "", fmt.Errorf("reconcile kustomization %s/%s: %w", ref.Namespace, ref.Name, err)
+		return fmt.Errorf("reconcile kustomization %s/%s: %w", ref.Namespace, ref.Name, err)
 	}
-	return requestedAt, nil
+	return nil
 }
 
-// KustomizationReconcileHandled reports whether Flux has handled the reconcile request identified by
-// requestedAt and the Kustomization is Ready.
-func (d *DefaultOutboundDispatcher) KustomizationReconcileHandled(ctx context.Context, ref fluxKustomizationRef, requestedAt string) (bool, error) {
-	body, err := d.kubeJSON(ctx, http.MethodGet, kustomizationPath(ref), "", nil)
+// ResolveFluxSourceRepo returns the owner/repo of the GitRepository behind a Flux object: the object
+// itself for a GitRepository, or its spec.sourceRef for a Kustomization. Other kinds resolve to "".
+func (d *DefaultOutboundDispatcher) ResolveFluxSourceRepo(ctx context.Context, obj FluxInvolvedObject) (string, error) {
+	namespace := cmp.Or(strings.TrimSpace(obj.Namespace), fluxSystemNamespace)
+	source := fluxSourceRef{Kind: obj.Kind, Name: strings.TrimSpace(obj.Name), Namespace: namespace}
+	if obj.Kind == "Kustomization" {
+		body, err := d.kubeJSON(ctx, http.MethodGet, kustomizationPath(fluxKustomizationRef{Namespace: namespace, Name: source.Name}), "", nil)
+		if err != nil {
+			return "", fmt.Errorf("get kustomization %s/%s: %w", namespace, source.Name, err)
+		}
+		var k fluxKustomizationObject
+		if err := json.Unmarshal(body, &k); err != nil {
+			return "", fmt.Errorf("decode kustomization %s/%s: %w", namespace, source.Name, err)
+		}
+		source = k.Spec.SourceRef
+		source.Namespace = cmp.Or(source.Namespace, namespace)
+	}
+	if source.Kind != "GitRepository" || source.Name == "" {
+		return "", nil
+	}
+	body, err := d.kubeJSON(ctx, http.MethodGet, gitRepositoryPath(source.Namespace, source.Name), "", nil)
 	if err != nil {
-		return false, fmt.Errorf("get kustomization %s/%s: %w", ref.Namespace, ref.Name, err)
+		return "", fmt.Errorf("get gitrepository %s/%s: %w", source.Namespace, source.Name, err)
 	}
-	var obj fluxKustomizationObject
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return false, fmt.Errorf("decode kustomization %s/%s: %w", ref.Namespace, ref.Name, err)
+	var repo struct {
+		Spec struct {
+			URL string `json:"url"`
+		} `json:"spec"`
 	}
-	return obj.reconcileHandled(requestedAt), nil
+	if err := json.Unmarshal(body, &repo); err != nil {
+		return "", fmt.Errorf("decode gitrepository %s/%s: %w", source.Namespace, source.Name, err)
+	}
+	return gitRepoSlug(repo.Spec.URL), nil
+}
+
+// ListKustomizations lists the Kustomizations of namespace and returns them with the list resourceVersion.
+func (d *DefaultOutboundDispatcher) ListKustomizations(ctx context.Context, namespace string) ([]kustomizationObservation, string, error) {
+	body, err := d.kubeJSON(ctx, http.MethodGet, kustomizationPath(fluxKustomizationRef{Namespace: namespace}), "", nil)
+	if err != nil {
+		return nil, "", fmt.Errorf("list kustomizations: %w", err)
+	}
+	return decodeKustomizationList(body, namespace)
+}
+
+// WatchKustomizations opens a kube watch stream of namespace's Kustomizations from resourceVersion.
+// The stream has no client timeout; the API server ends it, after which the caller re-lists.
+// A 410 Gone response returns errWatchExpired.
+func (d *DefaultOutboundDispatcher) WatchKustomizations(ctx context.Context, namespace, resourceVersion string) (io.ReadCloser, error) {
+	if d.kubeAPIServer == "" {
+		return nil, errors.New("kube api server not configured")
+	}
+	query := url.Values{"watch": {"1"}, "allowWatchBookmarks": {"true"}, "resourceVersion": {resourceVersion}}
+	path := kustomizationPath(fluxKustomizationRef{Namespace: namespace})
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.kubeAPIServer+path+"?"+query.Encode(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("create kube watch %s request: %w", path, err)
+	}
+	req.Header.Set("Accept", "application/json")
+	if token := d.getKubeToken(); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	streamClient := *getK8sHTTPClient(d.kubeAPIServer, d.httpClient)
+	streamClient.Timeout = 0
+	resp, err := streamClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("kube watch %s request failed: %w", path, err)
+	}
+	if resp.StatusCode == http.StatusGone {
+		resp.Body.Close()
+		return nil, errWatchExpired
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		defer resp.Body.Close()
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if readErr != nil {
+			return nil, fmt.Errorf("kube watch %s returned status %d (read error: %w)", path, resp.StatusCode, readErr)
+		}
+		return nil, fmt.Errorf("kube watch %s returned status %d: %s", path, resp.StatusCode, truncateKubeBody(body))
+	}
+	return resp.Body, nil
 }
 
 func validateBrainChannel(channelID, endpointPath string) error {

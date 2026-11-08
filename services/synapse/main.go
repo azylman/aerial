@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -278,6 +277,7 @@ func (s *RouterServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 type DeployEvent struct {
 	Event        string    `json:"event"`                   // "deploy_started", "deploy_success", "deploy_failed", "deploy_rollback"
 	JobName      string    `json:"job_name"`                // Deployment job or service name (e.g. "eri", "synapse")
+	SourceKind   string    `json:"source_kind,omitempty"`   // Kind of the Flux object that emitted the event (e.g. "Kustomization", "GitRepository")
 	ExpectedJobs []string  `json:"expected_jobs,omitempty"` // All jobs expected to deploy for this PR/sync
 	Repo         string    `json:"repo,omitempty"`          // repository name (e.g. "azylman/aerial", "azylman/aerial-config")
 	CommitSHA    string    `json:"commit_sha,omitempty"`    // git commit SHA (head or merge commit)
@@ -440,7 +440,8 @@ func (s *RouterServer) setPRWidgetState(ctx context.Context, repo string, prNumb
 		        ELSE COALESCE(metadata, '{}'::jsonb) - 'banner'
 		    END,
 		    updated_at = CURRENT_TIMESTAMP
-		WHERE repo = $1 AND pr_number = $2`
+		WHERE repo = $1 AND pr_number = $2
+		  AND NOT ($3 = 'deployed' AND status <> 'deployed' AND COALESCE(jsonb_typeof(metadata->'` + kustomizationRequestsKey + `') = 'object', false))`
 	if _, err := pgReg.pool.Exec(qCtx, query, normalizeRepo(repo), prNumber, strings.TrimSpace(status), strings.TrimSpace(banner)); err != nil {
 		log.Printf("[synapse] [widget] warning updating pr widget state for %s#%d: %v", repo, prNumber, err)
 	}
@@ -555,8 +556,11 @@ func (s *RouterServer) ProcessWidgetSync(ctx context.Context, args WidgetSyncArg
 	return s.syncSinglePRWidget(qCtx, pgReg, repo, prNumber, true)
 }
 
+// sweepOlderDeployedPRWidgets marks older in-flight PRs deployed once a newer one is. Watcher-tracked
+// rollouts still deploying are excluded: only the Kustomization watcher completes them, so their
+// completion wake or failure alert is never skipped.
 func (s *RouterServer) sweepOlderDeployedPRWidgets(qCtx context.Context, pgReg *PostgresPRRegistry, repo string, prNumber int) {
-	sweepQuery := `UPDATE pr_registry SET status = 'deployed', metadata = jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb) - 'banner', '{jobs}', '[]'::jsonb, true), '{deployed_jobs}', COALESCE(metadata->'started_jobs', metadata->'deployed_jobs', '[]'::jsonb), true), updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number < $2 AND status IN ('merged', 'synced', 'deploying', 'deploy_failed') AND NOT (status IN ('merged', 'synced') AND COALESCE((metadata->'ci_checks')::text, '') LIKE '%Build & Push (%') RETURNING pr_number`
+	sweepQuery := `UPDATE pr_registry SET status = 'deployed', metadata = jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb) - 'banner', '{jobs}', '[]'::jsonb, true), '{deployed_jobs}', COALESCE(metadata->'started_jobs', metadata->'deployed_jobs', '[]'::jsonb), true), updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number < $2 AND status IN ('merged', 'synced', 'deploying', 'deploy_failed') AND NOT (status IN ('merged', 'synced') AND COALESCE((metadata->'ci_checks')::text, '') LIKE '%Build & Push (%') AND NOT (status = 'deploying' AND COALESCE(jsonb_typeof(metadata->'` + kustomizationRequestsKey + `') = 'object', false)) RETURNING pr_number`
 	rows, sErr := pgReg.pool.Query(qCtx, sweepQuery, repo, prNumber)
 	if sErr != nil || rows == nil {
 		return
@@ -914,19 +918,6 @@ func (s *RouterServer) resolveDeployEventTargetID(ctx context.Context, evt *Depl
 
 func (s *RouterServer) enrichDeployEventPRAndTarget(ctx context.Context, evt *DeployEvent) {
 	s.resolveDeployEventPRNumber(ctx, evt)
-	if s.registry != nil && (evt.JobName == "aerial-config" || evt.JobName == "aerial-core") {
-		if deployingPRs, err := s.registry.ListDeployingPRs(ctx); err == nil && len(deployingPRs) > 0 && !isPRInDeployingList(deployingPRs, evt.Repo, evt.PRNumber) {
-			for _, p := range slices.Backward(deployingPRs) {
-				if matchesDeployingPRKustomization(p.Metadata, evt.JobName) {
-					evt.Repo = p.Repo
-					evt.PRNumber = p.PRNumber
-					evt.CommitSHA = firstNonEmpty(p.MergeSHA, p.HeadSHA, evt.CommitSHA)
-					evt.TargetID = firstNonEmpty(p.TargetID, evt.TargetID)
-					break
-				}
-			}
-		}
-	}
 	s.resolveDeployEventTargetID(ctx, evt)
 	if evt.TargetID == "" && (evt.Event == "deploy_failed" || evt.Event == "deploy_rollback" || evt.Event == "sync_failed") {
 		evt.TargetID = strings.TrimSpace(s.cfg.SystemChannelID)
@@ -1062,7 +1053,21 @@ func (s *RouterServer) isWaitingForImageBuild(ctx context.Context, repo string, 
 }
 
 func (s *RouterServer) shouldTreatDeploySuccessAsSync(ctx context.Context, evt DeployEvent) bool {
-	return (evt.JobName == "aerial-core" || evt.JobName == "aerial-config") && s.isWaitingForImageBuild(ctx, evt.Repo, evt.PRNumber)
+	return evt.SourceKind == "Kustomization" && s.isWaitingForImageBuild(ctx, evt.Repo, evt.PRNumber)
+}
+
+// isDeployEventOwnedByWatcher reports whether evt concerns a PR whose rollout completion is tracked by the
+// Kustomization watcher: such PRs ignore Kustomization alerts and never complete from a deploy_success
+// event, since live Kustomization status is the only source of truth for them.
+func (s *RouterServer) isDeployEventOwnedByWatcher(ctx context.Context, evt DeployEvent) bool {
+	if s.registry == nil || evt.PRNumber <= 0 || (evt.SourceKind != "Kustomization" && evt.Event != "deploy_success") {
+		return false
+	}
+	tracked, err := s.registry.HasKustomizationRequests(ctx, evt.Repo, evt.PRNumber)
+	if err != nil {
+		log.Printf("[synapse] [deploy] warning checking kustomization requests for %s#%d: %v", evt.Repo, evt.PRNumber, err)
+	}
+	return tracked
 }
 
 func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) (*DeployEvent, error) {
@@ -1072,6 +1077,11 @@ func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) 
 		evt.Event, evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA, evt.Status, evt.TargetID, evt.DeploymentID, evt.Details)
 
 	s.evaluateFluxEventTriggers(ctx, evt)
+
+	if s.isDeployEventOwnedByWatcher(ctx, evt) {
+		log.Printf("[synapse] [deploy] deferring %s for %s on %s#%d to the kustomization watcher", evt.Event, evt.JobName, evt.Repo, evt.PRNumber)
+		return &evt, nil
+	}
 
 	if s.handleDeployStartedRegistry(ctx, evt) {
 		return &evt, nil
@@ -1111,7 +1121,6 @@ func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) 
 		if evt.PRNumber > 0 {
 			s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "deployed", "")
 		}
-		s.completeCoalescedDeployingPRs(ctx, evt)
 		return &evt, s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, evt.JobName, evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID)
 	case "deploy_rollback", "deploy_failed":
 		return &evt, s.handleDeployFailedOrRollback(ctx, evt, prefix)
@@ -1387,6 +1396,8 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 	if dbPool != nil {
 		defer dbPool.Close()
 	}
+	stopWatcher := server.startKustomizationWatcher(ctx, dispatcher)
+	defer stopWatcher()
 
 	// Initialize and launch Discord Gateway consumer
 	stopDiscord, err := startDiscordGateway(ctx, server, cfg.DiscordToken)
@@ -1442,6 +1453,8 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 	}
 
 	safeStopDiscord()
+
+	stopWatcher()
 
 	if riverClient != nil {
 		if stopErr := riverClient.Stop(shutdownCtx); stopErr != nil && !errors.Is(stopErr, context.Canceled) {
