@@ -47,6 +47,12 @@ type Message struct {
 	ReplyingToContent string    `json:"replying_to_content,omitempty"`
 	Attachments       []string  `json:"attachments,omitempty"`
 	Model             string    `json:"model,omitempty"`
+	DurationMs        int64     `json:"duration_ms,omitempty"`
+	InputTokens       int       `json:"input_tokens,omitempty"`
+	OutputTokens      int       `json:"output_tokens,omitempty"`
+	ThinkingTokens    int       `json:"thinking_tokens,omitempty"`
+	CacheReadTokens   int       `json:"cache_read_tokens,omitempty"`
+	TotalTokens       int       `json:"total_tokens,omitempty"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
 }
@@ -100,7 +106,7 @@ func (m Message) BodyText() string {
 	return m.Content
 }
 
-const messageSelectCols = "id, COALESCE(row_id, 0) AS row_id, thread_id, guild_id, author_id, author_name, content, COALESCE(summary, '') AS summary, status, retry_count, COALESCE(restart_count, 0) AS restart_count, COALESCE(effort, '') AS effort, COALESCE(error_message, '') AS error_message, COALESCE(response_text, '') AS response_text, COALESCE(conversation_id, '') AS conversation_id, COALESCE(channel_id, '') AS channel_id, COALESCE(channel_name, '') AS channel_name, COALESCE(thread_name, '') AS thread_name, COALESCE(author_global_name, '') AS author_global_name, COALESCE(author_bot, false) AS author_bot, COALESCE(is_admin, false) AS is_admin, mentions, mention_user_ids, mention_role_ids, COALESCE(replying_to_author, '') AS replying_to_author, COALESCE(replying_to_content, '') AS replying_to_content, attachments, COALESCE(model, '') AS model, created_at, updated_at"
+const messageSelectCols = "id, COALESCE(row_id, 0) AS row_id, thread_id, guild_id, author_id, author_name, content, COALESCE(summary, '') AS summary, status, retry_count, COALESCE(restart_count, 0) AS restart_count, COALESCE(effort, '') AS effort, COALESCE(error_message, '') AS error_message, COALESCE(response_text, '') AS response_text, COALESCE(conversation_id, '') AS conversation_id, COALESCE(channel_id, '') AS channel_id, COALESCE(channel_name, '') AS channel_name, COALESCE(thread_name, '') AS thread_name, COALESCE(author_global_name, '') AS author_global_name, COALESCE(author_bot, false) AS author_bot, COALESCE(is_admin, false) AS is_admin, mentions, mention_user_ids, mention_role_ids, COALESCE(replying_to_author, '') AS replying_to_author, COALESCE(replying_to_content, '') AS replying_to_content, attachments, COALESCE(model, '') AS model, COALESCE(duration_ms, 0) AS duration_ms, COALESCE(input_tokens, 0) AS input_tokens, COALESCE(output_tokens, 0) AS output_tokens, COALESCE(thinking_tokens, 0) AS thinking_tokens, COALESCE(cache_read_tokens, 0) AS cache_read_tokens, COALESCE(total_tokens, 0) AS total_tokens, created_at, updated_at"
 
 // InsertMessage stores a new message in the database.
 func (s *SQLStore) InsertMessage(ctx context.Context, msg Message) (err error) {
@@ -131,7 +137,9 @@ func (s *SQLStore) InsertMessage(ctx context.Context, msg Message) (err error) {
 		channel_id, channel_name, thread_name, author_global_name,
 		author_bot, is_admin, mentions, mention_user_ids,
 		mention_role_ids, replying_to_author, replying_to_content, attachments,
-		model, created_at, updated_at
+		model, duration_ms, input_tokens, output_tokens,
+		thinking_tokens, cache_read_tokens, total_tokens,
+		created_at, updated_at
 	) VALUES (
 		$1, $2, $3, $4, $5,
 		$6, $7, $8, $9, $10,
@@ -139,7 +147,9 @@ func (s *SQLStore) InsertMessage(ctx context.Context, msg Message) (err error) {
 		$15, $16, $17, $18,
 		$19, $20, $21, $22,
 		$23, $24, $25, $26,
-		$27, $28, $29
+		$27, $28, $29, $30,
+		$31, $32, $33,
+		$34, $35
 	) ON CONFLICT (id) DO NOTHING;`,
 		msg.ID, msg.ThreadID, msg.GuildID, msg.AuthorID, msg.AuthorName,
 		msg.Content, msg.Summary, msg.Status, msg.RetryCount, msg.RestartCount,
@@ -147,7 +157,9 @@ func (s *SQLStore) InsertMessage(ctx context.Context, msg Message) (err error) {
 		msg.ChannelID, msg.ChannelName, msg.ThreadName, msg.AuthorGlobalName,
 		msg.AuthorBot, msg.IsAdmin, pgutil.FormatPGTextArray(msg.Mentions), pgutil.FormatPGTextArray(msg.MentionUserIDs),
 		pgutil.FormatPGTextArray(msg.MentionRoleIDs), msg.ReplyingToAuthor, msg.ReplyingToContent, pgutil.FormatPGTextArray(msg.Attachments),
-		msg.Model, msg.CreatedAt, msg.UpdatedAt,
+		msg.Model, msg.DurationMs, msg.InputTokens, msg.OutputTokens,
+		msg.ThinkingTokens, msg.CacheReadTokens, msg.TotalTokens,
+		msg.CreatedAt, msg.UpdatedAt,
 	)
 	return err
 }
@@ -166,6 +178,7 @@ func scanMessage(scanner interface{ Scan(dest ...any) error }, autoCleanSummary 
 		&m.ReplyingToAuthor, &m.ReplyingToContent,
 		&pgutil.PGStringSlice{Dest: &m.Attachments},
 		&m.Model,
+		&m.DurationMs, &m.InputTokens, &m.OutputTokens, &m.ThinkingTokens, &m.CacheReadTokens, &m.TotalTokens,
 		&m.CreatedAt, &m.UpdatedAt,
 	); err != nil {
 		return Message{}, err
@@ -203,16 +216,28 @@ func (s *SQLStore) execMessageUpdate(ctx context.Context, id, query string, args
 	return s.execWithTimeout(ctx, query, args...)
 }
 
-func (s *SQLStore) UpdateMessageStatus(ctx context.Context, id, status, errorMsg string) error {
-	return s.execMessageUpdate(ctx, id, `UPDATE messages SET status = $1, error_message = $2, updated_at = $3 WHERE id = $4`, status, errorMsg, time.Now().UTC(), id)
+func (s *SQLStore) UpdateMessageStatus(ctx context.Context, id, status, errorMsg string, telemetry ...TurnTelemetry) error {
+	now := time.Now().UTC()
+	if len(telemetry) > 0 {
+		t := telemetry[0]
+		return s.execMessageUpdate(ctx, id, `UPDATE messages SET status = $1, error_message = $2, duration_ms = $3, input_tokens = $4, output_tokens = $5, thinking_tokens = $6, cache_read_tokens = $7, total_tokens = $8, updated_at = $9 WHERE id = $10`,
+			status, errorMsg, t.DurationMs, t.InputTokens, t.OutputTokens, t.ThinkingTokens, t.CacheReadTokens, t.TotalTokens, now, id)
+	}
+	return s.execMessageUpdate(ctx, id, `UPDATE messages SET status = $1, error_message = $2, updated_at = $3 WHERE id = $4`, status, errorMsg, now, id)
 }
 
-func (s *SQLStore) UpdateMessageCompleted(ctx context.Context, id, responseText string, conversationID ...string) error {
+func (s *SQLStore) UpdateMessageCompleted(ctx context.Context, id, responseText, conversationID string, telemetry ...TurnTelemetry) error {
 	now := time.Now().UTC()
-	if len(conversationID) > 0 && strings.TrimSpace(conversationID[0]) != "" {
-		return s.execMessageUpdate(ctx, id, `UPDATE messages SET status = $1, response_text = $2, error_message = '', conversation_id = $3, updated_at = $4 WHERE id = $5`, StatusCompleted, responseText, strings.TrimSpace(conversationID[0]), now, id)
+	var t TurnTelemetry
+	if len(telemetry) > 0 {
+		t = telemetry[0]
 	}
-	return s.execMessageUpdate(ctx, id, `UPDATE messages SET status = $1, response_text = $2, error_message = '', updated_at = $3 WHERE id = $4`, StatusCompleted, responseText, now, id)
+	if strings.TrimSpace(conversationID) != "" {
+		return s.execMessageUpdate(ctx, id, `UPDATE messages SET status = $1, response_text = $2, error_message = '', conversation_id = $3, duration_ms = $4, input_tokens = $5, output_tokens = $6, thinking_tokens = $7, cache_read_tokens = $8, total_tokens = $9, updated_at = $10 WHERE id = $11`,
+			StatusCompleted, responseText, strings.TrimSpace(conversationID), t.DurationMs, t.InputTokens, t.OutputTokens, t.ThinkingTokens, t.CacheReadTokens, t.TotalTokens, now, id)
+	}
+	return s.execMessageUpdate(ctx, id, `UPDATE messages SET status = $1, response_text = $2, error_message = '', duration_ms = $3, input_tokens = $4, output_tokens = $5, thinking_tokens = $6, cache_read_tokens = $7, total_tokens = $8, updated_at = $9 WHERE id = $10`,
+		StatusCompleted, responseText, t.DurationMs, t.InputTokens, t.OutputTokens, t.ThinkingTokens, t.CacheReadTokens, t.TotalTokens, now, id)
 }
 
 func (s *SQLStore) IncrementMessageRetry(ctx context.Context, id, errorMsg string) error {

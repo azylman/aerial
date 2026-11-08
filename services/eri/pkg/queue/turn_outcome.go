@@ -156,6 +156,13 @@ func (te *turnExecution) deliverSuccessAndFinalize(resp *runner.AgyResponse, acc
 	cleanText, attachments := delivery.ExtractAndSanitizeMedia(resp.Response, baseDir)
 	attachments = delivery.AutoAttachNewMedia(baseDir, te.execStart, attachments)
 
+	resp.Usage.InputTokens += accumulatedUsage.InputTokens
+	resp.Usage.OutputTokens += accumulatedUsage.OutputTokens
+	resp.Usage.ThinkingTokens += accumulatedUsage.ThinkingTokens
+	resp.Usage.CacheReadTokens += accumulatedUsage.CacheReadTokens
+	resp.Usage.TotalTokens += accumulatedUsage.TotalTokens
+	te.turnTokenUsage, te.turnDurationMs = resp.Usage, time.Since(te.execStart).Milliseconds()
+
 	isSilent := te.isDispatch()
 	if !isSilent && strings.TrimSpace(cleanText) == "" && len(attachments) == 0 {
 		log.Printf("[Queue] Agent produced empty response for thread %s on attempt %d/%d; treating as failure", te.threadID, attempt, maxAttempts)
@@ -166,16 +173,10 @@ func (te *turnExecution) deliverSuccessAndFinalize(resp *runner.AgyResponse, acc
 		te.deliverDiscordSuccess(cleanText, attachments)
 	}
 
-	resp.Usage.InputTokens += accumulatedUsage.InputTokens
-	resp.Usage.OutputTokens += accumulatedUsage.OutputTokens
-	resp.Usage.ThinkingTokens += accumulatedUsage.ThinkingTokens
-	resp.Usage.CacheReadTokens += accumulatedUsage.CacheReadTokens
-	resp.Usage.TotalTokens += accumulatedUsage.TotalTokens
-
 	metrics.RecordTurnCompleted("success", te.triggerType, currentModel, time.Since(te.execStart))
 	tokenChannel := te.resolveTokenChannel()
 	metrics.RecordTokens(currentModel, tokenChannel, resp.Usage.InputTokens, resp.Usage.OutputTokens, resp.Usage.ThinkingTokens, resp.Usage.CacheReadTokens, resp.Usage.TotalTokens)
-	te.turnStatus, te.turnResponseText, te.turnTokenUsage, te.turnDurationMs = "success", cleanText, resp.Usage, time.Since(te.execStart).Milliseconds()
+	te.turnStatus, te.turnResponseText = "success", cleanText
 	te.finalizeBurstMessages(te.burst, db.StatusCompleted, cleanText, "completed", "", currentModel, true, true)
 
 	te.handleDispatchSessionRotation()
@@ -510,8 +511,11 @@ func (te *turnExecution) failBurstWithStatus(turnStatus, errText, model string) 
 
 func (te *turnExecution) completeAmbientMessage(m db.Message, info WakeInfo) {
 	metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
-	telemetry := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.Score, info.Threshold, info.Reason)
-	te.finalizeBurstMessages([]db.Message{m}, db.StatusCompleted, telemetry, "completed", "", "", true, false)
+	reason := fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.Score, info.Threshold, info.Reason)
+	te.updateMessageStatus(m.ID, db.StatusCompleted, reason)
+	if te.pool != nil && te.pool.cfg.OnMessageCompleted != nil {
+		te.pool.cfg.OnMessageCompleted(m, db.StatusCompleted)
+	}
 }
 
 func (te *turnExecution) cancelBurstOnShutdown(turnStatus string, failScheduleRun bool) {
@@ -551,5 +555,54 @@ func (te *turnExecution) deliverFailureNotice(agyBin, apiKey, errDetail, stderr,
 	deliveryTarget := te.threadID
 	if err := te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), deliveryTarget, notif); err != nil {
 		log.Printf("[WorkerPool] Failed to deliver %s for thread %s: %v", logLabel, te.threadID, err)
+	}
+}
+
+func (te *turnExecution) turnTelemetry() []db.TurnTelemetry {
+	if te == nil {
+		return nil
+	}
+	if !te.turnAttempted && te.turnDurationMs == 0 && te.turnTokenUsage == (runner.TokenUsage{}) {
+		return nil
+	}
+	return []db.TurnTelemetry{{
+		DurationMs:      te.turnDurationMs,
+		InputTokens:     te.turnTokenUsage.InputTokens,
+		OutputTokens:    te.turnTokenUsage.OutputTokens,
+		ThinkingTokens:  te.turnTokenUsage.ThinkingTokens,
+		CacheReadTokens: te.turnTokenUsage.CacheReadTokens,
+		TotalTokens:     te.turnTokenUsage.TotalTokens,
+	}}
+}
+
+func (te *turnExecution) updateMessageStatus(id, status, errorMsg string, telemetry ...db.TurnTelemetry) {
+	if s := te.store(); s != nil {
+		if err := s.UpdateMessageStatus(context.Background(), id, status, errorMsg, telemetry...); err != nil {
+			log.Printf("[Worker] Warning updating message %s status to %s: %v", id, status, err)
+		}
+	}
+}
+
+func (te *turnExecution) updateMessageCompleted(id, responseText string, telemetry ...db.TurnTelemetry) {
+	if s := te.store(); s != nil {
+		if err := s.UpdateMessageCompleted(context.Background(), id, responseText, te.currentSessionID, telemetry...); err != nil {
+			log.Printf("[Worker] Warning updating message %s completed: %v", id, err)
+		}
+	}
+}
+
+func (te *turnExecution) updateDispatchCompleted(id, responseText string, telemetry ...db.TurnTelemetry) {
+	if s := te.store(); s != nil {
+		if err := s.UpdateDispatchCompleted(context.Background(), id, responseText, te.currentSessionID, telemetry...); err != nil {
+			log.Printf("[Worker] Warning updating dispatch %s completed: %v", id, err)
+		}
+	}
+}
+
+func (te *turnExecution) updateDispatchStatus(id, status, errorMsg string, telemetry ...db.TurnTelemetry) {
+	if s := te.store(); s != nil {
+		if err := s.UpdateDispatchStatus(context.Background(), id, status, errorMsg, telemetry...); err != nil {
+			log.Printf("[Worker] Warning updating dispatch %s status to %s: %v", id, status, err)
+		}
 	}
 }

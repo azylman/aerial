@@ -305,15 +305,42 @@ func (f *FakeStore) mutateMessage(method, id string, fn func(*db.Message)) error
 	})
 }
 
-func (f *FakeStore) UpdateMessageStatus(ctx context.Context, id, status, errorMsg string) error {
-	return f.mutateMessage("UpdateMessageStatus", id, func(m *db.Message) { m.Status, m.ErrorMessage = status, errorMsg })
+func (f *FakeStore) UpdateMessageStatus(ctx context.Context, id, status, errorMsg string, telemetry ...db.TurnTelemetry) error {
+	return f.mutateMessage("UpdateMessageStatus", id, func(m *db.Message) {
+		m.Status, m.ErrorMessage = status, errorMsg
+		if len(telemetry) > 0 {
+			t := telemetry[0]
+			m.DurationMs = t.DurationMs
+			m.InputTokens = t.InputTokens
+			m.OutputTokens = t.OutputTokens
+			m.ThinkingTokens = t.ThinkingTokens
+			m.CacheReadTokens = t.CacheReadTokens
+			m.TotalTokens = t.TotalTokens
+		}
+	})
 }
 
-func (f *FakeStore) UpdateMessageCompleted(ctx context.Context, id, responseText string, conversationID ...string) error {
+func (f *FakeStore) UpdateMessageCompleted(ctx context.Context, id, responseText, conversationID string, telemetry ...db.TurnTelemetry) error {
 	return f.mutateMessage("UpdateMessageCompleted", id, func(m *db.Message) {
 		m.Status, m.ResponseText, m.ErrorMessage = db.StatusCompleted, responseText, ""
-		if len(conversationID) > 0 && strings.TrimSpace(conversationID[0]) != "" {
-			m.ConversationID = strings.TrimSpace(conversationID[0])
+		if strings.TrimSpace(conversationID) != "" {
+			m.ConversationID = strings.TrimSpace(conversationID)
+		}
+		if len(telemetry) > 0 {
+			t := telemetry[0]
+			m.DurationMs = t.DurationMs
+			m.InputTokens = t.InputTokens
+			m.OutputTokens = t.OutputTokens
+			m.ThinkingTokens = t.ThinkingTokens
+			m.CacheReadTokens = t.CacheReadTokens
+			m.TotalTokens = t.TotalTokens
+		} else {
+			m.DurationMs = 0
+			m.InputTokens = 0
+			m.OutputTokens = 0
+			m.ThinkingTokens = 0
+			m.CacheReadTokens = 0
+			m.TotalTokens = 0
 		}
 	})
 }
@@ -497,6 +524,12 @@ func buildActiveTaskRecord(m *db.Message, sess *db.SessionInfo, threadSummary st
 		IsAdmin:           m.IsAdmin,
 		Status:            m.Status,
 		RetryCount:        m.RetryCount,
+		DurationMs:        m.DurationMs,
+		InputTokens:       m.InputTokens,
+		OutputTokens:      m.OutputTokens,
+		ThinkingTokens:    m.ThinkingTokens,
+		CacheReadTokens:   m.CacheReadTokens,
+		TotalTokens:       m.TotalTokens,
 		TriggerType:       db.InferTriggerType(m.AuthorID),
 		CreatedAt:         m.CreatedAt,
 		UpdatedAt:         m.UpdatedAt,
@@ -537,6 +570,12 @@ func buildActiveTaskFromDispatch(d *db.Dispatch, sess *db.SessionInfo, threadSum
 		IsAdmin:           true,
 		Status:            d.Status,
 		RetryCount:        d.RetryCount,
+		DurationMs:        d.DurationMs,
+		InputTokens:       d.InputTokens,
+		OutputTokens:      d.OutputTokens,
+		ThinkingTokens:    d.ThinkingTokens,
+		CacheReadTokens:   d.CacheReadTokens,
+		TotalTokens:       d.TotalTokens,
 		TriggerType:       d.Source,
 		CreatedAt:         d.CreatedAt,
 		UpdatedAt:         d.UpdatedAt,
@@ -681,21 +720,46 @@ func (f *FakeStore) ClaimPendingDispatch(ctx context.Context, id string) (bool, 
 	})
 }
 
-func (f *FakeStore) UpdateDispatchStatus(ctx context.Context, id, status, errorMsg string) error {
+func (f *FakeStore) UpdateDispatchStatus(ctx context.Context, id, status, errorMsg string, telemetry ...db.TurnTelemetry) error {
 	return f.withLockErr("UpdateDispatchStatus", func() error {
 		if d, ok := f.dispatches[id]; ok {
 			d.Status, d.ErrorMessage, d.UpdatedAt = status, errorMsg, time.Now().UTC()
+			if len(telemetry) > 0 {
+				t := telemetry[0]
+				d.DurationMs = t.DurationMs
+				d.InputTokens = t.InputTokens
+				d.OutputTokens = t.OutputTokens
+				d.ThinkingTokens = t.ThinkingTokens
+				d.CacheReadTokens = t.CacheReadTokens
+				d.TotalTokens = t.TotalTokens
+			}
 		}
 		return nil
 	})
 }
 
-func (f *FakeStore) UpdateDispatchCompleted(ctx context.Context, id, responseText string, conversationID ...string) error {
+func (f *FakeStore) UpdateDispatchCompleted(ctx context.Context, id, responseText, conversationID string, telemetry ...db.TurnTelemetry) error {
 	return f.withLockErr("UpdateDispatchCompleted", func() error {
 		if d, ok := f.dispatches[id]; ok {
 			d.Status, d.ResponseText, d.ErrorMessage, d.UpdatedAt = db.StatusCompleted, responseText, "", time.Now().UTC()
-			if len(conversationID) > 0 && strings.TrimSpace(conversationID[0]) != "" {
-				d.ConversationID = strings.TrimSpace(conversationID[0])
+			if strings.TrimSpace(conversationID) != "" {
+				d.ConversationID = strings.TrimSpace(conversationID)
+			}
+			if len(telemetry) > 0 {
+				t := telemetry[0]
+				d.DurationMs = t.DurationMs
+				d.InputTokens = t.InputTokens
+				d.OutputTokens = t.OutputTokens
+				d.ThinkingTokens = t.ThinkingTokens
+				d.CacheReadTokens = t.CacheReadTokens
+				d.TotalTokens = t.TotalTokens
+			} else {
+				d.DurationMs = 0
+				d.InputTokens = 0
+				d.OutputTokens = 0
+				d.ThinkingTokens = 0
+				d.CacheReadTokens = 0
+				d.TotalTokens = 0
 			}
 		}
 		return nil

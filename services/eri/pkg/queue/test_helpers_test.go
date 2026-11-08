@@ -887,11 +887,11 @@ func newScriptedDaemonSpawner(conversationID string, turnResponses ...string) *m
 
 type errQueueStore struct{ db.Store }
 
-func (e *errQueueStore) UpdateMessageStatus(context.Context, string, string, string) error {
+func (e *errQueueStore) UpdateMessageStatus(context.Context, string, string, string, ...db.TurnTelemetry) error {
 	return errors.New("errQueueStore: update message status error")
 }
 
-func (e *errQueueStore) UpdateMessageCompleted(context.Context, string, string, ...string) error {
+func (e *errQueueStore) UpdateMessageCompleted(context.Context, string, string, string, ...db.TurnTelemetry) error {
 	return errors.New("errQueueStore: update message completed error")
 }
 
@@ -920,7 +920,7 @@ func (m *mockDrainErrStore) GetPendingOrProcessingMessages(context.Context, int)
 	return []db.Message{{ID: "msg-proc-1", Status: db.StatusProcessing}}, nil
 }
 
-func (m *mockDrainErrStore) UpdateMessageStatus(context.Context, string, string, string) error {
+func (m *mockDrainErrStore) UpdateMessageStatus(context.Context, string, string, string, ...db.TurnTelemetry) error {
 	return errors.New("mock drain update error")
 }
 

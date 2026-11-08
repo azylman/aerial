@@ -167,46 +167,6 @@ func (te *turnExecution) store() db.Store {
 	return te.pool.Store()
 }
 
-func (te *turnExecution) updateMessageStatus(id, status string, errorMsg ...string) {
-	errMsg := ""
-	if len(errorMsg) > 0 {
-		errMsg = errorMsg[0]
-	}
-	if s := te.store(); s != nil {
-		if err := s.UpdateMessageStatus(context.Background(), id, status, errMsg); err != nil {
-			log.Printf("[Worker] Warning updating message %s status to %s: %v", id, status, err)
-		}
-	}
-}
-
-func (te *turnExecution) updateMessageCompleted(id, responseText string) {
-	if s := te.store(); s != nil {
-		if err := s.UpdateMessageCompleted(context.Background(), id, responseText, te.currentSessionID); err != nil {
-			log.Printf("[Worker] Warning updating message %s completed: %v", id, err)
-		}
-	}
-}
-
-func (te *turnExecution) updateDispatchCompleted(id, responseText string) {
-	if s := te.store(); s != nil {
-		if err := s.UpdateDispatchCompleted(context.Background(), id, responseText, te.currentSessionID); err != nil {
-			log.Printf("[Worker] Warning updating dispatch %s completed: %v", id, err)
-		}
-	}
-}
-
-func (te *turnExecution) updateDispatchStatus(id, status string, errorMsg ...string) {
-	errMsg := ""
-	if len(errorMsg) > 0 {
-		errMsg = errorMsg[0]
-	}
-	if s := te.store(); s != nil {
-		if err := s.UpdateDispatchStatus(context.Background(), id, status, errMsg); err != nil {
-			log.Printf("[Worker] Warning updating dispatch %s status to %s: %v", id, status, err)
-		}
-	}
-}
-
 func (te *turnExecution) incrementDispatchRetry(id, errorMsg string) {
 	if s := te.store(); s != nil {
 		if err := s.IncrementDispatchRetry(context.Background(), id, errorMsg); err != nil {
@@ -247,19 +207,20 @@ func (te *turnExecution) rotateSessionID(threadID, newSessionID string) {
 
 //nolint:unparam
 func (te *turnExecution) finalizeBurstMessages(msgs []db.Message, msgStatus, msgOutput, runStatus, runErr, model string, notify, isResponse bool) {
+	telemetry := te.turnTelemetry()
 	if te.isDispatch() {
 		if isResponse {
-			te.updateDispatchCompleted(te.dispatch.ID, msgOutput)
+			te.updateDispatchCompleted(te.dispatch.ID, msgOutput, telemetry...)
 		} else {
-			te.updateDispatchStatus(te.dispatch.ID, msgStatus, msgOutput)
+			te.updateDispatchStatus(te.dispatch.ID, msgStatus, msgOutput, telemetry...)
 		}
 		return
 	}
 	for _, m := range msgs {
 		if isResponse {
-			te.updateMessageCompleted(m.ID, msgOutput)
+			te.updateMessageCompleted(m.ID, msgOutput, telemetry...)
 		} else {
-			te.updateMessageStatus(m.ID, msgStatus, msgOutput)
+			te.updateMessageStatus(m.ID, msgStatus, msgOutput, telemetry...)
 		}
 		if notify && te.pool != nil && te.pool.cfg.OnMessageCompleted != nil {
 			te.pool.cfg.OnMessageCompleted(m, msgStatus)
@@ -893,8 +854,8 @@ func (te *turnExecution) abortBurst(reason string) {
 	if te.pool != nil {
 		metrics.RecordTurnCompleted("aborted", te.triggerType, "pre_turn", time.Since(te.execStart))
 	}
-	telemetry := fmt.Sprintf("[SKIPPED %s]", reason)
-	te.finalizeBurstMessages(te.burst, db.StatusCompleted, telemetry, "completed", telemetry, "", true, false)
+	skipMsg := fmt.Sprintf("[SKIPPED %s]", reason)
+	te.finalizeBurstMessages(te.burst, db.StatusCompleted, skipMsg, "completed", skipMsg, "", true, false)
 }
 
 func (te *turnExecution) rescheduleBurst(delaySeconds int) {
@@ -951,8 +912,8 @@ func (te *turnExecution) handleTrailing() {
 			} else {
 				metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
 			}
-			telemetry := "[QUOTA_PAUSED] Trailing message suppressed due to active quota lockout"
-			te.updateMessageStatus(m.ID, db.StatusFailed, telemetry)
+			quotaMsg := "[QUOTA_PAUSED] Trailing message suppressed due to active quota lockout"
+			te.updateMessageStatus(m.ID, db.StatusFailed, quotaMsg)
 			if te.pool != nil && te.pool.cfg.OnMessageCompleted != nil {
 				te.pool.cfg.OnMessageCompleted(m, db.StatusFailed)
 			}
@@ -1446,6 +1407,7 @@ func (te *turnExecution) executeWithRetries() {
 		runStart := time.Now()
 		outcome, turnRes, leaseStderr, err := te.executeLeaseAttempt(currentModel, promptToSend, currentTimeout)
 		runDur := time.Since(runStart)
+		te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 
 		if te.isInterrupted() {
 			metrics.RecordRunnerExecution("error", currentModel, te.triggerType, runDur)
@@ -1460,6 +1422,13 @@ func (te *turnExecution) executeWithRetries() {
 		lastErrDetail, lastStderr = "", ""
 		runStatus := "success"
 		if isFailure {
+			accumulatedUsage.InputTokens += outcome.Usage.InputTokens
+			accumulatedUsage.OutputTokens += outcome.Usage.OutputTokens
+			accumulatedUsage.ThinkingTokens += outcome.Usage.ThinkingTokens
+			accumulatedUsage.CacheReadTokens += outcome.Usage.CacheReadTokens
+			accumulatedUsage.TotalTokens += outcome.Usage.TotalTokens
+			te.turnTokenUsage = accumulatedUsage
+
 			promptToSend = te.turnPrompt
 			errDetail, stderr = te.enrichFailureFromTranscript(outcome, stdout, stderr, isSessionCorruption)
 			lastErrDetail, lastStderr = errDetail, stderr
