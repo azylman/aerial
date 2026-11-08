@@ -729,12 +729,3 @@ func ExtractSingleContainerCommit(c DockerContainerJSON) string {
 	}
 	return ""
 }
-
-// normalizeGitCommit sanitizes and truncates a git commit string to short 7-character form.
-func normalizeGitCommit(commit string) string {
-	commit = strings.TrimSpace(commit)
-	if len(commit) > 7 {
-		return commit[:7]
-	}
-	return commit
-}
