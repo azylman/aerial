@@ -98,13 +98,8 @@ func applyEnvOverrides(cfg *Config) {
 			cfg.DefaultProjectID = pid
 		}
 	}
-	if dbURL := strings.TrimSpace(os.Getenv("POSTGRES_URL")); dbURL != "" {
-		cfg.DatabaseURL = dbURL
-	} else if dbURL := strings.TrimSpace(os.Getenv("DATABASE_URL")); dbURL != "" {
-		cfg.DatabaseURL = dbURL
-	}
-	if pgPass := strings.TrimSpace(os.Getenv("POSTGRES_PASSWORD")); pgPass != "" && !strings.Contains(cfg.DatabaseURL, pgPass) {
-		cfg.DatabaseURL = strings.Replace(cfg.DatabaseURL, ":postgres@", ":"+pgPass+"@", 1)
+	if dsn := httpkit.BuildPostgresDSN(os.Getenv, "docket"); dsn != "" {
+		cfg.DatabaseURL = dsn
 	}
 	if ob := strings.TrimSpace(os.Getenv("OLLAMA_BASE_URL")); ob != "" {
 		cfg.Ollama.BaseURL = ob

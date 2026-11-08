@@ -52,7 +52,7 @@ type SchedulerYAMLConfig struct {
 
 // LoadConfig loads configuration from path using DATABASE_URL from the environment.
 func LoadConfig(path string) (*Config, error) {
-	return LoadConfigFile(path, os.Getenv("DATABASE_URL"))
+	return LoadConfigFile(path, httpkit.BuildPostgresDSN(os.Getenv, "aerial"))
 }
 
 // LoadConfigFile loads and validates the YAML config from path.
@@ -82,6 +82,9 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 	}
 
 	cleanDB := strings.TrimSpace(dbURL)
+	if cleanDB == "" {
+		cleanDB = httpkit.BuildPostgresDSN(os.Getenv, "aerial")
+	}
 	if cleanDB == "" {
 		return nil, fmt.Errorf("config: database connection string is required")
 	}
