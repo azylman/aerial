@@ -336,58 +336,72 @@ func mockJSONResponse(status int, body string) (*http.Response, error) {
 }
 
 func TestSendMessageWithAttachments_MockSession(t *testing.T) {
-	var sentPayloads []string
-	sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
-		if req.Body != nil {
-			bodyBytes, _ := io.ReadAll(req.Body)
-			sentPayloads = append(sentPayloads, string(bodyBytes))
-		}
-		return mockJSONResponse(http.StatusOK, `{"id":"msg-123","channel_id":"12345","content":"ok"}`)
-	})
-
-	// 1. Single message
-	if err := SendMessage(sess, "12345", "Hello world"); err != nil {
-		t.Fatalf("SendMessage failed: %v", err)
-	}
-	if len(sentPayloads) == 0 || !strings.Contains(sentPayloads[0], `"flags":4`) {
-		t.Errorf("expected payload to contain flags:4, got %+v", sentPayloads)
-	}
-
-	// 2. Multi-chunk message with attachment
-	longText := strings.Repeat("A", 2500)
-	att := &Attachment{
-		Filename:    "img.png",
-		ContentType: "image/png",
-		Data:        []byte("fake png"),
-	}
-	if err := SendMessageWithAttachments(sess, "12345", longText, []*Attachment{att}); err != nil {
-		t.Fatalf("SendMessageWithAttachments multi-chunk failed: %v", err)
+	t.Parallel()
+	att := []*Attachment{{Filename: "img.png", ContentType: "image/png", Data: []byte("fake png")}}
+	tests := []struct {
+		name            string
+		channelID       string
+		text            string
+		attachments     []*Attachment
+		replyToID       string
+		apiStatus       int
+		wantErr         bool
+		wantPayloads    int
+		wantFirstRef    string
+		wantSecondNoRef bool
+	}{
+		{name: "SingleMessageNoReply", channelID: "12345", text: "Hello world", apiStatus: http.StatusOK, wantPayloads: 1},
+		{name: "SingleMessageWithReplyRef", channelID: "12345", text: "Hello reply", replyToID: "9876543210", apiStatus: http.StatusOK, wantPayloads: 1, wantFirstRef: `"message_id":"9876543210"`},
+		{name: "MultiChunkAttachmentsAndReplyOnFirstChunkOnly", channelID: "12345", text: strings.Repeat("A", 2500), attachments: att, replyToID: "9876543210", apiStatus: http.StatusOK, wantPayloads: 2, wantFirstRef: `"message_id":"9876543210"`, wantSecondNoRef: true},
+		{name: "AttachmentsOnlyWithReplyRef", channelID: "12345", text: "", attachments: att, replyToID: "1122334455", apiStatus: http.StatusOK, wantPayloads: 1, wantFirstRef: `"message_id":"1122334455"`},
+		{name: "WhitespaceReplyIDIgnored", channelID: "12345", text: "Hello", replyToID: "   ", apiStatus: http.StatusOK, wantPayloads: 1},
+		{name: "EmptyTextAndEmptyAttachments", channelID: "12345", text: "", apiStatus: http.StatusOK, wantPayloads: 0},
+		{name: "EmptyChannelIDError", channelID: "", text: "hello", apiStatus: http.StatusOK, wantErr: true},
+		{name: "APITextSendFailure", channelID: "12345", text: "Hello fail", apiStatus: http.StatusBadRequest, wantErr: true, wantPayloads: 1},
+		{name: "APIAttachmentOnlySendFailure", channelID: "12345", text: "", attachments: att, apiStatus: http.StatusBadRequest, wantErr: true, wantPayloads: 1},
 	}
 
-	// 3. Attachments only (empty text)
-	if err := SendMessageWithAttachments(sess, "12345", "", []*Attachment{att}); err != nil {
-		t.Fatalf("SendMessageWithAttachments attachments only failed: %v", err)
-	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var sentPayloads []string
+			sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
+				if req.Body != nil {
+					bodyBytes, _ := io.ReadAll(req.Body)
+					sentPayloads = append(sentPayloads, string(bodyBytes))
+				}
+				if tc.apiStatus != http.StatusOK {
+					return mockJSONResponse(tc.apiStatus, `{"message":"Missing permissions","code":50013}`)
+				}
+				return mockJSONResponse(http.StatusOK, `{"id":"msg-123","channel_id":"12345","content":"ok"}`)
+			})
 
-	// 4. Empty text and empty attachments -> returns nil
-	if err := SendMessageWithAttachments(sess, "12345", "", nil); err != nil {
-		t.Fatalf("SendMessageWithAttachments empty text failed: %v", err)
-	}
-
-	// 5. Send error from API
-	errSess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
-		return mockJSONResponse(http.StatusBadRequest, `{"message":"Missing permissions","code":50013}`)
-	})
-	if err := SendMessage(errSess, "12345", "Hello fail"); err == nil {
-		t.Error("expected error from API failure, got nil")
-	}
-
-	// 6. Empty channelID and attachment send failure on empty text
-	if err := SendMessageWithAttachments(sess, "", "hello", nil); err == nil {
-		t.Error("expected error for empty channelID")
-	}
-	if err := SendMessageWithAttachments(errSess, "12345", "", []*Attachment{att}); err == nil {
-		t.Error("expected error when attachment send fails")
+			var err error
+			if tc.replyToID == "" && len(tc.attachments) == 0 && tc.channelID != "" && tc.text != "" {
+				err = SendMessage(sess, tc.channelID, tc.text)
+			} else {
+				err = SendMessageWithAttachments(sess, tc.channelID, tc.text, tc.attachments, tc.replyToID)
+			}
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if len(sentPayloads) != tc.wantPayloads {
+				t.Fatalf("len(sentPayloads) = %d, want %d", len(sentPayloads), tc.wantPayloads)
+			}
+			if tc.wantPayloads > 0 && !strings.Contains(sentPayloads[0], `"flags":4`) {
+				t.Errorf("expected payload[0] to contain flags:4, got %s", sentPayloads[0])
+			}
+			if tc.wantFirstRef != "" {
+				if !strings.Contains(sentPayloads[0], tc.wantFirstRef) || !strings.Contains(sentPayloads[0], `"fail_if_not_exists":false`) {
+					t.Errorf("expected payload[0] to contain reference %s and fail_if_not_exists:false, got %s", tc.wantFirstRef, sentPayloads[0])
+				}
+			} else if tc.wantPayloads > 0 && strings.Contains(sentPayloads[0], `"message_reference"`) {
+				t.Errorf("expected payload[0] to omit message_reference, got %s", sentPayloads[0])
+			}
+			if tc.wantSecondNoRef && len(sentPayloads) > 1 && strings.Contains(sentPayloads[1], `"message_reference"`) {
+				t.Errorf("expected payload[1] to omit message_reference, got %s", sentPayloads[1])
+			}
+		})
 	}
 }
 

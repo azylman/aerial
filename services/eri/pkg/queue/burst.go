@@ -87,6 +87,9 @@ func (p *WorkerPool) EnqueueBurst(msgs ...db.Message) {
 			p.wg.Add(1)
 			newWorkers = append(newWorkers, newWorker{scopeKey: scopeKey, state: state})
 		}
+		if isDiscordMessage(msg) && IsNumericSnowflake(msg.ID) && (state.lastEnqueuedDiscordMsgID == "" || compareSnowflakeIDs(msg.ID, state.lastEnqueuedDiscordMsgID) > 0) {
+			state.lastEnqueuedDiscordMsgID = msg.ID
+		}
 
 		mCopy := msg
 		item := queueItem{msg: &mCopy}

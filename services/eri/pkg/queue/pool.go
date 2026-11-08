@@ -97,23 +97,24 @@ type WorkerPoolConfig struct {
 	VanadisURL                                                                   string
 
 	// Optional hooks for testing/custom overrides
-	RunnerFunc                  func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
-	RunnerWithOptionsFunc       func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (stdout, stderr string, exitCode int, err error)
-	NotifierFunc                func(agyBin, apiKey, contextDescription string) string
-	DeliveryFunc                func(s *discordgo.Session, channelID, text string) error
-	DeliveryWithAttachmentsFunc func(s *discordgo.Session, channelID, text string, attachments []*delivery.Attachment) error
-	WidgetDeliveryFunc          func(req discord.StatusWidgetRequest) (string, error)
-	TypingFunc                  func(s *discordgo.Session, channelID string) (stop func())
-	OnMessageCompleted          func(msg db.Message, finalStatus string)
-	ResolveChannelPolicy        func(channelID, channelName string) config.ChannelPolicy
-	HistoryFetcher              HistoryFetcherFunc
-	SystemAlertFunc             func(s *discordgo.Session, channelNameOrID, title, alertBody string) error
-	LLMFunc                     LLMFunc
-	WebhookDispatcher           WebhookDispatcher
-	VoiceRunnerFunc             func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (reply string, convID string, err error)
-	VoiceStreamRunnerFunc       func(ctx context.Context, prompt, sessionID string, onStatus func(string), onSentence func(string)) (reply string, convID string, err error)
-	AmbientResolver             func(ctx context.Context, cfg *config.AmbientContextConfig) (string, error)
-	CreateThreadFunc            func(channelID, title string) (string, error)
+	RunnerFunc                       func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (stdout, stderr string, exitCode int, err error)
+	RunnerWithOptionsFunc            func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (stdout, stderr string, exitCode int, err error)
+	NotifierFunc                     func(agyBin, apiKey, contextDescription string) string
+	DeliveryFunc                     func(s *discordgo.Session, channelID, text string) error
+	DeliveryWithAttachmentsFunc      func(s *discordgo.Session, channelID, text string, attachments []*delivery.Attachment) error
+	ReplyDeliveryWithAttachmentsFunc func(s *discordgo.Session, channelID, text string, attachments []*delivery.Attachment, replyToMessageID string) error
+	WidgetDeliveryFunc               func(req discord.StatusWidgetRequest) (string, error)
+	TypingFunc                       func(s *discordgo.Session, channelID string) (stop func())
+	OnMessageCompleted               func(msg db.Message, finalStatus string)
+	ResolveChannelPolicy             func(channelID, channelName string) config.ChannelPolicy
+	HistoryFetcher                   HistoryFetcherFunc
+	SystemAlertFunc                  func(s *discordgo.Session, channelNameOrID, title, alertBody string) error
+	LLMFunc                          LLMFunc
+	WebhookDispatcher                WebhookDispatcher
+	VoiceRunnerFunc                  func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (reply string, convID string, err error)
+	VoiceStreamRunnerFunc            func(ctx context.Context, prompt, sessionID string, onStatus func(string), onSentence func(string)) (reply string, convID string, err error)
+	AmbientResolver                  func(ctx context.Context, cfg *config.AmbientContextConfig) (string, error)
+	CreateThreadFunc                 func(channelID, title string) (string, error)
 }
 
 type queueItem struct {
@@ -122,9 +123,10 @@ type queueItem struct {
 }
 
 type threadWorkerState struct {
-	ch              chan queueItem
-	activeEnqueuers int
-	inFlight        bool
+	ch                       chan queueItem
+	activeEnqueuers          int
+	inFlight                 bool
+	lastEnqueuedDiscordMsgID string
 }
 
 type WorkerPool struct {
@@ -328,6 +330,7 @@ func applyWorkerPoolHookDefaults(cfg *WorkerPoolConfig) {
 	if cfg.NotifierFunc == nil {
 		cfg.NotifierFunc = func(agyBin, apiKey, desc string) string { return notifier.StaticFallback(desc) }
 	}
+	hasCustomDelivery := cfg.DeliveryFunc != nil || cfg.DeliveryWithAttachmentsFunc != nil
 	if cfg.DeliveryWithAttachmentsFunc == nil {
 		if cfg.DeliveryFunc != nil {
 			deliveryFn := cfg.DeliveryFunc
@@ -335,7 +338,14 @@ func applyWorkerPoolHookDefaults(cfg *WorkerPoolConfig) {
 				return deliveryFn(s, cID, txt)
 			}
 		} else {
-			cfg.DeliveryWithAttachmentsFunc = delivery.SendMessageWithAttachments
+			cfg.DeliveryWithAttachmentsFunc = func(s *discordgo.Session, cID, txt string, atts []*delivery.Attachment) error {
+				return delivery.SendMessageWithAttachments(s, cID, txt, atts)
+			}
+		}
+	}
+	if cfg.ReplyDeliveryWithAttachmentsFunc == nil && !hasCustomDelivery {
+		cfg.ReplyDeliveryWithAttachmentsFunc = func(s *discordgo.Session, cID, txt string, atts []*delivery.Attachment, replyToID string) error {
+			return delivery.SendMessageWithAttachments(s, cID, txt, atts, replyToID)
 		}
 	}
 	if cfg.DeliveryFunc == nil {
@@ -887,6 +897,20 @@ func (p *WorkerPool) ActiveTurnSessionID(msgID string) (string, bool) {
 func isScopeKeyForThread(scopeKey, threadID string) bool {
 	norm := db.DiscordSessionID(threadID)
 	return scopeKey == threadID || scopeKey == norm || strings.HasSuffix(scopeKey, ":"+threadID) || strings.HasSuffix(scopeKey, ":"+norm)
+}
+
+func (p *WorkerPool) hasNewerEnqueuedDiscordMessage(threadID, triggerID string) bool {
+	if p == nil || threadID == "" || !IsNumericSnowflake(triggerID) {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for scopeKey, state := range p.threadChs {
+		if state != nil && isScopeKeyForThread(scopeKey, threadID) && compareSnowflakeIDs(state.lastEnqueuedDiscordMsgID, triggerID) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func logInterruptWarning(op string, err error) {
