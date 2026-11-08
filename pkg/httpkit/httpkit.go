@@ -253,6 +253,9 @@ func BuildPostgresDSN(lookup func(string) string, defaultDB string) string {
 	}
 
 	dbPort := strings.TrimSpace(lookup("POSTGRES_PORT"))
+	if idx := strings.LastIndex(dbPort, ":"); idx >= 0 {
+		dbPort = dbPort[idx+1:]
+	}
 	if dbPort == "" {
 		dbPort = "5432"
 	}
