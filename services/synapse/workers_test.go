@@ -555,6 +555,22 @@ func TestResolveImageTagAndKustomization(t *testing.T) {
 			wantWorkload:      "prospera",
 		},
 		{
+			name:              "aerial-sidecars migrator routes to aerial-core",
+			repo:              "azylman/aerial-sidecars",
+			imageRef:          "ghcr.io/azylman/aerial-sidecar-migrator:sha123",
+			wantTagKey:        "TAG_AERIAL_SIDECAR_MIGRATOR",
+			wantKustomization: "aerial-core",
+			wantWorkload:      "aerial-sidecar-migrator",
+		},
+		{
+			name:              "aerial-sidecars bare migrator routes to aerial-core",
+			repo:              "aerial-sidecars",
+			imageRef:          "ghcr.io/azylman/migrator:sha123",
+			wantTagKey:        "TAG_AERIAL_SIDECAR_MIGRATOR",
+			wantKustomization: "aerial-core",
+			wantWorkload:      "migrator",
+		},
+		{
 			name:              "mirrormere repo with mirrormere- prefix",
 			repo:              "azylman/mirrormere",
 			imageRef:          "ghcr.io/azylman/mirrormere-kiosk:sha123",

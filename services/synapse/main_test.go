@@ -1328,6 +1328,27 @@ func TestProcessDeployEvent(t *testing.T) {
 			wantTargetID: "1555405874565091380",
 			wantPrompts:  1,
 		},
+		{
+			name: "enrichDeployEventPRAndTarget aerial-sidecars migrator matches aerial-core",
+			evt:  mkDeployEvt("deploy_success", "aerial-core", "", "sha-sidecar-mig-unres", 0, "", "success", ""),
+			reg: &mockPRRegistry{
+				listDeployingPRs: []DeployingPR{
+					{
+						Repo:     "azylman/aerial-sidecars",
+						PRNumber: 1001,
+						HeadSHA:  "sha-sidecar-mig-head",
+						TargetID: "1555405874565091380",
+						Metadata: map[string]any{
+							"started_jobs": []any{"aerial-sidecar-migrator"},
+						},
+					},
+				},
+			},
+			disp:         &mockOutboundDispatcher{},
+			wantPR:       1001,
+			wantTargetID: "1555405874565091380",
+			wantPrompts:  1,
+		},
 	}
 
 	for _, tc := range tests {
