@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -274,44 +275,29 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 		log.Printf("[synapse] [dispatcher] error resolving images for workflow run %d (%s): %v", runID, repo, err)
 		return fmt.Errorf("resolve workflow run images: %w", err)
 	}
-	if len(images) == 0 {
+
+	// Phase a: resolve image names and discover every owning Kustomization once.
+	var imageNames, workloads []string
+	for _, img := range images {
+		if _, imageName, workload := resolveImageTag(repo, img); workload != "" {
+			imageNames = append(imageNames, imageName)
+			workloads = append(workloads, workload)
+		}
+	}
+	imageNames, workloads = dedupeTrimmedStrings(imageNames), dedupeTrimmedStrings(workloads)
+	if len(workloads) == 0 {
 		return s.completeNoDeployWorkflowRun(ctx, repo, headSHA, targetID, prNum)
 	}
-
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	var rawJobs []string
-	errCh := make(chan error, len(images))
-
-	for _, img := range images {
-		wg.Add(1)
-		go func(imageRef string) {
-			defer wg.Done()
-			matchedJobs, err := s.dispatcher.DispatchImageReady(ctx, ImageReadyEventRequest{
-				Image:     imageRef,
-				Repo:      repo,
-				CommitSHA: headSHA,
-				PRNumber:  prNum,
-				TargetID:  targetID,
-			})
-			if err != nil {
-				log.Printf("[synapse] [dispatcher] error dispatching image_ready for %s: %v", imageRef, err)
-				errCh <- err
-				return
-			}
-			if len(matchedJobs) > 0 {
-				mu.Lock()
-				rawJobs = append(rawJobs, matchedJobs...)
-				mu.Unlock()
-			}
-		}(img)
+	refs, err := s.dispatcher.DiscoverImageKustomizations(ctx, imageNames)
+	if err != nil {
+		log.Printf("[synapse] [dispatcher] error discovering kustomizations for %s images %v: %v", repo, imageNames, err)
+		return fmt.Errorf("discover image kustomizations: %w", err)
 	}
-	wg.Wait()
-	close(errCh)
+	trackPR := s.registry != nil && prNum > 0
 
-	allMatchedJobs := dedupeTrimmedStrings(rawJobs)
-	if len(allMatchedJobs) > 0 && s.registry != nil && prNum > 0 {
-		if _, err := s.registry.TransitionDeploying(ctx, repo, prNum, allMatchedJobs); err != nil {
+	// Phase b: mark the PR deploying before any tag can roll out.
+	if len(refs) > 0 && trackPR {
+		if _, err := s.registry.TransitionDeploying(ctx, repo, prNum, workloads); err != nil {
 			log.Printf("[synapse] [dispatcher] error transitioning pr %s#%d to deploying: %v", repo, prNum, err)
 			return fmt.Errorf("transition pr deploying: %w", err)
 		}
@@ -320,15 +306,57 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 		}
 	}
 
-	for err := range errCh {
-		if err != nil {
-			return err
-		}
+	// Phase c: write every image tag before any reconcile so one reconcile renders all of them.
+	if err := s.promoteWorkflowRunImages(ctx, images, ImageReadyEventRequest{Repo: repo, CommitSHA: headSHA, PRNumber: prNum, TargetID: targetID}); err != nil {
+		return err
 	}
-	if len(allMatchedJobs) == 0 {
+	if len(refs) == 0 {
 		return s.completeNoDeployWorkflowRun(ctx, repo, headSHA, targetID, prNum)
 	}
-	return nil
+
+	// Phases d+e: reconcile each owning Kustomization and record what this PR requested.
+	requests, reconcileErr := s.reconcileImageKustomizations(ctx, refs)
+	if len(requests) > 0 && trackPR {
+		if err := s.registry.RecordKustomizationRequests(ctx, repo, prNum, requests); err != nil {
+			log.Printf("[synapse] [dispatcher] error recording kustomization requests for %s#%d: %v", repo, prNum, err)
+			return errors.Join(reconcileErr, fmt.Errorf("record kustomization requests: %w", err))
+		}
+	}
+	return reconcileErr
+}
+
+// promoteWorkflowRunImages promotes every image concurrently and waits for all of them.
+func (s *RouterServer) promoteWorkflowRunImages(ctx context.Context, images []string, base ImageReadyEventRequest) error {
+	var wg sync.WaitGroup
+	errs := make([]error, len(images))
+	for i, img := range images {
+		wg.Go(func() {
+			req := base
+			req.Image = img
+			if _, err := s.dispatcher.PromoteImageTag(ctx, req); err != nil {
+				log.Printf("[synapse] [dispatcher] error promoting image %s: %v", img, err)
+				errs[i] = fmt.Errorf("promote image %s: %w", img, err)
+			}
+		})
+	}
+	wg.Wait()
+	return errors.Join(errs...)
+}
+
+// reconcileImageKustomizations requests a reconcile of every ref; one failure never skips the rest.
+func (s *RouterServer) reconcileImageKustomizations(ctx context.Context, refs []fluxKustomizationRef) (map[string]kustomizationRequest, error) {
+	requests := make(map[string]kustomizationRequest, len(refs))
+	var errs []error
+	for _, ref := range refs {
+		requestedAt, err := s.dispatcher.ReconcileKustomization(ctx, ref)
+		if err != nil {
+			log.Printf("[synapse] [dispatcher] error reconciling kustomization %s/%s: %v", ref.Namespace, ref.Name, err)
+			errs = append(errs, err)
+			continue
+		}
+		requests[ref.Name] = kustomizationRequest{Namespace: ref.Namespace, RequestedAt: requestedAt}
+	}
+	return requests, errors.Join(errs...)
 }
 
 // GitHub Webhook Payloads and Resolution Types

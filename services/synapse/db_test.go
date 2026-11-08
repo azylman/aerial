@@ -170,6 +170,7 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 		sha            string
 		jobName        string
 		jobs           []string
+		kustRequests   map[string]kustomizationRequest
 		targetID       string
 		limit          int
 		mockSelectErr  error
@@ -368,6 +369,13 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 		{name: "AppendPRJobs nil pool guard", op: "AppendPRJobs", nilPool: true, repo: "azylman/aerial", prNumber: 42, jobs: []string{"coven"}},
 		{name: "AppendPRJobs empty jobs guard", op: "AppendPRJobs", repo: "azylman/aerial", prNumber: 42, jobs: []string{}},
 		{name: "AppendPRJobs success", op: "AppendPRJobs", repo: "azylman/aerial", prNumber: 42, jobs: []string{"coven"}, wantSQLSubstr: "UPDATE pr_registry"},
+		// RecordKustomizationRequests
+		{name: "RecordKustomizationRequests empty repo guard", op: "RecordKustomizationRequests", repo: "", prNumber: 42, kustRequests: map[string]kustomizationRequest{"aerial-core": {Namespace: "flux-system", RequestedAt: "t1"}}, mockExecErr: errors.New("unexpected exec")},
+		{name: "RecordKustomizationRequests zero pr guard", op: "RecordKustomizationRequests", repo: "azylman/aerial", prNumber: 0, kustRequests: map[string]kustomizationRequest{"aerial-core": {Namespace: "flux-system", RequestedAt: "t1"}}, mockExecErr: errors.New("unexpected exec")},
+		{name: "RecordKustomizationRequests nil pool guard", op: "RecordKustomizationRequests", nilPool: true, repo: "azylman/aerial", prNumber: 42, kustRequests: map[string]kustomizationRequest{"aerial-core": {Namespace: "flux-system", RequestedAt: "t1"}}},
+		{name: "RecordKustomizationRequests empty requests guard", op: "RecordKustomizationRequests", repo: "azylman/aerial", prNumber: 42, mockExecErr: errors.New("unexpected exec")},
+		{name: "RecordKustomizationRequests replaces requests and clears deployed", op: "RecordKustomizationRequests", repo: "azylman/aerial", prNumber: 42, kustRequests: map[string]kustomizationRequest{"aerial-core": {Namespace: "flux-system", RequestedAt: "t1"}}, wantSQLSubstr: "COALESCE(metadata, '{}'::jsonb) - 'deployed_kustomizations', '{kustomization_requests}', $3::jsonb"},
+		{name: "RecordKustomizationRequests exec error", op: "RecordKustomizationRequests", repo: "azylman/aerial", prNumber: 42, kustRequests: map[string]kustomizationRequest{"aerial-core": {Namespace: "flux-system", RequestedAt: "t1"}}, mockExecErr: errors.New("exec error"), wantErr: true},
 		{name: "AppendPRJobs exec error", op: "AppendPRJobs", repo: "azylman/aerial", prNumber: 42, jobs: []string{"coven"}, mockExecErr: errors.New("exec error"), wantErr: true},
 
 		// UpdatePRStatus
@@ -796,6 +804,11 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 				err := reg.AppendPRJobs(ctx, tc.repo, tc.prNumber, tc.jobs)
 				if (err != nil) != tc.wantErr {
 					t.Fatalf("AppendPRJobs err = %v, wantErr = %v", err, tc.wantErr)
+				}
+			case "RecordKustomizationRequests":
+				err := reg.RecordKustomizationRequests(ctx, tc.repo, tc.prNumber, tc.kustRequests)
+				if (err != nil) != tc.wantErr {
+					t.Fatalf("RecordKustomizationRequests err = %v, wantErr = %v", err, tc.wantErr)
 				}
 			case "UpdatePRStatus":
 				var meta map[string]any

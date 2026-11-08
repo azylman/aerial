@@ -6,8 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1256,48 +1259,111 @@ func TestResolveWorkflowRunImages(t *testing.T) {
 func TestDispatchWorkflowRunImages(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
+	brainJob := `{"jobs":[{"name":"Build & Push Images to GHCR (brain)","status":"completed","conclusion":"success"}]}`
+	twoJobs := `{"jobs":[{"name":"Build & Push Images to GHCR (brain)","status":"completed","conclusion":"success"},{"name":"Build & Push Images to GHCR (haro)","status":"completed","conclusion":"success"}]}`
+	core := fluxKustomizationRef{Namespace: "flux-system", Name: "aerial-core"}
+	marida := fluxKustomizationRef{Namespace: "flux-system", Name: "marida-core"}
+	owners := map[string][]fluxKustomizationRef{
+		"aerial-brain": {core},
+		"aerial-haro":  {core, marida},
+	}
 
 	tests := []struct {
-		name            string
-		isGitPush       bool
-		ref             string
-		commit          string
-		headBranch      string
-		conclusion      string
-		jobsStatus      int
-		jobsBody        string
-		noDisp          bool
-		gitPushErr      error
-		imageReadyErr   error
-		deployingErr    error
-		hasExpectedErr  error
-		suppressVanadis bool
-		widgetErr       error
-		wantImageCalls  int
-		wantDeployCalls int
-		wantWidgetCalls int
-		wantErr         bool
+		name             string
+		isGitPush        bool
+		ref              string
+		commit           string
+		headBranch       string
+		conclusion       string
+		jobsStatus       int
+		jobsBody         string
+		noDisp           bool
+		gitPushErr       error
+		promoteErr       error
+		discoverErr      error
+		reconcileErrs    map[string]error
+		deployingErr     error
+		recordErr        error
+		hasExpectedErr   error
+		suppressVanadis  bool
+		widgetErr        error
+		wantPromoteCalls int
+		wantDeployJobs   []string
+		wantWidgetCalls  int
+		wantReconciles   []fluxKustomizationRef
+		wantRequests     []map[string]kustomizationRequest
+		wantErr          bool
 	}{
 		{
-			name:            "main success with matched jobs and transition deploying",
-			headBranch:      "main",
-			conclusion:      "success",
-			jobsStatus:      http.StatusOK,
-			jobsBody:        `{"jobs":[{"name":"Build & Push Images to GHCR (brain)","status":"completed","conclusion":"success"}]}`,
-			wantImageCalls:  1,
-			wantDeployCalls: 1,
-			wantWidgetCalls: 1,
+			name:             "main success transitions deploying then reconciles owning kustomization",
+			headBranch:       "main",
+			conclusion:       "success",
+			jobsStatus:       http.StatusOK,
+			jobsBody:         brainJob,
+			wantPromoteCalls: 1,
+			wantDeployJobs:   []string{"brain"},
+			wantWidgetCalls:  1,
+			wantReconciles:   []fluxKustomizationRef{core},
+			wantRequests:     []map[string]kustomizationRequest{{"aerial-core": {Namespace: "flux-system", RequestedAt: "requested-aerial-core"}}},
 		},
 		{
-			name:            "main success with matched jobs widget sync warning still succeeds",
-			headBranch:      "main",
-			conclusion:      "success",
-			jobsStatus:      http.StatusOK,
-			jobsBody:        `{"jobs":[{"name":"Build & Push Images to GHCR (brain)","status":"completed","conclusion":"success"}]}`,
-			widgetErr:       errors.New("transient widget error"),
-			wantImageCalls:  1,
-			wantDeployCalls: 1,
-			wantWidgetCalls: 1,
+			name:             "two images reconcile each distinct kustomization once",
+			headBranch:       "main",
+			conclusion:       "success",
+			jobsBody:         twoJobs,
+			wantPromoteCalls: 2,
+			wantDeployJobs:   []string{"brain", "haro"},
+			wantReconciles:   []fluxKustomizationRef{core, marida},
+			wantRequests: []map[string]kustomizationRequest{{
+				"aerial-core": {Namespace: "flux-system", RequestedAt: "requested-aerial-core"},
+				"marida-core": {Namespace: "flux-system", RequestedAt: "requested-marida-core"},
+			}},
+		},
+		{
+			name:             "partial reconcile failure still records successful requests and errors",
+			headBranch:       "main",
+			conclusion:       "success",
+			jobsBody:         twoJobs,
+			reconcileErrs:    map[string]error{"aerial-core": errors.New("patch denied")},
+			wantPromoteCalls: 2,
+			wantDeployJobs:   []string{"brain", "haro"},
+			wantReconciles:   []fluxKustomizationRef{core, marida},
+			wantRequests:     []map[string]kustomizationRequest{{"marida-core": {Namespace: "flux-system", RequestedAt: "requested-marida-core"}}},
+			wantErr:          true,
+		},
+		{
+			name:             "all reconciles failing records nothing and errors",
+			headBranch:       "main",
+			conclusion:       "success",
+			jobsBody:         brainJob,
+			reconcileErrs:    map[string]error{"aerial-core": errors.New("patch denied")},
+			wantPromoteCalls: 1,
+			wantDeployJobs:   []string{"brain"},
+			wantReconciles:   []fluxKustomizationRef{core},
+			wantErr:          true,
+		},
+		{
+			name:             "record kustomization requests error returns error",
+			headBranch:       "main",
+			conclusion:       "success",
+			jobsBody:         brainJob,
+			recordErr:        errors.New("db fail"),
+			wantPromoteCalls: 1,
+			wantDeployJobs:   []string{"brain"},
+			wantReconciles:   []fluxKustomizationRef{core},
+			wantErr:          true,
+		},
+		{
+			name:             "main success with widget sync warning still succeeds",
+			headBranch:       "main",
+			conclusion:       "success",
+			jobsBody:         brainJob,
+			widgetErr:        errors.New("transient widget error"),
+			wantPromoteCalls: 1,
+			wantDeployJobs:   []string{"brain"},
+			wantWidgetCalls:  1,
+			wantReconciles:   []fluxKustomizationRef{core},
+			wantRequests:     []map[string]kustomizationRequest{{"aerial-core": {Namespace: "flux-system", RequestedAt: "requested-aerial-core"}}},
 		},
 		{
 			name:       "jobs API 500 error",
@@ -1311,15 +1377,12 @@ func TestDispatchWorkflowRunImages(t *testing.T) {
 			name:       "0 resolved images returns nil",
 			headBranch: "main",
 			conclusion: "success",
-			jobsStatus: http.StatusOK,
 			jobsBody:   `{"jobs":[]}`,
-			wantErr:    false,
 		},
 		{
 			name:            "0 resolved images with hasExpectedErr and Vanadis widget sync warning",
 			headBranch:      "main",
 			conclusion:      "success",
-			jobsStatus:      http.StatusOK,
 			jobsBody:        `{"jobs":[]}`,
 			hasExpectedErr:  errors.New("expected err"),
 			suppressVanadis: true,
@@ -1327,33 +1390,37 @@ func TestDispatchWorkflowRunImages(t *testing.T) {
 			wantErr:         true,
 		},
 		{
-			name:           "resolved image with 0 matched jobs completes no-deploy workflow run",
-			headBranch:     "main",
-			conclusion:     "success",
-			jobsStatus:     http.StatusOK,
-			jobsBody:       `{"jobs":[{"name":"Build & Push Images to GHCR (unmanaged)","status":"completed","conclusion":"success"}]}`,
-			wantImageCalls: 1,
-			wantErr:        false,
+			name:             "image without owning kustomization promotes then completes no-deploy",
+			headBranch:       "main",
+			conclusion:       "success",
+			jobsBody:         `{"jobs":[{"name":"Build & Push Images to GHCR (unmanaged)","status":"completed","conclusion":"success"}]}`,
+			wantPromoteCalls: 1,
 		},
 		{
-			name:           "imageReadyErr dispatch failure returns error",
-			headBranch:     "main",
-			conclusion:     "success",
-			jobsStatus:     http.StatusOK,
-			jobsBody:       `{"jobs":[{"name":"Build & Push Images to GHCR (brain)","status":"completed","conclusion":"success"}]}`,
-			imageReadyErr:  errors.New("hangar image failed"),
-			wantImageCalls: 1,
-			wantErr:        true,
+			name:        "discovery error returns before any side effect",
+			headBranch:  "main",
+			conclusion:  "success",
+			jobsBody:    brainJob,
+			discoverErr: errors.New("list forbidden"),
+			wantErr:     true,
 		},
 		{
-			name:           "deployingErr registry error returns error",
-			headBranch:     "main",
-			conclusion:     "success",
-			jobsStatus:     http.StatusOK,
-			jobsBody:       `{"jobs":[{"name":"Build & Push Images to GHCR (brain)","status":"completed","conclusion":"success"}]}`,
-			deployingErr:   errors.New("db fail"),
-			wantImageCalls: 1,
-			wantErr:        true,
+			name:             "promote failure skips reconcile and returns error",
+			headBranch:       "main",
+			conclusion:       "success",
+			jobsBody:         brainJob,
+			promoteErr:       errors.New("hangar image failed"),
+			wantPromoteCalls: 1,
+			wantDeployJobs:   []string{"brain"},
+			wantErr:          true,
+		},
+		{
+			name:         "deployingErr registry error returns before promotion",
+			headBranch:   "main",
+			conclusion:   "success",
+			jobsBody:     brainJob,
+			deployingErr: errors.New("db fail"),
+			wantErr:      true,
 		},
 		{
 			name:       "non-main branch is no-op",
@@ -1420,20 +1487,21 @@ func TestDispatchWorkflowRunImages(t *testing.T) {
 			var disp *mockOutboundDispatcher
 			if !tc.noDisp {
 				disp = &mockOutboundDispatcher{
-					gitPushErr:    tc.gitPushErr,
-					imageReadyErr: tc.imageReadyErr,
-					widgetErr:     tc.widgetErr,
-					matchedJobs: map[string][]string{
-						"ghcr.io/azylman/brain:latest": {"brain"},
-					},
+					gitPushErr:            tc.gitPushErr,
+					promoteErr:            tc.promoteErr,
+					discoverErr:           tc.discoverErr,
+					reconcileErrs:         tc.reconcileErrs,
+					widgetErr:             tc.widgetErr,
+					kustomizationsByImage: owners,
 				}
 			}
 			reg := &mockPRRegistry{
-				deployingErr:       tc.deployingErr,
-				hasExpectedErr:     tc.hasExpectedErr,
-				suppressVanadisRes: tc.suppressVanadis,
-				resolveTargetID:    "1555405874565091380",
-				resolveBranch:      "feat/test",
+				deployingErr:            tc.deployingErr,
+				kustomizationRequestErr: tc.recordErr,
+				hasExpectedErr:          tc.hasExpectedErr,
+				suppressVanadisRes:      tc.suppressVanadis,
+				resolveTargetID:         "1555405874565091380",
+				resolveBranch:           "feat/test",
 			}
 			srv := NewRouterServer(Config{GitHubAPIURL: ts.URL}, ts.Client())
 			if disp != nil {
@@ -1451,14 +1519,27 @@ func TestDispatchWorkflowRunImages(t *testing.T) {
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
 			}
-			if disp != nil && len(disp.ImageReadyCalls()) != tc.wantImageCalls {
-				t.Errorf("imageReadyCalls = %d, want %d", len(disp.ImageReadyCalls()), tc.wantImageCalls)
+			if disp == nil {
+				return
 			}
-			if len(reg.deployingCalls) != tc.wantDeployCalls {
-				t.Errorf("deployingCalls = %d, want %d", len(reg.deployingCalls), tc.wantDeployCalls)
+			if got := len(disp.PromoteCalls()); got != tc.wantPromoteCalls {
+				t.Errorf("promote calls = %d, want %d", got, tc.wantPromoteCalls)
 			}
-			if disp != nil && tc.wantWidgetCalls > 0 && len(disp.WidgetCalls()) != tc.wantWidgetCalls {
+			var gotDeployJobs []string
+			if len(reg.deployingCalls) > 0 {
+				gotDeployJobs = reg.deployingCalls[0].jobs
+			}
+			if len(reg.deployingCalls) > 1 || !slices.Equal(gotDeployJobs, tc.wantDeployJobs) {
+				t.Errorf("deploying calls = %+v, want one call with jobs %v", reg.deployingCalls, tc.wantDeployJobs)
+			}
+			if tc.wantWidgetCalls > 0 && len(disp.WidgetCalls()) != tc.wantWidgetCalls {
 				t.Errorf("widgetCalls = %d, want %d", len(disp.WidgetCalls()), tc.wantWidgetCalls)
+			}
+			if got := disp.ReconcileCalls(); !slices.Equal(got, tc.wantReconciles) {
+				t.Errorf("reconcile calls = %v, want %v", got, tc.wantReconciles)
+			}
+			if !reflect.DeepEqual(reg.kustomizationRequestCalls, tc.wantRequests) {
+				t.Errorf("recorded requests = %v, want %v", reg.kustomizationRequestCalls, tc.wantRequests)
 			}
 		})
 	}
@@ -3219,7 +3300,7 @@ func TestDispatchWorkflowRunImages_Ownership(t *testing.T) {
 				}
 			}
 			disp := &mockOutboundDispatcher{
-				matchedJobs: map[string][]string{"ghcr.io/azylman/eri:latest": {"deploy-job"}},
+				kustomizationsByImage: map[string][]fluxKustomizationRef{"aerial-eri": {{Namespace: "flux-system", Name: "aerial-core"}}},
 			}
 			cfg := Config{
 				GitHubAPIURL:       mockServer.URL,
@@ -3232,8 +3313,8 @@ func TestDispatchWorkflowRunImages_Ownership(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if len(disp.ImageReadyCalls()) != tc.wantDispatched {
-				t.Fatalf("got %d image ready calls, want %d", len(disp.ImageReadyCalls()), tc.wantDispatched)
+			if len(disp.PromoteCalls()) != tc.wantDispatched {
+				t.Fatalf("got %d promote calls, want %d", len(disp.PromoteCalls()), tc.wantDispatched)
 			}
 		})
 	}
@@ -3552,6 +3633,118 @@ func TestHandleGitHubWebhook_TeeAndForwarding(t *testing.T) {
 				}
 				if receivedDeliveryA != "del-test-1234" {
 					t.Errorf("received X-Github-Delivery = %q, want del-test-1234", receivedDeliveryA)
+				}
+			}
+		})
+	}
+}
+
+func TestDispatchWorkflowRunImages_KubeRollout(t *testing.T) {
+	t.Parallel()
+	const (
+		jobsPath      = "GET /repos/azylman/aerial/actions/runs/7/jobs"
+		configMapPath = "PATCH /api/v1/namespaces/flux-system/configmaps/aerial-image-tags"
+		kustPrefix    = "PATCH /apis/kustomize.toolkit.fluxcd.io/v1/namespaces/flux-system/kustomizations/"
+	)
+	twoImages := `{"jobs":[{"name":"Build & Push Images to GHCR (synapse)","status":"completed","conclusion":"success"},{"name":"Build & Push Images to GHCR (eri)","status":"completed","conclusion":"success"}]}`
+	ownedDeployments := `{"items":[
+		{"metadata":{"labels":{"kustomize.toolkit.fluxcd.io/name":"aerial-core","kustomize.toolkit.fluxcd.io/namespace":"flux-system"}},"spec":{"template":{"spec":{"containers":[{"image":"ghcr.io/azylman/aerial-synapse:old"},{"image":"ghcr.io/azylman/aerial-eri:old"}]}}}},
+		{"metadata":{"labels":{"kustomize.toolkit.fluxcd.io/name":"marida-core","kustomize.toolkit.fluxcd.io/namespace":"flux-system"}},"spec":{"template":{"spec":{"containers":[{"image":"ghcr.io/azylman/aerial-synapse:old"}]}}}}
+	]}`
+	fallbackKustomizations := `{"items":[{"metadata":{"name":"aerial-config","namespace":"flux-system"},"spec":{"postBuild":{"substituteFrom":[{"kind":"ConfigMap","name":"aerial-image-tags"}]}}}]}`
+
+	tests := []struct {
+		name           string
+		routes         map[string]kubeRoute
+		wantReconciled []string
+		wantRecorded   []string
+		wantErr        bool
+	}{
+		{
+			name: "every owning kustomization reconciles once after all tags are written",
+			routes: kubeWorkloadRoutes(map[string]kubeRoute{
+				jobsPath:                   {body: twoImages},
+				kubeDeploymentsPath:        {body: ownedDeployments},
+				configMapPath:              {body: `{}`},
+				kustPrefix + "aerial-core": {body: `{}`},
+				kustPrefix + "marida-core": {body: `{}`},
+			}),
+			wantReconciled: []string{"aerial-core", "marida-core"},
+			wantRecorded:   []string{"aerial-core", "marida-core"},
+		},
+		{
+			name: "no labeled owner falls back to image tag substituting kustomizations",
+			routes: kubeWorkloadRoutes(map[string]kubeRoute{
+				jobsPath:                     {body: twoImages},
+				kubeKustomizations:           {body: fallbackKustomizations},
+				configMapPath:                {body: `{}`},
+				kustPrefix + "aerial-config": {body: `{}`},
+			}),
+			wantReconciled: []string{"aerial-config"},
+			wantRecorded:   []string{"aerial-config"},
+		},
+		{
+			name: "partial reconcile failure still records the successful request",
+			routes: kubeWorkloadRoutes(map[string]kubeRoute{
+				jobsPath:                   {body: twoImages},
+				kubeDeploymentsPath:        {body: ownedDeployments},
+				configMapPath:              {body: `{}`},
+				kustPrefix + "aerial-core": {status: http.StatusForbidden, body: `forbidden`},
+				kustPrefix + "marida-core": {body: `{}`},
+			}),
+			wantReconciled: []string{"aerial-core", "marida-core"},
+			wantRecorded:   []string{"marida-core"},
+			wantErr:        true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fixture, ts := newKubeFixture(t, tc.routes)
+			disp := NewDefaultOutboundDispatcher("", ts.Client())
+			disp.SetKubeConfig(ts.URL, "test-token")
+			reg := &mockPRRegistry{resolveTargetID: "1555405874565091380"}
+			srv := newTestRouter(Config{GitHubAPIURL: ts.URL, DefaultOwner: true}, ts.Client(), reg, disp)
+
+			err := srv.dispatchWorkflowRunImages(context.Background(), "azylman/aerial", 7, "main", "success", "abcdef1234567890abcdef1234567890abcdef12", "1555405874565091380", 42)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
+			}
+
+			lastTagWrite, firstReconcile := -1, -1
+			var reconciled []string
+			for i, req := range fixture.Requests() {
+				switch {
+				case req == configMapPath:
+					lastTagWrite = i
+				case strings.HasPrefix(req, kustPrefix):
+					if firstReconcile < 0 {
+						firstReconcile = i
+					}
+					reconciled = append(reconciled, strings.TrimPrefix(req, kustPrefix))
+				}
+			}
+			if lastTagWrite < 0 || firstReconcile <= lastTagWrite {
+				t.Errorf("requests %v: want every configmap write before the first reconcile", fixture.Requests())
+			}
+			slices.Sort(reconciled)
+			if !slices.Equal(reconciled, tc.wantReconciled) {
+				t.Errorf("reconciled = %v, want %v", reconciled, tc.wantReconciled)
+			}
+			if len(reg.deployingCalls) != 1 || !slices.Equal(reg.deployingCalls[0].jobs, []string{"synapse", "eri"}) {
+				t.Errorf("deploying calls = %+v, want one call with jobs [synapse eri]", reg.deployingCalls)
+			}
+			if len(reg.kustomizationRequestCalls) != 1 {
+				t.Fatalf("recorded request calls = %d, want 1", len(reg.kustomizationRequestCalls))
+			}
+			recorded := reg.kustomizationRequestCalls[0]
+			if got := slices.Sorted(maps.Keys(recorded)); !slices.Equal(got, tc.wantRecorded) {
+				t.Errorf("recorded kustomizations = %v, want %v", got, tc.wantRecorded)
+			}
+			for name, req := range recorded {
+				if req.Namespace != "flux-system" || !strings.Contains(fixture.Body(kustPrefix+name), `"`+req.RequestedAt+`"`) {
+					t.Errorf("recorded %s = %+v, want namespace flux-system and the patched requestedAt (body %s)", name, req, fixture.Body(kustPrefix+name))
 				}
 			}
 		})

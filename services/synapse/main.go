@@ -917,7 +917,7 @@ func (s *RouterServer) enrichDeployEventPRAndTarget(ctx context.Context, evt *De
 	if s.registry != nil && (evt.JobName == "aerial-config" || evt.JobName == "aerial-core") {
 		if deployingPRs, err := s.registry.ListDeployingPRs(ctx); err == nil && len(deployingPRs) > 0 && !isPRInDeployingList(deployingPRs, evt.Repo, evt.PRNumber) {
 			for _, p := range slices.Backward(deployingPRs) {
-				if matchesDeployingPRKustomization(p.Repo, extractStringSliceFromMetadata(p.Metadata, "started_jobs"), evt.JobName) {
+				if matchesDeployingPRKustomization(p.Metadata, evt.JobName) {
 					evt.Repo = p.Repo
 					evt.PRNumber = p.PRNumber
 					evt.CommitSHA = firstNonEmpty(p.MergeSHA, p.HeadSHA, evt.CommitSHA)

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -644,6 +645,110 @@ func TestHandleFluxWebhook_Forwarding(t *testing.T) {
 				}
 			} else if receivedBody != "" {
 				t.Fatalf("expected no forward, but got body %q", receivedBody)
+			}
+		})
+	}
+}
+
+func TestKustomizationsForImages(t *testing.T) {
+	t.Parallel()
+	core := fluxKustomizationRef{Namespace: "flux-system", Name: "aerial-core"}
+	marida := fluxKustomizationRef{Namespace: "flux-system", Name: "marida-core"}
+	appsMarida := fluxKustomizationRef{Namespace: "apps", Name: "marida-core"}
+	owned := func(name, namespace string, images ...string) workloadImageRef {
+		labels := map[string]string{"kustomize.toolkit.fluxcd.io/name": name}
+		if namespace != "" {
+			labels["kustomize.toolkit.fluxcd.io/namespace"] = namespace
+		}
+		return workloadImageRef{Labels: labels, Images: images}
+	}
+
+	tests := []struct {
+		name       string
+		workloads  []workloadImageRef
+		imageNames []string
+		want       []fluxKustomizationRef
+	}{
+		{
+			name: "two kustomizations sharing an image are both returned sorted",
+			workloads: []workloadImageRef{
+				owned("marida-core", "flux-system", "ghcr.io/azylman/aerial-synapse:abc"),
+				owned("aerial-core", "flux-system", "ghcr.io/azylman/aerial-synapse:abc"),
+			},
+			imageNames: []string{"aerial-synapse"},
+			want:       []fluxKustomizationRef{core, marida},
+		},
+		{
+			name: "tag and digest are stripped before matching",
+			workloads: []workloadImageRef{
+				owned("aerial-core", "flux-system", "registry.local:5000/team/aerial-eri:v1@sha256:deadbeef"),
+				owned("marida-core", "flux-system", "aerial-eri@sha256:deadbeef"),
+			},
+			imageNames: []string{"aerial-eri"},
+			want:       []fluxKustomizationRef{core, marida},
+		},
+		{
+			name: "unlabeled workload is ignored",
+			workloads: []workloadImageRef{
+				{Labels: map[string]string{"app": "eri"}, Images: []string{"ghcr.io/azylman/aerial-eri:abc"}},
+				{Images: []string{"ghcr.io/azylman/aerial-eri:abc"}},
+			},
+			imageNames: []string{"aerial-eri"},
+		},
+		{
+			name:       "no matching image returns nil",
+			workloads:  []workloadImageRef{owned("aerial-core", "flux-system", "ghcr.io/azylman/aerial-eri:abc")},
+			imageNames: []string{"aerial-haro"},
+		},
+		{
+			name: "duplicate owners de-duplicate and namespace label defaults to flux-system",
+			workloads: []workloadImageRef{
+				owned("aerial-core", "", "ghcr.io/azylman/aerial-eri:abc"),
+				owned("aerial-core", "flux-system", "ghcr.io/azylman/aerial-eri:def"),
+				owned("marida-core", "apps", "ghcr.io/azylman/aerial-eri:abc"),
+			},
+			imageNames: []string{"aerial-eri"},
+			want:       []fluxKustomizationRef{appsMarida, core},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := kustomizationsForImages(tc.workloads, tc.imageNames); !slices.Equal(got, tc.want) {
+				t.Errorf("kustomizationsForImages() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMatchesDeployingPRKustomization(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		meta          string
+		kustomization string
+		want          bool
+	}{
+		{name: "requested kustomization matches", meta: `{"kustomization_requests":{"marida-core":{"namespace":"flux-system","requested_at":"t1"}}}`, kustomization: "marida-core", want: true},
+		{name: "other kustomization does not match", meta: `{"kustomization_requests":{"marida-core":{"namespace":"flux-system","requested_at":"t1"}}}`, kustomization: "aerial-core"},
+		{name: "legacy started_jobs alone does not match", meta: `{"started_jobs":["aerial-synapse"]}`, kustomization: "aerial-core"},
+		{name: "malformed requests value does not match", meta: `{"kustomization_requests":["aerial-core"]}`, kustomization: "aerial-core"},
+		{name: "nil metadata does not match", kustomization: "aerial-core"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var meta map[string]any
+			if tc.meta != "" {
+				if err := json.Unmarshal([]byte(tc.meta), &meta); err != nil {
+					t.Fatalf("unmarshal meta: %v", err)
+				}
+			}
+			if got := matchesDeployingPRKustomization(meta, tc.kustomization); got != tc.want {
+				t.Errorf("matchesDeployingPRKustomization() = %v, want %v", got, tc.want)
 			}
 		})
 	}
