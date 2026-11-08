@@ -302,9 +302,6 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 			log.Printf("[synapse] [dispatcher] error transitioning pr %s#%d to deploying: %v", repo, prNum, err)
 			return fmt.Errorf("transition pr deploying: %w", err)
 		}
-		if err := s.SyncPRWidget(ctx, repo, prNum); err != nil {
-			log.Printf("[synapse] [widget] warning syncing workflow_run deploying widget for %s#%d: %v", repo, prNum, err)
-		}
 	}
 
 	// Phase c: write every image tag before any reconcile so one reconcile renders all of them.
@@ -317,12 +314,15 @@ func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo strin
 
 	// Phases d+e: durably record every reconcile request before patching any of them, so a watch event can
 	// never observe a request that is not yet recorded. A crash or failure between record and patch is
-	// repaired by the Kustomization watcher re-patching the recorded value.
+	// repaired by the watcher re-patching the recorded value. Sync the widget after recording (rollout lines).
 	requests := newKustomizationRequests(refs, time.Now().UTC())
 	if trackPR {
 		if err := s.registry.RecordKustomizationRequests(ctx, repo, prNum, requests); err != nil {
 			log.Printf("[synapse] [dispatcher] error recording kustomization requests for %s#%d: %v", repo, prNum, err)
 			return fmt.Errorf("record kustomization requests: %w", err)
+		}
+		if err := s.SyncPRWidget(ctx, repo, prNum); err != nil {
+			log.Printf("[synapse] [widget] warning syncing workflow_run deploying widget for %s#%d: %v", repo, prNum, err)
 		}
 	}
 	return s.reconcileImageKustomizations(ctx, refs, requests)
@@ -876,7 +876,9 @@ func formatPRWidgetActiveStep(prStatus, ciChecksJSON, metadataJSON string) strin
 	if failed > 0 {
 		return ""
 	}
-
+	if rollout, ok := formatKustomizationRolloutStatus(cleanStatus, meta); ok {
+		return rollout
+	}
 	allJobs := resolveRolloutCandidateJobs(meta, checkJobs)
 	if len(allJobs) > 0 {
 		startedJobs := extractStringSliceFromMetadata(meta, "started_jobs")
