@@ -445,14 +445,14 @@ spec:
             - --dir
             - file:///migrations
             - --url
-            - $(DATABASE_URL)
+            - postgres://aerial:$(POSTGRES_PASSWORD)@postgres:5432/aerial?sslmode=disable
             - --revisions-schema
             - sidecars
           env:
-            - name: DATABASE_URL
+            - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  key: DATABASE_URL
+                  key: POSTGRES_PASSWORD
                   name: shared-secrets
           image: ghcr.io/azylman/aerial-sidecar-migrator:${TAG_AERIAL_SIDECAR_MIGRATOR:=latest}
           imagePullPolicy: Always
@@ -466,12 +466,12 @@ spec:
             - --dir
             - file:///migrations
             - --url
-            - $(DATABASE_URL)
+            - postgres://aerial:$(POSTGRES_PASSWORD)@postgres:5432/aerial?sslmode=disable
           env:
-            - name: DATABASE_URL
+            - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  key: DATABASE_URL
+                  key: POSTGRES_PASSWORD
                   name: shared-secrets
           image: ghcr.io/azylman/aerial-migrator:${TAG_AERIAL_MIGRATOR:=latest}
           imagePullPolicy: Always
@@ -1191,6 +1191,13 @@ spec:
         - env:
             - name: REDIS_URL
               value: redis://valkey:6379
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: POSTGRES_PASSWORD
+                  name: shared-secrets
+            - name: DB_CONNECTION_URI
+              value: postgres://aerial:$(POSTGRES_PASSWORD)@postgres:5432/aerial?sslmode=disable
           envFrom:
             - secretRef:
                 name: shared-secrets

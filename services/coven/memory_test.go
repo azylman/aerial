@@ -710,15 +710,16 @@ ollama:
 	_ = os.WriteFile(noDbYamlPath, []byte(strings.Replace(validContent, `database_url: "postgres://u:p@localhost:5432/testdb"`, `database_url: ""`, 1)), 0o644)
 
 	tests := []struct {
-		name      string
-		path      string
-		dbURL     string
-		envDB     string
-		envPG     string
-		wantErr   bool
-		wantPort  string
-		wantDB    string
-		wantModel string
+		name        string
+		path        string
+		dbURL       string
+		envDB       string
+		envPG       string
+		envPassword string
+		wantErr     bool
+		wantPort    string
+		wantDB      string
+		wantModel   string
 	}{
 		{
 			name:      "ValidFromYAML",
@@ -734,6 +735,14 @@ ollama:
 			wantPort:  "4009",
 			wantDB:    "postgres://envuser@localhost/envdb",
 			wantModel: "bge-m3",
+		},
+		{
+			name:        "DecomposedPostgresPassword",
+			path:        noDbYamlPath,
+			envPassword: "secretpass",
+			wantPort:    "4009",
+			wantDB:      "postgres://aerial:secretpass@postgres:5432/aerial?sslmode=disable",
+			wantModel:   "bge-m3",
 		},
 		{
 			name:      "DatabaseURLParamOverride",
@@ -778,6 +787,12 @@ ollama:
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("DATABASE_URL", tc.envDB)
+			t.Setenv("POSTGRES_URL", "")
+			t.Setenv("POSTGRES_HOST", "")
+			t.Setenv("POSTGRES_PORT", "")
+			t.Setenv("POSTGRES_USER", "")
+			t.Setenv("POSTGRES_PASSWORD", tc.envPassword)
+			t.Setenv("POSTGRES_DB", "")
 			t.Setenv("ERI_URL", "")
 			t.Setenv("ERI_LLM_URL", "")
 			t.Setenv("PR_REGISTER_URL", "")
@@ -8660,8 +8675,10 @@ ollama:
 		name         string
 		path         string
 		envDB        string
+		envPassword  string
 		wantPort     string
 		wantRulesDir string
+		wantDB       string
 		wantErr      bool
 	}{
 		{
@@ -8678,6 +8695,15 @@ ollama:
 			envDB:        "",
 			wantPort:     "4011",
 			wantRulesDir: "/custom/rules",
+			wantErr:      false,
+		},
+		{
+			name:         "valid file with decomposed postgres env vars",
+			path:         noDbFile,
+			envPassword:  "secretpass",
+			wantPort:     "4011",
+			wantRulesDir: "/custom/rules",
+			wantDB:       "postgres://aerial:secretpass@postgres:5432/aerial?sslmode=disable",
 			wantErr:      false,
 		},
 		{
@@ -8738,6 +8764,12 @@ ollama:
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("DATABASE_URL", tc.envDB)
+			t.Setenv("POSTGRES_URL", "")
+			t.Setenv("POSTGRES_HOST", "")
+			t.Setenv("POSTGRES_PORT", "")
+			t.Setenv("POSTGRES_USER", "")
+			t.Setenv("POSTGRES_PASSWORD", tc.envPassword)
+			t.Setenv("POSTGRES_DB", "")
 			cfg, err := LoadConfig(tc.path)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("LoadConfig() err = %v, wantErr = %v", err, tc.wantErr)
@@ -8750,6 +8782,9 @@ ollama:
 			}
 			if cfg.RulesDir != tc.wantRulesDir {
 				t.Errorf("RulesDir = %q, want %q", cfg.RulesDir, tc.wantRulesDir)
+			}
+			if tc.wantDB != "" && cfg.DatabaseURL != tc.wantDB {
+				t.Errorf("DatabaseURL = %q, want %q", cfg.DatabaseURL, tc.wantDB)
 			}
 		})
 	}

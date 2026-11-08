@@ -277,6 +277,16 @@ max_concurrent_calls: 2
 			wantBrainURL: "http://eri-prospera.aerial",
 		},
 		{
+			name: "decomposed POSTGRES_PASSWORD resolution",
+			path: validPath,
+			env: map[string]string{
+				"POSTGRES_PASSWORD": "secretpassword",
+			},
+			wantErr:         false,
+			wantPort:        "4019",
+			wantDatabaseURL: "postgres://aerial:secretpassword@postgres:5432/aerial?sslmode=disable",
+		},
+		{
 			name: "ERI_URL env fallback when absent from yaml",
 			path: missingBrainPath,
 			env: map[string]string{

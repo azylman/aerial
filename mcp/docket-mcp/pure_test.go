@@ -628,7 +628,7 @@ func TestLoadConfig(t *testing.T) {
 			envVal:          "secretpass",
 			wantPort:        "9090",
 			wantProjID:      42,
-			wantDatabaseURL: "postgres://postgres:secretpass@localhost:5432/docket?sslmode=disable",
+			wantDatabaseURL: "postgres://aerial:secretpass@postgres:5432/docket?sslmode=disable",
 			wantErr:         false,
 		},
 		{
@@ -670,6 +670,10 @@ func TestLoadConfig(t *testing.T) {
 			t.Setenv("POSTGRES_URL", "")
 			t.Setenv("DATABASE_URL", "")
 			t.Setenv("POSTGRES_PASSWORD", "")
+			t.Setenv("POSTGRES_HOST", "")
+			t.Setenv("POSTGRES_PORT", "")
+			t.Setenv("POSTGRES_USER", "")
+			t.Setenv("POSTGRES_DB", "")
 			t.Setenv("OLLAMA_BASE_URL", "")
 			t.Setenv("OLLAMA_MODEL", "")
 

@@ -1361,8 +1361,8 @@ spec:
               value: "8080"
             - name: CONFIG_PATH
               value: /config/config.yaml
-            - name: POSTGRES_URL
-              value: "postgres://aerial:postgres@postgres:5432/docket?sslmode=disable"
+            - name: POSTGRES_DB
+              value: "docket"
           envFrom:
             - secretRef:
                 name: shared-secrets

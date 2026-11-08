@@ -59,27 +59,38 @@ func TestLoadConfigFile(t *testing.T) {
 		name        string
 		path        string
 		dbURL       string
+		envPassword string
 		wantErr     bool
 		wantPort    string
 		wantTZ      string
+		wantDB      string
 		wantSources int
 	}{
-		{"valid config", validPath, "postgres://user:pass@host:5432/db", false, "4005", "America/Chicago", 0},
-		{"valid config with extra_event_sources", extraPath, "postgres://user:pass@host:5432/db", false, "4005", "America/Chicago", 1},
-		{"missing file", filepath.Join(tmpDir, "missing.yaml"), "postgres://localhost/db", true, "", "", 0},
-		{"malformed yaml", malformedPath, "postgres://localhost/db", true, "", "", 0},
-		{"missing port", noPortPath, "postgres://localhost/db", true, "", "", 0},
-		{"missing timezone", noTZPath, "postgres://localhost/db", true, "", "", 0},
-		{"empty dbURL", validPath, "", true, "", "", 0},
-		{"empty path", "", "postgres://localhost/db", true, "", "", 0},
+		{"valid config", validPath, "postgres://user:pass@host:5432/db", "", false, "4005", "America/Chicago", "postgres://user:pass@host:5432/db", 0},
+		{"valid config with extra_event_sources", extraPath, "postgres://user:pass@host:5432/db", "", false, "4005", "America/Chicago", "postgres://user:pass@host:5432/db", 1},
+		{"empty dbURL falls back to decomposed POSTGRES_PASSWORD", validPath, "", "secretpass", false, "4005", "America/Chicago", "postgres://aerial:secretpass@postgres:5432/aerial?sslmode=disable", 0},
+		{"missing file", filepath.Join(tmpDir, "missing.yaml"), "postgres://localhost/db", "", true, "", "", "", 0},
+		{"malformed yaml", malformedPath, "postgres://localhost/db", "", true, "", "", "", 0},
+		{"missing port", noPortPath, "postgres://localhost/db", "", true, "", "", "", 0},
+		{"missing timezone", noTZPath, "postgres://localhost/db", "", true, "", "", "", 0},
+		{"empty dbURL", validPath, "", "", true, "", "", "", 0},
+		{"empty path", "", "postgres://localhost/db", "", true, "", "", "", 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DATABASE_URL", "")
+			t.Setenv("POSTGRES_URL", "")
+			t.Setenv("POSTGRES_HOST", "")
+			t.Setenv("POSTGRES_PORT", "")
+			t.Setenv("POSTGRES_USER", "")
+			t.Setenv("POSTGRES_PASSWORD", tc.envPassword)
+			t.Setenv("POSTGRES_DB", "")
+
 			cfg, err := LoadConfigFile(tc.path, tc.dbURL)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("LoadConfigFile() err = %v, wantErr = %v", err, tc.wantErr)
 			}
-			if !tc.wantErr && (cfg.Port != tc.wantPort || cfg.Timezone != tc.wantTZ || cfg.DatabaseURL != tc.dbURL || len(cfg.ExtraEventSources) != tc.wantSources) {
+			if !tc.wantErr && (cfg.Port != tc.wantPort || cfg.Timezone != tc.wantTZ || cfg.DatabaseURL != tc.wantDB || len(cfg.ExtraEventSources) != tc.wantSources) {
 				t.Fatalf("unexpected config: %+v", cfg)
 			}
 		})
@@ -98,8 +109,10 @@ func TestLoadConfig_BrainURLResolution(t *testing.T) {
 		path         string
 		envEri       string
 		envDB        string
+		envPassword  string
 		wantErr      bool
 		wantBrainURL string
+		wantDB       string
 	}{
 		{
 			name:         "ERI_URL takes top precedence",
@@ -121,6 +134,13 @@ func TestLoadConfig_BrainURLResolution(t *testing.T) {
 			wantBrainURL: "http://eri.aerial",
 		},
 		{
+			name:         "decomposed POSTGRES_PASSWORD resolution",
+			path:         pathWithoutBrain,
+			envPassword:  "secretpass",
+			wantBrainURL: "http://eri.aerial",
+			wantDB:       "postgres://aerial:secretpass@postgres:5432/aerial?sslmode=disable",
+		},
+		{
 			name:    "missing DB returns error via LoadConfig",
 			path:    pathWithoutBrain,
 			envDB:   "",
@@ -132,6 +152,12 @@ func TestLoadConfig_BrainURLResolution(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("ERI_URL", tc.envEri)
 			t.Setenv("DATABASE_URL", tc.envDB)
+			t.Setenv("POSTGRES_URL", "")
+			t.Setenv("POSTGRES_HOST", "")
+			t.Setenv("POSTGRES_PORT", "")
+			t.Setenv("POSTGRES_USER", "")
+			t.Setenv("POSTGRES_PASSWORD", tc.envPassword)
+			t.Setenv("POSTGRES_DB", "")
 
 			cfg, err := LoadConfig(tc.path)
 			if (err != nil) != tc.wantErr {
@@ -143,6 +169,9 @@ func TestLoadConfig_BrainURLResolution(t *testing.T) {
 				}
 				if cfg.EriURL != tc.wantBrainURL {
 					t.Errorf("cfg.EriURL = %q, want %q", cfg.EriURL, tc.wantBrainURL)
+				}
+				if tc.wantDB != "" && cfg.DatabaseURL != tc.wantDB {
+					t.Errorf("cfg.DatabaseURL = %q, want %q", cfg.DatabaseURL, tc.wantDB)
 				}
 			}
 		})
@@ -191,6 +220,12 @@ func TestLoadConfig_VanadisURLResolution(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("VANADIS_URL", tc.envVanadis)
 			t.Setenv("DATABASE_URL", tc.envDB)
+			t.Setenv("POSTGRES_URL", "")
+			t.Setenv("POSTGRES_HOST", "")
+			t.Setenv("POSTGRES_PORT", "")
+			t.Setenv("POSTGRES_USER", "")
+			t.Setenv("POSTGRES_PASSWORD", "")
+			t.Setenv("POSTGRES_DB", "")
 
 			cfg, err := LoadConfig(tc.path)
 			if (err != nil) != tc.wantErr {

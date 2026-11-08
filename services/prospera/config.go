@@ -205,7 +205,7 @@ func LoadConfigFile(path string, getenv func(string) string) (*Config, error) {
 
 	publicWebhookBaseURL := strings.TrimRight(strings.TrimSpace(ycfg.PublicWebhookBaseURL), "/")
 
-	dbURL := strings.TrimSpace(getenv("DATABASE_URL"))
+	dbURL := httpkit.BuildPostgresDSN(getenv, "aerial")
 	if dbURL == "" {
 		return nil, fmt.Errorf("config: DATABASE_URL is required")
 	}

@@ -114,7 +114,7 @@ func resolveFirstNonEmpty(values ...string) string {
 
 // LoadConfig loads configuration from path using DATABASE_URL from the environment.
 func LoadConfig(path string) (*Config, error) {
-	return LoadConfigFile(path, os.Getenv("DATABASE_URL"))
+	return LoadConfigFile(path, httpkit.BuildPostgresDSN(os.Getenv, "aerial"))
 }
 
 // LoadConfigFile loads and strictly validates configuration from a YAML file and secrets.
@@ -179,7 +179,7 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		return nil, fmt.Errorf("config: ollama.num_ctx must be positive in %s", cleanPath)
 	}
 
-	databaseURL := resolveFirstNonEmpty(dbURL, os.Getenv("DATABASE_URL"), ycfg.DatabaseURL)
+	databaseURL := resolveFirstNonEmpty(dbURL, httpkit.BuildPostgresDSN(os.Getenv, "aerial"), ycfg.DatabaseURL)
 	if databaseURL == "" {
 		return nil, fmt.Errorf("config: database connection string is required")
 	}
