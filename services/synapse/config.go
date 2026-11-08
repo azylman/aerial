@@ -46,6 +46,8 @@ type Config struct {
 type RouterYAMLConfig struct {
 	Port                 string            `yaml:"port"`
 	InfisicalURL         string            `yaml:"infisical_url"`
+	InfisicalClientID    string            `yaml:"infisical_client_id"`
+	InfisicalProjectID   string            `yaml:"infisical_project_id"`
 	InfisicalEnvironment string            `yaml:"infisical_environment"`
 	FluxReceiverURL      string            `yaml:"flux_receiver_url"`
 	EriURL               string            `yaml:"eri_url"`
@@ -164,9 +166,9 @@ func LoadConfig(configPath string) Config {
 	return Config{
 		Port:                  firstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4020"),
 		InfisicalURL:          strings.TrimRight(firstNonEmpty(os.Getenv("INFISICAL_URL"), fileCfg.InfisicalURL, "http://infisical.aerial"), "/"),
-		InfisicalClientID:     os.Getenv("INFISICAL_CLIENT_ID"),
+		InfisicalClientID:     firstNonEmpty(os.Getenv("INFISICAL_CLIENT_ID"), fileCfg.InfisicalClientID),
 		InfisicalClientSecret: os.Getenv("INFISICAL_CLIENT_SECRET"),
-		InfisicalProjectID:    os.Getenv("INFISICAL_PROJECT_ID"),
+		InfisicalProjectID:    firstNonEmpty(os.Getenv("INFISICAL_PROJECT_ID"), fileCfg.InfisicalProjectID),
 		InfisicalEnvironment:  firstNonEmpty(os.Getenv("INFISICAL_ENVIRONMENT"), fileCfg.InfisicalEnvironment, "default"),
 		KubeAPIServer:         strings.TrimRight(kubeServer, "/"),
 		KubeToken:             kubeToken,

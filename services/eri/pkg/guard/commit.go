@@ -18,7 +18,7 @@ import (
 )
 
 // GuardScanURL is the loopback URL for eri's internal guard scan endpoint.
-var GuardScanURL = "http://127.0.0.1:8088/internal/guard/scan"
+var GuardScanURL = "http://127.0.0.1:8080/internal/guard/scan"
 
 // Violation represents a secret or PII detection in a commit diff.
 type Violation struct {

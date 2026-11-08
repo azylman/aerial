@@ -7,6 +7,7 @@ import (
 	"log"
 	"maps"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -25,7 +26,7 @@ var ConfigSearchPaths = []string{
 }
 
 // SharedSecretsPath defines the filesystem location for shared cluster secrets.
-var SharedSecretsPath = "/secrets/shared-secrets.json"
+var SharedSecretsPath = "/secrets"
 
 type WebhookEndpoint struct {
 	URL             string `yaml:"url" json:"url"`
@@ -776,24 +777,77 @@ func Reload(activeCfg *Config) error {
 	return ReloadWithSupplier(activeCfg, New)
 }
 
-// LoadSharedSecrets reads a JSON key-value map of shared secrets from path.
-// If path is empty, the file is missing, or the JSON is invalid, an empty map is returned.
+func loadSharedSecretsJSON(data []byte, dst map[string]string) {
+	var raw map[string]string
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return
+	}
+	for k, v := range raw {
+		if val := strings.TrimSpace(v); val != "" {
+			dst[k] = val
+		}
+	}
+}
+
+func loadSharedSecretsDir(dirPath string, dst map[string]string) {
+	entries, err := os.ReadDir(dirPath)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") || entry.IsDir() {
+			continue
+		}
+		filePath := filepath.Join(dirPath, name)
+		info, err := os.Stat(filePath)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			continue
+		}
+		trimmed := strings.TrimSpace(string(data))
+		if name == "shared-secrets.json" && strings.HasPrefix(trimmed, "{") {
+			loadSharedSecretsJSON([]byte(trimmed), dst)
+			continue
+		}
+		if trimmed != "" {
+			dst[name] = trimmed
+		}
+	}
+}
+
+// LoadSharedSecrets reads shared secrets from path, which can be either a Kubernetes
+// secret directory mount (e.g. /secrets) or a JSON file (e.g. /secrets/shared-secrets.json).
+// If path is empty, missing, or invalid, an empty map is returned.
 // Values are trimmed, and alias fallbacks are populated when the primary key is empty.
 func LoadSharedSecrets(path string) map[string]string {
 	result := make(map[string]string)
-	if strings.TrimSpace(path) == "" {
+	cleanPath := strings.TrimSpace(path)
+	if cleanPath == "" {
 		return result
 	}
-	data, err := os.ReadFile(path)
+	fi, err := os.Stat(cleanPath)
 	if err != nil {
 		return result
 	}
-	var raw map[string]string
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return result
-	}
-	for k, v := range raw {
-		result[k] = strings.TrimSpace(v)
+
+	if fi.IsDir() {
+		loadSharedSecretsDir(cleanPath, result)
+	} else {
+		data, err := os.ReadFile(cleanPath)
+		if err != nil {
+			return result
+		}
+		var raw map[string]string
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return result
+		}
+		for k, v := range raw {
+			result[k] = strings.TrimSpace(v)
+		}
 	}
 
 	aliases := [][2]string{
