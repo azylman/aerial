@@ -130,8 +130,14 @@ func executeConfigReload(source string, cfg *config.Config, options *reloadConfi
 		}
 	}
 
+	cur := cfg.Current()
 	if options.ephemeralPool != nil {
-		lowModel, _ := resolveBrainModelDefaults(cfg.Current())
+		if engineUpdater, ok := options.ephemeralPool.(interface {
+			UpdateEngine(engine, claudeBin string)
+		}); ok {
+			engineUpdater.UpdateEngine(cur.GetEngine(), cur.ClaudeBin)
+		}
+		lowModel, _ := resolveBrainModelDefaults(cur)
 		if modelUpdater, ok := options.ephemeralPool.(interface{ UpdateModel(model string) }); ok {
 			modelUpdater.UpdateModel(lowModel)
 		}
@@ -141,6 +147,15 @@ func executeConfigReload(source string, cfg *config.Config, options *reloadConfi
 	}
 
 	if options.workerPool != nil {
+		for _, k := range queue.AllValidPoolKeys() {
+			if p := options.workerPool.Pool(k); p != nil {
+				if engineUpdater, ok := p.(interface {
+					UpdateEngine(engine, claudeBin string)
+				}); ok {
+					engineUpdater.UpdateEngine(cur.GetEngine(), cur.ClaudeBin)
+				}
+			}
+		}
 		options.workerPool.MarkDirty()
 	}
 }
@@ -351,6 +366,8 @@ func buildUnifiedVoicePool(cfg *config.Config, cur *config.ConfigData, voiceHome
 	}
 	voiceSessionMgr := session.New(voiceHome, runtimeBase)
 	return runner.NewUnifiedProcessPool(runner.PoolConfig{
+		Engine:                  cur.GetEngine(),
+		ClaudeBin:               cur.ClaudeBin,
 		GeminiHomeDir:           voiceHome,
 		Model:                   lowEffortModel,
 		AgyBin:                  cur.AgyBin,
@@ -375,6 +392,15 @@ func computeVoiceConfigFingerprint(voiceEngine, effectiveModel, effectiveAPIKey 
 		keyHash := sha256.Sum256([]byte(effectiveAPIKey))
 		b.WriteString("apiKeyHash:")
 		b.WriteString(hex.EncodeToString(keyHash[:]))
+		b.WriteString("\n")
+	}
+	if voiceEngine != "gemini_api" {
+		b.WriteString("processEngine:")
+		b.WriteString(cur.GetEngine())
+		b.WriteString("\nclaudeBin:")
+		if cur != nil {
+			b.WriteString(cur.ClaudeBin)
+		}
 		b.WriteString("\n")
 	}
 	if ambCfg := cur.VoiceAmbientContext(); ambCfg != nil {
@@ -556,6 +582,8 @@ func buildBrainProcessPools(
 
 	basePoolCfg := func(home, model string, prewarmed []string) runner.PoolConfig {
 		pcfg := runner.PoolConfig{
+			Engine:            cur.GetEngine(),
+			ClaudeBin:         cur.ClaudeBin,
 			GeminiHomeDir:     home,
 			Model:             model,
 			AgyBin:            cur.AgyBin,
@@ -918,7 +946,9 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	discordPools, ephemeralPool, voicePool, allPools, poolEnv, ephemeralHome := buildBrainProcessPools(cfg, cur, sessionMgr, appOpts.processSpawner)
 	defer closeAllBrainPools(allPools)
 
-	metrics.StartUsagePoller(ctx, 10*time.Minute, metrics.DefaultUsageRunner(cur.AgyBin, ephemeralHome, poolEnv, testing.Testing()))
+	if cur.GetEngine() == "agy" {
+		metrics.StartUsagePoller(ctx, 10*time.Minute, metrics.DefaultUsageRunner(cur.AgyBin, ephemeralHome, poolEnv, testing.Testing()))
+	}
 
 	cls := classifier.New(cfg, classifier.WithProcessPool(ephemeralPool))
 	ambientResolver := newAmbientContextResolver(cfg)

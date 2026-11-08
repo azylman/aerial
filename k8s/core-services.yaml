@@ -630,6 +630,8 @@ spec:
               value: "8080"
             - name: AGENTSVIEW_DATA_DIR
               value: /data/agentsview
+            - name: CLAUDE_PROJECTS_DIR
+              value: /data/claude/projects
           envFrom:
             - secretRef:
                 name: shared-secrets

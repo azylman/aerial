@@ -209,23 +209,63 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 		CreateReloadConfigFunc(cfg, WithProvisioner(env.NewFromConfig(cfg)))("test-provisioner-error")
 	})
 
-	t.Run("with worker pool", func(t *testing.T) {
+	t.Run("with worker pool and claude engine propagation", func(t *testing.T) {
 		cfg := newTestConfig(func(d *config.ConfigData) {
 			d.LowEffortModel = "gpt-oss-120b-medium"
 		})
-		var spawnedModel string
+		var spawnedModel, spawnedEngine, spawnedClaudeBin string
 		spawner := &mockMainDaemonSpawner{
 			SpawnFn: func(ctx context.Context, dCfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 				spawnedModel = dCfg.Model
+				spawnedEngine = dCfg.Engine
+				spawnedClaudeBin = dCfg.ClaudeBin
 				return newMockMainDaemonSpawner().Spawn(ctx, dCfg)
 			},
 		}
 		ephemPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, spawner)
 		defer func() { _ = ephemPool.Close() }()
-		CreateReloadConfigFunc(cfg, WithSkipEnvironmentSync(), WithReloadSupplier(func(active *config.Config) error { return nil }), WithWorkerPool(queue.New(cfg, queue.WorkerPoolConfig{})), WithEphemeralPool(ephemPool))("TestWithWorkerPool")
+
+		var workerSpawnedEngine, workerSpawnedClaudeBin string
+		workerSpawner := &mockMainDaemonSpawner{
+			SpawnFn: func(ctx context.Context, dCfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+				workerSpawnedEngine = dCfg.Engine
+				workerSpawnedClaudeBin = dCfg.ClaudeBin
+				return newMockMainDaemonSpawner().Spawn(ctx, dCfg)
+			},
+		}
+		mockDiscordPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, workerSpawner)
+		defer func() { _ = mockDiscordPool.Close() }()
+		wp := queue.New(cfg, queue.WorkerPoolConfig{
+			Pools: map[queue.PoolKey]runner.AgentPool{
+				{Ephemeral: false, Effort: "high"}: mockDiscordPool,
+			},
+		})
+
+		CreateReloadConfigFunc(cfg,
+			WithSkipEnvironmentSync(),
+			WithReloadSupplier(func(active *config.Config) error {
+				active.Update(&config.ConfigData{
+					Engine:         "claude",
+					ClaudeBin:      "/opt/anthropic/bin/claude",
+					LowEffortModel: "gpt-oss-120b-medium",
+				})
+				return nil
+			}),
+			WithWorkerPool(wp),
+			WithEphemeralPool(ephemPool),
+		)("TestWithWorkerPool")
+
 		_, _ = ephemPool.GetOrCreate(context.Background(), "ephemeral:worker-0", "")
 		if spawnedModel != "gpt-oss-120b-medium" {
 			t.Fatalf("expected ephemeralPool model updated to gpt-oss-120b-medium, got %q", spawnedModel)
+		}
+		if spawnedEngine != "claude" || spawnedClaudeBin != "/opt/anthropic/bin/claude" {
+			t.Fatalf("expected ephemeralPool engine claude and bin /opt/anthropic/bin/claude, got %q, %q", spawnedEngine, spawnedClaudeBin)
+		}
+
+		_, _ = mockDiscordPool.GetOrCreate(context.Background(), "discord:worker-0", "")
+		if workerSpawnedEngine != "claude" || workerSpawnedClaudeBin != "/opt/anthropic/bin/claude" {
+			t.Fatalf("expected worker pool engine claude and bin /opt/anthropic/bin/claude, got %q, %q", workerSpawnedEngine, workerSpawnedClaudeBin)
 		}
 	})
 
@@ -743,6 +783,69 @@ func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
 			t.Fatalf("unexpected error from RunBrainApp: %v", err)
 		}
 	})
+
+	t.Run("ClaudeEngineFullLifecycle", func(t *testing.T) {
+		tmpDir, cfg := newLifecycleCfg(t, func(d *config.ConfigData) {
+			d.Engine = "claude"
+			d.ClaudeBin = "/usr/local/bin/claude"
+			d.DiscordToken = "mock-discord-token"
+			d.DataDir = d.GeminiHomeDir
+			d.LowEffortModel = "claude-haiku"
+			d.MediumEffortModel = "claude-sonnet"
+			d.Voice = config.VoiceConfig{
+				Engine: "agy",
+				Model:  "claude-voice",
+			}
+		})
+		_ = tmpDir
+
+		var mu sync.Mutex
+		seen := make(map[string]runner.DaemonConfig)
+		allSpawned := make(chan struct{})
+		var once sync.Once
+		baseMock := newMockMainDaemonSpawner()
+
+		trackingSpawner := &mockMainDaemonSpawner{
+			SpawnFn: func(ctx context.Context, dCfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+				mu.Lock()
+				seen[dCfg.ThreadID] = dCfg
+				if seen["ephemeral:worker-0"].ThreadID != "" && seen["ephemeral:worker-1"].ThreadID != "" &&
+					seen["discord:worker-0"].ThreadID != "" && seen["discord:worker-1"].ThreadID != "" &&
+					seen["discord:medium-worker-0"].ThreadID != "" && seen["discord:medium-worker-1"].ThreadID != "" {
+					once.Do(func() { close(allSpawned) })
+				}
+				mu.Unlock()
+				return baseMock.Spawn(ctx, dCfg)
+			},
+		}
+
+		boundAddr, cancel, wait := runBrainAppUntilReady(t, cfg, WithProcessSpawner(trackingSpawner))
+		resp, err := http.Post(fmt.Sprintf("http://%s/prompt", boundAddr), "application/json", strings.NewReader(`{"prompt":"Hello test prompt","channel_id":"1542423172400291873","message_id":"msg-1"}`))
+		if err == nil {
+			_ = resp.Body.Close()
+		}
+
+		select {
+		case <-allSpawned:
+		case <-time.After(2 * time.Second):
+		}
+
+		cancel()
+		if err := wait(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			t.Fatalf("unexpected error waiting for server shutdown: %v", err)
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+		for _, target := range []string{"ephemeral:worker-0", "ephemeral:worker-1", "discord:worker-0", "discord:worker-1", "discord:medium-worker-0", "discord:medium-worker-1"} {
+			if seen[target].Engine != "claude" {
+				t.Errorf("%s expected Engine=claude, got %q", target, seen[target].Engine)
+			}
+			if seen[target].ClaudeBin != "/usr/local/bin/claude" {
+				t.Errorf("%s expected ClaudeBin=/usr/local/bin/claude, got %q", target, seen[target].ClaudeBin)
+			}
+		}
+	})
 }
 
 func hasEnv(envs []string, target string) bool {
@@ -858,11 +961,13 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 		cfg := config.NewFromData(data)
 
 		var mu sync.Mutex
-		var lastSpawnedModel string
+		var lastSpawnedModel, lastSpawnedEngine, lastSpawnedClaudeBin string
 		trackingSpawner := &mockMainDaemonSpawner{
 			SpawnFn: func(ctx context.Context, dCfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 				mu.Lock()
 				lastSpawnedModel = dCfg.Model
+				lastSpawnedEngine = dCfg.Engine
+				lastSpawnedClaudeBin = dCfg.ClaudeBin
 				mu.Unlock()
 				return newMockMainDaemonSpawner().Spawn(ctx, dCfg)
 			},
@@ -955,6 +1060,29 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 			if sid != "k" {
 				t.Fatalf("expected swapped pool to be GeminiAPIPool, got sessionID=%q", sid)
 			}
+		}
+
+		// Update config to claude engine and verify voice pool hot-reloads to claude
+		cfg.Update(&config.ConfigData{
+			Engine:    "claude",
+			ClaudeBin: "/custom/bin/claude",
+			Voice: config.VoiceConfig{
+				Engine: "agy",
+				Model:  "claude-voice-model",
+			},
+		})
+		dynPool.MarkDirty()
+		if lease, err := dynPool.AcquireLease(context.Background(), "k"); err != nil {
+			t.Fatalf("AcquireLease failed after claude engine reload: %v", err)
+		} else {
+			_ = lease.Release()
+		}
+		mu.Lock()
+		reloadedEngine := lastSpawnedEngine
+		reloadedClaudeBin := lastSpawnedClaudeBin
+		mu.Unlock()
+		if reloadedEngine != "claude" || reloadedClaudeBin != "/custom/bin/claude" {
+			t.Fatalf("expected voice pool to spawn claude with /custom/bin/claude, got engine=%q bin=%q", reloadedEngine, reloadedClaudeBin)
 		}
 	})
 }

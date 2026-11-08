@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/bwmarrin/discordgo"
 )
@@ -138,5 +139,83 @@ func TestBuildSyncLLM_TableDriven(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestComputeVoiceConfigFingerprint_TableDriven(t *testing.T) {
+	tests := []struct {
+		name            string
+		voiceEngine     string
+		effectiveModel  string
+		apiKey          string
+		cfgEngine       string
+		claudeBin       string
+		wantMatchEngine string
+	}{
+		{
+			name:           "baseline_agy",
+			voiceEngine:    "agy",
+			effectiveModel: "model-a",
+			cfgEngine:      "agy",
+			claudeBin:      "claude",
+		},
+		{
+			name:           "different_model",
+			voiceEngine:    "agy",
+			effectiveModel: "model-b",
+			cfgEngine:      "agy",
+			claudeBin:      "claude",
+		},
+		{
+			name:           "claude_engine",
+			voiceEngine:    "agy",
+			effectiveModel: "model-a",
+			cfgEngine:      "claude",
+			claudeBin:      "/custom/bin/claude",
+		},
+		{
+			name:           "gemini_api_agy",
+			voiceEngine:    "gemini_api",
+			effectiveModel: "model-a",
+			apiKey:         "test-key",
+			cfgEngine:      "agy",
+			claudeBin:      "claude",
+		},
+		{
+			name:            "gemini_api_claude_matches_gemini_api_agy",
+			voiceEngine:     "gemini_api",
+			effectiveModel:  "model-a",
+			apiKey:          "test-key",
+			cfgEngine:       "claude",
+			claudeBin:       "/custom/bin/claude",
+			wantMatchEngine: "gemini_api_agy",
+		},
+	}
+
+	fingerprints := make(map[string]string)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cur := &config.ConfigData{
+				Engine:    tt.cfgEngine,
+				ClaudeBin: tt.claudeBin,
+			}
+			fp := computeVoiceConfigFingerprint(tt.voiceEngine, tt.effectiveModel, tt.apiKey, cur, nil, nil)
+			if fp == "" {
+				t.Fatalf("expected non-empty fingerprint")
+			}
+			fingerprints[tt.name] = fp
+			if tt.wantMatchEngine != "" {
+				if fp != fingerprints[tt.wantMatchEngine] {
+					t.Errorf("expected fingerprint to match %s, got %s vs %s", tt.wantMatchEngine, fp, fingerprints[tt.wantMatchEngine])
+				}
+			}
+		})
+	}
+
+	if fingerprints["baseline_agy"] == fingerprints["claude_engine"] {
+		t.Errorf("expected fingerprints for different process engines to differ")
+	}
+	if fingerprints["baseline_agy"] == fingerprints["different_model"] {
+		t.Errorf("expected fingerprints for different models to differ")
 	}
 }
