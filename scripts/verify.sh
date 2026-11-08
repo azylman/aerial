@@ -567,6 +567,14 @@ if [ "$MODE" = "staged" ]; then
         exit 0
     fi
 
+    CHANGED_FILES="$STAGED_FILES"
+    if has_cmd git && git rev-parse --verify origin/main >/dev/null 2>&1 && [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)" != "main" ]; then
+        branch_diff=$(git diff --name-only origin/main...HEAD 2>/dev/null || true)
+        if [ -n "$branch_diff" ]; then
+            CHANGED_FILES=$(printf '%s\n%s\n' "$STAGED_FILES" "$branch_diff" | sed '/^$/d' | sort -u)
+        fi
+    fi
+
     check_utf8_bom
     check_gofmt
     check_no_main_in_tests
@@ -575,25 +583,25 @@ if [ "$MODE" = "staged" ]; then
     check_no_imperative_ddl
     check_code_health
 
-    if echo "$STAGED_FILES" | grep -q '^docker-compose\.yml$'; then
+    if echo "$CHANGED_FILES" | grep -q '^docker-compose\.yml$'; then
         check_docker_compose
     fi
 
     lint_all_go=0
-    if echo "$STAGED_FILES" | grep -q -E '^(pkg/|\.golangci\.yml|scripts/verify\.sh)$'; then
+    if echo "$CHANGED_FILES" | grep -q -E '^(pkg/|\.golangci\.yml|scripts/verify\.sh)$'; then
         lint_all_go=1
     fi
 
     # Check Go microservices
     for svc in $GO_SERVICES; do
         svc_staged=0
-        if echo "$STAGED_FILES" | grep -q "^$svc/"; then
+        if echo "$CHANGED_FILES" | grep -q "^$svc/"; then
             svc_staged=1
         fi
         if [ "$lint_all_go" -eq 1 ]; then
             run_golangci_lint "$svc" "./..."
         elif [ "$svc_staged" -eq 1 ]; then
-            pkgs=$(echo "$STAGED_FILES" | grep "^$svc/.*\.go$" | sed "s|^$svc/||" | while read -r f; do dirname "$f"; done | sort -u)
+            pkgs=$(echo "$CHANGED_FILES" | grep "^$svc/.*\.go$" | sed "s|^$svc/||" | while read -r f; do dirname "$f"; done | sort -u)
             staged_pkg_targets=""
             for p in $pkgs; do
                 if [ -d "$svc/$p" ]; then
@@ -611,7 +619,7 @@ if [ "$MODE" = "staged" ]; then
             fi
         fi
         if [ "$svc_staged" -eq 1 ]; then
-            pkgs=$(echo "$STAGED_FILES" | grep "^$svc/.*\.go$" | sed "s|^$svc/||" | while read -r f; do dirname "$f"; done | sort -u)
+            pkgs=$(echo "$CHANGED_FILES" | grep "^$svc/.*\.go$" | sed "s|^$svc/||" | while read -r f; do dirname "$f"; done | sort -u)
             for p in $pkgs; do
                 if [ ! -d "$svc/$p" ]; then
                     continue
@@ -626,25 +634,25 @@ if [ "$MODE" = "staged" ]; then
     done
 
     # Check Atlas migrations
-    if echo "$STAGED_FILES" | grep -q -E "migrations/|atlas\.hcl|schema\.sql"; then
+    if echo "$CHANGED_FILES" | grep -q -E "migrations/|atlas\.hcl|schema\.sql"; then
         run_atlas_validate
     fi
 
     # Check dashboard JS syntax & frontend coverage gate
-    if echo "$STAGED_FILES" | grep -q -E "^(services/)?dashboard/"; then
+    if echo "$CHANGED_FILES" | grep -q -E "^(services/)?dashboard/"; then
         run_node_syntax "services/dashboard/static/app.js"
-        if echo "$STAGED_FILES" | grep -q -E "^(services/)?dashboard/.*\.js$" && [ -f "$SCRIPT_DIR/check-coverage.sh" ]; then
+        if echo "$CHANGED_FILES" | grep -q -E "^(services/)?dashboard/.*\.js$" && [ -f "$SCRIPT_DIR/check-coverage.sh" ]; then
             sh "$SCRIPT_DIR/check-coverage.sh" --check --service dashboard
         fi
     fi
 
     # Check docs service JS syntax
-    if echo "$STAGED_FILES" | grep -q -E "^(services/)?docs-service/"; then
+    if echo "$CHANGED_FILES" | grep -q -E "^(services/)?docs-service/"; then
         run_node_syntax "services/docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js"
     fi
 
     # Check homepage JS syntax & unit tests
-    if echo "$STAGED_FILES" | grep -q -E "^(services/)?homepage/"; then
+    if echo "$CHANGED_FILES" | grep -q -E "^(services/)?homepage/"; then
         run_node_syntax "services/homepage/lib/merge.js"
         run_node_syntax "services/homepage/prepare-config.js"
         if [ -d "services/homepage/test" ]; then
@@ -653,7 +661,7 @@ if [ "$MODE" = "staged" ]; then
     fi
 
     # Check grafana dashboard JSON syntax
-    if echo "$STAGED_FILES" | grep -q -E "^(services/)?grafana/dashboards/"; then
+    if echo "$CHANGED_FILES" | grep -q -E "^(services/)?grafana/dashboards/"; then
         for jf in services/grafana/dashboards/*.json; do
             run_json_syntax "$jf"
         done
