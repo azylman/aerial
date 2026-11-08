@@ -263,9 +263,9 @@ func TestAssetRegistry_ServeHTTP(t *testing.T) {
 			wantContentTypeSubstr: "image/png",
 		},
 		{
-			name:                  "serves_favicon_dashboard_prefix",
+			name:                  "serves_favicon_console_prefix",
 			method:                "GET",
-			path:                  "/dashboard/favicon.ico",
+			path:                  "/console/favicon.ico",
 			wantCode:              http.StatusOK,
 			wantContentTypeSubstr: "icon",
 		},

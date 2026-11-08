@@ -1,4 +1,4 @@
-// Package main implements the Aerial Permet HUD status dashboard and telemetry viewer.
+// Package main implements the Aerial console: the operator status HUD and telemetry viewer.
 package main
 
 import (
@@ -45,7 +45,7 @@ type ServiceStatus struct {
 }
 
 type MatrixJobChip struct {
-	Name       string `json:"name"`                 // e.g. "brain", "dashboard", "proxy"
+	Name       string `json:"name"`                 // e.g. "brain", "console", "proxy"
 	Status     string `json:"status"`               // "completed", "active", "pending", "failed"
 	Conclusion string `json:"conclusion,omitempty"` // "success", "failure", "skipped", ""
 	Duration   string `json:"duration,omitempty"`   // e.g. "45s"
@@ -184,10 +184,10 @@ func drainAndClose(body io.ReadCloser, name string) {
 		return
 	}
 	if _, err := io.Copy(io.Discard, io.LimitReader(body, 32*1024)); err != nil {
-		log.Printf("[Dashboard] Warning draining %s: %v", name, err)
+		log.Printf("[Console] Warning draining %s: %v", name, err)
 	}
 	if err := body.Close(); err != nil {
-		log.Printf("[Dashboard] Warning closing %s: %v", name, err)
+		log.Printf("[Console] Warning closing %s: %v", name, err)
 	}
 }
 
@@ -195,7 +195,7 @@ func writeJSON(w http.ResponseWriter, r *http.Request, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	b, err := json.Marshal(data)
 	if err != nil {
-		log.Printf("[Dashboard:HTTP] Failed to marshal JSON response: %v", err)
+		log.Printf("[Console:HTTP] Failed to marshal JSON response: %v", err)
 		http.Error(w, `{"error":"Internal error"}`, http.StatusInternalServerError)
 		return
 	}
@@ -209,7 +209,7 @@ func writeJSON(w http.ResponseWriter, r *http.Request, status int, data any) {
 		}
 	}
 	w.WriteHeader(status)
-	httpkit.WriteResponse(w, r, "dashboard", b)
+	httpkit.WriteResponse(w, r, "console", b)
 }
 
 func fetchDockerClusterState(ctx context.Context) ([]ServiceStatus, []DockerContainerJSON, error) {
@@ -399,7 +399,7 @@ func resolveClusterState(ctx context.Context, kubeAPIServer, gitCommit string, g
 		if k8sErr == nil && len(k8sServices) > 0 {
 			services = k8sServices
 		} else if k8sErr != nil {
-			log.Printf("[dashboard] Warning: Failed to fetch K8s cluster state (%s): %v, falling back to Docker", kubeAPIServer, k8sErr)
+			log.Printf("[Console] Warning: Failed to fetch K8s cluster state (%s): %v, falling back to Docker", kubeAPIServer, k8sErr)
 		}
 	}
 	if len(services) == 0 {
@@ -450,7 +450,7 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalA
 
 		activeTasks, taskErr := fetchActiveTasksFromBrain(ctx, brainURL)
 		if taskErr != nil {
-			log.Printf("[Dashboard] Failed to fetch active tasks from brain (%s): %v", brainURL, taskErr)
+			log.Printf("[Console] Failed to fetch active tasks from brain (%s): %v", brainURL, taskErr)
 			activeTasks = []ActiveTaskStatus{}
 		}
 		if activeTasks == nil {
@@ -474,7 +474,7 @@ func statusHandler(brainURL, gitsyncURL, configPath, gitCommit string, optionalA
 				{Name: "agentsview", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "autoheal", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 				{Name: "proxy", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
-				{Name: "dashboard", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
+				{Name: "console", Status: "healthy", UptimeSeconds: uptimeSec, LastCheckTime: now},
 			}
 		}
 
@@ -505,7 +505,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-	httpkit.WriteResponse(w, r, "dashboard", []byte("OK"))
+	httpkit.WriteResponse(w, r, "console", []byte("OK"))
 }
 
 func securityHeadersMiddleware(next http.Handler) http.Handler {
@@ -517,8 +517,8 @@ func securityHeadersMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// SetupDashboardMux configures the HTTP router and route handlers.
-func SetupDashboardMux(cfg DashboardConfig, assetReg *AssetRegistry) http.Handler {
+// SetupConsoleMux configures the HTTP router and route handlers.
+func SetupConsoleMux(cfg ConsoleConfig, assetReg *AssetRegistry) http.Handler {
 	mux := http.NewServeMux()
 	memoryURL := strings.TrimSpace(cfg.MemoryURL)
 	if memoryURL == "" {
@@ -529,33 +529,33 @@ func SetupDashboardMux(cfg DashboardConfig, assetReg *AssetRegistry) http.Handle
 		haroURL = cfg.BrainURL
 	}
 	mux.HandleFunc("/health", healthHandler)
-	mux.HandleFunc("/dashboard/health", healthHandler)
+	mux.HandleFunc("/console/health", healthHandler)
 	mux.HandleFunc("/api/status", statusHandler(cfg.BrainURL, cfg.GitSyncURL, cfg.ConfigPath, cfg.GitCommit, cfg.KubeAPIServer))
-	mux.HandleFunc("/dashboard/api/status", statusHandler(cfg.BrainURL, cfg.GitSyncURL, cfg.ConfigPath, cfg.GitCommit, cfg.KubeAPIServer))
+	mux.HandleFunc("/console/api/status", statusHandler(cfg.BrainURL, cfg.GitSyncURL, cfg.ConfigPath, cfg.GitCommit, cfg.KubeAPIServer))
 	mux.HandleFunc("/api/facts", factsHandler(memoryURL))
-	mux.HandleFunc("/dashboard/api/facts", factsHandler(memoryURL))
+	mux.HandleFunc("/console/api/facts", factsHandler(memoryURL))
 	mux.HandleFunc("/api/schedules", schedulesHandler(haroURL))
-	mux.HandleFunc("/dashboard/api/schedules", schedulesHandler(haroURL))
+	mux.HandleFunc("/console/api/schedules", schedulesHandler(haroURL))
 	mux.HandleFunc("/api/schedules/runs", scheduleRunsHandler(haroURL))
-	mux.HandleFunc("/dashboard/api/schedules/runs", scheduleRunsHandler(haroURL))
+	mux.HandleFunc("/console/api/schedules/runs", scheduleRunsHandler(haroURL))
 	mux.HandleFunc("/api/builds", buildsHandler(cfg.VanadisURL))
-	mux.HandleFunc("/dashboard/api/builds", buildsHandler(cfg.VanadisURL))
+	mux.HandleFunc("/console/api/builds", buildsHandler(cfg.VanadisURL))
 	mux.HandleFunc("/api/builds/", buildDetailHandler(cfg.VanadisURL))
-	mux.HandleFunc("/dashboard/api/builds/", buildDetailHandler(cfg.VanadisURL))
-	coverageFlush := httpkit.HandleCoverageFlush("dashboard")
+	mux.HandleFunc("/console/api/builds/", buildDetailHandler(cfg.VanadisURL))
+	coverageFlush := httpkit.HandleCoverageFlush("console")
 	mux.HandleFunc("/debug/coverage/flush", coverageFlush)
-	mux.HandleFunc("/dashboard/debug/coverage/flush", coverageFlush)
+	mux.HandleFunc("/console/debug/coverage/flush", coverageFlush)
 
 	if assetReg != nil {
 		mux.HandleFunc("/", assetReg.ServeHTTP)
-		mux.Handle("/dashboard/", http.StripPrefix("/dashboard", http.HandlerFunc(assetReg.ServeHTTP)))
+		mux.Handle("/console/", http.StripPrefix("/console", http.HandlerFunc(assetReg.ServeHTTP)))
 	}
 
 	return securityHeadersMiddleware(mux)
 }
 
-// RunDashboardServer starts the GitHub poller, creates the asset registry, and listens on the configured port.
-func RunDashboardServer(ctx context.Context, cfg DashboardConfig) error {
+// RunConsoleServer starts the GitHub poller, creates the asset registry, and listens on the configured port.
+func RunConsoleServer(ctx context.Context, cfg ConsoleConfig) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -580,11 +580,11 @@ func RunDashboardServer(ctx context.Context, cfg DashboardConfig) error {
 			case <-ctx.Done():
 				return
 			case <-sighupCh:
-				log.Println("Received SIGHUP, reloading dashboard static assets...")
+				log.Println("Received SIGHUP, reloading console static assets...")
 				if err := assetReg.Reload(os.DirFS(staticDir), gitCommit); err != nil {
-					log.Printf("failed to reload dashboard static assets: %v", err)
+					log.Printf("failed to reload console static assets: %v", err)
 				} else {
-					log.Println("Dashboard static assets reloaded successfully")
+					log.Println("Console static assets reloaded successfully")
 				}
 			}
 		}
@@ -603,9 +603,9 @@ func RunDashboardServer(ctx context.Context, cfg DashboardConfig) error {
 		globalGHPoller.Start(ctx)
 	}
 
-	handler := SetupDashboardMux(cfg, assetReg)
+	handler := SetupConsoleMux(cfg, assetReg)
 
-	log.Printf("aerial-dashboard server starting on :%s (upstream brain=%s)", cfg.Port, cfg.BrainURL)
+	log.Printf("aerial-console server starting on :%s (upstream brain=%s)", cfg.Port, cfg.BrainURL)
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           handler,
@@ -621,7 +621,7 @@ func RunDashboardServer(ctx context.Context, cfg DashboardConfig) error {
 
 	select {
 	case <-ctx.Done():
-		log.Println("Shutting down aerial-dashboard server gracefully...")
+		log.Println("Shutting down aerial-console server gracefully...")
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer shutdownCancel()
 		return srv.Shutdown(shutdownCtx)
@@ -633,7 +633,7 @@ func RunDashboardServer(ctx context.Context, cfg DashboardConfig) error {
 var (
 	defaultConfigPath = DefaultConfigPath
 	loadConfigFn      = LoadConfig
-	runDashboardFn    = RunDashboardServer
+	runConsoleFn      = RunConsoleServer
 	exitFn            = log.Fatalf
 	sighupNotifyFn    = func(c chan<- os.Signal) { signal.Notify(c, syscall.SIGHUP) }
 )
@@ -652,7 +652,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	if err := runDashboardFn(ctx, cfg); err != nil {
-		exitFn("dashboard failed: %v", err)
+	if err := runConsoleFn(ctx, cfg); err != nil {
+		exitFn("console failed: %v", err)
 	}
 }

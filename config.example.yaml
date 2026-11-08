@@ -132,10 +132,10 @@ mcp_servers:
 
 
 # ------------------------------------------------------------------------------
-# Dashboard Configuration
+# Console Configuration
 # ------------------------------------------------------------------------------
-# Configures CI and pipeline monitoring in the Aerial Command HUD (aerial-dashboard).
-dashboard:
+# Configures CI and pipeline monitoring in the Aerial Command HUD (aerial-console).
+console:
   # Repositories to monitor in the CI pipeline fanout.
   # When configured, the poller checks GitHub Actions runs across all declared repos.
   github_repos:

@@ -394,7 +394,7 @@ func TestSchedulesAndRunsHandlers_TableDriven(t *testing.T) {
 			wantStatus: http.StatusInternalServerError,
 		},
 		{
-			name:           "SetupDashboardMux_Schedules_RoutesToHaro",
+			name:           "SetupConsoleMux_Schedules_RoutesToHaro",
 			useMux:         true,
 			brainURL:       offlineURL,
 			haroURL:        mockHaro.URL,
@@ -404,17 +404,17 @@ func TestSchedulesAndRunsHandlers_TableDriven(t *testing.T) {
 			wantBodySubstr: []string{"Haro Schedule", `"total_active":1`},
 		},
 		{
-			name:           "SetupDashboardMux_DashboardSchedules_RoutesToHaro",
+			name:           "SetupConsoleMux_ConsoleSchedules_RoutesToHaro",
 			useMux:         true,
 			brainURL:       offlineURL,
 			haroURL:        mockHaro.URL,
 			method:         "GET",
-			target:         "/dashboard/api/schedules",
+			target:         "/console/api/schedules",
 			wantStatus:     http.StatusOK,
 			wantBodySubstr: []string{"Haro Schedule", `"total_active":1`},
 		},
 		{
-			name:           "SetupDashboardMux_ScheduleRuns_RoutesToHaro",
+			name:           "SetupConsoleMux_ScheduleRuns_RoutesToHaro",
 			useMux:         true,
 			isRuns:         true,
 			brainURL:       offlineURL,
@@ -425,18 +425,18 @@ func TestSchedulesAndRunsHandlers_TableDriven(t *testing.T) {
 			wantBodySubstr: []string{"Haro Brief #101", `"total":42`},
 		},
 		{
-			name:           "SetupDashboardMux_DashboardScheduleRuns_RoutesToHaro",
+			name:           "SetupConsoleMux_ConsoleScheduleRuns_RoutesToHaro",
 			useMux:         true,
 			isRuns:         true,
 			brainURL:       offlineURL,
 			haroURL:        mockHaro.URL,
 			method:         "GET",
-			target:         "/dashboard/api/schedules/runs?limit=10&offset=5&schedule_id=cron-1&status=success",
+			target:         "/console/api/schedules/runs?limit=10&offset=5&schedule_id=cron-1&status=success",
 			wantStatus:     http.StatusOK,
 			wantBodySubstr: []string{"Haro Brief #101", `"total":42`},
 		},
 		{
-			name:           "SetupDashboardMux_Schedules_FallbackToBrainWhenHaroEmpty",
+			name:           "SetupConsoleMux_Schedules_FallbackToBrainWhenHaroEmpty",
 			useMux:         true,
 			brainURL:       mockBrain.URL,
 			haroURL:        "",
@@ -451,7 +451,7 @@ func TestSchedulesAndRunsHandlers_TableDriven(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var h http.Handler
 			if tt.useMux {
-				h = SetupDashboardMux(DashboardConfig{
+				h = SetupConsoleMux(ConsoleConfig{
 					BrainURL: tt.brainURL,
 					HaroURL:  tt.haroURL,
 				}, nil)
@@ -637,11 +637,11 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 			wantBodySubstr: []string{"build-101", "chunk-1", "drawer-only-shared-context", "drawer-only-instructions"},
 		},
 		{
-			name:           "BuildDetail_Success_DashboardPrefix",
+			name:           "BuildDetail_Success_ConsolePrefix",
 			isDetail:       true,
 			vanadisURL:     mockVanadis.URL,
 			method:         http.MethodGet,
-			target:         "/dashboard/api/builds/build-101",
+			target:         "/console/api/builds/build-101",
 			wantStatus:     http.StatusOK,
 			wantBodySubstr: []string{"build-101"},
 		},
@@ -720,11 +720,11 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
-			name:       "MuxWiring_DashboardBuildsRoot",
+			name:       "MuxWiring_ConsoleBuildsRoot",
 			useMux:     true,
 			vanadisURL: mockVanadis.URL,
 			method:     http.MethodGet,
-			target:     "/dashboard/api/builds",
+			target:     "/console/api/builds",
 			wantStatus: http.StatusOK,
 		},
 		{
@@ -736,11 +736,11 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 			wantStatus: http.StatusOK,
 		},
 		{
-			name:       "MuxWiring_DashboardBuildDetail2",
+			name:       "MuxWiring_ConsoleBuildDetail2",
 			useMux:     true,
 			vanadisURL: mockVanadis.URL,
 			method:     http.MethodGet,
-			target:     "/dashboard/api/builds/test-build-2",
+			target:     "/console/api/builds/test-build-2",
 			wantStatus: http.StatusOK,
 		},
 	}
@@ -750,7 +750,7 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 			var h http.Handler
 			switch {
 			case tt.useMux:
-				h = SetupDashboardMux(DashboardConfig{VanadisURL: tt.vanadisURL}, nil)
+				h = SetupConsoleMux(ConsoleConfig{VanadisURL: tt.vanadisURL}, nil)
 			case tt.isDetail:
 				h = buildDetailHandler(tt.vanadisURL)
 			default:

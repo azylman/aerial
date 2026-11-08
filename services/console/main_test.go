@@ -108,7 +108,7 @@ func TestStatusHandler(t *testing.T) {
 		},
 		{
 			name:              "OngoingDeploy",
-			yamlContent:       "dashboard: {}\n",
+			yamlContent:       "console: {}\n",
 			wantCode:          http.StatusOK,
 			wantOngoingDeploy: "idle",
 		},
@@ -127,7 +127,7 @@ func TestStatusHandler(t *testing.T) {
 		{
 			name:          "EnrichedFields",
 			gitSyncMode:   "synced",
-			yamlContent:   "dashboard:\n  quick_launch_links:\n    - name: \"HOME\"\n      url: \"https://home.zylman.com\"\n",
+			yamlContent:   "console:\n  quick_launch_links:\n    - name: \"HOME\"\n      url: \"https://home.zylman.com\"\n",
 			wantCode:      http.StatusOK,
 			wantQuickLink: "HOME",
 		},
@@ -153,7 +153,7 @@ func TestStatusHandler(t *testing.T) {
 			pollerJobs: map[int64][]GitHubJob{
 				999: {{ID: 1, Name: "Build Dashboard", Status: "in_progress"}},
 			},
-			yamlContent:       "dashboard: {}\n",
+			yamlContent:       "console: {}\n",
 			wantCode:          http.StatusOK,
 			wantDeploys:       2,
 			wantOngoingDeploy: "swapping",
@@ -165,10 +165,10 @@ func TestStatusHandler(t *testing.T) {
 			wantCode: http.StatusMethodNotAllowed,
 		},
 		{
-			name:          "SetupDashboardMux_StatusWiring",
+			name:          "SetupConsoleMux_StatusWiring",
 			useMux:        true,
 			gitSyncMode:   "synced",
-			yamlContent:   "dashboard:\n  quick_launch_links:\n    - name: \"TESTLINK\"\n      url: \"https://test.zylman.com\"\n",
+			yamlContent:   "console:\n  quick_launch_links:\n    - name: \"TESTLINK\"\n      url: \"https://test.zylman.com\"\n",
 			wantCode:      http.StatusOK,
 			wantQuickLink: "TESTLINK",
 		},
@@ -265,7 +265,7 @@ func TestStatusHandler(t *testing.T) {
 			}
 			var h http.Handler
 			if tc.useMux {
-				cfg := DashboardConfig{
+				cfg := ConsoleConfig{
 					Port:          "8080",
 					BrainURL:      brainURL,
 					GitSyncURL:    gitSyncURL,
@@ -273,7 +273,7 @@ func TestStatusHandler(t *testing.T) {
 					GitCommit:     commitArg,
 					KubeAPIServer: kubeAPIServer,
 				}
-				h = SetupDashboardMux(cfg, nil)
+				h = SetupConsoleMux(cfg, nil)
 			} else {
 				h = statusHandler(brainURL, gitSyncURL, cfgFile, commitArg, kubeAPIServer)
 			}
@@ -605,14 +605,14 @@ func TestResolveStaticDir(t *testing.T) {
 	}
 }
 
-func TestDashboardServerLifecycle(t *testing.T) {
+func TestConsoleServerLifecycle(t *testing.T) {
 	// 1. Bad port errors
-	errBadPort := RunDashboardServer(context.Background(), DashboardConfig{Port: "bad-port-string"})
+	errBadPort := RunConsoleServer(context.Background(), ConsoleConfig{Port: "bad-port-string"})
 	if errBadPort == nil {
-		t.Errorf("expected error on bad port in RunDashboardServer")
+		t.Errorf("expected error on bad port in RunConsoleServer")
 	}
 
-	errFatal := RunDashboardServer(context.Background(), DashboardConfig{Port: "-1"})
+	errFatal := RunConsoleServer(context.Background(), ConsoleConfig{Port: "-1"})
 	if errFatal == nil {
 		t.Errorf("expected fatal error on invalid port -1")
 	}
@@ -634,7 +634,7 @@ func TestDashboardServerLifecycle(t *testing.T) {
 	}))
 	defer ghMock.Close()
 
-	cfg := DashboardConfig{
+	cfg := ConsoleConfig{
 		Port:       port,
 		BrainURL:   "http://127.0.0.1:54321",
 		GHRepo:     "azylman/aerial",
@@ -656,7 +656,7 @@ func TestDashboardServerLifecycle(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- RunDashboardServer(ctx, cfg)
+		done <- RunConsoleServer(ctx, cfg)
 	}()
 
 	probeAddr := "127.0.0.1:" + port
@@ -695,10 +695,10 @@ func TestDashboardServerLifecycle(t *testing.T) {
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Errorf("RunDashboardServer returned error: %v", err)
+			t.Errorf("RunConsoleServer returned error: %v", err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("RunDashboardServer did not shut down in time")
+		t.Fatal("RunConsoleServer did not shut down in time")
 	}
 }
 
@@ -979,7 +979,7 @@ func (m *mockErrWriter) WriteHeader(statusCode int) {
 	m.wroteHeader = true
 }
 
-func TestDashboard_CloseWarnAndDisconnect(t *testing.T) {
+func TestConsole_CloseWarnAndDisconnect(t *testing.T) {
 	// 2. drainAndClose with nil, success, copy error, and close error
 	drainAndClose(nil, "nil body")
 	drainAndClose(&mockReadCloser{Reader: strings.NewReader("clean body content"), closeErr: nil}, "clean body")
@@ -1012,14 +1012,14 @@ func TestDashboard_CloseWarnAndDisconnect(t *testing.T) {
 
 	// 4. writeResponse
 	rr := httptest.NewRecorder()
-	httpkit.WriteResponse(rr, reqActive, "dashboard", []byte("success payload"))
+	httpkit.WriteResponse(rr, reqActive, "console", []byte("success payload"))
 	if rr.Body.String() != "success payload" {
 		t.Errorf("expected 'success payload', got %q", rr.Body.String())
 	}
 	mockWDisconnect := newMockErrWriter(syscall.EPIPE)
-	httpkit.WriteResponse(mockWDisconnect, reqActive, "dashboard", []byte("data"))
+	httpkit.WriteResponse(mockWDisconnect, reqActive, "console", []byte("data"))
 	mockWOtherErr := newMockErrWriter(errors.New("other write failure"))
-	httpkit.WriteResponse(mockWOtherErr, reqActive, "dashboard", []byte("data"))
+	httpkit.WriteResponse(mockWOtherErr, reqActive, "console", []byte("data"))
 
 	// 5. writeJSON: success, marshal error, and write error
 	rrJSON := httptest.NewRecorder()
@@ -1059,7 +1059,7 @@ func TestDashboard_CloseWarnAndDisconnect(t *testing.T) {
 }
 
 func TestCoverageFlushEndpoint(t *testing.T) {
-	mux := SetupDashboardMux(DashboardConfig{}, nil)
+	mux := SetupConsoleMux(ConsoleConfig{}, nil)
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
@@ -1085,7 +1085,7 @@ func TestCoverageFlushEndpoint(t *testing.T) {
 		t.Errorf("expected 200 OK and both flush fns called, got status=%d called=%v metaCalled=%v", resp.StatusCode, called, metaCalled)
 	}
 
-	resp2, err2 := http.Get(ts.URL + "/dashboard/debug/coverage/flush")
+	resp2, err2 := http.Get(ts.URL + "/console/debug/coverage/flush")
 	if err2 != nil {
 		t.Fatalf("unexpected error: %v", err2)
 	}
@@ -1115,23 +1115,23 @@ func TestCoverageFlushEndpoint(t *testing.T) {
 		t.Errorf("expected 500 on error, got: %d", resp4.StatusCode)
 	}
 
-	resp5, err5 := http.Get(ts.URL + "/dashboard/debug/coverage/flush")
+	resp5, err5 := http.Get(ts.URL + "/console/debug/coverage/flush")
 	if err5 != nil {
 		t.Fatalf("unexpected error: %v", err5)
 	}
 	defer resp5.Body.Close()
 	if resp5.StatusCode != http.StatusInternalServerError {
-		t.Errorf("expected 500 on dashboard subpath error, got: %d", resp5.StatusCode)
+		t.Errorf("expected 500 on console subpath error, got: %d", resp5.StatusCode)
 	}
 }
 
 func TestMain_Execution(t *testing.T) {
 	origLoad := loadConfigFn
-	origRun := runDashboardFn
+	origRun := runConsoleFn
 	origExit := exitFn
 	defer func() {
 		loadConfigFn = origLoad
-		runDashboardFn = origRun
+		runConsoleFn = origRun
 		exitFn = origExit
 	}()
 
@@ -1166,13 +1166,13 @@ func TestMain_Execution(t *testing.T) {
 			runCalled := false
 			exitCalled := false
 
-			loadConfigFn = func(_ string) (DashboardConfig, error) {
+			loadConfigFn = func(_ string) (ConsoleConfig, error) {
 				if tc.loadErr != nil {
-					return DashboardConfig{}, tc.loadErr
+					return ConsoleConfig{}, tc.loadErr
 				}
-				return DashboardConfig{Port: "8084"}, nil
+				return ConsoleConfig{Port: "8084"}, nil
 			}
-			runDashboardFn = func(_ context.Context, _ DashboardConfig) error {
+			runConsoleFn = func(_ context.Context, _ ConsoleConfig) error {
 				runCalled = true
 				return tc.runErr
 			}

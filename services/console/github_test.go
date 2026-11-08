@@ -566,7 +566,7 @@ func TestGitHubPoller_MultiRepoAndDiscovery_TableDriven(t *testing.T) {
 				cfgFile := filepath.Join(tempDir, "config.yaml")
 
 				initialYaml := `
-dashboard:
+console:
   github_repos:
     - "azylman/aerial"
 `
@@ -601,7 +601,7 @@ dashboard:
 				}
 
 				updatedYaml := `
-dashboard:
+console:
   github_repos:
     - "azylman/aerial"
     - "azylman/aerial-sidecars"

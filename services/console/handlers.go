@@ -239,12 +239,12 @@ func serveUpstreamGET[T any](
 	statusCode, _, fetchErr := fetchUpstreamJSON(r.Context(), client, targetURL, &data)
 	if fetchErr != nil {
 		if statusCode == 0 {
-			log.Printf("[Dashboard] Upstream %s request failed (%s): %v", upstreamLabel, targetURL, fetchErr)
+			log.Printf("[Console] Upstream %s request failed (%s): %v", upstreamLabel, targetURL, fetchErr)
 			writeJSON(w, r, http.StatusServiceUnavailable, makeErrPayload("degraded", unreachableMsg))
 			return
 		}
 		if statusCode != http.StatusOK {
-			log.Printf("[Dashboard] Upstream %s returned status %d", upstreamLabel, statusCode)
+			log.Printf("[Console] Upstream %s returned status %d", upstreamLabel, statusCode)
 			writeJSON(w, r, statusCode, makeErrPayload("error", "Upstream "+upstreamLabel+" error occurred"))
 			return
 		}
@@ -372,7 +372,7 @@ func buildsHandler(vanadisBaseURL string) http.HandlerFunc {
 
 func handleBuildDetailFetchError(w http.ResponseWriter, r *http.Request, targetURL string, statusCode int, upstreamErrMsg string, fetchErr error) {
 	if statusCode == 0 {
-		log.Printf("[Dashboard] Upstream vanadis detail request failed (%s): %v", targetURL, fetchErr)
+		log.Printf("[Console] Upstream vanadis detail request failed (%s): %v", targetURL, fetchErr)
 		writeJSON(w, r, http.StatusServiceUnavailable, BuildDetailAPIResponse{
 			Status: "degraded",
 			Error:  "Vanadis service unreachable. Retrying...",
@@ -381,7 +381,7 @@ func handleBuildDetailFetchError(w http.ResponseWriter, r *http.Request, targetU
 		return
 	}
 	if statusCode != http.StatusOK {
-		log.Printf("[Dashboard] Upstream vanadis detail returned status %d", statusCode)
+		log.Printf("[Console] Upstream vanadis detail returned status %d", statusCode)
 		errMsg := "Upstream vanadis error occurred"
 		if statusCode == http.StatusNotFound {
 			errMsg = "Build not found"

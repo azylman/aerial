@@ -386,10 +386,10 @@ FRONTEND_BRANCH_PCT="0.0"
 FRONTEND_FUNCS_PCT="0.0"
 FRONTEND_STATUS="SKIPPED"
 
-if [ -f "services/dashboard/app.test.js" ] && { [ -z "$TARGET_SERVICE" ] || [ "$TARGET_SERVICE" = "services/dashboard" ] || [ "$TARGET_SERVICE" = "dashboard" ]; }; then
+if [ -f "services/console/app.test.js" ] && { [ -z "$TARGET_SERVICE" ] || [ "$TARGET_SERVICE" = "services/console" ] || [ "$TARGET_SERVICE" = "console" ]; }; then
     if command -v node >/dev/null 2>&1; then
         node_exit=0
-        node_out=$( (cd services/dashboard && node --test --experimental-test-coverage *.test.js 2>&1) ) || node_exit=$?
+        node_out=$( (cd services/console && node --test --experimental-test-coverage *.test.js 2>&1) ) || node_exit=$?
         if [ "$node_exit" -ne 0 ]; then
             echo "$node_out" >&2
             record_violation "Permet HUD frontend tests failed during coverage collection"

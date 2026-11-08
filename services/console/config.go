@@ -13,7 +13,7 @@ import (
 )
 
 // DefaultConfigPath is the canonical in-container configuration path.
-const DefaultConfigPath = "/config/dashboard.yaml"
+const DefaultConfigPath = "/config/console.yaml"
 
 var localConfigPath = "/local/config.yaml"
 
@@ -23,7 +23,7 @@ func ResolveConfigPath(fallbackPath string) string {
 	if fallbackPath != "" {
 		return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, fallbackPath)
 	}
-	return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, DefaultConfigPath, "dashboard.yaml", "config.yaml")
+	return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, DefaultConfigPath, "console.yaml", "config.yaml")
 }
 
 type QuickLaunchLink struct {
@@ -42,14 +42,14 @@ func DefaultQuickLaunchLinks() []QuickLaunchLink {
 }
 
 type rawUserConfig struct {
-	Dashboard struct {
+	Console struct {
 		QuickLinks       []QuickLaunchLink `yaml:"quick_links"`
 		QuickLaunchLinks []QuickLaunchLink `yaml:"quick_launch_links"`
 		GitHubRepos      []string          `yaml:"github_repos"`
 		Repos            []string          `yaml:"repos"`
 		VanadisURL       string            `yaml:"vanadis_url"`
 		HaroURL          string            `yaml:"haro_url"`
-	} `yaml:"dashboard"`
+	} `yaml:"console"`
 	QuickLinks       []QuickLaunchLink `yaml:"quick_links"`
 	QuickLaunchLinks []QuickLaunchLink `yaml:"quick_launch_links"`
 	GitHubRepos      []string          `yaml:"github_repos"`
@@ -72,22 +72,22 @@ func loadRawUserConfig(configPath string) (rawUserConfig, bool) {
 
 	var cfg rawUserConfig
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		log.Printf("[Dashboard] Warning: failed to parse %s: %v", configPath, err)
+		log.Printf("[Console] Warning: failed to parse %s: %v", configPath, err)
 		return rawUserConfig{}, false
 	}
 	return cfg, true
 }
 
-// loadDashboardRepos parses the list of GitHub repositories configured for status dashboard monitoring.
-func loadDashboardRepos(configPath string) []string {
+// loadConsoleRepos parses the list of GitHub repositories configured for console monitoring.
+func loadConsoleRepos(configPath string) []string {
 	cfg, ok := loadRawUserConfig(configPath)
 	if !ok {
 		return nil
 	}
 
-	rawList := cfg.Dashboard.GitHubRepos
+	rawList := cfg.Console.GitHubRepos
 	if len(rawList) == 0 {
-		rawList = cfg.Dashboard.Repos
+		rawList = cfg.Console.Repos
 	}
 	if len(rawList) == 0 {
 		rawList = cfg.GitHubRepos
@@ -116,9 +116,9 @@ func loadQuickLaunchLinks(configPath string) []QuickLaunchLink {
 		return links
 	}
 
-	custom := cfg.Dashboard.QuickLinks
+	custom := cfg.Console.QuickLinks
 	if len(custom) == 0 {
-		custom = cfg.Dashboard.QuickLaunchLinks
+		custom = cfg.Console.QuickLaunchLinks
 	}
 	if len(custom) == 0 {
 		custom = cfg.QuickLaunchLinks
@@ -141,8 +141,8 @@ func loadQuickLaunchLinks(configPath string) []QuickLaunchLink {
 	return links
 }
 
-// DashboardConfig holds configuration settings for the dashboard web server.
-type DashboardConfig struct {
+// ConsoleConfig holds configuration settings for the console web server.
+type ConsoleConfig struct {
 	Port          string
 	BrainURL      string
 	EriURL        string
@@ -159,8 +159,8 @@ type DashboardConfig struct {
 	HaroURL       string
 }
 
-// DashboardYAMLConfig defines the declarative file schema for dashboard.yaml.
-type DashboardYAMLConfig struct {
+// ConsoleYAMLConfig defines the declarative file schema for console.yaml.
+type ConsoleYAMLConfig struct {
 	Port          string   `yaml:"port"`
 	EriURL        string   `yaml:"eri_url"`
 	MemoryURL     string   `yaml:"memory_url"`
@@ -172,11 +172,11 @@ type DashboardYAMLConfig struct {
 }
 
 // LoadConfig loads configuration from path using os.Getenv.
-func LoadConfig(path string) (DashboardConfig, error) {
+func LoadConfig(path string) (ConsoleConfig, error) {
 	return LoadConfigFile(path, os.Getenv)
 }
 
-func parseDashboardRepos(rawRepos []string) []string {
+func parseConsoleRepos(rawRepos []string) []string {
 	var repos []string
 	seen := make(map[string]bool)
 	for _, r := range rawRepos {
@@ -197,54 +197,54 @@ func firstNonEmptyPort(val, fallback string) string {
 	return fallback
 }
 
-// LoadConfigFile loads and strictly validates dashboard configuration from a YAML file.
-func LoadConfigFile(path string, lookup func(string) string) (DashboardConfig, error) {
+// LoadConfigFile loads and strictly validates console configuration from a YAML file.
+func LoadConfigFile(path string, lookup func(string) string) (ConsoleConfig, error) {
 	if lookup == nil {
 		lookup = os.Getenv
 	}
 
 	cleanPath := strings.TrimSpace(path)
 	if cleanPath == "" {
-		return DashboardConfig{}, fmt.Errorf("config: path cannot be empty")
+		return ConsoleConfig{}, fmt.Errorf("config: path cannot be empty")
 	}
 
 	data, err := os.ReadFile(cleanPath)
 	if err != nil {
-		return DashboardConfig{}, fmt.Errorf("config: failed to read %s: %w", cleanPath, err)
+		return ConsoleConfig{}, fmt.Errorf("config: failed to read %s: %w", cleanPath, err)
 	}
 
-	var ycfg DashboardYAMLConfig
+	var ycfg ConsoleYAMLConfig
 	if err := yaml.Unmarshal(data, &ycfg); err != nil {
-		return DashboardConfig{}, fmt.Errorf("config: failed to parse YAML from %s: %w", cleanPath, err)
+		return ConsoleConfig{}, fmt.Errorf("config: failed to parse YAML from %s: %w", cleanPath, err)
 	}
 
 	port := strings.TrimSpace(ycfg.Port)
 	if port == "" {
-		return DashboardConfig{}, fmt.Errorf("config: port is required in %s", cleanPath)
+		return ConsoleConfig{}, fmt.Errorf("config: port is required in %s", cleanPath)
 	}
 	eriURL := strings.TrimSpace(ycfg.EriURL)
 	if eriURL == "" {
 		eriURL = strings.TrimSpace(lookup("ERI_URL"))
 	}
 	if eriURL == "" {
-		return DashboardConfig{}, fmt.Errorf("config: eri_url is required in %s", cleanPath)
+		return ConsoleConfig{}, fmt.Errorf("config: eri_url is required in %s", cleanPath)
 	}
 	memoryURL := strings.TrimSpace(ycfg.MemoryURL)
 	if memoryURL == "" {
-		return DashboardConfig{}, fmt.Errorf("config: memory_url is required in %s", cleanPath)
+		return ConsoleConfig{}, fmt.Errorf("config: memory_url is required in %s", cleanPath)
 	}
 	haroURL := strings.TrimSpace(ycfg.HaroURL)
 	if haroURL == "" {
-		return DashboardConfig{}, fmt.Errorf("config: haro_url is required in %s", cleanPath)
+		return ConsoleConfig{}, fmt.Errorf("config: haro_url is required in %s", cleanPath)
 	}
 	vanadisURL := strings.TrimSpace(ycfg.VanadisURL)
 	if vanadisURL == "" {
-		return DashboardConfig{}, fmt.Errorf("config: vanadis_url is required in %s", cleanPath)
+		return ConsoleConfig{}, fmt.Errorf("config: vanadis_url is required in %s", cleanPath)
 	}
 
-	repos := parseDashboardRepos(ycfg.GHRepos)
+	repos := parseConsoleRepos(ycfg.GHRepos)
 	if len(repos) == 0 {
-		return DashboardConfig{}, fmt.Errorf("config: github_repos is required in %s", cleanPath)
+		return ConsoleConfig{}, fmt.Errorf("config: github_repos is required in %s", cleanPath)
 	}
 
 	ghToken := strings.TrimSpace(lookup("GITHUB_PAT"))
@@ -266,7 +266,7 @@ func LoadConfigFile(path string, lookup func(string) string) (DashboardConfig, e
 		}
 	}
 
-	return DashboardConfig{
+	return ConsoleConfig{
 		Port:          port,
 		BrainURL:      eriURL,
 		EriURL:        eriURL,
