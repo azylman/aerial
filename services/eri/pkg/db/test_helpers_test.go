@@ -35,7 +35,7 @@ func assertStoreUnavailable(t *testing.T, s Store) {
 	ctx := context.Background()
 	requireErr(t, s.InsertMessage(ctx, Message{}), "InsertMessage")
 	requireErr(t, s.UpdateMessageStatus(ctx, "id", "", ""), "UpdateMessageStatus")
-	requireErr(t, s.UpdateMessageCompleted(ctx, "id", ""), "UpdateMessageCompleted")
+	requireErr(t, s.UpdateMessageCompleted(ctx, "id", "", ""), "UpdateMessageCompleted")
 	requireErr(t, s.IncrementMessageRetry(ctx, "id", ""), "IncrementMessageRetry")
 	requireErr(t, s.ResetMessageToPendingWithRestart(ctx, "id", ""), "ResetMessageToPendingWithRestart")
 	requireErr(t, c1(s.GetPendingOrProcessingMessages(ctx, 10)), "GetPendingOrProcessingMessages")

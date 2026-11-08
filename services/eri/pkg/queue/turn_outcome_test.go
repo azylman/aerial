@@ -800,7 +800,8 @@ func TestWorker_DeliverSuccessAndFinalize_CustomSessionTarget_TableDriven(t *tes
 
 			var d *db.Dispatch
 			if tc.silent {
-				d = &db.Dispatch{ID: "d-silent", Source: "webhook"}
+				d = &db.Dispatch{ID: "d-silent", Source: "webhook", Status: db.StatusProcessing}
+				_ = store.InsertDispatch(context.Background(), *d)
 			}
 
 			te := &turnExecution{
@@ -815,8 +816,22 @@ func TestWorker_DeliverSuccessAndFinalize_CustomSessionTarget_TableDriven(t *tes
 
 			resp := &runner.AgyResponse{
 				Response: "Task completed successfully",
+				Usage: runner.TokenUsage{
+					InputTokens:     50,
+					OutputTokens:    25,
+					ThinkingTokens:  5,
+					CacheReadTokens: 2,
+					TotalTokens:     82,
+				},
 			}
-			ok, _ := te.deliverSuccessAndFinalize(resp, runner.TokenUsage{}, "test-model", 1, 1)
+			accumulated := runner.TokenUsage{
+				InputTokens:     10,
+				OutputTokens:    5,
+				ThinkingTokens:  1,
+				CacheReadTokens: 1,
+				TotalTokens:     17,
+			}
+			ok, _ := te.deliverSuccessAndFinalize(resp, accumulated, "test-model", 1, 1)
 			if !ok {
 				t.Fatalf("deliverSuccessAndFinalize returned false")
 			}
@@ -825,6 +840,24 @@ func TestWorker_DeliverSuccessAndFinalize_CustomSessionTarget_TableDriven(t *tes
 			}
 			if !tc.wantDelivered && deliveredTo != "" {
 				t.Fatalf("deliveredTo = %q, want empty", deliveredTo)
+			}
+
+			if tc.silent {
+				disp, err := store.GetDispatch(context.Background(), "d-silent")
+				if err != nil || disp == nil {
+					t.Fatalf("failed to get dispatch: %v", err)
+				}
+				if disp.DurationMs < 0 || disp.InputTokens != 60 || disp.OutputTokens != 30 || disp.ThinkingTokens != 6 || disp.CacheReadTokens != 3 || disp.TotalTokens != 99 {
+					t.Errorf("unexpected telemetry on dispatch: %+v", disp)
+				}
+			} else {
+				m, err := store.GetMessage(context.Background(), "msg-succ")
+				if err != nil || m == nil {
+					t.Fatalf("failed to get message: %v", err)
+				}
+				if m.DurationMs < 0 || m.InputTokens != 60 || m.OutputTokens != 30 || m.ThinkingTokens != 6 || m.CacheReadTokens != 3 || m.TotalTokens != 99 {
+					t.Errorf("unexpected telemetry on message: %+v", m)
+				}
 			}
 		})
 	}
@@ -1007,6 +1040,99 @@ func TestTurnExecution_IsQuotaRetry(t *testing.T) {
 			t.Parallel()
 			if got := tc.te.isQuotaRetry(); got != tc.want {
 				t.Errorf("isQuotaRetry() = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTurnExecution_HandleTrailing_ZeroTurnTelemetryLeak(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		isQuotaPaused bool
+		trailingMsgs  []db.Message
+		trailingInfos []WakeInfo
+		wantStatus    map[string]string
+	}{
+		{
+			name: "ambient and wake trailing messages never leak active turn telemetry",
+			trailingMsgs: []db.Message{
+				{ID: "m-ambient", ThreadID: "t-trail", Content: "ambient talk"},
+				{ID: "m-wake", ThreadID: "t-trail", Content: "<@aerial> wake up"},
+			},
+			trailingInfos: []WakeInfo{
+				{IsWake: false, Score: 0.1, Threshold: 0.7, Reason: "ambient chat"},
+				{IsWake: true, Score: 0.9, Threshold: 0.7, Reason: "mention"},
+			},
+			wantStatus: map[string]string{
+				"m-ambient": db.StatusCompleted,
+				"m-wake":    db.StatusPending,
+			},
+		},
+		{
+			name:          "quota paused trailing messages never leak active turn telemetry",
+			isQuotaPaused: true,
+			trailingMsgs: []db.Message{
+				{ID: "m-quota-wake", ThreadID: "t-trail", Content: "<@aerial> hi"},
+				{ID: "m-quota-ambient", ThreadID: "t-trail", Content: "ambient"},
+			},
+			trailingInfos: []WakeInfo{
+				{IsWake: true},
+				{IsWake: false},
+			},
+			wantStatus: map[string]string{
+				"m-quota-wake":    db.StatusFailed,
+				"m-quota-ambient": db.StatusFailed,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := dbtest.NewFakeStore()
+			for _, m := range tc.trailingMsgs {
+				_ = store.InsertMessage(context.Background(), m)
+			}
+			pool := New(config.NewFromData(&config.ConfigData{}), WorkerPoolConfig{
+				Store: store,
+			})
+			defer pool.Stop()
+
+			te := &turnExecution{
+				pool:           pool,
+				threadID:       "t-trail",
+				triggerType:    "discord",
+				turnAttempted:  true,
+				turnDurationMs: 4500,
+				turnTokenUsage: runner.TokenUsage{
+					InputTokens:     100,
+					OutputTokens:    200,
+					ThinkingTokens:  50,
+					CacheReadTokens: 25,
+					TotalTokens:     375,
+				},
+				isQuotaPaused: tc.isQuotaPaused,
+				trailingMsgs:  tc.trailingMsgs,
+				trailingInfos: tc.trailingInfos,
+			}
+
+			te.handleTrailing()
+
+			for id, expectedStatus := range tc.wantStatus {
+				msg, err := store.GetMessage(context.Background(), id)
+				if err != nil || msg == nil {
+					t.Fatalf("failed to retrieve message %s: %v", id, err)
+				}
+				if msg.Status != expectedStatus {
+					t.Errorf("msg %s status = %q, want %q", id, msg.Status, expectedStatus)
+				}
+				if msg.DurationMs != 0 || msg.InputTokens != 0 || msg.OutputTokens != 0 ||
+					msg.ThinkingTokens != 0 || msg.CacheReadTokens != 0 || msg.TotalTokens != 0 {
+					t.Errorf("msg %s leaked turn telemetry: duration=%d input=%d output=%d thinking=%d cache=%d total=%d",
+						id, msg.DurationMs, msg.InputTokens, msg.OutputTokens, msg.ThinkingTokens, msg.CacheReadTokens, msg.TotalTokens)
+				}
 			}
 		})
 	}

@@ -34,7 +34,7 @@ func assertStoreUnavailable(t *testing.T, s db.Store) {
 	ctx := context.Background()
 	requireErr(t, s.InsertMessage(ctx, db.Message{}), "InsertMessage")
 	requireErr(t, s.UpdateMessageStatus(ctx, "id", "", ""), "UpdateMessageStatus")
-	requireErr(t, s.UpdateMessageCompleted(ctx, "id", ""), "UpdateMessageCompleted")
+	requireErr(t, s.UpdateMessageCompleted(ctx, "id", "", ""), "UpdateMessageCompleted")
 	requireErr(t, s.IncrementMessageRetry(ctx, "id", ""), "IncrementMessageRetry")
 	requireErr(t, s.ResetMessageToPendingWithRestart(ctx, "id", ""), "ResetMessageToPendingWithRestart")
 	requireErr(t, c1(s.GetPendingOrProcessingMessages(ctx, 10)), "GetPendingOrProcessingMessages")
@@ -78,13 +78,17 @@ func TestFakeStore_HasActiveThreadTurn(t *testing.T) {
 		t.Fatalf("expected true, nil for pending message, got %v, %v", active, err)
 	}
 
-	mustOK(t, s.UpdateMessageStatus(ctx, "m1", db.StatusProcessing, ""), "UpdateMessageStatus")
+	mustOK(t, s.UpdateMessageStatus(ctx, "m1", db.StatusProcessing, "busy", db.TurnTelemetry{DurationMs: 100, TotalTokens: 50}), "UpdateMessageStatus with telemetry")
 	active, err = s.HasActiveThreadTurn(ctx, "th-1")
 	if err != nil || !active {
 		t.Fatalf("expected true, nil for processing message, got %v, %v", active, err)
 	}
 
-	mustOK(t, s.UpdateMessageStatus(ctx, "m1", db.StatusCompleted, ""), "UpdateMessageStatus")
+	mustOK(t, s.UpdateMessageStatus(ctx, "m1", db.StatusCompleted, ""), "UpdateMessageStatus without telemetry")
+	msgM1, _ := s.GetMessage(ctx, "m1")
+	if msgM1.DurationMs != 100 || msgM1.TotalTokens != 50 {
+		t.Errorf("expected telemetry preserved on m1, got %+v", msgM1)
+	}
 	active, err = s.HasActiveThreadTurn(ctx, "th-1")
 	if err != nil || active {
 		t.Fatalf("expected false, nil for completed message, got %v, %v", active, err)
@@ -176,8 +180,8 @@ func TestFakeStoreMessageOperations(t *testing.T) {
 		t.Errorf("ClaimPendingMessage non-existent = true, want false")
 	}
 
-	_ = s.UpdateMessageCompleted(ctx, "msg-1", "Done response")
-	_ = s.UpdateMessageCompleted(ctx, "msg-none", "No-op")
+	_ = s.UpdateMessageCompleted(ctx, "msg-1", "Done response", "")
+	_ = s.UpdateMessageCompleted(ctx, "msg-none", "No-op", "")
 	if msg, _ := s.GetMessage(ctx, "msg-1"); msg.Status != db.StatusCompleted || msg.ResponseText != "Done response" {
 		t.Errorf("expected completed, got %+v", msg)
 	}
@@ -885,11 +889,15 @@ func TestFakeStore_DispatchStoreLifecycle(t *testing.T) {
 		t.Errorf("unexpected restart state: %+v", got)
 	}
 
-	// 5. Update completed with conversation ID
-	mustOK(t, s.UpdateDispatchCompleted(ctx, "disp-f1", "Result text", "conv-f123"), "UpdateDispatchCompleted")
+	// 5. Update completed with conversation ID and telemetry
+	tel := db.TurnTelemetry{DurationMs: 4000, InputTokens: 400, OutputTokens: 150, ThinkingTokens: 50, CacheReadTokens: 25, TotalTokens: 625}
+	mustOK(t, s.UpdateDispatchCompleted(ctx, "disp-f1", "Result text", "conv-f123", tel), "UpdateDispatchCompleted")
 	got, _ = s.GetDispatch(ctx, "disp-f1")
 	if got.Status != db.StatusCompleted || got.ResponseText != "Result text" || got.ConversationID != "conv-f123" {
 		t.Errorf("unexpected completed state: %+v", got)
+	}
+	if got.DurationMs != 4000 || got.TotalTokens != 625 {
+		t.Errorf("unexpected telemetry on fake dispatch: %+v", got)
 	}
 
 	// 6. Recent session dispatches
@@ -900,7 +908,7 @@ func TestFakeStore_DispatchStoreLifecycle(t *testing.T) {
 		Prompt:    "Prompt for fake dispatch 2",
 	}
 	mustOK(t, s.InsertDispatch(ctx, d2), "InsertDispatch disp-f2")
-	mustOK(t, s.UpdateDispatchCompleted(ctx, "disp-f2", "Result 2"), "UpdateDispatchCompleted disp-f2")
+	mustOK(t, s.UpdateDispatchCompleted(ctx, "disp-f2", "Result 2", ""), "UpdateDispatchCompleted disp-f2")
 
 	recent, err := s.GetRecentSessionDispatches(ctx, "heartbeat-hb-1", 10)
 	mustOK(t, err, "GetRecentSessionDispatches")
@@ -931,7 +939,17 @@ func TestFakeStore_DispatchStoreLifecycle(t *testing.T) {
 		t.Errorf("expected active dispatch for session build-1")
 	}
 
-	// 8. Cancel pending dispatches
+	// 9. Pending or processing dispatches
+	disps, err := s.GetPendingOrProcessingDispatches(ctx, 10)
+	mustOK(t, err, "GetPendingOrProcessingDispatches")
+	if len(disps) == 0 {
+		t.Errorf("expected dispatches from GetPendingOrProcessingDispatches")
+	}
+	dispsLimited, err := s.GetPendingOrProcessingDispatches(ctx, 1)
+	mustOK(t, err, "GetPendingOrProcessingDispatches limit=1")
+	if len(dispsLimited) != 1 {
+		t.Errorf("expected 1 dispatch from limited call")
+	}
 	cancelled, err := s.CancelPendingDispatches(ctx, "", "b-999", "cancelled build")
 	mustOK(t, err, "CancelPendingDispatches")
 	if len(cancelled) != 2 || !slices.Contains(cancelled, "disp-f3") || !slices.Contains(cancelled, "disp-f3b") {
@@ -954,22 +972,34 @@ func TestFakeStore_GetActiveTasks_DispatchesUnion(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 
 	mustOK(t, s.InsertMessage(ctx, db.Message{
-		ID:        "msg-fake-1",
-		ThreadID:  "123456",
-		Content:   "Discord user prompt",
-		Status:    db.StatusPending,
-		CreatedAt: now.Add(-2 * time.Minute),
-		UpdatedAt: now.Add(-2 * time.Minute),
+		ID:              "msg-fake-1",
+		ThreadID:        "123456",
+		Content:         "Discord user prompt",
+		Status:          db.StatusPending,
+		DurationMs:      800,
+		InputTokens:     80,
+		OutputTokens:    40,
+		ThinkingTokens:  10,
+		CacheReadTokens: 5,
+		TotalTokens:     135,
+		CreatedAt:       now.Add(-2 * time.Minute),
+		UpdatedAt:       now.Add(-2 * time.Minute),
 	}), "InsertMessage")
 
 	mustOK(t, s.InsertDispatch(ctx, db.Dispatch{
-		ID:        "disp-fake-stateful",
-		Source:    "heartbeat",
-		SessionID: "heartbeat-hb-1",
-		Prompt:    "Heartbeat prompt",
-		Status:    db.StatusPending,
-		CreatedAt: now.Add(-1 * time.Minute),
-		UpdatedAt: now.Add(-1 * time.Minute),
+		ID:              "disp-fake-stateful",
+		Source:          "heartbeat",
+		SessionID:       "heartbeat-hb-1",
+		Prompt:          "Heartbeat prompt",
+		Status:          db.StatusPending,
+		DurationMs:      1800,
+		InputTokens:     150,
+		OutputTokens:    70,
+		ThinkingTokens:  20,
+		CacheReadTokens: 10,
+		TotalTokens:     250,
+		CreatedAt:       now.Add(-1 * time.Minute),
+		UpdatedAt:       now.Add(-1 * time.Minute),
 	}), "InsertDispatch stateful")
 
 	mustOK(t, s.InsertDispatch(ctx, db.Dispatch{
@@ -990,6 +1020,12 @@ func TestFakeStore_GetActiveTasks_DispatchesUnion(t *testing.T) {
 	}
 	if unfiltered[0].ID != "msg-fake-1" || unfiltered[1].ID != "disp-fake-stateful" || unfiltered[2].ID != "disp-fake-ephem" {
 		t.Errorf("unexpected task order: %+v", unfiltered)
+	}
+	if unfiltered[0].DurationMs != 800 || unfiltered[0].TotalTokens != 135 {
+		t.Errorf("unexpected telemetry on fake task 0: %+v", unfiltered[0])
+	}
+	if unfiltered[1].DurationMs != 1800 || unfiltered[1].TotalTokens != 250 {
+		t.Errorf("unexpected telemetry on fake task 1: %+v", unfiltered[1])
 	}
 	if unfiltered[1].TriggerType != "heartbeat" || unfiltered[2].TriggerType != "webhook" {
 		t.Errorf("unexpected trigger types: %s, %s", unfiltered[1].TriggerType, unfiltered[2].TriggerType)

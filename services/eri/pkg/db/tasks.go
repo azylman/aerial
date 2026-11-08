@@ -51,6 +51,12 @@ type ActiveTask struct {
 	IsAdmin           bool      `json:"is_admin,omitempty"`
 	Status            string    `json:"status"`
 	RetryCount        int       `json:"retry_count"`
+	DurationMs        int64     `json:"duration_ms,omitempty"`
+	InputTokens       int       `json:"input_tokens,omitempty"`
+	OutputTokens      int       `json:"output_tokens,omitempty"`
+	ThinkingTokens    int       `json:"thinking_tokens,omitempty"`
+	CacheReadTokens   int       `json:"cache_read_tokens,omitempty"`
+	TotalTokens       int       `json:"total_tokens,omitempty"`
 	TriggerType       string    `json:"trigger_type"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
@@ -85,10 +91,10 @@ func InferTriggerType(authorID string) string {
 }
 
 func buildActiveTasksQuery(flt TasksFilter, hasFilter bool) (string, []any) {
-	baseQuery := `SELECT m.id, COALESCE(m.row_id, 0) AS row_id, m.thread_id, COALESCE(NULLIF(m.conversation_id, ''), COALESCE(s.conversation_id, '')) AS session_id, COALESCE(s.previous_conversation_id, '') AS previous_session_id, COALESCE(s.summary, '') AS thread_summary, m.author_name, m.author_id, m.content AS prompt, COALESCE(m.summary, '') AS summary, COALESCE(m.response_text, '') AS response_text, m.is_admin, m.status, m.retry_count, m.created_at, m.updated_at FROM messages m LEFT JOIN sessions s ON s.session_id = 'discord-' || m.thread_id`
+	baseQuery := `SELECT m.id, COALESCE(m.row_id, 0) AS row_id, m.thread_id, COALESCE(NULLIF(m.conversation_id, ''), COALESCE(s.conversation_id, '')) AS session_id, COALESCE(s.previous_conversation_id, '') AS previous_session_id, COALESCE(s.summary, '') AS thread_summary, m.author_name, m.author_id, m.content AS prompt, COALESCE(m.summary, '') AS summary, COALESCE(m.response_text, '') AS response_text, m.is_admin, m.status, m.retry_count, COALESCE(m.duration_ms, 0) AS duration_ms, COALESCE(m.input_tokens, 0) AS input_tokens, COALESCE(m.output_tokens, 0) AS output_tokens, COALESCE(m.thinking_tokens, 0) AS thinking_tokens, COALESCE(m.cache_read_tokens, 0) AS cache_read_tokens, COALESCE(m.total_tokens, 0) AS total_tokens, m.created_at, m.updated_at FROM messages m LEFT JOIN sessions s ON s.session_id = 'discord-' || m.thread_id`
 	if !hasFilter {
-		dispatchesQuery := `SELECT d.id, COALESCE(d.row_id, 0) AS row_id, COALESCE(NULLIF(d.session_id, ''), 'dispatch-' || d.id) AS thread_id, CASE WHEN d.session_id = '' THEN '' ELSE COALESCE(NULLIF(d.conversation_id, ''), COALESCE(s.conversation_id, '')) END AS session_id, COALESCE(s.previous_conversation_id, '') AS previous_session_id, COALESCE(s.summary, '') AS thread_summary, d.source AS author_name, 'dispatch:' || d.source AS author_id, d.prompt, COALESCE(d.summary, '') AS summary, COALESCE(d.response_text, '') AS response_text, true AS is_admin, d.status, d.retry_count, d.created_at, d.updated_at FROM dispatches d LEFT JOIN sessions s ON d.session_id != '' AND s.session_id = d.session_id WHERE d.status IN ('PENDING', 'PROCESSING')`
-		return `SELECT id, row_id, thread_id, session_id, previous_session_id, thread_summary, author_name, author_id, prompt, summary, response_text, is_admin, status, retry_count, created_at, updated_at FROM (` + baseQuery + ` WHERE m.status IN ('PENDING', 'PROCESSING') UNION ALL ` + dispatchesQuery + `) combined ORDER BY created_at ASC LIMIT 50;`, nil
+		dispatchesQuery := `SELECT d.id, COALESCE(d.row_id, 0) AS row_id, COALESCE(NULLIF(d.session_id, ''), 'dispatch-' || d.id) AS thread_id, CASE WHEN d.session_id = '' THEN '' ELSE COALESCE(NULLIF(d.conversation_id, ''), COALESCE(s.conversation_id, '')) END AS session_id, COALESCE(s.previous_conversation_id, '') AS previous_session_id, COALESCE(s.summary, '') AS thread_summary, d.source AS author_name, 'dispatch:' || d.source AS author_id, d.prompt, COALESCE(d.summary, '') AS summary, COALESCE(d.response_text, '') AS response_text, true AS is_admin, d.status, d.retry_count, COALESCE(d.duration_ms, 0) AS duration_ms, COALESCE(d.input_tokens, 0) AS input_tokens, COALESCE(d.output_tokens, 0) AS output_tokens, COALESCE(d.thinking_tokens, 0) AS thinking_tokens, COALESCE(d.cache_read_tokens, 0) AS cache_read_tokens, COALESCE(d.total_tokens, 0) AS total_tokens, d.created_at, d.updated_at FROM dispatches d LEFT JOIN sessions s ON d.session_id != '' AND s.session_id = d.session_id WHERE d.status IN ('PENDING', 'PROCESSING')`
+		return `SELECT id, row_id, thread_id, session_id, previous_session_id, thread_summary, author_name, author_id, prompt, summary, response_text, is_admin, status, retry_count, duration_ms, input_tokens, output_tokens, thinking_tokens, cache_read_tokens, total_tokens, created_at, updated_at FROM (` + baseQuery + ` WHERE m.status IN ('PENDING', 'PROCESSING') UNION ALL ` + dispatchesQuery + `) combined ORDER BY created_at ASC LIMIT 50;`, nil
 	}
 
 	var whereClauses []string
@@ -175,6 +181,12 @@ func scanActiveTasks(rows *sql.Rows) ([]ActiveTask, error) {
 			&t.IsAdmin,
 			&t.Status,
 			&t.RetryCount,
+			&t.DurationMs,
+			&t.InputTokens,
+			&t.OutputTokens,
+			&t.ThinkingTokens,
+			&t.CacheReadTokens,
+			&t.TotalTokens,
 			&t.CreatedAt,
 			&t.UpdatedAt,
 		); err != nil {

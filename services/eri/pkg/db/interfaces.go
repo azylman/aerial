@@ -26,11 +26,21 @@ type SessionActivityStats struct {
 	LastCompletedMessageCreatedAt time.Time `json:"last_completed_message_created_at"`
 }
 
+// TurnTelemetry encapsulates execution timing and token breakdown for messages and dispatches.
+type TurnTelemetry struct {
+	DurationMs      int64 `json:"duration_ms,omitempty"`
+	InputTokens     int   `json:"input_tokens,omitempty"`
+	OutputTokens    int   `json:"output_tokens,omitempty"`
+	ThinkingTokens  int   `json:"thinking_tokens,omitempty"`
+	CacheReadTokens int   `json:"cache_read_tokens,omitempty"`
+	TotalTokens     int   `json:"total_tokens,omitempty"`
+}
+
 // MessageStore handles message queue lifecycle and turn history.
 type MessageStore interface {
 	InsertMessage(ctx context.Context, msg Message) error
-	UpdateMessageStatus(ctx context.Context, id, status, errorMsg string) error
-	UpdateMessageCompleted(ctx context.Context, id, responseText string, conversationID ...string) error
+	UpdateMessageStatus(ctx context.Context, id, status, errorMsg string, telemetry ...TurnTelemetry) error
+	UpdateMessageCompleted(ctx context.Context, id, responseText, conversationID string, telemetry ...TurnTelemetry) error
 	IncrementMessageRetry(ctx context.Context, id, errorMsg string) error
 	ResetMessageToPendingWithRestart(ctx context.Context, id, reason string) error
 	GetPendingOrProcessingMessages(ctx context.Context, limit int) ([]Message, error)
@@ -48,8 +58,8 @@ type DispatchStore interface {
 	InsertDispatch(ctx context.Context, d Dispatch) error
 	GetDispatch(ctx context.Context, id string) (*Dispatch, error)
 	ClaimPendingDispatch(ctx context.Context, id string) (bool, error)
-	UpdateDispatchStatus(ctx context.Context, id, status, errorMsg string) error
-	UpdateDispatchCompleted(ctx context.Context, id, responseText string, conversationID ...string) error
+	UpdateDispatchStatus(ctx context.Context, id, status, errorMsg string, telemetry ...TurnTelemetry) error
+	UpdateDispatchCompleted(ctx context.Context, id, responseText, conversationID string, telemetry ...TurnTelemetry) error
 	IncrementDispatchRetry(ctx context.Context, id, errorMsg string) error
 	ResetDispatchToPendingWithRestart(ctx context.Context, id, reason string) error
 	GetPendingOrProcessingDispatches(ctx context.Context, limit int) ([]Dispatch, error)

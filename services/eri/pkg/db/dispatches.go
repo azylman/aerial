@@ -10,25 +10,31 @@ import (
 )
 
 type Dispatch struct {
-	ID             string    `json:"id"`
-	RowID          int64     `json:"row_id,omitempty"`
-	Source         string    `json:"source"`
-	SessionID      string    `json:"session_id,omitempty"`
-	ConversationID string    `json:"conversation_id,omitempty"`
-	Prompt         string    `json:"prompt"`
-	Summary        string    `json:"summary"`
-	Effort         string    `json:"effort,omitempty"`
-	Model          string    `json:"model,omitempty"`
-	Status         string    `json:"status"`
-	RetryCount     int       `json:"retry_count"`
-	RestartCount   int       `json:"restart_count"`
-	ErrorMessage   string    `json:"error_message,omitempty"`
-	ResponseText   string    `json:"response_text,omitempty"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	ID              string    `json:"id"`
+	RowID           int64     `json:"row_id,omitempty"`
+	Source          string    `json:"source"`
+	SessionID       string    `json:"session_id,omitempty"`
+	ConversationID  string    `json:"conversation_id,omitempty"`
+	Prompt          string    `json:"prompt"`
+	Summary         string    `json:"summary"`
+	Effort          string    `json:"effort,omitempty"`
+	Model           string    `json:"model,omitempty"`
+	Status          string    `json:"status"`
+	RetryCount      int       `json:"retry_count"`
+	RestartCount    int       `json:"restart_count"`
+	ErrorMessage    string    `json:"error_message,omitempty"`
+	ResponseText    string    `json:"response_text,omitempty"`
+	DurationMs      int64     `json:"duration_ms,omitempty"`
+	InputTokens     int       `json:"input_tokens,omitempty"`
+	OutputTokens    int       `json:"output_tokens,omitempty"`
+	ThinkingTokens  int       `json:"thinking_tokens,omitempty"`
+	CacheReadTokens int       `json:"cache_read_tokens,omitempty"`
+	TotalTokens     int       `json:"total_tokens,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
-const dispatchSelectCols = "id, COALESCE(row_id, 0) AS row_id, source, session_id, conversation_id, prompt, COALESCE(summary, '') AS summary, COALESCE(effort, '') AS effort, COALESCE(model, '') AS model, status, retry_count, restart_count, COALESCE(error_message, '') AS error_message, COALESCE(response_text, '') AS response_text, created_at, updated_at"
+const dispatchSelectCols = "id, COALESCE(row_id, 0) AS row_id, source, session_id, conversation_id, prompt, COALESCE(summary, '') AS summary, COALESCE(effort, '') AS effort, COALESCE(model, '') AS model, status, retry_count, restart_count, COALESCE(error_message, '') AS error_message, COALESCE(response_text, '') AS response_text, COALESCE(duration_ms, 0) AS duration_ms, COALESCE(input_tokens, 0) AS input_tokens, COALESCE(output_tokens, 0) AS output_tokens, COALESCE(thinking_tokens, 0) AS thinking_tokens, COALESCE(cache_read_tokens, 0) AS cache_read_tokens, COALESCE(total_tokens, 0) AS total_tokens, created_at, updated_at"
 
 func scanDispatch(scanner interface{ Scan(dest ...any) error }) (Dispatch, error) {
 	var d Dispatch
@@ -37,6 +43,7 @@ func scanDispatch(scanner interface{ Scan(dest ...any) error }) (Dispatch, error
 		&d.ID, &d.RowID, &d.Source, &d.SessionID, &d.ConversationID,
 		&d.Prompt, &d.Summary, &d.Effort, &d.Model, &d.Status,
 		&d.RetryCount, &d.RestartCount, &errMsg, &respText,
+		&d.DurationMs, &d.InputTokens, &d.OutputTokens, &d.ThinkingTokens, &d.CacheReadTokens, &d.TotalTokens,
 		&d.CreatedAt, &d.UpdatedAt,
 	); err != nil {
 		return Dispatch{}, err
@@ -96,18 +103,24 @@ func (s *SQLStore) InsertDispatch(ctx context.Context, d Dispatch) error {
 		id, source, session_id, conversation_id,
 		prompt, summary, effort, model, status,
 		retry_count, restart_count, error_message, response_text,
+		duration_ms, input_tokens, output_tokens,
+		thinking_tokens, cache_read_tokens, total_tokens,
 		created_at, updated_at
 	) VALUES (
 		$1, $2, $3, $4,
 		$5, $6, $7, $8, $9,
 		$10, $11, $12, $13,
-		$14, $15
+		$14, $15, $16,
+		$17, $18, $19,
+		$20, $21
 	) ON CONFLICT (id) DO NOTHING;`
 
 	return s.execWithTimeout(ctx, query,
 		d.ID, d.Source, d.SessionID, d.ConversationID,
 		d.Prompt, d.Summary, d.Effort, d.Model, d.Status,
 		d.RetryCount, d.RestartCount, d.ErrorMessage, d.ResponseText,
+		d.DurationMs, d.InputTokens, d.OutputTokens,
+		d.ThinkingTokens, d.CacheReadTokens, d.TotalTokens,
 		d.CreatedAt, d.UpdatedAt,
 	)
 }
@@ -150,16 +163,28 @@ func (s *SQLStore) ClaimPendingDispatch(ctx context.Context, id string) (bool, e
 	return claimedID != "", nil
 }
 
-func (s *SQLStore) UpdateDispatchStatus(ctx context.Context, id, status, errorMsg string) error {
-	return s.execDispatchUpdate(ctx, id, `UPDATE dispatches SET status = $1, error_message = $2, updated_at = $3 WHERE id = $4`, status, errorMsg, time.Now().UTC(), id)
+func (s *SQLStore) UpdateDispatchStatus(ctx context.Context, id, status, errorMsg string, telemetry ...TurnTelemetry) error {
+	now := time.Now().UTC()
+	if len(telemetry) > 0 {
+		t := telemetry[0]
+		return s.execDispatchUpdate(ctx, id, `UPDATE dispatches SET status = $1, error_message = $2, duration_ms = $3, input_tokens = $4, output_tokens = $5, thinking_tokens = $6, cache_read_tokens = $7, total_tokens = $8, updated_at = $9 WHERE id = $10`,
+			status, errorMsg, t.DurationMs, t.InputTokens, t.OutputTokens, t.ThinkingTokens, t.CacheReadTokens, t.TotalTokens, now, id)
+	}
+	return s.execDispatchUpdate(ctx, id, `UPDATE dispatches SET status = $1, error_message = $2, updated_at = $3 WHERE id = $4`, status, errorMsg, now, id)
 }
 
-func (s *SQLStore) UpdateDispatchCompleted(ctx context.Context, id, responseText string, conversationID ...string) error {
+func (s *SQLStore) UpdateDispatchCompleted(ctx context.Context, id, responseText, conversationID string, telemetry ...TurnTelemetry) error {
 	now := time.Now().UTC()
-	if len(conversationID) > 0 && strings.TrimSpace(conversationID[0]) != "" {
-		return s.execDispatchUpdate(ctx, id, `UPDATE dispatches SET status = 'COMPLETED', response_text = $1, conversation_id = $2, error_message = '', updated_at = $3 WHERE id = $4`, responseText, strings.TrimSpace(conversationID[0]), now, id)
+	var t TurnTelemetry
+	if len(telemetry) > 0 {
+		t = telemetry[0]
 	}
-	return s.execDispatchUpdate(ctx, id, `UPDATE dispatches SET status = 'COMPLETED', response_text = $1, error_message = '', updated_at = $2 WHERE id = $3`, responseText, now, id)
+	if strings.TrimSpace(conversationID) != "" {
+		return s.execDispatchUpdate(ctx, id, `UPDATE dispatches SET status = 'COMPLETED', response_text = $1, conversation_id = $2, error_message = '', duration_ms = $3, input_tokens = $4, output_tokens = $5, thinking_tokens = $6, cache_read_tokens = $7, total_tokens = $8, updated_at = $9 WHERE id = $10`,
+			responseText, strings.TrimSpace(conversationID), t.DurationMs, t.InputTokens, t.OutputTokens, t.ThinkingTokens, t.CacheReadTokens, t.TotalTokens, now, id)
+	}
+	return s.execDispatchUpdate(ctx, id, `UPDATE dispatches SET status = 'COMPLETED', response_text = $1, error_message = '', duration_ms = $2, input_tokens = $3, output_tokens = $4, thinking_tokens = $5, cache_read_tokens = $6, total_tokens = $7, updated_at = $8 WHERE id = $9`,
+		responseText, t.DurationMs, t.InputTokens, t.OutputTokens, t.ThinkingTokens, t.CacheReadTokens, t.TotalTokens, now, id)
 }
 
 func (s *SQLStore) IncrementDispatchRetry(ctx context.Context, id, errorMsg string) error {
