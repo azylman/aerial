@@ -5,7 +5,7 @@ RUN mkdir -p /out/bin && \
     GOBIN=/out/bin CGO_ENABLED=0 go install golang.org/x/tools/cmd/deadcode@v0.52.0 && \
     GOBIN=/out/bin CGO_ENABLED=0 go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.4.1 && \
     git clone https://github.com/azylman/roborev.git /tmp/roborev && \
-    (cd /tmp/roborev && git checkout b63c53d5ce4c502424e81adfe59fb94cb9be3f92 && GOBIN=/out/bin CGO_ENABLED=0 go install ./cmd/roborev) && \
+    (cd /tmp/roborev && git checkout df224cbfb6a79a014e8faf8a1571e5fa23ca3c83 && GOBIN=/out/bin CGO_ENABLED=0 go install ./cmd/roborev) && \
     rm -rf /tmp/roborev && \
     rm -rf /usr/local/go/test /usr/local/go/doc /usr/local/go/api
 
