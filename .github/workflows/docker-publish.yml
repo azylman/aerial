@@ -41,6 +41,7 @@ jobs:
       vanadis: ${{ steps.filter.outputs.vanadis }}
       prospera: ${{ steps.filter.outputs.prospera }}
       github-runner: ${{ steps.filter.outputs.github-runner }}
+      migrator: ${{ steps.filter.outputs.migrator }}
       matrix: ${{ steps.set-matrix.outputs.matrix }}
       has_builds: ${{ steps.set-matrix.outputs.has_builds }}
     steps:
@@ -89,6 +90,10 @@ jobs:
               - 'pkg/**'
             github-runner:
               - 'services/github-runner/**'
+            migrator:
+              - 'services/eri/pkg/db/migrations/**'
+              - 'services/migrator/**'
+              - 'services/eri/atlas.hcl'
 
       - name: Compute Dynamic Build Matrix
         id: set-matrix
@@ -108,7 +113,8 @@ jobs:
               synapse: "${{ steps.filter.outputs.synapse }}",
               vanadis: "${{ steps.filter.outputs.vanadis }}",
               prospera: "${{ steps.filter.outputs.prospera }}",
-              "github-runner": "${{ steps.filter.outputs.github-runner }}"
+              "github-runner": "${{ steps.filter.outputs.github-runner }}",
+              migrator: "${{ steps.filter.outputs.migrator }}"
             };
 
             const catalog = [
@@ -125,7 +131,8 @@ jobs:
               { service: "synapse", context: ".", file: "./services/synapse/Dockerfile", image_name: "aerial-synapse" },
               { service: "vanadis", context: ".", file: "./services/vanadis/Dockerfile", image_name: "aerial-vanadis" },
               { service: "prospera", context: ".", file: "./services/prospera/Dockerfile", image_name: "aerial-prospera" },
-              { service: "github-runner", context: ".", file: "./services/github-runner/Dockerfile", image_name: "aerial-github-runner" }
+              { service: "github-runner", context: ".", file: "./services/github-runner/Dockerfile", image_name: "aerial-github-runner" },
+              { service: "migrator", context: ".", file: "./services/migrator/Dockerfile", image_name: "aerial-migrator" }
             ];
 
             const forceAll = "${{ inputs.force_all }}" === "true";

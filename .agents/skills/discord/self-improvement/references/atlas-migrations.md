@@ -1,6 +1,6 @@
 # Declarative Database Schema Migrations Runbook (Ariga Atlas)
 
-All database schema modifications across `aerial` and `aerial-sidecars` use declarative Ariga Atlas migrations executed automatically via `db-migrate` Kubernetes `initContainer`s prior to service rollout.
+All database schema modifications across `aerial` and `aerial-sidecars` use declarative Ariga Atlas migrations executed cluster-wide via a standalone Kubernetes `db-migrate` batch `Job` triggered automatically when migration images update.
 
 ## 1. Declarative Schema Definition (`schema.sql`)
 - Modify the repository's canonical schema file (`services/eri/pkg/db/schema.sql` for `aerial`, `db/schema.sql` for `aerial-sidecars`).
@@ -23,4 +23,4 @@ All database schema modifications across `aerial` and `aerial-sidecars` use decl
   go test -race ./services/eri/pkg/db/...
   ```
 - `./scripts/verify.sh --staged` automatically validates `check_no_imperative_ddl` and verifies migration directory checksums via `atlas migrate validate`.
-- Cluster-wide schema rollout executes automatically via the `db-migrate` `initContainer` on `eri` and `vanadis` (`k8s/core-services.yaml`) before container startup.
+- Cluster-wide schema rollout executes automatically via the standalone `db-migrate` Kubernetes `Job` (`k8s/core-services.yaml`) whenever `TAG_AERIAL_MIGRATOR` or `TAG_AERIAL_SIDECAR_MIGRATOR` updates.
