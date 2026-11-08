@@ -870,7 +870,7 @@ func applyEnvironmentOverrides(data *ConfigData, lookup func(string) string) {
 	overrideEnvStr(&data.APIKey, lookup, "AGY_GEMINI_API_KEY")
 	overrideEnvStr(&data.HarnessAPIKey, lookup, "GEMINI_HARNESS_API_KEY")
 	overrideEnvStr(&data.SystemPrompt, lookup, "SYSTEM_PROMPT")
-	overrideEnvStr(&data.DiscordToken, lookup, "DISCORD_TOKEN")
+	overrideEnvStr(&data.DiscordToken, lookup, "DISCORD_TOKEN", "DISCORD_BOT_TOKEN")
 	overrideEnvStr(&data.GitHubPAT, lookup, "GITHUB_PAT")
 	if dsn := buildPostgresDSN(lookup); dsn != "" {
 		data.DatabaseURL = dsn
