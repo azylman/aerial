@@ -11,6 +11,8 @@ import (
 	"maps"
 	"net/http"
 	"slices"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -426,4 +428,32 @@ func (s *RouterServer) failKustomizationRollout(ctx context.Context, pr Deployin
 		return fmt.Errorf("report %s failure for %s#%d: %w", name, pr.Repo, pr.PRNumber, err)
 	}
 	return nil
+}
+
+// formatKustomizationRolloutStatus renders a deploying PR's recorded Kustomizations one per line
+// (sorted), done once listed in deployed_kustomizations, else pending. ok is false when the PR is not
+// deploying or recorded no requests, so callers fall back to legacy per-job rendering.
+func formatKustomizationRolloutStatus(cleanStatus string, meta map[string]any) (string, bool) {
+	requests := recordedKustomizationRequests(meta)
+	if cleanStatus != "deploying" || len(requests) == 0 {
+		return "", false
+	}
+	deployed := make(map[string]bool)
+	for _, name := range extractStringSliceFromMetadata(meta, deployedKustomizationsKey) {
+		deployed[strings.TrimSpace(name)] = true
+	}
+	names := make([]string, 0, len(requests))
+	for name := range requests {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	lines := make([]string, 0, len(names))
+	for _, name := range names {
+		state := "🔄 rolling out"
+		if deployed[name] {
+			state = "✅ rolled out"
+		}
+		lines = append(lines, fmt.Sprintf("`%s`: %s", name, state))
+	}
+	return strings.Join(lines, "\n"), true
 }
