@@ -378,6 +378,9 @@ func (m *mockPRRegistry) ResolvePRBySHA(ctx context.Context, repo string, sha st
 }
 
 func (m *mockPRRegistry) ResolvePRByNumber(ctx context.Context, repo string, prNumber int) (string, string, string, string, error) {
+	if m == nil {
+		return "", "", "", "", errors.New("nil mockPRRegistry")
+	}
 	if err := m.checkErr(m.resolveErr); err != nil {
 		return "", "", "", "", err
 	}

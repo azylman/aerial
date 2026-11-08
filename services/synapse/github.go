@@ -141,6 +141,16 @@ func (s *RouterServer) handleStaleOpenPR(ctx context.Context, repo string, prNum
 	}
 }
 
+func (s *RouterServer) isEligibleAutoUpdatePR(ctx context.Context, repo string, pr GitHubPullRequest) bool {
+	if pr.Draft || !s.isAutoUpdateAuthorAllowed(pr.User.Login) {
+		return false
+	}
+	if !s.cfg.DefaultOwner && !s.isPROwnedLocally(ctx, repo, pr.GetNumber()) {
+		return false
+	}
+	return true
+}
+
 func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) error {
 	normRepo := normalizeRepo(repo)
 	if len(s.cfg.AutoUpdatePRAuthors) == 0 || normRepo == "" {
@@ -154,7 +164,7 @@ func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) er
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if pr.Draft || !s.isAutoUpdateAuthorAllowed(pr.User.Login) {
+		if !s.isEligibleAutoUpdatePR(ctx, normRepo, pr) {
 			continue
 		}
 		hasFailedOrPending := s.hasFailedCIForSHA(ctx, normRepo, pr.Number, pr.Head.SHA)
@@ -194,6 +204,9 @@ func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) er
 
 func (s *RouterServer) dispatchGitPush(ctx context.Context, repo, ref, commit, targetID string, prNum int) error {
 	if s.dispatcher == nil || !strings.HasPrefix(ref, "refs/heads/main") || isZeroSHA(commit) {
+		return nil
+	}
+	if !s.cfg.DefaultOwner && targetID == "" {
 		return nil
 	}
 	if err := s.dispatcher.DispatchGitPush(ctx, GitPushEventRequest{
@@ -238,8 +251,22 @@ func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, he
 	return nil
 }
 
-func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo string, runID int64, headBranch, conclusion, headSHA, targetID string, prNum int) error {
+func (s *RouterServer) shouldDispatchWorkflowRunImages(ctx context.Context, repo string, headBranch, conclusion string, prNum int) bool {
 	if s.dispatcher == nil || conclusion != "success" || (headBranch != "main" && !strings.HasPrefix(headBranch, "refs/heads/main")) {
+		return false
+	}
+	if prNum > 0 {
+		if !s.isPROwnedLocally(ctx, repo, prNum) && (!s.cfg.DefaultOwner || len(s.cfg.WebhookForwardURLs) > 0) {
+			return false
+		}
+	} else if !s.cfg.DefaultOwner && s.registry != nil {
+		return false
+	}
+	return true
+}
+
+func (s *RouterServer) dispatchWorkflowRunImages(ctx context.Context, repo string, runID int64, headBranch, conclusion, headSHA, targetID string, prNum int) error {
+	if !s.shouldDispatchWorkflowRunImages(ctx, repo, headBranch, conclusion, prNum) {
 		return nil
 	}
 	images, err := s.resolveWorkflowRunImages(ctx, repo, runID)
@@ -312,73 +339,6 @@ type GitHubPingPayload struct {
 	Repo   *struct {
 		FullName string `json:"full_name"`
 	} `json:"repository"`
-}
-
-type GitHubPRRef struct {
-	Ref string `json:"ref"`
-	SHA string `json:"sha"`
-}
-
-type GitHubPullRequest struct {
-	NodeID         string      `json:"node_id"`
-	Number         int         `json:"number"`
-	State          string      `json:"state"`
-	Title          string      `json:"title"`
-	Body           string      `json:"body"`
-	Head           GitHubPRRef `json:"head"`
-	Base           GitHubPRRef `json:"base"`
-	Draft          bool        `json:"draft"`
-	Merged         bool        `json:"merged"`
-	MergeCommitSHA string      `json:"merge_commit_sha"`
-	Mergeable      *bool       `json:"mergeable,omitempty"`
-	MergeableState string      `json:"mergeable_state,omitempty"`
-	User           struct {
-		Login string `json:"login"`
-	} `json:"user"`
-}
-
-func isPRMergeConflict(pr GitHubPullRequest) bool {
-	if strings.EqualFold(strings.TrimSpace(pr.MergeableState), "dirty") {
-		return true
-	}
-	if pr.Mergeable != nil && !*pr.Mergeable {
-		return true
-	}
-	return false
-}
-
-func isPRMergeabilityUnknown(pr GitHubPullRequest) bool {
-	if pr.Mergeable != nil {
-		return false
-	}
-	trimmedState := strings.TrimSpace(pr.MergeableState)
-	return trimmedState == "" || strings.EqualFold(trimmedState, "unknown")
-}
-
-const aerialPRMetadataPrefix = "<!-- aerial-pr:"
-
-func ParseAerialPRMetadata(body string) (string, string, bool) {
-	_, after0, ok0 := strings.CutLast(body, aerialPRMetadataPrefix)
-	if !ok0 {
-		return "", "", false
-	}
-	rest := after0
-	before, _, ok := strings.Cut(rest, "-->")
-	if !ok {
-		return "", "", false
-	}
-	var trailer struct {
-		TargetID       string `json:"target_id"`
-		VanadisChunkID string `json:"vanadis_chunk_id"`
-	}
-	if err := json.Unmarshal([]byte(strings.TrimSpace(before)), &trailer); err != nil {
-		return "", "", false
-	}
-	targetID, chunkID := NormalizeDiscordTargetID(trailer.TargetID), strings.TrimSpace(trailer.VanadisChunkID)
-	if !IsValidDiscordSnowflake(targetID) {
-		targetID = ""
-	}
-	return targetID, chunkID, targetID != "" || chunkID != ""
 }
 
 type GitHubPullRequestPayload struct {
@@ -577,6 +537,13 @@ func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Reques
 	body, ok := readWebhookBody(w, r, 5<<20)
 	if !ok {
 		return
+	}
+	if len(s.cfg.WebhookForwardURLs) > 0 {
+		reqPath := r.URL.RequestURI()
+		if reqPath == "" {
+			reqPath = r.URL.Path
+		}
+		s.teeGitHubWebhook(r.Context(), reqPath, r, event, body)
 	}
 	if s.riverClient == nil {
 		log.Printf("[synapse] [github] ERROR: river client not initialized")
@@ -1261,13 +1228,20 @@ func (s *RouterServer) handlePRAutoMergeDisabledAction(ctx context.Context, res 
 }
 
 func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res *ResolvedGitHubEvent, pr GitHubPullRequest) error {
-	if trailerTargetID, trailerChunkID, ok := ParseAerialPRMetadata(pr.Body); ok {
+	meta := ParseAerialPRMetadata(pr.GetBody())
+	shouldRegister := true
+	if meta.BotID != "" && s.cfg.BotID != "" && !strings.EqualFold(meta.BotID, s.cfg.BotID) {
+		shouldRegister = false
+	} else if meta.BotID == "" && !s.cfg.DefaultOwner {
+		shouldRegister = false
+	}
+	if shouldRegister && s.registry != nil && (meta.TargetID != "" || meta.VanadisChunkID != "") {
 		// Self-heal DB registration only; initial Discord widget delivery on opened is owned by Brain's /internal/pr/register to avoid duplicate message creation races.
-		resolvedTargetID, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, pr.Title, trailerTargetID, trailerChunkID)
+		resolvedTargetID, err := s.registry.EnsurePRRegistered(ctx, res.Repo, res.PRNumber, res.Branch, res.HeadSHA, pr.Title, meta.TargetID, meta.VanadisChunkID)
 		if err != nil {
 			return err
 		}
-		res.TargetID = firstNonEmpty(res.TargetID, resolvedTargetID, trailerTargetID)
+		res.TargetID = firstNonEmpty(res.TargetID, resolvedTargetID, meta.TargetID)
 	}
 	switch res.Action {
 	case "closed":

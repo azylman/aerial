@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"strings"
@@ -156,8 +157,21 @@ func isFluxFailureReason(reason string) bool {
 }
 
 func (s *RouterServer) handleFluxWebhook(w http.ResponseWriter, r *http.Request) {
+	body, ok := readWebhookBody(w, r, 1<<20)
+	if !ok {
+		return
+	}
+	if len(s.cfg.WebhookForwardURLs) > 0 {
+		reqPath := r.URL.RequestURI()
+		if reqPath == "" {
+			reqPath = r.URL.Path
+		}
+		s.forwardRawWebhookToPeers(r.Context(), reqPath, r.Header, body)
+	}
+
 	var alert FluxAlertEvent
-	if !readWebhookJSON(w, r, 1<<20, false, &alert) {
+	if err := json.Unmarshal(body, &alert); err != nil {
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json payload"})
 		return
 	}
 

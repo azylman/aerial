@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -578,5 +579,72 @@ func TestCleanRevisionSHAAndRepoHelpers(t *testing.T) {
 	evt, ok := TranslateFluxAlertToDeployEvent(zeroTimeAlert)
 	if !ok || evt.Timestamp.IsZero() {
 		t.Errorf("expected ok=true and non-zero timestamp for zero-time alert")
+	}
+}
+
+func TestHandleFluxWebhook_Forwarding(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		cfgForward    bool
+		wantForwarded bool
+	}{
+		{
+			name:          "forwards raw webhook to peer when configured",
+			cfgForward:    true,
+			wantForwarded: true,
+		},
+		{
+			name:          "no forward when WebhookForwardURLs is empty",
+			cfgForward:    false,
+			wantForwarded: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var receivedBody string
+			var receivedHeader http.Header
+			peerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				receivedBody = string(b)
+				receivedHeader = r.Header.Clone()
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer peerServer.Close()
+
+			cfg := Config{
+				BotID:        "aerial",
+				DefaultOwner: true,
+			}
+			if tc.cfgForward {
+				cfg.WebhookForwardURLs = map[string]string{
+					"aerial":  "http://self:4020",
+					"eri-sub": peerServer.URL,
+				}
+			}
+
+			srv := newTestRouter(cfg, peerServer.Client(), nil, nil)
+			payload := `{"involvedObject":{"kind":"GitRepository","name":"aerial","namespace":"flux-system"},"severity":"info","reason":"NewArtifact","message":"git commit"}`
+			req := httptest.NewRequest(http.MethodPost, "/webhooks/flux", strings.NewReader(payload))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Custom-Header", "custom-val")
+			w := httptest.NewRecorder()
+
+			srv.Routes().ServeHTTP(w, req)
+
+			if tc.wantForwarded {
+				if receivedBody != payload {
+					t.Fatalf("forwarded body = %q, want %q", receivedBody, payload)
+				}
+				if receivedHeader.Get("X-Custom-Header") != "custom-val" {
+					t.Errorf("forwarded header X-Custom-Header = %q, want custom-val", receivedHeader.Get("X-Custom-Header"))
+				}
+			} else if receivedBody != "" {
+				t.Fatalf("expected no forward, but got body %q", receivedBody)
+			}
+		})
 	}
 }
