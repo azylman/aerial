@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestLoadDashboardYAMLConfigs_TableDriven(t *testing.T) {
+func TestLoadConsoleYAMLConfigs_TableDriven(t *testing.T) {
 	t.Parallel()
 	defaults := DefaultQuickLaunchLinks()
 	if len(defaults) != 0 {
@@ -36,16 +36,16 @@ func TestLoadDashboardYAMLConfigs_TableDriven(t *testing.T) {
 		},
 		{
 			name: "InvalidYAML",
-			yamlData: `dashboard: [invalid-yaml
+			yamlData: `console: [invalid-yaml
 invalid: [yaml: broken
 `,
 			wantLinks: []QuickLaunchLink{},
 			wantRepos: nil,
 		},
 		{
-			name: "QuickLaunchLinks_DashboardConfig",
+			name: "QuickLaunchLinks_ConsoleConfig",
 			yamlData: `
-dashboard:
+console:
   quick_launch_links:
     - name: "HOME"
       url: "https://home.zylman.com"
@@ -105,9 +105,9 @@ quick_launch_links:
 			},
 		},
 		{
-			name: "GitHubRepos_DashboardBlock",
+			name: "GitHubRepos_ConsoleBlock",
 			yamlData: `
-dashboard:
+console:
   github_repos:
     - "azylman/aerial"
     - " azylman/aerial "
@@ -118,9 +118,9 @@ dashboard:
 			wantRepos: []string{"azylman/aerial", "azylman/mirrormere"},
 		},
 		{
-			name: "GitHubRepos_DashboardReposFallback",
+			name: "GitHubRepos_ConsoleReposFallback",
 			yamlData: `
-dashboard:
+console:
   repos:
     - "azylman/coven"
 `,
@@ -164,7 +164,7 @@ github_repos:
 			}
 
 			if tc.wantRepos != nil || tc.noFile || tc.nonExistent || tc.yamlData != "" {
-				gotRepos := loadDashboardRepos(path)
+				gotRepos := loadConsoleRepos(path)
 				if len(gotRepos) != len(tc.wantRepos) {
 					t.Fatalf("expected %d repos, got %d: %v vs %v", len(tc.wantRepos), len(gotRepos), tc.wantRepos, gotRepos)
 				}
@@ -188,7 +188,7 @@ func TestResolveConfigPath(t *testing.T) {
 	fallbackFile := filepath.Join(tmpDir, "fallback.yaml")
 	_ = os.WriteFile(fallbackFile, []byte("port: '8084'\n"), 0o644)
 
-	fallback := "/config/dashboard.yaml"
+	fallback := "/config/console.yaml"
 	tests := []struct {
 		name         string
 		envVal       string
@@ -236,7 +236,7 @@ github_repos:
   - "azylman/aerial-config"
   - "azylman/aerial"
 `
-	validPath := filepath.Join(tmpDir, "dashboard.yaml")
+	validPath := filepath.Join(tmpDir, "console.yaml")
 	_ = os.WriteFile(validPath, []byte(validYAML), 0o644)
 
 	singleRepoYAML := `

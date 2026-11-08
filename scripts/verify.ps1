@@ -12,7 +12,7 @@ $mode = if ($Staged) { "staged" } else { "full" }
 Write-Host "⚡ [Aerial Verify] Running $mode verification checks on Windows..." -ForegroundColor Cyan
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
-$goServices = @("services/eri", "services/haro", "mcp/discord-mcp", "services/dashboard", "services/synapse", "services/vanadis", "services/coven")
+$goServices = @("services/eri", "services/haro", "mcp/discord-mcp", "services/console", "services/synapse", "services/vanadis", "services/coven")
 
 $gitCmd = if (Get-Command "git" -ErrorAction SilentlyContinue) { "git" }
           elseif (Test-Path "$env:LOCALAPPDATA\Programs\MinGit\cmd\git.exe") { 
@@ -301,8 +301,8 @@ if ($Staged) {
         }
     }
 
-    if ($stagedFiles | Where-Object { $_ -like "services/dashboard/*" -or $_ -like "dashboard/*" }) {
-        Run-NodeCheck "services/dashboard/static/app.js"
+    if ($stagedFiles | Where-Object { $_ -like "services/console/*" -or $_ -like "console/*" }) {
+        Run-NodeCheck "services/console/static/app.js"
     }
 
     if ($stagedFiles | Where-Object { $_ -like "services/docs-service/*" -or $_ -like "docs-service/*" }) {
@@ -325,7 +325,7 @@ foreach ($svc in $goServices) {
 }
 
 Write-Host "=== 2. Frontend & Script Syntax Checks ===" -ForegroundColor Yellow
-Run-NodeCheck "services/dashboard/static/app.js"
+Run-NodeCheck "services/console/static/app.js"
 Run-NodeCheck "services/docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js"
 
 Write-Host "=== 3. Unit Test Suites ===" -ForegroundColor Yellow
@@ -333,8 +333,8 @@ foreach ($svc in $goServices) {
     Run-GoTest $svc
 }
 
-if (Test-Path (Join-Path $repoRoot "services/dashboard/app.test.js")) {
-    Run-NodeTest "services/dashboard" "*.test.js"
+if (Test-Path (Join-Path $repoRoot "services/console/app.test.js")) {
+    Run-NodeTest "services/console" "*.test.js"
 }
 
 Write-Host "=== 4. Test Coverage Gating ===" -ForegroundColor Yellow

@@ -615,7 +615,7 @@ function renderServicesGrid(services) {
 
 function getApiBase() {
     const path = window.location.pathname.replace(/\/+$/, '');
-    return path.endsWith('/dashboard') ? path : (path + '/dashboard').replace(/\/+/g, '/').replace(/\/+$/, '');
+    return path.endsWith('/console') ? path : (path + '/console').replace(/\/+/g, '/').replace(/\/+$/, '');
 }
 
 async function fetchStatus() {

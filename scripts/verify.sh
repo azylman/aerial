@@ -638,11 +638,11 @@ if [ "$MODE" = "staged" ]; then
         run_atlas_validate
     fi
 
-    # Check dashboard JS syntax & frontend coverage gate
-    if echo "$CHANGED_FILES" | grep -q -E "^(services/)?dashboard/"; then
-        run_node_syntax "services/dashboard/static/app.js"
-        if echo "$CHANGED_FILES" | grep -q -E "^(services/)?dashboard/.*\.js$" && [ -f "$SCRIPT_DIR/check-coverage.sh" ]; then
-            sh "$SCRIPT_DIR/check-coverage.sh" --check --service dashboard
+    # Check console JS syntax & frontend coverage gate
+    if echo "$CHANGED_FILES" | grep -q -E "^(services/)?console/"; then
+        run_node_syntax "services/console/static/app.js"
+        if echo "$CHANGED_FILES" | grep -q -E "^(services/)?console/.*\.js$" && [ -f "$SCRIPT_DIR/check-coverage.sh" ]; then
+            sh "$SCRIPT_DIR/check-coverage.sh" --check --service console
         fi
     fi
 
@@ -698,7 +698,7 @@ check_docker_compose
 run_atlas_validate
 
 echo "=== 2. Frontend & Script Syntax Checks ==="
-run_node_syntax "services/dashboard/static/app.js"
+run_node_syntax "services/console/static/app.js"
 run_node_syntax "services/docs-service/app/assets/js/plugins/docsify-mermaid-cyberpunk.js"
 run_node_syntax "services/homepage/lib/merge.js"
 run_node_syntax "services/homepage/prepare-config.js"
@@ -711,8 +711,8 @@ for svc in $GO_SERVICES; do
     run_go_test "$svc"
 done
 
-if [ -f "services/dashboard/app.test.js" ]; then
-    run_node_test "services/dashboard" "*.test.js"
+if [ -f "services/console/app.test.js" ]; then
+    run_node_test "services/console" "*.test.js"
 fi
 
 if [ -d "services/homepage/test" ]; then

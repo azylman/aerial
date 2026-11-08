@@ -118,7 +118,7 @@ func (p *GitHubPoller) getActiveRepos() []string {
 	}
 	var baseRepos []string
 	if p.configPath != "" {
-		baseRepos = loadDashboardRepos(p.configPath)
+		baseRepos = loadConsoleRepos(p.configPath)
 	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -362,7 +362,7 @@ func (p *GitHubPoller) pollRepo(ctx context.Context, repo, baseURL string, allAc
 		var runData GitHubRunsResponse
 		decodeErr := json.NewDecoder(resp.Body).Decode(&runData)
 		if decodeErr != nil {
-			log.Printf("[Dashboard:GitHub] Error decoding runs for %s: %v", repo, decodeErr)
+			log.Printf("[Console:GitHub] Error decoding runs for %s: %v", repo, decodeErr)
 			return false
 		}
 		sanitizeWorkflowRunCommits(runData.WorkflowRuns, repo)
@@ -370,9 +370,9 @@ func (p *GitHubPoller) pollRepo(ctx context.Context, repo, baseURL string, allAc
 	}
 
 	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
-		log.Printf("[Dashboard:GitHub] Warning: rate limited on %s: HTTP %d", repo, resp.StatusCode)
+		log.Printf("[Console:GitHub] Warning: rate limited on %s: HTTP %d", repo, resp.StatusCode)
 	} else {
-		log.Printf("[Dashboard:GitHub] Warning: unexpected HTTP %d querying %s", resp.StatusCode, repo)
+		log.Printf("[Console:GitHub] Warning: unexpected HTTP %d querying %s", resp.StatusCode, repo)
 	}
 	return false
 }

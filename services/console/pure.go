@@ -245,7 +245,7 @@ func BuildVanadisBuildDetailUpstreamURL(vanadisBaseURL string, requestPath strin
 	}
 
 	var rawID string
-	if after, ok := strings.CutPrefix(requestPath, "/dashboard/api/builds/"); ok {
+	if after, ok := strings.CutPrefix(requestPath, "/console/api/builds/"); ok {
 		rawID = after
 	} else if after, ok := strings.CutPrefix(requestPath, "/api/builds/"); ok {
 		rawID = after
@@ -401,7 +401,7 @@ func ExtractServiceNameFromJobName(jobName string) string {
 	lower := strings.ToLower(jobName)
 	services := []string{
 		"brain",
-		"dashboard",
+		"console",
 		"proxy",
 		"haro",
 		"coven",

@@ -133,7 +133,7 @@ func (ar *AssetRegistry) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reqPath := strings.TrimPrefix(r.URL.Path, "/dashboard")
+	reqPath := strings.TrimPrefix(r.URL.Path, "/console")
 	reqPath = strings.TrimPrefix(reqPath, "/")
 	if reqPath == "" || reqPath == "index.html" {
 		reqPath = "index.html"
@@ -171,5 +171,5 @@ func (ar *AssetRegistry) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodHead {
 		return
 	}
-	httpkit.WriteResponse(w, r, "dashboard", asset.Data)
+	httpkit.WriteResponse(w, r, "console", asset.Data)
 }

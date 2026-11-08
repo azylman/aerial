@@ -324,10 +324,10 @@ func TestBuildVanadisBuildDetailUpstreamURL_TableDriven(t *testing.T) {
 		{name: "empty base URL returns error", baseURL: "", requestPath: "/api/builds/build-123", wantErr: true},
 		{name: "control characters in URL return error", baseURL: "http://vanadis:\x7f8080", requestPath: "/api/builds/build-123", wantErr: true},
 		{name: "valid /api/builds/ prefix", baseURL: "http://vanadis.aerial", requestPath: "/api/builds/build-1792214230", wantID: "build-1792214230", wantURL: "http://vanadis.aerial/builds/build-1792214230"},
-		{name: "valid /dashboard/api/builds/ prefix with trailing slash baseURL", baseURL: "http://vanadis.aerial/", requestPath: "/dashboard/api/builds/build-1792214230", wantID: "build-1792214230", wantURL: "http://vanadis.aerial/builds/build-1792214230"},
+		{name: "valid /dashboard/api/builds/ prefix with trailing slash baseURL", baseURL: "http://vanadis.aerial/", requestPath: "/console/api/builds/build-1792214230", wantID: "build-1792214230", wantURL: "http://vanadis.aerial/builds/build-1792214230"},
 		{name: "missing expected prefix returns error", baseURL: "http://vanadis.aerial", requestPath: "/api/other/build-123", wantErr: true},
 		{name: "empty build ID on /api/builds/ returns error", baseURL: "http://vanadis.aerial", requestPath: "/api/builds/", wantErr: true},
-		{name: "empty build ID on /dashboard/api/builds/ returns error", baseURL: "http://vanadis.aerial", requestPath: "/dashboard/api/builds/", wantErr: true},
+		{name: "empty build ID on /dashboard/api/builds/ returns error", baseURL: "http://vanadis.aerial", requestPath: "/console/api/builds/", wantErr: true},
 		{name: "path traversal with .. returns error", baseURL: "http://vanadis.aerial", requestPath: "/api/builds/../evil", wantErr: true},
 		{name: "path traversal with embedded slash returns error", baseURL: "http://vanadis.aerial", requestPath: "/api/builds/build/subpath", wantErr: true},
 		{name: "control characters in build ID return error", baseURL: "http://vanadis.aerial", requestPath: "/api/builds/build-\x00bad", wantErr: true},
@@ -462,7 +462,7 @@ func TestExtractServiceNameFromJobName_TableDriven(t *testing.T) {
 		expected string
 	}{
 		{name: "brain service", jobName: "Build & Push brain (linux/amd64)", expected: "brain"},
-		{name: "dashboard service", jobName: "Build & Push dashboard", expected: "dashboard"},
+		{name: "console service", jobName: "Build & Push console", expected: "console"},
 		{name: "proxy service", jobName: "test-proxy-service", expected: "proxy"},
 		{name: "haro service", jobName: "haro CI", expected: "haro"},
 		{name: "coven service", jobName: "Build & Push coven", expected: "coven"},
@@ -508,7 +508,7 @@ func TestParseMatrixJobChips_TableDriven(t *testing.T) {
 		{name: "empty jobs returns empty slice", jobs: []GitHubJob{}, now: testRefTime, wantChips: []MatrixJobChip{}},
 		{name: "zero-time default fallback", jobs: []GitHubJob{mkJob(1, 10, "Build & Push Images (proxy)", "in_progress", "", -10*time.Second, 0)}, now: time.Time{}, wantChips: []MatrixJobChip{{Name: "proxy"}}},
 		{name: "in_progress job computes active status and duration from refTime", jobs: []GitHubJob{mkJob(1, 10, "brain-build", "in_progress", "", -45*time.Second, 0)}, now: testRefTime, wantChips: []MatrixJobChip{{Name: "brain", Status: "active", Duration: "45s"}}},
-		{name: "completed success and failure with deduplication", jobs: []GitHubJob{mkJob(1, 10, "dashboard-test", "completed", "success", -120*time.Second, -60*time.Second), mkJob(2, 10, "dashboard-duplicate", "completed", "failure", 0, 0), mkJob(3, 10, "haro", "completed", "failure", 0, 0), mkJob(4, 10, "discord-mcp", "completed", "cancelled", 0, 0)}, now: testRefTime, wantChips: []MatrixJobChip{{Name: "dashboard", Status: "completed", Duration: "60s"}, {Name: "haro", Status: "failed"}, {Name: "discord-mcp", Status: "pending"}}},
+		{name: "completed success and failure with deduplication", jobs: []GitHubJob{mkJob(1, 10, "console-test", "completed", "success", -120*time.Second, -60*time.Second), mkJob(2, 10, "console-duplicate", "completed", "failure", 0, 0), mkJob(3, 10, "haro", "completed", "failure", 0, 0), mkJob(4, 10, "discord-mcp", "completed", "cancelled", 0, 0)}, now: testRefTime, wantChips: []MatrixJobChip{{Name: "console", Status: "completed", Duration: "60s"}, {Name: "haro", Status: "failed"}, {Name: "discord-mcp", Status: "pending"}}},
 		{name: "zero reference time defaults to now", jobs: []GitHubJob{mkJob(1, 10, "brain-build", "in_progress", "", -10*time.Second, 0)}, now: time.Time{}, wantChips: []MatrixJobChip{{Name: "brain", Status: "active"}}},
 	}
 

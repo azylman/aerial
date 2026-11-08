@@ -35,7 +35,7 @@ jobs:
       kernel-mcp: ${{ steps.filter.outputs.kernel-mcp }}
       github-mcp: ${{ steps.filter.outputs.github-mcp }}
       infisical-mcp: ${{ steps.filter.outputs.infisical-mcp }}
-      dashboard: ${{ steps.filter.outputs.dashboard }}
+      console: ${{ steps.filter.outputs.console }}
       docs: ${{ steps.filter.outputs.docs }}
       synapse: ${{ steps.filter.outputs.synapse }}
       vanadis: ${{ steps.filter.outputs.vanadis }}
@@ -74,8 +74,8 @@ jobs:
               - 'mcp/github-mcp/**'
             infisical-mcp:
               - 'mcp/infisical-mcp/**'
-            dashboard:
-              - 'services/dashboard/**'
+            console:
+              - 'services/console/**'
               - 'pkg/**'
             docs:
               - 'services/docs-service/**'
@@ -108,7 +108,7 @@ jobs:
               "kernel-mcp": "${{ steps.filter.outputs.kernel-mcp }}",
               "github-mcp": "${{ steps.filter.outputs.github-mcp }}",
               "infisical-mcp": "${{ steps.filter.outputs.infisical-mcp }}",
-              dashboard: "${{ steps.filter.outputs.dashboard }}",
+              console: "${{ steps.filter.outputs.console }}",
               docs: "${{ steps.filter.outputs.docs }}",
               synapse: "${{ steps.filter.outputs.synapse }}",
               vanadis: "${{ steps.filter.outputs.vanadis }}",
@@ -126,7 +126,7 @@ jobs:
               { service: "kernel-mcp", context: ".", file: "./mcp/kernel-mcp/Dockerfile", image_name: "aerial-kernel-mcp" },
               { service: "github-mcp", context: "./mcp/github-mcp", file: "./mcp/github-mcp/Dockerfile", image_name: "aerial-github-mcp" },
               { service: "infisical-mcp", context: "./mcp/infisical-mcp", file: "./mcp/infisical-mcp/Dockerfile", image_name: "aerial-infisical-mcp" },
-              { service: "dashboard", context: ".", file: "./services/dashboard/Dockerfile", image_name: "aerial-dashboard" },
+              { service: "console", context: ".", file: "./services/console/Dockerfile", image_name: "aerial-console" },
               { service: "docs", context: "./services/docs-service", file: "./services/docs-service/Dockerfile", image_name: "aerial-docs" },
               { service: "synapse", context: ".", file: "./services/synapse/Dockerfile", image_name: "aerial-synapse" },
               { service: "vanadis", context: ".", file: "./services/vanadis/Dockerfile", image_name: "aerial-vanadis" },
@@ -280,9 +280,9 @@ jobs:
           done
 
       - name: Lint Permet HUD Frontend Syntax
-        if: needs.changes.outputs.dashboard == 'true'
+        if: needs.changes.outputs.console == 'true'
         run: |
-          node --check services/dashboard/static/app.js
+          node --check services/console/static/app.js
 
       - name: Lint Docsify Custom Plugins
         if: needs.changes.outputs.docs == 'true'

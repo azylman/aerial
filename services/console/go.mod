@@ -1,4 +1,4 @@
-module github.com/azylman/aerial/services/dashboard
+module github.com/azylman/aerial/services/console
 
 go 1.27.3
 
