@@ -24,7 +24,7 @@ type wakeInfo = WakeInfo
 type turnExecution struct {
 	pool                                                                                        *WorkerPool
 	activePool                                                                                  runner.AgentPool
-	burst, trailingMsgs                                                                         []db.Message
+	burst                                                                                       []db.Message
 	dispatch                                                                                    *db.Dispatch
 	threadID, triggerType, activeSessionID, currentSessionID, previousSessionID, leaseSessionID string
 	effectiveID, effectiveName, threadName, turnPrompt, turnStatus, turnResponseText            string
@@ -36,7 +36,7 @@ type turnExecution struct {
 	lease                                                                                       runner.SessionLease
 	isCold, isEphemeral, isThread, isQuotaPaused, turnAttempted                                 bool
 	policy                                                                                      config.ChannelPolicy
-	wakeInfos, trailingInfos                                                                    []wakeInfo
+	wakeInfos                                                                                   []wakeInfo
 	statusUpdater                                                                               *StatusUpdater
 	stopTyping                                                                                  func()
 	hookMetadata                                                                                map[string]any
@@ -404,7 +404,7 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 
 	// Synchronous post_turn hook:
 	// Go defers execute LIFO. By placing post_turn right after scopeLock.Lock() / defer scopeLock.Unlock(),
-	// it executes AFTER handleTrailing and panic recovery, but BEFORE scopeLock.Unlock().
+	// it executes AFTER panic recovery, but BEFORE scopeLock.Unlock().
 	defer te.runPostTurnHook()
 
 	defer te.stopIndicators()
@@ -414,8 +414,6 @@ func (p *WorkerPool) processBurst(burst []db.Message, scopeKeyOpt ...string) {
 			te.handleBurstPanic(r)
 		}
 	}()
-
-	defer te.handleTrailing()
 
 	if !te.claimAndFilterStale() {
 		return
@@ -794,16 +792,7 @@ func (te *turnExecution) runChannelAmbientTriage() bool {
 		te.saveSessionID(te.threadID, "")
 	}
 
-	for i, m := range plan.LeadingAmbient {
-		te.completeAmbientMessage(m, plan.WakeInfos[i])
-	}
-	te.activeSessionMu.Lock()
-	if !te.isInterrupted() {
-		te.trailingMsgs, te.trailingInfos = plan.TrailingMessages, plan.TrailingInfos
-	}
-	te.burst = []db.Message{plan.ActiveMessage}
-	te.activeSessionMu.Unlock()
-	metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "wake").Inc()
+	metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "wake").Add(float64(len(te.burst)))
 	return false
 }
 
@@ -886,48 +875,6 @@ func (te *turnExecution) rescheduleBurst(delaySeconds int) {
 			time.AfterFunc(delay, func() {
 				te.pool.Enqueue(mCopy)
 			})
-		}
-	}
-}
-
-func (te *turnExecution) handleTrailing() {
-	te.activeSessionMu.Lock()
-	if len(te.trailingMsgs) == 0 {
-		te.activeSessionMu.Unlock()
-		return
-	}
-	trailing := te.trailingMsgs
-	trailingInfos := te.trailingInfos
-	te.trailingMsgs = nil
-	te.trailingInfos = nil
-	te.activeSessionMu.Unlock()
-	if !te.isQuotaPaused && te.pool != nil && te.pool.ctx != nil && te.pool.ctx.Err() != nil {
-		return
-	}
-	for i, m := range trailing {
-		info := trailingInfos[i]
-		if te.isQuotaPaused {
-			if info.IsWake {
-				metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "wake").Inc()
-			} else {
-				metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
-			}
-			quotaMsg := "[QUOTA_PAUSED] Trailing message suppressed due to active quota lockout"
-			te.updateMessageStatus(m.ID, db.StatusFailed, quotaMsg)
-			if te.pool != nil && te.pool.cfg.OnMessageCompleted != nil {
-				te.pool.cfg.OnMessageCompleted(m, db.StatusFailed)
-			}
-			continue
-		}
-		if !info.IsWake {
-			te.completeAmbientMessage(m, info)
-		} else {
-			metrics.DiscordMessagesProcessedTotal.WithLabelValues("false", "wake").Inc()
-			te.updateMessageStatus(m.ID, db.StatusPending, "")
-			m.Status = db.StatusPending
-			if te.pool != nil {
-				te.pool.Enqueue(m)
-			}
 		}
 	}
 }

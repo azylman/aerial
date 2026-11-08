@@ -473,14 +473,9 @@ type WakeInfo struct {
 
 // BurstPlan encapsulates deterministic partitioning and wake decisions for a burst.
 type BurstPlan struct {
-	WakeIndex        int
-	WakeInfos        []WakeInfo
-	IsAllAmbient     bool
-	LeadingAmbient   []db.Message
-	ActiveMessage    db.Message
-	HasActiveMessage bool
-	TrailingMessages []db.Message
-	TrailingInfos    []WakeInfo
+	WakeIndex    int
+	WakeInfos    []WakeInfo
+	IsAllAmbient bool
 }
 
 // BurstPlanInput configures the burst execution planner.
@@ -547,31 +542,10 @@ func isBurstDirectedAtOther(burst []db.Message, botUserID string, botRoleIDs []s
 	return hasDirected
 }
 
-func populateTier1TrailingWakeInfos(burst []db.Message, wakeIdx int, wakeInfos []WakeInfo, wm string, threshold float64, botUserID string, botRoleIDs []string, classify func([]db.Message) (float64, string)) {
-	for i := range wakeIdx {
-		wakeInfos[i] = WakeInfo{IsWake: false, Score: 0.0, Threshold: threshold, Reason: "burst_prescan_leading"}
-	}
-	for i := wakeIdx + 1; i < len(burst); i++ {
-		m := burst[i]
-		switch {
-		case isTier1Wake(m, botUserID, botRoleIDs):
-			wakeInfos[i] = WakeInfo{IsWake: true, Score: 1.0, Threshold: threshold, Reason: "direct_address"}
-		case wm == "mention" || threshold <= 0.0 || classifier.IsHeuristicSkip(db.ExtractMessageBody(m.Content)):
-			wakeInfos[i] = WakeInfo{IsWake: false, Score: 0.0, Threshold: threshold, Reason: "heuristic_skip"}
-		case isDirectedAtOther(m, botUserID, botRoleIDs):
-			wakeInfos[i] = WakeInfo{IsWake: false, Score: 0.0, Threshold: threshold, Reason: "directed_at_other"}
-		default:
-			score, reason := classify([]db.Message{m})
-			wakeInfos[i] = WakeInfo{IsWake: score >= threshold, Score: score, Threshold: threshold, Reason: reason}
-		}
-	}
-}
-
-// PlanBurstExecution deterministically partitions an incoming burst into leading ambient messages,
-// the active wake turn message, and trailing messages based on channel policy and wake criteria.
+// PlanBurstExecution evaluates burst-level wake gating across channel and thread modes.
 func PlanBurstExecution(input BurstPlanInput) BurstPlan {
 	if len(input.Burst) == 0 {
-		return BurstPlan{WakeIndex: -1}
+		return BurstPlan{WakeIndex: -1, IsAllAmbient: true}
 	}
 
 	wm := normalizeWakeMode(input.WakeMode)
@@ -581,52 +555,55 @@ func PlanBurstExecution(input BurstPlanInput) BurstPlan {
 	}
 
 	threshold := input.Threshold
+
 	switch strings.ToLower(strings.TrimSpace(input.HookOverride)) {
-	case "wake":
-		return buildTriggeredBurstPlan(input.Burst, 0, fillBurstWakeInfos(len(input.Burst), 0, 1.0, threshold, "hook_wake_override", "hook_wake_trailing"))
 	case "drop":
 		return BurstPlan{WakeIndex: -1, IsAllAmbient: true, WakeInfos: fillBurstWakeInfos(len(input.Burst), -1, 0.0, threshold, "hook_drop_override", "hook_drop_override")}
+	case "wake":
+		return BurstPlan{WakeIndex: 0, IsAllAmbient: false, WakeInfos: fillBurstWakeInfos(len(input.Burst), 0, 1.0, threshold, "hook_wake_override", "hook_wake_trailing")}
 	}
 
+	// Pre-scan input.Burst for Tier-1 wake: if any message is Tier-1 wake,
+	// record wake reason and return immediately with zero classify calls.
 	wakeInfos := make([]WakeInfo, len(input.Burst))
-	wakeIdx := -1
-
+	firstTier1Idx := -1
 	for i, m := range input.Burst {
 		if isTier1Wake(m, input.BotUserID, input.BotRoleIDs) {
-			wakeInfos[i] = WakeInfo{IsWake: true, Score: 1.0, Threshold: threshold, Reason: "direct_address"}
-			if wakeIdx == -1 {
-				wakeIdx = i
+			wakeInfos[i] = WakeInfo{IsWake: true, Score: 1.0, Threshold: threshold, Reason: "tier1_mention_or_reply"}
+			if firstTier1Idx == -1 {
+				firstTier1Idx = i
 			}
+		} else {
+			wakeInfos[i] = WakeInfo{IsWake: false, Score: 0.0, Threshold: threshold, Reason: "ambient_in_wake_burst"}
 		}
 	}
-
-	if wakeIdx != -1 {
-		populateTier1TrailingWakeInfos(input.Burst, wakeIdx, wakeInfos, wm, threshold, input.BotUserID, input.BotRoleIDs, classify)
-		return buildTriggeredBurstPlan(input.Burst, wakeIdx, wakeInfos)
+	if firstTier1Idx != -1 {
+		return BurstPlan{WakeIndex: firstTier1Idx, WakeInfos: wakeInfos, IsAllAmbient: false}
 	}
 
-	if wm == "mention" {
-		return BurstPlan{WakeIndex: -1, IsAllAmbient: true, WakeInfos: fillBurstWakeInfos(len(input.Burst), -1, 0.0, 0.0, "mention_mode_ambient", "mention_mode_ambient")}
-	}
 	if wm == "all" {
-		return buildTriggeredBurstPlan(input.Burst, 0, fillBurstWakeInfos(len(input.Burst), 0, 1.0, 0.0, "all_wake", "all_wake_trailing"))
-	}
-	if threshold <= 0.0 {
-		return BurstPlan{WakeIndex: -1, IsAllAmbient: true, WakeInfos: fillBurstWakeInfos(len(input.Burst), -1, 0.0, threshold, "classifier disabled", "classifier disabled")}
+		return BurstPlan{WakeIndex: 0, IsAllAmbient: false, WakeInfos: fillBurstWakeInfos(len(input.Burst), 0, 1.0, 0.0, "all_wake", "all_wake_trailing")}
 	}
 
-	if isAllBurstHeuristicSkip(input.Burst) {
-		return BurstPlan{WakeIndex: -1, IsAllAmbient: true, WakeInfos: fillBurstWakeInfos(len(input.Burst), -1, 0.0, threshold, "heuristic_skip", "heuristic_skip")}
-	}
-	if isBurstDirectedAtOther(input.Burst, input.BotUserID, input.BotRoleIDs) {
-		return BurstPlan{WakeIndex: -1, IsAllAmbient: true, WakeInfos: fillBurstWakeInfos(len(input.Burst), -1, 0.0, threshold, "directed_at_other", "directed_at_other")}
+	if wm == "classifier" {
+		if threshold <= 0.0 {
+			return BurstPlan{WakeIndex: -1, IsAllAmbient: true, WakeInfos: fillBurstWakeInfos(len(input.Burst), -1, 0.0, threshold, "classifier disabled", "classifier disabled")}
+		}
+		if isAllBurstHeuristicSkip(input.Burst) {
+			return BurstPlan{WakeIndex: -1, IsAllAmbient: true, WakeInfos: fillBurstWakeInfos(len(input.Burst), -1, 0.0, threshold, "heuristic_skip", "heuristic_skip")}
+		}
+		if isBurstDirectedAtOther(input.Burst, input.BotUserID, input.BotRoleIDs) {
+			return BurstPlan{WakeIndex: -1, IsAllAmbient: true, WakeInfos: fillBurstWakeInfos(len(input.Burst), -1, 0.0, threshold, "directed_at_other", "directed_at_other")}
+		}
+		score, reason := classify(input.Burst)
+		if score >= threshold {
+			return BurstPlan{WakeIndex: 0, IsAllAmbient: false, WakeInfos: fillBurstWakeInfos(len(input.Burst), 0, score, threshold, reason, "burst_ambient")}
+		}
+		return BurstPlan{WakeIndex: -1, IsAllAmbient: true, WakeInfos: fillBurstWakeInfos(len(input.Burst), -1, score, threshold, reason, reason)}
 	}
 
-	score, reason := classify(input.Burst)
-	if score >= threshold {
-		return buildTriggeredBurstPlan(input.Burst, 0, fillBurstWakeInfos(len(input.Burst), 0, score, threshold, reason, "burst_ambient"))
-	}
-	return BurstPlan{WakeIndex: -1, IsAllAmbient: true, WakeInfos: fillBurstWakeInfos(len(input.Burst), -1, score, threshold, reason, reason)}
+	// For any other wakeMode (e.g. "mention" with no Tier-1 hit), return all-ambient plan.
+	return BurstPlan{WakeIndex: -1, IsAllAmbient: true, WakeInfos: fillBurstWakeInfos(len(input.Burst), -1, 0.0, 0.0, "mention_mode_ambient", "mention_mode_ambient")}
 }
 
 func fillBurstWakeInfos(n, wakeIdx int, score, threshold float64, wakeReason, otherReason string) []WakeInfo {
@@ -639,17 +616,6 @@ func fillBurstWakeInfos(n, wakeIdx int, score, threshold float64, wakeReason, ot
 		}
 	}
 	return infos
-}
-
-func buildTriggeredBurstPlan(burst []db.Message, wakeIdx int, infos []WakeInfo) BurstPlan {
-	plan := BurstPlan{WakeIndex: wakeIdx, WakeInfos: infos, ActiveMessage: burst[wakeIdx], HasActiveMessage: true}
-	if wakeIdx > 0 {
-		plan.LeadingAmbient = burst[:wakeIdx]
-	}
-	if wakeIdx+1 < len(burst) {
-		plan.TrailingMessages, plan.TrailingInfos = burst[wakeIdx+1:], infos[wakeIdx+1:]
-	}
-	return plan
 }
 
 // TurnPromptInput collects pre-fetched context components for deterministic prompt assembly.

@@ -674,12 +674,6 @@ func TestSummarizeAndHistoryHelpers(t *testing.T) {
 	_ = teSnowflakeHist.fetchTurnHistory(context.Background(), 5)
 	_, _ = teSnowflakeHist.getRecentThreadMessages("123456789012345678", 5)
 	_ = convertDiscordMessageToDBMessage(&discordgo.Message{ID: "non-num", WebhookID: "wh-1"}, "t-1")
-	teTrail := &turnExecution{
-		pool:          &WorkerPool{cfg: WorkerPoolConfig{Store: fake, OnMessageCompleted: func(db.Message, string) {}}},
-		isQuotaPaused: true, trailingMsgs: []db.Message{{ID: "m-tr1", Content: "tr1"}, {ID: "m-tr2", Content: "tr2"}},
-		trailingInfos: []WakeInfo{{IsWake: true}, {IsWake: false}},
-	}
-	teTrail.handleTrailing()
 	teSess := &turnExecution{threadID: "t-pers", pool: &WorkerPool{cfg: WorkerPoolConfig{Store: fake}}}
 	_ = teSess.probeCandidateSessionID("", "", "")
 	teSess.currentSessionID = "sess-cur"

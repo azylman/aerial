@@ -211,10 +211,7 @@ func hasNewerSnowflakeInSlice(msgs []db.Message, triggerID string, burstIDs map[
 	return false
 }
 
-func (te *turnExecution) hasNewerChannelActivity(triggerID string, burstIDs map[string]bool, trailing []db.Message) bool {
-	if hasNewerSnowflakeInSlice(trailing, triggerID, burstIDs) {
-		return true
-	}
+func (te *turnExecution) hasNewerChannelActivity(triggerID string, burstIDs map[string]bool) bool {
 	if te.pool != nil && te.pool.hasNewerEnqueuedDiscordMessage(te.threadID, triggerID) {
 		return true
 	}
@@ -234,7 +231,6 @@ func (te *turnExecution) resolveReplyToMessageID(deliveryTarget string) string {
 	}
 	te.activeSessionMu.Lock()
 	burst := slices.Clone(te.burst)
-	trailing := slices.Clone(te.trailingMsgs)
 	te.activeSessionMu.Unlock()
 
 	var triggerMsg db.Message
@@ -253,7 +249,7 @@ func (te *turnExecution) resolveReplyToMessageID(deliveryTarget string) string {
 	if triggerMsg.ID == deliveryTarget || (triggerMsg.ChannelID != "" && triggerMsg.ChannelID != deliveryTarget) {
 		return ""
 	}
-	if te.hasNewerChannelActivity(triggerMsg.ID, burstIDs, trailing) {
+	if te.hasNewerChannelActivity(triggerMsg.ID, burstIDs) {
 		return triggerMsg.ID
 	}
 	return ""
