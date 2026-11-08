@@ -1372,6 +1372,57 @@ func TestProcessDeployEvent(t *testing.T) {
 			wantTargetID: "1555405874565091380",
 			wantPrompts:  1,
 		},
+		{
+			name: "deploy_success completes coalesced older deploying PRs in same kustomization",
+			evt:  mkDeployEvt("deploy_success", "aerial-core", "azylman/aerial", "sha-pr-1485", 1485, "1555405874565091380", "success", ""),
+			reg: &mockPRRegistry{
+				resolvePRNum:    1485,
+				resolveTargetID: "1555405874565091380",
+				listDeployingPRs: []DeployingPR{
+					{
+						Repo:     "azylman/aerial",
+						PRNumber: 1484,
+						MergeSHA: "sha-pr-1484",
+						Metadata: map[string]any{
+							"started_jobs": []any{"aerial-synapse"},
+						},
+					},
+					{
+						Repo:     "azylman/aerial",
+						PRNumber: 1484,
+						MergeSHA: "sha-pr-1484",
+						Metadata: map[string]any{
+							"started_jobs": []any{"aerial-synapse"},
+						},
+					},
+					{
+						Repo:     "azylman/mirrormere",
+						PRNumber: 700,
+						HeadSHA:  "sha-mirrormere-700",
+						TargetID: "1555405874565091380",
+						Metadata: map[string]any{
+							"started_jobs": []any{"mirrormere-kiosk"},
+						},
+					},
+					{
+						Repo:     "azylman/aerial",
+						PRNumber: 1485,
+						MergeSHA: "sha-pr-1485",
+						TargetID: "1555405874565091380",
+						Metadata: map[string]any{
+							"started_jobs": []any{"aerial-eri"},
+						},
+					},
+				},
+			},
+			disp:         &mockOutboundDispatcher{},
+			wantPR:       1485,
+			wantTargetID: "1555405874565091380",
+			wantPrompts:  2,
+			wantPromptSubs: []string{
+				"Continuous Delivery deployment completed for job aerial-core on azylman/aerial (PR #1485, commit: sha-pr-1485).",
+			},
+		},
 	}
 
 	for _, tc := range tests {

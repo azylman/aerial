@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"strings"
@@ -172,4 +173,66 @@ func (s *RouterServer) handleFluxWebhook(w http.ResponseWriter, r *http.Request)
 	}
 
 	s.enqueueOrProcessDeployEvent(w, r, deployEvt, "flux")
+}
+
+func matchesDeployingPRKustomization(repo string, startedJobs []string, kustomizationName string) bool {
+	for _, job := range startedJobs {
+		if _, kust, _ := resolveImageTagAndKustomization(repo, job); kust == kustomizationName {
+			return true
+		}
+	}
+	return false
+}
+
+func isPRInDeployingList(deployingPRs []DeployingPR, repo string, prNumber int) bool {
+	if prNumber <= 0 {
+		return false
+	}
+	normRepo := normalizeRepo(repo)
+	for _, p := range deployingPRs {
+		if strings.EqualFold(normalizeRepo(p.Repo), normRepo) && p.PRNumber == prNumber {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *RouterServer) completeCoalescedDeployingPRs(ctx context.Context, evt DeployEvent) {
+	if s == nil || s.registry == nil || (evt.JobName != "aerial-config" && evt.JobName != "aerial-core") {
+		return
+	}
+	deployingPRs, err := s.registry.ListDeployingPRs(ctx)
+	if err != nil || len(deployingPRs) == 0 {
+		return
+	}
+	normEvtRepo := normalizeRepo(evt.Repo)
+	var pending []DeployingPR
+	for _, p := range deployingPRs {
+		if p.PRNumber <= 0 || (strings.EqualFold(normalizeRepo(p.Repo), normEvtRepo) && p.PRNumber == evt.PRNumber) {
+			continue
+		}
+		if !matchesDeployingPRKustomization(p.Repo, extractStringSliceFromMetadata(p.Metadata, "started_jobs"), evt.JobName) {
+			continue
+		}
+		commitSHA := firstNonEmpty(p.MergeSHA, p.HeadSHA, evt.CommitSHA)
+		if s.shouldSuppressDuplicateDeploySuccess(ctx, p.Repo, evt.JobName, commitSHA, p.PRNumber) {
+			s.reconcileStuckDeployingPRWidget(ctx, p.Repo, p.PRNumber)
+			continue
+		}
+		s.recordDeploySuccessDispatched(p.Repo, evt.JobName, commitSHA, p.PRNumber)
+		s.setPRWidgetState(ctx, p.Repo, p.PRNumber, "deployed", "")
+		pending = append(pending, p)
+	}
+	for _, p := range pending {
+		commitSHA := firstNonEmpty(p.MergeSHA, p.HeadSHA, evt.CommitSHA)
+		targetID := strings.TrimSpace(p.TargetID)
+		if targetID == "" {
+			if resolved, rErr := s.ResolveThreadForPR(ctx, p.Repo, p.PRNumber); rErr == nil {
+				targetID = resolved
+			}
+		}
+		if dErr := s.dispatchDeploymentSuccessPrompt(ctx, targetID, evt.JobName, p.Repo, commitSHA, p.PRNumber, evt.DeploymentID); dErr != nil {
+			log.Printf("[synapse] [deploy] warning dispatching coalesced deploy_success for %s#%d: %v", p.Repo, p.PRNumber, dErr)
+		}
+	}
 }
