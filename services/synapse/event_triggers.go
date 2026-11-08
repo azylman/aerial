@@ -165,8 +165,21 @@ func (s *RouterServer) fireEventTriggers(ctx context.Context, source string, tar
 }
 
 func (s *RouterServer) handleEventsWebhook(w http.ResponseWriter, r *http.Request) {
+	body, ok := readWebhookBody(w, r, 1<<20)
+	if !ok {
+		return
+	}
+	if len(s.cfg.WebhookForwardURLs) > 0 {
+		reqPath := r.URL.RequestURI()
+		if reqPath == "" {
+			reqPath = r.URL.Path
+		}
+		s.forwardRawWebhookToPeers(r.Context(), reqPath, r.Header, body)
+	}
+
 	var req EventWebhookRequest
-	if !readWebhookJSON(w, r, 1<<20, false, &req) {
+	if err := json.Unmarshal(body, &req); err != nil {
+		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json payload"})
 		return
 	}
 	source := strings.ToLower(strings.TrimSpace(req.Source))

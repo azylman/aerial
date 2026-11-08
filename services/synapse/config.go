@@ -37,25 +37,31 @@ type Config struct {
 	SystemChannelID       string
 	DiscordToken          string
 	AutoUpdatePRAuthors   []string
+	BotID                 string
+	DefaultOwner          bool
+	WebhookForwardURLs    map[string]string
 }
 
 // RouterYAMLConfig defines the declarative file schema for services/synapse/synapse.yaml.
 type RouterYAMLConfig struct {
-	Port                 string   `yaml:"port"`
-	InfisicalURL         string   `yaml:"infisical_url"`
-	InfisicalEnvironment string   `yaml:"infisical_environment"`
-	FluxReceiverURL      string   `yaml:"flux_receiver_url"`
-	EriURL               string   `yaml:"eri_url"`
-	VanadisURL           string   `yaml:"vanadis_url"`
-	HaroURL              string   `yaml:"haro_url"`
-	SystemChannelID      string   `yaml:"system_channel_id"`
-	SystemChannel        string   `yaml:"system_channel"`
-	AutoUpdatePRAuthors  []string `yaml:"auto_update_pr_authors"`
+	Port                 string            `yaml:"port"`
+	InfisicalURL         string            `yaml:"infisical_url"`
+	InfisicalEnvironment string            `yaml:"infisical_environment"`
+	FluxReceiverURL      string            `yaml:"flux_receiver_url"`
+	EriURL               string            `yaml:"eri_url"`
+	VanadisURL           string            `yaml:"vanadis_url"`
+	HaroURL              string            `yaml:"haro_url"`
+	SystemChannelID      string            `yaml:"system_channel_id"`
+	SystemChannel        string            `yaml:"system_channel"`
+	AutoUpdatePRAuthors  []string          `yaml:"auto_update_pr_authors"`
+	BotID                string            `yaml:"bot_id"`
+	DefaultOwner         bool              `yaml:"default_owner"`
+	WebhookForwardURLs   map[string]string `yaml:"webhook_forward_urls"`
 }
 
 var (
 	synapseFallbackConfigPath = "/config/synapse.yaml"
-	synapseAerialConfigPath   = "/config/config.yaml"
+	synapseAerialConfigPath   = "/share/aerial-config/config.yaml"
 )
 
 func firstNonEmpty(vals ...string) string {
@@ -67,22 +73,46 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
-func loadAerialConfigFallback(path, sysChan string, autoUpdateAuthors []string) (string, []string) {
+func normalizeWebhookForwardURLs(raw map[string]string) map[string]string {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make(map[string]string)
+	for k, v := range raw {
+		key := strings.TrimSpace(k)
+		val := strings.TrimRight(strings.TrimSpace(v), "/")
+		if key != "" && val != "" {
+			out[key] = val
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func loadAerialConfigFallback(path, sysChan, botID string, autoUpdateAuthors []string) (string, string, []string) {
 	data, err := os.ReadFile(path)
+	if err != nil && path == "/share/aerial-config/config.yaml" {
+		data, err = os.ReadFile("/config/config.yaml")
+	}
 	if err != nil {
-		return sysChan, autoUpdateAuthors
+		return sysChan, botID, autoUpdateAuthors
 	}
 	var aerialCfg RouterYAMLConfig
 	if err := yaml.Unmarshal(data, &aerialCfg); err != nil {
-		return sysChan, autoUpdateAuthors
+		return sysChan, botID, autoUpdateAuthors
 	}
 	if sysChan == "" {
 		sysChan = firstNonEmpty(aerialCfg.SystemChannelID, aerialCfg.SystemChannel)
 	}
+	if botID == "" {
+		botID = strings.TrimSpace(aerialCfg.BotID)
+	}
 	if len(autoUpdateAuthors) == 0 {
 		autoUpdateAuthors = dedupeTrimmedStrings(aerialCfg.AutoUpdatePRAuthors)
 	}
-	return sysChan, autoUpdateAuthors
+	return sysChan, botID, autoUpdateAuthors
 }
 
 // LoadConfig loads configuration from an optional YAML file (CONFIG_PATH) with environment variable overrides.
@@ -109,8 +139,15 @@ func LoadConfig(configPath string) Config {
 
 	autoUpdateAuthors := dedupeTrimmedStrings(fileCfg.AutoUpdatePRAuthors)
 	sysChan := firstNonEmpty(fileCfg.SystemChannelID, fileCfg.SystemChannel)
-	if (sysChan == "" || len(autoUpdateAuthors) == 0) && synapseAerialConfigPath != "" {
-		sysChan, autoUpdateAuthors = loadAerialConfigFallback(synapseAerialConfigPath, sysChan, autoUpdateAuthors)
+	var aerialBotID string
+	if (sysChan == "" || len(autoUpdateAuthors) == 0 || aerialBotID == "") && synapseAerialConfigPath != "" {
+		sysChan, aerialBotID, autoUpdateAuthors = loadAerialConfigFallback(synapseAerialConfigPath, sysChan, aerialBotID, autoUpdateAuthors)
+	}
+
+	botID := strings.TrimSpace(firstNonEmpty(os.Getenv("AERIAL_BOT_ID"), fileCfg.BotID, aerialBotID, "aerial"))
+	defaultOwner := fileCfg.DefaultOwner
+	if envVal := strings.TrimSpace(firstNonEmpty(os.Getenv("AERIAL_DEFAULT_OWNER"), os.Getenv("DEFAULT_OWNER"))); envVal != "" {
+		defaultOwner = strings.EqualFold(envVal, "true") || envVal == "1"
 	}
 
 	pgURL := firstNonEmpty(httpkit.BuildPostgresDSN(os.Getenv, "aerial"), "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable")
@@ -144,6 +181,9 @@ func LoadConfig(configPath string) Config {
 		SystemChannelID:       strings.TrimSpace(firstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), sysChan)),
 		DiscordToken:          os.Getenv("DISCORD_TOKEN"),
 		AutoUpdatePRAuthors:   autoUpdateAuthors,
+		BotID:                 botID,
+		DefaultOwner:          defaultOwner,
+		WebhookForwardURLs:    normalizeWebhookForwardURLs(fileCfg.WebhookForwardURLs),
 	}
 }
 

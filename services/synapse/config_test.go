@@ -172,20 +172,23 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 
 func TestLoadConfig_YAMLAndOverrides(t *testing.T) {
 	tests := []struct {
-		name            string
-		localYAML       string
-		fallbackYAML    string
-		aerialYAML      string
-		useEmptyPath    bool
-		missingFallback bool
-		env             map[string]string
-		wantPort        string
-		wantInfURL      string
-		wantEnv         string
-		wantFluxURL     string
-		wantBrainURL    string
-		wantSysChan     string
-		wantAuthors     []string
+		name             string
+		localYAML        string
+		fallbackYAML     string
+		aerialYAML       string
+		useEmptyPath     bool
+		missingFallback  bool
+		env              map[string]string
+		wantPort         string
+		wantInfURL       string
+		wantEnv          string
+		wantFluxURL      string
+		wantBrainURL     string
+		wantSysChan      string
+		wantAuthors      []string
+		wantBotID        string
+		wantDefaultOwner bool
+		wantForwardURLs  map[string]string
 	}{
 		{
 			name: "yaml config without overrides",
@@ -299,11 +302,44 @@ eri_url: "http://brain.custom:8088"
 			localYAML: "invalid: [yaml",
 			wantPort:  "4020",
 		},
+		{
+			name:             "bot_id and default_owner loaded from local yaml",
+			localYAML:        "bot_id: \"eri-sub\"\ndefault_owner: true\n",
+			wantBotID:        "eri-sub",
+			wantDefaultOwner: true,
+		},
+		{
+			name:             "bot_id loaded from aerial config fallback",
+			localYAML:        "port: \"4020\"\n",
+			aerialYAML:       "bot_id: \"aerial-fallback\"\n",
+			wantBotID:        "aerial-fallback",
+			wantDefaultOwner: false,
+		},
+		{
+			name:      "webhook_forward_urls normalized from yaml",
+			localYAML: "webhook_forward_urls:\n  \" eri-sub \": \" http://eri-sub:4020/ \"\n  \"\": \"http://empty-key:4020/\"\n  \"empty-val\": \"   \"\n",
+			wantForwardURLs: map[string]string{
+				"eri-sub": "http://eri-sub:4020",
+			},
+		},
+		{
+			name:             "env overrides for bot_id and default_owner",
+			localYAML:        "bot_id: \"yaml-bot\"\ndefault_owner: false\n",
+			env:              map[string]string{"AERIAL_BOT_ID": "env-bot", "DEFAULT_OWNER": "true"},
+			wantBotID:        "env-bot",
+			wantDefaultOwner: true,
+		},
+		{
+			name:      "default bot_id is aerial when unset",
+			localYAML: "port: \"4020\"\n",
+			wantBotID: "aerial",
+		},
 	}
 
 	keysToClear := []string{
 		"PORT", "INFISICAL_URL", "INFISICAL_ENVIRONMENT",
 		"HANGAR_URL", "FLUX_RECEIVER_URL", "ERI_URL", "SYSTEM_CHANNEL_ID",
+		"AERIAL_BOT_ID", "DEFAULT_OWNER", "AERIAL_DEFAULT_OWNER",
 	}
 
 	for _, tc := range tests {
@@ -363,9 +399,25 @@ eri_url: "http://brain.custom:8088"
 				{cfg.BrainURL, tc.wantBrainURL, "BrainURL"},
 				{cfg.EriURL, tc.wantBrainURL, "EriURL"},
 				{cfg.SystemChannelID, tc.wantSysChan, "SystemChannelID"},
+				{cfg.BotID, tc.wantBotID, "BotID"},
 			} {
 				if check.want != "" && check.got != check.want {
 					t.Errorf("%s = %q, want %q", check.field, check.got, check.want)
+				}
+			}
+			if tc.wantDefaultOwner != cfg.DefaultOwner && (tc.wantDefaultOwner || tc.localYAML != "") {
+				if tc.wantDefaultOwner != cfg.DefaultOwner {
+					t.Errorf("DefaultOwner = %v, want %v", cfg.DefaultOwner, tc.wantDefaultOwner)
+				}
+			}
+			if tc.wantForwardURLs != nil {
+				if len(cfg.WebhookForwardURLs) != len(tc.wantForwardURLs) {
+					t.Errorf("WebhookForwardURLs len = %d, want %d", len(cfg.WebhookForwardURLs), len(tc.wantForwardURLs))
+				}
+				for k, v := range tc.wantForwardURLs {
+					if cfg.WebhookForwardURLs[k] != v {
+						t.Errorf("WebhookForwardURLs[%q] = %q, want %q", k, cfg.WebhookForwardURLs[k], v)
+					}
 				}
 			}
 			if tc.wantAuthors != nil {
@@ -611,6 +663,66 @@ func TestIs4xxClientError(t *testing.T) {
 			t.Parallel()
 			if got := is4xxClientError(tc.err); got != tc.want {
 				t.Errorf("%s: is4xxClientError(%v) = %v, want %v", tc.name, tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeWebhookForwardURLs(t *testing.T) {
+	t.Parallel()
+
+	paddedKey := " bot1 "
+	whitespaceKey := "   "
+
+	tests := []struct {
+		name string
+		raw  map[string]string
+		want map[string]string
+	}{
+		{
+			name: "nil input returns nil",
+			raw:  nil,
+			want: nil,
+		},
+		{
+			name: "empty input returns nil",
+			raw:  map[string]string{},
+			want: nil,
+		},
+		{
+			name: "all empty keys or values returns nil",
+			raw: map[string]string{
+				"":            "http://example.com",
+				whitespaceKey: "http://example.com",
+				"bot1":        "",
+				"bot2":        "   ",
+			},
+			want: nil,
+		},
+		{
+			name: "trims whitespace and trailing slashes",
+			raw: map[string]string{
+				paddedKey: " http://example.com/api/ ",
+				"bot2":    "http://example.org///",
+			},
+			want: map[string]string{
+				"bot1": "http://example.com/api",
+				"bot2": "http://example.org",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := normalizeWebhookForwardURLs(tc.raw)
+			if len(got) != len(tc.want) {
+				t.Fatalf("len(got) = %d, want %d: %v", len(got), len(tc.want), got)
+			}
+			for k, wantVal := range tc.want {
+				if gotVal, ok := got[k]; !ok || gotVal != wantVal {
+					t.Errorf("got[%q] = %q (ok=%v), want %q", k, gotVal, ok, wantVal)
+				}
 			}
 		})
 	}
