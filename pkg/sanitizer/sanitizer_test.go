@@ -467,3 +467,64 @@ func TestRegisterSensitiveTokens_TableDriven(t *testing.T) {
 		})
 	}
 }
+
+func TestReplaceSensitiveTokens_TableDriven(t *testing.T) {
+	// Not t.Parallel() because it mutates global sensitive tokens state
+	tests := []struct {
+		name            string
+		initialTokens   []string
+		replacedTokens  []string
+		input           string
+		shouldRedact    []string
+		shouldNotRedact []string
+	}{
+		{
+			name:            "replaced tokens purge prior registered secrets",
+			initialTokens:   []string{"mycustomsecret_old_1111", "mycustomsecret_preserved_2222"},
+			replacedTokens:  []string{"mycustomsecret_preserved_2222", "mycustomsecret_new_3333"},
+			input:           "values: mycustomsecret_old_1111 and mycustomsecret_preserved_2222 and mycustomsecret_new_3333",
+			shouldRedact:    []string{"mycustomsecret_preserved_2222", "mycustomsecret_new_3333"},
+			shouldNotRedact: []string{"mycustomsecret_old_1111"},
+		},
+		{
+			name:            "empty replacement clears all registered tokens",
+			initialTokens:   []string{"mycustomsecret_purged_9999"},
+			replacedTokens:  nil,
+			input:           "plain text with mycustomsecret_purged_9999 included",
+			shouldRedact:    nil,
+			shouldNotRedact: []string{"mycustomsecret_purged_9999"},
+		},
+		{
+			name:            "replacement filters short tokens and sorts longest first",
+			initialTokens:   []string{"mycustomsecret_initial_0000"},
+			replacedTokens:  []string{"short", "shorter_val", "longest_replacement_mycustomsecret", "abc", "   "},
+			input:           "items: longest_replacement_mycustomsecret and shorter_val and short and abc and mycustomsecret_initial_0000",
+			shouldRedact:    []string{"longest_replacement_mycustomsecret", "shorter_val", "short"},
+			shouldNotRedact: []string{"mycustomsecret_initial_0000", "abc"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resetSensitiveTokens()
+			defer resetSensitiveTokens()
+
+			if len(tc.initialTokens) > 0 {
+				RegisterSensitiveTokens(tc.initialTokens...)
+			}
+			ReplaceSensitiveTokens(tc.replacedTokens...)
+			got := SanitizeString(tc.input)
+
+			for _, redacted := range tc.shouldRedact {
+				if strings.Contains(got, redacted) {
+					t.Errorf("expected %q to be redacted from %q", redacted, got)
+				}
+			}
+			for _, notRedacted := range tc.shouldNotRedact {
+				if !strings.Contains(got, notRedacted) {
+					t.Errorf("expected %q to be preserved in %q", notRedacted, got)
+				}
+			}
+		})
+	}
+}
