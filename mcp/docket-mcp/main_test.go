@@ -169,6 +169,22 @@ func setupTestEnvironment(t *testing.T) (*Server, *http.ServeMux, *fakeVikunjaSe
 					Done:  true,
 				},
 				{
+					ID:    6,
+					Title: "Parent Task 6",
+					Done:  false,
+					RelatedTasks: map[string][]VikunjaTask{
+						"subtask": {{ID: 7}},
+					},
+				},
+				{
+					ID:    7,
+					Title: "Subtask 7",
+					Done:  false,
+					RelatedTasks: map[string][]VikunjaTask{
+						"parenttask": {{ID: 6}},
+					},
+				},
+				{
 					ID:    888,
 					Title: "Task 888",
 					Done:  false,
@@ -751,9 +767,16 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 		{
 			name:       "close wont_do cascades",
 			toolName:   "close",
-			args:       `{"id":1,"resolution":"wont_do","reason":"abandoned"}`,
+			args:       `{"id":6,"resolution":"wont_do","reason":"abandoned"}`,
 			wantSubstr: `"status":"wont_do"`,
 			wantError:  false,
+		},
+		{
+			name:       "close wont_do rejected when blocking open task",
+			toolName:   "close",
+			args:       `{"id":1,"resolution":"wont_do","reason":"abandoned"}`,
+			wantSubstr: "blocks open tasks: [3]",
+			wantError:  true,
 		},
 		{
 			name:       "close invalid resolution error",

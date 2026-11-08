@@ -263,7 +263,7 @@ func isTaskReady(node TaskNode, nodes map[int64]TaskNode) bool {
 		return false
 	}
 	for _, bid := range node.BlockedBy {
-		if bNode, exists := nodes[bid]; exists && bNode.Status == "open" {
+		if bNode, exists := nodes[bid]; exists && bNode.Status != "completed" {
 			return false
 		}
 	}
@@ -327,13 +327,42 @@ func buildReadyNode(node TaskNode, nodes map[int64]TaskNode) ReadyTask {
 	return rt
 }
 
+func collectExternalOpenBlocked(nodes map[int64]TaskNode, id int64) []int64 {
+	closingIDs := append([]int64{id}, CollectOpenSubtreeIDs(nodes, id)...)
+	closingSet := make(map[int64]bool, len(closingIDs))
+	for _, cid := range closingIDs {
+		closingSet[cid] = true
+	}
+	seenBlocked := make(map[int64]bool)
+	var openBlocked []int64
+	for _, cid := range closingIDs {
+		for _, bid := range nodes[cid].Blocks {
+			if closingSet[bid] || seenBlocked[bid] {
+				continue
+			}
+			if bNode, ok := nodes[bid]; ok && bNode.Status == "open" {
+				seenBlocked[bid] = true
+				openBlocked = append(openBlocked, bid)
+			}
+		}
+	}
+	slices.Sort(openBlocked)
+	return openBlocked
+}
+
 // ValidateCloseGuard validates completion prerequisites for closing a task.
 func ValidateCloseGuard(nodes map[int64]TaskNode, id int64, resolution string) error {
+	node, exists := nodes[id]
 	switch resolution {
 	case "wont_do":
+		if !exists {
+			return fmt.Errorf("task %d not found in graph", id)
+		}
+		if openBlocked := collectExternalOpenBlocked(nodes, id); len(openBlocked) > 0 {
+			return fmt.Errorf("cannot close task %d as wont_do: blocks open tasks: %v", id, openBlocked)
+		}
 		return nil
 	case "completed":
-		node, exists := nodes[id]
 		if !exists {
 			return fmt.Errorf("task %d not found in graph", id)
 		}
