@@ -737,8 +737,24 @@ func NewFromData(data *ConfigData) *Config {
 	return cfg
 }
 
+// ResolveConfigSearchPaths returns defaultPaths with CONFIG_PATH prepended if lookup is non-nil
+// and CONFIG_PATH resolves to a non-empty trimmed string. Otherwise it returns a copy of defaultPaths.
+func ResolveConfigSearchPaths(lookup func(string) string, defaultPaths ...string) []string {
+	if lookup != nil {
+		if p := strings.TrimSpace(lookup("CONFIG_PATH")); p != "" {
+			res := make([]string, 0, len(defaultPaths)+1)
+			res = append(res, p)
+			res = append(res, defaultPaths...)
+			return res
+		}
+	}
+	res := make([]string, len(defaultPaths))
+	copy(res, defaultPaths)
+	return res
+}
+
 func New() (*Config, error) {
-	return LoadConfigFromPaths(ConfigSearchPaths...)
+	return LoadConfigFromPaths(ResolveConfigSearchPaths(os.Getenv, ConfigSearchPaths...)...)
 }
 
 func ReloadWithSupplier(activeCfg *Config, supplier func() (*Config, error)) error {

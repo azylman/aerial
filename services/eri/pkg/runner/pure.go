@@ -46,6 +46,7 @@ func FilterAgyBaseEnv(env []string) []string {
 		"GITHUB_PAT",
 		"DISCORD_TOKEN",
 		"DISCORD_BOT_TOKEN",
+		"MARIDA_DISCORD_BOT_TOKEN",
 		"DATABASE_URL",
 		"POSTGRES_PASSWORD",
 		"HA_TOKEN",

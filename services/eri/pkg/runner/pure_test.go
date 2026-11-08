@@ -52,8 +52,80 @@ func TestBuildDaemonArgs(t *testing.T) {
 			[]string{"-p", "--verbose", "--dangerously-skip-permissions", "--resume sess-claude-resumed"},
 			[]string{"--session-id", "--conversation", "--print-timeout"},
 		},
+		{
+			DaemonConfig{
+				Engine:    "claude",
+				SessionID: "sess-claude-effort-high",
+				Model:     "opus-high",
+			},
+			[]string{"-p", "--verbose", "--dangerously-skip-permissions", "--session-id sess-claude-effort-high", "--model opus", "--effort high"},
+			[]string{"--resume", "--conversation", "--print-timeout"},
+		},
+		{
+			DaemonConfig{
+				Engine:    "claude",
+				SessionID: "sess-claude-effort-medium",
+				Model:     "opus-medium",
+			},
+			[]string{"-p", "--verbose", "--dangerously-skip-permissions", "--session-id sess-claude-effort-medium", "--model opus", "--effort medium"},
+			[]string{"--resume", "--conversation", "--print-timeout"},
+		},
+		{
+			DaemonConfig{
+				Engine:    "claude",
+				SessionID: "sess-claude-effort-low",
+				Model:     "opus-low",
+			},
+			[]string{"-p", "--verbose", "--dangerously-skip-permissions", "--session-id sess-claude-effort-low", "--model opus", "--effort low"},
+			[]string{"--resume", "--conversation", "--print-timeout"},
+		},
+		{
+			DaemonConfig{
+				Engine:    "claude",
+				SessionID: "sess-claude-explicit-effort",
+				Model:     "opus",
+				Effort:    "high",
+			},
+			[]string{"-p", "--verbose", "--dangerously-skip-permissions", "--session-id sess-claude-explicit-effort", "--model opus", "--effort high"},
+			[]string{"--resume", "--conversation", "--print-timeout"},
+		},
 	} {
 		assertContainsAndOmits(t, strings.Join(BuildDaemonArgs(tc.cfg), " "), tc.contains, tc.omits, tc.cfg)
+	}
+}
+
+func TestParseClaudeModelAndEffort(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		model      string
+		effort     string
+		wantModel  string
+		wantEffort string
+	}{
+		{name: "opus high suffix", model: "opus-high", effort: "", wantModel: "opus", wantEffort: "high"},
+		{name: "opus medium suffix", model: "opus-medium", effort: "", wantModel: "opus", wantEffort: "medium"},
+		{name: "opus low suffix", model: "opus-low", effort: "", wantModel: "opus", wantEffort: "low"},
+		{name: "case insensitive suffix", model: "Claude-3-7-Sonnet-HIGH", effort: "", wantModel: "Claude-3-7-Sonnet", wantEffort: "high"},
+		{name: "explicit effort takes effect without suffix", model: "opus", effort: "high", wantModel: "opus", wantEffort: "high"},
+		{name: "explicit effort normalized lowercase", model: "opus", effort: "  MEDIUM  ", wantModel: "opus", wantEffort: "medium"},
+		{name: "suffix overrides explicit effort", model: "opus-low", effort: "high", wantModel: "opus", wantEffort: "low"},
+		{name: "bare suffix without prefix", model: "-high", effort: "medium", wantModel: "-high", wantEffort: "medium"},
+		{name: "whitespace padded model", model: "  claude-3-5-sonnet-high  ", effort: "", wantModel: "claude-3-5-sonnet", wantEffort: "high"},
+		{name: "no suffix and no effort", model: "claude-3-7-sonnet", effort: "", wantModel: "claude-3-7-sonnet", wantEffort: ""},
+		{name: "empty model with effort", model: "", effort: "low", wantModel: "", wantEffort: "low"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gotModel, gotEffort := parseClaudeModelAndEffort(tc.model, tc.effort)
+			if gotModel != tc.wantModel {
+				t.Errorf("parseClaudeModelAndEffort(%q, %q) gotModel = %q, want %q", tc.model, tc.effort, gotModel, tc.wantModel)
+			}
+			if gotEffort != tc.wantEffort {
+				t.Errorf("parseClaudeModelAndEffort(%q, %q) gotEffort = %q, want %q", tc.model, tc.effort, gotEffort, tc.wantEffort)
+			}
+		})
 	}
 }
 
@@ -71,6 +143,7 @@ func TestBuildAgyEnv(t *testing.T) {
 		"github_pat=s7",
 		"DISCORD_TOKEN=s8",
 		"discord_bot_token=s9",
+		"MARIDA_DISCORD_BOT_TOKEN=s24",
 		"DATABASE_URL=s10",
 		"POSTGRES_PASSWORD=s11",
 		"ha_token=s12",
