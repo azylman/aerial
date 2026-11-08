@@ -2,6 +2,8 @@ package runner
 
 import (
 	"fmt"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -15,6 +17,9 @@ const (
 )
 
 type DaemonConfig struct {
+	Engine                  string
+	ClaudeBin               string
+	ResumeSession           bool
 	SessionID               string
 	ThreadID                string
 	InitialTurnCount        int
@@ -27,6 +32,11 @@ type DaemonConfig struct {
 	TranscriptRescuer       func(convID string, since time.Time) string
 	MemoryRetriever         MemoryRetriever
 	AmbientContextRetriever AmbientContextRetriever
+}
+
+// IsClaude returns true if the configured Engine is "claude" (case-insensitive).
+func (c DaemonConfig) IsClaude() bool {
+	return strings.EqualFold(strings.TrimSpace(c.Engine), "claude")
 }
 
 type TurnResult struct {
@@ -47,8 +57,24 @@ type streamInputMessage struct {
 	Content string `json:"content"`
 }
 
-// BuildDaemonArgs constructs the CLI arguments for launching an agy streaming daemon process.
+// BuildDaemonArgs constructs the CLI arguments for launching an agy or claude streaming daemon process.
 func BuildDaemonArgs(cfg DaemonConfig) []string {
+	if cfg.IsClaude() {
+		args := []string{"-p", "--verbose", "--dangerously-skip-permissions", "--input-format", "stream-json", "--output-format", "stream-json", "--include-partial-messages"}
+		if cfg.ResumeSession && cfg.SessionID != "" {
+			args = append(args, "--resume", cfg.SessionID)
+		} else if cfg.SessionID != "" {
+			args = append(args, "--session-id", cfg.SessionID)
+		}
+		if cfg.Model != "" {
+			args = append(args, "--model", cfg.Model)
+		}
+		if cfg.GeminiHomeDir != "" {
+			args = append(args, "--mcp-config", filepath.Join(cfg.GeminiHomeDir, ".claude", "mcp_config.json"))
+		}
+		return args
+	}
+
 	args := []string{"--dangerously-skip-permissions", "--input-format", "stream-json", "--output-format", "stream-json"}
 	if cfg.SessionID != "" {
 		args = append(args, "--conversation", cfg.SessionID)

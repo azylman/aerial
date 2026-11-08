@@ -277,10 +277,14 @@ func TestInterchangeablePool_DelegationAndErrorGuards(t *testing.T) {
 
 	pool.SetTranscriptRescuer(func(string, time.Time) string { return "rescued" })
 	pool.UpdateModel("claude-sonnet-5-5-low")
+	pool.UpdateEngine("claude", "/usr/bin/claude")
 	pool.MarkDirty()
 	pool.WaitBackground()
 	if underlying.cfg.Model != "claude-sonnet-5-5-low" {
 		t.Fatalf("expected underlying model updated to claude-sonnet-5-5-low, got %q", underlying.cfg.Model)
+	}
+	if underlying.cfg.Engine != "claude" || underlying.cfg.ClaudeBin != "/usr/bin/claude" {
+		t.Fatalf("expected underlying engine updated, got %q %q", underlying.cfg.Engine, underlying.cfg.ClaudeBin)
 	}
 	if pool.Underlying() != underlying {
 		t.Fatalf("unexpected Underlying: %v", pool.Underlying())
@@ -308,6 +312,7 @@ func TestInterchangeablePool_DelegationAndErrorGuards(t *testing.T) {
 	nd, ndOk := nilPool.Get("t")
 	nilPool.SetTranscriptRescuer(nil)
 	nilPool.UpdateModel("claude-sonnet-5-5-low")
+	nilPool.UpdateEngine("claude", "claude")
 	nilPool.MarkDirty()
 	nilPool.WaitBackground()
 	nilPool.SetSessionManager(nil)

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
+	"github.com/google/uuid"
 )
 
 // TurnSink receives streaming notifications and results during an active turn.
@@ -54,6 +55,33 @@ type TurnContext struct {
 	hasSeenStep         bool
 }
 
+// tailBuffer is a thread-safe ring buffer capturing the trailing N bytes written to it.
+type tailBuffer struct {
+	mu  sync.Mutex
+	buf []byte
+	max int
+}
+
+func newTailBuffer(limit int) *tailBuffer {
+	return &tailBuffer{max: limit}
+}
+
+func (b *tailBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf = append(b.buf, p...)
+	if len(b.buf) > b.max {
+		b.buf = b.buf[len(b.buf)-b.max:]
+	}
+	return len(p), nil
+}
+
+func (b *tailBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return string(b.buf)
+}
+
 type inFlightToolCall struct {
 	stepIndex int
 	toolName  string
@@ -70,6 +98,7 @@ type StreamingDaemon struct {
 	stdin          io.WriteCloser
 	stdout         io.ReadCloser
 	stderrCloser   io.Closer
+	stderrTail     *tailBuffer
 	mu             sync.RWMutex
 	stdinMu        sync.Mutex
 	state          DaemonState
@@ -82,6 +111,7 @@ type StreamingDaemon struct {
 	inflightMu     sync.Mutex
 	inflight       []*TurnContext
 	inFlightTools  map[int]inFlightToolCall
+	claudeToolIDs  map[string]int
 	seenMemoryIDs  map[string]bool
 	readerWg       sync.WaitGroup
 	closeOnce      sync.Once
@@ -156,42 +186,10 @@ func (d *StreamingDaemon) closeOnStartupError(reason string) {
 // DefaultHandshakeTimeout is the default maximum duration to wait for the daemon init event.
 const DefaultHandshakeTimeout = 30 * time.Second
 
-// StartStreamingDaemon launches a streaming daemon, waits for the initial handshake NDJSON event,
-// latches the session ID, and spawns the background stdout reader loop.
-func StartStreamingDaemon(ctx context.Context, cfg DaemonConfig, spawner DaemonSpawner) (*StreamingDaemon, error) {
-	if spawner == nil {
-		spawner = &DefaultDaemonSpawner{}
-	}
-	stdin, stdout, stderr, handle, err := spawner.Spawn(ctx, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("failed spawning daemon: %w", err)
-	}
-
-	if stderr != nil {
-		go func() {
-			defer closeStreamQuietly(stderr, "stderr")
-			if _, copyErr := io.Copy(io.Discard, stderr); copyErr != nil && !errors.Is(copyErr, io.EOF) && !errors.Is(copyErr, io.ErrClosedPipe) && !errors.Is(copyErr, os.ErrClosed) {
-				log.Printf("[StreamingDaemon] Warning: error copying stderr: %v", copyErr)
-			}
-		}()
-	}
-
-	d := &StreamingDaemon{
-		cfg: cfg, spawner: spawner, handle: handle, stdin: stdin,
-		stdout: stdout, stderrCloser: stderr,
-		state: StateStarting, lastUsed: time.Now(),
-		turnCount: cfg.InitialTurnCount, inFlightTools: make(map[int]inFlightToolCall),
-		seenMemoryIDs: make(map[string]bool),
-	}
-
-	timeout := DefaultHandshakeTimeout
-	if cfg.Timeout > 0 {
-		timeout = cfg.Timeout
-	}
+func (d *StreamingDaemon) waitForAgyHandshake(ctx context.Context, reader *bufio.Reader, timeout time.Duration) error {
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
-	reader := bufio.NewReader(stdout)
 	lineChan, errChan := make(chan string, 1), make(chan error, 1)
 	go func() {
 		line, readErr := reader.ReadString('\n')
@@ -205,22 +203,85 @@ func StartStreamingDaemon(ctx context.Context, cfg DaemonConfig, spawner DaemonS
 	select {
 	case <-ctx.Done():
 		d.closeOnStartupError("cancelled")
-		return nil, fmt.Errorf("daemon startup cancelled: %w", ctx.Err())
+		return fmt.Errorf("daemon startup cancelled: %w", ctx.Err())
 	case <-timer.C:
 		d.closeOnStartupError("timeout")
-		return nil, errors.New("daemon startup timed out waiting for init event")
+		errMsg := "daemon startup timed out waiting for init event"
+		if tailText := strings.TrimSpace(d.stderrTail.String()); tailText != "" {
+			errMsg = fmt.Sprintf("%s: %s", errMsg, tailText)
+		}
+		return errors.New(errMsg)
 	case readErr := <-errChan:
 		d.closeOnStartupError("read error")
-		return nil, fmt.Errorf("daemon stdout closed before init event: %w", readErr)
+		errMsg := fmt.Sprintf("daemon stdout closed before init event: %v", readErr)
+		if tailText := strings.TrimSpace(d.stderrTail.String()); tailText != "" {
+			errMsg = fmt.Sprintf("%s: %s", errMsg, tailText)
+		}
+		return errors.New(errMsg)
 	case line := <-lineChan:
 		initSessID, ok := ParseInitEvent(line)
 		if !ok || !IsValidUUID(initSessID) {
 			d.closeOnStartupError("malformed init")
-			return nil, fmt.Errorf("failed parsing init event (%q)", line)
+			errMsg := fmt.Sprintf("failed parsing init event (%q)", line)
+			if tailText := strings.TrimSpace(d.stderrTail.String()); tailText != "" {
+				errMsg = fmt.Sprintf("%s: %s", errMsg, tailText)
+			}
+			return errors.New(errMsg)
 		}
 		d.mu.Lock()
 		d.sessionID, d.state = initSessID, StateReady
 		d.mu.Unlock()
+		return nil
+	}
+}
+
+// StartStreamingDaemon launches a streaming daemon, waits for the initial handshake NDJSON event,
+// latches the session ID, and spawns the background stdout reader loop.
+func StartStreamingDaemon(ctx context.Context, cfg DaemonConfig, spawner DaemonSpawner) (*StreamingDaemon, error) {
+	if spawner == nil {
+		spawner = &DefaultDaemonSpawner{}
+	}
+	stdin, stdout, stderr, handle, err := spawner.Spawn(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed spawning daemon: %w", err)
+	}
+
+	tail := newTailBuffer(4096)
+	if stderr != nil {
+		go func() {
+			defer closeStreamQuietly(stderr, "stderr")
+			if _, copyErr := io.Copy(tail, stderr); copyErr != nil && !errors.Is(copyErr, io.EOF) && !errors.Is(copyErr, io.ErrClosedPipe) && !errors.Is(copyErr, os.ErrClosed) {
+				log.Printf("[StreamingDaemon] Warning: error copying stderr: %v", copyErr)
+			}
+		}()
+	}
+
+	d := &StreamingDaemon{
+		cfg: cfg, spawner: spawner, handle: handle, stdin: stdin,
+		stdout: stdout, stderrCloser: stderr, stderrTail: tail,
+		state: StateStarting, lastUsed: time.Now(),
+		turnCount: cfg.InitialTurnCount, inFlightTools: make(map[int]inFlightToolCall),
+		claudeToolIDs: make(map[string]int),
+		seenMemoryIDs: make(map[string]bool),
+	}
+
+	reader := bufio.NewReader(stdout)
+
+	if cfg.IsClaude() {
+		sessID := cfg.SessionID
+		if sessID == "" {
+			sessID = uuid.New().String()
+		}
+		d.sessionID = sessID
+		d.state = StateReady
+	} else {
+		timeout := DefaultHandshakeTimeout
+		if cfg.Timeout > 0 {
+			timeout = cfg.Timeout
+		}
+		if err := d.waitForAgyHandshake(ctx, reader, timeout); err != nil {
+			return nil, err
+		}
 	}
 
 	d.readerWg.Add(1)
@@ -294,6 +355,27 @@ func (d *StreamingDaemon) SetOnTurnFinished(fn func(d *StreamingDaemon)) {
 	d.onTurnFinished = fn
 }
 
+func marshalPromptPayload(isClaude bool, payloadPrompt string) ([]byte, error) {
+	if isClaude {
+		type claudeUserMessage struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		}
+		type claudeUserInput struct {
+			Type    string            `json:"type"`
+			Message claudeUserMessage `json:"message"`
+		}
+		return json.Marshal(claudeUserInput{
+			Type: "user",
+			Message: claudeUserMessage{
+				Role:    "user",
+				Content: payloadPrompt,
+			},
+		})
+	}
+	return json.Marshal(streamInputPayload{Event: "user", Message: streamInputMessage{Content: payloadPrompt}})
+}
+
 func (d *StreamingDaemon) Send(prompt string, turnCtx *TurnContext) error {
 	d.stdinMu.Lock()
 	defer d.stdinMu.Unlock()
@@ -319,7 +401,8 @@ func (d *StreamingDaemon) Send(prompt string, turnCtx *TurnContext) error {
 	}
 	payloadPrompt = deduplicateRetrievedMemory(payloadPrompt, d.seenMemoryIDs)
 	d.mu.Unlock()
-	encoded, err := json.Marshal(streamInputPayload{Event: "user", Message: streamInputMessage{Content: payloadPrompt}})
+
+	encoded, err := marshalPromptPayload(d.cfg.IsClaude(), payloadPrompt)
 	if err != nil {
 		return fmt.Errorf("failed to marshal turn prompt: %w", err)
 	}
@@ -412,6 +495,17 @@ func (d *StreamingDaemon) tryRescueTurnOnEOF(turn *TurnContext) bool {
 	return true
 }
 
+func (d *StreamingDaemon) formatEOFErr(err error) error {
+	if d.stderrTail == nil {
+		return fmt.Errorf("daemon stdout unexpected EOF: %w", err)
+	}
+	tailText := strings.TrimSpace(d.stderrTail.String())
+	if tailText == "" {
+		return fmt.Errorf("daemon stdout unexpected EOF: %w", err)
+	}
+	return fmt.Errorf("daemon stdout unexpected EOF: %w: %s", err, tailText)
+}
+
 func (d *StreamingDaemon) handleStdoutEOF(err error) {
 	if d.closed.Load() {
 		return
@@ -430,10 +524,11 @@ func (d *StreamingDaemon) handleStdoutEOF(err error) {
 		}
 	}
 	for _, turn := range remaining {
-		if turn != nil && turn.Sink != nil {
-			if !d.tryRescueTurnOnEOF(turn) {
-				turn.Sink.OnError(fmt.Errorf("daemon stdout unexpected EOF: %w", err))
-			}
+		if turn == nil || turn.Sink == nil {
+			continue
+		}
+		if !d.tryRescueTurnOnEOF(turn) {
+			turn.Sink.OnError(d.formatEOFErr(err))
 		}
 	}
 }
@@ -785,6 +880,57 @@ func (d *StreamingDaemon) handleStepUpdateEvent(activeTurn *TurnContext, raw map
 	}
 }
 
+func extractErrorsArray(errs []any) string {
+	var errStrs []string
+	for _, e := range errs {
+		if es, ok := e.(string); ok && strings.TrimSpace(es) != "" {
+			errStrs = append(errStrs, es)
+			continue
+		}
+		if em, ok := e.(map[string]any); ok {
+			if msg := extractFirstString(em, "message", "error", "text"); msg != "" {
+				errStrs = append(errStrs, msg)
+			}
+		}
+	}
+	return strings.Join(errStrs, "; ")
+}
+
+func isClaudeResultError(raw, resObj map[string]any) bool {
+	if b, ok := raw["is_error"].(bool); ok && b {
+		return true
+	}
+	if resObj != nil {
+		if b, ok := resObj["is_error"].(bool); ok && b {
+			return true
+		}
+	}
+	sub := extractFirstString(raw, "subtype")
+	if sub == "" && resObj != nil {
+		sub = extractFirstString(resObj, "subtype")
+	}
+	return strings.HasPrefix(strings.ToLower(sub), "error")
+}
+
+func extractResultErrors(raw, resObj map[string]any, isErr bool) string {
+	if isErr {
+		if s, ok := raw["result"].(string); ok && strings.TrimSpace(s) != "" {
+			return s
+		}
+	}
+	for _, m := range []map[string]any{resObj, raw} {
+		if m == nil {
+			continue
+		}
+		if errs, ok := m["errors"].([]any); ok && len(errs) > 0 {
+			if joined := extractErrorsArray(errs); joined != "" {
+				return joined
+			}
+		}
+	}
+	return ""
+}
+
 func extractResultStatusAndError(raw map[string]any) (status, errMsg string) {
 	var resObj map[string]any
 	if r, ok := raw["result"].(map[string]any); ok {
@@ -795,16 +941,21 @@ func extractResultStatusAndError(raw map[string]any) (status, errMsg string) {
 			continue
 		}
 		if status == "" {
-			if s, ok := m["status"].(string); ok {
-				status = s
-			}
+			status = extractFirstString(m, "status")
 		}
 		if errMsg == "" {
-			if em, ok := m["error"].(string); ok {
-				errMsg = em
-			}
+			errMsg = extractFirstString(m, "error")
 		}
 	}
+
+	isErr := isClaudeResultError(raw, resObj)
+	if isErr && status == "" {
+		status = "ERROR"
+	}
+	if errMsg == "" {
+		errMsg = extractResultErrors(raw, resObj, isErr)
+	}
+
 	return status, errMsg
 }
 
@@ -918,11 +1069,28 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 		log.Printf("[StreamingDaemon] Malformed NDJSON line: %v", err)
 		return
 	}
+
 	event, ok := raw["event"].(string)
 	if !ok {
-		log.Printf("[StreamingDaemon] NDJSON line missing string event field: %v", raw["event"])
+		event, ok = raw["type"].(string)
+	}
+	if !ok {
+		log.Printf("[StreamingDaemon] NDJSON line missing string event/type field: %v", raw)
 		return
 	}
+
+	// Handle Claude "system" init event before inflight check, as it may latch the session ID
+	if event == "system" {
+		if extractFirstString(raw, "subtype") == "init" {
+			if sessID := extractFirstString(raw, "session_id"); sessID != "" && IsValidUUID(sessID) {
+				d.mu.Lock()
+				d.sessionID = sessID
+				d.mu.Unlock()
+			}
+		}
+		return
+	}
+
 	d.inflightMu.Lock()
 	var activeTurn *TurnContext
 	if len(d.inflight) > 0 {
@@ -938,6 +1106,148 @@ func (d *StreamingDaemon) dispatchNDJSONLine(line string) {
 		d.handleStepUpdateEvent(activeTurn, raw)
 	case "result":
 		d.handleResultEvent(raw)
+	case "stream_event":
+		d.handleClaudeStreamEvent(activeTurn, raw)
+	case "assistant":
+		d.handleClaudeAssistantEvent(activeTurn, raw)
+	case "user":
+		d.handleClaudeUserEvent(activeTurn, raw)
+	}
+}
+
+func (d *StreamingDaemon) handleClaudeStreamEvent(activeTurn *TurnContext, raw map[string]any) {
+	ev, ok := raw["event"].(map[string]any)
+	if !ok || ev == nil {
+		return
+	}
+	switch extractFirstString(ev, "type") {
+	case "message_start":
+		d.mu.Lock()
+		d.stepCount++
+		stepIdx := d.stepCount
+		d.mu.Unlock()
+		d.notifyStepBoundary(activeTurn, stepIdx)
+	case "content_block_delta":
+		if delta, ok := ev["delta"].(map[string]any); ok && delta != nil {
+			switch extractFirstString(delta, "type") {
+			case "text_delta":
+				if text := extractFirstString(delta, "text"); text != "" && activeTurn.Sink != nil {
+					activeTurn.Sink.OnTextDelta(text)
+				}
+			case "thinking_delta":
+				if activeTurn.Sink != nil {
+					activeTurn.Sink.OnThinking()
+				}
+			}
+		}
+	}
+}
+
+func (d *StreamingDaemon) handleClaudeAssistantEvent(activeTurn *TurnContext, raw map[string]any) {
+	msg, ok := raw["message"].(map[string]any)
+	if !ok || msg == nil {
+		return
+	}
+	contents, ok := msg["content"].([]any)
+	if !ok {
+		return
+	}
+
+	for _, block := range contents {
+		bMap, ok := block.(map[string]any)
+		if !ok || bMap == nil {
+			continue
+		}
+		if extractFirstString(bMap, "type") != "tool_use" {
+			continue
+		}
+
+		toolID := extractFirstString(bMap, "id")
+		toolName := extractFirstString(bMap, "name")
+		var inputMap map[string]any
+		if in, ok := bMap["input"].(map[string]any); ok {
+			inputMap = in
+		}
+
+		d.mu.Lock()
+		d.stepCount++
+		stepIdx := d.stepCount
+		d.mu.Unlock()
+
+		d.inflightMu.Lock()
+		if d.claudeToolIDs == nil {
+			d.claudeToolIDs = make(map[string]int)
+		}
+		if toolID != "" {
+			d.claudeToolIDs[toolID] = stepIdx
+		}
+		d.inflightMu.Unlock()
+
+		d.notifyStepBoundary(activeTurn, stepIdx)
+
+		canonicalTool, mcpServer := ExtractMCPToolInfo(toolName, inputMap)
+		cmdDetail := ExtractToolDetail(toolName, inputMap, "")
+		activatedSkill, hasSkill := extractActivatedSkill(toolName, inputMap, cmdDetail)
+
+		isNewStart := d.recordToolStart(stepIdx, true, canonicalTool, mcpServer)
+		if isNewStart && activeTurn.Sink != nil {
+			toolForSink := canonicalTool
+			cmdForSink := cmdDetail
+			if toolName == "call_mcp_tool" {
+				toolForSink = "call_mcp_tool"
+			} else if canonicalTool == cmdForSink {
+				cmdForSink = ""
+			}
+			activeTurn.Sink.OnToolCall(toolForSink, cmdForSink)
+			if hasSkill {
+				activeTurn.Sink.OnSkillActivated(activatedSkill, "discord")
+			}
+		}
+	}
+}
+
+func (d *StreamingDaemon) handleClaudeUserEvent(activeTurn *TurnContext, raw map[string]any) {
+	msg, ok := raw["message"].(map[string]any)
+	if !ok || msg == nil {
+		return
+	}
+	contents, ok := msg["content"].([]any)
+	if !ok {
+		return
+	}
+
+	for _, block := range contents {
+		bMap, ok := block.(map[string]any)
+		if !ok || bMap == nil {
+			continue
+		}
+		if extractFirstString(bMap, "type") != "tool_result" {
+			continue
+		}
+
+		toolUseID := extractFirstString(bMap, "tool_use_id")
+		status := "ok"
+		if isErr, ok := bMap["is_error"].(bool); ok && isErr {
+			status = "error"
+		}
+
+		d.inflightMu.Lock()
+		stepIdx, hasStep := d.claudeToolIDs[toolUseID]
+		if hasStep {
+			delete(d.claudeToolIDs, toolUseID)
+		}
+		d.inflightMu.Unlock()
+
+		fields := stepUpdateFields{
+			isToolEnd:     true,
+			toolEndStatus: status,
+			hasStepIdx:    hasStep,
+			stepIdx:       stepIdx,
+		}
+		rec, hasRec, isEnd := d.recordToolEnd(fields)
+		if isEnd && hasRec && activeTurn.Sink != nil {
+			activeTurn.Sink.OnToolCompleted(rec.toolName, rec.mcpServer, time.Since(rec.startedAt), status)
+		}
 	}
 }
 
@@ -961,15 +1271,33 @@ func extractStepIndex(m map[string]any) (int, bool) {
 }
 
 func extractResponseString(raw map[string]any) string {
+	// If it's an error result, the "result" string is the error, not the substantive response.
+	isErr := false
+	if b, ok := raw["is_error"].(bool); ok && b {
+		isErr = true
+	}
+	if sub := extractFirstString(raw, "subtype"); strings.HasPrefix(strings.ToLower(sub), "error") {
+		isErr = true
+	}
+
 	keys := []string{"response", "result", "content", "text"}
 	if resObj, ok := raw["result"].(map[string]any); ok {
+		if b, ok := resObj["is_error"].(bool); ok && b {
+			isErr = true
+		}
+		if sub := extractFirstString(resObj, "subtype"); strings.HasPrefix(strings.ToLower(sub), "error") {
+			isErr = true
+		}
 		for _, k := range keys {
 			if resp, ok := resObj[k].(string); ok && strings.TrimSpace(resp) != "" {
 				return resp
 			}
 		}
 	}
-	for _, k := range []string{"response", "content", "text"} {
+	for _, k := range []string{"response", "result", "content", "text"} {
+		if k == "result" && isErr {
+			continue
+		}
 		if resp, ok := raw[k].(string); ok && strings.TrimSpace(resp) != "" {
 			return resp
 		}
@@ -1003,6 +1331,20 @@ func populateUsage(res *TurnResult, raw map[string]any) {
 	getInt("thinking_tokens", &res.Usage.ThinkingTokens)
 	getInt("cache_read_tokens", &res.Usage.CacheReadTokens)
 	getInt("total_tokens", &res.Usage.TotalTokens)
+
+	// Claude token usage mapping:
+	// sum input_tokens + cache_creation_input_tokens + cache_read_input_tokens into InputTokens,
+	// with cache_read_input_tokens in CacheReadTokens and InputTokens + OutputTokens in TotalTokens.
+	var cacheCreation, cacheRead int
+	getInt("cache_creation_input_tokens", &cacheCreation)
+	getInt("cache_read_input_tokens", &cacheRead)
+	if cacheCreation > 0 || cacheRead > 0 {
+		res.Usage.InputTokens += cacheCreation + cacheRead
+		if cacheRead > 0 {
+			res.Usage.CacheReadTokens = cacheRead
+		}
+		res.Usage.TotalTokens = res.Usage.InputTokens + res.Usage.OutputTokens
+	}
 }
 
 func recordStreamErrorMetric(errMsg, model string, recordProcessErr bool) {

@@ -136,12 +136,14 @@ func TestUnifiedProcessPool_Defaults(t *testing.T) {
 func TestUnifiedProcessPool_ModelResolution(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name, model, defaultModel, updateModel, wantModel, wantUpdatedModel string
-		nilPool, checkDaemon                                                bool
+		name, model, defaultModel, updateModel, wantModel, wantUpdatedModel                        string
+		engine, updateEngine, updateClaudeBin, wantEngine, wantUpdatedEngine, wantUpdatedClaudeBin string
+		nilPool, checkDaemon                                                                       bool
 	}{
 		{name: "NilPoolUpdateModel", nilPool: true, updateModel: "claude-sonnet-5-5-low"},
 		{name: "ModelBoundAndHotReload", model: "gemini-3.8-flash-low", updateModel: "gpt-oss-120b-medium", wantModel: "gemini-3.8-flash-low", wantUpdatedModel: "gpt-oss-120b-medium", checkDaemon: true},
 		{name: "ModelFallbackAndEmptyUpdateIgnored", defaultModel: "gemini-2.5-pro", updateModel: "   ", wantModel: "gemini-2.5-pro", wantUpdatedModel: "gemini-2.5-pro"},
+		{name: "UpdateEngineSwitchToClaude", model: "gemini-3.8-flash-low", wantModel: "gemini-3.8-flash-low", wantUpdatedModel: "gemini-3.8-flash-low", engine: "agy", updateEngine: "claude", updateClaudeBin: "/opt/bin/claude", wantEngine: "agy", wantUpdatedEngine: "claude", wantUpdatedClaudeBin: "/opt/bin/claude", checkDaemon: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -149,13 +151,17 @@ func TestUnifiedProcessPool_ModelResolution(t *testing.T) {
 			if tc.nilPool {
 				var p *UnifiedProcessPool
 				p.UpdateModel(tc.updateModel)
+				p.UpdateEngine(tc.updateEngine, tc.updateClaudeBin)
 				return
 			}
 			mock := NewMockSpawner()
-			pool := NewUnifiedProcessPool(PoolConfig{Model: tc.model, DefaultModel: tc.defaultModel}, mock)
+			pool := NewUnifiedProcessPool(PoolConfig{Model: tc.model, DefaultModel: tc.defaultModel, Engine: tc.engine}, mock)
 			defer pool.Close()
 			if got := pool.cfg.Model; got != tc.wantModel {
 				t.Fatalf("expected pool model %q, got %q", tc.wantModel, got)
+			}
+			if tc.wantEngine != "" && pool.cfg.Engine != tc.wantEngine {
+				t.Fatalf("expected pool engine %q, got %q", tc.wantEngine, pool.cfg.Engine)
 			}
 			if tc.checkDaemon {
 				daemon, err := pool.GetOrCreate(context.Background(), "target-1", "")
@@ -168,12 +174,26 @@ func TestUnifiedProcessPool_ModelResolution(t *testing.T) {
 				if spawnCfg.Model != tc.wantModel {
 					t.Fatalf("expected model %s, got %s", tc.wantModel, spawnCfg.Model)
 				}
+				if tc.wantEngine != "" && spawnCfg.Engine != tc.wantEngine {
+					t.Fatalf("expected engine %s, got %s", tc.wantEngine, spawnCfg.Engine)
+				}
 			}
-			pool.UpdateModel(tc.updateModel)
+			if tc.updateModel != "" {
+				pool.UpdateModel(tc.updateModel)
+			}
+			if tc.updateEngine != "" {
+				pool.UpdateEngine(tc.updateEngine, tc.updateClaudeBin)
+			}
 			pool.MarkDirty()
 			pool.WaitBackground()
 			if got := pool.cfg.Model; got != tc.wantUpdatedModel {
 				t.Fatalf("expected updated pool model %q, got %q", tc.wantUpdatedModel, got)
+			}
+			if tc.wantUpdatedEngine != "" && pool.cfg.Engine != tc.wantUpdatedEngine {
+				t.Fatalf("expected updated pool engine %q, got %q", tc.wantUpdatedEngine, pool.cfg.Engine)
+			}
+			if tc.wantUpdatedClaudeBin != "" && pool.cfg.ClaudeBin != tc.wantUpdatedClaudeBin {
+				t.Fatalf("expected updated claude bin %q, got %q", tc.wantUpdatedClaudeBin, pool.cfg.ClaudeBin)
 			}
 			if tc.checkDaemon {
 				daemon, err := pool.GetOrCreate(context.Background(), "target-1", "")
@@ -185,6 +205,12 @@ func TestUnifiedProcessPool_ModelResolution(t *testing.T) {
 				mock.mu.Unlock()
 				if spawnCfg.Model != tc.wantUpdatedModel {
 					t.Fatalf("expected updated daemon model %s, got %s", tc.wantUpdatedModel, spawnCfg.Model)
+				}
+				if tc.wantUpdatedEngine != "" && spawnCfg.Engine != tc.wantUpdatedEngine {
+					t.Fatalf("expected updated daemon engine %s, got %s", tc.wantUpdatedEngine, spawnCfg.Engine)
+				}
+				if tc.wantUpdatedClaudeBin != "" && spawnCfg.ClaudeBin != tc.wantUpdatedClaudeBin {
+					t.Fatalf("expected updated daemon claude bin %s, got %s", tc.wantUpdatedClaudeBin, spawnCfg.ClaudeBin)
 				}
 			}
 		})
@@ -1663,5 +1689,40 @@ func TestUnifiedSessionLease_ThreadSafety(t *testing.T) {
 			}
 			wg.Wait()
 		})
+	}
+}
+
+func TestUnifiedProcessPool_ClaudeEngine_BuildDaemonConfig(t *testing.T) {
+	t.Parallel()
+	mock := NewMockSpawner()
+	sm := session.New(t.TempDir(), t.TempDir())
+	pool := NewUnifiedProcessPool(PoolConfig{
+		Engine:         "claude",
+		ClaudeBin:      "/custom/bin/claude",
+		SessionManager: sm,
+	}, mock)
+	defer pool.Close()
+
+	ctx := context.Background()
+	daemon, err := pool.GetOrCreate(ctx, "target-claude", "")
+	if err != nil || daemon == nil {
+		t.Fatalf("unexpected GetOrCreate error: %v", err)
+	}
+
+	mock.mu.Lock()
+	spawnCfg := mock.lastSpawnCfg
+	mock.mu.Unlock()
+
+	if !spawnCfg.IsClaude() {
+		t.Errorf("expected IsClaude() to be true")
+	}
+	if spawnCfg.ClaudeBin != "/custom/bin/claude" {
+		t.Errorf("expected ClaudeBin /custom/bin/claude, got %q", spawnCfg.ClaudeBin)
+	}
+	if spawnCfg.SessionID == "" || !IsValidUUID(spawnCfg.SessionID) {
+		t.Errorf("expected generated UUID SessionID, got %q", spawnCfg.SessionID)
+	}
+	if spawnCfg.ResumeSession {
+		t.Errorf("expected ResumeSession false for non-existent session on disk")
 	}
 }

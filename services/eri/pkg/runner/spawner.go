@@ -77,7 +77,12 @@ func (s *DefaultDaemonSpawner) Spawn(ctx context.Context, cfg DaemonConfig) (io.
 		ctx = context.Background()
 	}
 	bin := cfg.AgyBin
-	if bin == "" {
+	if cfg.IsClaude() {
+		bin = cfg.ClaudeBin
+		if bin == "" {
+			bin = "claude"
+		}
+	} else if bin == "" {
 		bin = "agy"
 	}
 	cmd := exec.CommandContext(ctx, bin, BuildDaemonArgs(cfg)...)
