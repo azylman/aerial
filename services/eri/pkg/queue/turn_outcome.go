@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -187,12 +188,86 @@ func (te *turnExecution) deliverSuccessAndFinalize(resp *runner.AgyResponse, acc
 	return true, ""
 }
 
+func compareSnowflakeIDs(a, b string) int {
+	if !IsNumericSnowflake(a) || !IsNumericSnowflake(b) {
+		return 0
+	}
+	if len(a) != len(b) {
+		if len(a) > len(b) {
+			return 1
+		}
+		return -1
+	}
+	return strings.Compare(a, b)
+}
+
+func hasNewerSnowflakeInSlice(msgs []db.Message, triggerID string, burstIDs map[string]bool) bool {
+	for _, m := range msgs {
+		if isDiscordMessage(m) && !burstIDs[m.ID] && compareSnowflakeIDs(m.ID, triggerID) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (te *turnExecution) hasNewerChannelActivity(triggerID string, burstIDs map[string]bool, trailing []db.Message) bool {
+	if hasNewerSnowflakeInSlice(trailing, triggerID, burstIDs) {
+		return true
+	}
+	if te.pool != nil && te.pool.hasNewerEnqueuedDiscordMessage(te.threadID, triggerID) {
+		return true
+	}
+	if s := te.store(); s != nil {
+		if recent, err := s.GetRecentThreadMessages(te.poolCtx(), te.threadID, 10); err == nil {
+			if hasNewerSnowflakeInSlice(recent, triggerID, burstIDs) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (te *turnExecution) resolveReplyToMessageID(deliveryTarget string) string {
+	if te == nil || te.isDispatch() || !IsNumericSnowflake(deliveryTarget) {
+		return ""
+	}
+	te.activeSessionMu.Lock()
+	burst := slices.Clone(te.burst)
+	trailing := slices.Clone(te.trailingMsgs)
+	te.activeSessionMu.Unlock()
+
+	var triggerMsg db.Message
+	hasTrigger := false
+	burstIDs := make(map[string]bool, len(burst))
+	for _, m := range burst {
+		burstIDs[m.ID] = true
+		if isDiscordMessage(m) && IsNumericSnowflake(m.ID) {
+			triggerMsg = m
+			hasTrigger = true
+		}
+	}
+	if !hasTrigger {
+		return ""
+	}
+	if triggerMsg.ID == deliveryTarget || (triggerMsg.ChannelID != "" && triggerMsg.ChannelID != deliveryTarget) {
+		return ""
+	}
+	if te.hasNewerChannelActivity(triggerMsg.ID, burstIDs, trailing) {
+		return triggerMsg.ID
+	}
+	return ""
+}
+
 func (te *turnExecution) deliverDiscordSuccess(cleanText string, attachments []*delivery.Attachment) {
 	deliveryTarget := te.threadID
+	replyToID := te.resolveReplyToMessageID(deliveryTarget)
 	var deliveryErr error
-	if te.pool.cfg.DeliveryWithAttachmentsFunc != nil {
+	switch {
+	case te.pool.cfg.ReplyDeliveryWithAttachmentsFunc != nil:
+		deliveryErr = te.pool.cfg.ReplyDeliveryWithAttachmentsFunc(te.pool.getDiscordSession(), deliveryTarget, cleanText, attachments, replyToID)
+	case te.pool.cfg.DeliveryWithAttachmentsFunc != nil:
 		deliveryErr = te.pool.cfg.DeliveryWithAttachmentsFunc(te.pool.getDiscordSession(), deliveryTarget, cleanText, attachments)
-	} else if te.pool.cfg.DeliveryFunc != nil {
+	case te.pool.cfg.DeliveryFunc != nil:
 		deliveryErr = te.pool.cfg.DeliveryFunc(te.pool.getDiscordSession(), deliveryTarget, cleanText)
 	}
 	if deliveryErr != nil {

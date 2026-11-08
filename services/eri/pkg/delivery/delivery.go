@@ -284,11 +284,30 @@ func collectDiscordFiles(attachments []*Attachment) []*discordgo.File {
 	return discordFiles
 }
 
-func sendChunkedDiscordMessages(s *discordgo.Session, channelID string, chunks []string, discordFiles []*discordgo.File) error {
+func buildMessageReference(channelID, replyToMessageID string) *discordgo.MessageReference {
+	trimmed := strings.TrimSpace(replyToMessageID)
+	if trimmed == "" {
+		return nil
+	}
+	failIfNotExists := false
+	return &discordgo.MessageReference{
+		MessageID:       trimmed,
+		ChannelID:       channelID,
+		FailIfNotExists: &failIfNotExists,
+	}
+}
+
+func sendChunkedDiscordMessages(s *discordgo.Session, channelID string, chunks []string, discordFiles []*discordgo.File, replyToMessageID ...string) error {
+	var replyID string
+	if len(replyToMessageID) > 0 {
+		replyID = replyToMessageID[0]
+	}
+	ref := buildMessageReference(channelID, replyID)
 	if len(chunks) == 0 && len(discordFiles) > 0 {
 		msg := &discordgo.MessageSend{
-			Files: discordFiles,
-			Flags: discordgo.MessageFlagsSuppressEmbeds,
+			Files:     discordFiles,
+			Flags:     discordgo.MessageFlagsSuppressEmbeds,
+			Reference: ref,
 		}
 		if _, sendErr := s.ChannelMessageSendComplex(channelID, msg); sendErr != nil {
 			return fmt.Errorf("failed to send attachments: %w", sendErr)
@@ -301,9 +320,11 @@ func sendChunkedDiscordMessages(s *discordgo.Session, channelID string, chunks [
 			continue
 		}
 		msg := &discordgo.MessageSend{
-			Content: chunk,
-			Flags:   discordgo.MessageFlagsSuppressEmbeds,
+			Content:   chunk,
+			Flags:     discordgo.MessageFlagsSuppressEmbeds,
+			Reference: ref,
 		}
+		ref = nil
 		if i == len(chunks)-1 && len(discordFiles) > 0 {
 			msg.Files = discordFiles
 		}
@@ -316,8 +337,9 @@ func sendChunkedDiscordMessages(s *discordgo.Session, channelID string, chunks [
 }
 
 // SendMessageWithAttachments delivers text to the target Discord channel/thread, chunking at 2000 characters,
-// and binding any provided file attachments strictly to the final (last) message chunk.
-func SendMessageWithAttachments(s *discordgo.Session, channelID, text string, attachments []*Attachment) (err error) {
+// binding any provided file attachments strictly to the final (last) message chunk, and optionally attaching
+// a Discord message_reference inline reply to the first transmitted chunk.
+func SendMessageWithAttachments(s *discordgo.Session, channelID, text string, attachments []*Attachment, replyToMessageID ...string) (err error) {
 	start := time.Now()
 	defer func() {
 		status := "success"
@@ -346,7 +368,7 @@ func SendMessageWithAttachments(s *discordgo.Session, channelID, text string, at
 	}
 
 	discordFiles := collectDiscordFiles(attachments)
-	return sendChunkedDiscordMessages(s, channelID, chunks, discordFiles)
+	return sendChunkedDiscordMessages(s, channelID, chunks, discordFiles, replyToMessageID...)
 }
 
 // StartTyping sends a Discord typing indicator immediately and keeps it active every 8 seconds until stopped.

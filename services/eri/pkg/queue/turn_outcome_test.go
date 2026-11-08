@@ -20,6 +20,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
+	"github.com/azylman/aerial/services/eri/pkg/delivery"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
@@ -824,6 +825,135 @@ func TestWorker_DeliverSuccessAndFinalize_CustomSessionTarget_TableDriven(t *tes
 			}
 			if !tc.wantDelivered && deliveredTo != "" {
 				t.Fatalf("deliveredTo = %q, want empty", deliveredTo)
+			}
+		})
+	}
+}
+
+func TestTurnExecution_InlineReplyOnNewerMessages(t *testing.T) {
+	t.Parallel()
+	const chanID = "1542423172400291873"
+	tests := []struct {
+		name       string
+		threadID   string
+		burst      []db.Message
+		trailing   []db.Message
+		stored     []db.Message
+		enqueuedID string
+		wantReply  string
+	}{
+		{
+			name:      "no newer messages sends plain message without reply reference",
+			threadID:  chanID,
+			burst:     []db.Message{{ID: "100000000000000001", ThreadID: chanID, AuthorID: "u1"}},
+			stored:    []db.Message{{ID: "100000000000000001", ThreadID: chanID, AuthorID: "u1"}},
+			wantReply: "",
+		},
+		{
+			name:      "newer discord message in store attaches reply reference to trigger message",
+			threadID:  chanID,
+			burst:     []db.Message{{ID: "100000000000000001", ThreadID: chanID, AuthorID: "u1"}},
+			stored:    []db.Message{{ID: "100000000000000001", ThreadID: chanID, AuthorID: "u1"}, {ID: "100000000000000002", ThreadID: chanID, AuthorID: "u2"}},
+			wantReply: "100000000000000001",
+		},
+		{
+			name:      "newer discord message in trailing slice attaches reply reference",
+			threadID:  chanID,
+			burst:     []db.Message{{ID: "100000000000000001", ThreadID: chanID, AuthorID: "u1"}},
+			trailing:  []db.Message{{ID: "100000000000000003", ThreadID: chanID, AuthorID: "u2"}},
+			wantReply: "100000000000000001",
+		},
+		{
+			name:       "newer discord message enqueued in worker state attaches reply reference",
+			threadID:   chanID,
+			burst:      []db.Message{{ID: "100000000000000001", ThreadID: chanID, AuthorID: "u1"}},
+			enqueuedID: "100000000000000004",
+			wantReply:  "100000000000000001",
+		},
+		{
+			name:      "longer numeric snowflake in store compares greater",
+			threadID:  chanID,
+			burst:     []db.Message{{ID: "999999999999999999", ThreadID: chanID, AuthorID: "u1"}},
+			stored:    []db.Message{{ID: "1000000000000000002", ThreadID: chanID, AuthorID: "u2"}},
+			wantReply: "999999999999999999",
+		},
+		{
+			name:      "shorter numeric snowflake in store compares smaller",
+			threadID:  chanID,
+			burst:     []db.Message{{ID: "100000000000000001", ThreadID: chanID, AuthorID: "u1"}},
+			stored:    []db.Message{{ID: "99999999999999999", ThreadID: chanID, AuthorID: "u2"}},
+			wantReply: "",
+		},
+		{
+			name:      "thread starter message matching deliveryTarget is guarded against cross-channel reference",
+			threadID:  chanID,
+			burst:     []db.Message{{ID: chanID, ThreadID: chanID, AuthorID: "u1"}},
+			stored:    []db.Message{{ID: "9999999999999999999", ThreadID: chanID, AuthorID: "u2"}},
+			wantReply: "",
+		},
+		{
+			name:      "cross-channel trigger message is guarded against invalid reference",
+			threadID:  chanID,
+			burst:     []db.Message{{ID: "100000000000000001", ThreadID: chanID, ChannelID: "999999999999999999", AuthorID: "u1"}},
+			stored:    []db.Message{{ID: "100000000000000002", ThreadID: chanID, AuthorID: "u2"}},
+			wantReply: "",
+		},
+		{
+			name:      "http-client trigger or non-discord newer message does not attach reply reference",
+			threadID:  chanID,
+			burst:     []db.Message{{ID: "100000000000000001", ThreadID: chanID, AuthorID: "u1"}},
+			stored:    []db.Message{{ID: "100000000000000002", ThreadID: chanID, AuthorID: "http-client"}, {ID: "non-snowflake", ThreadID: chanID, AuthorID: "u2"}},
+			wantReply: "",
+		},
+		{
+			name:      "http-client burst without discord trigger returns empty reply reference",
+			threadID:  chanID,
+			burst:     []db.Message{{ID: "uuid-msg-1", ThreadID: chanID, AuthorID: "http-client"}},
+			stored:    []db.Message{{ID: "100000000000000002", ThreadID: chanID, AuthorID: "u2"}},
+			wantReply: "",
+		},
+		{
+			name:      "coalesced multi-message burst replies to last discord message in burst",
+			threadID:  chanID,
+			burst:     []db.Message{{ID: "100000000000000001", ThreadID: chanID, AuthorID: "u1"}, {ID: "100000000000000002", ThreadID: chanID, AuthorID: "u1"}},
+			stored:    []db.Message{{ID: "100000000000000003", ThreadID: chanID, AuthorID: "u2"}},
+			wantReply: "100000000000000002",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := dbtest.NewFakeStore()
+			for i, m := range tc.stored {
+				m.CreatedAt = time.Now().UTC().Add(time.Duration(i) * time.Second)
+				_ = store.InsertMessage(context.Background(), m)
+			}
+			var gotReplyTo string
+			pool := New(config.NewFromData(&config.ConfigData{}), WorkerPoolConfig{
+				Store: store,
+				ReplyDeliveryWithAttachmentsFunc: func(s *discordgo.Session, channelID, text string, attachments []*delivery.Attachment, replyToMessageID string) error {
+					gotReplyTo = replyToMessageID
+					return nil
+				},
+			})
+			defer pool.Stop()
+			if tc.enqueuedID != "" {
+				pool.EnqueueBurst(db.Message{ID: tc.enqueuedID, ThreadID: tc.threadID, AuthorID: "u2"})
+			}
+
+			te := &turnExecution{
+				pool:         pool,
+				threadID:     tc.threadID,
+				triggerType:  "discord",
+				burst:        tc.burst,
+				trailingMsgs: tc.trailing,
+				execStart:    time.Now().UTC(),
+				stopTyping:   func() {},
+			}
+			te.deliverDiscordSuccess("completed output", nil)
+			if gotReplyTo != tc.wantReply {
+				t.Errorf("gotReplyTo = %q, want %q", gotReplyTo, tc.wantReply)
 			}
 		})
 	}
