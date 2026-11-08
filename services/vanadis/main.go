@@ -103,7 +103,7 @@ func LoadConfig(configPath string) Config {
 			}
 		}
 	}
-	pgURL := firstNonEmpty(os.Getenv("DATABASE_URL"), fileCfg.PostgresURL)
+	pgURL := firstNonEmpty(httpkit.BuildPostgresDSN(os.Getenv, "aerial"), fileCfg.PostgresURL)
 	if pgURL == "" {
 		host := "127.0.0.1"
 		for _, h := range []string{"aerial-postgres", "postgres"} {

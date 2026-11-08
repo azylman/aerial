@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/httpkit"
 	"gopkg.in/yaml.v3"
 )
 
@@ -112,7 +113,7 @@ func LoadConfig(configPath string) Config {
 		sysChan, autoUpdateAuthors = loadAerialConfigFallback(synapseAerialConfigPath, sysChan, autoUpdateAuthors)
 	}
 
-	pgURL := firstNonEmpty(os.Getenv("DATABASE_URL"), "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable")
+	pgURL := firstNonEmpty(httpkit.BuildPostgresDSN(os.Getenv, "aerial"), "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable")
 
 	kubeServer := os.Getenv("KUBE_API_SERVER")
 	if kubeServer == "" {

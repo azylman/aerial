@@ -804,19 +804,26 @@ func TestLoadConfigAndEnv(t *testing.T) {
 	defer func() {
 		vanadisFallbackConfigPath, lookupHostFn = origFallback, origLookup
 	}()
-	for _, k := range []string{"PORT", "DATABASE_URL", "ERI_URL", "SYNAPSE_URL", "CONFIG_PATH"} {
+	for _, k := range []string{
+		"PORT", "DATABASE_URL", "POSTGRES_URL", "POSTGRES_HOST", "POSTGRES_PORT",
+		"POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "ERI_URL", "SYNAPSE_URL", "CONFIG_PATH",
+	} {
 		t.Setenv(k, "")
 	}
 	tmpDir := t.TempDir()
 	vanadisFallbackConfigPath = filepath.Join(tmpDir, "nonexistent.yaml")
 	for _, tc := range []struct {
-		name, lookupHost, wantHost string
+		name, lookupHost, wantHost, password string
 	}{
-		{"DNSFallback_AerialPostgres", "aerial-postgres", "@aerial-postgres:5432/"},
-		{"DNSFallback_Postgres", "postgres", "@postgres:5432/"},
-		{"DNSFallback_Localhost", "other", "@127.0.0.1:5432/"},
+		{"DNSFallback_AerialPostgres", "aerial-postgres", "@aerial-postgres:5432/", ""},
+		{"DNSFallback_Postgres", "postgres", "@postgres:5432/", ""},
+		{"DNSFallback_Localhost", "other", "@127.0.0.1:5432/", ""},
+		{"Decomposed_PostgresPassword", "other", "@postgres:5432/", "custom_vanadis_pass"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.password != "" {
+				t.Setenv("POSTGRES_PASSWORD", tc.password)
+			}
 			lookupHostFn = func(_ context.Context, host string) ([]string, error) {
 				if host == tc.lookupHost {
 					return []string{"10.0.0.2"}, nil
@@ -826,6 +833,9 @@ func TestLoadConfigAndEnv(t *testing.T) {
 			cfg := LoadConfig("")
 			if !strings.Contains(cfg.PostgresURL, tc.wantHost) {
 				t.Fatalf("expected postgres URL to contain %s, got %s", tc.wantHost, cfg.PostgresURL)
+			}
+			if tc.password != "" && !strings.Contains(cfg.PostgresURL, ":"+tc.password+"@") {
+				t.Fatalf("expected postgres URL to contain password %s, got %s", tc.password, cfg.PostgresURL)
 			}
 			if tc.name == "DNSFallback_AerialPostgres" && (cfg.Port != "4025" || cfg.BrainURL != "http://127.0.0.1:8088" || cfg.SynapseURL != "http://synapse.aerial") {
 				t.Fatalf("unexpected defaults: %+v", cfg)

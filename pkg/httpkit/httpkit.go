@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime/coverage"
@@ -220,4 +221,64 @@ func ServeMCPStream(w http.ResponseWriter, r *http.Request, streamHandler http.H
 	if streamHandler != nil {
 		streamHandler.ServeHTTP(w, r)
 	}
+}
+
+// BuildPostgresDSN constructs a PostgreSQL connection DSN from environment lookup and optional defaultDB.
+// If lookup is nil or both POSTGRES_HOST and POSTGRES_PASSWORD (and URL overrides) are empty, it returns "".
+func BuildPostgresDSN(lookup func(string) string, defaultDB string) string {
+	if lookup == nil {
+		return ""
+	}
+	rawURL := strings.TrimSpace(lookup("POSTGRES_URL"))
+	if rawURL == "" {
+		rawURL = strings.TrimSpace(lookup("DATABASE_URL"))
+	}
+	if rawURL != "" {
+		if explicitDB := strings.TrimSpace(lookup("POSTGRES_DB")); explicitDB != "" {
+			if u, err := url.Parse(rawURL); err == nil && u.Scheme != "" {
+				u.Path = "/" + strings.TrimPrefix(explicitDB, "/")
+				return u.String()
+			}
+		}
+		return rawURL
+	}
+
+	dbHost := strings.TrimSpace(lookup("POSTGRES_HOST"))
+	passVal := strings.TrimSpace(lookup("POSTGRES_PASSWORD"))
+	if dbHost == "" && passVal != "" {
+		dbHost = "postgres"
+	}
+	if dbHost == "" && passVal == "" {
+		return ""
+	}
+
+	dbPort := strings.TrimSpace(lookup("POSTGRES_PORT"))
+	if dbPort == "" {
+		dbPort = "5432"
+	}
+	dbUser := strings.TrimSpace(lookup("POSTGRES_USER"))
+	if dbUser == "" {
+		dbUser = "aerial"
+	}
+	dbPass := passVal
+	if dbPass == "" {
+		dbPass = "aerial_secure_pass"
+	}
+	dbName := strings.TrimSpace(lookup("POSTGRES_DB"))
+	if dbName == "" {
+		dbName = strings.TrimSpace(defaultDB)
+	}
+	if dbName == "" {
+		dbName = "aerial"
+	}
+	dbName = strings.TrimPrefix(dbName, "/")
+
+	u := &url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(dbUser, dbPass),
+		Host:     net.JoinHostPort(dbHost, dbPort),
+		Path:     "/" + dbName,
+		RawQuery: "sslmode=disable",
+	}
+	return u.String()
 }
