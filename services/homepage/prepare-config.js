@@ -15,6 +15,9 @@ function resolveDefaultCoreDir(existsFn = fs.existsSync) {
   if (existsFn('/local/core-homepage/config')) {
     return '/local/core-homepage/config';
   }
+  if (existsFn('/share/aerial/services/homepage/config')) {
+    return '/share/aerial/services/homepage/config';
+  }
   return '/app/core-homepage/config';
 }
 

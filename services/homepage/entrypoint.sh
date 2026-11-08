@@ -5,6 +5,8 @@ mkdir -p /config /app/config
 
 if [ -d "/local/core-homepage" ]; then
     CORE_HOMEPAGE_DIR="/local/core-homepage"
+elif [ -d "/share/aerial/services/homepage" ]; then
+    CORE_HOMEPAGE_DIR="/share/aerial/services/homepage"
 else
     CORE_HOMEPAGE_DIR="/app/core-homepage"
 fi
