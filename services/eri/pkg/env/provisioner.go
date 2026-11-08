@@ -204,6 +204,7 @@ func (p *Provisioner) Sync(ctx context.Context, cfg *config.Config) error {
 	var cur *config.ConfigData
 	if cfg != nil {
 		cur = cfg.Current()
+		_ = cfg.Engine()
 	} else {
 		cur = config.DefaultConfigData()
 	}
@@ -233,6 +234,15 @@ func (p *Provisioner) Sync(ctx context.Context, cfg *config.Config) error {
 	return nil
 }
 
+func chownTree(root string) {
+	ignore(filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err == nil && info != nil && info.Mode()&os.ModeSymlink == 0 {
+			ignore(chownPath(path, 1000, 1000))
+		}
+		return nil
+	}))
+}
+
 func (p *Provisioner) chownProvisionedPaths() {
 	if getEuid() != 0 {
 		return
@@ -240,36 +250,29 @@ func (p *Provisioner) chownProvisionedPaths() {
 	if p.homeDir == rootHomeDir {
 		ignore(chmodPath(rootHomeDir, 0o755))
 	}
-	homeGemini := filepath.Join(p.homeDir, ".gemini")
-	ignore(filepath.Walk(homeGemini, func(path string, info os.FileInfo, err error) error {
-		if err == nil && info != nil && info.Mode()&os.ModeSymlink == 0 {
-			ignore(chownPath(path, 1000, 1000))
-		}
-		return nil
-	}))
+	chownTree(filepath.Join(p.homeDir, ".gemini"))
+	chownTree(filepath.Join(p.homeDir, ".claude"))
+
 	for _, target := range allRuntimeTargets {
 		rtHome := p.runtimeHomeDir(target)
 		ignore(chownPath(rtHome, 1000, 1000))
 		base := filepath.Join(rtHome, ".gemini")
 		ignore(chownPath(base, 1000, 1000))
 		for _, sub := range []string{"rules", "config"} {
-			ignore(filepath.Walk(filepath.Join(base, sub), func(path string, info os.FileInfo, err error) error {
-				if err == nil && info != nil && info.Mode()&os.ModeSymlink == 0 {
-					ignore(chownPath(path, 1000, 1000))
-				}
-				return nil
-			}))
+			chownTree(filepath.Join(base, sub))
 		}
 		cliDir := filepath.Join(base, "antigravity-cli")
 		ignore(chownPath(cliDir, 1000, 1000))
 		if entries, err := os.ReadDir(cliDir); err == nil {
 			for _, entry := range entries {
-				if entry.Type()&os.ModeSymlink != 0 {
-					continue
+				if entry.Type()&os.ModeSymlink == 0 {
+					ignore(chownPath(filepath.Join(cliDir, entry.Name()), 1000, 1000))
 				}
-				ignore(chownPath(filepath.Join(cliDir, entry.Name()), 1000, 1000))
 			}
 		}
+		rtClaude := filepath.Join(rtHome, ".claude")
+		ignore(chownPath(rtClaude, 1000, 1000))
+		chownTree(rtClaude)
 	}
 	if p.dataDir != "" {
 		ignore(chownPath(p.dataDir, 1000, 1000))
@@ -278,13 +281,9 @@ func (p *Provisioner) chownProvisionedPaths() {
 			filepath.Join(p.dataDir, "brain"),
 			filepath.Join(p.dataDir, "conversations"),
 			filepath.Join(p.dataDir, "cache"),
+			filepath.Join(p.dataDir, "claude"),
 		} {
-			ignore(filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-				if err == nil && info != nil && info.Mode()&os.ModeSymlink == 0 {
-					ignore(chownPath(path, 1000, 1000))
-				}
-				return nil
-			}))
+			chownTree(dir)
 		}
 	}
 }

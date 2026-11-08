@@ -7,6 +7,44 @@ import (
 	"strings"
 )
 
+// Default canonical claude settings.json hooks configuration.
+const defaultCanonicalClaudeSettingsJSON = `{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "hook-guard pre-invocation"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "hook-guard all"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "hook-guard post-batch"
+          }
+        ]
+      }
+    ]
+  }
+}`
+
 // Default canonical hooks.json payload used when external file is absent.
 const defaultCanonicalHooksJSON = `{"share-guard":{"PreToolUse":[{"matcher":"replace_file_content|write_to_file|edit_file|write_file|run_command","hooks":[{"type":"command","command":"hook-guard share","timeout":5}]}]},"schedule-guard":{"PreToolUse":[{"matcher":"schedule|run_command|manage_task|manage_subagents|view_file|read_file","hooks":[{"type":"command","command":"hook-guard schedule","timeout":5}]}]},"batch-guard":{"PreInvocation":[{"type":"command","command":"hook-guard pre-invocation","timeout":5}],"PreToolUse":[{"matcher":"view_file|read_file|replace_file_content|write_to_file|edit_file|write_file|run_command","hooks":[{"type":"command","command":"hook-guard batch","timeout":5}]}],"PostToolUse":[{"matcher":"replace_file_content|write_to_file|edit_file|write_file","hooks":[{"type":"command","command":"hook-guard post-batch","timeout":5}]}]},"search-guard":{"PreToolUse":[{"matcher":"run_command|call_mcp_tool","hooks":[{"type":"command","command":"hook-guard search","timeout":5}]}]},"commit-guard":{"PreToolUse":[{"matcher":"run_command|call_mcp_tool","hooks":[{"type":"command","command":"hook-guard commit","timeout":5}]}]}}`
 
@@ -65,6 +103,17 @@ func (p *Provisioner) provisionTargetHooks(targetGemini, hooksJSONContent, hooks
 	p.copyHookScriptsToTarget(hooksDir, targetHooksScriptsDir)
 }
 
+func (p *Provisioner) provisionTargetClaudeSettings(claudeDir string) {
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		log.Printf("[Env] Warning: failed to mkdir %s for claude settings: %v", claudeDir, err)
+		return
+	}
+	settingsPath := filepath.Join(claudeDir, "settings.json")
+	if err := p.writeAtomic(settingsPath, defaultCanonicalClaudeSettingsJSON); err != nil {
+		log.Printf("[Env] Warning: failed to write settings.json to %s: %v", claudeDir, err)
+	}
+}
+
 // SyncHooks provisions hooks.json and executable hook scripts into primary ~/.gemini and all runtime targets.
 func (p *Provisioner) SyncHooks() error {
 	if p == nil || p.homeDir == "" {
@@ -102,6 +151,14 @@ func (p *Provisioner) SyncHooks() error {
 	// 3. Provision hooks into each target root
 	for _, targetGemini := range targetRoots {
 		p.provisionTargetHooks(targetGemini, hooksJSONContent, hooksDir)
+	}
+
+	// 4. Provision Claude settings.json into primary ~/.claude and each runtime target ~/.claude
+	p.provisionTargetClaudeSettings(filepath.Join(p.homeDir, ".claude"))
+	if p.dataDir != "" {
+		for _, target := range allRuntimeTargets {
+			p.provisionTargetClaudeSettings(filepath.Join(p.runtimeHomeDir(target), ".claude"))
+		}
 	}
 
 	log.Printf("[Env] Synchronized lifecycle hooks across %d runtime targets", len(targetRoots))

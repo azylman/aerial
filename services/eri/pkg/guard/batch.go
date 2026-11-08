@@ -370,11 +370,11 @@ func normalizeBatchTarget(path string) string {
 
 func categorizeInvocation(toolName string, args ToolArgs) (category, target string) {
 	switch normalizeToolName(toolName) {
-	case "view_file", "read_file":
+	case "view_file", "read_file", "read":
 		return "read", normalizeBatchTarget(args.FilePath())
-	case "replace_file_content", "write_to_file", "edit_file", "write_file":
+	case "replace_file_content", "write_to_file", "edit_file", "write_file", "edit", "multiedit", "write":
 		return "edit", normalizeBatchTarget(args.FilePath())
-	case "run_command":
+	case "run_command", "bash":
 		cmd := strings.TrimSpace(args.CommandLine)
 		if isUnscopedTest(cmd) {
 			return "unscoped_test", cmd
@@ -622,6 +622,26 @@ func shapeReadFileRange(target string, startLine, endLine int, priorRecords []To
 	return start, end, start != startLine
 }
 
+func overwriteReadRange(d *Decision, isClaude bool, start, end int) {
+	if isClaude {
+		d.Overwrite = map[string]any{"offset": start, "limit": end - start + 1}
+	} else {
+		d.Overwrite = map[string]any{"StartLine": start, "EndLine": end}
+	}
+}
+
+func overwriteCommandLine(d *Decision, isClaude bool, cmdLine string) {
+	rewritten := shapeGitStatus(stripGoTestVerbose(cmdLine))
+	if rewritten == cmdLine {
+		return
+	}
+	if isClaude {
+		d.Overwrite = map[string]any{"command": rewritten}
+	} else {
+		d.Overwrite = map[string]any{"CommandLine": rewritten}
+	}
+}
+
 // CheckBatch evaluates tool batching and thrash invariants using the active state directory and system time.
 func CheckBatch(payload Payload, args ToolArgs) *Decision {
 	return CheckBatchWithDir(payload, args, GetBatchDir(), time.Now())
@@ -769,7 +789,7 @@ func inspectGitBatchCommand(cmdLine string) *Decision {
 }
 
 func checkStatelessBatchRules(normalizedTool string, args ToolArgs) *Decision {
-	if normalizedTool == "run_command" {
+	if normalizedTool == "run_command" || normalizedTool == "bash" {
 		if isUnscopedTest(args.CommandLine) {
 			return &Decision{
 				Decision: DecisionDeny,
@@ -786,7 +806,7 @@ func checkStatelessBatchRules(normalizedTool string, args ToolArgs) *Decision {
 			return dec
 		}
 	}
-	if (normalizedTool == "read_file" || normalizedTool == "view_file") && isTranscriptLogPath(args.FilePath()) {
+	if (normalizedTool == "read_file" || normalizedTool == "view_file" || normalizedTool == "read") && isTranscriptLogPath(args.FilePath()) {
 		return &Decision{
 			Decision: DecisionDeny,
 			Reason:   "Direct read_file/view_file on raw session transcripts (transcript*.jsonl) is prohibited because each JSONL line can exceed 30KB and floods the context window. Use the 'transcript-search' CLI skill or targeted 'jq' / 'rg -m 20' queries via run_command instead.",
@@ -858,11 +878,9 @@ func CheckBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time
 		opportunisticGC(dir, now)
 		decision = &Decision{Decision: DecisionAllow}
 		if readOverwritten {
-			decision.Overwrite = map[string]any{"StartLine": effStart, "EndLine": effEnd}
-		} else if normalizedTool == "run_command" {
-			if rewritten := shapeGitStatus(stripGoTestVerbose(args.CommandLine)); rewritten != args.CommandLine {
-				decision.Overwrite = map[string]any{"CommandLine": rewritten}
-			}
+			overwriteReadRange(decision, payload.IsClaude(), effStart, effEnd)
+		} else if normalizedTool == "run_command" || normalizedTool == "bash" {
+			overwriteCommandLine(decision, payload.IsClaude(), args.CommandLine)
 		}
 		return nil
 	})
@@ -996,7 +1014,8 @@ func RecordPostBatch(payload Payload, args ToolArgs) *InvocationResponse {
 // RecordPostBatchWithDir rolls back a failed edit invocation in the specified state directory,
 // and reaps orphaned background command process groups on successful terminal submit commands.
 func RecordPostBatchWithDir(payload Payload, args ToolArgs, dir string, now time.Time) *InvocationResponse {
-	if strings.TrimSpace(payload.Error) == "" && normalizeToolName(payload.ToolCall.Name) == "run_command" && isTerminalSubmitCommand(args.CommandLine) {
+	normTool := normalizeToolName(payload.ToolCall.Name)
+	if strings.TrimSpace(payload.Error) == "" && (normTool == "run_command" || normTool == "bash") && isTerminalSubmitCommand(args.CommandLine) {
 		reapOrphanedParentChildren(resolveProcDir(dir))
 	}
 	if cat, target := categorizeInvocation(payload.ToolCall.Name, args); strings.TrimSpace(payload.Error) != "" && cat == "edit" && target != "" {

@@ -811,12 +811,12 @@ func collectCommitDiff(dir, cmdLine string) string {
 	return diffBuilder.String()
 }
 
-// CheckCommit evaluates run_command tool calls against commit safety guard invariants.
+// CheckCommit evaluates run_command and bash tool calls against commit safety guard invariants.
 // Guaranteed fail-open: returns DecisionAllow on any unexpected error or non-commit command.
 func CheckCommit(toolName string, args ToolArgs) *Decision {
 	normalizedName := normalizeToolName(toolName)
 
-	if normalizedName != "run_command" {
+	if normalizedName != "run_command" && normalizedName != "bash" {
 		return CheckOutboundSecrets(toolName, args)
 	}
 
@@ -866,7 +866,7 @@ func CheckOutboundSecrets(toolName string, args ToolArgs) *Decision {
 	var textToScan string
 
 	switch {
-	case cleanName == "run_command":
+	case cleanName == "run_command" || cleanName == "bash":
 		textToScan = args.CommandLine
 	case cleanName == "call_mcp_tool" || strings.HasPrefix(cleanName, "mcp_") || strings.HasPrefix(rawLower, "mcp_") || strings.HasPrefix(rawLower, "mcp:"):
 		parts := []string{

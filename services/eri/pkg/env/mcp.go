@@ -305,6 +305,70 @@ func (p *Provisioner) LoadTargetMCPConfig(cfg *config.Config, target RuleTarget)
 	return json.RawMessage(outBytes)
 }
 
+// ConvertMCPConfigForClaude transforms an agy MCP config JSON message into Claude Code mcp_config.json format.
+// Specifically, under "mcpServers", entries with "serverUrl" are transformed to {"type": "http", "url": serverUrl}
+// while preserving stdio servers (command, args, env) and any existing fields.
+func ConvertMCPConfigForClaude(rawConfig json.RawMessage) json.RawMessage {
+	if len(rawConfig) == 0 {
+		return json.RawMessage(`{"mcpServers":{}}`)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(rawConfig, &root); err != nil {
+		return rawConfig
+	}
+	servers, ok := root["mcpServers"].(map[string]any)
+	if !ok {
+		return rawConfig
+	}
+	newServers := make(map[string]any, len(servers))
+	for name, srvVal := range servers {
+		srvMap, ok := srvVal.(map[string]any)
+		if !ok {
+			newServers[name] = srvVal
+			continue
+		}
+		newMap := make(map[string]any, len(srvMap))
+		maps.Copy(newMap, srvMap)
+		var serverURL string
+		if u, ok := newMap["serverUrl"].(string); ok && u != "" {
+			serverURL = u
+		} else if u, ok := newMap["server_url"].(string); ok && u != "" {
+			serverURL = u
+		}
+		if serverURL != "" {
+			delete(newMap, "serverUrl")
+			delete(newMap, "server_url")
+			newMap["type"] = "http"
+			newMap["url"] = serverURL
+		}
+		newServers[name] = newMap
+	}
+	root["mcpServers"] = newServers
+	outBytes, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return rawConfig
+	}
+	return json.RawMessage(outBytes)
+}
+
+// EnsureTargetClaudeMcpConfig writes raw JSON configuration into <claudeDir>/mcp_config.json,
+// converting HTTP servers to Claude format.
+func (p *Provisioner) EnsureTargetClaudeMcpConfig(claudeDir string, rawConfig json.RawMessage) error {
+	if p == nil || claudeDir == "" || len(rawConfig) == 0 {
+		return nil
+	}
+	trimmed := strings.TrimSpace(string(rawConfig))
+	if trimmed == "" || trimmed == `""` || trimmed == "null" {
+		return nil
+	}
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		return fmt.Errorf("failed to create claude directory %s: %w", claudeDir, err)
+	}
+	claudeConfig := ConvertMCPConfigForClaude(rawConfig)
+	targetPath := filepath.Join(claudeDir, "mcp_config.json")
+	return p.writeAtomic(targetPath, string(claudeConfig))
+}
+
 // SyncMCP loads and synchronizes target-partitioned mcp_config.json into:
 // 1. Primary ~/.gemini/config/mcp_config.json
 // 2. Discord runtime <dataDir>/runtimes/discord/.gemini/config/mcp_config.json
@@ -323,6 +387,9 @@ func (p *Provisioner) SyncMCP(ctx context.Context, cfg *config.Config) error {
 		if err := p.EnsureTargetMcpConfig(filepath.Join(p.homeDir, ".gemini"), discordConfig); err != nil {
 			return fmt.Errorf("failed to sync primary mcp config: %w", err)
 		}
+		if err := p.EnsureTargetClaudeMcpConfig(filepath.Join(p.homeDir, ".claude"), discordConfig); err != nil {
+			return fmt.Errorf("failed to sync primary claude mcp config: %w", err)
+		}
 	}
 
 	if p.dataDir != "" {
@@ -335,6 +402,10 @@ func (p *Provisioner) SyncMCP(ctx context.Context, cfg *config.Config) error {
 			geminiDir := filepath.Join(p.runtimeHomeDir(target), ".gemini")
 			if err := p.EnsureTargetMcpConfig(geminiDir, configs[target]); err != nil {
 				return fmt.Errorf("failed to sync %s runtime mcp config: %w", target, err)
+			}
+			claudeDir := filepath.Join(p.runtimeHomeDir(target), ".claude")
+			if err := p.EnsureTargetClaudeMcpConfig(claudeDir, configs[target]); err != nil {
+				return fmt.Errorf("failed to sync %s runtime claude mcp config: %w", target, err)
 			}
 		}
 	}

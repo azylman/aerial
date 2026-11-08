@@ -233,6 +233,8 @@ type ConfigData struct {
 	DaemonIdleTimeout         time.Duration            `yaml:"daemon_idle_timeout,omitempty" json:"daemon_idle_timeout,omitempty"`
 	MaxConcurrentDaemons      int                      `yaml:"max_concurrent_daemons,omitempty" json:"max_concurrent_daemons,omitempty"`
 	MaxBackgroundTaskDuration time.Duration            `yaml:"max_background_task_duration,omitempty" json:"max_background_task_duration,omitempty"`
+	Engine                    string                   `yaml:"engine,omitempty" json:"engine,omitempty"`
+	ClaudeBin                 string                   `yaml:"claude_bin,omitempty" json:"claude_bin,omitempty"`
 }
 
 func normalizePrewarmedTargets(targets []string) []string {
@@ -362,6 +364,8 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		DaemonIdleTimeout         time.Duration            `yaml:"daemon_idle_timeout"`
 		MaxConcurrentDaemons      int                      `yaml:"max_concurrent_daemons"`
 		MaxBackgroundTaskDuration time.Duration            `yaml:"max_background_task_duration"`
+		Engine                    string                   `yaml:"engine"`
+		ClaudeBin                 string                   `yaml:"claude_bin"`
 	}
 
 	var raw rawConfigHelper
@@ -380,6 +384,8 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	c.DatabaseURL = raw.DatabaseURL
 	c.Port = raw.Port
 	c.AgyBin = raw.AgyBin
+	c.Engine = raw.Engine
+	c.ClaudeBin = raw.ClaudeBin
 	c.APIKey = raw.APIKey
 	c.HarnessAPIKey = raw.HarnessAPIKey
 	c.SystemPrompt = raw.SystemPrompt
@@ -590,6 +596,8 @@ func DefaultConfigData() *ConfigData {
 		DaemonIdleTimeout:         24 * time.Hour,
 		MaxConcurrentDaemons:      40,
 		MaxBackgroundTaskDuration: 2 * time.Hour,
+		Engine:                    "agy",
+		ClaudeBin:                 "claude",
 	}
 }
 
@@ -607,6 +615,25 @@ func (c *Config) Current() *ConfigData {
 // Get returns the current ConfigData pointer (alias for Current).
 func (c *Config) Get() *ConfigData {
 	return c.Current()
+}
+
+// Engine returns the process-wide execution engine ("claude" or "agy"), defaulting to "agy".
+func (c *Config) Engine() string {
+	if c == nil {
+		return "agy"
+	}
+	return c.Current().GetEngine()
+}
+
+// GetEngine returns the process-wide execution engine ("claude" or "agy"), defaulting to "agy".
+func (c *ConfigData) GetEngine() string {
+	if c == nil {
+		return "agy"
+	}
+	if strings.EqualFold(strings.TrimSpace(c.Engine), "claude") {
+		return "claude"
+	}
+	return "agy"
 }
 
 // VoicePrewarmedTargets returns a defensive copy of configured voice daemon targets to eagerly pre-warm.
@@ -807,6 +834,8 @@ func applyEnvironmentOverrides(data *ConfigData, lookup func(string) string) {
 	}
 	overrideEnvStr(&data.Port, lookup, "PORT")
 	overrideEnvStr(&data.AgyBin, lookup, "AGY_BIN")
+	overrideEnvStr(&data.Engine, lookup, "ENGINE")
+	overrideEnvStr(&data.ClaudeBin, lookup, "CLAUDE_BIN")
 	overrideEnvStr(&data.APIKey, lookup, "AGY_GEMINI_API_KEY")
 	overrideEnvStr(&data.HarnessAPIKey, lookup, "GEMINI_HARNESS_API_KEY")
 	overrideEnvStr(&data.SystemPrompt, lookup, "SYSTEM_PROMPT")

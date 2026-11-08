@@ -42,6 +42,8 @@ func (p *Provisioner) SyncSkills() error {
 	// 1. Primary config (Discord compatibility)
 	primarySkillDir := filepath.Join(p.homeDir, ".gemini", "config", "skills")
 	p.LinkTargetSkills(primarySkillDir, TargetDiscord)
+	primaryClaudeSkills := filepath.Join(p.homeDir, ".claude", "skills")
+	p.LinkTargetSkills(primaryClaudeSkills, TargetDiscord)
 
 	// 2. Isolated runtimes (if dataDir configured)
 	if p.dataDir != "" {
@@ -49,6 +51,8 @@ func (p *Provisioner) SyncSkills() error {
 		for _, target := range allRuntimeTargets {
 			runtimeDir := filepath.Join(p.runtimeHomeDir(target), ".gemini", "config", "skills")
 			counts[target] = p.LinkTargetSkills(runtimeDir, target)
+			runtimeClaudeSkills := filepath.Join(p.runtimeHomeDir(target), ".claude", "skills")
+			p.LinkTargetSkills(runtimeClaudeSkills, target)
 		}
 		log.Printf("[Skills] Synchronized skills: %d discord skills, %d voice skills, %d ephemeral skills", counts[TargetDiscord], counts[TargetVoice], counts[TargetEphemeral])
 	}

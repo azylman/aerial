@@ -8,6 +8,13 @@ import (
 // normalizeToolName returns the lowercased tool base name without server prefix.
 func normalizeToolName(toolName string) string {
 	n := strings.ToLower(strings.TrimSpace(toolName))
+	// Strip Claude MCP tool prefix: mcp__<server>__<tool> -> <tool>
+	if strings.HasPrefix(n, "mcp__") {
+		parts := strings.Split(n, "__")
+		if len(parts) >= 3 {
+			n = parts[len(parts)-1]
+		}
+	}
 	if idx := strings.LastIndex(n, ":"); idx != -1 {
 		n = n[idx+1:]
 	}
@@ -22,6 +29,9 @@ const (
 	DecisionDeny  DecisionType = "deny"
 )
 
+// InvocationResponse is the JSON payload returned for PreInvocation and PostToolUse hooks.
+type InvocationResponse struct{}
+
 // Decision is the JSON payload returned to Antigravity.
 type Decision struct {
 	Decision  DecisionType   `json:"decision"`
@@ -29,16 +39,54 @@ type Decision struct {
 	Overwrite map[string]any `json:"overwrite,omitempty"`
 }
 
-// InvocationResponse is the JSON payload returned for PreInvocation and PostToolUse hooks.
-type InvocationResponse struct{}
+// ClaudeHookResponse represents the JSON output format for Claude Code hooks.
+type ClaudeHookResponse struct {
+	HookSpecificOutput ClaudeHookSpecificOutput `json:"hookSpecificOutput"`
+}
 
-// Payload is the root JSON structure received from Antigravity via stdin.
+type ClaudeHookSpecificOutput struct {
+	HookEventName            string         `json:"hookEventName"`
+	PermissionDecision       string         `json:"permissionDecision"`
+	PermissionDecisionReason string         `json:"permissionDecisionReason,omitempty"`
+	UpdatedInput             map[string]any `json:"updatedInput,omitempty"`
+}
+
+// Payload is the root JSON structure received from Antigravity or Claude Code via stdin.
 type Payload struct {
-	ToolCall       ToolCall `json:"toolCall"`
-	StepIdx        int      `json:"stepIdx"`
-	InvocationNum  int      `json:"invocationNum,omitempty"`
-	Error          string   `json:"error,omitempty"`
-	ConversationID string   `json:"conversationId"`
+	ToolCall       ToolCall        `json:"toolCall"`
+	StepIdx        int             `json:"stepIdx"`
+	InvocationNum  int             `json:"invocationNum,omitempty"`
+	Error          string          `json:"error,omitempty"`
+	ConversationID string          `json:"conversationId"`
+	SessionID      string          `json:"session_id,omitempty"`
+	HookEventName  string          `json:"hook_event_name,omitempty"`
+	ToolName       string          `json:"tool_name,omitempty"`
+	ToolInput      json.RawMessage `json:"tool_input,omitempty"`
+	Cwd            string          `json:"cwd,omitempty"`
+}
+
+// IsClaude reports whether this payload originated from Claude Code hooks.
+func (p *Payload) IsClaude() bool {
+	if p == nil {
+		return false
+	}
+	return p.SessionID != "" || p.HookEventName != "" || p.ToolName != "" || len(p.ToolInput) > 0
+}
+
+// Normalize normalizes Claude Code fields into canonical Antigravity Payload fields.
+func (p *Payload) Normalize() {
+	if p == nil {
+		return
+	}
+	if p.ConversationID == "" && p.SessionID != "" {
+		p.ConversationID = p.SessionID
+	}
+	if p.ToolCall.Name == "" && p.ToolName != "" {
+		p.ToolCall.Name = p.ToolName
+	}
+	if len(p.ToolCall.Args) == 0 && len(p.ToolInput) > 0 {
+		p.ToolCall.Args = p.ToolInput
+	}
 }
 
 // ToolCall represents the intercepted tool invocation.
@@ -53,6 +101,11 @@ type ToolArgs struct {
 	AbsolutePath      string          `json:"AbsolutePath"`
 	Path              string          `json:"path"`
 	File              string          `json:"file"`
+	FilePathSnake     string          `json:"file_path,omitempty"`
+	Command           string          `json:"command,omitempty"`
+	Pattern           string          `json:"pattern,omitempty"`
+	Offset            int             `json:"offset,omitempty"`
+	Limit             int             `json:"limit,omitempty"`
 	StartLine         int             `json:"StartLine"`
 	EndLine           int             `json:"EndLine"`
 	CommandLine       string          `json:"CommandLine"`
@@ -69,17 +122,26 @@ type ToolArgs struct {
 }
 
 // NormalizedAction returns the lowercased, unquoted Action parameter.
-func (a ToolArgs) NormalizedAction() string {
+func (a *ToolArgs) NormalizedAction() string {
+	if a == nil {
+		return ""
+	}
 	return strings.ToLower(strings.Trim(strings.TrimSpace(a.Action), `"`))
 }
 
 // IsDaemonBool reports whether IsDaemon is set to true (handling bool or string JSON encodings).
-func (a ToolArgs) IsDaemonBool() bool {
+func (a *ToolArgs) IsDaemonBool() bool {
+	if a == nil {
+		return false
+	}
 	return strings.EqualFold(strings.Trim(strings.TrimSpace(string(a.IsDaemon)), `"`), "true")
 }
 
 // WaitMs returns the parsed integer value of WaitMsBeforeAsync, or 0 if unset/unparseable.
-func (a ToolArgs) WaitMs() int {
+func (a *ToolArgs) WaitMs() int {
+	if a == nil {
+		return 0
+	}
 	raw := strings.Trim(strings.TrimSpace(string(a.WaitMsBeforeAsync)), `"`)
 	if raw == "" {
 		return 0
@@ -91,15 +153,21 @@ func (a ToolArgs) WaitMs() int {
 	return 0
 }
 
-func (a ToolArgs) hasAnyField() bool {
+func (a *ToolArgs) hasAnyField() bool {
+	if a == nil {
+		return false
+	}
 	return a.FilePath() != "" || a.CommandLine != "" || a.Cwd != "" ||
 		a.ToolName != "" || a.ServerName != "" || a.ToolNameLower != "" || a.ServerNameLower != "" ||
 		a.Action != "" || len(a.Arguments) > 0 || len(a.ArgumentsLower) > 0 ||
 		len(a.WaitMsBeforeAsync) > 0 || len(a.IsDaemon) > 0
 }
 
-// FilePath returns the resolved file path from TargetFile, AbsolutePath, Path, or File.
-func (a ToolArgs) FilePath() string {
+// FilePath returns the resolved file path from TargetFile, AbsolutePath, Path, FilePathSnake, or File.
+func (a *ToolArgs) FilePath() string {
+	if a == nil {
+		return ""
+	}
 	if a.TargetFile != "" {
 		return a.TargetFile
 	}
@@ -109,7 +177,26 @@ func (a ToolArgs) FilePath() string {
 	if a.Path != "" {
 		return a.Path
 	}
+	if a.FilePathSnake != "" {
+		return a.FilePathSnake
+	}
 	return a.File
+}
+
+// Normalize normalizes Claude fields (Command -> CommandLine, Offset/Limit -> StartLine/EndLine).
+func (a *ToolArgs) Normalize() {
+	if a == nil {
+		return
+	}
+	if a.CommandLine == "" && a.Command != "" {
+		a.CommandLine = a.Command
+	}
+	if a.StartLine <= 0 && a.EndLine <= 0 && (a.Offset > 0 || a.Limit > 0) {
+		a.StartLine = max(1, a.Offset)
+		if a.Limit > 0 {
+			a.EndLine = a.StartLine + a.Limit - 1
+		}
+	}
 }
 
 // ParseArgs extracts ToolArgs from raw JSON message (handling both object and JSON-string representations).
@@ -121,6 +208,7 @@ func ParseArgs(raw json.RawMessage) ToolArgs {
 
 	// 1. Try direct object unmarshal
 	if err := json.Unmarshal(raw, &args); err == nil && args.hasAnyField() {
+		args.Normalize()
 		return args
 	}
 
@@ -128,9 +216,11 @@ func ParseArgs(raw json.RawMessage) ToolArgs {
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil && s != "" {
 		if err := json.Unmarshal([]byte(s), &args); err == nil {
+			args.Normalize()
 			return args
 		}
 	}
 
+	args.Normalize()
 	return args
 }
