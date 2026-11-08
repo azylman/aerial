@@ -276,6 +276,36 @@ init_scratch() {
 
 SCRATCH_DIR_CLEANUP=""
 
+read_config_yaml_val() {
+    local key="$1"
+    local config_files=()
+    if [ -n "${CONFIG_PATH:-}" ]; then
+        config_files+=("${CONFIG_PATH}")
+    else
+        config_files+=("/local/config.yaml" "/share/aerial-config/config.yaml")
+    fi
+
+    for f in "${config_files[@]}"; do
+        if [ -f "$f" ] && [ -r "$f" ]; then
+            local val
+            val=$(awk -v k="$key" '
+                $0 ~ "^" k ":[ \t]*" {
+                    sub("^" k ":[ \t]*", "")
+                    sub(/[ \t]*#.*$/, "")
+                    gsub(/^["\x27]|["\x27]$/, "")
+                    print
+                    exit
+                }
+            ' "$f" 2>/dev/null || true)
+            if [ -n "$val" ]; then
+                echo "$val"
+                return 0
+            fi
+        fi
+    done
+    echo ""
+}
+
 resolve_target_id() {
     if [ -n "${1:-}" ]; then echo "$1"; return; fi
     if [ -n "${AERIAL_TARGET_ID:-}" ]; then echo "${AERIAL_TARGET_ID}"; return; fi
@@ -309,7 +339,10 @@ verify_vanadis_chunk_active() {
     if [ -z "$chunk_id" ]; then
         return 0
     fi
-    local vanadis_base="${VANADIS_URL:-http://vanadis.aerial}"
+    local vanadis_base="${VANADIS_URL:-$(read_config_yaml_val vanadis_url)}"
+    if [ -z "$vanadis_base" ]; then
+        return 0
+    fi
     local resp=""
     if resp=$(curl -sS --connect-timeout 2 --max-time 4 "${vanadis_base%/}/chunks/${chunk_id}" 2>/dev/null); then
         if [ -n "$resp" ] && echo "$resp" | jq -e '.chunk.status == "cancelled" or .build.status == "cancelled"' >/dev/null 2>&1; then
@@ -434,8 +467,13 @@ lookup_existing_open_pr() {
 
 format_aerial_pr_trailer() {
     local t_id="${1:-}" v_id="${2:-}"
+    local b_id="${3:-${AERIAL_BOT_ID:-$(read_config_yaml_val bot_id)}}"
     [ -z "$t_id" ] && [ -z "$v_id" ] && return 0
-    printf "<!-- aerial-pr: %s -->" "$(jq -c -n --arg target_id "$t_id" --arg vanadis_chunk_id "$v_id" '{target_id: $target_id, vanadis_chunk_id: $vanadis_chunk_id}')"
+    if [ -n "$b_id" ]; then
+        printf "<!-- aerial-pr: %s -->" "$(jq -c -n --arg target_id "$t_id" --arg vanadis_chunk_id "$v_id" --arg bot_id "$b_id" '{target_id: $target_id, vanadis_chunk_id: $vanadis_chunk_id, bot_id: $bot_id}')"
+    else
+        printf "<!-- aerial-pr: %s -->" "$(jq -c -n --arg target_id "$t_id" --arg vanadis_chunk_id "$v_id" '{target_id: $target_id, vanadis_chunk_id: $vanadis_chunk_id}')"
+    fi
 }
 
 rebase_staged_changes() {
@@ -471,6 +509,23 @@ rebase_staged_changes() {
     git reset --soft "origin/${target_branch}" >/dev/null 2>&1
     echo "🔄 [aerial-pr] Rebased staged changes onto latest origin/${target_branch} (${upstream_sha:0:7})." >&2
     return 0
+}
+
+resolve_pr_register_url() {
+    if [ -n "${AERIAL_PR_REGISTER_URL:-}" ]; then
+        if [[ "${AERIAL_PR_REGISTER_URL}" == */internal/pr/register ]]; then
+            echo "${AERIAL_PR_REGISTER_URL}"
+        else
+            echo "${AERIAL_PR_REGISTER_URL%/}/internal/pr/register"
+        fi
+        return 0
+    fi
+    local syn_url="${SYNAPSE_URL:-$(read_config_yaml_val synapse_url)}"
+    if [ -n "$syn_url" ]; then
+        echo "${syn_url%/}/internal/pr/register"
+        return 0
+    fi
+    return 1
 }
 
 submit_scratch() {
@@ -856,27 +911,8 @@ submit_scratch() {
     enable_github_auto_merge "$pr_node_id" "$pr_num"
 
     # Register PR in PostgreSQL pr_registry via internal endpoint
-    local brain_reg_url=""
-    if [ -n "${AERIAL_PR_REGISTER_URL:-}" ]; then
-        if [[ "${AERIAL_PR_REGISTER_URL}" == */internal/pr/register ]]; then
-            brain_reg_url="${AERIAL_PR_REGISTER_URL}"
-        else
-            brain_reg_url="${AERIAL_PR_REGISTER_URL%/}/internal/pr/register"
-        fi
-    else
-        # Probe candidate endpoints for synapse or Eri/Brain's /internal/pr/register handler
-        for cand in "http://synapse.aerial" "http://127.0.0.1:4020" "http://127.0.0.1:8088" "http://eri.aerial" "http://host.docker.internal:8088" "http://127.0.0.1:8080"; do
-            local probe_code
-            probe_code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 1 -m 2 -X POST "${cand}/internal/pr/register" 2>/dev/null || true)
-            if [ "$probe_code" = "400" ] || [ "$probe_code" = "200" ]; then
-                brain_reg_url="${cand}/internal/pr/register"
-                break
-            fi
-        done
-        if [ -z "$brain_reg_url" ]; then
-            brain_reg_url="http://synapse.aerial/internal/pr/register"
-        fi
-    fi
+    local brain_reg_url
+    brain_reg_url=$(resolve_pr_register_url 2>/dev/null || true)
 
     local reg_payload
     reg_payload=$(jq -n \
@@ -889,10 +925,23 @@ submit_scratch() {
         --arg vanadis_chunk_id "$vanadis_chunk_id" \
         '{repo: $repo, pr_number: $pr_num, branch: $branch, head_sha: $head_sha, target_id: $target_id, title: $title, metadata: "{}", vanadis_chunk_id: $vanadis_chunk_id}')
 
-    if ! register_pr_in_brain "$brain_reg_url" "$reg_payload" "$pr_num" "$target_id"; then
+    if [ -n "$brain_reg_url" ]; then
+        if ! register_pr_in_brain "$brain_reg_url" "$reg_payload" "$pr_num" "$target_id"; then
+            if [ -n "$pr_trailer" ]; then
+                echo "⚠️ [aerial-pr] Warning: Brain registration unreachable; relying on synapse PR trailer self-healing for PR #${pr_num}." >&2
+            else
+                if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
+                    echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
+                    SCRATCH_DIR_CLEANUP=""
+                fi
+                exit 1
+            fi
+        fi
+    else
         if [ -n "$pr_trailer" ]; then
-            echo "⚠️ [aerial-pr] Warning: Brain registration unreachable; relying on synapse PR trailer self-healing for PR #${pr_num}." >&2
+            echo "⚠️ [aerial-pr] Warning: Brain registration URL unset; relying on synapse PR trailer self-healing for PR #${pr_num}." >&2
         else
+            echo "ERROR: No PR registration endpoint available (AERIAL_PR_REGISTER_URL, SYNAPSE_URL, or synapse_url in config.yaml must be set)." >&2
             if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
                 echo "💾 [aerial-pr] Scratch workspace preserved at: ${SCRATCH_DIR_CLEANUP}" >&2
                 SCRATCH_DIR_CLEANUP=""

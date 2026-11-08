@@ -1209,15 +1209,9 @@ func TestHandleInternalLLM_And_MemoryRetriever(t *testing.T) {
 		t.Errorf("expected error on bad json")
 	}
 
-	t.Setenv("MEMORY_MCP_URL", memSrv.URL)
-	retEnv := newHTTPMemoryRetriever("")
-	t.Setenv("MEMORY_MCP_URL", "")
-	if out, err := retEnv(context.Background(), "hello"); err != nil || !strings.Contains(out, "<retrieved_memory>") {
-		t.Errorf("expected retrieved memory with env var fallback, got %q, %v", out, err)
-	}
-	retDef := newHTTPMemoryRetriever("")
-	if retDef == nil {
-		t.Errorf("expected non-nil retriever with default URL")
+	retEmpty := newHTTPMemoryRetriever("")
+	if out, err := retEmpty(context.Background(), "hello"); err != nil || out != "" {
+		t.Errorf("expected empty string and nil error on empty base URL, got %q, %v", out, err)
 	}
 }
 
@@ -1692,6 +1686,9 @@ channels:
 }
 
 func TestHandleInternalDiscordInteraction(t *testing.T) {
+	origRouter := activeInteractionRouter.Swap(nil)
+	defer activeInteractionRouter.Store(origRouter)
+
 	tests := []struct {
 		name           string
 		method         string

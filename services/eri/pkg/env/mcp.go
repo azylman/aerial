@@ -17,13 +17,10 @@ import (
 )
 
 func loadOpenObserveMCPServer(cur *config.ConfigData, mergedServers map[string]any) {
-	if cur.OpenObserveUser == "" || cur.OpenObservePassword == "" {
+	if cur == nil || cur.OpenObserveUser == "" || cur.OpenObservePassword == "" || cur.OpenObserveURL == "" {
 		return
 	}
 	ooURL := cur.OpenObserveURL
-	if ooURL == "" {
-		ooURL = "http://openobserve:5080/openobserve"
-	}
 	ooOrg := cur.OpenObserveOrg
 	if ooOrg == "" {
 		ooOrg = "default"
@@ -36,6 +33,58 @@ func loadOpenObserveMCPServer(cur *config.ConfigData, mergedServers map[string]a
 			"Authorization": "Basic " + authVal,
 		},
 	}
+}
+
+func hasAuthorizationHeader(headers any) bool {
+	switch h := headers.(type) {
+	case map[string]string:
+		for k := range h {
+			if strings.EqualFold(k, "Authorization") {
+				return true
+			}
+		}
+	case map[string]any:
+		for k := range h {
+			if strings.EqualFold(k, "Authorization") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func injectGitHubAuthHeader(cur *config.ConfigData, mergedServers map[string]any) {
+	if cur == nil || cur.GitHubPAT == "" {
+		return
+	}
+	val, ok := mergedServers["github"]
+	if !ok {
+		return
+	}
+	srvMap, ok := val.(map[string]any)
+	if !ok {
+		return
+	}
+	headers, ok := srvMap["headers"]
+	if !ok || headers == nil {
+		srvMap["headers"] = map[string]string{
+			"Authorization": "Bearer " + cur.GitHubPAT,
+		}
+		mergedServers["github"] = srvMap
+		return
+	}
+	if hasAuthorizationHeader(headers) {
+		return
+	}
+	switch h := headers.(type) {
+	case map[string]string:
+		h["Authorization"] = "Bearer " + cur.GitHubPAT
+		srvMap["headers"] = h
+	case map[string]any:
+		h["Authorization"] = "Bearer " + cur.GitHubPAT
+		srvMap["headers"] = h
+	}
+	mergedServers["github"] = srvMap
 }
 
 // SanitizeMCPServersForDisk scrubs credentials from MCP servers for writing to disk,
@@ -78,28 +127,8 @@ func ResolveUpstreamMCPServer(cfg *config.Config, serverName string) (serverURL 
 		return "", nil, false
 	}
 	cur := cfg.Current()
-	if cur == nil {
-		return "", nil, false
-	}
 
 	mergedServers := make(map[string]any)
-	mergedServers["scheduler"] = map[string]any{
-		"serverUrl": "http://haro.aerial/mcp",
-	}
-	mergedServers["memory"] = map[string]any{
-		"serverUrl": "http://coven.aerial/mcp",
-	}
-	mergedServers["discord"] = map[string]any{
-		"serverUrl": "http://discord-mcp:4001/mcp",
-	}
-	mergedServers["vanadis"] = map[string]any{
-		"serverUrl": "http://vanadis.aerial/mcp",
-	}
-	if cur.GitHubPAT != "" {
-		mergedServers["github"] = map[string]any{
-			"serverUrl": "http://github-mcp:4003/mcp",
-		}
-	}
 	loadOpenObserveMCPServer(cur, mergedServers)
 
 	loadFileBasedMCPServers(cur.DataDir, cur.MCPConfig, mergedServers)
@@ -120,6 +149,8 @@ func ResolveUpstreamMCPServer(cfg *config.Config, serverName string) (serverURL 
 			}
 		}
 	}
+
+	injectGitHubAuthHeader(cur, mergedServers)
 
 	val, found := mergedServers[serverName]
 	if !found {
@@ -191,20 +222,8 @@ func loadFileBasedMCPServers(dataDir, fallbackConfig string, mergedServers map[s
 }
 
 func (p *Provisioner) loadDiscordBaseMCPServers(cfg *config.Config, mergedServers map[string]any) {
-	mergedServers["discord"] = map[string]any{
-		"serverUrl": "http://discord-mcp:4001/mcp",
-	}
-	mergedServers["vanadis"] = map[string]any{
-		"serverUrl": "http://vanadis.aerial/mcp",
-	}
-
 	if cfg != nil {
 		cur := cfg.Current()
-		if cur.GitHubPAT != "" {
-			mergedServers["github"] = map[string]any{
-				"serverUrl": "http://github-mcp:4003/mcp",
-			}
-		}
 		loadOpenObserveMCPServer(cur, mergedServers)
 	}
 
@@ -268,23 +287,16 @@ func overlayConfigMCPServers(cfg *config.Config, target RuleTarget, mergedServer
 func (p *Provisioner) LoadTargetMCPConfig(cfg *config.Config, target RuleTarget) json.RawMessage {
 	mergedServers := make(map[string]any)
 
-	// 1. Start with built-in default MCP microservices
-	// Scheduler and memory are common across all runtimes except ephemeral
-	if target != TargetEphemeral {
-		mergedServers["scheduler"] = map[string]any{
-			"serverUrl": "http://haro.aerial/mcp",
-		}
-		mergedServers["memory"] = map[string]any{
-			"serverUrl": "http://coven.aerial/mcp",
-		}
-	}
-
 	if target == TargetDiscord {
 		p.loadDiscordBaseMCPServers(cfg, mergedServers)
 	}
 
-	// 3. Overlay custom MCP servers from config.yaml
+	// Overlay custom MCP servers from config.yaml
 	overlayConfigMCPServers(cfg, target, mergedServers)
+
+	if cfg != nil {
+		injectGitHubAuthHeader(cfg.Current(), mergedServers)
+	}
 
 	var loopbackPort string
 	if cfg != nil {

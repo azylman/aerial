@@ -627,6 +627,9 @@ func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
 			d.LowEffortModel = "gemini-test-low"
 			d.MediumEffortModel = "gemini-test-medium"
 			d.Ollama.BaseURL = "http://127.0.0.1:65534"
+			d.BotID = "aerial-main"
+			d.SynapseURL = "http://synapse.local:4020"
+			d.VanadisURL = "http://vanadis.local:4025"
 			d.Voice = config.VoiceConfig{
 				Engine:           "gemini_api",
 				Model:            "gemini-2.5-flash",
@@ -682,6 +685,15 @@ func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
 		for _, target := range []string{"ephemeral:worker-0", "ephemeral:worker-1"} {
 			if !hasEnv(seen[target].Env, "HOME="+expectedEphemeralHome) {
 				t.Errorf("%s expected HOME=%q, got %v", target, expectedEphemeralHome, seen[target].Env)
+			}
+			if !hasEnv(seen[target].Env, "AERIAL_BOT_ID=aerial-main") {
+				t.Errorf("%s expected AERIAL_BOT_ID=aerial-main, got %v", target, seen[target].Env)
+			}
+			if !hasEnv(seen[target].Env, "SYNAPSE_URL=http://synapse.local:4020") {
+				t.Errorf("%s expected SYNAPSE_URL=http://synapse.local:4020, got %v", target, seen[target].Env)
+			}
+			if !hasEnv(seen[target].Env, "VANADIS_URL=http://vanadis.local:4025") {
+				t.Errorf("%s expected VANADIS_URL=http://vanadis.local:4025, got %v", target, seen[target].Env)
 			}
 			if seen[target].MemoryRetriever != nil {
 				t.Errorf("%s expected nil MemoryRetriever, got non-nil", target)
@@ -904,6 +916,11 @@ func TestVoicePool_FactoryWiring(t *testing.T) {
 			},
 		}
 		if tmpl != "" {
+			cd.McpServers = config.TargetMcpConfig{
+				Voice: map[string]json.RawMessage{
+					"ha": json.RawMessage(`{"serverUrl":"http://127.0.0.1:1/mcp"}`),
+				},
+			}
 			cd.Voice.AmbientContext = &config.AmbientContextConfig{
 				CacheTTL: "30s",
 				Template: tmpl,
@@ -1092,22 +1109,24 @@ func TestExtractMCPServers(t *testing.T) {
 
 	// 1. Nil config
 	nilVoice := extractMCPServers(nil, false)
-	if len(nilVoice) != 1 || nilVoice[0].Name != "scheduler" || nilVoice[0].ServerURL != "http://haro.aerial/mcp" {
-		t.Fatalf("expected scheduler default for nil voice config, got: %+v", nilVoice)
+	if len(nilVoice) != 0 {
+		t.Fatalf("expected 0 servers for nil voice config, got: %+v", nilVoice)
 	}
 	nilAll := extractMCPServers(nil, true)
-	if len(nilAll) != 1 || nilAll[0].Name != "scheduler" || nilAll[0].ServerURL != "http://haro.aerial/mcp" {
-		t.Fatalf("expected scheduler default for nil all config, got: %+v", nilAll)
+	if len(nilAll) != 0 {
+		t.Fatalf("expected 0 servers for nil all config, got: %+v", nilAll)
 	}
 
 	// 2. Populated config with Common, Voice, Discord
 	rawValid := json.RawMessage(`{"serverUrl":"http://alpha:8080/mcp","headers":{"Auth":"Bearer tok"}}`)
 	rawDiscord := json.RawMessage(`{"serverUrl":"http://discord:8080/mcp"}`)
 	rawVoice := json.RawMessage(`{"serverUrl":"http://voice:8080/mcp"}`)
+	rawSched := json.RawMessage(`{"serverUrl":"http://haro.aerial/mcp"}`)
 	data := &config.ConfigData{
 		McpServers: config.TargetMcpConfig{
 			Common: map[string]json.RawMessage{
-				"alpha": rawValid,
+				"scheduler": rawSched,
+				"alpha":     rawValid,
 			},
 			Discord: map[string]json.RawMessage{
 				"beta": rawDiscord,

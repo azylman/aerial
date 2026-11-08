@@ -34,11 +34,18 @@ func (p *WorkerPool) hasWarmChunkWidget(chunkID string) bool {
 }
 
 func (p *WorkerPool) resolveSynapseURL() string {
+	if p == nil {
+		return ""
+	}
 	if u := strings.TrimSpace(p.cfg.SynapseURL); u != "" {
 		return strings.TrimRight(u, "/")
 	}
-	if p.DiscordSession() != nil {
-		return "http://synapse.aerial"
+	if p.appCfg != nil {
+		if cur := p.appCfg.Current(); cur != nil {
+			if u := strings.TrimSpace(cur.SynapseURL); u != "" {
+				return strings.TrimRight(u, "/")
+			}
+		}
 	}
 	return ""
 }
@@ -50,8 +57,12 @@ func (p *WorkerPool) resolveVanadisURL() string {
 	if u := strings.TrimSpace(p.cfg.VanadisURL); u != "" {
 		return strings.TrimRight(u, "/")
 	}
-	if p.DiscordSession() != nil {
-		return "http://vanadis.aerial"
+	if p.appCfg != nil {
+		if cur := p.appCfg.Current(); cur != nil {
+			if u := strings.TrimSpace(cur.VanadisURL); u != "" {
+				return strings.TrimRight(u, "/")
+			}
+		}
 	}
 	return ""
 }

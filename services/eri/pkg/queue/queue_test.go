@@ -4188,21 +4188,6 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 			if tc.syncBadURL {
 				pBad := &WorkerPool{cfg: WorkerPoolConfig{SynapseURL: "://bad-url", VanadisURL: "http://vanadis.aerial/api/"}}
 				pBad.ensureChunkWidgetHydrated("Build ID: b1", "c1", "b1")
-				pDef := &WorkerPool{}
-				pDef.SetDiscordSession(&discordgo.Session{})
-				if got := pDef.resolveSynapseURL(); got != "http://synapse.aerial" {
-					t.Fatalf("resolveSynapseURL() = %q, want http://synapse.aerial", got)
-				}
-				if got := pDef.resolveVanadisURL(); got != "http://vanadis.aerial" {
-					t.Fatalf("resolveVanadisURL() with discord session = %q, want http://vanadis.aerial", got)
-				}
-				if got := pBad.resolveVanadisURL(); got != "http://vanadis.aerial/api" {
-					t.Fatalf("resolveVanadisURL() with custom url = %q, want http://vanadis.aerial/api", got)
-				}
-				pNil := &WorkerPool{}
-				if got := pNil.resolveVanadisURL(); got != "" {
-					t.Fatalf("resolveVanadisURL() on empty pool = %q, want empty", got)
-				}
 			}
 
 			if tc.seedWidget || tc.seedOutdatedWidget {
@@ -4636,27 +4621,45 @@ func TestWorkerPool_ResolveVanadisURL(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		pool       *WorkerPool
-		withSess   bool
-		vanadisURL string
-		want       string
+		name string
+		pool *WorkerPool
+		want string
 	}{
 		{name: "nil pool", pool: nil, want: ""},
 		{name: "configured URL trimmed", pool: &WorkerPool{cfg: WorkerPoolConfig{VanadisURL: "http://vanadis.local:4025///"}}, want: "http://vanadis.local:4025"},
-		{name: "fallback with discord session", pool: &WorkerPool{}, withSess: true, want: "http://vanadis.aerial"},
-		{name: "empty without discord session", pool: &WorkerPool{}, want: ""},
+		{name: "appCfg fallback", pool: &WorkerPool{appCfg: config.NewFromData(&config.ConfigData{VanadisURL: "http://vanadis.cfg:4025///"})}, want: "http://vanadis.cfg:4025"},
+		{name: "empty when unconfigured", pool: &WorkerPool{}, want: ""},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			p := tc.pool
-			if tc.withSess && p != nil {
-				p.SetDiscordSession(&discordgo.Session{})
-			}
-			if got := p.resolveVanadisURL(); got != tc.want {
+			if got := tc.pool.resolveVanadisURL(); got != tc.want {
 				t.Fatalf("resolveVanadisURL() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWorkerPool_ResolveSynapseURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		pool *WorkerPool
+		want string
+	}{
+		{name: "nil pool", pool: nil, want: ""},
+		{name: "configured URL trimmed", pool: &WorkerPool{cfg: WorkerPoolConfig{SynapseURL: "http://synapse.local:4020///"}}, want: "http://synapse.local:4020"},
+		{name: "appCfg fallback", pool: &WorkerPool{appCfg: config.NewFromData(&config.ConfigData{SynapseURL: "http://synapse.cfg:4020///"})}, want: "http://synapse.cfg:4020"},
+		{name: "empty when unconfigured", pool: &WorkerPool{}, want: ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.pool.resolveSynapseURL(); got != tc.want {
+				t.Fatalf("resolveSynapseURL() = %q, want %q", got, tc.want)
 			}
 		})
 	}

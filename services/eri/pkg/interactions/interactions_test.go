@@ -381,8 +381,8 @@ func TestRouter_HandleStatus(t *testing.T) {
 		{"StandardWithFactsAndCron", "", "`aerial@bfed897` (Live, healthy)", true, true, true, false, false, false, 0, []string{"**Runtime**:", "`aerial@bfed897`", "1 facts recorded", "Morning briefing"}, ""},
 		{"FallbackEnvAndIdle", "abcdef123456", "", false, false, false, false, false, false, 0, []string{"`aerial@abcdef1`", "`Idle`"}, ""},
 		{"AdvancedBranchesAndSchedules", "", "", true, false, true, true, true, false, 0, []string{"Follow up on PR deployment"}, ""},
-		{"HaroEnvFallback", "", "", false, true, true, false, false, false, 0, []string{"Morning briefing"}, "haro_env"},
-		{"CovenEnvFallback", "", "", false, false, true, false, false, false, 0, []string{"Hourly health check", "1 facts recorded"}, "coven_env"},
+		{"HaroConfigFallback", "", "", false, true, true, false, false, false, 0, []string{"Morning briefing"}, "haro_config"},
+		{"CovenConfigFallback", "", "", false, false, true, false, false, false, 0, []string{"Hourly health check", "1 facts recorded"}, "coven_config"},
 		{"StoreFailuresHandledGracefully", "", "", false, false, false, false, false, true, 0, []string{"0 facts recorded"}, ""},
 		{"ErrorLoggingHttp500", "", "", false, false, false, false, false, false, http.StatusInternalServerError, nil, ""},
 	}
@@ -393,7 +393,7 @@ func TestRouter_HandleStatus(t *testing.T) {
 				t.Setenv("GIT_COMMIT", tc.gitCommitEnv)
 			}
 
-			router, _, transport, session := setupTestRouter("admin-123", tc.httpStatus)
+			router, cfg, transport, session := setupTestRouter("admin-123", tc.httpStatus)
 			if tc.seedFacts {
 				router.deps.MemoryURL = memSrv.URL
 			} else if tc.failStore {
@@ -440,11 +440,12 @@ func TestRouter_HandleStatus(t *testing.T) {
 				}))
 				defer haroSrv.Close()
 				switch tc.envMode {
-				case "haro_env":
-					t.Setenv("HARO_URL", haroSrv.URL)
-				case "coven_env":
-					t.Setenv("COVEN_URL", memSrv.URL)
+				case "haro_config":
+					router.deps.HaroURL = ""
+					cfg.Current().HaroURL = haroSrv.URL
+				case "coven_config":
 					router.deps.MemoryURL = ""
+					cfg.Current().CovenURL = memSrv.URL
 					router.deps.HaroURL = haroSrv.URL
 				default:
 					router.deps.HaroURL = haroSrv.URL
