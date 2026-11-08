@@ -62,6 +62,8 @@ func isInternalAerialHTTPURL(rawURL string) bool {
 var AllowedAttachmentRoots = []string{
 	"/root/.gemini/antigravity-cli/brain",
 	"/root/.gemini/antigravity-cli/scratch",
+	"/data/brain",
+	"/data/runtimes",
 	"/tmp",
 	"/dev/shm",
 }
