@@ -212,6 +212,11 @@ func formatBuildCompletedWakePrompt(res *VanadisAdvancementResult) string {
 	return strings.Join(lines, "\n")
 }
 
+func isShutdownInterruptionReason(reason string) bool {
+	norm := strings.ToLower(strings.TrimSpace(reason))
+	return norm == "interrupted by shutdown" || norm == "context cancelled during execution"
+}
+
 func (s *VanadisServer) failChunkInternal(ctx context.Context, chunkID, reason string) (*VanadisBuild, *VanadisChunk, bool, error) {
 	if s.store == nil {
 		return nil, nil, false, errors.New("vanadis store not configured")
@@ -220,6 +225,11 @@ func (s *VanadisServer) failChunkInternal(ctx context.Context, chunkID, reason s
 	reason = strings.TrimSpace(reason)
 	if chunkID == "" || reason == "" {
 		return nil, nil, false, fmt.Errorf("%w: chunk_id and reason are required", ErrInvalidBuildInput)
+	}
+
+	if isShutdownInterruptionReason(reason) {
+		chunk, build, err := s.store.GetChunk(ctx, chunkID)
+		return build, chunk, false, err
 	}
 
 	build, chunk, transitioned, err := s.store.FailChunk(ctx, chunkID, reason)
