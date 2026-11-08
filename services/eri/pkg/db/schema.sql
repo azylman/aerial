@@ -32,6 +32,12 @@ CREATE TABLE IF NOT EXISTS messages (
     replying_to_content TEXT NOT NULL DEFAULT '',
     attachments TEXT[] NOT NULL DEFAULT '{}',
     model TEXT NOT NULL DEFAULT '',
+    duration_ms BIGINT NOT NULL DEFAULT 0,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    thinking_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -70,6 +76,12 @@ CREATE TABLE IF NOT EXISTS dispatches (
     restart_count INTEGER NOT NULL DEFAULT 0,
     error_message TEXT,
     response_text TEXT,
+    duration_ms BIGINT NOT NULL DEFAULT 0,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    thinking_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    total_tokens INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

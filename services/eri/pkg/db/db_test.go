@@ -186,9 +186,16 @@ func TestMessageLifecycle(t *testing.T) {
 		t.Errorf("restart mismatch: %+v", got)
 	}
 
-	mustOK(t, store.UpdateMessageCompleted(ctx, "msg-1", "Task complete"), "UpdateMessageCompleted")
+	mustOK(t, store.UpdateMessageCompleted(ctx, "msg-1", "Task complete", "conv-msg-1", TurnTelemetry{
+		DurationMs:      1200,
+		InputTokens:     100,
+		OutputTokens:    50,
+		ThinkingTokens:  10,
+		CacheReadTokens: 5,
+		TotalTokens:     165,
+	}), "UpdateMessageCompleted")
 	got, _ = store.GetMessage(ctx, "msg-1")
-	if got.Status != StatusCompleted || got.ResponseText != "Task complete" {
+	if got.Status != StatusCompleted || got.ResponseText != "Task complete" || got.ConversationID != "conv-msg-1" || got.DurationMs != 1200 || got.TotalTokens != 165 {
 		t.Errorf("completed mismatch: %+v", got)
 	}
 
@@ -219,7 +226,7 @@ func TestMessageLifecycle(t *testing.T) {
 	// Empty ID validation
 	assertErr(t, store.InsertMessage(ctx, Message{ID: ""}), "InsertMessage empty ID")
 	assertErr(t, store.UpdateMessageStatus(ctx, "", StatusCompleted, ""), "UpdateMessageStatus empty ID")
-	assertErr(t, store.UpdateMessageCompleted(ctx, "", "resp"), "UpdateMessageCompleted empty ID")
+	assertErr(t, store.UpdateMessageCompleted(ctx, "", "resp", ""), "UpdateMessageCompleted empty ID")
 	assertErr(t, store.IncrementMessageRetry(ctx, "", "err"), "IncrementMessageRetry empty ID")
 	assertErr(t, store.ResetMessageToPendingWithRestart(ctx, "", "reason"), "ResetMessageToPendingWithRestart empty ID")
 	if m, err := store.GetMessage(ctx, ""); err != nil || m != nil {
@@ -666,11 +673,15 @@ func TestDispatchStore_SQLite(t *testing.T) {
 		t.Errorf("unexpected restart state: %+v", got)
 	}
 
-	// 5. Update completed with conversation ID
-	mustOK(t, store.UpdateDispatchCompleted(ctx, "disp-1", "Result text", "conv-uuid-123"), "UpdateDispatchCompleted")
+	// 5. Update completed with conversation ID and telemetry
+	dispTel := TurnTelemetry{DurationMs: 2500, InputTokens: 200, OutputTokens: 80, ThinkingTokens: 20, CacheReadTokens: 10, TotalTokens: 310}
+	mustOK(t, store.UpdateDispatchCompleted(ctx, "disp-1", "Result text", "conv-uuid-123", dispTel), "UpdateDispatchCompleted")
 	got, _ = store.GetDispatch(ctx, "disp-1")
 	if got.Status != StatusCompleted || got.ResponseText != "Result text" || got.ConversationID != "conv-uuid-123" {
 		t.Errorf("unexpected completed state: %+v", got)
+	}
+	if got.DurationMs != 2500 || got.InputTokens != 200 || got.OutputTokens != 80 || got.ThinkingTokens != 20 || got.CacheReadTokens != 10 || got.TotalTokens != 310 {
+		t.Errorf("unexpected telemetry on dispatch: %+v", got)
 	}
 
 	// 6. Recent session dispatches
@@ -681,7 +692,7 @@ func TestDispatchStore_SQLite(t *testing.T) {
 		Prompt:    "Prompt for dispatch 2",
 	}
 	mustOK(t, store.InsertDispatch(ctx, d2), "InsertDispatch disp-2")
-	mustOK(t, store.UpdateDispatchCompleted(ctx, "disp-2", "Result 2"), "UpdateDispatchCompleted disp-2")
+	mustOK(t, store.UpdateDispatchCompleted(ctx, "disp-2", "Result 2", ""), "UpdateDispatchCompleted disp-2")
 
 	recent, err := store.GetRecentSessionDispatches(ctx, "heartbeat-hb-1", 10)
 	mustOK(t, err, "GetRecentSessionDispatches")
@@ -758,7 +769,7 @@ func TestDispatchStore_SQLite(t *testing.T) {
 	}
 
 	// 10. UpdateDispatchCompleted without conversationID
-	mustOK(t, store.UpdateDispatchCompleted(ctx, "disp-4-pending", "Done 4"), "UpdateDispatchCompleted without conv")
+	mustOK(t, store.UpdateDispatchCompleted(ctx, "disp-4-pending", "Done 4", ""), "UpdateDispatchCompleted without conv")
 	got, _ = store.GetDispatch(ctx, "disp-4-pending")
 	if got.Status != StatusCompleted || got.ResponseText != "Done 4" {
 		t.Errorf("unexpected completed state without conv: %+v", got)
@@ -797,7 +808,7 @@ func TestDispatchStore_SQLite(t *testing.T) {
 
 	// 12. UpdateMessageCompleted with and without conversationID
 	mustOK(t, store.InsertMessage(ctx, Message{ID: "msg-cov-1", Content: "Coverage"}), "InsertMessage")
-	mustOK(t, store.UpdateMessageCompleted(ctx, "msg-cov-1", "Done without conv"), "UpdateMessageCompleted without conv")
+	mustOK(t, store.UpdateMessageCompleted(ctx, "msg-cov-1", "Done without conv", ""), "UpdateMessageCompleted without conv")
 	covMsg, _ := store.GetMessage(ctx, "msg-cov-1")
 	if covMsg.ResponseText != "Done without conv" {
 		t.Errorf("unexpected response text")
@@ -838,23 +849,35 @@ func TestGetActiveTasks_DispatchesUnion_SQLite(t *testing.T) {
 
 	// Insert message
 	mustOK(t, store.InsertMessage(ctx, Message{
-		ID:        "msg-live-1",
-		ThreadID:  "123456",
-		Content:   "Discord user prompt",
-		Status:    StatusPending,
-		CreatedAt: now.Add(-2 * time.Minute),
-		UpdatedAt: now.Add(-2 * time.Minute),
+		ID:              "msg-live-1",
+		ThreadID:        "123456",
+		Content:         "Discord user prompt",
+		Status:          StatusPending,
+		DurationMs:      1500,
+		InputTokens:     120,
+		OutputTokens:    60,
+		ThinkingTokens:  15,
+		CacheReadTokens: 10,
+		TotalTokens:     205,
+		CreatedAt:       now.Add(-2 * time.Minute),
+		UpdatedAt:       now.Add(-2 * time.Minute),
 	}), "InsertMessage")
 
 	// Insert stateful dispatch
 	mustOK(t, store.InsertDispatch(ctx, Dispatch{
-		ID:        "disp-live-stateful",
-		Source:    "heartbeat",
-		SessionID: "heartbeat-hb-1",
-		Prompt:    "Heartbeat prompt",
-		Status:    StatusPending,
-		CreatedAt: now.Add(-1 * time.Minute),
-		UpdatedAt: now.Add(-1 * time.Minute),
+		ID:              "disp-live-stateful",
+		Source:          "heartbeat",
+		SessionID:       "heartbeat-hb-1",
+		Prompt:          "Heartbeat prompt",
+		Status:          StatusPending,
+		DurationMs:      3000,
+		InputTokens:     250,
+		OutputTokens:    100,
+		ThinkingTokens:  30,
+		CacheReadTokens: 20,
+		TotalTokens:     400,
+		CreatedAt:       now.Add(-1 * time.Minute),
+		UpdatedAt:       now.Add(-1 * time.Minute),
 	}), "InsertDispatch stateful")
 
 	// Insert ephemeral dispatch
@@ -876,6 +899,12 @@ func TestGetActiveTasks_DispatchesUnion_SQLite(t *testing.T) {
 	}
 	if unfiltered[0].ID != "msg-live-1" || unfiltered[1].ID != "disp-live-stateful" || unfiltered[2].ID != "disp-live-ephem" {
 		t.Errorf("unexpected task order: %+v", unfiltered)
+	}
+	if unfiltered[0].DurationMs != 1500 || unfiltered[0].TotalTokens != 205 {
+		t.Errorf("unexpected telemetry on task 0: %+v", unfiltered[0])
+	}
+	if unfiltered[1].DurationMs != 3000 || unfiltered[1].TotalTokens != 400 {
+		t.Errorf("unexpected telemetry on task 1: %+v", unfiltered[1])
 	}
 	if unfiltered[1].TriggerType != "heartbeat" || unfiltered[2].TriggerType != "webhook" {
 		t.Errorf("unexpected trigger types: %s, %s", unfiltered[1].TriggerType, unfiltered[2].TriggerType)
