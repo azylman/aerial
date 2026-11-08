@@ -993,6 +993,23 @@ spec:
     app.kubernetes.io/name: synapse
   type: ClusterIP
 ---
+apiVersion: v1
+data:
+  dashboard.yaml: |
+    port: "8084"
+    eri_url: "http://eri.aerial"
+    memory_url: "http://coven.aerial"
+    haro_url: "http://haro.aerial"
+    vanadis_url: "http://vanadis.aerial"
+    github_repos:
+      - "azylman/aerial"
+      - "azylman/aerial-sidecars"
+      - "azylman/aerial-config"
+kind: ConfigMap
+metadata:
+  name: dashboard-config
+  namespace: default
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -1021,7 +1038,9 @@ spec:
             - name: PORT
               value: "8084"
             - name: CONFIG_PATH
-              value: /share/aerial-config/services/dashboard/dashboard.yaml
+              value: /config/dashboard.yaml
+            - name: GIT_COMMIT
+              value: "${TAG_AERIAL_DASHBOARD:=latest}"
           envFrom:
             - secretRef:
                 name: shared-secrets
@@ -1033,90 +1052,17 @@ spec:
               name: http
               protocol: TCP
           volumeMounts:
-            - mountPath: /share
-              name: share
-              readOnly: true
-      initContainers:
-        - args:
-            - --repo=https://github.com/azylman/aerial.git
-            - --ref=main
-            - --root=/share/.sync/aerial
-            - --link=/share/aerial
-            - --period=30s
-          env:
-            - name: GIT_CONFIG_COUNT
-              value: "1"
-            - name: GIT_CONFIG_KEY_0
-              value: safe.directory
-            - name: GIT_CONFIG_VALUE_0
-              value: '*'
-            - name: GITSYNC_USERNAME
-              value: x-access-token
-            - name: GITSYNC_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  key: GITHUB_PAT
-                  name: shared-secrets
-          image: registry.k8s.io/git-sync/git-sync:v4.8.0
-          name: git-sync-aerial
-          restartPolicy: Always
-          startupProbe:
-            exec:
-              command:
-                - git
-                - -C
-                - /share/aerial
-                - rev-parse
-                - HEAD
-            failureThreshold: 60
-            periodSeconds: 1
-          volumeMounts:
-            - mountPath: /share
-              name: share
-        - args:
-            - --repo=https://github.com/azylman/aerial-config.git
-            - --ref=main
-            - --root=/share/.sync/aerial-config
-            - --link=/share/aerial-config
-            - --period=30s
-          env:
-            - name: GIT_CONFIG_COUNT
-              value: "1"
-            - name: GIT_CONFIG_KEY_0
-              value: safe.directory
-            - name: GIT_CONFIG_VALUE_0
-              value: '*'
-            - name: GITSYNC_USERNAME
-              value: x-access-token
-            - name: GITSYNC_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  key: GITHUB_PAT
-                  name: shared-secrets
-          image: registry.k8s.io/git-sync/git-sync:v4.8.0
-          name: git-sync-aerial-config
-          restartPolicy: Always
-          startupProbe:
-            exec:
-              command:
-                - git
-                - -C
-                - /share/aerial-config
-                - rev-parse
-                - HEAD
-            failureThreshold: 60
-            periodSeconds: 1
-          volumeMounts:
-            - mountPath: /share
-              name: share
+            - mountPath: /config/dashboard.yaml
+              name: config
+              subPath: dashboard.yaml
       nodeSelector:
         compute-tier: performance
-      securityContext:
-        fsGroup: 65533
       serviceAccountName: dashboard-sa
       volumes:
-        - emptyDir: {}
-          name: share
+        - configMap:
+            defaultMode: 420
+            name: dashboard-config
+          name: config
 ---
 apiVersion: v1
 kind: Service
