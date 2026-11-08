@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"log"
 	"maps"
-	"net"
 	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/azylman/aerial/pkg/httpkit"
 	"gopkg.in/yaml.v3"
 )
 
@@ -776,33 +776,7 @@ func WithSharedSecretsLookup(primary func(string) string, secretsPath string) fu
 }
 
 func buildPostgresDSN(lookup func(string) string) string {
-	if lookup == nil {
-		lookup = func(string) string { return "" }
-	}
-	if envDSN := strings.TrimSpace(lookup("DATABASE_URL")); envDSN != "" {
-		return envDSN
-	}
-	dbHost := strings.TrimSpace(lookup("POSTGRES_HOST"))
-	if dbHost == "" {
-		return ""
-	}
-	dbPort := strings.TrimSpace(lookup("POSTGRES_PORT"))
-	if dbPort == "" {
-		dbPort = "5432"
-	}
-	dbUser := strings.TrimSpace(lookup("POSTGRES_USER"))
-	if dbUser == "" {
-		dbUser = "aerial"
-	}
-	dbPass := lookup("POSTGRES_PASSWORD")
-	if dbPass == "" {
-		dbPass = "aerial_secure_pass"
-	}
-	dbName := strings.TrimSpace(lookup("POSTGRES_DB"))
-	if dbName == "" {
-		dbName = "aerial"
-	}
-	return fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=disable", dbUser, dbPass, net.JoinHostPort(dbHost, dbPort), dbName)
+	return httpkit.BuildPostgresDSN(lookup, "aerial")
 }
 
 func overrideEnvStr(dst *string, lookup func(string) string, keys ...string) {

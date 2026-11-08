@@ -86,6 +86,17 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 			wantPGURL: "postgres://custom:pass@db:5432/customdb",
 		},
 		{
+			name: "decomposed postgres envs",
+			env: map[string]string{
+				"POSTGRES_HOST":     "custom-pg.aerial",
+				"POSTGRES_PORT":     "5432",
+				"POSTGRES_USER":     "aerial",
+				"POSTGRES_PASSWORD": "custom_pass",
+				"POSTGRES_DB":       "aerial",
+			},
+			wantPGURL: "postgres://aerial:custom_pass@custom-pg.aerial:5432/aerial?sslmode=disable",
+		},
+		{
 			name:        "system channel id primary env",
 			env:         map[string]string{"SYSTEM_CHANNEL_ID": "123456789012345678"},
 			wantSysChan: "123456789012345678",
@@ -118,7 +129,9 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 		"INFISICAL_ENVIRONMENT", "KUBE_API_SERVER",
 		"KUBE_TOKEN", "KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT",
 		"GITHUB_PAT", "GITHUB_API_URL",
-		"DATABASE_URL", "HANGAR_URL", "FLUX_RECEIVER_URL", "ERI_URL",
+		"DATABASE_URL", "POSTGRES_URL", "POSTGRES_HOST", "POSTGRES_PORT",
+		"POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB",
+		"HANGAR_URL", "FLUX_RECEIVER_URL", "ERI_URL",
 		"SYSTEM_CHANNEL_ID", "CONFIG_PATH", "DISCORD_TOKEN",
 	}
 

@@ -620,3 +620,110 @@ func TestHandleCoverageFlush_TableDriven(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildPostgresDSN(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		lookupMap map[string]string
+		isNil     bool
+		defaultDB string
+		expected  string
+	}{
+		{
+			name:      "nil lookup returns empty",
+			isNil:     true,
+			defaultDB: "aerial",
+			expected:  "",
+		},
+		{
+			name:      "empty env returns empty",
+			lookupMap: map[string]string{},
+			defaultDB: "aerial",
+			expected:  "",
+		},
+		{
+			name: "postgres url precedence over database url",
+			lookupMap: map[string]string{
+				"POSTGRES_URL": "postgres://pguser:pgpass@pghost:5432/primary_db",
+				"DATABASE_URL": "postgres://dbuser:dbpass@dbhost:5432/ignored_db",
+			},
+			defaultDB: "aerial",
+			expected:  "postgres://pguser:pgpass@pghost:5432/primary_db",
+		},
+		{
+			name: "database url with explicit postgres db path override",
+			lookupMap: map[string]string{
+				"DATABASE_URL": "postgres://app:secret@db:5432/olddb",
+				"POSTGRES_DB":  "overridedb",
+			},
+			defaultDB: "aerial",
+			expected:  "postgres://app:secret@db:5432/overridedb",
+		},
+		{
+			name: "postgres password only auto defaults host to postgres",
+			lookupMap: map[string]string{
+				"POSTGRES_PASSWORD": "secretpassword",
+			},
+			defaultDB: "aerial",
+			expected:  "postgres://aerial:secretpassword@postgres:5432/aerial?sslmode=disable",
+		},
+		{
+			name: "custom host port user and db",
+			lookupMap: map[string]string{
+				"POSTGRES_HOST":     "custom-pg",
+				"POSTGRES_PORT":     "5433",
+				"POSTGRES_USER":     "myuser",
+				"POSTGRES_PASSWORD": "mypassword",
+				"POSTGRES_DB":       "mydb",
+			},
+			defaultDB: "aerial",
+			expected:  "postgres://myuser:mypassword@custom-pg:5433/mydb?sslmode=disable",
+		},
+		{
+			name: "default db fallback when postgres db unset",
+			lookupMap: map[string]string{
+				"POSTGRES_HOST":     "postgres",
+				"POSTGRES_PASSWORD": "pass",
+			},
+			defaultDB: "custom_default",
+			expected:  "postgres://aerial:pass@postgres:5432/custom_default?sslmode=disable",
+		},
+		{
+			name: "default db fallback to aerial when both unset",
+			lookupMap: map[string]string{
+				"POSTGRES_HOST": "postgres",
+			},
+			defaultDB: "",
+			expected:  "postgres://aerial:aerial_secure_pass@postgres:5432/aerial?sslmode=disable",
+		},
+		{
+			name: "special character url encoding in passwords",
+			lookupMap: map[string]string{
+				"POSTGRES_HOST":     "postgres",
+				"POSTGRES_PASSWORD": "p@ss:w/ord",
+			},
+			defaultDB: "aerial",
+			expected:  "postgres://aerial:p%40ss%3Aw%2Ford@postgres:5432/aerial?sslmode=disable",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var lookup func(string) string
+			if !tc.isNil {
+				lookup = func(k string) string {
+					return tc.lookupMap[k]
+				}
+			}
+
+			got := BuildPostgresDSN(lookup, tc.defaultDB)
+			if got != tc.expected {
+				t.Errorf("BuildPostgresDSN() = %q, want %q", got, tc.expected)
+			}
+		})
+	}
+}
