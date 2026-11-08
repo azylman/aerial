@@ -921,16 +921,29 @@ func matchesDeployingPRKustomization(repo string, startedJobs []string, kustomiz
 	return false
 }
 
+func isPRInDeployingList(deployingPRs []DeployingPR, repo string, prNumber int) bool {
+	if prNumber <= 0 {
+		return false
+	}
+	normRepo := normalizeRepo(repo)
+	for _, p := range deployingPRs {
+		if strings.EqualFold(normalizeRepo(p.Repo), normRepo) && p.PRNumber == prNumber {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *RouterServer) enrichDeployEventPRAndTarget(ctx context.Context, evt *DeployEvent) {
 	s.resolveDeployEventPRNumber(ctx, evt)
-	if evt.PRNumber == 0 && s.registry != nil && (evt.JobName == "aerial-config" || evt.JobName == "aerial-core") {
-		if deployingPRs, err := s.registry.ListDeployingPRs(ctx); err == nil && len(deployingPRs) > 0 {
+	if s.registry != nil && (evt.JobName == "aerial-config" || evt.JobName == "aerial-core") {
+		if deployingPRs, err := s.registry.ListDeployingPRs(ctx); err == nil && len(deployingPRs) > 0 && !isPRInDeployingList(deployingPRs, evt.Repo, evt.PRNumber) {
 			for _, p := range slices.Backward(deployingPRs) {
 				if matchesDeployingPRKustomization(p.Repo, extractStringSliceFromMetadata(p.Metadata, "started_jobs"), evt.JobName) {
 					evt.Repo = p.Repo
 					evt.PRNumber = p.PRNumber
 					evt.CommitSHA = firstNonEmpty(p.MergeSHA, p.HeadSHA, evt.CommitSHA)
-					evt.TargetID = firstNonEmpty(evt.TargetID, p.TargetID)
+					evt.TargetID = firstNonEmpty(p.TargetID, evt.TargetID)
 					break
 				}
 			}

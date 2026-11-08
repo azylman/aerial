@@ -26,7 +26,12 @@ test('prepare-config: resolveDefaultCoreDir prefers /local/core-homepage/config 
   assert.equal(dir, '/local/core-homepage/config');
 });
 
-test('prepare-config: resolveDefaultCoreDir falls back to /app/core-homepage/config when /local/core-homepage/config absent', () => {
+test('prepare-config: resolveDefaultCoreDir falls back to /share/aerial/services/homepage/config when present', () => {
+  const dir = resolveDefaultCoreDir((p) => p === '/share/aerial/services/homepage/config');
+  assert.equal(dir, '/share/aerial/services/homepage/config');
+});
+
+test('prepare-config: resolveDefaultCoreDir falls back to /app/core-homepage/config when /local and /share absent', () => {
   const dir = resolveDefaultCoreDir(() => false);
   assert.equal(dir, '/app/core-homepage/config');
 });

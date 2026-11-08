@@ -1287,6 +1287,29 @@ func TestProcessDeployEvent(t *testing.T) {
 			wantPrompts:  1,
 		},
 		{
+			name: "enrichDeployEventPRAndTarget overrides stale already-deployed aerial-config PR with active deploying PR",
+			evt:  mkDeployEvt("deploy_success", "aerial-config", "azylman/aerial-config", "sha-stale-config", 0, "", "success", ""),
+			reg: &mockPRRegistry{
+				resolvePRNum:    555,
+				resolveTargetID: "1111111111111111111",
+				listDeployingPRs: []DeployingPR{
+					{
+						Repo:     "azylman/mirrormere",
+						PRNumber: 777,
+						HeadSHA:  "sha-mirrormere-head",
+						TargetID: "1555405874565091380",
+						Metadata: map[string]any{
+							"started_jobs": []any{"mirrormere-kiosk"},
+						},
+					},
+				},
+			},
+			disp:         &mockOutboundDispatcher{},
+			wantPR:       777,
+			wantTargetID: "1555405874565091380",
+			wantPrompts:  1,
+		},
+		{
 			name: "enrichDeployEventPRAndTarget aerial repo matches aerial-core and resolves thread via ResolveThreadForPR",
 			evt:  mkDeployEvt("deploy_success", "aerial-core", "", "sha-aerial-unres", 0, "", "success", ""),
 			reg: &mockPRRegistry{
