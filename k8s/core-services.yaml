@@ -1039,8 +1039,6 @@ spec:
               value: "8084"
             - name: CONFIG_PATH
               value: /config/dashboard.yaml
-            - name: GIT_COMMIT
-              value: "${TAG_AERIAL_DASHBOARD:=latest}"
           envFrom:
             - secretRef:
                 name: shared-secrets
