@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -103,14 +104,15 @@ func TestManager_InitAndActivity(t *testing.T) {
 	}
 
 	tests := []struct {
-		name       string
-		isNilMgr   bool
-		sessionID  string
-		roots      []string
-		setupLogs  bool
-		setupTasks bool
-		wantErr    bool
-		wantZero   bool
+		name              string
+		isNilMgr          bool
+		sessionID         string
+		roots             []string
+		setupLogs         bool
+		setupTasks        bool
+		setupClaudeDirect bool
+		wantErr           bool
+		wantZero          bool
 	}{
 		{name: "nil manager", isNilMgr: true, sessionID: "sess-1", wantZero: true},
 		{name: "empty session ID", sessionID: "", wantZero: true},
@@ -124,6 +126,7 @@ func TestManager_InitAndActivity(t *testing.T) {
 		{name: "direct logs root", sessionID: "sess-logs", roots: []string{filepath.Join(tmp, "home", ".gemini", "antigravity-cli", "brain", "sess-logs", ".system_generated", "logs")}, setupLogs: true},
 		{name: "logs activity timestamp", sessionID: "sess-logs", setupLogs: true},
 		{name: "task activity timestamp", sessionID: "sess-tasks", setupTasks: true},
+		{name: "direct claude jsonl root", sessionID: "sess-claude-root", roots: []string{filepath.Join(tmp, "claude-direct")}, setupClaudeDirect: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -134,6 +137,10 @@ func TestManager_InitAndActivity(t *testing.T) {
 			roots := tc.roots
 			if roots == nil && mgr != nil {
 				roots = mgr.Roots()
+			}
+			if tc.setupClaudeDirect && len(tc.roots) > 0 {
+				_ = os.MkdirAll(tc.roots[0], 0o755)
+				_ = os.WriteFile(filepath.Join(tc.roots[0], tc.sessionID+".jsonl"), []byte(`{"type":"user"}`+"\n"), 0o644)
 			}
 			if tc.setupLogs {
 				sessDir := filepath.Join(tmp, "home", ".gemini", "antigravity-cli", "brain", tc.sessionID)
@@ -312,15 +319,16 @@ func TestExtractLastTurnError(t *testing.T) {
 	t0 := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
 	t1 := t0.Add(time.Minute)
 	tests := []struct {
-		name          string
-		isNilMgr      bool
-		convID        string
-		transcript    string
-		writeFilename string
-		since         time.Time
-		cancelCtx     bool
-		wantError     string
-		wantErr       bool
+		name             string
+		isNilMgr         bool
+		convID           string
+		transcript       string
+		claudeTranscript string
+		writeFilename    string
+		since            time.Time
+		cancelCtx        bool
+		wantError        string
+		wantErr          bool
 	}{
 		{name: "nil manager", isNilMgr: true, convID: "s1"},
 		{name: "empty convID", convID: ""},
@@ -408,19 +416,125 @@ func TestExtractLastTurnError(t *testing.T) {
 			since:     t0,
 			wantError: "large chunk fail",
 		},
+		{
+			name:   "claude transcript extracts error event after user input",
+			convID: "s-claude-err-event",
+			claudeTranscript: strings.Join([]string{
+				fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"Do work"}}`, t0.Format(time.RFC3339Nano)),
+				fmt.Sprintf(`{"type":"error","timestamp":%q,"error":"claude connection reset"}`, t1.Format(time.RFC3339Nano)),
+			}, "\n") + "\n",
+			since:     t0,
+			wantError: "claude connection reset",
+		},
+		{
+			name:   "claude transcript extracts error object message",
+			convID: "s-claude-err-obj",
+			claudeTranscript: strings.Join([]string{
+				fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"Check quota"}}`, t0.Format(time.RFC3339Nano)),
+				fmt.Sprintf(`{"type":"error","timestamp":%q,"error":{"message":"rate limit exceeded"}}`, t1.Format(time.RFC3339Nano)),
+			}, "\n") + "\n",
+			since:     t0,
+			wantError: "rate limit exceeded",
+		},
+		{
+			name:   "claude transcript extracts error from tool_result is_error",
+			convID: "s-claude-tool-err",
+			claudeTranscript: strings.Join([]string{
+				fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"Run script"}}`, t0.Format(time.RFC3339Nano)),
+				fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":[{"type":"tool_result","is_error":true,"content":"exit status 1"}]}}`, t1.Format(time.RFC3339Nano)),
+			}, "\n") + "\n",
+			since:     t0,
+			wantError: "exit status 1",
+		},
+		{
+			name:   "claude transcript extracts assistant error with status error",
+			convID: "s-claude-asst-status-err",
+			claudeTranscript: strings.Join([]string{
+				fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"Start job"}}`, t0.Format(time.RFC3339Nano)),
+				fmt.Sprintf(`{"type":"assistant","status":"error","timestamp":%q,"message":{"role":"assistant","content":[{"type":"text","text":"Internal assistant crash"}]}}`, t1.Format(time.RFC3339Nano)),
+			}, "\n") + "\n",
+			since:     t0,
+			wantError: "Internal assistant crash",
+		},
+		{
+			name:   "claude error before cutoff is ignored",
+			convID: "s-claude-err-before-cutoff",
+			claudeTranscript: strings.Join([]string{
+				fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"Query"}}`, t0.Format(time.RFC3339Nano)),
+				fmt.Sprintf(`{"type":"error","timestamp":%q,"error":"old error"}`, t0.Add(-time.Hour).Format(time.RFC3339Nano)),
+			}, "\n") + "\n",
+			since:     t0,
+			wantError: "",
+		},
+		{
+			name:   "claude top level raw json error code",
+			convID: "s-claude-raw-json-code",
+			claudeTranscript: strings.Join([]string{
+				fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"Run query"}}`, t0.Format(time.RFC3339Nano)),
+				fmt.Sprintf(`{"type":"error","timestamp":%q,"error":{"code":500}}`, t1.Format(time.RFC3339Nano)),
+			}, "\n") + "\n",
+			since:     t0,
+			wantError: `{"code":500}`,
+		},
+		{
+			name:   "claude type error with message content",
+			convID: "s-claude-msg-content-err",
+			claudeTranscript: strings.Join([]string{
+				fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"Invoke tool"}}`, t0.Format(time.RFC3339Nano)),
+				fmt.Sprintf(`{"type":"error","timestamp":%q,"message":{"content":"message content error"}}`, t1.Format(time.RFC3339Nano)),
+			}, "\n") + "\n",
+			since:     t0,
+			wantError: "message content error",
+		},
+		{
+			name:   "claude tool result with text block content",
+			convID: "s-claude-tool-text-blocks",
+			claudeTranscript: strings.Join([]string{
+				fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"Read log"}}`, t0.Format(time.RFC3339Nano)),
+				fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":[{"type":"tool_result","is_error":true,"content":[{"type":"text","text":"block text error"}]}]}}`, t1.Format(time.RFC3339Nano)),
+			}, "\n") + "\n",
+			since:     t0,
+			wantError: "block text error",
+		},
+		{
+			name:   "claude tool result with raw json object content",
+			convID: "s-claude-tool-raw-obj",
+			claudeTranscript: strings.Join([]string{
+				fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"Execute API"}}`, t0.Format(time.RFC3339Nano)),
+				fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":[{"type":"tool_result","is_error":true,"content":{"raw":"error"}}]}}`, t1.Format(time.RFC3339Nano)),
+			}, "\n") + "\n",
+			since:     t0,
+			wantError: `{"raw":"error"}`,
+		},
+		{
+			name:   "claude turn with no error",
+			convID: "s-claude-no-err",
+			claudeTranscript: strings.Join([]string{
+				fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"Run tests"}}`, t0.Format(time.RFC3339Nano)),
+				fmt.Sprintf(`{"type":"assistant","timestamp":%q,"message":{"role":"assistant","content":[{"type":"text","text":"Tests passed"}]}}`, t1.Format(time.RFC3339Nano)),
+				fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":[{"type":"tool_result","is_error":false,"content":"ok"}]}}`, t1.Add(time.Second).Format(time.RFC3339Nano)),
+			}, "\n") + "\n",
+			since:     t0,
+			wantError: "",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			tmp := t.TempDir()
 			var mgr *Manager
 			if !tc.isNilMgr {
-				mgr = New(tmp, tmp)
+				mgr = New(filepath.Join(tmp, "home"), filepath.Join(tmp, "data"))
 				if tc.transcript != "" {
 					fn := "transcript_full.jsonl"
 					if tc.writeFilename != "" {
 						fn = tc.writeFilename
 					}
 					writeTranscript(t, mgr, tc.convID, fn, tc.transcript)
+				}
+				if tc.claudeTranscript != "" {
+					projDir := filepath.Join(tmp, "data", "claude", "projects", "-test-proj")
+					_ = os.MkdirAll(projDir, 0o755)
+					_ = os.WriteFile(filepath.Join(projDir, tc.convID+".jsonl"), []byte(tc.claudeTranscript), 0o644)
 				}
 			}
 			ctx := context.Background()
@@ -461,14 +575,15 @@ func TestExtractResponseSince(t *testing.T) {
 	})
 
 	tests := []struct {
-		name       string
-		isNilMgr   bool
-		convID     string
-		transcript string
-		since      time.Time
-		cancelCtx  bool
-		useCtx     bool
-		wantResp   string
+		name             string
+		isNilMgr         bool
+		convID           string
+		transcript       string
+		claudeTranscript string
+		since            time.Time
+		cancelCtx        bool
+		useCtx           bool
+		wantResp         string
 	}{
 		{name: "nil manager", isNilMgr: true, convID: "s1", since: t0},
 		{name: "empty convID", convID: "", since: t0},
@@ -480,15 +595,83 @@ func TestExtractResponseSince(t *testing.T) {
 		{name: "invalid timestamp string", convID: "s-invalid-ts", transcript: "{\"type\":\"PLANNER_RESPONSE\",\"content\":\"bad ts answer\",\"created_at\":\"not-a-timestamp\"}\n", since: t0, wantResp: "bad ts answer"},
 		{name: "skips tool call request and generic types and empty planner content", convID: "s-tool-generic", transcript: fmt.Sprintf("{\"type\":\"GENERIC\",\"content\":\"search results\",\"created_at\":%q}\n{\"type\":\"PLANNER_RESPONSE\",\"content\":\"[Tool Call Requested]: grep\",\"created_at\":%q}\n{\"type\":\"PLANNER_RESPONSE\",\"content\":\"   \",\"created_at\":%q}\n{\"type\":\"PLANNER_RESPONSE\",\"content\":\"actual answer\",\"created_at\":%q}\n", t0.Format(time.RFC3339Nano), t0.Format(time.RFC3339Nano), t0.Format(time.RFC3339Nano), t1.Format(time.RFC3339Nano)), since: t0, wantResp: "actual answer"},
 		{name: "tail has tool call and empty content with older step before since", convID: "s-tail-empty", transcript: fmt.Sprintf("{\"type\":\"USER_INPUT\",\"created_at\":%q}\n{\"type\":\"GENERIC\",\"content\":\"skip me\",\"created_at\":%q}\n{\"type\":\"PLANNER_RESPONSE\",\"content\":\"[Tool Call Requested]: run\",\"created_at\":%q}\n{\"type\":\"PLANNER_RESPONSE\",\"content\":\"\",\"tool_calls\":[{\"name\":\"call\"}],\"created_at\":%q}\n", t0.Add(-time.Hour).Format(time.RFC3339Nano), t1.Format(time.RFC3339Nano), t1.Format(time.RFC3339Nano), t1.Format(time.RFC3339Nano)), since: t0, wantResp: ""},
+		{
+			name:   "claude transcript extracts latest substantive assistant response",
+			convID: "s-claude-resp",
+			claudeTranscript: strings.Join([]string{
+				fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"Run build"}}`, t0.Format(time.RFC3339Nano)),
+				fmt.Sprintf(`{"type":"assistant","timestamp":%q,"message":{"role":"assistant","content":[{"type":"thinking","thinking":"Analyzing"},{"type":"text","text":"Build finished successfully"}]}}`, t1.Format(time.RFC3339Nano)),
+			}, "\n") + "\n",
+			since:    t0,
+			wantResp: "Build finished successfully",
+		},
+		{
+			name:   "claude transcript ignores tool_use only blocks",
+			convID: "s-claude-tool-only",
+			claudeTranscript: strings.Join([]string{
+				fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":"Run read"}}`, t0.Format(time.RFC3339Nano)),
+				fmt.Sprintf(`{"type":"assistant","timestamp":%q,"message":{"role":"assistant","content":[{"type":"tool_use","name":"Read","input":{}}]}}`, t1.Format(time.RFC3339Nano)),
+			}, "\n") + "\n",
+			since:    t0,
+			wantResp: "",
+		},
+		{
+			name:   "claude transcript response before since returns empty",
+			convID: "s-claude-stale",
+			claudeTranscript: strings.Join([]string{
+				fmt.Sprintf(`{"type":"assistant","timestamp":%q,"message":{"role":"assistant","content":[{"type":"text","text":"Stale message"}]}}`, t0.Format(time.RFC3339Nano)),
+			}, "\n") + "\n",
+			since:    t1,
+			wantResp: "",
+		},
+		{
+			name:   "claude transcript assistant with raw string content",
+			convID: "s-claude-raw-str",
+			claudeTranscript: strings.Join([]string{
+				fmt.Sprintf(`{"type":"assistant","timestamp":%q,"message":{"role":"assistant","content":"Raw string response"}}`, t1.Format(time.RFC3339Nano)),
+			}, "\n") + "\n",
+			since:    t0,
+			wantResp: "Raw string response",
+		},
+		{
+			name:             "claude transcript canceled context returns empty",
+			convID:           "s-claude-canc",
+			claudeTranscript: `{"type":"assistant","timestamp":"2026-10-19T12:01:00Z","message":{"role":"assistant","content":"reply"}}` + "\n",
+			since:            t0,
+			cancelCtx:        true,
+			useCtx:           true,
+			wantResp:         "",
+		},
+		{
+			name:             "claude transcript empty file returns empty",
+			convID:           "s-claude-empty-file",
+			claudeTranscript: "",
+			since:            t0,
+			wantResp:         "",
+		},
+		{
+			name:   "claude transcript tool call requested prefix ignored",
+			convID: "s-claude-tool-req-prefix",
+			claudeTranscript: strings.Join([]string{
+				fmt.Sprintf(`{"type":"assistant","timestamp":%q,"message":{"role":"assistant","content":"[Tool Call Requested]: Read"}}`, t1.Format(time.RFC3339Nano)),
+			}, "\n") + "\n",
+			since:    t0,
+			wantResp: "",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			tmp := t.TempDir()
 			var mgr *Manager
 			if !tc.isNilMgr {
-				mgr = New(tmp, tmp)
+				mgr = New(filepath.Join(tmp, "home"), filepath.Join(tmp, "data"))
 				if tc.transcript != "" {
 					writeTranscript(t, mgr, tc.convID, "transcript_full.jsonl", tc.transcript)
+				}
+				if tc.claudeTranscript != "" {
+					projDir := filepath.Join(tmp, "data", "claude", "projects", "-test-proj")
+					_ = os.MkdirAll(projDir, 0o755)
+					_ = os.WriteFile(filepath.Join(projDir, tc.convID+".jsonl"), []byte(tc.claudeTranscript), 0o644)
 				}
 			}
 			ctx := context.Background()
@@ -670,5 +853,359 @@ func TestSessionStorageAndRotationMetrics(t *testing.T) {
 		DefaultMaxTranscriptBytes != 1024*1024 || DefaultMaxSessionTranscriptBytes != 2*1024*1024 ||
 		DefaultMaxSessionDBBytes != 4*1024*1024 || DefaultMaxQuotaPauseDBBytes != 3*1024*1024 {
 		t.Fatalf("unexpected session rotation constant values")
+	}
+}
+
+func TestSanitizeClaudeProjectPath(t *testing.T) {
+	tests := []struct {
+		name string
+		cwd  string
+		want string
+	}{
+		{name: "root directory", cwd: "/", want: "-"},
+		{name: "empty cwd", cwd: "", want: ""},
+		{name: "standard unix path", cwd: "/data/runtimes/discord", want: "-data-runtimes-discord"},
+		{name: "path with dots", cwd: "/share/aerial-config/..", want: "-share-aerial-config---"},
+		{name: "relative path with dots", cwd: "foo.bar/baz.qux", want: "foo-bar-baz-qux"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := SanitizeClaudeProjectPath(tc.cwd); got != tc.want {
+				t.Fatalf("SanitizeClaudeProjectPath(%q) = %q, want %q", tc.cwd, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestClaudeSessionLifecycle(t *testing.T) {
+	t0 := time.Date(2026, 11, 7, 10, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name            string
+		isNilMgr        bool
+		sessionID       string
+		location        string
+		content         string
+		zeroByte        bool
+		age             time.Duration
+		rootsOverride   []string
+		wantExists      bool
+		wantPaths       int
+		wantSize        int64
+		wantSteps       int
+		wantTurns       int
+		wantNonZeroTime bool
+	}{
+		{
+			name:      "nil manager",
+			isNilMgr:  true,
+			sessionID: "sess-claude-nil",
+		},
+		{
+			name:      "empty session ID",
+			sessionID: "",
+		},
+		{
+			name:      "path traversal session ID",
+			sessionID: "../bad-id",
+		},
+		{
+			name:      "data claude projects standard session",
+			sessionID: "sess-claude-data",
+			location:  "data_claude",
+			content: strings.Join([]string{
+				`{"type":"user","timestamp":"2026-11-07T10:00:00Z","message":{"role":"user","content":"Initial prompt"}}`,
+				`{"type":"assistant","timestamp":"2026-11-07T10:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"Done"}]}}`,
+			}, "\n") + "\n",
+			age:             10 * time.Minute,
+			wantExists:      true,
+			wantPaths:       1,
+			wantSteps:       1,
+			wantTurns:       1,
+			wantNonZeroTime: true,
+		},
+		{
+			name:      "data runtime claude projects session with tool results and ambient",
+			sessionID: "sess-claude-runtime",
+			location:  "data_runtime",
+			content: strings.Join([]string{
+				`{"type":"user","timestamp":"2026-11-07T10:00:00Z","message":{"role":"user","content":"Prompt 1"}}`,
+				`{"type":"assistant","timestamp":"2026-11-07T10:00:02Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"Read","input":{}}]}}`,
+				`{"type":"user","timestamp":"2026-11-07T10:00:04Z","message":{"role":"user","content":[{"type":"tool_result","content":"file contents"}]}}`,
+				`{"type":"user","timestamp":"2026-11-07T10:00:05Z","message":{"role":"user","content":"[Chat ambient message]"}}`,
+				`{"type":"assistant","timestamp":"2026-11-07T10:00:06Z","message":{"role":"assistant","content":[{"type":"text","text":"Final answer"}]}}`,
+				`{"type":"tool_result","timestamp":"2026-11-07T10:00:07Z","content":"extra tool"}`,
+			}, "\n") + "\n",
+			wantExists:      true,
+			wantPaths:       1,
+			wantSteps:       4,
+			wantTurns:       1,
+			wantNonZeroTime: true,
+		},
+		{
+			name:      "home claude projects session",
+			sessionID: "sess-claude-home",
+			location:  "home_claude",
+			content: strings.Join([]string{
+				`{"type":"user","timestamp":"2026-11-07T10:00:00Z","message":{"role":"user","content":"Home prompt"}}`,
+			}, "\n") + "\n",
+			wantExists:      true,
+			wantPaths:       1,
+			wantSteps:       0,
+			wantTurns:       1,
+			wantNonZeroTime: true,
+		},
+		{
+			name:      "direct in claude projects base directory",
+			sessionID: "sess-claude-direct",
+			location:  "direct_claude",
+			content: strings.Join([]string{
+				`{"type":"user","timestamp":"2026-11-07T10:00:00Z","message":{"role":"user","content":"Direct prompt"}}`,
+			}, "\n") + "\n",
+			wantExists:      true,
+			wantPaths:       1,
+			wantTurns:       1,
+			wantNonZeroTime: true,
+		},
+		{
+			name:       "zero byte file does not exist",
+			sessionID:  "sess-claude-zero",
+			location:   "data_claude",
+			zeroByte:   true,
+			wantExists: false,
+			wantPaths:  1,
+			wantSize:   0,
+		},
+		{
+			name:            "custom roots override in GetSessionLastActivity",
+			sessionID:       "sess-claude-custom-root",
+			location:        "data_claude",
+			content:         `{"type":"user","timestamp":"2026-11-07T10:00:00Z","message":{"role":"user","content":"Hello"}}` + "\n",
+			wantExists:      true,
+			wantPaths:       1,
+			wantTurns:       1,
+			wantNonZeroTime: true,
+		},
+		{
+			name:      "claude transcript with empty lines and invalid lines",
+			sessionID: "sess-claude-empty-lines",
+			location:  "data_claude",
+			content: strings.Join([]string{
+				"",
+				"invalid-json",
+				`{"type":"user","timestamp":"2026-11-07T10:00:00Z","message":{"role":"user","content":"Valid prompt"}}`,
+				"",
+				`{"type":"assistant","timestamp":"2026-11-07T10:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"Valid reply"}]}}`,
+				"",
+			}, "\n") + "\n",
+			wantExists:      true,
+			wantPaths:       1,
+			wantSteps:       1,
+			wantTurns:       1,
+			wantNonZeroTime: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmp := t.TempDir()
+			var mgr *Manager
+			var dataDir string
+			if !tc.isNilMgr {
+				homeDir := filepath.Join(tmp, "home")
+				dataDir = filepath.Join(tmp, "data")
+				mgr = New(homeDir, dataDir)
+
+				var writeDir string
+				switch tc.location {
+				case "data_claude":
+					writeDir = filepath.Join(dataDir, "claude", "projects", "-data-proj")
+				case "data_runtime":
+					writeDir = filepath.Join(dataDir, "runtimes", "discord", ".claude", "projects", "-runtime-proj")
+				case "home_claude":
+					writeDir = filepath.Join(homeDir, ".claude", "projects", "-home-proj")
+				case "direct_claude":
+					writeDir = filepath.Join(dataDir, "claude", "projects")
+				}
+
+				if writeDir != "" {
+					_ = os.MkdirAll(writeDir, 0o755)
+					filePath := filepath.Join(writeDir, tc.sessionID+".jsonl")
+					if tc.zeroByte {
+						_ = os.WriteFile(filePath, nil, 0o644)
+					} else if tc.content != "" {
+						_ = os.WriteFile(filePath, []byte(tc.content), 0o644)
+						mtime := t0
+						if tc.age > 0 {
+							mtime = time.Now().Add(-tc.age)
+						}
+						_ = os.Chtimes(filePath, mtime, mtime)
+					}
+				}
+			}
+
+			paths := mgr.claudeTranscriptPaths(tc.sessionID)
+			if len(paths) != tc.wantPaths {
+				t.Errorf("claudeTranscriptPaths count=%d, want %d", len(paths), tc.wantPaths)
+			}
+
+			exists := mgr.ClaudeSessionExistsOnDisk(tc.sessionID)
+			if exists != tc.wantExists {
+				t.Errorf("ClaudeSessionExistsOnDisk=%v, want %v", exists, tc.wantExists)
+			}
+
+			sessExists := mgr.SessionExistsOnDisk(tc.sessionID)
+			if sessExists != tc.wantExists {
+				t.Errorf("SessionExistsOnDisk=%v, want %v", sessExists, tc.wantExists)
+			}
+
+			size := mgr.GetTranscriptSize(tc.sessionID)
+			if tc.wantSize > 0 && size != tc.wantSize {
+				t.Errorf("GetTranscriptSize=%d, want %d", size, tc.wantSize)
+			} else if tc.content != "" && size == 0 {
+				t.Errorf("GetTranscriptSize expected non-zero, got 0")
+			}
+
+			steps := mgr.CountTranscriptSteps(tc.sessionID)
+			if steps != tc.wantSteps {
+				t.Errorf("CountTranscriptSteps=%d, want %d", steps, tc.wantSteps)
+			}
+
+			turns := mgr.CountTranscriptTurns(tc.sessionID)
+			if turns != tc.wantTurns {
+				t.Errorf("CountTranscriptTurns=%d, want %d", turns, tc.wantTurns)
+			}
+
+			var lastAct time.Time
+			var err error
+			if tc.name == "custom roots override in GetSessionLastActivity" {
+				lastAct, err = mgr.GetSessionLastActivity(tc.sessionID, filepath.Join(dataDir, "claude", "projects"))
+			} else {
+				lastAct, err = mgr.GetSessionLastActivity(tc.sessionID)
+			}
+			if err != nil {
+				t.Fatalf("GetSessionLastActivity error: %v", err)
+			}
+			if tc.wantNonZeroTime && lastAct.IsZero() {
+				t.Errorf("GetSessionLastActivity expected non-zero, got zero")
+			} else if !tc.wantNonZeroTime && !lastAct.IsZero() {
+				t.Errorf("GetSessionLastActivity expected zero, got %v", lastAct)
+			}
+		})
+	}
+}
+
+func TestClaudeInternalHelpers(t *testing.T) {
+	tests := []struct {
+		name       string
+		content    string
+		wantResult bool
+	}{
+		{name: "empty content", content: "", wantResult: false},
+		{name: "invalid json content", content: "not-json", wantResult: false},
+		{name: "empty json array", content: "[]", wantResult: false},
+		{name: "non-tool-result array", content: `[{"type":"text","text":"hello"}]`, wantResult: false},
+		{name: "tool-result array", content: `[{"type":"tool_result","content":"output"}]`, wantResult: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isClaudeToolResultContent(json.RawMessage(tc.content))
+			if got != tc.wantResult {
+				t.Fatalf("isClaudeToolResultContent(%q) = %v, want %v", tc.content, got, tc.wantResult)
+			}
+		})
+	}
+
+	missingFileTests := []struct {
+		name      string
+		filePath  string
+		wantSteps int
+		wantTurns int
+		wantResp  string
+	}{
+		{name: "nonexistent file", filePath: "/nonexistent/path/file.jsonl", wantSteps: 0, wantTurns: 0, wantResp: ""},
+	}
+	for _, tc := range missingFileTests {
+		t.Run(tc.name, func(t *testing.T) {
+			if steps := countStepsInClaudeTranscript(tc.filePath); steps != tc.wantSteps {
+				t.Fatalf("countStepsInClaudeTranscript = %d, want %d", steps, tc.wantSteps)
+			}
+			if turns := countTurnsInClaudeTranscript(tc.filePath); turns != tc.wantTurns {
+				t.Fatalf("countTurnsInClaudeTranscript = %d, want %d", turns, tc.wantTurns)
+			}
+			if resp := extractResponseFromClaudeTranscriptFile(context.Background(), tc.filePath, time.Now()); resp != tc.wantResp {
+				t.Fatalf("extractResponseFromClaudeTranscriptFile = %q, want %q", resp, tc.wantResp)
+			}
+		})
+	}
+
+	targetTests := []struct {
+		name       string
+		cwd        string
+		createFile bool
+		prePopSeen bool
+		wantFound  bool
+	}{
+		{name: "empty cwd", cwd: "", createFile: true, prePopSeen: false, wantFound: false},
+		{name: "missing file", cwd: "/missing/cwd", createFile: false, prePopSeen: false, wantFound: false},
+		{name: "file found and not seen", cwd: "/found/cwd", createFile: true, prePopSeen: false, wantFound: true},
+		{name: "file already seen", cwd: "/seen/cwd", createFile: true, prePopSeen: true, wantFound: false},
+	}
+	for _, tc := range targetTests {
+		t.Run("checkClaudeTargetProject_"+tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			cleanID := "sess-target"
+			cand := filepath.Join(tmpDir, SanitizeClaudeProjectPath(tc.cwd), cleanID+".jsonl")
+			if tc.createFile && tc.cwd != "" {
+				_ = os.MkdirAll(filepath.Dir(cand), 0o755)
+				_ = os.WriteFile(cand, []byte("data\n"), 0o644)
+			}
+			seen := make(map[string]bool)
+			if tc.prePopSeen {
+				seen[filepath.Clean(cand)] = true
+			}
+			gotPath, ok := checkClaudeTargetProject(tmpDir, tc.cwd, cleanID, seen)
+			if ok != tc.wantFound {
+				t.Fatalf("checkClaudeTargetProject ok=%v, want %v", ok, tc.wantFound)
+			}
+			if tc.wantFound && gotPath != cand {
+				t.Fatalf("checkClaudeTargetProject path=%q, want %q", gotPath, cand)
+			}
+		})
+	}
+
+	assistantTests := []struct {
+		name     string
+		content  string
+		wantText string
+	}{
+		{name: "invalid json object", content: `{"invalid":true}`, wantText: ""},
+		{name: "string content", content: `"hello world"`, wantText: "hello world"},
+		{name: "blocks content", content: `[{"type":"text","text":"block text"}]`, wantText: "block text"},
+	}
+	for _, tc := range assistantTests {
+		t.Run("extractAssistantText_"+tc.name, func(t *testing.T) {
+			got := extractAssistantText(json.RawMessage(tc.content))
+			if got != tc.wantText {
+				t.Fatalf("extractAssistantText = %q, want %q", got, tc.wantText)
+			}
+		})
+	}
+
+	errorLineTests := []struct {
+		name      string
+		line      string
+		wantError string
+	}{
+		{name: "direct error type", line: `{"type":"error","message":{"role":"assistant","content":"direct error"}}`, wantError: "direct error"},
+		{name: "status error text", line: `{"status":"error","message":{"role":"assistant","content":"status err"}}`, wantError: "status err"},
+	}
+	for _, tc := range errorLineTests {
+		t.Run("extractClaudeErrorFromLine_"+tc.name, func(t *testing.T) {
+			got, _ := extractClaudeErrorFromLine(tc.line, time.Time{})
+			if got != tc.wantError {
+				t.Fatalf("extractClaudeErrorFromLine = %q, want %q", got, tc.wantError)
+			}
+		})
 	}
 }

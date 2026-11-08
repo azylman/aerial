@@ -73,6 +73,13 @@ func RunTranscriptSync(ctx context.Context, store db.TranscriptStore, cfg *confi
 	if targetBrainDir != "" {
 		opts.BrainDir = targetBrainDir
 	}
+	if cfg != nil {
+		if dataDir := strings.TrimSpace(cfg.DataDir()); dataDir != "" {
+			opts.ClaudeProjectsDir = filepath.Join(dataDir, "claude", "projects")
+		} else if homeDir := strings.TrimSpace(cfg.GeminiHomeDir()); homeDir != "" {
+			opts.ClaudeProjectsDir = filepath.Join(homeDir, ".claude", "projects")
+		}
+	}
 
 	stats, err := SyncTranscripts(syncCtx, store, targetBrainDir, embedder, llmFunc, opts)
 	if err != nil {

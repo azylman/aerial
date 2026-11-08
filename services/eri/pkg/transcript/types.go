@@ -15,11 +15,12 @@ type LLMClientFunc func(ctx context.Context, prompt string) (string, error)
 
 // SyncOptions configures the transcript sync sweep.
 type SyncOptions struct {
-	BatchLimit    int           `json:"batch_limit"`
-	IdleThreshold time.Duration `json:"idle_threshold"`
-	BrainDir      string        `json:"brain_dir"`
-	HeadLimit     int           `json:"head_limit"`
-	TailLimit     int           `json:"tail_limit"`
+	BatchLimit        int           `json:"batch_limit"`
+	IdleThreshold     time.Duration `json:"idle_threshold"`
+	BrainDir          string        `json:"brain_dir"`
+	HeadLimit         int           `json:"head_limit"`
+	TailLimit         int           `json:"tail_limit"`
+	ClaudeProjectsDir string        `json:"claude_projects_dir,omitempty"`
 }
 
 // SyncStats records metrics from a transcript synchronization execution.
