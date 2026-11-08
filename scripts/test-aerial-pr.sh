@@ -279,6 +279,91 @@ assert_eq "true" "$(echo "$VANADIS_TRANSCRIPT_CHECK" | grep -q 'vc1:ok' && echo 
 assert_eq "true" "$(echo "$VANADIS_TRANSCRIPT_CHECK" | grep -q 'vc2:ok' && echo true || echo false)" "resolve_vanadis_chunk_id: extracts vanadis_chunk_id from latest USER_INPUT in transcript.jsonl"
 assert_eq "true" "$(echo "$VANADIS_TRANSCRIPT_CHECK" | grep -q 'vc3:ok' && echo true || echo false)" "resolve_vanadis_chunk_id: does not leak older USER_INPUT chunk ID into non-chunk turn"
 
+# Case 9b: verify_vanadis_chunk_active guards against submitting PR for cancelled chunks
+VANADIS_GUARD_CHECK=$(bash -c "
+    REPO_TEST_MODE=1
+    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
+
+    # Subtest 1: Empty chunk_id returns 0 immediately
+    verify_vanadis_chunk_active '' && echo 'guard1:ok'
+
+    # Subtest 2: Active chunk returns 0
+    curl() {
+        echo '{\"chunk\":{\"status\":\"running\"},\"build\":{\"status\":\"running\"}}'
+    }
+    export -f curl
+    verify_vanadis_chunk_active 'chunk-active' && echo 'guard2:ok'
+
+    # Subtest 3: Cancelled chunk aborts with exit code 1 and error message
+    curl() {
+        echo '{\"chunk\":{\"status\":\"cancelled\"},\"build\":{\"status\":\"running\"}}'
+    }
+    export -f curl
+    set +e
+    err3=\$(verify_vanadis_chunk_active 'chunk-cancelled' 2>&1)
+    rc3=\$?
+    set -e
+    if [ \"\$rc3\" -ne 0 ] && echo \"\$err3\" | grep -q 'Vanadis chunk chunk-cancelled (or parent build) is cancelled; aborting PR submission'; then
+        echo 'guard3:ok'
+    else
+        echo \"guard3:fail:rc=\$rc3:\$err3\"
+    fi
+
+    # Subtest 4: Cancelled build aborts with exit code 1 and error message
+    curl() {
+        echo '{\"chunk\":{\"status\":\"pr_opened\"},\"build\":{\"status\":\"cancelled\"}}'
+    }
+    export -f curl
+    set +e
+    err4=\$(verify_vanadis_chunk_active 'chunk-b-cancelled' 2>&1)
+    rc4=\$?
+    set -e
+    if [ \"\$rc4\" -ne 0 ] && echo \"\$err4\" | grep -q 'Vanadis chunk chunk-b-cancelled (or parent build) is cancelled; aborting PR submission'; then
+        echo 'guard4:ok'
+    else
+        echo \"guard4:fail:rc=\$rc4:\$err4\"
+    fi
+
+    # Subtest 5: Network/curl failure is non-fatal (returns 0)
+    curl() {
+        return 1
+    }
+    export -f curl
+    verify_vanadis_chunk_active 'chunk-unreachable' && echo 'guard5:ok'
+
+    # Subtest 6: submit_scratch aborts before push when chunk is cancelled
+    WORK_DIR=\$(mktemp -d /tmp/aerial-pr-guard-work.XXXXXX)
+    git init -q \"\$WORK_DIR\"
+    echo 'Summary' > \"\$WORK_DIR/PR_DESCRIPTION.md\"
+    echo 'code' > \"\$WORK_DIR/file.txt\"
+    CANARY_FILE=\"${TMP_TEST_DIR}/guard6_canary\"
+    rm -f \"\$CANARY_FILE\"
+    rebase_staged_changes() { touch \"\$CANARY_FILE\"; return 1; }
+    run_preflight_verification() { touch \"\$CANARY_FILE\"; return 0; }
+    push_scratch_branch() { touch \"\$CANARY_FILE\"; return 0; }
+    export -f rebase_staged_changes run_preflight_verification push_scratch_branch
+    curl() {
+        echo '{\"chunk\":{\"status\":\"cancelled\"},\"build\":{\"status\":\"running\"}}'
+    }
+    export -f curl
+    set +e
+    err6=\$(submit_scratch \"\$WORK_DIR\" 'feat: test' --vanadis-chunk 'chunk-abort-test' 2>&1)
+    rc6=\$?
+    set -e
+    rm -rf \"\$WORK_DIR\"
+    if [ \"\$rc6\" -ne 0 ] && [ ! -f \"\$CANARY_FILE\" ] && echo \"\$err6\" | grep -q 'Vanadis chunk chunk-abort-test (or parent build) is cancelled; aborting PR submission'; then
+        echo 'guard6:ok'
+    else
+        echo \"guard6:fail:rc=\$rc6:canary=\$( [ -f \"\$CANARY_FILE\" ] && echo yes || echo no ):\$err6\"
+    fi
+")
+assert_eq "true" "$(echo "$VANADIS_GUARD_CHECK" | grep -q 'guard1:ok' && echo true || echo false)" "verify_vanadis_chunk_active: empty chunk returns 0"
+assert_eq "true" "$(echo "$VANADIS_GUARD_CHECK" | grep -q 'guard2:ok' && echo true || echo false)" "verify_vanadis_chunk_active: active chunk returns 0"
+assert_eq "true" "$(echo "$VANADIS_GUARD_CHECK" | grep -q 'guard3:ok' && echo true || echo false)" "verify_vanadis_chunk_active: cancelled chunk exits non-zero with error"
+assert_eq "true" "$(echo "$VANADIS_GUARD_CHECK" | grep -q 'guard4:ok' && echo true || echo false)" "verify_vanadis_chunk_active: cancelled build exits non-zero with error"
+assert_eq "true" "$(echo "$VANADIS_GUARD_CHECK" | grep -q 'guard5:ok' && echo true || echo false)" "verify_vanadis_chunk_active: curl failure returns 0 without aborting"
+assert_eq "true" "$(echo "$VANADIS_GUARD_CHECK" | grep -q 'guard6:ok' && echo true || echo false)" "submit_scratch: aborts immediately on cancelled chunk before git push"
+
 # Case 10: register_pr_in_brain retry with backoff and hard failure on exhaustion
 REGISTER_PR_CHECK=$(bash -c "
     REPO_TEST_MODE=1

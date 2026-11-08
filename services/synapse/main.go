@@ -206,6 +206,10 @@ func (s *RouterServer) handlePRRegister(w http.ResponseWriter, r *http.Request) 
 			httpkit.WriteJSON(w, http.StatusNotFound, map[string]string{"error": "vanadis chunk not found"})
 			return
 		}
+		if errors.Is(err, ErrVanadisChunkCancelled) {
+			httpkit.WriteJSON(w, http.StatusConflict, map[string]string{"error": "vanadis chunk or build is cancelled"})
+			return
+		}
 		if errors.Is(err, ErrInvalidTargetID) || strings.Contains(err.Error(), "target_id") {
 			httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{"error": "target_id must be a valid Discord snowflake (17-20 digits)"})
 			return

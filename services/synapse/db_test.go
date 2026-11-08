@@ -322,6 +322,7 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 		{name: "EnsurePRRegistered empty repo guard", op: "EnsurePRRegistered", repo: "", prNumber: 692, wantTarget: ""},
 		{name: "EnsurePRRegistered chunk query error", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", vanadisStatus: http.StatusInternalServerError, vanadisBody: `{"error":"internal"}`, wantErr: true},
 		{name: "EnsurePRRegistered chunk attach 400 bad request returns error", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", vanadisStatus: http.StatusBadRequest, vanadisBody: `{"error":"bad request"}`, wantErr: true},
+		{name: "EnsurePRRegistered cancelled chunk returns empty target without error or upsert", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", vanadisStatus: http.StatusConflict, vanadisBody: `{"error":"chunk or parent build is cancelled"}`, targetID: "1562162630997581946", mockExecErr: errors.New("unexpected upsert"), wantTarget: ""},
 		{name: "EnsurePRRegistered chunk resolves thread_id and upserts pr_registry", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", vanadisStatus: http.StatusOK, vanadisBody: `{"status":"attached","thread_id":"1562162630997581946"}`, targetIDReturn: "1562162630997581946", wantTarget: "1562162630997581946"},
 		{name: "EnsurePRRegistered invalid targetID after chunk miss skips upsert", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, jobName: "chunk-2", vanadisStatus: http.StatusNotFound, vanadisBody: `{"error":"not found"}`, wantTarget: ""},
 		{name: "EnsurePRRegistered upsert exec error", op: "EnsurePRRegistered", repo: "azylman/mirrormere", prNumber: 692, targetID: "1562162630997581946", mockExecErr: errors.New("upsert err"), wantErr: true},
@@ -334,6 +335,7 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 		{name: "RegisterPR empty head_sha guard", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, sha: "", targetID: "1555405874565091380", branchReturn: "feat/foo", wantErr: true},
 		{name: "RegisterPR chunk query error", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", jobName: "chunk-1", vanadisStatus: http.StatusInternalServerError, vanadisBody: `{"error":"internal"}`, wantErr: true},
 		{name: "RegisterPR chunk not found returns ErrVanadisChunkNotFound", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", jobName: "chunk-1", vanadisStatus: http.StatusNotFound, vanadisBody: `{"error":"not found"}`, wantErr: true},
+		{name: "RegisterPR chunk cancelled returns ErrVanadisChunkCancelled", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", jobName: "chunk-1", vanadisStatus: http.StatusConflict, vanadisBody: `{"error":"chunk or parent build is cancelled"}`, wantErr: true},
 		{name: "RegisterPR chunk resolves thread_id and upserts pr_registry", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", jobName: "chunk-1", vanadisStatus: http.StatusOK, vanadisBody: `{"status":"attached","thread_id":"1555405874565091380"}`, targetIDReturn: "1555405874565091380", wantTarget: "1555405874565091380", wantSQLSubstr: "ON CONFLICT (repo, pr_number)"},
 		{name: "RegisterPR invalid targetID without chunk returns error", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", targetID: "invalid-target", wantErr: true},
 		{name: "RegisterPR empty targetID without chunk returns error", op: "RegisterPR", repo: "azylman/aerial", prNumber: 42, branchReturn: "feat/foo", sha: "head123", targetID: "", wantErr: true},
@@ -756,6 +758,11 @@ func TestPostgresPRRegistry_Unit(t *testing.T) {
 				if tc.name == "RegisterPR chunk not found returns ErrVanadisChunkNotFound" {
 					if !errors.Is(err, ErrVanadisChunkNotFound) {
 						t.Errorf("err = %v, want ErrVanadisChunkNotFound", err)
+					}
+				}
+				if tc.name == "RegisterPR chunk cancelled returns ErrVanadisChunkCancelled" {
+					if !errors.Is(err, ErrVanadisChunkCancelled) {
+						t.Errorf("err = %v, want ErrVanadisChunkCancelled", err)
 					}
 				}
 				if gotTarget != tc.wantTarget {

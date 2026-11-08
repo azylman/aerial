@@ -304,6 +304,22 @@ resolve_vanadis_chunk_id() {
     echo ""
 }
 
+verify_vanadis_chunk_active() {
+    local chunk_id="${1:-}"
+    if [ -z "$chunk_id" ]; then
+        return 0
+    fi
+    local vanadis_base="${VANADIS_URL:-http://vanadis.aerial}"
+    local resp=""
+    if resp=$(curl -sS --connect-timeout 2 --max-time 4 "${vanadis_base%/}/chunks/${chunk_id}" 2>/dev/null); then
+        if [ -n "$resp" ] && echo "$resp" | jq -e '.chunk.status == "cancelled" or .build.status == "cancelled"' >/dev/null 2>&1; then
+            echo "ERROR: Vanadis chunk ${chunk_id} (or parent build) is cancelled; aborting PR submission." >&2
+            exit 1
+        fi
+    fi
+    return 0
+}
+
 enable_github_auto_merge() {
     local node_id="$1"
     local pr_num="${2:-}"
@@ -575,6 +591,8 @@ submit_scratch() {
         echo "ERROR: Valid scratch directory path required for submit." >&2
         exit 1
     fi
+
+    verify_vanadis_chunk_active "${vanadis_chunk_id}"
 
     # Resolve Tier 1 file if specified
     if [ -n "$pr_body_file" ]; then
