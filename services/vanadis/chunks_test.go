@@ -1551,6 +1551,12 @@ func TestPostgresVanadisStore_ChunkMethods(t *testing.T) {
 						return nil
 					}}
 				}
+				if strings.Contains(sql, "c.status = 'cancelled'") {
+					return &genericMockRow{scanFn: func(dest ...any) error {
+						*dest[0].(*bool) = false
+						return nil
+					}}
+				}
 				if strings.Contains(sql, "SELECT EXISTS") {
 					return &genericMockRow{scanFn: func(dest ...any) error {
 						*dest[0].(*bool) = true
@@ -1560,8 +1566,58 @@ func TestPostgresVanadisStore_ChunkMethods(t *testing.T) {
 				return &mockRow{err: pgx.ErrNoRows}
 			},
 		})
-		if _, err := sMismatched.AttachChunkPR(ctx, "c1", 101, "aerial"); err == nil || errors.Is(err, ErrChunkNotFound) {
+		if _, err := sMismatched.AttachChunkPR(ctx, "c1", 101, "aerial"); err == nil || errors.Is(err, ErrChunkNotFound) || errors.Is(err, ErrBuildConflict) {
 			t.Errorf("expected mismatch error, got %v", err)
+		}
+
+		// Cancelled chunk or build with repo returns ErrBuildConflict
+		sCancelledWithRepo := newMockStore(mockDB{
+			queryRowFn: func(_ context.Context, sql string, _ ...any) pgx.Row {
+				if strings.Contains(sql, "SELECT mode") {
+					return &genericMockRow{scanFn: func(dest ...any) error {
+						*dest[0].(*string) = "pr"
+						return nil
+					}}
+				}
+				if strings.Contains(sql, "c.status = 'cancelled'") {
+					return &genericMockRow{scanFn: func(dest ...any) error {
+						*dest[0].(*bool) = true
+						return nil
+					}}
+				}
+				if strings.Contains(sql, "SELECT EXISTS") {
+					return &genericMockRow{scanFn: func(dest ...any) error {
+						*dest[0].(*bool) = true
+						return nil
+					}}
+				}
+				return &mockRow{err: pgx.ErrNoRows}
+			},
+		})
+		if _, err := sCancelledWithRepo.AttachChunkPR(ctx, "c1", 101, "aerial"); !errors.Is(err, ErrBuildConflict) {
+			t.Errorf("expected ErrBuildConflict for cancelled chunk, got %v", err)
+		}
+
+		// Cancelled chunk or build without repo returns ErrBuildConflict
+		sCancelledNoRepo := newMockStore(mockDB{
+			queryRowFn: func(_ context.Context, sql string, _ ...any) pgx.Row {
+				if strings.Contains(sql, "SELECT mode") {
+					return &genericMockRow{scanFn: func(dest ...any) error {
+						*dest[0].(*string) = "pr"
+						return nil
+					}}
+				}
+				if strings.Contains(sql, "SELECT EXISTS") {
+					return &genericMockRow{scanFn: func(dest ...any) error {
+						*dest[0].(*bool) = true
+						return nil
+					}}
+				}
+				return &mockRow{err: pgx.ErrNoRows}
+			},
+		})
+		if _, err := sCancelledNoRepo.AttachChunkPR(ctx, "c1", 101, ""); !errors.Is(err, ErrBuildConflict) {
+			t.Errorf("expected ErrBuildConflict for cancelled chunk without repo, got %v", err)
 		}
 
 		// General error

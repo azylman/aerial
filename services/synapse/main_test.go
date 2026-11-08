@@ -3290,6 +3290,13 @@ func TestRouterServer_HandlePRRegister(t *testing.T) {
 			wantSubstr: "vanadis chunk not found",
 		},
 		{
+			name:       "CancelledVanadisChunkReturns409",
+			body:       `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"sha123","vanadis_chunk_id":"cancelled-chunk-id"}`,
+			regErr:     ErrVanadisChunkCancelled,
+			wantStatus: http.StatusConflict,
+			wantSubstr: "vanadis chunk or build is cancelled",
+		},
+		{
 			name:       "InvalidTargetIDFromChunkRegistrationReturns400",
 			body:       `{"repo":"azylman/aerial","pr_number":101,"branch":"feat/test","head_sha":"sha123","vanadis_chunk_id":"chunk-no-thread"}`,
 			regErr:     ErrInvalidTargetID,

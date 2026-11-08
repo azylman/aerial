@@ -273,24 +273,36 @@ func (s *PostgresVanadisStore) AttachChunkPR(ctx context.Context, chunkID string
 	var threadID string
 	var err error
 	if repo != "" {
-		const qWithRepo = `UPDATE vanadis_chunks c SET pr_number = $1, status = CASE WHEN c.status IN ('merged', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $2 AND c.repo = $3 RETURNING b.thread_id;`
+		const qWithRepo = `UPDATE vanadis_chunks c SET pr_number = $1, status = CASE WHEN c.status IN ('merged', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $2 AND c.repo = $3 AND c.status != 'cancelled' AND b.status != 'cancelled' RETURNING b.thread_id;`
 		err = s.db.QueryRow(ctx, qWithRepo, prNumber, chunkID, repo).Scan(&threadID)
 	} else {
-		const qNoRepo = `UPDATE vanadis_chunks c SET pr_number = $1, status = CASE WHEN c.status IN ('merged', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $2 RETURNING b.thread_id;`
+		const qNoRepo = `UPDATE vanadis_chunks c SET pr_number = $1, status = CASE WHEN c.status IN ('merged', 'failed') THEN c.status ELSE 'pr_opened' END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $2 AND c.status != 'cancelled' AND b.status != 'cancelled' RETURNING b.thread_id;`
 		err = s.db.QueryRow(ctx, qNoRepo, prNumber, chunkID).Scan(&threadID)
 	}
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			var exists bool
-			checkErr := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM vanadis_chunks WHERE id = $1);`, chunkID).Scan(&exists)
-			if checkErr == nil && !exists {
-				return "", ErrChunkNotFound
-			}
-			return "", fmt.Errorf("chunk %s cannot attach pr %d (mismatched repo)", chunkID, prNumber)
+			return "", s.resolveAttachChunkPRError(ctx, chunkID, repo, prNumber)
 		}
 		return "", fmt.Errorf("attach chunk pr %s#%d: %w", repo, prNumber, err)
 	}
 	return threadID, nil
+}
+
+func (s *PostgresVanadisStore) resolveAttachChunkPRError(ctx context.Context, chunkID, repo string, prNumber int) error {
+	var exists bool
+	checkErr := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM vanadis_chunks WHERE id = $1);`, chunkID).Scan(&exists)
+	if checkErr == nil && !exists {
+		return fmt.Errorf("%w: %s", ErrChunkNotFound, chunkID)
+	}
+	if repo == "" {
+		return fmt.Errorf("%w: chunk %s or parent build is cancelled", ErrBuildConflict, chunkID)
+	}
+	var isCancelled bool
+	cancErr := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM vanadis_chunks c JOIN vanadis_builds b ON c.build_id = b.id WHERE c.id = $1 AND (c.status = 'cancelled' OR b.status = 'cancelled'));`, chunkID).Scan(&isCancelled)
+	if cancErr == nil && isCancelled {
+		return fmt.Errorf("%w: chunk %s or parent build is cancelled", ErrBuildConflict, chunkID)
+	}
+	return fmt.Errorf("chunk %s cannot attach pr %d (mismatched repo)", chunkID, prNumber)
 }
 
 func computeNextChunkIndex(chunks []VanadisChunkSummary, currentIdx int) int {

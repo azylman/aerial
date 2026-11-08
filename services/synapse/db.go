@@ -62,8 +62,9 @@ type VanadisAdvancementResult struct {
 }
 
 var (
-	ErrVanadisChunkNotFound = errors.New("vanadis chunk not found")
-	ErrInvalidTargetID      = errors.New("target_id must be a valid Discord snowflake (17-20 digits)")
+	ErrVanadisChunkNotFound  = errors.New("vanadis chunk not found")
+	ErrVanadisChunkCancelled = errors.New("vanadis chunk or build is cancelled")
+	ErrInvalidTargetID       = errors.New("target_id must be a valid Discord snowflake (17-20 digits)")
 )
 
 // PRRegisterRequest defines the request payload for POST /internal/pr/register.
@@ -392,6 +393,13 @@ func (r *PostgresPRRegistry) attachVanadisChunkPR(ctx context.Context, repo, chu
 		if resp.StatusCode == http.StatusNotFound {
 			return ErrVanadisChunkNotFound
 		}
+		if resp.StatusCode == http.StatusConflict {
+			body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
+			if readErr != nil {
+				return fmt.Errorf("%w: status %d (read error: %w)", ErrVanadisChunkCancelled, resp.StatusCode, readErr)
+			}
+			return fmt.Errorf("%w: status %d (%s)", ErrVanadisChunkCancelled, resp.StatusCode, strings.TrimSpace(string(body)))
+		}
 		if resp.StatusCode != http.StatusOK {
 			body, readErr := io.ReadAll(io.LimitReader(resp.Body, 1024))
 			if readErr != nil {
@@ -418,11 +426,14 @@ func (r *PostgresPRRegistry) EnsurePRRegistered(ctx context.Context, repo string
 	targetID, vanadisChunkID = NormalizeDiscordTargetID(targetID), strings.TrimSpace(vanadisChunkID)
 	if vanadisChunkID != "" {
 		threadID, err := r.attachVanadisChunkPR(ctx, repo, vanadisChunkID, prNumber)
-		if err == nil {
+		switch {
+		case err == nil:
 			if normThread := NormalizeDiscordTargetID(threadID); IsValidDiscordSnowflake(normThread) {
 				targetID = normThread
 			}
-		} else if !errors.Is(err, ErrVanadisChunkNotFound) {
+		case errors.Is(err, ErrVanadisChunkCancelled):
+			return "", nil
+		case !errors.Is(err, ErrVanadisChunkNotFound):
 			return "", err
 		}
 	}
