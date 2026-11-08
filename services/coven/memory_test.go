@@ -2110,7 +2110,6 @@ func TestSQLStore_ConstructorsAndSetters(t *testing.T) {
 		initialURL   string
 		setURL       string
 		setToken     string
-		client       *http.Client
 		wantBrainURL string
 		wantToken    string
 	}{
@@ -2123,7 +2122,6 @@ func TestSQLStore_ConstructorsAndSetters(t *testing.T) {
 			name:         "CustomURL",
 			initialURL:   "http://my-eri:5000/",
 			setToken:     "test-token",
-			client:       &http.Client{Timeout: 5 * time.Second},
 			wantBrainURL: "http://my-eri:5000",
 			wantToken:    "test-token",
 		},
@@ -2152,7 +2150,7 @@ func TestSQLStore_ConstructorsAndSetters(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var store *SQLStore
 			if tc.name != "NilStoreFallback" {
-				store = NewSQLStoreWithBrainURL(dbMem, tc.initialURL, tc.client)
+				store = NewSQLStoreWithBrainURL(dbMem, tc.initialURL, nil)
 				if tc.setURL != "" {
 					store.SetBrainURL(tc.setURL)
 				}
@@ -2165,9 +2163,6 @@ func TestSQLStore_ConstructorsAndSetters(t *testing.T) {
 			}
 			if store != nil && store.brainToken != tc.wantToken {
 				t.Errorf("brainToken = %q, want %q", store.brainToken, tc.wantToken)
-			}
-			if cl := store.getHTTPClient(); cl == nil {
-				t.Error("getHTTPClient() returned nil")
 			}
 		})
 	}

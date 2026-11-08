@@ -245,6 +245,12 @@ func mkDispWithRoute(srvName, url, tool string) *DefaultDispatcher {
 	return d
 }
 
+type errRoundTripper struct{}
+
+func (errRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, fmt.Errorf("airgapped test transport: connection refused")
+}
+
 func mkDispWithSession(srvName, url, tool, sess string, headers ...map[string]string) *DefaultDispatcher {
 	srv := ServerConfig{Name: srvName, ServerURL: url}
 	if len(headers) > 0 {
@@ -368,7 +374,7 @@ func TestEnsureSession(t *testing.T) {
 		{"NonCanonicalHeader", mkDisp("srvNC", nonCanonTs.URL), "srvNC", "sess-nc-456", false, ""},
 		{"ServerError500", mkDisp("srvErr", errTs.URL), "srvErr", "", true, "returned status 500"},
 		{"InvalidURL", mkDisp("srvInv", "://invalid\x7f"), "srvInv", "", true, "failed to create initialize request"},
-		{"ClosedPort", NewDispatcher([]ServerConfig{{Name: "srvClosed", ServerURL: "http://127.0.0.1:59998"}}, &http.Client{Timeout: 50 * time.Millisecond}), "srvClosed", "", true, "failed to send initialize"},
+		{"ClosedPort", NewDispatcher([]ServerConfig{{Name: "srvClosed", ServerURL: "http://127.0.0.1:59998"}}, &http.Client{Transport: errRoundTripper{}, Timeout: 50 * time.Millisecond}), "srvClosed", "", true, "failed to send initialize"},
 	}
 
 	for _, tc := range tests {
@@ -434,7 +440,7 @@ func TestListTools(t *testing.T) {
 		{"BadStructContinues", mkDisp("srvStruct", badStructTs.URL), 0, false, ""},
 		{"SSEDiscovery", mkDisp("srvSSE", sseTs.URL), 1, false, "t_sse"},
 		{"InvalidURLContinues", mkDisp("srvInv", "://invalid\x7f"), 0, false, ""},
-		{"ClosedPortContinues", NewDispatcher([]ServerConfig{{Name: "srvClosed", ServerURL: "http://127.0.0.1:59997"}}, &http.Client{Timeout: 50 * time.Millisecond}), 0, false, ""},
+		{"ClosedPortContinues", NewDispatcher([]ServerConfig{{Name: "srvClosed", ServerURL: "http://127.0.0.1:59997"}}, &http.Client{Transport: errRoundTripper{}, Timeout: 50 * time.Millisecond}), 0, false, ""},
 	}
 
 	for _, tc := range tests {

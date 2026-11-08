@@ -839,7 +839,7 @@ func TestPostgresPRRegistry_VanadisClientOptions(t *testing.T) {
 		},
 		{
 			name:       "custom URL and client",
-			reg:        NewPostgresPRRegistry(nil, WithVanadisClient("http://custom.vanadis:8080/", &http.Client{Timeout: 5 * time.Second})),
+			reg:        NewPostgresPRRegistry(nil, WithVanadisClient("http://custom.vanadis:8080/", &http.Client{Transport: noopClusterTransport{}, Timeout: 5 * time.Second})),
 			wantURL:    "http://custom.vanadis:8080",
 			wantClient: true,
 		},
