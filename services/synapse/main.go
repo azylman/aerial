@@ -556,7 +556,7 @@ func (s *RouterServer) ProcessWidgetSync(ctx context.Context, args WidgetSyncArg
 }
 
 func (s *RouterServer) sweepOlderDeployedPRWidgets(qCtx context.Context, pgReg *PostgresPRRegistry, repo string, prNumber int) {
-	sweepQuery := `UPDATE pr_registry SET status = 'deployed', metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb) - 'banner', '{jobs}', '[]'::jsonb), updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number < $2 AND status IN ('merged', 'synced', 'deploying', 'deploy_failed') RETURNING pr_number`
+	sweepQuery := `UPDATE pr_registry SET status = 'deployed', metadata = jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb) - 'banner', '{jobs}', '[]'::jsonb, true), '{deployed_jobs}', COALESCE(metadata->'started_jobs', metadata->'deployed_jobs', '[]'::jsonb), true), updated_at = CURRENT_TIMESTAMP WHERE repo = $1 AND pr_number < $2 AND status IN ('merged', 'synced', 'deploying', 'deploy_failed') AND NOT (status IN ('merged', 'synced') AND COALESCE((metadata->'ci_checks')::text, '') LIKE '%Build & Push (%') RETURNING pr_number`
 	rows, sErr := pgReg.pool.Query(qCtx, sweepQuery, repo, prNumber)
 	if sErr != nil || rows == nil {
 		return
@@ -912,28 +912,6 @@ func (s *RouterServer) resolveDeployEventTargetID(ctx context.Context, evt *Depl
 	}
 }
 
-func matchesDeployingPRKustomization(repo string, startedJobs []string, kustomizationName string) bool {
-	for _, job := range startedJobs {
-		if _, kust, _ := resolveImageTagAndKustomization(repo, job); kust == kustomizationName {
-			return true
-		}
-	}
-	return false
-}
-
-func isPRInDeployingList(deployingPRs []DeployingPR, repo string, prNumber int) bool {
-	if prNumber <= 0 {
-		return false
-	}
-	normRepo := normalizeRepo(repo)
-	for _, p := range deployingPRs {
-		if strings.EqualFold(normalizeRepo(p.Repo), normRepo) && p.PRNumber == prNumber {
-			return true
-		}
-	}
-	return false
-}
-
 func (s *RouterServer) enrichDeployEventPRAndTarget(ctx context.Context, evt *DeployEvent) {
 	s.resolveDeployEventPRNumber(ctx, evt)
 	if s.registry != nil && (evt.JobName == "aerial-config" || evt.JobName == "aerial-core") {
@@ -1133,6 +1111,7 @@ func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) 
 		if evt.PRNumber > 0 {
 			s.setPRWidgetState(ctx, evt.Repo, evt.PRNumber, "deployed", "")
 		}
+		s.completeCoalescedDeployingPRs(ctx, evt)
 		return &evt, s.dispatchDeploymentSuccessPrompt(ctx, evt.TargetID, evt.JobName, evt.Repo, evt.CommitSHA, evt.PRNumber, evt.DeploymentID)
 	case "deploy_rollback", "deploy_failed":
 		return &evt, s.handleDeployFailedOrRollback(ctx, evt, prefix)
