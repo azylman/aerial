@@ -142,7 +142,7 @@ func TestSyncSecrets(t *testing.T) {
 					InfisicalClientID:     "cid",
 					InfisicalClientSecret: "csec",
 					KubeAPIServer:         "http://127.0.0.1:1",
-				}, &http.Client{Timeout: 50 * time.Millisecond})
+				}, &http.Client{Transport: &zeroCallTransport{}, Timeout: 50 * time.Millisecond})
 
 				if err := badClientServer.SyncSecrets(ctx, "ws", "env"); err == nil {
 					t.Errorf("SyncSecrets() expected error on unreachable, got nil")
@@ -331,7 +331,7 @@ func TestGetK8sHTTPClient(t *testing.T) {
 			kubeCAPath = tc.caPath
 			var customClient *http.Client
 			if tc.hasHTTPClient {
-				customClient = &http.Client{Timeout: 42 * time.Millisecond}
+				customClient = &http.Client{Transport: &zeroCallTransport{}, Timeout: 42 * time.Millisecond}
 			}
 			srv := &RouterServer{
 				cfg:        Config{KubeAPIServer: tc.apiServer},

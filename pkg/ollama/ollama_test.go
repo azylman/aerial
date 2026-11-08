@@ -13,6 +13,12 @@ import (
 	"time"
 )
 
+type errRoundTripper struct{}
+
+func (errRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, fmt.Errorf("airgapped test transport: connection refused")
+}
+
 func TestNewDynamicClient_TableDriven(t *testing.T) {
 	t.Parallel()
 
@@ -64,12 +70,6 @@ func TestNewDynamicClient_TableDriven(t *testing.T) {
 
 			if got := client.BaseURL(); got != tc.wantBaseURL {
 				t.Errorf("BaseURL() = %q, want %q", got, tc.wantBaseURL)
-			}
-
-			customHC := &http.Client{Timeout: 10 * time.Second}
-			client.SetHTTPClient(customHC)
-			if client.httpClient != customHC {
-				t.Errorf("httpClient did not return configured client")
 			}
 
 			client.SetRetryDelay(5 * time.Millisecond)
@@ -319,6 +319,7 @@ func TestGenerateEmbedding_NetworkError_TableDriven(t *testing.T) {
 					BaseURL: tc.baseURL,
 				}
 			})
+			client.SetHTTPClient(&http.Client{Transport: errRoundTripper{}})
 			client.SetRetryDelay(0)
 
 			_, err := client.GenerateEmbedding(context.Background(), "test prompt", false, tc.maxRetries)

@@ -760,43 +760,98 @@ func analyzeTestFile(fullPath, rel string) ([]string, error) {
 	}
 
 	ast.Inspect(f, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok {
-			if reason := checkBannedTestCall(call); reason != "" {
-				line := fset.Position(call.Pos()).Line
-				violations = append(violations, fmt.Sprintf("%s:%d: %s", rel, line, reason))
-			}
-		}
-		st, ok := n.(*ast.StructType)
-		if !ok || st.Fields == nil {
-			return true
-		}
-		for _, field := range st.Fields.List {
-			if _, isFunc := field.Type.(*ast.FuncType); !isFunc {
-				continue
-			}
-			for _, ident := range field.Names {
-				if isBannedClosureFieldName(ident.Name) {
-					line := fset.Position(ident.Pos()).Line
-					violations = append(violations, fmt.Sprintf("%s:%d: test struct field %q uses a banned closure func type; use declarative expectation fields instead", rel, line, ident.Name))
-				}
-			}
-		}
-		return true
+		return inspectTestNode(n, fset, rel, &violations)
 	})
 
 	return violations, nil
 }
 
-func checkBannedTestCall(call *ast.CallExpr) string {
-	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok {
-		return ""
+func inspectTestNode(n ast.Node, fset *token.FileSet, rel string, violations *[]string) bool {
+	if sel, ok := n.(*ast.SelectorExpr); ok {
+		if isSelectorNamed(sel.X, "http", "DefaultClient") && sel.Sel.Name == "CloseIdleConnections" {
+			return false
+		}
+		if isSelectorNamed(sel, "http", "DefaultClient") {
+			line := fset.Position(sel.Pos()).Line
+			*violations = append(*violations, fmt.Sprintf("%s:%d: unguarded http.DefaultClient in tests is prohibited; use httptest.Server.Client() or an http.Client with a mock Transport", rel, line))
+		}
+	}
+	if lit, ok := n.(*ast.CompositeLit); ok {
+		if reason := checkHTTPClientLit(lit); reason != "" {
+			line := fset.Position(lit.Pos()).Line
+			*violations = append(*violations, fmt.Sprintf("%s:%d: %s", rel, line, reason))
+		}
+	}
+	if call, ok := n.(*ast.CallExpr); ok {
+		if reason := checkBannedTestCall(call); reason != "" {
+			line := fset.Position(call.Pos()).Line
+			*violations = append(*violations, fmt.Sprintf("%s:%d: %s", rel, line, reason))
+		}
+	}
+	if st, ok := n.(*ast.StructType); ok && st.Fields != nil {
+		checkTestStructFields(st, fset, rel, violations)
+	}
+	return true
+}
+
+func checkTestStructFields(st *ast.StructType, fset *token.FileSet, rel string, violations *[]string) {
+	for _, field := range st.Fields.List {
+		if _, isFunc := field.Type.(*ast.FuncType); !isFunc {
+			continue
+		}
+		for _, ident := range field.Names {
+			if isBannedClosureFieldName(ident.Name) {
+				line := fset.Position(ident.Pos()).Line
+				*violations = append(*violations, fmt.Sprintf("%s:%d: test struct field %q uses a banned closure func type; use declarative expectation fields instead", rel, line, ident.Name))
+			}
+		}
+	}
+}
+
+func isSelectorNamed(expr ast.Expr, pkgName, selName string) bool {
+	sel, ok := expr.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != selName {
+		return false
 	}
 	pkg, ok := sel.X.(*ast.Ident)
-	if ok && pkg.Name == "time" && sel.Sel.Name == "Sleep" {
+	return ok && pkg.Name == pkgName
+}
+
+func checkHTTPClientLit(lit *ast.CompositeLit) string {
+	if !isSelectorNamed(lit.Type, "http", "Client") {
+		return ""
+	}
+	for _, elt := range lit.Elts {
+		if kv, ok := elt.(*ast.KeyValueExpr); ok {
+			if key, ok := kv.Key.(*ast.Ident); ok && key.Name == "Transport" && !isDisallowedTransportExpr(kv.Value) {
+				return ""
+			}
+		}
+	}
+	return "http.Client literal without mock Transport in tests is prohibited; inject a mock RoundTripper or use httptest.Server.Client()"
+}
+
+func isDisallowedTransportExpr(expr ast.Expr) bool {
+	if ident, ok := expr.(*ast.Ident); ok && ident.Name == "nil" {
+		return true
+	}
+	if isSelectorNamed(expr, "http", "DefaultTransport") {
+		return true
+	}
+	if unary, ok := expr.(*ast.UnaryExpr); ok && unary.Op == token.AND {
+		return isDisallowedTransportExpr(unary.X)
+	}
+	if comp, ok := expr.(*ast.CompositeLit); ok && isSelectorNamed(comp.Type, "http", "Transport") {
+		return true
+	}
+	return false
+}
+
+func checkBannedTestCall(call *ast.CallExpr) string {
+	if isSelectorNamed(call.Fun, "time", "Sleep") {
 		return "time.Sleep in tests is prohibited; use event-driven channels, condition variables, or injected delay overrides"
 	}
-	if ok && pkg.Name == "syscall" && sel.Sel.Name == "Kill" {
+	if isSelectorNamed(call.Fun, "syscall", "Kill") {
 		return "raw syscall.Kill in tests is prohibited; use dependency-injected signal or process-kill functions"
 	}
 	return ""
