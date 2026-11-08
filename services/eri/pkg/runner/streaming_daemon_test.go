@@ -756,7 +756,7 @@ func TestExtractResponseStringAndPopulateUsage(t *testing.T) {
 		{map[string]any{"content": "root-content"}, "root-content"},
 		{map[string]any{"text": "root-text"}, "root-text"},
 		{map[string]any{"unknown": "val"}, ""},
-		{map[string]any{"result": "not-a-map"}, ""},
+		{map[string]any{"result": "not-a-map"}, "not-a-map"},
 		{map[string]any{}, ""},
 		{nil, ""},
 	}
@@ -1060,5 +1060,212 @@ func TestStreamingDaemon_StepAwareDeltaPurging(t *testing.T) {
 	}
 	if len(completed) != 1 || completed[0].ToolName != "bg_daemon" || completed[0].Status != "aborted" {
 		t.Errorf("expected bg_daemon aborted completion without purging final response, got %+v", completed)
+	}
+}
+
+func TestStreamingDaemon_Claude_FullLifecycle(t *testing.T) {
+	claudeSess := "99999999-8888-7777-6666-555555555555"
+	cfg := DaemonConfig{
+		Engine:        "claude",
+		SessionID:     claudeSess,
+		ClaudeBin:     "claude",
+		GeminiHomeDir: "/tmp/claude-home",
+	}
+	h := startTestStreamingDaemon(t, cfg, "", true)
+	defer h.daemon.Close()
+
+	if h.daemon.State() != StateReady {
+		t.Fatalf("expected StateReady on spawn, got %s", h.daemon.State())
+	}
+	if h.daemon.SessionID() != claudeSess {
+		t.Fatalf("expected session ID %s, got %s", claudeSess, h.daemon.SessionID())
+	}
+
+	sink := newMockTurnSink()
+	turn := &TurnContext{
+		TurnID:    "claude-turn-1",
+		Prompt:    "fix the bug",
+		Sink:      sink,
+		CreatedAt: time.Now(),
+	}
+	if err := h.daemon.Send(turn.Prompt, turn); err != nil {
+		t.Fatalf("send failed: %v", err)
+	}
+
+	// 1. System init event latching session ID
+	h.daemon.dispatchNDJSONLine(`{"type":"system","subtype":"init","session_id":"12345678-1234-5678-1234-567812345678"}`)
+	if h.daemon.SessionID() != "12345678-1234-5678-1234-567812345678" {
+		t.Errorf("expected latched session ID, got %s", h.daemon.SessionID())
+	}
+
+	// 2. Stream event: message_start
+	h.daemon.dispatchNDJSONLine(`{"type":"stream_event","event":{"type":"message_start"}}`)
+
+	// 3. Stream event: thinking_delta
+	h.daemon.dispatchNDJSONLine(`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta"}}}`)
+
+	// 4. Stream event: text_delta
+	h.daemon.dispatchNDJSONLine(`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Thinking about "}}}`)
+	h.daemon.dispatchNDJSONLine(`{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"it..."}}}`)
+
+	// 5. Assistant event: tool_use (double underscore mcp format and skill)
+	h.daemon.dispatchNDJSONLine(`{"type":"assistant","message":{"content":[{"type":"tool_use","id":"call_1","name":"mcp__github__create_pull_request","input":{"title":"my PR"}},{"type":"tool_use","id":"call_2","name":"run_command","input":{"CommandLine":"cat /share/aerial-config/custom-skills/ha-operations/SKILL.md"}}]}}`)
+
+	// 6. User event: tool_result
+	h.daemon.dispatchNDJSONLine(`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call_1","is_error":false}]}}`)
+	h.daemon.dispatchNDJSONLine(`{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call_2","is_error":true}]}}`)
+
+	// 7. Result event: success with usage tokens
+	h.daemon.dispatchNDJSONLine(`{"type":"result","result":"all done successfully","usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":20,"cache_read_input_tokens":10}}`)
+
+	waitAndAssertSinkResult(t, "ClaudeTurn", sink, "all done successfully", "", "")
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+
+	if sink.thinking < 1 {
+		t.Errorf("expected OnThinking to be called, got %d", sink.thinking)
+	}
+	if strings.Join(sink.deltas, "") != "Thinking about it..." {
+		t.Errorf("unexpected deltas: %v", sink.deltas)
+	}
+	if len(sink.toolCalls) != 2 {
+		t.Fatalf("expected 2 tool calls, got %d: %v", len(sink.toolCalls), sink.toolCalls)
+	}
+	if sink.toolCalls[0] != "create_pull_request:" {
+		t.Errorf("expected toolCall[0] 'create_pull_request:', got %q", sink.toolCalls[0])
+	}
+	if sink.toolCalls[1] != "run_command:cat" {
+		t.Errorf("expected toolCall[1] 'run_command:cat', got %q", sink.toolCalls[1])
+	}
+	if len(sink.activatedSkills) != 1 || sink.activatedSkills[0] != "ha-operations:discord" {
+		t.Errorf("expected skill 'ha-operations:discord', got %v", sink.activatedSkills)
+	}
+	if len(sink.completedToolDetails) != 2 {
+		t.Fatalf("expected 2 completed tools, got %d: %+v", len(sink.completedToolDetails), sink.completedToolDetails)
+	}
+	if sink.completedToolDetails[0].ToolName != "create_pull_request" || sink.completedToolDetails[0].MCPServer != "github" || sink.completedToolDetails[0].Status != "ok" {
+		t.Errorf("unexpected completed tool 0: %+v", sink.completedToolDetails[0])
+	}
+	if sink.completedToolDetails[1].ToolName != "run_command" || sink.completedToolDetails[1].MCPServer != "native" || sink.completedToolDetails[1].Status != "error" {
+		t.Errorf("unexpected completed tool 1: %+v", sink.completedToolDetails[1])
+	}
+	if sink.result == nil {
+		t.Fatalf("expected non-nil result")
+	}
+	// input: 100 + 20 + 10 = 130, cache_read: 10, total: 130 + 50 = 180
+	if sink.result.Usage.InputTokens != 130 || sink.result.Usage.CacheReadTokens != 10 || sink.result.Usage.TotalTokens != 180 || sink.result.Usage.OutputTokens != 50 {
+		t.Errorf("unexpected usage in result: %+v", sink.result.Usage)
+	}
+}
+
+func TestStreamingDaemon_Claude_ErrorHandling(t *testing.T) {
+	tests := []struct {
+		name       string
+		ndjsonLine string
+		wantResp   string
+		wantErrSub string
+		wantStatus string
+	}{
+		{
+			name:       "IsErrorTrueWithStringResult",
+			ndjsonLine: `{"type":"result","is_error":true,"result":"rate limit exceeded"}`,
+			wantErrSub: "rate limit exceeded",
+		},
+		{
+			name:       "SubtypeErrorWithErrorsArray",
+			ndjsonLine: `{"type":"result","subtype":"error_rate_limit","errors":[{"message":"too many tokens"},{"message":"retry later"}]}`,
+			wantErrSub: "too many tokens; retry later",
+		},
+		{
+			name:       "SubtypeErrorWithStringErrorsArray",
+			ndjsonLine: `{"type":"result","subtype":"error_invalid_request","errors":["malformed payload"]}`,
+			wantErrSub: "malformed payload",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DaemonConfig{
+				Engine:    "claude",
+				SessionID: "11111111-2222-3333-4444-555555555555",
+			}
+			daemon := &StreamingDaemon{
+				cfg:           cfg,
+				sessionID:     cfg.SessionID,
+				claudeToolIDs: make(map[string]int),
+			}
+			sink := newMockTurnSink()
+			enqueueInflightTurn(daemon, "turn-"+tc.name, sink)
+			daemon.dispatchNDJSONLine(tc.ndjsonLine)
+			waitAndAssertSinkResult(t, tc.name, sink, tc.wantResp, "", tc.wantErrSub)
+		})
+	}
+
+	// Verify tailBuffer Write and String
+	tb := newTailBuffer(10)
+	if n, err := tb.Write([]byte("0123456789extra")); err != nil || n != 15 || tb.String() != "56789extra" {
+		t.Errorf("tailBuffer failed: %q %v", tb.String(), err)
+	}
+
+	// Verify Startup with empty SessionID generates UUID
+	hGen := startTestStreamingDaemon(t, DaemonConfig{Engine: "claude"}, "", false)
+	defer hGen.daemon.Close()
+	if !IsValidUUID(hGen.daemon.SessionID()) {
+		t.Errorf("expected valid generated UUID, got %q", hGen.daemon.SessionID())
+	}
+
+	// Verify StartStreamingDaemon timeout with stderr tail diagnostics
+	mockErrSpawner := &MockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, c DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			go func() {
+				_, _ = errW.Write([]byte("fatal startup error from binary"))
+				closeQuietly(errW)
+			}()
+			_ = inR
+			_ = outW
+			return inW, outR, errR, &MockProcessHandle{pid: 9999}, nil
+		},
+	}
+	_, errStart := StartStreamingDaemon(context.Background(), DaemonConfig{Timeout: 50 * time.Millisecond}, mockErrSpawner)
+	if errStart == nil || !strings.Contains(errStart.Error(), "fatal startup error from binary") {
+		t.Errorf("expected stderr diagnostics in timeout error, got %v", errStart)
+	}
+
+	// Verify tool_calls array in step_update
+	hToolCalls := startTestStreamingDaemon(t, cfgForSession("00000000-0000-0000-0000-000000000301"), "", true)
+	defer hToolCalls.daemon.Close()
+	sinkTC := newMockTurnSink()
+	enqueueInflightTurn(hToolCalls.daemon, "turn-tc", sinkTC)
+	hToolCalls.daemon.dispatchNDJSONLine(`{"event":"step_update","step_update":{"type":"tool_call","state":"RUNNING","tool_calls":[{"name":"bash","args":{"command":"echo test"}}]}}`)
+	if len(sinkTC.toolCalls) != 1 || sinkTC.toolCalls[0] != "bash:echo" {
+		t.Errorf("expected tool_calls entry handled, got %v", sinkTC.toolCalls)
+	}
+
+	// Verify formatEOFErr branches
+	dNilTail := &StreamingDaemon{}
+	if err := dNilTail.formatEOFErr(io.EOF); err == nil || !strings.Contains(err.Error(), "unexpected EOF") {
+		t.Errorf("expected unexpected EOF, got %v", err)
+	}
+	dEmptyTail := &StreamingDaemon{stderrTail: newTailBuffer(10)}
+	if err := dEmptyTail.formatEOFErr(io.EOF); err == nil || !strings.Contains(err.Error(), "unexpected EOF") {
+		t.Errorf("expected unexpected EOF, got %v", err)
+	}
+	dWithTail := &StreamingDaemon{stderrTail: newTailBuffer(100)}
+	_, _ = dWithTail.stderrTail.Write([]byte("crash log"))
+	if err := dWithTail.formatEOFErr(io.EOF); err == nil || !strings.Contains(err.Error(), "crash log") {
+		t.Errorf("expected crash log, got %v", err)
+	}
+
+	// Verify recordToolStart unindexed duplicate
+	dTools := &StreamingDaemon{inFlightTools: make(map[int]inFlightToolCall)}
+	if !dTools.recordToolStart(-1, false, "read_file", "native") {
+		t.Errorf("expected initial unindexed tool start true")
+	}
+	if dTools.recordToolStart(-1, false, "read_file", "native") {
+		t.Errorf("expected duplicate unindexed tool start false")
 	}
 }

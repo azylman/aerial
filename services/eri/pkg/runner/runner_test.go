@@ -77,6 +77,9 @@ func TestIsQuotaPause(t *testing.T) {
 		{name: "Process syntax error", errDetail: "syntax error near token"},
 		{name: "Google capacity exhausted reset after 0s", errDetail: "API error (attempt 2): RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.", want: true},
 		{name: "Google capacity exhausted reset after 1s", errDetail: "API error (attempt 1): RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 1s.", want: true},
+		{name: "Claude AI usage limit reached", errDetail: "Claude AI usage limit reached. Resets in 2h 30m.", want: true},
+		{name: "Claude rate limit error", stderr: "rate_limit_error: usage limit exceeded, resets in 10m", want: true},
+		{name: "Claude usage limit phrase with resets prefix", errDetail: "Your usage limit resets 3pm.", want: true},
 	} {
 		if got := IsQuotaPause(tc.errDetail, tc.stderr); got != tc.want {
 			t.Errorf("%s: IsQuotaPause(%q, %q) = %v, want %v", tc.name, tc.errDetail, tc.stderr, got, tc.want)

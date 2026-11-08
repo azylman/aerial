@@ -230,6 +230,12 @@ func (p *InterchangeablePool) UpdateModel(model string) {
 	}
 }
 
+func (p *InterchangeablePool) UpdateEngine(engine, claudeBin string) {
+	if p != nil && p.underlying != nil {
+		p.underlying.UpdateEngine(engine, claudeBin)
+	}
+}
+
 func (p *InterchangeablePool) MarkDirty() {
 	if p != nil && p.underlying != nil {
 		p.underlying.MarkDirty()

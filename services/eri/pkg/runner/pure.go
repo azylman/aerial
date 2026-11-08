@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -62,7 +63,7 @@ func FilterAgyBaseEnv(env []string) []string {
 }
 
 func filterHomeEnv(env []string) []string {
-	return filterEnvKeys(env, "HOME", "USERPROFILE", "GEMINI_CLI_HOME")
+	return filterEnvKeys(env, "HOME", "USERPROFILE", "GEMINI_CLI_HOME", "CLAUDE_CONFIG_DIR")
 }
 
 func filterVanadisChunkEnv(env []string) []string {
@@ -106,7 +107,7 @@ func BuildAgyEnv(input AgyEnvInput) []string {
 
 	cmdEnv = append(cmdEnv, "GIT_TERMINAL_PROMPT=0", "AGY_LOG_LEVEL=debug", "ANTIGRAVITY_LOG_LEVEL=debug")
 	if h := strings.TrimSpace(input.HomeDir); h != "" {
-		cmdEnv = append(cmdEnv, "HOME="+h, "USERPROFILE="+h, "GEMINI_CLI_HOME="+h)
+		cmdEnv = append(cmdEnv, "HOME="+h, "USERPROFILE="+h, "GEMINI_CLI_HOME="+h, "CLAUDE_CONFIG_DIR="+filepath.Join(h, ".claude"))
 	}
 	if k := strings.TrimSpace(input.APIKey); k != "" {
 		cmdEnv = append(cmdEnv, "GEMINI_API_KEY="+k, "ANTIGRAVITY_API_KEY="+k, "GOOGLE_GENAI_API_KEY="+k)
@@ -174,6 +175,15 @@ func ExtractMCPToolInfo(toolName string, params map[string]any) (string, string)
 	}
 	if toolName == "call_mcp_tool" {
 		return extractCallMCPToolInfo(params)
+	}
+	if strings.HasPrefix(toolName, "mcp__") {
+		parts := strings.SplitN(toolName[5:], "__", 2)
+		if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+			return parts[1], parts[0]
+		}
+		if len(parts) == 1 && parts[0] != "" {
+			return parts[0], "unknown"
+		}
 	}
 	if strings.HasPrefix(toolName, "mcp_") {
 		parts := strings.SplitN(toolName[4:], "_", 2)

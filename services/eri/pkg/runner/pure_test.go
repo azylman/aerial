@@ -32,6 +32,26 @@ func TestBuildDaemonArgs(t *testing.T) {
 		{DaemonConfig{SessionID: "sess-abc", Model: "gemini-test"}, []string{"--dangerously-skip-permissions", "--input-format stream-json", "--output-format stream-json", "--conversation sess-abc", "--model gemini-test", "--print-timeout 60m"}, nil},
 		{DaemonConfig{Timeout: 15 * time.Minute}, []string{"--print-timeout 15m"}, []string{"--conversation", "--model"}},
 		{DaemonConfig{Timeout: 45 * time.Second}, []string{"--print-timeout 45s"}, nil},
+		{
+			DaemonConfig{
+				Engine:        "claude",
+				SessionID:     "sess-claude-new",
+				ResumeSession: false,
+				Model:         "claude-3-7-sonnet",
+				GeminiHomeDir: "/home/user",
+			},
+			[]string{"-p", "--verbose", "--dangerously-skip-permissions", "--input-format stream-json", "--output-format stream-json", "--include-partial-messages", "--session-id sess-claude-new", "--model claude-3-7-sonnet", "--mcp-config /home/user/.claude/mcp_config.json"},
+			[]string{"--resume", "--conversation", "--print-timeout"},
+		},
+		{
+			DaemonConfig{
+				Engine:        "claude",
+				SessionID:     "sess-claude-resumed",
+				ResumeSession: true,
+			},
+			[]string{"-p", "--verbose", "--dangerously-skip-permissions", "--resume sess-claude-resumed"},
+			[]string{"--session-id", "--conversation", "--print-timeout"},
+		},
 	} {
 		assertContainsAndOmits(t, strings.Join(BuildDaemonArgs(tc.cfg), " "), tc.contains, tc.omits, tc.cfg)
 	}
@@ -41,6 +61,7 @@ func TestBuildAgyEnv(t *testing.T) {
 	t.Parallel()
 	filt := FilterAgyBaseEnv([]string{
 		"FOO=bar",
+		"CLAUDE_CODE_OAUTH_TOKEN=claude-secret-kept",
 		"GEMINI_API_KEY=secret1",
 		"gemini_api_key=secret2",
 		"ANTIGRAVITY_API_KEY=s3",
@@ -66,7 +87,7 @@ func TestBuildAgyEnv(t *testing.T) {
 		"MALFORMED_NO_EQUALS",
 		"PATH=/usr/bin",
 	})
-	if fj := strings.Join(filt, "\n"); strings.Contains(fj, "secret") || strings.Contains(fj, "=s") || !strings.Contains(fj, "FOO=bar") || !strings.Contains(fj, "MALFORMED_NO_EQUALS") || !strings.Contains(fj, "PATH=/usr/bin") {
+	if fj := strings.Join(filt, "\n"); strings.Contains(fj, "secret1") || strings.Contains(fj, "=s") || !strings.Contains(fj, "FOO=bar") || !strings.Contains(fj, "CLAUDE_CODE_OAUTH_TOKEN=claude-secret-kept") || !strings.Contains(fj, "MALFORMED_NO_EQUALS") || !strings.Contains(fj, "PATH=/usr/bin") {
 		t.Errorf("FilterAgyBaseEnv leak or drop: %v", filt)
 	}
 
@@ -78,15 +99,15 @@ func TestBuildAgyEnv(t *testing.T) {
 		{AgyEnvInput{}, []string{"GIT_TERMINAL_PROMPT=0", "AGY_LOG_LEVEL=debug", "ANTIGRAVITY_LOG_LEVEL=debug"}, nil},
 		{
 			AgyEnvInput{
-				BaseEnv:  []string{"CUSTOM_BASE=1", "AERIAL_VANADIS_CHUNK_ID=stale-chunk", "PATH=/bin", "HOME=/root", "USERPROFILE=C:\\root", "GEMINI_CLI_HOME=/gemini"},
+				BaseEnv:  []string{"CUSTOM_BASE=1", "AERIAL_VANADIS_CHUNK_ID=stale-chunk", "PATH=/bin", "HOME=/root", "USERPROFILE=C:\\root", "GEMINI_CLI_HOME=/gemini", "CLAUDE_CONFIG_DIR=/stale/claude"},
 				HomeDir:  "/custom/home",
 				APIKey:   "secret-token-123",
 				TargetID: "target-agent",
 				Timezone: "America/Los_Angeles",
 				ExtraEnv: []string{"EXTRA_KEY=foo"},
 			},
-			[]string{"CUSTOM_BASE=1", "GIT_TERMINAL_PROMPT=0", "AGY_LOG_LEVEL=debug", "ANTIGRAVITY_LOG_LEVEL=debug", "HOME=/custom/home", "USERPROFILE=/custom/home", "GEMINI_CLI_HOME=/custom/home", "GEMINI_API_KEY=secret-token-123", "ANTIGRAVITY_API_KEY=secret-token-123", "GOOGLE_GENAI_API_KEY=secret-token-123", "AERIAL_TARGET_ID=target-agent", "TZ=America/Los_Angeles", "EXTRA_KEY=foo"},
-			[]string{"AERIAL_VANADIS_CHUNK_ID=stale-chunk", "HOME=/root", "USERPROFILE=C:\\root", "GEMINI_CLI_HOME=/gemini"},
+			[]string{"CUSTOM_BASE=1", "GIT_TERMINAL_PROMPT=0", "AGY_LOG_LEVEL=debug", "ANTIGRAVITY_LOG_LEVEL=debug", "HOME=/custom/home", "USERPROFILE=/custom/home", "GEMINI_CLI_HOME=/custom/home", "CLAUDE_CONFIG_DIR=/custom/home/.claude", "GEMINI_API_KEY=secret-token-123", "ANTIGRAVITY_API_KEY=secret-token-123", "GOOGLE_GENAI_API_KEY=secret-token-123", "AERIAL_TARGET_ID=target-agent", "TZ=America/Los_Angeles", "EXTRA_KEY=foo"},
+			[]string{"AERIAL_VANADIS_CHUNK_ID=stale-chunk", "HOME=/root", "USERPROFILE=C:\\root", "GEMINI_CLI_HOME=/gemini", "CLAUDE_CONFIG_DIR=/stale/claude"},
 		},
 		{
 			AgyEnvInput{BaseEnv: []string{"CUSTOM_BASE=1", "GEMINI_API_KEY=ambient-key", "ANTIGRAVITY_API_KEY=ambient-key", "GOOGLE_GENAI_API_KEY=ambient-key", "gemini_api_key=ambient2", "GITHUB_PAT=secret-pat", "DISCORD_TOKEN=secret-discord", "DATABASE_URL=postgres://leak", "AERIAL_VANADIS_CHUNK_ID=stale-chunk", "VANADIS_CHUNK_ID=stale-legacy-chunk", "MALFORMED_NO_EQUALS", "OTHER_ENV=kept"}},
@@ -181,6 +202,9 @@ func TestExtractMCPToolInfo(t *testing.T) {
 		{"call_mcp_tool", "list_containers", "unknown", map[string]any{"ToolName": "list_containers"}},
 		{"call_mcp_tool", "call_mcp_tool", "unknown", map[string]any{"ServerName": 12345, "ToolName": []any{"bad"}}},
 		{"mcp_github_create_pull_request", "create_pull_request", "github", nil},
+		{"mcp__github__create_pull_request", "create_pull_request", "github", nil},
+		{"mcp__docker__run", "run", "docker", nil},
+		{"mcp__singlepart", "singlepart", "unknown", nil},
 		{"mcp_docker", "docker", "unknown", nil},
 		{"mcp_singlepart", "singlepart", "unknown", nil},
 	} {

@@ -14,7 +14,7 @@ var (
 	reUUIDInText                 = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
 	reUpdateStream               = regexp.MustCompile(`Starting conversation update stream for ([^\s\r\n]+)`)
 	reGeneralSession             = regexp.MustCompile(`(?i)(?:conversation|session)(?:_id)?[:\s=]+([a-zA-Z0-9\-]+)`)
-	reQuotaResetIn               = regexp.MustCompile(`(?i)(?:resets in|reset after)\s+([-0-9a-zA-Z\s]+?)(?:\.|\n|\r|$)`)
+	reQuotaResetIn               = regexp.MustCompile(`(?i)(?:resets in|reset after|resets)\s+([-0-9a-zA-Z\s]+?)(?:\.|\n|\r|$)`)
 	reWhitespace                 = regexp.MustCompile(`\s+`)
 	safeCmdRegex                 = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 	reTerminatingBackgroundTasks = regexp.MustCompile(`(?i)terminating\s+([1-9]\d*)\s+background\s+task\(s\)`)
@@ -395,13 +395,16 @@ func IsQuotaPause(errDetail, stderr string) bool {
 	if strings.Contains(combined, "individual quota reached") ||
 		strings.Contains(combined, "please upgrade your subscription") ||
 		strings.Contains(combined, "exhausted your capacity on this model") ||
-		strings.Contains(combined, "brain bucket resets in") {
+		strings.Contains(combined, "brain bucket resets in") ||
+		strings.Contains(combined, "claude ai usage limit reached") ||
+		strings.Contains(combined, "rate_limit_error") {
 		return true
 	}
 	hasQuotaWord := strings.Contains(combined, "quota") ||
 		strings.Contains(combined, "resource_exhausted") ||
-		strings.Contains(combined, "resource has been exhausted")
-	hasResetTimer := strings.Contains(combined, "resets in") || strings.Contains(combined, "reset after")
+		strings.Contains(combined, "resource has been exhausted") ||
+		strings.Contains(combined, "usage limit")
+	hasResetTimer := strings.Contains(combined, "resets in") || strings.Contains(combined, "reset after") || strings.Contains(combined, "resets ")
 	return hasQuotaWord && (hasResetTimer || strings.Contains(combined, "upgrade your subscription"))
 }
 

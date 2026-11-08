@@ -19,6 +19,7 @@ import (
 
 // PoolConfig specifies parameters for initializing and configuring UnifiedProcessPool.
 type PoolConfig struct {
+	Engine, ClaudeBin                                             string
 	AgyBin, Model, DefaultModel, Cwd, GeminiHomeDir, Timezone     string
 	TargetModels                                                  map[string]string // Deprecated: pools are now model-bound. Ignored.
 	Env, PrewarmedTargets                                         []string
@@ -132,6 +133,17 @@ func (p *UnifiedProcessPool) UpdateModel(model string) {
 	p.mu.Unlock()
 }
 
+// UpdateEngine updates the engine and Claude binary used for newly spawned or rotated daemons in the pool.
+func (p *UnifiedProcessPool) UpdateEngine(engine, claudeBin string) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.cfg.Engine = strings.TrimSpace(engine)
+	p.cfg.ClaudeBin = strings.TrimSpace(claudeBin)
+	p.mu.Unlock()
+}
+
 // Initialize pre-warms configured target daemons sequentially in the caller's context.
 func (p *UnifiedProcessPool) Initialize(ctx context.Context) error {
 	if p.isClosed() {
@@ -238,6 +250,14 @@ func (p *UnifiedProcessPool) buildDaemonConfig(targetKey, trimmedSess string, in
 	cfg := p.cfg
 	p.mu.RUnlock()
 
+	var resumeSession bool
+	if strings.EqualFold(strings.TrimSpace(cfg.Engine), "claude") {
+		if trimmedSess == "" {
+			trimmedSess = uuid.New().String()
+		}
+		resumeSession = cfg.SessionManager != nil && cfg.SessionManager.ClaudeSessionExistsOnDisk(trimmedSess)
+	}
+
 	daemonEnv := filterVanadisChunkEnv(cfg.Env)
 	if home := strings.TrimSpace(cfg.GeminiHomeDir); home != "" {
 		geminiDir := filepath.Join(home, ".gemini")
@@ -258,6 +278,7 @@ func (p *UnifiedProcessPool) buildDaemonConfig(targetKey, trimmedSess string, in
 	}
 
 	return DaemonConfig{
+		Engine: cfg.Engine, ClaudeBin: cfg.ClaudeBin, ResumeSession: resumeSession,
 		ThreadID: targetKey, SessionID: trimmedSess, InitialTurnCount: initTurnCount,
 		Model: cfg.Model, AgyBin: cfg.AgyBin, Cwd: cfg.Cwd, Env: daemonEnv,
 		GeminiHomeDir: cfg.GeminiHomeDir, Timeout: cfg.HandshakeTimeout,
