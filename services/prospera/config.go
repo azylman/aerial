@@ -61,6 +61,8 @@ type ProsperaYAMLConfig struct {
 	GeminiVoiceName       string `yaml:"gemini_voice_name"`
 	CallbackWindowMinutes int    `yaml:"callback_window_minutes"`
 	MaxConcurrentCalls    int    `yaml:"max_concurrent_calls"`
+	TwilioAccountSID      string `yaml:"twilio_account_sid"`
+	TwilioFromNumber      string `yaml:"twilio_from_number"`
 }
 
 var e164Regex = regexp.MustCompile(`^\+[1-9][0-9]{1,14}$`)
@@ -212,9 +214,18 @@ func LoadConfigFile(path string, getenv func(string) string) (*Config, error) {
 
 	geminiKey := strings.TrimSpace(getenv("GEMINI_HARNESS_API_KEY"))
 
-	fromNum, err := parseFromNumber(getenv("TWILIO_FROM_NUMBER"))
+	rawFrom := strings.TrimSpace(getenv("TWILIO_FROM_NUMBER"))
+	if rawFrom == "" {
+		rawFrom = strings.TrimSpace(ycfg.TwilioFromNumber)
+	}
+	fromNum, err := parseFromNumber(rawFrom)
 	if err != nil {
 		return nil, err
+	}
+
+	twilioAccountSID := strings.TrimSpace(getenv("TWILIO_ACCOUNT_SID"))
+	if twilioAccountSID == "" {
+		twilioAccountSID = strings.TrimSpace(ycfg.TwilioAccountSID)
 	}
 
 	allowList, err := parseAllowFrom(getenv("ALLOW_FROM"))
@@ -225,7 +236,7 @@ func LoadConfigFile(path string, getenv func(string) string) (*Config, error) {
 	return &Config{
 		Port:                  strings.TrimSpace(ycfg.Port),
 		DatabaseURL:           dbURL,
-		TwilioAccountSID:      strings.TrimSpace(getenv("TWILIO_ACCOUNT_SID")),
+		TwilioAccountSID:      twilioAccountSID,
 		TwilioAuthToken:       strings.TrimSpace(getenv("TWILIO_AUTH_TOKEN")),
 		TwilioFromNumber:      fromNum,
 		PublicWebhookBaseURL:  publicWebhookBaseURL,

@@ -1800,6 +1800,24 @@ func TestLoadSharedSecrets_TableDriven(t *testing.T) {
 	invalidJSON := filepath.Join(tmpDir, "invalid.json")
 	_ = os.WriteFile(invalidJSON, []byte(`{not valid json`), 0o600)
 
+	secretsDir := filepath.Join(tmpDir, "secrets_dir")
+	_ = os.MkdirAll(filepath.Join(secretsDir, "..data"), 0o755)
+	_ = os.WriteFile(filepath.Join(secretsDir, "..data", "IGNORE_ME"), []byte("ignored"), 0o600)
+	_ = os.WriteFile(filepath.Join(secretsDir, ".hidden"), []byte("ignored"), 0o600)
+	_ = os.MkdirAll(filepath.Join(secretsDir, "subdir"), 0o755)
+	_ = os.WriteFile(filepath.Join(secretsDir, "subdir", "IGNORE_SUB"), []byte("ignored"), 0o600)
+	_ = os.WriteFile(filepath.Join(secretsDir, "DISCORD_BOT_TOKEN"), []byte("dir-bot-token\n"), 0o600)
+	_ = os.WriteFile(filepath.Join(secretsDir, "POSTGRES_PASSWORD"), []byte("  dir-pg-pass  "), 0o600)
+	_ = os.WriteFile(filepath.Join(secretsDir, "EMPTY_KEY"), []byte("  "), 0o600)
+
+	dirWithJSON := filepath.Join(tmpDir, "dir_with_json")
+	_ = os.MkdirAll(dirWithJSON, 0o755)
+	_ = os.WriteFile(filepath.Join(dirWithJSON, "shared-secrets.json"), []byte(`{
+		"NESTED_KEY": "nested-val",
+		"OPENOBSERVE_ROOT_USER_PASSWORD": "dir-oo-pass"
+	}`), 0o600)
+	_ = os.WriteFile(filepath.Join(dirWithJSON, "INDIVIDUAL_FILE"), []byte("indiv-val"), 0o600)
+
 	tests := []struct {
 		name         string
 		filePath     string
@@ -1863,6 +1881,42 @@ func TestLoadSharedSecrets_TableDriven(t *testing.T) {
 			filePath: existingPrimaryJSON,
 			wantKey:  "DISCORD_TOKEN",
 			wantVal:  "primary-tok",
+		},
+		{
+			name:     "directory mount reads individual files",
+			filePath: secretsDir,
+			wantKey:  "POSTGRES_PASSWORD",
+			wantVal:  "dir-pg-pass",
+		},
+		{
+			name:     "directory mount alias fallback",
+			filePath: secretsDir,
+			wantKey:  "DISCORD_TOKEN",
+			wantVal:  "dir-bot-token",
+		},
+		{
+			name:     "directory mount skips dotfiles",
+			filePath: secretsDir,
+			wantKey:  ".hidden",
+			wantVal:  "",
+		},
+		{
+			name:     "directory mount unmarshals shared-secrets.json",
+			filePath: dirWithJSON,
+			wantKey:  "NESTED_KEY",
+			wantVal:  "nested-val",
+		},
+		{
+			name:     "directory mount shared-secrets.json alias fallback",
+			filePath: dirWithJSON,
+			wantKey:  "OPENOBSERVE_PASSWORD",
+			wantVal:  "dir-oo-pass",
+		},
+		{
+			name:     "directory mount includes both json and individual files",
+			filePath: dirWithJSON,
+			wantKey:  "INDIVIDUAL_FILE",
+			wantVal:  "indiv-val",
 		},
 	}
 
@@ -1994,24 +2048,37 @@ func TestRegisterConfigTokens_SharedSecrets_TableDriven(t *testing.T) {
 	_ = os.WriteFile(secretsFile, []byte(`{
 		"DYNAMIC_SHARED_SECRET": "dynamic_shared_secret_token_val_12345"
 	}`), 0o600)
-	SharedSecretsPath = secretsFile
+
+	secretsDir := filepath.Join(tmpDir, "secrets_dir")
+	_ = os.MkdirAll(secretsDir, 0o755)
+	_ = os.WriteFile(filepath.Join(secretsDir, "DYNAMIC_DIR_SECRET"), []byte("dynamic_dir_secret_token_val_67890"), 0o600)
 
 	tests := []struct {
 		name       string
+		path       string
 		cfg        *Config
 		input      string
 		wantResult string
 	}{
 		{
-			name:       "shared secrets token registered and redacted",
+			name:       "shared secrets token registered and redacted from json file",
+			path:       secretsFile,
 			cfg:        nil,
 			input:      "alert with dynamic_shared_secret_token_val_12345 in message",
+			wantResult: "alert with [REDACTED] in message",
+		},
+		{
+			name:       "shared secrets token registered and redacted from directory mount",
+			path:       secretsDir,
+			cfg:        nil,
+			input:      "alert with dynamic_dir_secret_token_val_67890 in message",
 			wantResult: "alert with [REDACTED] in message",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			SharedSecretsPath = tc.path
 			RegisterConfigTokens(tc.cfg)
 			got := sanitizer.SanitizeString(tc.input)
 			if got != tc.wantResult {

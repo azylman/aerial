@@ -182,6 +182,14 @@ max_concurrent_calls: 2
 		t.Fatalf("failed to write bad_calls.yaml: %v", err)
 	}
 
+	twilioYAML := validYAML + `twilio_account_sid: "AC_from_yaml"
+twilio_from_number: "(510) 555-0999"
+`
+	twilioPath := filepath.Join(tmpDir, "twilio.yaml")
+	if err := os.WriteFile(twilioPath, []byte(twilioYAML), 0o644); err != nil {
+		t.Fatalf("failed to write twilio.yaml: %v", err)
+	}
+
 	tests := []struct {
 		name                   string
 		path                   string
@@ -296,6 +304,30 @@ max_concurrent_calls: 2
 			wantErr:      false,
 			wantPort:     "4019",
 			wantBrainURL: "http://env-eri.aerial:8088",
+		},
+		{
+			name: "twilio fields loaded from yaml when env unset",
+			path: twilioPath,
+			env: map[string]string{
+				"DATABASE_URL": "postgres://user:pass@localhost:5432/testdb",
+			},
+			wantErr:              false,
+			wantPort:             "4019",
+			wantTwilioAccountSID: "AC_from_yaml",
+			wantTwilioFromNumber: "+15105550999",
+		},
+		{
+			name: "twilio fields in env override yaml",
+			path: twilioPath,
+			env: map[string]string{
+				"DATABASE_URL":       "postgres://user:pass@localhost:5432/testdb",
+				"TWILIO_ACCOUNT_SID": "AC_override_env",
+				"TWILIO_FROM_NUMBER": "+15105550111",
+			},
+			wantErr:              false,
+			wantPort:             "4019",
+			wantTwilioAccountSID: "AC_override_env",
+			wantTwilioFromNumber: "+15105550111",
 		},
 		{
 			name:    "empty path error",

@@ -189,16 +189,22 @@ func TestLoadConfig_YAMLAndOverrides(t *testing.T) {
 		wantBotID        string
 		wantDefaultOwner bool
 		wantForwardURLs  map[string]string
+		wantCID          string
+		wantPID          string
 	}{
 		{
 			name: "yaml config without overrides",
 			localYAML: `port: "4099"
 infisical_url: "http://infisical.custom:8085"
+infisical_client_id: "yaml-cid-123"
+infisical_project_id: "yaml-pid-456"
 infisical_environment: "staging"
 eri_url: "http://brain.custom:8088"
 `,
 			wantPort:     "4099",
 			wantInfURL:   "http://infisical.custom:8085",
+			wantCID:      "yaml-cid-123",
+			wantPID:      "yaml-pid-456",
 			wantEnv:      "staging",
 			wantBrainURL: "http://brain.custom:8088",
 		},
@@ -334,10 +340,24 @@ eri_url: "http://brain.custom:8088"
 			localYAML: "port: \"4020\"\n",
 			wantBotID: "aerial",
 		},
+		{
+			name: "env overrides infisical client and project id",
+			localYAML: `port: "4020"
+infisical_client_id: "yaml-cid"
+infisical_project_id: "yaml-pid"
+`,
+			env: map[string]string{
+				"INFISICAL_CLIENT_ID":  "env-cid-override",
+				"INFISICAL_PROJECT_ID": "env-pid-override",
+			},
+			wantPort: "4020",
+			wantCID:  "env-cid-override",
+			wantPID:  "env-pid-override",
+		},
 	}
 
 	keysToClear := []string{
-		"PORT", "INFISICAL_URL", "INFISICAL_ENVIRONMENT",
+		"PORT", "INFISICAL_URL", "INFISICAL_CLIENT_ID", "INFISICAL_PROJECT_ID", "INFISICAL_ENVIRONMENT",
 		"HANGAR_URL", "FLUX_RECEIVER_URL", "ERI_URL", "SYSTEM_CHANNEL_ID",
 		"AERIAL_BOT_ID", "DEFAULT_OWNER", "AERIAL_DEFAULT_OWNER",
 	}
@@ -400,6 +420,8 @@ eri_url: "http://brain.custom:8088"
 				{cfg.EriURL, tc.wantBrainURL, "EriURL"},
 				{cfg.SystemChannelID, tc.wantSysChan, "SystemChannelID"},
 				{cfg.BotID, tc.wantBotID, "BotID"},
+				{cfg.InfisicalClientID, tc.wantCID, "InfisicalClientID"},
+				{cfg.InfisicalProjectID, tc.wantPID, "InfisicalProjectID"},
 			} {
 				if check.want != "" && check.got != check.want {
 					t.Errorf("%s = %q, want %q", check.field, check.got, check.want)

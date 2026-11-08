@@ -36,31 +36,71 @@ func filterEnvKeys(env []string, excluded ...string) []string {
 	return filtered
 }
 
+var exactSecretKeys = map[string]struct{}{
+	"GEMINI_API_KEY":                  {},
+	"ANTIGRAVITY_API_KEY":             {},
+	"GOOGLE_GENAI_API_KEY":            {},
+	"GEMINI_HARNESS_API_KEY":          {},
+	"AGY_GEMINI_API_KEY":              {},
+	"GITHUB_PAT":                      {},
+	"DISCORD_TOKEN":                   {},
+	"DISCORD_BOT_TOKEN":               {},
+	"MARIDA_DISCORD_BOT_TOKEN":        {},
+	"DATABASE_URL":                    {},
+	"POSTGRES_PASSWORD":               {},
+	"HA_TOKEN":                        {},
+	"OPENOBSERVE_PASSWORD":            {},
+	"OPENOBSERVE_ROOT_USER_PASSWORD":  {},
+	"UNIFI_PASS":                      {},
+	"UNIFI_PASSWORD":                  {},
+	"OP_SERVICE_ACCOUNT_TOKEN":        {},
+	"1PASSWORD_SERVICE_ACCOUNT_TOKEN": {},
+	"QNAP_PASS":                       {},
+	"INFISICAL_CLIENT_SECRET":         {},
+	"CLOUDFLARE_MCP_TOKEN":            {},
+	"UBEREATS_MCP_TOKEN":              {},
+}
+
+var secretSuffixes = []string{
+	"_SECRET",
+	"_TOKEN",
+	"_PASSWORD",
+	"_PASS",
+	"_PAT",
+	"_API_KEY",
+	"_PRIVATE_KEY",
+}
+
+func isSecretEnvKey(key string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(key))
+	if upper == "CLAUDE_CODE_OAUTH_TOKEN" {
+		return false
+	}
+	if upper == "DATABASE_URL" {
+		return true
+	}
+	if _, ok := exactSecretKeys[upper]; ok {
+		return true
+	}
+	for _, suffix := range secretSuffixes {
+		if strings.HasSuffix(upper, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
 func FilterAgyBaseEnv(env []string) []string {
-	return filterEnvKeys(env,
-		"GEMINI_API_KEY",
-		"ANTIGRAVITY_API_KEY",
-		"GOOGLE_GENAI_API_KEY",
-		"GEMINI_HARNESS_API_KEY",
-		"AGY_GEMINI_API_KEY",
-		"GITHUB_PAT",
-		"DISCORD_TOKEN",
-		"DISCORD_BOT_TOKEN",
-		"MARIDA_DISCORD_BOT_TOKEN",
-		"DATABASE_URL",
-		"POSTGRES_PASSWORD",
-		"HA_TOKEN",
-		"OPENOBSERVE_PASSWORD",
-		"OPENOBSERVE_ROOT_USER_PASSWORD",
-		"UNIFI_PASS",
-		"UNIFI_PASSWORD",
-		"OP_SERVICE_ACCOUNT_TOKEN",
-		"1PASSWORD_SERVICE_ACCOUNT_TOKEN",
-		"QNAP_PASS",
-		"INFISICAL_CLIENT_SECRET",
-		"CLOUDFLARE_MCP_TOKEN",
-		"UBEREATS_MCP_TOKEN",
-	)
+	filtered := make([]string, 0, len(env))
+	for _, e := range env {
+		if k, _, ok := strings.Cut(e, "="); ok {
+			if isSecretEnvKey(k) {
+				continue
+			}
+		}
+		filtered = append(filtered, e)
+	}
+	return filtered
 }
 
 func filterHomeEnv(env []string) []string {
