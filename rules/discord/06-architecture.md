@@ -29,7 +29,7 @@ Aerial runs on a 3-node NixOS 26.05 k3s Kubernetes cluster supervised by Flux CD
 - **Web, Gateway & Ingress Services**:
   - **`homepage`**: Root landing portal and service discovery HUD.
   - **`lan-gateway`**: NGINX Gateway Fabric LAN gateway (`HTTPRoute`s on `:80`/`:443`) routing internal services and web dashboards.
-  - **`dashboard`**: Web status HUD rendering live queue state, schedules, memory, and turn health.
+  - **`console`**: Web status HUD rendering live queue state, schedules, memory, and turn health.
   - **`docs`**: Living documentation portal serving architectural specifications and runbooks.
   - **`agentsview`**: Web observability dashboard rendering agent session transcripts and tool traces.
   - **`synapse`**: Event-driven ingress router (`:4020`) owning the live Discord Gateway WebSocket connection, startup catch-up sweeps, and River-backed message/interaction ingestion to `eri`, plus routing GitHub push/CI webhooks to Flux CD (`FLUX_RECEIVER_URL`), updating `ConfigMap/aerial-image-tags` in `flux-system` and triggering Flux Kustomization reconciliation (`postBuild.substituteFrom`) on CI image promotions, `/webhooks/flux` deployment notifications, Vanadis chunk progression, and Infisical secret sync to Kubernetes Secrets (`shared-secrets`).
@@ -61,7 +61,7 @@ Aerial operates on a strict **Multi-Repository Architecture & Separation of Conc
 
 ### 1. Core Engine Monorepo (`azylman/aerial` at `/share/aerial` — `scripts/aerial-pr.sh init aerial`)
 - **Purpose**: Generic, domain-agnostic open-source foundation.
-- **Contents**: Core Go services (`services/eri`, `services/haro`, `services/coven`, `services/vanadis`, `services/synapse`, `services/dashboard`, `services/homepage`, `services/docs-service`, `services/prospera`, `services/github-runner`), MCP servers (`mcp/discord-mcp`, `mcp/docket-mcp`, `mcp/github-mcp`, `mcp/infisical-mcp`, `mcp/kubernetes-mcp`, `mcp/kernel-mcp`), shared Go packages (`pkg/`), base system rules (`rules/`), built-in skills (`.agents/skills/`), Kubernetes manifests (`k8s/*.yaml`), Dockerfiles, and CI/verification scripts (`scripts/`).
+- **Contents**: Core Go services (`services/eri`, `services/haro`, `services/coven`, `services/vanadis`, `services/synapse`, `services/console`, `services/homepage`, `services/docs-service`, `services/prospera`, `services/github-runner`), MCP servers (`mcp/discord-mcp`, `mcp/docket-mcp`, `mcp/github-mcp`, `mcp/infisical-mcp`, `mcp/kubernetes-mcp`, `mcp/kernel-mcp`), shared Go packages (`pkg/`), base system rules (`rules/`), built-in skills (`.agents/skills/`), Kubernetes manifests (`k8s/*.yaml`), Dockerfiles, and CI/verification scripts (`scripts/`).
 - **Strict Invariants**:
   - **100% Generic & Domain-Agnostic**: All prompts, code, error handlers, and schemas must remain completely generic and reusable for any user.
   - **Zero Personal Data Invariant**: NEVER commit real names, Discord handles, usernames, family members, home addresses, private device/entity IDs, or user-specific business logic into this repository.

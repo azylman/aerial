@@ -61,7 +61,7 @@ Aerial separates generic platform orchestration from private homelab state using
 ├──────────────────────────────┬──────────────────────────────┬───────────────────────────────┤
 │ GPU Control-Plane (calibarn) │ Storage Node (quiet-zero)    │ Touch Kiosk (cockpit)         │
 │ • eri, vanadis, coven, haro  │ • NixOS 26.05 k3s agent      │ • kiosk-display (Cage Wayland)│
-│ • synapse, dashboard, docs   │ • NVMe persistent storage    │ • kiosk-ear (ALSA capture)    │
+│ • synapse, console, docs     │ • NVMe persistent storage    │ • kiosk-ear (ALSA capture)    │
 │ • homepage, agentsview       │ • CloudNativePG standby      │ • kiosk-remote & go2rtc       │
 │ • CloudNativePG primary      │ • Compute & storage tier     │ • kiosk-cast-watcher          │
 │ • valkey, infisical          │ • Standard worker workloads  │ • Display power CronJobs      │
@@ -395,7 +395,7 @@ Aerial uses an automated, event-driven GitOps continuous deployment pipeline:
 | **`senses`** | `8880` / `10300` | Unified Rust CUDA ONNX Runtime inference service serving NeMo Parakeet TDT 0.6B v2 STT, Kokoro-82M TTS, BAAI/bge-small embeddings, and speaker verification. |
 | **`pjev`** | `8000` | Local CUDA GGUF LLM inference service serving `/v1/systemone` ambient triage. |
 | **`homepage`** | `3000` | Root landing portal and service discovery HUD. |
-| **`dashboard`** | `8080` | Web status HUD rendering live queue state, schedules, memory, and turn health. |
+| **`console`** | `8080` | Web status HUD rendering live queue state, schedules, memory, and turn health. |
 | **`agentsview`** | `8080` | Web UI for visualizing agent transcripts, session history, and execution timelines. |
 | **`docs`** | `8080` | Living documentation portal rendering Markdown and Mermaid diagrams via Docsify. |
 | **`lan-gateway`** | `80` / `443` | NGINX Gateway Fabric ingress controller routing dynamic internal services and web dashboards. |
@@ -469,7 +469,7 @@ kubectl logs -f deployment/eri -c eri
 | Action / Service | URL / Command |
 | :--- | :--- |
 | Root Landing Portal (`homepage`) | `http://homepage.aerial/` |
-| Status Dashboard (`dashboard`) | `http://dashboard.aerial/` |
+| Operator Console (`console`) | `http://console.aerial/` |
 | Documentation (`docs`) | `http://docs.aerial/` |
 | Agent Transcripts (`agentsview`) | `http://agentsview.aerial/` |
 | System Telemetry (`grafana`) | `http://grafana.aerial/` |

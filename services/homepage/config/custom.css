@@ -145,13 +145,13 @@ a:has(.bookmark-name):hover {
 }
 
 /* --- FLAGSHIP CARD: AERIAL COMMAND HUD --- */
-.service-card:has(a[href*="/dashboard/"]),
+.service-card:has(a[href*="/console/"]),
 li[data-name="Aerial Command HUD"] .service-card {
     border-color: var(--permet-cyan) !important;
     box-shadow: 0 0 16px rgba(0, 240, 255, 0.30), inset 0 0 14px rgba(192, 132, 252, 0.15) !important;
 }
 
-.service-card:has(a[href*="/dashboard/"]):hover,
+.service-card:has(a[href*="/console/"]):hover,
 li[data-name="Aerial Command HUD"] .service-card:hover {
     border-color: var(--permet-cyan) !important;
     box-shadow: 0 0 24px rgba(0, 240, 255, 0.50), inset 0 0 18px rgba(192, 132, 252, 0.25) !important;

@@ -878,6 +878,161 @@ spec:
     app.kubernetes.io/name: openobserve
   type: ClusterIP
 ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubernetes-mcp-sa
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aerial-kubernetes-mcp
+# Read-only by design: cluster state changes go through git and Flux. The one
+# write is deleting pods, which only restarts them; their controller recreates
+# them from the git-defined spec, so nothing drifts. Secrets, serviceaccounts/token,
+# pods/exec, nodes/proxy and all RBAC resources are excluded on purpose to
+# prevent credential reads and privilege escalation.
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+      - pods/log
+      - services
+      - endpoints
+      - configmaps
+      - persistentvolumeclaims
+      - persistentvolumes
+      - events
+      - namespaces
+      - nodes
+      - serviceaccounts
+      - resourcequotas
+      - limitranges
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - pods
+    verbs:
+      - delete
+  - apiGroups:
+      - apps
+    resources:
+      - deployments
+      - statefulsets
+      - daemonsets
+      - replicasets
+      - controllerrevisions
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - batch
+    resources:
+      - jobs
+      - cronjobs
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - autoscaling
+    resources:
+      - horizontalpodautoscalers
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - policy
+    resources:
+      - poddisruptionbudgets
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - discovery.k8s.io
+    resources:
+      - endpointslices
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - networking.k8s.io
+    resources:
+      - ingresses
+      - networkpolicies
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - gateway.networking.k8s.io
+    resources:
+      - gateways
+      - httproutes
+      - grpcroutes
+      - referencegrants
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - metrics.k8s.io
+    resources:
+      - pods
+      - nodes
+    verbs:
+      - get
+      - list
+  - apiGroups:
+      - kustomize.toolkit.fluxcd.io
+    resources:
+      - kustomizations
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - helm.toolkit.fluxcd.io
+    resources:
+      - helmreleases
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - source.toolkit.fluxcd.io
+    resources:
+      - gitrepositories
+      - helmrepositories
+      - ocirepositories
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aerial-kubernetes-mcp-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aerial-kubernetes-mcp
+subjects:
+  - kind: ServiceAccount
+    name: kubernetes-mcp-sa
+    namespace: default
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -911,7 +1066,7 @@ spec:
             - containerPort: 8080
               name: mcp
               protocol: TCP
-      serviceAccountName: dashboard-sa
+      serviceAccountName: kubernetes-mcp-sa
 ---
 apiVersion: v1
 kind: Service
