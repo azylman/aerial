@@ -528,13 +528,16 @@ func TestAnalyzeTestFile(t *testing.T) {
 			content: `package pkg
 
 import (
+	"net/http"
 	"syscall"
 	"time"
 )
 
-func TestValid() {
+func TestValid(rt http.RoundTripper) {
 	_ = time.Now()
 	_ = syscall.Getpid()
+	http.DefaultClient.CloseIdleConnections()
+	_ = &http.Client{Timeout: time.Second, Transport: rt}
 }
 type Case struct {
 	expected int
@@ -542,22 +545,37 @@ type Case struct {
 `,
 		},
 		{
-			name: "banned time.Sleep and syscall.Kill detected",
+			name: "banned time.Sleep, syscall.Kill, DefaultClient, and unairgapped http.Client detected",
 			content: `package pkg
 
 import (
+	"net/http"
 	"syscall"
 	"time"
 )
 
-func TestBannedCalls() {
+func TestBannedCalls(req *http.Request) {
 	time.Sleep(time.Millisecond)
 	_ = syscall.Kill(1, syscall.SIGHUP)
+	_, _ = http.DefaultClient.Do(req)
+	_ = &http.Client{}
+	_ = &http.Client{Timeout: time.Second}
+	_ = &http.Client{Transport: nil}
+	_ = &http.Client{Transport: http.DefaultTransport}
+	_ = &http.Client{Transport: &http.Transport{}}
+	_ = &http.Client{Transport: http.Transport{}}
 }
 `,
 			wantViolations: []string{
-				"time.Sleep in tests is prohibited; use event-driven channels, condition variables, or injected delay overrides",
-				"raw syscall.Kill in tests is prohibited; use dependency-injected signal or process-kill functions",
+				"sample_test.go:10: time.Sleep in tests is prohibited; use event-driven channels, condition variables, or injected delay overrides",
+				"sample_test.go:11: raw syscall.Kill in tests is prohibited; use dependency-injected signal or process-kill functions",
+				"sample_test.go:12: unguarded http.DefaultClient in tests is prohibited; use httptest.Server.Client() or an http.Client with a mock Transport",
+				"sample_test.go:13: http.Client literal without mock Transport in tests is prohibited; inject a mock RoundTripper or use httptest.Server.Client()",
+				"sample_test.go:14: http.Client literal without mock Transport in tests is prohibited; inject a mock RoundTripper or use httptest.Server.Client()",
+				"sample_test.go:15: http.Client literal without mock Transport in tests is prohibited; inject a mock RoundTripper or use httptest.Server.Client()",
+				"sample_test.go:16: http.Client literal without mock Transport in tests is prohibited; inject a mock RoundTripper or use httptest.Server.Client()",
+				"sample_test.go:17: http.Client literal without mock Transport in tests is prohibited; inject a mock RoundTripper or use httptest.Server.Client()",
+				"sample_test.go:18: http.Client literal without mock Transport in tests is prohibited; inject a mock RoundTripper or use httptest.Server.Client()",
 			},
 		},
 		{

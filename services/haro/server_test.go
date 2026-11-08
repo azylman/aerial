@@ -208,7 +208,7 @@ func TestServer_HTTPEndpointsAndMCPProtocol(t *testing.T) {
 			if tc.method == http.MethodPost && tc.name != "mcp post without content-type" {
 				req.Header.Set("Content-Type", "application/json")
 			}
-			resp, err := http.DefaultClient.Do(req)
+			resp, err := ts.Client().Do(req)
 			if err != nil {
 				t.Fatalf("request failed: %v", err)
 			}

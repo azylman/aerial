@@ -331,18 +331,3 @@ func TestHTTPContextConsultClient_ConsultMemory(t *testing.T) {
 		})
 	}
 }
-
-func WithConsultHTTPClient(client *http.Client) ConsultOption {
-	return func(c *HTTPContextConsultClient) {
-		c.httpClient = client
-	}
-}
-
-func TestWithConsultHTTPClient(t *testing.T) {
-	t.Parallel()
-	hc := &http.Client{}
-	client := NewHTTPContextConsultClient("http://cal", "http://mem", WithConsultHTTPClient(hc))
-	if client.httpClient != hc {
-		t.Errorf("httpClient = %v, want %v", client.httpClient, hc)
-	}
-}

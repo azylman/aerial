@@ -274,7 +274,7 @@ func TestGitHubPoller_PollAndDecode(t *testing.T) {
 				}
 				return
 			case "empty_repo":
-				emptyRepoPoller := &GitHubPoller{client: &http.Client{}}
+				emptyRepoPoller := &GitHubPoller{client: mockGH.Client()}
 				emptyRepoPoller.fetchJobsForRun(ctx, 123)
 				return
 			case "unreachable":
@@ -291,7 +291,7 @@ func TestGitHubPoller_PollAndDecode(t *testing.T) {
 					runsETag:         tc.runsETag,
 					runsETagMap:      map[string]string{tc.initialOldRepo: "etag-old"},
 					cachedRunsByRepo: map[string][]GitHubRun{tc.initialOldRepo: {{ID: 999}}},
-					client:           &http.Client{Timeout: 2 * time.Second},
+					client:           mockGH.Client(),
 					apiBaseURL:       mockGH.URL,
 				}
 				prunePoller.pollOnce(ctx)
