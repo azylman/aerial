@@ -914,8 +914,17 @@ func TestFakeStore_DispatchStoreLifecycle(t *testing.T) {
 		Source:    "vanadis",
 		SessionID: "build-1",
 		Prompt:    "Build ID: b-999\nChunk 1",
+		Status:    db.StatusPending,
 	}
 	mustOK(t, s.InsertDispatch(ctx, d3), "InsertDispatch disp-f3")
+	d3b := db.Dispatch{
+		ID:        "disp-f3b",
+		Source:    "vanadis",
+		SessionID: "vanadis-b-999-chunk-2",
+		Prompt:    "Executing chunk 2",
+		Status:    db.StatusProcessing,
+	}
+	mustOK(t, s.InsertDispatch(ctx, d3b), "InsertDispatch disp-f3b")
 	hasActive, err := s.HasActiveDispatchTurn(ctx, "build-1", "")
 	mustOK(t, err, "HasActiveDispatchTurn")
 	if !hasActive {
@@ -925,12 +934,16 @@ func TestFakeStore_DispatchStoreLifecycle(t *testing.T) {
 	// 8. Cancel pending dispatches
 	cancelled, err := s.CancelPendingDispatches(ctx, "", "b-999", "cancelled build")
 	mustOK(t, err, "CancelPendingDispatches")
-	if len(cancelled) != 1 || cancelled[0] != "disp-f3" {
-		t.Errorf("expected cancelled [disp-f3], got %v", cancelled)
+	if len(cancelled) != 2 || !slices.Contains(cancelled, "disp-f3") || !slices.Contains(cancelled, "disp-f3b") {
+		t.Errorf("expected cancelled [disp-f3, disp-f3b], got %v", cancelled)
 	}
 	got, _ = s.GetDispatch(ctx, "disp-f3")
 	if got.Status != db.StatusFailed || got.ErrorMessage != "cancelled build" {
 		t.Errorf("unexpected status after cancel: %+v", got)
+	}
+	gotB, _ := s.GetDispatch(ctx, "disp-f3b")
+	if gotB.Status != db.StatusFailed || gotB.ErrorMessage != "cancelled build" {
+		t.Errorf("unexpected status for disp-f3b after cancel: %+v", gotB)
 	}
 }
 

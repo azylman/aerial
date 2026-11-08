@@ -940,6 +940,108 @@ func DrainThreadPendingMessages(ctx context.Context, store db.Store, targetThrea
 	}
 }
 
+func matchesDispatchTarget(d *db.Dispatch, dispatchID, buildID string) bool {
+	if d == nil {
+		return false
+	}
+	if dispatchID != "" && d.ID == dispatchID {
+		return true
+	}
+	if buildID != "" && (strings.Contains(d.Prompt, "Build ID: "+buildID+"\n") ||
+		strings.HasPrefix(d.SessionID, "vanadis-"+buildID+"-chunk-") ||
+		strings.Contains(d.Prompt, "Chunk ID: "+buildID+"-chunk-")) {
+		return true
+	}
+	return false
+}
+
+type activeDispatchCancelTarget struct {
+	te       *turnExecution
+	threadID string
+}
+
+func drainMatchingDispatchesFromChannel(ch chan queueItem, dID, bID string) []string {
+	var drainedIDs []string
+	var nonMatching []queueItem
+drainLoop:
+	for {
+		select {
+		case item := <-ch:
+			if item.dispatch != nil && matchesDispatchTarget(item.dispatch, dID, bID) {
+				metrics.QueueDepth.Dec()
+				drainedIDs = append(drainedIDs, item.dispatch.ID)
+			} else {
+				nonMatching = append(nonMatching, item)
+			}
+		default:
+			break drainLoop
+		}
+	}
+	for _, item := range nonMatching {
+		ch <- item
+	}
+	return drainedIDs
+}
+
+func (p *WorkerPool) interruptMatchingActiveDispatchesLocked(dID, bID, reason string) ([]string, []activeDispatchCancelTarget) {
+	var cancelledIDs []string
+	var activeToCancel []activeDispatchCancelTarget
+	for _, te := range p.activeTurns {
+		if te != nil && te.isDispatch() && matchesDispatchTarget(te.dispatch, dID, bID) {
+			te.interrupted.Store(true)
+			te.setInterruptReason(reason)
+			if te.dispatch != nil && !slices.Contains(cancelledIDs, te.dispatch.ID) {
+				cancelledIDs = append(cancelledIDs, te.dispatch.ID)
+			}
+			activeToCancel = append(activeToCancel, activeDispatchCancelTarget{te: te, threadID: te.threadID})
+		}
+	}
+	return cancelledIDs, activeToCancel
+}
+
+// CancelDispatches drains queued dispatches and interrupts active in-flight dispatch turns
+// matching either dispatchID or buildID.
+func (p *WorkerPool) CancelDispatches(dispatchID, buildID, reason string) []string {
+	if p == nil || (strings.TrimSpace(dispatchID) == "" && strings.TrimSpace(buildID) == "") {
+		return nil
+	}
+	dID := strings.TrimSpace(dispatchID)
+	bID := strings.TrimSpace(buildID)
+	if strings.TrimSpace(reason) == "" {
+		reason = "dispatch cancelled by operator"
+	}
+
+	var cancelledIDs []string
+
+	p.mu.Lock()
+	for _, state := range p.threadChs {
+		if state != nil && state.ch != nil {
+			for _, id := range drainMatchingDispatchesFromChannel(state.ch, dID, bID) {
+				if !slices.Contains(cancelledIDs, id) {
+					cancelledIDs = append(cancelledIDs, id)
+				}
+			}
+		}
+	}
+
+	activeIDs, activeTargets := p.interruptMatchingActiveDispatchesLocked(dID, bID, reason)
+	for _, id := range activeIDs {
+		if !slices.Contains(cancelledIDs, id) {
+			cancelledIDs = append(cancelledIDs, id)
+		}
+	}
+	p.mu.Unlock()
+
+	for _, target := range activeTargets {
+		target.te.cancelTurn()
+		if target.threadID != "" {
+			p.CloseThreadProcesses(target.threadID, reason)
+		}
+	}
+
+	return cancelledIDs
+}
+
 func (p *WorkerPool) latchActiveTurnsLocked(threadID string, drainQueue bool) ([]*turnExecution, []string, []db.Message) {
 	var active []*turnExecution
 	var burstMsgIDs []string

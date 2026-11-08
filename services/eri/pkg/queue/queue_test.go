@@ -4664,6 +4664,7 @@ func TestWorkerPool_NotifyVanadisChunkOutcome(t *testing.T) {
 		turnStatus   string
 		turnError    string
 		emptyURL     bool
+		cancelPool   bool
 		serverStatus int
 		wantEndpoint string
 		wantBody     map[string]string
@@ -4680,6 +4681,13 @@ func TestWorkerPool_NotifyVanadisChunkOutcome(t *testing.T) {
 			chunkID:    "c-1",
 			turnStatus: "success",
 			emptyURL:   true,
+			wantCalls:  0,
+		},
+		{
+			name:       "cancelled pool context makes no calls",
+			chunkID:    "c-shutdown",
+			turnStatus: "success",
+			cancelPool: true,
 			wantCalls:  0,
 		},
 		{
@@ -4756,7 +4764,14 @@ func TestWorkerPool_NotifyVanadisChunkOutcome(t *testing.T) {
 				url = ""
 			}
 
-			pool := &WorkerPool{cfg: WorkerPoolConfig{VanadisURL: url}}
+			poolCtx, cancelPool := context.WithCancel(context.Background())
+			if tc.cancelPool {
+				cancelPool()
+			} else {
+				defer cancelPool()
+			}
+
+			pool := &WorkerPool{ctx: poolCtx, cancel: cancelPool, cfg: WorkerPoolConfig{VanadisURL: url}}
 			pool.notifyVanadisChunkOutcome(tc.chunkID, tc.turnStatus, tc.turnError)
 
 			reqsMu.Lock()
@@ -4780,6 +4795,204 @@ func TestWorkerPool_NotifyVanadisChunkOutcome(t *testing.T) {
 	// Also test nil pool safety
 	var nilPool *WorkerPool
 	nilPool.notifyVanadisChunkOutcome("c-nil", "success", "")
+}
+
+func TestCancelDispatches(t *testing.T) {
+	t.Parallel()
+
+	type cancelDispatchFixture struct {
+		queuedDispatches []*db.Dispatch
+		queuedMessages   []*db.Message
+		activeDispatch   *db.Dispatch
+	}
+
+	tests := []struct {
+		name             string
+		nilPool          bool
+		dispatchID       string
+		buildID          string
+		reason           string
+		fixture          cancelDispatchFixture
+		wantCancelledIDs []string
+		wantRemainingIDs []string
+		wantInterrupted  bool
+		wantCtxCancelled bool
+		wantReason       string
+	}{
+		{
+			name:             "nil worker pool returns nil",
+			nilPool:          true,
+			dispatchID:       "disp-1",
+			wantCancelledIDs: nil,
+		},
+		{
+			name:             "empty dispatch and build IDs returns nil",
+			dispatchID:       "",
+			buildID:          "",
+			wantCancelledIDs: nil,
+		},
+		{
+			name:       "drain queued dispatch by dispatch_id",
+			dispatchID: "disp-target",
+			fixture: cancelDispatchFixture{
+				queuedDispatches: []*db.Dispatch{
+					{ID: "disp-other", Prompt: "unrelated prompt"},
+					{ID: "disp-target", Prompt: "target dispatch"},
+				},
+				queuedMessages: []*db.Message{
+					{ID: "msg-1", Content: "chat message"},
+				},
+			},
+			wantCancelledIDs: []string{"disp-target"},
+			wantRemainingIDs: []string{"disp-other", "msg-1"},
+		},
+		{
+			name:    "drain queued dispatch by build_id in prompt",
+			buildID: "b-build-42",
+			fixture: cancelDispatchFixture{
+				queuedDispatches: []*db.Dispatch{
+					{ID: "disp-b42-1", Prompt: "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: b-build-42\nChunk 1"},
+					{ID: "disp-other", Prompt: "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: b-build-99\nChunk 1"},
+				},
+			},
+			wantCancelledIDs: []string{"disp-b42-1"},
+			wantRemainingIDs: []string{"disp-other"},
+		},
+		{
+			name:    "interrupt active dispatch turn by build_id session prefix",
+			buildID: "b-build-42",
+			fixture: cancelDispatchFixture{
+				activeDispatch: &db.Dispatch{
+					ID:        "disp-active",
+					SessionID: "vanadis-b-build-42-chunk-1",
+					Prompt:    "chunk 1 execution",
+				},
+			},
+			wantCancelledIDs: []string{"disp-active"},
+			wantInterrupted:  true,
+			wantCtxCancelled: true,
+			wantReason:       "dispatch cancelled by operator",
+		},
+		{
+			name:       "interrupt active dispatch turn by dispatch_id with custom reason",
+			dispatchID: "disp-active-direct",
+			reason:     "superseded by newer task",
+			fixture: cancelDispatchFixture{
+				activeDispatch: &db.Dispatch{
+					ID:     "disp-active-direct",
+					Prompt: "active dispatch prompt",
+				},
+			},
+			wantCancelledIDs: []string{"disp-active-direct"},
+			wantInterrupted:  true,
+			wantCtxCancelled: true,
+			wantReason:       "superseded by newer task",
+		},
+		{
+			name:       "non matching target preserves active dispatch",
+			dispatchID: "disp-unrelated",
+			fixture: cancelDispatchFixture{
+				activeDispatch: &db.Dispatch{
+					ID:     "disp-active",
+					Prompt: "active dispatch",
+				},
+			},
+			wantCancelledIDs: nil,
+			wantInterrupted:  false,
+			wantCtxCancelled: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.nilPool {
+				var nilP *WorkerPool
+				got := nilP.CancelDispatches(tc.dispatchID, tc.buildID, tc.reason)
+				if got != nil {
+					t.Fatalf("expected nil for nil WorkerPool, got %v", got)
+				}
+				return
+			}
+
+			p := &WorkerPool{
+				threadChs:   make(map[string]*threadWorkerState),
+				activeTurns: make(map[string]*turnExecution),
+			}
+
+			ch := make(chan queueItem, 20)
+			p.threadChs["test-thread"] = &threadWorkerState{ch: ch}
+
+			for _, d := range tc.fixture.queuedDispatches {
+				ch <- queueItem{dispatch: d}
+			}
+			for _, m := range tc.fixture.queuedMessages {
+				ch <- queueItem{msg: m}
+			}
+
+			var activeTE *turnExecution
+			if tc.fixture.activeDispatch != nil {
+				turnCtx, cancelTurn := context.WithCancel(context.Background())
+				defer cancelTurn()
+				activeTE = &turnExecution{
+					threadID:   "test-thread",
+					dispatch:   tc.fixture.activeDispatch,
+					turnCtx:    turnCtx,
+					turnCancel: cancelTurn,
+				}
+				p.activeTurns["test-thread"] = activeTE
+			}
+
+			gotCancelled := p.CancelDispatches(tc.dispatchID, tc.buildID, tc.reason)
+
+			if len(gotCancelled) != len(tc.wantCancelledIDs) {
+				t.Fatalf("cancelled IDs count = %d (%v), want %d (%v)",
+					len(gotCancelled), gotCancelled, len(tc.wantCancelledIDs), tc.wantCancelledIDs)
+			}
+			for _, wantID := range tc.wantCancelledIDs {
+				if !slices.Contains(gotCancelled, wantID) {
+					t.Fatalf("expected cancelled IDs to contain %q, got %v", wantID, gotCancelled)
+				}
+			}
+
+			var remainingIDs []string
+		drainRemaining:
+			for {
+				select {
+				case item := <-ch:
+					if item.dispatch != nil {
+						remainingIDs = append(remainingIDs, item.dispatch.ID)
+					} else if item.msg != nil {
+						remainingIDs = append(remainingIDs, item.msg.ID)
+					}
+				default:
+					break drainRemaining
+				}
+			}
+			if len(remainingIDs) != len(tc.wantRemainingIDs) {
+				t.Fatalf("remaining IDs count = %d (%v), want %d (%v)",
+					len(remainingIDs), remainingIDs, len(tc.wantRemainingIDs), tc.wantRemainingIDs)
+			}
+			for i, wantID := range tc.wantRemainingIDs {
+				if remainingIDs[i] != wantID {
+					t.Fatalf("remaining ID at %d = %q, want %q", i, remainingIDs[i], wantID)
+				}
+			}
+
+			if activeTE != nil {
+				if activeTE.isInterrupted() != tc.wantInterrupted {
+					t.Fatalf("activeTE.isInterrupted() = %v, want %v", activeTE.isInterrupted(), tc.wantInterrupted)
+				}
+				isCancelled := activeTE.turnCtx.Err() != nil
+				if isCancelled != tc.wantCtxCancelled {
+					t.Fatalf("activeTE context cancelled = %v, want %v", isCancelled, tc.wantCtxCancelled)
+				}
+				if tc.wantReason != "" && activeTE.getInterruptReason() != tc.wantReason {
+					t.Fatalf("activeTE interruptReason = %q, want %q", activeTE.getInterruptReason(), tc.wantReason)
+				}
+			}
+		})
+	}
 }
 
 func TestDispatchPromptAssembly(t *testing.T) {
