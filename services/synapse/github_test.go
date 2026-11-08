@@ -9,7 +9,6 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -1291,7 +1290,7 @@ func TestDispatchWorkflowRunImages(t *testing.T) {
 		wantDeployJobs   []string
 		wantWidgetCalls  int
 		wantReconciles   []fluxKustomizationRef
-		wantRequests     []map[string]kustomizationRequest
+		wantRecorded     []string
 		wantErr          bool
 	}{
 		{
@@ -1304,7 +1303,7 @@ func TestDispatchWorkflowRunImages(t *testing.T) {
 			wantDeployJobs:   []string{"brain"},
 			wantWidgetCalls:  1,
 			wantReconciles:   []fluxKustomizationRef{core},
-			wantRequests:     []map[string]kustomizationRequest{{"aerial-core": {Namespace: "flux-system", RequestedAt: "requested-aerial-core"}}},
+			wantRecorded:     []string{"aerial-core"},
 		},
 		{
 			name:             "two images reconcile each distinct kustomization once",
@@ -1314,13 +1313,10 @@ func TestDispatchWorkflowRunImages(t *testing.T) {
 			wantPromoteCalls: 2,
 			wantDeployJobs:   []string{"brain", "haro"},
 			wantReconciles:   []fluxKustomizationRef{core, marida},
-			wantRequests: []map[string]kustomizationRequest{{
-				"aerial-core": {Namespace: "flux-system", RequestedAt: "requested-aerial-core"},
-				"marida-core": {Namespace: "flux-system", RequestedAt: "requested-marida-core"},
-			}},
+			wantRecorded:     []string{"aerial-core", "marida-core"},
 		},
 		{
-			name:             "partial reconcile failure still records successful requests and errors",
+			name:             "partial reconcile failure keeps every recorded request for watcher repair and errors",
 			headBranch:       "main",
 			conclusion:       "success",
 			jobsBody:         twoJobs,
@@ -1328,11 +1324,11 @@ func TestDispatchWorkflowRunImages(t *testing.T) {
 			wantPromoteCalls: 2,
 			wantDeployJobs:   []string{"brain", "haro"},
 			wantReconciles:   []fluxKustomizationRef{core, marida},
-			wantRequests:     []map[string]kustomizationRequest{{"marida-core": {Namespace: "flux-system", RequestedAt: "requested-marida-core"}}},
+			wantRecorded:     []string{"aerial-core", "marida-core"},
 			wantErr:          true,
 		},
 		{
-			name:             "all reconciles failing records nothing and errors",
+			name:             "reconcile failure after record keeps the request and errors",
 			headBranch:       "main",
 			conclusion:       "success",
 			jobsBody:         brainJob,
@@ -1340,17 +1336,17 @@ func TestDispatchWorkflowRunImages(t *testing.T) {
 			wantPromoteCalls: 1,
 			wantDeployJobs:   []string{"brain"},
 			wantReconciles:   []fluxKustomizationRef{core},
+			wantRecorded:     []string{"aerial-core"},
 			wantErr:          true,
 		},
 		{
-			name:             "record kustomization requests error returns error",
+			name:             "record error returns before any reconcile patch",
 			headBranch:       "main",
 			conclusion:       "success",
 			jobsBody:         brainJob,
 			recordErr:        errors.New("db fail"),
 			wantPromoteCalls: 1,
 			wantDeployJobs:   []string{"brain"},
-			wantReconciles:   []fluxKustomizationRef{core},
 			wantErr:          true,
 		},
 		{
@@ -1363,7 +1359,7 @@ func TestDispatchWorkflowRunImages(t *testing.T) {
 			wantDeployJobs:   []string{"brain"},
 			wantWidgetCalls:  1,
 			wantReconciles:   []fluxKustomizationRef{core},
-			wantRequests:     []map[string]kustomizationRequest{{"aerial-core": {Namespace: "flux-system", RequestedAt: "requested-aerial-core"}}},
+			wantRecorded:     []string{"aerial-core"},
 		},
 		{
 			name:       "jobs API 500 error",
@@ -1538,8 +1534,23 @@ func TestDispatchWorkflowRunImages(t *testing.T) {
 			if got := disp.ReconcileCalls(); !slices.Equal(got, tc.wantReconciles) {
 				t.Errorf("reconcile calls = %v, want %v", got, tc.wantReconciles)
 			}
-			if !reflect.DeepEqual(reg.kustomizationRequestCalls, tc.wantRequests) {
-				t.Errorf("recorded requests = %v, want %v", reg.kustomizationRequestCalls, tc.wantRequests)
+			if tc.wantRecorded == nil {
+				if len(reg.kustomizationRequestCalls) != 0 {
+					t.Errorf("recorded requests = %v, want none", reg.kustomizationRequestCalls)
+				}
+				return
+			}
+			if len(reg.kustomizationRequestCalls) != 1 {
+				t.Fatalf("recorded request calls = %d, want 1", len(reg.kustomizationRequestCalls))
+			}
+			recorded := reg.kustomizationRequestCalls[0]
+			if got := slices.Sorted(maps.Keys(recorded)); !slices.Equal(got, tc.wantRecorded) {
+				t.Errorf("recorded kustomizations = %v, want %v", got, tc.wantRecorded)
+			}
+			for i, ref := range disp.ReconcileCalls() {
+				if req := recorded[ref.Name]; req.Namespace != "flux-system" || disp.reconcileRequestedAts[i] != req.RequestedAt {
+					t.Errorf("reconcile %s requestedAt = %q, want recorded %+v", ref.Name, disp.reconcileRequestedAts[i], req)
+				}
 			}
 		})
 	}
@@ -3684,7 +3695,7 @@ func TestDispatchWorkflowRunImages_KubeRollout(t *testing.T) {
 			wantRecorded:   []string{"aerial-config"},
 		},
 		{
-			name: "partial reconcile failure still records the successful request",
+			name: "partial reconcile failure still records every request before patching",
 			routes: kubeWorkloadRoutes(map[string]kubeRoute{
 				jobsPath:                   {body: twoImages},
 				kubeDeploymentsPath:        {body: ownedDeployments},
@@ -3693,7 +3704,7 @@ func TestDispatchWorkflowRunImages_KubeRollout(t *testing.T) {
 				kustPrefix + "marida-core": {body: `{}`},
 			}),
 			wantReconciled: []string{"aerial-core", "marida-core"},
-			wantRecorded:   []string{"marida-core"},
+			wantRecorded:   []string{"aerial-core", "marida-core"},
 			wantErr:        true,
 		},
 	}

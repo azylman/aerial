@@ -1492,6 +1492,7 @@ func TestDefaultOutboundDispatcher_ReconcileKustomization(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	const marida = "PATCH /apis/kustomize.toolkit.fluxcd.io/v1/namespaces/apps/kustomizations/marida-core"
+	const requestedAt = "2026-11-08T10:00:00.123456789Z"
 
 	tests := []struct {
 		name    string
@@ -1499,7 +1500,7 @@ func TestDefaultOutboundDispatcher_ReconcileKustomization(t *testing.T) {
 		routes  map[string]kubeRoute
 		wantErr string
 	}{
-		{name: "patches requestedAt annotation in the ref namespace", routes: map[string]kubeRoute{marida: {body: `{}`}}},
+		{name: "patches the given requestedAt annotation in the ref namespace", routes: map[string]kubeRoute{marida: {body: `{}`}}},
 		{name: "patch rejection returns error", routes: map[string]kubeRoute{marida: {status: http.StatusForbidden, body: `forbidden`}}, wantErr: "reconcile kustomization apps/marida-core"},
 		{name: "unconfigured kube API returns error", noKube: true, wantErr: "kube api server not configured"},
 	}
@@ -1512,20 +1513,17 @@ func TestDefaultOutboundDispatcher_ReconcileKustomization(t *testing.T) {
 			if !tc.noKube {
 				disp.SetKubeConfig(ts.URL, "test-token")
 			}
-			requestedAt, err := disp.ReconcileKustomization(ctx, fluxKustomizationRef{Namespace: "apps", Name: "marida-core"})
+			err := disp.ReconcileKustomization(ctx, fluxKustomizationRef{Namespace: "apps", Name: "marida-core"}, requestedAt)
 			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || requestedAt != "" {
-					t.Fatalf("got (%q, %v), want empty requestedAt and err containing %q", requestedAt, err, tc.wantErr)
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want substring %q", err, tc.wantErr)
 				}
 				return
 			}
 			if err != nil {
 				t.Fatalf("unexpected err: %v", err)
 			}
-			if _, perr := time.Parse(time.RFC3339Nano, requestedAt); perr != nil {
-				t.Fatalf("requestedAt %q is not RFC3339Nano: %v", requestedAt, perr)
-			}
-			wantBody := `{"metadata":{"annotations":{"reconcile.fluxcd.io/requestedAt":"` + requestedAt + `"}}}`
+			wantBody := `{"metadata":{"annotations":{"reconcile.fluxcd.io/requestedAt":"2026-11-08T10:00:00.123456789Z"}}}`
 			if got := fixture.Body(marida); got != wantBody {
 				t.Errorf("patch body = %s, want %s", got, wantBody)
 			}
@@ -1533,36 +1531,40 @@ func TestDefaultOutboundDispatcher_ReconcileKustomization(t *testing.T) {
 	}
 }
 
-func TestDefaultOutboundDispatcher_KustomizationReconcileHandled(t *testing.T) {
+func TestDefaultOutboundDispatcher_ResolveFluxSourceRepo(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	const coreGet = "GET /apis/kustomize.toolkit.fluxcd.io/v1/namespaces/flux-system/kustomizations/aerial-core"
-	status := func(handled, ready string) string {
-		return `{"status":{"lastHandledReconcileAt":"` + handled + `","conditions":[{"type":"Reconciling","status":"False"},{"type":"Ready","status":"` + ready + `"}]}}`
-	}
+	const (
+		coreGet    = "GET /apis/kustomize.toolkit.fluxcd.io/v1/namespaces/flux-system/kustomizations/aerial-core"
+		repoGet    = "GET /apis/source.toolkit.fluxcd.io/v1/namespaces/flux-system/gitrepositories/aerial"
+		appsGitGet = "GET /apis/source.toolkit.fluxcd.io/v1/namespaces/apps/gitrepositories/stack"
+	)
 
 	tests := []struct {
-		name        string
-		requestedAt string
-		route       kubeRoute
-		want        bool
-		wantErr     string
+		name    string
+		obj     FluxInvolvedObject
+		routes  map[string]kubeRoute
+		want    string
+		wantErr string
 	}{
-		{name: "handled request with Ready=True", requestedAt: "t2", route: kubeRoute{body: status("t2", "True")}, want: true},
-		{name: "handled request with Ready=False", requestedAt: "t2", route: kubeRoute{body: status("t2", "False")}},
-		{name: "older request handled", requestedAt: "t2", route: kubeRoute{body: status("t1", "True")}},
-		{name: "empty requestedAt never matches", requestedAt: "", route: kubeRoute{body: `{"status":{"conditions":[{"type":"Ready","status":"True"}]}}`}},
-		{name: "get failure returns error", requestedAt: "t2", route: kubeRoute{status: http.StatusInternalServerError, body: `boom`}, wantErr: "get kustomization flux-system/aerial-core"},
-		{name: "malformed object returns error", requestedAt: "t2", route: kubeRoute{body: `{`}, wantErr: "decode kustomization flux-system/aerial-core"},
+		{name: "gitrepository resolves its own url", obj: FluxInvolvedObject{Kind: "GitRepository", Name: "aerial", Namespace: "flux-system"}, routes: map[string]kubeRoute{repoGet: {body: `{"spec":{"url":"https://github.com/acme/widgets.git"}}`}}, want: "acme/widgets"},
+		{name: "kustomization follows sourceRef in its namespace", obj: FluxInvolvedObject{Kind: "Kustomization", Name: "aerial-core"}, routes: map[string]kubeRoute{coreGet: {body: `{"spec":{"sourceRef":{"kind":"GitRepository","name":"aerial"}}}`}, repoGet: {body: `{"spec":{"url":"ssh://git@github.com/acme/core"}}`}}, want: "acme/core"},
+		{name: "kustomization follows cross-namespace sourceRef", obj: FluxInvolvedObject{Kind: "Kustomization", Name: "aerial-core", Namespace: "flux-system"}, routes: map[string]kubeRoute{coreGet: {body: `{"spec":{"sourceRef":{"kind":"GitRepository","name":"stack","namespace":"apps"}}}`}, appsGitGet: {body: `{"spec":{"url":"git@github.com:acme/stack.git"}}`}}, want: "acme/stack"},
+		{name: "kustomization with bucket source resolves empty", obj: FluxInvolvedObject{Kind: "Kustomization", Name: "aerial-core"}, routes: map[string]kubeRoute{coreGet: {body: `{"spec":{"sourceRef":{"kind":"Bucket","name":"b"}}}`}}},
+		{name: "unsupported kind resolves empty", obj: FluxInvolvedObject{Kind: "HelmRelease", Name: "x"}},
+		{name: "kustomization get failure", obj: FluxInvolvedObject{Kind: "Kustomization", Name: "aerial-core"}, wantErr: "get kustomization flux-system/aerial-core"},
+		{name: "malformed kustomization", obj: FluxInvolvedObject{Kind: "Kustomization", Name: "aerial-core"}, routes: map[string]kubeRoute{coreGet: {body: `{`}}, wantErr: "decode kustomization flux-system/aerial-core"},
+		{name: "gitrepository get failure", obj: FluxInvolvedObject{Kind: "GitRepository", Name: "aerial"}, wantErr: "get gitrepository flux-system/aerial"},
+		{name: "malformed gitrepository", obj: FluxInvolvedObject{Kind: "GitRepository", Name: "aerial"}, routes: map[string]kubeRoute{repoGet: {body: `[`}}, wantErr: "decode gitrepository flux-system/aerial"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, ts := newKubeFixture(t, map[string]kubeRoute{coreGet: tc.route})
+			_, ts := newKubeFixture(t, tc.routes)
 			disp := NewDefaultOutboundDispatcher("", ts.Client())
 			disp.SetKubeConfig(ts.URL, "test-token")
-			got, err := disp.KustomizationReconcileHandled(ctx, fluxKustomizationRef{Namespace: "flux-system", Name: "aerial-core"}, tc.requestedAt)
+			got, err := disp.ResolveFluxSourceRepo(ctx, tc.obj)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("err = %v, want substring %q", err, tc.wantErr)
@@ -1571,7 +1573,7 @@ func TestDefaultOutboundDispatcher_KustomizationReconcileHandled(t *testing.T) {
 				t.Fatalf("unexpected err: %v", err)
 			}
 			if got != tc.want {
-				t.Errorf("handled = %v, want %v", got, tc.want)
+				t.Errorf("repo = %q, want %q", got, tc.want)
 			}
 		})
 	}
