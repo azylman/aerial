@@ -44,7 +44,7 @@ data:
         updateIntervalSeconds: 30
         allowUiUpdates: false
         options:
-          path: /local/dashboards/system
+          path: /share/aerial/services/grafana/dashboards
           foldersFromFilesStructure: true
       - name: 'Aerial Custom'
         orgId: 1
@@ -55,7 +55,7 @@ data:
         updateIntervalSeconds: 30
         allowUiUpdates: false
         options:
-          path: /local/dashboards/custom
+          path: /share/aerial-config/services/grafana/dashboards
           foldersFromFilesStructure: true
   victoriametrics.yml: |
     apiVersion: 1
@@ -404,7 +404,7 @@ data:
     global:
       scrape_interval: 15s
     scrape_config_files:
-      - "/config/scrape.yml"
+      - "/share/aerial-config/services/victoriametrics/scrape.yml"
     scrape_configs:
       - job_name: eri
         static_configs:
@@ -473,11 +473,50 @@ spec:
               name: storage
             - mountPath: /etc/victoriametrics
               name: victoriametrics-scrape
-            - mountPath: /config
-              name: custom-scrape
+            - mountPath: /share
+              name: share
               readOnly: true
+      initContainers:
+        - args:
+            - --repo=https://github.com/azylman/aerial-config.git
+            - --ref=main
+            - --root=/share/.sync/aerial-config
+            - --link=/share/aerial-config
+            - --period=30s
+          env:
+            - name: GIT_CONFIG_COUNT
+              value: "1"
+            - name: GIT_CONFIG_KEY_0
+              value: safe.directory
+            - name: GIT_CONFIG_VALUE_0
+              value: '*'
+            - name: GITSYNC_USERNAME
+              value: x-access-token
+            - name: GITSYNC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: GITHUB_PAT
+                  name: shared-secrets
+          image: registry.k8s.io/git-sync/git-sync:v4.8.0
+          name: git-sync-aerial-config
+          restartPolicy: Always
+          startupProbe:
+            exec:
+              command:
+                - git
+                - -C
+                - /share/aerial-config
+                - rev-parse
+                - HEAD
+            failureThreshold: 60
+            periodSeconds: 1
+          volumeMounts:
+            - mountPath: /share
+              name: share
       nodeSelector:
         kubernetes.io/hostname: calibarn
+      securityContext:
+        fsGroup: 65533
       serviceAccountName: victoriametrics-sa
       volumes:
         - name: storage
@@ -486,10 +525,8 @@ spec:
         - configMap:
             name: victoriametrics-scrape
           name: victoriametrics-scrape
-        - hostPath:
-            path: /share/aerial-config/services/victoriametrics
-            type: ""
-          name: custom-scrape
+        - emptyDir: {}
+          name: share
 ---
 apiVersion: v1
 kind: Service
@@ -642,12 +679,84 @@ spec:
             - mountPath: /local/provisioning/dashboards/dashboards.yml
               name: prov-db
               subPath: dashboards.yml
-            - mountPath: /local/dashboards/system
-              name: dash-sys
+            - mountPath: /share
+              name: share
               readOnly: true
-            - mountPath: /local/dashboards/custom
-              name: dash-cust
-              readOnly: true
+      initContainers:
+        - args:
+            - --repo=https://github.com/azylman/aerial.git
+            - --ref=main
+            - --root=/share/.sync/aerial
+            - --link=/share/aerial
+            - --period=30s
+          env:
+            - name: GIT_CONFIG_COUNT
+              value: "1"
+            - name: GIT_CONFIG_KEY_0
+              value: safe.directory
+            - name: GIT_CONFIG_VALUE_0
+              value: '*'
+            - name: GITSYNC_USERNAME
+              value: x-access-token
+            - name: GITSYNC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: GITHUB_PAT
+                  name: shared-secrets
+          image: registry.k8s.io/git-sync/git-sync:v4.8.0
+          name: git-sync-aerial
+          restartPolicy: Always
+          startupProbe:
+            exec:
+              command:
+                - git
+                - -C
+                - /share/aerial
+                - rev-parse
+                - HEAD
+            failureThreshold: 60
+            periodSeconds: 1
+          volumeMounts:
+            - mountPath: /share
+              name: share
+        - args:
+            - --repo=https://github.com/azylman/aerial-config.git
+            - --ref=main
+            - --root=/share/.sync/aerial-config
+            - --link=/share/aerial-config
+            - --period=30s
+          env:
+            - name: GIT_CONFIG_COUNT
+              value: "1"
+            - name: GIT_CONFIG_KEY_0
+              value: safe.directory
+            - name: GIT_CONFIG_VALUE_0
+              value: '*'
+            - name: GITSYNC_USERNAME
+              value: x-access-token
+            - name: GITSYNC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: GITHUB_PAT
+                  name: shared-secrets
+          image: registry.k8s.io/git-sync/git-sync:v4.8.0
+          name: git-sync-aerial-config
+          restartPolicy: Always
+          startupProbe:
+            exec:
+              command:
+                - git
+                - -C
+                - /share/aerial-config
+                - rev-parse
+                - HEAD
+            failureThreshold: 60
+            periodSeconds: 1
+          volumeMounts:
+            - mountPath: /share
+              name: share
+      securityContext:
+        fsGroup: 65533
       volumes:
         - configMap:
             defaultMode: 420
@@ -657,14 +766,8 @@ spec:
             defaultMode: 420
             name: grafana-provisioning
           name: prov-db
-        - hostPath:
-            path: /share/aerial/services/grafana/dashboards
-            type: ""
-          name: dash-sys
-        - hostPath:
-            path: /share/aerial-config/services/grafana/dashboards
-            type: ""
-          name: dash-cust
+        - emptyDir: {}
+          name: share
 ---
 apiVersion: v1
 kind: Service
@@ -1181,6 +1284,8 @@ spec:
         - env:
             - name: PORT
               value: "8080"
+            - name: CONFIG_PATH
+              value: /share/aerial-config/services/prospera/prospera.yaml
           envFrom:
             - secretRef:
                 name: shared-secrets
@@ -1192,14 +1297,51 @@ spec:
               name: http
               protocol: TCP
           volumeMounts:
-            - mountPath: /config
-              name: config
+            - mountPath: /share
+              name: share
               readOnly: true
+      initContainers:
+        - args:
+            - --repo=https://github.com/azylman/aerial-config.git
+            - --ref=main
+            - --root=/share/.sync/aerial-config
+            - --link=/share/aerial-config
+            - --period=30s
+          env:
+            - name: GIT_CONFIG_COUNT
+              value: "1"
+            - name: GIT_CONFIG_KEY_0
+              value: safe.directory
+            - name: GIT_CONFIG_VALUE_0
+              value: '*'
+            - name: GITSYNC_USERNAME
+              value: x-access-token
+            - name: GITSYNC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: GITHUB_PAT
+                  name: shared-secrets
+          image: registry.k8s.io/git-sync/git-sync:v4.8.0
+          name: git-sync-aerial-config
+          restartPolicy: Always
+          startupProbe:
+            exec:
+              command:
+                - git
+                - -C
+                - /share/aerial-config
+                - rev-parse
+                - HEAD
+            failureThreshold: 60
+            periodSeconds: 1
+          volumeMounts:
+            - mountPath: /share
+              name: share
+      securityContext:
+        fsGroup: 65533
       volumes:
-        - hostPath:
-            path: /share/aerial-config/services/prospera
-            type: ""
-          name: config
+        - emptyDir: {}
+          name: share
 ---
 apiVersion: v1
 kind: Service
