@@ -53,6 +53,22 @@ func TestWorkerPool_ConfigInjection(t *testing.T) {
 	}
 }
 
+func TestWorkerPool_ParentContext(t *testing.T) {
+	t.Parallel()
+	parentCtx, parentCancel := context.WithCancel(context.Background())
+	defer parentCancel()
+
+	pool := New(nil, WorkerPoolConfig{ParentContext: parentCtx})
+	defer pool.Stop()
+
+	parentCancel()
+	select {
+	case <-pool.ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected pool.ctx to be cancelled when parent context is cancelled")
+	}
+}
+
 func mockJSONResponse(convID, responseText string) string {
 	if convID == "" {
 		convID = uuid.New().String()
@@ -4708,6 +4724,27 @@ func TestWorkerPool_NotifyVanadisChunkOutcome(t *testing.T) {
 			wantCalls:    1,
 		},
 		{
+			name:       "failed with interrupted by shutdown makes no calls",
+			chunkID:    "c-shutdown-fail",
+			turnStatus: "failed",
+			turnError:  "interrupted by shutdown",
+			wantCalls:  0,
+		},
+		{
+			name:       "failed with context cancelled during execution makes no calls",
+			chunkID:    "c-ctx-cancel-fail",
+			turnStatus: "failed",
+			turnError:  "context cancelled during execution",
+			wantCalls:  0,
+		},
+		{
+			name:       "timeout with interrupted by shutdown makes no calls",
+			chunkID:    "c-shutdown-timeout",
+			turnStatus: "timeout",
+			turnError:  "  Interrupted by Shutdown  ",
+			wantCalls:  0,
+		},
+		{
 			name:       "unhandled status makes no calls",
 			chunkID:    "c-cancelled",
 			turnStatus: "cancelled",
@@ -5135,6 +5172,9 @@ func TestCancelBurstOnShutdown_Dispatch(t *testing.T) {
 			te.cancelBurstOnShutdown("failed", tc.failScheduleRun)
 			if te.turnError != tc.wantTurnErr {
 				t.Fatalf("expected turnError %q, got %q", tc.wantTurnErr, te.turnError)
+			}
+			if te.turnStatus != "cancelled" {
+				t.Fatalf("expected turnStatus %q, got %q", "cancelled", te.turnStatus)
 			}
 
 			refreshed, err := store.GetDispatch(ctx, interruptedDisp.ID)

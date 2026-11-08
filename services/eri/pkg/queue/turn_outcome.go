@@ -514,8 +514,8 @@ func (te *turnExecution) completeAmbientMessage(m db.Message, info WakeInfo) {
 	}
 }
 
-func (te *turnExecution) cancelBurstOnShutdown(turnStatus string, failScheduleRun bool) {
-	te.turnStatus = turnStatus
+func (te *turnExecution) cancelBurstOnShutdown(_ string, failScheduleRun bool) {
+	te.turnStatus = "cancelled"
 	te.turnError = "interrupted by shutdown"
 	if failScheduleRun {
 		te.turnError = "context cancelled during execution"
