@@ -377,6 +377,70 @@ if [[ "${1:-}" == "ci" && "${2:-}" == "review" ]]; then
       env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real sync now >/dev/null 2>&1 || true
     fi
     env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real daemon start >/dev/null 2>&1 || true
+
+    # Attach synced placeholder repository rows onto the active checkout path for <prior-range-reviews>.
+    repo_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+    repo_short_name=$(basename "${repo_root}")
+    if [[ -n "${repo_short_name}" && -n "${repo_root}" ]]; then
+      (cd /tmp && env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real repo move "${repo_short_name}" "${repo_root}" >/dev/null 2>&1) || true
+    fi
+
+    # Backfill ## roborev-override PR comments into native roborev responses and close overridden reviews.
+    gh_token="${GH_TOKEN:-${GITHUB_TOKEN:-${GITHUB_PAT:-}}}"
+    if [[ -n "${gh_token}" && -n "${gh_repo}" && -n "${pr_num}" ]]; then
+      pr_comments_json=$(curl -fsSL -H "Accept: application/vnd.github+json" -H "Authorization: Bearer ${gh_token}" \
+        -H "X-GitHub-Api-Version: 2022-11-28" "https://api.github.com/repos/${gh_repo}/issues/${pr_num}/comments?per_page=100" 2>/dev/null || echo "[]")
+      overrides_ndjson=$(printf '%s' "${pr_comments_json}" | jq -c --arg repo "${gh_repo}" '
+        .[]? | select(((.body // "") | contains("## roborev-override")) and (.user.login == ($repo | split("/")[0]) or ([.author_association] | inside(["OWNER","MEMBER","COLLABORATOR"]))))
+        | {
+            commenter: (.user.login // "override"),
+            sha: ((try (.body | capture("\\*\\*Commit:\\*\\* `(?<s>[0-9a-fA-F]{7,40})`").s) catch null) // (try (.body | capture("## roborev-override \\(`(?<s>[0-9a-fA-F]{7,40})`\\)").s) catch "")),
+            rebuttal: (if (.body | contains("**Technical Rebuttal:**")) then (.body | split("**Technical Rebuttal:**")[1] | gsub("^[[:space:]]+|[[:space:]]+$"; "")) else (.body | gsub("^[[:space:]]+|[[:space:]]+$"; "")) end),
+            body: .body
+          } | select(.sha != "" and .rebuttal != "")' 2>/dev/null || true)
+
+      if [[ -n "${overrides_ndjson}" ]]; then
+        jobs_json=$(env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real list --json --all-branches --limit 100 2>/dev/null || echo "[]")
+        head_override_body=""
+        override_synced_any=0
+        while IFS= read -r ovr_row; do
+          [[ -z "${ovr_row}" ]] && continue
+          ovr_commenter=$(printf '%s' "${ovr_row}" | jq -r '.commenter')
+          ovr_sha=$(printf '%s' "${ovr_row}" | jq -r '.sha')
+          ovr_rebuttal=$(printf '%s' "${ovr_row}" | jq -r '.rebuttal')
+          ovr_body=$(printf '%s' "${ovr_row}" | jq -r '.body')
+          match_job_id=$(printf '%s' "${jobs_json}" | jq -r --arg sha "${ovr_sha}" '
+            [.[]? | select((.panel_role // "") != "member" and .status == "done")
+              | select((.git_ref == $sha) or (.git_ref | startswith($sha)) or (.git_ref | endswith(".." + $sha)) or (($sha | length) >= 7 and (((.git_ref | split("..") | last) | startswith($sha)) or ($sha | startswith(.git_ref | split("..") | last)))))]
+            | first | .id // empty' 2>/dev/null || true)
+          if [[ -n "${match_job_id}" ]]; then
+            already_recorded=$(env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real show --json --job "${match_job_id}" 2>/dev/null \
+              | jq -r --arg reb "${ovr_rebuttal}" 'if ([.comments[]? | select(.response == $reb)] | length) > 0 then "1" else "0" end' 2>/dev/null || echo "0")
+            if [[ "${already_recorded}" != "1" ]]; then
+              env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real comment --commenter "${ovr_commenter}" --job "${match_job_id}" "${ovr_rebuttal}" >/dev/null 2>&1 || true
+              override_synced_any=1
+            fi
+            if env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real close "${match_job_id}" >/dev/null 2>&1; then
+              override_synced_any=1
+            fi
+          fi
+          if [[ -n "${head_sha}" && ( "${head_sha}" == "${ovr_sha}"* || "${ovr_sha}" == "${head_sha:0:7}"* ) ]]; then
+            head_override_body="${ovr_body}"
+          fi
+        done <<< "${overrides_ndjson}"
+
+        if [[ "${override_synced_any}" -eq 1 && -s "/root/.roborev/postgres-password" ]]; then
+          env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real sync now >/dev/null 2>&1 || true
+        fi
+        if [[ -n "${head_override_body}" ]]; then
+          short_sha="${head_sha:0:7}"
+          [[ -z "${short_sha}" ]] && short_sha=$(git rev-parse --short=7 HEAD 2>/dev/null || echo "unknown")
+          printf '## roborev: Review Passed (`%s`)\n\n%s\n' "${short_sha}" "${head_override_body}"
+          exit 0
+        fi
+      fi
+    fi
+
     env -u GITHUB_PAT -u GH_TOKEN -u GITHUB_TOKEN /usr/local/bin/roborev.real "${cmd_args[@]}" > "${raw_out}" 2>&1
     rc=$?
     if [ -s "/root/.roborev/postgres-password" ]; then

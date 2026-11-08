@@ -474,6 +474,7 @@ jobs:
             OVERRIDE_COMMENT=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100" \
               --jq "[.[] | select(.user.login == \"azylman\" and (.body | contains(\"## roborev-override\")) and ((.body | contains(\"${HEAD_SHA}\")) or (.body | contains(\"${SHORT_SHA}\"))))] | last | .body // empty" 2>/dev/null || true)
             if [ -n "${OVERRIDE_COMMENT}" ]; then
+              roborev ci review --agent gemini --min-severity medium --reasoning thorough >/dev/null 2>&1 || true
               echo "${OVERRIDE_COMMENT}" >> "$GITHUB_STEP_SUMMARY"
               echo "RoboRev gate overridden for commit ${SHORT_SHA} via verified technical rebuttal."
               exit 0
