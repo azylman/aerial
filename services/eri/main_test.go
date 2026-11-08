@@ -206,7 +206,10 @@ func TestCreateReloadConfigFunc(t *testing.T) {
 		tmpFile := filepath.Join(t.TempDir(), "blocking_file")
 		_ = os.WriteFile(tmpFile, []byte("file"), 0o644)
 		cfg.Update(&config.ConfigData{GeminiHomeDir: tmpFile})
-		CreateReloadConfigFunc(cfg, WithProvisioner(env.NewFromConfig(cfg)))("test-provisioner-error")
+		CreateReloadConfigFunc(cfg,
+			WithReloadSupplier(func(active *config.Config) error { return nil }),
+			WithProvisioner(env.NewFromConfig(cfg)),
+		)("test-provisioner-error")
 	})
 
 	t.Run("with worker pool and claude engine propagation", func(t *testing.T) {
