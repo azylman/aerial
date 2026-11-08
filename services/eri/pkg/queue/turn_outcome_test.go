@@ -870,7 +870,6 @@ func TestTurnExecution_InlineReplyOnNewerMessages(t *testing.T) {
 		name       string
 		threadID   string
 		burst      []db.Message
-		trailing   []db.Message
 		stored     []db.Message
 		enqueuedID string
 		wantReply  string
@@ -887,13 +886,6 @@ func TestTurnExecution_InlineReplyOnNewerMessages(t *testing.T) {
 			threadID:  chanID,
 			burst:     []db.Message{{ID: "100000000000000001", ThreadID: chanID, AuthorID: "u1"}},
 			stored:    []db.Message{{ID: "100000000000000001", ThreadID: chanID, AuthorID: "u1"}, {ID: "100000000000000002", ThreadID: chanID, AuthorID: "u2"}},
-			wantReply: "100000000000000001",
-		},
-		{
-			name:      "newer discord message in trailing slice attaches reply reference",
-			threadID:  chanID,
-			burst:     []db.Message{{ID: "100000000000000001", ThreadID: chanID, AuthorID: "u1"}},
-			trailing:  []db.Message{{ID: "100000000000000003", ThreadID: chanID, AuthorID: "u2"}},
 			wantReply: "100000000000000001",
 		},
 		{
@@ -976,13 +968,12 @@ func TestTurnExecution_InlineReplyOnNewerMessages(t *testing.T) {
 			}
 
 			te := &turnExecution{
-				pool:         pool,
-				threadID:     tc.threadID,
-				triggerType:  "discord",
-				burst:        tc.burst,
-				trailingMsgs: tc.trailing,
-				execStart:    time.Now().UTC(),
-				stopTyping:   func() {},
+				pool:        pool,
+				threadID:    tc.threadID,
+				triggerType: "discord",
+				burst:       tc.burst,
+				execStart:   time.Now().UTC(),
+				stopTyping:  func() {},
 			}
 			te.deliverDiscordSuccess("completed output", nil)
 			if gotReplyTo != tc.wantReply {
@@ -1040,99 +1031,6 @@ func TestTurnExecution_IsQuotaRetry(t *testing.T) {
 			t.Parallel()
 			if got := tc.te.isQuotaRetry(); got != tc.want {
 				t.Errorf("isQuotaRetry() = %t, want %t", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestTurnExecution_HandleTrailing_ZeroTurnTelemetryLeak(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name          string
-		isQuotaPaused bool
-		trailingMsgs  []db.Message
-		trailingInfos []WakeInfo
-		wantStatus    map[string]string
-	}{
-		{
-			name: "ambient and wake trailing messages never leak active turn telemetry",
-			trailingMsgs: []db.Message{
-				{ID: "m-ambient", ThreadID: "t-trail", Content: "ambient talk"},
-				{ID: "m-wake", ThreadID: "t-trail", Content: "<@aerial> wake up"},
-			},
-			trailingInfos: []WakeInfo{
-				{IsWake: false, Score: 0.1, Threshold: 0.7, Reason: "ambient chat"},
-				{IsWake: true, Score: 0.9, Threshold: 0.7, Reason: "mention"},
-			},
-			wantStatus: map[string]string{
-				"m-ambient": db.StatusCompleted,
-				"m-wake":    db.StatusPending,
-			},
-		},
-		{
-			name:          "quota paused trailing messages never leak active turn telemetry",
-			isQuotaPaused: true,
-			trailingMsgs: []db.Message{
-				{ID: "m-quota-wake", ThreadID: "t-trail", Content: "<@aerial> hi"},
-				{ID: "m-quota-ambient", ThreadID: "t-trail", Content: "ambient"},
-			},
-			trailingInfos: []WakeInfo{
-				{IsWake: true},
-				{IsWake: false},
-			},
-			wantStatus: map[string]string{
-				"m-quota-wake":    db.StatusFailed,
-				"m-quota-ambient": db.StatusFailed,
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			store := dbtest.NewFakeStore()
-			for _, m := range tc.trailingMsgs {
-				_ = store.InsertMessage(context.Background(), m)
-			}
-			pool := New(config.NewFromData(&config.ConfigData{}), WorkerPoolConfig{
-				Store: store,
-			})
-			defer pool.Stop()
-
-			te := &turnExecution{
-				pool:           pool,
-				threadID:       "t-trail",
-				triggerType:    "discord",
-				turnAttempted:  true,
-				turnDurationMs: 4500,
-				turnTokenUsage: runner.TokenUsage{
-					InputTokens:     100,
-					OutputTokens:    200,
-					ThinkingTokens:  50,
-					CacheReadTokens: 25,
-					TotalTokens:     375,
-				},
-				isQuotaPaused: tc.isQuotaPaused,
-				trailingMsgs:  tc.trailingMsgs,
-				trailingInfos: tc.trailingInfos,
-			}
-
-			te.handleTrailing()
-
-			for id, expectedStatus := range tc.wantStatus {
-				msg, err := store.GetMessage(context.Background(), id)
-				if err != nil || msg == nil {
-					t.Fatalf("failed to retrieve message %s: %v", id, err)
-				}
-				if msg.Status != expectedStatus {
-					t.Errorf("msg %s status = %q, want %q", id, msg.Status, expectedStatus)
-				}
-				if msg.DurationMs != 0 || msg.InputTokens != 0 || msg.OutputTokens != 0 ||
-					msg.ThinkingTokens != 0 || msg.CacheReadTokens != 0 || msg.TotalTokens != 0 {
-					t.Errorf("msg %s leaked turn telemetry: duration=%d input=%d output=%d thinking=%d cache=%d total=%d",
-						id, msg.DurationMs, msg.InputTokens, msg.OutputTokens, msg.ThinkingTokens, msg.CacheReadTokens, msg.TotalTokens)
-				}
 			}
 		})
 	}

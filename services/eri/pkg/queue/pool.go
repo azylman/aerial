@@ -1066,10 +1066,9 @@ func (p *WorkerPool) CancelDispatches(dispatchID, buildID, reason string) []stri
 	return cancelledIDs
 }
 
-func (p *WorkerPool) latchActiveTurnsLocked(threadID string, drainQueue bool) ([]*turnExecution, []string, []db.Message) {
+func (p *WorkerPool) latchActiveTurnsLocked(threadID string) ([]*turnExecution, []string) {
 	var active []*turnExecution
 	var burstMsgIDs []string
-	var drainedMsgs []db.Message
 
 	for scopeKey, te := range p.activeTurns {
 		if te == nil || (te.threadID != threadID && !isScopeKeyForThread(scopeKey, threadID)) {
@@ -1082,13 +1081,9 @@ func (p *WorkerPool) latchActiveTurnsLocked(threadID string, drainQueue bool) ([
 		for i := range te.burst {
 			burstMsgIDs = append(burstMsgIDs, te.burst[i].ID)
 		}
-		if drainQueue && len(te.trailingMsgs) > 0 {
-			drainedMsgs = append(drainedMsgs, te.trailingMsgs...)
-			te.trailingMsgs, te.trailingInfos = nil, nil
-		}
 		te.activeSessionMu.Unlock()
 	}
-	return active, burstMsgIDs, drainedMsgs
+	return active, burstMsgIDs
 }
 
 func drainChannelMessages(ch chan queueItem) []db.Message {
@@ -1126,7 +1121,8 @@ func (p *WorkerPool) drainQueuedThreadMessagesLocked(threadID string) []db.Messa
 }
 
 func (p *WorkerPool) latchInterruptAndDrainLocked(threadID string, drainQueue bool) ([]*turnExecution, []string, []db.Message) {
-	active, burstMsgIDs, drainedMsgs := p.latchActiveTurnsLocked(threadID, drainQueue)
+	active, burstMsgIDs := p.latchActiveTurnsLocked(threadID)
+	var drainedMsgs []db.Message
 	if drainQueue {
 		drainedMsgs = append(drainedMsgs, p.drainQueuedThreadMessagesLocked(threadID)...)
 	}

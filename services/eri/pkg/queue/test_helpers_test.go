@@ -552,17 +552,17 @@ func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 }
 
 type burstTestCase struct {
-	name, channelID, seedSessionID, botUserID, classifierJSON, runnerConvID, runnerResponse, wantSavedSession, wantFinalStatus, wantDeliveredText, wantOldTranscriptExcludes, wantPromptPrefix, wantClassifierPromptContains, wantAlertTitle, wantAlertChannel string
-	seedSession, enableHistoryFetcher, sequentialBursts, preserveSessionInRunner, checkClassifierCalls, checkSavedSession, wantNoStubDir, checkDeliveryCalls, checkMaxTypingCalls, wantPassedInitialSession, wantSingleInstructionTagPerPrompt                 bool
-	seedTurnCount, maxAttempts, rotateBeforeTurn, wantClassifierCalls, wantRunnerCalls, wantDeliveryCalls, wantMinTypingCalls, wantMaxTypingCalls, wantTurnCount                                                                                               int
-	seedTranscripts, wantPassedSessions, wantPromptContains, wantPromptExcludes, wantAlertBodyContains                                                                                                                                                         []string
-	channelInstructions, wantMsgErrors, wantMsgResponses                                                                                                                                                                                                       map[string]string
-	cachedChannels                                                                                                                                                                                                                                             []*discordgo.Channel
-	historyMessages                                                                                                                                                                                                                                            []HistoryMessage
-	policy                                                                                                                                                                                                                                                     config.ChannelPolicy
-	runnerSteps                                                                                                                                                                                                                                                []mockRunnerStep
-	messages                                                                                                                                                                                                                                                   []db.Message
-	wantTurnPromptContains, wantTurnPromptExcludes                                                                                                                                                                                                             map[int][]string
+	name, channelID, seedSessionID, botUserID, classifierJSON, runnerConvID, runnerResponse, wantSavedSession, wantFinalStatus, wantDeliveredText, wantPromptPrefix, wantClassifierPromptContains, wantAlertTitle, wantAlertChannel            string
+	seedSession, enableHistoryFetcher, sequentialBursts, preserveSessionInRunner, checkClassifierCalls, checkSavedSession, wantNoStubDir, checkDeliveryCalls, checkMaxTypingCalls, wantPassedInitialSession, wantSingleInstructionTagPerPrompt bool
+	seedTurnCount, maxAttempts, rotateBeforeTurn, wantClassifierCalls, wantRunnerCalls, wantDeliveryCalls, wantMinTypingCalls, wantMaxTypingCalls, wantTurnCount                                                                               int
+	seedTranscripts, wantPassedSessions, wantPromptContains, wantPromptExcludes, wantAlertBodyContains                                                                                                                                         []string
+	channelInstructions, wantMsgErrors, wantMsgResponses                                                                                                                                                                                       map[string]string
+	cachedChannels                                                                                                                                                                                                                             []*discordgo.Channel
+	historyMessages                                                                                                                                                                                                                            []HistoryMessage
+	policy                                                                                                                                                                                                                                     config.ChannelPolicy
+	runnerSteps                                                                                                                                                                                                                                []mockRunnerStep
+	messages                                                                                                                                                                                                                                   []db.Message
+	wantTurnPromptContains, wantTurnPromptExcludes                                                                                                                                                                                             map[int][]string
 }
 
 func runBurstTestCase(t *testing.T, tc burstTestCase) {
@@ -766,13 +766,6 @@ func runBurstTestCase(t *testing.T, tc burstTestCase) {
 	}
 	if tc.wantPassedInitialSession && passedSessID != initialSessionID {
 		t.Errorf("passedSessID = %q, want %q", passedSessID, initialSessionID)
-	}
-	if tc.wantOldTranscriptExcludes != "" {
-		oldSessDir, _ := ensureTestSessionDir(sessMgr, initialSessionID)
-		dataOld, _ := os.ReadFile(filepath.Join(oldSessDir, ".system_generated", "logs", "transcript.jsonl"))
-		if strings.Contains(string(dataOld), tc.wantOldTranscriptExcludes) {
-			t.Errorf("old transcript should NOT contain %q", tc.wantOldTranscriptExcludes)
-		}
 	}
 	if tc.wantPromptPrefix != "" && !strings.HasPrefix(receivedPrompt, tc.wantPromptPrefix) {
 		t.Errorf("prompt prefix missing %q", tc.wantPromptPrefix)

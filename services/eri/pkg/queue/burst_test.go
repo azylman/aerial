@@ -23,38 +23,34 @@ func TestPlanBurstExecution(t *testing.T) {
 	botID, roleIDs := "bot-aerial-123", []string{"role-aerial-managed"}
 
 	tests := []struct {
-		name                                              string
-		input                                             BurstPlanInput
-		expectedWakeIdx                                   int
-		expectedAllAmb, wantAllAmbient, expectedHasActive bool
-		classifierMode                                    string
-		classifierScore                                   float64
-		classifierReason                                  string
-		wantActiveID                                      string
-		wantLeadingIDs, wantTrailingIDs                   []string
-		wantTrailingWake, wantFirstWake, wantAllWakeFalse bool
-		wantWakeReason                                    string
-		wantFirstScore                                    float64
-		wantTrailingReason                                string
-		wantTrailingCount                                 int
-		wantClassifyCalls                                 int
+		name                            string
+		input                           BurstPlanInput
+		expectedWakeIdx                 int
+		expectedAllAmb, wantAllAmbient  bool
+		classifierMode                  string
+		classifierScore                 float64
+		classifierReason                string
+		wantFirstWake, wantAllWakeFalse bool
+		wantWakeReason                  string
+		wantFirstScore                  float64
+		wantClassifyCalls               int
 	}{
-		{name: "Empty burst", input: BurstPlanInput{Burst: nil}, expectedWakeIdx: -1},
-		{name: "Hook override wake", input: BurstPlanInput{Burst: []db.Message{mkBurstMsg("m1", "hello"), mkBurstMsg("m2", "world")}, HookOverride: "wake"}, expectedWakeIdx: 0, expectedHasActive: true, wantActiveID: "m1", wantTrailingIDs: []string{"m2"}, wantFirstWake: true},
+		{name: "Empty burst", input: BurstPlanInput{Burst: nil}, expectedWakeIdx: -1, expectedAllAmb: true},
+		{name: "Hook override wake", input: BurstPlanInput{Burst: []db.Message{mkBurstMsg("m1", "hello"), mkBurstMsg("m2", "world")}, HookOverride: "wake"}, expectedWakeIdx: 0, wantFirstWake: true},
 		{name: "Hook override drop", input: BurstPlanInput{Burst: []db.Message{mkBurstMsg("m1", "hello"), mkBurstMsg("m2", "world")}, HookOverride: "drop"}, expectedWakeIdx: -1, expectedAllAmb: true, wantAllWakeFalse: true, wantWakeReason: "hook_drop_override"},
-		{name: "Tier-1 direct mention at head", input: BurstPlanInput{Burst: []db.Message{mkBurstMsg("m1", "<@bot-aerial-123> help", now), mkBurstMsg("m2", "milk", now.Add(time.Second))}, WakeMode: "mention", BotUserID: botID, BotRoleIDs: roleIDs}, expectedWakeIdx: 0, expectedHasActive: true, wantTrailingIDs: []string{"m2"}},
-		{name: "Tier-1 direct mention after ambient", input: BurstPlanInput{Burst: []db.Message{mkBurstMsg("m1", "day", now), mkBurstMsg("m2", "yeah", now.Add(time.Second)), mkBurstMsg("m3", "<@bot-aerial-123> sum", now.Add(2*time.Second)), mkBurstMsg("m4", "dm", now.Add(3*time.Second))}, WakeMode: "mention", BotUserID: botID, BotRoleIDs: roleIDs}, expectedWakeIdx: 2, expectedHasActive: true, wantLeadingIDs: []string{"m1", "m2"}, wantActiveID: "m3", wantTrailingIDs: []string{"m4"}},
+		{name: "Hook override drop suppresses Tier-1 wake", input: BurstPlanInput{Burst: []db.Message{mkBurstMsg("m1", "<@bot-aerial-123> help", now)}, HookOverride: "drop", BotUserID: botID, BotRoleIDs: roleIDs}, expectedWakeIdx: -1, expectedAllAmb: true, wantAllWakeFalse: true, wantWakeReason: "hook_drop_override"},
+		{name: "Tier-1 direct mention at head", input: BurstPlanInput{Burst: []db.Message{mkBurstMsg("m1", "<@bot-aerial-123> help", now), mkBurstMsg("m2", "milk", now.Add(time.Second))}, WakeMode: "mention", BotUserID: botID, BotRoleIDs: roleIDs}, expectedWakeIdx: 0, wantFirstWake: true, wantWakeReason: "tier1_mention_or_reply"},
+		{name: "Tier-1 direct mention after ambient", input: BurstPlanInput{Burst: []db.Message{mkBurstMsg("m1", "day", now), mkBurstMsg("m2", "yeah", now.Add(time.Second)), mkBurstMsg("m3", "<@bot-aerial-123> sum", now.Add(2*time.Second)), mkBurstMsg("m4", "dm", now.Add(3*time.Second))}, WakeMode: "mention", BotUserID: botID, BotRoleIDs: roleIDs}, expectedWakeIdx: 2},
 		{name: "Mention mode no mentions drops", input: BurstPlanInput{Burst: []db.Message{mkBurstMsg("m1", "general", now), mkBurstMsg("m2", "cool", now.Add(time.Second))}, WakeMode: "mention"}, expectedWakeIdx: -1, expectedAllAmb: true, classifierMode: "panic"},
 		{name: "WakeMode aliases mentions", input: BurstPlanInput{Burst: []db.Message{mkBurstMsg("m1", "text", now)}, WakeMode: "mentions"}, expectedWakeIdx: -1, expectedAllAmb: true},
 		{name: "WakeMode alias direct", input: BurstPlanInput{Burst: []db.Message{mkBurstMsg("m1", "text", now)}, WakeMode: "direct"}, expectedWakeIdx: -1, expectedAllAmb: true},
-		{name: "All mode always wakes", input: BurstPlanInput{Burst: []db.Message{mkBurstMsg("m1", "msg 1", now), mkBurstMsg("m2", "msg 2", now.Add(time.Second))}, WakeMode: "all"}, expectedWakeIdx: 0, expectedHasActive: true, wantActiveID: "m1", wantTrailingIDs: []string{"m2"}},
-		{name: "WakeMode alias always", input: BurstPlanInput{Burst: []db.Message{mkBurstMsg("m1", "msg 1", now)}, WakeMode: "always"}, expectedWakeIdx: 0, expectedHasActive: true, wantActiveID: "m1", wantFirstWake: true},
+		{name: "All mode always wakes", input: BurstPlanInput{Burst: []db.Message{mkBurstMsg("m1", "msg 1", now), mkBurstMsg("m2", "msg 2", now.Add(time.Second))}, WakeMode: "all"}, expectedWakeIdx: 0},
+		{name: "WakeMode alias always", input: BurstPlanInput{Burst: []db.Message{mkBurstMsg("m1", "msg 1", now)}, WakeMode: "always"}, expectedWakeIdx: 0, wantFirstWake: true},
 		{name: "Classifier mode threshold <= 0 drops", input: BurstPlanInput{Burst: []db.Message{mkBurstMsg("m1", "msg 1", now)}, WakeMode: "classifier", Threshold: 0.0}, expectedWakeIdx: -1, expectedAllAmb: true},
 		{name: "Classifier heuristic skip drops", input: BurstPlanInput{Burst: []db.Message{mkBurstMsg("m1", "lol", now), mkBurstMsg("m2", "👍", now.Add(time.Second))}, WakeMode: "classifier", Threshold: 0.8}, expectedWakeIdx: -1, expectedAllAmb: true, classifierMode: "panic"},
-		{name: "Classifier high score wakes", input: BurstPlanInput{Burst: []db.Message{mkBurstMsg("m1", "help with docker?", now)}, WakeMode: "classifier", Threshold: 0.75}, expectedWakeIdx: 0, expectedHasActive: true, classifierMode: "static", classifierScore: 0.92, classifierReason: "direct question", wantFirstScore: 0.92, wantWakeReason: "direct question", wantClassifyCalls: 1},
+		{name: "Classifier high score wakes", input: BurstPlanInput{Burst: []db.Message{mkBurstMsg("m1", "help with docker?", now)}, WakeMode: "classifier", Threshold: 0.75}, expectedWakeIdx: 0, classifierMode: "static", classifierScore: 0.92, classifierReason: "direct question", wantFirstScore: 0.92, wantWakeReason: "direct question", wantClassifyCalls: 1},
 		{name: "Classifier low score drops", input: BurstPlanInput{Burst: []db.Message{mkBurstMsg("m1", "tacos for lunch", now)}, WakeMode: "classifier", Threshold: 0.75}, expectedWakeIdx: -1, expectedAllAmb: true, classifierMode: "static", classifierScore: 0.15, classifierReason: "unrelated", wantClassifyCalls: 1},
 		{name: "Nil classifierFn defaults safely", input: BurstPlanInput{Burst: []db.Message{mkBurstMsg("m1", "need assistance", now)}, WakeMode: "classifier", Threshold: 0.5}, expectedWakeIdx: -1, expectedAllAmb: true, wantClassifyCalls: 1},
-		{name: "Trailing message direct mention marked wake", input: BurstPlanInput{Burst: []db.Message{mkBurstMsg("m1", "<@bot-aerial-123> task 1", now), mkBurstMsg("m2", "<@bot-aerial-123> task 2", now.Add(time.Second))}, WakeMode: "mention", BotUserID: botID, BotRoleIDs: roleIDs}, expectedWakeIdx: 0, expectedHasActive: true, wantTrailingIDs: []string{"m2"}, wantTrailingWake: true},
 		{
 			name: "Single-message peer-mention burst drops deterministically",
 			input: BurstPlanInput{
@@ -124,26 +120,6 @@ func TestPlanBurstExecution(t *testing.T) {
 			classifierScore:   0.20,
 			classifierReason:  "ambient chatter",
 		},
-		{
-			name: "Tier-1 wake at index 0 followed by peer-directed trailing message",
-			input: BurstPlanInput{
-				Burst: []db.Message{
-					{ID: "m1", AuthorID: "alice", Content: "<@bot-aerial-123> please review this branch", MentionUserIDs: []string{botID}},
-					{ID: "m2", AuthorID: "alice", Content: "Hey <@user-bob> you can ignore that notification", MentionUserIDs: []string{"user-bob"}},
-				},
-				WakeMode:   "classifier",
-				Threshold:  0.54,
-				BotUserID:  botID,
-				BotRoleIDs: roleIDs,
-			},
-			expectedWakeIdx:    0,
-			expectedHasActive:  true,
-			wantActiveID:       "m1",
-			wantTrailingIDs:    []string{"m2"},
-			wantTrailingCount:  1,
-			wantTrailingReason: "directed_at_other",
-			wantClassifyCalls:  0,
-		},
 	}
 
 	for _, tc := range tests {
@@ -169,40 +145,8 @@ func TestPlanBurstExecution(t *testing.T) {
 
 			plan := PlanBurstExecution(in)
 			wantAllAmb := tc.expectedAllAmb || tc.wantAllAmbient
-			if plan.WakeIndex != tc.expectedWakeIdx || plan.IsAllAmbient != wantAllAmb || plan.HasActiveMessage != tc.expectedHasActive {
-				t.Errorf("WakeIndex=%d, IsAllAmbient=%t, HasActiveMessage=%t", plan.WakeIndex, plan.IsAllAmbient, plan.HasActiveMessage)
-			}
-			if tc.wantActiveID != "" && plan.ActiveMessage.ID != tc.wantActiveID {
-				t.Errorf("expected active message %s, got %s", tc.wantActiveID, plan.ActiveMessage.ID)
-			}
-			checkIDs := func(kind string, msgs []db.Message, want []string) {
-				if want == nil {
-					return
-				}
-				if len(msgs) != len(want) {
-					t.Fatalf("expected %d %s, got %d", len(want), kind, len(msgs))
-				}
-				for i, id := range want {
-					if msgs[i].ID != id {
-						t.Errorf("expected %s[%d]=%s, got %s", kind, i, id, msgs[i].ID)
-					}
-				}
-			}
-			checkIDs("leading", plan.LeadingAmbient, tc.wantLeadingIDs)
-			checkIDs("trailing", plan.TrailingMessages, tc.wantTrailingIDs)
-
-			if tc.wantTrailingCount > 0 && len(plan.TrailingMessages) != tc.wantTrailingCount {
-				t.Errorf("expected %d trailing messages, got %d", tc.wantTrailingCount, len(plan.TrailingMessages))
-			}
-			if tc.wantTrailingWake && (len(plan.TrailingInfos) == 0 || !plan.TrailingInfos[0].IsWake) {
-				t.Errorf("expected trailing IsWake = true")
-			}
-			if tc.wantTrailingReason != "" {
-				for i, info := range plan.TrailingInfos {
-					if info.Reason != tc.wantTrailingReason {
-						t.Errorf("expected trailingInfo[%d].Reason = %q, got %q", i, tc.wantTrailingReason, info.Reason)
-					}
-				}
+			if plan.WakeIndex != tc.expectedWakeIdx || plan.IsAllAmbient != wantAllAmb {
+				t.Errorf("WakeIndex=%d, IsAllAmbient=%t (want WakeIndex=%d, IsAllAmbient=%t)", plan.WakeIndex, plan.IsAllAmbient, tc.expectedWakeIdx, wantAllAmb)
 			}
 			if tc.wantFirstWake && (len(plan.WakeInfos) == 0 || !plan.WakeInfos[0].IsWake) {
 				t.Errorf("expected wakeInfos[0].IsWake = true")
@@ -215,10 +159,9 @@ func TestPlanBurstExecution(t *testing.T) {
 				}
 			}
 			if tc.wantWakeReason != "" {
-				for i, info := range plan.WakeInfos {
-					if info.Reason != tc.wantWakeReason {
-						t.Errorf("expected wakeInfo[%d].Reason = %q, got %q", i, tc.wantWakeReason, info.Reason)
-					}
+				idx := max(plan.WakeIndex, 0)
+				if idx < len(plan.WakeInfos) && plan.WakeInfos[idx].Reason != tc.wantWakeReason {
+					t.Errorf("expected wakeInfo[%d].Reason = %q, got %q", idx, tc.wantWakeReason, plan.WakeInfos[idx].Reason)
 				}
 			}
 			if tc.wantFirstScore != 0 && (len(plan.WakeInfos) == 0 || plan.WakeInfos[0].Score != tc.wantFirstScore) {
