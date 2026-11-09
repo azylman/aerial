@@ -1,0 +1,25 @@
+/* VirtualList geometry. Mounted rows flow in a column between the list's top and bottom padding,
+   which stand in for the unmounted rows (padding and gaps are set inline from the layout). */
+.virtual-list {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.virtual-list-row {
+    display: grid;
+}
+
+/* The focused row kept mounted outside the window: out of flow, at its layout offset. */
+.virtual-list-row.detached {
+    position: absolute;
+    left: 0;
+    right: 0;
+}
+
+/* A cell is a one-item grid so the item stretches to the row height like a direct grid child. */
+.virtual-list-cell {
+    display: grid;
+    min-width: 0;
+}
