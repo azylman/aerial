@@ -102,6 +102,40 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libespeak-ng-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Playwright Chromium runtime libs + CI-matching fonts for the console parity suite (turns run without root, so they can't apt-get at runtime)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libasound2t64 \
+    libatk-bridge2.0-0t64 \
+    libatk1.0-0t64 \
+    libatspi2.0-0t64 \
+    libcairo2 \
+    libcups2t64 \
+    libdbus-1-3 \
+    libdrm2 \
+    libgbm1 \
+    libglib2.0-0t64 \
+    libnspr4 \
+    libnss3 \
+    libpango-1.0-0 \
+    libx11-6 \
+    libxcb1 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxext6 \
+    libxfixes3 \
+    libxkbcommon0 \
+    libxrandr2 \
+    libfontconfig1 \
+    libfreetype6 \
+    fonts-liberation \
+    fonts-noto-color-emoji \
+    fonts-ipafont-gothic \
+    fonts-wqy-zenhei \
+    fonts-tlwg-loma-otf \
+    fonts-freefont-ttf \
+    xfonts-scalable \
+    && rm -rf /var/lib/apt/lists/*
+
 # Configure default SSH client with include for aerial-config
 RUN mkdir -p -m 0700 /root/.ssh && \
     echo "Include /share/aerial-config/ssh/config" > /root/.ssh/config && \
@@ -148,7 +182,7 @@ ENV RUSTUP_HOME="/usr/local/rustup" \
 RUN curl -fsSL --compressed https://antigravity.google/cli/install.sh | bash -s -- -d /usr/local/bin
 
 # Install Stripe Link CLI (@stripe/link-cli v0.29.0) standalone binary
-RUN curl -fsSL https://github.com/stripe/link-cli/releases/download/%40stripe/link-cli%401.0.0/link-cli-linux-x64 -o /usr/local/bin/link-cli && \
+RUN curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 https://github.com/stripe/link-cli/releases/download/%40stripe/link-cli%401.0.0/link-cli-linux-x64 -o /usr/local/bin/link-cli && \
     echo "40fa5fbade72cc9fde4014312fa5b7a3eeb6b7b151e0a97539991100f3e9943f  /usr/local/bin/link-cli" | sha256sum -c - && \
     chmod 0755 /usr/local/bin/link-cli
 ENV LINK_AUTH_FILE="/data/runtimes/discord/.config/link-cli-nodejs/config.json"
