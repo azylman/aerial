@@ -1242,6 +1242,23 @@ spec:
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
 metadata:
+  name: eri-ssh-key
+  namespace: default
+spec:
+  data:
+    - remoteRef:
+        key: SSH_PRIVATE_KEY
+      secretKey: SSH_PRIVATE_KEY
+  refreshInterval: 1m
+  secretStoreRef:
+    kind: SecretStore
+    name: infisical
+  target:
+    creationPolicy: Owner
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
   name: infisical-secret
   namespace: default
 spec:

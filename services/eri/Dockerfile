@@ -136,12 +136,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xfonts-scalable \
     && rm -rf /var/lib/apt/lists/*
 
-# Configure default SSH client with include for aerial-config
-RUN mkdir -p -m 0700 /root/.ssh && \
-    echo "Include /share/aerial-config/ssh/config" > /root/.ssh/config && \
-    chmod 0600 /root/.ssh/config && \
-    mkdir -p -m 0755 /etc/ssh/ssh_config.d && \
-    echo "Include /share/aerial-config/ssh/config" > /etc/ssh/ssh_config.d/aerial.conf && \
+# Configure default SSH client to include the config copied to /data/ssh by the ssh-bootstrap initContainer
+RUN mkdir -p -m 0755 /etc/ssh/ssh_config.d && \
+    echo "Include /data/ssh/config" > /etc/ssh/ssh_config.d/aerial.conf && \
     chmod 0644 /etc/ssh/ssh_config.d/aerial.conf
 
 # Copy Go SDK, Rust toolchain, golangci-lint, and Node.js 22 LTS runtime from builders/images
