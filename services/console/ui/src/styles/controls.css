@@ -170,6 +170,9 @@
     top: 0; right: 0; bottom: 0; left: 0;
     transform: translateX(-100%);
     background: linear-gradient(90deg, transparent, rgba(0, 242, 254, 0.08), transparent);
+}
+
+html.motion-ready .fact-card-skeleton::after {
     animation: skeleton-shimmer 1.8s infinite;
 }
 
@@ -237,6 +240,9 @@
 
 .reconnect-icon {
     font-size: 1rem;
+}
+
+html.motion-ready .reconnect-icon {
     animation: blink-dot 1s infinite alternate;
 }
 

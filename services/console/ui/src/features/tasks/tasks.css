@@ -48,6 +48,9 @@
     width: 100%;
     height: 2px;
     background: linear-gradient(90deg, transparent, var(--neon-cyan), var(--neon-purple), transparent);
+}
+
+html.motion-ready .task-card-laser {
     animation: laser-sweep 2.5s infinite linear;
 }
 
