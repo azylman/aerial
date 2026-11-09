@@ -765,10 +765,10 @@ func TestExtractResponseStringAndPopulateUsage(t *testing.T) {
 			t.Errorf("extractResponseString(%v) = %q, want %q", tc.raw, got, tc.want)
 		}
 	}
-	assertUsage := func(r *TurnResult, in, out, tot int) {
+	assertUsage := func(r *TurnResult, in, out, tot, cacheRead int) {
 		t.Helper()
-		if r.Usage.InputTokens != in || r.Usage.OutputTokens != out || r.Usage.TotalTokens != tot {
-			t.Errorf("unexpected usage: %+v", r.Usage)
+		if r.Usage.InputTokens != in || r.Usage.OutputTokens != out || r.Usage.TotalTokens != tot || r.Usage.CacheReadTokens != cacheRead {
+			t.Errorf("unexpected usage: %+v (want in=%d out=%d tot=%d cacheRead=%d)", r.Usage, in, out, tot, cacheRead)
 		}
 	}
 	res := &TurnResult{}
@@ -776,11 +776,25 @@ func TestExtractResponseStringAndPopulateUsage(t *testing.T) {
 	populateUsage(res, nil)
 	populateUsage(nil, map[string]any{"usage": map[string]any{}})
 	populateUsage(res, map[string]any{"usage": map[string]any{"input_tokens": float64(10), "output_tokens": float64(20), "total_tokens": float64(30)}})
-	assertUsage(res, 10, 20, 30)
+	assertUsage(res, 10, 20, 30, 0)
 
 	res2 := &TurnResult{}
 	populateUsage(res2, map[string]any{"result": map[string]any{"usage": map[string]any{"input_tokens": float64(40), "output_tokens": float64(50), "total_tokens": float64(90)}}})
-	assertUsage(res2, 40, 50, 90)
+	assertUsage(res2, 40, 50, 90, 0)
+
+	// Claude usage payloads: cache_creation_input_tokens added to InputTokens,
+	// cache_read_input_tokens assigned to CacheReadTokens without inflating InputTokens or TotalTokens,
+	// and TotalTokens defaults to InputTokens + OutputTokens when total_tokens is omitted.
+	resClaude := &TurnResult{}
+	populateUsage(resClaude, map[string]any{
+		"usage": map[string]any{
+			"input_tokens":                float64(100),
+			"output_tokens":               float64(50),
+			"cache_creation_input_tokens": float64(20),
+			"cache_read_input_tokens":     float64(10),
+		},
+	})
+	assertUsage(resClaude, 120, 50, 170, 10)
 }
 
 func TestStreamingDaemon_OnTurnFinishedCallback(t *testing.T) {
@@ -1153,8 +1167,8 @@ func TestStreamingDaemon_Claude_FullLifecycle(t *testing.T) {
 	if sink.result == nil {
 		t.Fatalf("expected non-nil result")
 	}
-	// input: 100 + 20 + 10 = 130, cache_read: 10, total: 130 + 50 = 180
-	if sink.result.Usage.InputTokens != 130 || sink.result.Usage.CacheReadTokens != 10 || sink.result.Usage.TotalTokens != 180 || sink.result.Usage.OutputTokens != 50 {
+	// input: 100 + 20 = 120, cache_read: 10, total: 120 + 50 = 170
+	if sink.result.Usage.InputTokens != 120 || sink.result.Usage.CacheReadTokens != 10 || sink.result.Usage.TotalTokens != 170 || sink.result.Usage.OutputTokens != 50 {
 		t.Errorf("unexpected usage in result: %+v", sink.result.Usage)
 	}
 }
