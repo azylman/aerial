@@ -2,6 +2,7 @@ import { memo, type RefObject, useCallback, useEffect, useMemo, useRef, useState
 import type { CronSchedule, OneShotSchedule, ScheduleRun, ScheduleSummaryMetrics } from '../../api/types';
 import { Glyph } from '../../components/Glyph';
 import { Icon } from '../../components/Icon';
+import { useFirstPassLimit } from '../../hooks/useFirstPassLimit';
 import { useSearchShortcutTarget } from '../../hooks/useKeyboardShortcuts';
 import { usePollingSync } from '../../hooks/usePollingSync';
 import { HighlightQuery } from '../../lib/search';
@@ -204,8 +205,16 @@ interface GridProps {
   readonly onRetry: () => void;
 }
 
+/** About one screen of schedule cards, counted across crons then one-shots; the rest follow the first paint. */
+const FIRST_PASS_SCHEDULES = 12;
+/** About one screen of run cards; the rest follow the first paint. */
+const FIRST_PASS_RUNS = 10;
+
 const ScheduleGrid = memo(function ScheduleGrid({ phase, crons, oneShots, onRetry }: GridProps) {
   const error = useConsoleStore(selectListError);
+  const listed = phase === 'loading' || phase === 'error' ? 0 : crons.length + oneShots.length;
+  const shown = useFirstPassLimit(listed, FIRST_PASS_SCHEDULES);
+  const shownCrons = Math.min(crons.length, shown);
   let body;
   if (phase === 'loading') body = <SchedulesSkeleton />;
   else if (phase === 'error') body = <SchedulesError message={error ?? ''} onRetry={onRetry} />;
@@ -220,10 +229,10 @@ const ScheduleGrid = memo(function ScheduleGrid({ phase, crons, oneShots, onRetr
   } else {
     body = (
       <>
-        {crons.map((cron) => (
+        {crons.slice(0, shownCrons).map((cron) => (
           <CronCard key={cron.id} cron={cron} />
         ))}
-        {oneShots.map((oneShot) => (
+        {oneShots.slice(0, shown - shownCrons).map((oneShot) => (
           <OneShotCard key={oneShot.id} oneShot={oneShot} />
         ))}
       </>
@@ -238,6 +247,7 @@ const ScheduleGrid = memo(function ScheduleGrid({ phase, crons, oneShots, onRetr
 
 const RunsList = memo(function RunsList({ runs }: { readonly runs: readonly ScheduleRun[] }) {
   const loaded = useConsoleStore(selectRunsLoaded);
+  const shown = useFirstPassLimit(loaded ? runs.length : 0, FIRST_PASS_RUNS);
   return (
     <div className="runs-feed-container" id="runs-feed-container" aria-live="polite">
       {!loaded ? null : runs.length === 0 ? (
@@ -247,7 +257,7 @@ const RunsList = memo(function RunsList({ runs }: { readonly runs: readonly Sche
           hint="Schedule execution history and outcome logs will appear here."
         />
       ) : (
-        runs.map((run) => <RunCard key={run.id} run={run} />)
+        runs.slice(0, shown).map((run) => <RunCard key={run.id} run={run} />)
       )}
     </div>
   );

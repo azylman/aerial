@@ -1,6 +1,7 @@
 import { memo, type RefObject, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import type { BuildsAPIResponse, VanadisBuildDTO } from '../../api/types';
 import { Icon } from '../../components/Icon';
+import { useFirstPassLimit } from '../../hooks/useFirstPassLimit';
 import { useSearchShortcutTarget } from '../../hooks/useKeyboardShortcuts';
 import { usePollingSync } from '../../hooks/usePollingSync';
 import { type ConsoleState, useConsoleStore } from '../../store/store';
@@ -201,13 +202,20 @@ function NoBuilds() {
   );
 }
 
-/** The card grid: skeleton until the first payload, then cards (memoized per build) or the empty row. */
+/** About one screen of build cards; the rest arrive right after the first paint. */
+const FIRST_PASS_BUILDS = 10;
+
+/**
+ * The card grid: skeleton until the first payload, then cards (memoized per build) or the empty
+ * row. The first pass with builds renders about one screen of cards and fills in after it paints.
+ */
 const BuildGrid = memo(function BuildGrid({ builds }: { readonly builds: readonly IndexedBuild[] }) {
   const loaded = useConsoleStore(selectLoaded);
+  const shown = useFirstPassLimit(loaded ? builds.length : 0, FIRST_PASS_BUILDS);
   let body;
   if (!loaded) body = <BuildsSkeleton />;
   else if (builds.length === 0) body = <NoBuilds />;
-  else body = builds.map((b) => <BuildCard key={b.build.id} build={b.build} />);
+  else body = builds.slice(0, shown).map((b) => <BuildCard key={b.build.id} build={b.build} />);
   return (
     <div className="builds-grid" id="builds-grid" aria-live="polite">
       {body}

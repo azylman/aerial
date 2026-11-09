@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { Profiler, type ProfilerOnRenderCallback } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
@@ -263,6 +263,27 @@ describe('SchedulesView list lifecycle', () => {
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(
       Array.from({ length: wantRounds }, () => ['/api/schedules', '/api/schedules/runs?limit=50&offset=0']).flat(),
     );
+  });
+});
+
+// Above the first-pass limits (12 schedules, 10 runs) the first commit holds a prefix of each
+// list in order, counted across crons then one-shots; the rest fill in right after the next paint.
+describe('SchedulesView first pass', () => {
+  it('renders a prefix of long lists first, then every card', async () => {
+    const crons = Array.from({ length: 10 }, (_, i) => cron(`cron-${i}`));
+    const oneShots = Array.from({ length: 5 }, (_, i) => once(`once-${i}`));
+    const feed = Array.from({ length: 14 }, (_, i) => run(`run-${i}`));
+    const { container } = render(<SchedulesView />);
+    seed(schedules(crons, oneShots), runs(feed));
+    const counts = (): number[] => [
+      container.querySelectorAll('#schedules-grid .cron-card').length,
+      container.querySelectorAll('#schedules-grid .oneshot-card').length,
+      container.querySelectorAll('#runs-feed-container .run-card').length,
+    ];
+    expect(counts()).toEqual([10, 2, 10]);
+    // jsdom drives requestAnimationFrame from setInterval, which this file fakes: step one frame.
+    act(() => vi.advanceTimersByTime(17));
+    await waitFor(() => expect(counts()).toEqual([10, 5, 14]));
   });
 });
 
