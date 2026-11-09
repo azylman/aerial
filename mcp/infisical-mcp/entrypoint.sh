@@ -80,16 +80,26 @@ elif command -v curl >/dev/null 2>&1; then
 fi
 
 if [ "$AUTH_CONFIGURED" = "true" ]; then
-  echo "[infisical-mcp] Credentials detected. Starting supergateway with @infisical/mcp on port $PORT..."
-  exec supergateway \
-    --host 0.0.0.0 \
-    --port "$PORT" \
-    --outputTransport streamableHttp \
-    --streamableHttpPath /mcp \
-    --stateful \
-    --sessionTimeout 60000 \
-    --cors \
-    --stdio "infisical-mcp"
+  echo "[infisical-mcp] Credentials detected. Starting mcp-proxy with @infisical/mcp on port $PORT..."
+  # Credentials stay in the exported environment (inherited by the stdio child); never write them to the config.
+  # logEnabled stays false: request logging would print secret values returned by get-secret/list-secrets.
+  PROXY_CONFIG=$(mktemp)
+  cat > "$PROXY_CONFIG" <<JSON
+{
+  "mcpProxy": {
+    "baseURL": "http://127.0.0.1:$PORT",
+    "addr": ":$PORT",
+    "name": "infisical-mcp",
+    "version": "1.0.0",
+    "type": "streamable-http",
+    "options": { "panicIfInvalid": true, "logEnabled": false }
+  },
+  "mcpServers": {
+    "mcp": { "command": "infisical-mcp", "args": [] }
+  }
+}
+JSON
+  exec mcp-proxy --config "$PROXY_CONFIG"
 else
   echo "[infisical-mcp] Notice: Credentials not configured (missing INFISICAL_TOKEN or INFISICAL_UNIVERSAL_AUTH_CLIENT_ID/SECRET)."
   echo "[infisical-mcp] Running in standby healthcheck mode on port $PORT to prevent container restart loops."
