@@ -10,14 +10,15 @@ import (
 type Mode string
 
 const (
-	ModeAll      Mode = "all"
-	ModeShare    Mode = "share"
-	ModeSchedule Mode = "schedule"
-	ModeBatch    Mode = "batch"
-	ModePost     Mode = "post-batch"
-	ModeInv      Mode = "pre-invocation"
-	ModeSearch   Mode = "search"
-	ModeCommit   Mode = "commit"
+	ModeAll       Mode = "all"
+	ModeShare     Mode = "share"
+	ModeLiveState Mode = "live-state"
+	ModeSchedule  Mode = "schedule"
+	ModeBatch     Mode = "batch"
+	ModePost      Mode = "post-batch"
+	ModeInv       Mode = "pre-invocation"
+	ModeSearch    Mode = "search"
+	ModeCommit    Mode = "commit"
 )
 
 // IsInvocationMode reports whether mode uses the InvocationResponse ({}) stdout contract.
@@ -121,6 +122,8 @@ func evaluateGuardMode(payload Payload, args ToolArgs, mode string) *Decision {
 	switch mode {
 	case "share":
 		return CheckShare(payload.ToolCall.Name, args)
+	case string(ModeLiveState):
+		return CheckLiveState(payload.ToolCall.Name, args)
 	case "schedule":
 		return CheckSchedule(payload, args)
 	case "batch":
@@ -137,6 +140,7 @@ func evaluateGuardMode(payload Payload, args ToolArgs, mode string) *Decision {
 func evaluateAllGuards(payload Payload, args ToolArgs) *Decision {
 	checks := []func() *Decision{
 		func() *Decision { return CheckShare(payload.ToolCall.Name, args) },
+		func() *Decision { return CheckLiveState(payload.ToolCall.Name, args) },
 		func() *Decision { return CheckSchedule(payload, args) },
 		func() *Decision { return CheckBatch(payload, args) },
 		func() *Decision { return CheckSearch(payload.ToolCall.Name, args) },

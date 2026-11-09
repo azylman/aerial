@@ -118,6 +118,8 @@ func TestGuardProcess_EndToEnd(t *testing.T) {
 		{"python script with sleep in name", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "python3 check_sleep_timer.py", "WaitMsBeforeAsync": 10000}}}`, false, 0, ""},
 		{"non-schedule non-sleep run_command", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "ls -la", "WaitMsBeforeAsync": 10000}}}`, false, 0, ""},
 		{"all mode denies share violation", "all", `{"toolCall": {"name": "write_to_file", "args": {"TargetFile": "/share/aerial/evil.go"}}}`, true, 0, ""},
+		{"live-state mode denies rm of live ssh config", "live-state", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "rm -f /data/ssh/config", "Cwd": "/data"}}}`, true, 0, ""},
+		{"all mode denies claude write to live ssh config", "all", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Write", "tool_input": {"file_path": "/data/ssh/config"}}`, true, 0, ""},
 		{"all mode denies sleep violation", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "sleep 5"}}}`, true, 0, ""},
 		{"all mode denies unconstrained search", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "find / -name secret"}}}`, true, 0, ""},
 		{"all mode allows safe command and overwrites WaitMsBeforeAsync", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git status", "Cwd": "/data", "WaitMsBeforeAsync": 5000}}}`, false, 10000, "git status -sb"},
