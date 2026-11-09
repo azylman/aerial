@@ -21,16 +21,18 @@ function writeHash(tab: TabId): void {
   if (window.location.hash !== hash) window.location.hash = hash;
 }
 
-function followHash(): void {
-  useConsoleStore.getState().setActiveTab(tabFromHash(window.location.hash));
+function followHash(): TabId {
+  const tab = tabFromHash(window.location.hash);
+  useConsoleStore.getState().setActiveTab(tab);
+  return tab;
 }
 
 /**
  * Seeds the ui slice from the URL before the first render, so a deep link to `#memory` mounts
- * (and lazy-loads) only the memory view instead of flashing telemetry first.
+ * (and lazy-loads) only the memory view instead of flashing telemetry first. Returns that tab.
  */
-export function initRouteFromLocation(): void {
-  followHash();
+export function initRouteFromLocation(): TabId {
+  return followHash();
 }
 
 /**
