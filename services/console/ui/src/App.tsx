@@ -1,4 +1,4 @@
-import { type ComponentType, lazy, Suspense, useDeferredValue, useEffect } from 'react';
+import { Activity, type ComponentType, lazy, Suspense, useDeferredValue, useEffect, useState } from 'react';
 import { loadBuildsView, pollStatus, statusPolledOn, VIEW_LOADERS } from './boot';
 import { Drawer, type DrawerPanels } from './components/Drawer';
 import { Header } from './components/Header';
@@ -51,33 +51,60 @@ function useShellData(activeTab: TabId): void {
   usePollingSync(pollStatus, STATUS_POLL_MS, statusPolledOn(activeTab));
 }
 
-function ViewPanel({ tab }: { readonly tab: TabId }) {
+function ViewPanel({ tab, visible }: { readonly tab: TabId; readonly visible: boolean }) {
   const View = VIEWS[tab];
   return (
-    <div id={tabPanelId(tab)} className="view-panel active" role="tabpanel" aria-labelledby={tabButtonId(tab)}>
-      <Suspense fallback={null}>
+    <Activity mode={visible ? 'visible' : 'hidden'}>
+      <div
+        id={tabPanelId(tab)}
+        className={visible ? 'view-panel active' : 'view-panel'}
+        role="tabpanel"
+        aria-labelledby={tabButtonId(tab)}
+      >
         <View />
-      </Suspense>
-    </div>
+      </div>
+    </Activity>
   );
+}
+
+/**
+ * Tabs in first-visit order. A tab joins once it is the deferred view tab, so its tree is built
+ * once and kept: switching back reveals it instead of rebuilding it.
+ */
+function useVisitedTabs(viewTab: TabId): readonly TabId[] {
+  const [visited, setVisited] = useState<readonly TabId[]>([viewTab]);
+  if (!visited.includes(viewTab)) {
+    // Adjusting state during render (not in an effect) keeps the reveal in the same commit.
+    const next = [...visited, viewTab];
+    setVisited(next);
+    return next;
+  }
+  return visited;
 }
 
 export function App() {
   const activeTab = useHashRoute();
-  // The tab button flips immediately; the view swap renders as a deferred (transition) update,
-  // so switching to a not-yet-loaded chunk keeps the old view until the new one is ready rather
-  // than flashing an empty Suspense fallback.
+  // The tab button flips immediately; the view swap renders as a deferred (transition) update.
+  // All panels share one already-revealed Suspense boundary, so first opening a not-yet-loaded
+  // chunk keeps the old view on screen until the new one is ready instead of flashing a fallback.
   const viewTab = useDeferredValue(activeTab);
+  const visited = useVisitedTabs(viewTab);
   useKeyboardShortcuts(activeTab);
   useShellData(activeTab);
   useIdlePrefetch();
 
+  // Hidden Activity trees keep their DOM and state but unmount their effects, which stops a
+  // hidden view's polling and its search shortcut registration until it is shown again.
   return (
     <>
       <div className="scanline" />
       <div className="hud-container">
         <Header />
-        <ViewPanel key={viewTab} tab={viewTab} />
+        <Suspense fallback={null}>
+          {visited.map((tab) => (
+            <ViewPanel key={tab} tab={tab} visible={tab === viewTab} />
+          ))}
+        </Suspense>
       </div>
       <Drawer panels={DRAWER_PANELS} />
     </>

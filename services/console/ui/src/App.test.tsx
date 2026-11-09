@@ -16,7 +16,26 @@ import type {
 import { App } from './App';
 import { startBoot, VIEW_LOADERS } from './boot';
 import { initRouteFromLocation } from './hooks/useHashRoute';
-import { useConsoleStore } from './store/store';
+import { type TabId, useConsoleStore } from './store/store';
+
+// Each feature view is wrapped (not replaced) so a test can count how often its tree is built:
+// the state initializer runs once per mount and never on a re-render or an Activity reveal.
+const viewMounts = vi.hoisted(() => new Map<string, number>());
+async function countingView(tab: TabId, original: () => Promise<{ default: () => unknown }>) {
+  const mod = await original();
+  const { createElement, useState } = await import('react');
+  const View = mod.default as () => null;
+  function CountedView() {
+    useState(() => viewMounts.set(tab, (viewMounts.get(tab) ?? 0) + 1));
+    return createElement(View);
+  }
+  return { ...mod, default: CountedView };
+}
+vi.mock('./features/telemetry/TelemetryView', (orig) => countingView('telemetry', orig));
+vi.mock('./features/tasks/TasksView', (orig) => countingView('tasks', orig));
+vi.mock('./features/schedules/SchedulesView', (orig) => countingView('schedules', orig));
+vi.mock('./features/memory/MemoryView', (orig) => countingView('memory', orig));
+vi.mock('./features/builds/BuildsView', (orig) => countingView('builds', orig));
 
 const BODIES: Readonly<Record<string, unknown>> = {
   '/console/api/status': {
@@ -212,6 +231,119 @@ describe('App with a fully seeded store', () => {
     await flush();
     expect(screen.getByRole('dialog', { name: 'BUILD // BUILD-1794100000-C046DE69' })).toBeTruthy();
     expect(screen.getByText('ORDERED BUILD CHUNKS (3)')).toBeTruthy();
+  });
+});
+
+async function goTo(hash: string): Promise<void> {
+  await act(async () => {
+    window.location.hash = hash;
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+  });
+  await flush();
+}
+
+const SCHEDULE_POLLS = ['/console/api/schedules', '/console/api/schedules/runs?limit=50&offset=0'];
+
+describe('visited views stay mounted', () => {
+  let fetched: string[] = [];
+  beforeEach(() => {
+    useConsoleStore.setState(useConsoleStore.getInitialState(), true);
+    viewMounts.clear();
+    fetched = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        fetched.push(url);
+        return Promise.resolve(new Response(FIXTURE_BODIES[url] ?? '{}', { status: url in FIXTURE_BODIES ? 200 : 404 }));
+      }),
+    );
+    vi.useFakeTimers({ now: Date.parse('2026-11-08T12:00:00Z'), toFake: ['setInterval', 'clearInterval', 'Date'] });
+    seedAll();
+  });
+  afterEach(() => {
+    cleanup();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it.each([
+    {
+      name: 'schedules, memory, schedules',
+      walk: ['#schedules', '#memory', '#schedules'],
+      wantMounts: { schedules: 1, memory: 1 },
+      wantPanels: ['schedules-view', 'memory-view'],
+      wantVisible: 'schedules-view',
+      wantIds: ['#schedules-grid', '#schedules-search-input', '#memory-search-input'],
+    },
+    {
+      name: 'telemetry, builds, telemetry, builds',
+      walk: ['#telemetry', '#builds', '#telemetry', '#builds'],
+      wantMounts: { telemetry: 1, builds: 1 },
+      wantPanels: ['telemetry-view', 'builds-view'],
+      wantVisible: 'builds-view',
+      wantIds: ['#builds-search-input'],
+    },
+    {
+      name: 'every tab and back to the first',
+      walk: ['#tasks', '#telemetry', '#schedules', '#memory', '#builds', '#tasks'],
+      wantMounts: { tasks: 1, telemetry: 1, schedules: 1, memory: 1, builds: 1 },
+      wantPanels: ['tasks-view', 'telemetry-view', 'schedules-view', 'memory-view', 'builds-view'],
+      wantVisible: 'tasks-view',
+      wantIds: ['#schedules-grid', '#memory-search-input', '#builds-search-input'],
+    },
+  ])('$name builds each view once and shows only the active panel', async ({ walk, wantMounts, wantPanels, wantVisible, wantIds }) => {
+    window.history.replaceState(null, '', `/console/next/${walk[0]}`);
+    initRouteFromLocation();
+    render(<App />);
+    for (const hash of walk) await goTo(hash);
+
+    expect(Object.fromEntries(viewMounts)).toEqual(wantMounts);
+    const panels = [...document.querySelectorAll<HTMLElement>('[role="tabpanel"]')];
+    expect(panels.map((p) => p.id)).toEqual(wantPanels);
+    expect(panels.filter((p) => p.classList.contains('active')).map((p) => p.id)).toEqual([wantVisible]);
+    expect(panels.filter((p) => p.style.display !== 'none').map((p) => p.id)).toEqual([wantVisible]);
+    // Hidden panels are out of the accessibility tree; only the active one is a reachable tabpanel.
+    expect(screen.getAllByRole('tabpanel').map((p) => p.id)).toEqual([wantVisible]);
+    expect(panels.map((p) => p.getAttribute('aria-labelledby'))).toEqual(
+      wantPanels.map((id) => `tab-${id.replace('-view', '')}-btn`),
+    );
+    expect(wantIds.map((id) => document.querySelectorAll(id).length)).toEqual(wantIds.map(() => 1));
+  });
+
+  it('stops a hidden schedules view polling and resumes it when shown again', async () => {
+    window.history.replaceState(null, '', '/console/next/#schedules');
+    initRouteFromLocation();
+    render(<App />);
+    await flush();
+    const polls = (): number[] => SCHEDULE_POLLS.map((url) => fetched.filter((f) => f === url).length);
+    expect(polls()).toEqual([1, 1]);
+    await act(async () => vi.advanceTimersByTime(10_000));
+    expect(polls()).toEqual([2, 2]);
+
+    await goTo('#memory');
+    await act(async () => vi.advanceTimersByTime(30_000));
+    expect(polls()).toEqual([2, 2]);
+
+    // Revealing runs the effects again: an immediate poll, then the 10s cadence.
+    await goTo('#schedules');
+    expect(polls()).toEqual([3, 3]);
+    await act(async () => vi.advanceTimersByTime(10_000));
+    expect(polls()).toEqual([4, 4]);
+    expect(viewMounts.get('schedules')).toBe(1);
+  });
+
+  it.each([
+    { name: 'memory search after leaving schedules', walk: ['#schedules', '#memory'], want: 'memory-search-input' },
+    { name: 'schedules search after a round trip', walk: ['#schedules', '#memory', '#schedules'], want: 'schedules-search-input' },
+  ])('"/" focuses the $name', async ({ walk, want }) => {
+    window.history.replaceState(null, '', `/console/next/${walk[0]}`);
+    initRouteFromLocation();
+    render(<App />);
+    for (const hash of walk) await goTo(hash);
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: '/' }));
+    });
+    expect(document.activeElement?.id).toBe(want);
   });
 });
 
