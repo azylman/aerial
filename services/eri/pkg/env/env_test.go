@@ -2,17 +2,16 @@ package env
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 
-	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 )
 
@@ -1117,6 +1116,7 @@ func TestMCPProvisioning(t *testing.T) {
 		withRawInvalidJSON bool
 		withEphemeralSrv   bool
 		withMCPCfgStr      bool
+		withHeaderSrv      bool
 		emptyRaw           bool
 		strRaw             bool
 		blockDir           bool
@@ -1126,9 +1126,24 @@ func TestMCPProvisioning(t *testing.T) {
 		wantDiscord        bool
 		wantGitHub         bool
 		wantOpenObs        bool
+		wantURL            map[string]string
+		wantHeaders        map[string]map[string]any // nil value asserts no headers key
 	}{
-		{name: "discord target with github and openobserve", target: TargetDiscord, withPAT: true, withOpenObs: true, wantScheduler: true, wantDiscord: true, wantGitHub: true, wantOpenObs: true},
-		{name: "openobserve with default org", target: TargetDiscord, withOpenObs: true, defaultOOOrg: true, wantScheduler: true, wantDiscord: true, wantGitHub: true, wantOpenObs: true},
+		{
+			name: "discord target with github and openobserve", target: TargetDiscord, withPAT: true, withOpenObs: true, wantScheduler: true, wantDiscord: true, wantGitHub: true, wantOpenObs: true,
+			wantURL:     map[string]string{"openobserve": "http://openobserve:5080/openobserve/api/custom_org/mcp", "github": "http://github-mcp:4003/mcp"},
+			wantHeaders: map[string]map[string]any{"openobserve": {"Authorization": "Basic YWRtaW46cGFzc3dvcmQ="}, "github": nil},
+		},
+		{
+			name: "openobserve with default org", target: TargetDiscord, withOpenObs: true, defaultOOOrg: true, wantScheduler: true, wantDiscord: true, wantGitHub: true, wantOpenObs: true,
+			wantURL:     map[string]string{"openobserve": "http://openobserve:5080/openobserve/api/default/mcp"},
+			wantHeaders: map[string]map[string]any{"openobserve": {"Authorization": "Basic YWRtaW46cGFzc3dvcmQ="}},
+		},
+		{
+			name: "config server headers pass through verbatim", target: TargetVoice, withHeaderSrv: true, wantScheduler: true, wantGitHub: true,
+			wantURL:     map[string]string{"ubereats": "https://mcp.example.com/mcp?key=abc"},
+			wantHeaders: map[string]map[string]any{"ubereats": {"Authorization": "Bearer tok-123", "X-Tenant": "home"}},
+		},
 		{name: "voice target isolates scheduler and excludes discord services", target: TargetVoice, withPAT: true, withOpenObs: true, wantScheduler: true, wantGitHub: true},
 		{name: "ephemeral target excludes scheduler and discord services", target: TargetEphemeral},
 		{name: "ephemeral target includes ephemeral servers", target: TargetEphemeral, withEphemeralSrv: true},
@@ -1207,6 +1222,9 @@ func TestMCPProvisioning(t *testing.T) {
 						c.McpServers.Discord = make(map[string]json.RawMessage)
 					}
 					c.McpServers.Discord["invalid_srv"] = json.RawMessage(`{not-valid-json`)
+				}
+				if tc.withHeaderSrv {
+					c.McpServers.Common["ubereats"] = json.RawMessage(`{"serverUrl":"https://mcp.example.com/mcp?key=abc","headers":{"Authorization":"Bearer tok-123","X-Tenant":"home"}}`)
 				}
 				if tc.withMCPCfgStr {
 					c.MCPConfig = `{"mcpServers":{"fallback_srv":{"serverUrl":"http://fallback:80"}}}`
@@ -1295,33 +1313,12 @@ func TestMCPProvisioning(t *testing.T) {
 			if (servers["openobserve"] != nil) != tc.wantOpenObs {
 				t.Errorf("openobserve presence = %v, want %v", servers["openobserve"] != nil, tc.wantOpenObs)
 			}
-			if tc.withOpenObs && tc.wantOpenObs {
-				oo := servers["openobserve"].(map[string]any)
-				if oo["headers"] != nil {
-					t.Errorf("expected openobserve headers to be stripped from disk, got %+v", oo["headers"])
+			for name, want := range tc.wantURL {
+				srv, _ := servers[name].(map[string]any)
+				if srv["serverUrl"] != want {
+					t.Errorf("%s serverUrl = %v, want %q", name, srv["serverUrl"], want)
 				}
-				expectedURL := "http://127.0.0.1:8088/internal/mcp/openobserve"
-				if oo["serverUrl"] != expectedURL {
-					t.Errorf("expected openobserve serverUrl on disk to be %q, got %q", expectedURL, oo["serverUrl"])
-				}
-
-				upURL, upHeaders, ok := ResolveUpstreamMCPServer(cfg, "openobserve")
-				if !ok {
-					t.Fatalf("expected ResolveUpstreamMCPServer(cfg, openobserve) to return true")
-				}
-				expectedAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("admin:password"))
-				if upHeaders["Authorization"] != expectedAuth {
-					t.Errorf("expected upstream auth %q, got %q", expectedAuth, upHeaders["Authorization"])
-				}
-				var expectedUpURL string
-				if tc.defaultOOUrl || tc.defaultOOOrg {
-					expectedUpURL = "http://openobserve:5080/openobserve/api/default/mcp"
-				} else {
-					expectedUpURL = "http://openobserve:5080/openobserve/api/custom_org/mcp"
-				}
-				if upURL != expectedUpURL {
-					t.Errorf("expected upstream url %q, got %q", expectedUpURL, upURL)
-				}
+				assertMCPHeaders(t, name, srv, tc.wantHeaders[name])
 			}
 			if tc.withFileConf && servers["custom_override"] == nil {
 				t.Errorf("expected custom_override from file-based config")
@@ -1344,237 +1341,46 @@ func TestMCPProvisioning(t *testing.T) {
 			if err := p.SyncMCP(context.Background(), cfg); err != nil {
 				t.Fatalf("SyncMCP failed: %v", err)
 			}
-			claudeJSON := filepath.Join(tmpHome, ".claude", "mcp_config.json")
-			if cData, err := os.ReadFile(claudeJSON); err == nil {
-				var cParsed map[string]map[string]any
-				if err := json.Unmarshal(cData, &cParsed); err == nil {
-					cServers := cParsed["mcpServers"]
-					if tc.wantScheduler && cServers["scheduler"] != nil {
-						sMap := cServers["scheduler"].(map[string]any)
-						if sMap["type"] != "http" || sMap["url"] != "http://haro.aerial/mcp" {
-							t.Errorf("claude scheduler config mismatch: %+v", sMap)
-						}
-					}
+			cData, err := os.ReadFile(filepath.Join(p.runtimeHomeDir(tc.target), ".claude", "mcp_config.json"))
+			if err != nil {
+				t.Fatalf("reading claude mcp config: %v", err)
+			}
+			var cParsed map[string]map[string]any
+			if err := json.Unmarshal(cData, &cParsed); err != nil {
+				t.Fatalf("parsing claude mcp config: %v", err)
+			}
+			cServers := cParsed["mcpServers"]
+			if tc.wantScheduler {
+				sMap, _ := cServers["scheduler"].(map[string]any)
+				if sMap["type"] != "http" || sMap["url"] != "http://haro.aerial/mcp" {
+					t.Errorf("claude scheduler config mismatch: %+v", sMap)
 				}
+			}
+			for name, want := range tc.wantURL {
+				srv, _ := cServers[name].(map[string]any)
+				if srv["type"] != "http" || srv["url"] != want {
+					t.Errorf("claude %s = %+v, want type http url %q", name, srv, want)
+				}
+				if _, has := srv["serverUrl"]; has {
+					t.Errorf("claude %s retains serverUrl: %+v", name, srv)
+				}
+				assertMCPHeaders(t, "claude "+name, srv, tc.wantHeaders[name])
 			}
 		})
 	}
 }
 
-func TestResolveUpstreamMCPServer(t *testing.T) {
-	tests := []struct {
-		name          string
-		cfgNil        bool
-		curNil        bool
-		serverName    string
-		githubPAT     string
-		openObsUser   string
-		openObsPass   string
-		openObsURL    string
-		openObsOrg    string
-		commonServers map[string]json.RawMessage
-		mcpConfig     string
-		wantURL       string
-		wantHeaders   map[string]string
-		wantOK        bool
-	}{
-		{name: "nil config", cfgNil: true, serverName: "openobserve", wantOK: false},
-		{name: "nil current config data", curNil: true, serverName: "openobserve", wantOK: false},
-		{name: "empty server name", serverName: "", wantOK: false},
-		{name: "github with PAT injects auth header", serverName: "github", githubPAT: "ghp_123", commonServers: map[string]json.RawMessage{
-			"github": json.RawMessage(`{"serverUrl":"http://github-mcp:4003/mcp"}`),
-		}, wantURL: "http://github-mcp:4003/mcp", wantHeaders: map[string]string{"Authorization": "Bearer ghp_123"}, wantOK: true},
-		{name: "github with PAT and string header without auth", serverName: "github", githubPAT: "ghp_123", commonServers: map[string]json.RawMessage{
-			"github": json.RawMessage(`{"serverUrl":"http://github-mcp:4003/mcp","headers":{"X-Custom":"val"}}`),
-		}, wantURL: "http://github-mcp:4003/mcp", wantHeaders: map[string]string{"Authorization": "Bearer ghp_123", "X-Custom": "val"}, wantOK: true},
-		{name: "github with PAT and any header with auth", serverName: "github", githubPAT: "ghp_123", commonServers: map[string]json.RawMessage{
-			"github": json.RawMessage(`{"serverUrl":"http://github-mcp:4003/mcp","headers":{"authorization":"Token custom2","num":123}}`),
-		}, wantURL: "http://github-mcp:4003/mcp", wantHeaders: map[string]string{"authorization": "Token custom2"}, wantOK: true},
-		{name: "github server entry not a map", serverName: "github", githubPAT: "ghp_123", commonServers: map[string]json.RawMessage{
-			"github": json.RawMessage(`"scalar"`),
-		}, wantOK: false},
-		{name: "github without PAT does not inject auth header", serverName: "github", commonServers: map[string]json.RawMessage{
-			"github": json.RawMessage(`{"serverUrl":"http://github-mcp:4003/mcp"}`),
-		}, wantURL: "http://github-mcp:4003/mcp", wantOK: true},
-		{name: "github without server config is not found", serverName: "github", githubPAT: "ghp_123", wantOK: false},
-		{name: "openobserve without URL is not resolved", serverName: "openobserve", openObsUser: "user", openObsPass: "pass", openObsURL: "", wantOK: false},
-		{name: "openobserve resolved with auth", serverName: "openobserve", openObsUser: "user", openObsPass: "pass", openObsURL: "http://oo:5080/oo", openObsOrg: "myorg", wantURL: "http://oo:5080/oo/api/myorg/mcp", wantHeaders: map[string]string{"Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte("user:pass"))}, wantOK: true},
-		{name: "custom server from common with headers", serverName: "ha-mcp", commonServers: map[string]json.RawMessage{
-			"ha-mcp": json.RawMessage(`{"serverUrl":"http://ha:8123/mcp","headers":{"Authorization":"Bearer ha-token"}}`),
-		}, wantURL: "http://ha:8123/mcp", wantHeaders: map[string]string{"Authorization": "Bearer ha-token"}, wantOK: true},
-		{name: "server with snake_case server_url and non-string header", serverName: "snake-srv", commonServers: map[string]json.RawMessage{
-			"snake-srv": json.RawMessage(`{"server_url":"http://snake:8080","headers":{"H1":"V1","H2":123}}`),
-		}, wantURL: "http://snake:8080", wantHeaders: map[string]string{"H1": "V1"}, wantOK: true},
-		{name: "server with empty url", serverName: "empty-url-srv", commonServers: map[string]json.RawMessage{
-			"empty-url-srv": json.RawMessage(`{"headers":{"Authorization":"Bearer test"}}`),
-		}, wantOK: false},
-		{name: "unmarshal error in targetMaps", serverName: "invalid-json", commonServers: map[string]json.RawMessage{
-			"invalid-json": json.RawMessage(`{not-valid-json`),
-		}, wantOK: false},
-		{name: "server entry not a map", serverName: "scalar-srv", commonServers: map[string]json.RawMessage{
-			"scalar-srv": json.RawMessage(`"just a string"`),
-		}, wantOK: false},
-		{name: "custom server from fallback MCPConfig string", serverName: "fallback-srv", mcpConfig: `{"mcpServers":{"fallback-srv":{"serverUrl":"http://fb:9090"}}}`, wantURL: "http://fb:9090", wantOK: true},
-		{name: "file-based server overridden by McpServers", serverName: "override-srv", mcpConfig: `{"mcpServers":{"override-srv":{"serverUrl":"http://file-srv:9090"}}}`, commonServers: map[string]json.RawMessage{
-			"override-srv": json.RawMessage(`{"serverUrl":"http://config-srv:8080","headers":{"Authorization":"Bearer win"}}`),
-		}, wantURL: "http://config-srv:8080", wantHeaders: map[string]string{"Authorization": "Bearer win"}, wantOK: true},
-		{name: "nonexistent server", serverName: "ghost-mcp", wantOK: false},
+func assertMCPHeaders(t *testing.T, name string, srv map[string]any, want map[string]any) {
+	t.Helper()
+	got, has := srv["headers"]
+	if want == nil {
+		if has {
+			t.Errorf("%s headers = %+v, want no headers key", name, got)
+		}
+		return
 	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var cfg *config.Config
-			if tc.curNil {
-				cfg = &config.Config{}
-			} else if !tc.cfgNil {
-				cfg = newTestConfig(func(c *config.ConfigData) {
-					c.GitHubPAT = tc.githubPAT
-					c.OpenObserveUser = tc.openObsUser
-					c.OpenObservePassword = tc.openObsPass
-					c.OpenObserveURL = tc.openObsURL
-					c.OpenObserveOrg = tc.openObsOrg
-					c.McpServers.Common = tc.commonServers
-					c.MCPConfig = tc.mcpConfig
-				})
-			}
-			gotURL, gotHeaders, gotOK := ResolveUpstreamMCPServer(cfg, tc.serverName)
-			if gotOK != tc.wantOK {
-				t.Fatalf("ResolveUpstreamMCPServer(%q) ok = %v, want %v", tc.serverName, gotOK, tc.wantOK)
-			}
-			if tc.wantOK {
-				if gotURL != tc.wantURL {
-					t.Errorf("ResolveUpstreamMCPServer(%q) url = %q, want %q", tc.serverName, gotURL, tc.wantURL)
-				}
-				if len(gotHeaders) != len(tc.wantHeaders) {
-					t.Errorf("header count mismatch for %q: got %d, want %d", tc.serverName, len(gotHeaders), len(tc.wantHeaders))
-				}
-				for k, v := range tc.wantHeaders {
-					if gotHeaders[k] != v {
-						t.Errorf("header %q = %q, want %q", k, gotHeaders[k], v)
-					}
-				}
-			}
-		})
-	}
-}
-
-func TestSanitizeMCPServersForDisk(t *testing.T) {
-	sanitizer.RegisterSensitiveTokens("secret-webhook-token-12345")
-	defer sanitizer.ResetSensitiveTokensForTest()
-	tests := []struct {
-		name        string
-		servers     map[string]any
-		port        string
-		wantURL     string
-		wantHeaders bool
-	}{
-		{
-			name: "server with headers gets rewritten and headers deleted",
-			servers: map[string]any{
-				"openobserve": map[string]any{
-					"serverUrl": "http://openobserve:5080/mcp",
-					"headers":   map[string]string{"Authorization": "Basic 123"},
-				},
-			},
-			port:        "8088",
-			wantURL:     "http://127.0.0.1:8088/internal/mcp/openobserve",
-			wantHeaders: false,
-		},
-		{
-			name: "server with registered secret in serverUrl gets rewritten",
-			servers: map[string]any{
-				"ha-mcp": map[string]any{
-					"serverUrl": "http://192.168.1.14:8123/api/webhook/secret-webhook-token-12345",
-				},
-			},
-			port:        "8088",
-			wantURL:     "http://127.0.0.1:8088/internal/mcp/ha-mcp",
-			wantHeaders: false,
-		},
-		{
-			name: "server with registered secret in snake_case server_url gets rewritten",
-			servers: map[string]any{
-				"ha-mcp": map[string]any{
-					"server_url": "http://192.168.1.14:8123/api/webhook/secret-webhook-token-12345",
-				},
-			},
-			port:        "8088",
-			wantURL:     "http://127.0.0.1:8088/internal/mcp/ha-mcp",
-			wantHeaders: false,
-		},
-		{
-			name: "server with headers and snake_case server_url gets rewritten and credentials deleted",
-			servers: map[string]any{
-				"ha-mcp": map[string]any{
-					"server_url": "http://192.168.1.14:8123/api/webhook/secret-webhook-token-12345",
-					"headers":    map[string]string{"Authorization": "Bearer secret"},
-				},
-			},
-			port:        "8088",
-			wantURL:     "http://127.0.0.1:8088/internal/mcp/ha-mcp",
-			wantHeaders: false,
-		},
-		{
-			name: "server without headers remains unchanged",
-			servers: map[string]any{
-				"scheduler": map[string]any{
-					"serverUrl": "http://haro.aerial/mcp",
-				},
-			},
-			port:        "8088",
-			wantURL:     "http://haro.aerial/mcp",
-			wantHeaders: false,
-		},
-		{
-			name: "server with port having leading colon",
-			servers: map[string]any{
-				"ha": map[string]any{
-					"serverUrl": "http://ha:8123/mcp",
-					"headers":   map[string]string{"Authorization": "Bearer xyz"},
-				},
-			},
-			port:        ":9090",
-			wantURL:     "http://127.0.0.1:9090/internal/mcp/ha",
-			wantHeaders: false,
-		},
-		{
-			name: "empty or zero port defaults to 8088",
-			servers: map[string]any{
-				"ha": map[string]any{
-					"serverUrl": "http://ha:8123/mcp",
-					"headers":   map[string]any{"Authorization": "Bearer xyz"},
-				},
-			},
-			port:        "0",
-			wantURL:     "http://127.0.0.1:8088/internal/mcp/ha",
-			wantHeaders: false,
-		},
-		{
-			name: "non-map server entry is skipped safely",
-			servers: map[string]any{
-				"raw": "not-a-map",
-			},
-			port: "8088",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			SanitizeMCPServersForDisk(tc.servers, tc.port)
-			for name, val := range tc.servers {
-				if sMap, ok := val.(map[string]any); ok {
-					if tc.wantURL != "" && sMap["serverUrl"] != tc.wantURL {
-						t.Errorf("server %q url = %v, want %v", name, sMap["serverUrl"], tc.wantURL)
-					}
-					if !tc.wantHeaders && sMap["headers"] != nil {
-						t.Errorf("server %q headers = %v, want nil", name, sMap["headers"])
-					}
-					if sMap["server_url"] != nil {
-						t.Errorf("server %q server_url = %v, want nil", name, sMap["server_url"])
-					}
-				}
-			}
-		})
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("%s headers = %+v, want %+v", name, got, want)
 	}
 }
 

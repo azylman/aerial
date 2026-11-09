@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
-	"github.com/azylman/aerial/services/eri/pkg/env"
 )
 
 var proxyHTTPClient = &http.Client{
@@ -49,56 +48,6 @@ func streamProxyResponse(w http.ResponseWriter, resp *http.Response) {
 	}
 	if _, err := io.Copy(w, resp.Body); err != nil {
 		return
-	}
-}
-
-func handleInternalMCPProxy(cfg *config.Config) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		rest := strings.TrimPrefix(r.URL.Path, "/internal/mcp/")
-		rest = strings.TrimPrefix(rest, "/")
-		if rest == "" {
-			http.Error(w, `{"error":"MCP server name required"}`, http.StatusNotFound)
-			return
-		}
-		serverName, subpath, _ := strings.Cut(rest, "/")
-		if subpath != "" {
-			subpath = "/" + subpath
-		}
-
-		upstreamURL, upstreamHeaders, ok := env.ResolveUpstreamMCPServer(cfg, serverName)
-		if !ok || upstreamURL == "" {
-			http.Error(w, fmt.Sprintf(`{"error":"MCP server %q not found"}`, serverName), http.StatusNotFound)
-			return
-		}
-
-		targetURL := strings.TrimSuffix(upstreamURL, "/") + subpath
-		if r.URL.RawQuery != "" {
-			targetURL += "?" + r.URL.RawQuery
-		}
-
-		proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, r.Body)
-		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":"Failed to create proxy request: %v"}`, err), http.StatusInternalServerError)
-			return
-		}
-
-		for _, h := range []string{"Content-Type", "Accept", "Mcp-Session-Id"} {
-			if v := r.Header.Get(h); v != "" {
-				proxyReq.Header.Set(h, v)
-			}
-		}
-		for k, v := range upstreamHeaders {
-			proxyReq.Header.Set(k, v)
-		}
-
-		resp, err := proxyHTTPClient.Do(proxyReq)
-		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":"Upstream MCP error: %v"}`, err), http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close()
-
-		streamProxyResponse(w, resp)
 	}
 }
 

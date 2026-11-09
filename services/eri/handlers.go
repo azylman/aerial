@@ -1287,8 +1287,6 @@ func normalizeRoute(path string) string {
 		return "/transcripts"
 	case path == "/tasks" || strings.HasPrefix(path, "/tasks/"):
 		return "/tasks"
-	case path == "/internal/mcp" || strings.HasPrefix(path, "/internal/mcp/"):
-		return "/internal/mcp"
 	case path == "/internal/github-api" || strings.HasPrefix(path, "/internal/github-api/"):
 		return "/internal/github-api"
 	case path == "/internal/github-git" || strings.HasPrefix(path, "/internal/github-git/"):
@@ -1400,7 +1398,6 @@ func SetupBrainMuxWithEmbedder(store db.Store, txStore db.TranscriptStore, pool 
 	} else {
 		cfg = config.ActiveConfig()
 	}
-	mux.HandleFunc("/internal/mcp/", handleInternalMCPProxy(cfg))
 	mux.HandleFunc("/internal/github-api/", handleInternalGitHubAPIProxy(cfg))
 	mux.HandleFunc("/internal/github-git/", handleInternalGitHubGitProxy(cfg))
 
