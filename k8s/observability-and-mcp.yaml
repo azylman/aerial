@@ -381,6 +381,9 @@ rules:
       - nodes/proxy
       - nodes/metrics
       - nodes/stats
+      - services
+      - endpoints
+      - pods
     verbs:
       - get
       - list
@@ -407,21 +410,35 @@ data:
     scrape_config_files:
       - "/share/aerial-config/services/victoriametrics/scrape.yml"
     scrape_configs:
-      - job_name: eri
-        static_configs:
-          - targets: ["eri:8080"]
-      - job_name: haro
-        static_configs:
-          - targets: ["haro:4005"]
-      - job_name: coven
-        static_configs:
-          - targets: ["coven:4008"]
-      - job_name: vanadis
-        static_configs:
-          - targets: ["vanadis:4025"]
-      - job_name: synapse
-        static_configs:
-          - targets: ["synapse:4020"]
+      - job_name: kubernetes-services
+        kubernetes_sd_configs:
+          - role: service
+            namespaces:
+              names:
+                - default
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          - source_labels: [__meta_kubernetes_service_port_number, __meta_kubernetes_service_annotation_prometheus_io_port]
+            action: keep_if_equal
+          - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__meta_kubernetes_service_name, __meta_kubernetes_service_annotation_prometheus_io_port]
+            action: replace
+            regex: (.+);(.+)
+            replacement: $1:$2
+            target_label: __address__
+          - source_labels: [__meta_kubernetes_service_name]
+            action: replace
+            target_label: job
+          - source_labels: [__meta_kubernetes_service_name]
+            action: replace
+            target_label: instance
+          - action: labelmap
+            regex: __meta_kubernetes_service_annotation_prometheus_io_label_(.+)
       - job_name: node-exporter
         static_configs:
           - targets:

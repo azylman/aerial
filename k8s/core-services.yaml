@@ -340,6 +340,9 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  annotations:
+    prometheus.io/port: "8080"
+    prometheus.io/scrape: "true"
   name: eri
   namespace: default
 spec:
@@ -541,6 +544,9 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  annotations:
+    prometheus.io/port: "4025"
+    prometheus.io/scrape: "true"
   name: vanadis
   namespace: default
 spec:
@@ -650,6 +656,9 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  annotations:
+    prometheus.io/port: "4008"
+    prometheus.io/scrape: "true"
   name: coven
   namespace: default
 spec:
@@ -837,6 +846,9 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  annotations:
+    prometheus.io/port: "4005"
+    prometheus.io/scrape: "true"
   name: haro
   namespace: default
 spec:
@@ -1055,6 +1067,9 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  annotations:
+    prometheus.io/port: "4020"
+    prometheus.io/scrape: "true"
   name: synapse
   namespace: default
 spec:
