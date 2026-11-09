@@ -319,6 +319,7 @@ spec:
           weight: 1
       filters:
         - urlRewrite:
+            hostname: localhost
             path:
               type: ReplacePrefixMatch
               replacePrefixMatch: /
@@ -338,6 +339,10 @@ spec:
           name: agentsview
           port: 8080
           weight: 1
+      filters:
+        - urlRewrite:
+            hostname: localhost
+          type: URLRewrite
       matches:
         - path:
             type: PathPrefix
@@ -524,6 +529,10 @@ spec:
           name: agentsview
           port: 8080
           weight: 1
+      filters:
+        - urlRewrite:
+            hostname: localhost
+          type: URLRewrite
       matches:
         - path:
             type: PathPrefix
@@ -919,6 +928,7 @@ spec:
           weight: 1
       filters:
         - urlRewrite:
+            hostname: localhost
             path:
               type: ReplacePrefixMatch
               replacePrefixMatch: /
@@ -938,6 +948,10 @@ spec:
           name: agentsview
           port: 8080
           weight: 1
+      filters:
+        - urlRewrite:
+            hostname: localhost
+          type: URLRewrite
       matches:
         - path:
             type: PathPrefix
