@@ -350,7 +350,7 @@ spec:
   dependsOn:
     - name: arc-controller
       namespace: arc-systems
-  interval: 30m
+  interval: 5m
   values:
     controllerServiceAccount:
       name: arc-controller
@@ -382,7 +382,7 @@ spec:
                 valueFrom:
                   secretKeyRef:
                     key: GITHUB_PAT
-                    name: shared-secrets
+                    name: roborev-runner-secret
             image: ghcr.io/azylman/aerial-github-runner:${TAG_AERIAL_GITHUB_RUNNER:=latest}
             name: runner
             volumeMounts:
@@ -408,14 +408,14 @@ spec:
                 - key: POSTGRES_PASSWORD
                   path: postgres-password
               optional: true
-              secretName: shared-secrets
+              secretName: roborev-runner-secret
           - hostPath:
               path: /var/lib/docker/volumes/aerial-roborev-cache/_data/brain
               type: DirectoryOrCreate
             name: roborev-brain-cache
   valuesFrom:
     - kind: Secret
-      name: shared-secrets
+      name: roborev-runner-secret
       targetPath: githubConfigSecret.github_token
       valuesKey: GITHUB_PAT
 ---
@@ -436,7 +436,7 @@ spec:
   dependsOn:
     - name: arc-controller
       namespace: arc-systems
-  interval: 30m
+  interval: 5m
   values:
     controllerServiceAccount:
       name: arc-controller
@@ -483,7 +483,7 @@ spec:
             name: ci-cache
   valuesFrom:
     - kind: Secret
-      name: shared-secrets
+      name: git-sync-secret
       targetPath: githubConfigSecret.github_token
       valuesKey: GITHUB_PAT
 ---
@@ -504,7 +504,7 @@ spec:
   dependsOn:
     - name: arc-controller
       namespace: arc-systems
-  interval: 30m
+  interval: 5m
   values:
     controllerServiceAccount:
       name: arc-controller
@@ -536,7 +536,7 @@ spec:
                 valueFrom:
                   secretKeyRef:
                     key: GITHUB_PAT
-                    name: shared-secrets
+                    name: roborev-runner-secret
             image: ghcr.io/azylman/aerial-github-runner:${TAG_AERIAL_GITHUB_RUNNER:=latest}
             name: runner
             volumeMounts:
@@ -562,14 +562,14 @@ spec:
                 - key: POSTGRES_PASSWORD
                   path: postgres-password
               optional: true
-              secretName: shared-secrets
+              secretName: roborev-runner-secret
           - hostPath:
               path: /var/lib/docker/volumes/aerial-roborev-cache/_data/brain
               type: DirectoryOrCreate
             name: roborev-brain-cache
   valuesFrom:
     - kind: Secret
-      name: shared-secrets
+      name: roborev-runner-secret
       targetPath: githubConfigSecret.github_token
       valuesKey: GITHUB_PAT
 ---
@@ -590,7 +590,7 @@ spec:
   dependsOn:
     - name: arc-controller
       namespace: arc-systems
-  interval: 30m
+  interval: 5m
   values:
     controllerServiceAccount:
       name: arc-controller
@@ -637,7 +637,7 @@ spec:
             name: ci-cache
   valuesFrom:
     - kind: Secret
-      name: shared-secrets
+      name: git-sync-secret
       targetPath: githubConfigSecret.github_token
       valuesKey: GITHUB_PAT
 ---
@@ -658,7 +658,7 @@ spec:
   dependsOn:
     - name: arc-controller
       namespace: arc-systems
-  interval: 30m
+  interval: 5m
   values:
     controllerServiceAccount:
       name: arc-controller
@@ -690,7 +690,7 @@ spec:
                 valueFrom:
                   secretKeyRef:
                     key: GITHUB_PAT
-                    name: shared-secrets
+                    name: roborev-runner-secret
             image: ghcr.io/azylman/aerial-github-runner:${TAG_AERIAL_GITHUB_RUNNER:=latest}
             name: runner
             volumeMounts:
@@ -716,14 +716,14 @@ spec:
                 - key: POSTGRES_PASSWORD
                   path: postgres-password
               optional: true
-              secretName: shared-secrets
+              secretName: roborev-runner-secret
           - hostPath:
               path: /var/lib/docker/volumes/aerial-roborev-cache/_data/brain
               type: DirectoryOrCreate
             name: roborev-brain-cache
   valuesFrom:
     - kind: Secret
-      name: shared-secrets
+      name: roborev-runner-secret
       targetPath: githubConfigSecret.github_token
       valuesKey: GITHUB_PAT
 ---
@@ -744,7 +744,7 @@ spec:
   dependsOn:
     - name: arc-controller
       namespace: arc-systems
-  interval: 30m
+  interval: 5m
   values:
     controllerServiceAccount:
       name: arc-controller
@@ -791,7 +791,7 @@ spec:
             name: ci-cache
   valuesFrom:
     - kind: Secret
-      name: shared-secrets
+      name: git-sync-secret
       targetPath: githubConfigSecret.github_token
       valuesKey: GITHUB_PAT
 ---
@@ -812,7 +812,7 @@ spec:
   dependsOn:
     - name: arc-controller
       namespace: arc-systems
-  interval: 30m
+  interval: 5m
   values:
     controllerServiceAccount:
       name: arc-controller
@@ -844,7 +844,7 @@ spec:
                 valueFrom:
                   secretKeyRef:
                     key: GITHUB_PAT
-                    name: shared-secrets
+                    name: roborev-runner-secret
             image: ghcr.io/azylman/aerial-github-runner:${TAG_AERIAL_GITHUB_RUNNER:=latest}
             name: runner
             volumeMounts:
@@ -870,14 +870,14 @@ spec:
                 - key: POSTGRES_PASSWORD
                   path: postgres-password
               optional: true
-              secretName: shared-secrets
+              secretName: roborev-runner-secret
           - hostPath:
               path: /var/lib/docker/volumes/aerial-roborev-cache/_data/brain
               type: DirectoryOrCreate
             name: roborev-brain-cache
   valuesFrom:
     - kind: Secret
-      name: shared-secrets
+      name: roborev-runner-secret
       targetPath: githubConfigSecret.github_token
       valuesKey: GITHUB_PAT
 ---
@@ -898,7 +898,7 @@ spec:
   dependsOn:
     - name: arc-controller
       namespace: arc-systems
-  interval: 30m
+  interval: 5m
   values:
     controllerServiceAccount:
       name: arc-controller
@@ -945,6 +945,452 @@ spec:
             name: ci-cache
   valuesFrom:
     - kind: Secret
-      name: shared-secrets
+      name: git-sync-secret
       targetPath: githubConfigSecret.github_token
       valuesKey: GITHUB_PAT
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: stakater
+  namespace: flux-system
+spec:
+  interval: 24h
+  url: https://stakater.github.io/stakater-charts
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: reloader
+  namespace: default
+spec:
+  chart:
+    spec:
+      chart: reloader
+      sourceRef:
+        kind: HelmRepository
+        name: stakater
+        namespace: flux-system
+      version: 2.2.19
+  interval: 30m
+  values:
+    reloader:
+      watchGlobally: true
+---
+apiVersion: external-secrets.io/v1
+kind: SecretStore
+metadata:
+  name: infisical
+  namespace: default
+spec:
+  provider:
+    infisical:
+      hostAPI: http://infisical.default.svc.cluster.local:8080
+      auth:
+        universalAuthCredentials:
+          clientId:
+            key: INFISICAL_CLIENT_ID
+            name: shared-secrets
+          clientSecret:
+            key: INFISICAL_CLIENT_SECRET
+            name: shared-secrets
+      secretsScope:
+        projectSlug: aerial-8-jn8
+        environmentSlug: default
+        secretsPath: /
+        recursive: false
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: shared-secrets
+  namespace: default
+spec:
+  dataFrom:
+    - find:
+        name:
+          regexp: .*
+  refreshInterval: 1m
+  secretStoreRef:
+    kind: SecretStore
+    name: infisical
+  target:
+    creationPolicy: Merge
+    deletionPolicy: Retain
+    name: shared-secrets
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: postgres-aerial-role
+  namespace: default
+spec:
+  data:
+    - remoteRef:
+        key: POSTGRES_PASSWORD
+      secretKey: POSTGRES_PASSWORD
+  refreshInterval: 1m
+  secretStoreRef:
+    kind: SecretStore
+    name: infisical
+  target:
+    creationPolicy: Owner
+    template:
+      data:
+        password: "{{ .POSTGRES_PASSWORD }}"
+        username: aerial
+      metadata:
+        labels:
+          cnpg.io/reload: "true"
+      type: kubernetes.io/basic-auth
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: git-sync-secret
+  namespace: default
+spec:
+  data:
+    - remoteRef:
+        key: GITHUB_PAT
+      secretKey: GITHUB_PAT
+  refreshInterval: 1m
+  secretStoreRef:
+    kind: SecretStore
+    name: infisical
+  target:
+    creationPolicy: Owner
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: postgres-secret
+  namespace: default
+spec:
+  data:
+    - remoteRef:
+        key: POSTGRES_PASSWORD
+      secretKey: POSTGRES_PASSWORD
+  refreshInterval: 1m
+  secretStoreRef:
+    kind: SecretStore
+    name: infisical
+  target:
+    creationPolicy: Owner
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: coven-secret
+  namespace: default
+spec:
+  data:
+    - remoteRef:
+        key: POSTGRES_PASSWORD
+      secretKey: POSTGRES_PASSWORD
+    - remoteRef:
+        key: GITHUB_PAT
+      secretKey: GITHUB_PAT
+  refreshInterval: 1m
+  secretStoreRef:
+    kind: SecretStore
+    name: infisical
+  target:
+    creationPolicy: Owner
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: synapse-secret
+  namespace: default
+spec:
+  data:
+    - remoteRef:
+        key: DISCORD_BOT_TOKEN
+      secretKey: DISCORD_BOT_TOKEN
+    - remoteRef:
+        key: POSTGRES_PASSWORD
+      secretKey: POSTGRES_PASSWORD
+    - remoteRef:
+        key: GITHUB_PAT
+      secretKey: GITHUB_PAT
+    - remoteRef:
+        key: INFISICAL_CLIENT_ID
+      secretKey: INFISICAL_CLIENT_ID
+    - remoteRef:
+        key: INFISICAL_CLIENT_SECRET
+      secretKey: INFISICAL_CLIENT_SECRET
+    - remoteRef:
+        key: INFISICAL_PROJECT_ID
+      secretKey: INFISICAL_PROJECT_ID
+  refreshInterval: 1m
+  secretStoreRef:
+    kind: SecretStore
+    name: infisical
+  target:
+    creationPolicy: Owner
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: eri-secret
+  namespace: default
+spec:
+  data:
+    - remoteRef:
+        key: DISCORD_BOT_TOKEN
+      secretKey: DISCORD_BOT_TOKEN
+    - remoteRef:
+        key: POSTGRES_PASSWORD
+      secretKey: POSTGRES_PASSWORD
+    - remoteRef:
+        key: GEMINI_HARNESS_API_KEY
+      secretKey: GEMINI_HARNESS_API_KEY
+    - remoteRef:
+        key: GITHUB_PAT
+      secretKey: GITHUB_PAT
+    - remoteRef:
+        key: OPENOBSERVE_ROOT_USER_PASSWORD
+      secretKey: OPENOBSERVE_ROOT_USER_PASSWORD
+    - remoteRef:
+        key: HA_TOKEN
+      secretKey: HA_TOKEN
+    - remoteRef:
+        key: UBEREATS_MCP_TOKEN
+      secretKey: UBEREATS_MCP_TOKEN
+    - remoteRef:
+        key: CLOUDFLARE_MCP_TOKEN
+      secretKey: CLOUDFLARE_MCP_TOKEN
+    - remoteRef:
+        key: CLAUDE_CODE_OAUTH_TOKEN
+      secretKey: CLAUDE_CODE_OAUTH_TOKEN
+    - remoteRef:
+        key: ANTIGRAVITY_OAUTH_TOKEN
+      secretKey: ANTIGRAVITY_OAUTH_TOKEN
+    - remoteRef:
+        key: 1PASSWORD_SERVICE_ACCOUNT_TOKEN
+      secretKey: 1PASSWORD_SERVICE_ACCOUNT_TOKEN
+  refreshInterval: 1m
+  secretStoreRef:
+    kind: SecretStore
+    name: infisical
+  target:
+    creationPolicy: Owner
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: infisical-secret
+  namespace: default
+spec:
+  data:
+    - remoteRef:
+        key: POSTGRES_PASSWORD
+      secretKey: POSTGRES_PASSWORD
+    - remoteRef:
+        key: AUTH_SECRET
+      secretKey: AUTH_SECRET
+    - remoteRef:
+        key: ENCRYPTION_KEY
+      secretKey: ENCRYPTION_KEY
+    - remoteRef:
+        key: INFISICAL_AUTH_SECRET
+      secretKey: INFISICAL_AUTH_SECRET
+    - remoteRef:
+        key: INFISICAL_ENCRYPTION_KEY
+      secretKey: INFISICAL_ENCRYPTION_KEY
+  refreshInterval: 1m
+  secretStoreRef:
+    kind: SecretStore
+    name: infisical
+  target:
+    creationPolicy: Owner
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: openobserve-secret
+  namespace: default
+spec:
+  data:
+    - remoteRef:
+        key: OPENOBSERVE_ROOT_USER_PASSWORD
+      secretKey: OPENOBSERVE_ROOT_USER_PASSWORD
+    - remoteRef:
+        key: POSTGRES_PASSWORD
+      secretKey: POSTGRES_PASSWORD
+  refreshInterval: 1m
+  secretStoreRef:
+    kind: SecretStore
+    name: infisical
+  target:
+    creationPolicy: Owner
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: fluent-bit-secret
+  namespace: default
+spec:
+  data:
+    - remoteRef:
+        key: OPENOBSERVE_ROOT_USER_PASSWORD
+      secretKey: OPENOBSERVE_ROOT_USER_PASSWORD
+  refreshInterval: 1m
+  secretStoreRef:
+    kind: SecretStore
+    name: infisical
+  target:
+    creationPolicy: Owner
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: victoriametrics-secret
+  namespace: default
+spec:
+  data:
+    - remoteRef:
+        key: HA_METRICS_TOKEN
+      secretKey: HA_METRICS_TOKEN
+  refreshInterval: 1m
+  secretStoreRef:
+    kind: SecretStore
+    name: infisical
+  target:
+    creationPolicy: Owner
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: homepage-secret
+  namespace: default
+spec:
+  data:
+    - remoteRef:
+        key: HA_TOKEN
+      secretKey: HA_TOKEN
+    - remoteRef:
+        key: UNIFI_PASS
+      secretKey: UNIFI_PASS
+    - remoteRef:
+        key: QNAP_PASS
+      secretKey: QNAP_PASS
+  refreshInterval: 1m
+  secretStoreRef:
+    kind: SecretStore
+    name: infisical
+  target:
+    creationPolicy: Owner
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: discord-mcp-secret
+  namespace: default
+spec:
+  data:
+    - remoteRef:
+        key: DISCORD_BOT_TOKEN
+      secretKey: DISCORD_BOT_TOKEN
+    - remoteRef:
+        key: DISCORD_BOT_TOKEN
+      secretKey: DISCORD_TOKEN
+  refreshInterval: 1m
+  secretStoreRef:
+    kind: SecretStore
+    name: infisical
+  target:
+    creationPolicy: Owner
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: github-mcp-secret
+  namespace: default
+spec:
+  data:
+    - remoteRef:
+        key: GITHUB_PAT
+      secretKey: GITHUB_PAT
+    - remoteRef:
+        key: GITHUB_PAT
+      secretKey: GITHUB_PERSONAL_ACCESS_TOKEN
+  refreshInterval: 1m
+  secretStoreRef:
+    kind: SecretStore
+    name: infisical
+  target:
+    creationPolicy: Owner
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: infisical-mcp-secret
+  namespace: default
+spec:
+  data:
+    - remoteRef:
+        key: INFISICAL_CLIENT_ID
+      secretKey: INFISICAL_CLIENT_ID
+    - remoteRef:
+        key: INFISICAL_CLIENT_SECRET
+      secretKey: INFISICAL_CLIENT_SECRET
+    - remoteRef:
+        key: INFISICAL_CLIENT_ID
+      secretKey: INFISICAL_UNIVERSAL_AUTH_CLIENT_ID
+    - remoteRef:
+        key: INFISICAL_CLIENT_SECRET
+      secretKey: INFISICAL_UNIVERSAL_AUTH_CLIENT_SECRET
+  refreshInterval: 1m
+  secretStoreRef:
+    kind: SecretStore
+    name: infisical
+  target:
+    creationPolicy: Owner
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: prospera-secret
+  namespace: default
+spec:
+  data:
+    - remoteRef:
+        key: POSTGRES_PASSWORD
+      secretKey: POSTGRES_PASSWORD
+    - remoteRef:
+        key: GEMINI_HARNESS_API_KEY
+      secretKey: GEMINI_HARNESS_API_KEY
+    - remoteRef:
+        key: TWILIO_AUTH_TOKEN
+      secretKey: TWILIO_AUTH_TOKEN
+  refreshInterval: 1m
+  secretStoreRef:
+    kind: SecretStore
+    name: infisical
+  target:
+    creationPolicy: Owner
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: roborev-runner-secret
+  namespace: default
+spec:
+  data:
+    - remoteRef:
+        key: GITHUB_PAT
+      secretKey: GITHUB_PAT
+    - remoteRef:
+        key: ANTIGRAVITY_OAUTH_TOKEN
+      secretKey: ANTIGRAVITY_OAUTH_TOKEN
+    - remoteRef:
+        key: POSTGRES_PASSWORD
+      secretKey: POSTGRES_PASSWORD
+  refreshInterval: 1m
+  secretStoreRef:
+    kind: SecretStore
+    name: infisical
+  target:
+    creationPolicy: Owner

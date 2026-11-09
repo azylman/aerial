@@ -120,6 +120,8 @@ subjects:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
   labels:
     app.kubernetes.io/name: eri
   name: eri
@@ -160,55 +162,55 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: DISCORD_BOT_TOKEN
-                  name: shared-secrets
+                  name: eri-secret
                   optional: true
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
                   key: POSTGRES_PASSWORD
-                  name: shared-secrets
+                  name: eri-secret
                   optional: true
             - name: GEMINI_HARNESS_API_KEY
               valueFrom:
                 secretKeyRef:
                   key: GEMINI_HARNESS_API_KEY
-                  name: shared-secrets
+                  name: eri-secret
                   optional: true
             - name: GITHUB_PAT
               valueFrom:
                 secretKeyRef:
                   key: GITHUB_PAT
-                  name: shared-secrets
+                  name: eri-secret
                   optional: true
             - name: OPENOBSERVE_ROOT_USER_PASSWORD
               valueFrom:
                 secretKeyRef:
                   key: OPENOBSERVE_ROOT_USER_PASSWORD
-                  name: shared-secrets
+                  name: eri-secret
                   optional: true
             - name: HA_TOKEN
               valueFrom:
                 secretKeyRef:
                   key: HA_TOKEN
-                  name: shared-secrets
+                  name: eri-secret
                   optional: true
             - name: UBEREATS_MCP_TOKEN
               valueFrom:
                 secretKeyRef:
                   key: UBEREATS_MCP_TOKEN
-                  name: shared-secrets
+                  name: eri-secret
                   optional: true
             - name: CLOUDFLARE_MCP_TOKEN
               valueFrom:
                 secretKeyRef:
                   key: CLOUDFLARE_MCP_TOKEN
-                  name: shared-secrets
+                  name: eri-secret
                   optional: true
             - name: CLAUDE_CODE_OAUTH_TOKEN
               valueFrom:
                 secretKeyRef:
                   key: CLAUDE_CODE_OAUTH_TOKEN
-                  name: shared-secrets
+                  name: eri-secret
                   optional: true
           image: ghcr.io/azylman/aerial-eri:${TAG_AERIAL_ERI:=latest}
           imagePullPolicy: Always
@@ -233,7 +235,7 @@ spec:
               readOnly: true
               subPath: antigravity-oauth-token
             - mountPath: /secrets
-              name: shared-secrets
+              name: eri-secret
               readOnly: true
       initContainers:
         - args:
@@ -255,7 +257,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: GITHUB_PAT
-                  name: shared-secrets
+                  name: git-sync-secret
           image: registry.k8s.io/git-sync/git-sync:v4.8.0
           name: git-sync-aerial
           restartPolicy: Always
@@ -291,7 +293,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: GITHUB_PAT
-                  name: shared-secrets
+                  name: git-sync-secret
           image: registry.k8s.io/git-sync/git-sync:v4.8.0
           name: git-sync-aerial-config
           restartPolicy: Always
@@ -328,12 +330,12 @@ spec:
               - key: ANTIGRAVITY_OAUTH_TOKEN
                 path: antigravity-oauth-token
             optional: true
-            secretName: shared-secrets
-        - name: shared-secrets
+            secretName: eri-secret
+        - name: eri-secret
           secret:
             defaultMode: 256
             optional: true
-            secretName: shared-secrets
+            secretName: eri-secret
 ---
 apiVersion: v1
 kind: Service
@@ -357,6 +359,8 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
   labels:
     app.kubernetes.io/name: vanadis
   name: vanadis
@@ -385,7 +389,7 @@ spec:
               value: http://eri.aerial
           envFrom:
             - secretRef:
-                name: shared-secrets
+                name: postgres-secret
           image: ghcr.io/azylman/aerial-vanadis:${TAG_AERIAL_VANADIS:=latest}
           imagePullPolicy: Always
           name: vanadis
@@ -417,7 +421,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: GITHUB_PAT
-                  name: shared-secrets
+                  name: git-sync-secret
           image: registry.k8s.io/git-sync/git-sync:v4.8.0
           name: git-sync-aerial
           restartPolicy: Always
@@ -453,7 +457,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: GITHUB_PAT
-                  name: shared-secrets
+                  name: git-sync-secret
           image: registry.k8s.io/git-sync/git-sync:v4.8.0
           name: git-sync-aerial-config
           restartPolicy: Always
@@ -509,7 +513,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: POSTGRES_PASSWORD
-                  name: shared-secrets
+                  name: postgres-secret
           image: ghcr.io/azylman/aerial-sidecar-migrator:${TAG_AERIAL_SIDECAR_MIGRATOR:=latest}
           imagePullPolicy: Always
           name: migrate-sidecars
@@ -528,7 +532,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: POSTGRES_PASSWORD
-                  name: shared-secrets
+                  name: postgres-secret
           image: ghcr.io/azylman/aerial-migrator:${TAG_AERIAL_MIGRATOR:=latest}
           imagePullPolicy: Always
           name: migrate-core
@@ -556,6 +560,8 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
   labels:
     app.kubernetes.io/name: coven
   name: coven
@@ -584,7 +590,7 @@ spec:
               value: /share/aerial-config/services/coven/coven.yaml
           envFrom:
             - secretRef:
-                name: shared-secrets
+                name: coven-secret
           image: ghcr.io/azylman/aerial-coven:${TAG_AERIAL_COVEN:=latest}
           imagePullPolicy: Always
           name: coven
@@ -616,7 +622,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: GITHUB_PAT
-                  name: shared-secrets
+                  name: git-sync-secret
           image: registry.k8s.io/git-sync/git-sync:v4.8.0
           name: git-sync-aerial-config
           restartPolicy: Always
@@ -697,9 +703,6 @@ spec:
               value: /data/agentsview
             - name: CLAUDE_PROJECTS_DIR
               value: /data/claude/projects
-          envFrom:
-            - secretRef:
-                name: shared-secrets
           image: ghcr.io/azylman/agentsview:latest
           imagePullPolicy: Always
           name: agentsview
@@ -740,6 +743,8 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
   labels:
     app.kubernetes.io/name: haro
   name: haro
@@ -772,7 +777,7 @@ spec:
               value: http://vanadis.aerial
           envFrom:
             - secretRef:
-                name: shared-secrets
+                name: postgres-secret
           image: ghcr.io/azylman/aerial-haro:${TAG_AERIAL_HARO:=latest}
           imagePullPolicy: Always
           name: haro
@@ -804,7 +809,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: GITHUB_PAT
-                  name: shared-secrets
+                  name: git-sync-secret
           image: registry.k8s.io/git-sync/git-sync:v4.8.0
           name: git-sync-aerial-config
           restartPolicy: Always
@@ -975,6 +980,8 @@ subjects:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
   labels:
     app.kubernetes.io/name: synapse
   name: synapse
@@ -1018,11 +1025,11 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: DISCORD_BOT_TOKEN
-                  name: shared-secrets
+                  name: synapse-secret
                   optional: true
           envFrom:
             - secretRef:
-                name: shared-secrets
+                name: synapse-secret
           image: ghcr.io/azylman/aerial-synapse:${TAG_AERIAL_SYNAPSE:=latest}
           imagePullPolicy: Always
           name: synapse
@@ -1054,7 +1061,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: GITHUB_PAT
-                  name: shared-secrets
+                  name: git-sync-secret
           image: registry.k8s.io/git-sync/git-sync:v4.8.0
           name: git-sync-aerial-config
           restartPolicy: Always
@@ -1118,6 +1125,8 @@ metadata:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
   labels:
     app.kubernetes.io/name: console
   name: console
@@ -1146,7 +1155,7 @@ spec:
               value: /config/console.yaml
           envFrom:
             - secretRef:
-                name: shared-secrets
+                name: git-sync-secret
           image: ghcr.io/azylman/aerial-console:${TAG_AERIAL_CONSOLE:=latest}
           imagePullPolicy: Always
           name: console
@@ -1189,6 +1198,8 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
   labels:
     app.kubernetes.io/name: homepage
   name: homepage
@@ -1218,7 +1229,7 @@ spec:
               value: "3001"
           envFrom:
             - secretRef:
-                name: shared-secrets
+                name: homepage-secret
           image: ghcr.io/gethomepage/homepage:v2.7.0
           name: homepage
           ports:
@@ -1249,7 +1260,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: GITHUB_PAT
-                  name: shared-secrets
+                  name: git-sync-secret
           image: registry.k8s.io/git-sync/git-sync:v4.8.0
           name: git-sync-aerial
           restartPolicy: Always
@@ -1285,7 +1296,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: GITHUB_PAT
-                  name: shared-secrets
+                  name: git-sync-secret
           image: registry.k8s.io/git-sync/git-sync:v4.8.0
           name: git-sync-aerial-config
           restartPolicy: Always
@@ -1330,6 +1341,8 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
   labels:
     app.kubernetes.io/name: docs
   name: docs
@@ -1384,7 +1397,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: GITHUB_PAT
-                  name: shared-secrets
+                  name: git-sync-secret
           image: registry.k8s.io/git-sync/git-sync:v4.8.0
           name: git-sync-aerial-config
           restartPolicy: Always
@@ -1475,6 +1488,8 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
   labels:
     app.kubernetes.io/name: infisical
   name: infisical
@@ -1503,12 +1518,12 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: POSTGRES_PASSWORD
-                  name: shared-secrets
+                  name: infisical-secret
             - name: DB_CONNECTION_URI
               value: postgres://aerial:$(POSTGRES_PASSWORD)@postgres:5432/infisical?sslmode=disable
           envFrom:
             - secretRef:
-                name: shared-secrets
+                name: infisical-secret
           image: infisical/infisical:v0.167.4
           name: infisical
           ports:
