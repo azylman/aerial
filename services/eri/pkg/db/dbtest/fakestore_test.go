@@ -1160,4 +1160,11 @@ func TestTranscriptStore_FakeStore_EngineKindsAndStackFilter(t *testing.T) {
 	if _, err := store.BackfillToolKinds(ctx, nil); err == nil {
 		t.Error("expected error for nil mapper")
 	}
+	if purged, err := store.PurgeMigratedLocalTranscripts(ctx); err != nil || purged != 0 {
+		t.Errorf("PurgeMigratedLocalTranscripts = %d err=%v, want 0", purged, err)
+	}
+	store.FailNext("PurgeMigratedLocalTranscripts", errors.New("boom"))
+	if _, err := store.PurgeMigratedLocalTranscripts(ctx); err == nil {
+		t.Error("expected armed PurgeMigratedLocalTranscripts failure")
+	}
 }

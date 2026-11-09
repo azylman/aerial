@@ -762,6 +762,9 @@ func TestSQLTranscriptStore_ReadOnlyGuardsAndExecFailures(t *testing.T) {
 	if steps, err := s.GetTranscriptStepRange(ctx, "", "missing", 0, 1); err != nil || len(steps) != 0 {
 		t.Errorf("read-only store should still read: steps=%v err=%v", steps, err)
 	}
+	if purged, err := s.PurgeMigratedLocalTranscripts(ctx); err != nil || purged != 0 {
+		t.Errorf("single-database store has no migrated rows to purge: purged=%d err=%v", purged, err)
+	}
 	if _, err := newTestTranscriptStore(t, "stack-a").BackfillSessionEngines(ctx, nil); err == nil || !strings.Contains(err.Error(), "inference func cannot be nil") {
 		t.Errorf("expected nil infer rejection, got %v", err)
 	}

@@ -442,6 +442,91 @@ func scanSessionToolNames(rows *sql.Rows) (map[string][]string, []string, error)
 	return toolNames, order, nil
 }
 
+// PurgeMigratedLocalTranscripts is a no-op for a single-database store: its database is the index, so
+// it holds no stranded pre-migration rows. Routed stores reclaim those across the primary and shared DBs.
+func (s *SQLTranscriptStore) PurgeMigratedLocalTranscripts(ctx context.Context) (int64, error) {
+	return 0, s.checkDB()
+}
+
+// sessionIDsAfter pages the store's own-stack session IDs strictly after the keyset cursor after,
+// in ascending order, returning at most limit IDs.
+func (s *SQLTranscriptStore) sessionIDsAfter(ctx context.Context, after string, limit int) ([]string, error) {
+	if err := s.checkDB(); err != nil {
+		return nil, err
+	}
+	queryCtx, cancel := withTimeout(ctx, toolKindBackfillStatementTimeout)
+	defer cancel()
+	rows, err := s.db.QueryContext(queryCtx, `SELECT session_id FROM session_summaries WHERE stack = $1 AND session_id > $2 ORDER BY session_id LIMIT $3`, s.stack, after, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query session ids: %w", err)
+	}
+	ids, err := scanNonEmptyStrings(rows)
+	if err != nil {
+		return nil, fmt.Errorf("scan session ids: %w", err)
+	}
+	return ids, nil
+}
+
+// existingSessionIDs returns the subset of ids that have an own-stack session summary in this store.
+func (s *SQLTranscriptStore) existingSessionIDs(ctx context.Context, ids []string) ([]string, error) {
+	if err := s.checkDB(); err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	queryCtx, cancel := withTimeout(ctx, toolKindBackfillStatementTimeout)
+	defer cancel()
+	in, args := stackSessionInList(s.stack, ids)
+	rows, err := s.db.QueryContext(queryCtx, `SELECT session_id FROM session_summaries WHERE stack = $1 AND session_id IN (`+in+`)`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query existing session ids: %w", err)
+	}
+	found, err := scanNonEmptyStrings(rows)
+	if err != nil {
+		return nil, fmt.Errorf("scan existing session ids: %w", err)
+	}
+	return found, nil
+}
+
+// deleteSessions removes the own-stack sessions in ids along with their steps, deleting steps
+// explicitly rather than relying on the FK cascade, and returns the session rows deleted.
+func (s *SQLTranscriptStore) deleteSessions(ctx context.Context, ids []string) (int64, error) {
+	if err := s.checkWriter(); err != nil {
+		return 0, err
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	execCtx, cancel := withTimeout(ctx, toolKindBackfillStatementTimeout)
+	defer cancel()
+	in, args := stackSessionInList(s.stack, ids)
+	if _, err := s.db.ExecContext(execCtx, `DELETE FROM transcript_steps WHERE stack = $1 AND session_id IN (`+in+`)`, args...); err != nil {
+		return 0, fmt.Errorf("delete transcript steps: %w", err)
+	}
+	res, err := s.db.ExecContext(execCtx, `DELETE FROM session_summaries WHERE stack = $1 AND session_id IN (`+in+`)`, args...)
+	if err != nil {
+		return 0, fmt.Errorf("delete session summaries: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, nil
+	}
+	return n, nil
+}
+
+// stackSessionInList binds stack as $1 followed by ids as $2..$n, returning the IN-list placeholders.
+func stackSessionInList(stack string, ids []string) (string, []any) {
+	args := make([]any, 0, len(ids)+1)
+	args = append(args, stack)
+	placeholders := make([]string, len(ids))
+	for i, id := range ids {
+		args = append(args, id)
+		placeholders[i] = fmt.Sprintf("$%d", len(args))
+	}
+	return strings.Join(placeholders, ", "), args
+}
+
 // sanitizeTranscriptText strips NUL bytes and replaces invalid UTF-8 so Postgres text columns
 // accept the value; one dirty step must not reject its whole insert batch.
 func sanitizeTranscriptText(s string) string {

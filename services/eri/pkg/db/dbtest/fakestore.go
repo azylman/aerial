@@ -1132,6 +1132,14 @@ func (f *FakeStore) BackfillSessionEngines(ctx context.Context, infer func([]str
 	})
 }
 
+// PurgeMigratedLocalTranscripts is a no-op: the fake is a single index with no stranded primary-DB
+// rows, so it never deletes anything. FailNext still arms failures for sweep error-path tests.
+func (f *FakeStore) PurgeMigratedLocalTranscripts(ctx context.Context) (int64, error) {
+	return withFakeLock(f, "PurgeMigratedLocalTranscripts", func() (int64, error) {
+		return 0, nil
+	})
+}
+
 // GetTranscriptStats counts the fake's single stack; it reports nothing when the index is empty
 // or the stack filter excludes it.
 func (f *FakeStore) GetTranscriptStats(ctx context.Context, stack string) ([]db.TranscriptStackStats, error) {
