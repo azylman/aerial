@@ -169,7 +169,7 @@ func (s *RouterServer) handleEventsWebhook(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	if len(s.cfg.WebhookForwardURLs) > 0 {
+	if len(s.cfgSrc.Current().WebhookForwardURLs) > 0 {
 		reqPath := r.URL.RequestURI()
 		if reqPath == "" {
 			reqPath = r.URL.Path

@@ -470,7 +470,7 @@ func TestNotifyRemediationCap(t *testing.T) {
 				failVanadisBuildID: "build-cap-1",
 				failVanadisChunkID: "chunk-cap-1",
 			}
-			server := NewRouterServer(Config{}, nil)
+			server := NewRouterServer(fixedConfig(Config{}), nil)
 			if !tc.nilRegistry {
 				server.SetRegistry(reg)
 			}
@@ -563,7 +563,7 @@ func TestPopulateMissingBranch(t *testing.T) {
 				resolveBranch: tc.regBranch,
 				resolveErr:    tc.resolveErr,
 			}
-			server := NewRouterServer(Config{}, nil)
+			server := NewRouterServer(fixedConfig(Config{}), nil)
 			if !tc.nilRegistry {
 				server.SetRegistry(reg)
 			}

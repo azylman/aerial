@@ -27,7 +27,7 @@ import (
 
 // RouterServer handles webhook requests and orchestrates secret synchronization.
 type RouterServer struct {
-	cfg                      Config
+	cfgSrc                   ConfigSource
 	httpClient               *http.Client
 	riverClient              RiverInserter
 	registry                 PRRegistryUpdater
@@ -46,12 +46,12 @@ type RouterServer struct {
 }
 
 // NewRouterServer constructs a new RouterServer instance.
-func NewRouterServer(cfg Config, client *http.Client, riverClient ...RiverInserter) *RouterServer {
+func NewRouterServer(cfgSrc ConfigSource, client *http.Client, riverClient ...RiverInserter) *RouterServer {
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
 	s := &RouterServer{
-		cfg:        cfg,
+		cfgSrc:     cfgSrc,
 		httpClient: client,
 	}
 	if len(riverClient) > 0 {
@@ -127,7 +127,7 @@ func (s *RouterServer) resolveHeadlessPRTargetID(ctx context.Context, repo strin
 			}
 		}
 	}
-	if sys := NormalizeDiscordTargetID(s.cfg.SystemChannelID); IsValidDiscordSnowflake(sys) {
+	if sys := NormalizeDiscordTargetID(s.cfgSrc.Current().SystemChannelID); IsValidDiscordSnowflake(sys) {
 		return sys
 	}
 	return ""
@@ -765,7 +765,7 @@ func (s *RouterServer) isValidAlertTarget(targetID string) bool {
 	if IsValidDiscordSnowflake(clean) {
 		return true
 	}
-	sys := strings.TrimSpace(s.cfg.SystemChannelID)
+	sys := strings.TrimSpace(s.cfgSrc.Current().SystemChannelID)
 	return sys != "" && clean == sys && IsValidDiscordChannel(clean)
 }
 
@@ -903,7 +903,7 @@ func (s *RouterServer) enrichDeployEventPRAndTarget(ctx context.Context, evt *De
 	s.resolveDeployEventPRNumber(ctx, evt)
 	s.resolveDeployEventTargetID(ctx, evt)
 	if evt.TargetID == "" && (evt.Event == "deploy_failed" || evt.Event == "deploy_rollback" || evt.Event == "sync_failed") {
-		evt.TargetID = strings.TrimSpace(s.cfg.SystemChannelID)
+		evt.TargetID = strings.TrimSpace(s.cfgSrc.Current().SystemChannelID)
 	}
 }
 
@@ -954,7 +954,7 @@ func (s *RouterServer) handleDeployFailedOrRollback(ctx context.Context, evt Dep
 		}
 		targetID = firstNonEmpty(tID, targetID)
 	}
-	targetID = firstNonEmpty(targetID, s.cfg.SystemChannelID)
+	targetID = firstNonEmpty(targetID, s.cfgSrc.Current().SystemChannelID)
 	actionDesc, fixDesc := "Deployment failed", "deployment failure"
 	if evt.Event == "deploy_rollback" {
 		actionDesc, fixDesc = "Deployment failed and rolled back", "deployment rollback failure"
@@ -1362,17 +1362,20 @@ func setupRiverWorkerPool(ctx context.Context, server *RouterServer, cfg Config)
 }
 
 // runServer runs the HTTP server with graceful shutdown and optional ready callback.
-func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error {
+// Fields bound at startup (listener, database pool, Discord session, dispatcher)
+// are read once from the initial snapshot; synapseRestartRequired guards them.
+func runServer(ctx context.Context, cfgSrc *httpkit.Reloadable[Config], onReady func(addr string)) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	server := NewRouterServer(cfg, nil)
+	cfg := cfgSrc.Current()
+	server := NewRouterServer(cfgSrc, nil)
 	dispatcher := NewDefaultOutboundDispatcher(cfg.BrainURL, nil)
 	dispatcher.SetFluxReceiverURL(cfg.FluxReceiverURL)
 	dispatcher.SetKubeConfig(cfg.KubeAPIServer, cfg.KubeToken)
 	server.SetDispatcher(dispatcher)
 
-	dbPool, riverClient, err := setupRiverWorkerPool(ctx, server, cfg)
+	dbPool, riverClient, err := setupRiverWorkerPool(ctx, server, *cfg)
 	if err != nil {
 		return err
 	}
@@ -1399,8 +1402,11 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 		return fmt.Errorf("listening on port %s: %w", cfg.Port, err)
 	}
 
+	mux := http.NewServeMux()
+	mux.Handle("POST /-/reload", cfgSrc.Handler("synapse"))
+	mux.Handle("/", server.Routes())
 	httpServer := &http.Server{
-		Handler:      server.Routes(),
+		Handler:      mux,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  60 * time.Second,
@@ -1449,17 +1455,29 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 	return runErr
 }
 
-// runApp runs the webhooks-router application.
-func runApp(ctx context.Context, cfg Config) error {
-	return runServer(ctx, cfg, nil)
+// runApp runs synapse until ctx is cancelled or a config reload requests a
+// restart, in which case it shuts down gracefully and returns nil so the
+// container restarts with the new configuration.
+func runApp(ctx context.Context, cfgSrc *httpkit.Reloadable[Config]) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-cfgSrc.RestartRequested():
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return runServer(ctx, cfgSrc, nil)
 }
 
 func main() {
 	cfg := LoadConfigFromEnv()
+	cfgSrc := httpkit.NewReloadable(&cfg, loadConfigFromEnvStrict, synapseRestartRequired)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 
-	err := runApp(ctx, cfg)
+	err := runApp(ctx, cfgSrc)
 	cancel()
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("[synapse] Error: %v", err)

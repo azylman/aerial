@@ -147,10 +147,10 @@ func TestForwardRawWebhookToBot_Routing(t *testing.T) {
 			if !tc.nilServer {
 				srv = &RouterServer{
 					httpClient: ts.Client(),
-					cfg: Config{
+					cfgSrc: fixedConfig(Config{
 						BotID:              tc.botID,
 						WebhookForwardURLs: urls,
-					},
+					}),
 				}
 			}
 
@@ -198,10 +198,10 @@ func TestForwardRawWebhookToPeers(t *testing.T) {
 			if !tc.nilServer {
 				srv = &RouterServer{
 					httpClient: ts.Client(),
-					cfg: Config{
+					cfgSrc: fixedConfig(Config{
 						BotID:              "aerial",
 						WebhookForwardURLs: urls,
-					},
+					}),
 				}
 			}
 
@@ -299,10 +299,10 @@ func TestTeeGitHubWebhook_PayloadFallbacks(t *testing.T) {
 			if !tc.nilServer {
 				srv = &RouterServer{
 					httpClient: ts.Client(),
-					cfg: Config{
+					cfgSrc: fixedConfig(Config{
 						BotID:              "aerial",
 						WebhookForwardURLs: urls,
-					},
+					}),
 				}
 			}
 

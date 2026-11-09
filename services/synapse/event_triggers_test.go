@@ -381,7 +381,7 @@ func TestHandleEventsWebhook(t *testing.T) {
 				mockRiver.err = errors.New("river db down")
 			}
 
-			srv := NewRouterServer(Config{}, nil)
+			srv := NewRouterServer(fixedConfig(Config{}), nil)
 			srv.SetRegistry(mockReg)
 			if tc.withRiver {
 				srv.SetRiverClient(mockRiver)
@@ -463,7 +463,7 @@ func TestProcessEventTriggerWebhook(t *testing.T) {
 			}
 			var srv *RouterServer
 			if !tc.nilServer {
-				srv = NewRouterServer(Config{}, nil)
+				srv = NewRouterServer(fixedConfig(Config{}), nil)
 				if !tc.nilRegistry {
 					srv.SetRegistry(mockReg)
 				}
@@ -528,7 +528,7 @@ func TestFireEventTriggers(t *testing.T) {
 				mockReg.claimTriggersErr = errors.New("simulated fire error")
 			}
 
-			srv := NewRouterServer(Config{}, nil)
+			srv := NewRouterServer(fixedConfig(Config{}), nil)
 			if !tc.nilRegistry {
 				srv.SetRegistry(mockReg)
 			}
@@ -598,7 +598,7 @@ func TestEvaluateFluxEventTriggers(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			mockReg := &mockPRRegistry{}
-			srv := NewRouterServer(Config{}, nil)
+			srv := NewRouterServer(fixedConfig(Config{}), nil)
 			srv.SetRegistry(mockReg)
 
 			srv.evaluateFluxEventTriggers(context.Background(), DeployEvent{
@@ -707,7 +707,7 @@ func TestEvaluateVanadisAdvancementTriggers(t *testing.T) {
 			t.Parallel()
 			mockReg := &mockPRRegistry{}
 			mockDisp := &mockOutboundDispatcher{}
-			srv := NewRouterServer(Config{}, nil)
+			srv := NewRouterServer(fixedConfig(Config{}), nil)
 			srv.SetRegistry(mockReg)
 			srv.SetDispatcher(mockDisp)
 
@@ -779,7 +779,7 @@ func TestEvaluateVanadisFailureTriggers(t *testing.T) {
 			t.Parallel()
 			mockReg := &mockPRRegistry{}
 			mockDisp := &mockOutboundDispatcher{}
-			srv := NewRouterServer(Config{}, nil)
+			srv := NewRouterServer(fixedConfig(Config{}), nil)
 			srv.SetRegistry(mockReg)
 			srv.SetDispatcher(mockDisp)
 
@@ -861,7 +861,7 @@ func TestFailVanadisChunk(t *testing.T) {
 				mockReg.failVanadisErr = errors.New("simulated fail err")
 			}
 			mockDisp := &mockOutboundDispatcher{}
-			srv := NewRouterServer(Config{}, nil)
+			srv := NewRouterServer(fixedConfig(Config{}), nil)
 			if !tc.nilRegistry {
 				srv.SetRegistry(mockReg)
 			}
@@ -1147,7 +1147,7 @@ func TestEvaluateGitHubEventTriggers(t *testing.T) {
 			t.Parallel()
 			mockReg := &mockPRRegistry{}
 			mockDisp := &mockOutboundDispatcher{}
-			srv := NewRouterServer(Config{}, nil)
+			srv := NewRouterServer(fixedConfig(Config{}), nil)
 			srv.SetRegistry(mockReg)
 			srv.SetDispatcher(mockDisp)
 
@@ -1243,7 +1243,7 @@ func TestIntegrations_EventTriggers(t *testing.T) {
 				},
 			}
 			mockDisp := &mockOutboundDispatcher{}
-			srv := NewRouterServer(Config{}, nil)
+			srv := NewRouterServer(fixedConfig(Config{}), nil)
 			srv.SetRegistry(mockReg)
 			srv.SetDispatcher(mockDisp)
 
@@ -1301,7 +1301,7 @@ func TestProcessGitHubEvent_TriggersEvaluatedOnlyOnSuccess(t *testing.T) {
 		err: errors.New("database connection lost"),
 	}
 	mockDisp := &mockOutboundDispatcher{}
-	srv := NewRouterServer(Config{}, nil)
+	srv := NewRouterServer(fixedConfig(Config{}), nil)
 	srv.SetRegistry(mockReg)
 	srv.SetDispatcher(mockDisp)
 

@@ -25,14 +25,9 @@ type GitHubIssueComment struct {
 }
 
 func (s *RouterServer) getGitHubJSON(ctx context.Context, path string, maxBytes int64, out any) error {
-	apiURL := firstNonEmpty(s.cfg.GitHubAPIURL, "https://api.github.com")
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL+path, nil)
+	req, err := s.newGitHubRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return fmt.Errorf("create github api request: %w", err)
-	}
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	if s.cfg.GitHubToken != "" {
-		req.Header.Set("Authorization", "token "+s.cfg.GitHubToken)
 	}
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
@@ -62,7 +57,7 @@ func (s *RouterServer) isAutoUpdateAuthorAllowed(author string) bool {
 	if clean == "" || s == nil {
 		return false
 	}
-	for _, allowed := range s.cfg.AutoUpdatePRAuthors {
+	for _, allowed := range s.cfgSrc.Current().AutoUpdatePRAuthors {
 		if strings.EqualFold(clean, strings.TrimSpace(allowed)) {
 			return true
 		}
@@ -96,16 +91,11 @@ func (s *RouterServer) handleDirtyPRConflict(ctx context.Context, repo string, p
 }
 
 func (s *RouterServer) updatePRBranch(ctx context.Context, repo string, prNumber int) (bool, error) {
-	apiURL := firstNonEmpty(s.cfg.GitHubAPIURL, "https://api.github.com")
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, fmt.Sprintf("%s/repos/%s/pulls/%d/update-branch", apiURL, normalizeRepo(repo), prNumber), strings.NewReader(`{}`))
+	req, err := s.newGitHubRequest(ctx, http.MethodPut, fmt.Sprintf("/repos/%s/pulls/%d/update-branch", normalizeRepo(repo), prNumber), strings.NewReader(`{}`))
 	if err != nil {
 		return false, fmt.Errorf("create update-branch request: %w", err)
 	}
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
 	req.Header.Set("Content-Type", "application/json")
-	if s.cfg.GitHubToken != "" {
-		req.Header.Set("Authorization", "token "+s.cfg.GitHubToken)
-	}
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return false, fmt.Errorf("update-branch request failed: %w", err)
@@ -147,7 +137,7 @@ func (s *RouterServer) isEligibleAutoUpdatePR(ctx context.Context, repo string, 
 	if pr.Draft || !s.isAutoUpdateAuthorAllowed(pr.User.Login) {
 		return false
 	}
-	if !s.cfg.DefaultOwner && !s.isPROwnedLocally(ctx, repo, pr.GetNumber()) {
+	if !s.cfgSrc.Current().DefaultOwner && !s.isPROwnedLocally(ctx, repo, pr.GetNumber()) {
 		return false
 	}
 	return true
@@ -155,7 +145,7 @@ func (s *RouterServer) isEligibleAutoUpdatePR(ctx context.Context, repo string, 
 
 func (s *RouterServer) checkOpenPRConflicts(ctx context.Context, repo string) error {
 	normRepo := normalizeRepo(repo)
-	if len(s.cfg.AutoUpdatePRAuthors) == 0 || normRepo == "" {
+	if len(s.cfgSrc.Current().AutoUpdatePRAuthors) == 0 || normRepo == "" {
 		return nil
 	}
 	var openPRs []GitHubPullRequest
@@ -208,7 +198,7 @@ func (s *RouterServer) dispatchGitPush(ctx context.Context, repo, ref, commit, t
 	if s.dispatcher == nil || !strings.HasPrefix(ref, "refs/heads/main") || isZeroSHA(commit) {
 		return nil
 	}
-	if !s.cfg.DefaultOwner && targetID == "" {
+	if !s.cfgSrc.Current().DefaultOwner && targetID == "" {
 		return nil
 	}
 	if err := s.dispatcher.DispatchGitPush(ctx, GitPushEventRequest{
@@ -254,14 +244,15 @@ func (s *RouterServer) completeNoDeployWorkflowRun(ctx context.Context, repo, he
 }
 
 func (s *RouterServer) shouldDispatchWorkflowRunImages(ctx context.Context, repo string, headBranch, conclusion string, prNum int) bool {
+	cfg := s.cfgSrc.Current()
 	if s.dispatcher == nil || conclusion != "success" || (headBranch != "main" && !strings.HasPrefix(headBranch, "refs/heads/main")) {
 		return false
 	}
 	if prNum > 0 {
-		if !s.isPROwnedLocally(ctx, repo, prNum) && (!s.cfg.DefaultOwner || len(s.cfg.WebhookForwardURLs) > 0) {
+		if !s.isPROwnedLocally(ctx, repo, prNum) && (!cfg.DefaultOwner || len(cfg.WebhookForwardURLs) > 0) {
 			return false
 		}
-	} else if !s.cfg.DefaultOwner && s.registry != nil {
+	} else if !cfg.DefaultOwner && s.registry != nil {
 		return false
 	}
 	return true
@@ -581,7 +572,7 @@ func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	if len(s.cfg.WebhookForwardURLs) > 0 {
+	if len(s.cfgSrc.Current().WebhookForwardURLs) > 0 {
 		reqPath := r.URL.RequestURI()
 		if reqPath == "" {
 			reqPath = r.URL.Path
@@ -1269,11 +1260,12 @@ func (s *RouterServer) handlePRAutoMergeDisabledAction(ctx context.Context, res 
 }
 
 func (s *RouterServer) handlePullRequestRegistryAction(ctx context.Context, res *ResolvedGitHubEvent, pr GitHubPullRequest) error {
+	cfg := s.cfgSrc.Current()
 	meta := ParseAerialPRMetadata(pr.GetBody())
 	shouldRegister := true
-	if meta.BotID != "" && s.cfg.BotID != "" && !strings.EqualFold(meta.BotID, s.cfg.BotID) {
+	if meta.BotID != "" && cfg.BotID != "" && !strings.EqualFold(meta.BotID, cfg.BotID) {
 		shouldRegister = false
-	} else if meta.BotID == "" && !s.cfg.DefaultOwner {
+	} else if meta.BotID == "" && !cfg.DefaultOwner {
 		shouldRegister = false
 	}
 	if shouldRegister && s.registry != nil && (meta.TargetID != "" || meta.VanadisChunkID != "") {
