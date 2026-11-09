@@ -177,3 +177,11 @@ func (r *routedTranscriptStore) GetTranscriptStepRange(ctx context.Context, stac
 	}
 	return s.GetTranscriptStepRange(ctx, stack, sessionID, startStep, endStep)
 }
+
+func (r *routedTranscriptStore) GetTranscriptStats(ctx context.Context, stack string) ([]TranscriptStackStats, error) {
+	s, err := r.resolve()
+	if err != nil {
+		return nil, err
+	}
+	return s.GetTranscriptStats(ctx, stack)
+}

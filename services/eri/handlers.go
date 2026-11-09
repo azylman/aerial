@@ -766,6 +766,7 @@ func handleTranscriptSearch(store db.TranscriptStore, embedder transcript.Embedd
 		}
 
 		res, err := transcript.ExecuteTranscriptSearch(r.Context(), store, embedder, transcript.SearchOptions{
+			Stack:         strings.TrimSpace(r.URL.Query().Get("stack")),
 			Query:         q,
 			Mode:          mode,
 			SessionFilter: session,
@@ -789,14 +790,24 @@ func handleTranscriptStats(store db.TranscriptStore) http.HandlerFunc {
 			return
 		}
 
-		syncStates, err := store.GetSessionSyncStates(r.Context())
+		stacks, err := store.GetTranscriptStats(r.Context(), strings.TrimSpace(r.URL.Query().Get("stack")))
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		if stacks == nil {
+			stacks = []db.TranscriptStackStats{}
+		}
+		var totalSessions, totalSteps int
+		for _, st := range stacks {
+			totalSessions += st.Sessions
+			totalSteps += st.Steps
+		}
 
 		httpkit.WriteJSON(w, http.StatusOK, map[string]any{
-			"total_sessions": len(syncStates),
+			"total_sessions": totalSessions,
+			"total_steps":    totalSteps,
+			"stacks":         stacks,
 			"status":         "ok",
 		})
 	}
@@ -836,7 +847,7 @@ func handleTranscriptSteps(store db.TranscriptStore) http.HandlerFunc {
 			contextWindow = c
 		}
 
-		res, err := transcript.GetTranscriptStepWindow(r.Context(), store, "", session, step, contextWindow)
+		res, err := transcript.GetTranscriptStepWindow(r.Context(), store, r.URL.Query().Get("stack"), session, step, contextWindow)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return

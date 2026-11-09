@@ -1106,6 +1106,21 @@ func (f *FakeStore) BackfillToolKinds(ctx context.Context, mapper func(string) s
 	})
 }
 
+// GetTranscriptStats counts the fake's single stack; it reports nothing when the index is empty
+// or the stack filter excludes it.
+func (f *FakeStore) GetTranscriptStats(ctx context.Context, stack string) ([]db.TranscriptStackStats, error) {
+	return withFakeLock(f, "GetTranscriptStats", func() ([]db.TranscriptStackStats, error) {
+		if len(f.sessionSummaries) == 0 || !fakeStackMatches(stack) {
+			return nil, nil
+		}
+		st := db.TranscriptStackStats{Stack: FakeTranscriptStack, Sessions: len(f.sessionSummaries)}
+		for _, steps := range f.transcriptSteps {
+			st.Steps += len(steps)
+		}
+		return []db.TranscriptStackStats{st}, nil
+	})
+}
+
 // fakeStackMatches reports whether a read filtered to stack can see the fake's single stack.
 func fakeStackMatches(stack string) bool {
 	stack = strings.TrimSpace(stack)
@@ -1196,7 +1211,7 @@ func parseAllowedSessions(filter string) map[string]bool {
 }
 
 func matchesTranscriptStep(s db.TranscriptStep, toolFilter string, sinceTime time.Time, queryText, qLower string, words []string) bool {
-	if toolFilter != "" && s.ToolName != toolFilter {
+	if toolFilter != "" && s.ToolKind != toolFilter && s.ToolName != toolFilter {
 		return false
 	}
 	if !sinceTime.IsZero() && !s.CreatedAt.After(sinceTime) {

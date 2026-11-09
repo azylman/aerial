@@ -8,6 +8,8 @@ description: >-
 
 This skill defines operational procedures and guidelines for querying Aerial's persistent transcript index. Aerial automatically syncs and indexes historical transcripts and tool execution steps into PostgreSQL with hybrid semantic vector embeddings and full-text search (BM25 / tsvector).
 
+The index is **shared across every bot (stack)** and every engine (agy and Claude Code). Each bot only writes its own sessions, but **searches, `get`, and `stats` cover every bot's sessions by default**. Pass `--stack <name>` to narrow results to one bot.
+
 ---
 
 ## 1. When to Use
@@ -35,22 +37,44 @@ transcript-search stats [options]
 - `-q, --query <string>`: The query text or question to search. Can also be passed as positional arguments.
 - `-m, --mode <auto|sessions|steps>`:
   - `auto` (default): Searches both high-level session summaries and individual tool execution steps.
-  - `sessions`: Dense vector cosine similarity + BM25 full-text search fused with 50/50 Reciprocal Rank Fusion (RRF) over session summaries. Best for conceptual, architectural, or multi-turn conversational queries.
+  - `sessions`: Dense vector cosine similarity + BM25 full-text search fused with 70/30 weighted Reciprocal Rank Fusion (RRF) over session summaries. Best for conceptual, architectural, or multi-turn conversational queries.
   - `steps`: Exact full-text search with `ts_rank_cd` over granular tool calls and agent dialogue. Best for error messages, specific commands, or code identifiers.
-- `-t, --tool <name>`: Filter steps by tool name (e.g. `run_command`, `view_file`, `replace_file_content`, `mcp_github_create_pull_request`).
+- `-t, --tool <kind|name>`: Filter steps by normalized tool kind (works across engines) or by a raw engine-native tool name. See the vocabulary below.
+- `--stack <name>`: Restrict results to one bot's sessions (default: all stacks).
 - `-s, --session <id>`: Restrict search results to a specific session / conversation ID.
 - `-n, --limit <int>`: Maximum number of records to return (default: `10`).
 - `--json`: Output structured JSON for piping into `jq`.
 - `--url <url>`: Override the Aerial eri daemon HTTP endpoint (default: `http://localhost:8080` or `$ERI_URL`).
-- `--direct-db`: Bypass HTTP daemon and query PostgreSQL directly via `$POSTGRES_URL`.
 
 ### Get Subcommand Flags (Step-Window Zoom)
 - `-s, --session <id>`: Session / conversation ID to inspect (required).
 - `-i, --step <int>`: Target step index to zoom into (required, non-negative).
 - `-C, --context <int>`: Number of surrounding context steps before and after the target step (default: `2`, range: 0–20).
 - `--json`: Output raw JSON containing `{session_id, step, context, steps: [...]}`.
+- `--stack <name>`: Only return steps from that stack (default: any stack; the same session ID can exist on more than one stack).
 - `--url <url>`: Override the Aerial eri daemon HTTP endpoint (default: `http://localhost:8080` or `$ERI_URL`).
-- `--direct-db`: Bypass HTTP daemon and query PostgreSQL directly via `$POSTGRES_URL`.
+
+### Stats Subcommand
+Prints total indexed sessions and steps plus a per-stack breakdown. `--stack <name>` limits the counts to one stack; `--json` emits `{total_sessions, total_steps, stacks: [{stack, sessions, steps}], status}`.
+
+### Tool Kind Vocabulary (`--tool`)
+Every step stores its raw `tool_name` plus a normalized `tool_kind`. A `--tool` value that is a known kind matches `tool_kind`; anything else matches the raw `tool_name` exactly.
+- `shell`: `Bash`, `BashOutput`, `KillShell`, `run_command`, `send_command_input`, `read_terminal`
+- `read`: `Read`, `NotebookRead`, `view_file`, `view_file_outline`, `view_code_item`, `list_dir`
+- `edit`: `Edit`, `MultiEdit`, `NotebookEdit`, `edit_file`, `replace_file_content`, `multi_replace_file_content`
+- `write`: `Write`, `write_to_file`
+- `search`: `Grep`, `Glob`, `grep_search`, `find_by_name`, `codebase_search`
+- `web`: `WebFetch`, `WebSearch`, `read_url_content`, `search_web`, `browser_*`
+- `subagent`: `Agent`, `Task`, `invoke_subagent`, `manage_subagents`
+- `skill`: `Skill`
+- `task`: `TodoWrite`
+- `mcp:<server>`: any MCP tool of that server (`mcp__github__create_pull_request`, `mcp_github_create_pull_request` → `mcp:github`)
+- `other`: any unrecognized tool
+
+Examples: `--tool shell` finds both Claude `Bash` and agy `run_command` steps; `--tool mcp:github` finds GitHub MCP calls from either engine; `--tool Bash` still matches only raw `Bash` steps.
+
+### Result Labels
+Every session and step result is prefixed with a `[stack/engine]` label showing which bot and engine wrote it (e.g. `[aerial/claude]`, `[aerial/agy]`); an unknown part prints as `?`. Step badges show `tool_name · tool_kind`, e.g. `- [aerial/agy] **[run_command · shell]** Step #5 in [d3a1a377...](conversation://...)`.
 
 ---
 
@@ -83,9 +107,13 @@ When hunting for an exact log line, shell command, or stack trace:
 ```bash
 transcript-search search "SASL auth failed for user aerial" --mode steps -n 5
 ```
-Or filter specifically to shell executions:
+Or filter specifically to shell executions from any engine:
 ```bash
-transcript-search search "docker compose restart" --tool run_command -n 5
+transcript-search search "docker compose restart" --tool shell -n 5
+```
+Or to file edits on one bot only:
+```bash
+transcript-search search "schema.sql" --tool edit --stack <stack> -n 5
 ```
 
 ### Scenario C: Filtering Within a Known Session
@@ -96,7 +124,7 @@ transcript-search search "verify.sh --staged" --session "d3a1a377-e199-426d-8588
 
 ### Scenario D: Programmatic Traversal via JSON
 ```bash
-transcript-search search "atlas migration validate" --json | jq '.steps[] | {step: .step_index, content: .content[:120]}'
+transcript-search search "atlas migration validate" --json | jq '.steps[] | {stack, engine, step: .step_index, tool: .tool_kind, content: .content[:120]}'
 ```
 
 ---
@@ -105,4 +133,5 @@ transcript-search search "atlas migration validate" --json | jq '.steps[] | {ste
 
 - **Zero Arbitrary Transcript Scrapes**: Avoid running heavy `find` or `grep` loops against `/data/runtimes/discord/.gemini/antigravity-cli/brain/*/transcript.jsonl`. Always prefer `transcript-search` for fast, indexed queries and step-window zoom (`transcript-search get`).
 - **Link Navigation**: Results include `[conv_id](conversation://<conv_id>)` links. Use these IDs directly if you need to read the full transcript file on disk (`<appDataDir>/brain/<conv_id>/.system_generated/logs/transcript.jsonl`).
-- **Daemon-First Resilience**: `transcript-search` communicates with the local `aerial-eri` daemon over HTTP (`/api/transcripts/search`). If the daemon is temporarily unavailable or restarting, it automatically falls back to direct PostgreSQL queries.
+- **HTTP Only**: `transcript-search` talks only to the local eri daemon over HTTP (`/api/transcripts/search`, `/steps`, `/stats`). If eri is restarting, the command fails; retry shortly instead of querying PostgreSQL directly.
+- **Cross-Bot Sessions**: A session labelled with another stack lives on that bot's disk, so its raw transcript file is not available locally; use `transcript-search get --stack <stack>` to read its steps.

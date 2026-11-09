@@ -451,8 +451,10 @@ func buildSearchTranscriptStepsQuery(stack, queryText, sessionFilter, toolFilter
 	}
 
 	if toolFilter != "" {
+		// Normalized kinds (shell, mcp:<server>, ...) and engine-native names never collide, so one
+		// value matches either column: "shell" finds Bash and run_command, "Bash" finds only Bash.
 		args = append(args, toolFilter)
-		whereClauses = append(whereClauses, fmt.Sprintf("t.tool_name = $%d", len(args)))
+		whereClauses = append(whereClauses, fmt.Sprintf("(t.tool_kind = $%d OR t.tool_name = $%d)", len(args), len(args)))
 	}
 
 	if !sinceTime.IsZero() {
@@ -539,4 +541,29 @@ ORDER BY t.stack ASC, t.step_index ASC;`
 		return nil, fmt.Errorf("get transcript step range query failed: %w", err)
 	}
 	return scanTranscriptSteps(rows)
+}
+
+// GetTranscriptStats counts indexed sessions and steps per stack, ordered by stack. An empty stack
+// covers every stack in the shared index.
+func (s *SQLTranscriptStore) GetTranscriptStats(ctx context.Context, stack string) (results []TranscriptStackStats, err error) {
+	defer recordTranscriptQuery("get_transcript_stats", time.Now(), &err)
+	if err := s.checkDB(); err != nil {
+		return nil, err
+	}
+	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	rows, err := s.db.QueryContext(queryCtx, `WITH ss AS (SELECT stack, COUNT(*) AS sessions FROM session_summaries WHERE $1 = '' OR stack = $1 GROUP BY stack),
+ts AS (SELECT stack, COUNT(*) AS steps FROM transcript_steps WHERE $1 = '' OR stack = $1 GROUP BY stack)
+SELECT ss.stack, ss.sessions, COALESCE(ts.steps, 0) FROM ss LEFT JOIN ts ON ts.stack = ss.stack ORDER BY ss.stack`, strings.TrimSpace(stack))
+	if err != nil {
+		return nil, fmt.Errorf("query transcript stats: %w", err)
+	}
+	return scanRows(rows, func(r *sql.Rows) (TranscriptStackStats, error) {
+		var st TranscriptStackStats
+		if err := r.Scan(&st.Stack, &st.Sessions, &st.Steps); err != nil {
+			return TranscriptStackStats{}, fmt.Errorf("scan transcript stats: %w", err)
+		}
+		return st, nil
+	})
 }

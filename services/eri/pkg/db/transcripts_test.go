@@ -658,3 +658,37 @@ func TestSQLTranscriptStore_ReadOnlyGuardsAndExecFailures(t *testing.T) {
 		t.Errorf("expected exec failure, got %v", err)
 	}
 }
+
+func TestSQLTranscriptStore_GetTranscriptStatsFailures(t *testing.T) {
+	t.Parallel()
+	dbMem := initTestSQLiteDB(t)
+	tests := []struct {
+		name     string
+		nilDB    bool
+		queryErr error
+		statsSQL string
+		wantErr  string
+	}{
+		{name: "nil database", nilDB: true, wantErr: ErrNilDatabase.Error()},
+		{name: "query failure", queryErr: errors.New("stats down"), wantErr: "query transcript stats"},
+		{name: "scan failure", statsSQL: "SELECT 'stack-a', 'many', 1", wantErr: "scan transcript stats"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var database DBTX = testMockDBTX{queryFn: func(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+				if tc.queryErr != nil {
+					return nil, tc.queryErr
+				}
+				return dbMem.QueryContext(ctx, tc.statsSQL)
+			}}
+			if tc.nilDB {
+				database = nil
+			}
+			_, err := NewSQLTranscriptStore(database, "").GetTranscriptStats(context.Background(), "")
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}

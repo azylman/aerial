@@ -1063,6 +1063,9 @@ func TestTranscriptStore_FakeStore_EngineKindsAndStackFilter(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	store := NewFakeStore()
+	if stats, err := store.GetTranscriptStats(ctx, ""); err != nil || stats != nil {
+		t.Fatalf("empty index stats = %+v err=%v, want none", stats, err)
+	}
 	mustOK(t, store.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-e", Summary: "engine session"}), "UpsertSessionSummary")
 	mustOK(t, store.BatchInsertTranscriptSteps(ctx, []db.TranscriptStep{
 		{SessionID: "sess-e", StepIndex: 0, ToolName: "Bash"},
@@ -1088,9 +1091,11 @@ func TestTranscriptStore_FakeStore_EngineKindsAndStackFilter(t *testing.T) {
 		wantKinds   []string
 		wantEngine  string
 		wantSummary int
+		wantShell   int
+		wantStats   []db.TranscriptStackStats
 	}{
-		{name: "all stacks", wantKinds: []string{"shell", "", "read", ""}, wantEngine: "claude", wantSummary: 1},
-		{name: "own stack", stack: FakeTranscriptStack, wantKinds: []string{"shell", "", "read", ""}, wantEngine: "claude", wantSummary: 1},
+		{name: "all stacks", wantKinds: []string{"shell", "", "read", ""}, wantEngine: "claude", wantSummary: 1, wantShell: 1, wantStats: []db.TranscriptStackStats{{Stack: FakeTranscriptStack, Sessions: 1, Steps: 4}}},
+		{name: "own stack", stack: FakeTranscriptStack, wantKinds: []string{"shell", "", "read", ""}, wantEngine: "claude", wantSummary: 1, wantShell: 1, wantStats: []db.TranscriptStackStats{{Stack: FakeTranscriptStack, Sessions: 1, Steps: 4}}},
 		{name: "other stack sees nothing", stack: "elsewhere"},
 	}
 	for _, tc := range tests {
@@ -1115,6 +1120,12 @@ func TestTranscriptStore_FakeStore_EngineKindsAndStackFilter(t *testing.T) {
 			}
 			if sums, _ := store.SearchSessionSummaries(ctx, tc.stack, nil, "engine", 10, 0); len(sums) != tc.wantSummary {
 				t.Errorf("SearchSessionSummaries len = %d, want %d", len(sums), tc.wantSummary)
+			}
+			if shell, _ := store.SearchTranscriptSteps(ctx, tc.stack, "", "", "shell", 10); len(shell) != tc.wantShell {
+				t.Errorf("SearchTranscriptSteps(tool=shell) len = %d, want %d", len(shell), tc.wantShell)
+			}
+			if stats, err := store.GetTranscriptStats(ctx, tc.stack); err != nil || !slices.Equal(stats, tc.wantStats) {
+				t.Errorf("GetTranscriptStats = %+v err=%v, want %+v", stats, err, tc.wantStats)
 			}
 		})
 	}

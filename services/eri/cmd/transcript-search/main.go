@@ -18,17 +18,17 @@ import (
 )
 
 type CLIConfig struct {
-	Command  string
-	Query    string
-	Mode     string
-	Tool     string
-	Session  string
-	Limit    int
-	Step     int
-	Context  int
-	JSON     bool
-	BaseURL  string
-	DirectDB bool
+	Command string
+	Query   string
+	Mode    string
+	Tool    string
+	Stack   string
+	Session string
+	Limit   int
+	Step    int
+	Context int
+	JSON    bool
+	BaseURL string
 }
 
 func splitSubcommandAndArgs(args []string) (string, []string, error) {
@@ -46,7 +46,7 @@ func splitSubcommandAndArgs(args []string) (string, []string, error) {
 
 func isFlagWithValue(name string) bool {
 	switch name {
-	case "query", "q", "mode", "m", "tool", "t", "session", "s", "limit", "n", "url", "step", "i", "context", "C":
+	case "query", "q", "mode", "m", "tool", "t", "stack", "session", "s", "limit", "n", "url", "step", "i", "context", "C":
 		return true
 	default:
 		return false
@@ -125,8 +125,9 @@ func parseCLIArgs(args []string) (CLIConfig, error) {
 	fs.StringVar(&cfg.Query, "q", cfg.Query, "Search query string (shorthand)")
 	fs.StringVar(&cfg.Mode, "mode", cfg.Mode, "Search mode: auto, steps, sessions")
 	fs.StringVar(&cfg.Mode, "m", cfg.Mode, "Search mode (shorthand)")
-	fs.StringVar(&cfg.Tool, "tool", "", "Filter steps by tool name (e.g. run_command, view_file)")
-	fs.StringVar(&cfg.Tool, "t", "", "Filter steps by tool name (shorthand)")
+	fs.StringVar(&cfg.Tool, "tool", "", "Filter steps by tool kind (shell, read, edit, mcp:<server>, ...) or raw tool name (Bash, run_command)")
+	fs.StringVar(&cfg.Tool, "t", "", "Filter steps by tool kind or raw tool name (shorthand)")
+	fs.StringVar(&cfg.Stack, "stack", "", "Restrict results to one stack (default: all stacks)")
 	fs.StringVar(&cfg.Session, "session", "", "Filter steps by session ID")
 	fs.StringVar(&cfg.Session, "s", "", "Filter steps by session ID (shorthand)")
 	fs.IntVar(&cfg.Limit, "limit", cfg.Limit, "Maximum results to return")
@@ -137,7 +138,6 @@ func parseCLIArgs(args []string) (CLIConfig, error) {
 	fs.IntVar(&cfg.Context, "C", cfg.Context, "Surrounding context step window size (shorthand)")
 	fs.BoolVar(&cfg.JSON, "json", false, "Output results as raw JSON")
 	fs.StringVar(&cfg.BaseURL, "url", cfg.BaseURL, "Aerial brain base HTTP URL")
-	fs.BoolVar(&cfg.DirectDB, "direct-db", false, "Force direct PostgreSQL connection instead of HTTP daemon")
 
 	if err := fs.Parse(flags); err != nil {
 		return cfg, err
@@ -150,6 +150,31 @@ func parseCLIArgs(args []string) (CLIConfig, error) {
 	return cfg, nil
 }
 
+// originLabel renders the [stack/engine] provenance of a shared-index row; unknown parts print as "?".
+func originLabel(stack, engine string) string {
+	if stack == "" {
+		stack = "?"
+	}
+	if engine == "" {
+		engine = "?"
+	}
+	return "[" + stack + "/" + engine + "]"
+}
+
+// toolBadge names a step by tool_name plus its normalized tool_kind, falling back to the step type.
+func toolBadge(step db.TranscriptStep) string {
+	switch {
+	case step.ToolName != "" && step.ToolKind != "":
+		return step.ToolName + " · " + step.ToolKind
+	case step.ToolName != "":
+		return step.ToolName
+	case step.StepType != "":
+		return step.StepType
+	default:
+		return "STEP"
+	}
+}
+
 func formatSearchSessions(sb *strings.Builder, sessions []db.SessionSummary) {
 	fmt.Fprintf(sb, "### 📄 Session Summaries (%d matches)\n", len(sessions))
 	for _, s := range sessions {
@@ -159,7 +184,7 @@ func formatSearchSessions(sb *strings.Builder, sessions []db.SessionSummary) {
 			shortID = shortID[:8] + "..."
 		}
 		link := fmt.Sprintf("[%s](conversation://%s)", shortID, convID)
-		sb.WriteString("- Session " + link)
+		sb.WriteString("- " + originLabel(s.Stack, s.Engine) + " Session " + link)
 		if s.ThreadID != "" {
 			fmt.Fprintf(sb, " (Thread: `%s`)", s.ThreadID)
 		}
@@ -180,15 +205,8 @@ func formatSearchSteps(sb *strings.Builder, steps []db.TranscriptStep) {
 			shortID = shortID[:8] + "..."
 		}
 		link := fmt.Sprintf("[%s](conversation://%s)", shortID, convID)
-		toolBadge := "STEP"
-		if step.ToolName != "" {
-			toolBadge = step.ToolName
-		} else if step.StepType != "" {
-			toolBadge = step.StepType
-		}
-
 		ts := step.CreatedAt.Format("2006-01-02 15:04:05")
-		fmt.Fprintf(sb, "- **[%s]** Step #%d in %s (%s):\n", toolBadge, step.StepIndex, link, ts)
+		fmt.Fprintf(sb, "- %s **[%s]** Step #%d in %s (%s):\n", originLabel(step.Stack, step.Engine), toolBadge(step), step.StepIndex, link, ts)
 		if step.Content != "" {
 			snippet := transcript.CleanSessionSummary(step.Content, 300)
 			if strings.Contains(snippet, "\n") {
@@ -245,15 +263,8 @@ func formatStepWindow(res transcript.StepWindowResult) string {
 			marker = "▶"
 			maxRunes = 2500
 		}
-		toolBadge := "STEP"
-		if step.ToolName != "" {
-			toolBadge = step.ToolName
-		} else if step.StepType != "" {
-			toolBadge = step.StepType
-		}
-
 		ts := step.CreatedAt.Format("2006-01-02 15:04:05")
-		fmt.Fprintf(&sb, "%s **[%s]** Step #%d (%s):\n", marker, toolBadge, step.StepIndex, ts)
+		fmt.Fprintf(&sb, "%s %s **[%s]** Step #%d (%s):\n", marker, originLabel(step.Stack, step.Engine), toolBadge(step), step.StepIndex, ts)
 		if step.Content != "" {
 			content := transcript.CleanSessionSummary(step.Content, maxRunes)
 			if strings.Contains(content, "\n") {
@@ -287,7 +298,6 @@ func fetchTranscriptAPI[T any](ctx context.Context, baseURL, endpointPath string
 		return out, err
 	}
 
-	// Use 5s timeout to leave headroom for direct-DB fallback within parent CLI context
 	client := newHTTPClient(5 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
@@ -321,67 +331,42 @@ func executeSearchHTTP(ctx context.Context, cfg CLIConfig) (transcript.SearchRes
 	if cfg.Session != "" {
 		params.Set("session", cfg.Session)
 	}
+	if cfg.Stack != "" {
+		params.Set("stack", cfg.Stack)
+	}
 	params.Set("limit", strconv.Itoa(cfg.Limit))
 
 	return fetchTranscriptAPI[transcript.SearchResult](ctx, cfg.BaseURL, "/api/transcripts/search", params)
 }
 
-func executeStatsHTTP(ctx context.Context, cfg CLIConfig) (map[string]any, error) {
-	return fetchTranscriptAPI[map[string]any](ctx, cfg.BaseURL, "/api/transcripts/stats", nil)
+// statsResponse mirrors the /api/transcripts/stats payload: shared-index totals plus a per-stack breakdown.
+type statsResponse struct {
+	TotalSessions int                       `json:"total_sessions"`
+	TotalSteps    int                       `json:"total_steps"`
+	Stacks        []db.TranscriptStackStats `json:"stacks"`
+	Status        string                    `json:"status"`
 }
 
-var (
-	openDBFn          = db.Open
-	jsonMarshalIndent = json.MarshalIndent
-)
-
-var newDirectStoreFn = func(pgURL string) (db.TranscriptStore, func(), error) {
-	sqlDB, err := openDBFn(pgURL)
-	if err != nil {
-		return nil, nil, fmt.Errorf("postgres connect failed: %w", err)
+func executeStatsHTTP(ctx context.Context, cfg CLIConfig) (statsResponse, error) {
+	params := url.Values{}
+	if cfg.Stack != "" {
+		params.Set("stack", cfg.Stack)
 	}
-	return db.NewSQLTranscriptStore(sqlDB, ""), func() {
-		if err := sqlDB.Close(); err != nil {
-			return
-		}
-	}, nil
+	return fetchTranscriptAPI[statsResponse](ctx, cfg.BaseURL, "/api/transcripts/stats", params)
 }
 
-func executeSearchDirectDB(ctx context.Context, cfg CLIConfig) (transcript.SearchResult, error) {
-	pgURL := os.Getenv("POSTGRES_URL")
-	if pgURL == "" {
-		pgURL = "postgres://aerial:aerial@aerial-postgres:5432/aerial?sslmode=disable"
-	}
-	store, closeFn, err := newDirectStoreFn(pgURL)
-	if err != nil {
-		return transcript.SearchResult{}, err
-	}
-	defer closeFn()
-
-	return transcript.SearchTranscripts(ctx, store, nil, cfg.Query, cfg.Mode, cfg.Session, cfg.Tool, cfg.Limit)
-}
+var jsonMarshalIndent = json.MarshalIndent
 
 func executeGetHTTP(ctx context.Context, cfg CLIConfig) (transcript.StepWindowResult, error) {
 	params := url.Values{}
 	params.Set("session", cfg.Session)
 	params.Set("step", strconv.Itoa(cfg.Step))
 	params.Set("context", strconv.Itoa(cfg.Context))
+	if cfg.Stack != "" {
+		params.Set("stack", cfg.Stack)
+	}
 
 	return fetchTranscriptAPI[transcript.StepWindowResult](ctx, cfg.BaseURL, "/api/transcripts/steps", params)
-}
-
-func executeGetDirectDB(ctx context.Context, cfg CLIConfig) (transcript.StepWindowResult, error) {
-	pgURL := os.Getenv("POSTGRES_URL")
-	if pgURL == "" {
-		pgURL = "postgres://aerial:aerial@aerial-postgres:5432/aerial?sslmode=disable"
-	}
-	store, closeFn, err := newDirectStoreFn(pgURL)
-	if err != nil {
-		return transcript.StepWindowResult{}, err
-	}
-	defer closeFn()
-
-	return transcript.GetTranscriptStepWindow(ctx, store, "", cfg.Session, cfg.Step, cfg.Context)
 }
 
 func writeCLIOutput(out io.Writer, asJSON bool, payload any, formatted string) error {
@@ -397,59 +382,30 @@ func writeCLIOutput(out io.Writer, asJSON bool, payload any, formatted string) e
 	return err
 }
 
+func formatStats(stats statsResponse) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "📊 Aerial Transcript Index Stats:\n- Total Indexed Sessions: %d\n- Total Indexed Steps: %d\n", stats.TotalSessions, stats.TotalSteps)
+	for _, st := range stats.Stacks {
+		fmt.Fprintf(&sb, "  - [%s] %d sessions, %d steps\n", st.Stack, st.Sessions, st.Steps)
+	}
+	fmt.Fprintf(&sb, "- Status: %s\n", stats.Status)
+	return sb.String()
+}
+
 func runStatsCLI(ctx context.Context, cfg CLIConfig, out io.Writer) error {
 	stats, err := executeStatsHTTP(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("failed fetching stats: %w", err)
 	}
-	formatted := fmt.Sprintf("📊 Aerial Transcript Index Stats:\n- Total Indexed Sessions: %v\n- Status: %v\n", stats["total_sessions"], stats["status"])
-	return writeCLIOutput(out, cfg.JSON, stats, formatted)
-}
-
-func resolveGetResult(ctx context.Context, cfg CLIConfig) (transcript.StepWindowResult, error) {
-	if cfg.DirectDB {
-		dbRes, dbErr := executeGetDirectDB(ctx, cfg)
-		if dbErr != nil {
-			return transcript.StepWindowResult{}, fmt.Errorf("direct DB get failed: %w", dbErr)
-		}
-		return dbRes, nil
-	}
-	httpRes, httpErr := executeGetHTTP(ctx, cfg)
-	if httpErr == nil {
-		return httpRes, nil
-	}
-	dbRes, dbErr := executeGetDirectDB(ctx, cfg)
-	if dbErr != nil {
-		return transcript.StepWindowResult{}, fmt.Errorf("get failed via HTTP (%w) and direct DB (%w)", httpErr, dbErr)
-	}
-	return dbRes, nil
+	return writeCLIOutput(out, cfg.JSON, stats, formatStats(stats))
 }
 
 func runGetCLI(ctx context.Context, cfg CLIConfig, out io.Writer) error {
-	res, err := resolveGetResult(ctx, cfg)
+	res, err := executeGetHTTP(ctx, cfg)
 	if err != nil {
-		return err
+		return fmt.Errorf("get failed: %w", err)
 	}
 	return writeCLIOutput(out, cfg.JSON, res, formatStepWindow(res))
-}
-
-func resolveSearchResult(ctx context.Context, cfg CLIConfig) (transcript.SearchResult, error) {
-	if cfg.DirectDB {
-		dbRes, dbErr := executeSearchDirectDB(ctx, cfg)
-		if dbErr != nil {
-			return transcript.SearchResult{}, fmt.Errorf("direct DB search failed: %w", dbErr)
-		}
-		return dbRes, nil
-	}
-	httpRes, httpErr := executeSearchHTTP(ctx, cfg)
-	if httpErr == nil {
-		return httpRes, nil
-	}
-	dbRes, dbErr := executeSearchDirectDB(ctx, cfg)
-	if dbErr != nil {
-		return transcript.SearchResult{}, fmt.Errorf("search failed via HTTP (%w) and direct DB (%w)", httpErr, dbErr)
-	}
-	return dbRes, nil
 }
 
 func runSearchCLI(ctx context.Context, cfg CLIConfig, out io.Writer) error {
@@ -457,9 +413,9 @@ func runSearchCLI(ctx context.Context, cfg CLIConfig, out io.Writer) error {
 		return fmt.Errorf("search query cannot be empty (usage: transcript-search search <query>)")
 	}
 
-	res, err := resolveSearchResult(ctx, cfg)
+	res, err := executeSearchHTTP(ctx, cfg)
 	if err != nil {
-		return err
+		return fmt.Errorf("search failed: %w", err)
 	}
 	return writeCLIOutput(out, cfg.JSON, res, formatSearchResults(res))
 }

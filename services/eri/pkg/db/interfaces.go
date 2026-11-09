@@ -135,6 +135,14 @@ type TranscriptStore interface {
 	SearchSessionSummaries(ctx context.Context, stack string, embedding []float32, queryText string, limit int, minScore float64) ([]SessionSummary, error)
 	SearchTranscriptSteps(ctx context.Context, stack, queryText, sessionFilter, toolFilter string, limit int, since ...time.Time) ([]TranscriptStep, error)
 	GetTranscriptStepRange(ctx context.Context, stack, sessionID string, startStep, endStep int) ([]TranscriptStep, error)
+	GetTranscriptStats(ctx context.Context, stack string) ([]TranscriptStackStats, error)
+}
+
+// TranscriptStackStats counts one stack's indexed sessions and steps in the shared transcript index.
+type TranscriptStackStats struct {
+	Stack    string `json:"stack"`
+	Sessions int    `json:"sessions"`
+	Steps    int    `json:"steps"`
 }
 
 // Store unifies all repository capabilities under a single interface.
