@@ -1,0 +1,269 @@
+/* Search toolbar, category pills, results bar, loading/empty/error states and the reconnect
+   banner shared by the list views (ported verbatim from static/style.css). */
+
+.toolbar-search-wrap {
+    flex: 1;
+    min-width: 280px;
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+.toolbar-search-wrap .search-icon {
+    position: absolute;
+    left: 1rem;
+    color: var(--neon-cyan);
+    font-size: 0.95rem;
+    pointer-events: none;
+    opacity: 0.8;
+}
+
+.cyber-input {
+    width: 100%;
+    background: rgba(0, 0, 0, 0.45);
+    border: 1px solid rgba(0, 242, 254, 0.25);
+    border-radius: 8px;
+    padding: 0.75rem 2.5rem 0.75rem 2.75rem;
+    color: #fff;
+    font-family: var(--font-mono);
+    font-size: 0.85rem;
+    letter-spacing: 0.5px;
+    transition: all 0.25s ease;
+}
+
+.cyber-input::placeholder {
+    color: var(--text-dim);
+    font-size: 0.75rem;
+    letter-spacing: 0.5px;
+}
+
+.cyber-input:focus {
+    outline: none;
+    border-color: var(--neon-cyan);
+    box-shadow: 0 0 15px rgba(0, 242, 254, 0.25);
+    background: rgba(0, 0, 0, 0.65);
+}
+
+.search-clear-btn {
+    position: absolute;
+    right: 0.75rem;
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 1.3rem;
+    cursor: pointer;
+    line-height: 1;
+}
+
+.search-clear-btn:hover {
+    color: var(--neon-magenta);
+}
+
+.cyber-btn-secondary {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--card-border);
+    color: var(--text-primary);
+    padding: 0.75rem 1.25rem;
+    border-radius: 8px;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    font-weight: 700;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    transition: all 0.2s ease;
+}
+
+.cyber-btn-secondary:hover {
+    border-color: var(--neon-cyan);
+    background: rgba(0, 242, 254, 0.12);
+    color: #fff;
+    box-shadow: 0 0 12px rgba(0, 242, 254, 0.25);
+}
+
+/* --- CATEGORY PILLS --- */
+.category-pills-bar {
+    display: flex;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+    margin-bottom: 1rem;
+}
+
+.cat-pill {
+    background: rgba(14, 18, 28, 0.6);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: var(--text-muted);
+    padding: 0.4rem 0.85rem;
+    border-radius: 20px;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.cat-pill:hover {
+    border-color: var(--neon-cyan);
+    color: #fff;
+}
+
+.cat-pill.active {
+    background: rgba(0, 242, 254, 0.15);
+    border-color: var(--neon-cyan);
+    color: var(--neon-cyan);
+    box-shadow: 0 0 12px rgba(0, 242, 254, 0.25);
+}
+
+.pill-count {
+    background: rgba(0, 0, 0, 0.4);
+    padding: 1px 6px;
+    border-radius: 10px;
+    font-size: 0.65rem;
+}
+
+/* --- RESULTS TELEMETRY BAR --- */
+.results-telemetry-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    margin-bottom: 1.25rem;
+    padding: 0 0.25rem;
+    font-family: var(--font-mono);
+}
+
+.telemetry-hint {
+    opacity: 0.7;
+}
+
+
+.cyber-highlight {
+    background: rgba(0, 242, 254, 0.3);
+    color: #fff;
+    text-shadow: 0 0 6px var(--neon-cyan);
+    padding: 0 3px;
+    border-radius: 2px;
+}
+
+/* --- SKELETON SHIMMER PLACEHOLDERS --- */
+.fact-card-skeleton {
+    background: var(--card-bg);
+    border: 1px dashed rgba(255, 255, 255, 0.1);
+    border-radius: 12px;
+    padding: 1.25rem;
+    height: 180px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    position: relative;
+    overflow: hidden;
+}
+
+.fact-card-skeleton::after {
+    content: "";
+    position: absolute;
+    top: 0; right: 0; bottom: 0; left: 0;
+    transform: translateX(-100%);
+    background: linear-gradient(90deg, transparent, rgba(0, 242, 254, 0.08), transparent);
+    animation: skeleton-shimmer 1.8s infinite;
+}
+
+@keyframes skeleton-shimmer {
+    100% { transform: translateX(100%); }
+}
+
+.skeleton-box {
+    background: rgba(255, 255, 255, 0.06);
+    border-radius: 4px;
+}
+
+/* --- ALERT & EMPTY STATES --- */
+.permet-alert-box {
+    grid-column: 1 / -1;
+    background: rgba(255, 42, 109, 0.08);
+    border: 1px solid var(--neon-red);
+    border-radius: 12px;
+    padding: 2.5rem 1.5rem;
+    text-align: center;
+    box-shadow: 0 0 30px rgba(255, 42, 109, 0.15);
+}
+
+.permet-alert-box h3 {
+    font-family: var(--font-heading);
+    color: var(--neon-red);
+    font-size: 1.25rem;
+    margin-bottom: 0.5rem;
+    letter-spacing: 1px;
+}
+
+.permet-alert-box p {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    margin-bottom: 1.5rem;
+}
+
+.empty-state-box {
+    grid-column: 1 / -1;
+    background: var(--card-bg);
+    border: 1px dashed rgba(0, 242, 254, 0.2);
+    border-radius: 12px;
+    padding: 3rem 1.5rem;
+    text-align: center;
+    color: var(--text-muted);
+}
+
+/* --- RECONNECTION / DEGRADED BANNER --- */
+.reconnect-banner {
+    background: rgba(255, 183, 0, 0.12);
+    border: 1px solid var(--neon-amber);
+    border-radius: 8px;
+    padding: 0.65rem 1.25rem;
+    margin-bottom: 1.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    color: var(--neon-amber);
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    box-shadow: 0 0 15px rgba(255, 183, 0, 0.2);
+    animation: pulse-border 1.5s infinite alternate;
+}
+
+.reconnect-icon {
+    font-size: 1rem;
+    animation: blink-dot 1s infinite alternate;
+}
+
+/* Inline styles in the vanilla skeleton, empty and alert templates, as classes. */
+.skeleton-title { width: 40%; height: 18px; }
+.skeleton-body { width: 100%; height: 60px; margin: 12px 0; }
+.skeleton-meta { width: 50%; height: 14px; }
+
+.empty-state-glyph { font-size: 1.6rem; margin-bottom: 0.6rem; }
+.empty-state-title { font-weight: 700; color: #fff; }
+.empty-state-hint { font-size: 0.75rem; color: var(--text-dim); margin-top: 6px; }
+
+.permet-alert-box .cyber-btn-secondary { margin: 0 auto; }
+
+/* React polish: icon glyphs sit like the emoji they replace; live counts do not jitter. */
+.search-icon,
+.refresh-icon,
+.reconnect-icon,
+.search-clear-btn {
+    display: inline-flex;
+    align-items: center;
+}
+
+.pill-count {
+    font-variant-numeric: tabular-nums;
+}
+
+.toolbar-search-wrap {
+    min-width: min(280px, 100%);
+}

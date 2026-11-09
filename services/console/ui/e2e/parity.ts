@@ -10,7 +10,7 @@ import type { BrowserContextOptions } from '@playwright/test';
 export type ViewId = 'telemetry' | 'tasks' | 'schedules' | 'memory' | 'builds';
 
 /** Views (and their drawers) the React UI does not ship yet; rows needing them are skipped. */
-export const PENDING_VIEWS: readonly ViewId[] = ['schedules', 'memory', 'builds'];
+export const PENDING_VIEWS: readonly ViewId[] = ['memory', 'builds'];
 
 export interface Viewport {
   readonly name: string;
@@ -115,6 +115,16 @@ export const MASKED_SELECTORS: readonly string[] = [
   '.step-status-badge',
   '.matrix-chip',
   '.compact-badge',
+  // Schedules: badges, chips and buttons whose vanilla text starts with an emoji (⏱ ⚡ ⏰ 📋 ✓ 🔄
+  // ⏳ 🚨), the cron/one-shot subtitle lines (📅 🎯 prefix) and the search clear glyph (×).
+  '#schedules-next-trigger',
+  '.schedule-countdown-badge',
+  '.schedule-type-badge',
+  '.schedule-cron-human',
+  '.prompt-copy-btn',
+  '.run-status-chip',
+  '.run-duration-badge',
+  '.search-clear-btn',
 ];
 
 /**
@@ -138,10 +148,19 @@ export const STABILIZE_CSS = `
 }
 #tasks-count-badge, #tasks-view-badge, #deploy-count-badge, .task-trigger-badge, .task-retry-badge,
 .task-status-pill, .task-inspect-btn.active, .timer-text, .deploy-repo-badge, .deploy-commit-time,
-.deploy-stage-badge, .step-status-badge, .matrix-chip, .compact-badge {
+.deploy-stage-badge, .step-status-badge, .matrix-chip, .compact-badge,
+#schedules-next-trigger, .schedule-countdown-badge, .schedule-type-badge, .prompt-copy-btn, .run-status-chip,
+.run-duration-badge {
   display: inline-flex !important; flex: none !important; width: 8em !important; max-width: none !important;
   height: 2em !important; box-sizing: border-box !important; align-items: center !important;
   white-space: nowrap !important; overflow: hidden !important;
+}
+.schedule-cron-human {
+  display: block !important; height: 1.5em !important; white-space: nowrap !important; overflow: hidden !important;
+}
+.search-clear-btn {
+  display: inline-flex !important; width: 24px !important; height: 24px !important; padding: 0 !important;
+  overflow: hidden !important;
 }
 `;
 
@@ -224,6 +243,51 @@ const DRAWER_TEXTS = [
   'aerial-net:internal (Docker Bridge)',
   '[TELEMETRY LOG STREAM]',
   '> Service node aerial-vision initialized via Docker Supervisor.',
+];
+
+/**
+ * schedules.json: 28 crons + 12 one-shots (40 active), 94% success over 50 runs in 24h;
+ * schedule-runs.json: 50 runs (45 completed, 3 failed, 1 running, 1 enqueued). Counts use
+ * :visible because the vanilla page hides (not removes) the section a pill switches off.
+ */
+// Rows with steps end with a deterministic scroll. Clicking a pill or filling the search scrolls
+// it into view, and that offset depends on what was rendered above it at that instant (the
+// vanilla NEXT TRIGGER only fills in on its 1s ticker, which can wrap it onto a second line).
+// So each row then clicks the id chip of the last card it shows (the runner's click-by-text
+// step; chips have no handler, so this only scrolls far down) and re-selects the active SCHEDULES
+// tab: the tab is now off screen, Playwright scrolls it into view, and its position in the
+// identical header fixes the final offset. Re-selecting the tab keeps pill and search state.
+const settleScroll = (lastChip: string): readonly Step[] => [
+  { kind: 'openDrawer', text: lastChip },
+  { kind: 'clickTab', tab: 'SCHEDULES' },
+];
+const SCHEDULES_SEARCH = "SEARCH SCHEDULES, PROMPTS, TARGET IDs (PRESS '/' TO FOCUS)...";
+const SCHEDULE_HEADINGS = ['ACTIVE CRONS', 'PENDING ONCE', 'NEXT TRIGGER', '24H SUCCESS RATE', '94.0%', '50 RUNS LOGGED (24H)'];
+
+const scheduleCounts = (crons: number, oneShots: number, runs: number, marks: number): readonly CountExpectation[] => [
+  { selector: '#schedules-view .schedule-card.cron-card:visible', count: crons },
+  { selector: '#schedules-view .schedule-card.oneshot-card:visible', count: oneShots },
+  { selector: '#schedules-view .run-card:visible', count: runs },
+  { selector: '#schedules-view mark.cyber-highlight:visible', count: marks },
+  { selector: '#schedules-view .cat-pill.active', count: 1 },
+];
+
+const schedulesExpect = (texts: readonly string[], counts: readonly CountExpectation[]): Expectation => ({
+  hash: '#schedules',
+  activeTab: 'SCHEDULES',
+  badges: BADGES_NO_STATUS,
+  texts: [...SCHEDULE_HEADINGS, ...texts],
+  counts,
+});
+
+/** Grid and feed headings with their badges at the default (ALL, no search) state. */
+const SCHEDULES_DEFAULT_TEXTS = [
+  'ACTIVE SCHEDULED ROUTINES',
+  '40 ACTIVE',
+  'EXECUTION RUN AUDIT LOG',
+  '50 RUNS',
+  'SHOWING 40 / 40 ACTIVE ROUTINES',
+  'Morning standup digest 1',
 ];
 
 export const PARITY_ROWS: readonly ParityRow[] = [
@@ -345,6 +409,93 @@ export const PARITY_ROWS: readonly ParityRow[] = [
         { selector: '.diagnostic-drawer.active .diag-item', count: 4 },
       ],
     },
+    region: 'viewport',
+  },
+  {
+    name: 'schedules: default view lists crons, one-shots and the run feed',
+    start: '#schedules',
+    requires: ['schedules'],
+    steps: [],
+    expect: schedulesExpect(SCHEDULES_DEFAULT_TEXTS, [
+      ...scheduleCounts(28, 12, 50, 0),
+      { selector: '#schedules-view .run-card.run-failed', count: 3 },
+      { selector: '#schedules-view .run-card.run-running', count: 1 },
+      { selector: '#schedules-view .run-card.run-enqueued', count: 1 },
+      { selector: '#schedules-view .pulse-dot.healthy', count: 40 },
+    ]),
+    region: 'viewport',
+  },
+  {
+    name: 'schedules: cron routines pill',
+    start: '#schedules',
+    requires: ['schedules'],
+    steps: [
+      { kind: 'pill', label: 'CRON ROUTINES' },
+      ...settleScroll('cron-28'),
+    ],
+    expect: schedulesExpect(['SHOWING 28 / 40 ACTIVE ROUTINES', '40 ACTIVE'], scheduleCounts(28, 0, 0, 0)),
+    region: 'viewport',
+  },
+  {
+    name: 'schedules: one-shot pill',
+    start: '#schedules',
+    requires: ['schedules'],
+    steps: [
+      { kind: 'pill', label: 'ONE-SHOT' },
+      ...settleScroll('once-12'),
+    ],
+    expect: schedulesExpect(
+      ['SHOWING 12 / 40 ACTIVE ROUTINES', 'ONE-TIME REMINDER', 'Reminder 1: water the basil'],
+      scheduleCounts(0, 12, 0, 0),
+    ),
+    region: 'viewport',
+  },
+  {
+    name: 'schedules: run audit log pill',
+    start: '#schedules',
+    requires: ['schedules'],
+    steps: [
+      { kind: 'pill', label: 'RUN AUDIT LOG' },
+      ...settleScroll('run-050'),
+    ],
+    expect: schedulesExpect(['EXECUTION RUN AUDIT LOG', '50 RUNS'], scheduleCounts(0, 0, 50, 0)),
+    region: 'viewport',
+  },
+  {
+    name: 'schedules: all pill after another pill',
+    start: '#schedules',
+    requires: ['schedules'],
+    steps: [
+      { kind: 'pill', label: 'ONE-SHOT' },
+      { kind: 'pill', label: 'ALL' },
+      ...settleScroll('run-050'),
+    ],
+    expect: schedulesExpect(SCHEDULES_DEFAULT_TEXTS, scheduleCounts(28, 12, 50, 0)),
+    region: 'viewport',
+  },
+  {
+    // "plant" matches the 4 "Plant watering N" crons (title + prompt: 8 marks) and 6 of their runs
+    // (title + prompt: 12 marks).
+    name: 'schedules: search narrows cards and runs and highlights matches',
+    start: '#schedules',
+    requires: ['schedules'],
+    steps: [
+      { kind: 'type', placeholder: SCHEDULES_SEARCH, text: 'plant' },
+      ...settleScroll('run-046'),
+    ],
+    expect: schedulesExpect(['SHOWING 4 / 40 ACTIVE ROUTINES', '6 RUNS', 'Plant'], scheduleCounts(4, 0, 6, 20)),
+    region: 'viewport',
+  },
+  {
+    name: 'schedules: Escape clears the search',
+    start: '#schedules',
+    requires: ['schedules'],
+    steps: [
+      { kind: 'type', placeholder: SCHEDULES_SEARCH, text: 'plant' },
+      { kind: 'press', key: 'Escape' },
+      ...settleScroll('run-050'),
+    ],
+    expect: schedulesExpect(SCHEDULES_DEFAULT_TEXTS, scheduleCounts(28, 12, 50, 0)),
     region: 'viewport',
   },
 ];
