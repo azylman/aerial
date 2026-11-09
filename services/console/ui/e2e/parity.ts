@@ -572,8 +572,6 @@ const BUILD_DRAWER_TEXTS = [
   'Coverage stays at 95%',
 ];
 const BUILD_DRAWER_COUNTS: readonly CountExpectation[] = [
-  // The React drawer opens through a document view transition; wait until it has settled.
-  { selector: 'html:not(:active-view-transition)', count: 1 },
   { selector: '.diagnostic-drawer.active', count: 1 },
   { selector: '.diagnostic-drawer.active .chunk-card', count: 3 },
   { selector: '.diagnostic-drawer.active .chunk-status-badge.chunk-status-merged', count: 2 },
@@ -691,11 +689,12 @@ export const PARITY_ROWS: readonly ParityRow[] = [
     name: 'telemetry: clicking a degraded service opens its diagnostics drawer',
     start: '#telemetry',
     requires: ['telemetry'],
-    // Opening scrolls the card into view; Home brings both pages back to the top so the blurred
-    // backdrop compares the same region of each page.
+    // Opening scrolls the card into view; an instant jump brings both pages back to the top so the
+    // blurred backdrop compares the same region of each page (Home's animated keyboard scroll
+    // raced the screenshot, see settleBuilds).
     steps: [
       { kind: 'openDrawer', text: 'aerial-vision' },
-      { kind: 'press', key: 'Home' },
+      { kind: 'scrollTop' },
     ],
     expect: {
       hash: '#telemetry',
@@ -703,8 +702,6 @@ export const PARITY_ROWS: readonly ParityRow[] = [
       badges: BADGES_ALL,
       texts: DRAWER_TEXTS,
       counts: [
-        // The React drawer opens through a document view transition; wait until it has settled.
-        { selector: 'html:not(:active-view-transition)', count: 1 },
         { selector: '.diagnostic-drawer.active', count: 1 },
         { selector: '.diagnostic-drawer.active .diag-item', count: 4 },
       ],
@@ -964,7 +961,6 @@ export const PARITY_ROWS: readonly ParityRow[] = [
     requires: ['builds'],
     steps: [...OPEN_BUILD_ONE, { kind: 'press', key: 'Escape' }],
     expect: buildsExpect(BUILDS_DEFAULT_TEXTS, 'ALL', ALL_BUILD_CARDS, [
-      { selector: 'html:not(:active-view-transition)', count: 1 },
       { selector: '.diagnostic-drawer.active', count: 0 },
     ]),
     // Closing leaves each page wherever its card click scrolled it (the vanilla page's click may
